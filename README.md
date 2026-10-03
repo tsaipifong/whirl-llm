@@ -25,7 +25,7 @@ and selected GPUs, as close to the hardware limit as possible;
 
 | | |
 |---|---|
-| GPU | **AMD Radeon AI PRO R9700** (RDNA 4, gfx1201) — required; single GPU only. A version for the Ryzen AI Max+ 395 (Radeon 8060S) is planned |
+| GPU | **AMD Radeon AI PRO R9700** (RDNA 4, gfx1201) — required; single GPU only. **Radeon 8060S (Ryzen AI Max+ 395, gfx1151) support is in development** on the [`gfx1151` branch](https://github.com/tsaipifong/whirl-llm/tree/gfx1151) |
 | OS | **Windows 11**, 64-bit |
 | Driver | **AMD Software: Adrenalin Edition 26.8.1** (driver 32.0.31041.1004) or newer |
 | To run | only the driver (it installs `amdhip64_7.dll` and `amd_comgr_3.dll`). No HIP SDK, no ROCm, no Visual C++ runtime |
