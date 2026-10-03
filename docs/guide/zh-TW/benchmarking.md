@@ -195,9 +195,11 @@ Qwen3.8-27B、R9700、greedy。除非另註，單位為 tok/s。
 | Decode 無 MTP / MTP，24k（早期） | 124.3 / 130.9 | 89.7 / 84.1 |
 | 程式基準測試，MTP + n-gram（CLI 平均） | 約 216 | — |
 
-### 10.3 Radeon 8060S（歷史數據，較舊的程式碼樹）
+### 10.3 Radeon 8060S
 
-8060S 程式碼樹正從 R9700 樹重新分支；這些數據來自較舊的樹（降溫後的交錯執行）。
+C++ 引擎的 gfx1151 bring-up（預覽、尚未調校）量測在 [benchmarks.md §14](benchmarks.md#14-radeon-8060s預覽bring-up尚未調校)：
+≥ 2k token 的 prefill 是 llama.cpp b11214 的 1.12–1.35×、無 MTP decode 1.06–1.29×、短提示 0.72–0.95×。下表是較舊研究
+程式碼樹的數據（降溫後的交錯執行）。
 
 | | 27B 無 MTP | 27B MTP | MoE 無 MTP | MoE MTP |
 |---|---|---|---|---|

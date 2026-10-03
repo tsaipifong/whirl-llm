@@ -3,7 +3,7 @@
 # Kernels
 
 > **狀態。** 以下每一個 kernel 家族都已在 `kernels/*.hip` 中實作（gfx1201，R9700）；gfx1151（8060S）的 kernel
-> 在規劃中。除非標註 8060S（gfx1151；這些數字來自研究建置），數字皆為 R9700（gfx1201）。「逐位元相同」一律指輸出
+> 集在 `kernels/gfx1151/`（預覽、尚未調校；見 [3.2](#gfx1151)）。除非標註 8060S（gfx1151；這些數字來自研究建置），數字皆為 R9700（gfx1201）。「逐位元相同」一律指輸出
 > 位元完全相同，並由常設檢查驗證，而不是「在容許誤差內」。
 
 **對誰有幫助：** 為 RDNA 3.5/4 撰寫 HIP kernel 的人（WMMA 佈局、int8 內積、暫存器壓力）、在 AMD 上處理量化
@@ -157,7 +157,9 @@ lane 解碼自己的四個單元 scale，IQ3_S grid 表放在 LDS。
 1.12×、mxfp4 1.16×、q6_k 各層 1.46×、head 1.25×、q3_k 1.9×、iq3_s 2.5×——其餘是每個（列、token、單元）的標準浮點運算式，逐位元相同的要求不允許省略。較差的做法：每個
 block 3–4 個 tile（溢出，−7…−40%）。
 
-### 3.2 gfx1151（RDNA 3.5）的差異
+### <a id="gfx1151"></a>3.2 gfx1151（RDNA 3.5）的差異
+
+gfx1151 的 kernel 集（`kernels/gfx1151/`，一個 code object）沿用 gfx1201 的 kernel 名稱與參數 ABI，所以 host 與 `KernelTable` 共用。它有 int8 decode GEMV（1 token、2–16 token WMMA 與多列）、f16 WMMA prefill GEMM（24 種配置；MXFP4 先反量化成 f16）、分頁 f16 / q8 KV attention、DeltaNet（逐 token、chunk f32、循序 scan、融合 decode）、MoE kernel（MXFP4 專家走通用的 int8 decode / f16 prefill 入口）、2-bit MTP 草稿頭，以及 f16 prefill activation 融合。**gfx1151 沒有的**（host 改走其他路徑，見 `kernels::Caps`）：fp8 / int8 內積 WMMA GEMM（RDNA 3.5 沒有 fp8 WMMA：MXFP4 prefill 用 f16 activation）、小批次 GEMM、int8 WMMA 中批次 GEMV（`gemvw`）與多 token 的群組雙胞胎、MXFP4 整塊 decode 專家與 fp8 群組專家 GEMM、`q8v` / `q8h` KV 格式（auto 會選 f16，再來 q8）、DeltaNet replay、WMMA DeltaNet prefill、key-split prefill attention，以及視覺 kernel。它的 int8 activation scale word 內含區塊總和（`pk_make`：11 位元尾數的 scale + 總和），內積 kernel 因此省掉逐列求和；CPU 參考實作必須先解碼（`ref::xdScale`）。8060S 上的正確性：`whirl-kernel-test` 執行的每一項檢查都通過；27B Q4_K_M、Swift MXFP4-A 與 Ornith MXFP4 三個檔案的 MTP / MTP + n-gram 輸出都與 plain greedy 相同（各 7 個提示，最長 32k token）。
 
 - 在 8060S 上 `v_dot4` 的速率只有 int8 WMMA 的一半，而且每個驗證列都要重讀 activation，所以 Q4_K、Q5_K、IQ4_XS 與 Q6_K 的
   2–16 列 kernel 使用 int8 WMMA；1-token dp4 kernel 共用相同的切片與加總順序（MTP 維持逐位元相同）。相對 1 列的驗證成本：n=4 1.36 →

@@ -36,7 +36,7 @@ WHIRL 會以兩種方式之一看待一個模型檔案：
 
 ## 2. WHIRL 接受的 tensor 類型
 
-以下類型有 decode 與 prefill kernel：F32 和 F16（小型 tensor）、Q8_0、Q3_K、Q4_K、Q5_K、Q6_K、IQ3_S、IQ4_NL、IQ4_XS、MXFP4；視覺 projector 則有 BF16。任何其他類型（例如 NVFP4）會中止載入——沒有通用的反量化到 f16 的退路。MXFP4 已為 dense `qwen35` 與 MoE 專家（`qwen35moe`，[第 6 節](#ornith-mxfp4)）實作。gfx1151（8060S）的 kernel 在規劃中（gfx1151 沒有 fp8 WMMA，那裡的 MXFP4 prefill 會用 f16 activation）。
+以下類型有 decode 與 prefill kernel：F32 和 F16（小型 tensor）、Q8_0、Q3_K、Q4_K、Q5_K、Q6_K、IQ3_S、IQ4_NL、IQ4_XS、MXFP4；視覺 projector 則有 BF16。任何其他類型（例如 NVFP4）會中止載入——沒有通用的反量化到 f16 的退路。MXFP4 已為 dense `qwen35` 與 MoE 專家（`qwen35moe`，[第 6 節](#ornith-mxfp4)）實作。在 gfx1151（8060S，預覽）上 MXFP4 走同樣的 int8 decode GEMV，prefill 先反量化成 f16（gfx1151 沒有 fp8 WMMA，所以那裡的 MXFP4 prefill 用 f16 activation；MoE 專家走通用路徑）。
 
 ### 2.1 unsloth UD-Q4_K_M 檔案包含什麼
 

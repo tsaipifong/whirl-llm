@@ -180,5 +180,6 @@ All documentation text was written new for this project.
 | src/model/loader.cpp, src/model/forward.cpp, src/server/server_main.cpp | changed | KV-format auto choice, query grouping and DeltaNet replay from `Caps` instead of the architecture; integrated GPUs: host RAM / SSD tiers off by default |
 | src/model/device.cpp, src/cli/main.cpp, src/release/release.cpp, src/model/tune.cpp, src/vision/vision.cpp | changed | default device (R9700, else the first supported GPU), `devices` output, messages naming both GPUs, tune notice, image input refused on GPUs without vision kernels |
 | CMakeLists.txt, cmake/kernels.cmake | changed | per-architecture code-object dependencies, architecture check |
+| tests/server/server_gate.cpp | changed | `--kv` (KV format the comparing suites pin; default q8v) and `--server-env NAME=VALUE` (extra server environment, e.g. host tiers on an integrated GPU) |
 | tests/kernels/* | changed | per-device runs (`--device`, `WHIRL_DEVICE`), packed int8 scale words in the CPU references (`ref::setXdSum`), checks for kernels a code object lacks are reported as skipped |
 

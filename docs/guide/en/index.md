@@ -14,7 +14,7 @@ other projects can reuse the lessons.
 
 > **Status (WHIRL 0.1.0, 2026-10-03).** Everything described here is implemented in this repository's
 > C++ engine for the R9700 (gfx1201): kernels, loader, forward pass, speculative decoding, the server
-> with tiered caching, and image input. A gfx1151 (Radeon 8060S) version is planned. Some measurements
+> with tiered caching, and image input. A gfx1151 (Radeon 8060S) version is in preview (correct, not yet tuned). Some measurements
 > in these documents were taken with the research build that preceded the C++ engine; the C++ engine
 > produces identical outputs at the same speed (within ±1%). Release benchmarks:
 > [benchmarks.md](../../benchmarks.md).

@@ -21,12 +21,12 @@ WHIRL 走專門化路線，而不是泛用引擎：一次加入一種模型架�
 
 | | |
 |---|---|
-| GPU | **AMD Radeon AI PRO R9700**（RDNA 4，gfx1201）——必要；只支援單張 GPU。**Radeon 8060S（Ryzen AI Max+ 395，gfx1151）支援開發中**，見 [`gfx1151` 分支](https://github.com/tsaipifong/whirl-llm/tree/gfx1151) |
+| GPU | **AMD Radeon AI PRO R9700**（RDNA 4，gfx1201），或 **Radeon 8060S**（Ryzen AI Max+ 395 內顯，RDNA 3.5，gfx1151）——在這個 `gfx1151` 分支上為**預覽、尚未調校**（[見下](#radeon-8060s)）；每個行程用一張 GPU |
 | 作業系統 | **Windows 11**，64 位元 |
 | 驅動程式 | **AMD Software: Adrenalin Edition 26.8.1**（驅動程式 32.0.31041.1004）或更新版 |
 | 執行 | 只需要驅動程式（它會安裝 `amdhip64_7.dll` 與 `amd_comgr_3.dll`）。不用 HIP SDK、不用 ROCm、不用 Visual C++ runtime |
 | 從原始碼建置 | HIP SDK 7.2 + Visual Studio 2022 Build Tools（MSVC）+ CMake + Ninja——見[從原始碼建置](building_zh-TW.md) |
-| 記憶體 / 磁碟 | 預設設定下，伺服器會為主記憶體快取層 pin 住約 8～9 GiB 主記憶體，SSD 快取層最多使用 64 GiB；兩者都可調整或關閉（`--kv-ram-mb`、`--kv-ssd-gb`） |
+| 記憶體 / 磁碟 | 預設設定下，伺服器會為主記憶體快取層 pin 住約 8～9 GiB 主記憶體，SSD 快取層最多使用 64 GiB；兩者都可調整或關閉（`--kv-ram-mb`、`--kv-ssd-gb`）。Radeon 8060S 上兩層預設關閉（它的 KV pool 本來就在系統記憶體） |
 
 我們的測試機以 USB4 / Thunderbolt eGPU 連接 R9700，可以正常使用。插在主機板 PCIe 插槽上的顯示卡，數字可能略有
 不同（主要是資料要經過主機連結的部分，例如載入模型、主記憶體 / SSD 快取層）。
@@ -110,6 +110,26 @@ WHIRL 領先**不多**的地方：dense 模型的一般 decode（no MTP）兩邊
 但還原與載入模型會經過主機連結。
 
 完整方法與所有數字：[benchmarks.md](guide/zh-TW/benchmarks.md)。
+
+### <a id="radeon-8060s"></a>Radeon 8060S（預覽、尚未調校）
+
+`gfx1151` 分支為 Radeon 8060S（Ryzen AI Max+ 395 內顯）加上一套 kernel。它**結果正確但還沒調校**：kernel 測試在
+8060S 上全過，下列三個模型的 MTP / MTP + n-gram 輸出都與 plain greedy 相同，server gate 也通過。建置同時包含兩套
+kernel；有 R9700 時預設用 R9700，否則用 8060S（`whirl devices` 會標示；`--device 8060s` / `WHIRL_DEVICE=8060s`
+可指定）。8060S 上尚未支援：圖片輸入、`q8v` / `q8h` KV 格式、fp8 prefill（MXFP4 prefill 用 f16 activation）。
+統一記憶體：server 預設 KV pool 為 262,144 token，RAM / SSD 層預設關閉，給 `--kv-ram-mb` 才會開。
+
+| Radeon 8060S，greedy，**尚未調校**——WHIRL 對 llama.cpp（倍數） | Ornith-1.5-35B-A3B MXFP4（MoE） | Swift-1.5 27B MXFP4-A（dense） | Qwen3.8-27B UD-Q4_K_M（dense） |
+|---|---|---|---|
+| Prefill tok/s，88 token 提示 | 560 對 779（0.72×） | 252 對 264（0.95×） | 234 對 260（0.90×） |
+| Prefill tok/s，2k token 提示 | 1,475 對 1,312（1.12×） | 389 對 292（1.33×） | 357 對 284（1.26×） |
+| Prefill tok/s，8k token 提示 | 1,372 對 1,186（1.16×） | 366 對 272（1.35×） | 337 對 264（1.28×） |
+| Decode tok/s，**無 MTP**（llama-bench tg256） | 85.9 對 66.8（1.29×） | 14.9 對 13.5（1.10×） | 13.2 對 12.4（1.06×） |
+| Decode tok/s，WHIRL MTP / MTP + n-gram | 106.3 / 117.9 | 29.5 / 29.3 | 28.8 / 33.0 |
+| 第一次執行：prefill kernel 自動調校（每個模型一次） | 10 s | 85 s | 461 s |
+
+Bring-up 快照：在同一台筆電上與 llama.cpp b11214 ROCm 交錯量兩輪；細節見
+[benchmarks.md §14](guide/zh-TW/benchmarks.md#14-radeon-8060s預覽bring-up尚未調校)。
 
 ## Windows 安全性提示
 

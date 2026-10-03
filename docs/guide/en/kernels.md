@@ -3,7 +3,7 @@
 # Kernels
 
 > **Status.** Every kernel family below is in `kernels/*.hip` for gfx1201 (R9700); the gfx1151
-> (8060S) kernel set is planned. Numbers are R9700 (gfx1201) unless marked 8060S (gfx1151; those come
+> (8060S) set is in `kernels/gfx1151/` (preview, untuned; see [3.2](#gfx1151)). Numbers are R9700 (gfx1201) unless marked 8060S (gfx1151; those come
 > from the research build). "Bit-exact" always means identical output bits, verified by a permanent
 > check, not "within tolerance".
 
@@ -193,7 +193,23 @@ concurrent users' steady-state throughput 241.1 → 252.9 tok/s (Q4_K_M) and 276
 unit), which bit-exactness forbids skipping. Things that lost: 3–4 tiles per block (spills,
 −7…−40%).
 
-### 3.2 gfx1151 (RDNA 3.5) differences
+### <a id="gfx1151"></a>3.2 gfx1151 (RDNA 3.5) differences
+
+The gfx1151 kernel set (`kernels/gfx1151/`, one code object) keeps the gfx1201 kernel names and
+argument ABIs, so the host and `KernelTable` are shared. It has the int8 decode GEMVs (1-token,
+2–16-token WMMA and multi-row), the f16 WMMA prefill GEMMs (24 configurations; MXFP4 is dequantized
+to f16 first), paged f16 / q8 KV attention, DeltaNet (per-token, chunked f32, sequential scan, fused
+decode), the MoE kernels (MXFP4 experts on the generic int8-decode / f16-prefill entries), the
+2-bit MTP draft head and the f16 prefill activation fusions. **Not on gfx1151** (the host takes
+the remaining path, see `kernels::Caps`): fp8 / int8-dot WMMA GEMMs (no fp8 WMMA in RDNA 3.5:
+MXFP4 prefill uses f16 activations), the small-batch GEMMs, the int8-WMMA mid-batch GEMVs (`gemvw`)
+and the grouped multi-token twins, the whole-block MXFP4 decode experts and the fp8 grouped expert
+GEMM, the `q8v` / `q8h` KV formats (auto picks f16, then q8), DeltaNet replay, the WMMA DeltaNet
+prefill, the key-split prefill attention, and the vision kernels. Its int8 activation scale words
+carry the block sum (`pk_make`: scale with an 11-bit mantissa + sum), which saves the per-row sum in
+the dot kernels; CPU references must decode them (`ref::xdScale`). Correctness on the 8060S:
+`whirl-kernel-test` passes every check it runs, and MTP / MTP + n-gram output equals plain greedy on
+the 27B Q4_K_M, Swift MXFP4-A and Ornith MXFP4 files (7 prompts each, up to 32k tokens).
 
 - On the 8060S `v_dot4` runs at half the int8 WMMA rate and each verify row re-reads
   activations, so the 2–16-row kernels for Q4_K, Q5_K, IQ4_XS and Q6_K use int8 WMMA; the 1-token

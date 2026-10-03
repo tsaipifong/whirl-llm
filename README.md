@@ -25,12 +25,12 @@ and selected GPUs, as close to the hardware limit as possible;
 
 | | |
 |---|---|
-| GPU | **AMD Radeon AI PRO R9700** (RDNA 4, gfx1201) — required; single GPU only. **Radeon 8060S (Ryzen AI Max+ 395, gfx1151) support is in development** on the [`gfx1151` branch](https://github.com/tsaipifong/whirl-llm/tree/gfx1151) |
+| GPU | **AMD Radeon AI PRO R9700** (RDNA 4, gfx1201), or **Radeon 8060S** (Ryzen AI Max+ 395 iGPU, RDNA 3.5, gfx1151) — **preview, untuned** on this `gfx1151` branch ([below](#radeon-8060s)); one GPU per process |
 | OS | **Windows 11**, 64-bit |
 | Driver | **AMD Software: Adrenalin Edition 26.8.1** (driver 32.0.31041.1004) or newer |
 | To run | only the driver (it installs `amdhip64_7.dll` and `amd_comgr_3.dll`). No HIP SDK, no ROCm, no Visual C++ runtime |
 | To build from source | HIP SDK 7.2 + Visual Studio 2022 Build Tools (MSVC) + CMake + Ninja — see [building.md](docs/building.md) |
-| Memory / disk | the server pins ~8–9 GiB of host RAM for the RAM cache tier and may use up to 64 GiB of SSD for the SSD tier by default; both are adjustable or can be turned off (`--kv-ram-mb`, `--kv-ssd-gb`) |
+| Memory / disk | the server pins ~8–9 GiB of host RAM for the RAM cache tier and may use up to 64 GiB of SSD for the SSD tier by default; both are adjustable or can be turned off (`--kv-ram-mb`, `--kv-ssd-gb`). On the Radeon 8060S both tiers are off by default (its KV pool already lives in system memory) |
 
 Our test machine connects the R9700 as a USB4 / Thunderbolt eGPU; that works. Numbers on a card in a
 direct PCIe slot may differ slightly (mostly where data crosses the host link, such as model loading
@@ -122,6 +122,28 @@ prefill of an 88-token prompt on Q4_K_M is at parity (1.03×); and at the same c
 in VRAM, but restores and model loading cross the host link.
 
 Full methodology and all numbers: [benchmarks.md](docs/benchmarks.md).
+
+### <a id="radeon-8060s"></a>Radeon 8060S (preview, untuned)
+
+The `gfx1151` branch adds a kernel set for the Radeon 8060S (Ryzen AI Max+ 395 iGPU). It is
+**correct but not tuned yet**: the kernel tests pass on it, MTP / MTP + n-gram output equals plain
+greedy on the three models below, and the server gates pass. Builds contain both kernel sets; the
+R9700 is the default device when present, otherwise the 8060S (`whirl devices` shows which;
+`--device 8060s` / `WHIRL_DEVICE=8060s` selects it). Not yet on the 8060S: image input, the `q8v` /
+`q8h` KV formats, fp8 prefill (MXFP4 prefill uses f16 activations). Unified memory: the server's
+default KV pool is 262,144 tokens and the RAM / SSD tiers are off unless `--kv-ram-mb` is given.
+
+| Radeon 8060S, greedy, **untuned** — WHIRL vs llama.cpp (ratio) | Ornith-1.5-35B-A3B MXFP4 (MoE) | Swift-1.5 27B MXFP4-A (dense) | Qwen3.8-27B UD-Q4_K_M (dense) |
+|---|---|---|---|
+| Prefill tok/s, 88-token prompt | 560 vs 779 (0.72×) | 252 vs 264 (0.95×) | 234 vs 260 (0.90×) |
+| Prefill tok/s, 2k-token prompt | 1,475 vs 1,312 (1.12×) | 389 vs 292 (1.33×) | 357 vs 284 (1.26×) |
+| Prefill tok/s, 8k-token prompt | 1,372 vs 1,186 (1.16×) | 366 vs 272 (1.35×) | 337 vs 264 (1.28×) |
+| Decode tok/s, **no MTP** (llama-bench tg256) | 85.9 vs 66.8 (1.29×) | 14.9 vs 13.5 (1.10×) | 13.2 vs 12.4 (1.06×) |
+| Decode tok/s, WHIRL MTP / MTP + n-gram | 106.3 / 117.9 | 29.5 / 29.3 | 28.8 / 33.0 |
+| First run: prefill-kernel autotune (once per model) | 10 s | 85 s | 461 s |
+
+Bring-up snapshot, two interleaved rounds against llama.cpp b11214 ROCm on the same laptop; details in
+[benchmarks.md §14](docs/benchmarks.md#14-radeon-8060s-preview-bring-up-untuned).
 
 ## Windows security prompts
 

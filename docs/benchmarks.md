@@ -376,3 +376,28 @@ stay on the measurement machine.
 WHIRL v0.1.0 vs llama.cpp b11214, R9700 (USB4 eGPU), greedy, same prompts. Decode: 7 Chinese coding
 prompts, 800 tokens, median of 3 rounds; "fastest" = llama.cpp's best of plain / MTP / MTP + n-gram for
 that model. Full tables and methodology: this page.
+
+## 14. Radeon 8060S (preview, bring-up, untuned)
+
+| Radeon 8060S, greedy, **untuned** — WHIRL vs llama.cpp (ratio) | Ornith-1.5-35B-A3B MXFP4 (MoE) | Swift-1.5 27B MXFP4-A (dense) | Qwen3.8-27B UD-Q4_K_M (dense) |
+|---|---|---|---|
+| Prefill tok/s, 88-token prompt | 560 vs 779 (0.72×) | 252 vs 264 (0.95×) | 234 vs 260 (0.90×) |
+| Prefill tok/s, 2k-token prompt | 1,475 vs 1,312 (1.12×) | 389 vs 292 (1.33×) | 357 vs 284 (1.26×) |
+| Prefill tok/s, 8k-token prompt | 1,372 vs 1,186 (1.16×) | 366 vs 272 (1.35×) | 337 vs 264 (1.28×) |
+| Decode tok/s, **no MTP** (llama-bench tg256) | 85.9 vs 66.8 (1.29×) | 14.9 vs 13.5 (1.10×) | 13.2 vs 12.4 (1.06×) |
+| Decode tok/s, WHIRL MTP / MTP + n-gram | 106.3 / 117.9 | 29.5 / 29.3 | 28.8 / 33.0 |
+| First run: prefill-kernel autotune (once per model) | 10 s | 85 s | 461 s |
+
+Bring-up snapshot (WHIRL `gfx1151` branch, no gfx1151-specific tuning yet) vs llama.cpp b11214
+ROCm on the same laptop (ASUS ROG Flow Z13, Ryzen AI Max+ 395, `HIP_VISIBLE_DEVICES=0`). WHIRL:
+`whirl bench --prefill 88,2048,8192 --decode 256` (decode after the 144-token coding prompt, thinking
+on). llama.cpp: `llama-bench -ngl 99 -fa on -p 88,2048,8192 -n 256 -ub 2048 (MoE) / 1024 (dense)
+-b 2048 -r 2`. Two rounds, WHIRL and llama.cpp interleaved, 75 s idle before every run (the laptop
+throttles); mean of the two rounds (rounds within 4% of each other). llama.cpp's MTP modes were not
+measured on the 8060S.
+
+Where it stands: the MoE model and prefill of ≥ 2k tokens are ahead of llama.cpp already; short
+prompts (88 tokens) are behind, and dense plain decoding is close to parity (memory bound in both).
+Long-prompt prefill is slow on this GPU for both engines (27B Q4_K_M, 34.7k-token prompt: 263 tok/s).
+Planned gfx1151 tuning: a gfx11 WMMA small-batch GEMM for short prompts, grouped multi-token GEMV
+twins, and a prefill GEMM retune.

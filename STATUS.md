@@ -7,7 +7,7 @@ OpenAI 相容伺服器（continuous batching、prefix cache、VRAM → RAM → S
 Ornith MXFP4 專家路徑都已完成。C++ 程式是 WHIRL 自己的 Zig 研究原型的乾淨重寫；行為以黑箱方式對該原型驗證
 （輸出逐 token / 逐位元相同）。研究原型已退役，不再開發，也不在本儲存庫中。
 
-待辦：gfx1151（Radeon 8060S）版本。使用者文件：README.md、docs/usage.md、docs/quickstart.md、docs/benchmarks.md；
+gfx1151（Radeon 8060S）：`gfx1151` 分支上為預覽版（結果正確、尚未調校），見第 9 節。使用者文件：README.md、docs/usage.md、docs/quickstart.md、docs/benchmarks.md；
 各檔來源見 PROVENANCE.md。
 
 以下各節是各階段的驗收紀錄（數字為當時量測值）。
@@ -40,7 +40,7 @@ Ornith MXFP4 專家路徑都已完成。C++ 程式是 WHIRL 自己的 Zig 研究
 - `whirl-kernel-test.exe`（全部 C++）：每種量化型別的 block 解碼、GEMV / GEMM、paged attention、Gated DeltaNet、MoE、norm / RoPE / SiLU、e4m3、requant、draft head 的 CPU 參考比對，以及 bitwise invariance（多 token == 1 token、grouped == ungrouped、prefill GEMM 選擇不變、attn 分組）。真權重：Qwen3.8-27B UD-Q4_K_M、Qwen3.8-27B MXFP4、Ornith-1.5-35B Q4_K_M。
 - 結果：最新全套 **412 / 412**（exact 83、tolerance 179、invariance 150）。
 - `silu_mul_x16h`（Q4_K_M relaxed mode）依設計不是 bitwise（f16 儲存只捨入一次），以 1 f16 ulp 容差檢查。
-- gfx1151 的 code object 目前只含 smoke kernel（延後）。
+- gfx1151 的 kernel 集見第 9 節。
 
 ## 3. 模型與 CLI
 
@@ -134,7 +134,7 @@ build\Release\whirl-parity.exe tokenizer --whirl-tool build\Release\whirl-tool.e
 cmake -DWHIRL_LLAMACPP_SRC=<llama.cpp 原始碼目錄> build\Release && cmake --build build\Release --target whirl-template-oracle
 build\Release\whirl-parity.exe template  --whirl-tool build\Release\whirl-tool.exe --oracle build\Release\tests\template_oracle\whirl-template-oracle.exe --work <DIR> --model-a <Qwen3.8 GGUF> --model-b <Ornith GGUF>
 rem GPU：kernel 對 CPU 參考、模型自檢、多序列路徑、輸出 / logits / 速度
-build\Release\whirl-kernel-test.exe
+build\Release\whirl-kernel-test.exe                  (Radeon 8060S: --device 8060s)
 build\Release\whirl.exe selftest <GGUF>
 build\Release\whirl.exe seqtest <GGUF>
 build\Release\whirl.exe chat <GGUF> "PROMPT" --max-tokens 256 --no-stream          (WHIRL_MTP=0：plain)
@@ -143,3 +143,33 @@ build\Release\whirl.exe bench <GGUF> --prefill 2048,8192,32768 --decode 256
 set WHIRL_GATE_TEXT_ROOT=<llama.cpp 原始碼目錄>
 build\Release\whirl-server-gate.exe --exe build\Release\whirl-server.exe --kind whirl --model <GGUF> --suite basic --results OUT.json [--compare REF.json]
 ```
+
+## 9. gfx1151（Radeon 8060S）bring-up（預覽、尚未調校）
+
+| 項目 | 內容 |
+|---|---|
+| Kernel | `kernels/gfx1151/` 17 個家族檔（研究原型的 gfx1151 kernel 原始碼，含 MXFP4、f16 prefill 融合、grouped 1-token GEMV）；與原始碼同旗標編譯逐 kernel 機器碼相同。新增：`MOE_ENTRIES(mxfp4)`、`attn_prefill_wmma*` 的 `h0`（原本缺，長 prefill 分 head 區段會算錯）、能力標記 `whirl_cap_xd_sum` / `whirl_cap_attn_group1` |
+| 建置 | `WHIRL_GPU_ARCHS` 預設 `gfx1201;gfx1151`，可只編一套；每個 code object 只依賴自己的原始檔；執行時依 `gcnArchName` 選 |
+| Host | `kernels::Caps`（從 code object 探測：fp8_gemm、kv_q8v、kv_q8h、gemvw、gdn_replay、mrope、xd_sum、attn_group1）取代架構判斷：KV auto（f16 → q8v → q8h → q8，缺的跳過；指定沒有的格式回報 `UnsupportedKvFormat`）、attention query 分組、DeltaNet replay。預設裝置：有 gfx1201 kernel 時第一張 R9700，否則第一張有 kernel 的 GPU。server：內顯（`integrated`）預設 KV pool 262,144 token、RAM / SSD 層關（`--kv-ram-mb` 開啟）。圖片輸入在 gfx1151 上回報不支援 |
+| 測試 | `whirl-kernel-test --device 8060s`：exact 74/74、tol 151/151、invariance 89/89（27 項 skip：gfx1151 沒有的 kernel）；CPU 參考依 `Caps::xd_sum` 處理 packed scale word。`whirl-server-gate` 加 `--kv`、`--server-env` |
+
+### 驗收（8060S）
+
+| 檢查 | 結果 |
+|---|---|
+| MTP + n-gram（預設）輸出 == plain greedy，7 提示（中 / 英、thinking 開 / 關、2k、8k、32k） | 27B Q4_K_M 7/7、Swift MXFP4-A 7/7、Ornith MXFP4 7/7 |
+| `whirl selftest` / `seqtest`（27B Q4_K_M） | ok / ok |
+| server gate（27B Q4_K_M） | basic 22/22、mt_cache 4/4；pool 6/6、sys 10/10、restore_conc 11/11、tier 24/24（`--server-env WHIRL_KV_RAM_MB=8192 --kv f16`：tier 預設關、沒有 q8v）；Ornith MXFP4 basic + mt_cache 26/26 |
+| 對 R9700（同提示 greedy） | 27B Q4_K_M：6 提示中 2 個全同，其餘在第 37–178 token 分岔；最後 prompt 位置 logits top-1 6/6 相同、KL 5e-8–1.2e-3。Ornith MXFP4：第 5–90 token 分岔（R9700 用 fp8 prefill / fp8 專家，8060S 用 f16），top-1 6/6 相同、KL 6.5e-5–5.7e-2 |
+| 對 llama.cpp b11214（8060S，en 提示 128 token） | Swift 全同；27B Q4_K_M 前 66 字元相同；Ornith 前 76 字元相同（措辭分岔） |
+| 首次 autotune | 27B Q4_K_M 460.8 s、Swift MXFP4-A 85.3 s、Ornith MXFP4 10.1 s |
+
+### 速度快照（bring-up，未調校；llama.cpp b11214 ROCm `-fa on`；2 輪交錯平均）
+
+| 8060S | WHIRL Ornith MXFP4 | llama.cpp | WHIRL Swift MXFP4-A | llama.cpp | WHIRL Q4_K_M | llama.cpp |
+|---|---|---|---|---|---|---|
+| Prefill 88 / 2k / 8k（tok/s） | 560 / 1,475 / 1,372 | 779 / 1,312 / 1,186 | 252 / 389 / 366 | 264 / 292 / 272 | 234 / 357 / 337 | 260 / 284 / 264 |
+| Decode no MTP（bench；llama.cpp tg256） | 85.9 | 66.8 | 14.9 | 13.5 | 13.2 | 12.4 |
+| Decode MTP / MTP + n-gram（bench） | 106.3 / 117.9 | — | 29.5 / 29.3 | — | 28.8 / 33.0 | — |
+
+待做（調校）：短提示用的 gfx11 WMMA 小批次 GEMM、多 token grouped GEMV 雙胞胎、prefill GEMM 重新調校、MXFP4 整塊 decode 專家、圖片輸入。

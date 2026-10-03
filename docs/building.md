@@ -44,12 +44,19 @@ builds at low CPU priority. Outputs in `build\Release\`:
 Host code is compiled by MSVC with a static C++ runtime (`/MT`). Device code is compiled by the
 HIP SDK's clang into one code object per GPU architecture, turned into a byte array by
 `tools/bin2c` and embedded in the executable. `amdhip64_7.dll` is delay-loaded, so the
-executables start without the HIP SDK installed. Only the gfx1201 (R9700) kernel set exists at
-the moment; `-DWHIRL_GPU_ARCHS=gfx1201` skips the gfx1151 placeholder object:
+executables start without the HIP SDK installed. The default builds both kernel sets, gfx1201
+(R9700) and gfx1151 (Radeon 8060S); at run time the code object matching the selected GPU's
+`gcnArchName` is loaded. One set alone builds faster (useful while working on one GPU's kernels):
 
 ```bat
 build.bat Release -DWHIRL_GPU_ARCHS=gfx1201
+build.bat Release -DWHIRL_GPU_ARCHS=gfx1151
 ```
+
+Each code object depends only on its own sources (`kernels/*.hip` for gfx1201, `kernels/gfx1151/*.hip`
+for gfx1151). `whirl-kernel-test` runs on one GPU per invocation: `--device 8060s` (or
+`WHIRL_DEVICE=8060s`) tests the gfx1151 set; checks of kernels a code object does not have are
+listed as skipped.
 
 More on compiling and loading device code on Windows: [windows-hip.md](guide/en/windows-hip.md#build).
 

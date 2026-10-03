@@ -172,6 +172,14 @@ memory shows up as Shared Usage, [windows-hip.md](windows-hip.md#shared-usage)).
 Server defaults that follow: dense 27B → `--parallel 4`, ≤ 131,072 tokens per request
 (`--ctx-per-slot`, max 262,144), q8v. MoE → f16, 131,072 per request, pool ~341k tokens.
 
+**Radeon 8060S (unified memory) defaults.** The server's KV pool defaults to 262,144 tokens
+(f16 for every model: 17 GiB for the dense 27B) instead of "all VRAM left": on a 100 GiB UMA device
+the left-over would be most of system memory. The host tiers are **off** by default there: the RAM
+tier would copy KV pages from system memory to pinned system memory (no capacity gained, ~9 GiB of
+the CPU's share pinned), and the SSD tier hangs off the RAM tier. `--kv-ram-mb N` turns both on; the
+tier gates (`sys`, `restore_conc`, `tier`, `pool`) pass on the 8060S that way. Decided from the
+capability `DeviceInfo::integrated`, not the architecture.
+
 ## <a id="checkpoints"></a>5. Prefix caching for a hybrid model: checkpoints
 
 A transformer can reuse any prefix whose KV blocks are cached. A DeltaNet layer cannot: its state

@@ -286,3 +286,24 @@ Server，Ornith MXFP4 zh 情境，`whirl-server.exe` 0.1.0（MTP + n-gram，2 �
 | Server 4 併發總吞吐 tok/s | 396.7 vs 191.9 (2.07×) | 198.6 vs 65.8 (3.02×) | 134.1 vs 58.5 (2.29×) |
 
 WHIRL v0.1.0 對 llama.cpp b11214，R9700（USB4 eGPU），greedy，相同提示。Decode：7 個中文寫程式提示、800 token、3 輪中位數；「最快」= 該模型 llama.cpp 在 plain／MTP／MTP + n-gram 中最快者。完整表格與方法：本頁。
+
+## 14. Radeon 8060S（預覽、bring-up、尚未調校）
+
+| Radeon 8060S，greedy，**尚未調校**——WHIRL 對 llama.cpp（倍數） | Ornith-1.5-35B-A3B MXFP4（MoE） | Swift-1.5 27B MXFP4-A（dense） | Qwen3.8-27B UD-Q4_K_M（dense） |
+|---|---|---|---|
+| Prefill tok/s，88 token 提示 | 560 對 779（0.72×） | 252 對 264（0.95×） | 234 對 260（0.90×） |
+| Prefill tok/s，2k token 提示 | 1,475 對 1,312（1.12×） | 389 對 292（1.33×） | 357 對 284（1.26×） |
+| Prefill tok/s，8k token 提示 | 1,372 對 1,186（1.16×） | 366 對 272（1.35×） | 337 對 264（1.28×） |
+| Decode tok/s，**無 MTP**（llama-bench tg256） | 85.9 對 66.8（1.29×） | 14.9 對 13.5（1.10×） | 13.2 對 12.4（1.06×） |
+| Decode tok/s，WHIRL MTP / MTP + n-gram | 106.3 / 117.9 | 29.5 / 29.3 | 28.8 / 33.0 |
+| 第一次執行：prefill kernel 自動調校（每個模型一次） | 10 s | 85 s | 461 s |
+
+Bring-up 快照（WHIRL `gfx1151` 分支，尚未做 gfx1151 專屬調校），與同一台筆電（ASUS ROG Flow Z13、Ryzen AI Max+ 395、
+`HIP_VISIBLE_DEVICES=0`）上的 llama.cpp b11214 ROCm 比較。WHIRL：`whirl bench --prefill 88,2048,8192 --decode 256`
+（decode 接在 144 token 的程式提示之後，思考開啟）。llama.cpp：`llama-bench -ngl 99 -fa on -p 88,2048,8192 -n 256
+-ub 2048（MoE）/ 1024（dense）-b 2048 -r 2`。兩輪，WHIRL 與 llama.cpp 交錯執行，每次執行前閒置 75 秒（筆電會降頻）；
+取兩輪平均（兩輪差距在 4% 內）。8060S 上沒有量 llama.cpp 的 MTP 模式。
+
+現況：MoE 模型與 ≥ 2k token 的 prefill 已經領先 llama.cpp；短提示（88 token）落後，dense 模型的無 MTP decode 接近
+持平（兩者都受記憶體頻寬限制）。這張 GPU 上長提示的 prefill 兩個引擎都慢（27B Q4_K_M，34.7k token 提示：263 tok/s）。
+預定的 gfx1151 調校：短提示用的 gfx11 WMMA 小批次 GEMM、多 token 群組 GEMV 雙胞胎、prefill GEMM 重新調校。

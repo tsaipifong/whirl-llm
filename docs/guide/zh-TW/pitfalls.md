@@ -313,6 +313,15 @@ eGPU 或直連 PCIe）、附上確切錯誤字串的**症狀**、**根本原因*
 - **症狀：** 一個含有原始 NUL 位元組的字串常值無法編譯。
 - **修正：** 在產生的表格中輸出跳脫序列（`\x00`）。
 
+### <a id="tool-15"></a>TOOL-15 · device 編譯途中改了原始檔，留下過期的 code object
+- **條件：** Ninja、一次約 2 分鐘的 HIP device 編譯，編譯途中修改 kernel 原始檔。
+- **症狀：** 加進 gfx1151 kernel 集的標記 kernel 不在內嵌的 code object 裡：能力探測回報不存在，kernel 測試有數十項
+  以荒謬數值失敗（CPU 參考用錯了 scale word 格式）。
+- **根本原因：** 編譯器讀到的是舊原始檔；它寫出的輸出比修改時間還新，所以 Ninja 認為已是最新，不會重編。
+- **修正：** 建置進行中不要改它會讀的原始檔；改了就再 touch 一次。新 kernel「找不到」時先看 code object 的符號表
+  （`llvm-objdump -t`）。
+- **現在怎麼抓：** `whirl-kernel-test` 一開始就印出探測到的能力旗標。
+
 ---
 
 ## <a id="kern"></a>3. Kernel 與數值
@@ -478,6 +487,24 @@ eGPU 或直連 PCIe）、附上確切錯誤字串的**症狀**、**根本原因*
   不同的 bucket。
 - **修正：**只有在每個 bucket 的配置都支援時才啟用 f16 輸出。
 - **現在怎麼抓：**在寬鬆模式下也跑分段 prefill gate。
+
+### <a id="kern-31"></a>KERN-31 · 兩套分支的 kernel 在一個參數上走岔了 **[8060S]**
+- **條件：** gfx1201 與 gfx1151 的 kernel 各自維護原始碼、kernel 名稱相同；host 共用同一條啟動路徑。
+- **症狀：** 短測試看不出來。kernel 測試的「分 head 區段啟動 == 一次啟動」在 gfx1151 上失敗（一半的 head 錯）。
+- **根本原因：** gfx1201 的 `attn_prefill_wmma*` 為了把長 prefill 分成多個 head 區段，加了 `h0`（第一個 head）參數；
+  gfx1151 的版本沒有。host 傳了 `h0`、kernel 沒用，第一段之後的每一段都重算 head 0 起的內容 —— 只在提示長到需要分段時
+  （n × context > 4096 × 128k）才會發生。
+- **修正：** gfx1151 kernel 補上 `h0`。現在會從 AMDGPU metadata（`.args`：offset、size、kind）比對兩個 code object 中
+  共同 kernel 的參數版面。
+- **現在怎麼抓：** ABI 比對（0 個不同）與 `whirl-kernel-test` 的分 head 區段不變性檢查（每張 GPU 都跑）。
+
+### <a id="kern-32"></a>KERN-32 · int8 scale word 的格式依架構而不同 **[8060S]**
+- **症狀：** 在 gfx1151 上所有 int8 activation 的檢查都失敗：`quantize_q8 xd` 每個 word 都不同，GEMV 參考差了 1e37。
+- **根本原因：** gfx1151 kernel 把每 32 值區塊的 scale 存成一個 32 位元 word：(f32 scale 捨入到 11 位元尾數，區塊總和
+  + 4096)，內積 kernel 因此免費拿到區塊總和；CPU 參考卻假設是單純的 f32 scale。
+- **修正：** code object 以標記 kernel 宣告格式（`kernels::Caps::xd_sum`）；參考實作依此打包 / 解包
+  （`ref::setXdSum`、`ref::xdScale`）。
+- **現在怎麼抓：** 兩張 GPU 上的 `quantize_q8` / 融合量化 exact 檢查。
 
 ---
 
