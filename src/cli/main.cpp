@@ -1083,6 +1083,10 @@ int cmdBench(const Args& a) {
         long_ids = tok.encode(text);
     }
     out("\n  prefill (tokens, ms, tok/s)" + std::string(has_mtp ? " - with the MTP block over the prompt, as chat runs it" : "") + ":\n");
+    // WHIRL_PROFILE: per-op-class GPU time of the last prefill run of each size
+    // (per-op events slow the run down; the printed tok/s is then not comparable)
+    q::Profile prof;
+    const bool profiling = envGet("PROFILE").has_value();
     Timer timer;
     for (u32 s : sizes) {
         if (s > long_ids.size()) continue;
@@ -1091,6 +1095,10 @@ int cmdBench(const Args& a) {
         const int reps = s <= 8192 ? 2 : 1;
         for (int rep = 0; rep < reps + 1; ++rep) {  // first run = warm-up
             model.reset();
+            if (profiling) {
+                prof.reset();
+                model.prof = rep == reps ? &prof : nullptr;
+            }
             timer.begin();
             std::size_t off = 0;
             while (off < pr.size()) {
@@ -1106,6 +1114,10 @@ int cmdBench(const Args& a) {
             if (rep > 0 || reps == 0) best = std::min(best, ms);
         }
         out(fmt("    prefill %6u tok: %9.1f ms  %8.1f tok/s\n", s, best, s * 1000.0 / best));
+        if (profiling) {
+            printProfile("prefill", prof, s);
+            model.prof = nullptr;
+        }
     }
     // decode
     out(fmt("\n  decode (%zu-token prompt, %u tokens, greedy):\n", dec_ids.size(), n_dec));

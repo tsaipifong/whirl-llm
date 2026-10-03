@@ -533,16 +533,36 @@ void Model::attnBlock(const AttnW& a, const KvLayer& lkv, u32 n) {
 // WMMA prefill attention of n queries at positions pos0 .. (keys 0 .. pos0 +
 // n - 1), split over head ranges so one launch does at most ~4096 x 128k
 // query-key pairs x all heads. Same results as one launch.
+// f16 KV: attn_kg (NP query heads of one KV head per block; bit-identical to
+// attn_kx) when NP divides the GQA group, the head ranges stay whole groups of
+// NP and the softmax scale is a power of two (it relies on exact scaling).
 void Model::prefillAttn(DevPtr q, const KvArgs& kva, DevPtr out, DevPtr pos, u32 n, u32 pos0, float scale) {
     const u64 work = static_cast<u64>(n) * (static_cast<u64>(pos0) + n);
     const u64 budget = 4096ull * 131072ull;
     u32 parts = static_cast<u32>(std::min<u64>(cfg.n_head, (work + budget - 1) / budget));
     while (parts > 1 && cfg.n_head % parts != 0) parts += 1;  // whole head ranges
     const u32 hp = cfg.n_head / parts;
+    const u32 grp = cfg.n_head / cfg.n_head_kv;
+    hip::Function kg = nullptr;
+    u32 np = 0;
+    int sexp = 0;
+    const bool pow2 = std::frexp(scale, &sexp) == 0.5f;
+    if (attn_kg_on && cfg.head_dim == 256 && pow2) {
+        for (const auto& [f, c] : {std::pair{k.attn_kg6, 6u}, std::pair{k.attn_kg4, 4u}, std::pair{k.attn_kg2, 2u}})
+            if (f != nullptr && grp % c == 0 && hp % c == 0) {
+                kg = f;
+                np = c;
+                break;
+            }
+    }
     const bool kx = attn_kx_on && k.attn_kx != nullptr && cfg.head_dim == 256;
     for (u32 p = 0; p < parts; ++p) {
-        hip::launch(kx ? k.attn_kx : k.attn_prefill_wmma, D((n + 127) / 128, hp), D(kx ? 512 : 256), 0, stream, q, kva, out, I(cfg.n_head),
-                    I(cfg.n_head_kv), I(2 * cfg.head_dim), pos, I(n), scale, I(p * hp));
+        if (kg != nullptr)
+            hip::launch(kg, D((n + 15) / 16, hp / np), D(64 * np), 0, stream, q, kva, out, I(cfg.n_head), I(cfg.n_head_kv),
+                        I(2 * cfg.head_dim), pos, I(n), scale, I(p * hp));
+        else
+            hip::launch(kx ? k.attn_kx : k.attn_prefill_wmma, D((n + 127) / 128, hp), D(kx ? 512 : 256), 0, stream, q, kva, out,
+                        I(cfg.n_head), I(cfg.n_head_kv), I(2 * cfg.head_dim), pos, I(n), scale, I(p * hp));
     }
 }
 

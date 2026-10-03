@@ -415,6 +415,7 @@ public:
     bool gdn_wmma = false;
     bool act_fuse = true;
     bool attn_kx_on = true;
+    bool attn_kg_on = true;  // GQA-grouped direct-load prefill attention (f16 KV; WHIRL_ATTN_KG=0 off)
     bool ffn_h16 = false;
     bool out_h16 = false;
     bool g8t = false;
