@@ -3,6 +3,22 @@
 All notable changes to WHIRL are listed here. Versions follow `project(whirl VERSION ...)` in
 `CMakeLists.txt`.
 
+## Unreleased
+
+### Changed
+
+- Speculative verify attention: a sequence's verify rows now share one K/V pass in groups of up to
+  32 query columns (`attn_wsplit2`; 27B: 5 rows × 6 GQA heads) instead of 16 (2 rows). The second
+  column group runs on the block's otherwise idle second wave over the same staged Vᵀ tile; each
+  column's arithmetic is unchanged, so outputs are bit-identical (checked by `checkAttnGroups`, the
+  kernel test and server A/B against v0.1.2). Attention kernel time per layer at 16k context: one
+  user with 4 drafts 0.286 → 0.141 ms, four users with 3 drafts each 0.853 → 0.607 ms; at 32k,
+  1.784 → 1.162 ms. Single-row decode keeps `attn_wsplit1`. `WHIRL_ATTN_WIDE=0` restores the old
+  grouping.
+- MTP block stored as Q8_0 (e.g. the Swift-1.5 MXFP4 files) is now requantized to Q4_K for drafting,
+  like Q6_K blocks already were (`WHIRL_MTP_Q4=0` keeps the file's types). Drafts only; outputs are
+  unchanged.
+
 ## 0.1.2 — unreleased
 
 ### Changed

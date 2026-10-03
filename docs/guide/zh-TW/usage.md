@@ -281,7 +281,7 @@ PowerShell 中先用 `$env:WHIRL_KV = "q8v"` 設定再啟動程式。**一般使
 | `WHIRL_MTP_PMIN=P` | 草稿機率低於 P 時結束這串草稿（在 `WHIRL_MTP_NMIN` 個草稿之後才生效） |
 | `WHIRL_MTP_NMIN=N` | `WHIRL_MTP_PMIN` 生效前一定會產生的草稿數 |
 | `WHIRL_MTP_BATCH_DRAFTS=d1,d2,...` | 1、2、… 個 slot 同時 decode 時，每回合的草稿上限（伺服器） |
-| `WHIRL_MTP_Q4=0` | 保留 MTP 區塊的 Q6_K 矩陣（預設：改用 Q4_K 副本，只用於草稿） |
+| `WHIRL_MTP_Q4=0` | 保留 MTP 區塊的 Q6_K / Q8_0 矩陣（預設：改用 Q4_K 副本，只用於草稿） |
 | `WHIRL_DRAFT_HEAD=q4` | 草擬頭改用 Q4_K，不用 2-bit |
 | `WHIRL_MTP_FULLHEAD=1` | 草稿使用完整的輸出頭 |
 | `WHIRL_DRAFT_VOCAB=N` | 草擬頭只涵蓋前 N 個詞彙列 |
@@ -361,6 +361,7 @@ PowerShell 中先用 `$env:WHIRL_KV = "q8v"` 設定再啟動程式。**一般使
 | `WHIRL_GV_NMAX=N` | 同輸入 GEMV 一組的最大數量 |
 | `WHIRL_MOE_BN=32\|64` | 分組專家 GEMM 的 token tile |
 | `WHIRL_DBG=BITS` | 1 = 不合併 gdn_abconv、2 = 純量 split attention、4 = 每個 attention 群組一個 query |
+| `WHIRL_ATTN_WIDE=0` | 驗證 attention 每群最多 16 欄（`attn_wsplit1`），不用最多 32 欄的 `attn_wsplit2` |
 
 ### 7.7 診斷
 

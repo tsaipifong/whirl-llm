@@ -383,9 +383,10 @@ bool Model::checkPrefillInvariance(std::string& log) {
 
 // attn_wsplit consistency: the grouped (verify) launch must give every query
 // the same partials, bit for bit, as its own one-query launch.
-bool Model::checkAttnGroups(std::string& log, u32 p0, u32 n) {
+bool Model::checkAttnGroups(std::string& log, u32 p0, u32 n, bool wide) {
     const u32 hd = cfg.head_dim;
     if (k.attn_wsplit1 == nullptr || hd != 256) return true;
+    if (wide && k.attn_wsplit2 == nullptr) return true;
     if (kv_kf16) return true;  // probe: q8 or f16 only
     std::size_t li_attn = 0;
     for (std::size_t i = 0; i < layers.size(); ++i)
@@ -465,7 +466,8 @@ bool Model::checkAttnGroups(std::string& log, u32 p0, u32 n) {
             }
             ng = n;
         }
-        hip::launch(k.attn_wsplit1, hip::Dim3{cfg.n_head_kv, n_split, ng}, hip::Dim3{128}, 0, stream, qf, kva, part_ml, part_acc,
+        hip::launch(mode == 0 && wide ? k.attn_wsplit2 : k.attn_wsplit1, hip::Dim3{cfg.n_head_kv, n_split, ng}, hip::Dim3{128}, 0, stream, qf,
+                    kva, part_ml, part_acc,
                     static_cast<i32>(cfg.n_head), static_cast<i32>(cfg.n_head_kv), static_cast<i32>(2 * hd), pos_buf, scale, u64(0), groups);
         hip::sync();
         hip::download((mode == 0 ? ml_a : ml_b).data(), part_ml, ml_n * 4);
@@ -488,8 +490,8 @@ bool Model::checkAttnGroups(std::string& log, u32 p0, u32 n) {
                     }
             }
     const bool ok = bad_ml == 0 && bad_acc == 0;
-    log += fmt("  attn_wsplit grouped vs per-query, %u queries at pos %u: ml mismatches %zu, acc mismatches %zu (max |d| %.3e) %s\n", n, p0, bad_ml,
-               bad_acc, maxd, ok ? "ok" : "FAIL");
+    log += fmt("  attn_wsplit%s grouped vs per-query, %u queries at pos %u: ml mismatches %zu, acc mismatches %zu (max |d| %.3e) %s\n",
+               wide ? "2" : "1", n, p0, bad_ml, bad_acc, maxd, ok ? "ok" : "FAIL");
     return ok;
 }
 

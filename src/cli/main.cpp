@@ -646,6 +646,7 @@ void applyRuntimeEnv(q::Model& m) {
     if (envGet("NO_GRAPH")) m.use_graph = false;
     if (envGet("NO_FUSE")) m.no_fuse = true;
     if (envGet("NAIVE_ATTN")) m.naive_attn = true;
+    if (auto v = envGet("ATTN_WIDE"); v && *v == "0") m.attn_wide = false;
     if (auto v = envU32("MOE_BN")) m.moe_bn_force = *v;
     if (envGet("GDN_SEQ")) m.gdn_chunked = false;
     if (auto v = envGet("GV_GROUP")) q::gv_group = *v != "0";
@@ -865,7 +866,7 @@ int cmdChat(const Args& a) {
     if (envGet("GDN_V0")) {
         if (auto fv0 = model.module.getFunctionOpt("gdn_step_norm_v0")) model.k.gdn_step_norm = fv0;
     }
-    // MTP block as Q4_K (drafts only; default, WHIRL_MTP_Q4=0 keeps Q6_K)
+    // MTP block as Q4_K from Q6_K or Q8_0 (drafts only; default, WHIRL_MTP_Q4=0 keeps the file's types)
     if (envFlag("MTP_Q4", true)) model.requantMtpQ4();
     loadLog(model, L.stats);
 #if WHIRL_HAVE_VISION
@@ -1293,6 +1294,9 @@ int cmdSelftest(const Args& a) {
     const u32 grp = std::max<u32>(1, 16 / (m.cfg.n_head / m.cfg.n_head_kv));
     ok = m.checkAttnGroups(log, 1000, grp) && ok;
     ok = m.checkAttnGroups(log, 1023, grp) && ok;
+    const u32 grp2 = std::max<u32>(1, 32 / (m.cfg.n_head / m.cfg.n_head_kv));
+    ok = m.checkAttnGroups(log, 1000, grp2, true) && ok;
+    ok = m.checkAttnGroups(log, 1023, grp2, true) && ok;
     out(log);
     out(ok ? "selftest: ok\n" : "selftest: FAIL\n");
     return ok ? 0 : 1;

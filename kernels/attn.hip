@@ -710,6 +710,25 @@ extern "C" __global__ void __launch_bounds__(128)
                  int q_stride, const int *pos, float scale, const int *skip, AwGroups groups) {
     attn_wsplit_impl<1, 2>(q, kv, part_ml, part_acc, n_head, n_kv, q_stride, pos, scale, skip, groups);
 }
+// Up to 32 columns per group (27B: 5 verify rows x 6 GQA heads): waves 0 and 1 each
+// compute 16 columns on the same staged V^T tile, so a sequence's K/V is read once
+// for up to 5 verify rows instead of once per 2. Per column the arithmetic is the
+// CG = 1 kernel's (same code path), so the partials are the same bits.
+extern "C" __global__ void __launch_bounds__(128)
+    attn_wsplit2(const float *q, KvArgs kv, float *part_ml, float *part_acc, int n_head, int n_kv,
+                 int q_stride, const int *pos, float scale, const int *skip, AwGroups groups) {
+    attn_wsplit_impl<2, false>(q, kv, part_ml, part_acc, n_head, n_kv, q_stride, pos, scale, skip, groups);
+}
+extern "C" __global__ void __launch_bounds__(128)
+    attn_wsplit2_q8(const float *q, KvArgs kv, float *part_ml, float *part_acc, int n_head, int n_kv,
+                 int q_stride, const int *pos, float scale, const int *skip, AwGroups groups) {
+    attn_wsplit_impl<2, true>(q, kv, part_ml, part_acc, n_head, n_kv, q_stride, pos, scale, skip, groups);
+}
+extern "C" __global__ void __launch_bounds__(128)
+    attn_wsplit2_q8v(const float *q, KvArgs kv, float *part_ml, float *part_acc, int n_head, int n_kv,
+                 int q_stride, const int *pos, float scale, const int *skip, AwGroups groups) {
+    attn_wsplit_impl<2, 2>(q, kv, part_ml, part_acc, n_head, n_kv, q_stride, pos, scale, skip, groups);
+}
 
 
 

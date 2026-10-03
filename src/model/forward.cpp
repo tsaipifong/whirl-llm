@@ -475,28 +475,45 @@ void Model::attnBlock(const AttnW& a, const KvLayer& lkv, u32 n) {
         if (k.attn_wsplit1 != nullptr && hd == 256 && grp_q <= 16 && (dbg_flags & 2) == 0) {
             // query groups: consecutive rows of one sequence whose split size
             // `per` (a function of the position) matches, <= 16 columns each
-            AwGroups groups;
-            u32 ng = 0;
+            // (attn_wsplit1) or <= 32 (attn_wsplit2: one K/V pass for up to 32 / grp_q rows)
             // gfx1151: one query per group (its WMMA P.V is not exact when a masked
             // key carries a real V row), so a grouped verify row could differ
-            const u32 max_q = ((dbg_flags & 4) != 0 || arch == hip::Arch::gfx1151) ? 1 : 16 / grp_q;
+            const bool one_q = (dbg_flags & 4) != 0 || arch == hip::Arch::gfx1151;
             const bool known = row_n == n && n > 1;
-            u32 r = 0;
-            while (r < n) {
-                u32 c = 1;
-                if (known) {
-                    const i32 per0 = awPer(row_pos[r] + 1, n_split);
-                    while (r + c < n && c < max_q && row_base[r + c] == row_base[r] && row_pos[r + c] == row_pos[r] + static_cast<i32>(c) &&
-                           awPer(row_pos[r + c] + 1, n_split) == per0)
-                        c += 1;
+            auto group = [&](u32 max_q, AwGroups& groups) {
+                u32 ng = 0, r = 0, widest = 0;
+                while (r < n) {
+                    u32 c = 1;
+                    if (known) {
+                        const i32 per0 = awPer(row_pos[r] + 1, n_split);
+                        while (r + c < n && c < max_q && row_base[r + c] == row_base[r] && row_pos[r + c] == row_pos[r] + static_cast<i32>(c) &&
+                               awPer(row_pos[r + c] + 1, n_split) == per0)
+                            c += 1;
+                    }
+                    groups.first[ng] = static_cast<i32>(r);
+                    groups.count[ng] = static_cast<i32>(c);
+                    widest = std::max(widest, c);
+                    ng += 1;
+                    r += c;
                 }
-                groups.first[ng] = static_cast<i32>(r);
-                groups.count[ng] = static_cast<i32>(c);
-                ng += 1;
-                r += c;
+                return std::pair<u32, u32>{ng, widest};
+            };
+            AwGroups groups;
+            const u32 max_q1 = one_q ? 1 : 16 / grp_q;
+            hip::Function aw = k.attn_wsplit1;
+            u32 ng = 0;
+            bool wide = false;
+            if (!one_q && attn_wide && k.attn_wsplit2 != nullptr && known && 32 / grp_q > max_q1) {
+                const auto [ng2, widest2] = group(32 / grp_q, groups);
+                if (widest2 > max_q1) {
+                    aw = k.attn_wsplit2;
+                    ng = ng2;
+                    wide = true;
+                }
             }
-            hip::launch(k.attn_wsplit1, D(cfg.n_head_kv, n_split, ng), D(128), 0, stream, qf, kva, part_ml, part_acc, I(cfg.n_head),
-                        I(cfg.n_head_kv), I(2 * hd), pos_buf, scale, gate, groups);
+            if (!wide) ng = group(max_q1, groups).first;
+            hip::launch(aw, D(cfg.n_head_kv, n_split, ng), D(128), 0, stream, qf, kva, part_ml, part_acc, I(cfg.n_head), I(cfg.n_head_kv),
+                        I(2 * hd), pos_buf, scale, gate, groups);
         } else {
             hip::launch(k.attn_split, D(cfg.n_head_kv, n_split, n), D(256), 0, stream, qf, kva, part_ml, part_acc, I(cfg.n_head), I(cfg.n_head_kv),
                         I(hd), I(2 * hd), pos_buf, scale, i32(1), gate);

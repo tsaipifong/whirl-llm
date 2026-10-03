@@ -212,6 +212,7 @@ KernelTable KernelTable::load(const hip::Module& m, KvFormat kv) {
 
     static constexpr Named optional[] = {
         {&KernelTable::requant_q6k_d2, "requant_q6k_d2"},
+        {&KernelTable::requant_q80_q4k, "requant_q80_q4k"},
         {&KernelTable::gdn_wprep, "gdn_wprep"},
         {&KernelTable::gdn_wscan8, "gdn_wscan8"},
         {&KernelTable::rmsnorm_x8, "rmsnorm_x8"},
@@ -223,6 +224,7 @@ KernelTable KernelTable::load(const hip::Module& m, KvFormat kv) {
         {&KernelTable::attn_prep, "attn_prep"},
         {&KernelTable::attn_combine_q8, "attn_combine_q8"},
         {&KernelTable::attn_wsplit1, "attn_wsplit1"},
+        {&KernelTable::attn_wsplit2, "attn_wsplit2"},
         {&KernelTable::topk_rows, "topk_rows"},
     };
     for (const Named& n : optional) k.*(n.f) = L.opt(n.name);
@@ -235,6 +237,7 @@ KernelTable KernelTable::load(const hip::Module& m, KvFormat kv) {
         k.attn_prefill_wmma = L.req("attn_prefill_wmma_q8v");
         k.attn_prep = L.req("attn_prep_q8v");
         k.attn_wsplit1 = L.opt("attn_wsplit1_q8v");
+        k.attn_wsplit2 = L.opt("attn_wsplit2_q8v");
     } else if (kv == KvFormat::q8 || kv == KvFormat::q8h) {
         k.attn_decode = L.req("attn_decode_q8");
         k.kv_store = L.req("kv_store_q8");
@@ -242,6 +245,7 @@ KernelTable KernelTable::load(const hip::Module& m, KvFormat kv) {
         k.attn_prefill_wmma = L.req("attn_prefill_wmma_q8");
         k.attn_prep = L.opt(kv == KvFormat::q8h ? "attn_prep_q8h" : "attn_prep_q8");
         k.attn_wsplit1 = L.opt("attn_wsplit1_q8");
+        k.attn_wsplit2 = L.opt("attn_wsplit2_q8");
     }
     k.attn_kx = L.opt(kv == KvFormat::q8v ? "attn_kx_q8v" : (kv == KvFormat::f16 ? "attn_kx" : "attn_kx_q8"));
     // vision: multi-section RoPE attention prep (same KV-format choice as attn_prep)

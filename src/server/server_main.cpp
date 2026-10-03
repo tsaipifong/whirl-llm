@@ -460,8 +460,9 @@ int serveMain(int argc, char** argv, const char* program) {
         if (env("GDN_V0")) {
             if (hip::Function fv0 = model.module.getFunctionOpt("gdn_step_norm_v0")) model.k.gdn_step_norm = fv0;
         }
-        // MTP block as Q4_K (drafts only; WHIRL_MTP_Q4=0 keeps Q6_K)
+        // MTP block as Q4_K from Q6_K or Q8_0 (drafts only; WHIRL_MTP_Q4=0 keeps the file's types)
         if (use_mtp && envOn("MTP_Q4", true)) model.requantMtpQ4();
+        if (!envOn("ATTN_WIDE", true)) model.attn_wide = false;
         if (use_mtp && !env("MTP_FULLHEAD")) {
             const bool q4 = env("DRAFT_HEAD").value_or("") == "q4";
             model.buildDraftHeadEx(q4 ? qwen35::Model::DraftHeadKind::q4 : qwen35::Model::DraftHeadKind::d2);

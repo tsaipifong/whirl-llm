@@ -68,8 +68,8 @@
 //            head_dim, q_stride, pos, scale, int nq, skip)
 //   attn_combine(part_ml, part_acc, q, out, n_head, head_dim, q_stride, n_split)
 //   attn_combine_q8(... same ..., int8* xq, float* xd)
-//   attn_wsplit1[_q8|_q8v](q, KvArgs, part_ml, part_acc, n_head, n_kv,
-//            q_stride, pos, scale, skip, AwGroups groups)
+//   attn_wsplit1[_q8|_q8v], attn_wsplit2[_q8|_q8v](q, KvArgs, part_ml, part_acc, n_head, n_kv,
+//            q_stride, pos, scale, skip, AwGroups groups)   [<= 16 / <= 32 columns per group]
 //   attn_prep[_q8|_q8h|_q8v](qf, kk, vv, qw, kw, KvArgs, pos, n_head, n_kv,
 //            hd, n_rot, theta_scale, eps)
 //   attn_prefill_wmma[_q8|_q8v], attn_kx[_q8|_q8v](q, KvArgs, out, n_head,
@@ -106,7 +106,7 @@
 //   set_rows(ids, pos, kvbase, dev_src, RowTab tab, n)
 //   topk_rows(x, n, K, float inv_t, int* ids, float* vals, float* stats)
 //   requant_q6k_q4k(src, u64 src_rb, dst, u64 dst_rb); requant_q6k_d2(src,
-//            u64 src_rb, dst, int ncols)
+//            u64 src_rb, dst, int ncols); requant_q80_q4k(src, u64 src_rb, dst, u64 dst_rb)
 //  mixture of experts:
 //   moe_logits_f32(W, x, out, R, C, n, skip)
 //   moe_topk(logits, ld, h, shw, ids, w, sg, R, K, E)
@@ -361,13 +361,13 @@ struct KernelTable {
 
     F rmsnorm{}, l2norm{}, add_inplace{}, silu_mul{}, rope_neox{};
     F attn_decode{}, kv_store{}, attn_split{}, attn_combine{}, attn_prep{}, attn_combine_q8{};
-    F attn_wsplit1{}, attn_prefill_wmma{}, attn_kx{};
+    F attn_wsplit1{}, attn_wsplit2{}, attn_prefill_wmma{}, attn_kx{};
     F gdn_conv_seq{}, gdn_gates{}, gdn_seq_128{}, f32_to_f16{}, gdn_gated_norm{};
     F argmax{}, quantize_q8{};
     F gdn_chunk_prep{}, gdn_chunk_scan{}, gdn_wprep{}, gdn_wscan8{};
     F rmsnorm_x8{}, rmsnorm_x16{}, silu_mul_x8{}, silu_mul_x16{}, gated_norm_x8{}, gated_norm_x16{};
     F gdn_conv_par{}, gdn_conv_state{}, rmsnorm_q8{}, silu_mul_q8{}, gdn_ab_q8_0{};
-    F gdn_conv_l2{}, gdn_step_norm{}, requant_q6k_q4k{}, requant_q6k_d2{};
+    F gdn_conv_l2{}, gdn_step_norm{}, requant_q6k_q4k{}, requant_q6k_d2{}, requant_q80_q4k{};
     F set_tokens{}, argmax_rows{}, argmax_prob{}, draft_pick{};
     F set_rows{}, rmsnorm_q8_rows{}, argmax_rows_to{}, draft_pick_rows{};
     F moe_logits_f32{}, moe_topk{}, moe_route{}, moe_gather_f16{}, moe_act_f16{}, moe_combine{};

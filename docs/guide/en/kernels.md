@@ -476,6 +476,23 @@ instead of f32 for their element-wise consumers (+5.4…+5.8% and +0.6%).
 - Lost: a 64-column variant (same speed; not bit-exact on gfx1151); a version that reads KV once
   for all queries (24k MTP 39.5 → 35.6 tok/s — the bottleneck was the reductions, not KV reads,
   and its 41 KB of LDS cut occupancy).
+- **`attn_wsplit2` (up to 32 columns).** With 16 columns per group, a sequence's verify rows go
+  through attention two at a time (27B: 6 GQA heads per KV head), so each split's K/V range is read
+  once per 2 rows, while 3 of the block's 4 waves only help stage Vᵀ. `attn_wsplit2` is the same
+  template with two column groups: waves 0 and 1 each compute 16 columns on the same staged Vᵀ tile
+  (one K/V pass for up to 5 rows; LDS 37 KB, below the ~41 KB occupancy cliff). Each column runs the
+  identical code path, so its partials are the same bits as alone (`checkAttnGroups` and the kernel
+  test compare 5-row groups with per-query launches). The host groups rows with the 32-column limit
+  and uses `attn_wsplit2` only when some group then holds more than 2 rows (single-row decode keeps
+  `attn_wsplit1`; `WHIRL_ATTN_WIDE=0` turns it off). Kernel time per attention layer, q8v KV, R9700:
+
+  | Context | Rows | `attn_wsplit1` | `attn_wsplit2` |
+  |---|---|---|---|
+  | 16k | 1 sequence × 5 (one user, 4 drafts) | 0.286 ms | 0.141 ms |
+  | 16k | 1 × 9 (8 drafts) | 0.477 ms | 0.277 ms |
+  | 16k | 4 × 4 (four users, 3 drafts each) | 0.853 ms | 0.607 ms |
+  | 32k | 4 × 4 | 1.784 ms | 1.162 ms |
+  | 32k | 1 × 9 | 1.115 ms | 0.633 ms |
 - **gfx1151 limitation:** gfx11 WMMA is not exact when a P = 0 entry multiplies another query's
   real V row, so on the 8060S each group holds one query (the kernel still runs, without sharing
   K/V).

@@ -679,10 +679,12 @@ void Model::restoreSeqSnapshot(u32 s, u32 set) {
 }
 
 Mat Model::requantQ4k(const Mat& w) {
-    if (w.ty != GgmlType::q6_k || w.ncols % 256 != 0) return w;
+    // Q6_K (Q4_K_M files) or Q8_0 (e.g. the Swift MXFP4 files' MTP block)
+    const hip::Function f = w.ty == GgmlType::q6_k ? k.requant_q6k_q4k : w.ty == GgmlType::q8_0 ? k.requant_q80_q4k : nullptr;
+    if (f == nullptr || w.ncols % 256 != 0) return w;
     const u64 rb = w.ncols / 256 * 144;
     const DevPtr p = alloc(rb * w.nrows);
-    hip::launch(k.requant_q6k_q4k, {w.nrows, w.ncols / 256, 1}, {256, 1, 1}, 0, stream, w.ptr, w.row_bytes, p, rb);
+    hip::launch(f, {w.nrows, w.ncols / 256, 1}, {256, 1, 1}, 0, stream, w.ptr, w.row_bytes, p, rb);
     Mat r;
     r.ptr = p;
     r.ty = GgmlType::q4_k;

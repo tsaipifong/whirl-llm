@@ -362,6 +362,19 @@ asm 屏障，因為編譯器把 `x*x` 收縮進第一個 butterfly 加法，並�
 
 - 較差的做法：64 欄變體（速度相同；在 gfx1151 上非逐位元相同）；一個對所有 query 只讀一次 KV 的版本（24k MTP 39.5 → 35.6 tok/s——瓶頸是歸約而不是 KV 讀取，而且它
   41 KB 的 LDS 降低了佔用率）。
+- **`attn_wsplit2`（每群最多 32 欄）。** 每群 16 欄時，一個序列的驗證列兩列一組進 attention（27B：每個 KV head 6 個 GQA head），所以每個 split 的 K/V 範圍每 2 列就讀一次，
+  而 block 的 4 個 wave 中有 3 個只幫忙搬 Vᵀ。`attn_wsplit2` 是同一個 template 的兩個欄群版本：wave 0 與 wave 1 在同一塊已搬好的 Vᵀ tile 上各算 16 欄（最多 5 列共用一次
+  K/V 讀取；LDS 37 KB，低於約 41 KB 的佔用率斷崖）。每一欄走完全相同的程式路徑，所以 partials 與單獨執行逐位元相同（`checkAttnGroups` 與 kernel test 都拿 5 列群組和逐
+  query launch 比對）。主機端以 32 欄上限分群，只有某群因此超過 2 列時才用 `attn_wsplit2`（單列 decode 仍用 `attn_wsplit1`；`WHIRL_ATTN_WIDE=0` 可關閉）。每個 attention
+  層的 kernel 時間，q8v KV，R9700：
+
+  | 上下文 | 列數 | `attn_wsplit1` | `attn_wsplit2` |
+  |---|---|---|---|
+  | 16k | 1 序列 × 5（一位使用者、4 個草稿） | 0.286 ms | 0.141 ms |
+  | 16k | 1 × 9（8 個草稿） | 0.477 ms | 0.277 ms |
+  | 16k | 4 × 4（四位使用者、各 3 個草稿） | 0.853 ms | 0.607 ms |
+  | 32k | 4 × 4 | 1.784 ms | 1.162 ms |
+  | 32k | 1 × 9 | 1.115 ms | 0.633 ms |
 - **gfx1151 的限制：** 當 P = 0 的項乘上另一個 query 的真實 V 列時，gfx11 WMMA 並不精確，所以在 8060S 上每個群組只放一個 query（kernel 仍會執行，只是不共用 K/V）。
 - 這項工作之後，一般 decode 時間每 1k token 上下文約增加 0.11 ms——正好是以 ~600 GB/s 每 1k token 多讀 64 MiB KV 的時間。Decode attention 已達頻寬；剩下的槓桿是減少 KV
   位元組，而反量化 K 的成本比它省下的位元組還多（[kv-and-caching.md](kv-and-caching.md#formats)）。

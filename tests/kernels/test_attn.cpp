@@ -1,10 +1,10 @@
 // whirl-kernel-test: paged KV cache and attention.
 //   * kv_store / kv_store_q8 / kv_store_q8v exact (CPU emulation of the f16
 //     store and of the q8 quantizer), single-sequence and batched (kvbase);
-//   * attn_decode, attn_split + attn_combine, attn_wsplit1 + attn_combine,
+//   * attn_decode, attn_split + attn_combine, attn_wsplit1 / attn_wsplit2 + attn_combine,
 //     attn_prefill_wmma vs a double-precision CPU softmax attention over the
 //     cache contents (tolerance; f16 WMMA paths looser);
-//   * bitwise invariances: attn_wsplit1 grouped == per-query (the
+//   * bitwise invariances: attn_wsplit1 / attn_wsplit2 grouped == per-query (the
 //     prototype's checkAttnGroups), attn_kx == attn_prefill_wmma, head-range
 //     split launches == one launch, attn_combine_q8 == attn_combine (+ its
 //     int8 copy == quantize_q8), attn_prep == rmsnorm + rope_neox + kv_store.
@@ -264,8 +264,13 @@ void testAttn(Ctx& c) {
             }
         }
         // ---- attn_wsplit1: grouped == per-query (checkAttnGroups), and vs CPU
-        if (auto fw = c.fnOpt("attn_wsplit1" + fs)) {
-            const int ng_q = std::max(1, 16 / kGrp);  // queries per group (2 for 24 / 4 heads)
+        // ---- attn_wsplit2 (<= 32 columns): grouped == per-query attn_wsplit1
+        if (auto fw = c.fnOpt("attn_wsplit1" + fs))
+        for (int wv : {1, 2}) {
+            const auto fg = wv == 1 ? fw : c.fnOpt("attn_wsplit2" + fs);
+            if (!fg) continue;
+            const std::string kn = "attn_wsplit" + std::to_string(wv);
+            const int ng_q = std::max(1, (16 * wv) / kGrp);  // queries per group (2 / 5 for 24 / 4 heads)
             for (int p0 : {L - 100, L - 77}) {  // a chunk start and a position inside a chunk
                 std::vector<int> pv(16);
                 for (int t = 0; t < 16; ++t) pv[static_cast<std::size_t>(t)] = p0 + t;
@@ -287,7 +292,7 @@ void testAttn(Ctx& c) {
                         }
                         ng = static_cast<unsigned>(ng_q);
                     }
-                    hip::launch(fw, {kKv, static_cast<unsigned>(ns), ng}, {128, 1, 1}, 0, c.s, dq.p(), pool.args(), ml.p(),
+                    hip::launch(mode == 0 ? fg : fw, {kKv, static_cast<unsigned>(ns), ng}, {128, 1, 1}, 0, c.s, dq.p(), pool.args(), ml.p(),
                                 acc.p(), kHeads, kKv, kQStride, dpv.p(), kScale, DevPtr{0}, g);
                     c.sync();
                     auto m = ml.down<float>(static_cast<std::size_t>(ng_q) * ns * kHeads * 2);
@@ -306,7 +311,7 @@ void testAttn(Ctx& c) {
                         bad += std::memcmp(&acca[i / 2 * kHd], &a[i / 2 * kHd], kHd * 4) != 0;
                     }
                     Result r;
-                    r.name = "attn_wsplit1" + fs + " grouped == per-query (" + std::to_string(ng_q) + " q at pos " +
+                    r.name = kn + fs + " grouped == per-query (" + std::to_string(ng_q) + " q at pos " +
                              std::to_string(p0) + ")" + tag;
                     r.kind = Kind::invariant;
                     r.n = n;
@@ -319,7 +324,7 @@ void testAttn(Ctx& c) {
                     std::vector<int> rows(static_cast<std::size_t>(ng_q));
                     std::iota(rows.begin(), rows.end(), 0);
                     attnRef(h, pool, q, pv, rows, ro, rs);
-                    c.rep.add(cmpTol("attn_wsplit1" + fs + " + combine vs CPU (pos " + std::to_string(p0) + ")" + tag, out, ro,
+                    c.rep.add(cmpTol(kn + fs + " + combine vs CPU (pos " + std::to_string(p0) + ")" + tag, out, ro,
                                      rs, 1e-2, 1e-4));
                 }
             }

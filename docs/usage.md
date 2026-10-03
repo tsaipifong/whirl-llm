@@ -296,7 +296,7 @@ The output always equals plain greedy decoding (with sampling: the same distribu
 | `WHIRL_MTP_PMIN=P` | end a draft chain at a draft whose probability is below P (after `WHIRL_MTP_NMIN` drafts) |
 | `WHIRL_MTP_NMIN=N` | drafts always made before `WHIRL_MTP_PMIN` applies |
 | `WHIRL_MTP_BATCH_DRAFTS=d1,d2,...` | most drafts per cycle with 1, 2, … decoding slots (server) |
-| `WHIRL_MTP_Q4=0` | keep the MTP block's Q6_K matrices (default: Q4_K copies, used for drafts only) |
+| `WHIRL_MTP_Q4=0` | keep the MTP block's Q6_K / Q8_0 matrices (default: Q4_K copies, used for drafts only) |
 | `WHIRL_DRAFT_HEAD=q4` | Q4_K draft head instead of the 2-bit one |
 | `WHIRL_MTP_FULLHEAD=1` | drafts use the full output head |
 | `WHIRL_DRAFT_VOCAB=N` | draft head over the first N vocabulary rows only |
@@ -377,6 +377,7 @@ Alternatives kept for A/B tests and numerics comparisons; the defaults are the t
 | `WHIRL_GV_NMAX=N` | largest group of same-input GEMVs |
 | `WHIRL_MOE_BN=32\|64` | grouped expert GEMM token tile |
 | `WHIRL_DBG=BITS` | 1 = no gdn_abconv merge, 2 = scalar split attention, 4 = one query per attention group |
+| `WHIRL_ATTN_WIDE=0` | verify attention groups of at most 16 columns (`attn_wsplit1`) instead of up to 32 (`attn_wsplit2`) |
 
 ### 7.7 Diagnostics
 

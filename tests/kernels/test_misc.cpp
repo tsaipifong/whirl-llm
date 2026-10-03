@@ -6,7 +6,7 @@
 //   * argmax / argmax_rows / argmax_rows_to / argmax_prob / draft_pick(_rows)
 //     tokens and control words exact (first maximum wins), probabilities vs
 //     CPU; set_tokens / set_rows exact; topk_rows candidate sets exact;
-//   * requant_q6k_q4k exact (CPU emulation); requant_q6k_d2 + gemv_d2_nt*
+//   * requant_q6k_q4k / requant_q80_q4k exact (CPU emulation); requant_q6k_d2 + gemv_d2_nt*
 //     vs CPU on the decoded 2-bit head and multi-token == 1-token (bitwise);
 //   * activation fusions (rmsnorm_x8/x16, silu_mul_x8/x16, gated_norm_x8/x16
 //     and the f16-input / fragment-tiled variants) == the unfused kernel
@@ -312,12 +312,11 @@ void testMisc(Ctx& c) {
             hip::launch(c.k.requant_q6k_q4k, {static_cast<unsigned>(nr), static_cast<unsigned>(nsb), 1}, {256, 1, 1}, 0, c.s, src.p(),
                         head.row_bytes, dst.p(), rb4);
             c.sync();
-            std::vector<std::uint8_t> want(static_cast<std::size_t>(nr) * rb4);
-            for (int r = 0; r < nr; ++r) {
-                std::vector<float> v(static_cast<std::size_t>(ncols));
-                ref::dequantRow(QType::q6_k, head.data.data() + static_cast<std::size_t>(r) * head.row_bytes, ncols, v.data());
-                for (int sb = 0; sb < nsb; ++sb) {
-                    const float* x = v.data() + 256 * sb;
+            // CPU emulation of the Q4_K requantizer (same fit, same rounding) for one row
+            auto q4kRow = [](const float* v, int nc, std::uint8_t* orow) {
+                const int nsbl = nc / 256;
+                for (int sb = 0; sb < nsbl; ++sb) {
+                    const float* x = v + 256 * sb;
                     float scl[8], mnl[8];
                     for (int j = 0; j < 8; ++j) {
                         float mn = x[32 * j], mx = x[32 * j];
@@ -347,7 +346,7 @@ void testMisc(Ctx& c) {
                             qv[32 * j + i] = static_cast<std::uint8_t>(std::max(0, std::min(15, q)));
                         }
                     }
-                    std::uint8_t* o = want.data() + static_cast<std::size_t>(r) * rb4 + static_cast<std::size_t>(sb) * 144;
+                    std::uint8_t* o = orow + static_cast<std::size_t>(sb) * 144;
                     std::memcpy(o, &dh, 2);
                     std::memcpy(o + 2, &dmh, 2);
                     for (int i = 0; i < 4; ++i) {
@@ -360,8 +359,33 @@ void testMisc(Ctx& c) {
                         o[16 + t] = static_cast<std::uint8_t>(qv[64 * j64 + l] | (qv[64 * j64 + 32 + l] << 4));
                     }
                 }
+            };
+            std::vector<std::uint8_t> want(static_cast<std::size_t>(nr) * rb4);
+            for (int r = 0; r < nr; ++r) {
+                std::vector<float> v(static_cast<std::size_t>(ncols));
+                ref::dequantRow(QType::q6_k, head.data.data() + static_cast<std::size_t>(r) * head.row_bytes, ncols, v.data());
+                q4kRow(v.data(), ncols, want.data() + static_cast<std::size_t>(r) * rb4);
             }
             c.rep.add(cmpExact("requant_q6k_q4k (CPU emulation, " + std::to_string(nr) + " head rows)", dst.down<std::uint8_t>(want.size()), want));
+            // Q8_0 -> Q4_K (MTP blocks stored as Q8_0): the same fit on the Q8_0 values
+            if (c.k.requant_q80_q4k) {
+                HostMat q8 = loadMat(*f, "blk.64.attn_k.weight", 0, c.quick ? 128 : 1024);  // Q8_0 5120 x 1024
+                if (q8.type == QType::q8_0 && q8.ncols % 256 == 0) {
+                    const int nr8 = q8.nrows, nc8 = q8.ncols;
+                    const std::uint64_t rb8 = wk::rowBytes(QType::q4_k, nc8);
+                    Buf s8(q8.data), d8(static_cast<std::size_t>(nr8) * rb8);
+                    hip::launch(c.k.requant_q80_q4k, {static_cast<unsigned>(nr8), static_cast<unsigned>(nc8 / 256), 1}, {256, 1, 1}, 0, c.s,
+                                s8.p(), q8.row_bytes, d8.p(), rb8);
+                    c.sync();
+                    std::vector<std::uint8_t> w8(static_cast<std::size_t>(nr8) * rb8);
+                    for (int r = 0; r < nr8; ++r) {
+                        std::vector<float> v(static_cast<std::size_t>(nc8));
+                        ref::dequantRow(QType::q8_0, q8.data.data() + static_cast<std::size_t>(r) * q8.row_bytes, nc8, v.data());
+                        q4kRow(v.data(), nc8, w8.data() + static_cast<std::size_t>(r) * rb8);
+                    }
+                    c.rep.add(cmpExact("requant_q80_q4k (CPU emulation, " + std::to_string(nr8) + " rows)", d8.down<std::uint8_t>(w8.size()), w8));
+                }
+            }
 
             // Q6_K -> D2 and the D2 GEMV
             if (c.k.requant_q6k_d2) {

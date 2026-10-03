@@ -387,6 +387,9 @@ public:
     std::uint64_t tune_mask = ~0ull;
     bool tune_cold = false;
     bool naive_attn = false;
+    // verify attention: groups of up to 32 columns (attn_wsplit2) when that lets a
+    // sequence's rows share one K/V pass (WHIRL_ATTN_WIDE=0: <= 16 columns as before)
+    bool attn_wide = true;
     bool float_gemv = false;
     std::uint32_t gemv_max = max_small_batch;
     GemvR gemv_r = defaultGemvR();
@@ -597,7 +600,8 @@ public:
     bool checkGemvq(std::string& log);
     bool checkGemvBitwise(std::string& log);
     bool checkPrefillInvariance(std::string& log);
-    bool checkAttnGroups(std::string& log, std::uint32_t p0, std::uint32_t n);
+    // wide: the grouped launch is attn_wsplit2 (<= 32 columns) instead of attn_wsplit1
+    bool checkAttnGroups(std::string& log, std::uint32_t p0, std::uint32_t n, bool wide = false);
 
     // Device memory helpers (tracked in `allocations`, freed by the destructor).
     DevPtr alloc(std::uint64_t bytes);
