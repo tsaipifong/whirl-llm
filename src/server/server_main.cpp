@@ -13,6 +13,7 @@
 #include "log.h"
 #include "tier/device_ops.h"
 #include "tier/kv_tier.h"
+#include "tier/ram_size.h"
 #include "whirl/common.h"
 #include "whirl/gguf.h"
 #include "whirl/hip.h"
@@ -73,7 +74,6 @@ constexpr std::size_t n_ckpt_default = 4;
 constexpr std::size_t n_ckpt_default_par = 2;
 constexpr std::size_t n_spe_default = 2;
 constexpr std::uint32_t sys_min_default = 2048;
-constexpr std::uint64_t kv_ram_mb_default = 8192;
 constexpr std::uint64_t kv_ssd_gb_default = 64;
 constexpr std::uint32_t decode_min_tps_default = 20;
 
@@ -99,9 +99,11 @@ const char* kHelpBody =
     "  --decode-min-tps N       while other requests prefill, keep every streaming (decoding) request\n"
     "                           at >= N tok/s by limiting prefill forwards (default 20; 0 = off:\n"
     "                           prefill forwards are not limited)\n"
-    "  --kv-ram-mb N            host RAM tier of the prefix cache in MiB of pinned memory (default 8192,\n"
-    "                           or one full-length session if more; 0 = no host tiers). Idle sessions\n"
-    "                           are copied there and restored instead of prefilled again\n"
+    "  --kv-ram-mb N            host RAM tier of the prefix cache in MiB of pinned memory (default: 1/4\n"
+    "                           of physical RAM, at least 8 GiB or one full-length session, at most\n"
+    "                           32 GiB, and at most half of the RAM available at startup; 0 = no host\n"
+    "                           tiers). Idle sessions are copied there and restored instead of\n"
+    "                           prefilled again\n"
     "  --kv-ssd-dir PATH        SSD tier directory (default %LOCALAPPDATA%\\whirl\\kvcache)\n"
     "  --kv-ssd-gb N            SSD tier size cap in GiB (default 64; 0 = no SSD tier)\n"
     "  --mmproj FILE            vision encoder (Qwen3-VL style mmproj GGUF, F16 / BF16): image_url parts\n"
@@ -579,23 +581,50 @@ int serveMain(int argc, char** argv, const char* program) {
                                                         static_cast<std::uint64_t>(V) * 4,
                                                     tier::block_bytes);
             const std::uint64_t full = static_cast<std::uint64_t>(slot_ctx) * model.kvBytesPerTokenFmt(false, false) + n_ck * ck_stride;
-            return std::max(kv_ram_mb_default, alignUp(full, 1ull << 30) >> 20);
+            return std::max(tier::ram_auto_min_mb, alignUp(full, 1ull << 30) >> 20);
         }();
-        std::uint64_t kv_ram_mb = ram_def;
-        if (opt.kv_ram_mb) kv_ram_mb = *opt.kv_ram_mb;
-        else if (auto v = env("KV_RAM_MB")) {
+        // size: explicit (--kv-ram-mb / WHIRL_KV_RAM_MB), else 1/4 of physical RAM
+        // within [ram_def, 32 GiB] and at most half of the RAM available now
+        tier::RamTierInput rin;
+        rin.floor_mb = ram_def;
+        rin.integrated = info.integrated;
+        if (opt.kv_ram_mb) {
+            rin.explicit_mb = *opt.kv_ram_mb;
+        } else if (auto v = env("KV_RAM_MB")) {
             try {
-                kv_ram_mb = std::stoull(*v);
+                rin.explicit_mb = std::stoull(*v);
+                rin.explicit_src = "WHIRL_KV_RAM_MB";
             } catch (const std::exception&) {
+                logW("kv tier: WHIRL_KV_RAM_MB=\"{}\" is not a number; using the automatic size", *v);
             }
         }
+        {
+            MEMORYSTATUSEX ms{};
+            ms.dwLength = sizeof(ms);
+            if (GlobalMemoryStatusEx(&ms)) {
+                rin.total_phys = ms.ullTotalPhys;
+                rin.avail_phys = ms.ullAvailPhys;
+            }
+        }
+        const tier::RamTierSize rsz = tier::ramTierSize(rin);
+        const std::uint64_t kv_ram_mb = rsz.mb;
         std::unique_ptr<tier::Tier> tier_pre;
+        double tier_alloc_s = 0.0;
         if (kv_ram_mb > 0 && n_ck > 0 && !no_pc && hip::archFor(info.gcn_arch) == hip::Arch::gfx1201) {
+            if (rsz.avail_limited) logW("kv tier: RAM tier size {} MiB ({})", kv_ram_mb, rsz.reason);
+            else logI("kv tier: RAM tier size {} MiB ({})", kv_ram_mb, rsz.reason);
+            if (rin.explicit_mb && rin.avail_phys > 0 && (kv_ram_mb << 20) > rin.avail_phys / 2)
+                logW("kv tier: {} MiB is more than half of the {} MiB of RAM available now; the system may page", kv_ram_mb,
+                     rin.avail_phys >> 20);
+            const TimePoint t_alloc0 = Clock::now();
             try {
                 tier_pre = tier::Tier::create(*ops, kv_ram_mb << 20, seed0 ^ 0x5bd1e995ull, dev);
             } catch (const std::exception& ex) {
                 logE("kv tier: cannot allocate {} MiB of pinned host memory ({}); running without host tiers", kv_ram_mb, ex.what());
             }
+            tier_alloc_s = msSince(t_alloc0) / 1000.0;
+        } else if (kv_ram_mb == 0 && n_ck > 0 && !no_pc) {
+            logI("kv tier: RAM tier off ({})", rsz.reason);
         }
         const hip::MemInfo mem_t1 = hip::memInfo();
         // shared KV pool: --ctx, or (R9700) the VRAM left now minus a reserve
@@ -729,10 +758,10 @@ int serveMain(int argc, char** argv, const char* program) {
                 if (tier_owned) {
                     tier::Tier& tr = *tier_owned;
                     tier::declarePinned(lad, tr.pinnedBytes());
-                    logI("kv tier: RAM {:.2f} GiB of pinned host memory (counted as this process's GPU 'Shared Usage', SSD index {:.1f} "
-                         "s), entries >= {} tokens; SSD {}{} (cap {} GiB, {} entries / {:.2f} GiB indexed); entry: {:.1f} MiB per "
-                         "checkpoint, {:.1f} MiB per 256-token page",
-                         static_cast<double>(tr.pinnedBytes()) / 1073741824.0, msSince(t_tier0) / 1000.0, tr.cfg.min_tokens,
+                    logI("kv tier: RAM {:.2f} GiB of pinned host memory (counted as this process's GPU 'Shared Usage'; pinned in {:.1f} s, "
+                         "SSD index {:.1f} s), entries >= {} tokens; SSD {}{} (cap {} GiB, {} entries / {:.2f} GiB indexed); entry: {:.1f} "
+                         "MiB per checkpoint, {:.1f} MiB per 256-token page",
+                         static_cast<double>(tr.pinnedBytes()) / 1073741824.0, tier_alloc_s, msSince(t_tier0) / 1000.0, tr.cfg.min_tokens,
                          ssd_dir ? *ssd_dir : std::string("off"), (ssd_dir && !tr.hasSsd()) ? " (unavailable)" : "", ssd_gb,
                          tr.ssdEntries(), static_cast<double>(tr.ssd_bytes) / 1073741824.0,
                          static_cast<double>(lay.ck_bytes) / 1048576.0, static_cast<double>(lay.page_bytes) / 1048576.0);

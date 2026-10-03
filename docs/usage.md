@@ -133,7 +133,7 @@ request slots, a prefix cache in VRAM and host RAM / SSD tiers for idle sessions
 | `--ctx-per-slot N` | longest context of one request (default min(pool, 131072); up to 262144) |
 | `--mtp-drafts N` | fixed MTP drafts per cycle, 1–10 (default: chosen per model type by a cost model) |
 | `--decode-min-tps N` | decode floor: while other requests prefill, every streaming (decoding) request keeps at least N tok/s; prefill forwards are shortened and decode cycles interleaved to hold it (default 20; `0` = off, prefill forwards are not limited). Outputs are identical for any N ([server.md](guide/en/server.md#batching)) |
-| `--kv-ram-mb N` | host RAM tier of the prefix cache, MiB of pinned memory (default 8192, or one full-length session if that is larger — about 9 GiB for the 27B model). Idle sessions are copied there and restored instead of prefilled again. `0` disables both host tiers |
+| `--kv-ram-mb N` | host RAM tier of the prefix cache, MiB of pinned memory (default: 1/4 of physical RAM, at least 8 GiB or one full-length session if that is larger — about 9 GiB for the 27B model —, at most 32 GiB, and at most half of the RAM available at startup; 16 GiB on a 64 GB PC; off by default on integrated GPUs). The startup log prints the chosen size and why. Idle sessions are copied there and restored instead of prefilled again. `0` disables both host tiers |
 | `--kv-ssd-dir PATH` | SSD tier directory (default `%LOCALAPPDATA%\whirl\kvcache`) |
 | `--kv-ssd-gb N` | SSD tier size cap in GiB (default 64; `0` = no SSD tier) |
 | `--mmproj FILE` | vision encoder (Qwen3-VL style mmproj GGUF, F16 / BF16). `image_url` parts (`data:` URLs with base64 PNG / JPEG / …) become image tokens. Weights stay in pinned host RAM; nothing goes to VRAM until an image arrives |
@@ -157,8 +157,8 @@ Examples:
 .\whirl-server.exe C:\models\model.gguf --mmproj C:\models\mmproj-F16.gguf
 ```
 
-Memory note: with the defaults the server pins about 8–9 GiB of host RAM for the RAM tier (plus
-about 0.9 GiB when `--mmproj` is given) and may use up to 64 GiB on the SSD. Use `--kv-ram-mb` /
+Memory note: with the defaults the server pins about a quarter of the host RAM for the RAM tier
+(8–32 GiB, at most half of the RAM free at startup; 16 GiB on a 64 GB PC; plus about 0.9 GiB when `--mmproj` is given) and may use up to 64 GiB on the SSD. Use `--kv-ram-mb` /
 `--kv-ssd-gb` to shrink or disable the tiers on machines with less memory or disk space.
 
 ### <a id="endpoints"></a>Endpoints

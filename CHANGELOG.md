@@ -3,6 +3,21 @@
 All notable changes to WHIRL are listed here. Versions follow `project(whirl VERSION ...)` in
 `CMakeLists.txt`.
 
+## 0.1.2 — unreleased
+
+### Changed
+
+- Server: the pinned-RAM tier of the prefix cache (`--kv-ram-mb`) is now sized from the machine
+  instead of a fixed max(8 GiB, one full-length session + checkpoints) ≈ 9 GiB: **1/4 of physical
+  RAM** (nearest GiB), at least that old minimum, at most 32 GiB (the minimum wins over the cap), and
+  never more than half of the RAM available at startup (so the pinned arena does not push the machine
+  into paging; logged as a warning when it limits the size; under 1 GiB the tier stays off). A 64 GB
+  PC now gets 16 GiB. In real agent use (Hermes, 30–40k-token sessions with subagents) the old 9 GiB
+  filled within an hour, after which restores came from the SSD. `--kv-ram-mb N` /
+  `WHIRL_KV_RAM_MB=N` still override (used as given), `0` still turns the host tiers off. On an
+  integrated GPU (shared system memory) the RAM tier is off unless a size is given. The startup log
+  prints the chosen size and the reason, and the pinning time.
+
 ## 0.1.1 — 2026-10-03
 
 ### Added

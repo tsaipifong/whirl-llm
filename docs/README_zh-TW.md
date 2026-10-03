@@ -26,7 +26,7 @@ WHIRL 走專門化路線，而不是泛用引擎：一次加入一種模型架�
 | 驅動程式 | **AMD Software: Adrenalin Edition 26.8.1**（驅動程式 32.0.31041.1004）或更新版 |
 | 執行 | 只需要驅動程式（它會安裝 `amdhip64_7.dll` 與 `amd_comgr_3.dll`）。不用 HIP SDK、不用 ROCm、不用 Visual C++ runtime |
 | 從原始碼建置 | HIP SDK 7.2 + Visual Studio 2022 Build Tools（MSVC）+ CMake + Ninja——見[從原始碼建置](building_zh-TW.md) |
-| 記憶體 / 磁碟 | 預設設定下，伺服器會為主記憶體快取層 pin 住約 8～9 GiB 主記憶體，SSD 快取層最多使用 64 GiB；兩者都可調整或關閉（`--kv-ram-mb`、`--kv-ssd-gb`） |
+| 記憶體 / 磁碟 | 預設設定下，伺服器會為主記憶體快取層 pin 住約四分之一的主記憶體（8～32 GiB；64 GB 的電腦為 16 GiB），SSD 快取層最多使用 64 GiB；兩者都可調整或關閉（`--kv-ram-mb`、`--kv-ssd-gb`） |
 
 我們的測試機以 USB4 / Thunderbolt eGPU 連接 R9700，可以正常使用。插在主機板 PCIe 插槽上的顯示卡，數字可能略有
 不同（主要是資料要經過主機連結的部分，例如載入模型、主記憶體 / SSD 快取層）。

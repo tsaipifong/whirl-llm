@@ -126,7 +126,7 @@ whirl serve  MODEL.gguf [選項]      （同一支程式）
 | `--ctx-per-slot N` | 單一請求的最長 context（預設 min(池大小, 131072)；最多 262144） |
 | `--mtp-drafts N` | 每回合固定的 MTP 草稿數，1～10（預設：依模型類型由成本模型決定） |
 | `--decode-min-tps N` | decode 保底速度：其他請求在 prefill 時，每個串流中（decode 中）的請求至少維持 N tok/s；做法是縮短 prefill forward、穿插 decode cycle（預設 20；`0` = 關閉，prefill forward 不受限）。任何 N 的輸出都相同（[server.md](server.md#batching)） |
-| `--kv-ram-mb N` | 前綴快取的主記憶體層，單位 MiB 的 pinned 記憶體（預設 8192；若一個完整長度 session 更大則取其大小——27B 模型約 9 GiB）。閒置 session 會複製到這裡，下次直接還原而不必重新 prefill。`0` 會關閉兩個 host 層 |
+| `--kv-ram-mb N` | 前綴快取的主記憶體層，單位 MiB 的 pinned 記憶體（預設：實體記憶體的 1/4，至少 8 GiB 或一個完整長度 session（若更大；27B 模型約 9 GiB），最多 32 GiB，且不超過啟動時可用記憶體的一半；64 GB 的電腦為 16 GiB；整合式 GPU 預設關閉）。啟動日誌會印出選定的大小與原因。閒置 session 會複製到這裡，下次直接還原而不必重新 prefill。`0` 會關閉兩個 host 層 |
 | `--kv-ssd-dir PATH` | SSD 層目錄（預設 `%LOCALAPPDATA%\whirl\kvcache`） |
 | `--kv-ssd-gb N` | SSD 層容量上限，GiB（預設 64；`0` = 不用 SSD 層） |
 | `--mmproj FILE` | 視覺編碼器（Qwen3-VL 形式的 mmproj GGUF，F16 / BF16）。`image_url` 內容（base64 PNG / JPEG 等的 `data:` URL）會變成圖片 token。權重放在 pinned 主記憶體，收到圖片之前不占 VRAM |
@@ -150,7 +150,7 @@ whirl serve  MODEL.gguf [選項]      （同一支程式）
 .\whirl-server.exe C:\models\model.gguf --mmproj C:\models\mmproj-F16.gguf
 ```
 
-記憶體提醒：預設設定下，伺服器會為主記憶體層 pin 住約 8～9 GiB 的主記憶體（指定 `--mmproj` 時再加約 0.9 GiB），
+記憶體提醒：預設設定下，伺服器會為主記憶體層 pin 住約四分之一的主記憶體（8～32 GiB，且不超過啟動時可用記憶體的一半；64 GB 的電腦為 16 GiB；指定 `--mmproj` 時再加約 0.9 GiB），
 SSD 最多用到 64 GiB。記憶體或磁碟空間較少的電腦，可用 `--kv-ram-mb` / `--kv-ssd-gb` 縮小或關閉分層快取。
 
 ### <a id="endpoints"></a>端點

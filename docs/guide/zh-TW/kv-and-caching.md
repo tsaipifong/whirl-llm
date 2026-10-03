@@ -197,7 +197,7 @@ agent 情境（8 個 session，各自「詢問某個檔案 → `read_file` → �
 - 啟動時一次配置的 pinned arena，以 512 MiB 為單位分塊配置、以 2 MiB 區塊管理；項目對應到區塊清單；LRU 逐出（已在 SSD 上的項目退回其 SSD 副本，否則直接丟棄）。
 - 所有 GPU↔host 複製都在單一**非阻塞分層 stream**（FIFO）上以 ≤ 1 MiB 的片段執行，因此 decode 的小量回讀永遠不會排在長傳輸後面。讓 kernel 直接寫 host 記憶體（zero-copy）在這台機器上行不通（[windows-hip.md](windows-hip.md#zero-copy)）。
 - 必須拿掉全裝置同步：`hipDeviceSynchronize` 會等待分層複製。
-- 預設大小：max(8 GiB, 一個完整長度 f16 session + 檢查點) = 27B 在 128k 時為 **9 GiB**。它會在 GPU 計數器中顯示為共享使用量（Shared Usage）；server 會宣告其 pinned 大小，讓監控可以扣除。
+- 預設大小（`src/tier/ram_size.h`）：**實體記憶體的 1/4**（取最接近的 GiB），至少為舊的下限 max(8 GiB, 一個完整長度 f16 session + 檢查點)（27B 在 128k 時為 9 GiB），最多 32 GiB（下限優先於上限），且不超過啟動時可用記憶體的一半（取整 GiB；受此限制時以警告記錄；不到 1 GiB 則關閉此層），以免 pin 住記憶體讓系統開始分頁。**64 GB 的電腦為 16 GiB。** `--kv-ram-mb N` / `WHIRL_KV_RAM_MB` 照指定值使用；整合式 GPU（共用系統記憶體）未指定大小時關閉此層。原因：在 agent 實際使用中（Hermes、30～40k token 的 session、子代理），9 GiB 的舊預設不到一小時就用到 8.3 GiB，之後 LRU 項目只能退回較慢的 SSD 副本。啟動日誌 `kv tier: RAM tier size N MiB (原因)` 會顯示選擇結果，摘要行會顯示 pin 住所花的時間（R9700 主機、64 GB：16 GiB 花 3.1～3.4 s；「model ready」13.6～14.1 s，舊的 9 GiB 為 11.8～12.3 s、關閉此層為 10.2 s，因此仍在啟動時一次配置）。它會在 GPU 計數器中顯示為共享使用量（Shared Usage）；server 會宣告其 pinned 大小，讓監控可以扣除。
 
 ### 8.3 SSD 層
 

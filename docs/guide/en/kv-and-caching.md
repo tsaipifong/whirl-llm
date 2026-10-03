@@ -327,7 +327,16 @@ then KV page j at `nck × ck_stride + j × page_bytes` (13.0 MiB per page for q8
   small readbacks are never queued behind a long transfer. Kernels writing host memory directly
   (zero-copy) did not work on this machine ([windows-hip.md](windows-hip.md#zero-copy)).
 - Device-wide synchronization had to go: `hipDeviceSynchronize` waits for tier copies.
-- Default size: max(8 GiB, one full-length f16 session + checkpoints) = **9 GiB** for 27B at 128k.
+- Default size (`src/tier/ram_size.h`): **1/4 of physical RAM** (nearest GiB), at least the old
+  minimum max(8 GiB, one full-length f16 session + checkpoints) = 9 GiB for 27B at 128k, at most
+  32 GiB (the minimum wins over the cap), and at most half of the RAM available at startup (whole GiB;
+  logged as a warning when it bites; under 1 GiB the tier is off) so pinning does not push the
+  machine into paging. **16 GiB on a 64 GB PC.** `--kv-ram-mb N` / `WHIRL_KV_RAM_MB` are used as
+  given; on an integrated GPU (shared system memory) the tier is off unless a size is given. Why: in
+  agent use (Hermes, 30–40k-token sessions, subagents) the 9 GiB default was 8.3 GiB full within an
+  hour, after which LRU entries fell back to their slower SSD copies. The startup log line
+  `kv tier: RAM tier size N MiB (reason)` shows the choice; the summary line shows the pinning time
+  (R9700 host, 64 GB: 16 GiB pinned in 3.1–3.4 s; "model ready" 13.6–14.1 s vs 11.8–12.3 s with the old 9 GiB and 10.2 s with the tier off, so the arena is still allocated up front).
   It appears as Shared Usage in GPU counters; the server declares its pinned size so monitoring can
   subtract it.
 

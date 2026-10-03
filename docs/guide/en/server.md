@@ -28,7 +28,7 @@ model and GPU on disk).
 | `--ctx-per-slot N` | per-request context limit | 131,072 (max 262,144) |
 | `--mtp-drafts N` | MTP draft cap 1–10 | dense: automatic, cap 8; MoE: 1 |
 | `--decode-min-tps N` | decode floor per streaming request while others prefill ([§6](#batching)); 0 = off | 20 |
-| `--kv-ram-mb N` | pinned RAM KV tier size; 0 disables RAM and SSD tiers | max(8 GiB, one full f16 session + checkpoints) = 9 GiB for 27B |
+| `--kv-ram-mb N` | pinned RAM KV tier size; 0 disables RAM and SSD tiers | 1/4 of physical RAM within [max(8 GiB, one full f16 session + checkpoints), 32 GiB], at most half of the RAM available at startup; 16 GiB on a 64 GB PC; off on integrated GPUs |
 | `--kv-ssd-dir` / `--kv-ssd-gb N` | SSD tier directory / size cap; 0 GB disables SSD | per-user local app-data directory / 64 |
 | `--log-file` | log file (also printed to the console) | per-user local app-data directory |
 | `--alias` | model id reported by `/v1/models` | GGUF file name |

@@ -7,6 +7,7 @@
 //   (default: %WHIRL_TEST_TMP%\tier_test_tmp, else %TEMP%\whirl-tests\tier_test_tmp)
 
 #include "tier/kv_tier.h"
+#include "tier/ram_size.h"
 
 #include <malloc.h>
 
@@ -761,6 +762,76 @@ static void testHelpers() {
     CHECK(kLay.tokRegion() == 32768 && kLay.dataOff() == 36864);
 }
 
+// default size of the pinned-RAM tier (src/tier/ram_size.h)
+static void testRamTierSize() {
+    constexpr std::uint64_t G = 1ull << 30;
+    const auto sz = [](std::uint64_t total, std::uint64_t avail, std::uint64_t floor_mb = 8192) {
+        RamTierInput in;
+        in.total_phys = total;
+        in.avail_phys = avail;
+        in.floor_mb = floor_mb;
+        return ramTierSize(in);
+    };
+    // 1/4 of physical RAM, nearest GiB
+    CHECK(sz(64 * G, 60 * G).mb == 16384);
+    CHECK(sz(68341796864ull, 50 * G).mb == 16384);  // a "64 GB" machine: 63.65 GiB visible
+    CHECK(sz(48 * G, 40 * G).mb == 12288);
+    CHECK(!sz(64 * G, 60 * G).avail_limited);
+    // floor: 8 GiB, or one full-length session if more
+    CHECK(sz(16 * G, 0).mb == 8192);
+    CHECK(sz(16 * G, 14 * G).mb == 7168 && sz(16 * G, 14 * G).avail_limited);  // 8 GiB would be over half of 14
+    CHECK(sz(32 * G, 30 * G).mb == 8192);
+    CHECK(sz(64 * G, 60 * G, 9216).mb == 16384);
+    CHECK(sz(32 * G, 30 * G, 9216).mb == 9216);
+    CHECK(sz(32 * G, 30 * G, 4096).mb == 8192);  // never under 8 GiB
+    CHECK(sz(32 * G, 30 * G, 9216).reason.find("minimum") != std::string::npos);
+    // cap 32 GiB; the floor wins over the cap
+    CHECK(sz(128 * G, 120 * G).mb == 32768);
+    CHECK(sz(256 * G, 250 * G).mb == 32768);
+    CHECK(sz(256 * G, 250 * G).reason.find("capped") != std::string::npos);
+    CHECK(sz(256 * G, 250 * G, 40960).mb == 40960);
+    // availability: at most half of the RAM available at startup (whole GiB)
+    CHECK(sz(64 * G, 20 * G).mb == 10240);
+    CHECK(sz(64 * G, 20 * G).avail_limited);
+    CHECK(sz(64 * G, 20 * G).reason.find("available") != std::string::npos);
+    CHECK(sz(64 * G, 33 * G).mb == 16384 && !sz(64 * G, 33 * G).avail_limited);
+    CHECK(sz(64 * G, 31 * G).mb == 15360);
+    CHECK(sz(16 * G, 9 * G).mb == 4096);       // also below the floor: paging is worse
+    CHECK(sz(16 * G, G + G / 2).mb == 0);      // half would be under 1 GiB: off
+    CHECK(sz(16 * G, G + G / 2).avail_limited);
+    CHECK(sz(16 * G, 2 * G).mb == 1024);
+    // unknown RAM: the floor; unknown availability: no availability cap
+    CHECK(sz(0, 0).mb == 8192);
+    CHECK(sz(0, 0, 9216).mb == 9216);
+    CHECK(sz(0, 6 * G).mb == 3072);
+    CHECK(sz(64 * G, 0).mb == 16384);
+    // explicit size: used as given (no caps), 0 = off
+    {
+        RamTierInput in;
+        in.total_phys = 16 * G;
+        in.avail_phys = 4 * G;
+        in.explicit_mb = 20000;
+        CHECK(ramTierSize(in).mb == 20000 && !ramTierSize(in).avail_limited);
+        CHECK(ramTierSize(in).reason.find("--kv-ram-mb") != std::string::npos);
+        in.explicit_mb = 0;
+        CHECK(ramTierSize(in).mb == 0);
+        in.explicit_mb = 512;
+        in.explicit_src = "WHIRL_KV_RAM_MB";
+        CHECK(ramTierSize(in).mb == 512 && ramTierSize(in).reason.find("WHIRL_KV_RAM_MB") != std::string::npos);
+        in.integrated = true;
+        CHECK(ramTierSize(in).mb == 512);  // explicit wins on an integrated GPU too
+    }
+    // integrated GPU (UMA): off by default
+    {
+        RamTierInput in;
+        in.total_phys = 128 * G;
+        in.avail_phys = 100 * G;
+        in.integrated = true;
+        CHECK(ramTierSize(in).mb == 0);
+        CHECK(ramTierSize(in).reason.find("integrated") != std::string::npos);
+    }
+}
+
 int main(int argc, char** argv) {
     // default: WHIRL_TEST_TMP, else %TEMP%\whirl-tests; this test uses <base>\tier_test_tmp
     fs::path base;
@@ -769,6 +840,7 @@ int main(int argc, char** argv) {
     fs::path dir = argc > 1 ? fs::path(argv[1]) : base / L"tier_test_tmp";
     MockDeviceOps ops;
     testHelpers();
+    testRamTierSize();
     testLookup(ops);
     testEvictLru(ops);
     testTrimDropCk(ops);
