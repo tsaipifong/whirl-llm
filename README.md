@@ -71,9 +71,7 @@ NVFP4); there is no slow generic fallback.
 > - Dense 27B: [**Swift-1.5-Qwen3.8-27b-MXFP4-GGUF**](https://huggingface.co/tsaipifong/Swift-1.5-Qwen3.8-27b-MXFP4-GGUF),
 >   variant A (`Swift-1.5-Qwen3.8-27B-MXFP4-A-outQ6_K.gguf`). Swift-1.5 also thinks much less than
 >   the base model (44% fewer thinking tokens on our mixed Chinese/English coding prompts).
-> - MoE 35B (~3B active): **Ornith-1.5-35B-A3B MXFP4** — *coming soon on Hugging Face* (it will be
->   uploaded after this release; placeholder: [huggingface.co/tsaipifong](https://huggingface.co/tsaipifong)).
->   <!-- TODO(release): replace the placeholder with the Ornith-1.5-35B-A3B-MXFP4 repository URL once uploaded. -->
+> - MoE 35B (~3B active): **Ornith-1.5-35B-A3B MXFP4**: [tsaipifong/Ornith-1.5-35B-A3B-MXFP4-GGUF](https://huggingface.co/tsaipifong/Ornith-1.5-35B-A3B-MXFP4-GGUF).
 
 Tested GGUF files (loaded, greedy output checked, MTP output identical to plain greedy, benchmarked
 on the R9700):
@@ -83,7 +81,7 @@ on the R9700):
 | [tsaipifong/Swift-1.5-Qwen3.8-27b-MXFP4-GGUF](https://huggingface.co/tsaipifong/Swift-1.5-Qwen3.8-27b-MXFP4-GGUF) `…-A-outQ6_K.gguf` (recommended), `…-B-outQ8_0.gguf`, `…-C-outQ4_K.gguf` | dense 27B | qwen35 | MXFP4 (+ Q8_0 MTP / embeddings) | speed mode; quantized by us for WHIRL |
 | [unsloth/Qwen3.8-27B-GGUF](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF) `Qwen3.8-27B-UD-Q4_K_M.gguf` | dense 27B | qwen35 | UD-Q4_K_M | precision mode (outputs bit-exact across optimizations) |
 | [FreedomAISVR/Qwen3.8-27B-MXFP4-GGUF](https://huggingface.co/FreedomAISVR/Qwen3.8-27B-MXFP4-GGUF) `qwen3.8-27b-mxfp4.gguf` | dense 27B | qwen35 | MXFP4 | speed mode |
-| `Ornith-1.5-35B-A3B-MXFP4.gguf` — coming soon on Hugging Face (quantized by us) | MoE 35B, ~3B active | qwen35moe | MXFP4 experts and dense (+ Q8_0 MTP / embeddings, Q6_K head) | speed mode (fp8 expert prefill) |
+| [`Ornith-1.5-35B-A3B-MXFP4.gguf`](https://huggingface.co/tsaipifong/Ornith-1.5-35B-A3B-MXFP4-GGUF) (quantized by us) | MoE 35B, ~3B active | qwen35moe | MXFP4 experts and dense (+ Q8_0 MTP / embeddings, Q6_K head) | speed mode (fp8 expert prefill) |
 | [ornith-ai/Ornith-1.5-35B-A3B-GGUF](https://huggingface.co/ornith-ai/Ornith-1.5-35B-A3B-GGUF) `Ornith-1.5-35B-Q4_K_M.gguf` | MoE 35B, ~3B active | qwen35moe | Q4_K_M | precision mode |
 
 Image input works with a Qwen3-VL-style mmproj (F16 / BF16) via `--mmproj`; it was tested with the

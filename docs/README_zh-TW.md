@@ -63,9 +63,7 @@ WHIRL 讀取 GGUF 的 `general.architecture`，只接受 `qwen35` 與 `qwen35moe
 > - Dense 27B：[**Swift-1.5-Qwen3.8-27b-MXFP4-GGUF**](https://huggingface.co/tsaipifong/Swift-1.5-Qwen3.8-27b-MXFP4-GGUF)，
 >   A 版（`Swift-1.5-Qwen3.8-27B-MXFP4-A-outQ6_K.gguf`）。Swift-1.5 的思考也比原模型精簡得多（在我們的中英混合
 >   程式提示上，思考 token 少 44%）。
-> - MoE 35B（約 3B 啟用）：**Ornith-1.5-35B-A3B MXFP4**——*即將在 Hugging Face 發布*（會在這個發行版之後上傳；
->   暫時連結：[huggingface.co/tsaipifong](https://huggingface.co/tsaipifong)）。
->   <!-- TODO(release): 上傳後把暫時連結換成 Ornith-1.5-35B-A3B-MXFP4 的儲存庫網址。 -->
+> - MoE 35B（約 3B 啟用）：**Ornith-1.5-35B-A3B MXFP4**：[tsaipifong/Ornith-1.5-35B-A3B-MXFP4-GGUF](https://huggingface.co/tsaipifong/Ornith-1.5-35B-A3B-MXFP4-GGUF)。
 
 測試過的 GGUF 檔（可載入、greedy 輸出已檢查、MTP 輸出與一般 greedy 相同，並在 R9700 上量測過）：
 
@@ -74,7 +72,7 @@ WHIRL 讀取 GGUF 的 `general.architecture`，只接受 `qwen35` 與 `qwen35moe
 | [tsaipifong/Swift-1.5-Qwen3.8-27b-MXFP4-GGUF](https://huggingface.co/tsaipifong/Swift-1.5-Qwen3.8-27b-MXFP4-GGUF) `…-A-outQ6_K.gguf`（推薦）、`…-B-outQ8_0.gguf`、`…-C-outQ4_K.gguf` | dense 27B | qwen35 | MXFP4（+ Q8_0 MTP / embedding） | 速度模式；我們為 WHIRL 量化 |
 | [unsloth/Qwen3.8-27B-GGUF](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF) `Qwen3.8-27B-UD-Q4_K_M.gguf` | dense 27B | qwen35 | UD-Q4_K_M | 精確模式（各項最佳化前後輸出逐位元相同） |
 | [FreedomAISVR/Qwen3.8-27B-MXFP4-GGUF](https://huggingface.co/FreedomAISVR/Qwen3.8-27B-MXFP4-GGUF) `qwen3.8-27b-mxfp4.gguf` | dense 27B | qwen35 | MXFP4 | 速度模式 |
-| `Ornith-1.5-35B-A3B-MXFP4.gguf`——即將在 Hugging Face 發布（我們量化） | MoE 35B，約 3B 啟用 | qwen35moe | MXFP4 專家與 dense（+ Q8_0 MTP / embedding、Q6_K head） | 速度模式（專家 prefill 走 fp8） |
+| [`Ornith-1.5-35B-A3B-MXFP4.gguf`](https://huggingface.co/tsaipifong/Ornith-1.5-35B-A3B-MXFP4-GGUF)（我們量化） | MoE 35B，約 3B 啟用 | qwen35moe | MXFP4 專家與 dense（+ Q8_0 MTP / embedding、Q6_K head） | 速度模式（專家 prefill 走 fp8） |
 | [ornith-ai/Ornith-1.5-35B-A3B-GGUF](https://huggingface.co/ornith-ai/Ornith-1.5-35B-A3B-GGUF) `Ornith-1.5-35B-Q4_K_M.gguf` | MoE 35B，約 3B 啟用 | qwen35moe | Q4_K_M | 精確模式 |
 
 圖片輸入搭配 Qwen3-VL 形式的 mmproj（F16 / BF16），以 `--mmproj` 指定；已用上表的 27B 檔測試。其他 `qwen35` /
