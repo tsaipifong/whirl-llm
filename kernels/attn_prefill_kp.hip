@@ -179,24 +179,27 @@ KX_ENTRY(attn_kx_q8, true)
 KX_ENTRY(attn_kx_q8v, 2)
 
 // ---------------------------------------------------------------------------
-// Prefill attention, "GQA-grouped direct loads" (f16 KV only). Same per-query
-// arithmetic as attn_kx / attn_prefill_impl, so the output is bit-identical:
-// the same 32-key tiles in the same order, the same S^T WMMA chain over the 16
-// dimension steps, the same online softmax per tile and the same P.V WMMA
-// order per output tile. What changes is who does the work and where K/V come
-// from:
+// Prefill attention, "GQA-grouped" (f16 and q8v KV). Same per-query arithmetic
+// as attn_kx / attn_prefill_impl, so the output is bit-identical: the same
+// 32-key tiles in the same order, the same S^T WMMA chain over the 16 dimension
+// steps, the same online softmax per tile and the same P.V WMMA order per
+// output tile. What changes is who does the work and where K/V come from:
 //   * block = NP query heads of one KV head x 16 consecutive queries; two waves
 //     per head as in attn_kx (wave w computes S^T for keys w*16.. of each tile
 //     and keeps O^T dims [128w, 128w + 128)), partners exchange S^T via LDS;
-//   * no shared K/V tiles: each wave loads its K fragments from the cache
+//   * K (f16 in both formats): each wave loads its fragments from the cache
 //     straight into WMMA A registers (one 16-byte load per lane and dimension
-//     step), and its V^T fragments with global_load_tr_b128 (gfx12: the load
-//     transposes 8x8 16-bit blocks across each group of 8 lanes, so lane a
-//     supplies the row of key 8*(a/16) + a%8, dims 8*((a/8)%2).., and receives
-//     the A-operand column it needs). The NP heads of one KV head read the same
-//     rows at the same time, so these loads hit the cache; one barrier per tile
-//     (the S^T exchange, double-buffered by tile parity) keeps the waves of a
-//     block in step;
+//     step). The NP heads of one KV head read the same rows at the same time,
+//     so the loads hit the cache;
+//   * V, f16: V^T fragments with global_load_tr_b128 (gfx12: the load transposes
+//     8x8 16-bit blocks across each group of 8 lanes, so lane a supplies the row
+//     of key 8*(a/16) + a%8, dims 8*((a/8)%2).., and receives the A-operand
+//     column it needs);
+//   * V, q8v: dequantized once per block ((f16)q * s, as kv_ld8), 8 keys x 4
+//     dims per thread (8 dims in 128-thread blocks), into a double-buffered LDS
+//     stage in A-register order, one tile ahead;
+//   * one barrier per tile: the S^T exchange (double-buffered by tile parity),
+//     which also publishes the next q8v V stage and keeps the block in step;
 //   * scores stay unscaled: scale = 1/16 is a power of two, so
 //     (s - m) * (scale * log2 e) rounds exactly like (s*scale - m*scale) * log2 e,
 //     the expression __expf evaluates; exp2(-inf) = 0 replaces the -inf
@@ -213,11 +216,12 @@ __device__ __forceinline__ half8 kg_ld_tr(const _Float16 *p) {
     __builtin_memcpy(&r, &v, 16);
     return r;
 }
-template <int NP>
+template <int NP, bool VQ8>
 __device__ __forceinline__ void attn_kg_impl(const float *q, const KvArgs &kv, float *out, int n_head, int n_kv,
                                              int q_stride, const int *pos, int n_tok, float scale, int h0) {
     const int tb = kv.tab0;
     __shared__ float8 Sx[2][NP * 2][32];
+    __shared__ half8 Vf[VQ8 ? 2 : 1][2][VQ8 ? 16 : 1][32];  // q8v: [buffer][key half][dim tile][lane]
     const int lane = threadIdx.x % WARP, wid = threadIdx.x / WARP;
     const int w = wid & 1, dh = w * (FA_D / 2);
     const int h = blockIdx.y * NP + (wid >> 1) + h0;
@@ -246,13 +250,47 @@ __device__ __forceinline__ void attn_kg_impl(const float *q, const KvArgs &kv, f
     const int n_keys = pos0 + min(q0 + 16, n_tok);  // keys of the block's last query + 1
     const int full_end = pos0 + q0;                 // tiles ending at or before this key are unmasked
     const _Float16 *Kc = (const _Float16 *)kv.k + (size_t)kvh * FA_D;
-    const _Float16 *Vc = (const _Float16 *)kv.v + (size_t)kvh * FA_D;
     const int rs = n_kv * FA_D;                     // elements per pool row
     const int krow = w * 16 + lane % 16;            // S^T: this lane's key row in the tile
     const int kcol = 8 * (lane / 16);
-    const int vkey = 8 * (lane / 16) + (lane % 8);  // transposed V load: key row
-    const int vdim = dh + 8 * ((lane >> 3) & 1);    // transposed V load: first dim
     const float cexp = scale * 1.44269504088896340736f;
+    // f16 V: transposed loads (key row, first dim of this lane's 16 bytes)
+    const _Float16 *Vc = (const _Float16 *)kv.v + (size_t)kvh * FA_D;
+    const int vkey = 8 * (lane / 16) + (lane % 8);
+    const int vdim = dh + 8 * ((lane >> 3) & 1);
+    // q8v V: loader item = key octet x DQ dims (DQ 4: 256 items; 8 in 128-thread blocks)
+    constexpr int DQ = 64 * NP >= 256 ? 4 : 8, NDQ = FA_D / DQ;
+    const int8_t *Vq = (const int8_t *)kv.v + (size_t)kvh * FA_D;
+    const _Float16 *Vs = kv.vs + (size_t)kvh * (FA_D / 32);
+    const int rss = n_kv * (FA_D / 32);             // q8v scales per pool row
+    const bool ldr = VQ8 && (int)threadIdx.x < 4 * NDQ;
+    const int ko = ((int)threadIdx.x / NDQ) & 3, dq = (int)threadIdx.x % NDQ;
+    int vraw[8][DQ / 4];
+    _Float16 vsc[8];
+#define KG_VFETCH(K0)                                                                                     \
+    do {                                                                                                  \
+        const int dl_ = kv_delta(kv, tb, (K0));                                                           \
+        _Pragma("unroll") for (int r = 0; r < 8; ++r) {                                                   \
+            const int key = min((K0) + ko * 8 + r, n_keys - 1);                                           \
+            const int *src = (const int *)(Vq + (size_t)(key + dl_) * rs + dq * DQ);                      \
+            _Pragma("unroll") for (int u = 0; u < DQ / 4; ++u) vraw[r][u] = src[u];                       \
+            vsc[r] = Vs[(size_t)(key + dl_) * rss + dq * DQ / 32];                                        \
+        }                                                                                                 \
+    } while (0)
+#define KG_VSTORE(B)                                                                                      \
+    do {                                                                                                  \
+        _Pragma("unroll") for (int c = 0; c < DQ; ++c) {                                                  \
+            half8 col;                                                                                    \
+            _Pragma("unroll") for (int r = 0; r < 8; ++r)                                                 \
+                col[r] = (_Float16)(int8_t)(vraw[r][c / 4] >> (8 * (c % 4))) * vsc[r];                    \
+            const int d = dq * DQ + c;                                                                    \
+            Vf[(B)][ko >> 1][d >> 4][(d & 15) + 16 * (ko & 1)] = col;                                      \
+        }                                                                                                 \
+    } while (0)
+    if (ldr) {
+        KG_VFETCH(0);
+        KG_VSTORE(0);
+    }
     int par = 0;
     for (int k0 = 0; k0 < n_keys; k0 += FA_K, par ^= 1) {
         const int dl = kv_delta(kv, tb, k0);  // FA_K-key tiles never straddle a page
@@ -261,12 +299,16 @@ __device__ __forceinline__ void attn_kg_impl(const float *q, const KvArgs &kv, f
             const _Float16 *kr = Kc + (size_t)(min(k0 + krow, n_keys - 1) + dl) * rs + kcol;
 #pragma unroll
             for (int st = 0; st < FA_D / 16; ++st) {
+                // q8v: two batches of K loads (fewer VGPRs: 6 waves per SIMD)
+                if (VQ8 && st == 8) __builtin_amdgcn_sched_barrier(0);
                 const half8 a = *(const half8 *)(kr + 16 * st);
                 own = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(a, qf[st], own);
             }
         }
         Sx[par][wid][lane] = own;
         __syncthreads();
+        const bool more = k0 + FA_K < n_keys;
+        if (ldr && more) KG_VFETCH(k0 + FA_K);
         float8 sc[FA_K / 16];
         sc[0] = Sx[par][wid & ~1][lane];
         sc[1] = Sx[par][wid | 1][lane];
@@ -303,22 +345,37 @@ __device__ __forceinline__ void attn_kg_impl(const float *q, const KvArgs &kv, f
         rsum += __shfl_xor(rsum, 16, WARP);
         l = l * alpha + rsum;
         m = m_new;
+        // next q8v stage: its buffer was last read in tile k0 - FA_K, before this tile's barrier
+        if (ldr && more) KG_VSTORE(par ^ 1);
         if (__builtin_amdgcn_ballot_w32(alpha != 1.f)) {
 #pragma unroll
             for (int dt = 0; dt < DT; ++dt)
 #pragma unroll
                 for (int v = 0; v < 8; ++v) o[dt][v] *= alpha;
         }
-        const _Float16 *vb0 = Vc + (size_t)(min(k0 + vkey, n_keys - 1) + dl) * rs + vdim;
-        const _Float16 *vb1 = Vc + (size_t)(min(k0 + 16 + vkey, n_keys - 1) + dl) * rs + vdim;
+        if constexpr (VQ8) {
 #pragma unroll
-        for (int dt = 0; dt < DT; ++dt) {
-            const half8 a0 = kg_ld_tr(vb0 + dt * 16);
-            const half8 a1 = kg_ld_tr(vb1 + dt * 16);
-            o[dt] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(a0, pt[0], o[dt]);
-            o[dt] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(a1, pt[1], o[dt]);
+            for (int dt = 0; dt < DT; ++dt) {
+                if (dt == 4) __builtin_amdgcn_sched_barrier(0);
+                const half8 a0 = Vf[par][0][w * 8 + dt][lane];
+                const half8 a1 = Vf[par][1][w * 8 + dt][lane];
+                o[dt] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(a0, pt[0], o[dt]);
+                o[dt] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(a1, pt[1], o[dt]);
+            }
+        } else {
+            const _Float16 *vb0 = Vc + (size_t)(min(k0 + vkey, n_keys - 1) + dl) * rs + vdim;
+            const _Float16 *vb1 = Vc + (size_t)(min(k0 + 16 + vkey, n_keys - 1) + dl) * rs + vdim;
+#pragma unroll
+            for (int dt = 0; dt < DT; ++dt) {
+                const half8 a0 = kg_ld_tr(vb0 + dt * 16);
+                const half8 a1 = kg_ld_tr(vb1 + dt * 16);
+                o[dt] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(a0, pt[0], o[dt]);
+                o[dt] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(a1, pt[1], o[dt]);
+            }
         }
     }
+#undef KG_VFETCH
+#undef KG_VSTORE
     if (my_q >= n_tok) return;
     const float inv = 1.f / l;
     const float *gate = q + ((size_t)my_q * n_head + h) * q_stride + FA_D;
@@ -332,15 +389,18 @@ __device__ __forceinline__ void attn_kg_impl(const float *q, const KvArgs &kv, f
         }
 }
 // grid (ceil(n_tok / 16), heads / NP), block 64 * NP; NP divides n_head / n_kv
-#define KG_ENTRY(NAME, NP)                                                                          \
+#define KG_ENTRY(NAME, NP, VQ8)                                                                     \
     extern "C" __global__ void __launch_bounds__(64 * NP)                                           \
         NAME(const float *q, KvArgs kv, float *out, int n_head, int n_kv,                           \
              int q_stride, const int *pos, int n_tok, float scale, int h0) {                        \
-        attn_kg_impl<NP>(q, kv, out, n_head, n_kv, q_stride, pos, n_tok, scale, h0);               \
+        attn_kg_impl<NP, VQ8>(q, kv, out, n_head, n_kv, q_stride, pos, n_tok, scale, h0);          \
     }
-KG_ENTRY(attn_kg6, 6)
-KG_ENTRY(attn_kg4, 4)
-KG_ENTRY(attn_kg2, 2)
+KG_ENTRY(attn_kg6, 6, false)
+KG_ENTRY(attn_kg4, 4, false)
+KG_ENTRY(attn_kg2, 2, false)
+KG_ENTRY(attn_kg6_q8v, 6, true)
+KG_ENTRY(attn_kg4_q8v, 4, true)
+// (no attn_kg2_q8v: with 4 waves per block the q8v stage is slower than attn_kx_q8v)
 
 // item P: f16-output variants of the f16-weight prefill GEMMs (Q4_K_M relaxed mode)
 extern "C" __global__ void __launch_bounds__(512) gemm_ch0_f16(const uint8_t *W, uint64_t row_bytes, const _Float16 *X, float *Y, int ncols, int nrows, int n_tok, int accumulate) { gemm3_impl<QT_F16, 128, 256, 64, 4, 0, 512, true, true>(W, row_bytes, X, Y, ncols, nrows, n_tok, 0); }

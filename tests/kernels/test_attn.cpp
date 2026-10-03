@@ -5,7 +5,8 @@
 //     attn_prefill_wmma vs a double-precision CPU softmax attention over the
 //     cache contents (tolerance; f16 WMMA paths looser);
 //   * bitwise invariances: attn_wsplit1 grouped == per-query (the
-//     prototype's checkAttnGroups), attn_kx == attn_prefill_wmma, head-range
+//     prototype's checkAttnGroups), attn_kx and attn_kg (f16, q8v) ==
+//     attn_prefill_wmma, head-range
 //     split launches == one launch, attn_combine_q8 == attn_combine (+ its
 //     int8 copy == quantize_q8), attn_prep == rmsnorm + rope_neox + kv_store.
 // SPDX-License-Identifier: Apache-2.0
@@ -355,7 +356,7 @@ void testAttn(Ctx& c) {
                 c.rep.add(cmpExact("attn_kx" + fs + " == attn_prefill_wmma" + fs + tag, o2.down<float>(ref1.size()), ref1,
                                    Kind::invariant));
             }
-            // attn_kg (f16 KV): GQA-grouped direct loads == attn_prefill_wmma, for
+            // attn_kg (f16 / q8v KV): GQA-grouped kernel == attn_prefill_wmma, for
             // group 6 (24 / 4) and group 8 (24 / 3, the pool read with 3 KV heads),
             // one launch and two head-range launches
             for (const int nkv : {kKv, 3}) {

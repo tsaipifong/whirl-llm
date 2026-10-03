@@ -533,9 +533,9 @@ void Model::attnBlock(const AttnW& a, const KvLayer& lkv, u32 n) {
 // WMMA prefill attention of n queries at positions pos0 .. (keys 0 .. pos0 +
 // n - 1), split over head ranges so one launch does at most ~4096 x 128k
 // query-key pairs x all heads. Same results as one launch.
-// f16 KV: attn_kg (NP query heads of one KV head per block; bit-identical to
-// attn_kx) when NP divides the GQA group, the head ranges stay whole groups of
-// NP and the softmax scale is a power of two (it relies on exact scaling).
+// f16 / q8v KV: attn_kg (NP query heads of one KV head per block; bit-identical
+// to attn_kx) when NP divides the GQA group, the head ranges stay whole groups
+// of NP and the softmax scale is a power of two (it relies on exact scaling).
 void Model::prefillAttn(DevPtr q, const KvArgs& kva, DevPtr out, DevPtr pos, u32 n, u32 pos0, float scale) {
     const u64 work = static_cast<u64>(n) * (static_cast<u64>(pos0) + n);
     const u64 budget = 4096ull * 131072ull;
