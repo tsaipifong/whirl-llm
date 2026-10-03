@@ -372,6 +372,7 @@ constexpr EnvDoc k_env[] = {
     {"Numerics / speed switches (A/B tests; defaults are the tested paths)", "GEMMH=0", "no f16-output prefill GEMM (bitwise-equal alternative)", TUNED},
     {"Numerics / speed switches (A/B tests; defaults are the tested paths)", "GEMMHQ=1", "f16-output GEMM for the attention projections too", TUNED},
     {"Numerics / speed switches (A/B tests; defaults are the tested paths)", "ATTN_KX=0", "prefill attention without the K-exchange kernel (bitwise-equal)", TUNED},
+    {"Numerics / speed switches (A/B tests; defaults are the tested paths)", "ATTN_KG=0", "prefill attention without the GQA-grouped kernel (bitwise-equal)", TUNED},
     {"Numerics / speed switches (A/B tests; defaults are the tested paths)", "GDN_SEQ=1", "sequential DeltaNet prefill instead of the chunked scan", C | B | S},
     {"Numerics / speed switches (A/B tests; defaults are the tested paths)", "GDN_V0=1", "per-row DeltaNet decode step kernel (same values)", C | S},
     {"Numerics / speed switches (A/B tests; defaults are the tested paths)", "NAIVE_ATTN=1", "reference attention path (numerics comparisons)", C | B | S},
@@ -389,7 +390,7 @@ constexpr EnvDoc k_env[] = {
 
     {"Diagnostics", "TOKENIZE_ONLY=1", "print the prompt token ids and stop", C},
     {"Diagnostics", "PRINT_IDS=1", "print the generated token ids and their FNV-1a hash", C},
-    {"Diagnostics", "PROFILE=1", "per-op-class GPU time (distorts speed numbers; server: 1 or 2)", C | S},
+    {"Diagnostics", "PROFILE=1", "per-op-class GPU time (distorts speed numbers; bench: per prefill size; server: 1 or 2)", C | B | S},
     {"Diagnostics", "TRACE_TPS=N", "print the window tok/s every N tokens (stderr)", C | B},
     {"Diagnostics", "DUMP_LOGITS=FILE", "(no MTP) next-token logits of every prompt position >= DUMP_FROM as f16 rows", C},
     {"Diagnostics", "DUMP_FROM=N", "first prompt position written by DUMP_LOGITS", C},

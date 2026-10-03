@@ -14,9 +14,9 @@ All notable changes to WHIRL are listed here. Versions follow `project(whirl VER
   bit-identical to the previous kernel (kernel-test invariants; last-token logits, MTP == plain and
   server outputs identical to 0.1.2). Kernel throughput at long context: f16 ~65 → ~93 TFLOPS, q8v
   ~61 → ~84 TFLOPS. `whirl bench` prefill, Swift-1.5 27B MXFP4-A (f16 KV, R9700): 32k +10%, 64k
-  +17%, 96k +21%, 128k +24%; Ornith MXFP4 64k +11%, 128k +14%. Long prompts on the server (q8v KV for the dense
-  models) gain the same way: Swift 96k +19%, 128k +21%. `WHIRL_ATTN_KG=0` restores the previous
-  kernel. See [kernels.md](docs/guide/en/kernels.md#flash).
+  +17%, 96k +21%, 128k +24%; Ornith MXFP4 64k +11%, 128k +14%; Qwen3.8-27B UD-Q4_K_M (f16 KV) 32k +5%, 128k +16%.
+  Long prompts on the server (q8v KV for the dense models) gain the same way: Swift 96k +19%, 128k +21%.
+  `WHIRL_ATTN_KG=0` restores the previous kernel. See [kernels.md](docs/guide/en/kernels.md#flash).
 
 ### Added
 
