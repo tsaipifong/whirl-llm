@@ -1,0 +1,53 @@
+# build output (build.bat writes build\<config>; any other CMake build directory too)
+/build/
+/out/
+/build-*/
+/cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+CMakeUserPresets.json
+.ninja_deps
+.ninja_log
+build.ninja
+compile_commands.json
+/Release/
+/Debug/
+/RelWithDebInfo/
+*.hsaco
+*.co
+*.obj
+*.o
+*.lib
+*.exp
+*.exe
+*.dll
+*.pdb
+*.ilk
+*.res
+
+# release packaging (tools\package_release.ps1 writes out\release by default)
+*.zip
+*.zip.sha256
+
+# IDE / editor
+/.vs/
+/.vscode/
+/.idea/
+*.user
+*.suo
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# local data: models, logits dumps, tune caches, test scratch output
+*.gguf
+*.f32
+*.safetensors
+tune-*.txt
+tune3-*.txt
+tune4-*.txt
+/tests/**/output/
+oracle_build.txt
+oracle_cfg.txt
+*.log

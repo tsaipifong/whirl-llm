@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+for f in *.txt; do
+  [[ -s "$f" ]] || continue
+  wc -l "$f" | awk '{print $1}' >> counts.log 2>&1
+done
+echo "done: $(date +%s)"

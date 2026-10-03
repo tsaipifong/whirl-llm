@@ -1,0 +1,10 @@
+<|im_start|>system
+You are helpful.<|im_end|>
+<|im_start|>user
+你好，世界！<|im_end|>
+<|im_start|>assistant
+<think>
+
+</think>
+
+OK<|im_end|>

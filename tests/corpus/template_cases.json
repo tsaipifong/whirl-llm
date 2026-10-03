@@ -1,0 +1,97 @@
+[
+  {"name": "user_only", "request": {"messages": [{"role": "user", "content": "Hello"}]}},
+  {"name": "user_zh_trim", "request": {"messages": [{"role": "user", "content": "\n\t  請用 Python 寫快速排序，並加上繁體中文註解。  \n"}]}},
+  {"name": "system_user", "request": {"messages": [{"role": "system", "content": "You are a helpful assistant."}, {"role": "user", "content": "Hi"}]}},
+  {"name": "two_systems", "request": {"messages": [{"role": "system", "content": "Rule one."}, {"role": "developer", "content": "  Rule two.  "}, {"role": "user", "content": "Go"}]}},
+  {"name": "three_systems", "expect_diverge": [], "request": {"messages": [{"role": "system", "content": "A"}, {"role": "system", "content": "B"}, {"role": "system", "content": "C"}, {"role": "user", "content": "Go"}]}},
+  {"name": "empty_system", "request": {"messages": [{"role": "system", "content": "   "}, {"role": "user", "content": "x"}]}},
+  {"name": "null_system", "request": {"messages": [{"role": "system", "content": null}, {"role": "user", "content": "x"}]}},
+  {"name": "system_parts", "request": {"messages": [{"role": "system", "content": [{"type": "text", "text": "Part A. "}, {"type": "text", "text": "Part B."}]}, {"role": "user", "content": [{"type": "text", "text": "U1"}, {"type": "text", "text": " U2"}]}]}},
+  {"name": "multi_turn_reasoning", "request": {"messages": [
+      {"role": "user", "content": "What is 2+2?"},
+      {"role": "assistant", "content": "4", "reasoning_content": "  simple arithmetic\n"},
+      {"role": "user", "content": "And 3+3?"}]}},
+  {"name": "assistant_think_in_content", "request": {"messages": [
+      {"role": "user", "content": "q1"},
+      {"role": "assistant", "content": "<think>\nI should answer briefly.\n</think>\n\nAnswer one."},
+      {"role": "user", "content": "q2"}]}},
+  {"name": "assistant_two_think_blocks", "request": {"messages": [
+      {"role": "user", "content": "q"},
+      {"role": "assistant", "content": "pre<think>a</think>mid</think>\n\nfinal"},
+      {"role": "user", "content": "q2"}]}},
+  {"name": "assistant_close_think_only", "request": {"messages": [
+      {"role": "user", "content": "q"},
+      {"role": "assistant", "content": "reasoning without open tag\n</think>\nvisible"},
+      {"role": "user", "content": "q2"}]}},
+  {"name": "preserve_thinking_false", "request": {"chat_template_kwargs": {"preserve_thinking": false}, "messages": [
+      {"role": "user", "content": "old question"},
+      {"role": "assistant", "content": "old answer", "reasoning_content": "old thoughts"},
+      {"role": "user", "content": "new question"},
+      {"role": "assistant", "content": "partial", "reasoning_content": "new thoughts"}]}},
+  {"name": "preserve_thinking_true", "request": {"chat_template_kwargs": {"preserve_thinking": true}, "messages": [
+      {"role": "user", "content": "old question"},
+      {"role": "assistant", "content": "old answer", "reasoning_content": "old thoughts"},
+      {"role": "user", "content": "new question"}]}},
+  {"name": "thinking_off_toplevel", "request": {"enable_thinking": false, "messages": [{"role": "user", "content": "x"}]}},
+  {"name": "thinking_off_kwargs", "request": {"chat_template_kwargs": {"enable_thinking": false}, "messages": [{"role": "system", "content": "S"}, {"role": "user", "content": "x"}]}},
+  {"name": "thinking_on_explicit", "request": {"chat_template_kwargs": {"enable_thinking": true}, "messages": [{"role": "user", "content": "x"}]}},
+  {"name": "effort_low", "request": {"reasoning_effort": "low", "messages": [{"role": "user", "content": "x"}]}},
+  {"name": "effort_medium", "request": {"chat_template_kwargs": {"reasoning_effort": "medium"}, "messages": [{"role": "system", "content": "S"}, {"role": "user", "content": "x"}]}},
+  {"name": "effort_high", "request": {"reasoning_effort": "high", "messages": [{"role": "user", "content": "x"}]}},
+  {"name": "effort_invalid", "request": {"reasoning_effort": "max", "messages": [{"role": "user", "content": "x"}]}},
+  {"name": "effort_invalid_thinking_off", "request": {"reasoning_effort": "max", "enable_thinking": false, "messages": [{"role": "user", "content": "x"}]}},
+  {"name": "tools_basic", "request": {"tools": [
+      {"type": "function", "function": {"name": "get_weather", "description": "取得城市天氣", "parameters": {"type": "object", "properties": {"city": {"type": "string", "description": "城市名稱"}, "days": {"type": "integer", "minimum": 1, "maximum": 14}}, "required": ["city"]}}},
+      {"type": "function", "function": {"name": "noop", "description": "Has \"quotes\", a backslash \\ and a tab\t.", "parameters": {"type": "object", "properties": {}}}}],
+    "messages": [{"role": "system", "content": "Use tools."}, {"role": "user", "content": "台北天氣？"}]}},
+  {"name": "tools_no_system", "request": {"tools": [{"type": "function", "function": {"name": "f", "parameters": {"type": "object", "properties": {"x": {"type": "boolean", "default": false, "enum": [true, false, null]}}}}}],
+    "messages": [{"role": "user", "content": "go"}]}},
+  {"name": "tools_effort_low", "request": {"reasoning_effort": "low", "tools": [{"type": "function", "function": {"name": "f"}}], "messages": [{"role": "user", "content": "go"}]}},
+  {"name": "tools_control_chars", "request": {"tools": [{"type": "function", "function": {"name": "ctl", "description": "bell\u0007 nul\u0000 esc\u001b del\u007f emoji 😀"}}], "messages": [{"role": "user", "content": "x"}]}},
+  {"name": "tool_choice_none", "request": {"tool_choice": "none", "tools": [{"type": "function", "function": {"name": "f"}}], "messages": [{"role": "user", "content": "go"}]}},
+  {"name": "tool_call_roundtrip", "request": {"tools": [{"type": "function", "function": {"name": "get_weather"}}], "messages": [
+      {"role": "user", "content": "Weather in Taipei and Tokyo?"},
+      {"role": "assistant", "content": "Let me check.", "tool_calls": [
+          {"id": "c1", "type": "function", "function": {"name": "get_weather", "arguments": {"city": "Taipei", "days": 3, "metric": true, "note": null, "opts": {"lang": "zh-TW", "fields": ["temp", "rain"]}, "list": [1, "two", false]}}},
+          {"id": "c2", "type": "function", "function": {"name": "get_weather", "arguments": {"city": "Tokyo"}}}]},
+      {"role": "tool", "tool_call_id": "c1", "content": "{\"temp\": 31}"},
+      {"role": "tool", "tool_call_id": "c2", "content": "  sunny \n"},
+      {"role": "assistant", "content": "Taipei is hot, Tokyo is sunny."},
+      {"role": "user", "content": "Thanks"}]}},
+  {"name": "tool_call_empty_content", "request": {"messages": [
+      {"role": "user", "content": "run it"},
+      {"role": "assistant", "content": "", "tool_calls": [{"type": "function", "function": {"name": "run", "arguments": {"cmd": "ls -la\n"}}}]},
+      {"role": "tool", "content": "file1\nfile2"}]}},
+  {"name": "tool_call_null_content_flat", "request": {"messages": [
+      {"role": "user", "content": "run it"},
+      {"role": "assistant", "content": null, "tool_calls": [{"name": "run", "arguments": {"n": -12345678901}}]},
+      {"role": "tool", "content": "ok"},
+      {"role": "user", "content": "<tool_response>\nmanual\n</tool_response>"}]}},
+  {"name": "tool_call_no_arguments", "request": {"messages": [
+      {"role": "user", "content": "x"},
+      {"role": "assistant", "content": "y", "tool_calls": [{"function": {"name": "ping"}}]}]}},
+  {"name": "tool_call_args_json_string", "expect_diverge": ["a", "b"], "request": {"messages": [
+      {"role": "user", "content": "x"},
+      {"role": "assistant", "content": "", "tool_calls": [{"function": {"name": "f", "arguments": "{\"a\": 1, \"b\": \"two\"}"}}]}]}},
+  {"name": "tool_call_args_empty_string", "request": {"messages": [
+      {"role": "user", "content": "x"},
+      {"role": "assistant", "content": "", "tool_calls": [{"function": {"name": "f", "arguments": "   "}}]}]}},
+  {"name": "tool_call_missing_name", "expect_diverge": ["b"], "request": {"messages": [
+      {"role": "user", "content": "x"},
+      {"role": "assistant", "content": "", "tool_calls": [{"function": {"arguments": {}}}]}]}},
+  {"name": "multi_step_tool_user", "request": {"chat_template_kwargs": {"preserve_thinking": false}, "messages": [
+      {"role": "user", "content": "first"},
+      {"role": "assistant", "content": "a1", "reasoning_content": "r1", "tool_calls": [{"function": {"name": "t", "arguments": {"k": "v"}}}]},
+      {"role": "user", "content": "<tool_response>\nres\n</tool_response>"},
+      {"role": "assistant", "content": "a2", "reasoning_content": "r2"}]}},
+  {"name": "tool_first_message", "request": {"messages": [{"role": "tool", "content": "orphan"}, {"role": "user", "content": "x"}]}},
+  {"name": "tool_last_message", "request": {"messages": [{"role": "user", "content": "x"}, {"role": "assistant", "content": "", "tool_calls": [{"function": {"name": "t", "arguments": {}}}]}, {"role": "tool", "content": "r1"}, {"role": "tool", "content": "r2"}]}},
+  {"name": "assistant_prefill_last", "request": {"messages": [{"role": "user", "content": "x"}, {"role": "assistant", "content": "Partial answer"}]}},
+  {"name": "mid_system_message", "expect_diverge": ["a"], "request": {"messages": [{"role": "user", "content": "x"}, {"role": "system", "content": "late rule"}, {"role": "user", "content": "y"}]}},
+  {"name": "unknown_role", "expect_diverge": ["b"], "request": {"messages": [{"role": "robot", "content": "beep"}]}},
+  {"name": "empty_messages", "request": {"messages": []}},
+  {"name": "image_part", "expect_diverge": ["a", "b"], "request": {"messages": [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:,"}}, {"type": "text", "text": "describe"}]}]}},
+  {"name": "float_values", "expect_diverge": ["a", "b"], "request": {"tools": [{"type": "function", "function": {"name": "f", "parameters": {"type": "object", "properties": {"t": {"type": "number", "default": 0.7, "maximum": 2.0}}}}}], "messages": [{"role": "user", "content": "x"}]}},
+  {"name": "unicode_mix", "request": {"messages": [{"role": "user", "content": "混合 English 與中文 😀 — “quotes” ‘single’ … 　全形空白　"}, {"role": "assistant", "content": "好的。", "reasoning_content": "　思考　"}, {"role": "user", "content": "下一題"}]}},
+  {"name": "long_code_prompt", "request": {"messages": [{"role": "system", "content": "你是資深工程師。"}, {"role": "user", "content": "請修正這段程式：\n```python\ndef f(xs):\n    for i in range(len(xs)):\n        if xs[i] = 0:\n            return i\n```\n並說明原因。"}]}}
+]

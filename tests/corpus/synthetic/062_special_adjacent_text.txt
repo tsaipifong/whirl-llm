@@ -1,0 +1,1 @@
+abc<think>def</think>ghi<|im_end|>jkl

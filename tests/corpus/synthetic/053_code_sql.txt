@@ -1,0 +1,7 @@
+SELECT u.id, u.name, COUNT(o.id) AS n_orders
+FROM users AS u
+LEFT JOIN orders o ON o.user_id = u.id
+WHERE u.created_at >= '2024-01-01'
+GROUP BY u.id, u.name
+HAVING COUNT(o.id) > 3
+ORDER BY n_orders DESC;

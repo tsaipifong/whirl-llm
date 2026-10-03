@@ -1,0 +1,4 @@
+請用繁體中文解釋這段程式碼，def add(a, b):
+    # 回傳 a + b
+    return a + b
+。

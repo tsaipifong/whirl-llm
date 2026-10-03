@@ -1,0 +1,12 @@
+#include <vector>
+#include <cstdint>
+
+template <typename T>
+static T clamp(T v, T lo, T hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+int main(int argc, char** argv) {
+	std::vector<std::uint32_t> xs{1u, 2u, 3u};
+	for (auto& x : xs) x <<= 2;   // shift
+	if (argc > 1 && argv[1][0] == '-') { return -1; }
+	return static_cast<int>(xs.size()) - 3;
+}

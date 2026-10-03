@@ -1,0 +1,23 @@
+import os
+from typing import List
+
+
+def fib(n: int) -> List[int]:
+    """Return the first n Fibonacci numbers."""
+    out = [0, 1]
+    while len(out) < n:
+        out.append(out[-1] + out[-2])
+    return out[:n]
+
+
+class Cache:
+    def __init__(self, size=128):
+        self._d = {}
+        self.size = size
+
+    def get(self, k, default=None):
+        return self._d.get(k, default)
+
+
+if __name__ == "__main__":
+    print(fib(10))  # [0, 1, 1, 2, 3, 5, 8, 13, 21, 34]

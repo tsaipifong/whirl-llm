@@ -1,0 +1,7 @@
+<tool_call>
+<function=get_weather>
+<parameter=city>
+世界
+</parameter>
+</function>
+</tool_call>

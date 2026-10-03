@@ -1,0 +1,13 @@
+# Text files are stored and checked out with LF (the tree is built and tested with LF);
+# Windows scripts are checked out with CRLF.
+* text=auto eol=lf
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# byte-exact: tokenizer test corpus (contains CR / CRLF on purpose), vendored header, generated images
+tests/corpus/** -text
+src/vision/stb_image.h -text
+*.svg -text
+*.png binary
+*.ico binary

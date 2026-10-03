@@ -1,0 +1,6 @@
+const fetchJson = async (url, opts = {}) => {
+  const res = await fetch(url, { ...opts, headers: { "Content-Type": "application/json" } });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+};
+export default fetchJson;

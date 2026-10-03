@@ -1,0 +1,10 @@
+fn main() {
+    let v: Vec<i64> = (1..=10).map(|x| x * x).collect();
+    let s: i64 = v.iter().sum();
+    println!("sum = {s}, len = {}", v.len());
+    match s {
+        0 => unreachable!(),
+        n if n > 100 => println!("big"),
+        _ => {}
+    }
+}

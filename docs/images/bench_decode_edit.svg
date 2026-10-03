@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="840" height="552" viewBox="0 0 840 552" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+<rect width="840" height="552" fill="#ffffff"/>
+<defs><pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" fill="white"/><line x1="0" y1="0" x2="0" y2="6" stroke="#000" stroke-opacity="0.55" stroke-width="2.4"/></pattern></defs>
+<text x="64" y="30" font-size="19" font-weight="600" fill="#1f2328">Decode: file-editing prompts (output the whole edited file)</text>
+<text x="64" y="52" font-size="12.5" fill="#57606a">5 prompts, 1.6–2.3k-token sources, up to 2,500 tokens, greedy, server API; median of 2 rounds (tok/s)</text>
+<text x="441.0" y="80" font-size="13.5" font-weight="600" text-anchor="middle" fill="#1f2328"></text>
+<line x1="74" x2="808" y1="452.0" y2="452.0" stroke="#d0d7de" stroke-width="1"/>
+<text x="69" y="456.0" font-size="10.5" text-anchor="end" fill="#57606a">0</text>
+<line x1="74" x2="808" y1="380.0" y2="380.0" stroke="#d0d7de" stroke-width="1"/>
+<text x="69" y="384.0" font-size="10.5" text-anchor="end" fill="#57606a">160</text>
+<line x1="74" x2="808" y1="308.0" y2="308.0" stroke="#d0d7de" stroke-width="1"/>
+<text x="69" y="312.0" font-size="10.5" text-anchor="end" fill="#57606a">320</text>
+<line x1="74" x2="808" y1="236.0" y2="236.0" stroke="#d0d7de" stroke-width="1"/>
+<text x="69" y="240.0" font-size="10.5" text-anchor="end" fill="#57606a">480</text>
+<line x1="74" x2="808" y1="164.0" y2="164.0" stroke="#d0d7de" stroke-width="1"/>
+<text x="69" y="168.0" font-size="10.5" text-anchor="end" fill="#57606a">640</text>
+<line x1="74" x2="808" y1="92.0" y2="92.0" stroke="#d0d7de" stroke-width="1"/>
+<text x="69" y="96.0" font-size="10.5" text-anchor="end" fill="#57606a">800</text>
+<rect x="145.3" y="173.9" width="24.0" height="278.1" fill="#1f6feb"/>
+<text x="157.3" y="169.9" font-size="9" text-anchor="start" fill="#1f2328" transform="rotate(-90 160.3 169.9)">618</text>
+<rect x="171.3" y="378.5" width="24.0" height="73.5" fill="#79b8ff"/>
+<rect x="171.3" y="378.5" width="24.0" height="73.5" fill="url(#hatch)" opacity="0.35"/>
+<text x="183.3" y="374.5" font-size="9" text-anchor="start" fill="#1f2328" transform="rotate(-90 186.3 374.5)">163</text>
+<rect x="197.3" y="344.3" width="24.0" height="107.7" fill="#d9480f"/>
+<text x="209.3" y="340.3" font-size="9" text-anchor="start" fill="#1f2328" transform="rotate(-90 212.3 340.3)">239</text>
+<rect x="223.3" y="399.3" width="24.0" height="52.7" fill="#ffa94d"/>
+<rect x="223.3" y="399.3" width="24.0" height="52.7" fill="url(#hatch)" opacity="0.35"/>
+<text x="235.3" y="395.3" font-size="9" text-anchor="start" fill="#1f2328" transform="rotate(-90 238.3 395.3)">117</text>
+<text x="196.3" y="469" font-size="11.5" text-anchor="middle" fill="#1f2328">Ornith MXFP4 (MoE)</text>
+<rect x="390.0" y="304.3" width="24.0" height="147.7" fill="#1f6feb"/>
+<text x="402.0" y="300.3" font-size="9" text-anchor="start" fill="#1f2328" transform="rotate(-90 405.0 300.3)">328</text>
+<rect x="416.0" y="435.3" width="24.0" height="16.7" fill="#79b8ff"/>
+<rect x="416.0" y="435.3" width="24.0" height="16.7" fill="url(#hatch)" opacity="0.35"/>
+<text x="428.0" y="431.3" font-size="9" text-anchor="start" fill="#1f2328" transform="rotate(-90 431.0 431.3)">37.0</text>
+<rect x="442.0" y="386.8" width="24.0" height="65.2" fill="#d9480f"/>
+<text x="454.0" y="382.8" font-size="9" text-anchor="start" fill="#1f2328" transform="rotate(-90 457.0 382.8)">145</text>
+<rect x="468.0" y="437.1" width="24.0" height="14.9" fill="#ffa94d"/>
+<rect x="468.0" y="437.1" width="24.0" height="14.9" fill="url(#hatch)" opacity="0.35"/>
+<text x="480.0" y="433.1" font-size="9" text-anchor="start" fill="#1f2328" transform="rotate(-90 483.0 433.1)">33.0</text>
+<text x="441.0" y="469" font-size="11.5" text-anchor="middle" fill="#1f2328">Swift MXFP4-A (dense)</text>
+<rect x="634.7" y="314.8" width="24.0" height="137.2" fill="#1f6feb"/>
+<text x="646.7" y="310.8" font-size="9" text-anchor="start" fill="#1f2328" transform="rotate(-90 649.7 310.8)">305</text>
+<rect x="660.7" y="436.7" width="24.0" height="15.3" fill="#79b8ff"/>
+<rect x="660.7" y="436.7" width="24.0" height="15.3" fill="url(#hatch)" opacity="0.35"/>
+<text x="672.7" y="432.7" font-size="9" text-anchor="start" fill="#1f2328" transform="rotate(-90 675.7 432.7)">34.0</text>
+<rect x="686.7" y="390.5" width="24.0" height="61.5" fill="#d9480f"/>
+<text x="698.7" y="386.5" font-size="9" text-anchor="start" fill="#1f2328" transform="rotate(-90 701.7 386.5)">137</text>
+<rect x="712.7" y="438.2" width="24.0" height="13.8" fill="#ffa94d"/>
+<rect x="712.7" y="438.2" width="24.0" height="13.8" fill="url(#hatch)" opacity="0.35"/>
+<text x="724.7" y="434.2" font-size="9" text-anchor="start" fill="#1f2328" transform="rotate(-90 727.7 434.2)">30.7</text>
+<text x="685.7" y="469" font-size="11.5" text-anchor="middle" fill="#1f2328">Qwen3.8-27B Q4_K_M</text>
+<line x1="74" x2="808" y1="452" y2="452" stroke="#57606a" stroke-width="1"/>
+<text x="16" y="272.0" font-size="12" fill="#57606a" text-anchor="middle" transform="rotate(-90 16 272.0)">generated tokens per second</text>
+<rect x="64.0" y="481" width="14" height="14" fill="#1f6feb"/>
+<text x="84.0" y="493" font-size="12" fill="#1f2328">WHIRL MTP+n-gram (default)</text>
+<rect x="444.0" y="481" width="14" height="14" fill="#79b8ff"/>
+<rect x="444.0" y="481" width="14" height="14" fill="url(#hatch)" opacity="0.35"/>
+<text x="464.0" y="493" font-size="12" fill="#1f2328">WHIRL no MTP</text>
+<rect x="64.0" y="503" width="14" height="14" fill="#d9480f"/>
+<text x="84.0" y="515" font-size="12" fill="#1f2328">llama.cpp fastest speculative</text>
+<rect x="444.0" y="503" width="14" height="14" fill="#ffa94d"/>
+<rect x="444.0" y="503" width="14" height="14" fill="url(#hatch)" opacity="0.35"/>
+<text x="464.0" y="515" font-size="12" fill="#1f2328">llama.cpp plain (no MTP)</text>
+</svg>

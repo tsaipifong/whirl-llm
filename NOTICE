@@ -1,0 +1,24 @@
+WHIRL - Windows HIP Inference for RDNA LLMs
+Copyright 2026 tsaipifong
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This project was designed, implemented, optimized and benchmarked with the
+participation of Claude Opus 5.5, an AI model by Anthropic, working under the
+direction of the project owner (GitHub: tsaipifong). Anthropic is not
+affiliated with and does not endorse this project.
+
+This product includes third-party material; see THIRD_PARTY_NOTICES.md:
+  - llama.cpp / ggml (iq3s_grid lookup table; qwen35 pre-tokenizer split,
+    special-token partition and BPE merge loop adapted in src/tokenizer;
+    image preprocessing, the qwen3vl vision graph, vision / M-RoPE rotations
+    and image token positions adapted in src/vision, kernels/vision,
+    include/whirl/vismap.h), MIT License, Copyright (c) 2023-2026 The ggml authors
+  - stb_image v2.30 (image decoding, src/vision/stb_image.h), Sean Barrett,
+    public domain or MIT License (used under MIT), Copyright (c) 2017 Sean Barrett
+  - Unicode Character Database (code point property tables),
+    Unicode License v3, Copyright (c) 1991-2026 Unicode, Inc.
+
+Inspiration (ideas only, no code was used):
+  - NInfer (https://github.com/Neroued/ninfer)
+  - gufo (https://github.com/gufo-org/gufo)
