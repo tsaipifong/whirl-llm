@@ -9,9 +9,8 @@
 // generated code are unchanged by the split. The host-side view (argument
 // structs, kernel names, launch tables) is include/whirl/kernels_abi.h.
 //
-// gfx1201 (RDNA 4) carries the full set. The gfx1151 (RDNA 3.5) port lives
-// in kernels/gfx1151/ once it is done; until then the gfx1151 code object
-// only contains the smoke kernel (deferred, see STATUS.md).
+// gfx1201 (RDNA 4) carries the full set. The gfx1151 (RDNA 3.5) set lives in
+// kernels/gfx1151/ (same kernel names and ABIs, gfx11 WMMA fragments, no fp8).
 
 #include <hip/hip_runtime.h>
 
@@ -43,4 +42,8 @@
 #include "gemm_fp8t.hip"           // fragment-tiled fp8 / f16 GEMM
 #include "gemm_small.hip"          // small-batch prefill GEMM
 #include "moe_mxfp4.hip"           // MXFP4 routed experts (decode, fp8 grouped GEMM)
+#endif
+
+#if defined(__gfx1151__)
+#include "gfx1151/whirl_kernels_gfx1151.hip"  // RDNA 3.5 kernel set
 #endif

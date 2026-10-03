@@ -682,7 +682,8 @@ void applyGemvEnv(Model& m);
 // device selection
 
 // HIP device for `spec` (index, "r9700" / "8060s" alias, or a substring of
-// the name / gcnArchName); empty: WHIRL_DEVICE, else the first R9700.
+// the name / gcnArchName); empty: WHIRL_DEVICE, else the first R9700, else the
+// first device with an embedded code object (a Radeon 8060S on its own).
 // Takes the per-GPU process mutex (WHIRL_GPU_SHARE=1 skips it).
 int pickDevice(std::string_view spec);
 

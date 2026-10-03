@@ -85,7 +85,25 @@ int pickDevice(std::string_view spec_arg) {
     if (spec.empty()) {
         if (auto v = envGet("DEVICE")) spec = *v;
     }
-    const int dev = matchDevice(n, spec.empty() ? std::string_view("r9700") : std::string_view(spec));
+    int dev = -1;
+    if (!spec.empty()) {
+        dev = matchDevice(n, spec);
+    } else {
+        // default: the first R9700, else the first device this build has kernels for
+        // (e.g. a Radeon 8060S on its own)
+        auto have = [](const std::string& a) {
+            for (const hip::EmbeddedObject& o : hip::embeddedObjects())
+                if (a.rfind(o.arch, 0) == 0) return true;
+            return false;
+        };
+        for (int i = 0; i < n && dev < 0; ++i) {
+            const std::string a = hip::describeDevice(i).gcn_arch;
+            if (a.rfind("gfx1201", 0) == 0 && have(a)) dev = i;
+        }
+        for (int i = 0; i < n && dev < 0; ++i)
+            if (have(hip::describeDevice(i).gcn_arch)) dev = i;
+        if (dev < 0) throw ModelError("NoTargetGpu", "no R9700 or Radeon 8060S found (set --device / WHIRL_DEVICE)");
+    }
     lockGpu(dev);
     return dev;
 }

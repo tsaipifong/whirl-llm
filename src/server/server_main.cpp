@@ -95,7 +95,8 @@ const char* kHelpBody =
     "  --ctx-per-slot N         longest context of one request (default min(pool, 131072); up to 262144)\n"
     "  --mtp-drafts N           MTP drafts per cycle, 1..10 (fixed count; default: per model type)\n"
     "  --kv-ram-mb N            host RAM tier of the prefix cache in MiB of pinned memory (default 8192,\n"
-    "                           or one full-length session if more; 0 = no host tiers). Idle sessions\n"
+    "                           or one full-length session if more; 0 = no host tiers; Radeon 8060S:\n"
+    "                           default 0, its KV pool already is system memory). Idle sessions\n"
     "                           are copied there and restored instead of prefilled again\n"
     "  --kv-ssd-dir PATH        SSD tier directory (default %LOCALAPPDATA%\\whirl\\kvcache)\n"
     "  --kv-ssd-gb N            SSD tier size cap in GiB (default 64; 0 = no SSD tier)\n"
@@ -317,7 +318,8 @@ int serveMain(int argc, char** argv, const char* program) {
         else dev = qwen35::pickDevice(opt.device);
         const hip::DeviceInfo info = hip::describeDevice(dev);
         hip::setDevice(dev);
-        const bool is_uma = hip::archFor(info.gcn_arch) == hip::Arch::gfx1151;
+        // integrated GPU (Radeon 8060S): the "VRAM" is system memory shared with the CPU
+        const bool is_uma = info.integrated;
         const std::optional<std::uint32_t> pool_req = opt.ctx ? opt.ctx : (is_uma ? std::optional<std::uint32_t>(262144) : std::nullopt);
         const std::uint32_t cap_max = 262144;
         const std::uint32_t slot_ctx = static_cast<std::uint32_t>(alignUp(
@@ -567,7 +569,9 @@ int serveMain(int argc, char** argv, const char* program) {
             const std::uint64_t full = static_cast<std::uint64_t>(slot_ctx) * model.kvBytesPerTokenFmt(false, false) + n_ck * ck_stride;
             return std::max(kv_ram_mb_default, alignUp(full, 1ull << 30) >> 20);
         }();
-        std::uint64_t kv_ram_mb = ram_def;
+        // integrated GPU: the KV pool already lives in system memory, so the RAM
+        // tier (and the SSD tier behind it) is off unless asked for explicitly
+        std::uint64_t kv_ram_mb = is_uma ? 0 : ram_def;
         if (opt.kv_ram_mb) kv_ram_mb = *opt.kv_ram_mb;
         else if (auto v = env("KV_RAM_MB")) {
             try {
@@ -576,7 +580,7 @@ int serveMain(int argc, char** argv, const char* program) {
             }
         }
         std::unique_ptr<tier::Tier> tier_pre;
-        if (kv_ram_mb > 0 && n_ck > 0 && !no_pc && hip::archFor(info.gcn_arch) == hip::Arch::gfx1201) {
+        if (kv_ram_mb > 0 && n_ck > 0 && !no_pc) {
             try {
                 tier_pre = tier::Tier::create(*ops, kv_ram_mb << 20, seed0 ^ 0x5bd1e995ull, dev);
             } catch (const std::exception& ex) {
@@ -596,11 +600,11 @@ int serveMain(int argc, char** argv, const char* program) {
             const std::uint64_t need = pool_req ? *pool_req : static_cast<std::uint64_t>(slot_ctx) + second + (opt.parallel > 1 ? 2ull : 1ull) * kv_page;
             if (need * model.kvBytesPerTokenFmt(false, false) <= avail) {
                 kv_note = " (auto: the floor pool fits as f16)";
-            } else if (need * model.kvBytesPerTokenFmt(true, true) <= avail) {
+            } else if (model.k.caps.kv_q8v && need * model.kvBytesPerTokenFmt(true, true) <= avail) {
                 model.setKvFormat(true, false, true);
                 kv_note = " (auto: the floor pool (one full request + a 64k second one) does not fit as f16, fits as q8v)";
             } else {
-                model.setKvFormat(true, true, false);
+                model.setKvFormat(true, model.k.caps.kv_q8h, false);
                 kv_note = " (auto: the floor pool (one full request + a 64k second one) does not fit as f16 or q8v)";
             }
         }

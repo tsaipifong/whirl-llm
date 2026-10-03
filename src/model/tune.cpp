@@ -591,10 +591,13 @@ void loadOrTune(Model& m, const std::string& model_path, std::string& log) {
         if (tryRead(p, text)) have_old = m.readTune(text, 2);
     }
     // one-time notice (stderr): the tuning pause would otherwise look like a hang
-    // (measured on the R9700: ~100 s for a 27B Q4_K_M model, a few s for MXFP4)
+    // (measured: R9700 ~100 s for a 27B Q4_K_M model, a few s for MXFP4; Radeon 8060S
+    // ~460 s for the 27B Q4_K_M)
     std::fprintf(stderr,
                  "First run with this model on this GPU: tuning the prefill kernels. This takes up to about\n"
-                 "2 minutes (a few seconds for MXFP4 models) and happens only once%s%s.\n",
+                 "%s and happens only once%s%s.\n",
+                 m.arch == hip::Arch::gfx1151 ? "8 minutes on the Radeon 8060S (less for MXFP4 models)"
+                                              : "2 minutes (a few seconds for MXFP4 models)",
                  cache_path.empty() ? "" : "; the result is cached in ", cache_path.c_str());
     std::fflush(stderr);
     const double t0 = nowMs();

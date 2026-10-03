@@ -477,9 +477,9 @@ void Model::attnBlock(const AttnW& a, const KvLayer& lkv, u32 n) {
             // `per` (a function of the position) matches, <= 16 columns each
             AwGroups groups;
             u32 ng = 0;
-            // gfx1151: one query per group (its WMMA P.V is not exact when a masked
-            // key carries a real V row), so a grouped verify row could differ
-            const u32 max_q = ((dbg_flags & 4) != 0 || arch == hip::Arch::gfx1151) ? 1 : 16 / grp_q;
+            // caps.attn_group1 (gfx1151): one query per group (its WMMA P.V is not exact
+            // when a masked key carries a real V row), so a grouped verify row could differ
+            const u32 max_q = ((dbg_flags & 4) != 0 || k.caps.attn_group1) ? 1 : 16 / grp_q;
             const bool known = row_n == n && n > 1;
             u32 r = 0;
             while (r < n) {

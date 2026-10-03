@@ -134,8 +134,9 @@ const char* k_help_seqtest =
 const char* k_help_devices =
     "usage: whirl devices\n"
     "\n"
-    "Lists the AMD GPUs the driver reports (index, name, architecture, memory, compute units)\n"
-    "and whether this build has GPU kernels for each of them.\n";
+    "Lists the AMD GPUs the driver reports (index, name, architecture, memory, compute units),\n"
+    "whether this build has GPU kernels for each of them, and which one is used by default\n"
+    "(the first R9700, else the first supported GPU; --device / WHIRL_DEVICE pick another).\n";
 
 const char* k_help_vis =
     "usage: whirl vis-encode MMPROJ.gguf IMAGE [OUT.f32] [--reps N] [--mode auto|resident|stream]\n"
@@ -1302,16 +1303,32 @@ int cmdDevices() {
     const std::vector<hip::DeviceInfo> devs = hip::listDevices();
     if (devs.empty()) {
         std::fputs("whirl: error: the AMD graphics driver reports no GPU.\n"
-                   "  WHIRL needs an AMD Radeon AI PRO R9700 (gfx1201). If one is installed, install AMD Software:\n"
+                   "  WHIRL needs an AMD Radeon AI PRO R9700 (gfx1201) or a Radeon 8060S (gfx1151). If one is\n"
+                   "  installed, install AMD Software:\n"
                    "  Adrenalin Edition 26.8.1 or newer (https://www.amd.com/en/support) and restart Windows.\n",
                    stderr);
         return app::exit_gpu;
     }
+    auto haveKernels = [](const hip::DeviceInfo& d) {
+        for (const hip::EmbeddedObject& o : hip::embeddedObjects())
+            if (d.gcn_arch.rfind(o.arch, 0) == 0) return true;
+        return false;
+    };
+    // the device used without --device / WHIRL_DEVICE (pickDevice's rule)
+    int def = -1;
+    for (const hip::DeviceInfo& d : devs)
+        if (def < 0 && d.gcn_arch.rfind("gfx1201", 0) == 0 && haveKernels(d)) def = d.index;
+    for (const hip::DeviceInfo& d : devs)
+        if (def < 0 && haveKernels(d)) def = d.index;
     for (const hip::DeviceInfo& d : devs) {
-        bool have = false;
-        for (const hip::EmbeddedObject& o : hip::embeddedObjects()) have = have || d.gcn_arch.rfind(o.arch, 0) == 0;
+        std::string tags;
+        if (!haveKernels(d)) tags += "  [no GPU kernels for this architecture in this build]";
+        else if (hip::archFor(d.gcn_arch) == hip::Arch::gfx1151) tags += "  [supported: preview, untuned]";
+        else tags += "  [supported]";
+        if (d.integrated) tags += " [integrated: memory shared with the CPU]";
+        if (d.index == def) tags += " [default]";
         out(fmt("  device %d: %s (%s), %.1f GiB, %d CUs%s\n", d.index, d.name.c_str(), d.gcn_arch.c_str(), d.total_mem / (1024.0 * 1024.0 * 1024.0),
-                d.compute_units, have ? "" : "  [no GPU kernels for this architecture in this build]"));
+                d.compute_units, tags.c_str()));
     }
     return 0;
 }

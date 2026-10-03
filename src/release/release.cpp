@@ -96,8 +96,9 @@ std::string deviceListText() {
 constexpr const char* k_vram_advice =
     "  Try a smaller context: whirl chat --ctx 8192 (or less); whirl-server --ctx N, a smaller\n"
     "  --ctx-per-slot, or fewer --parallel slots. Dense models can keep the KV cache in 8 bits:\n"
-    "  set WHIRL_KV=q8v (or q8h). Close other programs that use the GPU (games, browsers with\n"
-    "  hardware acceleration, other AI tools) and check the model fits in the GPU's memory.\n";
+    "  set WHIRL_KV=q8v (or q8h; Radeon 8060S: q8). Close other programs that use the GPU (games,\n"
+    "  browsers with hardware acceleration, other AI tools) and check the model fits in the GPU's\n"
+    "  memory.\n";
 
 }  // namespace
 
@@ -207,7 +208,7 @@ std::string explainText(const std::exception& e, int* exit_code) {
                   "  tested files and quantizations.\n";
         } else if (c == "NoTargetGpu") {
             code = exit_gpu;
-            msg = "no supported AMD GPU found (" + what + ").\n  WHIRL needs an AMD Radeon AI PRO R9700 (RDNA 4, gfx1201); this build has GPU kernels for: " +
+            msg = "no supported AMD GPU found (" + what + ").\n  WHIRL needs an AMD Radeon AI PRO R9700 (RDNA 4, gfx1201) or a Radeon 8060S\n  (Ryzen AI Max, RDNA 3.5, gfx1151); this build has GPU kernels for: " +
                   supportedArchList() + ".\n  GPUs reported by the driver:\n" + deviceListText() +
                   "  If the GPU is installed but not listed, update the driver:\n" + k_driver_advice;
         } else if (c == "GpuBusy") {
@@ -215,6 +216,9 @@ std::string explainText(const std::exception& e, int* exit_code) {
             msg = "the GPU is still in use by another WHIRL process (waited WHIRL_GPU_WAIT seconds).\n"
                   "  Close the other whirl / whirl-server, or set WHIRL_GPU_SHARE=1 to run side by side\n"
                   "  (both then share the GPU's memory and speed).\n";
+        } else if (c == "UnsupportedKvFormat") {
+            code = exit_usage;
+            msg = what + "\n";
         } else if (c == "ContextTooLong") {
             code = exit_usage;
             msg = "the prompt plus the tokens to generate do not fit in the context (" + what +

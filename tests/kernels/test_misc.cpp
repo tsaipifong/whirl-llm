@@ -452,6 +452,7 @@ void testMisc(Ctx& c) {
         const std::vector<float> x = c.randn(static_cast<std::size_t>(n) * E, 2.f), w = c.randu(E, 0.3f, 1.7f);
         Buf dx(x), dw(w);
         auto conv8 = [&](DevPtr src, int cols, Buf& q, Buf& sx) {
+            if (!c.k.qact_fp8) return;  // no fp8 path in this code object (gfx1151)
             hip::launch(c.k.qact_fp8, {static_cast<unsigned>(n), 1, 1}, {256, 1, 1}, 0, c.s, src, q.p(), sx.p(), cols);
         };
         auto conv16 = [&](DevPtr src, int cols, Buf& q) {
@@ -514,7 +515,9 @@ void testMisc(Ctx& c) {
                   r_smh = makeRef(smh.p(), F), r_gnh = makeRef(gnh.p(), NV * 128);
 
         // qact_fp8 itself vs CPU e4m3
-        {
+        if (!c.k.qact_fp8) {
+            c.rep.skip("fp8", "qact_fp8", "kernel not present");
+        } else {
             const auto rnh = rn.down<float>(x.size());
             std::vector<std::uint8_t> q(x.size());
             std::vector<float> sx(static_cast<std::size_t>(n));

@@ -365,6 +365,9 @@ void Vision::loadModule() {
     if (module_.loaded()) return;
     const auto img = kernelImage();
     if (img.empty()) throw VisionError("NoVisionKernels", "this build has no gfx1201 vision code object");
+    // the encoder kernels exist for gfx1201 only (image input on the Radeon 8060S is not ported yet)
+    if (hip::archFor(hip::describeDevice(hip::getDevice()).gcn_arch) != hip::Arch::gfx1201)
+        throw VisionError("NoVisionKernels", "image input needs the R9700 (gfx1201); this GPU has no vision kernels yet");
     module_ = hip::Module::loadData(img.data(), hip::Arch::gfx1201);
     f_.patchify = module_.getFunction("vis_patchify");
     f_.pos_ln = module_.getFunction("vis_pos_ln");

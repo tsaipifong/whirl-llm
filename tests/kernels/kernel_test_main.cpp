@@ -12,7 +12,7 @@
 #include <sstream>
 #include <string>
 
-#include "kt.h"
+#include "cpu_ref.h"
 
 namespace {
 
@@ -26,7 +26,8 @@ int usage() {
     std::printf(
         "usage: whirl-kernel-test [--device SPEC] [--only quant,gemv,gemm,attn,gdn,moe,moemx,misc] [--quick] [-v]\n"
         "                         [--q4 GGUF] [--mx GGUF] [--moe GGUF] [--moemx GGUF]\n"
-        "  --device  index, gfx arch or name substring (default: R9700, else device 0)\n"
+        "  --device  index, gfx arch, name substring, r9700 or 8060s (default: WHIRL_DEVICE, else the\n"
+        "            first R9700, else the first GPU this build has kernels for)\n"
         "  models default to WHIRL_TEST_Q4 (else WHIRL_TEST_GGUF) / WHIRL_TEST_MX / WHIRL_TEST_MOE /\n"
         "  WHIRL_TEST_MOEMX; an unset model or '-' means synthetic data is used\n");
     return 2;
@@ -35,7 +36,7 @@ int usage() {
 }  // namespace
 
 int main(int argc, char** argv) {
-    std::string device = "R9700";
+    std::string device = envOr("WHIRL_DEVICE");
     std::set<std::string> only;
     kt::Ctx c;
     c.models = {envOr("WHIRL_TEST_Q4"), envOr("WHIRL_TEST_MX"), envOr("WHIRL_TEST_MOE"), envOr("WHIRL_TEST_MOEMX")};
@@ -68,15 +69,33 @@ int main(int argc, char** argv) {
         if (*p == "-") p->clear();
 
     try {
-        int dev = whirl::hip::findDevice(device);
-        if (dev < 0) dev = 0;
-        whirl::hip::setDevice(dev);
-        const auto info = whirl::hip::describeDevice(dev);
+        namespace hip = whirl::hip;
+        auto have = [](const hip::DeviceInfo& d) {
+            for (const hip::EmbeddedObject& o : hip::embeddedObjects())
+                if (d.gcn_arch.rfind(o.arch, 0) == 0) return true;
+            return false;
+        };
+        int dev = -1;
+        if (!device.empty()) {
+            dev = hip::findDevice(device == "8060s" ? "gfx1151" : device == "r9700" ? "gfx1201" : device);
+            if (dev < 0) throw std::runtime_error("no device matches '" + device + "'");
+        } else {
+            for (const hip::DeviceInfo& d : hip::listDevices())
+                if (dev < 0 && d.gcn_arch.rfind("gfx1201", 0) == 0 && have(d)) dev = d.index;
+            for (const hip::DeviceInfo& d : hip::listDevices())
+                if (dev < 0 && have(d)) dev = d.index;
+            if (dev < 0) dev = 0;
+        }
+        hip::setDevice(dev);
+        const auto info = hip::describeDevice(dev);
         std::printf("device %d: %s (%s)\n", dev, info.name.c_str(), info.gcn_arch.c_str());
-        if (whirl::hip::archFor(info.gcn_arch) != whirl::hip::Arch::gfx1201)
-            std::printf("note: only the gfx1201 kernel set is ported so far; this device's code object lacks them\n");
-        c.mod = whirl::hip::Module::loadEmbedded();
+        c.mod = hip::Module::loadEmbedded();
         c.k = whirl::kernels::KernelTable::load(c.mod, whirl::kernels::KvFormat::f16);
+        // gfx1151 stores packed int8 scale words; the CPU references follow the code object
+        kt::ref::setXdSum(c.k.caps.xd_sum);
+        const auto& cp = c.k.caps;
+        std::printf("caps: fp8_gemm %d, kv_q8v %d, kv_q8h %d, gemvw %d, gdn_replay %d, mrope %d, xd_sum %d, attn_group1 %d\n", cp.fp8_gemm,
+                    cp.kv_q8v, cp.kv_q8h, cp.gemvw, cp.gdn_replay, cp.mrope, cp.xd_sum, cp.attn_group1);
         c.s = whirl::hip::streamCreate(false);  // blocking: ordered with the null-stream copies / memsets
     } catch (const std::exception& e) {
         std::printf("setup failed: %s\n", e.what());

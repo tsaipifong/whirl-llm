@@ -168,6 +168,10 @@ void testAttn(Ctx& c) {
     for (Fmt fmt : {Fmt::f16, Fmt::q8, Fmt::q8v}) {
         const std::string fs = fmtSuffix(fmt);
         const std::string tag = std::string(" [kv ") + (fmt == Fmt::f16 ? "f16" : (fmt == Fmt::q8 ? "q8" : "q8v")) + "]";
+        if (fmt == Fmt::q8v && !c.k.caps.kv_q8v) {  // gfx1151: no q8v kernels
+            c.rep.skip("attn", "kv q8v (kv_store / attn_decode / attn_split / attn_prefill_wmma)", "kernel not in this code object");
+            continue;
+        }
         Pool pool(c, fmt);
         // ---- kv_store of L rows (single sequence, positions 0..L-1)
         const std::vector<float> kin = c.randn(static_cast<std::size_t>(L) * kRow, 0.7f);
@@ -312,7 +316,10 @@ void testAttn(Ctx& c) {
                     r.n = n;
                     r.mismatches = bad;
                     r.pass = bad == 0;
-                    c.rep.add(r);
+                    if (c.k.caps.attn_group1)  // gfx1151: the host never groups queries (not bitwise here)
+                        c.rep.skip("attn", r.name, "caps.attn_group1: groups of one query only (" + std::to_string(bad) + " differing rows)");
+                    else
+                        c.rep.add(r);
                     // per-query result vs CPU
                     const std::vector<float> out = combine(ng_q);
                     std::vector<double> ro, rs;

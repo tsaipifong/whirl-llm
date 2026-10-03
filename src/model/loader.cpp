@@ -309,6 +309,13 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
     m.kv_q8 = kvQ8(kvm);
     m.kv_rot = kvRot(kvm);
     m.kv_kf16 = kvm == KvMode::q8v;
+    {
+        // an explicit KV format the code object has no kernels for (gfx1151: q8v, q8h)
+        const kernels::Caps caps = kernels::Caps::probe(m.module);
+        if ((m.kv_kf16 && !caps.kv_q8v) || (m.kv_rot && !caps.kv_q8h))
+            throw ModelError("UnsupportedKvFormat", std::string(m.kv_kf16 ? "q8v" : "q8h") +
+                                                        " KV needs kernels this GPU does not have; use WHIRL_KV=f16, q8 or auto");
+    }
     m.k = loadKernels(m.module, m.kv_q8, m.kv_rot, m.kv_kf16);
     // MXFP4 routed experts: process-level switches (as WHIRL_KV), read by CLI and server alike
     m.moe_fp8 = envFlag("MOE_FP8", true);
@@ -489,7 +496,7 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
     // server loads with max_ctx 0 and allocates its shared pool later).
     // auto, dense: f16 if it fits next to what the CLI still allocates (MTP
     // snapshot sets for 8 drafts, the 2-bit draft head) plus a 768 MiB margin,
-    // else q8v, else q8h.
+    // else q8v, else q8h (formats the code object lacks are skipped; q8 last).
     if (max_ctx_req > 0) {
         if (m.kvAutoDense()) {
             const hip::MemInfo mi = hip::memInfo();
@@ -499,10 +506,10 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
             const u64 later = 8 * n_gdn * (m.convBytes() + m.ssmBytes()) + static_cast<u64>(cfg.n_vocab) * cfg.n_embd * 5 / 16 + (768ull << 20);
             const u64 toks = (static_cast<u64>(max_ctx_req) + kv_page - 1) / kv_page * kv_page;
             if (toks * m.kvBytesPerTokenFmt(false, false) + later > mi.free) {
-                if (toks * m.kvBytesPerTokenFmt(true, true) + later <= mi.free)
+                if (m.k.caps.kv_q8v && toks * m.kvBytesPerTokenFmt(true, true) + later <= mi.free)
                     m.setKvFormat(true, false, true);
                 else
-                    m.setKvFormat(true, true, false);
+                    m.setKvFormat(true, m.k.caps.kv_q8h, false);
             }
         }
         m.allocKvPool(max_ctx_req);
@@ -627,9 +634,8 @@ void Model::setupSeqs(u32 n, u32 slot_ctx) {
         sq.kv_base = si * ((slot_ctx + kv_page - 1) / kv_page);
     }
     seqs = std::move(ss);
-    // replay needs the fused segment kernels of the gfx1201 code object (the
-    // int8-WMMA mid-batch GEMV is its marker)
-    if (gdn_replay && !(fusedDecode() && k.gemvw[1][0][ti(GgmlType::q4_k)] != nullptr)) gdn_replay = false;
+    // replay needs the replay-mode fused segment kernels (gfx1201 code object)
+    if (gdn_replay && !(fusedDecode() && k.caps.gdn_replay)) gdn_replay = false;
     if (gdn_replay) {
         gdn_ord.assign(cfg.n_layer, 0);
         u32 n_gdn = 0;

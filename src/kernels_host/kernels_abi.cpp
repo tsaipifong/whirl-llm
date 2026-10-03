@@ -106,9 +106,27 @@ constexpr int ti(QType t) { return static_cast<int>(t); }
 
 }  // namespace
 
+Caps Caps::probe(const hip::Module& m) {
+    const Loader L{m};
+    Caps c;
+    c.fp8_gemm = L.opt("gemm8_c0") != nullptr;
+    c.kv_q8v = L.opt("attn_decode_q8v") != nullptr;
+    c.kv_q8h = L.opt("attn_prep_q8h") != nullptr;
+    c.gemvw = L.opt("gemvw_nt2v1_q4_k") != nullptr;
+    c.gdn_replay = c.gemvw;
+    c.mrope = L.opt("attn_prep_m") != nullptr;
+    c.xd_sum = L.opt("whirl_cap_xd_sum") != nullptr;
+    c.attn_group1 = L.opt("whirl_cap_attn_group1") != nullptr;
+    return c;
+}
+
 KernelTable KernelTable::load(const hip::Module& m, KvFormat kv) {
     const Loader L{m};
     KernelTable k;
+    k.caps = Caps::probe(m);
+    if (!k.caps.supports(kv))
+        throw std::invalid_argument(std::string("kernels: this GPU's code object has no ") + (kv == KvFormat::q8v ? "q8v" : "q8h") +
+                                    " KV kernels");
 
     // Every type but MXFP4: the core kernels are required.
     constexpr QType base_types[] = {QType::f32, QType::f16, QType::q8_0, QType::q3_k, QType::q4_k,
@@ -249,7 +267,7 @@ KernelTable KernelTable::load(const hip::Module& m, KvFormat kv) {
     k.set_rpos = L.opt("set_rpos");
     for (int nt = 1; nt <= kMaxSmallBatch; ++nt) k.gemv_d2[nt - 1] = L.opt("gemv_d2_nt" + std::to_string(nt));
 
-    // MXFP4: every lookup optional (gfx1201 only).
+    // MXFP4: every lookup optional (the fp8 / whole-block expert kernels are gfx1201 only).
     {
         const QType t = QType::mxfp4;
         const int i = ti(t);

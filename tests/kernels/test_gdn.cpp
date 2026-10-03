@@ -396,7 +396,9 @@ void testGdn(Ctx& c) {
             c.rep.add(cmpTolRel("gdn_conv_l2 vs CPU (conv + SiLU + q/k l2norm)", oa, ref, 1e-5, 1e-6));
         }
         // conv replay: record 6 rows (pend), then apply 4 kept rows
-        {
+        if (!c.k.caps.gdn_replay) {
+            c.rep.skip("gdn", "gdn_conv_l2 replay", "replay-mode fused DeltaNet kernels not in this code object");
+        } else {
             Buf cs(cst0), pend(static_cast<std::size_t>(n) * kCh * 4), out(oa.size() * 4);
             wk::GdnSegs s;
             s.s[0].state = cs.p();
@@ -451,7 +453,8 @@ void testGdn(Ctx& c) {
         wk::GdnSegs sc;
         sc.s[0].state = st_c.p();
         sc.s[0].nrows = n;
-        step(c.fn("gdn_step_norm_v0"), sc, 1, y_c.p(), q_c.p(), d_c.p());
+        const hip::Function fv0 = c.fnOpt("gdn_step_norm_v0");  // gfx1201 only
+        if (fv0) step(fv0, sc, 1, y_c.p(), q_c.p(), d_c.p());
         c.sync();
         const auto ya = y_a.down<float>(no);
         c.rep.add(cmpExact("gdn_step_norm 6-row segment == 6 single-row launches (out)", ya, y_b.down<float>(no), Kind::invariant));
@@ -469,9 +472,13 @@ void testGdn(Ctx& c) {
             r.pass = bad == 0;
             c.rep.add(r);
         }
-        c.rep.add(cmpExact("gdn_step_norm == gdn_step_norm_v0 (out)", ya, y_c.down<float>(no), Kind::invariant));
-        c.rep.add(cmpExact("gdn_step_norm == gdn_step_norm_v0 (xq)", q_a.down<std::int8_t>(no), q_c.down<std::int8_t>(no), Kind::invariant));
-        c.rep.add(cmpExact("gdn_step_norm == gdn_step_norm_v0 (state)", st_a.down<float>(state0.size()), st_c.down<float>(state0.size()), Kind::invariant));
+        if (fv0) {
+            c.rep.add(cmpExact("gdn_step_norm == gdn_step_norm_v0 (out)", ya, y_c.down<float>(no), Kind::invariant));
+            c.rep.add(cmpExact("gdn_step_norm == gdn_step_norm_v0 (xq)", q_a.down<std::int8_t>(no), q_c.down<std::int8_t>(no), Kind::invariant));
+            c.rep.add(cmpExact("gdn_step_norm == gdn_step_norm_v0 (state)", st_a.down<float>(state0.size()), st_c.down<float>(state0.size()), Kind::invariant));
+        } else {
+            c.rep.skip("gdn", "gdn_step_norm == gdn_step_norm_v0", "kernel not in this code object");
+        }
         // xq / xd == quantize_q8(out)
         {
             std::vector<std::int8_t> rq(no);
@@ -490,7 +497,9 @@ void testGdn(Ctx& c) {
             c.rep.add(tolRms("gdn_step_norm state vs CPU", st_a.down<float>(state0.size()), st, 1e-4));
         }
         // replay: record 6 rows, apply 4 kept rows
-        {
+        if (!c.k.caps.gdn_replay) {
+            c.rep.skip("gdn", "gdn_step_norm replay", "replay-mode fused DeltaNet kernels not in this code object");
+        } else {
             const int PW = kDk + kDv + 2;
             Buf st(state0), pend(static_cast<std::size_t>(n) * kNv * PW * 4), y(no * 4), q(no), d(no / 32 * 4);
             wk::GdnSegs s;

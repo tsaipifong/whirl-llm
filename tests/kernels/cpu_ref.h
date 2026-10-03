@@ -28,13 +28,23 @@ std::vector<float> dequantRows(const HostMat& m, int r0, int nrows);
 void dequantRowF16(QType t, const std::uint8_t* row, int ncols, std::uint16_t* out);
 
 // quantize_q8: per 32 values d = amax / 127 (f32), q = rint(x * (1 / d)).
+// With packed scale words (setXdSum(true), code objects with
+// kernels::Caps::xd_sum, i.e. gfx1151) xd[b] = xdPack(d, sum of the block's q).
 void quantizeQ8(const float* x, int n, std::int8_t* xq, float* xd);
+
+// Int8 activation scale words. gfx1151 kernels store (d rounded to an 11-bit
+// mantissa, block sum + 4096) in one 32-bit word (kernels/gfx1151/common.hip
+// pk_make); xdScale returns the f32 scale the kernels multiply by.
+void setXdSum(bool on);
+bool xdSum();
+float xdPack(float d, int sum);
+float xdScale(float word);
 
 // y[t][r] = sum_c W[r][c] * x[t][c] in double (W exact), plus scale[t][r] =
 // sum |W x| for the tolerance bound.
 void gemvF64(const std::vector<float>& W, int nrows, int ncols, const float* x, int ntok, int x_stride,
              std::vector<double>& y, std::vector<double>& scale);
-// Same with int8 activations: x[t][c] = xq * xd[block] (exactly what gemvq_* consume).
+// Same with int8 activations: x[t][c] = xq * xdScale(xd[block]) (exactly what gemvq_* consume).
 void gemvQ8F64(const std::vector<float>& W, int nrows, int ncols, const std::int8_t* xq, const float* xd, int ntok,
                std::vector<double>& y, std::vector<double>& scale);
 
