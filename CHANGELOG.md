@@ -18,6 +18,15 @@ All notable changes to WHIRL are listed here. Versions follow `project(whirl VER
   object, and effort aliases: `max` / `ultra` / `xhigh` / `high` → xhigh, `medium` → medium,
   `low` / `minimal` → low, `none` → thinking off (values are case-insensitive).
 
+- Server: decode floor, `--decode-min-tps N` (env `WHIRL_DECODE_MIN_TPS`, default 20, `0` = off).
+  While other requests prefill long prompts, every streaming request keeps at least N tok/s: prefill
+  forwards are limited to a row budget (whole chunks; the oldest request always progresses) and decode
+  cycles are interleaved, adapted every cycle from the measured decode-cycle time, tokens per cycle and
+  prefill rate. Swift-1.5 27B MXFP4 on the R9700, one stream at 25.7k context + three ~17k-token prompts:
+  the stream goes from 3.3 to 23.0 tok/s (longest pause 1.22 → 0.47 s), prefill throughput meanwhile
+  2791 → 1862 tok/s, mean TTFT of the three 17.8 → 18.6 s. With no slot decoding, prefill is unchanged;
+  outputs are bit-identical for any N; short-prompt C = 1 / C = 4 throughput unchanged.
+
 ### Changed
 
 - Chat requests: an unknown reasoning effort no longer fails the request with 400; the server logs a

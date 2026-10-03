@@ -125,6 +125,7 @@ whirl serve  MODEL.gguf [選項]      （同一支程式）
 | `-c`、`--ctx N` | 共用 KV 池的大小（token）。slot 依需要取用分頁；池滿時，閒置 slot 的前綴快取依最久未使用（LRU）逐出。預設：權重與緩衝區之後剩下的全部 VRAM 減 768 MiB（MoE：1.5 GiB） |
 | `--ctx-per-slot N` | 單一請求的最長 context（預設 min(池大小, 131072)；最多 262144） |
 | `--mtp-drafts N` | 每回合固定的 MTP 草稿數，1～10（預設：依模型類型由成本模型決定） |
+| `--decode-min-tps N` | decode 保底速度：其他請求在 prefill 時，每個串流中（decode 中）的請求至少維持 N tok/s；做法是縮短 prefill forward、穿插 decode cycle（預設 20；`0` = 關閉，prefill forward 不受限）。任何 N 的輸出都相同（[server.md](server.md#batching)） |
 | `--kv-ram-mb N` | 前綴快取的主記憶體層，單位 MiB 的 pinned 記憶體（預設 8192；若一個完整長度 session 更大則取其大小——27B 模型約 9 GiB）。閒置 session 會複製到這裡，下次直接還原而不必重新 prefill。`0` 會關閉兩個 host 層 |
 | `--kv-ssd-dir PATH` | SSD 層目錄（預設 `%LOCALAPPDATA%\whirl\kvcache`） |
 | `--kv-ssd-gb N` | SSD 層容量上限，GiB（預設 64；`0` = 不用 SSD 層） |
@@ -305,6 +306,7 @@ PowerShell 中先用 `$env:WHIRL_KV = "q8v"` 設定再啟動程式。**一般使
 | `WHIRL_PREFILL_CHUNK=N` | 合併後單次 prefill forward 的最多列數（1024 的倍數，預設 2048） |
 | `WHIRL_SEG_PREFILL=0` | 每個請求各自 prefill，不把多個請求放進同一次 forward |
 | `WHIRL_GATHER_MS=MS` | 收集一波新請求的等待時間窗（預設 30，0 = 關閉） |
+| `WHIRL_DECODE_MIN_TPS=N` | 其他請求 prefill 時，每個串流請求的 decode 保底速度（= `--decode-min-tps`，預設 20，0 = 關閉） |
 | `WHIRL_GDN_REPLAY=0` | DeltaNet 驗證改用快照組，不重播保留的列 |
 | `WHIRL_SNAP_SETS=N` | 遞迴狀態快照組的最少數量（搭配 `WHIRL_GDN_REPLAY=0`） |
 | `WHIRL_SLOT_DRAFTS=1` | 依預期接受率在 slot 之間分配草稿預算 |

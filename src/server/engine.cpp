@@ -116,6 +116,8 @@ Engine::Engine(ServerModel& model, tier::DeviceOps& ops, const Tokenizer& tok, c
     conv_bytes_ = m_.convBytes();
     ssm_bytes_ = m_.ssmBytes();
     if (opt_.ngram && opt_.use_mtp) crlf_norm_ = ChatTokens::crlfToLf(tok_);
+    floor_.configure(opt_.decode_min_tps);
+    floor_epoch_ = Clock::now();
 }
 
 Engine::~Engine() {
@@ -1347,7 +1349,9 @@ void Engine::prefillStep(Slot& sl) {
     if (sl.pf_off == toks.size()) finishPrefill(sl);
 }
 
-void Engine::prefillGroup(Slot& first) {
+// Returns the rows run (0 when nothing ran). row_budget caps the rows of the
+// whole forward; the oldest request's chunk always runs (decode floor).
+std::size_t Engine::prefillGroup(Slot& first, std::size_t row_budget) {
     const std::size_t n0 = chunkLen(first);
     const std::size_t small_max = max_small_batch;
     auto solo = [&] {
@@ -1359,9 +1363,9 @@ void Engine::prefillGroup(Slot& first) {
     };
     if (!opt_.seg_prefill || n0 <= small_max || !m_.canSegment()) {
         solo();
-        return;
+        return n0;
     }
-    const std::size_t cap = m_.maxBatch();
+    const std::size_t cap = std::min<std::size_t>(m_.maxBatch(), std::max(row_budget, n0));
     // the other prefilling slots, oldest first
     std::vector<Slot*> cand;
     for (Slot& sl : slots_) {
@@ -1386,7 +1390,7 @@ void Engine::prefillGroup(Slot& first) {
     }
     if (grp.size() == 1) {
         solo();
-        return;
+        return n0;
     }
     // pool pages for every chunk of the group (a slot that cannot get them fails alone)
     {
@@ -1405,7 +1409,7 @@ void Engine::prefillGroup(Slot& first) {
             kept.push_back(sl);
         }
         grp = std::move(kept);
-        if (grp.empty()) return;
+        if (grp.empty()) return 0;
     }
     std::vector<PSeg> segs(grp.size());
     for (std::size_t k = 0; k < grp.size(); ++k) {
@@ -1421,7 +1425,7 @@ void Engine::prefillGroup(Slot& first) {
         m_.prefillSegs(segs, opt_.use_mtp);
     } catch (const std::exception& ex) {
         for (Slot* sl : grp) failSlot(*sl, ex.what());
-        return;
+        return 0;
     }
     stat_prefill_tok_ += total;
     stat_seg_batches_ += 1;
@@ -1450,6 +1454,7 @@ void Engine::prefillGroup(Slot& first) {
             failSlot(sl, ex.what());
         }
     }
+    return static_cast<std::size_t>(r0);
 }
 
 void Engine::finishPrefill(Slot& sl) {
@@ -2622,6 +2627,10 @@ void Engine::logBatchStats(bool force) {
         logI("batch | segmented prefill: {} forwards, {} chunks ({:.2f} chunks/forward)", stat_seg_batches_, stat_seg_chunks_,
              static_cast<double>(stat_seg_chunks_) / static_cast<double>(stat_seg_batches_));
     stat_prefill_tok_ = stat_seg_batches_ = stat_seg_chunks_ = 0;
+    if (stat_floor_periods_ > 0)
+        logI("batch | decode floor: {} prefill forwards while decoding, {} decode cycles held prefill back", stat_floor_periods_,
+             stat_floor_waits_);
+    stat_floor_periods_ = stat_floor_waits_ = 0;
 }
 
 void Engine::submitAndWait(Job& job) {
@@ -2789,6 +2798,16 @@ void Engine::runLoop() {
             if (!pf || sl.job->id < pf->job->id) pf = &sl;
         }
         bool idle_wait = false;
+        // decode floor: only while some slot decodes (otherwise prefill runs as without it)
+        std::vector<DecodeFloor::SlotTok> dec_toks;
+        if (floor_.on()) {
+            for (const Slot& sl : slots_)
+                if (sl.phase == Phase::decode) dec_toks.push_back({sl.id, sl.reqId(), sl.n_gen});
+            if (dec_toks.empty()) floor_.idle();
+        }
+        auto floorNow = [&] { return std::chrono::duration<double, std::milli>(Clock::now() - floor_epoch_).count(); };
+        std::size_t pf_rows = 0;
+        bool floor_pf = false;
         if (pf) {
             // a burst in flight: hold the first chunk briefly so the other
             // requests join its segmented forward
@@ -2796,8 +2815,32 @@ void Engine::runLoop() {
                                 msSince(pf->tp0) < opt_.gather_ms;
             if (gather) {
                 idle_wait = true;
+            } else if (!dec_toks.empty() && !floor_.prefillAllowed(floorNow(), dec_toks)) {
+                // decoding slots are below the floor in this period: a decode cycle alone
+                ++stat_floor_waits_;
             } else {
-                prefillGroup(*pf);
+                std::size_t budget = static_cast<std::size_t>(-1);
+                if (!dec_toks.empty()) {
+                    floor_.startPeriod(floorNow(), dec_toks);
+                    const DecodeFloor::Plan pl = floor_.plan(chunkLen(*pf), m_.maxBatch());
+                    budget = pl.rows;
+                    floor_pf = true;
+                    ++stat_floor_periods_;
+                    if (msSince(floor_log_t_) >= 10000) {
+                        floor_log_t_ = Clock::now();
+                        if (pl.cycles > 0)
+                            logI("decode floor | {:.0f} tok/s per decoding slot ({} decoding): prefill forward <= {} rows, ~{} decode "
+                                 "cycles between forwards{} (cycle {:.1f} ms, prefill {:.0f} rows/s)",
+                                 floor_.minTps(), dec_toks.size(), pl.rows, pl.cycles,
+                                 pl.reachable ? "" : " (floor out of reach: prefill keeps 20% of the time)", floor_.cycleMs(),
+                                 floor_.rowsPerMs() * 1000.0);
+                        else
+                            logI("decode floor | {:.0f} tok/s per decoding slot ({} decoding): prefill forward <= {} rows "
+                                 "(not measured yet)",
+                                 floor_.minTps(), dec_toks.size(), pl.rows);
+                    }
+                }
+                pf_rows = prefillGroup(*pf, budget);
                 if (prof_) prof_->last_end.reset();
             }
         }
@@ -2814,6 +2857,18 @@ void Engine::runLoop() {
             } catch (const std::exception& ex) {
                 for (Slot* sl : act)
                     if (sl->phase == Phase::decode) failSlot(*sl, ex.what());
+            }
+            if (floor_.on()) {
+                // measurements: the cycle synchronizes the stream, so [tl2, now] covers
+                // this iteration's prefill forward too
+                const TimePoint te = Clock::now();
+                const double it_ms = std::chrono::duration<double, std::milli>(te - tl2).count();
+                const double cyc_ms = std::chrono::duration<double, std::milli>(te - tl3).count();
+                std::vector<DecodeFloor::SlotTok> now_dec;
+                for (const Slot& sl : slots_)
+                    if (sl.phase == Phase::decode) now_dec.push_back({sl.id, sl.reqId(), sl.n_gen});
+                floor_.noteCycle(cyc_ms, pf_rows > 0, now_dec);
+                if (floor_pf && pf_rows > 0) floor_.notePrefill(pf_rows, it_ms - std::min(floor_.cycleMs(), 0.5 * it_ms));
             }
         } else if (idle_wait || (restoring && pf == nullptr)) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));

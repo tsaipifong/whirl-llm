@@ -75,6 +75,7 @@ constexpr std::size_t n_spe_default = 2;
 constexpr std::uint32_t sys_min_default = 2048;
 constexpr std::uint64_t kv_ram_mb_default = 8192;
 constexpr std::uint64_t kv_ssd_gb_default = 64;
+constexpr std::uint32_t decode_min_tps_default = 20;
 
 const char* kHelpBody =
     "Loads a qwen35 / qwen35moe GGUF model on the GPU and serves the OpenAI-compatible API\n"
@@ -95,6 +96,9 @@ const char* kHelpBody =
     "                           left over minus 768 MiB (MoE 1.5 GiB); 262144 on the Radeon 8060S)\n"
     "  --ctx-per-slot N         longest context of one request (default min(pool, 131072); up to 262144)\n"
     "  --mtp-drafts N           MTP drafts per cycle, 1..10 (fixed count; default: per model type)\n"
+    "  --decode-min-tps N       while other requests prefill, keep every streaming (decoding) request\n"
+    "                           at >= N tok/s by limiting prefill forwards (default 20; 0 = off:\n"
+    "                           prefill forwards are not limited)\n"
     "  --kv-ram-mb N            host RAM tier of the prefix cache in MiB of pinned memory (default 8192,\n"
     "                           or one full-length session if more; 0 = no host tiers). Idle sessions\n"
     "                           are copied there and restored instead of prefilled again\n"
@@ -122,6 +126,7 @@ struct Options {
     std::uint32_t parallel = 4;
     std::optional<std::uint32_t> ctx_per_slot;
     std::optional<std::uint32_t> mtp_drafts;
+    std::optional<std::uint32_t> decode_min_tps;
     std::optional<std::string> log_file;
     std::optional<std::string> alias;
     std::optional<std::uint64_t> kv_ram_mb;
@@ -216,7 +221,7 @@ std::uint64_t tierFingerprint(const qwen35::Model& m, const std::string& path, c
             static const char* skip[] = {"WHIRL_KV_RAM_MB", "WHIRL_KV_SSD_DIR", "WHIRL_KV_SSD_GB", "WHIRL_KV_SSD_DELAY_MS",
                                          "WHIRL_KV_TIER_MIN", "WHIRL_R9700_LOCK_HELD", "WHIRL_GPU_WAIT", "WHIRL_GPU_SHARE",
                                          "WHIRL_PROFILE", "WHIRL_TRACE_ND", "WHIRL_GATHER_MS", "WHIRL_EXE", "WHIRL_LOOP_LOG",
-                                         "WHIRL_TIER_VERIFY", "WHIRL_TIER_MIN_GAIN"};
+                                         "WHIRL_TIER_VERIFY", "WHIRL_TIER_MIN_GAIN", "WHIRL_DECODE_MIN_TPS"};
             bool sk = false;
             for (const char* x : skip) sk = sk || up == x;
             if (!sk) kv.emplace_back(k, s.substr(eq + 1));
@@ -270,6 +275,8 @@ int serveMain(int argc, char** argv, const char* program) {
         else if (auto v4b = argValue(args, i, "-np")) opt.parallel = parseNum<std::uint32_t>(*v4b, "--parallel");
         else if (auto v5 = argValue(args, i, "--mtp-drafts"))
             opt.mtp_drafts = std::clamp(parseNum<std::uint32_t>(*v5, "--mtp-drafts"), 1u, qwen35::max_drafts);
+        else if (auto v5b = argValue(args, i, "--decode-min-tps"))
+            opt.decode_min_tps = parseNum<std::uint32_t>(*v5b, "--decode-min-tps");
         else if (auto v6 = argValue(args, i, "--ctx-per-slot")) opt.ctx_per_slot = parseNum<std::uint32_t>(*v6, "--ctx-per-slot");
         else if (auto v7 = argValue(args, i, "--log-file")) opt.log_file = *v7;
         else if (auto v8 = argValue(args, i, "--alias")) opt.alias = *v8;
@@ -544,6 +551,11 @@ int serveMain(int argc, char** argv, const char* program) {
             } catch (const std::exception&) {
             }
         }
+        eo.decode_min_tps = opt.decode_min_tps ? *opt.decode_min_tps : envU32("DECODE_MIN_TPS", decode_min_tps_default);
+        if (eo.decode_min_tps > 0)
+            logI("decode floor: >= {:.0f} tok/s per decoding request while others prefill (--decode-min-tps)", eo.decode_min_tps);
+        else
+            logI("decode floor: off (--decode-min-tps 0: prefill forwards are not limited)");
         if (auto v = env("PROFILE")) eo.profile = *v == "2" ? 2 : 1;
         eo.sys_min = envU32("SYS_MIN", sys_min_default);
         eo.lcp_on = envOn("SYS_LCP", true);

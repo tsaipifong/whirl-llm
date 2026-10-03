@@ -19,7 +19,9 @@
 #include "whirl/json.h"
 #include "whirl/tokenizer.h"
 
+#include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -723,8 +725,9 @@ void testPrefixCacheMultiTurn() {
 }
 
 // concurrent requests (more than slots): every output equals its reference
-void testConcurrency(std::uint32_t parallel, std::uint32_t n_req, bool mtp) {
+void testConcurrency(std::uint32_t parallel, std::uint32_t n_req, bool mtp, double floor_tps = 0) {
     ServerSetup su = baseSetup(mtp);
+    su.eo.decode_min_tps = floor_tps;
     su.mc.parallel = parallel;
     su.mc.pool_tokens = 131072;
     TestServer srv(su);
@@ -747,6 +750,155 @@ void testConcurrency(std::uint32_t parallel, std::uint32_t n_req, bool mtp) {
     CHECK_EQ(srv.model().hidMismatch(), 0u);
     const auto h = srv.get("/health");
     CHECK(h.body.find("\"busy\":false") != std::string::npos);
+}
+
+// decode floor bookkeeping (DecodeFloor): pure math on given times
+void testDecodeFloorMath() {
+    using ST = DecodeFloor::SlotTok;
+    {
+        DecodeFloor f(0);
+        CHECK(!f.on());
+        const ST d[1] = {{0, 7, 0}};
+        f.startPeriod(0, d);
+        CHECK(f.prefillAllowed(10, d));
+        CHECK_EQ(f.plan(1024, 4096).rows, std::size_t{4096});  // off: the whole prefill batch
+    }
+    {
+        DecodeFloor f(20);
+        CHECK(f.on());
+        // no period yet / no decoding slot: prefill always allowed
+        const ST d0[1] = {{0, 7, 0}};
+        CHECK(f.prefillAllowed(0, d0));
+        CHECK(f.prefillAllowed(0, {}));
+        f.startPeriod(0, d0);
+        // 400 ms later 2 tokens: 20 tok/s needs 8 -> decode first
+        const ST d1[1] = {{0, 7, 2}};
+        CHECK(!f.prefillAllowed(400, d1));
+        // 500 ms: 10 tokens = 20 tok/s -> prefill may run
+        const ST d2[1] = {{0, 7, 10}};
+        CHECK(f.prefillAllowed(500, d2));
+        // a second slot that starts decoding mid-period is accounted from then
+        f.startPeriod(500, d2);
+        const ST d3[2] = {{0, 7, 30}, {2, 9, 1}};
+        CHECK(f.prefillAllowed(900, d3));   // slot 2 first seen now: owes nothing yet
+        const ST d4[2] = {{0, 7, 30}, {2, 9, 1}};
+        CHECK(!f.prefillAllowed(1000, d4));  // 100 ms, 0 new tokens -> owes 2
+        const ST d5[2] = {{0, 7, 30}, {2, 9, 4}};
+        CHECK(f.prefillAllowed(1000, d5));
+        // a new request in slot 0 restarts its accounting
+        const ST d6[2] = {{0, 8, 0}, {2, 9, 12}};
+        CHECK(f.prefillAllowed(1100, d6));
+        const ST d7[2] = {{0, 8, 0}, {2, 9, 12}};
+        CHECK(!f.prefillAllowed(1300, d7));
+    }
+    {
+        // starvation guard: decode-only time per period <= 4 x its prefill time
+        DecodeFloor f(20);
+        const ST d0[1] = {{1, 3, 0}};
+        f.startPeriod(0, d0);
+        f.notePrefill(1024, 400);
+        const ST d1[1] = {{1, 3, 1}};
+        CHECK(!f.prefillAllowed(1500, d1));  // 1100 ms decode-only < 1600
+        CHECK(f.prefillAllowed(2001, d1));   // >= 1600: prefill runs although below the floor
+    }
+    {
+        // plan: row budget from the prefill rate (stall ~ gap_tokens at the floor rate), and cycles
+        DecodeFloor f(20);
+        const ST d0[1] = {{0, 1, 0}};
+        f.startPeriod(0, d0);
+        CHECK_EQ(f.plan(1024, 4096).rows, std::size_t{1024});  // no measurement yet: the oldest chunk only
+        f.notePrefill(2700, 1000);                              // 2.7 rows/ms
+        for (int i = 0; i < 20; ++i) {
+            const ST d[1] = {{0, 1, static_cast<std::uint64_t>(5 * (i + 1))}};
+            f.noteCycle(40, false, d);                          // 40 ms cycles, 5 tok/cycle
+        }
+        const DecodeFloor::Plan p = f.plan(1024, 4096);
+        CHECK_EQ(p.rows, std::size_t{1350});                    // 2.7 rows/ms * 500 ms
+        CHECK(p.reachable);
+        // k * 5 >= 20 * (0.5 + k * 0.04) -> k >= 10 / 4.2 -> 3
+        CHECK_EQ(p.cycles, 3u);
+        CHECK_EQ(f.plan(2048, 4096).rows, std::size_t{2048});   // the oldest chunk always fits
+        CHECK_EQ(f.plan(1024, 1200).rows, std::size_t{1200});   // never more than the prefill batch
+        DecodeFloor g(10);
+        g.startPeriod(0, d0);
+        g.notePrefill(2700, 1000);
+        CHECK_EQ(g.plan(1024, 4096).rows, std::size_t{2700});  // lower floor: longer forwards allowed
+    }
+    {
+        // floor out of reach (1 tok/cycle at 100 ms < 20 tok/s): flagged, cycles capped
+        DecodeFloor f(20);
+        const ST d0[1] = {{0, 1, 0}};
+        f.startPeriod(0, d0);
+        f.notePrefill(1024, 400);
+        for (int i = 0; i < 10; ++i) {
+            const ST d[1] = {{0, 1, static_cast<std::uint64_t>(i + 1)}};
+            f.noteCycle(100, false, d);
+        }
+        const DecodeFloor::Plan p = f.plan(1024, 4096);
+        CHECK(!p.reachable);
+        CHECK(p.cycles > 0);
+    }
+}
+
+// decode floor end to end (mock with simulated device time): a streaming-length
+// request keeps decoding while three long prompts prefill; outputs stay exact
+void testDecodeFloor() {
+    struct Run {
+        double main_end_ms = 0, last_other_end_ms = 0;
+        bool exact = false;
+    };
+    auto run = [](double floor_tps) {
+        ServerSetup su = baseSetup();
+        su.mc.parallel = 4;
+        su.mc.slot_ctx = 16384;
+        su.mc.pool_tokens = 131072;
+        su.mc.prefill_us_per_row = 100;  // 1024-row chunk ~ 100 ms
+        su.mc.cycle_us = 5000;  // ~600 tok/s alone
+        su.eo.decode_min_tps = floor_tps;
+        TestServer srv(su);
+        const auto pm = makePrompt(300, 500);
+        std::vector<std::vector<std::uint32_t>> po;
+        for (std::uint32_t i = 0; i < 3; ++i) po.push_back(makePrompt(6144, 600 + i));
+        const std::uint32_t g_main = 250;
+        Run r;
+        std::string got_main;
+        std::vector<std::string> got(3);
+        const double t0 = nowSeconds();
+        std::thread tm([&] {
+            auto x = srv.post("/v1/completions", completionBody(pm, g_main, true));
+            got_main = streamText(x, false);
+            r.main_end_ms = (nowSeconds() - t0) * 1000.0;
+        });
+        std::this_thread::sleep_for(std::chrono::milliseconds(60));  // main is decoding
+        std::vector<std::thread> th;
+        std::vector<double> ends(3);
+        for (std::uint32_t i = 0; i < 3; ++i)
+            th.emplace_back([&, i] {
+                auto x = srv.post("/v1/completions", completionBody(po[i], 4));
+                got[i] = completionText(x);
+                ends[i] = (nowSeconds() - t0) * 1000.0;
+            });
+        for (auto& t : th) t.join();
+        tm.join();
+        r.last_other_end_ms = *std::max_element(ends.begin(), ends.end());
+        bool ok = got_main == decode(srv.model().greedyReference(pm, g_main, true));
+        for (std::uint32_t i = 0; i < 3; ++i) ok = ok && got[i] == decode(srv.model().greedyReference(po[i], 4, true));
+        r.exact = ok && srv.model().poison() == 0 && srv.model().hidMismatch() == 0;
+        return r;
+    };
+    g_log.clear();
+    const Run off = run(0);
+    const Run on = run(150);
+    CHECK(off.exact);
+    CHECK(on.exact);
+    // off: the main request advances one cycle per (up to 4096-row) forward and ends after
+    // the prefills; on: >= 150 tok/s over the ~2 s of prefill finishes its 250 tokens first
+    if (g_verbose)
+        std::printf("    floor off: main %.0f ms, others %.0f ms; floor 150: main %.0f ms, others %.0f ms\n", off.main_end_ms,
+                    off.last_other_end_ms, on.main_end_ms, on.last_other_end_ms);
+    CHECK(off.main_end_ms > off.last_other_end_ms);
+    CHECK(on.main_end_ms < on.last_other_end_ms);
+    CHECK(g_log.count("decode floor: ") >= 1);
 }
 
 // small KV pool: idle slots are evicted (LRU) and requests still match
@@ -1228,6 +1380,9 @@ int main(int argc, char** argv) {
         {"concurrency", [] { testConcurrency(4, 12, true); }},
         {"concurrency16", [] { testConcurrency(16, 24, true); }},
         {"concurrency_nomtp", [] { testConcurrency(4, 8, false); }},
+        {"concurrency_floor", [] { testConcurrency(4, 12, true, 20); }},
+        {"decode_floor_math", testDecodeFloorMath},
+        {"decode_floor", testDecodeFloor},
         {"pool", testPoolPressure},
         {"sys_prompt", testSharedSystemPrompt},
         {"tiers", testTiers},

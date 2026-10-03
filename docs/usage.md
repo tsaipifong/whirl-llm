@@ -132,6 +132,7 @@ request slots, a prefix cache in VRAM and host RAM / SSD tiers for idle sessions
 | `-c`, `--ctx N` | size of the shared KV pool in tokens. Slots take pages on demand; when the pool is full, idle slots' prefix caches are evicted (least recently used first). Default: all VRAM left after weights and buffers minus 768 MiB (MoE: 1.5 GiB) |
 | `--ctx-per-slot N` | longest context of one request (default min(pool, 131072); up to 262144) |
 | `--mtp-drafts N` | fixed MTP drafts per cycle, 1–10 (default: chosen per model type by a cost model) |
+| `--decode-min-tps N` | decode floor: while other requests prefill, every streaming (decoding) request keeps at least N tok/s; prefill forwards are shortened and decode cycles interleaved to hold it (default 20; `0` = off, prefill forwards are not limited). Outputs are identical for any N ([server.md](guide/en/server.md#batching)) |
 | `--kv-ram-mb N` | host RAM tier of the prefix cache, MiB of pinned memory (default 8192, or one full-length session if that is larger — about 9 GiB for the 27B model). Idle sessions are copied there and restored instead of prefilled again. `0` disables both host tiers |
 | `--kv-ssd-dir PATH` | SSD tier directory (default `%LOCALAPPDATA%\whirl\kvcache`) |
 | `--kv-ssd-gb N` | SSD tier size cap in GiB (default 64; `0` = no SSD tier) |
@@ -320,6 +321,7 @@ The output always equals plain greedy decoding (with sampling: the same distribu
 | `WHIRL_PREFILL_CHUNK=N` | most rows per merged prefill forward (multiple of 1024, default 2048) |
 | `WHIRL_SEG_PREFILL=0` | prefill each request on its own instead of several in one forward |
 | `WHIRL_GATHER_MS=MS` | window to gather a burst of new requests (default 30, 0 = off) |
+| `WHIRL_DECODE_MIN_TPS=N` | decode floor per streaming request while others prefill (= `--decode-min-tps`, default 20, 0 = off) |
 | `WHIRL_GDN_REPLAY=0` | DeltaNet verify with snapshot sets instead of replaying kept rows |
 | `WHIRL_SNAP_SETS=N` | minimum number of recurrent-state snapshot sets (with `WHIRL_GDN_REPLAY=0`) |
 | `WHIRL_SLOT_DRAFTS=1` | split the draft budget between slots by expected acceptance |

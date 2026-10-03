@@ -27,6 +27,7 @@ model and GPU on disk).
 | `--ctx N` | size of the shared KV pool, tokens | all VRAM left after other buffers, minus a reserve |
 | `--ctx-per-slot N` | per-request context limit | 131,072 (max 262,144) |
 | `--mtp-drafts N` | MTP draft cap 1–10 | dense: automatic, cap 8; MoE: 1 |
+| `--decode-min-tps N` | decode floor per streaming request while others prefill ([§6](#batching)); 0 = off | 20 |
 | `--kv-ram-mb N` | pinned RAM KV tier size; 0 disables RAM and SSD tiers | max(8 GiB, one full f16 session + checkpoints) = 9 GiB for 27B |
 | `--kv-ssd-dir` / `--kv-ssd-gb N` | SSD tier directory / size cap; 0 GB disables SSD | per-user local app-data directory / 64 |
 | `--log-file` | log file (also printed to the console) | per-user local app-data directory |
@@ -45,6 +46,7 @@ Useful environment variables (all of them: [usage.md](../../usage.md#env)):
 | `WHIRL_MTP=0`, `WHIRL_NGRAM=0` | disable MTP / n-gram co-drafting |
 | `WHIRL_MTP_BATCH_DRAFTS=d1,d2,…` | draft caps by number of decoding slots |
 | `WHIRL_GATHER_MS` | burst-gather window for new requests (default 30, 0 = off) |
+| `WHIRL_DECODE_MIN_TPS` | decode floor (= `--decode-min-tps`, default 20, 0 = off) |
 | `WHIRL_PREFILL_CHUNK` | max rows per merged prefill forward (multiple of 1024, default 2048) |
 | `WHIRL_SYS_MIN`, `WHIRL_SYS_CKPTS`, `WHIRL_SYS_LCP=0` | system-prompt checkpoint threshold (2048), VRAM count (2), disable `prefix` checkpoints |
 | `WHIRL_KV_TIER_MIN` | minimum entry size for the tiers (2048 tokens) |
@@ -168,7 +170,47 @@ prefilling request always runs; others join if their next chunk has more than 16
 the small-batch path) and the total stays ≤ 4096. Because every GEMM configuration and MoE tile is
 row-invariant, a batched prefill row equals the solo row bit for bit. When no slot is decoding,
 consecutive chunks of one request merge into forwards of up to 2048 rows
-([kv-and-caching.md](kv-and-caching.md#merge)).
+([kv-and-caching.md](kv-and-caching.md#merge)). While slots decode, the decode floor below limits
+the forward size.
+
+**Decode floor (`--decode-min-tps N`, default 20).** Without it, the loop runs one prefill forward
+(up to 4096 rows of combined chunks, ~1.5 s on the 27B model) per decode cycle, so a streaming request
+advances one cycle per forward while other requests prefill long prompts — about 3 tok/s, which looks
+frozen. With a floor, and only while at least one slot is decoding:
+
+- a prefill forward carries at most a row budget: whole schedule chunks (the oldest request's next
+  chunk always runs, so prefill always progresses), sized from the measured prefill rate so that one
+  forward's stall is about 10 tokens' worth at the floor rate (≈ 1 chunk at N = 20);
+- after each prefill forward, decode cycles run alone until every decoding slot has produced ≥ N
+  tokens per second over the period that began with that forward. The cycle count adapts every cycle
+  to the actual tokens (MTP acceptance, number of decoding slots) and to the measured prefill time
+  (EMAs of decode-cycle time, tokens per cycle and prefill rows/s);
+- if the floor is out of reach even by pure decoding, decode-only time per period is capped at 4 × the
+  period's prefill time, so prefill keeps about 20% of the GPU.
+
+When no slot is decoding, prefill runs exactly as without the floor (full-size merged forwards), and
+burst gathering is unchanged. Only the grouping of rows into forwards and the timing of decode cycles
+change; every GEMM / MoE tile is row-invariant, so outputs are bit-identical for any N (checked for
+every N below, the short-prompt runs and Ornith). A side effect: with a small row budget the waiting
+prompts prefill oldest-first instead of side by side, so the first one is answered much earlier and
+the last one later.
+
+| Swift-1.5 27B MXFP4-A, R9700: one request streaming at a 25.7k-token context, then 3 prompts (15.8k / 17.1k / 18.9k tokens) arrive | N = 0 (off) | 10 | **20** | 30 | 40 |
+|---|---|---|---|---|---|
+| Streaming request while they prefill, tok/s (alone: ~72) | 3.3 | 12.0 | **23.0** | 30.7 | 40.5 |
+| Its longest pause, s | 1.22 | 1.13 | **0.47** | 0.46 | 0.48 |
+| The 3 prompts' TTFT, s | 17.0 / 17.8 / 18.6 | 16.9 / 18.9 / 22.1 | **8.7 / 19.2 / 27.8** | 9.5 / 21.1 / 33.4 | 13.8 / 27.5 / 45.6 |
+| Mean TTFT, s | 17.8 | 19.3 | **18.6** | 21.3 | 29.0 |
+| Prefill throughput while streaming, tok/s | 2791 | 2341 | **1862** | 1551 | 1137 |
+
+Ornith-1.5-35B-A3B MXFP4 (MoE), same scenario: N = 0 → 20 raises the streaming request from 6.7 to
+31.5 tok/s (alone ~230; longest pause 0.39 → 0.43 s) and moves the last TTFT from 5.8 to 6.8 s
+(prefill 8986 → 7653 tok/s). Short prompts are unaffected: Swift MXFP4-A, ~1.1k-token prompts, 256
+generated, 3 runs each, C = 1 81.0 → 82.0 tok/s and C = 4 187.5 → 186.5 tok/s for N = 0 → 20 (run-to-run
+noise; the floor held back no prefill there), outputs identical. 20 is the default: the stream stays
+readable (> 20 tok/s, pauses < 0.5 s) for about a third of the prefill throughput, while the mean TTFT
+of the waiting prompts stays the same. Use 0 for batch jobs where only total throughput matters, or a
+higher N for a smoother stream at the cost of slower prefill.
 
 **Burst gathering.** Requests that are still being received, parsed or tokenized are counted; while
 any exist, a new request's first prefill chunk waits up to 30 ms so a burst of requests enters the
@@ -176,7 +218,8 @@ same segmented forward. A single user never waits (their own request is already 
 it, the first request of a burst prefilled alone and then stalled 2.4 s while the others prefilled.
 
 **Stalls.** When another user submits a 14k-token prompt, a streaming request's longest pause was
-0.90 s (MoE: 0.25 s).
+0.90 s (MoE: 0.25 s) before the decode floor; with three long prompts at once it was 1.22 s and the
+stream fell to 3 tok/s (table above), 0.47 s and 23 tok/s with the default floor.
 
 | Concurrency (27B Q4_K_M, ~1.1k-token prompts, 256 generated, greedy) | C = 1 | C = 2 | C = 4 |
 |---|---|---|---|

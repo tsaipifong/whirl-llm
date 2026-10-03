@@ -341,6 +341,7 @@ constexpr EnvDoc k_env[] = {
     {"Server", "PREFILL_CHUNK=N", "most rows per merged prefill forward (multiple of 1024, default 2048)", S},
     {"Server", "SEG_PREFILL=0", "prefill each request on its own instead of several in one forward", S},
     {"Server", "GATHER_MS=MS", "window to gather a burst of new requests (default 30, 0 = off)", S},
+    {"Server", "DECODE_MIN_TPS=N", "decode floor per streaming request while others prefill (= --decode-min-tps, default 20, 0 = off)", S},
     {"Server", "GDN_REPLAY=0", "DeltaNet verify with snapshot sets instead of replaying kept rows", S},
     {"Server", "SNAP_SETS=N", "minimum number of recurrent-state snapshot sets (with GDN_REPLAY=0)", S},
     {"Server", "SLOT_DRAFTS=1", "split the draft budget between slots by expected acceptance", S},

@@ -25,6 +25,7 @@ Base URL 為 `http://127.0.0.1:8080/v1`；接受任何 API key。模型只載入
 | `--ctx N` | 共用 KV 池的大小，單位 token | 其他緩衝區配置後剩下的全部 VRAM，扣掉一段保留量 |
 | `--ctx-per-slot N` | 每個請求的上下文上限 | 131,072（最大 262,144） |
 | `--mtp-drafts N` | MTP 草稿上限 1–10 | dense：自動，上限 8；MoE：1 |
+| `--decode-min-tps N` | 其他請求 prefill 時，每個串流請求的 decode 保底速度（[§6](#batching)）；0 = 關閉 | 20 |
 | `--kv-ram-mb N` | pinned RAM KV 層大小；0 會停用 RAM 與 SSD 層 | max(8 GiB, 一個完整 f16 session + 檢查點) = 27B 為 9 GiB |
 | `--kv-ssd-dir` / `--kv-ssd-gb N` | SSD 層目錄 / 大小上限；0 GB 停用 SSD | 每位使用者的本機 app-data 目錄 / 64 |
 | `--log-file` | 記錄檔（同時印到主控台） | 每位使用者的本機 app-data 目錄 |
@@ -43,6 +44,7 @@ Base URL 為 `http://127.0.0.1:8080/v1`；接受任何 API key。模型只載入
 | `WHIRL_MTP=0`、`WHIRL_NGRAM=0` | 停用 MTP / n-gram 共同草擬 |
 | `WHIRL_MTP_BATCH_DRAFTS=d1,d2,…` | 依 decode 中 slot 數決定的草稿上限 |
 | `WHIRL_GATHER_MS` | 新請求的突發收集視窗（預設 30，0 = 關閉） |
+| `WHIRL_DECODE_MIN_TPS` | decode 保底速度（= `--decode-min-tps`，預設 20，0 = 關閉） |
 | `WHIRL_PREFILL_CHUNK` | 每次合併 prefill forward 的最大列數（1024 的倍數，預設 2048） |
 | `WHIRL_SYS_MIN`、`WHIRL_SYS_CKPTS`、`WHIRL_SYS_LCP=0` | system prompt 檢查點門檻（2048）、VRAM 中的數量（2）、停用 `prefix` 檢查點 |
 | `WHIRL_KV_TIER_MIN` | 各層的最小項目大小（2048 tokens） |
@@ -156,13 +158,51 @@ Dense 依 decode 中 slot 數的上限：1–4 個 slot 分別為 8 / 7 / 4 / 3�
 最舊的 prefill 中請求一定會執行；其他請求在下一塊超過 16 列（避開小批次路徑）且總數維持 ≤ 4096
 時才加入。由於每種 GEMM 配置與 MoE tile 都與列無關（row-invariant），批次 prefill 的一列與單獨執行
 的一列逐位元相同。沒有 slot 在 decode 時，同一請求的連續區塊會合併成最多 2048 列的 forward
-（[kv-and-caching.md](kv-and-caching.md#merge)）。
+（[kv-and-caching.md](kv-and-caching.md#merge)）。有 slot 在 decode 時，由下述的 decode 保底速度限制
+forward 大小。
+
+**Decode 保底速度（`--decode-min-tps N`，預設 20）。** 沒有它時，主迴圈每個 decode cycle 會跑一次
+prefill forward（合併的區塊最多 4096 列，27B 模型約 1.5 s），所以其他請求在 prefill 長 prompt 時，
+串流中的請求每次 forward 只前進一個 cycle——約 3 tok/s，看起來像卡住。設定保底後，且只在至少有一個
+slot 在 decode 時：
+
+- 一次 prefill forward 最多帶一個列數預算：完整的排程區塊（最舊請求的下一塊一定會執行，所以 prefill
+  永遠有進度），依量測到的 prefill 速度決定大小，使一次 forward 造成的停頓約等於保底速度下 10 個
+  token 的時間（N = 20 時約 1 塊）；
+- 每次 prefill forward 之後，單獨執行 decode cycle，直到每個 decode 中的 slot 在「從這次 forward 開始
+  的這段期間」內產生 ≥ N tok/s。cycle 數每個 cycle 都依實際產生的 token（MTP 接受率、decode 中 slot 數）
+  與量測到的 prefill 時間調整（decode cycle 時間、每 cycle token 數、prefill 列/秒的 EMA）；
+- 若連純 decode 都達不到保底速度，每段期間的純 decode 時間上限為該期間 prefill 時間的 4 倍，prefill
+  仍保有約 20% 的 GPU 時間。
+
+沒有 slot 在 decode 時，prefill 與沒有保底時完全相同（完整大小的合併 forward），突發收集也不變。
+改變的只有「哪些列放進同一次 forward」與 decode cycle 的時機；每種 GEMM / MoE tile 都與列無關，
+所以任何 N 的輸出都逐位元相同（下表每個 N、短 prompt 測試與 Ornith 都驗證過）。附帶效果：列數預算
+小時，等待中的 prompt 改為依先後順序 prefill，而不是並排進行，所以第一個很早就得到回應，最後一個較晚。
+
+| Swift-1.5 27B MXFP4-A，R9700：一個請求在 25.7k token context 下串流，接著 3 個 prompt（15.8k / 17.1k / 18.9k token）同時到達 | N = 0（關） | 10 | **20** | 30 | 40 |
+|---|---|---|---|---|---|
+| 它們 prefill 期間串流請求的速度，tok/s（單獨：約 72） | 3.3 | 12.0 | **23.0** | 30.7 | 40.5 |
+| 串流請求最長的停頓，s | 1.22 | 1.13 | **0.47** | 0.46 | 0.48 |
+| 3 個 prompt 的 TTFT，s | 17.0 / 17.8 / 18.6 | 16.9 / 18.9 / 22.1 | **8.7 / 19.2 / 27.8** | 9.5 / 21.1 / 33.4 | 13.8 / 27.5 / 45.6 |
+| 平均 TTFT，s | 17.8 | 19.3 | **18.6** | 21.3 | 29.0 |
+| 串流期間的 prefill 吞吐量，tok/s | 2791 | 2341 | **1862** | 1551 | 1137 |
+
+Ornith-1.5-35B-A3B MXFP4（MoE），同一情境：N = 0 → 20 時串流請求從 6.7 提高到 31.5 tok/s（單獨約
+230；最長停頓 0.39 → 0.43 s），最後一個 TTFT 從 5.8 變為 6.8 s（prefill 8986 → 7653 tok/s）。短
+prompt 不受影響：Swift MXFP4-A，約 1.1k token prompt、生成 256、各跑 3 次，N = 0 → 20 時 C = 1 為
+81.0 → 82.0 tok/s，C = 4 為 187.5 → 186.5 tok/s（屬於每次執行的雜訊；那裡保底機制沒有擋下任何
+prefill），輸出相同。預設取 20：串流維持可讀（> 20 tok/s、停頓 < 0.5 s），代價約三分之一的 prefill
+吞吐量，而等待中 prompt 的平均 TTFT 不變。只在乎總吞吐量的批次工作可用 0；想要更順的串流可設更高的
+N，代價是 prefill 變慢。
 
 **突發收集。** 仍在接收、解析或 tokenize 中的請求會被計數；只要還有這種請求，新請求的第一個 prefill
 區塊最多等待 30 ms，讓一波突發請求進入同一次分段 forward。單一使用者永遠不會等待（自己的請求早已
 排入佇列）。沒有這個機制時，突發中的第一個請求會單獨 prefill，然後在其他請求 prefill 時停頓 2.4 s。
 
-**停頓。** 當另一位使用者送出 14k token 的 prompt 時，串流請求最長的停頓為 0.90 s（MoE：0.25 s）。
+**停頓。** 當另一位使用者送出 14k token 的 prompt 時，串流請求最長的停頓為 0.90 s（MoE：0.25 s），
+這是加入 decode 保底速度之前的數字；三個長 prompt 同時到達時為 1.22 s，串流掉到 3 tok/s（見上表），
+預設保底下為 0.47 s、23 tok/s。
 
 | 並行度（27B Q4_K_M，約 1.1k token prompt，生成 256，greedy） | C = 1 | C = 2 | C = 4 |
 |---|---|---|---|
