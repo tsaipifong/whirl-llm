@@ -21,7 +21,7 @@ WHIRL 走專門化路線，而不是泛用引擎：一次加入一種模型架�
 
 | | |
 |---|---|
-| GPU | **AMD Radeon AI PRO R9700**（RDNA 4，gfx1201）——必要；只支援單張 GPU。Ryzen AI Max+ 395（Radeon 8060S）版本在規劃中 |
+| GPU | **AMD Radeon AI PRO R9700**（RDNA 4，gfx1201）——必要；只支援單張 GPU。**Radeon 8060S（Ryzen AI Max+ 395，gfx1151）支援開發中**，見 [`gfx1151` 分支](https://github.com/tsaipifong/whirl-llm/tree/gfx1151) |
 | 作業系統 | **Windows 11**，64 位元 |
 | 驅動程式 | **AMD Software: Adrenalin Edition 26.8.1**（驅動程式 32.0.31041.1004）或更新版 |
 | 執行 | 只需要驅動程式（它會安裝 `amdhip64_7.dll` 與 `amd_comgr_3.dll`）。不用 HIP SDK、不用 ROCm、不用 Visual C++ runtime |
