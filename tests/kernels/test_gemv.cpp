@@ -6,7 +6,8 @@
 //     reproduce the 1-token gemvq_<T> result bitwise per token row;
 //   * grouped one-launch GEMV over 3 matrices == separate launches (bitwise);
 //   * accumulate = 1 adds onto y exactly once (bitwise);
-//   * the 2-bit MTP draft head GEMV (gemv_d2_nt*) multi-token == 1-token.
+//   * the 2-bit MTP draft head GEMV (gemv_d2_nt*) multi-token == 1-token;
+//   * the wide GEMV gemvx_v6_<T> (17..32 tokens) == 1-token, rows past the count untouched.
 // SPDX-License-Identifier: Apache-2.0
 
 #include "cpu_ref.h"
@@ -160,6 +161,59 @@ void testGemv(Ctx& c) {
                     if (first_bad.empty()) first_bad = "nt=" + std::to_string(nt) + " " + v.label;
                 }
             }
+        }
+        // strided 16-token head kernel over row ranges (wide verify output head) == 1-token
+        if (m.type == QType::q6_k && c.k.gemvw_head_s != nullptr) {
+            y.fill(0xff);
+            const int chunk = 96;  // several ranges, the last one partial
+            for (int r0 = 0; r0 < nrows; r0 += chunk) {
+                const int cr = std::min(chunk, nrows - r0);
+                hip::launch(c.k.gemvw_head_s, {cdiv(cr, 32), 1, 1}, {256, 1, 1}, 0, c.s, w.p() + static_cast<std::uint64_t>(r0) * m.row_bytes,
+                            m.row_bytes, xq.p(), xd.p(), y.p() + static_cast<std::uint64_t>(r0) * 4, ncols, cr, nrows, 0, DevPtr{0});
+            }
+            c.sync();
+            c.rep.add(cmpExact("gemvw_nt16v2s_q6_k (row ranges, y stride) == 1-token " + m.name,
+                               y.down<float>(static_cast<std::size_t>(kNt) * nrows), ref1, Kind::invariant));
+        }
+        // wide GEMV (gemvx_v6_<T>, 17..32 tokens of one batched verify) == 1-token
+        if (c.k.gemvx[ti] != nullptr) {
+            constexpr int kW = wk::kMaxVerifyRows;
+            const std::vector<float> xw = c.randn(static_cast<std::size_t>(kW) * ncols);
+            Buf dxw(xw), xqw(static_cast<std::size_t>(kW) * ncols), xdw(static_cast<std::size_t>(kW) * ncols / 32 * 4);
+            hip::launch(c.k.quantize_q8, {cdiv(static_cast<std::uint64_t>(kW) * ncols, 256), 1, 1}, {256, 1, 1}, 0, c.s, dxw.p(), xqw.p(),
+                        xdw.p(), kW * ncols);
+            Buf yw1(static_cast<std::size_t>(kW) * nrows * 4), yw(static_cast<std::size_t>(kW) * nrows * 4);
+            for (int t = 0; t < kW; ++t)
+                gemvq1(c, m.type, w, m.row_bytes, nrows, xqw.p() + static_cast<std::uint64_t>(t) * ncols,
+                       xdw.p() + static_cast<std::uint64_t>(t) * (ncols / 32) * 4, yw1.p() + static_cast<std::uint64_t>(t) * nrows * 4, ncols, 0);
+            c.sync();
+            const auto refw = yw1.down<float>(static_cast<std::size_t>(kW) * nrows);
+            std::size_t badw = 0, nw = 0;
+            for (int nt : {17, 24, 32}) {
+                yw.fill(0xff);
+                hip::launch(c.k.gemvx[ti], {cdiv(nrows, 16), 1, 1}, {256, 1, 1}, 0, c.s, w.p(), m.row_bytes, xqw.p(), xdw.p(), yw.p(), ncols,
+                            nrows, 0, DevPtr{0}, nt);
+                c.sync();
+                const auto got = yw.down<float>(static_cast<std::size_t>(kW) * nrows);
+                nw += static_cast<std::size_t>(nt) * nrows;
+                badw += std::memcmp(got.data(), refw.data(), static_cast<std::size_t>(nt) * nrows * 4) != 0;
+                // rows >= nt untouched (0xff fill)
+                for (std::size_t i = static_cast<std::size_t>(nt) * nrows; i < got.size(); ++i) {
+                    std::uint32_t u;
+                    std::memcpy(&u, &got[i], 4);
+                    if (u != 0xffffffffu) {
+                        ++badw;
+                        break;
+                    }
+                }
+            }
+            Result rw;
+            rw.name = "gemvx_v6 (17 / 24 / 32 tokens) == 1-token " + m.name;
+            rw.kind = Kind::invariant;
+            rw.n = nw;
+            rw.mismatches = badw;
+            rw.pass = badw == 0;
+            c.rep.add(rw);
         }
         Result r;
         r.name = "multi-token/multi-row/WMMA GEMV == 1-token (" + std::to_string(variants) + " kernels) " + m.name;

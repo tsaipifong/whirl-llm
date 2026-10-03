@@ -468,7 +468,7 @@ __device__ __forceinline__ void gemvw8_impl(const uint8_t *__restrict__ W, uint6
 template <int T, int NT, int TILES, int PIN>
 __device__ __forceinline__ void gemvw_impl(const uint8_t *__restrict__ W, uint64_t row_bytes, const int8_t *__restrict__ xq,
                            const float *__restrict__ xd, float *__restrict__ y, int ncols, int nrows, int accumulate,
-                           const int *__restrict__ skip, int bid) {
+                           const int *__restrict__ skip, int bid, int ystride = 0) {
     constexpr int ROWS = 16 * TILES;
     constexpr int NV = NT < 8 ? NT : 8;  // D rows (tokens) per lane half
     __shared__ float red[8][NT][ROWS];
@@ -541,7 +541,7 @@ __device__ __forceinline__ void gemvw_impl(const uint8_t *__restrict__ W, uint64
         const float s = ((red[0][t][nn] + red[4][t][nn]) + (red[2][t][nn] + red[6][t][nn])) +
                         ((red[1][t][nn] + red[5][t][nn]) + (red[3][t][nn] + red[7][t][nn]));
         if (row < nrows) {
-            float *dst = y + (size_t)t * nrows + row;
+            float *dst = y + (size_t)t * (ystride ? ystride : nrows) + row;
             *dst = accumulate ? *dst + s : s;
         }
     }
@@ -581,6 +581,15 @@ __device__ __forceinline__ void gemvw_impl(const uint8_t *__restrict__ W, uint64
     GEMVW_ENTRY(NT, V, TILES, PIN, iq4_nl, QT_IQ4_NL)   \
     GEMVW8_ENTRY(NT, V, TILES, PIN, q3_k, QT_Q3_K)
 // (v3 = (1, 2) measured never better than v1 / v2 on the 27B; not built)
+// Output head of a wide (17..32-row) verify: 16 tokens over a range of head rows at a time,
+// with the logits row stride passed separately (ystride = n_vocab), so the host can run the
+// two token passes of each row range back to back and the second pass reads the weights
+// from cache. Same kernel body as gemvw_nt16v2_q6_k.
+extern "C" __global__ void __launch_bounds__(256)
+    gemvw_nt16v2s_q6_k(const uint8_t *W, uint64_t row_bytes, const int8_t *xq, const float *xd, float *y, int ncols, int nrows,
+                       int ystride, int accumulate, const int *skip) {
+    gemvw_impl<QT_Q6_K, 16, 2, 1>(W, row_bytes, xq, xd, y, ncols, nrows, accumulate, skip, blockIdx.x, ystride);
+}
 #define GEMVW_NT(NT) GEMVW_TYPES(NT, 1, 1, 1) GEMVW_TYPES(NT, 2, 2, 1) GEMVW_TYPES(NT, 4, 2, 2)
 GEMVW_NT(2)
 GEMVW_NT(3)

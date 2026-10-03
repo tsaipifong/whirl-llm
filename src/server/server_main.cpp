@@ -191,7 +191,9 @@ bool envOn(std::string_view name, bool def) {
 }
 
 // Default max drafts per cycle by number of decoding slots (index = slots).
-std::array<std::uint32_t, gdn_max_seg + 1> defaultBatchDrafts(bool moe) {
+// wide: verify batches of up to 32 rows (otherwise 16); the cost model picks within the cap.
+std::array<std::uint32_t, gdn_max_seg + 1> defaultBatchDrafts(bool moe, bool wide) {
+    (void)wide;
     if (moe) return {0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0};
     return {0, 8, 7, 4, 3, 2, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0};
 }
@@ -436,7 +438,9 @@ int serveMain(int argc, char** argv, const char* program) {
         }
         // an explicit draft count is used as is (fixed) unless WHIRL_MTP_ADAPT asks otherwise
         const bool auto_mode = adapt_env ? (*adapt_env == "auto") : (def.automatic && !drafts_user);
-        auto batch_drafts = defaultBatchDrafts(model.cfg.moe);
+        if (!envOn("WIDE_VERIFY", true)) model.wide_verify = false;
+        if (auto hc = env("HEAD_CHUNK")) model.head_chunk = std::max<std::uint32_t>(32, static_cast<std::uint32_t>(std::stoul(*hc)) / 32 * 32);
+        auto batch_drafts = defaultBatchDrafts(model.cfg.moe, model.wideCapable());
         batch_drafts[1] = drafts;
         const auto bd_env = env("MTP_BATCH_DRAFTS");
         if (bd_env) {

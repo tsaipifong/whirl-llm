@@ -77,6 +77,9 @@ constexpr std::uint32_t max_batch_default = 4096;
 constexpr std::uint32_t max_batch_limit = 16384;
 // Largest batch served by the multi-token int8 GEMV / small-batch kernels.
 constexpr std::uint32_t max_small_batch = 16;
+// Most rows of one batched verify / MTP step over several sequences (dense models with the
+// wide GEMV kernels; each sequence still has at most max_small_batch rows).
+constexpr std::uint32_t max_verify_rows = 32;
 // Most MTP drafts per verify cycle.
 constexpr std::uint32_t max_drafts = 10;
 // Recurrent-state segments / snapshots per segment in the fused DeltaNet kernels.
@@ -129,10 +132,11 @@ using GvArgs = kernels::GvArgs;
 using KvArgs = kernels::KvArgs;
 using Tok16 = kernels::Tok16;
 using RowTab = kernels::RowTab;
-using Idx16 = kernels::Idx16;
+using RowIdx = kernels::RowIdx;
 using AwGroups = kernels::AwGroups;
 static_assert(kv_page == kernels::kKvPage && gdn_max_seg == kernels::kGdnMaxSeg && gdn_max_snap == kernels::kGdnMaxSnap &&
-              max_small_batch == kernels::kMaxSmallBatch && max_drafts == kernels::kMaxDrafts && n_types == kernels::kNTypes);
+              max_small_batch == kernels::kMaxSmallBatch && max_drafts == kernels::kMaxDrafts && n_types == kernels::kNTypes &&
+              max_verify_rows == kernels::kMaxVerifyRows);
 static_assert(ctl_rows == kernels::kCtlRows && ctl_drafts == kernels::kCtlDrafts && ctl_probs == kernels::kCtlProbs &&
               ctl_nd == kernels::kCtlNd && ctl_stop == kernels::kCtlStop && ctl_words == kernels::kCtlWords);
 // ---------------------------------------------------------------------------
@@ -381,8 +385,11 @@ public:
     bool head_phase = false;
     bool no_fuse = false;
     std::uint32_t row_n = 0;
-    std::array<std::int32_t, max_small_batch> row_pos{};
-    std::array<std::int32_t, max_small_batch> row_base{};
+    std::array<std::int32_t, max_verify_rows> row_pos{};
+    std::array<std::int32_t, max_verify_rows> row_base{};
+    // most rows the GEMV / decode-fusion paths take in the current forward: max_small_batch,
+    // raised to max_verify_rows inside a wide batched verify / MTP step (see wideOk())
+    std::uint32_t small_max = max_small_batch;
     std::uint32_t dbg_flags = 0;
     std::uint64_t tune_mask = ~0ull;
     bool tune_cold = false;
@@ -390,6 +397,10 @@ public:
     // verify attention: groups of up to 32 columns (attn_wsplit2) when that lets a
     // sequence's rows share one K/V pass (WHIRL_ATTN_WIDE=0: <= 16 columns as before)
     bool attn_wide = true;
+    // batched verify of more than 16 rows (WHIRL_WIDE_VERIFY=0: at most 16 as before)
+    bool wide_verify = true;
+    // output-head rows per range in a wide verify (two 16-token passes per range; WHIRL_HEAD_CHUNK)
+    std::uint32_t head_chunk = 248320;
     bool float_gemv = false;
     std::uint32_t gemv_max = max_small_batch;
     GemvR gemv_r = defaultGemvR();
@@ -576,6 +587,11 @@ public:
     void restoreSnapshot(std::uint32_t keep);
     void restoreSeqSnapshot(std::uint32_t s, std::uint32_t set);
     bool fusedDecode() const;
+    // batched verify / MTP steps of up to max_verify_rows rows (dense, fused decode, replay)
+    bool wideOk() const;
+    // wideOk() before setupSeqs decides replay (which wide batches also need)
+    bool wideCapable() const;
+    std::uint32_t verifyRows() const { return wideOk() ? max_verify_rows : max_small_batch; }
 
     // MTP block Q6_K matrices as Q4_K (drafts only).
     void requantMtpQ4();
@@ -631,6 +647,9 @@ private:
     std::optional<ActIn> actCommon(std::span<const Mat> consumers, std::uint32_t n, std::uint8_t cls) const;
     void rmsnormIn(DevPtr xin, DevPtr w, DevPtr out, std::uint32_t n, std::span<const Mat> consumers, std::uint8_t cls);
     bool fused(std::uint32_t n) const;
+    // most tokens of the int8 GEMV path in the current forward
+    std::uint32_t gvMax() const { return small_max > max_small_batch ? small_max : gemv_max; }
+    void gemvKernels(std::span<const Mat> ws, std::span<const DevPtr> ys, std::uint32_t n, std::int32_t acc, DevPtr xqp, DevPtr xdp);
     bool gdnAbFusable(const GdnW& g) const;
     void rmsnormQ8(DevPtr xin, DevPtr w, DevPtr out, std::uint32_t n);
     void elementwise(hip::Function f, DevPtr a, DevPtr b, std::uint32_t n);

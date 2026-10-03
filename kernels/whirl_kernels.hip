@@ -25,6 +25,7 @@
 #include "gemv_mr.hip"             // multi-row multi-token GEMV
 #include "gemv_w.hip"              // mid-batch WMMA GEMV
 #include "gemv_wp.hip"             // pipelined mid-batch WMMA GEMV
+#include "gemv_wx.hip"             // wide mid-batch WMMA GEMV (17..32 tokens)
 #include "fused_decode.hip"        // decode fusions (norm+quant, fused DeltaNet)
 #include "misc_rows_norm.hip"      // get_rows, norms, rope, elementwise
 #include "attn.hip"                // paged KV + decode / split / prefill attention

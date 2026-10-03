@@ -110,6 +110,7 @@ public:
         p.record(m_.stream, qwen35::OpClass::misc);
     }
     void profileStop() override { m_.prof = nullptr; }
+    std::uint32_t verifyRows() const override { return m_.verifyRows(); }
     void profileFlush(std::size_t slots) override {
         if (prof_mtp_[slots]) prof_mtp_[slots]->flush();
         if (prof_ver_[slots]) prof_ver_[slots]->flush();

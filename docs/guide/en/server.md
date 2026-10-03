@@ -176,41 +176,47 @@ the forward size.
 **Decode floor (`--decode-min-tps N`, default 20).** Without it, the loop runs one prefill forward
 (up to 4096 rows of combined chunks, ~1.5 s on the 27B model) per decode cycle, so a streaming request
 advances one cycle per forward while other requests prefill long prompts — about 3 tok/s, which looks
-frozen. With a floor, and only while at least one slot is decoding:
+frozen.
 
+The decode floor protects **interactive streaming streams that a user is actively reading**: it only
+protects slots that were already in the decode phase before the arrival of the current batch of prefill
+requests (`job->t_arrive + gather_ms < min_t_arrive` and `td0 < max_t_arrive`). Requests arriving
+within the same burst window do not protect against one another and are merged for full-speed prefill
+without spurious floor throttling.
+
+With a floor, and only while protected slots are decoding:
 - a prefill forward carries at most a row budget: whole schedule chunks (the oldest request's next
   chunk always runs, so prefill always progresses), sized from the measured prefill rate so that one
   forward's stall is about 10 tokens' worth at the floor rate (≈ 1 chunk at N = 20);
-- after each prefill forward, decode cycles run alone until every decoding slot has produced ≥ N
-  tokens per second over the period that began with that forward. The cycle count adapts every cycle
+- after each prefill forward, decode cycles run alone until every protected decoding slot has produced
+  ≥ N tokens per second over the period that began with that forward. The cycle count adapts every cycle
   to the actual tokens (MTP acceptance, number of decoding slots) and to the measured prefill time
   (EMAs of decode-cycle time, tokens per cycle and prefill rows/s);
 - if the floor is out of reach even by pure decoding, decode-only time per period is capped at 4 × the
   period's prefill time, so prefill keeps about 20% of the GPU.
 
-When no slot is decoding, prefill runs exactly as without the floor (full-size merged forwards), and
-burst gathering is unchanged. Only the grouping of rows into forwards and the timing of decode cycles
+When no protected slot is decoding, prefill runs exactly as without the floor (full-size merged forwards),
+and burst gathering is unchanged. Only the grouping of rows into forwards and the timing of decode cycles
 change; every GEMM / MoE tile is row-invariant, so outputs are bit-identical for any N (checked for
 every N below, the short-prompt runs and Ornith). A side effect: with a small row budget the waiting
 prompts prefill oldest-first instead of side by side, so the first one is answered much earlier and
 the last one later.
 
-| Swift-1.5 27B MXFP4-A, R9700: one request streaming at a 25.7k-token context, then 3 prompts (15.8k / 17.1k / 18.9k tokens) arrive | N = 0 (off) | 10 | **20** | 30 | 40 |
-|---|---|---|---|---|---|
-| Streaming request while they prefill, tok/s (alone: ~72) | 3.3 | 12.0 | **23.0** | 30.7 | 40.5 |
-| Its longest pause, s | 1.22 | 1.13 | **0.47** | 0.46 | 0.48 |
-| The 3 prompts' TTFT, s | 17.0 / 17.8 / 18.6 | 16.9 / 18.9 / 22.1 | **8.7 / 19.2 / 27.8** | 9.5 / 21.1 / 33.4 | 13.8 / 27.5 / 45.6 |
-| Mean TTFT, s | 17.8 | 19.3 | **18.6** | 21.3 | 29.0 |
-| Prefill throughput while streaming, tok/s | 2791 | 2341 | **1862** | 1551 | 1137 |
+| Scenario B: Swift-1.5 27B MXFP4-A, R9700: main stream at various contexts, then 3 subagent prompts (15.8k / 17.1k / 18.9k tokens) arrive | 25.7k context (N = 0) | 25.7k context (**N = 20**) | 97.4k context (**N = 20**) | 123.7k context (**N = 20**) |
+|---|---|---|---|---|
+| Main stream rate while they prefill, tok/s | 3.2 | **23.7** | **23.0** | **23.1** |
+| Main stream longest pause, s | 1.217 | **0.499** | **0.482** | **0.479** |
+| The 3 subagents' TTFT, s | 17.0 / 17.8 / 18.5 | **8.5 / 17.0 / 27.3** | **10.1 / 18.8 / 28.6** | **9.7 / 22.2 / 31.8** |
+| Subagents prefill throughput while streaming, tok/s | 2797 | **1897** | **1813** | **1629** |
 
 Ornith-1.5-35B-A3B MXFP4 (MoE), same scenario: N = 0 → 20 raises the streaming request from 6.7 to
 31.5 tok/s (alone ~230; longest pause 0.39 → 0.43 s) and moves the last TTFT from 5.8 to 6.8 s
 (prefill 8986 → 7653 tok/s). Short prompts are unaffected: Swift MXFP4-A, ~1.1k-token prompts, 256
-generated, 3 runs each, C = 1 81.0 → 82.0 tok/s and C = 4 187.5 → 186.5 tok/s for N = 0 → 20 (run-to-run
-noise; the floor held back no prefill there), outputs identical. 20 is the default: the stream stays
-readable (> 20 tok/s, pauses < 0.5 s) for about a third of the prefill throughput, while the mean TTFT
-of the waiting prompts stays the same. Use 0 for batch jobs where only total throughput matters, or a
-higher N for a smoother stream at the cost of slower prefill.
+generated, Scenario A (C = 4 concurrent arrival) finishes in wall 4.67 s with 288.8 tok/s decode
+in steady state without triggering the floor, merging 3 requests into one prefill forward. 20 is
+the default: the stream stays readable (> 20 tok/s, pauses < 0.5 s) for about a third of the prefill
+throughput, while the mean TTFT of the waiting prompts stays the same. Use 0 for batch jobs where
+only total throughput matters, or a higher N for a smoother stream at the cost of slower prefill.
 
 **Burst gathering.** Requests that are still being received, parsed or tokenized are counted; while
 any exist, a new request's first prefill chunk waits up to 30 ms so a burst of requests enters the
@@ -219,13 +225,13 @@ it, the first request of a burst prefilled alone and then stalled 2.4 s while th
 
 **Stalls.** When another user submits a 14k-token prompt, a streaming request's longest pause was
 0.90 s (MoE: 0.25 s) before the decode floor; with three long prompts at once it was 1.22 s and the
-stream fell to 3 tok/s (table above), 0.47 s and 23 tok/s with the default floor.
+stream fell to 3 tok/s (table above), 0.48–0.50 s and 23 tok/s with the default floor.
 
-| Concurrency (27B Q4_K_M, ~1.1k-token prompts, 256 generated, greedy) | C = 1 | C = 2 | C = 4 |
+| Concurrency (27B Q4_K_M / MXFP4, ~1.1k-token prompts, 256 generated, greedy) | C = 1 | C = 2 | C = 4 |
 |---|---|---|---|
 | Wall-clock aggregate tok/s (incl. prefill), MTP + n-gram | 61.6–62.4 | 98.0–99.6 | 138.7–139.6 |
 | MXFP4, same | 68.5–70.7 | 118.9–119.3 | 190.3–190.7 |
-| Steady state inside the decode loop, Q4_K_M / MXFP4 | | | 252.9 / 289.8 |
+| Steady state inside decode loop, Q4_K_M / MXFP4 (Scenario A) | 109.5–110.1 | — | 252.9 / **288.8** |
 | llama.cpp ROCm `-np 4`, MTP on (older measurement) | 39.8 | 43.3 | 64.1 |
 
 Every concurrent output equals the same request run alone (gated). Earlier 8/16-user measurements

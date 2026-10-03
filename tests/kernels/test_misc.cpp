@@ -84,7 +84,7 @@ void testMisc(Ctx& c) {
         c.rep.add(cmpExact("rmsnorm_q8 xq == quantize_q8(out)", xq.down<std::int8_t>(rq.size()), rq));
         c.rep.add(cmpExact("rmsnorm_q8 xd == quantize_q8(out)", xd.down<float>(rd.size()), rd));
         // gathered rows
-        wk::Idx16 src;
+        wk::RowIdx src;
         const int pick[4] = {4, 0, 5, 2};
         for (int i = 0; i < 4; ++i) src.v[i] = pick[i];
         Buf o9(4 * static_cast<std::size_t>(n) * 4), xq9(4 * static_cast<std::size_t>(n)), xd9(4 * static_cast<std::size_t>(n) / 32 * 4);
@@ -171,7 +171,7 @@ void testMisc(Ctx& c) {
         hip::launch(c.k.argmax_rows, {static_cast<unsigned>(rows), 1, 1}, {1024, 1, 1}, 0, c.s, dx.p(), n, out.p());
         c.sync();
         c.rep.add(cmpExact("argmax_rows", out.down<int>(static_cast<std::size_t>(rows)), want));
-        wk::Idx16 dst;
+        wk::RowIdx dst;
         for (int r = 0; r < rows; ++r) dst.v[r] = 10 + 3 * r;
         out.fill(0xff);
         hip::launch(c.k.argmax_rows_to, {static_cast<unsigned>(rows), 1, 1}, {1024, 1, 1}, 0, c.s, dx.p(), n, out.p(), dst);
@@ -220,7 +220,7 @@ void testMisc(Ctx& c) {
             // draft_pick_rows: two sequences' control areas, same logits rows as r = 0 / 1 above
             Buf ctl_all(2 * wk::kCtlWords * 4);
             ctl_all.zero();
-            wk::Idx16 area;
+            wk::RowIdx area;
             area.v[0] = 0;
             area.v[1] = wk::kCtlWords;
             hip::launch(c.k.draft_pick_rows, {2, 1, 1}, {1024, 1, 1}, 0, c.s, dl.p(), n, ctl_all.p(), area, 0, 1, 0.5f);

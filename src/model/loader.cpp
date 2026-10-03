@@ -429,7 +429,7 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
     m.ff_scratch = ffs;
     m.ffn_g = m.alloc(B * ffs * f4);
     m.ffn_u = m.alloc(B * ffs * f4);
-    m.logits = m.alloc(static_cast<u64>(max_small_batch) * cfg.n_vocab * f4);
+    m.logits = m.alloc(static_cast<u64>(max_verify_rows) * cfg.n_vocab * f4);
     m.hn = m.alloc(B * cfg.n_embd * f4);
     m.mtp_cat = m.alloc(B * 2 * cfg.n_embd * f4);
     m.mtp_h = m.alloc(static_cast<u64>(max_small_batch) * cfg.n_embd * f4);
@@ -439,8 +439,8 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
     m.pos_buf = m.alloc(B * 4);
     m.out_tok = m.allocZero(ctl_words * 4);
     const u64 n_split = 64;  // fd_max_splits
-    m.part_ml = m.alloc(max_small_batch * n_split * cfg.n_head * 2 * f4);
-    m.part_acc = m.alloc(max_small_batch * n_split * cfg.n_head * cfg.head_dim * f4);
+    m.part_ml = m.alloc(max_verify_rows * n_split * cfg.n_head * 2 * f4);
+    m.part_acc = m.alloc(max_verify_rows * n_split * cfg.n_head * cfg.head_dim * f4);
     {
         u64 max_elems = 0;
         for (const Layer& L : m.layers)
@@ -457,8 +457,8 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
     }
     // widest decode matmul input: FFN, DeltaNet / attention output, MTP eh_proj
     const u64 in_max = std::max<u64>(std::max<u64>(cfg.n_ff, 2ull * cfg.n_embd), std::max<u64>(cfg.d_inner, static_cast<u64>(cfg.n_head) * cfg.head_dim));
-    m.xq = m.alloc(max_small_batch * in_max + 256);
-    m.xd = m.alloc((max_small_batch * in_max / 32 + 8) * 4);
+    m.xq = m.alloc(max_verify_rows * in_max + 256);
+    m.xd = m.alloc((max_verify_rows * in_max / 32 + 8) * 4);
     m.x16 = m.alloc(B * std::max<u64>(in_max, cfg.n_embd) * 2);
     m.sx8 = m.alloc(B * 4);
     m.fp8_prefill = opt.fp8_default;
@@ -642,8 +642,8 @@ void Model::setupSeqs(u32 n, u32 slot_ctx) {
     seq_pages = (slot_ctx + kv_page - 1) / kv_page;
     ptab = allocZero(static_cast<u64>(n) * seq_pages * 4);
     out_tok = allocZero(static_cast<u64>(n) * ctl_words * 4);
-    kvbase_buf = allocZero(static_cast<u64>(max_small_batch) * 4);
-    mtp_in = alloc(static_cast<u64>(max_small_batch) * E * 4);
+    kvbase_buf = allocZero(static_cast<u64>(max_verify_rows) * 4);
+    mtp_in = alloc(static_cast<u64>(max_verify_rows) * E * 4);
     max_ctx = slot_ctx;
     selectSeq(0);
 }

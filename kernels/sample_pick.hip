@@ -49,9 +49,9 @@ extern "C" __global__ void __launch_bounds__(1024) argmax_rows(const float *x, i
 // < 0: dev_src[-tok - 1], e.g. a sequence's draft slot), position and KV
 // region base per row, all from kernel args.
 struct RowTab {
-    int tok[16];
-    int pos[16];
-    int base[16];
+    int tok[32];
+    int pos[32];
+    int base[32];
 };
 extern "C" __global__ void set_rows(int *ids, int *pos, int *kvbase, const int *dev_src, RowTab tab, int n) {
     const int i = threadIdx.x;
@@ -62,13 +62,13 @@ extern "C" __global__ void set_rows(int *ids, int *pos, int *kvbase, const int *
     kvbase[i] = tab.base[i];
 }
 
-struct Idx16 {
-    int v[16];
+struct RowIdx {
+    int v[32];
 };
 
 // rmsnorm_q8 over gathered rows: output row b = norm(x row src.v[b]).
 extern "C" __global__ void __launch_bounds__(1024)
-    rmsnorm_q8_rows(const float *x, const float *w, float *out, int8_t *xq, float *xd, int n, float eps, Idx16 src) {
+    rmsnorm_q8_rows(const float *x, const float *w, float *out, int8_t *xq, float *xd, int n, float eps, RowIdx src) {
     x += (size_t)src.v[blockIdx.x] * n;
     out += (size_t)blockIdx.x * n;
     xq += (size_t)blockIdx.x * n;
@@ -88,7 +88,7 @@ extern "C" __global__ void __launch_bounds__(1024)
 
 // Greedy token of row b of x into out[dst.v[b]] (verify rows -> each
 // sequence's control area).
-extern "C" __global__ void __launch_bounds__(1024) argmax_rows_to(const float *x, int n, int *out, Idx16 dst) {
+extern "C" __global__ void __launch_bounds__(1024) argmax_rows_to(const float *x, int n, int *out, RowIdx dst) {
     __shared__ float bv[1024];
     __shared__ int bi[1024];
     x += (size_t)blockIdx.x * n;
@@ -181,7 +181,7 @@ extern "C" __global__ void __launch_bounds__(1024)
 // Batched drafts: logits row b belongs to the sequence whose control area
 // starts at ctl_all + area.v[b] (ints; see the control-area layout in the model code).
 extern "C" __global__ void __launch_bounds__(1024)
-    draft_pick_rows(const float *x, int n, int *ctl_all, Idx16 area, int r, int n_min, float p_min) {
+    draft_pick_rows(const float *x, int n, int *ctl_all, RowIdx area, int r, int n_min, float p_min) {
     int *c = ctl_all + area.v[blockIdx.x];
     draft_pick_body(x + (size_t)blockIdx.x * n, n, c + 16, (float *)(c + 32), c + 48, r, n_min, p_min);
 }

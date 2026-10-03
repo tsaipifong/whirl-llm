@@ -547,8 +547,8 @@ extern "C" __global__ void attn_combine_q8(const float *part_ml, const float *pa
 #define AW_K 32
 #define AW_D 256
 struct AwGroups {
-    int first[16];
-    int count[16];
+    int first[32];
+    int count[32];
 };
 
 template <int CG, int Q8>

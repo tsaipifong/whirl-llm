@@ -8,8 +8,26 @@
 
 #include <algorithm>
 #include <cstring>
+#include <optional>
 #include <stdexcept>
+#include <string_view>
 #include <vector>
+
+#include <cstdlib>
+
+namespace {
+std::optional<std::string> getEnv(std::string_view name) {
+    const std::string key = std::string("WHIRL_") + std::string(name);
+    char* buf = nullptr;
+    std::size_t len = 0;
+    if (_dupenv_s(&buf, &len, key.c_str()) == 0 && buf != nullptr) {
+        std::string v(buf);
+        std::free(buf);
+        return v;
+    }
+    return std::nullopt;
+}
+}
 
 namespace whirl::kernels {
 
@@ -141,6 +159,10 @@ KernelTable KernelTable::load(const hip::Module& m, KvFormat kv) {
             }
         }
     }
+    const std::string vx_var = getEnv("GEMVX_VARIANT").value_or("v5");
+    for (QType t : {QType::q4_k, QType::q5_k, QType::iq4_xs, QType::q6_k, QType::mxfp4})
+        k.gemvx[ti(t)] = L.opt("gemvx_" + vx_var + "_" + sfx(t));
+    k.gemvw_head_s = L.opt("gemvw_nt16v2s_q6_k");
     for (QType t : {QType::q4_k, QType::q5_k, QType::iq4_xs, QType::q6_k, QType::iq4_nl, QType::q3_k, QType::iq3_s}) {
         for (int nt = 2; nt <= kMaxSmallBatch; ++nt) {
             for (int v = 1; v < kNGemvw; ++v) {

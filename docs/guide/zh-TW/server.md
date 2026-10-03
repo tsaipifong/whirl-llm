@@ -163,38 +163,40 @@ forward 大小。
 
 **Decode 保底速度（`--decode-min-tps N`，預設 20）。** 沒有它時，主迴圈每個 decode cycle 會跑一次
 prefill forward（合併的區塊最多 4096 列，27B 模型約 1.5 s），所以其他請求在 prefill 長 prompt 時，
-串流中的請求每次 forward 只前進一個 cycle——約 3 tok/s，看起來像卡住。設定保底後，且只在至少有一個
-slot 在 decode 時：
+串流中的請求每次 forward 只前進一個 cycle——約 3 tok/s，看起來像卡住。
 
+保底判定條件保護的是**使用者正在互動的串流**：只保護「在這批 prefill 請求到達之前，就已經進入 decode」
+的 slot（即 slot 的到達時間加上突發視窗小於目前 prefill 請求的最早到達者，且進入 decode 的時間早於最晚到達者）。
+同一批（突發視窗內）到達的請求互不保護，可全速合併 prefill，不會被誤啟動的保底限制分段 forward。
+
+設定保底後，且有符合條件的 slot 在 decode 時：
 - 一次 prefill forward 最多帶一個列數預算：完整的排程區塊（最舊請求的下一塊一定會執行，所以 prefill
   永遠有進度），依量測到的 prefill 速度決定大小，使一次 forward 造成的停頓約等於保底速度下 10 個
   token 的時間（N = 20 時約 1 塊）；
-- 每次 prefill forward 之後，單獨執行 decode cycle，直到每個 decode 中的 slot 在「從這次 forward 開始
+- 每次 prefill forward 之後，單獨執行 decode cycle，直到每個受保護的 slot 在「從這次 forward 開始
   的這段期間」內產生 ≥ N tok/s。cycle 數每個 cycle 都依實際產生的 token（MTP 接受率、decode 中 slot 數）
   與量測到的 prefill 時間調整（decode cycle 時間、每 cycle token 數、prefill 列/秒的 EMA）；
 - 若連純 decode 都達不到保底速度，每段期間的純 decode 時間上限為該期間 prefill 時間的 4 倍，prefill
   仍保有約 20% 的 GPU 時間。
 
-沒有 slot 在 decode 時，prefill 與沒有保底時完全相同（完整大小的合併 forward），突發收集也不變。
+沒有受保護的 slot 在 decode 時，prefill 與沒有保底時完全相同（完整大小的合併 forward），突發收集也不變。
 改變的只有「哪些列放進同一次 forward」與 decode cycle 的時機；每種 GEMM / MoE tile 都與列無關，
 所以任何 N 的輸出都逐位元相同（下表每個 N、短 prompt 測試與 Ornith 都驗證過）。附帶效果：列數預算
 小時，等待中的 prompt 改為依先後順序 prefill，而不是並排進行，所以第一個很早就得到回應，最後一個較晚。
 
-| Swift-1.5 27B MXFP4-A，R9700：一個請求在 25.7k token context 下串流，接著 3 個 prompt（15.8k / 17.1k / 18.9k token）同時到達 | N = 0（關） | 10 | **20** | 30 | 40 |
-|---|---|---|---|---|---|
-| 它們 prefill 期間串流請求的速度，tok/s（單獨：約 72） | 3.3 | 12.0 | **23.0** | 30.7 | 40.5 |
-| 串流請求最長的停頓，s | 1.22 | 1.13 | **0.47** | 0.46 | 0.48 |
-| 3 個 prompt 的 TTFT，s | 17.0 / 17.8 / 18.6 | 16.9 / 18.9 / 22.1 | **8.7 / 19.2 / 27.8** | 9.5 / 21.1 / 33.4 | 13.8 / 27.5 / 45.6 |
-| 平均 TTFT，s | 17.8 | 19.3 | **18.6** | 21.3 | 29.0 |
-| 串流期間的 prefill 吞吐量，tok/s | 2791 | 2341 | **1862** | 1551 | 1137 |
+| 情境 B：Swift-1.5 27B MXFP4-A，R9700：主對話在不同 context 下串流，接著 3 個子代理 prompt（15.8k / 17.1k / 18.9k token）同時到達 | 25.7k context（N = 0） | 25.7k context（**N = 20**） | 97.4k context（**N = 20**） | 123.7k context（**N = 20**） |
+|---|---|---|---|---|
+| 它們 prefill 期間主對話串流速度，tok/s | 3.2 | **23.7** | **23.0** | **23.1** |
+| 主對話串流最長停頓，s | 1.217 | **0.499** | **0.482** | **0.479** |
+| 3 個子代理的 TTFT，s | 17.0 / 17.8 / 18.5 | **8.5 / 17.0 / 27.3** | **10.1 / 18.8 / 28.6** | **9.7 / 22.2 / 31.8** |
+| 串流期間子代理 prefill 吞吐量，tok/s | 2797 | **1897** | **1813** | **1629** |
 
 Ornith-1.5-35B-A3B MXFP4（MoE），同一情境：N = 0 → 20 時串流請求從 6.7 提高到 31.5 tok/s（單獨約
 230；最長停頓 0.39 → 0.43 s），最後一個 TTFT 從 5.8 變為 6.8 s（prefill 8986 → 7653 tok/s）。短
-prompt 不受影響：Swift MXFP4-A，約 1.1k token prompt、生成 256、各跑 3 次，N = 0 → 20 時 C = 1 為
-81.0 → 82.0 tok/s，C = 4 為 187.5 → 186.5 tok/s（屬於每次執行的雜訊；那裡保底機制沒有擋下任何
-prefill），輸出相同。預設取 20：串流維持可讀（> 20 tok/s、停頓 < 0.5 s），代價約三分之一的 prefill
-吞吐量，而等待中 prompt 的平均 TTFT 不變。只在乎總吞吐量的批次工作可用 0；想要更順的串流可設更高的
-N，代價是 prefill 變慢。
+prompt 不受影響：Swift MXFP4-A，約 1.1k token prompt、生成 256，C = 4 同時到達時（情境 A）總時間 4.67 s，
+decode 穩態 288.8 tok/s，保底不會誤啟動，3 個請求合併 prefill（第四個因合併後超過 4096 上限循序排程）。
+預設取 20：串流維持可讀（> 20 tok/s、停頓 < 0.5 s），代價約三分之一的 prefill 吞吐量，而等待中 prompt
+的平均 TTFT 不變。只在乎總吞吐量的批次工作可用 0；想要更順的串流可設更高的 N，代價是 prefill 變慢。
 
 **突發收集。** 仍在接收、解析或 tokenize 中的請求會被計數；只要還有這種請求，新請求的第一個 prefill
 區塊最多等待 30 ms，讓一波突發請求進入同一次分段 forward。單一使用者永遠不會等待（自己的請求早已
@@ -202,13 +204,13 @@ N，代價是 prefill 變慢。
 
 **停頓。** 當另一位使用者送出 14k token 的 prompt 時，串流請求最長的停頓為 0.90 s（MoE：0.25 s），
 這是加入 decode 保底速度之前的數字；三個長 prompt 同時到達時為 1.22 s，串流掉到 3 tok/s（見上表），
-預設保底下為 0.47 s、23 tok/s。
+預設保底下為 0.48–0.50 s、23 tok/s。
 
-| 並行度（27B Q4_K_M，約 1.1k token prompt，生成 256，greedy） | C = 1 | C = 2 | C = 4 |
+| 並行度（27B Q4_K_M / MXFP4，約 1.1k token prompt，生成 256，greedy） | C = 1 | C = 2 | C = 4 |
 |---|---|---|---|
 | 實際時間總計 tok/s（含 prefill），MTP + n-gram | 61.6–62.4 | 98.0–99.6 | 138.7–139.6 |
 | MXFP4，同上 | 68.5–70.7 | 118.9–119.3 | 190.3–190.7 |
-| decode 迴圈內的穩態，Q4_K_M / MXFP4 | | | 252.9 / 289.8 |
+| decode 迴圈內的穩態，Q4_K_M / MXFP4（情境 A） | 109.5–110.1 | — | 252.9 / **288.8** |
 | llama.cpp ROCm `-np 4`，MTP 開（較舊的量測） | 39.8 | 43.3 | 64.1 |
 
 每個並行輸出都與同一請求單獨執行時相同（有 gate 把關）。較早的 8/16 使用者量測（在後來數項優化之前；

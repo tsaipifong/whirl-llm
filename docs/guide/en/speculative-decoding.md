@@ -213,7 +213,10 @@ acceptance fell from 63.2% to 59.4% because the policy sends more drafts; tokens
 (~225 MB) was first rejected (acceptance −1.5 points, speed −1.6%). Re-measured after the other
 speedups it gave +0.8% single-user and cut the per-cycle MTP time at four users from 5.00 to
 4.35 ms, so it is now the default for dense models — an example of why small rejected ideas are
-re-tested after the core gets faster.
+re-tested after the core gets faster. Files whose MTP block is stored as **Q8_0** (the Swift-1.5
+MXFP4 files: ~450 MB per draft step plus the 2-bit head) get the same Q4_K copies (`requant_q80_q4k`,
+~240 MB); outputs are unchanged. Swift MXFP4-A on the R9700, ~16k-token prompts, steady-state decode:
+one user 78.3 → 85.4 tok/s, four users 213.7 → 221.2 tok/s aggregate (both with `attn_wsplit2`).
 
 **Rejected:** a Q3_K draft head (acceptance unchanged but its GEMV ran at ~488 GB/s: +0.3%);
 truncating the draft vocabulary to the first N token ids (Chinese tokens have high ids:

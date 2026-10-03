@@ -50,7 +50,7 @@
 //  norms / elementwise:
 //   rmsnorm(x, w, out, int n, int in_stride, int out_stride, float eps)
 //   rmsnorm_q8(x, w, out, xq, xd, int n, float eps)
-//   rmsnorm_q8_rows(x, w, out, xq, xd, int n, float eps, Idx16 src)
+//   rmsnorm_q8_rows(x, w, out, xq, xd, int n, float eps, RowIdx src)
 //   rmsnorm_x8 / rmsnorm_x16 / rmsnorm_x8t(x, w, u8* q, float* sx, n, eps)
 //   l2norm(float* x, int n, int stride, int tok_stride, float eps)
 //   add_inplace(a, b, n); silu_mul(a, b, n); silu_mul_q8(g, u, xq, xd, n)
@@ -98,10 +98,10 @@
 //   gdn_conv_l2n_h / gdn_conv_state_h: as above with const f16* xin
 //  tokens / picks:
 //   argmax(x, n, int* out, int* ids, int* pos, int advance)
-//   argmax_rows(x, n, out); argmax_rows_to(x, n, out, Idx16 dst)
+//   argmax_rows(x, n, out); argmax_rows_to(x, n, out, RowIdx dst)
 //   argmax_prob(x, n, int* out_tok, float* out_prob)
 //   draft_pick(x, n, int* tok, float* prob, int* ctl, int r, int n_min, float p_min)
-//   draft_pick_rows(x, n, int* ctl_all, Idx16 area, int r, int n_min, float p_min)
+//   draft_pick_rows(x, n, int* ctl_all, RowIdx area, int r, int n_min, float p_min)
 //   set_tokens(ids, pos, dev_src, Tok16 toks, n, n_host, pos0)
 //   set_rows(ids, pos, kvbase, dev_src, RowTab tab, n)
 //   topk_rows(x, n, K, float inv_t, int* ids, float* vals, float* stats)
@@ -153,6 +153,7 @@ inline constexpr int kFdMaxSplits = 64;      // host cap on split count
 inline constexpr int kGdnMaxSeg = 16;        // GDN_MAX_SEG
 inline constexpr int kGdnMaxSnap = 15;       // GDN_MAX_SNAP
 inline constexpr int kMaxSmallBatch = 16;    // multi-token GEMV / small-batch kernels: 2..16 tokens
+inline constexpr int kMaxVerifyRows = 32;    // rows of one batched verify / MTP step (gemvx_v6_* past 16)
 inline constexpr int kMaxDrafts = 10;        // MTP drafts per verify cycle
 inline constexpr int kGemm3Bm = 256, kGemm3Bn = 256, kGemm3Threads = 512;  // GEMM3_*
 inline constexpr int kMoeBm = 128, kMoeBn = 64;                            // MOE_BM, gemm_moe_* token tile
@@ -242,20 +243,21 @@ inline GvArgs gvSingle(DevPtr w, DevPtr y, std::uint64_t row_bytes, int nrows) {
 struct Tok16 {
     std::int32_t t[16] = {};
 };
+// per-row tables of a batched verify / MTP step (up to kMaxVerifyRows rows)
 struct RowTab {
-    std::int32_t tok[16] = {};   // >= 0 token id, < 0: -(index into dev_src) - 1
-    std::int32_t pos[16] = {};
-    std::int32_t base[16] = {};
+    std::int32_t tok[kMaxVerifyRows] = {};   // >= 0 token id, < 0: -(index into dev_src) - 1
+    std::int32_t pos[kMaxVerifyRows] = {};
+    std::int32_t base[kMaxVerifyRows] = {};
 };
-struct Idx16 {
-    std::int32_t v[16] = {};
+struct RowIdx {
+    std::int32_t v[kMaxVerifyRows] = {};
 };
 // attn_wsplit query groups: queries first[z] .. first[z] + count[z] - 1.
 struct AwGroups {
-    std::int32_t first[16] = {};
-    std::int32_t count[16] = {};
+    std::int32_t first[kMaxVerifyRows] = {};
+    std::int32_t count[kMaxVerifyRows] = {};
 };
-static_assert(sizeof(Tok16) == 64 && sizeof(RowTab) == 192 && sizeof(Idx16) == 64 && sizeof(AwGroups) == 128);
+static_assert(sizeof(Tok16) == 64 && sizeof(RowTab) == 384 && sizeof(RowIdx) == 128 && sizeof(AwGroups) == 256);
 
 // Recurrent-state segment of the fused DeltaNet decode kernels: rows
 // [row0, row0 + nrows) belong to one sequence whose state is at `state`;
@@ -354,6 +356,8 @@ struct KernelTable {
     std::array<PerType<F>, kGemmsCfgs.size()> gemms{}, gemmsh{};
     PerType<F> gemmhq{}, gemmhqh{};
     PerType<F> gdn_ab{}, gdn_abconv{}, moe_gu{}, moe_down{}, gemm_moe{}, gemm_moe32{};
+    PerType<F> gemvx{};  // gemvx_v6_<T>: 17..32-token GEMV (runtime token count)
+    F gemvw_head_s{};    // gemvw_nt16v2s_q6_k: 16-token output head over a row range, separate y stride
     std::array<F, kMaxSmallBatch> gemv_d2{};       // [nt - 1]
     std::array<F, kGemm8Cfgs.size()> gemm8{}, gemm8h{};
     std::array<F, kGemm8tCfgs.size()> gemm8t{}, gemm8th{};

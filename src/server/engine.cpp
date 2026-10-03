@@ -115,6 +115,7 @@ Engine::Engine(ServerModel& model, tier::DeviceOps& ops, const Tokenizer& tok, c
     }
     conv_bytes_ = m_.convBytes();
     ssm_bytes_ = m_.ssmBytes();
+    vrows_ = std::clamp(m_.verifyRows(), max_small_batch, qwen35::max_verify_rows);
     if (opt_.ngram && opt_.use_mtp) crlf_norm_ = ChatTokens::crlfToLf(tok_);
     floor_.configure(opt_.decode_min_tps);
     floor_epoch_ = Clock::now();
@@ -1574,7 +1575,7 @@ std::uint32_t Engine::pickDrafts(std::span<Slot* const> act) {
     const std::uint32_t A = static_cast<std::uint32_t>(act.size());
     std::uint32_t nd = std::min(opt_.batch_drafts[std::min(A, gdn_max_seg)], opt_.n_draft);
     if (!m_.fusedDecode()) nd = std::min(nd, 1u);
-    while (nd > 0 && (A * (nd + 1) > max_small_batch || A * nd > qwen35::gdn_max_snap)) nd -= 1;
+    while (nd > 0 && (A * (nd + 1) > vrows_ || (!m_.gdnReplay() && A * nd > qwen35::gdn_max_snap))) nd -= 1;
     if (nd == 0) return 0;
     if (opt_.mtp_auto) {
         std::vector<const qwen35::DraftAccept*> accs;
@@ -1619,10 +1620,11 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
     std::array<std::uint32_t, gdn_max_seg> ng_n{};
     std::array<std::array<std::uint32_t, qwen35::max_ng_drafts>, gdn_max_seg> ng_d{};
     std::size_t n_ng = 0;
-    const std::uint32_t snap_cap = m_.gdnReplay() ? qwen35::gdn_max_snap : std::min(qwen35::gdn_max_snap, m_.snapSets());
+    // replay keeps no snapshot sets: the verify row budget is the only shared limit
+    const std::uint32_t snap_cap = m_.gdnReplay() ? vrows_ : std::min(qwen35::gdn_max_snap, m_.snapSets());
     if (opt_.ngram && opt_.use_mtp) {
         const std::uint32_t Au = static_cast<std::uint32_t>(A);
-        std::uint32_t lim = std::min({qwen35::max_ng_drafts, snap_cap / Au, max_small_batch / Au > 0 ? max_small_batch / Au - 1 : 0u});
+        std::uint32_t lim = std::min({qwen35::max_ng_drafts, snap_cap / Au, vrows_ / Au > 0 ? vrows_ / Au - 1 : 0u});
         if (opt_.ngram_max > 0) lim = std::min(lim, opt_.ngram_max);
         if (!m_.fusedDecode()) lim = std::min(lim, 1u);
         const qwen35::DraftTiming& tm = timing_[std::min<std::size_t>(A, gdn_max_seg)];
@@ -1657,10 +1659,10 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
     const std::size_t n_mtp = act_mtp.size();
     std::uint32_t nd = n_mtp > 0 ? pickDrafts(act_mtp) : 0;
     {
-        // keep the verify within max_small_batch rows and gdn_max_snap snapshots
+        // keep the verify within vrows_ rows (and the snapshot sets without replay)
         std::uint32_t ng_tot = 0;
         for (std::size_t k = 0; k < A; ++k) ng_tot += ng_n[k];
-        while (nd > 0 && (static_cast<std::uint32_t>(A) + ng_tot + static_cast<std::uint32_t>(n_mtp) * nd > max_small_batch ||
+        while (nd > 0 && (static_cast<std::uint32_t>(A) + ng_tot + static_cast<std::uint32_t>(n_mtp) * nd > vrows_ ||
                           ng_tot + static_cast<std::uint32_t>(n_mtp) * nd > snap_cap))
             nd -= 1;
     }
@@ -1671,7 +1673,7 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
         std::uint32_t ng_tot = 0;
         for (std::size_t k = 0; k < A; ++k) ng_tot += ng_n[k];
         const std::uint32_t used = static_cast<std::uint32_t>(A) + ng_tot;
-        const std::uint32_t rows_free = max_small_batch > used ? max_small_batch - used : 0;
+        const std::uint32_t rows_free = vrows_ > used ? vrows_ - used : 0;
         const std::uint32_t snap_free = snap_cap > ng_tot ? snap_cap - ng_tot : 0;
         splitDrafts(act_mtp, nd, std::min(rows_free, snap_free), std::span<std::uint32_t>(nd_m.data(), n_mtp));
         nd_max = 0;
@@ -1972,7 +1974,7 @@ void Engine::splitDrafts(std::span<Slot* const> act, std::uint32_t nd, std::uint
 std::uint32_t Engine::draftCap(std::uint32_t A) {
     std::uint32_t nd = std::min(opt_.batch_drafts[std::min(A, gdn_max_seg)], opt_.n_draft);
     if (!m_.fusedDecode()) nd = std::min(nd, 1u);
-    while (nd > 0 && (A * (nd + 1) > max_small_batch || A * nd > qwen35::gdn_max_snap)) nd -= 1;
+    while (nd > 0 && (A * (nd + 1) > vrows_ || (!m_.gdnReplay() && A * nd > qwen35::gdn_max_snap))) nd -= 1;
     return nd;
 }
 
@@ -2798,11 +2800,40 @@ void Engine::runLoop() {
             if (!pf || sl.job->id < pf->job->id) pf = &sl;
         }
         bool idle_wait = false;
-        // decode floor: only while some slot decodes (otherwise prefill runs as without it)
+        // decode floor: only protects slots that were ALREADY decoding before the
+        // current batch of prefill requests arrived (i.e. an interactive stream
+        // the user is reading). Requests arriving in the same burst (within
+        // gather window) or after this prefill batch are not protected against it,
+        // so simultaneous arrivals can merge prefill forwards at full throughput.
         std::vector<DecodeFloor::SlotTok> dec_toks;
         if (floor_.on()) {
-            for (const Slot& sl : slots_)
-                if (sl.phase == Phase::decode) dec_toks.push_back({sl.id, sl.reqId(), sl.n_gen});
+            TimePoint pf_latest{};
+            TimePoint pf_earliest{};
+            bool has_pf = false;
+            for (const Slot& sl : slots_) {
+                if (sl.phase != Phase::prefill || !sl.job) continue;
+                const TimePoint t_arr = sl.job->t_arrive;
+                if (!has_pf) {
+                    pf_latest = pf_earliest = t_arr;
+                    has_pf = true;
+                } else {
+                    if (t_arr > pf_latest) pf_latest = t_arr;
+                    if (t_arr < pf_earliest) pf_earliest = t_arr;
+                }
+            }
+            if (has_pf) {
+                const double gather_ms = opt_.gather_ms > 0 ? opt_.gather_ms : 30.0;
+                const auto gather_dur =
+                    std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double, std::milli>(gather_ms));
+                for (const Slot& sl : slots_) {
+                    if (sl.phase != Phase::decode || !sl.job) continue;
+                    const bool separate_arrival = (sl.job->t_arrive + gather_dur < pf_earliest);
+                    const bool decode_before_pf = (sl.td0 < pf_latest);
+                    if (separate_arrival && decode_before_pf) {
+                        dec_toks.push_back({sl.id, sl.reqId(), sl.n_gen});
+                    }
+                }
+            }
             if (dec_toks.empty()) floor_.idle();
         }
         auto floorNow = [&] { return std::chrono::duration<double, std::milli>(Clock::now() - floor_epoch_).count(); };

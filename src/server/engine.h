@@ -46,7 +46,7 @@ constexpr std::uint32_t gdn_max_seg = qwen35::gdn_max_seg;
 constexpr std::uint32_t max_small_batch = qwen35::max_small_batch;
 constexpr std::uint32_t k_small = 256;
 constexpr std::uint32_t k_big = 16384;
-constexpr std::uint32_t max_rows = max_small_batch;
+constexpr std::uint32_t max_rows = qwen35::max_verify_rows;
 constexpr std::size_t prefill_chunk = 1024;
 constexpr std::size_t prefill_merge = 256;
 
@@ -461,6 +461,8 @@ private:
     std::array<qwen35::DraftTiming, gdn_max_seg + 1> timing_{};
     std::unique_ptr<CycleProf> prof_;
     std::uint32_t n_cycles_ = 0;
+    // most rows of one batched verify (ServerModel::verifyRows: 16, or 32 with the wide GEMV path)
+    std::uint32_t vrows_ = max_small_batch;
     std::uint32_t prev_nd_ = 0;
     // decode floor bookkeeping (main thread)
     DecodeFloor floor_;

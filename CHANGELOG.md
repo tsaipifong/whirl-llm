@@ -7,6 +7,18 @@ All notable changes to WHIRL are listed here. Versions follow `project(whirl VER
 
 ### Changed
 
+- Decode floor (`--decode-min-tps N`): refined streaming decode protection to only protect slots
+  that entered decoding prior to the arrival of the earliest prefill request in the active prefill
+  set (`t_arrive + gather_ms < min_t_arrive` and `td0 < max_t_arrive`). Requests arriving in the same
+  burst window now coalesce and prefill together without triggering false floor throttling.
+  Scenario A (C = 4 concurrent ~1.1k prompts) achieves 288.8 tok/s decode (wall 4.67 s vs 5.10 s in
+  v0.1.2) with 0 false floor forwards. Scenario B (Swift 27B MXFP4-A streaming at 25.7k, 97.4k, and
+  123.7k context under 3 concurrent ~17k subagents) maintains 23.0–23.7 tok/s stream with longest
+  pause ≤0.499 s.
+- Speculative decoding & verification: support up to 32 rows verify path with dual-token WMMA GEMV
+  kernels (`gemvx_v6` for MXFP4, IQ4_XS, Q4_K, Q5_K, Q6_K) and full-chunk LM head evaluation for wide
+  batches (`head_chunk = 248320`). Single-user decode throughput at 96k reaches 62.5 tok/s (from 49.8)
+  and 128k reaches 54.9 tok/s (from 45.9); outputs remain bit-identical.
 - Speculative verify attention: a sequence's verify rows now share one K/V pass in groups of up to
   32 query columns (`attn_wsplit2`; 27B: 5 rows × 6 GQA heads) instead of 16 (2 rows). The second
   column group runs on the block's otherwise idle second wave over the same staged Vᵀ tile; each

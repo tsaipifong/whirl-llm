@@ -63,7 +63,6 @@ void Model::mark(OpClass cls) {
 // plain launch per matrix. Per-row arithmetic is that of the single launch.
 void Model::gemvLaunch(std::span<const Mat> ws, DevPtr xin, std::span<const DevPtr> ys, u32 n, i32 acc) {
     const Mat& w = ws[0];
-    const i32 ncols = I(w.ncols);
     if (xq_src != xin || xq_n != n) {
         const u32 cnt = n * w.ncols;
         hip::launch(k.quantize_q8, D((cnt + 255) / 256), D(256), 0, stream, xin, xq, xd, I(cnt));
@@ -71,6 +70,50 @@ void Model::gemvLaunch(std::span<const Mat> ws, DevPtr xin, std::span<const DevP
         xq_n = n;
         mark(OpClass::quant);
     }
+    if (n <= max_small_batch) {
+        gemvKernels(ws, ys, n, acc, xq, xd);
+        return;
+    }
+    // 17..32 tokens (wide batched verify): the two-tile WMMA GEMV where the type has one
+    // (weights read once), else 16-token pieces through the multi-token kernels. Either
+    // way every token row is computed exactly as the one-token GEMV computes it.
+    const std::size_t t = ti(w.ty);
+    const bool head = w.ptr == output.ptr;
+    if (k.gemvx[t] != nullptr && (!head || envFlag("HEAD_GEMVX", false))) {
+        for (std::size_t si = 0; si < ws.size(); ++si) {
+            const Mat& wi = ws[si];
+            hip::launch(k.gemvx[t], D((wi.nrows + 15) / 16), D(256), 0, stream, wi.ptr, wi.row_bytes, xq, xd, ys[si], I(wi.ncols), I(wi.nrows),
+                        acc, gate, I(n));
+        }
+        return;
+    }
+    if (head && n > max_small_batch && w.ty == GgmlType::q6_k && k.gemvw_head_s != nullptr && ws.size() == 1) {
+        // output head: per range of rows, tokens [0, 16) then [n - 16, n) (rows of the overlap are
+        // computed twice, to the same bits); the second pass finds the range's weights in cache
+        const u32 V = w.nrows, chunk = head_chunk;
+        for (u32 r0 = 0; r0 < V; r0 += chunk) {
+            const u32 cr = std::min(chunk, V - r0);
+            for (const u32 t0 : {0u, n - max_small_batch}) {
+                hip::launch(k.gemvw_head_s, D((cr + 31) / 32), D(256), 0, stream, w.ptr + static_cast<u64>(r0) * w.row_bytes, w.row_bytes,
+                            xq + static_cast<u64>(t0) * w.ncols, xd + static_cast<u64>(t0) * (w.ncols / 32) * 4,
+                            ys[0] + (static_cast<u64>(t0) * V + r0) * 4, I(w.ncols), I(cr), I(V), acc, gate);
+            }
+        }
+        return;
+    }
+    for (u32 t0 = 0; t0 < n; t0 += max_small_batch) {
+        const u32 nt = std::min(max_small_batch, n - t0);
+        DevPtr yo[3] = {0, 0, 0};
+        for (std::size_t si = 0; si < ws.size(); ++si) yo[si] = ys[si] + static_cast<u64>(t0) * ws[si].nrows * 4;
+        gemvKernels(ws, std::span<const DevPtr>(yo, ws.size()), nt, acc, xq + static_cast<u64>(t0) * w.ncols,
+                    xd + static_cast<u64>(t0) * (w.ncols / 32) * 4);
+    }
+}
+
+// The int8 GEMV launches for n <= 16 tokens of xqp / xdp (already quantized).
+void Model::gemvKernels(std::span<const Mat> ws, std::span<const DevPtr> ys, u32 n, i32 acc, DevPtr xqp, DevPtr xdp) {
+    const Mat& w = ws[0];
+    const i32 ncols = I(w.ncols);
     const std::size_t t = ti(w.ty);
     hip::Function f = n == 1 ? k.gemvq[t] : k.gemvq_nt[n - 2][t];
     hip::Function fg = n == 1 ? nullptr : k.gemvq_nt_g[n - 2][t];
@@ -105,11 +148,11 @@ void Model::gemvLaunch(std::span<const Mat> ws, DevPtr xin, std::span<const DevP
             g.n[si] = I(wi.nrows);
             nb += (wi.nrows + rows_per_block - 1) / rows_per_block;
         }
-        hip::launch(f, D(nb), D(256), 0, stream, g, xq, xd, ncols, acc, gate);
+        hip::launch(f, D(nb), D(256), 0, stream, g, xqp, xdp, ncols, acc, gate);
     } else {
         for (std::size_t si = 0; si < ws.size(); ++si) {
             const Mat& wi = ws[si];
-            hip::launch(f, D((wi.nrows + rows_per_block - 1) / rows_per_block), D(256), 0, stream, wi.ptr, wi.row_bytes, xq, xd, ys[si],
+            hip::launch(f, D((wi.nrows + rows_per_block - 1) / rows_per_block), D(256), 0, stream, wi.ptr, wi.row_bytes, xqp, xdp, ys[si],
                         ncols, I(wi.nrows), acc, gate);
         }
     }
@@ -118,7 +161,7 @@ void Model::gemvLaunch(std::span<const Mat> ws, DevPtr xin, std::span<const DevP
 // Matmuls (no accumulate) of ws on the same input into ys. On the int8 GEMV
 // path the matrices of one type run as one grouped launch (bitwise the same).
 void Model::matmulGroup(std::span<const Mat> ws, DevPtr xin, std::span<const DevPtr> ys, u32 n) {
-    const bool ok = gv_group && k.gv_grp && n <= gemv_max && !float_gemv;
+    const bool ok = gv_group && k.gv_grp && n <= gvMax() && !float_gemv;
     bool done[3] = {false, false, false};
     for (std::size_t i = 0; i < ws.size(); ++i) {
         if (done[i]) continue;
@@ -161,7 +204,7 @@ void Model::matmul(const Mat& w, DevPtr xin, DevPtr y, u32 n, bool accumulate) {
         if (prof) prof->matmul_bytes += w.row_bytes * w.nrows;
         mark(head_phase ? OpClass::head : OpClass::matmul);
     };
-    if (n <= gemv_max && k.gemvq[t] != nullptr && !float_gemv) {
+    if (n <= gvMax() && k.gemvq[t] != nullptr && !float_gemv) {
         const DevPtr yy[1] = {y};
         gemvLaunch(std::span<const Mat>(&w, 1), xin, yy, n, acc);
     } else if (n == 1) {
@@ -255,7 +298,7 @@ void Model::rmsnorm(DevPtr xin, DevPtr w, DevPtr out, u32 n, u32 count, u32 in_s
 }
 
 Model::ActIn Model::actIn(const Mat& w, u32 n, std::uint8_t cls) const {
-    if (n <= gemv_max && k.gemvq[ti(w.ty)] != nullptr && !float_gemv) return ActIn::gemv;
+    if (n <= gvMax() && k.gemvq[ti(w.ty)] != nullptr && !float_gemv) return ActIn::gemv;
     if (n == 1) return ActIn::f32in;
     if (fp8_prefill && (fp8_mask & cls) != 0 && w.ty == GgmlType::mxfp4 && w.ref != 0 && k.gemm8[0] != nullptr) return ActIn::fp8;
     return ActIn::f16;
@@ -314,7 +357,7 @@ void Model::rmsnormIn(DevPtr xin, DevPtr w, DevPtr out, u32 n, std::span<const M
 }
 
 // Decode fusions apply to small batches on the int8 GEMV path.
-bool Model::fused(u32 n) const { return n <= max_small_batch && !float_gemv && !no_fuse; }
+bool Model::fused(u32 n) const { return n <= small_max && !float_gemv && !no_fuse; }
 
 bool Model::fusedDecode() const {
     if (!fused(max_small_batch)) return false;
@@ -324,6 +367,10 @@ bool Model::fusedDecode() const {
     }
     return true;
 }
+
+bool Model::wideCapable() const { return wide_verify && !cfg.moe && fusedDecode() && k.gemvx[ti(GgmlType::q4_k)] != nullptr; }
+
+bool Model::wideOk() const { return wideCapable() && gdn_replay; }
 
 bool Model::gdnAbFusable(const GdnW& g) const {
     return k.gdn_ab[ti(g.beta.ty) % n_types] != nullptr && g.beta.ty == g.alpha.ty && g.beta.row_bytes == g.alpha.row_bytes &&
@@ -467,7 +514,7 @@ void Model::attnBlock(const AttnW& a, const KvLayer& lkv, u32 n) {
         hip::launch(k.kv_store, D(n), D(256), 0, stream, kv_k, kv_v, kva, pos_buf, I(row));
     }
     const float scale = 1.0f / std::sqrt(static_cast<float>(hd));
-    if (n <= max_small_batch) {
+    if (n <= small_max) {
         // flash-decoding; grid.z = query (speculative verify), query t sees
         // positions up to pos_buf[t]
         const u32 n_split = fdSplits(max_ctx);
@@ -518,7 +565,7 @@ void Model::attnBlock(const AttnW& a, const KvLayer& lkv, u32 n) {
             hip::launch(k.attn_split, D(cfg.n_head_kv, n_split, n), D(256), 0, stream, qf, kva, part_ml, part_acc, I(cfg.n_head), I(cfg.n_head_kv),
                         I(hd), I(2 * hd), pos_buf, scale, i32(1), gate);
         }
-        const bool combine_q8 = k.attn_combine_q8 != nullptr && fused(n) && hd == 256 && k.gemvq[ti(a.o.ty)] != nullptr && n <= gemv_max;
+        const bool combine_q8 = k.attn_combine_q8 != nullptr && fused(n) && hd == 256 && k.gemvq[ti(a.o.ty)] != nullptr && n <= gvMax();
         if (combine_q8) {
             // the o-projection's int8 input comes out of the combine
             hip::launch(k.attn_combine_q8, D(cfg.n_head, n), D(256), 0, stream, part_ml, part_acc, qf, attn_out, I(cfg.n_head), I(hd), I(2 * hd),
@@ -905,13 +952,13 @@ u32 Model::verifyBatchEnqueue(std::span<const VSeg> segs) {
     BatchPlan plan;
     plan.segs = segs;
     RowTab tab;
-    Idx16 dst;
+    RowIdx dst;
     u32 n = 0;
     u32 snaps = 0;
     for (std::size_t kk = 0; kk < segs.size(); ++kk) {
         const VSeg& sg = segs[kk];
         if (sg.pos + sg.nd + 1 > max_ctx) throw ModelError("ContextTooLong");
-        if (n + sg.nd + 1 > max_small_batch) throw ModelError("BatchTooLarge");
+        if (sg.nd + 1 > max_small_batch || n + sg.nd + 1 > verifyRows()) throw ModelError("BatchTooLarge");
         plan.snap_base[kk] = snaps;
         snaps += sg.nd;
         for (u32 r = 0; r < sg.nd + 1; ++r) {
@@ -956,12 +1003,14 @@ u32 Model::verifyBatchEnqueue(std::span<const VSeg> segs) {
     keep_hidden = true;
     all_logits = true;
     bplan = &plan;
+    small_max = n > max_small_batch ? max_verify_rows : max_small_batch;
     struct Reset {
         Model& m;
         ~Reset() {
             m.keep_hidden = false;
             m.all_logits = false;
             m.bplan = nullptr;
+            m.small_max = max_small_batch;
         }
     } reset_flags{*this};
     xq_src = 0;
@@ -981,14 +1030,14 @@ void Model::mtpBatchStepEx(std::span<const MSeg> segs, u32 r, bool draft) {
     const u64 E = cfg.n_embd;
     if (segs.empty() || segs.size() > max_small_batch) throw ModelError("BadBatch");
     RowTab tab;
-    Idx16 last;
-    Idx16 area;
+    RowIdx last;
+    RowIdx area;
     u32 n = 0;
     for (std::size_t kk = 0; kk < segs.size(); ++kk) {
         const MSeg& sg = segs[kk];
         const Seq& sq = seqs[sg.seq];
         if (r == 0) {
-            if (n + sg.pend.size() > max_small_batch) throw ModelError("BatchTooLarge");
+            if (sg.pend.size() > max_small_batch || n + sg.pend.size() > verifyRows()) throw ModelError("BatchTooLarge");
             hip::copyAsync(mtp_in + static_cast<u64>(n) * E * 4, sq.hid, sg.pend.size() * E * 4, stream);
             for (std::size_t j = 0; j < sg.pend.size(); ++j) {
                 tab.tok[n] = lookupId(sg.pend[j]);
@@ -1009,10 +1058,14 @@ void Model::mtpBatchStepEx(std::span<const MSeg> segs, u32 r, bool draft) {
     xq_src = 0;
     x16_src = 0;
     mtp_batch = true;
+    small_max = n > max_small_batch ? max_verify_rows : max_small_batch;
     struct BatchReset {
-        bool& b;
-        ~BatchReset() { b = false; }
-    } batch_reset{mtp_batch};
+        Model& m;
+        ~BatchReset() {
+            m.mtp_batch = false;
+            m.small_max = max_small_batch;
+        }
+    } batch_reset{*this};
     row_n = n;
     for (u32 ri = 0; ri < n; ++ri) {
         row_pos[ri] = tab.pos[ri];
@@ -1383,7 +1436,7 @@ void Model::run(u32 n) {
     }
     if (keep_hidden) rmsnorm(x, output_norm, hn, E, n, E, E);
     if (!psegs.empty()) return;  // prefillSegs: per-segment logits from x
-    if (keep_hidden && all_logits && n <= max_small_batch) {
+    if (keep_hidden && all_logits && n <= small_max) {
         head_phase = true;
         matmul(output, hn, logits, n, false);
         head_phase = false;

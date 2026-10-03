@@ -110,7 +110,7 @@ void testTables() {
     check(q::n_choices == 56 && q::gemm_cfgs.size() == 24 && q::gemms_cfgs.size() == 8, "GEMM config counts");
     check(sizeof(q::GdnSeg) == 152 && sizeof(q::GdnSegs) == 152 * 16, "GdnSeg layout");
     check(sizeof(q::GvArgs) == 3 * 8 * 3 + 5 * 4 + 4, "GvArgs layout");
-    check(sizeof(q::KvArgs) == 56 && sizeof(q::RowTab) == 192 && sizeof(q::AwGroups) == 128, "KvArgs / RowTab / AwGroups layout");
+    check(sizeof(q::KvArgs) == 56 && sizeof(q::RowTab) == 384 && sizeof(q::AwGroups) == 256, "KvArgs / RowTab / AwGroups layout");
 }
 
 void testDraftModel() {
