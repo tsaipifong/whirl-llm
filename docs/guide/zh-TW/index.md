@@ -21,6 +21,7 @@ WHIRL（*Windows HIP Inference for RDNA LLMs*）是以 C++ 與 HIP 撰寫、授�
 | 文件 | 內容 |
 |---|---|
 | [usage.md](usage.md) | 每個指令、選項、環境變數、伺服器端點與結束代碼的參考 |
+| [recipes_zh-TW.md](../../recipes_zh-TW.md) | 以任務為主的情境食譜：接上 agent 與聊天前端、含子 agent 的長時間工作階段、長上下文、多使用者、圖片、看懂伺服器 log、疑難排解 |
 | [architecture.md](architecture.md) | 整體流程（GGUF → 載入器 → kernel → forward → server）、每種 GPU 一個 code object、為什麼要專門化、正確性模型 |
 | [windows-hip.md](windows-hip.md) | Windows 上的 HIP：PAL 與 ROCr 的差異、沒有效能分析工具時如何計時、記憶體（大配置、mmap、VMM、WDDM 降級、pinned 記憶體算成共享使用量）、stream、裝置編號、eGPU、shell 陷阱 |
 | [kernels.md](kernels.md) | 每一個 kernel 家族：`v_dot4`／`v_perm` 的 int8 GEMV、逐位元相同的多列 GEMV、int8 WMMA 中批次 GEMV、合併 launch、prefill GEMM、MXFP4×fp8 WMMA、flash attention、split-K decode attention、DeltaNet、MoE、暫存器紀律、fma 收縮 |

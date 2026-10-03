@@ -24,6 +24,7 @@ other projects can reuse the lessons.
 | Document | What it covers |
 |---|---|
 | [usage.md](../../usage.md) | Reference of every command, option, environment variable, server endpoint and exit code |
+| [recipes.md](../../recipes.md) | Task-oriented recipes: connecting agents and chat front ends, long agent sessions with subagents, long context, several users, images, reading the server log, troubleshooting |
 | [architecture.md](architecture.md) | The pipeline (GGUF → loader → kernels → forward → server), per-GPU code objects, why specialize, the correctness model |
 | [windows-hip.md](windows-hip.md) | HIP on Windows: PAL vs ROCr, timing without a profiler, memory (big allocations, mmap, VMM, WDDM demotion, pinned = shared usage), streams, device numbering, eGPU, shell traps |
 | [kernels.md](kernels.md) | Every kernel family: int8 GEMV with `v_dot4`/`v_perm`, bit-exact multi-row GEMV, int8 WMMA mid-batch GEMV, grouped launches, prefill GEMMs, MXFP4×fp8 WMMA, flash attention, split-K decode attention, DeltaNet, MoE, register discipline, fma contraction |

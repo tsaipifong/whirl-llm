@@ -84,6 +84,7 @@ If Windows shows "Windows protected your PC", or the program is blocked, see
 
 ## Next
 
+- Step-by-step recipes (connect an agent, long sessions, long context, images, log lines): [recipes.md](recipes.md)
 - Every option and environment variable: [usage reference](usage.md)
 - Server details (API, sampling, tool calls, caching): [server.md](guide/en/server.md)
 - Which GGUF to use: [quantization.md](guide/en/quantization.md#rules)

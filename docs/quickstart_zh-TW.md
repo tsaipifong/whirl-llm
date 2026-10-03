@@ -77,6 +77,7 @@ WHIRL 會說明發生了什麼、該怎麼做，並以代碼結束：
 
 ## 接下來
 
+- 照做就會的情境食譜（接上 agent、長工作階段、長上下文、圖片、log 解讀）：[recipes_zh-TW.md](recipes_zh-TW.md)
 - 每個選項與環境變數：[使用參考](guide/zh-TW/usage.md)
 - 伺服器細節（API、取樣、工具呼叫、快取）：[server.md](guide/zh-TW/server.md)
 - 該用哪個 GGUF：[quantization.md](guide/zh-TW/quantization.md#rules)

@@ -123,6 +123,7 @@ SHA-256 的 zip 這樣做）。**智慧型應用程式控制**設為*開啟*時�
 | | 繁體中文 | English |
 |---|---|---|
 | 快速上手 | [quickstart_zh-TW.md](quickstart_zh-TW.md) | [quickstart.md](quickstart.md) |
+| 情境食譜：接上用戶端、長時間 agent 工作階段、長上下文、多使用者、圖片、看懂 log、疑難排解 | [recipes_zh-TW.md](recipes_zh-TW.md) | [recipes.md](recipes.md) |
 | 使用參考（所有指令、選項、環境變數、結束代碼） | [usage.md](guide/zh-TW/usage.md) | [usage.md](usage.md) |
 | 伺服器（API、取樣、工具呼叫、批次、log） | [server.md](guide/zh-TW/server.md) | [server.md](guide/en/server.md) |
 | 與 llama.cpp 的效能比較 | [benchmarks.md](guide/zh-TW/benchmarks.md) | [benchmarks.md](benchmarks.md) |
