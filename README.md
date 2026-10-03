@@ -127,7 +127,7 @@ Full methodology and all numbers: [benchmarks.md](docs/benchmarks.md).
 
 The `gfx1151` branch adds a kernel set for the Radeon 8060S (Ryzen AI Max+ 395 iGPU). It is
 **correct but not tuned yet**: the kernel tests pass on it, MTP / MTP + n-gram output equals plain
-greedy on the three models below, and the server gates pass. Builds contain both kernel sets; the
+greedy on the three models in the table below, and the server gates pass. Builds contain both kernel sets; the
 R9700 is the default device when present, otherwise the 8060S (`whirl devices` shows which;
 `--device 8060s` / `WHIRL_DEVICE=8060s` selects it). Not yet on the 8060S: image input, the `q8v` /
 `q8h` KV formats, fp8 prefill (MXFP4 prefill uses f16 activations). Unified memory: the server's
