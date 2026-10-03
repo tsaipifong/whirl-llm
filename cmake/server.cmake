@@ -39,6 +39,8 @@ add_library(whirl_server_core STATIC
   ${CMAKE_SOURCE_DIR}/src/server/engine_vision.cpp
   ${CMAKE_SOURCE_DIR}/src/server/http.cpp)
 target_include_directories(whirl_server_core PUBLIC ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/include)
+# whirl/version.h (configured by cmake/release.cmake) for GET /version and /props
+target_include_directories(whirl_server_core PRIVATE ${CMAKE_BINARY_DIR}/generated)
 target_link_libraries(whirl_server_core PUBLIC whirl whirl_tier_core ws2_32)
 
 if(WHIRL_WITH_HIP)

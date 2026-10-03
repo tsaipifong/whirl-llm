@@ -111,7 +111,9 @@ kernel 表；[pitfalls.md](pitfalls.md#srv-defaultenv)）。
 ## <a id="thinking"></a>4. 思考與 `reasoning_content`
 
 - 思考由 `chat_template_kwargs.enable_thinking` 或頂層的 `enable_thinking` 控制；
-  `reasoning_effort` 與 `preserve_thinking` 依 GGUF chat template 的方式支援。
+  `reasoning_effort` 與 `preserve_thinking` 依 GGUF chat template 的方式支援。也接受 OpenRouter 形式的
+  `"reasoning": {"effort", "enabled"}` 物件與 effort 別名（`max` / `ultra`、`minimal`、`none`），見
+  [usage.md](usage.md#endpoints)。
 - 思考文字放在 `message.reasoning_content` 回傳（串流：`delta.reasoning_content`），答案放在
   `content`。
 - 大多數用戶端在下一輪不會把 `reasoning_content` 送回來。此時 template 會產生一個空的

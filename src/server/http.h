@@ -1,6 +1,6 @@
 // HTTP/1.1 front end of the server (one thread per connection, Connection:
-// close): /health, /v1/models, /v1/chat/completions, /v1/completions and
-// CORS preflight. Requests are parsed, rendered and tokenized here; the
+// close): /health, /v1/models, /v1/chat/completions, /v1/completions, the
+// read-only compatibility endpoints /props and /version, and CORS preflight. Requests are parsed, rendered and tokenized here; the
 // engine's main thread runs them and writes the responses.
 // SPDX-License-Identifier: Apache-2.0
 

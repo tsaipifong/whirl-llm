@@ -536,6 +536,75 @@ ServerSetup baseSetup(bool mtp = true) {
     return su;
 }
 
+// Read-only compatibility endpoints (GET /props, /version) and the quiet 404 of
+// other server types' probe paths.
+void testCompatEndpoints() {
+    ServerSetup su = baseSetup();
+    su.eo.model_name = "mock-alias";
+    su.eo.model_file = "models/sub\\mock-Q4_K_M.gguf";  // directories must never reach the response
+    TestServer srv(su);
+    for (const char* p : {"/props", "/v1/props"}) {
+        const auto r = srv.get(p);
+        CHECK_EQ(r.status, 200);
+        const json::Value v = parseBody(r);
+        CHECK(v.isObject());
+        if (!v.isObject()) continue;
+        const json::Value* dg = v.get("default_generation_settings");
+        CHECK(dg && dg->isObject());
+        if (dg && dg->isObject()) {
+            const json::Value* n_ctx = dg->get("n_ctx");
+            CHECK(n_ctx && n_ctx->asInt() == static_cast<std::int64_t>(su.mc.slot_ctx));
+            const json::Value* m = dg->get("model");
+            CHECK(m && m->isString() && m->asString() == "mock-alias");
+        }
+        const json::Value* ts = v.get("total_slots");
+        CHECK(ts && ts->asInt() == static_cast<std::int64_t>(su.mc.parallel));
+        const json::Value* mp = v.get("model_path");
+        CHECK(mp && mp->isString() && mp->asString() == "mock-Q4_K_M.gguf");
+        const json::Value* al = v.get("model_alias");
+        CHECK(al && al->isString() && al->asString() == "mock-alias");
+        const json::Value* mod = v.get("modalities");
+        CHECK(mod && mod->isObject() && mod->get("vision") && mod->get("vision")->isBool());
+        const json::Value* bi = v.get("build_info");
+        CHECK(bi && bi->isString() && bi->asString().starts_with("whirl "));
+        CHECK(r.body.find("models/") == std::string::npos && r.body.find('\\') == std::string::npos);
+    }
+    CHECK_EQ(srv.post("/props", "{}").status, 405);
+    const auto ver = srv.get("/version");
+    CHECK_EQ(ver.status, 200);
+    const json::Value vv = parseBody(ver);
+    const json::Value* vs = vv.isObject() ? vv.get("version") : nullptr;
+    const json::Value* vn = vv.isObject() ? vv.get("name") : nullptr;
+    CHECK(vs && vs->isString() && !vs->asString().empty());
+    CHECK(vn && vn->isString() && vn->asString() == "whirl");
+    if (vs && vs->isString()) {
+        const json::Value pv = parseBody(srv.get("/props"));
+        const json::Value* bi = pv.isObject() ? pv.get("build_info") : nullptr;
+        CHECK(bi && bi->isString() && bi->asString() == "whirl " + vs->asString());
+    }
+    // probes for LM Studio / Ollama: 404 without a warning line
+    g_log.clear();
+    for (int i = 0; i < 3; ++i) {
+        CHECK_EQ(srv.get("/api/v1/models").status, 404);
+        CHECK_EQ(srv.get("/api/tags").status, 404);
+    }
+    CHECK_EQ(g_log.count(" W GET /api/"), 0u);
+    CHECK(g_log.count("GET /api/tags -> 404") <= 1);
+    // an unknown path still warns
+    CHECK_EQ(srv.get("/nope-compat").status, 404);
+    CHECK_EQ(g_log.count(" W GET /nope-compat -> 404"), 1u);
+    // reasoning effort: an unknown value is a warning, not a 400; aliases and the
+    // "reasoning" object are accepted and logged as the canonical effort
+    g_log.clear();
+    const std::string q = R"({"messages":[{"role":"user","content":"q"}],"max_tokens":4,"temperature":0,)";
+    CHECK_EQ(srv.post("/v1/chat/completions", q + R"("reasoning_effort":"turbo"})").status, 200);
+    CHECK_EQ(g_log.count("unknown reasoning_effort \"turbo\" ignored"), 1u);
+    CHECK_EQ(srv.post("/v1/chat/completions", q + R"("reasoning":{"effort":"ultra"}})").status, 200);
+    CHECK_EQ(g_log.count("thinking on, reasoning_effort xhigh"), 1u);
+    CHECK_EQ(srv.post("/v1/chat/completions", q + R"("reasoning":{"enabled":false}})").status, 200);
+    CHECK_EQ(g_log.count("thinking off"), 1u);
+}
+
 void testEndpoints() {
     TestServer srv(baseSetup());
     auto h = srv.get("/health");
@@ -1152,6 +1221,7 @@ int main(int argc, char** argv) {
         {"sampler", testSampler},
         {"chat_tokens", testChatTokens},
         {"endpoints", testEndpoints},
+        {"compat_endpoints", testCompatEndpoints},
         {"greedy_reference", testGreedyMatchesReference},
         {"stream", testStreamEqualsNonStream},
         {"prefix_cache", testPrefixCacheMultiTurn},

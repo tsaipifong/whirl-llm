@@ -260,6 +260,7 @@ struct CycleProf;
 
 struct EngineOptions {
     std::string model_name;
+    std::string model_file;  // GGUF file name without directory (GET /props model_path)
     std::uint32_t ctx = 131072;  // context per slot (cap)
     std::uint32_t parallel = 4;
     chat::TemplateKind tmpl = chat::TemplateKind::a;

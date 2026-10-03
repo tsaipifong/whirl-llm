@@ -78,7 +78,8 @@ constexpr std::uint64_t kv_ssd_gb_default = 64;
 
 const char* kHelpBody =
     "Loads a qwen35 / qwen35moe GGUF model on the GPU and serves the OpenAI-compatible API\n"
-    "(GET /health, GET /v1/models, POST /v1/chat/completions, POST /v1/completions) with\n"
+    "(GET /health, GET /v1/models, POST /v1/chat/completions, POST /v1/completions; plus\n"
+    "GET /props and GET /version for clients that detect the context length) with\n"
     "continuous batching over --parallel request slots, a prefix cache and host RAM / SSD tiers.\n"
     "Stop it with Ctrl+C (running requests finish, cached sessions are written out).\n"
     "\n"
@@ -513,6 +514,7 @@ int serveMain(int argc, char** argv, const char* program) {
         }
         EngineOptions eo;
         eo.model_name = name;
+        eo.model_file = base;
         eo.ctx = slot_ctx;
         eo.parallel = opt.parallel;
         eo.tmpl = tmpl;
@@ -805,7 +807,7 @@ int serveMain(int argc, char** argv, const char* program) {
         HttpServer http(engine);
         http.start(opt.host, opt.port);
         logI("server listening on http://{}:{} (model id \"{}\", {} slots); endpoints: GET /health, GET /v1/models, POST "
-             "/v1/chat/completions, POST /v1/completions",
+             "/v1/chat/completions, POST /v1/completions, GET /props, GET /version",
              opt.host, http.port(), name, opt.parallel);
         // main thread: continuous batching over the slots (until a console control
         // event stops the engine: graceful shutdown, see onConsoleCtrl)

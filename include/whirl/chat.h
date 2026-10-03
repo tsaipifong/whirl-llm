@@ -22,6 +22,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace whirl::chat {
 
@@ -48,17 +49,30 @@ struct ChatOptions {
 std::string renderChat(TemplateKind kind, const json::Array& messages, const json::Array& tools,
                        const ChatOptions& opt);
 
+// Canonical reasoning effort for a client value (ASCII case-insensitive,
+// surrounding whitespace ignored): "max" / "ultra" / "xhigh" / "high" -> "xhigh",
+// "medium" -> "medium", "low" / "minimal" -> "low", "none" -> "none" (thinking
+// off). Anything else -> nullopt.
+std::optional<std::string> canonicalEffort(std::string_view value);
+
 // OpenAI-style request fields used for rendering.
 struct ChatRequest {
     json::Array messages;
     json::Array tools;  // empty when tool_choice == "none"
     std::string tool_choice = "auto";
-    ChatOptions options;
+    ChatOptions options;            // options.effort is canonical (xhigh / medium / low) when set
+    std::vector<std::string> warnings;  // ignored values (e.g. an unknown reasoning effort), for the log
 };
 
-// Reads messages, tools, tool_choice, chat_template_kwargs {enable_thinking,
-// reasoning_effort, preserve_thinking} and top-level enable_thinking /
-// reasoning_effort (top level wins).
+// Reads messages, tools, tool_choice and the thinking options, applied in this
+// order (a later source overrides an earlier one):
+//   chat_template_kwargs {enable_thinking, reasoning_effort, preserve_thinking},
+//   reasoning {enabled, effort} (OpenRouter / OpenAI Responses style; a string
+//   or boolean `reasoning` is read as the effort / enabled flag),
+//   top-level enable_thinking, top-level reasoning_effort.
+// Efforts go through canonicalEffort; "none" or reasoning.enabled == false turns
+// thinking off, reasoning.enabled == true turns it on. An unknown effort is not
+// an error: it is ignored (the default effort applies) and noted in `warnings`.
 ChatRequest parseChatRequest(const json::Value& root);
 
 }  // namespace whirl::chat

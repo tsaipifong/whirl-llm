@@ -117,7 +117,9 @@ that default path (it re-loaded kernel tables after the KV format was chosen at 
 ## <a id="thinking"></a>4. Thinking and `reasoning_content`
 
 - Thinking is controlled by `chat_template_kwargs.enable_thinking` or a top-level `enable_thinking`;
-  `reasoning_effort` and `preserve_thinking` are supported as in the GGUF chat template.
+  `reasoning_effort` and `preserve_thinking` are supported as in the GGUF chat template. The
+  OpenRouter-style `"reasoning": {"effort", "enabled"}` object and effort aliases (`max` / `ultra`,
+  `minimal`, `none`) are accepted too; see [usage.md](../../usage.md#endpoints).
 - Thinking text is returned in `message.reasoning_content` (streaming: `delta.reasoning_content`),
   the answer in `content`.
 - Most clients do not send `reasoning_content` back in the next turn. The template then renders an

@@ -175,14 +175,18 @@ std::string renderChat(TemplateKind kind, const json::Array& msgs, const json::A
 
     std::string_view instr;
     if (kind == TemplateKind::a && opt.think) {
-        std::string eff = opt.effort.value_or("xhigh");
-        if (eff == "high") eff = "xhigh";
+        // parseChatRequest already stores canonical values; direct callers may pass aliases
+        std::string eff = "xhigh";
+        if (opt.effort) {
+            const std::optional<std::string> c = canonicalEffort(*opt.effort);
+            eff = c && *c != "none" ? *c : std::string();
+        }
         if (eff == "xhigh")
             instr = k_effort_xhigh;
         else if (eff == "low")
             instr = k_effort_low;
         else if (eff != "medium")
-            bad("unexpected reasoning_effort (supported: xhigh / high, medium, low)");
+            bad("unexpected reasoning_effort (supported: xhigh / high / max / ultra, medium, low / minimal)");
     }
 
     if (!tools.empty()) {
@@ -339,6 +343,17 @@ std::string renderChat(TemplateKind kind, const json::Array& msgs, const json::A
     return w;
 }
 
+std::optional<std::string> canonicalEffort(std::string_view value) {
+    std::string v(trimWs(value));
+    for (char& c : v)
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    if (v == "xhigh" || v == "high" || v == "max" || v == "ultra") return std::string("xhigh");
+    if (v == "medium") return std::string("medium");
+    if (v == "low" || v == "minimal") return std::string("low");
+    if (v == "none") return std::string("none");
+    return std::nullopt;
+}
+
 ChatRequest parseChatRequest(const json::Value& root) {
     if (!root.isObject()) bad("request body must be a JSON object");
     ChatRequest req;
@@ -347,15 +362,43 @@ ChatRequest parseChatRequest(const json::Value& root) {
     if (!mv->isArray()) bad("'messages' must be an array");
     req.messages = mv->asArray();
 
+    // a client's effort value: canonical, "none" = thinking off, unknown = ignored (default effort)
+    const auto applyEffort = [&req](const std::string& value, std::string_view field) {
+        const std::optional<std::string> c = canonicalEffort(value);
+        if (!c) {
+            std::string w = "unknown ";
+            w += field;
+            w += " \"";
+            w += value.size() > 64 ? value.substr(0, 64) + "..." : value;
+            w += "\" ignored (supported: xhigh / high / max / ultra, medium, low / minimal, none); default effort used";
+            req.warnings.push_back(std::move(w));
+        } else if (*c == "none") {
+            req.options.think = false;
+        } else {
+            req.options.effort = *c;
+        }
+    };
+
     if (const json::Value* kw = getField(root, "chat_template_kwargs")) {
         if (!kw->isObject()) bad("chat_template_kwargs must be an object");
         if (auto b = getBool(*kw, "enable_thinking", "enable_thinking must be a boolean")) req.options.think = *b;
-        if (const std::string* s = getStr(*kw, "reasoning_effort")) req.options.effort = *s;
+        if (const std::string* s = getStr(*kw, "reasoning_effort")) applyEffort(*s, "chat_template_kwargs.reasoning_effort");
         if (auto b = getBool(*kw, "preserve_thinking", "preserve_thinking must be a boolean"))
             req.options.preserve_thinking = *b;
     }
+    // OpenRouter / OpenAI Responses style: "reasoning": {"effort": "...", "enabled": bool}
+    if (const json::Value* rv = getField(root, "reasoning")) {
+        if (rv->isObject()) {
+            if (const json::Value* en = getField(*rv, "enabled"); en && en->isBool()) req.options.think = en->asBool();
+            if (const std::string* s = getStr(*rv, "effort")) applyEffort(*s, "reasoning.effort");
+        } else if (rv->isString()) {
+            applyEffort(rv->asString(), "reasoning");
+        } else if (rv->isBool()) {
+            req.options.think = rv->asBool();
+        }
+    }
     if (auto b = getBool(root, "enable_thinking", "enable_thinking must be a boolean")) req.options.think = *b;
-    if (const std::string* s = getStr(root, "reasoning_effort")) req.options.effort = *s;
+    if (const std::string* s = getStr(root, "reasoning_effort")) applyEffort(*s, "reasoning_effort");
 
     if (const json::Value* tv = getField(root, "tools")) {
         if (!tv->isArray()) bad("'tools' must be an array");

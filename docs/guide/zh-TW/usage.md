@@ -2,7 +2,7 @@
 
 # 使用參考：`whirl` 與 `whirl-server`
 
-本頁列出 WHIRL 0.1.0 的每一個指令、選項、環境變數與伺服器端點。內容依發行版執行檔的內建說明
+本頁列出 WHIRL 0.1.1 的每一個指令、選項、環境變數與伺服器端點。內容依發行版執行檔的內建說明
 （`whirl --help`、`whirl <指令> --help`、`whirl help env`、`whirl-server --help`）整理；若有出入，以你手上
 執行檔的說明文字為準。
 
@@ -160,9 +160,15 @@ base URL `http://127.0.0.1:8080/v1`。任何 API key 都接受（沒有身分驗
 |---|---|
 | `POST /v1/chat/completions` | messages、串流（SSE）或不串流、工具 / 工具呼叫、思考（`reasoning_content`）、圖片（需 `--mmproj`） |
 | `POST /v1/completions` | 原始提示，不套聊天樣板 |
-| `GET /v1/models` | 已載入的那一個模型（id = `--alias`） |
+| `GET /v1/models` | 已載入的那一個模型（id = `--alias`）；`meta.n_ctx` 為每個 slot 的 context |
 | `GET /health` | 忙碌時也會立刻回應；回報忙碌狀態與佇列長度 |
+| `GET /props`（也接受 `/v1/props`） | 唯讀，llama.cpp server 形式的子集，供會自動偵測 context 長度的客戶端使用：`default_generation_settings.n_ctx`（每個 slot 的 context）、`default_generation_settings.model` 與 `model_alias`（= `--alias`）、`total_slots`、`model_path`（只有檔名，絕不含目錄）、`modalities`、`build_info` |
+| `GET /version` | `{"version":"0.1.1","name":"whirl"}` |
 | `OPTIONS`（CORS preflight） | 支援 |
+
+LM Studio（`/api/v1/models`）與 Ollama（`/api/tags`、`/api/show`、`/api/version`）的原生端點不模擬
+（客戶端偵測到它們就會改用 WHIRL 沒有的 API）：一律回 404，且每個路徑只在第一次被探測時記一行 `I` 級
+日誌，不再每次請求都記警告。這類客戶端請改指向上面的 OpenAI 相容 base URL。
 
 請求參數：`temperature`、`top_p`、`top_k`、`min_p`、`seed`、`max_tokens` / `max_completion_tokens`、`stop`、
 `stream`、`tools`、`tool_choice`、`chat_template_kwargs.enable_thinking`（或最上層的 `enable_thinking`）、
@@ -170,6 +176,21 @@ base URL `http://127.0.0.1:8080/v1`。任何 API key 都接受（沒有身分驗
 `whirl chat` 逐 token 相同。`presence_penalty` / `frequency_penalty` 會接受但忽略；`n` 必須為 1；不支援
 `logprobs`、`response_format`，`tool_choice: "required"` 也不會強制。回應另含 `usage.cached_tokens` 與
 llama.cpp 形式的 `timings` 物件。細節見 [server.md](server.md#sampling)。
+
+思考與 reasoning effort 可用下列任一種寫法（依此順序套用，後者覆蓋前者）：
+`chat_template_kwargs.{enable_thinking, reasoning_effort}`、OpenRouter / OpenAI Responses 形式的物件
+`"reasoning": {"effort": "...", "enabled": true|false}`、最上層 `enable_thinking`、最上層 `reasoning_effort`。
+effort 值（不分大小寫）：
+
+| 送出的值 | 實際使用的 effort |
+|---|---|
+| `xhigh`、`high`、`max`、`ultra` | xhigh（沒給時的預設） |
+| `medium` | medium |
+| `low`、`minimal` | low |
+| `none`（或 `"reasoning": {"enabled": false}`） | 關閉思考 |
+
+不認得的 effort 值不會讓請求失敗：伺服器記一行警告並改用預設值。effort 只會改變 chat template 支援它的
+模型（Qwen3.8）的提示；思考已被關閉時，給有效的 effort 也不會把思考重新打開。
 
 ```powershell
 $body = '{"messages":[{"role":"user","content":"2+3 等於多少？"}],"temperature":0,"max_tokens":200}'

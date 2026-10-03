@@ -2,7 +2,7 @@
 
 # Usage reference: `whirl` and `whirl-server`
 
-This page lists every command, option, environment variable and server endpoint of WHIRL 0.1.0.
+This page lists every command, option, environment variable and server endpoint of WHIRL 0.1.1.
 It was written from the built-in help of the release executables (`whirl --help`,
 `whirl <command> --help`, `whirl help env`, `whirl-server --help`); when in doubt, the help text of
 your own executable is authoritative.
@@ -168,9 +168,16 @@ Base URL `http://127.0.0.1:8080/v1`. Any API key is accepted (there is no authen
 |---|---|
 | `POST /v1/chat/completions` | messages, streaming (SSE) or not, tools / tool calls, thinking (`reasoning_content`), images (with `--mmproj`) |
 | `POST /v1/completions` | raw prompt, no chat template |
-| `GET /v1/models` | the one loaded model (id = `--alias`) |
+| `GET /v1/models` | the one loaded model (id = `--alias`); `meta.n_ctx` is the context per slot |
 | `GET /health` | answers immediately even while busy; reports the busy state and queue length |
+| `GET /props` (also `/v1/props`) | read-only, llama.cpp-server-style subset for clients that auto-detect the context length: `default_generation_settings.n_ctx` (context per slot), `default_generation_settings.model` and `model_alias` (= `--alias`), `total_slots`, `model_path` (file name only, never a directory), `modalities`, `build_info` |
+| `GET /version` | `{"version":"0.1.1","name":"whirl"}` |
 | `OPTIONS` (CORS preflight) | supported |
+
+LM Studio (`/api/v1/models`) and Ollama (`/api/tags`, `/api/show`, `/api/version`) native endpoints
+are not emulated (a client that found them would switch to an API WHIRL does not have): they answer
+404, and the server logs the first probe of each path once at `I` level instead of a warning per
+request. Point such clients at the OpenAI-compatible base URL above.
 
 Request parameters: `temperature`, `top_p`, `top_k`, `min_p`, `seed`, `max_tokens` /
 `max_completion_tokens`, `stop`, `stream`, `tools`, `tool_choice`,
@@ -180,6 +187,22 @@ Request parameters: `temperature`, `top_p`, `top_k`, `min_p`, `seed`, `max_token
 `frequency_penalty` are accepted but ignored; `n` must be 1; `logprobs`, `response_format` and
 enforced `tool_choice: "required"` are not supported. Responses add `usage.cached_tokens` and a
 llama.cpp-style `timings` object. Details: [server.md](guide/en/server.md#sampling).
+
+Thinking and reasoning effort can be given in any of these forms (applied in this order; a later one
+overrides an earlier one): `chat_template_kwargs.{enable_thinking, reasoning_effort}`, the
+OpenRouter / OpenAI Responses-style object `"reasoning": {"effort": "...", "enabled": true|false}`,
+top-level `enable_thinking`, top-level `reasoning_effort`. Effort values (case-insensitive):
+
+| Value sent | Effort used |
+|---|---|
+| `xhigh`, `high`, `max`, `ultra` | xhigh (the default when none is given) |
+| `medium` | medium |
+| `low`, `minimal` | low |
+| `none` (or `"reasoning": {"enabled": false}`) | thinking off |
+
+An unknown effort value does not fail the request: the server logs a warning and uses the default.
+Effort only changes the prompt of models whose chat template supports it (Qwen3.8); a valid effort does
+not turn thinking back on when it was switched off.
 
 ```powershell
 $body = '{"messages":[{"role":"user","content":"What is 2+3?"}],"temperature":0,"max_tokens":200}'
