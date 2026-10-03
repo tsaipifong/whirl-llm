@@ -337,6 +337,25 @@ asm 屏障，因為編譯器把 `x*x` 收縮進第一個 butterfly 加法，並�
   fragment 64），而且每個 WMMA 都從 LDS 讀取 512 位元組的 fragment。`attn_kx` 每 128 個 query 使用 16 個 wave；兩個相鄰的 wave 共用 16 個 query，各自用原本的
   WMMA 鏈為 16 個 key 計算 Sᵀ，透過 LDS 交換，兩者計算相同的 softmax，各保留 Oᵀ 的一半（64 VGPR，無溢出）；下一個 K/V tile 預取到暫存器。逐位元相同。120k：f16
   KV 218 → 185 ms（+17.8%），q8v KV 247 → 198 ms（+25.0%）；32k +11%；≤ 8k 不變。
+- **`attn_kg`：依 GQA 分組、直接載入（f16 與 q8v KV 的預設）。** 對 0.1.2 build 做逐類別 profile（Swift MXFP4-A，`whirl bench` 加
+  `WHIRL_PROFILE=1`）：除了 attention 以外，每一類運算的每 token 成本在各種 prompt 長度下都一樣；attention 則從 2k 的 0.015 ms/token（prefill 的
+  5%）漲到 64k 的 0.228 ms/token（46%），約 61–66 TFLOPS。`attn_kg` 重新分配 `attn_kx` 的工作，但每個 query 的運算一個都沒改：
+  - 一個 block = 同一個 KV head 底下的 query head（Qwen3.8-27B 全部 6 個，Ornith 的 8 個取 4 個）× 16 個 query，每個 head 兩個 wave，與
+    `attn_kx` 相同（Sᵀ 依 key 切、Oᵀ 依維度切）；
+  - 不共用 K/V tile。K fragment 從快取直接載入 WMMA A 暫存器；Vᵀ fragment 用 `global_load_tr_b128`，也就是 RDNA 4 的轉置載入：它在每 8 個 lane
+    一組之間轉置 8×8 的 16 位元區塊，所以每個 lane 提供一列 key，拿回的正好是它需要的 A 運算元那一行。同一個 KV head 的各個 head 同時讀同一批列，
+    所以這些載入會命中快取。沒有暫存器內轉置，每個 32-key tile 只有一個 barrier（Sᵀ 交換），原本是三個；
+  - q8v：V 在每個 block 只 dequantize 一次（與其他地方相同的 `(f16)q × s` 乘法），寫進提前一個 tile 的雙緩衝 LDS stage，由同一個 barrier 公開；
+  - softmax scale 1/16 是 2 的冪，所以分數維持不縮放——(s − m)·(scale·log2 e) 的捨入與 `__expf` 實際計算的 (s·scale − m·scale)·log2 e
+    完全相同——−inf 的 select 也可以拿掉（exp2(−inf) = 0；key 0 對每個 query 都可見，所以第一個 tile 之後累計最大值就是有限值）。block 內每個
+    query 都完整可見的 tile 直接跳過 mask。
+
+  與 `attn_kx` 逐位元相同（kernel-test 不變量涵蓋 group 6、group 8 與 head 範圍切分；三個模型在 4.9k–70.9k token 下最後一個 token 的 logits
+  與 0.1.2 逐位元相同，f16 與 q8v 皆是）。Probe，每次啟動 4096 個 query：f16、24 / 4 heads 62–66 → 92–97 TFLOPS；Ornith 的 group 8（每 block 4
+  個 head）60–66 → 78–81；q8v 57–62 → 82–84。同一個 kernel 拿掉所有 K/V 載入可到 123 TFLOPS，連 softmax 也拿掉是 139，所以剩下的成本是載入的資料
+  路徑，以及精確性要求的 16 步序列 Sᵀ 鏈。較差的做法（全都逐位元相同，全都比較慢）：f16 的 Vᵀ 改經共用 LDS stage（88 對 93）、K 和 V 都經 LDS
+  （暫存器溢出）、把 tile j−1 的 P·V 與 tile j 的 Sᵀ 交錯（89）、預取下一個 tile 的 K（−25%）、每 block 兩組 query（持平）、最長的 block 先排（第一個
+  chunk −10%）、q8v 用 4 個 wave 的 block（比 `attn_kx_q8v` 慢，未採用）、8192 列的 prefill chunk（端到端 −2%）。
 - 超過 128k 上下文時，啟動依 head 範圍切分（結果不變；成本約 2%；≤ 128k 從不套用），這是在一次 256k prefill 期間出現無法解釋的 `HipFailed` 之後採取的預防措施
   （[pitfalls.md](pitfalls.md#hip-256k)）。
 - 較差的做法：在非對角 tile 上跳過 causal mask（30k −4%，但 120k +1.3%）、只跳過 mask（+8%，排程變差）、依維度切分的 wave 對（1.5× WMMA，沒有收益）、只做預取（`attn_pf`，已被取代）、釘住
