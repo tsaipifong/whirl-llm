@@ -179,7 +179,7 @@ KX_ENTRY(attn_kx_q8, true)
 KX_ENTRY(attn_kx_q8v, 2)
 
 // ---------------------------------------------------------------------------
-// Prefill attention, "GQA-grouped" (f16 and q8v KV). Same per-query arithmetic
+// Prefill attention, "GQA-grouped" (f16, q8 / q8h and q8v KV). Same per-query arithmetic
 // as attn_kx / attn_prefill_impl, so the output is bit-identical: the same
 // 32-key tiles in the same order, the same S^T WMMA chain over the 16 dimension
 // steps, the same online softmax per tile and the same P.V WMMA order per
@@ -187,7 +187,7 @@ KX_ENTRY(attn_kx_q8v, 2)
 //   * block = NP query heads of one KV head x 16 consecutive queries; two waves
 //     per head as in attn_kx (wave w computes S^T for keys w*16.. of each tile
 //     and keeps O^T dims [128w, 128w + 128)), partners exchange S^T via LDS;
-//   * K (f16 in both formats): each wave loads its fragments from the cache
+//   * K (f16, or int8 for q8 / q8h, dequantized in registers as kv_ld8): each wave loads its fragments from the cache
 //     straight into WMMA A registers (one 16-byte load per lane and dimension
 //     step). The NP heads of one KV head read the same rows at the same time,
 //     so the loads hit the cache;
@@ -195,7 +195,7 @@ KX_ENTRY(attn_kx_q8v, 2)
 //     8x8 16-bit blocks across each group of 8 lanes, so lane a supplies the row
 //     of key 8*(a/16) + a%8, dims 8*((a/8)%2).., and receives the A-operand
 //     column it needs);
-//   * V, q8v: dequantized once per block ((f16)q * s, as kv_ld8), 8 keys x 4
+//   * V, q8 / q8v: dequantized once per block ((f16)q * s, as kv_ld8), 8 keys x 4
 //     dims per thread (8 dims in 128-thread blocks), into a double-buffered LDS
 //     stage in A-register order, one tile ahead;
 //   * one barrier per tile: the S^T exchange (double-buffered by tile parity),
@@ -216,9 +216,10 @@ __device__ __forceinline__ half8 kg_ld_tr(const _Float16 *p) {
     __builtin_memcpy(&r, &v, 16);
     return r;
 }
-template <int NP, bool VQ8>
+template <int NP, int Q8>  // Q8: 0 f16, 1 q8 (int8 K and V), 2 q8v (int8 V)
 __device__ __forceinline__ void attn_kg_impl(const float *q, const KvArgs &kv, float *out, int n_head, int n_kv,
                                              int q_stride, const int *pos, int n_tok, float scale, int h0) {
+    constexpr bool KQ8 = Q8 == 1, VQ8 = Q8 != 0;
     const int tb = kv.tab0;
     __shared__ float8 Sx[2][NP * 2][32];
     __shared__ half8 Vf[VQ8 ? 2 : 1][2][VQ8 ? 16 : 1][32];  // q8v: [buffer][key half][dim tile][lane]
@@ -250,6 +251,8 @@ __device__ __forceinline__ void attn_kg_impl(const float *q, const KvArgs &kv, f
     const int n_keys = pos0 + min(q0 + 16, n_tok);  // keys of the block's last query + 1
     const int full_end = pos0 + q0;                 // tiles ending at or before this key are unmasked
     const _Float16 *Kc = (const _Float16 *)kv.k + (size_t)kvh * FA_D;
+    const int8_t *Kq = (const int8_t *)kv.k + (size_t)kvh * FA_D;   // q8 K
+    const _Float16 *Ks = kv.ks + (size_t)kvh * (FA_D / 32);
     const int rs = n_kv * FA_D;                     // elements per pool row
     const int krow = w * 16 + lane % 16;            // S^T: this lane's key row in the tile
     const int kcol = 8 * (lane / 16);
@@ -295,7 +298,23 @@ __device__ __forceinline__ void attn_kg_impl(const float *q, const KvArgs &kv, f
     for (int k0 = 0; k0 < n_keys; k0 += FA_K, par ^= 1) {
         const int dl = kv_delta(kv, tb, k0);  // FA_K-key tiles never straddle a page
         float8 own = (float8){0, 0, 0, 0, 0, 0, 0, 0};
-        {
+        if constexpr (KQ8) {
+            // q8 K: the lane's 8-byte int8 fragments of its key row and the row's 8 scales (one per
+            // 32 dims; dims 16*st + kcol.. lie in group st / 2), dequantized as kv_ld8: (f16)q * s
+            const int krw = min(k0 + krow, n_keys - 1) + dl;
+            const int8_t *kr = Kq + (size_t)krw * rs + kcol;
+            const half8 ksc = *(const half8 *)(Ks + (size_t)krw * rss);
+#pragma unroll
+            for (int st = 0; st < FA_D / 16; ++st) {
+                if (st % 4 == 0 && st > 0) __builtin_amdgcn_sched_barrier(0);  // four batches: VGPRs
+                const kvq8_t qk = *(const kvq8_t *)(kr + 16 * st);
+                const _Float16 s = ksc[st >> 1];
+                half8 a;
+#pragma unroll
+                for (int i = 0; i < 8; ++i) a[i] = (_Float16)qk[i] * s;
+                own = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(a, qf[st], own);
+            }
+        } else {
             const _Float16 *kr = Kc + (size_t)(min(k0 + krow, n_keys - 1) + dl) * rs + kcol;
 #pragma unroll
             for (int st = 0; st < FA_D / 16; ++st) {
@@ -389,18 +408,20 @@ __device__ __forceinline__ void attn_kg_impl(const float *q, const KvArgs &kv, f
         }
 }
 // grid (ceil(n_tok / 16), heads / NP), block 64 * NP; NP divides n_head / n_kv
-#define KG_ENTRY(NAME, NP, VQ8)                                                                     \
+#define KG_ENTRY(NAME, NP, Q8)                                                                     \
     extern "C" __global__ void __launch_bounds__(64 * NP)                                           \
         NAME(const float *q, KvArgs kv, float *out, int n_head, int n_kv,                           \
              int q_stride, const int *pos, int n_tok, float scale, int h0) {                        \
-        attn_kg_impl<NP, VQ8>(q, kv, out, n_head, n_kv, q_stride, pos, n_tok, scale, h0);          \
+        attn_kg_impl<NP, Q8>(q, kv, out, n_head, n_kv, q_stride, pos, n_tok, scale, h0);          \
     }
-KG_ENTRY(attn_kg6, 6, false)
-KG_ENTRY(attn_kg4, 4, false)
-KG_ENTRY(attn_kg2, 2, false)
-KG_ENTRY(attn_kg6_q8v, 6, true)
-KG_ENTRY(attn_kg4_q8v, 4, true)
-// (no attn_kg2_q8v: with 4 waves per block the q8v stage is slower than attn_kx_q8v)
+KG_ENTRY(attn_kg6, 6, 0)
+KG_ENTRY(attn_kg4, 4, 0)
+KG_ENTRY(attn_kg2, 2, 0)
+KG_ENTRY(attn_kg6_q8, 6, 1)
+KG_ENTRY(attn_kg4_q8, 4, 1)
+KG_ENTRY(attn_kg6_q8v, 6, 2)
+KG_ENTRY(attn_kg4_q8v, 4, 2)
+// (no attn_kg2_q8 / attn_kg2_q8v: with 4 waves per block the int8 V stage is slower than attn_kx)
 
 // item P: f16-output variants of the f16-weight prefill GEMMs (Q4_K_M relaxed mode)
 extern "C" __global__ void __launch_bounds__(512) gemm_ch0_f16(const uint8_t *W, uint64_t row_bytes, const _Float16 *X, float *Y, int ncols, int nrows, int n_tok, int accumulate) { gemm3_impl<QT_F16, 128, 256, 64, 4, 0, 512, true, true>(W, row_bytes, X, Y, ncols, nrows, n_tok, 0); }
