@@ -1293,11 +1293,17 @@ void Model::run(u32 n) {
                 x16_src = 0;
                 mark(OpClass::gdn_rec);
             } else {
-                matmul(g.beta, h, beta, n, false);
-                matmul(g.alpha, h, alpha, n, false);
                 const u32 nh = n * cfg.n_v_heads;
                 bool conv_l2 = false;
-                hip::launch(k.gdn_gates, D((nh + 63) / 64), D(64), 0, stream, beta, alpha, g.dt, g.a, I(nh), I(cfg.n_v_heads));
+                if (gdn_ba_on && k.gdn_gates_ba != nullptr && ba_buf != 0 && rowsContiguous(g.beta, g.alpha)) {
+                    // one [beta; alpha] GEMM (beta's tune) into ba[t][2 * n_v_heads]
+                    matmul(concatRows(g.beta, g.alpha), h, ba_buf, n, false);
+                    hip::launch(k.gdn_gates_ba, D((nh + 63) / 64), D(64), 0, stream, ba_buf, beta, alpha, g.dt, g.a, I(nh), I(cfg.n_v_heads));
+                } else {
+                    matmul(g.beta, h, beta, n, false);
+                    matmul(g.alpha, h, alpha, n, false);
+                    hip::launch(k.gdn_gates, D((nh + 63) / 64), D(64), 0, stream, beta, alpha, g.dt, g.a, I(nh), I(cfg.n_v_heads));
+                }
                 if (!psegs.empty() && gdn_h16) {
                     // the solo f16 conv kernels per segment (segmented == solo bitwise)
                     conv_l2 = true;

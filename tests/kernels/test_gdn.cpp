@@ -244,6 +244,27 @@ void testGdn(Ctx& c) {
         }
         c.rep.add(cmpTolRel("gdn_gates beta vs CPU", db.down<float>(rb.size()), rb, 1e-5, 1e-7));
         c.rep.add(cmpTolRel("gdn_gates g vs CPU", da.down<float>(ra.size()), ra, 1e-5, 1e-7));
+        // gdn_gates_ba on [beta | alpha] per token == gdn_gates (bitwise)
+        if (c.k.gdn_gates_ba != nullptr) {
+            std::vector<float> ba(static_cast<std::size_t>(2 * nh));
+            for (int t = 0; t < n; ++t)
+                for (int h = 0; h < kNv; ++h) {
+                    ba[static_cast<std::size_t>(t * 2 * kNv + h)] = b[static_cast<std::size_t>(t * kNv + h)];
+                    ba[static_cast<std::size_t>(t * 2 * kNv + kNv + h)] = a[static_cast<std::size_t>(t * kNv + h)];
+                }
+            Buf dba(ba), db2(static_cast<std::size_t>(nh) * 4), da2(static_cast<std::size_t>(nh) * 4);
+            db2.fill(0xff);
+            da2.fill(0xff);
+            hip::launch(c.k.gdn_gates_ba, {cdiv(nh, 64), 1, 1}, {64, 1, 1}, 0, c.s, dba.p(), db2.p(), da2.p(), ddt.p(), dA.p(), nh, kNv);
+            c.sync();
+            c.rep.add(cmpExact("gdn_gates_ba beta == gdn_gates", db2.down<float>(rb.size()), db.down<float>(rb.size()), Kind::invariant));
+            c.rep.add(cmpExact("gdn_gates_ba g == gdn_gates", da2.down<float>(ra.size()), da.down<float>(ra.size()), Kind::invariant));
+        } else {
+            Result r;
+            r.name = "gdn_gates_ba present";
+            r.pass = false;
+            c.rep.add(r);
+        }
     }
 
     // ---- recurrence

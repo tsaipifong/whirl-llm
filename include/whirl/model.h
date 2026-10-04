@@ -410,7 +410,7 @@ public:
     GemvR gemv_w_head = defaultGemvWHead();
 
     // ---- activations
-    DevPtr x = 0, h = 0, qf = 0, kv_k = 0, kv_v = 0, attn_out = 0, qkv = 0, conv_out = 0, z = 0, beta = 0, alpha = 0,
+    DevPtr x = 0, h = 0, qf = 0, kv_k = 0, kv_v = 0, attn_out = 0, qkv = 0, conv_out = 0, z = 0, beta = 0, alpha = 0, ba_buf = 0,
            gdn_out = 0, ffn_g = 0, ffn_u = 0, logits = 0, scores = 0, ids = 0, pos_buf = 0, out_tok = 0;
     DevPtr part_ml = 0, part_acc = 0;
     DevPtr x16 = 0, xq = 0, xd = 0;
@@ -431,6 +431,7 @@ public:
     bool gdn_wmma = false;
     bool act_fuse = true;
     bool attn_kx_on = true;
+    bool gdn_ba_on = true;   // n>16 GDN prefill: one [beta; alpha] GEMM + gdn_gates_ba (WHIRL_GDN_BA=0 off)
     bool attn_kg_on = true;  // GQA-grouped prefill attention (f16 / q8 / q8h / q8v KV; WHIRL_ATTN_KG=0 off)
     bool ffn_h16 = false;
     bool out_h16 = false;

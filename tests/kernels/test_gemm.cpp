@@ -12,6 +12,8 @@
 
 #include "cpu_ref.h"
 
+#include <functional>
+
 namespace kt {
 
 namespace {
@@ -236,6 +238,102 @@ void testGemm(Ctx& c) {
             std::vector<float> want(ref.size());
             for (std::size_t i = 0; i < want.size(); ++i) want[i] = y0[i] + ref[i];
             c.rep.add(cmpExact("gemm_c0_" + sfx + " accumulate == y0 + y", y.down<float>(want.size()), want, Kind::invariant));
+        }
+    }
+
+    // GDN [beta; alpha]: one 96-row Q8_0 GEMM == the two 48-row GEMMs side by side
+    // (rows 0-47 of each token from beta, 48-95 from alpha), bitwise, for every choice.
+    {
+        const int nh = 48, ncols = 5120;
+        const QType qt = QType::q8_0;
+        const int ti = static_cast<int>(qt);
+        const HostMat ba = randomMat(c, qt, 2 * nh, ncols);
+        const std::uint64_t rb = ba.row_bytes;
+        Buf wba(ba.data);
+        const std::uint64_t half = static_cast<std::uint64_t>(nh) * rb;
+        Buf wb(std::vector<std::uint8_t>(ba.data.begin(), ba.data.begin() + static_cast<std::ptrdiff_t>(half)));
+        Buf wa(std::vector<std::uint8_t>(ba.data.begin() + static_cast<std::ptrdiff_t>(half), ba.data.end()));
+        const std::uint64_t rb16 = static_cast<std::uint64_t>(ncols) * 2;
+        auto deq = [&](const Buf& w, int rows, Buf& w16) {
+            const std::uint64_t groups = static_cast<std::uint64_t>(ncols / 8) * rows;
+            hip::launch(c.k.dequant_f16[ti], {static_cast<unsigned>(std::min<std::uint64_t>(cdiv(groups, 256), 65535)), 1, 1}, {256, 1, 1},
+                        0, c.s, w.p(), rb, w16.p(), ncols, rows);
+        };
+        Buf wba16(static_cast<std::size_t>(2 * nh) * ncols * 2), wb16(static_cast<std::size_t>(nh) * ncols * 2),
+            wa16(static_cast<std::size_t>(nh) * ncols * 2);
+        deq(wba, 2 * nh, wba16);
+        deq(wb, nh, wb16);
+        deq(wa, nh, wa16);
+        const std::vector<int> ns = c.quick ? std::vector<int>{17, 512} : std::vector<int>{17, 512, 4096};
+        for (int n : ns) {
+            const std::vector<float> x = c.randn(static_cast<std::size_t>(n) * ncols);
+            Buf dx(x), x16(static_cast<std::size_t>(n) * ncols * 2);
+            hip::launch(c.k.f32_to_f16, {cdiv(static_cast<std::uint64_t>(n) * ncols / 4, 256), 1, 1}, {256, 1, 1}, 0, c.s, dx.p(), x16.p(),
+                        n * ncols);
+            // one kernel choice: (quantized weights, f16 weights, rows, y)
+            using L = std::function<void(DevPtr, DevPtr, int, DevPtr)>;
+            std::vector<std::pair<std::string, L>> vs;
+            for (int ci = 0; ci < static_cast<int>(wk::kGemmCfgs.size()); ++ci) {
+                const auto cf = wk::kGemmCfgs[static_cast<std::size_t>(ci)];
+                if (hip::Function f = c.k.gemmc[ci][ti])
+                    vs.push_back({"gemm_c" + std::to_string(ci), [&, f, cf](DevPtr w, DevPtr, int rows, DevPtr y) {
+                                      hip::launch(f, {cdiv(n, cf.bn), cdiv(rows, cf.bm), 1}, {static_cast<unsigned>(cf.nth), 1, 1}, 0, c.s, w,
+                                                  rb, x16.p(), y, ncols, rows, n, 0);
+                                  }});
+                if (hip::Function f = c.k.gemmc[ci][static_cast<int>(QType::f16)])
+                    vs.push_back({"dequant+gemm_c" + std::to_string(ci) + "_f16", [&, f, cf](DevPtr, DevPtr w16, int rows, DevPtr y) {
+                                      hip::launch(f, {cdiv(n, cf.bn), cdiv(rows, cf.bm), 1}, {static_cast<unsigned>(cf.nth), 1, 1}, 0, c.s,
+                                                  w16, rb16, x16.p(), y, ncols, rows, n, 0);
+                                  }});
+            }
+            for (int si = 0; si < static_cast<int>(wk::kGemmsCfgs.size()); ++si) {
+                const auto cf = wk::kGemmsCfgs[static_cast<std::size_t>(si)];
+                if (hip::Function f = c.k.gemms[si][ti])
+                    vs.push_back({"gemms_c" + std::to_string(si), [&, f, cf](DevPtr w, DevPtr, int rows, DevPtr y) {
+                                      hip::launch(f, {cdiv(n, cf.bn), cdiv(rows, cf.bm), 1}, {static_cast<unsigned>(cf.nth), 1, 1}, 0, c.s, w,
+                                                  rb, x16.p(), y, ncols, rows, n, 0);
+                                  }});
+            }
+            if (hip::Function f = c.k.gemmhq[ti])
+                vs.push_back({"gemmhq", [&, f](DevPtr w, DevPtr, int rows, DevPtr y) {
+                                  hip::launch(f, {cdiv(n, 256), cdiv(rows, 128), 1}, {256, 1, 1}, 0, c.s, w, rb, x16.p(), y, ncols, rows, n, 0);
+                              }});
+            if (hip::Function f = c.k.gemmh_f16)
+                vs.push_back({"gemmh_f16", [&, f](DevPtr, DevPtr w16, int rows, DevPtr y) {
+                                  hip::launch(f, {cdiv(n, 256), cdiv(rows, 128), 1}, {256, 1, 1}, 0, c.s, w16, x16.p(), y, ncols, rows, n, 0);
+                              }});
+            std::size_t bad = 0;
+            std::string first_bad;
+            const std::size_t nb = static_cast<std::size_t>(n) * nh;
+            Buf yba(nb * 2 * 4), yb(nb * 4), ya(nb * 4);
+            for (const auto& [label, run] : vs) {
+                yba.fill(0xff);
+                yb.fill(0xff);
+                ya.fill(0xff);
+                run(wba.p(), wba16.p(), 2 * nh, yba.p());
+                run(wb.p(), wb16.p(), nh, yb.p());
+                run(wa.p(), wa16.p(), nh, ya.p());
+                c.sync();
+                const std::vector<float> gba = yba.down<float>(nb * 2), gb = yb.down<float>(nb), ga = ya.down<float>(nb);
+                std::vector<float> want(nb * 2);
+                for (int t = 0; t < n; ++t) {
+                    std::memcpy(&want[static_cast<std::size_t>(t) * 2 * nh], &gb[static_cast<std::size_t>(t) * nh], nh * 4);
+                    std::memcpy(&want[static_cast<std::size_t>(t) * 2 * nh + nh], &ga[static_cast<std::size_t>(t) * nh], nh * 4);
+                }
+                if (std::memcmp(gba.data(), want.data(), want.size() * 4) != 0) {
+                    ++bad;
+                    if (first_bad.empty()) first_bad = label;
+                }
+            }
+            Result r;
+            r.name = "gemm [beta;alpha] 96 rows == beta 48 | alpha 48 (q8_0, " + std::to_string(vs.size()) + " choices, n=" +
+                     std::to_string(n) + ")";
+            r.kind = Kind::invariant;
+            r.n = vs.size();
+            r.mismatches = bad;
+            r.pass = bad == 0 && !vs.empty();
+            if (!first_bad.empty()) r.note = "first " + first_bad;
+            c.rep.add(r);
         }
     }
 }

@@ -224,6 +224,7 @@ KernelTable KernelTable::load(const hip::Module& m, KvFormat kv) {
         {&KernelTable::attn_combine_q8, "attn_combine_q8"},
         {&KernelTable::attn_wsplit1, "attn_wsplit1"},
         {&KernelTable::topk_rows, "topk_rows"},
+        {&KernelTable::gdn_gates_ba, "gdn_gates_ba"},
     };
     for (const Named& n : optional) k.*(n.f) = L.opt(n.name);
 

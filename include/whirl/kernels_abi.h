@@ -80,6 +80,8 @@
 //  Gated DeltaNet:
 //   gdn_conv_seq(xin, state, w, out, ch, n_tok); gdn_gates(b, a, dt_bias, A,
 //            n, n_heads); gdn_conv_par(xin, state, w, out, ch, n_tok)
+//   gdn_gates_ba(const ba, b, a, dt_bias, A, n, n_heads): gdn_gates reading
+//            ba[t][2*n_heads] = [beta | alpha] (optional)
 //   gdn_conv_state(xin, state, ch, n_tok, float* snap, int snap_after)
 //   gdn_seq_128(qkv, g, beta, state, out, n_tok, n_k_heads, n_v_heads, dv,
 //            qkv_stride, scale, float* snap, int snap_after)
@@ -365,7 +367,7 @@ struct KernelTable {
     F attn_decode{}, kv_store{}, attn_split{}, attn_combine{}, attn_prep{}, attn_combine_q8{};
     F attn_wsplit1{}, attn_prefill_wmma{}, attn_kx{};
     F attn_kg6{}, attn_kg4{}, attn_kg2{};  // f16 / q8 / q8h / q8v KV (null if not built)
-    F gdn_conv_seq{}, gdn_gates{}, gdn_seq_128{}, f32_to_f16{}, gdn_gated_norm{};
+    F gdn_conv_seq{}, gdn_gates{}, gdn_gates_ba{}, gdn_seq_128{}, f32_to_f16{}, gdn_gated_norm{};
     F argmax{}, quantize_q8{};
     F gdn_chunk_prep{}, gdn_chunk_scan{}, gdn_wprep{}, gdn_wscan8{};
     F rmsnorm_x8{}, rmsnorm_x16{}, silu_mul_x8{}, silu_mul_x16{}, gated_norm_x8{}, gated_norm_x16{};

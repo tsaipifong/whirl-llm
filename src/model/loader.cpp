@@ -459,6 +459,7 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
     m.z = m.alloc(B * cfg.d_inner * f4);
     m.beta = m.alloc(B * cfg.n_v_heads * f4);
     m.alpha = m.alloc(B * cfg.n_v_heads * f4);
+    m.ba_buf = m.alloc(B * 2 * cfg.n_v_heads * f4);
     m.gdn_out = m.alloc(B * cfg.d_inner * f4);
     // ffn_g / ffn_u double as autotune / bench scratch for every matrix
     u32 ffs = cfg.n_ff;
