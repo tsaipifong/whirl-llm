@@ -1212,6 +1212,8 @@ void Model::verify(std::span<const u32> tokens, u32 pos0, std::span<u32> out) {
 void Model::restoreSnapshot(u32 keep) {
     // a captured decode graph holds the old state pointers
     decode_graph.reset();
+    // the unfused decode path writes only snapshot 0: any later set would be stale
+    if (keep == 0 || keep > snap_sets || (keep > 1 && !fusedDecode())) throw ModelError("SnapshotNotWritten");
     const u32 kk = keep - 1;
     for (u32 i = 0; i < cfg.n_layer; ++i) {
         if (ssm_state[i] == 0) continue;

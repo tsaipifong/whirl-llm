@@ -468,6 +468,8 @@ DecodeResult specDecode(q::Model& model, const Tok& tok, u32 first, u32 n_prompt
     q::NgramPolicy ngp;
     if (opt.ngram) ngp.ng.norm = tok.crlfToLf();
     u32 ng_max = opt.ngram_max > 0 ? std::min(opt.ngram_max, q::max_ng_drafts) : q::max_ng_drafts;
+    // the unfused decode path snapshots row 0 only: more than 1 draft would restore an unwritten set
+    if (!model.fusedDecode()) ng_max = std::min<u32>(ng_max, 1);
     if (opt.ngram && ng_max > model.snap_sets) {
         // n-gram verifies need a recurrent-state snapshot set per draft: take them now
         // if they fit in free VRAM with room to spare, else draft at most what exists
