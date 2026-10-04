@@ -549,6 +549,7 @@ void loadOrTune(Model& m, const std::string& model_path, std::string& log) {
     if (auto v = envGet("ATTN_KX")) m.attn_kx_on = *v != "0";
     if (auto v = envGet("ATTN_KG")) m.attn_kg_on = *v != "0";
     if (auto v = envGet("GDN_BA")) m.gdn_ba_on = *v != "0";
+    if (auto v = envGet("GDN_IN2")) m.gdn_in2_on = *v != "0";
     m.ffn_h16 = has_mx;
     // WHIRL_Q4_RELAXED=1: every non-bitwise prefill speedup for non-MXFP4 models too
     if (auto v = envGet("Q4_RELAXED"); v && *v != "0") {

@@ -498,7 +498,10 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
     const u64 in_max = std::max<u64>(std::max<u64>(cfg.n_ff, 2ull * cfg.n_embd), std::max<u64>(cfg.d_inner, static_cast<u64>(cfg.n_head) * cfg.head_dim));
     m.xq = m.alloc(max_small_batch * in_max + 256);
     m.xd = m.alloc((max_small_batch * in_max / 32 + 8) * 4);
-    m.x16 = m.alloc(B * std::max<u64>(in_max, cfg.n_embd) * 2);
+    m.x16_bytes = B * std::max<u64>(in_max, cfg.n_embd) * 2;
+    m.x16 = m.alloc(m.x16_bytes);
+    // GDN prefill x16b (fp8 rows + f16 rows from one norm) must fit in x16 for any batch > 16
+    if (B > 16 && m.x16bOff() + B * cfg.n_embd * 2 > m.x16_bytes) throw ModelError("X16bOverflow");
     m.sx8 = m.alloc(B * 4);
     m.fp8_prefill = opt.fp8_default;
     if (cfg.moe) {

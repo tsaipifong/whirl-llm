@@ -184,9 +184,6 @@ void Model::matmul(const Mat& w, DevPtr xin, DevPtr y, u32 n, bool accumulate) {
         hip::launch(g8, D((n + c.bn - 1) / c.bn, (w.nrows + c.bm - 1) / c.bm), D(c.nth), 0, stream, w.ptr, w.row_bytes, w.ref, x16, sx8, y,
                     ncols, nrows, I(n), acc);
     } else {
-        const u32 choice = w.tune[tuneBucket(n)];
-        const std::size_t gcfg = choice % gemm_cfgs.size();
-        const GemmCfg c = gemm_cfgs[gcfg];
         const u32 count = n * w.ncols;
         if (x16_src != xin || x16_count != count || x16_fp8) {
             hip::launch(k.f32_to_f16, D((count / 4 + 255) / 256), D(256), 0, stream, xin, x16, I(count));
@@ -194,45 +191,55 @@ void Model::matmul(const Mat& w, DevPtr xin, DevPtr y, u32 n, bool accumulate) {
             x16_count = count;
             x16_fp8 = false;
         }
-        if (choice >= 2 * gemm_cfgs.size()) {
-            // small-batch GEMM straight from the quantized weights (bitwise == gemm_cN)
-            const std::size_t si = choice - 2 * gemm_cfgs.size();
-            const GemmCfg sc = gemms_cfgs[si];
-            const hip::Function sf = out_h16 ? k.gemmsh[si][t] : k.gemms[si][t];
-            hip::launch(sf, D((n + sc.bn - 1) / sc.bn, (w.nrows + sc.bm - 1) / sc.bm), D(sc.nth), 0, stream, w.ptr, w.row_bytes, x16, y, ncols,
-                        nrows, I(n), acc);
-            finish();
-            return;
-        }
-        DevPtr wptr = w.ptr;
-        u64 wrb = w.row_bytes;
-        GgmlType wty = w.ty;
-        const hip::Function hq = (out_h16 && k.gemmch[gcfg] != nullptr) ? k.gemmhqh[t] : k.gemmhq[t];
-        if (choice >= gemm_cfgs.size() && w.ty != GgmlType::f16 && gemmh_on && gemmhq_on && hq != nullptr && n >= gemmh_min && w.ncols % 32 == 0) {
-            // dequant fused into the fragment-order f16 GEMM (bitwise == dequant_f16 + gemm_cN_f16)
-            hip::launch(hq, D((n + 255) / 256, (w.nrows + 127) / 128), D(256), 0, stream, w.ptr, w.row_bytes, x16, y, ncols, nrows, I(n), acc);
-            finish();
-            return;
-        }
-        if (choice >= gemm_cfgs.size() && w.ty != GgmlType::f16) {
-            const u64 groups = static_cast<u64>(w.ncols / 8) * w.nrows;
-            hip::launch(k.dequant_f16[t], D(std::min<u64>((groups + 255) / 256, 65535)), D(256), 0, stream, w.ptr, w.row_bytes, w16, ncols,
-                        nrows);
-            wptr = w16;
-            wrb = static_cast<u64>(w.ncols) * 2;
-            wty = GgmlType::f16;
-        }
-        const bool use_ch = out_h16 && wty == GgmlType::f16 && k.gemmch[gcfg] != nullptr;
-        const hip::Function gf = use_ch ? k.gemmch[gcfg] : k.gemmc[gcfg][ti(wty)];
-        const hip::Function hf = use_ch ? k.gemmhh_f16 : k.gemmh_f16;
-        if (gemmh_on && hf != nullptr && wty == GgmlType::f16 && n >= gemmh_min && w.ncols % 32 == 0 && wrb == static_cast<u64>(w.ncols) * 2) {
-            // 128 rows x 256 tokens, bitwise the same as gf
-            hip::launch(hf, D((n + 255) / 256, (w.nrows + 127) / 128), D(256), 0, stream, wptr, x16, y, ncols, nrows, I(n), acc);
-        } else {
-            hip::launch(gf, D((n + c.bn - 1) / c.bn, (w.nrows + c.bm - 1) / c.bm), D(c.nth), 0, stream, wptr, wrb, x16, y, ncols, nrows, I(n), acc);
-        }
+        gemmF16(w, x16, y, n, acc);
     }
     finish();
+}
+
+// The f16-activation GEMM of matmul: y[t][:] (+)= W x16in[t][:] (x16in: n rows
+// of w.ncols f16; not registered in the x16 cache).
+void Model::gemmF16(const Mat& w, DevPtr x16in, DevPtr y, u32 n, i32 acc) {
+    const i32 ncols = I(w.ncols);
+    const i32 nrows = I(w.nrows);
+    const std::size_t t = ti(w.ty);
+    const u32 choice = w.tune[tuneBucket(n)];
+    const std::size_t gcfg = choice % gemm_cfgs.size();
+    const GemmCfg c = gemm_cfgs[gcfg];
+    if (choice >= 2 * gemm_cfgs.size()) {
+        // small-batch GEMM straight from the quantized weights (bitwise == gemm_cN)
+        const std::size_t si = choice - 2 * gemm_cfgs.size();
+        const GemmCfg sc = gemms_cfgs[si];
+        const hip::Function sf = out_h16 ? k.gemmsh[si][t] : k.gemms[si][t];
+        hip::launch(sf, D((n + sc.bn - 1) / sc.bn, (w.nrows + sc.bm - 1) / sc.bm), D(sc.nth), 0, stream, w.ptr, w.row_bytes, x16in, y, ncols,
+                    nrows, I(n), acc);
+        return;
+    }
+    DevPtr wptr = w.ptr;
+    u64 wrb = w.row_bytes;
+    GgmlType wty = w.ty;
+    const hip::Function hq = (out_h16 && k.gemmch[gcfg] != nullptr) ? k.gemmhqh[t] : k.gemmhq[t];
+    if (choice >= gemm_cfgs.size() && w.ty != GgmlType::f16 && gemmh_on && gemmhq_on && hq != nullptr && n >= gemmh_min && w.ncols % 32 == 0) {
+        // dequant fused into the fragment-order f16 GEMM (bitwise == dequant_f16 + gemm_cN_f16)
+        hip::launch(hq, D((n + 255) / 256, (w.nrows + 127) / 128), D(256), 0, stream, w.ptr, w.row_bytes, x16in, y, ncols, nrows, I(n), acc);
+        return;
+    }
+    if (choice >= gemm_cfgs.size() && w.ty != GgmlType::f16) {
+        const u64 groups = static_cast<u64>(w.ncols / 8) * w.nrows;
+        hip::launch(k.dequant_f16[t], D(std::min<u64>((groups + 255) / 256, 65535)), D(256), 0, stream, w.ptr, w.row_bytes, w16, ncols,
+                    nrows);
+        wptr = w16;
+        wrb = static_cast<u64>(w.ncols) * 2;
+        wty = GgmlType::f16;
+    }
+    const bool use_ch = out_h16 && wty == GgmlType::f16 && k.gemmch[gcfg] != nullptr;
+    const hip::Function gf = use_ch ? k.gemmch[gcfg] : k.gemmc[gcfg][ti(wty)];
+    const hip::Function hf = use_ch ? k.gemmhh_f16 : k.gemmh_f16;
+    if (gemmh_on && hf != nullptr && wty == GgmlType::f16 && n >= gemmh_min && w.ncols % 32 == 0 && wrb == static_cast<u64>(w.ncols) * 2) {
+        // 128 rows x 256 tokens, bitwise the same as gf
+        hip::launch(hf, D((n + 255) / 256, (w.nrows + 127) / 128), D(256), 0, stream, wptr, x16in, y, ncols, nrows, I(n), acc);
+    } else {
+        hip::launch(gf, D((n + c.bn - 1) / c.bn, (w.nrows + c.bm - 1) / c.bm), D(c.nth), 0, stream, wptr, wrb, x16in, y, ncols, nrows, I(n), acc);
+    }
 }
 
 // Every fp8 activation producer writes the fragment-tiled layout and the fp8
@@ -311,6 +318,19 @@ void Model::rmsnormIn(DevPtr xin, DevPtr w, DevPtr out, u32 n, std::span<const M
         }
     }
     rmsnorm(xin, w, out, E, n, E, E);
+}
+
+// n>16 GDN prefill with qkv / gate on fp8 and contiguous [beta; alpha] on f16:
+// one rmsnorm_x8h16(t) writes both inputs (WHIRL_GDN_IN2=0 off).
+bool Model::gdnIn2(const GdnW& g, u32 n) const {
+    if (!gdn_in2_on || fused(n) || n <= 16 || cfg.n_embd > 8192) return false;
+    if (x8(k.rmsnorm_x8h16, k.rmsnorm_x8h16t) == nullptr) return false;
+    if (!gdn_ba_on || k.gdn_gates_ba == nullptr || ba_buf == 0 || !rowsContiguous(g.beta, g.alpha)) return false;
+    const Mat pc[2] = {g.qkv, g.gate};
+    const Mat bc[2] = {g.beta, g.alpha};
+    const auto pin = actCommon(pc, n, 1);
+    const auto bin = actCommon(bc, n, 1);
+    return pin && *pin == ActIn::fp8 && bin && *bin == ActIn::f16;
 }
 
 // Decode fusions apply to small batches on the int8 GEMV path.
@@ -1233,11 +1253,24 @@ void Model::run(u32 n) {
     const u32 E = cfg.n_embd;
     for (std::size_t i = 0; i < layers.size(); ++i) {
         const Layer& L = layers[i];
+        bool gdn_in2 = false;  // x16b holds this layer's normed input as f16 for [beta; alpha]
         if (fused(n)) {
             rmsnormQ8(x, L.attn_norm, h, n);
         } else if (L.kind == LayerKind::attn) {
             const Mat c[3] = {L.attn.q, L.attn.k, L.attn.v};
             rmsnormIn(x, L.attn_norm, h, n, c, 1);
+        } else if (gdnIn2(L.gdn, n)) {
+            // one norm: fp8 (+ sx8) into x16 for qkv / gate (registered as h's
+            // conversion; h itself is left unwritten) and f16 into x16b for [beta; alpha]
+            if (x16bOff() + static_cast<u64>(n) * E * 2 > x16_bytes) throw ModelError("X16bOverflow");
+            hip::launch(x8(k.rmsnorm_x8h16, k.rmsnorm_x8h16t), D(n), D(256), 0, stream, x, L.attn_norm, x16, sx8, x16 + x16bOff(), I(E),
+                        cfg.eps);
+            xq_src = 0;
+            x16_src = h;
+            x16_count = n * E;
+            x16_fp8 = true;
+            mark(OpClass::norm);
+            gdn_in2 = true;
         } else {
             const Mat c[4] = {L.gdn.qkv, L.gdn.gate, L.gdn.beta, L.gdn.alpha};
             rmsnormIn(x, L.attn_norm, h, n, c, 1);
@@ -1295,7 +1328,16 @@ void Model::run(u32 n) {
             } else {
                 const u32 nh = n * cfg.n_v_heads;
                 bool conv_l2 = false;
-                if (gdn_ba_on && k.gdn_gates_ba != nullptr && ba_buf != 0 && rowsContiguous(g.beta, g.alpha)) {
+                if (gdn_in2) {
+                    // the [beta; alpha] f16 GEMM straight from x16b (gdnIn2 implies the gates_ba path)
+                    const Mat ba = concatRows(g.beta, g.alpha);
+                    gemmF16(ba, x16 + x16bOff(), ba_buf, n, 0);
+                    if (ba_buf == xq_src) xq_src = 0;
+                    if (ba_buf == x16_src) x16_src = 0;
+                    if (prof) prof->matmul_bytes += ba.row_bytes * ba.nrows;
+                    mark(OpClass::matmul);
+                    hip::launch(k.gdn_gates_ba, D((nh + 63) / 64), D(64), 0, stream, ba_buf, beta, alpha, g.dt, g.a, I(nh), I(cfg.n_v_heads));
+                } else if (gdn_ba_on && k.gdn_gates_ba != nullptr && ba_buf != 0 && rowsContiguous(g.beta, g.alpha)) {
                     // one [beta; alpha] GEMM (beta's tune) into ba[t][2 * n_v_heads]
                     matmul(concatRows(g.beta, g.alpha), h, ba_buf, n, false);
                     hip::launch(k.gdn_gates_ba, D((nh + 63) / 64), D(64), 0, stream, ba_buf, beta, alpha, g.dt, g.a, I(nh), I(cfg.n_v_heads));

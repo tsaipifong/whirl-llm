@@ -432,6 +432,8 @@ public:
     bool act_fuse = true;
     bool attn_kx_on = true;
     bool gdn_ba_on = true;   // n>16 GDN prefill: one [beta; alpha] GEMM + gdn_gates_ba (WHIRL_GDN_BA=0 off)
+    bool gdn_in2_on = true;  // n>16 GDN prefill: one norm -> fp8 (qkv / gate) + f16 x16b ([beta; alpha]) (WHIRL_GDN_IN2=0 off)
+    std::uint64_t x16_bytes = 0;  // x16 allocation size (x16b sub-buffer bound check)
     bool attn_kg_on = true;  // GQA-grouped prefill attention (f16 / q8 / q8h / q8v KV; WHIRL_ATTN_KG=0 off)
     bool ffn_h16 = false;
     bool out_h16 = false;
@@ -627,6 +629,10 @@ public:
     void gemvLaunch(std::span<const Mat> ws, DevPtr xin, std::span<const DevPtr> ys, std::uint32_t n, std::int32_t acc);
     void matmulGroup(std::span<const Mat> ws, DevPtr xin, std::span<const DevPtr> ys, std::uint32_t n);
     void matmul(const Mat& w, DevPtr xin, DevPtr y, std::uint32_t n, bool accumulate);
+    void gemmF16(const Mat& w, DevPtr x16in, DevPtr y, std::uint32_t n, std::int32_t acc);
+    bool gdnIn2(const GdnW& g, std::uint32_t n) const;
+    // x16b: f16 sub-buffer of x16 past the fp8 rows (tiled fp8 pads to 16 rows), 256-aligned
+    std::uint64_t x16bOff() const { return ((static_cast<std::uint64_t>((max_batch + 15) / 16 * 16) * cfg.n_embd) + 255) & ~std::uint64_t(255); }
     void run(std::uint32_t n);
 
 private:
