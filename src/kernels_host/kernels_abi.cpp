@@ -244,8 +244,9 @@ KernelTable KernelTable::load(const hip::Module& m, KvFormat kv) {
         k.attn_wsplit1 = L.opt("attn_wsplit1_q8");
     }
     k.attn_kx = L.opt(kv == KvFormat::q8v ? "attn_kx_q8v" : (kv == KvFormat::f16 ? "attn_kx" : "attn_kx_q8"));
-    if (kv == KvFormat::f16 || kv == KvFormat::q8v) {
-        const std::string s = kv == KvFormat::q8v ? "_q8v" : "";
+    {
+        // q8 and q8h share the int8 K/V layout, so both use the _q8 variants.
+        const std::string s = kv == KvFormat::q8v ? "_q8v" : (kv == KvFormat::f16 ? "" : "_q8");
         k.attn_kg6 = L.opt("attn_kg6" + s);
         k.attn_kg4 = L.opt("attn_kg4" + s);
         k.attn_kg2 = L.opt("attn_kg2" + s);

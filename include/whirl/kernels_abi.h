@@ -74,7 +74,7 @@
 //            hd, n_rot, theta_scale, eps)
 //   attn_prefill_wmma[_q8|_q8v], attn_kx[_q8|_q8v](q, KvArgs, out, n_head,
 //            n_kv, q_stride, pos, n_tok, scale, int h0)
-//   attn_kg6 / attn_kg4 / attn_kg2[_q8v] (f16 / q8v KV; same arguments; grid
+//   attn_kg6 / attn_kg4 / attn_kg2[_q8|_q8v] (f16 / q8 / q8h / q8v KV; same arguments; grid
 //            (ceil(n_tok / 16), heads / NP), block 64 * NP, NP | n_head / n_kv)
 //   kv_store[_q8|_q8v](k, v, KvArgs, pos, int row)
 //  Gated DeltaNet:
@@ -364,7 +364,7 @@ struct KernelTable {
     F rmsnorm{}, l2norm{}, add_inplace{}, silu_mul{}, rope_neox{};
     F attn_decode{}, kv_store{}, attn_split{}, attn_combine{}, attn_prep{}, attn_combine_q8{};
     F attn_wsplit1{}, attn_prefill_wmma{}, attn_kx{};
-    F attn_kg6{}, attn_kg4{}, attn_kg2{};  // f16 / q8v KV (null otherwise)
+    F attn_kg6{}, attn_kg4{}, attn_kg2{};  // f16 / q8 / q8h / q8v KV (null if not built)
     F gdn_conv_seq{}, gdn_gates{}, gdn_seq_128{}, f32_to_f16{}, gdn_gated_norm{};
     F argmax{}, quantize_q8{};
     F gdn_chunk_prep{}, gdn_chunk_scan{}, gdn_wprep{}, gdn_wscan8{};

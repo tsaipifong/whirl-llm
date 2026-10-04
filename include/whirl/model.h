@@ -415,7 +415,7 @@ public:
     bool gdn_wmma = false;
     bool act_fuse = true;
     bool attn_kx_on = true;
-    bool attn_kg_on = true;  // GQA-grouped prefill attention (f16 / q8v KV; WHIRL_ATTN_KG=0 off)
+    bool attn_kg_on = true;  // GQA-grouped prefill attention (f16 / q8 / q8h / q8v KV; WHIRL_ATTN_KG=0 off)
     bool ffn_h16 = false;
     bool out_h16 = false;
     bool g8t = false;
