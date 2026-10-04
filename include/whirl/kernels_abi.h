@@ -358,6 +358,7 @@ struct KernelTable {
     PerType<F> gdn_ab{}, gdn_abconv{}, moe_gu{}, moe_down{}, gemm_moe{}, gemm_moe32{};
     PerType<F> gemvx{};  // gemvx_v6_<T>: 17..32-token GEMV (runtime token count)
     F gemvw_head_s{};    // gemvw_nt16v2s_q6_k: 16-token output head over a row range, separate y stride
+    F gemvw_head_2p{};   // gemvw_nt16x2s_q6_k: wide-verify output head, both 16-token passes in one launch (optional)
     std::array<F, kMaxSmallBatch> gemv_d2{};       // [nt - 1]
     std::array<F, kGemm8Cfgs.size()> gemm8{}, gemm8h{};
     std::array<F, kGemm8tCfgs.size()> gemm8t{}, gemm8th{};

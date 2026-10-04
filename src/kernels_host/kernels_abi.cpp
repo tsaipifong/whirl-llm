@@ -163,6 +163,7 @@ KernelTable KernelTable::load(const hip::Module& m, KvFormat kv) {
     for (QType t : {QType::q4_k, QType::q5_k, QType::iq4_xs, QType::q6_k, QType::mxfp4})
         k.gemvx[ti(t)] = L.opt("gemvx_" + vx_var + "_" + sfx(t));
     k.gemvw_head_s = L.opt("gemvw_nt16v2s_q6_k");
+    k.gemvw_head_2p = L.opt("gemvw_nt16x2s_q6_k");
     for (QType t : {QType::q4_k, QType::q5_k, QType::iq4_xs, QType::q6_k, QType::iq4_nl, QType::q3_k, QType::iq3_s}) {
         for (int nt = 2; nt <= kMaxSmallBatch; ++nt) {
             for (int v = 1; v < kNGemvw; ++v) {

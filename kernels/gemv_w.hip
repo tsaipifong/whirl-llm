@@ -606,6 +606,35 @@ extern "C" __global__ void __launch_bounds__(256)
                        int ystride, int accumulate, const int *skip) {
     gemvw_impl<QT_Q6_K, 16, 2, 1>(W, row_bytes, xq, xd, y, ncols, nrows, accumulate, skip, blockIdx.x, ystride);
 }
+// Output head of a wide (17..32-row) verify in one launch: each block computes its 32 head
+// rows for tokens [0, 16), then (same rows, weights now in cache) for [ntok - 16, ntok); rows
+// of the overlap are written twice with the same bits. Each pass is gemvw_nt16v2s_q6_k's body,
+// so the result equals two gemvw_nt16v2s_q6_k launches bitwise. ystride = logits row stride
+// (n_vocab); ntok in 17..32.
+extern "C" __global__ void __launch_bounds__(256)
+    gemvw_nt16x2s_q6_k(const uint8_t *__restrict__ W, uint64_t row_bytes, const int8_t *__restrict__ xq,
+                       const float *__restrict__ xd, float *__restrict__ y, int ncols, int nrows, int ystride, int ntok,
+                       int accumulate, const int *__restrict__ skip) {
+    constexpr int T = QT_Q6_K, NT = 16, TILES = 2, ROWS = 16 * TILES;
+    __shared__ float red[8][NT][ROWS];
+    if (skip != nullptr && *skip) return;
+    const int n = (threadIdx.x % WARP) & 15;
+    const int r0 = blockIdx.x * ROWS;
+    const uint8_t *wr[TILES];
+#pragma unroll
+    for (int tt = 0; tt < TILES; ++tt) wr[tt] = W + (size_t)min(r0 + tt * 16 + n, nrows - 1) * row_bytes;
+    const int nb32 = ncols / 32;
+    const int nu = WMU<T>::units(ncols);
+    const int t1 = ntok - NT;
+#pragma unroll 1
+    for (int p = 0; p < 2; ++p) {
+        const int ts = p ? t1 : 0;
+        if (p) __syncthreads();  // red WAR: pass 0's final reads before pass 1's writes
+        const int8_t *xt = xq + (size_t)(ts + min(n, NT - 1)) * ncols;  // A row = token ts + n
+        gemvw_pass<T, NT, TILES, 1>(wr, xt, xd + (size_t)ts * nb32, y + (size_t)ts * ystride, red, nb32, nu, nrows,
+                                    accumulate, ystride, r0);
+    }
+}
 #define GEMVW_NT(NT) GEMVW_TYPES(NT, 1, 1, 1) GEMVW_TYPES(NT, 2, 2, 1) GEMVW_TYPES(NT, 4, 2, 2)
 GEMVW_NT(2)
 GEMVW_NT(3)
