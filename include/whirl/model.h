@@ -742,6 +742,85 @@ struct DraftTiming {
 std::uint32_t pickDrafts(std::span<const DraftAccept* const> accepts, const DraftTiming& timing, std::uint32_t max,
                          std::uint32_t cycle, std::uint32_t prev);
 
+// ---- per-slot draft allocation (T4-1): pure model code, not wired into the engine yet
+
+// One verify cycle as the cost model sees it.
+struct CycleFeat {
+    float rows = 0;    // R: verify rows of all sequences
+    float steps = 0;   // S: sequential MTP draft steps (the longest MTP draft)
+    float row_ctx = 0; // sum over sequences of rows_i * context_i, in k tokens
+};
+
+// Cycle time for one number of decoding slots: T ~ a + b R + c S + e [R > 16] + f sum(rows_i ctx_i),
+// fitted by recursive least squares with forgetting factor 0.98.
+class CycleCost {
+public:
+    static constexpr std::uint32_t n_par = 5;
+    static constexpr double forget = 0.98;
+    CycleCost() { reset(); }
+    void reset();
+    // seed from the uniform-allocation timing of `slots` decoding slots (DraftTiming points or its prior)
+    void prior(const DraftTiming& tm, std::uint32_t slots, float ctx_k = 0);
+    void observe(const CycleFeat& x, float ms);
+    float predict(const CycleFeat& x) const;
+    std::uint32_t samples() const { return n_obs; }
+    const std::array<double, n_par>& params() const { return th; }
+
+private:
+    static std::array<double, n_par> feat(const CycleFeat& x);
+    void rls(const std::array<double, n_par>& z, double y);
+    std::array<double, n_par> th{};
+    std::array<std::array<double, n_par>, n_par> P{};
+    std::uint32_t n_obs = 0;
+};
+
+// Per-slot acceptance with the T4-1 additions on top of DraftAccept: faster start (r = 0.2 for 16
+// cycles), unobserved positions drift towards the last observed rate x 0.95 (rate 0.02; a fully
+// accepted chain is censored, not a ceiling, so it drifts without the 0.95), observation counts
+// for shrinkage towards a global pool.
+struct SlotAccept {
+    static constexpr std::uint32_t n_cap = 32;
+    static constexpr float pool_weight = 4.0f;
+    static constexpr float drift_rate = 0.02f;
+    static constexpr float drift_decay = 0.95f;
+    DraftAccept a;
+    std::array<std::uint32_t, max_ng_drafts> n{};
+    std::uint32_t cycles = 0;
+    explicit SlotAccept(float a0 = 0.75f) : a(a0) {}
+    void observe(std::uint32_t nd_dev, std::uint32_t acc);
+    // alpha_eff[k] = (n_k alpha_k + 4 alpha_pool[k]) / (n_k + 4)
+    DraftAccept effective(const DraftAccept& pool) const;
+};
+
+struct AllocSlot {
+    const DraftAccept* acc = nullptr; // MTP slot: acceptance (alpha_eff); unused for n-gram slots
+    std::uint32_t cap = 1;            // max drafts of this slot
+    float ctx_k = 0;                  // context length, k tokens
+    std::uint32_t ng_rows = 0;        // > 0: n-gram slot with this many verify rows (fixed)
+    float ng_e = 0;                   // n-gram slot: expected tokens of its fixed draft
+};
+
+struct AllocBudget {
+    std::uint32_t rows = 16;           // verify rows available in total
+    std::uint32_t snaps = 0xffffffffu; // snapshot sets free for drafts (0xffffffff: replay, no limit)
+};
+
+struct AllocResult {
+    std::vector<std::uint32_t> d;     // drafts per slot (0 for n-gram slots)
+    float score = 0;                  // sum(E) / T (tokens per ms)
+    std::uint32_t rounds = 0;         // local-search rounds used
+    bool uniform = true;              // true: the uniform allocation u was returned
+};
+
+// Per-slot draft counts maximizing sum(E_i) / T, starting from the uniform count `uniform`
+// (capped per slot): local search over +1 / -1 / swap moves, at most 16 rounds, subject to
+// sum(d) <= min(rows free, snapshots free), 1 <= d_i <= cap_i and each slot keeping at least
+// (1 - x) of its uniform-allocation throughput. Keeps `prev` when it scores >= 0.98 of the best,
+// and returns u unless the best beats it by more than 1%, with < 2 MTP slots, < 16 cost samples,
+// or acceptances so close that u is already optimal.
+AllocResult allocDrafts(std::span<const AllocSlot> slots, const CycleCost& cost, AllocBudget budget, std::uint32_t uniform,
+                        std::span<const std::uint32_t> prev, float x = 0.03f);
+
 class Ngram {
 public:
     static constexpr std::uint32_t none = 0xffffffffu;

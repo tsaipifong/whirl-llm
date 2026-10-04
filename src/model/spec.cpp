@@ -1,7 +1,8 @@
 // MTP draft-count cost model and prompt-lookup (n-gram) drafting.
 // SPDX-License-Identifier: Apache-2.0
 // Reimplements the WHIRL Zig research prototype's model/qwen35.zig (Ngram, NgramPolicy,
-// DraftAccept, DraftTiming, pickDrafts).
+// DraftAccept, DraftTiming, pickDrafts); CycleCost, SlotAccept and allocDrafts are the
+// per-slot draft allocation of T4-1 (not wired into the engine yet).
 
 #include "whirl/model.h"
 
@@ -116,6 +117,242 @@ u32 pickDrafts(std::span<const DraftAccept* const> accepts, const DraftTiming& t
         if (!up && best > 1) return best - 1;
     }
     return best;
+}
+
+// ---- T4-1: cycle cost, per-slot acceptance, per-slot draft allocation
+
+std::array<double, CycleCost::n_par> CycleCost::feat(const CycleFeat& x) {
+    // scaled so every parameter has a similar range: rows / 16, steps / 8, rows * ctx / 1024
+    return {1.0, x.rows / 16.0, x.steps / 8.0, x.rows > 16 ? 1.0 : 0.0, x.row_ctx / 1024.0};
+}
+
+void CycleCost::reset() {
+    th.fill(0);
+    for (u32 i = 0; i < n_par; ++i) {
+        P[i].fill(0);
+        P[i][i] = 1e4;
+    }
+    n_obs = 0;
+}
+
+void CycleCost::rls(const std::array<double, n_par>& z, double y) {
+    std::array<double, n_par> pz{};
+    for (u32 i = 0; i < n_par; ++i)
+        for (u32 j = 0; j < n_par; ++j) pz[i] += P[i][j] * z[j];
+    double den = forget;
+    for (u32 i = 0; i < n_par; ++i) den += z[i] * pz[i];
+    double err = y;
+    for (u32 i = 0; i < n_par; ++i) err -= th[i] * z[i];
+    for (u32 i = 0; i < n_par; ++i) th[i] += pz[i] / den * err;
+    // P = (P - pz pz^T / den) / forget, kept symmetric; bounded so unexcited directions cannot wind up
+    for (u32 i = 0; i < n_par; ++i)
+        for (u32 j = i; j < n_par; ++j) {
+            const double v = (P[i][j] - pz[i] * pz[j] / den) / forget;
+            P[i][j] = P[j][i] = v;
+        }
+    for (u32 i = 0; i < n_par; ++i)
+        if (P[i][i] > 1e6) {
+            const double f = 1e6 / P[i][i];
+            for (u32 j = 0; j < n_par; ++j) {
+                P[i][j] *= std::sqrt(f);
+                P[j][i] = P[i][j];
+            }
+            P[i][i] = 1e6;
+        }
+}
+
+void CycleCost::prior(const DraftTiming& tm, u32 slots, float ctx_k) {
+    reset();
+    for (u32 nd = 1; nd < max_ng_drafts + 1; ++nd) {
+        if (tm.n[nd] == 0) continue;
+        CycleFeat x;
+        x.rows = static_cast<float>(slots * (nd + 1));
+        x.steps = static_cast<float>(nd);
+        x.row_ctx = x.rows * ctx_k;
+        const u32 w = std::min<u32>(tm.n[nd], 4);
+        for (u32 i = 0; i < w; ++i) rls(feat(x), tm.t[nd]);
+    }
+    n_obs = 0;  // a prior is not a sample
+}
+
+void CycleCost::observe(const CycleFeat& x, float ms) {
+    rls(feat(x), ms);
+    n_obs += 1;
+}
+
+float CycleCost::predict(const CycleFeat& x) const {
+    const auto z = feat(x);
+    double t = 0;
+    for (u32 i = 0; i < n_par; ++i) t += th[i] * z[i];
+    return static_cast<float>(std::max(t, 0.05));
+}
+
+void SlotAccept::observe(u32 nd_dev, u32 acc) {
+    const float r = cycles < 16 ? 0.2f : 0.1f;
+    cycles += 1;
+    nd_dev = std::min(nd_dev, max_ng_drafts);
+    if (nd_dev == 0) return;
+    acc = std::min(acc, nd_dev);
+    a.updateRate(nd_dev, acc, r);
+    const u32 reached = std::min(acc + 1, nd_dev);
+    for (u32 k = 0; k < reached; ++k) n[k] = std::min(n[k] + 1, n_cap);
+    // positions past the last observed one drift towards it; a fully accepted chain did not
+    // break, so it is censored (no 0.95 per position) rather than an upper bound
+    const bool full = acc == nd_dev;
+    const u32 last = reached - 1;
+    float target = a.alpha[last];
+    for (u32 k = reached; k < max_ng_drafts; ++k) {
+        if (!full) target *= drift_decay;
+        a.alpha[k] += drift_rate * (target - a.alpha[k]);
+    }
+}
+
+DraftAccept SlotAccept::effective(const DraftAccept& pool) const {
+    DraftAccept e;
+    for (u32 k = 0; k < max_ng_drafts; ++k) {
+        const float nk = static_cast<float>(n[k]);
+        e.alpha[k] = (nk * a.alpha[k] + pool_weight * pool.alpha[k]) / (nk + pool_weight);
+    }
+    return e;
+}
+
+namespace {
+
+struct AllocEval {
+    float score = 0;
+    float t = 0;
+    std::vector<float> e;  // expected tokens per slot
+};
+
+AllocEval allocEval(std::span<const AllocSlot> slots, const CycleCost& cost, const std::vector<u32>& d) {
+    AllocEval r;
+    r.e.resize(slots.size());
+    CycleFeat x;
+    float sum_e = 0;
+    for (std::size_t i = 0; i < slots.size(); ++i) {
+        const AllocSlot& s = slots[i];
+        const bool ng = s.ng_rows > 0;
+        const float rows = ng ? static_cast<float>(s.ng_rows) : static_cast<float>(d[i] + 1);
+        x.rows += rows;
+        x.row_ctx += rows * s.ctx_k;
+        if (!ng) x.steps = std::max(x.steps, static_cast<float>(d[i]));
+        r.e[i] = ng ? s.ng_e : s.acc->expected(d[i]);
+        sum_e += r.e[i];
+    }
+    r.t = cost.predict(x);
+    r.score = sum_e / r.t;
+    return r;
+}
+
+}  // namespace
+
+AllocResult allocDrafts(std::span<const AllocSlot> slots, const CycleCost& cost, AllocBudget budget, u32 uniform,
+                        std::span<const u32> prev, float x) {
+    const std::size_t n = slots.size();
+    AllocResult res;
+    res.d.assign(n, 0);
+    u32 n_mtp = 0, ng_rows = 0;
+    for (std::size_t i = 0; i < n; ++i) {
+        if (slots[i].ng_rows > 0) {
+            ng_rows += slots[i].ng_rows;
+            continue;
+        }
+        n_mtp += 1;
+        res.d[i] = std::clamp<u32>(uniform, 1, std::max<u32>(slots[i].cap, 1));
+    }
+    const std::vector<u32> u = res.d;
+    const AllocEval eu = allocEval(slots, cost, u);
+    res.score = eu.score;
+    if (n_mtp < 2 || cost.samples() < 16) return res;
+
+    // acceptances so close that the uniform count is already the best choice
+    u32 max_cap = 1;
+    for (const AllocSlot& s : slots)
+        if (s.ng_rows == 0) max_cap = std::max(max_cap, s.cap);
+    bool close = true;
+    for (u32 dd = 1; dd <= max_cap && close; ++dd) {
+        float lo = 1e30f, hi = 0;
+        for (const AllocSlot& s : slots) {
+            if (s.ng_rows > 0) continue;
+            const float e = s.acc->expected(dd);
+            lo = std::min(lo, e);
+            hi = std::max(hi, e);
+        }
+        close = hi <= 1.01f * lo;
+    }
+    if (close) return res;
+
+    const u32 base_rows = ng_rows + n_mtp;
+    const u32 rows_free = budget.rows > base_rows ? budget.rows - base_rows : 0;
+    const u32 d_max = std::min(rows_free, budget.snaps);
+    const auto feasible = [&](const std::vector<u32>& d, const AllocEval& ev) {
+        u32 sum = 0;
+        for (std::size_t i = 0; i < n; ++i) {
+            if (slots[i].ng_rows > 0) continue;
+            if (d[i] < 1 || d[i] > slots[i].cap) return false;
+            sum += d[i];
+        }
+        if (sum > d_max) return false;
+        for (std::size_t i = 0; i < n; ++i)  // per-slot throughput floor against u
+            if (ev.e[i] / ev.t < (1 - x) * eu.e[i] / eu.t) return false;
+        return true;
+    };
+
+    std::vector<u32> cur = u;
+    float cur_score = eu.score;
+    std::vector<u32> cand;
+    for (res.rounds = 0; res.rounds < 16;) {
+        std::vector<u32> best_d;
+        float best_s = cur_score * (1 + 1e-6f);
+        const auto tryMove = [&](std::size_t i, int di, std::size_t j, int dj) {
+            cand = cur;
+            if (static_cast<int>(cand[i]) + di < 1) return;
+            cand[i] = static_cast<u32>(static_cast<int>(cand[i]) + di);
+            if (dj != 0) {
+                if (static_cast<int>(cand[j]) + dj < 1) return;
+                cand[j] = static_cast<u32>(static_cast<int>(cand[j]) + dj);
+            }
+            const AllocEval ev = allocEval(slots, cost, cand);
+            if (ev.score > best_s && feasible(cand, ev)) {
+                best_s = ev.score;
+                best_d = cand;
+            }
+        };
+        for (std::size_t i = 0; i < n; ++i) {
+            if (slots[i].ng_rows > 0) continue;
+            tryMove(i, +1, i, 0);
+            tryMove(i, -1, i, 0);
+            for (std::size_t j = 0; j < n; ++j)
+                if (j != i && slots[j].ng_rows == 0) tryMove(i, +1, j, -1);
+        }
+        res.rounds += 1;
+        if (best_d.empty()) break;
+        cur = best_d;
+        cur_score = best_s;
+    }
+
+    // keep the previous allocation while it is within 2% of the best (and still allowed)
+    if (prev.size() == n) {
+        const std::vector<u32> p(prev.begin(), prev.end());
+        bool ok = true;
+        for (std::size_t i = 0; i < n; ++i)
+            if ((slots[i].ng_rows > 0) != (p[i] == 0)) ok = false;
+        if (ok) {
+            const AllocEval ev = allocEval(slots, cost, p);
+            if (feasible(p, ev) && ev.score >= 0.98f * cur_score) {
+                res.d = p;
+                res.score = ev.score;
+                res.uniform = p == u;
+                return res;
+            }
+        }
+    }
+    // 1% hysteresis against the uniform allocation
+    if (cur_score <= 1.01f * eu.score) return res;
+    res.d = cur;
+    res.score = cur_score;
+    res.uniform = false;
+    return res;
 }
 
 void Ngram::reset() {

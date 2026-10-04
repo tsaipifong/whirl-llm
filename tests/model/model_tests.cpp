@@ -1,13 +1,17 @@
 // Host-only unit tests of the model library (no GPU work): architecture
-// whitelist, tune buckets, GEMV tables, draft-count cost model, n-gram drafter.
+// whitelist, tune buckets, GEMV tables, draft-count cost model, n-gram drafter, per-slot
+// draft allocation (cycle cost, slot acceptance, allocDrafts).
 // SPDX-License-Identifier: Apache-2.0
 
 #include "whirl/gguf.h"
 #include "whirl/model.h"
 
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -148,6 +152,209 @@ void testNgram() {
     check(ng2.lookup(none, 3, out).n == 0, "n-gram no match");
 }
 
+
+// ---- T4-1: cycle cost, per-slot acceptance, draft allocation
+
+struct Lcg {
+    std::uint64_t x = 0x9E3779B97F4A7C15ull;
+    std::uint32_t next() {
+        x = x * 6364136223846793005ull + 1442695040888963407ull;
+        return static_cast<std::uint32_t>(x >> 33);
+    }
+    float uni() { return static_cast<float>(next()) / 2147483648.0f; }  // [0, 1)
+    std::uint32_t range(std::uint32_t lo, std::uint32_t hi) { return lo + next() % (hi - lo + 1); }
+};
+
+// synthetic truth: T = 20 + 0.8 R + 2.5 S + 3 [R > 16] + 0.002 sum(rows_i ctx_i)
+float trueCycle(const q::CycleFeat& x) {
+    return 20.0f + 0.8f * x.rows + 2.5f * x.steps + (x.rows > 16 ? 3.0f : 0.0f) + 0.002f * x.row_ctx;
+}
+
+q::CycleFeat randomCycle(Lcg& g) {
+    for (;;) {
+        q::CycleFeat x;
+        const std::uint32_t slots = g.range(1, 8);
+        for (std::uint32_t i = 0; i < slots; ++i) {
+            const std::uint32_t d = g.range(0, 7);
+            const float ctx = static_cast<float>(g.range(1, 128));
+            x.rows += static_cast<float>(d + 1);
+            x.steps = std::max(x.steps, static_cast<float>(d));
+            x.row_ctx += static_cast<float>(d + 1) * ctx;
+        }
+        if (x.rows <= 32) return x;
+    }
+}
+
+q::CycleCost trainedCost(std::uint32_t n_obs) {
+    q::CycleCost c;
+    Lcg g;
+    for (std::uint32_t i = 0; i < n_obs; ++i) {
+        const q::CycleFeat x = randomCycle(g);
+        c.observe(x, trueCycle(x) * (1.0f + 0.01f * (g.uni() - 0.5f)));  // +-0.5% noise
+    }
+    return c;
+}
+
+void testCycleCost() {
+    const q::CycleCost c = trainedCost(300);
+    Lcg g;
+    g.x = 12345;
+    float worst = 0;
+    for (int i = 0; i < 200; ++i) {
+        const q::CycleFeat x = randomCycle(g);
+        worst = std::max(worst, std::fabs(c.predict(x) / trueCycle(x) - 1.0f));
+    }
+    check(worst < 0.02f, "CycleCost: synthetic fit within 2%");
+    check(c.samples() == 300, "CycleCost: sample count");
+    // prior from uniform timing points (4 slots, 1 and 3 drafts) reproduces those points
+    q::DraftTiming tm;
+    tm.update(1, 30.0f);
+    tm.update(3, 40.0f);
+    q::CycleCost p;
+    p.prior(tm, 4);
+    q::CycleFeat x1, x3;
+    x1.rows = 8, x1.steps = 1;
+    x3.rows = 16, x3.steps = 3;
+    check(std::fabs(p.predict(x1) - 30.0f) < 1.5f && std::fabs(p.predict(x3) - 40.0f) < 1.5f, "CycleCost: prior from timing");
+    check(p.samples() == 0, "CycleCost: a prior is not a sample");
+}
+
+void testSlotAccept() {
+    q::SlotAccept s0(0.5f);
+    s0.observe(1, 1);
+    check(std::fabs(s0.a.alpha[0] - 0.6f) < 1e-6f, "SlotAccept: r = 0.2 in the first 16 cycles");
+    // a broken chain pulls the never-observed positions to last x 0.95^k
+    q::SlotAccept b(0.9f);
+    for (int i = 0; i < 1500; ++i) b.observe(3, 2);  // positions 0, 1 hit, 2 missed
+    check(b.a.alpha[1] > 0.95f && b.a.alpha[2] < 0.05f && b.a.alpha[5] < 0.05f, "SlotAccept: frozen positions follow a broken chain");
+    // only position 0 is observed, half the chains complete (censored) and half break: the frozen
+    // positions settle between alpha0 * 0.95^k and alpha0, non-increasing in k
+    q::SlotAccept f(0.9f);
+    std::array<float, 6> mid{};
+    for (int i = 0; i < 2000; ++i) {
+        f.observe(1, static_cast<std::uint32_t>(i % 2));
+        if (i == 1799)
+            for (std::size_t k = 0; k < 6; ++k) mid[k] = f.a.alpha[k];
+    }
+    const float a0 = f.a.alpha[0];
+    bool conv = std::fabs(a0 - 0.5f) < 0.08f;
+    for (std::uint32_t k = 1; k < 6; ++k) {
+        conv = conv && f.a.alpha[k] <= f.a.alpha[k - 1] + 1e-6f && f.a.alpha[k] <= a0 + 0.03f &&
+               f.a.alpha[k] >= a0 * std::pow(0.95f, static_cast<float>(k)) - 0.03f && std::fabs(f.a.alpha[k] - mid[k]) < 0.02f;
+    }
+    check(conv, "SlotAccept: unobserved positions settle in [alpha0 * 0.95^k, alpha0]");
+    // whole chains accepted: censored, positions beyond are not pulled down
+    q::SlotAccept c(0.5f);
+    for (int i = 0; i < 500; ++i) c.observe(2, 2);
+    check(c.a.alpha[1] > 0.95f && c.a.alpha[6] > 0.9f, "SlotAccept: full acceptance is censored, not a ceiling");
+    // shrinkage towards the pool with few samples, count capped at 32
+    q::SlotAccept few(0.75f);
+    few.observe(1, 0);
+    few.observe(1, 0);
+    const q::DraftAccept pool(0.8f);
+    const float raw = few.a.alpha[0];
+    const float eff = few.effective(pool).alpha[0];
+    check(few.n[0] == 2 && std::fabs(eff - (2 * raw + 4 * 0.8f) / 6) < 1e-6f && std::fabs(eff - 0.8f) < std::fabs(raw - 0.8f),
+          "SlotAccept: few samples shrink towards the pool");
+    for (int i = 0; i < 100; ++i) few.observe(1, 0);
+    check(few.n[0] == 32 && few.n[1] == 0, "SlotAccept: count capped at 32, unobserved positions not counted");
+}
+
+// independent score / throughput of an allocation (same definitions as allocDrafts)
+struct Score {
+    float total = 0;
+    std::vector<float> per;
+};
+
+Score scoreOf(std::span<const q::AllocSlot> slots, const q::CycleCost& c, const std::vector<std::uint32_t>& d) {
+    q::CycleFeat x;
+    std::vector<float> e(slots.size());
+    for (std::size_t i = 0; i < slots.size(); ++i) {
+        const bool ng = slots[i].ng_rows > 0;
+        const float rows = ng ? static_cast<float>(slots[i].ng_rows) : static_cast<float>(d[i] + 1);
+        x.rows += rows;
+        x.row_ctx += rows * slots[i].ctx_k;
+        if (!ng) x.steps = std::max(x.steps, static_cast<float>(d[i]));
+        e[i] = ng ? slots[i].ng_e : slots[i].acc->expected(d[i]);
+    }
+    const float t = c.predict(x);
+    Score s;
+    for (float v : e) {
+        s.total += v / t;
+        s.per.push_back(v / t);
+    }
+    return s;
+}
+
+void testAllocDrafts() {
+    const q::CycleCost c = trainedCost(64);
+    const q::DraftAccept hi(0.92f), lo(0.35f), mid(0.7f);
+    std::vector<q::AllocSlot> slots(4);
+    for (int i = 0; i < 4; ++i) {
+        slots[i].acc = i < 2 ? &hi : &lo;
+        slots[i].cap = 8;
+        slots[i].ctx_k = 8;
+    }
+    const std::uint32_t U = 3;
+    const std::vector<std::uint32_t> u(4, U);
+    const q::AllocResult r = q::allocDrafts(slots, c, {32, 0xffffffffu}, U, {});
+    std::uint32_t sum = 0;
+    bool ge1 = true;
+    for (std::uint32_t d : r.d) {
+        sum += d;
+        ge1 = ge1 && d >= 1 && d <= 8;
+    }
+    check(!r.uniform && r.d[0] > r.d[2] && r.d[1] > r.d[3], "allocDrafts: more drafts to the high-acceptance slots");
+    check(sum <= 32 - 4 && ge1, "allocDrafts: sum(d) within the free rows, 1 <= d_i <= cap");
+    const Score su = scoreOf(slots, c, u), sr = scoreOf(slots, c, r.d);
+    bool floor = true;
+    for (std::size_t i = 0; i < 4; ++i) floor = floor && sr.per[i] >= 0.97f * su.per[i] - 1e-6f;
+    check(floor, "allocDrafts: every slot keeps >= 97% of its uniform throughput");
+    check(sr.total > 1.01f * su.total && std::fabs(sr.total - r.score) < 1e-4f * sr.total, "allocDrafts: beats u by > 1%");
+    check(r.rounds >= 1 && r.rounds <= 16, "allocDrafts: ends within 16 rounds");
+
+    // tight budgets: 12 rows -> sum(d) <= 8; 9 snapshot sets -> sum(d) <= 9
+    const q::AllocResult t1 = q::allocDrafts(slots, c, {12, 0xffffffffu}, 2, {});
+    const q::AllocResult t2 = q::allocDrafts(slots, c, {32, 9}, 2, {});
+    std::uint32_t s1 = 0, s2 = 0;
+    for (std::size_t i = 0; i < 4; ++i) {
+        s1 += t1.d[i];
+        s2 += t2.d[i];
+    }
+    check(s1 <= 8 && s2 <= 9, "allocDrafts: row and snapshot limits");
+
+    // u is returned: one slot, few cost samples, near-equal acceptance
+    const q::AllocResult one = q::allocDrafts(std::span<const q::AllocSlot>(slots.data(), 1), c, {32, 0xffffffffu}, 10, {});
+    check(one.uniform && one.d.size() == 1 && one.d[0] == 8, "allocDrafts: A = 1 returns u (capped)");
+    const q::CycleCost fresh;
+    check(q::allocDrafts(slots, fresh, {32, 0xffffffffu}, U, {}).uniform, "allocDrafts: < 16 samples returns u");
+    std::vector<q::AllocSlot> same = slots;
+    for (q::AllocSlot& sl : same) sl.acc = &mid;
+    const q::AllocResult rs = q::allocDrafts(same, c, {32, 0xffffffffu}, U, {});
+    check(rs.uniform && rs.d == u, "allocDrafts: near-equal acceptance returns u");
+
+    // hysteresis: an allowed previous allocation within 2% of the best is kept
+    std::vector<std::uint32_t> prev = r.d;
+    for (std::size_t i = 0; i < 2; ++i)
+        if (prev[i] > 1) {
+            prev[i] -= 1;
+            prev[i + 2] += 1;
+            break;
+        }
+    const q::AllocResult h = q::allocDrafts(slots, c, {32, 0xffffffffu}, U, prev);
+    const Score sp = scoreOf(slots, c, prev);
+    check(sp.total >= 0.98f * r.score ? h.d == prev : h.d == r.d, "allocDrafts: keeps prev within 2% of the best");
+    check(q::allocDrafts(slots, c, {32, 0xffffffffu}, U, r.d).d == r.d, "allocDrafts: stable on its own result");
+
+    // an n-gram slot keeps its fixed rows and gets no MTP drafts
+    std::vector<q::AllocSlot> mix = slots;
+    mix[3].ng_rows = 6;
+    mix[3].ng_e = 4.0f;
+    const q::AllocResult m = q::allocDrafts(mix, c, {32, 0xffffffffu}, U, {});
+    std::uint32_t rows = 6;
+    for (std::size_t i = 0; i < 3; ++i) rows += m.d[i] + 1;
+    check(m.d[3] == 0 && rows <= 32, "allocDrafts: n-gram slot rows count against the budget");
+}
 }  // namespace
 
 int main() {
@@ -155,6 +362,9 @@ int main() {
     testTables();
     testDraftModel();
     testNgram();
+    testCycleCost();
+    testSlotAccept();
+    testAllocDrafts();
     std::printf("model tests: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }
