@@ -182,7 +182,9 @@ noted; min–max spreads ≤ 1%).
 | 131,072 | 1,411 | 1,745 (+23.6%) | 3,789 | 4,308 (+13.7%) |
 
 Swift with `WHIRL_KV=q8v` (the dense server default): 96k 1,589 → 1,885 (+18.7%), 128k 1,345 → 1,625
-(+20.9%). Ornith 2k–64k and 128k: 2 rounds. Qwen3.8-27B UD-Q4_K_M (f16 KV, 2 rounds): 2k 1,689 → 1,677
+(+20.9%). Server, one user, `--ctx-per-slot 262144` (256k slot), q8h KV, Swift MXFP4-A (q8 / q8h
+now also use `attn_kg`): 128k 1,342 → 1,522 (+13.4%), 192k 1,021 → 1,177 (+15.3%), 256k 824 → 961
+(+16.6%); per-token time stays linear — 0.657 / 0.850 / 1.041 ms, about +0.19 ms per 64k. Ornith 2k–64k and 128k: 2 rounds. Qwen3.8-27B UD-Q4_K_M (f16 KV, 2 rounds): 2k 1,689 → 1,677
 (-0.7%), 32k 1,490 → 1,563 (+4.9%), 128k 1,003 → 1,159 (+15.5%).
 
 **Smoothness.** Per-token prefill time of the new build fits t(n) = a + b·n within 0.2% at all seven

@@ -437,7 +437,7 @@ instead of f32 for their element-wise consumers (+5.4…+5.8% and +0.6%).
   each keeps half of Oᵀ (64 VGPRs, no spill); the next K/V tile is prefetched into registers.
   Bit-identical. 120k: f16 KV 218 → 185 ms (+17.8%), q8v KV 247 → 198 ms (+25.0%); 32k +11%;
   ≤ 8k unchanged.
-- **`attn_kg`: GQA-grouped, direct loads (default for f16 and q8v KV).** A per-op profile of the
+- **`attn_kg`: GQA-grouped, direct loads (default for f16, q8v, q8 and q8h KV).** A per-op profile of the
   0.1.2 build (Swift MXFP4-A, `whirl bench` with `WHIRL_PROFILE=1`) showed that every op class except
   attention costs the same per token at every prompt length; attention grew from 0.015 ms/token (5% of
   prefill) at 2k to 0.228 ms/token (46%) at 64k, at ~61–66 TFLOPS. `attn_kg` regroups the work of
@@ -452,6 +452,13 @@ instead of f32 for their element-wise consumers (+5.4…+5.8% and +0.6%).
     instead of three;
   - q8v: V is dequantized once per block (the same `(f16)q × s` multiply as everywhere else) into a
     double-buffered LDS stage one tile ahead; the same barrier publishes it;
+  - q8 / q8h (`attn_kg6_q8` / `attn_kg4_q8`): K is dequantized from int8 in registers with the magic
+    number trick — `0x6400 | (b ^ 0x80)` is the f16 1152 + q, so subtracting 1152 and multiplying by
+    the scale gives q·s with one rounding, as packed f16 with `v_perm` to assemble the halves;
+    `#pragma clang fp contract(off)` keeps the compiler from fusing it into an FMA. Bit-identical to
+    `attn_kx_q8`; 225 VGPRs, 6 waves per SIMD (in practice one block per WGP). Probe at 61k:
+    `attn_kx_q8` 57.8 → `attn_kg6_q8` 72.1 TFLOPS (+24.7%); the straightforward `(_Float16)q * s`
+    conversion gained only 5%, which is why the magic-number form is used;
   - the softmax scale 1/16 is a power of two, so the scores stay unscaled — (s − m)·(scale·log2 e)
     rounds exactly like the (s·scale − m·scale)·log2 e that `__expf` evaluates — and the −inf selects
     go away (exp2(−inf) = 0; key 0 is visible to every query, so the running max is finite after the

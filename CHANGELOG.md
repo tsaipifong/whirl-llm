@@ -7,7 +7,7 @@ All notable changes to WHIRL are listed here. Versions follow `project(whirl VER
 
 ### Changed
 
-- Prefill attention: new GQA-grouped kernel (`attn_kg`) for f16 and q8v KV. One block holds the
+- Prefill attention: new GQA-grouped kernel (`attn_kg`) for f16, q8v, q8 and q8h KV. One block holds the
   query heads of one KV head over 16 queries; K fragments are loaded straight into WMMA registers,
   f16 Vᵀ fragments with RDNA 4's transposing load (`global_load_tr_b128`), q8v V is dequantized once
   per block into a double-buffered LDS stage, and there is one barrier per 32-key tile. Outputs are
@@ -16,6 +16,10 @@ All notable changes to WHIRL are listed here. Versions follow `project(whirl VER
   ~61 → ~84 TFLOPS. `whirl bench` prefill, Swift-1.5 27B MXFP4-A (f16 KV, R9700): 32k +10%, 64k
   +17%, 96k +21%, 128k +24%; Ornith MXFP4 64k +11%, 128k +14%; Qwen3.8-27B UD-Q4_K_M (f16 KV) 32k +5%, 128k +16%.
   Long prompts on the server (q8v KV for the dense models) gain the same way: Swift 96k +19%, 128k +21%.
+  q8 and q8h KV now use `attn_kg` too (`attn_kg6_q8` / `attn_kg4_q8`; K dequantized from int8 with a
+  magic-number f16 conversion, bit-identical to `attn_kx_q8`; probe at 61k 57.8 → 72.1 TFLOPS). Server
+  prefill, Swift-1.5 27B MXFP4-A, one user, `--ctx-per-slot 262144`, q8h KV: 128k 1,342 → 1,522
+  (+13.4%), 192k 1,021 → 1,177 (+15.3%), 256k 824 → 961 (+16.6%); outputs bitwise-equal to 0.1.2.
   `WHIRL_ATTN_KG=0` restores the previous kernel. See [kernels.md](docs/guide/en/kernels.md#flash).
 
 ### Added

@@ -337,7 +337,7 @@ asm 屏障，因為編譯器把 `x*x` 收縮進第一個 butterfly 加法，並�
   fragment 64），而且每個 WMMA 都從 LDS 讀取 512 位元組的 fragment。`attn_kx` 每 128 個 query 使用 16 個 wave；兩個相鄰的 wave 共用 16 個 query，各自用原本的
   WMMA 鏈為 16 個 key 計算 Sᵀ，透過 LDS 交換，兩者計算相同的 softmax，各保留 Oᵀ 的一半（64 VGPR，無溢出）；下一個 K/V tile 預取到暫存器。逐位元相同。120k：f16
   KV 218 → 185 ms（+17.8%），q8v KV 247 → 198 ms（+25.0%）；32k +11%；≤ 8k 不變。
-- **`attn_kg`：依 GQA 分組、直接載入（f16 與 q8v KV 的預設）。** 對 0.1.2 build 做逐類別 profile（Swift MXFP4-A，`whirl bench` 加
+- **`attn_kg`：依 GQA 分組、直接載入（f16、q8v、q8 與 q8h KV 的預設）。** 對 0.1.2 build 做逐類別 profile（Swift MXFP4-A，`whirl bench` 加
   `WHIRL_PROFILE=1`）：除了 attention 以外，每一類運算的每 token 成本在各種 prompt 長度下都一樣；attention 則從 2k 的 0.015 ms/token（prefill 的
   5%）漲到 64k 的 0.228 ms/token（46%），約 61–66 TFLOPS。`attn_kg` 重新分配 `attn_kx` 的工作，但每個 query 的運算一個都沒改：
   - 一個 block = 同一個 KV head 底下的 query head（Qwen3.8-27B 全部 6 個，Ornith 的 8 個取 4 個）× 16 個 query，每個 head 兩個 wave，與
@@ -346,6 +346,10 @@ asm 屏障，因為編譯器把 `x*x` 收縮進第一個 butterfly 加法，並�
     一組之間轉置 8×8 的 16 位元區塊，所以每個 lane 提供一列 key，拿回的正好是它需要的 A 運算元那一行。同一個 KV head 的各個 head 同時讀同一批列，
     所以這些載入會命中快取。沒有暫存器內轉置，每個 32-key tile 只有一個 barrier（Sᵀ 交換），原本是三個；
   - q8v：V 在每個 block 只 dequantize 一次（與其他地方相同的 `(f16)q × s` 乘法），寫進提前一個 tile 的雙緩衝 LDS stage，由同一個 barrier 公開；
+  - q8 / q8h（`attn_kg6_q8` / `attn_kg4_q8`）：K 在暫存器內由 int8 反量化，用 magic number 手法——`0x6400 | (b ^ 0x80)` 就是 f16 的 1152 + q，
+    減 1152 再乘 scale 得到 q·s，只捨入一次；以 packed f16 計算，用 `v_perm` 組合兩半；`#pragma clang fp contract(off)` 防止編譯器融合成 FMA。
+    與 `attn_kx_q8` 逐位元相同；225 VGPR、每 SIMD 6 個 wave（實際每個 WGP 1 個 block）。61k probe：`attn_kx_q8` 57.8 → `attn_kg6_q8` 72.1 TFLOPS
+    （+24.7%）；直接寫 `(_Float16)q * s` 的版本只快 5%，所以改用 magic number 形式；
   - softmax scale 1/16 是 2 的冪，所以分數維持不縮放——(s − m)·(scale·log2 e) 的捨入與 `__expf` 實際計算的 (s·scale − m·scale)·log2 e
     完全相同——−inf 的 select 也可以拿掉（exp2(−inf) = 0；key 0 對每個 query 都可見，所以第一個 tile 之後累計最大值就是有限值）。block 內每個
     query 都完整可見的 tile 直接跳過 mask。
