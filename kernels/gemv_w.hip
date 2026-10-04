@@ -465,24 +465,20 @@ __device__ __forceinline__ void gemvw8_impl(const uint8_t *__restrict__ W, uint6
     }
 }
 
+// One 16 * TILES-row by NT-token pass of gemvw_impl: zero the accumulators,
+// run the K loop over this wave's units, reduce through red and write y.
+// Rows (wr) are per block; the token slice (xt, xd, y) is per pass. ystride
+// is the y row stride (0 = nrows). Ends after the write loop with no
+// trailing barrier: a caller reusing red must __syncthreads() first.
 template <int T, int NT, int TILES, int PIN>
-__device__ __forceinline__ void gemvw_impl(const uint8_t *__restrict__ W, uint64_t row_bytes, const int8_t *__restrict__ xq,
-                           const float *__restrict__ xd, float *__restrict__ y, int ncols, int nrows, int accumulate,
-                           const int *__restrict__ skip, int bid, int ystride = 0) {
+__device__ __forceinline__ void gemvw_pass(const uint8_t *const (&wr)[TILES], const int8_t *xt,
+                                           const float *xd, float *y,
+                                           float (&red)[8][NT][16 * TILES], int nb32, int nu, int nrows,
+                                           int accumulate, int ystride, int r0) {
     constexpr int ROWS = 16 * TILES;
     constexpr int NV = NT < 8 ? NT : 8;  // D rows (tokens) per lane half
-    __shared__ float red[8][NT][ROWS];
-    if (skip != nullptr && *skip) return;
     const int lane = threadIdx.x % WARP, h = lane >> 4, n = lane & 15;
-    // wave-uniform unit index -> scalar block math and uniform scale branches
     const int w = __builtin_amdgcn_readfirstlane(threadIdx.x / WARP);
-    const int r0 = bid * ROWS;
-    const uint8_t *wr[TILES];
-#pragma unroll
-    for (int tt = 0; tt < TILES; ++tt) wr[tt] = W + (size_t)min(r0 + tt * 16 + n, nrows - 1) * row_bytes;
-    const int8_t *xt = xq + (size_t)min(n, NT - 1) * ncols;  // A row = token n
-    const int nb32 = ncols / 32;
-    const int nu = WMU<T>::units(ncols);
     const int t0 = 8 * h;
     float acc[TILES][4][NV];
 #pragma unroll
@@ -545,6 +541,26 @@ __device__ __forceinline__ void gemvw_impl(const uint8_t *__restrict__ W, uint64
             *dst = accumulate ? *dst + s : s;
         }
     }
+}
+
+template <int T, int NT, int TILES, int PIN>
+__device__ __forceinline__ void gemvw_impl(const uint8_t *__restrict__ W, uint64_t row_bytes, const int8_t *__restrict__ xq,
+                           const float *__restrict__ xd, float *__restrict__ y, int ncols, int nrows, int accumulate,
+                           const int *__restrict__ skip, int bid, int ystride = 0) {
+    constexpr int ROWS = 16 * TILES;
+    __shared__ float red[8][NT][ROWS];
+    if (skip != nullptr && *skip) return;
+    const int lane = threadIdx.x % WARP, h = lane >> 4, n = lane & 15;
+    // wave-uniform unit index -> scalar block math and uniform scale branches
+    const int w = __builtin_amdgcn_readfirstlane(threadIdx.x / WARP);
+    const int r0 = bid * ROWS;
+    const uint8_t *wr[TILES];
+#pragma unroll
+    for (int tt = 0; tt < TILES; ++tt) wr[tt] = W + (size_t)min(r0 + tt * 16 + n, nrows - 1) * row_bytes;
+    const int8_t *xt = xq + (size_t)min(n, NT - 1) * ncols;  // A row = token n
+    const int nb32 = ncols / 32;
+    const int nu = WMU<T>::units(ncols);
+    gemvw_pass<T, NT, TILES, PIN>(wr, xt, xd, y, red, nb32, nu, nrows, accumulate, ystride, r0);
 }
 
 // Variants V = (tiles, units in flight): 1 = (1, 1), 2 = (2, 1), 3 = (1, 2),
