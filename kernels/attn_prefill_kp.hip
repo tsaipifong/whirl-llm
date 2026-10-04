@@ -216,6 +216,34 @@ __device__ __forceinline__ half8 kg_ld_tr(const _Float16 *p) {
     __builtin_memcpy(&r, &v, 16);
     return r;
 }
+// q8 K dequantization, bit-identical to kv_ld8's (f16)q * s: magic-number int8 -> f16 (0x6400 | (b ^ 0x80) is
+// the f16 1024 + (q + 128), exact; minus 1152 gives q exactly), then one rounding in * s. Packed f16 ops,
+// two values per VGPR. The subtract and the multiply must NOT be contracted into an FMA (one rounding of
+// q*s - 1152*s differs), hence contract(off).
+typedef _Float16 kg_h2 __attribute__((ext_vector_type(2)));
+__device__ __forceinline__ half8 kg_dq8(kvq8_t qk, _Float16 s) {
+#pragma clang fp contract(off)
+    uint32_t w[2];
+    __builtin_memcpy(w, &qk, 8);
+    const kg_h2 off = (kg_h2){(_Float16)1152.0f, (_Float16)1152.0f}, sc = (kg_h2){s, s};
+    half8 r;
+#pragma unroll
+    for (int j = 0; j < 2; ++j) {
+        const uint32_t x = w[j] ^ 0x80808080u;
+        const uint32_t lo = __builtin_amdgcn_perm(0x64646464u, x, 0x04010400u);  // bytes 0,1 -> 0x64xx halves
+        const uint32_t hi = __builtin_amdgcn_perm(0x64646464u, x, 0x04030402u);  // bytes 2,3
+        kg_h2 a, b;
+        __builtin_memcpy(&a, &lo, 4);
+        __builtin_memcpy(&b, &hi, 4);
+        a = (a - off) * sc;
+        b = (b - off) * sc;
+        r[4 * j + 0] = a[0];
+        r[4 * j + 1] = a[1];
+        r[4 * j + 2] = b[0];
+        r[4 * j + 3] = b[1];
+    }
+    return r;
+}
 template <int NP, int Q8>  // Q8: 0 f16, 1 q8 (int8 K and V), 2 q8v (int8 V)
 __device__ __forceinline__ void attn_kg_impl(const float *q, const KvArgs &kv, float *out, int n_head, int n_kv,
                                              int q_stride, const int *pos, int n_tok, float scale, int h0) {
@@ -309,9 +337,7 @@ __device__ __forceinline__ void attn_kg_impl(const float *q, const KvArgs &kv, f
                 if (st % 4 == 0 && st > 0) __builtin_amdgcn_sched_barrier(0);  // four batches: VGPRs
                 const kvq8_t qk = *(const kvq8_t *)(kr + 16 * st);
                 const _Float16 s = ksc[st >> 1];
-                half8 a;
-#pragma unroll
-                for (int i = 0; i < 8; ++i) a[i] = (_Float16)qk[i] * s;
+                const half8 a = kg_dq8(qk, s);
                 own = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(a, qf[st], own);
             }
         } else {
