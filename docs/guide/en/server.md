@@ -51,7 +51,7 @@ Useful environment variables (all of them: [usage.md](../../usage.md#env)):
 | `WHIRL_SYS_MIN`, `WHIRL_SYS_CKPTS`, `WHIRL_SYS_LCP=0` | system-prompt checkpoint threshold (2048), VRAM count (2), disable `prefix` checkpoints |
 | `WHIRL_KV_TIER_MIN` | minimum entry size for the tiers (2048 tokens) |
 | `WHIRL_TIMING_RESET=0` | keep the MTP timing table across requests (not recommended) |
-| `WHIRL_LOOP_LOG=1`, `WHIRL_TIER_VERIFY=1`, `WHIRL_TIER_MIN_GAIN=n` | diagnostics: per-loop phase timing, byte-verify every spill/restore, restore threshold (default 512) |
+| `WHIRL_LOOP_LOG=1`, `WHIRL_TIER_VERIFY=1`, `WHIRL_TIER_MIN_GAIN=n`, `WHIRL_TIMER_PROBE=1` | diagnostics: per-loop phase timing, byte-verify every spill/restore, restore threshold (default 512), actual sleep length before / after the 1 ms timer resolution the server sets |
 | `WHIRL_PROFILE=1\|2` | per-cycle GPU breakdown; **distorts timing** — never use it for speed numbers |
 
 Only one engine process may use a GPU at a time: the executable takes a named mutex per device and a

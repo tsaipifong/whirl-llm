@@ -49,7 +49,7 @@ Base URL 為 `http://127.0.0.1:8080/v1`；接受任何 API key。模型只載入
 | `WHIRL_SYS_MIN`、`WHIRL_SYS_CKPTS`、`WHIRL_SYS_LCP=0` | system prompt 檢查點門檻（2048）、VRAM 中的數量（2）、停用 `prefix` 檢查點 |
 | `WHIRL_KV_TIER_MIN` | 各層的最小項目大小（2048 tokens） |
 | `WHIRL_TIMING_RESET=0` | 跨請求保留 MTP 計時表（不建議） |
-| `WHIRL_LOOP_LOG=1`、`WHIRL_TIER_VERIFY=1`、`WHIRL_TIER_MIN_GAIN=n` | 診斷：每輪迴圈各階段計時、每次寫出/還原都逐位元組驗證、還原門檻（預設 512） |
+| `WHIRL_LOOP_LOG=1`、`WHIRL_TIER_VERIFY=1`、`WHIRL_TIER_MIN_GAIN=n`、`WHIRL_TIMER_PROBE=1` | 診斷：每輪迴圈各階段計時、每次寫出/還原都逐位元組驗證、還原門檻（預設 512）、server 設定 1 ms 計時器解析度前後的實際 sleep 長度 |
 | `WHIRL_PROFILE=1\|2` | 每個 cycle 的 GPU 時間拆解；**會扭曲計時**——絕不要用它量速度 |
 
 一張 GPU 同一時間只能有一個引擎行程使用：執行檔會對每個裝置取得一個具名 mutex，第二個實例會等待

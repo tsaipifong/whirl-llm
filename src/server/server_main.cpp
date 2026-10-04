@@ -23,16 +23,20 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <optional>
 #include <random>
 #include <string>
+#include <thread>
 #include <vector>
 
 #ifdef _WIN32
 #include <windows.h>
+#include <timeapi.h>
+#pragma comment(lib, "winmm.lib")  // timeBeginPeriod (whirl-server and whirl serve)
 #endif
 
 namespace whirl::server {
@@ -65,6 +69,23 @@ BOOL WINAPI onConsoleCtrl(DWORD type) {
     }
     logW("shutdown: the engine did not stop within {} s; exiting", wait_ms / 1000);
     return FALSE;
+}
+
+// Windows timer resolution: 1 ms while serving. At the default tick (10-16 ms) every
+// short wait of the main loop (the 1 ms polls of a burst gather and of host-tier
+// restores, the restore tail's 200 us poll) sleeps a whole tick. Restored on exit.
+struct TimerRes {
+    bool on = timeBeginPeriod(1) == TIMERR_NOERROR;
+    ~TimerRes() {
+        if (on) timeEndPeriod(1);
+    }
+};
+
+// WHIRL_TIMER_PROBE: mean actual duration of a short sleep (diagnostics)
+double sleepMs(std::chrono::microseconds d, int n) {
+    const auto t0 = std::chrono::steady_clock::now();
+    for (int k = 0; k < n; ++k) std::this_thread::sleep_for(d);
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count() / n;
 }
 
 constexpr std::uint32_t ctx_per_slot_default = 131072;
@@ -225,7 +246,8 @@ std::uint64_t tierFingerprint(const qwen35::Model& m, const std::string& path, c
             static const char* skip[] = {"WHIRL_KV_RAM_MB", "WHIRL_KV_SSD_DIR", "WHIRL_KV_SSD_GB", "WHIRL_KV_SSD_DELAY_MS",
                                          "WHIRL_KV_TIER_MIN", "WHIRL_R9700_LOCK_HELD", "WHIRL_GPU_WAIT", "WHIRL_GPU_SHARE",
                                          "WHIRL_PROFILE", "WHIRL_TRACE_ND", "WHIRL_GATHER_MS", "WHIRL_EXE", "WHIRL_LOOP_LOG",
-                                         "WHIRL_TIER_VERIFY", "WHIRL_TIER_MIN_GAIN", "WHIRL_DECODE_MIN_TPS"};
+                                         "WHIRL_TIER_VERIFY", "WHIRL_TIER_MIN_GAIN", "WHIRL_DECODE_MIN_TPS",
+                                         "WHIRL_TIMER_PROBE"};
             bool sk = false;
             for (const char* x : skip) sk = sk || up == x;
             if (!sk) kv.emplace_back(k, s.substr(eq + 1));
@@ -850,6 +872,14 @@ int serveMain(int argc, char** argv, const char* program) {
         }
 
         logI("model ready in {:.1f} s (weights {:.1f} s)", msSince(t_load0) / 1000.0, stats.ms / 1000.0);
+        const bool timer_probe = env("TIMER_PROBE").has_value();
+        const double probe_1ms = timer_probe ? sleepMs(std::chrono::milliseconds(1), 50) : 0.0;
+        const double probe_200us = timer_probe ? sleepMs(std::chrono::microseconds(200), 50) : 0.0;
+        const TimerRes timer_res;
+        if (!timer_res.on) logW("timer: 1 ms resolution not available; short waits of the main loop take one system tick");
+        if (timer_probe)
+            logI("timer probe | sleep 1 ms: {:.2f} ms before, {:.2f} ms after timeBeginPeriod(1) | sleep 200 us: {:.2f} / {:.2f} ms",
+                 probe_1ms, sleepMs(std::chrono::milliseconds(1), 50), probe_200us, sleepMs(std::chrono::microseconds(200), 50));
         HttpServer http(engine);
         http.start(opt.host, opt.port);
         logI("server listening on http://{}:{} (model id \"{}\", {} slots); endpoints: GET /health, GET /v1/models, POST "

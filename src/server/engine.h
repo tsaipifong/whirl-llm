@@ -329,7 +329,7 @@ public:
     // Queue a built job and wait until the main thread has answered it.
     void submitAndWait(Job& job);
     void beginBuilding() { n_building_.fetch_add(1); }
-    void endBuilding() { n_building_.fetch_sub(1); }
+    void endBuilding();
     struct Health {
         std::uint32_t active = 0;
         std::size_t queued = 0;
@@ -500,6 +500,7 @@ private:
     std::vector<KvArr> kv_arrays_;
     std::vector<tier::Span> tier_spans_;
     bool tier_wake_ = false;
+    std::uint64_t wake_seq_ = 0;  // under q_mutex_: bumped by a queued request, a finished build, the tier IO thread
     std::uint64_t stat_spill_waits_ = 0;
     std::vector<QBatch> quarantine_;
     std::uint64_t stat_cow_pages_ = 0;

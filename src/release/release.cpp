@@ -398,6 +398,7 @@ constexpr EnvDoc k_env[] = {
     {"Diagnostics", "DUMP_MOE=FILE", "selected experts of every prefill MoE block (i32)", C},
     {"Diagnostics", "TRACE_ND=1", "log the draft count of every decode cycle", S},
     {"Diagnostics", "LOOP_LOG=1", "log per-loop phase timing", S},
+    {"Diagnostics", "TIMER_PROBE=1", "log the actual length of a 1 ms / 200 us sleep before and after the 1 ms timer resolution is set", S},
     {"Diagnostics", "TIER_VERIFY=1", "byte-verify every host tier spill / restore", S},
     {"Diagnostics", "TIER_MIN_GAIN=N", "restore from a host tier only when it saves at least N tokens (default 512)", S},
 };

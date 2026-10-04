@@ -238,6 +238,7 @@ void Engine::attachTier(tier::Tier* t) {
         t->setWake([this] {
             std::lock_guard<std::mutex> lk(q_mutex_);
             tier_wake_ = true;
+            ++wake_seq_;
             q_cond_.notify_all();
         });
         t->log_fn = [](std::string_view msg) { logI("{}", msg); };
@@ -2641,12 +2642,22 @@ void Engine::submitAndWait(Job& job) {
     const std::size_t waiting = queue_.size();
     queue_.push_back(&job);
     n_building_.fetch_sub(1);
+    ++wake_seq_;
     q_cond_.notify_all();
     lk.unlock();
     if (waiting >= free)
         logI("req {} | queued ({} request(s) waiting ahead, all {} slots busy)", job.id, waiting - free, slots_.size());
     lk.lock();
     q_cond_.wait(lk, [&] { return job.done; });
+}
+
+void Engine::endBuilding() {
+    // a connection that did not queue a request (bad request, probe): a burst
+    // gather waiting for it ends now
+    std::lock_guard<std::mutex> lk(q_mutex_);
+    n_building_.fetch_sub(1);
+    ++wake_seq_;
+    q_cond_.notify_all();
 }
 
 void Engine::abortQueued(std::unique_lock<std::mutex>& lk) {
@@ -2729,15 +2740,22 @@ void Engine::runLoop() {
                     return;
                 }
                 if (tier_ != nullptr) {
+                    const std::uint64_t seq = wake_seq_;
                     lk.unlock();
                     const bool busy = tierTick();
                     if (!busy && !logged) {
                         logTier();
                         logged = true;
                     }
-                    if (busy) std::this_thread::sleep_for(std::chrono::milliseconds(5));
                     lk.lock();
-                    if (busy) continue;
+                    if (busy) {
+                        // tier work in flight: polled every 5 ms, but a request (or the
+                        // tier IO thread) ends the wait at once (a sleep here delayed a
+                        // request by up to one Windows timer tick, 10-16 ms)
+                        q_cond_.wait_for(lk, std::chrono::milliseconds(5),
+                                         [&] { return wake_seq_ != seq || !queue_.empty() || stop_; });
+                        continue;
+                    }
                 }
                 // vision: while the encoder is loaded, wake every 100 ms for its idle timeout
                 // (a timed wait on the queue condition, not a sleep: a request that arrives
@@ -2756,6 +2774,7 @@ void Engine::runLoop() {
             }
             stat_t0_ = Clock::now();
         }
+        const std::uint64_t wake_seq0 = wake_seq_;  // a later arrival ends this iteration's wait (below)
         std::vector<Job*> admit;
         std::size_t qi = 0;
         while (qi < queue_.size() && n_busy + admit.size() < slots_.size()) {
@@ -2897,7 +2916,11 @@ void Engine::runLoop() {
                 if (floor_pf && pf_rows > 0) floor_.notePrefill(pf_rows, it_ms - std::min(floor_.cycleMs(), 0.5 * it_ms));
             }
         } else if (idle_wait || (restoring && pf == nullptr)) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            // burst gather / host-tier restore: poll again in 1 ms, sooner when a
+            // request is queued, a connection finishes building one, or the tier
+            // IO thread reports progress
+            std::unique_lock<std::mutex> lw(q_mutex_);
+            q_cond_.wait_for(lw, std::chrono::milliseconds(1), [&] { return wake_seq_ != wake_seq0; });
         }
         if (opt_.loop_log && (!act.empty() || restoring || pf != nullptr)) {
             const TimePoint tl4 = Clock::now();
