@@ -687,6 +687,7 @@ void loadLog(q::Model& m, const q::LoadStats& stats) {
             static_cast<double>(stats.bytes) / (1024.0 * 1024.0 * 1024.0), stats.ms / 1000.0, static_cast<double>(stats.bytes) / (stats.ms * 1e6),
             static_cast<double>(mem.free) / (1024.0 * 1024.0 * 1024.0), static_cast<double>(mem.total) / (1024.0 * 1024.0 * 1024.0)));
     out(fmt("  KV cache: %s, %u tokens\n", m.kvName(), m.max_ctx));
+    if (envGet("LOAD_DEBUG")) out(fmt("  gdn beta/alpha contiguous: %u layers\n", stats.gdn_ba_contig));
 }
 
 std::string readPromptArg(const std::string& p) {

@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <tuple>
 
 namespace whirl::qwen35 {
 
@@ -62,6 +63,13 @@ struct Loader {
         const u64 nbytes = t.nbytes();
         if (nbytes == 0) throw ModelError("UnsupportedTensorType", std::string(t.name));
         const DevPtr dst = m.alloc(nbytes);
+        uploadTo(t, dst);
+        return dst;
+    }
+
+    // Reads tensor t into the existing device buffer dst (t.nbytes() bytes).
+    void uploadTo(const gguf::TensorInfo& t, DevPtr dst) {
+        const u64 nbytes = t.nbytes();
         u64 off = 0;
         const u64 base = f.absOffset(t);
         while (off < nbytes) {
@@ -73,7 +81,6 @@ struct Loader {
         stats.bytes += nbytes;
         stats.tensors += 1;
         m.type_bytes[ti(t.type) % n_types] += nbytes;
-        return dst;
     }
 
     // Like mat(), but the data stays in pinned host memory (device-accessible).
@@ -166,6 +173,36 @@ struct Loader {
             r.ptr = upload(*t);
         }
         return r;
+    }
+
+    // Two matrices with the same row layout in one allocation: a's rows, then
+    // b's (a.ptr / b.ptr point at the two parts; bytes are unchanged, so a GEMV
+    // on either reads exactly what mat() would give). Falls back to two mat()
+    // loads unless the types / ncols / row_bytes match, the type is not MXFP4
+    // (repacked + per-row refs) and b's start stays 256-byte aligned.
+    std::pair<Mat, Mat> matPair(const std::string& na, const std::string& nb, bool* contig) {
+        *contig = false;
+        const gguf::TensorInfo* ta = f.tensor(na);
+        const gguf::TensorInfo* tb = f.tensor(nb);
+        if (!ta || !tb || ta->type != tb->type || ta->type == GgmlType::mxfp4 || ta->ne[0] != tb->ne[0] ||
+            ta->rowBytes() != tb->rowBytes() || ta->nbytes() == 0 || tb->nbytes() == 0 || ta->nbytes() % 256 != 0 ||
+            ta->nbytes() != ta->rowBytes() * ta->rows() || tb->nbytes() != tb->rowBytes() * tb->rows() ||
+            m.k.gemv1[ti(ta->type) % n_types] == nullptr)
+            return {mat(na), mat(nb)};
+        const DevPtr base = m.alloc(ta->nbytes() + tb->nbytes());
+        uploadTo(*ta, base);
+        uploadTo(*tb, base + ta->nbytes());
+        auto mk = [](const gguf::TensorInfo& t, DevPtr p) {
+            Mat r;
+            r.ptr = p;
+            r.ty = t.type;
+            r.ncols = static_cast<u32>(t.ne[0]);
+            r.nrows = static_cast<u32>(t.rows());
+            r.row_bytes = t.rowBytes();
+            return r;
+        };
+        *contig = true;
+        return {mk(*ta, base), mk(*tb, base + ta->nbytes())};
     }
 
     DevPtr vec(const std::string& name) {
@@ -372,8 +409,9 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
             L.kind = LayerKind::gdn;
             L.gdn.qkv = ld.mat(n("attn_qkv.weight"));
             L.gdn.gate = ld.mat(n("attn_gate.weight"));
-            L.gdn.beta = ld.mat(n("ssm_beta.weight"));
-            L.gdn.alpha = ld.mat(n("ssm_alpha.weight"));
+            bool ba_contig = false;
+            std::tie(L.gdn.beta, L.gdn.alpha) = ld.matPair(n("ssm_beta.weight"), n("ssm_alpha.weight"), &ba_contig);
+            if (ba_contig && rowsContiguous(L.gdn.beta, L.gdn.alpha)) stats.gdn_ba_contig += 1;
             L.gdn.out = ld.mat(n("ssm_out.weight"));
             L.gdn.conv = ld.vec(n("ssm_conv1d.weight"));
             L.gdn.dt = ld.vec(n("ssm_dt.bias"));

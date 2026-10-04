@@ -186,6 +186,20 @@ struct Mat {
     std::uint64_t row_bytes = 0;
 };
 
+// True when b's rows directly follow a's in one allocation (same type and row
+// layout), so [a; b] can be read as one (a.nrows + b.nrows)-row matrix.
+inline bool rowsContiguous(const Mat& a, const Mat& b) {
+    return a.ptr != 0 && a.ty == b.ty && a.ncols == b.ncols && a.row_bytes == b.row_bytes && a.ref == 0 && b.ref == 0 &&
+           b.ptr == a.ptr + static_cast<std::uint64_t>(a.nrows) * a.row_bytes;
+}
+
+// [a; b] as one matrix (a's tune); only valid when rowsContiguous(a, b).
+inline Mat concatRows(const Mat& a, const Mat& b) {
+    Mat r = a;
+    r.nrows = a.nrows + b.nrows;
+    return r;
+}
+
 struct AttnW {
     Mat q, k, v, o;
     DevPtr q_norm = 0, k_norm = 0;
@@ -295,6 +309,8 @@ struct Profile {
 struct LoadStats {
     std::uint64_t bytes = 0;
     std::uint32_t tensors = 0;
+    // GDN layers whose ssm_beta / ssm_alpha were loaded into one block (beta rows then alpha rows)
+    std::uint32_t gdn_ba_contig = 0;
     double ms = 0;
 };
 
