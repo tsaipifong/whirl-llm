@@ -316,6 +316,8 @@ KernelTable KernelTable::load(const hip::Module& m, KvFormat kv) {
             {&KernelTable::gated_norm_x16h, "gated_norm_x16h"},
             {&KernelTable::qact_fp8t, "qact_fp8t"},
             {&KernelTable::rmsnorm_x8t, "rmsnorm_x8t"},
+            {&KernelTable::rmsnorm_x8h16, "rmsnorm_x8h16"},
+            {&KernelTable::rmsnorm_x8h16t, "rmsnorm_x8h16t"},
             {&KernelTable::silu_mul_x8t, "silu_mul_x8t"},
             {&KernelTable::silu_mul_x8ht, "silu_mul_x8ht"},
             {&KernelTable::gated_norm_x8t, "gated_norm_x8t"},

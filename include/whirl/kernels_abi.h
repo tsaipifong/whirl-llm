@@ -52,6 +52,8 @@
 //   rmsnorm_q8(x, w, out, xq, xd, int n, float eps)
 //   rmsnorm_q8_rows(x, w, out, xq, xd, int n, float eps, Idx16 src)
 //   rmsnorm_x8 / rmsnorm_x16 / rmsnorm_x8t(x, w, u8* q, float* sx, n, eps)
+//   rmsnorm_x8h16 / rmsnorm_x8h16t(x, w, u8* q, float* sx, f16* q16, n, eps)
+//            (fp8 row-major / tiled + f16 row-major from one norm; optional)
 //   l2norm(float* x, int n, int stride, int tok_stride, float eps)
 //   add_inplace(a, b, n); silu_mul(a, b, n); silu_mul_q8(g, u, xq, xd, n)
 //   silu_mul_x8 / x16 / x8t(const float* g, const float* u, u8* q, sx, ncols)
@@ -378,6 +380,7 @@ struct KernelTable {
     F moe_logits_f32{}, moe_topk{}, moe_route{}, moe_gather_f16{}, moe_act_f16{}, moe_combine{};
     F qact_fp8{}, silu_mul_x8h{}, gdn_conv_l2n{}, gdn_conv_l2n_h{}, gdn_conv_state_h{}, gated_norm_x8h{};
     F silu_mul_x16h{}, gated_norm_x16h{};
+    F rmsnorm_x8h16{}, rmsnorm_x8h16t{};
     F qact_fp8t{}, rmsnorm_x8t{}, silu_mul_x8t{}, silu_mul_x8ht{}, gated_norm_x8t{}, gated_norm_x8ht{};
     F gemmh_f16{}, gemmhh_f16{};
     F topk_rows{};
