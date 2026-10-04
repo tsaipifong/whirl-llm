@@ -165,9 +165,9 @@ forward 大小。
 prefill forward（合併的區塊最多 4096 列，27B 模型約 1.5 s），所以其他請求在 prefill 長 prompt 時，
 串流中的請求每次 forward 只前進一個 cycle——約 3 tok/s，看起來像卡住。
 
-保底判定條件保護的是**使用者正在互動的串流**：只保護「在這批 prefill 請求到達之前，就已經進入 decode」
-的 slot（即 slot 的到達時間加上突發視窗小於目前 prefill 請求的最早到達者，且進入 decode 的時間早於最晚到達者）。
-同一批（突發視窗內）到達的請求互不保護，可全速合併 prefill，不會被誤啟動的保底限制分段 forward。
+保底保護**同一批到達以外的所有 decode 中 slot**：只有在某個仍在 prefill 的請求的突發收集視窗（30 ms）
+內到達的 decode slot 不受保護。所以一起到達的請求（情境 A：C = 4 同時到達）互不牽制，可全速合併 prefill；
+而較早開始的串流，或是在子代理 prompt 之後才送來、而它們仍在 prefill 時的主對話下一輪，不論到達順序都受保護。
 
 設定保底後，且有符合條件的 slot 在 decode 時：
 - 一次 prefill forward 最多帶一個列數預算：完整的排程區塊（最舊請求的下一塊一定會執行，所以 prefill
@@ -181,7 +181,8 @@ prefill forward（合併的區塊最多 4096 列，27B 模型約 1.5 s），所�
 
 沒有受保護的 slot 在 decode 時，prefill 與沒有保底時完全相同（完整大小的合併 forward），突發收集也不變。
 改變的只有「哪些列放進同一次 forward」與 decode cycle 的時機；每種 GEMM / MoE tile 都與列無關，
-所以任何 N 的輸出都逐位元相同（下表每個 N、短 prompt 測試與 Ornith 都驗證過）。附帶效果：列數預算
+所以任何 N 的輸出都逐位元相同（已驗證：25.7k、97.4k、123.7k context 與反向順序的 N = 0 對 20，v0.1.1 在
+25.7k 的 N = 0 / 10 / 20 / 30 / 40，短 prompt 測試與 Ornith）。附帶效果：列數預算
 小時，等待中的 prompt 改為依先後順序 prefill，而不是並排進行，所以第一個很早就得到回應，最後一個較晚。
 
 | 情境 B：Swift-1.5 27B MXFP4-A，R9700：主對話在不同 context 下串流，接著 3 個子代理 prompt（15.8k / 17.1k / 18.9k token）同時到達 | 25.7k context（N = 0） | 25.7k context（**N = 20**） | 97.4k context（**N = 20**） | 123.7k context（**N = 20**） |

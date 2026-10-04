@@ -411,6 +411,7 @@ private:
     void flushOut(Slot& sl);
     bool startJob(Slot& sl, Job& job);
     std::size_t chunkLen(const Slot& sl) const;
+    std::vector<DecodeFloor::SlotTok> floorProtected() const;
     void maybeSplitCkpt(Slot& sl, DevPtr hid_row);
     void prefillStep(Slot& sl);
     std::size_t prefillGroup(Slot& first, std::size_t row_budget);

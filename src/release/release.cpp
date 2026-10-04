@@ -320,6 +320,8 @@ constexpr EnvDoc k_env[] = {
     {"Speculative decoding (output always equals plain greedy)", "MTP_PMIN=P", "end a draft chain at a draft with probability below P (after MTP_NMIN drafts)", C | B | S},
     {"Speculative decoding (output always equals plain greedy)", "MTP_NMIN=N", "drafts always made before MTP_PMIN applies", C | B | S},
     {"Speculative decoding (output always equals plain greedy)", "MTP_BATCH_DRAFTS=d1,d2,...", "max drafts per cycle with 1, 2, ... decoding slots", S},
+    {"Speculative decoding (output always equals plain greedy)", "WIDE_VERIFY=0", "server: keep one verify forward at <= 16 rows (default: up to 32 rows when n-gram drafts add rows)", S},
+    {"Speculative decoding (output always equals plain greedy)", "HEAD_CHUNK=N", "server: output head rows per pass in a > 16-row verify (default: the whole vocabulary)", S},
     {"Speculative decoding (output always equals plain greedy)", "MTP_Q4=0", "keep the MTP block's Q6_K matrices (default: Q4_K copies, used for drafts only)", C | B | S},
     {"Speculative decoding (output always equals plain greedy)", "DRAFT_HEAD=q4", "Q4_K draft head instead of the 2-bit one", C | B | S},
     {"Speculative decoding (output always equals plain greedy)", "MTP_FULLHEAD=1", "drafts use the full output head", C | B | S},

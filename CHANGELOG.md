@@ -7,18 +7,26 @@ All notable changes to WHIRL are listed here. Versions follow `project(whirl VER
 
 ### Changed
 
-- Decode floor (`--decode-min-tps N`): refined streaming decode protection to only protect slots
-  that entered decoding prior to the arrival of the earliest prefill request in the active prefill
-  set (`t_arrive + gather_ms < min_t_arrive` and `td0 < max_t_arrive`). Requests arriving in the same
-  burst window now coalesce and prefill together without triggering false floor throttling.
-  Scenario A (C = 4 concurrent ~1.1k prompts) achieves 288.8 tok/s decode (wall 4.67 s vs 5.10 s in
-  v0.1.2) with 0 false floor forwards. Scenario B (Swift 27B MXFP4-A streaming at 25.7k, 97.4k, and
-  123.7k context under 3 concurrent ~17k subagents) maintains 23.0–23.7 tok/s stream with longest
-  pause ≤0.499 s.
+- Decode floor (`--decode-min-tps N`): every decoding slot is protected except one that arrived in
+  the same burst (within the 30 ms gathering window) as a request that is still prefilling. Requests
+  arriving together therefore merge their prefill without false floor throttling (Scenario A, C = 4
+  concurrent ~1.1k prompts: 0 floor forwards, wall 4.6–4.7 s vs 5.10 s in v0.1.2), while a stream is
+  protected regardless of arrival order. An earlier version of this change protected only slots that
+  arrived before every prefilling request, which left a conversation's next turn unprotected when it
+  arrived after its subagents' prompts ("reverse order": 23.5 → 9.6 tok/s while they prefilled); the
+  server test `decode_floor` now covers that order. Scenario B (Swift 27B MXFP4-A streaming at 25.7k,
+  97.4k and 123.7k context under 3 concurrent ~17k subagents) keeps the stream at ~23 tok/s with the
+  longest pause < 0.5 s.
 - Speculative decoding & verification: support up to 32 rows verify path with dual-token WMMA GEMV
   kernels (`gemvx_v6` for MXFP4, IQ4_XS, Q4_K, Q5_K, Q6_K) and full-chunk LM head evaluation for wide
-  batches (`head_chunk = 248320`). Single-user decode throughput at 96k reaches 62.5 tok/s (from 49.8)
-  and 128k reaches 54.9 tok/s (from 45.9); outputs remain bit-identical.
+  batches (`head_chunk = 248320`; `WHIRL_WIDE_VERIFY=0`, `WHIRL_HEAD_CHUNK=N`); outputs remain
+  bit-identical. These only affect verify forwards of more than 16 rows (several users, or n-gram
+  drafts adding rows): one user's verify has at most 16 rows per sequence and never takes this path.
+  The single-user decode gains measured on this branch (96k 49.8 → 62.5 tok/s, 128k 45.9 → 54.9 tok/s
+  vs v0.1.2) come mainly from `attn_wsplit2` and the Q4_K MTP block below, not from wide verify or the
+  whole-vocabulary head. With 4 users, the whole head raised prose decode 247.1 → 267.8 tok/s.
+  Default draft caps stay 8 / 7 / 4 / 3 for 1–4 decoding slots (8 / 8 / 8 / 7 was not faster for code
+  or prose).
 - Speculative verify attention: a sequence's verify rows now share one K/V pass in groups of up to
   32 query columns (`attn_wsplit2`; 27B: 5 rows × 6 GQA heads) instead of 16 (2 rows). The second
   column group runs on the block's otherwise idle second wave over the same staged Vᵀ tile; each

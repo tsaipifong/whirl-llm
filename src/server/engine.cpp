@@ -2664,6 +2664,34 @@ void Engine::abortQueued(std::unique_lock<std::mutex>& lk) {
     (void)lk;
 }
 
+// Decode floor: the slots it protects. Every decoding slot is protected (a stream
+// someone is reading), except one that arrived in the same burst as a request
+// still prefilling (arrival times within the gather window): simultaneous
+// arrivals do not hold one another back, so a burst merges its prefill forwards
+// at full throughput. Arrival order does not matter otherwise: a conversation's
+// next turn that arrives while earlier subagent prompts prefill is protected too.
+// Empty when the floor is off or nothing is prefilling.
+std::vector<DecodeFloor::SlotTok> Engine::floorProtected() const {
+    std::vector<DecodeFloor::SlotTok> dec_toks;
+    if (!floor_.on()) return dec_toks;
+    const double gather_ms = opt_.gather_ms > 0 ? opt_.gather_ms : 30.0;
+    const auto gather_dur = std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double, std::milli>(gather_ms));
+    bool has_pf = false;
+    for (const Slot& sl : slots_) has_pf = has_pf || (sl.phase == Phase::prefill && sl.job);
+    if (!has_pf) return dec_toks;
+    for (const Slot& sl : slots_) {
+        if (sl.phase != Phase::decode || !sl.job) continue;
+        bool same_burst = false;
+        for (const Slot& pf : slots_) {
+            if (pf.phase != Phase::prefill || !pf.job) continue;
+            const TimePoint a = sl.job->t_arrive, b = pf.job->t_arrive;
+            same_burst = same_burst || (a > b ? a - b : b - a) <= gather_dur;
+        }
+        if (!same_burst) dec_toks.push_back({sl.id, sl.reqId(), sl.n_gen});
+    }
+    return dec_toks;
+}
+
 void Engine::runLoop() {
     stat_t0_ = Clock::now();
     bool was_busy = false;
@@ -2800,42 +2828,9 @@ void Engine::runLoop() {
             if (!pf || sl.job->id < pf->job->id) pf = &sl;
         }
         bool idle_wait = false;
-        // decode floor: only protects slots that were ALREADY decoding before the
-        // current batch of prefill requests arrived (i.e. an interactive stream
-        // the user is reading). Requests arriving in the same burst (within
-        // gather window) or after this prefill batch are not protected against it,
-        // so simultaneous arrivals can merge prefill forwards at full throughput.
-        std::vector<DecodeFloor::SlotTok> dec_toks;
-        if (floor_.on()) {
-            TimePoint pf_latest{};
-            TimePoint pf_earliest{};
-            bool has_pf = false;
-            for (const Slot& sl : slots_) {
-                if (sl.phase != Phase::prefill || !sl.job) continue;
-                const TimePoint t_arr = sl.job->t_arrive;
-                if (!has_pf) {
-                    pf_latest = pf_earliest = t_arr;
-                    has_pf = true;
-                } else {
-                    if (t_arr > pf_latest) pf_latest = t_arr;
-                    if (t_arr < pf_earliest) pf_earliest = t_arr;
-                }
-            }
-            if (has_pf) {
-                const double gather_ms = opt_.gather_ms > 0 ? opt_.gather_ms : 30.0;
-                const auto gather_dur =
-                    std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double, std::milli>(gather_ms));
-                for (const Slot& sl : slots_) {
-                    if (sl.phase != Phase::decode || !sl.job) continue;
-                    const bool separate_arrival = (sl.job->t_arrive + gather_dur < pf_earliest);
-                    const bool decode_before_pf = (sl.td0 < pf_latest);
-                    if (separate_arrival && decode_before_pf) {
-                        dec_toks.push_back({sl.id, sl.reqId(), sl.n_gen});
-                    }
-                }
-            }
-            if (dec_toks.empty()) floor_.idle();
-        }
+        // decode floor: the slots it protects this iteration
+        const std::vector<DecodeFloor::SlotTok> dec_toks = floorProtected();
+        if (floor_.on() && dec_toks.empty()) floor_.idle();
         auto floorNow = [&] { return std::chrono::duration<double, std::milli>(Clock::now() - floor_epoch_).count(); };
         std::size_t pf_rows = 0;
         bool floor_pf = false;

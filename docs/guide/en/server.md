@@ -178,11 +178,12 @@ the forward size.
 advances one cycle per forward while other requests prefill long prompts — about 3 tok/s, which looks
 frozen.
 
-The decode floor protects **interactive streaming streams that a user is actively reading**: it only
-protects slots that were already in the decode phase before the arrival of the current batch of prefill
-requests (`job->t_arrive + gather_ms < min_t_arrive` and `td0 < max_t_arrive`). Requests arriving
-within the same burst window do not protect against one another and are merged for full-speed prefill
-without spurious floor throttling.
+The decode floor protects **every decoding slot except those of the same burst**: a decoding slot is
+not protected only if it arrived within the burst-gathering window (30 ms) of a request that is still
+prefilling. Requests that arrive together (Scenario A: C = 4 at once) therefore do not hold one
+another back and merge their prefill at full speed, while a stream that started earlier — or a
+conversation's next turn that arrives after the subagent prompts, while they still prefill — is
+protected regardless of arrival order.
 
 With a floor, and only while protected slots are decoding:
 - a prefill forward carries at most a row budget: whole schedule chunks (the oldest request's next
@@ -197,8 +198,9 @@ With a floor, and only while protected slots are decoding:
 
 When no protected slot is decoding, prefill runs exactly as without the floor (full-size merged forwards),
 and burst gathering is unchanged. Only the grouping of rows into forwards and the timing of decode cycles
-change; every GEMM / MoE tile is row-invariant, so outputs are bit-identical for any N (checked for
-every N below, the short-prompt runs and Ornith). A side effect: with a small row budget the waiting
+change; every GEMM / MoE tile is row-invariant, so outputs are bit-identical for any N (checked: N = 0 vs 20 at 25.7k, 97.4k
+and 123.7k context and in reverse order, N = 0 / 10 / 20 / 30 / 40 at 25.7k in v0.1.1, the
+short-prompt runs and Ornith). A side effect: with a small row budget the waiting
 prompts prefill oldest-first instead of side by side, so the first one is answered much earlier and
 the last one later.
 

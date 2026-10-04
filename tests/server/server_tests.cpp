@@ -847,7 +847,9 @@ void testDecodeFloor() {
         double main_end_ms = 0, last_other_end_ms = 0;
         bool exact = false;
     };
-    auto run = [](double floor_tps) {
+    // reverse: the 3 prompts arrive first and the main request 60 ms later (a conversation's
+    // next turn while subagent prompts prefill): once decoding it is protected as well
+    auto run = [](double floor_tps, bool reverse) {
         ServerSetup su = baseSetup();
         su.mc.parallel = 4;
         su.mc.slot_ctx = 16384;
@@ -858,18 +860,23 @@ void testDecodeFloor() {
         TestServer srv(su);
         const auto pm = makePrompt(300, 500);
         std::vector<std::vector<std::uint32_t>> po;
-        for (std::uint32_t i = 0; i < 3; ++i) po.push_back(makePrompt(6144, 600 + i));
+        // reverse: longer prompts, so that they still prefill for a while once the main request decodes
+        for (std::uint32_t i = 0; i < 3; ++i) po.push_back(makePrompt(reverse ? 12288 : 6144, 600 + i));
         const std::uint32_t g_main = 250;
         Run r;
         std::string got_main;
         std::vector<std::string> got(3);
         const double t0 = nowSeconds();
-        std::thread tm([&] {
+        auto main_req = [&] {
             auto x = srv.post("/v1/completions", completionBody(pm, g_main, true));
             got_main = streamText(x, false);
             r.main_end_ms = (nowSeconds() - t0) * 1000.0;
-        });
-        std::this_thread::sleep_for(std::chrono::milliseconds(60));  // main is decoding
+        };
+        std::thread tm;
+        if (!reverse) {
+            tm = std::thread(main_req);
+            std::this_thread::sleep_for(std::chrono::milliseconds(60));  // main is decoding
+        }
         std::vector<std::thread> th;
         std::vector<double> ends(3);
         for (std::uint32_t i = 0; i < 3; ++i)
@@ -878,6 +885,10 @@ void testDecodeFloor() {
                 got[i] = completionText(x);
                 ends[i] = (nowSeconds() - t0) * 1000.0;
             });
+        if (reverse) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(60));  // the prompts are prefilling
+            tm = std::thread(main_req);
+        }
         for (auto& t : th) t.join();
         tm.join();
         r.last_other_end_ms = *std::max_element(ends.begin(), ends.end());
@@ -887,10 +898,16 @@ void testDecodeFloor() {
         return r;
     };
     g_log.clear();
-    const Run off = run(0);
-    const Run on = run(150);
+    const Run off = run(0, false);
+    const Run on = run(150, false);
+    CHECK(g_log.count("decode floor: ") >= 1);
+    const Run rev_off = run(0, true);
+    g_log.clear();
+    const Run rev = run(150, true);
     CHECK(off.exact);
     CHECK(on.exact);
+    CHECK(rev_off.exact);
+    CHECK(rev.exact);
     // off: the main request advances one cycle per (up to 4096-row) forward and ends after
     // the prefills; on: >= 150 tok/s over the ~2 s of prefill finishes its 250 tokens first
     if (g_verbose)
@@ -898,7 +915,13 @@ void testDecodeFloor() {
                     off.last_other_end_ms, on.main_end_ms, on.last_other_end_ms);
     CHECK(off.main_end_ms > off.last_other_end_ms);
     CHECK(on.main_end_ms < on.last_other_end_ms);
-    CHECK(g_log.count("decode floor: ") >= 1);
+    // reverse: the main request's prefill waits behind the older prompts' chunks; once it decodes,
+    // the floor holds their prefill back (they finish later than without a floor)
+    if (g_verbose)
+        std::printf("    reverse order: floor off: main %.0f ms, others %.0f ms; floor 150: main %.0f ms, others %.0f ms\n",
+                    rev_off.main_end_ms, rev_off.last_other_end_ms, rev.main_end_ms, rev.last_other_end_ms);
+    CHECK(g_log.count("decode floor | 150 tok/s per decoding slot (1 decoding)") >= 1);
+    CHECK(rev.last_other_end_ms > rev_off.last_other_end_ms + 100);
 }
 
 // small KV pool: idle slots are evicted (LRU) and requests still match
