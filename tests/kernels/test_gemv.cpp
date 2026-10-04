@@ -12,7 +12,6 @@
 #include "cpu_ref.h"
 
 #include <cstdio>
-#include <cstdlib>
 
 namespace kt {
 
@@ -60,13 +59,10 @@ void testGemv(Ctx& c) {
             c.rep.add(cmpTol("gemv_" + sfx + "_" + std::to_string(nt) + " " + m.name, got, ry, rs, 1e-4, 1e-6));
         }
 
-        // f32 / f16 (no int8 GEMV): do the multi-token instances gemv_<T>_4 / _8 reproduce
-        // gemv_<T>_1 (the n = 1 decode path) bitwise per token row? (C-13: production n = 2..16
-        // runs the f16 GEMM instead, which does not; _4 / _8 are candidates for a fix.)
-        // Informational by default; WHIRL_KT_FLOAT_GEMV_BITWISE=1 makes a mismatch a failure.
+        // f32 / f16 (no int8 GEMV): the multi-token instances gemv_<T>_4 / _8 must reproduce
+        // gemv_<T>_1 (the n = 1 decode path) bitwise per token row: matmul runs n = 2..16 as a
+        // composition of _8 / _4 / _1 (C-13), so verify == n = 1 depends on it.
         if (m.type == QType::f32 || m.type == QType::f16) {
-            const char* sv = std::getenv("WHIRL_KT_FLOAT_GEMV_BITWISE");
-            const bool strict = sv != nullptr && sv[0] == '1';
             std::vector<float> ref1(static_cast<std::size_t>(kNt) * nrows);
             Buf y1(static_cast<std::size_t>(nrows) * 4);
             for (int t = 0; t < kNt; ++t) {
@@ -87,10 +83,6 @@ void testGemv(Ctx& c) {
                                     got, want, Kind::invariant);
                 std::printf("  [info] gemv  gemv_%s_%d vs gemv_%s_1 per token (%s): %zu of %zu differ\n", sfx.c_str(), nt,
                             sfx.c_str(), m.name.c_str(), r.mismatches, r.n);
-                if (!r.pass && !strict) {
-                    r.pass = true;
-                    r.note += " [known: not bitwise, informational (WHIRL_KT_FLOAT_GEMV_BITWISE=1 to enforce)]";
-                }
                 c.rep.add(r);
             }
         }

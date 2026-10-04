@@ -168,6 +168,19 @@ void Model::matmul(const Mat& w, DevPtr xin, DevPtr y, u32 n, bool accumulate) {
         const u32 rows_per_block = 8;
         hip::launch(k.gemv1[t], D((w.nrows + rows_per_block - 1) / rows_per_block), D(256), 0, stream, w.ptr, w.row_bytes, xin, y, ncols,
                     nrows, ncols, nrows, acc);
+    } else if (floatGemvN(w, n)) {
+        // f32 / f16 weights, n = 2..16: f32 activations through gemv_<T>_8 / _4 / _1, each
+        // token bitwise == the n = 1 gemv_<T>_1 (C-13; the f16 GEMM is not)
+        const u32 rows_per_block = 8;
+        const hip::Dim3 grid = D((w.nrows + rows_per_block - 1) / rows_per_block);
+        for (u32 t0 = 0; t0 < n;) {
+            const u32 left = n - t0;
+            const u32 nt = left >= 8 ? 8 : left >= 4 ? 4 : 1;
+            const hip::Function f = nt == 8 ? k.gemv8[t] : nt == 4 ? k.gemv4[t] : k.gemv1[t];
+            hip::launch(f, grid, D(256), 0, stream, w.ptr, w.row_bytes, xin + static_cast<DevPtr>(t0) * w.ncols * 4,
+                        y + static_cast<DevPtr>(t0) * w.nrows * 4, ncols, nrows, ncols, nrows, acc);
+            t0 += nt;
+        }
     } else if (fp8_prefill && (fp8_mask & mm_class) != 0 && w.ty == GgmlType::mxfp4 && w.ref != 0 && k.gemm8[0] != nullptr) {
         // MXFP4 x fp8 (per-token scaled activations, folded block exponents)
         const u32 count = n * w.ncols;
@@ -263,7 +276,7 @@ void Model::rmsnorm(DevPtr xin, DevPtr w, DevPtr out, u32 n, u32 count, u32 in_s
 
 Model::ActIn Model::actIn(const Mat& w, u32 n, std::uint8_t cls) const {
     if (n <= gemv_max && k.gemvq[ti(w.ty)] != nullptr && !float_gemv) return ActIn::gemv;
-    if (n == 1) return ActIn::f32in;
+    if (n == 1 || floatGemvN(w, n)) return ActIn::f32in;
     if (fp8_prefill && (fp8_mask & cls) != 0 && w.ty == GgmlType::mxfp4 && w.ref != 0 && k.gemm8[0] != nullptr) return ActIn::fp8;
     return ActIn::f16;
 }
@@ -331,6 +344,14 @@ bool Model::gdnIn2(const GdnW& g, u32 n) const {
     const auto pin = actCommon(pc, n, 1);
     const auto bin = actCommon(bc, n, 1);
     return pin && *pin == ActIn::fp8 && bin && *bin == ActIn::f16;
+}
+
+// f32 / f16 weights (no int8 GEMV) at n = 2..16 run the f32-activation GEMV
+// instances, bitwise == n = 1 per token (C-13).
+bool Model::floatGemvN(const Mat& w, u32 n) const {
+    const std::size_t t = ti(w.ty);
+    return n >= 2 && n <= max_small_batch && (w.ty == GgmlType::f32 || w.ty == GgmlType::f16) && k.gemvq[t] == nullptr &&
+           k.gemv4[t] != nullptr && k.gemv8[t] != nullptr;
 }
 
 // Decode fusions apply to small batches on the int8 GEMV path.

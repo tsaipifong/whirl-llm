@@ -116,6 +116,10 @@ KernelTable KernelTable::load(const hip::Module& m, KvFormat kv) {
     for (QType t : base_types) {
         const std::string s = sfx(t);
         k.gemv1[ti(t)] = L.req("gemv_" + s + "_1");
+        if (t == QType::f32 || t == QType::f16) {
+            k.gemv4[ti(t)] = L.opt("gemv_" + s + "_4");
+            k.gemv8[ti(t)] = L.opt("gemv_" + s + "_8");
+        }
         k.get_rows[ti(t)] = L.req("get_rows_" + s);
         k.gemm[ti(t)] = L.req("gemm3_" + s);
         if (t != QType::f16) k.dequant_f16[ti(t)] = L.req("dequant_f16_" + s);
