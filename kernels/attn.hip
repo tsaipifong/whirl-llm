@@ -31,14 +31,37 @@ __device__ __forceinline__ int kv_delta(const KvArgs &a, int tb, int p) {
     const int pg = p / KV_PAGE;
     return (a.ptab[tb + pg] - pg) * KV_PAGE;
 }
+// int8 x8 -> f16 x8 times s, without per-element conversions: 0x6400 | (b ^ 0x80)
+// read as f16 is 1024 + (b + 128) (exact), minus 1152 is b (exact), so (that - 1152) * s
+// is the same single f16 rounding as (_Float16)b * s. Packed f16 pairs from v_perm;
+// fp contract off keeps the subtract and the multiply from fusing into an FMA.
+typedef _Float16 kv_h2 __attribute__((ext_vector_type(2)));
+__device__ __forceinline__ half8 kv_dq8(kvq8_t qk, _Float16 s) {
+#pragma clang fp contract(off)
+    uint32_t w[2];
+    __builtin_memcpy(w, &qk, 8);
+    const kv_h2 off = (kv_h2){(_Float16)1152.0f, (_Float16)1152.0f}, sc = (kv_h2){s, s};
+    half8 r;
+#pragma unroll
+    for (int j = 0; j < 2; ++j) {
+        const uint32_t x = w[j] ^ 0x80808080u;
+        const uint32_t lo = __builtin_amdgcn_perm(0x64646464u, x, 0x04010400u);  // bytes 0,1 -> 0x64xx halves
+        const uint32_t hi = __builtin_amdgcn_perm(0x64646464u, x, 0x04030402u);  // bytes 2,3
+        kv_h2 a, b;
+        __builtin_memcpy(&a, &lo, 4);
+        __builtin_memcpy(&b, &hi, 4);
+        a = (a - off) * sc;
+        b = (b - off) * sc;
+        r[4 * j + 0] = a[0];
+        r[4 * j + 1] = a[1];
+        r[4 * j + 2] = b[0];
+        r[4 * j + 3] = b[1];
+    }
+    return r;
+}
 template <bool Q8> __device__ __forceinline__ half8 kv_ld8(const void *base, const _Float16 *sc, size_t e) {
     if constexpr (Q8) {
-        const kvq8_t q = *(const kvq8_t *)((const int8_t *)base + e);
-        const _Float16 s = sc[e >> 5];
-        half8 h;
-#pragma unroll
-        for (int i = 0; i < 8; ++i) h[i] = (_Float16)q[i] * s;
-        return h;
+        return kv_dq8(*(const kvq8_t *)((const int8_t *)base + e), sc[e >> 5]);
     } else {
         return *(const half8 *)((const _Float16 *)base + e);
     }
@@ -639,9 +662,16 @@ __device__ __forceinline__ void attn_wsplit_impl(const float *q, const KvArgs &k
             sc[kt] = (float8){0, 0, 0, 0, 0, 0, 0, 0};
             const int krow = min(k0 + kt * 16 + lane % 16, b1 - 1);  // clamp (masked below)
             const size_t kr = ((size_t)(krow + dl) * n_kv + g) * AW_D + 8 * (lane / 16);
+            // q8 K: the row's 8 scales in one load (step st uses scale st / 2)
+            half8 ks8;
+            if constexpr (Q8 == 1) ks8 = *(const half8 *)(kv.ks + (kr >> 5));
 #pragma unroll
             for (int st = 0; st < AW_D / 16; ++st) {
-                const half8 a = kv_ld8<Q8 == 1>(kv.k, kv.ks, kr + 16 * st);
+                half8 a;
+                if constexpr (Q8 == 1)
+                    a = kv_dq8(*(const kvq8_t *)((const int8_t *)kv.k + kr + 16 * st), ks8[st >> 1]);
+                else
+                    a = kv_ld8<false>(kv.k, kv.ks, kr + 16 * st);
                 const half8 qb = *(const half8 *)&Qs[wid * 16 + lane % 16][16 * st + 8 * (lane / 16)];
                 sc[kt] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(a, qb, sc[kt]);
             }
