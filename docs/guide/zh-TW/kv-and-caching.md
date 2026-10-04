@@ -175,7 +175,7 @@ agent 情境（8 個 session，各自「詢問某個檔案 → `read_file` → �
 
 較大的 prefill 前向計算較快，但檢查點（`prefix`、`system`、`think-open`）只能位於 chunk 邊界。把 server 的 chunk 改成 2048 列能讓冷 prefill 快 +18…+21%，但跨 slot 的後續請求因此重用的是位置 27,418 而非 28,442 的 `prefix` 檢查點，30k 上下文 + 300 / + 1000 個新 token 的 TTFT 從 980 → 1681 ms 與 1548 → 2230 ms。
 
-採用的設計是**排程**維持 1024 token 的 chunk（檢查點位置不變），而在沒有受 decode 保底保護的 slot 正在 decode 時（[server.md](server.md#batching)），把連續的完整 chunk 合併成一次最多 2048 列（+256 尾段）的前向計算來**執行**，且絕不跨越檢查點邊界。這依賴 logits 與前向大小無關——已驗證：batch 1024 / 2048 / 4096 的最後一個 token logits 相同，兩個模型、MTP 開/關皆然。
+採用的設計是**排程**維持 1024 token 的 chunk（檢查點位置不變），而在沒有其他 slot 正在 decode、或 decode 保底關閉時（[server.md](server.md#batching)），把連續的完整 chunk 合併成一次最多 2048 列（+256 尾段）的前向計算來**執行**，且絕不跨越檢查點邊界。這依賴 logits 與前向大小無關——已驗證：batch 1024 / 2048 / 4096 的最後一個 token logits 相同，兩個模型、MTP 開/關皆然。
 
 | Server，MTP + n-gram | Q4_K_M 修正前 → 後 | MXFP4 修正前 → 後 |
 |---|---|---|

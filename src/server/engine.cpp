@@ -1305,9 +1305,13 @@ std::size_t Engine::chunkLen(const Slot& sl) const {
     const std::size_t lim = schedNextV(sl.job->tokens.size(), sl.sys_split, sl.pf_split, imgSplits(sl.job->tokens), cur);
     std::size_t n = prefillChunkLen(lim - cur);
     if (opt_.prefill_exec <= prefill_chunk) return n;
-    // only a slot the decode floor protects keeps forwards at one chunk (the
-    // same set as the floor itself: floorProtected(), this loop iteration)
-    if (pf_protected_) return n;
+    // With the decode floor on, any decoding slot keeps forwards at one chunk, also
+    // an unprotected one of the same burst: next to a long prompt a 2048-row forward
+    // doubled its stall (96k: 1.2 -> 3.3 s, ~1.5 tok/s) for ~4% faster prefill.
+    // With the floor off (--decode-min-tps 0, throughput first) chunks merge anyway.
+    if (floor_.on())
+        for (const Slot& o : slots_)
+            if (&o != &sl && o.phase == Phase::decode) return n;
     while (cur + n < lim) {
         if (sl.lcp_ck > 0 && cur + n == sl.lcp_ck) break;  // a shared-prefix checkpoint is kept there
         const std::size_t nx = prefillChunkLen(lim - cur - n);
@@ -2848,9 +2852,8 @@ void Engine::runLoop() {
             if (!pf || sl.job->id < pf->job->id) pf = &sl;
         }
         bool idle_wait = false;
-        // decode floor: the slots it protects this iteration (also read by chunkLen)
+        // decode floor: the slots it protects this iteration
         const std::vector<DecodeFloor::SlotTok> dec_toks = floorProtected();
-        pf_protected_ = !dec_toks.empty();
         if (floor_.on() && dec_toks.empty()) floor_.idle();
         auto floorNow = [&] { return std::chrono::duration<double, std::milli>(Clock::now() - floor_epoch_).count(); };
         std::size_t pf_rows = 0;

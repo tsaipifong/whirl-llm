@@ -10,21 +10,29 @@ All notable changes to WHIRL are listed here. Versions follow `project(whirl VER
 - Decode floor (`--decode-min-tps N`): every decoding slot is protected except one that arrived in
   the same burst (within the 30 ms gathering window) as a request that is still prefilling. Requests
   arriving together therefore merge their prefill without false floor throttling (Scenario A, C = 4
-  concurrent ~1.1k prompts: 0 floor forwards, wall 4.6–4.7 s vs 5.10 s in v0.1.2), while a stream is
-  protected regardless of arrival order. An earlier version of this change protected only slots that
-  arrived before every prefilling request, which left a conversation's next turn unprotected when it
-  arrived after its subagents' prompts ("reverse order": 23.5 → 9.6 tok/s while they prefilled); the
-  server test `decode_floor` now covers that order. Scenario B (Swift 27B MXFP4-A streaming at 25.7k,
-  97.4k and 123.7k context under 3 concurrent ~17k subagents) keeps the stream at ~23 tok/s with the
-  longest pause < 0.5 s.
+  concurrent ~1.1k prompts: 0 floor forwards, batch wall 4.65 s vs 4.91 s in v0.1.2, median of 3),
+  while a stream is protected regardless of arrival order. An earlier version of this change protected
+  only slots that arrived before every prefilling request, which left a conversation's next turn
+  unprotected when it arrived after its subagents' prompts ("reverse order", 25.7k: 8.6 tok/s while
+  they prefilled; now 22.8–23.0, v0.1.2 22.4); the server test `decode_floor` now covers that order.
+  Scenario B (Swift 27B MXFP4-A, 3 concurrent ~17k subagents) at 25.7k context is unchanged
+  (22.7 tok/s, longest pause 0.47 s; v0.1.2 23.1 / 0.47). Outputs are identical to v0.1.2.
+- Server: Windows timer resolution set to 1 ms while serving (`timeBeginPeriod`), and the main loop's
+  idle / burst-gather / restore waits wake on a new request instead of sleeping: a 1 ms sleep took
+  11.5 ms before, 1.9 ms after (`WHIRL_TIMER_PROBE=1`). A short request arriving while the prefix-cache
+  tier is still writing the previous one: TTFT median 86 → 69 ms. C = 4 burst of ~1.1k prompts: mean
+  TTFT 1207 → 1187 ms.
+- Server: with the decode floor off (`--decode-min-tps 0`), a prefilling request's chunks merge into
+  2048-row forwards even while other slots decode. With the floor on they still do not while any slot
+  decodes (merging next to a long prompt made its prefill only ~4% faster but doubled the decoders'
+  stalls, 96k: 1.2 → 3.3 s).
 - Speculative decoding & verification: support up to 32 rows verify path with dual-token WMMA GEMV
   kernels (`gemvx_v6` for MXFP4, IQ4_XS, Q4_K, Q5_K, Q6_K) and full-chunk LM head evaluation for wide
   batches (`head_chunk = 248320`; `WHIRL_WIDE_VERIFY=0`, `WHIRL_HEAD_CHUNK=N`); outputs remain
   bit-identical. These only affect verify forwards of more than 16 rows (several users, or n-gram
   drafts adding rows): one user's verify has at most 16 rows per sequence and never takes this path.
-  The single-user decode gains measured on this branch (96k 49.8 → 62.5 tok/s, 128k 45.9 → 54.9 tok/s
-  vs v0.1.2) come mainly from `attn_wsplit2` and the Q4_K MTP block below, not from wide verify or the
-  whole-vocabulary head. With 4 users, the whole head raised prose decode 247.1 → 267.8 tok/s.
+  Single-user decode gains on this branch come from `attn_wsplit2` and the Q4_K MTP block below, not
+  from wide verify or the whole-vocabulary head (numbers to be re-measured). With 4 users, the whole head raised prose decode 247.1 → 267.8 tok/s.
   Default draft caps stay 8 / 7 / 4 / 3 for 1–4 decoding slots (8 / 8 / 8 / 7 was not faster for code
   or prose).
 - Speculative verify attention: a sequence's verify rows now share one K/V pass in groups of up to

@@ -168,12 +168,13 @@ forward: row-wise work (embeddings, norms, GEMMs, MoE) runs once over all rows; 
 (attention, DeltaNet conv and chunk scan) runs per segment with the solo kernels. The oldest
 prefilling request always runs; others join if their next chunk has more than 16 rows (to avoid
 the small-batch path) and the total stays ≤ 4096. Because every GEMM configuration and MoE tile is
-row-invariant, a batched prefill row equals the solo row bit for bit. Unless the decode floor
-below protects a decoding slot, consecutive chunks of one request merge into forwards of up to 2048
-rows ([kv-and-caching.md](kv-and-caching.md#merge)); slots of the same burst, and any slot with the
-floor off (`--decode-min-tps 0`), keep decoding between those larger forwards (a longer stall per
-forward, about 0.8 s instead of 0.4 s on the 27B model). While protected slots decode, the floor
-limits the forward size to whole chunks.
+row-invariant, a batched prefill row equals the solo row bit for bit. When no other slot is
+decoding, or with the decode floor off (`--decode-min-tps 0`, throughput first), consecutive chunks
+of one request merge into forwards of up to 2048 rows ([kv-and-caching.md](kv-and-caching.md#merge)).
+With the floor on, any decoding slot (protected or of the same burst) keeps forwards at whole chunks:
+measured on the 27B model with 3 short requests decoding next to a 32k / 96k / 128k prompt of the
+same burst, merging raised that prompt's prefill throughput by only 3.7–4.2% but doubled the decoders' longest
+pause (0.54 → 1.03 s, 1.17 → 3.27 s, 1.85 → 2.37 s).
 
 **Decode floor (`--decode-min-tps N`, default 20).** Without it, the loop runs one prefill forward
 (up to 4096 rows of combined chunks, ~1.5 s on the 27B model) per decode cycle, so a streaming request
@@ -198,29 +199,54 @@ With a floor, and only while protected slots are decoding:
 - if the floor is out of reach even by pure decoding, decode-only time per period is capped at 4 × the
   period's prefill time, so prefill keeps about 20% of the GPU.
 
-When no protected slot is decoding, prefill runs exactly as without the floor (full-size merged forwards),
-and burst gathering is unchanged. Only the grouping of rows into forwards and the timing of decode cycles
-change; every GEMM / MoE tile is row-invariant, so outputs are bit-identical for any N (checked: N = 0 vs 20 at 25.7k, 97.4k
-and 123.7k context and in reverse order, N = 0 / 10 / 20 / 30 / 40 at 25.7k in v0.1.1, the
-short-prompt runs and Ornith). A side effect: with a small row budget the waiting
+When no protected slot is decoding, the floor holds nothing back (no row budget, no decode-only
+cycles), and burst gathering is unchanged. Only the grouping of rows into forwards and the timing of
+decode cycles change; every GEMM / MoE tile is row-invariant, so outputs are bit-identical for any N
+(checked for every N in the tables below, in both arrival orders, against v0.1.2 at N = 20 for all
+three contexts, the short-prompt runs and Ornith). A side effect: with a small row budget the waiting
 prompts prefill oldest-first instead of side by side, so the first one is answered much earlier and
 the last one later.
 
-| Scenario B: Swift-1.5 27B MXFP4-A, R9700: main stream at various contexts, then 3 subagent prompts (15.8k / 17.1k / 18.9k tokens) arrive | 25.7k context (N = 0) | 25.7k context (**N = 20**) | 97.4k context (**N = 20**) | 123.7k context (**N = 20**) |
-|---|---|---|---|---|
-| Main stream rate while they prefill, tok/s | 3.2 | **23.7** | **23.0** | **23.1** |
-| Main stream longest pause, s | 1.217 | **0.499** | **0.482** | **0.479** |
-| The 3 subagents' TTFT, s | 17.0 / 17.8 / 18.5 | **8.5 / 17.0 / 27.3** | **10.1 / 18.8 / 28.6** | **9.7 / 22.2 / 31.8** |
-| Subagents prefill throughput while streaming, tok/s | 2797 | **1897** | **1813** | **1629** |
+Measured on Swift-1.5 27B MXFP4-A, R9700, 3 subagent prompts of 15.8k / 17.1k / 18.9k tokens.
+**Forward order**: the main stream decodes, then the 3 prompts arrive. **Reverse order**: the 3
+prompts arrive first and the conversation's next turn (a short delta on its cached context) 1.5 s
+later; "while they prefill" then runs from the main stream's first token to the last subagent's first
+token.
 
-Ornith-1.5-35B-A3B MXFP4 (MoE), same scenario: N = 0 → 20 raises the streaming request from 6.7 to
-31.5 tok/s (alone ~230; longest pause 0.39 → 0.43 s) and moves the last TTFT from 5.8 to 6.8 s
+| 25.7k context | N = 0 (off) | 10 | **20** | 30 | 40 |
+|---|---|---|---|---|---|
+| Forward: main stream while they prefill, tok/s (alone ~84) | 2.8 | 11.9 | **22.7** | 31.0 | 40.3 |
+| Forward: its longest pause, s | 1.57 | 1.12 | **0.47** | 0.47 | 0.46 |
+| Forward: the 3 prompts' TTFT, s | 11.1 / 12.0 / 18.5 | 16.7 / 20.5 / 21.9 | **7.7 / 16.3 / 26.1** | 9.2 / 19.7 / 31.1 | 11.2 / 23.3 / 38.6 |
+| Forward: mean TTFT, s | 13.9 | 19.7 | **16.7** | 20.0 | 24.4 |
+| Forward: prefill throughput while streaming, tok/s | 2799 | 2368 | **1981** | 1663 | 1342 |
+| Reverse: main stream while they prefill, tok/s | 4.1 | 14.6 | **22.8** | 33.3 | 42.3 |
+| Reverse: its longest pause, s | 1.07 | 0.52 | **0.47** | 0.47 | 0.47 |
+| Reverse: the 3 prompts' TTFT, s | 11.8 / 12.6 / 18.3 | 12.2 / 12.5 / 19.6 | **11.0 / 12.4 / 21.9** | 11.6 / 11.9 / 24.2 | 11.5 / 11.9 / 28.2 |
+
+| N = 20, by context | 25.7k | 97.4k | 123.7k |
+|---|---|---|---|
+| Forward: main stream while they prefill, tok/s | 22.7 | 23.0 | 23.1 |
+| Forward: its longest pause, s | 0.47 | 0.47 | 0.52 |
+| Forward: the 3 prompts' TTFT, s | 7.7 / 16.3 / 26.1 | 8.4 / 19.1 / 29.0 | 11.8 / 21.7 / 32.2 |
+| Forward: prefill throughput while streaming, tok/s | 1981 | 1789 | 1609 |
+| Reverse: main stream while they prefill, tok/s | 22.8 | 21.1 | 22.9 |
+| Reverse: its longest pause, s | 0.47 | 0.48 | 0.48 |
+| Reverse: the 3 prompts' TTFT, s | 11.0 / 12.4 / 21.9 | 11.4 / 11.9 / 25.1 | 11.3 / 11.7 / 23.6 |
+
+v0.1.2 measured 23.1 / 22.7 / 22.1 tok/s forward and 22.4 / 21.5 / 22.4 tok/s reverse at the same
+three contexts (longest pause 0.47–0.52 s); at 123.7k the pause is 0.52 s in both versions. An earlier
+build of this release that protected only streams arriving before every prefilling prompt fell to
+8.6 tok/s (pause 0.92 s) in reverse order at 25.7k.
+
+Ornith-1.5-35B-A3B MXFP4 (MoE), same scenario (v0.1.1): N = 0 → 20 raises the streaming request from
+6.7 to 31.5 tok/s (alone ~230; longest pause 0.39 → 0.43 s) and moves the last TTFT from 5.8 to 6.8 s
 (prefill 8986 → 7653 tok/s). Short prompts are unaffected: Swift MXFP4-A, ~1.1k-token prompts, 256
-generated, Scenario A (C = 4 concurrent arrival) finishes in wall 4.67 s with 288.8 tok/s decode
-in steady state without triggering the floor, merging 3 requests into one prefill forward. 20 is
-the default: the stream stays readable (> 20 tok/s, pauses < 0.5 s) for about a third of the prefill
-throughput, while the mean TTFT of the waiting prompts stays the same. Use 0 for batch jobs where
-only total throughput matters, or a higher N for a smoother stream at the cost of slower prefill.
+generated, Scenario A (C = 4 concurrent arrival) finishes in 4.65 s wall (median of 3; v0.1.2 4.91 s)
+without triggering the floor, merging 3 requests into one prefill forward. 20 is the default: the
+stream stays readable (> 20 tok/s, pauses ≤ 0.5 s) for about 30% less prefill throughput. Use 0 for
+batch jobs where only total throughput matters, or a higher N for a smoother stream at the cost of
+slower prefill.
 
 **Burst gathering.** Requests that are still being received, parsed or tokenized are counted; while
 any exist, a new request's first prefill chunk waits up to 30 ms so a burst of requests enters the
@@ -228,8 +254,8 @@ same segmented forward. A single user never waits (their own request is already 
 it, the first request of a burst prefilled alone and then stalled 2.4 s while the others prefilled.
 
 **Stalls.** When another user submits a 14k-token prompt, a streaming request's longest pause was
-0.90 s (MoE: 0.25 s) before the decode floor; with three long prompts at once it was 1.22 s and the
-stream fell to 3 tok/s (table above), 0.48–0.50 s and 23 tok/s with the default floor.
+0.90 s (MoE: 0.25 s) before the decode floor; with three long prompts at once it was 1.57 s and the
+stream fell to 3 tok/s (table above), 0.47–0.52 s and 21–23 tok/s with the default floor.
 
 | Concurrency (27B Q4_K_M / MXFP4, ~1.1k-token prompts, 256 generated, greedy) | C = 1 | C = 2 | C = 4 |
 |---|---|---|---|
