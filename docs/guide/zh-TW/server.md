@@ -157,9 +157,10 @@ Dense 依 decode 中 slot 數的上限：1–4 個 slot 分別為 8 / 7 / 4 / 3�
 執行一次；逐序列工作（attention、DeltaNet conv 與 chunk scan）則以單獨模式的 kernel 逐段執行。
 最舊的 prefill 中請求一定會執行；其他請求在下一塊超過 16 列（避開小批次路徑）且總數維持 ≤ 4096
 時才加入。由於每種 GEMM 配置與 MoE tile 都與列無關（row-invariant），批次 prefill 的一列與單獨執行
-的一列逐位元相同。沒有 slot 在 decode 時，同一請求的連續區塊會合併成最多 2048 列的 forward
-（[kv-and-caching.md](kv-and-caching.md#merge)）。有 slot 在 decode 時，由下述的 decode 保底速度限制
-forward 大小。
+的一列逐位元相同。除非下述的 decode 保底正在保護某個 decode 中的 slot，同一請求的連續區塊會合併成
+最多 2048 列的 forward（[kv-and-caching.md](kv-and-caching.md#merge)）；同一批到達的 slot，以及保底關閉
+（`--decode-min-tps 0`）時的任何 slot，會在這些較大的 forward 之間繼續 decode（每次 forward 的停頓較長，
+27B 模型約 0.8 s，原本約 0.4 s）。有受保護的 slot 在 decode 時，由保底把 forward 限制為整數個區塊。
 
 **Decode 保底速度（`--decode-min-tps N`，預設 20）。** 沒有它時，主迴圈每個 decode cycle 會跑一次
 prefill forward（合併的區塊最多 4096 列，27B 模型約 1.5 s），所以其他請求在 prefill 長 prompt 時，

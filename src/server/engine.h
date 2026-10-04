@@ -470,6 +470,7 @@ private:
     TimePoint floor_epoch_{};
     TimePoint floor_log_t_{};
     std::uint64_t stat_floor_waits_ = 0, stat_floor_periods_ = 0;
+    bool pf_protected_ = false;  // floorProtected() non-empty this loop iteration (chunkLen: no merging)
     // sampling buffers
     DevPtr samp_dev_ = 0, big_dev_ = 0;
     std::vector<std::uint8_t> samp_host_, big_host_;

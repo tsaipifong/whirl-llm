@@ -168,10 +168,12 @@ forward: row-wise work (embeddings, norms, GEMMs, MoE) runs once over all rows; 
 (attention, DeltaNet conv and chunk scan) runs per segment with the solo kernels. The oldest
 prefilling request always runs; others join if their next chunk has more than 16 rows (to avoid
 the small-batch path) and the total stays ≤ 4096. Because every GEMM configuration and MoE tile is
-row-invariant, a batched prefill row equals the solo row bit for bit. When no slot is decoding,
-consecutive chunks of one request merge into forwards of up to 2048 rows
-([kv-and-caching.md](kv-and-caching.md#merge)). While slots decode, the decode floor below limits
-the forward size.
+row-invariant, a batched prefill row equals the solo row bit for bit. Unless the decode floor
+below protects a decoding slot, consecutive chunks of one request merge into forwards of up to 2048
+rows ([kv-and-caching.md](kv-and-caching.md#merge)); slots of the same burst, and any slot with the
+floor off (`--decode-min-tps 0`), keep decoding between those larger forwards (a longer stall per
+forward, about 0.8 s instead of 0.4 s on the 27B model). While protected slots decode, the floor
+limits the forward size to whole chunks.
 
 **Decode floor (`--decode-min-tps N`, default 20).** Without it, the loop runs one prefill forward
 (up to 4096 rows of combined chunks, ~1.5 s on the 27B model) per decode cycle, so a streaming request

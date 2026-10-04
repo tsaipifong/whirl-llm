@@ -292,8 +292,8 @@ follow-ups then reused a `prefix` checkpoint at position 27,418 instead of 28,44
 context + 300 / + 1000 new tokens went from 980 → 1681 ms and 1548 → 2230 ms TTFT.
 
 The adopted design keeps the **schedule** at 1024-token chunks (checkpoint positions unchanged) and
-**executes** consecutive whole chunks in one forward of up to 2048 rows (+256 tail) when no other
-slot is decoding, never across a checkpoint boundary. This relies on logits being independent of
+**executes** consecutive whole chunks in one forward of up to 2048 rows (+256 tail) unless a slot the
+decode floor protects is decoding ([server.md](server.md#batching)), never across a checkpoint boundary. This relies on logits being independent of
 forward size — verified: last-token logits identical for batch 1024 / 2048 / 4096, both models,
 MTP on/off.
 
