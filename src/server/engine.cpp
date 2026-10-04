@@ -5,9 +5,11 @@
 #include "engine.h"
 
 #include "log.h"
+#include "whirl/hip.h"
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <ctime>
 #include <limits>
@@ -99,6 +101,14 @@ struct CycleProf {
         }
         last_end.reset();
     }
+};
+
+// WHIRL_BUSY region (one decode cycle / one prefill forward): ends when the
+// guard leaves scope; `info` is extra JSON fields. No-op when WHIRL_BUSY is off.
+struct BusyRegion {
+    char info[192] = {0};
+    BusyRegion(const char* kind, void* stream) { hip::busy::beginRegion(kind, stream); }
+    ~BusyRegion() { hip::busy::endRegion(info); }
 };
 
 // ---------------------------------------------------------------------------
@@ -1350,6 +1360,7 @@ void Engine::prefillStep(Slot& sl) {
     } else {
         m_.forward(toks.subspan(sl.pf_off, n), sl.reuse + static_cast<std::uint32_t>(sl.pf_off));
     }
+    hip::busy::markEnd();
     sl.pf_off += n;
     stat_prefill_tok_ += n;
     maybeSplitCkpt(sl, m_.hn() + static_cast<std::uint64_t>(n - 1) * m_.cfg().n_embd * 4);
@@ -1359,6 +1370,7 @@ void Engine::prefillStep(Slot& sl) {
 // Returns the rows run (0 when nothing ran). row_budget caps the rows of the
 // whole forward; the oldest request's chunk always runs (decode floor).
 std::size_t Engine::prefillGroup(Slot& first, std::size_t row_budget) {
+    BusyRegion busy_rg("pf", m_.stream());
     const std::size_t n0 = chunkLen(first);
     const std::size_t small_max = max_small_batch;
     auto solo = [&] {
@@ -1368,6 +1380,9 @@ std::size_t Engine::prefillGroup(Slot& first, std::size_t row_budget) {
             failSlot(first, ex.what());
         }
     };
+    if (hip::busy::on())
+        std::snprintf(busy_rg.info, sizeof busy_rg.info, "\"rows\":%zu,\"segs\":1,\"pos\":%u", n0,
+                      first.reuse + static_cast<std::uint32_t>(first.pf_off));
     if (!opt_.seg_prefill || n0 <= small_max || !m_.canSegment()) {
         solo();
         return n0;
@@ -1434,6 +1449,10 @@ std::size_t Engine::prefillGroup(Slot& first, std::size_t row_budget) {
         for (Slot* sl : grp) failSlot(*sl, ex.what());
         return 0;
     }
+    hip::busy::markEnd();
+    if (hip::busy::on())
+        std::snprintf(busy_rg.info, sizeof busy_rg.info, "\"rows\":%zu,\"segs\":%zu,\"pos\":%u", total, grp.size(),
+                      grp[0]->reuse + static_cast<std::uint32_t>(grp[0]->pf_off));
     stat_prefill_tok_ += total;
     stat_seg_batches_ += 1;
     stat_seg_chunks_ += grp.size();
@@ -1603,6 +1622,7 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
     const auto& cfg = m_.cfg();
     const std::uint64_t E = cfg.n_embd;
     const TimePoint t_cycle0 = Clock::now();
+    BusyRegion busy_rg("dec", m_.stream());
     // slots out of context room end here
     std::vector<Slot*> act;
     const std::uint32_t nd_room = opt_.use_mtp ? opt_.n_draft : 0;
@@ -1765,6 +1785,13 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
         launchTopk(row_of[k], nd_of[k] + 1, k_small, sl.sm.inv_t, samp_dev_, max_rows, row_of[k]);
     }
     const TimePoint t_enq = Clock::now();
+    if (hip::busy::on()) {
+        std::uint32_t pmax = 0;
+        for (Slot* sl : act) pmax = std::max<std::uint32_t>(pmax, sl->pos);
+        std::snprintf(busy_rg.info, sizeof busy_rg.info, "\"A\":%zu,\"rows\":%u,\"nd\":%u,\"ng\":%zu,\"pos\":%u", A, rows, nd,
+                      n_ng, pmax);
+        hip::busy::markEnd();
+    }
     m_.readCtl(std::span<std::int32_t>(ctl_host_.data(), slots_.size() * qwen35::ctl_words));
     if (p) {
         p->t_ready = Clock::now();

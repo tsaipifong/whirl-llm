@@ -183,6 +183,33 @@ void launch(Function f, Dim3 grid, Dim3 block, unsigned shared_bytes, Stream s, 
     launchRaw(f, grid, block, shared_bytes, s, params);
 }
 
+// ---- busy-ratio instrumentation (WHIRL_BUSY, src/hip/busy.cpp). Off by
+// default: every hook below is one test of busy::g_mode.
+namespace busy {
+extern int g_mode;  // 0 off, 1 counters + GPU span (M1+M2), 3 counters only (M1)
+void launchHookImpl(Stream s);
+void copyHookImpl(int dir, std::uint64_t bytes);  // dir 0 H2D 1 D2H 2 D2D 3 memset 4 any
+void syncHookImpl(double us);
+void graphHookImpl();
+void beginRegionImpl(const char* kind, Stream s);
+void markEndImpl();
+void endRegionImpl(const char* info);
+double nowMicros();
+void flush();  // writes pending span lines (blocks on their events); no-op when off
+inline bool on() { return g_mode != 0; }
+// A region = one decode cycle / one prefill forward: begin before its first
+// launch, markEnd just before its natural host sync, end after it.
+inline void beginRegion(const char* kind, Stream s) {
+    if (g_mode) beginRegionImpl(kind, s);
+}
+inline void markEnd() {
+    if (g_mode) markEndImpl();
+}
+inline void endRegion(const char* info = nullptr) {
+    if (g_mode) endRegionImpl(info);
+}
+}  // namespace busy
+
 // Runs the smoke kernel on the current device; returns an empty string on
 // success, otherwise a description of the failure.
 std::string smokeTest();

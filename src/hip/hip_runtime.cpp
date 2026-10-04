@@ -139,39 +139,50 @@ void hostFree(void* p) {
     if (p) (void)hipHostFree(p);
 }
 
+// Synchronous calls under WHIRL_BUSY: counted with the host time they block.
+#define WHIRL_BUSY_SYNC(...)                                do {                                                        if (busy::g_mode) {                                         const double t_ = busy::nowMicros();                    __VA_ARGS__;                                            busy::syncHookImpl(busy::nowMicros() - t_);         } else {                                                    __VA_ARGS__;                                        }                                                   } while (0)
+
 void upload(DevPtr dst, const void* src, std::size_t bytes) {
-    check(hipMemcpy(ptr(dst), src, bytes, hipMemcpyHostToDevice), "hipMemcpy H2D");
+    if (busy::g_mode) busy::copyHookImpl(0, bytes);
+    WHIRL_BUSY_SYNC(check(hipMemcpy(ptr(dst), src, bytes, hipMemcpyHostToDevice), "hipMemcpy H2D"));
 }
 
 void download(void* dst, DevPtr src, std::size_t bytes) {
-    check(hipMemcpy(dst, ptr(src), bytes, hipMemcpyDeviceToHost), "hipMemcpy D2H");
+    if (busy::g_mode) busy::copyHookImpl(1, bytes);
+    WHIRL_BUSY_SYNC(check(hipMemcpy(dst, ptr(src), bytes, hipMemcpyDeviceToHost), "hipMemcpy D2H"));
 }
 
 void uploadAsync(DevPtr dst, const void* src, std::size_t bytes, Stream s) {
+    if (busy::g_mode) busy::copyHookImpl(0, bytes);
     check(hipMemcpyAsync(ptr(dst), src, bytes, hipMemcpyHostToDevice, strm(s)), "hipMemcpyAsync H2D");
 }
 
 void downloadAsync(void* dst, DevPtr src, std::size_t bytes, Stream s) {
+    if (busy::g_mode) busy::copyHookImpl(1, bytes);
     check(hipMemcpyAsync(dst, ptr(src), bytes, hipMemcpyDeviceToHost, strm(s)), "hipMemcpyAsync D2H");
 }
 
 void copyAsync(DevPtr dst, DevPtr src, std::size_t bytes, Stream s) {
+    if (busy::g_mode) busy::copyHookImpl(2, bytes);
     check(hipMemcpyAsync(ptr(dst), ptr(src), bytes, hipMemcpyDeviceToDevice, strm(s)), "hipMemcpyAsync D2D");
 }
 
 void copyAnyAsync(DevPtr dst, DevPtr src, std::size_t bytes, Stream s) {
+    if (busy::g_mode) busy::copyHookImpl(4, bytes);
     check(hipMemcpyAsync(ptr(dst), ptr(src), bytes, hipMemcpyDefault, strm(s)), "hipMemcpyAsync default");
 }
 
 void memset(DevPtr dst, int value, std::size_t bytes) {
-    check(hipMemset(ptr(dst), value, bytes), "hipMemset");
+    if (busy::g_mode) busy::copyHookImpl(3, bytes);
+    WHIRL_BUSY_SYNC(check(hipMemset(ptr(dst), value, bytes), "hipMemset"));
 }
 
 void memsetAsync(DevPtr dst, int value, std::size_t bytes, Stream s) {
+    if (busy::g_mode) busy::copyHookImpl(3, bytes);
     check(hipMemsetAsync(ptr(dst), value, bytes, strm(s)), "hipMemsetAsync");
 }
 
-void sync() { check(hipDeviceSynchronize(), "hipDeviceSynchronize"); }
+void sync() { WHIRL_BUSY_SYNC(check(hipDeviceSynchronize(), "hipDeviceSynchronize")); }
 
 MemInfo memInfo() {
     MemInfo m;
@@ -195,7 +206,7 @@ void streamDestroy(Stream s) {
     if (s) (void)hipStreamDestroy(strm(s));
 }
 
-void streamSync(Stream s) { check(hipStreamSynchronize(strm(s)), "hipStreamSynchronize"); }
+void streamSync(Stream s) { WHIRL_BUSY_SYNC(check(hipStreamSynchronize(strm(s)), "hipStreamSynchronize")); }
 
 void streamWaitEvent(Stream s, Event e) { check(hipStreamWaitEvent(strm(s), evt(e), 0), "hipStreamWaitEvent"); }
 
@@ -214,7 +225,7 @@ void eventDestroy(Event e) {
 
 void eventRecord(Event e, Stream s) { check(hipEventRecord(evt(e), strm(s)), "hipEventRecord"); }
 
-void eventSync(Event e) { check(hipEventSynchronize(evt(e)), "hipEventSynchronize"); }
+void eventSync(Event e) { WHIRL_BUSY_SYNC(check(hipEventSynchronize(evt(e)), "hipEventSynchronize")); }
 
 bool eventDone(Event e) {
     const hipError_t st = hipEventQuery(evt(e));
@@ -268,6 +279,7 @@ Graph Graph::endCapture(Stream s) {
 }
 
 void Graph::launch(Stream s) const {
+    if (busy::g_mode) busy::graphHookImpl();
     check(hipGraphLaunch(static_cast<hipGraphExec_t>(exec_), strm(s)), "hipGraphLaunch");
 }
 
@@ -343,6 +355,7 @@ DevPtr Module::getGlobal(const char* name, std::size_t* bytes) const {
 
 void launchRaw(Function f, Dim3 grid, Dim3 block, unsigned shared_bytes, Stream s, void** params) {
     g_launch_count.fetch_add(1, std::memory_order_relaxed);
+    if (busy::g_mode) busy::launchHookImpl(s);
     check(hipModuleLaunchKernel(static_cast<hipFunction_t>(f), grid.x, grid.y, grid.z, block.x, block.y, block.z,
                                 shared_bytes, strm(s), params, nullptr),
           "hipModuleLaunchKernel");

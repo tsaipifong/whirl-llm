@@ -1096,14 +1096,28 @@ int cmdBench(const Args& a) {
             std::size_t off = 0;
             while (off < pr.size()) {
                 const std::size_t n = std::min<std::size_t>(pr.size() - off, model.max_batch);
+                hip::busy::beginRegion("bench_pf", model.stream);
                 if (has_mtp)
                     model.prefillMtpChunk(pr, 0, off, n, std::nullopt);
                 else
                     model.forward(pr.subspan(off, n), static_cast<u32>(off));
+                hip::busy::markEnd();
+                if (hip::busy::on()) {
+                    char info[128];
+                    std::snprintf(info, sizeof info, "\"size\":%u,\"rep\":%d,\"rows\":%zu,\"pos\":%zu", s, rep, n, off);
+                    hip::busy::endRegion(info);
+                }
                 off += n;
             }
             (void)model.beginDecode(s);
             const double ms = timer.end();
+            if (hip::busy::on()) {
+                char info[160];
+                std::snprintf(info, sizeof info, "\"size\":%u,\"rep\":%d,\"wall_ms\":%.2f", s, rep, ms);
+                hip::busy::beginRegion("bench_pf_total", model.stream);
+                hip::busy::endRegion(info);
+                hip::busy::flush();
+            }
             if (rep > 0 || reps == 0) best = std::min(best, ms);
         }
         out(fmt("    prefill %6u tok: %9.1f ms  %8.1f tok/s\n", s, best, s * 1000.0 / best));

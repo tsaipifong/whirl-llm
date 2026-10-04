@@ -107,6 +107,7 @@ if(WHIRL_WITH_HIP)
 
   add_library(whirl_hip STATIC
     src/hip/hip_runtime.cpp
+    src/hip/busy.cpp
     ${CMAKE_BINARY_DIR}/kernels/embedded_objects.cpp
     ${WHIRL_EMBED_SOURCES})
   target_include_directories(whirl_hip PUBLIC ${CMAKE_SOURCE_DIR}/include)
