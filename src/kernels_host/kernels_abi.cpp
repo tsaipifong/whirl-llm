@@ -65,22 +65,23 @@ BlockInfo blockInfo(QType t) {
     return {0, 0};
 }
 
-std::uint8_t repackMxfp4Row(const std::uint8_t* src, std::uint8_t* dst, int ncols, std::uint64_t* lossy) {
-    if (ncols % 256 != 0) throw std::invalid_argument("repackMxfp4Row: ncols must be a multiple of 256");
-    const int nsb = ncols / 256;
-    std::vector<std::uint8_t> tmp(static_cast<std::size_t>(nsb) * 136);
+std::uint8_t repackMxfp4Row(const std::uint8_t* src, std::uint8_t* dst, int ncols, std::uint64_t* lossy,
+                            std::uint8_t* scratch) {
+    if (ncols < 0 || ncols % 256 != 0) throw std::invalid_argument("repackMxfp4Row: ncols must be a multiple of 256");
+    const std::size_t nsb = static_cast<std::size_t>(ncols) / 256;
     std::uint8_t emax = 0;
-    for (int sb = 0; sb < nsb; ++sb) {
-        for (int i = 0; i < 8; ++i) {
-            const std::uint8_t* blk = src + (static_cast<std::size_t>(sb) * 8 + i) * 17;
-            tmp[static_cast<std::size_t>(sb) * 136 + i] = blk[0];
-            std::memcpy(&tmp[static_cast<std::size_t>(sb) * 136 + 8 + i * 16], blk + 1, 16);
+    for (std::size_t sb = 0; sb < nsb; ++sb) {
+        for (std::size_t i = 0; i < 8; ++i) {
+            const std::uint8_t* blk = src + (sb * 8 + i) * 17;
+            scratch[sb * 136 + i] = blk[0];
+            std::memcpy(&scratch[sb * 136 + 8 + i * 16], blk + 1, 16);
             emax = std::max(emax, blk[0]);
         }
     }
     if (lossy != nullptr) {
-        for (int bi = 0; bi < nsb * 8; ++bi) {
-            const std::uint8_t* blk = src + static_cast<std::size_t>(bi) * 17;
+        for (std::size_t bi = 0; bi < nsb * 8; ++bi) {
+            // blocks that are all +-0 do not matter for the fold
+            const std::uint8_t* blk = src + bi * 17;
             if (static_cast<unsigned>(emax) - blk[0] > 8) {
                 bool nz = false;
                 for (int q = 1; q <= 16; ++q) nz = nz || (blk[q] & 0x77) != 0;
@@ -88,8 +89,14 @@ std::uint8_t repackMxfp4Row(const std::uint8_t* src, std::uint8_t* dst, int ncol
             }
         }
     }
-    std::memcpy(dst, tmp.data(), tmp.size());
+    std::memcpy(dst, scratch, nsb * 136);
     return emax;
+}
+
+std::uint8_t repackMxfp4Row(const std::uint8_t* src, std::uint8_t* dst, int ncols, std::uint64_t* lossy) {
+    if (ncols < 0 || ncols % 256 != 0) throw std::invalid_argument("repackMxfp4Row: ncols must be a multiple of 256");
+    std::vector<std::uint8_t> scratch(static_cast<std::size_t>(ncols) / 256 * 136);
+    return repackMxfp4Row(src, dst, ncols, lossy, scratch.data());
 }
 
 static std::string sfx(QType t) {

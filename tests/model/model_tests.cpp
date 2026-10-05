@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "whirl/gguf.h"
+#include "whirl/kernels_abi.h"
 #include "whirl/model.h"
 
 #include <algorithm>
@@ -732,6 +733,111 @@ void testAllocDrafts() {
     for (std::size_t i = 0; i < 3; ++i) rows += m.d[i] + 1;
     check(m.d[3] == 0 && rows <= 32, "allocDrafts: n-gram slot rows count against the budget");
 }
+// ---------------------------------------------------------------------------
+// N8: the MXFP4 load-time repack has one implementation (kernels::repackMxfp4Row,
+// called by the loader's uploadMx with a per-tensor scratch). These frozen copies
+// of the two pre-v0.1.4 implementations pin its output bytes, reference exponent
+// and lossy count on random rows.
+std::uint8_t oldLoaderRepack(std::uint8_t* row, std::uint64_t ncols, std::vector<std::uint8_t>& tmp, std::uint64_t& lossy) {
+    const std::size_t nsb = static_cast<std::size_t>(ncols / 256);
+    std::uint8_t emax = 0;
+    for (std::size_t sb = 0; sb < nsb; ++sb)
+        for (std::size_t i = 0; i < 8; ++i) {
+            const std::uint8_t* blk = row + (sb * 8 + i) * 17;
+            tmp[sb * 136 + i] = blk[0];
+            std::memcpy(&tmp[sb * 136 + 8 + i * 16], blk + 1, 16);
+            emax = std::max(emax, blk[0]);
+        }
+    for (std::size_t bi = 0; bi < nsb * 8; ++bi) {
+        const std::uint8_t e = row[bi * 17];
+        if (static_cast<std::uint32_t>(emax) - e > 8) {
+            bool nz = false;
+            for (std::size_t q = 0; q < 16; ++q) nz = nz || (row[bi * 17 + 1 + q] & 0x77) != 0;
+            if (nz) lossy += 1;
+        }
+    }
+    std::memcpy(row, tmp.data(), nsb * 136);
+    return emax;
+}
+
+std::uint8_t oldAbiRepack(const std::uint8_t* src, std::uint8_t* dst, int ncols, std::uint64_t* lossy) {
+    const int nsb = ncols / 256;
+    std::vector<std::uint8_t> tmp(static_cast<std::size_t>(nsb) * 136);
+    std::uint8_t emax = 0;
+    for (int sb = 0; sb < nsb; ++sb) {
+        for (int i = 0; i < 8; ++i) {
+            const std::uint8_t* blk = src + (static_cast<std::size_t>(sb) * 8 + i) * 17;
+            tmp[static_cast<std::size_t>(sb) * 136 + i] = blk[0];
+            std::memcpy(&tmp[static_cast<std::size_t>(sb) * 136 + 8 + i * 16], blk + 1, 16);
+            emax = std::max(emax, blk[0]);
+        }
+    }
+    if (lossy != nullptr) {
+        for (int bi = 0; bi < nsb * 8; ++bi) {
+            const std::uint8_t* blk = src + static_cast<std::size_t>(bi) * 17;
+            if (static_cast<unsigned>(emax) - blk[0] > 8) {
+                bool nz = false;
+                for (int q = 1; q <= 16; ++q) nz = nz || (blk[q] & 0x77) != 0;
+                if (nz) ++*lossy;
+            }
+        }
+    }
+    std::memcpy(dst, tmp.data(), tmp.size());
+    return emax;
+}
+
+void testMxfp4Repack() {
+    namespace wk = whirl::kernels;
+    std::uint64_t seed = 0x9E3779B97F4A7C15ull;
+    auto rnd = [&] {
+        seed ^= seed << 13, seed ^= seed >> 7, seed ^= seed << 17;
+        return seed;
+    };
+    bool bytes_ok = true, emax_ok = true, lossy_ok = true, inplace_ok = true;
+    std::uint64_t lossy_seen = 0;
+    for (int ncols : {256, 512, 2048, 5120}) {
+        const std::size_t rb = static_cast<std::size_t>(ncols) / 32 * 17;
+        check(wk::rowBytes(wk::QType::mxfp4, ncols) == rb, "mxfp4 repack: row size unchanged");
+        std::vector<std::uint8_t> scratch(rb), tmp(rb);
+        for (int r = 0; r < 64; ++r) {
+            std::vector<std::uint8_t> src(rb);
+            for (auto& b : src) b = static_cast<std::uint8_t>(rnd());
+            // exponents near 127 with a wide spread (some > 8 steps below the max), some zero code blocks
+            for (std::size_t bi = 0; bi < rb / 17; ++bi) {
+                src[bi * 17] = static_cast<std::uint8_t>(110 + rnd() % 30);
+                if (rnd() % 7 == 0) std::memset(&src[bi * 17 + 1], static_cast<int>(rnd() % 2) * 0x88, 16);
+            }
+            if (r == 0) src[0] = 255, src[17] = 0;  // extreme exponents
+            std::vector<std::uint8_t> a = src, b(rb), c(rb), d = src;
+            std::uint64_t la = 0, lb = 0, lc = 0, ld = 0;
+            const std::uint8_t ea = oldLoaderRepack(a.data(), static_cast<std::uint64_t>(ncols), tmp, la);
+            const std::uint8_t eb = oldAbiRepack(src.data(), b.data(), ncols, &lb);
+            const std::uint8_t ec = wk::repackMxfp4Row(src.data(), c.data(), ncols, &lc, scratch.data());
+            const std::uint8_t ed = wk::repackMxfp4Row(d.data(), d.data(), ncols, &ld, scratch.data());  // loader: in place
+            std::vector<std::uint8_t> e(rb);
+            const std::uint8_t ee = wk::repackMxfp4Row(src.data(), e.data(), ncols, nullptr);
+            bytes_ok = bytes_ok && a == b && b == c && e == c;
+            inplace_ok = inplace_ok && d == a;
+            emax_ok = emax_ok && ea == eb && eb == ec && ec == ed && ed == ee;
+            lossy_ok = lossy_ok && la == lb && lb == lc && lc == ld;
+            lossy_seen += la;
+        }
+    }
+    check(bytes_ok, "mxfp4 repack: bytes identical to both previous implementations");
+    check(inplace_ok, "mxfp4 repack: in-place (loader) form identical");
+    check(emax_ok, "mxfp4 repack: reference exponent identical");
+    check(lossy_ok, "mxfp4 repack: lossy count identical");
+    check(lossy_seen > 0, "mxfp4 repack: random rows exercise the lossy count");
+    std::vector<std::uint8_t> buf(17 * 8 * 2), sc(136 * 2);
+    bool threw = false;
+    try {
+        (void)wk::repackMxfp4Row(buf.data(), buf.data(), 128, nullptr, sc.data());
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    check(threw, "mxfp4 repack: ncols not a multiple of 256 rejected");
+}
+
 }  // namespace
 
 int main() {
@@ -746,6 +852,7 @@ int main() {
     testCycleCost();
     testSlotAccept();
     testAllocDrafts();
+    testMxfp4Repack();
     std::printf("model tests: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }

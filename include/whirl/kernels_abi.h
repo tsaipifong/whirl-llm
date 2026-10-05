@@ -206,6 +206,12 @@ inline std::uint64_t rowBytes(QType t, int ncols) {
 // `wref` byte). If `lossy` is non-null it is incremented for every non-zero
 // block more than 8 exponent steps below that maximum (the fp8 GEMM's
 // exponent fold flushes those).
+// This is the one implementation: the model loader (uploadMx) calls the
+// scratch form with a buffer allocated once per tensor; `scratch` must hold
+// rowBytes(QType::mxfp4, ncols) bytes and must not overlap src or dst. The
+// 4-argument form allocates that scratch per call (tests, tools).
+std::uint8_t repackMxfp4Row(const std::uint8_t* src, std::uint8_t* dst, int ncols, std::uint64_t* lossy,
+                            std::uint8_t* scratch);
 std::uint8_t repackMxfp4Row(const std::uint8_t* src, std::uint8_t* dst, int ncols, std::uint64_t* lossy);
 
 // ---------------------------------------------------------------------------

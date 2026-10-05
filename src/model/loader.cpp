@@ -108,6 +108,7 @@ struct Loader {
     DevPtr uploadMx(const gguf::TensorInfo& t, DevPtr* ref_out) {
         const u64 ncols = t.ne[0];
         if (ncols % 256 != 0) throw ModelError("UnsupportedTensorType", std::string(t.name) + ": MXFP4 row not a multiple of 256");
+        if (ncols > 0x7FFFFFFF) throw ModelError("UnsupportedTensorType", std::string(t.name) + ": MXFP4 row too long");
         const u64 rb = t.rowBytes();
         const u64 nrows = t.rows();
         const u64 nbytes = rb * nrows;
@@ -123,25 +124,7 @@ struct Loader {
             file.read(staging, n, base + r0 * rb);
             for (u64 ri = 0; ri < nr; ++ri) {
                 std::uint8_t* row = staging + ri * rb;
-                const std::size_t nsb = static_cast<std::size_t>(ncols / 256);
-                std::uint8_t emax = 0;
-                for (std::size_t sb = 0; sb < nsb; ++sb)
-                    for (std::size_t i = 0; i < 8; ++i) {
-                        const std::uint8_t* blk = row + (sb * 8 + i) * 17;
-                        tmp[sb * 136 + i] = blk[0];
-                        std::memcpy(&tmp[sb * 136 + 8 + i * 16], blk + 1, 16);
-                        emax = std::max(emax, blk[0]);
-                    }
-                for (std::size_t bi = 0; bi < nsb * 8; ++bi) {
-                    // blocks that are all +-0 do not matter for the fold
-                    const std::uint8_t e = row[bi * 17];
-                    if (static_cast<u32>(emax) - e > 8) {
-                        bool nz = false;
-                        for (std::size_t q = 0; q < 16; ++q) nz = nz || (row[bi * 17 + 1 + q] & 0x77) != 0;
-                        if (nz) lossy += 1;
-                    }
-                }
-                std::memcpy(row, tmp.data(), static_cast<std::size_t>(rb));
+                const std::uint8_t emax = kernels::repackMxfp4Row(row, row, static_cast<int>(ncols), &lossy, tmp.data());
                 refs[static_cast<std::size_t>(r0 + ri)] = emax;
             }
             hip::upload(dst + r0 * rb, staging, n);
