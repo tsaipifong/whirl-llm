@@ -498,6 +498,15 @@ int serveMain(int argc, char** argv, const char* program) {
                      "pool gets about {} tokens (wanted {}); set WHIRL_PREFILL_BATCH / WHIRL_SERVE_CKPTS / WHIRL_SYS_CKPTS to choose",
                      av / g, est.weights / g, plan.note, plan.pool_tokens, fi.pool_min_tokens);
             }
+            // not even the weights + smallest buffers fit (no room for any KV): stop before a load that
+            // would run out of memory part way through, with the "smaller quantization" advice
+            // (WHIRL_FIT_CHECK=0 loads anyway; borderline cases only warn)
+            if (!plan.fits && plan.pool_tokens == 0 && envOn("FIT_CHECK", true))
+                throw qwen35::ModelError("VramLimit",
+                                         std::format("needs about {:.2f} GiB of VRAM before any KV cache (weights {:.2f} GiB + prefill batch {}, "
+                                                     "state, checkpoints), about {:.2f} GiB usable of {:.2f} GiB{}",
+                                                     plan.need_fixed / g, est.weights / g, plan.batch, av / g, mf.total / g,
+                                                     vram::limitBytes() ? " (" + vram::limitNote() + ")" : std::string()));
             if (!plan.fits)
                 logW("VRAM estimate: weights + buffers + checkpoints {:.2f} GiB leave about {} KV tokens of {:.2f} GiB usable "
                      "(at least {} needed); the model may not fit this GPU",
