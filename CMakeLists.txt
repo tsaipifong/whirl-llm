@@ -7,7 +7,7 @@
 cmake_minimum_required(VERSION 3.24)
 # The project version is the single version source: --version texts, the
 # Windows VERSIONINFO resources and the release package name derive from it.
-project(whirl VERSION 0.1.3 LANGUAGES CXX)
+project(whirl VERSION 0.1.4 LANGUAGES CXX)
 if(MSVC)
   enable_language(RC)
   # static C++ runtime (/MT): the executables need no Visual C++ redistributable

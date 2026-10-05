@@ -3,6 +3,76 @@
 All notable changes to WHIRL are listed here. Versions follow `project(whirl VERSION ...)` in
 `CMakeLists.txt`.
 
+## 0.1.4 — 2026-10-06
+
+Routine bug-fix release: no new features, no speed changes. The changes harden input handling (GGUF
+files, HTTP requests, tokenizer vocabularies); inference code paths are unchanged, so outputs are
+bit-identical to 0.1.3.
+
+### Fixes
+
+- Server (HTTP): a streaming client that stops reading no longer stalls the other slots. While a
+  request runs, the engine writes its response through a non-blocking socket; bytes the client does
+  not accept stay buffered and are retried on the next flush. With no progress for 30 s, or more than
+  64 MiB unsent, the connection counts as gone and the request is dropped (its slot is freed). The
+  rest of a finished response is sent by the connection thread (a10ac5b).
+- Server: shutdown no longer waits up to 30 s for connections still reading a request; `stop()`
+  shuts them down and cancels the pending reads. Connections close with a linger so clients receive
+  error responses instead of a reset (a10ac5b).
+- Tokenizer: `piece()` decodes `<0xNN>` byte tokens with a small hex parser instead of `std::stoi`,
+  which threw on `<0xZZ>` and silently mis-decoded `<0x-1>` / `<0x1Z>` (24475c4).
+- zh-TW guide: bold runs broken by CJK punctuation render correctly again (no text change, 8b2c58d).
+
+### Security hardening
+
+- GGUF parser: tensor extent checks are overflow-safe (subtraction-based `File::inBounds`, at parse
+  and in `tensorData()`), so `data_offset + offset + nbytes` can no longer wrap past 2^64; dimensions
+  above INT64_MAX and shapes whose row count, element count or byte size overflow are rejected;
+  `TensorInfo::nbytes()` / `rowBytes()` are overflow-checked. The header's KV and tensor counts must
+  fit in the remaining file bytes, so their `reserve()` is bounded by the file size (b6af30a).
+- Model load: `Config::fromGguf` rejects inconsistent or out-of-range hyper-parameters (for example
+  `nextn >= block_count`, zero dimensions, `head_dim > 256`, GQA group > 8,
+  `value_length != key_length`, interval 0) with `UnsupportedConfig`; `Config::validateTensors`
+  checks the type and shape of every tensor `Model::load` reads (including MoE experts and the MTP
+  block) before any GPU allocation, with the new error codes `MissingTensor`, `UnsupportedTensorType`
+  and `UnsupportedTensorShape` (b6af30a).
+- HTTP: 30 s idle timeout per read and a 60 s deadline for the request line and headers (`408`); at
+  most 64 open connections (`503`, then close); headers capped at 64 KiB / 100 lines (`431`);
+  `Content-Length` above 64 MiB is refused (`413`) instead of wrapping, conflicting duplicate
+  `Content-Length` headers get `400`; the body buffer grows as data arrives instead of reserving the
+  claimed length (a10ac5b).
+- CORS: `Access-Control-Allow-Origin` is sent only to pages from `http(s)://localhost`, `127.0.0.1`
+  or `[::1]` (any port), echoing the `Origin` with `Vary: Origin`; other origins (including `null`,
+  i.e. `file://` pages) get no CORS headers, and preflight answers the same way. New option
+  `--cors-origin ORIGIN` (repeatable; `*` restores the previous allow-all behaviour) (a10ac5b,
+  docs 765f49a).
+- Tokenizer: a byte-type token whose text is not exactly `<0xNN>` (two hex digits) fails loading with
+  `TokenizerError("malformed byte token at id N")` (24475c4).
+
+### Behaviour changes
+
+- CORS default tightened (see above). Browser pages on other origins, or opened from `file://`, can no
+  longer read the server's responses unless started with `--cors-origin <origin>` (or
+  `--cors-origin "*"`). SDKs, curl, IDE agents and other non-browser clients are not affected.
+- HTTP limits: 64 connections, 30 s read idle / 60 s header deadline, 30 s send stall or 64 MiB
+  unsent on a streaming response, 64 KiB / 100 header lines, 64 MiB request body.
+- Malformed GGUF files that 0.1.3 might have loaded (or crashed on) are now refused at load with one
+  of the error codes above; the release front-end reports them as "cannot be loaded".
+
+### Internal
+
+- Version 0.1.4 (`project(whirl VERSION 0.1.4)`).
+- MXFP4: the loader and the tests share one row-repack implementation (`kernels::repackMxfp4Row`,
+  new scratch-buffer overload; scratch still allocated once per tensor); model tests pin the bytes
+  against frozen copies of both previous implementations (ee87049).
+- `build.bat` finds `vcvars64.bat` with `vswhere`, restricted to Visual Studio 2022
+  (`-version [17.0,18.0)`; HIP clang with the VS 2026 STL is unverified), any edition with the C++ x64
+  tools; it falls back to the default Build Tools path and prints a clear error if neither exists
+  (f54e2da).
+- Tests: crafted malformed GGUFs, synthetic tiny models with mutations (optional
+  `WHIRL_TEST_GGUF="a.gguf;b.gguf"` runs the load validation on real files without a GPU), HTTP limits,
+  connection cap, stuck reader, CORS matrix, byte-token validation.
+
 ## 0.1.3 — 2026-10-05
 
 Every change below keeps the output bit-identical to plain greedy decoding, unless it says otherwise.
