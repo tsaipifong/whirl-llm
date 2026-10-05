@@ -7,6 +7,7 @@
 #include "whirl/json.h"
 #include "whirl/tokenizer.h"
 #include "whirl/unicode.h"
+#include "whirl/vram_limit.h"
 
 #include <cstdio>
 #include <cstring>
@@ -475,6 +476,118 @@ void testChat() {
     CHECK(chat::detectTemplate("{% if x %}") == chat::TemplateKind::b);
 }
 
+void testVramLimit() {
+    constexpr std::uint64_t MiB = 1ull << 20, GiB = 1ull << 30;
+    // WHIRL_VRAM_LIMIT_MB parsing
+    CHECK_EQ(vram::parseLimitMb("16384"), 16384ull);
+    CHECK_EQ(vram::parseLimitMb(" 15360 "), 15360ull);
+    CHECK_EQ(vram::parseLimitMb(""), 0ull);
+    CHECK_EQ(vram::parseLimitMb("0"), 0ull);
+    CHECK_EQ(vram::parseLimitMb("-1"), 0ull);
+    CHECK_EQ(vram::parseLimitMb("16G"), 0ull);
+    CHECK_EQ(vram::parseLimitMb("99999999999999"), 0ull);
+    CHECK_EQ(vram::parseLimitMb(nullptr), 0ull);
+
+    // clamp: the simulated card keeps other programs' use, loses the missing VRAM
+    const std::uint64_t total = 32 * GiB - 300 * MiB, free = total - 1 * GiB;
+    const auto c = vram::clampMemInfo(free, total, 16 * GiB);
+    CHECK_EQ(c.total, 16 * GiB);
+    CHECK_EQ(c.free, 15 * GiB);
+    CHECK_EQ(c.total - c.free, total - free);  // used stays the same
+    const auto n = vram::clampMemInfo(free, total, 0);
+    CHECK(n.free == free && n.total == total);  // no limit: unchanged
+    const auto big = vram::clampMemInfo(free, total, 64 * GiB);
+    CHECK(big.free == free && big.total == total);  // limit above the card: unchanged
+    CHECK_EQ(vram::clampMemInfo(2 * GiB, total, 1 * GiB).free, 0ull);  // floor at 0
+    // WDDM budget: lowered by the VRAM the simulated card lacks
+    const std::uint64_t budget = 31 * GiB;
+    CHECK_EQ(vram::clampBudget(budget, total, 16 * GiB), budget - (total - 16 * GiB));
+    CHECK_EQ(vram::clampBudget(budget, total, 0), budget);
+    CHECK_EQ(vram::clampBudget(1 * GiB, total, 1 * GiB), 0ull);
+    // allocation cap of the process: the simulated card's free VRAM at the first allocation
+    CHECK_EQ(vram::processCap(free, total, 16 * GiB), 15 * GiB);
+
+    // counter: over-cap allocations are refused and leave the count unchanged
+    vram::Counter k;
+    k.setCap(10 * MiB);
+    CHECK(k.tryReserve(4 * MiB));
+    CHECK(k.tryReserve(6 * MiB));
+    CHECK_EQ(k.live(), 10 * MiB);
+    CHECK(!k.tryReserve(1));
+    CHECK_EQ(k.live(), 10 * MiB);
+    k.release(6 * MiB);
+    CHECK(!k.tryReserve(7 * MiB));
+    CHECK(k.tryReserve(6 * MiB));
+    CHECK(!k.tryReserve(~0ull));  // no wrap-around
+    k.release(100 * MiB);         // over-release clamps at 0
+    CHECK_EQ(k.live(), 0ull);
+    vram::Counter u;  // cap 0 = unlimited
+    CHECK(u.tryReserve(64 * GiB) && u.live() == 64 * GiB);
+
+    // limit note / override
+    vram::setLimitMb(16384);
+    CHECK_EQ(vram::limitBytes(), 16384 * MiB);
+    CHECK(vram::limitNote() == "VRAM limit 16384 MiB (WHIRL_VRAM_LIMIT_MB)");
+    vram::setLimitMb(0);
+    CHECK(vram::limitNote().empty());
+
+    // auto-shrink decision. 27B Q3_K_S-like on 16 GB: weights 11.35 GiB, prefill buffers
+    // ~0.56 MiB per row (2.3 GiB at 4096), checkpoints 150.6 MiB, q8h 36.1 KiB/token
+    vram::FitInput fi;
+    fi.avail = 13 * GiB + 700 * MiB;
+    fi.weights = 11 * GiB + 358 * MiB;
+    fi.fixed = 512 * MiB;
+    fi.buf_per_row = 576 * 1024;
+    fi.buf_fixed = 64 * MiB;
+    fi.ckpt_bytes = 150 * MiB;
+    fi.parallel = 1;
+    fi.kv_per_token = 36 * 1024;
+    fi.pool_min_tokens = 16384;
+    fi.batch = 4096;
+    fi.n_ck = 4;
+    fi.n_spe = 2;
+    CHECK_EQ(vram::fixedNeed(fi, 4096, 4, 2), fi.weights + fi.fixed + fi.buf_fixed + fi.buf_per_row * 4096 + 6 * fi.ckpt_bytes);
+    const vram::FitPlan p = vram::planFit(fi);
+    CHECK(p.reduced && p.fits);
+    CHECK_EQ(p.batch, 1024u);
+    CHECK_EQ(p.n_ck, 2u);
+    CHECK_EQ(p.n_spe, 1u);
+    CHECK(p.pool_tokens >= 16384);
+    CHECK(p.note == "prefill batch 4096 -> 1024, checkpoints per slot 4 -> 2, shared checkpoints 2 -> 1");
+    // the same model on 32 GB: nothing changes
+    vram::FitInput roomy = fi;
+    roomy.avail = 29 * GiB;
+    const vram::FitPlan pr = vram::planFit(roomy);
+    CHECK(!pr.reduced && pr.fits && pr.batch == 4096 && pr.n_ck == 4 && pr.n_spe == 2 && pr.note.empty());
+    // just short of the wanted pool: only the first step (batch 2048)
+    vram::FitInput step1 = fi;
+    step1.avail = vram::fixedNeed(fi, 4096, 4, 2) + 16000ull * fi.kv_per_token;
+    const vram::FitPlan p1 = vram::planFit(step1);
+    CHECK(p1.reduced && p1.batch == 2048 && p1.n_ck == 4 && p1.n_spe == 2);
+    // user-set batch: only the checkpoints move
+    vram::FitInput fixb = fi;
+    fixb.batch_fixed = true;
+    const vram::FitPlan pb = vram::planFit(fixb);
+    CHECK(pb.batch == 4096 && pb.n_ck == 1 && pb.n_spe == 0);
+    // both fixed: no change, and it does not fit
+    vram::FitInput fixall = fixb;
+    fixall.ck_fixed = true;
+    fixall.avail = 12 * GiB;
+    const vram::FitPlan pf = vram::planFit(fixall);
+    CHECK(!pf.reduced && !pf.fits && pf.pool_tokens < 4096);
+    // hopeless (weights alone over the budget): every step taken, still does not fit
+    vram::FitInput hopeless = fi;
+    hopeless.avail = 10 * GiB;
+    const vram::FitPlan ph = vram::planFit(hopeless);
+    CHECK(ph.reduced && !ph.fits && ph.batch == 512 && ph.n_ck == 1 && ph.n_spe == 0 && ph.pool_tokens == 0);
+    // prefix cache off (0 checkpoints): checkpoint steps change nothing
+    vram::FitInput nopc = fi;
+    nopc.n_ck = 0;
+    nopc.n_spe = 0;
+    const vram::FitPlan pn = vram::planFit(nopc);
+    CHECK(pn.n_ck == 0 && pn.n_spe == 0 && pn.batch <= 2048);
+}
+
 }  // namespace
 
 int main() {
@@ -484,6 +597,7 @@ int main() {
     testGgufHardening();
     testTokenizerByteTokens();
     testChat();
+    testVramLimit();
     std::printf("unit tests: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

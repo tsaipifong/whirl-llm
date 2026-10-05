@@ -85,6 +85,7 @@ endif()
 
 add_library(whirl STATIC
   src/common/util.cpp
+  src/common/vram_limit.cpp
   src/gguf/gguf.cpp
   src/tokenizer/unicode.cpp
   src/tokenizer/tokenizer.cpp

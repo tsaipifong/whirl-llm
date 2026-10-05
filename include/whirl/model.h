@@ -281,6 +281,25 @@ struct LoadOptions {
     std::string code_object;
 };
 
+// VRAM Model::load will take, estimated from the GGUF header before any
+// allocation (pre-load fit check, server auto-shrink of the prefill batch).
+// buffers(B) follows the allocation list of Model::load exactly for B a
+// multiple of 64; weights are the tensor bytes (+ MXFP4 row refs) that go to VRAM.
+struct LoadEstimate {
+    std::uint64_t weights = 0;  // tensor bytes uploaded to VRAM
+    std::uint64_t state = 0;    // DeltaNet conv + ssm state allocated at load
+    std::uint64_t ffs = 0;      // widest layer-matrix side (ffn_g / ffn_u scratch)
+    std::uint64_t max_elems = 0;  // largest layer matrix (w16 scratch)
+    bool embd_on_host = false;  // token_embd goes to pinned host memory
+    bool has_mtp = false;       // nextn layer present (one more KV layer)
+    std::uint64_t kv_f16 = 0, kv_q8v = 0, kv_q8h = 0;  // KV bytes per token by format
+};
+LoadEstimate estimateLoad(const gguf::File& f, const Config& cfg, bool embd_on_host);
+// Prefill / decode buffers of Model::load for prefill batch B.
+std::uint64_t bufferBytes(const Config& cfg, std::uint32_t B, std::uint64_t ffs, std::uint64_t max_elems);
+// KV bytes per token (Model::kvBytesPerTokenFmt) from the config alone.
+std::uint64_t kvBytesPerTokenCfg(const Config& cfg, bool has_mtp, bool q8, bool kf16);
+
 // Grouped same-input GEMV launches (WHIRL_GV_GROUP=0: off) and the largest
 // token count that takes the grouped multi-token twins (WHIRL_GV_NMAX).
 extern bool gv_group;

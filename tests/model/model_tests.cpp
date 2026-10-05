@@ -404,6 +404,14 @@ void testRealFiles() {
             c.validateTensors(f);
             std::printf("  real file OK: %s (%s, %u layers + %u MTP, embd %u, vocab %u, %zu tensors)\n", path.c_str(), c.archName(), c.n_layer, c.n_nextn,
                         c.n_embd, c.n_vocab, f.tensors().size());
+            // pre-load VRAM estimate (Model::load fit check, server auto-shrink)
+            const q::LoadEstimate est = q::estimateLoad(f, c, true);
+            const double g = 1024.0 * 1024.0 * 1024.0;
+            std::printf("    VRAM estimate: weights %.2f GiB (embedding %s), state %.1f MiB, buffers %.2f / %.2f / %.2f GiB at batch "
+                        "4096 / 2048 / 1024; KV %.1f / %.1f / %.1f KiB per token (f16 / q8v / q8h)\n",
+                        est.weights / g, est.embd_on_host ? "in host memory" : "in VRAM", est.state / 1048576.0,
+                        q::bufferBytes(c, 4096, est.ffs, est.max_elems) / g, q::bufferBytes(c, 2048, est.ffs, est.max_elems) / g,
+                        q::bufferBytes(c, 1024, est.ffs, est.max_elems) / g, est.kv_f16 / 1024.0, est.kv_q8v / 1024.0, est.kv_q8h / 1024.0);
         } catch (const std::exception& ex) {
             err = ex.what();
             std::printf("  real file REJECTED: %s: %s\n", path.c_str(), err.c_str());
@@ -840,8 +848,74 @@ void testMxfp4Repack() {
 
 }  // namespace
 
+// pre-load VRAM estimate (fit check / server auto-shrink)
+void testLoadEstimate() {
+    for (bool moe : {false, true}) {
+        const std::string tag = moe ? " (moe)" : " (dense)";
+        const TinyModel m(moe);
+        const std::vector<std::uint8_t> img = m.build();
+        const gguf::File f = gguf::File::parse(img);
+        const q::Config cfg = q::Config::fromGguf(f);
+        std::uint64_t all = 0, emb = 0, max_elems = 0, ffs = cfg.n_ff;
+        for (const gguf::TensorInfo& t : f.tensors()) {
+            all += t.nbytes();
+            if (t.name == "token_embd.weight") emb = t.nbytes();
+            const std::string n(t.name);
+            if (t.n_dims == 2 && (n.rfind("blk.0.", 0) == 0 || n.rfind("blk.1.", 0) == 0) && n.find("norm") == std::string::npos &&
+                n.find("conv1d") == std::string::npos && n.find("ffn_gate_inp") == std::string::npos &&
+                n.find("_exps") == std::string::npos && n.find("ssm_a") == std::string::npos && n.find("ssm_dt") == std::string::npos) {
+                max_elems = std::max<std::uint64_t>(max_elems, t.ne[0] * t.ne[1]);
+                ffs = std::max<std::uint64_t>(ffs, std::max(t.ne[0], t.ne[1]));
+            }
+        }
+        const q::LoadEstimate ev = q::estimateLoad(f, cfg, false);
+        const q::LoadEstimate eh = q::estimateLoad(f, cfg, true);
+        check(!ev.embd_on_host && ev.weights == all, ("estimate: all tensor bytes in VRAM" + tag).c_str());
+        check(eh.embd_on_host && eh.weights == all - emb && emb > 0, ("estimate: host embedding not counted" + tag).c_str());
+        check(ev.has_mtp, ("estimate: nextn layer seen" + tag).c_str());
+        check(ev.max_elems == max_elems && ev.ffs == ffs, ("estimate: scratch sizes from the layer matrices" + tag).c_str());
+        // one DeltaNet layer (layer 0): conv + ssm state
+        const std::uint64_t st = static_cast<std::uint64_t>(cfg.d_conv - 1) * cfg.convCh() * 4 +
+                                 static_cast<std::uint64_t>(cfg.n_v_heads) * cfg.d_state * cfg.headV() * 4;
+        check(ev.state == st, ("estimate: recurrent state of the DeltaNet layer" + tag).c_str());
+        // KV per token: 1 attention layer + MTP; f16 K and V, q8v = f16 K + int8 V, q8h = int8 K and V
+        const std::uint64_t e = static_cast<std::uint64_t>(cfg.n_head_kv) * cfg.head_dim, q8 = e + e / 32 * 2;
+        check(ev.kv_f16 == 2 * (4 * e) && ev.kv_q8v == 2 * (2 * e + q8) && ev.kv_q8h == 2 * (2 * q8), ("estimate: KV bytes per token" + tag).c_str());
+        check(q::kvBytesPerTokenCfg(cfg, false, false, false) == 4 * e, ("kvBytesPerTokenCfg without MTP" + tag).c_str());
+        // buffers: linear in the batch for multiples of 64, growing with it
+        const auto b = [&](std::uint32_t B) { return q::bufferBytes(cfg, B, ev.ffs, ev.max_elems); };
+        check(b(4096) - b(2048) == 2 * (b(2048) - b(1024)) && b(1024) - b(512) == b(576) - b(64) && b(64) > 0,
+              ("bufferBytes linear in the batch" + tag).c_str());
+        check(b(4096) > b(2048) && b(2048) > b(1024), ("bufferBytes grows with the batch" + tag).c_str());
+        // part of the per-row cost that is easy to see: x, h, hn (3 x E f32), mtp_cat (2 x E f32), ffn_g / ffn_u (2 x ffs f32)
+        check((b(2048) - b(1024)) / 1024 >= (5ull * cfg.n_embd + 2ull * ev.ffs) * 4, ("bufferBytes per-row lower bound" + tag).c_str());
+    }
+    {
+        // tied embeddings (no output.weight): the embedding stays in VRAM even if host was asked
+        TinyModel m(false);
+        m.makeTensors();
+        m.tensors.erase("output.weight");
+        const std::vector<std::uint8_t> img = m.build();
+        const gguf::File f = gguf::File::parse(img);
+        const q::Config cfg = q::Config::fromGguf(f);
+        std::uint64_t all = 0;
+        for (const gguf::TensorInfo& t : f.tensors()) all += t.nbytes();
+        const q::LoadEstimate e = q::estimateLoad(f, cfg, true);
+        check(!e.embd_on_host && e.weights == all, "estimate: tied embedding counted in VRAM");
+    }
+    {
+        // MoE buffers exceed the dense ones of the same trunk
+        const TinyModel md(false), mm(true);
+        const std::vector<std::uint8_t> id = md.build(), im = mm.build();
+        const gguf::File fd = gguf::File::parse(id), fm = gguf::File::parse(im);
+        const q::Config cd = q::Config::fromGguf(fd), cm = q::Config::fromGguf(fm);
+        check(q::bufferBytes(cm, 1024, cm.n_ff, 0) > q::bufferBytes(cd, 1024, cm.n_ff, 0), "bufferBytes: MoE buffers added");
+    }
+}
+
 int main() {
     testArchWhitelist();
+    testLoadEstimate();
     testLoadValidation();
     testRealFiles();
     testTables();

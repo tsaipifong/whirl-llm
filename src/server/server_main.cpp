@@ -19,6 +19,7 @@
 #include "whirl/hip.h"
 #include "whirl/model.h"
 #include "whirl/tokenizer.h"
+#include "whirl/vram_limit.h"
 #include "release/release.h"
 
 #include <algorithm>
@@ -94,6 +95,8 @@ constexpr std::uint32_t serve_prefill_batch = 4096;
 constexpr std::size_t n_ckpt_default = 4;
 constexpr std::size_t n_ckpt_default_par = 2;
 constexpr std::size_t n_spe_default = 2;
+// KV pool (tokens, smallest format) below which startup lowers the prefill batch / checkpoints
+constexpr std::uint32_t vram_tight_pool = 16384;
 constexpr std::uint32_t sys_min_default = 2048;
 constexpr std::uint64_t kv_ssd_gb_default = 64;
 constexpr std::uint32_t decode_min_tps_default = 20;
@@ -414,8 +417,9 @@ int serveMain(int argc, char** argv, const char* program) {
              cfg.n_embd, cfg.n_ff, cfg.n_vocab, cfg.n_nextn > 0 ? ", MTP (nextn) layer" : "");
         if (cfg.moe)
             logI("experts {} (top {}, ff {}) + shared expert ff {}", cfg.n_expert, cfg.n_expert_used, cfg.n_ff_exp, cfg.n_ff);
-        logI("device {}: {} ({}), {:.1f} GiB VRAM", dev, info.name, info.gcn_arch,
-             static_cast<double>(info.total_mem) / (1024.0 * 1024.0 * 1024.0));
+        logI("device {}: {} ({}), {:.1f} GiB VRAM{}", dev, info.name, info.gcn_arch,
+             static_cast<double>(info.total_mem) / (1024.0 * 1024.0 * 1024.0), vram::limitBytes() ? " (simulated limit)" : "");
+        if (vram::limitBytes()) logI("{}: memory sizes, the WDDM budget and allocations are capped as on a card of that size", vram::limitNote());
 
         const Tokenizer tok = Tokenizer::fromGguf(f);
         const std::string_view tmpl_text = f.getStringOr("tokenizer.chat_template", "");
@@ -434,6 +438,70 @@ int serveMain(int argc, char** argv, const char* program) {
                 lo.max_batch = std::clamp(static_cast<std::uint32_t>(std::stoul(*v)), 1u, qwen35::max_batch_limit);
             } catch (const std::exception&) {
             }
+        }
+        // prefix checkpoints (per slot / shared); the auto-shrink below may lower the defaults
+        const bool no_pc = envOn("NO_PREFIX_CACHE", false);
+        const std::size_t ck_def = opt.parallel == 1 ? n_ckpt_default : (opt.parallel <= 4 ? n_ckpt_default_par : 1);
+        std::size_t n_ck = no_pc ? 0 : envU32("SERVE_CKPTS", static_cast<std::uint32_t>(ck_def));
+        std::uint32_t n_spe_plan = (n_ck == 0 || no_pc) ? 0 : envU32("SYS_CKPTS", static_cast<std::uint32_t>(n_spe_default));
+        // VRAM estimate before loading: when the KV pool left after weights, prefill buffers and
+        // checkpoints would be small, lower the prefill batch and the checkpoint counts first
+        // (only values the user did not set; nothing changes when the pool has room). Not on the
+        // UMA iGPU, whose VRAM numbers do not bound what it can allocate.
+        if (!is_uma) {
+            const qwen35::LoadEstimate est = qwen35::estimateLoad(f, cfg, lo.embd_on_host);
+            const hip::MemInfo mf = hip::memInfo();
+            const hip::WddmMemInfo w = hip::wddmMemInfo();
+            const bool res_explicit = env("POOL_RESERVE_MB").has_value();
+            const std::uint64_t res = static_cast<std::uint64_t>(envU32("POOL_RESERVE_MB", cfg.moe ? 1536 : (w.ok ? 768 : 3072))) << 20;
+            const std::uint64_t margin = static_cast<std::uint64_t>(envU32("POOL_BUDGET_MARGIN_MB", cfg.moe ? 1536 : 768)) << 20;
+            std::uint64_t av = mf.free > res ? mf.free - res : 0;
+            if (!res_explicit && w.ok) av = std::min(av, w.local_budget > w.local_usage + margin ? w.local_budget - w.local_usage - margin : 0);
+            std::uint64_t n_gdn_c = 0;
+            for (std::uint32_t li = 0; li < cfg.n_layer; ++li)
+                if (!cfg.isAttn(li)) ++n_gdn_c;
+            const std::uint64_t st1 = n_gdn_c * (static_cast<std::uint64_t>(cfg.d_conv - 1) * cfg.convCh() * 4 +
+                                                 static_cast<std::uint64_t>(cfg.n_v_heads) * cfg.d_state * cfg.headV() * 4);
+            const std::uint64_t pend1 = n_gdn_c * (static_cast<std::uint64_t>(qwen35::max_small_batch) * cfg.convCh() * 4 +
+                                                   static_cast<std::uint64_t>(qwen35::max_small_batch) * cfg.n_v_heads *
+                                                       (cfg.d_state + cfg.headV() + 2) * 4);
+            vram::FitInput fi;
+            fi.avail = av;
+            fi.weights = est.weights;
+            // load-time state, per-slot state + replay rows, draft head (64k rows, 2 bit), slack; and the
+            // ~4% more that WDDM sees for this process than the sum of its allocations
+            fi.fixed = est.state + opt.parallel * (st1 + pend1) + (est.has_mtp ? 65536ull * cfg.n_embd * 5 / 16 : 0) + (256ull << 20);
+            fi.fixed += (est.weights + fi.fixed) / 25;
+            const std::uint64_t b2 = qwen35::bufferBytes(cfg, 2048, est.ffs, est.max_elems);
+            const std::uint64_t b4 = qwen35::bufferBytes(cfg, 4096, est.ffs, est.max_elems);
+            fi.buf_per_row = (b4 - b2) / 2048;
+            fi.buf_fixed = b2 - fi.buf_per_row * 2048;
+            // (WHIRL_CKPT_HOST=1: checkpoints in pinned host memory, no VRAM)
+            fi.ckpt_bytes = envOn("CKPT_HOST", false) ? 0 : st1 + static_cast<std::uint64_t>(cfg.n_embd) * 4 + static_cast<std::uint64_t>(cfg.n_vocab) * 4;
+            fi.parallel = opt.parallel;
+            const std::string kv_env = env("KV").value_or("auto");
+            fi.kv_per_token = kv_env == "f16" ? est.kv_f16 : kv_env == "q8v" ? est.kv_q8v : (kv_env == "q8" || kv_env == "q8h") ? est.kv_q8h
+                              : cfg.moe ? est.kv_f16 : est.kv_q8h;
+            fi.pool_min_tokens = pool_req ? *pool_req : std::min<std::uint32_t>(slot_ctx, vram_tight_pool);
+            fi.batch = lo.max_batch;
+            fi.n_ck = static_cast<std::uint32_t>(n_ck);
+            fi.n_spe = n_spe_plan;
+            fi.batch_fixed = env("PREFILL_BATCH").has_value();
+            fi.ck_fixed = env("SERVE_CKPTS").has_value() || env("SYS_CKPTS").has_value();
+            const vram::FitPlan plan = vram::planFit(fi);
+            const double g = 1024.0 * 1024.0 * 1024.0;
+            if (plan.reduced) {
+                lo.max_batch = plan.batch;
+                n_ck = plan.n_ck;
+                n_spe_plan = plan.n_spe;
+                logW("VRAM is tight (about {:.2f} GiB usable for weights {:.2f} GiB + buffers + checkpoints + KV): reduced {} so the KV "
+                     "pool gets about {} tokens (wanted {}); set WHIRL_PREFILL_BATCH / WHIRL_SERVE_CKPTS / WHIRL_SYS_CKPTS to choose",
+                     av / g, est.weights / g, plan.note, plan.pool_tokens, fi.pool_min_tokens);
+            }
+            if (!plan.fits)
+                logW("VRAM estimate: weights + buffers + checkpoints {:.2f} GiB leave about {} KV tokens of {:.2f} GiB usable "
+                     "(at least {} needed); the model may not fit this GPU",
+                     plan.need_fixed / g, plan.pool_tokens, av / g, fi.pool_hard_min);
         }
         std::size_t prefill_exec = 2048;
         if (auto v = env("PREFILL_CHUNK")) {
@@ -597,9 +665,6 @@ int serveMain(int argc, char** argv, const char* program) {
         }
 
         // engine (checkpoint buffers, shared checkpoints, sampling buffers)
-        const bool no_pc = envOn("NO_PREFIX_CACHE", false);
-        const std::size_t ck_def = opt.parallel == 1 ? n_ckpt_default : (opt.parallel <= 4 ? n_ckpt_default_par : 1);
-        const std::size_t n_ck = no_pc ? 0 : envU32("SERVE_CKPTS", static_cast<std::uint32_t>(ck_def));
         const std::uint64_t conv_bytes = model.convBytes();
         const std::uint64_t ssm_bytes = model.ssmBytes();
         std::uint64_t n_gdn = 0;
@@ -658,7 +723,7 @@ int serveMain(int argc, char** argv, const char* program) {
         eo.sys_min = envU32("SYS_MIN", sys_min_default);
         eo.lcp_on = envOn("SYS_LCP", true);
         eo.n_ck = n_ck;
-        eo.n_spe = (n_ck == 0 || no_pc) ? 0 : envU32("SYS_CKPTS", static_cast<std::uint32_t>(n_spe_default));
+        eo.n_spe = (n_ck == 0 || no_pc) ? 0 : n_spe_plan;
         eo.ckpt_host = envOn("CKPT_HOST", false);
         eo.prefill_exec = prefill_exec;
         eo.seed = seed0;
