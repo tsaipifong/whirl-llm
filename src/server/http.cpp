@@ -12,6 +12,8 @@
 
 #include <chrono>
 #include <cstring>
+#include <functional>
+#include <optional>
 #include <format>
 #include <mutex>
 #include <set>
@@ -25,43 +27,130 @@ namespace whirl::server {
 namespace {
 
 constexpr std::size_t kReadBuf = 1 << 16;
+constexpr std::size_t kMaxBody = 64u << 20;
+// unsent response bytes of one connection while the engine writes (non-blocking)
+constexpr std::size_t kMaxPending = 64u << 20;
 
+using SteadyClock = std::chrono::steady_clock;
+
+void setTimeout(SOCKET s, int opt, std::uint32_t ms) {
+    const DWORD v = ms;
+    setsockopt(s, SOL_SOCKET, opt, reinterpret_cast<const char*>(&v), sizeof v);
+}
+
+// After shutdown(SD_SEND): read and discard what the client still sends (an
+// unread request body, the rest of an oversized header) until it closes, for at
+// most budget_ms / 1 MiB. Closing with unread received data makes Windows reset
+// the connection, and the client may then lose the response it was sent.
+void lingerDrain(SOCKET s, std::uint32_t budget_ms) {
+    const auto end = SteadyClock::now() + std::chrono::milliseconds(budget_ms);
+    char buf[4096];
+    std::size_t total = 0;
+    for (;;) {
+        const auto left = std::chrono::ceil<std::chrono::milliseconds>(end - SteadyClock::now()).count();
+        if (left <= 0 || total > (1u << 20)) return;
+        setTimeout(s, SO_RCVTIMEO, static_cast<std::uint32_t>(left));
+        const int n = ::recv(s, buf, sizeof buf, 0);
+        if (n <= 0) return;
+        total += static_cast<std::size_t>(n);
+    }
+}
+
+// Response writer of a connection. While a request runs, the engine's main
+// thread writes through it in non-blocking mode: bytes the client does not
+// accept stay buffered and are retried on the next flush, so a client that stops
+// reading never stalls the engine (and so the other slots); after send_timeout
+// without progress (or kMaxPending unsent bytes) the connection counts as gone and
+// the engine drops the request. When the job is done, the connection thread sends
+// what is left (blocking, bounded by SO_SNDTIMEO).
+// The CORS headers of the request are inserted after the status line of the
+// response.
 class SocketConn final : public Conn {
 public:
-    explicit SocketConn(SOCKET s) : s_(s) { buf_.reserve(16384); }
+    SocketConn(SOCKET s, std::uint32_t send_timeout_ms) : s_(s), stall_ms_(send_timeout_ms) { buf_.reserve(16384); }
+    void setCors(std::string h) { cors_ = std::move(h); }
     bool write(std::string_view data) override {
         if (bad_) return false;
+        if (!started_) {
+            started_ = true;
+            const std::size_t eol = data.find("\r\n");
+            if (!cors_.empty() && data.starts_with("HTTP/") && eol != std::string_view::npos) {
+                buf_.append(data.substr(0, eol + 2));
+                buf_.append(cors_);
+                data.remove_prefix(eol + 2);
+            }
+        }
         buf_.append(data);
-        if (buf_.size() >= 16384) return flush();
+        if (buf_.size() - off_ >= 16384) return flush();
         return true;
     }
     bool flush() override {
         if (bad_) return false;
-        std::size_t off = 0;
-        while (off < buf_.size()) {
-            const int n = ::send(s_, buf_.data() + off, static_cast<int>(std::min<std::size_t>(buf_.size() - off, 1 << 20)), 0);
-            if (n <= 0) {
-                bad_ = true;
-                buf_.clear();
-                return false;
+        while (off_ < buf_.size()) {
+            const int n = ::send(s_, buf_.data() + off_, static_cast<int>(std::min<std::size_t>(buf_.size() - off_, 1 << 20)), 0);
+            if (n > 0) {
+                off_ += static_cast<std::size_t>(n);
+                stalled_ = false;
+                continue;
             }
-            off += static_cast<std::size_t>(n);
+            if (nonblocking_ && n == SOCKET_ERROR && WSAGetLastError() == WSAEWOULDBLOCK) {
+                const auto now = SteadyClock::now();
+                if (!stalled_) {
+                    stalled_ = true;
+                    stall_t0_ = now;
+                } else if (now - stall_t0_ >= std::chrono::milliseconds(stall_ms_)) {
+                    return setBad();
+                }
+                if (buf_.size() - off_ > kMaxPending) return setBad();
+                if (off_ >= (1u << 20)) {  // drop the sent prefix now and then
+                    buf_.erase(0, off_);
+                    off_ = 0;
+                }
+                return true;  // kept for the next flush
+            }
+            return setBad();
         }
         buf_.clear();
+        off_ = 0;
         return true;
     }
+    // Non-blocking while the engine writes; back to blocking for the final drain.
+    void setNonBlocking(bool on) {
+        u_long v = on ? 1 : 0;
+        if (ioctlsocket(s_, FIONBIO, &v) == 0) nonblocking_ = on;
+        stalled_ = false;
+    }
+    bool bad() const { return bad_; }
 
 private:
+    bool setBad() {
+        bad_ = true;
+        buf_.clear();
+        off_ = 0;
+        return false;
+    }
     SOCKET s_;
+    std::uint32_t stall_ms_;
     std::string buf_;
+    std::size_t off_ = 0;
+    std::string cors_;
+    bool started_ = false;
     bool bad_ = false;
+    bool nonblocking_ = false;
+    bool stalled_ = false;
+    SteadyClock::time_point stall_t0_{};
 };
 
-// Buffered reader over a socket.
+// Buffered reader over a socket. Each recv waits at most idle_ms (SO_RCVTIMEO);
+// with a deadline set (the header phase), also no longer than the deadline.
 class Reader {
 public:
-    explicit Reader(SOCKET s) : s_(s) { buf_.resize(kReadBuf); }
-    enum class Res { ok, eof, too_long, error };
+    Reader(SOCKET s, std::uint32_t idle_ms) : s_(s), idle_ms_(idle_ms), cur_to_(idle_ms) { buf_.resize(kReadBuf); }
+    enum class Res { ok, eof, too_long, timeout, error };
+    void setDeadline(std::optional<SteadyClock::time_point> d) { deadline_ = d; }
+    // the header deadline passed (answer 408); a read that was idle for
+    // recv_timeout is only closed (nothing useful to tell an idle client)
+    bool deadlineHit() const { return deadline_hit_; }
     // One line including '\n' (or up to EOF); the line must fit kReadBuf.
     Res line(std::string& out) {
         out.clear();
@@ -81,13 +170,15 @@ public:
                     pos_ = end_;
                     return Res::ok;
                 }
-                return eof_ ? Res::eof : Res::error;
+                return eof_ ? Res::eof : timed_out_ ? Res::timeout : Res::error;
             }
         }
     }
+    // n bytes; the string grows as data arrives (no up-front reservation of a
+    // claimed Content-Length)
     bool read(std::string& out, std::size_t n) {
         out.clear();
-        out.reserve(n);
+        out.reserve(std::min<std::size_t>(n, kReadBuf));
         while (out.size() < n) {
             if (pos_ == end_ && !fill()) return false;
             const std::size_t take = std::min(n - out.size(), end_ - pos_);
@@ -105,16 +196,39 @@ private:
             pos_ = 0;
         }
         if (end_ == buf_.size()) return false;
+        std::uint32_t to = idle_ms_;
+        if (deadline_) {
+            const auto now = SteadyClock::now();
+            if (now >= *deadline_) {
+                timed_out_ = deadline_hit_ = true;
+                return false;
+            }
+            const auto left = std::chrono::ceil<std::chrono::milliseconds>(*deadline_ - now).count();
+            to = static_cast<std::uint32_t>(std::min<long long>(to, std::max<long long>(left, 1)));
+        }
+        if (to != cur_to_) {
+            setTimeout(s_, SO_RCVTIMEO, to);
+            cur_to_ = to;
+        }
         const int n = ::recv(s_, buf_.data() + end_, static_cast<int>(buf_.size() - end_), 0);
         if (n == 0) eof_ = true;
+        if (n == SOCKET_ERROR && WSAGetLastError() == WSAETIMEDOUT) {
+            timed_out_ = true;
+            // cut short by the deadline (not idle): still answer 408 (best effort)
+            if (deadline_ && to < idle_ms_) deadline_hit_ = true;
+        }
         if (n <= 0) return false;
         end_ += static_cast<std::size_t>(n);
         return true;
     }
     SOCKET s_;
+    std::uint32_t idle_ms_, cur_to_;
+    std::optional<SteadyClock::time_point> deadline_;
     std::string buf_;
     std::size_t pos_ = 0, end_ = 0;
     bool eof_ = false;
+    bool timed_out_ = false;
+    bool deadline_hit_ = false;
 };
 
 bool ieq(std::string_view a, std::string_view b) {
@@ -359,7 +473,15 @@ bool firstProbe(std::string_view path) {
     return seen.emplace(path).second;
 }
 
-void handleConn(Engine& e, SOCKET s) {
+// Per-connection context from the server.
+struct ConnCtx {
+    Engine& e;
+    const HttpOptions& o;
+    std::function<void()> on_read;  // the request has been read (stop() no longer cuts it)
+};
+
+void handleConn(const ConnCtx& cx, SOCKET s) {
+    Engine& e = cx.e;
     e.beginBuilding();
     bool building = true;
     struct Guard {
@@ -369,10 +491,18 @@ void handleConn(Engine& e, SOCKET s) {
             if (b) e.endBuilding();
         }
     } guard{e, building};
-    Reader r(s);
-    SocketConn w(s);
+    Reader r(s, cx.o.recv_timeout_ms);
+    r.setDeadline(SteadyClock::now() + std::chrono::milliseconds(cx.o.header_timeout_ms));
+    SocketConn w(s, cx.o.send_timeout_ms);
+    auto timedOut = [&] {
+        if (r.deadlineHit()) sendAll(w, errorResponse(408, "request headers not received in time"));
+    };
     std::string line0;
-    if (r.line(line0) != Reader::Res::ok) return;
+    if (const Reader::Res res = r.line(line0); res != Reader::Res::ok) {
+        if (res == Reader::Res::too_long) return sendAll(w, errorResponse(413, "request line too long"));
+        if (res == Reader::Res::timeout) timedOut();
+        return;
+    }
     const std::string req_line(trimWs(line0));
     std::string_view rl = req_line;
     auto nextTok = [&]() -> std::string_view {
@@ -387,12 +517,20 @@ void handleConn(Engine& e, SOCKET s) {
     if (method.empty() || target.empty()) return sendAll(w, errorResponse(400, "malformed request line"));
     std::string path(target.substr(0, target.find('?')));
     std::size_t content_len = 0;
+    bool have_len = false;
     bool chunked = false;
+    std::string origin;
+    std::size_t header_bytes = line0.size();
+    std::uint32_t header_lines = 0;
     std::string hl;
     for (;;) {
         const Reader::Res res = r.line(hl);
-        if (res == Reader::Res::too_long) return sendAll(w, errorResponse(413, "header line too long"));
+        if (res == Reader::Res::too_long) return sendAll(w, errorResponse(431, "header line too long"));
+        if (res == Reader::Res::timeout) return timedOut();
         if (res != Reader::Res::ok) return;
+        header_bytes += hl.size();
+        if (header_bytes > cx.o.max_header_bytes || ++header_lines > cx.o.max_header_lines)
+            return sendAll(w, errorResponse(431, "request headers too large"));
         const std::string_view h = trimWs(hl);
         if (h.empty()) break;
         const std::size_t colon = h.find(':');
@@ -400,32 +538,48 @@ void handleConn(Engine& e, SOCKET s) {
         const std::string_view name = trimWs(h.substr(0, colon));
         const std::string_view val = trimWs(h.substr(colon + 1));
         if (ieq(name, "content-length")) {
+            // digits only; anything above the body limit is 413 (no overflow)
             std::size_t v = 0;
             bool ok = !val.empty();
+            bool big = false;
             for (char c : val) {
                 if (c < '0' || c > '9') {
                     ok = false;
                     break;
                 }
-                v = v * 10 + static_cast<std::size_t>(c - '0');
+                if (!big) {
+                    v = v * 10 + static_cast<std::size_t>(c - '0');
+                    if (v > kMaxBody) big = true;
+                }
             }
-            if (!ok) return sendAll(w, errorResponse(400, "bad Content-Length"));
+            if (!ok || (have_len && !big && v != content_len)) return sendAll(w, errorResponse(400, "bad Content-Length"));
+            if (big) return sendAll(w, errorResponse(413, "request body too large"));
             content_len = v;
+            have_len = true;
         } else if (ieq(name, "transfer-encoding")) {
             if (icontains(val, "chunked")) chunked = true;
+        } else if (ieq(name, "origin")) {
+            origin.assign(val);
         }
     }
+    r.setDeadline(std::nullopt);
+    const std::string cors = corsHeaders(origin, cx.o.cors_origins);
+    w.setCors(cors);
     if (method == "OPTIONS") {
-        sendAll(w,
-                "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, "
-                "OPTIONS\r\nAccess-Control-Allow-Headers: *\r\nAccess-Control-Max-Age: 86400\r\nContent-Length: "
-                "0\r\nConnection: close\r\n\r\n");
-        return;
+        // preflight: allowed Origin -> the CORS headers (Allow-Origin from setCors);
+        // other Origins get a bare 204 and the browser blocks the request
+        std::string resp = "HTTP/1.1 204 No Content\r\n";
+        if (!cors.empty())
+            resp += "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: *\r\n"
+                    "Access-Control-Max-Age: 86400\r\n";
+        resp += "Content-Length: 0\r\nConnection: close\r\n\r\n";
+        return sendAll(w, resp);
     }
     if (chunked) return sendAll(w, errorResponse(411, "chunked request bodies are not supported; send Content-Length"));
-    if (content_len > (64u << 20)) return sendAll(w, errorResponse(413, "request body too large"));
+    if (content_len > kMaxBody) return sendAll(w, errorResponse(413, "request body too large"));
     std::string body;
     if (content_len > 0 && !r.read(body, content_len)) return;
+    if (cx.on_read) cx.on_read();
 
     const bool is_get = method == "GET";
     const bool is_post = method == "POST";
@@ -486,14 +640,72 @@ void handleConn(Engine& e, SOCKET s) {
         logE("req {} | POST {} -> 500: {}", job.id, path, ex.what());
         return sendAll(w, errorResponse(500, ex.what()));
     }
-    // enqueue and wait (the main thread runs the job and writes the response)
+    // enqueue and wait (the main thread runs the job and writes the response,
+    // without blocking on this client; what the client has not taken yet is sent
+    // here afterwards)
     building = false;
+    w.setNonBlocking(true);
     e.submitAndWait(job);
+    w.setNonBlocking(false);
+    w.flush();
 }
 
 std::once_flag g_net_once;
 
+std::string lower(std::string_view s) {
+    std::string r(s);
+    for (char& c : r) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return r;
+}
+
 }  // namespace
+
+bool isLoopbackOrigin(std::string_view origin) {
+    const std::string o = lower(origin);
+    std::string_view v = o;
+    if (v.starts_with("http://")) v.remove_prefix(7);
+    else if (v.starts_with("https://")) v.remove_prefix(8);
+    else return false;
+    bool host = false;
+    for (std::string_view h : {"localhost", "127.0.0.1", "[::1]"})
+        if (v.starts_with(h)) {
+            v.remove_prefix(h.size());
+            host = true;
+            break;
+        }
+    if (!host) return false;
+    if (v.empty()) return true;
+    if (v.front() != ':' || v.size() < 2 || v.size() > 6) return false;
+    for (char c : v.substr(1))
+        if (c < '0' || c > '9') return false;
+    return true;
+}
+
+std::string corsHeaders(std::string_view origin, const std::vector<std::string>& extra) {
+    for (const std::string& x : extra)
+        if (x == "*") return "Access-Control-Allow-Origin: *\r\n";
+    // an Origin echoed back: only printable ASCII (it goes into a header line)
+    if (origin.empty() || origin.size() > 256) return {};
+    for (char c : origin)
+        if (static_cast<unsigned char>(c) < 0x21 || static_cast<unsigned char>(c) > 0x7e) return {};
+    bool ok = isLoopbackOrigin(origin);
+    if (!ok) {
+        const std::string lo = lower(origin);
+        for (const std::string& x : extra) {
+            std::string_view xv = x;
+            while (!xv.empty() && xv.back() == '/') xv.remove_suffix(1);
+            if (lower(xv) == lo) {
+                ok = true;
+                break;
+            }
+        }
+    }
+    if (!ok) return {};
+    std::string h = "Access-Control-Allow-Origin: ";
+    h += origin;
+    h += "\r\nVary: Origin\r\n";
+    return h;
+}
 
 void netInit() {
     std::call_once(g_net_once, [] {
@@ -502,7 +714,7 @@ void netInit() {
     });
 }
 
-HttpServer::HttpServer(Engine& e) : e_(e) { netInit(); }
+HttpServer::HttpServer(Engine& e, HttpOptions o) : e_(e), o_(std::move(o)) { netInit(); }
 
 HttpServer::~HttpServer() { stop(); }
 
@@ -547,8 +759,34 @@ void HttpServer::stop() {
     closesocket(static_cast<SOCKET>(listen_));
     if (accept_.joinable()) accept_.join();
     listen_ = ~std::uintptr_t(0);
-    // connection threads finish on their own (their jobs are answered)
-    for (int i = 0; i < 6000 && n_conn_.load() > 0; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    auto shutAll = [this](bool reading_only) {
+        // shutdown (not closesocket) from this thread: the connection thread still
+        // owns the handle and closes it; it leaves the sets before closing
+        std::lock_guard<std::mutex> lk(conns_mu_);
+        // (shutdown alone does not end a recv that is already waiting: cancel it)
+        for (std::uintptr_t c : reading_only ? reading_ : conns_) {
+            shutdown(static_cast<SOCKET>(c), SD_BOTH);
+            CancelIoEx(reinterpret_cast<HANDLE>(c), nullptr);
+        }
+    };
+    auto waitConns = [this](int ms) {
+        for (int i = 0; i < ms / 5 && n_conn_.load() > 0; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    };
+    // connections still reading a request (idle, slow or stuck clients) end now;
+    // the others finish on their own (their jobs are answered) or are shut down
+    // after a few seconds (a client that does not take its response)
+    shutAll(true);
+    waitConns(5000);
+    if (n_conn_.load() > 0) {
+        shutAll(false);
+        waitConns(5000);
+    }
+}
+
+void HttpServer::setReading(std::uintptr_t sock, bool on) {
+    std::lock_guard<std::mutex> lk(conns_mu_);
+    if (on) reading_.insert(sock);
+    else reading_.erase(sock);
 }
 
 void HttpServer::acceptLoop() {
@@ -559,11 +797,36 @@ void HttpServer::acceptLoop() {
             logE("accept failed: WSA error {}", WSAGetLastError());
             continue;
         }
+        setTimeout(c, SO_RCVTIMEO, o_.recv_timeout_ms);
+        setTimeout(c, SO_SNDTIMEO, o_.send_timeout_ms);
+        if (o_.sndbuf > 0) setsockopt(c, SOL_SOCKET, SO_SNDBUF, reinterpret_cast<const char*>(&o_.sndbuf), sizeof o_.sndbuf);
+        if (n_conn_.load() >= static_cast<int>(o_.max_conn)) {
+            static std::atomic<std::uint64_t> n_rejected{0};
+            if (n_rejected.fetch_add(1) % 100 == 0)
+                logW("connection limit ({} open connections) reached: answering 503", o_.max_conn);
+            setTimeout(c, SO_SNDTIMEO, 1000);
+            const std::string r = errorResponse(503, "too many open connections; retry later");
+            ::send(c, r.data(), static_cast<int>(r.size()), 0);
+            shutdown(c, SD_SEND);
+            lingerDrain(c, 50);
+            closesocket(c);
+            continue;
+        }
         n_conn_.fetch_add(1);
+        {
+            std::lock_guard<std::mutex> lk(conns_mu_);
+            conns_.insert(static_cast<std::uintptr_t>(c));
+            reading_.insert(static_cast<std::uintptr_t>(c));
+        }
         try {
             std::thread([this, c] { connThread(static_cast<std::uintptr_t>(c)); }).detach();
         } catch (const std::exception& ex) {
             logE("cannot spawn connection thread: {}", ex.what());
+            {
+                std::lock_guard<std::mutex> lk(conns_mu_);
+                conns_.erase(static_cast<std::uintptr_t>(c));
+                reading_.erase(static_cast<std::uintptr_t>(c));
+            }
             closesocket(c);
             n_conn_.fetch_sub(1);
         }
@@ -573,11 +836,18 @@ void HttpServer::acceptLoop() {
 void HttpServer::connThread(std::uintptr_t sock) {
     const SOCKET s = static_cast<SOCKET>(sock);
     try {
-        handleConn(e_, s);
+        const ConnCtx cx{e_, o_, [this, sock] { setReading(sock, false); }};
+        handleConn(cx, s);
     } catch (const std::exception& ex) {
         logE("connection error: {}", ex.what());
     }
+    {
+        std::lock_guard<std::mutex> lk(conns_mu_);
+        conns_.erase(sock);
+        reading_.erase(sock);
+    }
     shutdown(s, SD_SEND);
+    lingerDrain(s, 500);
     closesocket(s);
     n_conn_.fetch_sub(1);
 }

@@ -94,6 +94,7 @@ struct ServerSetup {
     bool vision = false;
     bool allow_files = false;
     std::uint32_t vis_ck_min = 1024;
+    HttpOptions http;
 };
 
 // vision: host mock encoder (real stb decode + preprocessing size rule, deterministic
@@ -176,7 +177,7 @@ public:
             engine_->attachTier(tier_.get());
             tier_->start(tc, lay, su.fingerprint);
         }
-        http_ = std::make_unique<HttpServer>(*engine_);
+        http_ = std::make_unique<HttpServer>(*engine_, su.http);
         http_->start("127.0.0.1", 0);
         loop_ = std::thread([this] { engine_->runLoop(); });
     }
@@ -618,7 +619,8 @@ void testEndpoints() {
     CHECK_EQ(srv.get("/nope").status, 404);
     CHECK_EQ(srv.get("/v1/chat/completions").status, 405);
     CHECK_EQ(srv.post("/health", "").status, 405);
-    auto opt = test::httpRequest("127.0.0.1", srv.port(), "OPTIONS", "/v1/chat/completions");
+    auto opt = test::httpRequest("127.0.0.1", srv.port(), "OPTIONS", "/v1/chat/completions", {}, 600,
+                                 "Origin: http://localhost:3000\r\n");
     CHECK_EQ(opt.status, 204);
     CHECK(opt.headers.find("Access-Control-Allow-Methods: GET, POST, OPTIONS") != std::string::npos);
     auto bad = srv.post("/v1/chat/completions", "{not json");
@@ -639,6 +641,266 @@ void testEndpoints() {
         CHECK(r.body.find("prompt is too long for the context size") != std::string::npos);
     }
     CHECK_EQ(srv.model().poison(), 0u);
+}
+
+// ---- connection handling (timeouts, connection cap, header / body limits)
+
+bool hasHeader(const HttpResult& r, std::string_view line) { return r.headers.find(line) != std::string::npos; }
+
+int rawStatus(const std::string& resp) {
+    return resp.size() > 12 && resp.compare(0, 5, "HTTP/") == 0 ? std::atoi(resp.c_str() + 9) : 0;
+}
+
+// one raw request; the response status (0: closed without a response)
+int rawRequestStatus(std::uint16_t port, const std::string& req) {
+    const auto s = test::rawConnect("127.0.0.1", port);
+    if (s == test::kNoSock) return -1;
+    test::rawSend(s, req);
+    const std::string resp = test::rawRecvAll(s, 5);
+    test::rawClose(s);
+    return rawStatus(resp);
+}
+
+void testHttpLimits() {
+    ServerSetup su = baseSetup();
+    su.http.recv_timeout_ms = 300;
+    su.http.header_timeout_ms = 800;
+    TestServer srv(su);
+    const std::uint16_t port = srv.port();
+    // an idle client (connects, sends nothing) is closed after the read timeout
+    {
+        const auto s = test::rawConnect("127.0.0.1", port);
+        CHECK(s != test::kNoSock);
+        const double t0 = nowSeconds();
+        bool closed = false;
+        const std::string resp = test::rawRecvAll(s, 5, &closed);
+        const double dt = nowSeconds() - t0;
+        test::rawClose(s);
+        CHECK(closed);
+        CHECK(resp.empty());
+        CHECK(dt >= 0.2 && dt < 2.0);
+        if (g_verbose) std::printf("  idle client closed after %.2f s\n", dt);
+    }
+    // a slow client (one header byte per 100 ms: every read in time, the whole
+    // header not) gets 408 at the header deadline
+    {
+        const auto s = test::rawConnect("127.0.0.1", port);
+        CHECK(test::rawSend(s, "GET /health HTTP/1.1\r\n"));
+        std::atomic<bool> quit{false};
+        std::thread drip([&] {
+            for (int i = 0; i < 40 && !quit.load(); ++i) {
+                if (!test::rawSend(s, "X")) break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+        });
+        const double t0 = nowSeconds();
+        bool closed = false;
+        const std::string resp = test::rawRecvAll(s, 5, &closed);
+        const double dt = nowSeconds() - t0;
+        quit = true;
+        drip.join();
+        test::rawClose(s);
+        CHECK_EQ(rawStatus(resp), 408);
+        if (rawStatus(resp) != 408) std::printf("  slow client got %zu bytes: [%s]\n", resp.size(), resp.substr(0, 200).c_str());
+        CHECK(dt >= 0.6 && dt < 2.5);
+        if (g_verbose) std::printf("  slow client: 408 after %.2f s\n", dt);
+    }
+    // header limits: too many lines, too many bytes, one line too long
+    {
+        std::string many = "GET /health HTTP/1.1\r\n";
+        for (int i = 0; i < 150; ++i) many += std::format("X-H{}: v\r\n", i);
+        CHECK_EQ(rawRequestStatus(port, many + "\r\n"), 431);
+        std::string big = "GET /health HTTP/1.1\r\n";
+        for (int i = 0; i < 10; ++i) big += std::format("X-B{}: {}\r\n", i, std::string(8000, 'b'));
+        CHECK_EQ(rawRequestStatus(port, big + "\r\n"), 431);
+        CHECK_EQ(rawRequestStatus(port, "GET /health HTTP/1.1\r\nX-L: " + std::string(70000, 'l') + "\r\n\r\n"), 431);
+        std::string ok = "GET /health HTTP/1.1\r\n";
+        for (int i = 0; i < 20; ++i) ok += std::format("X-H{}: v\r\n", i);
+        CHECK_EQ(rawRequestStatus(port, ok + "\r\n"), 200);
+    }
+    // Content-Length: overflow-safe, digits only, one value
+    {
+        auto withLen = [&](const std::string& h) {
+            return rawRequestStatus(port, "POST /v1/completions HTTP/1.1\r\n" + h + "\r\n{}");
+        };
+        CHECK_EQ(withLen("Content-Length: 18446744073709551617\r\n"), 413);  // 2^64 + 1 (wrapped to 1 before)
+        CHECK_EQ(withLen("Content-Length: 99999999999999999999999999999\r\n"), 413);
+        CHECK_EQ(withLen("Content-Length: 67108865\r\n"), 413);  // 64 MiB + 1
+        CHECK_EQ(withLen("Content-Length: 12a\r\n"), 400);
+        CHECK_EQ(withLen("Content-Length: -1\r\n"), 400);
+        CHECK_EQ(withLen("Content-Length: 2\r\nContent-Length: 3\r\n"), 400);
+        CHECK_EQ(withLen("Content-Length: 2\r\n"), 400);  // "{}" -> 'prompt' is required
+    }
+    // a claimed 64 MiB body that never comes: closed after the read timeout
+    {
+        const auto s = test::rawConnect("127.0.0.1", port);
+        test::rawSend(s, "POST /v1/completions HTTP/1.1\r\nContent-Length: 67108864\r\n\r\n{\"prompt\"");
+        bool closed = false;
+        const double t0 = nowSeconds();
+        test::rawRecvAll(s, 5, &closed);
+        test::rawClose(s);
+        CHECK(closed && nowSeconds() - t0 < 2.0);
+    }
+    CHECK_EQ(srv.get("/health").status, 200);
+}
+
+void testHttpConnCap() {
+    ServerSetup su = baseSetup();
+    su.http.recv_timeout_ms = 10000;
+    su.http.max_conn = 4;
+    TestServer srv(su);
+    std::vector<std::uintptr_t> idle;
+    for (int i = 0; i < 4; ++i) idle.push_back(test::rawConnect("127.0.0.1", srv.port()));
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    const auto over = srv.get("/health");
+    CHECK_EQ(over.status, 503);
+    CHECK(over.body.find("too many open connections") != std::string::npos);
+    for (auto s : idle) test::rawClose(s);
+    int st = 0;
+    for (int i = 0; i < 40 && st != 200; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        st = srv.get("/health").status;
+    }
+    CHECK_EQ(st, 200);
+    // stop() does not wait for idle connections (their read timeout is 10 s here)
+    idle.clear();
+    for (int i = 0; i < 3; ++i) idle.push_back(test::rawConnect("127.0.0.1", srv.port()));
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    const double t0 = nowSeconds();
+    srv.shutdown();
+    const double dt = nowSeconds() - t0;
+    CHECK(dt < 1.5);
+    if (g_verbose) std::printf("  stop() with 3 idle connections: %.2f s\n", dt);
+    for (auto s : idle) test::rawClose(s);
+}
+
+// A streaming client that stops reading (connection open) must not stall the
+// engine: another request completes, and the stuck one is dropped after the send
+// timeout with its slot freed.
+void testHttpStuckReader() {
+    ServerSetup su = baseSetup();
+    su.mc.cycle_us = 2000;  // the stuck stream generates longer than the send timeout
+    // the engine must not wait for the stuck client at all: the other request
+    // finishes well inside the send timeout (a blocking send with only
+    // SO_SNDTIMEO would hold every slot for up to 2 s)
+    su.http.send_timeout_ms = 2000;
+    su.http.sndbuf = 4096;
+    TestServer srv(su);
+    g_log.clear();
+    const auto a = test::rawConnect("127.0.0.1", srv.port(), 1024);
+    CHECK(a != test::kNoSock);
+    const std::string body = completionBody(makePrompt(64, 71), 12000, true);
+    CHECK(test::rawSend(a, std::format("POST /v1/completions HTTP/1.1\r\nContent-Type: application/json\r\nContent-Length: "
+                                       "{}\r\n\r\n{}",
+                                       body.size(), body)));
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    const auto b = test::httpRequest("127.0.0.1", srv.port(), "POST", "/v1/completions",
+                                     completionBody(makePrompt(64, 72), 16), 15);
+    CHECK_EQ(b.status, 200);
+    CHECK(b.ms < 1000);
+    if (g_verbose) std::printf("  request beside a stuck reader: %.0f ms\n", b.ms);
+    bool lost = false;
+    for (int i = 0; i < 200 && !lost; ++i) {
+        lost = g_log.count("client connection lost") > 0;
+        if (!lost) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    CHECK(lost);
+    bool idle = false;
+    for (int i = 0; i < 100 && !idle; ++i) {
+        idle = srv.get("/health").body.find("\"slots_busy\":0") != std::string::npos;
+        if (!idle) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    CHECK(idle);
+    test::rawClose(a);
+    CHECK_EQ(srv.post("/v1/completions", completionBody(makePrompt(32, 73), 8)).status, 200);
+}
+
+void testCors() {
+    CHECK(isLoopbackOrigin("http://localhost"));
+    CHECK(isLoopbackOrigin("http://localhost:5173"));
+    CHECK(isLoopbackOrigin("https://127.0.0.1:8443"));
+    CHECK(isLoopbackOrigin("http://[::1]:3000"));
+    CHECK(isLoopbackOrigin("HTTP://LocalHost:80"));
+    CHECK(!isLoopbackOrigin("null"));
+    CHECK(!isLoopbackOrigin("http://localhost.evil.com"));
+    CHECK(!isLoopbackOrigin("http://localhost:80/x"));
+    CHECK(!isLoopbackOrigin("http://localhost:"));
+    CHECK(!isLoopbackOrigin("http://127.0.0.1.nip.io"));
+    CHECK(!isLoopbackOrigin("ftp://localhost"));
+    CHECK(!isLoopbackOrigin("http://localhost:1234567"));
+    CHECK(corsHeaders("http://localhost\r\nX: y", {}).empty());
+    const std::string chat = R"({"messages":[{"role":"user","content":"q"}],"max_tokens":4,"temperature":0)";
+    auto req = [](std::uint16_t port, const char* method, const char* path, const std::string& body, const std::string& origin) {
+        return test::httpRequest("127.0.0.1", port, method, path, body, 30,
+                                 origin.empty() ? std::string() : "Origin: " + origin + "\r\n");
+    };
+    {
+        TestServer srv(baseSetup());
+        const std::uint16_t p = srv.port();
+        for (const char* o : {"http://localhost:5173", "http://127.0.0.1", "https://[::1]:8443"}) {
+            const auto r = req(p, "GET", "/health", "", o);
+            CHECK_EQ(r.status, 200);
+            CHECK(hasHeader(r, std::string("Access-Control-Allow-Origin: ") + o + "\r\n"));
+            CHECK(hasHeader(r, "Vary: Origin"));
+        }
+        for (const char* o : {"https://evil.example", "null", "http://localhost.evil.com", ""}) {
+            const auto r = req(p, "GET", "/health", "", o);
+            CHECK_EQ(r.status, 200);
+            CHECK(!hasHeader(r, "Access-Control-"));
+        }
+        // engine-written responses (non-stream, stream, error) carry it too
+        const std::string lo = "http://localhost:8000";
+        const auto ns = req(p, "POST", "/v1/chat/completions", chat + "}", lo);
+        CHECK_EQ(ns.status, 200);
+        CHECK(hasHeader(ns, "Access-Control-Allow-Origin: http://localhost:8000"));
+        const auto st = req(p, "POST", "/v1/chat/completions", chat + R"(,"stream":true})", lo);
+        CHECK_EQ(st.status, 200);
+        CHECK(hasHeader(st, "Content-Type: text/event-stream"));
+        CHECK(hasHeader(st, "Access-Control-Allow-Origin: http://localhost:8000"));
+        CHECK(test::sseEvents(st.body).size() >= 2);
+        const auto st_evil = req(p, "POST", "/v1/chat/completions", chat + R"(,"stream":true})", "https://evil.example");
+        CHECK_EQ(st_evil.status, 200);
+        CHECK(!hasHeader(st_evil, "Access-Control-"));
+        const auto bad = req(p, "POST", "/v1/chat/completions", "{not json", lo);
+        CHECK_EQ(bad.status, 400);
+        CHECK(hasHeader(bad, "Access-Control-Allow-Origin: http://localhost:8000"));
+        // preflight
+        const auto pf = req(p, "OPTIONS", "/v1/chat/completions", "", lo);
+        CHECK_EQ(pf.status, 204);
+        CHECK(hasHeader(pf, "Access-Control-Allow-Origin: http://localhost:8000"));
+        CHECK(hasHeader(pf, "Access-Control-Allow-Methods: GET, POST, OPTIONS"));
+        CHECK(hasHeader(pf, "Access-Control-Allow-Headers: *"));
+        const auto pf_evil = req(p, "OPTIONS", "/v1/chat/completions", "", "https://evil.example");
+        CHECK_EQ(pf_evil.status, 204);
+        CHECK(!hasHeader(pf_evil, "Access-Control-"));
+    }
+    {
+        ServerSetup su = baseSetup();
+        su.http.cors_origins = {"https://App.Example.com/"};
+        TestServer srv(su);
+        const auto ok = req(srv.port(), "GET", "/health", "", "https://app.example.com");
+        CHECK(hasHeader(ok, "Access-Control-Allow-Origin: https://app.example.com\r\n"));
+        CHECK(hasHeader(req(srv.port(), "GET", "/health", "", "http://localhost:1"), "Access-Control-Allow-Origin: http://localhost:1"));
+        CHECK(!hasHeader(req(srv.port(), "GET", "/health", "", "https://evil.example"), "Access-Control-"));
+        const auto pf = req(srv.port(), "OPTIONS", "/v1/completions", "", "https://app.example.com");
+        CHECK(hasHeader(pf, "Access-Control-Allow-Methods: GET, POST, OPTIONS"));
+    }
+    {
+        ServerSetup su = baseSetup();
+        su.http.cors_origins = {"*"};
+        TestServer srv(su);
+        for (const char* o : {"https://evil.example", "null", ""}) {
+            const auto r = req(srv.port(), "GET", "/health", "", o);
+            CHECK(hasHeader(r, "Access-Control-Allow-Origin: *\r\n"));
+            CHECK(!hasHeader(r, "Vary: Origin"));
+        }
+        const auto st = req(srv.port(), "POST", "/v1/chat/completions", chat + R"(,"stream":true})", "https://evil.example");
+        CHECK(hasHeader(st, "Access-Control-Allow-Origin: *"));
+        const auto pf = req(srv.port(), "OPTIONS", "/v1/chat/completions", "", "");
+        CHECK_EQ(pf.status, 204);
+        CHECK(hasHeader(pf, "Access-Control-Allow-Origin: *"));
+        CHECK(hasHeader(pf, "Access-Control-Allow-Methods: GET, POST, OPTIONS"));
+    }
 }
 
 // greedy completions == the mock's own reference; MTP on and off
@@ -1491,6 +1753,10 @@ int main(int argc, char** argv) {
         {"chat_tokens", testChatTokens},
         {"endpoints", testEndpoints},
         {"compat_endpoints", testCompatEndpoints},
+        {"http_limits", testHttpLimits},
+        {"http_conn_cap", testHttpConnCap},
+        {"http_stuck_reader", testHttpStuckReader},
+        {"cors", testCors},
         {"greedy_reference", testGreedyMatchesReference},
         {"stream", testStreamEqualsNonStream},
         {"prefix_cache", testPrefixCacheMultiTurn},

@@ -388,8 +388,10 @@ const char* statusText(int status) {
         case 400: return "Bad Request";
         case 404: return "Not Found";
         case 405: return "Method Not Allowed";
+        case 408: return "Request Timeout";
         case 411: return "Length Required";
         case 413: return "Payload Too Large";
+        case 431: return "Request Header Fields Too Large";
         case 500: return "Internal Server Error";
         case 503: return "Service Unavailable";
         default: return "Error";
@@ -398,7 +400,7 @@ const char* statusText(int status) {
 
 std::string httpResponse(int status, std::string_view ctype, std::string_view body) {
     std::string r = std::format(
-        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: "
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: "
         "close\r\n\r\n",
         status, statusText(status), ctype, body.size());
     r += body;

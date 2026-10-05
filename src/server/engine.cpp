@@ -3061,7 +3061,7 @@ void StreamState::begin() {
     if (!job->params.stream) return;
     std::string b =
         "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\nCache-Control: no-cache\r\n"
-        "Access-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n";
+        "Connection: close\r\n\r\n";  // CORS headers: added by the connection (http.cpp)
     if (job->kind == JobKind::chat) {
         chunkBegin(b);
         b += "{\"role\":\"assistant\",\"content\":null}";

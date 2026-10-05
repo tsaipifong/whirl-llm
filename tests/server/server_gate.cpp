@@ -654,9 +654,15 @@ void suiteBasic() {
         check("basic: GET /health", h.status == 200 && h.body.find("\"status\":\"ok\"") != std::string::npos, h.body);
         auto m = test::httpRequest("127.0.0.1", g.port, "GET", "/v1/models");
         check("basic: GET /v1/models", m.status == 200 && m.body.find("\"object\":\"list\"") != std::string::npos);
-        auto o = test::httpRequest("127.0.0.1", g.port, "OPTIONS", "/v1/chat/completions");
+        // CORS (v0.1.4): loopback Origins are echoed, other Origins get no CORS headers
+        auto o = test::httpRequest("127.0.0.1", g.port, "OPTIONS", "/v1/chat/completions", {}, 600,
+                                   "Origin: http://localhost:3000\r\n");
         check("basic: OPTIONS preflight (CORS)",
-              o.status == 204 && o.headers.find("Access-Control-Allow-Origin: *") != std::string::npos);
+              o.status == 204 && o.headers.find("Access-Control-Allow-Origin: http://localhost:3000") != std::string::npos);
+        auto oe = test::httpRequest("127.0.0.1", g.port, "OPTIONS", "/v1/chat/completions", {}, 600,
+                                    "Origin: https://evil.example\r\n");
+        check("basic: OPTIONS preflight, foreign Origin -> no CORS headers",
+              oe.status == 204 && oe.headers.find("Access-Control-") == std::string::npos);
         auto b = test::httpRequest("127.0.0.1", g.port, "POST", "/v1/chat/completions", "{not json");
         check("basic: bad JSON -> 400", b.status == 400 && b.body.find("\"error\"") != std::string::npos, b.body.substr(0, 100));
         auto mm = test::httpRequest("127.0.0.1", g.port, "POST", "/v1/chat/completions", R"({"model":"x"})");

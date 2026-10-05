@@ -136,6 +136,9 @@ const char* kHelpBody =
     "  --vis-mode M             auto (default), resident (weights in VRAM), stream (layer by layer)\n"
     "  --vis-cache-mb N         host cache of image embeddings by content hash, MiB (default 1024)\n"
     "  --allow-local-images     also accept local file paths / file:// URLs as image sources\n"
+    "  --cors-origin ORIGIN     web pages from ORIGIN (e.g. https://app.example.com) may call the server\n"
+    "                           from a browser (CORS); repeatable; * = any page (the behaviour before\n"
+    "                           v0.1.4). Default: only pages on http(s)://localhost, 127.0.0.1, [::1]\n"
     "  --log-file PATH          log file (default %LOCALAPPDATA%\\whirl\\server.log; the log also goes to\n"
     "                           the console)\n"
     "  -h, --help               this text\n"
@@ -164,6 +167,7 @@ struct Options {
     std::string vis_mode = "auto";
     std::uint64_t vis_cache_mb = 1024;
     bool allow_local_images = false;
+    std::vector<std::string> cors_origins;  // --cors-origin (repeatable)
 };
 
 [[noreturn]] void die(const std::string& msg) {
@@ -359,6 +363,11 @@ int serveMain(int argc, char** argv, const char* program) {
             opt.vis_mode = *v15;
         } else if (auto v16 = argValue(args, i, "--vis-cache-mb")) opt.vis_cache_mb = parseNum<std::uint64_t>(*v16, "--vis-cache-mb");
         else if (arg == "--allow-local-images") opt.allow_local_images = true;
+        else if (auto v17 = argValue(args, i, "--cors-origin")) {
+            if (*v17 != "*" && v17->find("://") == std::string::npos)
+                die("invalid --cors-origin " + *v17 + " (give an origin such as https://app.example.com, or *)");
+            opt.cors_origins.push_back(*v17);
+        }
         else if (!arg.empty() && arg[0] == '-') die("unknown option " + arg);
         else if (opt.path.empty()) opt.path = arg;
         else die("unexpected argument " + arg);
@@ -987,7 +996,9 @@ int serveMain(int argc, char** argv, const char* program) {
         if (timer_probe)
             logI("timer probe | sleep 1 ms: {:.2f} ms before, {:.2f} ms after timeBeginPeriod(1) | sleep 200 us: {:.2f} / {:.2f} ms",
                  probe_1ms, sleepMs(std::chrono::milliseconds(1), 50), probe_200us, sleepMs(std::chrono::microseconds(200), 50));
-        HttpServer http(engine);
+        HttpOptions ho;
+        ho.cors_origins = opt.cors_origins;
+        HttpServer http(engine, ho);
         http.start(opt.host, opt.port);
         logI("server listening on http://{}:{} (model id \"{}\", {} slots); endpoints: GET /health, GET /v1/models, POST "
              "/v1/chat/completions, POST /v1/completions, GET /props, GET /version",
