@@ -22,7 +22,7 @@ WHIRL 是 AMD Radeon AI PRO R9700（RDNA 4）在 Windows 上的 LLM 推論引擎
 
 | | Swift-1.5 27B MXFP4-A（dense） | Ornith-1.5-35B-A3B MXFP4（MoE） |
 |---|---|---|
-| Decode tok/s，中文寫程式提示 | 112.4 vs 60.8（**1.85×**） | 257.6 vs 118.8（**2.17×**） |
+| Decode tok/s，寫程式提示 | 112.4 vs 60.8（**1.85×**） | 257.6 vs 118.8（**2.17×**） |
 | 伺服器 4 人同時使用，總吞吐 tok/s | 182.1 vs 64.0（**2.84×**） | 381.1 vs 176.8（**2.16×**） |
 | Prefill tok/s，8k token 提示 | 3,469 vs 1,338（**2.59×**） | 11,258 vs 4,637（**2.43×**） |
 | Prefill tok/s，32k token 提示 | 2,907 vs 1,174（**2.48×**） | 8,633 vs 3,778（**2.29×**） |
@@ -35,7 +35,7 @@ WHIRL 是 AMD Radeon AI PRO R9700（RDNA 4）在 Windows 上的 LLM 推論引擎
 
 ![Prefill 速度與提示長度：WHIRL 0.1.3 對 llama.cpp](images/bench_prefill.png)
 
-![中文寫程式提示的 decode 速度：WHIRL 0.1.3 對 llama.cpp](images/bench_decode_zh.png)
+![寫程式提示的 decode 速度：WHIRL 0.1.3 對 llama.cpp](images/bench_decode_zh.png)
 
 完整表格（含 Qwen3.8 Q4_K_M，以及 WHIRL 領先*不多*的地方）：[效能](#效能)。
 
@@ -128,7 +128,7 @@ WHIRL 0.1.3 對 llama.cpp b11214（ROCm，每一列都用我們找到最快的�
 
 | R9700，greedy——WHIRL 對 llama.cpp（倍數） | Swift-1.5 27B MXFP4-A（dense） | Ornith-1.5-35B-A3B MXFP4（MoE，約 3B 啟用） | Qwen3.8-27B UD-Q4_K_M（dense，參考） |
 |---|---|---|---|
-| Decode tok/s，7 個中文寫程式提示（800 token）——WHIRL MTP+n-gram 對 llama.cpp 最快¹ | 112.4 vs 60.8（1.85×） | 257.6 vs 118.8（2.17×） | 97.3 vs 56.0（1.74×） |
+| Decode tok/s，7 個寫程式提示（800 token）——WHIRL MTP+n-gram 對 llama.cpp 最快¹ | 112.4 vs 60.8（1.85×） | 257.6 vs 118.8（2.17×） | 97.3 vs 56.0（1.74×） |
 | 16k token context 之後的 decode tok/s——WHIRL MTP+n-gram 對 llama.cpp 最快¹ | 71.4 vs 60.9⁴（1.17×） | 316.4 vs 106.9⁴（2.96×） | 80.7 vs 60.7⁴（1.33×） |
 | Decode tok/s，同樣 7 個提示——WHIRL **no MTP** 對 llama.cpp **no MTP** | 38.1 vs 33.4（1.14×） | 177.4 vs 118.8（1.49×） | 34.8 vs 30.9（1.13×） |
 | 伺服器 4 人並發總吞吐 tok/s（含 prefill）——WHIRL MTP+n-gram 對 llama.cpp 最快¹ | 182.1 vs 64.0⁴（2.84×） | 381.1 vs 176.8⁴（2.16×） | 122.4 vs 57.1⁴（2.14×） |
@@ -185,7 +185,7 @@ WHIRL 領先**不多**的地方：dense 模型的一般 decode（不開 MTP）�
 | Prefill tok/s，128k token 提示（q8h KV，伺服器） | 1,352.7 | 1,533.0 | +13.3% |
 | Prefill tok/s，256k token 提示（q8h KV，伺服器） | 832.5 | 969.8 | +16.5% |
 | 128k token 文件問答的 decode tok/s（回答大量引用文件） | 63.7 | 87.6 | +37.5% |
-| Decode tok/s，中文寫程式提示 | 110.7 | 120.7 | +9.1% |
+| Decode tok/s，寫程式提示 | 110.7 | 120.7 | +9.1% |
 | KV 池容量，預設 4 個 slot（token） | 210,688 | 226,304 | +7.4% |
 | 4 人短提示同時送出：整批完成時間（秒，越低越好） | 9.57 | 8.62 | −9.9% |
 | 長上下文 coding agent 請求的 decode tok/s（agent 工作階段 3 第 143 步，127.9k token） | 53.7 | 75.2 | +40.0% |

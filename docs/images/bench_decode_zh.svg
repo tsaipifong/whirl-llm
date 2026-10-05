@@ -1,8 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="840" height="552" viewBox="0 0 840 552" font-family="Segoe UI, Helvetica, Arial, sans-serif">
 <rect width="840" height="552" fill="#ffffff"/>
 <defs><pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" fill="white"/><line x1="0" y1="0" x2="0" y2="6" stroke="#000" stroke-opacity="0.55" stroke-width="2.4"/></pattern></defs>
-<text x="64" y="30" font-size="19" font-weight="600" fill="#1f2328">Decode: Chinese coding prompts — WHIRL 0.1.3 vs llama.cpp b11214</text>
-<text x="64" y="52" font-size="12.5" fill="#57606a">7 prompts (Chinese question → Chinese explanation + English code), thinking off, 800 tokens, greedy, server API (tok/s)</text>
+<text x="64" y="30" font-size="19" font-weight="600" fill="#1f2328">Decode: coding prompts — WHIRL 0.1.3 vs llama.cpp b11214</text>
+<text x="64" y="52" font-size="12.5" fill="#57606a">7 coding prompts, thinking off, 800 tokens, greedy, server API (tok/s, higher is better)</text>
 <text x="441.0" y="80" font-size="13.5" font-weight="600" text-anchor="middle" fill="#1f2328"></text>
 <line x1="74" x2="808" y1="452.0" y2="452.0" stroke="#d0d7de" stroke-width="1"/>
 <text x="69" y="456.0" font-size="10.5" text-anchor="end" fill="#57606a">0</text>

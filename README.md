@@ -22,7 +22,7 @@ Same GGUF file, same prompts, one R9700, greedy decoding; llama.cpp b11214 (ROCm
 
 | | Swift-1.5 27B MXFP4-A (dense) | Ornith-1.5-35B-A3B MXFP4 (MoE) |
 |---|---|---|
-| Decode tok/s, Chinese coding prompts | 112.4 vs 60.8 (**1.85×**) | 257.6 vs 118.8 (**2.17×**) |
+| Decode tok/s, coding prompts | 112.4 vs 60.8 (**1.85×**) | 257.6 vs 118.8 (**2.17×**) |
 | Server, 4 users at once, aggregate tok/s | 182.1 vs 64.0 (**2.84×**) | 381.1 vs 176.8 (**2.16×**) |
 | Prefill tok/s, 8k-token prompt | 3,469 vs 1,338 (**2.59×**) | 11,258 vs 4,637 (**2.43×**) |
 | Prefill tok/s, 32k-token prompt | 2,907 vs 1,174 (**2.48×**) | 8,633 vs 3,778 (**2.29×**) |
@@ -35,7 +35,7 @@ Same GGUF file, same prompts, one R9700, greedy decoding; llama.cpp b11214 (ROCm
 
 ![Prefill throughput vs prompt length, WHIRL 0.1.3 vs llama.cpp](docs/images/bench_prefill.png)
 
-![Decode speed on Chinese coding prompts, WHIRL 0.1.3 vs llama.cpp](docs/images/bench_decode_zh.png)
+![Decode speed on coding prompts, WHIRL 0.1.3 vs llama.cpp](docs/images/bench_decode_zh.png)
 
 Full table (including Qwen3.8 Q4_K_M and where WHIRL does *not* lead by much): [Performance](#performance).
 
@@ -128,7 +128,7 @@ Our MXFP4 files (Swift-1.5 27B and Ornith-1.5-35B-A3B) are the main comparison; 
 
 | R9700, greedy — WHIRL vs llama.cpp (ratio) | Swift-1.5 27B MXFP4-A (dense) | Ornith-1.5-35B-A3B MXFP4 (MoE, ~3B active) | Qwen3.8-27B UD-Q4_K_M (dense, reference) |
 |---|---|---|---|
-| Decode tok/s, 7 Chinese coding prompts (800 tokens) — WHIRL MTP+n-gram vs llama.cpp fastest¹ | 112.4 vs 60.8 (1.85×) | 257.6 vs 118.8 (2.17×) | 97.3 vs 56.0 (1.74×) |
+| Decode tok/s, 7 coding prompts (800 tokens) — WHIRL MTP+n-gram vs llama.cpp fastest¹ | 112.4 vs 60.8 (1.85×) | 257.6 vs 118.8 (2.17×) | 97.3 vs 56.0 (1.74×) |
 | Decode tok/s after a 16k-token context — WHIRL MTP+n-gram vs llama.cpp fastest¹ | 71.4 vs 60.9⁴ (1.17×) | 316.4 vs 106.9⁴ (2.96×) | 80.7 vs 60.7⁴ (1.33×) |
 | Decode tok/s, same 7 prompts — WHIRL **no MTP** vs llama.cpp **no MTP** | 38.1 vs 33.4 (1.14×) | 177.4 vs 118.8 (1.49×) | 34.8 vs 30.9 (1.13×) |
 | Server, 4 concurrent users, aggregate tok/s (incl. prefill) — WHIRL MTP+n-gram vs llama.cpp fastest¹ | 182.1 vs 64.0⁴ (2.84×) | 381.1 vs 176.8⁴ (2.16×) | 122.4 vs 57.1⁴ (2.14×) |
@@ -185,7 +185,7 @@ Both versions measured on the same machine, with the same GGUF file and the same
 | Prefill tok/s, 128k-token prompt (q8h KV, server) | 1,352.7 | 1,533.0 | +13.3% |
 | Prefill tok/s, 256k-token prompt (q8h KV, server) | 832.5 | 969.8 | +16.5% |
 | Decode tok/s, Q&A over a 128k-token document (answer quotes the document a lot) | 63.7 | 87.6 | +37.5% |
-| Decode tok/s, Chinese coding prompts | 110.7 | 120.7 | +9.1% |
+| Decode tok/s, coding prompts | 110.7 | 120.7 | +9.1% |
 | KV pool, default 4 slots (tokens) | 210,688 | 226,304 | +7.4% |
 | 4 users, short prompts sent together: whole batch done (s, lower is better) | 9.57 | 8.62 | −9.9% |
 | Decode tok/s, long-context coding-agent request (agent session 3, step 143, 127.9k tokens) | 53.7 | 75.2 | +40.0% |
