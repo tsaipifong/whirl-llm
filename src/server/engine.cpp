@@ -144,12 +144,12 @@ void Engine::initCkpt(Ckpt& c, bool host_ok) {
     c.conv.assign(L, 0);
     c.ssm.assign(L, 0);
     const auto ssm0 = m_.ssmState();
+    std::uint64_t n_gdn = 0;
+    for (std::uint32_t li = 0; li < L; ++li)
+        if (ssm0[li] != 0) ++n_gdn;
+    auto al = [](std::uint64_t x) { return (x + 255) / 256 * 256; };
     if (host_ok && opt_.ckpt_host) {
         // one pinned host buffer per checkpoint; save / load copy over PCIe
-        std::uint64_t n_gdn = 0;
-        for (std::uint32_t li = 0; li < L; ++li)
-            if (ssm0[li] != 0) ++n_gdn;
-        auto al = [](std::uint64_t x) { return (x + 255) / 256 * 256; };
         const std::uint64_t total = n_gdn * (al(conv_bytes_) + al(ssm_bytes_)) + V * 4;
         c.host = ops_.hostMalloc(total);
         std::uint64_t p = reinterpret_cast<std::uint64_t>(c.host);
@@ -165,13 +165,21 @@ void Engine::initCkpt(Ckpt& c, bool host_ok) {
         c.hid = ops_.malloc(static_cast<std::uint64_t>(cfg.n_embd) * 4);
         return;
     }
+    // one VRAM allocation per checkpoint, sliced like the pinned layout (256-byte aligned parts);
+    // separate allocations per GDN layer (~98 on the 27B models) cost allocation granularity
+    const std::uint64_t hid_bytes = al(static_cast<std::uint64_t>(cfg.n_embd) * 4);
+    c.dev = ops_.malloc(n_gdn * (al(conv_bytes_) + al(ssm_bytes_)) + hid_bytes + V * 4);
+    std::uint64_t p = c.dev;
     for (std::uint32_t li = 0; li < L; ++li) {
         if (ssm0[li] == 0) continue;
-        c.conv[li] = ops_.malloc(conv_bytes_);
-        c.ssm[li] = ops_.malloc(ssm_bytes_);
+        c.conv[li] = p;
+        p += al(conv_bytes_);
+        c.ssm[li] = p;
+        p += al(ssm_bytes_);
     }
-    c.hid = ops_.malloc(static_cast<std::uint64_t>(cfg.n_embd) * 4);
-    c.logits = ops_.malloc(V * 4);
+    c.hid = p;
+    p += hid_bytes;
+    c.logits = p;
 }
 
 void Engine::freeCkpt(Ckpt& c) {
@@ -179,13 +187,9 @@ void Engine::freeCkpt(Ckpt& c) {
         ops_.hostFree(c.host);
         c.host = nullptr;
         if (c.hid) ops_.free(c.hid);
-    } else {
-        for (DevPtr p : c.conv)
-            if (p) ops_.free(p);
-        for (DevPtr p : c.ssm)
-            if (p) ops_.free(p);
-        if (c.hid) ops_.free(c.hid);
-        if (c.logits) ops_.free(c.logits);
+    } else if (c.dev) {
+        ops_.free(c.dev);  // conv / ssm / hid / logits are slices of it
+        c.dev = 0;
     }
     c.conv.clear();
     c.ssm.clear();

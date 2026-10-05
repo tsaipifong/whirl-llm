@@ -93,6 +93,7 @@ struct Ckpt {
     DevPtr logits = 0;
     bool has_logits = true;
     void* host = nullptr;  // pinned host buffer (WHIRL_CKPT_HOST)
+    DevPtr dev = 0;        // the one VRAM allocation that conv / ssm / hid / logits are slices of
 };
 
 struct Cand {
