@@ -5,7 +5,8 @@
 //     attn_prefill_wmma vs a double-precision CPU softmax attention over the
 //     cache contents (tolerance; f16 WMMA paths looser);
 //   * bitwise invariances: attn_wsplit1 / attn_wsplit2 grouped == per-query (the
-//     prototype's checkAttnGroups), attn_kx == attn_prefill_wmma, head-range
+//     prototype's checkAttnGroups), attn_kx and attn_kg (f16, q8, q8v) ==
+//     attn_prefill_wmma, head-range
 //     split launches == one launch, attn_combine_q8 == attn_combine (+ its
 //     int8 copy == quantize_q8), attn_prep == rmsnorm + rope_neox + kv_store.
 // SPDX-License-Identifier: Apache-2.0
@@ -396,6 +397,36 @@ void testAttn(Ctx& c) {
                 c.sync();
                 c.rep.add(cmpExact("attn_kx" + fs + " == attn_prefill_wmma" + fs + tag, o2.down<float>(ref1.size()), ref1,
                                    Kind::invariant));
+            }
+            // attn_kg (f16 / q8 / q8v KV): GQA-grouped kernel == attn_prefill_wmma, for
+            // group 6 (24 / 4) and group 8 (24 / 3, the pool read with 3 KV heads),
+            // one launch and two head-range launches
+            for (const int nkv : {kKv, 3}) {
+                Buf rb(static_cast<std::size_t>(n) * kHeads * kHd * 4);
+                rb.zero();
+                hip::launch(c.fn("attn_prefill_wmma" + fs), {cdiv(n, 128), static_cast<unsigned>(kHeads), 1}, {256, 1, 1}, 0, c.s,
+                            dqp.p(), pool.args(), rb.p(), kHeads, nkv, kQStride, pos.p(), n, kScale, 0);
+                c.sync();
+                const auto ref = rb.down<float>(static_cast<std::size_t>(n) * kHeads * kHd);
+                const int grp = kHeads / nkv;
+                for (const auto& [name, np] : {std::pair{"attn_kg6", 6}, std::pair{"attn_kg4", 4}, std::pair{"attn_kg2", 2}}) {
+                    if (grp % np != 0) continue;
+                    auto fk = c.fnOpt(name + fs);
+                    if (!fk) continue;
+                    for (const int split : {1, 2}) {
+                        const int hp = kHeads / split;
+                        if (hp % np != 0) continue;
+                        Buf ob(static_cast<std::size_t>(n) * kHeads * kHd * 4);
+                        ob.zero();
+                        for (int h0 = 0; h0 < kHeads; h0 += hp)
+                            hip::launch(fk, {cdiv(n, 16), static_cast<unsigned>(hp / np), 1}, {static_cast<unsigned>(64 * np), 1, 1}, 0,
+                                        c.s, dqp.p(), pool.args(), ob.p(), kHeads, nkv, kQStride, pos.p(), n, kScale, h0);
+                        c.sync();
+                        c.rep.add(cmpExact(std::string(name) + fs + " == attn_prefill_wmma" + fs + " (group " + std::to_string(grp) +
+                                               (split > 1 ? ", 2 head-range launches)" : ")") + tag,
+                                           ob.down<float>(ref.size()), ref, Kind::invariant));
+                    }
+                }
             }
             {  // two head-range launches (h0 = 0, 12) == one launch
                 Buf out(static_cast<std::size_t>(n) * kHeads * kHd * 4);

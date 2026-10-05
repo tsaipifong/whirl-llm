@@ -347,6 +347,7 @@ PowerShell 中先用 `$env:WHIRL_KV = "q8v"` 設定再啟動程式。**一般使
 | `WHIRL_GEMMH=0` | 不用 f16 輸出的 prefill GEMM（位元相同） |
 | `WHIRL_GEMMHQ=1` | attention 投影也用 f16 輸出的 GEMM |
 | `WHIRL_ATTN_KX=0` | prefill attention 不用 K-exchange kernel（位元相同） |
+| `WHIRL_ATTN_KG=0` | prefill attention 不用依 GQA 分組的 kernel（位元相同） |
 | `WHIRL_GDN_SEQ=1` | DeltaNet prefill 改用逐步計算，不用分塊掃描 |
 | `WHIRL_GDN_V0=1` | 逐列的 DeltaNet decode 步驟 kernel（數值相同） |
 | `WHIRL_NAIVE_ATTN=1` | 參考用 attention 路徑 |
@@ -369,7 +370,7 @@ PowerShell 中先用 `$env:WHIRL_KV = "q8v"` 設定再啟動程式。**一般使
 |---|---|
 | `WHIRL_TOKENIZE_ONLY=1` | 印出提示的 token id 後停止 |
 | `WHIRL_PRINT_IDS=1` | 印出生成的 token id 與其 FNV-1a 雜湊 |
-| `WHIRL_PROFILE=1` | 各類運算的 GPU 時間；會扭曲速度數字（伺服器：1 或 2） |
+| `WHIRL_PROFILE=1` | 各類運算的 GPU 時間；會扭曲速度數字（`whirl bench`：每個 prefill 長度各一份；伺服器：1 或 2） |
 | `WHIRL_TRACE_TPS=N` | 每 N 個 token 印出該區間的 tok/s（stderr） |
 | `WHIRL_DUMP_LOGITS=FILE` | （不開 MTP）把每個位置 ≥ `WHIRL_DUMP_FROM` 的下一 token logits 以 f16 列寫出 |
 | `WHIRL_DUMP_FROM=N` | `WHIRL_DUMP_LOGITS` 寫出的第一個提示位置 |

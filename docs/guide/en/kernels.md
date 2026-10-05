@@ -437,6 +437,43 @@ instead of f32 for their element-wise consumers (+5.4…+5.8% and +0.6%).
   each keeps half of Oᵀ (64 VGPRs, no spill); the next K/V tile is prefetched into registers.
   Bit-identical. 120k: f16 KV 218 → 185 ms (+17.8%), q8v KV 247 → 198 ms (+25.0%); 32k +11%;
   ≤ 8k unchanged.
+- **`attn_kg`: GQA-grouped, direct loads (default for f16, q8v, q8 and q8h KV).** A per-op profile of the
+  0.1.2 build (Swift MXFP4-A, `whirl bench` with `WHIRL_PROFILE=1`) showed that every op class except
+  attention costs the same per token at every prompt length; attention grew from 0.015 ms/token (5% of
+  prefill) at 2k to 0.228 ms/token (46%) at 64k, at ~61–66 TFLOPS. `attn_kg` regroups the work of
+  `attn_kx` without changing one operation per query:
+  - one block = the query heads of one KV head (all 6 for Qwen3.8-27B, 4 of Ornith's 8) × 16 queries,
+    two waves per head as in `attn_kx` (keys split for Sᵀ, dimensions split for Oᵀ);
+  - no shared K/V tiles. K fragments are loaded from the cache straight into WMMA A registers; Vᵀ
+    fragments come from `global_load_tr_b128`, RDNA 4's transposing load: it transposes 8×8 16-bit
+    blocks across each group of 8 lanes, so each lane supplies one key row and receives exactly the
+    A-operand column it needs. The heads of one KV head read the same rows at the same time, so the
+    loads hit the cache. No in-register transposes, and one barrier per 32-key tile (the Sᵀ exchange)
+    instead of three;
+  - q8v: V is dequantized once per block (the same `(f16)q × s` multiply as everywhere else) into a
+    double-buffered LDS stage one tile ahead; the same barrier publishes it;
+  - q8 / q8h (`attn_kg6_q8` / `attn_kg4_q8`): K is dequantized from int8 in registers with the magic
+    number trick — `0x6400 | (b ^ 0x80)` is the f16 1152 + q, so subtracting 1152 and multiplying by
+    the scale gives q·s with one rounding, as packed f16 with `v_perm` to assemble the halves;
+    `#pragma clang fp contract(off)` keeps the compiler from fusing it into an FMA. Bit-identical to
+    `attn_kx_q8`; 225 VGPRs, 6 waves per SIMD (in practice one block per WGP). Probe at 61k:
+    `attn_kx_q8` 57.8 → `attn_kg6_q8` 72.1 TFLOPS (+24.7%); the straightforward `(_Float16)q * s`
+    conversion gained only 5%, which is why the magic-number form is used;
+  - the softmax scale 1/16 is a power of two, so the scores stay unscaled — (s − m)·(scale·log2 e)
+    rounds exactly like the (s·scale − m·scale)·log2 e that `__expf` evaluates — and the −inf selects
+    go away (exp2(−inf) = 0; key 0 is visible to every query, so the running max is finite after the
+    first tile). Tiles that every query of the block sees completely skip the mask.
+
+  Bit-identical to `attn_kx` (kernel-test invariants for groups 6 and 8 and head-range splits;
+  last-token logits identical to 0.1.2 at 4.9k–70.9k tokens on all three models, f16 and q8v).
+  Probe, 4096 queries per launch: f16, 24 / 4 heads 62–66 → 92–97 TFLOPS; Ornith's group 8 (4 heads
+  per block) 60–66 → 78–81; q8v 57–62 → 82–84. Without any K/V loads the same kernel reaches 123
+  TFLOPS, and 139 without the softmax as well, so what remains is the load data path and the serial
+  16-step Sᵀ chain that exactness requires. Lost (all bit-identical, all slower): Vᵀ through a shared
+  LDS stage for f16 (88 vs 93), K and V both through LDS (spills), P·V of tile j−1 interleaved with Sᵀ
+  of tile j (89), prefetching the next tile's K (−25%), two query groups per block (equal), longest
+  blocks first (−10% on the first chunk), 4-wave blocks for q8v (slower than `attn_kx_q8v`, not used),
+  prefill chunks of 8192 rows (−2% end to end).
 - Beyond 128k context the launch is split by head range (results unchanged; ~2% cost; never
   applied ≤ 128k) as a precaution after an unexplained `HipFailed` during a 256k prefill
   ([pitfalls.md](pitfalls.md#hip-256k)).

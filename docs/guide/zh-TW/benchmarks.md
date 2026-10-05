@@ -125,6 +125,32 @@ WHIRL 用預設值：`whirl serve MODEL`（4 個 slot，自動選 KV 格式與 p
 
 server 數字包含 tokenize 與 HTTP；同樣 `-ub` 下 llama-server 比 llama-bench 低約 10–13%，WHIRL server 比它的 CLI 低約 6–15%。
 
+### 3.3 換上依 GQA 分組的 attention kernel 之後的 prefill（未發布，v0.1.2 之後）
+
+對 v0.1.2 做逐類別 profile（`WHIRL_PROFILE=1 whirl bench`，Swift MXFP4-A）：隨 prompt 變長而增加的只有 full attention——2k 時每 token
+0.015 ms（prefill 的 5%）、32k 0.118（31%）、64k 0.228（46%）；GEMM（每 token 0.225 ms）、DeltaNet、norm 與 element-wise 運算都不變，GPU
+時間等於牆鐘時間（chunk 之間沒有 host 空檔）。新的 prefill attention kernel（`attn_kg`，[kernels.md](kernels.md#flash)）與舊版逐位元相同；
+下表全部是 `whirl bench`，除非另註 KV 為 f16，與 v0.1.2 執行檔交錯量測（除非另註為 3 輪中位數；min–max 差距 ≤ 1%）。
+
+| Prompt token 數 | Swift MXFP4-A v0.1.2 | **Swift 新版** | Ornith MXFP4 v0.1.2 | **Ornith 新版** |
+|---|---|---|---|---|
+| 2,048 | 3,502 | 3,555 (+1.5%) | 11,744 | 11,857 (+1.0%) |
+| 4,096 | 3,423 | 3,498 (+2.2%) | 11,539 | 11,807 (+2.3%) |
+| 16,384 | 3,019 | 3,186 (+5.5%) | 9,710 | 10,194 (+5.0%) |
+| 32,768 | 2,593 | 2,854 (+10.1%) | 7,978 | 8,569 (+7.4%) |
+| 65,536 | 2,017 | 2,351 (+16.6%) | 5,806 | 6,470 (+11.4%) |
+| 98,304 | 1,658 | 2,005 (+20.9%) | 4,589 | 5,189 (+13.1%) |
+| 131,072 | 1,411 | 1,745 (+23.6%) | 3,789 | 4,308 (+13.7%) |
+
+Swift 加 `WHIRL_KV=q8v`（dense 模型的 server 預設）：96k 1,589 → 1,885（+18.7%），128k 1,345 → 1,625（+20.9%）。server、單人、`--ctx-per-slot 262144`（256k slot）、q8h KV，Swift MXFP4-A（q8 / q8h 現在也走
+`attn_kg`）：128k 1,342 → 1,522（+13.4%），192k 1,021 → 1,177（+15.3%），256k 824 → 961（+16.6%）；每 token 時間仍為線性——0.657 / 0.850 /
+1.041 ms，每 64k 約增加 0.19 ms。Ornith 2k–64k 與 128k
+為 2 輪。Qwen3.8-27B UD-Q4_K_M（f16 KV，2 輪）：2k 1,689 → 1,677（-0.7%），32k 1,490 → 1,563（+4.9%），128k 1,003 → 1,159（+15.5%）。
+
+**平滑度。** 新 build 每 token 的 prefill 時間在七個長度（2k / 4k / 16k / 32k / 64k / 96k / 128k）上符合 t(n) = a + b·n：Swift f16 誤差在
+0.2% 內（a = 276.6 µs，每個上下文 token b = 2.27 ns），Swift q8v 也在 0.2% 內（277.2 µs、2.58 ns），Ornith 在 1.0% 內（80.1 µs、1.15 ns），
+只有它的 2k 點 +2.6%（單一不滿的 chunk）；各長度之間沒有階梯式跳動。
+
 ## 4. Decode — 主要情境：中文提問、中文說明、英文程式碼
 
 ![Decode，中文寫程式](../../images/bench_decode_zh.png)

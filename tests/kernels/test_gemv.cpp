@@ -13,6 +13,8 @@
 
 #include "cpu_ref.h"
 
+#include <cstdio>
+
 namespace kt {
 
 namespace {
@@ -57,6 +59,34 @@ void testGemv(Ctx& c) {
             std::vector<double> ry, rs;
             ref::gemvF64(wf, crows, ncols, x.data(), nt, ncols, ry, rs);
             c.rep.add(cmpTol("gemv_" + sfx + "_" + std::to_string(nt) + " " + m.name, got, ry, rs, 1e-4, 1e-6));
+        }
+
+        // f32 / f16 (no int8 GEMV): the multi-token instances gemv_<T>_4 / _8 must reproduce
+        // gemv_<T>_1 (the n = 1 decode path) bitwise per token row: matmul runs n = 2..16 as a
+        // composition of _8 / _4 / _1 (C-13), so verify == n = 1 depends on it.
+        if (m.type == QType::f32 || m.type == QType::f16) {
+            std::vector<float> ref1(static_cast<std::size_t>(kNt) * nrows);
+            Buf y1(static_cast<std::size_t>(nrows) * 4);
+            for (int t = 0; t < kNt; ++t) {
+                hip::launch(c.fn("gemv_" + sfx + "_1"), {cdiv(nrows, 8), 1, 1}, {256, 1, 1}, 0, c.s, w.p(), m.row_bytes,
+                            dx.p() + static_cast<DevPtr>(t) * ncols * 4, y1.p(), ncols, nrows, ncols, nrows, 0);
+                c.sync();
+                const auto r1 = y1.down<float>(static_cast<std::size_t>(nrows));
+                std::copy(r1.begin(), r1.end(), ref1.begin() + static_cast<std::ptrdiff_t>(t) * nrows);
+            }
+            for (int nt : {4, 8}) {
+                Buf y(static_cast<std::size_t>(nt) * nrows * 4);
+                hip::launch(c.fn("gemv_" + sfx + "_" + std::to_string(nt)), {cdiv(nrows, 8), 1, 1}, {256, 1, 1}, 0, c.s,
+                            w.p(), m.row_bytes, dx.p(), y.p(), ncols, nrows, ncols, nrows, 0);
+                c.sync();
+                const auto got = y.down<float>(static_cast<std::size_t>(nt) * nrows);
+                const std::vector<float> want(ref1.begin(), ref1.begin() + static_cast<std::ptrdiff_t>(nt) * nrows);
+                Result r = cmpExact("gemv_" + sfx + "_" + std::to_string(nt) + " == gemv_" + sfx + "_1 per token " + m.name,
+                                    got, want, Kind::invariant);
+                std::printf("  [info] gemv  gemv_%s_%d vs gemv_%s_1 per token (%s): %zu of %zu differ\n", sfx.c_str(), nt,
+                            sfx.c_str(), m.name.c_str(), r.mismatches, r.n);
+                c.rep.add(r);
+            }
         }
 
         if (c.k.gemvq[ti] == nullptr) continue;

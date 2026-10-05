@@ -503,6 +503,8 @@ DecodeResult specDecode(q::Model& model, const Tok& tok, u32 first, u32 n_prompt
     q::NgramPolicy ngp;
     if (opt.ngram) ngp.ng.norm = tok.crlfToLf();
     u32 ng_max = opt.ngram_max > 0 ? std::min(opt.ngram_max, q::max_ng_drafts) : q::max_ng_drafts;
+    // the unfused decode path snapshots row 0 only: more than 1 draft would restore an unwritten set
+    if (!model.fusedDecode()) ng_max = std::min<u32>(ng_max, 1);
     if (opt.ngram && ng_max > model.snap_sets) {
         // n-gram verifies need a recurrent-state snapshot set per draft: take them now
         // if they fit in free VRAM with room to spare, else draft at most what exists
@@ -725,6 +727,7 @@ void loadLog(q::Model& m, const q::LoadStats& stats) {
             static_cast<double>(stats.bytes) / (1024.0 * 1024.0 * 1024.0), stats.ms / 1000.0, static_cast<double>(stats.bytes) / (stats.ms * 1e6),
             static_cast<double>(mem.free) / (1024.0 * 1024.0 * 1024.0), static_cast<double>(mem.total) / (1024.0 * 1024.0 * 1024.0)));
     out(fmt("  KV cache: %s, %u tokens\n", m.kvName(), m.max_ctx));
+    if (envGet("LOAD_DEBUG")) out(fmt("  gdn beta/alpha contiguous: %u layers\n", stats.gdn_ba_contig));
 }
 
 std::string readPromptArg(const std::string& p) {
@@ -1121,6 +1124,10 @@ int cmdBench(const Args& a) {
         long_ids = tok.encode(text);
     }
     out("\n  prefill (tokens, ms, tok/s)" + std::string(has_mtp ? " - with the MTP block over the prompt, as chat runs it" : "") + ":\n");
+    // WHIRL_PROFILE: per-op-class GPU time of the last prefill run of each size
+    // (per-op events slow the run down; the printed tok/s is then not comparable)
+    q::Profile prof;
+    const bool profiling = envGet("PROFILE").has_value();
     Timer timer;
     for (u32 s : sizes) {
         if (s > long_ids.size()) continue;
@@ -1129,6 +1136,10 @@ int cmdBench(const Args& a) {
         const int reps = s <= 8192 ? 2 : 1;
         for (int rep = 0; rep < reps + 1; ++rep) {  // first run = warm-up
             model.reset();
+            if (profiling) {
+                prof.reset();
+                model.prof = rep == reps ? &prof : nullptr;
+            }
             timer.begin();
             std::size_t off = 0;
             while (off < pr.size()) {
@@ -1144,6 +1155,10 @@ int cmdBench(const Args& a) {
             if (rep > 0 || reps == 0) best = std::min(best, ms);
         }
         out(fmt("    prefill %6u tok: %9.1f ms  %8.1f tok/s\n", s, best, s * 1000.0 / best));
+        if (profiling) {
+            printProfile("prefill", prof, s);
+            model.prof = nullptr;
+        }
     }
     // decode
     out(fmt("\n  decode (%zu-token prompt, %u tokens, greedy):\n", dec_ids.size(), n_dec));

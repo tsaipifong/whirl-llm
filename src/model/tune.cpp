@@ -15,6 +15,7 @@
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <limits>
@@ -257,8 +258,13 @@ bool Model::checkGemvBitwise(std::string& log) {
             all.add(output);
         for (const Mat& w : all.slice()) {
             const std::size_t t = ti(w.ty) % n_types;
-            if (li < layers.size() && (done[t] || k.gemvq[t] == nullptr)) continue;
-            if (k.gemvq[t] == nullptr) continue;
+            // f32 / f16 have no int8 GEMV: n = 1 runs gemv_<t>_1 (f32 activations), n = 2..16 the
+            // f16 GEMM. They are checked too (C-13): the check FAILS on such files until the
+            // multi-token path is made bitwise (known bug; WHIRL_GEMV_BITWISE_FLOAT=warn reports
+            // without failing).
+            const bool flt = w.ty == GgmlType::f32 || w.ty == GgmlType::f16;
+            if (li < layers.size() && done[t]) continue;
+            if (k.gemvq[t] == nullptr && !flt) continue;
             done[t] = true;
             const std::size_t nr = w.nrows;
             std::vector<float> ref(max_small_batch * nr), got(max_small_batch * nr);
@@ -300,9 +306,11 @@ bool Model::checkGemvBitwise(std::string& log) {
                 gemv_r = saved;
                 gemv_w = saved_w;
             }
-            if (bad > 0) all_ok = false;
+            const char* fw = std::getenv("WHIRL_GEMV_BITWISE_FLOAT");
+            const bool warn_only = flt && fw != nullptr && std::strcmp(fw, "warn") == 0;
+            if (bad > 0 && !warn_only) all_ok = false;
             log += fmt("    %-7s %ux%u: multi-token / multi-row GEMV bitwise == 1-token: %s\n", tyName(w.ty).c_str(), w.nrows, w.ncols,
-                       bad == 0 ? "ok" : "FAIL");
+                       bad == 0 ? "ok" : (warn_only ? "FAIL (known bug C-13, warn only)" : "FAIL"));
         }
     }
     gemv_r = saved;
@@ -549,6 +557,9 @@ void loadOrTune(Model& m, const std::string& model_path, std::string& log) {
     if (auto v = envGet("GEMMH")) m.gemmh_on = *v != "0";
     if (auto v = envGet("GEMMHQ")) m.gemmhq_on = *v != "0";
     if (auto v = envGet("ATTN_KX")) m.attn_kx_on = *v != "0";
+    if (auto v = envGet("ATTN_KG")) m.attn_kg_on = *v != "0";
+    if (auto v = envGet("GDN_BA")) m.gdn_ba_on = *v != "0";
+    if (auto v = envGet("GDN_IN2")) m.gdn_in2_on = *v != "0";
     m.ffn_h16 = has_mx;
     // WHIRL_Q4_RELAXED=1: every non-bitwise prefill speedup for non-MXFP4 models too
     if (auto v = envGet("Q4_RELAXED"); v && *v != "0") {

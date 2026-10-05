@@ -363,6 +363,7 @@ Alternatives kept for A/B tests and numerics comparisons; the defaults are the t
 | `WHIRL_GEMMH=0` | no f16-output prefill GEMM (bitwise-equal) |
 | `WHIRL_GEMMHQ=1` | f16-output GEMM for the attention projections too |
 | `WHIRL_ATTN_KX=0` | prefill attention without the K-exchange kernel (bitwise-equal) |
+| `WHIRL_ATTN_KG=0` | prefill attention without the GQA-grouped kernel (bitwise-equal) |
 | `WHIRL_GDN_SEQ=1` | sequential DeltaNet prefill instead of the chunked scan |
 | `WHIRL_GDN_V0=1` | per-row DeltaNet decode step kernel (same values) |
 | `WHIRL_NAIVE_ATTN=1` | reference attention path |
@@ -385,7 +386,7 @@ Alternatives kept for A/B tests and numerics comparisons; the defaults are the t
 |---|---|
 | `WHIRL_TOKENIZE_ONLY=1` | print the prompt token ids and stop |
 | `WHIRL_PRINT_IDS=1` | print the generated token ids and their FNV-1a hash |
-| `WHIRL_PROFILE=1` | per-op-class GPU time; distorts speed numbers (server: 1 or 2) |
+| `WHIRL_PROFILE=1` | per-op-class GPU time; distorts speed numbers (`whirl bench`: per prefill size; server: 1 or 2) |
 | `WHIRL_TRACE_TPS=N` | print the window tok/s every N tokens (stderr) |
 | `WHIRL_DUMP_LOGITS=FILE` | (no MTP) next-token logits of every prompt position ≥ `WHIRL_DUMP_FROM` as f16 rows |
 | `WHIRL_DUMP_FROM=N` | first prompt position written by `WHIRL_DUMP_LOGITS` |

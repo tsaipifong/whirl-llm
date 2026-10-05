@@ -161,6 +161,37 @@ selected with `WHIRL_MTP=0 WHIRL_NGRAM=0` (no MTP) and `WHIRL_NGRAM=0` (MTP only
 The server numbers include tokenization and HTTP; llama-server is ~10–13% below llama-bench on the dense
 models with the same `-ub`, WHIRL's server ~6–15% below its CLI.
 
+### 3.3 Prefill after the GQA-grouped attention kernel (unreleased, since v0.1.2)
+
+A per-op profile of v0.1.2 (`WHIRL_PROFILE=1 whirl bench`, Swift MXFP4-A) showed that only full
+attention grows with the prompt: 0.015 ms/token (5% of prefill) at 2k, 0.118 (31%) at 32k, 0.228 (46%)
+at 64k, while the GEMMs (0.225 ms/token), DeltaNet, norms and element-wise ops stay flat and GPU time
+equals wall time (no host gaps between chunks). The new prefill attention kernel (`attn_kg`,
+[kernels.md](guide/en/kernels.md#flash)) is bit-identical to the old one; every number below is
+`whirl bench`, KV f16 unless noted, interleaved with the v0.1.2 executable (median, 3 rounds unless
+noted; min–max spreads ≤ 1%).
+
+| Prompt tokens | Swift MXFP4-A v0.1.2 | **Swift new** | Ornith MXFP4 v0.1.2 | **Ornith new** |
+|---|---|---|---|---|
+| 2,048 | 3,502 | 3,555 (+1.5%) | 11,744 | 11,857 (+1.0%) |
+| 4,096 | 3,423 | 3,498 (+2.2%) | 11,539 | 11,807 (+2.3%) |
+| 16,384 | 3,019 | 3,186 (+5.5%) | 9,710 | 10,194 (+5.0%) |
+| 32,768 | 2,593 | 2,854 (+10.1%) | 7,978 | 8,569 (+7.4%) |
+| 65,536 | 2,017 | 2,351 (+16.6%) | 5,806 | 6,470 (+11.4%) |
+| 98,304 | 1,658 | 2,005 (+20.9%) | 4,589 | 5,189 (+13.1%) |
+| 131,072 | 1,411 | 1,745 (+23.6%) | 3,789 | 4,308 (+13.7%) |
+
+Swift with `WHIRL_KV=q8v` (the dense server default): 96k 1,589 → 1,885 (+18.7%), 128k 1,345 → 1,625
+(+20.9%). Server, one user, `--ctx-per-slot 262144` (256k slot), q8h KV, Swift MXFP4-A (q8 / q8h
+now also use `attn_kg`): 128k 1,342 → 1,522 (+13.4%), 192k 1,021 → 1,177 (+15.3%), 256k 824 → 961
+(+16.6%); per-token time stays linear — 0.657 / 0.850 / 1.041 ms, about +0.19 ms per 64k. Ornith 2k–64k and 128k: 2 rounds. Qwen3.8-27B UD-Q4_K_M (f16 KV, 2 rounds): 2k 1,689 → 1,677
+(-0.7%), 32k 1,490 → 1,563 (+4.9%), 128k 1,003 → 1,159 (+15.5%).
+
+**Smoothness.** Per-token prefill time of the new build fits t(n) = a + b·n within 0.2% at all seven
+lengths (2k / 4k / 16k / 32k / 64k / 96k / 128k) for Swift f16 (a = 276.6 µs, b = 2.27 ns per context
+token) and Swift q8v (277.2 µs, 2.58 ns), and within 1.0% for Ornith (80.1 µs, 1.15 ns) except its 2k
+point (+2.6%, a single partial chunk); no step changes between lengths.
+
 ## 4. Decode — main scenario: Chinese question, Chinese explanation, English code
 
 ![Decode, zh coding](images/bench_decode_zh.png)

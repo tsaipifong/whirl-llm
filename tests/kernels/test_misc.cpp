@@ -659,6 +659,47 @@ void testMisc(Ctx& c) {
         }
     }
 
+    // ---------------- rmsnorm_x8h16(t): one norm -> fp8 (+sx) and f16, each bitwise
+    // equal to the unfused chain (rmsnorm -> qact_fp8 / qact_fp8t, rmsnorm -> f32_to_f16)
+    if (c.k.rmsnorm_x8h16 == nullptr || c.k.rmsnorm_x8h16t == nullptr || c.k.qact_fp8 == nullptr || c.k.qact_fp8t == nullptr) {
+        c.rep.skip("fp8", "rmsnorm_x8h16", "kernel not present");
+    } else {
+        for (const int E : {5120, 2048, 2064}) {
+            const std::vector<float> w = c.randu(E, 0.3f, 1.7f);
+            Buf dw(w);
+            for (const int n : {1, 17, 4096}) {
+                const std::size_t ne = static_cast<std::size_t>(n) * E, tl = ne + static_cast<std::size_t>(16) * E;
+                const std::vector<float> x = c.randn(ne, 2.f);
+                Buf dx(x), rn(ne * 4);
+                Buf r8(ne), r8t(tl), rsx(static_cast<std::size_t>(n) * 4), rsxt(static_cast<std::size_t>(n) * 4), r16(ne * 2);
+                Buf q8(ne), q8t(tl), sx(static_cast<std::size_t>(n) * 4), sxt(static_cast<std::size_t>(n) * 4), q16(ne * 2), q16t(ne * 2);
+                r8t.zero();
+                q8t.zero();
+                const unsigned nb = static_cast<unsigned>(n);
+                hip::launch(c.k.rmsnorm, {nb, 1, 1}, {256, 1, 1}, 0, c.s, dx.p(), dw.p(), rn.p(), E, E, E, eps);
+                hip::launch(c.k.qact_fp8, {nb, 1, 1}, {256, 1, 1}, 0, c.s, rn.p(), r8.p(), rsx.p(), E);
+                hip::launch(c.k.qact_fp8t, {nb, 1, 1}, {256, 1, 1}, 0, c.s, rn.p(), r8t.p(), rsxt.p(), E);
+                hip::launch(c.k.f32_to_f16, {cdiv(static_cast<std::uint64_t>(ne) / 4, 256), 1, 1}, {256, 1, 1}, 0, c.s, rn.p(), r16.p(),
+                            static_cast<int>(ne));
+                hip::launch(c.k.rmsnorm_x8h16, {nb, 1, 1}, {256, 1, 1}, 0, c.s, dx.p(), dw.p(), q8.p(), sx.p(), q16.p(), E, eps);
+                hip::launch(c.k.rmsnorm_x8h16t, {nb, 1, 1}, {256, 1, 1}, 0, c.s, dx.p(), dw.p(), q8t.p(), sxt.p(), q16t.p(), E, eps);
+                c.sync();
+                const std::string tag = " (E=" + std::to_string(E) + ", n=" + std::to_string(n) + ")";
+                const auto w16 = r16.down<std::uint8_t>(ne * 2);
+                const auto wsx = rsx.down<float>(static_cast<std::size_t>(n));
+                c.rep.add(cmpExact("rmsnorm_x8h16 q8 == rmsnorm + qact_fp8" + tag, q8.down<std::uint8_t>(ne), r8.down<std::uint8_t>(ne),
+                                   Kind::invariant));
+                c.rep.add(cmpExact("rmsnorm_x8h16 sx == qact_fp8" + tag, sx.down<float>(static_cast<std::size_t>(n)), wsx, Kind::invariant));
+                c.rep.add(cmpExact("rmsnorm_x8h16 q16 == rmsnorm + f32_to_f16" + tag, q16.down<std::uint8_t>(ne * 2), w16, Kind::invariant));
+                c.rep.add(cmpExact("rmsnorm_x8h16t q8 == rmsnorm + qact_fp8t" + tag, q8t.down<std::uint8_t>(tl), r8t.down<std::uint8_t>(tl),
+                                   Kind::invariant));
+                c.rep.add(cmpExact("rmsnorm_x8h16t sx == qact_fp8t" + tag, sxt.down<float>(static_cast<std::size_t>(n)),
+                                   rsxt.down<float>(static_cast<std::size_t>(n)), Kind::invariant));
+                c.rep.add(cmpExact("rmsnorm_x8h16t q16 == rmsnorm + f32_to_f16" + tag, q16t.down<std::uint8_t>(ne * 2), w16, Kind::invariant));
+            }
+        }
+    }
+
     // ---------------- MXFP4 x fp8 GEMMs
     {
         const std::vector<HostMat> mats = sampleMats(c, c.quick ? 512 : 2048);

@@ -52,6 +52,8 @@
 //   rmsnorm_q8(x, w, out, xq, xd, int n, float eps)
 //   rmsnorm_q8_rows(x, w, out, xq, xd, int n, float eps, RowIdx src)
 //   rmsnorm_x8 / rmsnorm_x16 / rmsnorm_x8t(x, w, u8* q, float* sx, n, eps)
+//   rmsnorm_x8h16 / rmsnorm_x8h16t(x, w, u8* q, float* sx, f16* q16, n, eps)
+//            (fp8 row-major / tiled + f16 row-major from one norm; optional)
 //   l2norm(float* x, int n, int stride, int tok_stride, float eps)
 //   add_inplace(a, b, n); silu_mul(a, b, n); silu_mul_q8(g, u, xq, xd, n)
 //   silu_mul_x8 / x16 / x8t(const float* g, const float* u, u8* q, sx, ncols)
@@ -74,10 +76,14 @@
 //            hd, n_rot, theta_scale, eps)
 //   attn_prefill_wmma[_q8|_q8v], attn_kx[_q8|_q8v](q, KvArgs, out, n_head,
 //            n_kv, q_stride, pos, n_tok, scale, int h0)
+//   attn_kg6 / attn_kg4 / attn_kg2[_q8|_q8v] (f16 / q8 / q8h / q8v KV; same arguments; grid
+//            (ceil(n_tok / 16), heads / NP), block 64 * NP, NP | n_head / n_kv)
 //   kv_store[_q8|_q8v](k, v, KvArgs, pos, int row)
 //  Gated DeltaNet:
 //   gdn_conv_seq(xin, state, w, out, ch, n_tok); gdn_gates(b, a, dt_bias, A,
 //            n, n_heads); gdn_conv_par(xin, state, w, out, ch, n_tok)
+//   gdn_gates_ba(const ba, b, a, dt_bias, A, n, n_heads): gdn_gates reading
+//            ba[t][2*n_heads] = [beta | alpha] (optional)
 //   gdn_conv_state(xin, state, ch, n_tok, float* snap, int snap_after)
 //   gdn_seq_128(qkv, g, beta, state, out, n_tok, n_k_heads, n_v_heads, dv,
 //            qkv_stride, scale, float* snap, int snap_after)
@@ -351,6 +357,7 @@ struct KernelTable {
 
     bool gv_grp = false;  // gemvq_<T> / ggemv* take GvArgs (gemv_grouped_abi present)
     PerType<F> gemv1{}, gemvq{}, get_rows{}, gemm{}, dequant_f16{};
+    PerType<F> gemv4{}, gemv8{};  // gemv_<T>_4 / _8 (f32 / f16 only): n = 2..16 bitwise == gemv1 per token
     Nt gemvq_nt{}, gemvq_nt_g{};
     std::array<Nt, 2> gemvq_mr{}, gemvq_mr_g{};      // [R/2 - 1][nt - 2][type], R = 2, 4
     std::array<Nt, kNGemvw> gemvw{}, gemvw_g{};      // [v][nt - 2][type], v = 1..8
@@ -369,7 +376,8 @@ struct KernelTable {
     F rmsnorm{}, l2norm{}, add_inplace{}, silu_mul{}, rope_neox{};
     F attn_decode{}, kv_store{}, attn_split{}, attn_combine{}, attn_prep{}, attn_combine_q8{};
     F attn_wsplit1{}, attn_wsplit2{}, attn_prefill_wmma{}, attn_kx{};
-    F gdn_conv_seq{}, gdn_gates{}, gdn_seq_128{}, f32_to_f16{}, gdn_gated_norm{};
+    F attn_kg6{}, attn_kg4{}, attn_kg2{};  // f16 / q8 / q8h / q8v KV (null if not built)
+    F gdn_conv_seq{}, gdn_gates{}, gdn_gates_ba{}, gdn_seq_128{}, f32_to_f16{}, gdn_gated_norm{};
     F argmax{}, quantize_q8{};
     F gdn_chunk_prep{}, gdn_chunk_scan{}, gdn_wprep{}, gdn_wscan8{};
     F rmsnorm_x8{}, rmsnorm_x16{}, silu_mul_x8{}, silu_mul_x16{}, gated_norm_x8{}, gated_norm_x16{};
@@ -381,6 +389,7 @@ struct KernelTable {
     F moe_logits_f32{}, moe_topk{}, moe_route{}, moe_gather_f16{}, moe_act_f16{}, moe_combine{};
     F qact_fp8{}, silu_mul_x8h{}, gdn_conv_l2n{}, gdn_conv_l2n_h{}, gdn_conv_state_h{}, gated_norm_x8h{};
     F silu_mul_x16h{}, gated_norm_x16h{};
+    F rmsnorm_x8h16{}, rmsnorm_x8h16t{};
     F qact_fp8t{}, rmsnorm_x8t{}, silu_mul_x8t{}, silu_mul_x8ht{}, gated_norm_x8t{}, gated_norm_x8ht{};
     F gemmh_f16{}, gemmhh_f16{};
     F topk_rows{};

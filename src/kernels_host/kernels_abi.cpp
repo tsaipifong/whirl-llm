@@ -134,6 +134,10 @@ KernelTable KernelTable::load(const hip::Module& m, KvFormat kv) {
     for (QType t : base_types) {
         const std::string s = sfx(t);
         k.gemv1[ti(t)] = L.req("gemv_" + s + "_1");
+        if (t == QType::f32 || t == QType::f16) {
+            k.gemv4[ti(t)] = L.opt("gemv_" + s + "_4");
+            k.gemv8[ti(t)] = L.opt("gemv_" + s + "_8");
+        }
         k.get_rows[ti(t)] = L.req("get_rows_" + s);
         k.gemm[ti(t)] = L.req("gemm3_" + s);
         if (t != QType::f16) k.dequant_f16[ti(t)] = L.req("dequant_f16_" + s);
@@ -249,6 +253,7 @@ KernelTable KernelTable::load(const hip::Module& m, KvFormat kv) {
         {&KernelTable::attn_wsplit1, "attn_wsplit1"},
         {&KernelTable::attn_wsplit2, "attn_wsplit2"},
         {&KernelTable::topk_rows, "topk_rows"},
+        {&KernelTable::gdn_gates_ba, "gdn_gates_ba"},
     };
     for (const Named& n : optional) k.*(n.f) = L.opt(n.name);
 
@@ -271,6 +276,13 @@ KernelTable KernelTable::load(const hip::Module& m, KvFormat kv) {
         k.attn_wsplit2 = L.opt("attn_wsplit2_q8");
     }
     k.attn_kx = L.opt(kv == KvFormat::q8v ? "attn_kx_q8v" : (kv == KvFormat::f16 ? "attn_kx" : "attn_kx_q8"));
+    {
+        // q8 and q8h share the int8 K/V layout, so both use the _q8 variants.
+        const std::string s = kv == KvFormat::q8v ? "_q8v" : (kv == KvFormat::f16 ? "" : "_q8");
+        k.attn_kg6 = L.opt("attn_kg6" + s);
+        k.attn_kg4 = L.opt("attn_kg4" + s);
+        k.attn_kg2 = L.opt("attn_kg2" + s);
+    }
     // vision: multi-section RoPE attention prep (same KV-format choice as attn_prep)
     k.attn_prep_m = L.opt(kv == KvFormat::q8v ? "attn_prep_m_q8v" : kv == KvFormat::q8h ? "attn_prep_m_q8h" : kv == KvFormat::q8 ? "attn_prep_m_q8" : "attn_prep_m");
     k.set_rpos = L.opt("set_rpos");
@@ -336,6 +348,8 @@ KernelTable KernelTable::load(const hip::Module& m, KvFormat kv) {
             {&KernelTable::gated_norm_x16h, "gated_norm_x16h"},
             {&KernelTable::qact_fp8t, "qact_fp8t"},
             {&KernelTable::rmsnorm_x8t, "rmsnorm_x8t"},
+            {&KernelTable::rmsnorm_x8h16, "rmsnorm_x8h16"},
+            {&KernelTable::rmsnorm_x8h16t, "rmsnorm_x8h16t"},
             {&KernelTable::silu_mul_x8t, "silu_mul_x8t"},
             {&KernelTable::silu_mul_x8ht, "silu_mul_x8ht"},
             {&KernelTable::gated_norm_x8t, "gated_norm_x8t"},

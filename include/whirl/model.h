@@ -190,6 +190,20 @@ struct Mat {
     std::uint64_t row_bytes = 0;
 };
 
+// True when b's rows directly follow a's in one allocation (same type and row
+// layout), so [a; b] can be read as one (a.nrows + b.nrows)-row matrix.
+inline bool rowsContiguous(const Mat& a, const Mat& b) {
+    return a.ptr != 0 && a.ty == b.ty && a.ncols == b.ncols && a.row_bytes == b.row_bytes && a.ref == 0 && b.ref == 0 &&
+           b.ptr == a.ptr + static_cast<std::uint64_t>(a.nrows) * a.row_bytes;
+}
+
+// [a; b] as one matrix (a's tune); only valid when rowsContiguous(a, b).
+inline Mat concatRows(const Mat& a, const Mat& b) {
+    Mat r = a;
+    r.nrows = a.nrows + b.nrows;
+    return r;
+}
+
 struct AttnW {
     Mat q, k, v, o;
     DevPtr q_norm = 0, k_norm = 0;
@@ -299,6 +313,8 @@ struct Profile {
 struct LoadStats {
     std::uint64_t bytes = 0;
     std::uint32_t tensors = 0;
+    // GDN layers whose ssm_beta / ssm_alpha were loaded into one block (beta rows then alpha rows)
+    std::uint32_t gdn_ba_contig = 0;
     double ms = 0;
 };
 
@@ -408,7 +424,7 @@ public:
     GemvR gemv_w_head = defaultGemvWHead();
 
     // ---- activations
-    DevPtr x = 0, h = 0, qf = 0, kv_k = 0, kv_v = 0, attn_out = 0, qkv = 0, conv_out = 0, z = 0, beta = 0, alpha = 0,
+    DevPtr x = 0, h = 0, qf = 0, kv_k = 0, kv_v = 0, attn_out = 0, qkv = 0, conv_out = 0, z = 0, beta = 0, alpha = 0, ba_buf = 0,
            gdn_out = 0, ffn_g = 0, ffn_u = 0, logits = 0, scores = 0, ids = 0, pos_buf = 0, out_tok = 0;
     DevPtr part_ml = 0, part_acc = 0;
     DevPtr x16 = 0, xq = 0, xd = 0;
@@ -429,6 +445,10 @@ public:
     bool gdn_wmma = false;
     bool act_fuse = true;
     bool attn_kx_on = true;
+    bool gdn_ba_on = true;   // n>16 GDN prefill: one [beta; alpha] GEMM + gdn_gates_ba (WHIRL_GDN_BA=0 off)
+    bool gdn_in2_on = true;  // n>16 GDN prefill: one norm -> fp8 (qkv / gate) + f16 x16b ([beta; alpha]) (WHIRL_GDN_IN2=0 off)
+    std::uint64_t x16_bytes = 0;  // x16 allocation size (x16b sub-buffer bound check)
+    bool attn_kg_on = true;  // GQA-grouped prefill attention (f16 / q8 / q8h / q8v KV; WHIRL_ATTN_KG=0 off)
     bool ffn_h16 = false;
     bool out_h16 = false;
     bool g8t = false;
@@ -641,6 +661,10 @@ public:
     void gemvLaunch(std::span<const Mat> ws, DevPtr xin, std::span<const DevPtr> ys, std::uint32_t n, std::int32_t acc);
     void matmulGroup(std::span<const Mat> ws, DevPtr xin, std::span<const DevPtr> ys, std::uint32_t n);
     void matmul(const Mat& w, DevPtr xin, DevPtr y, std::uint32_t n, bool accumulate);
+    void gemmF16(const Mat& w, DevPtr x16in, DevPtr y, std::uint32_t n, std::int32_t acc);
+    bool gdnIn2(const GdnW& g, std::uint32_t n) const;
+    // x16b: f16 sub-buffer of x16 past the fp8 rows (tiled fp8 pads to 16 rows), 256-aligned
+    std::uint64_t x16bOff() const { return ((static_cast<std::uint64_t>((max_batch + 15) / 16 * 16) * cfg.n_embd) + 255) & ~std::uint64_t(255); }
     void run(std::uint32_t n);
 
 private:
@@ -662,6 +686,7 @@ private:
     // most tokens of the int8 GEMV path in the current forward
     std::uint32_t gvMax() const { return small_max > max_small_batch ? small_max : gemv_max; }
     void gemvKernels(std::span<const Mat> ws, std::span<const DevPtr> ys, std::uint32_t n, std::int32_t acc, DevPtr xqp, DevPtr xdp);
+    bool floatGemvN(const Mat& w, std::uint32_t n) const;
     bool gdnAbFusable(const GdnW& g) const;
     void rmsnormQ8(DevPtr xin, DevPtr w, DevPtr out, std::uint32_t n);
     void elementwise(hip::Function f, DevPtr a, DevPtr b, std::uint32_t n);
