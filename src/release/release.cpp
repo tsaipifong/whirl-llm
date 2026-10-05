@@ -326,6 +326,7 @@ constexpr EnvDoc k_env[] = {
     {"Speculative decoding (output always equals plain greedy)", "DRAFT_HEAD=q4", "Q4_K draft head instead of the 2-bit one", C | B | S},
     {"Speculative decoding (output always equals plain greedy)", "MTP_FULLHEAD=1", "drafts use the full output head", C | B | S},
     {"Speculative decoding (output always equals plain greedy)", "DRAFT_VOCAB=off|64k|48k|FILE|N", "draft head over a frequency subset of the vocabulary (default: the embedded 64k subset on dense qwen35 models with a 248320-token vocabulary; off = full head; 48k = draft_vocab\\subset_48k.bin next to the exe; FILE = uint32 ids), or the first N rows", C | S},
+    {"Speculative decoding (output always equals plain greedy)", "DRAFT_WINDOW=W, DRAFT_WINDOW_MIN=N", "MTP draft attention over the first 256 + last W positions once the context reaches N (default 65536); W = 0: off", C | S},
     {"Speculative decoding (output always equals plain greedy)", "NGRAM=0", "no n-gram (prompt-lookup) drafts", C | B | S},
     {"Speculative decoding (output always equals plain greedy)", "NGRAM_MIN=N", "minimum matched suffix for an n-gram draft (default 3)", C | B | S},
     {"Speculative decoding (output always equals plain greedy)", "NGRAM_MAX=N", "most n-gram drafts per cycle (default 15)", C | B | S},

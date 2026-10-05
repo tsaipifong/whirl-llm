@@ -198,6 +198,14 @@ void testDraftVocab() {
           "draft vocab: embedded 64k subset (65536 ascending ids < 248320, specials included)");
 }
 
+void testDraftWindowArg() {
+    check(q::draftWindowArg(0, 65536) == 0, "draft window: W = 0 is off");
+    check(q::draftWindowArg(8192, 65536) == (128 | 64 << 16), "draft window: W / 64 | threshold / 1024 << 16");
+    check(q::draftWindowArg(100, 0) == 2, "draft window: W rounded up to 64");
+    check((q::draftWindowArg(1u << 30, 1u << 30) & 0xffff) == 0xffff && (q::draftWindowArg(1u << 30, 1u << 30) >> 16) == 0x7fff,
+          "draft window: fields clamped");
+}
+
 void testNgram() {
     q::Ngram ng;
     // history: "1 2 3 4 5 6 7 8 9" then "... 1 2 3" -> drafts 4 5 6 ...
@@ -426,6 +434,7 @@ int main() {
     testDraftModel();
     testNgram();
     testDraftVocab();
+    testDraftWindowArg();
     testCycleCost();
     testSlotAccept();
     testAllocDrafts();

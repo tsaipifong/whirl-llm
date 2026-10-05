@@ -217,7 +217,7 @@ struct KvArgs {
     DevPtr ptab = 0;
     DevPtr kvbase = 0;
     std::int32_t tab0 = 0;
-    std::int32_t pad = 0;
+    std::int32_t win = 0;  // attn_wsplit*: MTP draft window (qwen35::draftWindowArg), 0 = off
 };
 static_assert(sizeof(KvArgs) == 56);
 

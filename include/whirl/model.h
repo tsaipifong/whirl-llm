@@ -469,6 +469,10 @@ public:
     bool all_logits = false;
     std::uint32_t snap_rows = 0;
     std::uint32_t draft_vocab = 0;  // WHIRL_DRAFT_VOCAB=N: the first N rows only (old experiment)
+    // WHIRL_DRAFT_WINDOW / _MIN: MTP draft attention over the first 256 + the last W positions once
+    // the context reaches draft_window_min (0 = off); the trunk and verify always see everything
+    std::uint32_t draft_window = 0;
+    std::uint32_t draft_window_min = 65536;
     float draft_p_min = 0;
     std::uint32_t draft_n_min = 0;
     std::optional<Mat> draft_head;
@@ -476,6 +480,7 @@ public:
     // draft-head vocabulary subset (setDraftVocab): rows of draft_d2 and their token ids on the device
     std::uint32_t draft_rows = 0;
     std::optional<DevPtr> draft_map;
+    std::int32_t attn_win = 0;  // KvArgs::win of the current attnBlock (set around the MTP calls only)
     std::uint32_t moe_bn_force = 0;
     std::vector<std::int32_t>* moe_dump = nullptr;
     std::uint32_t ff_scratch = 0;
@@ -775,6 +780,14 @@ inline bool draftVocabDefaultFits(bool moe, std::uint32_t n_vocab) { return !moe
 // the embedded 64k subset (data/draft_vocab/subset_64k.bin, built by whirl-cloud tools/vocab_subset);
 // defined in draft_vocab_embed.cpp (whirl_model only)
 std::vector<std::uint32_t> embeddedDraftVocab64k();
+// KvArgs::win for the MTP draft attention window: W / 64 (rounded up, <= 65535) in the low 16
+// bits, the context threshold / 1024 in the high bits; 0 (off) for W = 0.
+inline std::int32_t draftWindowArg(std::uint32_t w, std::uint32_t min_ctx) {
+    if (w == 0) return 0;
+    const std::uint32_t lo = std::min<std::uint32_t>((w + 63) / 64, 0xffffu);
+    const std::uint32_t hi = std::min<std::uint32_t>(min_ctx / 1024, 0x7fffu);
+    return static_cast<std::int32_t>(lo | hi << 16);
+}
 
 // Draft count in [1, max] maximizing sum(E) / T (see the prototype notes).
 std::uint32_t pickDrafts(std::span<const DraftAccept* const> accepts, const DraftTiming& timing, std::uint32_t max,

@@ -479,6 +479,8 @@ int serveMain(int argc, char** argv, const char* program) {
         // 48k / <file> = frequency subset file, N = the first N rows (old experiment), off = full head
         const qwen35::DraftVocabChoice draft_vocab = qwen35::draftVocabChoice(env("DRAFT_VOCAB"), qwen35::exeDirectory());
         if (draft_vocab.kind == qwen35::DraftVocabChoice::Kind::first_n) model.draft_vocab = draft_vocab.n;
+        if (auto v = env("DRAFT_WINDOW")) model.draft_window = static_cast<std::uint32_t>(std::stoul(*v));
+        if (auto v = env("DRAFT_WINDOW_MIN")) model.draft_window_min = static_cast<std::uint32_t>(std::stoul(*v));
         if (env("GEMV_R") || env("GEMV_W") || env("GEMV_WH"))
             logW("WHIRL_GEMV_R / WHIRL_GEMV_W / WHIRL_GEMV_WH are not supported by whirl-server (ignored)");
         model.use_graph = false;

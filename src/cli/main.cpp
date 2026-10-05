@@ -680,6 +680,8 @@ void applyRuntimeEnv(q::Model& m) {
     if (auto v = envU32("GEMV_MAX")) m.gemv_max = std::clamp<u32>(*v, 1, q::max_small_batch);
     if (envGet("NO_GRAPH")) m.use_graph = false;
     if (envGet("NO_FUSE")) m.no_fuse = true;
+    if (auto v = envU32("DRAFT_WINDOW")) m.draft_window = *v;
+    if (auto v = envU32("DRAFT_WINDOW_MIN")) m.draft_window_min = *v;
     if (envGet("NAIVE_ATTN")) m.naive_attn = true;
     if (auto v = envGet("ATTN_WIDE"); v && *v == "0") m.attn_wide = false;
     if (auto v = envU32("MOE_BN")) m.moe_bn_force = *v;

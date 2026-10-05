@@ -457,7 +457,8 @@ void Model::attnBlock(const AttnW& a, const KvLayer& lkv, u32 n) {
     const u32 hd = cfg.head_dim;
     const bool batched = bplan != nullptr || mtp_batch;
     const DevPtr kvb = batched ? kvbase_buf : 0;
-    const KvArgs kva = kvArgs(lkv, kvb, kv_off);
+    KvArgs kva = kvArgs(lkv, kvb, kv_off);
+    kva.win = attn_win;  // 0 except for the MTP drafts (only attn_wsplit reads it)
     {
         const Mat ws[3] = {a.q, a.k, a.v};
         const DevPtr ys[3] = {qf, kv_k, kv_v};
@@ -862,7 +863,9 @@ void Model::mtpEnqueue(DevPtr hidden, std::span<const u32> tokens, DevPtr dev_to
         rmsnormQ8(x, mw.attn_norm, h, n);
     else
         rmsnorm(x, mw.attn_norm, h, E, n, E, E);
+    attn_win = draftWindowArg(draft_window, draft_window_min);  // drafts only: sink + last W positions
     attnBlock(mw.attn, mtpKv(), n);
+    attn_win = 0;
     if (mw.moe)
         moeBlock(mw.post_norm, mw.ffn_gate, mw.ffn_up, mw.ffn_down, *mw.moe, n);
     else
@@ -1099,7 +1102,9 @@ void Model::mtpBatchStepEx(std::span<const MSeg> segs, u32 r, bool draft) {
     rmsnorm(hidden, mw.hnorm, mtp_cat + E * 4, static_cast<u32>(E), n, static_cast<u32>(E), static_cast<u32>(2 * E));
     matmul(mw.eh_proj, mtp_cat, x, n, false);
     rmsnormQ8(x, mw.attn_norm, h, n);
+    attn_win = draftWindowArg(draft_window, draft_window_min);  // drafts only: sink + last W positions
     attnBlock(mw.attn, mtpKv(), n);
+    attn_win = 0;
     if (mw.moe)
         moeBlock(mw.post_norm, mw.ffn_gate, mw.ffn_up, mw.ffn_down, *mw.moe, n);
     else

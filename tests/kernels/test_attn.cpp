@@ -108,8 +108,9 @@ double kvVal(const std::vector<std::uint16_t>& f16, const std::vector<std::int8_
 }
 
 // CPU softmax attention of query rows (positions qpos[t]) against keys 0..qpos[t].
+// win_lo > 0: MTP draft window, keys [256, win_lo) are not attended (sink 256 + window from win_lo)
 void attnRef(const HostKv& h, const Pool& p, const std::vector<float>& q, const std::vector<int>& qpos,
-             const std::vector<int>& rows, std::vector<double>& out, std::vector<double>& scale) {
+             const std::vector<int>& rows, std::vector<double>& out, std::vector<double>& scale, int win_lo = 0) {
     const int n = static_cast<int>(rows.size());
     out.assign(static_cast<std::size_t>(n) * kHeads * kHd, 0.0);
     scale.assign(out.size(), 0.0);
@@ -125,7 +126,7 @@ void attnRef(const HostKv& h, const Pool& p, const std::vector<float>& q, const 
                 const std::size_t base = (static_cast<std::size_t>(p.prow(pp)) * kKv + kvh) * kHd;
                 double d = 0;
                 for (int i = 0; i < kHd; ++i) d += static_cast<double>(qv[i]) * kvVal(h.k16, h.k8, h.ks, base + i);
-                s[static_cast<std::size_t>(pp)] = d * kScale;
+                s[static_cast<std::size_t>(pp)] = pp >= 256 && pp < win_lo ? -INFINITY : d * kScale;
                 m = std::max(m, s[static_cast<std::size_t>(pp)]);
             }
             double l = 0;
@@ -328,6 +329,42 @@ void testAttn(Ctx& c) {
                                      rs, 1e-2, 1e-4));
                 }
             }
+        }
+        // ---- MTP draft window (KvArgs::win = W / 64 | threshold / 1024 << 16): a window that reaches
+        // the sink, or a context below the threshold, gives the same bits as no window; a narrow
+        // window (sink 256 + last 256 from a 64-aligned start) matches the CPU over those keys
+        if (auto fw1 = c.fnOpt("attn_wsplit1" + fs)) {
+            const std::vector<int> pv1 = {L - 1};
+            Buf dp1(pv1);
+            wk::AwGroups g1;
+            g1.first[0] = 0;
+            g1.count[0] = 1;
+            auto winArg = [](int w, int min_ctx) { return ((w + 63) / 64) | ((min_ctx / 1024) << 16); };
+            auto run = [&](int win) {
+                ml.zero();
+                acc.zero();
+                wk::KvArgs a = pool.args();
+                a.win = win;
+                hip::launch(fw1, {kKv, static_cast<unsigned>(ns), 1}, {128, 1, 1}, 0, c.s, dq.p(), a, ml.p(), acc.p(), kHeads, kKv,
+                            kQStride, dp1.p(), kScale, DevPtr{0}, g1);
+                c.sync();
+                return std::pair<std::vector<float>, std::vector<float>>{ml.down<float>(static_cast<std::size_t>(ns) * kHeads * 2),
+                                                                         acc.down<float>(static_cast<std::size_t>(ns) * kHeads * kHd)};
+            };
+            const auto base = run(0);
+            const auto all = run(winArg(L, 0));            // W >= context: the window reaches the sink
+            const auto below = run(winArg(256, L + 1024));  // context below the threshold
+            c.rep.add(cmpExact("attn_wsplit1 draft window reaching the sink == off (ml)" + tag, all.first, base.first, Kind::invariant));
+            c.rep.add(cmpExact("attn_wsplit1 draft window reaching the sink == off (acc)" + tag, all.second, base.second, Kind::invariant));
+            c.rep.add(cmpExact("attn_wsplit1 draft window below threshold == off (ml)" + tag, below.first, base.first, Kind::invariant));
+            c.rep.add(cmpExact("attn_wsplit1 draft window below threshold == off (acc)" + tag, below.second, base.second, Kind::invariant));
+            const int w0 = std::max(256, (L - 256) & ~63);
+            run(winArg(256, 0));
+            const std::vector<float> out = combine(1);
+            std::vector<double> ro, rs;
+            attnRef(h, pool, q, pv1, {0}, ro, rs, w0);
+            c.rep.add(cmpTol("attn_wsplit1 draft window (sink 256 + keys from " + std::to_string(w0) + ") + combine vs CPU" + tag, out, ro, rs,
+                             1e-2, 1e-4));
         }
         // ---- prefill attention: n queries at L-n .. L-1
         {
