@@ -94,8 +94,8 @@ int main(int argc, char** argv) {
         // gfx1151 stores packed int8 scale words; the CPU references follow the code object
         kt::ref::setXdSum(c.k.caps.xd_sum);
         const auto& cp = c.k.caps;
-        std::printf("caps: fp8_gemm %d, kv_q8v %d, kv_q8h %d, gemvw %d, gdn_replay %d, mrope %d, xd_sum %d, attn_group1 %d\n", cp.fp8_gemm,
-                    cp.kv_q8v, cp.kv_q8h, cp.gemvw, cp.gdn_replay, cp.mrope, cp.xd_sum, cp.attn_group1);
+        std::printf("caps: fp8_gemm %d, kv_q8v %d, kv_q8h %d, gemvw %d, gdn_replay %d, mrope %d, xd_sum %d, attn_group1 %d, draft_window %d\n",
+                    cp.fp8_gemm, cp.kv_q8v, cp.kv_q8h, cp.gemvw, cp.gdn_replay, cp.mrope, cp.xd_sum, cp.attn_group1, cp.draft_window);
         c.s = whirl::hip::streamCreate(false);  // blocking: ordered with the null-stream copies / memsets
     } catch (const std::exception& e) {
         std::printf("setup failed: %s\n", e.what());

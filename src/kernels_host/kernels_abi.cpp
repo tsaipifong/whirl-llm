@@ -135,6 +135,7 @@ Caps Caps::probe(const hip::Module& m) {
     c.mrope = L.opt("attn_prep_m") != nullptr;
     c.xd_sum = L.opt("whirl_cap_xd_sum") != nullptr;
     c.attn_group1 = L.opt("whirl_cap_attn_group1") != nullptr;
+    c.draft_window = L.opt("whirl_cap_no_draft_window") == nullptr;
     return c;
 }
 

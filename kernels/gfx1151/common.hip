@@ -67,8 +67,12 @@ __device__ __forceinline__ float pk_make(float d, int sum) {
 //                         (scale + block sum), not plain f32 scales
 //   whirl_cap_attn_group1 attn_wsplit1 query groups must hold one query (the
 //                         gfx11 WMMA P.V is not bitwise invariant otherwise)
+//   whirl_cap_no_draft_window attn_wsplit* ignore KvArgs::win (the MTP draft
+//                         window is not implemented here; drafts attend every
+//                         position, the verified output is unaffected)
 extern "C" __global__ void whirl_cap_xd_sum() {}
 extern "C" __global__ void whirl_cap_attn_group1() {}
+extern "C" __global__ void whirl_cap_no_draft_window() {}
 
 __device__ __forceinline__ int warp_sum_i(int v) {
 #pragma unroll
