@@ -266,6 +266,23 @@ bool Model::h16Out(const Mat& w, u32 n, std::uint8_t cls) const {
         case ActIn::fp8:
             return k.gemm8h[0] != nullptr;
         case ActIn::f16:
+            // Radeon 8060S: decided by the kernel set and the tuner's candidate list, never by
+            // the tuned choices, so the output (f16 intermediates or not) does not depend on
+            // autotune timings. The gfx1151 code object has no h16 fused / dequant GEMM, so
+            // this is off for quantized weights while those are candidates.
+            if (arch == hip::Arch::gfx1151) {
+                for (u32 cj = 0; cj < n_choices && cj < 64; ++cj) {
+                    if ((tune_mask & (1ull << cj)) == 0) continue;
+                    if (cj >= 2 * gemm_cfgs.size()) {
+                        const std::size_t si = cj - 2 * gemm_cfgs.size();
+                        if (k.gemms[si][ti(w.ty)] == nullptr || w.ncols % 256 != 0) continue;  // not a candidate (= tune.cpp)
+                        if (k.gemmsh[si][ti(w.ty)] == nullptr) return false;
+                        continue;
+                    }
+                    if (!((cj >= gemm_cfgs.size() || w.ty == GgmlType::f16) && k.gemmch[cj % gemm_cfgs.size()] != nullptr)) return false;
+                }
+                // (and the table must agree: a cached table may predate the candidate list)
+            }
             // every bucket (not just n's), so the choice is the same for a request's
             // solo chunks and a segmented forward of any total size
             for (std::uint8_t choice : w.tune) {
