@@ -32,6 +32,21 @@ std::uint32_t byteToCodePoint(int b) {
 }
 
 // names that llama.cpp always treats as control tokens
+// value of one hex digit, -1 if c is not [0-9a-fA-F]
+int hexDigit(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+// byte value of a "<0xNN>" byte token, -1 if the text is not exactly that form
+int byteTokenValue(std::string_view t) {
+    if (t.size() != 6 || t.substr(0, 3) != "<0x" || t[5] != '>') return -1;
+    const int hi = hexDigit(t[3]), lo = hexDigit(t[4]);
+    return hi < 0 || lo < 0 ? -1 : hi * 16 + lo;
+}
+
 bool controlLookingName(std::string_view t) {
     static constexpr std::string_view names[] = {
         "<|eot_id|>", "<|im_end|>", "<|end|>", "<end_of_turn>", "<|endoftext|>", "<|end_of_text|>",
@@ -99,6 +114,10 @@ Tokenizer Tokenizer::fromGguf(const gguf::File& f) {
             t.types_[i] != TokenType::unused)
             t.types_[i] = TokenType::control;
     }
+    // byte tokens must be exactly "<0xNN>": piece() decodes them without further checks
+    for (std::size_t i = 0; i < tokens.size(); ++i)
+        if (t.types_[i] == TokenType::byte && byteTokenValue(tokens[i]) < 0)
+            throw TokenizerError("malformed byte token at id " + std::to_string(i) + " (expected <0xNN>)");
 
     if (f.has("tokenizer.ggml.merges")) {
         const auto merges = f.stringArray("tokenizer.ggml.merges");
@@ -326,8 +345,9 @@ std::string Tokenizer::piece(TokenId id, bool special) const {
         }
         case TokenType::byte: {
             // <0xXX> byte tokens are not used by byte-level BPE vocabularies
-            if (t.size() == 6 && t.substr(0, 3) == "<0x") return std::string(1, static_cast<char>(std::stoi(std::string(t.substr(3, 2)), nullptr, 16)));
-            return std::string();
+            // (validated at load, so the fallback only guards hand-built tokenizers)
+            const int v = byteTokenValue(t);
+            return v < 0 ? std::string() : std::string(1, static_cast<char>(v));
         }
         default: return std::string();  // unused / undefined
     }

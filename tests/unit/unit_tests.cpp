@@ -5,6 +5,7 @@
 #include "whirl/common.h"
 #include "whirl/gguf.h"
 #include "whirl/json.h"
+#include "whirl/tokenizer.h"
 #include "whirl/unicode.h"
 
 #include <cstdio>
@@ -187,6 +188,55 @@ std::vector<std::uint8_t> makeGguf(std::uint32_t version, std::uint32_t alignmen
     while ((g.b.size() - data) % alignment) g.b.push_back(0);
     for (int i = 0; i < 68; ++i) g.b.push_back(static_cast<std::uint8_t>(i));
     return g.b;
+}
+
+// ---------------------------------------------------------------------------
+// minimal tokenizer metadata (no tensors): vocab {"a", "b", byte_text} with byte_text typed as a byte token
+std::vector<std::uint8_t> makeTokenizerGguf(std::string_view byte_text) {
+    GgufBuilder g;
+    g.put<std::uint32_t>(0x46554747);
+    g.put<std::uint32_t>(3);
+    g.put<std::uint64_t>(0);  // tensors
+    g.put<std::uint64_t>(4);  // kv
+    auto key = [&](std::string_view k, gguf::ValueType t) {
+        g.str(k);
+        g.put<std::uint32_t>(static_cast<std::uint32_t>(t));
+    };
+    key("tokenizer.ggml.model", gguf::ValueType::string), g.str("gpt2");
+    key("tokenizer.ggml.pre", gguf::ValueType::string), g.str("qwen35");
+    key("tokenizer.ggml.tokens", gguf::ValueType::array), g.put<std::uint32_t>(8), g.put<std::uint64_t>(3), g.str("a"),
+        g.str("b"), g.str(byte_text);
+    key("tokenizer.ggml.token_type", gguf::ValueType::array), g.put<std::uint32_t>(5), g.put<std::uint64_t>(3),
+        g.put<std::int32_t>(1), g.put<std::int32_t>(1), g.put<std::int32_t>(6);
+    while (g.b.size() % 32) g.b.push_back(0);
+    return g.b;
+}
+
+void testTokenizerByteTokens() {
+    auto load = [](std::string_view byte_text) {
+        const auto bytes = makeTokenizerGguf(byte_text);
+        const gguf::File f = gguf::File::parse(bytes);
+        return Tokenizer::fromGguf(f);
+    };
+    {
+        const Tokenizer t = load("<0x41>");
+        CHECK_EQ(t.piece(2), std::string("A"));
+        CHECK_EQ(t.piece(0), std::string("a"));
+    }
+    CHECK_EQ(load("<0xfF>").piece(2), std::string("\xFF"));
+    CHECK_EQ(load("<0x00>").piece(2), std::string(1, '\0'));
+    // malformed byte tokens are rejected at load with a TokenizerError (std::stoi used to throw
+    // invalid_argument on decode, or silently mis-decode "<0x-1>" / "<0x1Z>")
+    for (std::string_view bad : {"<0xZZ>", "<0x-1>", "<0x1Z>", "<0x+1>", "<0x 1>", "<0x41", "<0x41]", "<0x041>", "0x41>>", ""}) {
+        bool tokenizer_error = false;
+        try {
+            (void)load(bad);
+        } catch (const TokenizerError&) {
+            tokenizer_error = true;
+        } catch (...) {
+        }
+        CHECK(tokenizer_error);
+    }
 }
 
 void testGguf() {
@@ -432,6 +482,7 @@ int main() {
     testUnicode();
     testGguf();
     testGgufHardening();
+    testTokenizerByteTokens();
     testChat();
     std::printf("unit tests: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
