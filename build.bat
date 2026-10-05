@@ -8,12 +8,13 @@ if "%CFG%"=="" set CFG=Release
 set BUILD_DIR=%~dp0build\%CFG%
 if defined VSCMD_VER goto :have_vs
 rem find vcvars64.bat via vswhere (any edition with the C++ x64 tools:
-rem Community / Professional / Enterprise / BuildTools), else the old fixed path
+rem Community / Professional / Enterprise / BuildTools; VS 2022 only, HIP clang with
+rem the VS 2026 STL is unverified), else the old fixed path
 set "VCVARS="
 set "VSINST="
 set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
 if not exist "%VSWHERE%" goto :vs_fallback
-for /f "usebackq delims=" %%i in (`"%VSWHERE%" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSINST=%%i"
+for /f "usebackq delims=" %%i in (`"%VSWHERE%" -latest -version [17.0^,18.0^) -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSINST=%%i"
 if not defined VSINST goto :vs_fallback
 if exist "%VSINST%\VC\Auxiliary\Build\vcvars64.bat" set "VCVARS=%VSINST%\VC\Auxiliary\Build\vcvars64.bat"
 :vs_fallback

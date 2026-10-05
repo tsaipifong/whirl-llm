@@ -33,7 +33,9 @@ build.bat Release
 `build.bat` calls `vcvars64.bat` if needed, configures CMake with Ninja into `build\Release` and
 builds at low CPU priority. It finds `vcvars64.bat` with `vswhere`, so any Visual Studio 2022
 edition with the C++ x64 tools works (Community, Professional, Enterprise or Build Tools); running
-from a Developer Command Prompt skips the lookup. Outputs in `build\Release\`:
+from a Developer Command Prompt skips the lookup. The lookup only accepts Visual Studio 2022
+(17.x): HIP clang with the Visual Studio 2026 STL has not been verified, so a machine that has both
+uses 2022. Outputs in `build\Release\`:
 
 | File | What |
 |---|---|

@@ -28,7 +28,7 @@ cd whirl-llm
 build.bat Release
 ```
 
-`build.bat` 視需要呼叫 `vcvars64.bat`，以 Ninja 把 CMake 設定到 `build\Release`，並以低 CPU 優先權建置。它用 `vswhere` 尋找 `vcvars64.bat`，所以任何裝有 C++ x64 工具的 Visual Studio 2022 版本（Community、Professional、Enterprise 或 Build Tools）都可以；從 Developer Command Prompt 執行則略過尋找。
+`build.bat` 視需要呼叫 `vcvars64.bat`，以 Ninja 把 CMake 設定到 `build\Release`，並以低 CPU 優先權建置。它用 `vswhere` 尋找 `vcvars64.bat`，所以任何裝有 C++ x64 工具的 Visual Studio 2022 版本（Community、Professional、Enterprise 或 Build Tools）都可以；從 Developer Command Prompt 執行則略過尋找。尋找只接受 Visual Studio 2022（17.x）：HIP clang 搭配 Visual Studio 2026 的 STL 尚未驗證，所以兩者都裝的機器會使用 2022。
 `build\Release\` 的產出：
 
 | 檔案 | 用途 |
