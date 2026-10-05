@@ -42,6 +42,23 @@ extern "C" __global__ void gdn_gates(float *b, float *a, const float *dt_bias, c
     a[i] = sp * A[h];
 }
 
+// gdn_gates on the concatenated [beta | alpha] projection output: ba[t][0, nh) = b,
+// ba[t][nh, 2nh) = a (one 2nh-row GEMM). Same math as gdn_gates (bitwise), written
+// to b / a laid out [t][nh]. n = n_tok * n_heads. Same kernel as the gfx1201 set.
+extern "C" __global__ void gdn_gates_ba(const float *ba, float *b, float *a, const float *dt_bias, const float *A,
+                                        int n, int n_heads) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const int h = i % n_heads;
+    const int t = i / n_heads;
+    const float bi = ba[(size_t)t * 2 * n_heads + h];
+    const float ai = ba[(size_t)t * 2 * n_heads + n_heads + h];
+    b[i] = 1.f / (1.f + __expf(-bi));
+    const float x = ai + dt_bias[h];
+    const float sp = x > 20.f ? x : log1pf(__expf(x));
+    a[i] = sp * A[h];
+}
+
 // One v-head per block, blockDim = dv. Thread j keeps column j of the state
 // (S[i][j], i = key dim) in registers for the whole token run.
 // State layout: state[h*DK*dv + i*dv + j]. qkv: [n_tok][qkv_stride] with q at

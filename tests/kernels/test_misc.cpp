@@ -280,6 +280,11 @@ void testMisc(Ctx& c) {
                 std::vector<std::uint8_t> want_rows;
                 for (int m : mp) want_rows.insert(want_rows.end(), src.begin() + static_cast<std::ptrdiff_t>(m * rb), src.begin() + static_cast<std::ptrdiff_t>((m + 1) * rb));
                 c.rep.add(cmpExact("copy_rows_map (vocabulary subset rows)", got, want_rows));
+            } else {
+                Result r;
+                r.name = "copy_rows_map present";
+                r.pass = false;
+                c.rep.add(r);
             }
         }
         // set_tokens / set_rows
