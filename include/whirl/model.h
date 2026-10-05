@@ -468,11 +468,14 @@ public:
     bool keep_hidden = false;
     bool all_logits = false;
     std::uint32_t snap_rows = 0;
-    std::uint32_t draft_vocab = 0;
+    std::uint32_t draft_vocab = 0;  // WHIRL_DRAFT_VOCAB=N: the first N rows only (old experiment)
     float draft_p_min = 0;
     std::uint32_t draft_n_min = 0;
     std::optional<Mat> draft_head;
     std::optional<DevPtr> draft_d2;
+    // draft-head vocabulary subset (setDraftVocab): rows of draft_d2 and their token ids on the device
+    std::uint32_t draft_rows = 0;
+    std::optional<DevPtr> draft_map;
     std::uint32_t moe_bn_force = 0;
     std::vector<std::int32_t>* moe_dump = nullptr;
     std::uint32_t ff_scratch = 0;
@@ -598,6 +601,10 @@ public:
     enum class DraftHeadKind { q4, d2 };
     void buildDraftHead() { buildDraftHeadEx(DraftHeadKind::d2); }
     void buildDraftHeadEx(DraftHeadKind kind);
+    // Keep only these rows (ascending token ids, see draftVocabIds) of the 2-bit draft head;
+    // drafts map back to token ids, the trunk and its output head are untouched. False (and no
+    // change) without the 2-bit head or the copy_rows_map kernel.
+    bool setDraftVocab(std::span<const std::uint32_t> ids);
 
     // ---- prefill GEMM autotune
     void autotuneGemm(std::size_t bucket, std::uint32_t reps, std::string* log);
@@ -737,6 +744,19 @@ struct DraftTiming {
     void update(std::uint32_t nd, float ms);
     std::optional<float> estimate(std::uint32_t nd) const;
 };
+
+// ---- draft-head vocabulary subset (T5-1b): WHIRL_DRAFT_VOCAB = 48k | 64k | <file> | off | N
+// File for a WHIRL_DRAFT_VOCAB value: "48k" / "64k" / ... -> <dir>/subset_48k.bin, anything else
+// that is not "off" or a plain number (the old first-N-rows experiment) is a path; else nullopt.
+std::optional<std::string> draftVocabFile(std::string_view spec, const std::string& dir);
+// uint32 little-endian token ids (throws on a missing file or a size that is not a multiple of 4)
+std::vector<std::uint32_t> readDraftVocab(const std::string& path);
+// Checks a subset (strictly ascending, every id < n_rows; throws otherwise) and adds the missing
+// `required` ids (special and byte tokens), counting them in *added.
+std::vector<std::uint32_t> draftVocabIds(std::span<const std::uint32_t> ids, std::uint32_t n_rows,
+                                         std::span<const std::uint32_t> required, std::uint32_t* added = nullptr);
+// directory of the running executable ("" if unknown)
+std::string exeDirectory();
 
 // Draft count in [1, max] maximizing sum(E) / T (see the prototype notes).
 std::uint32_t pickDrafts(std::span<const DraftAccept* const> accepts, const DraftTiming& timing, std::uint32_t max,

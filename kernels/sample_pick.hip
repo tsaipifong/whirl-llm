@@ -121,8 +121,9 @@ extern "C" __global__ void __launch_bounds__(1024) argmax_rows_to(const float *x
 // the device-side p-min cutoff (llama.cpp --spec-draft-p-min / n-min):
 // ctl[0] = drafts kept this cycle, ctl[1] = chain stopped (later drafts'
 // weight-streaming kernels see it through their skip pointer and return).
+// map (may be null): token id of each logits row (draft-head vocabulary subset).
 __device__ __forceinline__ void draft_pick_body(const float *x, int n, int *tok, float *prob, int *ctl, int r, int n_min,
-                                                float p_min) {
+                                                float p_min, const int *map) {
     if (r > 0 && ctl[1] != 0) return;
     __shared__ float bv[1024];
     __shared__ int bi[1024];
@@ -161,7 +162,7 @@ __device__ __forceinline__ void draft_pick_body(const float *x, int n, int *tok,
     }
     const float p = 1.f / bv[0];
     if (threadIdx.x == 0) {
-        tok[r] = top;
+        tok[r] = map ? map[top] : top;
         prob[r] = p;
         if (p_min > 0.f && r >= n_min && p < p_min) {
             ctl[0] = r;
@@ -174,16 +175,16 @@ __device__ __forceinline__ void draft_pick_body(const float *x, int n, int *tok,
 }
 
 extern "C" __global__ void __launch_bounds__(1024)
-    draft_pick(const float *x, int n, int *tok, float *prob, int *ctl, int r, int n_min, float p_min) {
-    draft_pick_body(x, n, tok, prob, ctl, r, n_min, p_min);
+    draft_pick(const float *x, int n, int *tok, float *prob, int *ctl, int r, int n_min, float p_min, const int *map) {
+    draft_pick_body(x, n, tok, prob, ctl, r, n_min, p_min, map);
 }
 
 // Batched drafts: logits row b belongs to the sequence whose control area
 // starts at ctl_all + area.v[b] (ints; see the control-area layout in the model code).
 extern "C" __global__ void __launch_bounds__(1024)
-    draft_pick_rows(const float *x, int n, int *ctl_all, RowIdx area, int r, int n_min, float p_min) {
+    draft_pick_rows(const float *x, int n, int *ctl_all, RowIdx area, int r, int n_min, float p_min, const int *map) {
     int *c = ctl_all + area.v[blockIdx.x];
-    draft_pick_body(x + (size_t)blockIdx.x * n, n, c + 16, (float *)(c + 32), c + 48, r, n_min, p_min);
+    draft_pick_body(x + (size_t)blockIdx.x * n, n, c + 16, (float *)(c + 32), c + 48, r, n_min, p_min, map);
 }
 
 // Greedy token of one logits row plus its softmax probability (MTP draft

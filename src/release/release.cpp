@@ -325,7 +325,7 @@ constexpr EnvDoc k_env[] = {
     {"Speculative decoding (output always equals plain greedy)", "MTP_Q4=0", "keep the MTP block's Q6_K matrices (default: Q4_K copies, used for drafts only)", C | B | S},
     {"Speculative decoding (output always equals plain greedy)", "DRAFT_HEAD=q4", "Q4_K draft head instead of the 2-bit one", C | B | S},
     {"Speculative decoding (output always equals plain greedy)", "MTP_FULLHEAD=1", "drafts use the full output head", C | B | S},
-    {"Speculative decoding (output always equals plain greedy)", "DRAFT_VOCAB=N", "draft head over the first N vocabulary rows only", C | S},
+    {"Speculative decoding (output always equals plain greedy)", "DRAFT_VOCAB=48k|64k|FILE|N", "draft head over a frequency subset of the vocabulary (draft_vocab\\subset_48k.bin next to the exe; FILE = uint32 ids), or the first N rows", C | S},
     {"Speculative decoding (output always equals plain greedy)", "NGRAM=0", "no n-gram (prompt-lookup) drafts", C | B | S},
     {"Speculative decoding (output always equals plain greedy)", "NGRAM_MIN=N", "minimum matched suffix for an n-gram draft (default 3)", C | B | S},
     {"Speculative decoding (output always equals plain greedy)", "NGRAM_MAX=N", "most n-gram drafts per cycle (default 15)", C | B | S},

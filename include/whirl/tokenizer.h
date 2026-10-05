@@ -66,6 +66,8 @@ public:
     bool addBos() const { return add_bos_; }
     std::size_t mergeCount() const { return n_merges_; }
     std::size_t specialCount() const { return specials_.size(); }
+    std::span<const TokenId> specials() const { return specials_; }
+    TokenId byteToken(int b) const { return byte_token_[b & 255]; }  // -1 if none
     const std::string& pre() const { return pre_; }
 
 private:

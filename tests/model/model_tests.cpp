@@ -11,7 +11,10 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -133,6 +136,47 @@ void testDraftModel() {
     const q::DraftAccept* accs[1] = {&hi};
     const std::uint32_t nd = q::pickDrafts(accs, tm, 8, 0, 0);
     check(nd >= 4, "pickDrafts prefers long chains at high acceptance");
+}
+
+void testDraftVocab() {
+    std::vector<std::uint32_t> full(100);
+    for (std::uint32_t i = 0; i < 100; ++i) full[i] = i;
+    std::uint32_t added = 7;
+    const std::vector<std::uint32_t> req = {99, 0, 50};
+    check(q::draftVocabIds(full, 100, req, &added) == full && added == 0, "draft vocab: the full vocabulary is the identity map");
+    const std::vector<std::uint32_t> sub = {3, 10, 42}, req2 = {99, 0, 10, 99, 150};
+    const auto s = q::draftVocabIds(sub, 100, req2, &added);
+    check(s == std::vector<std::uint32_t>{0, 3, 10, 42, 99} && added == 2, "draft vocab: missing special ids added (sorted, out of range ignored)");
+    check(s[2] == 10 && s[4] == 99, "draft vocab: map[row] = token id");
+    bool threw = false;
+    try {
+        q::draftVocabIds(std::vector<std::uint32_t>{5, 3}, 100, {});
+    } catch (const std::exception&) {
+        threw = true;
+    }
+    check(threw, "draft vocab: ids not ascending are rejected");
+    threw = false;
+    try {
+        q::draftVocabIds(std::vector<std::uint32_t>{1, 100}, 100, {});
+    } catch (const std::exception&) {
+        threw = true;
+    }
+    check(threw, "draft vocab: an id >= rows is rejected");
+    const std::string d48 = (std::filesystem::path("D") / "draft_vocab" / "subset_48k.bin").string();
+    check(!q::draftVocabFile("off", "D") && !q::draftVocabFile("150000", "D") && q::draftVocabFile("48k", "D") == d48 &&
+              q::draftVocabFile("x/y.bin", "D") == std::string("x/y.bin"),
+          "draft vocab: WHIRL_DRAFT_VOCAB values (off, N, 48k, path)");
+    const std::filesystem::path tmp = std::filesystem::temp_directory_path() / "whirl_draft_vocab_test.bin";
+    {
+        std::ofstream f(tmp, std::ios::binary);
+        for (std::uint32_t v : s) {
+            const unsigned char b[4] = {static_cast<unsigned char>(v), static_cast<unsigned char>(v >> 8),
+                                        static_cast<unsigned char>(v >> 16), static_cast<unsigned char>(v >> 24)};
+            f.write(reinterpret_cast<const char*>(b), 4);
+        }
+    }
+    check(q::readDraftVocab(tmp.string()) == s, "draft vocab: file round trip (uint32 little-endian)");
+    std::filesystem::remove(tmp);
 }
 
 void testNgram() {
@@ -362,6 +406,7 @@ int main() {
     testTables();
     testDraftModel();
     testNgram();
+    testDraftVocab();
     testCycleCost();
     testSlotAccept();
     testAllocDrafts();

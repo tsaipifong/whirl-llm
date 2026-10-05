@@ -275,6 +275,7 @@ KernelTable KernelTable::load(const hip::Module& m, KvFormat kv) {
     k.attn_prep_m = L.opt(kv == KvFormat::q8v ? "attn_prep_m_q8v" : kv == KvFormat::q8h ? "attn_prep_m_q8h" : kv == KvFormat::q8 ? "attn_prep_m_q8" : "attn_prep_m");
     k.set_rpos = L.opt("set_rpos");
     for (int nt = 1; nt <= kMaxSmallBatch; ++nt) k.gemv_d2[nt - 1] = L.opt("gemv_d2_nt" + std::to_string(nt));
+    k.copy_rows_map = L.opt("copy_rows_map");
 
     // MXFP4: every lookup optional (gfx1201 only).
     {

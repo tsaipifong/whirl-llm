@@ -233,6 +233,31 @@ std::vector<u32> parseIds(const std::string& list) {
     return ids;
 }
 
+// WHIRL_DRAFT_VOCAB: N = the first N draft-head rows (old experiment); 48k / 64k / <file> = a
+// frequency subset of the 2-bit draft head (special and byte tokens always added); off
+void applyDraftVocab(q::Model& model, const Tokenizer& tok) {
+    const auto v = envGet("DRAFT_VOCAB");
+    if (!v) return;
+    if (!v->empty() && std::all_of(v->begin(), v->end(), [](char c) { return c >= '0' && c <= '9'; })) {
+        model.draft_vocab = static_cast<u32>(std::stoul(*v));
+        return;
+    }
+    const auto file = q::draftVocabFile(*v, q::exeDirectory());
+    if (!file) return;
+    std::vector<u32> req;
+    for (const TokenId t : tok.specials())
+        if (t >= 0) req.push_back(static_cast<u32>(t));
+    for (int b = 0; b < 256; ++b)
+        if (tok.byteToken(b) >= 0) req.push_back(static_cast<u32>(tok.byteToken(b)));
+    u32 added = 0;
+    const auto ids = q::draftVocabIds(q::readDraftVocab(*file), model.cfg.n_vocab, req, &added);
+    if (model.setDraftVocab(ids))
+        std::fprintf(stderr, "draft head: vocabulary subset %s (%zu of %u rows; %u special / byte tokens added)\n", file->c_str(),
+                     ids.size(), model.cfg.n_vocab, added);
+    else
+        std::fprintf(stderr, "WHIRL_DRAFT_VOCAB ignored: it needs the 2-bit draft head (Q6_K output head, WHIRL_DRAFT_HEAD not q4)\n");
+}
+
 std::optional<u32> envU32(const char* name) {
     if (auto v = envGet(name)) {
         try {
@@ -905,7 +930,6 @@ int cmdChat(const Args& a) {
     // MTP speculative decode is exact greedy: on whenever the checkpoint has a nextn
     // layer; WHIRL_MTP=0 turns it off.
     const bool use_mtp = model.mtp.has_value() && logits_out == nullptr && envFlag("MTP", true);
-    if (auto v = envU32("DRAFT_VOCAB")) model.draft_vocab = *v;
     Timer timer;
     timer.begin();
     std::vector<std::int32_t> moe_ids;
@@ -987,6 +1011,7 @@ int cmdChat(const Args& a) {
             const auto dh = envGet("DRAFT_HEAD");
             model.buildDraftHeadEx(dh && *dh == "q4" ? q::Model::DraftHeadKind::q4 : q::Model::DraftHeadKind::d2);
         }
+        applyDraftVocab(model, tok.t);
         u32 drafts = 0;
         const ChatOpts sopt = mtpOpts(model, opt, &drafts);
         const DecodeResult r = specDecode(model, tok, next, static_cast<u32>(ids.size()), sopt, drafts, ids);
@@ -1119,6 +1144,7 @@ int cmdBench(const Args& a) {
         const auto dh = envGet("DRAFT_HEAD");
         model.buildDraftHeadEx(dh && *dh == "q4" ? q::Model::DraftHeadKind::q4 : q::Model::DraftHeadKind::d2);
     }
+    if (has_mtp) applyDraftVocab(model, tok.t);
     std::optional<u64> ref_hash;
     for (const std::string& mode : modes) {
         if (mode != "plain" && !has_mtp) continue;

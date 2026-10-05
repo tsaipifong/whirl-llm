@@ -8,6 +8,20 @@
 
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
+#include <fstream>
+#include <stdexcept>
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
 
 namespace whirl::qwen35 {
 
@@ -92,6 +106,63 @@ std::optional<float> DraftTiming::estimate(u32 nd) const {
     b = std::max(b, 0.01f * std::max(a0, 0.1f));
     const float a = (sy - b * sx) / sw;
     return std::max(a + b * xf, 0.05f);
+}
+
+std::optional<std::string> draftVocabFile(std::string_view spec, const std::string& dir) {
+    if (spec.empty() || spec == "off" || spec == "0") return std::nullopt;
+    if (std::all_of(spec.begin(), spec.end(), [](char c) { return c >= '0' && c <= '9'; })) return std::nullopt;  // first-N rows
+    const bool named = spec.size() >= 2 && spec.back() == 'k' &&
+                       std::all_of(spec.begin(), spec.end() - 1, [](char c) { return c >= '0' && c <= '9'; });
+    if (named) return (std::filesystem::path(dir) / "draft_vocab" / ("subset_" + std::string(spec) + ".bin")).string();
+    return std::string(spec);
+}
+
+std::vector<u32> readDraftVocab(const std::string& path) {
+    std::ifstream f(std::filesystem::path(path), std::ios::binary | std::ios::ate);
+    if (!f) throw std::runtime_error("draft vocabulary file not found: " + path);
+    const std::streamoff n = f.tellg();
+    if (n <= 0 || n % 4 != 0) throw std::runtime_error("draft vocabulary file size is not a multiple of 4: " + path);
+    std::vector<u32> ids(static_cast<std::size_t>(n / 4));
+    f.seekg(0);
+    std::vector<unsigned char> b(static_cast<std::size_t>(n));
+    f.read(reinterpret_cast<char*>(b.data()), n);
+    for (std::size_t i = 0; i < ids.size(); ++i)
+        ids[i] = static_cast<u32>(b[4 * i]) | static_cast<u32>(b[4 * i + 1]) << 8 | static_cast<u32>(b[4 * i + 2]) << 16 |
+                 static_cast<u32>(b[4 * i + 3]) << 24;
+    return ids;
+}
+
+std::vector<u32> draftVocabIds(std::span<const u32> ids, u32 n_rows, std::span<const u32> required, u32* added) {
+    for (std::size_t i = 0; i < ids.size(); ++i) {
+        if (ids[i] >= n_rows) throw std::runtime_error("draft vocabulary: token id " + std::to_string(ids[i]) + " >= " + std::to_string(n_rows));
+        if (i > 0 && ids[i] <= ids[i - 1]) throw std::runtime_error("draft vocabulary: ids not strictly ascending");
+    }
+    std::vector<u32> req;
+    for (u32 r : required)
+        if (r < n_rows) req.push_back(r);
+    std::sort(req.begin(), req.end());
+    req.erase(std::unique(req.begin(), req.end()), req.end());
+    std::vector<u32> out;
+    out.reserve(ids.size() + req.size());
+    std::set_union(ids.begin(), ids.end(), req.begin(), req.end(), std::back_inserter(out));
+    if (added) *added = static_cast<u32>(out.size() - ids.size());
+    return out;
+}
+
+std::string exeDirectory() {
+#ifdef _WIN32
+    wchar_t buf[1024];
+    const DWORD n = GetModuleFileNameW(nullptr, buf, 1023);
+    if (n == 0) return {};
+    buf[n] = 0;
+    return std::filesystem::path(buf).parent_path().string();
+#else
+    char buf[4096];
+    const ssize_t n = readlink("/proc/self/exe", buf, sizeof buf - 1);
+    if (n <= 0) return {};
+    buf[n] = 0;
+    return std::filesystem::path(buf).parent_path().string();
+#endif
 }
 
 u32 pickDrafts(std::span<const DraftAccept* const> accepts, const DraftTiming& timing, u32 max, u32 cycle, u32 prev) {

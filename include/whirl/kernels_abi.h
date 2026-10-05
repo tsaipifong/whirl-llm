@@ -100,13 +100,15 @@
 //   argmax(x, n, int* out, int* ids, int* pos, int advance)
 //   argmax_rows(x, n, out); argmax_rows_to(x, n, out, RowIdx dst)
 //   argmax_prob(x, n, int* out_tok, float* out_prob)
-//   draft_pick(x, n, int* tok, float* prob, int* ctl, int r, int n_min, float p_min)
-//   draft_pick_rows(x, n, int* ctl_all, RowIdx area, int r, int n_min, float p_min)
+//   draft_pick(x, n, int* tok, float* prob, int* ctl, int r, int n_min, float p_min, const int* map)
+//   draft_pick_rows(x, n, int* ctl_all, RowIdx area, int r, int n_min, float p_min, const int* map)
+//            map (null: identity) = token id of each draft-head row (vocabulary subset)
 //   set_tokens(ids, pos, dev_src, Tok16 toks, n, n_host, pos0)
 //   set_rows(ids, pos, kvbase, dev_src, RowTab tab, n)
 //   topk_rows(x, n, K, float inv_t, int* ids, float* vals, float* stats)
 //   requant_q6k_q4k(src, u64 src_rb, dst, u64 dst_rb); requant_q6k_d2(src,
 //            u64 src_rb, dst, int ncols); requant_q80_q4k(src, u64 src_rb, dst, u64 dst_rb)
+//   copy_rows_map(src, u64 rb, dst, const int* map): dst row i = src row map[i] (optional)
 //  mixture of experts:
 //   moe_logits_f32(W, x, out, R, C, n, skip)
 //   moe_topk(logits, ld, h, shw, ids, w, sg, R, K, E)
@@ -373,6 +375,7 @@ struct KernelTable {
     F rmsnorm_x8{}, rmsnorm_x16{}, silu_mul_x8{}, silu_mul_x16{}, gated_norm_x8{}, gated_norm_x16{};
     F gdn_conv_par{}, gdn_conv_state{}, rmsnorm_q8{}, silu_mul_q8{}, gdn_ab_q8_0{};
     F gdn_conv_l2{}, gdn_step_norm{}, requant_q6k_q4k{}, requant_q6k_d2{}, requant_q80_q4k{};
+    F copy_rows_map{};  // optional
     F set_tokens{}, argmax_rows{}, argmax_prob{}, draft_pick{};
     F set_rows{}, rmsnorm_q8_rows{}, argmax_rows_to{}, draft_pick_rows{};
     F moe_logits_f32{}, moe_topk{}, moe_route{}, moe_gather_f16{}, moe_act_f16{}, moe_combine{};

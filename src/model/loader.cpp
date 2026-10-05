@@ -728,6 +728,23 @@ void Model::buildDraftHeadEx(DraftHeadKind kind) {
     hip::sync();
 }
 
+bool Model::setDraftVocab(std::span<const u32> vocab_ids) {
+    if (!draft_d2 || k.copy_rows_map == nullptr || vocab_ids.empty() || vocab_ids.size() >= output.nrows) return false;
+    const u32 n = static_cast<u32>(vocab_ids.size());
+    const u64 rb = static_cast<u64>(output.ncols / 4 + output.ncols / 16);  // 2-bit codes + f16 scales per row
+    const std::vector<i32> m(vocab_ids.begin(), vocab_ids.end());
+    const DevPtr map = alloc(static_cast<u64>(n) * 4);
+    hip::upload(map, m.data(), m.size() * 4);
+    const DevPtr p = alloc(rb * n);
+    hip::launch(k.copy_rows_map, {n, 1, 1}, {256, 1, 1}, 0, stream, *draft_d2, rb, p, map);
+    hip::sync();
+    freeAlloc(*draft_d2);
+    draft_d2 = p;
+    draft_rows = n;
+    draft_map = map;
+    return true;
+}
+
 MatList Model::layerMats(const Layer& L) const {
     MatList out;
     if (L.kind == LayerKind::attn) {

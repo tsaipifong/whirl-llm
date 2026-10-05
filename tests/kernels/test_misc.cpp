@@ -201,7 +201,7 @@ void testMisc(Ctx& c) {
             dt.fill(0x7f);
             for (int r = 0; r < 3; ++r)
                 hip::launch(c.k.draft_pick, {1, 1, 1}, {1024, 1, 1}, 0, c.s, dl.p() + static_cast<std::uint64_t>(r) * n * 4, n, dt.p(),
-                            dp.p(), ctl.p(), r, 1, 0.5f);
+                            dp.p(), ctl.p(), r, 1, 0.5f, hip::DevPtr{0});
             c.sync();
             const auto ht = dt.down<int>(3);
             const auto hc = ctl.down<int>(2);
@@ -223,7 +223,7 @@ void testMisc(Ctx& c) {
             wk::RowIdx area;
             area.v[0] = 0;
             area.v[1] = wk::kCtlWords;
-            hip::launch(c.k.draft_pick_rows, {2, 1, 1}, {1024, 1, 1}, 0, c.s, dl.p(), n, ctl_all.p(), area, 0, 1, 0.5f);
+            hip::launch(c.k.draft_pick_rows, {2, 1, 1}, {1024, 1, 1}, 0, c.s, dl.p(), n, ctl_all.p(), area, 0, 1, 0.5f, hip::DevPtr{0});
             c.sync();
             const auto ca = ctl_all.down<int>(2 * wk::kCtlWords);
             const bool okr = ca[wk::kCtlDrafts] == ht[0] && ca[wk::kCtlWords + wk::kCtlDrafts] == ht[1] && ca[wk::kCtlNd] == 1 &&
@@ -234,6 +234,53 @@ void testMisc(Ctx& c) {
             rr.mismatches = okr ? 0 : 1;
             rr.pass = okr;
             c.rep.add(rr);
+            // draft-head vocabulary subset: an identity map gives the same tokens as no map; any map
+            // returns map[top] (draft_pick and draft_pick_rows)
+            {
+                std::vector<int> ident(static_cast<std::size_t>(n)), perm(static_cast<std::size_t>(n));
+                for (int i = 0; i < n; ++i) {
+                    ident[static_cast<std::size_t>(i)] = i;
+                    perm[static_cast<std::size_t>(i)] = 100000 + 3 * i;
+                }
+                Buf di(ident), dm(perm), t1(16 * 4), p1(16 * 4), c1(8), t2(16 * 4), p2(16 * 4), c2(8);
+                for (int r = 0; r < 2; ++r) {
+                    const hip::DevPtr row = dl.p() + static_cast<std::uint64_t>(r) * n * 4;
+                    hip::launch(c.k.draft_pick, {1, 1, 1}, {1024, 1, 1}, 0, c.s, row, n, t1.p(), p1.p(), c1.p(), r, 0, 0.f, di.p());
+                    hip::launch(c.k.draft_pick, {1, 1, 1}, {1024, 1, 1}, 0, c.s, row, n, t2.p(), p2.p(), c2.p(), r, 0, 0.f, dm.p());
+                }
+                Buf cm(2 * wk::kCtlWords * 4);
+                cm.zero();
+                hip::launch(c.k.draft_pick_rows, {2, 1, 1}, {1024, 1, 1}, 0, c.s, dl.p(), n, cm.p(), area, 0, 0, 0.f, dm.p());
+                c.sync();
+                const auto a1 = t1.down<int>(2), a2 = t2.down<int>(2);
+                const auto cmh = cm.down<int>(2 * wk::kCtlWords);
+                const int top0 = ht[0], top1 = firstMax(lg.data() + n, n);
+                const bool okm = a1[0] == top0 && a1[1] == top1 && a2[0] == perm[static_cast<std::size_t>(top0)] &&
+                                 a2[1] == perm[static_cast<std::size_t>(top1)] &&
+                                 cmh[wk::kCtlDrafts] == perm[static_cast<std::size_t>(top0)] &&
+                                 cmh[wk::kCtlWords + wk::kCtlDrafts] == perm[static_cast<std::size_t>(top1)];
+                Result rm;
+                rm.name = "draft_pick(_rows) with a vocabulary map (identity == no map, map[top])";
+                rm.n = 6;
+                rm.mismatches = okm ? 0 : 1;
+                rm.pass = okm;
+                c.rep.add(rm);
+            }
+            // copy_rows_map: dst row i = src row map[i] (2-bit draft-head rows, 1600 bytes for 5120 columns)
+            if (c.k.copy_rows_map != nullptr) {
+                const std::uint64_t rb = 1600;
+                const int nsrc = 64;
+                std::vector<std::uint8_t> src(static_cast<std::size_t>(nsrc) * rb);
+                for (std::size_t i = 0; i < src.size(); ++i) src[i] = static_cast<std::uint8_t>(i * 131 + i / rb * 7);
+                const std::vector<int> mp = {5, 0, 63, 17, 18};
+                Buf ds(src), dmp(mp), dd(mp.size() * rb);
+                hip::launch(c.k.copy_rows_map, {static_cast<unsigned>(mp.size()), 1, 1}, {256, 1, 1}, 0, c.s, ds.p(), rb, dd.p(), dmp.p());
+                c.sync();
+                const auto got = dd.down<std::uint8_t>(mp.size() * rb);
+                std::vector<std::uint8_t> want_rows;
+                for (int m : mp) want_rows.insert(want_rows.end(), src.begin() + static_cast<std::ptrdiff_t>(m * rb), src.begin() + static_cast<std::ptrdiff_t>((m + 1) * rb));
+                c.rep.add(cmpExact("copy_rows_map (vocabulary subset rows)", got, want_rows));
+            }
         }
         // set_tokens / set_rows
         {

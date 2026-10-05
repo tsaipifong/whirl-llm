@@ -206,6 +206,23 @@ std::uint32_t envU32(std::string_view name, std::uint32_t def) {
     return def;
 }
 
+// WHIRL_DRAFT_VOCAB=48k|64k|<file>: keep only that vocabulary subset of the 2-bit draft head
+// (special and byte tokens are always added); outputs are unchanged, only the acceptance can drop.
+void applyDraftVocab(qwen35::Model& model, const Tokenizer& tok, const std::string& file) {
+    std::vector<std::uint32_t> req;
+    for (const TokenId t : tok.specials())
+        if (t >= 0) req.push_back(static_cast<std::uint32_t>(t));
+    for (int b = 0; b < 256; ++b)
+        if (tok.byteToken(b) >= 0) req.push_back(static_cast<std::uint32_t>(tok.byteToken(b)));
+    std::uint32_t added = 0;
+    const auto ids = qwen35::draftVocabIds(qwen35::readDraftVocab(file), model.cfg.n_vocab, req, &added);
+    if (model.setDraftVocab(ids))
+        logI("draft head: vocabulary subset {} ({} of {} rows; {} special / byte tokens added)", file, ids.size(), model.cfg.n_vocab,
+             added);
+    else
+        logW("WHIRL_DRAFT_VOCAB ignored: it needs the 2-bit draft head (Q6_K output head, WHIRL_DRAFT_HEAD not q4)");
+}
+
 bool envOn(std::string_view name, bool def) {
     if (auto v = env(name)) return *v != "0";
     return def;
@@ -424,7 +441,14 @@ int serveMain(int argc, char** argv, const char* program) {
         if (auto v = env("MOE_BN")) model.moe_bn_force = static_cast<std::uint32_t>(std::strtoul(v->c_str(), nullptr, 10));
         if (auto v = env("PREFILL_BATCH"))
             model.max_batch = std::max(1u, std::min(model.max_batch, static_cast<std::uint32_t>(std::stoul(*v))));
-        if (auto v = env("DRAFT_VOCAB")) model.draft_vocab = static_cast<std::uint32_t>(std::stoul(*v));
+        // WHIRL_DRAFT_VOCAB: N = the first N rows (old experiment), 48k / 64k / <file> = frequency subset, off
+        std::optional<std::string> draft_vocab_file;
+        if (auto v = env("DRAFT_VOCAB")) {
+            if (!v->empty() && std::all_of(v->begin(), v->end(), [](char c) { return c >= '0' && c <= '9'; }))
+                model.draft_vocab = static_cast<std::uint32_t>(std::stoul(*v));
+            else
+                draft_vocab_file = qwen35::draftVocabFile(*v, qwen35::exeDirectory());
+        }
         if (env("GEMV_R") || env("GEMV_W") || env("GEMV_WH"))
             logW("WHIRL_GEMV_R / WHIRL_GEMV_W / WHIRL_GEMV_WH are not supported by whirl-server (ignored)");
         model.use_graph = false;
@@ -492,6 +516,7 @@ int serveMain(int argc, char** argv, const char* program) {
         if (use_mtp && !env("MTP_FULLHEAD")) {
             const bool q4 = env("DRAFT_HEAD").value_or("") == "q4";
             model.buildDraftHeadEx(q4 ? qwen35::Model::DraftHeadKind::q4 : qwen35::Model::DraftHeadKind::d2);
+            if (draft_vocab_file) applyDraftVocab(model, tok, *draft_vocab_file);
         }
         if (use_mtp) {
             logI("MTP speculative decoding: on, up to {} draft(s) per cycle{}, p-min {:.2f}, n-min {}, draft count {}", drafts,

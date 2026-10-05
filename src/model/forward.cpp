@@ -874,12 +874,14 @@ void Model::mtpEnqueue(DevPtr hidden, std::span<const u32> tokens, DevPtr dev_to
         rmsnormQ8(last, mw.head_norm, h, 1);
     else
         rmsnorm(last, mw.head_norm, h, E, 1, E, E);
-    // draft head over the first draft_vocab rows only
+    // draft head over the vocabulary subset (draft_map) or the first draft_vocab rows only
     Mat head = draft_head ? *draft_head : output;
-    if (draft_vocab > 0 && draft_vocab < head.nrows) head.nrows = draft_vocab;
+    if (draft_rows > 0 && draft_d2) head.nrows = draft_rows;
+    else if (draft_vocab > 0 && draft_vocab < head.nrows) head.nrows = draft_vocab;
     draftHeadMatmul(head, 1);
+    const DevPtr map = draft_rows > 0 && draft_d2 && draft_map ? *draft_map : DevPtr{0};
     hip::launch(k.draft_pick, D(1), D(1024), 0, stream, logits, I(head.nrows), ctlSlot(ctl_drafts), ctlSlot(ctl_probs), ctlSlot(ctl_nd),
-                I(draft_slot), I(draft_n_min), draft_p_min);
+                I(draft_slot), I(draft_n_min), draft_p_min, map);
 }
 
 // Apply sequence s's kept verify rows to its recurrent state (replay mode).
@@ -1110,9 +1112,12 @@ void Model::mtpBatchStepEx(std::span<const MSeg> segs, u32 r, bool draft) {
     xq_n = ns;
     x16_src = 0;
     Mat head = draft_head ? *draft_head : output;
-    if (draft_vocab > 0 && draft_vocab < head.nrows) head.nrows = draft_vocab;
+    if (draft_rows > 0 && draft_d2) head.nrows = draft_rows;
+    else if (draft_vocab > 0 && draft_vocab < head.nrows) head.nrows = draft_vocab;
     draftHeadMatmul(head, ns);
-    hip::launch(k.draft_pick_rows, D(ns), D(1024), 0, stream, logits, I(head.nrows), out_tok, area, I(r), I(draft_n_min), draft_p_min);
+    const DevPtr map = draft_rows > 0 && draft_d2 && draft_map ? *draft_map : DevPtr{0};
+    hip::launch(k.draft_pick_rows, D(ns), D(1024), 0, stream, logits, I(head.nrows), out_tok, area, I(r), I(draft_n_min), draft_p_min,
+                map);
 }
 
 void Model::readCtl(std::span<i32> dst) { hip::download(dst.data(), out_tok, dst.size() * 4); }
