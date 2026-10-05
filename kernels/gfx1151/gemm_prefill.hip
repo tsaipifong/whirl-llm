@@ -155,7 +155,6 @@ __device__ void gemm_wmma_impl(const uint8_t *__restrict__ W, uint64_t row_bytes
 
     for (int k0 = 0; k0 < ncols; k0 += BK) {
         __syncthreads();
-#pragma unroll
         for (int i = threadIdx.x; i < BM * GPR; i += 256) {
             const int r = i / GPR, gg = i % GPR;
             half8 h;
@@ -174,7 +173,6 @@ __device__ void gemm_wmma_impl(const uint8_t *__restrict__ W, uint64_t row_bytes
             }
             *(half8 *)&As[r][gg * 8] = h;
         }
-#pragma unroll
         for (int i = threadIdx.x; i < BN * GPR; i += 256) {
             const int t = i / GPR, gg = i % GPR;
             half8 h;
