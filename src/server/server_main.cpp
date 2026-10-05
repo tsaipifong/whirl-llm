@@ -244,6 +244,8 @@ void applyDraftVocab(qwen35::Model& model, const Tokenizer& tok, const qwen35::D
     if (model.setDraftVocab(ids))
         logI("draft head: vocabulary subset {} ({} of {} rows; {} special / byte tokens added)", label, ids.size(), model.cfg.n_vocab,
              added);
+    else if (dv.by_default)  // the default only: no warning for a setting the user did not make
+        logI("draft head: full vocabulary (no vocabulary subset with this draft head / kernel set)");
     else
         logW("WHIRL_DRAFT_VOCAB ignored: it needs the 2-bit draft head (Q6_K output head, WHIRL_DRAFT_HEAD not q4)");
 }

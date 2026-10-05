@@ -265,7 +265,7 @@ void applyDraftVocab(q::Model& model, const Tokenizer& tok) {
     if (model.setDraftVocab(ids))
         std::fprintf(stderr, "draft head: vocabulary subset %s (%zu of %u rows; %u special / byte tokens added)\n", label.c_str(),
                      ids.size(), model.cfg.n_vocab, added);
-    else
+    else if (!dv.by_default)  // the default only: stay quiet (the user did not set WHIRL_DRAFT_VOCAB)
         std::fprintf(stderr, "WHIRL_DRAFT_VOCAB ignored: it needs the 2-bit draft head (Q6_K output head, WHIRL_DRAFT_HEAD not q4)\n");
 }
 
