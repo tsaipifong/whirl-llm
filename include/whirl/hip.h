@@ -92,6 +92,16 @@ struct MemInfo {
     std::size_t free = 0, total = 0;
 };
 MemInfo memInfo();
+// This process's WDDM video memory numbers for the current device (DXGI
+// IDXGIAdapter3::QueryVideoMemoryInfo). Going over local_budget makes the OS
+// demote allocations to system memory (they then show up as non-local /
+// "Shared Usage" and every access crosses PCIe). ok = false off Windows or if
+// the adapter cannot be matched by LUID.
+struct WddmMemInfo {
+    bool ok = false;
+    std::uint64_t local_budget = 0, local_usage = 0, nonlocal_budget = 0, nonlocal_usage = 0;
+};
+WddmMemInfo wddmMemInfo();
 
 // ---- streams and events
 // Blocking streams order with the legacy null stream; non-blocking ones do not.

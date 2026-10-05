@@ -592,18 +592,20 @@ void Model::allocKvPool(u32 tokens) {
     const bool kq8 = kv_q8 && !kv_kf16;  // K format (q8v: f16)
     const u64 ebk = kq8 ? 1 : 2;
     const u64 ebv = kv_q8 ? 1 : 2;
+    // MTP KV first: the draft head reads it every step, so if the process ever ends up over
+    // its WDDM budget it should not be the last (most likely demoted) allocation
+    if (mtp) {
+        mtp_kc = allocZero(rows * elems * ebk);
+        mtp_vc = allocZero(rows * elems * ebv);
+        if (kq8) mtp_ks = allocZero(rows * elems / 32 * 2);
+        if (kv_q8) mtp_vs = allocZero(rows * elems / 32 * 2);
+    }
     for (u32 i = 0; i < cfg.n_layer; ++i) {
         if (!cfg.isAttn(i)) continue;
         kcache[i] = allocZero(rows * elems * ebk);
         vcache[i] = allocZero(rows * elems * ebv);
         if (kq8) kscale[i] = allocZero(rows * elems / 32 * 2);
         if (kv_q8) vscale[i] = allocZero(rows * elems / 32 * 2);
-    }
-    if (mtp) {
-        mtp_kc = allocZero(rows * elems * ebk);
-        mtp_vc = allocZero(rows * elems * ebv);
-        if (kq8) mtp_ks = allocZero(rows * elems / 32 * 2);
-        if (kv_q8) mtp_vs = allocZero(rows * elems / 32 * 2);
     }
     pool_pages = pages;
     if (seqs.empty()) {

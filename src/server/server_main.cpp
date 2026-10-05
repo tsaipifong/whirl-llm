@@ -114,7 +114,9 @@ const char* kHelpBody =
     "  -np, --parallel N        concurrent request slots (continuous batching, 1..16; default 4)\n"
     "  -c, --ctx N              shared KV pool in tokens; slots take pages on demand and idle slots'\n"
     "                           prefix caches are evicted (LRU) when it is full (default: all VRAM\n"
-    "                           left over minus 768 MiB (MoE 1.5 GiB); 262144 on the Radeon 8060S)\n"
+    "                           left over, kept 768 MiB (MoE 1.5 GiB) under both the free VRAM and the\n"
+    "                           Windows (WDDM) budget; WHIRL_POOL_RESERVE_MB=N: free VRAM minus N only;\n"
+    "                           262144 on the Radeon 8060S)\n"
     "  --ctx-per-slot N         longest context of one request (default min(pool, 131072); up to 262144)\n"
     "  --mtp-drafts N           MTP drafts per cycle, 1..10 (fixed count; default: per model type)\n"
     "  --decode-min-tps N       while other requests prefill, keep every streaming (decoding) request\n"
@@ -713,11 +715,37 @@ int serveMain(int argc, char** argv, const char* program) {
         }
         const hip::MemInfo mem_t1 = hip::memInfo();
         // shared KV pool: --ctx, or (R9700) the VRAM left now minus a reserve
-        const std::uint64_t reserve = static_cast<std::uint64_t>(envU32("POOL_RESERVE_MB", cfg.moe ? 1536 : 768)) << 20;
+        // The reserve is kept below both the free VRAM and this process's WDDM budget: going over the
+        // budget makes Windows demote allocations to system memory (seen as GPU 'Shared Usage'), and a
+        // demoted KV array is read across PCIe on every step (FIX-1: ~128k agent decode 29 -> 68 tok/s).
+        // WHIRL_POOL_RESERVE_MB keeps the old free-VRAM-only rule with that reserve.
+        const bool reserve_explicit = env("POOL_RESERVE_MB").has_value();
+        const hip::WddmMemInfo wddm0 = hip::wddmMemInfo();
+        const std::uint64_t reserve =
+            static_cast<std::uint64_t>(envU32("POOL_RESERVE_MB", cfg.moe ? 1536 : (wddm0.ok ? 768 : 3072))) << 20;
+        const std::uint64_t budget_margin = static_cast<std::uint64_t>(envU32("POOL_BUDGET_MARGIN_MB", cfg.moe ? 1536 : 768)) << 20;
+        std::string budget_note;
         const std::uint64_t avail = [&] {
             const hip::MemInfo mf = hip::memInfo();
-            return mf.free > reserve ? mf.free - reserve : 0;
+            std::uint64_t a = mf.free > reserve ? mf.free - reserve : 0;
+            if (!reserve_explicit && wddm0.ok) {
+                const std::uint64_t room = wddm0.local_budget > wddm0.local_usage + budget_margin
+                                               ? wddm0.local_budget - wddm0.local_usage - budget_margin
+                                               : 0;
+                budget_note = std::format("WDDM budget {:.2f} GiB, used {:.2f} GiB, margin {} MiB -> room {:.2f} GiB; free VRAM {:.2f} GiB "
+                                          "minus {} MiB -> {:.2f} GiB",
+                                          wddm0.local_budget / 1073741824.0, wddm0.local_usage / 1073741824.0, budget_margin >> 20,
+                                          room / 1073741824.0, mf.free / 1073741824.0, reserve >> 20, a / 1073741824.0);
+                a = std::min(a, room);
+            } else if (reserve_explicit) {
+                budget_note = std::format("WHIRL_POOL_RESERVE_MB={}: free VRAM {:.2f} GiB minus the reserve, WDDM budget not applied",
+                                          reserve >> 20, mf.free / 1073741824.0);
+            } else {
+                budget_note = std::format("WDDM budget unavailable: free VRAM {:.2f} GiB minus {} MiB", mf.free / 1073741824.0, reserve >> 20);
+            }
+            return a;
         }();
+        if (!pool_req) logI("kv pool sizing: {}", budget_note);
         std::string kv_note;
         if (model.kvAutoDense()) {
             const std::uint32_t second = opt.parallel > 1 ? std::min(floor_second_ctx, slot_ctx) : 0;
@@ -791,6 +819,27 @@ int serveMain(int argc, char** argv, const char* program) {
                  eo.ngram ? "=0 turns it off" : "=1 turns it on", eo.ngram_min,
                  eo.ngram_max > 0 ? std::min(eo.ngram_max, qwen35::max_ng_drafts) : qwen35::max_ng_drafts);
         engine.initPool();
+        {
+            // after everything sized at startup is allocated: any growth of the non-local segment
+            // since the pool was sized is VRAM demoted to system memory (pinned host buffers made
+            // before that point, such as the embedding table and the RAM tier, are in the baseline)
+            const hip::WddmMemInfo w = hip::wddmMemInfo();
+            if (w.ok && wddm0.ok) {
+                const std::uint64_t grow = w.nonlocal_usage > wddm0.nonlocal_usage ? w.nonlocal_usage - wddm0.nonlocal_usage : 0;
+                const bool over = w.local_usage > w.local_budget || grow > (256ull << 20);
+                const std::string msg = std::format(
+                    "WDDM memory: local {:.2f} / budget {:.2f} GiB; non-local (GPU 'Shared Usage') {:.0f} MiB, of which {:.0f} MiB was there "
+                    "before the KV pool (declared pinned host memory: embedding {:.0f} MiB{}); growth {:.0f} MiB",
+                    w.local_usage / 1073741824.0, w.local_budget / 1073741824.0, w.nonlocal_usage / 1048576.0,
+                    wddm0.nonlocal_usage / 1048576.0, embd_pinned / 1048576.0, tier_pre ? ", RAM tier" : "", grow / 1048576.0);
+                if (over)
+                    logW("{} -- over the WDDM budget, part of the GPU buffers may live in system memory and decode can be several "
+                         "times slower; set WHIRL_POOL_RESERVE_MB larger (e.g. 3072) or give --ctx",
+                         msg);
+                else
+                    logI("{}", msg);
+            }
+        }
         if (eo.n_spe > 0)
             logI("shared prefix checkpoints: {} x {:.1f} MiB in VRAM; system messages >= {} tokens are prefilled as their own chunk "
                  "run and kept (WHIRL_SYS_MIN, 0 = no split), plus checkpoints at prefixes common to sessions ({})",
