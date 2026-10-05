@@ -258,13 +258,13 @@ __device__ void gemv1s_impl(const uint8_t *__restrict__ W, uint64_t row_bytes, c
 template <int T, int NT, int TILES, bool HALF>
 __device__ void gemvw_impl(const uint8_t *__restrict__ W, uint64_t row_bytes, const int8_t *__restrict__ xq,
                            const float *__restrict__ xd, float *__restrict__ y, int ncols, int nrows, int accumulate,
-                           const int *__restrict__ skip) {
+                           const int *__restrict__ skip, int bid = -1) {
     constexpr int ROWS = HALF ? 8 : 16 * TILES;
     constexpr int NTV = (NT + 1) / 2;
     __shared__ float red[8][NT][ROWS];
     if (skip != nullptr && *skip) return;
     const int lane = threadIdx.x % WARP, w = threadIdx.x / WARP, h = lane >> 4, n = lane & 15;
-    const int r0 = blockIdx.x * ROWS;
+    const int r0 = (bid < 0 ? (int)blockIdx.x : bid) * ROWS;
     const uint8_t *wr[TILES];
 #pragma unroll
     for (int tt = 0; tt < TILES; ++tt) wr[tt] = W + (size_t)min(r0 + tt * 16 + (HALF ? (n & 7) : n), nrows - 1) * row_bytes;

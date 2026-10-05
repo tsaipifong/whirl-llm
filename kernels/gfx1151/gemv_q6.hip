@@ -77,13 +77,13 @@ __device__ void gemv1s6_impl(const uint8_t *__restrict__ W, uint64_t row_bytes, 
 template <int NT, int TILES, bool HALF>
 __device__ void gemvw6_impl(const uint8_t *__restrict__ W, uint64_t row_bytes, const int8_t *__restrict__ xq,
                             const float *__restrict__ xd, float *__restrict__ y, int ncols, int nrows, int accumulate,
-                            const int *__restrict__ skip) {
+                            const int *__restrict__ skip, int bid = -1) {
     constexpr int ROWS = HALF ? 8 : 16 * TILES;
     constexpr int NTV = (NT + 1) / 2;
     __shared__ float red[8][NT][ROWS];
     if (skip != nullptr && *skip) return;
     const int lane = threadIdx.x % WARP, w = threadIdx.x / WARP, h = lane >> 4, n = lane & 15;
-    const int r0 = blockIdx.x * ROWS;
+    const int r0 = (bid < 0 ? (int)blockIdx.x : bid) * ROWS;
     const uint8_t *wr[TILES];
 #pragma unroll
     for (int tt = 0; tt < TILES; ++tt) wr[tt] = W + (size_t)min(r0 + tt * 16 + (HALF ? (n & 7) : n), nrows - 1) * row_bytes;
@@ -222,6 +222,26 @@ __device__ void gemvq_mr_impl(const uint8_t *__restrict__ W, uint64_t row_bytes,
              int ncols, int nrows, int accumulate, const int *skip) {                            \
         gemvw6_impl<NT, TILES, HALF>(W, row_bytes, xq, xd, y, ncols, nrows, accumulate, skip);   \
     }
+// "g" twins (grouped ABI, GvArgs): one launch covers up to 3 matrices sharing the input;
+// each block runs its segment's rows with the plain entry's code (bitwise the same rows).
+#define GGEMVQ_NT_ENTRY(NT, SUF, T)                                                              \
+    extern "C" __global__ void __launch_bounds__(256)                                            \
+        ggemvq_nt##NT##_##SUF(GV_PARAMS) {                                                       \
+        const GvSel gs = gv_sel(g);                                                              \
+        gemvq_nt_impl<T, NT>(gs.W, gs.rb, xq, xd, gs.y, ncols, gs.nrows, accumulate, skip, gs.b); \
+    }
+#define GGEMVW_ENTRY(NAME, T, NT, TILES, HALF)                                                   \
+    extern "C" __global__ void __launch_bounds__(256)                                            \
+        NAME(GV_PARAMS) {                                                                        \
+        const GvSel gs = gv_sel(g);                                                              \
+        gemvw_impl<T, NT, TILES, HALF>(gs.W, gs.rb, xq, xd, gs.y, ncols, gs.nrows, accumulate, skip, gs.b); \
+    }
+#define GGEMVW6_ENTRY(NAME, NT, TILES, HALF)                                                     \
+    extern "C" __global__ void __launch_bounds__(256)                                            \
+        NAME(GV_PARAMS) {                                                                        \
+        const GvSel gs = gv_sel(g);                                                              \
+        gemvw6_impl<NT, TILES, HALF>(gs.W, gs.rb, xq, xd, gs.y, ncols, gs.nrows, accumulate, skip, gs.b); \
+    }
 #define GEMVQ_NT_TYPES(NT)                \
     GEMVW_ENTRY(gemvq_nt##NT##_q4_k, QT_Q4_K, NT, 1, true)     \
     GEMVW_ENTRY(gemvq_nt##NT##_q5_k, QT_Q5_K, NT, 1, true)     \
@@ -231,7 +251,16 @@ __device__ void gemvq_mr_impl(const uint8_t *__restrict__ W, uint64_t row_bytes,
     GEMVQ_NT_ENTRY(NT, iq4_nl, QT_IQ4_NL) \
     GEMVQ_NT_ENTRY(NT, q8_0, QT_Q8_0)     \
     GEMVQ_NT_ENTRY(NT, q3_k, QT_Q3_K)     \
-    GEMVQ_NT_ENTRY(NT, iq3_s, QT_IQ3_S)
+    GEMVQ_NT_ENTRY(NT, iq3_s, QT_IQ3_S)   \
+    GGEMVW_ENTRY(ggemvq_nt##NT##_q4_k, QT_Q4_K, NT, 1, true)     \
+    GGEMVW_ENTRY(ggemvq_nt##NT##_q5_k, QT_Q5_K, NT, 1, true)     \
+    GGEMVW_ENTRY(ggemvq_nt##NT##_iq4_xs, QT_IQ4_XS, NT, 1, true) \
+    GGEMVW_ENTRY(ggemvq_nt##NT##_mxfp4, QT_MXFP4, NT, 1, true) \
+    GGEMVW6_ENTRY(ggemvq_nt##NT##_q6_k, NT, 1, true) \
+    GGEMVQ_NT_ENTRY(NT, iq4_nl, QT_IQ4_NL) \
+    GGEMVQ_NT_ENTRY(NT, q8_0, QT_Q8_0)     \
+    GGEMVQ_NT_ENTRY(NT, q3_k, QT_Q3_K)     \
+    GGEMVQ_NT_ENTRY(NT, iq3_s, QT_IQ3_S)
 
 GEMV1S_ENTRY(q4_k, QT_Q4_K)
 GEMV1S_ENTRY(q5_k, QT_Q5_K)
@@ -275,7 +304,12 @@ GEMVQ_NT_TYPES(16)
     GEMVW_ENTRY(gemvq_nt##NT##r##R##_q5_k, QT_Q5_K, NT, R / 2, false)     \
     GEMVW_ENTRY(gemvq_nt##NT##r##R##_iq4_xs, QT_IQ4_XS, NT, R / 2, false) \
     GEMVW_ENTRY(gemvq_nt##NT##r##R##_mxfp4, QT_MXFP4, NT, R / 2, false) \
-    GEMVW6_ENTRY(gemvq_nt##NT##r##R##_q6_k, NT, R / 2, false)
+    GEMVW6_ENTRY(gemvq_nt##NT##r##R##_q6_k, NT, R / 2, false) \
+    GGEMVW_ENTRY(ggemvq_nt##NT##r##R##_q4_k, QT_Q4_K, NT, R / 2, false)     \
+    GGEMVW_ENTRY(ggemvq_nt##NT##r##R##_q5_k, QT_Q5_K, NT, R / 2, false)     \
+    GGEMVW_ENTRY(ggemvq_nt##NT##r##R##_iq4_xs, QT_IQ4_XS, NT, R / 2, false) \
+    GGEMVW_ENTRY(ggemvq_nt##NT##r##R##_mxfp4, QT_MXFP4, NT, R / 2, false) \
+    GGEMVW6_ENTRY(ggemvq_nt##NT##r##R##_q6_k, NT, R / 2, false)
 GEMVQ_MR_TYPES(2, 2)
 GEMVQ_MR_TYPES(2, 4)
 GEMVQ_MR_TYPES(3, 2)

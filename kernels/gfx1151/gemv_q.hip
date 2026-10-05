@@ -390,10 +390,10 @@ __device__ void gemvq_impl(const uint8_t *__restrict__ W, uint64_t row_bytes, co
 template <int T, int NT>
 __device__ void gemvq_nt_impl(const uint8_t *__restrict__ W, uint64_t row_bytes, const int8_t *__restrict__ xq,
                               const float *__restrict__ xd, float *__restrict__ y, int ncols, int nrows, int accumulate,
-                              const int *__restrict__ skip) {
+                              const int *__restrict__ skip, int bid = -1) {
     if (skip != nullptr && *skip) return;
     const int lane = threadIdx.x % WARP;
-    const int row = blockIdx.x * (blockDim.x / WARP) + threadIdx.x / WARP;
+    const int row = (bid < 0 ? (int)blockIdx.x : bid) * (blockDim.x / WARP) + threadIdx.x / WARP;
     if (row >= nrows) return;
     const uint8_t *wr = W + (size_t)row * row_bytes;
     const int nu = ncols / QD<T>::sb * QD<T>::per_sb;
