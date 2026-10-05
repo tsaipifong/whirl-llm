@@ -198,7 +198,7 @@ std::string explainText(const std::exception& e, int* exit_code) {
                   "  and qwen35moe (the mixture-of-experts variant, e.g. Ornith-1.5-35B-A3B).\n"
                   "  Architectures are added one at a time, each with kernels tuned for it; for other models\n"
                   "  (Llama, Gemma, Mistral, DeepSeek, Qwen3 / Qwen2.5, ...) use llama.cpp.\n";
-        } else if (c == "UnsupportedTensorType" || c == "UnsupportedMoeShape" || c == "MissingTensor" || c == "Truncated" || c == "OpenFailed") {
+        } else if (c == "UnsupportedTensorType" || c == "UnsupportedMoeShape" || c == "UnsupportedTensorShape" || c == "UnsupportedConfig" || c == "MissingTensor" || c == "Truncated" || c == "OpenFailed") {
             code = exit_model;
             msg = "this GGUF file cannot be loaded (" + what +
                   ").\n"

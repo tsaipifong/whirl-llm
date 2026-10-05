@@ -1,5 +1,5 @@
 // Host-only unit tests of the model library (no GPU work): architecture
-// whitelist, tune buckets, GEMV tables, draft-count cost model, n-gram drafter, per-slot
+// whitelist, load-time hyper-parameter / tensor shape validation, tune buckets, GEMV tables, draft-count cost model, n-gram drafter, per-slot
 // draft allocation (cycle cost, slot acceptance, allocDrafts).
 // SPDX-License-Identifier: Apache-2.0
 
@@ -11,7 +11,9 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
 #include <filesystem>
+#include <map>
 #include <fstream>
 #include <span>
 #include <stdexcept>
@@ -102,6 +104,310 @@ void testArchWhitelist() {
             code = e.code();
         }
         check(code == "MissingTensor", "qwen35 accepted by the whitelist");
+    }
+}
+
+// Tiny synthetic qwen35 / qwen35moe model (all f32, zero payload) for the
+// load-time validation (review SR-1 N1): hyper-parameters and tensor shapes.
+struct TinyModel {
+    bool moe = false;
+    std::map<std::string, std::uint64_t> hp = {
+        {"block_count", 3},  // 2 trunk layers (0: DeltaNet, 1: attention) + 1 MTP block
+        {"nextn_predict_layers", 1},
+        {"embedding_length", 256},
+        {"feed_forward_length", 256},
+        {"attention.head_count", 2},
+        {"attention.head_count_kv", 1},
+        {"attention.key_length", 32},
+        {"attention.value_length", 32},
+        {"rope.dimension_count", 16},
+        {"full_attention_interval", 2},
+        {"ssm.conv_kernel", 4},
+        {"ssm.state_size", 32},
+        {"ssm.group_count", 1},
+        {"ssm.time_step_rank", 2},
+        {"ssm.inner_size", 64},
+    };
+    std::uint64_t vocab = 16;
+    // tensor name -> ne (overrides / removals applied by the tests)
+    std::map<std::string, std::vector<std::uint64_t>> tensors;
+    std::map<std::string, std::uint32_t> types;  // default f32
+
+    std::uint64_t H(const char* k) const { return hp.at(k); }
+
+    void makeTensors() {
+        tensors.clear();
+        const std::uint64_t E = H("embedding_length"), F = moe ? H("expert_shared_feed_forward_length") : H("feed_forward_length");
+        const std::uint64_t HD = H("attention.key_length"), NH = H("attention.head_count"), NKV = H("attention.head_count_kv");
+        const std::uint64_t DS = H("ssm.state_size"), NK = H("ssm.group_count"), NV = H("ssm.time_step_rank"), DI = H("ssm.inner_size");
+        const std::uint64_t CH = 2 * NK * DS + DI;
+        const std::uint64_t n_all = H("block_count"), n_layer = n_all - H("nextn_predict_layers");
+        tensors["token_embd.weight"] = {E, vocab};
+        tensors["output.weight"] = {E, vocab};
+        tensors["output_norm.weight"] = {E};
+        auto bn = [](std::uint64_t l, const char* s) { return "blk." + std::to_string(l) + "." + s; };
+        auto ffn = [&](std::uint64_t l) {
+            if (moe) {
+                const std::uint64_t FE = H("expert_feed_forward_length"), NE = H("expert_count");
+                tensors[bn(l, "ffn_gate_shexp.weight")] = {E, F};
+                tensors[bn(l, "ffn_up_shexp.weight")] = {E, F};
+                tensors[bn(l, "ffn_down_shexp.weight")] = {F, E};
+                tensors[bn(l, "ffn_gate_inp.weight")] = {E, NE};
+                tensors[bn(l, "ffn_gate_inp_shexp.weight")] = {E};
+                tensors[bn(l, "ffn_gate_exps.weight")] = {E, FE, NE};
+                tensors[bn(l, "ffn_up_exps.weight")] = {E, FE, NE};
+                tensors[bn(l, "ffn_down_exps.weight")] = {FE, E, NE};
+            } else {
+                tensors[bn(l, "ffn_gate.weight")] = {E, F};
+                tensors[bn(l, "ffn_up.weight")] = {E, F};
+                tensors[bn(l, "ffn_down.weight")] = {F, E};
+            }
+        };
+        auto attn = [&](std::uint64_t l) {
+            tensors[bn(l, "attn_q.weight")] = {E, 2 * NH * HD};
+            tensors[bn(l, "attn_k.weight")] = {E, NKV * HD};
+            tensors[bn(l, "attn_v.weight")] = {E, NKV * HD};
+            tensors[bn(l, "attn_output.weight")] = {NH * HD, E};
+            tensors[bn(l, "attn_q_norm.weight")] = {HD};
+            tensors[bn(l, "attn_k_norm.weight")] = {HD};
+        };
+        for (std::uint64_t l = 0; l < n_layer; ++l) {
+            tensors[bn(l, "attn_norm.weight")] = {E};
+            tensors[bn(l, "post_attention_norm.weight")] = {E};
+            ffn(l);
+            if ((l + 1) % H("full_attention_interval") == 0) {
+                attn(l);
+            } else {
+                tensors[bn(l, "attn_qkv.weight")] = {E, CH};
+                tensors[bn(l, "attn_gate.weight")] = {E, DI};
+                tensors[bn(l, "ssm_beta.weight")] = {E, NV};
+                tensors[bn(l, "ssm_alpha.weight")] = {E, NV};
+                tensors[bn(l, "ssm_out.weight")] = {DI, E};
+                tensors[bn(l, "ssm_conv1d.weight")] = {H("ssm.conv_kernel"), CH};
+                tensors[bn(l, "ssm_dt.bias")] = {NV};
+                tensors[bn(l, "ssm_a")] = {NV};
+                tensors[bn(l, "ssm_norm.weight")] = {DI / NV};
+            }
+        }
+        for (std::uint64_t l = n_layer; l < n_all; ++l) {
+            attn(l);
+            tensors[bn(l, "attn_norm.weight")] = {E};
+            tensors[bn(l, "post_attention_norm.weight")] = {E};
+            ffn(l);
+            tensors[bn(l, "nextn.eh_proj.weight")] = {2 * E, E};
+            tensors[bn(l, "nextn.enorm.weight")] = {E};
+            tensors[bn(l, "nextn.hnorm.weight")] = {E};
+            tensors[bn(l, "nextn.shared_head_norm.weight")] = {E};
+        }
+    }
+
+    TinyModel(bool is_moe = false) : moe(is_moe) {
+        if (moe) {
+            hp["expert_count"] = 4;
+            hp["expert_used_count"] = 2;
+            hp["expert_feed_forward_length"] = 256;
+            hp["expert_shared_feed_forward_length"] = 256;
+            hp.erase("feed_forward_length");
+        }
+        makeTensors();
+    }
+
+    std::vector<std::uint8_t> build() const {
+        GgufImage g;
+        const std::string arch = moe ? "qwen35moe" : "qwen35";
+        g.kvString("general.architecture", arch);
+        for (const auto& [k, v] : hp) g.kvU32(arch + "." + k, static_cast<std::uint32_t>(v));
+        auto kvF32 = [&](const std::string& k, float v) {
+            g.str(g.kv, k);
+            g.u32(g.kv, 6);
+            std::uint32_t bits;
+            std::memcpy(&bits, &v, 4);
+            g.u32(g.kv, bits);
+            ++g.n_kv;
+        };
+        kvF32(arch + ".rope.freq_base", 1e7f);
+        kvF32(arch + ".attention.layer_norm_rms_epsilon", 1e-6f);
+        std::vector<std::uint8_t> out;
+        g.u32(out, 0x46554747);
+        g.u32(out, 3);
+        g.u64(out, tensors.size());
+        g.u64(out, g.n_kv);
+        out.insert(out.end(), g.kv.begin(), g.kv.end());
+        std::uint64_t off = 0;
+        for (const auto& [name, ne] : tensors) {
+            g.str(out, name);
+            g.u32(out, static_cast<std::uint32_t>(ne.size()));
+            std::uint64_t n = 1;
+            for (std::uint64_t d : ne) g.u64(out, d), n *= d;
+            const auto it = types.find(name);
+            g.u32(out, it == types.end() ? 0 : it->second);
+            g.u64(out, off);
+            off += (n * 4 + 31) / 32 * 32;
+        }
+        while (out.size() % 32) out.push_back(0);
+        out.resize(out.size() + off, 0);
+        return out;
+    }
+};
+
+// error code of Config::fromGguf + validateTensors on the image, "" if accepted
+std::string loadCheck(const std::vector<std::uint8_t>& img, std::string* detail = nullptr) {
+    try {
+        const gguf::File f = gguf::File::parse(img);
+        const q::Config cfg = q::Config::fromGguf(f);
+        cfg.validateTensors(f);
+    } catch (const q::ModelError& e) {
+        if (detail) *detail = e.what();
+        return e.code();
+    } catch (const std::exception& e) {
+        if (detail) *detail = e.what();
+        return std::string("other: ") + e.what();
+    }
+    return "";
+}
+
+void testLoadValidation() {
+    for (bool moe : {false, true}) {
+        const char* tag = moe ? " (moe)" : " (dense)";
+        auto expectCode = [&](const TinyModel& m, const char* code, const char* what) {
+            std::string detail;
+            const std::string got = loadCheck(m.build(), &detail);
+            const bool ok = got == code;
+            if (!ok) std::printf("  %s%s: got '%s' (%s)\n", what, tag, got.c_str(), detail.c_str());
+            check(ok, (std::string(what) + tag).c_str());
+        };
+        {
+            const TinyModel m(moe);
+            expectCode(m, "", "tiny valid model accepted");
+            const std::vector<std::uint8_t> img = m.build();
+            const gguf::File f = gguf::File::parse(img);
+            const q::Config c = q::Config::fromGguf(f);
+            check(c.n_layer == 2 && c.n_nextn == 1 && c.n_vocab == 16 && c.head_dim == 32 && c.moe == moe, (std::string("tiny config values") + tag).c_str());
+        }
+        {
+            TinyModel m(moe);  // no MTP block, no output.weight (tied embeddings)
+            m.hp["nextn_predict_layers"] = 0;
+            m.hp["block_count"] = 2;
+            m.makeTensors();
+            m.tensors.erase("output.weight");
+            expectCode(m, "", "tiny model without MTP / output.weight accepted");
+        }
+        {
+            TinyModel m(moe);
+            m.hp["nextn_predict_layers"] = 3;  // == block_count: n_layer would be 0
+            expectCode(m, "UnsupportedConfig", "nextn_predict_layers == block_count rejected");
+            m.hp["nextn_predict_layers"] = 5;  // > block_count: n_layer would wrap to ~4e9
+            expectCode(m, "UnsupportedConfig", "nextn_predict_layers > block_count rejected");
+        }
+        {
+            TinyModel m(moe);
+            m.hp["attention.key_length"] = 64;  // metadata head_dim no longer matches the tensors
+            m.hp["attention.value_length"] = 64;
+            expectCode(m, "UnsupportedTensorShape", "head_dim metadata vs attn tensors rejected");
+        }
+        {
+            TinyModel m(moe);
+            m.tensors["blk.1.attn_k.weight"] = {256, 64};  // one KV projection with the wrong head count / dim
+            expectCode(m, "UnsupportedTensorShape", "mismatched attn_k shape rejected");
+        }
+        {
+            TinyModel m(moe);
+            m.hp["attention.key_length"] = 512;
+            m.hp["attention.value_length"] = 512;
+            m.makeTensors();  // consistent tensors, but head_dim beyond the kernels' 256
+            expectCode(m, "UnsupportedConfig", "head_dim 512 rejected");
+        }
+        {
+            TinyModel m(moe);
+            m.hp["attention.value_length"] = 64;
+            expectCode(m, "UnsupportedConfig", "value_length != key_length rejected");
+        }
+        {
+            TinyModel m(moe);
+            m.hp["attention.head_count_kv"] = 3;  // 2 % 3
+            expectCode(m, "UnsupportedConfig", "head_count_kv not dividing head_count rejected");
+        }
+        {
+            TinyModel m(moe);
+            m.hp["full_attention_interval"] = 0;  // isAttn() would divide by zero
+            expectCode(m, "UnsupportedConfig", "full_attention_interval 0 rejected");
+        }
+        {
+            TinyModel m(moe);
+            m.hp["ssm.conv_kernel"] = 0;  // d_conv - 1 would wrap
+            expectCode(m, "UnsupportedConfig", "ssm.conv_kernel 0 rejected");
+        }
+        {
+            TinyModel m(moe);
+            m.hp["embedding_length"] = 100;
+            m.makeTensors();
+            expectCode(m, "UnsupportedConfig", "embedding_length not a multiple of 256 rejected");
+        }
+        {
+            TinyModel m(moe);
+            m.tensors["output.weight"] = {256, 17};  // vocab differs from token_embd
+            expectCode(m, "UnsupportedTensorShape", "output.weight vocab mismatch rejected");
+        }
+        {
+            TinyModel m(moe);
+            m.tensors["blk.0.ssm_conv1d.weight"] = {4, 128, 2};  // extra dimension
+            expectCode(m, "UnsupportedTensorShape", "extra tensor dimension rejected");
+        }
+        {
+            TinyModel m(moe);
+            m.tensors.erase("blk.0.ssm_out.weight");
+            expectCode(m, "MissingTensor", "missing trunk tensor rejected");
+        }
+        {
+            TinyModel m(moe);
+            m.tensors.erase("blk.2.attn_q.weight");  // MTP block present (eh_proj) but incomplete
+            expectCode(m, "MissingTensor", "missing MTP tensor rejected");
+        }
+        {
+            TinyModel m(moe);
+            m.types["blk.1.attn_q.weight"] = 12;  // q4_K with a 256-wide row is fine...
+            expectCode(m, "", "q4_K tensor with matching shape accepted");
+            m.types["blk.1.attn_q_norm.weight"] = 12;  // ...but a 32-wide q4_K row is not a whole block
+            expectCode(m, "UnsupportedTensorType", "partial-block tensor rejected");
+        }
+        if (moe) {
+            TinyModel m(moe);
+            m.tensors["blk.0.ffn_up_exps.weight"] = {256, 256, 5};  // expert count differs
+            expectCode(m, "UnsupportedTensorShape", "expert tensor shape mismatch rejected");
+            TinyModel m2(moe);
+            m2.hp["expert_used_count"] = 8;  // > expert_count
+            expectCode(m2, "UnsupportedConfig", "expert_used_count > expert_count rejected");
+        }
+    }
+}
+
+// Optional: WHIRL_TEST_GGUF="a.gguf;b.gguf" runs the load-time validation on
+// real model files (header + tensor directory only; no GPU, no weight reads).
+void testRealFiles() {
+    char* buf = nullptr;
+    std::size_t len = 0;
+    if (_dupenv_s(&buf, &len, "WHIRL_TEST_GGUF") != 0 || buf == nullptr) return;
+    std::string list(buf);
+    std::free(buf);
+    std::size_t p = 0;
+    while (p < list.size()) {
+        std::size_t e = list.find(';', p);
+        if (e == std::string::npos) e = list.size();
+        const std::string path = list.substr(p, e - p);
+        p = e + 1;
+        if (path.empty()) continue;
+        std::string err;
+        try {
+            const gguf::File f = gguf::File::open(path);
+            const q::Config c = q::Config::fromGguf(f);
+            c.validateTensors(f);
+            std::printf("  real file OK: %s (%s, %u layers + %u MTP, embd %u, vocab %u, %zu tensors)\n", path.c_str(), c.archName(), c.n_layer, c.n_nextn,
+                        c.n_embd, c.n_vocab, f.tensors().size());
+        } catch (const std::exception& ex) {
+            err = ex.what();
+            std::printf("  real file REJECTED: %s: %s\n", path.c_str(), err.c_str());
+        }
+        check(err.empty(), ("real file passes load validation: " + path).c_str());
     }
 }
 
@@ -430,6 +736,8 @@ void testAllocDrafts() {
 
 int main() {
     testArchWhitelist();
+    testLoadValidation();
+    testRealFiles();
     testTables();
     testDraftModel();
     testNgram();

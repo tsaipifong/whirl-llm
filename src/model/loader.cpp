@@ -323,6 +323,8 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
     Model& m = *mp;
     m.cfg = Config::fromGguf(f);
     const Config& cfg = m.cfg;
+    // every tensor's type and shape against cfg, before any GPU allocation
+    cfg.validateTensors(f);
     std::string co_path = opt.code_object;
     if (co_path.empty()) {
         if (auto v = envGet("CODE_OBJECT")) co_path = *v;

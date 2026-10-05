@@ -168,8 +168,14 @@ struct Config {
     std::array<std::uint32_t, 4> rope_sections = {0, 0, 0, 0};
 
     // Throws ModelError("UnsupportedArch") unless general.architecture is
-    // qwen35 or qwen35moe.
+    // qwen35 or qwen35moe, and ModelError("UnsupportedConfig") when the
+    // hyper-parameters are zero, inconsistent or outside what the kernels
+    // handle (e.g. nextn_predict_layers >= block_count, head_dim > 256).
     static Config fromGguf(const gguf::File& f);
+    // Checks the type (known, non-empty) and ne[] of every tensor Model::load
+    // reads against this config, before any GPU work: ModelError("MissingTensor"),
+    // ("UnsupportedTensorType") or ("UnsupportedTensorShape"). Host-only.
+    void validateTensors(const gguf::File& f) const;
     const char* archName() const { return moe ? "qwen35moe" : "qwen35"; }
     bool isAttn(std::uint32_t il) const { return (il + 1) % interval == 0; }
     std::uint32_t convCh() const { return 2 * n_k_heads * d_state + d_inner; }

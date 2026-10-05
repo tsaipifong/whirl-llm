@@ -118,11 +118,14 @@ struct TensorInfo {
     GgmlType type = GgmlType::f32;
     std::uint64_t offset = 0;  // relative to the data section
 
+    // File::parse rejects shapes whose element count or byte size overflows,
+    // so elements() / rows() cannot wrap for tensors of a parsed file.
     std::uint64_t elements() const { return ne[0] * ne[1] * ne[2] * ne[3]; }
     // 0 if the type is unknown or ne[0] is not a multiple of the block size.
     std::uint64_t rowBytes() const;
     std::uint64_t rows() const { return ne[1] * ne[2] * ne[3]; }
-    std::uint64_t nbytes() const { return rowBytes() * rows(); }
+    // rowBytes() * rows(); 0 (like an unknown type) if that would overflow.
+    std::uint64_t nbytes() const;
 };
 
 class File {
@@ -160,6 +163,9 @@ public:
     std::uint64_t absOffset(const TensorInfo& t) const { return data_offset_ + t.offset; }
     // Payload bytes of a tensor inside the mapping (bounds-checked).
     std::span<const std::uint8_t> tensorData(const TensorInfo& t) const;
+    // True when [dataOffset() + t.offset, + nbytes) lies inside the file
+    // (overflow-safe; nbytes 0 counts as inside).
+    bool inBounds(const TensorInfo& t, std::uint64_t nbytes) const;
 
     // Human-readable value, e.g. for gguf-info (arrays summarized).
     static std::string formatValue(const Value& v, std::size_t max_array_items = 8);

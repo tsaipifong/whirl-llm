@@ -248,6 +248,118 @@ void testGguf() {
     CHECK(gguf::typeTraits(static_cast<gguf::GgmlType>(4)) == nullptr);
 }
 
+// One-tensor GGUF v3 image (no metadata): `ne` dims, `type`, `offset`, then
+// `payload` zero bytes after the aligned data start. offset_pos receives the
+// byte position of the offset field (for patching), data_off the data start.
+std::vector<std::uint8_t> oneTensorGguf(std::vector<std::uint64_t> ne, gguf::GgmlType type, std::uint64_t offset, std::size_t payload,
+                                        std::size_t* offset_pos = nullptr, std::size_t* data_off = nullptr) {
+    GgufBuilder g;
+    g.put<std::uint32_t>(0x46554747);
+    g.put<std::uint32_t>(3);
+    g.put<std::uint64_t>(1);  // tensors
+    g.put<std::uint64_t>(0);  // kv
+    g.str("t");
+    g.put<std::uint32_t>(static_cast<std::uint32_t>(ne.size()));
+    for (std::uint64_t n : ne) g.put<std::uint64_t>(n);
+    g.put<std::uint32_t>(static_cast<std::uint32_t>(type));
+    if (offset_pos) *offset_pos = g.b.size();
+    g.put<std::uint64_t>(offset);
+    while (g.b.size() % 32) g.b.push_back(0);
+    if (data_off) *data_off = g.b.size();
+    g.b.resize(g.b.size() + payload, 0);
+    return g.b;
+}
+
+// error text of gguf::File::parse, "" if it parsed
+std::string parseError(const std::vector<std::uint8_t>& bytes) {
+    try {
+        (void)gguf::File::parse(bytes);
+    } catch (const gguf::Error& e) {
+        return e.what();
+    } catch (const std::exception& e) {
+        return std::string("non-gguf exception: ") + e.what();
+    }
+    return "";
+}
+
+bool contains(const std::string& s, const char* sub) { return s.find(sub) != std::string::npos; }
+
+// Malformed tensor directories (review SR-1 #1 / N7): overflowing offsets and
+// shapes, header counts the file cannot hold. Each must be a gguf::Error.
+void testGgufHardening() {
+    using gguf::GgmlType;
+    constexpr std::uint64_t u64max = ~0ull;
+    // valid one-tensor file: f32 [16] = 64 bytes at offset 0, ending exactly at EOF
+    {
+        const auto ok = oneTensorGguf({16}, GgmlType::f32, 0, 64);
+        CHECK_EQ(parseError(ok), std::string());
+        const gguf::File f = gguf::File::parse(ok);
+        CHECK(f.tensor("t") != nullptr && f.tensor("t")->nbytes() == 64u && f.tensorData(*f.tensor("t")).size() == 64u);
+        // one byte short -> past the end
+        auto shortf = ok;
+        shortf.pop_back();
+        CHECK(contains(parseError(shortf), "extends past the end"));
+        // offset 32: last byte at size + 32 - 1
+        const auto off32 = oneTensorGguf({16}, GgmlType::f32, 32, 64);
+        CHECK(contains(parseError(off32), "extends past the end"));
+        const auto off32ok = oneTensorGguf({16}, GgmlType::f32, 32, 96);
+        CHECK_EQ(parseError(off32ok), std::string());
+    }
+    // offset close to 2^64: data_offset + offset + nb wraps to a small value
+    {
+        std::size_t pos = 0, data = 0;
+        auto img = oneTensorGguf({16}, GgmlType::f32, 0, 64, &pos, &data);
+        const std::uint64_t evil = 0ull - 32 - static_cast<std::uint64_t>(data);  // 2^64 - 32 - data_offset (32-aligned)
+        std::memcpy(img.data() + pos, &evil, 8);
+        CHECK(contains(parseError(img), "extends past the end"));
+        const std::uint64_t evil2 = u64max - 31;  // 2^64 - 32
+        std::memcpy(img.data() + pos, &evil2, 8);
+        CHECK(contains(parseError(img), "extends past the end"));
+    }
+    // review case: q4_K [256, 2^62] (2^70 elements, 144 * 2^62 bytes)
+    CHECK(contains(parseError(oneTensorGguf({256, 1ull << 62}, GgmlType::q4_k, 0, 0)), "overflows"));
+    // byte size overflows although the element count fits: f32 [2^31, 2^32] = 2^63 elements, 2^65 bytes
+    CHECK(contains(parseError(oneTensorGguf({1ull << 31, 1ull << 32}, GgmlType::f32, 0, 0)), "size overflows"));
+    // element count overflows: f32 [2^40, 2^40]
+    CHECK(contains(parseError(oneTensorGguf({1ull << 40, 1ull << 40}, GgmlType::f32, 0, 0)), "shape overflows"));
+    // rows overflow: [32, 2^32, 2^32, 2]
+    CHECK(contains(parseError(oneTensorGguf({32, 1ull << 32, 1ull << 32, 2}, GgmlType::f32, 0, 0)), "shape overflows"));
+    // a dimension beyond int64
+    CHECK(contains(parseError(oneTensorGguf({u64max}, GgmlType::f32, 0, 0)), "dimension that is too large"));
+    // an unknown type with a huge shape is still rejected by the shape check
+    CHECK(contains(parseError(oneTensorGguf({1ull << 40, 1ull << 40}, static_cast<GgmlType>(4), 0, 0)), "shape overflows"));
+    // header counts the file cannot hold (old check: count <= size / 8)
+    {
+        auto img = makeGguf(3, 32);
+        const std::uint64_t n_t = img.size() / 8;  // passes "size / 8", but a tensor entry takes >= 24 bytes
+        std::memcpy(img.data() + 8, &n_t, 8);
+        CHECK(contains(parseError(img), "implausible header counts"));
+        img = makeGguf(3, 32);
+        const std::uint64_t n_kv = img.size() / 9;  // a key/value entry takes >= 13 bytes
+        std::memcpy(img.data() + 16, &n_kv, 8);
+        CHECK(contains(parseError(img), "implausible header counts"));
+        img = makeGguf(3, 32);
+        const std::uint64_t huge = u64max / 2;
+        std::memcpy(img.data() + 8, &huge, 8);
+        CHECK(contains(parseError(img), "implausible header counts"));
+    }
+    // TensorInfo is public: an edited copy must not reach outside the mapping
+    {
+        const auto ok = oneTensorGguf({16}, GgmlType::f32, 0, 64);
+        const gguf::File f = gguf::File::parse(ok);
+        gguf::TensorInfo t = *f.tensor("t");
+        t.offset = 0ull - 32 - f.dataOffset();
+        CHECK(throws([&] { (void)f.tensorData(t); }));
+        CHECK(!f.inBounds(t, 64));
+        t.offset = 0;
+        t.ne[0] = 1ull << 40, t.ne[1] = 1ull << 40;  // nbytes would wrap
+        CHECK_EQ(t.nbytes(), 0u);
+        CHECK(throws([&] { (void)f.tensorData(t); }));
+        t.ne[0] = 16, t.ne[1] = 1;
+        CHECK(f.inBounds(t, 64) && !f.inBounds(t, 65));
+    }
+}
+
 // ---------------------------------------------------------------------------
 void testChat() {
     auto render = [](chat::TemplateKind k, const char* req) {
@@ -319,6 +431,7 @@ int main() {
     testJson();
     testUnicode();
     testGguf();
+    testGgufHardening();
     testChat();
     std::printf("unit tests: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

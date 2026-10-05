@@ -220,10 +220,27 @@ bool Value::isSigned() const {
     return type == ValueType::i8 || type == ValueType::i16 || type == ValueType::i32 || type == ValueType::i64;
 }
 
+// a * b without wrapping; false (r untouched) on overflow
+static bool mulOk(std::uint64_t a, std::uint64_t b, std::uint64_t& r) {
+    if (b != 0 && a > (std::numeric_limits<std::uint64_t>::max)() / b) return false;
+    r = a * b;
+    return true;
+}
+
 std::uint64_t TensorInfo::rowBytes() const {
     const TypeTraits* tr = typeTraits(type);
     if (!tr || ne[0] % tr->block_size != 0) return 0;
-    return ne[0] / tr->block_size * tr->type_size;
+    std::uint64_t rb = 0;
+    if (!mulOk(ne[0] / tr->block_size, tr->type_size, rb)) return 0;
+    return rb;
+}
+
+std::uint64_t TensorInfo::nbytes() const {
+    std::uint64_t rows = 1, nb = 0;
+    for (int d = 1; d < 4; ++d)
+        if (!mulOk(rows, ne[d], rows)) return 0;
+    if (!mulOk(rowBytes(), rows, nb)) return 0;
+    return nb;
 }
 
 File File::open(const std::string& path) {
@@ -250,6 +267,14 @@ void File::parseImpl() {
     const std::uint64_t n_kv = r.scalar<std::uint64_t>();
     // every entry takes at least 8 bytes, so a count beyond the file size is corrupt
     if (n_tensors > bytes_.size() / 8 || n_kv > bytes_.size() / 8) throw Error("gguf: implausible header counts");
+    // a key/value entry takes >= 13 bytes (key length, type, 1-byte value), a
+    // tensor entry >= 24 (name length, n_dims, type, offset): the counts must
+    // fit in what is left of the file. (Both terms are <= the file size here,
+    // so the sum cannot wrap.)
+    constexpr std::uint64_t k_min_kv = 13, k_min_tensor = 24;
+    const std::uint64_t rest = bytes_.size() - r.pos();
+    if (n_kv > rest / k_min_kv || n_tensors > rest / k_min_tensor || n_kv * k_min_kv + n_tensors * k_min_tensor > rest)
+        throw Error("gguf: implausible header counts (more entries than the file can hold)");
 
     kv_.reserve(static_cast<std::size_t>(n_kv));
     for (std::uint64_t k = 0; k < n_kv; ++k) {
@@ -274,8 +299,25 @@ void File::parseImpl() {
         t.name = r.str();
         t.n_dims = r.scalar<std::uint32_t>();
         if (t.n_dims > k_max_dims) throw Error("gguf: tensor " + std::string(t.name) + " has too many dimensions");
-        for (std::uint32_t d = 0; d < t.n_dims; ++d) t.ne[d] = r.scalar<std::uint64_t>();
-        t.type = static_cast<GgmlType>(r.scalar<std::uint32_t>());
+        for (std::uint32_t d = 0; d < t.n_dims; ++d) {
+            t.ne[d] = r.scalar<std::uint64_t>();
+            // ggml dimensions are int64
+            if (t.ne[d] > static_cast<std::uint64_t>((std::numeric_limits<std::int64_t>::max)()))
+                throw Error("gguf: tensor " + std::string(t.name) + " has a dimension that is too large");
+        }
+        {
+            // elements(), rows() and the byte size must not wrap
+            std::uint64_t rows = 1, elems = 0, nb = 0;
+            for (std::uint32_t d = 1; d < 4; ++d)
+                if (!mulOk(rows, t.ne[d], rows)) throw Error("gguf: tensor " + std::string(t.name) + " shape overflows");
+            if (!mulOk(t.ne[0], rows, elems)) throw Error("gguf: tensor " + std::string(t.name) + " shape overflows");
+            t.type = static_cast<GgmlType>(r.scalar<std::uint32_t>());
+            if (const TypeTraits* tr = typeTraits(t.type); tr && t.ne[0] % tr->block_size == 0) {
+                std::uint64_t rb = 0;
+                if (!mulOk(t.ne[0] / tr->block_size, tr->type_size, rb) || !mulOk(rb, rows, nb))
+                    throw Error("gguf: tensor " + std::string(t.name) + " size overflows");
+            }
+        }
         t.offset = r.scalar<std::uint64_t>();
         if (t.offset % alignment_ != 0) throw Error("gguf: tensor " + std::string(t.name) + " is misaligned");
         if (!tensor_index_.emplace(t.name, tensors_.size()).second)
@@ -288,9 +330,17 @@ void File::parseImpl() {
     for (const auto& t : tensors_) {
         const std::uint64_t nb = t.nbytes();
         if (nb == 0) continue;
-        if (data_offset_ + t.offset + nb > bytes_.size())
-            throw Error("gguf: tensor " + std::string(t.name) + " extends past the end of the file");
+        if (!inBounds(t, nb)) throw Error("gguf: tensor " + std::string(t.name) + " extends past the end of the file");
     }
+}
+
+bool File::inBounds(const TensorInfo& t, std::uint64_t nb) const {
+    if (nb == 0) return true;
+    const std::uint64_t size = bytes_.size();
+    // subtraction only: data_offset_ + t.offset + nb may not fit in 64 bits
+    if (data_offset_ > size) return false;
+    const std::uint64_t avail = size - data_offset_;
+    return t.offset <= avail && nb <= avail - t.offset;
 }
 
 const Value* File::find(std::string_view key) const {
@@ -414,8 +464,8 @@ const TensorInfo* File::tensor(std::string_view name) const {
 std::span<const std::uint8_t> File::tensorData(const TensorInfo& t) const {
     const std::uint64_t nb = t.nbytes();
     if (nb == 0) throw Error("gguf: tensor " + std::string(t.name) + " has an unsupported type or shape");
-    const std::uint64_t off = data_offset_ + t.offset;
-    if (off + nb > bytes_.size()) throw Error("gguf: tensor " + std::string(t.name) + " is out of bounds");
+    if (!inBounds(t, nb)) throw Error("gguf: tensor " + std::string(t.name) + " is out of bounds");
+    const std::uint64_t off = data_offset_ + t.offset;  // cannot wrap: inBounds
     return bytes_.subspan(static_cast<std::size_t>(off), static_cast<std::size_t>(nb));
 }
 
