@@ -157,9 +157,15 @@ the slot that can reuse the longest prefix (or restore one from the tiers).
    KV pages and positions; DeltaNet uses segmented kernels, one state per segment.
 3. One synchronization per cycle.
 
-**Draft limits by load.** All decoding rows fit in one verify of at most 16 rows, so drafts compete
-with users. Dense caps by number of decoding slots: 8 / 7 / 4 / 3 for 1–4 slots; the cost model
-picks within the cap. MoE: 1 draft up to 8 users. With zero drafts the MTP layer still processes
+**Draft limits by load.** All decoding rows fit in one verify forward, so drafts compete with users.
+The verify holds at most 16 rows per sequence and, on dense models with wide verify
+(`WHIRL_WIDE_VERIFY`, default on), at most 32 rows in total (16 otherwise, and always 16 for MoE).
+Default dense caps by number of decoding slots: 8 / 7 / 4 / 3 / 2 / 1 / 1 / 1 for 1–8 slots, 0 beyond
+(`--batch-drafts` overrides; when DeltaNet verify uses snapshot sets instead of replay, the cap for
+k slots is also ≤ 8 / k); with these caps an MTP verify stays at ≤ 16 rows, and only n-gram drafts
+or raised caps with several users use rows 17–32. The cost model picks within the cap. MoE: 1 draft
+up to 8 users. Models whose DeltaNet decode is not fused (F32 / F16 α/β) are capped at 1 draft.
+With zero drafts the MTP layer still processes
 accepted tokens to keep its KV complete.
 
 **Prefill scheduling.** Prefill runs in chunks of ≤ 1024 tokens (the last chunk may absorb ≤ 256
@@ -267,7 +273,9 @@ stream fell to 3 tok/s (table above), 0.47–0.52 s and 21–23 tok/s with the d
 Every concurrent output equals the same request run alone (gated). Earlier 8/16-user measurements
 (before several later optimizations; 4096 context per user): 27B no MTP 100.0 / 115.5 tok/s
 aggregate; at 16 users MTP no longer helps (113.1 vs 115.5) because 16 rows leave no room for
-drafts, and 16-row GEMV is already compute-bound.
+drafts, and 16-row GEMV is already compute-bound. (These predate wide verify; with the default
+caps, 9–16 slots still get 0 drafts, so the conclusion holds. Rows 17–32 have no measured per-row
+cost yet.)
 
 ## <a id="logging"></a>7. Logging
 
@@ -301,8 +309,10 @@ an idle `kv tier |` summary; `vision:` lines for image input.
 - No HTTP keep-alive (every response is `Connection: close`); no shutdown endpoint (stop the
   server with Ctrl+C, see section 1).
 - Streaming output is written on the engine thread; a very slow client can delay the batch.
-- Cached vs uncached runs are numerically equivalent, not bit-identical (history KV computed by
-  decode kernels vs prefill GEMMs; [kv-and-caching.md](kv-and-caching.md#think-open)). Requests with
+- Cache hits on `system` / `prefix` checkpoints, on the same prompt's `prompt-end`, and tier restores
+  are bit-identical to a cold run. Continuing a conversation (`gen-end`, or a prompt checkpoint followed
+  by more tokens) is numerically equivalent but not bit-identical: the history's KV and DeltaNet state
+  came from decode kernels ([kv-and-caching.md](kv-and-caching.md#checkpoints)). Requests with
   a ≥ 2048-token system message are split at the system boundary and so are not bit-identical to a
   binary that does not split.
 - With the MoE model, near-tied expert routing can make a multi-turn cached conversation diverge from

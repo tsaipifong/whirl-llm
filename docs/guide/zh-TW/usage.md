@@ -35,7 +35,7 @@ whirl-server --help | --version
 ```
 
 兩支程式都只接受 `general.architecture` 為 `qwen35`（dense）或 `qwen35moe`（混合專家，MoE）的 GGUF 檔，
-見[支援的模型](../../README_zh-TW.md#models)。CLI 一律 greedy 生成；伺服器另外支援取樣（temperature、top-p 等）。
+見[支援的模型](../../README_zh-TW.md#支援的模型)。CLI 一律 greedy 生成；伺服器另外支援取樣（temperature、top-p 等）。
 
 **第一次使用某個模型。** prefill kernel 會針對每個模型檔與 GPU 調校一次（stderr 會有提示）：27B Q4_K_M 約
 1.5～2 分鐘，MXFP4 檔只要幾秒。結果會快取起來（[第 8 節](#files)），之後直接開始。每一種候選組態算出的位元都

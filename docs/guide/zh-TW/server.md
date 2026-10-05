@@ -148,9 +148,12 @@ kernel 表；[pitfalls.md](pitfalls.md#srv-defaultenv)）。
    位置；DeltaNet 使用分段 kernel，每段一個狀態。
 3. 每個 cycle 同步一次。
 
-**依負載的草稿上限。** 所有 decode 列都要塞進一次最多 16 列的驗證，因此草稿與使用者互相競爭。
-Dense 依 decode 中 slot 數的上限：1–4 個 slot 分別為 8 / 7 / 4 / 3；成本模型在上限內挑選。MoE：
-最多 8 位使用者時 1 個草稿。草稿數為零時，MTP 層仍會處理已接受的 token，以維持其 KV 完整。
+**依負載的草稿上限。** 所有 decode 列都要塞進一次 verify forward，因此草稿與使用者互相競爭。每個序列最多
+16 列；dense 模型在寬 verify（`WHIRL_WIDE_VERIFY`，預設開）時總共最多 32 列（否則 16 列，MoE 一律 16 列）。
+Dense 依 decode 中 slot 數的預設上限：1–8 個 slot 分別為 8 / 7 / 4 / 3 / 2 / 1 / 1 / 1，更多則為 0
+（`--batch-drafts` 可覆寫；DeltaNet verify 改用快照組而非 replay 時，k 個 slot 的上限另外 ≤ 8 / k）；在這組
+上限下 MTP 的 verify 不超過 16 列，只有 n-gram 草稿或調高上限的多人情況會用到第 17–32 列。成本模型在上限內
+挑選。MoE：最多 8 位使用者時 1 個草稿。DeltaNet decode 未融合的模型（F32／F16 α/β）上限為 1 個草稿。草稿數為零時，MTP 層仍會處理已接受的 token，以維持其 KV 完整。
 
 **Prefill 排程。** Prefill 以 ≤ 1024 token 的區塊執行（最後一塊可多吸收 ≤ 256 個），與 decode cycle
 交錯進行。多個請求的區塊會合併成一次分段 forward：逐列工作（embedding、norm、GEMM、MoE）對所有列
@@ -241,6 +244,7 @@ prompt 不受影響：Swift MXFP4-A，約 1.1k token prompt、生成 256，C = 4
 每個並行輸出都與同一請求單獨執行時相同（有 gate 把關）。較早的 8/16 使用者量測（在後來數項優化之前；
 每位使用者 4096 上下文）：27B 無 MTP 總計 100.0 / 115.5 tok/s；16 位使用者時 MTP 已無幫助
 （113.1 vs 115.5），因為 16 列沒有留給草稿的空間，而 16 列 GEMV 已經是運算受限（compute-bound）。
+（這些量測早於寬 verify；在預設上限下 9–16 個 slot 仍是 0 個草稿，結論不變。第 17–32 列的每列成本尚無量測。）
 
 ## <a id="logging"></a>7. 記錄
 
@@ -272,8 +276,9 @@ I batch | slots busy 0/4 (decode 0, prefill 0) | 80 cycles, 3.79 slots/cycle, 11
 - 懲罰參數會被接受但忽略；`n` 只能 = 1；不支援 `logprobs`。
 - 沒有 HTTP keep-alive（每個回應都是 `Connection: close`）；沒有關機端點（請用 Ctrl+C 停止伺服器，見第 1 節）。
 - 串流輸出在引擎執行緒上寫出；非常慢的用戶端可能拖慢整個批次。
-- 有快取與無快取的執行在數值上等價，但不是逐位元相同（歷史 KV 由 decode kernel 計算 vs 由 prefill
-  GEMM 計算；[kv-and-caching.md](kv-and-caching.md#think-open)）。帶有 ≥ 2048 token system message
+- `system`／`prefix` 檢查點、同一提示的 `prompt-end` 命中，以及分層還原，都與冷執行逐位元相同。接續對話
+  （`gen-end`，或提示檢查點之後再接更多 token）在數值上等價，但不是逐位元相同：歷史的 KV 與 DeltaNet 狀態
+  來自 decode kernel（[kv-and-caching.md](kv-and-caching.md#checkpoints)）。帶有 ≥ 2048 token system message
   的請求會在 system 邊界切開，因此與不切開的執行檔不是逐位元相同。
 - 使用 MoE 模型時，專家路由幾乎平手的情況可能讓有快取的多輪對話與無快取的對話分歧（在一次思考模式
   測試中看過一次）；兩者都是有效的計算。

@@ -157,6 +157,8 @@ eGPU 或直連 PCIe）、附上確切錯誤字串的**症狀**、**根本原因*
 - **條件：** 經 USB4 連接的 R9700。
 - **症狀：** 直接寫入 `hipHostMalloc` 記憶體的 kernel，在主機端沒有產生任何資料。
 - **修正：** 在非阻塞 stream 上使用 `hipMemcpyAsync`。未在直連 PCIe 上驗證。
+- **範圍**：這裡講的是 kernel **寫入**主記憶體。kernel **讀取** pinned 主記憶體用於 token embedding
+  （`WHIRL_EMBD_HOST`，自 0.1.3 起 server 預設開啟）；輸出與放在 VRAM 時逐位元相同。
 
 ### <a id="hip-13"></a>HIP-13 · Grid 的 y/z 上限 → `HipFailed`
 - **症狀：** 一個針對 248,320 列輸出頭的重新量化 kernel 回傳了 `HipFailed`。
@@ -424,6 +426,18 @@ eGPU 或直連 PCIe）、附上確切錯誤字串的**症狀**、**根本原因*
 ### <a id="kern-20"></a>KERN-20 · 每個 workgroup 的 LDS 超過約 41 KB 會壓低佔用率
 - **實測：**每個 SIMD 從 16 → 6 個 wave，比 LDS 較小的版本慢。
 
+### <a id="kern-20b"></a>KERN-20b · HIP 的佔用率數字只算了 RDNA 4 一半的 LDS
+- **症狀**：`hipDeviceProp_t`（`sharedMemPerMultiprocessor`）與
+  `hipOccupancyMaxActiveBlocksPerMultiprocessor` 對 LDS 超過 32 KiB 的 block 一律預測每個 WGP 只能跑 1 個，
+  於是 kernel 都刻意壓在 32 KiB 以下。
+- **根因**：gfx12 每個 WGP 有 **128 KiB** LDS（單一 workgroup 仍最多用 64 KiB）；HIP runtime 回報並以 64 KiB
+  計算，所以它算出的「受 LDS 限制的佔用率」只有實際的一半。
+- **實測**：LDS 36–64 KiB 的 block，每個 WGP **同時跑 2 個**。其餘由暫存器決定：VGPR 236 以下每個 SIMD 仍是
+  6 個 wave，256 時降為 5 個。
+- **修法**：在 gfx12 上不要相信佔用率 API 對 LDS 的估算；用量測（每 WGP 是否同時有 2 個 block）或以
+  每 WGP 128 KiB、每 workgroup 64 KiB 自行計算。KERN-20 的「約 41 KB 斷崖」是單一 kernel 暫存器加 LDS 的組合結果，
+  不是一般性的 LDS 上限。
+
 ### <a id="kern-21"></a>KERN-21 · 「所有 query 只讀一次 KV」反而更慢
 - **實測：**24k MTP 39.5 → 35.6 tok/s。
 - **根本原因：**瓶頸在歸約，不在 KV 讀取；L2/Infinity Cache 已經承接了重複的讀取。
@@ -492,9 +506,11 @@ eGPU 或直連 PCIe）、附上確切錯誤字串的**症狀**、**根本原因*
 
 ### <a id="mtp-2"></a>MTP-2 · F32 小矩陣在 n = 1 與 n ≥ 2 時走不同 kernel
 - **條件：**GGUF 把 `ssm_alpha`／`ssm_beta` 存成 F32。
-- **症狀：**三個量化變體上都是 MTP ≠ 單純 greedy；自動草稿數掉到 1。
+- **症狀**：三個量化變體上都是 MTP ≠ 單純 greedy；草稿數被限制為 1。
 - **根本原因：**F32 權重：單列用 f32-activation GEMV，verify 用 f16 GEMM。
-- **修正：**這些張量改用 Q8_0（融合的精確路徑）；引擎修正已排入佇列。
+- **修正**：這些張量改用 Q8_0（融合的精確路徑，仍建議使用）。引擎修正已在 0.1.3 完成：F32／F16 小矩陣
+  在所有 n 下都走同一個 GEMV 家族，輸出因此逐位元正確，但草稿數仍上限為 1，因為融合的 DeltaNet decode
+  （`gdn_ab`）只支援 Q8_0／MXFP4 的 α/β（[speculative-decoding.md](speculative-decoding.md#exact)）。
 - **現在怎麼抓：**每個新模型檔都跑 MTP 冒煙測試（plain == MTP == MTP + n-gram == 強制 n-gram）。
 
 ### <a id="mtp-3"></a>MTP-3 · 序列結束後仍接受草稿

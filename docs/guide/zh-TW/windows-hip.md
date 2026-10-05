@@ -126,6 +126,8 @@ Windows 提供每個行程、每個介面卡的 GPU 記憶體計數器（Dedicat
 
 直接寫入 `hipHostMalloc` 記憶體（零複製）的 kernel，在這台機器上資料從未真正落到主機記憶體中。因此 WHIRL 所有主機↔裝置的傳輸都在非阻塞 stream 上使用 `hipMemcpyAsync`。我們尚未在直接 PCIe 連接的 R9700 上驗證這點；在那種環境下應視為未驗證，而不是壞掉。
 
+這裡講的是 kernel **寫入**主記憶體。kernel **讀取** pinned 主記憶體用於 token embedding（`WHIRL_EMBD_HOST`，自 0.1.3 起 server 預設開啟）；輸出與放在 VRAM 時逐位元相同。
+
 ### 4.8 `hipMemGetInfo` 看不到 WDDM 計入的所有東西
 
 - 建立一個非阻塞 stream 與 pinned 區域，讓 `hipMemGetInfo` 的可用記憶體減少 12.8 MiB，但 WDDM 的專用計數器增加了約 60 MiB。請在建立所有 stream 與輔助緩衝區*之後*才決定 VRAM 池的大小，並保留餘裕。
@@ -146,7 +148,7 @@ Windows 提供每個行程、每個介面卡的 GPU 記憶體計數器（Dedicat
 ## <a id="limits"></a>6. Launch 限制
 
 - **Grid 的 y 與 z 上限為 65,536 個 block。**把 248,320 列 output head 放在 y 軸的 kernel 回傳了 `HipFailed`。請把大的維度放在 x。
-- **每個 workgroup 的 LDS 超過約 41 KB 時，佔用率（occupancy）從每個 SIMD 16 個 wave 降到 6 個**，這發生在一個 multi-query attention 變體上，而且它變得更慢。gfx12 上每個 workgroup 的 LDS 為 64 KB，但全部用掉會犧牲並行度。
+- **每個 workgroup 的 LDS 超過約 41 KB 時，佔用率（occupancy）從每個 SIMD 16 個 wave 降到 6 個**，這發生在一個 multi-query attention 變體上，而且它變得更慢。gfx12 上一個 workgroup 最多可用 WGP 128 KiB 中的 64 KiB；36–64 KiB 的 block 仍是每個 WGP 同時跑 2 個。**不要依 `hipOccupancyMaxActiveBlocksPerMultiprocessor` 決定 kernel 大小**——它以每 WGP 64 KiB 計算，把受 LDS 限制的佔用率砍半（[pitfalls KERN-20b](pitfalls.md#kern-20b)）。
 
 ## <a id="devices"></a>7. 在雙 GPU 機器上選對 GPU
 

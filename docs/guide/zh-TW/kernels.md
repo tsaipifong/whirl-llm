@@ -31,7 +31,8 @@ GEMV/GEMM 的 llama.cpp/ggml 貢獻者，以及任何需要讓批次與非批次
 | 啟動開銷 | 1.3–3.3 µs（R9700 2.2–2.5） |
 
 形塑了每個 kernel 的硬體事實：wave 是 32 個 lane（Vulkan 回報 64——那是驅動程式的另一種分組）；gfx12 WMMA
-處理 16×16×16 的 tile，A/B fragment（片段）放在暫存器中；LDS（共享記憶體）每個 workgroup 有 64 KB，但在我們的一個
+處理 16×16×16 的 tile，A/B fragment（片段）放在暫存器中；LDS（共享記憶體）每個 WGP 有 128 KiB，單一 workgroup 最多 64 KiB，
+所以兩個各用到 64 KiB 的 block 可以共用一個 WGP——HIP 的佔用率 API 以每 WGP 64 KiB 計算，只回報一半（[pitfalls KERN-20b](pitfalls.md#kern-20b)）。在我們的一個
 kernel 中使用超過 ~41 KB 就讓佔用率（occupancy）從 16 降到 6 waves/SIMD；**暫存器才是真正的限制**——一旦 kernel
 超出它的 VGPR 預算，編譯器就會溢出到 scratch 記憶體，效能隨之崩潰。
 
@@ -400,7 +401,10 @@ asm 屏障，因為編譯器把 `x*x` 收縮進第一個 butterfly 加法，並�
   | 32k | 1 × 9 | 1.115 ms | 0.633 ms |
 - **gfx1151 的限制：** 當 P = 0 的項乘上另一個 query 的真實 V 列時，gfx11 WMMA 並不精確，所以在 8060S 上每個群組只放一個 query（kernel 仍會執行，只是不共用 K/V）。
 - 這項工作之後，一般 decode 時間每 1k token 上下文約增加 0.11 ms——正好是以 ~600 GB/s 每 1k token 多讀 64 MiB KV 的時間。Decode attention 已達頻寬；剩下的槓桿是減少 KV
-  位元組，而反量化 K 的成本比它省下的位元組還多（[kv-and-caching.md](kv-and-caching.md#formats)）。
+  位元組。
+- **`attn_wsplit1/2` 的 int8 K（q8、q8h）：magic number 反量化（`kv_dq8`）**。第一版 int8 對每個元素各做一次 `cvt` 與乘法，成本比 K 減半省下的頻寬還多（q8h 在 128k 的 decode 比 f16 慢 5.2%，[kv-and-caching.md](kv-and-caching.md#formats)）。現在改用與 `attn_kg` 相同的轉換：`v_perm` 組出 f16 的
+  `0x6400 | (b ^ 0x80)`（= 1152 + q），減去 1152（精確），再以 packed f16 成對乘上 scale；`#pragma clang fp contract(off)` 保留 `(_Float16)q * s` 唯一一次捨入——**位元完全相同**。每一列的 8 個 K scale
+  只載入一次。Swift-1.5 MXFP4-A、q8h、125,853 token 提示、純 decode：24.09 → 25.99 tok/s（+7.9%），輸出雜湊相同；VGPR 189 → 191。
 
 ## <a id="deltanet"></a>9. Gated DeltaNet
 

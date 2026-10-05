@@ -36,7 +36,7 @@ whirl-server --help | --version
 ```
 
 Both programs accept only GGUF files whose `general.architecture` is `qwen35` (dense) or
-`qwen35moe` (mixture of experts); see [Supported models](../README.md#models). Generation is greedy
+`qwen35moe` (mixture of experts); see [Supported models](../README.md#supported-models). Generation is greedy
 in the CLI; the server also samples (temperature, top-p, …).
 
 **First run with a new model.** The prefill kernels are tuned once per model file and GPU

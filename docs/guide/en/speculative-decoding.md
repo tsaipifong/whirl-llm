@@ -94,10 +94,19 @@ greedy. With bit equality, any difference between MTP and plain output is a bug,
 **Counter-example that slipped through a model file, not the engine:** a quantization of
 Swift-1.5 stored the tiny DeltaNet `ssm_alpha`/`ssm_beta` matrices as F32. WHIRL has no int8
 GEMV for F32 weights: n = 1 used an f32-activation GEMV, n ≥ 2 used an f16 GEMM — different
-numerics. MTP output differed from plain greedy on all three variants, and the auto draft
-policy collapsed to 1 draft. Requantizing those matrices to Q8_0 (which has a fused exact path,
-as in unsloth's Q4_K_M) fixed it. Engine-side fix (route F32 small matrices through one kernel
-for all n) is on the to-do list. See [quantization.md](quantization.md#f32-alpha-beta).
+numerics, so MTP output differed from plain greedy on all three variants. Requantizing those
+matrices to Q8_0 (which has a fused exact path, as in unsloth's Q4_K_M) fixed it.
+
+**Engine fix (0.1.3).** F32 / F16 weights at n = 2..16 now run the same f32-activation GEMV
+instances as n = 1 (`gemv_<T>_8 / _4 / _1`), so every token is bit-identical to the single-row
+result and speculative output equals plain greedy on such files (for example the Cyber-Tiel
+series, and some Q4_0 / Q4_K_M quantizations). **They still draft only 1 token:** the fused DeltaNet
+decode path (`gdn_ab`) exists only for Q8_0 and MXFP4 α/β, and without it (`fusedDecode()` false)
+only one recurrent-state snapshot is written per verify. This is a **hard cap**, not a choice of the
+cost model: the CLI (MTP and n-gram) and the server both clamp drafts to 1 (the server's startup
+line says "fused decode off: 1 used"). Restoring an unwritten snapshot now throws `SnapshotNotWritten`
+instead of silently diverging. For full draft counts, requantize α/β to Q8_0
+([quantization.md](quantization.md#f32-alpha-beta)).
 
 Gates: CLI MTP vs plain on Chinese and English prompts for both models; draft counts 1, 2, 5, 10
 all identical; n-gram forced on every cycle == plain; server and concurrent variants
@@ -171,8 +180,9 @@ ran 171–172 tok/s and at 24k was slower than no MTP. Fixed at 1 (overridable).
 
 **Server specifics:**
 
-- Draft caps by number of decoding slots (dense): `{8, 7, 4, 3}` for 1–4 slots, i.e. at most 16
-  verify rows; the cost model chooses within the cap. Raising the 4-slot cap from 2 to 3 (16 rows)
+- Draft caps by number of decoding slots (dense): `{8, 7, 4, 3, 2, 1, 1, 1}` for 1–8 slots (0 beyond),
+  which keeps an MTP verify at ≤ 16 rows; n-gram drafts may use up to 32 rows in total with wide verify
+  ([server.md](server.md#batching)). The cost model chooses within the cap. Raising the 4-slot cap from 2 to 3 (16 rows)
   gave +10% at four users.
 - With zero drafts (too many users), the MTP layer still processes accepted tokens (without the
   draft head) so its KV cache stays complete and drafting can resume immediately.

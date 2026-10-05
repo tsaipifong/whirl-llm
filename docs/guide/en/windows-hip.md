@@ -227,6 +227,10 @@ host memory on this machine. All host↔device traffic in WHIRL therefore uses `
 on a non-blocking stream. We have not verified this on a direct-PCIe R9700; treat it as
 unverified there rather than as broken.
 
+This is about kernel **writes** to host memory. Kernel **reads** of pinned host memory are used for
+the token embedding (`WHIRL_EMBD_HOST`, on by default in the server since 0.1.3); outputs are bitwise
+identical to keeping it in VRAM.
+
 ### 4.8 `hipMemGetInfo` does not see everything WDDM counts
 
 - Creating a non-blocking stream and the pinned arena reduced `hipMemGetInfo`'s free memory by
@@ -270,8 +274,10 @@ check must fail on empty input.
 - **Grid y and z are limited to 65,536 blocks.** A kernel that put the 248,320 output-head rows
   on the y axis returned `HipFailed`. Put the large dimension on x.
 - **LDS above ~41 KB per workgroup cut occupancy from 16 to 6 waves per SIMD** in a multi-query
-  attention variant, and it was slower. LDS is 64 KB per workgroup on gfx12, but using it all
-  costs concurrency.
+  attention variant, and it was slower. On gfx12 a workgroup can use up to 64 KiB of the WGP's
+  128 KiB; blocks of 36–64 KiB still run two per WGP. **Do not size kernels from
+  `hipOccupancyMaxActiveBlocksPerMultiprocessor`** — it assumes 64 KiB per WGP and halves the
+  LDS-limited occupancy ([pitfalls KERN-20b](pitfalls.md#kern-20b)).
 
 ## <a id="devices"></a>7. Selecting the right GPU in a two-GPU machine
 

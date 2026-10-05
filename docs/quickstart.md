@@ -21,7 +21,7 @@ The driver installs the two AMD runtime files WHIRL uses (`amdhip64_7.dll`, `amd
 1. `whirl-0.1.0-windows-x64.zip` from the [WHIRL releases page](https://github.com/tsaipifong/whirl-llm/releases).
    Compare its SHA-256 with the value published next to it:
    `Get-FileHash .\whirl-0.1.0-windows-x64.zip -Algorithm SHA256`.
-2. A supported GGUF model (list in the [README](../README.md#models)). The fastest choice is our own
+2. A supported GGUF model (list in the [README](../README.md#supported-models)). The fastest choice is our own
    MXFP4 quantization
    [`Swift-1.5-Qwen3.8-27B-MXFP4-A-outQ6_K.gguf`](https://huggingface.co/tsaipifong/Swift-1.5-Qwen3.8-27b-MXFP4-GGUF);
    the commands below assume it is saved in `C:\models\`.

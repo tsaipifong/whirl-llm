@@ -68,7 +68,9 @@ WHIRL 的 MTP 輸出與一般 greedy 輸出**逐位元相同**，適用於每一
 
 為什麼要堅持？因為「等價」無法測試，而且接近平手的情況很常見。早期一次重構讓多 token 內積的順序改變了一個 ulp，驗證 logits 與 decode logits 在最後幾個位元出現差異，接近平手的 token 被翻轉，MTP 輸出就不再與 greedy 相符。有了逐位元相等，MTP 與一般輸出之間的任何差異都是 bug，而 gate `MTP greedy == plain greedy` 會立即抓到。
 
-**一個從模型檔案而非引擎溜過的反例：** Swift-1.5 的某個量化版本把很小的 DeltaNet `ssm_alpha`/`ssm_beta` 矩陣存成 F32。WHIRL 沒有針對 F32 權重的 int8 GEMV：n = 1 使用 f32-activation（啟動值）GEMV，n ≥ 2 使用 f16 GEMM——數值行為不同。三個變體的 MTP 輸出都與一般 greedy 不同，自動草稿策略也退化成 1 個草稿。把這些矩陣重新量化為 Q8_0（它有融合的精確路徑，如 unsloth 的 Q4_K_M）就修好了。引擎端的修正（讓 F32 小矩陣在所有 n 下都走同一個 kernel）已列在待辦清單上。見 [quantization.md](quantization.md#f32-alpha-beta)。
+**一個從模型檔案而非引擎溜過的反例：** Swift-1.5 的某個量化版本把很小的 DeltaNet `ssm_alpha`/`ssm_beta` 矩陣存成 F32。WHIRL 沒有針對 F32 權重的 int8 GEMV：n = 1 使用 f32-activation（啟動值）GEMV，n ≥ 2 使用 f16 GEMM——數值行為不同，因此三個變體的 MTP 輸出都與一般 greedy 不同。把這些矩陣重新量化為 Q8_0（它有融合的精確路徑，如 unsloth 的 Q4_K_M）就修好了。
+
+**引擎端修正（0.1.3）**。F32／F16 權重在 n = 2..16 時改走與 n = 1 相同的 f32-activation GEMV（`gemv_<T>_8／_4／_1`），每個 token 都與單列結果逐位元相同，這類檔案（例如 Cyber-Tiel 系列，以及某些 Q4_0／Q4_K_M 量化）的推測解碼輸出因此等於單純 greedy。**但它們仍只能用 1 個草稿**：融合的 DeltaNet decode 路徑（`gdn_ab`）只支援 Q8_0 與 MXFP4 的 α/β，沒有它（`fusedDecode()` 為 false）時，每次 verify 只寫入一組遞迴狀態快照。這是**硬性上限**，不是成本模型的選擇：CLI（MTP 與 n-gram）與 server 都把草稿限制為 1（server 啟動訊息會顯示「fused decode off: 1 used」）。還原未寫入的快照現在會拋出 `SnapshotNotWritten`，不再默默偏離。要使用完整草稿數，請把 α/β 重新量化為 Q8_0（[quantization.md](quantization.md#f32-alpha-beta)）。
 
 Gate：兩個模型在中文與英文提示詞上的 CLI MTP 對一般解碼；草稿數 1、2、5、10 全部相同；每個循環強制使用 n-gram == 一般解碼；server 與並行變體（[benchmarking.md](benchmarking.md#gates)）。
 
@@ -117,7 +119,7 @@ attention 的 KV 快取可以透過忽略超出接受長度的位置來「回滾
 
 **Server 的特殊處理：**
 
-- 依 decode 中的 slot 數設定草稿上限（dense）：1–4 個 slot 分別為 `{8, 7, 4, 3}`，即最多 16 個驗證列；成本模型在上限內選擇。把 4-slot 的上限從 2 提高到 3（16 列）在四個使用者時帶來 +10%。
+- 依 decode 中的 slot 數設定草稿上限（dense）：1–8 個 slot 分別為 `{8, 7, 4, 3, 2, 1, 1, 1}`（更多為 0），讓 MTP 的 verify 維持在 16 列以內；n-gram 草稿在寬 verify 下總共最多可用 32 列（[server.md](server.md#batching)）。成本模型在上限內選擇。把 4-slot 的上限從 2 提高到 3（16 列）在四個使用者時帶來 +10%。
 - 草稿數為零時（使用者太多），MTP 層仍會處理被接受的 token（不跑草稿 head），讓它的 KV 快取保持完整，草擬可以立刻恢復。
 - **當請求在閒置的引擎上開始時，重設計時表。** server 原本跨請求保留循環時間表；單一使用者連續送出請求時，從第二個請求起就拿到過多的草稿（8060S：每循環約 4.5 個草稿，CLI 中約 3.3 個）。在閒置啟動時重設讓請求 2–4 快了 +4.1%，server 相對 CLI 的速度從 −3.6% 變成 −0.5%。
 - 逐 slot 的草稿數（把草稿從最不可能被接受的 slot 移到最可能的 slot）在兩個混合使用者時帶來 +13%，但讓低接受率的請求慢了約 10%、固定批次的總耗時慢了 5%；為了公平性維持關閉。

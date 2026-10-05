@@ -35,8 +35,10 @@ on this card, and every result in this document is quoted relative to it.
 
 Hardware facts that shaped every kernel: waves are 32 lanes (Vulkan reports 64 — a different
 grouping by the driver); gfx12 WMMA works on 16×16×16 tiles with A/B fragments in registers;
-LDS is 64 KB per workgroup but using > ~41 KB cut occupancy from 16 to 6 waves/SIMD in one of
-our kernels; **registers are the real limit** — once a kernel exceeds its VGPR budget the
+LDS is 128 KiB per WGP and at most 64 KiB per workgroup, so two blocks of up to 64 KiB can share a
+WGP — HIP's occupancy API assumes 64 KiB per WGP and reports half of that
+([pitfalls KERN-20b](pitfalls.md#kern-20b)). Using > ~41 KB cut occupancy from 16 to 6 waves/SIMD
+in one of our kernels; **registers are the real limit** — once a kernel exceeds its VGPR budget the
 compiler spills to scratch memory and performance collapses.
 
 ## <a id="gemv"></a>1. Decode GEMV: int8 activations, `v_dot4`, `v_perm` lookup tables
@@ -535,8 +537,15 @@ instead of f32 for their element-wise consumers (+5.4…+5.8% and +0.6%).
   K/V).
 - After this work, plain decode time grows by about 0.11 ms per 1k tokens of context — exactly
   the time to read 64 MiB more KV per 1k tokens at ~600 GB/s. Decode attention is at bandwidth;
-  the remaining lever is fewer KV bytes, and dequantizing K costs more than the bytes it saves
-  ([kv-and-caching.md](kv-and-caching.md#formats)).
+  the remaining lever is fewer KV bytes.
+- **int8 K in `attn_wsplit1/2` (q8, q8h): magic-number dequantization (`kv_dq8`).** The first
+  int8 version converted each element with its own `cvt` and multiply, which cost more than the
+  halved K bytes saved (q8h decode +5.2% at 128k vs f16, [kv-and-caching.md](kv-and-caching.md#formats)).
+  It now uses the same conversion as `attn_kg`: `v_perm` builds the f16 `0x6400 | (b ^ 0x80)`
+  (= 1152 + q), 1152 is subtracted (exact) and the scale multiplied on packed f16 pairs, with
+  `#pragma clang fp contract(off)` so the single rounding of `(_Float16)q * s` is kept — **same bits**.
+  The row's 8 K scales are loaded once per key row. Swift-1.5 MXFP4-A, q8h, 125,853-token prompt,
+  plain decode: 24.09 → 25.99 tok/s (+7.9%), same output hash. VGPR 189 → 191.
 
 ## <a id="deltanet"></a>9. Gated DeltaNet
 

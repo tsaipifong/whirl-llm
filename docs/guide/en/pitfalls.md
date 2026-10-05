@@ -167,6 +167,9 @@ templates](#tok) · [Model files and quantization](#quant) · [Vision](#vis) · 
 - **Conditions:** R9700 over USB4.
 - **Symptom:** kernels writing directly to `hipHostMalloc` memory produced no data on the host.
 - **Fix:** `hipMemcpyAsync` on a non-blocking stream. Unverified on direct PCIe.
+- **Scope:** this is about kernel **writes** to host memory. Kernel **reads** of pinned host memory are
+  used for the token embedding (`WHIRL_EMBD_HOST`, on by default in the server since 0.1.3); outputs are
+  bitwise identical to keeping it in VRAM.
 
 ### <a id="hip-13"></a>HIP-13 · Grid y/z limit → `HipFailed`
 - **Symptom:** a requantization kernel over the 248,320 output-head rows returned `HipFailed`.
@@ -439,6 +442,18 @@ templates](#tok) · [Model files and quantization](#quant) · [Vision](#vis) · 
 ### <a id="kern-20"></a>KERN-20 · LDS above ~41 KB per workgroup cut occupancy
 - **Measured:** 16 → 6 waves per SIMD, slower than the smaller-LDS version.
 
+### <a id="kern-20b"></a>KERN-20b · HIP's occupancy numbers assume half of RDNA 4's LDS
+- **Symptom:** `hipDeviceProp_t` (`sharedMemPerMultiprocessor`) and
+  `hipOccupancyMaxActiveBlocksPerMultiprocessor` predicted one block per WGP for every block using
+  more than 32 KiB of LDS, so kernels were sized to stay under 32 KiB.
+- **Root cause:** a gfx12 WGP has **128 KiB** of LDS (one workgroup can still use at most 64 KiB);
+  the HIP runtime reports and computes with 64 KiB, so its LDS-limited occupancy is half the real one.
+- **Measured:** blocks of 36–64 KiB LDS run **two per WGP** at the same time. Registers decide the rest:
+  up to 236 VGPRs a SIMD still holds 6 waves; at 256 VGPRs it drops to 5.
+- **Fix:** do not trust the occupancy API for LDS on gfx12; measure (two blocks in flight per WGP) or
+  compute from 128 KiB per WGP / 64 KiB per workgroup. KERN-20's "~41 KB cliff" was one kernel's
+  register-plus-LDS combination, not a general LDS limit.
+
 ### <a id="kern-21"></a>KERN-21 · "Read KV once for all queries" was slower
 - **Measured:** 24k MTP 39.5 → 35.6 tok/s.
 - **Root cause:** the bottleneck was the reductions, not KV reads; L2/Infinity Cache already served the
@@ -511,9 +526,12 @@ templates](#tok) · [Model files and quantization](#quant) · [Vision](#vis) · 
 
 ### <a id="mtp-2"></a>MTP-2 · F32 small matrices take different kernels at n = 1 and n ≥ 2
 - **Conditions:** a GGUF storing `ssm_alpha` / `ssm_beta` as F32.
-- **Symptom:** MTP ≠ plain greedy on all three quantized variants; auto draft count collapsed to 1.
+- **Symptom:** MTP ≠ plain greedy on all three quantized variants; drafts capped at 1.
 - **Root cause:** F32 weights: f32-activation GEMV for one row, f16 GEMM for verify.
-- **Fix:** Q8_0 for those tensors (fused exact path); engine fix queued.
+- **Fix:** Q8_0 for those tensors (fused exact path; still recommended). Engine fix landed in 0.1.3:
+  F32 / F16 small matrices now use one GEMV family for all n, so output is exact, but drafts stay
+  capped at 1 because the fused DeltaNet decode (`gdn_ab`) exists only for Q8_0 / MXFP4 α/β
+  ([speculative-decoding.md](speculative-decoding.md#exact)).
 - **Detection now:** MTP smoke test (plain == MTP == MTP + n-gram == forced n-gram) on every new model file.
 
 ### <a id="mtp-3"></a>MTP-3 · Drafts accepted past end-of-sequence
