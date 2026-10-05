@@ -344,6 +344,16 @@ KernelTable KernelTable::load(const hip::Module& m, KvFormat kv) {
             k.gemmsh[ci][ti(t)] = L.opt(gemmsName(t, ci, true));
         }
     }
+    // A code object whose small-batch GEMM slots have their own block geometry exports
+    // it (marker whirl_cap_gemms_geom + int32 whirl_gemms_geom[slot][BM, BN, threads]).
+    if (L.opt("whirl_cap_gemms_geom") != nullptr) {
+        std::size_t bytes = 0;
+        const DevPtr g = m.getGlobal("whirl_gemms_geom", &bytes);
+        std::array<std::int32_t, kGemmsCfgs.size() * 3> v{};
+        if (bytes != sizeof(v)) throw std::runtime_error("kernels: whirl_gemms_geom has an unexpected size");
+        hip::download(v.data(), g, sizeof(v));
+        for (std::size_t ci = 0; ci < kGemmsCfgs.size(); ++ci) k.gemms_geom[ci] = GemmCfg{v[3 * ci], v[3 * ci + 1], v[3 * ci + 2]};
+    }
     return k;
 }
 

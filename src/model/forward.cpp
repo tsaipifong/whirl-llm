@@ -197,7 +197,7 @@ void Model::matmul(const Mat& w, DevPtr xin, DevPtr y, u32 n, bool accumulate) {
         if (choice >= 2 * gemm_cfgs.size()) {
             // small-batch GEMM straight from the quantized weights (bitwise == gemm_cN)
             const std::size_t si = choice - 2 * gemm_cfgs.size();
-            const GemmCfg sc = gemms_cfgs[si];
+            const GemmCfg sc = k.gemms_geom[si];
             const hip::Function sf = out_h16 ? k.gemmsh[si][t] : k.gemms[si][t];
             hip::launch(sf, D((n + sc.bn - 1) / sc.bn, (w.nrows + sc.bm - 1) / sc.bm), D(sc.nth), 0, stream, w.ptr, w.row_bytes, x16, y, ncols,
                         nrows, I(n), acc);

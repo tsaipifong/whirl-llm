@@ -20,6 +20,7 @@
 #include <limits>
 #include <map>
 #include <random>
+#include <set>
 #include <sstream>
 #include <tuple>
 
@@ -58,7 +59,30 @@ std::vector<float> randomNormal(std::size_t n, unsigned seed, float scale = 1.0f
     return v;
 }
 
+// fast autotune: a candidate whose first timed launch takes this many times the best
+// candidate's first timed launch is dropped (timings on the 8060S vary by a few percent)
+constexpr double kTuneRejectFactor = 1.5;
+// ...only at batch >= this: below it a launch is short enough that the single launch's
+// sync overhead dominates, and early rejection dropped the faster small-batch GEMMs
+// (Swift MXFP4 n=96: fused gemm_c picked over gemms, prefill 88 -6.9%)
+constexpr u32 kTuneRejectMinN = 512;
+
 }  // namespace
+
+// The kernel(s) Model::matmul launches for tune choice cj of w at batch n (mirrors its
+// dispatch): {0, cfg} fused gemm_c, {1, cfg} dequant + gemm_c f16, {2, slot} gemms,
+// {3, 0} fused dequant gemmhq, {4, 0} dequant + gemmh_f16, {5, 0} gemmh_f16 on f16 weights.
+static std::pair<int, int> tuneKernelKey(const Model& m, const Mat& w, u32 cj, u32 n) {
+    constexpr u32 gemmh_min = 512;  // = forward.cpp
+    const u32 nc = static_cast<u32>(gemm_cfgs.size());
+    if (cj >= 2 * nc) return {2, static_cast<int>(cj - 2 * nc)};
+    const bool deq = cj >= nc && w.ty != GgmlType::f16;
+    const bool hok = m.gemmh_on && n >= gemmh_min && w.ncols % 32 == 0;
+    if (deq && hok && m.gemmhq_on && m.k.gemmhq[ti(w.ty)] != nullptr) return {3, 0};
+    if (hok && m.k.gemmh_f16 != nullptr && (deq || (w.ty == GgmlType::f16 && w.row_bytes == static_cast<u64>(w.ncols) * 2)))
+        return {deq ? 4 : 5, 0};
+    return {deq ? 1 : 0, static_cast<int>(cj % nc)};
+}
 
 // Pick the fastest prefill GEMM configuration for every distinct (type, rows,
 // cols) at batch tune_sizes[bucket]; writes the choice into the layers' Mats.
@@ -70,6 +94,14 @@ void Model::autotuneGemm(std::size_t bucket, u32 reps, std::string* log) {
     const bool saved_fp8 = fp8_prefill;
     fp8_prefill = false;
     double total_best = 0, total_default = 0;
+    // Radeon 8060S: the candidate list is long (24 fused + 24 dequant + 8 small-batch GEMMs)
+    // and the GPU is slow, so the first tune of a 27B model took ~8.5 min. There each kernel
+    // is timed once per shape (choices that launch the same kernel are skipped) and a
+    // candidate whose first timed launch is far behind the best so far is not timed further
+    // (batch >= kTuneRejectMinN only).
+    // Every choice computes the same bits, so this only affects which fast kernel is found.
+    const bool fast = arch == hip::Arch::gfx1151 && !tune_cold;
+    const bool early_reject = fast && n >= kTuneRejectMinN;  // else time like the full tune
     for (const Layer& L : layers) {
         const MatList all = layerMats(L);
         for (const Mat& w : all.slice()) {
@@ -77,16 +109,31 @@ void Model::autotuneGemm(std::size_t bucket, u32 reps, std::string* log) {
             if (chosen.count(key)) continue;
             std::uint8_t best_ci = 0;
             double best_ms = std::numeric_limits<double>::infinity();
+            double best_one = std::numeric_limits<double>::infinity();  // best's first timed launch (early_reject)
             double ms_default = 0;
             const DevPtr xin = w.ncols == cfg.n_embd ? h : ffn_g;
+            std::set<std::pair<int, int>> timed;  // kernels already timed for this shape (fast mode)
             for (u32 cj = 0; cj < n_choices; ++cj) {
                 if (cj >= 64 || (tune_mask & (1ull << cj)) == 0) continue;
                 if (cj >= 2 * gemm_cfgs.size() && (k.gemms[cj - 2 * gemm_cfgs.size()][ti(w.ty)] == nullptr || w.ncols % 256 != 0)) continue;
+                if (fast && !timed.insert(tuneKernelKey(*this, w, cj, n)).second) continue;
                 Mat probe = w;
                 probe.tune.fill(static_cast<std::uint8_t>(cj));
                 matmul(probe, xin, ffn_u, n, false);  // warm-up
-                double ms_sum = 0;
-                if (!tune_cold) {
+                double ms_sum = 0, one = 0;
+                if (early_reject) {
+                    // one timed launch first; a candidate already far behind the best stops there
+                    hip::sync();
+                    const double t0 = nowMs();
+                    matmul(probe, xin, ffn_u, n, false);
+                    hip::sync();
+                    one = nowMs() - t0;
+                    if (one > kTuneRejectFactor * best_one) continue;  // like with like: single launch vs single launch
+                    const double t1 = nowMs();
+                    for (u32 r = 1; r < reps; ++r) matmul(probe, xin, ffn_u, n, false);
+                    hip::sync();
+                    ms_sum = one + (nowMs() - t1);
+                } else if (!tune_cold) {
                     // back-to-back launches in one timed window, like real inference
                     hip::sync();
                     const double t0 = nowMs();
@@ -107,6 +154,7 @@ void Model::autotuneGemm(std::size_t bucket, u32 reps, std::string* log) {
                 if (cj == 0) ms_default = ms;
                 if (ms < best_ms) {
                     best_ms = ms;
+                    best_one = one;
                     best_ci = static_cast<std::uint8_t>(cj);
                 }
             }
@@ -563,8 +611,10 @@ void loadOrTune(Model& m, const std::string& model_path, std::string& log) {
         std::error_code ec;
         const auto fsz = std::filesystem::file_size(widen(model_path), ec);
         if (!ec) {
-            // the R9700 (gfx1201) keeps the plain file name; other code objects get their own
-            const std::string sfx = m.arch == hip::Arch::gfx1151 ? "-gfx1151" : "";
+            // the R9700 (gfx1201) keeps the plain file name; other code objects get their own.
+            // gfx1151 table revision 2: the small-batch WMMA GEMMs (gemms) became candidates,
+            // so tables written before them are tuned again.
+            const std::string sfx = m.arch == hip::Arch::gfx1151 ? "-gfx1151r2" : "";
             const std::string bname = narrow(std::filesystem::path(widen(model_path)).filename().wstring());
             const std::string stem = bname + "-" + std::to_string(fsz) + sfx + ".txt";
             const std::string dir = base + "\\whirl";

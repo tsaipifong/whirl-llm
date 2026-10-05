@@ -14,6 +14,7 @@
 #include "quant.hip"               // quant block decoders
 #include "gemv_f.hip"              // f32-activation matvec
 #include "gemm_prefill.hip"        // prefill GEMM (WMMA f16, configurations)
+#include "gemm_small.hip"          // small-batch prefill GEMM (raw quantized stages)
 #include "gemv_q.hip"              // int8 decode GEMV, multi-token, grouped ABI
 #include "gemv_mr.hip"             // multi-row multi-token GEMV
 #include "gemv_wunit.hip"          // Q4_K / Q5_K / IQ4_XS / MXFP4 GEMV units

@@ -359,6 +359,82 @@ __device__ __forceinline__ half8 dec_group_h<QT_MXFP4>(const uint8_t *row, int g
     return bytes8_to_h8(u0, u1, (_Float16)128.f, (_Float16)dl, (_Float16)0.f);
 }
 
+// Word-load decoders for the types whose blocks are only 2-byte aligned (Q6_K, Q8_0,
+// IQ4_NL, Q3_K). Same values as the generic dec_group + f16 conversion, bit for bit:
+// every weight is one f32 product (scale x exact small integer) rounded to f16 once;
+// only the loads (dwords from 2-aligned addresses instead of bytes) and the integer
+// unpacking differ.
+__device__ __forceinline__ uint32_t ld32a2(const uint8_t *p) {
+    uint32_t v;
+    __builtin_memcpy(&v, __builtin_assume_aligned(p, 2), 4);
+    return v;
+}
+
+template <>
+__device__ __forceinline__ half8 dec_group_h<QT_Q6_K>(const uint8_t *row, int g) {
+    const uint8_t *b = row + (size_t)(g >> 5) * 210;
+    const int p = (g & 31) * 8;
+    const int n = p >> 7, r = p & 127, quarter = r >> 5, l = r & 31;
+    const float d = h2f(b + 208);
+    const float ds = d * ((const int8_t *)(b + 192))[8 * n + (l >> 4) + 2 * quarter];
+    const uint8_t *qlp = b + 64 * n + l + ((quarter & 1) ? 32 : 0), *qhp = b + 128 + 32 * n + l;
+    const int lsh = (quarter >> 1) ? 4 : 0, hsh = 2 * quarter;
+    const uint32_t w[2] = {((ld32a2(qlp) >> lsh) & 0x0F0F0F0Fu) | (((ld32a2(qhp) >> hsh) & 0x03030303u) << 4),
+                           ((ld32a2(qlp + 4) >> lsh) & 0x0F0F0F0Fu) | (((ld32a2(qhp + 4) >> hsh) & 0x03030303u) << 4)};
+    half8 h;
+#pragma unroll
+    for (int i = 0; i < 8; ++i) h[i] = (_Float16)(ds * (float)((int)((w[i >> 2] >> (8 * (i & 3))) & 0xFF) - 32));
+    return h;
+}
+
+template <>
+__device__ __forceinline__ half8 dec_group_h<QT_Q8_0>(const uint8_t *row, int g) {
+    const uint8_t *b = row + (size_t)(g >> 2) * 34;
+    const float d = h2f(b);
+    const uint8_t *q = b + 2 + 8 * (g & 3);
+    const uint32_t w[2] = {ld32a2(q), ld32a2(q + 4)};
+    half8 h;
+#pragma unroll
+    for (int i = 0; i < 8; ++i) h[i] = (_Float16)(d * (float)(int8_t)(w[i >> 2] >> (8 * (i & 3))));
+    return h;
+}
+
+template <>
+__device__ __forceinline__ half8 dec_group_h<QT_IQ4_NL>(const uint8_t *row, int g) {
+    const uint8_t *b = row + (size_t)(g >> 2) * 18;
+    const float d = h2f(b);
+    const int p = (g & 3) * 8;
+    const uint8_t *q = b + 2 + (p & 15);
+    const int sh = p < 16 ? 0 : 4;
+    const uint32_t w[2] = {(uint32_t)iq4_lut4((ld32a2(q) >> sh) & 0x0F0F0F0Fu), (uint32_t)iq4_lut4((ld32a2(q + 4) >> sh) & 0x0F0F0F0Fu)};
+    half8 h;
+#pragma unroll
+    for (int i = 0; i < 8; ++i) h[i] = (_Float16)(d * (float)(int8_t)(w[i >> 2] >> (8 * (i & 3))));
+    return h;
+}
+
+template <>
+__device__ __forceinline__ half8 dec_group_h<QT_Q3_K>(const uint8_t *row, int g) {
+    const uint8_t *b = row + (size_t)(g >> 5) * 110;
+    const int p = (g & 31) * 8;
+    const uint8_t *hm = b, *qs = b + 32, *sb = b + 96;
+    const float d = h2f(b + 108);
+    const int n = p >> 7, r = p & 127, j = r >> 5, s = r & 31;
+    const int k = 8 * n + 2 * j + (s >> 4);
+    const int lo = (k < 8) ? (sb[k] & 0xF) : (sb[k - 8] >> 4);
+    const int hi = (sb[8 + (k & 3)] >> (2 * (k >> 2))) & 3;
+    const float dl = d * ((lo | (hi << 4)) - 32);
+    const int bit = 4 * n + j, shift = 2 * j;
+    const uint8_t *q = qs + 32 * n + s;
+    // per byte: ((q >> shift) & 3) - (hmask bit set ? 0 : 4)  ->  ((q >> shift) & 3) + 4 * hbit - 4
+    const uint32_t w[2] = {((ld32a2(q) >> shift) & 0x03030303u) | (((ld32a2(hm + s) >> bit) & 0x01010101u) << 2),
+                           ((ld32a2(q + 4) >> shift) & 0x03030303u) | (((ld32a2(hm + s + 4) >> bit) & 0x01010101u) << 2)};
+    half8 h;
+#pragma unroll
+    for (int i = 0; i < 8; ++i) h[i] = (_Float16)(dl * (float)((int)((w[i >> 2] >> (8 * (i & 3))) & 0xFF) - 4));
+    return h;
+}
+
 template <int T, int BM, int BN, int BK, int WAVES_M, int MODE = 0, int NTH = 256, bool TOK_X = false>
 __device__ void gemm3_impl(const uint8_t *__restrict__ W, uint64_t row_bytes, const _Float16 *__restrict__ X,
                            float *__restrict__ Y, int ncols, int nrows, int n_tok, int accumulate) {

@@ -314,7 +314,8 @@ inline constexpr std::array<GemmCfg, 24> kGemmCfgs = {{
     {128, 512, 512},  // bk 32, waves_m 8
 }};
 // gemms_c<i>_<T> / gemmsh_c<i>_<T> (small batch; c5..c7 = gemmsd variants).
-// q8_0 has no c3 and no c7 instantiation; q6_k has no c7.
+// q8_0 has no c3 and no c7 instantiation; q6_k has no c7. This is the gfx1201
+// geometry; a code object may export its own (KernelTable::gemms_geom).
 inline constexpr std::array<GemmCfg, 8> kGemmsCfgs = {{
     {64, 32, 128}, {128, 32, 256}, {128, 48, 256}, {128, 64, 256},
     {128, 16, 256}, {64, 64, 256}, {64, 96, 256}, {64, 128, 256},
@@ -372,6 +373,9 @@ struct KernelTable {
     std::array<Nt, kNGemvw> gemvw{}, gemvw_g{};      // [v][nt - 2][type], v = 1..8
     std::array<PerType<F>, kGemmCfgs.size()> gemmc{};
     std::array<PerType<F>, kGemmsCfgs.size()> gemms{}, gemmsh{};
+    // Block geometry of the gemms slots: kGemmsCfgs, or the code object's own table
+    // (marker whirl_cap_gemms_geom, int32 whirl_gemms_geom[slot][3] = BM, BN, threads).
+    std::array<GemmCfg, kGemmsCfgs.size()> gemms_geom = kGemmsCfgs;
     PerType<F> gemmhq{}, gemmhqh{};
     PerType<F> gdn_ab{}, gdn_abconv{}, moe_gu{}, moe_down{}, gemm_moe{}, gemm_moe32{};
     std::array<F, kMaxSmallBatch> gemv_d2{};       // [nt - 1]
