@@ -490,8 +490,8 @@ public:
     std::uint32_t snap_rows = 0;
     std::uint32_t draft_vocab = 0;  // WHIRL_DRAFT_VOCAB=N: the first N rows only (old experiment)
     // WHIRL_DRAFT_WINDOW / _MIN: MTP draft attention over the first 256 + the last W positions once
-    // the context reaches draft_window_min (0 = off); the trunk and verify always see everything
-    std::uint32_t draft_window = 0;
+    // the context reaches draft_window_min (W = 0: off); the trunk and verify always see everything
+    std::uint32_t draft_window = 16384;
     std::uint32_t draft_window_min = 65536;
     float draft_p_min = 0;
     std::uint32_t draft_n_min = 0;
