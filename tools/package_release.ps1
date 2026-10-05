@@ -74,7 +74,7 @@ function Get-PeImports([string]$path) {
     }
     return $names
 }
-$system = @("kernel32.dll", "ws2_32.dll", "user32.dll", "advapi32.dll", "shell32.dll", "ole32.dll", "bcrypt.dll", "ntdll.dll", "shlwapi.dll", "dbghelp.dll")
+$system = @("kernel32.dll", "ws2_32.dll", "user32.dll", "advapi32.dll", "shell32.dll", "ole32.dll", "bcrypt.dll", "ntdll.dll", "shlwapi.dll", "dbghelp.dll", "dxgi.dll", "winmm.dll")
 foreach ($e in $exes) {
     $imports = Get-PeImports (Join-Path $BuildDir $e)
     foreach ($i in $imports) {
