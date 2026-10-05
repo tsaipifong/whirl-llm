@@ -259,6 +259,7 @@ PowerShell 中先用 `$env:WHIRL_KV = "q8v"` 設定再啟動程式。**一般使
 | `WHIRL_CODE_OBJECT=FILE` | 開發用：從這個 code object 載入 GPU kernel，取代內建的 |
 | `WHIRL_MOE_FP8=0` | 專家為 MXFP4 的 MoE 模型：專家 prefill 改用 f16 activation，不用 fp8（預設 fp8，較快的路徑——Ornith MXFP4 在 2k token 約 11.7k 對 8.6k tok/s）。只影響 prefill |
 | `WHIRL_MOE_MXW=0` | 專家為 MXFP4 的 MoE 模型：改用通用的 MXFP4 專家 decode kernel，不用整塊（whole-block）kernel（預設整塊）。影響 decode / 驗證 |
+| `WHIRL_VRAM_LIMIT_MB=N` | 模擬只有 N MiB VRAM 的 GPU（例如在 R9700 上設 `16384` 模擬 16 GB 的 RX 9070 XT）：可用／總 VRAM、WDDM budget 與本行程的配置都以 N 為上限，載入、KV 池大小與自動縮小 prefill batch／checkpoint 數都會跟那張卡一樣。預設關閉 |
 | `WHIRL_EMBD_HOST=0` | token embedding 表放在 VRAM（預設放 pinned 主記憶體；server 會把它的大小併入 pinned 宣告，讓 Shared Usage 監控扣除） |
 | `WHIRL_TUNE_COLD=1` | 自動調校：每次計時前先清快取 *（診斷）* |
 | `WHIRL_TUNE_MASK=BITS` | 自動調校：候選 GEMM 組態的遮罩 *（診斷）* |

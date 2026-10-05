@@ -274,6 +274,7 @@ experiments and measurements.
 | `WHIRL_CODE_OBJECT=FILE` | development: load the GPU kernels from this code object instead of the built-in one |
 | `WHIRL_MOE_FP8=0` | MoE models with MXFP4 experts: run the expert prefill with f16 activations instead of fp8 (default fp8, the faster path — about 11.7k vs 8.6k tok/s at 2k tokens for Ornith MXFP4). Affects prefill only |
 | `WHIRL_MOE_MXW=0` | MoE models with MXFP4 experts: use the generic MXFP4 expert decode kernels instead of the whole-block ones (default whole-block). Affects decode / verify |
+| `WHIRL_VRAM_LIMIT_MB=N` | simulate a GPU with N MiB of VRAM (e.g. `16384` on an R9700 for a 16 GB RX 9070 XT): free / total VRAM, the WDDM budget and this process's allocations are capped at N, so loading, KV-pool sizing and the automatic prefill-batch / checkpoint reduction behave as on that card. Off by default |
 | `WHIRL_EMBD_HOST=0` | keep the token embedding table in VRAM (default: pinned host memory; the server declares its size with the other pinned memory so Shared Usage monitoring can subtract it) |
 | `WHIRL_TUNE_COLD=1` | autotune: evict the cache before each timing *(diagnostic)* |
 | `WHIRL_TUNE_MASK=BITS` | autotune: mask of the candidate GEMM configurations *(diagnostic)* |
