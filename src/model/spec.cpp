@@ -1,12 +1,27 @@
 // MTP draft-count cost model and prompt-lookup (n-gram) drafting.
 // SPDX-License-Identifier: Apache-2.0
 // Reimplements the WHIRL Zig research prototype's model/qwen35.zig (Ngram, NgramPolicy,
-// DraftAccept, DraftTiming, pickDrafts).
+// DraftAccept, DraftTiming, pickDrafts); CycleCost, SlotAccept and allocDrafts are the
+// per-slot draft allocation of T4-1 (not wired into the engine yet).
 
 #include "whirl/model.h"
 
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
+#include <fstream>
+#include <stdexcept>
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
 
 namespace whirl::qwen35 {
 
@@ -93,6 +108,88 @@ std::optional<float> DraftTiming::estimate(u32 nd) const {
     return std::max(a + b * xf, 0.05f);
 }
 
+std::optional<std::string> draftVocabFile(std::string_view spec, const std::string& dir) {
+    if (spec.empty() || spec == "off" || spec == "0") return std::nullopt;
+    if (std::all_of(spec.begin(), spec.end(), [](char c) { return c >= '0' && c <= '9'; })) return std::nullopt;  // first-N rows
+    const bool named = spec.size() >= 2 && spec.back() == 'k' &&
+                       std::all_of(spec.begin(), spec.end() - 1, [](char c) { return c >= '0' && c <= '9'; });
+    if (named) return (std::filesystem::path(dir) / "draft_vocab" / ("subset_" + std::string(spec) + ".bin")).string();
+    return std::string(spec);
+}
+
+DraftVocabChoice draftVocabChoice(const std::optional<std::string>& env_value, const std::string& dir) {
+    DraftVocabChoice c;
+    if (!env_value) {
+        c.kind = DraftVocabChoice::Kind::embedded_64k;
+        c.by_default = true;
+        return c;
+    }
+    const std::string& v = *env_value;
+    if (v.empty() || v == "off" || v == "0") return c;
+    if (std::all_of(v.begin(), v.end(), [](char ch) { return ch >= '0' && ch <= '9'; })) {
+        c.kind = DraftVocabChoice::Kind::first_n;
+        c.n = static_cast<u32>(std::stoul(v));
+        return c;
+    }
+    if (v == "64k") {
+        c.kind = DraftVocabChoice::Kind::embedded_64k;
+        return c;
+    }
+    if (auto f = draftVocabFile(v, dir)) {
+        c.kind = DraftVocabChoice::Kind::file;
+        c.file = *f;
+    }
+    return c;
+}
+
+std::vector<u32> readDraftVocab(const std::string& path) {
+    std::ifstream f(std::filesystem::path(path), std::ios::binary | std::ios::ate);
+    if (!f) throw std::runtime_error("draft vocabulary file not found: " + path);
+    const std::streamoff n = f.tellg();
+    if (n <= 0 || n % 4 != 0) throw std::runtime_error("draft vocabulary file size is not a multiple of 4: " + path);
+    std::vector<u32> ids(static_cast<std::size_t>(n / 4));
+    f.seekg(0);
+    std::vector<unsigned char> b(static_cast<std::size_t>(n));
+    f.read(reinterpret_cast<char*>(b.data()), n);
+    for (std::size_t i = 0; i < ids.size(); ++i)
+        ids[i] = static_cast<u32>(b[4 * i]) | static_cast<u32>(b[4 * i + 1]) << 8 | static_cast<u32>(b[4 * i + 2]) << 16 |
+                 static_cast<u32>(b[4 * i + 3]) << 24;
+    return ids;
+}
+
+std::vector<u32> draftVocabIds(std::span<const u32> ids, u32 n_rows, std::span<const u32> required, u32* added) {
+    for (std::size_t i = 0; i < ids.size(); ++i) {
+        if (ids[i] >= n_rows) throw std::runtime_error("draft vocabulary: token id " + std::to_string(ids[i]) + " >= " + std::to_string(n_rows));
+        if (i > 0 && ids[i] <= ids[i - 1]) throw std::runtime_error("draft vocabulary: ids not strictly ascending");
+    }
+    std::vector<u32> req;
+    for (u32 r : required)
+        if (r < n_rows) req.push_back(r);
+    std::sort(req.begin(), req.end());
+    req.erase(std::unique(req.begin(), req.end()), req.end());
+    std::vector<u32> out;
+    out.reserve(ids.size() + req.size());
+    std::set_union(ids.begin(), ids.end(), req.begin(), req.end(), std::back_inserter(out));
+    if (added) *added = static_cast<u32>(out.size() - ids.size());
+    return out;
+}
+
+std::string exeDirectory() {
+#ifdef _WIN32
+    wchar_t buf[1024];
+    const DWORD n = GetModuleFileNameW(nullptr, buf, 1023);
+    if (n == 0) return {};
+    buf[n] = 0;
+    return std::filesystem::path(buf).parent_path().string();
+#else
+    char buf[4096];
+    const ssize_t n = readlink("/proc/self/exe", buf, sizeof buf - 1);
+    if (n <= 0) return {};
+    buf[n] = 0;
+    return std::filesystem::path(buf).parent_path().string();
+#endif
+}
+
 u32 pickDrafts(std::span<const DraftAccept* const> accepts, const DraftTiming& timing, u32 max, u32 cycle, u32 prev) {
     if (max <= 1) return std::max<u32>(max, 1);
     u32 best = std::min<u32>(max, 3);
@@ -116,6 +213,242 @@ u32 pickDrafts(std::span<const DraftAccept* const> accepts, const DraftTiming& t
         if (!up && best > 1) return best - 1;
     }
     return best;
+}
+
+// ---- T4-1: cycle cost, per-slot acceptance, per-slot draft allocation
+
+std::array<double, CycleCost::n_par> CycleCost::feat(const CycleFeat& x) {
+    // scaled so every parameter has a similar range: rows / 16, steps / 8, rows * ctx / 1024
+    return {1.0, x.rows / 16.0, x.steps / 8.0, x.rows > 16 ? 1.0 : 0.0, x.row_ctx / 1024.0};
+}
+
+void CycleCost::reset() {
+    th.fill(0);
+    for (u32 i = 0; i < n_par; ++i) {
+        P[i].fill(0);
+        P[i][i] = 1e4;
+    }
+    n_obs = 0;
+}
+
+void CycleCost::rls(const std::array<double, n_par>& z, double y) {
+    std::array<double, n_par> pz{};
+    for (u32 i = 0; i < n_par; ++i)
+        for (u32 j = 0; j < n_par; ++j) pz[i] += P[i][j] * z[j];
+    double den = forget;
+    for (u32 i = 0; i < n_par; ++i) den += z[i] * pz[i];
+    double err = y;
+    for (u32 i = 0; i < n_par; ++i) err -= th[i] * z[i];
+    for (u32 i = 0; i < n_par; ++i) th[i] += pz[i] / den * err;
+    // P = (P - pz pz^T / den) / forget, kept symmetric; bounded so unexcited directions cannot wind up
+    for (u32 i = 0; i < n_par; ++i)
+        for (u32 j = i; j < n_par; ++j) {
+            const double v = (P[i][j] - pz[i] * pz[j] / den) / forget;
+            P[i][j] = P[j][i] = v;
+        }
+    for (u32 i = 0; i < n_par; ++i)
+        if (P[i][i] > 1e6) {
+            const double f = 1e6 / P[i][i];
+            for (u32 j = 0; j < n_par; ++j) {
+                P[i][j] *= std::sqrt(f);
+                P[j][i] = P[i][j];
+            }
+            P[i][i] = 1e6;
+        }
+}
+
+void CycleCost::prior(const DraftTiming& tm, u32 slots, float ctx_k) {
+    reset();
+    for (u32 nd = 1; nd < max_ng_drafts + 1; ++nd) {
+        if (tm.n[nd] == 0) continue;
+        CycleFeat x;
+        x.rows = static_cast<float>(slots * (nd + 1));
+        x.steps = static_cast<float>(nd);
+        x.row_ctx = x.rows * ctx_k;
+        const u32 w = std::min<u32>(tm.n[nd], 4);
+        for (u32 i = 0; i < w; ++i) rls(feat(x), tm.t[nd]);
+    }
+    n_obs = 0;  // a prior is not a sample
+}
+
+void CycleCost::observe(const CycleFeat& x, float ms) {
+    rls(feat(x), ms);
+    n_obs += 1;
+}
+
+float CycleCost::predict(const CycleFeat& x) const {
+    const auto z = feat(x);
+    double t = 0;
+    for (u32 i = 0; i < n_par; ++i) t += th[i] * z[i];
+    return static_cast<float>(std::max(t, 0.05));
+}
+
+void SlotAccept::observe(u32 nd_dev, u32 acc) {
+    const float r = cycles < 16 ? 0.2f : 0.1f;
+    cycles += 1;
+    nd_dev = std::min(nd_dev, max_ng_drafts);
+    if (nd_dev == 0) return;
+    acc = std::min(acc, nd_dev);
+    a.updateRate(nd_dev, acc, r);
+    const u32 reached = std::min(acc + 1, nd_dev);
+    for (u32 k = 0; k < reached; ++k) n[k] = std::min(n[k] + 1, n_cap);
+    // positions past the last observed one drift towards it; a fully accepted chain did not
+    // break, so it is censored (no 0.95 per position) rather than an upper bound
+    const bool full = acc == nd_dev;
+    const u32 last = reached - 1;
+    float target = a.alpha[last];
+    for (u32 k = reached; k < max_ng_drafts; ++k) {
+        if (!full) target *= drift_decay;
+        a.alpha[k] += drift_rate * (target - a.alpha[k]);
+    }
+}
+
+DraftAccept SlotAccept::effective(const DraftAccept& pool) const {
+    DraftAccept e;
+    for (u32 k = 0; k < max_ng_drafts; ++k) {
+        const float nk = static_cast<float>(n[k]);
+        e.alpha[k] = (nk * a.alpha[k] + pool_weight * pool.alpha[k]) / (nk + pool_weight);
+    }
+    return e;
+}
+
+namespace {
+
+struct AllocEval {
+    float score = 0;
+    float t = 0;
+    std::vector<float> e;  // expected tokens per slot
+};
+
+AllocEval allocEval(std::span<const AllocSlot> slots, const CycleCost& cost, const std::vector<u32>& d) {
+    AllocEval r;
+    r.e.resize(slots.size());
+    CycleFeat x;
+    float sum_e = 0;
+    for (std::size_t i = 0; i < slots.size(); ++i) {
+        const AllocSlot& s = slots[i];
+        const bool ng = s.ng_rows > 0;
+        const float rows = ng ? static_cast<float>(s.ng_rows) : static_cast<float>(d[i] + 1);
+        x.rows += rows;
+        x.row_ctx += rows * s.ctx_k;
+        if (!ng) x.steps = std::max(x.steps, static_cast<float>(d[i]));
+        r.e[i] = ng ? s.ng_e : s.acc->expected(d[i]);
+        sum_e += r.e[i];
+    }
+    r.t = cost.predict(x);
+    r.score = sum_e / r.t;
+    return r;
+}
+
+}  // namespace
+
+AllocResult allocDrafts(std::span<const AllocSlot> slots, const CycleCost& cost, AllocBudget budget, u32 uniform,
+                        std::span<const u32> prev, float x) {
+    const std::size_t n = slots.size();
+    AllocResult res;
+    res.d.assign(n, 0);
+    u32 n_mtp = 0, ng_rows = 0;
+    for (std::size_t i = 0; i < n; ++i) {
+        if (slots[i].ng_rows > 0) {
+            ng_rows += slots[i].ng_rows;
+            continue;
+        }
+        n_mtp += 1;
+        res.d[i] = std::clamp<u32>(uniform, 1, std::max<u32>(slots[i].cap, 1));
+    }
+    const std::vector<u32> u = res.d;
+    const AllocEval eu = allocEval(slots, cost, u);
+    res.score = eu.score;
+    if (n_mtp < 2 || cost.samples() < 16) return res;
+
+    // acceptances so close that the uniform count is already the best choice
+    u32 max_cap = 1;
+    for (const AllocSlot& s : slots)
+        if (s.ng_rows == 0) max_cap = std::max(max_cap, s.cap);
+    bool close = true;
+    for (u32 dd = 1; dd <= max_cap && close; ++dd) {
+        float lo = 1e30f, hi = 0;
+        for (const AllocSlot& s : slots) {
+            if (s.ng_rows > 0) continue;
+            const float e = s.acc->expected(dd);
+            lo = std::min(lo, e);
+            hi = std::max(hi, e);
+        }
+        close = hi <= 1.01f * lo;
+    }
+    if (close) return res;
+
+    const u32 base_rows = ng_rows + n_mtp;
+    const u32 rows_free = budget.rows > base_rows ? budget.rows - base_rows : 0;
+    const u32 d_max = std::min(rows_free, budget.snaps);
+    const auto feasible = [&](const std::vector<u32>& d, const AllocEval& ev) {
+        u32 sum = 0;
+        for (std::size_t i = 0; i < n; ++i) {
+            if (slots[i].ng_rows > 0) continue;
+            if (d[i] < 1 || d[i] > slots[i].cap) return false;
+            sum += d[i];
+        }
+        if (sum > d_max) return false;
+        for (std::size_t i = 0; i < n; ++i)  // per-slot throughput floor against u
+            if (ev.e[i] / ev.t < (1 - x) * eu.e[i] / eu.t) return false;
+        return true;
+    };
+
+    std::vector<u32> cur = u;
+    float cur_score = eu.score;
+    std::vector<u32> cand;
+    for (res.rounds = 0; res.rounds < 16;) {
+        std::vector<u32> best_d;
+        float best_s = cur_score * (1 + 1e-6f);
+        const auto tryMove = [&](std::size_t i, int di, std::size_t j, int dj) {
+            cand = cur;
+            if (static_cast<int>(cand[i]) + di < 1) return;
+            cand[i] = static_cast<u32>(static_cast<int>(cand[i]) + di);
+            if (dj != 0) {
+                if (static_cast<int>(cand[j]) + dj < 1) return;
+                cand[j] = static_cast<u32>(static_cast<int>(cand[j]) + dj);
+            }
+            const AllocEval ev = allocEval(slots, cost, cand);
+            if (ev.score > best_s && feasible(cand, ev)) {
+                best_s = ev.score;
+                best_d = cand;
+            }
+        };
+        for (std::size_t i = 0; i < n; ++i) {
+            if (slots[i].ng_rows > 0) continue;
+            tryMove(i, +1, i, 0);
+            tryMove(i, -1, i, 0);
+            for (std::size_t j = 0; j < n; ++j)
+                if (j != i && slots[j].ng_rows == 0) tryMove(i, +1, j, -1);
+        }
+        res.rounds += 1;
+        if (best_d.empty()) break;
+        cur = best_d;
+        cur_score = best_s;
+    }
+
+    // keep the previous allocation while it is within 2% of the best (and still allowed)
+    if (prev.size() == n) {
+        const std::vector<u32> p(prev.begin(), prev.end());
+        bool ok = true;
+        for (std::size_t i = 0; i < n; ++i)
+            if ((slots[i].ng_rows > 0) != (p[i] == 0)) ok = false;
+        if (ok) {
+            const AllocEval ev = allocEval(slots, cost, p);
+            if (feasible(p, ev) && ev.score >= 0.98f * cur_score) {
+                res.d = p;
+                res.score = ev.score;
+                res.uniform = p == u;
+                return res;
+            }
+        }
+    }
+    // 1% hysteresis against the uniform allocation
+    if (cur_score <= 1.01f * eu.score) return res;
+    res.d = cur;
+    res.score = cur_score;
+    res.uniform = false;
+    return res;
 }
 
 void Ngram::reset() {

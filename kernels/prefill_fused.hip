@@ -19,9 +19,12 @@ __device__ __forceinline__ uint8_t fp8_of(float v, float inv) {
 }
 
 // rmsnorm(x[t]) * w -> fp8 (FP8) or f16 into q[t]; n <= 256 * RN_PER.
+// H16 (with FP8): also writes the same normed row as f16 into q16[t] (the GDN
+// prefill needs fp8 for qkv / gate and f16 for [beta; alpha] from one norm).
 #define RN_PER 32
-template <bool FP8, bool TL = false>
-__device__ void rmsnorm_x_impl(const float *x, const float *w, uint8_t *q, float *sx, int n, float eps) {
+template <bool FP8, bool TL = false, bool H16 = false>
+__device__ void rmsnorm_x_impl(const float *x, const float *w, uint8_t *q, float *sx, int n, float eps,
+                               _Float16 *q16 = nullptr) {
     const float *xv = x + (size_t)blockIdx.x * n;
     const int tid = threadIdx.x;
     float v[RN_PER];
@@ -58,6 +61,7 @@ __device__ void rmsnorm_x_impl(const float *x, const float *w, uint8_t *q, float
             if (i < n) {
                 if (TL) q[x8t_off(blockIdx.x, i, n)] = fp8_of(v[k], inv);
                 else qr[i] = fp8_of(v[k], inv);
+                if (H16) q16[(size_t)blockIdx.x * n + i] = (_Float16)v[k];
             }
         }
     } else {
@@ -74,6 +78,13 @@ extern "C" __global__ void __launch_bounds__(256) rmsnorm_x8(const float *x, con
 }
 extern "C" __global__ void __launch_bounds__(256) rmsnorm_x16(const float *x, const float *w, uint8_t *q, float *sx, int n, float eps) {
     rmsnorm_x_impl<false>(x, w, q, sx, n, eps);
+}
+// one norm, two outputs: fp8 + sx (row-major / tiled) and f16 (row-major)
+extern "C" __global__ void __launch_bounds__(256) rmsnorm_x8h16(const float *x, const float *w, uint8_t *q, float *sx, _Float16 *q16, int n, float eps) {
+    rmsnorm_x_impl<true, false, true>(x, w, q, sx, n, eps, q16);
+}
+extern "C" __global__ void __launch_bounds__(256) rmsnorm_x8h16t(const float *x, const float *w, uint8_t *q, float *sx, _Float16 *q16, int n, float eps) {
+    rmsnorm_x_impl<true, true, true>(x, w, q, sx, n, eps, q16);
 }
 
 // silu(g[t]) * u[t] -> fp8 / f16 into q[t]; ncols % 4 == 0, ncols <= 1024 * SM_PER4.

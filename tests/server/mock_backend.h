@@ -73,6 +73,9 @@ struct MockConfig {
     bool mtp = true;
     double draft_miss = 0.3;       // probability that a draft is wrong
     double eos_rate = 0.0;         // per-token probability that <|im_end|> is the argmax
+    // simulated device time (busy wait; 0 = none): per prefill row, per verify cycle
+    double prefill_us_per_row = 0;
+    double cycle_us = 0;
 };
 
 class MockModel final : public server::ServerModel {

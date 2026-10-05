@@ -234,6 +234,41 @@ std::vector<u32> parseIds(const std::string& list) {
     return ids;
 }
 
+// WHIRL_DRAFT_VOCAB: unset = the embedded 64k subset on dense qwen35 models with the 248320-token
+// vocabulary; 64k = embedded; 48k / <file> = a frequency subset file; N = the first N draft-head rows
+// (old experiment); off = full head. Special and byte tokens are always added.
+void applyDraftVocab(q::Model& model, const Tokenizer& tok) {
+    using K = q::DraftVocabChoice::Kind;
+    const q::DraftVocabChoice dv = q::draftVocabChoice(envGet("DRAFT_VOCAB"), q::exeDirectory());
+    if (dv.kind == K::first_n) {
+        model.draft_vocab = dv.n;
+        return;
+    }
+    if (dv.kind == K::full) return;
+    if (dv.kind == K::embedded_64k) {
+        const bool fits = dv.by_default ? q::draftVocabDefaultFits(model.cfg.moe, model.cfg.n_vocab)
+                                        : model.cfg.n_vocab == q::draft_vocab_embedded_n_vocab;
+        if (!fits || (dv.by_default && !model.draft_d2)) {
+            if (!dv.by_default) std::fprintf(stderr, "WHIRL_DRAFT_VOCAB=64k ignored: the embedded subset needs a 248320-token vocabulary\n");
+            return;
+        }
+    }
+    std::vector<u32> req;
+    for (const TokenId t : tok.specials())
+        if (t >= 0) req.push_back(static_cast<u32>(t));
+    for (int b = 0; b < 256; ++b)
+        if (tok.byteToken(b) >= 0) req.push_back(static_cast<u32>(tok.byteToken(b)));
+    u32 added = 0;
+    const auto ids =
+        q::draftVocabIds(dv.kind == K::file ? q::readDraftVocab(dv.file) : q::embeddedDraftVocab64k(), model.cfg.n_vocab, req, &added);
+    const std::string label = dv.kind == K::file ? dv.file : std::string(dv.by_default ? "64k (embedded, default)" : "64k (embedded)");
+    if (model.setDraftVocab(ids))
+        std::fprintf(stderr, "draft head: vocabulary subset %s (%zu of %u rows; %u special / byte tokens added)\n", label.c_str(),
+                     ids.size(), model.cfg.n_vocab, added);
+    else
+        std::fprintf(stderr, "WHIRL_DRAFT_VOCAB ignored: it needs the 2-bit draft head (Q6_K output head, WHIRL_DRAFT_HEAD not q4)\n");
+}
+
 std::optional<u32> envU32(const char* name) {
     if (auto v = envGet(name)) {
         try {
@@ -469,6 +504,8 @@ DecodeResult specDecode(q::Model& model, const Tok& tok, u32 first, u32 n_prompt
     q::NgramPolicy ngp;
     if (opt.ngram) ngp.ng.norm = tok.crlfToLf();
     u32 ng_max = opt.ngram_max > 0 ? std::min(opt.ngram_max, q::max_ng_drafts) : q::max_ng_drafts;
+    // the unfused decode path snapshots row 0 only: more than 1 draft would restore an unwritten set
+    if (!model.fusedDecode()) ng_max = std::min<u32>(ng_max, 1);
     if (opt.ngram && ng_max > model.snap_sets) {
         // n-gram verifies need a recurrent-state snapshot set per draft: take them now
         // if they fit in free VRAM with room to spare, else draft at most what exists
@@ -646,7 +683,10 @@ void applyRuntimeEnv(q::Model& m) {
     if (auto v = envU32("GEMV_MAX")) m.gemv_max = std::clamp<u32>(*v, 1, q::max_small_batch);
     if (envGet("NO_GRAPH")) m.use_graph = false;
     if (envGet("NO_FUSE")) m.no_fuse = true;
+    if (auto v = envU32("DRAFT_WINDOW")) m.draft_window = *v;
+    if (auto v = envU32("DRAFT_WINDOW_MIN")) m.draft_window_min = *v;
     if (envGet("NAIVE_ATTN")) m.naive_attn = true;
+    if (auto v = envGet("ATTN_WIDE"); v && *v == "0") m.attn_wide = false;
     if (auto v = envU32("MOE_BN")) m.moe_bn_force = *v;
     if (envGet("GDN_SEQ")) m.gdn_chunked = false;
     if (auto v = envGet("GV_GROUP")) q::gv_group = *v != "0";
@@ -688,6 +728,7 @@ void loadLog(q::Model& m, const q::LoadStats& stats) {
             static_cast<double>(stats.bytes) / (1024.0 * 1024.0 * 1024.0), stats.ms / 1000.0, static_cast<double>(stats.bytes) / (stats.ms * 1e6),
             static_cast<double>(mem.free) / (1024.0 * 1024.0 * 1024.0), static_cast<double>(mem.total) / (1024.0 * 1024.0 * 1024.0)));
     out(fmt("  KV cache: %s, %u tokens\n", m.kvName(), m.max_ctx));
+    if (envGet("LOAD_DEBUG")) out(fmt("  gdn beta/alpha contiguous: %u layers\n", stats.gdn_ba_contig));
 }
 
 std::string readPromptArg(const std::string& p) {
@@ -866,7 +907,7 @@ int cmdChat(const Args& a) {
     if (envGet("GDN_V0")) {
         if (auto fv0 = model.module.getFunctionOpt("gdn_step_norm_v0")) model.k.gdn_step_norm = fv0;
     }
-    // MTP block as Q4_K (drafts only; default, WHIRL_MTP_Q4=0 keeps Q6_K)
+    // MTP block as Q4_K from Q6_K or Q8_0 (drafts only; default, WHIRL_MTP_Q4=0 keeps the file's types)
     if (envFlag("MTP_Q4", true)) model.requantMtpQ4();
     loadLog(model, L.stats);
 #if WHIRL_HAVE_VISION
@@ -905,7 +946,6 @@ int cmdChat(const Args& a) {
     // MTP speculative decode is exact greedy: on whenever the checkpoint has a nextn
     // layer; WHIRL_MTP=0 turns it off.
     const bool use_mtp = model.mtp.has_value() && logits_out == nullptr && envFlag("MTP", true);
-    if (auto v = envU32("DRAFT_VOCAB")) model.draft_vocab = *v;
     Timer timer;
     timer.begin();
     std::vector<std::int32_t> moe_ids;
@@ -987,6 +1027,7 @@ int cmdChat(const Args& a) {
             const auto dh = envGet("DRAFT_HEAD");
             model.buildDraftHeadEx(dh && *dh == "q4" ? q::Model::DraftHeadKind::q4 : q::Model::DraftHeadKind::d2);
         }
+        applyDraftVocab(model, tok.t);
         u32 drafts = 0;
         const ChatOpts sopt = mtpOpts(model, opt, &drafts);
         const DecodeResult r = specDecode(model, tok, next, static_cast<u32>(ids.size()), sopt, drafts, ids);
@@ -1084,6 +1125,10 @@ int cmdBench(const Args& a) {
         long_ids = tok.encode(text);
     }
     out("\n  prefill (tokens, ms, tok/s)" + std::string(has_mtp ? " - with the MTP block over the prompt, as chat runs it" : "") + ":\n");
+    // WHIRL_PROFILE: per-op-class GPU time of the last prefill run of each size
+    // (per-op events slow the run down; the printed tok/s is then not comparable)
+    q::Profile prof;
+    const bool profiling = envGet("PROFILE").has_value();
     Timer timer;
     for (u32 s : sizes) {
         if (s > long_ids.size()) continue;
@@ -1092,6 +1137,10 @@ int cmdBench(const Args& a) {
         const int reps = s <= 8192 ? 2 : 1;
         for (int rep = 0; rep < reps + 1; ++rep) {  // first run = warm-up
             model.reset();
+            if (profiling) {
+                prof.reset();
+                model.prof = rep == reps ? &prof : nullptr;
+            }
             timer.begin();
             std::size_t off = 0;
             while (off < pr.size()) {
@@ -1107,6 +1156,10 @@ int cmdBench(const Args& a) {
             if (rep > 0 || reps == 0) best = std::min(best, ms);
         }
         out(fmt("    prefill %6u tok: %9.1f ms  %8.1f tok/s\n", s, best, s * 1000.0 / best));
+        if (profiling) {
+            printProfile("prefill", prof, s);
+            model.prof = nullptr;
+        }
     }
     // decode
     out(fmt("\n  decode (%zu-token prompt, %u tokens, greedy):\n", dec_ids.size(), n_dec));
@@ -1119,6 +1172,7 @@ int cmdBench(const Args& a) {
         const auto dh = envGet("DRAFT_HEAD");
         model.buildDraftHeadEx(dh && *dh == "q4" ? q::Model::DraftHeadKind::q4 : q::Model::DraftHeadKind::d2);
     }
+    if (has_mtp) applyDraftVocab(model, tok.t);
     std::optional<u64> ref_hash;
     for (const std::string& mode : modes) {
         if (mode != "plain" && !has_mtp) continue;
@@ -1294,6 +1348,9 @@ int cmdSelftest(const Args& a) {
     const u32 grp = std::max<u32>(1, 16 / (m.cfg.n_head / m.cfg.n_head_kv));
     ok = m.checkAttnGroups(log, 1000, grp) && ok;
     ok = m.checkAttnGroups(log, 1023, grp) && ok;
+    const u32 grp2 = std::max<u32>(1, 32 / (m.cfg.n_head / m.cfg.n_head_kv));
+    ok = m.checkAttnGroups(log, 1000, grp2, true) && ok;
+    ok = m.checkAttnGroups(log, 1023, grp2, true) && ok;
     out(log);
     out(ok ? "selftest: ok\n" : "selftest: FAIL\n");
     return ok ? 0 : 1;

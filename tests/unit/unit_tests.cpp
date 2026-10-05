@@ -262,7 +262,52 @@ void testChat() {
                     R"({"messages":[{"role":"system","content":"S"},{"role":"user","content":"q"}],"reasoning_effort":"medium"})"),
              std::string("<|im_start|>system\nS<|im_end|>\n<|im_start|>user\nq<|im_end|>\n<|im_start|>assistant\n<think>\n"));
     CHECK(throws([&] { render(chat::TemplateKind::a, R"({"messages":[]})"); }));
-    CHECK(throws([&] { render(chat::TemplateKind::a, R"({"messages":[{"role":"user","content":"q"}],"reasoning_effort":"max"})"); }));
+    // reasoning effort: aliases, the OpenRouter-style "reasoning" object, unknown values
+    {
+        const auto ra = [&](const std::string& extra) {
+            return render(chat::TemplateKind::a, (R"({"messages":[{"role":"user","content":"q"}])" + extra + "}").c_str());
+        };
+        const std::string def = ra(""), xhigh = ra(R"(,"reasoning_effort":"xhigh")"), low = ra(R"(,"reasoning_effort":"low")"),
+                          medium = ra(R"(,"reasoning_effort":"medium")"), off = ra(R"(,"enable_thinking":false)");
+        CHECK(def == xhigh && low != xhigh && medium != xhigh && medium != low);
+        CHECK(xhigh.find("Reasoning effort is set to xhigh") != std::string::npos);
+        CHECK(low.find("Reasoning effort is set to low") != std::string::npos);
+        for (const char* v : {"high", "max", "ultra", "XHigh", " Max "}) {
+            const std::string extra = std::string(",\"reasoning_effort\":\"") + v + "\"";
+            CHECK_EQ(ra(extra), xhigh);
+        }
+        CHECK_EQ(ra(R"(,"reasoning_effort":"minimal")"), low);
+        CHECK_EQ(ra(R"(,"reasoning_effort":"MEDIUM")"), medium);
+        CHECK_EQ(ra(R"(,"reasoning_effort":"none")"), off);
+        CHECK_EQ(ra(R"(,"reasoning":{"effort":"low"})"), low);
+        CHECK_EQ(ra(R"(,"reasoning":{"effort":"ultra"})"), xhigh);
+        CHECK_EQ(ra(R"(,"reasoning":{"effort":"none"})"), off);
+        CHECK_EQ(ra(R"(,"reasoning":{"enabled":false})"), off);
+        CHECK_EQ(ra(R"(,"reasoning":{"enabled":true,"effort":"medium"})"), medium);
+        CHECK_EQ(ra(R"(,"reasoning":"minimal")"), low);
+        CHECK_EQ(ra(R"(,"chat_template_kwargs":{"reasoning_effort":"max"})"), xhigh);
+        // later sources override earlier ones: kwargs < reasoning object < top level
+        CHECK_EQ(ra(R"(,"chat_template_kwargs":{"reasoning_effort":"low"},"reasoning":{"effort":"medium"})"), medium);
+        CHECK_EQ(ra(R"(,"reasoning":{"effort":"low"},"reasoning_effort":"medium")"), medium);
+        CHECK_EQ(ra(R"(,"reasoning":{"enabled":false},"enable_thinking":true)"), def);
+        // a valid effort does not turn thinking back on
+        CHECK_EQ(ra(R"(,"enable_thinking":false,"reasoning_effort":"low")"), off);
+        // unknown values: no error, default effort, one warning
+        CHECK_EQ(ra(R"(,"reasoning_effort":"turbo")"), def);
+        CHECK_EQ(ra(R"(,"reasoning":{"effort":"turbo"})"), def);
+        CHECK_EQ(ra(R"(,"reasoning_effort":"low","reasoning":{"effort":"turbo"})"), low);
+        const auto r1 = chat::parseChatRequest(json::parse(R"({"messages":[{"role":"user","content":"q"}],"reasoning_effort":"turbo"})"));
+        CHECK(r1.warnings.size() == 1 && r1.warnings[0].find("turbo") != std::string::npos && !r1.options.effort);
+        const auto r2 = chat::parseChatRequest(json::parse(R"({"messages":[{"role":"user","content":"q"}],"reasoning_effort":"Max"})"));
+        CHECK(r2.warnings.empty() && r2.options.effort && *r2.options.effort == "xhigh");
+        CHECK(chat::canonicalEffort("minimal") == std::optional<std::string>("low"));
+        CHECK(!chat::canonicalEffort("") && !chat::canonicalEffort("hi"));
+        // direct renderChat callers still get an error for an unknown value
+        chat::ChatOptions bad_opt;
+        bad_opt.effort = "turbo";
+        const json::Array no_tools;
+        CHECK(throws([&] { (void)chat::renderChat(chat::TemplateKind::a, r1.messages, no_tools, bad_opt); }));
+    }
     CHECK(throws([&] { render(chat::TemplateKind::b, R"({"messages":[{"role":"robot","content":"q"}]})"); }));
     CHECK(chat::detectTemplate("{% if reasoning_effort %}") == chat::TemplateKind::a);
     CHECK(chat::detectTemplate("{% if x %}") == chat::TemplateKind::b);

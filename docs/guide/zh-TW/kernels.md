@@ -31,7 +31,8 @@ GEMV/GEMM 的 llama.cpp/ggml 貢獻者，以及任何需要讓批次與非批次
 | 啟動開銷 | 1.3–3.3 µs（R9700 2.2–2.5） |
 
 形塑了每個 kernel 的硬體事實：wave 是 32 個 lane（Vulkan 回報 64——那是驅動程式的另一種分組）；gfx12 WMMA
-處理 16×16×16 的 tile，A/B fragment（片段）放在暫存器中；LDS（共享記憶體）每個 workgroup 有 64 KB，但在我們的一個
+處理 16×16×16 的 tile，A/B fragment（片段）放在暫存器中；LDS（共享記憶體）每個 WGP 有 128 KiB，單一 workgroup 最多 64 KiB，
+所以兩個各用到 64 KiB 的 block 可以共用一個 WGP——HIP 的佔用率 API 以每 WGP 64 KiB 計算，只回報一半（[pitfalls KERN-20b](pitfalls.md#kern-20b)）。在我們的一個
 kernel 中使用超過 ~41 KB 就讓佔用率（occupancy）從 16 降到 6 waves/SIMD；**暫存器才是真正的限制**——一旦 kernel
 超出它的 VGPR 預算，編譯器就會溢出到 scratch 記憶體，效能隨之崩潰。
 
@@ -339,6 +340,29 @@ asm 屏障，因為編譯器把 `x*x` 收縮進第一個 butterfly 加法，並�
   fragment 64），而且每個 WMMA 都從 LDS 讀取 512 位元組的 fragment。`attn_kx` 每 128 個 query 使用 16 個 wave；兩個相鄰的 wave 共用 16 個 query，各自用原本的
   WMMA 鏈為 16 個 key 計算 Sᵀ，透過 LDS 交換，兩者計算相同的 softmax，各保留 Oᵀ 的一半（64 VGPR，無溢出）；下一個 K/V tile 預取到暫存器。逐位元相同。120k：f16
   KV 218 → 185 ms（+17.8%），q8v KV 247 → 198 ms（+25.0%）；32k +11%；≤ 8k 不變。
+- **`attn_kg`：依 GQA 分組、直接載入（f16、q8v、q8 與 q8h KV 的預設）。** 對 0.1.2 build 做逐類別 profile（Swift MXFP4-A，`whirl bench` 加
+  `WHIRL_PROFILE=1`）：除了 attention 以外，每一類運算的每 token 成本在各種 prompt 長度下都一樣；attention 則從 2k 的 0.015 ms/token（prefill 的
+  5%）漲到 64k 的 0.228 ms/token（46%），約 61–66 TFLOPS。`attn_kg` 重新分配 `attn_kx` 的工作，但每個 query 的運算一個都沒改：
+  - 一個 block = 同一個 KV head 底下的 query head（Qwen3.8-27B 全部 6 個，Ornith 的 8 個取 4 個）× 16 個 query，每個 head 兩個 wave，與
+    `attn_kx` 相同（Sᵀ 依 key 切、Oᵀ 依維度切）；
+  - 不共用 K/V tile。K fragment 從快取直接載入 WMMA A 暫存器；Vᵀ fragment 用 `global_load_tr_b128`，也就是 RDNA 4 的轉置載入：它在每 8 個 lane
+    一組之間轉置 8×8 的 16 位元區塊，所以每個 lane 提供一列 key，拿回的正好是它需要的 A 運算元那一行。同一個 KV head 的各個 head 同時讀同一批列，
+    所以這些載入會命中快取。沒有暫存器內轉置，每個 32-key tile 只有一個 barrier（Sᵀ 交換），原本是三個；
+  - q8v：V 在每個 block 只 dequantize 一次（與其他地方相同的 `(f16)q × s` 乘法），寫進提前一個 tile 的雙緩衝 LDS stage，由同一個 barrier 公開；
+  - q8 / q8h（`attn_kg6_q8` / `attn_kg4_q8`）：K 在暫存器內由 int8 反量化，用 magic number 手法——`0x6400 | (b ^ 0x80)` 就是 f16 的 1152 + q，
+    減 1152 再乘 scale 得到 q·s，只捨入一次；以 packed f16 計算，用 `v_perm` 組合兩半；`#pragma clang fp contract(off)` 防止編譯器融合成 FMA。
+    與 `attn_kx_q8` 逐位元相同；225 VGPR、每 SIMD 6 個 wave（實際每個 WGP 1 個 block）。61k probe：`attn_kx_q8` 57.8 → `attn_kg6_q8` 72.1 TFLOPS
+    （+24.7%）；直接寫 `(_Float16)q * s` 的版本只快 5%，所以改用 magic number 形式；
+  - softmax scale 1/16 是 2 的冪，所以分數維持不縮放——(s − m)·(scale·log2 e) 的捨入與 `__expf` 實際計算的 (s·scale − m·scale)·log2 e
+    完全相同——−inf 的 select 也可以拿掉（exp2(−inf) = 0；key 0 對每個 query 都可見，所以第一個 tile 之後累計最大值就是有限值）。block 內每個
+    query 都完整可見的 tile 直接跳過 mask。
+
+  與 `attn_kx` 逐位元相同（kernel-test 不變量涵蓋 group 6、group 8 與 head 範圍切分；三個模型在 4.9k–70.9k token 下最後一個 token 的 logits
+  與 0.1.2 逐位元相同，f16 與 q8v 皆是）。Probe，每次啟動 4096 個 query：f16、24 / 4 heads 62–66 → 92–97 TFLOPS；Ornith 的 group 8（每 block 4
+  個 head）60–66 → 78–81；q8v 57–62 → 82–84。同一個 kernel 拿掉所有 K/V 載入可到 123 TFLOPS，連 softmax 也拿掉是 139，所以剩下的成本是載入的資料
+  路徑，以及精確性要求的 16 步序列 Sᵀ 鏈。較差的做法（全都逐位元相同，全都比較慢）：f16 的 Vᵀ 改經共用 LDS stage（88 對 93）、K 和 V 都經 LDS
+  （暫存器溢出）、把 tile j−1 的 P·V 與 tile j 的 Sᵀ 交錯（89）、預取下一個 tile 的 K（−25%）、每 block 兩組 query（持平）、最長的 block 先排（第一個
+  chunk −10%）、q8v 用 4 個 wave 的 block（比 `attn_kx_q8v` 慢，未採用）、8192 列的 prefill chunk（端到端 −2%）。
 - 超過 128k 上下文時，啟動依 head 範圍切分（結果不變；成本約 2%；≤ 128k 從不套用），這是在一次 256k prefill 期間出現無法解釋的 `HipFailed` 之後採取的預防措施
   （[pitfalls.md](pitfalls.md#hip-256k)）。
 - 較差的做法：在非對角 tile 上跳過 causal mask（30k −4%，但 120k +1.3%）、只跳過 mask（+8%，排程變差）、依維度切分的 wave 對（1.5× WMMA，沒有收益）、只做預取（`attn_pf`，已被取代）、釘住
@@ -364,9 +388,25 @@ asm 屏障，因為編譯器把 `x*x` 收縮進第一個 butterfly 加法，並�
 
 - 較差的做法：64 欄變體（速度相同；在 gfx1151 上非逐位元相同）；一個對所有 query 只讀一次 KV 的版本（24k MTP 39.5 → 35.6 tok/s——瓶頸是歸約而不是 KV 讀取，而且它
   41 KB 的 LDS 降低了佔用率）。
+- **`attn_wsplit2`（每群最多 32 欄）。** 每群 16 欄時，一個序列的驗證列兩列一組進 attention（27B：每個 KV head 6 個 GQA head），所以每個 split 的 K/V 範圍每 2 列就讀一次，
+  而 block 的 4 個 wave 中有 3 個只幫忙搬 Vᵀ。`attn_wsplit2` 是同一個 template 的兩個欄群版本：wave 0 與 wave 1 在同一塊已搬好的 Vᵀ tile 上各算 16 欄（最多 5 列共用一次
+  K/V 讀取；LDS 37 KB，低於約 41 KB 的佔用率斷崖）。每一欄走完全相同的程式路徑，所以 partials 與單獨執行逐位元相同（`checkAttnGroups` 與 kernel test 都拿 5 列群組和逐
+  query launch 比對）。主機端以 32 欄上限分群，只有某群因此超過 2 列時才用 `attn_wsplit2`（單列 decode 仍用 `attn_wsplit1`；`WHIRL_ATTN_WIDE=0` 可關閉）。每個 attention
+  層的 kernel 時間，q8v KV，R9700：
+
+  | 上下文 | 列數 | `attn_wsplit1` | `attn_wsplit2` |
+  |---|---|---|---|
+  | 16k | 1 序列 × 5（一位使用者、4 個草稿） | 0.286 ms | 0.141 ms |
+  | 16k | 1 × 9（8 個草稿） | 0.477 ms | 0.277 ms |
+  | 16k | 4 × 4（四位使用者、各 3 個草稿） | 0.853 ms | 0.607 ms |
+  | 32k | 4 × 4 | 1.784 ms | 1.162 ms |
+  | 32k | 1 × 9 | 1.115 ms | 0.633 ms |
 - **gfx1151 的限制：** 當 P = 0 的項乘上另一個 query 的真實 V 列時，gfx11 WMMA 並不精確，所以在 8060S 上每個群組只放一個 query（kernel 仍會執行，只是不共用 K/V）。
 - 這項工作之後，一般 decode 時間每 1k token 上下文約增加 0.11 ms——正好是以 ~600 GB/s 每 1k token 多讀 64 MiB KV 的時間。Decode attention 已達頻寬；剩下的槓桿是減少 KV
-  位元組，而反量化 K 的成本比它省下的位元組還多（[kv-and-caching.md](kv-and-caching.md#formats)）。
+  位元組。
+- **`attn_wsplit1/2` 的 int8 K（q8、q8h）：magic number 反量化（`kv_dq8`）**。第一版 int8 對每個元素各做一次 `cvt` 與乘法，成本比 K 減半省下的頻寬還多（q8h 在 128k 的 decode 比 f16 慢 5.2%，[kv-and-caching.md](kv-and-caching.md#formats)）。現在改用與 `attn_kg` 相同的轉換：`v_perm` 組出 f16 的
+  `0x6400 | (b ^ 0x80)`（= 1152 + q），減去 1152（精確），再以 packed f16 成對乘上 scale；`#pragma clang fp contract(off)` 保留 `(_Float16)q * s` 唯一一次捨入——**位元完全相同**。每一列的 8 個 K scale
+  只載入一次。Swift-1.5 MXFP4-A、q8h、125,853 token 提示、純 decode：24.09 → 25.99 tok/s（+7.9%），輸出雜湊相同；VGPR 189 → 191。
 
 ## <a id="deltanet"></a>9. Gated DeltaNet
 

@@ -8,6 +8,7 @@
 #pragma once
 
 #include "backend.h"
+#include "decode_floor.h"
 #include "protocol.h"
 #include "tier/device_ops.h"
 #include "tier/kv_tier.h"
@@ -45,7 +46,7 @@ constexpr std::uint32_t gdn_max_seg = qwen35::gdn_max_seg;
 constexpr std::uint32_t max_small_batch = qwen35::max_small_batch;
 constexpr std::uint32_t k_small = 256;
 constexpr std::uint32_t k_big = 16384;
-constexpr std::uint32_t max_rows = max_small_batch;
+constexpr std::uint32_t max_rows = qwen35::max_verify_rows;
 constexpr std::size_t prefill_chunk = 1024;
 constexpr std::size_t prefill_merge = 256;
 
@@ -92,6 +93,7 @@ struct Ckpt {
     DevPtr logits = 0;
     bool has_logits = true;
     void* host = nullptr;  // pinned host buffer (WHIRL_CKPT_HOST)
+    DevPtr dev = 0;        // the one VRAM allocation that conv / ssm / hid / logits are slices of
 };
 
 struct Cand {
@@ -224,6 +226,8 @@ struct Slot {
     bool logits_ok = false;
     float acc_ema = 0;
     qwen35::DraftAccept dacc;
+    qwen35::SlotAccept sacc;      // WHIRL_SLOT_DRAFTS=2: per-slot acceptance with pool shrinkage
+    std::uint32_t d_prev = 0;     // MTP drafts of this slot in its last MTP cycle
     qwen35::NgramPolicy ng;
     std::uint32_t ng_cycles = 0;
     std::array<std::uint32_t, max_small_batch + 1> batch{};
@@ -258,8 +262,24 @@ struct QBatch {
 
 struct CycleProf;
 
+// One decoding slot as the per-slot draft planner (WHIRL_SLOT_DRAFTS=2) sees it.
+struct DraftPlanSlot {
+    const qwen35::DraftAccept* acc = nullptr;  // MTP slot: effective acceptance; unused for n-gram slots
+    std::uint32_t pos = 0;                     // context length
+    std::uint32_t ng_rows = 0;                 // > 0: n-gram slot with this many verify rows
+    float ng_e = 0;                            // n-gram slot: expected tokens
+    std::uint32_t d_prev = 0;                  // MTP drafts in its last MTP cycle (0: none)
+};
+
+// MTP draft counts of the MTP slots (in order, n-gram slots skipped) from qwen35::allocDrafts:
+// `uniform` drafts each unless the cost model finds a better split within `rows` verify rows and
+// `snaps` snapshot sets; every MTP slot gets 1..cap. Pure (no engine state), for tests.
+std::vector<std::uint32_t> planSlotDrafts(std::span<const DraftPlanSlot> slots, const qwen35::CycleCost& cost,
+                                          std::uint32_t uniform, std::uint32_t cap, std::uint32_t rows, std::uint32_t snaps);
+
 struct EngineOptions {
     std::string model_name;
+    std::string model_file;  // GGUF file name without directory (GET /props model_path)
     std::uint32_t ctx = 131072;  // context per slot (cap)
     std::uint32_t parallel = 4;
     chat::TemplateKind tmpl = chat::TemplateKind::a;
@@ -278,12 +298,16 @@ struct EngineOptions {
     std::uint32_t ngram_min = 3;
     std::uint32_t ngram_max = 0;
     bool ngram_force = false;
-    bool slot_drafts = false;
+    // per-slot draft counts: 0 uniform, 1 marginal-gain swaps (splitDrafts), 2 cost model (allocDrafts)
+    std::uint32_t slot_drafts = 0;
     bool trace_nd = false;
     bool loop_log = false;
     bool tier_verify = false;
     std::uint32_t tier_min_gain = 512;
     double gather_ms = 30;
+    // decode floor (--decode-min-tps): while slots decode, each keeps >= this many tok/s
+    // (prefill forwards limited, decode cycles interleaved); 0 = off
+    double decode_min_tps = 0;
     int profile = 0;  // 0 off, 1 events, 2 cycle stats only
     std::uint32_t sys_min = 2048;
     bool lcp_on = true;
@@ -324,7 +348,7 @@ public:
     // Queue a built job and wait until the main thread has answered it.
     void submitAndWait(Job& job);
     void beginBuilding() { n_building_.fetch_add(1); }
-    void endBuilding() { n_building_.fetch_sub(1); }
+    void endBuilding();
     struct Health {
         std::uint32_t active = 0;
         std::size_t queued = 0;
@@ -406,9 +430,10 @@ private:
     void flushOut(Slot& sl);
     bool startJob(Slot& sl, Job& job);
     std::size_t chunkLen(const Slot& sl) const;
+    std::vector<DecodeFloor::SlotTok> floorProtected() const;
     void maybeSplitCkpt(Slot& sl, DevPtr hid_row);
     void prefillStep(Slot& sl);
-    void prefillGroup(Slot& first);
+    std::size_t prefillGroup(Slot& first, std::size_t row_budget);
     void finishPrefill(Slot& sl);
     std::uint32_t pickDrafts(std::span<Slot* const> act);
     void decodeCycle(std::span<Slot* const> act_in);
@@ -454,9 +479,20 @@ private:
     std::vector<std::int32_t> free_pages_;
     std::uint32_t pool_pages_ = 0;
     std::array<qwen35::DraftTiming, gdn_max_seg + 1> timing_{};
+    // WHIRL_SLOT_DRAFTS=2: cycle time per number of decoding slots, global acceptance pool
+    std::array<qwen35::CycleCost, gdn_max_seg + 1> ccost_{};
+    std::array<bool, gdn_max_seg + 1> ccost_primed_{};
+    qwen35::DraftAccept dpool_{};
     std::unique_ptr<CycleProf> prof_;
     std::uint32_t n_cycles_ = 0;
+    // most rows of one batched verify (ServerModel::verifyRows: 16, or 32 with the wide GEMV path)
+    std::uint32_t vrows_ = max_small_batch;
     std::uint32_t prev_nd_ = 0;
+    // decode floor bookkeeping (main thread)
+    DecodeFloor floor_;
+    TimePoint floor_epoch_{};
+    TimePoint floor_log_t_{};
+    std::uint64_t stat_floor_waits_ = 0, stat_floor_periods_ = 0;
     // sampling buffers
     DevPtr samp_dev_ = 0, big_dev_ = 0;
     std::vector<std::uint8_t> samp_host_, big_host_;
@@ -487,6 +523,7 @@ private:
     std::vector<KvArr> kv_arrays_;
     std::vector<tier::Span> tier_spans_;
     bool tier_wake_ = false;
+    std::uint64_t wake_seq_ = 0;  // under q_mutex_: bumped by a queued request, a finished build, the tier IO thread
     std::uint64_t stat_spill_waits_ = 0;
     std::vector<QBatch> quarantine_;
     std::uint64_t stat_cow_pages_ = 0;

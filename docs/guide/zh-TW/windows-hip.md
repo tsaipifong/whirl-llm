@@ -2,7 +2,7 @@
 
 # Windows 上的 HIP
 
-**對誰有幫助：**任何在 Windows 上撰寫或執行 HIP 程式碼的人——kernel 作者、使用或貢獻 llama.cpp ROCm/HIP 後端的人、移植 Linux ROCm 工具的人，以及 AMD GPU 明明還有大量記憶體卻「記憶體不足」的人。以下大多數內容不在 AMD 的文件裡；每一項都是在我們的機器上量測所得，並註明觀察到的條件。
+**對誰有幫助**：任何在 Windows 上撰寫或執行 HIP 程式碼的人——kernel 作者、使用或貢獻 llama.cpp ROCm/HIP 後端的人、移植 Linux ROCm 工具的人，以及 AMD GPU 明明還有大量記憶體卻「記憶體不足」的人。以下大多數內容不在 AMD 的文件裡；每一項都是在我們的機器上量測所得，並註明觀察到的條件。
 
 ## <a id="env"></a>0. 這些發現的來源環境
 
@@ -23,8 +23,8 @@ R9700 透過 USB4 連接。標記 **[eGPU]** 的發現取決於這條連結，�
 在 Linux 上，HIP 架在 ROCr 與 KFD 核心驅動程式之上。在 Windows 上，HIP 架在 WDDM 底下 AMD 的 **PAL**（Platform Abstraction Library）之上。我們碰到的後果：
 
 - **Linux 工具不存在。**`rocprof`、`rocminfo`、`omniperf`/`rocprof-compute` 都無法使用。沒有可以附加到 HIP 行程的硬體計數器效能分析工具。你得自己建構量測方式（第 3 節）。
-- **錯誤訊息來自 PAL。**設定 `AMD_LOG_LEVEL=1` 時，runtime 會把自己的錯誤印到 stderr，內容會提到 `palvirtual.cpp`。沒設定時，應用程式通常只顯示籠統的失敗（`hipErrorLaunchFailure`、llama.cpp 的 `ROCm error: unspecified launch failure`、WHIRL 的 `HipFailed`）。**任何東西失敗時，先設定 `AMD_LOG_LEVEL=1`。**
-- **Linux 專屬的建議無法套用。**例子：有人回報在 Linux/ROCm 上，這張卡的 decode（逐 token 生成）迴圈每步會在約 28 與約 36 ms 之間交替，用 `GPU_MAX_HW_QUEUES=1` 修正（KFD 硬體佇列分配問題）。我們在 Windows 上量測，每次執行都用新的行程，有無該變數交錯進行：
+- **錯誤訊息來自 PAL**。設定 `AMD_LOG_LEVEL=1` 時，runtime 會把自己的錯誤印到 stderr，內容會提到 `palvirtual.cpp`。沒設定時，應用程式通常只顯示籠統的失敗（`hipErrorLaunchFailure`、llama.cpp 的 `ROCm error: unspecified launch failure`、WHIRL 的 `HipFailed`）。**任何東西失敗時，先設定 `AMD_LOG_LEVEL=1`。**
+- **Linux 專屬的建議無法套用**。例子：有人回報在 Linux/ROCm 上，這張卡的 decode（逐 token 生成）迴圈每步會在約 28 與約 36 ms 之間交替，用 `GPU_MAX_HW_QUEUES=1` 修正（KFD 硬體佇列分配問題）。我們在 Windows 上量測，每次執行都用新的行程，有無該變數交錯進行：
 
   | 執行（未註明者為 R9700） | 不設定 | 設定 `GPU_MAX_HW_QUEUES=1` |
   |---|---|---|
@@ -66,12 +66,12 @@ Kernel 引數上限為 4 KB。我們分段的 DeltaNet kernel 以傳值方式傳
 
 ## <a id="timing"></a>3. 沒有效能分析工具時的計時與 profile
 
-- **在 null stream 上的 `hipEvent` 計時偏低。**我們最早的 kernel 計時來自記錄在 null stream 上的 event，結果一直偏小。請在同步過的區段前後使用主機端牆鐘時間，或在明確指定的 stream 上使用 event，且兩個 event 之間要有足夠的工作量。
-- **每個 op 一個 event 會扭曲被量測的對象。**每個運算一個 event 的 profiler 模式讓 decode 從 34 掉到 14 tok/s，並讓 server 的一個 decode 週期從 44 ms 拉長到 74 ms；它還把 MTP 草擬時間算到 embedding op 頭上。每週期三個 event（MTP 開始、驗證開始、驗證結束）的粗略模式，在 MoE 模型上仍有約 2.5% 的成本。profile 只用來找出*比例*，絕不用來回報速度，做 A/B 執行時要關掉。
-- **剔除法（knockout）。**對 decode 而言，event 扭曲太大，因此我們建構跳過某一類 kernel 的變體並量測差值（例如，一次 41.65 ms 的 16 列驗證，拿掉 DeltaNet step + snapshot 少 4.6 ms，拿掉 attention 少 1.2 ms，拿掉 RMSNorm+量化少 1.0 ms）。
-- **獨立探測程式。**Kernel 實驗在一個小型主機程式中執行：它載入 code object，使用從 GGUF 抽出的真實權重，將各變體交錯執行 6–12 輪，回報最小/中位數/最大值，並把每個變體的輸出與正式版 kernel 逐位元組比對。
-- **在探測程式中避開快取。**R9700 有 64 MB 的 Infinity Cache（8060S 則有 32 MB 的 MALL）。重複讀取同一個權重矩陣的探測程式，量到的是快取頻寬。請輪流使用總量超過 512 MB 的多份副本（我們在 R9700 上用 ≥ 512 MB，在 8060S 上用 > 2 GB）。
-- **工作管理員的「Compute」圖不會顯示 HIP 工作。**GPU 滿載時它仍是平的。基準測試期間 VRAM 圖的鋸齒狀，是每個 prompt 都重新載入模型造成的，不是洩漏。請用 AMD Software 的使用率與功耗讀數，或看 tok/s。
+- **在 null stream 上的 `hipEvent` 計時偏低**。我們最早的 kernel 計時來自記錄在 null stream 上的 event，結果一直偏小。請在同步過的區段前後使用主機端牆鐘時間，或在明確指定的 stream 上使用 event，且兩個 event 之間要有足夠的工作量。
+- **每個 op 一個 event 會扭曲被量測的對象**。每個運算一個 event 的 profiler 模式讓 decode 從 34 掉到 14 tok/s，並讓 server 的一個 decode 週期從 44 ms 拉長到 74 ms；它還把 MTP 草擬時間算到 embedding op 頭上。每週期三個 event（MTP 開始、驗證開始、驗證結束）的粗略模式，在 MoE 模型上仍有約 2.5% 的成本。profile 只用來找出*比例*，絕不用來回報速度，做 A/B 執行時要關掉。
+- **剔除法（knockout**）。對 decode 而言，event 扭曲太大，因此我們建構跳過某一類 kernel 的變體並量測差值（例如，一次 41.65 ms 的 16 列驗證，拿掉 DeltaNet step + snapshot 少 4.6 ms，拿掉 attention 少 1.2 ms，拿掉 RMSNorm+量化少 1.0 ms）。
+- **獨立探測程式**。Kernel 實驗在一個小型主機程式中執行：它載入 code object，使用從 GGUF 抽出的真實權重，將各變體交錯執行 6–12 輪，回報最小/中位數/最大值，並把每個變體的輸出與正式版 kernel 逐位元組比對。
+- **在探測程式中避開快取**。R9700 有 64 MB 的 Infinity Cache（8060S 則有 32 MB 的 MALL）。重複讀取同一個權重矩陣的探測程式，量到的是快取頻寬。請輪流使用總量超過 512 MB 的多份副本（我們在 R9700 上用 ≥ 512 MB，在 8060S 上用 > 2 GB）。
+- **工作管理員的「Compute」圖不會顯示 HIP 工作**。GPU 滿載時它仍是平的。基準測試期間 VRAM 圖的鋸齒狀，是每個 prompt 都重新載入模型造成的，不是洩漏。請用 AMD Software 的使用率與功耗讀數，或看 tok/s。
 
 ## <a id="memory"></a>4. 記憶體
 
@@ -85,7 +85,7 @@ PAL failed to submit CMD! result:-5
 ggml-cuda.cu:107: ROCm error
 ```
 
-在 llama.cpp 中有兩件事會掩蓋原因：它的 logger 是非同步佇列，因此 `GGML_ABORT` 可能丟掉指出失敗呼叫的那幾行（`AMD_LOG_LEVEL=1` 會把 HIP 的錯誤直接印到 stderr，abort 後依然留存）；而且 HIP 後端不回報最大緩衝區大小，因此配置器會把整個模型塞進一個緩衝區。**修正：**限制單一緩衝區大小，讓載入器把它們切開（我們在本地用了每個緩衝區 8192 MiB 的上限）。這台機器上先前的四個診斷（BIOS 保留記憶體、記憶體故障、僅限 ROCm 的 bug、KV 量化）都是錯的，因為它們都假設是容量問題。WHIRL 以 tensor 群組為單位配置權重，從不要求一整塊巨大的記憶體。
+在 llama.cpp 中有兩件事會掩蓋原因：它的 logger 是非同步佇列，因此 `GGML_ABORT` 可能丟掉指出失敗呼叫的那幾行（`AMD_LOG_LEVEL=1` 會把 HIP 的錯誤直接印到 stderr，abort 後依然留存）；而且 HIP 後端不回報最大緩衝區大小，因此配置器會把整個模型塞進一個緩衝區。**修正**：限制單一緩衝區大小，讓載入器把它們切開（我們在本地用了每個緩衝區 8192 MiB 的上限）。這台機器上先前的四個診斷（BIOS 保留記憶體、記憶體故障、僅限 ROCm 的 bug、KV 量化）都是錯的，因為它們都假設是容量問題。WHIRL 以 tensor 群組為單位配置權重，從不要求一整塊巨大的記憶體。
 
 ### <a id="mmap"></a>4.2 從記憶體映射檔案載入會失敗
 
@@ -97,7 +97,7 @@ llama.cpp 的 ROCm 版本預設以 mmap 載入；在這個堆疊上，載入期�
 
 - runtime 回報支援 VMM，粒度 64 KiB；
 - 對映射範圍做 `hipMemcpy` 正常；
-- **kernel 只看得到映射進該範圍的第一個實體配置。**寫入由第二個實體 handle 支撐之頁面的資料會遺失，部分執行中 GPU 還會發生 fault。
+- **kernel 只看得到映射進該範圍的第一個實體配置**。寫入由第二個實體 handle 支撐之頁面的資料會遺失，部分執行中 GPU 還會發生 fault。
 
 我們的解讀：WDDM 的駐留機制只讓 kernel 引數所參照的那個配置常駐。在 R9700 上執行這個探測時，同一張卡上正在計時的基準測試行程也跟著 fault——絕對不要在正被量測的 GPU 上執行探測程式。我們改為實作真正的頁表（256 token 一頁；[kv-and-caching.md](kv-and-caching.md)）。查表成本為 decode 時間的 0.3–0.5%。
 
@@ -105,10 +105,10 @@ llama.cpp 的 ROCm 版本預設以 mmap 載入；在這個堆疊上，載入期�
 
 有兩次，在 R9700 上已有一個模型行程執行時，又啟動了第二個模型行程（各約 15+ GiB）。WDDM 沒有讓任何一個配置失敗；它把**兩個**行程的部分記憶體都移到共享系統記憶體（其中一個顯示 11.6 GiB 中有 7.2 GiB 為共享），兩者都慢到幾乎停擺約 20 分鐘，直到被終止。那段期間的每一筆量測都無效。我們現在採用的分層防護：
 
-1. **執行檔中的具名 mutex。**選定裝置後，WHIRL 會取得 `Local\whirl-gpu-<device index>`。行程結束或崩潰時 Windows 會釋放它。第二個實例會等待（每 30 s 印一則訊息）直到逾時（預設 1800 s），然後失敗。有明確的覆寫選項供刻意共用時使用；量測時不要用它。
-2. **每個啟動腳本中的檔案鎖。**mutex 只存在於新的執行檔中，而第二次事件牽涉的是舊執行檔。所有腳本都以共享模式 0（`FileShare.None`）開啟一個鎖定檔，並在整個生命週期內持有；第二個啟動器會等待。取得鎖之後，啟動器還會等到沒有任何引擎行程存活（殘留行程），最多 10 分鐘。子行程會繼承一個環境標記，避免已上鎖的腳本樹自己卡死自己。PowerShell 與 Python 啟動器彼此互鎖（雙向都測過）。
-3. **啟動下一個背景工作前，確認上一個已經結束。**兩次事件都源自只讀了部分日誌就假設背景工作已完成。
-4. **只終止你自己記錄下來的 PID。**曾經依行程名稱終止等待中的行程，結果把另一位使用者不相干的等待工作一併砍掉。
+1. **執行檔中的具名 mutex**。選定裝置後，WHIRL 會取得 `Local\whirl-gpu-<device index>`。行程結束或崩潰時 Windows 會釋放它。第二個實例會等待（每 30 s 印一則訊息）直到逾時（預設 1800 s），然後失敗。有明確的覆寫選項供刻意共用時使用；量測時不要用它。
+2. **每個啟動腳本中的檔案鎖**。mutex 只存在於新的執行檔中，而第二次事件牽涉的是舊執行檔。所有腳本都以共享模式 0（`FileShare.None`）開啟一個鎖定檔，並在整個生命週期內持有；第二個啟動器會等待。取得鎖之後，啟動器還會等到沒有任何引擎行程存活（殘留行程），最多 10 分鐘。子行程會繼承一個環境標記，避免已上鎖的腳本樹自己卡死自己。PowerShell 與 Python 啟動器彼此互鎖（雙向都測過）。
+3. **啟動下一個背景工作前，確認上一個已經結束**。兩次事件都源自只讀了部分日誌就假設背景工作已完成。
+4. **只終止你自己記錄下來的 PID**。曾經依行程名稱終止等待中的行程，結果把另一位使用者不相干的等待工作一併砍掉。
 
 ### <a id="shared-usage"></a>4.5 Pinned host 記憶體會被回報為「Shared Usage」
 
@@ -126,6 +126,8 @@ Windows 提供每個行程、每個介面卡的 GPU 記憶體計數器（Dedicat
 
 直接寫入 `hipHostMalloc` 記憶體（零複製）的 kernel，在這台機器上資料從未真正落到主機記憶體中。因此 WHIRL 所有主機↔裝置的傳輸都在非阻塞 stream 上使用 `hipMemcpyAsync`。我們尚未在直接 PCIe 連接的 R9700 上驗證這點；在那種環境下應視為未驗證，而不是壞掉。
 
+這裡講的是 kernel **寫入**主記憶體。kernel **讀取** pinned 主記憶體用於 token embedding（`WHIRL_EMBD_HOST`，自 0.1.3 起 server 預設開啟）；輸出與放在 VRAM 時逐位元相同。
+
 ### 4.8 `hipMemGetInfo` 看不到 WDDM 計入的所有東西
 
 - 建立一個非阻塞 stream 與 pinned 區域，讓 `hipMemGetInfo` 的可用記憶體減少 12.8 MiB，但 WDDM 的專用計數器增加了約 60 MiB。請在建立所有 stream 與輔助緩衝區*之後*才決定 VRAM 池的大小，並保留餘裕。
@@ -134,19 +136,19 @@ Windows 提供每個行程、每個介面卡的 GPU 記憶體計數器（Dedicat
 
 ### 4.9 監控中的 GPU 識別碼在重新開機後會改變
 
-監控程式以介面卡 LUID 作為 GPU 的鍵值。**LUID 在重新開機後會改變。**我們的報告腳本仍以舊 LUID 過濾，結果找到零筆樣本，卻印出「all runs in dedicated VRAM」。現在它在沒看到樣本時會失敗，並印出它實際看到的 LUID。規則：監控檢查在輸入為空時必須失敗。
+監控程式以介面卡 LUID 作為 GPU 的鍵值。**LUID 在重新開機後會改變**。我們的報告腳本仍以舊 LUID 過濾，結果找到零筆樣本，卻印出「all runs in dedicated VRAM」。現在它在沒看到樣本時會失敗，並印出它實際看到的 LUID。規則：監控檢查在輸入為空時必須失敗。
 
 ## <a id="streams"></a>5. Stream、複製與同步
 
-- **同步的 `hipMemcpy` 會清空佇列。**在每個 MTP 草稿步驟前用 `hipMemcpy` 上傳幾個 token id，會等待所有已排入佇列的 GPU 工作，使 GPU 每個週期閒置四次。改把 id 當作 kernel 引數傳入（一個小型傳值 struct）而不複製，端到端提升 +5%。規則：每步的小資料放進 kernel 引數；裝置端自行寫入下一步需要的結果（argmax 把下一個 token 與位置寫進裝置記憶體）。
-- **`hipDeviceSynchronize` 會等待每一個 stream，包括背景複製。**非阻塞 stream 上的複製不會阻塞 `hipStreamSynchronize(main)`（0.00 ms），也不會阻塞小型的 null-stream `hipMemcpy`（排入 6000 個複製時為 0.57 ms），但 `hipDeviceSynchronize` 會等它們全部完成。WHIRL 有了背景層 stream 之後，server 中每一次全裝置同步都變成停頓，因此全部改為 stream 同步。
-- **HIP graph 在 Windows 上毫無助益。**擷取 decode 步驟：早期為 28.87 vs 28.81 ms/token，後來為 27.81 vs 27.79 ms。主機端排入佇列（每步約 600–740 次 launch，耗時 0.4–0.7 ms）本來就被 GPU 執行時間遮蓋。graph 路徑保留為選項。
-- **Kernel 啟動（launch）開銷確實存在但很小。**每次 launch 有約 2.8 µs 的頭尾開銷（純讀取 kernel 在 50 MB 矩陣上達到 605 GB/s，但在 1 GB 的 output head 上達到 626 GB/s）。以每 token 約 740 次 launch 計，值得把相同輸入的矩陣融合成一次 launch（[kernels.md](kernels.md#grouped)），但不值得用 graph。
+- **同步的 `hipMemcpy` 會清空佇列**。在每個 MTP 草稿步驟前用 `hipMemcpy` 上傳幾個 token id，會等待所有已排入佇列的 GPU 工作，使 GPU 每個週期閒置四次。改把 id 當作 kernel 引數傳入（一個小型傳值 struct）而不複製，端到端提升 +5%。規則：每步的小資料放進 kernel 引數；裝置端自行寫入下一步需要的結果（argmax 把下一個 token 與位置寫進裝置記憶體）。
+- **`hipDeviceSynchronize` 會等待每一個 stream，包括背景複製**。非阻塞 stream 上的複製不會阻塞 `hipStreamSynchronize(main)`（0.00 ms），也不會阻塞小型的 null-stream `hipMemcpy`（排入 6000 個複製時為 0.57 ms），但 `hipDeviceSynchronize` 會等它們全部完成。WHIRL 有了背景層 stream 之後，server 中每一次全裝置同步都變成停頓，因此全部改為 stream 同步。
+- **HIP graph 在 Windows 上毫無助益**。擷取 decode 步驟：早期為 28.87 vs 28.81 ms/token，後來為 27.81 vs 27.79 ms。主機端排入佇列（每步約 600–740 次 launch，耗時 0.4–0.7 ms）本來就被 GPU 執行時間遮蓋。graph 路徑保留為選項。
+- **Kernel 啟動（launch）開銷確實存在但很小**。每次 launch 有約 2.8 µs 的頭尾開銷（純讀取 kernel 在 50 MB 矩陣上達到 605 GB/s，但在 1 GB 的 output head 上達到 626 GB/s）。以每 token 約 740 次 launch 計，值得把相同輸入的矩陣融合成一次 launch（[kernels.md](kernels.md#grouped)），但不值得用 graph。
 
 ## <a id="limits"></a>6. Launch 限制
 
-- **Grid 的 y 與 z 上限為 65,536 個 block。**把 248,320 列 output head 放在 y 軸的 kernel 回傳了 `HipFailed`。請把大的維度放在 x。
-- **每個 workgroup 的 LDS 超過約 41 KB 時，佔用率（occupancy）從每個 SIMD 16 個 wave 降到 6 個**，這發生在一個 multi-query attention 變體上，而且它變得更慢。gfx12 上每個 workgroup 的 LDS 為 64 KB，但全部用掉會犧牲並行度。
+- **Grid 的 y 與 z 上限為 65,536 個 block**。把 248,320 列 output head 放在 y 軸的 kernel 回傳了 `HipFailed`。請把大的維度放在 x。
+- **每個 workgroup 的 LDS 超過約 41 KB 時，佔用率（occupancy）從每個 SIMD 16 個 wave 降到 6 個**，這發生在一個 multi-query attention 變體上，而且它變得更慢。gfx12 上一個 workgroup 最多可用 WGP 128 KiB 中的 64 KiB；36–64 KiB 的 block 仍是每個 WGP 同時跑 2 個。**不要依 `hipOccupancyMaxActiveBlocksPerMultiprocessor` 決定 kernel 大小**——它以每 WGP 64 KiB 計算，把受 LDS 限制的佔用率砍半（[pitfalls KERN-20b](pitfalls.md#kern-20b)）。
 
 ## <a id="devices"></a>7. 在雙 GPU 機器上選對 GPU
 
@@ -158,7 +160,7 @@ Windows 提供每個行程、每個介面卡的 GPU 記憶體計數器（Dedicat
 
 每個工具都必須明確選擇 GPU；預設會落在內顯上。WHIRL 依名稱／架構選擇（每個版本都有預設裝置；`WHIRL_DEVICE` 可覆寫）。注意 Vulkan 對 RDNA 回報的 warp size 是 64，而 RDNA 上的 HIP wave 是 32 個 lane；WHIRL 所有的 reduction 與 shuffle 都是為 wave32 撰寫的。
 
-**[8060S] 兩張 GPU 並非彼此獨立。**8060S 與 CPU 共用電源與散熱。在 R9700 上的建置或基準測試（會加重 CPU 負載）在某次執行中讓 8060S 的 decode 慢了 11–18%。在 8060S 上計時時，絕對不要同時執行其他任何東西。
+**[8060S] 兩張 GPU 並非彼此獨立**。8060S 與 CPU 共用電源與散熱。在 R9700 上的建置或基準測試（會加重 CPU 負載）在某次執行中讓 8060S 的 decode 慢了 11–18%。在 8060S 上計時時，絕對不要同時執行其他任何東西。
 
 ## <a id="egpu"></a>8. eGPU（USB4）的影響 **[eGPU]**
 

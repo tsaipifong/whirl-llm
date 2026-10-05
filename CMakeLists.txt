@@ -7,7 +7,7 @@
 cmake_minimum_required(VERSION 3.24)
 # The project version is the single version source: --version texts, the
 # Windows VERSIONINFO resources and the release package name derive from it.
-project(whirl VERSION 0.1.0 LANGUAGES CXX)
+project(whirl VERSION 0.1.3 LANGUAGES CXX)
 if(MSVC)
   enable_language(RC)
   # static C++ runtime (/MT): the executables need no Visual C++ redistributable
@@ -115,12 +115,16 @@ if(WHIRL_WITH_HIP)
 
   add_library(whirl_hip STATIC
     src/hip/hip_runtime.cpp
+    src/hip/wddm_mem.cpp
     ${CMAKE_BINARY_DIR}/kernels/embedded_objects.cpp
     ${WHIRL_EMBED_SOURCES})
   target_include_directories(whirl_hip PUBLIC ${CMAKE_SOURCE_DIR}/include)
   target_include_directories(whirl_hip SYSTEM PRIVATE "${WHIRL_HIP_ROOT}/include")
   target_compile_definitions(whirl_hip PRIVATE __HIP_PLATFORM_AMD__)
   target_link_libraries(whirl_hip PUBLIC "${WHIRL_AMDHIP_LIB}")
+  if(WIN32)
+    target_link_libraries(whirl_hip PUBLIC dxgi)
+  endif()
   target_compile_definitions(whirl PUBLIC WHIRL_WITH_HIP=1)
   target_link_libraries(whirl PUBLIC whirl_hip)
 endif()

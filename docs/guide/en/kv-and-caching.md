@@ -115,7 +115,7 @@ contexts with decoys). An earlier QA version that asked for the answer only was 
 
 ### 3.2 Speed — the surprise
 
-| Plain decode, ms/token (CLI, same binary) | 16k | 64k | 128k |
+| Plain decode, ms/token (CLI, same binary, before `kv_dq8`) | 16k | 64k | 128k |
 |---|---|---|---|
 | f16 | 30.0 | 35.8–35.9 | 42.0–42.1 |
 | q8h | 30.3 (+1.0%) | 37.1–37.2 (+3.6%) | 44.2–44.3 (+5.2%) |
@@ -131,6 +131,10 @@ Halving KV bytes made decode **slower**: the int8 dequantization of K inside the
 kernel costs more than the bandwidth it saves (decode attention is not purely bandwidth-bound once
 dequant is added). The decode cost is entirely in K; quantizing only V (`q8v`) decodes as fast as
 f16 or slightly faster. The prefill cost is in V (the PV product), where q8v and q8h pay the same.
+
+**Update (0.1.3):** with the magic-number K conversion (`kv_dq8`, [kernels.md](kernels.md#decode-attn))
+the dequantization cost is gone: q8h decode at 125,853 tokens went from 24.09 to 25.99 tok/s (+7.9%,
+bit-identical).
 
 ### <a id="kv-auto"></a>3.3 The automatic policy
 
@@ -165,9 +169,12 @@ Lossless VRAM savers considered for keeping f16: prefill batch 4096 → 3072 sav
 speed cost (3072 vs 4096: 4k +1.2%, 16k −0.7%, 64k 0.0%; 2048 costs 1.3–2.0%); aliasing scratch
 buffers (estimated ≤ 0.75 GiB, not done); halving checkpoints (0.78 GiB, hurts prefix caching).
 Together not enough for f16, so q8v. Also measured and rejected: prefill batch 8192 (no faster on
-long prompts, which are attention-bound; +2.1 GiB), embedding or checkpoints in pinned host memory
-(checkpoint save/load took ~40 ms as 96 small copies at ~3.75 GB/s, agent turns −25%; and pinned
-memory shows up as Shared Usage, [windows-hip.md](windows-hip.md#shared-usage)).
+long prompts, which are attention-bound; +2.1 GiB) and checkpoints in pinned host memory
+(checkpoint save/load took ~40 ms as 96 small copies at ~3.75 GB/s, agent turns −25%). The token
+embedding in pinned host memory was first rejected only because pinned memory shows up as Shared
+Usage ([windows-hip.md](windows-hip.md#shared-usage)); since 0.1.3 the server keeps it in pinned host
+memory by default and declares its size (`%LOCALAPPDATA%\whirl\pinned\<pid>.txt`) so the monitor
+subtracts it (`WHIRL_EMBD_HOST=0` keeps it in VRAM; outputs are bitwise identical either way).
 
 Server defaults that follow: dense 27B → `--parallel 4`, ≤ 131,072 tokens per request
 (`--ctx-per-slot`, max 262,144), q8v. MoE → f16, 131,072 per request, pool ~341k tokens.
@@ -232,9 +239,23 @@ reply diverges mid-turn and the next turn falls back to the previous `prompt-end
 prefill lost). Fixing it would mean feeding generated tokens instead of re-tokenized text, which
 makes cached and uncached inputs differ — not worth it. llama.cpp has the same behavior.
 
-**Cached vs uncached is not bit-identical by design:** reused history KV was computed by decode
-kernels, re-prefilled history by prefill GEMMs. The diagnostic mode re-prefills after each cache
-hit and requires KL ≤ 1e-2 and identical top-1 (27B KL ≤ 9e-5 in practice).
+**Which cache hits are bit-identical to a cold run, and which are not:**
+
+| Reuse point | Bit-identical to a cold run? | Why |
+|---|---|---|
+| `system` checkpoint (B ≥ 2048) | **yes** | a cold run is also split at B, so both run the same chunks (§6) |
+| `prefix` checkpoint | **yes** | used only if its position is also a chunk start in the new request's own schedule (§6) |
+| `prompt-end` / `think-open`, **same prompt** | **yes** | the state was produced by the same prefill chunks |
+| RAM / SSD tier restore | **yes** | the same bytes are copied back (§8) |
+| `gen-end` (next turn of a conversation) | **no, by design** | the history's KV **and DeltaNet state** were produced by decode / verify kernels (int8 GEMV, decode attention, `gdn_step`), not by prefill GEMMs |
+| `prompt-end` / `think-open` followed by more tokens | **no, by design** | the continuation's chunk boundaries differ from a cold run's |
+
+The difference is not limited to "the generated tokens' KV": every DeltaNet layer's recurrent state
+carries the whole history, so a decode-produced state differs from a prefill-produced one at every
+later position. Speed mode widens the gap (a cold run's prefill uses fp8 / f16 WMMA, the reused
+history came from the exact int8 decode path). The diagnostic mode (`WHIRL_PREFIX_CACHE_VERIFY=1`)
+re-prefills after each cache hit and requires KL ≤ 1e-2 and identical top-1 (27B KL ≤ 9e-5 in
+practice); it does not yet assert bit equality for the "yes" rows.
 
 ## <a id="system-ckpt"></a>6. System-prompt checkpoints: new sessions skip the prefill
 
@@ -301,7 +322,7 @@ context + 300 / + 1000 new tokens went from 980 → 1681 ms and 1548 → 2230 ms
 
 The adopted design keeps the **schedule** at 1024-token chunks (checkpoint positions unchanged) and
 **executes** consecutive whole chunks in one forward of up to 2048 rows (+256 tail) when no other
-slot is decoding, never across a checkpoint boundary. This relies on logits being independent of
+slot is decoding or the decode floor is off ([server.md](server.md#batching)), never across a checkpoint boundary. This relies on logits being independent of
 forward size — verified: last-token logits identical for batch 1024 / 2048 / 4096, both models,
 MTP on/off.
 
@@ -335,7 +356,16 @@ then KV page j at `nck × ck_stride + j × page_bytes` (13.0 MiB per page for q8
   small readbacks are never queued behind a long transfer. Kernels writing host memory directly
   (zero-copy) did not work on this machine ([windows-hip.md](windows-hip.md#zero-copy)).
 - Device-wide synchronization had to go: `hipDeviceSynchronize` waits for tier copies.
-- Default size: max(8 GiB, one full-length f16 session + checkpoints) = **9 GiB** for 27B at 128k.
+- Default size (`src/tier/ram_size.h`): **1/4 of physical RAM** (nearest GiB), at least the old
+  minimum max(8 GiB, one full-length f16 session + checkpoints) = 9 GiB for 27B at 128k, at most
+  32 GiB (the minimum wins over the cap), and at most half of the RAM available at startup (whole GiB;
+  logged as a warning when it bites; under 1 GiB the tier is off) so pinning does not push the
+  machine into paging. **16 GiB on a 64 GB PC.** `--kv-ram-mb N` / `WHIRL_KV_RAM_MB` are used as
+  given; on an integrated GPU (shared system memory) the tier is off unless a size is given. Why: in
+  agent use (Hermes, 30–40k-token sessions, subagents) the 9 GiB default was 8.3 GiB full within an
+  hour, after which LRU entries fell back to their slower SSD copies. The startup log line
+  `kv tier: RAM tier size N MiB (reason)` shows the choice; the summary line shows the pinning time
+  (R9700 host, 64 GB: 16 GiB pinned in 3.1–3.4 s; "model ready" 13.6–14.1 s vs 11.8–12.3 s with the old 9 GiB and 10.2 s with the tier off, so the arena is still allocated up front).
   It appears as Shared Usage in GPU counters; the server declares its pinned size so monitoring can
   subtract it.
 

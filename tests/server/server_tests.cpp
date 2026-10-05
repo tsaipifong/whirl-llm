@@ -19,7 +19,9 @@
 #include "whirl/json.h"
 #include "whirl/tokenizer.h"
 
+#include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -536,6 +538,75 @@ ServerSetup baseSetup(bool mtp = true) {
     return su;
 }
 
+// Read-only compatibility endpoints (GET /props, /version) and the quiet 404 of
+// other server types' probe paths.
+void testCompatEndpoints() {
+    ServerSetup su = baseSetup();
+    su.eo.model_name = "mock-alias";
+    su.eo.model_file = "models/sub\\mock-Q4_K_M.gguf";  // directories must never reach the response
+    TestServer srv(su);
+    for (const char* p : {"/props", "/v1/props"}) {
+        const auto r = srv.get(p);
+        CHECK_EQ(r.status, 200);
+        const json::Value v = parseBody(r);
+        CHECK(v.isObject());
+        if (!v.isObject()) continue;
+        const json::Value* dg = v.get("default_generation_settings");
+        CHECK(dg && dg->isObject());
+        if (dg && dg->isObject()) {
+            const json::Value* n_ctx = dg->get("n_ctx");
+            CHECK(n_ctx && n_ctx->asInt() == static_cast<std::int64_t>(su.mc.slot_ctx));
+            const json::Value* m = dg->get("model");
+            CHECK(m && m->isString() && m->asString() == "mock-alias");
+        }
+        const json::Value* ts = v.get("total_slots");
+        CHECK(ts && ts->asInt() == static_cast<std::int64_t>(su.mc.parallel));
+        const json::Value* mp = v.get("model_path");
+        CHECK(mp && mp->isString() && mp->asString() == "mock-Q4_K_M.gguf");
+        const json::Value* al = v.get("model_alias");
+        CHECK(al && al->isString() && al->asString() == "mock-alias");
+        const json::Value* mod = v.get("modalities");
+        CHECK(mod && mod->isObject() && mod->get("vision") && mod->get("vision")->isBool());
+        const json::Value* bi = v.get("build_info");
+        CHECK(bi && bi->isString() && bi->asString().starts_with("whirl "));
+        CHECK(r.body.find("models/") == std::string::npos && r.body.find('\\') == std::string::npos);
+    }
+    CHECK_EQ(srv.post("/props", "{}").status, 405);
+    const auto ver = srv.get("/version");
+    CHECK_EQ(ver.status, 200);
+    const json::Value vv = parseBody(ver);
+    const json::Value* vs = vv.isObject() ? vv.get("version") : nullptr;
+    const json::Value* vn = vv.isObject() ? vv.get("name") : nullptr;
+    CHECK(vs && vs->isString() && !vs->asString().empty());
+    CHECK(vn && vn->isString() && vn->asString() == "whirl");
+    if (vs && vs->isString()) {
+        const json::Value pv = parseBody(srv.get("/props"));
+        const json::Value* bi = pv.isObject() ? pv.get("build_info") : nullptr;
+        CHECK(bi && bi->isString() && bi->asString() == "whirl " + vs->asString());
+    }
+    // probes for LM Studio / Ollama: 404 without a warning line
+    g_log.clear();
+    for (int i = 0; i < 3; ++i) {
+        CHECK_EQ(srv.get("/api/v1/models").status, 404);
+        CHECK_EQ(srv.get("/api/tags").status, 404);
+    }
+    CHECK_EQ(g_log.count(" W GET /api/"), 0u);
+    CHECK(g_log.count("GET /api/tags -> 404") <= 1);
+    // an unknown path still warns
+    CHECK_EQ(srv.get("/nope-compat").status, 404);
+    CHECK_EQ(g_log.count(" W GET /nope-compat -> 404"), 1u);
+    // reasoning effort: an unknown value is a warning, not a 400; aliases and the
+    // "reasoning" object are accepted and logged as the canonical effort
+    g_log.clear();
+    const std::string q = R"({"messages":[{"role":"user","content":"q"}],"max_tokens":4,"temperature":0,)";
+    CHECK_EQ(srv.post("/v1/chat/completions", q + R"("reasoning_effort":"turbo"})").status, 200);
+    CHECK_EQ(g_log.count("unknown reasoning_effort \"turbo\" ignored"), 1u);
+    CHECK_EQ(srv.post("/v1/chat/completions", q + R"("reasoning":{"effort":"ultra"}})").status, 200);
+    CHECK_EQ(g_log.count("thinking on, reasoning_effort xhigh"), 1u);
+    CHECK_EQ(srv.post("/v1/chat/completions", q + R"("reasoning":{"enabled":false}})").status, 200);
+    CHECK_EQ(g_log.count("thinking off"), 1u);
+}
+
 void testEndpoints() {
     TestServer srv(baseSetup());
     auto h = srv.get("/health");
@@ -654,8 +725,10 @@ void testPrefixCacheMultiTurn() {
 }
 
 // concurrent requests (more than slots): every output equals its reference
-void testConcurrency(std::uint32_t parallel, std::uint32_t n_req, bool mtp) {
+void testConcurrency(std::uint32_t parallel, std::uint32_t n_req, bool mtp, double floor_tps = 0, std::uint32_t slot_drafts = 0) {
     ServerSetup su = baseSetup(mtp);
+    su.eo.decode_min_tps = floor_tps;
+    su.eo.slot_drafts = slot_drafts;
     su.mc.parallel = parallel;
     su.mc.pool_tokens = 131072;
     TestServer srv(su);
@@ -678,6 +751,271 @@ void testConcurrency(std::uint32_t parallel, std::uint32_t n_req, bool mtp) {
     CHECK_EQ(srv.model().hidMismatch(), 0u);
     const auto h = srv.get("/health");
     CHECK(h.body.find("\"busy\":false") != std::string::npos);
+}
+
+// WHIRL_SLOT_DRAFTS=2 planner (planSlotDrafts / qwen35::allocDrafts): pure, synthetic cycle times
+// T = 20 + 0.8 R + 2.5 S + 3 [R > 16] + 0.002 sum(rows_i ctx_i)
+float planTrueMs(const qwen35::CycleFeat& x) {
+    return 20.0f + 0.8f * x.rows + 2.5f * x.steps + (x.rows > 16 ? 3.0f : 0.0f) + 0.002f * x.row_ctx;
+}
+
+qwen35::CycleFeat planFeat(std::span<const DraftPlanSlot> ps, std::span<const std::uint32_t> d) {
+    qwen35::CycleFeat x;
+    std::size_t i = 0;
+    for (const DraftPlanSlot& s : ps) {
+        const std::uint32_t r = s.ng_rows > 0 ? s.ng_rows : d[i] + 1;
+        if (s.ng_rows == 0) x.steps = std::max(x.steps, static_cast<float>(d[i++]));
+        x.rows += static_cast<float>(r);
+        x.row_ctx += static_cast<float>(r) * static_cast<float>(s.pos) / 1024.0f;
+    }
+    return x;
+}
+
+void testSlotDraftPlan() {
+    qwen35::CycleCost cc;
+    std::uint64_t st = 0x9E3779B97F4A7C15ull;
+    const auto rnd = [&st](std::uint32_t lo, std::uint32_t hi) {
+        st = st * 6364136223846793005ull + 1442695040888963407ull;
+        return lo + static_cast<std::uint32_t>(st >> 33) % (hi - lo + 1);
+    };
+    for (int i = 0; i < 64; ++i) {
+        qwen35::CycleFeat x;
+        const std::uint32_t n = rnd(1, 4);
+        for (std::uint32_t k = 0; k < n; ++k) {
+            const std::uint32_t d = rnd(0, 6);
+            x.rows += static_cast<float>(d + 1);
+            x.steps = std::max(x.steps, static_cast<float>(d));
+            x.row_ctx += static_cast<float>(d + 1) * static_cast<float>(rnd(1, 64));
+        }
+        cc.observe(x, planTrueMs(x));
+    }
+    const qwen35::DraftAccept hi(0.92f), lo(0.3f);
+    std::vector<DraftPlanSlot> ps(2);
+    ps[0].acc = &hi;
+    ps[1].acc = &lo;
+    ps[0].pos = ps[1].pos = 8192;
+    const std::uint32_t U = 3, cap = 8;
+    const auto d = planSlotDrafts(ps, cc, U, cap, 16, 15);
+    CHECK(d.size() == 2 && d[0] > d[1]);                                     // uneven: more to the high-acceptance slot
+    CHECK(d[0] >= 1 && d[1] >= 1 && d[0] <= cap && d[1] <= cap);             // 1 <= d_i <= cap
+    CHECK(d[0] + d[1] + 2 <= 16);                                            // verify rows
+    const std::vector<std::uint32_t> u = {U, U};
+    const float tu = cc.predict(planFeat(ps, u)), td = cc.predict(planFeat(ps, d));
+    CHECK(hi.expected(d[0]) / td >= 0.97f * hi.expected(U) / tu - 1e-6f);    // throughput floor, both slots
+    CHECK(lo.expected(d[1]) / td >= 0.97f * lo.expected(U) / tu - 1e-6f);
+    const auto ds = planSlotDrafts(ps, cc, U, cap, 16, 5);                    // 5 snapshot sets
+    CHECK(ds[0] + ds[1] <= 5 && ds[1] >= 1);
+    // one slot: the uniform count, exactly as without the planner
+    const auto d1 = planSlotDrafts(std::span<const DraftPlanSlot>(ps.data(), 1), cc, U, cap, 16, 15);
+    CHECK(d1.size() == 1 && d1[0] == U);
+    // an n-gram slot keeps its rows and is skipped in the result
+    std::vector<DraftPlanSlot> mix = {ps[0], ps[1], DraftPlanSlot{}};
+    mix[2].ng_rows = 6;
+    mix[2].ng_e = 3.0f;
+    mix[2].pos = 4096;
+    const auto dm = planSlotDrafts(mix, cc, 2, cap, 16, 15);
+    CHECK(dm.size() == 2 && dm[0] + dm[1] + 2 + 6 <= 16 && dm[0] >= 1 && dm[1] >= 1);
+}
+
+// WHIRL_SLOT_DRAFTS=2 with one decoding slot: the same draft count every cycle as without it
+// (fixed draft count, no n-gram: the automatic choices depend on measured wall-clock times)
+void testSlotDraftsOneSlot() {
+    std::vector<std::string> nds[2];
+    std::string text[2];
+    const auto p = makePrompt(700, 42);
+    for (int m = 0; m < 2; ++m) {
+        ServerSetup su = baseSetup(true);
+        su.mc.parallel = 1;
+        su.eo.slot_drafts = m == 0 ? 0 : 2;
+        su.eo.mtp_auto = false;
+        su.eo.ngram = false;
+        su.eo.trace_nd = true;
+        TestServer srv(su);
+        g_log.clear();
+        auto r = srv.post("/v1/completions", completionBody(p, 96));
+        text[m] = completionText(r);
+        std::lock_guard<std::mutex> lk(g_log.mu);
+        for (const auto& l : g_log.lines) {
+            const std::size_t a = l.find("| nd ");
+            if (l.find("trace | cycle") != std::string::npos && a != std::string::npos)
+                nds[m].push_back(l.substr(a, l.find(" |", a + 5) - a));
+        }
+        CHECK_EQ(text[m], decode(srv.model().greedyReference(p, 96, true)));
+        CHECK_EQ(srv.model().poison(), 0u);
+    }
+    CHECK(!nds[0].empty() && nds[0] == nds[1]);
+}
+
+// decode floor bookkeeping (DecodeFloor): pure math on given times
+void testDecodeFloorMath() {
+    using ST = DecodeFloor::SlotTok;
+    {
+        DecodeFloor f(0);
+        CHECK(!f.on());
+        const ST d[1] = {{0, 7, 0}};
+        f.startPeriod(0, d);
+        CHECK(f.prefillAllowed(10, d));
+        CHECK_EQ(f.plan(1024, 4096).rows, std::size_t{4096});  // off: the whole prefill batch
+    }
+    {
+        DecodeFloor f(20);
+        CHECK(f.on());
+        // no period yet / no decoding slot: prefill always allowed
+        const ST d0[1] = {{0, 7, 0}};
+        CHECK(f.prefillAllowed(0, d0));
+        CHECK(f.prefillAllowed(0, {}));
+        f.startPeriod(0, d0);
+        // 400 ms later 2 tokens: 20 tok/s needs 8 -> decode first
+        const ST d1[1] = {{0, 7, 2}};
+        CHECK(!f.prefillAllowed(400, d1));
+        // 500 ms: 10 tokens = 20 tok/s -> prefill may run
+        const ST d2[1] = {{0, 7, 10}};
+        CHECK(f.prefillAllowed(500, d2));
+        // a second slot that starts decoding mid-period is accounted from then
+        f.startPeriod(500, d2);
+        const ST d3[2] = {{0, 7, 30}, {2, 9, 1}};
+        CHECK(f.prefillAllowed(900, d3));   // slot 2 first seen now: owes nothing yet
+        const ST d4[2] = {{0, 7, 30}, {2, 9, 1}};
+        CHECK(!f.prefillAllowed(1000, d4));  // 100 ms, 0 new tokens -> owes 2
+        const ST d5[2] = {{0, 7, 30}, {2, 9, 4}};
+        CHECK(f.prefillAllowed(1000, d5));
+        // a new request in slot 0 restarts its accounting
+        const ST d6[2] = {{0, 8, 0}, {2, 9, 12}};
+        CHECK(f.prefillAllowed(1100, d6));
+        const ST d7[2] = {{0, 8, 0}, {2, 9, 12}};
+        CHECK(!f.prefillAllowed(1300, d7));
+    }
+    {
+        // starvation guard: decode-only time per period <= 4 x its prefill time
+        DecodeFloor f(20);
+        const ST d0[1] = {{1, 3, 0}};
+        f.startPeriod(0, d0);
+        f.notePrefill(1024, 400);
+        const ST d1[1] = {{1, 3, 1}};
+        CHECK(!f.prefillAllowed(1500, d1));  // 1100 ms decode-only < 1600
+        CHECK(f.prefillAllowed(2001, d1));   // >= 1600: prefill runs although below the floor
+    }
+    {
+        // plan: row budget from the prefill rate (stall ~ gap_tokens at the floor rate), and cycles
+        DecodeFloor f(20);
+        const ST d0[1] = {{0, 1, 0}};
+        f.startPeriod(0, d0);
+        CHECK_EQ(f.plan(1024, 4096).rows, std::size_t{1024});  // no measurement yet: the oldest chunk only
+        f.notePrefill(2700, 1000);                              // 2.7 rows/ms
+        for (int i = 0; i < 20; ++i) {
+            const ST d[1] = {{0, 1, static_cast<std::uint64_t>(5 * (i + 1))}};
+            f.noteCycle(40, false, d);                          // 40 ms cycles, 5 tok/cycle
+        }
+        const DecodeFloor::Plan p = f.plan(1024, 4096);
+        CHECK_EQ(p.rows, std::size_t{1350});                    // 2.7 rows/ms * 500 ms
+        CHECK(p.reachable);
+        // k * 5 >= 20 * (0.5 + k * 0.04) -> k >= 10 / 4.2 -> 3
+        CHECK_EQ(p.cycles, 3u);
+        CHECK_EQ(f.plan(2048, 4096).rows, std::size_t{2048});   // the oldest chunk always fits
+        CHECK_EQ(f.plan(1024, 1200).rows, std::size_t{1200});   // never more than the prefill batch
+        DecodeFloor g(10);
+        g.startPeriod(0, d0);
+        g.notePrefill(2700, 1000);
+        CHECK_EQ(g.plan(1024, 4096).rows, std::size_t{2700});  // lower floor: longer forwards allowed
+    }
+    {
+        // floor out of reach (1 tok/cycle at 100 ms < 20 tok/s): flagged, cycles capped
+        DecodeFloor f(20);
+        const ST d0[1] = {{0, 1, 0}};
+        f.startPeriod(0, d0);
+        f.notePrefill(1024, 400);
+        for (int i = 0; i < 10; ++i) {
+            const ST d[1] = {{0, 1, static_cast<std::uint64_t>(i + 1)}};
+            f.noteCycle(100, false, d);
+        }
+        const DecodeFloor::Plan p = f.plan(1024, 4096);
+        CHECK(!p.reachable);
+        CHECK(p.cycles > 0);
+    }
+}
+
+// decode floor end to end (mock with simulated device time): a streaming-length
+// request keeps decoding while three long prompts prefill; outputs stay exact
+void testDecodeFloor() {
+    struct Run {
+        double main_end_ms = 0, last_other_end_ms = 0;
+        bool exact = false;
+    };
+    // reverse: the 3 prompts arrive first and the main request 60 ms later (a conversation's
+    // next turn while subagent prompts prefill): once decoding it is protected as well
+    auto run = [](double floor_tps, bool reverse) {
+        ServerSetup su = baseSetup();
+        su.mc.parallel = 4;
+        su.mc.slot_ctx = 16384;
+        su.mc.pool_tokens = 131072;
+        su.mc.prefill_us_per_row = 100;  // 1024-row chunk ~ 100 ms
+        su.mc.cycle_us = 5000;  // ~600 tok/s alone
+        su.eo.decode_min_tps = floor_tps;
+        TestServer srv(su);
+        const auto pm = makePrompt(300, 500);
+        std::vector<std::vector<std::uint32_t>> po;
+        // reverse: longer prompts, so that they still prefill for a while once the main request decodes
+        for (std::uint32_t i = 0; i < 3; ++i) po.push_back(makePrompt(reverse ? 12288 : 6144, 600 + i));
+        const std::uint32_t g_main = 250;
+        Run r;
+        std::string got_main;
+        std::vector<std::string> got(3);
+        const double t0 = nowSeconds();
+        auto main_req = [&] {
+            auto x = srv.post("/v1/completions", completionBody(pm, g_main, true));
+            got_main = streamText(x, false);
+            r.main_end_ms = (nowSeconds() - t0) * 1000.0;
+        };
+        std::thread tm;
+        if (!reverse) {
+            tm = std::thread(main_req);
+            std::this_thread::sleep_for(std::chrono::milliseconds(60));  // main is decoding
+        }
+        std::vector<std::thread> th;
+        std::vector<double> ends(3);
+        for (std::uint32_t i = 0; i < 3; ++i)
+            th.emplace_back([&, i] {
+                auto x = srv.post("/v1/completions", completionBody(po[i], 4));
+                got[i] = completionText(x);
+                ends[i] = (nowSeconds() - t0) * 1000.0;
+            });
+        if (reverse) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(60));  // the prompts are prefilling
+            tm = std::thread(main_req);
+        }
+        for (auto& t : th) t.join();
+        tm.join();
+        r.last_other_end_ms = *std::max_element(ends.begin(), ends.end());
+        bool ok = got_main == decode(srv.model().greedyReference(pm, g_main, true));
+        for (std::uint32_t i = 0; i < 3; ++i) ok = ok && got[i] == decode(srv.model().greedyReference(po[i], 4, true));
+        r.exact = ok && srv.model().poison() == 0 && srv.model().hidMismatch() == 0;
+        return r;
+    };
+    g_log.clear();
+    const Run off = run(0, false);
+    const Run on = run(150, false);
+    CHECK(g_log.count("decode floor: ") >= 1);
+    const Run rev_off = run(0, true);
+    g_log.clear();
+    const Run rev = run(150, true);
+    CHECK(off.exact);
+    CHECK(on.exact);
+    CHECK(rev_off.exact);
+    CHECK(rev.exact);
+    // off: the main request advances one cycle per (up to 4096-row) forward and ends after
+    // the prefills; on: >= 150 tok/s over the ~2 s of prefill finishes its 250 tokens first
+    if (g_verbose)
+        std::printf("    floor off: main %.0f ms, others %.0f ms; floor 150: main %.0f ms, others %.0f ms\n", off.main_end_ms,
+                    off.last_other_end_ms, on.main_end_ms, on.last_other_end_ms);
+    CHECK(off.main_end_ms > off.last_other_end_ms);
+    CHECK(on.main_end_ms < on.last_other_end_ms);
+    // reverse: the main request's prefill waits behind the older prompts' chunks; once it decodes,
+    // the floor holds their prefill back (they finish later than without a floor)
+    if (g_verbose)
+        std::printf("    reverse order: floor off: main %.0f ms, others %.0f ms; floor 150: main %.0f ms, others %.0f ms\n",
+                    rev_off.main_end_ms, rev_off.last_other_end_ms, rev.main_end_ms, rev.last_other_end_ms);
+    CHECK(g_log.count("decode floor | 150 tok/s per decoding slot (1 decoding)") >= 1);
+    CHECK(rev.last_other_end_ms > rev_off.last_other_end_ms + 100);
 }
 
 // small KV pool: idle slots are evicted (LRU) and requests still match
@@ -1152,12 +1490,21 @@ int main(int argc, char** argv) {
         {"sampler", testSampler},
         {"chat_tokens", testChatTokens},
         {"endpoints", testEndpoints},
+        {"compat_endpoints", testCompatEndpoints},
         {"greedy_reference", testGreedyMatchesReference},
         {"stream", testStreamEqualsNonStream},
         {"prefix_cache", testPrefixCacheMultiTurn},
         {"concurrency", [] { testConcurrency(4, 12, true); }},
         {"concurrency16", [] { testConcurrency(16, 24, true); }},
         {"concurrency_nomtp", [] { testConcurrency(4, 8, false); }},
+        {"concurrency_floor", [] { testConcurrency(4, 12, true, 20); }},
+        {"slot_draft_plan", testSlotDraftPlan},
+        {"slot_drafts_one_slot", testSlotDraftsOneSlot},
+        {"concurrency_slot2", [] { testConcurrency(4, 12, true, 0, 2); }},
+        {"concurrency_slot2_c2", [] { testConcurrency(2, 8, true, 0, 2); }},
+        {"concurrency16_slot2", [] { testConcurrency(16, 24, true, 0, 2); }},
+        {"decode_floor_math", testDecodeFloorMath},
+        {"decode_floor", testDecodeFloor},
         {"pool", testPoolPressure},
         {"sys_prompt", testSharedSystemPrompt},
         {"tiers", testTiers},

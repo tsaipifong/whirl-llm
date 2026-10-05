@@ -1,0 +1,83 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1070" height="530" viewBox="0 0 1070 530" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+<rect width="1070" height="530" fill="#ffffff"/>
+<defs><pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" fill="white"/><line x1="0" y1="0" x2="0" y2="6" stroke="#000" stroke-opacity="0.55" stroke-width="2.4"/></pattern></defs>
+<text x="64" y="30" font-size="19" font-weight="600" fill="#1f2328">Decode after a long context — WHIRL 0.1.3 vs llama.cpp b11214</text>
+<text x="64" y="52" font-size="12.5" fill="#57606a">tok/s, higher is better; 16k: 128 tokens after a 16,354-token code prompt, thinking off; 256k: WHIRL q8h KV vs llama-bench tg64@d262144 (plain)</text>
+<text x="226.0" y="80" font-size="13.5" font-weight="600" text-anchor="middle" fill="#1f2328">Swift-1.5 27B MXFP4 (dense)</text>
+<line x1="74" x2="378" y1="452.0" y2="452.0" stroke="#d0d7de" stroke-width="1"/>
+<text x="69" y="456.0" font-size="10.5" text-anchor="end" fill="#57606a">0</text>
+<line x1="74" x2="378" y1="380.0" y2="380.0" stroke="#d0d7de" stroke-width="1"/>
+<text x="69" y="384.0" font-size="10.5" text-anchor="end" fill="#57606a">16.0</text>
+<line x1="74" x2="378" y1="308.0" y2="308.0" stroke="#d0d7de" stroke-width="1"/>
+<text x="69" y="312.0" font-size="10.5" text-anchor="end" fill="#57606a">32.0</text>
+<line x1="74" x2="378" y1="236.0" y2="236.0" stroke="#d0d7de" stroke-width="1"/>
+<text x="69" y="240.0" font-size="10.5" text-anchor="end" fill="#57606a">48.0</text>
+<line x1="74" x2="378" y1="164.0" y2="164.0" stroke="#d0d7de" stroke-width="1"/>
+<text x="69" y="168.0" font-size="10.5" text-anchor="end" fill="#57606a">64.0</text>
+<line x1="74" x2="378" y1="92.0" y2="92.0" stroke="#d0d7de" stroke-width="1"/>
+<text x="69" y="96.0" font-size="10.5" text-anchor="end" fill="#57606a">80.0</text>
+<rect x="125.0" y="130.7" width="24.0" height="321.3" fill="#1f6feb"/>
+<text x="137.0" y="126.7" font-size="9" text-anchor="start" fill="#1f2328" transform="rotate(-90 140.0 126.7)">71.4</text>
+<rect x="151.0" y="177.9" width="24.0" height="274.1" fill="#d9480f"/>
+<text x="163.0" y="173.9" font-size="9" text-anchor="start" fill="#1f2328" transform="rotate(-90 166.0 173.9)">60.9</text>
+<text x="150.0" y="469" font-size="11.5" text-anchor="middle" fill="#1f2328">after 16k</text>
+<rect x="277.0" y="294.1" width="24.0" height="157.9" fill="#1f6feb"/>
+<text x="289.0" y="290.1" font-size="9" text-anchor="start" fill="#1f2328" transform="rotate(-90 292.0 290.1)">35.1</text>
+<rect x="303.0" y="376.4" width="24.0" height="75.6" fill="#d9480f"/>
+<text x="315.0" y="372.4" font-size="9" text-anchor="start" fill="#1f2328" transform="rotate(-90 318.0 372.4)">16.8</text>
+<text x="302.0" y="469" font-size="11.5" text-anchor="middle" fill="#1f2328">after 256k</text>
+<line x1="74" x2="378" y1="452" y2="452" stroke="#57606a" stroke-width="1"/>
+<text x="556.0" y="80" font-size="13.5" font-weight="600" text-anchor="middle" fill="#1f2328">Ornith-1.5-35B-A3B MXFP4 (MoE)</text>
+<line x1="404" x2="708" y1="452.0" y2="452.0" stroke="#d0d7de" stroke-width="1"/>
+<text x="399" y="456.0" font-size="10.5" text-anchor="end" fill="#57606a">0</text>
+<line x1="404" x2="708" y1="380.0" y2="380.0" stroke="#d0d7de" stroke-width="1"/>
+<text x="399" y="384.0" font-size="10.5" text-anchor="end" fill="#57606a">80.0</text>
+<line x1="404" x2="708" y1="308.0" y2="308.0" stroke="#d0d7de" stroke-width="1"/>
+<text x="399" y="312.0" font-size="10.5" text-anchor="end" fill="#57606a">160</text>
+<line x1="404" x2="708" y1="236.0" y2="236.0" stroke="#d0d7de" stroke-width="1"/>
+<text x="399" y="240.0" font-size="10.5" text-anchor="end" fill="#57606a">240</text>
+<line x1="404" x2="708" y1="164.0" y2="164.0" stroke="#d0d7de" stroke-width="1"/>
+<text x="399" y="168.0" font-size="10.5" text-anchor="end" fill="#57606a">320</text>
+<line x1="404" x2="708" y1="92.0" y2="92.0" stroke="#d0d7de" stroke-width="1"/>
+<text x="399" y="96.0" font-size="10.5" text-anchor="end" fill="#57606a">400</text>
+<rect x="455.0" y="167.2" width="24.0" height="284.8" fill="#1f6feb"/>
+<text x="467.0" y="163.2" font-size="9" text-anchor="start" fill="#1f2328" transform="rotate(-90 470.0 163.2)">316</text>
+<rect x="481.0" y="355.8" width="24.0" height="96.2" fill="#d9480f"/>
+<text x="493.0" y="351.8" font-size="9" text-anchor="start" fill="#1f2328" transform="rotate(-90 496.0 351.8)">107</text>
+<text x="480.0" y="469" font-size="11.5" text-anchor="middle" fill="#1f2328">after 16k</text>
+<rect x="607.0" y="348.0" width="24.0" height="104.0" fill="#1f6feb"/>
+<text x="619.0" y="344.0" font-size="9" text-anchor="start" fill="#1f2328" transform="rotate(-90 622.0 344.0)">116</text>
+<rect x="633.0" y="403.7" width="24.0" height="48.3" fill="#d9480f"/>
+<text x="645.0" y="399.7" font-size="9" text-anchor="start" fill="#1f2328" transform="rotate(-90 648.0 399.7)">53.7</text>
+<text x="632.0" y="469" font-size="11.5" text-anchor="middle" fill="#1f2328">after 256k</text>
+<line x1="404" x2="708" y1="452" y2="452" stroke="#57606a" stroke-width="1"/>
+<text x="886.0" y="80" font-size="13.5" font-weight="600" text-anchor="middle" fill="#1f2328">Qwen3.8-27B Q4_K_M (reference)</text>
+<line x1="734" x2="1038" y1="452.0" y2="452.0" stroke="#d0d7de" stroke-width="1"/>
+<text x="729" y="456.0" font-size="10.5" text-anchor="end" fill="#57606a">0</text>
+<line x1="734" x2="1038" y1="380.0" y2="380.0" stroke="#d0d7de" stroke-width="1"/>
+<text x="729" y="384.0" font-size="10.5" text-anchor="end" fill="#57606a">20.0</text>
+<line x1="734" x2="1038" y1="308.0" y2="308.0" stroke="#d0d7de" stroke-width="1"/>
+<text x="729" y="312.0" font-size="10.5" text-anchor="end" fill="#57606a">40.0</text>
+<line x1="734" x2="1038" y1="236.0" y2="236.0" stroke="#d0d7de" stroke-width="1"/>
+<text x="729" y="240.0" font-size="10.5" text-anchor="end" fill="#57606a">60.0</text>
+<line x1="734" x2="1038" y1="164.0" y2="164.0" stroke="#d0d7de" stroke-width="1"/>
+<text x="729" y="168.0" font-size="10.5" text-anchor="end" fill="#57606a">80.0</text>
+<line x1="734" x2="1038" y1="92.0" y2="92.0" stroke="#d0d7de" stroke-width="1"/>
+<text x="729" y="96.0" font-size="10.5" text-anchor="end" fill="#57606a">100</text>
+<rect x="785.0" y="161.5" width="24.0" height="290.5" fill="#1f6feb"/>
+<text x="797.0" y="157.5" font-size="9" text-anchor="start" fill="#1f2328" transform="rotate(-90 800.0 157.5)">80.7</text>
+<rect x="811.0" y="233.5" width="24.0" height="218.5" fill="#d9480f"/>
+<text x="823.0" y="229.5" font-size="9" text-anchor="start" fill="#1f2328" transform="rotate(-90 826.0 229.5)">60.7</text>
+<text x="810.0" y="469" font-size="11.5" text-anchor="middle" fill="#1f2328">after 16k</text>
+<rect x="937.0" y="331.4" width="24.0" height="120.6" fill="#1f6feb"/>
+<text x="949.0" y="327.4" font-size="9" text-anchor="start" fill="#1f2328" transform="rotate(-90 952.0 327.4)">33.5</text>
+<rect x="963.0" y="414.2" width="24.0" height="37.8" fill="#d9480f"/>
+<text x="975.0" y="410.2" font-size="9" text-anchor="start" fill="#1f2328" transform="rotate(-90 978.0 410.2)">10.5</text>
+<text x="962.0" y="469" font-size="11.5" text-anchor="middle" fill="#1f2328">after 256k</text>
+<line x1="734" x2="1038" y1="452" y2="452" stroke="#57606a" stroke-width="1"/>
+<text x="16" y="272.0" font-size="12" fill="#57606a" text-anchor="middle" transform="rotate(-90 16 272.0)">generated tokens per second</text>
+<rect x="64.0" y="481" width="14" height="14" fill="#1f6feb"/>
+<text x="84.0" y="493" font-size="12" fill="#1f2328">WHIRL 0.1.3 (MTP+n-gram)</text>
+<rect x="559.0" y="481" width="14" height="14" fill="#d9480f"/>
+<text x="579.0" y="493" font-size="12" fill="#1f2328">llama.cpp b11214 (fastest mode)</text>
+</svg>

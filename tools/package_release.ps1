@@ -74,7 +74,7 @@ function Get-PeImports([string]$path) {
     }
     return $names
 }
-$system = @("kernel32.dll", "ws2_32.dll", "user32.dll", "advapi32.dll", "shell32.dll", "ole32.dll", "bcrypt.dll", "ntdll.dll", "shlwapi.dll", "dbghelp.dll")
+$system = @("kernel32.dll", "ws2_32.dll", "user32.dll", "advapi32.dll", "shell32.dll", "ole32.dll", "bcrypt.dll", "ntdll.dll", "shlwapi.dll", "dbghelp.dll", "dxgi.dll", "winmm.dll")
 foreach ($e in $exes) {
     $imports = Get-PeImports (Join-Path $BuildDir $e)
     foreach ($i in $imports) {
@@ -104,7 +104,7 @@ $docsDst = Join-Path $stage "docs"
 New-Item -ItemType Directory -Force $docsDst | Out-Null
 $userDocs = @("README_zh-TW.md", "quickstart.md", "quickstart_zh-TW.md", "usage.md", "cli.md",
               "windows_security.md", "windows_security_zh-TW.md", "building.md", "building_zh-TW.md",
-              "benchmarks.md", "phase1_parity.md")
+              "benchmarks.md", "phase1_parity.md", "recipes.md", "recipes_zh-TW.md")
 foreach ($d in $userDocs) {
     $p = Join-Path $docsSrc $d
     if (-not (Test-Path $p)) { throw "missing documentation file $p" }

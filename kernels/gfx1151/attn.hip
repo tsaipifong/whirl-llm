@@ -22,7 +22,7 @@ struct KvArgs {
     const int *ptab;
     const int *kvbase;
     int tab0;
-    int pad;
+    int win;  // MTP draft window (gfx1201 attn_wsplit*); not implemented on gfx1151: ignored (drafts attend all positions)
 };
 typedef char kvq8_t __attribute__((ext_vector_type(8)));
 __device__ __forceinline__ int kv_tb(const KvArgs &a, int row) { return a.kvbase != nullptr ? a.kvbase[row] : a.tab0; }
@@ -460,9 +460,9 @@ extern "C" __global__ void attn_combine_q8(const float *part_ml, const float *pa
 // ---------------------------------------------------------------------------
 #define AW_K 32
 #define AW_D 256
-struct AwGroups {
-    int first[16];
-    int count[16];
+struct AwGroups {  // kMaxVerifyRows (32) groups, as include/whirl/kernels_abi.h
+    int first[32];
+    int count[32];
 };
 
 template <int CG, bool Q8>

@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <tuple>
 
 namespace whirl::qwen35 {
 
@@ -62,6 +63,13 @@ struct Loader {
         const u64 nbytes = t.nbytes();
         if (nbytes == 0) throw ModelError("UnsupportedTensorType", std::string(t.name));
         const DevPtr dst = m.alloc(nbytes);
+        uploadTo(t, dst);
+        return dst;
+    }
+
+    // Reads tensor t into the existing device buffer dst (t.nbytes() bytes).
+    void uploadTo(const gguf::TensorInfo& t, DevPtr dst) {
+        const u64 nbytes = t.nbytes();
         u64 off = 0;
         const u64 base = f.absOffset(t);
         while (off < nbytes) {
@@ -73,7 +81,6 @@ struct Loader {
         stats.bytes += nbytes;
         stats.tensors += 1;
         m.type_bytes[ti(t.type) % n_types] += nbytes;
-        return dst;
     }
 
     // Like mat(), but the data stays in pinned host memory (device-accessible).
@@ -166,6 +173,36 @@ struct Loader {
             r.ptr = upload(*t);
         }
         return r;
+    }
+
+    // Two matrices with the same row layout in one allocation: a's rows, then
+    // b's (a.ptr / b.ptr point at the two parts; bytes are unchanged, so a GEMV
+    // on either reads exactly what mat() would give). Falls back to two mat()
+    // loads unless the types / ncols / row_bytes match, the type is not MXFP4
+    // (repacked + per-row refs) and b's start stays 256-byte aligned.
+    std::pair<Mat, Mat> matPair(const std::string& na, const std::string& nb, bool* contig) {
+        *contig = false;
+        const gguf::TensorInfo* ta = f.tensor(na);
+        const gguf::TensorInfo* tb = f.tensor(nb);
+        if (!ta || !tb || ta->type != tb->type || ta->type == GgmlType::mxfp4 || ta->ne[0] != tb->ne[0] ||
+            ta->rowBytes() != tb->rowBytes() || ta->nbytes() == 0 || tb->nbytes() == 0 || ta->nbytes() % 256 != 0 ||
+            ta->nbytes() != ta->rowBytes() * ta->rows() || tb->nbytes() != tb->rowBytes() * tb->rows() ||
+            m.k.gemv1[ti(ta->type) % n_types] == nullptr)
+            return {mat(na), mat(nb)};
+        const DevPtr base = m.alloc(ta->nbytes() + tb->nbytes());
+        uploadTo(*ta, base);
+        uploadTo(*tb, base + ta->nbytes());
+        auto mk = [](const gguf::TensorInfo& t, DevPtr p) {
+            Mat r;
+            r.ptr = p;
+            r.ty = t.type;
+            r.ncols = static_cast<u32>(t.ne[0]);
+            r.nrows = static_cast<u32>(t.rows());
+            r.row_bytes = t.rowBytes();
+            return r;
+        };
+        *contig = true;
+        return {mk(*ta, base), mk(*tb, base + ta->nbytes())};
     }
 
     DevPtr vec(const std::string& name) {
@@ -379,8 +416,9 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
             L.kind = LayerKind::gdn;
             L.gdn.qkv = ld.mat(n("attn_qkv.weight"));
             L.gdn.gate = ld.mat(n("attn_gate.weight"));
-            L.gdn.beta = ld.mat(n("ssm_beta.weight"));
-            L.gdn.alpha = ld.mat(n("ssm_alpha.weight"));
+            bool ba_contig = false;
+            std::tie(L.gdn.beta, L.gdn.alpha) = ld.matPair(n("ssm_beta.weight"), n("ssm_alpha.weight"), &ba_contig);
+            if (ba_contig && rowsContiguous(L.gdn.beta, L.gdn.alpha)) stats.gdn_ba_contig += 1;
             L.gdn.out = ld.mat(n("ssm_out.weight"));
             L.gdn.conv = ld.vec(n("ssm_conv1d.weight"));
             L.gdn.dt = ld.vec(n("ssm_dt.bias"));
@@ -428,6 +466,7 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
     m.z = m.alloc(B * cfg.d_inner * f4);
     m.beta = m.alloc(B * cfg.n_v_heads * f4);
     m.alpha = m.alloc(B * cfg.n_v_heads * f4);
+    m.ba_buf = m.alloc(B * 2 * cfg.n_v_heads * f4);
     m.gdn_out = m.alloc(B * cfg.d_inner * f4);
     // ffn_g / ffn_u double as autotune / bench scratch for every matrix
     u32 ffs = cfg.n_ff;
@@ -436,7 +475,7 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
     m.ff_scratch = ffs;
     m.ffn_g = m.alloc(B * ffs * f4);
     m.ffn_u = m.alloc(B * ffs * f4);
-    m.logits = m.alloc(static_cast<u64>(max_small_batch) * cfg.n_vocab * f4);
+    m.logits = m.alloc(static_cast<u64>(max_verify_rows) * cfg.n_vocab * f4);
     m.hn = m.alloc(B * cfg.n_embd * f4);
     m.mtp_cat = m.alloc(B * 2 * cfg.n_embd * f4);
     m.mtp_h = m.alloc(static_cast<u64>(max_small_batch) * cfg.n_embd * f4);
@@ -446,8 +485,8 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
     m.pos_buf = m.alloc(B * 4);
     m.out_tok = m.allocZero(ctl_words * 4);
     const u64 n_split = 64;  // fd_max_splits
-    m.part_ml = m.alloc(max_small_batch * n_split * cfg.n_head * 2 * f4);
-    m.part_acc = m.alloc(max_small_batch * n_split * cfg.n_head * cfg.head_dim * f4);
+    m.part_ml = m.alloc(max_verify_rows * n_split * cfg.n_head * 2 * f4);
+    m.part_acc = m.alloc(max_verify_rows * n_split * cfg.n_head * cfg.head_dim * f4);
     {
         u64 max_elems = 0;
         for (const Layer& L : m.layers)
@@ -464,9 +503,12 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
     }
     // widest decode matmul input: FFN, DeltaNet / attention output, MTP eh_proj
     const u64 in_max = std::max<u64>(std::max<u64>(cfg.n_ff, 2ull * cfg.n_embd), std::max<u64>(cfg.d_inner, static_cast<u64>(cfg.n_head) * cfg.head_dim));
-    m.xq = m.alloc(max_small_batch * in_max + 256);
-    m.xd = m.alloc((max_small_batch * in_max / 32 + 8) * 4);
-    m.x16 = m.alloc(B * std::max<u64>(in_max, cfg.n_embd) * 2);
+    m.xq = m.alloc(max_verify_rows * in_max + 256);
+    m.xd = m.alloc((max_verify_rows * in_max / 32 + 8) * 4);
+    m.x16_bytes = B * std::max<u64>(in_max, cfg.n_embd) * 2;
+    m.x16 = m.alloc(m.x16_bytes);
+    // GDN prefill x16b (fp8 rows + f16 rows from one norm) must fit in x16 for any batch > 16
+    if (B > 16 && m.x16bOff() + B * cfg.n_embd * 2 > m.x16_bytes) throw ModelError("X16bOverflow");
     m.sx8 = m.alloc(B * 4);
     m.fp8_prefill = opt.fp8_default;
     if (cfg.moe) {
@@ -557,18 +599,20 @@ void Model::allocKvPool(u32 tokens) {
     const bool kq8 = kv_q8 && !kv_kf16;  // K format (q8v: f16)
     const u64 ebk = kq8 ? 1 : 2;
     const u64 ebv = kv_q8 ? 1 : 2;
+    // MTP KV first: the draft head reads it every step, so if the process ever ends up over
+    // its WDDM budget it should not be the last (most likely demoted) allocation
+    if (mtp) {
+        mtp_kc = allocZero(rows * elems * ebk);
+        mtp_vc = allocZero(rows * elems * ebv);
+        if (kq8) mtp_ks = allocZero(rows * elems / 32 * 2);
+        if (kv_q8) mtp_vs = allocZero(rows * elems / 32 * 2);
+    }
     for (u32 i = 0; i < cfg.n_layer; ++i) {
         if (!cfg.isAttn(i)) continue;
         kcache[i] = allocZero(rows * elems * ebk);
         vcache[i] = allocZero(rows * elems * ebv);
         if (kq8) kscale[i] = allocZero(rows * elems / 32 * 2);
         if (kv_q8) vscale[i] = allocZero(rows * elems / 32 * 2);
-    }
-    if (mtp) {
-        mtp_kc = allocZero(rows * elems * ebk);
-        mtp_vc = allocZero(rows * elems * ebv);
-        if (kq8) mtp_ks = allocZero(rows * elems / 32 * 2);
-        if (kv_q8) mtp_vs = allocZero(rows * elems / 32 * 2);
     }
     pool_pages = pages;
     if (seqs.empty()) {
@@ -648,8 +692,8 @@ void Model::setupSeqs(u32 n, u32 slot_ctx) {
     seq_pages = (slot_ctx + kv_page - 1) / kv_page;
     ptab = allocZero(static_cast<u64>(n) * seq_pages * 4);
     out_tok = allocZero(static_cast<u64>(n) * ctl_words * 4);
-    kvbase_buf = allocZero(static_cast<u64>(max_small_batch) * 4);
-    mtp_in = alloc(static_cast<u64>(max_small_batch) * E * 4);
+    kvbase_buf = allocZero(static_cast<u64>(max_verify_rows) * 4);
+    mtp_in = alloc(static_cast<u64>(max_verify_rows) * E * 4);
     max_ctx = slot_ctx;
     selectSeq(0);
 }
@@ -685,10 +729,12 @@ void Model::restoreSeqSnapshot(u32 s, u32 set) {
 }
 
 Mat Model::requantQ4k(const Mat& w) {
-    if (w.ty != GgmlType::q6_k || w.ncols % 256 != 0) return w;
+    // Q6_K (Q4_K_M files) or Q8_0 (e.g. the Swift MXFP4 files' MTP block)
+    const hip::Function f = w.ty == GgmlType::q6_k ? k.requant_q6k_q4k : w.ty == GgmlType::q8_0 ? k.requant_q80_q4k : nullptr;
+    if (f == nullptr || w.ncols % 256 != 0) return w;
     const u64 rb = w.ncols / 256 * 144;
     const DevPtr p = alloc(rb * w.nrows);
-    hip::launch(k.requant_q6k_q4k, {w.nrows, w.ncols / 256, 1}, {256, 1, 1}, 0, stream, w.ptr, w.row_bytes, p, rb);
+    hip::launch(f, {w.nrows, w.ncols / 256, 1}, {256, 1, 1}, 0, stream, w.ptr, w.row_bytes, p, rb);
     Mat r;
     r.ptr = p;
     r.ty = GgmlType::q4_k;
@@ -730,6 +776,23 @@ void Model::buildDraftHeadEx(DraftHeadKind kind) {
     }
     draft_head = requantQ4k(w);
     hip::sync();
+}
+
+bool Model::setDraftVocab(std::span<const u32> vocab_ids) {
+    if (!draft_d2 || k.copy_rows_map == nullptr || vocab_ids.empty() || vocab_ids.size() >= output.nrows) return false;
+    const u32 n = static_cast<u32>(vocab_ids.size());
+    const u64 rb = static_cast<u64>(output.ncols / 4 + output.ncols / 16);  // 2-bit codes + f16 scales per row
+    const std::vector<i32> m(vocab_ids.begin(), vocab_ids.end());
+    const DevPtr map = alloc(static_cast<u64>(n) * 4);
+    hip::upload(map, m.data(), m.size() * 4);
+    const DevPtr p = alloc(rb * n);
+    hip::launch(k.copy_rows_map, {n, 1, 1}, {256, 1, 1}, 0, stream, *draft_d2, rb, p, map);
+    hip::sync();
+    freeAlloc(*draft_d2);
+    draft_d2 = p;
+    draft_rows = n;
+    draft_map = map;
+    return true;
 }
 
 MatList Model::layerMats(const Layer& L) const {

@@ -127,3 +127,9 @@ GEMV_D2_ENTRY(14)
 GEMV_D2_ENTRY(15)
 GEMV_D2_ENTRY(16)
 
+// Draft-head vocabulary subset (WHIRL_DRAFT_VOCAB): dst row i = src row map[i], rb bytes per row.
+extern "C" __global__ void __launch_bounds__(256) copy_rows_map(const uint8_t *src, uint64_t rb, uint8_t *dst, const int *map) {
+    const uint8_t *s = src + (size_t)map[blockIdx.x] * rb;
+    uint8_t *d = dst + (size_t)blockIdx.x * rb;
+    for (uint64_t i = threadIdx.x; i < rb; i += blockDim.x) d[i] = s[i];
+}

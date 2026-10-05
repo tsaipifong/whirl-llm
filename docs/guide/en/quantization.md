@@ -167,11 +167,13 @@ with an F16 mmproj.
   applies either way.
 - <a id="f32-alpha-beta"></a>**Do not store `ssm_alpha` / `ssm_beta` as F32.** The first version
   followed a spec that kept them F32: WHIRL's MTP smoke test failed on all three variants (MTP output
-  ≠ plain greedy) and the automatic draft count dropped to 1. Cause: WHIRL has no int8 GEMV for F32
+  ≠ plain greedy) and drafts were capped at 1. Cause: WHIRL has no int8 GEMV for F32
   weights, so n = 1 used an f32-activation GEMV and n ≥ 2 (verify) an f16 GEMM — different numerics,
   breaking MTP's bit-exactness. With Q8_0 (which has a fused exact kernel, as unsloth's Q4_K_M uses)
-  all variants passed and drafts returned to 8. (An engine fix — one kernel family for F32 small
-  matrices at all n — is queued.)
+  all variants passed and drafts returned to 8. (Since 0.1.3 the engine runs F32 / F16 small
+  matrices through one GEMV family for all n, so such files are exact, but they remain capped at
+  1 draft because the fused DeltaNet decode kernel `gdn_ab` exists only for Q8_0 / MXFP4 α/β — see
+  [speculative-decoding.md](speculative-decoding.md#exact). Q8_0 is still the recommendation.)
 
 ### 5.3 Results (WHIRL server defaults, unified protocol, 2 rounds)
 

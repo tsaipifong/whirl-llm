@@ -3,6 +3,7 @@
 #include "mock_backend.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -11,6 +12,18 @@
 #include <stdexcept>
 
 namespace whirl::test {
+
+namespace {
+
+// simulated device time: a busy wait (sleep granularity on Windows is ~1-16 ms)
+void spinUs(double us) {
+    if (us <= 0) return;
+    const auto t_end = std::chrono::steady_clock::now() + std::chrono::duration<double, std::micro>(us);
+    while (std::chrono::steady_clock::now() < t_end) {
+    }
+}
+
+}  // namespace
 
 // ---------------------------------------------------------------------------
 // MockDeviceOps
@@ -329,6 +342,7 @@ MockModel::State MockModel::runRows(Seq& s, std::span<const std::uint32_t> toks,
 
 void MockModel::prefillOne(std::uint32_t si, std::span<const std::uint32_t> toks, std::uint32_t pos0, std::uint32_t r0,
                            std::uint32_t logits_row, std::optional<server::DevPtr> prev_hidden, bool mtp) {
+    spinUs(mc_.prefill_us_per_row * static_cast<double>(toks.size()));
     Seq& s = seqs_[si];
     commitSeq(si);
     if (mtp && pos0 > 0 && prev_hidden) {
@@ -439,6 +453,7 @@ void MockModel::mtpBatchStepEx(std::span<const server::MSeg> segs, std::uint32_t
 
 std::uint32_t MockModel::verifyBatchEnqueue(std::span<const server::VSeg> segs) {
     std::uint32_t row = 0;
+    spinUs(mc_.cycle_us);
     for (const server::VSeg& sg : segs) {
         Seq& s = seqs_[sg.seq];
         commitSeq(sg.seq);  // the kept rows of the previous verify reach the state

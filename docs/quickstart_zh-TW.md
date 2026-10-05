@@ -19,7 +19,7 @@
 
 1. 從 [WHIRL 發布頁](https://github.com/tsaipifong/whirl-llm/releases)下載 `whirl-0.1.0-windows-x64.zip`，並核對
    旁邊公布的 SHA-256：`Get-FileHash .\whirl-0.1.0-windows-x64.zip -Algorithm SHA256`。
-2. 一個支援的 GGUF 模型（清單見 [README](README_zh-TW.md#models)）。最快的選擇是我們自己量化的 MXFP4
+2. 一個支援的 GGUF 模型（清單見 [README](README_zh-TW.md#支援的模型)）。最快的選擇是我們自己量化的 MXFP4
    [`Swift-1.5-Qwen3.8-27B-MXFP4-A-outQ6_K.gguf`](https://huggingface.co/tsaipifong/Swift-1.5-Qwen3.8-27b-MXFP4-GGUF)；
    以下指令假設它存在 `C:\models\`。
 
@@ -77,6 +77,7 @@ WHIRL 會說明發生了什麼、該怎麼做，並以代碼結束：
 
 ## 接下來
 
+- 照做就會的情境食譜（接上 agent、長工作階段、長上下文、圖片、log 解讀）：[recipes_zh-TW.md](recipes_zh-TW.md)
 - 每個選項與環境變數：[使用參考](guide/zh-TW/usage.md)
 - 伺服器細節（API、取樣、工具呼叫、快取）：[server.md](guide/zh-TW/server.md)
 - 該用哪個 GGUF：[quantization.md](guide/zh-TW/quantization.md#rules)

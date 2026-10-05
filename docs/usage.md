@@ -2,7 +2,7 @@
 
 # Usage reference: `whirl` and `whirl-server`
 
-This page lists every command, option, environment variable and server endpoint of WHIRL 0.1.0.
+This page lists every command, option, environment variable and server endpoint of WHIRL 0.1.1.
 It was written from the built-in help of the release executables (`whirl --help`,
 `whirl <command> --help`, `whirl help env`, `whirl-server --help`); when in doubt, the help text of
 your own executable is authoritative.
@@ -36,7 +36,7 @@ whirl-server --help | --version
 ```
 
 Both programs accept only GGUF files whose `general.architecture` is `qwen35` (dense) or
-`qwen35moe` (mixture of experts); see [Supported models](../README.md#models). Generation is greedy
+`qwen35moe` (mixture of experts); see [Supported models](../README.md#supported-models). Generation is greedy
 in the CLI; the server also samples (temperature, top-p, …).
 
 **First run with a new model.** The prefill kernels are tuned once per model file and GPU
@@ -132,7 +132,8 @@ request slots, a prefix cache in VRAM and host RAM / SSD tiers for idle sessions
 | `-c`, `--ctx N` | size of the shared KV pool in tokens. Slots take pages on demand; when the pool is full, idle slots' prefix caches are evicted (least recently used first). Default: all VRAM left after weights and buffers minus 768 MiB (MoE: 1.5 GiB) |
 | `--ctx-per-slot N` | longest context of one request (default min(pool, 131072); up to 262144) |
 | `--mtp-drafts N` | fixed MTP drafts per cycle, 1–10 (default: chosen per model type by a cost model) |
-| `--kv-ram-mb N` | host RAM tier of the prefix cache, MiB of pinned memory (default 8192, or one full-length session if that is larger — about 9 GiB for the 27B model). Idle sessions are copied there and restored instead of prefilled again. `0` disables both host tiers. **Radeon 8060S** (integrated GPU): default `0` — the KV pool already lives in system memory; give a size to turn the RAM and SSD tiers on |
+| `--decode-min-tps N` | decode floor: while other requests prefill, every streaming (decoding) request keeps at least N tok/s; prefill forwards are shortened and decode cycles interleaved to hold it (default 20; `0` = off, prefill forwards are not limited). Outputs are identical for any N ([server.md](guide/en/server.md#batching)) |
+| `--kv-ram-mb N` | host RAM tier of the prefix cache, MiB of pinned memory (default: 1/4 of physical RAM, at least 8 GiB or one full-length session if that is larger — about 9 GiB for the 27B model —, at most 32 GiB, and at most half of the RAM available at startup; 16 GiB on a 64 GB PC; off by default on integrated GPUs). The startup log prints the chosen size and why. Idle sessions are copied there and restored instead of prefilled again. `0` disables both host tiers. **Radeon 8060S** (integrated GPU): default `0` — the KV pool already lives in system memory; give a size to turn the RAM and SSD tiers on |
 | `--kv-ssd-dir PATH` | SSD tier directory (default `%LOCALAPPDATA%\whirl\kvcache`) |
 | `--kv-ssd-gb N` | SSD tier size cap in GiB (default 64; `0` = no SSD tier) |
 | `--mmproj FILE` | vision encoder (Qwen3-VL style mmproj GGUF, F16 / BF16). `image_url` parts (`data:` URLs with base64 PNG / JPEG / …) become image tokens. Weights stay in pinned host RAM; nothing goes to VRAM until an image arrives |
@@ -156,8 +157,8 @@ Examples:
 .\whirl-server.exe C:\models\model.gguf --mmproj C:\models\mmproj-F16.gguf
 ```
 
-Memory note: with the defaults the server pins about 8–9 GiB of host RAM for the RAM tier (plus
-about 0.9 GiB when `--mmproj` is given) and may use up to 64 GiB on the SSD. Use `--kv-ram-mb` /
+Memory note: with the defaults the server pins about a quarter of the host RAM for the RAM tier
+(8–32 GiB, at most half of the RAM free at startup; 16 GiB on a 64 GB PC; plus about 0.9 GiB when `--mmproj` is given) and may use up to 64 GiB on the SSD. Use `--kv-ram-mb` /
 `--kv-ssd-gb` to shrink or disable the tiers on machines with less memory or disk space.
 
 ### <a id="endpoints"></a>Endpoints
@@ -168,9 +169,16 @@ Base URL `http://127.0.0.1:8080/v1`. Any API key is accepted (there is no authen
 |---|---|
 | `POST /v1/chat/completions` | messages, streaming (SSE) or not, tools / tool calls, thinking (`reasoning_content`), images (with `--mmproj`) |
 | `POST /v1/completions` | raw prompt, no chat template |
-| `GET /v1/models` | the one loaded model (id = `--alias`) |
+| `GET /v1/models` | the one loaded model (id = `--alias`); `meta.n_ctx` is the context per slot |
 | `GET /health` | answers immediately even while busy; reports the busy state and queue length |
+| `GET /props` (also `/v1/props`) | read-only, llama.cpp-server-style subset for clients that auto-detect the context length: `default_generation_settings.n_ctx` (context per slot), `default_generation_settings.model` and `model_alias` (= `--alias`), `total_slots`, `model_path` (file name only, never a directory), `modalities`, `build_info` |
+| `GET /version` | `{"version":"0.1.1","name":"whirl"}` |
 | `OPTIONS` (CORS preflight) | supported |
+
+LM Studio (`/api/v1/models`) and Ollama (`/api/tags`, `/api/show`, `/api/version`) native endpoints
+are not emulated (a client that found them would switch to an API WHIRL does not have): they answer
+404, and the server logs the first probe of each path once at `I` level instead of a warning per
+request. Point such clients at the OpenAI-compatible base URL above.
 
 Request parameters: `temperature`, `top_p`, `top_k`, `min_p`, `seed`, `max_tokens` /
 `max_completion_tokens`, `stop`, `stream`, `tools`, `tool_choice`,
@@ -180,6 +188,22 @@ Request parameters: `temperature`, `top_p`, `top_k`, `min_p`, `seed`, `max_token
 `frequency_penalty` are accepted but ignored; `n` must be 1; `logprobs`, `response_format` and
 enforced `tool_choice: "required"` are not supported. Responses add `usage.cached_tokens` and a
 llama.cpp-style `timings` object. Details: [server.md](guide/en/server.md#sampling).
+
+Thinking and reasoning effort can be given in any of these forms (applied in this order; a later one
+overrides an earlier one): `chat_template_kwargs.{enable_thinking, reasoning_effort}`, the
+OpenRouter / OpenAI Responses-style object `"reasoning": {"effort": "...", "enabled": true|false}`,
+top-level `enable_thinking`, top-level `reasoning_effort`. Effort values (case-insensitive):
+
+| Value sent | Effort used |
+|---|---|
+| `xhigh`, `high`, `max`, `ultra` | xhigh (the default when none is given) |
+| `medium` | medium |
+| `low`, `minimal` | low |
+| `none` (or `"reasoning": {"enabled": false}`) | thinking off |
+
+An unknown effort value does not fail the request: the server logs a warning and uses the default.
+Effort only changes the prompt of models whose chat template supports it (Qwen3.8); a valid effort does
+not turn thinking back on when it was switched off.
 
 ```powershell
 $body = '{"messages":[{"role":"user","content":"What is 2+3?"}],"temperature":0,"max_tokens":200}'
@@ -249,7 +273,7 @@ experiments and measurements.
 | `WHIRL_CODE_OBJECT=FILE` | development: load the GPU kernels from this code object instead of the built-in one |
 | `WHIRL_MOE_FP8=0` | MoE models with MXFP4 experts: run the expert prefill with f16 activations instead of fp8 (default fp8, the faster path — about 11.7k vs 8.6k tok/s at 2k tokens for Ornith MXFP4). Affects prefill only |
 | `WHIRL_MOE_MXW=0` | MoE models with MXFP4 experts: use the generic MXFP4 expert decode kernels instead of the whole-block ones (default whole-block). Affects decode / verify |
-| `WHIRL_EMBD_HOST=1` | keep the token embedding table in pinned host memory instead of VRAM |
+| `WHIRL_EMBD_HOST=0` | keep the token embedding table in VRAM (default: pinned host memory; the server declares its size with the other pinned memory so Shared Usage monitoring can subtract it) |
 | `WHIRL_TUNE_COLD=1` | autotune: evict the cache before each timing *(diagnostic)* |
 | `WHIRL_TUNE_MASK=BITS` | autotune: mask of the candidate GEMM configurations *(diagnostic)* |
 
@@ -272,10 +296,10 @@ The output always equals plain greedy decoding (with sampling: the same distribu
 | `WHIRL_MTP_PMIN=P` | end a draft chain at a draft whose probability is below P (after `WHIRL_MTP_NMIN` drafts) |
 | `WHIRL_MTP_NMIN=N` | drafts always made before `WHIRL_MTP_PMIN` applies |
 | `WHIRL_MTP_BATCH_DRAFTS=d1,d2,...` | most drafts per cycle with 1, 2, … decoding slots (server) |
-| `WHIRL_MTP_Q4=0` | keep the MTP block's Q6_K matrices (default: Q4_K copies, used for drafts only) |
+| `WHIRL_MTP_Q4=0` | keep the MTP block's Q6_K / Q8_0 matrices (default: Q4_K copies, used for drafts only) |
 | `WHIRL_DRAFT_HEAD=q4` | Q4_K draft head instead of the 2-bit one |
 | `WHIRL_MTP_FULLHEAD=1` | drafts use the full output head |
-| `WHIRL_DRAFT_VOCAB=N` | draft head over the first N vocabulary rows only |
+| `WHIRL_DRAFT_VOCAB=off\|64k\|48k\|FILE\|N` | MTP draft head over a frequency subset of the vocabulary. Default: the 64k subset embedded in the executable, used only for dense qwen35 models with the 2-bit draft head and a 248,320-token vocabulary (outputs unchanged). `off` = full draft head; `48k` = `draft_vocab\subset_48k.bin` next to the exe; FILE = uint32 little-endian token ids; N = the first N rows |
 | `WHIRL_NGRAM=0` | no n-gram (prompt-lookup) drafts |
 | `WHIRL_NGRAM_MIN=N` | minimum matched suffix for an n-gram draft (default 3) |
 | `WHIRL_NGRAM_MAX=N` | most n-gram drafts per cycle (default 15) |
@@ -297,6 +321,7 @@ The output always equals plain greedy decoding (with sampling: the same distribu
 | `WHIRL_PREFILL_CHUNK=N` | most rows per merged prefill forward (multiple of 1024, default 2048) |
 | `WHIRL_SEG_PREFILL=0` | prefill each request on its own instead of several in one forward |
 | `WHIRL_GATHER_MS=MS` | window to gather a burst of new requests (default 30, 0 = off) |
+| `WHIRL_DECODE_MIN_TPS=N` | decode floor per streaming request while others prefill (= `--decode-min-tps`, default 20, 0 = off) |
 | `WHIRL_GDN_REPLAY=0` | DeltaNet verify with snapshot sets instead of replaying kept rows |
 | `WHIRL_SNAP_SETS=N` | minimum number of recurrent-state snapshot sets (with `WHIRL_GDN_REPLAY=0`) |
 | `WHIRL_SLOT_DRAFTS=1` | split the draft budget between slots by expected acceptance |
@@ -338,6 +363,7 @@ Alternatives kept for A/B tests and numerics comparisons; the defaults are the t
 | `WHIRL_GEMMH=0` | no f16-output prefill GEMM (bitwise-equal) |
 | `WHIRL_GEMMHQ=1` | f16-output GEMM for the attention projections too |
 | `WHIRL_ATTN_KX=0` | prefill attention without the K-exchange kernel (bitwise-equal) |
+| `WHIRL_ATTN_KG=0` | prefill attention without the GQA-grouped kernel (bitwise-equal) |
 | `WHIRL_GDN_SEQ=1` | sequential DeltaNet prefill instead of the chunked scan |
 | `WHIRL_GDN_V0=1` | per-row DeltaNet decode step kernel (same values) |
 | `WHIRL_NAIVE_ATTN=1` | reference attention path |
@@ -352,6 +378,7 @@ Alternatives kept for A/B tests and numerics comparisons; the defaults are the t
 | `WHIRL_GV_NMAX=N` | largest group of same-input GEMVs |
 | `WHIRL_MOE_BN=32\|64` | grouped expert GEMM token tile |
 | `WHIRL_DBG=BITS` | 1 = no gdn_abconv merge, 2 = scalar split attention, 4 = one query per attention group |
+| `WHIRL_ATTN_WIDE=0` | verify attention groups of at most 16 columns (`attn_wsplit1`) instead of up to 32 (`attn_wsplit2`) |
 
 ### 7.7 Diagnostics
 
@@ -359,7 +386,7 @@ Alternatives kept for A/B tests and numerics comparisons; the defaults are the t
 |---|---|
 | `WHIRL_TOKENIZE_ONLY=1` | print the prompt token ids and stop |
 | `WHIRL_PRINT_IDS=1` | print the generated token ids and their FNV-1a hash |
-| `WHIRL_PROFILE=1` | per-op-class GPU time; distorts speed numbers (server: 1 or 2) |
+| `WHIRL_PROFILE=1` | per-op-class GPU time; distorts speed numbers (`whirl bench`: per prefill size; server: 1 or 2) |
 | `WHIRL_TRACE_TPS=N` | print the window tok/s every N tokens (stderr) |
 | `WHIRL_DUMP_LOGITS=FILE` | (no MTP) next-token logits of every prompt position ≥ `WHIRL_DUMP_FROM` as f16 rows |
 | `WHIRL_DUMP_FROM=N` | first prompt position written by `WHIRL_DUMP_LOGITS` |

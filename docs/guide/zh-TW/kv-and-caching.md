@@ -75,7 +75,7 @@ DeltaNet 狀態本身每個序列是固定大小，與上下文長度無關。se
 
 ### 3.2 速度——出乎意料
 
-| 純 decode，ms/token（CLI，同一個執行檔） | 16k | 64k | 128k |
+| 純 decode，ms/token（CLI，同一個執行檔，`kv_dq8` 之前） | 16k | 64k | 128k |
 |---|---|---|---|
 | f16 | 30.0 | 35.8–35.9 | 42.0–42.1 |
 | q8h | 30.3（+1.0%） | 37.1–37.2（+3.6%） | 44.2–44.3（+5.2%） |
@@ -88,6 +88,8 @@ DeltaNet 狀態本身每個序列是固定大小，與上下文長度無關。se
 | q8h | 1100.2–1100.8（−2.6%） | 890.2–891.3（−3.9%） |
 
 KV 位元組減半反而讓 decode **變慢**：split-K decode kernel 內部對 K 做 int8 反量化的成本，高於它省下的頻寬（加入反量化後，decode attention 就不再是純粹受頻寬限制）。decode 的成本完全來自 K；只量化 V（`q8v`）的 decode 與 f16 一樣快，甚至略快。prefill 的成本在 V（PV 乘積），q8v 與 q8h 付出的代價相同。
+
+**更新（0.1.3）**：改用 magic number 的 K 轉換（`kv_dq8`，[kernels.md](kernels.md#decode-attn)）後，反量化成本消失：125,853 token 時 q8h decode 從 24.09 提高到 25.99 tok/s（+7.9%，逐位元相同）。
 
 ### <a id="kv-auto"></a>3.3 自動選擇策略
 
@@ -108,7 +110,7 @@ KV 位元組減半反而讓 decode **變慢**：split-K decode kernel 內部對 
 
 自 q8v 引入以來池變小了，因為後來的功能在決定池大小之前就先保留了 VRAM：分層 stream 與 pinned arena（HIP 可見 12.8 MiB）、兩個共享系統提示詞檢查點（2 × 150.6 MiB，−7,424 token），以及較大的 code object（−256 token）。目前相對下限的餘裕是 **2,816 個 token**；任何新的常駐緩衝區都必須在別處省回來，否則預設會退回 q8h。
 
-為保住 f16 而考慮過的無損 VRAM 節省手段：prefill batch 4096 → 3072 可省 0.52 GiB 且無速度代價（3072 vs 4096：4k +1.2%、16k −0.7%、64k 0.0%；2048 則慢 1.3–2.0%）；暫存緩衝區共用別名（估計 ≤ 0.75 GiB，未實作）；檢查點減半（0.78 GiB，會傷害前綴快取）。合起來仍不夠讓 f16 放得下，所以用 q8v。另外也量測過並否決：prefill batch 8192（長提示詞受 attention 限制，並沒有更快；+2.1 GiB）、把 embedding 或檢查點放在 pinned host 記憶體（鎖頁主機記憶體）（檢查點存取要約 40 ms，因為是 96 次小複製、約 3.75 GB/s，agent 回合 −25%；而且 pinned 記憶體會顯示為共享使用量（Shared Usage），[windows-hip.md](windows-hip.md#shared-usage)）。
+為保住 f16 而考慮過的無損 VRAM 節省手段：prefill batch 4096 → 3072 可省 0.52 GiB 且無速度代價（3072 vs 4096：4k +1.2%、16k −0.7%、64k 0.0%；2048 則慢 1.3–2.0%）；暫存緩衝區共用別名（估計 ≤ 0.75 GiB，未實作）；檢查點減半（0.78 GiB，會傷害前綴快取）。合起來仍不夠讓 f16 放得下，所以用 q8v。另外也量測過並否決：prefill batch 8192（長提示詞受 attention 限制，並沒有更快；+2.1 GiB）、把檢查點放在 pinned host 記憶體（鎖頁主機記憶體）（檢查點存取要約 40 ms，因為是 96 次小複製、約 3.75 GB/s，agent 回合 −25%）。token embedding 放在 pinned host 記憶體，當初唯一的否決理由是 pinned 記憶體會顯示為共享使用量（Shared Usage，[windows-hip.md](windows-hip.md#shared-usage)）；自 0.1.3 起 server 預設就把它放在 pinned host 記憶體，並宣告其大小（`%LOCALAPPDATA%\whirl\pinned\<pid>.txt`）讓監控扣除（`WHIRL_EMBD_HOST=0` 則留在 VRAM；兩種方式輸出逐位元相同）。
 
 由此得出的 server 預設：dense 27B → `--parallel 4`、每個請求 ≤ 131,072 token（`--ctx-per-slot`，上限 262,144）、q8v。MoE → f16、每個請求 131,072、池約 341k token。
 
@@ -151,7 +153,18 @@ server 日誌顯示有兩個根本原因，而不是一開始懷疑的單一原�
 
 剩下一個已接受的限制：模型有時生成的 token 序列並非 tokenizer 對同一段文字的標準切分（例如程式碼中 `"""'` 附近）。重新 tokenize 該回覆會在回合中途分岔，下一回合便退回前一個 `prompt-end`（損失一個回覆的 prefill）。要修正就得改成餵入生成的 token 而非重新 tokenize 的文字，這會讓有快取與無快取的輸入不同——不值得。llama.cpp 也有相同行為。
 
-**有快取與無快取在設計上就不是逐位元相同：** 重用的歷史 KV 由 decode kernel 計算，重新 prefill 的歷史則由 prefill GEMM 計算。診斷模式會在每次快取命中後重新 prefill，並要求 KL ≤ 1e-2 且 top-1 相同（27B 實際上 KL ≤ 9e-5）。
+**哪些快取命中與冷執行逐位元相同，哪些不是**：
+
+| 重用點 | 與冷執行逐位元相同？ | 原因 |
+|---|---|---|
+| `system` 檢查點（B ≥ 2048） | **是** | 冷執行也在 B 切開，兩者跑完全相同的 chunk（§6） |
+| `prefix` 檢查點 | **是** | 只有該位置也是新請求自身排程中的 chunk 起點時才使用（§6） |
+| `prompt-end`／`think-open`，**同一個提示** | **是** | 狀態由相同的 prefill chunk 產生 |
+| RAM／SSD 分層還原 | **是** | 複製回同樣的位元組（§8） |
+| `gen-end`（對話的下一輪） | **否，依設計** | 歷史的 KV **與 DeltaNet 狀態**由 decode／verify kernel（int8 GEMV、decode attention、`gdn_step`）產生，而非 prefill GEMM |
+| `prompt-end`／`think-open` 之後再接更多 token | **否，依設計** | 接續部分的 chunk 切點與冷執行不同 |
+
+差異不只是「生成出來的 token 的 KV」：每個 DeltaNet 層的遞迴狀態帶著整段歷史，decode 產生的狀態與 prefill 產生的狀態在之後每個位置都不同。速度模式會擴大差距（冷執行的 prefill 用 fp8／f16 WMMA，重用的歷史來自精確的 int8 decode 路徑）。診斷模式（`WHIRL_PREFIX_CACHE_VERIFY=1`）會在每次快取命中後重新 prefill，並要求 KL ≤ 1e-2 且 top-1 相同（27B 實際上 KL ≤ 9e-5）；對表中「是」的列，目前尚未斷言逐位元相同。
 
 ## <a id="system-ckpt"></a>6. 系統提示詞檢查點：新 session 跳過 prefill
 
@@ -181,7 +194,7 @@ agent 情境（8 個 session，各自「詢問某個檔案 → `read_file` → �
 
 較大的 prefill 前向計算較快，但檢查點（`prefix`、`system`、`think-open`）只能位於 chunk 邊界。把 server 的 chunk 改成 2048 列能讓冷 prefill 快 +18…+21%，但跨 slot 的後續請求因此重用的是位置 27,418 而非 28,442 的 `prefix` 檢查點，30k 上下文 + 300 / + 1000 個新 token 的 TTFT 從 980 → 1681 ms 與 1548 → 2230 ms。
 
-採用的設計是**排程**維持 1024 token 的 chunk（檢查點位置不變），而在沒有其他 slot 正在 decode 時，把連續的完整 chunk 合併成一次最多 2048 列（+256 尾段）的前向計算來**執行**，且絕不跨越檢查點邊界。這依賴 logits 與前向大小無關——已驗證：batch 1024 / 2048 / 4096 的最後一個 token logits 相同，兩個模型、MTP 開/關皆然。
+採用的設計是**排程**維持 1024 token 的 chunk（檢查點位置不變），而在沒有其他 slot 正在 decode、或 decode 保底關閉時（[server.md](server.md#batching)），把連續的完整 chunk 合併成一次最多 2048 列（+256 尾段）的前向計算來**執行**，且絕不跨越檢查點邊界。這依賴 logits 與前向大小無關——已驗證：batch 1024 / 2048 / 4096 的最後一個 token logits 相同，兩個模型、MTP 開/關皆然。
 
 | Server，MTP + n-gram | Q4_K_M 修正前 → 後 | MXFP4 修正前 → 後 |
 |---|---|---|
@@ -203,7 +216,7 @@ agent 情境（8 個 session，各自「詢問某個檔案 → `read_file` → �
 - 啟動時一次配置的 pinned arena，以 512 MiB 為單位分塊配置、以 2 MiB 區塊管理；項目對應到區塊清單；LRU 逐出（已在 SSD 上的項目退回其 SSD 副本，否則直接丟棄）。
 - 所有 GPU↔host 複製都在單一**非阻塞分層 stream**（FIFO）上以 ≤ 1 MiB 的片段執行，因此 decode 的小量回讀永遠不會排在長傳輸後面。讓 kernel 直接寫 host 記憶體（zero-copy）在這台機器上行不通（[windows-hip.md](windows-hip.md#zero-copy)）。
 - 必須拿掉全裝置同步：`hipDeviceSynchronize` 會等待分層複製。
-- 預設大小：max(8 GiB, 一個完整長度 f16 session + 檢查點) = 27B 在 128k 時為 **9 GiB**。它會在 GPU 計數器中顯示為共享使用量（Shared Usage）；server 會宣告其 pinned 大小，讓監控可以扣除。
+- 預設大小（`src/tier/ram_size.h`）：**實體記憶體的 1/4**（取最接近的 GiB），至少為舊的下限 max(8 GiB, 一個完整長度 f16 session + 檢查點)（27B 在 128k 時為 9 GiB），最多 32 GiB（下限優先於上限），且不超過啟動時可用記憶體的一半（取整 GiB；受此限制時以警告記錄；不到 1 GiB 則關閉此層），以免 pin 住記憶體讓系統開始分頁。**64 GB 的電腦為 16 GiB。** `--kv-ram-mb N` / `WHIRL_KV_RAM_MB` 照指定值使用；整合式 GPU（共用系統記憶體）未指定大小時關閉此層。原因：在 agent 實際使用中（Hermes、30～40k token 的 session、子代理），9 GiB 的舊預設不到一小時就用到 8.3 GiB，之後 LRU 項目只能退回較慢的 SSD 副本。啟動日誌 `kv tier: RAM tier size N MiB (原因)` 會顯示選擇結果，摘要行會顯示 pin 住所花的時間（R9700 主機、64 GB：16 GiB 花 3.1～3.4 s；「model ready」13.6～14.1 s，舊的 9 GiB 為 11.8～12.3 s、關閉此層為 10.2 s，因此仍在啟動時一次配置）。它會在 GPU 計數器中顯示為共享使用量（Shared Usage）；server 會宣告其 pinned 大小，讓監控可以扣除。
 
 ### 8.3 SSD 層
 

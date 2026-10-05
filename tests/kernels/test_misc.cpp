@@ -6,7 +6,7 @@
 //   * argmax / argmax_rows / argmax_rows_to / argmax_prob / draft_pick(_rows)
 //     tokens and control words exact (first maximum wins), probabilities vs
 //     CPU; set_tokens / set_rows exact; topk_rows candidate sets exact;
-//   * requant_q6k_q4k exact (CPU emulation); requant_q6k_d2 + gemv_d2_nt*
+//   * requant_q6k_q4k / requant_q80_q4k exact (CPU emulation); requant_q6k_d2 + gemv_d2_nt*
 //     vs CPU on the decoded 2-bit head and multi-token == 1-token (bitwise);
 //   * activation fusions (rmsnorm_x8/x16, silu_mul_x8/x16, gated_norm_x8/x16
 //     and the f16-input / fragment-tiled variants) == the unfused kernel
@@ -84,7 +84,7 @@ void testMisc(Ctx& c) {
         c.rep.add(cmpExact("rmsnorm_q8 xq == quantize_q8(out)", xq.down<std::int8_t>(rq.size()), rq));
         c.rep.add(cmpExact("rmsnorm_q8 xd == quantize_q8(out)", xd.down<float>(rd.size()), rd));
         // gathered rows
-        wk::Idx16 src;
+        wk::RowIdx src;
         const int pick[4] = {4, 0, 5, 2};
         for (int i = 0; i < 4; ++i) src.v[i] = pick[i];
         Buf o9(4 * static_cast<std::size_t>(n) * 4), xq9(4 * static_cast<std::size_t>(n)), xd9(4 * static_cast<std::size_t>(n) / 32 * 4);
@@ -171,7 +171,7 @@ void testMisc(Ctx& c) {
         hip::launch(c.k.argmax_rows, {static_cast<unsigned>(rows), 1, 1}, {1024, 1, 1}, 0, c.s, dx.p(), n, out.p());
         c.sync();
         c.rep.add(cmpExact("argmax_rows", out.down<int>(static_cast<std::size_t>(rows)), want));
-        wk::Idx16 dst;
+        wk::RowIdx dst;
         for (int r = 0; r < rows; ++r) dst.v[r] = 10 + 3 * r;
         out.fill(0xff);
         hip::launch(c.k.argmax_rows_to, {static_cast<unsigned>(rows), 1, 1}, {1024, 1, 1}, 0, c.s, dx.p(), n, out.p(), dst);
@@ -201,7 +201,7 @@ void testMisc(Ctx& c) {
             dt.fill(0x7f);
             for (int r = 0; r < 3; ++r)
                 hip::launch(c.k.draft_pick, {1, 1, 1}, {1024, 1, 1}, 0, c.s, dl.p() + static_cast<std::uint64_t>(r) * n * 4, n, dt.p(),
-                            dp.p(), ctl.p(), r, 1, 0.5f);
+                            dp.p(), ctl.p(), r, 1, 0.5f, hip::DevPtr{0});
             c.sync();
             const auto ht = dt.down<int>(3);
             const auto hc = ctl.down<int>(2);
@@ -220,10 +220,10 @@ void testMisc(Ctx& c) {
             // draft_pick_rows: two sequences' control areas, same logits rows as r = 0 / 1 above
             Buf ctl_all(2 * wk::kCtlWords * 4);
             ctl_all.zero();
-            wk::Idx16 area;
+            wk::RowIdx area;
             area.v[0] = 0;
             area.v[1] = wk::kCtlWords;
-            hip::launch(c.k.draft_pick_rows, {2, 1, 1}, {1024, 1, 1}, 0, c.s, dl.p(), n, ctl_all.p(), area, 0, 1, 0.5f);
+            hip::launch(c.k.draft_pick_rows, {2, 1, 1}, {1024, 1, 1}, 0, c.s, dl.p(), n, ctl_all.p(), area, 0, 1, 0.5f, hip::DevPtr{0});
             c.sync();
             const auto ca = ctl_all.down<int>(2 * wk::kCtlWords);
             const bool okr = ca[wk::kCtlDrafts] == ht[0] && ca[wk::kCtlWords + wk::kCtlDrafts] == ht[1] && ca[wk::kCtlNd] == 1 &&
@@ -234,6 +234,53 @@ void testMisc(Ctx& c) {
             rr.mismatches = okr ? 0 : 1;
             rr.pass = okr;
             c.rep.add(rr);
+            // draft-head vocabulary subset: an identity map gives the same tokens as no map; any map
+            // returns map[top] (draft_pick and draft_pick_rows)
+            {
+                std::vector<int> ident(static_cast<std::size_t>(n)), perm(static_cast<std::size_t>(n));
+                for (int i = 0; i < n; ++i) {
+                    ident[static_cast<std::size_t>(i)] = i;
+                    perm[static_cast<std::size_t>(i)] = 100000 + 3 * i;
+                }
+                Buf di(ident), dm(perm), t1(16 * 4), p1(16 * 4), c1(8), t2(16 * 4), p2(16 * 4), c2(8);
+                for (int r = 0; r < 2; ++r) {
+                    const hip::DevPtr row = dl.p() + static_cast<std::uint64_t>(r) * n * 4;
+                    hip::launch(c.k.draft_pick, {1, 1, 1}, {1024, 1, 1}, 0, c.s, row, n, t1.p(), p1.p(), c1.p(), r, 0, 0.f, di.p());
+                    hip::launch(c.k.draft_pick, {1, 1, 1}, {1024, 1, 1}, 0, c.s, row, n, t2.p(), p2.p(), c2.p(), r, 0, 0.f, dm.p());
+                }
+                Buf cm(2 * wk::kCtlWords * 4);
+                cm.zero();
+                hip::launch(c.k.draft_pick_rows, {2, 1, 1}, {1024, 1, 1}, 0, c.s, dl.p(), n, cm.p(), area, 0, 0, 0.f, dm.p());
+                c.sync();
+                const auto a1 = t1.down<int>(2), a2 = t2.down<int>(2);
+                const auto cmh = cm.down<int>(2 * wk::kCtlWords);
+                const int top0 = ht[0], top1 = firstMax(lg.data() + n, n);
+                const bool okm = a1[0] == top0 && a1[1] == top1 && a2[0] == perm[static_cast<std::size_t>(top0)] &&
+                                 a2[1] == perm[static_cast<std::size_t>(top1)] &&
+                                 cmh[wk::kCtlDrafts] == perm[static_cast<std::size_t>(top0)] &&
+                                 cmh[wk::kCtlWords + wk::kCtlDrafts] == perm[static_cast<std::size_t>(top1)];
+                Result rm;
+                rm.name = "draft_pick(_rows) with a vocabulary map (identity == no map, map[top])";
+                rm.n = 6;
+                rm.mismatches = okm ? 0 : 1;
+                rm.pass = okm;
+                c.rep.add(rm);
+            }
+            // copy_rows_map: dst row i = src row map[i] (2-bit draft-head rows, 1600 bytes for 5120 columns)
+            if (c.k.copy_rows_map != nullptr) {
+                const std::uint64_t rb = 1600;
+                const int nsrc = 64;
+                std::vector<std::uint8_t> src(static_cast<std::size_t>(nsrc) * rb);
+                for (std::size_t i = 0; i < src.size(); ++i) src[i] = static_cast<std::uint8_t>(i * 131 + i / rb * 7);
+                const std::vector<int> mp = {5, 0, 63, 17, 18};
+                Buf ds(src), dmp(mp), dd(mp.size() * rb);
+                hip::launch(c.k.copy_rows_map, {static_cast<unsigned>(mp.size()), 1, 1}, {256, 1, 1}, 0, c.s, ds.p(), rb, dd.p(), dmp.p());
+                c.sync();
+                const auto got = dd.down<std::uint8_t>(mp.size() * rb);
+                std::vector<std::uint8_t> want_rows;
+                for (int m : mp) want_rows.insert(want_rows.end(), src.begin() + static_cast<std::ptrdiff_t>(m * rb), src.begin() + static_cast<std::ptrdiff_t>((m + 1) * rb));
+                c.rep.add(cmpExact("copy_rows_map (vocabulary subset rows)", got, want_rows));
+            }
         }
         // set_tokens / set_rows
         {
@@ -312,12 +359,11 @@ void testMisc(Ctx& c) {
             hip::launch(c.k.requant_q6k_q4k, {static_cast<unsigned>(nr), static_cast<unsigned>(nsb), 1}, {256, 1, 1}, 0, c.s, src.p(),
                         head.row_bytes, dst.p(), rb4);
             c.sync();
-            std::vector<std::uint8_t> want(static_cast<std::size_t>(nr) * rb4);
-            for (int r = 0; r < nr; ++r) {
-                std::vector<float> v(static_cast<std::size_t>(ncols));
-                ref::dequantRow(QType::q6_k, head.data.data() + static_cast<std::size_t>(r) * head.row_bytes, ncols, v.data());
-                for (int sb = 0; sb < nsb; ++sb) {
-                    const float* x = v.data() + 256 * sb;
+            // CPU emulation of the Q4_K requantizer (same fit, same rounding) for one row
+            auto q4kRow = [](const float* v, int nc, std::uint8_t* orow) {
+                const int nsbl = nc / 256;
+                for (int sb = 0; sb < nsbl; ++sb) {
+                    const float* x = v + 256 * sb;
                     float scl[8], mnl[8];
                     for (int j = 0; j < 8; ++j) {
                         float mn = x[32 * j], mx = x[32 * j];
@@ -347,7 +393,7 @@ void testMisc(Ctx& c) {
                             qv[32 * j + i] = static_cast<std::uint8_t>(std::max(0, std::min(15, q)));
                         }
                     }
-                    std::uint8_t* o = want.data() + static_cast<std::size_t>(r) * rb4 + static_cast<std::size_t>(sb) * 144;
+                    std::uint8_t* o = orow + static_cast<std::size_t>(sb) * 144;
                     std::memcpy(o, &dh, 2);
                     std::memcpy(o + 2, &dmh, 2);
                     for (int i = 0; i < 4; ++i) {
@@ -360,8 +406,33 @@ void testMisc(Ctx& c) {
                         o[16 + t] = static_cast<std::uint8_t>(qv[64 * j64 + l] | (qv[64 * j64 + 32 + l] << 4));
                     }
                 }
+            };
+            std::vector<std::uint8_t> want(static_cast<std::size_t>(nr) * rb4);
+            for (int r = 0; r < nr; ++r) {
+                std::vector<float> v(static_cast<std::size_t>(ncols));
+                ref::dequantRow(QType::q6_k, head.data.data() + static_cast<std::size_t>(r) * head.row_bytes, ncols, v.data());
+                q4kRow(v.data(), ncols, want.data() + static_cast<std::size_t>(r) * rb4);
             }
             c.rep.add(cmpExact("requant_q6k_q4k (CPU emulation, " + std::to_string(nr) + " head rows)", dst.down<std::uint8_t>(want.size()), want));
+            // Q8_0 -> Q4_K (MTP blocks stored as Q8_0): the same fit on the Q8_0 values
+            if (c.k.requant_q80_q4k) {
+                HostMat q8 = loadMat(*f, "blk.64.attn_k.weight", 0, c.quick ? 128 : 1024);  // Q8_0 5120 x 1024
+                if (q8.type == QType::q8_0 && q8.ncols % 256 == 0) {
+                    const int nr8 = q8.nrows, nc8 = q8.ncols;
+                    const std::uint64_t rb8 = wk::rowBytes(QType::q4_k, nc8);
+                    Buf s8(q8.data), d8(static_cast<std::size_t>(nr8) * rb8);
+                    hip::launch(c.k.requant_q80_q4k, {static_cast<unsigned>(nr8), static_cast<unsigned>(nc8 / 256), 1}, {256, 1, 1}, 0, c.s,
+                                s8.p(), q8.row_bytes, d8.p(), rb8);
+                    c.sync();
+                    std::vector<std::uint8_t> w8(static_cast<std::size_t>(nr8) * rb8);
+                    for (int r = 0; r < nr8; ++r) {
+                        std::vector<float> v(static_cast<std::size_t>(nc8));
+                        ref::dequantRow(QType::q8_0, q8.data.data() + static_cast<std::size_t>(r) * q8.row_bytes, nc8, v.data());
+                        q4kRow(v.data(), nc8, w8.data() + static_cast<std::size_t>(r) * rb8);
+                    }
+                    c.rep.add(cmpExact("requant_q80_q4k (CPU emulation, " + std::to_string(nr8) + " rows)", d8.down<std::uint8_t>(w8.size()), w8));
+                }
+            }
 
             // Q6_K -> D2 and the D2 GEMV
             if (c.k.requant_q6k_d2) {
@@ -588,6 +659,47 @@ void testMisc(Ctx& c) {
             hip::launch(c.k.qact_fp8t, {static_cast<unsigned>(n), 1, 1}, {256, 1, 1}, 0, c.s, rn.p(), q.p(), sx.p(), E);
             c.sync();
             addSame("qact_fp8t == qact_fp8 (tiled layout)", q.down<std::uint8_t>(q.bytes()), tiled(r_rn.q8, E));
+        }
+    }
+
+    // ---------------- rmsnorm_x8h16(t): one norm -> fp8 (+sx) and f16, each bitwise
+    // equal to the unfused chain (rmsnorm -> qact_fp8 / qact_fp8t, rmsnorm -> f32_to_f16)
+    if (c.k.rmsnorm_x8h16 == nullptr || c.k.rmsnorm_x8h16t == nullptr || c.k.qact_fp8 == nullptr || c.k.qact_fp8t == nullptr) {
+        c.rep.skip("fp8", "rmsnorm_x8h16", "kernel not present");
+    } else {
+        for (const int E : {5120, 2048, 2064}) {
+            const std::vector<float> w = c.randu(E, 0.3f, 1.7f);
+            Buf dw(w);
+            for (const int n : {1, 17, 4096}) {
+                const std::size_t ne = static_cast<std::size_t>(n) * E, tl = ne + static_cast<std::size_t>(16) * E;
+                const std::vector<float> x = c.randn(ne, 2.f);
+                Buf dx(x), rn(ne * 4);
+                Buf r8(ne), r8t(tl), rsx(static_cast<std::size_t>(n) * 4), rsxt(static_cast<std::size_t>(n) * 4), r16(ne * 2);
+                Buf q8(ne), q8t(tl), sx(static_cast<std::size_t>(n) * 4), sxt(static_cast<std::size_t>(n) * 4), q16(ne * 2), q16t(ne * 2);
+                r8t.zero();
+                q8t.zero();
+                const unsigned nb = static_cast<unsigned>(n);
+                hip::launch(c.k.rmsnorm, {nb, 1, 1}, {256, 1, 1}, 0, c.s, dx.p(), dw.p(), rn.p(), E, E, E, eps);
+                hip::launch(c.k.qact_fp8, {nb, 1, 1}, {256, 1, 1}, 0, c.s, rn.p(), r8.p(), rsx.p(), E);
+                hip::launch(c.k.qact_fp8t, {nb, 1, 1}, {256, 1, 1}, 0, c.s, rn.p(), r8t.p(), rsxt.p(), E);
+                hip::launch(c.k.f32_to_f16, {cdiv(static_cast<std::uint64_t>(ne) / 4, 256), 1, 1}, {256, 1, 1}, 0, c.s, rn.p(), r16.p(),
+                            static_cast<int>(ne));
+                hip::launch(c.k.rmsnorm_x8h16, {nb, 1, 1}, {256, 1, 1}, 0, c.s, dx.p(), dw.p(), q8.p(), sx.p(), q16.p(), E, eps);
+                hip::launch(c.k.rmsnorm_x8h16t, {nb, 1, 1}, {256, 1, 1}, 0, c.s, dx.p(), dw.p(), q8t.p(), sxt.p(), q16t.p(), E, eps);
+                c.sync();
+                const std::string tag = " (E=" + std::to_string(E) + ", n=" + std::to_string(n) + ")";
+                const auto w16 = r16.down<std::uint8_t>(ne * 2);
+                const auto wsx = rsx.down<float>(static_cast<std::size_t>(n));
+                c.rep.add(cmpExact("rmsnorm_x8h16 q8 == rmsnorm + qact_fp8" + tag, q8.down<std::uint8_t>(ne), r8.down<std::uint8_t>(ne),
+                                   Kind::invariant));
+                c.rep.add(cmpExact("rmsnorm_x8h16 sx == qact_fp8" + tag, sx.down<float>(static_cast<std::size_t>(n)), wsx, Kind::invariant));
+                c.rep.add(cmpExact("rmsnorm_x8h16 q16 == rmsnorm + f32_to_f16" + tag, q16.down<std::uint8_t>(ne * 2), w16, Kind::invariant));
+                c.rep.add(cmpExact("rmsnorm_x8h16t q8 == rmsnorm + qact_fp8t" + tag, q8t.down<std::uint8_t>(tl), r8t.down<std::uint8_t>(tl),
+                                   Kind::invariant));
+                c.rep.add(cmpExact("rmsnorm_x8h16t sx == qact_fp8t" + tag, sxt.down<float>(static_cast<std::size_t>(n)),
+                                   rsxt.down<float>(static_cast<std::size_t>(n)), Kind::invariant));
+                c.rep.add(cmpExact("rmsnorm_x8h16t q16 == rmsnorm + f32_to_f16" + tag, q16t.down<std::uint8_t>(ne * 2), w16, Kind::invariant));
+            }
         }
     }
 

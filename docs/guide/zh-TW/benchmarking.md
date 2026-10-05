@@ -6,7 +6,7 @@
 > build 26200，HIP SDK 7.2），以 C++ 引擎之前的研究建置於 2026-09-25 → 2026-10-02 量測；C++ 引擎的輸出與它相同，
 > 速度差距在 ±1% 內。WHIRL 0.1.0 對 llama.cpp 的發行版量測見 [benchmarks.md](benchmarks.md)。
 
-**對誰有幫助：**在 AMD GPU 上比較推論引擎的人，或想量測小幅（1–5%）kernel 改進而不自欺的人；以及數據會隨溫度漂移的筆電／APU 使用者。
+**對誰有幫助**：在 AMD GPU 上比較推論引擎的人，或想量測小幅（1–5%）kernel 改進而不自欺的人；以及數據會隨溫度漂移的筆電／APU 使用者。
 
 ## 1. 原則
 
@@ -33,7 +33,7 @@
   修改讓一段英文摘要的文字從 105 變成 138 個 token；新文字較難預測（每個循環 2.76 → 2.42 個 token），
   該提示詞因而「變慢」，但每個循環其實變快了（40.6 → 39.9 ms）。應分別比較每循環 ms、多提示詞平均值
   與接受率。
-- **我們量到的雜訊下限：**R9700 上純 decode（逐 token 生成）的每 token ms 在不同行程間穩定在約 0.2%
+- **我們量到的雜訊下限**：R9700 上純 decode（逐 token 生成）的每 token ms 在不同行程間穩定在約 0.2%
   以內；MoE 模型在不同時段之間出現 ±3.5% 的雙峰偏移（同一二進位檔交錯執行為 198.0 對 198.1，但換個
   時段就不同）；自動草稿策略每次執行會增加 ±2–4%。不同 session（工作階段）之間的機器漂移可能看起來
   像 2–6% 的增益或損失；只有交錯執行才算數。
@@ -159,17 +159,17 @@ Qwen3.8-27B、R9700、greedy。除非另註，單位為 tok/s。
 
 如何解讀：
 
-- **Prefill（WHIRL）：**CLI、KV f16、MTP 關閉、2 輪交錯。WHIRL *server* 的冷 prefill（預設設定、
+- **Prefill（WHIRL**）：CLI、KV f16、MTP 關閉、2 輪交錯。WHIRL *server* 的冷 prefill（預設設定、
   分塊合併）在 Q4_K_M 為 1,560（8k）/ 1,413（30k），MXFP4 為 3,235 / 2,637。llama.cpp 數據來自統一
   server 協定。
-- **Decode：**統一 server 協定，19 個提示詞的平均。僅看編輯提示詞時，WHIRL 在 CLI 中以 MTP + n-gram
+- **Decode**：統一 server 協定，19 個提示詞的平均。僅看編輯提示詞時，WHIRL 在 CLI 中以 MTP + n-gram
   可達約 300（Q4_K_M）/ 330（MXFP4）tok/s。
 - **無 MTP decode** 受記憶體頻寬限制：每個 token 需讀 14.33 GB 權重，而這張卡串流速度為
   604–626 GB/s，最多約 38 tok/s；WHIRL 的單 token GEMV 達其 97–100%，一個 decode 步驟耗時
   27.74 ms（Q4_K_M）/ 25.15 ms（MXFP4）。要更快的 decode，就必須每次讀過權重時驗證多個 token。
-- **並行：**約 1.1k token 的提示詞，生成 256 個 token，`--ctx-per-slot 4096`；實際時間總和包含
+- **並行**：約 1.1k token 的提示詞，生成 256 個 token，`--ctx-per-slot 4096`；實際時間總和包含
   prefill。llama.cpp 的 64.1 是較舊的 `-np 4` 量測，使用相似但不完全相同的腳本。
-- **系統提示詞／還原：**預設 server；還原受 eGPU 連結限制（§7）。
+- **系統提示詞／還原**：預設 server；還原受 eGPU 連結限制（§7）。
 - 這些執行中 WHIRL 的每個輸出都通過 MTP/n-gram == plain greedy 與並行 == 單獨的檢查。
 
 ### 10.1 長 context（27B Q4_K_M）

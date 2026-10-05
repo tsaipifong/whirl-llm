@@ -15,6 +15,7 @@
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <limits>
@@ -305,8 +306,13 @@ bool Model::checkGemvBitwise(std::string& log) {
             all.add(output);
         for (const Mat& w : all.slice()) {
             const std::size_t t = ti(w.ty) % n_types;
-            if (li < layers.size() && (done[t] || k.gemvq[t] == nullptr)) continue;
-            if (k.gemvq[t] == nullptr) continue;
+            // f32 / f16 have no int8 GEMV: n = 1 runs gemv_<t>_1 (f32 activations), n = 2..16 the
+            // f16 GEMM. They are checked too (C-13): the check FAILS on such files until the
+            // multi-token path is made bitwise (known bug; WHIRL_GEMV_BITWISE_FLOAT=warn reports
+            // without failing).
+            const bool flt = w.ty == GgmlType::f32 || w.ty == GgmlType::f16;
+            if (li < layers.size() && done[t]) continue;
+            if (k.gemvq[t] == nullptr && !flt) continue;
             done[t] = true;
             const std::size_t nr = w.nrows;
             std::vector<float> ref(max_small_batch * nr), got(max_small_batch * nr);
@@ -348,9 +354,11 @@ bool Model::checkGemvBitwise(std::string& log) {
                 gemv_r = saved;
                 gemv_w = saved_w;
             }
-            if (bad > 0) all_ok = false;
+            const char* fw = std::getenv("WHIRL_GEMV_BITWISE_FLOAT");
+            const bool warn_only = flt && fw != nullptr && std::strcmp(fw, "warn") == 0;
+            if (bad > 0 && !warn_only) all_ok = false;
             log += fmt("    %-7s %ux%u: multi-token / multi-row GEMV bitwise == 1-token: %s\n", tyName(w.ty).c_str(), w.nrows, w.ncols,
-                       bad == 0 ? "ok" : "FAIL");
+                       bad == 0 ? "ok" : (warn_only ? "FAIL (known bug C-13, warn only)" : "FAIL"));
         }
     }
     gemv_r = saved;
@@ -431,9 +439,10 @@ bool Model::checkPrefillInvariance(std::string& log) {
 
 // attn_wsplit consistency: the grouped (verify) launch must give every query
 // the same partials, bit for bit, as its own one-query launch.
-bool Model::checkAttnGroups(std::string& log, u32 p0, u32 n) {
+bool Model::checkAttnGroups(std::string& log, u32 p0, u32 n, bool wide) {
     const u32 hd = cfg.head_dim;
     if (k.attn_wsplit1 == nullptr || hd != 256) return true;
+    if (wide && k.attn_wsplit2 == nullptr) return true;
     if (kv_kf16) return true;  // probe: q8 or f16 only
     std::size_t li_attn = 0;
     for (std::size_t i = 0; i < layers.size(); ++i)
@@ -513,7 +522,8 @@ bool Model::checkAttnGroups(std::string& log, u32 p0, u32 n) {
             }
             ng = n;
         }
-        hip::launch(k.attn_wsplit1, hip::Dim3{cfg.n_head_kv, n_split, ng}, hip::Dim3{128}, 0, stream, qf, kva, part_ml, part_acc,
+        hip::launch(mode == 0 && wide ? k.attn_wsplit2 : k.attn_wsplit1, hip::Dim3{cfg.n_head_kv, n_split, ng}, hip::Dim3{128}, 0, stream, qf,
+                    kva, part_ml, part_acc,
                     static_cast<i32>(cfg.n_head), static_cast<i32>(cfg.n_head_kv), static_cast<i32>(2 * hd), pos_buf, scale, u64(0), groups);
         hip::sync();
         hip::download((mode == 0 ? ml_a : ml_b).data(), part_ml, ml_n * 4);
@@ -536,8 +546,8 @@ bool Model::checkAttnGroups(std::string& log, u32 p0, u32 n) {
                     }
             }
     const bool ok = bad_ml == 0 && bad_acc == 0;
-    log += fmt("  attn_wsplit grouped vs per-query, %u queries at pos %u: ml mismatches %zu, acc mismatches %zu (max |d| %.3e) %s\n", n, p0, bad_ml,
-               bad_acc, maxd, ok ? "ok" : "FAIL");
+    log += fmt("  attn_wsplit%s grouped vs per-query, %u queries at pos %u: ml mismatches %zu, acc mismatches %zu (max |d| %.3e) %s\n",
+               wide ? "2" : "1", n, p0, bad_ml, bad_acc, maxd, ok ? "ok" : "FAIL");
     return ok;
 }
 
@@ -595,6 +605,9 @@ void loadOrTune(Model& m, const std::string& model_path, std::string& log) {
     if (auto v = envGet("GEMMH")) m.gemmh_on = *v != "0";
     if (auto v = envGet("GEMMHQ")) m.gemmhq_on = *v != "0";
     if (auto v = envGet("ATTN_KX")) m.attn_kx_on = *v != "0";
+    if (auto v = envGet("ATTN_KG")) m.attn_kg_on = *v != "0";
+    if (auto v = envGet("GDN_BA")) m.gdn_ba_on = *v != "0";
+    if (auto v = envGet("GDN_IN2")) m.gdn_in2_on = *v != "0";
     m.ffn_h16 = has_mx;
     // WHIRL_Q4_RELAXED=1: every non-bitwise prefill speedup for non-MXFP4 models too
     if (auto v = envGet("Q4_RELAXED"); v && *v != "0") {

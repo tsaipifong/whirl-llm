@@ -68,7 +68,9 @@ WHIRL 的 MTP 輸出與一般 greedy 輸出**逐位元相同**，適用於每一
 
 為什麼要堅持？因為「等價」無法測試，而且接近平手的情況很常見。早期一次重構讓多 token 內積的順序改變了一個 ulp，驗證 logits 與 decode logits 在最後幾個位元出現差異，接近平手的 token 被翻轉，MTP 輸出就不再與 greedy 相符。有了逐位元相等，MTP 與一般輸出之間的任何差異都是 bug，而 gate `MTP greedy == plain greedy` 會立即抓到。
 
-**一個從模型檔案而非引擎溜過的反例：** Swift-1.5 的某個量化版本把很小的 DeltaNet `ssm_alpha`/`ssm_beta` 矩陣存成 F32。WHIRL 沒有針對 F32 權重的 int8 GEMV：n = 1 使用 f32-activation（啟動值）GEMV，n ≥ 2 使用 f16 GEMM——數值行為不同。三個變體的 MTP 輸出都與一般 greedy 不同，自動草稿策略也退化成 1 個草稿。把這些矩陣重新量化為 Q8_0（它有融合的精確路徑，如 unsloth 的 Q4_K_M）就修好了。引擎端的修正（讓 F32 小矩陣在所有 n 下都走同一個 kernel）已列在待辦清單上。見 [quantization.md](quantization.md#f32-alpha-beta)。
+**一個從模型檔案而非引擎溜過的反例：** Swift-1.5 的某個量化版本把很小的 DeltaNet `ssm_alpha`/`ssm_beta` 矩陣存成 F32。WHIRL 沒有針對 F32 權重的 int8 GEMV：n = 1 使用 f32-activation（啟動值）GEMV，n ≥ 2 使用 f16 GEMM——數值行為不同，因此三個變體的 MTP 輸出都與一般 greedy 不同。把這些矩陣重新量化為 Q8_0（它有融合的精確路徑，如 unsloth 的 Q4_K_M）就修好了。
+
+**引擎端修正（0.1.3）**。F32／F16 權重在 n = 2..16 時改走與 n = 1 相同的 f32-activation GEMV（`gemv_<T>_8／_4／_1`），每個 token 都與單列結果逐位元相同，這類檔案（例如 Cyber-Tiel 系列，以及某些 Q4_0／Q4_K_M 量化）的推測解碼輸出因此等於單純 greedy。**但它們仍只能用 1 個草稿**：融合的 DeltaNet decode 路徑（`gdn_ab`）只支援 Q8_0 與 MXFP4 的 α/β，沒有它（`fusedDecode()` 為 false）時，每次 verify 只寫入一組遞迴狀態快照。這是**硬性上限**，不是成本模型的選擇：CLI（MTP 與 n-gram）與 server 都把草稿限制為 1（server 啟動訊息會顯示「fused decode off: 1 used」）。還原未寫入的快照現在會拋出 `SnapshotNotWritten`，不再默默偏離。要使用完整草稿數，請把 α/β 重新量化為 Q8_0（[quantization.md](quantization.md#f32-alpha-beta)）。
 
 Gate：兩個模型在中文與英文提示詞上的 CLI MTP 對一般解碼；草稿數 1、2、5、10 全部相同；每個循環強制使用 n-gram == 一般解碼；server 與並行變體（[benchmarking.md](benchmarking.md#gates)）。
 
@@ -117,7 +119,7 @@ attention 的 KV 快取可以透過忽略超出接受長度的位置來「回滾
 
 **Server 的特殊處理：**
 
-- 依 decode 中的 slot 數設定草稿上限（dense）：1–4 個 slot 分別為 `{8, 7, 4, 3}`，即最多 16 個驗證列；成本模型在上限內選擇。把 4-slot 的上限從 2 提高到 3（16 列）在四個使用者時帶來 +10%。
+- 依 decode 中的 slot 數設定草稿上限（dense）：1–8 個 slot 分別為 `{8, 7, 4, 3, 2, 1, 1, 1}`（更多為 0），讓 MTP 的 verify 維持在 16 列以內；n-gram 草稿在寬 verify 下總共最多可用 32 列（[server.md](server.md#batching)）。成本模型在上限內選擇。把 4-slot 的上限從 2 提高到 3（16 列）在四個使用者時帶來 +10%。
 - 草稿數為零時（使用者太多），MTP 層仍會處理被接受的 token（不跑草稿 head），讓它的 KV 快取保持完整，草擬可以立刻恢復。
 - **當請求在閒置的引擎上開始時，重設計時表。** server 原本跨請求保留循環時間表；單一使用者連續送出請求時，從第二個請求起就拿到過多的草稿（8060S：每循環約 4.5 個草稿，CLI 中約 3.3 個）。在閒置啟動時重設讓請求 2–4 快了 +4.1%，server 相對 CLI 的速度從 −3.6% 變成 −0.5%。
 - 逐 slot 的草稿數（把草稿從最不可能被接受的 slot 移到最可能的 slot）在兩個混合使用者時帶來 +13%，但讓低接受率的請求慢了約 10%、固定批次的總耗時慢了 5%；為了公平性維持關閉。
@@ -137,7 +139,7 @@ attention 的 KV 快取可以透過忽略超出接受長度的位置來「回滾
 
 搭配自動策略的交錯 A/B：R9700 27B +2.4%、MoE +2.0%；8060S +1.5% / +2.5%。（每個草稿的接受率從 63.2% 降到 59.4%，因為策略送出了更多草稿；每秒 token 數上升。）
 
-**Q4_K 的 MTP 區塊。** 把 MTP 層的 Q6_K 矩陣（約 330 MB）重新量化為 Q4_K（約 225 MB）一開始被否決（接受率 −1.5 個百分點，速度 −1.6%）。在其他加速完成後重新量測，它帶來單一使用者 +0.8%，並把四個使用者時每循環的 MTP 時間從 5.00 降到 4.35 ms，因此現在是 dense 模型的預設——這是為什麼核心變快後要重新測試被否決的小點子的一個例子。
+**Q4_K 的 MTP 區塊。** 把 MTP 層的 Q6_K 矩陣（約 330 MB）重新量化為 Q4_K（約 225 MB）一開始被否決（接受率 −1.5 個百分點，速度 −1.6%）。在其他加速完成後重新量測，它帶來單一使用者 +0.8%，並把四個使用者時每循環的 MTP 時間從 5.00 降到 4.35 ms，因此現在是 dense 模型的預設——這是為什麼核心變快後要重新測試被否決的小點子的一個例子。MTP 區塊以 **Q8_0** 儲存的檔案（Swift-1.5 MXFP4 系列：每個草稿步約 450 MB，外加 2-bit head）也會得到同樣的 Q4_K 副本（`requant_q80_q4k`，約 240 MB）；輸出不變。Swift MXFP4-A、R9700、約 16k token 的 prompt、穩態 decode：單一使用者 78.3 → 85.4 tok/s，四位使用者合計 213.7 → 221.2 tok/s（兩者皆已含 `attn_wsplit2`）。
 
 **被否決的：** Q3_K 草稿 head（接受率不變，但它的 GEMV 只跑到約 488 GB/s：+0.3%）；把草稿詞彙表截斷為前 N 個 token id（中文 token 的 id 很高：接受率從 82% 降到 28–33%；後來以 150,000/100,000 個 id 測試，2.58 → 2.43 tokens/循環）。
 

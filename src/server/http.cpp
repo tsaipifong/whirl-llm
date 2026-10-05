@@ -5,6 +5,7 @@
 #include "http.h"
 
 #include "log.h"
+#include "whirl/version.h"
 
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -13,6 +14,7 @@
 #include <cstring>
 #include <format>
 #include <mutex>
+#include <set>
 #include <string>
 #include <string_view>
 
@@ -257,6 +259,7 @@ void buildJob(Engine& e, Job& job, std::string_view path, std::string_view body)
     const json::Object& obj = root.asObject();
     if (job.kind == JobKind::chat) {
         chat::ChatRequest req = chat::parseChatRequest(root);
+        for (const std::string& warn : req.warnings) logW("req {} | POST {} | {}", job.id, path, warn);
         const VisionConfig& vc = e.visionConfig();
         // vision: image parts render as the Qwen placeholder when an mmproj is loaded
         checkMediaParts(req.messages, vc.vis != nullptr);
@@ -309,6 +312,51 @@ void buildJob(Engine& e, Job& job, std::string_view path, std::string_view body)
         logI("req {} | POST {} | stream {}", job.id, path, job.params.stream ? "on" : "off");
     }
     if (job.tokens.empty()) throw RequestError("the prompt is empty");
+}
+
+// The model's file name for GET /props: never a directory (the option is set to
+// the bare file name; anything before a path separator is dropped regardless).
+std::string_view modelFileName(const EngineOptions& o) {
+    std::string_view f = o.model_file.empty() ? std::string_view(o.model_name) : std::string_view(o.model_file);
+    if (const std::size_t sep = f.find_last_of("/\\:"); sep != std::string_view::npos) f = f.substr(sep + 1);
+    return f;
+}
+
+// GET /props: the subset of llama.cpp server's /props that clients read to
+// auto-detect the context window and slot count (written from the documented
+// JSON shape). No chat_template: WHIRL renders built-in templates, not Jinja.
+std::string propsJson(Engine& e) {
+    const EngineOptions& o = e.options();
+    const Engine::Health hs = e.health();
+    std::string b = "{\"default_generation_settings\":{\"id\":0,\"n_ctx\":";
+    b += std::to_string(o.ctx);
+    b += ",\"model\":";
+    appendJsonStr(b, o.model_name);
+    b += std::format(",\"speculative\":{},\"is_processing\":{}}}", o.use_mtp ? "true" : "false",
+                     hs.active > 0 ? "true" : "false");
+    b += std::format(",\"total_slots\":{},\"model_path\":", hs.slots);
+    appendJsonStr(b, modelFileName(o));
+    b += ",\"model_alias\":";
+    appendJsonStr(b, o.model_name);
+    b += std::format(",\"modalities\":{{\"vision\":{},\"audio\":false}},\"build_info\":\"whirl {}\"}}",
+                     e.visionConfig().vis ? "true" : "false", WHIRL_VERSION_STRING);
+    return b;
+}
+
+// Paths that other servers' clients probe to detect the server type (LM Studio,
+// Ollama). WHIRL does not emulate those native APIs: answering them would make a
+// client switch to an API WHIRL lacks. 404, logged once per path at 'I' level
+// instead of a warning per request.
+bool isKnownProbe(std::string_view path) {
+    return path == "/api/v1/models" || path == "/api/tags" || path == "/api/version" || path == "/api/show" ||
+           path == "/api/v0/models";
+}
+
+bool firstProbe(std::string_view path) {
+    static std::mutex mu;
+    static std::set<std::string, std::less<>> seen;
+    std::lock_guard<std::mutex> lk(mu);
+    return seen.emplace(path).second;
 }
 
 void handleConn(Engine& e, SOCKET s) {
@@ -400,9 +448,24 @@ void handleConn(Engine& e, SOCKET s) {
             cfg.n_layer, e.options().use_mtp ? "true" : "false");
         return sendAll(w, httpResponse(200, "application/json; charset=utf-8", b));
     }
+    if (path == "/props" || path == "/v1/props") {
+        if (!is_get) return sendAll(w, errorResponse(405, "use GET"));
+        return sendAll(w, httpResponse(200, "application/json; charset=utf-8", propsJson(e)));
+    }
+    if (path == "/version" || path == "/v1/version") {
+        if (!is_get) return sendAll(w, errorResponse(405, "use GET"));
+        return sendAll(w, httpResponse(200, "application/json; charset=utf-8",
+                                       std::format("{{\"version\":\"{}\",\"name\":\"whirl\"}}", WHIRL_VERSION_STRING)));
+    }
     const bool is_chat = path == "/v1/chat/completions" || path == "/chat/completions";
     const bool is_cmpl = path == "/v1/completions" || path == "/completions";
     if (!is_chat && !is_cmpl) {
+        if (isKnownProbe(path)) {
+            if (firstProbe(path))
+                logI("{} {} -> 404 (probe for another server type; further probes of this path are not logged)", method,
+                     path);
+            return sendAll(w, errorResponse(404, "not found"));
+        }
         logW("{} {} -> 404", method, path);
         return sendAll(w, errorResponse(404, "not found"));
     }

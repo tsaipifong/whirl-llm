@@ -115,7 +115,10 @@ Engine::Engine(ServerModel& model, tier::DeviceOps& ops, const Tokenizer& tok, c
     }
     conv_bytes_ = m_.convBytes();
     ssm_bytes_ = m_.ssmBytes();
+    vrows_ = std::clamp(m_.verifyRows(), max_small_batch, qwen35::max_verify_rows);
     if (opt_.ngram && opt_.use_mtp) crlf_norm_ = ChatTokens::crlfToLf(tok_);
+    floor_.configure(opt_.decode_min_tps);
+    floor_epoch_ = Clock::now();
 }
 
 Engine::~Engine() {
@@ -141,12 +144,12 @@ void Engine::initCkpt(Ckpt& c, bool host_ok) {
     c.conv.assign(L, 0);
     c.ssm.assign(L, 0);
     const auto ssm0 = m_.ssmState();
+    std::uint64_t n_gdn = 0;
+    for (std::uint32_t li = 0; li < L; ++li)
+        if (ssm0[li] != 0) ++n_gdn;
+    auto al = [](std::uint64_t x) { return (x + 255) / 256 * 256; };
     if (host_ok && opt_.ckpt_host) {
         // one pinned host buffer per checkpoint; save / load copy over PCIe
-        std::uint64_t n_gdn = 0;
-        for (std::uint32_t li = 0; li < L; ++li)
-            if (ssm0[li] != 0) ++n_gdn;
-        auto al = [](std::uint64_t x) { return (x + 255) / 256 * 256; };
         const std::uint64_t total = n_gdn * (al(conv_bytes_) + al(ssm_bytes_)) + V * 4;
         c.host = ops_.hostMalloc(total);
         std::uint64_t p = reinterpret_cast<std::uint64_t>(c.host);
@@ -162,13 +165,21 @@ void Engine::initCkpt(Ckpt& c, bool host_ok) {
         c.hid = ops_.malloc(static_cast<std::uint64_t>(cfg.n_embd) * 4);
         return;
     }
+    // one VRAM allocation per checkpoint, sliced like the pinned layout (256-byte aligned parts);
+    // separate allocations per GDN layer (~98 on the 27B models) cost allocation granularity
+    const std::uint64_t hid_bytes = al(static_cast<std::uint64_t>(cfg.n_embd) * 4);
+    c.dev = ops_.malloc(n_gdn * (al(conv_bytes_) + al(ssm_bytes_)) + hid_bytes + V * 4);
+    std::uint64_t p = c.dev;
     for (std::uint32_t li = 0; li < L; ++li) {
         if (ssm0[li] == 0) continue;
-        c.conv[li] = ops_.malloc(conv_bytes_);
-        c.ssm[li] = ops_.malloc(ssm_bytes_);
+        c.conv[li] = p;
+        p += al(conv_bytes_);
+        c.ssm[li] = p;
+        p += al(ssm_bytes_);
     }
-    c.hid = ops_.malloc(static_cast<std::uint64_t>(cfg.n_embd) * 4);
-    c.logits = ops_.malloc(V * 4);
+    c.hid = p;
+    p += hid_bytes;
+    c.logits = p;
 }
 
 void Engine::freeCkpt(Ckpt& c) {
@@ -176,13 +187,9 @@ void Engine::freeCkpt(Ckpt& c) {
         ops_.hostFree(c.host);
         c.host = nullptr;
         if (c.hid) ops_.free(c.hid);
-    } else {
-        for (DevPtr p : c.conv)
-            if (p) ops_.free(p);
-        for (DevPtr p : c.ssm)
-            if (p) ops_.free(p);
-        if (c.hid) ops_.free(c.hid);
-        if (c.logits) ops_.free(c.logits);
+    } else if (c.dev) {
+        ops_.free(c.dev);  // conv / ssm / hid / logits are slices of it
+        c.dev = 0;
     }
     c.conv.clear();
     c.ssm.clear();
@@ -235,6 +242,7 @@ void Engine::attachTier(tier::Tier* t) {
         t->setWake([this] {
             std::lock_guard<std::mutex> lk(q_mutex_);
             tier_wake_ = true;
+            ++wake_seq_;
             q_cond_.notify_all();
         });
         t->log_fn = [](std::string_view msg) { logI("{}", msg); };
@@ -1281,6 +1289,8 @@ bool Engine::startJob(Slot& sl, Job& job) {
     sl.n_batch = 0;
     sl.acc_ema = static_cast<float>(opt_.n_draft);
     sl.dacc = qwen35::DraftAccept{};
+    sl.sacc = qwen35::SlotAccept{};
+    sl.d_prev = 0;
     sl.ng.reset();
     sl.ng.ng.norm = crlf_norm_;
     sl.ng_cycles = 0;
@@ -1289,6 +1299,9 @@ bool Engine::startJob(Slot& sl, Job& job) {
         for (Slot& o : slots_) others = others || (&o != &sl && o.phase == Phase::decode);
         if (!others) {
             for (auto& t : timing_) t = qwen35::DraftTiming{};
+            for (auto& c : ccost_) c.reset();
+            ccost_primed_.fill(false);
+            dpool_ = qwen35::DraftAccept{};
             prev_nd_ = 0;
         }
     }
@@ -1301,8 +1314,13 @@ std::size_t Engine::chunkLen(const Slot& sl) const {
     const std::size_t lim = schedNextV(sl.job->tokens.size(), sl.sys_split, sl.pf_split, imgSplits(sl.job->tokens), cur);
     std::size_t n = prefillChunkLen(lim - cur);
     if (opt_.prefill_exec <= prefill_chunk) return n;
-    for (const Slot& o : slots_)
-        if (&o != &sl && o.phase == Phase::decode) return n;
+    // With the decode floor on, any decoding slot keeps forwards at one chunk, also
+    // an unprotected one of the same burst: next to a long prompt a 2048-row forward
+    // doubled its stall (96k: 1.2 -> 3.3 s, ~1.5 tok/s) for ~4% faster prefill.
+    // With the floor off (--decode-min-tps 0, throughput first) chunks merge anyway.
+    if (floor_.on())
+        for (const Slot& o : slots_)
+            if (&o != &sl && o.phase == Phase::decode) return n;
     while (cur + n < lim) {
         if (sl.lcp_ck > 0 && cur + n == sl.lcp_ck) break;  // a shared-prefix checkpoint is kept there
         const std::size_t nx = prefillChunkLen(lim - cur - n);
@@ -1347,7 +1365,9 @@ void Engine::prefillStep(Slot& sl) {
     if (sl.pf_off == toks.size()) finishPrefill(sl);
 }
 
-void Engine::prefillGroup(Slot& first) {
+// Returns the rows run (0 when nothing ran). row_budget caps the rows of the
+// whole forward; the oldest request's chunk always runs (decode floor).
+std::size_t Engine::prefillGroup(Slot& first, std::size_t row_budget) {
     const std::size_t n0 = chunkLen(first);
     const std::size_t small_max = max_small_batch;
     auto solo = [&] {
@@ -1359,9 +1379,9 @@ void Engine::prefillGroup(Slot& first) {
     };
     if (!opt_.seg_prefill || n0 <= small_max || !m_.canSegment()) {
         solo();
-        return;
+        return n0;
     }
-    const std::size_t cap = m_.maxBatch();
+    const std::size_t cap = std::min<std::size_t>(m_.maxBatch(), std::max(row_budget, n0));
     // the other prefilling slots, oldest first
     std::vector<Slot*> cand;
     for (Slot& sl : slots_) {
@@ -1386,7 +1406,7 @@ void Engine::prefillGroup(Slot& first) {
     }
     if (grp.size() == 1) {
         solo();
-        return;
+        return n0;
     }
     // pool pages for every chunk of the group (a slot that cannot get them fails alone)
     {
@@ -1405,7 +1425,7 @@ void Engine::prefillGroup(Slot& first) {
             kept.push_back(sl);
         }
         grp = std::move(kept);
-        if (grp.empty()) return;
+        if (grp.empty()) return 0;
     }
     std::vector<PSeg> segs(grp.size());
     for (std::size_t k = 0; k < grp.size(); ++k) {
@@ -1421,7 +1441,7 @@ void Engine::prefillGroup(Slot& first) {
         m_.prefillSegs(segs, opt_.use_mtp);
     } catch (const std::exception& ex) {
         for (Slot* sl : grp) failSlot(*sl, ex.what());
-        return;
+        return 0;
     }
     stat_prefill_tok_ += total;
     stat_seg_batches_ += 1;
@@ -1450,6 +1470,7 @@ void Engine::prefillGroup(Slot& first) {
             failSlot(sl, ex.what());
         }
     }
+    return static_cast<std::size_t>(r0);
 }
 
 void Engine::finishPrefill(Slot& sl) {
@@ -1564,16 +1585,51 @@ void Engine::finishPrefill(Slot& sl) {
     if (sl.done || sl.st.gone) finishJob(sl);
 }
 
+std::vector<std::uint32_t> planSlotDrafts(std::span<const DraftPlanSlot> slots, const qwen35::CycleCost& cost,
+                                          std::uint32_t uniform, std::uint32_t cap, std::uint32_t rows, std::uint32_t snaps) {
+    std::vector<qwen35::AllocSlot> in(slots.size());
+    std::vector<std::uint32_t> prev(slots.size(), 0);
+    bool have_prev = true;
+    for (std::size_t k = 0; k < slots.size(); ++k) {
+        const DraftPlanSlot& s = slots[k];
+        in[k].acc = s.acc;
+        in[k].cap = cap;
+        in[k].ctx_k = static_cast<float>(s.pos) / 1024.0f;
+        in[k].ng_rows = s.ng_rows;
+        in[k].ng_e = s.ng_e;
+        if (s.ng_rows == 0) {
+            prev[k] = std::min(s.d_prev, cap);
+            have_prev = have_prev && s.d_prev > 0;
+        }
+    }
+    if (!have_prev) prev.clear();
+    const qwen35::AllocResult r =
+        qwen35::allocDrafts(in, cost, qwen35::AllocBudget{rows, snaps}, uniform, std::span<const std::uint32_t>(prev));
+    std::vector<std::uint32_t> out;
+    for (std::size_t k = 0; k < slots.size(); ++k)
+        if (slots[k].ng_rows == 0) out.push_back(r.d[k]);
+    return out;
+}
+
 std::uint32_t Engine::pickDrafts(std::span<Slot* const> act) {
     if (!opt_.use_mtp) return 0;
     const std::uint32_t A = static_cast<std::uint32_t>(act.size());
     std::uint32_t nd = std::min(opt_.batch_drafts[std::min(A, gdn_max_seg)], opt_.n_draft);
     if (!m_.fusedDecode()) nd = std::min(nd, 1u);
-    while (nd > 0 && (A * (nd + 1) > max_small_batch || A * nd > qwen35::gdn_max_snap)) nd -= 1;
+    while (nd > 0 && (A * (nd + 1) > vrows_ || (!m_.gdnReplay() && A * nd > qwen35::gdn_max_snap))) nd -= 1;
     if (nd == 0) return 0;
     if (opt_.mtp_auto) {
         std::vector<const qwen35::DraftAccept*> accs;
-        for (Slot* sl : act) accs.push_back(&sl->dacc);
+        std::vector<qwen35::DraftAccept> eff;
+        eff.reserve(act.size());
+        for (Slot* sl : act) {
+            if (opt_.slot_drafts == 2 && act.size() >= 2) {  // one slot: exactly as before
+                eff.push_back(sl->sacc.effective(dpool_));
+                accs.push_back(&eff.back());
+            } else {
+                accs.push_back(&sl->dacc);
+            }
+        }
         const std::uint32_t pick = qwen35::pickDrafts(accs, timing_[std::min(A, gdn_max_seg)], nd, n_cycles_, prev_nd_);
         prev_nd_ = pick;
         return pick;
@@ -1611,13 +1667,14 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
     if (A == 0) return;
     // n-gram drafts per slot (history = cache_tokens + next) when they promise
     // more tokens per ms than MTP drafts
-    std::array<std::uint32_t, gdn_max_seg> ng_n{};
+    std::array<std::uint32_t, gdn_max_seg> ng_n{}, ng_ml{};
     std::array<std::array<std::uint32_t, qwen35::max_ng_drafts>, gdn_max_seg> ng_d{};
     std::size_t n_ng = 0;
-    const std::uint32_t snap_cap = m_.gdnReplay() ? qwen35::gdn_max_snap : std::min(qwen35::gdn_max_snap, m_.snapSets());
+    // replay keeps no snapshot sets: the verify row budget is the only shared limit
+    const std::uint32_t snap_cap = m_.gdnReplay() ? vrows_ : std::min(qwen35::gdn_max_snap, m_.snapSets());
     if (opt_.ngram && opt_.use_mtp) {
         const std::uint32_t Au = static_cast<std::uint32_t>(A);
-        std::uint32_t lim = std::min({qwen35::max_ng_drafts, snap_cap / Au, max_small_batch / Au > 0 ? max_small_batch / Au - 1 : 0u});
+        std::uint32_t lim = std::min({qwen35::max_ng_drafts, snap_cap / Au, vrows_ / Au > 0 ? vrows_ / Au - 1 : 0u});
         if (opt_.ngram_max > 0) lim = std::min(lim, opt_.ngram_max);
         if (!m_.fusedDecode()) lim = std::min(lim, 1u);
         const qwen35::DraftTiming& tm = timing_[std::min<std::size_t>(A, gdn_max_seg)];
@@ -1640,7 +1697,14 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
             const auto mt = sl.ng.propose(sl.cache_tokens, opt_.ngram_min, std::span<std::uint32_t>(ng_d[k].data(), lim_k));
             if (mt.n == 0) continue;
             float mtp_score = 0;
-            if (auto t = tm.estimate(nd0)) mtp_score = sl.dacc.expected(nd0) / *t;
+            if (opt_.slot_drafts == 2 && A >= 2) {
+                // against this slot's own last MTP allocation and its effective acceptance (one slot: as before)
+                const std::uint32_t d = sl.d_prev > 0 ? sl.d_prev : nd0;
+                if (auto t = tm.estimate(d)) mtp_score = sl.sacc.effective(dpool_).expected(d) / *t;
+            } else if (auto t = tm.estimate(nd0)) {
+                mtp_score = sl.dacc.expected(nd0) / *t;
+            }
+            ng_ml[k] = mt.mlen;
             ng_n[k] = opt_.ngram_force ? static_cast<std::uint32_t>(mt.n) : sl.ng.choose(mt.n, mt.mlen, mtp_score, tm);
             if (ng_n[k] > 0) n_ng += 1;
         }
@@ -1652,10 +1716,10 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
     const std::size_t n_mtp = act_mtp.size();
     std::uint32_t nd = n_mtp > 0 ? pickDrafts(act_mtp) : 0;
     {
-        // keep the verify within max_small_batch rows and gdn_max_snap snapshots
+        // keep the verify within vrows_ rows (and the snapshot sets without replay)
         std::uint32_t ng_tot = 0;
         for (std::size_t k = 0; k < A; ++k) ng_tot += ng_n[k];
-        while (nd > 0 && (static_cast<std::uint32_t>(A) + ng_tot + static_cast<std::uint32_t>(n_mtp) * nd > max_small_batch ||
+        while (nd > 0 && (static_cast<std::uint32_t>(A) + ng_tot + static_cast<std::uint32_t>(n_mtp) * nd > vrows_ ||
                           ng_tot + static_cast<std::uint32_t>(n_mtp) * nd > snap_cap))
             nd -= 1;
     }
@@ -1666,9 +1730,39 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
         std::uint32_t ng_tot = 0;
         for (std::size_t k = 0; k < A; ++k) ng_tot += ng_n[k];
         const std::uint32_t used = static_cast<std::uint32_t>(A) + ng_tot;
-        const std::uint32_t rows_free = max_small_batch > used ? max_small_batch - used : 0;
+        const std::uint32_t rows_free = vrows_ > used ? vrows_ - used : 0;
         const std::uint32_t snap_free = snap_cap > ng_tot ? snap_cap - ng_tot : 0;
-        splitDrafts(act_mtp, nd, std::min(rows_free, snap_free), std::span<std::uint32_t>(nd_m.data(), n_mtp));
+        if (opt_.slot_drafts == 2 && nd > 0) {
+            const std::size_t ia = std::min<std::size_t>(A, gdn_max_seg);
+            qwen35::CycleCost& cc = ccost_[ia];
+            if (!ccost_primed_[ia] && cc.samples() == 0) {
+                float ctx_k = 0;
+                for (Slot* s : act) ctx_k += static_cast<float>(s->pos) / 1024.0f;
+                cc.prior(timing_[ia], static_cast<std::uint32_t>(A), ctx_k / static_cast<float>(A));
+                ccost_primed_[ia] = true;
+            }
+            std::vector<qwen35::DraftAccept> eff;
+            eff.reserve(A);
+            std::vector<DraftPlanSlot> ps(A);
+            for (std::size_t k = 0; k < A; ++k) {
+                Slot& s = *act[k];
+                ps[k].pos = s.pos;
+                ps[k].d_prev = s.d_prev;
+                if (ng_n[k] > 0) {
+                    ps[k].ng_rows = ng_n[k] + 1;
+                    ps[k].ng_e = s.ng.acc[qwen35::NgramPolicy::bucket(ng_ml[k])].expected(ng_n[k]);
+                } else {
+                    eff.push_back(s.sacc.effective(dpool_));
+                    ps[k].acc = &eff.back();
+                }
+            }
+            const std::uint32_t cap = !m_.fusedDecode() ? 1u : std::min({opt_.n_draft, qwen35::max_drafts, max_small_batch - 1});
+            const std::vector<std::uint32_t> d = planSlotDrafts(ps, cc, nd, cap, vrows_, snap_free);
+            for (std::size_t i = 0; i < n_mtp; ++i) nd_m[i] = d[i];
+        } else {
+            splitDrafts(act_mtp, nd, std::min(rows_free, snap_free), std::span<std::uint32_t>(nd_m.data(), n_mtp));
+        }
+        for (std::size_t i = 0; i < n_mtp; ++i) act_mtp[i]->d_prev = nd_m[i];
         nd_max = 0;
         for (std::size_t i = 0; i < n_mtp; ++i) nd_max = std::max(nd_max, nd_m[i]);
     }
@@ -1758,12 +1852,35 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
         p->enq_ms[pa] += std::chrono::duration<double, std::milli>(t_enq - tc0).count();
     }
     if (any_sampling) ops_.download(samp_host_.data(), samp_dev_, sampBytes());
-    if (nd > 0 && n_ng == 0) {
+    const float cycle_ms = static_cast<float>(msSince(tc0));
+    if (opt_.slot_drafts == 2 && opt_.use_mtp) {
+        // every cycle (uniform, per-slot, with n-gram slots) trains the cost model of A slots;
+        // a per-slot cycle reaches timing_ as the time the uniform split would have taken
+        qwen35::CycleCost& cc = ccost_[std::min<std::size_t>(A, gdn_max_seg)];
+        qwen35::CycleFeat x, xu;
+        bool uni = n_ng == 0;
+        for (std::size_t k = 0; k < A; ++k) {
+            const float ctx_k = static_cast<float>(act[k]->pos) / 1024.0f;
+            x.rows += static_cast<float>(nd_of[k] + 1);
+            x.row_ctx += static_cast<float>(nd_of[k] + 1) * ctx_k;
+            xu.rows += static_cast<float>(nd + 1);
+            xu.row_ctx += static_cast<float>(nd + 1) * ctx_k;
+            uni = uni && nd_of[k] == nd;
+        }
+        x.steps = static_cast<float>(nd_max);
+        xu.steps = static_cast<float>(nd);
+        if (nd > 0 && n_ng == 0) {
+            if (uni) timing_[std::min<std::size_t>(A, gdn_max_seg)].update(nd, cycle_ms);
+            else if (cc.samples() >= 16)
+                timing_[std::min<std::size_t>(A, gdn_max_seg)].update(nd, cycle_ms * cc.predict(xu) / cc.predict(x));
+        }
+        cc.observe(x, cycle_ms);
+    } else if (nd > 0 && n_ng == 0) {
         // swaps keep the rows of the common count (an extra step at most)
         std::uint32_t tot = 0;
         for (std::size_t i = 0; i < n_mtp; ++i) tot += nd_m[i];
         if (tot == nd * static_cast<std::uint32_t>(n_mtp))
-            timing_[std::min<std::size_t>(A, gdn_max_seg)].update(nd, static_cast<float>(msSince(tc0)));
+            timing_[std::min<std::size_t>(A, gdn_max_seg)].update(nd, cycle_ms);
     }
     if (n_ng == A) {
         // n-gram cycle times (every slot drafted from its history): per slot
@@ -1829,6 +1946,10 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
             // n-gram cycles stay out of the MTP acceptance models
             sl.acc_ema = 0.7f * sl.acc_ema + 0.3f * static_cast<float>(acc);
             sl.dacc.update(nd_dev, acc);
+            if (opt_.slot_drafts == 2 && nd_dev > 0) {
+                sl.sacc.observe(nd_dev, acc);
+                dpool_.update(nd_dev, acc);
+            }
         }
         // an accepted end-of-turn draft ends the reply: the trunk keeps only the
         // rows before it and the stop token becomes `chosen`
@@ -1911,7 +2032,7 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
 
 void Engine::splitDrafts(std::span<Slot* const> act, std::uint32_t nd, std::uint32_t rows, std::span<std::uint32_t> nd_m) {
     for (auto& x : nd_m) x = nd;
-    if (!opt_.slot_drafts || !opt_.mtp_auto || act.size() < 2 || nd == 0) return;
+    if (opt_.slot_drafts != 1 || !opt_.mtp_auto || act.size() < 2 || nd == 0) return;
     const std::uint32_t cap = std::min(opt_.n_draft, qwen35::max_drafts);
     std::uint32_t used = nd * static_cast<std::uint32_t>(act.size());
     float e_tot = 0;
@@ -1967,7 +2088,7 @@ void Engine::splitDrafts(std::span<Slot* const> act, std::uint32_t nd, std::uint
 std::uint32_t Engine::draftCap(std::uint32_t A) {
     std::uint32_t nd = std::min(opt_.batch_drafts[std::min(A, gdn_max_seg)], opt_.n_draft);
     if (!m_.fusedDecode()) nd = std::min(nd, 1u);
-    while (nd > 0 && (A * (nd + 1) > max_small_batch || A * nd > qwen35::gdn_max_snap)) nd -= 1;
+    while (nd > 0 && (A * (nd + 1) > vrows_ || (!m_.gdnReplay() && A * nd > qwen35::gdn_max_snap))) nd -= 1;
     return nd;
 }
 
@@ -2622,6 +2743,10 @@ void Engine::logBatchStats(bool force) {
         logI("batch | segmented prefill: {} forwards, {} chunks ({:.2f} chunks/forward)", stat_seg_batches_, stat_seg_chunks_,
              static_cast<double>(stat_seg_chunks_) / static_cast<double>(stat_seg_batches_));
     stat_prefill_tok_ = stat_seg_batches_ = stat_seg_chunks_ = 0;
+    if (stat_floor_periods_ > 0)
+        logI("batch | decode floor: {} prefill forwards while decoding, {} decode cycles held prefill back", stat_floor_periods_,
+             stat_floor_waits_);
+    stat_floor_periods_ = stat_floor_waits_ = 0;
 }
 
 void Engine::submitAndWait(Job& job) {
@@ -2630,12 +2755,22 @@ void Engine::submitAndWait(Job& job) {
     const std::size_t waiting = queue_.size();
     queue_.push_back(&job);
     n_building_.fetch_sub(1);
+    ++wake_seq_;
     q_cond_.notify_all();
     lk.unlock();
     if (waiting >= free)
         logI("req {} | queued ({} request(s) waiting ahead, all {} slots busy)", job.id, waiting - free, slots_.size());
     lk.lock();
     q_cond_.wait(lk, [&] { return job.done; });
+}
+
+void Engine::endBuilding() {
+    // a connection that did not queue a request (bad request, probe): a burst
+    // gather waiting for it ends now
+    std::lock_guard<std::mutex> lk(q_mutex_);
+    n_building_.fetch_sub(1);
+    ++wake_seq_;
+    q_cond_.notify_all();
 }
 
 void Engine::abortQueued(std::unique_lock<std::mutex>& lk) {
@@ -2651,6 +2786,34 @@ void Engine::abortQueued(std::unique_lock<std::mutex>& lk) {
     queue_.clear();
     q_cond_.notify_all();
     (void)lk;
+}
+
+// Decode floor: the slots it protects. Every decoding slot is protected (a stream
+// someone is reading), except one that arrived in the same burst as a request
+// still prefilling (arrival times within the gather window): simultaneous
+// arrivals do not hold one another back, so a burst merges its prefill forwards
+// at full throughput. Arrival order does not matter otherwise: a conversation's
+// next turn that arrives while earlier subagent prompts prefill is protected too.
+// Empty when the floor is off or nothing is prefilling.
+std::vector<DecodeFloor::SlotTok> Engine::floorProtected() const {
+    std::vector<DecodeFloor::SlotTok> dec_toks;
+    if (!floor_.on()) return dec_toks;
+    const double gather_ms = opt_.gather_ms > 0 ? opt_.gather_ms : 30.0;
+    const auto gather_dur = std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double, std::milli>(gather_ms));
+    bool has_pf = false;
+    for (const Slot& sl : slots_) has_pf = has_pf || (sl.phase == Phase::prefill && sl.job);
+    if (!has_pf) return dec_toks;
+    for (const Slot& sl : slots_) {
+        if (sl.phase != Phase::decode || !sl.job) continue;
+        bool same_burst = false;
+        for (const Slot& pf : slots_) {
+            if (pf.phase != Phase::prefill || !pf.job) continue;
+            const TimePoint a = sl.job->t_arrive, b = pf.job->t_arrive;
+            same_burst = same_burst || (a > b ? a - b : b - a) <= gather_dur;
+        }
+        if (!same_burst) dec_toks.push_back({sl.id, sl.reqId(), sl.n_gen});
+    }
+    return dec_toks;
 }
 
 void Engine::runLoop() {
@@ -2690,15 +2853,22 @@ void Engine::runLoop() {
                     return;
                 }
                 if (tier_ != nullptr) {
+                    const std::uint64_t seq = wake_seq_;
                     lk.unlock();
                     const bool busy = tierTick();
                     if (!busy && !logged) {
                         logTier();
                         logged = true;
                     }
-                    if (busy) std::this_thread::sleep_for(std::chrono::milliseconds(5));
                     lk.lock();
-                    if (busy) continue;
+                    if (busy) {
+                        // tier work in flight: polled every 5 ms, but a request (or the
+                        // tier IO thread) ends the wait at once (a sleep here delayed a
+                        // request by up to one Windows timer tick, 10-16 ms)
+                        q_cond_.wait_for(lk, std::chrono::milliseconds(5),
+                                         [&] { return wake_seq_ != seq || !queue_.empty() || stop_; });
+                        continue;
+                    }
                 }
                 // vision: while the encoder is loaded, wake every 100 ms for its idle timeout
                 // (a timed wait on the queue condition, not a sleep: a request that arrives
@@ -2717,6 +2887,7 @@ void Engine::runLoop() {
             }
             stat_t0_ = Clock::now();
         }
+        const std::uint64_t wake_seq0 = wake_seq_;  // a later arrival ends this iteration's wait (below)
         std::vector<Job*> admit;
         std::size_t qi = 0;
         while (qi < queue_.size() && n_busy + admit.size() < slots_.size()) {
@@ -2789,6 +2960,12 @@ void Engine::runLoop() {
             if (!pf || sl.job->id < pf->job->id) pf = &sl;
         }
         bool idle_wait = false;
+        // decode floor: the slots it protects this iteration
+        const std::vector<DecodeFloor::SlotTok> dec_toks = floorProtected();
+        if (floor_.on() && dec_toks.empty()) floor_.idle();
+        auto floorNow = [&] { return std::chrono::duration<double, std::milli>(Clock::now() - floor_epoch_).count(); };
+        std::size_t pf_rows = 0;
+        bool floor_pf = false;
         if (pf) {
             // a burst in flight: hold the first chunk briefly so the other
             // requests join its segmented forward
@@ -2796,8 +2973,32 @@ void Engine::runLoop() {
                                 msSince(pf->tp0) < opt_.gather_ms;
             if (gather) {
                 idle_wait = true;
+            } else if (!dec_toks.empty() && !floor_.prefillAllowed(floorNow(), dec_toks)) {
+                // decoding slots are below the floor in this period: a decode cycle alone
+                ++stat_floor_waits_;
             } else {
-                prefillGroup(*pf);
+                std::size_t budget = static_cast<std::size_t>(-1);
+                if (!dec_toks.empty()) {
+                    floor_.startPeriod(floorNow(), dec_toks);
+                    const DecodeFloor::Plan pl = floor_.plan(chunkLen(*pf), m_.maxBatch());
+                    budget = pl.rows;
+                    floor_pf = true;
+                    ++stat_floor_periods_;
+                    if (msSince(floor_log_t_) >= 10000) {
+                        floor_log_t_ = Clock::now();
+                        if (pl.cycles > 0)
+                            logI("decode floor | {:.0f} tok/s per decoding slot ({} decoding): prefill forward <= {} rows, ~{} decode "
+                                 "cycles between forwards{} (cycle {:.1f} ms, prefill {:.0f} rows/s)",
+                                 floor_.minTps(), dec_toks.size(), pl.rows, pl.cycles,
+                                 pl.reachable ? "" : " (floor out of reach: prefill keeps 20% of the time)", floor_.cycleMs(),
+                                 floor_.rowsPerMs() * 1000.0);
+                        else
+                            logI("decode floor | {:.0f} tok/s per decoding slot ({} decoding): prefill forward <= {} rows "
+                                 "(not measured yet)",
+                                 floor_.minTps(), dec_toks.size(), pl.rows);
+                    }
+                }
+                pf_rows = prefillGroup(*pf, budget);
                 if (prof_) prof_->last_end.reset();
             }
         }
@@ -2815,8 +3016,24 @@ void Engine::runLoop() {
                 for (Slot* sl : act)
                     if (sl->phase == Phase::decode) failSlot(*sl, ex.what());
             }
+            if (floor_.on()) {
+                // measurements: the cycle synchronizes the stream, so [tl2, now] covers
+                // this iteration's prefill forward too
+                const TimePoint te = Clock::now();
+                const double it_ms = std::chrono::duration<double, std::milli>(te - tl2).count();
+                const double cyc_ms = std::chrono::duration<double, std::milli>(te - tl3).count();
+                std::vector<DecodeFloor::SlotTok> now_dec;
+                for (const Slot& sl : slots_)
+                    if (sl.phase == Phase::decode) now_dec.push_back({sl.id, sl.reqId(), sl.n_gen});
+                floor_.noteCycle(cyc_ms, pf_rows > 0, now_dec);
+                if (floor_pf && pf_rows > 0) floor_.notePrefill(pf_rows, it_ms - std::min(floor_.cycleMs(), 0.5 * it_ms));
+            }
         } else if (idle_wait || (restoring && pf == nullptr)) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            // burst gather / host-tier restore: poll again in 1 ms, sooner when a
+            // request is queued, a connection finishes building one, or the tier
+            // IO thread reports progress
+            std::unique_lock<std::mutex> lw(q_mutex_);
+            q_cond_.wait_for(lw, std::chrono::milliseconds(1), [&] { return wake_seq_ != wake_seq0; });
         }
         if (opt_.loop_log && (!act.empty() || restoring || pf != nullptr)) {
             const TimePoint tl4 = Clock::now();

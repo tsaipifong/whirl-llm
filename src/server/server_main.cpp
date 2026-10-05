@@ -13,6 +13,7 @@
 #include "log.h"
 #include "tier/device_ops.h"
 #include "tier/kv_tier.h"
+#include "tier/ram_size.h"
 #include "whirl/common.h"
 #include "whirl/gguf.h"
 #include "whirl/hip.h"
@@ -22,16 +23,20 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <optional>
 #include <random>
 #include <string>
+#include <thread>
 #include <vector>
 
 #ifdef _WIN32
 #include <windows.h>
+#include <timeapi.h>
+#pragma comment(lib, "winmm.lib")  // timeBeginPeriod (whirl-server and whirl serve)
 #endif
 
 namespace whirl::server {
@@ -66,6 +71,23 @@ BOOL WINAPI onConsoleCtrl(DWORD type) {
     return FALSE;
 }
 
+// Windows timer resolution: 1 ms while serving. At the default tick (10-16 ms) every
+// short wait of the main loop (the 1 ms polls of a burst gather and of host-tier
+// restores, the restore tail's 200 us poll) sleeps a whole tick. Restored on exit.
+struct TimerRes {
+    bool on = timeBeginPeriod(1) == TIMERR_NOERROR;
+    ~TimerRes() {
+        if (on) timeEndPeriod(1);
+    }
+};
+
+// WHIRL_TIMER_PROBE: mean actual duration of a short sleep (diagnostics)
+double sleepMs(std::chrono::microseconds d, int n) {
+    const auto t0 = std::chrono::steady_clock::now();
+    for (int k = 0; k < n; ++k) std::this_thread::sleep_for(d);
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count() / n;
+}
+
 constexpr std::uint32_t ctx_per_slot_default = 131072;
 constexpr std::uint32_t floor_second_ctx = 65536;
 constexpr std::uint32_t serve_prefill_batch = 4096;
@@ -73,12 +95,13 @@ constexpr std::size_t n_ckpt_default = 4;
 constexpr std::size_t n_ckpt_default_par = 2;
 constexpr std::size_t n_spe_default = 2;
 constexpr std::uint32_t sys_min_default = 2048;
-constexpr std::uint64_t kv_ram_mb_default = 8192;
 constexpr std::uint64_t kv_ssd_gb_default = 64;
+constexpr std::uint32_t decode_min_tps_default = 20;
 
 const char* kHelpBody =
     "Loads a qwen35 / qwen35moe GGUF model on the GPU and serves the OpenAI-compatible API\n"
-    "(GET /health, GET /v1/models, POST /v1/chat/completions, POST /v1/completions) with\n"
+    "(GET /health, GET /v1/models, POST /v1/chat/completions, POST /v1/completions; plus\n"
+    "GET /props and GET /version for clients that detect the context length) with\n"
     "continuous batching over --parallel request slots, a prefix cache and host RAM / SSD tiers.\n"
     "Stop it with Ctrl+C (running requests finish, cached sessions are written out).\n"
     "\n"
@@ -91,13 +114,19 @@ const char* kHelpBody =
     "  -np, --parallel N        concurrent request slots (continuous batching, 1..16; default 4)\n"
     "  -c, --ctx N              shared KV pool in tokens; slots take pages on demand and idle slots'\n"
     "                           prefix caches are evicted (LRU) when it is full (default: all VRAM\n"
-    "                           left over minus 768 MiB (MoE 1.5 GiB); 262144 on the Radeon 8060S)\n"
+    "                           left over, kept 768 MiB (MoE 1.5 GiB) under both the free VRAM and the\n"
+    "                           Windows (WDDM) budget; WHIRL_POOL_RESERVE_MB=N: free VRAM minus N only;\n"
+    "                           262144 on the Radeon 8060S)\n"
     "  --ctx-per-slot N         longest context of one request (default min(pool, 131072); up to 262144)\n"
     "  --mtp-drafts N           MTP drafts per cycle, 1..10 (fixed count; default: per model type)\n"
-    "  --kv-ram-mb N            host RAM tier of the prefix cache in MiB of pinned memory (default 8192,\n"
-    "                           or one full-length session if more; 0 = no host tiers; Radeon 8060S:\n"
-    "                           default 0, its KV pool already is system memory). Idle sessions\n"
-    "                           are copied there and restored instead of prefilled again\n"
+    "  --decode-min-tps N       while other requests prefill, keep every streaming (decoding) request\n"
+    "                           at >= N tok/s by limiting prefill forwards (default 20; 0 = off:\n"
+    "                           prefill forwards are not limited)\n"
+    "  --kv-ram-mb N            host RAM tier of the prefix cache in MiB of pinned memory (default: 1/4\n"
+    "                           of physical RAM, at least 8 GiB or one full-length session, at most\n"
+    "                           32 GiB, and at most half of the RAM available at startup; 0 = no host\n"
+    "                           tiers; Radeon 8060S: default 0, its KV pool already is system memory).\n"
+    "                           Idle sessions are copied there and restored instead of prefilled again\n"
     "  --kv-ssd-dir PATH        SSD tier directory (default %LOCALAPPDATA%\\whirl\\kvcache)\n"
     "  --kv-ssd-gb N            SSD tier size cap in GiB (default 64; 0 = no SSD tier)\n"
     "  --mmproj FILE            vision encoder (Qwen3-VL style mmproj GGUF, F16 / BF16): image_url parts\n"
@@ -122,6 +151,7 @@ struct Options {
     std::uint32_t parallel = 4;
     std::optional<std::uint32_t> ctx_per_slot;
     std::optional<std::uint32_t> mtp_drafts;
+    std::optional<std::uint32_t> decode_min_tps;
     std::optional<std::string> log_file;
     std::optional<std::string> alias;
     std::optional<std::uint64_t> kv_ram_mb;
@@ -178,13 +208,55 @@ std::uint32_t envU32(std::string_view name, std::uint32_t def) {
     return def;
 }
 
+// WHIRL_DRAFT_VOCAB (default: the embedded 64k subset on dense qwen35 models with the 248320-token
+// vocabulary): keep only that vocabulary subset of the 2-bit draft head (special and byte tokens are
+// always added); outputs are unchanged, only the acceptance can drop.
+void applyDraftVocab(qwen35::Model& model, const Tokenizer& tok, const qwen35::DraftVocabChoice& dv) {
+    using K = qwen35::DraftVocabChoice::Kind;
+    if (dv.kind != K::embedded_64k && dv.kind != K::file) return;
+    if (dv.kind == K::embedded_64k) {
+        const bool fits = dv.by_default ? qwen35::draftVocabDefaultFits(model.cfg.moe, model.cfg.n_vocab)
+                                        : model.cfg.n_vocab == qwen35::draft_vocab_embedded_n_vocab;
+        if (!fits) {
+            if (dv.by_default)
+                logI("draft head: full vocabulary (the embedded 64k subset is for dense qwen35 models with a {}-token vocabulary)",
+                     qwen35::draft_vocab_embedded_n_vocab);
+            else
+                logW("WHIRL_DRAFT_VOCAB=64k ignored: the embedded subset needs a {}-token vocabulary (model: {})",
+                     qwen35::draft_vocab_embedded_n_vocab, model.cfg.n_vocab);
+            return;
+        }
+        if (!model.draft_d2) {
+            if (dv.by_default) logI("draft head: full vocabulary (the vocabulary subset needs the 2-bit draft head)");
+            else logW("WHIRL_DRAFT_VOCAB ignored: it needs the 2-bit draft head (Q6_K output head, WHIRL_DRAFT_HEAD not q4)");
+            return;
+        }
+    }
+    std::vector<std::uint32_t> req;
+    for (const TokenId t : tok.specials())
+        if (t >= 0) req.push_back(static_cast<std::uint32_t>(t));
+    for (int b = 0; b < 256; ++b)
+        if (tok.byteToken(b) >= 0) req.push_back(static_cast<std::uint32_t>(tok.byteToken(b)));
+    std::uint32_t added = 0;
+    const auto ids = qwen35::draftVocabIds(dv.kind == K::file ? qwen35::readDraftVocab(dv.file) : qwen35::embeddedDraftVocab64k(),
+                                           model.cfg.n_vocab, req, &added);
+    const std::string label = dv.kind == K::file ? dv.file : std::string(dv.by_default ? "64k (embedded, default)" : "64k (embedded)");
+    if (model.setDraftVocab(ids))
+        logI("draft head: vocabulary subset {} ({} of {} rows; {} special / byte tokens added)", label, ids.size(), model.cfg.n_vocab,
+             added);
+    else
+        logW("WHIRL_DRAFT_VOCAB ignored: it needs the 2-bit draft head (Q6_K output head, WHIRL_DRAFT_HEAD not q4)");
+}
+
 bool envOn(std::string_view name, bool def) {
     if (auto v = env(name)) return *v != "0";
     return def;
 }
 
 // Default max drafts per cycle by number of decoding slots (index = slots).
-std::array<std::uint32_t, gdn_max_seg + 1> defaultBatchDrafts(bool moe) {
+// wide: verify batches of up to 32 rows (otherwise 16); the cost model picks within the cap.
+std::array<std::uint32_t, gdn_max_seg + 1> defaultBatchDrafts(bool moe, bool wide) {
+    (void)wide;
     if (moe) return {0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0};
     return {0, 8, 7, 4, 3, 2, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0};
 }
@@ -216,7 +288,8 @@ std::uint64_t tierFingerprint(const qwen35::Model& m, const std::string& path, c
             static const char* skip[] = {"WHIRL_KV_RAM_MB", "WHIRL_KV_SSD_DIR", "WHIRL_KV_SSD_GB", "WHIRL_KV_SSD_DELAY_MS",
                                          "WHIRL_KV_TIER_MIN", "WHIRL_R9700_LOCK_HELD", "WHIRL_GPU_WAIT", "WHIRL_GPU_SHARE",
                                          "WHIRL_PROFILE", "WHIRL_TRACE_ND", "WHIRL_GATHER_MS", "WHIRL_EXE", "WHIRL_LOOP_LOG",
-                                         "WHIRL_TIER_VERIFY", "WHIRL_TIER_MIN_GAIN"};
+                                         "WHIRL_TIER_VERIFY", "WHIRL_TIER_MIN_GAIN", "WHIRL_DECODE_MIN_TPS",
+                                         "WHIRL_TIMER_PROBE"};
             bool sk = false;
             for (const char* x : skip) sk = sk || up == x;
             if (!sk) kv.emplace_back(k, s.substr(eq + 1));
@@ -270,6 +343,8 @@ int serveMain(int argc, char** argv, const char* program) {
         else if (auto v4b = argValue(args, i, "-np")) opt.parallel = parseNum<std::uint32_t>(*v4b, "--parallel");
         else if (auto v5 = argValue(args, i, "--mtp-drafts"))
             opt.mtp_drafts = std::clamp(parseNum<std::uint32_t>(*v5, "--mtp-drafts"), 1u, qwen35::max_drafts);
+        else if (auto v5b = argValue(args, i, "--decode-min-tps"))
+            opt.decode_min_tps = parseNum<std::uint32_t>(*v5b, "--decode-min-tps");
         else if (auto v6 = argValue(args, i, "--ctx-per-slot")) opt.ctx_per_slot = parseNum<std::uint32_t>(*v6, "--ctx-per-slot");
         else if (auto v7 = argValue(args, i, "--log-file")) opt.log_file = *v7;
         else if (auto v8 = argValue(args, i, "--alias")) opt.alias = *v8;
@@ -345,7 +420,7 @@ int serveMain(int argc, char** argv, const char* program) {
         qwen35::LoadStats stats;
         qwen35::LoadOptions lo;
         lo.max_batch = serve_prefill_batch;
-        lo.embd_on_host = envOn("EMBD_HOST", false);
+        lo.embd_on_host = envOn("EMBD_HOST", true);  // WHIRL_EMBD_HOST=0: embedding in VRAM
         if (auto v = env("PREFILL_BATCH")) {
             try {
                 lo.max_batch = std::clamp(static_cast<std::uint32_t>(std::stoul(*v)), 1u, qwen35::max_batch_limit);
@@ -384,6 +459,17 @@ int serveMain(int argc, char** argv, const char* program) {
              static_cast<double>(stats.bytes) / (1024.0 * 1024.0 * 1024.0), stats.ms / 1000.0,
              static_cast<double>(stats.bytes) / (stats.ms * 1e6));
 
+        // pinned host memory shows up as this process's GPU "Shared Usage": declare it so monitoring
+        // does not read the embedding table as VRAM spill (the RAM tier / vision add theirs below)
+        const std::uint64_t embd_pinned =
+            model.embd_host ? static_cast<std::uint64_t>(model.tok_embd.row_bytes) * model.tok_embd.nrows : 0;
+        if (embd_pinned > 0) {
+            tier::declarePinned(lad, embd_pinned);
+            logI("token embedding: {:.0f} MiB in pinned host memory (counted as this process's GPU 'Shared Usage', declared; "
+                 "WHIRL_EMBD_HOST=0 keeps it in VRAM)",
+                 static_cast<double>(embd_pinned) / 1048576.0);
+        }
+
         // same knobs as the CLI
         if (env("NO_FUSE")) model.no_fuse = true;
         if (env("FLOAT_GEMV")) model.float_gemv = true;
@@ -392,7 +478,12 @@ int serveMain(int argc, char** argv, const char* program) {
         if (auto v = env("MOE_BN")) model.moe_bn_force = static_cast<std::uint32_t>(std::strtoul(v->c_str(), nullptr, 10));
         if (auto v = env("PREFILL_BATCH"))
             model.max_batch = std::max(1u, std::min(model.max_batch, static_cast<std::uint32_t>(std::stoul(*v))));
-        if (auto v = env("DRAFT_VOCAB")) model.draft_vocab = static_cast<std::uint32_t>(std::stoul(*v));
+        // WHIRL_DRAFT_VOCAB: unset = embedded 64k subset (dense qwen35, 248320 vocab), 64k = embedded,
+        // 48k / <file> = frequency subset file, N = the first N rows (old experiment), off = full head
+        const qwen35::DraftVocabChoice draft_vocab = qwen35::draftVocabChoice(env("DRAFT_VOCAB"), qwen35::exeDirectory());
+        if (draft_vocab.kind == qwen35::DraftVocabChoice::Kind::first_n) model.draft_vocab = draft_vocab.n;
+        if (auto v = env("DRAFT_WINDOW")) model.draft_window = static_cast<std::uint32_t>(std::stoul(*v));
+        if (auto v = env("DRAFT_WINDOW_MIN")) model.draft_window_min = static_cast<std::uint32_t>(std::stoul(*v));
         if (env("GEMV_R") || env("GEMV_W") || env("GEMV_WH"))
             logW("WHIRL_GEMV_R / WHIRL_GEMV_W / WHIRL_GEMV_WH are not supported by whirl-server (ignored)");
         model.use_graph = false;
@@ -428,7 +519,9 @@ int serveMain(int argc, char** argv, const char* program) {
         }
         // an explicit draft count is used as is (fixed) unless WHIRL_MTP_ADAPT asks otherwise
         const bool auto_mode = adapt_env ? (*adapt_env == "auto") : (def.automatic && !drafts_user);
-        auto batch_drafts = defaultBatchDrafts(model.cfg.moe);
+        if (!envOn("WIDE_VERIFY", true)) model.wide_verify = false;
+        if (auto hc = env("HEAD_CHUNK")) model.head_chunk = std::max<std::uint32_t>(32, static_cast<std::uint32_t>(std::stoul(*hc)) / 32 * 32);
+        auto batch_drafts = defaultBatchDrafts(model.cfg.moe, model.wideCapable());
         batch_drafts[1] = drafts;
         const auto bd_env = env("MTP_BATCH_DRAFTS");
         if (bd_env) {
@@ -452,11 +545,13 @@ int serveMain(int argc, char** argv, const char* program) {
         if (env("GDN_V0")) {
             if (hip::Function fv0 = model.module.getFunctionOpt("gdn_step_norm_v0")) model.k.gdn_step_norm = fv0;
         }
-        // MTP block as Q4_K (drafts only; WHIRL_MTP_Q4=0 keeps Q6_K)
+        // MTP block as Q4_K from Q6_K or Q8_0 (drafts only; WHIRL_MTP_Q4=0 keeps the file's types)
         if (use_mtp && envOn("MTP_Q4", true)) model.requantMtpQ4();
+        if (!envOn("ATTN_WIDE", true)) model.attn_wide = false;
         if (use_mtp && !env("MTP_FULLHEAD")) {
             const bool q4 = env("DRAFT_HEAD").value_or("") == "q4";
             model.buildDraftHeadEx(q4 ? qwen35::Model::DraftHeadKind::q4 : qwen35::Model::DraftHeadKind::d2);
+            applyDraftVocab(model, tok, draft_vocab);
         }
         if (use_mtp) {
             logI("MTP speculative decoding: on, up to {} draft(s) per cycle{}, p-min {:.2f}, n-min {}, draft count {}", drafts,
@@ -515,6 +610,7 @@ int serveMain(int argc, char** argv, const char* program) {
         }
         EngineOptions eo;
         eo.model_name = name;
+        eo.model_file = base;
         eo.ctx = slot_ctx;
         eo.parallel = opt.parallel;
         eo.tmpl = tmpl;
@@ -533,7 +629,8 @@ int serveMain(int argc, char** argv, const char* program) {
         eo.ngram_min = envU32("NGRAM_MIN", 3);
         eo.ngram_max = envU32("NGRAM_MAX", 0);
         eo.ngram_force = envOn("NGRAM_FORCE", false);
-        eo.slot_drafts = envOn("SLOT_DRAFTS", false);
+        // WHIRL_SLOT_DRAFTS: 0 / unset uniform, 1 marginal-gain swaps, 2 cost-model allocation
+        if (auto v = env("SLOT_DRAFTS")) eo.slot_drafts = *v == "2" ? 2u : (*v != "0" ? 1u : 0u);
         eo.trace_nd = env("TRACE_ND").has_value();
         eo.loop_log = env("LOOP_LOG").has_value();
         eo.tier_verify = env("TIER_VERIFY").has_value();
@@ -544,6 +641,11 @@ int serveMain(int argc, char** argv, const char* program) {
             } catch (const std::exception&) {
             }
         }
+        eo.decode_min_tps = opt.decode_min_tps ? *opt.decode_min_tps : envU32("DECODE_MIN_TPS", decode_min_tps_default);
+        if (eo.decode_min_tps > 0)
+            logI("decode floor: >= {:.0f} tok/s per decoding request while others prefill (--decode-min-tps)", eo.decode_min_tps);
+        else
+            logI("decode floor: off (--decode-min-tps 0: prefill forwards are not limited)");
         if (auto v = env("PROFILE")) eo.profile = *v == "2" ? 2 : 1;
         eo.sys_min = envU32("SYS_MIN", sys_min_default);
         eo.lcp_on = envOn("SYS_LCP", true);
@@ -567,33 +669,86 @@ int serveMain(int argc, char** argv, const char* program) {
                                                         static_cast<std::uint64_t>(V) * 4,
                                                     tier::block_bytes);
             const std::uint64_t full = static_cast<std::uint64_t>(slot_ctx) * model.kvBytesPerTokenFmt(false, false) + n_ck * ck_stride;
-            return std::max(kv_ram_mb_default, alignUp(full, 1ull << 30) >> 20);
+            return std::max(tier::ram_auto_min_mb, alignUp(full, 1ull << 30) >> 20);
         }();
+        // size: explicit (--kv-ram-mb / WHIRL_KV_RAM_MB), else 1/4 of physical RAM
+        // within [ram_def, 32 GiB] and at most half of the RAM available now;
         // integrated GPU: the KV pool already lives in system memory, so the RAM
         // tier (and the SSD tier behind it) is off unless asked for explicitly
-        std::uint64_t kv_ram_mb = is_uma ? 0 : ram_def;
-        if (opt.kv_ram_mb) kv_ram_mb = *opt.kv_ram_mb;
-        else if (auto v = env("KV_RAM_MB")) {
+        tier::RamTierInput rin;
+        rin.floor_mb = ram_def;
+        rin.integrated = info.integrated;
+        if (opt.kv_ram_mb) {
+            rin.explicit_mb = *opt.kv_ram_mb;
+        } else if (auto v = env("KV_RAM_MB")) {
             try {
-                kv_ram_mb = std::stoull(*v);
+                rin.explicit_mb = std::stoull(*v);
+                rin.explicit_src = "WHIRL_KV_RAM_MB";
             } catch (const std::exception&) {
+                logW("kv tier: WHIRL_KV_RAM_MB=\"{}\" is not a number; using the automatic size", *v);
             }
         }
+        {
+            MEMORYSTATUSEX ms{};
+            ms.dwLength = sizeof(ms);
+            if (GlobalMemoryStatusEx(&ms)) {
+                rin.total_phys = ms.ullTotalPhys;
+                rin.avail_phys = ms.ullAvailPhys;
+            }
+        }
+        const tier::RamTierSize rsz = tier::ramTierSize(rin);
+        const std::uint64_t kv_ram_mb = rsz.mb;
         std::unique_ptr<tier::Tier> tier_pre;
+        double tier_alloc_s = 0.0;
         if (kv_ram_mb > 0 && n_ck > 0 && !no_pc) {
+            if (rsz.avail_limited) logW("kv tier: RAM tier size {} MiB ({})", kv_ram_mb, rsz.reason);
+            else logI("kv tier: RAM tier size {} MiB ({})", kv_ram_mb, rsz.reason);
+            if (rin.explicit_mb && rin.avail_phys > 0 && (kv_ram_mb << 20) > rin.avail_phys / 2)
+                logW("kv tier: {} MiB is more than half of the {} MiB of RAM available now; the system may page", kv_ram_mb,
+                     rin.avail_phys >> 20);
+            const TimePoint t_alloc0 = Clock::now();
             try {
                 tier_pre = tier::Tier::create(*ops, kv_ram_mb << 20, seed0 ^ 0x5bd1e995ull, dev);
             } catch (const std::exception& ex) {
                 logE("kv tier: cannot allocate {} MiB of pinned host memory ({}); running without host tiers", kv_ram_mb, ex.what());
             }
+            tier_alloc_s = msSince(t_alloc0) / 1000.0;
+        } else if (kv_ram_mb == 0 && n_ck > 0 && !no_pc) {
+            logI("kv tier: RAM tier off ({})", rsz.reason);
         }
         const hip::MemInfo mem_t1 = hip::memInfo();
         // shared KV pool: --ctx, or (R9700) the VRAM left now minus a reserve
-        const std::uint64_t reserve = static_cast<std::uint64_t>(envU32("POOL_RESERVE_MB", cfg.moe ? 1536 : 768)) << 20;
+        // The reserve is kept below both the free VRAM and this process's WDDM budget: going over the
+        // budget makes Windows demote allocations to system memory (seen as GPU 'Shared Usage'), and a
+        // demoted KV array is read across PCIe on every step (FIX-1: ~128k agent decode 29 -> 68 tok/s).
+        // WHIRL_POOL_RESERVE_MB keeps the old free-VRAM-only rule with that reserve.
+        const bool reserve_explicit = env("POOL_RESERVE_MB").has_value();
+        const hip::WddmMemInfo wddm0 = hip::wddmMemInfo();
+        const std::uint64_t reserve =
+            static_cast<std::uint64_t>(envU32("POOL_RESERVE_MB", cfg.moe ? 1536 : (wddm0.ok ? 768 : 3072))) << 20;
+        const std::uint64_t budget_margin = static_cast<std::uint64_t>(envU32("POOL_BUDGET_MARGIN_MB", cfg.moe ? 1536 : 768)) << 20;
+        std::string budget_note;
         const std::uint64_t avail = [&] {
             const hip::MemInfo mf = hip::memInfo();
-            return mf.free > reserve ? mf.free - reserve : 0;
+            std::uint64_t a = mf.free > reserve ? mf.free - reserve : 0;
+            if (!reserve_explicit && wddm0.ok) {
+                const std::uint64_t room = wddm0.local_budget > wddm0.local_usage + budget_margin
+                                               ? wddm0.local_budget - wddm0.local_usage - budget_margin
+                                               : 0;
+                budget_note = std::format("WDDM budget {:.2f} GiB, used {:.2f} GiB, margin {} MiB -> room {:.2f} GiB; free VRAM {:.2f} GiB "
+                                          "minus {} MiB -> {:.2f} GiB",
+                                          wddm0.local_budget / 1073741824.0, wddm0.local_usage / 1073741824.0, budget_margin >> 20,
+                                          room / 1073741824.0, mf.free / 1073741824.0, reserve >> 20, a / 1073741824.0);
+                a = std::min(a, room);
+            } else if (reserve_explicit) {
+                budget_note = std::format("WHIRL_POOL_RESERVE_MB={}: free VRAM {:.2f} GiB minus the reserve, WDDM budget not applied",
+                                          reserve >> 20, mf.free / 1073741824.0);
+            } else {
+                budget_note = std::format("WDDM budget unavailable: free VRAM {:.2f} GiB minus {} MiB", mf.free / 1073741824.0, reserve >> 20);
+            }
+            return a;
         }();
+        if (!pool_req) logI("kv pool sizing: {}", budget_note);
         std::string kv_note;
         if (model.kvAutoDense()) {
             const std::uint32_t second = opt.parallel > 1 ? std::min(floor_second_ctx, slot_ctx) : 0;
@@ -667,6 +822,27 @@ int serveMain(int argc, char** argv, const char* program) {
                  eo.ngram ? "=0 turns it off" : "=1 turns it on", eo.ngram_min,
                  eo.ngram_max > 0 ? std::min(eo.ngram_max, qwen35::max_ng_drafts) : qwen35::max_ng_drafts);
         engine.initPool();
+        {
+            // after everything sized at startup is allocated: any growth of the non-local segment
+            // since the pool was sized is VRAM demoted to system memory (pinned host buffers made
+            // before that point, such as the embedding table and the RAM tier, are in the baseline)
+            const hip::WddmMemInfo w = hip::wddmMemInfo();
+            if (w.ok && wddm0.ok) {
+                const std::uint64_t grow = w.nonlocal_usage > wddm0.nonlocal_usage ? w.nonlocal_usage - wddm0.nonlocal_usage : 0;
+                const bool over = w.local_usage > w.local_budget || grow > (256ull << 20);
+                const std::string msg = std::format(
+                    "WDDM memory: local {:.2f} / budget {:.2f} GiB; non-local (GPU 'Shared Usage') {:.0f} MiB, of which {:.0f} MiB was there "
+                    "before the KV pool (declared pinned host memory: embedding {:.0f} MiB{}); growth {:.0f} MiB",
+                    w.local_usage / 1073741824.0, w.local_budget / 1073741824.0, w.nonlocal_usage / 1048576.0,
+                    wddm0.nonlocal_usage / 1048576.0, embd_pinned / 1048576.0, tier_pre ? ", RAM tier" : "", grow / 1048576.0);
+                if (over)
+                    logW("{} -- over the WDDM budget, part of the GPU buffers may live in system memory and decode can be several "
+                         "times slower; set WHIRL_POOL_RESERVE_MB larger (e.g. 3072) or give --ctx",
+                         msg);
+                else
+                    logI("{}", msg);
+            }
+        }
         if (eo.n_spe > 0)
             logI("shared prefix checkpoints: {} x {:.1f} MiB in VRAM; system messages >= {} tokens are prefilled as their own chunk "
                  "run and kept (WHIRL_SYS_MIN, 0 = no split), plus checkpoints at prefixes common to sessions ({})",
@@ -718,11 +894,11 @@ int serveMain(int argc, char** argv, const char* program) {
                 }
                 if (tier_owned) {
                     tier::Tier& tr = *tier_owned;
-                    tier::declarePinned(lad, tr.pinnedBytes());
-                    logI("kv tier: RAM {:.2f} GiB of pinned host memory (counted as this process's GPU 'Shared Usage', SSD index {:.1f} "
-                         "s), entries >= {} tokens; SSD {}{} (cap {} GiB, {} entries / {:.2f} GiB indexed); entry: {:.1f} MiB per "
-                         "checkpoint, {:.1f} MiB per 256-token page",
-                         static_cast<double>(tr.pinnedBytes()) / 1073741824.0, msSince(t_tier0) / 1000.0, tr.cfg.min_tokens,
+                    tier::declarePinned(lad, embd_pinned + tr.pinnedBytes());
+                    logI("kv tier: RAM {:.2f} GiB of pinned host memory (counted as this process's GPU 'Shared Usage'; pinned in {:.1f} s, "
+                         "SSD index {:.1f} s), entries >= {} tokens; SSD {}{} (cap {} GiB, {} entries / {:.2f} GiB indexed); entry: {:.1f} "
+                         "MiB per checkpoint, {:.1f} MiB per 256-token page",
+                         static_cast<double>(tr.pinnedBytes()) / 1073741824.0, tier_alloc_s, msSince(t_tier0) / 1000.0, tr.cfg.min_tokens,
                          ssd_dir ? *ssd_dir : std::string("off"), (ssd_dir && !tr.hasSsd()) ? " (unavailable)" : "", ssd_gb,
                          tr.ssdEntries(), static_cast<double>(tr.ssd_bytes) / 1073741824.0,
                          static_cast<double>(lay.ck_bytes) / 1048576.0, static_cast<double>(lay.page_bytes) / 1048576.0);
@@ -793,7 +969,7 @@ int serveMain(int argc, char** argv, const char* program) {
             const std::size_t n_lend = backend->lendScratch(raw);
             std::uint64_t lent = 0;
             for (std::size_t k = 0; k < n_lend; ++k) lent += raw[k][1];
-            tier::declarePinned(lad, (tier_owned ? tier_owned->pinnedBytes() : 0) + v.pinnedBytes());
+            tier::declarePinned(lad, embd_pinned + (tier_owned ? tier_owned->pinnedBytes() : 0) + v.pinnedBytes());
             const hip::MemInfo mem_v1 = hip::memInfo();
             engine.attachVision(vc);
             logI("vision: {}: {} layers, {} pinned MiB in host RAM ({:.1f} s; VRAM change {:.1f} MiB); encoder loaded on demand, released "
@@ -806,10 +982,18 @@ int serveMain(int argc, char** argv, const char* program) {
         }
 
         logI("model ready in {:.1f} s (weights {:.1f} s)", msSince(t_load0) / 1000.0, stats.ms / 1000.0);
+        const bool timer_probe = env("TIMER_PROBE").has_value();
+        const double probe_1ms = timer_probe ? sleepMs(std::chrono::milliseconds(1), 50) : 0.0;
+        const double probe_200us = timer_probe ? sleepMs(std::chrono::microseconds(200), 50) : 0.0;
+        const TimerRes timer_res;
+        if (!timer_res.on) logW("timer: 1 ms resolution not available; short waits of the main loop take one system tick");
+        if (timer_probe)
+            logI("timer probe | sleep 1 ms: {:.2f} ms before, {:.2f} ms after timeBeginPeriod(1) | sleep 200 us: {:.2f} / {:.2f} ms",
+                 probe_1ms, sleepMs(std::chrono::milliseconds(1), 50), probe_200us, sleepMs(std::chrono::microseconds(200), 50));
         HttpServer http(engine);
         http.start(opt.host, opt.port);
         logI("server listening on http://{}:{} (model id \"{}\", {} slots); endpoints: GET /health, GET /v1/models, POST "
-             "/v1/chat/completions, POST /v1/completions",
+             "/v1/chat/completions, POST /v1/completions, GET /props, GET /version",
              opt.host, http.port(), name, opt.parallel);
         // main thread: continuous batching over the slots (until a console control
         // event stops the engine: graceful shutdown, see onConsoleCtrl)

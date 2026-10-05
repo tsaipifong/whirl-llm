@@ -124,7 +124,7 @@ Swift-1.5 是不同的微調模型，因此它與 Qwen MXFP4 的差距（A 約 +
 
 - **imatrix 在這裡幾乎沒有作用。** 主線 `llama-quantize` 對 MXFP4（`GGML_UNUSED(quant_weights)`）和 Q8_0 會忽略重要性矩陣。只有 K-quant 輸出 head（A 的 Q6_K、C 的 Q4_K）會用到它。
 - **參考用的 MXFP4 檔案全部都是 MXFP4**——包括 token_embd、ssm_alpha/beta 和 MTP 層——搭配 Q6_K head。我們把 embedding、MTP 和 alpha/beta 提高到 Q8_0。無論哪種做法，WHIRL 的速度模式都會套用。
-- <a id="f32-alpha-beta"></a>**不要把 `ssm_alpha` / `ssm_beta` 存成 F32。** 第一版依照一份把它們保留為 F32 的規格：WHIRL 的 MTP smoke test 在三個變體上全部失敗（MTP 輸出 ≠ 純 greedy），自動草稿數量降到 1。原因：WHIRL 沒有針對 F32 權重的 int8 GEMV，因此 n = 1 使用 f32-activation GEMV，而 n ≥ 2（驗證）使用 f16 GEMM——數值計算不同，破壞了 MTP 的逐位元相同。改用 Q8_0（它有融合的精確 kernel，unsloth 的 Q4_K_M 也是這樣用）後，所有變體都通過，草稿數回到 8。（引擎端的修正——讓 F32 小矩陣在所有 n 下使用同一個 kernel 家族——已排入待辦。）
+- <a id="f32-alpha-beta"></a>**不要把 `ssm_alpha` / `ssm_beta` 存成 F32。** 第一版依照一份把它們保留為 F32 的規格：WHIRL 的 MTP smoke test 在三個變體上全部失敗（MTP 輸出 ≠ 純 greedy），草稿數被限制為 1。原因：WHIRL 沒有針對 F32 權重的 int8 GEMV，因此 n = 1 使用 f32-activation GEMV，而 n ≥ 2（驗證）使用 f16 GEMM——數值計算不同，破壞了 MTP 的逐位元相同。改用 Q8_0（它有融合的精確 kernel，unsloth 的 Q4_K_M 也是這樣用）後，所有變體都通過，草稿數回到 8。（自 0.1.3 起，引擎讓 F32／F16 小矩陣在所有 n 下都走同一個 GEMV 家族，這類檔案因此逐位元正確；但因融合的 DeltaNet decode kernel `gdn_ab` 只支援 Q8_0／MXFP4 的 α/β，草稿數仍上限為 1——見 [speculative-decoding.md](speculative-decoding.md#exact)。仍建議使用 Q8_0。）
 
 ### 5.3 結果（WHIRL server 預設值，統一流程，2 輪）
 

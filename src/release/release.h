@@ -34,7 +34,7 @@ private:
     int code_;
 };
 
-const char* version();                                   // "0.1.0"
+const char* version();                                   // "0.1.1"
 std::string versionText(std::string_view program);       // multi-line text for --version
 
 // UTF-8 console output while the process runs (the previous code page is put

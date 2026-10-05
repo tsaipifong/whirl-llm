@@ -121,6 +121,8 @@ public:
         (void)slots, (void)mtp_ms, (void)ver_ms;
     }
     virtual const char* profileClassName(std::size_t i) const { (void)i; return "?"; }
+    // most rows of one batched verify / MTP step (qwen35::max_verify_rows with the wide GEMV path)
+    virtual std::uint32_t verifyRows() const { return qwen35::max_small_batch; }
 };
 
 // Production backend over a loaded qwen35::Model (setupSeqs / allocKvPool done).

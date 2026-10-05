@@ -8,8 +8,26 @@
 
 #include <algorithm>
 #include <cstring>
+#include <optional>
 #include <stdexcept>
+#include <string_view>
 #include <vector>
+
+#include <cstdlib>
+
+namespace {
+std::optional<std::string> getEnv(std::string_view name) {
+    const std::string key = std::string("WHIRL_") + std::string(name);
+    char* buf = nullptr;
+    std::size_t len = 0;
+    if (_dupenv_s(&buf, &len, key.c_str()) == 0 && buf != nullptr) {
+        std::string v(buf);
+        std::free(buf);
+        return v;
+    }
+    return std::nullopt;
+}
+}
 
 namespace whirl::kernels {
 
@@ -134,6 +152,10 @@ KernelTable KernelTable::load(const hip::Module& m, KvFormat kv) {
     for (QType t : base_types) {
         const std::string s = sfx(t);
         k.gemv1[ti(t)] = L.req("gemv_" + s + "_1");
+        if (t == QType::f32 || t == QType::f16) {
+            k.gemv4[ti(t)] = L.opt("gemv_" + s + "_4");
+            k.gemv8[ti(t)] = L.opt("gemv_" + s + "_8");
+        }
         k.get_rows[ti(t)] = L.req("get_rows_" + s);
         k.gemm[ti(t)] = L.req("gemm3_" + s);
         if (t != QType::f16) k.dequant_f16[ti(t)] = L.req("dequant_f16_" + s);
@@ -159,6 +181,11 @@ KernelTable KernelTable::load(const hip::Module& m, KvFormat kv) {
             }
         }
     }
+    const std::string vx_var = getEnv("GEMVX_VARIANT").value_or("v5");
+    for (QType t : {QType::q4_k, QType::q5_k, QType::iq4_xs, QType::q6_k, QType::mxfp4})
+        k.gemvx[ti(t)] = L.opt("gemvx_" + vx_var + "_" + sfx(t));
+    k.gemvw_head_s = L.opt("gemvw_nt16v2s_q6_k");
+    k.gemvw_head_2p = L.opt("gemvw_nt16x2s_q6_k");
     for (QType t : {QType::q4_k, QType::q5_k, QType::iq4_xs, QType::q6_k, QType::iq4_nl, QType::q3_k, QType::iq3_s}) {
         for (int nt = 2; nt <= kMaxSmallBatch; ++nt) {
             for (int v = 1; v < kNGemvw; ++v) {
@@ -230,6 +257,7 @@ KernelTable KernelTable::load(const hip::Module& m, KvFormat kv) {
 
     static constexpr Named optional[] = {
         {&KernelTable::requant_q6k_d2, "requant_q6k_d2"},
+        {&KernelTable::requant_q80_q4k, "requant_q80_q4k"},
         {&KernelTable::gdn_wprep, "gdn_wprep"},
         {&KernelTable::gdn_wscan8, "gdn_wscan8"},
         {&KernelTable::rmsnorm_x8, "rmsnorm_x8"},
@@ -241,7 +269,9 @@ KernelTable KernelTable::load(const hip::Module& m, KvFormat kv) {
         {&KernelTable::attn_prep, "attn_prep"},
         {&KernelTable::attn_combine_q8, "attn_combine_q8"},
         {&KernelTable::attn_wsplit1, "attn_wsplit1"},
+        {&KernelTable::attn_wsplit2, "attn_wsplit2"},
         {&KernelTable::topk_rows, "topk_rows"},
+        {&KernelTable::gdn_gates_ba, "gdn_gates_ba"},
     };
     for (const Named& n : optional) k.*(n.f) = L.opt(n.name);
 
@@ -253,6 +283,7 @@ KernelTable KernelTable::load(const hip::Module& m, KvFormat kv) {
         k.attn_prefill_wmma = L.req("attn_prefill_wmma_q8v");
         k.attn_prep = L.req("attn_prep_q8v");
         k.attn_wsplit1 = L.opt("attn_wsplit1_q8v");
+        k.attn_wsplit2 = L.opt("attn_wsplit2_q8v");
     } else if (kv == KvFormat::q8 || kv == KvFormat::q8h) {
         k.attn_decode = L.req("attn_decode_q8");
         k.kv_store = L.req("kv_store_q8");
@@ -260,12 +291,21 @@ KernelTable KernelTable::load(const hip::Module& m, KvFormat kv) {
         k.attn_prefill_wmma = L.req("attn_prefill_wmma_q8");
         k.attn_prep = L.opt(kv == KvFormat::q8h ? "attn_prep_q8h" : "attn_prep_q8");
         k.attn_wsplit1 = L.opt("attn_wsplit1_q8");
+        k.attn_wsplit2 = L.opt("attn_wsplit2_q8");
     }
     k.attn_kx = L.opt(kv == KvFormat::q8v ? "attn_kx_q8v" : (kv == KvFormat::f16 ? "attn_kx" : "attn_kx_q8"));
+    {
+        // q8 and q8h share the int8 K/V layout, so both use the _q8 variants.
+        const std::string s = kv == KvFormat::q8v ? "_q8v" : (kv == KvFormat::f16 ? "" : "_q8");
+        k.attn_kg6 = L.opt("attn_kg6" + s);
+        k.attn_kg4 = L.opt("attn_kg4" + s);
+        k.attn_kg2 = L.opt("attn_kg2" + s);
+    }
     // vision: multi-section RoPE attention prep (same KV-format choice as attn_prep)
     k.attn_prep_m = L.opt(kv == KvFormat::q8v ? "attn_prep_m_q8v" : kv == KvFormat::q8h ? "attn_prep_m_q8h" : kv == KvFormat::q8 ? "attn_prep_m_q8" : "attn_prep_m");
     k.set_rpos = L.opt("set_rpos");
     for (int nt = 1; nt <= kMaxSmallBatch; ++nt) k.gemv_d2[nt - 1] = L.opt("gemv_d2_nt" + std::to_string(nt));
+    k.copy_rows_map = L.opt("copy_rows_map");
 
     // MXFP4: every lookup optional (the fp8 / whole-block expert kernels are gfx1201 only).
     {
@@ -326,6 +366,8 @@ KernelTable KernelTable::load(const hip::Module& m, KvFormat kv) {
             {&KernelTable::gated_norm_x16h, "gated_norm_x16h"},
             {&KernelTable::qact_fp8t, "qact_fp8t"},
             {&KernelTable::rmsnorm_x8t, "rmsnorm_x8t"},
+            {&KernelTable::rmsnorm_x8h16, "rmsnorm_x8h16"},
+            {&KernelTable::rmsnorm_x8h16t, "rmsnorm_x8h16t"},
             {&KernelTable::silu_mul_x8t, "silu_mul_x8t"},
             {&KernelTable::silu_mul_x8ht, "silu_mul_x8ht"},
             {&KernelTable::gated_norm_x8t, "gated_norm_x8t"},

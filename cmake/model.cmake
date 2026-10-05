@@ -5,6 +5,18 @@
 # Included from the top-level CMakeLists.txt after the core library.
 
 if(WHIRL_WITH_HIP)
+  # default MTP draft-head vocabulary subset (64k token ids, uint32 LE), embedded
+  # so the release does not depend on a file next to the exe (WHIRL_DRAFT_VOCAB)
+  set(WHIRL_DRAFT_VOCAB_BIN "${CMAKE_SOURCE_DIR}/data/draft_vocab/subset_64k.bin")
+  set(WHIRL_DRAFT_VOCAB_CC "${CMAKE_BINARY_DIR}/generated/draft_vocab_64k.cpp")
+  add_custom_command(
+    OUTPUT "${WHIRL_DRAFT_VOCAB_CC}"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/generated"
+    COMMAND whirl-bin2c "${WHIRL_DRAFT_VOCAB_BIN}" "${WHIRL_DRAFT_VOCAB_CC}" whirl_draft_vocab_64k
+    DEPENDS whirl-bin2c "${WHIRL_DRAFT_VOCAB_BIN}"
+    COMMENT "Embedding draft vocabulary subset 64k"
+    VERBATIM)
+
   add_library(whirl_model STATIC
     ${CMAKE_SOURCE_DIR}/src/model/config.cpp
     ${CMAKE_SOURCE_DIR}/src/model/kernels.cpp
@@ -12,7 +24,9 @@ if(WHIRL_WITH_HIP)
     ${CMAKE_SOURCE_DIR}/src/model/forward.cpp
     ${CMAKE_SOURCE_DIR}/src/model/tune.cpp
     ${CMAKE_SOURCE_DIR}/src/model/device.cpp
-    ${CMAKE_SOURCE_DIR}/src/model/spec.cpp)
+    ${CMAKE_SOURCE_DIR}/src/model/spec.cpp
+    ${CMAKE_SOURCE_DIR}/src/model/draft_vocab_embed.cpp
+    "${WHIRL_DRAFT_VOCAB_CC}")
   target_include_directories(whirl_model PUBLIC ${CMAKE_SOURCE_DIR}/include)
   target_link_libraries(whirl_model PUBLIC whirl_kernels_host whirl)
 

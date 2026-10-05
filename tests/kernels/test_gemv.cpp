@@ -6,10 +6,14 @@
 //     reproduce the 1-token gemvq_<T> result bitwise per token row;
 //   * grouped one-launch GEMV over 3 matrices == separate launches (bitwise);
 //   * accumulate = 1 adds onto y exactly once (bitwise);
-//   * the 2-bit MTP draft head GEMV (gemv_d2_nt*) multi-token == 1-token.
+//   * the 2-bit MTP draft head GEMV (gemv_d2_nt*) multi-token == 1-token;
+//   * the wide GEMV gemvx_v6_<T> (17..32 tokens) == 1-token, rows past the count untouched;
+//   * the one-launch wide-verify head gemvw_nt16x2s_q6_k == 1-token == two gemvw_nt16v2s_q6_k launches.
 // SPDX-License-Identifier: Apache-2.0
 
 #include "cpu_ref.h"
+
+#include <cstdio>
 
 namespace kt {
 
@@ -55,6 +59,34 @@ void testGemv(Ctx& c) {
             std::vector<double> ry, rs;
             ref::gemvF64(wf, crows, ncols, x.data(), nt, ncols, ry, rs);
             c.rep.add(cmpTol("gemv_" + sfx + "_" + std::to_string(nt) + " " + m.name, got, ry, rs, 1e-4, 1e-6));
+        }
+
+        // f32 / f16 (no int8 GEMV): the multi-token instances gemv_<T>_4 / _8 must reproduce
+        // gemv_<T>_1 (the n = 1 decode path) bitwise per token row: matmul runs n = 2..16 as a
+        // composition of _8 / _4 / _1 (C-13), so verify == n = 1 depends on it.
+        if (m.type == QType::f32 || m.type == QType::f16) {
+            std::vector<float> ref1(static_cast<std::size_t>(kNt) * nrows);
+            Buf y1(static_cast<std::size_t>(nrows) * 4);
+            for (int t = 0; t < kNt; ++t) {
+                hip::launch(c.fn("gemv_" + sfx + "_1"), {cdiv(nrows, 8), 1, 1}, {256, 1, 1}, 0, c.s, w.p(), m.row_bytes,
+                            dx.p() + static_cast<DevPtr>(t) * ncols * 4, y1.p(), ncols, nrows, ncols, nrows, 0);
+                c.sync();
+                const auto r1 = y1.down<float>(static_cast<std::size_t>(nrows));
+                std::copy(r1.begin(), r1.end(), ref1.begin() + static_cast<std::ptrdiff_t>(t) * nrows);
+            }
+            for (int nt : {4, 8}) {
+                Buf y(static_cast<std::size_t>(nt) * nrows * 4);
+                hip::launch(c.fn("gemv_" + sfx + "_" + std::to_string(nt)), {cdiv(nrows, 8), 1, 1}, {256, 1, 1}, 0, c.s,
+                            w.p(), m.row_bytes, dx.p(), y.p(), ncols, nrows, ncols, nrows, 0);
+                c.sync();
+                const auto got = y.down<float>(static_cast<std::size_t>(nt) * nrows);
+                const std::vector<float> want(ref1.begin(), ref1.begin() + static_cast<std::ptrdiff_t>(nt) * nrows);
+                Result r = cmpExact("gemv_" + sfx + "_" + std::to_string(nt) + " == gemv_" + sfx + "_1 per token " + m.name,
+                                    got, want, Kind::invariant);
+                std::printf("  [info] gemv  gemv_%s_%d vs gemv_%s_1 per token (%s): %zu of %zu differ\n", sfx.c_str(), nt,
+                            sfx.c_str(), m.name.c_str(), r.mismatches, r.n);
+                c.rep.add(r);
+            }
         }
 
         if (c.k.gemvq[ti] == nullptr) continue;
@@ -160,6 +192,125 @@ void testGemv(Ctx& c) {
                     if (first_bad.empty()) first_bad = "nt=" + std::to_string(nt) + " " + v.label;
                 }
             }
+        }
+        // strided 16-token head kernel over row ranges (wide verify output head) == 1-token
+        if (m.type == QType::q6_k && c.k.gemvw_head_s != nullptr) {
+            y.fill(0xff);
+            const int chunk = 96;  // several ranges, the last one partial
+            for (int r0 = 0; r0 < nrows; r0 += chunk) {
+                const int cr = std::min(chunk, nrows - r0);
+                hip::launch(c.k.gemvw_head_s, {cdiv(cr, 32), 1, 1}, {256, 1, 1}, 0, c.s, w.p() + static_cast<std::uint64_t>(r0) * m.row_bytes,
+                            m.row_bytes, xq.p(), xd.p(), y.p() + static_cast<std::uint64_t>(r0) * 4, ncols, cr, nrows, 0, DevPtr{0});
+            }
+            c.sync();
+            c.rep.add(cmpExact("gemvw_nt16v2s_q6_k (row ranges, y stride) == 1-token " + m.name,
+                               y.down<float>(static_cast<std::size_t>(kNt) * nrows), ref1, Kind::invariant));
+        }
+        // wide GEMV (gemvx_v6_<T>, 17..32 tokens of one batched verify) == 1-token
+        if (c.k.gemvx[ti] != nullptr) {
+            constexpr int kW = wk::kMaxVerifyRows;
+            const std::vector<float> xw = c.randn(static_cast<std::size_t>(kW) * ncols);
+            Buf dxw(xw), xqw(static_cast<std::size_t>(kW) * ncols), xdw(static_cast<std::size_t>(kW) * ncols / 32 * 4);
+            hip::launch(c.k.quantize_q8, {cdiv(static_cast<std::uint64_t>(kW) * ncols, 256), 1, 1}, {256, 1, 1}, 0, c.s, dxw.p(), xqw.p(),
+                        xdw.p(), kW * ncols);
+            Buf yw1(static_cast<std::size_t>(kW) * nrows * 4), yw(static_cast<std::size_t>(kW) * nrows * 4);
+            for (int t = 0; t < kW; ++t)
+                gemvq1(c, m.type, w, m.row_bytes, nrows, xqw.p() + static_cast<std::uint64_t>(t) * ncols,
+                       xdw.p() + static_cast<std::uint64_t>(t) * (ncols / 32) * 4, yw1.p() + static_cast<std::uint64_t>(t) * nrows * 4, ncols, 0);
+            c.sync();
+            const auto refw = yw1.down<float>(static_cast<std::size_t>(kW) * nrows);
+            std::size_t badw = 0, nw = 0;
+            for (int nt : {17, 24, 32}) {
+                yw.fill(0xff);
+                hip::launch(c.k.gemvx[ti], {cdiv(nrows, 16), 1, 1}, {256, 1, 1}, 0, c.s, w.p(), m.row_bytes, xqw.p(), xdw.p(), yw.p(), ncols,
+                            nrows, 0, DevPtr{0}, nt);
+                c.sync();
+                const auto got = yw.down<float>(static_cast<std::size_t>(kW) * nrows);
+                nw += static_cast<std::size_t>(nt) * nrows;
+                badw += std::memcmp(got.data(), refw.data(), static_cast<std::size_t>(nt) * nrows * 4) != 0;
+                // rows >= nt untouched (0xff fill)
+                for (std::size_t i = static_cast<std::size_t>(nt) * nrows; i < got.size(); ++i) {
+                    std::uint32_t u;
+                    std::memcpy(&u, &got[i], 4);
+                    if (u != 0xffffffffu) {
+                        ++badw;
+                        break;
+                    }
+                }
+            }
+            Result rw;
+            rw.name = "gemvx_v6 (17 / 24 / 32 tokens) == 1-token " + m.name;
+            rw.kind = Kind::invariant;
+            rw.n = nw;
+            rw.mismatches = badw;
+            rw.pass = badw == 0;
+            c.rep.add(rw);
+        }
+        // wide-verify output head in one launch (gemvw_nt16x2s_q6_k: tokens [0, 16) then [n - 16, n))
+        // == 1-token per row, == two gemvw_nt16v2s_q6_k launches, rows >= n untouched; nrows with a
+        // partial last 32-row block; 20 repeats per n to catch a race on the shared reduction buffer
+        if (m.type == QType::q6_k && c.k.gemvw_head_2p != nullptr && c.k.gemvw_head_s != nullptr) {
+            constexpr int kW = wk::kMaxVerifyRows;
+            const int nr = nrows - 13;  // last block partial
+            const std::vector<float> xw = c.randn(static_cast<std::size_t>(kW) * ncols);
+            Buf dxw(xw), xqw(static_cast<std::size_t>(kW) * ncols), xdw(static_cast<std::size_t>(kW) * ncols / 32 * 4);
+            hip::launch(c.k.quantize_q8, {cdiv(static_cast<std::uint64_t>(kW) * ncols, 256), 1, 1}, {256, 1, 1}, 0, c.s, dxw.p(), xqw.p(),
+                        xdw.p(), kW * ncols);
+            Buf yw1(static_cast<std::size_t>(kW) * nr * 4), yw(static_cast<std::size_t>(kW) * nr * 4),
+                yw2(static_cast<std::size_t>(kW) * nr * 4);
+            for (int t = 0; t < kW; ++t)
+                gemvq1(c, m.type, w, m.row_bytes, nr, xqw.p() + static_cast<std::uint64_t>(t) * ncols,
+                       xdw.p() + static_cast<std::uint64_t>(t) * (ncols / 32) * 4, yw1.p() + static_cast<std::uint64_t>(t) * nr * 4, ncols, 0);
+            c.sync();
+            const auto refw = yw1.down<float>(static_cast<std::size_t>(kW) * nr);
+            const auto untouched = [](const std::vector<float>& v, std::size_t from) {
+                for (std::size_t i = from; i < v.size(); ++i) {
+                    std::uint32_t u;
+                    std::memcpy(&u, &v[i], 4);
+                    if (u != 0xffffffffu) return false;
+                }
+                return true;
+            };
+            std::size_t bad1 = 0, bad2 = 0, badu = 0, runs = 0;
+            std::string first;
+            for (int nt : {17, 20, 24, 31, 32}) {
+                // current path: two strided 16-token launches over the whole head
+                yw2.fill(0xff);
+                for (const int t0 : {0, nt - kNt})
+                    hip::launch(c.k.gemvw_head_s, {cdiv(nr, 32), 1, 1}, {256, 1, 1}, 0, c.s, w.p(), m.row_bytes,
+                                xqw.p() + static_cast<std::uint64_t>(t0) * ncols, xdw.p() + static_cast<std::uint64_t>(t0) * (ncols / 32) * 4,
+                                yw2.p() + static_cast<std::uint64_t>(t0) * nr * 4, ncols, nr, nr, 0, DevPtr{0});
+                c.sync();
+                const auto two = yw2.down<float>(static_cast<std::size_t>(kW) * nr);
+                const std::size_t cnt = static_cast<std::size_t>(nt) * nr;
+                for (int rep = 0; rep < 20; ++rep) {
+                    yw.fill(0xff);
+                    hip::launch(c.k.gemvw_head_2p, {cdiv(nr, 32), 1, 1}, {256, 1, 1}, 0, c.s, w.p(), m.row_bytes, xqw.p(), xdw.p(), yw.p(),
+                                ncols, nr, nr, nt, 0, DevPtr{0});
+                    c.sync();
+                    const auto got = yw.down<float>(static_cast<std::size_t>(kW) * nr);
+                    ++runs;
+                    const bool b1 = std::memcmp(got.data(), refw.data(), cnt * 4) != 0;
+                    const bool b2 = std::memcmp(got.data(), two.data(), got.size() * 4) != 0;
+                    const bool bu = !untouched(got, cnt);
+                    bad1 += b1;
+                    bad2 += b2;
+                    badu += bu;
+                    if ((b1 || b2 || bu) && first.empty())
+                        first = "n=" + std::to_string(nt) + " rep=" + std::to_string(rep) + (b1 ? " !=1-token" : "") + (b2 ? " !=2-launch" : "") +
+                                (bu ? " wrote rows>=n" : "");
+                }
+            }
+            Result rw;
+            rw.name = "gemvw_nt16x2s_q6_k (n 17/20/24/31/32 x20, " + std::to_string(nr) + " rows) == 1-token == 2x gemvw_nt16v2s, rows>=n untouched " +
+                      m.name;
+            rw.kind = Kind::invariant;
+            rw.n = runs;
+            rw.mismatches = bad1 + bad2 + badu;
+            rw.pass = rw.mismatches == 0 && runs > 0;
+            if (!first.empty()) rw.note = "first " + first + " (1tok " + std::to_string(bad1) + ", 2x " + std::to_string(bad2) + ", untouched " +
+                                          std::to_string(badu) + ")";
+            c.rep.add(rw);
         }
         Result r;
         r.name = "multi-token/multi-row/WMMA GEMV == 1-token (" + std::to_string(variants) + " kernels) " + m.name;

@@ -50,8 +50,10 @@
 //  norms / elementwise:
 //   rmsnorm(x, w, out, int n, int in_stride, int out_stride, float eps)
 //   rmsnorm_q8(x, w, out, xq, xd, int n, float eps)
-//   rmsnorm_q8_rows(x, w, out, xq, xd, int n, float eps, Idx16 src)
+//   rmsnorm_q8_rows(x, w, out, xq, xd, int n, float eps, RowIdx src)
 //   rmsnorm_x8 / rmsnorm_x16 / rmsnorm_x8t(x, w, u8* q, float* sx, n, eps)
+//   rmsnorm_x8h16 / rmsnorm_x8h16t(x, w, u8* q, float* sx, f16* q16, n, eps)
+//            (fp8 row-major / tiled + f16 row-major from one norm; optional)
 //   l2norm(float* x, int n, int stride, int tok_stride, float eps)
 //   add_inplace(a, b, n); silu_mul(a, b, n); silu_mul_q8(g, u, xq, xd, n)
 //   silu_mul_x8 / x16 / x8t(const float* g, const float* u, u8* q, sx, ncols)
@@ -68,16 +70,20 @@
 //            head_dim, q_stride, pos, scale, int nq, skip)
 //   attn_combine(part_ml, part_acc, q, out, n_head, head_dim, q_stride, n_split)
 //   attn_combine_q8(... same ..., int8* xq, float* xd)
-//   attn_wsplit1[_q8|_q8v](q, KvArgs, part_ml, part_acc, n_head, n_kv,
-//            q_stride, pos, scale, skip, AwGroups groups)
+//   attn_wsplit1[_q8|_q8v], attn_wsplit2[_q8|_q8v](q, KvArgs, part_ml, part_acc, n_head, n_kv,
+//            q_stride, pos, scale, skip, AwGroups groups)   [<= 16 / <= 32 columns per group]
 //   attn_prep[_q8|_q8h|_q8v](qf, kk, vv, qw, kw, KvArgs, pos, n_head, n_kv,
 //            hd, n_rot, theta_scale, eps)
 //   attn_prefill_wmma[_q8|_q8v], attn_kx[_q8|_q8v](q, KvArgs, out, n_head,
 //            n_kv, q_stride, pos, n_tok, scale, int h0)
+//   attn_kg6 / attn_kg4 / attn_kg2[_q8|_q8v] (f16 / q8 / q8h / q8v KV; same arguments; grid
+//            (ceil(n_tok / 16), heads / NP), block 64 * NP, NP | n_head / n_kv)
 //   kv_store[_q8|_q8v](k, v, KvArgs, pos, int row)
 //  Gated DeltaNet:
 //   gdn_conv_seq(xin, state, w, out, ch, n_tok); gdn_gates(b, a, dt_bias, A,
 //            n, n_heads); gdn_conv_par(xin, state, w, out, ch, n_tok)
+//   gdn_gates_ba(const ba, b, a, dt_bias, A, n, n_heads): gdn_gates reading
+//            ba[t][2*n_heads] = [beta | alpha] (optional)
 //   gdn_conv_state(xin, state, ch, n_tok, float* snap, int snap_after)
 //   gdn_seq_128(qkv, g, beta, state, out, n_tok, n_k_heads, n_v_heads, dv,
 //            qkv_stride, scale, float* snap, int snap_after)
@@ -98,15 +104,17 @@
 //   gdn_conv_l2n_h / gdn_conv_state_h: as above with const f16* xin
 //  tokens / picks:
 //   argmax(x, n, int* out, int* ids, int* pos, int advance)
-//   argmax_rows(x, n, out); argmax_rows_to(x, n, out, Idx16 dst)
+//   argmax_rows(x, n, out); argmax_rows_to(x, n, out, RowIdx dst)
 //   argmax_prob(x, n, int* out_tok, float* out_prob)
-//   draft_pick(x, n, int* tok, float* prob, int* ctl, int r, int n_min, float p_min)
-//   draft_pick_rows(x, n, int* ctl_all, Idx16 area, int r, int n_min, float p_min)
+//   draft_pick(x, n, int* tok, float* prob, int* ctl, int r, int n_min, float p_min, const int* map)
+//   draft_pick_rows(x, n, int* ctl_all, RowIdx area, int r, int n_min, float p_min, const int* map)
+//            map (null: identity) = token id of each draft-head row (vocabulary subset)
 //   set_tokens(ids, pos, dev_src, Tok16 toks, n, n_host, pos0)
 //   set_rows(ids, pos, kvbase, dev_src, RowTab tab, n)
 //   topk_rows(x, n, K, float inv_t, int* ids, float* vals, float* stats)
 //   requant_q6k_q4k(src, u64 src_rb, dst, u64 dst_rb); requant_q6k_d2(src,
-//            u64 src_rb, dst, int ncols)
+//            u64 src_rb, dst, int ncols); requant_q80_q4k(src, u64 src_rb, dst, u64 dst_rb)
+//   copy_rows_map(src, u64 rb, dst, const int* map): dst row i = src row map[i] (optional)
 //  mixture of experts:
 //   moe_logits_f32(W, x, out, R, C, n, skip)
 //   moe_topk(logits, ld, h, shw, ids, w, sg, R, K, E)
@@ -153,6 +161,7 @@ inline constexpr int kFdMaxSplits = 64;      // host cap on split count
 inline constexpr int kGdnMaxSeg = 16;        // GDN_MAX_SEG
 inline constexpr int kGdnMaxSnap = 15;       // GDN_MAX_SNAP
 inline constexpr int kMaxSmallBatch = 16;    // multi-token GEMV / small-batch kernels: 2..16 tokens
+inline constexpr int kMaxVerifyRows = 32;    // rows of one batched verify / MTP step (gemvx_v6_* past 16)
 inline constexpr int kMaxDrafts = 10;        // MTP drafts per verify cycle
 inline constexpr int kGemm3Bm = 256, kGemm3Bn = 256, kGemm3Threads = 512;  // GEMM3_*
 inline constexpr int kMoeBm = 128, kMoeBn = 64;                            // MOE_BM, gemm_moe_* token tile
@@ -214,7 +223,7 @@ struct KvArgs {
     DevPtr ptab = 0;
     DevPtr kvbase = 0;
     std::int32_t tab0 = 0;
-    std::int32_t pad = 0;
+    std::int32_t win = 0;  // attn_wsplit*: MTP draft window (qwen35::draftWindowArg), 0 = off
 };
 static_assert(sizeof(KvArgs) == 56);
 
@@ -242,20 +251,21 @@ inline GvArgs gvSingle(DevPtr w, DevPtr y, std::uint64_t row_bytes, int nrows) {
 struct Tok16 {
     std::int32_t t[16] = {};
 };
+// per-row tables of a batched verify / MTP step (up to kMaxVerifyRows rows)
 struct RowTab {
-    std::int32_t tok[16] = {};   // >= 0 token id, < 0: -(index into dev_src) - 1
-    std::int32_t pos[16] = {};
-    std::int32_t base[16] = {};
+    std::int32_t tok[kMaxVerifyRows] = {};   // >= 0 token id, < 0: -(index into dev_src) - 1
+    std::int32_t pos[kMaxVerifyRows] = {};
+    std::int32_t base[kMaxVerifyRows] = {};
 };
-struct Idx16 {
-    std::int32_t v[16] = {};
+struct RowIdx {
+    std::int32_t v[kMaxVerifyRows] = {};
 };
 // attn_wsplit query groups: queries first[z] .. first[z] + count[z] - 1.
 struct AwGroups {
-    std::int32_t first[16] = {};
-    std::int32_t count[16] = {};
+    std::int32_t first[kMaxVerifyRows] = {};
+    std::int32_t count[kMaxVerifyRows] = {};
 };
-static_assert(sizeof(Tok16) == 64 && sizeof(RowTab) == 192 && sizeof(Idx16) == 64 && sizeof(AwGroups) == 128);
+static_assert(sizeof(Tok16) == 64 && sizeof(RowTab) == 384 && sizeof(RowIdx) == 128 && sizeof(AwGroups) == 256);
 
 // Recurrent-state segment of the fused DeltaNet decode kernels: rows
 // [row0, row0 + nrows) belong to one sequence whose state is at `state`;
@@ -368,6 +378,7 @@ struct KernelTable {
     Caps caps;            // capability flags of the module (Caps::probe)
     bool gv_grp = false;  // gemvq_<T> / ggemv* take GvArgs (gemv_grouped_abi present)
     PerType<F> gemv1{}, gemvq{}, get_rows{}, gemm{}, dequant_f16{};
+    PerType<F> gemv4{}, gemv8{};  // gemv_<T>_4 / _8 (f32 / f16 only): n = 2..16 bitwise == gemv1 per token
     Nt gemvq_nt{}, gemvq_nt_g{};
     std::array<Nt, 2> gemvq_mr{}, gemvq_mr_g{};      // [R/2 - 1][nt - 2][type], R = 2, 4
     std::array<Nt, kNGemvw> gemvw{}, gemvw_g{};      // [v][nt - 2][type], v = 1..8
@@ -378,6 +389,9 @@ struct KernelTable {
     std::array<GemmCfg, kGemmsCfgs.size()> gemms_geom = kGemmsCfgs;
     PerType<F> gemmhq{}, gemmhqh{};
     PerType<F> gdn_ab{}, gdn_abconv{}, moe_gu{}, moe_down{}, gemm_moe{}, gemm_moe32{};
+    PerType<F> gemvx{};  // gemvx_v6_<T>: 17..32-token GEMV (runtime token count)
+    F gemvw_head_s{};    // gemvw_nt16v2s_q6_k: 16-token output head over a row range, separate y stride
+    F gemvw_head_2p{};   // gemvw_nt16x2s_q6_k: wide-verify output head, both 16-token passes in one launch (optional)
     std::array<F, kMaxSmallBatch> gemv_d2{};       // [nt - 1]
     std::array<F, kGemm8Cfgs.size()> gemm8{}, gemm8h{};
     std::array<F, kGemm8tCfgs.size()> gemm8t{}, gemm8th{};
@@ -385,18 +399,21 @@ struct KernelTable {
 
     F rmsnorm{}, l2norm{}, add_inplace{}, silu_mul{}, rope_neox{};
     F attn_decode{}, kv_store{}, attn_split{}, attn_combine{}, attn_prep{}, attn_combine_q8{};
-    F attn_wsplit1{}, attn_prefill_wmma{}, attn_kx{};
-    F gdn_conv_seq{}, gdn_gates{}, gdn_seq_128{}, f32_to_f16{}, gdn_gated_norm{};
+    F attn_wsplit1{}, attn_wsplit2{}, attn_prefill_wmma{}, attn_kx{};
+    F attn_kg6{}, attn_kg4{}, attn_kg2{};  // f16 / q8 / q8h / q8v KV (null if not built)
+    F gdn_conv_seq{}, gdn_gates{}, gdn_gates_ba{}, gdn_seq_128{}, f32_to_f16{}, gdn_gated_norm{};
     F argmax{}, quantize_q8{};
     F gdn_chunk_prep{}, gdn_chunk_scan{}, gdn_wprep{}, gdn_wscan8{};
     F rmsnorm_x8{}, rmsnorm_x16{}, silu_mul_x8{}, silu_mul_x16{}, gated_norm_x8{}, gated_norm_x16{};
     F gdn_conv_par{}, gdn_conv_state{}, rmsnorm_q8{}, silu_mul_q8{}, gdn_ab_q8_0{};
-    F gdn_conv_l2{}, gdn_step_norm{}, requant_q6k_q4k{}, requant_q6k_d2{};
+    F gdn_conv_l2{}, gdn_step_norm{}, requant_q6k_q4k{}, requant_q6k_d2{}, requant_q80_q4k{};
+    F copy_rows_map{};  // optional
     F set_tokens{}, argmax_rows{}, argmax_prob{}, draft_pick{};
     F set_rows{}, rmsnorm_q8_rows{}, argmax_rows_to{}, draft_pick_rows{};
     F moe_logits_f32{}, moe_topk{}, moe_route{}, moe_gather_f16{}, moe_act_f16{}, moe_combine{};
     F qact_fp8{}, silu_mul_x8h{}, gdn_conv_l2n{}, gdn_conv_l2n_h{}, gdn_conv_state_h{}, gated_norm_x8h{};
     F silu_mul_x16h{}, gated_norm_x16h{};
+    F rmsnorm_x8h16{}, rmsnorm_x8h16t{};
     F qact_fp8t{}, rmsnorm_x8t{}, silu_mul_x8t{}, silu_mul_x8ht{}, gated_norm_x8t{}, gated_norm_x8ht{};
     F gemmh_f16{}, gemmhh_f16{};
     F topk_rows{};

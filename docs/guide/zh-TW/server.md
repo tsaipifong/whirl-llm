@@ -25,7 +25,8 @@ Base URL 為 `http://127.0.0.1:8080/v1`；接受任何 API key。模型只載入
 | `--ctx N` | 共用 KV 池的大小，單位 token | 其他緩衝區配置後剩下的全部 VRAM，扣掉一段保留量 |
 | `--ctx-per-slot N` | 每個請求的上下文上限 | 131,072（最大 262,144） |
 | `--mtp-drafts N` | MTP 草稿上限 1–10 | dense：自動，上限 8；MoE：1 |
-| `--kv-ram-mb N` | pinned RAM KV 層大小；0 會停用 RAM 與 SSD 層 | max(8 GiB, 一個完整 f16 session + 檢查點) = 27B 為 9 GiB |
+| `--decode-min-tps N` | 其他請求 prefill 時，每個串流請求的 decode 保底速度（[§6](#batching)）；0 = 關閉 | 20 |
+| `--kv-ram-mb N` | pinned RAM KV 層大小；0 會停用 RAM 與 SSD 層 | 實體記憶體的 1/4，範圍 [max(8 GiB, 一個完整 f16 session + 檢查點), 32 GiB]，且不超過啟動時可用記憶體的一半；64 GB 的電腦為 16 GiB；整合式 GPU 預設關閉 |
 | `--kv-ssd-dir` / `--kv-ssd-gb N` | SSD 層目錄 / 大小上限；0 GB 停用 SSD | 每位使用者的本機 app-data 目錄 / 64 |
 | `--log-file` | 記錄檔（同時印到主控台） | 每位使用者的本機 app-data 目錄 |
 | `--alias` | `/v1/models` 回報的模型 id | GGUF 檔名 |
@@ -43,11 +44,12 @@ Base URL 為 `http://127.0.0.1:8080/v1`；接受任何 API key。模型只載入
 | `WHIRL_MTP=0`、`WHIRL_NGRAM=0` | 停用 MTP / n-gram 共同草擬 |
 | `WHIRL_MTP_BATCH_DRAFTS=d1,d2,…` | 依 decode 中 slot 數決定的草稿上限 |
 | `WHIRL_GATHER_MS` | 新請求的突發收集視窗（預設 30，0 = 關閉） |
+| `WHIRL_DECODE_MIN_TPS` | decode 保底速度（= `--decode-min-tps`，預設 20，0 = 關閉） |
 | `WHIRL_PREFILL_CHUNK` | 每次合併 prefill forward 的最大列數（1024 的倍數，預設 2048） |
 | `WHIRL_SYS_MIN`、`WHIRL_SYS_CKPTS`、`WHIRL_SYS_LCP=0` | system prompt 檢查點門檻（2048）、VRAM 中的數量（2）、停用 `prefix` 檢查點 |
 | `WHIRL_KV_TIER_MIN` | 各層的最小項目大小（2048 tokens） |
 | `WHIRL_TIMING_RESET=0` | 跨請求保留 MTP 計時表（不建議） |
-| `WHIRL_LOOP_LOG=1`、`WHIRL_TIER_VERIFY=1`、`WHIRL_TIER_MIN_GAIN=n` | 診斷：每輪迴圈各階段計時、每次寫出/還原都逐位元組驗證、還原門檻（預設 512） |
+| `WHIRL_LOOP_LOG=1`、`WHIRL_TIER_VERIFY=1`、`WHIRL_TIER_MIN_GAIN=n`、`WHIRL_TIMER_PROBE=1` | 診斷：每輪迴圈各階段計時、每次寫出/還原都逐位元組驗證、還原門檻（預設 512）、server 設定 1 ms 計時器解析度前後的實際 sleep 長度 |
 | `WHIRL_PROFILE=1\|2` | 每個 cycle 的 GPU 時間拆解；**會扭曲計時**——絕不要用它量速度 |
 
 一張 GPU 同一時間只能有一個引擎行程使用：執行檔會對每個裝置取得一個具名 mutex，第二個實例會等待
@@ -111,7 +113,9 @@ kernel 表；[pitfalls.md](pitfalls.md#srv-defaultenv)）。
 ## <a id="thinking"></a>4. 思考與 `reasoning_content`
 
 - 思考由 `chat_template_kwargs.enable_thinking` 或頂層的 `enable_thinking` 控制；
-  `reasoning_effort` 與 `preserve_thinking` 依 GGUF chat template 的方式支援。
+  `reasoning_effort` 與 `preserve_thinking` 依 GGUF chat template 的方式支援。也接受 OpenRouter 形式的
+  `"reasoning": {"effort", "enabled"}` 物件與 effort 別名（`max` / `ultra`、`minimal`、`none`），見
+  [usage.md](usage.md#endpoints)。
 - 思考文字放在 `message.reasoning_content` 回傳（串流：`delta.reasoning_content`），答案放在
   `content`。
 - 大多數用戶端在下一輪不會把 `reasoning_content` 送回來。此時 template 會產生一個空的
@@ -144,34 +148,103 @@ kernel 表；[pitfalls.md](pitfalls.md#srv-defaultenv)）。
    位置；DeltaNet 使用分段 kernel，每段一個狀態。
 3. 每個 cycle 同步一次。
 
-**依負載的草稿上限。** 所有 decode 列都要塞進一次最多 16 列的驗證，因此草稿與使用者互相競爭。
-Dense 依 decode 中 slot 數的上限：1–4 個 slot 分別為 8 / 7 / 4 / 3；成本模型在上限內挑選。MoE：
-最多 8 位使用者時 1 個草稿。草稿數為零時，MTP 層仍會處理已接受的 token，以維持其 KV 完整。
+**依負載的草稿上限。** 所有 decode 列都要塞進一次 verify forward，因此草稿與使用者互相競爭。每個序列最多
+16 列；dense 模型在寬 verify（`WHIRL_WIDE_VERIFY`，預設開）時總共最多 32 列（否則 16 列，MoE 一律 16 列）。
+Dense 依 decode 中 slot 數的預設上限：1–8 個 slot 分別為 8 / 7 / 4 / 3 / 2 / 1 / 1 / 1，更多則為 0
+（`--batch-drafts` 可覆寫；DeltaNet verify 改用快照組而非 replay 時，k 個 slot 的上限另外 ≤ 8 / k）；在這組
+上限下 MTP 的 verify 不超過 16 列，只有 n-gram 草稿或調高上限的多人情況會用到第 17–32 列。成本模型在上限內
+挑選。MoE：最多 8 位使用者時 1 個草稿。DeltaNet decode 未融合的模型（F32／F16 α/β）上限為 1 個草稿。草稿數為零時，MTP 層仍會處理已接受的 token，以維持其 KV 完整。
 
 **Prefill 排程。** Prefill 以 ≤ 1024 token 的區塊執行（最後一塊可多吸收 ≤ 256 個），與 decode cycle
 交錯進行。多個請求的區塊會合併成一次分段 forward：逐列工作（embedding、norm、GEMM、MoE）對所有列
 執行一次；逐序列工作（attention、DeltaNet conv 與 chunk scan）則以單獨模式的 kernel 逐段執行。
 最舊的 prefill 中請求一定會執行；其他請求在下一塊超過 16 列（避開小批次路徑）且總數維持 ≤ 4096
 時才加入。由於每種 GEMM 配置與 MoE tile 都與列無關（row-invariant），批次 prefill 的一列與單獨執行
-的一列逐位元相同。沒有 slot 在 decode 時，同一請求的連續區塊會合併成最多 2048 列的 forward
-（[kv-and-caching.md](kv-and-caching.md#merge)）。
+的一列逐位元相同。沒有其他 slot 在 decode，或 decode 保底關閉（`--decode-min-tps 0`，吞吐量優先）時，
+同一請求的連續區塊會合併成最多 2048 列的 forward（[kv-and-caching.md](kv-and-caching.md#merge)）。
+保底開啟時，只要有任何 slot 在 decode（不論受保護或同一批到達），forward 就維持整數個區塊：27B 模型實測，
+3 個短請求與同批到達的 32k / 96k / 128k prompt 一起時，合併只讓那個 prompt 的 prefill 吞吐量提高 3.7–4.2%，
+卻讓 decode 中請求的最長停頓加倍（0.54 → 1.03 s、1.17 → 3.27 s、1.85 → 2.37 s）。
+
+**Decode 保底速度（`--decode-min-tps N`，預設 20）。** 沒有它時，主迴圈每個 decode cycle 會跑一次
+prefill forward（合併的區塊最多 4096 列，27B 模型約 1.5 s），所以其他請求在 prefill 長 prompt 時，
+串流中的請求每次 forward 只前進一個 cycle——約 3 tok/s，看起來像卡住。
+
+保底保護**同一批到達以外的所有 decode 中 slot**：只有在某個仍在 prefill 的請求的突發收集視窗（30 ms）
+內到達的 decode slot 不受保護。所以一起到達的請求（情境 A：C = 4 同時到達）互不牽制，可全速合併 prefill；
+而較早開始的串流，或是在子代理 prompt 之後才送來、而它們仍在 prefill 時的主對話下一輪，不論到達順序都受保護。
+
+設定保底後，且有符合條件的 slot 在 decode 時：
+- 一次 prefill forward 最多帶一個列數預算：完整的排程區塊（最舊請求的下一塊一定會執行，所以 prefill
+  永遠有進度），依量測到的 prefill 速度決定大小，使一次 forward 造成的停頓約等於保底速度下 10 個
+  token 的時間（N = 20 時約 1 塊）；
+- 每次 prefill forward 之後，單獨執行 decode cycle，直到每個受保護的 slot 在「從這次 forward 開始
+  的這段期間」內產生 ≥ N tok/s。cycle 數每個 cycle 都依實際產生的 token（MTP 接受率、decode 中 slot 數）
+  與量測到的 prefill 時間調整（decode cycle 時間、每 cycle token 數、prefill 列/秒的 EMA）；
+- 若連純 decode 都達不到保底速度，每段期間的純 decode 時間上限為該期間 prefill 時間的 4 倍，prefill
+  仍保有約 20% 的 GPU 時間。
+
+沒有受保護的 slot 在 decode 時，保底不會壓住任何東西（沒有列數預算、沒有純 decode cycle），突發收集也不變。
+改變的只有「哪些列放進同一次 forward」與 decode cycle 的時機；每種 GEMM / MoE tile 都與列無關，
+所以任何 N 的輸出都逐位元相同（已驗證：下表每個 N、兩種到達順序、三種 context 的 N = 20 與 v0.1.2 相同，
+短 prompt 測試與 Ornith）。附帶效果：列數預算小時，等待中的 prompt 改為依先後順序 prefill，而不是並排進行，
+所以第一個很早就得到回應，最後一個較晚。
+
+實測條件：Swift-1.5 27B MXFP4-A，R9700，3 個子代理 prompt 為 15.8k / 17.1k / 18.9k token。
+**正向**：主對話正在串流，3 個 prompt 才到達。**反向**：3 個 prompt 先到，1.5 s 後主對話送出下一輪
+（在已快取的 context 上加一小段）；「它們 prefill 期間」從主對話第一個 token 算到最後一個子代理的第一個 token。
+
+| 25.7k context | N = 0（關閉） | 10 | **20** | 30 | 40 |
+|---|---|---|---|---|---|
+| 正向：它們 prefill 期間主對話串流速度，tok/s（單獨約 84） | 2.8 | 11.9 | **22.7** | 31.0 | 40.3 |
+| 正向：最長停頓，s | 1.57 | 1.12 | **0.47** | 0.47 | 0.46 |
+| 正向：3 個 prompt 的 TTFT，s | 11.1 / 12.0 / 18.5 | 16.7 / 20.5 / 21.9 | **7.7 / 16.3 / 26.1** | 9.2 / 19.7 / 31.1 | 11.2 / 23.3 / 38.6 |
+| 正向：平均 TTFT，s | 13.9 | 19.7 | **16.7** | 20.0 | 24.4 |
+| 正向：串流期間 prefill 吞吐量，tok/s | 2799 | 2368 | **1981** | 1663 | 1342 |
+| 反向：它們 prefill 期間主對話串流速度，tok/s | 4.1 | 14.6 | **22.8** | 33.3 | 42.3 |
+| 反向：最長停頓，s | 1.07 | 0.52 | **0.47** | 0.47 | 0.47 |
+| 反向：3 個 prompt 的 TTFT，s | 11.8 / 12.6 / 18.3 | 12.2 / 12.5 / 19.6 | **11.0 / 12.4 / 21.9** | 11.6 / 11.9 / 24.2 | 11.5 / 11.9 / 28.2 |
+
+| N = 20，依 context | 25.7k | 97.4k | 123.7k |
+|---|---|---|---|
+| 正向：它們 prefill 期間主對話串流速度，tok/s | 22.7 | 23.0 | 23.1 |
+| 正向：最長停頓，s | 0.47 | 0.47 | 0.52 |
+| 正向：3 個 prompt 的 TTFT，s | 7.7 / 16.3 / 26.1 | 8.4 / 19.1 / 29.0 | 11.8 / 21.7 / 32.2 |
+| 正向：串流期間 prefill 吞吐量，tok/s | 1981 | 1789 | 1609 |
+| 反向：它們 prefill 期間主對話串流速度，tok/s | 22.8 | 21.1 | 22.9 |
+| 反向：最長停頓，s | 0.47 | 0.48 | 0.48 |
+| 反向：3 個 prompt 的 TTFT，s | 11.0 / 12.4 / 21.9 | 11.4 / 11.9 / 25.1 | 11.3 / 11.7 / 23.6 |
+
+v0.1.2 在同樣三種 context 的數字：正向 23.1 / 22.7 / 22.1 tok/s，反向 22.4 / 21.5 / 22.4 tok/s（最長停頓
+0.47–0.52 s）；123.7k 的停頓兩版都是 0.52 s。本版先前一個只保護「比所有 prefill 中 prompt 都早到」之串流的
+版本，在 25.7k 反向順序下掉到 8.6 tok/s（停頓 0.92 s）。
+
+Ornith-1.5-35B-A3B MXFP4（MoE），同一情境（v0.1.1）：N = 0 → 20 時串流請求從 6.7 提高到 31.5 tok/s（單獨約
+230；最長停頓 0.39 → 0.43 s），最後一個 TTFT 從 5.8 變為 6.8 s（prefill 8986 → 7653 tok/s）。短
+prompt 不受影響：Swift MXFP4-A，約 1.1k token prompt、生成 256，C = 4 同時到達時（情境 A）整批 4.65 s
+（3 輪中位數；v0.1.2 為 4.91 s），保底不會誤啟動，3 個請求合併 prefill（第四個因合併後超過 4096 上限循序排程）。
+預設取 20：串流維持可讀（> 20 tok/s、停頓 ≤ 0.5 s），代價約 30% 的 prefill 吞吐量。只在乎總吞吐量的批次工作
+可用 0；想要更順的串流可設更高的 N，代價是 prefill 變慢。
 
 **突發收集。** 仍在接收、解析或 tokenize 中的請求會被計數；只要還有這種請求，新請求的第一個 prefill
 區塊最多等待 30 ms，讓一波突發請求進入同一次分段 forward。單一使用者永遠不會等待（自己的請求早已
 排入佇列）。沒有這個機制時，突發中的第一個請求會單獨 prefill，然後在其他請求 prefill 時停頓 2.4 s。
 
-**停頓。** 當另一位使用者送出 14k token 的 prompt 時，串流請求最長的停頓為 0.90 s（MoE：0.25 s）。
+**停頓。** 當另一位使用者送出 14k token 的 prompt 時，串流請求最長的停頓為 0.90 s（MoE：0.25 s），
+這是加入 decode 保底速度之前的數字；三個長 prompt 同時到達時為 1.57 s，串流掉到 3 tok/s（見上表），
+預設保底下為 0.47–0.52 s、21–23 tok/s。
 
-| 並行度（27B Q4_K_M，約 1.1k token prompt，生成 256，greedy） | C = 1 | C = 2 | C = 4 |
+| 並行度（27B Q4_K_M / MXFP4，約 1.1k token prompt，生成 256，greedy） | C = 1 | C = 2 | C = 4 |
 |---|---|---|---|
 | 實際時間總計 tok/s（含 prefill），MTP + n-gram | 61.6–62.4 | 98.0–99.6 | 138.7–139.6 |
 | MXFP4，同上 | 68.5–70.7 | 118.9–119.3 | 190.3–190.7 |
-| decode 迴圈內的穩態，Q4_K_M / MXFP4 | | | 252.9 / 289.8 |
+| decode 迴圈內的穩態，Q4_K_M / MXFP4（情境 A） | 109.5–110.1 | — | 252.9 / **288.8** |
 | llama.cpp ROCm `-np 4`，MTP 開（較舊的量測） | 39.8 | 43.3 | 64.1 |
 
 每個並行輸出都與同一請求單獨執行時相同（有 gate 把關）。較早的 8/16 使用者量測（在後來數項優化之前；
 每位使用者 4096 上下文）：27B 無 MTP 總計 100.0 / 115.5 tok/s；16 位使用者時 MTP 已無幫助
 （113.1 vs 115.5），因為 16 列沒有留給草稿的空間，而 16 列 GEMV 已經是運算受限（compute-bound）。
+（這些量測早於寬 verify；在預設上限下 9–16 個 slot 仍是 0 個草稿，結論不變。第 17–32 列的每列成本尚無量測。）
 
 ## <a id="logging"></a>7. 記錄
 
@@ -203,8 +276,9 @@ I batch | slots busy 0/4 (decode 0, prefill 0) | 80 cycles, 3.79 slots/cycle, 11
 - 懲罰參數會被接受但忽略；`n` 只能 = 1；不支援 `logprobs`。
 - 沒有 HTTP keep-alive（每個回應都是 `Connection: close`）；沒有關機端點（請用 Ctrl+C 停止伺服器，見第 1 節）。
 - 串流輸出在引擎執行緒上寫出；非常慢的用戶端可能拖慢整個批次。
-- 有快取與無快取的執行在數值上等價，但不是逐位元相同（歷史 KV 由 decode kernel 計算 vs 由 prefill
-  GEMM 計算；[kv-and-caching.md](kv-and-caching.md#think-open)）。帶有 ≥ 2048 token system message
+- `system`／`prefix` 檢查點、同一提示的 `prompt-end` 命中，以及分層還原，都與冷執行逐位元相同。接續對話
+  （`gen-end`，或提示檢查點之後再接更多 token）在數值上等價，但不是逐位元相同：歷史的 KV 與 DeltaNet 狀態
+  來自 decode kernel（[kv-and-caching.md](kv-and-caching.md#checkpoints)）。帶有 ≥ 2048 token system message
   的請求會在 system 邊界切開，因此與不切開的執行檔不是逐位元相同。
 - 使用 MoE 模型時，專家路由幾乎平手的情況可能讓有快取的多輪對話與無快取的對話分歧（在一次思考模式
   測試中看過一次）；兩者都是有效的計算。

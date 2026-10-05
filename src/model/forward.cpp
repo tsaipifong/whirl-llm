@@ -63,7 +63,6 @@ void Model::mark(OpClass cls) {
 // plain launch per matrix. Per-row arithmetic is that of the single launch.
 void Model::gemvLaunch(std::span<const Mat> ws, DevPtr xin, std::span<const DevPtr> ys, u32 n, i32 acc) {
     const Mat& w = ws[0];
-    const i32 ncols = I(w.ncols);
     if (xq_src != xin || xq_n != n) {
         const u32 cnt = n * w.ncols;
         hip::launch(k.quantize_q8, D((cnt + 255) / 256), D(256), 0, stream, xin, xq, xd, I(cnt));
@@ -71,6 +70,50 @@ void Model::gemvLaunch(std::span<const Mat> ws, DevPtr xin, std::span<const DevP
         xq_n = n;
         mark(OpClass::quant);
     }
+    if (n <= max_small_batch) {
+        gemvKernels(ws, ys, n, acc, xq, xd);
+        return;
+    }
+    // 17..32 tokens (wide batched verify): the two-tile WMMA GEMV where the type has one
+    // (weights read once), else 16-token pieces through the multi-token kernels. Either
+    // way every token row is computed exactly as the one-token GEMV computes it.
+    const std::size_t t = ti(w.ty);
+    const bool head = w.ptr == output.ptr;
+    if (k.gemvx[t] != nullptr && (!head || envFlag("HEAD_GEMVX", false))) {
+        for (std::size_t si = 0; si < ws.size(); ++si) {
+            const Mat& wi = ws[si];
+            hip::launch(k.gemvx[t], D((wi.nrows + 15) / 16), D(256), 0, stream, wi.ptr, wi.row_bytes, xq, xd, ys[si], I(wi.ncols), I(wi.nrows),
+                        acc, gate, I(n));
+        }
+        return;
+    }
+    if (head && n > max_small_batch && w.ty == GgmlType::q6_k && k.gemvw_head_s != nullptr && ws.size() == 1) {
+        // output head: per range of rows, tokens [0, 16) then [n - 16, n) (rows of the overlap are
+        // computed twice, to the same bits); the second pass finds the range's weights in cache
+        const u32 V = w.nrows, chunk = head_chunk;
+        for (u32 r0 = 0; r0 < V; r0 += chunk) {
+            const u32 cr = std::min(chunk, V - r0);
+            for (const u32 t0 : {0u, n - max_small_batch}) {
+                hip::launch(k.gemvw_head_s, D((cr + 31) / 32), D(256), 0, stream, w.ptr + static_cast<u64>(r0) * w.row_bytes, w.row_bytes,
+                            xq + static_cast<u64>(t0) * w.ncols, xd + static_cast<u64>(t0) * (w.ncols / 32) * 4,
+                            ys[0] + (static_cast<u64>(t0) * V + r0) * 4, I(w.ncols), I(cr), I(V), acc, gate);
+            }
+        }
+        return;
+    }
+    for (u32 t0 = 0; t0 < n; t0 += max_small_batch) {
+        const u32 nt = std::min(max_small_batch, n - t0);
+        DevPtr yo[3] = {0, 0, 0};
+        for (std::size_t si = 0; si < ws.size(); ++si) yo[si] = ys[si] + static_cast<u64>(t0) * ws[si].nrows * 4;
+        gemvKernels(ws, std::span<const DevPtr>(yo, ws.size()), nt, acc, xq + static_cast<u64>(t0) * w.ncols,
+                    xd + static_cast<u64>(t0) * (w.ncols / 32) * 4);
+    }
+}
+
+// The int8 GEMV launches for n <= 16 tokens of xqp / xdp (already quantized).
+void Model::gemvKernels(std::span<const Mat> ws, std::span<const DevPtr> ys, u32 n, i32 acc, DevPtr xqp, DevPtr xdp) {
+    const Mat& w = ws[0];
+    const i32 ncols = I(w.ncols);
     const std::size_t t = ti(w.ty);
     hip::Function f = n == 1 ? k.gemvq[t] : k.gemvq_nt[n - 2][t];
     hip::Function fg = n == 1 ? nullptr : k.gemvq_nt_g[n - 2][t];
@@ -105,11 +148,11 @@ void Model::gemvLaunch(std::span<const Mat> ws, DevPtr xin, std::span<const DevP
             g.n[si] = I(wi.nrows);
             nb += (wi.nrows + rows_per_block - 1) / rows_per_block;
         }
-        hip::launch(f, D(nb), D(256), 0, stream, g, xq, xd, ncols, acc, gate);
+        hip::launch(f, D(nb), D(256), 0, stream, g, xqp, xdp, ncols, acc, gate);
     } else {
         for (std::size_t si = 0; si < ws.size(); ++si) {
             const Mat& wi = ws[si];
-            hip::launch(f, D((wi.nrows + rows_per_block - 1) / rows_per_block), D(256), 0, stream, wi.ptr, wi.row_bytes, xq, xd, ys[si],
+            hip::launch(f, D((wi.nrows + rows_per_block - 1) / rows_per_block), D(256), 0, stream, wi.ptr, wi.row_bytes, xqp, xdp, ys[si],
                         ncols, I(wi.nrows), acc, gate);
         }
     }
@@ -118,7 +161,7 @@ void Model::gemvLaunch(std::span<const Mat> ws, DevPtr xin, std::span<const DevP
 // Matmuls (no accumulate) of ws on the same input into ys. On the int8 GEMV
 // path the matrices of one type run as one grouped launch (bitwise the same).
 void Model::matmulGroup(std::span<const Mat> ws, DevPtr xin, std::span<const DevPtr> ys, u32 n) {
-    const bool ok = gv_group && k.gv_grp && n <= gemv_max && !float_gemv;
+    const bool ok = gv_group && k.gv_grp && n <= gvMax() && !float_gemv;
     bool done[3] = {false, false, false};
     for (std::size_t i = 0; i < ws.size(); ++i) {
         if (done[i]) continue;
@@ -161,13 +204,26 @@ void Model::matmul(const Mat& w, DevPtr xin, DevPtr y, u32 n, bool accumulate) {
         if (prof) prof->matmul_bytes += w.row_bytes * w.nrows;
         mark(head_phase ? OpClass::head : OpClass::matmul);
     };
-    if (n <= gemv_max && k.gemvq[t] != nullptr && !float_gemv) {
+    if (n <= gvMax() && k.gemvq[t] != nullptr && !float_gemv) {
         const DevPtr yy[1] = {y};
         gemvLaunch(std::span<const Mat>(&w, 1), xin, yy, n, acc);
     } else if (n == 1) {
         const u32 rows_per_block = 8;
         hip::launch(k.gemv1[t], D((w.nrows + rows_per_block - 1) / rows_per_block), D(256), 0, stream, w.ptr, w.row_bytes, xin, y, ncols,
                     nrows, ncols, nrows, acc);
+    } else if (floatGemvN(w, n)) {
+        // f32 / f16 weights, n = 2..16: f32 activations through gemv_<T>_8 / _4 / _1, each
+        // token bitwise == the n = 1 gemv_<T>_1 (C-13; the f16 GEMM is not)
+        const u32 rows_per_block = 8;
+        const hip::Dim3 grid = D((w.nrows + rows_per_block - 1) / rows_per_block);
+        for (u32 t0 = 0; t0 < n;) {
+            const u32 left = n - t0;
+            const u32 nt = left >= 8 ? 8 : left >= 4 ? 4 : 1;
+            const hip::Function f = nt == 8 ? k.gemv8[t] : nt == 4 ? k.gemv4[t] : k.gemv1[t];
+            hip::launch(f, grid, D(256), 0, stream, w.ptr, w.row_bytes, xin + static_cast<DevPtr>(t0) * w.ncols * 4,
+                        y + static_cast<DevPtr>(t0) * w.nrows * 4, ncols, nrows, ncols, nrows, acc);
+            t0 += nt;
+        }
     } else if (fp8_prefill && (fp8_mask & mm_class) != 0 && w.ty == GgmlType::mxfp4 && w.ref != 0 && k.gemm8[0] != nullptr) {
         // MXFP4 x fp8 (per-token scaled activations, folded block exponents)
         const u32 count = n * w.ncols;
@@ -184,9 +240,6 @@ void Model::matmul(const Mat& w, DevPtr xin, DevPtr y, u32 n, bool accumulate) {
         hip::launch(g8, D((n + c.bn - 1) / c.bn, (w.nrows + c.bm - 1) / c.bm), D(c.nth), 0, stream, w.ptr, w.row_bytes, w.ref, x16, sx8, y,
                     ncols, nrows, I(n), acc);
     } else {
-        const u32 choice = w.tune[tuneBucket(n)];
-        const std::size_t gcfg = choice % gemm_cfgs.size();
-        const GemmCfg c = gemm_cfgs[gcfg];
         const u32 count = n * w.ncols;
         if (x16_src != xin || x16_count != count || x16_fp8) {
             hip::launch(k.f32_to_f16, D((count / 4 + 255) / 256), D(256), 0, stream, xin, x16, I(count));
@@ -194,45 +247,55 @@ void Model::matmul(const Mat& w, DevPtr xin, DevPtr y, u32 n, bool accumulate) {
             x16_count = count;
             x16_fp8 = false;
         }
-        if (choice >= 2 * gemm_cfgs.size()) {
-            // small-batch GEMM straight from the quantized weights (bitwise == gemm_cN)
-            const std::size_t si = choice - 2 * gemm_cfgs.size();
-            const GemmCfg sc = k.gemms_geom[si];
-            const hip::Function sf = out_h16 ? k.gemmsh[si][t] : k.gemms[si][t];
-            hip::launch(sf, D((n + sc.bn - 1) / sc.bn, (w.nrows + sc.bm - 1) / sc.bm), D(sc.nth), 0, stream, w.ptr, w.row_bytes, x16, y, ncols,
-                        nrows, I(n), acc);
-            finish();
-            return;
-        }
-        DevPtr wptr = w.ptr;
-        u64 wrb = w.row_bytes;
-        GgmlType wty = w.ty;
-        const hip::Function hq = (out_h16 && k.gemmch[gcfg] != nullptr) ? k.gemmhqh[t] : k.gemmhq[t];
-        if (choice >= gemm_cfgs.size() && w.ty != GgmlType::f16 && gemmh_on && gemmhq_on && hq != nullptr && n >= gemmh_min && w.ncols % 32 == 0) {
-            // dequant fused into the fragment-order f16 GEMM (bitwise == dequant_f16 + gemm_cN_f16)
-            hip::launch(hq, D((n + 255) / 256, (w.nrows + 127) / 128), D(256), 0, stream, w.ptr, w.row_bytes, x16, y, ncols, nrows, I(n), acc);
-            finish();
-            return;
-        }
-        if (choice >= gemm_cfgs.size() && w.ty != GgmlType::f16) {
-            const u64 groups = static_cast<u64>(w.ncols / 8) * w.nrows;
-            hip::launch(k.dequant_f16[t], D(std::min<u64>((groups + 255) / 256, 65535)), D(256), 0, stream, w.ptr, w.row_bytes, w16, ncols,
-                        nrows);
-            wptr = w16;
-            wrb = static_cast<u64>(w.ncols) * 2;
-            wty = GgmlType::f16;
-        }
-        const bool use_ch = out_h16 && wty == GgmlType::f16 && k.gemmch[gcfg] != nullptr;
-        const hip::Function gf = use_ch ? k.gemmch[gcfg] : k.gemmc[gcfg][ti(wty)];
-        const hip::Function hf = use_ch ? k.gemmhh_f16 : k.gemmh_f16;
-        if (gemmh_on && hf != nullptr && wty == GgmlType::f16 && n >= gemmh_min && w.ncols % 32 == 0 && wrb == static_cast<u64>(w.ncols) * 2) {
-            // 128 rows x 256 tokens, bitwise the same as gf
-            hip::launch(hf, D((n + 255) / 256, (w.nrows + 127) / 128), D(256), 0, stream, wptr, x16, y, ncols, nrows, I(n), acc);
-        } else {
-            hip::launch(gf, D((n + c.bn - 1) / c.bn, (w.nrows + c.bm - 1) / c.bm), D(c.nth), 0, stream, wptr, wrb, x16, y, ncols, nrows, I(n), acc);
-        }
+        gemmF16(w, x16, y, n, acc);
     }
     finish();
+}
+
+// The f16-activation GEMM of matmul: y[t][:] (+)= W x16in[t][:] (x16in: n rows
+// of w.ncols f16; not registered in the x16 cache).
+void Model::gemmF16(const Mat& w, DevPtr x16in, DevPtr y, u32 n, i32 acc) {
+    const i32 ncols = I(w.ncols);
+    const i32 nrows = I(w.nrows);
+    const std::size_t t = ti(w.ty);
+    const u32 choice = w.tune[tuneBucket(n)];
+    const std::size_t gcfg = choice % gemm_cfgs.size();
+    const GemmCfg c = gemm_cfgs[gcfg];
+    if (choice >= 2 * gemm_cfgs.size()) {
+        // small-batch GEMM straight from the quantized weights (bitwise == gemm_cN)
+        const std::size_t si = choice - 2 * gemm_cfgs.size();
+        const GemmCfg sc = k.gemms_geom[si];  // a code object may export its own geometry (gfx1151)
+        const hip::Function sf = out_h16 ? k.gemmsh[si][t] : k.gemms[si][t];
+        hip::launch(sf, D((n + sc.bn - 1) / sc.bn, (w.nrows + sc.bm - 1) / sc.bm), D(sc.nth), 0, stream, w.ptr, w.row_bytes, x16in, y, ncols,
+                    nrows, I(n), acc);
+        return;
+    }
+    DevPtr wptr = w.ptr;
+    u64 wrb = w.row_bytes;
+    GgmlType wty = w.ty;
+    const hip::Function hq = (out_h16 && k.gemmch[gcfg] != nullptr) ? k.gemmhqh[t] : k.gemmhq[t];
+    if (choice >= gemm_cfgs.size() && w.ty != GgmlType::f16 && gemmh_on && gemmhq_on && hq != nullptr && n >= gemmh_min && w.ncols % 32 == 0) {
+        // dequant fused into the fragment-order f16 GEMM (bitwise == dequant_f16 + gemm_cN_f16)
+        hip::launch(hq, D((n + 255) / 256, (w.nrows + 127) / 128), D(256), 0, stream, w.ptr, w.row_bytes, x16in, y, ncols, nrows, I(n), acc);
+        return;
+    }
+    if (choice >= gemm_cfgs.size() && w.ty != GgmlType::f16) {
+        const u64 groups = static_cast<u64>(w.ncols / 8) * w.nrows;
+        hip::launch(k.dequant_f16[t], D(std::min<u64>((groups + 255) / 256, 65535)), D(256), 0, stream, w.ptr, w.row_bytes, w16, ncols,
+                    nrows);
+        wptr = w16;
+        wrb = static_cast<u64>(w.ncols) * 2;
+        wty = GgmlType::f16;
+    }
+    const bool use_ch = out_h16 && wty == GgmlType::f16 && k.gemmch[gcfg] != nullptr;
+    const hip::Function gf = use_ch ? k.gemmch[gcfg] : k.gemmc[gcfg][ti(wty)];
+    const hip::Function hf = use_ch ? k.gemmhh_f16 : k.gemmh_f16;
+    if (gemmh_on && hf != nullptr && wty == GgmlType::f16 && n >= gemmh_min && w.ncols % 32 == 0 && wrb == static_cast<u64>(w.ncols) * 2) {
+        // 128 rows x 256 tokens, bitwise the same as gf
+        hip::launch(hf, D((n + 255) / 256, (w.nrows + 127) / 128), D(256), 0, stream, wptr, x16in, y, ncols, nrows, I(n), acc);
+    } else {
+        hip::launch(gf, D((n + c.bn - 1) / c.bn, (w.nrows + c.bm - 1) / c.bm), D(c.nth), 0, stream, wptr, wrb, x16in, y, ncols, nrows, I(n), acc);
+    }
 }
 
 // Every fp8 activation producer writes the fragment-tiled layout and the fp8
@@ -255,8 +318,8 @@ void Model::rmsnorm(DevPtr xin, DevPtr w, DevPtr out, u32 n, u32 count, u32 in_s
 }
 
 Model::ActIn Model::actIn(const Mat& w, u32 n, std::uint8_t cls) const {
-    if (n <= gemv_max && k.gemvq[ti(w.ty)] != nullptr && !float_gemv) return ActIn::gemv;
-    if (n == 1) return ActIn::f32in;
+    if (n <= gvMax() && k.gemvq[ti(w.ty)] != nullptr && !float_gemv) return ActIn::gemv;
+    if (n == 1 || floatGemvN(w, n)) return ActIn::f32in;
     if (fp8_prefill && (fp8_mask & cls) != 0 && w.ty == GgmlType::mxfp4 && w.ref != 0 && k.gemm8[0] != nullptr) return ActIn::fp8;
     return ActIn::f16;
 }
@@ -330,8 +393,29 @@ void Model::rmsnormIn(DevPtr xin, DevPtr w, DevPtr out, u32 n, std::span<const M
     rmsnorm(xin, w, out, E, n, E, E);
 }
 
+// n>16 GDN prefill with qkv / gate on fp8 and contiguous [beta; alpha] on f16:
+// one rmsnorm_x8h16(t) writes both inputs (WHIRL_GDN_IN2=0 off).
+bool Model::gdnIn2(const GdnW& g, u32 n) const {
+    if (!gdn_in2_on || fused(n) || n <= 16 || cfg.n_embd > 8192) return false;
+    if (x8(k.rmsnorm_x8h16, k.rmsnorm_x8h16t) == nullptr) return false;
+    if (!gdn_ba_on || k.gdn_gates_ba == nullptr || ba_buf == 0 || !rowsContiguous(g.beta, g.alpha)) return false;
+    const Mat pc[2] = {g.qkv, g.gate};
+    const Mat bc[2] = {g.beta, g.alpha};
+    const auto pin = actCommon(pc, n, 1);
+    const auto bin = actCommon(bc, n, 1);
+    return pin && *pin == ActIn::fp8 && bin && *bin == ActIn::f16;
+}
+
+// f32 / f16 weights (no int8 GEMV) at n = 2..16 run the f32-activation GEMV
+// instances, bitwise == n = 1 per token (C-13).
+bool Model::floatGemvN(const Mat& w, u32 n) const {
+    const std::size_t t = ti(w.ty);
+    return n >= 2 && n <= max_small_batch && (w.ty == GgmlType::f32 || w.ty == GgmlType::f16) && k.gemvq[t] == nullptr &&
+           k.gemv4[t] != nullptr && k.gemv8[t] != nullptr;
+}
+
 // Decode fusions apply to small batches on the int8 GEMV path.
-bool Model::fused(u32 n) const { return n <= max_small_batch && !float_gemv && !no_fuse; }
+bool Model::fused(u32 n) const { return n <= small_max && !float_gemv && !no_fuse; }
 
 bool Model::fusedDecode() const {
     if (!fused(max_small_batch)) return false;
@@ -341,6 +425,10 @@ bool Model::fusedDecode() const {
     }
     return true;
 }
+
+bool Model::wideCapable() const { return wide_verify && !cfg.moe && fusedDecode() && k.gemvx[ti(GgmlType::q4_k)] != nullptr; }
+
+bool Model::wideOk() const { return wideCapable() && gdn_replay; }
 
 bool Model::gdnAbFusable(const GdnW& g) const {
     return k.gdn_ab[ti(g.beta.ty) % n_types] != nullptr && g.beta.ty == g.alpha.ty && g.beta.row_bytes == g.alpha.row_bytes &&
@@ -427,7 +515,8 @@ void Model::attnBlock(const AttnW& a, const KvLayer& lkv, u32 n) {
     const u32 hd = cfg.head_dim;
     const bool batched = bplan != nullptr || mtp_batch;
     const DevPtr kvb = batched ? kvbase_buf : 0;
-    const KvArgs kva = kvArgs(lkv, kvb, kv_off);
+    KvArgs kva = kvArgs(lkv, kvb, kv_off);
+    kva.win = attn_win;  // 0 except for the MTP drafts (only attn_wsplit reads it)
     {
         const Mat ws[3] = {a.q, a.k, a.v};
         const DevPtr ys[3] = {qf, kv_k, kv_v};
@@ -484,7 +573,7 @@ void Model::attnBlock(const AttnW& a, const KvLayer& lkv, u32 n) {
         hip::launch(k.kv_store, D(n), D(256), 0, stream, kv_k, kv_v, kva, pos_buf, I(row));
     }
     const float scale = 1.0f / std::sqrt(static_cast<float>(hd));
-    if (n <= max_small_batch) {
+    if (n <= small_max) {
         // flash-decoding; grid.z = query (speculative verify), query t sees
         // positions up to pos_buf[t]
         const u32 n_split = fdSplits(max_ctx);
@@ -492,33 +581,50 @@ void Model::attnBlock(const AttnW& a, const KvLayer& lkv, u32 n) {
         if (k.attn_wsplit1 != nullptr && hd == 256 && grp_q <= 16 && (dbg_flags & 2) == 0) {
             // query groups: consecutive rows of one sequence whose split size
             // `per` (a function of the position) matches, <= 16 columns each
-            AwGroups groups;
-            u32 ng = 0;
+            // (attn_wsplit1) or <= 32 (attn_wsplit2: one K/V pass for up to 32 / grp_q rows)
             // caps.attn_group1 (gfx1151): one query per group (its WMMA P.V is not exact
             // when a masked key carries a real V row), so a grouped verify row could differ
-            const u32 max_q = ((dbg_flags & 4) != 0 || k.caps.attn_group1) ? 1 : 16 / grp_q;
+            const bool one_q = (dbg_flags & 4) != 0 || k.caps.attn_group1;
             const bool known = row_n == n && n > 1;
-            u32 r = 0;
-            while (r < n) {
-                u32 c = 1;
-                if (known) {
-                    const i32 per0 = awPer(row_pos[r] + 1, n_split);
-                    while (r + c < n && c < max_q && row_base[r + c] == row_base[r] && row_pos[r + c] == row_pos[r] + static_cast<i32>(c) &&
-                           awPer(row_pos[r + c] + 1, n_split) == per0)
-                        c += 1;
+            auto group = [&](u32 max_q, AwGroups& groups) {
+                u32 ng = 0, r = 0, widest = 0;
+                while (r < n) {
+                    u32 c = 1;
+                    if (known) {
+                        const i32 per0 = awPer(row_pos[r] + 1, n_split);
+                        while (r + c < n && c < max_q && row_base[r + c] == row_base[r] && row_pos[r + c] == row_pos[r] + static_cast<i32>(c) &&
+                               awPer(row_pos[r + c] + 1, n_split) == per0)
+                            c += 1;
+                    }
+                    groups.first[ng] = static_cast<i32>(r);
+                    groups.count[ng] = static_cast<i32>(c);
+                    widest = std::max(widest, c);
+                    ng += 1;
+                    r += c;
                 }
-                groups.first[ng] = static_cast<i32>(r);
-                groups.count[ng] = static_cast<i32>(c);
-                ng += 1;
-                r += c;
+                return std::pair<u32, u32>{ng, widest};
+            };
+            AwGroups groups;
+            const u32 max_q1 = one_q ? 1 : 16 / grp_q;
+            hip::Function aw = k.attn_wsplit1;
+            u32 ng = 0;
+            bool wide = false;
+            if (!one_q && attn_wide && k.attn_wsplit2 != nullptr && known && 32 / grp_q > max_q1) {
+                const auto [ng2, widest2] = group(32 / grp_q, groups);
+                if (widest2 > max_q1) {
+                    aw = k.attn_wsplit2;
+                    ng = ng2;
+                    wide = true;
+                }
             }
-            hip::launch(k.attn_wsplit1, D(cfg.n_head_kv, n_split, ng), D(128), 0, stream, qf, kva, part_ml, part_acc, I(cfg.n_head),
-                        I(cfg.n_head_kv), I(2 * hd), pos_buf, scale, gate, groups);
+            if (!wide) ng = group(max_q1, groups).first;
+            hip::launch(aw, D(cfg.n_head_kv, n_split, ng), D(128), 0, stream, qf, kva, part_ml, part_acc, I(cfg.n_head), I(cfg.n_head_kv),
+                        I(2 * hd), pos_buf, scale, gate, groups);
         } else {
             hip::launch(k.attn_split, D(cfg.n_head_kv, n_split, n), D(256), 0, stream, qf, kva, part_ml, part_acc, I(cfg.n_head), I(cfg.n_head_kv),
                         I(hd), I(2 * hd), pos_buf, scale, i32(1), gate);
         }
-        const bool combine_q8 = k.attn_combine_q8 != nullptr && fused(n) && hd == 256 && k.gemvq[ti(a.o.ty)] != nullptr && n <= gemv_max;
+        const bool combine_q8 = k.attn_combine_q8 != nullptr && fused(n) && hd == 256 && k.gemvq[ti(a.o.ty)] != nullptr && n <= gvMax();
         if (combine_q8) {
             // the o-projection's int8 input comes out of the combine
             hip::launch(k.attn_combine_q8, D(cfg.n_head, n), D(256), 0, stream, part_ml, part_acc, qf, attn_out, I(cfg.n_head), I(hd), I(2 * hd),
@@ -550,16 +656,36 @@ void Model::attnBlock(const AttnW& a, const KvLayer& lkv, u32 n) {
 // WMMA prefill attention of n queries at positions pos0 .. (keys 0 .. pos0 +
 // n - 1), split over head ranges so one launch does at most ~4096 x 128k
 // query-key pairs x all heads. Same results as one launch.
+// f16 / q8 / q8h / q8v KV: attn_kg (NP query heads of one KV head per block; bit-identical
+// to attn_kx) when NP divides the GQA group, the head ranges stay whole groups
+// of NP and the softmax scale is a power of two (it relies on exact scaling).
 void Model::prefillAttn(DevPtr q, const KvArgs& kva, DevPtr out, DevPtr pos, u32 n, u32 pos0, float scale) {
     const u64 work = static_cast<u64>(n) * (static_cast<u64>(pos0) + n);
     const u64 budget = 4096ull * 131072ull;
     u32 parts = static_cast<u32>(std::min<u64>(cfg.n_head, (work + budget - 1) / budget));
     while (parts > 1 && cfg.n_head % parts != 0) parts += 1;  // whole head ranges
     const u32 hp = cfg.n_head / parts;
+    const u32 grp = cfg.n_head / cfg.n_head_kv;
+    hip::Function kg = nullptr;
+    u32 np = 0;
+    int sexp = 0;
+    const bool pow2 = std::frexp(scale, &sexp) == 0.5f;
+    if (attn_kg_on && cfg.head_dim == 256 && pow2) {
+        for (const auto& [f, c] : {std::pair{k.attn_kg6, 6u}, std::pair{k.attn_kg4, 4u}, std::pair{k.attn_kg2, 2u}})
+            if (f != nullptr && grp % c == 0 && hp % c == 0) {
+                kg = f;
+                np = c;
+                break;
+            }
+    }
     const bool kx = attn_kx_on && k.attn_kx != nullptr && cfg.head_dim == 256;
     for (u32 p = 0; p < parts; ++p) {
-        hip::launch(kx ? k.attn_kx : k.attn_prefill_wmma, D((n + 127) / 128, hp), D(kx ? 512 : 256), 0, stream, q, kva, out, I(cfg.n_head),
-                    I(cfg.n_head_kv), I(2 * cfg.head_dim), pos, I(n), scale, I(p * hp));
+        if (kg != nullptr)
+            hip::launch(kg, D((n + 15) / 16, hp / np), D(64 * np), 0, stream, q, kva, out, I(cfg.n_head), I(cfg.n_head_kv),
+                        I(2 * cfg.head_dim), pos, I(n), scale, I(p * hp));
+        else
+            hip::launch(kx ? k.attn_kx : k.attn_prefill_wmma, D((n + 127) / 128, hp), D(kx ? 512 : 256), 0, stream, q, kva, out,
+                        I(cfg.n_head), I(cfg.n_head_kv), I(2 * cfg.head_dim), pos, I(n), scale, I(p * hp));
     }
 }
 
@@ -815,7 +941,9 @@ void Model::mtpEnqueue(DevPtr hidden, std::span<const u32> tokens, DevPtr dev_to
         rmsnormQ8(x, mw.attn_norm, h, n);
     else
         rmsnorm(x, mw.attn_norm, h, E, n, E, E);
+    attn_win = draftWindowArg(draft_window, draft_window_min);  // drafts only: sink + last W positions
     attnBlock(mw.attn, mtpKv(), n);
+    attn_win = 0;
     if (mw.moe)
         moeBlock(mw.post_norm, mw.ffn_gate, mw.ffn_up, mw.ffn_down, *mw.moe, n);
     else
@@ -827,12 +955,14 @@ void Model::mtpEnqueue(DevPtr hidden, std::span<const u32> tokens, DevPtr dev_to
         rmsnormQ8(last, mw.head_norm, h, 1);
     else
         rmsnorm(last, mw.head_norm, h, E, 1, E, E);
-    // draft head over the first draft_vocab rows only
+    // draft head over the vocabulary subset (draft_map) or the first draft_vocab rows only
     Mat head = draft_head ? *draft_head : output;
-    if (draft_vocab > 0 && draft_vocab < head.nrows) head.nrows = draft_vocab;
+    if (draft_rows > 0 && draft_d2) head.nrows = draft_rows;
+    else if (draft_vocab > 0 && draft_vocab < head.nrows) head.nrows = draft_vocab;
     draftHeadMatmul(head, 1);
+    const DevPtr map = draft_rows > 0 && draft_d2 && draft_map ? *draft_map : DevPtr{0};
     hip::launch(k.draft_pick, D(1), D(1024), 0, stream, logits, I(head.nrows), ctlSlot(ctl_drafts), ctlSlot(ctl_probs), ctlSlot(ctl_nd),
-                I(draft_slot), I(draft_n_min), draft_p_min);
+                I(draft_slot), I(draft_n_min), draft_p_min, map);
 }
 
 // Apply sequence s's kept verify rows to its recurrent state (replay mode).
@@ -905,13 +1035,13 @@ u32 Model::verifyBatchEnqueue(std::span<const VSeg> segs) {
     BatchPlan plan;
     plan.segs = segs;
     RowTab tab;
-    Idx16 dst;
+    RowIdx dst;
     u32 n = 0;
     u32 snaps = 0;
     for (std::size_t kk = 0; kk < segs.size(); ++kk) {
         const VSeg& sg = segs[kk];
         if (sg.pos + sg.nd + 1 > max_ctx) throw ModelError("ContextTooLong");
-        if (n + sg.nd + 1 > max_small_batch) throw ModelError("BatchTooLarge");
+        if (sg.nd + 1 > max_small_batch || n + sg.nd + 1 > verifyRows()) throw ModelError("BatchTooLarge");
         plan.snap_base[kk] = snaps;
         snaps += sg.nd;
         for (u32 r = 0; r < sg.nd + 1; ++r) {
@@ -956,12 +1086,14 @@ u32 Model::verifyBatchEnqueue(std::span<const VSeg> segs) {
     keep_hidden = true;
     all_logits = true;
     bplan = &plan;
+    small_max = n > max_small_batch ? max_verify_rows : max_small_batch;
     struct Reset {
         Model& m;
         ~Reset() {
             m.keep_hidden = false;
             m.all_logits = false;
             m.bplan = nullptr;
+            m.small_max = max_small_batch;
         }
     } reset_flags{*this};
     xq_src = 0;
@@ -981,14 +1113,14 @@ void Model::mtpBatchStepEx(std::span<const MSeg> segs, u32 r, bool draft) {
     const u64 E = cfg.n_embd;
     if (segs.empty() || segs.size() > max_small_batch) throw ModelError("BadBatch");
     RowTab tab;
-    Idx16 last;
-    Idx16 area;
+    RowIdx last;
+    RowIdx area;
     u32 n = 0;
     for (std::size_t kk = 0; kk < segs.size(); ++kk) {
         const MSeg& sg = segs[kk];
         const Seq& sq = seqs[sg.seq];
         if (r == 0) {
-            if (n + sg.pend.size() > max_small_batch) throw ModelError("BatchTooLarge");
+            if (sg.pend.size() > max_small_batch || n + sg.pend.size() > verifyRows()) throw ModelError("BatchTooLarge");
             hip::copyAsync(mtp_in + static_cast<u64>(n) * E * 4, sq.hid, sg.pend.size() * E * 4, stream);
             for (std::size_t j = 0; j < sg.pend.size(); ++j) {
                 tab.tok[n] = lookupId(sg.pend[j]);
@@ -1009,10 +1141,14 @@ void Model::mtpBatchStepEx(std::span<const MSeg> segs, u32 r, bool draft) {
     xq_src = 0;
     x16_src = 0;
     mtp_batch = true;
+    small_max = n > max_small_batch ? max_verify_rows : max_small_batch;
     struct BatchReset {
-        bool& b;
-        ~BatchReset() { b = false; }
-    } batch_reset{mtp_batch};
+        Model& m;
+        ~BatchReset() {
+            m.mtp_batch = false;
+            m.small_max = max_small_batch;
+        }
+    } batch_reset{*this};
     row_n = n;
     for (u32 ri = 0; ri < n; ++ri) {
         row_pos[ri] = tab.pos[ri];
@@ -1044,7 +1180,9 @@ void Model::mtpBatchStepEx(std::span<const MSeg> segs, u32 r, bool draft) {
     rmsnorm(hidden, mw.hnorm, mtp_cat + E * 4, static_cast<u32>(E), n, static_cast<u32>(E), static_cast<u32>(2 * E));
     matmul(mw.eh_proj, mtp_cat, x, n, false);
     rmsnormQ8(x, mw.attn_norm, h, n);
+    attn_win = draftWindowArg(draft_window, draft_window_min);  // drafts only: sink + last W positions
     attnBlock(mw.attn, mtpKv(), n);
+    attn_win = 0;
     if (mw.moe)
         moeBlock(mw.post_norm, mw.ffn_gate, mw.ffn_up, mw.ffn_down, *mw.moe, n);
     else
@@ -1057,9 +1195,12 @@ void Model::mtpBatchStepEx(std::span<const MSeg> segs, u32 r, bool draft) {
     xq_n = ns;
     x16_src = 0;
     Mat head = draft_head ? *draft_head : output;
-    if (draft_vocab > 0 && draft_vocab < head.nrows) head.nrows = draft_vocab;
+    if (draft_rows > 0 && draft_d2) head.nrows = draft_rows;
+    else if (draft_vocab > 0 && draft_vocab < head.nrows) head.nrows = draft_vocab;
     draftHeadMatmul(head, ns);
-    hip::launch(k.draft_pick_rows, D(ns), D(1024), 0, stream, logits, I(head.nrows), out_tok, area, I(r), I(draft_n_min), draft_p_min);
+    const DevPtr map = draft_rows > 0 && draft_d2 && draft_map ? *draft_map : DevPtr{0};
+    hip::launch(k.draft_pick_rows, D(ns), D(1024), 0, stream, logits, I(head.nrows), out_tok, area, I(r), I(draft_n_min), draft_p_min,
+                map);
 }
 
 void Model::readCtl(std::span<i32> dst) { hip::download(dst.data(), out_tok, dst.size() * 4); }
@@ -1168,6 +1309,8 @@ void Model::verify(std::span<const u32> tokens, u32 pos0, std::span<u32> out) {
 void Model::restoreSnapshot(u32 keep) {
     // a captured decode graph holds the old state pointers
     decode_graph.reset();
+    // the unfused decode path writes only snapshot 0: any later set would be stale
+    if (keep == 0 || keep > snap_sets || (keep > 1 && !fusedDecode())) throw ModelError("SnapshotNotWritten");
     const u32 kk = keep - 1;
     for (u32 i = 0; i < cfg.n_layer; ++i) {
         if (ssm_state[i] == 0) continue;
@@ -1230,11 +1373,24 @@ void Model::run(u32 n) {
     const u32 E = cfg.n_embd;
     for (std::size_t i = 0; i < layers.size(); ++i) {
         const Layer& L = layers[i];
+        bool gdn_in2 = false;  // x16b holds this layer's normed input as f16 for [beta; alpha]
         if (fused(n)) {
             rmsnormQ8(x, L.attn_norm, h, n);
         } else if (L.kind == LayerKind::attn) {
             const Mat c[3] = {L.attn.q, L.attn.k, L.attn.v};
             rmsnormIn(x, L.attn_norm, h, n, c, 1);
+        } else if (gdnIn2(L.gdn, n)) {
+            // one norm: fp8 (+ sx8) into x16 for qkv / gate (registered as h's
+            // conversion; h itself is left unwritten) and f16 into x16b for [beta; alpha]
+            if (x16bOff() + static_cast<u64>(n) * E * 2 > x16_bytes) throw ModelError("X16bOverflow");
+            hip::launch(x8(k.rmsnorm_x8h16, k.rmsnorm_x8h16t), D(n), D(256), 0, stream, x, L.attn_norm, x16, sx8, x16 + x16bOff(), I(E),
+                        cfg.eps);
+            xq_src = 0;
+            x16_src = h;
+            x16_count = n * E;
+            x16_fp8 = true;
+            mark(OpClass::norm);
+            gdn_in2 = true;
         } else {
             const Mat c[4] = {L.gdn.qkv, L.gdn.gate, L.gdn.beta, L.gdn.alpha};
             rmsnormIn(x, L.attn_norm, h, n, c, 1);
@@ -1290,11 +1446,26 @@ void Model::run(u32 n) {
                 x16_src = 0;
                 mark(OpClass::gdn_rec);
             } else {
-                matmul(g.beta, h, beta, n, false);
-                matmul(g.alpha, h, alpha, n, false);
                 const u32 nh = n * cfg.n_v_heads;
                 bool conv_l2 = false;
-                hip::launch(k.gdn_gates, D((nh + 63) / 64), D(64), 0, stream, beta, alpha, g.dt, g.a, I(nh), I(cfg.n_v_heads));
+                if (gdn_in2) {
+                    // the [beta; alpha] f16 GEMM straight from x16b (gdnIn2 implies the gates_ba path)
+                    const Mat ba = concatRows(g.beta, g.alpha);
+                    gemmF16(ba, x16 + x16bOff(), ba_buf, n, 0);
+                    if (ba_buf == xq_src) xq_src = 0;
+                    if (ba_buf == x16_src) x16_src = 0;
+                    if (prof) prof->matmul_bytes += ba.row_bytes * ba.nrows;
+                    mark(OpClass::matmul);
+                    hip::launch(k.gdn_gates_ba, D((nh + 63) / 64), D(64), 0, stream, ba_buf, beta, alpha, g.dt, g.a, I(nh), I(cfg.n_v_heads));
+                } else if (gdn_ba_on && k.gdn_gates_ba != nullptr && ba_buf != 0 && rowsContiguous(g.beta, g.alpha)) {
+                    // one [beta; alpha] GEMM (beta's tune) into ba[t][2 * n_v_heads]
+                    matmul(concatRows(g.beta, g.alpha), h, ba_buf, n, false);
+                    hip::launch(k.gdn_gates_ba, D((nh + 63) / 64), D(64), 0, stream, ba_buf, beta, alpha, g.dt, g.a, I(nh), I(cfg.n_v_heads));
+                } else {
+                    matmul(g.beta, h, beta, n, false);
+                    matmul(g.alpha, h, alpha, n, false);
+                    hip::launch(k.gdn_gates, D((nh + 63) / 64), D(64), 0, stream, beta, alpha, g.dt, g.a, I(nh), I(cfg.n_v_heads));
+                }
                 if (!psegs.empty() && gdn_h16) {
                     // the solo f16 conv kernels per segment (segmented == solo bitwise)
                     conv_l2 = true;
@@ -1383,7 +1554,7 @@ void Model::run(u32 n) {
     }
     if (keep_hidden) rmsnorm(x, output_norm, hn, E, n, E, E);
     if (!psegs.empty()) return;  // prefillSegs: per-segment logits from x
-    if (keep_hidden && all_logits && n <= max_small_batch) {
+    if (keep_hidden && all_logits && n <= small_max) {
         head_phase = true;
         matmul(output, hn, logits, n, false);
         head_phase = false;

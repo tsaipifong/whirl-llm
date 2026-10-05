@@ -77,6 +77,9 @@ constexpr std::uint32_t max_batch_default = 4096;
 constexpr std::uint32_t max_batch_limit = 16384;
 // Largest batch served by the multi-token int8 GEMV / small-batch kernels.
 constexpr std::uint32_t max_small_batch = 16;
+// Most rows of one batched verify / MTP step over several sequences (dense models with the
+// wide GEMV kernels; each sequence still has at most max_small_batch rows).
+constexpr std::uint32_t max_verify_rows = 32;
 // Most MTP drafts per verify cycle.
 constexpr std::uint32_t max_drafts = 10;
 // Recurrent-state segments / snapshots per segment in the fused DeltaNet kernels.
@@ -129,10 +132,11 @@ using GvArgs = kernels::GvArgs;
 using KvArgs = kernels::KvArgs;
 using Tok16 = kernels::Tok16;
 using RowTab = kernels::RowTab;
-using Idx16 = kernels::Idx16;
+using RowIdx = kernels::RowIdx;
 using AwGroups = kernels::AwGroups;
 static_assert(kv_page == kernels::kKvPage && gdn_max_seg == kernels::kGdnMaxSeg && gdn_max_snap == kernels::kGdnMaxSnap &&
-              max_small_batch == kernels::kMaxSmallBatch && max_drafts == kernels::kMaxDrafts && n_types == kernels::kNTypes);
+              max_small_batch == kernels::kMaxSmallBatch && max_drafts == kernels::kMaxDrafts && n_types == kernels::kNTypes &&
+              max_verify_rows == kernels::kMaxVerifyRows);
 static_assert(ctl_rows == kernels::kCtlRows && ctl_drafts == kernels::kCtlDrafts && ctl_probs == kernels::kCtlProbs &&
               ctl_nd == kernels::kCtlNd && ctl_stop == kernels::kCtlStop && ctl_words == kernels::kCtlWords);
 // ---------------------------------------------------------------------------
@@ -185,6 +189,20 @@ struct Mat {
     std::uint32_t nrows = 0;
     std::uint64_t row_bytes = 0;
 };
+
+// True when b's rows directly follow a's in one allocation (same type and row
+// layout), so [a; b] can be read as one (a.nrows + b.nrows)-row matrix.
+inline bool rowsContiguous(const Mat& a, const Mat& b) {
+    return a.ptr != 0 && a.ty == b.ty && a.ncols == b.ncols && a.row_bytes == b.row_bytes && a.ref == 0 && b.ref == 0 &&
+           b.ptr == a.ptr + static_cast<std::uint64_t>(a.nrows) * a.row_bytes;
+}
+
+// [a; b] as one matrix (a's tune); only valid when rowsContiguous(a, b).
+inline Mat concatRows(const Mat& a, const Mat& b) {
+    Mat r = a;
+    r.nrows = a.nrows + b.nrows;
+    return r;
+}
 
 struct AttnW {
     Mat q, k, v, o;
@@ -295,6 +313,8 @@ struct Profile {
 struct LoadStats {
     std::uint64_t bytes = 0;
     std::uint32_t tensors = 0;
+    // GDN layers whose ssm_beta / ssm_alpha were loaded into one block (beta rows then alpha rows)
+    std::uint32_t gdn_ba_contig = 0;
     double ms = 0;
 };
 
@@ -381,12 +401,22 @@ public:
     bool head_phase = false;
     bool no_fuse = false;
     std::uint32_t row_n = 0;
-    std::array<std::int32_t, max_small_batch> row_pos{};
-    std::array<std::int32_t, max_small_batch> row_base{};
+    std::array<std::int32_t, max_verify_rows> row_pos{};
+    std::array<std::int32_t, max_verify_rows> row_base{};
+    // most rows the GEMV / decode-fusion paths take in the current forward: max_small_batch,
+    // raised to max_verify_rows inside a wide batched verify / MTP step (see wideOk())
+    std::uint32_t small_max = max_small_batch;
     std::uint32_t dbg_flags = 0;
     std::uint64_t tune_mask = ~0ull;
     bool tune_cold = false;
     bool naive_attn = false;
+    // verify attention: groups of up to 32 columns (attn_wsplit2) when that lets a
+    // sequence's rows share one K/V pass (WHIRL_ATTN_WIDE=0: <= 16 columns as before)
+    bool attn_wide = true;
+    // batched verify of more than 16 rows (WHIRL_WIDE_VERIFY=0: at most 16 as before)
+    bool wide_verify = true;
+    // output-head rows per range in a wide verify (two 16-token passes per range; WHIRL_HEAD_CHUNK)
+    std::uint32_t head_chunk = 248320;
     bool float_gemv = false;
     std::uint32_t gemv_max = max_small_batch;
     GemvR gemv_r = defaultGemvR();
@@ -394,7 +424,7 @@ public:
     GemvR gemv_w_head = defaultGemvWHead();
 
     // ---- activations
-    DevPtr x = 0, h = 0, qf = 0, kv_k = 0, kv_v = 0, attn_out = 0, qkv = 0, conv_out = 0, z = 0, beta = 0, alpha = 0,
+    DevPtr x = 0, h = 0, qf = 0, kv_k = 0, kv_v = 0, attn_out = 0, qkv = 0, conv_out = 0, z = 0, beta = 0, alpha = 0, ba_buf = 0,
            gdn_out = 0, ffn_g = 0, ffn_u = 0, logits = 0, scores = 0, ids = 0, pos_buf = 0, out_tok = 0;
     DevPtr part_ml = 0, part_acc = 0;
     DevPtr x16 = 0, xq = 0, xd = 0;
@@ -415,6 +445,10 @@ public:
     bool gdn_wmma = false;
     bool act_fuse = true;
     bool attn_kx_on = true;
+    bool gdn_ba_on = true;   // n>16 GDN prefill: one [beta; alpha] GEMM + gdn_gates_ba (WHIRL_GDN_BA=0 off)
+    bool gdn_in2_on = true;  // n>16 GDN prefill: one norm -> fp8 (qkv / gate) + f16 x16b ([beta; alpha]) (WHIRL_GDN_IN2=0 off)
+    std::uint64_t x16_bytes = 0;  // x16 allocation size (x16b sub-buffer bound check)
+    bool attn_kg_on = true;  // GQA-grouped prefill attention (f16 / q8 / q8h / q8v KV; WHIRL_ATTN_KG=0 off)
     bool ffn_h16 = false;
     bool out_h16 = false;
     bool g8t = false;
@@ -454,11 +488,19 @@ public:
     bool keep_hidden = false;
     bool all_logits = false;
     std::uint32_t snap_rows = 0;
-    std::uint32_t draft_vocab = 0;
+    std::uint32_t draft_vocab = 0;  // WHIRL_DRAFT_VOCAB=N: the first N rows only (old experiment)
+    // WHIRL_DRAFT_WINDOW / _MIN: MTP draft attention over the first 256 + the last W positions once
+    // the context reaches draft_window_min (W = 0: off); the trunk and verify always see everything
+    std::uint32_t draft_window = 16384;
+    std::uint32_t draft_window_min = 65536;
     float draft_p_min = 0;
     std::uint32_t draft_n_min = 0;
     std::optional<Mat> draft_head;
     std::optional<DevPtr> draft_d2;
+    // draft-head vocabulary subset (setDraftVocab): rows of draft_d2 and their token ids on the device
+    std::uint32_t draft_rows = 0;
+    std::optional<DevPtr> draft_map;
+    std::int32_t attn_win = 0;  // KvArgs::win of the current attnBlock (set around the MTP calls only)
     std::uint32_t moe_bn_force = 0;
     std::vector<std::int32_t>* moe_dump = nullptr;
     std::uint32_t ff_scratch = 0;
@@ -573,12 +615,21 @@ public:
     void restoreSnapshot(std::uint32_t keep);
     void restoreSeqSnapshot(std::uint32_t s, std::uint32_t set);
     bool fusedDecode() const;
+    // batched verify / MTP steps of up to max_verify_rows rows (dense, fused decode, replay)
+    bool wideOk() const;
+    // wideOk() before setupSeqs decides replay (which wide batches also need)
+    bool wideCapable() const;
+    std::uint32_t verifyRows() const { return wideOk() ? max_verify_rows : max_small_batch; }
 
     // MTP block Q6_K matrices as Q4_K (drafts only).
     void requantMtpQ4();
     enum class DraftHeadKind { q4, d2 };
     void buildDraftHead() { buildDraftHeadEx(DraftHeadKind::d2); }
     void buildDraftHeadEx(DraftHeadKind kind);
+    // Keep only these rows (ascending token ids, see draftVocabIds) of the 2-bit draft head;
+    // drafts map back to token ids, the trunk and its output head are untouched. False (and no
+    // change) without the 2-bit head or the copy_rows_map kernel.
+    bool setDraftVocab(std::span<const std::uint32_t> ids);
 
     // ---- prefill GEMM autotune
     void autotuneGemm(std::size_t bucket, std::uint32_t reps, std::string* log);
@@ -597,7 +648,8 @@ public:
     bool checkGemvq(std::string& log);
     bool checkGemvBitwise(std::string& log);
     bool checkPrefillInvariance(std::string& log);
-    bool checkAttnGroups(std::string& log, std::uint32_t p0, std::uint32_t n);
+    // wide: the grouped launch is attn_wsplit2 (<= 32 columns) instead of attn_wsplit1
+    bool checkAttnGroups(std::string& log, std::uint32_t p0, std::uint32_t n, bool wide = false);
 
     // Device memory helpers (tracked in `allocations`, freed by the destructor).
     DevPtr alloc(std::uint64_t bytes);
@@ -609,6 +661,10 @@ public:
     void gemvLaunch(std::span<const Mat> ws, DevPtr xin, std::span<const DevPtr> ys, std::uint32_t n, std::int32_t acc);
     void matmulGroup(std::span<const Mat> ws, DevPtr xin, std::span<const DevPtr> ys, std::uint32_t n);
     void matmul(const Mat& w, DevPtr xin, DevPtr y, std::uint32_t n, bool accumulate);
+    void gemmF16(const Mat& w, DevPtr x16in, DevPtr y, std::uint32_t n, std::int32_t acc);
+    bool gdnIn2(const GdnW& g, std::uint32_t n) const;
+    // x16b: f16 sub-buffer of x16 past the fp8 rows (tiled fp8 pads to 16 rows), 256-aligned
+    std::uint64_t x16bOff() const { return ((static_cast<std::uint64_t>((max_batch + 15) / 16 * 16) * cfg.n_embd) + 255) & ~std::uint64_t(255); }
     void run(std::uint32_t n);
 
 private:
@@ -627,6 +683,10 @@ private:
     std::optional<ActIn> actCommon(std::span<const Mat> consumers, std::uint32_t n, std::uint8_t cls) const;
     void rmsnormIn(DevPtr xin, DevPtr w, DevPtr out, std::uint32_t n, std::span<const Mat> consumers, std::uint8_t cls);
     bool fused(std::uint32_t n) const;
+    // most tokens of the int8 GEMV path in the current forward
+    std::uint32_t gvMax() const { return small_max > max_small_batch ? small_max : gemv_max; }
+    void gemvKernels(std::span<const Mat> ws, std::span<const DevPtr> ys, std::uint32_t n, std::int32_t acc, DevPtr xqp, DevPtr xdp);
+    bool floatGemvN(const Mat& w, std::uint32_t n) const;
     bool gdnAbFusable(const GdnW& g) const;
     void rmsnormQ8(DevPtr xin, DevPtr w, DevPtr out, std::uint32_t n);
     void elementwise(hip::Function f, DevPtr a, DevPtr b, std::uint32_t n);
@@ -716,9 +776,127 @@ struct DraftTiming {
     std::optional<float> estimate(std::uint32_t nd) const;
 };
 
+// ---- draft-head vocabulary subset (T5-1b): WHIRL_DRAFT_VOCAB = 48k | 64k | <file> | off | N
+// File for a WHIRL_DRAFT_VOCAB value: "48k" / "64k" / ... -> <dir>/subset_48k.bin, anything else
+// that is not "off" or a plain number (the old first-N-rows experiment) is a path; else nullopt.
+std::optional<std::string> draftVocabFile(std::string_view spec, const std::string& dir);
+// uint32 little-endian token ids (throws on a missing file or a size that is not a multiple of 4)
+std::vector<std::uint32_t> readDraftVocab(const std::string& path);
+// Checks a subset (strictly ascending, every id < n_rows; throws otherwise) and adds the missing
+// `required` ids (special and byte tokens), counting them in *added.
+std::vector<std::uint32_t> draftVocabIds(std::span<const std::uint32_t> ids, std::uint32_t n_rows,
+                                         std::span<const std::uint32_t> required, std::uint32_t* added = nullptr);
+// directory of the running executable ("" if unknown)
+std::string exeDirectory();
+// What WHIRL_DRAFT_VOCAB selects. Unset = the embedded 64k subset by default (only applied to a
+// model draftVocabDefaultFits accepts); "64k" = the embedded subset explicitly; "off" / "0" / "" =
+// the full vocabulary; N = the first N rows (old experiment); "48k" etc. = <dir>/draft_vocab/
+// subset_48k.bin; anything else = a file path.
+struct DraftVocabChoice {
+    enum class Kind { full, first_n, embedded_64k, file } kind = Kind::full;
+    std::uint32_t n = 0;
+    std::string file;
+    bool by_default = false;  // WHIRL_DRAFT_VOCAB unset
+};
+DraftVocabChoice draftVocabChoice(const std::optional<std::string>& env_value, const std::string& dir);
+// vocabulary size of the qwen35 tokenizer the embedded subset was built for
+inline constexpr std::uint32_t draft_vocab_embedded_n_vocab = 248320;
+// the default (embedded 64k) subset is used only for dense qwen35 models with that vocabulary
+inline bool draftVocabDefaultFits(bool moe, std::uint32_t n_vocab) { return !moe && n_vocab == draft_vocab_embedded_n_vocab; }
+// the embedded 64k subset (data/draft_vocab/subset_64k.bin, built by whirl-cloud tools/vocab_subset);
+// defined in draft_vocab_embed.cpp (whirl_model only)
+std::vector<std::uint32_t> embeddedDraftVocab64k();
+// KvArgs::win for the MTP draft attention window: W / 64 (rounded up, <= 65535) in the low 16
+// bits, the context threshold / 1024 in the high bits; 0 (off) for W = 0.
+inline std::int32_t draftWindowArg(std::uint32_t w, std::uint32_t min_ctx) {
+    if (w == 0) return 0;
+    const std::uint32_t lo = std::min<std::uint32_t>((w + 63) / 64, 0xffffu);
+    const std::uint32_t hi = std::min<std::uint32_t>(min_ctx / 1024, 0x7fffu);
+    return static_cast<std::int32_t>(lo | hi << 16);
+}
+
 // Draft count in [1, max] maximizing sum(E) / T (see the prototype notes).
 std::uint32_t pickDrafts(std::span<const DraftAccept* const> accepts, const DraftTiming& timing, std::uint32_t max,
                          std::uint32_t cycle, std::uint32_t prev);
+
+// ---- per-slot draft allocation (T4-1): pure model code, not wired into the engine yet
+
+// One verify cycle as the cost model sees it.
+struct CycleFeat {
+    float rows = 0;    // R: verify rows of all sequences
+    float steps = 0;   // S: sequential MTP draft steps (the longest MTP draft)
+    float row_ctx = 0; // sum over sequences of rows_i * context_i, in k tokens
+};
+
+// Cycle time for one number of decoding slots: T ~ a + b R + c S + e [R > 16] + f sum(rows_i ctx_i),
+// fitted by recursive least squares with forgetting factor 0.98.
+class CycleCost {
+public:
+    static constexpr std::uint32_t n_par = 5;
+    static constexpr double forget = 0.98;
+    CycleCost() { reset(); }
+    void reset();
+    // seed from the uniform-allocation timing of `slots` decoding slots (DraftTiming points or its prior)
+    void prior(const DraftTiming& tm, std::uint32_t slots, float ctx_k = 0);
+    void observe(const CycleFeat& x, float ms);
+    float predict(const CycleFeat& x) const;
+    std::uint32_t samples() const { return n_obs; }
+    const std::array<double, n_par>& params() const { return th; }
+
+private:
+    static std::array<double, n_par> feat(const CycleFeat& x);
+    void rls(const std::array<double, n_par>& z, double y);
+    std::array<double, n_par> th{};
+    std::array<std::array<double, n_par>, n_par> P{};
+    std::uint32_t n_obs = 0;
+};
+
+// Per-slot acceptance with the T4-1 additions on top of DraftAccept: faster start (r = 0.2 for 16
+// cycles), unobserved positions drift towards the last observed rate x 0.95 (rate 0.02; a fully
+// accepted chain is censored, not a ceiling, so it drifts without the 0.95), observation counts
+// for shrinkage towards a global pool.
+struct SlotAccept {
+    static constexpr std::uint32_t n_cap = 32;
+    static constexpr float pool_weight = 4.0f;
+    static constexpr float drift_rate = 0.02f;
+    static constexpr float drift_decay = 0.95f;
+    DraftAccept a;
+    std::array<std::uint32_t, max_ng_drafts> n{};
+    std::uint32_t cycles = 0;
+    explicit SlotAccept(float a0 = 0.75f) : a(a0) {}
+    void observe(std::uint32_t nd_dev, std::uint32_t acc);
+    // alpha_eff[k] = (n_k alpha_k + 4 alpha_pool[k]) / (n_k + 4)
+    DraftAccept effective(const DraftAccept& pool) const;
+};
+
+struct AllocSlot {
+    const DraftAccept* acc = nullptr; // MTP slot: acceptance (alpha_eff); unused for n-gram slots
+    std::uint32_t cap = 1;            // max drafts of this slot
+    float ctx_k = 0;                  // context length, k tokens
+    std::uint32_t ng_rows = 0;        // > 0: n-gram slot with this many verify rows (fixed)
+    float ng_e = 0;                   // n-gram slot: expected tokens of its fixed draft
+};
+
+struct AllocBudget {
+    std::uint32_t rows = 16;           // verify rows available in total
+    std::uint32_t snaps = 0xffffffffu; // snapshot sets free for drafts (0xffffffff: replay, no limit)
+};
+
+struct AllocResult {
+    std::vector<std::uint32_t> d;     // drafts per slot (0 for n-gram slots)
+    float score = 0;                  // sum(E) / T (tokens per ms)
+    std::uint32_t rounds = 0;         // local-search rounds used
+    bool uniform = true;              // true: the uniform allocation u was returned
+};
+
+// Per-slot draft counts maximizing sum(E_i) / T, starting from the uniform count `uniform`
+// (capped per slot): local search over +1 / -1 / swap moves, at most 16 rounds, subject to
+// sum(d) <= min(rows free, snapshots free), 1 <= d_i <= cap_i and each slot keeping at least
+// (1 - x) of its uniform-allocation throughput. Keeps `prev` when it scores >= 0.98 of the best,
+// and returns u unless the best beats it by more than 1%, with < 2 MTP slots, < 16 cost samples,
+// or acceptances so close that u is already optimal.
+AllocResult allocDrafts(std::span<const AllocSlot> slots, const CycleCost& cost, AllocBudget budget, std::uint32_t uniform,
+                        std::span<const std::uint32_t> prev, float x = 0.03f);
 
 class Ngram {
 public:

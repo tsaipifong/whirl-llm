@@ -21,7 +21,7 @@ struct KvArgs {
     const int *ptab;
     const int *kvbase;
     int tab0;
-    int pad;
+    int win;  // attn_wsplit only: MTP draft window (see attn_wsplit_impl), 0 = off; others ignore it
 };
 typedef char kvq8_t __attribute__((ext_vector_type(8)));
 __device__ __forceinline__ int kv_tb(const KvArgs &a, int row) { return a.kvbase != nullptr ? a.kvbase[row] : a.tab0; }
@@ -31,14 +31,37 @@ __device__ __forceinline__ int kv_delta(const KvArgs &a, int tb, int p) {
     const int pg = p / KV_PAGE;
     return (a.ptab[tb + pg] - pg) * KV_PAGE;
 }
+// int8 x8 -> f16 x8 times s, without per-element conversions: 0x6400 | (b ^ 0x80)
+// read as f16 is 1024 + (b + 128) (exact), minus 1152 is b (exact), so (that - 1152) * s
+// is the same single f16 rounding as (_Float16)b * s. Packed f16 pairs from v_perm;
+// fp contract off keeps the subtract and the multiply from fusing into an FMA.
+typedef _Float16 kv_h2 __attribute__((ext_vector_type(2)));
+__device__ __forceinline__ half8 kv_dq8(kvq8_t qk, _Float16 s) {
+#pragma clang fp contract(off)
+    uint32_t w[2];
+    __builtin_memcpy(w, &qk, 8);
+    const kv_h2 off = (kv_h2){(_Float16)1152.0f, (_Float16)1152.0f}, sc = (kv_h2){s, s};
+    half8 r;
+#pragma unroll
+    for (int j = 0; j < 2; ++j) {
+        const uint32_t x = w[j] ^ 0x80808080u;
+        const uint32_t lo = __builtin_amdgcn_perm(0x64646464u, x, 0x04010400u);  // bytes 0,1 -> 0x64xx halves
+        const uint32_t hi = __builtin_amdgcn_perm(0x64646464u, x, 0x04030402u);  // bytes 2,3
+        kv_h2 a, b;
+        __builtin_memcpy(&a, &lo, 4);
+        __builtin_memcpy(&b, &hi, 4);
+        a = (a - off) * sc;
+        b = (b - off) * sc;
+        r[4 * j + 0] = a[0];
+        r[4 * j + 1] = a[1];
+        r[4 * j + 2] = b[0];
+        r[4 * j + 3] = b[1];
+    }
+    return r;
+}
 template <bool Q8> __device__ __forceinline__ half8 kv_ld8(const void *base, const _Float16 *sc, size_t e) {
     if constexpr (Q8) {
-        const kvq8_t q = *(const kvq8_t *)((const int8_t *)base + e);
-        const _Float16 s = sc[e >> 5];
-        half8 h;
-#pragma unroll
-        for (int i = 0; i < 8; ++i) h[i] = (_Float16)q[i] * s;
-        return h;
+        return kv_dq8(*(const kvq8_t *)((const int8_t *)base + e), sc[e >> 5]);
     } else {
         return *(const half8 *)((const _Float16 *)base + e);
     }
@@ -546,9 +569,10 @@ extern "C" __global__ void attn_combine_q8(const float *part_ml, const float *pa
 // ---------------------------------------------------------------------------
 #define AW_K 32
 #define AW_D 256
+#define AW_SINK 256  // draft window: positions [0, AW_SINK) are always attended
 struct AwGroups {
-    int first[16];
-    int count[16];
+    int first[32];
+    int count[32];
 };
 
 template <int CG, int Q8>
@@ -567,8 +591,26 @@ __device__ __forceinline__ void attn_wsplit_impl(const float *q, const KvArgs &k
     const int ncol = count * grp;
     const int tb = kv_tb(kv, first);
     const int n_pos = pos[first + count - 1] + 1;  // the group's last query
-    const int per = (n_pos + n_split * 64 - 1) / (n_split * 64) * 64;
-    const int b0 = split * per, b1 = min(n_pos, b0 + per);
+    int per = (n_pos + n_split * 64 - 1) / (n_split * 64) * 64;
+    int b0 = split * per, b1 = min(n_pos, b0 + per);
+    // MTP draft window (kv.win = W / 64 | (threshold / 1024) << 16; the trunk passes 0): once
+    // n_pos >= threshold, split 0 takes the sink [0, AW_SINK) and the other splits share the last
+    // W positions from a 64-aligned start; keys between are skipped. A window that reaches the
+    // sink leaves the ranges above unchanged (same bits as without it).
+    if (kv.win != 0 && n_split > 1) {
+        const int w = (kv.win & 0xffff) * 64, min_pos = (kv.win >> 16) * 1024;
+        const int w0 = max(AW_SINK, (n_pos - w) & ~63);
+        if (n_pos >= min_pos && w0 > AW_SINK) {
+            if (split == 0) {
+                b0 = 0;
+                b1 = AW_SINK;
+            } else {
+                per = (n_pos - w0 + (n_split - 1) * 64 - 1) / ((n_split - 1) * 64) * 64;
+                b0 = w0 + (split - 1) * per;
+                b1 = min(n_pos, b0 + per);
+            }
+        }
+    }
     const size_t ml_q = (size_t)n_split * n_head * 2, acc_q = (size_t)n_split * n_head * AW_D;
     // this lane's column
     const bool cw = wid * 16 < ncol;              // computing wave
@@ -639,9 +681,16 @@ __device__ __forceinline__ void attn_wsplit_impl(const float *q, const KvArgs &k
             sc[kt] = (float8){0, 0, 0, 0, 0, 0, 0, 0};
             const int krow = min(k0 + kt * 16 + lane % 16, b1 - 1);  // clamp (masked below)
             const size_t kr = ((size_t)(krow + dl) * n_kv + g) * AW_D + 8 * (lane / 16);
+            // q8 K: the row's 8 scales in one load (step st uses scale st / 2)
+            half8 ks8;
+            if constexpr (Q8 == 1) ks8 = *(const half8 *)(kv.ks + (kr >> 5));
 #pragma unroll
             for (int st = 0; st < AW_D / 16; ++st) {
-                const half8 a = kv_ld8<Q8 == 1>(kv.k, kv.ks, kr + 16 * st);
+                half8 a;
+                if constexpr (Q8 == 1)
+                    a = kv_dq8(*(const kvq8_t *)((const int8_t *)kv.k + kr + 16 * st), ks8[st >> 1]);
+                else
+                    a = kv_ld8<false>(kv.k, kv.ks, kr + 16 * st);
                 const half8 qb = *(const half8 *)&Qs[wid * 16 + lane % 16][16 * st + 8 * (lane / 16)];
                 sc[kt] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(a, qb, sc[kt]);
             }
@@ -709,6 +758,25 @@ extern "C" __global__ void __launch_bounds__(128)
     attn_wsplit1_q8v(const float *q, KvArgs kv, float *part_ml, float *part_acc, int n_head, int n_kv,
                  int q_stride, const int *pos, float scale, const int *skip, AwGroups groups) {
     attn_wsplit_impl<1, 2>(q, kv, part_ml, part_acc, n_head, n_kv, q_stride, pos, scale, skip, groups);
+}
+// Up to 32 columns per group (27B: 5 verify rows x 6 GQA heads): waves 0 and 1 each
+// compute 16 columns on the same staged V^T tile, so a sequence's K/V is read once
+// for up to 5 verify rows instead of once per 2. Per column the arithmetic is the
+// CG = 1 kernel's (same code path), so the partials are the same bits.
+extern "C" __global__ void __launch_bounds__(128)
+    attn_wsplit2(const float *q, KvArgs kv, float *part_ml, float *part_acc, int n_head, int n_kv,
+                 int q_stride, const int *pos, float scale, const int *skip, AwGroups groups) {
+    attn_wsplit_impl<2, false>(q, kv, part_ml, part_acc, n_head, n_kv, q_stride, pos, scale, skip, groups);
+}
+extern "C" __global__ void __launch_bounds__(128)
+    attn_wsplit2_q8(const float *q, KvArgs kv, float *part_ml, float *part_acc, int n_head, int n_kv,
+                 int q_stride, const int *pos, float scale, const int *skip, AwGroups groups) {
+    attn_wsplit_impl<2, true>(q, kv, part_ml, part_acc, n_head, n_kv, q_stride, pos, scale, skip, groups);
+}
+extern "C" __global__ void __launch_bounds__(128)
+    attn_wsplit2_q8v(const float *q, KvArgs kv, float *part_ml, float *part_acc, int n_head, int n_kv,
+                 int q_stride, const int *pos, float scale, const int *skip, AwGroups groups) {
+    attn_wsplit_impl<2, 2>(q, kv, part_ml, part_acc, n_head, n_kv, q_stride, pos, scale, skip, groups);
 }
 
 

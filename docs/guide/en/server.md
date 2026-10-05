@@ -27,7 +27,8 @@ model and GPU on disk).
 | `--ctx N` | size of the shared KV pool, tokens | all VRAM left after other buffers, minus a reserve |
 | `--ctx-per-slot N` | per-request context limit | 131,072 (max 262,144) |
 | `--mtp-drafts N` | MTP draft cap 1–10 | dense: automatic, cap 8; MoE: 1 |
-| `--kv-ram-mb N` | pinned RAM KV tier size; 0 disables RAM and SSD tiers | max(8 GiB, one full f16 session + checkpoints) = 9 GiB for 27B |
+| `--decode-min-tps N` | decode floor per streaming request while others prefill ([§6](#batching)); 0 = off | 20 |
+| `--kv-ram-mb N` | pinned RAM KV tier size; 0 disables RAM and SSD tiers | 1/4 of physical RAM within [max(8 GiB, one full f16 session + checkpoints), 32 GiB], at most half of the RAM available at startup; 16 GiB on a 64 GB PC; off on integrated GPUs |
 | `--kv-ssd-dir` / `--kv-ssd-gb N` | SSD tier directory / size cap; 0 GB disables SSD | per-user local app-data directory / 64 |
 | `--log-file` | log file (also printed to the console) | per-user local app-data directory |
 | `--alias` | model id reported by `/v1/models` | GGUF file name |
@@ -45,11 +46,12 @@ Useful environment variables (all of them: [usage.md](../../usage.md#env)):
 | `WHIRL_MTP=0`, `WHIRL_NGRAM=0` | disable MTP / n-gram co-drafting |
 | `WHIRL_MTP_BATCH_DRAFTS=d1,d2,…` | draft caps by number of decoding slots |
 | `WHIRL_GATHER_MS` | burst-gather window for new requests (default 30, 0 = off) |
+| `WHIRL_DECODE_MIN_TPS` | decode floor (= `--decode-min-tps`, default 20, 0 = off) |
 | `WHIRL_PREFILL_CHUNK` | max rows per merged prefill forward (multiple of 1024, default 2048) |
 | `WHIRL_SYS_MIN`, `WHIRL_SYS_CKPTS`, `WHIRL_SYS_LCP=0` | system-prompt checkpoint threshold (2048), VRAM count (2), disable `prefix` checkpoints |
 | `WHIRL_KV_TIER_MIN` | minimum entry size for the tiers (2048 tokens) |
 | `WHIRL_TIMING_RESET=0` | keep the MTP timing table across requests (not recommended) |
-| `WHIRL_LOOP_LOG=1`, `WHIRL_TIER_VERIFY=1`, `WHIRL_TIER_MIN_GAIN=n` | diagnostics: per-loop phase timing, byte-verify every spill/restore, restore threshold (default 512) |
+| `WHIRL_LOOP_LOG=1`, `WHIRL_TIER_VERIFY=1`, `WHIRL_TIER_MIN_GAIN=n`, `WHIRL_TIMER_PROBE=1` | diagnostics: per-loop phase timing, byte-verify every spill/restore, restore threshold (default 512), actual sleep length before / after the 1 ms timer resolution the server sets |
 | `WHIRL_PROFILE=1\|2` | per-cycle GPU breakdown; **distorts timing** — never use it for speed numbers |
 
 Only one engine process may use a GPU at a time: the executable takes a named mutex per device and a
@@ -117,7 +119,9 @@ that default path (it re-loaded kernel tables after the KV format was chosen at 
 ## <a id="thinking"></a>4. Thinking and `reasoning_content`
 
 - Thinking is controlled by `chat_template_kwargs.enable_thinking` or a top-level `enable_thinking`;
-  `reasoning_effort` and `preserve_thinking` are supported as in the GGUF chat template.
+  `reasoning_effort` and `preserve_thinking` are supported as in the GGUF chat template. The
+  OpenRouter-style `"reasoning": {"effort", "enabled"}` object and effort aliases (`max` / `ultra`,
+  `minimal`, `none`) are accepted too; see [usage.md](../../usage.md#endpoints).
 - Thinking text is returned in `message.reasoning_content` (streaming: `delta.reasoning_content`),
   the answer in `content`.
 - Most clients do not send `reasoning_content` back in the next turn. The template then renders an
@@ -153,9 +157,15 @@ the slot that can reuse the longest prefix (or restore one from the tiers).
    KV pages and positions; DeltaNet uses segmented kernels, one state per segment.
 3. One synchronization per cycle.
 
-**Draft limits by load.** All decoding rows fit in one verify of at most 16 rows, so drafts compete
-with users. Dense caps by number of decoding slots: 8 / 7 / 4 / 3 for 1–4 slots; the cost model
-picks within the cap. MoE: 1 draft up to 8 users. With zero drafts the MTP layer still processes
+**Draft limits by load.** All decoding rows fit in one verify forward, so drafts compete with users.
+The verify holds at most 16 rows per sequence and, on dense models with wide verify
+(`WHIRL_WIDE_VERIFY`, default on), at most 32 rows in total (16 otherwise, and always 16 for MoE).
+Default dense caps by number of decoding slots: 8 / 7 / 4 / 3 / 2 / 1 / 1 / 1 for 1–8 slots, 0 beyond
+(`--batch-drafts` overrides; when DeltaNet verify uses snapshot sets instead of replay, the cap for
+k slots is also ≤ 8 / k); with these caps an MTP verify stays at ≤ 16 rows, and only n-gram drafts
+or raised caps with several users use rows 17–32. The cost model picks within the cap. MoE: 1 draft
+up to 8 users. Models whose DeltaNet decode is not fused (F32 / F16 α/β) are capped at 1 draft.
+With zero drafts the MTP layer still processes
 accepted tokens to keep its KV complete.
 
 **Prefill scheduling.** Prefill runs in chunks of ≤ 1024 tokens (the last chunk may absorb ≤ 256
@@ -164,9 +174,85 @@ forward: row-wise work (embeddings, norms, GEMMs, MoE) runs once over all rows; 
 (attention, DeltaNet conv and chunk scan) runs per segment with the solo kernels. The oldest
 prefilling request always runs; others join if their next chunk has more than 16 rows (to avoid
 the small-batch path) and the total stays ≤ 4096. Because every GEMM configuration and MoE tile is
-row-invariant, a batched prefill row equals the solo row bit for bit. When no slot is decoding,
-consecutive chunks of one request merge into forwards of up to 2048 rows
-([kv-and-caching.md](kv-and-caching.md#merge)).
+row-invariant, a batched prefill row equals the solo row bit for bit. When no other slot is
+decoding, or with the decode floor off (`--decode-min-tps 0`, throughput first), consecutive chunks
+of one request merge into forwards of up to 2048 rows ([kv-and-caching.md](kv-and-caching.md#merge)).
+With the floor on, any decoding slot (protected or of the same burst) keeps forwards at whole chunks:
+measured on the 27B model with 3 short requests decoding next to a 32k / 96k / 128k prompt of the
+same burst, merging raised that prompt's prefill throughput by only 3.7–4.2% but doubled the decoders' longest
+pause (0.54 → 1.03 s, 1.17 → 3.27 s, 1.85 → 2.37 s).
+
+**Decode floor (`--decode-min-tps N`, default 20).** Without it, the loop runs one prefill forward
+(up to 4096 rows of combined chunks, ~1.5 s on the 27B model) per decode cycle, so a streaming request
+advances one cycle per forward while other requests prefill long prompts — about 3 tok/s, which looks
+frozen.
+
+The decode floor protects **every decoding slot except those of the same burst**: a decoding slot is
+not protected only if it arrived within the burst-gathering window (30 ms) of a request that is still
+prefilling. Requests that arrive together (Scenario A: C = 4 at once) therefore do not hold one
+another back and merge their prefill at full speed, while a stream that started earlier — or a
+conversation's next turn that arrives after the subagent prompts, while they still prefill — is
+protected regardless of arrival order.
+
+With a floor, and only while protected slots are decoding:
+- a prefill forward carries at most a row budget: whole schedule chunks (the oldest request's next
+  chunk always runs, so prefill always progresses), sized from the measured prefill rate so that one
+  forward's stall is about 10 tokens' worth at the floor rate (≈ 1 chunk at N = 20);
+- after each prefill forward, decode cycles run alone until every protected decoding slot has produced
+  ≥ N tokens per second over the period that began with that forward. The cycle count adapts every cycle
+  to the actual tokens (MTP acceptance, number of decoding slots) and to the measured prefill time
+  (EMAs of decode-cycle time, tokens per cycle and prefill rows/s);
+- if the floor is out of reach even by pure decoding, decode-only time per period is capped at 4 × the
+  period's prefill time, so prefill keeps about 20% of the GPU.
+
+When no protected slot is decoding, the floor holds nothing back (no row budget, no decode-only
+cycles), and burst gathering is unchanged. Only the grouping of rows into forwards and the timing of
+decode cycles change; every GEMM / MoE tile is row-invariant, so outputs are bit-identical for any N
+(checked for every N in the tables below, in both arrival orders, against v0.1.2 at N = 20 for all
+three contexts, the short-prompt runs and Ornith). A side effect: with a small row budget the waiting
+prompts prefill oldest-first instead of side by side, so the first one is answered much earlier and
+the last one later.
+
+Measured on Swift-1.5 27B MXFP4-A, R9700, 3 subagent prompts of 15.8k / 17.1k / 18.9k tokens.
+**Forward order**: the main stream decodes, then the 3 prompts arrive. **Reverse order**: the 3
+prompts arrive first and the conversation's next turn (a short delta on its cached context) 1.5 s
+later; "while they prefill" then runs from the main stream's first token to the last subagent's first
+token.
+
+| 25.7k context | N = 0 (off) | 10 | **20** | 30 | 40 |
+|---|---|---|---|---|---|
+| Forward: main stream while they prefill, tok/s (alone ~84) | 2.8 | 11.9 | **22.7** | 31.0 | 40.3 |
+| Forward: its longest pause, s | 1.57 | 1.12 | **0.47** | 0.47 | 0.46 |
+| Forward: the 3 prompts' TTFT, s | 11.1 / 12.0 / 18.5 | 16.7 / 20.5 / 21.9 | **7.7 / 16.3 / 26.1** | 9.2 / 19.7 / 31.1 | 11.2 / 23.3 / 38.6 |
+| Forward: mean TTFT, s | 13.9 | 19.7 | **16.7** | 20.0 | 24.4 |
+| Forward: prefill throughput while streaming, tok/s | 2799 | 2368 | **1981** | 1663 | 1342 |
+| Reverse: main stream while they prefill, tok/s | 4.1 | 14.6 | **22.8** | 33.3 | 42.3 |
+| Reverse: its longest pause, s | 1.07 | 0.52 | **0.47** | 0.47 | 0.47 |
+| Reverse: the 3 prompts' TTFT, s | 11.8 / 12.6 / 18.3 | 12.2 / 12.5 / 19.6 | **11.0 / 12.4 / 21.9** | 11.6 / 11.9 / 24.2 | 11.5 / 11.9 / 28.2 |
+
+| N = 20, by context | 25.7k | 97.4k | 123.7k |
+|---|---|---|---|
+| Forward: main stream while they prefill, tok/s | 22.7 | 23.0 | 23.1 |
+| Forward: its longest pause, s | 0.47 | 0.47 | 0.52 |
+| Forward: the 3 prompts' TTFT, s | 7.7 / 16.3 / 26.1 | 8.4 / 19.1 / 29.0 | 11.8 / 21.7 / 32.2 |
+| Forward: prefill throughput while streaming, tok/s | 1981 | 1789 | 1609 |
+| Reverse: main stream while they prefill, tok/s | 22.8 | 21.1 | 22.9 |
+| Reverse: its longest pause, s | 0.47 | 0.48 | 0.48 |
+| Reverse: the 3 prompts' TTFT, s | 11.0 / 12.4 / 21.9 | 11.4 / 11.9 / 25.1 | 11.3 / 11.7 / 23.6 |
+
+v0.1.2 measured 23.1 / 22.7 / 22.1 tok/s forward and 22.4 / 21.5 / 22.4 tok/s reverse at the same
+three contexts (longest pause 0.47–0.52 s); at 123.7k the pause is 0.52 s in both versions. An earlier
+build of this release that protected only streams arriving before every prefilling prompt fell to
+8.6 tok/s (pause 0.92 s) in reverse order at 25.7k.
+
+Ornith-1.5-35B-A3B MXFP4 (MoE), same scenario (v0.1.1): N = 0 → 20 raises the streaming request from
+6.7 to 31.5 tok/s (alone ~230; longest pause 0.39 → 0.43 s) and moves the last TTFT from 5.8 to 6.8 s
+(prefill 8986 → 7653 tok/s). Short prompts are unaffected: Swift MXFP4-A, ~1.1k-token prompts, 256
+generated, Scenario A (C = 4 concurrent arrival) finishes in 4.65 s wall (median of 3; v0.1.2 4.91 s)
+without triggering the floor, merging 3 requests into one prefill forward. 20 is the default: the
+stream stays readable (> 20 tok/s, pauses ≤ 0.5 s) for about 30% less prefill throughput. Use 0 for
+batch jobs where only total throughput matters, or a higher N for a smoother stream at the cost of
+slower prefill.
 
 **Burst gathering.** Requests that are still being received, parsed or tokenized are counted; while
 any exist, a new request's first prefill chunk waits up to 30 ms so a burst of requests enters the
@@ -174,19 +260,22 @@ same segmented forward. A single user never waits (their own request is already 
 it, the first request of a burst prefilled alone and then stalled 2.4 s while the others prefilled.
 
 **Stalls.** When another user submits a 14k-token prompt, a streaming request's longest pause was
-0.90 s (MoE: 0.25 s).
+0.90 s (MoE: 0.25 s) before the decode floor; with three long prompts at once it was 1.57 s and the
+stream fell to 3 tok/s (table above), 0.47–0.52 s and 21–23 tok/s with the default floor.
 
-| Concurrency (27B Q4_K_M, ~1.1k-token prompts, 256 generated, greedy) | C = 1 | C = 2 | C = 4 |
+| Concurrency (27B Q4_K_M / MXFP4, ~1.1k-token prompts, 256 generated, greedy) | C = 1 | C = 2 | C = 4 |
 |---|---|---|---|
 | Wall-clock aggregate tok/s (incl. prefill), MTP + n-gram | 61.6–62.4 | 98.0–99.6 | 138.7–139.6 |
 | MXFP4, same | 68.5–70.7 | 118.9–119.3 | 190.3–190.7 |
-| Steady state inside the decode loop, Q4_K_M / MXFP4 | | | 252.9 / 289.8 |
+| Steady state inside decode loop, Q4_K_M / MXFP4 (Scenario A) | 109.5–110.1 | — | 252.9 / **288.8** |
 | llama.cpp ROCm `-np 4`, MTP on (older measurement) | 39.8 | 43.3 | 64.1 |
 
 Every concurrent output equals the same request run alone (gated). Earlier 8/16-user measurements
 (before several later optimizations; 4096 context per user): 27B no MTP 100.0 / 115.5 tok/s
 aggregate; at 16 users MTP no longer helps (113.1 vs 115.5) because 16 rows leave no room for
-drafts, and 16-row GEMV is already compute-bound.
+drafts, and 16-row GEMV is already compute-bound. (These predate wide verify; with the default
+caps, 9–16 slots still get 0 drafts, so the conclusion holds. Rows 17–32 have no measured per-row
+cost yet.)
 
 ## <a id="logging"></a>7. Logging
 
@@ -220,8 +309,10 @@ an idle `kv tier |` summary; `vision:` lines for image input.
 - No HTTP keep-alive (every response is `Connection: close`); no shutdown endpoint (stop the
   server with Ctrl+C, see section 1).
 - Streaming output is written on the engine thread; a very slow client can delay the batch.
-- Cached vs uncached runs are numerically equivalent, not bit-identical (history KV computed by
-  decode kernels vs prefill GEMMs; [kv-and-caching.md](kv-and-caching.md#think-open)). Requests with
+- Cache hits on `system` / `prefix` checkpoints, on the same prompt's `prompt-end`, and tier restores
+  are bit-identical to a cold run. Continuing a conversation (`gen-end`, or a prompt checkpoint followed
+  by more tokens) is numerically equivalent but not bit-identical: the history's KV and DeltaNet state
+  came from decode kernels ([kv-and-caching.md](kv-and-caching.md#checkpoints)). Requests with
   a ≥ 2048-token system message are split at the system boundary and so are not bit-identical to a
   binary that does not split.
 - With the MoE model, near-tied expert routing can make a multi-turn cached conversation diverge from

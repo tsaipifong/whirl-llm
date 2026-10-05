@@ -1,11 +1,12 @@
 // whirl-kernel-test: paged KV cache and attention.
 //   * kv_store / kv_store_q8 / kv_store_q8v exact (CPU emulation of the f16
 //     store and of the q8 quantizer), single-sequence and batched (kvbase);
-//   * attn_decode, attn_split + attn_combine, attn_wsplit1 + attn_combine,
+//   * attn_decode, attn_split + attn_combine, attn_wsplit1 / attn_wsplit2 + attn_combine,
 //     attn_prefill_wmma vs a double-precision CPU softmax attention over the
 //     cache contents (tolerance; f16 WMMA paths looser);
-//   * bitwise invariances: attn_wsplit1 grouped == per-query (the
-//     prototype's checkAttnGroups), attn_kx == attn_prefill_wmma, head-range
+//   * bitwise invariances: attn_wsplit1 / attn_wsplit2 grouped == per-query (the
+//     prototype's checkAttnGroups), attn_kx and attn_kg (f16, q8, q8v) ==
+//     attn_prefill_wmma, head-range
 //     split launches == one launch, attn_combine_q8 == attn_combine (+ its
 //     int8 copy == quantize_q8), attn_prep == rmsnorm + rope_neox + kv_store.
 // SPDX-License-Identifier: Apache-2.0
@@ -108,8 +109,9 @@ double kvVal(const std::vector<std::uint16_t>& f16, const std::vector<std::int8_
 }
 
 // CPU softmax attention of query rows (positions qpos[t]) against keys 0..qpos[t].
+// win_lo > 0: MTP draft window, keys [256, win_lo) are not attended (sink 256 + window from win_lo)
 void attnRef(const HostKv& h, const Pool& p, const std::vector<float>& q, const std::vector<int>& qpos,
-             const std::vector<int>& rows, std::vector<double>& out, std::vector<double>& scale) {
+             const std::vector<int>& rows, std::vector<double>& out, std::vector<double>& scale, int win_lo = 0) {
     const int n = static_cast<int>(rows.size());
     out.assign(static_cast<std::size_t>(n) * kHeads * kHd, 0.0);
     scale.assign(out.size(), 0.0);
@@ -125,7 +127,7 @@ void attnRef(const HostKv& h, const Pool& p, const std::vector<float>& q, const 
                 const std::size_t base = (static_cast<std::size_t>(p.prow(pp)) * kKv + kvh) * kHd;
                 double d = 0;
                 for (int i = 0; i < kHd; ++i) d += static_cast<double>(qv[i]) * kvVal(h.k16, h.k8, h.ks, base + i);
-                s[static_cast<std::size_t>(pp)] = d * kScale;
+                s[static_cast<std::size_t>(pp)] = pp >= 256 && pp < win_lo ? -INFINITY : d * kScale;
                 m = std::max(m, s[static_cast<std::size_t>(pp)]);
             }
             double l = 0;
@@ -268,8 +270,13 @@ void testAttn(Ctx& c) {
             }
         }
         // ---- attn_wsplit1: grouped == per-query (checkAttnGroups), and vs CPU
-        if (auto fw = c.fnOpt("attn_wsplit1" + fs)) {
-            const int ng_q = std::max(1, 16 / kGrp);  // queries per group (2 for 24 / 4 heads)
+        // ---- attn_wsplit2 (<= 32 columns): grouped == per-query attn_wsplit1
+        if (auto fw = c.fnOpt("attn_wsplit1" + fs))
+        for (int wv : {1, 2}) {
+            const auto fg = wv == 1 ? fw : c.fnOpt("attn_wsplit2" + fs);
+            if (!fg) continue;
+            const std::string kn = "attn_wsplit" + std::to_string(wv);
+            const int ng_q = std::max(1, (16 * wv) / kGrp);  // queries per group (2 / 5 for 24 / 4 heads)
             for (int p0 : {L - 100, L - 77}) {  // a chunk start and a position inside a chunk
                 std::vector<int> pv(16);
                 for (int t = 0; t < 16; ++t) pv[static_cast<std::size_t>(t)] = p0 + t;
@@ -291,7 +298,7 @@ void testAttn(Ctx& c) {
                         }
                         ng = static_cast<unsigned>(ng_q);
                     }
-                    hip::launch(fw, {kKv, static_cast<unsigned>(ns), ng}, {128, 1, 1}, 0, c.s, dq.p(), pool.args(), ml.p(),
+                    hip::launch(mode == 0 ? fg : fw, {kKv, static_cast<unsigned>(ns), ng}, {128, 1, 1}, 0, c.s, dq.p(), pool.args(), ml.p(),
                                 acc.p(), kHeads, kKv, kQStride, dpv.p(), kScale, DevPtr{0}, g);
                     c.sync();
                     auto m = ml.down<float>(static_cast<std::size_t>(ng_q) * ns * kHeads * 2);
@@ -310,7 +317,7 @@ void testAttn(Ctx& c) {
                         bad += std::memcmp(&acca[i / 2 * kHd], &a[i / 2 * kHd], kHd * 4) != 0;
                     }
                     Result r;
-                    r.name = "attn_wsplit1" + fs + " grouped == per-query (" + std::to_string(ng_q) + " q at pos " +
+                    r.name = kn + fs + " grouped == per-query (" + std::to_string(ng_q) + " q at pos " +
                              std::to_string(p0) + ")" + tag;
                     r.kind = Kind::invariant;
                     r.n = n;
@@ -326,10 +333,46 @@ void testAttn(Ctx& c) {
                     std::vector<int> rows(static_cast<std::size_t>(ng_q));
                     std::iota(rows.begin(), rows.end(), 0);
                     attnRef(h, pool, q, pv, rows, ro, rs);
-                    c.rep.add(cmpTol("attn_wsplit1" + fs + " + combine vs CPU (pos " + std::to_string(p0) + ")" + tag, out, ro,
+                    c.rep.add(cmpTol(kn + fs + " + combine vs CPU (pos " + std::to_string(p0) + ")" + tag, out, ro,
                                      rs, 1e-2, 1e-4));
                 }
             }
+        }
+        // ---- MTP draft window (KvArgs::win = W / 64 | threshold / 1024 << 16): a window that reaches
+        // the sink, or a context below the threshold, gives the same bits as no window; a narrow
+        // window (sink 256 + last 256 from a 64-aligned start) matches the CPU over those keys
+        if (auto fw1 = c.fnOpt("attn_wsplit1" + fs)) {
+            const std::vector<int> pv1 = {L - 1};
+            Buf dp1(pv1);
+            wk::AwGroups g1;
+            g1.first[0] = 0;
+            g1.count[0] = 1;
+            auto winArg = [](int w, int min_ctx) { return ((w + 63) / 64) | ((min_ctx / 1024) << 16); };
+            auto run = [&](int win) {
+                ml.zero();
+                acc.zero();
+                wk::KvArgs a = pool.args();
+                a.win = win;
+                hip::launch(fw1, {kKv, static_cast<unsigned>(ns), 1}, {128, 1, 1}, 0, c.s, dq.p(), a, ml.p(), acc.p(), kHeads, kKv,
+                            kQStride, dp1.p(), kScale, DevPtr{0}, g1);
+                c.sync();
+                return std::pair<std::vector<float>, std::vector<float>>{ml.down<float>(static_cast<std::size_t>(ns) * kHeads * 2),
+                                                                         acc.down<float>(static_cast<std::size_t>(ns) * kHeads * kHd)};
+            };
+            const auto base = run(0);
+            const auto all = run(winArg(L, 0));            // W >= context: the window reaches the sink
+            const auto below = run(winArg(256, L + 1024));  // context below the threshold
+            c.rep.add(cmpExact("attn_wsplit1 draft window reaching the sink == off (ml)" + tag, all.first, base.first, Kind::invariant));
+            c.rep.add(cmpExact("attn_wsplit1 draft window reaching the sink == off (acc)" + tag, all.second, base.second, Kind::invariant));
+            c.rep.add(cmpExact("attn_wsplit1 draft window below threshold == off (ml)" + tag, below.first, base.first, Kind::invariant));
+            c.rep.add(cmpExact("attn_wsplit1 draft window below threshold == off (acc)" + tag, below.second, base.second, Kind::invariant));
+            const int w0 = std::max(256, (L - 256) & ~63);
+            run(winArg(256, 0));
+            const std::vector<float> out = combine(1);
+            std::vector<double> ro, rs;
+            attnRef(h, pool, q, pv1, {0}, ro, rs, w0);
+            c.rep.add(cmpTol("attn_wsplit1 draft window (sink 256 + keys from " + std::to_string(w0) + ") + combine vs CPU" + tag, out, ro, rs,
+                             1e-2, 1e-4));
         }
         // ---- prefill attention: n queries at L-n .. L-1
         {
@@ -361,6 +404,36 @@ void testAttn(Ctx& c) {
                 c.sync();
                 c.rep.add(cmpExact("attn_kx" + fs + " == attn_prefill_wmma" + fs + tag, o2.down<float>(ref1.size()), ref1,
                                    Kind::invariant));
+            }
+            // attn_kg (f16 / q8 / q8v KV): GQA-grouped kernel == attn_prefill_wmma, for
+            // group 6 (24 / 4) and group 8 (24 / 3, the pool read with 3 KV heads),
+            // one launch and two head-range launches
+            for (const int nkv : {kKv, 3}) {
+                Buf rb(static_cast<std::size_t>(n) * kHeads * kHd * 4);
+                rb.zero();
+                hip::launch(c.fn("attn_prefill_wmma" + fs), {cdiv(n, 128), static_cast<unsigned>(kHeads), 1}, {256, 1, 1}, 0, c.s,
+                            dqp.p(), pool.args(), rb.p(), kHeads, nkv, kQStride, pos.p(), n, kScale, 0);
+                c.sync();
+                const auto ref = rb.down<float>(static_cast<std::size_t>(n) * kHeads * kHd);
+                const int grp = kHeads / nkv;
+                for (const auto& [name, np] : {std::pair{"attn_kg6", 6}, std::pair{"attn_kg4", 4}, std::pair{"attn_kg2", 2}}) {
+                    if (grp % np != 0) continue;
+                    auto fk = c.fnOpt(name + fs);
+                    if (!fk) continue;
+                    for (const int split : {1, 2}) {
+                        const int hp = kHeads / split;
+                        if (hp % np != 0) continue;
+                        Buf ob(static_cast<std::size_t>(n) * kHeads * kHd * 4);
+                        ob.zero();
+                        for (int h0 = 0; h0 < kHeads; h0 += hp)
+                            hip::launch(fk, {cdiv(n, 16), static_cast<unsigned>(hp / np), 1}, {static_cast<unsigned>(64 * np), 1, 1}, 0,
+                                        c.s, dqp.p(), pool.args(), ob.p(), kHeads, nkv, kQStride, pos.p(), n, kScale, h0);
+                        c.sync();
+                        c.rep.add(cmpExact(std::string(name) + fs + " == attn_prefill_wmma" + fs + " (group " + std::to_string(grp) +
+                                               (split > 1 ? ", 2 head-range launches)" : ")") + tag,
+                                           ob.down<float>(ref.size()), ref, Kind::invariant));
+                    }
+                }
             }
             {  // two head-range launches (h0 = 0, 12) == one launch
                 Buf out(static_cast<std::size_t>(n) * kHeads * kHd * 4);

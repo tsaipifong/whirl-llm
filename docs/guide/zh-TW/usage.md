@@ -2,7 +2,7 @@
 
 # 使用參考：`whirl` 與 `whirl-server`
 
-本頁列出 WHIRL 0.1.0 的每一個指令、選項、環境變數與伺服器端點。內容依發行版執行檔的內建說明
+本頁列出 WHIRL 0.1.1 的每一個指令、選項、環境變數與伺服器端點。內容依發行版執行檔的內建說明
 （`whirl --help`、`whirl <指令> --help`、`whirl help env`、`whirl-server --help`）整理；若有出入，以你手上
 執行檔的說明文字為準。
 
@@ -35,7 +35,7 @@ whirl-server --help | --version
 ```
 
 兩支程式都只接受 `general.architecture` 為 `qwen35`（dense）或 `qwen35moe`（混合專家，MoE）的 GGUF 檔，
-見[支援的模型](../../README_zh-TW.md#models)。CLI 一律 greedy 生成；伺服器另外支援取樣（temperature、top-p 等）。
+見[支援的模型](../../README_zh-TW.md#支援的模型)。CLI 一律 greedy 生成；伺服器另外支援取樣（temperature、top-p 等）。
 
 **第一次使用某個模型。** prefill kernel 會針對每個模型檔與 GPU 調校一次（stderr 會有提示）：27B Q4_K_M 約
 1.5～2 分鐘，MXFP4 檔只要幾秒。結果會快取起來（[第 8 節](#files)），之後直接開始。每一種候選組態算出的位元都
@@ -125,7 +125,8 @@ whirl serve  MODEL.gguf [選項]      （同一支程式）
 | `-c`、`--ctx N` | 共用 KV 池的大小（token）。slot 依需要取用分頁；池滿時，閒置 slot 的前綴快取依最久未使用（LRU）逐出。預設：權重與緩衝區之後剩下的全部 VRAM 減 768 MiB（MoE：1.5 GiB） |
 | `--ctx-per-slot N` | 單一請求的最長 context（預設 min(池大小, 131072)；最多 262144） |
 | `--mtp-drafts N` | 每回合固定的 MTP 草稿數，1～10（預設：依模型類型由成本模型決定） |
-| `--kv-ram-mb N` | 前綴快取的主記憶體層，單位 MiB 的 pinned 記憶體（預設 8192；若一個完整長度 session 更大則取其大小——27B 模型約 9 GiB）。閒置 session 會複製到這裡，下次直接還原而不必重新 prefill。`0` 會關閉兩個 host 層。**Radeon 8060S**（內顯）：預設 `0` —— KV pool 本來就在系統記憶體；給定大小才會開啟 RAM 與 SSD 層 |
+| `--decode-min-tps N` | decode 保底速度：其他請求在 prefill 時，每個串流中（decode 中）的請求至少維持 N tok/s；做法是縮短 prefill forward、穿插 decode cycle（預設 20；`0` = 關閉，prefill forward 不受限）。任何 N 的輸出都相同（[server.md](server.md#batching)） |
+| `--kv-ram-mb N` | 前綴快取的主記憶體層，單位 MiB 的 pinned 記憶體（預設：實體記憶體的 1/4，至少 8 GiB 或一個完整長度 session（若更大；27B 模型約 9 GiB），最多 32 GiB，且不超過啟動時可用記憶體的一半；64 GB 的電腦為 16 GiB；整合式 GPU 預設關閉）。啟動日誌會印出選定的大小與原因。閒置 session 會複製到這裡，下次直接還原而不必重新 prefill。`0` 會關閉兩個 host 層。**Radeon 8060S**（內顯）：預設 `0` —— KV pool 本來就在系統記憶體；給定大小才會開啟 RAM 與 SSD 層 |
 | `--kv-ssd-dir PATH` | SSD 層目錄（預設 `%LOCALAPPDATA%\whirl\kvcache`） |
 | `--kv-ssd-gb N` | SSD 層容量上限，GiB（預設 64；`0` = 不用 SSD 層） |
 | `--mmproj FILE` | 視覺編碼器（Qwen3-VL 形式的 mmproj GGUF，F16 / BF16）。`image_url` 內容（base64 PNG / JPEG 等的 `data:` URL）會變成圖片 token。權重放在 pinned 主記憶體，收到圖片之前不占 VRAM |
@@ -149,7 +150,7 @@ whirl serve  MODEL.gguf [選項]      （同一支程式）
 .\whirl-server.exe C:\models\model.gguf --mmproj C:\models\mmproj-F16.gguf
 ```
 
-記憶體提醒：預設設定下，伺服器會為主記憶體層 pin 住約 8～9 GiB 的主記憶體（指定 `--mmproj` 時再加約 0.9 GiB），
+記憶體提醒：預設設定下，伺服器會為主記憶體層 pin 住約四分之一的主記憶體（8～32 GiB，且不超過啟動時可用記憶體的一半；64 GB 的電腦為 16 GiB；指定 `--mmproj` 時再加約 0.9 GiB），
 SSD 最多用到 64 GiB。記憶體或磁碟空間較少的電腦，可用 `--kv-ram-mb` / `--kv-ssd-gb` 縮小或關閉分層快取。
 
 ### <a id="endpoints"></a>端點
@@ -160,9 +161,15 @@ base URL `http://127.0.0.1:8080/v1`。任何 API key 都接受（沒有身分驗
 |---|---|
 | `POST /v1/chat/completions` | messages、串流（SSE）或不串流、工具 / 工具呼叫、思考（`reasoning_content`）、圖片（需 `--mmproj`） |
 | `POST /v1/completions` | 原始提示，不套聊天樣板 |
-| `GET /v1/models` | 已載入的那一個模型（id = `--alias`） |
+| `GET /v1/models` | 已載入的那一個模型（id = `--alias`）；`meta.n_ctx` 為每個 slot 的 context |
 | `GET /health` | 忙碌時也會立刻回應；回報忙碌狀態與佇列長度 |
+| `GET /props`（也接受 `/v1/props`） | 唯讀，llama.cpp server 形式的子集，供會自動偵測 context 長度的客戶端使用：`default_generation_settings.n_ctx`（每個 slot 的 context）、`default_generation_settings.model` 與 `model_alias`（= `--alias`）、`total_slots`、`model_path`（只有檔名，絕不含目錄）、`modalities`、`build_info` |
+| `GET /version` | `{"version":"0.1.1","name":"whirl"}` |
 | `OPTIONS`（CORS preflight） | 支援 |
+
+LM Studio（`/api/v1/models`）與 Ollama（`/api/tags`、`/api/show`、`/api/version`）的原生端點不模擬
+（客戶端偵測到它們就會改用 WHIRL 沒有的 API）：一律回 404，且每個路徑只在第一次被探測時記一行 `I` 級
+日誌，不再每次請求都記警告。這類客戶端請改指向上面的 OpenAI 相容 base URL。
 
 請求參數：`temperature`、`top_p`、`top_k`、`min_p`、`seed`、`max_tokens` / `max_completion_tokens`、`stop`、
 `stream`、`tools`、`tool_choice`、`chat_template_kwargs.enable_thinking`（或最上層的 `enable_thinking`）、
@@ -170,6 +177,21 @@ base URL `http://127.0.0.1:8080/v1`。任何 API key 都接受（沒有身分驗
 `whirl chat` 逐 token 相同。`presence_penalty` / `frequency_penalty` 會接受但忽略；`n` 必須為 1；不支援
 `logprobs`、`response_format`，`tool_choice: "required"` 也不會強制。回應另含 `usage.cached_tokens` 與
 llama.cpp 形式的 `timings` 物件。細節見 [server.md](server.md#sampling)。
+
+思考與 reasoning effort 可用下列任一種寫法（依此順序套用，後者覆蓋前者）：
+`chat_template_kwargs.{enable_thinking, reasoning_effort}`、OpenRouter / OpenAI Responses 形式的物件
+`"reasoning": {"effort": "...", "enabled": true|false}`、最上層 `enable_thinking`、最上層 `reasoning_effort`。
+effort 值（不分大小寫）：
+
+| 送出的值 | 實際使用的 effort |
+|---|---|
+| `xhigh`、`high`、`max`、`ultra` | xhigh（沒給時的預設） |
+| `medium` | medium |
+| `low`、`minimal` | low |
+| `none`（或 `"reasoning": {"enabled": false}`） | 關閉思考 |
+
+不認得的 effort 值不會讓請求失敗：伺服器記一行警告並改用預設值。effort 只會改變 chat template 支援它的
+模型（Qwen3.8）的提示；思考已被關閉時，給有效的 effort 也不會把思考重新打開。
 
 ```powershell
 $body = '{"messages":[{"role":"user","content":"2+3 等於多少？"}],"temperature":0,"max_tokens":200}'
@@ -236,7 +258,7 @@ PowerShell 中先用 `$env:WHIRL_KV = "q8v"` 設定再啟動程式。**一般使
 | `WHIRL_CODE_OBJECT=FILE` | 開發用：從這個 code object 載入 GPU kernel，取代內建的 |
 | `WHIRL_MOE_FP8=0` | 專家為 MXFP4 的 MoE 模型：專家 prefill 改用 f16 activation，不用 fp8（預設 fp8，較快的路徑——Ornith MXFP4 在 2k token 約 11.7k 對 8.6k tok/s）。只影響 prefill |
 | `WHIRL_MOE_MXW=0` | 專家為 MXFP4 的 MoE 模型：改用通用的 MXFP4 專家 decode kernel，不用整塊（whole-block）kernel（預設整塊）。影響 decode / 驗證 |
-| `WHIRL_EMBD_HOST=1` | token embedding 表放在 pinned 主記憶體，不放 VRAM |
+| `WHIRL_EMBD_HOST=0` | token embedding 表放在 VRAM（預設放 pinned 主記憶體；server 會把它的大小併入 pinned 宣告，讓 Shared Usage 監控扣除） |
 | `WHIRL_TUNE_COLD=1` | 自動調校：每次計時前先清快取 *（診斷）* |
 | `WHIRL_TUNE_MASK=BITS` | 自動調校：候選 GEMM 組態的遮罩 *（診斷）* |
 
@@ -259,10 +281,10 @@ PowerShell 中先用 `$env:WHIRL_KV = "q8v"` 設定再啟動程式。**一般使
 | `WHIRL_MTP_PMIN=P` | 草稿機率低於 P 時結束這串草稿（在 `WHIRL_MTP_NMIN` 個草稿之後才生效） |
 | `WHIRL_MTP_NMIN=N` | `WHIRL_MTP_PMIN` 生效前一定會產生的草稿數 |
 | `WHIRL_MTP_BATCH_DRAFTS=d1,d2,...` | 1、2、… 個 slot 同時 decode 時，每回合的草稿上限（伺服器） |
-| `WHIRL_MTP_Q4=0` | 保留 MTP 區塊的 Q6_K 矩陣（預設：改用 Q4_K 副本，只用於草稿） |
+| `WHIRL_MTP_Q4=0` | 保留 MTP 區塊的 Q6_K / Q8_0 矩陣（預設：改用 Q4_K 副本，只用於草稿） |
 | `WHIRL_DRAFT_HEAD=q4` | 草擬頭改用 Q4_K，不用 2-bit |
 | `WHIRL_MTP_FULLHEAD=1` | 草稿使用完整的輸出頭 |
-| `WHIRL_DRAFT_VOCAB=N` | 草擬頭只涵蓋前 N 個詞彙列 |
+| `WHIRL_DRAFT_VOCAB=off\|64k\|48k\|檔案\|N` | MTP 草擬頭只涵蓋依頻率挑出的詞彙子集。預設：內嵌在執行檔中的 64k 子集，只用於有 2-bit 草擬頭、詞表 248,320 的 dense qwen35 模型（輸出不變）。`off` = 完整草擬頭；`48k` = exe 旁的 `draft_vocab\subset_48k.bin`；檔案 = uint32 little-endian token id；N = 前 N 列 |
 | `WHIRL_NGRAM=0` | 不用 n-gram（prompt lookup）草稿 |
 | `WHIRL_NGRAM_MIN=N` | n-gram 草稿的最短比對後綴（預設 3） |
 | `WHIRL_NGRAM_MAX=N` | 每回合最多的 n-gram 草稿數（預設 15） |
@@ -284,6 +306,7 @@ PowerShell 中先用 `$env:WHIRL_KV = "q8v"` 設定再啟動程式。**一般使
 | `WHIRL_PREFILL_CHUNK=N` | 合併後單次 prefill forward 的最多列數（1024 的倍數，預設 2048） |
 | `WHIRL_SEG_PREFILL=0` | 每個請求各自 prefill，不把多個請求放進同一次 forward |
 | `WHIRL_GATHER_MS=MS` | 收集一波新請求的等待時間窗（預設 30，0 = 關閉） |
+| `WHIRL_DECODE_MIN_TPS=N` | 其他請求 prefill 時，每個串流請求的 decode 保底速度（= `--decode-min-tps`，預設 20，0 = 關閉） |
 | `WHIRL_GDN_REPLAY=0` | DeltaNet 驗證改用快照組，不重播保留的列 |
 | `WHIRL_SNAP_SETS=N` | 遞迴狀態快照組的最少數量（搭配 `WHIRL_GDN_REPLAY=0`） |
 | `WHIRL_SLOT_DRAFTS=1` | 依預期接受率在 slot 之間分配草稿預算 |
@@ -324,6 +347,7 @@ PowerShell 中先用 `$env:WHIRL_KV = "q8v"` 設定再啟動程式。**一般使
 | `WHIRL_GEMMH=0` | 不用 f16 輸出的 prefill GEMM（位元相同） |
 | `WHIRL_GEMMHQ=1` | attention 投影也用 f16 輸出的 GEMM |
 | `WHIRL_ATTN_KX=0` | prefill attention 不用 K-exchange kernel（位元相同） |
+| `WHIRL_ATTN_KG=0` | prefill attention 不用依 GQA 分組的 kernel（位元相同） |
 | `WHIRL_GDN_SEQ=1` | DeltaNet prefill 改用逐步計算，不用分塊掃描 |
 | `WHIRL_GDN_V0=1` | 逐列的 DeltaNet decode 步驟 kernel（數值相同） |
 | `WHIRL_NAIVE_ATTN=1` | 參考用 attention 路徑 |
@@ -338,6 +362,7 @@ PowerShell 中先用 `$env:WHIRL_KV = "q8v"` 設定再啟動程式。**一般使
 | `WHIRL_GV_NMAX=N` | 同輸入 GEMV 一組的最大數量 |
 | `WHIRL_MOE_BN=32\|64` | 分組專家 GEMM 的 token tile |
 | `WHIRL_DBG=BITS` | 1 = 不合併 gdn_abconv、2 = 純量 split attention、4 = 每個 attention 群組一個 query |
+| `WHIRL_ATTN_WIDE=0` | 驗證 attention 每群最多 16 欄（`attn_wsplit1`），不用最多 32 欄的 `attn_wsplit2` |
 
 ### 7.7 診斷
 
@@ -345,7 +370,7 @@ PowerShell 中先用 `$env:WHIRL_KV = "q8v"` 設定再啟動程式。**一般使
 |---|---|
 | `WHIRL_TOKENIZE_ONLY=1` | 印出提示的 token id 後停止 |
 | `WHIRL_PRINT_IDS=1` | 印出生成的 token id 與其 FNV-1a 雜湊 |
-| `WHIRL_PROFILE=1` | 各類運算的 GPU 時間；會扭曲速度數字（伺服器：1 或 2） |
+| `WHIRL_PROFILE=1` | 各類運算的 GPU 時間；會扭曲速度數字（`whirl bench`：每個 prefill 長度各一份；伺服器：1 或 2） |
 | `WHIRL_TRACE_TPS=N` | 每 N 個 token 印出該區間的 tok/s（stderr） |
 | `WHIRL_DUMP_LOGITS=FILE` | （不開 MTP）把每個位置 ≥ `WHIRL_DUMP_FROM` 的下一 token logits 以 f16 列寫出 |
 | `WHIRL_DUMP_FROM=N` | `WHIRL_DUMP_LOGITS` 寫出的第一個提示位置 |

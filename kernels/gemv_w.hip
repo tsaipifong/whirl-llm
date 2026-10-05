@@ -465,24 +465,20 @@ __device__ __forceinline__ void gemvw8_impl(const uint8_t *__restrict__ W, uint6
     }
 }
 
+// One 16 * TILES-row by NT-token pass of gemvw_impl: zero the accumulators,
+// run the K loop over this wave's units, reduce through red and write y.
+// Rows (wr) are per block; the token slice (xt, xd, y) is per pass. ystride
+// is the y row stride (0 = nrows). Ends after the write loop with no
+// trailing barrier: a caller reusing red must __syncthreads() first.
 template <int T, int NT, int TILES, int PIN>
-__device__ __forceinline__ void gemvw_impl(const uint8_t *__restrict__ W, uint64_t row_bytes, const int8_t *__restrict__ xq,
-                           const float *__restrict__ xd, float *__restrict__ y, int ncols, int nrows, int accumulate,
-                           const int *__restrict__ skip, int bid) {
+__device__ __forceinline__ void gemvw_pass(const uint8_t *const (&wr)[TILES], const int8_t *xt,
+                                           const float *xd, float *y,
+                                           float (&red)[8][NT][16 * TILES], int nb32, int nu, int nrows,
+                                           int accumulate, int ystride, int r0) {
     constexpr int ROWS = 16 * TILES;
     constexpr int NV = NT < 8 ? NT : 8;  // D rows (tokens) per lane half
-    __shared__ float red[8][NT][ROWS];
-    if (skip != nullptr && *skip) return;
     const int lane = threadIdx.x % WARP, h = lane >> 4, n = lane & 15;
-    // wave-uniform unit index -> scalar block math and uniform scale branches
     const int w = __builtin_amdgcn_readfirstlane(threadIdx.x / WARP);
-    const int r0 = bid * ROWS;
-    const uint8_t *wr[TILES];
-#pragma unroll
-    for (int tt = 0; tt < TILES; ++tt) wr[tt] = W + (size_t)min(r0 + tt * 16 + n, nrows - 1) * row_bytes;
-    const int8_t *xt = xq + (size_t)min(n, NT - 1) * ncols;  // A row = token n
-    const int nb32 = ncols / 32;
-    const int nu = WMU<T>::units(ncols);
     const int t0 = 8 * h;
     float acc[TILES][4][NV];
 #pragma unroll
@@ -541,10 +537,30 @@ __device__ __forceinline__ void gemvw_impl(const uint8_t *__restrict__ W, uint64
         const float s = ((red[0][t][nn] + red[4][t][nn]) + (red[2][t][nn] + red[6][t][nn])) +
                         ((red[1][t][nn] + red[5][t][nn]) + (red[3][t][nn] + red[7][t][nn]));
         if (row < nrows) {
-            float *dst = y + (size_t)t * nrows + row;
+            float *dst = y + (size_t)t * (ystride ? ystride : nrows) + row;
             *dst = accumulate ? *dst + s : s;
         }
     }
+}
+
+template <int T, int NT, int TILES, int PIN>
+__device__ __forceinline__ void gemvw_impl(const uint8_t *__restrict__ W, uint64_t row_bytes, const int8_t *__restrict__ xq,
+                           const float *__restrict__ xd, float *__restrict__ y, int ncols, int nrows, int accumulate,
+                           const int *__restrict__ skip, int bid, int ystride = 0) {
+    constexpr int ROWS = 16 * TILES;
+    __shared__ float red[8][NT][ROWS];
+    if (skip != nullptr && *skip) return;
+    const int lane = threadIdx.x % WARP, h = lane >> 4, n = lane & 15;
+    // wave-uniform unit index -> scalar block math and uniform scale branches
+    const int w = __builtin_amdgcn_readfirstlane(threadIdx.x / WARP);
+    const int r0 = bid * ROWS;
+    const uint8_t *wr[TILES];
+#pragma unroll
+    for (int tt = 0; tt < TILES; ++tt) wr[tt] = W + (size_t)min(r0 + tt * 16 + n, nrows - 1) * row_bytes;
+    const int8_t *xt = xq + (size_t)min(n, NT - 1) * ncols;  // A row = token n
+    const int nb32 = ncols / 32;
+    const int nu = WMU<T>::units(ncols);
+    gemvw_pass<T, NT, TILES, PIN>(wr, xt, xd, y, red, nb32, nu, nrows, accumulate, ystride, r0);
 }
 
 // Variants V = (tiles, units in flight): 1 = (1, 1), 2 = (2, 1), 3 = (1, 2),
@@ -581,6 +597,44 @@ __device__ __forceinline__ void gemvw_impl(const uint8_t *__restrict__ W, uint64
     GEMVW_ENTRY(NT, V, TILES, PIN, iq4_nl, QT_IQ4_NL)   \
     GEMVW8_ENTRY(NT, V, TILES, PIN, q3_k, QT_Q3_K)
 // (v3 = (1, 2) measured never better than v1 / v2 on the 27B; not built)
+// Output head of a wide (17..32-row) verify: 16 tokens over a range of head rows at a time,
+// with the logits row stride passed separately (ystride = n_vocab), so the host can run the
+// two token passes of each row range back to back and the second pass reads the weights
+// from cache. Same kernel body as gemvw_nt16v2_q6_k.
+extern "C" __global__ void __launch_bounds__(256)
+    gemvw_nt16v2s_q6_k(const uint8_t *W, uint64_t row_bytes, const int8_t *xq, const float *xd, float *y, int ncols, int nrows,
+                       int ystride, int accumulate, const int *skip) {
+    gemvw_impl<QT_Q6_K, 16, 2, 1>(W, row_bytes, xq, xd, y, ncols, nrows, accumulate, skip, blockIdx.x, ystride);
+}
+// Output head of a wide (17..32-row) verify in one launch: each block computes its 32 head
+// rows for tokens [0, 16), then (same rows, weights now in cache) for [ntok - 16, ntok); rows
+// of the overlap are written twice with the same bits. Each pass is gemvw_nt16v2s_q6_k's body,
+// so the result equals two gemvw_nt16v2s_q6_k launches bitwise. ystride = logits row stride
+// (n_vocab); ntok in 17..32.
+extern "C" __global__ void __launch_bounds__(256)
+    gemvw_nt16x2s_q6_k(const uint8_t *__restrict__ W, uint64_t row_bytes, const int8_t *__restrict__ xq,
+                       const float *__restrict__ xd, float *__restrict__ y, int ncols, int nrows, int ystride, int ntok,
+                       int accumulate, const int *__restrict__ skip) {
+    constexpr int T = QT_Q6_K, NT = 16, TILES = 2, ROWS = 16 * TILES;
+    __shared__ float red[8][NT][ROWS];
+    if (skip != nullptr && *skip) return;
+    const int n = (threadIdx.x % WARP) & 15;
+    const int r0 = blockIdx.x * ROWS;
+    const uint8_t *wr[TILES];
+#pragma unroll
+    for (int tt = 0; tt < TILES; ++tt) wr[tt] = W + (size_t)min(r0 + tt * 16 + n, nrows - 1) * row_bytes;
+    const int nb32 = ncols / 32;
+    const int nu = WMU<T>::units(ncols);
+    const int t1 = ntok - NT;
+#pragma unroll 1
+    for (int p = 0; p < 2; ++p) {
+        const int ts = p ? t1 : 0;
+        if (p) __syncthreads();  // red WAR: pass 0's final reads before pass 1's writes
+        const int8_t *xt = xq + (size_t)(ts + min(n, NT - 1)) * ncols;  // A row = token ts + n
+        gemvw_pass<T, NT, TILES, 1>(wr, xt, xd + (size_t)ts * nb32, y + (size_t)ts * ystride, red, nb32, nu, nrows,
+                                    accumulate, ystride, r0);
+    }
+}
 #define GEMVW_NT(NT) GEMVW_TYPES(NT, 1, 1, 1) GEMVW_TYPES(NT, 2, 2, 1) GEMVW_TYPES(NT, 4, 2, 2)
 GEMVW_NT(2)
 GEMVW_NT(3)
