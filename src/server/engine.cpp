@@ -1289,6 +1289,8 @@ bool Engine::startJob(Slot& sl, Job& job) {
     sl.n_batch = 0;
     sl.acc_ema = static_cast<float>(opt_.n_draft);
     sl.dacc = qwen35::DraftAccept{};
+    sl.sacc = qwen35::SlotAccept{};
+    sl.d_prev = 0;
     sl.ng.reset();
     sl.ng.ng.norm = crlf_norm_;
     sl.ng_cycles = 0;
@@ -1297,6 +1299,9 @@ bool Engine::startJob(Slot& sl, Job& job) {
         for (Slot& o : slots_) others = others || (&o != &sl && o.phase == Phase::decode);
         if (!others) {
             for (auto& t : timing_) t = qwen35::DraftTiming{};
+            for (auto& c : ccost_) c.reset();
+            ccost_primed_.fill(false);
+            dpool_ = qwen35::DraftAccept{};
             prev_nd_ = 0;
         }
     }
@@ -1580,6 +1585,32 @@ void Engine::finishPrefill(Slot& sl) {
     if (sl.done || sl.st.gone) finishJob(sl);
 }
 
+std::vector<std::uint32_t> planSlotDrafts(std::span<const DraftPlanSlot> slots, const qwen35::CycleCost& cost,
+                                          std::uint32_t uniform, std::uint32_t cap, std::uint32_t rows, std::uint32_t snaps) {
+    std::vector<qwen35::AllocSlot> in(slots.size());
+    std::vector<std::uint32_t> prev(slots.size(), 0);
+    bool have_prev = true;
+    for (std::size_t k = 0; k < slots.size(); ++k) {
+        const DraftPlanSlot& s = slots[k];
+        in[k].acc = s.acc;
+        in[k].cap = cap;
+        in[k].ctx_k = static_cast<float>(s.pos) / 1024.0f;
+        in[k].ng_rows = s.ng_rows;
+        in[k].ng_e = s.ng_e;
+        if (s.ng_rows == 0) {
+            prev[k] = std::min(s.d_prev, cap);
+            have_prev = have_prev && s.d_prev > 0;
+        }
+    }
+    if (!have_prev) prev.clear();
+    const qwen35::AllocResult r =
+        qwen35::allocDrafts(in, cost, qwen35::AllocBudget{rows, snaps}, uniform, std::span<const std::uint32_t>(prev));
+    std::vector<std::uint32_t> out;
+    for (std::size_t k = 0; k < slots.size(); ++k)
+        if (slots[k].ng_rows == 0) out.push_back(r.d[k]);
+    return out;
+}
+
 std::uint32_t Engine::pickDrafts(std::span<Slot* const> act) {
     if (!opt_.use_mtp) return 0;
     const std::uint32_t A = static_cast<std::uint32_t>(act.size());
@@ -1589,7 +1620,16 @@ std::uint32_t Engine::pickDrafts(std::span<Slot* const> act) {
     if (nd == 0) return 0;
     if (opt_.mtp_auto) {
         std::vector<const qwen35::DraftAccept*> accs;
-        for (Slot* sl : act) accs.push_back(&sl->dacc);
+        std::vector<qwen35::DraftAccept> eff;
+        eff.reserve(act.size());
+        for (Slot* sl : act) {
+            if (opt_.slot_drafts == 2 && act.size() >= 2) {  // one slot: exactly as before
+                eff.push_back(sl->sacc.effective(dpool_));
+                accs.push_back(&eff.back());
+            } else {
+                accs.push_back(&sl->dacc);
+            }
+        }
         const std::uint32_t pick = qwen35::pickDrafts(accs, timing_[std::min(A, gdn_max_seg)], nd, n_cycles_, prev_nd_);
         prev_nd_ = pick;
         return pick;
@@ -1627,7 +1667,7 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
     if (A == 0) return;
     // n-gram drafts per slot (history = cache_tokens + next) when they promise
     // more tokens per ms than MTP drafts
-    std::array<std::uint32_t, gdn_max_seg> ng_n{};
+    std::array<std::uint32_t, gdn_max_seg> ng_n{}, ng_ml{};
     std::array<std::array<std::uint32_t, qwen35::max_ng_drafts>, gdn_max_seg> ng_d{};
     std::size_t n_ng = 0;
     // replay keeps no snapshot sets: the verify row budget is the only shared limit
@@ -1657,7 +1697,14 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
             const auto mt = sl.ng.propose(sl.cache_tokens, opt_.ngram_min, std::span<std::uint32_t>(ng_d[k].data(), lim_k));
             if (mt.n == 0) continue;
             float mtp_score = 0;
-            if (auto t = tm.estimate(nd0)) mtp_score = sl.dacc.expected(nd0) / *t;
+            if (opt_.slot_drafts == 2 && A >= 2) {
+                // against this slot's own last MTP allocation and its effective acceptance (one slot: as before)
+                const std::uint32_t d = sl.d_prev > 0 ? sl.d_prev : nd0;
+                if (auto t = tm.estimate(d)) mtp_score = sl.sacc.effective(dpool_).expected(d) / *t;
+            } else if (auto t = tm.estimate(nd0)) {
+                mtp_score = sl.dacc.expected(nd0) / *t;
+            }
+            ng_ml[k] = mt.mlen;
             ng_n[k] = opt_.ngram_force ? static_cast<std::uint32_t>(mt.n) : sl.ng.choose(mt.n, mt.mlen, mtp_score, tm);
             if (ng_n[k] > 0) n_ng += 1;
         }
@@ -1685,7 +1732,37 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
         const std::uint32_t used = static_cast<std::uint32_t>(A) + ng_tot;
         const std::uint32_t rows_free = vrows_ > used ? vrows_ - used : 0;
         const std::uint32_t snap_free = snap_cap > ng_tot ? snap_cap - ng_tot : 0;
-        splitDrafts(act_mtp, nd, std::min(rows_free, snap_free), std::span<std::uint32_t>(nd_m.data(), n_mtp));
+        if (opt_.slot_drafts == 2 && nd > 0) {
+            const std::size_t ia = std::min<std::size_t>(A, gdn_max_seg);
+            qwen35::CycleCost& cc = ccost_[ia];
+            if (!ccost_primed_[ia] && cc.samples() == 0) {
+                float ctx_k = 0;
+                for (Slot* s : act) ctx_k += static_cast<float>(s->pos) / 1024.0f;
+                cc.prior(timing_[ia], static_cast<std::uint32_t>(A), ctx_k / static_cast<float>(A));
+                ccost_primed_[ia] = true;
+            }
+            std::vector<qwen35::DraftAccept> eff;
+            eff.reserve(A);
+            std::vector<DraftPlanSlot> ps(A);
+            for (std::size_t k = 0; k < A; ++k) {
+                Slot& s = *act[k];
+                ps[k].pos = s.pos;
+                ps[k].d_prev = s.d_prev;
+                if (ng_n[k] > 0) {
+                    ps[k].ng_rows = ng_n[k] + 1;
+                    ps[k].ng_e = s.ng.acc[qwen35::NgramPolicy::bucket(ng_ml[k])].expected(ng_n[k]);
+                } else {
+                    eff.push_back(s.sacc.effective(dpool_));
+                    ps[k].acc = &eff.back();
+                }
+            }
+            const std::uint32_t cap = !m_.fusedDecode() ? 1u : std::min({opt_.n_draft, qwen35::max_drafts, max_small_batch - 1});
+            const std::vector<std::uint32_t> d = planSlotDrafts(ps, cc, nd, cap, vrows_, snap_free);
+            for (std::size_t i = 0; i < n_mtp; ++i) nd_m[i] = d[i];
+        } else {
+            splitDrafts(act_mtp, nd, std::min(rows_free, snap_free), std::span<std::uint32_t>(nd_m.data(), n_mtp));
+        }
+        for (std::size_t i = 0; i < n_mtp; ++i) act_mtp[i]->d_prev = nd_m[i];
         nd_max = 0;
         for (std::size_t i = 0; i < n_mtp; ++i) nd_max = std::max(nd_max, nd_m[i]);
     }
@@ -1775,12 +1852,35 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
         p->enq_ms[pa] += std::chrono::duration<double, std::milli>(t_enq - tc0).count();
     }
     if (any_sampling) ops_.download(samp_host_.data(), samp_dev_, sampBytes());
-    if (nd > 0 && n_ng == 0) {
+    const float cycle_ms = static_cast<float>(msSince(tc0));
+    if (opt_.slot_drafts == 2 && opt_.use_mtp) {
+        // every cycle (uniform, per-slot, with n-gram slots) trains the cost model of A slots;
+        // a per-slot cycle reaches timing_ as the time the uniform split would have taken
+        qwen35::CycleCost& cc = ccost_[std::min<std::size_t>(A, gdn_max_seg)];
+        qwen35::CycleFeat x, xu;
+        bool uni = n_ng == 0;
+        for (std::size_t k = 0; k < A; ++k) {
+            const float ctx_k = static_cast<float>(act[k]->pos) / 1024.0f;
+            x.rows += static_cast<float>(nd_of[k] + 1);
+            x.row_ctx += static_cast<float>(nd_of[k] + 1) * ctx_k;
+            xu.rows += static_cast<float>(nd + 1);
+            xu.row_ctx += static_cast<float>(nd + 1) * ctx_k;
+            uni = uni && nd_of[k] == nd;
+        }
+        x.steps = static_cast<float>(nd_max);
+        xu.steps = static_cast<float>(nd);
+        if (nd > 0 && n_ng == 0) {
+            if (uni) timing_[std::min<std::size_t>(A, gdn_max_seg)].update(nd, cycle_ms);
+            else if (cc.samples() >= 16)
+                timing_[std::min<std::size_t>(A, gdn_max_seg)].update(nd, cycle_ms * cc.predict(xu) / cc.predict(x));
+        }
+        cc.observe(x, cycle_ms);
+    } else if (nd > 0 && n_ng == 0) {
         // swaps keep the rows of the common count (an extra step at most)
         std::uint32_t tot = 0;
         for (std::size_t i = 0; i < n_mtp; ++i) tot += nd_m[i];
         if (tot == nd * static_cast<std::uint32_t>(n_mtp))
-            timing_[std::min<std::size_t>(A, gdn_max_seg)].update(nd, static_cast<float>(msSince(tc0)));
+            timing_[std::min<std::size_t>(A, gdn_max_seg)].update(nd, cycle_ms);
     }
     if (n_ng == A) {
         // n-gram cycle times (every slot drafted from its history): per slot
@@ -1846,6 +1946,10 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
             // n-gram cycles stay out of the MTP acceptance models
             sl.acc_ema = 0.7f * sl.acc_ema + 0.3f * static_cast<float>(acc);
             sl.dacc.update(nd_dev, acc);
+            if (opt_.slot_drafts == 2 && nd_dev > 0) {
+                sl.sacc.observe(nd_dev, acc);
+                dpool_.update(nd_dev, acc);
+            }
         }
         // an accepted end-of-turn draft ends the reply: the trunk keeps only the
         // rows before it and the stop token becomes `chosen`
@@ -1928,7 +2032,7 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
 
 void Engine::splitDrafts(std::span<Slot* const> act, std::uint32_t nd, std::uint32_t rows, std::span<std::uint32_t> nd_m) {
     for (auto& x : nd_m) x = nd;
-    if (!opt_.slot_drafts || !opt_.mtp_auto || act.size() < 2 || nd == 0) return;
+    if (opt_.slot_drafts != 1 || !opt_.mtp_auto || act.size() < 2 || nd == 0) return;
     const std::uint32_t cap = std::min(opt_.n_draft, qwen35::max_drafts);
     std::uint32_t used = nd * static_cast<std::uint32_t>(act.size());
     float e_tot = 0;

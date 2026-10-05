@@ -626,7 +626,8 @@ int serveMain(int argc, char** argv, const char* program) {
         eo.ngram_min = envU32("NGRAM_MIN", 3);
         eo.ngram_max = envU32("NGRAM_MAX", 0);
         eo.ngram_force = envOn("NGRAM_FORCE", false);
-        eo.slot_drafts = envOn("SLOT_DRAFTS", false);
+        // WHIRL_SLOT_DRAFTS: 0 / unset uniform, 1 marginal-gain swaps, 2 cost-model allocation
+        if (auto v = env("SLOT_DRAFTS")) eo.slot_drafts = *v == "2" ? 2u : (*v != "0" ? 1u : 0u);
         eo.trace_nd = env("TRACE_ND").has_value();
         eo.loop_log = env("LOOP_LOG").has_value();
         eo.tier_verify = env("TIER_VERIFY").has_value();

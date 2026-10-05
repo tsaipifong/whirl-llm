@@ -725,9 +725,10 @@ void testPrefixCacheMultiTurn() {
 }
 
 // concurrent requests (more than slots): every output equals its reference
-void testConcurrency(std::uint32_t parallel, std::uint32_t n_req, bool mtp, double floor_tps = 0) {
+void testConcurrency(std::uint32_t parallel, std::uint32_t n_req, bool mtp, double floor_tps = 0, std::uint32_t slot_drafts = 0) {
     ServerSetup su = baseSetup(mtp);
     su.eo.decode_min_tps = floor_tps;
+    su.eo.slot_drafts = slot_drafts;
     su.mc.parallel = parallel;
     su.mc.pool_tokens = 131072;
     TestServer srv(su);
@@ -750,6 +751,99 @@ void testConcurrency(std::uint32_t parallel, std::uint32_t n_req, bool mtp, doub
     CHECK_EQ(srv.model().hidMismatch(), 0u);
     const auto h = srv.get("/health");
     CHECK(h.body.find("\"busy\":false") != std::string::npos);
+}
+
+// WHIRL_SLOT_DRAFTS=2 planner (planSlotDrafts / qwen35::allocDrafts): pure, synthetic cycle times
+// T = 20 + 0.8 R + 2.5 S + 3 [R > 16] + 0.002 sum(rows_i ctx_i)
+float planTrueMs(const qwen35::CycleFeat& x) {
+    return 20.0f + 0.8f * x.rows + 2.5f * x.steps + (x.rows > 16 ? 3.0f : 0.0f) + 0.002f * x.row_ctx;
+}
+
+qwen35::CycleFeat planFeat(std::span<const DraftPlanSlot> ps, std::span<const std::uint32_t> d) {
+    qwen35::CycleFeat x;
+    std::size_t i = 0;
+    for (const DraftPlanSlot& s : ps) {
+        const std::uint32_t r = s.ng_rows > 0 ? s.ng_rows : d[i] + 1;
+        if (s.ng_rows == 0) x.steps = std::max(x.steps, static_cast<float>(d[i++]));
+        x.rows += static_cast<float>(r);
+        x.row_ctx += static_cast<float>(r) * static_cast<float>(s.pos) / 1024.0f;
+    }
+    return x;
+}
+
+void testSlotDraftPlan() {
+    qwen35::CycleCost cc;
+    std::uint64_t st = 0x9E3779B97F4A7C15ull;
+    const auto rnd = [&st](std::uint32_t lo, std::uint32_t hi) {
+        st = st * 6364136223846793005ull + 1442695040888963407ull;
+        return lo + static_cast<std::uint32_t>(st >> 33) % (hi - lo + 1);
+    };
+    for (int i = 0; i < 64; ++i) {
+        qwen35::CycleFeat x;
+        const std::uint32_t n = rnd(1, 4);
+        for (std::uint32_t k = 0; k < n; ++k) {
+            const std::uint32_t d = rnd(0, 6);
+            x.rows += static_cast<float>(d + 1);
+            x.steps = std::max(x.steps, static_cast<float>(d));
+            x.row_ctx += static_cast<float>(d + 1) * static_cast<float>(rnd(1, 64));
+        }
+        cc.observe(x, planTrueMs(x));
+    }
+    const qwen35::DraftAccept hi(0.92f), lo(0.3f);
+    std::vector<DraftPlanSlot> ps(2);
+    ps[0].acc = &hi;
+    ps[1].acc = &lo;
+    ps[0].pos = ps[1].pos = 8192;
+    const std::uint32_t U = 3, cap = 8;
+    const auto d = planSlotDrafts(ps, cc, U, cap, 16, 15);
+    CHECK(d.size() == 2 && d[0] > d[1]);                                     // uneven: more to the high-acceptance slot
+    CHECK(d[0] >= 1 && d[1] >= 1 && d[0] <= cap && d[1] <= cap);             // 1 <= d_i <= cap
+    CHECK(d[0] + d[1] + 2 <= 16);                                            // verify rows
+    const std::vector<std::uint32_t> u = {U, U};
+    const float tu = cc.predict(planFeat(ps, u)), td = cc.predict(planFeat(ps, d));
+    CHECK(hi.expected(d[0]) / td >= 0.97f * hi.expected(U) / tu - 1e-6f);    // throughput floor, both slots
+    CHECK(lo.expected(d[1]) / td >= 0.97f * lo.expected(U) / tu - 1e-6f);
+    const auto ds = planSlotDrafts(ps, cc, U, cap, 16, 5);                    // 5 snapshot sets
+    CHECK(ds[0] + ds[1] <= 5 && ds[1] >= 1);
+    // one slot: the uniform count, exactly as without the planner
+    const auto d1 = planSlotDrafts(std::span<const DraftPlanSlot>(ps.data(), 1), cc, U, cap, 16, 15);
+    CHECK(d1.size() == 1 && d1[0] == U);
+    // an n-gram slot keeps its rows and is skipped in the result
+    std::vector<DraftPlanSlot> mix = {ps[0], ps[1], DraftPlanSlot{}};
+    mix[2].ng_rows = 6;
+    mix[2].ng_e = 3.0f;
+    mix[2].pos = 4096;
+    const auto dm = planSlotDrafts(mix, cc, 2, cap, 16, 15);
+    CHECK(dm.size() == 2 && dm[0] + dm[1] + 2 + 6 <= 16 && dm[0] >= 1 && dm[1] >= 1);
+}
+
+// WHIRL_SLOT_DRAFTS=2 with one decoding slot: the same draft count every cycle as without it
+// (fixed draft count, no n-gram: the automatic choices depend on measured wall-clock times)
+void testSlotDraftsOneSlot() {
+    std::vector<std::string> nds[2];
+    std::string text[2];
+    const auto p = makePrompt(700, 42);
+    for (int m = 0; m < 2; ++m) {
+        ServerSetup su = baseSetup(true);
+        su.mc.parallel = 1;
+        su.eo.slot_drafts = m == 0 ? 0 : 2;
+        su.eo.mtp_auto = false;
+        su.eo.ngram = false;
+        su.eo.trace_nd = true;
+        TestServer srv(su);
+        g_log.clear();
+        auto r = srv.post("/v1/completions", completionBody(p, 96));
+        text[m] = completionText(r);
+        std::lock_guard<std::mutex> lk(g_log.mu);
+        for (const auto& l : g_log.lines) {
+            const std::size_t a = l.find("| nd ");
+            if (l.find("trace | cycle") != std::string::npos && a != std::string::npos)
+                nds[m].push_back(l.substr(a, l.find(" |", a + 5) - a));
+        }
+        CHECK_EQ(text[m], decode(srv.model().greedyReference(p, 96, true)));
+        CHECK_EQ(srv.model().poison(), 0u);
+    }
+    CHECK(!nds[0].empty() && nds[0] == nds[1]);
 }
 
 // decode floor bookkeeping (DecodeFloor): pure math on given times
@@ -1404,6 +1498,11 @@ int main(int argc, char** argv) {
         {"concurrency16", [] { testConcurrency(16, 24, true); }},
         {"concurrency_nomtp", [] { testConcurrency(4, 8, false); }},
         {"concurrency_floor", [] { testConcurrency(4, 12, true, 20); }},
+        {"slot_draft_plan", testSlotDraftPlan},
+        {"slot_drafts_one_slot", testSlotDraftsOneSlot},
+        {"concurrency_slot2", [] { testConcurrency(4, 12, true, 0, 2); }},
+        {"concurrency_slot2_c2", [] { testConcurrency(2, 8, true, 0, 2); }},
+        {"concurrency16_slot2", [] { testConcurrency(16, 24, true, 0, 2); }},
         {"decode_floor_math", testDecodeFloorMath},
         {"decode_floor", testDecodeFloor},
         {"pool", testPoolPressure},

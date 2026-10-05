@@ -226,6 +226,8 @@ struct Slot {
     bool logits_ok = false;
     float acc_ema = 0;
     qwen35::DraftAccept dacc;
+    qwen35::SlotAccept sacc;      // WHIRL_SLOT_DRAFTS=2: per-slot acceptance with pool shrinkage
+    std::uint32_t d_prev = 0;     // MTP drafts of this slot in its last MTP cycle
     qwen35::NgramPolicy ng;
     std::uint32_t ng_cycles = 0;
     std::array<std::uint32_t, max_small_batch + 1> batch{};
@@ -260,6 +262,21 @@ struct QBatch {
 
 struct CycleProf;
 
+// One decoding slot as the per-slot draft planner (WHIRL_SLOT_DRAFTS=2) sees it.
+struct DraftPlanSlot {
+    const qwen35::DraftAccept* acc = nullptr;  // MTP slot: effective acceptance; unused for n-gram slots
+    std::uint32_t pos = 0;                     // context length
+    std::uint32_t ng_rows = 0;                 // > 0: n-gram slot with this many verify rows
+    float ng_e = 0;                            // n-gram slot: expected tokens
+    std::uint32_t d_prev = 0;                  // MTP drafts in its last MTP cycle (0: none)
+};
+
+// MTP draft counts of the MTP slots (in order, n-gram slots skipped) from qwen35::allocDrafts:
+// `uniform` drafts each unless the cost model finds a better split within `rows` verify rows and
+// `snaps` snapshot sets; every MTP slot gets 1..cap. Pure (no engine state), for tests.
+std::vector<std::uint32_t> planSlotDrafts(std::span<const DraftPlanSlot> slots, const qwen35::CycleCost& cost,
+                                          std::uint32_t uniform, std::uint32_t cap, std::uint32_t rows, std::uint32_t snaps);
+
 struct EngineOptions {
     std::string model_name;
     std::string model_file;  // GGUF file name without directory (GET /props model_path)
@@ -281,7 +298,8 @@ struct EngineOptions {
     std::uint32_t ngram_min = 3;
     std::uint32_t ngram_max = 0;
     bool ngram_force = false;
-    bool slot_drafts = false;
+    // per-slot draft counts: 0 uniform, 1 marginal-gain swaps (splitDrafts), 2 cost model (allocDrafts)
+    std::uint32_t slot_drafts = 0;
     bool trace_nd = false;
     bool loop_log = false;
     bool tier_verify = false;
@@ -461,6 +479,10 @@ private:
     std::vector<std::int32_t> free_pages_;
     std::uint32_t pool_pages_ = 0;
     std::array<qwen35::DraftTiming, gdn_max_seg + 1> timing_{};
+    // WHIRL_SLOT_DRAFTS=2: cycle time per number of decoding slots, global acceptance pool
+    std::array<qwen35::CycleCost, gdn_max_seg + 1> ccost_{};
+    std::array<bool, gdn_max_seg + 1> ccost_primed_{};
+    qwen35::DraftAccept dpool_{};
     std::unique_ptr<CycleProf> prof_;
     std::uint32_t n_cycles_ = 0;
     // most rows of one batched verify (ServerModel::verifyRows: 16, or 32 with the wide GEMV path)
