@@ -141,6 +141,7 @@ request slots, a prefix cache in VRAM and host RAM / SSD tiers for idle sessions
 | `--vis-mode M` | `auto` (default), `resident` (encoder weights in VRAM), `stream` (layer by layer) |
 | `--vis-cache-mb N` | host cache of image embeddings, keyed by content hash, MiB (default 1024) |
 | `--allow-local-images` | also accept local file paths / `file://` URLs as image sources (off by default; `http(s)` image URLs are never fetched) |
+| `--cors-origin ORIGIN` | let web pages from `ORIGIN` (e.g. `https://app.example.com`) call the server from a browser; repeatable. By default only pages served from `http(s)://localhost`, `127.0.0.1` or `[::1]` (any port) get CORS headers (their `Origin` is echoed back, never `*`); other web pages, including `file://` pages, cannot read responses. `*` restores the behaviour before v0.1.4 (`Access-Control-Allow-Origin: *` for every page). Non-browser clients (SDKs, curl, IDE agents) are not affected |
 | `--log-file PATH` | log file (default `%LOCALAPPDATA%\whirl\server.log`); the log also goes to the console |
 | `-h`, `--help` / `-V`, `--version` | help / version |
 
@@ -173,7 +174,7 @@ Base URL `http://127.0.0.1:8080/v1`. Any API key is accepted (there is no authen
 | `GET /health` | answers immediately even while busy; reports the busy state and queue length |
 | `GET /props` (also `/v1/props`) | read-only, llama.cpp-server-style subset for clients that auto-detect the context length: `default_generation_settings.n_ctx` (context per slot), `default_generation_settings.model` and `model_alias` (= `--alias`), `total_slots`, `model_path` (file name only, never a directory), `modalities`, `build_info` |
 | `GET /version` | `{"version":"0.1.1","name":"whirl"}` |
-| `OPTIONS` (CORS preflight) | supported |
+| `OPTIONS` (CORS preflight) | supported (allowed origins: see `--cors-origin`) |
 
 LM Studio (`/api/v1/models`) and Ollama (`/api/tags`, `/api/show`, `/api/version`) native endpoints
 are not emulated (a client that found them would switch to an API WHIRL does not have): they answer

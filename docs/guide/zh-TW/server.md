@@ -31,6 +31,7 @@ Base URL 為 `http://127.0.0.1:8080/v1`；接受任何 API key。模型只載入
 | `--log-file` | 記錄檔（同時印到主控台） | 每位使用者的本機 app-data 目錄 |
 | `--alias` | `/v1/models` 回報的模型 id | GGUF 檔名 |
 | `--mmproj FILE`、`--vis-idle-s`、`--vis-mode`、`--vis-cache-mb` | 影像輸入（[vision.md](vision.md)） | off / 60 / auto / 1024 |
+| `--cors-origin ORIGIN` | 額外允許從瀏覽器呼叫伺服器的網頁來源（可重複；`*` = 任何網頁，即 v0.1.4 之前的行為） | 只允許 `http(s)://localhost`、`127.0.0.1`、`[::1]` 的網頁 |
 
 實用的環境變數（完整清單見[使用參考](usage.md#env)）：
 
@@ -69,7 +70,7 @@ Base URL 為 `http://127.0.0.1:8080/v1`；接受任何 API key。模型只載入
 | `POST /v1/completions` | 原始 prompt |
 | `GET /v1/models` | 一個模型 |
 | `GET /health` | 即使忙碌也立即回應；回報忙碌狀態與佇列長度 |
-| CORS preflight | 支援 |
+| CORS preflight | 支援；只對允許的來源回 `Access-Control-Allow-Origin`（`--cors-origin`） |
 
 回應為標準 OpenAI JSON：`finish_reason` 為 `stop` / `length` / `tool_calls`；`usage` 含
 `cached_tokens`；另外加上 llama.cpp 風格的 `timings` 物件（prompt 與預測 token 的每秒數、草稿
@@ -275,7 +276,9 @@ I batch | slots busy 0/4 (decode 0, prefill 0) | 80 cycles, 3.79 slots/cycle, 11
 - 沒有文法約束的 decode：`tool_choice: "required"` 與 `response_format` 不會強制執行。
 - 懲罰參數會被接受但忽略；`n` 只能 = 1；不支援 `logprobs`。
 - 沒有 HTTP keep-alive（每個回應都是 `Connection: close`）；沒有關機端點（請用 Ctrl+C 停止伺服器，見第 1 節）。
-- 串流輸出在引擎執行緒上寫出；非常慢的用戶端可能拖慢整個批次。
+- 連線限制：最多 64 條連線（超過回 `503`）；請求的標頭須在 60 秒內送達（否則 `408`），兩次讀取之間
+  不得超過 30 秒；標頭上限 64 KiB / 100 行（`431`）。引擎不會等待任何用戶端：停止讀取回應達 30 秒的
+  用戶端會被斷線、其請求停止，其他 slot 不受影響。
 - `system`／`prefix` 檢查點、同一提示的 `prompt-end` 命中，以及分層還原，都與冷執行逐位元相同。接續對話
   （`gen-end`，或提示檢查點之後再接更多 token）在數值上等價，但不是逐位元相同：歷史的 KV 與 DeltaNet 狀態
   來自 decode kernel（[kv-and-caching.md](kv-and-caching.md#checkpoints)）。帶有 ≥ 2048 token system message

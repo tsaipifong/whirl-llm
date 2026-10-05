@@ -33,6 +33,7 @@ model and GPU on disk).
 | `--log-file` | log file (also printed to the console) | per-user local app-data directory |
 | `--alias` | model id reported by `/v1/models` | GGUF file name |
 | `--mmproj FILE`, `--vis-idle-s`, `--vis-mode`, `--vis-cache-mb` | image input ([vision.md](vision.md)) | off / 60 / auto / 1024 |
+| `--cors-origin ORIGIN` | extra web-page origin allowed to call the server from a browser (repeatable; `*` = any page, the pre-v0.1.4 behaviour) | only `http(s)://localhost`, `127.0.0.1`, `[::1]` pages |
 
 Useful environment variables (all of them: [usage.md](../../usage.md#env)):
 
@@ -72,7 +73,7 @@ about 5 s whatever is left. Killing the process (Task Manager, `taskkill /F`) sk
 | `POST /v1/completions` | raw prompt |
 | `GET /v1/models` | one model |
 | `GET /health` | answers immediately even while busy; reports busy state and queue length |
-| CORS preflight | supported |
+| CORS preflight | supported; `Access-Control-Allow-Origin` only for allowed origins (`--cors-origin`) |
 
 Responses are standard OpenAI JSON: `finish_reason` `stop` / `length` / `tool_calls`; `usage`
 includes `cached_tokens`; a llama.cpp-style `timings` object is added (prompt and predicted tokens
@@ -308,7 +309,10 @@ an idle `kv tier |` summary; `vision:` lines for image input.
 - Penalties accepted but ignored; `n` = 1 only; no `logprobs`.
 - No HTTP keep-alive (every response is `Connection: close`); no shutdown endpoint (stop the
   server with Ctrl+C, see section 1).
-- Streaming output is written on the engine thread; a very slow client can delay the batch.
+- Connection limits: at most 64 open connections (more get `503`); a request must arrive within
+  60 s (headers; otherwise `408`) and with no more than 30 s between reads; headers are capped at
+  64 KiB / 100 lines (`431`). The engine never waits for a client: a client that stops reading its
+  response for 30 s is disconnected and its request stopped, without slowing the other slots.
 - Cache hits on `system` / `prefix` checkpoints, on the same prompt's `prompt-end`, and tier restores
   are bit-identical to a cold run. Continuing a conversation (`gen-end`, or a prompt checkpoint followed
   by more tokens) is numerically equivalent but not bit-identical: the history's KV and DeltaNet state

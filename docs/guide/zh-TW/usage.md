@@ -134,6 +134,7 @@ whirl serve  MODEL.gguf [選項]      （同一支程式）
 | `--vis-mode M` | `auto`（預設）、`resident`（編碼器權重常駐 VRAM）、`stream`（逐層串流） |
 | `--vis-cache-mb N` | 依內容雜湊快取圖片 embedding 的主記憶體容量，MiB（預設 1024） |
 | `--allow-local-images` | 也接受本機檔案路徑 / `file://` URL 當圖片來源（預設關閉；`http(s)` 圖片網址一律不抓） |
+| `--cors-origin ORIGIN` | 允許來自 `ORIGIN`（例如 `https://app.example.com`）的網頁從瀏覽器呼叫伺服器；可重複指定。預設只有 `http(s)://localhost`、`127.0.0.1`、`[::1]`（任何 port）上的網頁會拿到 CORS 標頭（回傳原本的 `Origin`，不回 `*`）；其他網頁（包括 `file://` 開啟的頁面）讀不到回應。`*` 恢復 v0.1.4 之前的行為（對所有網頁回 `Access-Control-Allow-Origin: *`）。非瀏覽器的用戶端（SDK、curl、IDE 代理）不受影響 |
 | `--log-file PATH` | log 檔（預設 `%LOCALAPPDATA%\whirl\server.log`）；log 也會印在主控台 |
 | `-h`、`--help` / `-V`、`--version` | 說明 / 版本 |
 
@@ -165,7 +166,7 @@ base URL `http://127.0.0.1:8080/v1`。任何 API key 都接受（沒有身分驗
 | `GET /health` | 忙碌時也會立刻回應；回報忙碌狀態與佇列長度 |
 | `GET /props`（也接受 `/v1/props`） | 唯讀，llama.cpp server 形式的子集，供會自動偵測 context 長度的客戶端使用：`default_generation_settings.n_ctx`（每個 slot 的 context）、`default_generation_settings.model` 與 `model_alias`（= `--alias`）、`total_slots`、`model_path`（只有檔名，絕不含目錄）、`modalities`、`build_info` |
 | `GET /version` | `{"version":"0.1.1","name":"whirl"}` |
-| `OPTIONS`（CORS preflight） | 支援 |
+| `OPTIONS`（CORS preflight） | 支援（允許的來源見 `--cors-origin`） |
 
 LM Studio（`/api/v1/models`）與 Ollama（`/api/tags`、`/api/show`、`/api/version`）的原生端點不模擬
 （客戶端偵測到它們就會改用 WHIRL 沒有的 API）：一律回 404，且每個路徑只在第一次被探測時記一行 `I` 級
