@@ -19,6 +19,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 
 namespace whirl::vram {
@@ -97,5 +98,48 @@ struct FitPlan {
 };
 std::uint64_t fixedNeed(const FitInput& in, std::uint32_t batch, std::uint32_t n_ck, std::uint32_t n_spe);
 FitPlan planFit(const FitInput& in);
+
+// ---- server defaults by card size
+//
+// A discrete card with less than 20 GiB (the 16 GB RX 9070 / 9070 XT / 9060 XT,
+// or WHIRL_VRAM_LIMIT_MB below that) usually also drives the desktop and other
+// programs, so the server defaults to what such a card really holds:
+//  - one request slot (--parallel 1) unless --parallel was given;
+//  - KV auto picks q8v (K f16, V int8) first; WHIRL_KV=f16 still forces f16;
+//  - 1536 MiB of VRAM is kept free for the desktop / other apps (headroom),
+//    on top of the usual reserve and WDDM margin.
+// WHIRL_VRAM_HEADROOM_MB sets the headroom on any card (0 = none); an explicit
+// WHIRL_POOL_RESERVE_MB (the user's own reserve) turns the default headroom off.
+// Cards with 20 GiB or more (R9700 32 GB, RX 7900 XTX 24 GB) and the UMA iGPU
+// keep the regular defaults (4 slots, f16 when the floor pool fits, no headroom).
+inline constexpr std::uint64_t small_card_below = 20ull << 30;
+inline constexpr std::uint32_t small_card_headroom_mb = 1536;
+
+struct CardInput {
+    std::uint64_t total = 0;          // describeDevice total_mem (the simulated size under WHIRL_VRAM_LIMIT_MB)
+    bool uma = false;                 // integrated GPU (shared memory): never "small"
+    std::optional<std::uint32_t> parallel_arg;  // --parallel / -np when given
+    std::uint32_t parallel_default = 4;
+    bool kv_auto = true;              // WHIRL_KV unset / auto (and a dense model)
+    std::optional<std::uint32_t> headroom_mb_env;  // WHIRL_VRAM_HEADROOM_MB when set
+    bool reserve_explicit = false;    // WHIRL_POOL_RESERVE_MB set
+};
+struct CardDefaults {
+    bool small = false;
+    std::uint32_t parallel = 4;
+    bool parallel_auto = false;       // parallel lowered by the small-card rule
+    bool prefer_q8v = false;          // KV auto: q8v before f16
+    std::uint64_t headroom = 0;       // bytes kept free for the desktop / other apps
+    std::string note;                 // startup log line ("" for a regular card with no headroom)
+};
+CardDefaults cardDefaults(const CardInput& in);
+
+// KV format on a small card (KV auto, dense model): q8v when the floor pool (one
+// full request) fits as q8v; else still q8v with a smaller pool when that pool
+// holds at least small_card_q8v_min_tokens (the pool, not the slot context, then
+// bounds a request: longer prompts get a clean 400); else q8h (K int8 too).
+inline constexpr std::uint64_t small_card_q8v_min_tokens = 65536;
+enum class SmallKv { q8v, q8v_short, q8h };
+SmallKv smallCardKv(std::uint64_t avail, std::uint64_t floor_tokens, std::uint64_t q8v_bytes_per_token);
 
 }  // namespace whirl::vram

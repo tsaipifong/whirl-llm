@@ -588,6 +588,87 @@ void testVramLimit() {
     CHECK(pn.n_ck == 0 && pn.n_spe == 0 && pn.batch <= 2048);
 }
 
+// server defaults by card size (vram::cardDefaults)
+void testCardDefaults() {
+    const std::uint64_t GiB = 1ull << 30, MiB = 1ull << 20;
+    // R9700 32 GB / RX 7900 XTX 24 GB: unchanged (4 slots, f16 when it fits, no headroom, no log line)
+    for (std::uint64_t t : {32 * GiB - 140 * MiB, 24 * GiB, 20 * GiB}) {
+        vram::CardInput in;
+        in.total = t;
+        const vram::CardDefaults d = vram::cardDefaults(in);
+        CHECK(!d.small && d.parallel == 4 && !d.parallel_auto && !d.prefer_q8v && d.headroom == 0 && d.note.empty());
+    }
+    // 16 GB card (or WHIRL_VRAM_LIMIT_MB=16384 / 14336): 1 slot, q8v first, 1536 MiB headroom
+    for (std::uint64_t t : {16 * GiB, 14336 * MiB, 20 * GiB - 1}) {
+        vram::CardInput in;
+        in.total = t;
+        const vram::CardDefaults d = vram::cardDefaults(in);
+        CHECK(d.small && d.parallel == 1 && d.parallel_auto && d.prefer_q8v);
+        CHECK_EQ(d.headroom, 1536 * MiB);
+        CHECK(d.note.find("small card") != std::string::npos && d.note.find("--parallel 1") != std::string::npos &&
+              d.note.find("q8v") != std::string::npos && d.note.find("1536 MiB") != std::string::npos);
+    }
+    vram::CardInput s16;
+    s16.total = 16 * GiB;
+    // --parallel given: kept (also --parallel 4 explicitly)
+    {
+        vram::CardInput in = s16;
+        in.parallel_arg = 4;
+        const vram::CardDefaults d = vram::cardDefaults(in);
+        CHECK(d.small && d.parallel == 4 && !d.parallel_auto && d.note.find("--parallel 4 (given)") != std::string::npos);
+        in.parallel_arg = 2;
+        CHECK_EQ(vram::cardDefaults(in).parallel, 2u);
+    }
+    // WHIRL_KV=f16 (or a MoE model): no q8v preference
+    {
+        vram::CardInput in = s16;
+        in.kv_auto = false;
+        const vram::CardDefaults d = vram::cardDefaults(in);
+        CHECK(d.small && !d.prefer_q8v && d.parallel == 1 && d.note.find("WHIRL_KV") != std::string::npos);
+    }
+    // WHIRL_VRAM_HEADROOM_MB overrides, on small and large cards; 0 = none
+    {
+        vram::CardInput in = s16;
+        in.headroom_mb_env = 0;
+        CHECK_EQ(vram::cardDefaults(in).headroom, 0ull);
+        in.headroom_mb_env = 3072;
+        CHECK_EQ(vram::cardDefaults(in).headroom, 3072 * MiB);
+        vram::CardInput big;
+        big.total = 32 * GiB;
+        big.headroom_mb_env = 1024;
+        const vram::CardDefaults d = vram::cardDefaults(big);
+        CHECK(!d.small && d.parallel == 4 && !d.prefer_q8v && d.headroom == 1024 * MiB && d.note.find("1024 MiB") != std::string::npos);
+    }
+    // explicit WHIRL_POOL_RESERVE_MB: no default headroom (WHIRL_VRAM_HEADROOM_MB still adds one)
+    {
+        vram::CardInput in = s16;
+        in.reserve_explicit = true;
+        CHECK_EQ(vram::cardDefaults(in).headroom, 0ull);
+        in.headroom_mb_env = 512;
+        CHECK_EQ(vram::cardDefaults(in).headroom, 512 * MiB);
+    }
+    // UMA iGPU (8060S) and an unknown size are never "small"
+    {
+        vram::CardInput in = s16;
+        in.uma = true;
+        const vram::CardDefaults d = vram::cardDefaults(in);
+        CHECK(!d.small && d.parallel == 4 && d.headroom == 0);
+        vram::CardInput z;
+        CHECK(!vram::cardDefaults(z).small);
+    }
+    // small-card KV: q8v (full floor), q8v with a short pool (>= 64k tokens), else q8h
+    {
+        const std::uint64_t q8v = 28262;  // ~27.6 KiB/token (Ornith 9B)
+        const std::uint64_t floor = 131072 + 256;
+        CHECK(vram::smallCardKv(5 * GiB + 400 * MiB, floor, q8v) == vram::SmallKv::q8v);           // cap 16384
+        CHECK(vram::smallCardKv(3 * GiB + 400 * MiB, floor, q8v) == vram::SmallKv::q8v_short);     // cap 14336
+        CHECK(vram::smallCardKv(floor * q8v, floor, q8v) == vram::SmallKv::q8v);
+        CHECK(vram::smallCardKv(65536 * q8v, floor, q8v) == vram::SmallKv::q8v_short);
+        CHECK(vram::smallCardKv(65536 * q8v - 1, floor, q8v) == vram::SmallKv::q8h);
+        CHECK(vram::smallCardKv(1 * GiB, floor, 0) == vram::SmallKv::q8h);
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -598,6 +679,7 @@ int main() {
     testTokenizerByteTokens();
     testChat();
     testVramLimit();
+    testCardDefaults();
     std::printf("unit tests: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }
