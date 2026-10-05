@@ -341,9 +341,7 @@ void testAttn(Ctx& c) {
         // ---- MTP draft window (KvArgs::win = W / 64 | threshold / 1024 << 16): a window that reaches
         // the sink, or a context below the threshold, gives the same bits as no window; a narrow
         // window (sink 256 + last 256 from a 64-aligned start) matches the CPU over those keys
-        if (!c.k.caps.draft_window) {  // gfx1151: attn_wsplit* ignore KvArgs::win
-            c.rep.skip("attn", "attn_wsplit1 draft window" + tag, "caps.draft_window off: MTP draft window not implemented (drafts attend all positions)");
-        } else if (auto fw1 = c.fnOpt("attn_wsplit1" + fs)) {
+        if (auto fw1 = c.fnOpt("attn_wsplit1" + fs)) {
             const std::vector<int> pv1 = {L - 1};
             Buf dp1(pv1);
             wk::AwGroups g1;

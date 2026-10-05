@@ -437,6 +437,11 @@ void testMisc(Ctx& c) {
                     }
                     c.rep.add(cmpExact("requant_q80_q4k (CPU emulation, " + std::to_string(nr8) + " rows)", d8.down<std::uint8_t>(w8.size()), w8));
                 }
+            } else {
+                Result r;
+                r.name = "requant_q80_q4k present";
+                r.pass = false;
+                c.rep.add(r);
             }
 
             // Q6_K -> D2 and the D2 GEMV

@@ -349,7 +349,7 @@ enum class KvFormat { f16, q8, q8h, q8v };
 
 // What a loaded code object can do. The host picks its paths from these flags
 // (and from null KernelTable entries), never from the GPU architecture name.
-// gfx1201 has every flag but xd_sum / attn_group1; gfx1151 lacks draft_window, has no fp8 GEMM,
+// gfx1201 has every flag but xd_sum / attn_group1; gfx1151 has no fp8 GEMM,
 // no q8v / q8h KV kernels and no vision kernels, and sets both markers.
 struct Caps {
     bool fp8_gemm = false;     // MXFP4 x fp8 prefill GEMM (gemm8_c0)
@@ -362,7 +362,8 @@ struct Caps {
     bool xd_sum = false;       // marker whirl_cap_xd_sum: int8 scale words carry the block sum
     bool attn_group1 = false;  // marker whirl_cap_attn_group1: attn_wsplit1 groups of one query
     bool draft_window = false; // attn_wsplit* honour KvArgs::win (MTP draft window); off when the
-                               // module has the marker whirl_cap_no_draft_window (gfx1151)
+                               // module has the marker whirl_cap_no_draft_window (no shipped module
+                               // has it since gfx1151 implements the window)
     static Caps probe(const hip::Module& m);
     // Whether `kv` can be loaded (f16 / q8 always can).
     bool supports(KvFormat kv) const { return kv == KvFormat::q8v ? kv_q8v : kv == KvFormat::q8h ? kv_q8h : true; }

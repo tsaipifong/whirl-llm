@@ -22,7 +22,7 @@ struct KvArgs {
     const int *ptab;
     const int *kvbase;
     int tab0;
-    int win;  // MTP draft window (gfx1201 attn_wsplit*); not implemented on gfx1151: ignored (drafts attend all positions)
+    int win;  // MTP draft window (attn_wsplit1 only): W / 64 | (threshold / 1024) << 16, 0 = off
 };
 typedef char kvq8_t __attribute__((ext_vector_type(8)));
 __device__ __forceinline__ int kv_tb(const KvArgs &a, int row) { return a.kvbase != nullptr ? a.kvbase[row] : a.tab0; }
@@ -460,6 +460,7 @@ extern "C" __global__ void attn_combine_q8(const float *part_ml, const float *pa
 // ---------------------------------------------------------------------------
 #define AW_K 32
 #define AW_D 256
+#define AW_SINK 256  // draft window: positions [0, AW_SINK) are always attended
 struct AwGroups {  // kMaxVerifyRows (32) groups, as include/whirl/kernels_abi.h
     int first[32];
     int count[32];
@@ -481,8 +482,26 @@ __device__ __forceinline__ void attn_wsplit_impl(const float *q, const KvArgs &k
     const int ncol = count * grp;
     const int tb = kv_tb(kv, first);
     const int n_pos = pos[first + count - 1] + 1;
-    const int per = (n_pos + n_split * 64 - 1) / (n_split * 64) * 64;
-    const int b0 = split * per, b1 = min(n_pos, b0 + per);
+    int per = (n_pos + n_split * 64 - 1) / (n_split * 64) * 64;
+    int b0 = split * per, b1 = min(n_pos, b0 + per);
+    // MTP draft window (kv.win = W / 64 | (threshold / 1024) << 16; the trunk passes 0): once
+    // n_pos >= threshold, split 0 takes the sink [0, AW_SINK) and the other splits share the last
+    // W positions from a 64-aligned start; keys between are skipped. A window that reaches the
+    // sink leaves the ranges above unchanged (same bits as without it). Same as kernels/attn.hip.
+    if (kv.win != 0 && n_split > 1) {
+        const int w = (kv.win & 0xffff) * 64, min_pos = (kv.win >> 16) * 1024;
+        const int w0 = max(AW_SINK, (n_pos - w) & ~63);
+        if (n_pos >= min_pos && w0 > AW_SINK) {
+            if (split == 0) {
+                b0 = 0;
+                b1 = AW_SINK;
+            } else {
+                per = (n_pos - w0 + (n_split - 1) * 64 - 1) / ((n_split - 1) * 64) * 64;
+                b0 = w0 + (split - 1) * per;
+                b1 = min(n_pos, b0 + per);
+            }
+        }
+    }
     const size_t ml_q = (size_t)n_split * n_head * 2, acc_q = (size_t)n_split * n_head * AW_D;
     const bool cw = wid * 16 < ncol;
     const int col = wid * 16 + lane % 16;
