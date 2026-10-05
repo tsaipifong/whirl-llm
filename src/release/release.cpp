@@ -308,7 +308,7 @@ constexpr EnvDoc k_env[] = {
     {"GPU and loading", "CODE_OBJECT=FILE", "development: load the GPU kernels from this code object instead of the built-in one", GPU},
     {"GPU and loading", "MOE_FP8=0", "MoE expert prefill with f16 instead of fp8 activations (MXFP4 experts)", GPU},
     {"GPU and loading", "MOE_MXW=0", "generic MXFP4 MoE decode kernels instead of the whole-block ones", GPU},
-    {"GPU and loading", "EMBD_HOST=1", "keep the token embedding table in pinned host memory instead of VRAM", S},
+    {"GPU and loading", "EMBD_HOST=0", "keep the token embedding table in VRAM (default: pinned host memory, declared as Shared Usage)", S},
     {"GPU and loading", "TUNE_COLD=1", "autotune: evict the cache before each timing", C | B | T},
     {"GPU and loading", "TUNE_MASK=BITS", "autotune: mask of the candidate GEMM configurations", C | B | T},
 
@@ -325,7 +325,7 @@ constexpr EnvDoc k_env[] = {
     {"Speculative decoding (output always equals plain greedy)", "MTP_Q4=0", "keep the MTP block's Q6_K matrices (default: Q4_K copies, used for drafts only)", C | B | S},
     {"Speculative decoding (output always equals plain greedy)", "DRAFT_HEAD=q4", "Q4_K draft head instead of the 2-bit one", C | B | S},
     {"Speculative decoding (output always equals plain greedy)", "MTP_FULLHEAD=1", "drafts use the full output head", C | B | S},
-    {"Speculative decoding (output always equals plain greedy)", "DRAFT_VOCAB=48k|64k|FILE|N", "draft head over a frequency subset of the vocabulary (draft_vocab\\subset_48k.bin next to the exe; FILE = uint32 ids), or the first N rows", C | S},
+    {"Speculative decoding (output always equals plain greedy)", "DRAFT_VOCAB=off|64k|48k|FILE|N", "draft head over a frequency subset of the vocabulary (default: the embedded 64k subset on dense qwen35 models with a 248320-token vocabulary; off = full head; 48k = draft_vocab\\subset_48k.bin next to the exe; FILE = uint32 ids), or the first N rows", C | S},
     {"Speculative decoding (output always equals plain greedy)", "NGRAM=0", "no n-gram (prompt-lookup) drafts", C | B | S},
     {"Speculative decoding (output always equals plain greedy)", "NGRAM_MIN=N", "minimum matched suffix for an n-gram draft (default 3)", C | B | S},
     {"Speculative decoding (output always equals plain greedy)", "NGRAM_MAX=N", "most n-gram drafts per cycle (default 15)", C | B | S},

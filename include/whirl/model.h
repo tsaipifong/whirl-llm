@@ -757,6 +757,24 @@ std::vector<std::uint32_t> draftVocabIds(std::span<const std::uint32_t> ids, std
                                          std::span<const std::uint32_t> required, std::uint32_t* added = nullptr);
 // directory of the running executable ("" if unknown)
 std::string exeDirectory();
+// What WHIRL_DRAFT_VOCAB selects. Unset = the embedded 64k subset by default (only applied to a
+// model draftVocabDefaultFits accepts); "64k" = the embedded subset explicitly; "off" / "0" / "" =
+// the full vocabulary; N = the first N rows (old experiment); "48k" etc. = <dir>/draft_vocab/
+// subset_48k.bin; anything else = a file path.
+struct DraftVocabChoice {
+    enum class Kind { full, first_n, embedded_64k, file } kind = Kind::full;
+    std::uint32_t n = 0;
+    std::string file;
+    bool by_default = false;  // WHIRL_DRAFT_VOCAB unset
+};
+DraftVocabChoice draftVocabChoice(const std::optional<std::string>& env_value, const std::string& dir);
+// vocabulary size of the qwen35 tokenizer the embedded subset was built for
+inline constexpr std::uint32_t draft_vocab_embedded_n_vocab = 248320;
+// the default (embedded 64k) subset is used only for dense qwen35 models with that vocabulary
+inline bool draftVocabDefaultFits(bool moe, std::uint32_t n_vocab) { return !moe && n_vocab == draft_vocab_embedded_n_vocab; }
+// the embedded 64k subset (data/draft_vocab/subset_64k.bin, built by whirl-cloud tools/vocab_subset);
+// defined in draft_vocab_embed.cpp (whirl_model only)
+std::vector<std::uint32_t> embeddedDraftVocab64k();
 
 // Draft count in [1, max] maximizing sum(E) / T (see the prototype notes).
 std::uint32_t pickDrafts(std::span<const DraftAccept* const> accepts, const DraftTiming& timing, std::uint32_t max,

@@ -7,6 +7,20 @@ All notable changes to WHIRL are listed here. Versions follow `project(whirl VER
 
 ### Changed
 
+- Defaults: the token embedding table is kept in pinned host memory (`WHIRL_EMBD_HOST`, now on by
+  default; `WHIRL_EMBD_HOST=0` keeps it in VRAM). The KV pool grows by ~11.9% on R9700, outputs are
+  bitwise identical, prefill -0.4-0.9%. Models with tied embeddings or an MXFP4 embedding keep it in
+  VRAM. The server adds the embedding size to its pinned-memory declaration
+  (`%LOCALAPPDATA%\whirl\pinned\<pid>.txt`), so Shared Usage monitoring does not count it as spill.
+- Defaults: the MTP draft head uses a 64k-token vocabulary subset (`WHIRL_DRAFT_VOCAB`, default
+  `64k`), embedded in the executable (`data/draft_vocab/subset_64k.bin` via whirl-bin2c), for dense
+  qwen35 models with the 2-bit draft head and a 248,320-token vocabulary; MoE models and other
+  vocabularies keep the full head. Main scenario +3.4-5.0% tok/s, same acceptance, outputs bitwise
+  identical. `WHIRL_DRAFT_VOCAB=off|48k|<file>` overrides. The subset is only a list of token ids
+  (uint32 LE, ascending), ranked by token frequency over permissively licensed code and documentation
+  (llama.cpp, ROCm aiter, hipfire, dflash, PaddleNLP / PaddleOCR, ECharts, WHIRL docs) and Wikipedia
+  samples (CC BY-SA 4.0), tokenized with the Qwen3.x tokenizer; no corpus text is included. Generated
+  by whirl-cloud `tools/vocab_subset/build.py` (sources and licenses in its `sources.tsv`).
 - Decode floor (`--decode-min-tps N`): every decoding slot is protected except one that arrived in
   the same burst (within the 30 ms gathering window) as a request that is still prefilling. Requests
   arriving together therefore merge their prefill without false floor throttling (Scenario A, C = 4

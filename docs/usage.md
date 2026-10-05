@@ -273,7 +273,7 @@ experiments and measurements.
 | `WHIRL_CODE_OBJECT=FILE` | development: load the GPU kernels from this code object instead of the built-in one |
 | `WHIRL_MOE_FP8=0` | MoE models with MXFP4 experts: run the expert prefill with f16 activations instead of fp8 (default fp8, the faster path — about 11.7k vs 8.6k tok/s at 2k tokens for Ornith MXFP4). Affects prefill only |
 | `WHIRL_MOE_MXW=0` | MoE models with MXFP4 experts: use the generic MXFP4 expert decode kernels instead of the whole-block ones (default whole-block). Affects decode / verify |
-| `WHIRL_EMBD_HOST=1` | keep the token embedding table in pinned host memory instead of VRAM |
+| `WHIRL_EMBD_HOST=0` | keep the token embedding table in VRAM (default: pinned host memory; the server declares its size with the other pinned memory so Shared Usage monitoring can subtract it) |
 | `WHIRL_TUNE_COLD=1` | autotune: evict the cache before each timing *(diagnostic)* |
 | `WHIRL_TUNE_MASK=BITS` | autotune: mask of the candidate GEMM configurations *(diagnostic)* |
 
@@ -299,7 +299,7 @@ The output always equals plain greedy decoding (with sampling: the same distribu
 | `WHIRL_MTP_Q4=0` | keep the MTP block's Q6_K / Q8_0 matrices (default: Q4_K copies, used for drafts only) |
 | `WHIRL_DRAFT_HEAD=q4` | Q4_K draft head instead of the 2-bit one |
 | `WHIRL_MTP_FULLHEAD=1` | drafts use the full output head |
-| `WHIRL_DRAFT_VOCAB=N` | draft head over the first N vocabulary rows only |
+| `WHIRL_DRAFT_VOCAB=off\|64k\|48k\|FILE\|N` | MTP draft head over a frequency subset of the vocabulary. Default: the 64k subset embedded in the executable, used only for dense qwen35 models with the 2-bit draft head and a 248,320-token vocabulary (outputs unchanged). `off` = full draft head; `48k` = `draft_vocab\subset_48k.bin` next to the exe; FILE = uint32 little-endian token ids; N = the first N rows |
 | `WHIRL_NGRAM=0` | no n-gram (prompt-lookup) drafts |
 | `WHIRL_NGRAM_MIN=N` | minimum matched suffix for an n-gram draft (default 3) |
 | `WHIRL_NGRAM_MAX=N` | most n-gram drafts per cycle (default 15) |

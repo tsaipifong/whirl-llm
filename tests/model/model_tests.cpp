@@ -177,6 +177,25 @@ void testDraftVocab() {
     }
     check(q::readDraftVocab(tmp.string()) == s, "draft vocab: file round trip (uint32 little-endian)");
     std::filesystem::remove(tmp);
+    using DK = q::DraftVocabChoice::Kind;
+    const q::DraftVocabChoice c0 = q::draftVocabChoice(std::nullopt, "D");
+    check(c0.kind == DK::embedded_64k && c0.by_default, "draft vocab: unset = embedded 64k by default");
+    const q::DraftVocabChoice c64 = q::draftVocabChoice(std::string("64k"), "D");
+    check(c64.kind == DK::embedded_64k && !c64.by_default, "draft vocab: 64k = embedded, explicit");
+    check(q::draftVocabChoice(std::string("off"), "D").kind == DK::full && q::draftVocabChoice(std::string("0"), "D").kind == DK::full,
+          "draft vocab: off / 0 = full head");
+    const q::DraftVocabChoice c48 = q::draftVocabChoice(std::string("48k"), "D");
+    const q::DraftVocabChoice cn = q::draftVocabChoice(std::string("150000"), "D");
+    check(c48.kind == DK::file && c48.file == d48 && cn.kind == DK::first_n && cn.n == 150000,
+          "draft vocab: 48k = file next to the exe, N = first N rows");
+    check(q::draftVocabDefaultFits(false, 248320) && !q::draftVocabDefaultFits(true, 248320) &&
+              !q::draftVocabDefaultFits(false, 151936),
+          "draft vocab: default only for dense qwen35 with the 248320-token vocabulary");
+    const std::vector<std::uint32_t> e64 = q::embeddedDraftVocab64k();
+    bool asc = e64.size() == 65536;
+    for (std::size_t i = 1; asc && i < e64.size(); ++i) asc = e64[i - 1] < e64[i];
+    check(asc && e64.back() < 248320 && e64.front() == 0 && std::find(e64.begin(), e64.end(), 248044u) != e64.end(),
+          "draft vocab: embedded 64k subset (65536 ascending ids < 248320, specials included)");
 }
 
 void testNgram() {

@@ -117,6 +117,31 @@ std::optional<std::string> draftVocabFile(std::string_view spec, const std::stri
     return std::string(spec);
 }
 
+DraftVocabChoice draftVocabChoice(const std::optional<std::string>& env_value, const std::string& dir) {
+    DraftVocabChoice c;
+    if (!env_value) {
+        c.kind = DraftVocabChoice::Kind::embedded_64k;
+        c.by_default = true;
+        return c;
+    }
+    const std::string& v = *env_value;
+    if (v.empty() || v == "off" || v == "0") return c;
+    if (std::all_of(v.begin(), v.end(), [](char ch) { return ch >= '0' && ch <= '9'; })) {
+        c.kind = DraftVocabChoice::Kind::first_n;
+        c.n = static_cast<u32>(std::stoul(v));
+        return c;
+    }
+    if (v == "64k") {
+        c.kind = DraftVocabChoice::Kind::embedded_64k;
+        return c;
+    }
+    if (auto f = draftVocabFile(v, dir)) {
+        c.kind = DraftVocabChoice::Kind::file;
+        c.file = *f;
+    }
+    return c;
+}
+
 std::vector<u32> readDraftVocab(const std::string& path) {
     std::ifstream f(std::filesystem::path(path), std::ios::binary | std::ios::ate);
     if (!f) throw std::runtime_error("draft vocabulary file not found: " + path);

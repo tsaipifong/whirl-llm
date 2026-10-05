@@ -233,26 +233,36 @@ std::vector<u32> parseIds(const std::string& list) {
     return ids;
 }
 
-// WHIRL_DRAFT_VOCAB: N = the first N draft-head rows (old experiment); 48k / 64k / <file> = a
-// frequency subset of the 2-bit draft head (special and byte tokens always added); off
+// WHIRL_DRAFT_VOCAB: unset = the embedded 64k subset on dense qwen35 models with the 248320-token
+// vocabulary; 64k = embedded; 48k / <file> = a frequency subset file; N = the first N draft-head rows
+// (old experiment); off = full head. Special and byte tokens are always added.
 void applyDraftVocab(q::Model& model, const Tokenizer& tok) {
-    const auto v = envGet("DRAFT_VOCAB");
-    if (!v) return;
-    if (!v->empty() && std::all_of(v->begin(), v->end(), [](char c) { return c >= '0' && c <= '9'; })) {
-        model.draft_vocab = static_cast<u32>(std::stoul(*v));
+    using K = q::DraftVocabChoice::Kind;
+    const q::DraftVocabChoice dv = q::draftVocabChoice(envGet("DRAFT_VOCAB"), q::exeDirectory());
+    if (dv.kind == K::first_n) {
+        model.draft_vocab = dv.n;
         return;
     }
-    const auto file = q::draftVocabFile(*v, q::exeDirectory());
-    if (!file) return;
+    if (dv.kind == K::full) return;
+    if (dv.kind == K::embedded_64k) {
+        const bool fits = dv.by_default ? q::draftVocabDefaultFits(model.cfg.moe, model.cfg.n_vocab)
+                                        : model.cfg.n_vocab == q::draft_vocab_embedded_n_vocab;
+        if (!fits || (dv.by_default && !model.draft_d2)) {
+            if (!dv.by_default) std::fprintf(stderr, "WHIRL_DRAFT_VOCAB=64k ignored: the embedded subset needs a 248320-token vocabulary\n");
+            return;
+        }
+    }
     std::vector<u32> req;
     for (const TokenId t : tok.specials())
         if (t >= 0) req.push_back(static_cast<u32>(t));
     for (int b = 0; b < 256; ++b)
         if (tok.byteToken(b) >= 0) req.push_back(static_cast<u32>(tok.byteToken(b)));
     u32 added = 0;
-    const auto ids = q::draftVocabIds(q::readDraftVocab(*file), model.cfg.n_vocab, req, &added);
+    const auto ids =
+        q::draftVocabIds(dv.kind == K::file ? q::readDraftVocab(dv.file) : q::embeddedDraftVocab64k(), model.cfg.n_vocab, req, &added);
+    const std::string label = dv.kind == K::file ? dv.file : std::string(dv.by_default ? "64k (embedded, default)" : "64k (embedded)");
     if (model.setDraftVocab(ids))
-        std::fprintf(stderr, "draft head: vocabulary subset %s (%zu of %u rows; %u special / byte tokens added)\n", file->c_str(),
+        std::fprintf(stderr, "draft head: vocabulary subset %s (%zu of %u rows; %u special / byte tokens added)\n", label.c_str(),
                      ids.size(), model.cfg.n_vocab, added);
     else
         std::fprintf(stderr, "WHIRL_DRAFT_VOCAB ignored: it needs the 2-bit draft head (Q6_K output head, WHIRL_DRAFT_HEAD not q4)\n");

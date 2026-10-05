@@ -206,18 +206,41 @@ std::uint32_t envU32(std::string_view name, std::uint32_t def) {
     return def;
 }
 
-// WHIRL_DRAFT_VOCAB=48k|64k|<file>: keep only that vocabulary subset of the 2-bit draft head
-// (special and byte tokens are always added); outputs are unchanged, only the acceptance can drop.
-void applyDraftVocab(qwen35::Model& model, const Tokenizer& tok, const std::string& file) {
+// WHIRL_DRAFT_VOCAB (default: the embedded 64k subset on dense qwen35 models with the 248320-token
+// vocabulary): keep only that vocabulary subset of the 2-bit draft head (special and byte tokens are
+// always added); outputs are unchanged, only the acceptance can drop.
+void applyDraftVocab(qwen35::Model& model, const Tokenizer& tok, const qwen35::DraftVocabChoice& dv) {
+    using K = qwen35::DraftVocabChoice::Kind;
+    if (dv.kind != K::embedded_64k && dv.kind != K::file) return;
+    if (dv.kind == K::embedded_64k) {
+        const bool fits = dv.by_default ? qwen35::draftVocabDefaultFits(model.cfg.moe, model.cfg.n_vocab)
+                                        : model.cfg.n_vocab == qwen35::draft_vocab_embedded_n_vocab;
+        if (!fits) {
+            if (dv.by_default)
+                logI("draft head: full vocabulary (the embedded 64k subset is for dense qwen35 models with a {}-token vocabulary)",
+                     qwen35::draft_vocab_embedded_n_vocab);
+            else
+                logW("WHIRL_DRAFT_VOCAB=64k ignored: the embedded subset needs a {}-token vocabulary (model: {})",
+                     qwen35::draft_vocab_embedded_n_vocab, model.cfg.n_vocab);
+            return;
+        }
+        if (!model.draft_d2) {
+            if (dv.by_default) logI("draft head: full vocabulary (the vocabulary subset needs the 2-bit draft head)");
+            else logW("WHIRL_DRAFT_VOCAB ignored: it needs the 2-bit draft head (Q6_K output head, WHIRL_DRAFT_HEAD not q4)");
+            return;
+        }
+    }
     std::vector<std::uint32_t> req;
     for (const TokenId t : tok.specials())
         if (t >= 0) req.push_back(static_cast<std::uint32_t>(t));
     for (int b = 0; b < 256; ++b)
         if (tok.byteToken(b) >= 0) req.push_back(static_cast<std::uint32_t>(tok.byteToken(b)));
     std::uint32_t added = 0;
-    const auto ids = qwen35::draftVocabIds(qwen35::readDraftVocab(file), model.cfg.n_vocab, req, &added);
+    const auto ids = qwen35::draftVocabIds(dv.kind == K::file ? qwen35::readDraftVocab(dv.file) : qwen35::embeddedDraftVocab64k(),
+                                           model.cfg.n_vocab, req, &added);
+    const std::string label = dv.kind == K::file ? dv.file : std::string(dv.by_default ? "64k (embedded, default)" : "64k (embedded)");
     if (model.setDraftVocab(ids))
-        logI("draft head: vocabulary subset {} ({} of {} rows; {} special / byte tokens added)", file, ids.size(), model.cfg.n_vocab,
+        logI("draft head: vocabulary subset {} ({} of {} rows; {} special / byte tokens added)", label, ids.size(), model.cfg.n_vocab,
              added);
     else
         logW("WHIRL_DRAFT_VOCAB ignored: it needs the 2-bit draft head (Q6_K output head, WHIRL_DRAFT_HEAD not q4)");
@@ -394,7 +417,7 @@ int serveMain(int argc, char** argv, const char* program) {
         qwen35::LoadStats stats;
         qwen35::LoadOptions lo;
         lo.max_batch = serve_prefill_batch;
-        lo.embd_on_host = envOn("EMBD_HOST", false);
+        lo.embd_on_host = envOn("EMBD_HOST", true);  // WHIRL_EMBD_HOST=0: embedding in VRAM
         if (auto v = env("PREFILL_BATCH")) {
             try {
                 lo.max_batch = std::clamp(static_cast<std::uint32_t>(std::stoul(*v)), 1u, qwen35::max_batch_limit);
@@ -433,6 +456,17 @@ int serveMain(int argc, char** argv, const char* program) {
              static_cast<double>(stats.bytes) / (1024.0 * 1024.0 * 1024.0), stats.ms / 1000.0,
              static_cast<double>(stats.bytes) / (stats.ms * 1e6));
 
+        // pinned host memory shows up as this process's GPU "Shared Usage": declare it so monitoring
+        // does not read the embedding table as VRAM spill (the RAM tier / vision add theirs below)
+        const std::uint64_t embd_pinned =
+            model.embd_host ? static_cast<std::uint64_t>(model.tok_embd.row_bytes) * model.tok_embd.nrows : 0;
+        if (embd_pinned > 0) {
+            tier::declarePinned(lad, embd_pinned);
+            logI("token embedding: {:.0f} MiB in pinned host memory (counted as this process's GPU 'Shared Usage', declared; "
+                 "WHIRL_EMBD_HOST=0 keeps it in VRAM)",
+                 static_cast<double>(embd_pinned) / 1048576.0);
+        }
+
         // same knobs as the CLI
         if (env("NO_FUSE")) model.no_fuse = true;
         if (env("FLOAT_GEMV")) model.float_gemv = true;
@@ -441,14 +475,10 @@ int serveMain(int argc, char** argv, const char* program) {
         if (auto v = env("MOE_BN")) model.moe_bn_force = static_cast<std::uint32_t>(std::strtoul(v->c_str(), nullptr, 10));
         if (auto v = env("PREFILL_BATCH"))
             model.max_batch = std::max(1u, std::min(model.max_batch, static_cast<std::uint32_t>(std::stoul(*v))));
-        // WHIRL_DRAFT_VOCAB: N = the first N rows (old experiment), 48k / 64k / <file> = frequency subset, off
-        std::optional<std::string> draft_vocab_file;
-        if (auto v = env("DRAFT_VOCAB")) {
-            if (!v->empty() && std::all_of(v->begin(), v->end(), [](char c) { return c >= '0' && c <= '9'; }))
-                model.draft_vocab = static_cast<std::uint32_t>(std::stoul(*v));
-            else
-                draft_vocab_file = qwen35::draftVocabFile(*v, qwen35::exeDirectory());
-        }
+        // WHIRL_DRAFT_VOCAB: unset = embedded 64k subset (dense qwen35, 248320 vocab), 64k = embedded,
+        // 48k / <file> = frequency subset file, N = the first N rows (old experiment), off = full head
+        const qwen35::DraftVocabChoice draft_vocab = qwen35::draftVocabChoice(env("DRAFT_VOCAB"), qwen35::exeDirectory());
+        if (draft_vocab.kind == qwen35::DraftVocabChoice::Kind::first_n) model.draft_vocab = draft_vocab.n;
         if (env("GEMV_R") || env("GEMV_W") || env("GEMV_WH"))
             logW("WHIRL_GEMV_R / WHIRL_GEMV_W / WHIRL_GEMV_WH are not supported by whirl-server (ignored)");
         model.use_graph = false;
@@ -516,7 +546,7 @@ int serveMain(int argc, char** argv, const char* program) {
         if (use_mtp && !env("MTP_FULLHEAD")) {
             const bool q4 = env("DRAFT_HEAD").value_or("") == "q4";
             model.buildDraftHeadEx(q4 ? qwen35::Model::DraftHeadKind::q4 : qwen35::Model::DraftHeadKind::d2);
-            if (draft_vocab_file) applyDraftVocab(model, tok, *draft_vocab_file);
+            applyDraftVocab(model, tok, draft_vocab);
         }
         if (use_mtp) {
             logI("MTP speculative decoding: on, up to {} draft(s) per cycle{}, p-min {:.2f}, n-min {}, draft count {}", drafts,
@@ -809,7 +839,7 @@ int serveMain(int argc, char** argv, const char* program) {
                 }
                 if (tier_owned) {
                     tier::Tier& tr = *tier_owned;
-                    tier::declarePinned(lad, tr.pinnedBytes());
+                    tier::declarePinned(lad, embd_pinned + tr.pinnedBytes());
                     logI("kv tier: RAM {:.2f} GiB of pinned host memory (counted as this process's GPU 'Shared Usage'; pinned in {:.1f} s, "
                          "SSD index {:.1f} s), entries >= {} tokens; SSD {}{} (cap {} GiB, {} entries / {:.2f} GiB indexed); entry: {:.1f} "
                          "MiB per checkpoint, {:.1f} MiB per 256-token page",
@@ -884,7 +914,7 @@ int serveMain(int argc, char** argv, const char* program) {
             const std::size_t n_lend = backend->lendScratch(raw);
             std::uint64_t lent = 0;
             for (std::size_t k = 0; k < n_lend; ++k) lent += raw[k][1];
-            tier::declarePinned(lad, (tier_owned ? tier_owned->pinnedBytes() : 0) + v.pinnedBytes());
+            tier::declarePinned(lad, embd_pinned + (tier_owned ? tier_owned->pinnedBytes() : 0) + v.pinnedBytes());
             const hip::MemInfo mem_v1 = hip::memInfo();
             engine.attachVision(vc);
             logI("vision: {}: {} layers, {} pinned MiB in host RAM ({:.1f} s; VRAM change {:.1f} MiB); encoder loaded on demand, released "

@@ -258,7 +258,7 @@ PowerShell 中先用 `$env:WHIRL_KV = "q8v"` 設定再啟動程式。**一般使
 | `WHIRL_CODE_OBJECT=FILE` | 開發用：從這個 code object 載入 GPU kernel，取代內建的 |
 | `WHIRL_MOE_FP8=0` | 專家為 MXFP4 的 MoE 模型：專家 prefill 改用 f16 activation，不用 fp8（預設 fp8，較快的路徑——Ornith MXFP4 在 2k token 約 11.7k 對 8.6k tok/s）。只影響 prefill |
 | `WHIRL_MOE_MXW=0` | 專家為 MXFP4 的 MoE 模型：改用通用的 MXFP4 專家 decode kernel，不用整塊（whole-block）kernel（預設整塊）。影響 decode / 驗證 |
-| `WHIRL_EMBD_HOST=1` | token embedding 表放在 pinned 主記憶體，不放 VRAM |
+| `WHIRL_EMBD_HOST=0` | token embedding 表放在 VRAM（預設放 pinned 主記憶體；server 會把它的大小併入 pinned 宣告，讓 Shared Usage 監控扣除） |
 | `WHIRL_TUNE_COLD=1` | 自動調校：每次計時前先清快取 *（診斷）* |
 | `WHIRL_TUNE_MASK=BITS` | 自動調校：候選 GEMM 組態的遮罩 *（診斷）* |
 
@@ -284,7 +284,7 @@ PowerShell 中先用 `$env:WHIRL_KV = "q8v"` 設定再啟動程式。**一般使
 | `WHIRL_MTP_Q4=0` | 保留 MTP 區塊的 Q6_K / Q8_0 矩陣（預設：改用 Q4_K 副本，只用於草稿） |
 | `WHIRL_DRAFT_HEAD=q4` | 草擬頭改用 Q4_K，不用 2-bit |
 | `WHIRL_MTP_FULLHEAD=1` | 草稿使用完整的輸出頭 |
-| `WHIRL_DRAFT_VOCAB=N` | 草擬頭只涵蓋前 N 個詞彙列 |
+| `WHIRL_DRAFT_VOCAB=off\|64k\|48k\|檔案\|N` | MTP 草擬頭只涵蓋依頻率挑出的詞彙子集。預設：內嵌在執行檔中的 64k 子集，只用於有 2-bit 草擬頭、詞表 248,320 的 dense qwen35 模型（輸出不變）。`off` = 完整草擬頭；`48k` = exe 旁的 `draft_vocab\subset_48k.bin`；檔案 = uint32 little-endian token id；N = 前 N 列 |
 | `WHIRL_NGRAM=0` | 不用 n-gram（prompt lookup）草稿 |
 | `WHIRL_NGRAM_MIN=N` | n-gram 草稿的最短比對後綴（預設 3） |
 | `WHIRL_NGRAM_MAX=N` | 每回合最多的 n-gram 草稿數（預設 15） |
