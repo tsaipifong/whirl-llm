@@ -140,6 +140,9 @@
 //            const Int4* tiles, const int* n_tiles): MXFP4 x fp8 grouped GEMM, token
 //            tile 64 / 32, h = f16 output; W2 != null -> gate and up in one launch
 //            (grid.y = 2 * ceil(rows_e / kMoeBm))
+//   gemm8r_moe / gemm8r_moe32 / gemm8r_moeh / gemm8r_moe32h (optional): same arguments,
+//            same outputs; 1-D grid n_tile_slots * nbt, nbt = 2 * ceil(rows_e / kMoeBm)
+//            with W2 else ceil(rows_e / kMoeBm), row block fastest
 //   moe_gather_fp8(x, perm, u8* x8, float* sx, C, K): per-pos fp8 rows + scales
 
 #pragma once
@@ -440,6 +443,7 @@ struct KernelTable {
     // grouped expert GEMM (token tile 64 / 32, f32 / f16 output), fp8 gather.
     F moe_gu_mxw{}, moe_down_mxw{};
     F gemm8_moe{}, gemm8_moe32{}, gemm8_moeh{}, gemm8_moe32h{}, moe_gather_fp8{};
+    F gemm8r_moe{}, gemm8r_moe32{}, gemm8r_moeh{}, gemm8r_moe32h{};  // optional
 
     // Resolves every entry. Kernels the model always needs are required
     // (throws hip::Error naming the missing kernel); the others are optional.

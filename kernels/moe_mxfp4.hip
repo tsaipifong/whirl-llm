@@ -89,22 +89,35 @@ extern "C" __global__ void __launch_bounds__(256)
 // shape (FFN gate rows -> Y1, up rows -> Y2), blockIdx.y in [0, 2 * ceil(rows_e / BM)).
 // Each accumulator sees the WMMA sequence in k of gemm8_impl, independent of the tile's
 // other tokens and of BN (token tile 32 / 64 give the same output).
+// RBF (gemm8r_*): 1-D grid with the row block fastest, so the blocks sharing a tile's X8
+// rows run together (L2 hits instead of re-reads; the down projection has 16 row blocks
+// per tile at Ornith shapes); SKIP: a wave's 16-token fragments at or past the tile's
+// count skip their WMMAs (those accumulators are never stored). Neither changes any
+// stored value.
 // Epilogue: lane holds 8 consecutive rows of one token -> one 16-byte (f16, OH) or two
 // 16-byte (f32) stores per lane and accumulator; the prototype's f32 epilogue wrote 8
 // scattered 4-byte values (the down projection's 7 ms at Ornith 2k shapes). Values are
 // the same expressions, so both epilogues give the same bits.
 // ---------------------------------------------------------------------------
-template <int BM, int BN, int BK, int WAVES_M, bool OH>
+template <int BM, int BN, int BK, int WAVES_M, bool OH, bool RBF = false, bool SKIP = false>
 __device__ void gemm8_moe_impl(const uint8_t *__restrict__ W1, const uint8_t *__restrict__ W2, uint64_t row_bytes,
                                const uint8_t *__restrict__ ref1, const uint8_t *__restrict__ ref2, int rows_e,
                                const uint8_t *__restrict__ X8a, const float *__restrict__ sxa, float *__restrict__ Y1,
                                float *__restrict__ Y2, int ncols, const int4 *__restrict__ tiles,
                                const int *__restrict__ n_tiles) {
     constexpr int NTH = 256;
-    if ((int)blockIdx.x >= *n_tiles) return;
-    const int4 tl = tiles[blockIdx.x];
     const int nby = (rows_e + BM - 1) / BM;
-    int by = blockIdx.y;
+    int tix, by;
+    if (RBF) {
+        const int nbt = W2 != nullptr ? 2 * nby : nby;
+        tix = (int)blockIdx.x / nbt;
+        by = (int)blockIdx.x - tix * nbt;
+    } else {
+        tix = (int)blockIdx.x;
+        by = (int)blockIdx.y;
+    }
+    if (tix >= *n_tiles) return;
+    const int4 tl = tiles[tix];
     const bool second = by >= nby;
     if (second) by -= nby;
     const uint8_t *__restrict__ W = (second ? W2 : W1) + (size_t)tl.x * rows_e * row_bytes;
@@ -212,7 +225,8 @@ __device__ void gemm8_moe_impl(const uint8_t *__restrict__ W1, const uint8_t *__
             for (int i = 0; i < TM; ++i)
 #pragma unroll
                 for (int j = 0; j < TN; ++j)
-                    acc[i][j] = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(a[i], b[j], acc[i][j]);
+                    if (!SKIP || (wn * TN + j) * 16 < n_tok)
+                        acc[i][j] = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(a[i], b[j], acc[i][j]);
         }
     }
 #undef G8M_FETCH
@@ -257,18 +271,24 @@ __device__ void gemm8_moe_impl(const uint8_t *__restrict__ W1, const uint8_t *__
 }
 
 // (BM, BN, BK, WAVES_M): token tile 64 (gemm8_moe*) and 32 (gemm8_moe32*); h = f16 output
-#define GEMM8_MOE_ENTRY(NAME, BM, BN, BK, WM, OH)                                                                \
+#define GEMM8_MOE_ENTRY(NAME, BM, BN, BK, WM, OH, RBF, SKIP)                                                     \
     extern "C" __global__ void __launch_bounds__(256)                                                            \
         NAME(const uint8_t *W1, const uint8_t *W2, uint64_t row_bytes, const uint8_t *ref1, const uint8_t *ref2,  \
              int rows_e, const uint8_t *X8, const float *sx, float *Y1, float *Y2, int ncols, const int4 *tiles,   \
              const int *n_tiles) {                                                                               \
-        gemm8_moe_impl<BM, BN, BK, WM, OH>(W1, W2, row_bytes, ref1, ref2, rows_e, X8, sx, Y1, Y2, ncols, tiles,   \
-                                           n_tiles);                                                             \
+        gemm8_moe_impl<BM, BN, BK, WM, OH, RBF, SKIP>(W1, W2, row_bytes, ref1, ref2, rows_e, X8, sx, Y1, Y2,     \
+                                                      ncols, tiles, n_tiles);                                    \
     }
-GEMM8_MOE_ENTRY(gemm8_moe, 128, 64, 128, 2, false)
-GEMM8_MOE_ENTRY(gemm8_moe32, 128, 32, 128, 4, false)
-GEMM8_MOE_ENTRY(gemm8_moeh, 128, 64, 128, 2, true)
-GEMM8_MOE_ENTRY(gemm8_moe32h, 128, 32, 128, 4, true)
+GEMM8_MOE_ENTRY(gemm8_moe, 128, 64, 128, 2, false, false, false)
+GEMM8_MOE_ENTRY(gemm8_moe32, 128, 32, 128, 4, false, false, false)
+GEMM8_MOE_ENTRY(gemm8_moeh, 128, 64, 128, 2, true, false, false)
+GEMM8_MOE_ENTRY(gemm8_moe32h, 128, 32, 128, 4, true, false, false)
+// row block fastest 1-D grid (n_tile_slots * nbt blocks, nbt = 2 * nby with W2 else nby) and
+// 16-token fragments past the tile's count skipped: same accumulators, same stores
+GEMM8_MOE_ENTRY(gemm8r_moe, 128, 64, 128, 2, false, true, true)
+GEMM8_MOE_ENTRY(gemm8r_moe32, 128, 32, 128, 4, false, true, true)
+GEMM8_MOE_ENTRY(gemm8r_moeh, 128, 64, 128, 2, true, true, true)
+GEMM8_MOE_ENTRY(gemm8r_moe32h, 128, 32, 128, 4, true, true, true)
 #undef GEMM8_MOE_ENTRY
 
 // x8[pos][c] = e4m3(x[perm[pos] / K][c] * 448 / amax), sx[pos] = amax / 448 (per pos = per

@@ -357,6 +357,10 @@ KernelTable KernelTable::load(const hip::Module& m, KvFormat kv) {
         k.gemm8_moe32 = L.opt("gemm8_moe32");
         k.gemm8_moeh = L.opt("gemm8_moeh");
         k.gemm8_moe32h = L.opt("gemm8_moe32h");
+        k.gemm8r_moe = L.opt("gemm8r_moe");
+        k.gemm8r_moe32 = L.opt("gemm8r_moe32");
+        k.gemm8r_moeh = L.opt("gemm8r_moeh");
+        k.gemm8r_moe32h = L.opt("gemm8r_moe32h");
         k.moe_gather_fp8 = L.opt("moe_gather_fp8");
         for (int ci = 0; ci < static_cast<int>(kGemm8Cfgs.size()); ++ci) {
             k.gemm8[ci] = L.opt("gemm8_c" + std::to_string(ci));

@@ -7,7 +7,9 @@
 //     gemm8_moe32 == gemm8_moe per (token, slot) row and a 40-token batch == the same rows
 //     of the 200-token batch (bitwise); gemm8_moeh / gemm8_moe32h fused gate + up within
 //     one f16 rounding of the f32 results; down projection (silu_mul_x8h activations) vs
-//     CPU and tile 32 == 64; the generic f16 gemm_moe_mxfp4 vs CPU and tile 32 == 64.
+//     CPU and tile 32 == 64; gemm8r_* (row-block-fast grid) == gemm8_moe* bitwise (gate,
+//     fused gate + up, down; tiles 64 and 32); the generic f16 gemm_moe_mxfp4 vs CPU and
+//     tile 32 == 64.
 //   Code objects without the whole-block / fp8 kernels (gfx1151) run the generic parts:
 //   the 1-token == 5-token checks then cover moe_gu_mxfp4 / moe_down_mxfp4.
 // SPDX-License-Identifier: Apache-2.0
@@ -256,6 +258,8 @@ void testMoeMx(Ctx& c) {
             std::vector<std::uint8_t> x8;
             std::vector<float> sx, yg, yu;            // f32 gate / up (separate launches)
             std::vector<std::uint16_t> hg, hu;        // fused gate + up, f16 out
+            std::vector<float> ryg;                   // gemm8r_* (row-block-fast grid), when present
+            std::vector<std::uint16_t> rhg, rhu;
         };
         auto run = [&](int np, int bn, Run& out) {
             Buf perm(static_cast<std::size_t>(np) * 4), inv(static_cast<std::size_t>(np) * 4);
@@ -284,7 +288,21 @@ void testMoeMx(Ctx& c) {
                         DevPtr{0}, F, x8.p(), sx.p(), yu.p(), DevPtr{0}, E, tiles.p(), nt.p());
             hip::launch(f16, {static_cast<unsigned>(max_tiles), 2 * nby, 1}, {256, 1, 1}, 0, c.s, dgate.p(), dup.p(), mw.gate.row_bytes, rgate.p(),
                         rup.p(), F, x8.p(), sx.p(), hg.p(), hu.p(), E, tiles.p(), nt.p());
+            const bool rbf = c.k.gemm8r_moe && c.k.gemm8r_moe32 && c.k.gemm8r_moeh && c.k.gemm8r_moe32h;
+            Buf ryg(static_cast<std::size_t>(np) * F * 4), rhg(static_cast<std::size_t>(np) * F * 2), rhu(static_cast<std::size_t>(np) * F * 2);
+            if (rbf) {
+                for (Buf* b : {&ryg, &rhg, &rhu}) b->fill(0xff);
+                hip::launch(bn == 32 ? c.k.gemm8r_moe32 : c.k.gemm8r_moe, {static_cast<unsigned>(max_tiles) * nby, 1, 1}, {256, 1, 1}, 0, c.s, dgate.p(),
+                            DevPtr{0}, mw.gate.row_bytes, rgate.p(), DevPtr{0}, F, x8.p(), sx.p(), ryg.p(), DevPtr{0}, E, tiles.p(), nt.p());
+                hip::launch(bn == 32 ? c.k.gemm8r_moe32h : c.k.gemm8r_moeh, {static_cast<unsigned>(max_tiles) * 2 * nby, 1, 1}, {256, 1, 1}, 0, c.s,
+                            dgate.p(), dup.p(), mw.gate.row_bytes, rgate.p(), rup.p(), F, x8.p(), sx.p(), rhg.p(), rhu.p(), E, tiles.p(), nt.p());
+            }
             c.sync();
+            if (rbf) {
+                out.ryg = ryg.down<float>(static_cast<std::size_t>(np) * F);
+                out.rhg = rhg.down<std::uint16_t>(static_cast<std::size_t>(np) * F);
+                out.rhu = rhu.down<std::uint16_t>(static_cast<std::size_t>(np) * F);
+            }
             out.perm = perm.down<int>(static_cast<std::size_t>(np));
             out.inv = inv.down<int>(static_cast<std::size_t>(np));
             out.ntiles = nt.down<int>(1)[0];
@@ -353,6 +371,18 @@ void testMoeMx(Ctx& c) {
             c.rep.add(invariant("gemm8_moe32 == gemm8_moe per (token, slot) row (gate, up)", 2 * static_cast<std::size_t>(pairs), bad));
             c.rep.add(invariant("gemm8_moe32h == gemm8_moeh per (token, slot) row (fused gate + up)", 2 * static_cast<std::size_t>(pairs), badh));
         }
+        // row-block-fast grid (gemm8r_*) == tile-major gemm8_moe*, all positions, bitwise
+        if (!r64.ryg.empty()) {
+            for (const Run* rr : {&r64, &r32}) {
+                const char* tag = rr == &r64 ? "64" : "32";
+                c.rep.add(cmpExact(std::string("gemm8r_moe") + (rr == &r64 ? "" : "32") + " == gemm8_moe" + (rr == &r64 ? "" : "32") + " (gate, f32, tile " + tag + ")",
+                                   rr->ryg, rr->yg, Kind::invariant));
+                std::size_t bad = 0;
+                for (std::size_t i = 0; i < rr->hg.size(); ++i) bad += rr->rhg[i] != rr->hg[i] || rr->rhu[i] != rr->hu[i];
+                c.rep.add(invariant(std::string("gemm8r_moe") + (rr == &r64 ? "" : "32") + "h == gemm8_moe" + (rr == &r64 ? "" : "32") + "h (fused gate + up, f16, tile " + tag + ")",
+                                    2 * rr->hg.size(), bad));
+            }
+        }
         // the first 40 tokens alone (tile 32) == the same rows of the 200-token batch
         if (fp8) {
             const int np40 = 40 * K;
@@ -391,8 +421,19 @@ void testMoeMx(Ctx& c) {
                 y.fill(0xff);
                 hip::launch(bn == 32 ? c.k.gemm8_moe32 : c.k.gemm8_moe, {static_cast<unsigned>(rr.tiles.size()), cdiv(E, wk::kMoeBm), 1}, {256, 1, 1}, 0,
                             c.s, ddown.p(), DevPtr{0}, mw.down.row_bytes, rdown.p(), DevPtr{0}, E, x8.p(), sx.p(), y.p(), DevPtr{0}, F, tiles.p(), nt.p());
+                Buf yr(static_cast<std::size_t>(pairs) * E * 4);
+                const bool rbf = c.k.gemm8r_moe && c.k.gemm8r_moe32;
+                if (rbf) {
+                    yr.fill(0xff);
+                    hip::launch(bn == 32 ? c.k.gemm8r_moe32 : c.k.gemm8r_moe, {static_cast<unsigned>(rr.tiles.size()) * cdiv(E, wk::kMoeBm), 1, 1}, {256, 1, 1},
+                                0, c.s, ddown.p(), DevPtr{0}, mw.down.row_bytes, rdown.p(), DevPtr{0}, E, x8.p(), sx.p(), yr.p(), DevPtr{0}, F, tiles.p(), nt.p());
+                }
                 c.sync();
                 const auto yy = y.down<float>(static_cast<std::size_t>(pairs) * E);
+                if (rbf)
+                    c.rep.add(cmpExact(std::string("gemm8r_moe") + (bn == 32 ? "32" : "") + " == gemm8_moe" + (bn == 32 ? "32" : "") + " (down projection, tile " +
+                                           std::to_string(bn) + ")",
+                                       yr.down<float>(static_cast<std::size_t>(pairs) * E), yy, Kind::invariant));
                 if (vi == 0) {
                     a8 = x8.down<std::uint8_t>(static_cast<std::size_t>(pairs) * F);
                     asx = sx.down<float>(static_cast<std::size_t>(pairs));
