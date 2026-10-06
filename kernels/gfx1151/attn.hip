@@ -650,19 +650,46 @@ extern "C" __global__ void __launch_bounds__(128)
 
 // ---------------------------------------------------------------------------
 // Prefill attention on WMMA (flash-attention style), causal, head_dim 256.
-// Block = 64 queries (4 waves x 16) of one head. Per 32-key block:
+// Block = 128 queries (8 waves x 16) of one head. Per 32-key block:
 //   S^T = K Q^T   (A = K rows from LDS, B = Q^T fragments kept in registers)
 //   online softmax per query column (lane % 16), P^T stays in registers and
 //   is directly the B operand of
 //   O^T += V^T P^T (A = V^T rows from LDS, stored transposed).
-// Output gated by sigmoid(gate) like attn_decode. K/V cache is f32.
+// Output gated by sigmoid(gate) like attn_decode. K/V cache is f16 (or q8).
+// Tile loads use all 256 threads: K as 4 x 16-byte row pieces per thread; V as
+// 4 dims x 8 keys per thread (8-byte loads), transposed in registers and stored
+// with 8-byte writes into V^T rows whose 16-byte chunks are XOR-swizzled by row
+// bits 3..4 (fa_vt_off): the transposed stores are ~4-way instead of ~16-way
+// bank conflicted and the fragment reads stay conflict-free. Keys past the
+// block's last key are zero, as before (gfx11 WMMA results depend on the V
+// values where P = 0, so the zero-fill boundary is part of the output bits).
 // ---------------------------------------------------------------------------
 #define FA_Q 128
 #define FA_K 32
 #define FA_D 256
+#define FA_VS 40  // V^T row stride (halves)
 
+typedef _Float16 fa_h4 __attribute__((ext_vector_type(4)));
+typedef char fa_q4 __attribute__((ext_vector_type(4)));
+template <bool Q8> __device__ __forceinline__ fa_h4 kv_ld4(const void *base, const _Float16 *sc, size_t e) {
+    if constexpr (Q8) {
+        const fa_q4 q = *(const fa_q4 *)((const int8_t *)base + e);
+        const _Float16 s = sc[e >> 5];
+        fa_h4 h;
+#pragma unroll
+        for (int i = 0; i < 4; ++i) h[i] = (_Float16)q[i] * s;
+        return h;
+    } else {
+        return *(const fa_h4 *)((const _Float16 *)base + e);
+    }
+}
+// V^T element (dim row, permuted key position h)
+__device__ __forceinline__ int fa_vt_off(int row, int h) { return row * FA_VS + ((((h >> 3) ^ (row >> 3)) & 3) << 3) + (h & 7); }
+
+// q8 KV: the previous tile loader (the 256-thread loader below spills with the
+// q8 dequantization); same arithmetic, same bits.
 template <int MODE, bool Q8>
-__device__ __forceinline__ void attn_prefill_impl(const float *q, const KvArgs &kv, float *out, int n_head, int n_kv,
+__device__ __forceinline__ void attn_prefill_impl_q8kv(const float *q, const KvArgs &kv, float *out, int n_head, int n_kv,
                       int q_stride, const int *pos, int n_tok, float scale, int h0) {
     const int tb = kv.tab0;  // one sequence per launch
     __shared__ _Float16 Ks[FA_K][FA_D + 8];
@@ -810,6 +837,187 @@ __device__ __forceinline__ void attn_prefill_impl(const float *q, const KvArgs &
 #pragma unroll
             for (int dt = 0; dt < FA_D / 16; ++dt) {
                 const half16 a = ld_frag16(&Vt[dt * 16 + lane % 16][kt * 16]);
+                if (MODE != 3) o[dt] = WMMA16(a, pb, o[dt]);
+                // pin: one V fragment in flight at a time (else all 16 are
+                // preloaded and the kernel spills)
+                asm volatile("" : "+v"(o[dt]));
+            }
+        }
+    }
+    if (my_q >= n_tok) return;
+    const float inv = 1.f / l;
+    const float *gate = q + ((size_t)my_q * n_head + h) * q_stride + FA_D;
+    float *orow = out + (size_t)my_q * n_head * FA_D + (size_t)h * FA_D;
+#pragma unroll
+    for (int dt = 0; dt < FA_D / 16; ++dt)
+#pragma unroll
+        for (int v = 0; v < 8; ++v) {
+            const int d = dt * 16 + CROW(lane, v);
+            orow[d] = o[dt][v] * inv / (1.f + __expf(-gate[d]));
+        }
+}
+template <int MODE, bool Q8>
+__device__ __forceinline__ void attn_prefill_impl(const float *q, const KvArgs &kv, float *out, int n_head, int n_kv,
+                      int q_stride, const int *pos, int n_tok, float scale, int h0) {
+    if constexpr (Q8) {
+        attn_prefill_impl_q8kv<MODE, Q8>(q, kv, out, n_head, n_kv, q_stride, pos, n_tok, scale, h0);
+        return;
+    }
+    const int tb = kv.tab0;  // one sequence per launch
+    __shared__ _Float16 Ks[FA_K][FA_D + 8];
+    __shared__ _Float16 Vt[FA_D * FA_VS];
+    const int lane = threadIdx.x % WARP, wid = threadIdx.x / WARP, tid = threadIdx.x;
+    // h0: first head of this launch (the host splits long prefills over head ranges)
+    const int h = blockIdx.y + h0, kvh = h / (n_head / n_kv);
+    const int q0 = blockIdx.x * FA_Q;
+    const int pos0 = pos[0];
+    const int my_q = q0 + wid * 16 + lane % 16;       // this lane's query column
+    const int my_qc = min(my_q, n_tok - 1);            // clamp for loads
+    const int my_pos = pos0 + my_qc;
+
+    // Q^T fragments (B operand): column = query, k = dims 16s + 8*(lane/16) ..
+    half8 qf[FA_D / 16];
+    {
+        const float *qr = q + ((size_t)my_qc * n_head + h) * q_stride;
+#pragma unroll
+        for (int st = 0; st < FA_D / 16; ++st) {
+            const float4 a = *(const float4 *)(qr + 16 * st + 8 * (lane / 16));
+            const float4 b = *(const float4 *)(qr + 16 * st + 8 * (lane / 16) + 4);
+            qf[st] = (half8){(_Float16)a.x, (_Float16)a.y, (_Float16)a.z, (_Float16)a.w,
+                             (_Float16)b.x, (_Float16)b.y, (_Float16)b.z, (_Float16)b.w};
+        }
+    }
+    float8 o[FA_D / 16];
+#pragma unroll
+    for (int dt = 0; dt < FA_D / 16; ++dt) o[dt] = (float8){0, 0, 0, 0, 0, 0, 0, 0};
+    float m = -INFINITY, l = 0.f;
+
+    const int last_q = min(q0 + FA_Q, n_tok) - 1;
+    const int n_keys = pos0 + last_q + 1;
+    // per-thread load / store geometry (loop invariant and kept small: the kernel
+    // sits at 256 VGPRs, and per-element 64-bit addresses made it spill)
+    const int vd4 = (tid % 64) * 4, vkb = tid / 64;                      // V: dims vd4 .. +3 of keys vkb*8 .. +7
+    const int vtb = (vkb / 2) * 16 + (vkb % 2) * 4;                      // permuted position of its even keys
+    const int vsA = fa_vt_off(vd4, vtb), vsB = fa_vt_off(vd4, vtb + 8);  // rows vd4 + c share row >> 3
+    const int rstep = n_kv * FA_D;
+    const int kro = kvh * FA_D + (tid % 32) * 8, vro = kvh * FA_D + vd4;
+    half8 kr8[4];
+    fa_h4 vr[8];
+    // keys >= n_keys: read the last key's row (same page), store zeros
+    auto loadK = [&](int k0) {
+        const int dl = kv_delta(kv, tb, k0);  // FA_K-key tiles never straddle a page
+#pragma unroll
+        for (int e = 0; e < 4; ++e) {
+            const int key = k0 + tid / 32 + 8 * e;
+            const int kc = min(key, n_keys - 1);
+            const half8 x = kv_ld8<Q8>(kv.k, kv.ks, (size_t)(unsigned)(kc + dl) * rstep + kro);
+            const half8 z = {0, 0, 0, 0, 0, 0, 0, 0};
+            kr8[e] = key < n_keys ? x : z;
+        }
+    };
+    auto loadV = [&](int k0) {
+        const int dl = kv_delta(kv, tb, k0);
+#pragma unroll
+        for (int r = 0; r < 8; ++r) {
+            const int key = k0 + vkb * 8 + r;
+            const int kc = min(key, n_keys - 1);
+            const fa_h4 x = kv_ld4<Q8>(kv.v, kv.vs, (size_t)(unsigned)(kc + dl) * rstep + vro);
+            const fa_h4 z = {0, 0, 0, 0};
+            vr[r] = key < n_keys ? x : z;
+        }
+    };
+    for (int k0 = 0; k0 < n_keys; k0 += FA_K) {
+        __syncthreads();
+        if (MODE != 1 || k0 == 0) {
+            loadK(k0);
+            loadV(k0);
+#pragma unroll
+            for (int e = 0; e < 4; ++e) {
+                const int i = tid + e * 256;
+                *(half8 *)&Ks[i / 32][(i % 32) * 8] = kr8[e];
+            }
+            // keys vkb*8 + r: tile vkb / 2, j = (vkb % 2) * 8 + r ->
+            // position (r % 2) * 8 + (vkb % 2) * 4 + r / 2 within the tile
+#pragma unroll
+            for (int c = 0; c < 4; ++c) {
+                fa_h4 ev, od;
+#pragma unroll
+                for (int r = 0; r < 4; ++r) {
+                    ev[r] = vr[2 * r][c];
+                    od[r] = vr[2 * r + 1][c];
+                }
+                *(fa_h4 *)&Vt[vsA + c * FA_VS] = ev;
+                *(fa_h4 *)&Vt[vsB + c * FA_VS] = od;
+            }
+        }
+        __syncthreads();
+        // S^T tiles: rows = keys kt*16 + 8*(lane/16) + v, column = my query
+        // gfx11: Q^T keeps only this half's 8 dims per st in registers; the
+        // full 16-dim B fragment is rebuilt with one cross-half exchange.
+        float8 sc[FA_K / 16];
+#pragma unroll
+        for (int kt = 0; kt < FA_K / 16; ++kt) sc[kt] = (float8){0, 0, 0, 0, 0, 0, 0, 0};
+#pragma unroll
+        for (int st = 0; st < FA_D / 16; ++st) {
+            const half16 qb = join_halves(qf[st], lane);
+#pragma unroll
+            for (int kt = 0; kt < FA_K / 16; ++kt) {
+                const half16 a = ld_frag16(&Ks[kt * 16 + lane % 16][16 * st]);
+                sc[kt] = WMMA16(a, qb, sc[kt]);
+            }
+        }
+        // causal mask + online softmax (per lane = per query; partner lane ^16)
+        float mx = -INFINITY;
+#pragma unroll
+        for (int kt = 0; kt < FA_K / 16; ++kt)
+#pragma unroll
+            for (int v = 0; v < 8; ++v) {
+                const int key = k0 + kt * 16 + CROW(lane, v);
+                const float x = (key <= my_pos) ? sc[kt][v] * scale : -INFINITY;
+                sc[kt][v] = x;
+                mx = fmaxf(mx, x);
+            }
+        mx = fmaxf(mx, __shfl_xor(mx, 16, WARP));
+        const float m_new = fmaxf(m, mx);
+        const float alpha = (m == -INFINITY) ? 0.f : __expf(m - m_new);
+        float rs = 0.f;
+        half8 pt[FA_K / 16];
+#pragma unroll
+        for (int kt = 0; kt < FA_K / 16; ++kt)
+#pragma unroll
+            for (int v = 0; v < 8; ++v) {
+                const float p = (sc[kt][v] == -INFINITY) ? 0.f : __expf(sc[kt][v] - m_new);
+                rs += p;
+                pt[kt][v] = (_Float16)p;
+            }
+        rs += __shfl_xor(rs, 16, WARP);
+        l = l * alpha + rs;
+        m = m_new;
+        if (MODE != 2) {
+#pragma unroll
+        for (int dt = 0; dt < FA_D / 16; ++dt)
+#pragma unroll
+            for (int v = 0; v < 8; ++v) o[dt][v] *= alpha;
+        }
+        // O^T += V^T P^T. This lane holds keys 2v + (lane / 16) of P^T; the
+        // B fragment takes k = [even keys; odd keys], matching the permuted
+        // key order Vt is stored in.
+        // one key tile's B fragment live at a time (register pressure: the
+        // kernel spilled); per dt the accumulation order is unchanged
+        // (kt = 0 then 1), so results are identical
+        // V^T fragment reads, row dt*16 + l (l = lane % 16): chunk = (c ^ 2 (dt & 1)) ^ (l / 8)
+        const int s0 = (lane % 16) >> 3;
+        const _Float16 *vlo = Vt + (lane % 16) * FA_VS + s0 * 8;
+        const _Float16 *vhi = Vt + (lane % 16) * FA_VS + 8 - s0 * 8;
+#pragma unroll
+        for (int kt = 0; kt < FA_K / 16; ++kt) {
+            const half16 pb = join_halves(pt[kt], lane);
+#pragma unroll
+            for (int dt = 0; dt < FA_D / 16; ++dt) {
+                const int C = (2 * kt) ^ (2 * (dt & 1));
+                const half8 lo = *(const half8 *)(vlo + dt * 16 * FA_VS + C * 8);
+                const half8 hi = *(const half8 *)(vhi + dt * 16 * FA_VS + C * 8);
+                const half16 a = __builtin_shufflevector(lo, hi, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
                 if (MODE != 3) o[dt] = WMMA16(a, pb, o[dt]);
                 // pin: one V fragment in flight at a time (else all 16 are
                 // preloaded and the kernel spills)
