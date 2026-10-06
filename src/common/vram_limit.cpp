@@ -164,7 +164,7 @@ CardDefaults cardDefaults(const CardInput& in) {
         d.parallel = 1;
         d.parallel_auto = true;
     }
-    d.prefer_q8v = d.small && in.kv_auto;
+    d.prefer_q8v = d.small && in.kv_auto && in.kv_quant_ok;
     std::uint64_t mb = 0;
     if (in.headroom_mb_env) mb = *in.headroom_mb_env;
     else if (d.small && !in.reserve_explicit) mb = small_card_headroom_mb;
@@ -177,7 +177,9 @@ CardDefaults cardDefaults(const CardInput& in) {
     if (d.small) {
         const std::string par = d.parallel_auto ? std::format("--parallel 1 (default {} on cards >= 20 GiB; pass --parallel N for more)", in.parallel_default)
                                                 : std::format("--parallel {} (given)", d.parallel);
-        const std::string kv = in.kv_auto ? "KV auto prefers q8v (K f16, V int8; WHIRL_KV=f16 forces f16)" : "KV format as set by WHIRL_KV";
+        const std::string kv = !in.kv_auto ? "KV format as set by WHIRL_KV"
+                               : in.kv_quant_ok ? "KV auto prefers q8v (K f16, V int8; WHIRL_KV=f16 forces f16)"
+                                                : "precise mode: f16 KV (--balance prefers q8v KV here: a longer context)";
         d.note = std::format("small card ({:.1f} GiB < 20 GiB, likely also driving the desktop): {}, {}, {}", gib, par, kv, hr);
     } else if (!hr.empty()) {
         d.note = hr;

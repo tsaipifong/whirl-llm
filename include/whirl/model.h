@@ -28,6 +28,7 @@
 #include "whirl/gguf.h"
 #include "whirl/hip.h"
 #include "whirl/kernels_abi.h"
+#include "whirl/numerics.h"
 #include "whirl/vismap.h"
 
 #include <array>
@@ -275,8 +276,13 @@ struct LoadOptions {
     // Keep token_embd in pinned host memory instead of VRAM.
     bool embd_on_host = false;
     KvMode kv_mode = KvMode::automatic;
-    // MXFP4 prefill with fp8 activations (lossy; WHIRL_FP8=0 keeps f16).
-    bool fp8_default = true;
+    // Numerics mode (whirl/numerics.h): precise (default) / balance / fast and the lossy items.
+    // Precise: no fp8 / MoE fp8 / f16-WMMA DeltaNet / h16, f16 KV (WHIRL_KV still honoured).
+    whirl::numerics::Request numerics;
+    // CLI KV pool (max_ctx_req > 0): the context was given explicitly (precise f16 KV that does not
+    // fit then refuses instead of shrinking), and the smallest context a shrink may leave.
+    bool ctx_explicit = false;
+    std::uint32_t min_ctx = 0;
     // Optional external code object file (development: WHIRL_CODE_OBJECT).
     std::string code_object;
 };
@@ -463,6 +469,12 @@ public:
     std::uint8_t fp8_mask = 7;
     std::uint8_t mm_class = 1;
     std::uint64_t mx_fold_lossy = 0;
+    // numerics mode: the request (LoadOptions), the resolved plan (loadOrTune), load-time notes
+    // (precise KV shrink) for the caller's log
+    whirl::numerics::Request num_req;
+    whirl::numerics::Plan num_plan;
+    std::string load_note;
+    bool kvQuantAuto() const { return num_req.has(whirl::numerics::Item::kvq8); }
     DevPtr w16 = 0;
     DevPtr gc_w = 0, gc_u = 0, gc_m = 0, gc_g = 0;
     std::uint32_t fwd_pos0 = 0;

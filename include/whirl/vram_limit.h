@@ -121,6 +121,7 @@ struct CardInput {
     std::optional<std::uint32_t> parallel_arg;  // --parallel / -np when given
     std::uint32_t parallel_default = 4;
     bool kv_auto = true;              // WHIRL_KV unset / auto (and a dense model)
+    bool kv_quant_ok = true;          // the numerics mode lets KV auto pick int8 (balance / fast; precise: false)
     std::optional<std::uint32_t> headroom_mb_env;  // WHIRL_VRAM_HEADROOM_MB when set
     bool reserve_explicit = false;    // WHIRL_POOL_RESERVE_MB set
 };

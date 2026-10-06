@@ -448,7 +448,9 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
     }
     m.k = loadKernels(m.module, m.kv_q8, m.kv_rot, m.kv_kf16);
     // MXFP4 routed experts: process-level switches (as WHIRL_KV), read by CLI and server alike
-    m.moe_fp8 = envFlag("MOE_FP8", true);
+    m.num_req = opt.numerics;
+    // MoE expert fp8: a balance item (WHIRL_MOE_FP8 overrides the mode)
+    m.moe_fp8 = envFlag("MOE_FP8", opt.numerics.has(numerics::Item::moefp8));
     m.moe_mxw = envFlag("MOE_MXW", true);
     m.moe_rbf = envFlag("MOE_RBF", true);
     m.layers.resize(cfg.n_layer);
@@ -624,7 +626,7 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
     // GDN prefill x16b (fp8 rows + f16 rows from one norm) must fit in x16 for any batch > 16
     if (B > 16 && m.x16bOff() + B * cfg.n_embd * 2 > m.x16_bytes) throw ModelError("X16bOverflow");
     m.sx8 = m.alloc(B * 4);
-    m.fp8_prefill = opt.fp8_default;
+    m.fp8_prefill = opt.numerics.has(numerics::Item::fp8);  // balance item (WHIRL_FP8 overrides in loadOrTune)
     if (cfg.moe) {
         const u64 Kx = cfg.n_expert_used;
         const u64 F = cfg.n_ff_exp;
@@ -656,7 +658,22 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
     // snapshot sets for 8 drafts, the 2-bit draft head) plus a 768 MiB margin,
     // else q8v, else q8h (formats the code object lacks are skipped; q8 last).
     if (max_ctx_req > 0) {
-        if (m.kvAutoDense()) {
+        if (m.kvAutoDense() && !m.kvQuantAuto()) {
+            // precise: f16 KV always; shrink the context when it was not given, else refuse
+            const hip::MemInfo mi = hip::memInfo();
+            u64 n_gdn = 0;
+            for (u32 i = 0; i < cfg.n_layer; ++i)
+                if (m.ssm_state[i] != 0) n_gdn += 1;
+            const u64 later = 8 * n_gdn * (m.convBytes() + m.ssmBytes()) + static_cast<u64>(cfg.n_vocab) * cfg.n_embd * 5 / 16 + (768ull << 20);
+            const numerics::CtxFit cf =
+                numerics::cliCtxFit(max_ctx_req, opt.ctx_explicit, opt.min_ctx, mi.free, later, m.kvBytesPerTokenFmt(false, false), kv_page);
+            if (cf.refuse) throw ModelError("KvF16DoesNotFit", cf.msg);
+            if (cf.shrunk) {
+                max_ctx_req = cf.ctx;
+                m.max_ctx = cf.ctx;
+                m.load_note = "warning: " + cf.msg + "\n";
+            }
+        } else if (m.kvAutoDense()) {
             const hip::MemInfo mi = hip::memInfo();
             u64 n_gdn = 0;
             for (u32 i = 0; i < cfg.n_layer; ++i)

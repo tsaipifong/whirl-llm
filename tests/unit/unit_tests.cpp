@@ -7,10 +7,13 @@
 #include "whirl/json.h"
 #include "whirl/tokenizer.h"
 #include "whirl/unicode.h"
+#include "whirl/numerics.h"
 #include "whirl/vram_limit.h"
 
 #include <cstdio>
 #include <cstring>
+#include <optional>
+#include <stdexcept>
 #include <functional>
 #include <string>
 #include <vector>
@@ -669,6 +672,161 @@ void testCardDefaults() {
     }
 }
 
+
+// numerics modes: parsing, capability table, overrides, precise KV decisions (whirl/numerics.h)
+void testNumerics() {
+    namespace nu = whirl::numerics;
+    using nu::Item;
+    using nu::Mode;
+    // parsing and resolution
+    CHECK(nu::resolve(std::nullopt, std::nullopt).mode == Mode::precise);
+    CHECK(nu::resolve(std::nullopt, std::string("")).mode == Mode::precise);
+    CHECK(nu::resolve(std::nullopt, std::string("balance")).mode == Mode::balance);
+    CHECK(nu::resolve(std::nullopt, std::string("Balanced")).mode == Mode::balance);
+    CHECK(nu::resolve(std::string("precise"), std::string("fast")).mode == Mode::precise);  // command line first
+    {
+        const nu::Request r = nu::parseMode("balance", "t");
+        CHECK(r.items == nu::balance_items && !r.custom && r.has(Item::fp8) && r.has(Item::kvq8) && !r.has(Item::kvq4));
+        const nu::Request f = nu::parseMode("fast", "t");
+        CHECK(f.items == (nu::balance_items | nu::fast_only_items));
+        const nu::Request c = nu::parseMode("balance:fp8, kvq8", "t");
+        CHECK(c.custom && c.items == (nu::bit(Item::fp8) | nu::bit(Item::kvq8)));
+        const nu::Request c2 = nu::parseMode("fast:kvq4", "t");
+        CHECK(c2.mode == Mode::fast && c2.items == nu::bit(Item::kvq4));
+        CHECK(nu::parseMode("precise", "t").items == 0);
+    }
+    auto throws = [](const char* s) {
+        try {
+            (void)nu::parseMode(s, "t");
+        } catch (const std::invalid_argument&) {
+            return true;
+        }
+        return false;
+    };
+    CHECK(throws("turbo"));
+    CHECK(throws("balance:fp9"));
+    CHECK(throws("precise:fp8"));
+    CHECK(throws("balance:kvq4"));  // a fast-only item in balance
+    // command-line flags
+    {
+        std::string sp;
+        bool nx = false;
+        CHECK(nu::modeFlag("--precise", &sp, &nx) && sp == "precise" && !nx);
+        CHECK(nu::modeFlag("--balance", &sp, &nx) && sp == "balance");
+        CHECK(nu::modeFlag("--balance=fp8,h16", &sp, &nx) && sp == "balance:fp8,h16");
+        CHECK(nu::modeFlag("--fast", &sp, &nx) && sp == "fast");
+        CHECK(nu::modeFlag("--mode", &sp, &nx) && nx);
+        CHECK(nu::modeFlag("--mode=balanced", &sp, &nx) && sp == "balanced" && !nx);
+        CHECK(!nu::modeFlag("--fastest", &sp, &nx) && !nu::modeFlag("--ctx", &sp, &nx));
+        CHECK(nu::parseMode(sp, "t").mode == Mode::balance);
+    }
+    // capability table: R9700 (gfx1201) MXFP4 dense / MXFP4 MoE / Q4_K_M dense, 8060S
+    nu::Target r97;
+    r97.k_gemm8 = r97.k_gemm8_moe = r97.k_gdn_wmma = r97.k_kv_q8v = r97.k_kv_q8h = true;
+    nu::Target swift = r97;
+    swift.has_mxfp4 = true;
+    nu::Target ornith = swift;
+    ornith.moe = ornith.moe_mxfp4 = true;
+    nu::Target q4 = r97;
+    nu::Target s8060;
+    s8060.gfx1151 = true;
+    s8060.has_mxfp4 = true;
+    const nu::Request bal = nu::parseMode("balance", "t"), pre{}, fast = nu::parseMode("fast", "t");
+    {
+        const nu::Plan p = nu::plan(pre, swift);
+        for (const nu::ItemState& st : p.items) CHECK(!st.enabled && !st.requested);
+        CHECK(nu::logLine(p).find("numerics: precise - f16/f32") == 0);
+        CHECK(nu::logLine(p).find("q8dec") != std::string::npos && nu::logLine(p).find("pending P-8") != std::string::npos);
+        CHECK(nu::modeLabel(p) == "precise");
+    }
+    {
+        const nu::Plan p = nu::plan(bal, swift);
+        CHECK(p.on(Item::fp8) && !p.on(Item::moefp8) && p.on(Item::gdnwmma) && p.on(Item::h16) && p.on(Item::kvq8));
+        CHECK(p.items[static_cast<std::size_t>(Item::moefp8)].note == "dense model");
+        const nu::Plan po = nu::plan(bal, ornith);
+        CHECK(po.on(Item::fp8) && po.on(Item::moefp8) && po.on(Item::gdnwmma) && po.on(Item::h16) && !po.on(Item::kvq8));
+        const nu::Plan pq = nu::plan(bal, q4);
+        CHECK(!pq.on(Item::fp8) && !pq.on(Item::gdnwmma) && !pq.on(Item::h16) && pq.on(Item::kvq8));
+        CHECK(pq.items[static_cast<std::size_t>(Item::fp8)].note.find("no MXFP4") != std::string::npos);
+        const nu::Plan p8 = nu::plan(bal, s8060);  // never an error: skipped with a reason
+        CHECK(!p8.on(Item::fp8) && !p8.on(Item::moefp8) && !p8.on(Item::gdnwmma) && p8.on(Item::h16) && p8.on(Item::kvq8));
+        CHECK(p8.items[static_cast<std::size_t>(Item::fp8)].note.find("gfx1151") != std::string::npos);
+        CHECK(p8.items[static_cast<std::size_t>(Item::kvq8)].note == "auto: q8 when f16 does not fit");
+        const std::string l = nu::logLine(p8);
+        CHECK(l.find("numerics: balance - enabled: h16") == 0 && l.find("skipped: fp8 (") != std::string::npos);
+    }
+    {
+        const nu::Plan p = nu::plan(fast, swift);  // fast items: not implemented, skipped
+        CHECK(p.on(Item::fp8) && !p.on(Item::kvq4) && !p.on(Item::a4));
+        CHECK(p.items[static_cast<std::size_t>(Item::kvq4)].note.find("not yet implemented") != std::string::npos);
+        CHECK(nu::logLine(p).find("fast runs as balance") != std::string::npos);
+    }
+    // per-item environment overrides
+    {
+        nu::Plan p = nu::plan(pre, swift);
+        nu::applyOverride(p, Item::fp8, "FP8", "1", true, true);
+        CHECK(p.on(Item::fp8) && p.lossy_override && p.overrides.size() == 1 && nu::modeLabel(p) == "precise+overrides");
+        CHECK(p.overrides[0].find("lossy, user-requested") != std::string::npos);
+        nu::Plan pq = nu::plan(pre, q4);
+        nu::applyOverride(pq, Item::fp8, "FP8", "1", true, false);  // not applicable: no change
+        CHECK(!pq.on(Item::fp8) && pq.overrides.empty() && !pq.lossy_override);
+        nu::Plan pb = nu::plan(bal, swift);
+        nu::applyOverride(pb, Item::fp8, "FP8", "0", false, true);
+        CHECK(!pb.on(Item::fp8) && !pb.lossy_override && pb.overrides.size() == 1 && nu::modeLabel(pb) == "balance");
+        nu::applyOverride(pb, Item::gdnwmma, "GDN_WMMA", "1", true, true);  // already on: nothing
+        CHECK(pb.overrides.size() == 1);
+        const std::string j = nu::propsJson(pb, "q8v");
+        CHECK(j.find("\"mode\":\"balance\"") != std::string::npos && j.find("\"kv\":\"q8v\"") != std::string::npos);
+        CHECK(j.find("\"enabled\":[\"gdnwmma\",\"h16\",\"kvq8\"]") != std::string::npos);
+        CHECK(j.find("{\"item\":\"fp8\",\"reason\":\"off by WHIRL_FP8=0\"}") != std::string::npos && j.find("{\"item\":\"moefp8\",\"reason\":\"dense model\"}") != std::string::npos);
+        const json::Value v = json::parse(nu::propsJson(nu::plan(fast, s8060), "f16"));
+        CHECK(v.isObject());
+    }
+    // precise KV, CLI: fits / shrinks (implicit) / refuses (explicit or below the minimum)
+    {
+        const std::uint64_t GiB = 1ull << 30, pt = 65536;  // 64 KiB/token
+        nu::CtxFit a = nu::cliCtxFit(8192, false, 100, 10 * GiB, GiB, pt, 256);
+        CHECK(!a.shrunk && !a.refuse && a.ctx == 8192);
+        nu::CtxFit b = nu::cliCtxFit(131072, false, 1000, 5 * GiB, GiB, pt, 256);  // 4 GiB -> 65536 tokens
+        CHECK(b.shrunk && !b.refuse && b.ctx == 65536 && b.msg.find("--balance") != std::string::npos);
+        nu::CtxFit c = nu::cliCtxFit(131072, true, 1000, 5 * GiB, GiB, pt, 256);
+        CHECK(c.refuse && c.msg.find("--balance") != std::string::npos && c.msg.find("--ctx") != std::string::npos);
+        nu::CtxFit d = nu::cliCtxFit(131072, false, 70000, 5 * GiB, GiB, pt, 256);  // shrink would cut the prompt
+        CHECK(d.refuse);
+    }
+    // precise KV, server: f16 pool, context shrink / refusal
+    {
+        const std::uint64_t GiB = 1ull << 30, pt = 69632;  // ~68 KiB/token (27B f16)
+        // R9700 32 GB Swift: ~11.24 GiB -> ~173k tokens >= one 131072 request (no shrink)
+        nu::PoolFit a = nu::serverPoolFit(11 * GiB + GiB / 4, pt, std::nullopt, false, 131072, false, 256, 8 * 262144);
+        CHECK(!a.refuse && !a.shrunk_ctx && a.slot_ctx == 131072 && a.pool >= 131072 && a.pool % 256 == 0 && a.msg.empty());
+        // 16 GB card: 4 GiB -> 61k tokens: per-request context lowered (not given) / refused (given)
+        nu::PoolFit b = nu::serverPoolFit(4 * GiB, pt, std::nullopt, false, 131072, false, 256, 8 * 262144);
+        CHECK(!b.refuse && b.shrunk_ctx && b.slot_ctx == b.pool && b.pool == 61440 && b.msg.find("--balance") != std::string::npos);
+        nu::PoolFit c = nu::serverPoolFit(4 * GiB, pt, std::nullopt, false, 131072, true, 256, 8 * 262144);
+        CHECK(c.refuse && c.msg.find("--ctx-per-slot") != std::string::npos);
+        // explicit --ctx that does not fit: refused; the UMA default pool: shrunk
+        nu::PoolFit d = nu::serverPoolFit(4 * GiB, pt, 131072u, true, 131072, false, 256, 8 * 262144);
+        CHECK(d.refuse && d.msg.find("--ctx") != std::string::npos);
+        nu::PoolFit e = nu::serverPoolFit(4 * GiB, pt, 262144u, false, 131072, false, 256, 8 * 262144);
+        CHECK(!e.refuse && e.shrunk_pool && e.shrunk_ctx && e.pool == 61440 && e.slot_ctx == 61440);
+        nu::PoolFit f = nu::serverPoolFit(4 * GiB, pt, 32768u, true, 32768, false, 256, 8 * 262144);  // fits
+        CHECK(!f.refuse && f.pool == 32768 && f.slot_ctx == 32768 && f.msg.empty());
+        nu::PoolFit g = nu::serverPoolFit(GiB / 8, pt, std::nullopt, false, 131072, false, 256, 8 * 262144);  // < 4096 tokens
+        CHECK(g.refuse && g.msg.find("--balance") != std::string::npos);
+    }
+    // small card: int8 KV preference only when the mode allows it
+    {
+        vram::CardInput in;
+        in.total = 16ull << 30;
+        in.kv_quant_ok = false;
+        const vram::CardDefaults d = vram::cardDefaults(in);
+        CHECK(d.small && !d.prefer_q8v && d.parallel == 1 && d.note.find("precise mode: f16 KV") != std::string::npos);
+        in.kv_quant_ok = true;
+        CHECK(vram::cardDefaults(in).prefer_q8v);
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -680,6 +838,7 @@ int main() {
     testChat();
     testVramLimit();
     testCardDefaults();
+    testNumerics();
     std::printf("unit tests: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

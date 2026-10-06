@@ -3,6 +3,27 @@
 All notable changes to WHIRL are listed here. Versions follow `project(whirl VERSION ...)` in
 `CMakeLists.txt`.
 
+## Unreleased (0.2.0)
+
+### Numerics modes: precise (default), balance, fast
+
+- New `--precise` / `--balance` / `--fast` (or `--mode M`, env `WHIRL_MODE`) for `whirl` and
+  `whirl-server`; one mode per process, reported in the start-up log and in `GET /props`
+  (`"numerics"`). See [docs/usage.md](docs/usage.md#modes).
+- **precise is the new default** on every GPU: no fp8 MXFP4 prefill activations (and no rounding of
+  folded MXFP4 exponents), no fp8 MoE expert prefill, f32 DeltaNet prefill chunks instead of
+  f16-WMMA, no f16 GEMM intermediates (h16), and **f16 KV everywhere** (no automatic q8v / q8h / q8,
+  also on cards under 20 GiB and on the Radeon 8060S). When f16 KV does not fit, the context is
+  lowered with a warning, or the program stops with a message when `--ctx` / `--ctx-per-slot` was
+  given. MXFP4 prefill is slower in precise mode than in 0.1.x.
+- **balance** is the 0.1.x / 0.2.0-rc behaviour, bit for bit (items `fp8`, `moefp8`, `gdnwmma`,
+  `h16`, `kvq8`; `--balance=ITEMS` picks a subset). **fast** lists the future gated lossy items
+  (4-bit KV, relaxed acceptance, ...); none is implemented yet, so fast runs as balance.
+- The per-item variables (`WHIRL_FP8`, `WHIRL_MOE_FP8`, `WHIRL_GDN_WMMA`, `WHIRL_FFN_H16`,
+  `WHIRL_Q4_RELAXED`, `WHIRL_KV`) still work and override the mode (logged as user-requested).
+- Still pending in precise mode: the decode / verify GEMV quantizes activations to int8 (q8_1
+  class), as llama.cpp does; a float-activation version is being written.
+
 ## 0.1.4 — 2026-10-06
 
 Routine bug-fix release: no new features, no speed changes. The changes harden input handling (GGUF

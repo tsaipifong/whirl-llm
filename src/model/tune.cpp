@@ -581,9 +581,14 @@ bool tryRead(const std::string& path, std::string& out) {
 }  // namespace
 
 void loadOrTune(Model& m, const std::string& model_path, std::string& log) {
+    namespace nu = whirl::numerics;
     const bool has_mx = m.type_bytes[ti(GgmlType::mxfp4)] > 0;
-    // MXFP4 prefill with fp8 activations (default; WHIRL_FP8=0|1)
-    if (auto v = envGet("FP8")) m.fp8_prefill = *v != "0";
+    const nu::Request& rq = m.num_req;
+    // MXFP4 prefill with fp8 activations: a balance item (m.fp8_prefill from the mode at load);
+    // WHIRL_FP8=0|1 overrides. WHIRL_FP8=0 also turns the MoE expert fp8 path off (as before).
+    const auto fp8_env = envGet("FP8");
+    if (fp8_env) m.fp8_prefill = *fp8_env != "0";
+    if (fp8_env && *fp8_env == "0") m.moe_fp8 = false;
     if (auto v = envGet("FP8_MASK")) {
         try {
             m.fp8_mask = static_cast<std::uint8_t>(std::stoul(*v, nullptr, 0));
@@ -592,15 +597,18 @@ void loadOrTune(Model& m, const std::string& model_path, std::string& log) {
         }
     }
     if (has_mx) {
-        log += fmt("  MXFP4 prefill: %s activations (%llu folded blocks rounded)\n", m.fp8_prefill && m.k.gemm8[0] != nullptr ? "fp8" : "f16",
-                   static_cast<unsigned long long>(m.mx_fold_lossy));
+        if (m.fp8_prefill && m.k.gemm8[0] != nullptr)
+            log += fmt("  MXFP4 prefill: fp8 activations (%llu folded blocks rounded)\n", static_cast<unsigned long long>(m.mx_fold_lossy));
+        else
+            log += "  MXFP4 prefill: f16 activations\n";
         // fragment-tiled fp8 GEMM (bitwise == gemm8), default on; WHIRL_G8T=0 keeps gemm8
         const bool g8t_on = envFlag("G8T", true);
         if (g8t_on && m.fp8_prefill && m.k.gemm8[0] != nullptr && m.useTiledFp8()) log += "  fp8 prefill GEMM: fragment-tiled (gemm8t)\n";
     }
-    // f16-WMMA chunked DeltaNet prefill: default on for MXFP4 (speed mode)
-    m.gdn_wmma = has_mx;
-    if (auto v = envGet("GDN_WMMA")) m.gdn_wmma = *v != "0";
+    // f16-WMMA chunked DeltaNet prefill: a balance item, MXFP4 models (WHIRL_GDN_WMMA overrides)
+    m.gdn_wmma = has_mx && rq.has(nu::Item::gdnwmma);
+    const auto wmma_env = envGet("GDN_WMMA");
+    if (wmma_env) m.gdn_wmma = *wmma_env != "0";
     if (auto v = envGet("ACT_FUSE")) m.act_fuse = *v != "0";
     if (auto v = envGet("GEMMH")) m.gemmh_on = *v != "0";
     if (auto v = envGet("GEMMHQ")) m.gemmhq_on = *v != "0";
@@ -608,14 +616,52 @@ void loadOrTune(Model& m, const std::string& model_path, std::string& log) {
     if (auto v = envGet("ATTN_KG")) m.attn_kg_on = *v != "0";
     if (auto v = envGet("GDN_BA")) m.gdn_ba_on = *v != "0";
     if (auto v = envGet("GDN_IN2")) m.gdn_in2_on = *v != "0";
-    m.ffn_h16 = has_mx;
+    // f16 FFN / DeltaNet GEMM outputs: a balance item, MXFP4 models (WHIRL_FFN_H16 overrides)
+    m.ffn_h16 = has_mx && rq.has(nu::Item::h16);
     // WHIRL_Q4_RELAXED=1: every non-bitwise prefill speedup for non-MXFP4 models too
-    if (auto v = envGet("Q4_RELAXED"); v && *v != "0") {
+    const auto relaxed_env = envGet("Q4_RELAXED");
+    const bool relaxed = relaxed_env && *relaxed_env != "0";
+    if (relaxed) {
         m.gdn_wmma = true;
         m.ffn_h16 = true;
     }
-    if (auto v = envGet("FFN_H16")) m.ffn_h16 = *v != "0";
+    const auto h16_env = envGet("FFN_H16");
+    if (h16_env) m.ffn_h16 = *h16_env != "0";
     if (m.gdn_wmma && m.gdn_chunked && m.k.gdn_wprep != nullptr) log += "  DeltaNet prefill: f16 WMMA chunks\n";
+    {
+        // numerics mode: capability table, per-item environment overrides, one log line
+        nu::Target t;
+        t.gfx1151 = m.arch == hip::Arch::gfx1151;
+        t.has_mxfp4 = has_mx;
+        t.moe = m.cfg.moe;
+        for (const Layer& L : m.layers)
+            if (L.moe) {
+                t.moe_mxfp4 = L.moe->gate.ty == GgmlType::mxfp4 && L.moe->up.ty == GgmlType::mxfp4 && L.moe->down.ty == GgmlType::mxfp4;
+                break;
+            }
+        t.k_gemm8 = m.k.gemm8[0] != nullptr;
+        t.k_gemm8_moe = m.k.gemm8_moe != nullptr && m.k.gemm8_moe32 != nullptr && m.k.gemm8_moeh != nullptr && m.k.gemm8_moe32h != nullptr &&
+                        m.k.moe_gather_fp8 != nullptr;
+        t.k_gdn_wmma = m.k.gdn_wprep != nullptr;
+        t.k_kv_q8v = m.k.caps.kv_q8v;
+        t.k_kv_q8h = m.k.caps.kv_q8h;
+        nu::Plan p = nu::plan(rq, t);
+        if (fp8_env) nu::applyOverride(p, nu::Item::fp8, "FP8", *fp8_env, m.fp8_prefill, t.has_mxfp4 && t.k_gemm8);
+        const bool moe_ok = t.moe && t.moe_mxfp4 && t.k_gemm8_moe;
+        if (const auto v = envGet("MOE_FP8"); v && !(fp8_env && *fp8_env == "0"))
+            nu::applyOverride(p, nu::Item::moefp8, "MOE_FP8", *v, m.moe_fp8, moe_ok);
+        else if (fp8_env && *fp8_env == "0")
+            nu::applyOverride(p, nu::Item::moefp8, "FP8", *fp8_env, m.moe_fp8, moe_ok);
+        if (relaxed) nu::applyOverride(p, nu::Item::gdnwmma, "Q4_RELAXED", *relaxed_env, m.gdn_wmma, t.k_gdn_wmma && m.gdn_chunked);
+        else if (wmma_env) nu::applyOverride(p, nu::Item::gdnwmma, "GDN_WMMA", *wmma_env, m.gdn_wmma, t.k_gdn_wmma && m.gdn_chunked);
+        if (h16_env) nu::applyOverride(p, nu::Item::h16, "FFN_H16", *h16_env, m.ffn_h16, true);
+        else if (relaxed) nu::applyOverride(p, nu::Item::h16, "Q4_RELAXED", *relaxed_env, m.ffn_h16, true);
+        if (const auto v = envGet("KV"); v && !v->empty() && *v != "auto")
+            nu::applyOverride(p, nu::Item::kvq8, "KV", *v, *v != "f16", !t.moe || *v != "f16");
+        m.num_plan = p;
+        log += "  " + nu::logLine(p) + "\n";
+        if (!m.load_note.empty()) log += "  " + m.load_note;
+    }
 
     std::string cache_path;
     std::vector<std::string> read_paths4, read_paths_old;

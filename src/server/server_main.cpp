@@ -121,6 +121,10 @@ const char* kHelpBody =
     "                           Windows (WDDM) budget; WHIRL_POOL_RESERVE_MB=N: free VRAM minus N only;\n"
     "                           262144 on the Radeon 8060S)\n"
     "  --ctx-per-slot N         longest context of one request (default min(pool, 131072); up to 262144)\n"
+    "  --precise | --balance | --fast\n"
+    "                           numerics mode (default precise: f16/f32 activations, f16 KV; balance:\n"
+    "                           fp8 MXFP4 prefill, int8 KV when f16 does not fit, ...; fast: balance +\n"
+    "                           future lossy items). --balance=fp8,kvq8 picks items; --mode M; WHIRL_MODE\n"
     "  --mtp-drafts N           MTP drafts per cycle, 1..10 (fixed count; default: per model type)\n"
     "  --decode-min-tps N       while other requests prefill, keep every streaming (decoding) request\n"
     "                           at >= N tok/s by limiting prefill forwards (default 20; 0 = off:\n"
@@ -172,6 +176,7 @@ struct Options {
     std::uint64_t vis_cache_mb = 1024;
     bool allow_local_images = false;
     std::vector<std::string> cors_origins;  // --cors-origin (repeatable)
+    std::optional<std::string> mode_spec;   // --precise / --balance[=items] / --fast[=items] / --mode M
 };
 
 [[noreturn]] void die(const std::string& msg) {
@@ -345,6 +350,28 @@ int serveMain(int argc, char** argv, const char* program) {
     Options opt;
     for (std::size_t i = 0; i < args.size(); ++i) {
         const std::string arg = args[i];
+        std::string mspec;
+        bool mnext = false;
+        bool is_mode = false;
+        try {
+            is_mode = numerics::modeFlag(arg, &mspec, &mnext);
+        } catch (const std::exception& ex) {
+            die(ex.what());
+        }
+        if (is_mode) {
+            if (mnext) {
+                if (i + 1 >= args.size()) die("missing value for --mode");
+                mspec = args[++i];
+            }
+            if (opt.mode_spec) die("give one numerics mode (--precise, --balance, --fast or --mode M)");
+            try {
+                (void)numerics::parseMode(mspec, "command line");
+            } catch (const std::exception& ex) {
+                die(ex.what());
+            }
+            opt.mode_spec = mspec;
+            continue;
+        }
         if (auto v = argValue(args, i, "--host")) opt.host = *v;
         else if (auto v2 = argValue(args, i, "--port")) opt.port = parseNum<std::uint16_t>(*v2, "--port");
         else if (auto v3 = argValue(args, i, "--ctx")) opt.ctx = parseNum<std::uint32_t>(*v3, "--ctx");
@@ -379,6 +406,12 @@ int serveMain(int argc, char** argv, const char* program) {
         else die("unexpected argument " + arg);
     }
     if (opt.path.empty()) die("missing MODEL.gguf");
+    numerics::Request nreq;
+    try {
+        nreq = numerics::resolve(opt.mode_spec, env("MODE"));
+    } catch (const std::exception& ex) {
+        die(ex.what());
+    }
     if (opt.parallel < 1 || opt.parallel > gdn_max_seg) die("--parallel must be 1..16");
     // the model file and the port are checked before the (long) model load
     try {
@@ -434,6 +467,7 @@ int serveMain(int argc, char** argv, const char* program) {
             if (opt.parallel_given) ci.parallel_arg = opt.parallel;
             ci.parallel_default = opt.parallel;
             ci.kv_auto = env("KV").value_or("auto") == "auto" && !cfg.moe;
+            ci.kv_quant_ok = nreq.has(numerics::Item::kvq8);  // precise: never prefer int8 KV
             if (env("VRAM_HEADROOM_MB")) ci.headroom_mb_env = envU32("VRAM_HEADROOM_MB", 0);
             ci.reserve_explicit = env("POOL_RESERVE_MB").has_value();
             card = vram::cardDefaults(ci);
@@ -451,6 +485,7 @@ int serveMain(int argc, char** argv, const char* program) {
         const hip::MemInfo mem0 = hip::memInfo();
         qwen35::LoadStats stats;
         qwen35::LoadOptions lo;
+        lo.numerics = nreq;
         lo.max_batch = serve_prefill_batch;
         lo.embd_on_host = envOn("EMBD_HOST", true);  // WHIRL_EMBD_HOST=0: embedding in VRAM
         if (auto v = env("PREFILL_BATCH")) {
@@ -501,8 +536,9 @@ int serveMain(int argc, char** argv, const char* program) {
             fi.ckpt_bytes = envOn("CKPT_HOST", false) ? 0 : st1 + static_cast<std::uint64_t>(cfg.n_embd) * 4 + static_cast<std::uint64_t>(cfg.n_vocab) * 4;
             fi.parallel = opt.parallel;
             const std::string kv_env = env("KV").value_or("auto");
+            // KV auto: precise f16; balance / fast as before (dense: the q8h size)
             fi.kv_per_token = kv_env == "f16" ? est.kv_f16 : kv_env == "q8v" ? est.kv_q8v : (kv_env == "q8" || kv_env == "q8h") ? est.kv_q8h
-                              : cfg.moe ? est.kv_f16 : est.kv_q8h;
+                              : (cfg.moe || !nreq.has(numerics::Item::kvq8)) ? est.kv_f16 : est.kv_q8h;
             fi.pool_min_tokens = pool_req ? *pool_req : std::min<std::uint32_t>(slot_ctx, vram_tight_pool);
             fi.batch = lo.max_batch;
             fi.n_ck = static_cast<std::uint32_t>(n_ck);
@@ -860,7 +896,21 @@ int serveMain(int argc, char** argv, const char* program) {
         }();
         if (!pool_req) logI("kv pool sizing: {}", budget_note);
         std::string kv_note;
-        if (model.kvAutoDense()) {
+        // precise (KV auto without the kvq8 item): always f16; a pool / context that does not fit
+        // shrinks when not given explicitly, else the server refuses to start
+        // (MoE models always had f16 KV: their pool sizing is unchanged)
+        const bool kv_precise = model.kvAutoDense() && !model.kvQuantAuto();
+        std::uint32_t slot_ctx_eff = slot_ctx;
+        std::optional<std::uint32_t> precise_pool;
+        if (kv_precise) {
+            const numerics::PoolFit pf = numerics::serverPoolFit(avail, model.kvBytesPerTokenFmt(false, false), pool_req, opt.ctx.has_value(),
+                                                                 slot_ctx, opt.ctx_per_slot.has_value(), kv_page, 8 * cap_max);
+            if (pf.refuse) throw app::UserError(app::exit_vram, pf.msg);
+            if (!pf.msg.empty()) logW("{}", pf.msg);
+            precise_pool = pf.pool;
+            slot_ctx_eff = pf.slot_ctx;
+            kv_note = " (precise mode: f16 KV)";
+        } else if (model.kvAutoDense()) {
             const std::uint32_t second = opt.parallel > 1 ? std::min(floor_second_ctx, slot_ctx) : 0;
             const std::uint64_t need = pool_req ? *pool_req : static_cast<std::uint64_t>(slot_ctx) + second + (opt.parallel > 1 ? 2ull : 1ull) * kv_page;
             // small-card q8v preference only where the code object has the q8v and q8h kernels
@@ -886,22 +936,24 @@ int serveMain(int argc, char** argv, const char* program) {
             }
         }
         const std::uint64_t per_tok = model.kvBytesPerToken();
-        const std::uint32_t pool_tokens = pool_req ? *pool_req : [&] {
+        const std::uint32_t pool_tokens = precise_pool ? *precise_pool : pool_req ? *pool_req : [&] {
             const std::uint64_t t = std::min(avail / per_tok, static_cast<std::uint64_t>(8) * cap_max);
             return static_cast<std::uint32_t>(t / kv_page * kv_page);
         }();
         if (pool_tokens < 4096)
             throw app::UserError(app::exit_vram,
                                  std::format("not enough GPU memory left for the KV cache: a pool of {} tokens (at least 4096 needed).\n"
-                                             "  Use a smaller model or quantization, give --ctx explicitly, set WHIRL_KV=q8v (dense models),\n"
+                                             "  Use a smaller model or quantization, give --ctx explicitly, use --balance (int8 KV, dense models),\n"
                                              "  or close other programs that use the GPU.",
                                              pool_tokens));
+        if (slot_ctx_eff != slot_ctx) engine.setCtx(slot_ctx_eff);
         {
-            const std::uint64_t floor = static_cast<std::uint64_t>(slot_ctx) + (opt.parallel > 1 ? std::min(floor_second_ctx, slot_ctx) : 0);
+            const std::uint64_t floor = static_cast<std::uint64_t>(slot_ctx_eff) + (opt.parallel > 1 ? std::min(floor_second_ctx, slot_ctx_eff) : 0);
             if (pool_tokens < floor)
                 logW("kv pool {} tokens < {} (one {}-token request + a second one reaching {}): concurrent long requests may end "
-                     "early (finish_reason length)",
-                     pool_tokens, floor, slot_ctx, opt.parallel > 1 ? std::min(floor_second_ctx, slot_ctx) : 0);
+                     "early (finish_reason length){}",
+                     pool_tokens, floor, slot_ctx_eff, opt.parallel > 1 ? std::min(floor_second_ctx, slot_ctx_eff) : 0,
+                     kv_precise ? "; --balance allows int8 KV (a longer pool)" : "");
         }
         try {
             model.allocKvPool(pool_tokens);
@@ -922,7 +974,7 @@ int serveMain(int argc, char** argv, const char* program) {
                  "request",
                  model.pool_pages * kv_page, model.pool_pages, kv_page, model.kvName(), kv_note, static_cast<double>(per_tok) / 1024.0,
                  static_cast<double>(per_tok * model.pool_pages * kv_page) / (1024.0 * 1024.0 * 1024.0), opt.parallel,
-                 std::min<std::uint64_t>(slot_ctx, static_cast<std::uint64_t>(model.pool_pages) * kv_page));
+                 std::min<std::uint64_t>(slot_ctx_eff, static_cast<std::uint64_t>(model.pool_pages) * kv_page));
             logI("slots: {}; per slot: recurrent state {:.1f} MiB, prefix checkpoints {:.1f} MiB; shared: {} snapshot sets {:.1f} MiB",
                  opt.parallel, st_mib, ck_mb * static_cast<double>(n_ck), model.snap_sets, snap_mib);
         }
@@ -937,13 +989,14 @@ int serveMain(int argc, char** argv, const char* program) {
              eo.ckpt_host ? " (in pinned host memory)" : "", gib(mem_ck1.free, mem2.free),
              static_cast<double>(mem2.free) / (1024.0 * 1024.0 * 1024.0));
         logI("context {} tokens per request, pool {} tokens; VRAM free {:.2f} / {:.2f} GiB (after weights {:.2f}, at start {:.2f})",
-             std::min<std::uint64_t>(slot_ctx, static_cast<std::uint64_t>(model.pool_pages) * kv_page), model.pool_pages * kv_page, static_cast<double>(mem2.free) / (1024.0 * 1024.0 * 1024.0),
+             std::min<std::uint64_t>(slot_ctx_eff, static_cast<std::uint64_t>(model.pool_pages) * kv_page), model.pool_pages * kv_page, static_cast<double>(mem2.free) / (1024.0 * 1024.0 * 1024.0),
              static_cast<double>(mem2.total) / (1024.0 * 1024.0 * 1024.0), static_cast<double>(mem.free) / (1024.0 * 1024.0 * 1024.0),
              static_cast<double>(mem0.free) / (1024.0 * 1024.0 * 1024.0));
         if (use_mtp)
             logI("prompt-lookup (n-gram) drafting: {} (WHIRL_NGRAM{}), min match {}, up to {} drafts", eo.ngram ? "on" : "off",
                  eo.ngram ? "=0 turns it off" : "=1 turns it on", eo.ngram_min,
                  eo.ngram_max > 0 ? std::min(eo.ngram_max, qwen35::max_ng_drafts) : qwen35::max_ng_drafts);
+        engine.setNumerics(numerics::propsJson(model.num_plan, model.kv_q8 ? (model.kv_kf16 ? "q8v" : model.kv_rot ? "q8h" : "q8") : "f16"));
         engine.initPool();
         {
             // after everything sized at startup is allocated: any growth of the non-local segment
@@ -997,7 +1050,7 @@ int serveMain(int argc, char** argv, const char* program) {
                 lay.ck_bytes = n_gdn * (conv_bytes + ssm_bytes) + static_cast<std::uint64_t>(cfg.n_embd) * 4 + static_cast<std::uint64_t>(V) * 4;
                 lay.page_bytes = per_tok * kv_page;
                 lay.page_tokens = kv_page;
-                lay.tok_cap = slot_ctx;
+                lay.tok_cap = slot_ctx_eff;
                 const std::uint64_t fp = tierFingerprint(model, opt.path, stats, use_mtp, n_gdn, lay);
                 const TimePoint t_tier0 = Clock::now();
                 tier::Config tc;

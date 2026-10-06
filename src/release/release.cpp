@@ -223,6 +223,9 @@ std::string explainText(const std::exception& e, int* exit_code) {
             msg = "the GPU is still in use by another WHIRL process (waited WHIRL_GPU_WAIT seconds).\n"
                   "  Close the other whirl / whirl-server, or set WHIRL_GPU_SHARE=1 to run side by side\n"
                   "  (both then share the GPU's memory and speed).\n";
+        } else if (c == "KvF16DoesNotFit") {
+            code = exit_vram;
+            msg = (what.size() > c.size() + 2 ? what.substr(c.size() + 2) : what) + "\n";
         } else if (c == "UnsupportedKvFormat") {
             code = exit_usage;
             msg = what + "\n";
@@ -316,12 +319,15 @@ constexpr EnvDoc k_env[] = {
     {"GPU and loading", "HIP_DEVICE=N", "device index, bypassing device matching and the one-process-per-GPU lock", GPU},
     {"GPU and loading", "GPU_SHARE=1", "do not wait for other WHIRL processes on the same GPU", GPU},
     {"GPU and loading", "GPU_WAIT=S", "seconds to wait for another WHIRL process to free the GPU (default 1800)", GPU},
-    {"GPU and loading", "KV=auto|f16|q8|q8h|q8v", "KV cache format (auto: f16 when it fits; dense models fall back to q8v, then q8h; MoE f16)",
+    {"GPU and loading", "MODE=precise|balance|fast[:ITEMS]", "numerics mode (= --precise / --balance / --fast / --mode; default precise; "
+     "ITEMS e.g. fp8,kvq8 picks lossy items)", GPU},
+    {"GPU and loading", "KV=auto|f16|q8|q8h|q8v", "KV cache format (auto: f16; in balance / fast mode dense models fall back to q8v, then q8h, "
+     "when f16 does not fit; MoE f16). A q8 value in precise mode is a user-requested lossy override",
      GPU},
     {"GPU and loading", "PREFILL_BATCH=N", "prefill rows per forward (default 4096, up to 16384)", C | B | T | S},
     {"GPU and loading", "MAX_CTX=N", "default context size of chat (= --ctx; default 8192)", C},
     {"GPU and loading", "CODE_OBJECT=FILE", "development: load the GPU kernels from this code object instead of the built-in one", GPU},
-    {"GPU and loading", "MOE_FP8=0", "MoE expert prefill with f16 instead of fp8 activations (MXFP4 experts)", GPU},
+    {"GPU and loading", "MOE_FP8=0|1", "MoE expert prefill with fp8 activations (MXFP4 experts; default: on in balance / fast)", GPU},
     {"GPU and loading", "MOE_MXW=0", "generic MXFP4 MoE decode kernels instead of the whole-block ones", GPU},
     {"GPU and loading", "EMBD_HOST=0", "keep the token embedding table in VRAM (default: pinned host memory, declared as Shared Usage)", S},
     {"GPU and loading", "TUNE_COLD=1", "autotune: evict the cache before each timing", C | B | T},
@@ -381,12 +387,12 @@ constexpr EnvDoc k_env[] = {
     {"Vision", "VIS_PRE=FILE", "diagnostic: preprocess this image instead", V},
     {"Vision", "VIS_PROF=1", "diagnostic: per-stage encoder timing", V},
 
-    {"Numerics / speed switches (A/B tests; defaults are the tested paths)", "FP8=0", "MXFP4 prefill with f16 instead of fp8 activations", TUNED},
+    {"Numerics / speed switches (A/B tests; defaults are the tested paths)", "FP8=0|1", "MXFP4 prefill with fp8 activations (default: on in balance / fast; 0 also turns MOE_FP8 off)", TUNED},
     {"Numerics / speed switches (A/B tests; defaults are the tested paths)", "FP8_MASK=BITS", "matmul classes that use fp8 activations (default 7)", TUNED},
     {"Numerics / speed switches (A/B tests; defaults are the tested paths)", "G8T=0", "row-major fp8 GEMM instead of the fragment-tiled one (same bits)", TUNED},
-    {"Numerics / speed switches (A/B tests; defaults are the tested paths)", "GDN_WMMA=0|1", "f16-WMMA DeltaNet prefill chunks (default on for MXFP4)", TUNED},
-    {"Numerics / speed switches (A/B tests; defaults are the tested paths)", "FFN_H16=0|1", "f16 GEMM outputs into the elementwise ops (default on for MXFP4)", TUNED},
-    {"Numerics / speed switches (A/B tests; defaults are the tested paths)", "Q4_RELAXED=1", "the MXFP4 speed-mode prefill switches for other models too", TUNED},
+    {"Numerics / speed switches (A/B tests; defaults are the tested paths)", "GDN_WMMA=0|1", "f16-WMMA DeltaNet prefill chunks (default: on for MXFP4 in balance / fast)", TUNED},
+    {"Numerics / speed switches (A/B tests; defaults are the tested paths)", "FFN_H16=0|1", "f16 GEMM outputs into the elementwise ops (default: on for MXFP4 in balance / fast)", TUNED},
+    {"Numerics / speed switches (A/B tests; defaults are the tested paths)", "Q4_RELAXED=1", "the MXFP4 balance-mode prefill switches (WMMA DeltaNet, h16) for other models too", TUNED},
     {"Numerics / speed switches (A/B tests; defaults are the tested paths)", "ACT_FUSE=0", "no fused activation in prefill (bitwise-equal alternative)", TUNED},
     {"Numerics / speed switches (A/B tests; defaults are the tested paths)", "GEMMH=0", "no f16-output prefill GEMM (bitwise-equal alternative)", TUNED},
     {"Numerics / speed switches (A/B tests; defaults are the tested paths)", "GEMMHQ=1", "f16-output GEMM for the attention projections too", TUNED},

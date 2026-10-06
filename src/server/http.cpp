@@ -452,8 +452,10 @@ std::string propsJson(Engine& e) {
     appendJsonStr(b, modelFileName(o));
     b += ",\"model_alias\":";
     appendJsonStr(b, o.model_name);
-    b += std::format(",\"modalities\":{{\"vision\":{},\"audio\":false}},\"build_info\":\"whirl {}\"}}",
+    b += std::format(",\"modalities\":{{\"vision\":{},\"audio\":false}},\"build_info\":\"whirl {}\"",
                      e.visionConfig().vis ? "true" : "false", WHIRL_VERSION_STRING);
+    if (!o.numerics_json.empty()) b += ",\"numerics\":" + o.numerics_json;
+    b += "}";
     return b;
 }
 

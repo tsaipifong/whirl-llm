@@ -71,6 +71,13 @@ const char* k_help_main =
     "Supported models: GGUF files of the qwen35 / qwen35moe architectures (see the README).\n"
     "The first run with a new model tunes the GPU kernels once (cached in %LOCALAPPDATA%\\whirl).\n";
 
+#define WHIRL_HELP_MODES                                                                            \
+    "  --precise | --balance | --fast\n"                                                            \
+    "                             numerics mode (default precise: f16/f32 activations, f16 KV;\n"   \
+    "                             balance: fp8 MXFP4 prefill, int8 KV when f16 does not fit, ...;\n" \
+    "                             fast: balance + future lossy items). --balance=fp8,kvq8 picks\n"  \
+    "                             items; --mode M also works; env WHIRL_MODE\n"
+
 const char* k_help_chat =
     "usage: whirl chat MODEL.gguf \"PROMPT\" | @PROMPT_FILE [options]\n"
     "\n"
@@ -90,6 +97,7 @@ const char* k_help_chat =
     "  --mmproj MMPROJ.gguf       vision encoder (Qwen3-VL style mmproj, F16 / BF16) for --image\n"
     "  --image IMAGE              an image placed before the prompt text (repeatable; needs --mmproj)\n"
     "  --device SPEC              GPU: r9700 (default), 8060s, an index, or a name / gfx substring\n"
+    WHIRL_HELP_MODES
     "  -h, --help                 this text\n";
 
 const char* k_help_bench =
@@ -107,6 +115,7 @@ const char* k_help_bench =
     "                             (default mtp-ngram,mtp,plain)\n"
     "  --no-think / --think       thinking off / on for the decode prompt (default on)\n"
     "  --device SPEC              GPU: r9700 (default), 8060s, an index, or a name / gfx substring\n"
+    WHIRL_HELP_MODES
     "  -h, --help                 this text\n";
 
 const char* k_help_selftest =
@@ -118,6 +127,7 @@ const char* k_help_selftest =
     "\n"
     "options:\n"
     "  --device SPEC              GPU: r9700 (default), 8060s, an index, or a name / gfx substring\n"
+    WHIRL_HELP_MODES
     "  -h, --help                 this text\n";
 
 const char* k_help_seqtest =
@@ -130,6 +140,7 @@ const char* k_help_seqtest =
     "options:\n"
     "  --decode N                 tokens generated per sequence (default 24)\n"
     "  --device SPEC              GPU: r9700 (default), 8060s, an index, or a name / gfx substring\n"
+    WHIRL_HELP_MODES
     "  -h, --help                 this text\n";
 
 const char* k_help_devices =
@@ -201,7 +212,17 @@ Args parseArgs(const std::vector<std::string>& argv, std::size_t from) {
     for (std::size_t i = from; i < argv.size(); ++i) {
         const std::string& s = argv[i];
         if (s.size() > 2 && s[0] == '-' && s[1] == '-') {
-            if (s == "--image") {
+            std::string mspec;
+            bool mnext = false;
+            if (whirl::numerics::modeFlag(s, &mspec, &mnext)) {
+                if (mnext) {
+                    if (i + 1 >= argv.size()) throw std::runtime_error("missing value for " + s);
+                    mspec = argv[++i];
+                }
+                if (a.has("--mode")) throw std::runtime_error("give one numerics mode (--precise, --balance, --fast or --mode M)");
+                (void)whirl::numerics::parseMode(mspec, "command line");  // reject a bad value before any GPU work
+                a.opts["--mode"] = mspec;
+            } else if (s == "--image") {
                 if (i + 1 >= argv.size()) throw std::runtime_error("missing value for " + s);
                 a.images.push_back(argv[++i]);
             } else if (takesValue(s)) {
@@ -714,9 +735,19 @@ int selectDevice(const Args& a, std::string* info_line) {
     return dev;
 }
 
-Loaded loadModel(const gguf::File& f, u32 max_ctx) {
+// numerics mode: --precise / --balance[=items] / --fast[=items] / --mode M, else WHIRL_MODE, else precise
+whirl::numerics::Request modeRequest(const Args& a) {
+    return whirl::numerics::resolve(a.get("--mode") ? std::optional<std::string>(*a.get("--mode")) : std::nullopt, envGet("MODE"));
+}
+
+// ctx_explicit: the context was asked for (--ctx / WHIRL_MAX_CTX, bench sizes): precise f16 KV that
+// does not fit refuses instead of shrinking to at least min_ctx tokens
+Loaded loadModel(const Args& a, const gguf::File& f, u32 max_ctx, bool ctx_explicit = true, u32 min_ctx = 0) {
     Loaded L;
     q::LoadOptions lo;
+    lo.numerics = modeRequest(a);
+    lo.ctx_explicit = ctx_explicit;
+    lo.min_ctx = min_ctx;
     if (auto v = envU32("PREFILL_BATCH")) lo.max_batch = std::max(q::max_batch_default, std::min(q::max_batch_limit, *v));
     lo.kv_mode = q::kvModeFromEnv().value_or(q::KvMode::automatic);
     L.model = q::Model::load(f, max_ctx, L.stats, lo);
@@ -905,7 +936,9 @@ int cmdChat(const Args& a) {
     if (ids.empty()) throw q::ModelError("EmptyPrompt");
     if (ids.size() + opt.max_tokens > opt.max_ctx) throw q::ModelError("ContextTooLong");
 
-    Loaded L = loadModel(f, opt.max_ctx);
+    const bool ctx_given = a.get("--ctx") != nullptr || envU32("MAX_CTX").has_value();
+    Loaded L = loadModel(a, f, opt.max_ctx, ctx_given, static_cast<u32>(ids.size()) + opt.max_tokens);
+    opt.max_ctx = L.model->max_ctx;  // precise: may be lowered to what f16 KV fits
     q::Model& model = *L.model;
     {
         std::string log;
@@ -1112,7 +1145,7 @@ int cmdBench(const Args& a) {
     u32 max_size = 0;
     for (u32 s : sizes) max_size = std::max(max_size, s);
     const u32 ctx = std::max<u32>(max_size + 64, static_cast<u32>(dec_ids.size()) + n_dec + 64);
-    Loaded L = loadModel(f, ctx);
+    Loaded L = loadModel(a, f, ctx);
     q::Model& model = *L.model;
     {
         std::string log;
@@ -1242,6 +1275,7 @@ int cmdSeqtest(const Args& a) {
     const std::vector<u32> pb = tok.encode(chatWrap("請用繁體中文說明 TCP 三向交握的過程，並用 Python 寫一個簡單的 socket 伺服器。", false));
     q::LoadOptions lo;
     lo.kv_mode = q::kvModeFromEnv().value_or(q::KvMode::automatic);
+    lo.numerics = modeRequest(a);
     q::LoadStats stats;
     auto mp = q::Model::load(f, 0, stats, lo);
     q::Model& m = *mp;
@@ -1343,7 +1377,7 @@ int cmdSelftest(const Args& a) {
     if (a.pos.empty()) throw std::runtime_error("selftest: missing MODEL.gguf");
     gguf::File f = gguf::File::open(a.pos[0]);
     selectDevice(a, nullptr);
-    Loaded L = loadModel(f, 4096);
+    Loaded L = loadModel(a, f, 4096);
     q::Model& m = *L.model;
     hip::memset(m.h, 0, 4ull * m.max_batch * m.cfg.n_embd);
     hip::memset(m.ffn_g, 0, 4ull * m.max_batch * m.ff_scratch);

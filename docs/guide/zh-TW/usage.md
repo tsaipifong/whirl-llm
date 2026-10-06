@@ -45,6 +45,41 @@ whirl-server --help | --version
 （預設最多 30 分鐘），而不是共用 VRAM——因為一張 GPU 上同時有兩個大行程時，Windows 會把兩者都移到很慢的共享
 記憶體（[windows-hip.md](windows-hip.md#wddm-demote)）。見 `WHIRL_GPU_WAIT` / `WHIRL_GPU_SHARE`。
 
+### <a id="modes"></a>數值模式：precise（預設）、balance、fast
+
+一個行程只用一種模式，啟動時決定（`--precise`、`--balance`、`--fast`，或 `--mode M`；也可用環境變數
+`WHIRL_MODE=precise|balance|fast`，命令列優先）。`chat`、`bench`、`selftest`、`seqtest` 與伺服器都適用，R9700 與 Radeon 8060S 都一樣。
+
+| 模式 | 內容 |
+|---|---|
+| **precise**（預設） | GGUF 權重反量化成 f16；prefill 的 activation 與累加用 f16 / f32；DeltaNet prefill 用 f32 區塊路徑；**KV 快取在每張卡上都是 f16**。除了檔案本身的量化權重，不再額外量化（目前還有一項例外待處理，見下面的 `q8dec`）。f16 KV 放不下時：沒有指定 context 就降低 context 並發出警告；有指定（`--ctx`、`--ctx-per-slot`）就停止並說明（結束代碼 3）——絕不自行改用 int8 KV |
+| **balance** | 就是 WHIRL 0.1.x / 0.2.0-rc 以速度為主的預設，完全相同：下表的項目。輸出可能與 precise 有些微差異（KL / 準確度實測見 [quantization.md](quantization.md)） |
+| **fast** | balance 再加上更積極的有損項目，每項都要先通過 KL 與配對準確度門檻。目前都還沒實作：會列為略過，fast 目前等同 balance |
+
+項目（用 `--balance=fp8,kvq8` 或 `--fast=...` 只選一部分；`WHIRL_MODE=balance:fp8,kvq8`）：
+
+| 項目 | 模式 | 內容 | R9700（gfx1201） | Radeon 8060S（gfx1151） |
+|---|---|---|---|---|
+| `fp8` | balance | MXFP4 dense prefill GEMM 用 fp8（e4m3）activation，含 MXFP4 指數折疊的捨入 | MXFP4 模型 | 略過（沒有 fp8 WMMA） |
+| `moefp8` | balance | MoE 專家 prefill GEMM 用 fp8 activation | MXFP4 MoE（Ornith MXFP4） | 略過 |
+| `gdnwmma` | balance | DeltaNet prefill 區塊用 f16 WMMA，取代 f32 區塊路徑 | MXFP4 模型 | 略過（還沒有 kernel） |
+| `h16` | balance | FFN / DeltaNet 的 GEMM 輸出先存成 f16 再進逐元素運算 | MXFP4 模型 | 只有 f16 權重 |
+| `kvq8` | balance | f16 放不下時 KV auto 可以選 int8：q8v（K f16、V int8），再不行 q8h；20 GiB 以下的卡優先 q8v | dense 模型 | q8（dense 模型） |
+| `kvq4`、`relaxacc`、`headq`、`moeskip`、`a8`、`a4` | fast | 4-bit KV、寬鬆推測接受、低位元輸出頭、略過 MoE 專家、W4A8 / W4A4 prefill | 尚未實作 | 尚未實作 |
+| `q8dec` | 所有模式 | decode / verify GEMV 的 activation 用 int8（每 32 個值一個 f32 scale，同 llama.cpp 的 q8_1） | 開 | 開 |
+
+`q8dec` 在 precise 模式下目前仍然開著：維持 MTP == plain 的浮點 activation decode GEMV 正在撰寫中。
+不適用於該 GPU 或模型的項目會記錄為略過（不會出錯）。啟動 log 會有一行，例如
+
+```
+numerics: balance - enabled: fp8, gdnwmma, h16, kvq8 (auto: q8v, then q8h, when f16 does not fit); skipped: moefp8 (dense model); ...
+```
+
+伺服器在 `GET /props` 回報模式（`"numerics": {"mode", "label", "enabled", "skipped", "overrides", "kv", "always_on"}`）。
+[7.6](#env-numerics) 的單項變數（`WHIRL_FP8`、`WHIRL_MOE_FP8`、`WHIRL_GDN_WMMA`、`WHIRL_FFN_H16`、`WHIRL_Q4_RELAXED`）與
+`WHIRL_KV` 仍然有效，而且會覆寫模式；在 precise 模式下設成有損的值，log 會標示 `user-requested`，模式顯示為 `precise+overrides`。
+在同一個模式內，MTP / n-gram 解碼等於純 greedy 解碼，並發請求等於單獨執行。
+
 ## <a id="chat"></a>2. `whirl chat`
 
 ```
@@ -97,6 +132,7 @@ whirl bench MODEL.gguf [選項]
 | `--modes M,M,...` | decode 模式：`mtp-ngram`（MTP + n-gram 草稿，預設路徑）、`mtp`（只用 MTP）、`plain`（不開 MTP）；預設三種都量 |
 | `--no-think` / `--think` | decode 提示的思考關閉 / 開啟（預設開啟） |
 | `--device SPEC` | GPU，同 `chat` |
+| `--precise` / `--balance` / `--fast` / `--mode M` | 數值模式，同 `chat` |
 
 ```powershell
 .\whirl.exe bench C:\models\model.gguf --prefill 2048,8192 --decode 256 --modes mtp-ngram,plain
@@ -124,6 +160,7 @@ whirl serve  MODEL.gguf [選項]      （同一支程式）
 | `-np`、`--parallel N` | 同時處理的請求 slot 數（continuous batching），1～16，預設 4（VRAM 小於 20 GiB 的卡預設 1，見 `WHIRL_VRAM_HEADROOM_MB`） |
 | `-c`、`--ctx N` | 共用 KV 池的大小（token）。slot 依需要取用分頁；池滿時，閒置 slot 的前綴快取依最久未使用（LRU）逐出。預設：權重與緩衝區之後剩下的全部 VRAM 減 768 MiB（MoE：1.5 GiB） |
 | `--ctx-per-slot N` | 單一請求的最長 context（預設 min(池大小, 131072)；最多 262144） |
+| `--precise` / `--balance` / `--fast` / `--mode M` | 數值模式（預設 precise：f16 KV；f16 池放不下一個完整請求時，會降低每個請求的 context 並警告；若有指定 `--ctx` / `--ctx-per-slot` 則拒絕啟動）。見[數值模式](#modes) |
 | `--mtp-drafts N` | 每回合固定的 MTP 草稿數，1～10（預設：依模型類型由成本模型決定） |
 | `--decode-min-tps N` | decode 保底速度：其他請求在 prefill 時，每個串流中（decode 中）的請求至少維持 N tok/s；做法是縮短 prefill forward、穿插 decode cycle（預設 20；`0` = 關閉，prefill forward 不受限）。任何 N 的輸出都相同（[server.md](server.md#batching)） |
 | `--kv-ram-mb N` | 前綴快取的主記憶體層，單位 MiB 的 pinned 記憶體（預設：實體記憶體的 1/4，至少 8 GiB 或一個完整長度 session（若更大；27B 模型約 9 GiB），最多 32 GiB，且不超過啟動時可用記憶體的一半；64 GB 的電腦為 16 GiB；整合式 GPU 預設關閉）。啟動日誌會印出選定的大小與原因。閒置 session 會複製到這裡，下次直接還原而不必重新 prefill。`0` 會關閉兩個 host 層。**Radeon 8060S**（內顯）：預設 `0` —— KV pool 本來就在系統記憶體；給定大小才會開啟 RAM 與 SSD 層 |
@@ -253,11 +290,12 @@ PowerShell 中先用 `$env:WHIRL_KV = "q8v"` 設定再啟動程式。**一般使
 | `WHIRL_HIP_DEVICE=N` | 裝置索引，略過裝置比對與「一張 GPU 一個行程」的鎖 |
 | `WHIRL_GPU_SHARE=1` | 不等待同一張 GPU 上的其他 WHIRL 行程 |
 | `WHIRL_GPU_WAIT=S` | 等待其他 WHIRL 行程釋放 GPU 的秒數（預設 1800） |
-| `WHIRL_KV=auto\|f16\|q8\|q8h\|q8v` | KV 快取格式。`auto`（預設）：放得下就用 f16；dense 模型依序退到 q8v、q8h；MoE 一律 f16。Radeon 8060S 沒有 q8v / q8h kernel：那裡 auto 會退到 q8，指定 `q8v` / `q8h` 會被拒絕。見 [kv-and-caching.md](kv-and-caching.md#formats) |
+| `WHIRL_MODE=precise\|balance\|fast[:項目]` | 數值模式（= `--precise` / `--balance` / `--fast` / `--mode`；預設 precise）。見[數值模式](#modes) |
+| `WHIRL_KV=auto\|f16\|q8\|q8h\|q8v` | KV 快取格式。`auto`（預設）：f16；balance / fast 模式下 f16 放不下時，dense 模型依序退到 q8v、q8h；MoE 一律 f16。precise 模式下設成 q8 類的值屬於使用者明確要求的有損覆寫。Radeon 8060S 沒有 q8v / q8h kernel：那裡 auto 會退到 q8，指定 `q8v` / `q8h` 會被拒絕。見 [kv-and-caching.md](kv-and-caching.md#formats) |
 | `WHIRL_PREFILL_BATCH=N` | 每次 forward 的 prefill 列數（預設 4096，最多 16384） |
 | `WHIRL_MAX_CTX=N` | `chat` 的預設 context 大小（= `--ctx`；預設 8192） |
 | `WHIRL_CODE_OBJECT=FILE` | 開發用：從這個 code object 載入 GPU kernel，取代內建的 |
-| `WHIRL_MOE_FP8=0` | 專家為 MXFP4 的 MoE 模型：專家 prefill 改用 f16 activation，不用 fp8（預設 fp8，較快的路徑——Ornith MXFP4 在 2k token 約 11.7k 對 8.6k tok/s）。只影響 prefill |
+| `WHIRL_MOE_FP8=0\|1` | 專家為 MXFP4 的 MoE 模型：專家 prefill 用 fp8 activation（項目 `moefp8`：balance / fast 開、precise 關；fp8 是較快的路徑——Ornith MXFP4 在 2k token 約 11.7k 對 8.6k tok/s）。只影響 prefill |
 | `WHIRL_MOE_MXW=0` | 專家為 MXFP4 的 MoE 模型：改用通用的 MXFP4 專家 decode kernel，不用整塊（whole-block）kernel（預設整塊）。影響 decode / 驗證 |
 | `WHIRL_VRAM_LIMIT_MB=N` | 模擬只有 N MiB VRAM 的 GPU（例如在 R9700 上設 `16384` 模擬 16 GB 的 RX 9070 XT）：可用／總 VRAM、WDDM budget 與本行程的配置都以 N 為上限，載入、KV 池大小與自動縮小 prefill batch／checkpoint 數都會跟那張卡一樣。預設關閉 |
 | `WHIRL_EMBD_HOST=0` | token embedding 表放在 VRAM（預設放 pinned 主記憶體；server 會把它的大小併入 pinned 宣告，讓 Shared Usage 監控扣除） |
@@ -334,18 +372,20 @@ PowerShell 中先用 `$env:WHIRL_KV = "q8v"` 設定再啟動程式。**一般使
 | `WHIRL_VIS_PRE=FILE` | 改為前處理這張圖 *（診斷）* |
 | `WHIRL_VIS_PROF=1` | 編碼器各階段計時 *（診斷）* |
 
-### 7.6 數值與速度開關 *（A/B）*
+### <a id="env-numerics"></a>7.6 數值與速度開關 *（A/B）*
+
+有損的開關就是[數值模式](#modes)的項目：預設值跟著模式走，在這裡設定會覆寫模式。
 
 保留給 A/B 測試與數值比對的替代路徑；預設值就是測試過的路徑。「位元相同」的替代路徑算出的位元一樣，只差速度。
 
 | 變數 | 說明 |
 |---|---|
-| `WHIRL_FP8=0` | MXFP4 prefill 改用 f16 activation，不用 fp8 |
+| `WHIRL_FP8=0\|1` | MXFP4 prefill 用 fp8 activation（項目 `fp8`；balance / fast 預設開）。`0` 也會關掉 `WHIRL_MOE_FP8` |
 | `WHIRL_FP8_MASK=BITS` | 使用 fp8 activation 的矩陣乘法類別（預設 7） |
 | `WHIRL_G8T=0` | fp8 GEMM 改用列優先版本，不用 fragment 排列版本（位元相同） |
-| `WHIRL_GDN_WMMA=0\|1` | DeltaNet prefill 區塊用 f16 WMMA（MXFP4 預設開啟） |
-| `WHIRL_FFN_H16=0\|1` | GEMM 以 f16 輸出給逐元素運算（MXFP4 預設開啟） |
-| `WHIRL_Q4_RELAXED=1` | 其他模型也套用 MXFP4 速度模式的 prefill 開關 |
+| `WHIRL_GDN_WMMA=0\|1` | DeltaNet prefill 區塊用 f16 WMMA（項目 `gdnwmma`；balance / fast 下 MXFP4 預設開啟） |
+| `WHIRL_FFN_H16=0\|1` | GEMM 以 f16 輸出給逐元素運算（項目 `h16`；balance / fast 下 MXFP4 預設開啟） |
+| `WHIRL_Q4_RELAXED=1` | 其他模型也套用 MXFP4 balance 模式的 prefill 開關（`gdnwmma`、`h16`） |
 | `WHIRL_ACT_FUSE=0` | prefill 不融合 activation（位元相同） |
 | `WHIRL_GEMMH=0` | 不用 f16 輸出的 prefill GEMM（位元相同） |
 | `WHIRL_GEMMHQ=1` | attention 投影也用 f16 輸出的 GEMM |

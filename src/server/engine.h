@@ -281,6 +281,7 @@ struct EngineOptions {
     std::string model_name;
     std::string model_file;  // GGUF file name without directory (GET /props model_path)
     std::uint32_t ctx = 131072;  // context per slot (cap)
+    std::string numerics_json;   // GET /props "numerics" (numerics::propsJson; empty: not reported)
     std::uint32_t parallel = 4;
     chat::TemplateKind tmpl = chat::TemplateKind::a;
     bool use_mtp = false;
@@ -359,6 +360,12 @@ public:
 
     // read-only facts for the HTTP layer
     const EngineOptions& options() const { return opt_; }
+    // before initPool: precise f16 KV lowered the context per request; numerics mode for /props
+    void setCtx(std::uint32_t c) {
+        ctx_ = c;
+        opt_.ctx = c;
+    }
+    void setNumerics(std::string j) { opt_.numerics_json = std::move(j); }
     const Tokenizer& tokenizer() const { return tok_; }
     const ChatTokens& chatTokens() const { return ct_; }
     ServerModel& model() { return m_; }

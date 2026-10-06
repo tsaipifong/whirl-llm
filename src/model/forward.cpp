@@ -888,7 +888,7 @@ bool Model::moeGuFused(const MoeW& mo) const {
 // Prefill experts on the MXFP4 x fp8 grouped GEMM: all three expert tensors MXFP4 with
 // load-time row exponents, fp8 prefill on (speed mode), kernels present.
 bool Model::moeFp8(const MoeW& mo) const {
-    return moe_fp8 && fp8_prefill && mo.gate.ty == GgmlType::mxfp4 && mo.up.ty == GgmlType::mxfp4 && mo.down.ty == GgmlType::mxfp4 &&
+    return moe_fp8 && mo.gate.ty == GgmlType::mxfp4 && mo.up.ty == GgmlType::mxfp4 && mo.down.ty == GgmlType::mxfp4 &&
            mo.gate.ref != 0 && mo.up.ref != 0 && mo.down.ref != 0 && mo.gate.row_bytes == mo.up.row_bytes && moe_sx != 0 &&
            k.gemm8_moe != nullptr && k.gemm8_moe32 != nullptr && k.gemm8_moeh != nullptr && k.gemm8_moe32h != nullptr &&
            k.moe_gather_fp8 != nullptr && k.silu_mul_x8h != nullptr;
