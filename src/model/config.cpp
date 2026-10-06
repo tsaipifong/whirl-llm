@@ -171,7 +171,19 @@ void applyGemvEnv(Model& m) {
     if (auto v = envGet("GEMV_WH")) parseGemvWHead(m, *v);
 }
 
-MtpDefaults mtpDefaults(bool moe) {
+MtpDefaults mtpDefaults(bool moe, hip::Arch arch) {
+    if (arch == hip::Arch::gfx1151) {
+        // Radeon 8060S (UMA, measured there): the draft counts, the draft-vocabulary default and
+        // the n-gram minimum match measured the same as on the R9700 (within noise), but a verify
+        // row costs far more: ~+11 ms per extra row on a ~95 ms 1-draft cycle at 9k context
+        // (slope ~0.12, vs 0.015 on the R9700). With the R9700 prior the first n-gram proposal
+        // of a request took 8 drafts and lost the cycle (agent tool-output replay: -6%).
+        // qwen35moe (Ornith): 0.12 gave +1.6% on that replay but -2.2% on a file edit that
+        // n-gram drafts best: it keeps the R9700 prior (and one MTP draft per cycle, also
+        // fastest there: 2 fixed / 3 auto were 1-12% slower).
+        if (moe) return {1, 0.0f, 0, false, 3, 0.015f};
+        return {8, 0.0f, 0, true, 3, 0.12f};
+    }
     // dense qwen35 (Qwen3.8-27B): chained drafts stay good out to 10 -> cost-model
     // auto, max 8. qwen35moe (Ornith-35B-A3B): one draft per cycle is fastest.
     if (moe) return {1, 0.0f, 0, false};

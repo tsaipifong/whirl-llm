@@ -388,6 +388,7 @@ struct ChatOpts {
     u32 trace_tps = 0;
     bool ngram = true;
     u32 ngram_min = 3;
+    float ngram_slope = 0.015f;
     u32 ngram_max = 0;
     bool ngram_force = false;
     bool ngram_debug = false;
@@ -502,6 +503,8 @@ DecodeResult specDecode(q::Model& model, const Tok& tok, u32 first, u32 n_prompt
     q::DraftTiming timing;
     std::vector<u32> hist;
     q::NgramPolicy ngp;
+    ngp.verify_slope = opt.ngram_slope;
+    ngp.reset();
     if (opt.ngram) ngp.ng.norm = tok.crlfToLf();
     u32 ng_max = opt.ngram_max > 0 ? std::min(opt.ngram_max, q::max_ng_drafts) : q::max_ng_drafts;
     // the unfused decode path snapshots row 0 only: more than 1 draft would restore an unwritten set
@@ -750,7 +753,7 @@ bool thinkFromArgs(const Args& a) {
 }
 
 ChatOpts mtpOpts(const q::Model& model, ChatOpts base, u32* drafts_out) {
-    const q::MtpDefaults def = q::mtpDefaults(model.cfg.moe);
+    const q::MtpDefaults def = q::mtpDefaults(model.cfg.moe, model.arch);
     u32 drafts = def.drafts;
     const auto dv = envGet("MTP_DRAFTS");
     if (dv) {
@@ -763,6 +766,8 @@ ChatOpts mtpOpts(const q::Model& model, ChatOpts base, u32* drafts_out) {
     base.trace_tps = envU32("TRACE_TPS").value_or(0);
     base.mtp_p_min = def.p_min;
     base.mtp_adapt = def.adapt;
+    base.ngram_min = def.ngram_min;
+    base.ngram_slope = def.ngram_slope;
     // an explicit draft count is used as is (fixed) unless WHIRL_MTP_ADAPT asks otherwise
     base.mtp_auto = def.automatic && !dv;
     if (auto v = envGet("MTP_PMIN")) {
@@ -779,6 +784,7 @@ ChatOpts mtpOpts(const q::Model& model, ChatOpts base, u32* drafts_out) {
     }
     if (auto v = envGet("NGRAM")) base.ngram = *v != "0";
     if (auto v = envGet("NGRAM_MIN")) base.ngram_min = static_cast<u32>(std::strtoul(v->c_str(), nullptr, 10));
+    if (auto v = envGet("NGRAM_SLOPE")) base.ngram_slope = std::strtof(v->c_str(), nullptr);
     if (auto v = envGet("NGRAM_MAX")) base.ngram_max = static_cast<u32>(std::strtoul(v->c_str(), nullptr, 10));
     if (auto v = envGet("NGRAM_FORCE")) base.ngram_force = *v != "0";
     if (auto v = envGet("NGRAM_DEBUG")) base.ngram_debug = *v != "0";

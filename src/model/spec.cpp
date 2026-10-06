@@ -546,7 +546,7 @@ Ngram::Match Ngram::lookup(std::span<const u32> toks, u32 min_match, std::span<u
 void NgramPolicy::reset() {
     ng.reset();
     acc = priorAcc();
-    timing = priorTiming();
+    timing = priorTiming(verify_slope);
     n_pend = 0;
 }
 

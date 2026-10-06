@@ -1291,6 +1291,7 @@ bool Engine::startJob(Slot& sl, Job& job) {
     sl.dacc = qwen35::DraftAccept{};
     sl.sacc = qwen35::SlotAccept{};
     sl.d_prev = 0;
+    sl.ng.verify_slope = opt_.ngram_slope;
     sl.ng.reset();
     sl.ng.ng.norm = crlf_norm_;
     sl.ng_cycles = 0;

@@ -756,8 +756,12 @@ struct MtpDefaults {
     float p_min;
     std::uint32_t adapt;
     bool automatic;
+    std::uint32_t ngram_min = 3;  // n-gram drafting: shortest history suffix match (WHIRL_NGRAM_MIN)
+    float ngram_slope = 0.015f;   // NgramPolicy::verify_slope (WHIRL_NGRAM_SLOPE)
 };
-MtpDefaults mtpDefaults(bool moe);
+// Per-device defaults: gfx1201 (R9700) is the reference; gfx1151 (Radeon 8060S, UMA,
+// bandwidth-bound decode) has its own values measured on that device.
+MtpDefaults mtpDefaults(bool moe, hip::Arch arch = hip::Arch::gfx1201);
 
 struct DraftAccept {
     std::array<float, max_ng_drafts> alpha;
@@ -928,9 +932,11 @@ private:
 class NgramPolicy {
 public:
     Ngram ng;
+    // prior cost of one more verify row relative to a 1-draft MTP cycle, used until the n-gram
+    // cycles are timed (per device: MtpDefaults::ngram_slope; set it before reset())
+    float verify_slope = 0.015f;
     std::array<DraftAccept, 3> acc = priorAcc();
-    DraftTiming timing = priorTiming();
-    static constexpr float verify_slope = 0.015f;
+    DraftTiming timing = priorTiming(verify_slope);
     static constexpr float acc_rate = 0.2f;
 
     static std::uint32_t bucket(std::uint32_t mlen) { return mlen >= 24 ? 2 : (mlen >= 8 ? 1 : 0); }
@@ -946,9 +952,9 @@ private:
         std::array<std::uint32_t, max_ng_drafts> toks{};
     };
     static std::array<DraftAccept, 3> priorAcc() { return {DraftAccept(0.35f), DraftAccept(0.7f), DraftAccept(0.85f)}; }
-    static DraftTiming priorTiming() {
+    static DraftTiming priorTiming(float slope) {
         DraftTiming t;
-        t.prior_slope = verify_slope;
+        t.prior_slope = slope;
         t.skip_first = true;
         return t;
     }
