@@ -7,6 +7,7 @@
 #include "whirl/json.h"
 #include "whirl/tokenizer.h"
 #include "whirl/unicode.h"
+#include "whirl/vram_limit.h"
 
 #include <cstdio>
 #include <cstring>
@@ -475,6 +476,199 @@ void testChat() {
     CHECK(chat::detectTemplate("{% if x %}") == chat::TemplateKind::b);
 }
 
+void testVramLimit() {
+    constexpr std::uint64_t MiB = 1ull << 20, GiB = 1ull << 30;
+    // WHIRL_VRAM_LIMIT_MB parsing
+    CHECK_EQ(vram::parseLimitMb("16384"), 16384ull);
+    CHECK_EQ(vram::parseLimitMb(" 15360 "), 15360ull);
+    CHECK_EQ(vram::parseLimitMb(""), 0ull);
+    CHECK_EQ(vram::parseLimitMb("0"), 0ull);
+    CHECK_EQ(vram::parseLimitMb("-1"), 0ull);
+    CHECK_EQ(vram::parseLimitMb("16G"), 0ull);
+    CHECK_EQ(vram::parseLimitMb("99999999999999"), 0ull);
+    CHECK_EQ(vram::parseLimitMb(nullptr), 0ull);
+
+    // clamp: the simulated card keeps other programs' use, loses the missing VRAM
+    const std::uint64_t total = 32 * GiB - 300 * MiB, free = total - 1 * GiB;
+    const auto c = vram::clampMemInfo(free, total, 16 * GiB);
+    CHECK_EQ(c.total, 16 * GiB);
+    CHECK_EQ(c.free, 15 * GiB);
+    CHECK_EQ(c.total - c.free, total - free);  // used stays the same
+    const auto n = vram::clampMemInfo(free, total, 0);
+    CHECK(n.free == free && n.total == total);  // no limit: unchanged
+    const auto big = vram::clampMemInfo(free, total, 64 * GiB);
+    CHECK(big.free == free && big.total == total);  // limit above the card: unchanged
+    CHECK_EQ(vram::clampMemInfo(2 * GiB, total, 1 * GiB).free, 0ull);  // floor at 0
+    // WDDM budget: lowered by the VRAM the simulated card lacks
+    const std::uint64_t budget = 31 * GiB;
+    CHECK_EQ(vram::clampBudget(budget, total, 16 * GiB), budget - (total - 16 * GiB));
+    CHECK_EQ(vram::clampBudget(budget, total, 0), budget);
+    CHECK_EQ(vram::clampBudget(1 * GiB, total, 1 * GiB), 0ull);
+    // allocation cap of the process: the simulated card's free VRAM at the first allocation
+    CHECK_EQ(vram::processCap(free, total, 16 * GiB), 15 * GiB);
+
+    // counter: over-cap allocations are refused and leave the count unchanged
+    vram::Counter k;
+    k.setCap(10 * MiB);
+    CHECK(k.tryReserve(4 * MiB));
+    CHECK(k.tryReserve(6 * MiB));
+    CHECK_EQ(k.live(), 10 * MiB);
+    CHECK(!k.tryReserve(1));
+    CHECK_EQ(k.live(), 10 * MiB);
+    k.release(6 * MiB);
+    CHECK(!k.tryReserve(7 * MiB));
+    CHECK(k.tryReserve(6 * MiB));
+    CHECK(!k.tryReserve(~0ull));  // no wrap-around
+    k.release(100 * MiB);         // over-release clamps at 0
+    CHECK_EQ(k.live(), 0ull);
+    vram::Counter u;  // cap 0 = unlimited
+    CHECK(u.tryReserve(64 * GiB) && u.live() == 64 * GiB);
+
+    // limit note / override
+    vram::setLimitMb(16384);
+    CHECK_EQ(vram::limitBytes(), 16384 * MiB);
+    CHECK(vram::limitNote() == "VRAM limit 16384 MiB (WHIRL_VRAM_LIMIT_MB)");
+    vram::setLimitMb(0);
+    CHECK(vram::limitNote().empty());
+
+    // auto-shrink decision. 27B Q3_K_S-like on 16 GB: weights 11.35 GiB, prefill buffers
+    // ~0.56 MiB per row (2.3 GiB at 4096), checkpoints 150.6 MiB, q8h 36.1 KiB/token
+    vram::FitInput fi;
+    fi.avail = 13 * GiB + 700 * MiB;
+    fi.weights = 11 * GiB + 358 * MiB;
+    fi.fixed = 512 * MiB;
+    fi.buf_per_row = 576 * 1024;
+    fi.buf_fixed = 64 * MiB;
+    fi.ckpt_bytes = 150 * MiB;
+    fi.parallel = 1;
+    fi.kv_per_token = 36 * 1024;
+    fi.pool_min_tokens = 16384;
+    fi.batch = 4096;
+    fi.n_ck = 4;
+    fi.n_spe = 2;
+    CHECK_EQ(vram::fixedNeed(fi, 4096, 4, 2), fi.weights + fi.fixed + fi.buf_fixed + fi.buf_per_row * 4096 + 6 * fi.ckpt_bytes);
+    const vram::FitPlan p = vram::planFit(fi);
+    CHECK(p.reduced && p.fits);
+    CHECK_EQ(p.batch, 1024u);
+    CHECK_EQ(p.n_ck, 2u);
+    CHECK_EQ(p.n_spe, 1u);
+    CHECK(p.pool_tokens >= 16384);
+    CHECK(p.note == "prefill batch 4096 -> 1024, checkpoints per slot 4 -> 2, shared checkpoints 2 -> 1");
+    // the same model on 32 GB: nothing changes
+    vram::FitInput roomy = fi;
+    roomy.avail = 29 * GiB;
+    const vram::FitPlan pr = vram::planFit(roomy);
+    CHECK(!pr.reduced && pr.fits && pr.batch == 4096 && pr.n_ck == 4 && pr.n_spe == 2 && pr.note.empty());
+    // just short of the wanted pool: only the first step (batch 2048)
+    vram::FitInput step1 = fi;
+    step1.avail = vram::fixedNeed(fi, 4096, 4, 2) + 16000ull * fi.kv_per_token;
+    const vram::FitPlan p1 = vram::planFit(step1);
+    CHECK(p1.reduced && p1.batch == 2048 && p1.n_ck == 4 && p1.n_spe == 2);
+    // user-set batch: only the checkpoints move
+    vram::FitInput fixb = fi;
+    fixb.batch_fixed = true;
+    const vram::FitPlan pb = vram::planFit(fixb);
+    CHECK(pb.batch == 4096 && pb.n_ck == 1 && pb.n_spe == 0);
+    // both fixed: no change, and it does not fit
+    vram::FitInput fixall = fixb;
+    fixall.ck_fixed = true;
+    fixall.avail = 12 * GiB;
+    const vram::FitPlan pf = vram::planFit(fixall);
+    CHECK(!pf.reduced && !pf.fits && pf.pool_tokens < 4096);
+    // hopeless (weights alone over the budget): every step taken, still does not fit
+    vram::FitInput hopeless = fi;
+    hopeless.avail = 10 * GiB;
+    const vram::FitPlan ph = vram::planFit(hopeless);
+    CHECK(ph.reduced && !ph.fits && ph.batch == 512 && ph.n_ck == 1 && ph.n_spe == 0 && ph.pool_tokens == 0);
+    // prefix cache off (0 checkpoints): checkpoint steps change nothing
+    vram::FitInput nopc = fi;
+    nopc.n_ck = 0;
+    nopc.n_spe = 0;
+    const vram::FitPlan pn = vram::planFit(nopc);
+    CHECK(pn.n_ck == 0 && pn.n_spe == 0 && pn.batch <= 2048);
+}
+
+// server defaults by card size (vram::cardDefaults)
+void testCardDefaults() {
+    const std::uint64_t GiB = 1ull << 30, MiB = 1ull << 20;
+    // R9700 32 GB / RX 7900 XTX 24 GB: unchanged (4 slots, f16 when it fits, no headroom, no log line)
+    for (std::uint64_t t : {32 * GiB - 140 * MiB, 24 * GiB, 20 * GiB}) {
+        vram::CardInput in;
+        in.total = t;
+        const vram::CardDefaults d = vram::cardDefaults(in);
+        CHECK(!d.small && d.parallel == 4 && !d.parallel_auto && !d.prefer_q8v && d.headroom == 0 && d.note.empty());
+    }
+    // 16 GB card (or WHIRL_VRAM_LIMIT_MB=16384 / 14336): 1 slot, q8v first, 1536 MiB headroom
+    for (std::uint64_t t : {16 * GiB, 14336 * MiB, 20 * GiB - 1}) {
+        vram::CardInput in;
+        in.total = t;
+        const vram::CardDefaults d = vram::cardDefaults(in);
+        CHECK(d.small && d.parallel == 1 && d.parallel_auto && d.prefer_q8v);
+        CHECK_EQ(d.headroom, 1536 * MiB);
+        CHECK(d.note.find("small card") != std::string::npos && d.note.find("--parallel 1") != std::string::npos &&
+              d.note.find("q8v") != std::string::npos && d.note.find("1536 MiB") != std::string::npos);
+    }
+    vram::CardInput s16;
+    s16.total = 16 * GiB;
+    // --parallel given: kept (also --parallel 4 explicitly)
+    {
+        vram::CardInput in = s16;
+        in.parallel_arg = 4;
+        const vram::CardDefaults d = vram::cardDefaults(in);
+        CHECK(d.small && d.parallel == 4 && !d.parallel_auto && d.note.find("--parallel 4 (given)") != std::string::npos);
+        in.parallel_arg = 2;
+        CHECK_EQ(vram::cardDefaults(in).parallel, 2u);
+    }
+    // WHIRL_KV=f16 (or a MoE model): no q8v preference
+    {
+        vram::CardInput in = s16;
+        in.kv_auto = false;
+        const vram::CardDefaults d = vram::cardDefaults(in);
+        CHECK(d.small && !d.prefer_q8v && d.parallel == 1 && d.note.find("WHIRL_KV") != std::string::npos);
+    }
+    // WHIRL_VRAM_HEADROOM_MB overrides, on small and large cards; 0 = none
+    {
+        vram::CardInput in = s16;
+        in.headroom_mb_env = 0;
+        CHECK_EQ(vram::cardDefaults(in).headroom, 0ull);
+        in.headroom_mb_env = 3072;
+        CHECK_EQ(vram::cardDefaults(in).headroom, 3072 * MiB);
+        vram::CardInput big;
+        big.total = 32 * GiB;
+        big.headroom_mb_env = 1024;
+        const vram::CardDefaults d = vram::cardDefaults(big);
+        CHECK(!d.small && d.parallel == 4 && !d.prefer_q8v && d.headroom == 1024 * MiB && d.note.find("1024 MiB") != std::string::npos);
+    }
+    // explicit WHIRL_POOL_RESERVE_MB: no default headroom (WHIRL_VRAM_HEADROOM_MB still adds one)
+    {
+        vram::CardInput in = s16;
+        in.reserve_explicit = true;
+        CHECK_EQ(vram::cardDefaults(in).headroom, 0ull);
+        in.headroom_mb_env = 512;
+        CHECK_EQ(vram::cardDefaults(in).headroom, 512 * MiB);
+    }
+    // UMA iGPU (8060S) and an unknown size are never "small"
+    {
+        vram::CardInput in = s16;
+        in.uma = true;
+        const vram::CardDefaults d = vram::cardDefaults(in);
+        CHECK(!d.small && d.parallel == 4 && d.headroom == 0);
+        vram::CardInput z;
+        CHECK(!vram::cardDefaults(z).small);
+    }
+    // small-card KV: q8v (full floor), q8v with a short pool (>= 64k tokens), else q8h
+    {
+        const std::uint64_t q8v = 28262;  // ~27.6 KiB/token (Ornith 9B)
+        const std::uint64_t floor = 131072 + 256;
+        CHECK(vram::smallCardKv(5 * GiB + 400 * MiB, floor, q8v) == vram::SmallKv::q8v);           // cap 16384
+        CHECK(vram::smallCardKv(3 * GiB + 400 * MiB, floor, q8v) == vram::SmallKv::q8v_short);     // cap 14336
+        CHECK(vram::smallCardKv(floor * q8v, floor, q8v) == vram::SmallKv::q8v);
+        CHECK(vram::smallCardKv(65536 * q8v, floor, q8v) == vram::SmallKv::q8v_short);
+        CHECK(vram::smallCardKv(65536 * q8v - 1, floor, q8v) == vram::SmallKv::q8h);
+        CHECK(vram::smallCardKv(1 * GiB, floor, 0) == vram::SmallKv::q8h);
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -484,6 +678,8 @@ int main() {
     testGgufHardening();
     testTokenizerByteTokens();
     testChat();
+    testVramLimit();
+    testCardDefaults();
     std::printf("unit tests: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

@@ -206,7 +206,8 @@ public:
         argv.insert(argv.end(), args.begin(), args.end());
         std::wstring cmd;
         for (const auto& a : argv) cmd += (cmd.empty() ? L"" : L" ") + quoteArg(widen(a));
-        // environment: ours minus WHIRL_* (WHIRL_DEVICE kept) plus the extras
+        // environment: ours minus WHIRL_* (WHIRL_DEVICE and WHIRL_VRAM_LIMIT_MB kept: they describe
+        // the GPU, so a gate under a simulated 16 GB card runs its servers on that card) plus the extras
         std::vector<std::pair<std::wstring, std::wstring>> envv;
         if (wchar_t* blk = GetEnvironmentStringsW()) {
             for (const wchar_t* p = blk; *p; p += wcslen(p) + 1) {
@@ -215,7 +216,7 @@ public:
                 if (eq == std::wstring::npos) continue;
                 std::wstring k = s.substr(0, eq), up = k;
                 for (auto& c : up) c = static_cast<wchar_t>(towupper(c));
-                if (up.rfind(L"WHIRL_", 0) == 0 && up != L"WHIRL_DEVICE") continue;
+                if (up.rfind(L"WHIRL_", 0) == 0 && up != L"WHIRL_DEVICE" && up != L"WHIRL_VRAM_LIMIT_MB") continue;
                 envv.emplace_back(k, s.substr(eq + 1));
             }
             FreeEnvironmentStringsW(blk);

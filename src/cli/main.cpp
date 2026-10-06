@@ -16,6 +16,7 @@
 #include "whirl/hip.h"
 #include "whirl/model.h"
 #include "whirl/tokenizer.h"
+#include "whirl/vram_limit.h"
 
 #if WHIRL_HAVE_SERVER
 #include "server/server_main.h"
@@ -727,6 +728,7 @@ void loadLog(q::Model& m, const q::LoadStats& stats) {
     out(fmt("  loaded %u tensors, %.2f GiB in %.1f s (%.2f GB/s); VRAM free %.2f/%.2f GiB\n", stats.tensors,
             static_cast<double>(stats.bytes) / (1024.0 * 1024.0 * 1024.0), stats.ms / 1000.0, static_cast<double>(stats.bytes) / (stats.ms * 1e6),
             static_cast<double>(mem.free) / (1024.0 * 1024.0 * 1024.0), static_cast<double>(mem.total) / (1024.0 * 1024.0 * 1024.0)));
+    if (vram::limitBytes()) out(fmt("  %s: VRAM sizes and allocations are capped (simulated card)\n", vram::limitNote().c_str()));
     out(fmt("  KV cache: %s, %u tokens\n", m.kvName(), m.max_ctx));
     if (envGet("LOAD_DEBUG")) out(fmt("  gdn beta/alpha contiguous: %u layers\n", stats.gdn_ba_contig));
 }

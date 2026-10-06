@@ -19,6 +19,7 @@
 #include "whirl/hip.h"
 #include "whirl/model.h"
 #include "whirl/tokenizer.h"
+#include "whirl/vram_limit.h"
 #include "release/release.h"
 
 #include <algorithm>
@@ -94,6 +95,8 @@ constexpr std::uint32_t serve_prefill_batch = 4096;
 constexpr std::size_t n_ckpt_default = 4;
 constexpr std::size_t n_ckpt_default_par = 2;
 constexpr std::size_t n_spe_default = 2;
+// KV pool (tokens, smallest format) below which startup lowers the prefill batch / checkpoints
+constexpr std::uint32_t vram_tight_pool = 16384;
 constexpr std::uint32_t sys_min_default = 2048;
 constexpr std::uint64_t kv_ssd_gb_default = 64;
 constexpr std::uint32_t decode_min_tps_default = 20;
@@ -111,7 +114,7 @@ const char* kHelpBody =
     "  --port N                 TCP port (default 8080)\n"
     "  --alias NAME             model id reported by /v1/models (default: the file name without .gguf)\n"
     "  --device D               GPU: r9700 (default), 8060s, a device index, or a name / gfx substring\n"
-    "  -np, --parallel N        concurrent request slots (continuous batching, 1..16; default 4)\n"
+    "  -np, --parallel N        concurrent request slots (continuous batching, 1..16; default 4, 1 on cards < 20 GiB)\n"
     "  -c, --ctx N              shared KV pool in tokens; slots take pages on demand and idle slots'\n"
     "                           prefix caches are evicted (LRU) when it is full (default: all VRAM\n"
     "                           left over, kept 768 MiB (MoE 1.5 GiB) under both the free VRAM and the\n"
@@ -152,6 +155,7 @@ struct Options {
     std::uint16_t port = 8080;
     std::optional<std::uint32_t> ctx;
     std::uint32_t parallel = 4;
+    bool parallel_given = false;  // --parallel / -np on the command line
     std::optional<std::uint32_t> ctx_per_slot;
     std::optional<std::uint32_t> mtp_drafts;
     std::optional<std::uint32_t> decode_min_tps;
@@ -345,8 +349,8 @@ int serveMain(int argc, char** argv, const char* program) {
         else if (auto v2 = argValue(args, i, "--port")) opt.port = parseNum<std::uint16_t>(*v2, "--port");
         else if (auto v3 = argValue(args, i, "--ctx")) opt.ctx = parseNum<std::uint32_t>(*v3, "--ctx");
         else if (auto v3b = argValue(args, i, "-c")) opt.ctx = parseNum<std::uint32_t>(*v3b, "--ctx");
-        else if (auto v4 = argValue(args, i, "--parallel")) opt.parallel = parseNum<std::uint32_t>(*v4, "--parallel");
-        else if (auto v4b = argValue(args, i, "-np")) opt.parallel = parseNum<std::uint32_t>(*v4b, "--parallel");
+        else if (auto v4 = argValue(args, i, "--parallel")) { opt.parallel = parseNum<std::uint32_t>(*v4, "--parallel"); opt.parallel_given = true; }
+        else if (auto v4b = argValue(args, i, "-np")) { opt.parallel = parseNum<std::uint32_t>(*v4b, "--parallel"); opt.parallel_given = true; }
         else if (auto v5 = argValue(args, i, "--mtp-drafts"))
             opt.mtp_drafts = std::clamp(parseNum<std::uint32_t>(*v5, "--mtp-drafts"), 1u, qwen35::max_drafts);
         else if (auto v5b = argValue(args, i, "--decode-min-tps"))
@@ -417,8 +421,25 @@ int serveMain(int argc, char** argv, const char* program) {
              cfg.n_embd, cfg.n_ff, cfg.n_vocab, cfg.n_nextn > 0 ? ", MTP (nextn) layer" : "");
         if (cfg.moe)
             logI("experts {} (top {}, ff {}) + shared expert ff {}", cfg.n_expert, cfg.n_expert_used, cfg.n_ff_exp, cfg.n_ff);
-        logI("device {}: {} ({}), {:.1f} GiB VRAM", dev, info.name, info.gcn_arch,
-             static_cast<double>(info.total_mem) / (1024.0 * 1024.0 * 1024.0));
+        logI("device {}: {} ({}), {:.1f} GiB VRAM{}", dev, info.name, info.gcn_arch,
+             static_cast<double>(info.total_mem) / (1024.0 * 1024.0 * 1024.0), vram::limitBytes() ? " (simulated limit)" : "");
+        if (vram::limitBytes()) logI("{}: memory sizes, the WDDM budget and allocations are capped as on a card of that size", vram::limitNote());
+        // small cards (< 20 GiB, e.g. a 16 GB RX 9070 XT that also drives the desktop): 1 slot,
+        // q8v KV first, VRAM headroom for other apps; cards >= 20 GiB are unchanged
+        vram::CardDefaults card;
+        {
+            vram::CardInput ci;
+            ci.total = info.total_mem;
+            ci.uma = is_uma;
+            if (opt.parallel_given) ci.parallel_arg = opt.parallel;
+            ci.parallel_default = opt.parallel;
+            ci.kv_auto = env("KV").value_or("auto") == "auto" && !cfg.moe;
+            if (env("VRAM_HEADROOM_MB")) ci.headroom_mb_env = envU32("VRAM_HEADROOM_MB", 0);
+            ci.reserve_explicit = env("POOL_RESERVE_MB").has_value();
+            card = vram::cardDefaults(ci);
+            opt.parallel = card.parallel;
+            if (!card.note.empty()) logI("{}", card.note);
+        }
 
         const Tokenizer tok = Tokenizer::fromGguf(f);
         const std::string_view tmpl_text = f.getStringOr("tokenizer.chat_template", "");
@@ -437,6 +458,80 @@ int serveMain(int argc, char** argv, const char* program) {
                 lo.max_batch = std::clamp(static_cast<std::uint32_t>(std::stoul(*v)), 1u, qwen35::max_batch_limit);
             } catch (const std::exception&) {
             }
+        }
+        // prefix checkpoints (per slot / shared); the auto-shrink below may lower the defaults
+        const bool no_pc = envOn("NO_PREFIX_CACHE", false);
+        const std::size_t ck_def = opt.parallel == 1 ? n_ckpt_default : (opt.parallel <= 4 ? n_ckpt_default_par : 1);
+        std::size_t n_ck = no_pc ? 0 : envU32("SERVE_CKPTS", static_cast<std::uint32_t>(ck_def));
+        std::uint32_t n_spe_plan = (n_ck == 0 || no_pc) ? 0 : envU32("SYS_CKPTS", static_cast<std::uint32_t>(n_spe_default));
+        // VRAM estimate before loading: when the KV pool left after weights, prefill buffers and
+        // checkpoints would be small, lower the prefill batch and the checkpoint counts first
+        // (only values the user did not set; nothing changes when the pool has room). Not on the
+        // UMA iGPU, whose VRAM numbers do not bound what it can allocate.
+        if (!is_uma) {
+            const qwen35::LoadEstimate est = qwen35::estimateLoad(f, cfg, lo.embd_on_host);
+            const hip::MemInfo mf = hip::memInfo();
+            const hip::WddmMemInfo w = hip::wddmMemInfo();
+            const bool res_explicit = env("POOL_RESERVE_MB").has_value();
+            const std::uint64_t res = static_cast<std::uint64_t>(envU32("POOL_RESERVE_MB", cfg.moe ? 1536 : (w.ok ? 768 : 3072))) << 20;
+            const std::uint64_t margin = static_cast<std::uint64_t>(envU32("POOL_BUDGET_MARGIN_MB", cfg.moe ? 1536 : 768)) << 20;
+            std::uint64_t av = mf.free > res ? mf.free - res : 0;
+            if (!res_explicit && w.ok) av = std::min(av, w.local_budget > w.local_usage + margin ? w.local_budget - w.local_usage - margin : 0);
+            av = av > card.headroom ? av - card.headroom : 0;
+            std::uint64_t n_gdn_c = 0;
+            for (std::uint32_t li = 0; li < cfg.n_layer; ++li)
+                if (!cfg.isAttn(li)) ++n_gdn_c;
+            const std::uint64_t st1 = n_gdn_c * (static_cast<std::uint64_t>(cfg.d_conv - 1) * cfg.convCh() * 4 +
+                                                 static_cast<std::uint64_t>(cfg.n_v_heads) * cfg.d_state * cfg.headV() * 4);
+            const std::uint64_t pend1 = n_gdn_c * (static_cast<std::uint64_t>(qwen35::max_small_batch) * cfg.convCh() * 4 +
+                                                   static_cast<std::uint64_t>(qwen35::max_small_batch) * cfg.n_v_heads *
+                                                       (cfg.d_state + cfg.headV() + 2) * 4);
+            vram::FitInput fi;
+            fi.avail = av;
+            fi.weights = est.weights;
+            // load-time state, per-slot state + replay rows, draft head (64k rows, 2 bit), slack; and the
+            // ~4% more that WDDM sees for this process than the sum of its allocations
+            fi.fixed = est.state + opt.parallel * (st1 + pend1) + (est.has_mtp ? 65536ull * cfg.n_embd * 5 / 16 : 0) + (256ull << 20);
+            fi.fixed += (est.weights + fi.fixed) / 25;
+            const std::uint64_t b2 = qwen35::bufferBytes(cfg, 2048, est.ffs, est.max_elems);
+            const std::uint64_t b4 = qwen35::bufferBytes(cfg, 4096, est.ffs, est.max_elems);
+            fi.buf_per_row = (b4 - b2) / 2048;
+            fi.buf_fixed = b2 - fi.buf_per_row * 2048;
+            // (WHIRL_CKPT_HOST=1: checkpoints in pinned host memory, no VRAM)
+            fi.ckpt_bytes = envOn("CKPT_HOST", false) ? 0 : st1 + static_cast<std::uint64_t>(cfg.n_embd) * 4 + static_cast<std::uint64_t>(cfg.n_vocab) * 4;
+            fi.parallel = opt.parallel;
+            const std::string kv_env = env("KV").value_or("auto");
+            fi.kv_per_token = kv_env == "f16" ? est.kv_f16 : kv_env == "q8v" ? est.kv_q8v : (kv_env == "q8" || kv_env == "q8h") ? est.kv_q8h
+                              : cfg.moe ? est.kv_f16 : est.kv_q8h;
+            fi.pool_min_tokens = pool_req ? *pool_req : std::min<std::uint32_t>(slot_ctx, vram_tight_pool);
+            fi.batch = lo.max_batch;
+            fi.n_ck = static_cast<std::uint32_t>(n_ck);
+            fi.n_spe = n_spe_plan;
+            fi.batch_fixed = env("PREFILL_BATCH").has_value();
+            fi.ck_fixed = env("SERVE_CKPTS").has_value() || env("SYS_CKPTS").has_value();
+            const vram::FitPlan plan = vram::planFit(fi);
+            const double g = 1024.0 * 1024.0 * 1024.0;
+            if (plan.reduced) {
+                lo.max_batch = plan.batch;
+                n_ck = plan.n_ck;
+                n_spe_plan = plan.n_spe;
+                logW("VRAM is tight (about {:.2f} GiB usable for weights {:.2f} GiB + buffers + checkpoints + KV): reduced {} so the KV "
+                     "pool gets about {} tokens (wanted {}); set WHIRL_PREFILL_BATCH / WHIRL_SERVE_CKPTS / WHIRL_SYS_CKPTS to choose",
+                     av / g, est.weights / g, plan.note, plan.pool_tokens, fi.pool_min_tokens);
+            }
+            // not even the weights + smallest buffers fit (no room for any KV): stop before a load that
+            // would run out of memory part way through, with the "smaller quantization" advice
+            // (WHIRL_FIT_CHECK=0 loads anyway; borderline cases only warn)
+            if (!plan.fits && plan.pool_tokens == 0 && envOn("FIT_CHECK", true))
+                throw qwen35::ModelError("VramLimit",
+                                         std::format("needs about {:.2f} GiB of VRAM before any KV cache (weights {:.2f} GiB + prefill batch {}, "
+                                                     "state, checkpoints), about {:.2f} GiB usable of {:.2f} GiB{}",
+                                                     plan.need_fixed / g, est.weights / g, plan.batch, av / g, mf.total / g,
+                                                     vram::limitBytes() ? " (" + vram::limitNote() + ")" : std::string()));
+            if (!plan.fits)
+                logW("VRAM estimate: weights + buffers + checkpoints {:.2f} GiB leave about {} KV tokens of {:.2f} GiB usable "
+                     "(at least {} needed); the model may not fit this GPU",
+                     plan.need_fixed / g, plan.pool_tokens, av / g, fi.pool_hard_min);
         }
         std::size_t prefill_exec = 2048;
         if (auto v = env("PREFILL_CHUNK")) {
@@ -600,9 +695,6 @@ int serveMain(int argc, char** argv, const char* program) {
         }
 
         // engine (checkpoint buffers, shared checkpoints, sampling buffers)
-        const bool no_pc = envOn("NO_PREFIX_CACHE", false);
-        const std::size_t ck_def = opt.parallel == 1 ? n_ckpt_default : (opt.parallel <= 4 ? n_ckpt_default_par : 1);
-        const std::size_t n_ck = no_pc ? 0 : envU32("SERVE_CKPTS", static_cast<std::uint32_t>(ck_def));
         const std::uint64_t conv_bytes = model.convBytes();
         const std::uint64_t ssm_bytes = model.ssmBytes();
         std::uint64_t n_gdn = 0;
@@ -661,7 +753,7 @@ int serveMain(int argc, char** argv, const char* program) {
         eo.sys_min = envU32("SYS_MIN", sys_min_default);
         eo.lcp_on = envOn("SYS_LCP", true);
         eo.n_ck = n_ck;
-        eo.n_spe = (n_ck == 0 || no_pc) ? 0 : envU32("SYS_CKPTS", static_cast<std::uint32_t>(n_spe_default));
+        eo.n_spe = (n_ck == 0 || no_pc) ? 0 : n_spe_plan;
         eo.ckpt_host = envOn("CKPT_HOST", false);
         eo.prefill_exec = prefill_exec;
         eo.seed = seed0;
@@ -757,6 +849,11 @@ int serveMain(int argc, char** argv, const char* program) {
             } else {
                 budget_note = std::format("WDDM budget unavailable: free VRAM {:.2f} GiB minus {} MiB", mf.free / 1073741824.0, reserve >> 20);
             }
+            if (card.headroom > 0) {
+                budget_note += std::format("; minus {} MiB desktop headroom (WHIRL_VRAM_HEADROOM_MB) -> {:.2f} GiB", card.headroom >> 20,
+                                           (a > card.headroom ? a - card.headroom : 0) / 1073741824.0);
+                a = a > card.headroom ? a - card.headroom : 0;
+            }
             return a;
         }();
         if (!pool_req) logI("kv pool sizing: {}", budget_note);
@@ -764,7 +861,19 @@ int serveMain(int argc, char** argv, const char* program) {
         if (model.kvAutoDense()) {
             const std::uint32_t second = opt.parallel > 1 ? std::min(floor_second_ctx, slot_ctx) : 0;
             const std::uint64_t need = pool_req ? *pool_req : static_cast<std::uint64_t>(slot_ctx) + second + (opt.parallel > 1 ? 2ull : 1ull) * kv_page;
-            if (need * model.kvBytesPerTokenFmt(false, false) <= avail) {
+            // small-card q8v preference only where the code object has the q8v and q8h kernels
+            const bool small_kv = card.prefer_q8v && model.k.caps.kv_q8v && model.k.caps.kv_q8h;
+            const vram::SmallKv sk = small_kv ? vram::smallCardKv(avail, need, model.kvBytesPerTokenFmt(true, true)) : vram::SmallKv::q8h;
+            if (small_kv && sk != vram::SmallKv::q8h) {
+                model.setKvFormat(true, false, true);
+                kv_note = sk == vram::SmallKv::q8v
+                              ? " (auto: small card (< 20 GiB) prefers q8v; WHIRL_KV=f16 forces f16)"
+                              : " (auto: small card (< 20 GiB) prefers q8v, with a pool below one full request rather than K in int8; "
+                                "WHIRL_KV=q8 for a longer pool)";
+            } else if (small_kv) {
+                model.setKvFormat(true, true, false);
+                kv_note = std::format(" (auto: small card (< 20 GiB), q8v would leave under {} tokens)", vram::small_card_q8v_min_tokens);
+            } else if (need * model.kvBytesPerTokenFmt(false, false) <= avail) {
                 kv_note = " (auto: the floor pool fits as f16)";
             } else if (model.k.caps.kv_q8v && need * model.kvBytesPerTokenFmt(true, true) <= avail) {
                 model.setKvFormat(true, false, true);
@@ -810,7 +919,8 @@ int serveMain(int argc, char** argv, const char* program) {
             logI("kv pool: {} tokens ({} pages of {}), {} KV{}, {:.1f} KiB/token, {:.2f} GiB, shared by {} slots; max {} tokens per "
                  "request",
                  model.pool_pages * kv_page, model.pool_pages, kv_page, model.kvName(), kv_note, static_cast<double>(per_tok) / 1024.0,
-                 static_cast<double>(per_tok * model.pool_pages * kv_page) / (1024.0 * 1024.0 * 1024.0), opt.parallel, slot_ctx);
+                 static_cast<double>(per_tok * model.pool_pages * kv_page) / (1024.0 * 1024.0 * 1024.0), opt.parallel,
+                 std::min<std::uint64_t>(slot_ctx, static_cast<std::uint64_t>(model.pool_pages) * kv_page));
             logI("slots: {}; per slot: recurrent state {:.1f} MiB, prefix checkpoints {:.1f} MiB; shared: {} snapshot sets {:.1f} MiB",
                  opt.parallel, st_mib, ck_mb * static_cast<double>(n_ck), model.snap_sets, snap_mib);
         }
@@ -825,7 +935,7 @@ int serveMain(int argc, char** argv, const char* program) {
              eo.ckpt_host ? " (in pinned host memory)" : "", gib(mem_ck1.free, mem2.free),
              static_cast<double>(mem2.free) / (1024.0 * 1024.0 * 1024.0));
         logI("context {} tokens per request, pool {} tokens; VRAM free {:.2f} / {:.2f} GiB (after weights {:.2f}, at start {:.2f})",
-             slot_ctx, model.pool_pages * kv_page, static_cast<double>(mem2.free) / (1024.0 * 1024.0 * 1024.0),
+             std::min<std::uint64_t>(slot_ctx, static_cast<std::uint64_t>(model.pool_pages) * kv_page), model.pool_pages * kv_page, static_cast<double>(mem2.free) / (1024.0 * 1024.0 * 1024.0),
              static_cast<double>(mem2.total) / (1024.0 * 1024.0 * 1024.0), static_cast<double>(mem.free) / (1024.0 * 1024.0 * 1024.0),
              static_cast<double>(mem0.free) / (1024.0 * 1024.0 * 1024.0));
         if (use_mtp)

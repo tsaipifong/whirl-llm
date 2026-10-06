@@ -6,6 +6,7 @@
 // description and selection are written from the HIP runtime API docs.
 
 #include "whirl/hip.h"
+#include "whirl/vram_limit.h"
 
 #include <hip/hip_runtime_api.h>
 
@@ -13,6 +14,9 @@
 #include <atomic>
 #include <cctype>
 #include <cstring>
+#include <format>
+#include <mutex>
+#include <unordered_map>
 #include <utility>
 
 namespace whirl::hip {
@@ -69,7 +73,7 @@ DeviceInfo describeDevice(int index) {
     d.index = index;
     d.name = p.name;
     d.gcn_arch = p.gcnArchName;
-    d.total_mem = p.totalGlobalMem;
+    d.total_mem = vram::clampMemInfo(0, p.totalGlobalMem, vram::limitBytes()).total;
     d.compute_units = p.multiProcessorCount;
     d.warp_size = p.warpSize;
     d.clock_khz = p.clockRate;
@@ -119,14 +123,66 @@ const char* archName(Arch a) { return a == Arch::gfx1151 ? "gfx1151" : "gfx1201"
 // ---------------------------------------------------------------------------
 // memory
 
+namespace {
+
+// WHIRL_VRAM_LIMIT_MB: live device bytes of this process (sizes by pointer);
+// only touched when a cap is active
+struct VramTrack {
+    std::mutex mu;
+    bool init = false;
+    vram::Counter counter;
+    std::unordered_map<std::uintptr_t, std::size_t> sizes;
+};
+VramTrack& vramTrack() {
+    static VramTrack t;
+    return t;
+}
+
+}  // namespace
+
 DevPtr malloc(std::size_t bytes) {
+    const std::size_t n = std::max<std::size_t>(bytes, 1);
+    const std::uint64_t limit = vram::limitBytes();
+    if (limit == 0) {
+        void* p = nullptr;
+        check(hipMalloc(&p, n), "hipMalloc");
+        return reinterpret_cast<std::uintptr_t>(p);
+    }
+    VramTrack& t = vramTrack();
+    std::lock_guard<std::mutex> lk(t.mu);
+    if (!t.init) {
+        // cap = the simulated card's free VRAM before this process's first allocation
+        std::size_t fr = 0, tot = 0;
+        check(hipMemGetInfo(&fr, &tot), "hipMemGetInfo");
+        t.counter.setCap(std::max<std::uint64_t>(vram::processCap(fr, tot, limit), 1));
+        t.init = true;
+    }
+    if (!t.counter.tryReserve(n)) {
+        g_last_op = "VramLimit";
+        g_last_code = static_cast<int>(hipErrorOutOfMemory);
+        throw Error("VramLimit", static_cast<int>(hipErrorOutOfMemory),
+                    std::format("allocation of {:.1f} MiB would exceed the simulated VRAM limit (WHIRL_VRAM_LIMIT_MB={}: "
+                                "{:.1f} MiB in use by this process, {:.1f} MiB allowed)",
+                                n / 1048576.0, limit >> 20, t.counter.live() / 1048576.0, t.counter.cap() / 1048576.0));
+    }
     void* p = nullptr;
-    check(hipMalloc(&p, std::max<std::size_t>(bytes, 1)), "hipMalloc");
+    const hipError_t st = hipMalloc(&p, n);
+    if (st != hipSuccess) t.counter.release(n);
+    check(st, "hipMalloc");
+    t.sizes[reinterpret_cast<std::uintptr_t>(p)] = n;
     return reinterpret_cast<std::uintptr_t>(p);
 }
 
 void free(DevPtr p) {
-    if (p) (void)hipFree(ptr(p));
+    if (!p) return;
+    (void)hipFree(ptr(p));
+    if (vram::limitBytes() == 0) return;
+    VramTrack& t = vramTrack();
+    std::lock_guard<std::mutex> lk(t.mu);
+    const auto it = t.sizes.find(static_cast<std::uintptr_t>(p));
+    if (it == t.sizes.end()) return;
+    t.counter.release(it->second);
+    t.sizes.erase(it);
 }
 
 void* hostMalloc(std::size_t bytes) {
@@ -176,6 +232,11 @@ void sync() { check(hipDeviceSynchronize(), "hipDeviceSynchronize"); }
 MemInfo memInfo() {
     MemInfo m;
     check(hipMemGetInfo(&m.free, &m.total), "hipMemGetInfo");
+    if (const std::uint64_t limit = vram::limitBytes()) {
+        const vram::Clamped c = vram::clampMemInfo(m.free, m.total, limit);
+        m.free = static_cast<std::size_t>(c.free);
+        m.total = static_cast<std::size_t>(c.total);
+    }
     return m;
 }
 

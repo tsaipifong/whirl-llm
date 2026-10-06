@@ -206,6 +206,13 @@ std::string explainText(const std::exception& e, int* exit_code) {
                   "  The architecture is supported, but the file uses a tensor type / layout WHIRL does not\n"
                   "  implement, or the file is incomplete (an interrupted download?). See the README for the\n"
                   "  tested files and quantizations.\n";
+        } else if (c == "VramLimit") {
+            code = exit_vram;
+            msg = "the model does not fit in the GPU's memory (" + what +
+                  ").\n"
+                  "  Use a smaller quantization of the model (e.g. Q4_K_M or a 3-bit file instead of Q6_K / Q8_0 / MXFP4),\n"
+                  "  a smaller --ctx / --ctx-per-slot, or a smaller prefill batch (WHIRL_PREFILL_BATCH=1024).\n"
+                  "  Close other programs that use the GPU.\n";
         } else if (c == "NoTargetGpu") {
             code = exit_gpu;
             msg = "no supported AMD GPU found (" + what + ").\n  WHIRL needs an AMD Radeon AI PRO R9700 (RDNA 4, gfx1201) or a Radeon 8060S\n  (Ryzen AI Max, RDNA 3.5, gfx1151); this build has GPU kernels for: " +
@@ -229,7 +236,11 @@ std::string explainText(const std::exception& e, int* exit_code) {
     } else if (const auto* he = dynamic_cast<const hip::Error*>(&e)) {
         const int hc = he->code();
         const std::string& op = he->op();
-        if (hc == 2 /* hipErrorOutOfMemory */ || op == "hipMalloc" || op == "hipMallocAsync") {
+        if (op == "VramLimit") {
+            code = exit_vram;
+            msg = "out of GPU memory under the simulated VRAM limit (" + what + ").\n" + k_vram_advice +
+                  "  Unset WHIRL_VRAM_LIMIT_MB (or raise it) to use all of the GPU's memory.\n";
+        } else if (hc == 2 /* hipErrorOutOfMemory */ || op == "hipMalloc" || op == "hipMallocAsync") {
             code = exit_vram;
             msg = "out of GPU memory (" + what + ").\n" + k_vram_advice;
         } else if (op == "hipHostMalloc" || op == "hipHostRegister") {

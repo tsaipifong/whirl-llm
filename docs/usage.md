@@ -128,7 +128,7 @@ request slots, a prefix cache in VRAM and host RAM / SSD tiers for idle sessions
 | `--port N` | TCP port (default 8080). If it is taken, the server exits with code 6 before loading the model |
 | `--alias NAME` | model id reported by `/v1/models` (default: the file name without `.gguf`) |
 | `--device D` | GPU: `r9700`, `8060s`, a device index, or a name / gfx substring (default as for `chat`) |
-| `-np`, `--parallel N` | concurrent request slots (continuous batching), 1–16, default 4 |
+| `-np`, `--parallel N` | concurrent request slots (continuous batching), 1–16, default 4 (1 on cards with less than 20 GiB of VRAM, see `WHIRL_VRAM_HEADROOM_MB`) |
 | `-c`, `--ctx N` | size of the shared KV pool in tokens. Slots take pages on demand; when the pool is full, idle slots' prefix caches are evicted (least recently used first). Default: all VRAM left after weights and buffers minus 768 MiB (MoE: 1.5 GiB) |
 | `--ctx-per-slot N` | longest context of one request (default min(pool, 131072); up to 262144) |
 | `--mtp-drafts N` | fixed MTP drafts per cycle, 1–10 (default: chosen per model type by a cost model) |
@@ -275,6 +275,7 @@ experiments and measurements.
 | `WHIRL_MOE_FP8=0` | MoE models with MXFP4 experts: run the expert prefill with f16 activations instead of fp8 (default fp8, the faster path — about 11.7k vs 8.6k tok/s at 2k tokens for Ornith MXFP4). Affects prefill only |
 | `WHIRL_MOE_RBF=0` | MoE models with MXFP4 experts on the fp8 expert prefill: use the tile-major grouped GEMM grid instead of the row-block-fast one (default row-block-fast; same output bits, faster prefill). Affects prefill only |
 | `WHIRL_MOE_MXW=0` | MoE models with MXFP4 experts: use the generic MXFP4 expert decode kernels instead of the whole-block ones (default whole-block). Affects decode / verify |
+| `WHIRL_VRAM_LIMIT_MB=N` | simulate a GPU with N MiB of VRAM (e.g. `16384` on an R9700 for a 16 GB RX 9070 XT): free / total VRAM, the WDDM budget and this process's allocations are capped at N, so loading, KV-pool sizing and the automatic prefill-batch / checkpoint reduction behave as on that card. Off by default |
 | `WHIRL_EMBD_HOST=0` | keep the token embedding table in VRAM (default: pinned host memory; the server declares its size with the other pinned memory so Shared Usage monitoring can subtract it) |
 | `WHIRL_TUNE_COLD=1` | autotune: evict the cache before each timing *(diagnostic)* |
 | `WHIRL_TUNE_MASK=BITS` | autotune: mask of the candidate GEMM configurations *(diagnostic)* |
@@ -320,6 +321,7 @@ The output always equals plain greedy decoding (with sampling: the same distribu
 | `WHIRL_SYS_LCP=0` | no checkpoints at prefixes common to sessions |
 | `WHIRL_CKPT_HOST=1` | keep prefix checkpoints in pinned host memory instead of VRAM |
 | `WHIRL_POOL_RESERVE_MB=N` | VRAM left free when the KV pool is sized (default 768, MoE 1536) |
+| `WHIRL_VRAM_HEADROOM_MB=N` | VRAM kept free for the desktop and other programs, on top of the reserve. Default 1536 on cards with less than 20 GiB (16 GB RX 9070 / 9070 XT / 9060 XT, which usually also drive the display), where the server also defaults to `--parallel 1` and KV auto picks q8v first (`WHIRL_KV=f16` still forces f16); 0 on larger cards, whose defaults are unchanged. 0 = no headroom |
 | `WHIRL_PREFILL_CHUNK=N` | most rows per merged prefill forward (multiple of 1024, default 2048) |
 | `WHIRL_SEG_PREFILL=0` | prefill each request on its own instead of several in one forward |
 | `WHIRL_GATHER_MS=MS` | window to gather a burst of new requests (default 30, 0 = off) |

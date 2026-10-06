@@ -5,6 +5,7 @@
 // IDXGIAdapter3::QueryVideoMemoryInfo); the HIP adapter is matched by its LUID.
 
 #include "whirl/hip.h"
+#include "whirl/vram_limit.h"
 
 #include <hip/hip_runtime_api.h>
 
@@ -45,7 +46,8 @@ WddmMemInfo wddmMemInfo() {
                 if (SUCCEEDED(a3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &lo)) &&
                     SUCCEEDED(a3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL, &nl))) {
                     r.ok = true;
-                    r.local_budget = lo.Budget;
+                    // WHIRL_VRAM_LIMIT_MB: the simulated card's budget is smaller by the VRAM it lacks
+                    r.local_budget = vram::clampBudget(lo.Budget, prop.totalGlobalMem, vram::limitBytes());
                     r.local_usage = lo.CurrentUsage;
                     r.nonlocal_budget = nl.Budget;
                     r.nonlocal_usage = nl.CurrentUsage;

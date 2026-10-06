@@ -4,10 +4,12 @@
 // setKvFormat, setupSeqs, snapshots, requantMtpQ4, buildDraftHeadEx).
 
 #include "whirl/model.h"
+#include "whirl/vram_limit.h"
 
 #include "whirl/common.h"
 
 #include <algorithm>
+#include <format>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -301,6 +303,112 @@ std::optional<KvMode> kvModeFromEnv() {
     throw std::invalid_argument("WHIRL_KV must be auto, f16, q8, q8h or q8v (got '" + *v + "')");
 }
 
+u64 bufferBytes(const Config& cfg, u32 Bq, u64 ffs, u64 max_elems) {
+    // mirrors the buffer allocations of Model::load below (keep in step)
+    const u64 f4 = 4;
+    const u64 B = Bq;
+    u64 n = 0;
+    n += B * cfg.n_embd * f4 * 2;                         // x, h
+    n += B * cfg.n_head * cfg.head_dim * 2 * f4;          // qf
+    n += B * cfg.n_head_kv * cfg.head_dim * f4 * 2;       // kv_k, kv_v
+    n += B * cfg.n_head * cfg.head_dim * f4;              // attn_out
+    n += B * cfg.convCh() * f4 * 2;                       // qkv, conv_out
+    n += B * cfg.d_inner * f4;                            // z
+    n += B * cfg.n_v_heads * f4 * 2;                      // beta, alpha
+    n += B * 2 * cfg.n_v_heads * f4;                      // ba_buf
+    n += B * cfg.d_inner * f4;                            // gdn_out
+    n += B * ffs * f4 * 2;                                // ffn_g, ffn_u
+    n += static_cast<u64>(max_verify_rows) * cfg.n_vocab * f4;  // logits
+    n += B * cfg.n_embd * f4;                             // hn
+    n += B * 2 * cfg.n_embd * f4;                         // mtp_cat
+    n += static_cast<u64>(max_small_batch) * cfg.n_embd * f4;  // mtp_h
+    n += B * 4 * 3;                                       // mtp_ids, ids, pos_buf
+    n += ctl_words * 4;                                   // out_tok
+    const u64 n_split = 64;
+    n += max_verify_rows * n_split * cfg.n_head * 2 * f4;  // part_ml
+    n += max_verify_rows * n_split * cfg.n_head * cfg.head_dim * f4;  // part_acc
+    n += max_elems * 2;                                   // w16
+    {
+        const u64 n_chunks = (B + 63) / 64;
+        const u64 heads = cfg.n_v_heads;
+        n += n_chunks * heads * (64 * 128 * 4 * 2 + 64 * 64 * 4 + 64 * 4);  // gc_w, gc_u, gc_m, gc_g
+    }
+    const u64 in_max = std::max<u64>(std::max<u64>(cfg.n_ff, 2ull * cfg.n_embd), std::max<u64>(cfg.d_inner, static_cast<u64>(cfg.n_head) * cfg.head_dim));
+    n += max_verify_rows * in_max + 256;                  // xq
+    n += (max_verify_rows * in_max / 32 + 8) * 4;         // xd
+    n += B * std::max<u64>(in_max, cfg.n_embd) * 2;       // x16
+    n += B * 4;                                           // sx8
+    if (cfg.moe) {
+        const u64 Kx = cfg.n_expert_used;
+        const u64 F = cfg.n_ff_exp;
+        const u64 E = cfg.n_embd;
+        n += B * cfg.n_expert * f4;                       // moe_logits
+        n += B * Kx * 4 + B * Kx * f4 + B * f4;           // moe_ids, moe_w, moe_sg
+        n += max_small_batch * Kx * F * f4 * 2;           // moe_g, moe_u
+        n += max_small_batch * Kx * F + 256;              // moe_xq
+        n += (max_small_batch * Kx * F / 32 + 8) * 4;     // moe_xd
+        n += B * E * f4;                                  // moe_ysh
+        n += B * Kx * 4 * 2;                              // moe_perm, moe_inv
+        n += (B * Kx / 32 + cfg.n_expert + 1) * 16;       // moe_tiles
+        n += 16;                                          // moe_ntiles
+        n += B * Kx * std::max(E, F) * 2;                 // moe_x16
+        n += B * Kx * F * f4 * 2;                         // moe_yg, moe_yu
+        n += B * Kx * E * f4;                             // moe_yd
+        n += B * Kx * f4;                                 // moe_sx
+    }
+    return n;
+}
+
+u64 kvBytesPerTokenCfg(const Config& cfg, bool has_mtp, bool q8, bool kf16) {
+    u64 layers = has_mtp ? 1 : 0;
+    for (u32 i = 0; i < cfg.n_layer; ++i)
+        if (cfg.isAttn(i)) layers += 1;
+    const u64 e = static_cast<u64>(cfg.n_head_kv) * cfg.head_dim;
+    const u64 q = e + e / 32 * 2;
+    return layers * ((q8 && !kf16 ? q : e * 2) + (q8 ? q : e * 2));
+}
+
+LoadEstimate estimateLoad(const gguf::File& f, const Config& cfg, bool embd_on_host) {
+    LoadEstimate r;
+    const gguf::TensorInfo* emb = f.tensor("token_embd.weight");
+    r.embd_on_host = embd_on_host && emb != nullptr && f.tensor("output.weight") != nullptr && emb->type != GgmlType::mxfp4;
+    r.has_mtp = cfg.n_nextn > 0 && f.tensor(Loader::bn(cfg.n_layer, "nextn.eh_proj.weight")) != nullptr;
+    static constexpr std::string_view mats[] = {"attn_q.weight",  "attn_k.weight",    "attn_v.weight",   "attn_output.weight",
+                                                "attn_qkv.weight", "attn_gate.weight", "ssm_beta.weight", "ssm_alpha.weight",
+                                                "ssm_out.weight", "ffn_gate.weight",  "ffn_up.weight",   "ffn_down.weight",
+                                                "ffn_gate_shexp.weight", "ffn_up_shexp.weight", "ffn_down_shexp.weight"};
+    r.ffs = cfg.n_ff;
+    for (const gguf::TensorInfo& t : f.tensors()) {
+        if (r.embd_on_host && t.name == "token_embd.weight") continue;
+        r.weights += t.nbytes();
+        if (t.type == GgmlType::mxfp4) r.weights += t.rows();  // per-row reference exponents
+        // layer matrices of the main blocks (not the nextn block): scratch sizes
+        if (t.n_dims != 2 || t.name.rfind("blk.", 0) != 0) continue;
+        const std::size_t dot = t.name.find('.', 4);
+        if (dot == std::string_view::npos || dot == 4) continue;
+        u32 il = 0;
+        bool num = true;
+        for (std::size_t i = 4; i < dot; ++i) {
+            num = num && t.name[i] >= '0' && t.name[i] <= '9';
+            il = il * 10 + static_cast<u32>(t.name[i] - '0');
+        }
+        if (!num || il >= cfg.n_layer) continue;
+        const std::string_view suffix = t.name.substr(dot + 1);
+        bool is_mat = false;
+        for (std::string_view mn : mats) is_mat = is_mat || suffix == mn;
+        if (!is_mat) continue;
+        r.ffs = std::max<u64>(r.ffs, std::max(t.ne[0], t.ne[1]));
+        r.max_elems = std::max<u64>(r.max_elems, t.ne[0] * t.ne[1]);
+    }
+    for (u32 il = 0; il < cfg.n_layer; ++il)
+        if (!cfg.isAttn(il))
+            r.state += static_cast<u64>(cfg.d_conv - 1) * cfg.convCh() * 4 + static_cast<u64>(cfg.n_v_heads) * cfg.d_state * cfg.headV() * 4;
+    r.kv_f16 = kvBytesPerTokenCfg(cfg, r.has_mtp, false, false);
+    r.kv_q8v = kvBytesPerTokenCfg(cfg, r.has_mtp, true, true);
+    r.kv_q8h = kvBytesPerTokenCfg(cfg, r.has_mtp, true, false);
+    return r;
+}
+
 std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadStats& stats, const LoadOptions& opt) {
     auto mp = std::make_unique<Model>();
     Model& m = *mp;
@@ -361,6 +469,26 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
         ~StagingFree() { hip::hostFree(p); }
     } staging_free{staging};
     Loader ld{m, f, Reader(f.path()), staging, staging_len, stats};
+
+    // fit check before any weight is uploaded: weights + state + buffers against the
+    // free VRAM (the simulated card's under WHIRL_VRAM_LIMIT_MB); a load that cannot fit
+    // fails here with the sizes instead of an out-of-memory error part way through
+    // (not on the UMA iGPU, gfx1151, unless a limit is set: its free VRAM does not bound what it can allocate)
+    if (m.arch != hip::Arch::gfx1151 || vram::limitBytes() != 0) {
+        const LoadEstimate est = estimateLoad(f, cfg, opt.embd_on_host);
+        const u64 buf = bufferBytes(cfg, m.max_batch, est.ffs, est.max_elems);
+        const u64 need = est.weights + est.state + buf;
+        const hip::MemInfo mi = hip::memInfo();
+        if (need > mi.free) {
+            const double g = 1024.0 * 1024.0 * 1024.0;
+            const std::string lim = vram::limitNote();
+            throw ModelError("VramLimit",
+                             std::format("needs about {:.2f} GiB of VRAM (weights {:.2f} GiB + buffers for prefill batch {} {:.2f} GiB + state "
+                                         "{:.2f} GiB), {:.2f} GiB free of {:.2f} GiB{}",
+                                         need / g, est.weights / g, m.max_batch, buf / g, est.state / g, mi.free / g, mi.total / g,
+                                         lim.empty() ? std::string() : " (" + lim + ")"));
+        }
+    }
 
     const auto t0 = std::chrono::steady_clock::now();
     const gguf::TensorInfo* emb = f.tensor("token_embd.weight");
