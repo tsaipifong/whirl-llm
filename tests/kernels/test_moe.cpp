@@ -402,6 +402,7 @@ void testMoe(Ctx& c) {
             c.rep.add(cmpTol("moe_combine vs CPU", dx.down<float>(rc.size()), rc, sc, 1e-6, 1e-7));
         }
     }
+    moeGuChecks(c, mw.gate, mw.up, mw.down, R, K);
 
     // ---------------- GDN beta / alpha projections (gdn_ab_<T>, gdn_abconv_<T>)
     {

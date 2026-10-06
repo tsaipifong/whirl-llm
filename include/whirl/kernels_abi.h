@@ -125,6 +125,13 @@
 //   moe_down_<T>(W, rb, E, xq, xd, ids, w, sg, ysh, x, F, K, skip)
 //   gemm_moe_<T> / gemm_moe32_<T>(W, rb, rows_e, const f16* X, float* Y,
 //            ncols, const Int4* tiles, const int* n_tiles)
+//  grouped expert GEMM, Radeon 8060S prefill (optional, gfx1151 only):
+//   moe_tiles(ids, n_pairs, R, bn, Int4* tiles, n_tiles): moe_route's tiles for token tile bn
+//   gemm_moe32r_<T>: gemm_moe32_<T> arguments, 32-token tiles, 1-D grid
+//            (n_tile_slots * ceil(rows_e / kMoeBm), row block fastest)
+//   gemm_moegu_<T>(W1, W2, rb, ff, const f16* X, f16* A, ncols, tiles, n_tiles): gate
+//            (W1) + up (W2) + SwiGLU, A = f16(silu(g) * u) == gemm_moe_<T> x2 +
+//            moe_act_f16; 64-token tiles, 1-D grid (n_tile_slots * ceil(ff / 64))
 //  MXFP4 routed experts (optional, gfx1201 only; T = mxfp4 also has the generic four above):
 //   moe_gu_mxfp4w / moe_down_mxfp4w: same arguments as moe_gu_<T> / moe_down_<T>
 //            (whole 32-value block per lane step)
@@ -391,7 +398,7 @@ struct KernelTable {
     // (marker whirl_cap_gemms_geom, int32 whirl_gemms_geom[slot][3] = BM, BN, threads).
     std::array<GemmCfg, kGemmsCfgs.size()> gemms_geom = kGemmsCfgs;
     PerType<F> gemmhq{}, gemmhqh{};
-    PerType<F> gdn_ab{}, gdn_abconv{}, moe_gu{}, moe_down{}, gemm_moe{}, gemm_moe32{};
+    PerType<F> gdn_ab{}, gdn_abconv{}, moe_gu{}, moe_down{}, gemm_moe{}, gemm_moe32{}, gemm_moe32r{}, gemm_moegu{};
     PerType<F> gemvx{};  // gemvx_v6_<T>: 17..32-token GEMV (runtime token count)
     F gemvw_head_s{};    // gemvw_nt16v2s_q6_k: 16-token output head over a row range, separate y stride
     F gemvw_head_2p{};   // gemvw_nt16x2s_q6_k: wide-verify output head, both 16-token passes in one launch (optional)
@@ -413,7 +420,7 @@ struct KernelTable {
     F copy_rows_map{};  // optional
     F set_tokens{}, argmax_rows{}, argmax_prob{}, draft_pick{};
     F set_rows{}, rmsnorm_q8_rows{}, argmax_rows_to{}, draft_pick_rows{};
-    F moe_logits_f32{}, moe_topk{}, moe_route{}, moe_gather_f16{}, moe_act_f16{}, moe_combine{};
+    F moe_logits_f32{}, moe_topk{}, moe_route{}, moe_gather_f16{}, moe_act_f16{}, moe_combine{}, moe_tiles{};
     F qact_fp8{}, silu_mul_x8h{}, gdn_conv_l2n{}, gdn_conv_l2n_h{}, gdn_conv_state_h{}, gated_norm_x8h{};
     F silu_mul_x16h{}, gated_norm_x16h{};
     F rmsnorm_x8h16{}, rmsnorm_x8h16t{};

@@ -528,6 +528,8 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
         m.moe_inv = m.alloc(B * Kx * 4);
         m.moe_tiles = m.alloc((B * Kx / 32 + cfg.n_expert + 1) * 16);
         m.moe_ntiles = m.allocZero(16);
+        m.moe_tiles64 = m.alloc((B * Kx / 64 + cfg.n_expert + 1) * 16);
+        m.moe_ntiles64 = m.allocZero(16);
         m.moe_x16 = m.alloc(B * Kx * std::max(E, F) * 2);
         m.moe_yg = m.alloc(B * Kx * F * f4);
         m.moe_yu = m.alloc(B * Kx * F * f4);

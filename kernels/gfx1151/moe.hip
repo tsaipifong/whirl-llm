@@ -371,7 +371,7 @@ extern "C" __global__ void moe_combine(float *__restrict__ x, const float *__res
 
 // One (BM rows x BN tokens) WMMA tile at (m0, t0): gemm3_impl with the tile
 // origin passed in instead of taken from blockIdx (grouped expert GEMM).
-template <int T, int BM, int BN, int BK, int WAVES_M, int NTH>
+template <int T, int BM, int BN, int BK, int WAVES_M, int NTH, bool SKIP = false>
 __device__ void gemm_tile_impl(const uint8_t *__restrict__ W, uint64_t row_bytes, const _Float16 *__restrict__ X,
                                float *__restrict__ Y, int ncols, int nrows, int n_tok, int m0, int t0) {
     constexpr int WAVES_N = NTH / 32 / WAVES_M;
@@ -427,6 +427,9 @@ __device__ void gemm_tile_impl(const uint8_t *__restrict__ W, uint64_t row_bytes
         }
         __syncthreads();
         if (k0 + BK < ncols) GTILE_FETCH(k0 + BK);
+        // SKIP: a 16-token fragment column past n_tok only multiplies padding (its outputs
+        // are never stored), so it is left out; the live columns run the same WMMA chain
+        if (SKIP && wn * TN * 16 >= n_tok) continue;
 #pragma unroll
         for (int kk = 0; kk < BK; kk += 16) {
             half16 a[TM], b[TN];
@@ -435,12 +438,12 @@ __device__ void gemm_tile_impl(const uint8_t *__restrict__ W, uint64_t row_bytes
                 a[i] = ld_frag16(&As[(wm * TM + i) * 16 + lane % 16][kk]);
 #pragma unroll
             for (int j = 0; j < TN; ++j)
-                b[j] = ld_frag16(&Bs[(wn * TN + j) * 16 + lane % 16][kk]);
+                if (!SKIP || (wn * TN + j) * 16 < n_tok) b[j] = ld_frag16(&Bs[(wn * TN + j) * 16 + lane % 16][kk]);
 #pragma unroll
             for (int i = 0; i < TM; ++i)
 #pragma unroll
                 for (int j = 0; j < TN; ++j)
-                    acc[i][j] = WMMA16(a[i], b[j], acc[i][j]);
+                    if (!SKIP || (wn * TN + j) * 16 < n_tok) acc[i][j] = WMMA16(a[i], b[j], acc[i][j]);
         }
     }
 #undef GTILE_FETCH
@@ -474,6 +477,149 @@ __device__ void gemm_moe_impl(const uint8_t *W, uint64_t row_bytes, int rows_e, 
                                                    tl.z, blockIdx.y * MOE_BM, 0);
 }
 
+// Tiles of another token-tile size over the same grouping as moe_route (expert counts
+// only, so the positions match moe_route's perm whatever its order within an expert).
+// One 1024-thread block; R <= 1024.
+extern "C" __global__ void __launch_bounds__(1024)
+    moe_tiles(const int *__restrict__ ids, int n_pairs, int R, int bn, int4 *__restrict__ tiles, int *__restrict__ n_tiles) {
+    __shared__ int cnt[1024];
+    for (int r = threadIdx.x; r < R; r += blockDim.x) cnt[r] = 0;
+    __syncthreads();
+    for (int p = threadIdx.x; p < n_pairs; p += blockDim.x) atomicAdd(&cnt[ids[p]], 1);
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        int o = 0, nt = 0;
+        for (int r = 0; r < R; ++r) {
+            for (int s = 0; s < cnt[r]; s += bn) tiles[nt++] = make_int4(r, o + s, min(bn, cnt[r] - s), 0);
+            o += cnt[r];
+        }
+        *n_tiles = nt;
+    }
+}
+
+// Grouped expert GEMM, 32-token tiles, for the Radeon 8060S prefill: 128 rows x 32 tokens
+// per block with the 8 waves as 4 (rows) x 2 (16-token halves), so a tile of <= 16 tokens
+// leaves half the waves without WMMA work (SKIP); 1-D grid with the row block fastest
+// (blockIdx.x = tile * nrb + row block) so the blocks reading one tile's X rows run
+// together. Per output the same WMMA chain over K as gemm_moe_<T> (bit-identical rows).
+template <int T>
+__device__ void gemm_moe32r_impl(const uint8_t *W, uint64_t row_bytes, int rows_e, const _Float16 *X, float *Y, int ncols,
+                                 const int4 *tiles, const int *n_tiles) {
+    const int nrb = (rows_e + MOE_BM - 1) / MOE_BM;
+    const int ti = (int)blockIdx.x / nrb, rb = (int)blockIdx.x % nrb;
+    if (ti >= *n_tiles) return;
+    const int4 tl = tiles[ti];
+    gemm_tile_impl<T, MOE_BM, 32, 64, 4, 256, true>(W + (size_t)tl.x * rows_e * row_bytes, row_bytes, X + (size_t)tl.y * ncols,
+                                                    Y + (size_t)tl.y * rows_e, ncols, rows_e, tl.z, rb * MOE_BM, 0);
+}
+
+// Gate + up + SwiGLU in one grouped GEMM (64-token tiles): a block takes 64 gate rows
+// (W1) and the same 64 up rows (W2) of one expert, i.e. a 128-row A tile, against one
+// token tile; wave (wm, wn) holds gate rows wm*16.. and up rows 64 + wm*16.. for tokens
+// wn*32.. (16-token fragments past the tile's count skipped). The f32 sums are those of
+// gemm_moe_<T> for the same rows (same K order and WMMA chain); A[pos][r] =
+// f16(silu(g) * u) with the moe_act_f16 expression, so A equals gemm_moe_<T> (gate),
+// gemm_moe_<T> (up), moe_act_f16 bit for bit. 1-D grid, row block fastest.
+// X: f16 [pos][ncols], A: f16 [pos][ff]; A must not alias X.
+template <int T>
+__device__ void gemm_moegu_impl(const uint8_t *__restrict__ W1, const uint8_t *__restrict__ W2, uint64_t row_bytes, int ff,
+                                const _Float16 *__restrict__ Xall, _Float16 *__restrict__ Aout, int ncols,
+                                const int4 *__restrict__ tiles, const int *__restrict__ n_tiles) {
+    constexpr int NTH = 256, BK = 64, BN = 64, GR = 64, WM = 4;
+    constexpr int BM = 2 * GR;
+    constexpr int WAVES_N = NTH / 32 / WM;
+    constexpr int TN = BN / 16 / WAVES_N;
+    constexpr int LD = BK + 8;
+    constexpr int GPR = BK / 8;
+    constexpr int A_PER = BM * GPR / NTH;
+    constexpr int B_PER = BN * GPR / NTH;
+    static_assert(GR == WM * 16 && BM * GPR % NTH == 0 && BN * GPR % NTH == 0, "tile/threads");
+    const int nrb = (ff + GR - 1) / GR;
+    const int ti = (int)blockIdx.x / nrb, rb = (int)blockIdx.x % nrb;
+    if (ti >= *n_tiles) return;
+    const int4 tl = tiles[ti];
+    const int n_tok = tl.z, m0 = rb * GR;
+    const uint8_t *Wg = W1 + (size_t)tl.x * ff * row_bytes, *Wu = W2 + (size_t)tl.x * ff * row_bytes;
+    const _Float16 *X = Xall + (size_t)tl.y * ncols;
+    __shared__ _Float16 As[BM][LD];
+    __shared__ _Float16 Bs[BN][LD];
+    const int lane = threadIdx.x % WARP, wid = threadIdx.x / WARP;
+    const int wm = wid % WM, wn = wid / WM;
+    float8 acc[2][TN];
+#pragma unroll
+    for (int i = 0; i < 2; ++i)
+#pragma unroll
+        for (int j = 0; j < TN; ++j) acc[i][j] = (float8){0, 0, 0, 0, 0, 0, 0, 0};
+    half8 ra[A_PER], rbx[B_PER];
+#define GU_FETCH(k0_)                                                                               \
+    do {                                                                                            \
+        _Pragma("unroll") for (int e = 0; e < A_PER; ++e) {                                         \
+            const int i = threadIdx.x + e * NTH;                                                    \
+            const int r = i / GPR, gg = i % GPR;                                                    \
+            const int rr = m0 + (r % GR);                                                           \
+            if (rr < ff) {                                                                          \
+                ra[e] = dec_group_h<T>((r < GR ? Wg : Wu) + (size_t)rr * row_bytes, (k0_) / 8 + gg); \
+            } else {                                                                                \
+                _Pragma("unroll") for (int q = 0; q < 8; ++q) ra[e][q] = (_Float16)0.f;              \
+            }                                                                                       \
+        }                                                                                           \
+        _Pragma("unroll") for (int e = 0; e < B_PER; ++e) {                                         \
+            const int i = threadIdx.x + e * NTH;                                                    \
+            const int t = i / GPR, gg = i % GPR;                                                    \
+            if (t < n_tok) {                                                                        \
+                rbx[e] = *(const half8 *)(X + (size_t)t * ncols + (k0_) + gg * 8);                  \
+            } else {                                                                                \
+                _Pragma("unroll") for (int q = 0; q < 8; ++q) rbx[e][q] = (_Float16)0.f;             \
+            }                                                                                       \
+        }                                                                                           \
+    } while (0)
+    GU_FETCH(0);
+    for (int k0 = 0; k0 < ncols; k0 += BK) {
+        __syncthreads();
+#pragma unroll
+        for (int e = 0; e < A_PER; ++e) {
+            const int i = threadIdx.x + e * NTH;
+            *(half8 *)&As[i / GPR][(i % GPR) * 8] = ra[e];
+        }
+#pragma unroll
+        for (int e = 0; e < B_PER; ++e) {
+            const int i = threadIdx.x + e * NTH;
+            *(half8 *)&Bs[i / GPR][(i % GPR) * 8] = rbx[e];
+        }
+        __syncthreads();
+        if (k0 + BK < ncols) GU_FETCH(k0 + BK);
+        if (wn * TN * 16 >= n_tok) continue;
+#pragma unroll
+        for (int kk = 0; kk < BK; kk += 16) {
+            half16 a[2], b[TN];
+            a[0] = ld_frag16(&As[wm * 16 + lane % 16][kk]);
+            a[1] = ld_frag16(&As[GR + wm * 16 + lane % 16][kk]);
+#pragma unroll
+            for (int j = 0; j < TN; ++j)
+                if ((wn * TN + j) * 16 < n_tok) b[j] = ld_frag16(&Bs[(wn * TN + j) * 16 + lane % 16][kk]);
+#pragma unroll
+            for (int i = 0; i < 2; ++i)
+#pragma unroll
+                for (int j = 0; j < TN; ++j)
+                    if ((wn * TN + j) * 16 < n_tok) acc[i][j] = WMMA16(a[i], b[j], acc[i][j]);
+        }
+    }
+#undef GU_FETCH
+#pragma unroll
+    for (int j = 0; j < TN; ++j) {
+        const int t = (wn * TN + j) * 16 + lane % 16;
+        if (t >= n_tok) continue;
+#pragma unroll
+        for (int v = 0; v < 8; ++v) {
+            const int row = m0 + wm * 16 + CROW(lane, v);
+            if (row < ff) {
+                const float g = acc[0][j][v], u = acc[1][j][v];
+                Aout[(size_t)(tl.y + t) * ff + row] = (_Float16)(g / (1.f + __expf(-g)) * u);
+            }
+        }
+    }
+}
+
 #define MOE_ENTRIES(SUF, T)                                                                                    \
     extern "C" __global__ void __launch_bounds__(256)                                                          \
         moe_gu_##SUF(const uint8_t *W1, const uint8_t *W2, uint64_t row_bytes, int ff, int nrows,              \
@@ -498,6 +644,16 @@ __device__ void gemm_moe_impl(const uint8_t *W, uint64_t row_bytes, int rows_e, 
         gemm_moe32_##SUF(const uint8_t *W, uint64_t row_bytes, int rows_e, const _Float16 *X, float *Y,        \
                          int ncols, const int4 *tiles, const int *n_tiles) {                                   \
         gemm_moe_impl<T, 32>(W, row_bytes, rows_e, X, Y, ncols, tiles, n_tiles);                               \
+    }                                                                                                          \
+    extern "C" __global__ void __launch_bounds__(256)                                                          \
+        gemm_moe32r_##SUF(const uint8_t *W, uint64_t row_bytes, int rows_e, const _Float16 *X, float *Y,       \
+                          int ncols, const int4 *tiles, const int *n_tiles) {                                  \
+        gemm_moe32r_impl<T>(W, row_bytes, rows_e, X, Y, ncols, tiles, n_tiles);                                \
+    }                                                                                                          \
+    extern "C" __global__ void __launch_bounds__(256)                                                          \
+        gemm_moegu_##SUF(const uint8_t *W1, const uint8_t *W2, uint64_t row_bytes, int ff, const _Float16 *X,  \
+                         _Float16 *A, int ncols, const int4 *tiles, const int *n_tiles) {                      \
+        gemm_moegu_impl<T>(W1, W2, row_bytes, ff, X, A, ncols, tiles, n_tiles);                                \
     }
 MOE_ENTRIES(q4_k, QT_Q4_K)
 MOE_ENTRIES(q5_k, QT_Q5_K)

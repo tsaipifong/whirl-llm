@@ -254,11 +254,14 @@ KernelTable KernelTable::load(const hip::Module& m, KvFormat kv) {
         k.moe_down[ti(t)] = L.req("moe_down_" + s);
         k.gemm_moe[ti(t)] = L.req("gemm_moe_" + s);
         k.gemm_moe32[ti(t)] = L.req("gemm_moe32_" + s);
+        k.gemm_moe32r[ti(t)] = L.opt("gemm_moe32r_" + s);
+        k.gemm_moegu[ti(t)] = L.opt("gemm_moegu_" + s);
     }
 
     static constexpr Named optional[] = {
         {&KernelTable::requant_q6k_d2, "requant_q6k_d2"},
         {&KernelTable::requant_q80_q4k, "requant_q80_q4k"},
+        {&KernelTable::moe_tiles, "moe_tiles"},
         {&KernelTable::gdn_wprep, "gdn_wprep"},
         {&KernelTable::gdn_wscan8, "gdn_wscan8"},
         {&KernelTable::rmsnorm_x8, "rmsnorm_x8"},
@@ -339,6 +342,8 @@ KernelTable KernelTable::load(const hip::Module& m, KvFormat kv) {
         k.moe_down[i] = L.opt("moe_down_mxfp4");
         k.gemm_moe[i] = L.opt("gemm_moe_mxfp4");
         k.gemm_moe32[i] = L.opt("gemm_moe32_mxfp4");
+        k.gemm_moe32r[i] = L.opt("gemm_moe32r_mxfp4");
+        k.gemm_moegu[i] = L.opt("gemm_moegu_mxfp4");
         k.moe_gu_mxw = L.opt("moe_gu_mxfp4w");
         k.moe_down_mxw = L.opt("moe_down_mxfp4w");
         k.gemm8_moe = L.opt("gemm8_moe");

@@ -463,6 +463,7 @@ void testMoeMx(Ctx& c) {
             }
             c.rep.add(cmpExact("gemm_moe32_mxfp4 == gemm_moe_mxfp4 per (token, slot) row", by_pair[1], by_pair[0], Kind::invariant));
         }
+        moeGuChecks(c, mw.gate, mw.up, mw.down, R, K);
     }
 }
 

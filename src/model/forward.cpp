@@ -809,7 +809,7 @@ void Model::moeBlock(DevPtr post_norm, const Mat& sg, const Mat& su, const Mat& 
     // prefill: group (token, slot) pairs by expert, grouped GEMMs, combine
     const u32 pairs = n * K;
     // token tile: 32 when experts average under ~48 tokens (short prompts), else 64
-    const u32 bn = (moe_bn_force == 32 || moe_bn_force == 64) ? moe_bn_force : moeTile(n);
+    const u32 bn = moeGuFused(mo) && !moeFp8(mo) ? 32 : (moe_bn_force == 32 || moe_bn_force == 64) ? moe_bn_force : moeTile(n);
     const auto& gm = bn == 32 ? k.gemm_moe32 : k.gemm_moe;
     hip::launch(k.moe_route, D(1), D(1024), 0, stream, moe_ids, I(pairs), I(R), I(bn), moe_perm, moe_inv, moe_tiles, moe_ntiles);
     const u32 max_tiles = (pairs + bn - 1) / bn + R;
@@ -826,6 +826,19 @@ void Model::moeBlock(DevPtr post_norm, const Mat& sg, const Mat& su, const Mat& 
         mark(OpClass::misc);
         hip::launch(bn == 32 ? k.gemm8_moe32 : k.gemm8_moe, D(max_tiles, (E + moe_bm - 1) / moe_bm), D(256), 0, stream, mo.down.ptr, DevPtr{0},
                     mo.down.row_bytes, mo.down.ref, DevPtr{0}, I(E), moe_x16, moe_sx, moe_yd, DevPtr{0}, I(F), moe_tiles, moe_ntiles);
+        mark(OpClass::matmul);
+    } else if (moeGuFused(mo)) {
+        // Radeon 8060S: gate + up + SwiGLU in one grouped GEMM over 64-token tiles (A, f16,
+        // into the f32 gate buffer: X is still being read), down over 32-token tiles; the
+        // same perm positions for both tile lists, every row bit-identical to the path below
+        hip::launch(k.moe_tiles, D(1), D(1024), 0, stream, moe_ids, I(pairs), I(R), I(64), moe_tiles64, moe_ntiles64);
+        hip::launch(k.moe_gather_f16, D(pairs), D(256), 0, stream, h, moe_perm, moe_x16, I(E), I(K));
+        mark(OpClass::misc);
+        const u32 max_tiles64 = (pairs + 63) / 64 + R;
+        hip::launch(k.gemm_moegu[ti(mo.gate.ty)], D(max_tiles64 * ((F + 63) / 64)), D(256), 0, stream, mo.gate.ptr, mo.up.ptr, mo.gate.row_bytes, I(F),
+                    moe_x16, moe_yg, I(E), moe_tiles64, moe_ntiles64);
+        hip::launch(k.gemm_moe32r[ti(mo.down.ty)], D(max_tiles * ((E + moe_bm - 1) / moe_bm)), D(256), 0, stream, mo.down.ptr, mo.down.row_bytes,
+                    I(E), moe_yg, moe_yd, I(F), moe_tiles, moe_ntiles);
         mark(OpClass::matmul);
     } else {
         hip::launch(k.moe_gather_f16, D(pairs), D(256), 0, stream, h, moe_perm, moe_x16, I(E), I(K));
@@ -859,6 +872,13 @@ hip::Function Model::moeGu(GgmlType ty) const {
 }
 hip::Function Model::moeDown(GgmlType ty) const {
     return ty == GgmlType::mxfp4 && moe_mxw && k.moe_down_mxw != nullptr ? k.moe_down_mxw : k.moe_down[ti(ty)];
+}
+
+// Prefill experts on the fused gate + up + SwiGLU grouped GEMM and the 32-token row-block-
+// fast down GEMM (gfx1151 code object; gate and up of one type and row size).
+bool Model::moeGuFused(const MoeW& mo) const {
+    return k.moe_tiles != nullptr && k.gemm_moegu[ti(mo.gate.ty)] != nullptr && k.gemm_moe32r[ti(mo.down.ty)] != nullptr &&
+           mo.gate.ty == mo.up.ty && mo.gate.row_bytes == mo.up.row_bytes && moe_tiles64 != 0;
 }
 
 // Prefill experts on the MXFP4 x fp8 grouped GEMM: all three expert tensors MXFP4 with
