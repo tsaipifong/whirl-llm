@@ -74,7 +74,14 @@ if(WHIRL_WITH_HIP)
       COMMAND "${WHIRL_HIP_CLANG}" -x hip --offload-arch=${arch} --cuda-device-only
               --no-gpu-bundle-output -O3 -std=c++17
               -I "${CMAKE_SOURCE_DIR}/kernels"
+              -Xclang -dependency-file -Xclang "${co}.d" -Xclang -MT -Xclang "${co}"
               -o "${co}" "${CMAKE_SOURCE_DIR}/kernels/whirl_kernels.hip"
+      # DEPFILE: clang lists every fragment the translation unit really
+      # includes (kernels/*.hip, gfx1151/*.hip, *.h), so an edit to any of them
+      # rebuilds this code object; DEPENDS stays as the first-build fallback.
+      # The cc1 options are used because the driver's -MD/-MF are ignored in
+      # --cuda-device-only mode (clang warns "argument unused").
+      DEPFILE "${co}.d"
       DEPENDS ${CMAKE_SOURCE_DIR}/kernels/whirl_kernels.hip ${co_deps}
       COMMENT "HIP device code object ${arch}"
       VERBATIM)
