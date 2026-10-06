@@ -296,6 +296,7 @@ struct EngineOptions {
     bool timing_reset = true;
     bool ngram = true;
     std::uint32_t ngram_min = 3;
+    float ngram_slope = 0.015f;
     std::uint32_t ngram_max = 0;
     bool ngram_force = false;
     // per-slot draft counts: 0 uniform, 1 marginal-gain swaps (splitDrafts), 2 cost model (allocDrafts)

@@ -305,6 +305,7 @@ The output always equals plain greedy decoding (with sampling: the same distribu
 | `WHIRL_DRAFT_VOCAB=off\|64k\|48k\|FILE\|N` | MTP draft head over a frequency subset of the vocabulary. Default: the 64k subset embedded in the executable, used only for dense qwen35 models with the 2-bit draft head and a 248,320-token vocabulary (outputs unchanged). `off` = full draft head; `48k` = `draft_vocab\subset_48k.bin` next to the exe; FILE = uint32 little-endian token ids; N = the first N rows |
 | `WHIRL_NGRAM=0` | no n-gram (prompt-lookup) drafts |
 | `WHIRL_NGRAM_MIN=N` | minimum matched suffix for an n-gram draft (default 3) |
+| `WHIRL_NGRAM_SLOPE=X` | prior cost of one more n-gram verify row, relative to a 1-draft cycle, until n-gram cycles are timed (default 0.015; Radeon 8060S 0.12) |
 | `WHIRL_NGRAM_MAX=N` | most n-gram drafts per cycle (default 15) |
 | `WHIRL_NGRAM_FORCE=1` | take every n-gram proposal *(A/B)* |
 | `WHIRL_NGRAM_DEBUG=1` | log every decode cycle to stderr *(diagnostic)* |

@@ -594,7 +594,7 @@ int serveMain(int argc, char** argv, const char* program) {
             logW("WHIRL_GEMV_R / WHIRL_GEMV_W / WHIRL_GEMV_WH are not supported by whirl-server (ignored)");
         model.use_graph = false;
         const bool use_mtp = model.mtp.has_value() && envOn("MTP", true);
-        const qwen35::MtpDefaults def = qwen35::mtpDefaults(model.cfg.moe);
+        const qwen35::MtpDefaults def = qwen35::mtpDefaults(model.cfg.moe, model.arch);
         std::optional<std::uint32_t> drafts_env;
         if (auto v = env("MTP_DRAFTS")) {
             std::uint32_t d = def.drafts;
@@ -729,7 +729,9 @@ int serveMain(int argc, char** argv, const char* program) {
         eo.seg_prefill = envOn("SEG_PREFILL", true);
         eo.timing_reset = envOn("TIMING_RESET", true);
         eo.ngram = envOn("NGRAM", true);
-        eo.ngram_min = envU32("NGRAM_MIN", 3);
+        eo.ngram_min = envU32("NGRAM_MIN", def.ngram_min);
+        eo.ngram_slope = def.ngram_slope;
+        if (auto v = env("NGRAM_SLOPE")) eo.ngram_slope = std::strtof(v->c_str(), nullptr);
         eo.ngram_max = envU32("NGRAM_MAX", 0);
         eo.ngram_force = envOn("NGRAM_FORCE", false);
         // WHIRL_SLOT_DRAFTS: 0 / unset uniform, 1 marginal-gain swaps, 2 cost-model allocation
