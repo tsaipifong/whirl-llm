@@ -15,7 +15,9 @@ if(WHIRL_WITH_HIP)
     COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/kernels"
     COMMAND "${WHIRL_HIP_CLANG}" -x hip --offload-arch=gfx1201 --cuda-device-only
             --no-gpu-bundle-output -O3 -std=c++17
+            -Xclang -dependency-file -Xclang "${WHIRL_VISION_CO}.d" -Xclang -MT -Xclang "${WHIRL_VISION_CO}"
             -o "${WHIRL_VISION_CO}" "${CMAKE_SOURCE_DIR}/kernels/vision/vision.hip"
+    DEPFILE "${WHIRL_VISION_CO}.d"
     DEPENDS ${CMAKE_SOURCE_DIR}/kernels/vision/vision.hip
     COMMENT "HIP vision code object gfx1201"
     VERBATIM)
