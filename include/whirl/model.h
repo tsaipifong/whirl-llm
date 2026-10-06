@@ -518,6 +518,7 @@ public:
     DevPtr moe_sx = 0;
     bool moe_fp8 = true;
     bool moe_mxw = true;
+    bool moe_rbf = true;  // MXFP4 x fp8 grouped GEMM: row-block-fast gemm8r_* when present (WHIRL_MOE_RBF=0 -> gemm8_moe*)
 
     // ---- vision (image prompts; see whirl/vismap.h). Text-only sequences never take
     // these paths (bitwise unchanged).

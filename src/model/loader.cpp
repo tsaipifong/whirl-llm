@@ -335,6 +335,7 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
     // MXFP4 routed experts: process-level switches (as WHIRL_KV), read by CLI and server alike
     m.moe_fp8 = envFlag("MOE_FP8", true);
     m.moe_mxw = envFlag("MOE_MXW", true);
+    m.moe_rbf = envFlag("MOE_RBF", true);
     m.layers.resize(cfg.n_layer);
     m.kcache.assign(cfg.n_layer, 0);
     m.vcache.assign(cfg.n_layer, 0);

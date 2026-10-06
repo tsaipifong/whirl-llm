@@ -801,14 +801,18 @@ void Model::moeBlock(DevPtr post_norm, const Mat& sg, const Mat& su, const Mat& 
         // one launch with f16 outputs, silu(g) * u -> fp8 rows, down with f32 output
         hip::launch(k.moe_gather_fp8, D(pairs), D(256), 0, stream, h, moe_perm, moe_x16, moe_sx, I(E), I(K));
         mark(OpClass::misc);
-        const u32 nby = (F + moe_bm - 1) / moe_bm;
-        hip::launch(bn == 32 ? k.gemm8_moe32h : k.gemm8_moeh, D(max_tiles, 2 * nby), D(256), 0, stream, mo.gate.ptr, mo.up.ptr, mo.gate.row_bytes,
-                    mo.gate.ref, mo.up.ref, I(F), moe_x16, moe_sx, moe_yg, moe_yu, I(E), moe_tiles, moe_ntiles);
+        // row-block-fast variants (same outputs): 1-D grid, the blocks sharing a tile's rows together
+        const u32 nby = (F + moe_bm - 1) / moe_bm, nbyd = (E + moe_bm - 1) / moe_bm;
+        const bool rbf = moe_rbf && k.gemm8r_moe != nullptr && k.gemm8r_moe32 != nullptr && k.gemm8r_moeh != nullptr && k.gemm8r_moe32h != nullptr;
+        const hip::Function fgu = rbf ? (bn == 32 ? k.gemm8r_moe32h : k.gemm8r_moeh) : (bn == 32 ? k.gemm8_moe32h : k.gemm8_moeh);
+        const hip::Function fdn = rbf ? (bn == 32 ? k.gemm8r_moe32 : k.gemm8r_moe) : (bn == 32 ? k.gemm8_moe32 : k.gemm8_moe);
+        hip::launch(fgu, rbf ? D(max_tiles * 2 * nby) : D(max_tiles, 2 * nby), D(256), 0, stream, mo.gate.ptr, mo.up.ptr, mo.gate.row_bytes, mo.gate.ref,
+                    mo.up.ref, I(F), moe_x16, moe_sx, moe_yg, moe_yu, I(E), moe_tiles, moe_ntiles);
         mark(OpClass::matmul);
         hip::launch(k.silu_mul_x8h, D(pairs), D(256), 0, stream, moe_yg, moe_yu, moe_x16, moe_sx, I(F));
         mark(OpClass::misc);
-        hip::launch(bn == 32 ? k.gemm8_moe32 : k.gemm8_moe, D(max_tiles, (E + moe_bm - 1) / moe_bm), D(256), 0, stream, mo.down.ptr, DevPtr{0},
-                    mo.down.row_bytes, mo.down.ref, DevPtr{0}, I(E), moe_x16, moe_sx, moe_yd, DevPtr{0}, I(F), moe_tiles, moe_ntiles);
+        hip::launch(fdn, rbf ? D(max_tiles * nbyd) : D(max_tiles, nbyd), D(256), 0, stream, mo.down.ptr, DevPtr{0}, mo.down.row_bytes, mo.down.ref,
+                    DevPtr{0}, I(E), moe_x16, moe_sx, moe_yd, DevPtr{0}, I(F), moe_tiles, moe_ntiles);
         mark(OpClass::matmul);
     } else {
         hip::launch(k.moe_gather_f16, D(pairs), D(256), 0, stream, h, moe_perm, moe_x16, I(E), I(K));

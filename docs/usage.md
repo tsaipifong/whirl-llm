@@ -273,6 +273,7 @@ experiments and measurements.
 | `WHIRL_MAX_CTX=N` | default context size of `chat` (= `--ctx`; default 8192) |
 | `WHIRL_CODE_OBJECT=FILE` | development: load the GPU kernels from this code object instead of the built-in one |
 | `WHIRL_MOE_FP8=0` | MoE models with MXFP4 experts: run the expert prefill with f16 activations instead of fp8 (default fp8, the faster path — about 11.7k vs 8.6k tok/s at 2k tokens for Ornith MXFP4). Affects prefill only |
+| `WHIRL_MOE_RBF=0` | MoE models with MXFP4 experts on the fp8 expert prefill: use the tile-major grouped GEMM grid instead of the row-block-fast one (default row-block-fast; same output bits, faster prefill). Affects prefill only |
 | `WHIRL_MOE_MXW=0` | MoE models with MXFP4 experts: use the generic MXFP4 expert decode kernels instead of the whole-block ones (default whole-block). Affects decode / verify |
 | `WHIRL_EMBD_HOST=0` | keep the token embedding table in VRAM (default: pinned host memory; the server declares its size with the other pinned memory so Shared Usage monitoring can subtract it) |
 | `WHIRL_TUNE_COLD=1` | autotune: evict the cache before each timing *(diagnostic)* |
