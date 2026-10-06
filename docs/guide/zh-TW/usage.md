@@ -53,7 +53,7 @@ whirl-server --help | --version
 
 | 模式 | 內容 |
 |---|---|
-| **precise**（預設） | GGUF 權重反量化成 f16；prefill 的 activation 與累加用 f16 / f32；DeltaNet prefill 用 f32 區塊路徑；**KV 快取在每張卡上都是 f16**。除了檔案本身的量化權重，不再額外量化（目前還有一項例外待處理，見下面的 `q8dec`）。f16 KV 放不下時：沒有指定 context 就降低 context 並發出警告；有指定（`--ctx`、`--ctx-per-slot`）就停止並說明（結束代碼 3）——絕不自行改用 int8 KV |
+| **precise**（預設） | GGUF 權重反量化成 f16；prefill 的 activation 與累加用 f16 / f32；DeltaNet prefill 用 f32 區塊路徑；**KV 快取在每張卡上都是 f16**。除了檔案本身的量化權重，不再額外量化（目前還有一項例外待處理，見下面的 `q8dec`）。f16 KV 放不下時：沒有指定 context 就降低 context 並發出警告；有指定（`--ctx`、`--ctx-per-slot`）就停止並說明（結束代碼 5）——絕不自行改用 int8 KV |
 | **balance** | 就是 WHIRL 0.1.x / 0.2.0-rc 以速度為主的預設，完全相同：下表的項目。輸出可能與 precise 有些微差異（KL / 準確度實測見 [quantization.md](quantization.md)） |
 | **fast** | balance 再加上更積極的有損項目，每項都要先通過 KL 與配對準確度門檻。目前都還沒實作：會列為略過，fast 目前等同 balance |
 

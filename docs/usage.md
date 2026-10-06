@@ -58,7 +58,7 @@ environment variable `WHIRL_MODE=precise|balance|fast`; the command line wins). 
 
 | Mode | What it does |
 |---|---|
-| **precise** (default) | The GGUF weights are dequantized to f16; prefill activations and accumulation are f16 / f32; DeltaNet prefill uses the f32 chunk path; **the KV cache is always f16** on every card. Nothing is quantized beyond the file's own weights (one exception still pending, see `q8dec` below). If f16 KV does not fit, the context is lowered with a warning when you did not give it, or the program stops with a message (exit code 3) when you did (`--ctx`, `--ctx-per-slot`) — it never switches to int8 KV by itself |
+| **precise** (default) | The GGUF weights are dequantized to f16; prefill activations and accumulation are f16 / f32; DeltaNet prefill uses the f32 chunk path; **the KV cache is always f16** on every card. Nothing is quantized beyond the file's own weights (one exception still pending, see `q8dec` below). If f16 KV does not fit, the context is lowered with a warning when you did not give it, or the program stops with a message (exit code 5) when you did (`--ctx`, `--ctx-per-slot`) — it never switches to int8 KV by itself |
 | **balance** | The speed-oriented defaults of WHIRL 0.1.x / 0.2.0-rc, exactly: the items below. The output may differ slightly from precise (measured KL / accuracy in [quantization.md](guide/en/quantization.md)) |
 | **fast** | balance plus more aggressive lossy items that must pass KL + paired-accuracy gates first. None is implemented yet: they are listed as skipped and fast currently runs as balance |
 
