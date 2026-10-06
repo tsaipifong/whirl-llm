@@ -1387,6 +1387,7 @@ int cmdSelftest(const Args& a) {
     ok = m.checkGemvq(log) && ok;
     ok = m.checkGemvBitwise(log) && ok;
     ok = m.checkPrefillInvariance(log) && ok;
+    ok = m.checkPreciseDecode(log) && ok;
     const u32 grp = std::max<u32>(1, 16 / (m.cfg.n_head / m.cfg.n_head_kv));
     ok = m.checkAttnGroups(log, 1000, grp) && ok;
     ok = m.checkAttnGroups(log, 1023, grp) && ok;

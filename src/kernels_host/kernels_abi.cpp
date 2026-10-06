@@ -395,6 +395,18 @@ KernelTable KernelTable::load(const hip::Module& m, KvFormat kv) {
         for (const Named& n : mx) k.*(n.f) = L.opt(n.name);
     }
 
+    // Precise decode / verify matmul (absent on code objects without it: gemms / gemm_c then).
+    for (QType t : {QType::f16, QType::q8_0, QType::q3_k, QType::q4_k, QType::q5_k, QType::q6_k, QType::iq4_nl, QType::iq3_s,
+                    QType::iq4_xs, QType::mxfp4}) {
+        k.gemvh[ti(t)] = L.opt(std::string("gemvh_") + sfx(t));
+        k.gemvh2[ti(t)] = L.opt(std::string("gemvh2_") + sfx(t));
+    }
+    for (QType t : {QType::q4_k, QType::q5_k, QType::q6_k, QType::q8_0, QType::iq4_xs, QType::iq4_nl, QType::q3_k, QType::iq3_s,
+                    QType::mxfp4}) {
+        k.moe_gu_f[ti(t)] = L.opt(std::string("moe_gu_f_") + sfx(t));
+        k.moe_down_f[ti(t)] = L.opt(std::string("moe_down_f_") + sfx(t));
+    }
+
     // Small-batch GEMM (absent configurations stay null).
     for (QType t : {QType::q8_0, QType::q3_k, QType::q4_k, QType::q5_k, QType::q6_k, QType::iq4_nl, QType::iq3_s,
                     QType::iq4_xs, QType::mxfp4}) {

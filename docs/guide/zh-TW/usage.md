@@ -53,7 +53,7 @@ whirl-server --help | --version
 
 | 模式 | 內容 |
 |---|---|
-| **precise**（預設） | GGUF 權重反量化成 f16；prefill 的 activation 與累加用 f16 / f32；DeltaNet prefill 用 f32 區塊路徑；**KV 快取在每張卡上都是 f16**。除了檔案本身的量化權重，不再額外量化（目前還有一項例外待處理，見下面的 `q8dec`）。f16 KV 放不下時：沒有指定 context 就降低 context 並發出警告；有指定（`--ctx`、`--ctx-per-slot`）就停止並說明（結束代碼 5）——絕不自行改用 int8 KV |
+| **precise**（預設） | GGUF 權重反量化成 f16；prefill 的 activation 與累加用 f16 / f32；DeltaNet prefill 用 f32 區塊路徑；**KV 快取在每張卡上都是 f16**。decode、MTP / n-gram 驗證與其他小 batch 也用 f16 activation 進同一個 f16 GEMM（f32 累加，不用 int8 activation）。除了檔案本身的量化權重，不再額外量化。f16 KV 放不下時：沒有指定 context 就降低 context 並發出警告；有指定（`--ctx`、`--ctx-per-slot`）就停止並說明（結束代碼 5）——絕不自行改用 int8 KV |
 | **balance** | 就是 WHIRL 0.1.x / 0.2.0-rc 以速度為主的預設，完全相同：下表的項目。輸出可能與 precise 有些微差異（KL / 準確度實測見 [quantization.md](quantization.md)） |
 | **fast** | balance 再加上更積極的有損項目，每項都要先通過 KL 與配對準確度門檻。目前都還沒實作：會列為略過，fast 目前等同 balance |
 
@@ -67,16 +67,16 @@ whirl-server --help | --version
 | `h16` | balance | FFN / DeltaNet 的 GEMM 輸出先存成 f16 再進逐元素運算 | MXFP4 模型 | 只有 f16 權重 |
 | `kvq8` | balance | f16 放不下時 KV auto 可以選 int8：q8v（K f16、V int8），再不行 q8h；20 GiB 以下的卡優先 q8v | dense 模型 | q8（dense 模型） |
 | `kvq4`、`relaxacc`、`headq`、`moeskip`、`a8`、`a4` | fast | 4-bit KV、寬鬆推測接受、低位元輸出頭、略過 MoE 專家、W4A8 / W4A4 prefill | 尚未實作 | 尚未實作 |
-| `q8dec` | 所有模式 | decode / verify GEMV 的 activation 用 int8（每 32 個值一個 f32 scale，同 llama.cpp 的 q8_1） | 開 | 開 |
+| `q8dec` | balance、fast | decode / verify GEMV 的 activation 用 int8（每 32 個值一個 f32 scale，同 llama.cpp 的 q8_1；balance 與 fast 一律包含） | 開 | 開 |
 
-`q8dec` 在 precise 模式下目前仍然開著：維持 MTP == plain 的浮點 activation decode GEMV 正在撰寫中。
+precise 模式關閉 `q8dec`：decode、MTP / n-gram 驗證與並發 batch 的每個 matmul 都用 f16 activation 進 f16 WMMA GEMM（權重從 GGUF 型別解成 f16、f32 累加、每列加總順序固定），所以每一列不論 batch 大小都得到相同的位元；如果 GPU 的 kernel 對模型某種權重型別缺少這條路徑，precise 模式會拒絕載入，不會退回 int8。
 不適用於該 GPU 或模型的項目會記錄為略過（不會出錯）。啟動 log 會有一行，例如
 
 ```
 numerics: balance - enabled: fp8, gdnwmma, h16, kvq8 (auto: q8v, then q8h, when f16 does not fit); skipped: moefp8 (dense model); ...
 ```
 
-伺服器在 `GET /props` 回報模式（`"numerics": {"mode", "label", "enabled", "skipped", "overrides", "kv", "always_on"}`）。
+伺服器在 `GET /props` 回報模式（`"numerics": {"mode", "label", "enabled", "skipped", "overrides", "kv", "decode", "always_on"}`；`decode` 是 `f16` 或 `q8dec`）。
 [7.6](#env-numerics) 的單項變數（`WHIRL_FP8`、`WHIRL_MOE_FP8`、`WHIRL_GDN_WMMA`、`WHIRL_FFN_H16`、`WHIRL_Q4_RELAXED`）與
 `WHIRL_KV` 仍然有效，而且會覆寫模式；在 precise 模式下設成有損的值，log 會標示 `user-requested`，模式顯示為 `precise+overrides`。
 在同一個模式內，MTP / n-gram 解碼等於純 greedy 解碼，並發請求等於單獨執行。
@@ -386,6 +386,7 @@ PowerShell 中先用 `$env:WHIRL_KV = "q8v"` 設定再啟動程式。**一般使
 | `WHIRL_FP8_MASK=BITS` | 使用 fp8 activation 的矩陣乘法類別（預設 7） |
 | `WHIRL_G8T=0` | fp8 GEMM 改用列優先版本，不用 fragment 排列版本（位元相同） |
 | `WHIRL_GDN_WMMA=0\|1` | DeltaNet prefill 區塊用 f16 WMMA（項目 `gdnwmma`；balance / fast 下 MXFP4 預設開啟） |
+| `WHIRL_Q8DEC=0\|1` | decode / verify activation：`1` 用 int8（項目 `q8dec`，balance / fast 預設；precise 下屬於有損覆寫），`0` 用 f16 進 f16 GEMM（precise 預設） |
 | `WHIRL_FFN_H16=0\|1` | GEMM 以 f16 輸出給逐元素運算（項目 `h16`；balance / fast 下 MXFP4 預設開啟） |
 | `WHIRL_Q4_RELAXED=1` | 其他模型也套用 MXFP4 balance 模式的 prefill 開關（`gdnwmma`、`h16`） |
 | `WHIRL_ACT_FUSE=0` | prefill 不融合 activation（位元相同） |

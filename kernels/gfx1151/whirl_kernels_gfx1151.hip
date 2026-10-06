@@ -28,3 +28,4 @@
 #include "moe.hip"                 // mixture of experts (incl. MXFP4 generic entries)
 #include "sample_cand.hip"         // sampling candidates
 #include "prefill_fused.hip"       // prefill activation fusions (f16)
+#include "../moe_f.hip"            // precise MoE decode experts (f32 activations; shared with gfx1201)

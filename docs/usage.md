@@ -58,7 +58,7 @@ environment variable `WHIRL_MODE=precise|balance|fast`; the command line wins). 
 
 | Mode | What it does |
 |---|---|
-| **precise** (default) | The GGUF weights are dequantized to f16; prefill activations and accumulation are f16 / f32; DeltaNet prefill uses the f32 chunk path; **the KV cache is always f16** on every card. Nothing is quantized beyond the file's own weights (one exception still pending, see `q8dec` below). If f16 KV does not fit, the context is lowered with a warning when you did not give it, or the program stops with a message (exit code 5) when you did (`--ctx`, `--ctx-per-slot`) — it never switches to int8 KV by itself |
+| **precise** (default) | The GGUF weights are dequantized to f16; prefill activations and accumulation are f16 / f32; DeltaNet prefill uses the f32 chunk path; **the KV cache is always f16** on every card. Decode, MTP / n-gram verify and other small batches use f16 activations into the same f16 GEMM as prefill (f32 accumulation; no int8 activations). Nothing is quantized beyond the file's own weights. If f16 KV does not fit, the context is lowered with a warning when you did not give it, or the program stops with a message (exit code 5) when you did (`--ctx`, `--ctx-per-slot`) — it never switches to int8 KV by itself |
 | **balance** | The speed-oriented defaults of WHIRL 0.1.x / 0.2.0-rc, exactly: the items below. The output may differ slightly from precise (measured KL / accuracy in [quantization.md](guide/en/quantization.md)) |
 | **fast** | balance plus more aggressive lossy items that must pass KL + paired-accuracy gates first. None is implemented yet: they are listed as skipped and fast currently runs as balance |
 
@@ -72,17 +72,20 @@ Items (pick a subset with `--balance=fp8,kvq8` or `--fast=...`; `WHIRL_MODE=bala
 | `h16` | balance | f16 FFN / DeltaNet GEMM outputs before the element-wise ops | MXFP4 models | f16 weights only |
 | `kvq8` | balance | KV auto may pick int8 when f16 does not fit: q8v (K f16, V int8), then q8h; and q8v first on cards under 20 GiB | dense models | q8 (dense models) |
 | `kvq4`, `relaxacc`, `headq`, `moeskip`, `a8`, `a4` | fast | 4-bit KV, relaxed speculative acceptance, low-bit output head, MoE expert skipping, W4A8 / W4A4 prefill | not yet implemented | not yet implemented |
-| `q8dec` | all modes | int8 activations (one f32 scale per 32 values, as llama.cpp's q8_1) in the decode / verify GEMV | on | on |
+| `q8dec` | balance, fast | int8 activations (one f32 scale per 32 values, as llama.cpp's q8_1) in the decode / verify GEMV (always part of balance and fast) | on | on |
 
-`q8dec` is still on in precise mode: a float-activation decode GEMV that keeps MTP == plain is being
-written. Items that do not apply to the GPU or model are logged as skipped (never an error). The
+In precise mode `q8dec` is off: every matmul of a decode step, an MTP / n-gram verify or a concurrent
+batch takes f16 activations into the f16 WMMA GEMM (weights decoded from the GGUF type to f16, f32
+accumulation, a fixed per-row reduction order), so each row gets the same bits whatever the batch
+size; a GPU whose kernels lack this path for one of the model's weight types refuses to load the
+model in precise mode instead of falling back to int8. Items that do not apply to the GPU or model are logged as skipped (never an error). The
 start-up log shows one line, e.g.
 
 ```
 numerics: balance - enabled: fp8, gdnwmma, h16, kvq8 (auto: q8v, then q8h, when f16 does not fit); skipped: moefp8 (dense model); ...
 ```
 
-and the server reports the mode in `GET /props` (`"numerics": {"mode", "label", "enabled", "skipped", "overrides", "kv", "always_on"}`).
+and the server reports the mode in `GET /props` (`"numerics": {"mode", "label", "enabled", "skipped", "overrides", "kv", "decode", "always_on"}`; `decode` is `f16` or `q8dec`).
 The per-item variables of [7.6](#env-numerics) (`WHIRL_FP8`, `WHIRL_MOE_FP8`, `WHIRL_GDN_WMMA`,
 `WHIRL_FFN_H16`, `WHIRL_Q4_RELAXED`) and `WHIRL_KV` still work and override the mode; in precise
 mode a lossy value is logged as `user-requested` and the mode reads `precise+overrides`.
@@ -403,6 +406,7 @@ Alternatives kept for A/B tests and numerics comparisons. The lossy ones are the
 
 | Variable | Meaning |
 |---|---|
+| `WHIRL_Q8DEC=0\|1` | decode / verify activations: `1` int8 (item `q8dec`, default in balance / fast; in precise a lossy override), `0` f16 into the f16 GEMM (default in precise) |
 | `WHIRL_FP8=0\|1` | MXFP4 prefill with fp8 activations (item `fp8`; default: on in balance / fast). `0` also turns `WHIRL_MOE_FP8` off |
 | `WHIRL_FP8_MASK=BITS` | matmul classes that use fp8 activations (default 7) |
 | `WHIRL_G8T=0` | row-major fp8 GEMM instead of the fragment-tiled one (same bits) |

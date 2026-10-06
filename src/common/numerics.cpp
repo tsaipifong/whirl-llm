@@ -29,7 +29,8 @@ constexpr std::array<ItemInfo, n_items> k_items = {{
     {"a4", "int4 activations for prefill (W4A4)"},
 }};
 
-constexpr const char* k_q8dec = "q8dec (int8 activations in the decode / verify GEMV, as llama.cpp's q8_1; in every mode; precise: pending P-8)";
+constexpr const char* k_q8dec = "q8dec (int8 activations in the decode / verify GEMV, as llama.cpp's q8_1)";
+constexpr const char* k_f16dec = "f16 decode / verify activations into the f16 GEMM, f32 accumulation (no int8)";
 
 std::string lower(std::string_view s) {
     std::string o(s);
@@ -170,6 +171,7 @@ Request resolve(std::optional<std::string> cli_spec, std::optional<std::string> 
 Plan plan(const Request& r, const Target& t) {
     Plan p;
     p.mode = r.mode;
+    p.q8dec = r.mode != Mode::precise;  // the loader confirms (setQ8dec: WHIRL_Q8DEC, kernels)
     for (std::size_t i = 0; i < n_items; ++i) {
         const Item it = static_cast<Item>(i);
         ItemState& s = p.items[i];
@@ -212,6 +214,18 @@ Plan plan(const Request& r, const Target& t) {
     return p;
 }
 
+void setQ8dec(Plan& p, bool q8, const std::string& env) {
+    p.q8dec = q8;
+    const bool def = p.mode != Mode::precise;
+    if (env.empty() || q8 == def) return;
+    if (q8) {
+        p.overrides.push_back(std::format("WHIRL_Q8DEC={}: q8dec on (lossy, user-requested)", env));
+        p.lossy_override = true;
+    } else {
+        p.overrides.push_back(std::format("WHIRL_Q8DEC={}: q8dec off (f16 decode activations)", env));
+    }
+}
+
 void applyOverride(Plan& p, Item it, const char* var, const std::string& value, bool forced, bool applicable) {
     ItemState& s = p.items[static_cast<std::size_t>(it)];
     const bool eff = forced && applicable;
@@ -241,12 +255,13 @@ std::string logLine(const Plan& p) {
         else if (s.requested) sk += std::format("{}{} ({})", sk.empty() ? "" : ", ", itemName(s.item), s.note);
     }
     std::string l = "numerics: " + modeLabel(p);
-    if (p.mode == Mode::precise && en.empty()) l += " - f16/f32 prefill activations, f32 DeltaNet, f16 KV";
+    if (p.mode == Mode::precise && en.empty())
+        l += std::string(" - f16/f32 prefill activations, ") + (p.q8dec ? "" : "f16 decode / verify activations, ") + "f32 DeltaNet, f16 KV";
     else l += " - enabled: " + (en.empty() ? std::string("none") : en);
     if (p.mode != Mode::precise || !sk.empty()) l += "; skipped: " + (sk.empty() ? std::string("none") : sk);
     if (p.mode == Mode::fast) l += "; fast items are not implemented yet: fast runs as balance";
     for (const std::string& o : p.overrides) l += "; " + o;
-    l += std::string("; always: ") + k_q8dec;
+    l += std::string("; decode: ") + (p.q8dec ? k_q8dec : k_f16dec);
     return l;
 }
 
@@ -282,7 +297,11 @@ std::string propsJson(const Plan& p, std::string_view kv) {
     }
     b += "],\"kv\":";
     jsonStr(b, kv);
-    b += ",\"always_on\":[{\"item\":\"q8dec\",\"note\":\"int8 activations in the decode / verify GEMV (llama.cpp q8_1 class); precise: pending P-8\"}]}";
+    b += ",\"decode\":";
+    jsonStr(b, p.q8dec ? "q8dec" : "f16");
+    b += ",\"always_on\":[";
+    if (p.q8dec) b += "{\"item\":\"q8dec\",\"note\":\"int8 activations in the decode / verify GEMV (llama.cpp q8_1 class)\"}";
+    b += "]}";
     return b;
 }
 

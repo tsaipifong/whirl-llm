@@ -187,6 +187,72 @@ void testGemm(Ctx& c) {
         if (!first_bad.empty()) r.note = "first " + first_bad;
         c.rep.add(r);
 
+        // Precise decode (P-8): the small-batch / verify matmuls of precise mode run these same
+        // f16 GEMMs (gemms_c*, gemm_c* on the quantized bytes) at n = 1..32. Every token row
+        // must equal the 200-token gemm_c0 row exactly whatever n and the kernel (fixed
+        // per-row reduction: wmma over k in increasing 16-steps), and match a double CPU
+        // product of the f16 activations and f16-dequantized weights.
+        {
+            const int cr = std::min(nrows, c.quick ? 64 : 256);
+            std::vector<float> wf(static_cast<std::size_t>(cr) * ncols);
+            std::vector<std::uint16_t> wh(static_cast<std::size_t>(ncols));
+            for (int r2 = 0; r2 < cr; ++r2) {
+                ref::dequantRowF16(m.type, m.data.data() + static_cast<std::size_t>(r2) * m.row_bytes, ncols, wh.data());
+                for (int k = 0; k < ncols; ++k) wf[static_cast<std::size_t>(r2) * ncols + k] = h2f(wh[static_cast<std::size_t>(k)]);
+            }
+            const int nmax = 33;
+            std::vector<float> xf(static_cast<std::size_t>(nmax) * ncols);
+            for (std::size_t i = 0; i < xf.size(); ++i) xf[i] = h2f(hx16[i]);
+            std::vector<double> ry, rs;
+            ref::gemvF64(wf, cr, ncols, xf.data(), nmax, ncols, ry, rs);
+            std::size_t pchecked = 0, pbad = 0;
+            std::string pfirst;
+            for (int nt : {1, 2, 3, 4, 8, 16, 33}) {
+                std::vector<std::pair<std::string, std::vector<float>>> outs;
+                if (ncols % 256 == 0)
+                    for (int si = 0; si < static_cast<int>(wk::kGemmsCfgs.size()); ++si) {
+                        const auto& cf = c.k.gemms_geom[static_cast<std::size_t>(si)];
+                        if (c.k.gemms[si][ti]) outs.push_back({"gemms_c" + std::to_string(si), g.run(c.k.gemms[si][ti], cf.bm, cf.bn, cf.nth, nt)});
+                    }
+                if (ncols % 256 == 0 && nt <= 32)
+                    for (const auto& [lab, f] : {std::pair{std::string("gemvh"), c.k.gemvh[ti]}, std::pair{std::string("gemvh2"), c.k.gemvh2[ti]}}) {
+                        if (!f || (lab == "gemvh" && nt > 16)) continue;
+                        outs.push_back({lab, g.run(f, 16, 1 << 20, 32, nt, false)});  // one wave per 16 rows
+                    }
+                for (int ci = 0; ci < static_cast<int>(wk::kGemmCfgs.size()); ++ci) {
+                    const auto& cf = wk::kGemmCfgs[static_cast<std::size_t>(ci)];
+                    if (c.k.gemmc[ci][ti] && (ci == 0 || !c.quick)) outs.push_back({"gemm_c" + std::to_string(ci), g.run(c.k.gemmc[ci][ti], cf.bm, cf.bn, cf.nth, nt)});
+                }
+                for (const auto& [label, y] : outs) {
+                    ++pchecked;
+                    if (std::memcmp(y.data(), ref.data(), static_cast<std::size_t>(nt) * nrows * 4) != 0) {
+                        ++pbad;
+                        if (pfirst.empty()) pfirst = label + " n=" + std::to_string(nt);
+                    }
+                }
+                if (!outs.empty()) {
+                    const std::vector<float>& y = outs.front().second;
+                    std::vector<float> got;
+                    std::vector<double> ryn, rsn;
+                    for (int t = 0; t < nt; ++t) {
+                        got.insert(got.end(), y.begin() + static_cast<std::ptrdiff_t>(t) * nrows, y.begin() + static_cast<std::ptrdiff_t>(t) * nrows + cr);
+                        ryn.insert(ryn.end(), ry.begin() + static_cast<std::ptrdiff_t>(t) * cr, ry.begin() + static_cast<std::ptrdiff_t>(t + 1) * cr);
+                        rsn.insert(rsn.end(), rs.begin() + static_cast<std::ptrdiff_t>(t) * cr, rs.begin() + static_cast<std::ptrdiff_t>(t + 1) * cr);
+                    }
+                    c.rep.add(cmpTol("precise decode " + outs.front().first + "_" + sfx + " n=" + std::to_string(nt) + " vs CPU " + m.name, got, ryn,
+                                     rsn, 1e-4, 1e-6));
+                }
+            }
+            Result rp;
+            rp.name = "precise decode rows == 200-token gemm_c0 rows, n=1,2,3,4,8,16,33 (" + std::to_string(pchecked) + " runs) " + m.name;
+            rp.kind = Kind::invariant;
+            rp.n = pchecked;
+            rp.mismatches = pbad;
+            rp.pass = pbad == 0 && pchecked > 0;
+            if (!pfirst.empty()) rp.note = "first " + pfirst;
+            c.rep.add(rp);
+        }
+
         // f16-output twins == f16(f32 result)
         {
             const std::vector<std::uint16_t> want = toHalf(ref);

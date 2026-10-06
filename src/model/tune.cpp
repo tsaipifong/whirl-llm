@@ -94,6 +94,8 @@ void Model::autotuneGemm(std::size_t bucket, u32 reps, std::string* log) {
     prof = nullptr;
     const bool saved_fp8 = fp8_prefill;
     fp8_prefill = false;
+    const bool saved_prec = prec_dec;  // (tune sizes are >= 32 > gvMax(); kept off regardless)
+    prec_dec = false;
     double total_best = 0, total_default = 0;
     // Radeon 8060S: the candidate list is long (24 fused + 24 dequant + 8 small-batch GEMMs)
     // and the GPU is slow, so the first tune of a 27B model took ~8.5 min. There each kernel
@@ -174,6 +176,7 @@ void Model::autotuneGemm(std::size_t bucket, u32 reps, std::string* log) {
         for (Mat* mp : tuneMats(L)) mp->tune[bucket] = chosen.at(std::make_tuple(static_cast<u32>(mp->ty), mp->nrows, mp->ncols));
     prof = saved_prof;
     fp8_prefill = saved_fp8;
+    prec_dec = saved_prec;
     if (log) *log += fmt("    distinct shapes %zu: sum of best %.1f ms vs cfg0 %.1f ms\n", chosen.size(), total_best, total_default);
 }
 
@@ -256,6 +259,12 @@ std::uint64_t Model::matmulsOfType(GgmlType ty, u32 n) {
 
 // Per quant type: int8-activation GEMV vs f32 GEMV on one real matrix.
 bool Model::checkGemvq(std::string& log) {
+    struct PrecOff {
+        bool& p;
+        bool s;
+        ~PrecOff() { p = s; }
+    } prec_off{prec_dec, prec_dec};
+    prec_dec = false;  // the int8 kernels (balance / fast), whatever the mode
     const std::vector<float> xs = randomNormal(ff_scratch, 42);
     bool done[n_types] = {};
     bool ok_all = true;
@@ -292,6 +301,12 @@ bool Model::checkGemvq(std::string& log) {
 // (MTP greedy == plain greedy): every type, token counts 2..16, R = 1, 2, 4 and
 // the WMMA variants, compared per token row with the n = 1 result.
 bool Model::checkGemvBitwise(std::string& log) {
+    struct PrecOff {
+        bool& p;
+        bool s;
+        ~PrecOff() { p = s; }
+    } prec_off{prec_dec, prec_dec};
+    prec_dec = false;  // the int8 kernels (balance / fast), whatever the mode
     const std::size_t cols_max = ff_scratch;
     const std::vector<float> xs = randomNormal(max_small_batch * cols_max, 7);
     bool done[n_types] = {};
@@ -434,6 +449,144 @@ bool Model::checkPrefillInvariance(std::string& log) {
         moe_bn_force = saved;
         break;
     }
+    return all_ok;
+}
+
+// Precise decode (P-8): per weight type, every row of a small batch (n = 2..16, and 17 / 32
+// as in a wide verify) bitwise == the same token alone (n = 1), and (not the head) == the
+// same row inside a 40-row prefill GEMM; MoE: a token's block output alone == inside a
+// batch of 16 == inside the 40-row prefill path. Random inputs.
+bool Model::checkPreciseDecode(std::string& log) {
+    const bool saved_prec = prec_dec;
+    const u32 saved_small = small_max;
+    prec_dec = true;
+    const u32 NP = 40;  // > every gvMax(): the prefill GEMM
+    const std::vector<float> xs = randomNormal(static_cast<std::size_t>(NP) * ff_scratch, 13);
+    bool done[n_types] = {};
+    bool all_ok = true;
+    const std::string miss = precMissing();
+    if (!miss.empty()) {
+        log += "    precise decode: missing " + miss + " - FAIL\n";
+        prec_dec = saved_prec;
+        return false;
+    }
+    for (std::size_t li = 0; li <= layers.size(); ++li) {
+        MatList all;
+        if (li < layers.size())
+            all = layerMats(layers[li]);
+        else
+            all.add(output);
+        for (const Mat& w : all.slice()) {
+            const bool head = w.ptr == output.ptr;
+            const std::size_t t = ti(w.ty) % n_types;
+            if (!head && done[t]) continue;
+            if (!head) done[t] = true;
+            const std::size_t nr = w.nrows;
+            const DevPtr yb = head ? logits : ffn_u;
+            std::vector<float> solo(32 * nr), got(32 * nr), pre;
+            hip::upload(ffn_g, xs.data(), static_cast<std::size_t>(NP) * w.ncols * 4);
+            small_max = max_small_batch;
+            for (u32 tk = 0; tk < 32; ++tk) {
+                x16_src = 0;
+                xq_src = 0;
+                matmul(w, ffn_g + static_cast<DevPtr>(tk) * w.ncols * 4, yb, 1, false);
+                hip::download(solo.data() + tk * nr, yb, nr * 4);
+            }
+            u32 bad = 0;
+            std::string where;
+            for (u32 nt : {2u, 3u, 4u, 8u, 13u, 16u, 17u, 32u}) {
+                small_max = nt > max_small_batch ? max_verify_rows : max_small_batch;
+                x16_src = 0;
+                xq_src = 0;
+                matmul(w, ffn_g, yb, nt, false);
+                hip::download(got.data(), yb, nt * nr * 4);
+                if (std::memcmp(got.data(), solo.data(), nt * nr * 4) != 0) {
+                    bad += 1;
+                    where += fmt(" n=%u", nt);
+                }
+            }
+            small_max = max_small_batch;
+            bool pre_ok = true;
+            if (!head) {
+                pre.resize(static_cast<std::size_t>(NP) * nr);
+                x16_src = 0;
+                matmul(w, ffn_g, yb, NP, false);
+                hip::download(pre.data(), yb, pre.size() * 4);
+                pre_ok = std::memcmp(pre.data(), solo.data(), 32 * nr * 4) == 0;
+            }
+            // accuracy vs a double-precision CPU product of the same f16 activations is in the
+            // kernel test; here: the solo row vs the f32-activation reference GEMV (sanity)
+            double num = 0, den = 0;
+            {
+                std::vector<float> ref(nr);
+                const bool fg = float_gemv, pd = prec_dec;
+                float_gemv = true;
+                prec_dec = false;
+                x16_src = 0;
+                xq_src = 0;
+                if (k.gemv1[t] != nullptr) {
+                    matmul(w, ffn_g, yb, 1, false);
+                    hip::download(ref.data(), yb, nr * 4);
+                    for (std::size_t i = 0; i < nr; ++i) {
+                        const double d = static_cast<double>(ref[i]) - solo[i];
+                        num += d * d;
+                        den += static_cast<double>(ref[i]) * ref[i];
+                    }
+                }
+                float_gemv = fg;
+                prec_dec = pd;
+            }
+            const double rel = den > 0 ? std::sqrt(num / den) : 0.0;
+            const bool ok = bad == 0 && pre_ok && rel < 0.01;
+            if (!ok) all_ok = false;
+            log += fmt("    precise %-7s %ux%u%s: batch rows == solo: %s%s; == prefill GEMM rows: %s; rel err vs f32 GEMV %.2e %s\n",
+                       tyName(w.ty).c_str(), w.nrows, w.ncols, head ? " (head)" : "", bad == 0 ? "yes" : "NO", where.c_str(),
+                       head ? "n/a" : (pre_ok ? "yes" : "NO"), rel, ok ? "ok" : "FAIL");
+        }
+    }
+    for (const Layer& L : layers) {
+        if (!L.moe) continue;
+        const u32 E = cfg.n_embd;
+        const std::vector<float> xm = randomNormal(static_cast<std::size_t>(NP) * E, 17);
+        std::vector<float> solo(16ull * E), got(static_cast<std::size_t>(NP) * E);
+        for (u32 tk = 0; tk < 16; ++tk) {
+            hip::upload(x, xm.data() + static_cast<std::size_t>(tk) * E, E * 4ull);
+            moeBlock(L.post_norm, L.ffn_gate, L.ffn_up, L.ffn_down, *L.moe, 1);
+            hip::download(solo.data() + static_cast<std::size_t>(tk) * E, x, E * 4ull);
+        }
+        std::string res;
+        bool ok = true;
+        for (u32 rows : {2u, 3u, 4u, 8u, 16u}) {
+            hip::upload(x, xm.data(), static_cast<std::size_t>(rows) * E * 4);
+            moeBlock(L.post_norm, L.ffn_gate, L.ffn_up, L.ffn_down, *L.moe, rows);
+            hip::download(got.data(), x, static_cast<std::size_t>(rows) * E * 4);
+            const bool same = std::memcmp(got.data(), solo.data(), static_cast<std::size_t>(rows) * E * 4) == 0;
+            if (!same) ok = false;
+            res += fmt(" n=%u %s", rows, same ? "same" : "DIFFERENT");
+        }
+        {
+            // sanity: the decode experts vs the prefill (f16 GEMM) path on the same tokens
+            hip::upload(x, xm.data(), static_cast<std::size_t>(NP) * E * 4);
+            moeBlock(L.post_norm, L.ffn_gate, L.ffn_up, L.ffn_down, *L.moe, NP);
+            hip::download(got.data(), x, static_cast<std::size_t>(NP) * E * 4);
+            double num = 0, den = 0;
+            for (std::size_t i = 0; i < 16ull * E; ++i) {
+                const double dx = static_cast<double>(got[i]) - xm[i], ds = static_cast<double>(solo[i]) - xm[i];
+                num += (dx - ds) * (dx - ds);
+                den += ds * ds;
+            }
+            const double rel = den > 0 ? std::sqrt(num / den) : 0.0;
+            if (!(rel < 0.02)) ok = false;
+            res += fmt("; MoE output vs prefill path rel diff %.2e", rel);
+        }
+        if (!ok) all_ok = false;
+        log += fmt("    precise MoE block, a token alone vs in a batch:%s %s\n", res.c_str(), ok ? "ok" : "FAIL");
+        break;
+    }
+    small_max = saved_small;
+    prec_dec = saved_prec;
+    xq_src = 0;
+    x16_src = 0;
     return all_ok;
 }
 
@@ -658,6 +811,20 @@ void loadOrTune(Model& m, const std::string& model_path, std::string& log) {
         else if (relaxed) nu::applyOverride(p, nu::Item::h16, "Q4_RELAXED", *relaxed_env, m.ffn_h16, true);
         if (const auto v = envGet("KV"); v && !v->empty() && *v != "auto")
             nu::applyOverride(p, nu::Item::kvq8, "KV", *v, *v != "f16", !t.moe || *v != "f16");
+        // decode / verify activations (P-8): precise -> f16 activations on the f16 GEMM
+        // (f32 accumulation), balance / fast -> int8 (q8_1 class). WHIRL_Q8DEC=0|1 overrides.
+        m.prec_dec = rq.mode == nu::Mode::precise;
+        const auto q8dec_env = envGet("Q8DEC");
+        if (q8dec_env && !q8dec_env->empty()) m.prec_dec = *q8dec_env == "0";
+        nu::setQ8dec(p, !m.prec_dec, q8dec_env ? *q8dec_env : std::string());
+        if (m.prec_dec) {
+            const std::string miss = m.precMissing();
+            if (!miss.empty())
+                throw ModelError("PreciseKernels",
+                                 "precise mode: this GPU's kernels have no " + miss +
+                                     ", and precise mode never falls back to int8 decode activations. Use --balance (int8 decode / verify "
+                                     "activations, as llama.cpp's q8_1)");
+        }
         m.num_plan = p;
         log += "  " + nu::logLine(p) + "\n";
         if (!m.load_note.empty()) log += "  " + m.load_note;

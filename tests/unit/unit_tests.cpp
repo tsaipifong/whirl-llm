@@ -736,8 +736,17 @@ void testNumerics() {
         const nu::Plan p = nu::plan(pre, swift);
         for (const nu::ItemState& st : p.items) CHECK(!st.enabled && !st.requested);
         CHECK(nu::logLine(p).find("numerics: precise - f16/f32") == 0);
-        CHECK(nu::logLine(p).find("q8dec") != std::string::npos && nu::logLine(p).find("pending P-8") != std::string::npos);
+        CHECK(nu::logLine(p).find("q8dec") == std::string::npos && nu::logLine(p).find("f16 decode / verify activations") != std::string::npos);
+        CHECK(!p.q8dec && nu::propsJson(p, "f16").find("\"decode\":\"f16\",\"always_on\":[]") != std::string::npos);
         CHECK(nu::modeLabel(p) == "precise");
+        nu::Plan po = p;
+        nu::setQ8dec(po, true, "1");  // user-requested int8 decode in precise: lossy override
+        CHECK(po.q8dec && nu::modeLabel(po) == "precise+overrides" && nu::logLine(po).find("WHIRL_Q8DEC=1: q8dec on") != std::string::npos);
+        nu::Plan pn = p;
+        nu::setQ8dec(pn, false, "0");  // same as the default: no override
+        CHECK(pn.overrides.empty() && nu::modeLabel(pn) == "precise");
+        const nu::Plan pb = nu::plan(nu::parseMode("balance", "t"), swift);
+        CHECK(pb.q8dec && nu::logLine(pb).find("decode: q8dec") != std::string::npos);
     }
     {
         const nu::Plan p = nu::plan(bal, swift);

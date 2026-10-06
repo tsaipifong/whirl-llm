@@ -98,6 +98,9 @@ struct Plan {
     std::array<ItemState, n_items> items{};
     std::vector<std::string> overrides;  // per-item environment variables that changed the mode's choice
     bool lossy_override = false;         // an override made precise lossy
+    // decode / verify / small-batch matmul activations: int8 (q8_1 class; balance / fast) or
+    // f16 into the f16 GEMM with f32 accumulation (precise). Set by the loader (setQ8dec).
+    bool q8dec = true;
     bool on(Item it) const { return items[static_cast<std::size_t>(it)].enabled; }
 };
 
@@ -106,6 +109,11 @@ Plan plan(const Request& r, const Target& t);
 // Per-item override from the environment: `forced` = the effective value after the variable.
 // Records "WHIRL_X=v: item on (lossy, user-requested)" or "... item off" when it differs.
 void applyOverride(Plan& p, Item it, const char* var, const std::string& value, bool forced, bool applicable);
+
+// The decode activation form actually used: q8 = int8 (balance / fast default). env = the
+// WHIRL_Q8DEC value ("" = unset); a value that changes the mode's default is recorded as an
+// override (int8 in precise: lossy, user-requested).
+void setQ8dec(Plan& p, bool q8, const std::string& env);
 
 // "numerics: balance - enabled: fp8 (...), ...; skipped: gdnwmma (...); always: q8dec (...)"
 std::string logLine(const Plan& p);

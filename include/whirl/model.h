@@ -449,6 +449,14 @@ public:
     // output-head rows per range in a wide verify (two 16-token passes per range; WHIRL_HEAD_CHUNK)
     std::uint32_t head_chunk = 248320;
     bool float_gemv = false;
+    // precise decode (numerics precise mode, P-8): no int8 activations anywhere in decode /
+    // verify / small batches. Every matmul of n <= gvMax() rows takes the f16-activation
+    // WMMA GEMM (f32 accumulation; the same kernels and per-element bits as the prefill GEMM,
+    // so a row's result does not depend on n, the batch's other rows or the tuned config),
+    // MoE experts the grouped f16 GEMM. WHIRL_Q8DEC=1 / =0 overrides.
+    bool prec_dec = false;
+    // precise decode: the kernels every weight type of this model needs; "" = all present
+    std::string precMissing() const;
     std::uint32_t gemv_max = max_small_batch;
     GemvR gemv_r = defaultGemvR();
     GemvW gemv_w = defaultGemvW();
@@ -687,6 +695,9 @@ public:
     bool checkGemvq(std::string& log);
     bool checkGemvBitwise(std::string& log);
     bool checkPrefillInvariance(std::string& log);
+    // precise decode: every small-batch row (n = 1..16 / 32) bitwise == the same row in a
+    // 200-row prefill GEMM, per weight type; MoE: a token alone == inside a batch
+    bool checkPreciseDecode(std::string& log);
     // wide: the grouped launch is attn_wsplit2 (<= 32 columns) instead of attn_wsplit1
     bool checkAttnGroups(std::string& log, std::uint32_t p0, std::uint32_t n, bool wide = false);
 
@@ -726,6 +737,9 @@ private:
     std::uint32_t gvMax() const { return small_max > max_small_batch ? small_max : gemv_max; }
     void gemvKernels(std::span<const Mat> ws, std::span<const DevPtr> ys, std::uint32_t n, std::int32_t acc, DevPtr xqp, DevPtr xdp);
     bool floatGemvN(const Mat& w, std::uint32_t n) const;
+    // precise decode: the f16 GEMM choice for a small batch (a small-batch / fused config,
+    // never the whole-matrix dequant; same bits as every other choice)
+    std::uint32_t precChoice(const Mat& w, std::uint32_t n) const;
     bool gdnAbFusable(const GdnW& g) const;
     void rmsnormQ8(DevPtr xin, DevPtr w, DevPtr out, std::uint32_t n);
     void elementwise(hip::Function f, DevPtr a, DevPtr b, std::uint32_t n);

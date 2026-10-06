@@ -397,7 +397,11 @@ struct KernelTable {
     Caps caps;            // capability flags of the module (Caps::probe)
     bool gv_grp = false;  // gemvq_<T> / ggemv* take GvArgs (gemv_grouped_abi present)
     PerType<F> gemv1{}, gemvq{}, get_rows{}, gemm{}, dequant_f16{};
-    PerType<F> gemv4{}, gemv8{};  // gemv_<T>_4 / _8 (f32 / f16 only): n = 2..16 bitwise == gemv1 per token
+    PerType<F> gemv4{}, gemv8{};
+    // gemvh_<T> / gemvh2_<T>: precise decode / verify matmul, f16 x, n <= 16 / 32, bitwise == gemm_c* (gfx1201)
+    PerType<F> gemvh{}, gemvh2{};
+    // moe_gu_f_<T> / moe_down_f_<T>: precise MoE decode experts (f32 activations), both code objects
+    PerType<F> moe_gu_f{}, moe_down_f{};  // gemv_<T>_4 / _8 (f32 / f16 only): n = 2..16 bitwise == gemv1 per token
     Nt gemvq_nt{}, gemvq_nt_g{};
     std::array<Nt, 2> gemvq_mr{}, gemvq_mr_g{};      // [R/2 - 1][nt - 2][type], R = 2, 4
     std::array<Nt, kNGemvw> gemvw{}, gemvw_g{};      // [v][nt - 2][type], v = 1..8
