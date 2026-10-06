@@ -289,6 +289,9 @@ std::uint64_t tierFingerprint(const qwen35::Model& m, const std::string& path, c
     h = tier::hashStr(h, std::format("exe {:x} model {} {} {} kv {} mtp {} gdn {} ck {} pg {} batch {}", tier::exeIdentity(),
                                      base, stats.tensors, stats.bytes, m.kvName(), use_mtp, n_gdn, lay.ck_bytes,
                                      lay.page_bytes, m.max_batch));
+    // the numerics mode and its items (a --balance run's KV / DeltaNet state must never be
+    // restored by a --precise process: same exe, model and KV type, other prompt numerics)
+    h = tier::hashStr(h, "numerics " + whirl::numerics::logLine(m.num_plan));
 #ifdef _WIN32
     std::vector<std::pair<std::string, std::string>> kv;
     if (wchar_t* blk = GetEnvironmentStringsW()) {

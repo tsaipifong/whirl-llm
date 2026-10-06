@@ -11,14 +11,15 @@
 // (lane: token lane%16, the same k), tokens past n_tok are zero columns. So a token row's
 // result is bitwise the same for every n_tok, every token tile it lands in, and the prefill
 // GEMM of any batch size. Decode-shaped: one wave per 16 rows (no K split), its rows' raw
-// quantized stages staged through LDS with coalesced loads.
-template <int T, int TN>
+// quantized stages staged through LDS with coalesced loads, two 256-k stages per LDS round
+// when ncols % 512 == 0 (more bytes in flight per wave; the same k order, so the same bits).
+template <int T, int TN, int S>
 __device__ __forceinline__ void gemvh_impl(const uint8_t *__restrict__ W, uint64_t row_bytes, const _Float16 *__restrict__ X,
                                            float *__restrict__ Y, int ncols, int nrows, int n_tok, int accumulate) {
     // one wave (= one block) per 16 rows. Each 256-k stage of the 16 rows is copied with
     // coalesced 16-byte loads into LDS (a 16-byte aligned copy keeps every super-block's
     // global alignment mod 16, as gemms_impl), the next stage prefetched into registers.
-    constexpr int SB = t2_sbb<T>();
+    constexpr int SB = S * t2_sbb<T>();  // S super-block stages (S * 256 k) per LDS round
     constexpr int CH = gemms_stage_chunks(SB);  // 16-byte chunks per row stage (covers the misaligned start)
     constexpr int SLOT = CH * 16;
     constexpr int WCH = 16 * CH;
@@ -27,7 +28,7 @@ __device__ __forceinline__ void gemvh_impl(const uint8_t *__restrict__ W, uint64
     const int lane = threadIdx.x % WARP;
     const int m0 = blockIdx.x * 16;
     if (m0 >= nrows) return;
-    const int nst = ncols / 256;
+    const int nst = ncols / (256 * S);
     const int g0 = lane / 16;
     const int rl = lane % 16;
     const int row = min(m0 + rl, nrows - 1);
@@ -71,16 +72,14 @@ __device__ __forceinline__ void gemvh_impl(const uint8_t *__restrict__ W, uint64
         __syncthreads();
         if (js + 1 < nst) fetch(js + 1);
         const uint8_t *wp = Ws + rl * SLOT + (int)(((size_t)row * row_bytes + (size_t)js * SB) & 15);
-        half8 a[16];
 #pragma unroll
-        for (int kk = 0; kk < 16; ++kk) a[kk] = dec_group_h<T>(wp, 2 * kk + g0);
-#pragma unroll
-        for (int kk = 0; kk < 16; ++kk) {
+        for (int kk = 0; kk < 16 * S; ++kk) {
+            const half8 a = dec_group_h<T>(wp, 2 * kk + g0);
 #pragma unroll
             for (int j = 0; j < TN; ++j) {
-                half8 b = *(const half8 *)(xr[j] + js * 256 + kk * 16);
+                half8 b = *(const half8 *)(xr[j] + js * 256 * S + kk * 16);
                 if (!xv[j]) b = (half8){0, 0, 0, 0, 0, 0, 0, 0};
-                acc[j] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(a[kk], b, acc[j]);
+                acc[j] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(a, b, acc[j]);
             }
         }
     }
@@ -102,11 +101,13 @@ __device__ __forceinline__ void gemvh_impl(const uint8_t *__restrict__ W, uint64
 #define GEMVH_TYPE(SUF, T)                                                                                                       \
     extern "C" __global__ void __launch_bounds__(32) gemvh_##SUF(const uint8_t *W, uint64_t row_bytes, const _Float16 *X, float *Y, \
                                                                    int ncols, int nrows, int n_tok, int accumulate) {           \
-        gemvh_impl<T, 1>(W, row_bytes, X, Y, ncols, nrows, n_tok, accumulate);                                                  \
+        if (ncols % 512 == 0) gemvh_impl<T, 1, 2>(W, row_bytes, X, Y, ncols, nrows, n_tok, accumulate);                        \
+        else gemvh_impl<T, 1, 1>(W, row_bytes, X, Y, ncols, nrows, n_tok, accumulate);                                           \
     }                                                                                                                            \
     extern "C" __global__ void __launch_bounds__(32) gemvh2_##SUF(const uint8_t *W, uint64_t row_bytes, const _Float16 *X, float *Y, \
                                                                     int ncols, int nrows, int n_tok, int accumulate) {          \
-        gemvh_impl<T, 2>(W, row_bytes, X, Y, ncols, nrows, n_tok, accumulate);                                                  \
+        if (ncols % 512 == 0) gemvh_impl<T, 2, 2>(W, row_bytes, X, Y, ncols, nrows, n_tok, accumulate);                        \
+        else gemvh_impl<T, 2, 1>(W, row_bytes, X, Y, ncols, nrows, n_tok, accumulate);                                           \
     }
 
 GEMVH_TYPE(f16, QT_F16)

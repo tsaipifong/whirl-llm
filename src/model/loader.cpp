@@ -635,8 +635,9 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
         m.moe_ids = m.allocZero(B * Kx * 4);
         m.moe_w = m.allocZero(B * Kx * f4);
         m.moe_sg = m.allocZero(B * f4);
-        m.moe_g = m.alloc(max_small_batch * Kx * F * f4);
-        m.moe_u = m.alloc(max_small_batch * Kx * F * f4);
+        // precise mode runs verify batches up to max_verify_rows rows on the decode experts
+        m.moe_g = m.alloc(max_verify_rows * Kx * F * f4);
+        m.moe_u = m.alloc(max_verify_rows * Kx * F * f4);
         m.moe_xq = m.alloc(max_small_batch * Kx * F + 256);
         m.moe_xd = m.alloc((max_small_batch * Kx * F / 32 + 8) * 4);
         m.moe_ysh = m.allocZero(B * E * f4);

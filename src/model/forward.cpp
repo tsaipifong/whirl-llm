@@ -845,7 +845,10 @@ void Model::moeBlock(DevPtr post_norm, const Mat& sg, const Mat& su, const Mat& 
     const u32 K = cfg.n_expert_used;
     const u32 F = cfg.n_ff_exp;
     const u32 R = cfg.n_expert;
-    const bool small = n <= max_small_batch;
+    // precise mode: every verify / decode batch (up to max_verify_rows rows, e.g. a long
+    // n-gram draft) takes the decode experts, so a generated token's MoE output never depends
+    // on whether its batch had more than 16 rows (MTP + n-gram == plain)
+    const bool small = n <= max_small_batch || (prec_dec && n <= max_verify_rows);
     // precise decode: f32-activation experts (moe_gu_f / moe_down_f) and the shared expert on
     // the precise matmul path (no int8 activations); a token's output is the same alone or in
     // a verify / concurrent batch
@@ -856,7 +859,10 @@ void Model::moeBlock(DevPtr post_norm, const Mat& sg, const Mat& su, const Mat& 
         rmsnorm(x, post_norm, h, E, n, E, E);
     // router logits (f32 activations for small batches, also in precise mode)
     if (small) {
-        hip::launch(k.moe_logits_f32, D((R + 7) / 8), D(256), 0, stream, mo.router.ptr, h, moe_logits, I(R), I(E), I(n), gate);
+        // 16 tokens per launch (the kernel's tile); each token's logits are the same in any piece
+        for (u32 t0 = 0; t0 < n; t0 += max_small_batch)
+            hip::launch(k.moe_logits_f32, D((R + 7) / 8), D(256), 0, stream, mo.router.ptr, h + static_cast<u64>(t0) * E * 4,
+                        moe_logits + static_cast<u64>(t0) * R * 4, I(R), I(E), I(std::min(max_small_batch, n - t0)), gate);
         mark(OpClass::matmul);
     } else {
         matmul(mo.router, h, moe_logits, n, false);

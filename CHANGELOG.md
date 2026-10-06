@@ -28,8 +28,16 @@ All notable changes to WHIRL are listed here. Versions follow `project(whirl VER
   from 0.2.0-rc (which accepted a greedy draft only when it equalled the sampled token; precise keeps
   that rule, so MTP == plain token for token there). Greedy decoding is unchanged in every mode.
   `WHIRL_SPEC_SAMPLE=0|1` overrides.
-- Still pending in precise mode: the decode / verify GEMV quantizes activations to int8 (q8_1
-  class), as llama.cpp does; a float-activation version is being written.
+- precise decode / verify no longer quantizes activations to int8: dense matmuls take f16
+  activations on the f16 GEMM's numerics (bitwise == the prefill GEMM rows, for every batch size up
+  to 32), MoE experts take f32 activations with f32 accumulation. Every decode / verify batch up to
+  32 rows (also a long n-gram draft) runs the same kernels, so MTP + n-gram == plain token for token
+  on MoE models too. Cost vs balance on R9700 (plain decode): Ornith-1.5-35B-A3B about -29%,
+  Swift-1.5 27B about -26%, Qwen3.8-27B Q4_K_M about -29%.
+- Server KV tier (RAM / SSD prefix cache): the cache fingerprint now includes the numerics mode and
+  its items. Before, a `--precise` server could restore a prompt's KV / DeltaNet state saved by a
+  `--balance` run of the same exe and model when both kept f16 KV (MoE models), so its output
+  depended on what an earlier process had cached.
 
 ## 0.1.4 — 2026-10-06
 

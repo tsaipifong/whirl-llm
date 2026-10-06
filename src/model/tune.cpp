@@ -548,15 +548,15 @@ bool Model::checkPreciseDecode(std::string& log) {
         if (!L.moe) continue;
         const u32 E = cfg.n_embd;
         const std::vector<float> xm = randomNormal(static_cast<std::size_t>(NP) * E, 17);
-        std::vector<float> solo(16ull * E), got(static_cast<std::size_t>(NP) * E);
-        for (u32 tk = 0; tk < 16; ++tk) {
+        std::vector<float> solo(32ull * E), got(static_cast<std::size_t>(NP) * E);
+        for (u32 tk = 0; tk < 32; ++tk) {
             hip::upload(x, xm.data() + static_cast<std::size_t>(tk) * E, E * 4ull);
             moeBlock(L.post_norm, L.ffn_gate, L.ffn_up, L.ffn_down, *L.moe, 1);
             hip::download(solo.data() + static_cast<std::size_t>(tk) * E, x, E * 4ull);
         }
         std::string res;
         bool ok = true;
-        for (u32 rows : {2u, 3u, 4u, 8u, 16u}) {
+        for (u32 rows : {2u, 3u, 4u, 8u, 16u, 17u, 24u, 32u}) {  // 17..32: wide verify (n-gram drafts)
             hip::upload(x, xm.data(), static_cast<std::size_t>(rows) * E * 4);
             moeBlock(L.post_norm, L.ffn_gate, L.ffn_up, L.ffn_down, *L.moe, rows);
             hip::download(got.data(), x, static_cast<std::size_t>(rows) * E * 4);

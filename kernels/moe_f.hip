@@ -88,4 +88,80 @@ MOE_F_ENTRIES(iq4_xs, QT_IQ4_XS)
 MOE_F_ENTRIES(iq4_nl, QT_IQ4_NL)
 MOE_F_ENTRIES(q3_k, QT_Q3_K)
 MOE_F_ENTRIES(iq3_s, QT_IQ3_S)
-MOE_F_ENTRIES(mxfp4, QT_MXFP4)
+
+// MXFP4 (Ornith experts): whole 32-value blocks per lane instead of 8-value groups - one
+// 16-byte code load + the block exponent per block (as moe_gu_mxfp4w), codes to their e2m1
+// integers by v_perm, f32 activations, f32 FMAs. A block's sum is dl * (sum of its low-nibble
+// half + sum of its high-nibble half), each in a fixed order; a pair's lanes cover fixed block
+// sets and warp_sum reduces them, so the result still depends only on the (token, expert) pair.
+__device__ __forceinline__ uint32_t mxf_lut4(uint32_t nib4) {
+    const uint32_t t0 = 0x03020100u, t1 = 0x0C080604u, t2 = 0xFDFEFF00u, t3 = 0xF4F8FAFCu;
+    const uint32_t sel = nib4 & 0x07070707u;
+    const uint32_t lo = __builtin_amdgcn_perm(t1, t0, sel);
+    const uint32_t hi = __builtin_amdgcn_perm(t3, t2, sel);
+    const uint32_t m = ((nib4 & 0x08080808u) >> 3) * 0xFFu;
+    return (hi & m) | (lo & ~m);
+}
+__device__ __forceinline__ float mxf_dot4(uint32_t v, float4 x, float s) {
+    s = fmaf((float)(int8_t)(v & 0xFF), x.x, s);
+    s = fmaf((float)(int8_t)((v >> 8) & 0xFF), x.y, s);
+    s = fmaf((float)(int8_t)((v >> 16) & 0xFF), x.z, s);
+    return fmaf((float)(int8_t)(v >> 24), x.w, s);
+}
+__device__ __forceinline__ float mxf_blk(const uint8_t *__restrict__ row, int b, const float *__restrict__ x) {
+    const uint8_t *sb = row + (size_t)(b >> 3) * 136;
+    const int ib = b & 7;
+    const uint4 q = *(const uint4 *)(sb + 8 + 16 * ib);
+    const float dl = e8m0_half(sb[ib]);
+    const float4 *xp = (const float4 *)(x + b * 32);
+    float s0 = 0.f, s1 = 0.f;
+    s0 = mxf_dot4(mxf_lut4(q.x & 0x0F0F0F0Fu), xp[0], s0);
+    s1 = mxf_dot4(mxf_lut4((q.x >> 4) & 0x0F0F0F0Fu), xp[4], s1);
+    s0 = mxf_dot4(mxf_lut4(q.y & 0x0F0F0F0Fu), xp[1], s0);
+    s1 = mxf_dot4(mxf_lut4((q.y >> 4) & 0x0F0F0F0Fu), xp[5], s1);
+    s0 = mxf_dot4(mxf_lut4(q.z & 0x0F0F0F0Fu), xp[2], s0);
+    s1 = mxf_dot4(mxf_lut4((q.z >> 4) & 0x0F0F0F0Fu), xp[6], s1);
+    s0 = mxf_dot4(mxf_lut4(q.w & 0x0F0F0F0Fu), xp[3], s0);
+    s1 = mxf_dot4(mxf_lut4((q.w >> 4) & 0x0F0F0F0Fu), xp[7], s1);
+    return dl * (s0 + s1);
+}
+extern "C" __global__ void __launch_bounds__(256) moe_gu_f_mxfp4(const uint8_t *__restrict__ W1, const uint8_t *__restrict__ W2,
+                                                                uint64_t row_bytes, int ff, int nrows, const float *__restrict__ h,
+                                                                const int *__restrict__ ids, float *__restrict__ y1,
+                                                                float *__restrict__ y2, int C, int K) {
+    const int lane = threadIdx.x % WARP;
+    const int row = blockIdx.x * (blockDim.x / WARP) + threadIdx.x / WARP;
+    if (row >= nrows) return;
+    const int p = blockIdx.y;
+    const int t = p / K, e = ids[p];
+    const bool second = row >= ff;
+    const int r = second ? row - ff : row;
+    const uint8_t *wr = (second ? W2 : W1) + ((size_t)e * ff + r) * row_bytes;
+    const float *x = h + (size_t)t * C;
+    float acc = 0.f;
+    for (int b = lane; b < C / 32; b += WARP) acc += mxf_blk(wr, b, x);
+    acc = warp_sum(acc);
+    if (lane == 0) (second ? y2 : y1)[(size_t)p * ff + r] = acc;
+}
+extern "C" __global__ void __launch_bounds__(256) moe_down_f_mxfp4(const uint8_t *__restrict__ W, uint64_t row_bytes, int E,
+                                                                  const float *__restrict__ act, const int *__restrict__ ids,
+                                                                  const float *__restrict__ w, const float *__restrict__ sg,
+                                                                  const float *__restrict__ ysh, float *__restrict__ x, int F, int K) {
+    const int lane = threadIdx.x % WARP;
+    const int row = blockIdx.x * (blockDim.x / WARP) + threadIdx.x / WARP;
+    if (row >= E) return;
+    const int t = blockIdx.y;
+    const int nb = F / 32;
+    float acc = 0.f;
+    for (int u = lane; u < K * nb; u += WARP) {
+        const int k = u / nb, b = u - k * nb;
+        const int p = t * K + k;
+        acc += w[p] * mxf_blk(W + ((size_t)ids[p] * E + row) * row_bytes, b, act + (size_t)p * F);
+    }
+    acc = warp_sum(acc);
+    if (lane == 0) {
+        float v = acc;
+        if (ysh != nullptr) v += sg[t] * ysh[(size_t)t * E + row];
+        x[(size_t)t * E + row] += v;
+    }
+}
