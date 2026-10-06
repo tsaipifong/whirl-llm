@@ -318,6 +318,10 @@ struct EngineOptions {
     bool ckpt_host = false;
     std::size_t prefill_exec = 2048;
     std::uint64_t seed = 0;
+    // numerics item specsample (balance / fast): temperature > 0 requests draw MTP drafts from the
+    // draft head's filtered distribution and accept with min(1, p / q) (whirl/spec_sample.h); off
+    // (precise): greedy drafts, accepted iff they equal the sampled token (MTP == plain bit for bit)
+    bool spec_sample = false;
 };
 
 class Engine {
@@ -432,6 +436,7 @@ private:
     void loadFullRow(std::uint32_t gr);
     double probOf(Sampler& s, std::uint32_t t);
     std::uint32_t sampleRow(Sampler& s, std::optional<std::uint32_t> ex, double p_ex);
+    std::uint32_t sampleResidual(Sampler& s, const spec::QDist& q, double u);
     DevPtr logitsRow(std::uint32_t r) const;
     // request lifecycle
     bool emit(Slot& sl, std::uint32_t t);
@@ -508,6 +513,10 @@ private:
     std::vector<std::uint8_t> in_cands_;
     std::vector<Cand> cands_scratch_;
     std::vector<std::int32_t> ctl_host_;
+    std::vector<std::int32_t> q_host_;  // draft distributions (specsample), [slot][max_drafts][q_words]
+    std::vector<std::uint32_t> res_ids_;
+    std::vector<double> res_p_;
+    bool spec_on_ = false;
     std::uint64_t conv_bytes_ = 0, ssm_bytes_ = 0;
     std::vector<Slot> slots_;
     std::uint64_t use_seq_ = 0;

@@ -8,8 +8,11 @@
 #include "whirl/tokenizer.h"
 #include "whirl/unicode.h"
 #include "whirl/numerics.h"
+#include "whirl/spec_sample.h"
 #include "whirl/vram_limit.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <optional>
@@ -761,6 +764,25 @@ void testNumerics() {
         CHECK(p.items[static_cast<std::size_t>(Item::kvq4)].note.find("not yet implemented") != std::string::npos);
         CHECK(nu::logLine(p).find("fast runs as balance") != std::string::npos);
     }
+    // specsample: balance / fast item, off in precise, skipped without an MTP head or the kernel
+    {
+        CHECK(nu::plan(bal, swift).on(Item::specsample) && nu::plan(bal, ornith).on(Item::specsample));
+        CHECK(nu::plan(fast, s8060).on(Item::specsample) && !nu::plan(pre, swift).on(Item::specsample));
+        nu::Target nomtp = swift;
+        nomtp.mtp = false;
+        CHECK(!nu::plan(bal, nomtp).on(Item::specsample) &&
+              nu::plan(bal, nomtp).items[static_cast<std::size_t>(Item::specsample)].note == "no MTP head");
+        nu::Target nok = swift;
+        nok.k_spec_sample = false;
+        CHECK(!nu::plan(bal, nok).on(Item::specsample));
+        CHECK(nu::parseMode("balance:specsample", "t").items == nu::bit(Item::specsample));
+        nu::Plan pp = nu::plan(pre, swift);
+        nu::applyOverride(pp, Item::specsample, "SPEC_SAMPLE", "1", true, true);
+        CHECK(pp.on(Item::specsample) && pp.lossy_override);
+        nu::Plan pb = nu::plan(bal, swift);
+        nu::applyOverride(pb, Item::specsample, "SPEC_SAMPLE", "0", false, true);
+        CHECK(!pb.on(Item::specsample) && !pb.lossy_override);
+    }
     // per-item environment overrides
     {
         nu::Plan p = nu::plan(pre, swift);
@@ -777,7 +799,7 @@ void testNumerics() {
         CHECK(pb.overrides.size() == 1);
         const std::string j = nu::propsJson(pb, "q8v");
         CHECK(j.find("\"mode\":\"balance\"") != std::string::npos && j.find("\"kv\":\"q8v\"") != std::string::npos);
-        CHECK(j.find("\"enabled\":[\"gdnwmma\",\"h16\",\"kvq8\"]") != std::string::npos);
+        CHECK(j.find("\"enabled\":[\"gdnwmma\",\"h16\",\"kvq8\",\"specsample\"]") != std::string::npos);
         CHECK(j.find("{\"item\":\"fp8\",\"reason\":\"off by WHIRL_FP8=0\"}") != std::string::npos && j.find("{\"item\":\"moefp8\",\"reason\":\"dense model\"}") != std::string::npos);
         const json::Value v = json::parse(nu::propsJson(nu::plan(fast, s8060), "f16"));
         CHECK(v.isObject());
@@ -829,6 +851,174 @@ void testNumerics() {
 
 }  // namespace
 
+// speculative sampling (whirl/spec_sample.h): the output distribution equals plain sampling from p
+// (chi-square over many trials) for top-k / top-p / min-p targets and a draft-vocabulary subset
+namespace specsample_test {
+namespace sp = whirl::spec;
+
+// Wilson-Hilferty upper quantile of chi-square(df) at z standard deviations
+double chi2Crit(double df, double z) {
+    const double a = 2.0 / (9.0 * df);
+    return df * std::pow(1.0 - a + z * std::sqrt(a), 3.0);
+}
+
+// filtered distribution over a row of logits (ids = token id of each logit), the target filter rule
+sp::QDist filtered(const std::vector<float>& lg, const std::vector<std::uint32_t>& ids, float inv_t, std::uint32_t top_k, float top_p,
+                   float min_p) {
+    float m = -1e30f;
+    for (float v : lg) m = std::max(m, v);
+    float sum = 0;
+    for (float v : lg) sum += std::exp((v - m) * inv_t);
+    std::vector<std::size_t> ord(lg.size());
+    for (std::size_t i = 0; i < ord.size(); ++i) ord[i] = i;
+    std::sort(ord.begin(), ord.end(), [&](std::size_t a, std::size_t b) { return lg[a] != lg[b] ? lg[a] > lg[b] : ids[a] < ids[b]; });
+    const std::size_t K = std::min<std::size_t>(sp::draftCands(top_k), ord.size());
+    std::vector<std::uint32_t> ci(K);
+    std::vector<float> cl(K);
+    for (std::size_t i = 0; i < K; ++i) {
+        ci[i] = ids[ord[i]];
+        cl[i] = lg[ord[i]];
+    }
+    return sp::draftDist(ci, cl, m, sum, inv_t, top_k, top_p, min_p);
+}
+
+// one case: chi-square of speculative sampling and of plain sampling against the target p
+void runCase(const char* name, const std::vector<float>& tl, const std::vector<float>& dl, const std::vector<std::uint32_t>& dsub,
+             float inv_t, std::uint32_t top_k, float top_p, float min_p, int trials) {
+    std::vector<std::uint32_t> all(tl.size());
+    for (std::size_t i = 0; i < all.size(); ++i) all[i] = static_cast<std::uint32_t>(i);
+    const sp::QDist pt = filtered(tl, all, inv_t, top_k, top_p, min_p);  // target p (closed)
+    const sp::QDist q = filtered(dl, dsub, inv_t, top_k, top_p, min_p);  // draft q over the subset
+    std::vector<std::uint32_t> pid(pt.id, pt.id + pt.n);
+    std::vector<double> pp(pt.n);
+    for (std::uint32_t i = 0; i < pt.n; ++i) pp[i] = pt.p[i];
+    std::vector<double> cnt_s(tl.size(), 0), cnt_p(tl.size(), 0);
+    double acc = 0, exact = 0;
+    const std::uint32_t qtop = q.id[0];
+    for (int i = 0; i < trials; ++i) {
+        const std::uint64_t seed = 0x1234567ull + static_cast<std::uint64_t>(i) * 7919ull;
+        const std::uint32_t d = sp::sampleQ(q, sp::uniform(seed, 5, sp::u_draft));
+        const double pd = pt.of(d), qd = q.of(d);
+        std::uint32_t x;
+        if (sp::accept(pd, qd, sp::uniform(seed, 5, sp::u_accept))) {
+            x = d;
+            acc += 1;
+        } else {
+            x = sp::sampleResidual(pid, pp, q, sp::uniform(seed, 5, sp::u_residual));
+        }
+        cnt_s[x] += 1;
+        // plain sampling (stream-0 draw); the old exact-match rule accepts the greedy draft iff y == argmax q
+        double cum = 0;
+        const double u = sp::uniform(seed, 5, sp::u_sample);
+        std::uint32_t y = pid.back();
+        for (std::size_t j = 0; j < pid.size(); ++j) {
+            cum += pp[j];
+            if (cum > u) {
+                y = pid[j];
+                break;
+            }
+        }
+        cnt_p[y] += 1;
+        if (y == qtop) exact += 1;
+    }
+    double chi_s = 0, chi_p = 0;
+    for (std::size_t t = 0; t < tl.size(); ++t) {
+        const double e = pt.of(static_cast<std::uint32_t>(t)) * trials;
+        if (e <= 0) {
+            CHECK(cnt_s[t] == 0);  // nothing outside the target's support
+            continue;
+        }
+        chi_s += (cnt_s[t] - e) * (cnt_s[t] - e) / e;
+        chi_p += (cnt_p[t] - e) * (cnt_p[t] - e) / e;
+    }
+    const double df = std::max(1.0, static_cast<double>(pt.n) - 1.0);
+    const double crit = chi2Crit(df, 3.719);  // upper tail ~1e-4
+    std::printf("  specsample %-22s support p %2u q %2u  chi2 spec %7.2f plain %7.2f (crit %.1f, df %.0f)  accept spec %.3f, exact-match %.3f\n",
+                name, pt.n, q.n, chi_s, chi_p, crit, df, acc / trials, exact / trials);
+    CHECK(chi_s < crit);
+    CHECK(chi_p < crit);
+    // acceptance rate = sum min(p, q) (within 4 sigma)
+    double ov = 0;
+    for (std::uint32_t i = 0; i < q.n; ++i) ov += std::min(static_cast<double>(pt.of(q.id[i])), static_cast<double>(q.p[i]));
+    CHECK(std::fabs(acc / trials - ov) < 4.0 * std::sqrt(ov * (1 - ov) / trials) + 1e-3);
+}
+
+void testSpecSample() {
+    // stream 0 = the server sampler's Sampler::uniform
+    {
+        const std::uint64_t seed = 987654321ull, pos = 41;
+        std::uint64_t z = seed + (pos + 1) * 0x9E3779B97F4A7C15ull;
+        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+        z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+        z ^= z >> 31;
+        CHECK(sp::uniform(seed, pos, sp::u_sample) == static_cast<double>(z >> 11) * (1.0 / 9007199254740992.0));
+        CHECK(sp::uniform(seed, pos, sp::u_accept) != sp::uniform(seed, pos, sp::u_sample));
+    }
+    // q filter: sorted (logit desc, id asc), top-k closes, min-p cuts, renormalized; buffer decoding
+    {
+        const std::vector<std::uint32_t> ids = {7, 3, 9, 1};
+        const std::vector<float> lg = {1.f, 3.f, 2.f, 2.f};
+        const float m = 3.f;
+        float sum = 0;
+        for (float v : lg) sum += std::exp(v - m);
+        sum += 0.5f;  // mass outside the candidates
+        const sp::QDist a = sp::draftDist(ids, lg, m, sum, 1.f, 0, 1.f, 0.f);
+        CHECK(a.n == 4 && a.id[0] == 3 && a.id[1] == 1 && a.id[2] == 9 && a.id[3] == 7);
+        float z = 0;
+        for (std::uint32_t i = 0; i < a.n; ++i) z += a.p[i];
+        CHECK(std::fabs(z - 1.f) < 1e-6f && a.of(42) == 0.f);
+        const sp::QDist b = sp::draftDist(ids, lg, m, sum, 1.f, 2, 1.f, 0.f);
+        CHECK(b.n == 2 && b.id[0] == 3 && b.id[1] == 1);
+        const sp::QDist c = sp::draftDist(ids, lg, m, sum, 1.f, 0, 1.f, 0.5f);  // e^-1 < 0.5: the top token only
+        CHECK(c.n == 1 && c.id[0] == 3 && c.p[0] == 1.f);
+        std::int32_t w[sp::q_words] = {};
+        w[0] = static_cast<std::int32_t>(b.n);
+        for (std::uint32_t i = 0; i < b.n; ++i) {
+            w[sp::q_off_ids + i] = static_cast<std::int32_t>(b.id[i]);
+            std::memcpy(&w[sp::q_off_p + i], &b.p[i], 4);
+        }
+        const sp::QDist r = sp::qFromWords(w);
+        CHECK(r.n == b.n && r.id[1] == b.id[1] && r.p[1] == b.p[1]);
+    }
+    // residual: never a token with q >= p; no residual mass -> the most likely target token
+    {
+        sp::QDist q;
+        q.n = 2;
+        q.id[0] = 0;
+        q.p[0] = 0.7f;
+        q.id[1] = 1;
+        q.p[1] = 0.3f;
+        const std::vector<std::uint32_t> ids = {0, 1, 2};
+        const std::vector<double> p = {0.5, 0.3, 0.2};
+        for (int i = 0; i < 100; ++i) CHECK(sp::sampleResidual(ids, p, q, i / 100.0) == 2);
+        const std::vector<double> p2 = {0.7, 0.3, 0.0};
+        CHECK(sp::sampleResidual(ids, p2, q, 0.5) == 0);
+    }
+    // distribution equality on toy rows: V = 24, draft head = perturbed target, draft vocabulary
+    // subset = even tokens plus 1 and 3 (q = 0 on the other odd tokens)
+    std::vector<float> tl(24), dl, dlfull(24);
+    for (int i = 0; i < 24; ++i) {
+        tl[i] = 2.5f * std::sin(0.7f * i) + 0.1f * i;
+        dlfull[i] = tl[i] + 0.8f * std::cos(1.3f * i);
+    }
+    std::vector<std::uint32_t> sub, allv(24);
+    for (std::uint32_t i = 0; i < 24; ++i) {
+        allv[i] = i;
+        if (i % 2 == 0 || i == 1 || i == 3) {
+            sub.push_back(i);
+            dl.push_back(dlfull[i]);
+        }
+    }
+    const int N = 200000;
+    runCase("t0.7 top-k20 top-p0.95", tl, dl, sub, 1.f / 0.7f, 20, 0.95f, 0.f, N);
+    runCase("t0.7 top-k5", tl, dl, sub, 1.f / 0.7f, 5, 1.f, 0.f, N);
+    runCase("t1.0 top-p0.8", tl, dl, sub, 1.f, 0, 0.8f, 0.f, N);
+    runCase("t1.0 min-p0.1", tl, dl, sub, 1.f, 0, 1.f, 0.1f, N);
+    runCase("t1.5 open, full vocab", tl, dlfull, allv, 1.f / 1.5f, 0, 1.f, 0.f, N);
+    runCase("t1.5 open, subset", tl, dl, sub, 1.f / 1.5f, 0, 1.f, 0.f, N);
+}
+}  // namespace specsample_test
+
 int main() {
     testJson();
     testUnicode();
@@ -839,6 +1029,7 @@ int main() {
     testVramLimit();
     testCardDefaults();
     testNumerics();
+    specsample_test::testSpecSample();
     std::printf("unit tests: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

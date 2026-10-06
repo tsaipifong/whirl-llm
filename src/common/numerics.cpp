@@ -21,6 +21,7 @@ constexpr std::array<ItemInfo, n_items> k_items = {{
     {"gdnwmma", "f16-WMMA DeltaNet prefill chunks"},
     {"h16", "f16 FFN / DeltaNet GEMM outputs"},
     {"kvq8", "int8 KV when f16 does not fit"},
+    {"specsample", "speculative sampling of MTP drafts (temperature > 0)"},
     {"kvq4", "4-bit KV"},
     {"relaxacc", "relaxed speculative acceptance"},
     {"headq", "low-bit output head in decode"},
@@ -129,7 +130,8 @@ Request parseMode(std::string_view spec, std::string source) {
         r.items = parseItems(items);
         r.custom = true;
         if (r.mode == Mode::balance && (r.items & fast_only_items) != 0)
-            throw std::invalid_argument("balance mode takes balance items only (fp8, moefp8, gdnwmma, h16, kvq8); use --fast=... for the others");
+            throw std::invalid_argument(
+                "balance mode takes balance items only (fp8, moefp8, gdnwmma, h16, kvq8, specsample); use --fast=... for the others");
     }
     return r;
 }
@@ -201,6 +203,11 @@ Plan plan(const Request& r, const Target& t) {
                 else if (t.k_kv_q8v && t.k_kv_q8h) note = "auto: q8v, then q8h, when f16 does not fit";
                 else if (t.k_kv_q8v) note = "auto: q8v, then q8, when f16 does not fit";
                 else note = "auto: q8 when f16 does not fit";
+                break;
+            case Item::specsample:
+                if (!t.mtp) why = "no MTP head";
+                else if (!t.k_spec_sample) why = "no draft sampling kernel";
+                else note = "temperature > 0: same distribution as plain sampling, other tokens for a seed";
                 break;
             default:
                 why = "not yet implemented (balance behaviour)";

@@ -71,6 +71,7 @@ Items (pick a subset with `--balance=fp8,kvq8` or `--fast=...`; `WHIRL_MODE=bala
 | `gdnwmma` | balance | f16-WMMA DeltaNet prefill chunks instead of the f32 chunk path | MXFP4 models | skipped (no kernel yet) |
 | `h16` | balance | f16 FFN / DeltaNet GEMM outputs before the element-wise ops | MXFP4 models | f16 weights only |
 | `kvq8` | balance | KV auto may pick int8 when f16 does not fit: q8v (K f16, V int8), then q8h; and q8v first on cards under 20 GiB | dense models | q8 (dense models) |
+| `specsample` | balance | Requests with temperature > 0: MTP drafts are drawn from the draft head's distribution (same temperature / top-k / top-p / min-p) and accepted with probability min(1, p/q), else resampled from max(0, p - q) (standard speculative sampling). The output *distribution* is exactly that of plain sampling; the tokens for a given seed differ from plain sampling. Off (precise): greedy drafts accepted only when they equal the sampled token, so MTP == plain token for token. Greedy (temperature 0) is unchanged in every mode | MTP models | MTP models |
 | `kvq4`, `relaxacc`, `headq`, `moeskip`, `a8`, `a4` | fast | 4-bit KV, relaxed speculative acceptance, low-bit output head, MoE expert skipping, W4A8 / W4A4 prefill | not yet implemented | not yet implemented |
 | `q8dec` | all modes | int8 activations (one f32 scale per 32 values, as llama.cpp's q8_1) in the decode / verify GEMV | on | on |
 
@@ -87,7 +88,8 @@ The per-item variables of [7.6](#env-numerics) (`WHIRL_FP8`, `WHIRL_MOE_FP8`, `W
 `WHIRL_FFN_H16`, `WHIRL_Q4_RELAXED`) and `WHIRL_KV` still work and override the mode; in precise
 mode a lossy value is logged as `user-requested` and the mode reads `precise+overrides`.
 MTP / n-gram decoding equals plain greedy decoding, and concurrent requests equal solo runs, within
-each mode.
+each mode. With temperature > 0, precise also gives the same tokens as plain sampling for a seed;
+balance / fast (`specsample`) give the same distribution, not the same tokens.
 
 ## <a id="chat"></a>2. `whirl chat`
 
@@ -407,6 +409,7 @@ Alternatives kept for A/B tests and numerics comparisons. The lossy ones are the
 | `WHIRL_FP8_MASK=BITS` | matmul classes that use fp8 activations (default 7) |
 | `WHIRL_G8T=0` | row-major fp8 GEMM instead of the fragment-tiled one (same bits) |
 | `WHIRL_GDN_WMMA=0\|1` | f16-WMMA DeltaNet prefill chunks (item `gdnwmma`; default: on for MXFP4 in balance / fast) |
+| `WHIRL_SPEC_SAMPLE=0\|1` | speculative sampling of MTP drafts for temperature > 0 (item `specsample`; default: on in balance / fast, off in precise) |
 | `WHIRL_FFN_H16=0\|1` | f16 GEMM outputs into the element-wise ops (item `h16`; default: on for MXFP4 in balance / fast) |
 | `WHIRL_Q4_RELAXED=1` | the MXFP4 balance-mode prefill switches (`gdnwmma`, `h16`) for other models too |
 | `WHIRL_ACT_FUSE=0` | no fused activation in prefill (bitwise-equal) |

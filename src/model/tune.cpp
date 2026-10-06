@@ -645,6 +645,8 @@ void loadOrTune(Model& m, const std::string& model_path, std::string& log) {
         t.k_gdn_wmma = m.k.gdn_wprep != nullptr;
         t.k_kv_q8v = m.k.caps.kv_q8v;
         t.k_kv_q8h = m.k.caps.kv_q8h;
+        t.mtp = m.mtp.has_value();
+        t.k_spec_sample = m.k.draft_sample_rows != nullptr;
         nu::Plan p = nu::plan(rq, t);
         if (fp8_env) nu::applyOverride(p, nu::Item::fp8, "FP8", *fp8_env, m.fp8_prefill, t.has_mxfp4 && t.k_gemm8);
         const bool moe_ok = t.moe && t.moe_mxfp4 && t.k_gemm8_moe;
@@ -658,6 +660,8 @@ void loadOrTune(Model& m, const std::string& model_path, std::string& log) {
         else if (relaxed) nu::applyOverride(p, nu::Item::h16, "Q4_RELAXED", *relaxed_env, m.ffn_h16, true);
         if (const auto v = envGet("KV"); v && !v->empty() && *v != "auto")
             nu::applyOverride(p, nu::Item::kvq8, "KV", *v, *v != "f16", !t.moe || *v != "f16");
+        if (const auto v = envGet("SPEC_SAMPLE"); v && !v->empty())
+            nu::applyOverride(p, nu::Item::specsample, "SPEC_SAMPLE", *v, *v != "0", t.mtp && t.k_spec_sample);
         m.num_plan = p;
         log += "  " + nu::logLine(p) + "\n";
         if (!m.load_note.empty()) log += "  " + m.load_note;

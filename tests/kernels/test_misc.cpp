@@ -20,6 +20,7 @@
 #include <set>
 
 #include "cpu_ref.h"
+#include "whirl/spec_sample.h"
 
 namespace kt {
 
@@ -349,6 +350,69 @@ void testMisc(Ctx& c) {
             rk.pass = badk == 0;
             c.rep.add(rk);
             c.rep.add(cmpTolRel("topk_rows softmax normalizer vs CPU", gsum, rsum, 1e-4, 1e-9));
+        }
+        // draft_sample_rows: draft distribution q (ids exact, probabilities vs whirl::spec::draftDist)
+        // and the drawn token = inverse CDF of the written q at u
+        if (c.k.draft_sample_rows) {
+            namespace sp = whirl::spec;
+            const int tr = 3, r = 1;
+            Buf ctl(static_cast<std::size_t>(tr) * 64 * 4), qb(static_cast<std::size_t>(tr) * sp::q_words * 4);
+            ctl.zero();
+            wk::RowIdx area;
+            wk::DSampArgs da;
+            const int tks[tr] = {20, 0, 5};
+            const float tps[tr] = {0.95f, 0.8f, 1.f}, mps[tr] = {0.f, 0.f, 0.05f}, its[tr] = {1.f / 0.7f, 1.f, 1.f / 0.6f};
+            const float us[tr] = {0.3f, 0.77f, 0.01f};
+            for (int b = 0; b < tr; ++b) {
+                area.v[b] = b * 64;
+                da.on[b] = 1;
+                da.top_k[b] = tks[b];
+                da.qoff[b] = b * static_cast<int>(sp::q_words);
+                da.inv_t[b] = its[b];
+                da.top_p[b] = tps[b];
+                da.min_p[b] = mps[b];
+                da.u[b] = us[b];
+            }
+            hip::launch(c.k.draft_sample_rows, {static_cast<unsigned>(tr), 1, 1}, {1024, 1, 1}, 0, c.s, dx.p(), n, ctl.p(), area, r,
+                        DevPtr{0}, da, qb.p());
+            c.sync();
+            const auto hc = ctl.down<int>(static_cast<std::size_t>(tr) * 64);
+            const auto hq = qb.down<std::int32_t>(static_cast<std::size_t>(tr) * sp::q_words);
+            std::size_t bad = 0;
+            std::vector<float> gp;
+            std::vector<double> rp;
+            for (int b = 0; b < tr; ++b) {
+                const float* xr = x.data() + static_cast<std::size_t>(b) * n;
+                const int K = static_cast<int>(sp::draftCands(static_cast<std::uint32_t>(tks[b])));
+                std::vector<int> idx(static_cast<std::size_t>(n));
+                std::iota(idx.begin(), idx.end(), 0);
+                std::partial_sort(idx.begin(), idx.begin() + K, idx.end(), [&](int a, int bb) { return xr[a] != xr[bb] ? xr[a] > xr[bb] : a < bb; });
+                const float m = xr[firstMax(xr, n)];
+                double s = 0;
+                for (int i = 0; i < n; ++i) s += std::exp((static_cast<double>(xr[i]) - m) * its[b]);
+                std::vector<std::uint32_t> ci(static_cast<std::size_t>(K));
+                std::vector<float> cl(static_cast<std::size_t>(K));
+                for (int k = 0; k < K; ++k) {
+                    ci[static_cast<std::size_t>(k)] = static_cast<std::uint32_t>(idx[static_cast<std::size_t>(k)]);
+                    cl[static_cast<std::size_t>(k)] = xr[idx[static_cast<std::size_t>(k)]];
+                }
+                const sp::QDist want = sp::draftDist(ci, cl, m, static_cast<float>(s), its[b], static_cast<std::uint32_t>(tks[b]), tps[b], mps[b]);
+                const sp::QDist got = sp::qFromWords(hq.data() + static_cast<std::size_t>(b) * sp::q_words);
+                bad += got.n != want.n;
+                for (std::uint32_t i = 0; i < std::min(got.n, want.n); ++i) {
+                    bad += got.id[i] != want.id[i];
+                    gp.push_back(got.p[i]);
+                    rp.push_back(want.p[i]);
+                }
+                bad += static_cast<std::uint32_t>(hc[static_cast<std::size_t>(b) * 64 + 16 + r]) != sp::sampleQ(got, us[b]);
+            }
+            Result rk;
+            rk.name = "draft_sample_rows q support / drawn token";
+            rk.n = static_cast<std::size_t>(tr);
+            rk.mismatches = bad;
+            rk.pass = bad == 0;
+            c.rep.add(rk);
+            c.rep.add(cmpTolRel("draft_sample_rows q probabilities vs CPU", gp, rp, 1e-4, 1e-7));
         }
     }
 

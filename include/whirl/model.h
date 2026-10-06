@@ -29,6 +29,7 @@
 #include "whirl/hip.h"
 #include "whirl/kernels_abi.h"
 #include "whirl/numerics.h"
+#include "whirl/spec_sample.h"
 #include "whirl/vismap.h"
 
 #include <array>
@@ -532,6 +533,13 @@ public:
     std::uint32_t draft_window_min = 65536;
     float draft_p_min = 0;
     std::uint32_t draft_n_min = 0;
+    // speculative sampling of MTP drafts (numerics item specsample, server): per sequence; a
+    // sequence with on = true gets draft_sample_rows after draft_pick_rows (q per draft step in
+    // draft_qbuf: [seq][max_drafts][spec::q_words] i32)
+    std::vector<spec::DraftSample> draft_samp;
+    DevPtr draft_qbuf = 0;
+    bool draftSampleOk() const { return k.draft_sample_rows != nullptr && draft_qbuf != 0; }
+    void readDraftQ(std::span<std::int32_t> dst);
     std::optional<Mat> draft_head;
     std::optional<DevPtr> draft_d2;
     // draft-head vocabulary subset (setDraftVocab): rows of draft_d2 and their token ids on the device

@@ -89,6 +89,11 @@ public:
     }
     std::uint32_t verifyBatchEnqueue(std::span<const VSeg> segs) override { return m_.verifyBatchEnqueue(segs); }
     void readCtl(std::span<std::int32_t> dst) override { m_.readCtl(dst); }
+    bool draftSampleOk() const override { return m_.draftSampleOk(); }
+    void setDraftSample(std::uint32_t s, const spec::DraftSample& ds) override {
+        if (s < m_.draft_samp.size()) m_.draft_samp[s] = ds;
+    }
+    void readDraftQ(std::span<std::int32_t> dst) override { m_.readDraftQ(dst); }
     void mtpEnqueue(DevPtr hidden, std::span<const std::uint32_t> tokens, std::uint32_t pos0) override {
         m_.mtpEnqueue(hidden, tokens, 0, pos0, std::nullopt);
     }

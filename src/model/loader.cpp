@@ -825,6 +825,8 @@ void Model::setupSeqs(u32 n, u32 slot_ctx) {
     seq_pages = (slot_ctx + kv_page - 1) / kv_page;
     ptab = allocZero(static_cast<u64>(n) * seq_pages * 4);
     out_tok = allocZero(static_cast<u64>(n) * ctl_words * 4);
+    draft_samp.assign(n, spec::DraftSample{});
+    draft_qbuf = mtp ? allocZero(static_cast<u64>(n) * max_drafts * spec::q_words * 4) : DevPtr{0};
     kvbase_buf = allocZero(static_cast<u64>(max_verify_rows) * 4);
     mtp_in = alloc(static_cast<u64>(max_verify_rows) * E * 4);
     max_ctx = slot_ctx;
