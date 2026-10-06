@@ -756,10 +756,19 @@ void testNumerics() {
         CHECK(l.find("numerics: balance - enabled: h16") == 0 && l.find("skipped: fp8 (") != std::string::npos);
     }
     {
-        const nu::Plan p = nu::plan(fast, swift);  // fast items: not implemented, skipped
+        const nu::Plan p = nu::plan(fast, swift);  // R9700: no q4 KV kernels, the rest not implemented
         CHECK(p.on(Item::fp8) && !p.on(Item::kvq4) && !p.on(Item::a4));
-        CHECK(p.items[static_cast<std::size_t>(Item::kvq4)].note.find("not yet implemented") != std::string::npos);
+        CHECK(p.items[static_cast<std::size_t>(Item::kvq4)].note.find("8060S only") != std::string::npos);
+        CHECK(p.items[static_cast<std::size_t>(Item::a4)].note.find("not yet implemented") != std::string::npos);
         CHECK(nu::logLine(p).find("fast runs as balance") != std::string::npos);
+        nu::Target t8 = s8060;
+        t8.k_kv_q4 = true;
+        const nu::Plan p8 = nu::plan(fast, t8);  // 8060S: kvq4 on
+        CHECK(p8.on(Item::kvq4) && p8.on(Item::kvq8) && nu::logLine(p8).find("fast runs as balance") == std::string::npos);
+        t8.kv_explicit = true;
+        CHECK(!nu::plan(fast, t8).on(Item::kvq4));
+        t8.kv_explicit = false;
+        CHECK(!nu::plan(bal, t8).on(Item::kvq4));
     }
     // per-item environment overrides
     {

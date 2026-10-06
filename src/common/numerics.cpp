@@ -202,6 +202,11 @@ Plan plan(const Request& r, const Target& t) {
                 else if (t.k_kv_q8v) note = "auto: q8v, then q8, when f16 does not fit";
                 else note = "auto: q8 when f16 does not fit";
                 break;
+            case Item::kvq4:
+                if (!t.k_kv_q4) why = t.gfx1151 ? "no q4 KV kernels in this code object" : "no 4-bit KV kernels on this GPU (Radeon 8060S only)";
+                else if (t.kv_explicit) why = "WHIRL_KV picks the KV format";
+                else note = "q4: int4 + f16 scale / 32, Hadamard-rotated q/k";
+                break;
             default:
                 why = "not yet implemented (balance behaviour)";
                 break;
@@ -244,7 +249,8 @@ std::string logLine(const Plan& p) {
     if (p.mode == Mode::precise && en.empty()) l += " - f16/f32 prefill activations, f32 DeltaNet, f16 KV";
     else l += " - enabled: " + (en.empty() ? std::string("none") : en);
     if (p.mode != Mode::precise || !sk.empty()) l += "; skipped: " + (sk.empty() ? std::string("none") : sk);
-    if (p.mode == Mode::fast) l += "; fast items are not implemented yet: fast runs as balance";
+    if (p.mode == Mode::fast && (p.items[static_cast<std::size_t>(Item::kvq4)].enabled == false))
+        l += "; no fast item applies here: fast runs as balance";
     for (const std::string& o : p.overrides) l += "; " + o;
     l += std::string("; always: ") + k_q8dec;
     return l;

@@ -8,7 +8,7 @@
 // caches are pools of KV_PAGE-token pages; logical position p of a sequence
 // lives in pool row ptab[tb + p / KV_PAGE] * KV_PAGE + p % KV_PAGE, tb = the
 // sequence's page-table offset (per batched row: kvbase[row]; else tab0).
-// Element format: f16, or q8 (int8 + one f16 scale per 32 consecutive
+// Element format: f16, int8 or int4 (+ one f16 scale per 32 consecutive
 // values of a row; scales in ks / vs as [pool row][row elements / 32]).
 // Every kernel reading K/V dequantizes with the same f16 multiply
 // (kv_ld8 / kv_ld1), and K/V are quantized once, when stored (kv_st32).
@@ -32,40 +32,113 @@ __device__ __forceinline__ int kv_delta(const KvArgs &a, int tb, int p) {
     const int pg = p / KV_PAGE;
     return (a.ptab[tb + pg] - pg) * KV_PAGE;
 }
-template <bool Q8> __device__ __forceinline__ half8 kv_ld8(const void *base, const _Float16 *sc, size_t e) {
-    if constexpr (Q8) {
-        const kvq8_t q = *(const kvq8_t *)((const int8_t *)base + e);
-        const _Float16 s = sc[e >> 5];
-        half8 h;
+// KV formats (template argument Q8 of the kernels, as kernels/attn.hip plus q4):
+// 0 f16, 1 q8 (int8 K and V), 2 q8v (K f16, V int8), 3 q4 (4-bit K and V). Element
+// formats (template argument F of the loaders): 0 f16, 1 int8, 2 int4. Both int
+// formats carry one f16 scale per 32 consecutive values of a row (ks / vs).
+// q4: element e is nibble e & 1 (low first) of byte e / 2, value (nibble - 8) * scale
+// with the scale = (the group's signed value of largest magnitude) / -8 (as ggml
+// q4_0), so the largest value is exact and the rest round to 16 levels.
+__host__ __device__ constexpr int kv_kf(int m) { return m == 1 ? 1 : m == 3 ? 2 : 0; }
+__host__ __device__ constexpr int kv_vf(int m) { return m == 0 ? 0 : m == 3 ? 2 : 1; }
+typedef _Float16 kv_h2 __attribute__((ext_vector_type(2)));
+// 8 nibbles (elements e .. e + 7 of one aligned group) -> f16 x8 times s: 0x6400 | n read
+// as f16 is 1024 + n (exact), minus 1032 is n - 8 (exact), so (that - 1032) * s is the
+// same single f16 rounding as (_Float16)(n - 8) * s.
+__device__ __forceinline__ half8 kv_dq4(uint32_t w, _Float16 s) {
+#pragma clang fp contract(off)
+    const uint32_t lo = w & 0x0f0f0f0fu, hi = (w >> 4) & 0x0f0f0f0fu;  // even / odd elements
+    const kv_h2 off = (kv_h2){(_Float16)1032.0f, (_Float16)1032.0f}, sc = (kv_h2){s, s};
+    half8 r;
 #pragma unroll
-        for (int i = 0; i < 8; ++i) h[i] = (_Float16)q[i] * s;
-        return h;
+    for (int j = 0; j < 4; ++j) {
+        const uint32_t x = ((lo >> (8 * j)) & 0xffu) | (((hi >> (8 * j)) & 0xffu) << 16) | 0x64006400u;
+        kv_h2 a;
+        __builtin_memcpy(&a, &x, 4);
+        a = (a - off) * sc;
+        r[2 * j] = a[0];
+        r[2 * j + 1] = a[1];
+    }
+    return r;
+}
+// int8 x8 -> f16 x8 times s without per-element conversions (as kernels/attn.hip): 0x6400 |
+// (b ^ 0x80) read as f16 is 1024 + (b + 128) (exact), minus 1152 is b (exact), so (that - 1152)
+// * s is the same single f16 rounding as (_Float16)b * s. Packed f16 pairs from v_perm.
+__device__ __forceinline__ half8 kv_dq8(kvq8_t qk, _Float16 s) {
+#pragma clang fp contract(off)
+    uint32_t w[2];
+    __builtin_memcpy(w, &qk, 8);
+    const kv_h2 off = (kv_h2){(_Float16)1152.0f, (_Float16)1152.0f}, sc = (kv_h2){s, s};
+    half8 r;
+#pragma unroll
+    for (int j = 0; j < 2; ++j) {
+        const uint32_t x = w[j] ^ 0x80808080u;
+        const uint32_t lo = __builtin_amdgcn_perm(0x64646464u, x, 0x04010400u);  // bytes 0,1 -> 0x64xx halves
+        const uint32_t hi = __builtin_amdgcn_perm(0x64646464u, x, 0x04030402u);  // bytes 2,3
+        kv_h2 a, b;
+        __builtin_memcpy(&a, &lo, 4);
+        __builtin_memcpy(&b, &hi, 4);
+        a = (a - off) * sc;
+        b = (b - off) * sc;
+        r[4 * j + 0] = a[0];
+        r[4 * j + 1] = a[1];
+        r[4 * j + 2] = b[0];
+        r[4 * j + 3] = b[1];
+    }
+    return r;
+}
+template <int F> __device__ __forceinline__ half8 kv_ld8(const void *base, const _Float16 *sc, size_t e) {
+    if constexpr (F == 1) {
+        return kv_dq8(*(const kvq8_t *)((const int8_t *)base + e), sc[e >> 5]);
+    } else if constexpr (F == 2) {
+        return kv_dq4(*(const uint32_t *)((const uint8_t *)base + (e >> 1)), sc[e >> 5]);
     } else {
         return *(const half8 *)((const _Float16 *)base + e);
     }
 }
-template <bool Q8> __device__ __forceinline__ float kv_ld1(const void *base, const _Float16 *sc, size_t e) {
-    if constexpr (Q8) {
+template <int F> __device__ __forceinline__ float kv_ld1(const void *base, const _Float16 *sc, size_t e) {
+    if constexpr (F == 1) {
         return (float)((_Float16)((const int8_t *)base)[e] * sc[e >> 5]);
+    } else if constexpr (F == 2) {
+        const int n = (((const uint8_t *)base)[e >> 1] >> (4 * (e & 1))) & 15;
+        return (float)((_Float16)(n - 8) * sc[e >> 5]);
     } else {
         return (float)((const _Float16 *)base)[e];
     }
 }
 // gfx11 WMMA fragment: 16 consecutive values (one scale group half)
-template <bool Q8> __device__ __forceinline__ half16 kv_ld16(const void *base, const _Float16 *sc, size_t e) {
-    const half8 lo = kv_ld8<Q8>(base, sc, e), hi = kv_ld8<Q8>(base, sc, e + 8);
-    return __builtin_shufflevector(lo, hi, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+template <int F> __device__ __forceinline__ half16 kv_ld16(const void *base, const _Float16 *sc, size_t e) {
+    if constexpr (F == 2) {
+        const uint2 w = *(const uint2 *)((const uint8_t *)base + (e >> 1));
+        const _Float16 s = sc[e >> 5];
+        const half8 lo = kv_dq4(w.x, s), hi = kv_dq4(w.y, s);
+        return __builtin_shufflevector(lo, hi, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+    } else {
+        const half8 lo = kv_ld8<F>(base, sc, e), hi = kv_ld8<F>(base, sc, e + 8);
+        return __builtin_shufflevector(lo, hi, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+    }
 }
 // Store x at element e; the 32 lanes of the wave hold the 32 elements of one
-// aligned scale group (q8: scale = amax / 127 rounded to f16, q = round(x / scale)).
-template <bool Q8> __device__ __forceinline__ void kv_st32(void *base, _Float16 *sc, size_t e, float x) {
-    if constexpr (Q8) {
+// aligned scale group, lane = e % 32 (q8: scale = amax / 127 rounded to f16,
+// q = round(x / scale); q4: see above, q = clamp(round(x / scale), -8, 7)).
+template <int F> __device__ __forceinline__ void kv_st32(void *base, _Float16 *sc, size_t e, float x) {
+    if constexpr (F == 1) {
         const float amax = warp_max(fabsf(x));
         const _Float16 s = (_Float16)(amax * (1.f / 127.f));
         const float sf = (float)s;
         int qv = sf > 0.f ? (int)rintf(x / sf) : 0;
         qv = max(-127, min(127, qv));
         ((int8_t *)base)[e] = (int8_t)qv;
+        if ((threadIdx.x % WARP) == 0) sc[e >> 5] = s;
+    } else if constexpr (F == 2) {
+        const float mx = warp_max(x), mn = -warp_max(-x);
+        const float m = mx >= -mn ? mx : mn;  // signed value of largest magnitude
+        const _Float16 s = (_Float16)(m * (-1.f / 8.f));
+        const float sf = (float)s;
+        int qv = sf != 0.f ? (int)rintf(x / sf) : 0;
+        qv = max(-8, min(7, qv)) + 8;
+        const int qo = __shfl_xor(qv, 1, WARP);
+        if ((e & 1) == 0) ((uint8_t *)base)[e >> 1] = (uint8_t)(qv | (qo << 4));
         if ((threadIdx.x % WARP) == 0) sc[e >> 5] = s;
     } else {
         ((_Float16 *)base)[e] = (_Float16)x;
@@ -80,7 +153,7 @@ template <bool Q8> __device__ __forceinline__ void kv_st32(void *base, _Float16 
 // scores scratch: [n_tok][n_head][max_ctx].
 // Token t attends to positions [0, pos0 + t].
 // ---------------------------------------------------------------------------
-template <bool Q8>
+template <int Q8>
 __device__ __forceinline__ void attn_decode_impl(const float *q, const KvArgs &kv, float *out, float *scores,
                 int n_head, int n_kv, int head_dim, int q_stride, int max_ctx, const int *pos, float scale) {
     const int h = blockIdx.x, t = blockIdx.y;
@@ -100,7 +173,7 @@ __device__ __forceinline__ void attn_decode_impl(const float *q, const KvArgs &k
     for (int p = wid; p < n_pos; p += nw) {
         const size_t kb = ((size_t)kv_row(kv, tb, p) * n_kv + kvh) * head_dim;
         float s = 0.f;
-        for (int i = lane; i < head_dim; i += WARP) s += qs[i] * kv_ld1<Q8>(kv.k, kv.ks, kb + i);
+        for (int i = lane; i < head_dim; i += WARP) s += qs[i] * kv_ld1<kv_kf(Q8)>(kv.k, kv.ks, kb + i);
         s = warp_sum(s);
         if (lane == 0) sc[p] = s * scale;
     }
@@ -123,7 +196,7 @@ __device__ __forceinline__ void attn_decode_impl(const float *q, const KvArgs &k
     for (int d = threadIdx.x; d < head_dim; d += blockDim.x) {
         float acc = 0.f;
         for (int p = 0; p < n_pos; ++p)
-            acc += sc[p] * kv_ld1<Q8>(kv.v, kv.vs, ((size_t)kv_row(kv, tb, p) * n_kv + kvh) * head_dim + d);
+            acc += sc[p] * kv_ld1<kv_vf(Q8)>(kv.v, kv.vs, ((size_t)kv_row(kv, tb, p) * n_kv + kvh) * head_dim + d);
         const float g = gate[d];
         out[(size_t)t * n_head * head_dim + h * head_dim + d] = acc * inv / (1.f + __expf(-g));
     }
@@ -136,6 +209,8 @@ __device__ __forceinline__ void attn_decode_impl(const float *q, const KvArgs &k
     }
 ATTN_DECODE_ENTRY(attn_decode, false)
 ATTN_DECODE_ENTRY(attn_decode_q8, true)
+ATTN_DECODE_ENTRY(attn_decode_q8v, 2)
+ATTN_DECODE_ENTRY(attn_decode_q4, 3)
 
 // ---------------------------------------------------------------------------
 // Split-K decode attention (flash-decoding), one query token.
@@ -155,7 +230,7 @@ ATTN_DECODE_ENTRY(attn_decode_q8, true)
 // nq queries (speculative verify; 1 for decode) share one pass over K/V: row
 // hh = t * grp + j is query t, head j of the group; query t sees positions
 // < pos[t] + 1 (later positions score -inf and add exact zeros).
-template <int NQ, bool Q8>
+template <int NQ, int Q8>
 __device__ __forceinline__ void attn_split_impl(const float *q, const KvArgs &kv, int tb, float *part_ml,
                                                 float *part_acc, int n_head, int n_kv, int head_dim, int q_stride,
                                                 const int *pos, float scale) {
@@ -223,7 +298,7 @@ __device__ __forceinline__ void attn_split_impl(const float *q, const KvArgs &kv
                 const size_t kr = ((size_t)(p + dl) * n_kv + g) * head_dim + 64 * sl;
 #pragma unroll
                 for (int e8 = 0; e8 < 8; ++e8) {
-                    const half8 kh8 = kv_ld8<Q8>(kv.k, kv.ks, kr + 8 * e8);
+                    const half8 kh8 = kv_ld8<kv_kf(Q8)>(kv.k, kv.ks, kr + 8 * e8);
                     float kv[8];
 #pragma unroll
                     for (int e = 0; e < 8; ++e) kv[e] = (float)kh8[e];
@@ -252,7 +327,7 @@ __device__ __forceinline__ void attn_split_impl(const float *q, const KvArgs &kv
         } else {
             // scores: one wave per position, lanes over head_dim (8 each for 256)
             for (int p = c0 + wid; p < c1; p += nw) {
-                const half8 kh8 = kv_ld8<Q8>(kv.k, kv.ks, ((size_t)(p + dl) * n_kv + g) * head_dim + lane * 8);
+                const half8 kh8 = kv_ld8<kv_kf(Q8)>(kv.k, kv.ks, ((size_t)(p + dl) * n_kv + g) * head_dim + lane * 8);
                 float kv[8];
 #pragma unroll
                 for (int e = 0; e < 8; ++e) kv[e] = (float)kh8[e];
@@ -297,7 +372,7 @@ __device__ __forceinline__ void attn_split_impl(const float *q, const KvArgs &kv
             for (int hh = 0; hh < ROWS; ++hh)
                 if (hh < nh) acc[hh] *= fac[hh];
             for (int p = c0; p < c1; ++p) {
-                const float v = kv_ld1<Q8>(kv.v, kv.vs, ((size_t)(p + dl) * n_kv + g) * head_dim + d);
+                const float v = kv_ld1<kv_vf(Q8)>(kv.v, kv.vs, ((size_t)(p + dl) * n_kv + g) * head_dim + d);
 #pragma unroll
                 for (int hh = 0; hh < ROWS; ++hh)
                     if (hh < nh) acc[hh] += sc[hh][p - c0] * v;
@@ -331,6 +406,8 @@ __device__ __forceinline__ void attn_split_impl(const float *q, const KvArgs &kv
 // grid.z = query with NQ = 1: the score reductions, not K/V bytes, bound it.
 ATTN_SPLIT_ENTRY(attn_split, 1, false)
 ATTN_SPLIT_ENTRY(attn_split_q8, 1, true)
+ATTN_SPLIT_ENTRY(attn_split_q8v, 1, 2)
+ATTN_SPLIT_ENTRY(attn_split_q4, 1, 3)
 
 // out[h][d] = sum_i e^(m_i - M) acc_i[d] / sum_i e^(m_i - M) l_i, gated by sigmoid.
 extern "C" __global__ void attn_combine(const float *part_ml, const float *part_acc, const float *q, float *out,
@@ -368,7 +445,7 @@ extern "C" __global__ void attn_combine(const float *part_ml, const float *part_
 // order), so the results are unchanged; 5 launches per attention layer -> 1.
 // grid = (n_head + n_kv, n_tok), 256 threads, hd <= 512.
 // ---------------------------------------------------------------------------
-template <bool Q8>
+template <int Q8, bool ROT = false>
 __device__ __forceinline__ void attn_prep_impl(float *qf, float *kk, const float *vv, const float *qw, const float *kw, const KvArgs &kv,
               const int *pos, int n_head, int n_kv, int hd, int n_rot, float theta_scale, float eps) {
     __shared__ float nv[512];
@@ -394,6 +471,20 @@ __device__ __forceinline__ void attn_prep_impl(float *qf, float *kk, const float
         nv[i + half] = x0 * s + x1 * c;
     }
     __syncthreads();
+    if constexpr (ROT) {  // in-place fast Walsh-Hadamard transform, hd a power of 2 (as kernels/attn.hip)
+        for (int len = 1; len < hd; len <<= 1) {
+            for (int i = threadIdx.x; i < hd / 2; i += blockDim.x) {
+                const int a = (i / len) * 2 * len + i % len, b = a + len;
+                const float x = nv[a], y = nv[b];
+                nv[a] = x + y;
+                nv[b] = x - y;
+            }
+            __syncthreads();
+        }
+        const float rs = rsqrtf((float)hd);
+        for (int i = threadIdx.x; i < hd; i += blockDim.x) nv[i] *= rs;
+        __syncthreads();
+    }
     for (int i = threadIdx.x; i < hd; i += blockDim.x) xv[i] = nv[i];
     if (isq) return;
     const int row = n_kv * hd;
@@ -402,8 +493,8 @@ __device__ __forceinline__ void attn_prep_impl(float *qf, float *kk, const float
     const size_t prow = (size_t)kv_row(kv, kv_tb(kv, t), lp);
     const float *vr = vv + (size_t)t * row + (size_t)h * hd;
     for (int d = threadIdx.x; d < hd; d += blockDim.x) {  // hd % 32 == 0: whole waves per scale group
-        kv_st32<Q8>(kv.k, kv.ks, prow * row + (size_t)h * hd + d, nv[d]);
-        kv_st32<Q8>(kv.v, kv.vs, prow * row + (size_t)h * hd + d, vr[d]);
+        kv_st32<kv_kf(Q8)>(kv.k, kv.ks, prow * row + (size_t)h * hd + d, nv[d]);
+        kv_st32<kv_vf(Q8)>(kv.v, kv.vs, prow * row + (size_t)h * hd + d, vr[d]);
     }
 }
 extern "C" __global__ void __launch_bounds__(256)
@@ -416,6 +507,15 @@ extern "C" __global__ void __launch_bounds__(256)
               const int *pos, int n_head, int n_kv, int hd, int n_rot, float theta_scale, float eps) {
     attn_prep_impl<true>(qf, kk, vv, qw, kw, kv, pos, n_head, n_kv, hd, n_rot, theta_scale, eps);
 }
+
+// ROT: rotate every q and k head by the orthonormal Walsh-Hadamard transform after
+// RoPE (q.k unchanged in exact arithmetic): K outlier channels spread over the head,
+// so the per-32 int scales fit better. Every attention path reads q from qf and K
+// from the cache written here. q8h: int8 K / V; q4: 4-bit K / V (always rotated).
+#define ATTN_PREP_ENTRY(NAME, Q8, ROT)                                                                                  extern "C" __global__ void __launch_bounds__(256)                                                                     NAME(float *qf, float *kk, const float *vv, const float *qw, const float *kw, KvArgs kv, const int *pos,               int n_head, int n_kv, int hd, int n_rot, float theta_scale, float eps) {                                     attn_prep_impl<Q8, ROT>(qf, kk, vv, qw, kw, kv, pos, n_head, n_kv, hd, n_rot, theta_scale, eps);              }
+ATTN_PREP_ENTRY(attn_prep_q8h, 1, true)
+ATTN_PREP_ENTRY(attn_prep_q8v, 2, false)  // K f16 (not rotated), V int8
+ATTN_PREP_ENTRY(attn_prep_q4, 3, true)
 
 // attn_combine + the int8 copy of its output for the o-projection GEMV
 // (same values as quantize_q8 over out); needs blockDim == head_dim, a
@@ -466,7 +566,7 @@ struct AwGroups {  // kMaxVerifyRows (32) groups, as include/whirl/kernels_abi.h
     int count[32];
 };
 
-template <int CG, bool Q8>
+template <int CG, int Q8>
 __device__ __forceinline__ void attn_wsplit_impl(const float *q, const KvArgs &kv, float *part_ml, float *part_acc, int n_head, int n_kv,
                 int q_stride, const int *pos, float scale, const int *skip, AwGroups groups) {
     // no implicit fma contraction: every instantiation (decode 128-thread,
@@ -475,6 +575,10 @@ __device__ __forceinline__ void attn_wsplit_impl(const float *q, const KvArgs &k
     if (skip != nullptr && *skip) return;
     __shared__ _Float16 Vt[AW_D][AW_K + 8];
     __shared__ _Float16 Qs[16 * CG][AW_D + 8];
+    // quantized K (q8 / q8h / q4): the tile is dequantized once by the block into LDS instead of
+    // by every computing lane (both WMMA lane halves) from the cache; same f16 values, same bits
+    constexpr bool KL = kv_kf(Q8) != 0;
+    __shared__ _Float16 Ks[KL ? AW_K : 1][AW_D + 8];
     const int lane = threadIdx.x % WARP, wid = threadIdx.x / WARP;
     const int g = blockIdx.x, split = blockIdx.y, n_split = gridDim.y, z = blockIdx.z;
     const int grp = n_head / n_kv;
@@ -547,7 +651,7 @@ __device__ __forceinline__ void attn_wsplit_impl(const float *q, const KvArgs &k
             for (int r = 0; r < 8; ++r) {
                 const int key = k0 + kb * 8 + r;
                 if (key < b1) {
-                    rows[r] = kv_ld8<Q8>(kv.v, kv.vs, ((size_t)(key + dl) * n_kv + g) * AW_D + d8);
+                    rows[r] = kv_ld8<kv_vf(Q8)>(kv.v, kv.vs, ((size_t)(key + dl) * n_kv + g) * AW_D + d8);
                 } else {
 #pragma unroll
                     for (int e2 = 0; e2 < 8; ++e2) rows[r][e2] = (_Float16)0.f;
@@ -566,6 +670,16 @@ __device__ __forceinline__ void attn_wsplit_impl(const float *q, const KvArgs &k
                 *(half4_t *)&Vt[d8 + c][tb] = ev;
                 *(half4_t *)&Vt[d8 + c][tb + 8] = od;
             }
+            if constexpr (KL) {
+                // 32 keys x 256 dims, 8 values per item; keys past b1 read row b1 - 1 (as the clamp below)
+#pragma unroll
+                for (int e = 0; e < AW_K * AW_D / 8 / 128; ++e) {
+                    const int i = tv + e * 128;
+                    const int kr = i / (AW_D / 8), dk8 = (i % (AW_D / 8)) * 8;
+                    const int krow = min(k0 + kr, b1 - 1);
+                    *(half8 *)&Ks[kr][dk8] = kv_ld8<kv_kf(Q8)>(kv.k, kv.ks, ((size_t)(krow + dl) * n_kv + g) * AW_D + dk8);
+                }
+            }
         }
         __syncthreads();
         if (!cw) continue;
@@ -579,7 +693,11 @@ __device__ __forceinline__ void attn_wsplit_impl(const float *q, const KvArgs &k
 #pragma unroll
             for (int st = 0; st < AW_D / 16; ++st) {
                 const half16 qb = ld_frag16(&Qs[wid * 16 + lane % 16][16 * st]);
-                const half16 a = kv_ld16<Q8>(kv.k, kv.ks, kr + 16 * st);
+                half16 a;
+                if constexpr (KL)
+                    a = ld_frag16(&Ks[kt * 16 + lane % 16][16 * st]);
+                else
+                    a = kv_ld16<kv_kf(Q8)>(kv.k, kv.ks, kr + 16 * st);
                 sc[kt] = WMMA16(a, qb, sc[kt]);
             }
         }
@@ -645,6 +763,16 @@ extern "C" __global__ void __launch_bounds__(128)
                  int q_stride, const int *pos, float scale, const int *skip, AwGroups groups) {
     attn_wsplit_impl<1, true>(q, kv, part_ml, part_acc, n_head, n_kv, q_stride, pos, scale, skip, groups);
 }
+extern "C" __global__ void __launch_bounds__(128)
+    attn_wsplit1_q8v(const float *q, KvArgs kv, float *part_ml, float *part_acc, int n_head, int n_kv,
+                 int q_stride, const int *pos, float scale, const int *skip, AwGroups groups) {
+    attn_wsplit_impl<1, 2>(q, kv, part_ml, part_acc, n_head, n_kv, q_stride, pos, scale, skip, groups);
+}
+extern "C" __global__ void __launch_bounds__(128)
+    attn_wsplit1_q4(const float *q, KvArgs kv, float *part_ml, float *part_acc, int n_head, int n_kv,
+                 int q_stride, const int *pos, float scale, const int *skip, AwGroups groups) {
+    attn_wsplit_impl<1, 3>(q, kv, part_ml, part_acc, n_head, n_kv, q_stride, pos, scale, skip, groups);
+}
 
 
 
@@ -671,14 +799,17 @@ extern "C" __global__ void __launch_bounds__(128)
 
 typedef _Float16 fa_h4 __attribute__((ext_vector_type(4)));
 typedef char fa_q4 __attribute__((ext_vector_type(4)));
-template <bool Q8> __device__ __forceinline__ fa_h4 kv_ld4(const void *base, const _Float16 *sc, size_t e) {
-    if constexpr (Q8) {
+template <int F> __device__ __forceinline__ fa_h4 kv_ld4(const void *base, const _Float16 *sc, size_t e) {
+    if constexpr (F == 1) {
         const fa_q4 q = *(const fa_q4 *)((const int8_t *)base + e);
         const _Float16 s = sc[e >> 5];
         fa_h4 h;
 #pragma unroll
         for (int i = 0; i < 4; ++i) h[i] = (_Float16)q[i] * s;
         return h;
+    } else if constexpr (F == 2) {
+        const half8 h8 = kv_dq4(*(const uint16_t *)((const uint8_t *)base + (e >> 1)), sc[e >> 5]);
+        return (fa_h4){h8[0], h8[1], h8[2], h8[3]};
     } else {
         return *(const fa_h4 *)((const _Float16 *)base + e);
     }
@@ -688,7 +819,7 @@ __device__ __forceinline__ int fa_vt_off(int row, int h) { return row * FA_VS + 
 
 // q8 KV: the previous tile loader (the 256-thread loader below spills with the
 // q8 dequantization); same arithmetic, same bits.
-template <int MODE, bool Q8>
+template <int MODE, int Q8>
 __device__ __forceinline__ void attn_prefill_impl_q8kv(const float *q, const KvArgs &kv, float *out, int n_head, int n_kv,
                       int q_stride, const int *pos, int n_tok, float scale, int h0) {
     const int tb = kv.tab0;  // one sequence per launch
@@ -737,7 +868,7 @@ __device__ __forceinline__ void attn_prefill_impl_q8kv(const float *q, const KvA
                     const int key = k0 + kr;
                     half8 kv8;
                     if (key < n_keys) {
-                        kv8 = kv_ld8<Q8>(kv.k, kv.ks, ((size_t)(key + dl) * n_kv + kvh) * FA_D + d8);
+                        kv8 = kv_ld8<kv_kf(Q8)>(kv.k, kv.ks, ((size_t)(key + dl) * n_kv + kvh) * FA_D + d8);
                     } else {
 #pragma unroll
                         for (int q = 0; q < 8; ++q) kv8[q] = (_Float16)0.f;
@@ -753,7 +884,7 @@ __device__ __forceinline__ void attn_prefill_impl_q8kv(const float *q, const KvA
                 for (int r = 0; r < 8; ++r) {
                     const int key = k0 + kb * 8 + r;
                     if (key < n_keys) {
-                        rows[r] = kv_ld8<Q8>(kv.v, kv.vs, ((size_t)(key + dl) * n_kv + kvh) * FA_D + d8);
+                        rows[r] = kv_ld8<kv_vf(Q8)>(kv.v, kv.vs, ((size_t)(key + dl) * n_kv + kvh) * FA_D + d8);
                     } else {
 #pragma unroll
                         for (int q = 0; q < 8; ++q) rows[r][q] = (_Float16)0.f;
@@ -856,7 +987,7 @@ __device__ __forceinline__ void attn_prefill_impl_q8kv(const float *q, const KvA
             orow[d] = o[dt][v] * inv / (1.f + __expf(-gate[d]));
         }
 }
-template <int MODE, bool Q8>
+template <int MODE, int Q8>
 __device__ __forceinline__ void attn_prefill_impl(const float *q, const KvArgs &kv, float *out, int n_head, int n_kv,
                       int q_stride, const int *pos, int n_tok, float scale, int h0) {
     if constexpr (Q8) {
@@ -910,7 +1041,7 @@ __device__ __forceinline__ void attn_prefill_impl(const float *q, const KvArgs &
         for (int e = 0; e < 4; ++e) {
             const int key = k0 + tid / 32 + 8 * e;
             const int kc = min(key, n_keys - 1);
-            const half8 x = kv_ld8<Q8>(kv.k, kv.ks, (size_t)(unsigned)(kc + dl) * rstep + kro);
+            const half8 x = kv_ld8<kv_kf(Q8)>(kv.k, kv.ks, (size_t)(unsigned)(kc + dl) * rstep + kro);
             const half8 z = {0, 0, 0, 0, 0, 0, 0, 0};
             kr8[e] = key < n_keys ? x : z;
         }
@@ -921,7 +1052,7 @@ __device__ __forceinline__ void attn_prefill_impl(const float *q, const KvArgs &
         for (int r = 0; r < 8; ++r) {
             const int key = k0 + vkb * 8 + r;
             const int kc = min(key, n_keys - 1);
-            const fa_h4 x = kv_ld4<Q8>(kv.v, kv.vs, (size_t)(unsigned)(kc + dl) * rstep + vro);
+            const fa_h4 x = kv_ld4<kv_vf(Q8)>(kv.v, kv.vs, (size_t)(unsigned)(kc + dl) * rstep + vro);
             const fa_h4 z = {0, 0, 0, 0};
             vr[r] = key < n_keys ? x : z;
         }
@@ -1045,6 +1176,8 @@ __device__ __forceinline__ void attn_prefill_impl(const float *q, const KvArgs &
     }
 FA_ENTRY(attn_prefill_wmma, 0, false)
 FA_ENTRY(attn_prefill_wmma_q8, 0, true)
+FA_ENTRY(attn_prefill_wmma_q8v, 0, 2)
+FA_ENTRY(attn_prefill_wmma_q4, 0, 3)
 FA_ENTRY(fa_probe_noload, 1, false)
 FA_ENTRY(fa_probe_norescale, 2, false)
 FA_ENTRY(fa_probe_nopv, 3, false)

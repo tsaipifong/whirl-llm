@@ -22,8 +22,6 @@ inline i32 I(u64 v) { return static_cast<i32>(v); }
 
 // Positions per attn_split block (FD_CH in the kernels).
 constexpr u32 fd_chunk = 64;
-// Flash-decoding split count cap.
-constexpr u32 fd_max_splits = 64;
 constexpr u32 moe_bm = 128;
 constexpr u32 moe_bn = 64;
 // smallest batch that takes gemmh_f16 instead of the tuned f16 GEMM
@@ -37,7 +35,6 @@ i32 awPer(i32 n_pos, u32 n_split) {
     return (q >= 0 ? q / span : -((-q + span - 1) / span)) * static_cast<i32>(fd_chunk);
 }
 
-u32 fdSplits(u32 max_ctx) { return std::min(fd_max_splits, (max_ctx + fd_chunk - 1) / fd_chunk); }
 
 u32 gvNmax(GgmlType ty) {
     if (gv_nmax != 0) return gv_nmax;
@@ -576,7 +573,7 @@ void Model::attnBlock(const AttnW& a, const KvLayer& lkv, u32 n) {
     if (n <= small_max) {
         // flash-decoding; grid.z = query (speculative verify), query t sees
         // positions up to pos_buf[t]
-        const u32 n_split = fdSplits(max_ctx);
+        const u32 n_split = std::min(fd_splits, (max_ctx + fd_chunk - 1) / fd_chunk);
         const u32 grp_q = cfg.n_head / cfg.n_head_kv;
         if (k.attn_wsplit1 != nullptr && hd == 256 && grp_q <= 16 && (dbg_flags & 2) == 0) {
             // query groups: consecutive rows of one sequence whose split size
