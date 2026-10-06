@@ -704,6 +704,10 @@ extern "C" __global__ void __launch_bounds__(256) dequant_f16_mxfp4(const uint8_
 // per arch. gfx1151: c10 uses WAVES_M 2 (4x2 WMMA tiles per wave instead of
 // 1x8) and c11 WAVES_M 4 (4x2 instead of 1x8): the gfx11 A/B fragments are 32
 // bytes per lane (lanes 16-31 duplicate), so fewer fragment loads per WMMA pay.
+// c2_f16 (the dequant + f16 GEMM the tuner picks for every dense matrix above
+// 1024 tokens) uses WAVES_M 4: 4x4 tiles per wave instead of 16x1 (8 instead of
+// 17 LDS fragment loads per 16 WMMAs), 1.1-1.3x on the 8060S; the other c2 types
+// keep WAVES_M 1. Same WMMAs per accumulator in the same k order: same bits.
 extern "C" __global__ void __launch_bounds__(512) gemm_c0_f32(const uint8_t *W, uint64_t row_bytes, const _Float16 *X, float *Y, int ncols, int nrows, int n_tok, int accumulate) { gemm3_impl<QT_F32, 128, 256, 64, 4, 0, 512, true>(W, row_bytes, X, Y, ncols, nrows, n_tok, accumulate); }
 extern "C" __global__ void __launch_bounds__(512) gemm_c0_f16(const uint8_t *W, uint64_t row_bytes, const _Float16 *X, float *Y, int ncols, int nrows, int n_tok, int accumulate) { gemm3_impl<QT_F16, 128, 256, 64, 4, 0, 512, true>(W, row_bytes, X, Y, ncols, nrows, n_tok, accumulate); }
 extern "C" __global__ void __launch_bounds__(512) gemm_c0_q8_0(const uint8_t *W, uint64_t row_bytes, const _Float16 *X, float *Y, int ncols, int nrows, int n_tok, int accumulate) { gemm3_impl<QT_Q8_0, 128, 256, 64, 4, 0, 512, true>(W, row_bytes, X, Y, ncols, nrows, n_tok, accumulate); }
@@ -727,7 +731,7 @@ extern "C" __global__ void __launch_bounds__(256) gemm_c1_iq3_s(const uint8_t *W
 extern "C" __global__ void __launch_bounds__(256) gemm_c1_iq4_xs(const uint8_t *W, uint64_t row_bytes, const _Float16 *X, float *Y, int ncols, int nrows, int n_tok, int accumulate) { gemm3_impl<QT_IQ4_XS, 128, 256, 64, 8, 0, 256, true>(W, row_bytes, X, Y, ncols, nrows, n_tok, accumulate); }
 extern "C" __global__ void __launch_bounds__(256) gemm_c1_mxfp4(const uint8_t *W, uint64_t row_bytes, const _Float16 *X, float *Y, int ncols, int nrows, int n_tok, int accumulate) { gemm3_impl<QT_MXFP4, 128, 256, 64, 8, 0, 256, true>(W, row_bytes, X, Y, ncols, nrows, n_tok, accumulate); }
 extern "C" __global__ void __launch_bounds__(256) gemm_c2_f32(const uint8_t *W, uint64_t row_bytes, const _Float16 *X, float *Y, int ncols, int nrows, int n_tok, int accumulate) { gemm3_impl<QT_F32, 256, 128, 64, 1, 0, 256, true>(W, row_bytes, X, Y, ncols, nrows, n_tok, accumulate); }
-extern "C" __global__ void __launch_bounds__(256) gemm_c2_f16(const uint8_t *W, uint64_t row_bytes, const _Float16 *X, float *Y, int ncols, int nrows, int n_tok, int accumulate) { gemm3_impl<QT_F16, 256, 128, 64, 1, 0, 256, true>(W, row_bytes, X, Y, ncols, nrows, n_tok, accumulate); }
+extern "C" __global__ void __launch_bounds__(256) gemm_c2_f16(const uint8_t *W, uint64_t row_bytes, const _Float16 *X, float *Y, int ncols, int nrows, int n_tok, int accumulate) { gemm3_impl<QT_F16, 256, 128, 64, 4, 0, 256, true>(W, row_bytes, X, Y, ncols, nrows, n_tok, accumulate); }
 extern "C" __global__ void __launch_bounds__(256) gemm_c2_q8_0(const uint8_t *W, uint64_t row_bytes, const _Float16 *X, float *Y, int ncols, int nrows, int n_tok, int accumulate) { gemm3_impl<QT_Q8_0, 256, 128, 64, 1, 0, 256, true>(W, row_bytes, X, Y, ncols, nrows, n_tok, accumulate); }
 extern "C" __global__ void __launch_bounds__(256) gemm_c2_q3_k(const uint8_t *W, uint64_t row_bytes, const _Float16 *X, float *Y, int ncols, int nrows, int n_tok, int accumulate) { gemm3_impl<QT_Q3_K, 256, 128, 64, 1, 0, 256, true>(W, row_bytes, X, Y, ncols, nrows, n_tok, accumulate); }
 extern "C" __global__ void __launch_bounds__(256) gemm_c2_q4_k(const uint8_t *W, uint64_t row_bytes, const _Float16 *X, float *Y, int ncols, int nrows, int n_tok, int accumulate) { gemm3_impl<QT_Q4_K, 256, 128, 64, 1, 0, 256, true>(W, row_bytes, X, Y, ncols, nrows, n_tok, accumulate); }
