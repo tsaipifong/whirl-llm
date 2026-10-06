@@ -74,6 +74,11 @@ Arch archFor(std::string_view gcn_arch);
 const char* archName(Arch a);
 
 // ---- memory
+// Every device allocation gets kTailPad spare bytes past `bytes` (never handed out, never
+// read for results): a kernel whose fixed-width loads run a few bytes past the end of a
+// weight / activation buffer then still reads mapped memory instead of faulting when the
+// allocation happens to end at an unmapped page (hipError 719, X16-4 / FIX-OVR).
+inline constexpr std::size_t kTailPad = 256;
 DevPtr malloc(std::size_t bytes);
 void free(DevPtr p);
 void* hostMalloc(std::size_t bytes);  // pinned host memory

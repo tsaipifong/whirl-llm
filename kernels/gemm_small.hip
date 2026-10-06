@@ -13,12 +13,13 @@
 // prefetched into registers; token tiles of 16..64 instead of 128/256 (no padding work).
 template <int T> constexpr int t2_sbb() { return 256 / Q<T>::blk * Q<T>::bytes; }
 typedef unsigned int t2_u32x4 __attribute__((ext_vector_type(4)));
+#include "gemm_small_addr.h"  // CH and which W chunks a stage loads (shared with the unit tests)
 
 template <int T, int BM, int BN, int NTH, int WAVES_M, bool OH>
 __device__ __forceinline__ void gemms_impl(const uint8_t *__restrict__ W, uint64_t row_bytes, const _Float16 *__restrict__ X,
                                            float *__restrict__ Y, int ncols, int nrows, int n_tok, int accumulate) {
     constexpr int SB = t2_sbb<T>();
-    constexpr int CH = (SB + 15) / 16 + 1;  // 16-byte chunks per row stage (covers the misaligned start)
+    constexpr int CH = gemms_stage_chunks(SB);  // 16-byte chunks per row stage (covers the misaligned start)
     constexpr int SLOT = CH * 16;
     constexpr int WCH = BM * CH;
     constexpr int WPER = (WCH + NTH - 1) / NTH;
@@ -50,7 +51,8 @@ __device__ __forceinline__ void gemms_impl(const uint8_t *__restrict__ W, uint64
                 const int r = idx / CH, c = idx % CH;                                               \
                 const int row = min(m0 + r, nrows - 1);                                             \
                 const size_t st = (size_t)row * row_bytes + (size_t)(js) * SB;                      \
-                rw[e] = *(const t2_u32x4 *)(W + (st & ~(size_t)15) + c * 16);                       \
+                /* only chunks overlapping the stage: the matrix may end right after it */          \
+                rw[e] = gemms_chunk_needed(st, c, SB) ? *(const t2_u32x4 *)(W + (st & ~(size_t)15) + c * 16) : (t2_u32x4){0, 0, 0, 0}; \
             }                                                                                       \
         }                                                                                           \
         _Pragma("unroll") for (int e = 0; e < XPER; ++e) {                                          \
@@ -125,7 +127,7 @@ template <int T, int BM, int BN, int NTH, int WAVES_M, bool OH>
 __device__ __forceinline__ void gemmsd_impl(const uint8_t *__restrict__ W, uint64_t row_bytes, const _Float16 *__restrict__ X,
                             float *__restrict__ Y, int ncols, int nrows, int n_tok, int accumulate) {
     constexpr int SB = t2_sbb<T>();
-    constexpr int CH = (SB + 15) / 16 + 1;
+    constexpr int CH = gemms_stage_chunks(SB);
     constexpr int SLOT = CH * 16;
     constexpr int WCH = BM * CH;
     constexpr int WPER = (WCH + NTH - 1) / NTH;
@@ -171,7 +173,8 @@ __device__ __forceinline__ void gemmsd_impl(const uint8_t *__restrict__ W, uint6
             const int idx = tid + e * NTH;
             if (WCH % NTH == 0 || idx < WCH) {
                 const uint32_t st = wst[e] + (uint32_t)js * SB;
-                rw[e] = *(const t2_u32x4 *)(W + (st & ~15u) + (idx % CH) * 16);
+                // only chunks overlapping the stage: the matrix may end right after it
+                rw[e] = gemms_chunk_needed(st, idx % CH, SB) ? *(const t2_u32x4 *)(W + (st & ~15u) + (idx % CH) * 16) : (t2_u32x4){0, 0, 0, 0};
             }
         }
     };

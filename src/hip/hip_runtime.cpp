@@ -141,7 +141,7 @@ VramTrack& vramTrack() {
 }  // namespace
 
 DevPtr malloc(std::size_t bytes) {
-    const std::size_t n = std::max<std::size_t>(bytes, 1);
+    const std::size_t n = bytes + kTailPad;  // see kTailPad in whirl/hip.h
     const std::uint64_t limit = vram::limitBytes();
     if (limit == 0) {
         void* p = nullptr;

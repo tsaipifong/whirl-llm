@@ -367,7 +367,7 @@ __device__ void gemm3_impl(const uint8_t *__restrict__ W, uint64_t row_bytes, co
         _Pragma("unroll") for (int e = 0; e < A_PER; ++e) {                                         \
             const int i = threadIdx.x + e * NTH;                                                    \
             const int r = i / GPR, gg = i % GPR;                                                    \
-            if (MODE == 1) {                                                                        \
+            if (MODE == 1 && m0 + r < nrows) { /* rows past nrows: zeros, no load past the matrix */ \
                 ra[e] = *(const half8 *)(W + (size_t)(m0 + r) * row_bytes + (((k0_) / 8 + gg) * 16) % row_bytes); \
             } else if (m0 + r < nrows) {                                                            \
                 ra[e] = dec_group_h<T>(W + (size_t)(m0 + r) * row_bytes, (k0_) / 8 + gg);            \

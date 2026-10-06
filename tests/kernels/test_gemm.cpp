@@ -50,6 +50,105 @@ std::vector<std::uint16_t> toHalf(const std::vector<float>& v) {
     return h;
 }
 
+// A device allocation of exactly `bytes` (no kTailPad): hip::malloc adds the pad itself.
+struct RawAlloc {
+    DevPtr p = 0;
+    explicit RawAlloc(std::size_t bytes) { p = hip::malloc(bytes - hip::kTailPad); }
+    RawAlloc(const RawAlloc&) = delete;
+    RawAlloc& operator=(const RawAlloc&) = delete;
+    ~RawAlloc() { hip::free(p); }
+};
+
+// FIX-OVR: every raw-weight GEMM with the matrix placed flush against the end of an
+// allocation whose size is a multiple of 2 MiB (and a freed 2 MiB guard right after it, so
+// the next page is likely unmapped): a load past the matrix end faults (hipError 719) or
+// reads foreign bytes. Results must equal gemm_c0 on an ordinary buffer, bitwise, for
+// n = 1, 17, 37, 40, 47, 128, 2048.
+void testGemmFlush(Ctx& c, const std::vector<HostMat>& mats) {
+    constexpr std::size_t kAlign = 2u << 20;
+    const std::vector<int> ns = c.quick ? std::vector<int>{1, 17, 37, 40, 47, 128} : std::vector<int>{1, 17, 37, 40, 47, 128, 2048};
+    const int nmax = ns.back();
+    for (const HostMat& m : mats) {
+        if (m.type == QType::f32) continue;
+        const int ti = static_cast<int>(m.type);
+        const int ncols = m.ncols, nrows = m.nrows;
+        const std::size_t bytes = m.data.size();
+        const std::size_t asz = (bytes + kAlign - 1) / kAlign * kAlign;
+        RawAlloc big(asz);
+        {
+            RawAlloc guard(kAlign);  // freed at once: likely a hole right after `big`
+        }
+        const DevPtr wf = big.p + (asz - bytes);
+        hip::upload(wf, m.data.data(), bytes);
+        Buf w(m.data);
+        const std::vector<float> x = c.randn(static_cast<std::size_t>(nmax) * ncols);
+        Buf dx(x), x16(static_cast<std::size_t>(nmax) * ncols * 2);
+        hip::launch(c.k.f32_to_f16, {cdiv(static_cast<std::uint64_t>(nmax) * ncols / 4, 256), 1, 1}, {256, 1, 1}, 0, c.s, dx.p(),
+                    x16.p(), nmax * ncols);
+        c.sync();
+        auto run = [&](hip::Function f, DevPtr wp, int bm, int bn, int nth, int nt, bool tok_x) {
+            Buf y(static_cast<std::size_t>(nt) * nrows * 4);
+            y.fill(0xff);
+            const hip::Dim3 grid = tok_x ? hip::Dim3{cdiv(nt, bn), cdiv(nrows, bm), 1} : hip::Dim3{cdiv(nrows, bm), cdiv(nt, bn), 1};
+            hip::launch(f, grid, {static_cast<unsigned>(nth), 1, 1}, 0, c.s, wp, m.row_bytes, x16.p(), y.p(), ncols, nrows, nt, 0);
+            c.sync();
+            return y.down<float>(static_cast<std::size_t>(nt) * nrows);
+        };
+        auto runH = [&](hip::Function f, DevPtr wp, int bm, int bn, int nth, int nt) {
+            Buf y(static_cast<std::size_t>(nt) * nrows * 2);
+            y.fill(0xff);
+            hip::launch(f, {cdiv(nt, bn), cdiv(nrows, bm), 1}, {static_cast<unsigned>(nth), 1, 1}, 0, c.s, wp, m.row_bytes, x16.p(), y.p(),
+                        ncols, nrows, nt, 0);
+            c.sync();
+            return y.down<std::uint16_t>(static_cast<std::size_t>(nt) * nrows);
+        };
+        const auto& c0 = wk::kGemmCfgs[0];
+        const std::vector<float> ref = run(c.k.gemmc[0][ti], w.p(), c0.bm, c0.bn, c0.nth, nmax, true);
+        std::size_t checked = 0, bad = 0;
+        std::string first_bad;
+        for (int nt : ns) {
+            const std::size_t cnt = static_cast<std::size_t>(nt) * nrows;
+            auto chk = [&](const std::vector<float>& y, const std::string& label) {
+                ++checked;
+                if (std::memcmp(y.data(), ref.data(), cnt * 4) != 0) {
+                    ++bad;
+                    if (first_bad.empty()) first_bad = label + " n=" + std::to_string(nt);
+                }
+            };
+            const std::vector<std::uint16_t> want = toHalf(std::vector<float>(ref.begin(), ref.begin() + static_cast<std::ptrdiff_t>(cnt)));
+            for (int ci = 0; ci < static_cast<int>(wk::kGemmCfgs.size()); ++ci) {
+                const auto& cf = wk::kGemmCfgs[static_cast<std::size_t>(ci)];
+                if (c.k.gemmc[ci][ti] && (!c.quick || ci == 0)) chk(run(c.k.gemmc[ci][ti], wf, cf.bm, cf.bn, cf.nth, nt, true), "gemm_c" + std::to_string(ci));
+            }
+            if (ncols % 256 == 0) {
+                for (int si = 0; si < static_cast<int>(wk::kGemmsCfgs.size()); ++si) {
+                    const auto& cf = c.k.gemms_geom[static_cast<std::size_t>(si)];
+                    if (c.k.gemms[si][ti]) chk(run(c.k.gemms[si][ti], wf, cf.bm, cf.bn, cf.nth, nt, true), "gemms_c" + std::to_string(si));
+                    if (c.k.gemmsh[si][ti]) {
+                        ++checked;
+                        if (runH(c.k.gemmsh[si][ti], wf, cf.bm, cf.bn, cf.nth, nt) != want) {
+                            ++bad;
+                            if (first_bad.empty()) first_bad = "gemmsh_c" + std::to_string(si) + " n=" + std::to_string(nt);
+                        }
+                    }
+                }
+                if (nt <= 16 && c.k.gemvh[ti]) chk(run(c.k.gemvh[ti], wf, 16, 1 << 20, 32, nt, false), "gemvh");
+                if (nt <= 32 && c.k.gemvh2[ti]) chk(run(c.k.gemvh2[ti], wf, 16, 1 << 20, 32, nt, false), "gemvh2");
+            }
+            if (ncols % 32 == 0 && c.k.gemmhq[ti]) chk(run(c.k.gemmhq[ti], wf, 128, 256, 256, nt, true), "gemmhq");
+        }
+        Result r;
+        r.name = "raw-weight GEMMs on a matrix flush at the end of a 2 MiB-multiple allocation == gemm_c0 (" + std::to_string(checked) +
+                 " runs, n=1..2048) " + m.name;
+        r.kind = Kind::invariant;
+        r.n = checked;
+        r.mismatches = bad;
+        r.pass = bad == 0 && checked > 0;
+        if (!first_bad.empty()) r.note = "first " + first_bad;
+        c.rep.add(r);
+    }
+}
+
 }  // namespace
 
 void testGemm(Ctx& c) {
@@ -306,6 +405,7 @@ void testGemm(Ctx& c) {
             c.rep.add(cmpExact("gemm_c0_" + sfx + " accumulate == y0 + y", y.down<float>(want.size()), want, Kind::invariant));
         }
     }
+    testGemmFlush(c, mats);
 
     // GDN [beta; alpha]: one 96-row Q8_0 GEMM == the two 48-row GEMMs side by side
     // (rows 0-47 of each token from beta, 48-95 from alpha), bitwise, for every choice.

@@ -269,15 +269,21 @@ __device__ __forceinline__ void attn_split_impl(const float *q, const KvArgs &kv
             }
         } else {
             // scores: one wave per position, lanes over head_dim (8 each for 256)
+            // lanes past head_dim (head_dim < 256) load nothing and add nothing: their 8 K
+            // values would be past the row (the last pool row: past the K pool) and their
+            // qs entries are unwritten LDS (FIX-OVR; head_dim == 256 is unchanged)
+            const bool lv = lane * 8 < head_dim;
             for (int p = c0 + wid; p < c1; p += nw) {
-                const half8 kh8 = kv_ld8<Q8 == 1>(kv.k, kv.ks, ((size_t)(p + dl) * n_kv + g) * head_dim + lane * 8);
+                half8 kh8 = (half8){0, 0, 0, 0, 0, 0, 0, 0};
+                if (lv) kh8 = kv_ld8<Q8 == 1>(kv.k, kv.ks, ((size_t)(p + dl) * n_kv + g) * head_dim + lane * 8);
                 float kv[8];
 #pragma unroll
                 for (int e = 0; e < 8; ++e) kv[e] = (float)kh8[e];
                 for (int hh = 0; hh < nh; ++hh) {
                     float s = 0.f;
+                    if (lv)
 #pragma unroll
-                    for (int e = 0; e < 8; ++e) s += qs[hh][lane * 8 + e] * kv[e];
+                        for (int e = 0; e < 8; ++e) s += qs[hh][lane * 8 + e] * kv[e];
                     s = warp_sum(s);
                     if (lane == 0) sc[hh][p - c0] = p < npq[hh / grp] ? s * scale : -INFINITY;
                 }

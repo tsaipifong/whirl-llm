@@ -10,6 +10,9 @@
 #include "whirl/numerics.h"
 #include "whirl/vram_limit.h"
 
+#include "../../kernels/gemm_small_addr.h"
+
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <optional>
@@ -836,6 +839,72 @@ void testNumerics() {
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// Kernel fetch bounds (FIX-OVR): replay the W-stage addressing of the raw-stage GEMMs
+// (gfx1201 gemms_impl / gemmsd_impl / gemvh_impl, gfx1151 gemms11_impl) and assert that no
+// 16-byte load starts at or past the end of the matrix and none ends past the end rounded
+// up to 16 bytes (a 16-byte aligned block holding a matrix byte never crosses a page).
+// The pre-fix addressing (every chunk loaded) must be caught by the same check.
+struct FetchBound {
+    std::uint64_t max_start = 0, max_end = 0;
+};
+FetchBound replayStageFetch(int sb, std::uint64_t row_bytes, int nrows, int ncols, bool guarded) {
+    const int ch = gemms_stage_chunks(sb), nst = ncols / 256;
+    FetchBound b;
+    // rows past nrows are clamped to nrows - 1 by every kernel; the pattern only depends on
+    // the row start, so the first rows, the last two and the clamped row cover every case
+    std::vector<int> rows = {0, 1, nrows - 2, nrows - 1, nrows + 5};
+    for (int r0 : rows) {
+        if (r0 < 0) continue;
+        const int row = std::min(r0, nrows - 1);
+        for (int js = 0; js < nst; ++js) {
+            const std::uint64_t st = static_cast<std::uint64_t>(row) * row_bytes + static_cast<std::uint64_t>(js) * sb;
+            const std::uint32_t st32 = static_cast<std::uint32_t>(st);  // gemmsd_impl's 32-bit offsets
+            for (int c = 0; c < ch; ++c) {
+                const bool need = gemms_chunk_needed(st, c, sb);
+                if (gemms_chunk_needed(st32, c, sb) != need) b.max_end = ~0ull;  // the 32-bit form must agree
+                if (guarded && !need) continue;
+                const std::uint64_t a = gemms_chunk_addr(st, c);
+                b.max_start = std::max(b.max_start, a);
+                b.max_end = std::max(b.max_end, a + 16);
+            }
+        }
+    }
+    return b;
+}
+
+void testKernelFetchBounds() {
+    struct T {
+        const char* name;
+        int blk, bytes;
+    };
+    const T types[] = {{"f16", 8, 16},     {"q8_0", 32, 34},    {"iq4_nl", 32, 18}, {"q3_k", 256, 110}, {"q4_k", 256, 144},
+                       {"q5_k", 256, 176}, {"q6_k", 256, 210},  {"iq3_s", 256, 110}, {"iq4_xs", 256, 136}, {"mxfp4", 256, 136}};
+    int old_caught = 0;
+    for (const T& t : types) {
+        const int sb = 256 / t.blk * t.bytes;
+        CHECK(gemms_stage_chunks(sb) * 16 >= sb + 15);  // CH covers the worst misalignment
+        for (int ncols : {256, 2048, 4096, 5120, 8192, 12288, 17408})
+            for (int nrows : {1, 17, 37, 40, 47, 48, 128, 2048, 4097}) {
+                const std::uint64_t rb = static_cast<std::uint64_t>(ncols) / t.blk * t.bytes;
+                const std::uint64_t total = rb * nrows, total16 = (total + 15) & ~15ull;
+                const FetchBound b = replayStageFetch(sb, rb, nrows, ncols, true);
+                const bool ok = b.max_start < total && b.max_end <= total16;
+                if (!ok)
+                    std::printf("FAIL fetch bound %s %dx%d: max start %llu end %llu, matrix %llu bytes\n", t.name, nrows, ncols,
+                                static_cast<unsigned long long>(b.max_start), static_cast<unsigned long long>(b.max_end),
+                                static_cast<unsigned long long>(total));
+                CHECK(ok);
+                // also within the allocation tail pad for any matrix size
+                CHECK(b.max_end <= total + 256);
+                const FetchBound o = replayStageFetch(sb, rb, nrows, ncols, false);
+                if (o.max_end > total16) ++old_caught;
+            }
+    }
+    CHECK(old_caught > 0);  // the check does see the pre-fix over-read (every type reads >= 16 B past)
+}
+
 }  // namespace
 
 int main() {
@@ -848,6 +917,7 @@ int main() {
     testVramLimit();
     testCardDefaults();
     testNumerics();
+    testKernelFetchBounds();
     std::printf("unit tests: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

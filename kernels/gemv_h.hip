@@ -19,7 +19,7 @@ __device__ __forceinline__ void gemvh_impl(const uint8_t *__restrict__ W, uint64
     // coalesced 16-byte loads into LDS (a 16-byte aligned copy keeps every super-block's
     // global alignment mod 16, as gemms_impl), the next stage prefetched into registers.
     constexpr int SB = t2_sbb<T>();
-    constexpr int CH = (SB + 15) / 16 + 1;  // 16-byte chunks per row stage (covers the misaligned start)
+    constexpr int CH = gemms_stage_chunks(SB);  // 16-byte chunks per row stage (covers the misaligned start)
     constexpr int SLOT = CH * 16;
     constexpr int WCH = 16 * CH;
     constexpr int WPER = (WCH + WARP - 1) / WARP;
@@ -54,7 +54,9 @@ __device__ __forceinline__ void gemvh_impl(const uint8_t *__restrict__ W, uint64
             const int idx = lane + e * WARP;
             if (WCH % WARP == 0 || idx < WCH) {
                 const size_t st = rbase[e] + (size_t)js * SB;
-                rw[e] = *(const t2_u32x4 *)(W + (st & ~(size_t)15) + (idx % CH) * 16);
+                // only chunks overlapping the stage: the matrix may end right after it (gemm_small_addr.h)
+                rw[e] = gemms_chunk_needed(st, idx % CH, SB) ? *(const t2_u32x4 *)(W + (st & ~(size_t)15) + (idx % CH) * 16)
+                                                             : (t2_u32x4){0, 0, 0, 0};
             }
         }
     };
