@@ -10,6 +10,7 @@
 [kv-and-caching.md](kv-and-caching.md)。
 
 - [1. 兩支程式](#programs)
+  ——[數值模式：precise、balance、fast](#modes)
 - [2. `whirl chat`](#chat)
 - [3. `whirl bench`](#bench)
 - [4. `whirl serve` / `whirl-server`](#serve)——選項、[端點](#endpoints)、[停止](#stop)
@@ -104,6 +105,7 @@ decode 速度；開 MTP 時另列驗證回合數與草稿接受率。
 | `--mmproj MMPROJ.gguf` | 視覺編碼器（Qwen3-VL 形式的 mmproj，F16 / BF16），`--image` 需要它 |
 | `--image IMAGE` | 放在提示文字前面的圖片；可重複指定 |
 | `--device SPEC` | GPU：`r9700`、`8060s`、索引，或名稱 / gfx 架構的子字串（也可用 `WHIRL_DEVICE`）。預設：第一張 R9700，沒有的話用第一張這個建置有 kernel 的 GPU（例如只有 Radeon 8060S 的機器） |
+| `--precise` / `--balance` / `--fast` / `--mode M` | 數值模式（預設 precise；也可用 `WHIRL_MODE`）；`--balance=項目` 只選部分項目。見[數值模式](#modes) |
 | `-h`、`--help` | 說明 |
 
 範例：
