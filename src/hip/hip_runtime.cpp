@@ -141,7 +141,13 @@ VramTrack& vramTrack() {
 }  // namespace
 
 DevPtr malloc(std::size_t bytes) {
-    const std::size_t n = bytes + kTailPad;  // see kTailPad in whirl/hip.h
+    // tail pad (kTailPad in whirl/hip.h), except for an exact multiple of the 2 MiB large-
+    // allocation granule: there the pad would cost a whole extra 2 MiB (MoE expert tensors:
+    // ~330 MiB of KV pool on a 35B-A3B), and no kernel reading such buffers over-reads
+    // (FIX-OVR audit; the raw-stage GEMMs no longer load past a matrix)
+    constexpr std::size_t kLargeGranule = std::size_t{2} << 20;
+    const bool exact_large = bytes >= kLargeGranule && bytes % kLargeGranule == 0;
+    const std::size_t n = std::max<std::size_t>(bytes + (exact_large ? 0 : kTailPad), 1);
     const std::uint64_t limit = vram::limitBytes();
     if (limit == 0) {
         void* p = nullptr;

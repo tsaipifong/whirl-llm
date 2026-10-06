@@ -77,7 +77,8 @@ const char* archName(Arch a);
 // Every device allocation gets kTailPad spare bytes past `bytes` (never handed out, never
 // read for results): a kernel whose fixed-width loads run a few bytes past the end of a
 // weight / activation buffer then still reads mapped memory instead of faulting when the
-// allocation happens to end at an unmapped page (hipError 719, X16-4 / FIX-OVR).
+// allocation happens to end at an unmapped page (hipError 719, X16-4 / FIX-OVR). Exact
+// multiples of 2 MiB get no pad (it would cost a whole 2 MiB granule each).
 inline constexpr std::size_t kTailPad = 256;
 DevPtr malloc(std::size_t bytes);
 void free(DevPtr p);
