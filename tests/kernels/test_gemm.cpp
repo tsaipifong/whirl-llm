@@ -241,6 +241,72 @@ void testGemm(Ctx& c) {
         }
     }
 
+    // Tile order coverage: a many-block grid (row-block count not a multiple of the
+    // tile-order group, partial last row and token blocks); every gemm_c<i> choice and
+    // dequant + gemm_c<i>_f16 vs the CPU product on ALL rows and tokens, plus the
+    // choices bitwise against each other.
+    {
+        const int nr = 1000, nc = 512, nt = c.quick ? 300 : 700;
+        const QType qt = QType::q4_k;
+        const int ti = static_cast<int>(qt);
+        const HostMat hm = randomMat(c, qt, nr, nc);
+        Buf w(hm.data);
+        const std::vector<float> x = c.randn(static_cast<std::size_t>(nt) * nc);
+        Buf dx(x), x16(static_cast<std::size_t>(nt) * nc * 2);
+        hip::launch(c.k.f32_to_f16, {cdiv(static_cast<std::uint64_t>(nt) * nc / 4, 256), 1, 1}, {256, 1, 1}, 0, c.s, dx.p(), x16.p(),
+                    nt * nc);
+        Buf w16(static_cast<std::size_t>(nr) * nc * 2);
+        const std::uint64_t groups = static_cast<std::uint64_t>(nc / 8) * nr;
+        hip::launch(c.k.dequant_f16[ti], {static_cast<unsigned>(std::min<std::uint64_t>(cdiv(groups, 256), 65535)), 1, 1}, {256, 1, 1}, 0,
+                    c.s, w.p(), hm.row_bytes, w16.p(), nc, nr);
+        c.sync();
+        const std::vector<std::uint16_t> hx16 = toHalf(x);
+        std::vector<float> wf(static_cast<std::size_t>(nr) * nc), xf(hx16.size());
+        std::vector<std::uint16_t> wh(static_cast<std::size_t>(nc));
+        for (int r = 0; r < nr; ++r) {
+            ref::dequantRowF16(qt, hm.data.data() + static_cast<std::size_t>(r) * hm.row_bytes, nc, wh.data());
+            for (int k = 0; k < nc; ++k) wf[static_cast<std::size_t>(r) * nc + k] = h2f(wh[static_cast<std::size_t>(k)]);
+        }
+        for (std::size_t i = 0; i < xf.size(); ++i) xf[i] = h2f(hx16[i]);
+        std::vector<double> ry, rs;
+        ref::gemvF64(wf, nr, nc, xf.data(), nt, nc, ry, rs);
+        Gemm g{c, hm, w, x16, nt};
+        const auto& c0 = wk::kGemmCfgs[0];
+        const std::vector<float> y0 = g.run(c.k.gemmc[0][ti], c0.bm, c0.bn, c0.nth, nt);
+        c.rep.add(cmpTol("gemm_c0_q4_k vs CPU, all of " + std::to_string(nr) + "x" + std::to_string(nt), y0, ry, rs, 1e-4, 1e-6));
+        std::size_t checked = 0, bad = 0;
+        std::string first_bad;
+        for (int ci = 0; ci < static_cast<int>(wk::kGemmCfgs.size()); ++ci) {
+            const auto& cf = wk::kGemmCfgs[static_cast<std::size_t>(ci)];
+            std::vector<std::vector<float>> ys;
+            if (ci > 0 && c.k.gemmc[ci][ti]) ys.push_back(g.run(c.k.gemmc[ci][ti], cf.bm, cf.bn, cf.nth, nt));
+            if (const hip::Function f16 = c.k.gemmc[ci][static_cast<int>(QType::f16)]) {
+                Buf y(static_cast<std::size_t>(nt) * nr * 4);
+                y.fill(0xff);
+                hip::launch(f16, {cdiv(nt, cf.bn), cdiv(nr, cf.bm), 1}, {static_cast<unsigned>(cf.nth), 1, 1}, 0, c.s, w16.p(),
+                            static_cast<std::uint64_t>(nc) * 2, x16.p(), y.p(), nc, nr, nt, 0);
+                c.sync();
+                ys.push_back(y.down<float>(y0.size()));
+            }
+            for (const auto& y : ys) {
+                ++checked;
+                if (std::memcmp(y.data(), y0.data(), y0.size() * 4) != 0) {
+                    ++bad;
+                    if (first_bad.empty()) first_bad = "cfg " + std::to_string(ci);
+                }
+            }
+        }
+        Result r;
+        r.name = "prefill GEMM choices == gemm_c0, " + std::to_string(nr) + "x" + std::to_string(nt) + " grid (" + std::to_string(checked) +
+                 " variants)";
+        r.kind = Kind::invariant;
+        r.n = checked;
+        r.mismatches = bad;
+        r.pass = bad == 0;
+        if (!first_bad.empty()) r.note = "first " + first_bad;
+        c.rep.add(r);
+    }
+
     // GDN [beta; alpha]: one 96-row Q8_0 GEMM == the two 48-row GEMMs side by side
     // (rows 0-47 of each token from beta, 48-95 from alpha), bitwise, for every choice.
     {
