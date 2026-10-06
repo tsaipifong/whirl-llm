@@ -4,15 +4,20 @@
 # built), so the list below feeds the code-object dependencies.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Only the gfx1201 (RDNA 4) kernel set is ported so far; the gfx1151 code
-# object still carries just the smoke kernel (see kernels/whirl_kernels.hip).
-# Configure with -DWHIRL_GPU_ARCHS=gfx1201 to skip the gfx1151 object.
+# Two kernel sets: gfx1201 (RDNA 4, kernels/*.hip) and gfx1151 (RDNA 3.5,
+# kernels/gfx1151/*.hip), one code object each (WHIRL_GPU_ARCHS, default both;
+# -DWHIRL_GPU_ARCHS=gfx1201 or =gfx1151 builds one). Each code object depends
+# only on its own sources (WHIRL_KERNEL_SOURCES_<arch>), so editing one set
+# never recompiles the other.
 
 file(GLOB WHIRL_KERNEL_FAMILY_SOURCES CONFIGURE_DEPENDS
   ${CMAKE_SOURCE_DIR}/kernels/*.hip
-  ${CMAKE_SOURCE_DIR}/kernels/*.h
-  ${CMAKE_SOURCE_DIR}/kernels/gfx1151/*.hip)
-list(APPEND WHIRL_KERNEL_SOURCES ${WHIRL_KERNEL_FAMILY_SOURCES})
+  ${CMAKE_SOURCE_DIR}/kernels/*.h)
+file(GLOB WHIRL_KERNEL_GFX1151_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/kernels/gfx1151/*.hip)
+set(WHIRL_KERNEL_SOURCES_gfx1201 ${WHIRL_KERNEL_SOURCES} ${WHIRL_KERNEL_FAMILY_SOURCES})
+set(WHIRL_KERNEL_SOURCES_gfx1151 ${WHIRL_KERNEL_SOURCES} ${CMAKE_SOURCE_DIR}/kernels/iq_tables.h
+    ${WHIRL_KERNEL_GFX1151_SOURCES})
+list(APPEND WHIRL_KERNEL_SOURCES ${WHIRL_KERNEL_FAMILY_SOURCES} ${WHIRL_KERNEL_GFX1151_SOURCES})
 
 if(WHIRL_WITH_HIP)
   # Host-side kernel registry (loads every kernel by name from the embedded

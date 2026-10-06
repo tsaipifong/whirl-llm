@@ -3,8 +3,8 @@
 # Architecture
 
 > **Status (WHIRL 0.1.0).** This document describes the design as implemented in this repository:
-> C++20 host code and HIP C++ device code for the R9700 (gfx1201). A gfx1151 (Radeon 8060S) kernel set
-> is planned. Some measurements were taken with the research build that preceded the C++ engine; the
+> C++20 host code and HIP C++ device code for the R9700 (gfx1201) and, as a preview (correct, not yet
+> tuned), the Radeon 8060S (gfx1151). Some measurements were taken with the research build that preceded the C++ engine; the
 > C++ engine reproduces its outputs token for token ([benchmarking.md](benchmarking.md#gates)).
 
 **Who this helps:** anyone deciding whether a model-specific, GPU-specific engine is worth
@@ -38,7 +38,7 @@ generic fallback path that would silently run slower or produce different numeri
 | GPU | ISA | Role | Measured limits (our probes, not spec sheets) |
 |---|---|---|---|
 | AMD Radeon AI PRO R9700 (RDNA 4, Navi 48) | gfx1201 | primary target | 32 GB GDDR6, 256-bit, 640 GB/s spec; GEMV streaming 604–626 GB/s; WMMA f16→f32 180–184 TFLOPS; WMMA iu8 343–374 TOPS |
-| AMD Radeon 8060S (Ryzen AI Max, RDNA 3.5) | gfx1151 | secondary target | unified memory; streaming read 238 GB/s; WMMA f16 43 TFLOPS; WMMA int8 45 TOPS (same rate as f16) |
+| AMD Radeon 8060S (Ryzen AI Max, RDNA 3.5) | gfx1151 | secondary target (preview, untuned) | unified memory; streaming read 238 GB/s; WMMA f16 43 TFLOPS; WMMA int8 45 TOPS (same rate as f16) |
 
 The development R9700 is attached as a **USB4 eGPU**. Its host link measures
 3.78–3.81 GB/s (D2H) and 3.84–3.86 GB/s (H2D). Everything that moves data between host and
@@ -143,12 +143,26 @@ Why per-GPU code objects rather than one portable kernel set:
   GEMV, MXFP4×fp8 GEMM, the `q8v` KV format exist only for gfx1201). The host looks them up
   with `getFunctionOpt`, which returns null for a missing kernel and clears HIP's sticky last
   error, and falls back or refuses at load time.
+- **Capabilities, not architecture names.** Where a missing kernel is not enough to decide,
+  `kernels::Caps` (`include/whirl/kernels_abi.h`) is probed once from the loaded code object:
+  `fp8_gemm`, `kv_q8v`, `kv_q8h`, `gemvw`, `gdn_replay`, `mrope`, plus two marker kernels that only
+  the gfx1151 object contains — `xd_sum` (its int8 activation scale words carry the block sum) and
+  `attn_group1` (its WMMA P·V is bitwise exact only with one query per attention group). The KV
+  auto choice, attention query grouping, DeltaNet replay and the kernel tests read these flags; the
+  only architecture checks left choose tuning tables, the tune-cache file name and the vision code
+  object (gfx1201 only).
+
+Default device: the first R9700 when the build has gfx1201 kernels, else the first GPU the build
+has kernels for (a Radeon 8060S on its own); `--device` / `WHIRL_DEVICE` pick another
+(`whirl devices` marks the default).
 
 File split: `kernels/common.hip` (types, wave primitives, block decoders), `gemv_*.hip`,
 `gemm_prefill.hip` / `gemm_fp8*.hip` / `gemm_small.hip`, `attn*.hip`, `gdn_*.hip` (DeltaNet),
 `moe.hip` / `moe_mxfp4.hip`, `fused_decode.hip`, `misc_*.hip`, `sample_*.hip`, `draft_d2.hip`, all
 included by `kernels/whirl_kernels.hip`; the vision encoder kernels are a separate code object in
-`kernels/vision/`. gfx1151-specific paths will go under `kernels/gfx1151/`.
+`kernels/vision/`. The gfx1151 set lives in `kernels/gfx1151/` (same kernel names and argument
+ABIs, its own file split, included by `whirl_kernels.hip` only when compiling for gfx1151); the
+families it lacks are listed in [kernels.md](kernels.md#gfx1151).
 
 ### 2.5 Forward pass — `src/model/`
 

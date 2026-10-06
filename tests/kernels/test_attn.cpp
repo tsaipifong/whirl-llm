@@ -3,7 +3,8 @@
 //     store and of the q8 quantizer), single-sequence and batched (kvbase);
 //   * attn_decode, attn_split + attn_combine, attn_wsplit1 / attn_wsplit2 + attn_combine,
 //     attn_prefill_wmma vs a double-precision CPU softmax attention over the
-//     cache contents (tolerance; f16 WMMA paths looser);
+//     cache contents (tolerance; f16 WMMA paths looser); attn_prefill_wmma also over a
+//     long (9000-position) random cache, KV heads 4 / 3 / 6;
 //   * bitwise invariances: attn_wsplit1 / attn_wsplit2 grouped == per-query (the
 //     prototype's checkAttnGroups), attn_kx and attn_kg (f16, q8, q8v) ==
 //     attn_prefill_wmma, head-range
@@ -170,6 +171,10 @@ void testAttn(Ctx& c) {
     for (Fmt fmt : {Fmt::f16, Fmt::q8, Fmt::q8v}) {
         const std::string fs = fmtSuffix(fmt);
         const std::string tag = std::string(" [kv ") + (fmt == Fmt::f16 ? "f16" : (fmt == Fmt::q8 ? "q8" : "q8v")) + "]";
+        if (fmt == Fmt::q8v && !c.k.caps.kv_q8v) {  // gfx1151: no q8v kernels
+            c.rep.skip("attn", "kv q8v (kv_store / attn_decode / attn_split / attn_prefill_wmma)", "kernel not in this code object");
+            continue;
+        }
         Pool pool(c, fmt);
         // ---- kv_store of L rows (single sequence, positions 0..L-1)
         const std::vector<float> kin = c.randn(static_cast<std::size_t>(L) * kRow, 0.7f);
@@ -319,7 +324,10 @@ void testAttn(Ctx& c) {
                     r.n = n;
                     r.mismatches = bad;
                     r.pass = bad == 0;
-                    c.rep.add(r);
+                    if (c.k.caps.attn_group1)  // gfx1151: the host never groups queries (not bitwise here)
+                        c.rep.skip("attn", r.name, "caps.attn_group1: groups of one query only (" + std::to_string(bad) + " differing rows)");
+                    else
+                        c.rep.add(r);
                     // per-query result vs CPU
                     const std::vector<float> out = combine(ng_q);
                     std::vector<double> ro, rs;
@@ -694,6 +702,122 @@ void testAttn(Ctx& c) {
             r.mismatches = same_e ? 0 : 1;
             r.pass = same_e;
             c.rep.add(r);
+        }
+    }
+    // ---- attn_prefill_wmma, long KV: random cache contents (f16 / q8) behind a shuffled page
+    // table of a 9000-position context, KV heads 4 / 3 / 6, query counts that are and are not
+    // multiples of the 128-query block, at the end of the context (and from position 0):
+    // a few rows vs the CPU, and two head-range launches == one launch (bitwise)
+    for (Fmt fmt : {Fmt::f16, Fmt::q8}) {
+        const std::string fs = fmtSuffix(fmt);
+        const bool q8 = fmt == Fmt::q8;
+        const int Lk = c.quick ? 3000 : 9000;
+        const int pages = (Lk + wk::kKvPage - 1) / wk::kKvPage;
+        const std::size_t prow = static_cast<std::size_t>(pages) * wk::kKvPage;
+        for (const int nkv : {4, 3, 6}) {
+            const int grp = kHeads / nkv;
+            const std::size_t rowel = static_cast<std::size_t>(nkv) * kHd, nel = prow * rowel;
+            std::vector<int> pt(static_cast<std::size_t>(pages));
+            std::iota(pt.begin(), pt.end(), 0);
+            std::shuffle(pt.begin(), pt.end(), c.rng);
+            std::vector<std::uint16_t> k16, v16, ks, vs;
+            std::vector<std::int8_t> k8, v8;
+            if (q8) {
+                std::uniform_int_distribution<int> qd(-127, 127);
+                std::uniform_real_distribution<float> sd(0.002f, 0.01f);
+                k8.resize(nel);
+                v8.resize(nel);
+                for (auto& x : k8) x = static_cast<std::int8_t>(qd(c.rng));
+                for (auto& x : v8) x = static_cast<std::int8_t>(qd(c.rng));
+                ks.resize(nel / 32);
+                vs.resize(nel / 32);
+                for (auto& x : ks) x = f2h(sd(c.rng));
+                for (auto& x : vs) x = f2h(sd(c.rng) * 0.5f);
+            } else {
+                const std::vector<float> kf = c.randn(nel, 0.7f), vf = c.randn(nel, 0.7f);
+                k16.resize(nel);
+                v16.resize(nel);
+                for (std::size_t i = 0; i < nel; ++i) {
+                    k16[i] = f2h(kf[i]);
+                    v16[i] = f2h(vf[i]);
+                }
+            }
+            Buf dk = q8 ? Buf(k8) : Buf(k16), dv = q8 ? Buf(v8) : Buf(v16);
+            Buf dks = q8 ? Buf(ks) : Buf(16), dvs = q8 ? Buf(vs) : Buf(16), dpt(pt);
+            wk::KvArgs a{};
+            a.k = dk.p();
+            a.v = dv.p();
+            a.ks = q8 ? dks.p() : 0;
+            a.vs = q8 ? dvs.p() : 0;
+            a.ptab = dpt.p();
+            a.kvbase = 0;
+            a.tab0 = 0;
+            auto prw = [&](int p) { return static_cast<std::size_t>(pt[static_cast<std::size_t>(p / wk::kKvPage)]) * wk::kKvPage + p % wk::kKvPage; };
+            auto kval = [&](const std::vector<std::uint16_t>& f, const std::vector<std::int8_t>& qv, const std::vector<std::uint16_t>& s,
+                            std::size_t e) { return q8 ? static_cast<double>(h2f(d2h(static_cast<double>(qv[e]) * h2f(s[e >> 5])))) : h2f(f[e]); };
+            struct Case {
+                int n, p0;
+            };
+            for (const Case cs : {Case{1, Lk - 1}, Case{17, Lk - 17}, Case{301, Lk - 301}, Case{333, 0}, Case{130, Lk - 131}}) {
+                const int n = cs.n, p0 = cs.p0;
+                const std::vector<float> qp = c.randn(static_cast<std::size_t>(n) * kHeads * kQStride);
+                Buf dq(qp), dpos(std::vector<int>{p0});
+                const std::size_t on = static_cast<std::size_t>(n) * kHeads * kHd;
+                Buf rb(on * 4), sb(on * 4);
+                rb.fill(0x7f);
+                sb.fill(0x7f);
+                hip::launch(c.fn("attn_prefill_wmma" + fs), {cdiv(n, 128), static_cast<unsigned>(kHeads), 1}, {256, 1, 1}, 0, c.s, dq.p(), a,
+                            rb.p(), kHeads, nkv, kQStride, dpos.p(), n, kScale, 0);
+                for (int h0 : {0, kHeads / 2})
+                    hip::launch(c.fn("attn_prefill_wmma" + fs), {cdiv(n, 128), kHeads / 2, 1}, {256, 1, 1}, 0, c.s, dq.p(), a, sb.p(), kHeads,
+                                nkv, kQStride, dpos.p(), n, kScale, h0);
+                c.sync();
+                const auto got = rb.down<float>(on);
+                const std::string where = " (long KV, group " + std::to_string(grp) + ", n " + std::to_string(n) + " at " + std::to_string(p0) + ")";
+                c.rep.add(cmpExact("attn_prefill_wmma" + fs + " head-split launches == one" + where, sb.down<float>(on), got, Kind::invariant));
+                // CPU reference: first and last query
+                std::vector<int> rows = {0, n - 1};
+                if (n == 1) rows = {0};
+                std::vector<double> ro, rsc;
+                std::vector<float> gp;
+                for (int t : rows) {
+                    const int npos = p0 + t + 1;
+                    for (int hh = 0; hh < kHeads; ++hh) {
+                        const int kvh = hh / grp;
+                        const float* qv = qp.data() + (static_cast<std::size_t>(t) * kHeads + hh) * kQStride;
+                        std::vector<double> s(static_cast<std::size_t>(npos));
+                        double mm = -INFINITY;
+                        for (int pp = 0; pp < npos; ++pp) {
+                            const std::size_t base = prw(pp) * rowel + static_cast<std::size_t>(kvh) * kHd;
+                            double d = 0;
+                            for (int i = 0; i < kHd; ++i) d += static_cast<double>(qv[i]) * kval(k16, k8, ks, base + i);
+                            s[static_cast<std::size_t>(pp)] = d * kScale;
+                            mm = std::max(mm, s[static_cast<std::size_t>(pp)]);
+                        }
+                        double ll = 0;
+                        for (auto& x : s) {
+                            x = std::exp(x - mm);
+                            ll += x;
+                        }
+                        std::vector<double> o(kHd, 0.0), aa(kHd, 0.0);
+                        for (int pp = 0; pp < npos; ++pp) {
+                            const std::size_t base = prw(pp) * rowel + static_cast<std::size_t>(kvh) * kHd;
+                            for (int dd = 0; dd < kHd; ++dd) {
+                                const double vv = kval(v16, v8, vs, base + dd);
+                                o[static_cast<std::size_t>(dd)] += s[static_cast<std::size_t>(pp)] * vv;
+                                aa[static_cast<std::size_t>(dd)] += s[static_cast<std::size_t>(pp)] * std::fabs(vv);
+                            }
+                        }
+                        for (int dd = 0; dd < kHd; ++dd) {
+                            const double g = 1.0 / (1.0 + std::exp(-static_cast<double>(qv[kHd + dd])));
+                            ro.push_back(o[static_cast<std::size_t>(dd)] / ll * g);
+                            rsc.push_back(aa[static_cast<std::size_t>(dd)] / ll * g);
+                            gp.push_back(got[(static_cast<std::size_t>(t) * kHeads + hh) * kHd + dd]);
+                        }
+                    }
+                }
+                c.rep.add(cmpTol("attn_prefill_wmma" + fs + " vs CPU (" + std::to_string(rows.size()) + " queries)" + where, gp, ro, rsc, 1e-2, 1e-4));
+            }
         }
     }
     if (auto fr = c.fnOpt("set_rpos")) {

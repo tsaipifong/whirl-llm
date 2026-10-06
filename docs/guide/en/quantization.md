@@ -48,8 +48,9 @@ prefill dominates; decode is also 8–10% faster (proportional to the weight byt
 Decode and prefill kernels exist for: F32 and F16 (small tensors), Q8_0, Q3_K, Q4_K, Q5_K, Q6_K,
 IQ3_S, IQ4_NL, IQ4_XS, MXFP4; BF16 for the vision projector. Any other type (for example NVFP4)
 stops the load — there is no generic dequantize-to-f16 fallback. MXFP4 is implemented for dense
-`qwen35` and for MoE experts (`qwen35moe`, [section 6](#ornith-mxfp4)). gfx1151 (8060S) kernels are
-planned (gfx1151 has no fp8 WMMA, so MXFP4 prefill there will use f16 activations).
+`qwen35` and for MoE experts (`qwen35moe`, [section 6](#ornith-mxfp4)). On gfx1151 (8060S, preview)
+MXFP4 runs on the same int8 decode GEMVs and is dequantized to f16 for prefill (gfx1151 has no fp8
+WMMA, so MXFP4 prefill there uses f16 activations; the MoE experts take the generic paths).
 
 ### 2.1 What the unsloth UD-Q4_K_M file contains
 

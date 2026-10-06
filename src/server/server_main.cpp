@@ -125,8 +125,8 @@ const char* kHelpBody =
     "  --kv-ram-mb N            host RAM tier of the prefix cache in MiB of pinned memory (default: 1/4\n"
     "                           of physical RAM, at least 8 GiB or one full-length session, at most\n"
     "                           32 GiB, and at most half of the RAM available at startup; 0 = no host\n"
-    "                           tiers). Idle sessions are copied there and restored instead of\n"
-    "                           prefilled again\n"
+    "                           tiers; Radeon 8060S: default 0, its KV pool already is system memory).\n"
+    "                           Idle sessions are copied there and restored instead of prefilled again\n"
     "  --kv-ssd-dir PATH        SSD tier directory (default %LOCALAPPDATA%\\whirl\\kvcache)\n"
     "  --kv-ssd-gb N            SSD tier size cap in GiB (default 64; 0 = no SSD tier)\n"
     "  --mmproj FILE            vision encoder (Qwen3-VL style mmproj GGUF, F16 / BF16): image_url parts\n"
@@ -248,6 +248,8 @@ void applyDraftVocab(qwen35::Model& model, const Tokenizer& tok, const qwen35::D
     if (model.setDraftVocab(ids))
         logI("draft head: vocabulary subset {} ({} of {} rows; {} special / byte tokens added)", label, ids.size(), model.cfg.n_vocab,
              added);
+    else if (dv.by_default)  // the default only: no warning for a setting the user did not make
+        logI("draft head: full vocabulary (no vocabulary subset with this draft head / kernel set)");
     else
         logW("WHIRL_DRAFT_VOCAB ignored: it needs the 2-bit draft head (Q6_K output head, WHIRL_DRAFT_HEAD not q4)");
 }
@@ -402,7 +404,8 @@ int serveMain(int argc, char** argv, const char* program) {
         else dev = qwen35::pickDevice(opt.device);
         const hip::DeviceInfo info = hip::describeDevice(dev);
         hip::setDevice(dev);
-        const bool is_uma = hip::archFor(info.gcn_arch) == hip::Arch::gfx1151;
+        // integrated GPU (Radeon 8060S): the "VRAM" is system memory shared with the CPU
+        const bool is_uma = info.integrated;
         const std::optional<std::uint32_t> pool_req = opt.ctx ? opt.ctx : (is_uma ? std::optional<std::uint32_t>(262144) : std::nullopt);
         const std::uint32_t cap_max = 262144;
         const std::uint32_t slot_ctx = static_cast<std::uint32_t>(alignUp(
@@ -680,7 +683,9 @@ int serveMain(int argc, char** argv, const char* program) {
             return std::max(tier::ram_auto_min_mb, alignUp(full, 1ull << 30) >> 20);
         }();
         // size: explicit (--kv-ram-mb / WHIRL_KV_RAM_MB), else 1/4 of physical RAM
-        // within [ram_def, 32 GiB] and at most half of the RAM available now
+        // within [ram_def, 32 GiB] and at most half of the RAM available now;
+        // integrated GPU: the KV pool already lives in system memory, so the RAM
+        // tier (and the SSD tier behind it) is off unless asked for explicitly
         tier::RamTierInput rin;
         rin.floor_mb = ram_def;
         rin.integrated = info.integrated;
@@ -706,7 +711,7 @@ int serveMain(int argc, char** argv, const char* program) {
         const std::uint64_t kv_ram_mb = rsz.mb;
         std::unique_ptr<tier::Tier> tier_pre;
         double tier_alloc_s = 0.0;
-        if (kv_ram_mb > 0 && n_ck > 0 && !no_pc && hip::archFor(info.gcn_arch) == hip::Arch::gfx1201) {
+        if (kv_ram_mb > 0 && n_ck > 0 && !no_pc) {
             if (rsz.avail_limited) logW("kv tier: RAM tier size {} MiB ({})", kv_ram_mb, rsz.reason);
             else logI("kv tier: RAM tier size {} MiB ({})", kv_ram_mb, rsz.reason);
             if (rin.explicit_mb && rin.avail_phys > 0 && (kv_ram_mb << 20) > rin.avail_phys / 2)
@@ -761,11 +766,11 @@ int serveMain(int argc, char** argv, const char* program) {
             const std::uint64_t need = pool_req ? *pool_req : static_cast<std::uint64_t>(slot_ctx) + second + (opt.parallel > 1 ? 2ull : 1ull) * kv_page;
             if (need * model.kvBytesPerTokenFmt(false, false) <= avail) {
                 kv_note = " (auto: the floor pool fits as f16)";
-            } else if (need * model.kvBytesPerTokenFmt(true, true) <= avail) {
+            } else if (model.k.caps.kv_q8v && need * model.kvBytesPerTokenFmt(true, true) <= avail) {
                 model.setKvFormat(true, false, true);
                 kv_note = " (auto: the floor pool (one full request + a 64k second one) does not fit as f16, fits as q8v)";
             } else {
-                model.setKvFormat(true, true, false);
+                model.setKvFormat(true, model.k.caps.kv_q8h, false);
                 kv_note = " (auto: the floor pool (one full request + a 64k second one) does not fit as f16 or q8v)";
             }
         }

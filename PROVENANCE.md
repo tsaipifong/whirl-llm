@@ -59,8 +59,8 @@ found no shared code (one match: the public Qwen chat-template string).
 
 ## Kernels
 
-Only the gfx1201 (RDNA 4) kernels are in the repository so far; the gfx1151 code object currently
-contains only the smoke kernel.
+Two kernel sets: gfx1201 (RDNA 4, `kernels/*.hip`) and gfx1151 (RDNA 3.5, `kernels/gfx1151/*.hip`,
+see "gfx1151 (Radeon 8060S)" below).
 
 | File | Origin | Notes |
 |---|---|---|
@@ -170,3 +170,18 @@ All documentation text was written new for this project.
 | docs/building.md, docs/building_zh-TW.md | new | |
 | docs/benchmarks.md, docs/guide/zh-TW/benchmarks.md, docs/images/* | new | |
 | docs/guide/{en,zh-TW}/*.md | new | |
+
+## gfx1151 (Radeon 8060S)
+
+| File | Origin | Notes |
+|---|---|---|
+| kernels/gfx1151/common.hip, quant.hip, gemv_f.hip, gemm_prefill.hip, gemv_q.hip, gemv_mr.hip, gemv_wunit.hip, gemv_q6.hip, fused_decode.hip, misc_rows_norm.hip, attn.hip, gdn.hip, misc_probe_requant.hip, draft_pick.hip, moe.hip, sample_cand.hip, prefill_fused.hip | carried over from the prototype's gfx1151 kernel source (`backends/hip/kernels_gfx1151.hip` with this project's MXFP4, prefill-fusion and grouped one-token GEMV additions, written by this project) | the single source split into consecutive line ranges, one file per family; comments and the debug-global name changed. Machine code of every carried-over kernel verified identical to the prototype source compiled with the same flags (per kernel, PC-relative global offsets masked). New: `MOE_ENTRIES(mxfp4, QT_MXFP4)` (generic MXFP4 routed experts, as in the gfx1201 set), the head offset `h0` of `attn_prefill_wmma*` (same ABI as gfx1201; the host splits long prefills over head ranges) and two capability markers (`whirl_cap_xd_sum`, `whirl_cap_attn_group1`) |
+| kernels/gfx1151/whirl_kernels_gfx1151.hip | new | include list of the gfx1151 set |
+| kernels/whirl_kernels.hip | changed | includes the gfx1151 set when compiling for gfx1151 (the gfx1201 part is unchanged) |
+| include/whirl/kernels_abi.h, src/kernels_host/kernels_abi.cpp | changed | `kernels::Caps` (capability flags probed from the loaded code object); `KernelTable::load` refuses KV formats the module lacks |
+| src/model/loader.cpp, src/model/forward.cpp, src/server/server_main.cpp | changed | KV-format auto choice, query grouping and DeltaNet replay from `Caps` instead of the architecture; integrated GPUs: host RAM / SSD tiers off by default |
+| src/model/device.cpp, src/cli/main.cpp, src/release/release.cpp, src/model/tune.cpp, src/vision/vision.cpp | changed | default device (R9700, else the first supported GPU), `devices` output, messages naming both GPUs, tune notice, image input refused on GPUs without vision kernels |
+| CMakeLists.txt, cmake/kernels.cmake | changed | per-architecture code-object dependencies, architecture check |
+| tests/server/server_gate.cpp | changed | `--kv` (KV format the comparing suites pin; default q8v) and `--server-env NAME=VALUE` (extra server environment, e.g. host tiers on an integrated GPU) |
+| tests/kernels/* | changed | per-device runs (`--device`, `WHIRL_DEVICE`), packed int8 scale words in the CPU references (`ref::setXdSum`), checks for kernels a code object lacks are reported as skipped |
+

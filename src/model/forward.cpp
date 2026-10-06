@@ -264,7 +264,7 @@ void Model::gemmF16(const Mat& w, DevPtr x16in, DevPtr y, u32 n, i32 acc) {
     if (choice >= 2 * gemm_cfgs.size()) {
         // small-batch GEMM straight from the quantized weights (bitwise == gemm_cN)
         const std::size_t si = choice - 2 * gemm_cfgs.size();
-        const GemmCfg sc = gemms_cfgs[si];
+        const GemmCfg sc = k.gemms_geom[si];  // a code object may export its own geometry (gfx1151)
         const hip::Function sf = out_h16 ? k.gemmsh[si][t] : k.gemms[si][t];
         hip::launch(sf, D((n + sc.bn - 1) / sc.bn, (w.nrows + sc.bm - 1) / sc.bm), D(sc.nth), 0, stream, w.ptr, w.row_bytes, x16in, y, ncols,
                     nrows, I(n), acc);
@@ -329,6 +329,23 @@ bool Model::h16Out(const Mat& w, u32 n, std::uint8_t cls) const {
         case ActIn::fp8:
             return k.gemm8h[0] != nullptr;
         case ActIn::f16:
+            // Radeon 8060S: decided by the kernel set and the tuner's candidate list, never by
+            // the tuned choices, so the output (f16 intermediates or not) does not depend on
+            // autotune timings. The gfx1151 code object has no h16 fused / dequant GEMM, so
+            // this is off for quantized weights while those are candidates.
+            if (arch == hip::Arch::gfx1151) {
+                for (u32 cj = 0; cj < n_choices && cj < 64; ++cj) {
+                    if ((tune_mask & (1ull << cj)) == 0) continue;
+                    if (cj >= 2 * gemm_cfgs.size()) {
+                        const std::size_t si = cj - 2 * gemm_cfgs.size();
+                        if (k.gemms[si][ti(w.ty)] == nullptr || w.ncols % 256 != 0) continue;  // not a candidate (= tune.cpp)
+                        if (k.gemmsh[si][ti(w.ty)] == nullptr) return false;
+                        continue;
+                    }
+                    if (!((cj >= gemm_cfgs.size() || w.ty == GgmlType::f16) && k.gemmch[cj % gemm_cfgs.size()] != nullptr)) return false;
+                }
+                // (and the table must agree: a cached table may predate the candidate list)
+            }
             // every bucket (not just n's), so the choice is the same for a request's
             // solo chunks and a segmented forward of any total size
             for (std::uint8_t choice : w.tune) {
@@ -565,9 +582,9 @@ void Model::attnBlock(const AttnW& a, const KvLayer& lkv, u32 n) {
             // query groups: consecutive rows of one sequence whose split size
             // `per` (a function of the position) matches, <= 16 columns each
             // (attn_wsplit1) or <= 32 (attn_wsplit2: one K/V pass for up to 32 / grp_q rows)
-            // gfx1151: one query per group (its WMMA P.V is not exact when a masked
-            // key carries a real V row), so a grouped verify row could differ
-            const bool one_q = (dbg_flags & 4) != 0 || arch == hip::Arch::gfx1151;
+            // caps.attn_group1 (gfx1151): one query per group (its WMMA P.V is not exact
+            // when a masked key carries a real V row), so a grouped verify row could differ
+            const bool one_q = (dbg_flags & 4) != 0 || k.caps.attn_group1;
             const bool known = row_n == n && n > 1;
             auto group = [&](u32 max_q, AwGroups& groups) {
                 u32 ng = 0, r = 0, widest = 0;
@@ -792,7 +809,7 @@ void Model::moeBlock(DevPtr post_norm, const Mat& sg, const Mat& su, const Mat& 
     // prefill: group (token, slot) pairs by expert, grouped GEMMs, combine
     const u32 pairs = n * K;
     // token tile: 32 when experts average under ~48 tokens (short prompts), else 64
-    const u32 bn = (moe_bn_force == 32 || moe_bn_force == 64) ? moe_bn_force : moeTile(n);
+    const u32 bn = moeGuFused(mo) && !moeFp8(mo) ? 32 : (moe_bn_force == 32 || moe_bn_force == 64) ? moe_bn_force : moeTile(n);
     const auto& gm = bn == 32 ? k.gemm_moe32 : k.gemm_moe;
     hip::launch(k.moe_route, D(1), D(1024), 0, stream, moe_ids, I(pairs), I(R), I(bn), moe_perm, moe_inv, moe_tiles, moe_ntiles);
     const u32 max_tiles = (pairs + bn - 1) / bn + R;
@@ -809,6 +826,19 @@ void Model::moeBlock(DevPtr post_norm, const Mat& sg, const Mat& su, const Mat& 
         mark(OpClass::misc);
         hip::launch(bn == 32 ? k.gemm8_moe32 : k.gemm8_moe, D(max_tiles, (E + moe_bm - 1) / moe_bm), D(256), 0, stream, mo.down.ptr, DevPtr{0},
                     mo.down.row_bytes, mo.down.ref, DevPtr{0}, I(E), moe_x16, moe_sx, moe_yd, DevPtr{0}, I(F), moe_tiles, moe_ntiles);
+        mark(OpClass::matmul);
+    } else if (moeGuFused(mo)) {
+        // Radeon 8060S: gate + up + SwiGLU in one grouped GEMM over 64-token tiles (A, f16,
+        // into the f32 gate buffer: X is still being read), down over 32-token tiles; the
+        // same perm positions for both tile lists, every row bit-identical to the path below
+        hip::launch(k.moe_tiles, D(1), D(1024), 0, stream, moe_ids, I(pairs), I(R), I(64), moe_tiles64, moe_ntiles64);
+        hip::launch(k.moe_gather_f16, D(pairs), D(256), 0, stream, h, moe_perm, moe_x16, I(E), I(K));
+        mark(OpClass::misc);
+        const u32 max_tiles64 = (pairs + 63) / 64 + R;
+        hip::launch(k.gemm_moegu[ti(mo.gate.ty)], D(max_tiles64 * ((F + 63) / 64)), D(256), 0, stream, mo.gate.ptr, mo.up.ptr, mo.gate.row_bytes, I(F),
+                    moe_x16, moe_yg, I(E), moe_tiles64, moe_ntiles64);
+        hip::launch(k.gemm_moe32r[ti(mo.down.ty)], D(max_tiles * ((E + moe_bm - 1) / moe_bm)), D(256), 0, stream, mo.down.ptr, mo.down.row_bytes,
+                    I(E), moe_yg, moe_yd, I(F), moe_tiles, moe_ntiles);
         mark(OpClass::matmul);
     } else {
         hip::launch(k.moe_gather_f16, D(pairs), D(256), 0, stream, h, moe_perm, moe_x16, I(E), I(K));
@@ -842,6 +872,13 @@ hip::Function Model::moeGu(GgmlType ty) const {
 }
 hip::Function Model::moeDown(GgmlType ty) const {
     return ty == GgmlType::mxfp4 && moe_mxw && k.moe_down_mxw != nullptr ? k.moe_down_mxw : k.moe_down[ti(ty)];
+}
+
+// Prefill experts on the fused gate + up + SwiGLU grouped GEMM and the 32-token row-block-
+// fast down GEMM (gfx1151 code object; gate and up of one type and row size).
+bool Model::moeGuFused(const MoeW& mo) const {
+    return k.moe_tiles != nullptr && k.gemm_moegu[ti(mo.gate.ty)] != nullptr && k.gemm_moe32r[ti(mo.down.ty)] != nullptr &&
+           mo.gate.ty == mo.up.ty && mo.gate.row_bytes == mo.up.row_bytes && moe_tiles64 != 0;
 }
 
 // Prefill experts on the MXFP4 x fp8 grouped GEMM: all three expert tensors MXFP4 with

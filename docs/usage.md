@@ -74,7 +74,7 @@ speed and, with MTP, the verify cycles and draft acceptance.
 | `--out FILE` | write the last prompt position's logits (f32, one value per vocabulary entry) to FILE; disables MTP |
 | `--mmproj MMPROJ.gguf` | vision encoder (Qwen3-VL style mmproj, F16 / BF16), needed for `--image` |
 | `--image IMAGE` | an image placed before the prompt text; repeatable |
-| `--device SPEC` | GPU: `r9700` (default), `8060s`, an index, or a substring of the name / gfx architecture (also `WHIRL_DEVICE`) |
+| `--device SPEC` | GPU: `r9700`, `8060s`, an index, or a substring of the name / gfx architecture (also `WHIRL_DEVICE`). Default: the first R9700, else the first GPU the build has kernels for (a Radeon 8060S on its own) |
 | `-h`, `--help` | help |
 
 Examples:
@@ -127,13 +127,13 @@ request slots, a prefix cache in VRAM and host RAM / SSD tiers for idle sessions
 | `--host ADDR` | address to listen on. Default `127.0.0.1` (this computer only). `0.0.0.0` listens on every network: anyone who can reach the PC can use the server — there is no authentication |
 | `--port N` | TCP port (default 8080). If it is taken, the server exits with code 6 before loading the model |
 | `--alias NAME` | model id reported by `/v1/models` (default: the file name without `.gguf`) |
-| `--device D` | GPU: `r9700` (default), `8060s`, a device index, or a name / gfx substring |
+| `--device D` | GPU: `r9700`, `8060s`, a device index, or a name / gfx substring (default as for `chat`) |
 | `-np`, `--parallel N` | concurrent request slots (continuous batching), 1–16, default 4 |
 | `-c`, `--ctx N` | size of the shared KV pool in tokens. Slots take pages on demand; when the pool is full, idle slots' prefix caches are evicted (least recently used first). Default: all VRAM left after weights and buffers minus 768 MiB (MoE: 1.5 GiB) |
 | `--ctx-per-slot N` | longest context of one request (default min(pool, 131072); up to 262144) |
 | `--mtp-drafts N` | fixed MTP drafts per cycle, 1–10 (default: chosen per model type by a cost model) |
 | `--decode-min-tps N` | decode floor: while other requests prefill, every streaming (decoding) request keeps at least N tok/s; prefill forwards are shortened and decode cycles interleaved to hold it (default 20; `0` = off, prefill forwards are not limited). Outputs are identical for any N ([server.md](guide/en/server.md#batching)) |
-| `--kv-ram-mb N` | host RAM tier of the prefix cache, MiB of pinned memory (default: 1/4 of physical RAM, at least 8 GiB or one full-length session if that is larger — about 9 GiB for the 27B model —, at most 32 GiB, and at most half of the RAM available at startup; 16 GiB on a 64 GB PC; off by default on integrated GPUs). The startup log prints the chosen size and why. Idle sessions are copied there and restored instead of prefilled again. `0` disables both host tiers |
+| `--kv-ram-mb N` | host RAM tier of the prefix cache, MiB of pinned memory (default: 1/4 of physical RAM, at least 8 GiB or one full-length session if that is larger — about 9 GiB for the 27B model —, at most 32 GiB, and at most half of the RAM available at startup; 16 GiB on a 64 GB PC; off by default on integrated GPUs). The startup log prints the chosen size and why. Idle sessions are copied there and restored instead of prefilled again. `0` disables both host tiers. **Radeon 8060S** (integrated GPU): default `0` — the KV pool already lives in system memory; give a size to turn the RAM and SSD tiers on |
 | `--kv-ssd-dir PATH` | SSD tier directory (default `%LOCALAPPDATA%\whirl\kvcache`) |
 | `--kv-ssd-gb N` | SSD tier size cap in GiB (default 64; `0` = no SSD tier) |
 | `--mmproj FILE` | vision encoder (Qwen3-VL style mmproj GGUF, F16 / BF16). `image_url` parts (`data:` URLs with base64 PNG / JPEG / …) become image tokens. Weights stay in pinned host RAM; nothing goes to VRAM until an image arrives |
@@ -229,7 +229,7 @@ all of this; there is no shutdown endpoint.
 
 | Command | What it does |
 |---|---|
-| `whirl devices` | lists the AMD GPUs the driver reports (index, name, architecture, memory, compute units) and whether this build has GPU kernels for each of them. Use it first to check the driver and the GPU |
+| `whirl devices` | lists the AMD GPUs the driver reports (index, name, architecture, memory, compute units), whether this build has GPU kernels for each of them (the Radeon 8060S is marked *preview, untuned*), whether it is integrated, and which one is the default. Use it first to check the driver and the GPU |
 | `whirl selftest MODEL.gguf [--device SPEC]` | bitwise self-checks of the GPU kernels on the model's own weights: int8 vs f32 GEMV error, multi-token GEMV == one-token GEMV, prefill GEMM invariance over all configurations, MoE token-tile invariance, grouped vs per-query decode attention. Prints `selftest: ok` or FAIL (exit code 1) |
 | `whirl seqtest MODEL.gguf [--decode N] [--device SPEC]` | runs the multi-request (server) paths against single-request runs on two prompts: segmented prefill, batched decode rows, batched verify with literal drafts. Every token must match; prints `seqtest: ok` or FAIL (exit code 1). `--decode N`: tokens per sequence (default 24) |
 | `whirl vis-encode MMPROJ.gguf IMAGE [OUT.f32] [--reps N] [--mode auto\|resident\|stream]` | diagnostic: encodes one image with the vision encoder and reports the time; `OUT.f32` receives the projected embeddings; `--reps N` repeats the encode N times |
@@ -264,11 +264,11 @@ experiments and measurements.
 
 | Variable | Meaning |
 |---|---|
-| `WHIRL_DEVICE=SPEC` | GPU to use: `r9700` (default), `8060s`, an index, or a name / gfx substring (= `--device`) |
+| `WHIRL_DEVICE=SPEC` | GPU to use: `r9700`, `8060s`, an index, or a name / gfx substring (= `--device`; default: the first R9700, else the first supported GPU) |
 | `WHIRL_HIP_DEVICE=N` | device index, bypassing device matching and the one-process-per-GPU lock |
 | `WHIRL_GPU_SHARE=1` | do not wait for other WHIRL processes on the same GPU |
 | `WHIRL_GPU_WAIT=S` | seconds to wait for another WHIRL process to free the GPU (default 1800) |
-| `WHIRL_KV=auto\|f16\|q8\|q8h\|q8v` | KV cache format. `auto` (default): f16 when it fits; dense models fall back to q8v, then q8h; MoE always f16. See [kv-and-caching.md](guide/en/kv-and-caching.md#formats) |
+| `WHIRL_KV=auto\|f16\|q8\|q8h\|q8v` | KV cache format. `auto` (default): f16 when it fits; dense models fall back to q8v, then q8h; MoE always f16. The Radeon 8060S has no q8v / q8h kernels: auto falls back to q8 there, and `q8v` / `q8h` are refused. See [kv-and-caching.md](guide/en/kv-and-caching.md#formats) |
 | `WHIRL_PREFILL_BATCH=N` | prefill rows per forward (default 4096, up to 16384) |
 | `WHIRL_MAX_CTX=N` | default context size of `chat` (= `--ctx`; default 8192) |
 | `WHIRL_CODE_OBJECT=FILE` | development: load the GPU kernels from this code object instead of the built-in one |

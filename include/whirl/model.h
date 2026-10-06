@@ -511,7 +511,7 @@ public:
     std::vector<std::int32_t>* moe_dump = nullptr;
     std::uint32_t ff_scratch = 0;
     DevPtr moe_logits = 0, moe_ids = 0, moe_w = 0, moe_sg = 0, moe_g = 0, moe_u = 0, moe_xq = 0, moe_xd = 0, moe_ysh = 0,
-           moe_perm = 0, moe_inv = 0, moe_tiles = 0, moe_ntiles = 0, moe_x16 = 0, moe_yg = 0, moe_yu = 0, moe_yd = 0;
+           moe_perm = 0, moe_inv = 0, moe_tiles = 0, moe_ntiles = 0, moe_tiles64 = 0, moe_ntiles64 = 0, moe_x16 = 0, moe_yg = 0, moe_yu = 0, moe_yd = 0;
     // MXFP4 routed experts (Ornith MXFP4): per-pos fp8 activation scales [max_batch * K];
     // prefill experts on the MXFP4 x fp8 grouped GEMM (WHIRL_MOE_FP8=0 -> f16 gemm_moe);
     // decode experts on the whole-block kernels (WHIRL_MOE_MXW=0 -> generic moe_gu / moe_down).
@@ -643,6 +643,7 @@ public:
     bool readTune(std::string_view text, std::size_t n_buckets);
     bool useTiledFp8();
     std::uint32_t moeTile(std::uint32_t n) const;
+    bool moeGuFused(const MoeW& mo) const;
     bool moeFp8(const MoeW& mo) const;
     hip::Function moeGu(GgmlType ty) const;
     hip::Function moeDown(GgmlType ty) const;
@@ -748,7 +749,8 @@ void applyGemvEnv(Model& m);
 // device selection
 
 // HIP device for `spec` (index, "r9700" / "8060s" alias, or a substring of
-// the name / gcnArchName); empty: WHIRL_DEVICE, else the first R9700.
+// the name / gcnArchName); empty: WHIRL_DEVICE, else the first R9700, else the
+// first device with an embedded code object (a Radeon 8060S on its own).
 // Takes the per-GPU process mutex (WHIRL_GPU_SHARE=1 skips it).
 int pickDevice(std::string_view spec);
 

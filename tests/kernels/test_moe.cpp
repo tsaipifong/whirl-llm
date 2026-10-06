@@ -58,7 +58,7 @@ MoeW loadMoe(Ctx& c) {
 // x[t] dequantized from int8 (exact in double)
 std::vector<double> deq8(const std::vector<std::int8_t>& q, const std::vector<float>& d, std::size_t off, int n) {
     std::vector<double> x(static_cast<std::size_t>(n));
-    for (int i = 0; i < n; ++i) x[static_cast<std::size_t>(i)] = static_cast<double>(q[off + i]) * d[(off + i) / 32];
+    for (int i = 0; i < n; ++i) x[static_cast<std::size_t>(i)] = static_cast<double>(q[off + i]) * ref::xdScale(d[(off + i) / 32]);
     return x;
 }
 
@@ -402,6 +402,7 @@ void testMoe(Ctx& c) {
             c.rep.add(cmpTol("moe_combine vs CPU", dx.down<float>(rc.size()), rc, sc, 1e-6, 1e-7));
         }
     }
+    moeGuChecks(c, mw.gate, mw.up, mw.down, R, K);
 
     // ---------------- GDN beta / alpha projections (gdn_ab_<T>, gdn_abconv_<T>)
     {

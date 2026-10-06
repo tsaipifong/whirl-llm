@@ -131,9 +131,28 @@ constexpr int ti(QType t) { return static_cast<int>(t); }
 
 }  // namespace
 
+Caps Caps::probe(const hip::Module& m) {
+    const Loader L{m};
+    Caps c;
+    c.fp8_gemm = L.opt("gemm8_c0") != nullptr;
+    c.kv_q8v = L.opt("attn_decode_q8v") != nullptr;
+    c.kv_q8h = L.opt("attn_prep_q8h") != nullptr;
+    c.gemvw = L.opt("gemvw_nt2v1_q4_k") != nullptr;
+    c.gdn_replay = c.gemvw;
+    c.mrope = L.opt("attn_prep_m") != nullptr;
+    c.xd_sum = L.opt("whirl_cap_xd_sum") != nullptr;
+    c.attn_group1 = L.opt("whirl_cap_attn_group1") != nullptr;
+    c.draft_window = L.opt("whirl_cap_no_draft_window") == nullptr;
+    return c;
+}
+
 KernelTable KernelTable::load(const hip::Module& m, KvFormat kv) {
     const Loader L{m};
     KernelTable k;
+    k.caps = Caps::probe(m);
+    if (!k.caps.supports(kv))
+        throw std::invalid_argument(std::string("kernels: this GPU's code object has no ") + (kv == KvFormat::q8v ? "q8v" : "q8h") +
+                                    " KV kernels");
 
     // Every type but MXFP4: the core kernels are required.
     constexpr QType base_types[] = {QType::f32, QType::f16, QType::q8_0, QType::q3_k, QType::q4_k,
@@ -242,11 +261,14 @@ KernelTable KernelTable::load(const hip::Module& m, KvFormat kv) {
         k.moe_down[ti(t)] = L.req("moe_down_" + s);
         k.gemm_moe[ti(t)] = L.req("gemm_moe_" + s);
         k.gemm_moe32[ti(t)] = L.req("gemm_moe32_" + s);
+        k.gemm_moe32r[ti(t)] = L.opt("gemm_moe32r_" + s);
+        k.gemm_moegu[ti(t)] = L.opt("gemm_moegu_" + s);
     }
 
     static constexpr Named optional[] = {
         {&KernelTable::requant_q6k_d2, "requant_q6k_d2"},
         {&KernelTable::requant_q80_q4k, "requant_q80_q4k"},
+        {&KernelTable::moe_tiles, "moe_tiles"},
         {&KernelTable::gdn_wprep, "gdn_wprep"},
         {&KernelTable::gdn_wscan8, "gdn_wscan8"},
         {&KernelTable::rmsnorm_x8, "rmsnorm_x8"},
@@ -296,7 +318,7 @@ KernelTable KernelTable::load(const hip::Module& m, KvFormat kv) {
     for (int nt = 1; nt <= kMaxSmallBatch; ++nt) k.gemv_d2[nt - 1] = L.opt("gemv_d2_nt" + std::to_string(nt));
     k.copy_rows_map = L.opt("copy_rows_map");
 
-    // MXFP4: every lookup optional (gfx1201 only).
+    // MXFP4: every lookup optional (the fp8 / whole-block expert kernels are gfx1201 only).
     {
         const QType t = QType::mxfp4;
         const int i = ti(t);
@@ -327,6 +349,8 @@ KernelTable KernelTable::load(const hip::Module& m, KvFormat kv) {
         k.moe_down[i] = L.opt("moe_down_mxfp4");
         k.gemm_moe[i] = L.opt("gemm_moe_mxfp4");
         k.gemm_moe32[i] = L.opt("gemm_moe32_mxfp4");
+        k.gemm_moe32r[i] = L.opt("gemm_moe32r_mxfp4");
+        k.gemm_moegu[i] = L.opt("gemm_moegu_mxfp4");
         k.moe_gu_mxw = L.opt("moe_gu_mxfp4w");
         k.moe_down_mxw = L.opt("moe_down_mxfp4w");
         k.gemm8_moe = L.opt("gemm8_moe");
@@ -374,6 +398,16 @@ KernelTable KernelTable::load(const hip::Module& m, KvFormat kv) {
             k.gemms[ci][ti(t)] = L.opt(gemmsName(t, ci, false));
             k.gemmsh[ci][ti(t)] = L.opt(gemmsName(t, ci, true));
         }
+    }
+    // A code object whose small-batch GEMM slots have their own block geometry exports
+    // it (marker whirl_cap_gemms_geom + int32 whirl_gemms_geom[slot][BM, BN, threads]).
+    if (L.opt("whirl_cap_gemms_geom") != nullptr) {
+        std::size_t bytes = 0;
+        const DevPtr g = m.getGlobal("whirl_gemms_geom", &bytes);
+        std::array<std::int32_t, kGemmsCfgs.size() * 3> v{};
+        if (bytes != sizeof(v)) throw std::runtime_error("kernels: whirl_gemms_geom has an unexpected size");
+        hip::download(v.data(), g, sizeof(v));
+        for (std::size_t ci = 0; ci < kGemmsCfgs.size(); ++ci) k.gemms_geom[ci] = GemmCfg{v[3 * ci], v[3 * ci + 1], v[3 * ci + 2]};
     }
     return k;
 }

@@ -19,7 +19,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(WHIRL_WITH_HIP "Build the HIP runtime wrapper and embedded kernels" ON)
-set(WHIRL_GPU_ARCHS "gfx1201;gfx1151" CACHE STRING "GPU architectures to build code objects for")
+set(WHIRL_GPU_ARCHS "gfx1201;gfx1151" CACHE STRING "GPU architectures to build code objects for (gfx1201 = R9700, gfx1151 = Radeon 8060S)")
 set(WHIRL_LLAMACPP_SRC "" CACHE PATH
     "Optional: path to an external llama.cpp source tree; enables the test-only chat-template oracle (never copied into WHIRL)")
 
@@ -58,7 +58,15 @@ include(${CMAKE_SOURCE_DIR}/cmake/kernels.cmake OPTIONAL)  # kernels area
 
 if(WHIRL_WITH_HIP)
   foreach(arch IN LISTS WHIRL_GPU_ARCHS)
+    if(NOT arch MATCHES "^(gfx1201|gfx1151)$")
+      message(FATAL_ERROR "WHIRL_GPU_ARCHS: unsupported architecture '${arch}' (gfx1201, gfx1151)")
+    endif()
     set(co "${CMAKE_BINARY_DIR}/kernels/whirl_kernels.${arch}.hsaco")
+    # per-arch dependency list from cmake/kernels.cmake (falls back to all sources)
+    set(co_deps ${WHIRL_KERNEL_SOURCES})
+    if(DEFINED WHIRL_KERNEL_SOURCES_${arch})
+      set(co_deps ${WHIRL_KERNEL_SOURCES_${arch}})
+    endif()
     set(cc "${CMAKE_BINARY_DIR}/kernels/whirl_kernels_${arch}.cpp")
     add_custom_command(
       OUTPUT "${co}"
@@ -67,7 +75,7 @@ if(WHIRL_WITH_HIP)
               --no-gpu-bundle-output -O3 -std=c++17
               -I "${CMAKE_SOURCE_DIR}/kernels"
               -o "${co}" "${CMAKE_SOURCE_DIR}/kernels/whirl_kernels.hip"
-      DEPENDS ${CMAKE_SOURCE_DIR}/kernels/whirl_kernels.hip ${WHIRL_KERNEL_SOURCES}
+      DEPENDS ${CMAKE_SOURCE_DIR}/kernels/whirl_kernels.hip ${co_deps}
       COMMENT "HIP device code object ${arch}"
       VERBATIM)
     add_custom_command(

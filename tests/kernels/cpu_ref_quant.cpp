@@ -264,14 +264,45 @@ void dequantRowF16(QType t, const std::uint8_t* b, int ncols, std::uint16_t* y) 
     }
 }
 
+namespace {
+bool g_xd_sum = false;
+}
+
+void setXdSum(bool on) { g_xd_sum = on; }
+bool xdSum() { return g_xd_sum; }
+
+float xdPack(float d, int sum) {
+    std::uint32_t b;
+    std::memcpy(&b, &d, 4);
+    b += 0x800u;
+    const std::uint32_t w = ((b >> 12) << 13) | static_cast<std::uint32_t>(sum + 4096);
+    float f;
+    std::memcpy(&f, &w, 4);
+    return f;
+}
+
+float xdScale(float word) {
+    if (!g_xd_sum) return word;
+    std::uint32_t w;
+    std::memcpy(&w, &word, 4);
+    const std::uint32_t b = (w >> 13) << 12;
+    float f;
+    std::memcpy(&f, &b, 4);
+    return f;
+}
+
 void quantizeQ8(const float* x, int n, std::int8_t* xq, float* xd) {
     for (int b = 0; b < n / 32; ++b) {
         float amax = 0;
         for (int i = 0; i < 32; ++i) amax = std::max(amax, std::fabs(x[32 * b + i]));
         const float d = amax / 127.f;
         const float id = d > 0.f ? 1.f / d : 0.f;
-        xd[b] = d;
-        for (int i = 0; i < 32; ++i) xq[32 * b + i] = static_cast<std::int8_t>(std::nearbyint(x[32 * b + i] * id));
+        int sum = 0;
+        for (int i = 0; i < 32; ++i) {
+            xq[32 * b + i] = static_cast<std::int8_t>(std::nearbyint(x[32 * b + i] * id));
+            sum += xq[32 * b + i];
+        }
+        xd[b] = g_xd_sum ? xdPack(d, sum) : d;
     }
 }
 
@@ -306,7 +337,7 @@ void gemvF64(const std::vector<float>& W, int nrows, int ncols, const float* x, 
 void gemvQ8F64(const std::vector<float>& W, int nrows, int ncols, const std::int8_t* xq, const float* xd, int ntok,
                std::vector<double>& y, std::vector<double>& scale) {
     std::vector<double> x(static_cast<std::size_t>(ntok) * ncols);
-    for (std::size_t i = 0; i < x.size(); ++i) x[i] = static_cast<double>(xq[i]) * xd[i / 32];  // exact in double
+    for (std::size_t i = 0; i < x.size(); ++i) x[i] = static_cast<double>(xq[i]) * xdScale(xd[i / 32]);  // exact in double
     gemvImpl(W, nrows, ncols, x.data(), ntok, ncols, y, scale);
 }
 

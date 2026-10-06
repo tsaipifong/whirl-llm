@@ -3,7 +3,7 @@
 # 架構
 
 > **狀態（WHIRL 0.1.0）。** 本文件描述的是本儲存庫中已實作的設計：C++20 host 程式碼與 HIP C++ device 程式碼，
-> 目標為 R9700（gfx1201）。gfx1151（Radeon 8060S）的 kernel 在規劃中。部分數字是在 C++ 引擎之前的研究建置上量測的；
+> 目標為 R9700（gfx1201），以及預覽版（結果正確、尚未調校）的 Radeon 8060S（gfx1151）。部分數字是在 C++ 引擎之前的研究建置上量測的；
 > C++ 引擎的輸出與其逐 token 相同（[benchmarking.md](benchmarking.md#gates)）。
 
 **對誰有幫助**：正在評估「針對特定模型、特定 GPU 的引擎」是否值得打造的人，以及想知道 WHIRL 各部分放在哪裡、為何長成這樣的人。
@@ -22,7 +22,7 @@ WHIRL **不是**「Qwen 引擎」。它一次加入一種模型架構，並針�
 | GPU | ISA | 角色 | 實測極限（我們自己的探測，非規格表） |
 |---|---|---|---|
 | AMD Radeon AI PRO R9700（RDNA 4，Navi 48） | gfx1201 | 主要目標 | 32 GB GDDR6，256-bit，規格 640 GB/s；GEMV 串流 604–626 GB/s；WMMA f16→f32 180–184 TFLOPS；WMMA iu8 343–374 TOPS |
-| AMD Radeon 8060S（Ryzen AI Max，RDNA 3.5） | gfx1151 | 次要目標 | 統一記憶體；串流讀取 238 GB/s；WMMA f16 43 TFLOPS；WMMA int8 45 TOPS（與 f16 同速率） |
+| AMD Radeon 8060S（Ryzen AI Max，RDNA 3.5） | gfx1151 | 次要目標（預覽、未調校） | 統一記憶體；串流讀取 238 GB/s；WMMA f16 43 TFLOPS；WMMA int8 45 TOPS（與 f16 同速率） |
 
 開發用的 R9700 是以 **USB4 eGPU** 連接。其主機連結實測為 3.78–3.81 GB/s（D2H）與 3.84–3.86 GB/s（H2D）。在這台機器上，所有在主機與 GPU 之間搬移資料的動作（載入、RAM/SSD KV 層、視覺權重串流）都受限於這條連結。多數使用者有直接的 PCIe 插槽，主機頻寬會高得多；我們在整份文件中把 eGPU 造成的效應標示為*環境限制*，且沒有為它們撰寫變通做法。
 
@@ -88,8 +88,11 @@ Tokenizer 不是小細節：原型中一個空白切分的 bug，讓每個有縮
 - **矩陣指令不同。** gfx12 WMMA 把 A/B fragment（片段）緊湊地保存在暫存器中，且其 C/D fragment 配置等同於 B 的配置，我們的 DeltaNet scan 與 flash attention 正是利用這一點。gfx11（RDNA 3.5）WMMA 需要在兩個半 wave 中都複製一份 B fragment，並交錯輸出列。為其中一種寫的 kernel，在另一種上不是錯就是慢。
 - **成本平衡不同。** 在 R9700 上 int8 WMMA 是 f16 的 2×；在 8060S 上兩者同速率，而且 gfx11 WMMA 會與 VALU 工作互相競爭。在一張 GPU 上勝出的設計，在另一張上可能落敗（例如 W8A8 prefill — 見 [kernels.md](kernels.md)）。
 - **選用 kernel。** 有些 kernel 只存在於某一種架構（int8 WMMA 中批次 GEMV、MXFP4×fp8 GEMM、`q8v` KV 格式只存在於 gfx1201）。主機以 `getFunctionOpt` 查找它們；缺少的 kernel 會回傳 null 並清除 HIP 黏著的 last error，接著在載入時改走後備路徑或拒絕載入。
+- **看能力旗標，不看架構名稱。** 光靠「kernel 不存在」無法決定的地方，會從載入的 code object 探測一次 `kernels::Caps`（`include/whirl/kernels_abi.h`）：`fp8_gemm`、`kv_q8v`、`kv_q8h`、`gemvw`、`gdn_replay`、`mrope`，以及只有 gfx1151 object 才有的兩個標記 kernel —— `xd_sum`（int8 activation 的 scale word 內含區塊總和）與 `attn_group1`（其 WMMA P·V 只有每個 attention 群組一個 query 時才逐位元精確）。KV 格式自動選擇、attention query 分組、DeltaNet replay 與 kernel 測試都讀這些旗標；剩下的架構判斷只用來選調校表、tune 快取檔名與視覺 code object（只有 gfx1201）。
 
-檔案切分：`kernels/common.hip`（型別、wave 基本操作、區塊解碼器）、`gemv_*.hip`、`gemm_prefill.hip` / `gemm_fp8*.hip` / `gemm_small.hip`、`attn*.hip`、`gdn_*.hip`（DeltaNet）、`moe.hip` / `moe_mxfp4.hip`、`fused_decode.hip`、`misc_*.hip`、`sample_*.hip`、`draft_d2.hip`，全部由 `kernels/whirl_kernels.hip` 引入；視覺編碼器的 kernel 是 `kernels/vision/` 下另一個 code object。gfx1151 專用路徑之後會放在 `kernels/gfx1151/`。
+預設裝置：build 含 gfx1201 kernel 時用第一張 R9700，否則用第一張 build 有 kernel 的 GPU（例如只有 Radeon 8060S 的機器）；`--device` / `WHIRL_DEVICE` 可指定其他裝置（`whirl devices` 會標出預設）。
+
+檔案切分：`kernels/common.hip`（型別、wave 基本操作、區塊解碼器）、`gemv_*.hip`、`gemm_prefill.hip` / `gemm_fp8*.hip` / `gemm_small.hip`、`attn*.hip`、`gdn_*.hip`（DeltaNet）、`moe.hip` / `moe_mxfp4.hip`、`fused_decode.hip`、`misc_*.hip`、`sample_*.hip`、`draft_d2.hip`，全部由 `kernels/whirl_kernels.hip` 引入；視覺編碼器的 kernel 是 `kernels/vision/` 下另一個 code object。gfx1151 的 kernel 集在 `kernels/gfx1151/`（kernel 名稱與參數 ABI 相同、自己的檔案切分，只在編譯 gfx1151 時由 `whirl_kernels.hip` 引入）；它缺少的家族列在 [kernels.md](kernels.md#gfx1151)。
 
 ### 2.5 前向傳遞 — `src/model/`
 

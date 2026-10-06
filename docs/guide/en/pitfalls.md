@@ -328,6 +328,18 @@ templates](#tok) · [Model files and quantization](#quant) · [Vision](#vis) · 
 - **Symptom:** a string literal containing a raw NUL byte did not compile.
 - **Fix:** emit escapes (`\x00`) in generated tables.
 
+### <a id="tool-15"></a>TOOL-15 · A source edited during a device compile left a stale code object
+- **Conditions:** Ninja, a HIP device compile that takes ~2 minutes, a kernel source edited while it
+  was running.
+- **Symptom:** a marker kernel added to the gfx1151 set was missing from the embedded code object:
+  the capability probe reported it absent and dozens of kernel-test checks failed with nonsense
+  values (the CPU reference decoded the wrong scale-word format).
+- **Root cause:** the compiler read the old source; the output it wrote is newer than the edit, so
+  Ninja considers it up to date and never rebuilds it.
+- **Fix:** do not edit sources a running build reads; after doing so, touch the file again. Check
+  the symbol table of the code object (`llvm-objdump -t`) when a new kernel "is not found".
+- **Detection now:** `whirl-kernel-test` prints the probed capability flags first.
+
 ---
 
 ## <a id="kern"></a>3. Kernels and numerics
@@ -510,6 +522,30 @@ templates](#tok) · [Model files and quantization](#quant) · [Vision](#vis) · 
   forward fell into different buckets.
 - **Fix:** enable f16 output only if every bucket's configuration supports it.
 - **Detection now:** segmented-prefill gate in the relaxed mode too.
+
+### <a id="kern-31"></a>KERN-31 · Two forked kernel sets drifted apart in one argument **[8060S]**
+- **Conditions:** gfx1201 and gfx1151 kernel sets kept as separate sources with the same kernel
+  names; the host shares one launch path.
+- **Symptom:** none in short tests. The kernel test's "head-split launches == one launch" check
+  failed on gfx1151 (half the heads wrong).
+- **Root cause:** the gfx1201 `attn_prefill_wmma*` had gained an `h0` (first head) argument for
+  long prefills split over head ranges; the gfx1151 copy had not. The host passed `h0`, the kernel
+  ignored it, so every range after the first recomputed heads 0.. — only for prompts long enough to
+  split (n x context > 4096 x 128k).
+- **Fix:** added `h0` to the gfx1151 kernel. Kernel argument layouts of both code objects are now
+  compared from the AMDGPU metadata (`.args`: offset, size, kind) for every kernel present in both.
+- **Detection now:** the ABI comparison (0 differing kernels) and the head-split invariance check in
+  `whirl-kernel-test`, which runs on each GPU.
+
+### <a id="kern-32"></a>KERN-32 · The int8 scale words have a per-architecture format **[8060S]**
+- **Symptom:** on gfx1151 every int8-activation check failed: `quantize_q8 xd` differed in all
+  words, the GEMV references were off by 1e37.
+- **Root cause:** the gfx1151 kernels store each 32-value block's scale as (f32 scale rounded to an
+  11-bit mantissa, block sum + 4096) in one 32-bit word, so the dot kernels get the block sum for
+  free; the CPU references assumed a plain f32 scale.
+- **Fix:** the code object announces the format with a marker kernel (`kernels::Caps::xd_sum`); the
+  references pack and unpack accordingly (`ref::setXdSum`, `ref::xdScale`).
+- **Detection now:** exact `quantize_q8` / fused-quantization checks on both GPUs.
 
 ---
 

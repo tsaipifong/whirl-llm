@@ -216,10 +216,12 @@ MTP on: 64k decode 46.79, 128k 35.94–36.01. MXFP4 at 256k (q8v, single slot): 
 | Decode no MTP / MTP, 24k (early) | 124.3 / 130.9 | 89.7 / 84.1 |
 | Coding benchmark, MTP + n-gram (CLI mean) | ~216 | — |
 
-### 10.3 Radeon 8060S (historical, older code tree)
+### 10.3 Radeon 8060S
 
-The 8060S code tree is being re-forked from the R9700 tree; these numbers are from the older tree
-(cooled interleaved runs).
+The C++ engine's gfx1151 bring-up (preview, untuned) is measured in
+[benchmarks.md §14](../../benchmarks.md#14-radeon-8060s-preview-bring-up-untuned): prefill of ≥ 2k
+tokens 1.12–1.35× llama.cpp b11214, plain decode 1.06–1.29×, short prompts 0.72–0.95×. The numbers
+below are from the older research tree (cooled interleaved runs).
 
 | | 27B no MTP | 27B MTP | MoE no MTP | MoE MTP |
 |---|---|---|---|---|

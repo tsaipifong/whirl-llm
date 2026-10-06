@@ -68,7 +68,7 @@ decode 速度；開 MTP 時另列驗證回合數與草稿接受率。
 | `--out FILE` | 把最後一個提示位置的 logits（f32，每個詞彙一個值）寫進 FILE；會停用 MTP |
 | `--mmproj MMPROJ.gguf` | 視覺編碼器（Qwen3-VL 形式的 mmproj，F16 / BF16），`--image` 需要它 |
 | `--image IMAGE` | 放在提示文字前面的圖片；可重複指定 |
-| `--device SPEC` | GPU：`r9700`（預設）、`8060s`、索引，或名稱 / gfx 架構的子字串（也可用 `WHIRL_DEVICE`） |
+| `--device SPEC` | GPU：`r9700`、`8060s`、索引，或名稱 / gfx 架構的子字串（也可用 `WHIRL_DEVICE`）。預設：第一張 R9700，沒有的話用第一張這個建置有 kernel 的 GPU（例如只有 Radeon 8060S 的機器） |
 | `-h`、`--help` | 說明 |
 
 範例：
@@ -120,13 +120,13 @@ whirl serve  MODEL.gguf [選項]      （同一支程式）
 | `--host ADDR` | 監聽位址。預設 `127.0.0.1`（只有這台電腦）。`0.0.0.0` 會監聽所有網路：任何連得到這台電腦的人都能使用——伺服器沒有身分驗證 |
 | `--port N` | TCP port（預設 8080）。若已被占用，伺服器會在載入模型之前以代碼 6 結束 |
 | `--alias NAME` | `/v1/models` 回報的模型 id（預設：去掉 `.gguf` 的檔名） |
-| `--device D` | GPU：`r9700`（預設）、`8060s`、裝置索引，或名稱 / gfx 子字串 |
+| `--device D` | GPU：`r9700`、`8060s`、裝置索引，或名稱 / gfx 子字串（預設同 `chat`） |
 | `-np`、`--parallel N` | 同時處理的請求 slot 數（continuous batching），1～16，預設 4 |
 | `-c`、`--ctx N` | 共用 KV 池的大小（token）。slot 依需要取用分頁；池滿時，閒置 slot 的前綴快取依最久未使用（LRU）逐出。預設：權重與緩衝區之後剩下的全部 VRAM 減 768 MiB（MoE：1.5 GiB） |
 | `--ctx-per-slot N` | 單一請求的最長 context（預設 min(池大小, 131072)；最多 262144） |
 | `--mtp-drafts N` | 每回合固定的 MTP 草稿數，1～10（預設：依模型類型由成本模型決定） |
 | `--decode-min-tps N` | decode 保底速度：其他請求在 prefill 時，每個串流中（decode 中）的請求至少維持 N tok/s；做法是縮短 prefill forward、穿插 decode cycle（預設 20；`0` = 關閉，prefill forward 不受限）。任何 N 的輸出都相同（[server.md](server.md#batching)） |
-| `--kv-ram-mb N` | 前綴快取的主記憶體層，單位 MiB 的 pinned 記憶體（預設：實體記憶體的 1/4，至少 8 GiB 或一個完整長度 session（若更大；27B 模型約 9 GiB），最多 32 GiB，且不超過啟動時可用記憶體的一半；64 GB 的電腦為 16 GiB；整合式 GPU 預設關閉）。啟動日誌會印出選定的大小與原因。閒置 session 會複製到這裡，下次直接還原而不必重新 prefill。`0` 會關閉兩個 host 層 |
+| `--kv-ram-mb N` | 前綴快取的主記憶體層，單位 MiB 的 pinned 記憶體（預設：實體記憶體的 1/4，至少 8 GiB 或一個完整長度 session（若更大；27B 模型約 9 GiB），最多 32 GiB，且不超過啟動時可用記憶體的一半；64 GB 的電腦為 16 GiB；整合式 GPU 預設關閉）。啟動日誌會印出選定的大小與原因。閒置 session 會複製到這裡，下次直接還原而不必重新 prefill。`0` 會關閉兩個 host 層。**Radeon 8060S**（內顯）：預設 `0` —— KV pool 本來就在系統記憶體；給定大小才會開啟 RAM 與 SSD 層 |
 | `--kv-ssd-dir PATH` | SSD 層目錄（預設 `%LOCALAPPDATA%\whirl\kvcache`） |
 | `--kv-ssd-gb N` | SSD 層容量上限，GiB（預設 64；`0` = 不用 SSD 層） |
 | `--mmproj FILE` | 視覺編碼器（Qwen3-VL 形式的 mmproj GGUF，F16 / BF16）。`image_url` 內容（base64 PNG / JPEG 等的 `data:` URL）會變成圖片 token。權重放在 pinned 主記憶體，收到圖片之前不占 VRAM |
@@ -216,7 +216,7 @@ Invoke-RestMethod http://127.0.0.1:8080/v1/chat/completions -Method Post -Conten
 
 | 指令 | 用途 |
 |---|---|
-| `whirl devices` | 列出驅動程式回報的 AMD GPU（索引、名稱、架構、記憶體、運算單元），以及這個建置有沒有該 GPU 的 kernel。先用它確認驅動程式與 GPU |
+| `whirl devices` | 列出驅動程式回報的 AMD GPU（索引、名稱、架構、記憶體、運算單元）、這個建置有沒有該 GPU 的 kernel（Radeon 8060S 標為 *preview, untuned*）、是否為內顯，以及哪一張是預設。先用它確認驅動程式與 GPU |
 | `whirl selftest MODEL.gguf [--device SPEC]` | 用模型本身的權重做 GPU kernel 的逐位元自我檢查：int8 與 f32 GEMV 誤差、多 token GEMV == 單 token GEMV、prefill GEMM 在所有組態下不變、MoE token tile 不變、分組與逐 query 的 decode attention。印出 `selftest: ok` 或 FAIL（結束代碼 1） |
 | `whirl seqtest MODEL.gguf [--decode N] [--device SPEC]` | 在兩個提示上比對多請求（伺服器）路徑與單請求執行：分段 prefill、批次 decode 列、以固定草稿做批次驗證。每個 token 都必須相同；印出 `seqtest: ok` 或 FAIL（結束代碼 1）。`--decode N`：每個序列生成的 token 數（預設 24） |
 | `whirl vis-encode MMPROJ.gguf IMAGE [OUT.f32] [--reps N] [--mode auto\|resident\|stream]` | 診斷用：用視覺編碼器編碼一張圖並回報時間；`OUT.f32` 存投影後的 embedding；`--reps N` 重複編碼 N 次 |
@@ -249,11 +249,11 @@ PowerShell 中先用 `$env:WHIRL_KV = "q8v"` 設定再啟動程式。**一般使
 
 | 變數 | 說明 |
 |---|---|
-| `WHIRL_DEVICE=SPEC` | 使用的 GPU：`r9700`（預設）、`8060s`、索引，或名稱 / gfx 子字串（= `--device`） |
+| `WHIRL_DEVICE=SPEC` | 使用的 GPU：`r9700`、`8060s`、索引，或名稱 / gfx 子字串（= `--device`；預設：第一張 R9700，否則第一張支援的 GPU） |
 | `WHIRL_HIP_DEVICE=N` | 裝置索引，略過裝置比對與「一張 GPU 一個行程」的鎖 |
 | `WHIRL_GPU_SHARE=1` | 不等待同一張 GPU 上的其他 WHIRL 行程 |
 | `WHIRL_GPU_WAIT=S` | 等待其他 WHIRL 行程釋放 GPU 的秒數（預設 1800） |
-| `WHIRL_KV=auto\|f16\|q8\|q8h\|q8v` | KV 快取格式。`auto`（預設）：放得下就用 f16；dense 模型依序退到 q8v、q8h；MoE 一律 f16。見 [kv-and-caching.md](kv-and-caching.md#formats) |
+| `WHIRL_KV=auto\|f16\|q8\|q8h\|q8v` | KV 快取格式。`auto`（預設）：放得下就用 f16；dense 模型依序退到 q8v、q8h；MoE 一律 f16。Radeon 8060S 沒有 q8v / q8h kernel：那裡 auto 會退到 q8，指定 `q8v` / `q8h` 會被拒絕。見 [kv-and-caching.md](kv-and-caching.md#formats) |
 | `WHIRL_PREFILL_BATCH=N` | 每次 forward 的 prefill 列數（預設 4096，最多 16384） |
 | `WHIRL_MAX_CTX=N` | `chat` 的預設 context 大小（= `--ctx`；預設 8192） |
 | `WHIRL_CODE_OBJECT=FILE` | 開發用：從這個 code object 載入 GPU kernel，取代內建的 |

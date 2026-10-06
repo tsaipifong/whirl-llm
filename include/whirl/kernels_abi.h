@@ -125,7 +125,14 @@
 //   moe_down_<T>(W, rb, E, xq, xd, ids, w, sg, ysh, x, F, K, skip)
 //   gemm_moe_<T> / gemm_moe32_<T>(W, rb, rows_e, const f16* X, float* Y,
 //            ncols, const Int4* tiles, const int* n_tiles)
-//  MXFP4 routed experts (gfx1201, optional; T = mxfp4 also has the generic four above):
+//  grouped expert GEMM, Radeon 8060S prefill (optional, gfx1151 only):
+//   moe_tiles(ids, n_pairs, R, bn, Int4* tiles, n_tiles): moe_route's tiles for token tile bn
+//   gemm_moe32r_<T>: gemm_moe32_<T> arguments, 32-token tiles, 1-D grid
+//            (n_tile_slots * ceil(rows_e / kMoeBm), row block fastest)
+//   gemm_moegu_<T>(W1, W2, rb, ff, const f16* X, f16* A, ncols, tiles, n_tiles): gate
+//            (W1) + up (W2) + SwiGLU, A = f16(silu(g) * u) == gemm_moe_<T> x2 +
+//            moe_act_f16; 64-token tiles, 1-D grid (n_tile_slots * ceil(ff / 64))
+//  MXFP4 routed experts (optional, gfx1201 only; T = mxfp4 also has the generic four above):
 //   moe_gu_mxfp4w / moe_down_mxfp4w: same arguments as moe_gu_<T> / moe_down_<T>
 //            (whole 32-value block per lane step)
 //   gemm8_moe / gemm8_moe32 / gemm8_moeh / gemm8_moe32h(W1, W2, rb, const u8* ref1,
@@ -330,7 +337,8 @@ inline constexpr std::array<GemmCfg, 24> kGemmCfgs = {{
     {128, 512, 512},  // bk 32, waves_m 8
 }};
 // gemms_c<i>_<T> / gemmsh_c<i>_<T> (small batch; c5..c7 = gemmsd variants).
-// q8_0 has no c3 and no c7 instantiation; q6_k has no c7.
+// q8_0 has no c3 and no c7 instantiation; q6_k has no c7. This is the gfx1201
+// geometry; a code object may export its own (KernelTable::gemms_geom).
 inline constexpr std::array<GemmCfg, 8> kGemmsCfgs = {{
     {64, 32, 128}, {128, 32, 256}, {128, 48, 256}, {128, 64, 256},
     {128, 16, 256}, {64, 64, 256}, {64, 96, 256}, {64, 128, 256},
@@ -352,6 +360,28 @@ inline constexpr std::array<int, kNGemvw> kGemvwRows = {0, 16, 32, 16, 32, 16, 1
 
 enum class KvFormat { f16, q8, q8h, q8v };
 
+// What a loaded code object can do. The host picks its paths from these flags
+// (and from null KernelTable entries), never from the GPU architecture name.
+// gfx1201 has every flag but xd_sum / attn_group1; gfx1151 has no fp8 GEMM,
+// no q8v / q8h KV kernels and no vision kernels, and sets both markers.
+struct Caps {
+    bool fp8_gemm = false;     // MXFP4 x fp8 prefill GEMM (gemm8_c0)
+    bool kv_q8v = false;       // q8v KV kernels (attn_decode_q8v)
+    bool kv_q8h = false;       // q8h attention prep (attn_prep_q8h, Hadamard-rotated q / k)
+    bool gemvw = false;        // int8-WMMA mid-batch GEMV (gemvw_nt2v1_q4_k)
+    bool gdn_replay = false;   // fused DeltaNet kernels with replay segments (GdnSeg::pend; ship with
+                               // the gfx1201 set, whose int8-WMMA GEMV is the marker)
+    bool mrope = false;        // multi-section RoPE attention prep (image prompts: attn_prep_m)
+    bool xd_sum = false;       // marker whirl_cap_xd_sum: int8 scale words carry the block sum
+    bool attn_group1 = false;  // marker whirl_cap_attn_group1: attn_wsplit1 groups of one query
+    bool draft_window = false; // attn_wsplit* honour KvArgs::win (MTP draft window); off when the
+                               // module has the marker whirl_cap_no_draft_window (no shipped module
+                               // has it since gfx1151 implements the window)
+    static Caps probe(const hip::Module& m);
+    // Whether `kv` can be loaded (f16 / q8 always can).
+    bool supports(KvFormat kv) const { return kv == KvFormat::q8v ? kv_q8v : kv == KvFormat::q8h ? kv_q8h : true; }
+};
+
 // Every production kernel, resolved by name from a loaded module. Entries
 // indexed by weight type use the ggml type id (index < kNTypes); a null
 // Function means the kernel does not exist for that type (or device).
@@ -361,6 +391,7 @@ struct KernelTable {
     using F = Function;
     using Nt = std::array<PerType<F>, kMaxSmallBatch - 1>;  // [nt - 2][type]
 
+    Caps caps;            // capability flags of the module (Caps::probe)
     bool gv_grp = false;  // gemvq_<T> / ggemv* take GvArgs (gemv_grouped_abi present)
     PerType<F> gemv1{}, gemvq{}, get_rows{}, gemm{}, dequant_f16{};
     PerType<F> gemv4{}, gemv8{};  // gemv_<T>_4 / _8 (f32 / f16 only): n = 2..16 bitwise == gemv1 per token
@@ -369,8 +400,11 @@ struct KernelTable {
     std::array<Nt, kNGemvw> gemvw{}, gemvw_g{};      // [v][nt - 2][type], v = 1..8
     std::array<PerType<F>, kGemmCfgs.size()> gemmc{};
     std::array<PerType<F>, kGemmsCfgs.size()> gemms{}, gemmsh{};
+    // Block geometry of the gemms slots: kGemmsCfgs, or the code object's own table
+    // (marker whirl_cap_gemms_geom, int32 whirl_gemms_geom[slot][3] = BM, BN, threads).
+    std::array<GemmCfg, kGemmsCfgs.size()> gemms_geom = kGemmsCfgs;
     PerType<F> gemmhq{}, gemmhqh{};
-    PerType<F> gdn_ab{}, gdn_abconv{}, moe_gu{}, moe_down{}, gemm_moe{}, gemm_moe32{};
+    PerType<F> gdn_ab{}, gdn_abconv{}, moe_gu{}, moe_down{}, gemm_moe{}, gemm_moe32{}, gemm_moe32r{}, gemm_moegu{};
     PerType<F> gemvx{};  // gemvx_v6_<T>: 17..32-token GEMV (runtime token count)
     F gemvw_head_s{};    // gemvw_nt16v2s_q6_k: 16-token output head over a row range, separate y stride
     F gemvw_head_2p{};   // gemvw_nt16x2s_q6_k: wide-verify output head, both 16-token passes in one launch (optional)
@@ -392,7 +426,7 @@ struct KernelTable {
     F copy_rows_map{};  // optional
     F set_tokens{}, argmax_rows{}, argmax_prob{}, draft_pick{};
     F set_rows{}, rmsnorm_q8_rows{}, argmax_rows_to{}, draft_pick_rows{};
-    F moe_logits_f32{}, moe_topk{}, moe_route{}, moe_gather_f16{}, moe_act_f16{}, moe_combine{};
+    F moe_logits_f32{}, moe_topk{}, moe_route{}, moe_gather_f16{}, moe_act_f16{}, moe_combine{}, moe_tiles{};
     F qact_fp8{}, silu_mul_x8h{}, gdn_conv_l2n{}, gdn_conv_l2n_h{}, gdn_conv_state_h{}, gated_norm_x8h{};
     F silu_mul_x16h{}, gated_norm_x16h{};
     F rmsnorm_x8h16{}, rmsnorm_x8h16t{};
@@ -409,7 +443,8 @@ struct KernelTable {
 
     // Resolves every entry. Kernels the model always needs are required
     // (throws hip::Error naming the missing kernel); the others are optional.
-    // `kv` picks the KV-format variants of attn_* / kv_store.
+    // `kv` picks the KV-format variants of attn_* / kv_store (throws
+    // std::invalid_argument when the module lacks that format, see Caps).
     static KernelTable load(const hip::Module& m, KvFormat kv);
 
     // Accessors with range checks (nt = token count 2..16).

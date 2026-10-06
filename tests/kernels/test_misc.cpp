@@ -280,6 +280,11 @@ void testMisc(Ctx& c) {
                 std::vector<std::uint8_t> want_rows;
                 for (int m : mp) want_rows.insert(want_rows.end(), src.begin() + static_cast<std::ptrdiff_t>(m * rb), src.begin() + static_cast<std::ptrdiff_t>((m + 1) * rb));
                 c.rep.add(cmpExact("copy_rows_map (vocabulary subset rows)", got, want_rows));
+            } else {
+                Result r;
+                r.name = "copy_rows_map present";
+                r.pass = false;
+                c.rep.add(r);
             }
         }
         // set_tokens / set_rows
@@ -432,6 +437,11 @@ void testMisc(Ctx& c) {
                     }
                     c.rep.add(cmpExact("requant_q80_q4k (CPU emulation, " + std::to_string(nr8) + " rows)", d8.down<std::uint8_t>(w8.size()), w8));
                 }
+            } else {
+                Result r;
+                r.name = "requant_q80_q4k present";
+                r.pass = false;
+                c.rep.add(r);
             }
 
             // Q6_K -> D2 and the D2 GEMV
@@ -523,6 +533,7 @@ void testMisc(Ctx& c) {
         const std::vector<float> x = c.randn(static_cast<std::size_t>(n) * E, 2.f), w = c.randu(E, 0.3f, 1.7f);
         Buf dx(x), dw(w);
         auto conv8 = [&](DevPtr src, int cols, Buf& q, Buf& sx) {
+            if (!c.k.qact_fp8) return;  // no fp8 path in this code object (gfx1151)
             hip::launch(c.k.qact_fp8, {static_cast<unsigned>(n), 1, 1}, {256, 1, 1}, 0, c.s, src, q.p(), sx.p(), cols);
         };
         auto conv16 = [&](DevPtr src, int cols, Buf& q) {
@@ -585,7 +596,9 @@ void testMisc(Ctx& c) {
                   r_smh = makeRef(smh.p(), F), r_gnh = makeRef(gnh.p(), NV * 128);
 
         // qact_fp8 itself vs CPU e4m3
-        {
+        if (!c.k.qact_fp8) {
+            c.rep.skip("fp8", "qact_fp8", "kernel not present");
+        } else {
             const auto rnh = rn.down<float>(x.size());
             std::vector<std::uint8_t> q(x.size());
             std::vector<float> sx(static_cast<std::size_t>(n));

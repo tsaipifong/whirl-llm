@@ -8,6 +8,8 @@
 //     of the 200-token batch (bitwise); gemm8_moeh / gemm8_moe32h fused gate + up within
 //     one f16 rounding of the f32 results; down projection (silu_mul_x8h activations) vs
 //     CPU and tile 32 == 64; the generic f16 gemm_moe_mxfp4 vs CPU and tile 32 == 64.
+//   Code objects without the whole-block / fp8 kernels (gfx1151) run the generic parts:
+//   the 1-token == 5-token checks then cover moe_gu_mxfp4 / moe_down_mxfp4.
 // SPDX-License-Identifier: Apache-2.0
 
 #include <algorithm>
@@ -48,7 +50,7 @@ MxMoe loadMxMoe(Ctx& c) {
 
 std::vector<double> deq8(const std::vector<std::int8_t>& q, const std::vector<float>& d, std::size_t off, int n) {
     std::vector<double> x(static_cast<std::size_t>(n));
-    for (int i = 0; i < n; ++i) x[static_cast<std::size_t>(i)] = static_cast<double>(q[off + i]) * d[(off + i) / 32];
+    for (int i = 0; i < n; ++i) x[static_cast<std::size_t>(i)] = static_cast<double>(q[off + i]) * ref::xdScale(d[(off + i) / 32]);
     return x;
 }
 
@@ -105,10 +107,15 @@ Result invariant(const std::string& name, std::size_t n, std::size_t bad) {
 void testMoeMx(Ctx& c) {
     c.rep.family = "moemx";
     const int ti = static_cast<int>(QType::mxfp4);
-    if (!c.k.moe_gu[ti] || !c.k.moe_gu_mxw || !c.k.gemm8_moe || !c.k.moe_gather_fp8) {
+    if (!c.k.moe_gu[ti] || !c.k.moe_down[ti]) {
         c.rep.skip("moemx", "kernels", "MXFP4 MoE kernels not in this code object");
         return;
     }
+    // whole-block decode experts and the fp8 grouped GEMM (gfx1201 only)
+    const bool mxw = c.k.moe_gu_mxw && c.k.moe_down_mxw;
+    const bool fp8 = c.k.gemm8_moe && c.k.gemm8_moe32 && c.k.gemm8_moeh && c.k.gemm8_moe32h && c.k.moe_gather_fp8;
+    if (!mxw) c.rep.skip("moemx", "moe_gu_mxfp4w / moe_down_mxfp4w", "kernel not in this code object");
+    if (!fp8) c.rep.skip("moemx", "gemm8_moe* / moe_gather_fp8 (fp8 prefill experts)", "kernel not in this code object");
     MxMoe mw = loadMxMoe(c);
     const int E = mw.E, R = mw.R, K = mw.K, F = mw.F;
     Buf dgate(mw.gate.data), dup(mw.up.data), ddown(mw.down.data);
@@ -128,8 +135,9 @@ void testMoeMx(Ctx& c) {
         const auto hq = xq.down<std::int8_t>(static_cast<std::size_t>(n) * E);
         const auto hd = xd.down<float>(static_cast<std::size_t>(n) * E / 32);
         const std::size_t ng = static_cast<std::size_t>(n) * K * F;
-        std::vector<float> g_w, u_w;  // whole-block results (feed the down test)
+        std::vector<float> g_w, u_w;  // decode-kernel results (feed the down test)
         for (const bool whole : {false, true}) {
+            if (whole && !mxw) continue;
             const hip::Function f = whole ? c.k.moe_gu_mxw : c.k.moe_gu[ti];
             const std::string nm = whole ? "moe_gu_mxfp4w" : "moe_gu_mxfp4";
             Buf yg(ng * 4), yu(ng * 4);
@@ -155,7 +163,7 @@ void testMoeMx(Ctx& c) {
                 }
             }
             c.rep.add(cmpTol(nm + " vs CPU", got, ref, sc, 1e-4, 1e-6));
-            if (whole) {
+            if (whole == mxw) {  // the kernel decode uses: whole-block if present, else generic
                 g_w = g1;
                 u_w = u1;
                 // one token per launch (the plain decode step) == the 5-token launch (verify)
@@ -171,7 +179,7 @@ void testMoeMx(Ctx& c) {
                     bad += std::memcmp(a.data(), g1.data() + static_cast<std::size_t>(t) * K * F, a.size() * 4) != 0;
                     bad += std::memcmp(b.data(), u1.data() + static_cast<std::size_t>(t) * K * F, b.size() * 4) != 0;
                 }
-                c.rep.add(invariant("moe_gu_mxfp4w: 1-token launches == 5-token launch", 2 * static_cast<std::size_t>(n), bad));
+                c.rep.add(invariant(nm + ": 1-token launches == 5-token launch", 2 * static_cast<std::size_t>(n), bad));
             }
         }
         // down: a = silu(g) * u as int8, down projection + weights + shared expert + residual
@@ -185,6 +193,7 @@ void testMoeMx(Ctx& c) {
         const auto adh = ad.down<float>(ng / 32);
         std::vector<float> xw;
         for (const bool whole : {false, true}) {
+            if (whole && !mxw) continue;
             const hip::Function f = whole ? c.k.moe_down_mxw : c.k.moe_down[ti];
             const std::string nm = whole ? "moe_down_mxfp4w" : "moe_down_mxfp4";
             Buf dx(x0);
@@ -211,7 +220,7 @@ void testMoeMx(Ctx& c) {
                     sc.push_back(std::fabs(x0[static_cast<std::size_t>(t) * E + r]) + a + std::fabs(shv));
                 }
             c.rep.add(cmpTol(nm + " (+ shared, residual) vs CPU", got, ref, sc, 1e-4, 1e-6));
-            if (whole) xw = gx;
+            if (whole == mxw) xw = gx;
         }
         {
             std::size_t bad = 0;
@@ -220,14 +229,15 @@ void testMoeMx(Ctx& c) {
                 std::vector<float> w1(hw.begin() + t * K, hw.begin() + (t + 1) * K);
                 std::vector<float> xt(x0.begin() + static_cast<std::ptrdiff_t>(t) * E, x0.begin() + static_cast<std::ptrdiff_t>(t + 1) * E);
                 Buf ids1(id1), dw1(w1), dx1(xt);
-                hip::launch(c.k.moe_down_mxw, {cdiv(E, 8), 1, 1}, {256, 1, 1}, 0, c.s, ddown.p(), mw.down.row_bytes, E,
+                hip::launch(mxw ? c.k.moe_down_mxw : c.k.moe_down[ti], {cdiv(E, 8), 1, 1}, {256, 1, 1}, 0, c.s, ddown.p(), mw.down.row_bytes, E,
                             aq.p() + static_cast<std::uint64_t>(t) * K * F, ad.p() + static_cast<std::uint64_t>(t) * K * F / 32 * 4, ids1.p(), dw1.p(),
                             sg.p() + static_cast<std::uint64_t>(t) * 4, dysh.p() + static_cast<std::uint64_t>(t) * E * 4, dx1.p(), F, K, DevPtr{0});
                 c.sync();
                 const auto a = dx1.down<float>(static_cast<std::size_t>(E));
                 bad += std::memcmp(a.data(), xw.data() + static_cast<std::size_t>(t) * E, a.size() * 4) != 0;
             }
-            c.rep.add(invariant("moe_down_mxfp4w: 1-token launches == 5-token launch", static_cast<std::size_t>(n), bad));
+            c.rep.add(invariant(std::string(mxw ? "moe_down_mxfp4w" : "moe_down_mxfp4") + ": 1-token launches == 5-token launch",
+                                static_cast<std::size_t>(n), bad));
         }
     }
 
@@ -252,6 +262,14 @@ void testMoeMx(Ctx& c) {
             const int max_tiles = (np + bn - 1) / bn + R;
             Buf tiles(static_cast<std::size_t>(max_tiles) * 16), nt(4);
             hip::launch(c.k.moe_route, {1, 1, 1}, {1024, 1, 1}, 0, c.s, ids.p(), np, R, bn, perm.p(), inv.p(), tiles.p(), nt.p());
+            if (!fp8) {  // routing only (the generic f16 expert GEMM below)
+                c.sync();
+                out.perm = perm.down<int>(static_cast<std::size_t>(np));
+                out.inv = inv.down<int>(static_cast<std::size_t>(np));
+                out.ntiles = nt.down<int>(1)[0];
+                out.tiles = tiles.down<wk::Int4>(static_cast<std::size_t>(max_tiles));
+                return;
+            }
             Buf x8(static_cast<std::size_t>(np) * E), sx(static_cast<std::size_t>(np) * 4);
             hip::launch(c.k.moe_gather_fp8, {static_cast<unsigned>(np), 1, 1}, {256, 1, 1}, 0, c.s, dh.p(), perm.p(), x8.p(), sx.p(), E, K);
             Buf yg(static_cast<std::size_t>(np) * F * 4), yu(static_cast<std::size_t>(np) * F * 4);
@@ -282,7 +300,7 @@ void testMoeMx(Ctx& c) {
         run(pairs, 64, r64);
         run(pairs, 32, r32);
         // gather: CPU qact_fp8 of the routed token row
-        {
+        if (fp8) {
             std::size_t bad = 0;
             std::vector<std::uint8_t> q(static_cast<std::size_t>(E));
             for (int pos = 0; pos < pairs; ++pos) {
@@ -300,7 +318,7 @@ void testMoeMx(Ctx& c) {
             c.rep.add(r);
         }
         // gate (f32 out) vs CPU: exact MXFP4 weights x the GPU's fp8 activations
-        {
+        if (fp8) {
             std::vector<float> got;
             std::vector<double> ref, sc;
             for (int p = 0; p < pairs; p += 37) {
@@ -323,7 +341,7 @@ void testMoeMx(Ctx& c) {
             c.rep.add(cmpTol("gemm8_moe gate / up (f32 out) vs CPU (exact MXFP4 weights, GPU fp8 activations)", got, ref, sc, 1e-4, 1e-6));
         }
         // tile 32 == tile 64 per (token, slot) row, f32 and fused f16 outputs
-        {
+        if (fp8) {
             std::size_t bad = 0, badh = 0;
             for (int p = 0; p < pairs; ++p) {
                 const std::size_t a = static_cast<std::size_t>(r64.inv[static_cast<std::size_t>(p)]) * F, b = static_cast<std::size_t>(r32.inv[static_cast<std::size_t>(p)]) * F;
@@ -336,7 +354,7 @@ void testMoeMx(Ctx& c) {
             c.rep.add(invariant("gemm8_moe32h == gemm8_moeh per (token, slot) row (fused gate + up)", 2 * static_cast<std::size_t>(pairs), badh));
         }
         // the first 40 tokens alone (tile 32) == the same rows of the 200-token batch
-        {
+        if (fp8) {
             const int np40 = 40 * K;
             run(np40, 32, r40);
             std::size_t bad = 0;
@@ -348,7 +366,7 @@ void testMoeMx(Ctx& c) {
             c.rep.add(invariant("gemm8_moe32 / gemm8_moe32h: 40-token batch rows == 200-token batch rows", 2 * static_cast<std::size_t>(np40), bad));
         }
         // fused f16 outputs within one f16 rounding of the f32 results
-        {
+        if (fp8) {
             std::vector<float> got;
             std::vector<double> ref;
             for (std::size_t i = 0; i < r64.yg.size(); i += 3) {
@@ -360,7 +378,7 @@ void testMoeMx(Ctx& c) {
             c.rep.add(cmpTolRel("gemm8_moeh fused gate + up (f16 out) vs gemm8_moe f32", got, ref, 1.0 / 2048, 1e-7));
         }
         // down projection: silu_mul_x8h(fused f16 g, u) -> fp8 rows; tile 64 vs CPU, tile 32 == 64
-        if (c.k.silu_mul_x8h) {
+        if (fp8 && c.k.silu_mul_x8h) {
             std::vector<std::vector<float>> by_pair(2);
             std::vector<std::uint8_t> a8;
             std::vector<float> asx;
@@ -445,6 +463,7 @@ void testMoeMx(Ctx& c) {
             }
             c.rep.add(cmpExact("gemm_moe32_mxfp4 == gemm_moe_mxfp4 per (token, slot) row", by_pair[1], by_pair[0], Kind::invariant));
         }
+        moeGuChecks(c, mw.gate, mw.up, mw.down, R, K);
     }
 }
 

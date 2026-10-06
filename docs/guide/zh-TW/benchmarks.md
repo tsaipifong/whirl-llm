@@ -241,3 +241,24 @@ llama-server -m MODEL.gguf --port 8099 --device ROCm0 -ngl 99 -fa on -b 2048 -ub
 ## 13. v0.1.3 沒有重量的項目
 
 VRAM 用量、vision 編碼、88 與 2,048 token 的 prefill、同一份文字經 server 的 prefill，以及檔案編輯情境與 llama.cpp 的對照，這次都沒有重量；它們的 v0.1.0 數字在 [v0.1.0 頁面](https://github.com/tsaipifong/whirl-llm/blob/v0.1.0/docs/guide/zh-TW/benchmarks.md)。v0.1.3 把 token embedding 放到 pinned 主記憶體，VRAM 用量應該比 v0.1.0 低。
+
+## 14. Radeon 8060S（預覽、bring-up、尚未調校）
+
+| Radeon 8060S，greedy，**尚未調校**——WHIRL 對 llama.cpp（倍數） | Ornith-1.5-35B-A3B MXFP4（MoE） | Swift-1.5 27B MXFP4-A（dense） | Qwen3.8-27B UD-Q4_K_M（dense） |
+|---|---|---|---|
+| Prefill tok/s，88 token 提示 | 560 對 779（0.72×） | 252 對 264（0.95×） | 234 對 260（0.90×） |
+| Prefill tok/s，2k token 提示 | 1,475 對 1,312（1.12×） | 389 對 292（1.33×） | 357 對 284（1.26×） |
+| Prefill tok/s，8k token 提示 | 1,372 對 1,186（1.16×） | 366 對 272（1.35×） | 337 對 264（1.28×） |
+| Decode tok/s，**無 MTP**（llama-bench tg256） | 85.9 對 66.8（1.29×） | 14.9 對 13.5（1.10×） | 13.2 對 12.4（1.06×） |
+| Decode tok/s，WHIRL MTP / MTP + n-gram | 106.3 / 117.9 | 29.5 / 29.3 | 28.8 / 33.0 |
+| 第一次執行：prefill kernel 自動調校（每個模型一次） | 10 s | 85 s | 461 s |
+
+Bring-up 快照（WHIRL `gfx1151` 分支，尚未做 gfx1151 專屬調校），與同一台筆電（ASUS ROG Flow Z13、Ryzen AI Max+ 395、
+`HIP_VISIBLE_DEVICES=0`）上的 llama.cpp b11214 ROCm 比較。WHIRL：`whirl bench --prefill 88,2048,8192 --decode 256`
+（decode 接在 144 token 的程式提示之後，思考開啟）。llama.cpp：`llama-bench -ngl 99 -fa on -p 88,2048,8192 -n 256
+-ub 2048（MoE）/ 1024（dense）-b 2048 -r 2`。兩輪，WHIRL 與 llama.cpp 交錯執行，每次執行前閒置 75 秒（筆電會降頻）；
+取兩輪平均（兩輪差距在 4% 內）。8060S 上沒有量 llama.cpp 的 MTP 模式。
+
+現況：MoE 模型與 ≥ 2k token 的 prefill 已經領先 llama.cpp；短提示（88 token）落後，dense 模型的無 MTP decode 接近
+持平（兩者都受記憶體頻寬限制）。這張 GPU 上長提示的 prefill 兩個引擎都慢（27B Q4_K_M，34.7k token 提示：263 tok/s）。
+預定的 gfx1151 調校：短提示用的 gfx11 WMMA 小批次 GEMM、多 token 群組 GEMV 雙胞胎、prefill GEMM 重新調校。

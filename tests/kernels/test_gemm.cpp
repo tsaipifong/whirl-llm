@@ -154,7 +154,7 @@ void testGemm(Ctx& c) {
         }
         if (ncols % 256 == 0) {
             for (int si = 0; si < static_cast<int>(wk::kGemmsCfgs.size()); ++si) {
-                const auto& cf = wk::kGemmsCfgs[static_cast<std::size_t>(si)];
+                const auto& cf = c.k.gemms_geom[static_cast<std::size_t>(si)];
                 if (c.k.gemms[si][ti]) check(g.run(c.k.gemms[si][ti], cf.bm, cf.bn, cf.nth, n), "gemms_c" + std::to_string(si));
             }
         }
@@ -205,7 +205,7 @@ void testGemm(Ctx& c) {
             }
             if (ncols % 256 == 0)
                 for (int si = 0; si < static_cast<int>(wk::kGemmsCfgs.size()); ++si) {
-                    const auto& cf = wk::kGemmsCfgs[static_cast<std::size_t>(si)];
+                    const auto& cf = c.k.gemms_geom[static_cast<std::size_t>(si)];
                     if (c.k.gemmsh[si][ti]) checkH(g.runH(c.k.gemmsh[si][ti], w.p(), m.row_bytes, cf.bm, cf.bn, cf.nth), "gemmsh_c" + std::to_string(si));
                 }
             if (ncols % 32 == 0 && c.k.gemmhqh[ti]) checkH(g.runH(c.k.gemmhqh[ti], w.p(), m.row_bytes, 128, 256, 256), "gemmhqh");
@@ -287,7 +287,7 @@ void testGemm(Ctx& c) {
                                   }});
             }
             for (int si = 0; si < static_cast<int>(wk::kGemmsCfgs.size()); ++si) {
-                const auto cf = wk::kGemmsCfgs[static_cast<std::size_t>(si)];
+                const auto cf = c.k.gemms_geom[static_cast<std::size_t>(si)];
                 if (hip::Function f = c.k.gemms[si][ti])
                     vs.push_back({"gemms_c" + std::to_string(si), [&, f, cf](DevPtr w, DevPtr, int rows, DevPtr y) {
                                       hip::launch(f, {cdiv(n, cf.bn), cdiv(rows, cf.bm), 1}, {static_cast<unsigned>(cf.nth), 1, 1}, 0, c.s, w,

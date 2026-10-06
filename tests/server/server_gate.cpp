@@ -8,7 +8,7 @@
 //
 //   whirl-server-gate --exe PATH --kind whirl|proto --model GGUF --suite NAME[,NAME...]
 //                     [--work DIR] [--port 8093] [--results OUT.json] [--compare REF.json]
-//                     [--cli EXE] [--no-lock]
+//                     [--cli EXE] [--no-lock] [--server-env NAME=VALUE ...] [--kv FORMAT]
 // Suites: basic, mt_cache, pool, tier, sys, restore_conc, vis (see each function;
 // vis / vis_speed need --mmproj MMPROJ.gguf and --images DIR).
 // A GPU lock file (WHIRL_GPU_LOCK, default %TEMP%\whirl-gpu.lock, opened with
@@ -19,6 +19,11 @@
 // (WHIRL_GATE_TEXT_ROOT, required: the root of a llama.cpp source checkout),
 // read as data only.
 // Defaults: --work = WHIRL_GATE_WORK, else %TEMP%\whirl-tests\gate;
+// --server-env adds environment variables to every server (the servers otherwise get no
+// WHIRL_* variable except WHIRL_DEVICE; a suite's own settings win), e.g.
+// WHIRL_KV_RAM_MB=8192 to turn the host tiers on for an integrated GPU (Radeon 8060S),
+// whose servers default to no tiers. --kv: the KV format the sys / restore_conc / vis
+// suites pin (default q8v; gfx1151 has no q8v kernels: use f16 or q8 there; auto = no pin).
 // --images = WHIRL_GATE_IMAGES (no default; only suite vis needs it).
 
 #include "http_client.h"
@@ -63,7 +68,15 @@ struct Opts {
     // suite vis: mmproj and the test images
     std::string mmproj;
     std::string images;  // empty: WHIRL_GATE_IMAGES
+    std::map<std::string, std::string> server_env;  // --server-env
+    std::string kv_pin = "q8v";                     // --kv
 } g;
+
+// KV-format pin of the suites that compare servers with different free memory
+std::map<std::string, std::string> kvPin() {
+    if (g.kv_pin == "auto") return {};
+    return {{"WHIRL_KV", g.kv_pin}};
+}
 
 json::Object g_results;  // name -> text
 int g_pass = 0, g_fail = 0;
@@ -177,6 +190,7 @@ public:
         std::error_code ec;
         fs::remove(widen(log_), ec);
         std::map<std::string, std::string> env_add = env_extra;
+        for (const auto& [k, v] : g.server_env) env_add.emplace(k, v);  // suite settings win
         if (fresh_ssd && !env_add.count("WHIRL_KV_SSD_DIR")) {
             ssd_ = g.work + "\\ssd_" + tag;
             fs::remove_all(widen(ssd_), ec);
@@ -1059,7 +1073,7 @@ void suiteSys() {
             if (c.name == n) return c;
         throw std::runtime_error("case " + n);
     };
-    const std::map<std::string, std::string> kv = {{"WHIRL_KV", "q8v"}};
+    const std::map<std::string, std::string> kv = kvPin();
     std::map<std::string, ChatResult> ref;
     {
         auto env = kv;
@@ -1178,7 +1192,7 @@ void suiteRestoreConc() {
                                           "Which file in the material is the shortest? One sentence.", "Is there any error handling code? One sentence."};
     auto turn = [&](const std::string& msgs, int n) { return chat(msgs, greedy(n) + thinkKw(false)); };
     auto burst = [&](const std::vector<std::string>& q, std::size_t i) { return arr({msg("system", sysA), msg("user", q[i])}); };
-    const std::map<std::string, std::string> kv = {{"WHIRL_KV", "q8v"}};
+    const std::map<std::string, std::string> kv = kvPin();
     ChatResult r1, r2, r3;
     std::vector<ChatResult> rdec, rb, rb2;
     std::string m2, m3;
@@ -1266,8 +1280,8 @@ void suiteRestoreConc() {
 // ---------------------------------------------------------------------------
 // suite vis: image input (--mmproj, image_url parts). Servers: base (no mmproj),
 // ref (mmproj, no prefix cache, no tiers), plain (no MTP), main (defaults, idle
-// release after 8 s, fresh SSD dir), restart (same SSD dir). KV format pinned to
-// q8v (a ref server with more free VRAM would otherwise pick f16).
+// release after 8 s, fresh SSD dir), restart (same SSD dir). KV format pinned (--kv,
+// default q8v: a ref server with more free VRAM would otherwise pick f16).
 // Needs --mmproj and the test images in --images (shapes.png, dialog.png, s1080.png).
 
 std::string b64(const std::string& bytes) {
@@ -1366,7 +1380,7 @@ void suiteVis() {
     const std::string m_1080 = arr({imgMsg({"s1080.png"}, Q_1080)});
     const std::string m_1080b = arr({imgMsg({"s1080.png"}, Q_1080B)});
     const std::string m_text = arr({msg("user", Q_TEXT)});
-    const std::map<std::string, std::string> kv = {{"WHIRL_KV", "q8v"}};
+    const std::map<std::string, std::string> kv = kvPin();
     const std::vector<std::string> mm = {"--mmproj", g.mmproj};
     std::optional<std::int64_t> pool_base;
     ChatResult base_text;
@@ -1543,6 +1557,13 @@ int wmain(int argc, wchar_t** wargv) {
         else if (a[i] == "--no-lock") g.lock = false;
         else if (a[i] == "--mmproj") g.mmproj = val();
         else if (a[i] == "--images") g.images = val();
+        else if (a[i] == "--kv") g.kv_pin = val();
+        else if (a[i] == "--server-env") {
+            const std::string kvp = val();
+            const std::size_t eq = kvp.find('=');
+            if (eq == std::string::npos || eq == 0) throw std::runtime_error("--server-env needs NAME=VALUE");
+            g.server_env[kvp.substr(0, eq)] = kvp.substr(eq + 1);
+        }
         else if (a[i] == "--suite") {
             const std::string s = val();
             std::size_t p = 0;
@@ -1578,6 +1599,7 @@ int wmain(int argc, wchar_t** wargv) {
                      "usage: whirl-server-gate --exe PATH --kind whirl|proto --model GGUF --suite basic,mt_cache,pool,tier,sys,restore_conc,vis\n"
                      "                         [--work DIR] [--port N] [--results OUT.json] [--compare REF.json] [--cli EXE] [--no-lock]\n"
                      "                         [--mmproj MMPROJ.gguf] [--images DIR]   (suite vis)\n"
+                     "                         [--server-env NAME=VALUE ...] [--kv q8v|q8|f16|auto]   (default q8v)\n"
                      "  env: WHIRL_GATE_TEXT_ROOT (required), WHIRL_GATE_WORK, WHIRL_GATE_IMAGES, WHIRL_GPU_LOCK\n"
                      "       whirl-server-gate --results A.json --compare B.json   (compare two result files only)\n");
         return 2;

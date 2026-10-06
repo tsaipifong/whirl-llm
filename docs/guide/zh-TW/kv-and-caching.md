@@ -114,6 +114,12 @@ KV 位元組減半反而讓 decode **變慢**：split-K decode kernel 內部對 
 
 由此得出的 server 預設：dense 27B → `--parallel 4`、每個請求 ≤ 131,072 token（`--ctx-per-slot`，上限 262,144）、q8v。MoE → f16、每個請求 131,072、池約 341k token。
 
+**Radeon 8060S（統一記憶體）的預設。** server 的 KV pool 預設 262,144 token（每個模型都是 f16：dense 27B 為
+17 GiB），而不是「剩下的全部 VRAM」：在 100 GiB 的 UMA 裝置上，剩下的就是大部分系統記憶體。那裡的 host 層預設**關閉**：
+RAM 層只會把 KV 頁從系統記憶體複製到 pinned 系統記憶體（容量沒有增加，還鎖住 CPU 那份約 9 GiB），而 SSD 層掛在 RAM
+層後面。`--kv-ram-mb N` 會把兩層都打開；這樣在 8060S 上 tier 相關 gate（`sys`、`restore_conc`、`tier`、`pool`）都通過。
+判斷依據是 `DeviceInfo::integrated` 這個能力，而不是架構名稱。
+
 ## <a id="checkpoints"></a>5. 混合模型的前綴快取：檢查點
 
 transformer 可以重用任何 KV 區塊已被快取的前綴。DeltaNet 層做不到：它在位置 p 的狀態無法從 KV 頁重建。只有在引擎**存了檢查點**的位置才能重用：每個 DeltaNet 層的 conv 與遞迴狀態，加上 MTP hidden 列（繼續草擬時需要），以及在有意義時的 logits 列（`has_logits`：若新提示詞恰好在該處結束就需要）。

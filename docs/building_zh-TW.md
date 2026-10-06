@@ -41,12 +41,17 @@ build.bat Release
 
 host 端由 MSVC 以靜態 C++ runtime（`/MT`）編譯。device 端由 HIP SDK 的 clang 為每種 GPU 架構各編一個 code
 object，經 `tools/bin2c` 轉成位元組陣列內嵌在執行檔裡。`amdhip64_7.dll` 採延遲載入，所以沒有安裝 HIP SDK 也
-能啟動執行檔。目前只有 gfx1201（R9700）的 kernel；`-DWHIRL_GPU_ARCHS=gfx1201` 可略過 gfx1151 的佔位 code
-object：
+能啟動執行檔。預設會編兩套 kernel：gfx1201（R9700）與 gfx1151（Radeon 8060S）；執行時依所選 GPU 的
+`gcnArchName` 載入對應的 code object。只編一套比較快（專心改某一張 GPU 的 kernel 時很方便）：
 
 ```bat
 build.bat Release -DWHIRL_GPU_ARCHS=gfx1201
+build.bat Release -DWHIRL_GPU_ARCHS=gfx1151
 ```
+
+每個 code object 只依賴自己的原始檔（gfx1201 是 `kernels/*.hip`，gfx1151 是 `kernels/gfx1151/*.hip`）。
+`whirl-kernel-test` 一次測一張 GPU：`--device 8060s`（或 `WHIRL_DEVICE=8060s`）測 gfx1151 那套；code object
+沒有的 kernel，其檢查會列為 skipped。
 
 在 Windows 上編譯與載入 device code 的更多細節：[windows-hip.md](guide/zh-TW/windows-hip.md#build)。
 
