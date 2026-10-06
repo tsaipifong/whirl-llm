@@ -20,7 +20,7 @@
 // read as data only.
 // Defaults: --work = WHIRL_GATE_WORK, else %TEMP%\whirl-tests\gate;
 // --server-env adds environment variables to every server (the servers otherwise get no
-// WHIRL_* variable except WHIRL_DEVICE; a suite's own settings win), e.g.
+// WHIRL_* variable except WHIRL_DEVICE, WHIRL_VRAM_LIMIT_MB and WHIRL_MODE; a suite's own settings win), e.g.
 // WHIRL_KV_RAM_MB=8192 to turn the host tiers on for an integrated GPU (Radeon 8060S),
 // whose servers default to no tiers. --kv: the KV format the sys / restore_conc / vis
 // suites pin (default q8v; gfx1151 has no q8v kernels: use f16 or q8 there; auto = no pin).
@@ -207,7 +207,8 @@ public:
         std::wstring cmd;
         for (const auto& a : argv) cmd += (cmd.empty() ? L"" : L" ") + quoteArg(widen(a));
         // environment: ours minus WHIRL_* (WHIRL_DEVICE and WHIRL_VRAM_LIMIT_MB kept: they describe
-        // the GPU, so a gate under a simulated 16 GB card runs its servers on that card) plus the extras
+        // the GPU, so a gate under a simulated 16 GB card runs its servers on that card; WHIRL_MODE
+        // kept: the numerics mode the gate runs in) plus the extras
         std::vector<std::pair<std::wstring, std::wstring>> envv;
         if (wchar_t* blk = GetEnvironmentStringsW()) {
             for (const wchar_t* p = blk; *p; p += wcslen(p) + 1) {
@@ -216,7 +217,7 @@ public:
                 if (eq == std::wstring::npos) continue;
                 std::wstring k = s.substr(0, eq), up = k;
                 for (auto& c : up) c = static_cast<wchar_t>(towupper(c));
-                if (up.rfind(L"WHIRL_", 0) == 0 && up != L"WHIRL_DEVICE" && up != L"WHIRL_VRAM_LIMIT_MB") continue;
+                if (up.rfind(L"WHIRL_", 0) == 0 && up != L"WHIRL_DEVICE" && up != L"WHIRL_VRAM_LIMIT_MB" && up != L"WHIRL_MODE") continue;
                 envv.emplace_back(k, s.substr(eq + 1));
             }
             FreeEnvironmentStringsW(blk);
