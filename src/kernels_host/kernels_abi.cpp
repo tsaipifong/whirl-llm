@@ -282,6 +282,7 @@ KernelTable KernelTable::load(const hip::Module& m, KvFormat kv) {
         {&KernelTable::attn_wsplit1, "attn_wsplit1"},
         {&KernelTable::attn_wsplit2, "attn_wsplit2"},
         {&KernelTable::topk_rows, "topk_rows"},
+        {&KernelTable::draft_sample_rows, "draft_sample_rows"},
         {&KernelTable::gdn_gates_ba, "gdn_gates_ba"},
     };
     for (const Named& n : optional) k.*(n.f) = L.opt(n.name);

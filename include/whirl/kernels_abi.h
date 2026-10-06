@@ -109,6 +109,9 @@
 //   draft_pick(x, n, int* tok, float* prob, int* ctl, int r, int n_min, float p_min, const int* map)
 //   draft_pick_rows(x, n, int* ctl_all, RowIdx area, int r, int n_min, float p_min, const int* map)
 //            map (null: identity) = token id of each draft-head row (vocabulary subset)
+//   draft_sample_rows(x, n, int* ctl_all, RowIdx area, int r, const int* map, DSampArgs a, int* qbuf)
+//            (optional) after draft_pick_rows: rows with a.on draw draft r from the filtered draft
+//            distribution q and write q to qbuf + a.qoff (whirl/spec_sample.h layout)
 //   set_tokens(ids, pos, dev_src, Tok16 toks, n, n_host, pos0)
 //   set_rows(ids, pos, kvbase, dev_src, RowTab tab, n)
 //   topk_rows(x, n, K, float inv_t, int* ids, float* vals, float* stats)
@@ -281,6 +284,17 @@ struct AwGroups {
     std::int32_t first[kMaxVerifyRows] = {};
     std::int32_t count[kMaxVerifyRows] = {};
 };
+// draft_sample_rows per-row parameters (speculative sampling of MTP drafts)
+struct DSampArgs {
+    std::int32_t on[kMaxVerifyRows] = {};
+    std::int32_t top_k[kMaxVerifyRows] = {};
+    std::int32_t qoff[kMaxVerifyRows] = {};
+    float inv_t[kMaxVerifyRows] = {};
+    float top_p[kMaxVerifyRows] = {};
+    float min_p[kMaxVerifyRows] = {};
+    float u[kMaxVerifyRows] = {};
+};
+static_assert(sizeof(DSampArgs) == 896);
 static_assert(sizeof(Tok16) == 64 && sizeof(RowTab) == 384 && sizeof(RowIdx) == 128 && sizeof(AwGroups) == 256);
 
 // Recurrent-state segment of the fused DeltaNet decode kernels: rows
@@ -433,6 +447,7 @@ struct KernelTable {
     F copy_rows_map{};  // optional
     F set_tokens{}, argmax_rows{}, argmax_prob{}, draft_pick{};
     F set_rows{}, rmsnorm_q8_rows{}, argmax_rows_to{}, draft_pick_rows{};
+    F draft_sample_rows{};  // optional (null: specsample skipped)
     F moe_logits_f32{}, moe_topk{}, moe_route{}, moe_gather_f16{}, moe_act_f16{}, moe_combine{}, moe_tiles{};
     F qact_fp8{}, silu_mul_x8h{}, gdn_conv_l2n{}, gdn_conv_l2n_h{}, gdn_conv_state_h{}, gated_norm_x8h{};
     F silu_mul_x16h{}, gated_norm_x16h{};

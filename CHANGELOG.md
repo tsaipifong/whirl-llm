@@ -21,6 +21,13 @@ All notable changes to WHIRL are listed here. Versions follow `project(whirl VER
   (4-bit KV, relaxed acceptance, ...); none is implemented yet, so fast runs as balance.
 - The per-item variables (`WHIRL_FP8`, `WHIRL_MOE_FP8`, `WHIRL_GDN_WMMA`, `WHIRL_FFN_H16`,
   `WHIRL_Q4_RELAXED`, `WHIRL_KV`) still work and override the mode (logged as user-requested).
+- New balance / fast item `specsample` (server, MTP models): with temperature > 0 the MTP drafts are
+  drawn from the draft head's distribution (same temperature / top-k / top-p / min-p) and accepted
+  with probability min(1, p/q), else resampled from max(0, p - q) (standard speculative sampling).
+  The output distribution is exactly that of plain sampling, but the tokens for a given seed differ
+  from 0.2.0-rc (which accepted a greedy draft only when it equalled the sampled token; precise keeps
+  that rule, so MTP == plain token for token there). Greedy decoding is unchanged in every mode.
+  `WHIRL_SPEC_SAMPLE=0|1` overrides.
 - Still pending in precise mode: the decode / verify GEMV quantizes activations to int8 (q8_1
   class), as llama.cpp does; a float-activation version is being written.
 

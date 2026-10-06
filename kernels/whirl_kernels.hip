@@ -50,3 +50,5 @@
 #if defined(__gfx1151__)
 #include "gfx1151/whirl_kernels_gfx1151.hip"  // RDNA 3.5 kernel set
 #endif
+
+#include "spec_sample.hip"           // speculative sampling of MTP drafts (both kernel sets)

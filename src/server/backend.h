@@ -87,6 +87,12 @@ public:
     virtual void mtpBatchStepEx(std::span<const MSeg> segs, std::uint32_t r, bool draft) = 0;
     virtual std::uint32_t verifyBatchEnqueue(std::span<const VSeg> segs) = 0;
     virtual void readCtl(std::span<std::int32_t> dst) = 0;
+    // speculative sampling of MTP drafts (numerics item specsample): per sequence, set before the
+    // draft steps of a cycle; q per (sequence, draft step) read back after the verify
+    // (whirl/spec_sample.h layout). Not supported: drafts stay greedy (exact-match acceptance).
+    virtual bool draftSampleOk() const { return false; }
+    virtual void setDraftSample(std::uint32_t s, const spec::DraftSample& ds) { (void)s, (void)ds; }
+    virtual void readDraftQ(std::span<std::int32_t> dst) { (void)dst; }
     virtual void mtpEnqueue(DevPtr hidden, std::span<const std::uint32_t> tokens, std::uint32_t pos0) = 0;
 
     // ---- sampling: topk_rows over logits rows row0 .. row0 + rows - 1 into

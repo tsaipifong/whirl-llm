@@ -1355,6 +1355,30 @@ void Model::mtpBatchStepEx(std::span<const MSeg> segs, u32 r, bool draft) {
     const DevPtr map = draft_rows > 0 && draft_d2 && draft_map ? *draft_map : DevPtr{0};
     hip::launch(k.draft_pick_rows, D(ns), D(1024), 0, stream, logits, I(head.nrows), out_tok, area, I(r), I(draft_n_min), draft_p_min,
                 map);
+    if (draftSampleOk()) {
+        // speculative sampling: rows of sampling requests redraw draft r from the filtered draft distribution
+        kernels::DSampArgs da;
+        bool any = false;
+        for (u32 kk = 0; kk < ns; ++kk) {
+            const u32 sq = segs[kk].seq;
+            if (sq >= draft_samp.size() || !draft_samp[sq].on) continue;
+            const spec::DraftSample& ds = draft_samp[sq];
+            any = true;
+            da.on[kk] = 1;
+            da.top_k[kk] = static_cast<i32>(std::min<std::uint32_t>(ds.top_k, 1u << 30));
+            da.qoff[kk] = static_cast<i32>((static_cast<u64>(sq) * max_drafts + r) * spec::q_words);
+            da.inv_t[kk] = ds.inv_t;
+            da.top_p[kk] = ds.top_p;
+            da.min_p[kk] = ds.min_p;
+            da.u[kk] = std::min(static_cast<float>(spec::uniform(ds.seed, ds.pos0 + r, spec::u_draft)), 0.99999994f);
+        }
+        if (any)
+            hip::launch(k.draft_sample_rows, D(ns), D(1024), 0, stream, logits, I(head.nrows), out_tok, area, I(r), map, da, draft_qbuf);
+    }
+}
+
+void Model::readDraftQ(std::span<i32> dst) {
+    if (draft_qbuf != 0) hip::download(dst.data(), draft_qbuf, dst.size() * 4);
 }
 
 void Model::readCtl(std::span<i32> dst) { hip::download(dst.data(), out_tok, dst.size() * 4); }

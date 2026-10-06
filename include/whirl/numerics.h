@@ -35,6 +35,8 @@ enum class Item : std::uint8_t {
     gdnwmma,  // f16-WMMA DeltaNet chunked prefill (vs the f32 chunk path)
     h16,      // f16 FFN / DeltaNet GEMM outputs before the elementwise ops
     kvq8,     // KV auto may pick int8 (q8v / q8h; q8 on the Radeon 8060S) when f16 does not fit
+    specsample,  // temperature > 0: MTP drafts drawn from the draft distribution, accepted with min(1, p/q)
+                 // (same output distribution as plain sampling, not the same tokens for a seed)
     // fast items (not implemented yet)
     kvq4,     // 4-bit KV
     relaxacc, // relaxed / typical speculative acceptance
@@ -49,7 +51,7 @@ const char* itemName(Item it);
 const char* itemDesc(Item it);
 std::optional<Item> itemFromName(std::string_view s);
 inline constexpr std::uint32_t bit(Item it) { return 1u << static_cast<unsigned>(it); }
-inline constexpr std::uint32_t balance_items = bit(Item::fp8) | bit(Item::moefp8) | bit(Item::gdnwmma) | bit(Item::h16) | bit(Item::kvq8);
+inline constexpr std::uint32_t balance_items = bit(Item::fp8) | bit(Item::moefp8) | bit(Item::gdnwmma) | bit(Item::h16) | bit(Item::kvq8) | bit(Item::specsample);
 inline constexpr std::uint32_t fast_only_items =
     bit(Item::kvq4) | bit(Item::relaxacc) | bit(Item::headq) | bit(Item::moeskip) | bit(Item::a8) | bit(Item::a4);
 // implemented items (the rest are "not yet implemented": skipped, the mode runs as balance)
@@ -84,6 +86,8 @@ struct Target {
     bool k_gemm8_moe = false;        // MXFP4 x fp8 grouped expert GEMMs present
     bool k_gdn_wmma = false;         // f16-WMMA DeltaNet kernels present
     bool k_kv_q8v = false, k_kv_q8h = false;
+    bool mtp = true;                 // MTP head present
+    bool k_spec_sample = true;       // draft_sample_rows kernel present
 };
 
 struct ItemState {
