@@ -420,6 +420,55 @@ void testAttn(Ctx& c) {
             c.rep.add(cmpTol("attn_wsplit1 draft window (sink 256 + keys from " + std::to_string(w0) + ") + combine vs CPU" + tag, out, ro, rs,
                              1e-2, 1e-4));
         }
+        // ---- attn_dq4 (gfx1151 q4 decode / verify; lossy: int8 q, f16 p.v_scale): one query per
+        // group, several groups (verify rows) vs CPU, a repeated launch is bitwise the same, and the
+        // MTP draft window as for attn_wsplit1 (same key sets)
+        if (auto fd = fmt == Fmt::q4 ? c.fnOpt("attn_dq4") : hip::Function{}) {
+            auto run = [&](const std::vector<int>& pv, int win) {
+                Buf dpv(pv);
+                ml.zero();
+                acc.zero();
+                wk::AwGroups g{};
+                for (std::size_t r = 0; r < pv.size(); ++r) {
+                    g.first[r] = static_cast<int>(r);
+                    g.count[r] = 1;
+                }
+                wk::KvArgs a = pool.args();
+                a.win = win;
+                hip::launch(fd, {kKv, static_cast<unsigned>(ns), static_cast<unsigned>(pv.size())}, {256, 1, 1}, 0, c.s, dq.p(), a, ml.p(), acc.p(),
+                            kHeads, kKv, kQStride, dpv.p(), kScale, DevPtr{0}, g);
+                c.sync();
+                const std::size_t n = pv.size();
+                return std::pair<std::vector<float>, std::vector<float>>{ml.down<float>(n * ns * kHeads * 2), acc.down<float>(n * ns * kHeads * kHd)};
+            };
+            for (int p0 : {L - 100, L - 77, 40}) {
+                std::vector<int> pv = {p0, p0 + 1, p0 + 2};
+                const auto first = run(pv, 0);
+                const std::vector<float> out = combine(3);
+                std::vector<double> ro, rs;
+                attnRef(h, pool, q, pv, {0, 1, 2}, ro, rs);
+                c.rep.add(cmpTol("attn_dq4 + combine vs CPU (3 groups at pos " + std::to_string(p0) + ")" + tag, out, ro, rs, 1e-2, 1e-4));
+                const auto again = run(pv, 0);
+                c.rep.add(cmpExact("attn_dq4 repeated launch == first (ml, pos " + std::to_string(p0) + ")" + tag, again.first, first.first, Kind::invariant));
+                c.rep.add(cmpExact("attn_dq4 repeated launch == first (acc, pos " + std::to_string(p0) + ")" + tag, again.second, first.second, Kind::invariant));
+            }
+            auto winArg = [](int w, int min_ctx) { return ((w + 63) / 64) | ((min_ctx / 1024) << 16); };
+            const std::vector<int> pv1 = {L - 1};
+            const auto base = run(pv1, 0);
+            const auto all = run(pv1, winArg(L, 0));
+            const auto below = run(pv1, winArg(256, L + 1024));
+            c.rep.add(cmpExact("attn_dq4 draft window reaching the sink == off (ml)" + tag, all.first, base.first, Kind::invariant));
+            c.rep.add(cmpExact("attn_dq4 draft window reaching the sink == off (acc)" + tag, all.second, base.second, Kind::invariant));
+            c.rep.add(cmpExact("attn_dq4 draft window below threshold == off (ml)" + tag, below.first, base.first, Kind::invariant));
+            c.rep.add(cmpExact("attn_dq4 draft window below threshold == off (acc)" + tag, below.second, base.second, Kind::invariant));
+            const int w0 = std::max(256, (L - 256) & ~63);
+            run(pv1, winArg(256, 0));
+            const std::vector<float> out = combine(1);
+            std::vector<double> ro, rs;
+            attnRef(h, pool, q, pv1, {0}, ro, rs, w0);
+            c.rep.add(cmpTol("attn_dq4 draft window (sink 256 + keys from " + std::to_string(w0) + ") + combine vs CPU" + tag, out, ro, rs, 1e-2,
+                             1e-4));
+        }
         // ---- prefill attention: n queries at L-n .. L-1
         {
             const int n = c.quick ? 130 : 200;
@@ -905,8 +954,10 @@ void testAttn(Ctx& c) {
                 // decode at the end of the long context: attn_split / attn_wsplit1 + attn_combine vs the same CPU rows
                 const int ns = std::min<int>(wk::kFdMaxSplits, static_cast<int>(cdiv(Lk, wk::kFdChunk)));
                 Buf ml(static_cast<std::size_t>(ns) * kHeads * 2 * 4), acc(static_cast<std::size_t>(ns) * kHeads * kHd * 4), dps(std::vector<int>{p0});
-                for (int kind = 0; kind < 2; ++kind) {
-                    const auto f = c.fnOpt((kind == 0 ? "attn_split" : "attn_wsplit1") + fs);
+                for (int kind = 0; kind < 3; ++kind) {
+                    static const char* const kNames[3] = {"attn_split", "attn_wsplit1", "attn_dq4"};
+                    if (kind == 2 && !q4) continue;
+                    const auto f = c.fnOpt(kind == 2 ? std::string(kNames[2]) : kNames[kind] + fs);
                     if (!f) continue;
                     if (kind == 0) {
                         hip::launch(f, {static_cast<unsigned>(nkv), static_cast<unsigned>(ns), 1}, {256, 1, 1}, 0, c.s, dq.p(), a, ml.p(), acc.p(), kHeads,
@@ -915,13 +966,13 @@ void testAttn(Ctx& c) {
                         wk::AwGroups g1;
                         g1.first[0] = 0;
                         g1.count[0] = 1;
-                        hip::launch(f, {static_cast<unsigned>(nkv), static_cast<unsigned>(ns), 1}, {128, 1, 1}, 0, c.s, dq.p(), a, ml.p(), acc.p(), kHeads,
-                                    nkv, kQStride, dps.p(), kScale, DevPtr{0}, g1);
+                        hip::launch(f, {static_cast<unsigned>(nkv), static_cast<unsigned>(ns), 1}, {kind == 2 ? 256u : 128u, 1, 1}, 0, c.s, dq.p(), a,
+                                    ml.p(), acc.p(), kHeads, nkv, kQStride, dps.p(), kScale, DevPtr{0}, g1);
                     }
                     Buf out(on * 4);
                     hip::launch(c.k.attn_combine, {kHeads, 1, 1}, {256, 1, 1}, 0, c.s, ml.p(), acc.p(), dq.p(), out.p(), kHeads, kHd, kQStride, ns);
                     c.sync();
-                    c.rep.add(cmpTol(std::string(kind == 0 ? "attn_split" : "attn_wsplit1") + fs + " + combine vs CPU" + where, out.down<float>(on), ro, rsc,
+                    c.rep.add(cmpTol(std::string(kNames[kind]) + (kind == 2 ? "" : fs) + " + combine vs CPU" + where, out.down<float>(on), ro, rsc,
                                      1e-2, 1e-4));
                 }
             }

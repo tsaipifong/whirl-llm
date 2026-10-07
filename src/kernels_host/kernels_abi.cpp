@@ -305,6 +305,7 @@ KernelTable KernelTable::load(const hip::Module& m, KvFormat kv) {
         k.attn_prep = L.req("attn_prep_q4");
         k.attn_wsplit1 = L.opt("attn_wsplit1_q4");
         k.attn_wsplit2 = L.opt("attn_wsplit2_q4");
+        k.attn_dq4 = L.opt("attn_dq4");
     } else if (kv == KvFormat::q8 || kv == KvFormat::q8h) {
         k.attn_decode = L.req("attn_decode_q8");
         k.kv_store = L.req("kv_store_q8");

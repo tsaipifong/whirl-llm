@@ -447,6 +447,9 @@ public:
     // verify attention: groups of up to 32 columns (attn_wsplit2) when that lets a
     // sequence's rows share one K/V pass (WHIRL_ATTN_WIDE=0: <= 16 columns as before)
     bool attn_wide = true;
+    // q4 KV decode / verify attention through attn_dq4 when the code object has it (fast mode on
+    // the 8060S; WHIRL_ATTN_DQ4=0: attn_wsplit1_q4 as before)
+    bool attn_dq4 = true;
     // batched verify of more than 16 rows (WHIRL_WIDE_VERIFY=0: at most 16 as before)
     bool wide_verify = true;
     // output-head rows per range in a wide verify (two 16-token passes per range; WHIRL_HEAD_CHUNK)

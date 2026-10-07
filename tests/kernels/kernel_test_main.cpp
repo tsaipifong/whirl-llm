@@ -108,9 +108,10 @@ int main(int argc, char** argv) {
     };
     const Fam fams[] = {{"quant", kt::testQuant}, {"gemv", kt::testGemv}, {"gemm", kt::testGemm},
                         {"attn", kt::testAttn},   {"gdn", kt::testGdn},   {"moe", kt::testMoe},
-                        {"moemx", kt::testMoeMx}, {"misc", kt::testMisc}};
+                        {"moemx", kt::testMoeMx}, {"misc", kt::testMisc},   {"attnbench", kt::benchAttn}};
     for (const Fam& f : fams) {
         if (!only.empty() && !only.count(f.name)) continue;
+        if (only.empty() && std::string(f.name) == "attnbench") continue;  // timing only, on request
         const auto t0 = std::chrono::steady_clock::now();
         std::printf("== %s\n", f.name);
         std::fflush(stdout);

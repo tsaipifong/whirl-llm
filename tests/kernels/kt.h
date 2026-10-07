@@ -194,6 +194,7 @@ void testQuant(Ctx& c);
 void testGemv(Ctx& c);
 void testGemm(Ctx& c);
 void testAttn(Ctx& c);
+void benchAttn(Ctx& c);  // "attnbench": timing only, run with --only attnbench
 void testGdn(Ctx& c);
 void testMoe(Ctx& c);
 void testMoeMx(Ctx& c);

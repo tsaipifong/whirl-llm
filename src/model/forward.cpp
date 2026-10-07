@@ -711,8 +711,10 @@ void Model::attnBlock(const AttnW& a, const KvLayer& lkv, u32 n) {
                 }
             }
             if (!wide) ng = group(max_q1, groups).first;
-            hip::launch(aw, D(cfg.n_head_kv, n_split, ng), D(128), 0, stream, qf, kva, part_ml, part_acc, I(cfg.n_head), I(cfg.n_head_kv),
-                        I(2 * hd), pos_buf, scale, gate, groups);
+            // q4 KV: attn_dq4 (one query per group, GQA group <= 8; lossy fast-mode path)
+            const bool dq4 = !wide && max_q1 == 1 && attn_dq4 && k.attn_dq4 != nullptr && grp_q <= 8;
+            hip::launch(dq4 ? k.attn_dq4 : aw, D(cfg.n_head_kv, n_split, ng), D(dq4 ? 256 : 128), 0, stream, qf, kva, part_ml, part_acc,
+                        I(cfg.n_head), I(cfg.n_head_kv), I(2 * hd), pos_buf, scale, gate, groups);
         } else {
             hip::launch(k.attn_split, D(cfg.n_head_kv, n_split, n), D(256), 0, stream, qf, kva, part_ml, part_acc, I(cfg.n_head), I(cfg.n_head_kv),
                         I(hd), I(2 * hd), pos_buf, scale, i32(1), gate);

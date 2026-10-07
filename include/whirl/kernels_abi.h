@@ -72,6 +72,7 @@
 //   attn_combine_q8(... same ..., int8* xq, float* xd)
 //   attn_wsplit1[_q8|_q8v], attn_wsplit2[_q8|_q8v](q, KvArgs, part_ml, part_acc, n_head, n_kv,
 //            q_stride, pos, scale, skip, AwGroups groups)   [<= 16 / <= 32 columns per group]
+//   attn_dq4 (gfx1151, q4 KV; attn_wsplit1 arguments, block 256, one query per group, n_head / n_kv <= 8)
 //   attn_prep[_q8|_q8h|_q8v](qf, kk, vv, qw, kw, KvArgs, pos, n_head, n_kv,
 //            hd, n_rot, theta_scale, eps)
 //   attn_prefill_wmma[_q8|_q8v], attn_kx[_q8|_q8v](q, KvArgs, out, n_head,
@@ -448,6 +449,7 @@ struct KernelTable {
     F rmsnorm{}, l2norm{}, add_inplace{}, silu_mul{}, rope_neox{};
     F attn_decode{}, kv_store{}, attn_split{}, attn_combine{}, attn_prep{}, attn_combine_q8{};
     F attn_wsplit1{}, attn_wsplit2{}, attn_prefill_wmma{}, attn_kx{};
+    F attn_dq4{};  // q4 KV decode / verify (gfx1151; null otherwise): attn_wsplit1 arguments, 256 threads
     F attn_kg6{}, attn_kg4{}, attn_kg2{};  // f16 / q8 / q8h / q8v KV (null if not built)
     F gdn_conv_seq{}, gdn_gates{}, gdn_gates_ba{}, gdn_seq_128{}, f32_to_f16{}, gdn_gated_norm{};
     F argmax{}, quantize_q8{};
