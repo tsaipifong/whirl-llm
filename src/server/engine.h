@@ -30,6 +30,7 @@
 #include <optional>
 #include <random>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace whirl::server {
@@ -283,6 +284,11 @@ struct EngineOptions {
     bool slot_drafts = false;
     bool trace_nd = false;
     bool loop_log = false;
+    // WHIRL_HANG_TRACE=<s>: a watchdog logs the engine thread's last step when it
+    // has not advanced for s seconds while requests are running (0 = off)
+    std::uint32_t hang_trace_s = 0;
+    // WHIRL_HANG_MARKERS=1: also GPU event markers between the decode-cycle steps
+    bool hang_markers = false;
     bool tier_verify = false;
     std::uint32_t tier_min_gain = 512;
     double gather_ms = 30;
@@ -485,6 +491,36 @@ private:
     std::deque<Job*> queue_;
     std::uint32_t n_active_ = 0;
     std::atomic<std::uint32_t> n_building_{0};
+    // hang trace (opt_.hang_trace_s): last engine-thread step and its details
+    std::atomic<std::uint32_t> hb_stage_{0};
+    std::atomic<std::uint64_t> hb_tick_{0};
+    std::array<std::atomic<std::int64_t>, 6> hb_info_{};
+    std::atomic<bool> hb_stop_{false};
+    std::thread hb_thread_;
+    void hb(std::uint32_t stage, std::int64_t a = -1, std::int64_t b = -1, std::int64_t c = -1, std::int64_t d = -1) {
+        if (opt_.hang_trace_s == 0) return;
+        hb_info_[0].store(a, std::memory_order_relaxed);
+        hb_info_[1].store(b, std::memory_order_relaxed);
+        hb_info_[2].store(c, std::memory_order_relaxed);
+        hb_info_[3].store(d, std::memory_order_relaxed);
+        hb_stage_.store(stage, std::memory_order_relaxed);
+        hb_tick_.fetch_add(1, std::memory_order_release);
+    }
+    void hbWatch();
+    // GPU markers on the main stream (which part of the last cycle completed)
+    std::array<tier::Event, 8> hb_ev_{};
+    std::atomic<std::uint32_t> hb_ev_mask_{0};
+    // independent probe stream (is the GPU executing at all while the main stream stalls)
+    void* hb_probe_s_ = nullptr;
+    // control words before the cycle that stalls (host copy of the last readCtl)
+    std::vector<std::int32_t> hb_ctl_snap_;
+    std::atomic<bool> hb_ctl_ok_{false};
+    std::uint64_t hb_probe_buf_ = 0;
+    void hbEv(std::uint32_t k) {
+        if (!opt_.hang_markers || hb_ev_[k] == nullptr) return;
+        ops_.eventRecord(hb_ev_[k], m_.stream());
+        hb_ev_mask_.fetch_or(1u << k);
+    }
     std::atomic<std::uint64_t> next_id_{1};
     std::mutex rng_mutex_;
     std::mt19937_64 id_prng_;

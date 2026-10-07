@@ -550,6 +550,8 @@ int serveMain(int argc, char** argv, const char* program) {
         eo.slot_drafts = envOn("SLOT_DRAFTS", false);
         eo.trace_nd = env("TRACE_ND").has_value();
         eo.loop_log = env("LOOP_LOG").has_value();
+        eo.hang_trace_s = envU32("HANG_TRACE", 0);
+        eo.hang_markers = envOn("HANG_MARKERS", false);
         eo.tier_verify = env("TIER_VERIFY").has_value();
         eo.tier_min_gain = envU32("TIER_MIN_GAIN", 512);
         if (auto v = env("GATHER_MS")) {

@@ -22,6 +22,7 @@ public:
     DevPtr hn() const override { return m_.hn; }
     DevPtr mtpH() const override { return m_.mtp_h; }
     DevPtr seqHid(std::uint32_t s) const override { return m_.seqs[s].hid; }
+    DevPtr ctlArea() const override { return m_.out_tok; }
     std::span<const DevPtr> convState() const override { return {m_.conv_state.data(), m_.conv_state.size()}; }
     std::span<const DevPtr> ssmState() const override { return {m_.ssm_state.data(), m_.ssm_state.size()}; }
     std::uint64_t convBytes() const override { return m_.convBytes(); }

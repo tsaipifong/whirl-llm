@@ -48,6 +48,7 @@ public:
     virtual DevPtr hn() const = 0;       // normed trunk hidden rows (n_embd f32 each)
     virtual DevPtr mtpH() const = 0;     // MTP hidden rows of the current sequence
     virtual DevPtr seqHid(std::uint32_t s) const = 0;
+    virtual DevPtr ctlArea() const { return 0; }  // control words of every sequence (debug reads)
     // per-layer recurrent state of the current sequence (0 = attention layer)
     virtual std::span<const DevPtr> convState() const = 0;
     virtual std::span<const DevPtr> ssmState() const = 0;

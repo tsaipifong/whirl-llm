@@ -5,6 +5,7 @@
 #include "engine.h"
 
 #include "log.h"
+#include "whirl/hip.h"
 
 #include <algorithm>
 #include <cmath>
@@ -135,6 +136,117 @@ Engine::~Engine() {
         if (q.ev) ops_.eventDestroy(q.ev);
     if (samp_dev_) ops_.free(samp_dev_);
     if (big_dev_) ops_.free(big_dev_);
+    hb_stop_.store(true);
+    if (hb_thread_.joinable()) hb_thread_.join();
+    for (auto& e : hb_ev_)
+        if (e) ops_.eventDestroy(e);
+    if (hb_probe_s_) hip::streamDestroy(hb_probe_s_);
+    if (hb_probe_buf_) hip::free(hb_probe_buf_);
+}
+
+// WHIRL_HANG_TRACE: log the engine thread's last step when it stalls with requests running
+void Engine::hbWatch() {
+    static constexpr const char* names[] = {"none", "idle wait", "admit", "startJob", "finishPrefill", "decode: room/drafts",
+                                            "decode: MTP steps", "decode: verify enqueue", "decode: readCtl",
+                                            "decode: accept", "finishJob", "tier poll", "prefill", "loop"};
+    std::uint64_t last = hb_tick_.load();
+    auto t_last = Clock::now();
+    double logged_at = 0;
+    while (!hb_stop_.load()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        const std::uint64_t now = hb_tick_.load(std::memory_order_acquire);
+        const std::uint32_t st = hb_stage_.load(std::memory_order_relaxed);
+        if (now != last || st <= 1) {
+            last = now;
+            t_last = Clock::now();
+            logged_at = 0;
+            continue;
+        }
+        const double s = msSince(t_last) / 1000.0;
+        if (s < opt_.hang_trace_s || (logged_at > 0 && s < logged_at + 30)) continue;
+        logged_at = s;
+        logW("hang trace | engine thread has not advanced for {:.1f} s: stage {} ({}), info {} {} {} {}, cycle {}", s, st,
+             st < std::size(names) ? names[st] : "?", hb_info_[0].load(), hb_info_[1].load(), hb_info_[2].load(),
+             hb_info_[3].load(), n_cycles_);
+        static constexpr const char* evn[] = {"full-hit copies", "-", "cycle start", "MTP step 0", "MTP steps", "verify",
+                                              "topk", "MTP step 1"};
+        std::string ev;
+        const std::uint32_t mask = hb_ev_mask_.load();
+        for (std::uint32_t k = 0; k < hb_ev_.size(); ++k) {
+            if ((mask & (1u << k)) == 0) continue;
+            std::string st_k;
+            try {
+                st_k = hip::eventDone(hb_ev_[k]) ? "done" : "NOT done";
+            } catch (const std::exception& ex) {
+                st_k = std::string("query error: ") + ex.what();
+            }
+            ev += std::format(" [{}: {}]", evn[k], st_k);
+        }
+        // is the GPU executing at all? a memset on an independent non-blocking stream
+        std::string probe = "probe failed";
+        try {
+            if (hb_probe_s_ == nullptr) {
+                hb_probe_s_ = hip::streamCreate(true);
+                hb_probe_buf_ = hip::malloc(256);
+            }
+            tier::Event pe = ops_.eventCreate();
+            hip::memsetAsync(hb_probe_buf_, 0, 256, hb_probe_s_);
+            ops_.eventRecord(pe, hb_probe_s_);
+            bool pd = false;
+            for (int i = 0; i < 20 && !pd; ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                pd = hip::eventDone(pe);
+            }
+            probe = pd ? "independent stream memset completes (GPU executes)" : "independent stream memset STUCK (GPU not executing)";
+            if (pd) ops_.eventDestroy(pe);
+        } catch (const std::exception& ex) {
+            probe = std::string("probe error: ") + ex.what();
+        }
+        std::string tier_st = "no tier";
+        if (tier_ != nullptr) {
+            try {
+                tier::Event te = ops_.eventCreate();
+                ops_.eventRecord(te, tier_->stream);
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                const bool td = hip::eventDone(te);
+                tier_st = td ? "tier stream idle" : "tier stream BUSY";
+                if (td) ops_.eventDestroy(te);
+            } catch (const std::exception& ex) {
+                tier_st = std::string("tier stream query failed: ") + ex.what();
+            }
+        }
+        logW("hang trace | {}", probe);
+        // how far did the stalled cycle get on the GPU? the control words now vs before the cycle
+        if (hb_probe_s_ != nullptr && m_.ctlArea() != 0 && hb_ctl_ok_.load(std::memory_order_acquire)) {
+            try {
+                std::vector<std::int32_t> ctl_now(hb_ctl_snap_.size());
+                tier::Event ce = ops_.eventCreate();
+                hip::downloadAsync(ctl_now.data(), m_.ctlArea(), ctl_now.size() * 4, hb_probe_s_);
+                ops_.eventRecord(ce, hb_probe_s_);
+                bool cd = false;
+                for (int i = 0; i < 20 && !cd; ++i) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                    cd = hip::eventDone(ce);
+                }
+                if (!cd) {
+                    logW("hang trace | control-word read on the probe stream did not complete");
+                } else {
+                    ops_.eventDestroy(ce);
+                    for (std::size_t si = 0; si < slots_.size(); ++si) {
+                        const std::int32_t* a = hb_ctl_snap_.data() + si * qwen35::ctl_words;
+                        const std::int32_t* b = ctl_now.data() + si * qwen35::ctl_words;
+                        std::string d;
+                        for (std::uint32_t w = 0; w < qwen35::ctl_words; ++w)
+                            if (a[w] != b[w]) d += std::format(" w{}:{}->{}", w, a[w], b[w]);
+                        logW("hang trace | slot {} control words changed since the cycle began:{}", si, d.empty() ? " none" : d);
+                    }
+                }
+            } catch (const std::exception& ex) {
+                logW("hang trace | control-word read failed: {}", ex.what());
+            }
+        }
+        logW("hang trace | main-stream markers:{} | {}", ev.empty() ? " none" : ev, tier_st);
+    }
 }
 
 void Engine::initCkpt(Ckpt& c, bool host_ok) {
@@ -1244,6 +1356,7 @@ bool Engine::startJob(Slot& sl, Job& job) {
         if (mt.reuse == N) {
             ops_.copyAsync(m_.logits(), c.logits, static_cast<std::uint64_t>(cfg.n_vocab) * 4, m_.stream());
             if (opt_.use_mtp) ops_.copyAsync(m_.mtpH(), c.hid, static_cast<std::uint64_t>(cfg.n_embd) * 4, m_.stream());
+            hbEv(0);
         }
     } else {
         m_.reset();
@@ -1465,6 +1578,7 @@ void Engine::finishPrefill(Slot& sl) {
     const auto& cfg = m_.cfg();
     const std::uint32_t V = cfg.n_vocab;
     m_.selectSeq(sl.id);
+    hb(4, sl.id, N, sl.reuse);
     std::uint32_t first;
     if (sl.greedy) {
         first = m_.argmax();
@@ -1597,6 +1711,7 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
     const auto& cfg = m_.cfg();
     const std::uint64_t E = cfg.n_embd;
     const TimePoint t_cycle0 = Clock::now();
+    hb(5, static_cast<std::int64_t>(act_in.size()), act_in.empty() ? -1 : act_in[0]->id, act_in.empty() ? -1 : act_in[0]->pos);
     // slots out of context room end here
     std::vector<Slot*> act;
     const std::uint32_t nd_room = opt_.use_mtp ? opt_.n_draft : 0;
@@ -1734,6 +1849,14 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
             snap += nd_of[k];
         }
     }
+    hb(6, static_cast<std::int64_t>(A), nd_max, static_cast<std::int64_t>(n_ng), act[0]->pos);
+    if (opt_.hang_trace_s > 0) {
+        hb_ctl_ok_.store(false);
+        hb_ctl_snap_ = ctl_host_;
+        hb_ctl_ok_.store(true, std::memory_order_release);
+    }
+    hb_ev_mask_.store(0);
+    hbEv(2);
     if (nd_max > 0) {
         m_.setDraftCutoff(opt_.p_min, std::min(opt_.n_min, nd_max));
         struct Reset {
@@ -1741,15 +1864,21 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
             ~Reset() { m.setDraftCutoff(0, 0); }
         } reset{m_};
         m_.mtpBatchStepEx(std::span<const MSeg>(msegs.data(), A), 0, true);
-        for (std::uint32_t r = 1; r < nd_max; ++r)
+        hbEv(3);
+        for (std::uint32_t r = 1; r < nd_max; ++r) {
             m_.mtpBatchStepEx(std::span<const MSeg>(msegs.data(), n_step[r]), r, true);
+            if (r == 1) hbEv(7);
+        }
+        hbEv(4);
     } else if (opt_.use_mtp) {
         // no MTP drafts this cycle: still feed the pend rows to the MTP block so
         // its KV cache stays complete for later drafting cycles
         m_.mtpBatchStepEx(std::span<const MSeg>(msegs.data(), A), 0, false);
     }
     if (p && p->events) m_.profileStart(1, pa);
+    hb(7, static_cast<std::int64_t>(A), nd_max, static_cast<std::int64_t>(n_ng), act[0]->pos);
     const std::uint32_t rows = m_.verifyBatchEnqueue(std::span<const VSeg>(vsegs.data(), A));
+    hbEv(5);
     if (p) m_.profileStop();
     bool any_sampling = false;
     for (std::size_t k = 0; k < A; ++k) {
@@ -1759,11 +1888,13 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
         launchTopk(row_of[k], nd_of[k] + 1, k_small, sl.sm.inv_t, samp_dev_, max_rows, row_of[k]);
     }
     const TimePoint t_enq = Clock::now();
+    hb(8, static_cast<std::int64_t>(A), nd_max, static_cast<std::int64_t>(n_ng), rows);
     m_.readCtl(std::span<std::int32_t>(ctl_host_.data(), slots_.size() * qwen35::ctl_words));
     if (p) {
         p->t_ready = Clock::now();
         p->enq_ms[pa] += std::chrono::duration<double, std::milli>(t_enq - tc0).count();
     }
+    hb(9, static_cast<std::int64_t>(A), nd_max, static_cast<std::int64_t>(n_ng), rows);
     if (any_sampling) ops_.download(samp_host_.data(), samp_dev_, sampBytes());
     if (nd > 0 && n_ng == 0) {
         // swaps keep the rows of the common count (an extra step at most)
@@ -1983,6 +2114,7 @@ void Engine::finishJob(Slot& sl) {
     const std::uint64_t E = m_.cfg().n_embd;
     const std::uint32_t N = sl.n_prompt;
     m_.selectSeq(sl.id);
+    hb(10, sl.id, sl.pos, sl.n_gen);
     ops_.streamSync(m_.stream());
     const double gen_ms = msSince(sl.td0);
     if (sl.stopped_str) sl.finish = "stop";
@@ -2666,6 +2798,16 @@ void Engine::abortQueued(std::unique_lock<std::mutex>& lk) {
 
 void Engine::runLoop() {
     stat_t0_ = Clock::now();
+    if (opt_.hang_trace_s > 0 && !hb_thread_.joinable()) {
+        logI("hang trace: on ({} s, GPU markers {}), engine thread {}", opt_.hang_trace_s, opt_.hang_markers ? "on" : "off", std::hash<std::thread::id>{}(std::this_thread::get_id()));
+        if (opt_.hang_markers)
+            for (auto& e : hb_ev_) e = ops_.eventCreate();
+        const int dev = hip::getDevice();
+        hb_thread_ = std::thread([this, dev] {
+            ops_.setDevice(dev);  // the probe stream / events belong to the engine's GPU
+            hbWatch();
+        });
+    }
     bool was_busy = false;
     for (;;) {
         const TimePoint tl0 = Clock::now();
@@ -2724,6 +2866,7 @@ void Engine::runLoop() {
                     continue;
                 }
                 tier_wake_ = false;
+                hb(1);
                 q_cond_.wait(lk, [&] { return !queue_.empty() || tier_wake_ || stop_; });
             }
             stat_t0_ = Clock::now();
@@ -2764,12 +2907,14 @@ void Engine::runLoop() {
                 n_active_ -= 1;
                 continue;
             }
+            hb(2, static_cast<std::int64_t>(job->id));
             Slot& sl = *pickSlot(job->tokens);
             const double wait_ms = msSince(job->t_arrive);
             if (wait_ms > 50) logI("req {} | slot {} | starting after {:.0f} ms in queue", job->id, sl.id, wait_ms);
             else logI("req {} | slot {} | assigned", job->id, sl.id);
             if (tryRestore(sl, *job)) continue;
             sl.phase = Phase::prefill;  // reserve before the next pick
+            hb(3, static_cast<std::int64_t>(job->id), sl.id);
             bool ok = true;
             try {
                 ok = startJob(sl, *job);
@@ -2785,6 +2930,7 @@ void Engine::runLoop() {
         const TimePoint tl1 = Clock::now();
         // ---- host-tier restores in progress / tier housekeeping (<= every 2 ms)
         if (tier_ != nullptr) {
+            hb(11);
             pollRestores();
             if (msSince(last_tick_) >= 2) {
                 tierTick();
@@ -2871,6 +3017,7 @@ void Engine::runLoop() {
                                  floor_.minTps(), dec_toks.size(), pl.rows);
                     }
                 }
+                hb(12, pf->id, static_cast<std::int64_t>(pf->pf_off));
                 pf_rows = prefillGroup(*pf, budget);
                 if (prof_) prof_->last_end.reset();
             }
@@ -2882,6 +3029,7 @@ void Engine::runLoop() {
         bool restoring = false;
         for (const Slot& sl : slots_) restoring = restoring || sl.phase == Phase::restore;
         const TimePoint tl3 = Clock::now();
+        hb(13, static_cast<std::int64_t>(act.size()));
         if (!act.empty()) {
             try {
                 decodeCycle(act);
