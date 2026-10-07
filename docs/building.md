@@ -76,6 +76,10 @@ build\Release\whirl.exe selftest MODEL.gguf
 build\Release\whirl.exe seqtest MODEL.gguf
 ```
 
+Before and after a change that must not alter output (a refactor, a speed-up claimed to be
+bit-exact), run the golden-hash gate: `pwsh tools/golden/golden.ps1 check`. See
+[dev/testing.md](dev/testing.md) for the gate and for the table of which tests each kind of change needs.
+
 No test has a machine-specific path built in. Paths come from the command line or from these
 environment variables:
 

@@ -67,6 +67,9 @@ build\Release\whirl.exe selftest MODEL.gguf
 build\Release\whirl.exe seqtest MODEL.gguf
 ```
 
+修改前後若輸出不應改變（重構、宣稱逐位元不變的加速），請跑 golden 雜湊 gate：
+`pwsh tools/golden/golden.ps1 check`。用法與「改動 → 必跑測試」表見 [dev/testing.md](dev/testing.md)。
+
 測試程式裡沒有寫死任何特定機器的路徑；路徑一律來自命令列或下列環境變數：
 
 | 變數 | 使用者 | 預設 |
