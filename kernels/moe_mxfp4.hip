@@ -317,3 +317,153 @@ extern "C" __global__ void __launch_bounds__(256)
         *(int *)(qr + i) = p;
     }
 }
+
+// ---------------------------------------------------------------------------
+// P-9: grouped expert GEMMs for the f16-activation (precise) MoE prefill, gfx1201.
+// Same per-output arithmetic as gemm_moe_impl / gemm_tile_impl (dec_group_h weights,
+// f16 activations, WMMA f16 -> f32 over k in ascending 16-steps), so every stored value
+// is bitwise the old path's. Differences:
+//  - 1-D grid with the row blocks of one tile consecutive (the tile's activations stay
+//    in L2 while its row blocks run), 16-token fragments past the tile's count skip their
+//    WMMAs (never stored), 16-byte epilogue stores
+//  - GU: gate and up rows of the same row block in one block (TMR fragments each); the
+//    epilogue writes f16(silu(g) * u) with the moe_act_f16 expression into the down
+//    GEMM's input, so the f32 gate / up buffers and the moe_act_f16 pass go away
+// Grid: n_tile_slots * ceil(rows_e / BMG) blocks of 256 threads.
+// ---------------------------------------------------------------------------
+template <int T, int BMG, int BN, int BK, int WAVES_M, bool GU>
+__device__ void gemmr_moe_impl(const uint8_t *__restrict__ W1, const uint8_t *__restrict__ W2, uint64_t row_bytes, int rows_e,
+                               const _Float16 *__restrict__ Xa, void *__restrict__ Ya, int ncols, const int4 *__restrict__ tiles,
+                               const int *__restrict__ n_tiles) {
+    constexpr int NTH = 256;
+    constexpr int AR = GU ? 2 * BMG : BMG;  // A rows in LDS (gate rows, then up rows)
+    constexpr int WAVES_N = NTH / 32 / WAVES_M;
+    constexpr int TMR = BMG / 16 / WAVES_M;  // fragments per weight matrix per wave
+    constexpr int TM = GU ? 2 * TMR : TMR;
+    constexpr int TN = BN / 16 / WAVES_N;
+    constexpr int LD = BK + 8;
+    constexpr int GPR = BK / 8;
+    constexpr int A_PER = AR * GPR / NTH;
+    constexpr int B_PER = BN * GPR / NTH;
+    static_assert(AR * GPR % NTH == 0 && BN * GPR % NTH == 0 && TMR >= 1 && TN >= 1, "tile/threads");
+    const int nby = (rows_e + BMG - 1) / BMG;
+    const int tix = (int)blockIdx.x / nby, by = (int)blockIdx.x - tix * nby;
+    if (tix >= *n_tiles) return;
+    const int4 tl = tiles[tix];
+    const int m0 = by * BMG, n_tok = tl.z;
+    const uint8_t *__restrict__ Wg = W1 + (size_t)tl.x * rows_e * row_bytes;
+    const uint8_t *__restrict__ Wu = GU ? W2 + (size_t)tl.x * rows_e * row_bytes : Wg;
+    const _Float16 *__restrict__ X = Xa + (size_t)tl.y * ncols;
+    __shared__ __attribute__((aligned(16))) _Float16 As[AR][LD];
+    __shared__ __attribute__((aligned(16))) _Float16 Bs[BN][LD];
+    const int lane = threadIdx.x % WARP, wid = threadIdx.x / WARP;
+    const int wm = wid % WAVES_M, wn = wid / WAVES_M;
+    float8 acc[TM][TN];
+#pragma unroll
+    for (int i = 0; i < TM; ++i)
+#pragma unroll
+        for (int j = 0; j < TN; ++j) acc[i][j] = (float8){0, 0, 0, 0, 0, 0, 0, 0};
+    half8 ra[A_PER], rb[B_PER];
+#define GMR_FETCH(k0_)                                                                              \
+    do {                                                                                            \
+        _Pragma("unroll") for (int e = 0; e < A_PER; ++e) {                                         \
+            const int i = threadIdx.x + e * NTH;                                                    \
+            const int r = i / GPR, gg = i % GPR;                                                    \
+            const bool up = GU && r >= BMG;                                                         \
+            const int row = m0 + (up ? r - BMG : r);                                                \
+            if (row < rows_e) {                                                                     \
+                ra[e] = dec_group_h<T>((up ? Wu : Wg) + (size_t)row * row_bytes, (k0_) / 8 + gg);    \
+            } else {                                                                                \
+                _Pragma("unroll") for (int q = 0; q < 8; ++q) ra[e][q] = (_Float16)0.f;              \
+            }                                                                                       \
+        }                                                                                           \
+        _Pragma("unroll") for (int e = 0; e < B_PER; ++e) {                                         \
+            const int i = threadIdx.x + e * NTH;                                                    \
+            const int t = i / GPR, gg = i % GPR;                                                    \
+            if (t < n_tok) {                                                                        \
+                rb[e] = *(const half8 *)(X + (size_t)t * ncols + (k0_) + gg * 8);                   \
+            } else {                                                                                \
+                _Pragma("unroll") for (int q = 0; q < 8; ++q) rb[e][q] = (_Float16)0.f;              \
+            }                                                                                       \
+        }                                                                                           \
+    } while (0)
+    GMR_FETCH(0);
+    for (int k0 = 0; k0 < ncols; k0 += BK) {
+        __syncthreads();
+#pragma unroll
+        for (int e = 0; e < A_PER; ++e) {
+            const int i = threadIdx.x + e * NTH;
+            *(half8 *)&As[i / GPR][(i % GPR) * 8] = ra[e];
+        }
+#pragma unroll
+        for (int e = 0; e < B_PER; ++e) {
+            const int i = threadIdx.x + e * NTH;
+            *(half8 *)&Bs[i / GPR][(i % GPR) * 8] = rb[e];
+        }
+        __syncthreads();
+        if (k0 + BK < ncols) GMR_FETCH(k0 + BK);
+#pragma unroll
+        for (int kk = 0; kk < BK; kk += 16) {
+            half8 a[TM], b[TN];
+#pragma unroll
+            for (int i = 0; i < TM; ++i) {
+                const int ar = (i < TMR ? 0 : BMG) + (wm * TMR + (i % TMR)) * 16 + lane % 16;
+                a[i] = *(const half8 *)&As[ar][kk + 8 * (lane / 16)];
+            }
+#pragma unroll
+            for (int j = 0; j < TN; ++j)
+                b[j] = *(const half8 *)&Bs[(wn * TN + j) * 16 + lane % 16][kk + 8 * (lane / 16)];
+#pragma unroll
+            for (int i = 0; i < TM; ++i)
+#pragma unroll
+                for (int j = 0; j < TN; ++j)
+                    if ((wn * TN + j) * 16 < n_tok)
+                        acc[i][j] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(a[i], b[j], acc[i][j]);
+        }
+    }
+#undef GMR_FETCH
+    const bool vec = (rows_e & 7) == 0;
+#pragma unroll
+    for (int j = 0; j < TN; ++j) {
+        const int t = (wn * TN + j) * 16 + lane % 16;
+        if (t >= n_tok) continue;
+#pragma unroll
+        for (int i = 0; i < TMR; ++i) {
+            const int row0 = m0 + (wm * TMR + i) * 16 + 8 * (lane / 16);
+            if (GU) {
+                _Float16 *dh = (_Float16 *)Ya + ((size_t)tl.y + t) * rows_e + row0;
+                half8 hv;
+#pragma unroll
+                for (int v = 0; v < 8; ++v) {
+                    const float g = acc[i][j][v], u = acc[i + TMR][j][v];
+                    hv[v] = (_Float16)(g / (1.f + __expf(-g)) * u);  // = moe_act_f16
+                }
+                if (vec && row0 + 8 <= rows_e) {
+                    *(half8 *)dh = hv;
+                } else {
+#pragma unroll
+                    for (int v = 0; v < 8; ++v)
+                        if (row0 + v < rows_e) dh[v] = hv[v];
+                }
+            } else {
+                float *df = (float *)Ya + ((size_t)tl.y + t) * rows_e + row0;
+                if (vec && row0 + 8 <= rows_e) {
+                    *(float4 *)df = make_float4(acc[i][j][0], acc[i][j][1], acc[i][j][2], acc[i][j][3]);
+                    *(float4 *)(df + 4) = make_float4(acc[i][j][4], acc[i][j][5], acc[i][j][6], acc[i][j][7]);
+                } else {
+#pragma unroll
+                    for (int v = 0; v < 8; ++v)
+                        if (row0 + v < rows_e) df[v] = acc[i][j][v];
+                }
+            }
+        }
+    }
+}
+
+// (BMG, BN, BK, WAVES_M): gate + up -> f16(silu(g) * u); down -> f32
+#define GEMMR_MOE_ENTRY(NAME, BMG, BN, BK, WM, GU)                                                                      extern "C" __global__ void __launch_bounds__(256)                                                                       NAME(const uint8_t *W1, const uint8_t *W2, uint64_t row_bytes, int rows_e, const _Float16 *X, void *Y,                     int ncols, const int4 *tiles, const int *n_tiles) {                                                            gemmr_moe_impl<QT_MXFP4, BMG, BN, BK, WM, GU>(W1, W2, row_bytes, rows_e, X, Y, ncols, tiles, n_tiles);           }
+GEMMR_MOE_ENTRY(gemmr_moegu_mxfp4, 64, 64, 64, 4, true)
+GEMMR_MOE_ENTRY(gemmr_moegu32_mxfp4, 64, 32, 64, 4, true)
+GEMMR_MOE_ENTRY(gemmr_moedn_mxfp4, 128, 64, 32, 2, false)
+GEMMR_MOE_ENTRY(gemmr_moedn32_mxfp4, 128, 32, 64, 4, false)
+#undef GEMMR_MOE_ENTRY

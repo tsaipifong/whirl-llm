@@ -693,6 +693,7 @@ public:
     std::uint32_t moeTile(std::uint32_t n) const;
     bool moeGuFused(const MoeW& mo) const;
     bool moeFp8(const MoeW& mo) const;
+    bool moeGuR(const MoeW& mo) const;
     hip::Function moeGu(GgmlType ty) const;
     hip::Function moeDown(GgmlType ty) const;
 

@@ -980,6 +980,17 @@ void Model::moeBlock(DevPtr post_norm, const Mat& sg, const Mat& su, const Mat& 
         hip::launch(k.gemm_moe32r[ti(mo.down.ty)], D(max_tiles * ((E + moe_bm - 1) / moe_bm)), D(256), 0, stream, mo.down.ptr, mo.down.row_bytes,
                     I(E), moe_yg, moe_yd, I(F), moe_tiles, moe_ntiles);
         mark(OpClass::matmul);
+    } else if (moeGuR(mo)) {
+        // MXFP4 experts, f16 activations (precise): gate + up + SwiGLU in one grouped GEMM
+        // into the f32 gate buffer as f16 (X is still being read), then down; row block
+        // fastest grid, empty 16-token fragments skipped - every value as the path below
+        hip::launch(k.moe_gather_f16, D(pairs), D(256), 0, stream, h, moe_perm, moe_x16, I(E), I(K));
+        mark(OpClass::misc);
+        hip::launch(bn == 32 ? k.gemmr_moegu32 : k.gemmr_moegu, D(max_tiles * ((F + 63) / 64)), D(256), 0, stream, mo.gate.ptr, mo.up.ptr,
+                    mo.gate.row_bytes, I(F), moe_x16, moe_yg, I(E), moe_tiles, moe_ntiles);
+        hip::launch(bn == 32 ? k.gemmr_moedn32 : k.gemmr_moedn, D(max_tiles * ((E + 127) / 128)), D(256), 0, stream, mo.down.ptr, DevPtr{0},
+                    mo.down.row_bytes, I(E), moe_yg, moe_yd, I(F), moe_tiles, moe_ntiles);
+        mark(OpClass::matmul);
     } else {
         hip::launch(k.moe_gather_f16, D(pairs), D(256), 0, stream, h, moe_perm, moe_x16, I(E), I(K));
         mark(OpClass::misc);
@@ -1019,6 +1030,14 @@ hip::Function Model::moeDown(GgmlType ty) const {
 bool Model::moeGuFused(const MoeW& mo) const {
     return k.moe_tiles != nullptr && k.gemm_moegu[ti(mo.gate.ty)] != nullptr && k.gemm_moe32r[ti(mo.down.ty)] != nullptr &&
            mo.gate.ty == mo.up.ty && mo.gate.row_bytes == mo.up.row_bytes && moe_tiles64 != 0;
+}
+
+// Prefill experts on the f16-activation MXFP4 grouped GEMMs gemmr_moe* (gfx1201; WHIRL_MOE_RBF=0
+// -> gemm_moe + moe_act_f16): all three expert tensors MXFP4, gate and up of one row size.
+bool Model::moeGuR(const MoeW& mo) const {
+    return moe_rbf && mo.gate.ty == GgmlType::mxfp4 && mo.up.ty == GgmlType::mxfp4 && mo.down.ty == GgmlType::mxfp4 &&
+           mo.gate.row_bytes == mo.up.row_bytes && k.gemmr_moegu != nullptr && k.gemmr_moegu32 != nullptr && k.gemmr_moedn != nullptr &&
+           k.gemmr_moedn32 != nullptr;
 }
 
 // Prefill experts on the MXFP4 x fp8 grouped GEMM: all three expert tensors MXFP4 with

@@ -146,6 +146,13 @@
 //   gemm8r_moe / gemm8r_moe32 / gemm8r_moeh / gemm8r_moe32h (optional): same arguments,
 //            same outputs; 1-D grid n_tile_slots * nbt, nbt = 2 * ceil(rows_e / kMoeBm)
 //            with W2 else ceil(rows_e / kMoeBm), row block fastest
+//   gemmr_moegu / gemmr_moegu32 (optional, MXFP4)(Wg, Wu, rb, F, const f16* X, f16* A, ncols,
+//            const Int4* tiles, const int* n_tiles): grouped gate + up of the f16 (precise) MoE
+//            prefill, A = f16(silu(g) * u) (moe_act_f16's values; A must not alias X); 1-D grid
+//            n_tile_slots * ceil(F / 64), token tile 64 / 32
+//   gemmr_moedn / gemmr_moedn32 (optional, MXFP4)(W, null, rb, E, const f16* A, float* Y, F,
+//            tiles, n_tiles): grouped down, = gemm_moe / gemm_moe32 values; grid
+//            n_tile_slots * ceil(E / 128)
 //   moe_gather_fp8(x, perm, u8* x8, float* sx, C, K): per-pos fp8 rows + scales
 
 #pragma once
@@ -464,6 +471,7 @@ struct KernelTable {
     F moe_gu_mxw{}, moe_down_mxw{};
     F gemm8_moe{}, gemm8_moe32{}, gemm8_moeh{}, gemm8_moe32h{}, moe_gather_fp8{};
     F gemm8r_moe{}, gemm8r_moe32{}, gemm8r_moeh{}, gemm8r_moe32h{};  // optional
+    F gemmr_moegu{}, gemmr_moegu32{}, gemmr_moedn{}, gemmr_moedn32{};  // optional (MXFP4, f16 activations)
 
     // Resolves every entry. Kernels the model always needs are required
     // (throws hip::Error naming the missing kernel); the others are optional.
