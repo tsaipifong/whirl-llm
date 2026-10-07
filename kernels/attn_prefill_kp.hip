@@ -218,10 +218,18 @@ __device__ __forceinline__ half8 kg_ld_tr(const _Float16 *p) {
 }
 // q8 K dequantization: kv_dq8 (attn.hip), the magic-number int8 -> f16 conversion shared with the
 // decode path, bit-identical to kv_ld8's (f16)q * s.
-template <int NP, int Q8>  // Q8: 0 f16, 1 q8 (int8 K and V), 2 q8v (int8 V)
+// SEG (f16 only, FC-1c): keys [kb0, kb1) of the sequence (kb0, kb1 multiples of FA_K, or kb1 = the
+// last key + 1) in one launch of a series covering [0, n): the running softmax state (m, l in
+// st_ml[query][head][2], the unnormalized O^T in out) is stored at the end of a non-final range and
+// loaded at the start of the next, so the series walks the same tiles in the same order with the
+// same arithmetic as one launch over all keys - bit-identical output (a block whose keys all lie
+// before kb0 returns at once; the range that holds a block's last key writes its output).
+template <int NP, int Q8, bool SEG = false>  // Q8: 0 f16, 1 q8 (int8 K and V), 2 q8v (int8 V)
 __device__ __forceinline__ void attn_kg_impl(const float *q, const KvArgs &kv, float *out, int n_head, int n_kv,
-                                             int q_stride, const int *pos, int n_tok, float scale, int h0) {
+                                             int q_stride, const int *pos, int n_tok, float scale, int h0,
+                                             int kb0 = 0, int kb1 = 0, float *st_ml = nullptr) {
     constexpr bool KQ8 = Q8 == 1, VQ8 = Q8 != 0;
+    static_assert(!SEG || Q8 == 0, "attn_kg SEG: f16 K / V only");
     const int tb = kv.tab0;
     __shared__ float8 Sx[2][NP * 2][32];
     __shared__ half8 Vf[VQ8 ? 2 : 1][2][VQ8 ? 16 : 1][32];  // q8v: [buffer][key half][dim tile][lane]
@@ -251,6 +259,19 @@ __device__ __forceinline__ void attn_kg_impl(const float *q, const KvArgs &kv, f
     for (int dt = 0; dt < DT; ++dt) o[dt] = (float8){0, 0, 0, 0, 0, 0, 0, 0};
     float m = -INFINITY, l = 0.f;
     const int n_keys = pos0 + min(q0 + 16, n_tok);  // keys of the block's last query + 1
+    if constexpr (SEG) {
+        if (kb0 >= n_keys) return;  // done in an earlier range (block-uniform)
+        if (kb0 > 0) {
+            const float *orow = out + (size_t)my_qc * n_head * FA_D + (size_t)h * FA_D;
+            m = st_ml[((size_t)my_qc * n_head + h) * 2];
+            l = st_ml[((size_t)my_qc * n_head + h) * 2 + 1];
+#pragma unroll
+            for (int dt = 0; dt < DT; ++dt)
+#pragma unroll
+                for (int v = 0; v < 8; ++v) o[dt][v] = orow[dh + dt * 16 + 8 * (lane / 16) + v];
+        }
+    }
+    const int k_beg = SEG ? kb0 : 0, k_end = SEG ? min(n_keys, kb1) : n_keys;
     const int full_end = pos0 + q0;                 // tiles ending at or before this key are unmasked
     const _Float16 *Kc = (const _Float16 *)kv.k + (size_t)kvh * FA_D;
     const int8_t *Kq = (const int8_t *)kv.k + (size_t)kvh * FA_D;   // q8 K
@@ -297,7 +318,7 @@ __device__ __forceinline__ void attn_kg_impl(const float *q, const KvArgs &kv, f
         KG_VSTORE(0);
     }
     int par = 0;
-    for (int k0 = 0; k0 < n_keys; k0 += FA_K, par ^= 1) {
+    for (int k0 = k_beg; k0 < k_end; k0 += FA_K, par ^= 1) {
         const int dl = kv_delta(kv, tb, k0);  // FA_K-key tiles never straddle a page
         float8 own = (float8){0, 0, 0, 0, 0, 0, 0, 0};
         if constexpr (KQ8) {
@@ -396,6 +417,20 @@ __device__ __forceinline__ void attn_kg_impl(const float *q, const KvArgs &kv, f
 #undef KG_VFETCH
 #undef KG_VSTORE
     if (my_q >= n_tok) return;
+    if constexpr (SEG) {
+        if (k_end < n_keys) {  // not this block's last range: keep the running state
+            float *orow = out + (size_t)my_q * n_head * FA_D + (size_t)h * FA_D;
+            if (w == 0 && lane < 16) {
+                st_ml[((size_t)my_q * n_head + h) * 2] = m;
+                st_ml[((size_t)my_q * n_head + h) * 2 + 1] = l;
+            }
+#pragma unroll
+            for (int dt = 0; dt < DT; ++dt)
+#pragma unroll
+                for (int v = 0; v < 8; ++v) orow[dh + dt * 16 + 8 * (lane / 16) + v] = o[dt][v];
+            return;
+        }
+    }
     const float inv = 1.f / l;
     const float *gate = q + ((size_t)my_q * n_head + h) * q_stride + FA_D;
     float *orow = out + (size_t)my_q * n_head * FA_D + (size_t)h * FA_D;
@@ -421,6 +456,11 @@ KG_ENTRY(attn_kg6_q8, 6, 1)
 KG_ENTRY(attn_kg4_q8, 4, 1)
 KG_ENTRY(attn_kg6_q8v, 6, 2)
 KG_ENTRY(attn_kg4_q8v, 4, 2)
+// SEG (FC-1c): key range [kb0, kb1) with the softmax state carried in st_ml / out (see attn_kg_impl)
+#define KGS_ENTRY(NAME, NP)                                                                            extern "C" __global__ void __launch_bounds__(64 * NP)                                                   NAME(const float *q, KvArgs kv, float *out, int n_head, int n_kv, int q_stride,                          const int *pos, int n_tok, float scale, int h0, int kb0, int kb1, float *st_ml) {              attn_kg_impl<NP, 0, true>(q, kv, out, n_head, n_kv, q_stride, pos, n_tok, scale, h0, kb0, kb1, st_ml);     }
+KGS_ENTRY(attn_kgs6, 6)
+KGS_ENTRY(attn_kgs4, 4)
+KGS_ENTRY(attn_kgs2, 2)
 // (no attn_kg2_q8 / attn_kg2_q8v: with 4 waves per block the int8 V stage is slower than attn_kx)
 
 // q8 / q8h KV prefill (Q8P): the int8 K and V of keys [0, n_rows) of one sequence, dequantized
@@ -430,13 +470,25 @@ KG_ENTRY(attn_kg4_q8v, 4, 2)
 // attn_kg_q8 converts K in every wave (each of the NP heads of a KV head again) and V in an LDS
 // stage, which made q8 prefill attention 29% slower than f16 at 128k keys; this pass costs ~0.5%.
 // grid ceil(n_rows * row_el / 2048), block 256; row_el % 32 == 0
-extern "C" __global__ void __launch_bounds__(256) kv_dq_rows(KvArgs kv, _Float16 *k16, _Float16 *v16, int n_rows, int row_el) {
+template <int F>
+__device__ __forceinline__ void kv_dq_rows_impl(const KvArgs &kv, _Float16 *k16, _Float16 *v16, int r0, int n_rows, int row_el) {
     const size_t o = ((size_t)blockIdx.x * 256 + threadIdx.x) * 8;
     if (o >= (size_t)n_rows * row_el) return;
-    const int p = (int)(o / row_el), e = (int)(o % row_el);
+    const int p = r0 + (int)(o / row_el), e = (int)(o % row_el);
     const size_t src = (size_t)kv_row(kv, kv.tab0, p) * row_el + e;
-    *(half8 *)(k16 + o) = kv_dq8(*(const kvq8_t *)((const int8_t *)kv.k + src), kv.ks[src >> 5]);
-    *(half8 *)(v16 + o) = kv_dq8(*(const kvq8_t *)((const int8_t *)kv.v + src), kv.vs[src >> 5]);
+    *(half8 *)(k16 + o) = kv_ld8<F>(kv.k, kv.ks, src);
+    *(half8 *)(v16 + o) = kv_ld8<F>(kv.v, kv.vs, src);
+}
+extern "C" __global__ void __launch_bounds__(256) kv_dq_rows(KvArgs kv, _Float16 *k16, _Float16 *v16, int n_rows, int row_el) {
+    kv_dq_rows_impl<1>(kv, k16, v16, 0, n_rows, row_el);
+}
+// FC-1c: keys [r0, r0 + n_rows) into rows 0 .. n_rows - 1 of k16 / v16 (a key range of a long
+// prefill, see Model::prefillAttn); _q4: the q4 cache (kv_dq4, the q4 readers' dequantization)
+extern "C" __global__ void __launch_bounds__(256) kv_dq_rows_r(KvArgs kv, _Float16 *k16, _Float16 *v16, int r0, int n_rows, int row_el) {
+    kv_dq_rows_impl<1>(kv, k16, v16, r0, n_rows, row_el);
+}
+extern "C" __global__ void __launch_bounds__(256) kv_dq_rows_r_q4(KvArgs kv, _Float16 *k16, _Float16 *v16, int r0, int n_rows, int row_el) {
+    kv_dq_rows_impl<2>(kv, k16, v16, r0, n_rows, row_el);
 }
 
 // item P: f16-output variants of the f16-weight prefill GEMMs (Q4_K_M relaxed mode)

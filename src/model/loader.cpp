@@ -418,6 +418,7 @@ LoadEstimate estimateLoad(const gguf::File& f, const Config& cfg, bool embd_on_h
     r.kv_f16 = kvBytesPerTokenCfg(cfg, r.has_mtp, false, false);
     r.kv_q8v = kvBytesPerTokenCfg(cfg, r.has_mtp, true, true);
     r.kv_q8h = kvBytesPerTokenCfg(cfg, r.has_mtp, true, false);
+    r.kv_q4 = kvBytesPerTokenCfg(cfg, r.has_mtp, true, false, true);
     return r;
 }
 
@@ -627,10 +628,12 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
     const u64 n_split = m.fd_splits;
     m.part_ml = m.alloc(max_verify_rows * n_split * cfg.n_head * 2 * f4);
     m.part_acc = m.alloc(max_verify_rows * n_split * cfg.n_head * cfg.head_dim * f4);
-    if (m.kv_q8 && !m.kv_kf16 && !m.kv_q4 && m.k.kv_dq_rows != nullptr) {
-        // q8 / q8h prefill attention: f16 copies of a sequence's K / V in ffn_g / ffn_u (Model::prefillAttn)
+    if (m.kv_q8 && !m.kv_kf16 && (m.kv_q4 ? m.k.kv_dq_rows_r != nullptr : m.k.kv_dq_rows != nullptr)) {
+        // q8 / q8h / q4 prefill attention: f16 copies of a sequence's K / V in ffn_g / ffn_u (Model::prefillAttn)
         m.dq_rows = static_cast<u32>(std::min<u64>(B * ffs * f4 / (static_cast<u64>(cfg.n_head_kv) * cfg.head_dim * 2), 1u << 30)) / 256 * 256;
-        std::vector<std::int32_t> id(m.dq_rows / 256 + 1);
+        if (m.k.kv_dq_rows_r != nullptr) m.dq_st_ml = m.alloc(B * cfg.n_head * 2 * f4);
+        // identity pages for every key position (the key ranges of attn_kgs index it by sequence position)
+        std::vector<std::int32_t> id(std::max<u64>(m.dq_rows, kDqMaxKeys) / 256 + 1);
         for (std::size_t i = 0; i < id.size(); ++i) id[i] = static_cast<std::int32_t>(i);
         m.dq_ptab = m.alloc(id.size() * 4);
         hip::upload(m.dq_ptab, id.data(), id.size() * 4);

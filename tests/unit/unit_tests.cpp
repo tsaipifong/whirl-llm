@@ -886,18 +886,20 @@ void testKvChoice() {
     namespace nu = whirl::numerics;
     using K = nu::KvKind;
     const nu::Request pre = nu::parseMode("precise", "t"), bal = nu::parseMode("balance", "t"), fast = nu::parseMode("fast", "t");
-    const nu::KvCaps r9700{true, true, false};  // gfx1201: q8h / q8v, no q4 yet
+    const nu::KvCaps noq4{true, true, false};   // a code object without q4 (gfx1201 before FAST-1c)
+    const nu::KvCaps r9700{true, true, true};   // gfx1201: q8h / q8v / q4 (FAST-1c)
     const nu::KvCaps s8060{true, true, true};   // gfx1151: q4 too
-    for (const nu::KvCaps& c : {r9700, s8060}) {
+    for (const nu::KvCaps& c : {noq4, r9700, s8060}) {
         for (bool moe : {false, true}) {
             CHECK(nu::chooseKv(pre, moe, c, std::nullopt).kv == K::f16);
             CHECK(nu::chooseKv(bal, moe, c, std::nullopt).kv == (moe ? K::f16 : K::q8h));
-            // fast: q4 where the kernels exist; R9700: f16 as before (no int8 stand-in)
+            // fast: q4 where the kernels exist; else f16 (no int8 stand-in)
             CHECK(nu::chooseKv(fast, moe, c, std::nullopt).kv == (c.q4 ? K::q4 : K::f16));
             CHECK(!nu::chooseKv(bal, moe, c, std::nullopt).debug);
         }
     }
-    CHECK(nu::chooseKv(fast, false, r9700, std::nullopt).why.find("no q4 KV kernels") != std::string::npos);
+    CHECK(nu::chooseKv(fast, false, noq4, std::nullopt).why.find("no q4 KV kernels") != std::string::npos);
+    CHECK(nu::chooseKv(fast, false, r9700, std::nullopt).kv == K::q4);
     CHECK(nu::chooseKv(bal, false, r9700, std::nullopt).why == "balance, dense model: q8h");
     // a code object without q8h: plain q8 (never q8v)
     CHECK(nu::chooseKv(bal, false, nu::KvCaps{false, true, false}, std::nullopt).kv == K::q8);

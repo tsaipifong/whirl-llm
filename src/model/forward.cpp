@@ -677,7 +677,10 @@ void Model::attnBlock(const AttnW& a, const KvLayer& lkv, u32 n) {
             // (attn_wsplit1) or <= 32 (attn_wsplit2: one K/V pass for up to 32 / grp_q rows)
             // caps.attn_group1 (gfx1151): one query per group (its WMMA P.V is not exact
             // when a masked key carries a real V row), so a grouped verify row could differ
-            const bool one_q = (dbg_flags & 4) != 0 || k.caps.attn_group1;
+            // q4 KV with attn_dq4 (FC-1c, gfx1201 too): every row its own group, so decode, verify and
+            // MTP rows all take attn_dq4 (a row's partials never depend on its batch)
+            const bool dq4_rows = kv_q4 && attn_dq4 && k.attn_dq4 != nullptr && grp_q <= 8;
+            const bool one_q = (dbg_flags & 4) != 0 || k.caps.attn_group1 || dq4_rows;
             const bool known = row_n == n && n > 1;
             auto group = [&](u32 max_q, AwGroups& groups) {
                 u32 ng = 0, r = 0, widest = 0;
@@ -755,10 +758,15 @@ void Model::attnBlock(const AttnW& a, const KvLayer& lkv, u32 n) {
 // to attn_kx) when NP divides the GQA group, the head ranges stay whole groups
 // of NP and the softmax scale is a power of two (it relies on exact scaling).
 void Model::prefillAttn(DevPtr q, const KvArgs& kva, DevPtr out, DevPtr pos, u32 n, u32 pos0, float scale) {
-    const u64 work = static_cast<u64>(n) * (static_cast<u64>(pos0) + n);
-    const u64 budget = 4096ull * 131072ull;
-    u32 parts = static_cast<u32>(std::min<u64>(cfg.n_head, (work + budget - 1) / budget));
-    while (parts > 1 && cfg.n_head % parts != 0) parts += 1;  // whole head ranges
+    // head ranges per launch: at most ~4096 x 128k query-key pairs x all heads (Windows TDR)
+    auto headParts = [&](u64 keys) {
+        const u64 work = static_cast<u64>(n) * keys;
+        const u64 budget = 4096ull * 131072ull;
+        u32 parts = static_cast<u32>(std::min<u64>(cfg.n_head, (work + budget - 1) / budget));
+        while (parts > 1 && cfg.n_head % parts != 0) parts += 1;  // whole head ranges
+        return parts;
+    };
+    const u32 parts = headParts(static_cast<u64>(pos0) + n);
     const u32 hp = cfg.n_head / parts;
     const u32 grp = cfg.n_head / cfg.n_head_kv;
     hip::Function kg = nullptr;
@@ -777,10 +785,10 @@ void Model::prefillAttn(DevPtr q, const KvArgs& kva, DevPtr out, DevPtr pos, u32
     // q8 / q8h KV: keys 0 .. pos0 + n - 1 dequantized once into f16 rows (ffn_g / ffn_u, free during
     // attention), then the f16 attn_kg: the same f16 K / V values as attn_kg_q8 converts in its waves,
     // so the output is bit-identical, at f16 speed (attn_kg_q8: +29% at 128k keys)
-    if (kg != nullptr && attn_dqf_on && k.kv_dq_rows != nullptr && dq_ptab != 0 && pos0 + n <= dq_rows) {
+    const u32 rows = pos0 + n, row_el = cfg.n_head_kv * cfg.head_dim;
+    if (kg != nullptr && attn_dqf_on && k.kv_dq_rows != nullptr && dq_ptab != 0 && rows <= dq_rows) {
         hip::Function kf = np == 6 ? k.attn_kgf6 : np == 4 ? k.attn_kgf4 : k.attn_kgf2;
         if (kf != nullptr) {
-            const u32 rows = pos0 + n, row_el = cfg.n_head_kv * cfg.head_dim;
             hip::launch(k.kv_dq_rows, D(static_cast<u32>((static_cast<u64>(rows) * row_el + 2047) / 2048)), D(256), 0, stream, kva, ffn_g, ffn_u,
                         I(rows), I(row_el));
             KvArgs f{};
@@ -790,6 +798,40 @@ void Model::prefillAttn(DevPtr q, const KvArgs& kva, DevPtr out, DevPtr pos, u32
             for (u32 p = 0; p < parts; ++p)
                 hip::launch(kf, D((n + 15) / 16, hp / np), D(64 * np), 0, stream, q, f, out, I(cfg.n_head), I(cfg.n_head_kv),
                             I(2 * cfg.head_dim), pos, I(n), scale, I(p * hp));
+            return;
+        }
+    }
+    // FC-1c: q8 / q8h past the scratch (rows > dq_rows) and q4 (no native attn_kg): the keys in ranges
+    // of <= dq_rows, each dequantized into ffn_g / ffn_u and walked by attn_kgs with the softmax state
+    // carried between ranges (bit-identical to one f16 attn_kg over all the dequantized keys)
+    if (attn_dqf_on && k.kv_dq_rows_r != nullptr && dq_ptab != 0 && dq_st_ml != 0 && dq_rows >= 4096 && rows <= kDqMaxKeys && cfg.head_dim == 256 &&
+        pow2 && attn_kg_on) {
+        hip::Function ks = nullptr;
+        u32 nps = 0;
+        for (const auto& [f, c] : {std::pair{k.attn_kgs6, 6u}, std::pair{k.attn_kgs4, 4u}, std::pair{k.attn_kgs2, 2u}})
+            if (f != nullptr && grp % c == 0 && cfg.n_head % (c * 2) == 0) {
+                ks = f;
+                nps = c;
+                break;
+            }
+        if (ks != nullptr) {
+            const u32 seg = dq_rows / 256 * 256;
+            for (u32 r0 = 0; r0 < rows; r0 += seg) {
+                const u32 r1 = std::min(rows, r0 + seg), nr = r1 - r0;
+                hip::launch(k.kv_dq_rows_r, D(static_cast<u32>((static_cast<u64>(nr) * row_el + 2047) / 2048)), D(256), 0, stream, kva, ffn_g, ffn_u,
+                            I(r0), I(nr), I(row_el));
+                KvArgs f{};
+                f.k = ffn_g - static_cast<u64>(r0) * row_el * 2;  // row r0 of the sequence = row 0 of the copy
+                f.v = ffn_u - static_cast<u64>(r0) * row_el * 2;
+                f.ptab = dq_ptab;
+                u32 sp = headParts(nr);
+                while (sp > 1 && (cfg.n_head / sp) % nps != 0) sp += 1;
+                if (cfg.n_head % sp != 0 || (cfg.n_head / sp) % nps != 0) sp = 1;
+                const u32 shp = cfg.n_head / sp;
+                for (u32 p = 0; p < sp; ++p)
+                    hip::launch(ks, D((n + 15) / 16, shp / nps), D(64 * nps), 0, stream, q, f, out, I(cfg.n_head), I(cfg.n_head_kv),
+                                I(2 * cfg.head_dim), pos, I(n), scale, I(p * shp), I(r0), I(r1), dq_st_ml);
+            }
             return;
         }
     }

@@ -205,15 +205,27 @@ void benchAttn(Ctx& c) {
             Buf dk16(nel * 2), dv16(nel * 2);
             dk16.fill(0x30);  // 0x3030 = 0.1318 (f16); timing only
             dv16.fill(0x30);
-            const std::vector<float> qp = c.randn(static_cast<std::size_t>(sh.heads) * qstride);
-            Buf dq(qp), dpos(std::vector<int>{L - 1});
+            // WHIRL_KT_BENCH_NQ: verify rows of one sequence (positions L - nq .. L - 1; attn_dq4 one row
+            // per group, attn_wsplit1 up to 16 / grp rows per group)
+            const int nq = std::getenv("WHIRL_KT_BENCH_NQ") ? std::max(1, std::min(16, std::atoi(std::getenv("WHIRL_KT_BENCH_NQ")))) : 1;
+            const std::vector<float> qp = c.randn(static_cast<std::size_t>(nq) * sh.heads * qstride);
+            std::vector<int> posv(static_cast<std::size_t>(nq));
+            for (int i = 0; i < nq; ++i) posv[static_cast<std::size_t>(i)] = L - nq + i;
+            Buf dq(qp), dpos(posv);
             int ns = std::min(256, static_cast<int>(cdiv(L, wk::kFdChunk)));
             if (env_s) ns = std::atoi(env_s);
-            Buf ml(static_cast<std::size_t>(ns) * sh.heads * 2 * 4), acc(static_cast<std::size_t>(ns) * sh.heads * hd * 4);
+            Buf ml(static_cast<std::size_t>(nq) * ns * sh.heads * 2 * 4), acc(static_cast<std::size_t>(nq) * ns * sh.heads * hd * 4);
             const std::size_t on = static_cast<std::size_t>(sh.heads) * hd;
-            wk::AwGroups g1{};
-            g1.first[0] = 0;
-            g1.count[0] = 1;
+            wk::AwGroups g1{}, gw{};
+            for (int i = 0; i < nq; ++i) {
+                g1.first[i] = i;
+                g1.count[i] = 1;
+            }
+            int ngw = 0;
+            for (int i = 0, per = std::max(1, 16 / (sh.heads / sh.nkv)); i < nq; i += per, ++ngw) {
+                gw.first[ngw] = i;
+                gw.count[ngw] = std::min(per, nq - i);
+            }
             std::vector<float> out_ref;
             for (const char* name : {"attn_wsplit1", "attn_wsplit1_q4", "attn_dq4"}) {
                 const auto f = c.fnOpt(name);
@@ -229,9 +241,10 @@ void benchAttn(Ctx& c) {
                 a.ks = q4 ? dks.p() : 0;
                 a.vs = q4 ? dvs.p() : 0;
                 a.ptab = dpt.p();
+                const bool one = std::string(name) == "attn_dq4";
                 auto launch = [&]() {
-                    hip::launch(f, {static_cast<unsigned>(sh.nkv), static_cast<unsigned>(ns), 1}, {threads, 1, 1}, 0, c.s, dq.p(), a, ml.p(),
-                                acc.p(), sh.heads, sh.nkv, qstride, dpos.p(), scale, DevPtr{0}, g1);
+                    hip::launch(f, {static_cast<unsigned>(sh.nkv), static_cast<unsigned>(ns), static_cast<unsigned>(one ? nq : ngw)}, {threads, 1, 1}, 0,
+                                c.s, dq.p(), a, ml.p(), acc.p(), sh.heads, sh.nkv, qstride, dpos.p(), scale, DevPtr{0}, one ? g1 : gw);
                 };
                 for (int i = 0; i < 3; ++i) launch();
                 c.sync();
@@ -245,7 +258,8 @@ void benchAttn(Ctx& c) {
                 hip::eventDestroy(e0);
                 hip::eventDestroy(e1);
                 const double bytes = static_cast<double>(L) * sh.nkv * (q4 ? (hd / 2 + hd / 32 * 2) * 2 : hd * 2 * 2);
-                std::printf("   %-16s heads %d/%d L %6d splits %3d: %8.1f us  %6.1f GB/s\n", name, sh.heads, sh.nkv, L, ns, us, bytes / us / 1e3);
+                std::printf("   %-16s heads %d/%d L %6d splits %3d rows %d: %8.1f us  %6.1f GB/s (one pass)\n", name, sh.heads, sh.nkv, L, ns, nq, us,
+                            bytes / us / 1e3);
                 if (q4) {
                     Buf out(on * 4);
                     launch();

@@ -365,7 +365,7 @@ KvChoice chooseKv(const Request& r, bool moe, const KvCaps& caps, std::optional<
             c.kv = KvKind::q4;
             c.why = std::format("{}, {}: q4", modeName(r.mode), model);
         } else {
-            // no q4 KV kernels in this code object (R9700 / gfx1201 until FAST-1c): f16, the KV
+            // no q4 KV kernels in this code object (gfx1201 before FAST-1c): f16, the KV
             // fast had there before (no int8 stand-in for q4)
             c.kv = KvKind::f16;
             c.why = std::format("{}, {}: f16 (no q4 KV kernels on this GPU yet)", modeName(r.mode), model);

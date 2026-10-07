@@ -941,6 +941,59 @@ void testAttn(Ctx& c) {
                         }
                     }
                 }
+                // FC-1c: kv_dq_rows_r[_q4] + attn_kgs over key ranges (the softmax state carried in st_ml / the
+                // output) == kv_dq_rows_r of all keys + one f16 attn_kg, bitwise (q8 and q4; ranges of 4096 and
+                // 1024 keys and the whole context); q4: also vs the CPU below
+                std::vector<float> seg_out;
+                if (fmt == Fmt::q8 || q4) {
+                    const auto fdr = c.fnOpt(q4 ? "kv_dq_rows_r_q4" : "kv_dq_rows_r");
+                    if (fdr) {
+                        const int rows = p0 + n, rel = nkv * kHd;
+                        Buf k16(static_cast<std::size_t>(rows) * rel * 2), v16(static_cast<std::size_t>(rows) * rel * 2);
+                        std::vector<int> idt(static_cast<std::size_t>(rows / wk::kKvPage + 1));
+                        std::iota(idt.begin(), idt.end(), 0);
+                        Buf did(idt), st(static_cast<std::size_t>(n) * kHeads * 2 * 4);
+                        hip::launch(fdr, {static_cast<unsigned>(cdiv(static_cast<long long>(rows) * rel, 2048)), 1, 1}, {256, 1, 1}, 0, c.s, a, k16.p(),
+                                    v16.p(), 0, rows, rel);
+                        for (const auto& [name, np] : {std::pair{"6", 6}, std::pair{"4", 4}, std::pair{"2", 2}}) {
+                            const auto fk = c.fnOpt(std::string("attn_kg") + name), fks = c.fnOpt(std::string("attn_kgs") + name);
+                            if (!fk || !fks || grp % np != 0 || (kHeads / 2) % np != 0) continue;
+                            wk::KvArgs f{};
+                            f.k = k16.p();
+                            f.v = v16.p();
+                            f.ptab = did.p();
+                            Buf ref(on * 4);
+                            ref.fill(0x7f);
+                            hip::launch(fk, {cdiv(n, 16), static_cast<unsigned>(kHeads / np), 1}, {static_cast<unsigned>(64 * np), 1, 1}, 0, c.s, dq.p(), f,
+                                        ref.p(), kHeads, nkv, kQStride, dpos.p(), n, kScale, 0);
+                            c.sync();
+                            const auto refv = ref.down<float>(on);
+                            for (const int seg : {4096, 1024, 1 << 20}) {
+                                Buf sk(static_cast<std::size_t>(std::min(seg, rows)) * rel * 2), sv(static_cast<std::size_t>(std::min(seg, rows)) * rel * 2);
+                                Buf ob(on * 4);
+                                ob.fill(0x7f);
+                                for (int r0 = 0; r0 < rows; r0 += seg) {
+                                    const int r1 = std::min(rows, r0 + seg), nr = r1 - r0;
+                                    hip::launch(fdr, {static_cast<unsigned>(cdiv(static_cast<long long>(nr) * rel, 2048)), 1, 1}, {256, 1, 1}, 0, c.s, a,
+                                                sk.p(), sv.p(), r0, nr, rel);
+                                    wk::KvArgs g{};
+                                    g.k = sk.p() - static_cast<DevPtr>(r0) * rel * 2;
+                                    g.v = sv.p() - static_cast<DevPtr>(r0) * rel * 2;
+                                    g.ptab = did.p();
+                                    for (int h0 = 0; h0 < kHeads; h0 += kHeads / 2)  // two head-range launches
+                                        hip::launch(fks, {cdiv(n, 16), static_cast<unsigned>(kHeads / 2 / np), 1}, {static_cast<unsigned>(64 * np), 1, 1}, 0,
+                                                    c.s, dq.p(), g, ob.p(), kHeads, nkv, kQStride, dpos.p(), n, kScale, h0, r0, r1, st.p());
+                                }
+                                c.sync();
+                                const auto sgv = ob.down<float>(on);
+                                c.rep.add(cmpExact(std::string("attn_kgs") + name + " key ranges of " + std::to_string(std::min(seg, rows)) + " (" + fmtName(fmt) +
+                                                       ") == attn_kg" + name + " over all keys" + where,
+                                                   sgv, refv, Kind::invariant));
+                                if (seg == 4096 && seg_out.empty()) seg_out = sgv;
+                            }
+                        }
+                    }
+                }
                 // CPU reference: first and last query
                 std::vector<int> rows = {0, n - 1};
                 if (n == 1) rows = {0};
@@ -983,6 +1036,13 @@ void testAttn(Ctx& c) {
                     }
                 }
                 c.rep.add(cmpTol("attn_prefill_wmma" + fs + " vs CPU (" + std::to_string(rows.size()) + " queries)" + where, gp, ro, rsc, 1e-2, 1e-4));
+                if (!seg_out.empty()) {
+                    std::vector<float> sp;
+                    for (int t : rows)
+                        sp.insert(sp.end(), seg_out.begin() + static_cast<std::ptrdiff_t>(t) * kHeads * kHd,
+                                  seg_out.begin() + static_cast<std::ptrdiff_t>(t + 1) * kHeads * kHd);
+                    c.rep.add(cmpTol(std::string("kv_dq_rows_r + attn_kgs (") + fmtName(fmt) + ", 4096-key ranges) vs CPU" + where, sp, ro, rsc, 1e-2, 1e-4));
+                }
                 if (n != 1) continue;
                 // decode at the end of the long context: attn_split / attn_wsplit1 + attn_combine vs the same CPU rows
                 const int ns = std::min<int>(wk::kFdMaxSplits, static_cast<int>(cdiv(Lk, wk::kFdChunk)));

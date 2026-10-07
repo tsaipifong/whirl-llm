@@ -520,14 +520,17 @@ int serveMain(int argc, char** argv, const char* program) {
             // (WHIRL_CKPT_HOST=1: checkpoints in pinned host memory, no VRAM)
             fi.ckpt_bytes = envOn("CKPT_HOST", false) ? 0 : st1 + static_cast<std::uint64_t>(cfg.n_embd) * 4 + static_cast<std::uint64_t>(cfg.n_vocab) * 4;
             fi.parallel = opt.parallel;
-            // the mode's KV format (numerics::chooseKv; the code object is not loaded yet: no q4
-            // assumed - only dGPUs reach here, and the R9700 has no q4 KV kernels yet)
+            // the mode's KV format (numerics::chooseKv; the code object is not loaded yet: only dGPUs
+            // reach here, and the R9700 code object has q4 KV kernels since FC-1c)
             const auto kv_env = env("KV");
             const numerics::KvKind kv_est =
-                numerics::chooseKv(nreq, cfg.moe, numerics::KvCaps{true, true, false},
+                numerics::chooseKv(nreq, cfg.moe, numerics::KvCaps{true, true, true},
                                    kv_env && *kv_env != "auto" ? numerics::kvKindFromName(*kv_env) : std::nullopt)
                     .kv;
-            fi.kv_per_token = kv_est == numerics::KvKind::f16 ? est.kv_f16 : kv_est == numerics::KvKind::q8v ? est.kv_q8v : est.kv_q8h;
+            fi.kv_per_token = kv_est == numerics::KvKind::f16   ? est.kv_f16
+                              : kv_est == numerics::KvKind::q8v ? est.kv_q8v
+                              : kv_est == numerics::KvKind::q4  ? est.kv_q4
+                                                                : est.kv_q8h;
             fi.pool_min_tokens = pool_req ? *pool_req : std::min<std::uint32_t>(slot_ctx, vram_tight_pool);
             fi.batch = lo.max_batch;
             fi.n_ck = static_cast<std::uint32_t>(n_ck);

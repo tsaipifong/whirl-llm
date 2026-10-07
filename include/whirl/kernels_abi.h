@@ -72,7 +72,7 @@
 //   attn_combine_q8(... same ..., int8* xq, float* xd)
 //   attn_wsplit1[_q8|_q8v], attn_wsplit2[_q8|_q8v](q, KvArgs, part_ml, part_acc, n_head, n_kv,
 //            q_stride, pos, scale, skip, AwGroups groups)   [<= 16 / <= 32 columns per group]
-//   attn_dq4 (gfx1151, q4 KV; attn_wsplit1 arguments, block 256, one query per group, n_head / n_kv <= 8)
+//   attn_dq4 (gfx1151 / gfx1201, q4 KV; attn_wsplit1 arguments, block 256, one query per group, n_head / n_kv <= 8)
 //   attn_prep[_q8|_q8h|_q8v](qf, kk, vv, qw, kw, KvArgs, pos, n_head, n_kv,
 //            hd, n_rot, theta_scale, eps)
 //   attn_prefill_wmma[_q8|_q8v], attn_kx[_q8|_q8v](q, KvArgs, out, n_head,
@@ -81,6 +81,11 @@
 //            (ceil(n_tok / 16), heads / NP), block 64 * NP, NP | n_head / n_kv)
 //   kv_dq_rows(KvArgs, f16* k16, f16* v16, n_rows, row_el) (q8 / q8h: keys [0, n_rows) of one
 //            sequence (tab0) dequantized into contiguous f16 rows; grid ceil(n_rows * row_el / 2048), block 256)
+//   kv_dq_rows_r[_q4](KvArgs, f16* k16, f16* v16, r0, n_rows, row_el): keys [r0, r0 + n_rows) into
+//            rows 0 .. n_rows - 1 (q8 / q8h, q4; gfx1201)
+//   attn_kgs6 / 4 / 2 (attn_kg arguments, int kb0, int kb1, float* st_ml): f16 attn_kg over keys
+//            [kb0, kb1); m / l in st_ml[query][head][2] and the unnormalized output in out carry the
+//            softmax state between ranges (bit-identical to one attn_kg over all keys; gfx1201)
 //   kv_store[_q8|_q8v](k, v, KvArgs, pos, int row)
 //  Gated DeltaNet:
 //   gdn_conv_seq(xin, state, w, out, ch, n_tok); gdn_gates(b, a, dt_bias, A,
@@ -455,6 +460,9 @@ struct KernelTable {
     F attn_kg6{}, attn_kg4{}, attn_kg2{};  // f16 / q8 / q8h / q8v KV (null if not built)
     // q8 / q8h KV prefill (Q8P): kv_dq_rows + the f16 attn_kg variants (null otherwise)
     F kv_dq_rows{}, attn_kgf6{}, attn_kgf4{}, attn_kgf2{};
+    // FC-1c: key-range variants (prefills past the f16 scratch, q4 prefill): kv_dq_rows_r (q8 / q8h)
+    // or kv_dq_rows_r_q4 (q4) + attn_kgs* (f16 attn_kg over a key range, softmax state carried)
+    F kv_dq_rows_r{}, attn_kgs6{}, attn_kgs4{}, attn_kgs2{};
     F gdn_conv_seq{}, gdn_gates{}, gdn_gates_ba{}, gdn_seq_128{}, f32_to_f16{}, gdn_gated_norm{};
     F argmax{}, quantize_q8{};
     F gdn_chunk_prep{}, gdn_chunk_scan{}, gdn_wprep{}, gdn_wscan8{};

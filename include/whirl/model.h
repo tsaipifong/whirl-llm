@@ -302,7 +302,7 @@ struct LoadEstimate {
     std::uint64_t max_elems = 0;  // largest layer matrix (w16 scratch)
     bool embd_on_host = false;  // token_embd goes to pinned host memory
     bool has_mtp = false;       // nextn layer present (one more KV layer)
-    std::uint64_t kv_f16 = 0, kv_q8v = 0, kv_q8h = 0;  // KV bytes per token by format
+    std::uint64_t kv_f16 = 0, kv_q8v = 0, kv_q8h = 0, kv_q4 = 0;  // KV bytes per token by format
 };
 LoadEstimate estimateLoad(const gguf::File& f, const Config& cfg, bool embd_on_host);
 // Prefill / decode buffers of Model::load for prefill batch B.
@@ -507,6 +507,10 @@ public:
     bool attn_dqf_on = true;
     DevPtr dq_ptab = 0;
     std::uint32_t dq_rows = 0;  // rows ffn_g / ffn_u hold
+    // FC-1c: attn_kgs softmax state (m, l per query row and head) between key ranges of a prefill
+    // longer than dq_rows (and for q4: every prefill dequantizes its keys into ffn_g / ffn_u)
+    DevPtr dq_st_ml = 0;
+    static constexpr std::uint32_t kDqMaxKeys = 1u << 22;  // dq_ptab covers keys [0, kDqMaxKeys)
     bool attn_kg_on = true;  // GQA-grouped prefill attention (f16 / q8 / q8h / q8v KV; WHIRL_ATTN_KG=0 off)
     bool ffn_h16 = false;
     bool out_h16 = false;
