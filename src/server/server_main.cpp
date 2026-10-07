@@ -445,7 +445,7 @@ int serveMain(int argc, char** argv, const char* program) {
              static_cast<double>(info.total_mem) / (1024.0 * 1024.0 * 1024.0), vram::limitBytes() ? " (simulated limit)" : "");
         if (vram::limitBytes()) logI("{}: memory sizes, the WDDM budget and allocations are capped as on a card of that size", vram::limitNote());
         // small cards (< 20 GiB, e.g. a 16 GB RX 9070 XT that also drives the desktop): 1 slot,
-        // q8v KV first, VRAM headroom for other apps; cards >= 20 GiB are unchanged
+        // VRAM headroom for other apps (the KV format is the mode's, as on every card)
         vram::CardDefaults card;
         {
             vram::CardInput ci;
@@ -453,8 +453,6 @@ int serveMain(int argc, char** argv, const char* program) {
             ci.uma = is_uma;
             if (opt.parallel_given) ci.parallel_arg = opt.parallel;
             ci.parallel_default = opt.parallel;
-            ci.kv_auto = env("KV").value_or("auto") == "auto" && !cfg.moe;
-            ci.kv_quant_ok = nreq.has(numerics::Item::kvq8);  // precise: never prefer int8 KV
             if (env("VRAM_HEADROOM_MB")) ci.headroom_mb_env = envU32("VRAM_HEADROOM_MB", 0);
             ci.reserve_explicit = env("POOL_RESERVE_MB").has_value();
             card = vram::cardDefaults(ci);
@@ -522,10 +520,14 @@ int serveMain(int argc, char** argv, const char* program) {
             // (WHIRL_CKPT_HOST=1: checkpoints in pinned host memory, no VRAM)
             fi.ckpt_bytes = envOn("CKPT_HOST", false) ? 0 : st1 + static_cast<std::uint64_t>(cfg.n_embd) * 4 + static_cast<std::uint64_t>(cfg.n_vocab) * 4;
             fi.parallel = opt.parallel;
-            const std::string kv_env = env("KV").value_or("auto");
-            // KV auto: precise f16; balance / fast as before (dense: the q8h size)
-            fi.kv_per_token = kv_env == "f16" ? est.kv_f16 : kv_env == "q8v" ? est.kv_q8v : (kv_env == "q8" || kv_env == "q8h") ? est.kv_q8h
-                              : (cfg.moe || !nreq.has(numerics::Item::kvq8)) ? est.kv_f16 : est.kv_q8h;
+            // the mode's KV format (numerics::chooseKv; the code object is not loaded yet: no q4
+            // assumed - only dGPUs reach here, and the R9700 has no q4 KV kernels yet)
+            const auto kv_env = env("KV");
+            const numerics::KvKind kv_est =
+                numerics::chooseKv(nreq, cfg.moe, numerics::KvCaps{true, true, false},
+                                   kv_env && *kv_env != "auto" ? numerics::kvKindFromName(*kv_env) : std::nullopt)
+                    .kv;
+            fi.kv_per_token = kv_est == numerics::KvKind::f16 ? est.kv_f16 : kv_est == numerics::KvKind::q8v ? est.kv_q8v : est.kv_q8h;
             fi.pool_min_tokens = pool_req ? *pool_req : std::min<std::uint32_t>(slot_ctx, vram_tight_pool);
             fi.batch = lo.max_batch;
             fi.n_ck = static_cast<std::uint32_t>(n_ck);
@@ -886,55 +888,32 @@ int serveMain(int argc, char** argv, const char* program) {
             return a;
         }();
         if (!pool_req) logI("kv pool sizing: {}", budget_note);
-        std::string kv_note;
-        // precise (KV auto without the kvq8 item): always f16; a pool / context that does not fit
-        // shrinks when not given explicitly, else the server refuses to start
-        // (MoE models always had f16 KV: their pool sizing is unchanged)
-        const bool kv_precise = model.kvAutoDense() && !model.kvQuantAuto();
+        // KV format: fixed at load by the mode and model type (numerics::chooseKv, as the CLI).
+        // A pool / context that does not fit in that format shrinks when not given explicitly,
+        // else the server refuses to start; never a lower-precision format. WHIRL_KV (debug
+        // override): the pool is sized from memory as before.
+        const std::string kv_note = std::format(" ({})", model.kv_choice.why);
+        const bool kv_fixed = !model.kv_choice.debug;
         std::uint32_t slot_ctx_eff = slot_ctx;
-        std::optional<std::uint32_t> precise_pool;
-        if (kv_precise) {
-            const numerics::PoolFit pf = numerics::serverPoolFit(avail, model.kvBytesPerTokenFmt(false, false), pool_req, opt.ctx.has_value(),
-                                                                 slot_ctx, opt.ctx_per_slot.has_value(), kv_page, 8 * cap_max);
+        std::optional<std::uint32_t> fit_pool;
+        if (kv_fixed) {
+            const numerics::PoolFit pf = numerics::serverPoolFit(avail, model.kvBytesPerToken(), pool_req, opt.ctx.has_value(), slot_ctx,
+                                                                 opt.ctx_per_slot.has_value(), kv_page, 8 * cap_max,
+                                                                 numerics::kvFitLabel(nreq, cfg.moe, model.kv_choice.kv));
             if (pf.refuse) throw app::UserError(app::exit_vram, pf.msg);
             if (!pf.msg.empty()) logW("{}", pf.msg);
-            precise_pool = pf.pool;
+            fit_pool = pf.pool;
             slot_ctx_eff = pf.slot_ctx;
-            kv_note = " (precise mode: f16 KV)";
-        } else if (model.kvAutoDense()) {
-            const std::uint32_t second = opt.parallel > 1 ? std::min(floor_second_ctx, slot_ctx) : 0;
-            const std::uint64_t need = pool_req ? *pool_req : static_cast<std::uint64_t>(slot_ctx) + second + (opt.parallel > 1 ? 2ull : 1ull) * kv_page;
-            // small-card q8v preference only where the code object has the q8v and q8h kernels
-            const bool small_kv = card.prefer_q8v && model.k.caps.kv_q8v && model.k.caps.kv_q8h;
-            const vram::SmallKv sk = small_kv ? vram::smallCardKv(avail, need, model.kvBytesPerTokenFmt(true, true)) : vram::SmallKv::q8h;
-            if (small_kv && sk != vram::SmallKv::q8h) {
-                model.setKvFormat(true, false, true);
-                kv_note = sk == vram::SmallKv::q8v
-                              ? " (auto: small card (< 20 GiB) prefers q8v; WHIRL_KV=f16 forces f16)"
-                              : " (auto: small card (< 20 GiB) prefers q8v, with a pool below one full request rather than K in int8; "
-                                "WHIRL_KV=q8 for a longer pool)";
-            } else if (small_kv) {
-                model.setKvFormat(true, true, false);
-                kv_note = std::format(" (auto: small card (< 20 GiB), q8v would leave under {} tokens)", vram::small_card_q8v_min_tokens);
-            } else if (need * model.kvBytesPerTokenFmt(false, false) <= avail) {
-                kv_note = " (auto: the floor pool fits as f16)";
-            } else if (model.k.caps.kv_q8v && need * model.kvBytesPerTokenFmt(true, true) <= avail) {
-                model.setKvFormat(true, false, true);
-                kv_note = " (auto: the floor pool (one full request + a 64k second one) does not fit as f16, fits as q8v)";
-            } else {
-                model.setKvFormat(true, model.k.caps.kv_q8h, false);
-                kv_note = " (auto: the floor pool (one full request + a 64k second one) does not fit as f16 or q8v)";
-            }
         }
         const std::uint64_t per_tok = model.kvBytesPerToken();
-        const std::uint32_t pool_tokens = precise_pool ? *precise_pool : pool_req ? *pool_req : [&] {
+        const std::uint32_t pool_tokens = fit_pool ? *fit_pool : pool_req ? *pool_req : [&] {
             const std::uint64_t t = std::min(avail / per_tok, static_cast<std::uint64_t>(8) * cap_max);
             return static_cast<std::uint32_t>(t / kv_page * kv_page);
         }();
         if (pool_tokens < 4096)
             throw app::UserError(app::exit_vram,
                                  std::format("not enough GPU memory left for the KV cache: a pool of {} tokens (at least 4096 needed).\n"
-                                             "  Use a smaller model or quantization, give --ctx explicitly, use --balance (int8 KV, dense models),\n"
+                                             "  Use a smaller model or quantization, give --ctx explicitly,\n"
                                              "  or close other programs that use the GPU.",
                                              pool_tokens));
         if (slot_ctx_eff != slot_ctx) engine.setCtx(slot_ctx_eff);
@@ -944,7 +923,9 @@ int serveMain(int argc, char** argv, const char* program) {
                 logW("kv pool {} tokens < {} (one {}-token request + a second one reaching {}): concurrent long requests may end "
                      "early (finish_reason length){}",
                      pool_tokens, floor, slot_ctx_eff, opt.parallel > 1 ? std::min(floor_second_ctx, slot_ctx_eff) : 0,
-                     kv_precise ? "; --balance allows int8 KV (a longer pool)" : "");
+                     model.kv_choice.kv == numerics::KvKind::f16 && !cfg.moe && nreq.mode == numerics::Mode::precise
+                         ? "; --balance allows int8 KV (a longer pool)"
+                         : "");
         }
         try {
             model.allocKvPool(pool_tokens);

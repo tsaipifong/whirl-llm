@@ -23,6 +23,13 @@ All notable changes to WHIRL are listed here. Versions follow `project(whirl VER
 - **balance** is the 0.1.x / 0.2.0-rc behaviour, bit for bit (items `fp8`, `moefp8`, `gdnwmma`,
   `h16`, `kvq8`; `--balance=ITEMS` picks a subset). **fast** lists the future gated lossy items
   (4-bit KV, relaxed acceptance, ...); none is implemented yet, so fast runs as balance.
+- **KV format fixed per mode (BAL-Q8)**: precise f16; balance q8h on dense models (KL vs f16
+  0.0002–0.002) and f16 on MoE models; fast q4 where the kernels exist (Radeon 8060S; the R9700 keeps
+  f16 until it has q4 KV kernels). The same on every card, CLI and server (one function,
+  `numerics::chooseKv`, decided before the kernels load). The automatic f16 → q8v → q8h fallback and
+  the q8v preference on cards under 20 GiB are gone: a format that does not fit lowers the context
+  (when not given) or stops with a message, never switches to a lower-precision format.
+  `WHIRL_KV` remains as a debug override ([usage 7.7](docs/usage.md#env-debug)).
 - The per-item variables (`WHIRL_FP8`, `WHIRL_MOE_FP8`, `WHIRL_GDN_WMMA`, `WHIRL_FFN_H16`,
   `WHIRL_Q4_RELAXED`, `WHIRL_KV`) still work and override the mode (logged as user-requested).
 - New balance / fast item `specsample` (server, MTP models): with temperature > 0 the MTP drafts are

@@ -95,8 +95,7 @@ std::string deviceListText() {
 
 constexpr const char* k_vram_advice =
     "  Try a smaller context: whirl chat --ctx 8192 (or less); whirl-server --ctx N, a smaller\n"
-    "  --ctx-per-slot, or fewer --parallel slots. Dense models can keep the KV cache in 8 bits:\n"
-    "  set WHIRL_KV=q8v (or q8h; Radeon 8060S: q8). Close other programs that use the GPU (games,\n"
+    "  --ctx-per-slot, or fewer --parallel slots. Close other programs that use the GPU (games,\n"
     "  browsers with hardware acceleration, other AI tools) and check the model fits in the GPU's\n"
     "  memory.\n";
 
@@ -223,7 +222,7 @@ std::string explainText(const std::exception& e, int* exit_code) {
             msg = "the GPU is still in use by another WHIRL process (waited WHIRL_GPU_WAIT seconds).\n"
                   "  Close the other whirl / whirl-server, or set WHIRL_GPU_SHARE=1 to run side by side\n"
                   "  (both then share the GPU's memory and speed).\n";
-        } else if (c == "KvF16DoesNotFit") {
+        } else if (c == "KvDoesNotFit") {
             code = exit_vram;
             msg = (what.size() > c.size() + 2 ? what.substr(c.size() + 2) : what) + "\n";
         } else if (c == "UnsupportedKvFormat") {

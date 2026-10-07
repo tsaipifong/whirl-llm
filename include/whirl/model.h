@@ -263,9 +263,10 @@ struct MatList {
 // load-time options (set before Model::load)
 
 // KV formats: f16; q8 = int8 + f16 scale per 32 values (K and V); q8h = q8
-// with Hadamard-rotated q / k; q8v = K f16, V q8. auto: f16 when it fits
-// (dense models fall back to q8v, then q8h); MoE always f16. q4 = 4-bit K and V
-// (+ f16 scale per 32 values) with Hadamard-rotated q / k (gfx1151; fast mode item kvq4).
+// with Hadamard-rotated q / k; q8v = K f16, V q8. q4 = 4-bit K and V (+ f16 scale per
+// 32 values) with Hadamard-rotated q / k (gfx1151). automatic: the numerics mode decides
+// (numerics::chooseKv: precise f16; balance q8h on dense models, f16 on MoE; fast q4, q8h
+// where there are no q4 kernels); any other value is a debug override (WHIRL_KV).
 enum class KvMode { automatic, f16, q8, q8h, q8v, q4 };
 
 // WHIRL_KV=auto|f16|q8|q8h|q8v|q4 (nullopt when unset; throws std::invalid_argument
@@ -489,7 +490,8 @@ public:
     whirl::numerics::Plan num_plan;
     whirl::relax::Params relax;  // numerics item relaxacc (fast): relaxed draft acceptance
     std::string load_note;
-    bool kvQuantAuto() const { return num_req.has(whirl::numerics::Item::kvq8); }
+    // the KV format and why (fixed at load: numerics::chooseKv)
+    whirl::numerics::KvChoice kv_choice;
     DevPtr w16 = 0;
     DevPtr gc_w = 0, gc_u = 0, gc_m = 0, gc_g = 0;
     std::uint32_t fwd_pos0 = 0;
@@ -617,11 +619,9 @@ public:
     std::uint64_t kvBytesPerToken() const { return kvBytesPerTokenFmt(kv_q8, kv_kf16, kv_q4); }
     std::uint32_t kvLayers() const;
     const char* kvName() const;
-    bool kvAutoDense() const;
     std::uint64_t pendLayerBytes() const;
 
     // ---- KV pool and sequences
-    void setKvFormat(bool q8, bool rot, bool kf16, bool q4 = false);
     void allocKvPool(std::uint32_t tokens);
     void mapPages(std::uint32_t s, std::uint32_t first, std::span<const std::int32_t> phys);
     void setupSeqs(std::uint32_t n, std::uint32_t slot_ctx);

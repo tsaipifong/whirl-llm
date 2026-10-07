@@ -50,14 +50,24 @@ whirl-server --help | --version
 
 一個行程只用一種模式，啟動時決定（`--precise`、`--balance`、`--fast`，或 `--mode M`；也可用環境變數
 `WHIRL_MODE=precise|balance|fast`，命令列優先）。`chat`、`bench`、`selftest`、`seqtest` 與伺服器都適用，R9700 與 Radeon 8060S 都一樣。
-沒指定模式時跑 **balance**；`--precise` 與 `--fast` 需要明確指定（`--balance` 仍可用）。小卡（20 GiB 以下）的規則跟著實際模式走：
-balance（預設）時 dense 模型照舊優先用 q8v KV；`--precise` 維持 f16 KV。
+沒指定模式時跑 **balance**；`--precise` 與 `--fast` 需要明確指定（`--balance` 仍可用）。
+
+**KV 快取格式：依模式與模型類型固定**，每張卡（32 GB、16 GB、8060S）都一樣，`chat`、`bench` 與伺服器也一樣：
+
+| 模式 | dense 模型 | MoE 模型 |
+|---|---|---|
+| precise | f16 | f16 |
+| balance（預設） | q8h（K、V 都是 int8，每 32 個值一個 f16 scale，q / k 先做 Hadamard 旋轉；相對 f16 的 KL 0.0002–0.002） | f16 |
+| fast | q4（Radeon 8060S）；R9700 在 q4 KV kernel 完成前用 f16 | q4（Radeon 8060S）；R9700 用 f16 |
+
+格式不會因為放不放得下而切換：選定的格式放不下要求的 context 時，沒有指定 context 就降低 context 並發出警告；
+有指定（`--ctx`、`--ctx-per-slot`）就停止並說明（結束代碼 5）。絕不自行改用更低精度的格式。20 GiB 以下的卡只會預設一個伺服器 slot 並保留 VRAM 給桌面。
 
 | 模式 | 內容 |
 |---|---|
 | **precise**（`--precise`） | GGUF 權重反量化成 f16；prefill 的 activation 與累加用 f16 / f32；DeltaNet prefill 用 f32 區塊路徑；**KV 快取在每張卡上都是 f16**。decode、MTP / n-gram 驗證與其他小 batch 也用 f16 activation 進同一個 f16 GEMM（f32 累加，不用 int8 activation）。除了檔案本身的量化權重，不再額外量化。f16 KV 放不下時：沒有指定 context 就降低 context 並發出警告；有指定（`--ctx`、`--ctx-per-slot`）就停止並說明（結束代碼 5）——絕不自行改用 int8 KV |
-| **balance**（預設；`--balance`） | 沒指定模式時的預設：就是 WHIRL 0.1.x / 0.2.0-rc 以速度為主的行為，完全相同：下表的項目。輸出可能與 precise 有些微差異（KL / 準確度實測見 [quantization.md](quantization.md)） |
-| **fast** | balance 再加上更積極的有損項目，每項都要先通過 KL 與配對準確度門檻。目前都還沒實作：會列為略過，fast 目前等同 balance |
+| **balance**（預設；`--balance`） | 沒指定模式時的預設：下表以速度為主的項目，dense 模型用 q8h KV、MoE 模型用 f16 KV。輸出可能與 precise 有些微差異（KL / 準確度實測見 [quantization.md](quantization.md)） |
+| **fast** | balance 再加上更積極的有損項目，每項都要先通過 KL 與配對準確度門檻。已實作：`kvq4`（Radeon 8060S）與 `relaxacc`；其他列為略過 |
 
 項目（用 `--balance=fp8,kvq8` 或 `--fast=...` 只選一部分；`WHIRL_MODE=balance:fp8,kvq8`）：
 
@@ -67,8 +77,8 @@ balance（預設）時 dense 模型照舊優先用 q8v KV；`--precise` 維持 f
 | `moefp8` | balance | MoE 專家 prefill GEMM 用 fp8 activation | MXFP4 MoE（Ornith MXFP4） | 略過 |
 | `gdnwmma` | balance | DeltaNet prefill 區塊用 f16 WMMA，取代 f32 區塊路徑 | MXFP4 模型 | 略過（還沒有 kernel） |
 | `h16` | balance | FFN / DeltaNet 的 GEMM 輸出先存成 f16 再進逐元素運算 | MXFP4 模型 | 只有 f16 權重 |
-| `kvq8` | balance | f16 放不下時 KV auto 可以選 int8：q8v（K f16、V int8），再不行 q8h；20 GiB 以下的卡優先 q8v | dense 模型 | q8（dense 模型） |
-| `kvq4` | fast | 4-bit KV（int4，每 32 個值一個 f16 scale，q / k 先做 Hadamard 旋轉）；8060S 的 decode attention 用 `attn_dq4` 讀取（約 180 GB/s）：Ornith-1.5-35B-A3B MXFP4 decode 128k 58.5 tok/s（f16 KV 32.7）、64k 67.0（46.4） | 略過（沒有 kernel） | dense 與 MoE |
+| `kvq8` | balance | dense 模型一律用 q8h KV（不是 f16 放不下才換）；MoE 模型維持 f16 | dense 模型 | dense 模型 |
+| `kvq4` | fast | 4-bit KV（int4，每 32 個值一個 f16 scale，q / k 先做 Hadamard 旋轉）；8060S 的 decode attention 用 `attn_dq4` 讀取（約 180 GB/s）：Ornith-1.5-35B-A3B MXFP4 decode 128k 58.5 tok/s（f16 KV 32.7）、64k 67.0（46.4） | 略過（還沒有 q4 kernel：f16 KV） | dense 與 MoE |
 | `relaxacc` | fast | 寬鬆推測接受（只對 MTP draft；n-gram draft 維持精確接受）。放寬接受若會讓結尾的 6-gram 與最近 4096 個 token 內重複，就不接受（重複防護）。greedy：draft 不是驗證列的 argmax 時，只要它在該列前 `WHIRL_RELAX_K` 名（預設 4）且 p(draft) >= `WHIRL_RELAX_ALPHA` × p(argmax)（預設 0.1）就保留；最後一個保留的 draft 之後那個 token 一定是目標模型自己的 argmax。temperature > 0：typical acceptance（Medusa）：在請求過濾後的分布上 p(draft) >= min(`WHIRL_RELAX_EPS` 0.09, `WHIRL_RELAX_DELTA` 0.3 × exp(−熵)) 就保留（此時不用 `specsample`）。**會改變 greedy 輸出**：fast 的 greedy 不等於 plain greedy，MTP ≠ plain；同樣的 prompt、seed、設定仍是確定的（此時 draft 數量策略改用固定的合成週期成本，不看牆鐘時間；並發請求共用 draft 數量，可能互相影響輸出）。`WHIRL_RELAX=0` 關閉；MoE 模型略過（每輪只有一個 MTP draft，量不到收益；`WHIRL_RELAX=1` 強制開） | dense MTP 模型 | dense MTP 模型 |
 | `headq`、`moeskip`、`a8`、`a4` | fast | 低位元輸出頭、略過 MoE 專家、W4A8 / W4A4 prefill | 尚未實作 | 尚未實作 |
 | `q8dec` | balance、fast | decode / verify GEMV 的 activation 用 int8（每 32 個值一個 f32 scale，同 llama.cpp 的 q8_1；balance 與 fast 一律包含） | 開 | 開 |
@@ -77,12 +87,12 @@ precise 模式關閉 `q8dec`：decode、MTP / n-gram 驗證與並發 batch 的�
 不適用於該 GPU 或模型的項目會記錄為略過（不會出錯）。啟動 log 會有一行，例如
 
 ```
-numerics: balance - enabled: fp8, gdnwmma, h16, kvq8 (auto: q8v, then q8h, when f16 does not fit); skipped: moefp8 (dense model); ...
+numerics: balance - enabled: fp8, gdnwmma, h16, kvq8 (q8h KV (int8 + f16 scale / 32, Hadamard-rotated q/k)); skipped: moefp8 (dense model); ...
 ```
 
 伺服器在 `GET /props` 回報模式（`"numerics": {"mode", "label", "enabled", "skipped", "overrides", "kv", "decode", "always_on"}`；`decode` 是 `f16` 或 `q8dec`）。
 [7.6](#env-numerics) 的單項變數（`WHIRL_FP8`、`WHIRL_MOE_FP8`、`WHIRL_GDN_WMMA`、`WHIRL_FFN_H16`、`WHIRL_Q4_RELAXED`）與
-`WHIRL_KV` 仍然有效，而且會覆寫模式；在 precise 模式下設成有損的值，log 會標示 `user-requested`，模式顯示為 `precise+overrides`。
+除錯用的 `WHIRL_KV`（[7.7](#env-debug)）仍然有效，而且會覆寫模式；在 precise 模式下設成有損的值，log 會標示 `user-requested`，模式顯示為 `precise+overrides`。
 在 precise 與 balance 模式內（以及 fast 加 `WHIRL_RELAX=0`），MTP / n-gram 解碼等於純 greedy 解碼，並發請求等於單獨執行；fast 開著 `relaxacc` 時輸出取決於 draft。
 
 ## <a id="chat"></a>2. `whirl chat`
@@ -298,7 +308,7 @@ Invoke-RestMethod http://127.0.0.1:8080/v1/chat/completions -Method Post -Conten
 | 2 | 指令列有誤 | 未知選項、缺少 `MODEL.gguf`、提示 + `--max-tokens` 超過 `--ctx`、`--host` 不是這台電腦的位址 |
 | 3 | GPU / 驅動程式問題 | 沒有 AMD GPU、沒有這張 GPU 架構的 kernel、`amdhip64_7.dll` 不存在或太舊（請安裝 AMD Software: Adrenalin Edition 26.8.1 或更新版）、GPU 忙碌中 |
 | 4 | 模型檔問題 | 找不到檔案、不是 GGUF、不支援的架構（只支援 `qwen35` / `qwen35moe`）、不支援的 tensor 型別（例如 NVFP4）、檔案不完整 |
-| 5 | GPU 記憶體不足 | 權重或 KV 快取放不下：試試較小的 `--ctx`、`WHIRL_KV=q8v`，或減少伺服器 slot |
+| 5 | GPU 記憶體不足 | 權重或 KV 快取放不下：試試較小的 `--ctx`、減少伺服器 slot，或改用較小的量化 |
 | 6 | 伺服器 port 已被占用 | 已有其他程式在 `--host`:`--port` 監聽（載入模型前就會檢查）：改用別的 `--port` |
 
 執行檔在需要時才載入 AMD GPU runtime（`amdhip64_7.dll`，隨顯示卡驅動程式安裝），並在啟動時先檢查，所以驅動
@@ -308,7 +318,7 @@ Invoke-RestMethod http://127.0.0.1:8080/v1/chat/completions -Method Post -Conten
 ## <a id="env"></a>7. 環境變數
 
 兩支程式都以 `WHIRL_<名稱>` 讀取每個變數。在
-PowerShell 中先用 `$env:WHIRL_KV = "q8v"` 設定再啟動程式。**一般使用完全不需要設定**；預設值就是測試過、
+PowerShell 中先用 `$env:WHIRL_MODE = "precise"` 設定再啟動程式。**一般使用完全不需要設定**；預設值就是測試過、
 最快的路徑。標示 *（A/B）* 或 *（診斷）* 的變數是給實驗與量測用的。
 
 ### 7.1 GPU 與載入
@@ -320,7 +330,6 @@ PowerShell 中先用 `$env:WHIRL_KV = "q8v"` 設定再啟動程式。**一般使
 | `WHIRL_GPU_SHARE=1` | 不等待同一張 GPU 上的其他 WHIRL 行程 |
 | `WHIRL_GPU_WAIT=S` | 等待其他 WHIRL 行程釋放 GPU 的秒數（預設 1800） |
 | `WHIRL_MODE=precise\|balance\|fast[:項目]` | 數值模式（= `--precise` / `--balance` / `--fast` / `--mode`；預設 balance）。見[數值模式](#modes) |
-| `WHIRL_KV=auto\|f16\|q8\|q8h\|q8v` | KV 快取格式。`auto`（預設）：f16；balance / fast 模式下 f16 放不下時，dense 模型依序退到 q8v、q8h；MoE 一律 f16。precise 模式下設成 q8 類的值屬於使用者明確要求的有損覆寫。Radeon 8060S 沒有 q8v / q8h kernel：那裡 auto 會退到 q8，指定 `q8v` / `q8h` 會被拒絕。見 [kv-and-caching.md](kv-and-caching.md#formats) |
 | `WHIRL_PREFILL_BATCH=N` | 每次 forward 的 prefill 列數（預設 4096，最多 16384） |
 | `WHIRL_MAX_CTX=N` | `chat` 的預設 context 大小（= `--ctx`；預設 8192） |
 | `WHIRL_CODE_OBJECT=FILE` | 開發用：從這個 code object 載入 GPU kernel，取代內建的 |
@@ -372,7 +381,7 @@ PowerShell 中先用 `$env:WHIRL_KV = "q8v"` 設定再啟動程式。**一般使
 | `WHIRL_SYS_LCP=0` | 不在多個 session 共同的前綴處建立檢查點 |
 | `WHIRL_CKPT_HOST=1` | 前綴檢查點放在 pinned 主記憶體，不放 VRAM |
 | `WHIRL_POOL_RESERVE_MB=N` | 決定 KV 池大小時保留不用的 VRAM（預設 768，MoE 1536） |
-| `WHIRL_VRAM_HEADROOM_MB=N` | 在上述保留之外，再留給桌面與其他程式的 VRAM。VRAM 小於 20 GiB 的卡（16 GB 的 RX 9070／9070 XT／9060 XT，通常同時負責顯示）預設 1536，這類卡的伺服器也預設 `--parallel 1`、KV 自動模式優先選 q8v（`WHIRL_KV=f16` 仍可強制 f16）；20 GiB 以上的卡預設 0，行為不變。0 = 不保留 |
+| `WHIRL_VRAM_HEADROOM_MB=N` | 在上述保留之外，再留給桌面與其他程式的 VRAM。VRAM 小於 20 GiB 的卡（16 GB 的 RX 9070／9070 XT／9060 XT，通常同時負責顯示）預設 1536，這類卡的伺服器也預設 `--parallel 1`（KV 格式跟其他卡一樣由模式決定）；20 GiB 以上的卡預設 0，行為不變。0 = 不保留 |
 | `WHIRL_PREFILL_CHUNK=N` | 合併後單次 prefill forward 的最多列數（1024 的倍數，預設 2048） |
 | `WHIRL_SEG_PREFILL=0` | 每個請求各自 prefill，不把多個請求放進同一次 forward |
 | `WHIRL_GATHER_MS=MS` | 收集一波新請求的等待時間窗（預設 30，0 = 關閉） |
@@ -441,10 +450,11 @@ PowerShell 中先用 `$env:WHIRL_KV = "q8v"` 設定再啟動程式。**一般使
 | `WHIRL_ATTN_WIDE=0` | 驗證 attention 每群最多 16 欄（`attn_wsplit1`），不用最多 32 欄的 `attn_wsplit2` |
 | `WHIRL_ATTN_DQ4=0` | 8060S 的 q4 KV：decode / 驗證 attention 改回 `attn_wsplit1_q4`（0.2.0 之前），不用 `attn_dq4` |
 
-### 7.7 診斷
+### <a id="env-debug"></a>7.7 診斷與除錯
 
 | 變數 | 說明 |
 |---|---|
+| `WHIRL_KV=f16\|q8\|q8h\|q8v\|q4` | *（除錯）* 強制使用某種 KV 快取格式，取代模式的選擇（[數值模式](#modes)）；`auto` 或未設定 = 由模式決定。強制的格式不做容量檢查（pool 依剩餘記憶體決定），precise 模式下設成量化格式會記為使用者要求的有損覆寫。GPU 沒有對應 kernel 的格式會被拒絕（R9700：`q4`）。見 [kv-and-caching.md](kv-and-caching.md#formats) |
 | `WHIRL_TOKENIZE_ONLY=1` | 印出提示的 token id 後停止 |
 | `WHIRL_PRINT_IDS=1` | 印出生成的 token id 與其 FNV-1a 雜湊 |
 | `WHIRL_PROFILE=1` | 各類運算的 GPU 時間；會扭曲速度數字（`whirl bench`：每個 prefill 長度各一份；伺服器：1 或 2） |

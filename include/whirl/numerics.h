@@ -6,12 +6,13 @@
 //    prefill, f32 DeltaNet chunks, f16 KV on every card (never quantized unless the user sets
 //    WHIRL_KV). If f16 KV does not fit, the context shrinks (when not given explicitly) or the load
 //    stops with a message pointing to --balance / a shorter context.
-//  - balance: the speed-oriented defaults of v0.1.x / v0.2.0-rc exactly (MXFP4 fp8 prefill
-//    activations, MoE expert fp8, f16-WMMA DeltaNet, f16 GEMM intermediates, automatic int8 KV
-//    when f16 does not fit).
+//  - balance: the speed-oriented defaults (MXFP4 fp8 prefill activations, MoE expert fp8,
+//    f16-WMMA DeltaNet, f16 GEMM intermediates); KV q8h on dense models, f16 on MoE models.
 //  - fast: balance plus aggressive gated items (4-bit KV, relaxed speculative acceptance, ...).
-//    Implemented: kvq4 (4-bit KV on the Radeon 8060S). The others are listed as skipped; with no
-//    fast item enabled fast runs as balance.
+//    Implemented: kvq4 (4-bit KV where the code object has it: Radeon 8060S; elsewhere fast keeps
+//    f16 KV until there are q4 kernels) and relaxacc. The others are listed as skipped.
+// KV format: fixed per mode and model type (chooseKv), never switched by what fits: a format that
+// does not fit shrinks the context (when not given) or refuses. WHIRL_KV is a debug override.
 // Items not applicable to the device or model are listed as skipped, never an error.
 // The pure parts (parsing, the capability table, KV / context decisions) live here for unit tests.
 
@@ -35,7 +36,7 @@ enum class Item : std::uint8_t {
     moefp8,   // MoE routed experts (MXFP4) with fp8 activations in prefill
     gdnwmma,  // f16-WMMA DeltaNet chunked prefill (vs the f32 chunk path)
     h16,      // f16 FFN / DeltaNet GEMM outputs before the elementwise ops
-    kvq8,     // KV auto may pick int8 (q8v / q8h; q8 on the Radeon 8060S) when f16 does not fit
+    kvq8,     // dense models: q8h KV (int8 K and V + f16 scale / 32, Hadamard-rotated q / k)
     specsample,  // temperature > 0: MTP drafts drawn from the draft distribution, accepted with min(1, p/q)
                  // (same output distribution as plain sampling, not the same tokens for a seed)
     // fast items (kvq4 and relaxacc implemented, the rest not yet)
@@ -130,7 +131,38 @@ std::string propsJson(const Plan& p, std::string_view kv);
 // the mode label: "precise", "precise+overrides", "balance", "fast (runs as balance)"
 std::string modeLabel(const Plan& p);
 
-// ---- KV decisions in precise mode (f16 only)
+// ---- KV format (BAL-Q8): one fixed format per mode x model type, CLI and server alike
+
+enum class KvKind : std::uint8_t { f16, q8, q8h, q8v, q4 };
+const char* kvKindName(KvKind k);
+// "f16" | "q8" | "q8h" | "q8v" | "q4" (nullopt for anything else, including "auto")
+std::optional<KvKind> kvKindFromName(std::string_view s);
+// KV kernels in the code object (f16 and q8 are always there)
+struct KvCaps {
+    bool q8h = false;
+    bool q8v = false;
+    bool q4 = false;
+};
+struct KvChoice {
+    KvKind kv = KvKind::f16;
+    bool debug = false;  // WHIRL_KV chose it (debug override: no fit check, sizing as before)
+    std::string why;     // "balance, dense model: q8h"
+};
+// The request's KV format: WHIRL_KV (forced) wins; else kvq4 -> q4 (where the kernels exist,
+// else f16: R9700 has no q4 KV kernels yet, and int8 is no stand-in), dense and MoE; else kvq8 on
+// a dense model -> q8h (q8 where the code object has no q8h kernels);
+// else f16 (precise, MoE in balance). Independent of free memory and card size.
+KvChoice chooseKv(const Request& r, bool moe, const KvCaps& caps, std::optional<KvKind> forced);
+
+// Wording of the "does not fit" messages for the chosen format
+struct KvFitLabel {
+    std::string mode = "precise";
+    std::string fmt = "f16";
+    std::string alt = "--balance allows int8 KV";  // a lower-precision alternative the user may choose ("" = none)
+};
+KvFitLabel kvFitLabel(const Request& r, bool moe, KvKind kv);
+
+// ---- KV fit (every mode: the chosen format only, never a lower-precision one)
 
 // CLI / bench: f16 KV for `ctx` tokens next to `later` bytes in `free` bytes.
 // Fits -> ctx unchanged. Else when ctx was not given explicitly: the largest page-aligned context
@@ -142,7 +174,7 @@ struct CtxFit {
     std::string msg;
 };
 CtxFit cliCtxFit(std::uint32_t ctx, bool ctx_explicit, std::uint32_t min_ctx, std::uint64_t free, std::uint64_t later,
-                 std::uint64_t f16_per_token, std::uint32_t page);
+                 std::uint64_t per_token, std::uint32_t page, const KvFitLabel& lb = {});
 
 // Server: f16 pool from the usable VRAM. pool_req = --ctx (explicit) or the UMA default pool;
 // slot_ctx = per-request context; *_explicit = given on the command line.
@@ -154,7 +186,7 @@ struct PoolFit {
     bool refuse = false;
     std::string msg;  // warning (shrunk) or error (refuse)
 };
-PoolFit serverPoolFit(std::uint64_t avail, std::uint64_t f16_per_token, std::optional<std::uint32_t> pool_req, bool pool_explicit,
-                      std::uint32_t slot_ctx, bool slot_explicit, std::uint32_t page, std::uint32_t pool_cap);
+PoolFit serverPoolFit(std::uint64_t avail, std::uint64_t per_token, std::optional<std::uint32_t> pool_req, bool pool_explicit,
+                      std::uint32_t slot_ctx, bool slot_explicit, std::uint32_t page, std::uint32_t pool_cap, const KvFitLabel& lb = {});
 
 }  // namespace whirl::numerics

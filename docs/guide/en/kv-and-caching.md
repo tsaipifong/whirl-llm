@@ -66,8 +66,8 @@ list and return to the free list only after the copy's fence.
 |---|---|---|---|---|
 | `f16` | f16 | f16 | 68 KiB | exact |
 | `q8` | int8 + f16 scale per 32 | same | 36.1 KiB | |
-| `q8h` | as q8, after a 256-dim Walsh–Hadamard rotation of q and k | int8 | 36.1 KiB | rotation spreads K's outlier channels |
-| `q8v` | f16 | int8 + f16 scale per 32 | 52.1 KiB | **current default for the dense model** |
+| `q8h` | as q8, after a 256-dim Walsh–Hadamard rotation of q and k | int8 | 36.1 KiB | rotation spreads K's outlier channels; **balance default for dense models** |
+| `q8v` | f16 | int8 + f16 scale per 32 | 52.1 KiB | debug override only (`WHIRL_KV=q8v`); the server default before 0.2.x BAL-Q8 |
 
 **Quantization happens once, at write.** In `kv_st32`, one wave of 32 lanes is exactly one scale
 group: wave max → `scale = amax / 127` stored as f16 → `q = round(x / scale)`. Every read
@@ -136,16 +136,31 @@ f16 or slightly faster. The prefill cost is in V (the PV product), where q8v and
 the dequantization cost is gone: q8h decode at 125,853 tokens went from 24.09 to 25.99 tok/s (+7.9%,
 bit-identical).
 
-### <a id="kv-auto"></a>3.3 The automatic policy
+### <a id="kv-auto"></a>3.3 Which format: fixed per mode
 
-- **MoE model: always f16.** Its single-prompt KL under q8 was far above its own path noise (77× at
-  p12k; 50× even with q8h), so precision mode keeps f16, even though QA showed no difference.
-  `q8h` remains a QA-validated option for a larger MoE pool. (With 22 KiB/token the MoE f16 pool is
-  already ~340k tokens.)
-- **Dense model:** the first of **f16 → q8v → q8h** whose *floor pool* fits (§4). With the default
-  four slots that is q8v; `--parallel 1` gets f16; `--ctx-per-slot 262144` gets q8h.
-- The CLI decides from its maximum context the same way (16k and 128k CLI runs use f16).
-- Forcing a format (`WHIRL_KV=f16|q8|q8h|q8v`) prints a warning if the pool ends up below the floor.
+Each numerics mode has one KV format per model type, decided at load before the kernels are loaded
+(`numerics::chooseKv`, shared by the CLI and the server). It does not depend on the card's size or on
+what fits:
+
+| Mode | Dense | MoE |
+|---|---|---|
+| precise | f16 | f16 |
+| balance (default) | q8h | f16 |
+| fast | q4 (Radeon 8060S); R9700: f16 until it has q4 KV kernels | q4 (8060S); R9700: f16 |
+
+- **Dense, balance: q8h.** Its KL against f16 is 0.0002–0.002 (KL-1), i.e. near lossless, and it
+  halves the KV bytes, so one 128k request plus a second long one fit on a 32 GB card without
+  reshuffling formats.
+- **MoE: f16** in precise and balance. Its single-prompt KL under q8 was far above its own path
+  noise (77× at p12k; 50× even with q8h), and Ornith with q8 missed the gate on Chinese 128k
+  (KL-1). (With 22 KiB/token the MoE f16 pool is already ~340k tokens.)
+- **Does not fit:** when the chosen format cannot hold the context, the context (CLI) or the pool and
+  per-request context (server) are lowered with a warning if they were not given, else the program
+  stops with a message (exit code 5). There is no automatic fallback to a lower-precision format;
+  before BAL-Q8 the dense model fell through f16 → q8v → q8h, and cards under 20 GiB preferred q8v.
+- `WHIRL_KV=f16|q8|q8h|q8v|q4` is a **debug override** ([usage 7.7](../../usage.md#env-debug)): it
+  replaces the mode's choice, skips the fit check and prints a warning if the pool ends up below the
+  floor.
 
 ## <a id="floor"></a>4. The 128k + 64k floor rule
 
@@ -177,7 +192,8 @@ memory by default and declares its size (`%LOCALAPPDATA%\whirl\pinned\<pid>.txt`
 subtracts it (`WHIRL_EMBD_HOST=0` keeps it in VRAM; outputs are bitwise identical either way).
 
 Server defaults that follow: dense 27B → `--parallel 4`, ≤ 131,072 tokens per request
-(`--ctx-per-slot`, max 262,144), q8v. MoE → f16, 131,072 per request, pool ~341k tokens.
+(`--ctx-per-slot`, max 262,144), q8h in balance (q8v before BAL-Q8). MoE → f16, 131,072 per request,
+pool ~341k tokens.
 
 **Radeon 8060S (unified memory) defaults.** The server's KV pool defaults to 262,144 tokens
 (f16 for every model: 17 GiB for the dense 27B) instead of "all VRAM left": on a 100 GiB UMA device

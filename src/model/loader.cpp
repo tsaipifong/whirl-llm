@@ -1,7 +1,7 @@
 // Weight loader and buffer / KV-pool / sequence management.
 // SPDX-License-Identifier: Apache-2.0
 // Reimplements the WHIRL Zig research prototype's model/qwen35.zig (Model.load, Loader, allocKvPool,
-// setKvFormat, setupSeqs, snapshots, requantMtpQ4, buildDraftHeadEx).
+// setupSeqs, snapshots, requantMtpQ4, buildDraftHeadEx).
 
 #include "whirl/model.h"
 #include "whirl/vram_limit.h"
@@ -285,8 +285,18 @@ void Model::ensureSnapshots(u32 n) {
 
 namespace {
 
-bool kvQ8(KvMode m) { return m == KvMode::q8 || m == KvMode::q8h || m == KvMode::q8v || m == KvMode::q4; }
-bool kvRot(KvMode m) { return m == KvMode::q8h || m == KvMode::q4; }
+// LoadOptions / WHIRL_KV -> the forced format for numerics::chooseKv (automatic: the mode decides)
+std::optional<numerics::KvKind> kvKindOf(KvMode m) {
+    switch (m) {
+        case KvMode::f16: return numerics::KvKind::f16;
+        case KvMode::q8: return numerics::KvKind::q8;
+        case KvMode::q8h: return numerics::KvKind::q8h;
+        case KvMode::q8v: return numerics::KvKind::q8v;
+        case KvMode::q4: return numerics::KvKind::q4;
+        case KvMode::automatic: break;
+    }
+    return std::nullopt;
+}
 
 std::string readWhole(const std::string& path) { return readFile(path); }
 
@@ -438,21 +448,19 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
     KvMode kvm = opt.kv_mode;
     if (kvm == KvMode::automatic) kvm = kvModeFromEnv().value_or(KvMode::automatic);
     m.kv_mode = kvm;
-    m.kv_q8 = kvQ8(kvm);
-    m.kv_rot = kvRot(kvm);
-    m.kv_kf16 = kvm == KvMode::q8v;
-    m.kv_q4 = kvm == KvMode::q4;
     {
-        // an explicit KV format the code object has no kernels for (gfx1201: q4)
+        // KV format: fixed per mode x model type (numerics::chooseKv, shared by CLI and server;
+        // WHIRL_KV is a debug override). Decided once, here, before the kernel table is loaded,
+        // and never switched afterwards (no fallback to a lower-precision format when it does
+        // not fit: the context shrinks or the load stops, below / in the server).
         const kernels::Caps caps = kernels::Caps::probe(m.module);
-        // fast mode item kvq4 with KV auto: 4-bit KV wherever the code object has it (gfx1151),
-        // dense and MoE alike, CLI and server (the server then sizes its pool in q4). Decided
-        // before the kernel table is loaded (a second KernelTable in this frame overflows the stack).
-        if (kvm == KvMode::automatic && opt.numerics.has(numerics::Item::kvq4) && caps.kv_q4) {
-            m.kv_q4 = true;
-            m.kv_q8 = true;
-            m.kv_rot = true;
-        }
+        m.kv_choice = numerics::chooseKv(opt.numerics, cfg.moe, numerics::KvCaps{caps.kv_q8h, caps.kv_q8v, caps.kv_q4}, kvKindOf(kvm));
+        const numerics::KvKind kv = m.kv_choice.kv;
+        m.kv_q8 = kv != numerics::KvKind::f16;
+        m.kv_rot = kv == numerics::KvKind::q8h || kv == numerics::KvKind::q4;
+        m.kv_kf16 = kv == numerics::KvKind::q8v;
+        m.kv_q4 = kv == numerics::KvKind::q4;
+        // an explicit KV format the code object has no kernels for (gfx1201: q4)
         if ((m.kv_kf16 && !caps.kv_q8v) || (m.kv_q4 && !caps.kv_q4) || (m.kv_rot && !m.kv_q4 && !caps.kv_q8h))
             throw ModelError("UnsupportedKvFormat", std::string(m.kv_kf16 ? "q8v" : m.kv_q4 ? "q4" : "q8h") +
                                                         " KV needs kernels this GPU does not have; use WHIRL_KV=f16, q8 or auto");
@@ -670,55 +678,30 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
         m.moe_sx = m.alloc(B * Kx * f4);
     }
     // KV pool for max_ctx tokens, one sequence with an identity page table (the
-    // server loads with max_ctx 0 and allocates its shared pool later).
-    // auto, dense: f16 if it fits next to what the CLI still allocates (MTP
-    // snapshot sets for 8 drafts, the 2-bit draft head) plus a 768 MiB margin,
-    // else q8v, else q8h (formats the code object lacks are skipped; q8 last).
+    // server loads with max_ctx 0 and allocates its shared pool later). The format chosen above
+    // must fit next to what the CLI still allocates (MTP snapshot sets for 8 drafts, the 2-bit
+    // draft head) plus a 768 MiB margin: else the context shrinks when it was not given, or the
+    // load stops (never a lower-precision format). WHIRL_KV (debug): no check, as before.
     if (max_ctx_req > 0) {
-        if (m.kvAutoDense() && !m.kvQuantAuto()) {
-            // precise: f16 KV always; shrink the context when it was not given, else refuse
+        if (!m.kv_choice.debug) {
             const hip::MemInfo mi = hip::memInfo();
             u64 n_gdn = 0;
             for (u32 i = 0; i < cfg.n_layer; ++i)
                 if (m.ssm_state[i] != 0) n_gdn += 1;
             const u64 later = 8 * n_gdn * (m.convBytes() + m.ssmBytes()) + static_cast<u64>(cfg.n_vocab) * cfg.n_embd * 5 / 16 + (768ull << 20);
-            const numerics::CtxFit cf =
-                numerics::cliCtxFit(max_ctx_req, opt.ctx_explicit, opt.min_ctx, mi.free, later, m.kvBytesPerTokenFmt(false, false), kv_page);
-            if (cf.refuse) throw ModelError("KvF16DoesNotFit", cf.msg);
+            const numerics::CtxFit cf = numerics::cliCtxFit(max_ctx_req, opt.ctx_explicit, opt.min_ctx, mi.free, later, m.kvBytesPerToken(), kv_page,
+                                                            numerics::kvFitLabel(opt.numerics, cfg.moe, m.kv_choice.kv));
+            if (cf.refuse) throw ModelError("KvDoesNotFit", cf.msg);
             if (cf.shrunk) {
                 max_ctx_req = cf.ctx;
                 m.max_ctx = cf.ctx;
                 m.load_note = "warning: " + cf.msg + "\n";
-            }
-        } else if (m.kvAutoDense()) {
-            const hip::MemInfo mi = hip::memInfo();
-            u64 n_gdn = 0;
-            for (u32 i = 0; i < cfg.n_layer; ++i)
-                if (m.ssm_state[i] != 0) n_gdn += 1;
-            const u64 later = 8 * n_gdn * (m.convBytes() + m.ssmBytes()) + static_cast<u64>(cfg.n_vocab) * cfg.n_embd * 5 / 16 + (768ull << 20);
-            const u64 toks = (static_cast<u64>(max_ctx_req) + kv_page - 1) / kv_page * kv_page;
-            if (toks * m.kvBytesPerTokenFmt(false, false) + later > mi.free) {
-                if (m.k.caps.kv_q8v && toks * m.kvBytesPerTokenFmt(true, true) + later <= mi.free)
-                    m.setKvFormat(true, false, true);
-                else
-                    m.setKvFormat(true, m.k.caps.kv_q8h, false);
             }
         }
         m.allocKvPool(max_ctx_req);
     }
     hip::sync();
     return mp;
-}
-
-bool Model::kvAutoDense() const { return kv_mode == KvMode::automatic && !cfg.moe && !kv_q4; }
-
-void Model::setKvFormat(bool q8, bool rot, bool kf16, bool q4) {
-    if (pool_pages != 0) throw ModelError("KvPoolAllocated");
-    kv_q4 = q4;
-    kv_q8 = q8 || q4;
-    kv_rot = q4 || (q8 && rot && !kf16);
-    kv_kf16 = q8 && kf16 && !q4;
-    k = loadKernels(module, kv_q8, kv_rot, kv_kf16, kv_q4);
 }
 
 u64 Model::kvBytesPerTokenFmt(bool q8, bool kf16, bool q4) const {

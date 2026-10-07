@@ -20,7 +20,7 @@ constexpr std::array<ItemInfo, n_items> k_items = {{
     {"moefp8", "MoE expert prefill GEMMs with fp8 activations"},
     {"gdnwmma", "f16-WMMA DeltaNet prefill chunks"},
     {"h16", "f16 FFN / DeltaNet GEMM outputs"},
-    {"kvq8", "int8 KV when f16 does not fit"},
+    {"kvq8", "q8h KV on dense models"},
     {"specsample", "race-coupled sampled MTP drafts (temperature > 0)"},
     {"kvq4", "4-bit KV"},
     {"relaxacc", "relaxed speculative acceptance"},
@@ -203,9 +203,7 @@ Plan plan(const Request& r, const Target& t) {
                 break;
             case Item::kvq8:
                 if (t.moe) why = "MoE models keep f16 KV";
-                else if (t.k_kv_q8v && t.k_kv_q8h) note = "auto: q8v, then q8h, when f16 does not fit";
-                else if (t.k_kv_q8v) note = "auto: q8v, then q8, when f16 does not fit";
-                else note = "auto: q8 when f16 does not fit";
+                else note = t.k_kv_q8h ? "q8h KV (int8 + f16 scale / 32, Hadamard-rotated q/k)" : "q8 KV (int8 + f16 scale / 32)";
                 break;
             case Item::specsample:
                 if (!t.mtp) why = "no MTP head";
@@ -213,7 +211,8 @@ Plan plan(const Request& r, const Target& t) {
                 else note = "temperature > 0: race sampler (other tokens for a seed than precise), text independent of drafts";
                 break;
             case Item::kvq4:
-                if (!t.k_kv_q4) why = t.gfx1151 ? "no q4 KV kernels in this code object" : "no 4-bit KV kernels on this GPU (Radeon 8060S only)";
+                if (!t.k_kv_q4)
+                    why = t.gfx1151 ? "no q4 KV kernels in this code object" : "no 4-bit KV kernels on this GPU yet (Radeon 8060S only): f16 KV";
                 else if (t.kv_explicit) why = "WHIRL_KV picks the KV format";
                 else note = "q4: int4 + f16 scale / 32, Hadamard-rotated q/k";
                 break;
@@ -330,46 +329,117 @@ std::string propsJson(const Plan& p, std::string_view kv) {
     return b;
 }
 
+const char* kvKindName(KvKind k) {
+    switch (k) {
+        case KvKind::f16: return "f16";
+        case KvKind::q8: return "q8";
+        case KvKind::q8h: return "q8h";
+        case KvKind::q8v: return "q8v";
+        case KvKind::q4: return "q4";
+    }
+    return "f16";
+}
+
+std::optional<KvKind> kvKindFromName(std::string_view s) {
+    if (s == "f16") return KvKind::f16;
+    if (s == "q8") return KvKind::q8;
+    if (s == "q8h") return KvKind::q8h;
+    if (s == "q8v") return KvKind::q8v;
+    if (s == "q4") return KvKind::q4;
+    return std::nullopt;
+}
+
+KvChoice chooseKv(const Request& r, bool moe, const KvCaps& caps, std::optional<KvKind> forced) {
+    KvChoice c;
+    const char* model = moe ? "MoE model" : "dense model";
+    if (forced) {
+        c.kv = *forced;
+        c.debug = true;
+        c.why = std::format("WHIRL_KV={} (debug override)", kvKindName(*forced));
+        return c;
+    }
+    // int8 with rotation where the code object has it, else plain int8 (every code object has q8)
+    const KvKind q8 = caps.q8h ? KvKind::q8h : KvKind::q8;
+    if (r.has(Item::kvq4)) {
+        if (caps.q4) {
+            c.kv = KvKind::q4;
+            c.why = std::format("{}, {}: q4", modeName(r.mode), model);
+        } else {
+            // no q4 KV kernels in this code object (R9700 / gfx1201 until FAST-1c): f16, the KV
+            // fast had there before (no int8 stand-in for q4)
+            c.kv = KvKind::f16;
+            c.why = std::format("{}, {}: f16 (no q4 KV kernels on this GPU yet)", modeName(r.mode), model);
+        }
+        return c;
+    }
+    if (r.has(Item::kvq8) && !moe) {
+        c.kv = q8;
+        c.why = std::format("{}, {}: {}", modeName(r.mode), model, kvKindName(q8));
+        return c;
+    }
+    c.kv = KvKind::f16;
+    c.why = std::format("{}, {}: f16", modeName(r.mode), model);
+    return c;
+}
+
+KvFitLabel kvFitLabel(const Request& r, bool moe, KvKind kv) {
+    KvFitLabel l;
+    l.mode = modeName(r.mode);
+    l.fmt = kvKindName(kv);
+    // a lower-precision mode only helps where it changes the format (precise, dense: balance is q8h)
+    l.alt = r.mode == Mode::precise && !moe && kv == KvKind::f16 ? "--balance allows int8 KV" : "";
+    return l;
+}
+
+namespace {
+
+// "alt; tail" or "tail"
+std::string altThen(const KvFitLabel& lb, std::string_view tail) {
+    return lb.alt.empty() ? std::string(tail) : lb.alt + "; " + std::string(tail);
+}
+// " (alt)" or ""
+std::string orAlt(const KvFitLabel& lb) { return lb.alt.empty() ? std::string() : " (" + lb.alt + ")"; }
+
+}  // namespace
+
 CtxFit cliCtxFit(std::uint32_t ctx, bool ctx_explicit, std::uint32_t min_ctx, std::uint64_t free, std::uint64_t later,
-                 std::uint64_t f16_per_token, std::uint32_t page) {
+                 std::uint64_t per_token, std::uint32_t page, const KvFitLabel& lb) {
     CtxFit r;
     r.ctx = ctx;
     const std::uint64_t toks = (static_cast<std::uint64_t>(ctx) + page - 1) / page * page;
-    if (f16_per_token == 0 || toks * f16_per_token + later <= free) return r;
+    if (per_token == 0 || toks * per_token + later <= free) return r;
     const std::uint64_t room = free > later ? free - later : 0;
-    const std::uint64_t fit = room / f16_per_token / page * page;
-    const std::string what = std::format("f16 KV for {} tokens needs {:.2f} GiB, about {:.2f} GiB of GPU memory is left for it", ctx,
-                                         gib(toks * f16_per_token), gib(room));
+    const std::uint64_t fit = room / per_token / page * page;
+    const std::string what = std::format("{} KV for {} tokens needs {:.2f} GiB, about {:.2f} GiB of GPU memory is left for it", lb.fmt, ctx,
+                                         gib(toks * per_token), gib(room));
     if (!ctx_explicit && fit >= std::max<std::uint64_t>(min_ctx, page)) {
         r.ctx = static_cast<std::uint32_t>(std::min<std::uint64_t>(fit, ctx));
         r.shrunk = true;
-        r.msg = std::format("precise mode keeps the KV cache in f16: {}; context lowered to {} tokens (--balance allows int8 KV; "
-                            "--ctx N sets the context)",
-                            what, r.ctx);
+        r.msg = std::format("{} mode keeps the KV cache in {}: {}; context lowered to {} tokens ({})", lb.mode, lb.fmt, what, r.ctx,
+                            altThen(lb, "--ctx N sets the context"));
         return r;
     }
     r.refuse = true;
-    r.msg = std::format("precise mode keeps the KV cache in f16: {} (room for about {} tokens). Use a shorter --ctx, or --balance "
-                        "(int8 KV when f16 does not fit)",
-                        what, fit);
+    r.msg = std::format("{} mode keeps the KV cache in {}: {} (room for about {} tokens). Use a shorter --ctx{}", lb.mode, lb.fmt, what, fit,
+                        orAlt(lb));
     return r;
 }
 
-PoolFit serverPoolFit(std::uint64_t avail, std::uint64_t f16_per_token, std::optional<std::uint32_t> pool_req, bool pool_explicit,
-                      std::uint32_t slot_ctx, bool slot_explicit, std::uint32_t page, std::uint32_t pool_cap) {
+PoolFit serverPoolFit(std::uint64_t avail, std::uint64_t per_token, std::optional<std::uint32_t> pool_req, bool pool_explicit,
+                      std::uint32_t slot_ctx, bool slot_explicit, std::uint32_t page, std::uint32_t pool_cap, const KvFitLabel& lb) {
     PoolFit r;
     r.slot_ctx = slot_ctx;
-    const std::uint64_t by_mem = f16_per_token ? std::min<std::uint64_t>(avail / f16_per_token, pool_cap) / page * page : 0;
+    const std::uint64_t by_mem = per_token ? std::min<std::uint64_t>(avail / per_token, pool_cap) / page * page : 0;
     bool from_mem = !pool_req;
     if (pool_req) {
-        if (static_cast<std::uint64_t>(*pool_req) * f16_per_token <= avail) {
+        if (static_cast<std::uint64_t>(*pool_req) * per_token <= avail) {
             r.pool = *pool_req;
         } else if (pool_explicit) {
             r.refuse = true;
-            r.msg = std::format("precise mode keeps the KV cache in f16: a pool of {} tokens (--ctx) needs {:.2f} GiB, about {:.2f} GiB of "
-                                "GPU memory is usable (room for about {} tokens). Use a smaller --ctx, or --balance (int8 KV when f16 "
-                                "does not fit)",
-                                *pool_req, gib(static_cast<std::uint64_t>(*pool_req) * f16_per_token), gib(avail), by_mem);
+            r.msg = std::format("{} mode keeps the KV cache in {}: a pool of {} tokens (--ctx) needs {:.2f} GiB, about {:.2f} GiB of "
+                                "GPU memory is usable (room for about {} tokens). Use a smaller --ctx{}",
+                                lb.mode, lb.fmt, *pool_req, gib(static_cast<std::uint64_t>(*pool_req) * per_token), gib(avail), by_mem,
+                                orAlt(lb));
             return r;
         } else {
             r.pool = static_cast<std::uint32_t>(by_mem);
@@ -381,29 +451,28 @@ PoolFit serverPoolFit(std::uint64_t avail, std::uint64_t f16_per_token, std::opt
     }
     if (r.pool < 4096) {
         r.refuse = true;
-        r.msg = std::format("not enough GPU memory left for an f16 KV cache: a pool of {} tokens (at least 4096 needed).\n"
-                            "  Use a smaller model or quantization, --balance (int8 KV), a shorter context, or close other programs "
-                            "that use the GPU.",
-                            r.pool);
+        r.msg = std::format("not enough GPU memory left for a {} KV cache ({} mode): a pool of {} tokens (at least 4096 needed).\n"
+                            "  Use a smaller model or quantization, a shorter context{}, or close other programs that use the GPU.",
+                            lb.fmt, lb.mode, r.pool, lb.alt.empty() ? std::string() : ", " + lb.alt);
         return r;
     }
     if (from_mem && r.pool < r.slot_ctx) {
         if (slot_explicit) {
             r.refuse = true;
-            r.msg = std::format("precise mode keeps the KV cache in f16: --ctx-per-slot {} does not fit, the f16 pool holds about {} "
-                                "tokens. Use a smaller --ctx-per-slot, or --balance (int8 KV when f16 does not fit)",
-                                r.slot_ctx, r.pool);
+            r.msg = std::format("{} mode keeps the KV cache in {}: --ctx-per-slot {} does not fit, the {} pool holds about {} "
+                                "tokens. Use a smaller --ctx-per-slot{}",
+                                lb.mode, lb.fmt, r.slot_ctx, lb.fmt, r.pool, orAlt(lb));
             return r;
         }
         r.slot_ctx = r.pool;
         r.shrunk_ctx = true;
     }
     if (r.shrunk_pool || r.shrunk_ctx)
-        r.msg = std::format("precise mode keeps the KV cache in f16: pool {} tokens{}{} (--balance allows int8 KV: a longer pool; "
-                            "--ctx / --ctx-per-slot choose explicitly)",
-                            r.pool, r.shrunk_pool ? std::format(" (wanted {})", pool_req.value_or(0)) : std::string(),
+        r.msg = std::format("{} mode keeps the KV cache in {}: pool {} tokens{}{} ({})", lb.mode, lb.fmt, r.pool,
+                            r.shrunk_pool ? std::format(" (wanted {})", pool_req.value_or(0)) : std::string(),
                             r.shrunk_ctx ? std::format(", context per request lowered to {} tokens (wanted {})", r.slot_ctx, slot_ctx)
-                                         : std::string());
+                                         : std::string(),
+                            altThen(lb, "--ctx / --ctx-per-slot choose explicitly"));
     return r;
 }
 

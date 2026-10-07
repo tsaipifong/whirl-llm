@@ -42,7 +42,7 @@ DeltaNet 狀態本身每個序列是固定大小，與上下文長度無關。se
 | `f16` | f16 | f16 | 68 KiB | 精確 |
 | `q8` | int8 + 每 32 個一個 f16 scale | 同左 | 36.1 KiB | |
 | `q8h` | 同 q8，但先對 q 與 k 做 256 維 Walsh–Hadamard 旋轉 | int8 | 36.1 KiB | 旋轉把 K 的離群通道攤開 |
-| `q8v` | f16 | int8 + 每 32 個一個 f16 scale | 52.1 KiB | **dense 模型目前的預設** |
+| `q8v` | f16 | int8 + 每 32 個一個 f16 scale | 52.1 KiB | 只用於除錯覆寫（`WHIRL_KV=q8v`）；BAL-Q8 之前是 server 的預設 |
 
 **量化只在寫入時做一次。** 在 `kv_st32` 中，一個 32 lane 的 wave 恰好是一個 scale 群組：wave 最大值 → `scale = amax / 127` 以 f16 儲存 → `q = round(x / scale)`。每次讀取都以一次 f16 乘法反量化；WMMA 仍吃 f16。kernel 以格式為模板參數（f16 / q8 / q8v），因此 f16 仍然可用。
 
@@ -91,12 +91,20 @@ KV 位元組減半反而讓 decode **變慢**：split-K decode kernel 內部對 
 
 **更新（0.1.3）**：改用 magic number 的 K 轉換（`kv_dq8`，[kernels.md](kernels.md#decode-attn)）後，反量化成本消失：125,853 token 時 q8h decode 從 24.09 提高到 25.99 tok/s（+7.9%，逐位元相同）。
 
-### <a id="kv-auto"></a>3.3 自動選擇策略
+### <a id="kv-auto"></a>3.3 用哪種格式：每個模式固定
 
-- **MoE 模型：一律 f16。** 它在 q8 下的單一提示詞 KL 遠高於自身的路徑雜訊（p12k 時 77 倍；即使用 q8h 也有 50 倍），因此精確模式保留 f16，儘管 QA 沒有顯示差異。`q8h` 仍是經 QA 驗證、可換取更大 MoE 池的選項。（以 22 KiB/token 計，MoE 的 f16 池已約 340k token。）
-- **Dense 模型：** 依 **f16 → q8v → q8h** 的順序，選第一個*下限池*放得下的格式（§4）。預設四個 slot 時是 q8v；`--parallel 1` 得到 f16；`--ctx-per-slot 262144` 得到 q8h。
-- CLI 依其最大上下文以同樣方式決定（16k 與 128k 的 CLI 執行使用 f16）。
-- 強制指定格式（`WHIRL_KV=f16|q8|q8h|q8v`）時，若池最後低於下限，會印出警告。
+每個數值模式對每種模型類型只有一種 KV 格式，在載入時、載入 kernel 之前決定（`numerics::chooseKv`，CLI 與 server 共用），與卡的大小、放不放得下都無關：
+
+| 模式 | Dense | MoE |
+|---|---|---|
+| precise | f16 | f16 |
+| balance（預設） | q8h | f16 |
+| fast | q4（Radeon 8060S）；R9700 在有 q4 KV kernel 之前用 f16 | q4（8060S）；R9700：f16 |
+
+- **Dense、balance：q8h。** 相對 f16 的 KL 是 0.0002–0.002（KL-1），近乎無損，而且 KV 位元組減半，32 GB 卡上一個 128k 請求加上另一個長請求都放得下，不必換格式。
+- **MoE：precise 與 balance 都用 f16。** 它在 q8 下的單一提示詞 KL 遠高於自身的路徑雜訊（p12k 時 77 倍；即使 q8h 也有 50 倍），Ornith 用 q8 在中文 128k 也沒過門檻（KL-1）。（以 22 KiB/token 計，MoE 的 f16 池已約 340k token。）
+- **放不下時：** 選定的格式放不下要求的 context，沒有指定時就降低 context（CLI）或池與每個請求的 context（server）並發出警告；有指定就停止並說明（結束代碼 5）。不會自動改用更低精度的格式；BAL-Q8 之前 dense 模型會依 f16 → q8v → q8h 退下去，20 GiB 以下的卡則優先 q8v。
+- `WHIRL_KV=f16|q8|q8h|q8v|q4` 是**除錯用覆寫**（[usage 7.7](usage.md#env-debug)）：取代模式的選擇、不做容量檢查，池低於下限時會印出警告。
 
 ## <a id="floor"></a>4. 128k + 64k 下限規則
 
@@ -112,7 +120,7 @@ KV 位元組減半反而讓 decode **變慢**：split-K decode kernel 內部對 
 
 為保住 f16 而考慮過的無損 VRAM 節省手段：prefill batch 4096 → 3072 可省 0.52 GiB 且無速度代價（3072 vs 4096：4k +1.2%、16k −0.7%、64k 0.0%；2048 則慢 1.3–2.0%）；暫存緩衝區共用別名（估計 ≤ 0.75 GiB，未實作）；檢查點減半（0.78 GiB，會傷害前綴快取）。合起來仍不夠讓 f16 放得下，所以用 q8v。另外也量測過並否決：prefill batch 8192（長提示詞受 attention 限制，並沒有更快；+2.1 GiB）、把檢查點放在 pinned host 記憶體（鎖頁主機記憶體）（檢查點存取要約 40 ms，因為是 96 次小複製、約 3.75 GB/s，agent 回合 −25%）。token embedding 放在 pinned host 記憶體，當初唯一的否決理由是 pinned 記憶體會顯示為共享使用量（Shared Usage，[windows-hip.md](windows-hip.md#shared-usage)）；自 0.1.3 起 server 預設就把它放在 pinned host 記憶體，並宣告其大小（`%LOCALAPPDATA%\whirl\pinned\<pid>.txt`）讓監控扣除（`WHIRL_EMBD_HOST=0` 則留在 VRAM；兩種方式輸出逐位元相同）。
 
-由此得出的 server 預設：dense 27B → `--parallel 4`、每個請求 ≤ 131,072 token（`--ctx-per-slot`，上限 262,144）、q8v。MoE → f16、每個請求 131,072、池約 341k token。
+由此得出的 server 預設：dense 27B → `--parallel 4`、每個請求 ≤ 131,072 token（`--ctx-per-slot`，上限 262,144）、balance 用 q8h（BAL-Q8 之前是 q8v）。MoE → f16、每個請求 131,072、池約 341k token。
 
 **Radeon 8060S（統一記憶體）的預設。** server 的 KV pool 預設 262,144 token（每個模型都是 f16：dense 27B 為
 17 GiB），而不是「剩下的全部 VRAM」：在 100 GiB 的 UMA 裝置上，剩下的就是大部分系統記憶體。那裡的 host 層預設**關閉**：

@@ -56,14 +56,27 @@ One mode per process, chosen at start-up (`--precise`, `--balance`, `--fast`, or
 environment variable `WHIRL_MODE=precise|balance|fast`; the command line wins). It applies to
 `chat`, `bench`, `selftest`, `seqtest` and the server alike, on the R9700 and the Radeon 8060S.
 With no mode given the process runs **balance**; `--precise` and `--fast` are opt-in (`--balance`
-is still accepted). The small-card rules (cards under 20 GiB) follow the active mode: in balance
-(the default) dense models prefer q8v KV there as before; `--precise` keeps f16 KV.
+is still accepted).
+
+**KV cache format: fixed per mode and model type**, the same on every card (32 GB, 16 GB, the
+8060S) and for `chat`, `bench` and the server alike:
+
+| Mode | Dense models | MoE models |
+|---|---|---|
+| precise | f16 | f16 |
+| balance (default) | q8h (int8 K and V + one f16 scale per 32 values, Hadamard-rotated q / k; KL vs f16 0.0002–0.002) | f16 |
+| fast | q4 (Radeon 8060S); R9700: f16 until its q4 KV kernels exist | q4 (Radeon 8060S); R9700: f16 |
+
+The format is never switched by what fits: when the chosen format cannot hold the context, the
+context is lowered with a warning if you did not give it, or the program stops with a message (exit
+code 5) if you did (`--ctx`, `--ctx-per-slot`). It never falls back to a lower-precision format by
+itself. Cards under 20 GiB only get one server slot and VRAM headroom by default.
 
 | Mode | What it does |
 |---|---|
 | **precise** (`--precise`) | The GGUF weights are dequantized to f16; prefill activations and accumulation are f16 / f32; DeltaNet prefill uses the f32 chunk path; **the KV cache is always f16** on every card. Decode, MTP / n-gram verify and other small batches use f16 activations into the same f16 GEMM as prefill (f32 accumulation; no int8 activations). Nothing is quantized beyond the file's own weights. If f16 KV does not fit, the context is lowered with a warning when you did not give it, or the program stops with a message (exit code 5) when you did (`--ctx`, `--ctx-per-slot`) — it never switches to int8 KV by itself |
-| **balance** (default; `--balance`) | The default when no mode is given: the speed-oriented behaviour of WHIRL 0.1.x / 0.2.0-rc, exactly: the items below. The output may differ slightly from precise (measured KL / accuracy in [quantization.md](guide/en/quantization.md)) |
-| **fast** | balance plus more aggressive lossy items that must pass KL + paired-accuracy gates first. None is implemented yet: they are listed as skipped and fast currently runs as balance |
+| **balance** (default; `--balance`) | The default when no mode is given: the speed-oriented items below, with q8h KV on dense models and f16 KV on MoE models. The output may differ slightly from precise (measured KL / accuracy in [quantization.md](guide/en/quantization.md)) |
+| **fast** | balance plus more aggressive lossy items that must pass KL + paired-accuracy gates first. Implemented: `kvq4` (Radeon 8060S) and `relaxacc`; the others are listed as skipped |
 
 Items (pick a subset with `--balance=fp8,kvq8` or `--fast=...`; `WHIRL_MODE=balance:fp8,kvq8`):
 
@@ -73,9 +86,9 @@ Items (pick a subset with `--balance=fp8,kvq8` or `--fast=...`; `WHIRL_MODE=bala
 | `moefp8` | balance | MoE expert prefill GEMMs with fp8 activations | MXFP4 MoE (Ornith MXFP4) | skipped |
 | `gdnwmma` | balance | f16-WMMA DeltaNet prefill chunks instead of the f32 chunk path | MXFP4 models | skipped (no kernel yet) |
 | `h16` | balance | f16 FFN / DeltaNet GEMM outputs before the element-wise ops | MXFP4 models | f16 weights only |
-| `kvq8` | balance | KV auto may pick int8 when f16 does not fit: q8v (K f16, V int8), then q8h; and q8v first on cards under 20 GiB | dense models | q8 (dense models) |
+| `kvq8` | balance | q8h KV on dense models, always (not only when f16 does not fit); MoE models keep f16 | dense models | dense models |
 | `specsample` | balance | Requests with temperature > 0: tokens are sampled by a race keyed by (seed, position, token) and MTP drafts are drawn from the draft head's distribution (same temperature / top-k / top-p / min-p) by the same race, accepted only when they equal the sampled token: exact sampling, acceptance close to the optimum, and the text for a seed does not depend on drafts (MTP on == off). The sequence for a seed differs from precise's sampler. Off (precise): inverse-CDF sampler, greedy drafts. Greedy (temperature 0) is unchanged in every mode | MTP models | MTP models |
-| `kvq4` | fast | 4-bit KV (int4 + one f16 scale per 32 values, Hadamard-rotated q / k); on the 8060S decode attention reads it through `attn_dq4` (~180 GB/s): Ornith-1.5-35B-A3B MXFP4 decode at 128k 58.5 tok/s (f16 KV 32.7), at 64k 67.0 (46.4) | skipped (no kernels) | dense and MoE |
+| `kvq4` | fast | 4-bit KV (int4 + one f16 scale per 32 values, Hadamard-rotated q / k); on the 8060S decode attention reads it through `attn_dq4` (~180 GB/s): Ornith-1.5-35B-A3B MXFP4 decode at 128k 58.5 tok/s (f16 KV 32.7), at 64k 67.0 (46.4) | skipped (no q4 kernels yet: f16 KV) | dense and MoE |
 | `relaxacc` | fast | Relaxed speculative acceptance (MTP drafts; n-gram drafts stay exact). A relaxed acceptance is refused when it would end in a 6-gram already among the last 4096 tokens (repetition guard). Greedy: a draft that is not the verify row's argmax is still kept when it is among the row's top `WHIRL_RELAX_K` tokens (default 4) and p(draft) >= `WHIRL_RELAX_ALPHA` x p(argmax) (default 0.1); the token after the last kept draft is always the target's own argmax. Temperature > 0: typical acceptance (Medusa): keep the draft when p(draft) >= min(`WHIRL_RELAX_EPS` 0.09, `WHIRL_RELAX_DELTA` 0.3 x exp(-entropy)) on the request's filtered distribution (`specsample` is not used then). **Changes greedy output**: fast greedy is not plain greedy and MTP != plain; it stays deterministic for the same prompt, seed and settings (the draft-count policy then uses a fixed synthetic cycle cost, not wall-clock times; concurrent requests share draft counts and can change each other's output). `WHIRL_RELAX=0` turns it off; MoE models skip it (one MTP draft per cycle, no measured gain; `WHIRL_RELAX=1` forces it) | dense MTP models | dense MTP models |
 | `headq`, `moeskip`, `a8`, `a4` | fast | low-bit output head, MoE expert skipping, W4A8 / W4A4 prefill | not yet implemented | not yet implemented |
 | `q8dec` | balance, fast | int8 activations (one f32 scale per 32 values, as llama.cpp's q8_1) in the decode / verify GEMV (always part of balance and fast) | on | on |
@@ -88,12 +101,12 @@ model in precise mode instead of falling back to int8. Items that do not apply t
 start-up log shows one line, e.g.
 
 ```
-numerics: balance - enabled: fp8, gdnwmma, h16, kvq8 (auto: q8v, then q8h, when f16 does not fit); skipped: moefp8 (dense model); ...
+numerics: balance - enabled: fp8, gdnwmma, h16, kvq8 (q8h KV (int8 + f16 scale / 32, Hadamard-rotated q/k)); skipped: moefp8 (dense model); ...
 ```
 
 and the server reports the mode in `GET /props` (`"numerics": {"mode", "label", "enabled", "skipped", "overrides", "kv", "decode", "always_on"}`; `decode` is `f16` or `q8dec`).
 The per-item variables of [7.6](#env-numerics) (`WHIRL_FP8`, `WHIRL_MOE_FP8`, `WHIRL_GDN_WMMA`,
-`WHIRL_FFN_H16`, `WHIRL_Q4_RELAXED`) and `WHIRL_KV` still work and override the mode; in precise
+`WHIRL_FFN_H16`, `WHIRL_Q4_RELAXED`) and the debug variable `WHIRL_KV` ([7.7](#env-debug)) still work and override the mode; in precise
 mode a lossy value is logged as `user-requested` and the mode reads `precise+overrides`.
 MTP / n-gram decoding equals plain greedy decoding, and concurrent requests equal solo runs, within
 each mode in precise and balance (and fast with `WHIRL_RELAX=0`; with `relaxacc` the fast output
@@ -337,7 +350,7 @@ distinct exit code:
 | 2 | bad command line | unknown option, missing `MODEL.gguf`, prompt + `--max-tokens` longer than `--ctx`, a `--host` address that does not belong to this computer |
 | 3 | GPU / driver problem | no AMD GPU, no kernels for this GPU's architecture, `amdhip64_7.dll` missing or too old (install AMD Software: Adrenalin Edition 26.8.1 or newer), GPU busy |
 | 4 | model file problem | file not found, not a GGUF, unsupported architecture (only `qwen35` / `qwen35moe`), unsupported tensor type (for example NVFP4), truncated file |
-| 5 | out of GPU memory | weights or KV cache do not fit: try a smaller `--ctx`, `WHIRL_KV=q8v`, or fewer server slots |
+| 5 | out of GPU memory | weights or KV cache do not fit: try a smaller `--ctx`, fewer server slots, or a smaller quantization |
 | 6 | server port in use | another program listens on `--host`:`--port` (checked before the model loads): use another `--port` |
 
 The executables load the AMD GPU runtime (`amdhip64_7.dll`, installed with the graphics driver)
@@ -347,7 +360,7 @@ Windows "DLL not found" dialog. Everything else, including the C++ runtime, is l
 ## <a id="env"></a>7. Environment variables
 
 Every variable is read as `WHIRL_<NAME>` by both programs. Set them in PowerShell with
-`$env:WHIRL_KV = "q8v"` before starting the program. **Normal use needs none of them**; the
+`$env:WHIRL_MODE = "precise"` before starting the program. **Normal use needs none of them**; the
 defaults are the tested, fastest paths. Variables marked *(A/B)* or *(diagnostic)* exist for
 experiments and measurements.
 
@@ -360,7 +373,6 @@ experiments and measurements.
 | `WHIRL_GPU_SHARE=1` | do not wait for other WHIRL processes on the same GPU |
 | `WHIRL_GPU_WAIT=S` | seconds to wait for another WHIRL process to free the GPU (default 1800) |
 | `WHIRL_MODE=precise\|balance\|fast[:ITEMS]` | numerics mode (= `--precise` / `--balance` / `--fast` / `--mode`; default balance). See [numerics modes](#modes) |
-| `WHIRL_KV=auto\|f16\|q8\|q8h\|q8v` | KV cache format. `auto` (default): f16; in balance / fast mode dense models fall back to q8v, then q8h, when f16 does not fit; MoE always f16. In precise mode a q8 value is a user-requested lossy override. The Radeon 8060S has no q8v / q8h kernels: auto falls back to q8 there, and `q8v` / `q8h` are refused. See [kv-and-caching.md](guide/en/kv-and-caching.md#formats) |
 | `WHIRL_PREFILL_BATCH=N` | prefill rows per forward (default 4096, up to 16384) |
 | `WHIRL_MAX_CTX=N` | default context size of `chat` (= `--ctx`; default 8192) |
 | `WHIRL_CODE_OBJECT=FILE` | development: load the GPU kernels from this code object instead of the built-in one |
@@ -414,7 +426,7 @@ The output always equals plain greedy decoding (with sampling: the same distribu
 | `WHIRL_SYS_LCP=0` | no checkpoints at prefixes common to sessions |
 | `WHIRL_CKPT_HOST=1` | keep prefix checkpoints in pinned host memory instead of VRAM |
 | `WHIRL_POOL_RESERVE_MB=N` | VRAM left free when the KV pool is sized (default 768, MoE 1536) |
-| `WHIRL_VRAM_HEADROOM_MB=N` | VRAM kept free for the desktop and other programs, on top of the reserve. Default 1536 on cards with less than 20 GiB (16 GB RX 9070 / 9070 XT / 9060 XT, which usually also drive the display), where the server also defaults to `--parallel 1` and KV auto picks q8v first (`WHIRL_KV=f16` still forces f16); 0 on larger cards, whose defaults are unchanged. 0 = no headroom |
+| `WHIRL_VRAM_HEADROOM_MB=N` | VRAM kept free for the desktop and other programs, on top of the reserve. Default 1536 on cards with less than 20 GiB (16 GB RX 9070 / 9070 XT / 9060 XT, which usually also drive the display), where the server also defaults to `--parallel 1` (the KV format is the mode's, as on any card); 0 on larger cards, whose defaults are unchanged. 0 = no headroom |
 | `WHIRL_PREFILL_CHUNK=N` | most rows per merged prefill forward (multiple of 1024, default 2048) |
 | `WHIRL_SEG_PREFILL=0` | prefill each request on its own instead of several in one forward |
 | `WHIRL_GATHER_MS=MS` | window to gather a burst of new requests (default 30, 0 = off) |
@@ -485,10 +497,11 @@ Alternatives kept for A/B tests and numerics comparisons. The lossy ones are the
 | `WHIRL_ATTN_WIDE=0` | verify attention groups of at most 16 columns (`attn_wsplit1`) instead of up to 32 (`attn_wsplit2`) |
 | `WHIRL_ATTN_DQ4=0` | q4 KV on the 8060S: decode / verify attention through `attn_wsplit1_q4` (before 0.2.0) instead of `attn_dq4` |
 
-### 7.7 Diagnostics
+### <a id="env-debug"></a>7.7 Diagnostics and debugging
 
 | Variable | Meaning |
 |---|---|
+| `WHIRL_KV=f16\|q8\|q8h\|q8v\|q4` | *(debug)* force a KV cache format instead of the mode's ([numerics modes](#modes)); `auto` or unset = the mode decides. A forced format skips the fit check (the pool is sized from what is free) and in precise mode a quantized value is logged as a user-requested lossy override. A format the GPU has no kernels for is refused (R9700: `q4`). See [kv-and-caching.md](guide/en/kv-and-caching.md#formats) |
 | `WHIRL_TOKENIZE_ONLY=1` | print the prompt token ids and stop |
 | `WHIRL_PRINT_IDS=1` | print the generated token ids and their FNV-1a hash |
 | `WHIRL_PROFILE=1` | per-op-class GPU time; distorts speed numbers (`whirl bench`: per prefill size; server: 1 or 2) |

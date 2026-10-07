@@ -637,17 +637,17 @@ void testCardDefaults() {
         vram::CardInput in;
         in.total = t;
         const vram::CardDefaults d = vram::cardDefaults(in);
-        CHECK(!d.small && d.parallel == 4 && !d.parallel_auto && !d.prefer_q8v && d.headroom == 0 && d.note.empty());
+        CHECK(!d.small && d.parallel == 4 && !d.parallel_auto && d.headroom == 0 && d.note.empty());
     }
-    // 16 GB card (or WHIRL_VRAM_LIMIT_MB=16384 / 14336): 1 slot, q8v first, 1536 MiB headroom
+    // 16 GB card (or WHIRL_VRAM_LIMIT_MB=16384 / 14336): 1 slot, 1536 MiB headroom; no KV preference (BAL-Q8)
     for (std::uint64_t t : {16 * GiB, 14336 * MiB, 20 * GiB - 1}) {
         vram::CardInput in;
         in.total = t;
         const vram::CardDefaults d = vram::cardDefaults(in);
-        CHECK(d.small && d.parallel == 1 && d.parallel_auto && d.prefer_q8v);
+        CHECK(d.small && d.parallel == 1 && d.parallel_auto);
         CHECK_EQ(d.headroom, 1536 * MiB);
         CHECK(d.note.find("small card") != std::string::npos && d.note.find("--parallel 1") != std::string::npos &&
-              d.note.find("q8v") != std::string::npos && d.note.find("1536 MiB") != std::string::npos);
+              d.note.find("KV") == std::string::npos && d.note.find("1536 MiB") != std::string::npos);
     }
     vram::CardInput s16;
     s16.total = 16 * GiB;
@@ -660,13 +660,6 @@ void testCardDefaults() {
         in.parallel_arg = 2;
         CHECK_EQ(vram::cardDefaults(in).parallel, 2u);
     }
-    // WHIRL_KV=f16 (or a MoE model): no q8v preference
-    {
-        vram::CardInput in = s16;
-        in.kv_auto = false;
-        const vram::CardDefaults d = vram::cardDefaults(in);
-        CHECK(d.small && !d.prefer_q8v && d.parallel == 1 && d.note.find("WHIRL_KV") != std::string::npos);
-    }
     // WHIRL_VRAM_HEADROOM_MB overrides, on small and large cards; 0 = none
     {
         vram::CardInput in = s16;
@@ -678,7 +671,7 @@ void testCardDefaults() {
         big.total = 32 * GiB;
         big.headroom_mb_env = 1024;
         const vram::CardDefaults d = vram::cardDefaults(big);
-        CHECK(!d.small && d.parallel == 4 && !d.prefer_q8v && d.headroom == 1024 * MiB && d.note.find("1024 MiB") != std::string::npos);
+        CHECK(!d.small && d.parallel == 4 && d.headroom == 1024 * MiB && d.note.find("1024 MiB") != std::string::npos);
     }
     // explicit WHIRL_POOL_RESERVE_MB: no default headroom (WHIRL_VRAM_HEADROOM_MB still adds one)
     {
@@ -696,17 +689,6 @@ void testCardDefaults() {
         CHECK(!d.small && d.parallel == 4 && d.headroom == 0);
         vram::CardInput z;
         CHECK(!vram::cardDefaults(z).small);
-    }
-    // small-card KV: q8v (full floor), q8v with a short pool (>= 64k tokens), else q8h
-    {
-        const std::uint64_t q8v = 28262;  // ~27.6 KiB/token (Ornith 9B)
-        const std::uint64_t floor = 131072 + 256;
-        CHECK(vram::smallCardKv(5 * GiB + 400 * MiB, floor, q8v) == vram::SmallKv::q8v);           // cap 16384
-        CHECK(vram::smallCardKv(3 * GiB + 400 * MiB, floor, q8v) == vram::SmallKv::q8v_short);     // cap 14336
-        CHECK(vram::smallCardKv(floor * q8v, floor, q8v) == vram::SmallKv::q8v);
-        CHECK(vram::smallCardKv(65536 * q8v, floor, q8v) == vram::SmallKv::q8v_short);
-        CHECK(vram::smallCardKv(65536 * q8v - 1, floor, q8v) == vram::SmallKv::q8h);
-        CHECK(vram::smallCardKv(1 * GiB, floor, 0) == vram::SmallKv::q8h);
     }
 }
 
@@ -801,7 +783,7 @@ void testNumerics() {
         const nu::Plan p8 = nu::plan(bal, s8060);  // never an error: skipped with a reason
         CHECK(!p8.on(Item::fp8) && !p8.on(Item::moefp8) && !p8.on(Item::gdnwmma) && p8.on(Item::h16) && p8.on(Item::kvq8));
         CHECK(p8.items[static_cast<std::size_t>(Item::fp8)].note.find("gfx1151") != std::string::npos);
-        CHECK(p8.items[static_cast<std::size_t>(Item::kvq8)].note == "auto: q8 when f16 does not fit");
+        CHECK(p8.items[static_cast<std::size_t>(Item::kvq8)].note.rfind("q8", 0) == 0);
         const std::string l = nu::logLine(p8);
         CHECK(l.find("numerics: balance - enabled: h16") == 0 && l.find("skipped: fp8 (") != std::string::npos);
     }
@@ -897,15 +879,76 @@ void testNumerics() {
         nu::PoolFit g = nu::serverPoolFit(GiB / 8, pt, std::nullopt, false, 131072, false, 256, 8 * 262144);  // < 4096 tokens
         CHECK(g.refuse && g.msg.find("--balance") != std::string::npos);
     }
-    // small card: int8 KV preference only when the mode allows it
+}
+
+// KV format (BAL-Q8): one fixed format per mode x model type, never by what fits
+void testKvChoice() {
+    namespace nu = whirl::numerics;
+    using K = nu::KvKind;
+    const nu::Request pre = nu::parseMode("precise", "t"), bal = nu::parseMode("balance", "t"), fast = nu::parseMode("fast", "t");
+    const nu::KvCaps r9700{true, true, false};  // gfx1201: q8h / q8v, no q4 yet
+    const nu::KvCaps s8060{true, true, true};   // gfx1151: q4 too
+    for (const nu::KvCaps& c : {r9700, s8060}) {
+        for (bool moe : {false, true}) {
+            CHECK(nu::chooseKv(pre, moe, c, std::nullopt).kv == K::f16);
+            CHECK(nu::chooseKv(bal, moe, c, std::nullopt).kv == (moe ? K::f16 : K::q8h));
+            // fast: q4 where the kernels exist; R9700: f16 as before (no int8 stand-in)
+            CHECK(nu::chooseKv(fast, moe, c, std::nullopt).kv == (c.q4 ? K::q4 : K::f16));
+            CHECK(!nu::chooseKv(bal, moe, c, std::nullopt).debug);
+        }
+    }
+    CHECK(nu::chooseKv(fast, false, r9700, std::nullopt).why.find("no q4 KV kernels") != std::string::npos);
+    CHECK(nu::chooseKv(bal, false, r9700, std::nullopt).why == "balance, dense model: q8h");
+    // a code object without q8h: plain q8 (never q8v)
+    CHECK(nu::chooseKv(bal, false, nu::KvCaps{false, true, false}, std::nullopt).kv == K::q8);
+    // custom item lists: kvq8 decides for balance, kvq4 for fast
+    CHECK(nu::chooseKv(nu::parseMode("balance:fp8", "t"), false, r9700, std::nullopt).kv == K::f16);
+    CHECK(nu::chooseKv(nu::parseMode("fast:kvq8", "t"), false, s8060, std::nullopt).kv == K::q8h);
+    // WHIRL_KV: debug override, any mode
+    const nu::KvChoice o = nu::chooseKv(pre, false, r9700, K::q8v);
+    CHECK(o.kv == K::q8v && o.debug && o.why.find("WHIRL_KV=q8v") != std::string::npos);
+    CHECK(nu::kvKindFromName("q8h") == K::q8h && !nu::kvKindFromName("auto") && !nu::kvKindFromName("q5"));
+
+    // does not fit: the chosen format only, shrink (implicit) or refuse (explicit); 32 GB vs 16 GB (simulated)
+    const std::uint64_t GiB = 1ull << 30;
+    const std::uint64_t f16_pt = 65536, q8h_pt = 34816;  // ~64 / 34 KiB/token
+    const nu::KvFitLabel lb_bal = nu::kvFitLabel(bal, false, K::q8h);
+    CHECK(lb_bal.mode == "balance" && lb_bal.fmt == "q8h" && lb_bal.alt.empty());
+    CHECK(nu::kvFitLabel(pre, false, K::f16).alt.find("--balance") != std::string::npos);
+    CHECK(nu::kvFitLabel(pre, true, K::f16).alt.empty());  // MoE: balance is f16 as well
+    {
+        // CLI: 32 GB card (~12 GiB left): 128k q8h fits, unchanged
+        const nu::CtxFit a = nu::cliCtxFit(131072, false, 1000, 13 * GiB, GiB, q8h_pt, 256, lb_bal);
+        CHECK(!a.shrunk && !a.refuse && a.ctx == 131072);
+        // 16 GB card (~4 GiB left): shrunk in q8h (not given) / refused (given), never a lower format
+        const nu::CtxFit b = nu::cliCtxFit(131072, false, 1000, 5 * GiB, GiB, q8h_pt, 256, lb_bal);
+        CHECK(b.shrunk && b.ctx == 4 * GiB / q8h_pt / 256 * 256 && b.msg.find("balance mode keeps the KV cache in q8h") == 0);
+        CHECK(b.msg.find("--balance") == std::string::npos);
+        const nu::CtxFit c = nu::cliCtxFit(131072, true, 1000, 5 * GiB, GiB, q8h_pt, 256, lb_bal);
+        CHECK(c.refuse && c.msg.find("q8h") != std::string::npos && c.msg.find("--ctx") != std::string::npos);
+        // MoE balance (f16) on 16 GB
+        const nu::CtxFit d = nu::cliCtxFit(131072, false, 1000, 5 * GiB, GiB, f16_pt, 256, nu::kvFitLabel(bal, true, K::f16));
+        CHECK(d.shrunk && d.ctx == 65536 && d.msg.find("balance mode keeps the KV cache in f16") == 0);
+    }
+    {
+        // server: 32 GB (~11 GiB) holds a 131072 request in q8h; 16 GB (~4 GiB): per-request ctx lowered / refused
+        const nu::PoolFit a = nu::serverPoolFit(11 * GiB, q8h_pt, std::nullopt, false, 131072, false, 256, 8 * 262144, lb_bal);
+        CHECK(!a.refuse && !a.shrunk_ctx && a.pool >= 131072 && a.msg.empty());
+        const nu::PoolFit b = nu::serverPoolFit(4 * GiB, q8h_pt, std::nullopt, false, 131072, false, 256, 8 * 262144, lb_bal);
+        CHECK(!b.refuse && b.shrunk_ctx && b.slot_ctx == b.pool && b.pool == 4 * GiB / q8h_pt / 256 * 256);
+        CHECK(b.msg.find("balance mode keeps the KV cache in q8h") == 0);
+        const nu::PoolFit c = nu::serverPoolFit(4 * GiB, q8h_pt, std::nullopt, false, 131072, true, 256, 8 * 262144, lb_bal);
+        CHECK(c.refuse && c.msg.find("--ctx-per-slot") != std::string::npos);
+        const nu::PoolFit d = nu::serverPoolFit(4 * GiB, q8h_pt, 262144u, true, 131072, false, 256, 8 * 262144, lb_bal);
+        CHECK(d.refuse && d.msg.find("q8h") != std::string::npos);
+        const nu::PoolFit e = nu::serverPoolFit(GiB / 16, q8h_pt, std::nullopt, false, 131072, false, 256, 8 * 262144, lb_bal);
+        CHECK(e.refuse && e.msg.find("q8h KV cache (balance mode)") != std::string::npos);
+    }
+    // the card's defaults carry no KV choice: 16 GB and 32 GB pick the same format
     {
         vram::CardInput in;
-        in.total = 16ull << 30;
-        in.kv_quant_ok = false;
-        const vram::CardDefaults d = vram::cardDefaults(in);
-        CHECK(d.small && !d.prefer_q8v && d.parallel == 1 && d.note.find("precise mode: f16 KV") != std::string::npos);
-        in.kv_quant_ok = true;
-        CHECK(vram::cardDefaults(in).prefer_q8v);
+        in.total = 16 * GiB;
+        CHECK(vram::cardDefaults(in).note.find("KV") == std::string::npos);
     }
 }
 
@@ -1252,6 +1295,7 @@ int main() {
     testVramLimit();
     testCardDefaults();
     testNumerics();
+    testKvChoice();
     testKernelFetchBounds();
     specsample_test::testSpecSample();
     std::printf("unit tests: %d passed, %d failed\n", g_pass, g_fail);
