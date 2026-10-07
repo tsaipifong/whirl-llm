@@ -677,10 +677,12 @@ void Model::attnBlock(const AttnW& a, const KvLayer& lkv, u32 n) {
             // (attn_wsplit1) or <= 32 (attn_wsplit2: one K/V pass for up to 32 / grp_q rows)
             // caps.attn_group1 (gfx1151): one query per group (its WMMA P.V is not exact
             // when a masked key carries a real V row), so a grouped verify row could differ
-            // q4 KV with attn_dq4 (FC-1c, gfx1201 too): every row its own group, so decode, verify and
-            // MTP rows all take attn_dq4 (a row's partials never depend on its batch)
+            // q4 KV with attn_dq4: every decode / verify / MTP row takes attn_dq4. gfx1151: one row per
+            // group (caps.attn_group1); gfx1201 (FC-1c): up to 32 columns (rows x GQA heads) per group,
+            // the rows of a group share one pass over K / V (a verify row's partials then differ in the
+            // last bits from the same row alone: lossy fast-mode path)
             const bool dq4_rows = kv_q4 && attn_dq4 && k.attn_dq4 != nullptr && grp_q <= 8;
-            const bool one_q = (dbg_flags & 4) != 0 || k.caps.attn_group1 || dq4_rows;
+            const bool one_q = (dbg_flags & 4) != 0 || k.caps.attn_group1;
             const bool known = row_n == n && n > 1;
             auto group = [&](u32 max_q, AwGroups& groups) {
                 u32 ng = 0, r = 0, widest = 0;
@@ -701,11 +703,11 @@ void Model::attnBlock(const AttnW& a, const KvLayer& lkv, u32 n) {
                 return std::pair<u32, u32>{ng, widest};
             };
             AwGroups groups;
-            const u32 max_q1 = one_q ? 1 : 16 / grp_q;
+            const u32 max_q1 = one_q ? 1 : dq4_rows ? std::max(1u, 32 / grp_q) : 16 / grp_q;
             hip::Function aw = k.attn_wsplit1;
             u32 ng = 0;
             bool wide = false;
-            if (!one_q && attn_wide && k.attn_wsplit2 != nullptr && known && 32 / grp_q > max_q1) {
+            if (!one_q && !dq4_rows && attn_wide && k.attn_wsplit2 != nullptr && known && 32 / grp_q > max_q1) {
                 const auto [ng2, widest2] = group(32 / grp_q, groups);
                 if (widest2 > max_q1) {
                     aw = k.attn_wsplit2;
@@ -715,7 +717,7 @@ void Model::attnBlock(const AttnW& a, const KvLayer& lkv, u32 n) {
             }
             if (!wide) ng = group(max_q1, groups).first;
             // q4 KV: attn_dq4 (one query per group, GQA group <= 8; lossy fast-mode path)
-            const bool dq4 = !wide && max_q1 == 1 && attn_dq4 && k.attn_dq4 != nullptr && grp_q <= 8;
+            const bool dq4 = dq4_rows && !wide && (max_q1 == 1 || !k.caps.attn_group1);
             hip::launch(dq4 ? k.attn_dq4 : aw, D(cfg.n_head_kv, n_split, ng), D(dq4 ? 256 : 128), 0, stream, qf, kva, part_ml, part_acc,
                         I(cfg.n_head), I(cfg.n_head_kv), I(2 * hd), pos_buf, scale, gate, groups);
         } else {

@@ -112,11 +112,19 @@ static void benchPrefill(Ctx& c) {
             const bool dqf = fmt == "dq";
             hip::Function fdq = dqf ? c.fnOpt("kv_dq_rows") : hip::Function{};
             if (dqf && !fdq) continue;
+            // fmt "dqs" (FC-1c): kv_dq_rows_r of key ranges of WHIRL_KT_BENCH_SEG rows (default 139264, the
+            // R9700 scratch at prefill batch 4096) + attn_kgs over each range (softmax state carried)
+            const bool dqs = fmt == "dqs";
+            hip::Function fdr = dqs ? c.fnOpt("kv_dq_rows_r") : hip::Function{};
+            if (dqs && !fdr) continue;
+            const int seg = std::getenv("WHIRL_KT_BENCH_SEG") ? std::atoi(std::getenv("WHIRL_KT_BENCH_SEG")) : 139264;
+            Buf dsk(dqs ? static_cast<std::size_t>(std::min(seg, L)) * nkv * hd * 2 : 16), dsv(dqs ? static_cast<std::size_t>(std::min(seg, L)) * nkv * hd * 2 : 16);
+            Buf dst(static_cast<std::size_t>(n) * heads * 2 * 4);
             std::vector<int> idt(static_cast<std::size_t>(pages) + 1);
             std::iota(idt.begin(), idt.end(), 0);
             Buf did(idt);
             wk::KvArgs a8 = a;
-            if (dqf) {
+            if (dqf || dqs) {
                 a8.k = dk8.p();
                 a8.v = dv8.p();
                 a8.ks = dks.p();
@@ -128,6 +136,19 @@ static void benchPrefill(Ctx& c) {
                 a.ptab = did.p();
             }
             auto launch = [&]() {
+                if (dqs) {
+                    for (int r0 = 0; r0 < L; r0 += seg) {
+                        const int r1 = std::min(L, r0 + seg), nr = r1 - r0;
+                        hip::launch(fdr, {cdiv(static_cast<std::uint64_t>(nr) * nkv * hd, 2048), 1, 1}, {256, 1, 1}, 0, c.s, a8, dsk.p(), dsv.p(), r0, nr,
+                                    nkv * hd);
+                        wk::KvArgs g = a;
+                        g.k = dsk.p() - static_cast<DevPtr>(r0) * nkv * hd * 2;
+                        g.v = dsv.p() - static_cast<DevPtr>(r0) * nkv * hd * 2;
+                        hip::launch(f, {static_cast<unsigned>(cdiv(n, 16)), static_cast<unsigned>(heads / kk.np), 1}, {static_cast<unsigned>(64 * kk.np), 1, 1},
+                                    0, c.s, dq.p(), g, out.p(), heads, nkv, qstride, dpos.p(), n, scale, 0, r0, r1, dst.p());
+                    }
+                    return;
+                }
                 if (dqf)
                     hip::launch(fdq, {cdiv(static_cast<std::uint64_t>(L) * nkv * hd, 2048), 1, 1}, {256, 1, 1}, 0, c.s, a8, dk16.p(), dv16.p(), L,
                                 nkv * hd);
@@ -150,7 +171,7 @@ static void benchPrefill(Ctx& c) {
             std::printf("   prefill %-22s (%3s) n %d L %6d: %9.1f us  %+6.1f%% vs first\n", name.c_str(), fmt.c_str(), n, L, us,
                         100.0 * (us / base_us - 1.0));
             std::fflush(stdout);
-            if (fmt == "q8" || dqf) {  // bitwise vs the first q8 kernel (attn_kg6_q8)
+            if (fmt == "q8" || dqf || dqs) {  // bitwise vs the first q8 kernel (attn_kg6_q8 or dq)
                 launch();
                 c.sync();
                 const auto o = out.down<float>(static_cast<std::size_t>(n) * heads * hd);

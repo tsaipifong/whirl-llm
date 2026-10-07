@@ -872,6 +872,7 @@ extern "C" __global__ void __launch_bounds__(128)
 #define DQ_NW 8
 #define DQ_C 8
 #define DQ_MAXS 128
+#define DQ_MC 32  // gfx1201: columns (verify rows x GQA heads) per block
 __device__ __forceinline__ int dq_per(int n_keys, int n_split) {
     const int ns = min(n_split, DQ_MAXS);
     return max(DQ_NW * 32, (n_keys + ns * 64 - 1) / (ns * 64) * 64);
@@ -891,9 +892,9 @@ extern "C" __global__ void __launch_bounds__(256)
     attn_dq4(const float *q, KvArgs kv, float *part_ml, float *part_acc, int n_head, int n_kv, int q_stride, const int *pos,
              float scale, const int *skip, AwGroups groups) {
     if (skip != nullptr && *skip) return;
-    __shared__ __align__(16) uint2 Q8[DQ_C][32];               // col, 8-value chunk: int8 x4 of the even / odd values
-    __shared__ float Qsc[DQ_C][8];                             // q scale per col, 32-group
-    __shared__ int Qs8[DQ_C][8];                               // 8 * sum of the group's q ints
+    __shared__ __align__(16) uint2 Q8[DQ_MC][32];              // col, 8-value chunk: int8 x4 of the even / odd values
+    __shared__ float Qsc[DQ_MC][8];                            // q scale per col, 32-group
+    __shared__ int Qs8[DQ_MC][8];                              // 8 * sum of the group's q ints
     __shared__ __align__(16) _Float16 Pw[DQ_NW][16][DQ_C][2];  // wave, key pair, col: p of the pair's keys
     __shared__ __align__(16) _Float16 Sv[DQ_NW][16][8][2];     // wave, key pair, group: V scales of the pair's keys
     __shared__ float Rm[DQ_NW][DQ_C], Rl[DQ_NW][DQ_C];
@@ -906,9 +907,16 @@ extern "C" __global__ void __launch_bounds__(256)
     const int z = lin % gridDim.z, gs = lin / gridDim.z;
     const int g = gs % gridDim.x, split = gs / gridDim.x, n_split = gridDim.y;
     const int grp = n_head / n_kv;
-    const int t = groups.first[z];
+    const int t = groups.first[z], count = groups.count[z];
+    // gfx1201 verify groups: count consecutive rows of one sequence, column c = (row c / grp, head
+    // c % grp), ncol <= DQ_MC; CC chunks of DQ_C columns, wave w takes chunk w % CC and key slice
+    // w / CC (CC = 1: the one-row kernel, every wave on its own key tiles); the waves of a chunk
+    // read the same K / V tiles (L0 / L2 hits), so the rows share one pass over K / V
+    const int ncol = count * grp;
+    const int CC = ncol <= DQ_C ? 1 : ncol <= 2 * DQ_C ? 2 : 4, KS = DQ_NW / CC;
+    const int cc = wid % CC, ks = wid / CC;
     const int tb = kv_tb(kv, t);
-    const int n_pos = pos[t] + 1;
+    const int n_pos = pos[t + count - 1] + 1;  // the group's last row
     int per = dq_per(n_pos, n_split);
     int b0 = split * per, b1 = min(n_pos, b0 + per);
     if (kv.win != 0 && n_split > 1) {  // MTP draft window: same key set as attn_wsplit1
@@ -927,19 +935,19 @@ extern "C" __global__ void __launch_bounds__(256)
     }
     const size_t ml_q = (size_t)n_split * n_head * 2, acc_q = (size_t)n_split * n_head * AW_D;
     if (b0 >= n_pos) {
-        if (threadIdx.x < grp) {
-            const int h = g * grp + threadIdx.x;
-            part_ml[t * ml_q + ((size_t)split * n_head + h) * 2 + 0] = -INFINITY;
-            part_ml[t * ml_q + ((size_t)split * n_head + h) * 2 + 1] = 0.f;
+        if (threadIdx.x < ncol) {
+            const int tr = t + threadIdx.x / grp, h = g * grp + threadIdx.x % grp;
+            part_ml[tr * ml_q + ((size_t)split * n_head + h) * 2 + 0] = -INFINITY;
+            part_ml[tr * ml_q + ((size_t)split * n_head + h) * 2 + 1] = 0.f;
         }
         return;
     }
     {
         // q -> int8 per 32 values: wave = column, lane = values [8 lane, 8 lane + 8)
-        const int c = wid;
+      for (int c = wid; c < DQ_C * CC; c += DQ_NW) {
         float x[8];
-        if (c < grp) {
-            const float *qr = q + ((size_t)t * n_head + g * grp + c) * q_stride + 8 * lane;
+        if (c < ncol) {
+            const float *qr = q + ((size_t)(t + c / grp) * n_head + g * grp + c % grp) * q_stride + 8 * lane;
             const float4 a = *(const float4 *)qr, b = *(const float4 *)(qr + 4);
             x[0] = a.x;
             x[1] = a.y;
@@ -975,6 +983,7 @@ extern "C" __global__ void __launch_bounds__(256)
             Qsc[c][lane >> 2] = qs;
             Qs8[c][lane >> 2] = 8 * sum;
         }
+      }
     }
     __syncthreads();
     const float sl2 = scale * 1.4426950408889634f;  // scores in base-2 units
@@ -986,9 +995,16 @@ extern "C" __global__ void __launch_bounds__(256)
 #pragma unroll
         for (int d = 0; d < 8; ++d) o[c][d] = 0.f;
     }
+    // this wave's columns: the last key each sees (padding columns: every key, as one row)
+    int cpos[DQ_C];
+#pragma unroll
+    for (int c = 0; c < DQ_C; ++c) {
+        const int cg = DQ_C * cc + c;
+        cpos[c] = cg < ncol ? pos[t + cg / grp] : n_pos - 1;
+    }
     const uint32_t M4 = 0x0f0f0f0fu;
     const int gl = lane >> 2;  // the 32-group of this lane's P.V dims
-    for (int k0 = b0 + wid * 32; k0 < b1; k0 += DQ_NW * 32) {
+    for (int k0 = b0 + ks * 32; k0 < b1; k0 += KS * 32) {
         const int dl = kv_delta(kv, tb, k0);  // 32-key tiles never straddle a page
         const int key = k0 + lane;
         const bool valid = key < b1;
@@ -1026,7 +1042,7 @@ extern "C" __global__ void __launch_bounds__(256)
             const float sk = (float)ksh[gi];
 #pragma unroll
             for (int c = 0; c < DQ_C; ++c) {
-                const uint4 qa = *(const uint4 *)&Q8[c][4 * gi + zo], qb = *(const uint4 *)&Q8[c][4 * gi + 2 + zo];
+                const uint4 qa = *(const uint4 *)&Q8[DQ_C * cc + c][4 * gi + zo], qb = *(const uint4 *)&Q8[DQ_C * cc + c][4 * gi + 2 + zo];
                 int S = 0;
                 S = __builtin_amdgcn_sudot4(true, (int)qa.x, false, (int)lo[0], S, false);
                 S = __builtin_amdgcn_sudot4(true, (int)qa.y, false, (int)hi[0], S, false);
@@ -1036,7 +1052,7 @@ extern "C" __global__ void __launch_bounds__(256)
                 S = __builtin_amdgcn_sudot4(true, (int)qb.y, false, (int)hi[2], S, false);
                 S = __builtin_amdgcn_sudot4(true, (int)qb.z, false, (int)lo[3], S, false);
                 S = __builtin_amdgcn_sudot4(true, (int)qb.w, false, (int)hi[3], S, false);
-                s[c] = fmaf((float)(S - Qs8[c][gi + zo]), Qsc[c][gi + zo] * sk, s[c]);
+                s[c] = fmaf((float)(S - Qs8[DQ_C * cc + c][gi + zo]), Qsc[DQ_C * cc + c][gi + zo] * sk, s[c]);
             }
             __builtin_amdgcn_sched_barrier(0);  // one group's q reads in flight at a time (no spills)
         }
@@ -1044,11 +1060,12 @@ extern "C" __global__ void __launch_bounds__(256)
         float p[DQ_C];
 #pragma unroll
         for (int c = 0; c < DQ_C; ++c) {
-            const float x = valid ? s[c] * sl2 : -INFINITY;
+            const float x = valid && key <= cpos[c] ? s[c] * sl2 : -INFINITY;
             const float mt = warp_max(x);
             const float mn = fmaxf(m[c], mt);
-            const float alpha = __builtin_amdgcn_exp2f(m[c] - mn);  // m = -inf: 0
-            p[c] = __builtin_amdgcn_exp2f(x - mn);
+            // m = -inf: alpha 0; mn = -inf (an earlier verify row, no visible key yet): a no-op
+            const float alpha = mn == -INFINITY ? 1.f : __builtin_amdgcn_exp2f(m[c] - mn);
+            p[c] = mn == -INFINITY ? 0.f : __builtin_amdgcn_exp2f(x - mn);
             ls[c] = ls[c] * alpha + p[c];
             m[c] = mn;
 #pragma unroll
@@ -1106,43 +1123,49 @@ extern "C" __global__ void __launch_bounds__(256)
 #pragma unroll
     for (int c = 0; c < DQ_C; ++c) {
         float M = -INFINITY;
-#pragma unroll
-        for (int w = 0; w < DQ_NW; ++w) M = fmaxf(M, Rm[w][c]);
+        for (int s2 = 0; s2 < KS; ++s2) M = fmaxf(M, Rm[s2 * CC + cc][c]);
         fac[c] = m[c] == -INFINITY ? 0.f : __builtin_amdgcn_exp2f(m[c] - M);
     }
-    for (int w = 0; w < DQ_NW; ++w) {
-        if (wid == w) {
-#pragma unroll
-            for (int c = 0; c < DQ_C; ++c) {
-                float4 *ap = (float4 *)&Acc[c][8 * lane];
-                const float4 z4 = make_float4(0.f, 0.f, 0.f, 0.f);
-                float4 x0 = w == 0 ? z4 : ap[0], x1 = w == 0 ? z4 : ap[1];
-                x0.x += fac[c] * o[c][0];
-                x0.y += fac[c] * o[c][1];
-                x0.z += fac[c] * o[c][2];
-                x0.w += fac[c] * o[c][3];
-                x1.x += fac[c] * o[c][4];
-                x1.y += fac[c] * o[c][5];
-                x1.z += fac[c] * o[c][6];
-                x1.w += fac[c] * o[c][7];
-                ap[0] = x0;
-                ap[1] = x1;
-            }
-        }
-        __syncthreads();
-    }
-    if (threadIdx.x < grp) {
-        const int c = threadIdx.x, h = g * grp + c;
+    if (threadIdx.x < ncol) {
+        const int cg = threadIdx.x, oc = cg / DQ_C, cl = cg % DQ_C;
+        const int tr = t + cg / grp, h = g * grp + cg % grp;
         float M = -INFINITY, L = 0.f;
-        for (int w = 0; w < DQ_NW; ++w) M = fmaxf(M, Rm[w][c]);
-        for (int w = 0; w < DQ_NW; ++w)
-            if (Rm[w][c] != -INFINITY) L += __builtin_amdgcn_exp2f(Rm[w][c] - M) * Rl[w][c];
-        part_ml[t * ml_q + ((size_t)split * n_head + h) * 2 + 0] = M * 0.6931471805599453f;  // natural-log units
-        part_ml[t * ml_q + ((size_t)split * n_head + h) * 2 + 1] = L;
+        for (int s2 = 0; s2 < KS; ++s2) M = fmaxf(M, Rm[s2 * CC + oc][cl]);
+        for (int s2 = 0; s2 < KS; ++s2)
+            if (Rm[s2 * CC + oc][cl] != -INFINITY) L += __builtin_amdgcn_exp2f(Rm[s2 * CC + oc][cl] - M) * Rl[s2 * CC + oc][cl];
+        part_ml[tr * ml_q + ((size_t)split * n_head + h) * 2 + 0] = M * 0.6931471805599453f;  // natural-log units
+        part_ml[tr * ml_q + ((size_t)split * n_head + h) * 2 + 1] = L;
     }
-    for (int i = threadIdx.x; i < grp * AW_D; i += blockDim.x) {
-        const int c = i / AW_D, d = i % AW_D, h = g * grp + c;
-        part_acc[t * acc_q + ((size_t)split * n_head + h) * AW_D + d] = Acc[c][d];
+    // chunk by chunk through Acc: the chunk's waves merged in key-slice order
+    for (int oc = 0; oc < CC; ++oc) {
+        for (int s2 = 0; s2 < KS; ++s2) {
+            if (wid == s2 * CC + oc) {
+#pragma unroll
+                for (int c = 0; c < DQ_C; ++c) {
+                    float4 *ap = (float4 *)&Acc[c][8 * lane];
+                    const float4 z4 = make_float4(0.f, 0.f, 0.f, 0.f);
+                    float4 x0 = s2 == 0 ? z4 : ap[0], x1 = s2 == 0 ? z4 : ap[1];
+                    x0.x += fac[c] * o[c][0];
+                    x0.y += fac[c] * o[c][1];
+                    x0.z += fac[c] * o[c][2];
+                    x0.w += fac[c] * o[c][3];
+                    x1.x += fac[c] * o[c][4];
+                    x1.y += fac[c] * o[c][5];
+                    x1.z += fac[c] * o[c][6];
+                    x1.w += fac[c] * o[c][7];
+                    ap[0] = x0;
+                    ap[1] = x1;
+                }
+            }
+            __syncthreads();
+        }
+        const int nin = min(DQ_C, ncol - DQ_C * oc);
+        for (int i = threadIdx.x; i < nin * AW_D; i += blockDim.x) {
+            const int cl = i / AW_D, d = i % AW_D, cg = DQ_C * oc + cl;
+            const int tr = t + cg / grp, h = g * grp + cg % grp;
+            part_acc[tr * acc_q + ((size_t)split * n_head + h) * AW_D + d] = Acc[cl][d];
+        }
+        if (oc + 1 < CC) __syncthreads();
     }
 }
 
