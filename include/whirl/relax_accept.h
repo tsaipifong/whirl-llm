@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
-// Relaxed speculative acceptance (numerics item relaxacc, fast mode only).
+// Relaxed speculative acceptance (numerics item relaxacc, fast mode only). MTP drafts only:
+// n-gram drafts copy the history, and relaxing them fed a repetition loop (FAST-2: a 13-line
+// duplicated import in 1 of 24 replies at k4/a0.1); they keep exact acceptance.
 //
 // Exact acceptance keeps a draft token only when it equals the token the target would pick
 // (greedy: the argmax of the verify row; sampling: the sampled token). relaxacc also keeps a
@@ -64,6 +66,23 @@ inline bool acceptGreedy(const Params& p, std::span<const std::int32_t> ids, std
     }
     if (rank >= p.topk()) return false;
     return std::exp(static_cast<double>(ld) - static_cast<double>(m)) >= static_cast<double>(p.alpha);
+}
+
+// Repetition guard: true when hist followed by tail ends in an n-gram (n = 6) that already occurs
+// earlier in the last `window` tokens. A relaxed (non-exact) acceptance never extends a repeat:
+// at k4/a0.1 relaxed drafts started duplicated-line loops that greedy then continued.
+inline bool extendsRepeat(std::span<const std::uint32_t> hist, std::span<const std::uint32_t> tail, std::size_t n = 6,
+                          std::size_t window = 4096) {
+    const std::size_t hn = hist.size() < window ? hist.size() : window;
+    const std::size_t s = hn + tail.size();
+    if (s < n + 1) return false;
+    auto at = [&](std::size_t i) { return i < hn ? hist[hist.size() - hn + i] : tail[i - hn]; };
+    for (std::size_t i = 0; i + n < s; ++i) {
+        std::size_t j = 0;
+        while (j < n && at(i + j) == at(s - n + j)) ++j;
+        if (j == n) return true;
+    }
+    return false;
 }
 
 // Typical acceptance threshold for a row with entropy h (nats).

@@ -617,7 +617,7 @@ DecodeResult specDecode(q::Model& model, const Tok& tok, u32 first, u32 n_prompt
             model.verifyEnqueueEx(next, nd_host, std::nullopt, p);
         verify_tokens += nd_host + 1;
         if (ng_n == 0) prev_nd = nd_host;
-        if (rx.on && nd_host > 0) {
+        if (rx.on && nd_host > 0 && ng_n == 0) {
             const hip::DevPtr ids = rx_dev, vals = rx_dev + static_cast<u64>(q::max_small_batch) * rk * 4,
                          stats = rx_dev + static_cast<u64>(q::max_small_batch) * rk * 8;
             hip::launch(rx_topk, hip::Dim3{nd_host, 1, 1}, hip::Dim3{1024, 1, 1}, 0, model.stream, model.logits,
@@ -644,17 +644,18 @@ DecodeResult specDecode(q::Model& model, const Tok& tok, u32 first, u32 n_prompt
         cycles += 1;
         drafted += nd;
         u32 acc = 0;
-        if (rx.on && nd > 0) hip::streamSync(model.stream);
+        if (rx.on && nd > 0 && ng_n == 0) hip::streamSync(model.stream);
         while (acc < nd) {
             if (outv[acc] == dr[acc]) {
                 acc += 1;
                 continue;
             }
-            if (!rx.on) break;
+            if (!rx.on || ng_n > 0) break;  // n-gram drafts copy the history: exact only (loops)
             const auto* rids = reinterpret_cast<const std::int32_t*>(rx_host.data()) + static_cast<std::size_t>(acc) * rk;
             const auto* rvals = reinterpret_cast<const float*>(rx_host.data() + static_cast<std::size_t>(q::max_small_batch) * rk * 4) + acc * rk;
             const auto* rst = reinterpret_cast<const float*>(rx_host.data() + static_cast<std::size_t>(q::max_small_batch) * rk * 8);
-            if (!whirl::relax::acceptGreedy(rx, std::span<const std::int32_t>(rids, rk), std::span<const float>(rvals, rk), rst[2 * acc], dr[acc]))
+            if (!whirl::relax::acceptGreedy(rx, std::span<const std::int32_t>(rids, rk), std::span<const float>(rvals, rk), rst[2 * acc], dr[acc]) ||
+                whirl::relax::extendsRepeat(std::span<const u32>(generated), std::span<const u32>(dr.data(), acc + 1)))
                 break;
             acc += 1;
             relaxed += 1;

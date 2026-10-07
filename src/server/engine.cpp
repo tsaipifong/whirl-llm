@@ -1672,6 +1672,15 @@ std::vector<std::uint32_t> planSlotDrafts(std::span<const DraftPlanSlot> slots, 
     return out;
 }
 
+// relaxacc repetition guard: would keeping draft dr[acc] (after sl.next and dr[0..acc)) end in
+// an n-gram already in the slot's recent tokens?
+bool Engine::relaxRepeats(const Slot& sl, std::span<const std::uint32_t> dr, std::uint32_t acc) const {
+    std::array<std::uint32_t, qwen35::max_ng_drafts + 2> tail{};
+    tail[0] = sl.next;
+    for (std::uint32_t r = 0; r <= acc; ++r) tail[r + 1] = dr[r];
+    return relax::extendsRepeat(std::span<const std::uint32_t>(sl.cache_tokens), std::span<const std::uint32_t>(tail.data(), acc + 2));
+}
+
 std::uint32_t Engine::pickDrafts(std::span<Slot* const> act) {
     if (!opt_.use_mtp) return 0;
     const std::uint32_t A = static_cast<std::uint32_t>(act.size());
@@ -1924,7 +1933,7 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
     for (std::size_t k = 0; k < A; ++k) {
         Slot& sl = *act[k];
         if (sl.greedy) {
-            if (opt_.relax.on && nd_of[k] > 0) {
+            if (opt_.relax.on && nd_of[k] > 0 && ng_n[k] == 0) {
                 any_relax = true;
                 launchTopk(row_of[k], nd_of[k], rk, 1.0f, relax_dev_, max_rows, row_of[k]);
             }
@@ -2029,14 +2038,16 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
                     ++acc;
                     continue;
                 }
-                if (!opt_.relax.on) break;
+                // n-gram drafts are copies of the history: relaxing them feeds repetition loops
+                if (!opt_.relax.on || is_ng) break;
                 // relaxacc: verify row acc (conditioned on drafts 0..acc-1) keeps a near-argmax draft
                 const std::size_t gr = row0 + acc;
                 const auto* rids = reinterpret_cast<const std::int32_t*>(relax_host_.data()) + gr * rk;
                 const auto* rvals = reinterpret_cast<const float*>(relax_host_.data() + static_cast<std::size_t>(max_rows) * rk * 4) + gr * rk;
                 const auto* rst = reinterpret_cast<const float*>(relax_host_.data() + static_cast<std::size_t>(max_rows) * rk * 8);
                 if (!relax::acceptGreedy(opt_.relax, std::span<const std::int32_t>(rids, rk), std::span<const float>(rvals, rk),
-                                         rst[2 * gr], dr[acc]))
+                                         rst[2 * gr], dr[acc]) ||
+                    relaxRepeats(sl, dr, acc))
                     break;
                 for (std::uint32_t j = 0; j < rk; ++j)
                     if (static_cast<std::uint32_t>(rids[j]) == dr[acc]) sl.relax_gap += static_cast<double>(rst[2 * gr] - rvals[j]);
@@ -2049,7 +2060,7 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
             // with min(1, p / q), else the residual max(0, p - q). Otherwise (precise, n-gram
             // drafts) a deterministic draft is accepted iff it is the sampled token.
             const bool spq = any_spec && !is_ng && nd_dev > 0;
-            const bool typ = opt_.relax.on;
+            const bool typ = opt_.relax.on && !is_ng;
             sl.sm.row_base = row0;
             for (;;) {
                 prepareRow(sl.sm, acc);
@@ -2081,7 +2092,7 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
                     const std::vector<Cand>& cv = *sl.sm.cands;
                     for (std::size_t i = 0; i < sl.sm.n; ++i)
                         if (cv[i].p > 0) h -= cv[i].p * std::log(cv[i].p);
-                    if (relax::acceptTypical(opt_.relax, pd, h)) {
+                    if (relax::acceptTypical(opt_.relax, pd, h) && !relaxRepeats(sl, dr, acc)) {
                         ++acc;
                         sl.relaxed += 1;
                         continue;

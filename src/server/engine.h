@@ -455,6 +455,7 @@ private:
     std::size_t prefillGroup(Slot& first, std::size_t row_budget);
     void finishPrefill(Slot& sl);
     std::uint32_t pickDrafts(std::span<Slot* const> act);
+    bool relaxRepeats(const Slot& sl, std::span<const std::uint32_t> dr, std::uint32_t acc) const;
     void decodeCycle(std::span<Slot* const> act_in);
     void splitDrafts(std::span<Slot* const> act, std::uint32_t nd, std::uint32_t rows, std::span<std::uint32_t> nd_m);
     std::uint32_t draftCap(std::uint32_t A);

@@ -90,6 +90,13 @@ void testRelaxAccept() {
     const std::int32_t tid[2] = {5, 4};
     const float tl[2] = {1.0f, 1.0f};  // tie: lower id is the argmax
     CHECK(!whirl::relax::acceptGreedy(p, tid, tl, 1.0f, 5) && whirl::relax::acceptGreedy(p, tid, tl, 1.0f, 4));
+    // repetition guard (6-gram)
+    {
+        const std::uint32_t h[8] = {1, 2, 3, 4, 5, 6, 9, 1};
+        const std::uint32_t t1[5] = {2, 3, 4, 5, 6};  // ... 1 2 3 4 5 6 repeats
+        const std::uint32_t t2[5] = {2, 3, 4, 5, 7};
+        CHECK(whirl::relax::extendsRepeat(h, t1) && !whirl::relax::extendsRepeat(h, t2));
+    }
     // typical: min(eps, delta * e^-H)
     CHECK(whirl::relax::acceptTypical(p, 0.1, 0.0) && !whirl::relax::acceptTypical(p, 0.08, 0.0));
     CHECK(whirl::relax::acceptTypical(p, 0.3 * std::exp(-3.0) + 1e-9, 3.0) && !whirl::relax::acceptTypical(p, 0.01, 3.0));
