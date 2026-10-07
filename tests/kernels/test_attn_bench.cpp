@@ -238,9 +238,10 @@ void benchAttn(Ctx& c) {
             Buf ml(static_cast<std::size_t>(nq) * ns * sh.heads * 2 * 4), acc(static_cast<std::size_t>(nq) * ns * sh.heads * hd * 4);
             const std::size_t on = static_cast<std::size_t>(sh.heads) * hd;
             wk::AwGroups g1{}, gw{};
-            for (int i = 0; i < nq; ++i) {
-                g1.first[i] = i;
-                g1.count[i] = 1;
+            int ng1 = 0;  // attn_dq4: one row per group
+            for (; ng1 < nq; ++ng1) {
+                g1.first[ng1] = ng1;
+                g1.count[ng1] = 1;
             }
             int ngw = 0;
             for (int i = 0, per = std::max(1, 16 / (sh.heads / sh.nkv)); i < nq; i += per, ++ngw) {
@@ -264,7 +265,7 @@ void benchAttn(Ctx& c) {
                 a.ptab = dpt.p();
                 const bool one = std::string(name) == "attn_dq4";
                 auto launch = [&]() {
-                    hip::launch(f, {static_cast<unsigned>(sh.nkv), static_cast<unsigned>(ns), static_cast<unsigned>(one ? nq : ngw)}, {threads, 1, 1}, 0,
+                    hip::launch(f, {static_cast<unsigned>(sh.nkv), static_cast<unsigned>(ns), static_cast<unsigned>(one ? ng1 : ngw)}, {threads, 1, 1}, 0,
                                 c.s, dq.p(), a, ml.p(), acc.p(), sh.heads, sh.nkv, qstride, dpos.p(), scale, DevPtr{0}, one ? g1 : gw);
                 };
                 for (int i = 0; i < 3; ++i) launch();

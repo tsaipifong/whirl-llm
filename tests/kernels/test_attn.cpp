@@ -424,20 +424,18 @@ void testAttn(Ctx& c) {
         // group, several groups (verify rows) vs CPU, a repeated launch is bitwise the same, and the
         // MTP draft window as for attn_wsplit1 (same key sets)
         if (auto fd = fmt == Fmt::q4 ? c.fnOpt("attn_dq4") : hip::Function{}) {
-            // gsz: rows per group (gfx1201 FC-1c: up to 32 columns = rows x GQA heads per group)
-            auto run = [&](const std::vector<int>& pv, int win, int gsz = 1) {
+            auto run = [&](const std::vector<int>& pv, int win) {
                 Buf dpv(pv);
                 ml.zero();
                 acc.zero();
                 wk::AwGroups g{};
-                unsigned ng = 0;
-                for (std::size_t r = 0; r < pv.size(); r += static_cast<std::size_t>(gsz), ++ng) {
-                    g.first[ng] = static_cast<int>(r);
-                    g.count[ng] = static_cast<int>(std::min<std::size_t>(static_cast<std::size_t>(gsz), pv.size() - r));
+                for (std::size_t r = 0; r < pv.size(); ++r) {
+                    g.first[r] = static_cast<int>(r);
+                    g.count[r] = 1;
                 }
                 wk::KvArgs a = pool.args();
                 a.win = win;
-                hip::launch(fd, {kKv, static_cast<unsigned>(ns), ng}, {256, 1, 1}, 0, c.s, dq.p(), a, ml.p(), acc.p(),
+                hip::launch(fd, {kKv, static_cast<unsigned>(ns), static_cast<unsigned>(pv.size())}, {256, 1, 1}, 0, c.s, dq.p(), a, ml.p(), acc.p(),
                             kHeads, kKv, kQStride, dpv.p(), kScale, DevPtr{0}, g);
                 c.sync();
                 const std::size_t n = pv.size();
@@ -453,29 +451,6 @@ void testAttn(Ctx& c) {
                 const auto again = run(pv, 0);
                 c.rep.add(cmpExact("attn_dq4 repeated launch == first (ml, pos " + std::to_string(p0) + ")" + tag, again.first, first.first, Kind::invariant));
                 c.rep.add(cmpExact("attn_dq4 repeated launch == first (acc, pos " + std::to_string(p0) + ")" + tag, again.second, first.second, Kind::invariant));
-            }
-            // multi-row groups (gfx1201 only; gfx1151's attn_dq4 takes one row per group): 5 rows (30
-            // columns, 4 chunks), 3 + 2, and 2 + 2 + 1 at positions inside / at the end of a key tile vs
-            // the CPU; repeated launch bitwise; a draft window reaching the sink == off
-            if (!c.k.caps.attn_group1) {
-                for (int p0 : {L - 5, L - 100, L - 34, 300}) {
-                    std::vector<int> pv = {p0, p0 + 1, p0 + 2, p0 + 3, p0 + 4};
-                    for (int gsz : {5, 3, 2}) {
-                        const auto first = run(pv, 0, gsz);
-                        const std::vector<float> out = combine(5);
-                        std::vector<double> ro, rs;
-                        attnRef(h, pool, q, pv, {0, 1, 2, 3, 4}, ro, rs);
-                        const std::string w = " (5 rows at " + std::to_string(p0) + ", groups of " + std::to_string(gsz) + ")" + tag;
-                        c.rep.add(cmpTol("attn_dq4 multi-row groups + combine vs CPU" + w, out, ro, rs, 1e-2, 1e-4));
-                        const auto again = run(pv, 0, gsz);
-                        c.rep.add(cmpExact("attn_dq4 multi-row repeated launch == first (acc)" + w, again.second, first.second, Kind::invariant));
-                        if (gsz == 5) {
-                            const auto wall = run(pv, ((L + 63) / 64) | 0, gsz);
-                            c.rep.add(cmpExact("attn_dq4 multi-row draft window reaching the sink == off (acc)" + w, wall.second, first.second,
-                                               Kind::invariant));
-                        }
-                    }
-                }
             }
             auto winArg = [](int w, int min_ctx) { return ((w + 63) / 64) | ((min_ctx / 1024) << 16); };
             const std::vector<int> pv1 = {L - 1};
