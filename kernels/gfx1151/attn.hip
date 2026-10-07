@@ -575,10 +575,6 @@ __device__ __forceinline__ void attn_wsplit_impl(const float *q, const KvArgs &k
     if (skip != nullptr && *skip) return;
     __shared__ _Float16 Vt[AW_D][AW_K + 8];
     __shared__ _Float16 Qs[16 * CG][AW_D + 8];
-    // quantized K (q8 / q8h / q4): the tile is dequantized once by the block into LDS instead of
-    // by every computing lane (both WMMA lane halves) from the cache; same f16 values, same bits
-    constexpr bool KL = kv_kf(Q8) != 0;
-    __shared__ _Float16 Ks[KL ? AW_K : 1][AW_D + 8];
     const int lane = threadIdx.x % WARP, wid = threadIdx.x / WARP;
     const int g = blockIdx.x, split = blockIdx.y, n_split = gridDim.y, z = blockIdx.z;
     const int grp = n_head / n_kv;
@@ -670,16 +666,6 @@ __device__ __forceinline__ void attn_wsplit_impl(const float *q, const KvArgs &k
                 *(half4_t *)&Vt[d8 + c][tb] = ev;
                 *(half4_t *)&Vt[d8 + c][tb + 8] = od;
             }
-            if constexpr (KL) {
-                // 32 keys x 256 dims, 8 values per item; keys past b1 read row b1 - 1 (as the clamp below)
-#pragma unroll
-                for (int e = 0; e < AW_K * AW_D / 8 / 128; ++e) {
-                    const int i = tv + e * 128;
-                    const int kr = i / (AW_D / 8), dk8 = (i % (AW_D / 8)) * 8;
-                    const int krow = min(k0 + kr, b1 - 1);
-                    *(half8 *)&Ks[kr][dk8] = kv_ld8<kv_kf(Q8)>(kv.k, kv.ks, ((size_t)(krow + dl) * n_kv + g) * AW_D + dk8);
-                }
-            }
         }
         __syncthreads();
         if (!cw) continue;
@@ -693,11 +679,7 @@ __device__ __forceinline__ void attn_wsplit_impl(const float *q, const KvArgs &k
 #pragma unroll
             for (int st = 0; st < AW_D / 16; ++st) {
                 const half16 qb = ld_frag16(&Qs[wid * 16 + lane % 16][16 * st]);
-                half16 a;
-                if constexpr (KL)
-                    a = ld_frag16(&Ks[kt * 16 + lane % 16][16 * st]);
-                else
-                    a = kv_ld16<kv_kf(Q8)>(kv.k, kv.ks, kr + 16 * st);
+                const half16 a = kv_ld16<kv_kf(Q8)>(kv.k, kv.ks, kr + 16 * st);
                 sc[kt] = WMMA16(a, qb, sc[kt]);
             }
         }
