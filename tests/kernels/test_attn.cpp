@@ -6,7 +6,7 @@
 //     cache contents (tolerance; f16 WMMA paths looser); attn_prefill_wmma also over a
 //     long (9000-position) random cache, KV heads 4 / 3 / 6;
 //   * bitwise invariances: attn_wsplit1 / attn_wsplit2 grouped == per-query (the
-//     prototype's checkAttnGroups), attn_kx and attn_kg (f16, q8, q8v) ==
+//     prototype's checkAttnGroups), attn_kx and attn_kg (f16, q8, q8v), kv_dq_rows + f16 attn_kg (q8) ==
 //     attn_prefill_wmma, head-range
 //     split launches == one launch, attn_combine_q8 == attn_combine (+ its
 //     int8 copy == quantize_q8), attn_prep == rmsnorm + rope_neox + kv_store.
@@ -908,6 +908,39 @@ void testAttn(Ctx& c) {
                 const auto got = rb.down<float>(on);
                 const std::string where = " (long KV, group " + std::to_string(grp) + ", n " + std::to_string(n) + " at " + std::to_string(p0) + ")";
                 c.rep.add(cmpExact("attn_prefill_wmma" + fs + " head-split launches == one" + where, sb.down<float>(on), got, Kind::invariant));
+                // q8 / q8h prefill (Q8P): kv_dq_rows (keys 0 .. p0 + n - 1 into contiguous f16 rows) +
+                // the f16 attn_kg on them == attn_prefill_wmma_q8 bitwise (one and two head-range launches)
+                if (fmt == Fmt::q8) {
+                    if (const auto fdq = c.fnOpt("kv_dq_rows")) {
+                        const int rows = p0 + n, rel = nkv * kHd;
+                        Buf k16(static_cast<std::size_t>(rows) * rel * 2), v16(static_cast<std::size_t>(rows) * rel * 2);
+                        std::vector<int> idt(static_cast<std::size_t>(rows / wk::kKvPage + 1));
+                        std::iota(idt.begin(), idt.end(), 0);
+                        Buf did(idt);
+                        hip::launch(fdq, {static_cast<unsigned>(cdiv(static_cast<long long>(rows) * rel, 2048)), 1, 1}, {256, 1, 1}, 0, c.s, a, k16.p(),
+                                    v16.p(), rows, rel);
+                        wk::KvArgs f{};
+                        f.k = k16.p();
+                        f.v = v16.p();
+                        f.ptab = did.p();
+                        for (const auto& [name, np] : {std::pair{"attn_kg6", 6}, std::pair{"attn_kg4", 4}, std::pair{"attn_kg2", 2}}) {
+                            const auto fk = c.fnOpt(name);
+                            if (!fk || grp % np != 0) continue;
+                            for (const int split : {1, 2}) {
+                                const int hp = kHeads / split;
+                                if (hp % np != 0) continue;
+                                Buf ob(on * 4);
+                                ob.fill(0x7f);
+                                for (int h0 = 0; h0 < kHeads; h0 += hp)
+                                    hip::launch(fk, {cdiv(n, 16), static_cast<unsigned>(hp / np), 1}, {static_cast<unsigned>(64 * np), 1, 1}, 0, c.s, dq.p(),
+                                                f, ob.p(), kHeads, nkv, kQStride, dpos.p(), n, kScale, h0);
+                                c.sync();
+                                c.rep.add(cmpExact(std::string("kv_dq_rows + ") + name + " == attn_prefill_wmma_q8" + (split > 1 ? " (2 head-range launches)" : "") + where,
+                                                   ob.down<float>(on), got, Kind::invariant));
+                            }
+                        }
+                    }
+                }
                 // CPU reference: first and last query
                 std::vector<int> rows = {0, n - 1};
                 if (n == 1) rows = {0};

@@ -774,6 +774,25 @@ void Model::prefillAttn(DevPtr q, const KvArgs& kva, DevPtr out, DevPtr pos, u32
             }
     }
     const bool kx = attn_kx_on && k.attn_kx != nullptr && cfg.head_dim == 256;
+    // q8 / q8h KV: keys 0 .. pos0 + n - 1 dequantized once into f16 rows (ffn_g / ffn_u, free during
+    // attention), then the f16 attn_kg: the same f16 K / V values as attn_kg_q8 converts in its waves,
+    // so the output is bit-identical, at f16 speed (attn_kg_q8: +29% at 128k keys)
+    if (kg != nullptr && attn_dqf_on && k.kv_dq_rows != nullptr && dq_ptab != 0 && pos0 + n <= dq_rows) {
+        hip::Function kf = np == 6 ? k.attn_kgf6 : np == 4 ? k.attn_kgf4 : k.attn_kgf2;
+        if (kf != nullptr) {
+            const u32 rows = pos0 + n, row_el = cfg.n_head_kv * cfg.head_dim;
+            hip::launch(k.kv_dq_rows, D(static_cast<u32>((static_cast<u64>(rows) * row_el + 2047) / 2048)), D(256), 0, stream, kva, ffn_g, ffn_u,
+                        I(rows), I(row_el));
+            KvArgs f{};
+            f.k = ffn_g;
+            f.v = ffn_u;
+            f.ptab = dq_ptab;
+            for (u32 p = 0; p < parts; ++p)
+                hip::launch(kf, D((n + 15) / 16, hp / np), D(64 * np), 0, stream, q, f, out, I(cfg.n_head), I(cfg.n_head_kv),
+                            I(2 * cfg.head_dim), pos, I(n), scale, I(p * hp));
+            return;
+        }
+    }
     for (u32 p = 0; p < parts; ++p) {
         if (kg != nullptr)
             hip::launch(kg, D((n + 15) / 16, hp / np), D(64 * np), 0, stream, q, kva, out, I(cfg.n_head), I(cfg.n_head_kv),

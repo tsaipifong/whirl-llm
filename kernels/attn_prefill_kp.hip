@@ -423,6 +423,22 @@ KG_ENTRY(attn_kg6_q8v, 6, 2)
 KG_ENTRY(attn_kg4_q8v, 4, 2)
 // (no attn_kg2_q8 / attn_kg2_q8v: with 4 waves per block the int8 V stage is slower than attn_kx)
 
+// q8 / q8h KV prefill (Q8P): the int8 K and V of keys [0, n_rows) of one sequence, dequantized
+// into contiguous f16 rows (k16 / v16: [row][row_el], pool layout without pages), so the prefill
+// attention runs the f16 attn_kg on them. Same dequantization as every q8 reader (kv_dq8 ==
+// (f16)q * s, one rounding), so attn_kg on the copy == attn_kg_q8 on the cache bit for bit;
+// attn_kg_q8 converts K in every wave (each of the NP heads of a KV head again) and V in an LDS
+// stage, which made q8 prefill attention 29% slower than f16 at 128k keys; this pass costs ~0.5%.
+// grid ceil(n_rows * row_el / 2048), block 256; row_el % 32 == 0
+extern "C" __global__ void __launch_bounds__(256) kv_dq_rows(KvArgs kv, _Float16 *k16, _Float16 *v16, int n_rows, int row_el) {
+    const size_t o = ((size_t)blockIdx.x * 256 + threadIdx.x) * 8;
+    if (o >= (size_t)n_rows * row_el) return;
+    const int p = (int)(o / row_el), e = (int)(o % row_el);
+    const size_t src = (size_t)kv_row(kv, kv.tab0, p) * row_el + e;
+    *(half8 *)(k16 + o) = kv_dq8(*(const kvq8_t *)((const int8_t *)kv.k + src), kv.ks[src >> 5]);
+    *(half8 *)(v16 + o) = kv_dq8(*(const kvq8_t *)((const int8_t *)kv.v + src), kv.vs[src >> 5]);
+}
+
 // item P: f16-output variants of the f16-weight prefill GEMMs (Q4_K_M relaxed mode)
 extern "C" __global__ void __launch_bounds__(512) gemm_ch0_f16(const uint8_t *W, uint64_t row_bytes, const _Float16 *X, float *Y, int ncols, int nrows, int n_tok, int accumulate) { gemm3_impl<QT_F16, 128, 256, 64, 4, 0, 512, true, true>(W, row_bytes, X, Y, ncols, nrows, n_tok, 0); }
 extern "C" __global__ void __launch_bounds__(256) gemm_ch1_f16(const uint8_t *W, uint64_t row_bytes, const _Float16 *X, float *Y, int ncols, int nrows, int n_tok, int accumulate) { gemm3_impl<QT_F16, 128, 256, 64, 8, 0, 256, true, true>(W, row_bytes, X, Y, ncols, nrows, n_tok, 0); }

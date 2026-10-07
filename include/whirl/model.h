@@ -502,6 +502,11 @@ public:
     bool gdn_ba_on = true;   // n>16 GDN prefill: one [beta; alpha] GEMM + gdn_gates_ba (WHIRL_GDN_BA=0 off)
     bool gdn_in2_on = true;  // n>16 GDN prefill: one norm -> fp8 (qkv / gate) + f16 x16b ([beta; alpha]) (WHIRL_GDN_IN2=0 off)
     std::uint64_t x16_bytes = 0;  // x16 allocation size (x16b sub-buffer bound check)
+    // q8 / q8h KV prefill attention: dequantize the sequence's keys into f16 rows in ffn_g / ffn_u, then
+    // the f16 attn_kg (bit-identical to attn_kg_q8; WHIRL_ATTN_DQF=0 off); dq_ptab: identity page table
+    bool attn_dqf_on = true;
+    DevPtr dq_ptab = 0;
+    std::uint32_t dq_rows = 0;  // rows ffn_g / ffn_u hold
     bool attn_kg_on = true;  // GQA-grouped prefill attention (f16 / q8 / q8h / q8v KV; WHIRL_ATTN_KG=0 off)
     bool ffn_h16 = false;
     bool out_h16 = false;

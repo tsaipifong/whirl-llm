@@ -323,6 +323,12 @@ KernelTable KernelTable::load(const hip::Module& m, KvFormat kv) {
         k.attn_kg6 = L.opt("attn_kg6" + s);
         k.attn_kg4 = L.opt("attn_kg4" + s);
         k.attn_kg2 = L.opt("attn_kg2" + s);
+        if (kv == KvFormat::q8 || kv == KvFormat::q8h) {
+            k.kv_dq_rows = L.opt("kv_dq_rows");
+            k.attn_kgf6 = L.opt("attn_kg6");
+            k.attn_kgf4 = L.opt("attn_kg4");
+            k.attn_kgf2 = L.opt("attn_kg2");
+        }
     }
     // vision: multi-section RoPE attention prep (same KV-format choice as attn_prep)
     k.attn_prep_m = L.opt(kv == KvFormat::q8v ? "attn_prep_m_q8v" : kv == KvFormat::q8h ? "attn_prep_m_q8h" : kv == KvFormat::q8 ? "attn_prep_m_q8" : kv == KvFormat::q4 ? "attn_prep_m_q4" : "attn_prep_m");

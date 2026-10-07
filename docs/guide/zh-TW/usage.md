@@ -433,6 +433,7 @@ PowerShell 中先用 `$env:WHIRL_MODE = "precise"` 設定再啟動程式。**一
 | `WHIRL_GEMMHQ=1` | attention 投影也用 f16 輸出的 GEMM |
 | `WHIRL_ATTN_KX=0` | prefill attention 不用 K-exchange kernel（位元相同） |
 | `WHIRL_ATTN_KG=0` | prefill attention 不用依 GQA 分組的 kernel（位元相同） |
+| `WHIRL_ATTN_DQF=0` | q8 / q8h KV 的 prefill attention 直接讀 int8 快取（`attn_kg_q8`），不先把序列的 key 轉成 f16 副本再跑 f16 kernel（位元相同，較慢） |
 | `WHIRL_GDN_SEQ=1` | DeltaNet prefill 改用逐步計算，不用分塊掃描 |
 | `WHIRL_GDN_V0=1` | 逐列的 DeltaNet decode 步驟 kernel（數值相同） |
 | `WHIRL_NAIVE_ATTN=1` | 參考用 attention 路徑 |

@@ -353,6 +353,15 @@ asm 屏障，因為編譯器把 `x*x` 收縮進第一個 butterfly 加法，並�
     減 1152 再乘 scale 得到 q·s，只捨入一次；以 packed f16 計算，用 `v_perm` 組合兩半；`#pragma clang fp contract(off)` 防止編譯器融合成 FMA。
     與 `attn_kx_q8` 逐位元相同；225 VGPR、每 SIMD 6 個 wave（實際每個 WGP 1 個 block）。61k probe：`attn_kx_q8` 57.8 → `attn_kg6_q8` 72.1 TFLOPS
     （+24.7%）；直接寫 `(_Float16)q * s` 的版本只快 5%，所以改用 magic number 形式；
+  - **0.2.0 起 q8 / q8h（Q8P）：`kv_dq_rows` + f16 的 `attn_kg`。** 用隨機 K/V 量（上面的 f16 probe 用常數資料，
+    running max 不變、rescale 被跳過），128k 個 key 時 `attn_kg6_q8` 比 f16 的 `attn_kg6` 慢 29%（181.9 vs 141.0 ms，4096 個 query）：
+    同一個 KV head 的 6 個 head 各自把同樣的 K 列再轉一次，V 的 LDS stage 也有自己的 VALU 與 LDS 流量。現在 prefill 先把該序列
+    key 0 .. pos0 + n − 1 一次反量化（`kv_dq_rows`，K 與 V 都用同一個 `kv_dq8` = (f16)q·s）成連續的 f16 列，放在 attention 期間
+    沒用到的 `ffn_g` / `ffn_u`（27B、batch 4096 可放 139k 列，更長的提示詞仍走 `attn_kg6_q8`），再以恆等 page table 跑 f16 的
+    `attn_kg`。f16 運算元相同、算法相同：與 `attn_kg6_q8` 逐位元相同（kernel test 60 項 invariant；decode 雜湊不變）。
+    128k：含轉換 141.7 ms（同資料比 f16 多 0.5%）。`WHIRL_ATTN_DQF=0` 回到 `attn_kg_q8`。試過但較慢：每個 K/V tile 由 block
+    合作反量化進 LDS、供 6 head × 32 query 共用（`attn_kq`，逐位元相同）：f16 的 2.1 倍，因為每個 WMMA A 運算元都改從 LDS
+    讀，LDS 頻寬正好等於 WMMA 吞吐，而且 V stage 溢出暫存器；
   - softmax scale 1/16 是 2 的冪，所以分數維持不縮放——(s − m)·(scale·log2 e) 的捨入與 `__expf` 實際計算的 (s·scale − m·scale)·log2 e
     完全相同——−inf 的 select 也可以拿掉（exp2(−inf) = 0；key 0 對每個 query 都可見，所以第一個 tile 之後累計最大值就是有限值）。block 內每個
     query 都完整可見的 tile 直接跳過 mask。

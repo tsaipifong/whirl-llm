@@ -91,6 +91,16 @@ KV 位元組減半反而讓 decode **變慢**：split-K decode kernel 內部對 
 
 **更新（0.1.3）**：改用 magic number 的 K 轉換（`kv_dq8`，[kernels.md](kernels.md#decode-attn)）後，反量化成本消失：125,853 token 時 q8h decode 從 24.09 提高到 25.99 tok/s（+7.9%，逐位元相同）。
 
+**更新（0.2.0，Q8P）**：R9700 上 q8h 的 prefill 現在和 f16 一樣快。原本 q8 的 prefill attention kernel 在每個 wave 轉換 K（每個 KV head 6 次），V 另走 LDS stage，128k 個 key 時比 f16 慢 29%；現在 prefill 每層每個 chunk 先把序列的 key 一次反量化成 f16 列，再跑 f16 kernel（逐位元相同，[kernels.md](kernels.md#flash)）。`whirl bench`，balance，R9700，q8h 對 `WHIRL_KV=f16`：
+
+| | prefill 8k | 32k | 128k | decode_7p |
+|---|---|---|---|---|
+| Swift-1.5 27B MXFP4-A，改前 | −3.3% | −7.7% | −15.1% | +2.4% |
+| Swift-1.5 27B MXFP4-A，現在 | 3,458 vs 3,512（−1.5%） | 2,886 vs 2,913（−0.9%） | 1,745 vs 1,763（−1.0%） | 112.2 vs 110.4（+1.7%） |
+| Qwen3.8-27B UD-Q4_K_M | 1,824 vs 1,833（−0.5%） | 1,646 vs 1,653（−0.4%） | 1,199 vs 1,207（−0.7%） | 97.2 vs 96.8（+0.4%） |
+
+f16 副本放在 attention 期間閒置的 prefill 緩衝區（預設 prefill batch 4096 時可放 139k 列）；比這更長的提示詞，超出的部分仍用 int8 kernel。Radeon 8060S（Qwen3.8-27B Q4_K_M，自己的 kernel，未改）：prefill 8k 375.8 vs 379.0（−0.8%），64k chat prefill 297.3 vs 305.6（−2.7%），64k decode 9.35 vs 9.53 tok/s（−1.9%）。皆為單次量測（約 ±1%）。
+
 ### <a id="kv-auto"></a>3.3 用哪種格式：每個模式固定
 
 每個數值模式對每種模型類型只有一種 KV 格式，在載入時、載入 kernel 之前決定（`numerics::chooseKv`，CLI 與 server 共用），與卡的大小、放不放得下都無關：

@@ -8,14 +8,170 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstring>
 #include <numeric>
 
 #include "kt.h"
 
 namespace kt {
 
+// WHIRL_KT_BENCH_PREFILL=1: prefill attention timing instead (Q8P): n = 4096 queries at the end of
+// L keys (WHIRL_KT_BENCH_L, default 32768 and 131072), 24 / 4 heads, attn_kg6 for f16 / q8v / q8 KV
+// (plus WHIRL_KT_BENCH_KERNELS, comma-separated "name:fmt" with fmt f16|q8|q8v, NP 6 grid).
+static void benchPrefill(Ctx& c) {
+    const int hd = 256, qstride = 2 * hd, heads = 24, nkv = 4, n = 4096;
+    const float scale = 1.0f / 16.0f;
+    std::vector<int> lens = {32768, 131072};
+    if (const char* e = std::getenv("WHIRL_KT_BENCH_L")) lens = {std::atoi(e)};
+    struct K {
+        std::string name, fmt;
+        int np = 6, qt = 1;
+    };
+    std::vector<K> ks = {{"attn_kg6", "f16"}, {"attn_kg6_q8v", "q8v"}, {"attn_kg6_q8", "q8"}, {"attn_kg6", "dq"}};
+    if (const char* e = std::getenv("WHIRL_KT_BENCH_KERNELS")) {
+        std::string s = e;
+        std::size_t a = 0;
+        while (a < s.size()) {
+            std::size_t b = s.find(',', a);
+            if (b == std::string::npos) b = s.size();
+            const std::string it = s.substr(a, b - a);
+            // name:fmt[:np:qt]
+            std::vector<std::string> f;
+            for (std::size_t x = 0;;) {
+                const std::size_t y = it.find(':', x);
+                f.push_back(it.substr(x, y == std::string::npos ? std::string::npos : y - x));
+                if (y == std::string::npos) break;
+                x = y + 1;
+            }
+            if (f.size() >= 2) ks.push_back({f[0], f[1], f.size() >= 4 ? std::atoi(f[2].c_str()) : 6, f.size() >= 4 ? std::atoi(f[3].c_str()) : 1});
+            a = b + 1;
+        }
+    }
+    // WHIRL_KT_BENCH_HSACO: extra kernels (WHIRL_KT_BENCH_KERNELS) from this code object (kernel development)
+    std::vector<char> image;
+    hip::Module xmod;
+    bool have_x = false;
+    if (const char* e = std::getenv("WHIRL_KT_BENCH_HSACO")) {
+        std::FILE* fp = std::fopen(e, "rb");
+        if (fp) {
+            std::fseek(fp, 0, SEEK_END);
+            image.resize(static_cast<std::size_t>(std::ftell(fp)));
+            std::fseek(fp, 0, SEEK_SET);
+            if (std::fread(image.data(), 1, image.size(), fp) != image.size()) image.clear();
+            std::fclose(fp);
+        }
+        if (!image.empty()) {
+            xmod = hip::Module::loadData(image.data(), c.mod.arch());
+            have_x = true;
+        }
+    }
+    auto fnX = [&](const std::string& nm) { return have_x && nm.find("attn_kg") != 0 ? xmod.getFunctionOpt(nm.c_str()) : c.fnOpt(nm); };
+    for (const int L : lens) {
+        const int pages = (L + wk::kKvPage - 1) / wk::kKvPage;
+        const std::size_t rows = static_cast<std::size_t>(pages) * wk::kKvPage, nel = rows * nkv * hd;
+        std::vector<int> pt(static_cast<std::size_t>(pages));
+        std::iota(pt.begin(), pt.end(), 0);
+        std::shuffle(pt.begin(), pt.end(), c.rng);
+        Buf dpt(pt);
+        std::vector<std::int8_t> k8(nel), v8(nel);
+        for (auto& x : k8) x = static_cast<std::int8_t>(static_cast<int>(c.rng() % 255) - 127);
+        for (auto& x : v8) x = static_cast<std::int8_t>(static_cast<int>(c.rng() % 255) - 127);
+        std::vector<std::uint16_t> ksc(nel / 32), vsc(nel / 32);
+        {
+            const auto a = c.randu(nel / 32, 0.001f, 0.004f), b = c.randu(nel / 32, 0.002f, 0.01f);
+            for (std::size_t i = 0; i < ksc.size(); ++i) {
+                ksc[i] = f2h(a[i]);
+                vsc[i] = f2h(b[i]);
+            }
+        }
+        Buf dk8(k8), dv8(v8), dks(ksc), dvs(vsc);
+        Buf dk16(nel * 2), dv16(nel * 2);
+        dk16.fill(0x30);
+        dv16.fill(0x30);
+        const std::vector<float> qp = c.randn(static_cast<std::size_t>(n) * heads * qstride);
+        Buf dq(qp), dpos(std::vector<int>{L - n});
+        Buf out(static_cast<std::size_t>(n) * heads * hd * 4);
+        double base_us = 0;
+        std::vector<float> ref_q8;
+        for (const K& kk : ks) {
+            const std::string& name = kk.name;
+            const std::string& fmt = kk.fmt;
+            const auto f = fnX(name);
+            if (!f) {
+                std::printf("   %s: not in this code object\n", name.c_str());
+                continue;
+            }
+            wk::KvArgs a{};
+            a.k = fmt == "q8" ? dk8.p() : dk16.p();
+            a.v = fmt == "f16" ? dv16.p() : dv8.p();
+            a.ks = fmt == "q8" ? dks.p() : 0;
+            a.vs = fmt == "f16" ? 0 : dvs.p();
+            a.ptab = dpt.p();
+            // fmt "dq" (Q8P): kv_dq_rows of the q8 cache into contiguous f16 rows, then the (f16) kernel on them
+            const bool dqf = fmt == "dq";
+            hip::Function fdq = dqf ? c.fnOpt("kv_dq_rows") : hip::Function{};
+            if (dqf && !fdq) continue;
+            std::vector<int> idt(static_cast<std::size_t>(pages) + 1);
+            std::iota(idt.begin(), idt.end(), 0);
+            Buf did(idt);
+            wk::KvArgs a8 = a;
+            if (dqf) {
+                a8.k = dk8.p();
+                a8.v = dv8.p();
+                a8.ks = dks.p();
+                a8.vs = dvs.p();
+                a.k = dk16.p();
+                a.v = dv16.p();
+                a.ks = 0;
+                a.vs = 0;
+                a.ptab = did.p();
+            }
+            auto launch = [&]() {
+                if (dqf)
+                    hip::launch(fdq, {cdiv(static_cast<std::uint64_t>(L) * nkv * hd, 2048), 1, 1}, {256, 1, 1}, 0, c.s, a8, dk16.p(), dv16.p(), L,
+                                nkv * hd);
+                hip::launch(f, {static_cast<unsigned>(cdiv(n, 16 * kk.qt)), static_cast<unsigned>(heads / kk.np), 1},
+                            {static_cast<unsigned>(64 * kk.np * kk.qt), 1, 1}, 0, c.s, dq.p(), a,
+                            out.p(), heads, nkv, qstride, dpos.p(), n, scale, 0);
+            };
+            launch();
+            c.sync();
+            hip::Event e0 = hip::eventCreate(true), e1 = hip::eventCreate(true);
+            const int iters = 5;
+            hip::eventRecord(e0, c.s);
+            for (int i = 0; i < iters; ++i) launch();
+            hip::eventRecord(e1, c.s);
+            hip::eventSync(e1);
+            const double us = 1000.0 * hip::eventElapsedMs(e0, e1) / iters;
+            hip::eventDestroy(e0);
+            hip::eventDestroy(e1);
+            if (base_us == 0) base_us = us;
+            std::printf("   prefill %-22s (%3s) n %d L %6d: %9.1f us  %+6.1f%% vs first\n", name.c_str(), fmt.c_str(), n, L, us,
+                        100.0 * (us / base_us - 1.0));
+            std::fflush(stdout);
+            if (fmt == "q8" || dqf) {  // bitwise vs the first q8 kernel (attn_kg6_q8)
+                launch();
+                c.sync();
+                const auto o = out.down<float>(static_cast<std::size_t>(n) * heads * hd);
+                if (ref_q8.empty()) {
+                    ref_q8 = o;
+                } else {
+                    std::size_t bad = 0;
+                    for (std::size_t i = 0; i < o.size(); ++i) bad += std::memcmp(&o[i], &ref_q8[i], 4) != 0;
+                    std::printf("   prefill %-22s bitwise mismatches vs first q8: %zu of %zu\n", name.c_str(), bad, o.size());
+                }
+            }
+        }
+    }
+}
+
 void benchAttn(Ctx& c) {
     c.rep.family = "attnbench";
+    if (std::getenv("WHIRL_KT_BENCH_PREFILL")) {
+        benchPrefill(c);
+        return;
+    }
     struct Shape {
         int heads, nkv;
     };

@@ -627,6 +627,14 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
     const u64 n_split = m.fd_splits;
     m.part_ml = m.alloc(max_verify_rows * n_split * cfg.n_head * 2 * f4);
     m.part_acc = m.alloc(max_verify_rows * n_split * cfg.n_head * cfg.head_dim * f4);
+    if (m.kv_q8 && !m.kv_kf16 && !m.kv_q4 && m.k.kv_dq_rows != nullptr) {
+        // q8 / q8h prefill attention: f16 copies of a sequence's K / V in ffn_g / ffn_u (Model::prefillAttn)
+        m.dq_rows = static_cast<u32>(std::min<u64>(B * ffs * f4 / (static_cast<u64>(cfg.n_head_kv) * cfg.head_dim * 2), 1u << 30)) / 256 * 256;
+        std::vector<std::int32_t> id(m.dq_rows / 256 + 1);
+        for (std::size_t i = 0; i < id.size(); ++i) id[i] = static_cast<std::int32_t>(i);
+        m.dq_ptab = m.alloc(id.size() * 4);
+        hip::upload(m.dq_ptab, id.data(), id.size() * 4);
+    }
     {
         u64 max_elems = 0;
         for (const Layer& L : m.layers)

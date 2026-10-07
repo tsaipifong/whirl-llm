@@ -151,6 +151,15 @@ Every change below keeps the output bit-identical to plain greedy decoding, unle
   prefill, Swift-1.5 27B MXFP4-A, one user, `--ctx-per-slot 262144`, q8h KV: 128k 1,342 → 1,522
   (+13.4%), 192k 1,021 → 1,177 (+15.3%), 256k 824 → 961 (+16.6%). `WHIRL_ATTN_KG=0` restores the
   previous kernel. See [kernels.md](docs/guide/en/kernels.md#flash).
+- **q8 / q8h KV prefill attention at f16 speed (Q8P)**, so balance can default to q8h on dense
+  models: per layer and prefill chunk, `kv_dq_rows` dequantizes the sequence's keys once into f16 rows
+  (in `ffn_g` / `ffn_u`, idle during attention; up to 139k keys at batch 4096) and the f16 `attn_kg`
+  runs on them, bit-identical to `attn_kg_q8` (which converts K once per query head and was 29%
+  slower than f16 at 128k keys). R9700, balance, q8h vs `WHIRL_KV=f16`: Swift-1.5 27B MXFP4-A prefill
+  8k −1.5%, 32k −0.9%, 128k −1.0% (before −3.3 / −7.7 / −15.1%), decode_7p +1.7%; Qwen3.8-27B
+  UD-Q4_K_M 8k −0.5%, 32k −0.4%, 128k −0.7%, decode_7p +0.4%. Radeon 8060S (unchanged kernels):
+  Q4_K_M prefill 8k −0.8%, 64k −2.7%, decode at 64k −1.9%. `WHIRL_ATTN_DQF=0` restores the int8
+  kernel. Goldens unchanged on gfx1201; gfx1151 dense balance re-recorded for the q8h default.
 - Speculative verify attention: a sequence's verify rows share one K/V pass in groups of up to 32
   query columns (`attn_wsplit2`; 27B: 5 rows × 6 GQA heads) instead of 16 (2 rows). The second column
   group runs on the block's otherwise idle second wave over the same staged Vᵀ tile; each column's

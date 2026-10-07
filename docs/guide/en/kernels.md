@@ -477,6 +477,19 @@ instead of f32 for their element-wise consumers (+5.4…+5.8% and +0.6%).
     `attn_kx_q8`; 225 VGPRs, 6 waves per SIMD (in practice one block per WGP). Probe at 61k:
     `attn_kx_q8` 57.8 → `attn_kg6_q8` 72.1 TFLOPS (+24.7%); the straightforward `(_Float16)q * s`
     conversion gained only 5%, which is why the magic-number form is used;
+  - **q8 / q8h since 0.2.0 (Q8P): `kv_dq_rows` + the f16 `attn_kg`.** With random K/V (the f16
+    probe above used constant data, where the running max never moves and the rescale is skipped),
+    `attn_kg6_q8` took 29% longer than f16 `attn_kg6` at 128k keys (181.9 vs 141.0 ms, 4096 queries):
+    each of the 6 heads of a KV head converts the same K rows again, and the V stage adds its own
+    VALU and LDS traffic. Now the prefill first dequantizes keys 0 .. pos0 + n − 1 of the sequence once
+    (`kv_dq_rows`, the same `kv_dq8` = (f16)q·s for K and V) into contiguous f16 rows in `ffn_g` /
+    `ffn_u` (free during attention; 139k rows at batch 4096 for the 27B, longer prompts keep
+    `attn_kg6_q8`) and runs the f16 `attn_kg` on them with an identity page table. Same f16 operands,
+    same arithmetic: bit-identical to `attn_kg6_q8` (kernel-test invariants, 60 cases; decode hashes
+    unchanged). 128k: 141.7 ms including the conversion (+0.5% over f16 on the same data).
+    `WHIRL_ATTN_DQF=0` restores `attn_kg_q8`. Lost: a block-cooperative variant that dequantizes each
+    K/V tile into LDS for 6 heads × 32 queries (`attn_kq`, bit-identical): 2.1× f16, because every
+    WMMA A operand then comes from LDS, whose bandwidth matches the WMMA rate, and the V stage spilled;
   - the softmax scale 1/16 is a power of two, so the scores stay unscaled — (s − m)·(scale·log2 e)
     rounds exactly like the (s·scale − m·scale)·log2 e that `__expf` evaluates — and the −inf selects
     go away (exp2(−inf) = 0; key 0 is visible to every query, so the running max is finite after the

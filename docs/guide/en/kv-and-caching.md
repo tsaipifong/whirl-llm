@@ -136,6 +136,23 @@ f16 or slightly faster. The prefill cost is in V (the PV product), where q8v and
 the dequantization cost is gone: q8h decode at 125,853 tokens went from 24.09 to 25.99 tok/s (+7.9%,
 bit-identical).
 
+**Update (0.2.0, Q8P):** q8h prefill is now as fast as f16 on the R9700. The q8 prefill attention
+kernel converted K in every wave (6× per KV head) and V in an LDS stage, 29% slower than f16 at 128k
+keys; the prefill now dequantizes the sequence's keys once per layer and chunk into f16 rows and runs
+the f16 kernel (bit-identical, [kernels.md](kernels.md#flash)). `whirl bench`, balance, R9700, q8h vs
+`WHIRL_KV=f16`:
+
+| | prefill 8k | 32k | 128k | decode_7p |
+|---|---|---|---|---|
+| Swift-1.5 27B MXFP4-A, before | −3.3% | −7.7% | −15.1% | +2.4% |
+| Swift-1.5 27B MXFP4-A, now | 3,458 vs 3,512 (−1.5%) | 2,886 vs 2,913 (−0.9%) | 1,745 vs 1,763 (−1.0%) | 112.2 vs 110.4 (+1.7%) |
+| Qwen3.8-27B UD-Q4_K_M | 1,824 vs 1,833 (−0.5%) | 1,646 vs 1,653 (−0.4%) | 1,199 vs 1,207 (−0.7%) | 97.2 vs 96.8 (+0.4%) |
+
+The f16 copy lives in prefill buffers that are idle during attention (139k rows at the default
+prefill batch 4096); a prompt longer than that keeps the int8 kernel for the rest. Radeon 8060S
+(Qwen3.8-27B Q4_K_M, its own kernels, unchanged): prefill 8k 375.8 vs 379.0 (−0.8%), 64k chat prefill
+297.3 vs 305.6 (−2.7%), decode at 64k 9.35 vs 9.53 tok/s (−1.9%). Single runs (about ±1%).
+
 ### <a id="kv-auto"></a>3.3 Which format: fixed per mode
 
 Each numerics mode has one KV format per model type, decided at load before the kernels are loaded
