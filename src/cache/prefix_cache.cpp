@@ -17,6 +17,47 @@ std::size_t lcpLen(Tokens a, Tokens b) {
 
 bool prefixEq(Tokens a, Tokens b) { return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin()); }
 
+Supersede supersedes(Tokens old_t, Tokens new_t, std::size_t sys, const SupersedeRule& r) {
+    Supersede s;
+    const std::size_t lo = old_t.size(), ln = new_t.size();
+    if (sys == 0 || lo == 0 || ln == 0) return s;
+    const std::size_t l = lcpLen(old_t, new_t);
+    if (l < sys) return s;  // not the same system prompt
+    if (static_cast<double>(ln) > r.shorter * static_cast<double>(lo)) return s;
+    const std::size_t tail = lo - l;
+    const double need = std::max(static_cast<double>(r.min_tail), r.tail_frac * static_cast<double>(lo));
+    if (static_cast<double>(tail) < need) return s;  // near-end divergence: retry / regenerate / edit
+    s.yes = true;
+    s.keep = l;
+    return s;
+}
+
+void SupersedeTracker::mark(std::uint64_t new_id, std::uint64_t old_id, std::size_t keep, std::uint64_t stamp) {
+    for (Item& it : items_) {
+        if (it.new_id == new_id && it.p.old_id == old_id) {
+            it.p = {old_id, keep, stamp};
+            return;
+        }
+    }
+    if (items_.size() >= 256) items_.erase(items_.begin());
+    items_.push_back({new_id, {old_id, keep, stamp}});
+}
+
+std::vector<SupersedeTracker::Pending> SupersedeTracker::take(std::uint64_t new_id) {
+    std::vector<Pending> v;
+    std::size_t w = 0;
+    for (std::size_t i = 0; i < items_.size(); ++i) {
+        if (items_[i].new_id == new_id) v.push_back(items_[i].p);
+        else items_[w++] = items_[i];
+    }
+    items_.resize(w);
+    return v;
+}
+
+void SupersedeTracker::forget(std::uint64_t id) {
+    std::erase_if(items_, [&](const Item& it) { return it.new_id == id || it.p.old_id == id; });
+}
+
 namespace {
 
 class PrefixCacheImpl final : public PrefixCache {

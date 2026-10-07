@@ -138,6 +138,8 @@ const char* kHelpBody =
     "                           Idle sessions are copied there and restored instead of prefilled again\n"
     "  --kv-ssd-dir PATH        SSD tier directory (default %LOCALAPPDATA%\\whirl\\kvcache)\n"
     "  --kv-ssd-gb N            SSD tier size cap in GiB (default 64; 0 = no SSD tier)\n"
+    "  --kv-ssd-mode M          always (default: idle sessions go to SSD after 2 s), shutdown (kept in RAM,\n"
+    "                           written on graceful shutdown), off (no SSD files)\n"
     "  --mmproj FILE            vision encoder (Qwen3-VL style mmproj GGUF, F16 / BF16): image_url parts\n"
     "                           (data: URLs with base64 PNG / JPEG / ...) become image tokens; weights stay\n"
     "                           in pinned host RAM, nothing in VRAM until an image arrives\n"
@@ -170,6 +172,7 @@ struct Options {
     std::optional<std::uint64_t> kv_ram_mb;
     std::optional<std::string> kv_ssd_dir;
     std::optional<std::uint64_t> kv_ssd_gb;
+    std::optional<std::string> kv_ssd_mode;
     std::string device;
     // vision: encoder, idle release seconds, weight mode, embedding cache MiB
     std::optional<std::string> mmproj;
@@ -367,6 +370,11 @@ int serveMain(int argc, char** argv, const char* program) {
         else if (auto v9 = argValue(args, i, "--kv-ram-mb")) opt.kv_ram_mb = parseNum<std::uint64_t>(*v9, "--kv-ram-mb");
         else if (auto v10 = argValue(args, i, "--kv-ssd-dir")) opt.kv_ssd_dir = *v10;
         else if (auto v11 = argValue(args, i, "--kv-ssd-gb")) opt.kv_ssd_gb = parseNum<std::uint64_t>(*v11, "--kv-ssd-gb");
+        else if (auto vm = argValue(args, i, "--kv-ssd-mode")) {
+            if (*vm != "always" && *vm != "shutdown" && *vm != "off")
+                throw std::runtime_error("--kv-ssd-mode: expected always, shutdown or off");
+            opt.kv_ssd_mode = *vm;
+        }
         else if (auto v12 = argValue(args, i, "--device")) opt.device = *v12;
         else if (auto v13 = argValue(args, i, "--mmproj")) opt.mmproj = *v13;
         else if (auto v14 = argValue(args, i, "--vis-idle-s")) opt.vis_idle_s = parseNum<std::uint32_t>(*v14, "--vis-idle-s");
@@ -770,6 +778,7 @@ int serveMain(int argc, char** argv, const char* program) {
             logI("decode floor: off (--decode-min-tps 0: prefill forwards are not limited)");
         if (auto v = env("PROFILE")) eo.profile = *v == "2" ? 2 : 1;
         eo.sys_min = envU32("SYS_MIN", sys_min_default);
+        eo.kv_supersede = envU32("KV_SUPERSEDE", 1) != 0;
         eo.lcp_on = envOn("SYS_LCP", true);
         eo.n_ck = n_ck;
         eo.n_spe = (n_ck == 0 || no_pc) ? 0 : n_spe_plan;
@@ -1022,7 +1031,9 @@ int serveMain(int argc, char** argv, const char* program) {
             for (const KvArr& a : backend->kvArrays()) page_row += a.row;
             if (tier_pre && page_row == per_tok) {
                 std::optional<std::string> ssd_dir;
-                if (ssd_gb > 0) {
+                std::string ssd_mode = opt.kv_ssd_mode.value_or(env("KV_SSD_MODE").value_or("always"));
+                if (ssd_mode != "shutdown" && ssd_mode != "off") ssd_mode = "always";
+                if (ssd_gb > 0 && ssd_mode != "off") {
                     if (opt.kv_ssd_dir) ssd_dir = opt.kv_ssd_dir;
                     else if (auto v = env("KV_SSD_DIR")) ssd_dir = *v;
                     else if (lad) ssd_dir = std::string(lad) + "\\whirl\\kvcache";
@@ -1040,6 +1051,8 @@ int serveMain(int argc, char** argv, const char* program) {
                 tc.ssd_cap = ssd_gb << 30;
                 tc.min_tokens = envU32("KV_TIER_MIN", 2048);
                 tc.ssd_delay_ms = envU32("KV_SSD_DELAY_MS", 2000);
+                tc.ssd_shutdown_only = ssd_mode == "shutdown";
+                tc.dedup = envU32("KV_SSD_DEDUP", 1) != 0;
                 // the wake hook must be in place before the IO thread starts
                 engine.attachTier(tier_pre.get());
                 try {
@@ -1051,6 +1064,10 @@ int serveMain(int argc, char** argv, const char* program) {
                 }
                 if (tier_owned) {
                     tier::Tier& tr = *tier_owned;
+                    engine.setKvSsdMode(tr.hasSsd() ? ssd_mode : std::string("off"));
+                    if (tr.ssdDirBusy())
+                        logW("kv tier: {} is in use by another WHIRL server; SSD tier off for this one (give each server its own --kv-ssd-dir)",
+                             *ssd_dir);
                     tier::declarePinned(lad, embd_pinned + tr.pinnedBytes());
                     logI("kv tier: RAM {:.2f} GiB of pinned host memory (counted as this process's GPU 'Shared Usage'; pinned in {:.1f} s, "
                          "SSD index {:.1f} s), entries >= {} tokens; SSD {}{} (cap {} GiB, {} entries / {:.2f} GiB indexed); entry: {:.1f} "

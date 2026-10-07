@@ -15,10 +15,20 @@
 // All GPU <-> host copies run on one non-blocking stream (FIFO), in pieces of
 // at most 1 MiB so that the decode loop's small synchronous readbacks are
 // never queued behind a long transfer.
-// SSD: one file per entry (4 KiB header, token ids, data region), written by
-// an IO thread with unbuffered positional writes (dirty blocks only; the
-// header is invalidated first and rewritten last), read back the same way
-// (read_qd overlapped reads in flight).
+// SSD: one sparse file per entry (4 KiB header, token ids, block table, data
+// region), written by an IO thread with unbuffered positional writes (dirty
+// blocks only; the header is invalidated first and rewritten last), read back
+// the same way (read_qd overlapped reads in flight).
+// Block dedup (CACHE-1): a KV block (2 MiB of the data region) that holds the
+// same token prefix as a block already on SSD and hashes the same (128-bit
+// content hash) is not written; the block table records its owner (entry id,
+// logical block) and the read job reads it from the owner's file. Owners are
+// always files (references are resolved to the owner at write time, never
+// chained). Dropping an owner's SSD copy (LRU, rewrite of a referenced block,
+// removal) first drops every entry referencing it; at startup a reference
+// whose owner is missing or hashes differently drops the referencing file.
+// A file is never restored unless all its blocks verify, so the worst case of
+// any cache fault is a miss (re-prefill), never wrong KV bytes.
 //
 // Threading: the main (engine) thread owns all entry bookkeeping and calls
 // every Tier method; the IO thread only moves file bytes and reports progress
@@ -62,7 +72,7 @@ constexpr std::size_t read_qd = 4;
 constexpr std::uint64_t chunk_bytes = 512ull << 20;
 constexpr std::uint32_t no_block = 0xffffffffu;
 constexpr char file_magic[8] = {'W', 'H', 'K', 'V', 'T', 'I', 'E', 'R'};
-constexpr std::uint32_t file_version = 1;
+constexpr std::uint32_t file_version = 2;
 constexpr std::uint64_t header_bytes = 4096;
 constexpr std::uint64_t sector = 4096;
 
@@ -95,8 +105,23 @@ struct Header {
     std::int64_t last_used;
     std::uint64_t tok_sum;
     CkMeta ck[max_ck];
+    std::uint64_t tbl_off;  // block table (n_blk BlkRef, one per KV block)
+    std::uint32_t n_blk;
+    std::uint32_t _r2;
 };
-static_assert(sizeof(Header) == 224);
+static_assert(sizeof(Header) == 240);
+
+// Block table row of one KV block (logical block kv_lb0 + k of the entry).
+struct BlkRef {
+    std::uint64_t owner = 0;     // 0: stored in this file; else the owner entry id
+    std::uint32_t owner_lb = 0;  // logical block in the owner's file
+    std::uint32_t _r = 0;
+    std::uint64_t h0 = 0, h1 = 0;  // content hash (0, 0: unknown, never shared)
+};
+static_assert(sizeof(BlkRef) == 32);
+
+// 128-bit content hash of a block (dedup).
+std::array<std::uint64_t, 2> blockHash(const void* p, std::uint64_t n);
 static_assert(std::is_standard_layout_v<Header>);
 
 // Layout constants of this model / server (bytes).
@@ -107,6 +132,8 @@ struct Layout {
 
     std::uint64_t ckStride() const;
     std::uint64_t tokRegion() const;
+    std::uint64_t maxKvBlocks() const;
+    std::uint64_t tblRegion() const;
     std::uint64_t dataOff() const;
 };
 
@@ -118,6 +145,11 @@ struct Config {
     std::uint32_t min_tokens = 2048;
     // an entry is written to SSD once unchanged for this long
     std::uint64_t ssd_delay_ms = 2000;
+    // --kv-ssd-mode shutdown: entries stay in RAM and are written only while
+    // `flushing` is set (graceful shutdown)
+    bool ssd_shutdown_only = false;
+    // share identical KV blocks between SSD files (WHIRL_KV_SSD_DEDUP=0: off)
+    bool dedup = true;
 };
 
 // Meta of the entry's copy on SSD (a RAM eviction of a newer, dirty entry
@@ -126,7 +158,9 @@ struct SsdSnap {
     std::uint32_t n_tok = 0, nck = 0, pages = 0;
     std::array<CkMeta, max_ck> ck{};
     std::vector<std::uint32_t> tokens;
-    std::uint64_t file_bytes = 0;
+    std::uint64_t file_bytes = 0;   // logical file size
+    std::uint64_t alloc_bytes = 0;  // bytes counted against the cap (shared blocks excluded)
+    std::vector<BlkRef> tbl;        // one row per KV block
 };
 
 struct Entry {
@@ -154,6 +188,12 @@ struct Entry {
     std::uint64_t lru = 0;
     std::chrono::steady_clock::time_point t_mod{};
     bool removed = false;
+    // read jobs of other entries reading blocks this entry owns
+    std::uint32_t ext_pin = 0;
+    // metadata changed (trimTo): header / table rewrite due
+    bool meta_dirty = false;
+    // an owner of a block it references was dropped while its write ran
+    bool ssd_stale = false;
 
     std::uint64_t kvOff(const Layout& l) const;
     std::uint64_t extent(const Layout& l) const;
@@ -207,7 +247,8 @@ struct Restore {
 
 struct Stats {
     std::uint64_t spills = 0, spill_bytes = 0, restores_ram = 0, restores_ssd = 0, restore_bytes = 0,
-                  ssd_writes = 0, ssd_write_bytes = 0, ram_evictions = 0, ssd_evictions = 0, dropped = 0;
+                  ssd_writes = 0, ssd_write_bytes = 0, ram_evictions = 0, ssd_evictions = 0, dropped = 0,
+                  ssd_dedup_bytes = 0, superseded = 0, superseded_bytes = 0;
 };
 
 class Tier {
@@ -235,8 +276,15 @@ public:
     // GPU work on e finished? (clears gpu_busy)
     bool gpuIdle(Entry* e);
     Entry* newEntry(std::uint32_t nck);
-    // Remove an entry entirely (RAM blocks, SSD file, index).
+    // Remove an entry entirely (RAM blocks, SSD file, index); entries
+    // referencing its SSD blocks lose their SSD copy first.
     void removeEntry(Entry* e);
+    // Superseded session (compact / compress): keep only tokens [0, keep)
+    // (rounded up to what referencing files need, down to its checkpoints),
+    // in RAM and on SSD. Returns the bytes freed (0: nothing / not now).
+    std::uint64_t trimTo(Entry* e, std::uint32_t keep);
+    // Entries whose SSD block table references blocks e owns.
+    std::vector<Entry*> dependentsOf(const Entry* e) const;
 
     // Arena blocks for logical blocks [lb0, lb1) of e (allocating what is missing).
     bool ensureBlocks(Entry* e, std::size_t lb0, std::size_t lb1);
@@ -281,6 +329,11 @@ public:
     bool tick();
 
     bool hasSsd() const { return ssd_dir_w_.has_value(); }
+    // the SSD directory is used by another process (SSD tier disabled)
+    bool ssdDirBusy() const { return dir_busy_; }
+
+    // graceful shutdown: write due entries now (also in ssd_shutdown_only mode)
+    bool flushing = false;
 
     // public state read by the engine
     Config cfg;
@@ -324,6 +377,14 @@ private:
     void startWrite(Entry* e);
     void indexFile(const std::wstring& full, std::uint64_t size, std::vector<IndexItem>& order);
     void index();
+    void validateRefs();
+    bool ssdDroppable(const Entry* e, int depth = 0) const;
+    void dropSsdCopy(Entry* e);
+    void touchOwners(const Entry* e);
+    void gcOwners();
+    std::uint64_t allocBytes(const Entry* e, std::size_t n_ref) const;
+    bool refsOk(const Entry* e) const;
+    void readSources(Job* j, const Entry* e);
 
     void ioThread();
     Job* pendingRead();
@@ -351,6 +412,9 @@ private:
     std::mt19937_64 rng_;
     std::vector<Event> ev_pool_;
     int dev_ = 0;  // device (the IO thread waits on tier-stream events)
+    void* dir_lock_ = nullptr;  // HANDLE of <ssd dir>\whirl.lock (delete on close)
+    bool dir_busy_ = false;
+    bool gc_due_ = false;
 };
 
 // Write %LOCALAPPDATA%\whirl\pinned\<pid>.txt = the pinned host bytes this

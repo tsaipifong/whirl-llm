@@ -151,6 +151,55 @@ public:
     virtual Victim evictVictim(View<const SlotCache> slots, const SlotPred& evictable, View<const SpeKey> spes) const = 0;
 };
 
+// Superseded session (CACHE-1): an agent framework's compact (history
+// replaced by a summary) or compress (middle messages dropped, tool output
+// cut) starts a conversation that shares only the system prompt or an early
+// prefix with the old one, and is clearly shorter; the old session's tail is
+// never asked for again. Retry / regenerate / edit-last diverge near the end
+// (short abandoned tail) and a different system prompt shares less than the
+// system message: neither supersedes.
+struct SupersedeRule {
+    double shorter = 0.75;           // new length <= shorter * old length
+    std::uint32_t min_tail = 4096;   // abandoned old tail >= max(min_tail, tail_frac * old)
+    double tail_frac = 0.25;
+};
+struct Supersede {
+    bool yes = false;
+    std::size_t keep = 0;  // shared prefix (the old entry keeps tokens [0, keep))
+};
+// old_t / new_t: token ids of the old entry and of the new conversation;
+// sys: end of the new conversation's system message (0: none / unknown -> no).
+Supersede supersedes(Tokens old_t, Tokens new_t, std::size_t sys, const SupersedeRule& r = {});
+
+// Deferred supersede: the new conversation's first turn marks the old
+// entries it would supersede; its second turn cuts those that were not used
+// since (stamp unchanged). A parallel session of another project with the
+// same system prompt keeps working on its old entry and is left alone; a
+// compacted agent never returns to it.
+class SupersedeTracker {
+public:
+    struct Pending {
+        std::uint64_t old_id = 0;
+        std::size_t keep = 0;
+        std::uint64_t stamp = 0;
+    };
+    void mark(std::uint64_t new_id, std::uint64_t old_id, std::size_t keep, std::uint64_t stamp);
+    // pending marks of new_id (removed from the tracker)
+    std::vector<Pending> take(std::uint64_t new_id);
+    void forget(std::uint64_t id);  // an entry removed: drop its marks either way
+    std::size_t size() const { return items_.size(); }
+
+private:
+    struct Item {
+        std::uint64_t new_id;
+        Pending p;
+    };
+    std::vector<Item> items_;
+};
+
+// Too short to keep in the host tiers (re-prefill is cheaper than a restore).
+inline bool tooShortForTier(std::uint32_t tokens, std::uint32_t min_tokens) { return tokens < min_tokens; }
+
 std::unique_ptr<PrefixCache> makePrefixCache(const Config& cfg);
 
 }  // namespace whirl::cache

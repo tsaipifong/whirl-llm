@@ -989,10 +989,12 @@ void tierMode(const std::string& mode) {
     if (fs::exists(widen(ssd)))
         for (const auto& e : fs::directory_iterator(widen(ssd))) files += e.is_regular_file() ? 1 : 0;
     check(std::format("tier {}: entries on SSD after the restart", mode), files >= 1, std::format("{} files", files));
+    std::map<std::string, ChatResult> after;
     {
         ServerLease s("tier_" + mode + "_restart", args, {{"WHIRL_KV_SSD_DIR", ssd}}, false);
         for (const auto& ss : S) {
             auto b = chat(t2msg(ss, t1[ss.name]), greedy(96) + thinkKw(ss.think));
+            after[ss.name] = b;
             const auto& rb = ref[ss.name].second;
             check(std::format("tier {}: {} turn 2 after restart (SSD restore) == never-evicted", mode, ss.name),
                   b.content == rb.content && b.reasoning == rb.reasoning,
@@ -1001,6 +1003,16 @@ void tierMode(const std::string& mode) {
         check(std::format("tier {}: SSD restores logged", mode), s->logCount(R"(kv tier: restored \d+ tok from SSD)") >= 1);
     }
     fs::remove_all(widen(ssd), ec);
+    if (p1) {
+        // CACHE-1: continuing after a restart (SSD restore) == a run with no prefix cache at all
+        ServerLease s("tier_p1_nocache", {"--parallel", "1", "--kv-ram-mb", "0"}, {{"WHIRL_NO_PREFIX_CACHE", "1"}});
+        for (const auto& ss : S) {
+            auto b = chat(t2msg(ss, t1[ss.name]), greedy(96) + thinkKw(ss.think));
+            check(std::format("tier p1: {} turn 2 after restart (SSD restore) == no prefix cache", ss.name),
+                  b.content == after[ss.name].content && b.reasoning == after[ss.name].reasoning,
+                  std::format("cached {} vs {}", after[ss.name].cached, b.cached));
+        }
+    }
 }
 
 void suiteTier() {
@@ -1118,6 +1130,10 @@ void suiteSys() {
         check("sys: 4 concurrent sessions == cold, all reuse", ok, d);
         std::this_thread::sleep_for(std::chrono::seconds(3));
         s->waitTierIdle(60);  // pending SSD writes done before the stop
+        // CACHE-1 block dedup: sessions sharing the system prompt store its KV once
+        check("sys: SSD entries share the system prompt's KV blocks (dedup)",
+              s->logCount(R"(MiB, [1-9]\d* MiB shared with other entries)") >= 1,
+              std::format("{} SSD writes with shared blocks", s->logCount(R"(MiB, [1-9]\d* MiB shared with other entries)")));
     }
     {
         auto env = kv;

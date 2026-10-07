@@ -275,6 +275,8 @@ struct EngineOptions {
     std::string model_file;  // GGUF file name without directory (GET /props model_path)
     std::uint32_t ctx = 131072;  // context per slot (cap)
     std::string numerics_json;   // GET /props "numerics" (numerics::propsJson; empty: not reported)
+    std::string kv_ssd_mode = "off";  // --kv-ssd-mode as in effect (GET /props kv_ssd)
+    bool kv_supersede = true;         // CACHE-1 superseded-session cut (WHIRL_KV_SUPERSEDE=0: off)
     std::uint32_t parallel = 4;
     chat::TemplateKind tmpl = chat::TemplateKind::a;
     bool use_mtp = false;
@@ -369,6 +371,7 @@ public:
         opt_.ctx = c;
     }
     void setNumerics(std::string j) { opt_.numerics_json = std::move(j); }
+    void setKvSsdMode(std::string m) { opt_.kv_ssd_mode = std::move(m); }
     const Tokenizer& tokenizer() const { return tok_; }
     const ChatTokens& chatTokens() const { return ct_; }
     ServerModel& model() { return m_; }
@@ -379,6 +382,9 @@ public:
         std::uint64_t spe_new = 0, spe_hits = 0, spe_tok = 0, spe_evict = 0, unshare = 0, evictions = 0;
         std::uint64_t cow_pages = 0, q_waits = 0, spill_waits = 0;
         std::uint64_t vis_enc = 0, vis_hit = 0;  // vision: images encoded / embedding cache hits
+        // SSD tier: bytes written since start, bytes not written (shared
+        // blocks), bytes in use, superseded sessions trimmed
+        std::uint64_t ssd_written = 0, ssd_dedup = 0, ssd_used = 0, ssd_entries = 0, superseded = 0;
     };
     Stats stats() const;
 
@@ -558,6 +564,10 @@ private:
     std::uint64_t emb_bytes_ = 0;
     std::uint64_t emb_seq_ = 0;
     std::uint64_t stat_vis_enc_ = 0, stat_vis_hit_ = 0;
+    std::atomic<std::uint64_t> stat_ssd_written_{0}, stat_ssd_dedup_{0}, stat_ssd_used_{0}, stat_ssd_entries_{0}, stat_superseded_{0};
+    void supersedeMark(const Slot& sl, tier::Entry* x);
+    void supersedeApply(const Slot& sl, tier::Entry* x);
+    cache::SupersedeTracker supersede_;
     std::array<std::array<std::uint64_t, 2>, 16> vis_lend_raw_{};
     std::vector<vision::Region> vis_lend_;
     std::uint64_t vis_free0_ = 0;  // VRAM free right after the mmproj was loaded (no image yet)

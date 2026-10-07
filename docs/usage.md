@@ -192,6 +192,7 @@ request slots, a prefix cache in VRAM and host RAM / SSD tiers for idle sessions
 | `--kv-ram-mb N` | host RAM tier of the prefix cache, MiB of pinned memory (default: 1/4 of physical RAM, at least 8 GiB or one full-length session if that is larger — about 9 GiB for the 27B model —, at most 32 GiB, and at most half of the RAM available at startup; 16 GiB on a 64 GB PC; off by default on integrated GPUs). The startup log prints the chosen size and why. Idle sessions are copied there and restored instead of prefilled again. `0` disables both host tiers. **Radeon 8060S** (integrated GPU): default `0` — the KV pool already lives in system memory; give a size to turn the RAM and SSD tiers on |
 | `--kv-ssd-dir PATH` | SSD tier directory (default `%LOCALAPPDATA%\whirl\kvcache`) |
 | `--kv-ssd-gb N` | SSD tier size cap in GiB (default 64; `0` = no SSD tier) |
+| `--kv-ssd-mode M` | when the SSD tier writes: `always` (default; idle sessions after about 2 s), `shutdown` (kept in RAM, written on a graceful stop), `off` (no SSD files). See [how the SSD tier stores sessions](#ssd-tier) |
 | `--mmproj FILE` | vision encoder (Qwen3-VL style mmproj GGUF, F16 / BF16). `image_url` parts (`data:` URLs with base64 PNG / JPEG / …) become image tokens. Weights stay in pinned host RAM; nothing goes to VRAM until an image arrives |
 | `--vis-idle-s N` | release the vision encoder after N seconds without images (default 60) |
 | `--vis-mode M` | `auto` (default), `resident` (encoder weights in VRAM), `stream` (layer by layer) |
@@ -266,6 +267,40 @@ not turn thinking back on when it was switched off.
 $body = '{"messages":[{"role":"user","content":"What is 2+3?"}],"temperature":0,"max_tokens":200}'
 Invoke-RestMethod http://127.0.0.1:8080/v1/chat/completions -Method Post -ContentType 'application/json' -Body $body
 ```
+
+### <a id="ssd-tier"></a>How the SSD tier stores sessions
+
+- **When it writes.** `--kv-ssd-mode always` (default): an idle session's RAM-tier entry is written
+  about 2 s after its last change. `shutdown`: entries stay in RAM and are written only during a
+  graceful stop (Ctrl+C) — the fewest SSD writes, but a crash or a RAM-tier eviction loses them.
+  `off`: no SSD files at all (the RAM tier still works). `--kv-ssd-gb` caps the space; the least
+  recently used entries are deleted first.
+- **Only what changed is written.** A continued conversation writes its new KV pages and the
+  changed checkpoint, not the whole session again. KV blocks that another file on the SSD already
+  holds for the same token prefix (a shared system prompt and tool definitions, the part before a
+  retry or a compact) are not written again: the new file refers to them (the file is sparse, the
+  block is read from the other file). A block is shared only when its token prefix matches and
+  its 128-bit content hash is equal.
+- **Superseded sessions.** When an agent compacts or trims its history (same system prompt, the new
+  conversation shares only an early part with an older session and is clearly shorter), the older
+  session is cut down to the shared part once the new conversation has finished its second turn
+  and the old one has not been used since. Retries, regenerations, edits of the last message and
+  other system prompts never trigger this. `WHIRL_KV_SUPERSEDE=0` turns it off.
+- **Short sessions** (under 2048 tokens, `WHIRL_KV_TIER_MIN`) are not kept: prefilling them again
+  is about as fast as restoring them.
+- **Safety.** The cache matches token prefixes exactly; a restored entry is the very bytes that were
+  saved. Every file has a checksummed token list and a header written last; a file cut short by a
+  crash, a file whose shared block is gone or no longer matches, or a file from another build,
+  model, mode or KV format is never restored (other builds' files are counted against the cap and
+  deleted first). The worst case of any fault is a cache miss, never different output.
+- **One server per directory.** A second server pointed at a directory in use (`whirl.lock`) runs
+  without an SSD tier and says so in the log; give each server its own `--kv-ssd-dir`.
+- **Write volume.** The log's `kv tier |` line and `GET /props` (`kv_ssd.bytes_written`,
+  `bytes_shared`, `bytes_used`, `entries`, `superseded`) show the bytes written to the SSD since
+  start and the bytes shared instead of written.
+- **Privacy.** The files hold your prompts as token ids (readable by anyone who can read the files)
+  and their KV data. They are in your user profile with its permissions. To remove them, stop the
+  server and delete the directory; `--kv-ssd-mode off` never writes them.
 
 ### <a id="stop"></a>Stopping the server
 
@@ -393,6 +428,9 @@ The output always equals plain greedy decoding (with sampling: the same distribu
 | `WHIRL_KV_SSD_GB=N` | SSD tier size cap in GiB (= `--kv-ssd-gb`) |
 | `WHIRL_KV_TIER_MIN=N` | smallest session copied to the host tiers, in tokens (default 2048) |
 | `WHIRL_KV_SSD_DELAY_MS=MS` | delay before a RAM-tier entry is also written to the SSD (default 2000) |
+| `WHIRL_KV_SSD_MODE=always\|shutdown\|off` | = `--kv-ssd-mode` |
+| `WHIRL_KV_SSD_DEDUP=0` | write every block even when another SSD file holds it (default: shared) |
+| `WHIRL_KV_SUPERSEDE=0` | keep sessions superseded by an agent's compact / trim (default: cut to the shared part) |
 | `WHIRL_MMPROJ=FILE` | vision encoder (= `--mmproj`) |
 | `WHIRL_VIS_IDLE_S=N` | release the vision encoder after N s without images (= `--vis-idle-s`) |
 | `WHIRL_VIS_CACHE_MB=N` | image embedding cache in MiB (= `--vis-cache-mb`) |

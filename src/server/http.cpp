@@ -455,6 +455,11 @@ std::string propsJson(Engine& e) {
     b += std::format(",\"modalities\":{{\"vision\":{},\"audio\":false}},\"build_info\":\"whirl {}\"",
                      e.visionConfig().vis ? "true" : "false", WHIRL_VERSION_STRING);
     if (!o.numerics_json.empty()) b += ",\"numerics\":" + o.numerics_json;
+    const Engine::Stats st = e.stats();
+    b += ",\"kv_ssd\":{\"mode\":";
+    appendJsonStr(b, o.kv_ssd_mode);
+    b += std::format(",\"bytes_written\":{},\"bytes_shared\":{},\"bytes_used\":{},\"entries\":{},\"superseded\":{}}}",
+                     st.ssd_written, st.ssd_dedup, st.ssd_used, st.ssd_entries, st.superseded);
     b += "}";
     return b;
 }

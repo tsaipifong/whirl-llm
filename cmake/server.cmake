@@ -39,6 +39,9 @@ target_link_libraries(whirl_cache PUBLIC whirl whirl_tier_core)
 add_executable(whirl-cache-tests ${CMAKE_SOURCE_DIR}/tests/cache/cache_tests.cpp)
 target_include_directories(whirl-cache-tests PRIVATE ${CMAKE_SOURCE_DIR}/tests/cache)
 target_link_libraries(whirl-cache-tests PRIVATE whirl_cache)
+if(TARGET whirl-tier-tests)
+  target_link_libraries(whirl-tier-tests PRIVATE whirl_cache)
+endif()
 
 # ---------------------------------------------------------------------------
 # OpenAI-compatible server (src/server)

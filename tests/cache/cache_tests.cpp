@@ -313,6 +313,81 @@ static void testFingerprint() {
     for (const auto& [k, v] : fingerprintEnv()) CHECK(fingerprintEnvKept(k));
 }
 
+// CACHE-1: superseded-session rule (compact / compress yes; retry,
+// regenerate, edit-last, other system prompt, unknown system prompt no)
+static void testSupersede() {
+    auto seq = [](std::size_t n, std::uint32_t base) {
+        std::vector<std::uint32_t> v(n);
+        for (std::size_t i = 0; i < n; ++i) v[i] = base + static_cast<std::uint32_t>(i);
+        return v;
+    };
+    auto cat = [](std::vector<std::uint32_t> a, const std::vector<std::uint32_t>& b) {
+        a.insert(a.end(), b.begin(), b.end());
+        return a;
+    };
+    const auto sys = seq(3000, 1);
+    const auto old_t = cat(sys, seq(20000, 100000));  // 23000 tokens
+    // compact: system prompt + summary
+    {
+        const auto n = cat(sys, seq(1500, 500000));
+        const Supersede s = supersedes(old_t, n, sys.size());
+        CHECK(s.yes && s.keep == 3000);
+    }
+    // compress: first messages kept, middle dropped (mid-way divergence), shorter
+    {
+        auto n = old_t;
+        n.resize(9000);
+        n = cat(n, seq(4000, 600000));
+        const Supersede s = supersedes(old_t, n, sys.size());
+        CHECK(s.yes && s.keep == 9000);
+    }
+    // regenerate / retry: diverges at the last answer
+    {
+        auto n = old_t;
+        n.resize(old_t.size() - 600);
+        n = cat(n, seq(500, 700000));
+        CHECK(!supersedes(old_t, n, sys.size()).yes);
+    }
+    // edit-last: the last user message changed (tail of 2500 tokens < max(4096, 25 %))
+    {
+        auto n = old_t;
+        n.resize(old_t.size() - 2500);
+        n = cat(n, seq(300, 710000));
+        CHECK(!supersedes(old_t, n, sys.size()).yes);
+    }
+    // continuation (longer): never
+    CHECK(!supersedes(old_t, cat(old_t, seq(100, 720000)), sys.size()).yes);
+    // different system prompt (shares less than the system message)
+    {
+        auto n = seq(2990, 1);
+        n = cat(n, seq(2000, 730000));
+        CHECK(!supersedes(old_t, n, 3000).yes);
+    }
+    // unknown system message: never
+    CHECK(!supersedes(old_t, cat(sys, seq(1500, 500000)), 0).yes);
+    // not clearly shorter (new >= 75 % of old)
+    CHECK(!supersedes(old_t, cat(sys, seq(16000, 740000)), sys.size()).yes);
+    // short old session: the abandoned tail is under min_tail
+    {
+        const auto small_old = cat(sys, seq(3000, 750000));
+        CHECK(!supersedes(small_old, cat(sys, seq(200, 760000)), sys.size()).yes);
+    }
+    // too short for the host tiers
+    CHECK(tooShortForTier(2047, 2048) && !tooShortForTier(2048, 2048));
+    // deferred marks: taken once per new entry, re-marking updates, forget drops
+    SupersedeTracker tr;
+    tr.mark(10, 1, 3000, 77);
+    tr.mark(10, 2, 3000, 78);
+    tr.mark(10, 1, 3100, 79);
+    tr.mark(11, 1, 3000, 80);
+    CHECK(tr.size() == 3);
+    const auto p = tr.take(10);
+    CHECK(p.size() == 2 && p[0].old_id == 1 && p[0].keep == 3100 && p[0].stamp == 79 && p[1].old_id == 2);
+    CHECK(tr.take(10).empty() && tr.size() == 1);
+    tr.forget(1);
+    CHECK(tr.size() == 0);
+}
+
 int main() {
     testHelpers();
     testMatchSlot();
@@ -322,6 +397,7 @@ int main() {
     testTier();
     testLcpTarget();
     testFingerprint();
+    testSupersede();
     std::printf("cache tests: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }

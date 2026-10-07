@@ -8,6 +8,7 @@
 
 #include "tier/kv_tier.h"
 #include "tier/ram_size.h"
+#include "cache/prefix_cache.h"
 
 #include <malloc.h>
 
@@ -515,7 +516,8 @@ static void testSsd(MockDeviceOps& ops, const fs::path& dir) {
         CHECK(tickIdle(*t));
         CHECK(e->ssd.has_value());
         CHECK(!e->hasDirty() && !e->io_busy);
-        CHECK(t->stats.ssd_writes == 1 && t->stats.ssd_write_bytes == 10 * block_bytes);
+        // bytes actually written: header twice, tokens, block table, data region
+        CHECK(t->stats.ssd_writes == 1 && t->stats.ssd_write_bytes == 3 * header_bytes + 8192 + (fb - kLay.dataOff()));
         CHECK(t->ssd_bytes == fb);
         CHECK(wakes.load() >= 1);
         CHECK(!logs.empty() && logs.back().find("written to SSD") != std::string::npos);
@@ -527,7 +529,7 @@ static void testSsd(MockDeviceOps& ops, const fs::path& dir) {
             if (bytes.size() == fb) {
                 Header h;
                 std::memcpy(&h, bytes.data(), sizeof h);
-                CHECK(std::memcmp(h.magic, "WHKVTIER", 8) == 0 && h.version == 1 && h.valid == 1);
+                CHECK(std::memcmp(h.magic, "WHKVTIER", 8) == 0 && h.version == 2 && h.valid == 1);
                 CHECK(h.fingerprint == fp1 && h.id == e->id && h.n_tok == 1700 && h.nck == nck && h.pages == pages);
                 CHECK(h.tok_off == header_bytes && h.data_off == kLay.dataOff() && h.ck_stride == kLay.ckStride());
                 CHECK(std::memcmp(bytes.data() + header_bytes, toks.data(), toks.size() * 4) == 0);
@@ -759,7 +761,7 @@ static void testHelpers() {
     CHECK(hashStr(0xcbf29ce484222325ull, "a") == 0xaf63dc4c8601ec8cull);  // FNV-1a 64 of "a"
     CHECK(exeIdentity() != 0);
     CHECK(kLay.ckStride() == (4ull << 20));
-    CHECK(kLay.tokRegion() == 32768 && kLay.dataOff() == 36864);
+    CHECK(kLay.tokRegion() == 32768 && kLay.tblRegion() == 4096 && kLay.dataOff() == 40960);
 }
 
 // default size of the pinned-RAM tier (src/tier/ram_size.h)
@@ -832,21 +834,596 @@ static void testRamTierSize() {
     }
 }
 
+// ---- CACHE-1: block dedup, superseded sessions, SSD modes ------------------------------
+
+// One server slot of the simulations: KV page j holds bytes derived from the
+// tokens up to the end of page j (a token prefix always has the same KV
+// bytes), checkpoints from the whole token list.
+struct Sess {
+    MockDeviceOps* ops;
+    DevSlot d;
+    std::vector<std::uint32_t> toks;
+    Entry* e = nullptr;  // valid only right after spillSess (use id later)
+    std::uint64_t id = 0;
+    std::uint64_t seq = 0;
+    Sess(MockDeviceOps& o, std::uint32_t max_pages) : ops(&o), d(o, 2, max_pages) {}
+    std::uint32_t pages() const { return static_cast<std::uint32_t>((toks.size() + kLay.page_tokens - 1) / kLay.page_tokens); }
+    static std::uint64_t sumOf(const std::vector<std::uint32_t>& t, std::size_t n) {
+        std::uint64_t h = 1469598103934665603ull;
+        for (std::size_t i = 0; i < n; ++i) h = (h ^ t[i]) * 1099511628211ull;
+        return h;
+    }
+    void fillFrom(std::uint32_t pg0) {
+        for (std::uint32_t j = pg0; j < pages(); ++j) {
+            const std::size_t end = std::min<std::size_t>(toks.size(), static_cast<std::size_t>(j + 1) * kLay.page_tokens);
+            fillBytes(reinterpret_cast<void*>(d.kv + static_cast<std::uint64_t>(j) * kLay.page_bytes), kLay.page_bytes, sumOf(toks, end));
+        }
+    }
+};
+
+// Spill the slot like Engine::spillSlot: in place when it still owns its
+// entry (pages from the first changed one, the newer checkpoint), else a new
+// entry. Returns true for a new entry.
+static bool spillSess(Tier& t, Sess& s, std::size_t changed_from) {
+    const std::uint32_t P = static_cast<std::uint32_t>(s.toks.size());
+    const std::uint32_t npages = s.pages();
+    CHECK(npages <= s.d.pages);
+    if (npages > s.d.pages) return false;
+    Entry* x = s.id != 0 ? t.find(s.id) : nullptr;
+    const bool fresh = x == nullptr || !x->in_ram || x->n_tok == 0;
+    std::uint32_t vp = 0;
+    if (fresh) {
+        x = t.newEntry(2);
+    } else {
+        vp = static_cast<std::uint32_t>(std::min<std::size_t>(changed_from, x->n_tok) / kLay.page_tokens);
+    }
+    s.fillFrom(vp);
+    // keep the checkpoint this request resumed from, overwrite the other
+    std::uint32_t k = 0;
+    if (!fresh) {
+        int keep = -1;
+        for (int i = 0; i < 2; ++i)
+            if (x->ck[i].valid != 0 && x->ck[i].pos <= changed_from && (keep < 0 || x->ck[i].pos > x->ck[keep].pos)) keep = i;
+        k = keep == 0 ? 1u : 0u;
+    }
+    s.seq += 1;
+    fillBytes(reinterpret_cast<void*>(s.d.ck[k]), kLay.ck_bytes, Sess::sumOf(s.toks, P) + k);
+    std::vector<Span> sp;
+    sp.push_back(Span{s.d.ck[k], static_cast<std::uint64_t>(k) * kLay.ckStride(), kLay.ck_bytes, static_cast<std::uint8_t>(k)});
+    if (npages > vp)
+        sp.push_back(Span{s.d.kv + static_cast<std::uint64_t>(vp) * kLay.page_bytes,
+                          x->kvOff(kLay) + static_cast<std::uint64_t>(vp) * kLay.page_bytes,
+                          static_cast<std::uint64_t>(npages - vp) * kLay.page_bytes, 0xff});
+    for (const Span& q : sp) {
+        const auto r = Tier::lbRange(q.off, q.len);
+        if (!t.ensureBlocks(x, r[0], r[1])) {
+            if (fresh) t.removeEntry(x);
+            s.e = nullptr;
+            s.id = 0;
+            return false;
+        }
+    }
+    // the other checkpoint is stale past the divergence
+    const std::uint32_t o = 1 - k;
+    if (x->ck[o].valid != 0 && x->ck[o].pos > changed_from) {
+        t.dropCkBlocks(x, o);
+        x->ck[o] = CkMeta{};
+    }
+    x->ck[k] = CkMeta{P, 1, 1, 0, 0, s.seq};
+    t.copyOut(x, sp);
+    x->tokens = s.toks;
+    x->n_tok = P;
+    x->pages = npages;
+    t.trim(x);
+    t.fence(x, nullptr);
+    x->owner = 0;
+    x->t_mod = std::chrono::steady_clock::now();
+    s.e = x;
+    s.id = x->id;
+    return fresh;
+}
+
+// what Engine::supersedeOld does after a new entry's first spill
+static std::uint64_t supersede(Tier& t, const Entry* x, std::size_t sys) {
+    std::uint64_t freed = 0;
+    for (int pass = 0; pass < 4; ++pass) {
+        std::uint64_t f = 0;
+        const std::vector<Entry*> all = t.entries;
+        for (Entry* e : all) {
+            if (e == x || e->n_tok == 0 || std::find(t.entries.begin(), t.entries.end(), e) == t.entries.end()) continue;
+            const auto sp = whirl::cache::supersedes(whirl::cache::Tokens(e->tokens.data(), e->n_tok),
+                                                     whirl::cache::Tokens(x->tokens.data(), x->n_tok), sys);
+            if (sp.yes) f += t.trimTo(e, static_cast<std::uint32_t>(sp.keep));
+        }
+        freed += f;
+        if (f == 0) break;
+    }
+    return freed;
+}
+
+// Engine::supersedeMark / supersedeApply (deferred: cut at the new
+// conversation's second spill unless the old entry was updated since)
+static std::uint64_t stampOf(const Entry* e) {
+    return static_cast<std::uint64_t>(e->t_mod.time_since_epoch().count()) * 0x9e3779b97f4a7c15ull ^ e->n_tok;
+}
+static void supersedeMark(Tier& t, whirl::cache::SupersedeTracker& tr, const Entry* x, std::size_t sys) {
+    for (Entry* e : t.entries) {
+        if (e == x || e->n_tok == 0) continue;
+        const auto sp = whirl::cache::supersedes(whirl::cache::Tokens(e->tokens.data(), e->n_tok),
+                                                 whirl::cache::Tokens(x->tokens.data(), x->n_tok), sys);
+        if (sp.yes) tr.mark(x->id, e->id, sp.keep, stampOf(e));
+    }
+}
+static std::uint64_t supersedeApply(Tier& t, whirl::cache::SupersedeTracker& tr, const Entry* x) {
+    auto pend = tr.take(x->id);
+    std::uint64_t freed = 0;
+    for (int pass = 0; pass < 4 && !pend.empty(); ++pass) {
+        bool any = false;
+        for (auto it = pend.begin(); it != pend.end();) {
+            Entry* e = t.find(it->old_id);
+            if (e == nullptr || stampOf(e) != it->stamp) {
+                it = pend.erase(it);
+                continue;
+            }
+            const std::uint64_t f = t.trimTo(e, static_cast<std::uint32_t>(it->keep));
+            if (f == 0) {
+                ++it;
+                continue;
+            }
+            freed += f;
+            any = true;
+            it = pend.erase(it);
+        }
+        if (!any) break;
+    }
+    return freed;
+}
+
+static std::vector<std::uint32_t> freshToks(std::size_t n, std::uint64_t& seed) {
+    auto v = makeTokens(n, seed++);
+    for (auto& x : v) x += 300000;
+    return v;
+}
+
+// Byte-compare a restore of entry e with the slot that produced it.
+static bool restoreMatches(Tier& t, MockDeviceOps& ops, Entry* e, const Sess& s) {
+    DevSlot dst(ops, 2, s.d.pages);
+    std::uint32_t k = 0;
+    for (std::uint32_t i = 0; i < 2; ++i)
+        if (e->ck[i].valid != 0 && e->ck[i].pos == e->n_tok) k = i;
+    std::vector<Span> sp;
+    sp.push_back(Span{dst.ck[k], static_cast<std::uint64_t>(k) * kLay.ckStride(), kLay.ck_bytes, static_cast<std::uint8_t>(k)});
+    sp.push_back(Span{dst.kv, e->kvOff(kLay), static_cast<std::uint64_t>(e->pages) * kLay.page_bytes, 0xff});
+    Restore* r = t.beginRestore(e, sp, sp.size());
+    if (r == nullptr) return false;
+    const bool ok = runRestore(t, r);
+    t.endRestore(r);
+    if (!ok) return false;
+    const bool ck_ok = std::memcmp(reinterpret_cast<void*>(dst.ck[k]), reinterpret_cast<void*>(s.d.ck[k]), kLay.ck_bytes) == 0;
+    const bool kv_ok = std::memcmp(reinterpret_cast<void*>(dst.kv), reinterpret_cast<void*>(s.d.kv),
+                                   static_cast<std::uint64_t>(e->pages) * kLay.page_bytes) == 0;
+    return ck_ok && kv_ok;
+}
+
+static void testDedupRestart(MockDeviceOps& ops, const fs::path& dir) {
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    SsdEnv env{dir};
+    const std::uint64_t fp = hashStr(0xcbf29ce484222325ull, "dedup");
+    std::uint64_t seed = 900;
+    const auto sys = freshToks(2560, seed);  // 10 pages = 15 MiB = 7 whole blocks
+    Sess a(ops, 24), b(ops, 24);
+    a.toks = sys;
+    auto ta = freshToks(1500, seed);
+    a.toks.insert(a.toks.end(), ta.begin(), ta.end());
+    b.toks = sys;
+    auto tb = freshToks(900, seed);
+    b.toks.insert(b.toks.end(), tb.begin(), tb.end());
+    std::uint64_t id_a = 0, id_b = 0;
+    {
+        auto t = Tier::create(ops, 256ull << 20, 7, 0);
+        t->start(env.cfg(4ull << 30), kLay, fp);
+        spillSess(*t, a, 0);
+        CHECK(tickIdle(*t));
+        const std::uint64_t w_a = t->stats.ssd_write_bytes;
+        spillSess(*t, b, 0);
+        CHECK(tickIdle(*t));
+        const std::uint64_t w_b = t->stats.ssd_write_bytes - w_a;
+        id_a = a.e->id;
+        id_b = b.e->id;
+        CHECK(b.e->ssd.has_value());
+        std::size_t refs = 0;
+        if (b.e->ssd)
+            for (const BlkRef& r : b.e->ssd->tbl) refs += r.owner == id_a ? 1 : 0;
+        CHECK(refs == 7);  // the shared system prompt: 7 whole blocks
+        CHECK(t->stats.ssd_dedup_bytes == 7 * block_bytes);
+        std::printf("dedup: entry a wrote %.1f MiB, entry b (same 2560-token prefix) wrote %.1f MiB, %.0f MiB shared\n",
+                    w_a / 1048576.0, w_b / 1048576.0, t->stats.ssd_dedup_bytes / 1048576.0);
+        CHECK(w_b + 6 * block_bytes <= w_a);
+    }
+    {
+        // restart: both indexed, references verified, b restores from both files
+        auto t = Tier::create(ops, 256ull << 20, 8, 0);
+        t->start(env.cfg(4ull << 30), kLay, fp);
+        CHECK(t->ssdEntries() == 2);
+        Entry* eb = t->find(id_b);
+        Entry* ea = t->find(id_a);
+        CHECK(eb != nullptr && !eb->in_ram && ea != nullptr);
+        if (eb && ea) CHECK(eb->lru <= ea->lru);  // owners stay newer than the files referencing them
+        if (eb) CHECK(restoreMatches(*t, ops, eb, b));
+        CHECK(tickIdle(*t));
+        if (ea) CHECK(restoreMatches(*t, ops, ea, a));
+        CHECK(tickIdle(*t));
+    }
+    {
+        // the owner file vanishes (crash, manual delete): b is dropped at start, never restored
+        fs::remove(entryFile(dir, fp, id_a), ec);
+        auto t = Tier::create(ops, 256ull << 20, 9, 0);
+        t->start(env.cfg(4ull << 30), kLay, fp);
+        CHECK(t->ssdEntries() == 0);
+        CHECK(countFiles(dir) == 0);
+    }
+    {
+        // a half-written file (header still invalid) is ignored and deleted
+        fs::remove_all(dir, ec);
+        auto t = Tier::create(ops, 256ull << 20, 10, 0);
+        t->start(env.cfg(4ull << 30), kLay, fp);
+        Sess a2(ops, 24);
+        a2.toks = a.toks;
+        spillSess(*t, a2, 0);
+        CHECK(tickIdle(*t));
+        const fs::path f = entryFile(dir, fp, a2.e->id);
+        t.reset();
+        {
+            FILE* fh = _wfopen(f.c_str(), L"r+b");
+            CHECK(fh != nullptr);
+            if (fh) {
+                std::uint32_t zero = 0;
+                std::fseek(fh, 12, SEEK_SET);  // Header::valid
+                std::fwrite(&zero, 4, 1, fh);
+                std::fclose(fh);
+            }
+        }
+        auto t2 = Tier::create(ops, 256ull << 20, 10, 0);
+        t2->start(env.cfg(4ull << 30), kLay, fp);
+        CHECK(t2->ssdEntries() == 0 && !fs::exists(f));
+    }
+    {
+        // dedup off: nothing shared
+        fs::remove_all(dir, ec);
+        auto t = Tier::create(ops, 256ull << 20, 10, 0);
+        Config c = env.cfg(4ull << 30);
+        c.dedup = false;
+        t->start(c, kLay, fp);
+        Sess a2(ops, 24), b2(ops, 24);
+        a2.toks = a.toks;
+        b2.toks = b.toks;
+        spillSess(*t, a2, 0);
+        CHECK(tickIdle(*t));
+        spillSess(*t, b2, 0);
+        CHECK(tickIdle(*t));
+        CHECK(t->stats.ssd_dedup_bytes == 0);
+    }
+    fs::remove_all(dir, ec);
+}
+
+static void testOwnerRewrite(MockDeviceOps& ops, const fs::path& dir) {
+    // an owner rewritten in place under a block others reference: the
+    // referencing file is dropped first (its RAM copy is written again)
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    SsdEnv env{dir};
+    std::uint64_t seed = 950;
+    auto t = Tier::create(ops, 256ull << 20, 11, 0);
+    t->start(env.cfg(4ull << 30), kLay, 77);
+    Sess a(ops, 24), b(ops, 24);
+    a.toks = freshToks(3000, seed);
+    b.toks = a.toks;
+    b.toks.resize(2800);
+    auto tb = freshToks(500, seed);
+    b.toks.insert(b.toks.end(), tb.begin(), tb.end());
+    spillSess(*t, a, 0);
+    CHECK(tickIdle(*t));
+    spillSess(*t, b, 0);
+    CHECK(tickIdle(*t));
+    CHECK(t->dependentsOf(a.e).size() == 1);
+    // a regenerates from token 1000 (in place): blocks b references change
+    a.toks.resize(1000);
+    auto ta = freshToks(2500, seed);
+    a.toks.insert(a.toks.end(), ta.begin(), ta.end());
+    spillSess(*t, a, 1000);
+    CHECK(tickIdle(*t));
+    CHECK(t->dependentsOf(a.e).empty());
+    CHECK(b.e->ssd.has_value());  // written again (own blocks)
+    CHECK(restoreMatches(*t, ops, a.e, a));
+    const std::uint64_t id_b = b.id;
+    t.reset();
+    auto t2 = Tier::create(ops, 256ull << 20, 12, 0);
+    t2->start(env.cfg(4ull << 30), kLay, 77);
+    CHECK(t2->ssdEntries() == 2);
+    Entry* eb = t2->find(id_b);
+    CHECK(eb != nullptr);
+    if (eb) CHECK(restoreMatches(*t2, ops, eb, b));
+    CHECK(tickIdle(*t2));
+    t2.reset();
+    fs::remove_all(dir, ec);
+}
+
+static void testModesLock(MockDeviceOps& ops, const fs::path& dir) {
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    SsdEnv env{dir};
+    std::uint64_t seed = 990;
+    {
+        // shutdown mode: nothing written until flushing
+        auto t = Tier::create(ops, 128ull << 20, 13, 0);
+        Config c = env.cfg(4ull << 30);
+        c.ssd_shutdown_only = true;
+        t->start(c, kLay, 5);
+        Sess a(ops, 24);
+        a.toks = freshToks(3000, seed);
+        spillSess(*t, a, 0);
+        CHECK(tickIdle(*t));
+        CHECK(t->stats.ssd_writes == 0 && countFiles(dir) == 0);
+        // a second server on the same directory: SSD tier off
+        auto t2 = Tier::create(ops, 32ull << 20, 14, 0);
+        t2->start(c, kLay, 5);
+        CHECK(!t2->hasSsd() && t2->ssdDirBusy());
+        t2.reset();
+        t->flushing = true;
+        CHECK(tickIdle(*t));
+        t->flushing = false;
+        CHECK(t->stats.ssd_writes == 1 && countFiles(dir) == 1);
+    }
+    {
+        // after the first server stopped, the lock is gone
+        auto t = Tier::create(ops, 32ull << 20, 15, 0);
+        t->start(env.cfg(4ull << 30), kLay, 5);
+        CHECK(t->hasSsd() && t->ssdEntries() == 1);
+    }
+    fs::remove_all(dir, ec);
+}
+
+static void testSupersedeTrim(MockDeviceOps& ops, const fs::path& dir) {
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    SsdEnv env{dir};
+    std::uint64_t seed = 1000;
+    auto t = Tier::create(ops, 512ull << 20, 16, 0);
+    t->start(env.cfg(8ull << 30), kLay, 6);
+    const auto sys = freshToks(2048, seed);
+    Sess old_s(ops, 40), regen(ops, 40), other(ops, 40), comp(ops, 40);
+    old_s.toks = sys;
+    auto h = freshToks(7000, seed);
+    old_s.toks.insert(old_s.toks.end(), h.begin(), h.end());
+    spillSess(*t, old_s, 0);
+    CHECK(tickIdle(*t));
+    const std::uint64_t id_old = old_s.e->id;
+    // regenerate on another slot (diverges near the end): no supersede
+    regen.toks = old_s.toks;
+    regen.toks.resize(old_s.toks.size() - 300);
+    auto r = freshToks(250, seed);
+    regen.toks.insert(regen.toks.end(), r.begin(), r.end());
+    spillSess(*t, regen, 0);
+    CHECK(supersede(*t, regen.e, sys.size()) == 0);
+    const std::uint64_t id_regen = regen.e->id;
+    // a different system prompt, short: no supersede
+    other.toks = freshToks(3000, seed);
+    spillSess(*t, other, 0);
+    CHECK(supersede(*t, other.e, 1500) == 0);
+    CHECK(old_s.e->n_tok == 9048);
+    CHECK(tickIdle(*t));
+    // compact: system prompt + summary, much shorter
+    comp.toks = sys;
+    auto s2 = freshToks(1200, seed);
+    comp.toks.insert(comp.toks.end(), s2.begin(), s2.end());
+    spillSess(*t, comp, 0);
+    const std::uint64_t freed = supersede(*t, comp.e, sys.size());
+    CHECK(freed > 0);
+    CHECK(tickIdle(*t));
+    // the old session and its regenerate branch are cut (what comp references stays)
+    for (const std::uint64_t id : {id_old, id_regen}) {
+        Entry* e = t->find(id);
+        if (e) CHECK(e->n_tok <= 2048 + kLay.page_tokens * 2);
+    }
+    CHECK(t->find(other.id) != nullptr && t->find(other.id)->n_tok == 3000);
+    CHECK(restoreMatches(*t, ops, comp.e, comp));
+    CHECK(tickIdle(*t));
+    const std::uint64_t id_comp = comp.e->id;
+    {
+        // deferred rule: a short new session of another project (same system
+        // prompt) is marked against comp... comp is shorter: nothing. A long
+        // session P and a short new one N: P keeps working -> left alone
+        whirl::cache::SupersedeTracker tr;
+        Sess p(ops, 48), n(ops, 48);
+        p.toks = sys;
+        auto ph = freshToks(8000, seed);
+        p.toks.insert(p.toks.end(), ph.begin(), ph.end());
+        spillSess(*t, p, 0);
+        CHECK(tickIdle(*t));
+        n.toks = sys;
+        auto nh = freshToks(900, seed);
+        n.toks.insert(n.toks.end(), nh.begin(), nh.end());
+        CHECK(spillSess(*t, n, 0));
+        supersedeMark(*t, tr, n.e, sys.size());
+        CHECK(tr.size() >= 1);
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        auto more = freshToks(400, seed);
+        const std::size_t pn = p.toks.size();
+        p.toks.insert(p.toks.end(), more.begin(), more.end());
+        CHECK(!spillSess(*t, p, pn));  // P's next turn (in place)
+        n.toks.insert(n.toks.end(), more.begin(), more.end());
+        CHECK(!spillSess(*t, n, 900 + sys.size()));
+        CHECK(supersedeApply(*t, tr, n.e) == 0);
+        CHECK(t->find(p.id) != nullptr && t->find(p.id)->n_tok == p.toks.size());
+        CHECK(tickIdle(*t));
+    }
+    t.reset();
+    // restart after the cut: consistent, comp restores bit-identically
+    auto t2 = Tier::create(ops, 512ull << 20, 17, 0);
+    t2->start(env.cfg(8ull << 30), kLay, 6);
+    Entry* ec2 = t2->find(id_comp);
+    CHECK(ec2 != nullptr);
+    if (ec2) CHECK(restoreMatches(*t2, ops, ec2, comp));
+    CHECK(tickIdle(*t2));
+    t2.reset();
+    fs::remove_all(dir, ec);
+}
+
+// Agent workflows: SSD bytes written / used and token hit rate, without
+// (dedup off, no supersede) and with CACHE-1.
+struct WfResult {
+    double written_gib = 0, used_gib = 0, hit = 0;
+};
+
+static WfResult runWorkflow(MockDeviceOps& ops, const fs::path& dir, int kind, bool cache1) {
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    SsdEnv env{dir};
+    auto t = Tier::create(ops, 256ull << 20, 21, 0);
+    Config c = env.cfg(3ull << 30);                    // SSD cap 3 GiB
+    c.dedup = cache1;
+    t->start(c, kLay, 31);
+    std::uint64_t seed = 5000 + static_cast<std::uint64_t>(kind) * 100;
+    const auto sys = freshToks(2600, seed);  // system prompt + tool definitions
+    std::uint64_t hit_tok = 0, req_tok = 0;
+    whirl::cache::SupersedeTracker tr;
+    Sess s(ops, 96);
+    auto request = [&](const std::vector<std::uint32_t>& toks, std::size_t changed_from, bool new_entry) {
+        const auto m = t->lookup(toks);
+        hit_tok += m ? m->reuse : 0;
+        req_tok += toks.size();
+        if (new_entry) s.id = 0;
+        s.toks = toks;
+        const bool fresh = spillSess(*t, s, changed_from);
+        if (cache1 && s.e) {
+            if (fresh) supersedeMark(*t, tr, s.e, sys.size());
+            else supersedeApply(*t, tr, s.e);
+        }
+        tickIdle(*t);
+    };
+    std::vector<std::vector<std::uint32_t>> msgs;  // conversation after the system prompt
+    auto build = [&] {
+        std::vector<std::uint32_t> v = sys;
+        for (const auto& m : msgs) v.insert(v.end(), m.begin(), m.end());
+        return v;
+    };
+    for (int turn = 0; turn < 40; ++turn) {
+        if (kind == 0) {
+            // periodic compact every 10 turns: a new conversation = system prompt + summary
+            if (turn > 0 && turn % 10 == 0) {
+                msgs.clear();
+                msgs.push_back(freshToks(800, seed));
+                request(build(), sys.size(), true);
+                continue;
+            }
+            msgs.push_back(freshToks(400 + static_cast<std::size_t>(turn % 3) * 150, seed));
+            const auto cur = build();
+            request(cur, cur.size() - msgs.back().size(), false);
+        } else if (kind == 1) {
+            // sliding window: tool outputs older than 3 turns cut to 60 tokens,
+            // the oldest messages dropped beyond 6000 tokens
+            msgs.push_back(freshToks(500, seed));
+            std::size_t changed = sys.size();
+            for (std::size_t i = 0; i < msgs.size(); ++i) {
+                if (i + 3 < msgs.size() && msgs[i].size() > 60) {
+                    msgs[i].resize(60);
+                    break;
+                }
+                changed += msgs[i].size();
+            }
+            std::size_t total = 0;
+            for (const auto& m : msgs) total += m.size();
+            bool dropped = false;
+            while (total > 6000) {
+                total -= msgs.front().size();
+                msgs.erase(msgs.begin());
+                dropped = true;
+            }
+            if (dropped) changed = sys.size();
+            const auto cur = build();
+            request(cur, std::min(changed, cur.size()), false);
+        } else {
+            // regenerate: every 4th turn the last answer is retried twice
+            msgs.push_back(freshToks(350, seed));
+            auto cur = build();
+            request(cur, cur.size() - msgs.back().size(), false);
+            if (turn % 4 == 3) {
+                for (int k = 0; k < 2; ++k) {
+                    msgs.back() = freshToks(350, seed);
+                    cur = build();
+                    request(cur, cur.size() - msgs.back().size(), false);
+                }
+            }
+        }
+        // every 5th turn another project with the same tools starts a short session
+        if (turn % 5 == 4) {
+            Sess o(ops, 96);
+            o.toks = sys;
+            auto q = freshToks(600, seed);
+            o.toks.insert(o.toks.end(), q.begin(), q.end());
+            const auto m = t->lookup(o.toks);
+            hit_tok += m ? m->reuse : 0;
+            req_tok += o.toks.size();
+            if (spillSess(*t, o, 0) && cache1 && o.e) supersedeMark(*t, tr, o.e, sys.size());
+            tickIdle(*t);
+        }
+    }
+    WfResult r;
+    r.written_gib = static_cast<double>(t->stats.ssd_write_bytes) / 1073741824.0;
+    r.used_gib = static_cast<double>(t->ssd_bytes) / 1073741824.0;
+    r.hit = req_tok ? static_cast<double>(hit_tok) / static_cast<double>(req_tok) : 0;
+    t.reset();
+    fs::remove_all(dir, ec);
+    return r;
+}
+
+static void testWorkflows(MockDeviceOps& ops, const fs::path& dir) {
+    const char* names[] = {"periodic compact", "sliding window + tool output cut", "regenerate"};
+    for (int k = 0; k < 3; ++k) {
+        const WfResult b = runWorkflow(ops, dir, k, false);
+        const WfResult a = runWorkflow(ops, dir, k, true);
+        std::printf("workflow %-34s SSD written %.2f -> %.2f GiB (%+.0f%%), SSD used %.2f -> %.2f GiB, token hit rate %.1f%% -> %.1f%%\n",
+                    names[k], b.written_gib, a.written_gib, b.written_gib > 0 ? (a.written_gib / b.written_gib - 1) * 100 : 0,
+                    b.used_gib, a.used_gib, b.hit * 100, a.hit * 100);
+        CHECK(a.written_gib <= b.written_gib);
+        CHECK(a.hit + 0.02 >= b.hit);
+    }
+}
+
 int main(int argc, char** argv) {
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
     // default: WHIRL_TEST_TMP, else %TEMP%\whirl-tests; this test uses <base>\tier_test_tmp
     fs::path base;
     if (const wchar_t* t = _wgetenv(L"WHIRL_TEST_TMP"); t && *t) base = fs::path(t);
     else base = fs::temp_directory_path() / L"whirl-tests";
     fs::path dir = argc > 1 ? fs::path(argv[1]) : base / L"tier_test_tmp";
     MockDeviceOps ops;
+    std::printf("-- %s\n", "testHelpers");
     testHelpers();
+    std::printf("-- %s\n", "testRamTierSize");
     testRamTierSize();
+    std::printf("-- %s\n", "testLookup");
     testLookup(ops);
+    std::printf("-- %s\n", "testEvictLru");
     testEvictLru(ops);
+    std::printf("-- %s\n", "testTrimDropCk");
     testTrimDropCk(ops);
+    std::printf("-- %s\n", "testRestoreRam");
     testRestoreRam(ops);
     CHECK(ops.live_events.load() == 0 && ops.live_host.load() == 0 && ops.live_streams.load() == 0);
+    std::printf("-- %s\n", "testSsd");
     testSsd(ops, dir);
+    std::printf("-- %s\n", "testDedupRestart");
+    testDedupRestart(ops, dir);
+    std::printf("-- %s\n", "testOwnerRewrite");
+    testOwnerRewrite(ops, dir);
+    std::printf("-- %s\n", "testModesLock");
+    testModesLock(ops, dir);
+    std::printf("-- %s\n", "testSupersedeTrim");
+    testSupersedeTrim(ops, dir);
+    std::printf("-- %s\n", "testWorkflows");
+    testWorkflows(ops, dir);
     std::printf("tier tests: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }

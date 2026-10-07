@@ -293,6 +293,11 @@ Engine::Stats Engine::stats() const {
     s.spill_waits = stat_spill_waits_;
     s.vis_enc = stat_vis_enc_;
     s.vis_hit = stat_vis_hit_;
+    s.ssd_written = stat_ssd_written_.load(std::memory_order_relaxed);
+    s.ssd_dedup = stat_ssd_dedup_.load(std::memory_order_relaxed);
+    s.ssd_used = stat_ssd_used_.load(std::memory_order_relaxed);
+    s.ssd_entries = stat_ssd_entries_.load(std::memory_order_relaxed);
+    s.superseded = stat_superseded_.load(std::memory_order_relaxed);
     return s;
 }
 
@@ -2380,6 +2385,68 @@ void Engine::spillSlot(Slot& sl) {
          sl.id, P, fresh ? "new entry" : "in place", vp, npages, static_cast<double>(ck_bytes) / 1048576.0,
          static_cast<double>(bytes) / 1048576.0, static_cast<double>(t->ramUsedBytes()) / 1073741824.0,
          static_cast<double>(t->cfg.ram_bytes) / 1073741824.0);
+    if (fresh) supersedeMark(sl, x);
+    else supersedeApply(sl, x);
+}
+
+// CACHE-1 superseded sessions (agent compact / compress: same system prompt,
+// early or mid-way divergence, clearly shorter; cache::supersedes). The new
+// conversation's first spill marks the old entries; its second spill cuts
+// those not used since down to the shared prefix in RAM and on SSD (blocks
+// other files reference stay). Retry / regenerate / edit-last and other
+// system prompts never match; a parallel session that keeps using its entry
+// is left alone.
+// changes when the entry is updated in place (its session went on); not on
+// LRU touches (entries referencing its blocks touch it)
+static std::uint64_t tierStamp(const tier::Entry* e) {
+    return static_cast<std::uint64_t>(e->t_mod.time_since_epoch().count()) * 0x9e3779b97f4a7c15ull ^ e->n_tok;
+}
+
+void Engine::supersedeMark(const Slot& sl, tier::Entry* x) {
+    tier::Tier* t = tier_;
+    if (!t || !x || !opt_.kv_supersede) return;
+    const cache::Tokens nt(x->tokens.data(), x->n_tok);
+    const std::size_t sys = ct_.sysBoundary(nt);
+    if (sys == 0 || sys >= nt.size()) return;
+    for (tier::Entry* e : t->entries) {
+        if (e == x || e->n_tok == 0) continue;
+        const cache::Tokens ot(e->tokens.data(), std::min<std::size_t>(e->n_tok, e->tokens.size()));
+        const cache::Supersede sp = cache::supersedes(ot, nt, sys);
+        if (!sp.yes) continue;
+        supersede_.mark(x->id, e->id, sp.keep, tierStamp(e));
+        logI("slot {} | kv tier: entry {:016x} ({} tok) looks superseded by this conversation (shares {} tok); cut after its next "
+             "turn unless used again",
+             sl.id, e->id, e->n_tok, sp.keep);
+    }
+}
+
+void Engine::supersedeApply(const Slot& sl, tier::Entry* x) {
+    tier::Tier* t = tier_;
+    if (!t || !x) return;
+    std::vector<cache::SupersedeTracker::Pending> pend = supersede_.take(x->id);
+    // several passes: a superseded branch referencing blocks of another
+    // superseded entry holds them until it is cut itself
+    for (int pass = 0; pass < 4 && !pend.empty(); ++pass) {
+        bool any = false;
+        for (auto it = pend.begin(); it != pend.end();) {
+            tier::Entry* e = t->find(it->old_id);
+            if (e == nullptr || tierStamp(e) != it->stamp) {  // gone, or used again
+                it = pend.erase(it);
+                continue;
+            }
+            const std::uint32_t old_n = e->n_tok;
+            const std::uint64_t freed = t->trimTo(e, static_cast<std::uint32_t>(it->keep));
+            if (freed == 0) {
+                ++it;
+                continue;
+            }
+            any = true;
+            logI("slot {} | kv tier: entry {:016x} ({} tok) superseded (compact / compress): cut to the {} shared tok, {:.0f} MiB freed",
+                 sl.id, it->old_id, old_n, it->keep, static_cast<double>(freed) / 1048576.0);
+            it = pend.erase(it);
+        }
+        if (!any) break;
+    }
 }
 
 bool Engine::tryRestore(Slot& sl, Job& job) {
@@ -2674,6 +2741,11 @@ bool Engine::tierTick() {
     tier::Tier* t = tier_;
     if (!t) return false;
     bool busy = t->tick();
+    stat_ssd_written_.store(t->stats.ssd_write_bytes, std::memory_order_relaxed);
+    stat_ssd_dedup_.store(t->stats.ssd_dedup_bytes, std::memory_order_relaxed);
+    stat_ssd_used_.store(t->ssd_bytes, std::memory_order_relaxed);
+    stat_superseded_.store(t->stats.superseded, std::memory_order_relaxed);
+    stat_ssd_entries_.store(t->ssdEntries(), std::memory_order_relaxed);
     if (!quarantine_.empty()) {
         reclaimPages(false);
         busy = busy || !quarantine_.empty();
@@ -2696,13 +2768,13 @@ void Engine::logTier() {
     if (!t) return;
     const tier::Stats& s = t->stats;
     logI("kv tier | RAM {:.2f} / {:.2f} GiB in {} entries, SSD {:.2f} GiB in {} entries | spills {} ({:.0f} MiB), restores RAM "
-         "{} / SSD {} ({:.0f} MiB), SSD writes {} ({:.0f} MiB), RAM evictions {}, dropped {}, spill waits {}, pages copied on "
-         "write {}, quarantine waits {}",
+         "{} / SSD {} ({:.0f} MiB), SSD writes {} ({:.0f} MiB written since start, {:.0f} MiB shared instead of written), RAM "
+         "evictions {}, dropped {}, superseded {}, spill waits {}, pages copied on write {}, quarantine waits {}",
          static_cast<double>(t->ramUsedBytes()) / 1073741824.0, static_cast<double>(t->cfg.ram_bytes) / 1073741824.0,
          t->countRam(), static_cast<double>(t->ssd_bytes) / 1073741824.0, t->ssdEntries(), s.spills,
          static_cast<double>(s.spill_bytes) / 1048576.0, s.restores_ram, s.restores_ssd,
          static_cast<double>(s.restore_bytes) / 1048576.0, s.ssd_writes, static_cast<double>(s.ssd_write_bytes) / 1048576.0,
-         s.ram_evictions, s.dropped, stat_spill_waits_, stat_cow_pages_, stat_q_waits_);
+         static_cast<double>(s.ssd_dedup_bytes) / 1048576.0, s.ram_evictions, s.dropped, s.superseded, stat_spill_waits_, stat_cow_pages_, stat_q_waits_);
 }
 
 // Shutdown (stop()): finished sessions still waiting for their spill go to the RAM
@@ -2715,6 +2787,7 @@ void Engine::flushTierOnStop() {
     if (!t) return;
     const std::uint64_t saved_delay = t->cfg.ssd_delay_ms;
     t->cfg.ssd_delay_ms = 0;
+    t->flushing = true;
     const auto t0 = Clock::now();
     const std::uint64_t w0 = t->stats.ssd_writes;
     bool busy = tierTick();
@@ -2724,6 +2797,7 @@ void Engine::flushTierOnStop() {
         busy = tierTick();
     }
     t->cfg.ssd_delay_ms = saved_delay;
+    t->flushing = false;
     if (busy)
         logW("shutdown: tier writes still pending after {} s; exiting without them", shutdown_flush_ms / 1000);
     else if (t->stats.ssd_writes != w0 || msSince(t0) > 1.0)
