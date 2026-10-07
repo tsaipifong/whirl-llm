@@ -581,6 +581,32 @@ bool Model::checkPreciseDecode(std::string& log) {
         }
         if (!ok) all_ok = false;
         log += fmt("    precise MoE block, a token alone vs in a batch:%s %s\n", res.c_str(), ok ? "ok" : "FAIL");
+        {
+            // balance / fast (int8 decode experts): a 17..32-row wide verify batch (small_max
+            // raised as in verifyBatch) must give every row the bits of its 1-token decode
+            prec_dec = false;
+            small_max = max_small_batch;
+            for (u32 tk = 0; tk < 32; ++tk) {
+                hip::upload(x, xm.data() + static_cast<std::size_t>(tk) * E, E * 4ull);
+                moeBlock(L.post_norm, L.ffn_gate, L.ffn_up, L.ffn_down, *L.moe, 1);
+                hip::download(solo.data() + static_cast<std::size_t>(tk) * E, x, E * 4ull);
+            }
+            std::string rb;
+            bool okb = true;
+            for (u32 rows : {2u, 8u, 16u, 17u, 24u, 32u}) {
+                small_max = rows > max_small_batch ? max_verify_rows : max_small_batch;
+                hip::upload(x, xm.data(), static_cast<std::size_t>(rows) * E * 4);
+                moeBlock(L.post_norm, L.ffn_gate, L.ffn_up, L.ffn_down, *L.moe, rows);
+                hip::download(got.data(), x, static_cast<std::size_t>(rows) * E * 4);
+                const bool same = std::memcmp(got.data(), solo.data(), static_cast<std::size_t>(rows) * E * 4) == 0;
+                if (!same) okb = false;
+                rb += fmt(" n=%u %s", rows, same ? "same" : "DIFFERENT");
+            }
+            small_max = max_small_batch;
+            prec_dec = true;
+            if (!okb) all_ok = false;
+            log += fmt("    balance MoE block (int8 decode experts), a token alone vs in a verify batch:%s %s\n", rb.c_str(), okb ? "ok" : "FAIL");
+        }
         break;
     }
     small_max = saved_small;

@@ -522,7 +522,11 @@ bool Model::fusedDecode() const {
     return true;
 }
 
-bool Model::wideCapable() const { return wide_verify && !cfg.moe && fusedDecode() && k.gemvx[ti(GgmlType::q4_k)] != nullptr; }
+// MoE: balance / fast only (17..32 rows on the int8 decode experts, see moeBlock); precise MoE
+// keeps 16-row verifies
+bool Model::wideCapable() const {
+    return wide_verify && (!cfg.moe || (moe_wide && !prec_dec)) && fusedDecode() && k.gemvx[ti(GgmlType::q4_k)] != nullptr;
+}
 
 bool Model::wideOk() const { return wideCapable() && gdn_replay; }
 
@@ -910,8 +914,10 @@ void Model::moeBlock(DevPtr post_norm, const Mat& sg, const Mat& su, const Mat& 
     const u32 R = cfg.n_expert;
     // precise mode: every verify / decode batch (up to max_verify_rows rows, e.g. a long
     // n-gram draft) takes the decode experts, so a generated token's MoE output never depends
-    // on whether its batch had more than 16 rows (MTP + n-gram == plain)
-    const bool small = n <= max_small_batch || (prec_dec && n <= max_verify_rows);
+    // on whether its batch had more than 16 rows (MTP + n-gram == plain). balance / fast: a wide
+    // verify / MTP batch (small_max raised to max_verify_rows) takes the int8 decode experts too,
+    // never the prefill grouped GEMM (fp8 / f16) - every row as its own 1-token decode
+    const bool small = n <= small_max || (prec_dec && n <= max_verify_rows);
     // precise decode: f32-activation experts (moe_gu_f / moe_down_f) and the shared expert on
     // the precise matmul path (no int8 activations); a token's output is the same alone or in
     // a verify / concurrent batch

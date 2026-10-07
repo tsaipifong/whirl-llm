@@ -160,8 +160,10 @@ the slot that can reuse the longest prefix (or restore one from the tiers).
 3. One synchronization per cycle.
 
 **Draft limits by load.** All decoding rows fit in one verify forward, so drafts compete with users.
-The verify holds at most 16 rows per sequence and, on dense models with wide verify
-(`WHIRL_WIDE_VERIFY`, default on), at most 32 rows in total (16 otherwise, and always 16 for MoE).
+The verify holds at most 16 rows per sequence and, with wide verify (`WHIRL_WIDE_VERIFY`, default on),
+at most 32 rows in total (16 otherwise). MoE models take wide verify in balance / fast (the 17–32-row
+batches run on the same int8 decode experts as a 1-token decode; `WHIRL_MOE_WIDE=0`: 16 rows as before);
+precise MoE stays at 16.
 Default dense caps by number of decoding slots: 8 / 7 / 4 / 3 / 2 / 1 / 1 / 1 for 1–8 slots, 0 beyond
 (`--batch-drafts` overrides; when DeltaNet verify uses snapshot sets instead of replay, the cap for
 k slots is also ≤ 8 / k); with these caps an MTP verify stays at ≤ 16 rows, and only n-gram drafts

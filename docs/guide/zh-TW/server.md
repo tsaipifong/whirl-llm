@@ -151,7 +151,7 @@ kernel 表；[pitfalls.md](pitfalls.md#srv-defaultenv)）。
 3. 每個 cycle 同步一次。
 
 **依負載的草稿上限。** 所有 decode 列都要塞進一次 verify forward，因此草稿與使用者互相競爭。每個序列最多
-16 列；dense 模型在寬 verify（`WHIRL_WIDE_VERIFY`，預設開）時總共最多 32 列（否則 16 列，MoE 一律 16 列）。
+16 列；寬 verify（`WHIRL_WIDE_VERIFY`，預設開）時總共最多 32 列（否則 16 列）。MoE 模型在 balance / fast 也走寬 verify（第 17–32 列和 1-token decode 用同一組 int8 decode 專家 kernel；`WHIRL_MOE_WIDE=0` 回到 16 列）；precise 的 MoE 維持 16 列。
 Dense 依 decode 中 slot 數的預設上限：1–8 個 slot 分別為 8 / 7 / 4 / 3 / 2 / 1 / 1 / 1，更多則為 0
 （`--batch-drafts` 可覆寫；DeltaNet verify 改用快照組而非 replay 時，k 個 slot 的上限另外 ≤ 8 / k）；在這組
 上限下 MTP 的 verify 不超過 16 列，只有 n-gram 草稿或調高上限的多人情況會用到第 17–32 列。成本模型在上限內
