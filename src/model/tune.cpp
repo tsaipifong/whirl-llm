@@ -596,7 +596,7 @@ bool Model::checkAttnGroups(std::string& log, u32 p0, u32 n, bool wide) {
     const u32 hd = cfg.head_dim;
     if (k.attn_wsplit1 == nullptr || hd != 256) return true;
     if (wide && k.attn_wsplit2 == nullptr) return true;
-    if (kv_kf16) return true;  // probe: q8 or f16 only
+    if (kv_kf16 || kv_q4) return true;  // probe: q8 or f16 only
     std::size_t li_attn = 0;
     for (std::size_t i = 0; i < layers.size(); ++i)
         if (layers[i].kind == LayerKind::attn) {
@@ -800,6 +800,8 @@ void loadOrTune(Model& m, const std::string& model_path, std::string& log) {
         t.k_kv_q8h = m.k.caps.kv_q8h;
         t.mtp = m.mtp.has_value();
         t.k_spec_sample = m.k.draft_sample_rows != nullptr;
+        t.k_kv_q4 = m.k.caps.kv_q4;
+        t.kv_explicit = m.kv_mode != KvMode::automatic;
         nu::Plan p = nu::plan(rq, t);
         if (fp8_env) nu::applyOverride(p, nu::Item::fp8, "FP8", *fp8_env, m.fp8_prefill, t.has_mxfp4 && t.k_gemm8);
         const bool moe_ok = t.moe && t.moe_mxfp4 && t.k_gemm8_moe;
@@ -812,7 +814,7 @@ void loadOrTune(Model& m, const std::string& model_path, std::string& log) {
         if (h16_env) nu::applyOverride(p, nu::Item::h16, "FFN_H16", *h16_env, m.ffn_h16, true);
         else if (relaxed) nu::applyOverride(p, nu::Item::h16, "Q4_RELAXED", *relaxed_env, m.ffn_h16, true);
         if (const auto v = envGet("KV"); v && !v->empty() && *v != "auto")
-            nu::applyOverride(p, nu::Item::kvq8, "KV", *v, *v != "f16", !t.moe || *v != "f16");
+            nu::applyOverride(p, *v == "q4" ? nu::Item::kvq4 : nu::Item::kvq8, "KV", *v, *v != "f16", !t.moe || *v != "f16");
         // decode / verify activations (P-8): precise -> f16 activations on the f16 GEMM
         // (f32 accumulation), balance / fast -> int8 (q8_1 class). WHIRL_Q8DEC=0|1 overrides.
         m.prec_dec = rq.mode == nu::Mode::precise;

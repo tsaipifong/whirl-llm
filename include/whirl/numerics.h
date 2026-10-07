@@ -10,7 +10,8 @@
 //    activations, MoE expert fp8, f16-WMMA DeltaNet, f16 GEMM intermediates, automatic int8 KV
 //    when f16 does not fit).
 //  - fast: balance plus aggressive gated items (4-bit KV, relaxed speculative acceptance, ...).
-//    None is implemented yet: they are listed as skipped and fast runs as balance.
+//    Implemented: kvq4 (4-bit KV on the Radeon 8060S). The others are listed as skipped; with no
+//    fast item enabled fast runs as balance.
 // Items not applicable to the device or model are listed as skipped, never an error.
 // The pure parts (parsing, the capability table, KV / context decisions) live here for unit tests.
 
@@ -37,8 +38,8 @@ enum class Item : std::uint8_t {
     kvq8,     // KV auto may pick int8 (q8v / q8h; q8 on the Radeon 8060S) when f16 does not fit
     specsample,  // temperature > 0: MTP drafts drawn from the draft distribution, accepted with min(1, p/q)
                  // (same output distribution as plain sampling, not the same tokens for a seed)
-    // fast items (not implemented yet)
-    kvq4,     // 4-bit KV
+    // fast items (kvq4 implemented, the rest not yet)
+    kvq4,     // 4-bit KV (gfx1151: q4 = int4 + f16 scale / 32, Hadamard-rotated q/k; dense and MoE)
     relaxacc, // relaxed / typical speculative acceptance
     headq,    // low-bit output head in the main decode
     moeskip,  // skip low-weight MoE experts
@@ -55,7 +56,7 @@ inline constexpr std::uint32_t balance_items = bit(Item::fp8) | bit(Item::moefp8
 inline constexpr std::uint32_t fast_only_items =
     bit(Item::kvq4) | bit(Item::relaxacc) | bit(Item::headq) | bit(Item::moeskip) | bit(Item::a8) | bit(Item::a4);
 // implemented items (the rest are "not yet implemented": skipped, the mode runs as balance)
-inline constexpr std::uint32_t implemented_items = balance_items;
+inline constexpr std::uint32_t implemented_items = balance_items | bit(Item::kvq4);
 
 // The requested mode and items.
 struct Request {
@@ -88,6 +89,8 @@ struct Target {
     bool k_kv_q8v = false, k_kv_q8h = false;
     bool mtp = true;                 // MTP head present
     bool k_spec_sample = true;       // draft_sample_rows kernel present
+    bool k_kv_q4 = false;      // q4 KV kernels present (gfx1151)
+    bool kv_explicit = false;  // WHIRL_KV set to a format (the KV items then do not choose)
 };
 
 struct ItemState {

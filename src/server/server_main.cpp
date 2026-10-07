@@ -1000,7 +1000,7 @@ int serveMain(int argc, char** argv, const char* program) {
             logI("prompt-lookup (n-gram) drafting: {} (WHIRL_NGRAM{}), min match {}, up to {} drafts", eo.ngram ? "on" : "off",
                  eo.ngram ? "=0 turns it off" : "=1 turns it on", eo.ngram_min,
                  eo.ngram_max > 0 ? std::min(eo.ngram_max, qwen35::max_ng_drafts) : qwen35::max_ng_drafts);
-        engine.setNumerics(numerics::propsJson(model.num_plan, model.kv_q8 ? (model.kv_kf16 ? "q8v" : model.kv_rot ? "q8h" : "q8") : "f16"));
+        engine.setNumerics(numerics::propsJson(model.num_plan, model.kv_q8 ? (model.kv_q4 ? "q4" : model.kv_kf16 ? "q8v" : model.kv_rot ? "q8h" : "q8") : "f16"));
         engine.initPool();
         {
             // after everything sized at startup is allocated: any growth of the non-local segment

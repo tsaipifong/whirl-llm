@@ -285,8 +285,8 @@ void Model::ensureSnapshots(u32 n) {
 
 namespace {
 
-bool kvQ8(KvMode m) { return m == KvMode::q8 || m == KvMode::q8h || m == KvMode::q8v; }
-bool kvRot(KvMode m) { return m == KvMode::q8h; }
+bool kvQ8(KvMode m) { return m == KvMode::q8 || m == KvMode::q8h || m == KvMode::q8v || m == KvMode::q4; }
+bool kvRot(KvMode m) { return m == KvMode::q8h || m == KvMode::q4; }
 
 std::string readWhole(const std::string& path) { return readFile(path); }
 
@@ -300,7 +300,8 @@ std::optional<KvMode> kvModeFromEnv() {
     if (*v == "q8") return KvMode::q8;
     if (*v == "q8h") return KvMode::q8h;
     if (*v == "q8v") return KvMode::q8v;
-    throw std::invalid_argument("WHIRL_KV must be auto, f16, q8, q8h or q8v (got '" + *v + "')");
+    if (*v == "q4") return KvMode::q4;
+    throw std::invalid_argument("WHIRL_KV must be auto, f16, q8, q8h, q8v or q4 (got '" + *v + "')");
 }
 
 u64 bufferBytes(const Config& cfg, u32 Bq, u64 ffs, u64 max_elems) {
@@ -359,11 +360,12 @@ u64 bufferBytes(const Config& cfg, u32 Bq, u64 ffs, u64 max_elems) {
     return n;
 }
 
-u64 kvBytesPerTokenCfg(const Config& cfg, bool has_mtp, bool q8, bool kf16) {
+u64 kvBytesPerTokenCfg(const Config& cfg, bool has_mtp, bool q8, bool kf16, bool q4) {
     u64 layers = has_mtp ? 1 : 0;
     for (u32 i = 0; i < cfg.n_layer; ++i)
         if (cfg.isAttn(i)) layers += 1;
     const u64 e = static_cast<u64>(cfg.n_head_kv) * cfg.head_dim;
+    if (q4) return layers * 2 * (e / 2 + e / 32 * 2);
     const u64 q = e + e / 32 * 2;
     return layers * ((q8 && !kf16 ? q : e * 2) + (q8 ? q : e * 2));
 }
@@ -439,14 +441,23 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
     m.kv_q8 = kvQ8(kvm);
     m.kv_rot = kvRot(kvm);
     m.kv_kf16 = kvm == KvMode::q8v;
+    m.kv_q4 = kvm == KvMode::q4;
     {
-        // an explicit KV format the code object has no kernels for (gfx1151: q8v, q8h)
+        // an explicit KV format the code object has no kernels for (gfx1201: q4)
         const kernels::Caps caps = kernels::Caps::probe(m.module);
-        if ((m.kv_kf16 && !caps.kv_q8v) || (m.kv_rot && !caps.kv_q8h))
-            throw ModelError("UnsupportedKvFormat", std::string(m.kv_kf16 ? "q8v" : "q8h") +
+        // fast mode item kvq4 with KV auto: 4-bit KV wherever the code object has it (gfx1151),
+        // dense and MoE alike, CLI and server (the server then sizes its pool in q4). Decided
+        // before the kernel table is loaded (a second KernelTable in this frame overflows the stack).
+        if (kvm == KvMode::automatic && opt.numerics.has(numerics::Item::kvq4) && caps.kv_q4) {
+            m.kv_q4 = true;
+            m.kv_q8 = true;
+            m.kv_rot = true;
+        }
+        if ((m.kv_kf16 && !caps.kv_q8v) || (m.kv_q4 && !caps.kv_q4) || (m.kv_rot && !m.kv_q4 && !caps.kv_q8h))
+            throw ModelError("UnsupportedKvFormat", std::string(m.kv_kf16 ? "q8v" : m.kv_q4 ? "q4" : "q8h") +
                                                         " KV needs kernels this GPU does not have; use WHIRL_KV=f16, q8 or auto");
     }
-    m.k = loadKernels(m.module, m.kv_q8, m.kv_rot, m.kv_kf16);
+    m.k = loadKernels(m.module, m.kv_q8, m.kv_rot, m.kv_kf16, m.kv_q4);
     // MXFP4 routed experts: process-level switches (as WHIRL_KV), read by CLI and server alike
     m.num_req = opt.numerics;
     // MoE expert fp8: a balance item (WHIRL_MOE_FP8 overrides the mode)
@@ -600,7 +611,12 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
     m.host_ids.assign(static_cast<std::size_t>(2 * B), 0);
     m.pos_buf = m.alloc(B * 4);
     m.out_tok = m.allocZero(ctl_words * 4);
-    const u64 n_split = 64;  // fd_max_splits
+    m.fd_splits = m.kv_q4 ? 256 : 64;
+    if (const auto v = envGet("FD_SPLITS")) {
+        const unsigned long s = std::strtoul(v->c_str(), nullptr, 10);
+        if (s >= 64 && s <= 256 && s % 64 == 0) m.fd_splits = static_cast<u32>(s);
+    }
+    const u64 n_split = m.fd_splits;
     m.part_ml = m.alloc(max_verify_rows * n_split * cfg.n_head * 2 * f4);
     m.part_acc = m.alloc(max_verify_rows * n_split * cfg.n_head * cfg.head_dim * f4);
     {
@@ -694,24 +710,27 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
     return mp;
 }
 
-bool Model::kvAutoDense() const { return kv_mode == KvMode::automatic && !cfg.moe; }
+bool Model::kvAutoDense() const { return kv_mode == KvMode::automatic && !cfg.moe && !kv_q4; }
 
-void Model::setKvFormat(bool q8, bool rot, bool kf16) {
+void Model::setKvFormat(bool q8, bool rot, bool kf16, bool q4) {
     if (pool_pages != 0) throw ModelError("KvPoolAllocated");
-    kv_q8 = q8;
-    kv_rot = q8 && rot && !kf16;
-    kv_kf16 = q8 && kf16;
-    k = loadKernels(module, kv_q8, kv_rot, kv_kf16);
+    kv_q4 = q4;
+    kv_q8 = q8 || q4;
+    kv_rot = q4 || (q8 && rot && !kf16);
+    kv_kf16 = q8 && kf16 && !q4;
+    k = loadKernels(module, kv_q8, kv_rot, kv_kf16, kv_q4);
 }
 
-u64 Model::kvBytesPerTokenFmt(bool q8, bool kf16) const {
+u64 Model::kvBytesPerTokenFmt(bool q8, bool kf16, bool q4) const {
     const u64 e = static_cast<u64>(cfg.n_head_kv) * cfg.head_dim;
+    if (q4) return kvLayers() * 2 * (e / 2 + e / 32 * 2);
     const u64 q = e + e / 32 * 2;
     return kvLayers() * ((q8 && !kf16 ? q : e * 2) + (q8 ? q : e * 2));
 }
 
 const char* Model::kvName() const {
     if (!kv_q8) return "f16";
+    if (kv_q4) return "q4 (4-bit + f16 scale / 32, Hadamard-rotated q/k)";
     if (kv_kf16) return "q8v (K f16, V int8 + f16 scale / 32)";
     if (kv_rot) return "q8h (int8 + f16 scale / 32, Hadamard-rotated q/k)";
     return "q8 (int8 + f16 scale / 32)";
@@ -731,20 +750,21 @@ void Model::allocKvPool(u32 tokens) {
     const u64 rows = static_cast<u64>(pages) * kv_page;
     const u64 elems = static_cast<u64>(cfg.n_head_kv) * cfg.head_dim;
     const bool kq8 = kv_q8 && !kv_kf16;  // K format (q8v: f16)
-    const u64 ebk = kq8 ? 1 : 2;
-    const u64 ebv = kv_q8 ? 1 : 2;
+    // element bytes x2 (q4: one byte per two values)
+    const u64 ebk = kv_q4 ? 1 : kq8 ? 2 : 4;
+    const u64 ebv = kv_q4 ? 1 : kv_q8 ? 2 : 4;
     // MTP KV first: the draft head reads it every step, so if the process ever ends up over
     // its WDDM budget it should not be the last (most likely demoted) allocation
     if (mtp) {
-        mtp_kc = allocZero(rows * elems * ebk);
-        mtp_vc = allocZero(rows * elems * ebv);
+        mtp_kc = allocZero(rows * elems * ebk / 2);
+        mtp_vc = allocZero(rows * elems * ebv / 2);
         if (kq8) mtp_ks = allocZero(rows * elems / 32 * 2);
         if (kv_q8) mtp_vs = allocZero(rows * elems / 32 * 2);
     }
     for (u32 i = 0; i < cfg.n_layer; ++i) {
         if (!cfg.isAttn(i)) continue;
-        kcache[i] = allocZero(rows * elems * ebk);
-        vcache[i] = allocZero(rows * elems * ebv);
+        kcache[i] = allocZero(rows * elems * ebk / 2);
+        vcache[i] = allocZero(rows * elems * ebv / 2);
         if (kq8) kscale[i] = allocZero(rows * elems / 32 * 2);
         if (kv_q8) vscale[i] = allocZero(rows * elems / 32 * 2);
     }
