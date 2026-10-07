@@ -19,7 +19,7 @@ WHIRL 會以兩種方式之一看待一個模型檔案：
 | 各項優化之間的輸出 | 前一版逐位元相同之處維持逐位元相同 | 速度路徑改變時可能改變 |
 | MTP == 純 greedy、並行 == 單獨執行 | 是 | 是 |
 
-當檔案包含 MXFP4 tensor 時，速度模式會自動套用：fp8 prefill（提示詞預填）GEMM、f16-WMMA DeltaNet chunk，以及供逐元素運算使用者讀取的 f16 GEMM 輸出。`WHIRL_FP8=0` 會讓 MXFP4 prefill 回到 f16 activation（此時 prefill 只比 Q4_K_M 快 2–4%——速度來自 fp8，而非格式本身）。兩種模式下 decode（逐 token 生成）都是精確的（int8 GEMV，每個單元的算術相同）。
+當檔案包含 MXFP4 tensor 時，速度模式會自動套用：fp8 prefill（提示詞預填）GEMM、f16-WMMA DeltaNet chunk，以及供逐元素運算使用者讀取的 f16 GEMM 輸出。在 R9700 上，後兩項（balance 項目 `gdnwmma`、`h16`）也用在 Q4_K_M 等其他格式的 dense 模型（KG-1：Qwen3.8-27B Q4_K_M 8k–128k prefill 快 7–10%；128k 對 precise 的 KL 變化在 ±4e-5 內，為 2.7e-4／4.1e-4）；這些模型的 GEMM 仍用 f16 activation。`WHIRL_FP8=0` 會讓 MXFP4 prefill 回到 f16 activation（此時 prefill 只比 Q4_K_M 快 2–4%——速度來自 fp8，而非格式本身）。兩種模式下 decode（逐 token 生成）都是精確的（int8 GEMV，每個單元的算術相同）。
 
 | R9700 上的 Qwen3.8-27B | Q4_K_M（精確） | MXFP4（速度） |
 |---|---|---|

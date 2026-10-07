@@ -84,8 +84,8 @@ Items (pick a subset with `--balance=fp8,kvq8` or `--fast=...`; `WHIRL_MODE=bala
 |---|---|---|---|---|
 | `fp8` | balance | MXFP4 dense prefill GEMMs with fp8 (e4m3) activations, incl. the rounding of folded MXFP4 exponents | MXFP4 models | skipped (no fp8 WMMA) |
 | `moefp8` | balance | MoE expert prefill GEMMs with fp8 activations | MXFP4 MoE (Ornith MXFP4) | skipped |
-| `gdnwmma` | balance | f16-WMMA DeltaNet prefill chunks instead of the f32 chunk path | MXFP4 models | skipped (no kernel yet) |
-| `h16` | balance | f16 FFN / DeltaNet GEMM outputs before the element-wise ops | MXFP4 models | f16 weights only |
+| `gdnwmma` | balance | f16-WMMA DeltaNet prefill chunks instead of the f32 chunk path | MXFP4 models and dense models of any weight format (Q4_K_M, Q5_K, Q6_K, IQ4_XS, ...; KG-1); MoE models only with MXFP4 | skipped (no kernel yet) |
+| `h16` | balance | f16 FFN / DeltaNet GEMM outputs before the element-wise ops | MXFP4 models and dense models of any weight format (KG-1); MoE models only with MXFP4 | MXFP4 models, f16 weights only |
 | `kvq8` | balance | q8h KV on dense models, always (not only when f16 does not fit); MoE models keep f16 | dense models | dense models |
 | `specsample` | balance | Requests with temperature > 0: tokens are sampled by a race keyed by (seed, position, token) and MTP drafts are drawn from the draft head's distribution (same temperature / top-k / top-p / min-p) by the same race, accepted only when they equal the sampled token: exact sampling, acceptance close to the optimum, and the text for a seed does not depend on drafts (MTP on == off). The sequence for a seed differs from precise's sampler. Off (precise): inverse-CDF sampler, greedy drafts. Greedy (temperature 0) is unchanged in every mode | MTP models | MTP models |
 | `kvq4` | fast | 4-bit KV (int4 + one f16 scale per 32 values, Hadamard-rotated q / k); on the 8060S decode attention reads it through `attn_dq4` (~180 GB/s): Ornith-1.5-35B-A3B MXFP4 decode at 128k 58.5 tok/s (f16 KV 32.7), at 64k 67.0 (46.4); on the R9700 (FAST-1c) Swift-1.5 27B decode at 131k plain 30.98 tok/s (f16 KV 25.08), MTP 68.79 (63.12), prefill 128k −1.9%; KL vs f16 0.002–0.010 | dense and MoE | dense and MoE |
@@ -470,11 +470,11 @@ Alternatives kept for A/B tests and numerics comparisons. The lossy ones are the
 | `WHIRL_FP8=0\|1` | MXFP4 prefill with fp8 activations (item `fp8`; default: on in balance / fast). `0` also turns `WHIRL_MOE_FP8` off |
 | `WHIRL_FP8_MASK=BITS` | matmul classes that use fp8 activations (default 7) |
 | `WHIRL_G8T=0` | row-major fp8 GEMM instead of the fragment-tiled one (same bits) |
-| `WHIRL_GDN_WMMA=0\|1` | f16-WMMA DeltaNet prefill chunks (item `gdnwmma`; default: on for MXFP4 in balance / fast) |
+| `WHIRL_GDN_WMMA=0\|1` | f16-WMMA DeltaNet prefill chunks (item `gdnwmma`; default: on in balance / fast for MXFP4 models and, on the R9700, dense models of any format) |
 | `WHIRL_SPEC_SAMPLE=0\|1` | speculative sampling of MTP drafts for temperature > 0 (item `specsample`; default: on in balance / fast, off in precise) |
 | `WHIRL_RELAX=0\|1`, `WHIRL_RELAX_K`, `WHIRL_RELAX_ALPHA`, `WHIRL_RELAX_EPS`, `WHIRL_RELAX_DELTA` | relaxed speculative acceptance (item `relaxacc`; default: on in fast only, k 4, alpha 0.1, eps 0.09, delta 0.3; `WHIRL_RELAX_K=1` = exact greedy acceptance). Changes greedy output |
-| `WHIRL_FFN_H16=0\|1` | f16 GEMM outputs into the element-wise ops (item `h16`; default: on for MXFP4 in balance / fast) |
-| `WHIRL_Q4_RELAXED=1` | the MXFP4 balance-mode prefill switches (`gdnwmma`, `h16`) for other models too |
+| `WHIRL_FFN_H16=0\|1` | f16 GEMM outputs into the element-wise ops (item `h16`; default: on in balance / fast for MXFP4 models and, on the R9700, dense models of any format) |
+| `WHIRL_Q4_RELAXED=1` | the balance-mode prefill switches (`gdnwmma`, `h16`) for the models that skip them (non-MXFP4 MoE models, the Radeon 8060S) too |
 | `WHIRL_ACT_FUSE=0` | no fused activation in prefill (bitwise-equal) |
 | `WHIRL_GEMMH=0` | no f16-output prefill GEMM (bitwise-equal) |
 | `WHIRL_GEMMHQ=1` | f16-output GEMM for the attention projections too |

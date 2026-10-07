@@ -75,8 +75,8 @@ whirl-server --help | --version
 |---|---|---|---|---|
 | `fp8` | balance | MXFP4 dense prefill GEMM 用 fp8（e4m3）activation，含 MXFP4 指數折疊的捨入 | MXFP4 模型 | 略過（沒有 fp8 WMMA） |
 | `moefp8` | balance | MoE 專家 prefill GEMM 用 fp8 activation | MXFP4 MoE（Ornith MXFP4） | 略過 |
-| `gdnwmma` | balance | DeltaNet prefill 區塊用 f16 WMMA，取代 f32 區塊路徑 | MXFP4 模型 | 略過（還沒有 kernel） |
-| `h16` | balance | FFN / DeltaNet 的 GEMM 輸出先存成 f16 再進逐元素運算 | MXFP4 模型 | 只有 f16 權重 |
+| `gdnwmma` | balance | DeltaNet prefill 區塊用 f16 WMMA，取代 f32 區塊路徑 | MXFP4 模型，以及任何權重格式的 dense 模型（Q4_K_M、Q5_K、Q6_K、IQ4_XS 等；KG-1）；MoE 模型只限 MXFP4 | 略過（還沒有 kernel） |
+| `h16` | balance | FFN / DeltaNet 的 GEMM 輸出先存成 f16 再進逐元素運算 | MXFP4 模型，以及任何權重格式的 dense 模型（KG-1）；MoE 模型只限 MXFP4 | MXFP4 模型，只有 f16 權重 |
 | `kvq8` | balance | dense 模型一律用 q8h KV（不是 f16 放不下才換）；MoE 模型維持 f16 | dense 模型 | dense 模型 |
 | `kvq4` | fast | 4-bit KV（int4，每 32 個值一個 f16 scale，q / k 先做 Hadamard 旋轉）；8060S 的 decode attention 用 `attn_dq4` 讀取（約 180 GB/s）：Ornith-1.5-35B-A3B MXFP4 decode 128k 58.5 tok/s（f16 KV 32.7）、64k 67.0（46.4）；R9700（FAST-1c）Swift-1.5 27B 在 131k 的 decode：plain 30.98 tok/s（f16 KV 25.08）、MTP 68.79（63.12），128k prefill −1.9%；對 f16 的 KL 0.002–0.010 | dense 與 MoE | dense 與 MoE |
 | `relaxacc` | fast | 寬鬆推測接受（只對 MTP draft；n-gram draft 維持精確接受）。放寬接受若會讓結尾的 6-gram 與最近 4096 個 token 內重複，就不接受（重複防護）。greedy：draft 不是驗證列的 argmax 時，只要它在該列前 `WHIRL_RELAX_K` 名（預設 4）且 p(draft) >= `WHIRL_RELAX_ALPHA` × p(argmax)（預設 0.1）就保留；最後一個保留的 draft 之後那個 token 一定是目標模型自己的 argmax。temperature > 0：typical acceptance（Medusa）：在請求過濾後的分布上 p(draft) >= min(`WHIRL_RELAX_EPS` 0.09, `WHIRL_RELAX_DELTA` 0.3 × exp(−熵)) 就保留（此時不用 `specsample`）。**會改變 greedy 輸出**：fast 的 greedy 不等於 plain greedy，MTP ≠ plain；同樣的 prompt、seed、設定仍是確定的（此時 draft 數量策略改用固定的合成週期成本，不看牆鐘時間；並發請求共用 draft 數量，可能互相影響輸出）。`WHIRL_RELAX=0` 關閉；MoE 模型略過（每輪只有一個 MTP draft，量不到收益；`WHIRL_RELAX=1` 強制開） | dense MTP 模型 | dense MTP 模型 |
@@ -424,10 +424,10 @@ PowerShell 中先用 `$env:WHIRL_MODE = "precise"` 設定再啟動程式。**一
 | `WHIRL_FP8=0\|1` | MXFP4 prefill 用 fp8 activation（項目 `fp8`；balance / fast 預設開）。`0` 也會關掉 `WHIRL_MOE_FP8` |
 | `WHIRL_FP8_MASK=BITS` | 使用 fp8 activation 的矩陣乘法類別（預設 7） |
 | `WHIRL_G8T=0` | fp8 GEMM 改用列優先版本，不用 fragment 排列版本（位元相同） |
-| `WHIRL_GDN_WMMA=0\|1` | DeltaNet prefill 區塊用 f16 WMMA（項目 `gdnwmma`；balance / fast 下 MXFP4 預設開啟） |
+| `WHIRL_GDN_WMMA=0\|1` | DeltaNet prefill 區塊用 f16 WMMA（項目 `gdnwmma`；balance / fast 下 MXFP4 模型，以及 R9700 上任何格式的 dense 模型預設開啟） |
 | `WHIRL_Q8DEC=0\|1` | decode / verify activation：`1` 用 int8（項目 `q8dec`，balance / fast 預設；precise 下屬於有損覆寫），`0` 用 f16 進 f16 GEMM（precise 預設） |
-| `WHIRL_FFN_H16=0\|1` | GEMM 以 f16 輸出給逐元素運算（項目 `h16`；balance / fast 下 MXFP4 預設開啟） |
-| `WHIRL_Q4_RELAXED=1` | 其他模型也套用 MXFP4 balance 模式的 prefill 開關（`gdnwmma`、`h16`） |
+| `WHIRL_FFN_H16=0\|1` | GEMM 以 f16 輸出給逐元素運算（項目 `h16`；balance / fast 下 MXFP4 模型，以及 R9700 上任何格式的 dense 模型預設開啟） |
+| `WHIRL_Q4_RELAXED=1` | 原本略過的模型（非 MXFP4 的 MoE、Radeon 8060S）也套用 balance 模式的 prefill 開關（`gdnwmma`、`h16`） |
 | `WHIRL_ACT_FUSE=0` | prefill 不融合 activation（位元相同） |
 | `WHIRL_GEMMH=0` | 不用 f16 輸出的 prefill GEMM（位元相同） |
 | `WHIRL_GEMMHQ=1` | attention 投影也用 f16 輸出的 GEMM |

@@ -29,6 +29,16 @@ All notable changes to WHIRL are listed here. Versions follow `project(whirl VER
   the q8v preference on cards under 20 GiB are gone: a format that does not fit lowers the context
   (when not given) or stops with a message, never switches to a lower-precision format.
   `WHIRL_KV` remains as a debug override ([usage 7.7](docs/usage.md#env-debug)).
+- **balance / fast on the R9700: WMMA DeltaNet and f16 GEMM outputs for every dense model (KG-1)**:
+  `gdnwmma` and `h16` were MXFP4-only; they now also apply to dense models of any weight format
+  (Q4_K_M, Q5_K, Q6_K, IQ4_XS, ...). Qwen3.8-27B Q4_K_M, balance, prefill 8k 1849 → 2042 tok/s
+  (+10.4%), 32k 1649 → 1812 (+9.9%), 128k 1201 → 1285 (+7.0%); decode unchanged (96.98 → 97.15).
+  KL vs precise over the last 128 rows of 128k prompts: code 3.1e-4 → 2.7e-4 (top-1 100% → 100%),
+  zh 3.7e-4 → 4.1e-4 (99.22% → 98.44%, one near-tie row); balance before vs after 1.9e-4 / 4.6e-4.
+  A fused quantized GEMM choice of the autotuner now runs as its bitwise twin (dequant + f16-out
+  GEMM) when an f16 output is wanted, so which GEMMs write f16 never depends on tuning timings.
+  Greedy output of balance / fast changes for these models (goldens re-recorded); precise, MoE
+  models without MXFP4 experts and the Radeon 8060S are unchanged.
 - The per-item variables (`WHIRL_FP8`, `WHIRL_MOE_FP8`, `WHIRL_GDN_WMMA`, `WHIRL_FFN_H16`,
   `WHIRL_Q4_RELAXED`, `WHIRL_KV`) still work and override the mode (logged as user-requested).
 - New balance / fast item `specsample` (server, MTP models): with temperature > 0 the MTP drafts are

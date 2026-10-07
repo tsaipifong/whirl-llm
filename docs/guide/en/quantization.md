@@ -23,7 +23,7 @@ WHIRL treats a model file in one of two ways:
 | MTP == plain greedy, concurrent == solo | yes | yes |
 
 Speed mode applies automatically when the file contains MXFP4 tensors: fp8 prefill GEMMs, f16-WMMA
-DeltaNet chunks and f16 GEMM outputs for element-wise consumers. `WHIRL_FP8=0` returns MXFP4
+DeltaNet chunks and f16 GEMM outputs for element-wise consumers. On the R9700 the last two (balance items `gdnwmma`, `h16`) also apply to dense models in other formats such as Q4_K_M (KG-1: Qwen3.8-27B Q4_K_M prefill +7–10% at 8k–128k; KL vs precise at 128k unchanged within ±4e-5, 2.7e-4 / 4.1e-4); their GEMMs keep f16 activations. `WHIRL_FP8=0` returns MXFP4
 prefill to f16 activations (then prefill is only 2–4% faster than Q4_K_M — the speed comes from fp8,
 not from the format). Decode is exact in both modes (int8 GEMV with the same per-unit arithmetic).
 
