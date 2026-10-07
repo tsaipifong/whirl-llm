@@ -38,9 +38,9 @@ enum class Item : std::uint8_t {
     kvq8,     // KV auto may pick int8 (q8v / q8h; q8 on the Radeon 8060S) when f16 does not fit
     specsample,  // temperature > 0: MTP drafts drawn from the draft distribution, accepted with min(1, p/q)
                  // (same output distribution as plain sampling, not the same tokens for a seed)
-    // fast items (kvq4 implemented, the rest not yet)
+    // fast items (kvq4 and relaxacc implemented, the rest not yet)
     kvq4,     // 4-bit KV (gfx1151: q4 = int4 + f16 scale / 32, Hadamard-rotated q/k; dense and MoE)
-    relaxacc, // relaxed / typical speculative acceptance
+    relaxacc, // relaxed / typical speculative acceptance (whirl/relax_accept.h; changes greedy output)
     headq,    // low-bit output head in the main decode
     moeskip,  // skip low-weight MoE experts
     a8,       // int8 activations for Q4_K / Q5_K / Q6_K prefill (W4A8)
@@ -56,7 +56,7 @@ inline constexpr std::uint32_t balance_items = bit(Item::fp8) | bit(Item::moefp8
 inline constexpr std::uint32_t fast_only_items =
     bit(Item::kvq4) | bit(Item::relaxacc) | bit(Item::headq) | bit(Item::moeskip) | bit(Item::a8) | bit(Item::a4);
 // implemented items (the rest are "not yet implemented": skipped, the mode runs as balance)
-inline constexpr std::uint32_t implemented_items = balance_items | bit(Item::kvq4);
+inline constexpr std::uint32_t implemented_items = balance_items | bit(Item::kvq4) | bit(Item::relaxacc);
 
 // The requested mode and items.
 struct Request {

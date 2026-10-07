@@ -205,6 +205,8 @@ struct Slot {
     std::uint32_t cycles = 0;
     std::uint32_t drafted = 0;
     std::uint32_t accepted = 0;
+    std::uint32_t relaxed = 0;  // relaxacc: drafts kept by the relaxed rule (not the exact one)
+    double relax_gap = 0;       // relaxacc greedy: sum of ln p(argmax) - ln p(kept draft)
     std::uint32_t pos = 0;
     std::uint32_t next = 0;
     // host tiers
@@ -322,6 +324,10 @@ struct EngineOptions {
     // draft head's filtered distribution and accept with min(1, p / q) (whirl/spec_sample.h); off
     // (precise): greedy drafts, accepted iff they equal the sampled token (MTP == plain bit for bit)
     bool spec_sample = false;
+    // numerics item relaxacc (fast): relaxed draft acceptance (whirl/relax_accept.h); greedy
+    // requests keep near-argmax drafts, sampling requests use typical acceptance (and greedy
+    // drafts: specsample is not used with it)
+    whirl::relax::Params relax;
 };
 
 class Engine {
@@ -508,6 +514,8 @@ private:
     std::uint64_t stat_floor_waits_ = 0, stat_floor_periods_ = 0;
     // sampling buffers
     DevPtr samp_dev_ = 0, big_dev_ = 0;
+    DevPtr relax_dev_ = 0;                  // relaxacc: top-K of the greedy verify rows [ids | vals | stats]
+    std::vector<std::uint8_t> relax_host_;
     std::vector<std::uint8_t> samp_host_, big_host_;
     std::vector<float> row_host_;
     std::vector<std::uint8_t> in_cands_;

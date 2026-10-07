@@ -9,6 +9,7 @@
 #include "whirl/unicode.h"
 #include "whirl/numerics.h"
 #include "whirl/spec_sample.h"
+#include "whirl/relax_accept.h"
 #include "whirl/vram_limit.h"
 
 #include "../../kernels/gemm_small_addr.h"
@@ -67,6 +68,31 @@ std::string J(std::string s) {
     for (auto& c : s)
         if (c == '~') c = static_cast<char>(92);
     return s;
+}
+
+void testRelaxAccept() {
+    using whirl::relax::Params;
+    Params p;
+    p.on = true;
+    p.k = 2;
+    p.alpha = 0.5f;
+    const std::int32_t ids[3] = {7, 3, 9};
+    const float lg[3] = {1.0f, 2.0f, 2.0f - 0.6f};  // ranks: 3, 9, 7; p9/p3 = e^-0.6 = 0.549
+    CHECK(whirl::relax::acceptGreedy(p, ids, lg, 2.0f, 3));     // argmax
+    CHECK(whirl::relax::acceptGreedy(p, ids, lg, 2.0f, 9));     // 2nd, ratio 0.549 >= 0.5
+    CHECK(!whirl::relax::acceptGreedy(p, ids, lg, 2.0f, 7));    // 3rd
+    CHECK(!whirl::relax::acceptGreedy(p, ids, lg, 2.0f, 42));   // not a candidate
+    p.alpha = 0.6f;
+    CHECK(!whirl::relax::acceptGreedy(p, ids, lg, 2.0f, 9));    // ratio below alpha
+    p.alpha = 0.5f;
+    p.k = 1;
+    CHECK(!whirl::relax::acceptGreedy(p, ids, lg, 2.0f, 9) && whirl::relax::acceptGreedy(p, ids, lg, 2.0f, 3));
+    const std::int32_t tid[2] = {5, 4};
+    const float tl[2] = {1.0f, 1.0f};  // tie: lower id is the argmax
+    CHECK(!whirl::relax::acceptGreedy(p, tid, tl, 1.0f, 5) && whirl::relax::acceptGreedy(p, tid, tl, 1.0f, 4));
+    // typical: min(eps, delta * e^-H)
+    CHECK(whirl::relax::acceptTypical(p, 0.1, 0.0) && !whirl::relax::acceptTypical(p, 0.08, 0.0));
+    CHECK(whirl::relax::acceptTypical(p, 0.3 * std::exp(-3.0) + 1e-9, 3.0) && !whirl::relax::acceptTypical(p, 0.01, 3.0));
 }
 
 void testJson() {
@@ -774,7 +800,11 @@ void testNumerics() {
         CHECK(p.on(Item::fp8) && !p.on(Item::kvq4) && !p.on(Item::a4));
         CHECK(p.items[static_cast<std::size_t>(Item::kvq4)].note.find("8060S only") != std::string::npos);
         CHECK(p.items[static_cast<std::size_t>(Item::a4)].note.find("not yet implemented") != std::string::npos);
-        CHECK(nu::logLine(p).find("fast runs as balance") != std::string::npos);
+        CHECK(p.on(Item::relaxacc) && nu::logLine(p).find("fast runs as balance") == std::string::npos);
+        CHECK(!nu::plan(bal, swift).on(Item::relaxacc) && !nu::plan(pre, swift).on(Item::relaxacc));
+        CHECK(!nu::plan(fast, ornith).on(Item::relaxacc));  // MoE: skipped (no measured gain)
+        nu::Request fk = nu::parseMode("fast:kvq8", "t");  // custom fast list without relaxacc / kvq4
+        CHECK(nu::logLine(nu::plan(fk, swift)).find("fast runs as balance") != std::string::npos);
         nu::Target t8 = s8060;
         t8.k_kv_q4 = true;
         const nu::Plan p8 = nu::plan(fast, t8);  // 8060S: kvq4 on
@@ -1106,6 +1136,7 @@ void testSpecSample() {
 }  // namespace specsample_test
 
 int main() {
+    testRelaxAccept();
     testJson();
     testUnicode();
     testGguf();

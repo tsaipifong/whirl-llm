@@ -29,6 +29,7 @@
 #include "whirl/hip.h"
 #include "whirl/kernels_abi.h"
 #include "whirl/numerics.h"
+#include "whirl/relax_accept.h"
 #include "whirl/spec_sample.h"
 #include "whirl/vismap.h"
 
@@ -483,6 +484,7 @@ public:
     // (precise KV shrink) for the caller's log
     whirl::numerics::Request num_req;
     whirl::numerics::Plan num_plan;
+    whirl::relax::Params relax;  // numerics item relaxacc (fast): relaxed draft acceptance
     std::string load_note;
     bool kvQuantAuto() const { return num_req.has(whirl::numerics::Item::kvq8); }
     DevPtr w16 = 0;

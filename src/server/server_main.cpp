@@ -758,6 +758,7 @@ int serveMain(int argc, char** argv, const char* program) {
         eo.tmpl = tmpl;
         eo.use_mtp = use_mtp;
         eo.spec_sample = model.num_plan.on(numerics::Item::specsample);
+        eo.relax = model.relax;
         eo.n_draft = drafts;
         eo.p_min = p_min;
         eo.n_min = n_min;

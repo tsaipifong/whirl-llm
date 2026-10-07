@@ -66,7 +66,9 @@ whirl-server --help | --version
 | `gdnwmma` | balance | DeltaNet prefill 區塊用 f16 WMMA，取代 f32 區塊路徑 | MXFP4 模型 | 略過（還沒有 kernel） |
 | `h16` | balance | FFN / DeltaNet 的 GEMM 輸出先存成 f16 再進逐元素運算 | MXFP4 模型 | 只有 f16 權重 |
 | `kvq8` | balance | f16 放不下時 KV auto 可以選 int8：q8v（K f16、V int8），再不行 q8h；20 GiB 以下的卡優先 q8v | dense 模型 | q8（dense 模型） |
-| `kvq4`、`relaxacc`、`headq`、`moeskip`、`a8`、`a4` | fast | 4-bit KV、寬鬆推測接受、低位元輸出頭、略過 MoE 專家、W4A8 / W4A4 prefill | 尚未實作 | 尚未實作 |
+| `kvq4` | fast | 4-bit KV（int4，每 32 個值一個 f16 scale，q / k 先做 Hadamard 旋轉） | 略過（沒有 kernel） | dense 與 MoE |
+| `relaxacc` | fast | 寬鬆推測接受（MTP 與 n-gram draft）。greedy：draft 不是驗證列的 argmax 時，只要它在該列前 `WHIRL_RELAX_K` 名（預設 4）且 p(draft) >= `WHIRL_RELAX_ALPHA` × p(argmax)（預設 0.1）就保留；最後一個保留的 draft 之後那個 token 一定是目標模型自己的 argmax。temperature > 0：typical acceptance（Medusa）：在請求過濾後的分布上 p(draft) >= min(`WHIRL_RELAX_EPS` 0.09, `WHIRL_RELAX_DELTA` 0.3 × exp(−熵)) 就保留（此時不用 `specsample`）。**會改變 greedy 輸出**：fast 的 greedy 不等於 plain greedy，MTP ≠ plain；同樣的 prompt、seed、設定仍是確定的。`WHIRL_RELAX=0` 關閉；MoE 模型略過（每輪只有一個 MTP draft，量不到收益；`WHIRL_RELAX=1` 強制開） | dense MTP 模型 | dense MTP 模型 |
+| `headq`、`moeskip`、`a8`、`a4` | fast | 低位元輸出頭、略過 MoE 專家、W4A8 / W4A4 prefill | 尚未實作 | 尚未實作 |
 | `q8dec` | balance、fast | decode / verify GEMV 的 activation 用 int8（每 32 個值一個 f32 scale，同 llama.cpp 的 q8_1；balance 與 fast 一律包含） | 開 | 開 |
 
 precise 模式關閉 `q8dec`：decode、MTP / n-gram 驗證與並發 batch 的每個 matmul 都用 f16 activation 進 f16 WMMA GEMM（權重從 GGUF 型別解成 f16、f32 累加、每列加總順序固定），所以每一列不論 batch 大小都得到相同的位元；如果 GPU 的 kernel 對模型某種權重型別缺少這條路徑，precise 模式會拒絕載入，不會退回 int8。
@@ -79,7 +81,7 @@ numerics: balance - enabled: fp8, gdnwmma, h16, kvq8 (auto: q8v, then q8h, when 
 伺服器在 `GET /props` 回報模式（`"numerics": {"mode", "label", "enabled", "skipped", "overrides", "kv", "decode", "always_on"}`；`decode` 是 `f16` 或 `q8dec`）。
 [7.6](#env-numerics) 的單項變數（`WHIRL_FP8`、`WHIRL_MOE_FP8`、`WHIRL_GDN_WMMA`、`WHIRL_FFN_H16`、`WHIRL_Q4_RELAXED`）與
 `WHIRL_KV` 仍然有效，而且會覆寫模式；在 precise 模式下設成有損的值，log 會標示 `user-requested`，模式顯示為 `precise+overrides`。
-在同一個模式內，MTP / n-gram 解碼等於純 greedy 解碼，並發請求等於單獨執行。
+在 precise 與 balance 模式內（以及 fast 加 `WHIRL_RELAX=0`），MTP / n-gram 解碼等於純 greedy 解碼，並發請求等於單獨執行；fast 開著 `relaxacc` 時輸出取決於 draft。
 
 ## <a id="chat"></a>2. `whirl chat`
 

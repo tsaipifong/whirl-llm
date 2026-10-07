@@ -829,6 +829,18 @@ void loadOrTune(Model& m, const std::string& model_path, std::string& log) {
                                      ", and precise mode never falls back to int8 decode activations. Use --balance (int8 decode / verify "
                                      "activations, as llama.cpp's q8_1)");
         }
+        if (const auto v = envGet("RELAX"); v && !v->empty())
+            nu::applyOverride(p, nu::Item::relaxacc, "RELAX", *v, *v != "0", true);
+        m.relax = whirl::relax::Params{};
+        if (p.on(nu::Item::relaxacc)) {
+            m.relax.on = true;
+            if (const auto v = envGet("RELAX_K"); v && !v->empty()) m.relax.k = static_cast<std::uint32_t>(std::stoul(*v));
+            if (const auto v = envGet("RELAX_ALPHA"); v && !v->empty()) m.relax.alpha = std::stof(*v);
+            if (const auto v = envGet("RELAX_EPS"); v && !v->empty()) m.relax.eps = std::stof(*v);
+            if (const auto v = envGet("RELAX_DELTA"); v && !v->empty()) m.relax.delta = std::stof(*v);
+            p.items[static_cast<std::size_t>(nu::Item::relaxacc)].note +=
+                std::format(" [k {}, alpha {:.2f}, eps {:.2f}, delta {:.2f}]", m.relax.topk(), m.relax.alpha, m.relax.eps, m.relax.delta);
+        }
         if (const auto v = envGet("SPEC_SAMPLE"); v && !v->empty())
             nu::applyOverride(p, nu::Item::specsample, "SPEC_SAMPLE", *v, *v != "0", t.mtp && t.k_spec_sample);
         m.num_plan = p;

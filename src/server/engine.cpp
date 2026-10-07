@@ -134,6 +134,7 @@ Engine::~Engine() {
     for (QBatch& q : quarantine_)
         if (q.ev) ops_.eventDestroy(q.ev);
     if (samp_dev_) ops_.free(samp_dev_);
+    if (relax_dev_) ops_.free(relax_dev_);
     if (big_dev_) ops_.free(big_dev_);
 }
 
@@ -221,7 +222,15 @@ void Engine::allocState() {
     in_cands_.assign(V, 0);
     cands_scratch_.resize(std::max<std::size_t>(V, k_big));
     ctl_host_.assign(static_cast<std::size_t>(opt_.parallel) * qwen35::ctl_words, 0);
-    spec_on_ = opt_.spec_sample && opt_.use_mtp && m_.draftSampleOk();
+    if (opt_.relax.on) {
+        const std::uint64_t rb = static_cast<std::uint64_t>(max_rows) * opt_.relax.topk() * 8 + max_rows * 8;
+        relax_dev_ = ops_.malloc(rb);
+        relax_host_.assign(rb, 0);
+        logI("decode: relaxed draft acceptance (relaxacc, fast): greedy top-{} with p >= {:.2f} p_max; sampling typical "
+             "acceptance eps {:.2f} delta {:.2f} - output differs from exact speculative decoding",
+             opt_.relax.topk(), opt_.relax.alpha, opt_.relax.eps, opt_.relax.delta);
+    }
+    spec_on_ = opt_.spec_sample && opt_.use_mtp && m_.draftSampleOk() && !opt_.relax.on;
     if (spec_on_) q_host_.assign(static_cast<std::size_t>(opt_.parallel) * qwen35::max_drafts * spec::q_words, 0);
     if (opt_.spec_sample && opt_.use_mtp)
         logI("sampling: speculative sampling of MTP drafts (specsample) {}", spec_on_ ? "on for temperature > 0" : "unavailable (no draft_sample_rows kernel): exact-match acceptance");
@@ -1332,6 +1341,8 @@ bool Engine::startJob(Slot& sl, Job& job) {
     sl.cycles = 0;
     sl.drafted = 0;
     sl.accepted = 0;
+    sl.relaxed = 0;
+    sl.relax_gap = 0;
     sl.n_batch = 0;
     sl.acc_ema = static_cast<float>(opt_.n_draft);
     sl.dacc = qwen35::DraftAccept{};
@@ -1904,10 +1915,17 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
     if (p && p->events) m_.profileStart(1, pa);
     const std::uint32_t rows = m_.verifyBatchEnqueue(std::span<const VSeg>(vsegs.data(), A));
     if (p) m_.profileStop();
-    bool any_sampling = false;
+    bool any_sampling = false, any_relax = false;
+    const std::uint32_t rk = opt_.relax.topk();
     for (std::size_t k = 0; k < A; ++k) {
         Slot& sl = *act[k];
-        if (sl.greedy) continue;
+        if (sl.greedy) {
+            if (opt_.relax.on && nd_of[k] > 0) {
+                any_relax = true;
+                launchTopk(row_of[k], nd_of[k], rk, 1.0f, relax_dev_, max_rows, row_of[k]);
+            }
+            continue;
+        }
         any_sampling = true;
         launchTopk(row_of[k], nd_of[k] + 1, k_small, sl.sm.inv_t, samp_dev_, max_rows, row_of[k]);
     }
@@ -1918,6 +1936,7 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
         p->enq_ms[pa] += std::chrono::duration<double, std::milli>(t_enq - tc0).count();
     }
     if (any_sampling) ops_.download(samp_host_.data(), samp_dev_, sampBytes());
+    if (any_relax) ops_.download(relax_host_.data(), relax_dev_, relax_host_.size());
     if (any_spec) m_.readDraftQ(q_host_);
     const float cycle_ms = static_cast<float>(msSince(tc0));
     if (opt_.slot_drafts == 2 && opt_.use_mtp) {
@@ -1990,13 +2009,32 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
         std::uint32_t acc = 0;
         std::uint32_t chosen;
         if (sl.greedy) {
-            while (acc < nd_dev && static_cast<std::uint32_t>(ctl[qwen35::ctl_rows + acc]) == dr[acc]) ++acc;
+            while (acc < nd_dev) {
+                if (static_cast<std::uint32_t>(ctl[qwen35::ctl_rows + acc]) == dr[acc]) {
+                    ++acc;
+                    continue;
+                }
+                if (!opt_.relax.on) break;
+                // relaxacc: verify row acc (conditioned on drafts 0..acc-1) keeps a near-argmax draft
+                const std::size_t gr = row0 + acc;
+                const auto* rids = reinterpret_cast<const std::int32_t*>(relax_host_.data()) + gr * rk;
+                const auto* rvals = reinterpret_cast<const float*>(relax_host_.data() + static_cast<std::size_t>(max_rows) * rk * 4) + gr * rk;
+                const auto* rst = reinterpret_cast<const float*>(relax_host_.data() + static_cast<std::size_t>(max_rows) * rk * 8);
+                if (!relax::acceptGreedy(opt_.relax, std::span<const std::int32_t>(rids, rk), std::span<const float>(rvals, rk),
+                                         rst[2 * gr], dr[acc]))
+                    break;
+                for (std::uint32_t j = 0; j < rk; ++j)
+                    if (static_cast<std::uint32_t>(rids[j]) == dr[acc]) sl.relax_gap += static_cast<double>(rst[2 * gr] - rvals[j]);
+                ++acc;
+                sl.relaxed += 1;
+            }
             chosen = static_cast<std::uint32_t>(ctl[qwen35::ctl_rows + acc]);
         } else {
             // spq: speculative sampling (specsample) - draft r drawn from q on the device, accepted
             // with min(1, p / q), else the residual max(0, p - q). Otherwise (precise, n-gram
             // drafts) a deterministic draft is accepted iff it is the sampled token.
             const bool spq = any_spec && !is_ng && nd_dev > 0;
+            const bool typ = opt_.relax.on;
             sl.sm.row_base = row0;
             for (;;) {
                 prepareRow(sl.sm, acc);
@@ -2020,6 +2058,19 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
                     }
                     chosen = sampleResidual(sl.sm, q, spec::uniform(sl.sm.seed, sl.sm.pos_idx, spec::u_residual));
                     break;
+                }
+                if (typ && acc < nd_dev) {
+                    // relaxacc typical acceptance on the filtered sampling distribution of row acc
+                    const double pd = probOf(sl.sm, dr[acc]);
+                    double h = 0;
+                    const std::vector<Cand>& cv = *sl.sm.cands;
+                    for (std::size_t i = 0; i < sl.sm.n; ++i)
+                        if (cv[i].p > 0) h -= cv[i].p * std::log(cv[i].p);
+                    if (relax::acceptTypical(opt_.relax, pd, h)) {
+                        ++acc;
+                        sl.relaxed += 1;
+                        continue;
+                    }
                 }
                 const std::uint32_t t = sampleRow(sl.sm, std::nullopt, 0);
                 if (!spq && acc < nd_dev && t == dr[acc]) {
@@ -2237,6 +2288,9 @@ void Engine::finishJob(Slot& sl) {
              job.id, sl.id, sl.drafted, sl.accepted, sl.drafted > 0 ? 100.0 * sl.accepted / sl.drafted : 0.0,
              sl.cycles > 0 ? static_cast<double>(sl.accepted + sl.cycles) / sl.cycles : 0.0, sl.cycles);
         if (opt_.ngram) logI("req {} | slot {} | n-gram drafts in {} of {} cycles", job.id, sl.id, sl.ng_cycles, sl.cycles);
+        if (opt_.relax.on)
+            logI("req {} | slot {} | relaxacc: {} of {} accepted drafts kept by the relaxed rule (greedy: mean ln p_max/p_kept {:.3f})",
+                 job.id, sl.id, sl.relaxed, sl.accepted, sl.relaxed > 0 ? sl.relax_gap / sl.relaxed : 0.0);
     }
     if (!sl.greedy && (sl.sm.big_used > 0 || sl.sm.full_used > 0))
         logI("req {} | slot {} | sampler fallbacks: top-{} {}x, full row {}x", job.id, sl.id, k_big, sl.sm.big_used,
