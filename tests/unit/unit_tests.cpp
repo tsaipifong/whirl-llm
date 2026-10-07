@@ -778,8 +778,18 @@ void testNumerics() {
         const nu::Plan po = nu::plan(bal, ornith);
         CHECK(po.on(Item::fp8) && po.on(Item::moefp8) && po.on(Item::gdnwmma) && po.on(Item::h16) && !po.on(Item::kvq8));
         const nu::Plan pq = nu::plan(bal, q4);
-        CHECK(!pq.on(Item::fp8) && !pq.on(Item::gdnwmma) && !pq.on(Item::h16) && pq.on(Item::kvq8));
+        CHECK(!pq.on(Item::fp8) && pq.on(Item::gdnwmma) && pq.on(Item::h16) && pq.on(Item::kvq8));  // KG-1: dense Q4_K_M on the R9700
         CHECK(pq.items[static_cast<std::size_t>(Item::fp8)].note.find("no MXFP4") != std::string::npos);
+        CHECK(!nu::plan(pre, q4).on(Item::gdnwmma) && !nu::plan(pre, q4).on(Item::h16));
+        nu::Target q4moe = q4;  // MoE with non-MXFP4 experts: unchanged (f32 paths)
+        q4moe.moe = true;
+        const nu::Plan pqm = nu::plan(bal, q4moe);
+        CHECK(!pqm.on(Item::gdnwmma) && !pqm.on(Item::h16) && pqm.items[static_cast<std::size_t>(Item::h16)].note.find("MoE") != std::string::npos);
+        nu::Target q4s = q4;  // Radeon 8060S Q4_K_M: unchanged (no WMMA DeltaNet, no h16 for quantized weights)
+        q4s.gfx1151 = true;
+        q4s.k_gemm8 = q4s.k_gemm8_moe = q4s.k_gdn_wmma = false;
+        const nu::Plan pqs = nu::plan(bal, q4s);
+        CHECK(!pqs.on(Item::gdnwmma) && !pqs.on(Item::h16));
         const nu::Plan p8 = nu::plan(bal, s8060);  // never an error: skipped with a reason
         CHECK(!p8.on(Item::fp8) && !p8.on(Item::moefp8) && !p8.on(Item::gdnwmma) && p8.on(Item::h16) && p8.on(Item::kvq8));
         CHECK(p8.items[static_cast<std::size_t>(Item::fp8)].note.find("gfx1151") != std::string::npos);

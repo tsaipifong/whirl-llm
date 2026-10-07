@@ -270,7 +270,9 @@ void Model::gemmF16(const Mat& w, DevPtr x16in, DevPtr y, u32 n, i32 acc) {
             return;
         }
     }
-    const u32 choice = prec_dec && n <= gvMax() ? precChoice(w, n) : w.tune[tuneBucket(n)];
+    u32 choice = prec_dec && n <= gvMax() ? precChoice(w, n) : w.tune[tuneBucket(n)];
+    // h16_dq: a fused quantized choice cannot write f16; its dequant twin (same bits) can
+    if (out_h16 && h16_dq && choice < gemm_cfgs.size() && w.ty != GgmlType::f16) choice += static_cast<u32>(gemm_cfgs.size());
     const std::size_t gcfg = choice % gemm_cfgs.size();
     const GemmCfg c = gemm_cfgs[gcfg];
     if (choice >= 2 * gemm_cfgs.size()) {
@@ -366,7 +368,8 @@ bool Model::h16Out(const Mat& w, u32 n, std::uint8_t cls) const {
                     if (k.gemmsh[choice - 2 * gemm_cfgs.size()][ti(w.ty)] == nullptr) return false;
                     continue;
                 }
-                if (!((choice >= gemm_cfgs.size() || w.ty == GgmlType::f16) && k.gemmch[choice % gemm_cfgs.size()] != nullptr)) return false;
+                if (!((choice >= gemm_cfgs.size() || w.ty == GgmlType::f16 || h16_dq) && k.gemmch[choice % gemm_cfgs.size()] != nullptr))
+                    return false;
             }
             return true;
         default:

@@ -195,10 +195,12 @@ Plan plan(const Request& r, const Target& t) {
                 break;
             case Item::gdnwmma:
                 if (!t.k_gdn_wmma) why = "no WMMA DeltaNet kernels on this GPU";
-                else if (!t.has_mxfp4) why = "MXFP4 models only for now (WHIRL_Q4_RELAXED=1 forces it)";
+                else if (!t.has_mxfp4 && !denseQuantRelaxed(t)) why = "MoE: MXFP4 experts only for now (WHIRL_Q4_RELAXED=1 forces it)";
                 break;
             case Item::h16:
-                if (!t.has_mxfp4) why = "MXFP4 models only for now (WHIRL_Q4_RELAXED=1 forces it)";
+                if (!t.has_mxfp4 && !denseQuantRelaxed(t))
+                    why = t.gfx1151 ? "MXFP4 models only on this GPU (WHIRL_Q4_RELAXED=1 forces it)"
+                                    : "MoE: MXFP4 experts only for now (WHIRL_Q4_RELAXED=1 forces it)";
                 else if (t.gfx1151) note = "f16 weights only on this GPU";
                 break;
             case Item::kvq8:

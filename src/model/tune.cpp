@@ -758,8 +758,10 @@ void loadOrTune(Model& m, const std::string& model_path, std::string& log) {
         const bool g8t_on = envFlag("G8T", true);
         if (g8t_on && m.fp8_prefill && m.k.gemm8[0] != nullptr && m.useTiledFp8()) log += "  fp8 prefill GEMM: fragment-tiled (gemm8t)\n";
     }
-    // f16-WMMA chunked DeltaNet prefill: a balance item, MXFP4 models (WHIRL_GDN_WMMA overrides)
-    m.gdn_wmma = has_mx && rq.has(nu::Item::gdnwmma);
+    // f16-WMMA chunked DeltaNet prefill and f16 GEMM outputs: balance items for MXFP4 models
+    // and (KG-1) dense non-MXFP4 models on the R9700 (= nu::denseQuantRelaxed)
+    const bool dense_q = !has_mx && !m.cfg.moe && m.arch != hip::Arch::gfx1151;
+    m.gdn_wmma = (has_mx || dense_q) && rq.has(nu::Item::gdnwmma);
     const auto wmma_env = envGet("GDN_WMMA");
     if (wmma_env) m.gdn_wmma = *wmma_env != "0";
     if (auto v = envGet("ACT_FUSE")) m.act_fuse = *v != "0";
@@ -770,8 +772,8 @@ void loadOrTune(Model& m, const std::string& model_path, std::string& log) {
     if (auto v = envGet("ATTN_DQF")) m.attn_dqf_on = *v != "0";
     if (auto v = envGet("GDN_BA")) m.gdn_ba_on = *v != "0";
     if (auto v = envGet("GDN_IN2")) m.gdn_in2_on = *v != "0";
-    // f16 FFN / DeltaNet GEMM outputs: a balance item, MXFP4 models (WHIRL_FFN_H16 overrides)
-    m.ffn_h16 = has_mx && rq.has(nu::Item::h16);
+    // f16 FFN / DeltaNet GEMM outputs: a balance item (WHIRL_FFN_H16 overrides)
+    m.ffn_h16 = (has_mx || dense_q) && rq.has(nu::Item::h16);
     // WHIRL_Q4_RELAXED=1: every non-bitwise prefill speedup for non-MXFP4 models too
     const auto relaxed_env = envGet("Q4_RELAXED");
     const bool relaxed = relaxed_env && *relaxed_env != "0";
@@ -781,6 +783,7 @@ void loadOrTune(Model& m, const std::string& model_path, std::string& log) {
     }
     const auto h16_env = envGet("FFN_H16");
     if (h16_env) m.ffn_h16 = *h16_env != "0";
+    m.h16_dq = m.ffn_h16 && dense_q;
     if (m.gdn_wmma && m.gdn_chunked && m.k.gdn_wprep != nullptr) log += "  DeltaNet prefill: f16 WMMA chunks\n";
     {
         // numerics mode: capability table, per-item environment overrides, one log line

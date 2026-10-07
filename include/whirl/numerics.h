@@ -94,6 +94,10 @@ struct Target {
     bool kv_explicit = false;  // WHIRL_KV set to a format (the KV items then do not choose)
 };
 
+// gdnwmma / h16 for a model without MXFP4 tensors (KG-1): dense models on the R9700 only
+// (MoE non-MXFP4 models and the Radeon 8060S keep the f32 paths).
+inline bool denseQuantRelaxed(const Target& t) { return !t.has_mxfp4 && !t.moe && !t.gfx1151; }
+
 struct ItemState {
     Item item{};
     bool requested = false;

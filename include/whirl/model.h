@@ -513,6 +513,10 @@ public:
     static constexpr std::uint32_t kDqMaxKeys = 1u << 22;  // dq_ptab covers keys [0, kDqMaxKeys)
     bool attn_kg_on = true;  // GQA-grouped prefill attention (f16 / q8 / q8h / q8v KV; WHIRL_ATTN_KG=0 off)
     bool ffn_h16 = false;
+    // KG-1: f16 outputs from quantized weights whatever the tuned choice (a fused quantized
+    // gemm_cN choice runs as dequant + gemm_chN, bitwise the same as gemm_cN), so whether a
+    // GEMM writes f16 never depends on autotune timings (dense non-MXFP4 models, R9700)
+    bool h16_dq = false;
     bool out_h16 = false;
     bool g8t = false;
     bool gemmh_on = true;
