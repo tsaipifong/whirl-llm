@@ -4,7 +4,8 @@
 //
 // draft_sample_rows runs right after draft_pick_rows (same rows, same control areas) for the rows
 // whose request samples (temperature > 0): it replaces the greedy draft r with a token drawn from
-// the draft distribution q and writes q for the host (accept min(1, p/q), residual max(0, p - q)).
+// the draft distribution q by the race coupled to the target sampler (argmin E(v) / q(v), E from the
+// row's race key, whirl/spec_sample.h) and writes q (tests / diagnostics).
 // q = softmax(x * inv_t) over the K = min(top_k, 32) (32 when top_k = 0) largest logits, then the
 // request's top-k / top-p / min-p, renormalized; host reference: whirl::spec::draftDist.
 // The p-min cutoff of draft_pick_rows (argmax probability at temperature 1, a function of the row
@@ -21,8 +22,15 @@ struct DSampArgs {
     float inv_t[32];
     float top_p[32];
     float min_p[32];
-    float u[32];
+    unsigned key_lo[32];  // race key base (whirl::spec::raceBase)
+    unsigned key_hi[32];
 };
+
+__device__ __forceinline__ unsigned long long spec_splitmix(unsigned long long z) {
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+    return z ^ (z >> 31);
+}
 
 __device__ __forceinline__ unsigned spec_key(float f) {
     const unsigned u = __float_as_uint(f);
@@ -175,15 +183,18 @@ extern "C" __global__ void __launch_bounds__(1024)
     float z = 0.f;
     for (int i = 0; i < nk; ++i) z += p[i];
     for (int i = 0; i < nk; ++i) p[i] /= z;
-    // draw (same arithmetic as whirl::spec::sampleQ)
-    const float u = a.u[b];
-    int pick = nk - 1;
-    float cum = 0.f;
+    // race draw (same arithmetic as whirl::spec::sampleRace / raceE)
+    const unsigned long long rkey = (static_cast<unsigned long long>(a.key_hi[b]) << 32) | a.key_lo[b];
+    int pick = 0;
+    double bk = __longlong_as_double(0x7FF0000000000000ll);  // +inf
     for (int i = 0; i < nk; ++i) {
-        cum += p[i];
-        if (cum > u) {
+        if (!(p[i] > 0.f)) continue;
+        const unsigned long long z = spec_splitmix(rkey + (static_cast<unsigned long long>(static_cast<unsigned>(id[i])) + 1ull) * 0xE7037ED1A0B428DBull);
+        const double u = static_cast<double>(z >> 11) * (1.0 / 9007199254740992.0);
+        const double k = -log(1.0 - u) / static_cast<double>(p[i]);
+        if (k < bk) {
+            bk = k;
             pick = i;
-            break;
         }
     }
     c[16 + r] = id[pick];

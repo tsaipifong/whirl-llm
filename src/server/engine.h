@@ -119,6 +119,7 @@ struct Sampler {
     std::uint32_t row_base = 0;
     std::uint32_t full_used = 0;
     std::uint32_t big_used = 0;
+    bool race = false;  // specsample: race draw coupled to the MTP drafts (whirl/spec_sample.h)
 
     // Uniform in [0, 1) keyed by (seed, output token index).
     double uniform() const {
@@ -318,9 +319,11 @@ struct EngineOptions {
     bool ckpt_host = false;
     std::size_t prefill_exec = 2048;
     std::uint64_t seed = 0;
-    // numerics item specsample (balance / fast): temperature > 0 requests draw MTP drafts from the
-    // draft head's filtered distribution and accept with min(1, p / q) (whirl/spec_sample.h); off
-    // (precise): greedy drafts, accepted iff they equal the sampled token (MTP == plain bit for bit)
+    // numerics item specsample (balance / fast): temperature > 0 requests sample by a race keyed by
+    // (seed, output index, token) and draw MTP drafts from the draft head's filtered distribution q
+    // by the same race (whirl/spec_sample.h); off (precise): inverse-CDF sampling, greedy drafts.
+    // Both accept a draft iff it equals the sampled token: the reply is a function of the seed only
+    // (MTP == plain bit for bit within the mode).
     bool spec_sample = false;
 };
 
@@ -434,9 +437,8 @@ private:
     void fetchCands(Sampler& s, std::uint32_t rows);
     void prepareRow(Sampler& s, std::uint32_t r);
     void loadFullRow(std::uint32_t gr);
-    double probOf(Sampler& s, std::uint32_t t);
     std::uint32_t sampleRow(Sampler& s, std::optional<std::uint32_t> ex, double p_ex);
-    std::uint32_t sampleResidual(Sampler& s, const spec::QDist& q, double u);
+    std::uint32_t sampleRace(Sampler& s);
     DevPtr logitsRow(std::uint32_t r) const;
     // request lifecycle
     bool emit(Slot& sl, std::uint32_t t);
@@ -513,9 +515,6 @@ private:
     std::vector<std::uint8_t> in_cands_;
     std::vector<Cand> cands_scratch_;
     std::vector<std::int32_t> ctl_host_;
-    std::vector<std::int32_t> q_host_;  // draft distributions (specsample), [slot][max_drafts][q_words]
-    std::vector<std::uint32_t> res_ids_;
-    std::vector<double> res_p_;
     bool spec_on_ = false;
     std::uint64_t conv_bytes_ = 0, ssm_bytes_ = 0;
     std::vector<Slot> slots_;

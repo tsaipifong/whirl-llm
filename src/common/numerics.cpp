@@ -21,7 +21,7 @@ constexpr std::array<ItemInfo, n_items> k_items = {{
     {"gdnwmma", "f16-WMMA DeltaNet prefill chunks"},
     {"h16", "f16 FFN / DeltaNet GEMM outputs"},
     {"kvq8", "int8 KV when f16 does not fit"},
-    {"specsample", "speculative sampling of MTP drafts (temperature > 0)"},
+    {"specsample", "race-coupled sampled MTP drafts (temperature > 0)"},
     {"kvq4", "4-bit KV"},
     {"relaxacc", "relaxed speculative acceptance"},
     {"headq", "low-bit output head in decode"},
@@ -209,7 +209,7 @@ Plan plan(const Request& r, const Target& t) {
             case Item::specsample:
                 if (!t.mtp) why = "no MTP head";
                 else if (!t.k_spec_sample) why = "no draft sampling kernel";
-                else note = "temperature > 0: same distribution as plain sampling, other tokens for a seed";
+                else note = "temperature > 0: race sampler (other tokens for a seed than precise), text independent of drafts";
                 break;
             default:
                 why = "not yet implemented (balance behaviour)";

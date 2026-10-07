@@ -352,7 +352,7 @@ void testMisc(Ctx& c) {
             c.rep.add(cmpTolRel("topk_rows softmax normalizer vs CPU", gsum, rsum, 1e-4, 1e-9));
         }
         // draft_sample_rows: draft distribution q (ids exact, probabilities vs whirl::spec::draftDist)
-        // and the drawn token = inverse CDF of the written q at u
+        // and the drawn token = the race draw from the written q (whirl::spec::sampleRace)
         if (c.k.draft_sample_rows) {
             namespace sp = whirl::spec;
             const int tr = 3, r = 1;
@@ -362,7 +362,7 @@ void testMisc(Ctx& c) {
             wk::DSampArgs da;
             const int tks[tr] = {20, 0, 5};
             const float tps[tr] = {0.95f, 0.8f, 1.f}, mps[tr] = {0.f, 0.f, 0.05f}, its[tr] = {1.f / 0.7f, 1.f, 1.f / 0.6f};
-            const float us[tr] = {0.3f, 0.77f, 0.01f};
+            const std::uint64_t keys[tr] = {sp::raceBase(1234, 7), sp::raceBase(42, 0), sp::raceBase(987654321ull, 100000)};
             for (int b = 0; b < tr; ++b) {
                 area.v[b] = b * 64;
                 da.on[b] = 1;
@@ -371,7 +371,8 @@ void testMisc(Ctx& c) {
                 da.inv_t[b] = its[b];
                 da.top_p[b] = tps[b];
                 da.min_p[b] = mps[b];
-                da.u[b] = us[b];
+                da.key_lo[b] = static_cast<std::uint32_t>(keys[b]);
+                da.key_hi[b] = static_cast<std::uint32_t>(keys[b] >> 32);
             }
             hip::launch(c.k.draft_sample_rows, {static_cast<unsigned>(tr), 1, 1}, {1024, 1, 1}, 0, c.s, dx.p(), n, ctl.p(), area, r,
                         DevPtr{0}, da, qb.p());
@@ -404,7 +405,7 @@ void testMisc(Ctx& c) {
                     gp.push_back(got.p[i]);
                     rp.push_back(want.p[i]);
                 }
-                bad += static_cast<std::uint32_t>(hc[static_cast<std::size_t>(b) * 64 + 16 + r]) != sp::sampleQ(got, us[b]);
+                bad += static_cast<std::uint32_t>(hc[static_cast<std::size_t>(b) * 64 + 16 + r]) != sp::sampleRace(got, keys[b]);
             }
             Result rk;
             rk.name = "draft_sample_rows q support / drawn token";

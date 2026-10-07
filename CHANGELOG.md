@@ -22,12 +22,18 @@ All notable changes to WHIRL are listed here. Versions follow `project(whirl VER
 - The per-item variables (`WHIRL_FP8`, `WHIRL_MOE_FP8`, `WHIRL_GDN_WMMA`, `WHIRL_FFN_H16`,
   `WHIRL_Q4_RELAXED`, `WHIRL_KV`) still work and override the mode (logged as user-requested).
 - New balance / fast item `specsample` (server, MTP models): with temperature > 0 the MTP drafts are
-  drawn from the draft head's distribution (same temperature / top-k / top-p / min-p) and accepted
-  with probability min(1, p/q), else resampled from max(0, p - q) (standard speculative sampling).
-  The output distribution is exactly that of plain sampling, but the tokens for a given seed differ
-  from 0.2.0-rc (which accepted a greedy draft only when it equalled the sampled token; precise keeps
-  that rule, so MTP == plain token for token there). Greedy decoding is unchanged in every mode.
-  `WHIRL_SPEC_SAMPLE=0|1` overrides.
+  drawn from the draft head's distribution (same temperature / top-k / top-p / min-p), coupled to the
+  target draw by a Gumbel-max / exponential race keyed by (seed, output position, token): the target
+  token is argmin E(v) / p(v), the draft argmin E(v) / q(v) with the same E, and a draft is accepted
+  iff it equals the target token. Sampling stays exact (same distribution as plain sampling), the
+  acceptance is close to the optimum sum min(p, q), and the text for a seed depends only on the seed
+  and the model's logits: the same with MTP on or off and whatever the draft counts, prefix cache or
+  earlier requests. With specsample on (balance / fast, temperature > 0) the token sequence for a
+  given seed differs from 0.2.0-rc's inverse-CDF sampler; precise (specsample off) keeps the
+  0.2.0-rc sampler and its sequences exactly. Greedy decoding is unchanged in every mode.
+  `WHIRL_SPEC_SAMPLE=0|1` overrides (0 = 0.2.0-rc sampler and greedy drafts). (An earlier rc2 build
+  used the accept-min(1, p/q) / residual rule; its emitted tokens depended on draft counts and the
+  draft head's state, so the same seed could give different text between requests.)
 - precise decode / verify no longer quantizes activations to int8: dense matmuls take f16
   activations on the f16 GEMM's numerics (bitwise == the prefill GEMM rows, for every batch size up
   to 32), MoE experts take f32 activations with f32 accumulation. Every decode / verify batch up to

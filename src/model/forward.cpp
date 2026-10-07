@@ -1362,7 +1362,8 @@ void Model::mtpBatchStepEx(std::span<const MSeg> segs, u32 r, bool draft) {
     hip::launch(k.draft_pick_rows, D(ns), D(1024), 0, stream, logits, I(head.nrows), out_tok, area, I(r), I(draft_n_min), draft_p_min,
                 map);
     if (draftSampleOk()) {
-        // speculative sampling: rows of sampling requests redraw draft r from the filtered draft distribution
+        // specsample: rows of sampling requests redraw draft r from the filtered draft distribution  by the race
+        // coupled to the target sampler for output index pos0 + r (whirl/spec_sample.h)
         kernels::DSampArgs da;
         bool any = false;
         for (u32 kk = 0; kk < ns; ++kk) {
@@ -1376,7 +1377,9 @@ void Model::mtpBatchStepEx(std::span<const MSeg> segs, u32 r, bool draft) {
             da.inv_t[kk] = ds.inv_t;
             da.top_p[kk] = ds.top_p;
             da.min_p[kk] = ds.min_p;
-            da.u[kk] = std::min(static_cast<float>(spec::uniform(ds.seed, ds.pos0 + r, spec::u_draft)), 0.99999994f);
+            const std::uint64_t key = spec::raceBase(ds.seed, ds.pos0 + r);
+            da.key_lo[kk] = static_cast<std::uint32_t>(key);
+            da.key_hi[kk] = static_cast<std::uint32_t>(key >> 32);
         }
         if (any)
             hip::launch(k.draft_sample_rows, D(ns), D(1024), 0, stream, logits, I(head.nrows), out_tok, area, I(r), map, da, draft_qbuf);

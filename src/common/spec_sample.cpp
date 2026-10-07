@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <limits>
 
 namespace whirl::spec {
 
@@ -79,38 +80,24 @@ QDist draftDist(std::span<const std::uint32_t> ids, std::span<const float> logit
     return q;
 }
 
-std::uint32_t sampleQ(const QDist& q, double u) {
-    if (q.n == 0) return 0;
-    const float target = static_cast<float>(u);
-    float cum = 0.f;
-    for (std::uint32_t i = 0; i < q.n; ++i) {
-        cum += q.p[i];
-        if (cum > target) return q.id[i];
-    }
-    return q.id[q.n - 1];
+double raceE(std::uint64_t base, std::uint32_t token) {
+    const std::uint64_t z = splitmix(base + (static_cast<std::uint64_t>(token) + 1) * 0xE7037ED1A0B428DBull);
+    const double u = static_cast<double>(z >> 11) * (1.0 / 9007199254740992.0);
+    return -std::log(1.0 - u);
 }
 
-std::uint32_t sampleResidual(std::span<const std::uint32_t> ids, std::span<const double> p, const QDist& q, double u) {
-    const std::size_t n = std::min(ids.size(), p.size());
-    double z = 0;
-    std::size_t best = 0;
-    for (std::size_t i = 0; i < n; ++i) {
-        z += std::max(0.0, p[i] - static_cast<double>(q.of(ids[i])));
-        if (p[i] > p[best]) best = i;
+std::uint32_t sampleRace(const QDist& q, std::uint64_t base) {
+    std::uint32_t best = q.n > 0 ? q.id[0] : 0;
+    double bk = std::numeric_limits<double>::infinity();
+    for (std::uint32_t i = 0; i < q.n; ++i) {
+        if (!(q.p[i] > 0.f)) continue;
+        const double k = raceE(base, q.id[i]) / static_cast<double>(q.p[i]);
+        if (k < bk) {
+            bk = k;
+            best = q.id[i];
+        }
     }
-    if (n == 0) return 0;
-    if (!(z > 0)) return ids[best];
-    const double target = u * z;
-    double cum = 0;
-    std::size_t last = best;
-    for (std::size_t i = 0; i < n; ++i) {
-        const double w = std::max(0.0, p[i] - static_cast<double>(q.of(ids[i])));
-        if (w <= 0) continue;
-        cum += w;
-        last = i;
-        if (cum > target) return ids[i];
-    }
-    return ids[last];
+    return best;
 }
 
 }  // namespace whirl::spec

@@ -928,8 +928,10 @@ void testKernelFetchBounds() {
 
 }  // namespace
 
-// speculative sampling (whirl/spec_sample.h): the output distribution equals plain sampling from p
-// (chi-square over many trials) for top-k / top-p / min-p targets and a draft-vocabulary subset
+// speculative sampling (whirl/spec_sample.h): race-coupled draws; the race is an exact draw from p
+// (chi-square over many trials, closed and open targets), the draft matches it with probability
+// close to sum min(p, q), and whole replies are identical for a seed whatever the drafts / draft
+// counts / draft-head state
 namespace specsample_test {
 namespace sp = whirl::spec;
 
@@ -959,65 +961,170 @@ sp::QDist filtered(const std::vector<float>& lg, const std::vector<std::uint32_t
     return sp::draftDist(ci, cl, m, sum, inv_t, top_k, top_p, min_p);
 }
 
-// one case: chi-square of speculative sampling and of plain sampling against the target p
+// target race draw over a closed distribution, as Engine::sampleRace
+std::uint32_t raceDraw(const sp::QDist& pt, std::uint64_t seed, std::uint64_t pos) { return sp::sampleRace(pt, sp::raceBase(seed, pos)); }
+
+// one case: race target against p (chi-square), race-coupled draft acceptance against sum min(p, q)
+// and against the greedy draft p(argmax q)
 void runCase(const char* name, const std::vector<float>& tl, const std::vector<float>& dl, const std::vector<std::uint32_t>& dsub,
              float inv_t, std::uint32_t top_k, float top_p, float min_p, int trials) {
     std::vector<std::uint32_t> all(tl.size());
     for (std::size_t i = 0; i < all.size(); ++i) all[i] = static_cast<std::uint32_t>(i);
     const sp::QDist pt = filtered(tl, all, inv_t, top_k, top_p, min_p);  // target p (closed)
     const sp::QDist q = filtered(dl, dsub, inv_t, top_k, top_p, min_p);  // draft q over the subset
-    std::vector<std::uint32_t> pid(pt.id, pt.id + pt.n);
-    std::vector<double> pp(pt.n);
-    for (std::uint32_t i = 0; i < pt.n; ++i) pp[i] = pt.p[i];
-    std::vector<double> cnt_s(tl.size(), 0), cnt_p(tl.size(), 0);
+    std::vector<double> cnt(tl.size(), 0);
     double acc = 0, exact = 0;
     const std::uint32_t qtop = q.id[0];
     for (int i = 0; i < trials; ++i) {
         const std::uint64_t seed = 0x1234567ull + static_cast<std::uint64_t>(i) * 7919ull;
-        const std::uint32_t d = sp::sampleQ(q, sp::uniform(seed, 5, sp::u_draft));
-        const double pd = pt.of(d), qd = q.of(d);
-        std::uint32_t x;
-        if (sp::accept(pd, qd, sp::uniform(seed, 5, sp::u_accept))) {
-            x = d;
-            acc += 1;
-        } else {
-            x = sp::sampleResidual(pid, pp, q, sp::uniform(seed, 5, sp::u_residual));
-        }
-        cnt_s[x] += 1;
-        // plain sampling (stream-0 draw); the old exact-match rule accepts the greedy draft iff y == argmax q
-        double cum = 0;
-        const double u = sp::uniform(seed, 5, sp::u_sample);
-        std::uint32_t y = pid.back();
-        for (std::size_t j = 0; j < pid.size(); ++j) {
-            cum += pp[j];
-            if (cum > u) {
-                y = pid[j];
-                break;
-            }
-        }
-        cnt_p[y] += 1;
-        if (y == qtop) exact += 1;
+        const std::uint32_t y = raceDraw(pt, seed, 5);  // target (emitted)
+        const std::uint32_t d = raceDraw(q, seed, 5);   // device draft
+        cnt[y] += 1;
+        acc += d == y;
+        exact += y == qtop;
     }
-    double chi_s = 0, chi_p = 0;
+    double chi = 0;
     for (std::size_t t = 0; t < tl.size(); ++t) {
         const double e = pt.of(static_cast<std::uint32_t>(t)) * trials;
         if (e <= 0) {
-            CHECK(cnt_s[t] == 0);  // nothing outside the target's support
+            CHECK(cnt[t] == 0);  // nothing outside the target's support
             continue;
         }
-        chi_s += (cnt_s[t] - e) * (cnt_s[t] - e) / e;
-        chi_p += (cnt_p[t] - e) * (cnt_p[t] - e) / e;
+        chi += (cnt[t] - e) * (cnt[t] - e) / e;
     }
     const double df = std::max(1.0, static_cast<double>(pt.n) - 1.0);
     const double crit = chi2Crit(df, 3.719);  // upper tail ~1e-4
-    std::printf("  specsample %-22s support p %2u q %2u  chi2 spec %7.2f plain %7.2f (crit %.1f, df %.0f)  accept spec %.3f, exact-match %.3f\n",
-                name, pt.n, q.n, chi_s, chi_p, crit, df, acc / trials, exact / trials);
-    CHECK(chi_s < crit);
-    CHECK(chi_p < crit);
-    // acceptance rate = sum min(p, q) (within 4 sigma)
     double ov = 0;
     for (std::uint32_t i = 0; i < q.n; ++i) ov += std::min(static_cast<double>(pt.of(q.id[i])), static_cast<double>(q.p[i]));
-    CHECK(std::fabs(acc / trials - ov) < 4.0 * std::sqrt(ov * (1 - ov) / trials) + 1e-3);
+    std::printf("  specsample %-22s support p %2u q %2u  chi2 %7.2f (crit %.1f, df %.0f)  accept race %.3f, sum min(p,q) %.3f, greedy draft %.3f\n",
+                name, pt.n, q.n, chi, crit, df, acc / trials, ov, exact / trials);
+    CHECK(chi < crit);
+    CHECK(acc / trials <= ov + 4.0 * std::sqrt(ov * (1 - ov) / trials) + 1e-3);  // no coupling beats sum min(p, q)
+    CHECK(acc / trials >= 0.85 * ov);                                              // close to it
+    CHECK(acc >= exact);                                                           // better than the greedy draft
+}
+
+// open target (Engine::sampleRace): the first `nc` tokens are the candidates, the rest a tail; u < S
+// races over the candidates, else the inverse-CDF walk over the tail
+void runOpen(const std::vector<float>& tl, float inv_t, std::size_t nc, int trials) {
+    std::vector<std::uint32_t> all(tl.size());
+    for (std::size_t i = 0; i < all.size(); ++i) all[i] = static_cast<std::uint32_t>(i);
+    const sp::QDist pt = filtered(tl, all, inv_t, 0, 1.f, 0.f);  // sorted, whole vocab
+    double S = 0;
+    for (std::size_t i = 0; i < nc; ++i) S += pt.p[i];
+    sp::QDist cand = pt;
+    cand.n = static_cast<std::uint32_t>(nc);
+    std::vector<double> cnt(tl.size(), 0);
+    for (int i = 0; i < trials; ++i) {
+        const std::uint64_t seed = 0xBEEFull + static_cast<std::uint64_t>(i) * 104729ull;
+        const double u = sp::uniform(seed, 9, sp::u_sample);
+        std::uint32_t y = pt.id[pt.n - 1];
+        if (u < S) {
+            y = raceDraw(cand, seed, 9);
+        } else {
+            double cum = S;
+            for (std::uint32_t j = static_cast<std::uint32_t>(nc); j < pt.n; ++j) {
+                cum += pt.p[j];
+                if (cum > u) {
+                    y = pt.id[j];
+                    break;
+                }
+            }
+        }
+        cnt[y] += 1;
+    }
+    double chi = 0;
+    for (std::uint32_t j = 0; j < pt.n; ++j) {
+        const double e = pt.p[j] * trials;
+        chi += (cnt[pt.id[j]] - e) * (cnt[pt.id[j]] - e) / e;
+    }
+    const double crit = chi2Crit(static_cast<double>(pt.n) - 1.0, 3.719);
+    std::printf("  specsample open target, %zu candidates (mass %.3f): chi2 %7.2f (crit %.1f)\n", nc, S, chi, crit);
+    CHECK(chi < crit);
+}
+
+// Toy LM for the reply test: target logits of the next token from a hash of the prefix; the draft
+// head = target + a perturbation keyed by `dstate` (stands for the draft head's cache / history
+// state, which differs between runs in the server).
+std::uint64_t mix(std::uint64_t z) {
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+    return z ^ (z >> 31);
+}
+std::vector<float> toyRow(const std::vector<std::uint32_t>& pre, std::uint32_t dstate, bool draft) {
+    std::uint64_t h = 0x51ED27ull;
+    for (std::uint32_t t : pre) h = mix(h ^ (t + 0x9E3779B97F4A7C15ull));
+    std::vector<float> lg(24);
+    for (std::uint32_t v = 0; v < 24; ++v) {
+        lg[v] = static_cast<float>(mix(h + v) >> 40) * (5.0f / 16777216.0f);  // [0, 5)
+        if (draft) lg[v] += static_cast<float>(mix(h * 31 + v * 7 + dstate * 1000003ull) >> 40) * (1.5f / 16777216.0f);
+    }
+    return lg;
+}
+
+// One reply of n tokens. nd_mode < 0: no drafts; otherwise speculative cycles whose draft count comes
+// from a generator keyed by nd_mode (0..4 drafts, like the timing-trained allocation), drafts raced
+// from the draft head (dstate) on the drafted prefix, accepted iff equal to the target's race draw.
+std::vector<std::uint32_t> toyReply(std::uint64_t seed, int nd_mode, std::uint32_t dstate, float inv_t, std::uint32_t top_k,
+                                    float top_p, float min_p, std::size_t n, double* acc_rate) {
+    std::vector<std::uint32_t> all(24), out;
+    for (std::uint32_t i = 0; i < 24; ++i) all[i] = i;
+    std::uint64_t cyc = 0;
+    double drafted = 0, accepted = 0;
+    while (out.size() < n) {
+        const std::uint32_t nd =
+            nd_mode < 0 ? 0 : static_cast<std::uint32_t>(mix(cyc++ * 977 + static_cast<std::uint64_t>(nd_mode)) % 5);
+        const std::uint64_t n_gen = out.size();
+        std::vector<std::uint32_t> dr, pre = out;
+        for (std::uint32_t r = 0; r < nd; ++r) {
+            const sp::QDist q = filtered(toyRow(pre, dstate, true), all, inv_t, top_k, top_p, min_p);
+            dr.push_back(raceDraw(q, seed, n_gen + r));
+            pre.push_back(dr.back());
+        }
+        drafted += nd;
+        for (std::uint32_t acc = 0;; ++acc) {
+            const sp::QDist pt = filtered(toyRow(out, 0, false), all, inv_t, top_k, top_p, min_p);
+            const std::uint32_t t = raceDraw(pt, seed, n_gen + acc);
+            out.push_back(t);
+            if (acc < nd && t == dr[acc]) {
+                accepted += 1;
+                continue;
+            }
+            break;
+        }
+    }
+    out.resize(n);
+    if (acc_rate) *acc_rate = drafted > 0 ? accepted / drafted : 0;
+    return out;
+}
+
+void testReplies() {
+    struct F {
+        float inv_t;
+        std::uint32_t top_k;
+        float top_p, min_p;
+    };
+    const F fs[] = {{1.f / 0.7f, 0, 1.f, 0.f}, {1.f / 0.7f, 20, 0.95f, 0.f}, {1.f, 0, 0.8f, 0.05f}};
+    int same = 0, total = 0, seed_diff = 0;
+    double acc_sum = 0;
+    for (const F& f : fs)
+        for (std::uint64_t seed : {1234ull, 42ull, 987654321ull}) {
+            const std::vector<std::uint32_t> plain = toyReply(seed, -1, 0, f.inv_t, f.top_k, f.top_p, f.min_p, 96, nullptr);
+            for (int nd_mode = 0; nd_mode < 3; ++nd_mode)
+                for (std::uint32_t dstate = 1; dstate <= 3; ++dstate) {
+                    double ar = 0;
+                    const std::vector<std::uint32_t> o = toyReply(seed, nd_mode, dstate, f.inv_t, f.top_k, f.top_p, f.min_p, 96, &ar);
+                    same += o == plain;
+                    ++total;
+                    acc_sum += ar;
+                }
+            seed_diff += toyReply(seed + 1, -1, 0, f.inv_t, f.top_k, f.top_p, f.min_p, 96, nullptr) != plain;
+        }
+    std::printf("  specsample replies: %d / %d (3 draft-count patterns x 3 draft states x 3 seeds x 3 filters) == plain, mean acceptance %.3f\n",
+                same, total, acc_sum / total);
+    CHECK(same == total);
+    CHECK(seed_diff == 9);         // the seed does matter
+    CHECK(acc_sum / total > 0.3);  // drafts are accepted
 }
 
 void testSpecSample() {
@@ -1029,7 +1136,7 @@ void testSpecSample() {
         z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
         z ^= z >> 31;
         CHECK(sp::uniform(seed, pos, sp::u_sample) == static_cast<double>(z >> 11) * (1.0 / 9007199254740992.0));
-        CHECK(sp::uniform(seed, pos, sp::u_accept) != sp::uniform(seed, pos, sp::u_sample));
+        CHECK(sp::uniform(seed, pos, 1) != sp::uniform(seed, pos, sp::u_sample));
     }
     // q filter: sorted (logit desc, id asc), top-k closes, min-p cuts, renormalized; buffer decoding
     {
@@ -1057,20 +1164,6 @@ void testSpecSample() {
         const sp::QDist r = sp::qFromWords(w);
         CHECK(r.n == b.n && r.id[1] == b.id[1] && r.p[1] == b.p[1]);
     }
-    // residual: never a token with q >= p; no residual mass -> the most likely target token
-    {
-        sp::QDist q;
-        q.n = 2;
-        q.id[0] = 0;
-        q.p[0] = 0.7f;
-        q.id[1] = 1;
-        q.p[1] = 0.3f;
-        const std::vector<std::uint32_t> ids = {0, 1, 2};
-        const std::vector<double> p = {0.5, 0.3, 0.2};
-        for (int i = 0; i < 100; ++i) CHECK(sp::sampleResidual(ids, p, q, i / 100.0) == 2);
-        const std::vector<double> p2 = {0.7, 0.3, 0.0};
-        CHECK(sp::sampleResidual(ids, p2, q, 0.5) == 0);
-    }
     // distribution equality on toy rows: V = 24, draft head = perturbed target, draft vocabulary
     // subset = even tokens plus 1 and 3 (q = 0 on the other odd tokens)
     std::vector<float> tl(24), dl, dlfull(24);
@@ -1093,6 +1186,9 @@ void testSpecSample() {
     runCase("t1.0 min-p0.1", tl, dl, sub, 1.f, 0, 1.f, 0.1f, N);
     runCase("t1.5 open, full vocab", tl, dlfull, allv, 1.f / 1.5f, 0, 1.f, 0.f, N);
     runCase("t1.5 open, subset", tl, dl, sub, 1.f / 1.5f, 0, 1.f, 0.f, N);
+    runOpen(tl, 1.f, 6, N);
+    runOpen(tl, 1.f / 1.5f, 3, N);
+    testReplies();
 }
 }  // namespace specsample_test
 

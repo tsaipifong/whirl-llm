@@ -222,9 +222,8 @@ void Engine::allocState() {
     cands_scratch_.resize(std::max<std::size_t>(V, k_big));
     ctl_host_.assign(static_cast<std::size_t>(opt_.parallel) * qwen35::ctl_words, 0);
     spec_on_ = opt_.spec_sample && opt_.use_mtp && m_.draftSampleOk();
-    if (spec_on_) q_host_.assign(static_cast<std::size_t>(opt_.parallel) * qwen35::max_drafts * spec::q_words, 0);
     if (opt_.spec_sample && opt_.use_mtp)
-        logI("sampling: speculative sampling of MTP drafts (specsample) {}", spec_on_ ? "on for temperature > 0" : "unavailable (no draft_sample_rows kernel): exact-match acceptance");
+        logI("sampling: speculative sampling of MTP drafts (specsample) {}", spec_on_ ? "on for temperature > 0 (race-coupled drafts; the text for a seed does not depend on drafts)" : "unavailable (no draft_sample_rows kernel): exact-match acceptance");
 }
 
 void Engine::initPool() {
@@ -1068,17 +1067,36 @@ void Engine::loadFullRow(std::uint32_t gr) {
     ops_.download(row_host_.data(), logitsRow(gr), static_cast<std::uint64_t>(V) * 4);
 }
 
-double Engine::probOf(Sampler& s, std::uint32_t t) {
+// specsample target draw (whirl/spec_sample.h): race over the candidates; an open distribution
+// first takes the tail with probability 1 - S (S = candidate mass) and walks it by inverse CDF.
+std::uint32_t Engine::sampleRace(Sampler& s) {
     const std::vector<Cand>& c = *s.cands;
-    for (std::size_t i = 0; i < s.n; ++i)
-        if (c[i].id == t) return c[i].p;
-    if (s.closed) return 0;
-    float l = 0;
-    ops_.download(&l, logitsRow(s.row) + static_cast<std::uint64_t>(t) * 4, 4);
-    return std::exp(static_cast<double>(l - s.m) * s.inv_t) / static_cast<double>(s.sum);
+    if (!s.closed) {
+        double S = 0;
+        for (std::size_t i = 0; i < s.n; ++i) S += c[i].p;
+        if (!(s.uniform() < S)) {
+            s.race = false;  // the inverse-CDF walk with the same u falls past the candidates
+            const std::uint32_t t = sampleRow(s, std::nullopt, 0);
+            s.race = true;
+            return t;
+        }
+    }
+    const std::uint64_t base = spec::raceBase(s.seed, s.pos_idx);
+    std::uint32_t best = c[0].id;
+    double bk = std::numeric_limits<double>::infinity();
+    for (std::size_t i = 0; i < s.n; ++i) {
+        if (!(c[i].p > 0)) continue;
+        const double k = spec::raceE(base, c[i].id) / c[i].p;
+        if (k < bk) {
+            bk = k;
+            best = c[i].id;
+        }
+    }
+    return best;
 }
 
 std::uint32_t Engine::sampleRow(Sampler& s, std::optional<std::uint32_t> ex, double p_ex) {
+    if (s.race && !ex) return sampleRace(s);
     const double u = s.uniform();
     const double target = u * (1.0 - p_ex);
     double cum = 0;
@@ -1105,48 +1123,6 @@ std::uint32_t Engine::sampleRow(Sampler& s, std::optional<std::uint32_t> ex, dou
         if (cum > target) return j;
     }
     return last ? *last : c[0].id;
-}
-
-// Residual draw of speculative sampling: r(x) proportional to max(0, p(x) - q(x)) over the
-// row prepared in s (whirl/spec_sample.h).
-std::uint32_t Engine::sampleResidual(Sampler& s, const spec::QDist& q, double u) {
-    const std::vector<Cand>& c = *s.cands;
-    if (s.closed) {
-        res_ids_.resize(s.n);
-        res_p_.resize(s.n);
-        for (std::size_t i = 0; i < s.n; ++i) {
-            res_ids_[i] = c[i].id;
-            res_p_[i] = c[i].p;
-        }
-        return spec::sampleResidual(res_ids_, res_p_, q, u);
-    }
-    // open target (no top-k / top-p / min-p cut inside the candidates): residual mass from q's support
-    double ov = 0;
-    for (std::uint32_t i = 0; i < q.n; ++i) ov += std::min(probOf(s, q.id[i]), static_cast<double>(q.p[i]));
-    const double z = 1.0 - ov;
-    if (!(z > 1e-12)) return c[0].id;
-    const double target = u * z;
-    double cum = 0;
-    for (std::size_t i = 0; i < s.n; ++i) {
-        cum += std::max(0.0, c[i].p - static_cast<double>(q.of(c[i].id)));
-        if (cum > target) return c[i].id;
-    }
-    s.full_used += 1;
-    loadFullRow(s.row);
-    const std::uint32_t V = m_.cfg().n_vocab;
-    std::fill(in_cands_.begin(), in_cands_.begin() + V, std::uint8_t{0});
-    for (std::size_t i = 0; i < s.n; ++i) in_cands_[c[i].id] = 1;
-    std::uint32_t last = c[0].id;
-    for (std::uint32_t j = 0; j < V; ++j) {
-        if (in_cands_[j]) continue;
-        const double p = std::exp(static_cast<double>(row_host_[j] - s.m) * s.inv_t) / static_cast<double>(s.sum);
-        const double w = std::max(0.0, p - static_cast<double>(q.of(j)));
-        if (w <= 0) continue;
-        cum += w;
-        last = j;
-        if (cum > target) return j;
-    }
-    return last;
 }
 
 // ---------------------------------------------------------------------------
@@ -1205,6 +1181,7 @@ bool Engine::startJob(Slot& sl, Job& job) {
     sl.sm.top_p = p.top_p;
     sl.sm.min_p = p.min_p;
     sl.sm.seed = seed;
+    sl.sm.race = opt_.spec_sample;
     sl.sm.cands = &cands_scratch_;
     if (sl.greedy) {
         logI("req {} | slot {} | sampling: greedy (temperature 0), max_tokens {}{}, stop strings {}{}", job.id, sl.id,
@@ -1868,15 +1845,13 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
             snap += nd_of[k];
         }
     }
-    bool any_spec = false;
     if (spec_on_ && nd_max > 0) {
-        // speculative sampling: MTP slots of sampling requests draw their drafts from q
+        // specsample: MTP slots of sampling requests draw their drafts from q by the target's race
         for (std::size_t k = 0; k < A; ++k) {
             const Slot& sl = *act[k];
             spec::DraftSample ds;
             ds.on = !sl.greedy && ng_n[k] == 0;
             if (ds.on) {
-                any_spec = true;
                 ds.top_k = sl.sm.top_k;
                 ds.inv_t = sl.sm.inv_t;
                 ds.top_p = static_cast<float>(sl.sm.top_p);
@@ -1918,7 +1893,6 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
         p->enq_ms[pa] += std::chrono::duration<double, std::milli>(t_enq - tc0).count();
     }
     if (any_sampling) ops_.download(samp_host_.data(), samp_dev_, sampBytes());
-    if (any_spec) m_.readDraftQ(q_host_);
     const float cycle_ms = static_cast<float>(msSince(tc0));
     if (opt_.slot_drafts == 2 && opt_.use_mtp) {
         // every cycle (uniform, per-slot, with n-gram slots) trains the cost model of A slots;
@@ -1993,36 +1967,17 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
             while (acc < nd_dev && static_cast<std::uint32_t>(ctl[qwen35::ctl_rows + acc]) == dr[acc]) ++acc;
             chosen = static_cast<std::uint32_t>(ctl[qwen35::ctl_rows + acc]);
         } else {
-            // spq: speculative sampling (specsample) - draft r drawn from q on the device, accepted
-            // with min(1, p / q), else the residual max(0, p - q). Otherwise (precise, n-gram
-            // drafts) a deterministic draft is accepted iff it is the sampled token.
-            const bool spq = any_spec && !is_ng && nd_dev > 0;
+            // The target token at every output index is the sampler's draw keyed by (seed, output
+            // index); a draft is accepted iff it is that token. With specsample the sampler is the race
+            // and MTP draft r was drawn on the device from the draft distribution q by the same race
+            // (whirl/spec_sample.h); otherwise inverse CDF and the draft argmax. Either way the reply
+            // is a function of (target logits, seed) only: drafts change speed, never text.
             sl.sm.row_base = row0;
             for (;;) {
                 prepareRow(sl.sm, acc);
                 sl.sm.pos_idx = sl.n_gen + acc;
-                if (spq && acc < nd_dev) {
-                    spec::QDist q = spec::qFromWords(q_host_.data() +
-                                                     (static_cast<std::size_t>(sl.id) * qwen35::max_drafts + acc) * spec::q_words);
-                    const std::uint32_t d = dr[acc];
-                    float qd = q.of(d);
-                    if (!(qd > 0.f)) {
-                        // not drawn by the kernel (cannot happen): a point mass keeps the rule exact
-                        q.n = 1;
-                        q.id[0] = d;
-                        q.p[0] = 1.f;
-                        qd = 1.f;
-                    }
-                    const double pd = probOf(sl.sm, d);
-                    if (spec::accept(pd, qd, spec::uniform(sl.sm.seed, sl.sm.pos_idx, spec::u_accept))) {
-                        ++acc;
-                        continue;
-                    }
-                    chosen = sampleResidual(sl.sm, q, spec::uniform(sl.sm.seed, sl.sm.pos_idx, spec::u_residual));
-                    break;
-                }
                 const std::uint32_t t = sampleRow(sl.sm, std::nullopt, 0);
-                if (!spq && acc < nd_dev && t == dr[acc]) {
+                if (acc < nd_dev && t == dr[acc]) {
                     ++acc;
                     continue;
                 }

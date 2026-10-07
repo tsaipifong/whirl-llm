@@ -292,9 +292,10 @@ struct DSampArgs {
     float inv_t[kMaxVerifyRows] = {};
     float top_p[kMaxVerifyRows] = {};
     float min_p[kMaxVerifyRows] = {};
-    float u[kMaxVerifyRows] = {};
+    std::uint32_t key_lo[kMaxVerifyRows] = {};  // whirl::spec::raceBase(seed, output index of draft r)
+    std::uint32_t key_hi[kMaxVerifyRows] = {};
 };
-static_assert(sizeof(DSampArgs) == 896);
+static_assert(sizeof(DSampArgs) == 1024);
 static_assert(sizeof(Tok16) == 64 && sizeof(RowTab) == 384 && sizeof(RowIdx) == 128 && sizeof(AwGroups) == 256);
 
 // Recurrent-state segment of the fused DeltaNet decode kernels: rows
