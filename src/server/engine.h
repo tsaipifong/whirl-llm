@@ -507,6 +507,7 @@ private:
     // most rows of one batched verify (ServerModel::verifyRows: 16, or 32 with the wide GEMV path)
     std::uint32_t vrows_ = max_small_batch;
     std::uint32_t prev_nd_ = 0;
+    std::uint32_t policy_cycles_ = 0;  // cycles since the draft-policy state was last reset
     // decode floor bookkeeping (main thread)
     DecodeFloor floor_;
     TimePoint floor_epoch_{};

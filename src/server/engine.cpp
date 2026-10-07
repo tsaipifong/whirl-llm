@@ -1352,7 +1352,9 @@ bool Engine::startJob(Slot& sl, Job& job) {
     sl.ng.reset();
     sl.ng.ng.norm = crlf_norm_;
     sl.ng_cycles = 0;
-    if (opt_.timing_reset && opt_.use_mtp) {
+    // relaxacc: a solo request starts from the same draft-policy state every time (the kept
+    // tokens depend on the drafts), so its output depends only on prompt, seed and settings
+    if ((opt_.timing_reset || opt_.relax.on) && opt_.use_mtp) {
         bool others = false;
         for (Slot& o : slots_) others = others || (&o != &sl && o.phase == Phase::decode);
         if (!others) {
@@ -1361,6 +1363,7 @@ bool Engine::startJob(Slot& sl, Job& job) {
             ccost_primed_.fill(false);
             dpool_ = qwen35::DraftAccept{};
             prev_nd_ = 0;
+            policy_cycles_ = 0;
         }
     }
     if (mt.reuse == N) finishPrefill(sl);
@@ -1688,7 +1691,8 @@ std::uint32_t Engine::pickDrafts(std::span<Slot* const> act) {
                 accs.push_back(&sl->dacc);
             }
         }
-        const std::uint32_t pick = qwen35::pickDrafts(accs, timing_[std::min(A, gdn_max_seg)], nd, n_cycles_, prev_nd_);
+        const std::uint32_t pick =
+            qwen35::pickDrafts(accs, timing_[std::min(A, gdn_max_seg)], nd, opt_.relax.on ? policy_cycles_ : n_cycles_, prev_nd_);
         prev_nd_ = pick;
         return pick;
     }
@@ -1938,7 +1942,17 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
     if (any_sampling) ops_.download(samp_host_.data(), samp_dev_, sampBytes());
     if (any_relax) ops_.download(relax_host_.data(), relax_dev_, relax_host_.size());
     if (any_spec) m_.readDraftQ(q_host_);
-    const float cycle_ms = static_cast<float>(msSince(tc0));
+    // relaxacc: the kept tokens depend on which drafts were proposed, so the draft-count policy
+    // must not see wall-clock times (run-to-run jitter would change the output). It sees a
+    // deterministic cycle cost instead: a base per slot, + ngram_slope per extra verify row (the
+    // per-device verify-row slope, 0.12 on the 8060S), + 3% per sequential MTP draft step.
+    const auto synthMs = [&](std::uint32_t steps) {
+        float rows = 0;
+        for (std::size_t k = 0; k < A; ++k) rows += static_cast<float>(nd_of[k] + 1);
+        const float a = static_cast<float>(A);
+        return 100.0f * (a + opt_.ngram_slope * (rows - a) + 0.03f * static_cast<float>(steps));
+    };
+    const float cycle_ms = opt_.relax.on ? synthMs(n_ng == A ? 0 : nd_max) : static_cast<float>(msSince(tc0));
     if (opt_.slot_drafts == 2 && opt_.use_mtp) {
         // every cycle (uniform, per-slot, with n-gram slots) trains the cost model of A slots;
         // a per-slot cycle reaches timing_ as the time the uniform split would have taken
@@ -1972,7 +1986,7 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
         // n-gram cycle times (every slot drafted from its history): per slot
         std::uint32_t ng_max_n = 0;
         for (std::size_t k = 0; k < A; ++k) ng_max_n = std::max(ng_max_n, ng_n[k]);
-        const float ms = static_cast<float>(msSince(tc0));
+        const float ms = opt_.relax.on ? cycle_ms : static_cast<float>(msSince(tc0));
         for (Slot* sl : act) sl->ng.timing.update(ng_max_n, ms);
     }
     if (p) {
@@ -1986,6 +2000,7 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
     }
     if (opt_.trace_nd) logI("trace | cycle {} | slots {} | nd {} | {:.2f} ms", n_cycles_, A, nd, msSince(tc0));
     n_cycles_ += 1;
+    policy_cycles_ += 1;
     stat_cycles_ += 1;
     stat_rows_ += rows;
     stat_slots_ += A;

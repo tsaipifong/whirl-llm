@@ -14,7 +14,11 @@
 //              default 0.3). A rejected position draws the token from the row as usual.
 //
 // The output is NOT the target model's greedy / sampled output (that is the point: fast mode);
-// it is deterministic for the same prompt, seed and settings. The bonus token after the last
+// it is deterministic for the same prompt, seed and settings: the kept tokens depend on which
+// drafts were proposed, so with relaxacc the draft-count policy sees a fixed synthetic cycle cost
+// instead of wall-clock times and a solo request starts from a reset policy state. Concurrent
+// requests share the verify batch's draft count, so their outputs can depend on each other.
+// The bonus token after the last
 // accepted draft is the target's own pick, so every emitted non-draft token is exact.
 // WHIRL_RELAX=0 turns the item off in fast mode; WHIRL_RELAX_K=1 is exact greedy acceptance.
 //

@@ -635,6 +635,10 @@ DecodeResult specDecode(q::Model& model, const Tok& tok, u32 first, u32 n_prompt
             nd = model.readCycle(std::span<u32>(outv.data(), nd_host + 1), std::span<u32>(dr.data(), nd_host)).nd;
         }
         const double c2 = nowMs();
+        // relaxacc: the draft-count policy sees a deterministic cycle cost, not wall-clock times
+        // (the kept tokens depend on the drafts; see the server engine)
+        const float cyc_ms = rx.on ? 100.0f * (1.0f + opt.ngram_slope * static_cast<float>(nd_host) + (ng_n > 0 ? 0.0f : 0.03f * static_cast<float>(nd_host)))
+                                   : static_cast<float>(c2 - c0);
         t_draft += c1 - c0;
         t_verify += c2 - c1;
         cycles += 1;
@@ -671,13 +675,13 @@ DecodeResult specDecode(q::Model& model, const Tok& tok, u32 first, u32 n_prompt
             ng_cycles += 1;
             ng_drafted += nd;
             ng_accepted += acc;
-            ngp.timing.update(nd_host, static_cast<float>(c2 - c0));
+            ngp.timing.update(nd_host, cyc_ms);
         } else {
             for (u32 kk = 0; kk < std::min(acc + 1, nd); ++kk) pos_tries[kk] += 1;
             for (u32 kk = 0; kk < acc; ++kk) pos_hits[kk] += 1;
             acc_ema = 0.7f * acc_ema + 0.3f * static_cast<float>(acc);
             acc_model.update(nd, acc);
-            timing.update(nd_host, static_cast<float>(c2 - c0));
+            timing.update(nd_host, cyc_ms);
         }
         // the verify ran nd_host + 1 rows: keep acc + 1 of them
         if (acc < nd_host) model.restoreSnapshot(acc + 1);

@@ -67,7 +67,7 @@ whirl-server --help | --version
 | `h16` | balance | FFN / DeltaNet 的 GEMM 輸出先存成 f16 再進逐元素運算 | MXFP4 模型 | 只有 f16 權重 |
 | `kvq8` | balance | f16 放不下時 KV auto 可以選 int8：q8v（K f16、V int8），再不行 q8h；20 GiB 以下的卡優先 q8v | dense 模型 | q8（dense 模型） |
 | `kvq4` | fast | 4-bit KV（int4，每 32 個值一個 f16 scale，q / k 先做 Hadamard 旋轉） | 略過（沒有 kernel） | dense 與 MoE |
-| `relaxacc` | fast | 寬鬆推測接受（MTP 與 n-gram draft）。greedy：draft 不是驗證列的 argmax 時，只要它在該列前 `WHIRL_RELAX_K` 名（預設 4）且 p(draft) >= `WHIRL_RELAX_ALPHA` × p(argmax)（預設 0.1）就保留；最後一個保留的 draft 之後那個 token 一定是目標模型自己的 argmax。temperature > 0：typical acceptance（Medusa）：在請求過濾後的分布上 p(draft) >= min(`WHIRL_RELAX_EPS` 0.09, `WHIRL_RELAX_DELTA` 0.3 × exp(−熵)) 就保留（此時不用 `specsample`）。**會改變 greedy 輸出**：fast 的 greedy 不等於 plain greedy，MTP ≠ plain；同樣的 prompt、seed、設定仍是確定的。`WHIRL_RELAX=0` 關閉；MoE 模型略過（每輪只有一個 MTP draft，量不到收益；`WHIRL_RELAX=1` 強制開） | dense MTP 模型 | dense MTP 模型 |
+| `relaxacc` | fast | 寬鬆推測接受（MTP 與 n-gram draft）。greedy：draft 不是驗證列的 argmax 時，只要它在該列前 `WHIRL_RELAX_K` 名（預設 4）且 p(draft) >= `WHIRL_RELAX_ALPHA` × p(argmax)（預設 0.1）就保留；最後一個保留的 draft 之後那個 token 一定是目標模型自己的 argmax。temperature > 0：typical acceptance（Medusa）：在請求過濾後的分布上 p(draft) >= min(`WHIRL_RELAX_EPS` 0.09, `WHIRL_RELAX_DELTA` 0.3 × exp(−熵)) 就保留（此時不用 `specsample`）。**會改變 greedy 輸出**：fast 的 greedy 不等於 plain greedy，MTP ≠ plain；同樣的 prompt、seed、設定仍是確定的（此時 draft 數量策略改用固定的合成週期成本，不看牆鐘時間；並發請求共用 draft 數量，可能互相影響輸出）。`WHIRL_RELAX=0` 關閉；MoE 模型略過（每輪只有一個 MTP draft，量不到收益；`WHIRL_RELAX=1` 強制開） | dense MTP 模型 | dense MTP 模型 |
 | `headq`、`moeskip`、`a8`、`a4` | fast | 低位元輸出頭、略過 MoE 專家、W4A8 / W4A4 prefill | 尚未實作 | 尚未實作 |
 | `q8dec` | balance、fast | decode / verify GEMV 的 activation 用 int8（每 32 個值一個 f32 scale，同 llama.cpp 的 q8_1；balance 與 fast 一律包含） | 開 | 開 |
 
