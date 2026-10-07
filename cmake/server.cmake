@@ -27,6 +27,20 @@ endif()
 include(${CMAKE_CURRENT_LIST_DIR}/tier.cmake OPTIONAL)
 
 # ---------------------------------------------------------------------------
+# prefix cache (src/cache): lookup / insertion / eviction decisions and the tier
+# fingerprint, host-only; engine -> PrefixCache -> cache::Tier (adapter over tier::Tier)
+add_library(whirl_cache STATIC
+  ${CMAKE_SOURCE_DIR}/src/cache/prefix_cache.cpp
+  ${CMAKE_SOURCE_DIR}/src/cache/tier_adapter.cpp
+  ${CMAKE_SOURCE_DIR}/src/cache/fingerprint.cpp)
+target_include_directories(whirl_cache PUBLIC ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(whirl_cache PUBLIC whirl whirl_tier_core)
+
+add_executable(whirl-cache-tests ${CMAKE_SOURCE_DIR}/tests/cache/cache_tests.cpp)
+target_include_directories(whirl-cache-tests PRIVATE ${CMAKE_SOURCE_DIR}/tests/cache)
+target_link_libraries(whirl-cache-tests PRIVATE whirl_cache)
+
+# ---------------------------------------------------------------------------
 # OpenAI-compatible server (src/server)
 
 # engine + HTTP front end; HIP-free (the GPU comes in through the ServerModel /
@@ -41,7 +55,7 @@ add_library(whirl_server_core STATIC
 target_include_directories(whirl_server_core PUBLIC ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/include)
 # whirl/version.h (configured by cmake/release.cmake) for GET /version and /props
 target_include_directories(whirl_server_core PRIVATE ${CMAKE_BINARY_DIR}/generated)
-target_link_libraries(whirl_server_core PUBLIC whirl whirl_tier_core ws2_32)
+target_link_libraries(whirl_server_core PUBLIC whirl whirl_cache whirl_tier_core ws2_32)
 
 if(WHIRL_WITH_HIP)
   # whirl-server.exe: the production server (qwen35::Model on HIP)

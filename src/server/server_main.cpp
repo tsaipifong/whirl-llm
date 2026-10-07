@@ -8,6 +8,7 @@
 #include "server_main.h"
 
 #include "backend.h"
+#include "cache/fingerprint.h"
 #include "engine.h"
 #include "http.h"
 #include "log.h"
@@ -284,46 +285,20 @@ double gib(std::size_t a, std::size_t b) { return static_cast<double>(a > b ? a 
 // Identity of everything that decides the bits of a tier entry.
 std::uint64_t tierFingerprint(const qwen35::Model& m, const std::string& path, const qwen35::LoadStats& stats, bool use_mtp,
                               std::uint64_t n_gdn, const tier::Layout& lay) {
-    std::uint64_t h = 0xcbf29ce484222325ull;
-    h = tier::hashStr(h, "whirl-kv-tier-1");
-    const std::string base = narrow(std::filesystem::path(widen(path)).filename().wstring());
-    h = tier::hashStr(h, std::format("exe {:x} model {} {} {} kv {} mtp {} gdn {} ck {} pg {} batch {}", tier::exeIdentity(),
-                                     base, stats.tensors, stats.bytes, m.kvName(), use_mtp, n_gdn, lay.ck_bytes,
-                                     lay.page_bytes, m.max_batch));
-    // the numerics mode and its items (a --balance run's KV / DeltaNet state must never be
-    // restored by a --precise process: same exe, model and KV type, other prompt numerics)
-    h = tier::hashStr(h, "numerics " + whirl::numerics::logLine(m.num_plan));
-#ifdef _WIN32
-    std::vector<std::pair<std::string, std::string>> kv;
-    if (wchar_t* blk = GetEnvironmentStringsW()) {
-        for (const wchar_t* p = blk; *p; p += wcslen(p) + 1) {
-            const std::string s = narrow(p);
-            const std::size_t eq = s.find('=', 1);
-            if (eq == std::string::npos) continue;
-            std::string k = s.substr(0, eq);
-            std::string up = k;
-            for (char& c : up) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
-            if (up.rfind("WHIRL_", 0) != 0) continue;
-            static const char* skip[] = {"WHIRL_KV_RAM_MB", "WHIRL_KV_SSD_DIR", "WHIRL_KV_SSD_GB", "WHIRL_KV_SSD_DELAY_MS",
-                                         "WHIRL_KV_TIER_MIN", "WHIRL_R9700_LOCK_HELD", "WHIRL_GPU_WAIT", "WHIRL_GPU_SHARE",
-                                         "WHIRL_PROFILE", "WHIRL_TRACE_ND", "WHIRL_GATHER_MS", "WHIRL_EXE", "WHIRL_LOOP_LOG",
-                                         "WHIRL_TIER_VERIFY", "WHIRL_TIER_MIN_GAIN", "WHIRL_DECODE_MIN_TPS",
-                                         "WHIRL_TIMER_PROBE"};
-            bool sk = false;
-            for (const char* x : skip) sk = sk || up == x;
-            if (!sk) kv.emplace_back(k, s.substr(eq + 1));
-        }
-        FreeEnvironmentStringsW(blk);
-    }
-    std::sort(kv.begin(), kv.end());
-    for (const auto& [k, v] : kv) {
-        h = tier::hashStr(h, k);
-        h = tier::hashStr(h, "=");
-        h = tier::hashStr(h, v);
-        h = tier::hashStr(h, ";");
-    }
-#endif
-    return h;
+    cache::FingerprintInputs in;
+    in.exe_id = tier::exeIdentity();
+    in.model_base = narrow(std::filesystem::path(widen(path)).filename().wstring());
+    in.tensors = stats.tensors;
+    in.bytes = stats.bytes;
+    in.kv_name = m.kvName();
+    in.use_mtp = use_mtp;
+    in.n_gdn = n_gdn;
+    in.ck_bytes = lay.ck_bytes;
+    in.page_bytes = lay.page_bytes;
+    in.max_batch = m.max_batch;
+    in.numerics = whirl::numerics::logLine(m.num_plan);
+    in.env = cache::fingerprintEnv();
+    return cache::tierFingerprint(in);
 }
 
 }  // namespace

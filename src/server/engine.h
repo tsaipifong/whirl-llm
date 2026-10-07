@@ -8,6 +8,7 @@
 #pragma once
 
 #include "backend.h"
+#include "cache/prefix_cache.h"
 #include "decode_floor.h"
 #include "protocol.h"
 #include "tier/device_ops.h"
@@ -83,15 +84,11 @@ struct Job {
     bool done = false;  // guarded by Engine::q_mutex
 };
 
-struct Ckpt {
-    bool valid = false;
-    std::uint32_t pos = 0;
-    std::uint64_t seq = 0;
-    const char* kind = "";
+// index fields (valid, pos, seq, kind, has_logits): cache::CkptKey
+struct Ckpt : cache::CkptKey {
     std::vector<DevPtr> conv, ssm;
     DevPtr hid = 0;
     DevPtr logits = 0;
-    bool has_logits = true;
     void* host = nullptr;  // pinned host buffer (WHIRL_CKPT_HOST)
     DevPtr dev = 0;        // the one VRAM allocation that conv / ssm / hid / logits are slices of
 };
@@ -169,15 +166,14 @@ private:
     void send(const std::string& b);
 };
 
-struct Slot {
+// cache_tokens, last_used: cache::SlotCache
+struct Slot : cache::SlotCache {
     std::uint32_t id = 0;
     Phase phase = Phase::idle;
     Job* job = nullptr;
-    std::vector<std::uint32_t> cache_tokens;
     std::vector<std::int32_t> pages;
     std::vector<Ckpt> ckpts;
     std::uint64_t ckpt_seq = 0;
-    std::uint64_t last_used = 0;
     Sampler sm;
     bool greedy = true;
     bool ignore_eos = false;
@@ -242,16 +238,10 @@ struct Slot {
 };
 
 // Shared prefix checkpoint (item S).
-struct Spe {
-    bool valid = false;
-    std::uint32_t n = 0;
-    const char* kind = "";
-    std::vector<std::uint32_t> tokens;
+// index fields (valid, n, kind, tokens, last_used, pin, uses): cache::SpeKey
+struct Spe : cache::SpeKey {
     std::vector<std::int32_t> pages;
     Ckpt ck;
-    std::uint64_t last_used = 0;
-    bool pin = false;
-    std::uint64_t uses = 0;
     std::uint64_t tier_id = 0;
     tier::Event spill_ev = nullptr;
     bool spill_busy = false;
@@ -529,7 +519,9 @@ private:
     bool spec_on_ = false;
     std::uint64_t conv_bytes_ = 0, ssm_bytes_ = 0;
     std::vector<Slot> slots_;
-    std::uint64_t use_seq_ = 0;
+    // prefix cache decisions (lookup / insertion / eviction); tier_view_: tier_ seen through cache::Tier
+    std::unique_ptr<cache::PrefixCache> pc_;
+    std::unique_ptr<cache::Tier> tier_view_;
     // queue
     std::mutex q_mutex_;
     std::condition_variable q_cond_;
