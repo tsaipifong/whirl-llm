@@ -50,8 +50,8 @@ All notable changes to WHIRL are listed here. Versions follow `project(whirl VER
   depended on what an earlier process had cached.
 - fast `kvq4` on the Radeon 8060S: new q4 decode / verify attention kernel `attn_dq4` (int8 q x 4-bit K
   integer dot, one scale multiply per 32 values, waves on independent key tiles, packed f16 P.V; ~180
-  GB/s vs ~55 GB/s); Ornith-1.5-35B-A3B MXFP4 decode with q4 KV at 128k 36.5 -> 56.3 tok/s, at 64k
-  48.0 -> 64.3 tok/s (f16 KV: 32.7 / 46.4); KL vs f16 KV 0.0013 at 128k. `WHIRL_ATTN_DQ4=0` restores
+  GB/s vs ~55 GB/s); Ornith-1.5-35B-A3B MXFP4 decode with q4 KV at 128k 36.5 -> 58.5 tok/s, at 64k
+  48.0 -> 67.0 tok/s (f16 KV: 32.7 / 46.4); KL vs f16 KV 0.002 at 128k. `WHIRL_ATTN_DQ4=0` restores
   the previous kernel. precise / balance unchanged.
 
 ## 0.1.4 — 2026-10-06
