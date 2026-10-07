@@ -42,8 +42,8 @@ public:
         std::vector<KvArr> out;
         const std::uint64_t elems = static_cast<std::uint64_t>(m_.cfg.n_head_kv) * m_.cfg.head_dim;
         const bool kq8 = m_.kv_q8 && !m_.kv_kf16;
-        const std::uint64_t rk = elems * (kq8 ? 1 : 2);
-        const std::uint64_t rv = elems * (m_.kv_q8 ? 1 : 2);
+        const std::uint64_t rk = m_.kv_q4 ? elems / 2 : elems * (kq8 ? 1 : 2);
+        const std::uint64_t rv = m_.kv_q4 ? elems / 2 : elems * (m_.kv_q8 ? 1 : 2);
         const std::uint64_t rs = elems / 32 * 2;
         for (std::uint32_t i = 0; i < m_.cfg.n_layer; ++i) {
             if (!m_.cfg.isAttn(i)) continue;

@@ -1,6 +1,6 @@
 // whirl-kernel-test: paged KV cache and attention.
-//   * kv_store / kv_store_q8 / kv_store_q8v exact (CPU emulation of the f16
-//     store and of the q8 quantizer), single-sequence and batched (kvbase);
+//   * kv_store / kv_store_q8 / kv_store_q8v / kv_store_q4 exact (CPU emulation of the f16
+//     store and of the q8 / q4 quantizers), single-sequence and batched (kvbase);
 //   * attn_decode, attn_split + attn_combine, attn_wsplit1 / attn_wsplit2 + attn_combine,
 //     attn_prefill_wmma vs a double-precision CPU softmax attention over the
 //     cache contents (tolerance; f16 WMMA paths looser); attn_prefill_wmma also over a
@@ -27,10 +27,44 @@ constexpr int kRow = kKv * kHd;
 constexpr int kPages = 8, kMaxCtx = 4096;
 const float kScale = 1.0f / 16.0f;  // 1 / sqrt(256)
 
-enum class Fmt { f16, q8, q8v };
-const char* fmtSuffix(Fmt f) { return f == Fmt::f16 ? "" : (f == Fmt::q8 ? "_q8" : "_q8v"); }
-bool kQ8(Fmt f) { return f == Fmt::q8; }
-bool vQ8(Fmt f) { return f != Fmt::f16; }
+enum class Fmt { f16, q8, q8v, q4 };
+const char* fmtSuffix(Fmt f) { return f == Fmt::f16 ? "" : f == Fmt::q8 ? "_q8" : f == Fmt::q8v ? "_q8v" : "_q4"; }
+const char* fmtName(Fmt f) { return f == Fmt::f16 ? "f16" : f == Fmt::q8 ? "q8" : f == Fmt::q8v ? "q8v" : "q4"; }
+bool kQ8(Fmt f) { return f == Fmt::q8 || f == Fmt::q4; }  // K quantized (int8 or int4)
+bool vQ8(Fmt f) { return f != Fmt::f16; }                  // V quantized
+bool fmtOk(const Ctx& c, Fmt f) { return f == Fmt::q8v ? c.k.caps.kv_q8v : f == Fmt::q4 ? c.k.caps.kv_q4 : true; }
+// bytes of n elements: f16 2, int8 1, int4 1/2
+std::size_t kvBytes(Fmt f, bool v, std::size_t n) { return f == Fmt::q4 ? n / 2 : (v ? vQ8(f) : kQ8(f)) ? n : 2 * n; }
+
+// q4 store of one 32-value group as the kernels do it (int values -8..7 in q).
+void q4Group(const float* x, std::int8_t* q, std::uint16_t& s) {
+    float mx = -INFINITY, mn = INFINITY;
+    for (int i = 0; i < 32; ++i) {
+        mx = std::max(mx, x[i]);
+        mn = std::min(mn, x[i]);
+    }
+    const float m = mx >= -mn ? mx : mn;
+    s = d2h(static_cast<double>(m) * static_cast<double>(-1.f / 8.f));
+    const float sf = h2f(s);
+    for (int i = 0; i < 32; ++i) {
+        const int qv = sf != 0.f ? static_cast<int>(std::nearbyint(x[i] / sf)) : 0;
+        q[i] = static_cast<std::int8_t>(std::max(-8, std::min(7, qv)));
+    }
+}
+// int4 bytes (low nibble first, value + 8) <-> int values
+std::vector<std::int8_t> unpack4(const std::vector<std::uint8_t>& b) {
+    std::vector<std::int8_t> o(b.size() * 2);
+    for (std::size_t i = 0; i < b.size(); ++i) {
+        o[2 * i] = static_cast<std::int8_t>((b[i] & 15) - 8);
+        o[2 * i + 1] = static_cast<std::int8_t>((b[i] >> 4) - 8);
+    }
+    return o;
+}
+std::vector<std::uint8_t> pack4(const std::vector<std::int8_t>& q) {
+    std::vector<std::uint8_t> o(q.size() / 2);
+    for (std::size_t i = 0; i < o.size(); ++i) o[i] = static_cast<std::uint8_t>((q[2 * i] + 8) | ((q[2 * i + 1] + 8) << 4));
+    return o;
+}
 
 struct Pool {
     Fmt fmt;
@@ -38,8 +72,8 @@ struct Pool {
     std::vector<int> ptab_h;
     Pool(Ctx& c, Fmt f) : fmt(f) {
         const std::size_t rows = static_cast<std::size_t>(kPages) * wk::kKvPage;
-        k = Buf(rows * kRow * (kQ8(f) ? 1 : 2));
-        v = Buf(rows * kRow * (vQ8(f) ? 1 : 2));
+        k = Buf(kvBytes(f, false, rows * kRow));
+        v = Buf(kvBytes(f, true, rows * kRow));
         ks = Buf(rows * kRow / 32 * 2);
         vs = Buf(rows * kRow / 32 * 2);
         ptab_h.resize(kPages);
@@ -87,6 +121,13 @@ struct HostKv {
 HostKv download(const Pool& p) {
     const std::size_t rows = static_cast<std::size_t>(kPages) * wk::kKvPage, n = rows * kRow;
     HostKv h;
+    if (p.fmt == Fmt::q4) {
+        h.k8 = unpack4(p.k.down<std::uint8_t>(n / 2));
+        h.ks = p.ks.down<std::uint16_t>(n / 32);
+        h.v8 = unpack4(p.v.down<std::uint8_t>(n / 2));
+        h.vs = p.vs.down<std::uint16_t>(n / 32);
+        return h;
+    }
     if (kQ8(p.fmt)) {
         h.k8 = p.k.down<std::int8_t>(n);
         h.ks = p.ks.down<std::uint16_t>(n / 32);
@@ -168,11 +209,12 @@ int nSplit() { return std::min(wk::kFdMaxSplits, (kMaxCtx + wk::kFdChunk - 1) / 
 void testAttn(Ctx& c) {
     c.rep.family = "attn";
     const int L = c.quick ? 600 : 1100;  // cached positions (crosses page boundaries)
-    for (Fmt fmt : {Fmt::f16, Fmt::q8, Fmt::q8v}) {
+    for (Fmt fmt : {Fmt::f16, Fmt::q8, Fmt::q8v, Fmt::q4}) {
         const std::string fs = fmtSuffix(fmt);
-        const std::string tag = std::string(" [kv ") + (fmt == Fmt::f16 ? "f16" : (fmt == Fmt::q8 ? "q8" : "q8v")) + "]";
-        if (fmt == Fmt::q8v && !c.k.caps.kv_q8v) {  // gfx1151: no q8v kernels
-            c.rep.skip("attn", "kv q8v (kv_store / attn_decode / attn_split / attn_prefill_wmma)", "kernel not in this code object");
+        const std::string tag = std::string(" [kv ") + fmtName(fmt) + "]";
+        if (!fmtOk(c, fmt)) {  // gfx1201: no q4 kernels
+            c.rep.skip("attn", std::string("kv ") + fmtName(fmt) + " (kv_store / attn_decode / attn_split / attn_prefill_wmma)",
+                       "kernel not in this code object");
             continue;
         }
         Pool pool(c, fmt);
@@ -202,7 +244,10 @@ void testAttn(Ctx& c) {
                         const auto& h8 = which ? h.v8 : h.k8;
                         const auto& hs = which ? h.vs : h.ks;
                         if (q8) {
-                            q8Group(x, q, s);
+                            if (fmt == Fmt::q4)
+                                q4Group(x, q, s);
+                            else
+                                q8Group(x, q, s);
                             bad += hs[(base >> 5) + g] != s;
                             for (int i = 0; i < 32; ++i) bad += h8[base + 32 * g + i] != q[i];
                             n += 33;
@@ -519,6 +564,41 @@ void testAttn(Ctx& c) {
                 }
             }
         c.rep.add(cmpTolRel("attn_prep_q8h rotated q vs CPU (rmsnorm, RoPE, Walsh-Hadamard)", g2, ref, 1e-4, 1e-5));
+        // ---- attn_prep_q4: same rotated q / k as attn_prep_q8h (bitwise), K / V cache == q4 of them
+        if (auto f4 = c.fnOpt("attn_prep_q4")) {
+            Buf dq4(qf), dk4(kk), dv4(vv), dk8(kk);
+            Pool p4(c, Fmt::q4);
+            hip::launch(f4, {kHeads + kKv, static_cast<unsigned>(n), 1}, {256, 1, 1}, 0, c.s, dq4.p(), dk4.p(), dv4.p(), dqw.p(), dkw.p(),
+                        p4.args(), dpos.p(), kHeads, kKv, kHd, kRot, theta_scale, eps);
+            Buf dq8(qf), dv8(vv);
+            hip::launch(fh, {kHeads + kKv, static_cast<unsigned>(n), 1}, {256, 1, 1}, 0, c.s, dq8.p(), dk8.p(), dv8.p(), dqw.p(), dkw.p(),
+                        pool.args(), dpos.p(), kHeads, kKv, kHd, kRot, theta_scale, eps);
+            c.sync();
+            c.rep.add(cmpExact("attn_prep_q4 rotated q == attn_prep_q8h", dq4.down<float>(qf.size()), dq8.down<float>(qf.size()), Kind::invariant));
+            const auto kr = dk4.down<float>(kk.size());
+            c.rep.add(cmpExact("attn_prep_q4 rotated k == attn_prep_q8h", kr, dk8.down<float>(kk.size()), Kind::invariant));
+            const HostKv h4 = download(p4);
+            std::size_t bad = 0, cnt = 0;
+            for (int t = 0; t < n; ++t) {
+                const std::size_t base = static_cast<std::size_t>(p4.prow(pos[static_cast<std::size_t>(t)])) * kRow;
+                for (int g = 0; g < kRow / 32; ++g)
+                    for (int which = 0; which < 2; ++which) {
+                        const float* x = (which ? vv.data() : kr.data()) + static_cast<std::size_t>(t) * kRow + 32 * g;
+                        std::int8_t q[32];
+                        std::uint16_t s;
+                        q4Group(x, q, s);
+                        bad += (which ? h4.vs : h4.ks)[(base >> 5) + g] != s;
+                        for (int i = 0; i < 32; ++i) bad += (which ? h4.v8 : h4.k8)[base + 32 * g + i] != q[i];
+                        cnt += 33;
+                    }
+            }
+            Result r;
+            r.name = "attn_prep_q4 K / V cache == q4(rotated k), q4(v)";
+            r.n = cnt;
+            r.mismatches = bad;
+            r.pass = bad == 0;
+            c.rep.add(r);
+        }
     }
 
     // ---- attn_prep == rmsnorm + rope_neox + kv_store (same arithmetic)
@@ -704,17 +784,19 @@ void testAttn(Ctx& c) {
             c.rep.add(r);
         }
     }
-    // ---- attn_prefill_wmma, long KV: random cache contents (f16 / q8) behind a shuffled page
-    // table of a 9000-position context, KV heads 4 / 3 / 6, query counts that are and are not
-    // multiples of the 128-query block, at the end of the context (and from position 0):
-    // a few rows vs the CPU, and two head-range launches == one launch (bitwise)
-    for (Fmt fmt : {Fmt::f16, Fmt::q8}) {
+    // ---- attn_prefill_wmma, long KV: random cache contents (f16 / q8 / q8v / q4) behind a shuffled
+    // page table of a 17000-position context (9000 for q8v / q4 heads 3 / 6), KV heads 4 / 3 / 6,
+    // query counts that are and are not multiples of the 128-query block, at the end of the context
+    // (and from position 0): a few rows vs the CPU, and two head-range launches == one launch
+    // (bitwise); decode (n 1): attn_split and attn_wsplit1 + attn_combine vs the CPU too
+    for (Fmt fmt : {Fmt::f16, Fmt::q8, Fmt::q8v, Fmt::q4}) {
+        if (!fmtOk(c, fmt)) continue;
         const std::string fs = fmtSuffix(fmt);
-        const bool q8 = fmt == Fmt::q8;
-        const int Lk = c.quick ? 3000 : 9000;
+        const bool kq = kQ8(fmt), vq = vQ8(fmt), q4 = fmt == Fmt::q4;
+        for (const int nkv : {4, 3, 6}) {
+        const int Lk = c.quick ? 3000 : (nkv == 4 || fmt == Fmt::f16 || fmt == Fmt::q8) ? 17000 : 9000;
         const int pages = (Lk + wk::kKvPage - 1) / wk::kKvPage;
         const std::size_t prow = static_cast<std::size_t>(pages) * wk::kKvPage;
-        for (const int nkv : {4, 3, 6}) {
             const int grp = kHeads / nkv;
             const std::size_t rowel = static_cast<std::size_t>(nkv) * kHd, nel = prow * rowel;
             std::vector<int> pt(static_cast<std::size_t>(pages));
@@ -722,39 +804,41 @@ void testAttn(Ctx& c) {
             std::shuffle(pt.begin(), pt.end(), c.rng);
             std::vector<std::uint16_t> k16, v16, ks, vs;
             std::vector<std::int8_t> k8, v8;
-            if (q8) {
-                std::uniform_int_distribution<int> qd(-127, 127);
+            {
+                // int values (q8: +-127 with scales 0.002..0.01; q4: -8..7 with 16x the scale)
+                std::uniform_int_distribution<int> qd(q4 ? -8 : -127, q4 ? 7 : 127);
                 std::uniform_real_distribution<float> sd(0.002f, 0.01f);
-                k8.resize(nel);
-                v8.resize(nel);
-                for (auto& x : k8) x = static_cast<std::int8_t>(qd(c.rng));
-                for (auto& x : v8) x = static_cast<std::int8_t>(qd(c.rng));
-                ks.resize(nel / 32);
-                vs.resize(nel / 32);
-                for (auto& x : ks) x = f2h(sd(c.rng));
-                for (auto& x : vs) x = f2h(sd(c.rng) * 0.5f);
-            } else {
+                const float sm = q4 ? 16.f : 1.f;
                 const std::vector<float> kf = c.randn(nel, 0.7f), vf = c.randn(nel, 0.7f);
-                k16.resize(nel);
-                v16.resize(nel);
-                for (std::size_t i = 0; i < nel; ++i) {
-                    k16[i] = f2h(kf[i]);
-                    v16[i] = f2h(vf[i]);
+                for (int which = 0; which < 2; ++which) {
+                    auto& q8v = which ? v8 : k8;
+                    auto& h16 = which ? v16 : k16;
+                    auto& sc = which ? vs : ks;
+                    if (which ? vq : kq) {
+                        q8v.resize(nel);
+                        for (auto& x : q8v) x = static_cast<std::int8_t>(qd(c.rng));
+                        sc.resize(nel / 32);
+                        for (auto& x : sc) x = f2h(sd(c.rng) * sm * (which ? 0.5f : 1.f));
+                    } else {
+                        h16.resize(nel);
+                        for (std::size_t i = 0; i < nel; ++i) h16[i] = f2h((which ? vf : kf)[i]);
+                    }
                 }
             }
-            Buf dk = q8 ? Buf(k8) : Buf(k16), dv = q8 ? Buf(v8) : Buf(v16);
-            Buf dks = q8 ? Buf(ks) : Buf(16), dvs = q8 ? Buf(vs) : Buf(16), dpt(pt);
+            auto devq = [&](const std::vector<std::int8_t>& q) { return q4 ? Buf(pack4(q)) : Buf(q); };
+            Buf dk = kq ? devq(k8) : Buf(k16), dv = vq ? devq(v8) : Buf(v16);
+            Buf dks = kq ? Buf(ks) : Buf(16), dvs = vq ? Buf(vs) : Buf(16), dpt(pt);
             wk::KvArgs a{};
             a.k = dk.p();
             a.v = dv.p();
-            a.ks = q8 ? dks.p() : 0;
-            a.vs = q8 ? dvs.p() : 0;
+            a.ks = kq ? dks.p() : 0;
+            a.vs = vq ? dvs.p() : 0;
             a.ptab = dpt.p();
             a.kvbase = 0;
             a.tab0 = 0;
             auto prw = [&](int p) { return static_cast<std::size_t>(pt[static_cast<std::size_t>(p / wk::kKvPage)]) * wk::kKvPage + p % wk::kKvPage; };
             auto kval = [&](const std::vector<std::uint16_t>& f, const std::vector<std::int8_t>& qv, const std::vector<std::uint16_t>& s,
-                            std::size_t e) { return q8 ? static_cast<double>(h2f(d2h(static_cast<double>(qv[e]) * h2f(s[e >> 5])))) : h2f(f[e]); };
+                            std::size_t e) { return f.empty() ? static_cast<double>(h2f(d2h(static_cast<double>(qv[e]) * h2f(s[e >> 5])))) : h2f(f[e]); };
             struct Case {
                 int n, p0;
             };
@@ -817,6 +901,29 @@ void testAttn(Ctx& c) {
                     }
                 }
                 c.rep.add(cmpTol("attn_prefill_wmma" + fs + " vs CPU (" + std::to_string(rows.size()) + " queries)" + where, gp, ro, rsc, 1e-2, 1e-4));
+                if (n != 1) continue;
+                // decode at the end of the long context: attn_split / attn_wsplit1 + attn_combine vs the same CPU rows
+                const int ns = std::min<int>(wk::kFdMaxSplits, static_cast<int>(cdiv(Lk, wk::kFdChunk)));
+                Buf ml(static_cast<std::size_t>(ns) * kHeads * 2 * 4), acc(static_cast<std::size_t>(ns) * kHeads * kHd * 4), dps(std::vector<int>{p0});
+                for (int kind = 0; kind < 2; ++kind) {
+                    const auto f = c.fnOpt((kind == 0 ? "attn_split" : "attn_wsplit1") + fs);
+                    if (!f) continue;
+                    if (kind == 0) {
+                        hip::launch(f, {static_cast<unsigned>(nkv), static_cast<unsigned>(ns), 1}, {256, 1, 1}, 0, c.s, dq.p(), a, ml.p(), acc.p(), kHeads,
+                                    nkv, kHd, kQStride, dps.p(), kScale, 1, DevPtr{0});
+                    } else {
+                        wk::AwGroups g1;
+                        g1.first[0] = 0;
+                        g1.count[0] = 1;
+                        hip::launch(f, {static_cast<unsigned>(nkv), static_cast<unsigned>(ns), 1}, {128, 1, 1}, 0, c.s, dq.p(), a, ml.p(), acc.p(), kHeads,
+                                    nkv, kQStride, dps.p(), kScale, DevPtr{0}, g1);
+                    }
+                    Buf out(on * 4);
+                    hip::launch(c.k.attn_combine, {kHeads, 1, 1}, {256, 1, 1}, 0, c.s, ml.p(), acc.p(), dq.p(), out.p(), kHeads, kHd, kQStride, ns);
+                    c.sync();
+                    c.rep.add(cmpTol(std::string(kind == 0 ? "attn_split" : "attn_wsplit1") + fs + " + combine vs CPU" + where, out.down<float>(on), ro, rsc,
+                                     1e-2, 1e-4));
+                }
             }
         }
     }

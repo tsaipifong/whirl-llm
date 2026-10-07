@@ -211,6 +211,20 @@ Plan plan(const Request& r, const Target& t) {
                 else if (!t.k_spec_sample) why = "no draft sampling kernel";
                 else note = "temperature > 0: race sampler (other tokens for a seed than precise), text independent of drafts";
                 break;
+            case Item::kvq4:
+                if (!t.k_kv_q4) why = t.gfx1151 ? "no q4 KV kernels in this code object" : "no 4-bit KV kernels on this GPU (Radeon 8060S only)";
+                else if (t.kv_explicit) why = "WHIRL_KV picks the KV format";
+                else note = "q4: int4 + f16 scale / 32, Hadamard-rotated q/k";
+                break;
+            case Item::relaxacc:
+                if (t.moe) {
+                    // FAST-2 (8060S): MoE runs one MTP draft per cycle there; relaxed acceptance moved
+                    // Ornith 1.75 -> 1.85 tok/cycle with no decode gain (short +2%, 32k -12%, n=1)
+                    why = "MoE: one MTP draft per cycle, no measured gain (WHIRL_RELAX=1 forces it)";
+                    break;
+                }
+                note = "drafts accepted when close to the target (greedy: top-k + p ratio; sampling: typical acceptance)";
+                break;
             default:
                 why = "not yet implemented (balance behaviour)";
                 break;
@@ -266,7 +280,8 @@ std::string logLine(const Plan& p) {
         l += std::string(" - f16/f32 prefill activations, ") + (p.q8dec ? "" : "f16 decode / verify activations, ") + "f32 DeltaNet, f16 KV";
     else l += " - enabled: " + (en.empty() ? std::string("none") : en);
     if (p.mode != Mode::precise || !sk.empty()) l += "; skipped: " + (sk.empty() ? std::string("none") : sk);
-    if (p.mode == Mode::fast) l += "; fast items are not implemented yet: fast runs as balance";
+    if (p.mode == Mode::fast && !p.on(Item::kvq4) && !p.on(Item::relaxacc))
+        l += "; no fast item applies here: fast runs as balance";
     for (const std::string& o : p.overrides) l += "; " + o;
     l += std::string("; decode: ") + (p.q8dec ? k_q8dec : k_f16dec);
     return l;

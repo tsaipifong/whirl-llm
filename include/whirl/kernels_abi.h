@@ -177,7 +177,7 @@ inline constexpr int kWarp = 32;
 inline constexpr int kKvPage = 256;          // KV_PAGE: tokens per KV page
 inline constexpr int kHeadDim = 256;         // attention head dim of the WMMA kernels (AW_D / FA_D)
 inline constexpr int kFdChunk = 64;          // FD_CH: positions per attn_split block
-inline constexpr int kFdMaxSplits = 64;      // host cap on split count
+inline constexpr int kFdMaxSplits = 64;      // host cap on split count (Model::fd_splits: 256 with q4 KV)
 inline constexpr int kGdnMaxSeg = 16;        // GDN_MAX_SEG
 inline constexpr int kGdnMaxSnap = 15;       // GDN_MAX_SNAP
 inline constexpr int kMaxSmallBatch = 16;    // multi-token GEMV / small-batch kernels: 2..16 tokens
@@ -383,16 +383,17 @@ inline constexpr std::array<int, kNGemvw> kGemvwRows = {0, 16, 32, 16, 32, 16, 1
 // ---------------------------------------------------------------------------
 // Kernel table
 
-enum class KvFormat { f16, q8, q8h, q8v };
+enum class KvFormat { f16, q8, q8h, q8v, q4 };
 
 // What a loaded code object can do. The host picks its paths from these flags
 // (and from null KernelTable entries), never from the GPU architecture name.
 // gfx1201 has every flag but xd_sum / attn_group1; gfx1151 has no fp8 GEMM,
-// no q8v / q8h KV kernels and no vision kernels, and sets both markers.
+// no vision kernels and sets both markers; only gfx1151 has the q4 KV kernels.
 struct Caps {
     bool fp8_gemm = false;     // MXFP4 x fp8 prefill GEMM (gemm8_c0)
     bool kv_q8v = false;       // q8v KV kernels (attn_decode_q8v)
     bool kv_q8h = false;       // q8h attention prep (attn_prep_q8h, Hadamard-rotated q / k)
+    bool kv_q4 = false;        // q4 KV kernels (attn_prep_q4: 4-bit K / V, Hadamard-rotated q / k)
     bool gemvw = false;        // int8-WMMA mid-batch GEMV (gemvw_nt2v1_q4_k)
     bool gdn_replay = false;   // fused DeltaNet kernels with replay segments (GdnSeg::pend; ship with
                                // the gfx1201 set, whose int8-WMMA GEMV is the marker)
@@ -404,7 +405,9 @@ struct Caps {
                                // has it since gfx1151 implements the window)
     static Caps probe(const hip::Module& m);
     // Whether `kv` can be loaded (f16 / q8 always can).
-    bool supports(KvFormat kv) const { return kv == KvFormat::q8v ? kv_q8v : kv == KvFormat::q8h ? kv_q8h : true; }
+    bool supports(KvFormat kv) const {
+        return kv == KvFormat::q8v ? kv_q8v : kv == KvFormat::q8h ? kv_q8h : kv == KvFormat::q4 ? kv_q4 : true;
+    }
 };
 
 // Every production kernel, resolved by name from a loaded module. Entries

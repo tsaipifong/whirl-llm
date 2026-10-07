@@ -29,6 +29,7 @@
 #include "whirl/hip.h"
 #include "whirl/kernels_abi.h"
 #include "whirl/numerics.h"
+#include "whirl/relax_accept.h"
 #include "whirl/spec_sample.h"
 #include "whirl/vismap.h"
 
@@ -263,10 +264,11 @@ struct MatList {
 
 // KV formats: f16; q8 = int8 + f16 scale per 32 values (K and V); q8h = q8
 // with Hadamard-rotated q / k; q8v = K f16, V q8. auto: f16 when it fits
-// (dense models fall back to q8v, then q8h); MoE always f16.
-enum class KvMode { automatic, f16, q8, q8h, q8v };
+// (dense models fall back to q8v, then q8h); MoE always f16. q4 = 4-bit K and V
+// (+ f16 scale per 32 values) with Hadamard-rotated q / k (gfx1151; fast mode item kvq4).
+enum class KvMode { automatic, f16, q8, q8h, q8v, q4 };
 
-// WHIRL_KV=auto|f16|q8|q8h|q8v (nullopt when unset; throws std::invalid_argument
+// WHIRL_KV=auto|f16|q8|q8h|q8v|q4 (nullopt when unset; throws std::invalid_argument
 // for another value). Model::load applies it when LoadOptions::kv_mode is
 // automatic, like the prototype's process-wide KV setting.
 std::optional<KvMode> kvModeFromEnv();
@@ -305,7 +307,7 @@ LoadEstimate estimateLoad(const gguf::File& f, const Config& cfg, bool embd_on_h
 // Prefill / decode buffers of Model::load for prefill batch B.
 std::uint64_t bufferBytes(const Config& cfg, std::uint32_t B, std::uint64_t ffs, std::uint64_t max_elems);
 // KV bytes per token (Model::kvBytesPerTokenFmt) from the config alone.
-std::uint64_t kvBytesPerTokenCfg(const Config& cfg, bool has_mtp, bool q8, bool kf16);
+std::uint64_t kvBytesPerTokenCfg(const Config& cfg, bool has_mtp, bool q8, bool kf16, bool q4 = false);
 
 // Grouped same-input GEMV launches (WHIRL_GV_GROUP=0: off) and the largest
 // token count that takes the grouped multi-token twins (WHIRL_GV_NMAX).
@@ -316,8 +318,8 @@ extern std::uint32_t gv_nmax;
 // kernels (table from whirl/kernels_abi.h)
 
 using Kernels = kernels::KernelTable;
-// q8: q8 KV kernels; rot: Hadamard-rotated q/k (q8h); kf16: q8v.
-Kernels loadKernels(const hip::Module& m, bool q8, bool rot, bool kf16);
+// q8: q8 KV kernels; rot: Hadamard-rotated q/k (q8h); kf16: q8v; q4: q4 (implies q8 + rot).
+Kernels loadKernels(const hip::Module& m, bool q8, bool rot, bool kf16, bool q4 = false);
 // ---------------------------------------------------------------------------
 // profiling (WHIRL_PROFILE=1)
 
@@ -482,6 +484,7 @@ public:
     // (precise KV shrink) for the caller's log
     whirl::numerics::Request num_req;
     whirl::numerics::Plan num_plan;
+    whirl::relax::Params relax;  // numerics item relaxacc (fast): relaxed draft acceptance
     std::string load_note;
     bool kvQuantAuto() const { return num_req.has(whirl::numerics::Item::kvq8); }
     DevPtr w16 = 0;
@@ -506,6 +509,11 @@ public:
     bool kv_q8 = true;
     bool kv_rot = false;
     bool kv_kf16 = false;
+    bool kv_q4 = false;  // 4-bit K and V (kv_q8 and kv_rot are set too: scales and rotation as q8h)
+    // flash-decoding split cap (part_ml / part_acc are sized for it): 64; q4 KV 256 (long-context
+    // decode is latency bound at 64 splits, so the smaller K / V reads only pay off with more
+    // blocks in flight). WHIRL_FD_SPLITS=N (64..256, multiple of 64) overrides.
+    std::uint32_t fd_splits = 64;
     KvMode kv_mode = KvMode::automatic;
     std::uint32_t pool_pages = 0;
     std::uint32_t seq_pages = 0;
@@ -602,15 +610,15 @@ public:
     // ---- sizes
     std::uint64_t convBytes() const;
     std::uint64_t ssmBytes() const;
-    std::uint64_t kvBytesPerTokenFmt(bool q8, bool kf16) const;
-    std::uint64_t kvBytesPerToken() const { return kvBytesPerTokenFmt(kv_q8, kv_kf16); }
+    std::uint64_t kvBytesPerTokenFmt(bool q8, bool kf16, bool q4 = false) const;
+    std::uint64_t kvBytesPerToken() const { return kvBytesPerTokenFmt(kv_q8, kv_kf16, kv_q4); }
     std::uint32_t kvLayers() const;
     const char* kvName() const;
     bool kvAutoDense() const;
     std::uint64_t pendLayerBytes() const;
 
     // ---- KV pool and sequences
-    void setKvFormat(bool q8, bool rot, bool kf16);
+    void setKvFormat(bool q8, bool rot, bool kf16, bool q4 = false);
     void allocKvPool(std::uint32_t tokens);
     void mapPages(std::uint32_t s, std::uint32_t first, std::span<const std::int32_t> phys);
     void setupSeqs(std::uint32_t n, std::uint32_t slot_ctx);

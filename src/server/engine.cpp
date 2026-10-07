@@ -134,6 +134,7 @@ Engine::~Engine() {
     for (QBatch& q : quarantine_)
         if (q.ev) ops_.eventDestroy(q.ev);
     if (samp_dev_) ops_.free(samp_dev_);
+    if (relax_dev_) ops_.free(relax_dev_);
     if (big_dev_) ops_.free(big_dev_);
 }
 
@@ -221,9 +222,17 @@ void Engine::allocState() {
     in_cands_.assign(V, 0);
     cands_scratch_.resize(std::max<std::size_t>(V, k_big));
     ctl_host_.assign(static_cast<std::size_t>(opt_.parallel) * qwen35::ctl_words, 0);
-    spec_on_ = opt_.spec_sample && opt_.use_mtp && m_.draftSampleOk();
+    if (opt_.relax.on) {
+        const std::uint64_t rb = static_cast<std::uint64_t>(max_rows) * opt_.relax.topk() * 8 + max_rows * 8;
+        relax_dev_ = ops_.malloc(rb);
+        relax_host_.assign(rb, 0);
+        logI("decode: relaxed draft acceptance (relaxacc, fast): greedy top-{} with p >= {:.2f} p_max; sampling typical "
+             "acceptance eps {:.2f} delta {:.2f} - output differs from exact speculative decoding",
+             opt_.relax.topk(), opt_.relax.alpha, opt_.relax.eps, opt_.relax.delta);
+    }
+    spec_on_ = opt_.spec_sample && opt_.use_mtp && m_.draftSampleOk() && !opt_.relax.on;
     if (opt_.spec_sample && opt_.use_mtp)
-        logI("sampling: speculative sampling of MTP drafts (specsample) {}", spec_on_ ? "on for temperature > 0 (race-coupled drafts; the text for a seed does not depend on drafts)" : "unavailable (no draft_sample_rows kernel): exact-match acceptance");
+        logI("sampling: speculative sampling of MTP drafts (specsample) {}", spec_on_ ? "on for temperature > 0 (race-coupled drafts; the text for a seed does not depend on drafts)" : opt_.relax.on ? "off (relaxacc typical acceptance instead)" : "unavailable (no draft_sample_rows kernel): exact-match acceptance");
 }
 
 void Engine::initPool() {
@@ -1309,6 +1318,8 @@ bool Engine::startJob(Slot& sl, Job& job) {
     sl.cycles = 0;
     sl.drafted = 0;
     sl.accepted = 0;
+    sl.relaxed = 0;
+    sl.relax_gap = 0;
     sl.n_batch = 0;
     sl.acc_ema = static_cast<float>(opt_.n_draft);
     sl.dacc = qwen35::DraftAccept{};
@@ -1318,7 +1329,9 @@ bool Engine::startJob(Slot& sl, Job& job) {
     sl.ng.reset();
     sl.ng.ng.norm = crlf_norm_;
     sl.ng_cycles = 0;
-    if (opt_.timing_reset && opt_.use_mtp) {
+    // relaxacc: a solo request starts from the same draft-policy state every time (the kept
+    // tokens depend on the drafts), so its output depends only on prompt, seed and settings
+    if ((opt_.timing_reset || opt_.relax.on) && opt_.use_mtp) {
         bool others = false;
         for (Slot& o : slots_) others = others || (&o != &sl && o.phase == Phase::decode);
         if (!others) {
@@ -1327,6 +1340,7 @@ bool Engine::startJob(Slot& sl, Job& job) {
             ccost_primed_.fill(false);
             dpool_ = qwen35::DraftAccept{};
             prev_nd_ = 0;
+            policy_cycles_ = 0;
         }
     }
     if (mt.reuse == N) finishPrefill(sl);
@@ -1635,6 +1649,15 @@ std::vector<std::uint32_t> planSlotDrafts(std::span<const DraftPlanSlot> slots, 
     return out;
 }
 
+// relaxacc repetition guard: would keeping draft dr[acc] (after sl.next and dr[0..acc)) end in
+// an n-gram already in the slot's recent tokens?
+bool Engine::relaxRepeats(const Slot& sl, std::span<const std::uint32_t> dr, std::uint32_t acc) const {
+    std::array<std::uint32_t, qwen35::max_ng_drafts + 2> tail{};
+    tail[0] = sl.next;
+    for (std::uint32_t r = 0; r <= acc; ++r) tail[r + 1] = dr[r];
+    return relax::extendsRepeat(std::span<const std::uint32_t>(sl.cache_tokens), std::span<const std::uint32_t>(tail.data(), acc + 2));
+}
+
 std::uint32_t Engine::pickDrafts(std::span<Slot* const> act) {
     if (!opt_.use_mtp) return 0;
     const std::uint32_t A = static_cast<std::uint32_t>(act.size());
@@ -1654,7 +1677,8 @@ std::uint32_t Engine::pickDrafts(std::span<Slot* const> act) {
                 accs.push_back(&sl->dacc);
             }
         }
-        const std::uint32_t pick = qwen35::pickDrafts(accs, timing_[std::min(A, gdn_max_seg)], nd, n_cycles_, prev_nd_);
+        const std::uint32_t pick =
+            qwen35::pickDrafts(accs, timing_[std::min(A, gdn_max_seg)], nd, opt_.relax.on ? policy_cycles_ : n_cycles_, prev_nd_);
         prev_nd_ = pick;
         return pick;
     }
@@ -1879,10 +1903,17 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
     if (p && p->events) m_.profileStart(1, pa);
     const std::uint32_t rows = m_.verifyBatchEnqueue(std::span<const VSeg>(vsegs.data(), A));
     if (p) m_.profileStop();
-    bool any_sampling = false;
+    bool any_sampling = false, any_relax = false;
+    const std::uint32_t rk = opt_.relax.topk();
     for (std::size_t k = 0; k < A; ++k) {
         Slot& sl = *act[k];
-        if (sl.greedy) continue;
+        if (sl.greedy) {
+            if (opt_.relax.on && nd_of[k] > 0 && ng_n[k] == 0) {
+                any_relax = true;
+                launchTopk(row_of[k], nd_of[k], rk, 1.0f, relax_dev_, max_rows, row_of[k]);
+            }
+            continue;
+        }
         any_sampling = true;
         launchTopk(row_of[k], nd_of[k] + 1, k_small, sl.sm.inv_t, samp_dev_, max_rows, row_of[k]);
     }
@@ -1893,7 +1924,18 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
         p->enq_ms[pa] += std::chrono::duration<double, std::milli>(t_enq - tc0).count();
     }
     if (any_sampling) ops_.download(samp_host_.data(), samp_dev_, sampBytes());
-    const float cycle_ms = static_cast<float>(msSince(tc0));
+    if (any_relax) ops_.download(relax_host_.data(), relax_dev_, relax_host_.size());
+    // relaxacc: the kept tokens depend on which drafts were proposed, so the draft-count policy
+    // must not see wall-clock times (run-to-run jitter would change the output). It sees a
+    // deterministic cycle cost instead: a base per slot, + ngram_slope per extra verify row (the
+    // per-device verify-row slope, 0.12 on the 8060S), + 3% per sequential MTP draft step.
+    const auto synthMs = [&](std::uint32_t steps) {
+        float rows = 0;
+        for (std::size_t k = 0; k < A; ++k) rows += static_cast<float>(nd_of[k] + 1);
+        const float a = static_cast<float>(A);
+        return 100.0f * (a + opt_.ngram_slope * (rows - a) + 0.03f * static_cast<float>(steps));
+    };
+    const float cycle_ms = opt_.relax.on ? synthMs(n_ng == A ? 0 : nd_max) : static_cast<float>(msSince(tc0));
     if (opt_.slot_drafts == 2 && opt_.use_mtp) {
         // every cycle (uniform, per-slot, with n-gram slots) trains the cost model of A slots;
         // a per-slot cycle reaches timing_ as the time the uniform split would have taken
@@ -1927,7 +1969,7 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
         // n-gram cycle times (every slot drafted from its history): per slot
         std::uint32_t ng_max_n = 0;
         for (std::size_t k = 0; k < A; ++k) ng_max_n = std::max(ng_max_n, ng_n[k]);
-        const float ms = static_cast<float>(msSince(tc0));
+        const float ms = opt_.relax.on ? cycle_ms : static_cast<float>(msSince(tc0));
         for (Slot* sl : act) sl->ng.timing.update(ng_max_n, ms);
     }
     if (p) {
@@ -1941,6 +1983,7 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
     }
     if (opt_.trace_nd) logI("trace | cycle {} | slots {} | nd {} | {:.2f} ms", n_cycles_, A, nd, msSince(tc0));
     n_cycles_ += 1;
+    policy_cycles_ += 1;
     stat_cycles_ += 1;
     stat_rows_ += rows;
     stat_slots_ += A;
@@ -1964,7 +2007,27 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
         std::uint32_t acc = 0;
         std::uint32_t chosen;
         if (sl.greedy) {
-            while (acc < nd_dev && static_cast<std::uint32_t>(ctl[qwen35::ctl_rows + acc]) == dr[acc]) ++acc;
+            while (acc < nd_dev) {
+                if (static_cast<std::uint32_t>(ctl[qwen35::ctl_rows + acc]) == dr[acc]) {
+                    ++acc;
+                    continue;
+                }
+                // n-gram drafts are copies of the history: relaxing them feeds repetition loops
+                if (!opt_.relax.on || is_ng) break;
+                // relaxacc: verify row acc (conditioned on drafts 0..acc-1) keeps a near-argmax draft
+                const std::size_t gr = row0 + acc;
+                const auto* rids = reinterpret_cast<const std::int32_t*>(relax_host_.data()) + gr * rk;
+                const auto* rvals = reinterpret_cast<const float*>(relax_host_.data() + static_cast<std::size_t>(max_rows) * rk * 4) + gr * rk;
+                const auto* rst = reinterpret_cast<const float*>(relax_host_.data() + static_cast<std::size_t>(max_rows) * rk * 8);
+                if (!relax::acceptGreedy(opt_.relax, std::span<const std::int32_t>(rids, rk), std::span<const float>(rvals, rk),
+                                         rst[2 * gr], dr[acc]) ||
+                    relaxRepeats(sl, dr, acc))
+                    break;
+                for (std::uint32_t j = 0; j < rk; ++j)
+                    if (static_cast<std::uint32_t>(rids[j]) == dr[acc]) sl.relax_gap += static_cast<double>(rst[2 * gr] - rvals[j]);
+                ++acc;
+                sl.relaxed += 1;
+            }
             chosen = static_cast<std::uint32_t>(ctl[qwen35::ctl_rows + acc]);
         } else {
             // The target token at every output index is the sampler's draw keyed by (seed, output
@@ -1972,10 +2035,24 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
             // and MTP draft r was drawn on the device from the draft distribution q by the same race
             // (whirl/spec_sample.h); otherwise inverse CDF and the draft argmax. Either way the reply
             // is a function of (target logits, seed) only: drafts change speed, never text.
+            const bool typ = opt_.relax.on && !is_ng;
             sl.sm.row_base = row0;
             for (;;) {
                 prepareRow(sl.sm, acc);
                 sl.sm.pos_idx = sl.n_gen + acc;
+                if (typ && acc < nd_dev) {
+                    // relaxacc typical acceptance on the filtered sampling distribution of row acc
+                    const double pd = probOf(sl.sm, dr[acc]);
+                    double h = 0;
+                    const std::vector<Cand>& cv = *sl.sm.cands;
+                    for (std::size_t i = 0; i < sl.sm.n; ++i)
+                        if (cv[i].p > 0) h -= cv[i].p * std::log(cv[i].p);
+                    if (relax::acceptTypical(opt_.relax, pd, h) && !relaxRepeats(sl, dr, acc)) {
+                        ++acc;
+                        sl.relaxed += 1;
+                        continue;
+                    }
+                }
                 const std::uint32_t t = sampleRow(sl.sm, std::nullopt, 0);
                 if (acc < nd_dev && t == dr[acc]) {
                     ++acc;
@@ -2192,6 +2269,9 @@ void Engine::finishJob(Slot& sl) {
              job.id, sl.id, sl.drafted, sl.accepted, sl.drafted > 0 ? 100.0 * sl.accepted / sl.drafted : 0.0,
              sl.cycles > 0 ? static_cast<double>(sl.accepted + sl.cycles) / sl.cycles : 0.0, sl.cycles);
         if (opt_.ngram) logI("req {} | slot {} | n-gram drafts in {} of {} cycles", job.id, sl.id, sl.ng_cycles, sl.cycles);
+        if (opt_.relax.on)
+            logI("req {} | slot {} | relaxacc: {} of {} accepted drafts kept by the relaxed rule (greedy: mean ln p_max/p_kept {:.3f})",
+                 job.id, sl.id, sl.relaxed, sl.accepted, sl.relaxed > 0 ? sl.relax_gap / sl.relaxed : 0.0);
     }
     if (!sl.greedy && (sl.sm.big_used > 0 || sl.sm.full_used > 0))
         logI("req {} | slot {} | sampler fallbacks: top-{} {}x, full row {}x", job.id, sl.id, k_big, sl.sm.big_used,

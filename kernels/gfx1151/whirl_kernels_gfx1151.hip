@@ -5,8 +5,8 @@
 //
 // Like the gfx1201 set, the files are fragments of one translation unit and
 // the include order matters. Kernel names and argument ABIs match the gfx1201
-// kernels (include/whirl/kernels_abi.h); families gfx1151 cannot run (fp8 /
-// int8-dot WMMA, the q8v KV format, the WMMA mid-batch GEMV, the small-batch
+// kernels (include/whirl/kernels_abi.h; gfx1151 adds the q4 KV format); families gfx1151 cannot run (fp8 /
+// int8-dot WMMA, the WMMA mid-batch GEMV, the small-batch
 // GEMM, vision) are simply absent, and the host picks the remaining paths
 // from what the code object contains (KernelTable / kernels::Caps).
 

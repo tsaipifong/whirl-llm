@@ -206,6 +206,8 @@ struct Slot {
     std::uint32_t cycles = 0;
     std::uint32_t drafted = 0;
     std::uint32_t accepted = 0;
+    std::uint32_t relaxed = 0;  // relaxacc: drafts kept by the relaxed rule (not the exact one)
+    double relax_gap = 0;       // relaxacc greedy: sum of ln p(argmax) - ln p(kept draft)
     std::uint32_t pos = 0;
     std::uint32_t next = 0;
     // host tiers
@@ -325,6 +327,10 @@ struct EngineOptions {
     // Both accept a draft iff it equals the sampled token: the reply is a function of the seed only
     // (MTP == plain bit for bit within the mode).
     bool spec_sample = false;
+    // numerics item relaxacc (fast): relaxed draft acceptance (whirl/relax_accept.h); greedy
+    // requests keep near-argmax drafts, sampling requests use typical acceptance (and greedy
+    // drafts: specsample is not used with it)
+    whirl::relax::Params relax;
 };
 
 class Engine {
@@ -451,6 +457,7 @@ private:
     std::size_t prefillGroup(Slot& first, std::size_t row_budget);
     void finishPrefill(Slot& sl);
     std::uint32_t pickDrafts(std::span<Slot* const> act);
+    bool relaxRepeats(const Slot& sl, std::span<const std::uint32_t> dr, std::uint32_t acc) const;
     void decodeCycle(std::span<Slot* const> act_in);
     void splitDrafts(std::span<Slot* const> act, std::uint32_t nd, std::uint32_t rows, std::span<std::uint32_t> nd_m);
     std::uint32_t draftCap(std::uint32_t A);
@@ -503,6 +510,7 @@ private:
     // most rows of one batched verify (ServerModel::verifyRows: 16, or 32 with the wide GEMV path)
     std::uint32_t vrows_ = max_small_batch;
     std::uint32_t prev_nd_ = 0;
+    std::uint32_t policy_cycles_ = 0;  // cycles since the draft-policy state was last reset
     // decode floor bookkeeping (main thread)
     DecodeFloor floor_;
     TimePoint floor_epoch_{};
@@ -510,6 +518,8 @@ private:
     std::uint64_t stat_floor_waits_ = 0, stat_floor_periods_ = 0;
     // sampling buffers
     DevPtr samp_dev_ = 0, big_dev_ = 0;
+    DevPtr relax_dev_ = 0;                  // relaxacc: top-K of the greedy verify rows [ids | vals | stats]
+    std::vector<std::uint8_t> relax_host_;
     std::vector<std::uint8_t> samp_host_, big_host_;
     std::vector<float> row_host_;
     std::vector<std::uint8_t> in_cands_;

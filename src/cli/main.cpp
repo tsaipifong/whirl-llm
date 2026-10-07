@@ -554,6 +554,19 @@ DecodeResult specDecode(q::Model& model, const Tok& tok, u32 first, u32 n_prompt
         generated.push_back(t);
         return generated.size() >= opt.max_tokens;
     };
+    // relaxacc (fast mode): top-K of the verify rows for the relaxed greedy rule (whirl/relax_accept.h)
+    const whirl::relax::Params& rx = model.relax;
+    const u32 rk = rx.topk();
+    hip::Function rx_topk = nullptr;
+    hip::DevPtr rx_dev = 0;
+    std::vector<std::uint8_t> rx_host;
+    if (rx.on) {
+        rx_topk = model.module.getFunction("topk_rows");
+        const std::size_t rb = static_cast<std::size_t>(q::max_small_batch) * rk * 8 + q::max_small_batch * 8;
+        rx_dev = hip::malloc(rb);
+        rx_host.assign(rb, 0);
+    }
+    u32 relaxed = 0;
     Timer timer;
     timer.begin();
     TpsTrace tps;
@@ -604,6 +617,13 @@ DecodeResult specDecode(q::Model& model, const Tok& tok, u32 first, u32 n_prompt
             model.verifyEnqueueEx(next, nd_host, std::nullopt, p);
         verify_tokens += nd_host + 1;
         if (ng_n == 0) prev_nd = nd_host;
+        if (rx.on && nd_host > 0 && ng_n == 0) {
+            const hip::DevPtr ids = rx_dev, vals = rx_dev + static_cast<u64>(q::max_small_batch) * rk * 4,
+                         stats = rx_dev + static_cast<u64>(q::max_small_batch) * rk * 8;
+            hip::launch(rx_topk, hip::Dim3{nd_host, 1, 1}, hip::Dim3{1024, 1, 1}, 0, model.stream, model.logits,
+                        static_cast<std::int32_t>(model.cfg.n_vocab), static_cast<std::int32_t>(rk), 1.0f, ids, vals, stats);
+            hip::downloadAsync(rx_host.data(), rx_dev, rx_host.size(), model.stream);
+        }
         const double c1 = nowMs();
         std::array<u32, q::max_small_batch> dr{}, outv{};
         u32 nd;
@@ -615,12 +635,31 @@ DecodeResult specDecode(q::Model& model, const Tok& tok, u32 first, u32 n_prompt
             nd = model.readCycle(std::span<u32>(outv.data(), nd_host + 1), std::span<u32>(dr.data(), nd_host)).nd;
         }
         const double c2 = nowMs();
+        // relaxacc: the draft-count policy sees a deterministic cycle cost, not wall-clock times
+        // (the kept tokens depend on the drafts; see the server engine)
+        const float cyc_ms = rx.on ? 100.0f * (1.0f + opt.ngram_slope * static_cast<float>(nd_host) + (ng_n > 0 ? 0.0f : 0.03f * static_cast<float>(nd_host)))
+                                   : static_cast<float>(c2 - c0);
         t_draft += c1 - c0;
         t_verify += c2 - c1;
         cycles += 1;
         drafted += nd;
         u32 acc = 0;
-        while (acc < nd && outv[acc] == dr[acc]) acc += 1;
+        if (rx.on && nd > 0 && ng_n == 0) hip::streamSync(model.stream);
+        while (acc < nd) {
+            if (outv[acc] == dr[acc]) {
+                acc += 1;
+                continue;
+            }
+            if (!rx.on || ng_n > 0) break;  // n-gram drafts copy the history: exact only (loops)
+            const auto* rids = reinterpret_cast<const std::int32_t*>(rx_host.data()) + static_cast<std::size_t>(acc) * rk;
+            const auto* rvals = reinterpret_cast<const float*>(rx_host.data() + static_cast<std::size_t>(q::max_small_batch) * rk * 4) + acc * rk;
+            const auto* rst = reinterpret_cast<const float*>(rx_host.data() + static_cast<std::size_t>(q::max_small_batch) * rk * 8);
+            if (!whirl::relax::acceptGreedy(rx, std::span<const std::int32_t>(rids, rk), std::span<const float>(rvals, rk), rst[2 * acc], dr[acc]) ||
+                whirl::relax::extendsRepeat(std::span<const u32>(generated), std::span<const u32>(dr.data(), acc + 1)))
+                break;
+            acc += 1;
+            relaxed += 1;
+        }
         accepted += acc;
         if (opt.ngram_debug) {
             u32 hyp = 0;
@@ -637,20 +676,22 @@ DecodeResult specDecode(q::Model& model, const Tok& tok, u32 first, u32 n_prompt
             ng_cycles += 1;
             ng_drafted += nd;
             ng_accepted += acc;
-            ngp.timing.update(nd_host, static_cast<float>(c2 - c0));
+            ngp.timing.update(nd_host, cyc_ms);
         } else {
             for (u32 kk = 0; kk < std::min(acc + 1, nd); ++kk) pos_tries[kk] += 1;
             for (u32 kk = 0; kk < acc; ++kk) pos_hits[kk] += 1;
             acc_ema = 0.7f * acc_ema + 0.3f * static_cast<float>(acc);
             acc_model.update(nd, acc);
-            timing.update(nd_host, static_cast<float>(c2 - c0));
+            timing.update(nd_host, cyc_ms);
         }
         // the verify ran nd_host + 1 rows: keep acc + 1 of them
         if (acc < nd_host) model.restoreSnapshot(acc + 1);
-        // emit accepted drafts plus the model's own next token
+        // emit accepted drafts plus the model's own next token (relaxacc: the accepted drafts
+        // themselves, which may differ from the rows' argmax)
         for (u32 r = 0; r < acc + 1; ++r) {
-            if (!done) done = emit(outv[r]);
-            if (opt.ngram) hist.push_back(outv[r]);
+            const u32 t = r < acc ? dr[r] : outv[r];
+            if (!done) done = emit(t);
+            if (opt.ngram) hist.push_back(t);
         }
         hip::copyAsync(model.mtp_h, model.hn, (acc + 1) * E * 4, model.stream);
         for (u32 r = 0; r < acc; ++r) pend[r] = dr[r];
@@ -664,6 +705,9 @@ DecodeResult specDecode(q::Model& model, const Tok& tok, u32 first, u32 n_prompt
     }
     res.decode_ms = timer.end();
     model.draft_p_min = 0;
+    if (rx_dev) hip::free(rx_dev);
+    if (rx.on)
+        std::fprintf(stderr, "relaxacc: %u of %u accepted drafts kept by the relaxed rule (top-%u, alpha %.2f)\n", relaxed, accepted, rk, rx.alpha);
     if (!opt.stream && opt.print_text) out(tok.decode(generated));
     res.cycles = cycles;
     res.accepted = accepted;
