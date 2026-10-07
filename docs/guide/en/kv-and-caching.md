@@ -163,7 +163,7 @@ what fits:
 |---|---|---|
 | precise | f16 | f16 |
 | balance (default) | q8h | f16 |
-| fast | q4 (Radeon 8060S); R9700: f16 until it has q4 KV kernels | q4 (8060S); R9700: f16 |
+| fast | q4 | q4 |
 
 - **Dense, balance: q8h.** Its KL against f16 is 0.0002–0.002 (KL-1), i.e. near lossless, and it
   halves the KV bytes, so one 128k request plus a second long one fit on a 32 GB card without

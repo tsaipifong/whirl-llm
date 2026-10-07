@@ -24,8 +24,7 @@ All notable changes to WHIRL are listed here. Versions follow `project(whirl VER
   `h16`, `kvq8`; `--balance=ITEMS` picks a subset). **fast** lists the future gated lossy items
   (4-bit KV, relaxed acceptance, ...); none is implemented yet, so fast runs as balance.
 - **KV format fixed per mode (BAL-Q8)**: precise f16; balance q8h on dense models (KL vs f16
-  0.0002–0.002) and f16 on MoE models; fast q4 where the kernels exist (Radeon 8060S; the R9700 keeps
-  f16 until it has q4 KV kernels). The same on every card, CLI and server (one function,
+  0.0002–0.002) and f16 on MoE models; fast q4 (Radeon 8060S, and the R9700 since FAST-1c). The same on every card, CLI and server (one function,
   `numerics::chooseKv`, decided before the kernels load). The automatic f16 → q8v → q8h fallback and
   the q8v preference on cards under 20 GiB are gone: a format that does not fit lowers the context
   (when not given) or stops with a message, never switches to a lower-precision format.
@@ -60,6 +59,30 @@ All notable changes to WHIRL are listed here. Versions follow `project(whirl VER
   GB/s vs ~55 GB/s); Ornith-1.5-35B-A3B MXFP4 decode with q4 KV at 128k 36.5 -> 58.5 tok/s, at 64k
   48.0 -> 67.0 tok/s (f16 KV: 32.7 / 46.4); KL vs f16 KV the same as the previous kernel (code 128k 0.0137 vs 0.0133, 64k 0.0177 vs 0.0183). `WHIRL_ATTN_DQ4=0` restores
   the previous kernel. precise / balance unchanged.
+- fast `kvq4` on the R9700 (FAST-1c): the gfx1201 code object has the q4 KV kernels (the 8060S
+  format: 4-bit K / V, one f16 scale per 32 values, Hadamard-rotated q / k): `attn_prep_q4` /
+  `kv_store_q4`, `attn_dq4` for decode / verify / MTP rows (ported; blocks ordered so the verify
+  rows of a sequence read the same K / V tiles together through L2; ~430 GB/s at 128k for the 27B
+  24/4-head shape), `attn_split_q4` / `attn_wsplit1/2_q4` / `attn_decode_q4` /
+  `attn_prefill_wmma_q4` as generic fallbacks, and prefill through the Q8P path (keys dequantized
+  into f16 rows, f16 `attn_kg`). `--fast` on the R9700 now uses q4 KV. Swift-1.5 27B MXFP4-A,
+  `whirl bench --fast`, q4 vs `WHIRL_KV=f16`: decode at a 131k prompt plain 25.08 → 30.98 tok/s
+  (+23.5%), MTP 63.12 → 68.79 (per verify cycle only −2.5%: each MTP row reads K / V, the f16
+  verify reads it once for 5 rows; a block shared by the rows measured no better, attn_dq4 is
+  ALU-bound per row); at a 67k prompt plain 30.42 → 34.08 (+12%), MTP 92.88 → 92.75; prefill 8k
+  −1.1%, 128k −1.9%. KL of the prompt logits vs f16 KV (128 rows each): code 128k 0.0049 (top-1
+  99.2%), zh 128k 0.0071 (93.0%; the 9 differing rows are near ties, top-1 p ≤ 0.53), code 64k
+  0.0100 (95.3%), zh 64k 0.0016 (95.3%). R9700 fast goldens re-recorded; precise / balance and every
+  8060S golden unchanged.
+- q8 / q8h (and q4) prefill past the f16 scratch (FAST-1c): a prefill whose keys exceed what
+  `ffn_g` / `ffn_u` hold (~139k at batch 4096 on the 27B) fell back to `attn_kg_q8` (+29% at 256k
+  keys); now the keys go in ranges of at most that size, each dequantized (`kv_dq_rows_r`) and
+  walked by `attn_kgs` with the softmax state (m, l, unnormalized output) carried from range to
+  range — bit-identical to one f16 `attn_kg` over all keys, so q8h output is unchanged (it was
+  already bit-identical to `attn_kg_q8`). Kernel bench, 4096 queries at 256k keys: f16 290.1 ms,
+  ranges 294.5 ms (+1.5%), `attn_kg_q8` 373 ms. End to end, Ornith-1.5-9B balance q8h vs f16: 192k
+  −1.4%, 256k −1.4% (same output hash); Swift-1.5 27B q8h 256k 1,129 tok/s (f16 KV at 256k does
+  not fit 32 GB next to its weights). Prefills within the scratch are unchanged.
 
 ## 0.1.4 — 2026-10-06
 

@@ -109,7 +109,7 @@ f16 副本放在 attention 期間閒置的 prefill 緩衝區（預設 prefill ba
 |---|---|---|
 | precise | f16 | f16 |
 | balance（預設） | q8h | f16 |
-| fast | q4（Radeon 8060S）；R9700 在有 q4 KV kernel 之前用 f16 | q4（8060S）；R9700：f16 |
+| fast | q4 | q4 |
 
 - **Dense、balance：q8h。** 相對 f16 的 KL 是 0.0002–0.002（KL-1），近乎無損，而且 KV 位元組減半，32 GB 卡上一個 128k 請求加上另一個長請求都放得下，不必換格式。
 - **MoE：precise 與 balance 都用 f16。** 它在 q8 下的單一提示詞 KL 遠高於自身的路徑雜訊（p12k 時 77 倍；即使 q8h 也有 50 倍），Ornith 用 q8 在中文 128k 也沒過門檻（KL-1）。（以 22 KiB/token 計，MoE 的 f16 池已約 340k token。）
