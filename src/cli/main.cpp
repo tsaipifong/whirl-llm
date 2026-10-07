@@ -1065,12 +1065,16 @@ int cmdChat(const Args& a) {
             if (dump_path && off < dump_from) lim = std::min(lim, dump_from);
             const std::size_t n = dumping ? std::min<std::size_t>(lim - off, q::max_small_batch) : std::min<std::size_t>(lim - off, model.max_batch);
             const double c0 = nowMs();
+            // all_logits needs keep_hidden (normed rows in hn); without it forward() computes only
+            // the chunk's last row (into row 0) and the dump held 1 real row per 16
             model.all_logits = dumping;
+            model.keep_hidden = dumping;
             if (use_mtp)
                 model.prefillMtpChunk(ids, 0, off, n, std::nullopt);
             else
                 model.forward(std::span<const u32>(ids).subspan(off, n), static_cast<u32>(off));
             model.all_logits = false;
+            model.keep_hidden = false;
             if (dumping) {
                 const std::size_t V = model.cfg.n_vocab;
                 hip::download(row_f32.data(), model.logits, n * V * 4);
