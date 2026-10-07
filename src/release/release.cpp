@@ -319,7 +319,7 @@ constexpr EnvDoc k_env[] = {
     {"GPU and loading", "HIP_DEVICE=N", "device index, bypassing device matching and the one-process-per-GPU lock", GPU},
     {"GPU and loading", "GPU_SHARE=1", "do not wait for other WHIRL processes on the same GPU", GPU},
     {"GPU and loading", "GPU_WAIT=S", "seconds to wait for another WHIRL process to free the GPU (default 1800)", GPU},
-    {"GPU and loading", "MODE=precise|balance|fast[:ITEMS]", "numerics mode (= --precise / --balance / --fast / --mode; default precise; "
+    {"GPU and loading", "MODE=precise|balance|fast[:ITEMS]", "numerics mode (= --precise / --balance / --fast / --mode; default balance; "
      "ITEMS e.g. fp8,kvq8 picks lossy items)", GPU},
     {"GPU and loading", "KV=auto|f16|q8|q8h|q8v", "KV cache format (auto: f16; in balance / fast mode dense models fall back to q8v, then q8h, "
      "when f16 does not fit; MoE f16). A q8 value in precise mode is a user-requested lossy override",

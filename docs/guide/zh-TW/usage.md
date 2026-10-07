@@ -46,15 +46,17 @@ whirl-server --help | --version
 （預設最多 30 分鐘），而不是共用 VRAM——因為一張 GPU 上同時有兩個大行程時，Windows 會把兩者都移到很慢的共享
 記憶體（[windows-hip.md](windows-hip.md#wddm-demote)）。見 `WHIRL_GPU_WAIT` / `WHIRL_GPU_SHARE`。
 
-### <a id="modes"></a>數值模式：precise（預設）、balance、fast
+### <a id="modes"></a>數值模式：balance（預設）、precise、fast
 
 一個行程只用一種模式，啟動時決定（`--precise`、`--balance`、`--fast`，或 `--mode M`；也可用環境變數
 `WHIRL_MODE=precise|balance|fast`，命令列優先）。`chat`、`bench`、`selftest`、`seqtest` 與伺服器都適用，R9700 與 Radeon 8060S 都一樣。
+沒指定模式時跑 **balance**；`--precise` 與 `--fast` 需要明確指定（`--balance` 仍可用）。小卡（20 GiB 以下）的規則跟著實際模式走：
+balance（預設）時 dense 模型照舊優先用 q8v KV；`--precise` 維持 f16 KV。
 
 | 模式 | 內容 |
 |---|---|
-| **precise**（預設） | GGUF 權重反量化成 f16；prefill 的 activation 與累加用 f16 / f32；DeltaNet prefill 用 f32 區塊路徑；**KV 快取在每張卡上都是 f16**。decode、MTP / n-gram 驗證與其他小 batch 也用 f16 activation 進同一個 f16 GEMM（f32 累加，不用 int8 activation）。除了檔案本身的量化權重，不再額外量化。f16 KV 放不下時：沒有指定 context 就降低 context 並發出警告；有指定（`--ctx`、`--ctx-per-slot`）就停止並說明（結束代碼 5）——絕不自行改用 int8 KV |
-| **balance** | 就是 WHIRL 0.1.x / 0.2.0-rc 以速度為主的預設，完全相同：下表的項目。輸出可能與 precise 有些微差異（KL / 準確度實測見 [quantization.md](quantization.md)） |
+| **precise**（`--precise`） | GGUF 權重反量化成 f16；prefill 的 activation 與累加用 f16 / f32；DeltaNet prefill 用 f32 區塊路徑；**KV 快取在每張卡上都是 f16**。decode、MTP / n-gram 驗證與其他小 batch 也用 f16 activation 進同一個 f16 GEMM（f32 累加，不用 int8 activation）。除了檔案本身的量化權重，不再額外量化。f16 KV 放不下時：沒有指定 context 就降低 context 並發出警告；有指定（`--ctx`、`--ctx-per-slot`）就停止並說明（結束代碼 5）——絕不自行改用 int8 KV |
+| **balance**（預設；`--balance`） | 沒指定模式時的預設：就是 WHIRL 0.1.x / 0.2.0-rc 以速度為主的行為，完全相同：下表的項目。輸出可能與 precise 有些微差異（KL / 準確度實測見 [quantization.md](quantization.md)） |
 | **fast** | balance 再加上更積極的有損項目，每項都要先通過 KL 與配對準確度門檻。目前都還沒實作：會列為略過，fast 目前等同 balance |
 
 項目（用 `--balance=fp8,kvq8` 或 `--fast=...` 只選一部分；`WHIRL_MODE=balance:fp8,kvq8`）：
@@ -107,7 +109,7 @@ decode 速度；開 MTP 時另列驗證回合數與草稿接受率。
 | `--mmproj MMPROJ.gguf` | 視覺編碼器（Qwen3-VL 形式的 mmproj，F16 / BF16），`--image` 需要它 |
 | `--image IMAGE` | 放在提示文字前面的圖片；可重複指定 |
 | `--device SPEC` | GPU：`r9700`、`8060s`、索引，或名稱 / gfx 架構的子字串（也可用 `WHIRL_DEVICE`）。預設：第一張 R9700，沒有的話用第一張這個建置有 kernel 的 GPU（例如只有 Radeon 8060S 的機器） |
-| `--precise` / `--balance` / `--fast` / `--mode M` | 數值模式（預設 precise；也可用 `WHIRL_MODE`）；`--balance=項目` 只選部分項目。見[數值模式](#modes) |
+| `--precise` / `--balance` / `--fast` / `--mode M` | 數值模式（預設 balance；也可用 `WHIRL_MODE`）；`--balance=項目` 只選部分項目。見[數值模式](#modes) |
 | `-h`、`--help` | 說明 |
 
 範例：
@@ -164,7 +166,7 @@ whirl serve  MODEL.gguf [選項]      （同一支程式）
 | `-np`、`--parallel N` | 同時處理的請求 slot 數（continuous batching），1～16，預設 4（VRAM 小於 20 GiB 的卡預設 1，見 `WHIRL_VRAM_HEADROOM_MB`） |
 | `-c`、`--ctx N` | 共用 KV 池的大小（token）。slot 依需要取用分頁；池滿時，閒置 slot 的前綴快取依最久未使用（LRU）逐出。預設：權重與緩衝區之後剩下的全部 VRAM 減 768 MiB（MoE：1.5 GiB） |
 | `--ctx-per-slot N` | 單一請求的最長 context（預設 min(池大小, 131072)；最多 262144） |
-| `--precise` / `--balance` / `--fast` / `--mode M` | 數值模式（預設 precise：f16 KV；f16 池放不下一個完整請求時，會降低每個請求的 context 並警告；若有指定 `--ctx` / `--ctx-per-slot` 則拒絕啟動）。見[數值模式](#modes) |
+| `--precise` / `--balance` / `--fast` / `--mode M` | 數值模式（預設 balance；`--precise`：f16 KV；f16 池放不下一個完整請求時，會降低每個請求的 context 並警告；若有指定 `--ctx` / `--ctx-per-slot` 則拒絕啟動）。見[數值模式](#modes) |
 | `--mtp-drafts N` | 每回合固定的 MTP 草稿數，1～10（預設：依模型類型由成本模型決定） |
 | `--decode-min-tps N` | decode 保底速度：其他請求在 prefill 時，每個串流中（decode 中）的請求至少維持 N tok/s；做法是縮短 prefill forward、穿插 decode cycle（預設 20；`0` = 關閉，prefill forward 不受限）。任何 N 的輸出都相同（[server.md](server.md#batching)） |
 | `--kv-ram-mb N` | 前綴快取的主記憶體層，單位 MiB 的 pinned 記憶體（預設：實體記憶體的 1/4，至少 8 GiB 或一個完整長度 session（若更大；27B 模型約 9 GiB），最多 32 GiB，且不超過啟動時可用記憶體的一半；64 GB 的電腦為 16 GiB；整合式 GPU 預設關閉）。啟動日誌會印出選定的大小與原因。閒置 session 會複製到這裡，下次直接還原而不必重新 prefill。`0` 會關閉兩個 host 層。**Radeon 8060S**（內顯）：預設 `0` —— KV pool 本來就在系統記憶體；給定大小才會開啟 RAM 與 SSD 層 |
@@ -294,7 +296,7 @@ PowerShell 中先用 `$env:WHIRL_KV = "q8v"` 設定再啟動程式。**一般使
 | `WHIRL_HIP_DEVICE=N` | 裝置索引，略過裝置比對與「一張 GPU 一個行程」的鎖 |
 | `WHIRL_GPU_SHARE=1` | 不等待同一張 GPU 上的其他 WHIRL 行程 |
 | `WHIRL_GPU_WAIT=S` | 等待其他 WHIRL 行程釋放 GPU 的秒數（預設 1800） |
-| `WHIRL_MODE=precise\|balance\|fast[:項目]` | 數值模式（= `--precise` / `--balance` / `--fast` / `--mode`；預設 precise）。見[數值模式](#modes) |
+| `WHIRL_MODE=precise\|balance\|fast[:項目]` | 數值模式（= `--precise` / `--balance` / `--fast` / `--mode`；預設 balance）。見[數值模式](#modes) |
 | `WHIRL_KV=auto\|f16\|q8\|q8h\|q8v` | KV 快取格式。`auto`（預設）：f16；balance / fast 模式下 f16 放不下時，dense 模型依序退到 q8v、q8h；MoE 一律 f16。precise 模式下設成 q8 類的值屬於使用者明確要求的有損覆寫。Radeon 8060S 沒有 q8v / q8h kernel：那裡 auto 會退到 q8，指定 `q8v` / `q8h` 會被拒絕。見 [kv-and-caching.md](kv-and-caching.md#formats) |
 | `WHIRL_PREFILL_BATCH=N` | 每次 forward 的 prefill 列數（預設 4096，最多 16384） |
 | `WHIRL_MAX_CTX=N` | `chat` 的預設 context 大小（= `--ctx`；預設 8192） |

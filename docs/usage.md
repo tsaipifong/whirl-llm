@@ -50,16 +50,19 @@ on the same GPU waits for it (up to 30 minutes by default) instead of sharing VR
 large processes on one GPU make Windows move both to slow shared memory
 ([windows-hip.md](guide/en/windows-hip.md#wddm-demote)). See `WHIRL_GPU_WAIT` / `WHIRL_GPU_SHARE`.
 
-### <a id="modes"></a>Numerics modes: precise (default), balance, fast
+### <a id="modes"></a>Numerics modes: balance (default), precise, fast
 
 One mode per process, chosen at start-up (`--precise`, `--balance`, `--fast`, or `--mode M`; or the
 environment variable `WHIRL_MODE=precise|balance|fast`; the command line wins). It applies to
 `chat`, `bench`, `selftest`, `seqtest` and the server alike, on the R9700 and the Radeon 8060S.
+With no mode given the process runs **balance**; `--precise` and `--fast` are opt-in (`--balance`
+is still accepted). The small-card rules (cards under 20 GiB) follow the active mode: in balance
+(the default) dense models prefer q8v KV there as before; `--precise` keeps f16 KV.
 
 | Mode | What it does |
 |---|---|
-| **precise** (default) | The GGUF weights are dequantized to f16; prefill activations and accumulation are f16 / f32; DeltaNet prefill uses the f32 chunk path; **the KV cache is always f16** on every card. Decode, MTP / n-gram verify and other small batches use f16 activations into the same f16 GEMM as prefill (f32 accumulation; no int8 activations). Nothing is quantized beyond the file's own weights. If f16 KV does not fit, the context is lowered with a warning when you did not give it, or the program stops with a message (exit code 5) when you did (`--ctx`, `--ctx-per-slot`) — it never switches to int8 KV by itself |
-| **balance** | The speed-oriented defaults of WHIRL 0.1.x / 0.2.0-rc, exactly: the items below. The output may differ slightly from precise (measured KL / accuracy in [quantization.md](guide/en/quantization.md)) |
+| **precise** (`--precise`) | The GGUF weights are dequantized to f16; prefill activations and accumulation are f16 / f32; DeltaNet prefill uses the f32 chunk path; **the KV cache is always f16** on every card. Decode, MTP / n-gram verify and other small batches use f16 activations into the same f16 GEMM as prefill (f32 accumulation; no int8 activations). Nothing is quantized beyond the file's own weights. If f16 KV does not fit, the context is lowered with a warning when you did not give it, or the program stops with a message (exit code 5) when you did (`--ctx`, `--ctx-per-slot`) — it never switches to int8 KV by itself |
+| **balance** (default; `--balance`) | The default when no mode is given: the speed-oriented behaviour of WHIRL 0.1.x / 0.2.0-rc, exactly: the items below. The output may differ slightly from precise (measured KL / accuracy in [quantization.md](guide/en/quantization.md)) |
 | **fast** | balance plus more aggressive lossy items that must pass KL + paired-accuracy gates first. None is implemented yet: they are listed as skipped and fast currently runs as balance |
 
 Items (pick a subset with `--balance=fp8,kvq8` or `--fast=...`; `WHIRL_MODE=balance:fp8,kvq8`):
@@ -125,7 +128,7 @@ speed and, with MTP, the verify cycles and draft acceptance.
 | `--mmproj MMPROJ.gguf` | vision encoder (Qwen3-VL style mmproj, F16 / BF16), needed for `--image` |
 | `--image IMAGE` | an image placed before the prompt text; repeatable |
 | `--device SPEC` | GPU: `r9700`, `8060s`, an index, or a substring of the name / gfx architecture (also `WHIRL_DEVICE`). Default: the first R9700, else the first GPU the build has kernels for (a Radeon 8060S on its own) |
-| `--precise` / `--balance` / `--fast` / `--mode M` | numerics mode (default precise; also `WHIRL_MODE`); `--balance=ITEMS` picks items. See [numerics modes](#modes) |
+| `--precise` / `--balance` / `--fast` / `--mode M` | numerics mode (default balance; also `WHIRL_MODE`); `--balance=ITEMS` picks items. See [numerics modes](#modes) |
 | `-h`, `--help` | help |
 
 Examples:
@@ -183,7 +186,7 @@ request slots, a prefix cache in VRAM and host RAM / SSD tiers for idle sessions
 | `-np`, `--parallel N` | concurrent request slots (continuous batching), 1–16, default 4 (1 on cards with less than 20 GiB of VRAM, see `WHIRL_VRAM_HEADROOM_MB`) |
 | `-c`, `--ctx N` | size of the shared KV pool in tokens. Slots take pages on demand; when the pool is full, idle slots' prefix caches are evicted (least recently used first). Default: all VRAM left after weights and buffers minus 768 MiB (MoE: 1.5 GiB) |
 | `--ctx-per-slot N` | longest context of one request (default min(pool, 131072); up to 262144) |
-| `--precise` / `--balance` / `--fast` / `--mode M` | numerics mode (default precise: f16 KV; when the f16 pool cannot hold a full request the context per request is lowered with a warning, or the server refuses to start if `--ctx` / `--ctx-per-slot` was given). See [numerics modes](#modes) |
+| `--precise` / `--balance` / `--fast` / `--mode M` | numerics mode (default balance; `--precise`: f16 KV; when the f16 pool cannot hold a full request the context per request is lowered with a warning, or the server refuses to start if `--ctx` / `--ctx-per-slot` was given). See [numerics modes](#modes) |
 | `--mtp-drafts N` | fixed MTP drafts per cycle, 1–10 (default: chosen per model type by a cost model) |
 | `--decode-min-tps N` | decode floor: while other requests prefill, every streaming (decoding) request keeps at least N tok/s; prefill forwards are shortened and decode cycles interleaved to hold it (default 20; `0` = off, prefill forwards are not limited). Outputs are identical for any N ([server.md](guide/en/server.md#batching)) |
 | `--kv-ram-mb N` | host RAM tier of the prefix cache, MiB of pinned memory (default: 1/4 of physical RAM, at least 8 GiB or one full-length session if that is larger — about 9 GiB for the 27B model —, at most 32 GiB, and at most half of the RAM available at startup; 16 GiB on a 64 GB PC; off by default on integrated GPUs). The startup log prints the chosen size and why. Idle sessions are copied there and restored instead of prefilled again. `0` disables both host tiers. **Radeon 8060S** (integrated GPU): default `0` — the KV pool already lives in system memory; give a size to turn the RAM and SSD tiers on |
@@ -321,7 +324,7 @@ experiments and measurements.
 | `WHIRL_HIP_DEVICE=N` | device index, bypassing device matching and the one-process-per-GPU lock |
 | `WHIRL_GPU_SHARE=1` | do not wait for other WHIRL processes on the same GPU |
 | `WHIRL_GPU_WAIT=S` | seconds to wait for another WHIRL process to free the GPU (default 1800) |
-| `WHIRL_MODE=precise\|balance\|fast[:ITEMS]` | numerics mode (= `--precise` / `--balance` / `--fast` / `--mode`; default precise). See [numerics modes](#modes) |
+| `WHIRL_MODE=precise\|balance\|fast[:ITEMS]` | numerics mode (= `--precise` / `--balance` / `--fast` / `--mode`; default balance). See [numerics modes](#modes) |
 | `WHIRL_KV=auto\|f16\|q8\|q8h\|q8v` | KV cache format. `auto` (default): f16; in balance / fast mode dense models fall back to q8v, then q8h, when f16 does not fit; MoE always f16. In precise mode a q8 value is a user-requested lossy override. The Radeon 8060S has no q8v / q8h kernels: auto falls back to q8 there, and `q8v` / `q8h` are refused. See [kv-and-caching.md](guide/en/kv-and-caching.md#formats) |
 | `WHIRL_PREFILL_BATCH=N` | prefill rows per forward (default 4096, up to 16384) |
 | `WHIRL_MAX_CTX=N` | default context size of `chat` (= `--ctx`; default 8192) |

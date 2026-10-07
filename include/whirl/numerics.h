@@ -1,8 +1,8 @@
-// Numerics modes: precise (default), balance, fast.
+// Numerics modes: precise, balance (default), fast.
 // SPDX-License-Identifier: Apache-2.0
 //
 // One mode per process, decided at load (KV format, kernel set and tuning are load-time):
-//  - precise (default): GGUF weights dequantized to f16, f16/f32 activations and accumulation in
+//  - precise (opt-in, --precise): GGUF weights dequantized to f16, f16/f32 activations and accumulation in
 //    prefill, f32 DeltaNet chunks, f16 KV on every card (never quantized unless the user sets
 //    WHIRL_KV). If f16 KV does not fit, the context shrinks (when not given explicitly) or the load
 //    stops with a message pointing to --balance / a shorter context.
@@ -102,6 +102,7 @@ struct ItemState {
 
 struct Plan {
     Mode mode = Mode::precise;
+    std::string source = "default";  // where the mode came from: default (balance), command line, WHIRL_MODE
     std::array<ItemState, n_items> items{};
     std::vector<std::string> overrides;  // per-item environment variables that changed the mode's choice
     bool lossy_override = false;         // an override made precise lossy

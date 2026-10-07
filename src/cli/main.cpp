@@ -74,9 +74,9 @@ const char* k_help_main =
 
 #define WHIRL_HELP_MODES                                                                            \
     "  --precise | --balance | --fast\n"                                                            \
-    "                             numerics mode (default precise: f16/f32 activations, f16 KV;\n"   \
-    "                             balance: fp8 MXFP4 prefill, int8 KV when f16 does not fit, ...;\n" \
-    "                             fast: balance + future lossy items). --balance=fp8,kvq8 picks\n"  \
+    "                             numerics mode (default balance: fp8 MXFP4 prefill, int8 KV when\n" \
+    "                             f16 does not fit, ...; --precise: f16/f32 activations, f16 KV;\n"  \
+    "                             --fast: balance + 4-bit KV, relaxed MTP acceptance). --balance=fp8,kvq8 picks\n" \
     "                             items; --mode M also works; env WHIRL_MODE\n"
 
 const char* k_help_chat =

@@ -279,7 +279,7 @@ struct LoadOptions {
     // Keep token_embd in pinned host memory instead of VRAM.
     bool embd_on_host = false;
     KvMode kv_mode = KvMode::automatic;
-    // Numerics mode (whirl/numerics.h): precise (default) / balance / fast and the lossy items.
+    // Numerics mode (whirl/numerics.h): precise / balance (default) / fast and the lossy items.
     // Precise: no fp8 / MoE fp8 / f16-WMMA DeltaNet / h16, f16 KV (WHIRL_KV still honoured).
     whirl::numerics::Request numerics;
     // CLI KV pool (max_ctx_req > 0): the context was given explicitly (precise f16 KV that does not

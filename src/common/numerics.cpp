@@ -117,8 +117,8 @@ Request parseMode(std::string_view spec, std::string source) {
     name = lower(trim(name));
     Request r;
     r.source = std::move(source);
-    if (name == "precise" || name.empty() || name == "default") r.mode = Mode::precise;
-    else if (name == "balance" || name == "balanced") r.mode = Mode::balance;
+    if (name == "precise") r.mode = Mode::precise;
+    else if (name == "balance" || name == "balanced" || name.empty() || name == "default") r.mode = Mode::balance;
     else if (name == "fast") r.mode = Mode::fast;
     else throw std::invalid_argument(std::format("unknown numerics mode '{}' (precise, balance or fast)", name));
     if (r.mode == Mode::precise) {
@@ -167,12 +167,13 @@ bool modeFlag(std::string_view arg, std::string* spec, bool* takes_next) {
 Request resolve(std::optional<std::string> cli_spec, std::optional<std::string> env_mode) {
     if (cli_spec) return parseMode(*cli_spec, "command line");
     if (env_mode && !trim(*env_mode).empty()) return parseMode(*env_mode, "WHIRL_MODE");
-    return Request{};
+    return parseMode("balance", "default");  // no flag: balance (precise and fast are opt-in)
 }
 
 Plan plan(const Request& r, const Target& t) {
     Plan p;
     p.mode = r.mode;
+    p.source = r.source;
     p.q8dec = r.mode != Mode::precise;  // the loader confirms (setQ8dec: WHIRL_Q8DEC, kernels)
     for (std::size_t i = 0; i < n_items; ++i) {
         const Item it = static_cast<Item>(i);
@@ -290,6 +291,8 @@ std::string logLine(const Plan& p) {
 std::string propsJson(const Plan& p, std::string_view kv) {
     std::string b = "{\"mode\":";
     jsonStr(b, modeName(p.mode));
+    b += ",\"source\":";
+    jsonStr(b, p.source);
     b += ",\"label\":";
     jsonStr(b, modeLabel(p));
     b += ",\"enabled\":[";

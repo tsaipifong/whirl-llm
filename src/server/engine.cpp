@@ -1104,6 +1104,16 @@ std::uint32_t Engine::sampleRace(Sampler& s) {
     return best;
 }
 
+double Engine::probOf(Sampler& s, std::uint32_t t) {
+    const std::vector<Cand>& c = *s.cands;
+    for (std::size_t i = 0; i < s.n; ++i)
+        if (c[i].id == t) return c[i].p;
+    if (s.closed) return 0;
+    float l = 0;
+    ops_.download(&l, logitsRow(s.row) + static_cast<std::uint64_t>(t) * 4, 4);
+    return std::exp(static_cast<double>(l - s.m) * s.inv_t) / static_cast<double>(s.sum);
+}
+
 std::uint32_t Engine::sampleRow(Sampler& s, std::optional<std::uint32_t> ex, double p_ex) {
     if (s.race && !ex) return sampleRace(s);
     const double u = s.uniform();

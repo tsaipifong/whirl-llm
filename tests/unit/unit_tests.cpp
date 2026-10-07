@@ -717,8 +717,11 @@ void testNumerics() {
     using nu::Item;
     using nu::Mode;
     // parsing and resolution
-    CHECK(nu::resolve(std::nullopt, std::nullopt).mode == Mode::precise);
-    CHECK(nu::resolve(std::nullopt, std::string("")).mode == Mode::precise);
+    CHECK(nu::resolve(std::nullopt, std::nullopt).mode == Mode::balance);  // default: balance
+    CHECK(nu::resolve(std::nullopt, std::nullopt).items == nu::balance_items);
+    CHECK(nu::resolve(std::nullopt, std::nullopt).source == "default");
+    CHECK(nu::resolve(std::nullopt, std::string("")).mode == Mode::balance);
+    CHECK(nu::resolve(std::string("precise"), std::nullopt).mode == Mode::precise);
     CHECK(nu::resolve(std::nullopt, std::string("balance")).mode == Mode::balance);
     CHECK(nu::resolve(std::nullopt, std::string("Balanced")).mode == Mode::balance);
     CHECK(nu::resolve(std::string("precise"), std::string("fast")).mode == Mode::precise);  // command line first

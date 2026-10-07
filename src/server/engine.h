@@ -441,6 +441,7 @@ private:
                     std::uint32_t dst_rows, std::uint32_t out0);
     static std::size_t sampBytes();
     void fetchCands(Sampler& s, std::uint32_t rows);
+    double probOf(Sampler& s, std::uint32_t t);  // relaxacc typical acceptance
     void prepareRow(Sampler& s, std::uint32_t r);
     void loadFullRow(std::uint32_t gr);
     std::uint32_t sampleRow(Sampler& s, std::optional<std::uint32_t> ex, double p_ex);

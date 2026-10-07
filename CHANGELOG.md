@@ -5,12 +5,16 @@ All notable changes to WHIRL are listed here. Versions follow `project(whirl VER
 
 ## Unreleased (0.2.0)
 
-### Numerics modes: precise (default), balance, fast
+### Numerics modes: balance (default), precise, fast
 
 - New `--precise` / `--balance` / `--fast` (or `--mode M`, env `WHIRL_MODE`) for `whirl` and
   `whirl-server`; one mode per process, reported in the start-up log and in `GET /props`
   (`"numerics"`). See [docs/usage.md](docs/usage.md#modes).
-- **precise is the new default** on every GPU: no fp8 MXFP4 prefill activations (and no rounding of
+- **balance stays the default** when no mode is given (owner decision for 0.2.0; same output as
+  0.1.x, including q8v KV on cards under 20 GiB); `--precise` and `--fast` are opt-in, `--balance`
+  is still accepted, and `GET /props` `"numerics"` reports `"source"` (`default`, `command line` or
+  `WHIRL_MODE`).
+- **precise** (`--precise`) on every GPU: no fp8 MXFP4 prefill activations (and no rounding of
   folded MXFP4 exponents), no fp8 MoE expert prefill, f32 DeltaNet prefill chunks instead of
   f16-WMMA, no f16 GEMM intermediates (h16), and **f16 KV everywhere** (no automatic q8v / q8h / q8,
   also on cards under 20 GiB and on the Radeon 8060S). When f16 KV does not fit, the context is
