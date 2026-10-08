@@ -365,7 +365,7 @@ asm 屏障，因為編譯器把 `x*x` 收縮進第一個 butterfly 加法，並�
     再跑 f16 的 `attn_prefill_wmma`；超過暫存容量的 key 交給 `attn_prefill_wmma_s`（softmax 狀態存在 `st_ml` / 輸出裡，同 `attn_kgs`）。
     與舊的 `attn_prefill_wmma_q8` / `_q4` loader 逐位元相同。`_s` 版溢出 56 個 VGPR（一般版 256、無溢出），只在約 139k 以上或設
     `WHIRL_ATTN_SEG` 時用到。端到端（Qwen3.8-27B Q4_K_M）的變化落在 8060S 連續量測的漂移內（±3%）：q8h 對 f16 8k −0.9%、64k −1.1%
-    （兩輪平均）、128k −4.0%（單輪、f16 先跑）；舊 loader 在 8k / 64k 為 −2.1% / −2.2%。kernel bench 的結論不同：它顯示 f16 kernel 比
+    （兩輪平均）、128k −0.1%（兩輪反序平均；每對中先跑的快約 4%）；舊 loader 在 8k / 64k 為 −2.1% / −2.2%。kernel bench 的結論不同：它顯示 f16 kernel 比
     int8 loader 慢、key 每 16k–32k 分段可快 26–35%（各格式都是），但端到端都看不到（`WHIRL_ATTN_SEG=32768`：64k 不變）。8060S 的
     attention kernel bench 數字要小心解讀；原因尚未查明（bench 裡的速度取決於一次 launch 涵蓋多少 head / key）。
   - **0.2.0 起 q8 / q8h（Q8P）：`kv_dq_rows` + f16 的 `attn_kg`。** 用隨機 K/V 量（上面的 f16 probe 用常數資料，

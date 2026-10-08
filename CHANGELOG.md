@@ -224,8 +224,8 @@ Every change below keeps the output bit-identical to plain greedy decoding, unle
   are unchanged. Speed, Qwen3.8-27B UD-Q4_K_M, end to end: within the run-to-run drift of the 8060S
   (about ±3% between consecutive 4-minute runs). balance q8h vs `WHIRL_KV=f16`: prefill 8k 374.2 vs
   377.5 tok/s (−0.9%; old loader 369.5, −2.1%); 64k, two runs in opposite orders, 279.6 / 279.7 vs
-  288.3 / 277.0 (mean −1.1%; old loader 272.8 / 280.2, −2.2%); 128k 212.1 vs 221.0 (−4.0%, f16 ran
-  first, one run each). fast q4 at 128k 211.9 vs the old loader 214.6 (−1.3%, noise). The kernel
+  288.3 / 277.0 (mean −1.1%; old loader 272.8 / 280.2, −2.2%); 128k, two runs in opposite orders,
+  212.1 / 221.9 vs 221.0 / 213.3 (mean −0.1%; whichever ran first was ~4% faster). fast q4 at 128k 211.9 vs the old loader 214.6 (−1.3%, noise). The kernel
   bench (4096 queries, 24 / 4 heads, random K / V) disagrees with the end-to-end runs: there the f16
   kernel on f16 data was slower than the int8 loader (64k 490–523 vs 388–425 ms) and key ranges of
   16k–32k keys cut f16 by 26–35%, but `WHIRL_ATTN_SEG=32768` end to end changed nothing (64k q8h

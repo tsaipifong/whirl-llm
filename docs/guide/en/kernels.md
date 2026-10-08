@@ -525,7 +525,7 @@ instead of f32 for their element-wise consumers (+5.4…+5.8% and +0.6%).
   the scratch. Bit-identical to the old `attn_prefill_wmma_q8` / `_q4` loaders. The `_s` variant
   spills 56 VGPRs (the plain kernel sits at 256 with none); it only runs past ~139k keys or with
   `WHIRL_ATTN_SEG`. End to end (Qwen3.8-27B Q4_K_M) the change is within the 8060S run-to-run drift
-  (±3%): q8h vs f16 8k −0.9%, 64k −1.1% (mean of two runs), 128k −4.0% (one run, f16 first); the old
+  (±3%): q8h vs f16 8k −0.9%, 64k −1.1% (mean of two runs), 128k −0.1% (two runs in opposite orders; the first run of a pair was ~4% faster); the old
   loader measured −2.1% / −2.2% at 8k / 64k. The kernel bench disagrees: it shows the f16 kernel
   slower than the int8 loader and key ranges of 16k–32k 26–35% faster for every format, but neither
   shows up end to end (`WHIRL_ATTN_SEG=32768`: 64k unchanged). Treat 8060S attention-kernel bench
