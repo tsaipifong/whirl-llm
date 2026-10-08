@@ -702,6 +702,11 @@ void testNumerics() {
     CHECK(nu::resolve(std::nullopt, std::nullopt).mode == Mode::balance);  // default: balance
     CHECK(nu::resolve(std::nullopt, std::nullopt).items == nu::balance_items);
     CHECK(nu::resolve(std::nullopt, std::nullopt).source == "default");
+    // FIX-PS: selftest loads in the default mode (balance) and Model::checkPreciseDecode turns the
+    // kernel-switching balance items off itself (fp8_prefill, moe_fp8, out_h16). A new balance
+    // item fails here: add its switch to checkPreciseDecode (or the precise selftest measures it).
+    CHECK(nu::balance_items ==
+          (nu::bit(Item::fp8) | nu::bit(Item::moefp8) | nu::bit(Item::gdnwmma) | nu::bit(Item::h16) | nu::bit(Item::kvq8) | nu::bit(Item::specsample)));
     CHECK(nu::resolve(std::nullopt, std::string("")).mode == Mode::balance);
     CHECK(nu::resolve(std::string("precise"), std::nullopt).mode == Mode::precise);
     CHECK(nu::resolve(std::nullopt, std::string("balance")).mode == Mode::balance);

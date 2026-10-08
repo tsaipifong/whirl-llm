@@ -23,6 +23,11 @@ All notable changes to WHIRL are listed here. Versions follow `project(whirl VER
 - **balance** is the 0.1.x / 0.2.0-rc behaviour, bit for bit (items `fp8`, `moefp8`, `gdnwmma`,
   `h16`, `kvq8`; `--balance=ITEMS` picks a subset). **fast** lists the future gated lossy items
   (4-bit KV, relaxed acceptance, ...); none is implemented yet, so fast runs as balance.
+- `whirl selftest`: the precise decode checks turn fp8 prefill, MoE fp8 and h16 off themselves
+  (FIX-PS). Since balance became the default, selftest loaded in balance and its "== prefill GEMM
+  rows" (MXFP4) and precise MoE n=17..32 checks compared against the fp8 prefill paths and
+  failed; precise itself was unchanged (`--precise` selftest and the precise goldens passed). The
+  log now prints the load mode.
 - **KV format fixed per mode (BAL-Q8)**: precise f16; balance q8h on dense models (KL vs f16
   0.0002–0.002) and f16 on MoE models; fast q4 (Radeon 8060S, and the R9700 since FAST-1c). The same on every card, CLI and server (one function,
   `numerics::chooseKv`, decided before the kernels load). The automatic f16 → q8v → q8h fallback and

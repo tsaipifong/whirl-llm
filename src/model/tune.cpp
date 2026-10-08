@@ -459,6 +459,21 @@ bool Model::checkPrefillInvariance(std::string& log) {
 bool Model::checkPreciseDecode(std::string& log) {
     const bool saved_prec = prec_dec;
     const u32 saved_small = small_max;
+    // The model may be loaded in balance / fast (selftest's default mode is balance since
+    // 0.2.0): turn every lossy prefill item off, as a --precise load has them, or the
+    // "== prefill GEMM rows" and MoE prefill-path comparisons below measure the fp8 / h16
+    // paths instead of the precise ones.
+    const bool saved_fp8 = fp8_prefill, saved_moe_fp8 = moe_fp8, saved_out_h16 = out_h16;
+    const auto restore = [&] {
+        prec_dec = saved_prec;
+        small_max = saved_small;
+        fp8_prefill = saved_fp8;
+        moe_fp8 = saved_moe_fp8;
+        out_h16 = saved_out_h16;
+    };
+    fp8_prefill = false;
+    moe_fp8 = false;
+    out_h16 = false;
     prec_dec = true;
     const u32 NP = 40;  // > every gvMax(): the prefill GEMM
     const std::vector<float> xs = randomNormal(static_cast<std::size_t>(NP) * ff_scratch, 13);
@@ -467,7 +482,7 @@ bool Model::checkPreciseDecode(std::string& log) {
     const std::string miss = precMissing();
     if (!miss.empty()) {
         log += "    precise decode: missing " + miss + " - FAIL\n";
-        prec_dec = saved_prec;
+        restore();
         return false;
     }
     for (std::size_t li = 0; li <= layers.size(); ++li) {
@@ -585,6 +600,8 @@ bool Model::checkPreciseDecode(std::string& log) {
             // balance / fast (int8 decode experts): a 17..32-row wide verify batch (small_max
             // raised as in verifyBatch) must give every row the bits of its 1-token decode
             prec_dec = false;
+            fp8_prefill = saved_fp8;  // the loaded balance / fast items
+            moe_fp8 = saved_moe_fp8;
             small_max = max_small_batch;
             for (u32 tk = 0; tk < 32; ++tk) {
                 hip::upload(x, xm.data() + static_cast<std::size_t>(tk) * E, E * 4ull);
@@ -604,13 +621,14 @@ bool Model::checkPreciseDecode(std::string& log) {
             }
             small_max = max_small_batch;
             prec_dec = true;
+            fp8_prefill = false;
+            moe_fp8 = false;
             if (!okb) all_ok = false;
             log += fmt("    balance MoE block (int8 decode experts), a token alone vs in a verify batch:%s %s\n", rb.c_str(), okb ? "ok" : "FAIL");
         }
         break;
     }
-    small_max = saved_small;
-    prec_dec = saved_prec;
+    restore();
     xq_src = 0;
     x16_src = 0;
     return all_ok;

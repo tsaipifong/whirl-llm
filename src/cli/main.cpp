@@ -1741,6 +1741,9 @@ int cmdSelftest(const Args& a) {
     hip::memset(m.ffn_g, 0, 4ull * m.max_batch * m.ff_scratch);
     bool ok = true;
     std::string log;
+    // the precise checks force the precise items themselves (fp8 / MoE fp8 / h16 off), whatever
+    // the load mode; the int8 and balance checks use the load mode's items
+    out(fmt("  numerics at load: %s (precise checks run with fp8 / MoE fp8 / h16 off)\n", whirl::numerics::modeName(m.num_req.mode)));
     out("  int8 GEMV vs f32 GEMV (random x, one matrix per type):\n");
     ok = m.checkGemvq(log) && ok;
     ok = m.checkGemvBitwise(log) && ok;
