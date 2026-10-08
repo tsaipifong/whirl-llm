@@ -808,6 +808,46 @@ void Model::prefillAttn(DevPtr q, const KvArgs& kva, DevPtr out, DevPtr pos, u32
             return;
         }
     }
+    // KG-3 (gfx1151, no attn_kg): q8 / q8h / q4 keys dequantized into ffn_g / ffn_u (kv_dq_rows_r) and the
+    // f16 attn_prefill_wmma on them - one launch series when they fit (rows <= dq_rows), else key ranges of
+    // <= dq_rows walked by attn_prefill_wmma_s with the softmax state carried. Bit-identical to
+    // attn_prefill_wmma_q8 / _q4 (same dequantization, same arithmetic on the same f16 values), which
+    // convert K / V in every block: q8h prefill was 2.7% slower than f16 at 64k.
+    if (kg == nullptr && attn_dqf_on && k.attn_pwf != nullptr && k.attn_pws != nullptr && k.kv_dq_rows_r != nullptr && dq_ptab != 0 &&
+        dq_st_ml != 0 && dq_rows >= 4096 && rows <= kDqMaxKeys && cfg.head_dim == 256) {
+        const u32 seg = attn_seg >= 256 ? std::min(attn_seg, dq_rows / 256 * 256) : dq_rows / 256 * 256;
+        for (u32 r0 = 0; r0 < rows; r0 += seg) {
+            const u32 r1 = std::min(rows, r0 + seg), nr = r1 - r0;
+            hip::launch(k.kv_dq_rows_r, D(static_cast<u32>((static_cast<u64>(nr) * row_el + 2047) / 2048)), D(256), 0, stream, kva, ffn_g, ffn_u,
+                        I(r0), I(nr), I(row_el));
+            KvArgs f{};
+            f.k = ffn_g - static_cast<u64>(r0) * row_el * 2;  // row r0 of the sequence = row 0 of the copy
+            f.v = ffn_u - static_cast<u64>(r0) * row_el * 2;
+            f.ptab = dq_ptab;
+            if (r0 == 0 && r1 == rows) {  // all keys in one range: the plain f16 kernel
+                for (u32 p = 0; p < parts; ++p)
+                    hip::launch(k.attn_pwf, D((n + 127) / 128, hp), D(256), 0, stream, q, f, out, I(cfg.n_head), I(cfg.n_head_kv),
+                                I(2 * cfg.head_dim), pos, I(n), scale, I(p * hp));
+                break;
+            }
+            const u32 sp = headParts(nr), shp = cfg.n_head / sp;
+            for (u32 p = 0; p < sp; ++p)
+                hip::launch(k.attn_pws, D((n + 127) / 128, shp), D(256), 0, stream, q, f, out, I(cfg.n_head), I(cfg.n_head_kv),
+                            I(2 * cfg.head_dim), pos, I(n), scale, I(p * shp), I(r0), I(r1), dq_st_ml);
+        }
+        return;
+    }
+    // KG-3 (gfx1151), WHIRL_ATTN_SEG: f16 KV walked in key ranges straight from the cache (same series)
+    if (kg == nullptr && !kv_q8 && attn_seg >= 256 && k.attn_pws != nullptr && dq_st_ml != 0 && cfg.head_dim == 256 && !kx && rows > attn_seg) {
+        for (u32 r0 = 0; r0 < rows; r0 += attn_seg) {
+            const u32 r1 = std::min(rows, r0 + attn_seg), nr = r1 - r0;
+            const u32 sp = headParts(nr), shp = cfg.n_head / sp;
+            for (u32 p = 0; p < sp; ++p)
+                hip::launch(k.attn_pws, D((n + 127) / 128, shp), D(256), 0, stream, q, kva, out, I(cfg.n_head), I(cfg.n_head_kv),
+                            I(2 * cfg.head_dim), pos, I(n), scale, I(p * shp), I(r0), I(r1), dq_st_ml);
+        }
+        return;
+    }
     // FC-1c: q8 / q8h past the scratch (rows > dq_rows) and q4 (no native attn_kg): the keys in ranges
     // of <= dq_rows, each dequantized into ffn_g / ffn_u and walked by attn_kgs with the softmax state
     // carried between ranges (bit-identical to one f16 attn_kg over all the dequantized keys)

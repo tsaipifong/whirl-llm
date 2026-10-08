@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <numeric>
 
 #include "kt.h"
@@ -187,9 +188,158 @@ static void benchPrefill(Ctx& c) {
     }
 }
 
+// gfx1151 (KG-3; no attn_kg): attn_prefill_wmma on f16 / q8 / q4 KV vs the dequantize-then-f16 paths:
+// "dq" / "dq4" (kv_dq_rows_r[_q4] of all keys + attn_prefill_wmma) and "dqs" / "dqs4" (key ranges of
+// WHIRL_KT_BENCH_SEG rows, default 32768, + attn_prefill_wmma_s); n = 4096 queries at the end of L
+// keys (WHIRL_KT_BENCH_L, default 65536 and 131072), 24 / 4 heads, head-range launches as the host
+// (~4096 x 128k query-key pairs per launch). The dq paths are checked bitwise against q8 / q4.
+static void benchPrefill1151(Ctx& c) {
+    const int hd = 256, qstride = 2 * hd, heads = 24, nkv = 4, n = 4096, rel = nkv * hd;
+    const float scale = 1.0f / 16.0f;
+    std::vector<int> lens = {65536, 131072};
+    if (const char* e = std::getenv("WHIRL_KT_BENCH_L")) lens = {std::atoi(e)};
+    const int seg = std::getenv("WHIRL_KT_BENCH_SEG") ? std::atoi(std::getenv("WHIRL_KT_BENCH_SEG")) : 32768;
+    const bool lp = std::getenv("WHIRL_KT_BENCH_LP") != nullptr;  // launch per 4096 x 32k pairs (instead of 4096 x 128k)
+    const auto fpw = c.fnOpt("attn_prefill_wmma"), fq8 = c.fnOpt("attn_prefill_wmma_q8"), fq4 = c.fnOpt("attn_prefill_wmma_q4"),
+               fps = c.fnOpt("attn_prefill_wmma_s"), fdr = c.fnOpt("kv_dq_rows_r"), fdr4 = c.fnOpt("kv_dq_rows_r_q4");
+    auto parts = [&](long long keys) {
+        const long long budget = 4096ll * (lp ? 32768ll : 131072ll);
+        int p = static_cast<int>(std::min<long long>(heads, (static_cast<long long>(n) * keys + budget - 1) / budget));
+        while (p > 1 && heads % p != 0) ++p;
+        return p;
+    };
+    for (const int L : lens) {
+        const int pages = (L + wk::kKvPage - 1) / wk::kKvPage;
+        const std::size_t rows = static_cast<std::size_t>(pages) * wk::kKvPage, nel = rows * rel;
+        std::vector<int> pt(static_cast<std::size_t>(pages)), idt(static_cast<std::size_t>(pages) + 1);
+        std::iota(pt.begin(), pt.end(), 0);
+        std::shuffle(pt.begin(), pt.end(), c.rng);
+        std::iota(idt.begin(), idt.end(), 0);
+        Buf dpt(pt), did(idt);
+        std::vector<std::int8_t> k8(nel), v8(nel);
+        for (auto& x : k8) x = static_cast<std::int8_t>(static_cast<int>(c.rng() % 255) - 127);
+        for (auto& x : v8) x = static_cast<std::int8_t>(static_cast<int>(c.rng() % 255) - 127);
+        std::vector<std::uint16_t> ksc(nel / 32), vsc(nel / 32), k16h(nel), v16h(nel);
+        {
+            const auto a = c.randu(nel / 32, 0.001f, 0.004f), b = c.randu(nel / 32, 0.002f, 0.01f);
+            for (std::size_t i = 0; i < ksc.size(); ++i) {
+                ksc[i] = f2h(a[i]);
+                vsc[i] = f2h(b[i]);
+            }
+            const auto kf = c.randn(nel, 0.3f), vf = c.randn(nel, 0.3f);
+            for (std::size_t i = 0; i < nel; ++i) {
+                k16h[i] = f2h(kf[i]);
+                v16h[i] = f2h(vf[i]);
+            }
+        }
+        // q4 cache: the same random bytes read as nibble pairs (first half of the int8 buffers)
+        Buf dk8(k8), dv8(v8), dks(ksc), dvs(vsc), dkf(k16h), dvf(v16h);
+        Buf sk(static_cast<std::size_t>(L) * rel * 2), sv(static_cast<std::size_t>(L) * rel * 2), st(static_cast<std::size_t>(n) * heads * 2 * 4);
+        const std::vector<float> qp = c.randn(static_cast<std::size_t>(n) * heads * qstride);
+        Buf dq(qp), dpos(std::vector<int>{L - n});
+        const std::size_t on = static_cast<std::size_t>(n) * heads * hd;
+        Buf out(on * 4);
+        wk::KvArgs af{}, a8{};
+        af.k = dkf.p();
+        af.v = dvf.p();
+        af.ptab = dpt.p();
+        a8.k = dk8.p();
+        a8.v = dv8.p();
+        a8.ks = dks.p();
+        a8.vs = dvs.p();
+        a8.ptab = dpt.p();
+        wk::KvArgs ad{};
+        ad.ptab = did.p();
+        const int P = parts(L), hp = heads / P;
+        auto direct = [&](hip::Function f, const wk::KvArgs& a) {
+            for (int p = 0; p < P; ++p)
+                hip::launch(f, {cdiv(n, 128), static_cast<unsigned>(hp), 1}, {256, 1, 1}, 0, c.s, dq.p(), a, out.p(), heads, nkv, qstride, dpos.p(), n,
+                            scale, p * hp);
+        };
+        auto dqAll = [&](hip::Function fd) {
+            hip::launch(fd, {cdiv(static_cast<std::uint64_t>(L) * rel, 2048), 1, 1}, {256, 1, 1}, 0, c.s, a8, sk.p(), sv.p(), 0, L, rel);
+            wk::KvArgs g = ad;
+            g.k = sk.p();
+            g.v = sv.p();
+            direct(fpw, g);
+        };
+        auto dqSeg = [&](hip::Function fd) {
+            for (int r0 = 0; r0 < L; r0 += seg) {
+                const int r1 = std::min(L, r0 + seg), nr = r1 - r0;
+                if (!fd) {  // f16 cache: key ranges straight through its page table
+                    const int sp = parts(nr), shp = heads / sp;
+                    for (int p = 0; p < sp; ++p)
+                        hip::launch(fps, {cdiv(n, 128), static_cast<unsigned>(shp), 1}, {256, 1, 1}, 0, c.s, dq.p(), af, out.p(), heads, nkv, qstride,
+                                    dpos.p(), n, scale, p * shp, r0, r1, st.p());
+                    continue;
+                }
+                hip::launch(fd, {cdiv(static_cast<std::uint64_t>(nr) * rel, 2048), 1, 1}, {256, 1, 1}, 0, c.s, a8, sk.p(), sv.p(), r0, nr, rel);
+                wk::KvArgs g = ad;
+                g.k = sk.p() - static_cast<DevPtr>(r0) * rel * 2;
+                g.v = sv.p() - static_cast<DevPtr>(r0) * rel * 2;
+                const int sp = parts(nr), shp = heads / sp;
+                for (int p = 0; p < sp; ++p)
+                    hip::launch(fps, {cdiv(n, 128), static_cast<unsigned>(shp), 1}, {256, 1, 1}, 0, c.s, dq.p(), g, out.p(), heads, nkv, qstride, dpos.p(),
+                                n, scale, p * shp, r0, r1, st.p());
+            }
+        };
+        struct Run {
+            const char* name;
+            int ref;  // 0 f16, 1 q8 family, 2 q4 family
+            std::function<void()> go;
+            bool ok;
+        };
+        const std::vector<Run> runs = {
+            {"attn_prefill_wmma (f16)", 0, [&] { direct(fpw, af); }, static_cast<bool>(fpw)},
+            {"f16s: f16 cache ranges + _s", 0, [&] { dqSeg(hip::Function{}); }, static_cast<bool>(fps)},
+            {"attn_prefill_wmma (f16) again", 0, [&] { direct(fpw, af); }, static_cast<bool>(fpw)},
+            {"attn_prefill_wmma_q8", 1, [&] { direct(fq8, a8); }, static_cast<bool>(fq8)},
+            {"dq: kv_dq_rows_r + f16", 1, [&] { dqAll(fdr); }, fdr && fpw},
+            {"dqs: ranges + _s", 1, [&] { dqSeg(fdr); }, fdr && fps},
+            {"attn_prefill_wmma_q4", 2, [&] { direct(fq4, a8); }, static_cast<bool>(fq4)},
+            {"dq4: kv_dq_rows_r_q4 + f16", 2, [&] { dqAll(fdr4); }, fdr4 && fpw},
+            {"dqs4: ranges + _s", 2, [&] { dqSeg(fdr4); }, fdr4 && fps},
+        };
+        double base_us = 0;
+        std::vector<float> ref[3];
+        for (const Run& r : runs) {
+            if (!r.ok) {
+                std::printf("   %s: not in this code object\n", r.name);
+                continue;
+            }
+            r.go();
+            c.sync();
+            hip::Event e0 = hip::eventCreate(true), e1 = hip::eventCreate(true);
+            const int iters = 3;
+            hip::eventRecord(e0, c.s);
+            for (int i = 0; i < iters; ++i) r.go();
+            hip::eventRecord(e1, c.s);
+            hip::eventSync(e1);
+            const double us = 1000.0 * hip::eventElapsedMs(e0, e1) / iters;
+            hip::eventDestroy(e0);
+            hip::eventDestroy(e1);
+            if (base_us == 0) base_us = us;
+            std::printf("   prefill %-28s n %d L %6d (seg %d): %10.1f us  %+6.1f%% vs f16\n", r.name, n, L, seg, us, 100.0 * (us / base_us - 1.0));
+            const auto o = out.down<float>(on);
+            if (ref[r.ref].empty()) {
+                ref[r.ref] = o;
+            } else {
+                std::size_t bad = 0;
+                for (std::size_t i = 0; i < o.size(); ++i) bad += std::memcmp(&o[i], &ref[r.ref][i], 4) != 0;
+                std::printf("   prefill %-28s bitwise mismatches vs the cache kernel: %zu of %zu\n", r.name, bad, o.size());
+            }
+            std::fflush(stdout);
+        }
+    }
+}
+
 void benchAttn(Ctx& c) {
     c.rep.family = "attnbench";
     if (std::getenv("WHIRL_KT_BENCH_PREFILL")) {
+        if (!c.fnOpt("attn_kg6") && c.fnOpt("attn_prefill_wmma_q8")) {
+            benchPrefill1151(c);
+            return;
+        }
         benchPrefill(c);
         return;
     }

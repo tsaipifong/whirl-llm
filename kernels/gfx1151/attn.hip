@@ -1260,9 +1260,18 @@ __device__ __forceinline__ void attn_prefill_impl_q8kv(const float *q, const KvA
             orow[d] = o[dt][v] * inv / (1.f + __expf(-gate[d]));
         }
 }
-template <int MODE, int Q8>
+// SEG (f16 only, KG-3; as attn_kgs on gfx1201): keys [kb0, kb1) of the sequence (kb0, kb1
+// multiples of FA_K, or kb1 = the last key + 1) in one launch of a series covering all keys: the
+// running softmax state (m, l in st_ml[query][head][2], the unnormalized O^T in out) is stored at
+// the end of a non-final range and loaded at the start of the next, so the series walks the same
+// tiles in the same order with the same arithmetic as one launch over all keys - bit-identical
+// output (a block whose keys all lie before kb0 returns at once; the range that holds a block's
+// last key writes its output).
+template <int MODE, int Q8, bool SEG = false>
 __device__ __forceinline__ void attn_prefill_impl(const float *q, const KvArgs &kv, float *out, int n_head, int n_kv,
-                      int q_stride, const int *pos, int n_tok, float scale, int h0) {
+                      int q_stride, const int *pos, int n_tok, float scale, int h0,
+                      int kb0 = 0, int kb1 = 0, float *st_ml = nullptr) {
+    static_assert(!SEG || Q8 == 0, "attn_prefill_wmma SEG: f16 K / V only");
     if constexpr (Q8) {
         attn_prefill_impl_q8kv<MODE, Q8>(q, kv, out, n_head, n_kv, q_stride, pos, n_tok, scale, h0);
         return;
@@ -1298,6 +1307,19 @@ __device__ __forceinline__ void attn_prefill_impl(const float *q, const KvArgs &
 
     const int last_q = min(q0 + FA_Q, n_tok) - 1;
     const int n_keys = pos0 + last_q + 1;
+    if constexpr (SEG) {
+        if (kb0 >= n_keys) return;  // done in an earlier range (block-uniform)
+        if (kb0 > 0) {
+            const float *orow = out + (size_t)my_qc * n_head * FA_D + (size_t)h * FA_D;
+            m = st_ml[((size_t)my_qc * n_head + h) * 2];
+            l = st_ml[((size_t)my_qc * n_head + h) * 2 + 1];
+#pragma unroll
+            for (int dt = 0; dt < FA_D / 16; ++dt)
+#pragma unroll
+                for (int v = 0; v < 8; ++v) o[dt][v] = orow[dt * 16 + CROW(lane, v)];
+        }
+    }
+    const int k_beg = SEG ? kb0 : 0, k_end = SEG ? min(n_keys, kb1) : n_keys;
     // per-thread load / store geometry (loop invariant and kept small: the kernel
     // sits at 256 VGPRs, and per-element 64-bit addresses made it spill)
     const int vd4 = (tid % 64) * 4, vkb = tid / 64;                      // V: dims vd4 .. +3 of keys vkb*8 .. +7
@@ -1330,7 +1352,7 @@ __device__ __forceinline__ void attn_prefill_impl(const float *q, const KvArgs &
             vr[r] = key < n_keys ? x : z;
         }
     };
-    for (int k0 = 0; k0 < n_keys; k0 += FA_K) {
+    for (int k0 = k_beg; k0 < k_end; k0 += FA_K) {
         __syncthreads();
         if (MODE != 1 || k0 == 0) {
             loadK(k0);
@@ -1430,6 +1452,20 @@ __device__ __forceinline__ void attn_prefill_impl(const float *q, const KvArgs &
         }
     }
     if (my_q >= n_tok) return;
+    if constexpr (SEG) {
+        if (k_end < n_keys) {  // not this block's last range: keep the running state
+            float *orow = out + (size_t)my_q * n_head * FA_D + (size_t)h * FA_D;
+            if (lane < 16) {
+                st_ml[((size_t)my_q * n_head + h) * 2] = m;
+                st_ml[((size_t)my_q * n_head + h) * 2 + 1] = l;
+            }
+#pragma unroll
+            for (int dt = 0; dt < FA_D / 16; ++dt)
+#pragma unroll
+                for (int v = 0; v < 8; ++v) orow[dt * 16 + CROW(lane, v)] = o[dt][v];
+            return;
+        }
+    }
     const float inv = 1.f / l;
     const float *gate = q + ((size_t)my_q * n_head + h) * q_stride + FA_D;
     float *orow = out + (size_t)my_q * n_head * FA_D + (size_t)h * FA_D;
@@ -1454,3 +1490,37 @@ FA_ENTRY(attn_prefill_wmma_q4, 0, 3)
 FA_ENTRY(fa_probe_noload, 1, false)
 FA_ENTRY(fa_probe_norescale, 2, false)
 FA_ENTRY(fa_probe_nopv, 3, false)
+// KG-3: key range [kb0, kb1) of the f16 kernel with the softmax state carried in st_ml / out
+// (see attn_prefill_impl); same grid and block as attn_prefill_wmma
+extern "C" __global__ void __launch_bounds__(256)
+    attn_prefill_wmma_s(const float *q, KvArgs kv, float *out, int n_head, int n_kv, int q_stride, const int *pos,
+                        int n_tok, float scale, int h0, int kb0, int kb1, float *st_ml) {
+    attn_prefill_impl<0, 0, true>(q, kv, out, n_head, n_kv, q_stride, pos, n_tok, scale, h0, kb0, kb1, st_ml);
+}
+
+// q8 / q8h / q4 KV prefill (KG-3, the gfx1151 port of Q8P / FC-1c): the K and V of keys
+// [r0, r0 + n_rows) of one sequence dequantized into contiguous f16 rows (k16 / v16:
+// [row][row_el], pool layout without pages), so the prefill attention runs the f16
+// attn_prefill_wmma (or attn_prefill_wmma_s over key ranges) on them. Same dequantization as
+// the q8 / q4 tile loaders of attn_prefill_wmma_q8 / _q4 (kv_ld8: kv_dq8 / kv_dq4), and the f16
+// kernel does the same arithmetic on the same f16 values, so the output is bit-identical; the
+// old loaders converted K / V in every block (each query block and head again).
+// grid ceil(n_rows * row_el / 2048), block 256; row_el % 32 == 0
+template <int F>
+__device__ __forceinline__ void kv_dq_rows_impl(const KvArgs &kv, _Float16 *k16, _Float16 *v16, int r0, int n_rows, int row_el) {
+    const size_t o = ((size_t)blockIdx.x * 256 + threadIdx.x) * 8;
+    if (o >= (size_t)n_rows * row_el) return;
+    const int p = r0 + (int)(o / row_el), e = (int)(o % row_el);
+    const size_t src = (size_t)kv_row(kv, kv.tab0, p) * row_el + e;
+    *(half8 *)(k16 + o) = kv_ld8<F>(kv.k, kv.ks, src);
+    *(half8 *)(v16 + o) = kv_ld8<F>(kv.v, kv.vs, src);
+}
+extern "C" __global__ void __launch_bounds__(256) kv_dq_rows(KvArgs kv, _Float16 *k16, _Float16 *v16, int n_rows, int row_el) {
+    kv_dq_rows_impl<1>(kv, k16, v16, 0, n_rows, row_el);
+}
+extern "C" __global__ void __launch_bounds__(256) kv_dq_rows_r(KvArgs kv, _Float16 *k16, _Float16 *v16, int r0, int n_rows, int row_el) {
+    kv_dq_rows_impl<1>(kv, k16, v16, r0, n_rows, row_el);
+}
+extern "C" __global__ void __launch_bounds__(256) kv_dq_rows_r_q4(KvArgs kv, _Float16 *k16, _Float16 *v16, int r0, int n_rows, int row_el) {
+    kv_dq_rows_impl<2>(kv, k16, v16, r0, n_rows, row_el);
+}

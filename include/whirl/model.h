@@ -509,6 +509,10 @@ public:
     // q8 / q8h KV prefill attention: dequantize the sequence's keys into f16 rows in ffn_g / ffn_u, then
     // the f16 attn_kg (bit-identical to attn_kg_q8; WHIRL_ATTN_DQF=0 off); dq_ptab: identity page table
     bool attn_dqf_on = true;
+    // KG-3 (gfx1151): keys per range of the prefill attention key-range series (attn_prefill_wmma_s;
+    // 0 = one range when the keys fit the f16 scratch). WHIRL_ATTN_SEG (multiple of 256); f16 KV
+    // also walks its cache in ranges when set. Bit-identical either way.
+    std::uint32_t attn_seg = 0;
     DevPtr dq_ptab = 0;
     std::uint32_t dq_rows = 0;  // rows ffn_g / ffn_u hold
     // FC-1c: attn_kgs softmax state (m, l per query row and head) between key ranges of a prefill

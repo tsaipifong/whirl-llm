@@ -333,6 +333,9 @@ KernelTable KernelTable::load(const hip::Module& m, KvFormat kv) {
             k.attn_kgs4 = L.opt("attn_kgs4");
             k.attn_kgs2 = L.opt("attn_kgs2");
         }
+        // gfx1151 (KG-3): the f16 attn_prefill_wmma (on dequantized rows) and its key-range variant
+        k.attn_pws = L.opt("attn_prefill_wmma_s");
+        if (k.attn_pws != nullptr) k.attn_pwf = L.opt("attn_prefill_wmma");
     }
     // vision: multi-section RoPE attention prep (same KV-format choice as attn_prep)
     k.attn_prep_m = L.opt(kv == KvFormat::q8v ? "attn_prep_m_q8v" : kv == KvFormat::q8h ? "attn_prep_m_q8h" : kv == KvFormat::q8 ? "attn_prep_m_q8" : kv == KvFormat::q4 ? "attn_prep_m_q4" : "attn_prep_m");

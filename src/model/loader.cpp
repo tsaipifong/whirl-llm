@@ -639,6 +639,8 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
         m.dq_ptab = m.alloc(id.size() * 4);
         hip::upload(m.dq_ptab, id.data(), id.size() * 4);
     }
+    // KG-3: attn_prefill_wmma_s softmax state (also f16 KV, for WHIRL_ATTN_SEG key ranges)
+    if (m.dq_st_ml == 0 && m.k.attn_pws != nullptr) m.dq_st_ml = m.alloc(B * cfg.n_head * 2 * f4);
     {
         u64 max_elems = 0;
         for (const Layer& L : m.layers)

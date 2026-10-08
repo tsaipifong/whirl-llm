@@ -814,6 +814,7 @@ void loadOrTune(Model& m, const std::string& model_path, std::string& log) {
     if (auto v = envGet("ATTN_KX")) m.attn_kx_on = *v != "0";
     if (auto v = envGet("ATTN_KG")) m.attn_kg_on = *v != "0";
     if (auto v = envGet("ATTN_DQF")) m.attn_dqf_on = *v != "0";
+    if (auto v = envGet("ATTN_SEG")) m.attn_seg = static_cast<std::uint32_t>(std::strtoul(v->c_str(), nullptr, 10)) / 256 * 256;
     if (auto v = envGet("GDN_BA")) m.gdn_ba_on = *v != "0";
     if (auto v = envGet("GDN_IN2")) m.gdn_in2_on = *v != "0";
     // f16 FFN / DeltaNet GEMM outputs: a balance item (WHIRL_FFN_H16 overrides)

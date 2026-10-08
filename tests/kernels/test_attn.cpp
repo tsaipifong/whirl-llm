@@ -994,6 +994,68 @@ void testAttn(Ctx& c) {
                         }
                     }
                 }
+                // KG-3 (gfx1151): kv_dq_rows[_r][_q4] + the f16 attn_prefill_wmma (one and two head-range
+                // launches) and attn_prefill_wmma_s over key ranges of 4096, 1024 and all keys (softmax state
+                // carried in st_ml / the output) == attn_prefill_wmma_q8 / _q4 on the cache, bitwise
+                if (fmt == Fmt::q8 || q4) {
+                    const auto fdr = c.fnOpt(q4 ? "kv_dq_rows_r_q4" : "kv_dq_rows_r"), fpw = c.fnOpt("attn_prefill_wmma"),
+                               fps = c.fnOpt("attn_prefill_wmma_s");
+                    if (fdr && fpw && fps) {
+                        const int rows = p0 + n, rel = nkv * kHd;
+                        std::vector<int> idt(static_cast<std::size_t>(rows / wk::kKvPage + 1));
+                        std::iota(idt.begin(), idt.end(), 0);
+                        Buf did(idt), st(static_cast<std::size_t>(n) * kHeads * 2 * 4);
+                        const std::string fn = fmtName(fmt);
+                        {
+                            Buf k16(static_cast<std::size_t>(rows) * rel * 2), v16(static_cast<std::size_t>(rows) * rel * 2);
+                            if (const auto fdq = q4 ? hip::Function{} : c.fnOpt("kv_dq_rows"))
+                                hip::launch(fdq, {static_cast<unsigned>(cdiv(static_cast<long long>(rows) * rel, 2048)), 1, 1}, {256, 1, 1}, 0, c.s, a,
+                                            k16.p(), v16.p(), rows, rel);
+                            else
+                                hip::launch(fdr, {static_cast<unsigned>(cdiv(static_cast<long long>(rows) * rel, 2048)), 1, 1}, {256, 1, 1}, 0, c.s, a,
+                                            k16.p(), v16.p(), 0, rows, rel);
+                            wk::KvArgs f{};
+                            f.k = k16.p();
+                            f.v = v16.p();
+                            f.ptab = did.p();
+                            for (const int split : {1, 2}) {
+                                const int hp = kHeads / split;
+                                Buf ob(on * 4);
+                                ob.fill(0x7f);
+                                for (int h0 = 0; h0 < kHeads; h0 += hp)
+                                    hip::launch(fpw, {cdiv(n, 128), static_cast<unsigned>(hp), 1}, {256, 1, 1}, 0, c.s, dq.p(), f, ob.p(), kHeads, nkv,
+                                                kQStride, dpos.p(), n, kScale, h0);
+                                c.sync();
+                                c.rep.add(cmpExact(std::string(q4 ? "kv_dq_rows_r_q4" : "kv_dq_rows") + " + attn_prefill_wmma == attn_prefill_wmma" + fs +
+                                                       (split > 1 ? " (2 head-range launches)" : "") + where,
+                                                   ob.down<float>(on), got, Kind::invariant));
+                            }
+                        }
+                        for (const int seg : {4096, 1024, 1 << 20}) {
+                            Buf sk(static_cast<std::size_t>(std::min(seg, rows)) * rel * 2), sv(static_cast<std::size_t>(std::min(seg, rows)) * rel * 2);
+                            Buf ob(on * 4);
+                            ob.fill(0x7f);
+                            for (int r0 = 0; r0 < rows; r0 += seg) {
+                                const int r1 = std::min(rows, r0 + seg), nr = r1 - r0;
+                                hip::launch(fdr, {static_cast<unsigned>(cdiv(static_cast<long long>(nr) * rel, 2048)), 1, 1}, {256, 1, 1}, 0, c.s, a, sk.p(),
+                                            sv.p(), r0, nr, rel);
+                                wk::KvArgs g{};
+                                g.k = sk.p() - static_cast<DevPtr>(r0) * rel * 2;
+                                g.v = sv.p() - static_cast<DevPtr>(r0) * rel * 2;
+                                g.ptab = did.p();
+                                for (int h0 = 0; h0 < kHeads; h0 += kHeads / 2)  // two head-range launches
+                                    hip::launch(fps, {cdiv(n, 128), static_cast<unsigned>(kHeads / 2), 1}, {256, 1, 1}, 0, c.s, dq.p(), g, ob.p(), kHeads, nkv,
+                                                kQStride, dpos.p(), n, kScale, h0, r0, r1, st.p());
+                            }
+                            c.sync();
+                            const auto sgv = ob.down<float>(on);
+                            c.rep.add(cmpExact("attn_prefill_wmma_s key ranges of " + std::to_string(std::min(seg, rows)) + " (" + fn + ") == attn_prefill_wmma" +
+                                                   fs + where,
+                                               sgv, got, Kind::invariant));
+                            if (seg == 4096 && seg_out.empty()) seg_out = sgv;
+                        }
+                    }
+                }
                 // CPU reference: first and last query
                 std::vector<int> rows = {0, n - 1};
                 if (n == 1) rows = {0};
@@ -1041,7 +1103,7 @@ void testAttn(Ctx& c) {
                     for (int t : rows)
                         sp.insert(sp.end(), seg_out.begin() + static_cast<std::ptrdiff_t>(t) * kHeads * kHd,
                                   seg_out.begin() + static_cast<std::ptrdiff_t>(t + 1) * kHeads * kHd);
-                    c.rep.add(cmpTol(std::string("kv_dq_rows_r + attn_kgs (") + fmtName(fmt) + ", 4096-key ranges) vs CPU" + where, sp, ro, rsc, 1e-2, 1e-4));
+                    c.rep.add(cmpTol(std::string("kv_dq_rows_r + ") + (c.fnOpt("attn_prefill_wmma_s") ? "attn_prefill_wmma_s (" : "attn_kgs (") + fmtName(fmt) + ", 4096-key ranges) vs CPU" + where, sp, ro, rsc, 1e-2, 1e-4));
                 }
                 if (n != 1) continue;
                 // decode at the end of the long context: attn_split / attn_wsplit1 + attn_combine vs the same CPU rows

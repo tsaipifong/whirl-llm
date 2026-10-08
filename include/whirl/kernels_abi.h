@@ -83,6 +83,8 @@
 //            sequence (tab0) dequantized into contiguous f16 rows; grid ceil(n_rows * row_el / 2048), block 256)
 //   kv_dq_rows_r[_q4](KvArgs, f16* k16, f16* v16, r0, n_rows, row_el): keys [r0, r0 + n_rows) into
 //            rows 0 .. n_rows - 1 (q8 / q8h, q4; gfx1201)
+//   attn_prefill_wmma_s (attn_prefill_wmma arguments, int kb0, int kb1, float* st_ml; gfx1151):
+//     the f16 attn_prefill_wmma over keys [kb0, kb1), softmax state carried as attn_kgs (KG-3)
 //   attn_kgs6 / 4 / 2 (attn_kg arguments, int kb0, int kb1, float* st_ml): f16 attn_kg over keys
 //            [kb0, kb1); m / l in st_ml[query][head][2] and the unnormalized output in out carry the
 //            softmax state between ranges (bit-identical to one attn_kg over all keys; gfx1201)
@@ -463,6 +465,9 @@ struct KernelTable {
     // FC-1c: key-range variants (prefills past the f16 scratch, q4 prefill): kv_dq_rows_r (q8 / q8h)
     // or kv_dq_rows_r_q4 (q4) + attn_kgs* (f16 attn_kg over a key range, softmax state carried)
     F kv_dq_rows_r{}, attn_kgs6{}, attn_kgs4{}, attn_kgs2{};
+    // KG-3 (gfx1151): q8 / q8h / q4 prefill on dequantized rows: the f16 attn_prefill_wmma and its
+    // key-range variant attn_prefill_wmma_s (softmax state carried; null when not in the code object)
+    F attn_pwf{}, attn_pws{};
     F gdn_conv_seq{}, gdn_gates{}, gdn_gates_ba{}, gdn_seq_128{}, f32_to_f16{}, gdn_gated_norm{};
     F argmax{}, quantize_q8{};
     F gdn_chunk_prep{}, gdn_chunk_scan{}, gdn_wprep{}, gdn_wscan8{};
