@@ -1882,13 +1882,21 @@ void Model::prefillWithMtpFrom(std::span<const u32> tokens, u32 pos0, DevPtr pre
 
 // One chunk of an MTP prefill: tokens[off .. off + n] at positions pos0 + off
 // .., then the MTP rows pairing each of their trunk hiddens with the following
-// token (the final chunk's last hidden goes to mtp_h).
+// token. The row pairing a chunk's LAST hidden with the next token is not run
+// in that chunk: the chunk's last hidden goes to mtp_h, and the next chunk runs
+// that boundary row on its own (one row) before its forward, exactly as a
+// prefix-cache resume at that position does (prev_hidden = the checkpoint's
+// hidden). So the MTP KV (and every later draft) is bitwise the same whether
+// the prompt was prefilled cold or resumed from a checkpoint at a chunk end:
+// small-row MTP forwards (q8 activations, fused kernels) are not bitwise equal
+// to the same row inside a larger batch. Exact acceptance never showed the
+// difference; relaxacc (fast) keeps drafts, so the text depended on it (FIX-FS).
+// The final chunk's last hidden stays in mtp_h for the first decode draft.
 void Model::prefillMtpChunk(std::span<const u32> tokens, u32 pos0, std::size_t off, std::size_t n, std::optional<DevPtr> prev_hidden) {
     const u64 E = cfg.n_embd;
-    if (off == 0 && prev_hidden) {
-        hip::copyAsync(mtp_h, *prev_hidden, E * 4, stream);
-        (void)mtpForward(mtp_h, tokens.subspan(0, 1), pos0, false);
-    }
+    if (off == 0 && prev_hidden) hip::copyAsync(mtp_h, *prev_hidden, E * 4, stream);
+    // mtp_h: the previous chunk's last hidden (off > 0) or the checkpoint's (resume)
+    if (off > 0 || prev_hidden) (void)mtpForward(mtp_h, tokens.subspan(off, 1), pos0 + static_cast<u32>(off), false);
     const u32 p = pos0 + static_cast<u32>(off);
     keep_hidden = true;
     try {
@@ -1898,10 +1906,8 @@ void Model::prefillMtpChunk(std::span<const u32> tokens, u32 pos0, std::size_t o
         throw;
     }
     keep_hidden = false;
-    const bool is_last = off + n == tokens.size();
-    const std::size_t nm = is_last ? n - 1 : n;
-    if (nm > 0) (void)mtpForward(hn, tokens.subspan(off + 1, nm), p + 1, false);
-    if (is_last) hip::copyAsync(mtp_h, hn + (n - 1) * E * 4, E * 4, stream);
+    if (n > 1) (void)mtpForward(hn, tokens.subspan(off + 1, n - 1), p + 1, false);
+    hip::copyAsync(mtp_h, hn + (n - 1) * E * 4, E * 4, stream);
 }
 
 bool Model::canSegment() const {
@@ -1924,13 +1930,14 @@ void Model::prefillSegs(std::span<const PSeg> segs, bool with_mtp) {
         total += static_cast<u32>(sg.n);
     }
     if (total > max_batch) throw ModelError("BatchTooLarge");
-    // MTP rows pairing a cached prefix's last hidden with tokens[0] (solo order)
+    // boundary MTP rows, one row each as in prefillMtpChunk (solo order): a cached
+    // prefix's last hidden (off 0) or the previous chunk's (in mtp_h) with tokens[off]
     if (with_mtp)
         for (const PSeg& sg : segs)
-            if (sg.off == 0 && sg.prev_hidden) {
+            if (sg.off > 0 || sg.prev_hidden) {
                 selectSeq(sg.seq);
-                hip::copyAsync(mtp_h, *sg.prev_hidden, E * 4, stream);
-                (void)mtpForward(mtp_h, sg.tokens.subspan(0, 1), sg.pos0, false);
+                if (sg.off == 0) hip::copyAsync(mtp_h, *sg.prev_hidden, E * 4, stream);
+                (void)mtpForward(mtp_h, sg.tokens.subspan(sg.off, 1), sg.pos0 + static_cast<u32>(sg.off), false);
             }
     const std::size_t cap = host_ids.size() / 2;
     for (std::size_t kk = 0; kk < segs.size(); ++kk) {
@@ -1991,10 +1998,9 @@ void Model::prefillSegs(std::span<const PSeg> segs, bool with_mtp) {
         selectSeq(sg.seq);
         const DevPtr hid = hn + static_cast<u64>(rows[kk].r0) * E * 4;
         const u32 p = sg.pos0 + static_cast<u32>(sg.off);
-        const bool is_last = sg.off + sg.n == sg.tokens.size();
-        const std::size_t nm = is_last ? sg.n - 1 : sg.n;
-        if (nm > 0) (void)mtpForward(hid, sg.tokens.subspan(sg.off + 1, nm), p + 1, false);
-        if (is_last) hip::copyAsync(mtp_h, hid + (sg.n - 1) * E * 4, E * 4, stream);
+        // the row pairing the last hidden with the next token runs with the next chunk
+        if (sg.n > 1) (void)mtpForward(hid, sg.tokens.subspan(sg.off + 1, sg.n - 1), p + 1, false);
+        hip::copyAsync(mtp_h, hid + (sg.n - 1) * E * 4, E * 4, stream);
     }
 }
 

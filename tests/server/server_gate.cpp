@@ -218,6 +218,13 @@ public:
                 std::wstring k = s.substr(0, eq), up = k;
                 for (auto& c : up) c = static_cast<wchar_t>(towupper(c));
                 if (up.rfind(L"WHIRL_", 0) == 0 && up != L"WHIRL_DEVICE" && up != L"WHIRL_VRAM_LIMIT_MB" && up != L"WHIRL_MODE") continue;
+                bool overridden = false;  // the extras replace an inherited variable (no duplicate entry)
+                for (const auto& [ek, ev] : env_add) {
+                    std::wstring eu = widen(ek);
+                    for (auto& c : eu) c = static_cast<wchar_t>(towupper(c));
+                    overridden = overridden || eu == up;
+                }
+                if (overridden) continue;
                 envv.emplace_back(k, s.substr(eq + 1));
             }
             FreeEnvironmentStringsW(blk);
@@ -882,6 +889,51 @@ void suiteMtCache() {
              "full");
     evaluate("noreason", runSession("noreason", "", {"What is 12 * 12?", "Double it.", "Now subtract 50."}, true, false, false, 1200),
              "prev");
+}
+
+// ---------------------------------------------------------------------------
+// suite fast_stream: fast mode (relaxacc forced on, also for MoE) gives the same text
+// streamed or not, cold or resumed from a prefix-cache checkpoint (think-open, prompt
+// chunk ends, shared prefix). Reference: a server without the prefix cache (every
+// request cold). FIX-FS: a resume ran the MTP boundary row as one row, a cold prefill
+// inside a larger batch; relaxacc kept drafts that depended on it.
+
+void suiteFastStream() {
+    logLine("== suite fast_stream");
+    const std::string code = codeText(12000, 3);
+    struct Case {
+        const char* key;
+        std::string prompt;
+        bool think;
+        int max;
+    };
+    const std::vector<Case> cases = {{"zh_think", P_ZH, true, 200},
+                                     {"zh_nothink", P_ZH, false, 200},
+                                     {"code_long", code + "\n\nSummarize the above in three sentences.", false, 150},
+                                     {"code_shared", code + "\n\nList the main functions above, one line each.", true, 150}};
+    const std::map<std::string, std::string> env = {{"WHIRL_MODE", "fast"}, {"WHIRL_RELAX", "1"}};
+    std::map<std::string, ChatResult> ref;
+    {
+        std::map<std::string, std::string> e = env;
+        e["WHIRL_NO_PREFIX_CACHE"] = "1";
+        ServerLease s("fast_stream_cold", {}, e);
+        for (const Case& c : cases) ref[c.key] = chat(arr({msg("user", c.prompt)}), greedy(c.max) + thinkKw(c.think));
+    }
+    ServerLease s("fast_stream", {}, env);
+    for (const Case& c : cases) {
+        const ChatResult& r0 = ref[c.key];
+        check(std::string("fast_stream: cold reference ") + c.key, r0.status == 200 && (!r0.content.empty() || !r0.reasoning.empty()),
+              brief(r0));
+        record(std::string("fast_stream/") + c.key, r0.text());
+        // non-stream / stream twice each: the first may be cold (or a shared-prefix resume),
+        // the others resume from this prompt's checkpoints
+        for (int i = 0; i < 4; ++i) {
+            const bool st = (i % 2) == 1;
+            const ChatResult r = chat(arr({msg("user", c.prompt)}), greedy(c.max) + thinkKw(c.think), st);
+            check(std::format("fast_stream: {} #{} ({}) == cold", c.key, i, st ? "stream" : "non-stream"),
+                  r.status == 200 && r.content == r0.content && r.reasoning == r0.reasoning && r.finish == r0.finish, brief(r));
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1614,7 +1666,7 @@ int wmain(int argc, wchar_t** wargv) {
     }
     if ((g.exe.empty() || g.model.empty()) && g.compare.empty()) {
         std::fprintf(stderr,
-                     "usage: whirl-server-gate --exe PATH --kind whirl|proto --model GGUF --suite basic,mt_cache,pool,tier,sys,restore_conc,vis\n"
+                     "usage: whirl-server-gate --exe PATH --kind whirl|proto --model GGUF --suite basic,mt_cache,pool,tier,sys,restore_conc,vis,fast_stream\n"
                      "                         [--work DIR] [--port N] [--results OUT.json] [--compare REF.json] [--cli EXE] [--no-lock]\n"
                      "                         [--mmproj MMPROJ.gguf] [--images DIR]   (suite vis)\n"
                      "                         [--server-env NAME=VALUE ...] [--kv q8v|q8|f16|auto]   (default q8v)\n"
@@ -1633,7 +1685,8 @@ int wmain(int argc, wchar_t** wargv) {
     }
     const std::map<std::string, std::function<void()>> suites = {{"basic", suiteBasic}, {"mt_cache", suiteMtCache}, {"pool", suitePool},
                                                                  {"tier", suiteTier},   {"sys", suiteSys},           {"restore_conc", suiteRestoreConc},
-                                                                 {"vis", suiteVis},     {"vis_speed", suiteVisSpeed}};
+                                                                 {"vis", suiteVis},     {"vis_speed", suiteVisSpeed},
+                                                                 {"fast_stream", suiteFastStream}};
     if (!g.exe.empty()) {
         for (const auto& name : g.suites) {
             auto it = suites.find(name);
