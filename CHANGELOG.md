@@ -39,6 +39,16 @@ All notable changes to WHIRL are listed here. Versions follow `project(whirl VER
   GEMM) when an f16 output is wanted, so which GEMMs write f16 never depends on tuning timings.
   Greedy output of balance / fast changes for these models (goldens re-recorded); precise, MoE
   models without MXFP4 experts and the Radeon 8060S are unchanged.
+- **MoE verify batches over 16 rows on the decode experts (KG-2)**: `moeBlock` sends every batch up
+  to the current verify width (32 inside a wide verify / MTP step) through the int8 decode experts,
+  never the prefill grouped GEMM, so a 17–32-row verify computes each row exactly as its 1-token
+  decode (selftest: balance MoE block, n = 2..32 bitwise == n = 1). New opt-in
+  `WHIRL_MOE_WIDE=1` lets MoE models (balance / fast, R9700) use wide verify; it stays **off by
+  default**: MoE verifies were already capped at 16 rows (one user never exceeds 16), and with it
+  on, Ornith-1.5-35B-A3B MXFP4 at four users was slower (server_c4_nothink 386.0 → 379.4 tok/s,
+  −1.7%; batch_c4 498.7 → 486.9, −2.4%; one user unchanged, 7 prompts 255.7 → 255.8) because each
+  extra row reads its own experts. Output is the same either way (Ornith balance / fast, MTP +
+  n-gram == plain, solo and concurrent, also with forced n-gram drafts); goldens unchanged.
 - The per-item variables (`WHIRL_FP8`, `WHIRL_MOE_FP8`, `WHIRL_GDN_WMMA`, `WHIRL_FFN_H16`,
   `WHIRL_Q4_RELAXED`, `WHIRL_KV`) still work and override the mode (logged as user-requested).
 - New balance / fast item `specsample` (server, MTP models): with temperature > 0 the MTP drafts are

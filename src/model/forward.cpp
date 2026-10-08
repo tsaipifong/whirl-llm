@@ -522,8 +522,8 @@ bool Model::fusedDecode() const {
     return true;
 }
 
-// MoE: balance / fast only (17..32 rows on the int8 decode experts, see moeBlock); precise MoE
-// keeps 16-row verifies
+// MoE: balance / fast with WHIRL_MOE_WIDE=1 only (17..32 rows on the int8 decode experts, see
+// moeBlock); precise MoE keeps 16-row verifies
 bool Model::wideCapable() const {
     return wide_verify && (!cfg.moe || (moe_wide && !prec_dec)) && fusedDecode() && k.gemvx[ti(GgmlType::q4_k)] != nullptr;
 }

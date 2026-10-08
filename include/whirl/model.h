@@ -453,9 +453,10 @@ public:
     bool attn_dq4 = true;
     // batched verify of more than 16 rows (WHIRL_WIDE_VERIFY=0: at most 16 as before)
     bool wide_verify = true;
-    // wide verify on MoE models (balance / fast): 17..32-row verify batches take the int8 decode
-    // experts, like a 1-token decode (WHIRL_MOE_WIDE=0: MoE verify at most 16 rows as before)
-    bool moe_wide = true;
+    // wide verify on MoE models (balance / fast; WHIRL_MOE_WIDE=1): 17..32-row verify batches take
+    // the int8 decode experts, like a 1-token decode. Off by default: each extra row reads its own
+    // experts, and Ornith C=4 measured 1.7-2.4% slower with it (KG-2)
+    bool moe_wide = false;
     // output-head rows per range in a wide verify (two 16-token passes per range; WHIRL_HEAD_CHUNK)
     std::uint32_t head_chunk = 248320;
     bool float_gemv = false;

@@ -472,7 +472,7 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
     // MoE expert fp8: a balance item (WHIRL_MOE_FP8 overrides the mode)
     m.moe_fp8 = envFlag("MOE_FP8", opt.numerics.has(numerics::Item::moefp8));
     m.moe_mxw = envFlag("MOE_MXW", true);
-    m.moe_wide = envFlag("MOE_WIDE", true);  // MoE wide verify (balance / fast), see wideCapable
+    m.moe_wide = envFlag("MOE_WIDE", false);  // MoE wide verify (balance / fast, opt-in), see wideCapable
     m.moe_rbf = envFlag("MOE_RBF", true);
     m.layers.resize(cfg.n_layer);
     m.kcache.assign(cfg.n_layer, 0);
