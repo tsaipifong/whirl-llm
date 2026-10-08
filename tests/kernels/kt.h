@@ -194,6 +194,8 @@ void testQuant(Ctx& c);
 void testGemv(Ctx& c);
 void testGemm(Ctx& c);
 void testAttn(Ctx& c);
+void testGemvh(Ctx& c);   // "gemvh": bitwise sweep of precise-decode gemvh/gemvh2
+void benchGemvh(Ctx& c);  // "gemvhbench": timing only
 void benchAttn(Ctx& c);  // "attnbench": timing only, run with --only attnbench
 void testGdn(Ctx& c);
 void testMoe(Ctx& c);
