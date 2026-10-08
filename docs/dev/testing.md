@@ -87,8 +87,8 @@ unit tests and block tests. Until they exist, run G0 for those changes.
 | prefix_cache / PagePool | whirl-server-tests (prefix, shared sys, pool, restore), prefix_cache unit tests | no | no; on a behaviour change (not just a move) add server-gate mt_cache, sys (R9700) |
 | tier (RAM/SSD) | whirl-tier-tests, whirl-server-tests testTiers/testRestoreConcurrent | no | no; on an IO path change add server-gate tier (R9700) |
 | sampling / spec policy (CPU side) | whirl-model-tests, whirl-tests specSample, whirl-server-tests sampler/sampling/slotDraft | no | no |
-| spec acceptance behaviour (specsample/relaxacc) | the row above + G0 (fast, balance) + cmp_mtp | yes | yes |
-| engine scheduling (prefill grouping, decode loop) | all whirl-server-tests + G0 (pair suite) + server-gate basic | yes | R9700 only; 8060S at merge time |
+| spec acceptance behaviour (specsample/relaxacc) | the row above + G0 (fast, balance) + cmp_mtp + server-gate fast_stream (dense and MoE) | yes | yes |
+| engine scheduling (prefill grouping, decode loop) | all whirl-server-tests + G0 (pair suite) + server-gate basic (+ fast_stream when MTP prefill rows move) | yes | R9700 only; 8060S at merge time |
 | one forward block (host dispatch) | block tests (after R-7) + G0 | yes | shared caps paths: both; gfx1151-only paths: 8060S |
 | one kernel (*.hip, gfx1201) | whirl-kernel-test --family X (R9700) + G0 | yes | no |
 | one kernel (gfx1151/*.hip) | whirl-kernel-test --family X (8060S) + G0 (8060S) | yes | no |

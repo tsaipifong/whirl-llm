@@ -893,10 +893,14 @@ void suiteMtCache() {
 
 // ---------------------------------------------------------------------------
 // suite fast_stream: fast mode (relaxacc forced on, also for MoE) gives the same text
-// streamed or not, cold or resumed from a prefix-cache checkpoint (think-open, prompt
-// chunk ends, shared prefix). Reference: a server without the prefix cache (every
-// request cold). FIX-FS: a resume ran the MTP boundary row as one row, a cold prefill
-// inside a larger batch; relaxacc kept drafts that depended on it.
+// for a request streamed or not, cold or resumed from its own prefix-cache checkpoints
+// (think-open, prompt end, chunk ends). FIX-FS: a resume ran the MTP boundary row as one
+// row, a cold prefill inside a larger batch; relaxacc kept drafts that depended on it.
+// Reference: a server without the prefix cache (every request cold). A case that shares a
+// prefix with the previous one (zh_nothink after zh_think; code_shared after code_long) is
+// prefilled in other chunks than cold (resume at, or split for, the shared prefix): fast
+// output may differ from cold there (as with concurrent requests; exact acceptance hides
+// these last-bit differences), so its repeats are compared with its first reply only.
 
 void suiteFastStream() {
     logLine("== suite fast_stream");
@@ -906,32 +910,45 @@ void suiteFastStream() {
         std::string prompt;
         bool think;
         int max;
+        bool shared;  // shares a prefix with the previous case
     };
-    const std::vector<Case> cases = {{"zh_think", P_ZH, true, 200},
-                                     {"zh_nothink", P_ZH, false, 200},
-                                     {"code_long", code + "\n\nSummarize the above in three sentences.", false, 150},
-                                     {"code_shared", code + "\n\nList the main functions above, one line each.", true, 150}};
+    const std::vector<Case> cases = {{"zh_think", P_ZH, true, 200, false},
+                                     {"zh_nothink", P_ZH, false, 200, true},
+                                     {"code_long", code + "\n\nSummarize the above in three sentences.", false, 150, false},
+                                     {"code_shared", code + "\n\nList the main functions above, one line each.", true, 150, true}};
     const std::map<std::string, std::string> env = {{"WHIRL_MODE", "fast"}, {"WHIRL_RELAX", "1"}};
     std::map<std::string, ChatResult> ref;
     {
         std::map<std::string, std::string> e = env;
         e["WHIRL_NO_PREFIX_CACHE"] = "1";
         ServerLease s("fast_stream_cold", {}, e);
-        for (const Case& c : cases) ref[c.key] = chat(arr({msg("user", c.prompt)}), greedy(c.max) + thinkKw(c.think));
+        for (const Case& c : cases) {
+            if (c.shared) continue;
+            ref[c.key] = chat(arr({msg("user", c.prompt)}), greedy(c.max) + thinkKw(c.think));
+            check(std::string("fast_stream: cold reference ") + c.key,
+                  ref[c.key].status == 200 && (!ref[c.key].content.empty() || !ref[c.key].reasoning.empty()), brief(ref[c.key]));
+        }
     }
     ServerLease s("fast_stream", {}, env);
     for (const Case& c : cases) {
-        const ChatResult& r0 = ref[c.key];
-        check(std::string("fast_stream: cold reference ") + c.key, r0.status == 200 && (!r0.content.empty() || !r0.reasoning.empty()),
-              brief(r0));
-        record(std::string("fast_stream/") + c.key, r0.text());
-        // non-stream / stream twice each: the first may be cold (or a shared-prefix resume),
-        // the others resume from this prompt's checkpoints
+        // non-stream / stream twice each: #0 is cold (or a shared-prefix resume), the
+        // others resume from this prompt's own checkpoints (full hit or think-open)
+        ChatResult first;
         for (int i = 0; i < 4; ++i) {
             const bool st = (i % 2) == 1;
             const ChatResult r = chat(arr({msg("user", c.prompt)}), greedy(c.max) + thinkKw(c.think), st);
-            check(std::format("fast_stream: {} #{} ({}) == cold", c.key, i, st ? "stream" : "non-stream"),
-                  r.status == 200 && r.content == r0.content && r.reasoning == r0.reasoning && r.finish == r0.finish, brief(r));
+            if (i == 0) {
+                first = r;
+                record(std::string("fast_stream/") + c.key, r.text());
+                if (c.shared) {
+                    check(std::format("fast_stream: {} #0 (non-stream)", c.key), r.status == 200 && (!r.content.empty() || !r.reasoning.empty()),
+                          brief(r));
+                    continue;
+                }
+            }
+            const ChatResult& want = c.shared ? first : ref[c.key];
+            check(std::format("fast_stream: {} #{} ({}) == {}", c.key, i, st ? "stream" : "non-stream", c.shared ? "#0" : "cold"),
+                  r.status == 200 && r.content == want.content && r.reasoning == want.reasoning && r.finish == want.finish, brief(r));
         }
     }
 }

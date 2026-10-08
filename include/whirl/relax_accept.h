@@ -20,6 +20,10 @@
 // drafts were proposed, so with relaxacc the draft-count policy sees a fixed synthetic cycle cost
 // instead of wall-clock times and a solo request starts from a reset policy state. Concurrent
 // requests share the verify batch's draft count, so their outputs can depend on each other.
+// Kept drafts also depend on the last bits of the MTP / trunk rows, so a prompt prefilled in
+// other chunks (resumed from another prompt's shared prefix) can give another text; a repeat
+// resumed from its own checkpoints is bit-identical to the cold run (FIX-FS: the MTP boundary
+// row of a chunk runs alone in both, see Model::prefillMtpChunk).
 // The bonus token after the last
 // accepted draft is the target's own pick, so every emitted non-draft token is exact.
 // WHIRL_RELAX=0 turns the item off in fast mode; WHIRL_RELAX_K=1 is exact greedy acceptance.

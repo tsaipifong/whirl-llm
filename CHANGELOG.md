@@ -99,6 +99,22 @@ All notable changes to WHIRL are listed here. Versions follow `project(whirl VER
   99.2%), zh 128k 0.0071 (93.0%; the 9 differing rows are near ties, top-1 p ≤ 0.53), code 64k
   0.0100 (95.3%), zh 64k 0.0016 (95.3%). R9700 fast goldens re-recorded; precise / balance and every
   8060S golden unchanged.
+- fast: a repeated request gives the same text streamed or not (FIX-FS). The server gate's
+  "stream == non-stream zh_think" failed in fast mode (also with f16 KV): the stream request came
+  second and resumed from the prompt's think-open checkpoint, and the resume ran the MTP row that
+  pairs the checkpoint's last hidden with the next token as a one-row MTP forward, while the cold
+  prefill had run that row inside the previous chunk's batch. One-row MTP forwards (q8
+  activations, fused kernels) are not bit-identical to the same row in a larger batch, so the MTP
+  KV and then the drafts differed; exact acceptance (precise / balance, fast with `WHIRL_RELAX=0`)
+  never shows drafts in the text, `relaxacc` keeps them. Every MTP prefill (CLI and server, solo
+  and grouped chunks) now runs that chunk-boundary row alone at the start of the next chunk, as a
+  resume does, so a cold prefill and a resume from its own checkpoints are bit-identical. Cost:
+  one one-row MTP forward per prefill chunk boundary. Text unchanged for precise / balance (exact
+  acceptance) and for every golden (gfx1201 and gfx1151, fast included). A prompt resumed from
+  another prompt's shared prefix is still prefilled in other chunks than cold and can give
+  another fast text (documented, like concurrency). New server-gate suite `fast_stream` (fast,
+  relaxacc forced on, also MoE): cold reference server without the prefix cache vs stream /
+  non-stream repeats.
 - q8 / q8h (and q4) prefill past the f16 scratch (FAST-1c): a prefill whose keys exceed what
   `ffn_g` / `ffn_u` hold (~139k at batch 4096 on the 27B) fell back to `attn_kg_q8` (+29% at 256k
   keys); now the keys go in ranges of at most that size, each dequantized (`kv_dq_rows_r`) and

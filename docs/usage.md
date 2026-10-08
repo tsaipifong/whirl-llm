@@ -110,7 +110,9 @@ The per-item variables of [7.6](#env-numerics) (`WHIRL_FP8`, `WHIRL_MOE_FP8`, `W
 mode a lossy value is logged as `user-requested` and the mode reads `precise+overrides`.
 MTP / n-gram decoding equals plain greedy decoding, and concurrent requests equal solo runs, within
 each mode in precise and balance (and fast with `WHIRL_RELAX=0`; with `relaxacc` the fast output
-depends on the drafts). With temperature > 0, MTP decoding gives the same tokens as plain sampling
+depends on the drafts: a repeated request gives the same text streamed or not, cold or resumed from
+its own prefix-cache checkpoints, but a prompt resumed from another prompt's shared prefix is
+prefilled in other chunks, which can change fast output in the last bits, as concurrency can). With temperature > 0, MTP decoding gives the same tokens as plain sampling
 for a seed in precise and balance (with `specsample` too), whatever the prefix cache or earlier
 requests; balance (`specsample`) samples by a different (equally exact) rule than precise, so its
 tokens for a seed differ from precise's. Fast with `relaxacc` uses typical acceptance instead.

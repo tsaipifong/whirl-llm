@@ -93,7 +93,7 @@ numerics: balance - enabled: fp8, gdnwmma, h16, kvq8 (q8h KV (int8 + f16 scale /
 伺服器在 `GET /props` 回報模式（`"numerics": {"mode", "label", "enabled", "skipped", "overrides", "kv", "decode", "always_on"}`；`decode` 是 `f16` 或 `q8dec`）。
 [7.6](#env-numerics) 的單項變數（`WHIRL_FP8`、`WHIRL_MOE_FP8`、`WHIRL_GDN_WMMA`、`WHIRL_FFN_H16`、`WHIRL_Q4_RELAXED`）與
 除錯用的 `WHIRL_KV`（[7.7](#env-debug)）仍然有效，而且會覆寫模式；在 precise 模式下設成有損的值，log 會標示 `user-requested`，模式顯示為 `precise+overrides`。
-在 precise 與 balance 模式內（以及 fast 加 `WHIRL_RELAX=0`），MTP / n-gram 解碼等於純 greedy 解碼，並發請求等於單獨執行；fast 開著 `relaxacc` 時輸出取決於 draft。
+在 precise 與 balance 模式內（以及 fast 加 `WHIRL_RELAX=0`），MTP / n-gram 解碼等於純 greedy 解碼，並發請求等於單獨執行；fast 開著 `relaxacc` 時輸出取決於 draft：同一請求重送時，串流與否、冷啟動或從它自己的前綴快取檢查點續接，文字都相同；但從另一個 prompt 的共用前綴續接時分塊不同，fast 的輸出可能因最後幾個位元而改變（與並發請求相同）。
 
 ## <a id="chat"></a>2. `whirl chat`
 
