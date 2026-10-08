@@ -200,14 +200,15 @@ unit), which bit-exactness forbids skipping. Things that lost: 3–4 tiles per b
 The gfx1151 kernel set (`kernels/gfx1151/`, one code object) keeps the gfx1201 kernel names and
 argument ABIs, so the host and `KernelTable` are shared. It has the int8 decode GEMVs (1-token,
 2–16-token WMMA and multi-row), the f16 WMMA prefill GEMMs (24 configurations; MXFP4 is dequantized
-to f16 first), paged f16 / q8 KV attention, DeltaNet (per-token, chunked f32, sequential scan, fused
+to f16 first), paged attention for every KV format (f16, q8 / q8h, q8v, q4; see below), DeltaNet (per-token, chunked f32, sequential scan, fused
 decode), the MoE kernels (MXFP4 experts on the generic int8-decode / f16-prefill entries), the
 2-bit MTP draft head and the f16 prefill activation fusions. **Not on gfx1151** (the host takes
 the remaining path, see `kernels::Caps`): fp8 / int8-dot WMMA GEMMs (no fp8 WMMA in RDNA 3.5:
 MXFP4 prefill uses f16 activations), the small-batch GEMMs, the int8-WMMA mid-batch GEMVs (`gemvw`)
 and the grouped multi-token twins, the whole-block MXFP4 decode experts and the fp8 grouped expert
-GEMM, the `q8v` / `q8h` KV formats (auto picks f16, then q8), DeltaNet replay, the WMMA DeltaNet
-prefill, the key-split prefill attention, and the vision kernels. Its int8 activation scale words
+GEMM, DeltaNet replay, the WMMA DeltaNet
+prefill, the GQA-grouped / key-split prefill attention (`attn_kg`, `attn_kx`), the wide verify attention
+(`attn_wsplit2`), and the vision kernels. Its int8 activation scale words
 carry the block sum (`pk_make`: scale with an 11-bit mantissa + sum), which saves the per-row sum in
 the dot kernels; CPU references must decode them (`ref::xdScale`). Correctness on the 8060S:
 `whirl-kernel-test` passes every check it runs, and MTP / MTP + n-gram output equals plain greedy on
@@ -221,6 +222,19 @@ the 27B Q4_K_M, Swift MXFP4-A and Ornith MXFP4 files (7 prompts each, up to 32k 
   whole 64-value unit (the IQ4_XS LUT decode is expensive). Now each half decodes its own 32-value
   half and the halves are exchanged with `v_permlanex16`. Integer dot unchanged → bit-identical;
   IQ4_XS T=3 27.68 → 25.37 ms (−8…−9%).
+- **KV formats on gfx1151.** The KV format is fixed per mode (`numerics::chooseKv`, as on the R9700):
+  balance q8h on dense models, fast q4, precise f16 (q8v is still in the code object for `WHIRL_KV`).
+  Decode / verify: `attn_wsplit1` / `attn_wsplit1_q8` / `_q8v` (one query per group, the gfx11 P = 0
+  constraint) and, for q4, `attn_dq4` (~178 GB/s, ~75% of the bandwidth). Prefill: `attn_prefill_wmma`
+  (f16; 8S-P5 XOR-swizzled Vᵀ loader, 256 VGPRs, no spill). **q8 / q8h / q4 prefill since KG-3:** the
+  keys of the sequence are dequantized once per layer and chunk into f16 rows in `ffn_g` / `ffn_u`
+  (`kv_dq_rows_r` / `kv_dq_rows_r_q4`, the same `kv_dq8` / `kv_dq4` as the tile loaders) and the f16
+  `attn_prefill_wmma` runs on them with an identity page table; keys past the scratch (139k rows at
+  batch 4096 for the 27B) go in ranges through `attn_prefill_wmma_s`, which carries the softmax state
+  (m, l, unnormalized Oᵀ) between ranges as `attn_kgs` does on gfx1201. Bit-identical to the previous
+  `attn_prefill_wmma_q8` / `_q4` (kernel test: 180 invariants, q8 and q4, one / two head ranges, key
+  ranges of 1024 / 4096 / all keys); `WHIRL_ATTN_DQF=0` restores the old loaders. See
+  [§7](#flash) for the measurements.
 - **gfx1151 decode MoE kernels** originally used 16-value units with an 8-byte load per lane
   (166–180 GB/s); switching to the 64-value wide units gave decode −2.3% and 9-row verify −14% on
   the MoE model.
@@ -505,6 +519,18 @@ instead of f32 for their element-wise consumers (+5.4…+5.8% and +0.6%).
   of tile j (89), prefetching the next tile's K (−25%), two query groups per block (equal), longest
   blocks first (−10% on the first chunk), 4-wave blocks for q8v (slower than `attn_kx_q8v`, not used),
   prefill chunks of 8192 rows (−2% end to end).
+- **gfx1151 (KG-3).** The Radeon 8060S has no `attn_kg`; its q8 / q8h / q4 prefill now dequantizes
+  the keys into f16 rows (`kv_dq_rows_r[_q4]`) and runs the f16 `attn_prefill_wmma` on them, with
+  `attn_prefill_wmma_s` (softmax state carried in `st_ml` / the output, as `attn_kgs`) for keys past
+  the scratch. Bit-identical to the old `attn_prefill_wmma_q8` / `_q4` loaders. The `_s` variant
+  spills 56 VGPRs (the plain kernel sits at 256 with none); it only runs past ~139k keys or with
+  `WHIRL_ATTN_SEG`. End to end (Qwen3.8-27B Q4_K_M) the change is within the 8060S run-to-run drift
+  (±3%): q8h vs f16 8k −0.9%, 64k −1.1% (mean of two runs), 128k −4.0% (one run, f16 first); the old
+  loader measured −2.1% / −2.2% at 8k / 64k. The kernel bench disagrees: it shows the f16 kernel
+  slower than the int8 loader and key ranges of 16k–32k 26–35% faster for every format, but neither
+  shows up end to end (`WHIRL_ATTN_SEG=32768`: 64k unchanged). Treat 8060S attention-kernel bench
+  numbers with care; the open question is why (the `attn_prefill_wmma` launch covers all 24 heads ×
+  4096 queries, and its speed in the bench depends on how many heads / keys one launch spans).
 - Beyond 128k context the launch is split by head range (results unchanged; ~2% cost; never
   applied ≤ 128k) as a precaution after an unexplained `HipFailed` during a 256k prefill
   ([pitfalls.md](pitfalls.md#hip-256k)).

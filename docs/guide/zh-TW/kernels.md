@@ -160,13 +160,21 @@ block 3–4 個 tile（溢出，−7…−40%）。
 
 ### <a id="gfx1151"></a>3.2 gfx1151（RDNA 3.5）的差異
 
-gfx1151 的 kernel 集（`kernels/gfx1151/`，一個 code object）沿用 gfx1201 的 kernel 名稱與參數 ABI，所以 host 與 `KernelTable` 共用。它有 int8 decode GEMV（1 token、2–16 token WMMA 與多列）、f16 WMMA prefill GEMM（24 種配置；MXFP4 先反量化成 f16）、分頁 f16 / q8 KV attention、DeltaNet（逐 token、chunk f32、循序 scan、融合 decode）、MoE kernel（MXFP4 專家走通用的 int8 decode / f16 prefill 入口）、2-bit MTP 草稿頭，以及 f16 prefill activation 融合。**gfx1151 沒有的**（host 改走其他路徑，見 `kernels::Caps`）：fp8 / int8 內積 WMMA GEMM（RDNA 3.5 沒有 fp8 WMMA：MXFP4 prefill 用 f16 activation）、小批次 GEMM、int8 WMMA 中批次 GEMV（`gemvw`）與多 token 的群組雙胞胎、MXFP4 整塊 decode 專家與 fp8 群組專家 GEMM、`q8v` / `q8h` KV 格式（auto 會選 f16，再來 q8）、DeltaNet replay、WMMA DeltaNet prefill、key-split prefill attention，以及視覺 kernel。它的 int8 activation scale word 內含區塊總和（`pk_make`：11 位元尾數的 scale + 總和），內積 kernel 因此省掉逐列求和；CPU 參考實作必須先解碼（`ref::xdScale`）。8060S 上的正確性：`whirl-kernel-test` 執行的每一項檢查都通過；27B Q4_K_M、Swift MXFP4-A 與 Ornith MXFP4 三個檔案的 MTP / MTP + n-gram 輸出都與 plain greedy 相同（各 7 個提示，最長 32k token）。
+gfx1151 的 kernel 集（`kernels/gfx1151/`，一個 code object）沿用 gfx1201 的 kernel 名稱與參數 ABI，所以 host 與 `KernelTable` 共用。它有 int8 decode GEMV（1 token、2–16 token WMMA 與多列）、f16 WMMA prefill GEMM（24 種配置；MXFP4 先反量化成 f16）、各種 KV 格式的分頁 attention（f16、q8 / q8h、q8v、q4，見下方）、DeltaNet（逐 token、chunk f32、循序 scan、融合 decode）、MoE kernel（MXFP4 專家走通用的 int8 decode / f16 prefill 入口）、2-bit MTP 草稿頭，以及 f16 prefill activation 融合。**gfx1151 沒有的**（host 改走其他路徑，見 `kernels::Caps`）：fp8 / int8 內積 WMMA GEMM（RDNA 3.5 沒有 fp8 WMMA：MXFP4 prefill 用 f16 activation）、小批次 GEMM、int8 WMMA 中批次 GEMV（`gemvw`）與多 token 的群組雙胞胎、MXFP4 整塊 decode 專家與 fp8 群組專家 GEMM、DeltaNet replay、WMMA DeltaNet prefill、GQA 分組／key-split 的 prefill attention（`attn_kg`、`attn_kx`）、寬 verify attention（`attn_wsplit2`），以及視覺 kernel。它的 int8 activation scale word 內含區塊總和（`pk_make`：11 位元尾數的 scale + 總和），內積 kernel 因此省掉逐列求和；CPU 參考實作必須先解碼（`ref::xdScale`）。8060S 上的正確性：`whirl-kernel-test` 執行的每一項檢查都通過；27B Q4_K_M、Swift MXFP4-A 與 Ornith MXFP4 三個檔案的 MTP / MTP + n-gram 輸出都與 plain greedy 相同（各 7 個提示，最長 32k token）。
 
 - 在 8060S 上 `v_dot4` 的速率只有 int8 WMMA 的一半，而且每個驗證列都要重讀 activation，所以 Q4_K、Q5_K、IQ4_XS 與 Q6_K 的
   2–16 列 kernel 使用 int8 WMMA；1-token dp4 kernel 共用相同的切片與加總順序（MTP 維持逐位元相同）。相對 1 列的驗證成本：n=4 1.36 →
   1.23×、n=8 1.91 → 1.50×。
 - **gfx11 WMMA 需要兩個 half-wave 都有 B fragment。** 原本每個 half-wave 解碼整個 64 值單元（IQ4_XS 的 LUT 解碼很貴）。現在每一半只解碼自己的 32 值半邊，再用
   `v_permlanex16` 交換兩半。整數內積不變 → 逐位元相同；IQ4_XS T=3 27.68 → 25.37 ms（−8…−9%）。
+- **gfx1151 的 KV 格式。** KV 格式依模式固定（`numerics::chooseKv`，與 R9700 相同）：balance 的 dense 模型用 q8h、fast 用 q4、
+  precise 用 f16（q8v 仍在 code object 裡，供 `WHIRL_KV` 使用）。Decode / verify：`attn_wsplit1` / `attn_wsplit1_q8` / `_q8v`（每組一個
+  query，gfx11 的 P = 0 限制），q4 用 `attn_dq4`（約 178 GB/s，約頻寬的 75%）。Prefill：`attn_prefill_wmma`（f16；8S-P5 的 XOR swizzle
+  Vᵀ loader，256 VGPR、無 spill）。**KG-3 起的 q8 / q8h / q4 prefill：** 每層每個 chunk 先把序列的 key 一次反量化成 f16 列，放在
+  `ffn_g` / `ffn_u`（`kv_dq_rows_r` / `kv_dq_rows_r_q4`，和 tile loader 用同一個 `kv_dq8` / `kv_dq4`），再以恆等 page table 跑 f16 的
+  `attn_prefill_wmma`；超過暫存容量（27B、batch 4096 為 139k 列）的 key 分段交給 `attn_prefill_wmma_s`，段與段之間帶著 softmax 狀態
+  （m、l、未正規化的 Oᵀ），做法同 gfx1201 的 `attn_kgs`。與原本的 `attn_prefill_wmma_q8` / `_q4` 逐位元相同（kernel test 180 項
+  invariant：q8 與 q4、一段／兩段 head、key 分段 1024 / 4096 / 全部）；`WHIRL_ATTN_DQF=0` 回到舊 loader。量測見 [§7](#flash)。
 - **gfx1151 decode MoE kernel** 原本使用 16 值單元，每個 lane 8 位元組載入（166–180 GB/s）；改用 64 值寬單元後，在 MoE 模型上 decode
   −2.3%、9 列驗證 −14%。
 
@@ -353,6 +361,13 @@ asm 屏障，因為編譯器把 `x*x` 收縮進第一個 butterfly 加法，並�
     減 1152 再乘 scale 得到 q·s，只捨入一次；以 packed f16 計算，用 `v_perm` 組合兩半；`#pragma clang fp contract(off)` 防止編譯器融合成 FMA。
     與 `attn_kx_q8` 逐位元相同；225 VGPR、每 SIMD 6 個 wave（實際每個 WGP 1 個 block）。61k probe：`attn_kx_q8` 57.8 → `attn_kg6_q8` 72.1 TFLOPS
     （+24.7%）；直接寫 `(_Float16)q * s` 的版本只快 5%，所以改用 magic number 形式；
+  - **gfx1151（KG-3）。** Radeon 8060S 沒有 `attn_kg`；它的 q8 / q8h / q4 prefill 現在先把 key 反量化成 f16 列（`kv_dq_rows_r[_q4]`），
+    再跑 f16 的 `attn_prefill_wmma`；超過暫存容量的 key 交給 `attn_prefill_wmma_s`（softmax 狀態存在 `st_ml` / 輸出裡，同 `attn_kgs`）。
+    與舊的 `attn_prefill_wmma_q8` / `_q4` loader 逐位元相同。`_s` 版溢出 56 個 VGPR（一般版 256、無溢出），只在約 139k 以上或設
+    `WHIRL_ATTN_SEG` 時用到。端到端（Qwen3.8-27B Q4_K_M）的變化落在 8060S 連續量測的漂移內（±3%）：q8h 對 f16 8k −0.9%、64k −1.1%
+    （兩輪平均）、128k −4.0%（單輪、f16 先跑）；舊 loader 在 8k / 64k 為 −2.1% / −2.2%。kernel bench 的結論不同：它顯示 f16 kernel 比
+    int8 loader 慢、key 每 16k–32k 分段可快 26–35%（各格式都是），但端到端都看不到（`WHIRL_ATTN_SEG=32768`：64k 不變）。8060S 的
+    attention kernel bench 數字要小心解讀；原因尚未查明（bench 裡的速度取決於一次 launch 涵蓋多少 head / key）。
   - **0.2.0 起 q8 / q8h（Q8P）：`kv_dq_rows` + f16 的 `attn_kg`。** 用隨機 K/V 量（上面的 f16 probe 用常數資料，
     running max 不變、rescale 被跳過），128k 個 key 時 `attn_kg6_q8` 比 f16 的 `attn_kg6` 慢 29%（181.9 vs 141.0 ms，4096 個 query）：
     同一個 KV head 的 6 個 head 各自把同樣的 K 列再轉一次，V 的 LDS stage 也有自己的 VALU 與 LDS 流量。現在 prefill 先把該序列
