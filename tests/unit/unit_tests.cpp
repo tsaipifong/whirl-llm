@@ -2302,15 +2302,66 @@ void testPoolMargin() {
 void testStartupFit() {
     using namespace whirl;
     constexpr std::uint64_t MiB = 1ull << 20, GiB = 1ull << 30;
-    // 1. RAM tier: more than half of the available RAM -> half, whole 512 MiB; otherwise unchanged
-    CHECK(!startfit::ramTierCap(12288, 48 * GiB, 16384).has_value());          // 12 GiB of 48 GiB available: kept
-    CHECK(!startfit::ramTierCap(20480, 48 * GiB, 16384).has_value());          // above the default but within half: kept
-    CHECK_EQ(startfit::ramTierCap(65536, 48955 * MiB, 16384).value_or(0), 16384ull);  // R9700 box: 64 GiB asked -> the default 16 GiB
-    CHECK_EQ(startfit::ramTierCap(32768, 40 * GiB, 0).value_or(0), 20480ull);  // no default known: half of 40 GiB
-    CHECK_EQ(startfit::ramTierCap(9000, 17000 * MiB, 0).value_or(0), 8192ull);  // half = 8500 MiB -> 8192 (512 steps)
-    CHECK_EQ(startfit::ramTierCap(9000, 12 * GiB, 8192).value_or(0), 6144ull);  // the default above half: half wins
-    CHECK(!startfit::ramTierCap(0, 8 * GiB, 8192).has_value());               // 0 = tiers off: kept
-    CHECK(!startfit::ramTierCap(4096, 0, 8192).has_value());                  // RAM unknown: kept
+    // 1. RAM tier (ramTierFit)
+    // explicit: kept when within half of the available RAM and within the 20480 MiB cap
+    CHECK(!startfit::ramTierFit(12288, 48 * GiB, 16384, true).has_value());
+    CHECK(!startfit::ramTierFit(20480, 48 * GiB, 16384, true).has_value());
+    // the hipError 719 repro (REVIEW-0221 C1): 24064 MiB on a box with 49247 MiB available is within half, but capped
+    {
+        const auto r = startfit::ramTierFit(24064, 49247 * MiB, 16384, true);
+        CHECK(r.has_value() && r->mb == 20480ull && r->safe && !r->half);
+    }
+    // more than half of the available RAM: the default size (16 GiB here), not half
+    {
+        const auto r = startfit::ramTierFit(65536, 48955 * MiB, 16384, true);
+        CHECK(r.has_value() && r->mb == 16384ull && r->half && !r->safe);
+    }
+    // more than half, no default known: half, then the cap
+    {
+        const auto r = startfit::ramTierFit(65536, 64 * GiB, 0, true);
+        CHECK(r.has_value() && r->mb == 20480ull && r->half && r->safe);
+    }
+    CHECK_EQ(startfit::ramTierFit(9000, 17000 * MiB, 0, true)->mb, 8192ull);  // half = 8500 MiB -> 8192 (512 steps)
+    CHECK_EQ(startfit::ramTierFit(9000, 12 * GiB, 8192, true)->mb, 6144ull);  // the default above half: half wins
+    // the automatic size (a PC with 128 GB RAM: 32 GiB by the 1/4 rule) is capped too, never the half rule
+    {
+        const auto r = startfit::ramTierFit(32768, 100 * GiB, 32768, false);
+        CHECK(r.has_value() && r->mb == 20480ull && r->safe && !r->half);
+        CHECK(!startfit::ramTierFit(16384, 20 * GiB, 16384, false).has_value());  // auto within the cap: kept (half rule not applied)
+    }
+    CHECK(!startfit::ramTierFit(0, 8 * GiB, 8192, true).has_value());  // 0 = tiers off: kept
+    CHECK(!startfit::ramTierFit(4096, 0, 8192, true).has_value());     // RAM unknown, small: kept
+    CHECK_EQ(startfit::ramTierFit(30000, 0, 0, true)->mb, 20480ull);    // RAM unknown, large: capped
+    // 2b. slots after the weights: the C5 case (15 slots left 13312 tokens for a 16384-token request) -> fewer slots
+    {
+        const std::uint64_t per_tok = 36966, per_slot = 380 * MiB, shared = 556 * MiB;
+        const std::uint64_t avail = shared + 15 * per_slot + 13312 * per_tok;  // 15 slots: exactly 13312 tokens
+        const std::uint32_t p = startfit::slotsThatFit(15, avail, per_slot, shared, per_tok, 16384);
+        CHECK(p < 15u && p >= 1u);
+        CHECK(avail - shared - per_slot * p >= 16384 * per_tok);
+        CHECK(avail - shared - per_slot * (p + 1) < 16384 * per_tok);  // the least reduction
+        CHECK_EQ(startfit::slotsThatFit(4, 40 * GiB, per_slot, shared, per_tok, 16384), 4u);  // fits: unchanged
+        CHECK_EQ(startfit::slotsThatFit(8, 1 * GiB, per_slot, shared, per_tok, 16384), 1u);   // never below 1
+    }
+    // the startup JSON (REVIEW-0221 A1: kv_ram_mb is the RAM tier in use)
+    {
+        startfit::StartupInfo si;
+        si.ctx_per_request = 13312;
+        si.pool_tokens = 13312;
+        si.parallel = 15;
+        si.kv_ram_mb = 18432;
+        si.wddm_margin_mib = 9468;
+        si.other_processes_mib = 7412;
+        si.display_attached = false;
+        si.adjusted = {"--parallel 16 -> 15", "say \"hi\" \\ ok"};
+        CHECK_EQ(startfit::startupJson(si),
+                 std::string("{\"ctx_per_request\":13312,\"pool_tokens\":13312,\"parallel\":15,\"kv_ram_mb\":18432,\"wddm_margin_mib\":9468,"
+                             "\"other_processes_mib\":7412,\"display_attached\":false,\"adjusted\":[\"--parallel 16 -> 15\",\"say \\\"hi\\\" "
+                             "\\\\ ok\"]}"));
+        CHECK_EQ(startfit::startupJson(startfit::StartupInfo{}),
+                 std::string("{\"ctx_per_request\":0,\"pool_tokens\":0,\"parallel\":0,\"kv_ram_mb\":0,\"wddm_margin_mib\":0,"
+                             "\"other_processes_mib\":0,\"display_attached\":false,\"adjusted\":[]}"));
+    }
     // a Swift-like card: 16 GiB weights, 0.75 GiB fixed per slot, 36 KiB / token, ~11 GiB left with 1 slot
     vram::FitInput fi;
     fi.avail = 28 * GiB;

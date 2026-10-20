@@ -550,11 +550,14 @@ int serveMain(int argc, char** argv, const char* program) {
         // owner 2026-10-21 (「我們系統先查而調整反而是好事，再將調整結果寫在log」): an explicit setting that does not fit
         // the measured resources is lowered to what fits, never silently: one "adjusted:" line each, a summary at the end
         // of startup, and the effective values in /props and /health ("startup"). Only when even one slot with a minimal
-        // pool does not fit does the server refuse to start. Order (each step only if still needed):
-        //   1. RAM tier (--kv-ram-mb): pinned first, against system RAM (17 GiB pinned did not move the R9700's WDDM budget);
-        //   2. prefill batch / checkpoint counts (the existing VRAM-tight plan; explicit values only if still needed);
-        //   3. --parallel: each slot's recurrent state and checkpoints are fixed VRAM; lowered when one full request no
-        //      longer fits next to them;
+        // pool does not fit does the server refuse to start. Order in which they run (each step only if still needed):
+        //   1. --parallel: each slot's recurrent state and checkpoints are fixed VRAM; lowered when one full request
+        //      (min(ctx-per-slot, 16384)) no longer fits next to them: in the pre-load estimate, then again with the VRAM
+        //      measured after the weights are loaded, before any slot is allocated;
+        //   2. prefill batch / checkpoint counts set by the user (the VRAM-tight plan; only if still short);
+        //   3. RAM tier (--kv-ram-mb): system RAM, not VRAM (17 GiB pinned did not move the R9700's WDDM budget): above
+        //      half of the available RAM -> the default size; every RAM tier capped at 20480 MiB (hipError 719 above it,
+        //      task_063b1573);
         //   4. -c / --ctx (the shared pool) down to what fits under the budget with the margin;
         //   5. --ctx-per-slot down to the pool. The per-request context reserves no memory by itself (the pool is
         //      shared), so lowering it first frees nothing: it is capped after the pool is known.
@@ -1006,6 +1009,42 @@ int serveMain(int argc, char** argv, const char* program) {
 
         // slots: KV-cache regions, recurrent state, MTP hidden rows
         model.gdn_replay = envOn("GDN_REPLAY", true);
+        // REVIEW-0221 C3: the pre-load estimate can be off (it lowered --parallel 16 -> 15 for a 16384-token request and the
+        // real pool held 13312). With the weights and buffers loaded, measure the VRAM usable now (same rule as the pool
+        // sizing below) and lower --parallel again, one slot at a time, until one request of min(ctx-per-slot, 16384)
+        // tokens fits next to every slot's state, replay rows and checkpoints (+4% WDDM overhead, + shared checkpoints,
+        // snapshot sets and 256 MiB slack). Each step is logged.
+        if (!is_uma && opt.parallel_given && opt.parallel > 1 && !model.kv_choice.debug) {
+            const hip::WddmMemInfo w = hip::wddmMemInfo();
+            const hip::MemInfo mf = hip::memInfo();
+            const bool res_explicit = env("POOL_RESERVE_MB").has_value();
+            const std::uint64_t res = static_cast<std::uint64_t>(envU32("POOL_RESERVE_MB", cfg.moe ? 1536 : (w.ok ? 768 : 3072))) << 20;
+            std::uint64_t av = mf.free > res ? mf.free - res : 0;
+            const poolbudget::Margin mg = budgetMargin(w.local_budget);
+            if (!res_explicit && w.ok) av = std::min(av, w.local_budget > w.local_usage + mg.bytes ? w.local_budget - w.local_usage - mg.bytes : 0);
+            av = av > card.headroom ? av - card.headroom : 0;
+            std::uint64_t ng = 0;
+            for (std::uint32_t li = 0; li < cfg.n_layer; ++li)
+                if (!cfg.isAttn(li)) ++ng;
+            const std::uint64_t st = ng * (model.convBytes() + model.ssmBytes());
+            const std::uint64_t pend = ng * (static_cast<std::uint64_t>(qwen35::max_small_batch) * cfg.convCh() * 4 +
+                                             static_cast<std::uint64_t>(qwen35::max_small_batch) * cfg.n_v_heads * (cfg.d_state + cfg.headV() + 2) * 4);
+            const std::uint64_t ck = envOn("CKPT_HOST", false) ? 0 : st + static_cast<std::uint64_t>(cfg.n_vocab) * 4 + static_cast<std::uint64_t>(cfg.n_embd) * 4;
+            const std::uint64_t per_slot = (st + pend + n_ck * ck) * 104 / 100;
+            const std::uint64_t shared = (n_spe_plan * ck + static_cast<std::uint64_t>(model.snap_sets) * st) * 104 / 100 + (256ull << 20);
+            const std::uint64_t target = std::min<std::uint32_t>(slot_ctx, vram_tight_pool);
+            const std::uint64_t per_tok_est = model.kvBytesPerToken();
+            const auto poolFor = [&](std::uint32_t n) {
+                const std::uint64_t fixed = shared + per_slot * n;
+                return av > fixed && per_tok_est ? (av - fixed) / per_tok_est : 0;
+            };
+            for (std::uint32_t p = opt.parallel; p > 1 && poolFor(p) < target; --p)
+                adjust(std::format("--parallel {} -> {}", p, p - 1),
+                       std::format("measured after loading the weights: with {} slots the KV pool would hold about {} tokens, less than one "
+                                   "{}-token request ({:.2f} GiB usable, {:.0f} MiB per slot)",
+                                   p, poolFor(p), target, av / 1073741824.0, per_slot / 1048576.0));
+            opt.parallel = startfit::slotsThatFit(opt.parallel, av, per_slot, shared, per_tok_est, target);
+        }
         const hip::MemInfo mem_s0 = hip::memInfo();
         model.setupSeqs(opt.parallel, slot_ctx);
         if (use_dflash) {
@@ -1213,13 +1252,21 @@ int serveMain(int argc, char** argv, const char* program) {
             a.explicit_mb.reset();
             return tier::ramTierSize(a).mb;
         }();
-        if (const auto cap_mb = startfit::ramTierCap(kv_ram_mb, rin.avail_phys, ram_auto_mb); rin.explicit_mb && cap_mb && n_ck > 0 && !no_pc) {
-            const std::uint64_t to = *cap_mb;
-            adjust(std::format("{} {} -> {} MiB", rin.explicit_src, kv_ram_mb, to),
-                   std::format("the RAM tier is pinned host memory; {} MiB is more than half of the {} MiB of RAM available now, and the "
-                               "system would page; lowered to the default size",
-                               kv_ram_mb, rin.avail_phys >> 20));
-            kv_ram_mb = to;
+        if (const auto rf = startfit::ramTierFit(kv_ram_mb, rin.avail_phys, ram_auto_mb, rin.explicit_mb.has_value());
+            rf && n_ck > 0 && !no_pc) {
+            std::string why;
+            if (rf->half)
+                why = std::format("the RAM tier is pinned host memory; {} MiB is more than half of the {} MiB of RAM available now, and "
+                                  "the system would page; lowered to the default size",
+                                  kv_ram_mb, rin.avail_phys >> 20);
+            if (rf->safe)
+                why += std::format("{}capped at {} MiB: larger pinned RAM tiers crash on some systems (hipError 719 on the first request), "
+                                   "investigating",
+                                   why.empty() ? "" : "; ", startfit::ram_tier_safe_mb);
+            adjust(std::format("{} {} -> {} MiB", rin.explicit_mb ? std::string(rin.explicit_src) : std::string("RAM tier (default)"),
+                               kv_ram_mb, rf->mb),
+                   why);
+            kv_ram_mb = rf->mb;
         }
         std::unique_ptr<tier::Tier> tier_pre;
         double tier_alloc_s = 0.0;
@@ -1326,11 +1373,10 @@ int serveMain(int argc, char** argv, const char* program) {
         // issue #5: the WDDM budget read when the pool was sized can be lower once the pool exists (31.02 ->
         // 29.55 GiB on a user's R9700, ~220 ms later; why it fell is not known). Read it again now and shrink the
         // pool (whole pages, before anything uses it) until local usage + margin fits; up to 3 rounds. A round
-        // only follows one whose free really lowered the local usage (WDDM counters can lag a free: re-polled for
-        // up to 0.5 s), so stale numbers cannot shrink it twice. Same conditions as the budget rule above: a pool
-        // sized from memory, WDDM numbers available, not the UMA iGPU, no WHIRL_POOL_RESERVE_MB. An explicit
-        // --ctx-per-slot is never lowered (refused, as when it does not fit at sizing). With an explicit -c or
-        // WHIRL_POOL_RESERVE_MB the pool is never resized: a warning says how many tokens would fit.
+        // only follows one whose free really lowered the local usage (WDDM counters can lag a free: re-polled until
+        // two reads 50 ms apart agree, at most 1 s), so stale numbers cannot shrink it twice. WDDM numbers available,
+        // not the UMA iGPU, no WHIRL_POOL_RESERVE_MB (never resized: a warning says how many tokens would fit). An
+        // explicit -c or --ctx-per-slot that no longer fits is lowered with an "adjusted:" line (owner 2026-10-21).
         // Output is unchanged (only the pool's size changes).
         if (wddm0.ok && !is_uma) {
             const auto poolGib = [&](std::uint64_t tokens) { return static_cast<double>(per_tok * tokens) / 1073741824.0; };
@@ -1724,42 +1770,42 @@ int serveMain(int argc, char** argv, const char* program) {
                 if (!o.ok) return std::nullopt;
                 return wddmwatch::Others{o.others, o0.ok ? std::optional<std::uint64_t>(o0.others) : std::nullopt};
             });
-        HttpOptions ho;
-        ho.cors_origins = opt.cors_origins;
-        ho.allowed_hosts = opt.allowed_hosts;
-        HttpServer http(engine, ho);
-        http.start(opt.host, opt.port);
         {
-            // v0.2.2.1: one line with every startup adjustment, and the effective values for /props and /health
+            // v0.2.2.1: one line with every startup adjustment, and the effective values for /props and /health, set before
+            // the HTTP server starts (REVIEW-0221 C5: /health readers on other threads)
             const std::uint32_t ctx_eff = std::min<std::uint32_t>(slot_ctx_eff, model.pool_pages * kv_page);
+            const std::uint64_t target_ctx = std::min<std::uint32_t>(slot_ctx, vram_tight_pool);
+            if (opt.parallel_given && ctx_eff < target_ctx)
+                adjusted.push_back(std::format("target not reached: context {} tokens per request with {} slot(s), less than {}", ctx_eff,
+                                               opt.parallel, target_ctx));
             if (adjusted.empty()) {
                 logI("startup adjustments: none (the requested settings fit)");
             } else {
                 std::string all;
                 for (const std::string& a : adjusted) all += (all.empty() ? "" : "; ") + a;
-                logW("startup adjustments ({}): {}. Effective: context {} tokens per request, KV pool {} tokens, {} slot(s); a "
-                     "longer prompt is rejected as too long for the context, and generation stops at the context limit",
-                     adjusted.size(), all, ctx_eff, model.pool_pages * kv_page, opt.parallel);
+                logW("startup adjustments ({}): {}. Effective: context {} tokens per request, KV pool {} tokens, {} slot(s), RAM tier {} "
+                     "MiB; a longer prompt is rejected as too long for the context, and generation stops at the context limit",
+                     adjusted.size(), all, ctx_eff, model.pool_pages * kv_page, opt.parallel, tier_owned ? kv_ram_mb : 0);
             }
-            std::string j = std::format("{{\"ctx_per_request\":{},\"pool_tokens\":{},\"parallel\":{},\"kv_ram_mb\":{},\"wddm_margin_mib\":{},"
-                                        "\"other_processes_mib\":{},\"display_attached\":{},\"adjusted\":[",
-                                        ctx_eff, model.pool_pages * kv_page, opt.parallel, tier_pre ? kv_ram_mb : 0,
-                                        wddm0.ok && !is_uma ? budget_margin >> 20 : 0, others0.ok ? others0.others >> 20 : 0,
-                                        others0.display_known && others0.display ? "true" : "false");
-            for (std::size_t k = 0; k < adjusted.size(); ++k) {
-                j += k ? ",\"" : "\"";
-                for (const char ch : adjusted[k]) {
-                    if (ch == '"' || ch == '\\') j += '\\';
-                    j += ch;
-                }
-                j += "\"";
-            }
-            j += "]}";
+            startfit::StartupInfo si;
+            si.ctx_per_request = ctx_eff;
+            si.pool_tokens = model.pool_pages * kv_page;
+            si.parallel = opt.parallel;
+            si.kv_ram_mb = tier_owned ? kv_ram_mb : 0;  // REVIEW-0221 A1: tier_pre is empty once it moved into tier_owned
+            si.wddm_margin_mib = wddm0.ok && !is_uma ? budget_margin >> 20 : 0;
+            si.other_processes_mib = others0.ok ? others0.others >> 20 : 0;
+            si.display_attached = others0.display_known && others0.display;
+            si.adjusted = adjusted;
             std::string note;
             for (const std::string& a : adjusted)
                 if (a.find("--ctx-per-slot") != std::string::npos || a.rfind("-c ", 0) == 0) note += (note.empty() ? "" : "; ") + a;
-            engine.setStartup(j, note.empty() ? std::string() : "adjusted at startup to fit the GPU memory: " + note);
+            engine.setStartup(startfit::startupJson(si), note.empty() ? std::string() : "adjusted at startup to fit the GPU memory: " + note);
         }
+        HttpOptions ho;
+        ho.cors_origins = opt.cors_origins;
+        ho.allowed_hosts = opt.allowed_hosts;
+        HttpServer http(engine, ho);
+        http.start(opt.host, opt.port);
         logI("server listening on http://{}:{} (model id \"{}\", {} slots); endpoints: GET /health, GET /v1/models, POST "
              "/v1/chat/completions, POST /v1/completions, GET /props, GET /version",
              opt.host, http.port(), name, opt.parallel);

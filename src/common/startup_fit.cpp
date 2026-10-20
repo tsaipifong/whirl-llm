@@ -4,14 +4,25 @@
 #include "whirl/startup_fit.h"
 
 #include <algorithm>
+#include <format>
 
 namespace whirl::startfit {
 
-std::optional<std::uint64_t> ramTierCap(std::uint64_t mb, std::uint64_t avail_phys_bytes, std::uint64_t auto_mb) {
-    if (mb == 0 || avail_phys_bytes == 0) return std::nullopt;
-    if ((mb << 20) <= avail_phys_bytes / 2) return std::nullopt;
-    const std::uint64_t half = (avail_phys_bytes / 2 >> 20) / 512 * 512;
-    return auto_mb > 0 ? std::min(half, auto_mb) : half;
+std::optional<RamFit> ramTierFit(std::uint64_t mb, std::uint64_t avail_phys_bytes, std::uint64_t auto_mb, bool explicit_size) {
+    if (mb == 0) return std::nullopt;
+    RamFit r;
+    r.mb = mb;
+    if (explicit_size && avail_phys_bytes > 0 && (mb << 20) > avail_phys_bytes / 2) {
+        const std::uint64_t half = (avail_phys_bytes / 2 >> 20) / 512 * 512;
+        r.mb = auto_mb > 0 ? std::min(half, auto_mb) : half;
+        r.half = true;
+    }
+    if (r.mb > ram_tier_safe_mb) {
+        r.mb = ram_tier_safe_mb;
+        r.safe = true;
+    }
+    if (!r.half && !r.safe) return std::nullopt;
+    return r;
 }
 
 std::uint64_t wantTokens(const vram::FitInput& fi) { return std::max<std::uint64_t>(fi.pool_min_tokens, fi.pool_hard_min); }
@@ -46,6 +57,34 @@ FixedFit fitFixed(const vram::FitInput& fi, const vram::FitPlan& plan) {
     r.fi = f2;
     r.plan = p2;
     return r;
+}
+
+std::uint32_t slotsThatFit(std::uint32_t parallel, std::uint64_t avail, std::uint64_t per_slot, std::uint64_t shared,
+                           std::uint64_t per_token, std::uint64_t target_tokens) {
+    if (per_token == 0) return parallel;
+    std::uint32_t p = std::max<std::uint32_t>(parallel, 1);
+    const auto pool = [&](std::uint32_t n) {
+        const std::uint64_t fixed = shared + per_slot * n;
+        return avail > fixed ? (avail - fixed) / per_token : 0;
+    };
+    while (p > 1 && pool(p) < target_tokens) --p;
+    return p;
+}
+
+std::string startupJson(const StartupInfo& s) {
+    std::string j = std::format("{{\"ctx_per_request\":{},\"pool_tokens\":{},\"parallel\":{},\"kv_ram_mb\":{},\"wddm_margin_mib\":{},"
+                                "\"other_processes_mib\":{},\"display_attached\":{},\"adjusted\":[",
+                                s.ctx_per_request, s.pool_tokens, s.parallel, s.kv_ram_mb, s.wddm_margin_mib, s.other_processes_mib,
+                                s.display_attached ? "true" : "false");
+    for (std::size_t k = 0; k < s.adjusted.size(); ++k) {
+        j += k ? ",\"" : "\"";
+        for (const char ch : s.adjusted[k]) {
+            if (ch == '"' || ch == '\\') j += '\\';
+            j += ch;
+        }
+        j += "\"";
+    }
+    return j + "]}";
 }
 
 }  // namespace whirl::startfit

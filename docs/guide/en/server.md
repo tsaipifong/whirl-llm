@@ -332,10 +332,13 @@ the Windows (WDDM) video memory budget, and these lines show whether it still do
   budget. `WHIRL_POOL_BUDGET_MARGIN_MB=N` sets the room.
 - `adjusted: ...` at startup: a setting you gave that does not fit what the server measured (RAM, the
   WDDM budget with the margin, other programs' VRAM) is lowered to what fits, one line each with the
-  reason, in this order: the RAM tier (`--kv-ram-mb`, more than half of the available RAM: lowered to
-  the default size), `--parallel` (each slot's state and checkpoints are fixed VRAM; lowered when one
-  full request no longer fits next to them), `WHIRL_PREFILL_BATCH` / checkpoint counts, `-c` (the
-  pool), then `--ctx-per-slot` (it reserves no memory by itself, so it is capped to the pool last).
+  reason, in this order: `--parallel` (each slot's state and checkpoints are fixed VRAM; lowered when one
+  full request no longer fits next to them, first from an estimate, then again with the VRAM measured
+  after the weights are loaded), `WHIRL_PREFILL_BATCH` / checkpoint counts, the RAM tier (`--kv-ram-mb`
+  above half of the available RAM goes to the default size; every RAM tier is capped at 20480 MiB,
+  because a larger one crashed with hipError 719 on a test machine, cause under investigation), `-c`
+  (the pool), then `--ctx-per-slot` (it reserves no memory by itself, so it is capped to the pool last).
+  If one full request still does not fit, the summary says `target not reached`.
   `startup adjustments (N): ...` sums them up (`none` when everything fits), and `GET /props` and
   `GET /health` show the effective values in a `startup` object. A prompt longer than an adjusted
   context per request is rejected as too long for the context, and the log says it was adjusted. The

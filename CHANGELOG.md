@@ -23,7 +23,7 @@ All notable changes to WHIRL are listed here. Versions follow `project(whirl VER
     the GPU) and 6% of the budget. `WHIRL_POOL_BUDGET_MARGIN_MB` sets the room. Cost on an R9700 with nothing else on
     it, balance: the KV pool of Swift-1.5 27B MXFP4 goes from 366592 to 330240 tokens with `--parallel 1` and from
     308736 to 272384 with the default 4 slots; Ornith-1.5-35B-A3B MXFP4 from 418816 to 395008 and from 381952 to
-    358144. Every request still gets its full 131072-token context. On cards with less than 20 GiB the extra
+    358144. On the R9700 every request still gets its full 131072-token context. On cards with less than 20 GiB the extra
     1536 MiB desktop headroom is dropped, since the margin now covers it.
   - Right after the KV pool is allocated the server reads the budget again and, when its usage plus the margin no
     longer fits, frees the pool and allocates a smaller one (whole pages, before any request), logging
@@ -32,13 +32,21 @@ All notable changes to WHIRL are listed here. Versions follow `project(whirl VER
   - Settings given on the command line that do not fit what the server measured are lowered to what fits instead of
     refusing to start or running over the budget, never silently: one `adjusted:` line each with the reason, a
     `startup adjustments` summary, and the effective values in a `startup` object in `GET /props` and `GET /health`.
-    In order: the RAM tier (`--kv-ram-mb` above half of the available RAM goes to the default size), `--parallel`
-    (when one full request no longer fits next to every slot's state and checkpoints), `WHIRL_PREFILL_BATCH` /
-    checkpoint counts, `-c`, then `--ctx-per-slot`. With 7.2 GiB taken by another process,
-    `--parallel 16 -c 600000 --ctx-per-slot 262144 --kv-ram-mb 65536` started as 15 slots, a 13312-token pool and
-    context, and an 18 GiB RAM tier, and served requests. The server refuses to start only when even one slot with a
-    4096-token pool does not fit. The Radeon 8060S keeps its carve-out check.
+    In order: `--parallel` (when one full request no longer fits next to every slot's state and checkpoints: from an
+    estimate before loading, then again with the VRAM measured after the weights are loaded), `WHIRL_PREFILL_BATCH` /
+    checkpoint counts, the RAM tier (`--kv-ram-mb` above half of the available RAM goes to the default size), `-c`,
+    then `--ctx-per-slot`; `target not reached` in the summary when one full request still does not fit. The server
+    refuses to start only when even one slot with a 4096-token pool does not fit. The Radeon 8060S keeps its
+    carve-out check.
+  - Not covered yet: when other programs take more VRAM than the room while the server runs, Windows can still move
+    WHIRL's memory and decode slows down (in the 4 GiB test above: about 100 -> 10-43 tok/s). The server now says so
+    in the log (below), and a restart sizes the pool for the VRAM free at that time. Adjusting the pool while running
+    comes in 0.2.2.2.
   - Output is unchanged; only the pool, and so how much context can be cached at once, is smaller.
+- Server: a RAM tier of the prefix cache above about 20 GiB could fail the first request with hipError 719 (R9700:
+  `--kv-ram-mb 24064` failed, 20480 worked; 0.2.2 too). The automatic size is above 20 GiB on PCs with more than about 80 GB of
+  RAM or more. Until the cause is found, every RAM tier, given or automatic, is capped at 20480 MiB, with an
+  `adjusted:` line. With the cap, `--kv-ram-mb 24064` starts with 20480 MiB and serves requests.
 
 ### Added
 

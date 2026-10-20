@@ -291,10 +291,12 @@ I batch | slots busy 0/4 (decode 0, prefill 0) | 80 cycles, 3.79 slots/cycle, 11
   空間：2 GiB（這張 GPU 接了螢幕時 3 GiB）與預算的 6% 取較大者。`WHIRL_POOL_BUDGET_MARGIN_MB=N` 可以
   指定後者。
 - 啟動時的 `adjusted: ...`：你指定的設定若放不下伺服器量到的資源（RAM、扣掉 margin 的 WDDM 預算、
-  其他程式的 VRAM），會降到放得下的值，每項一行並附原因。順序：RAM 層（`--kv-ram-mb` 超過可用 RAM
-  的一半時，降到預設大小）、`--parallel`（每個 slot 的狀態與檢查點是固定的 VRAM；放不下一個完整請求
-  時才減少）、`WHIRL_PREFILL_BATCH`／檢查點數量、`-c`（池），最後是 `--ctx-per-slot`（它本身不佔記憶體，
-  所以最後才依池的大小設上限）。`startup adjustments (N): ...` 會總結全部調整（全都放得下時為 `none`），
+  其他程式的 VRAM），會降到放得下的值，每項一行並附原因。順序：`--parallel`（每個 slot 的狀態與檢查點是
+  固定的 VRAM；放不下一個完整請求時才減少，先依估算，載入權重後再依實測的 VRAM 檢查一次）、
+  `WHIRL_PREFILL_BATCH`／檢查點數量、RAM 層（`--kv-ram-mb` 超過可用 RAM 的一半時降到預設大小；RAM 層一律
+  以 20480 MiB 為上限，因為在測試機上更大的會出現 hipError 719，原因調查中）、`-c`（池），最後是
+  `--ctx-per-slot`（它本身不佔記憶體，所以最後才依池的大小設上限）。若仍放不下一個完整請求，總結會寫
+  `target not reached`。`startup adjustments (N): ...` 會總結全部調整（全都放得下時為 `none`），
   `GET /props` 與 `GET /health` 的 `startup` 物件會顯示實際生效的值。超過調整後每請求 context 的提示
   會照常以「超出 context」拒絕，記錄中會說明那是啟動時調整的結果。只有連一個 slot 加 4096 token 的
   池都放不下時，伺服器才拒絕啟動。Radeon 8060S 不適用，它維持原本的 carve-out 檢查。
