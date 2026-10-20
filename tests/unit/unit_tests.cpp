@@ -668,15 +668,16 @@ void testCardDefaults() {
         const vram::CardDefaults d = vram::cardDefaults(in);
         CHECK(!d.small && d.parallel == 4 && !d.parallel_auto && d.headroom == 0 && d.note.empty());
     }
-    // 16 GB card (or WHIRL_VRAM_LIMIT_MB=16384 / 14336): 1 slot, 1536 MiB headroom; no KV preference (BAL-Q8)
+    // 16 GB card (or WHIRL_VRAM_LIMIT_MB=16384 / 14336): 1 slot; no KV preference (BAL-Q8); no extra headroom since
+    // 0.2.2.1 (the WDDM margin, 3 GiB with a display attached, covers the desktop)
     for (std::uint64_t t : {16 * GiB, 14336 * MiB, 20 * GiB - 1}) {
         vram::CardInput in;
         in.total = t;
         const vram::CardDefaults d = vram::cardDefaults(in);
         CHECK(d.small && d.parallel == 1 && d.parallel_auto);
-        CHECK_EQ(d.headroom, 1536 * MiB);
+        CHECK_EQ(d.headroom, 0ull);
         CHECK(d.note.find("small card") != std::string::npos && d.note.find("--parallel 1") != std::string::npos &&
-              d.note.find("KV") == std::string::npos && d.note.find("1536 MiB") != std::string::npos);
+              d.note.find("KV") == std::string::npos && d.note.find("WDDM budget margin") != std::string::npos);
     }
     vram::CardInput s16;
     s16.total = 16 * GiB;
@@ -2024,11 +2025,15 @@ void testWddmWatch() {
         Watch w(base);
         const auto a = w.check(smp(29000, 31232, 400 + 300), 100.0);
         CHECK(a && a->warn);
-        CHECK(a && a->text.rfind("GPU memory spill: WHIRL's shared GPU memory grew by 300 MiB since startup: Windows has moved part "
-                                 "of WHIRL's GPU buffers to system RAM", 0) == 0);
-        CHECK(has(a, "Generation is getting slower now: decode can become several times slower."));
+        CHECK(a && a->text.rfind("GPU memory spill: WHIRL's shared GPU memory grew by 300 MiB since startup: Windows has likely "
+                                 "moved part of WHIRL's GPU buffers to system RAM", 0) == 0);
+        CHECK(has(a, "Generation slows down if those buffers are used at every step: decode can become several times slower."));
         CHECK(has(a, "What you can do: close other programs that use the GPU (browsers, games, other AI tools); or restart the "
-                     "server with a smaller -c, with --parallel 1, or with WHIRL_POOL_RESERVE_MB=3072 (or larger)."));
+                     "server, which sizes the KV pool from the budget at startup, and set WHIRL_POOL_BUDGET_MARGIN_MB=4096 (or "
+                     "more) to keep more room free for other programs."));
+        // review P2-1 / P3-1: never the variable that turns the budget rule off, never --parallel 1
+        CHECK(!has(a, "WHIRL_POOL_RESERVE_MB"));
+        CHECK(!has(a, "--parallel"));
         CHECK(has(a, "Now: vram local 28.32 / budget 30.50 GiB, shared 700 MiB (+300 MiB since start)"));
         CHECK(!has(a, "over the Windows"));
         CHECK(w.spilling());
@@ -2058,7 +2063,7 @@ void testWddmWatch() {
         CHECK(a && a->text.rfind("GPU memory spill: WHIRL's GPU memory is 0.07 GiB over the Windows video memory (WDDM) budget, "
                                  "so Windows can move part of WHIRL's GPU buffers to system RAM at any time.",
                                  0) == 0);
-        CHECK(has(a, "Generation gets slower as soon as it does: decode can become several times slower."));
+        CHECK(has(a, "Generation slows down as soon as it does: decode can become several times slower."));
         CHECK(has(w.check(smp(30000, 31232, 400), 10.0), "GPU memory spill is over (it lasted 10 s)"));
         CHECK(!w.check(smp(31300, 31232, 400), 20.0));  // new spill, 20 s after the last warning: held
         CHECK(!w.check(smp(30000, 31232, 400), 30.0));  // over before it was reported: no INFO
@@ -2072,8 +2077,28 @@ void testWddmWatch() {
         Watch w(base);
         const auto a = w.check(smp(31300, 31232, 1000), 0.0);
         CHECK(has(a, "GPU memory spill: WHIRL's GPU memory is 0.07 GiB over the Windows video memory (WDDM) budget, and Windows "
-                     "has moved part of WHIRL's GPU buffers to system RAM (shared GPU memory +600 MiB since startup)."));
-        CHECK(has(a, "Generation is getting slower now"));
+                     "has likely moved part of WHIRL's GPU buffers to system RAM (shared GPU memory +600 MiB since startup)."));
+        CHECK(has(a, "Generation slows down if those buffers are used at every step"));
+    }
+    // the KV pool size in the advice (review P3-3), other programs' VRAM note
+    {
+        Config c;
+        c.pool_tokens = 334080;
+        Watch w(base, c);
+        const auto a = w.check(smp(31300, 31232, 400), 0.0);
+        CHECK(has(a, "or restart the server, which sizes the KV pool (the KV pool is now 334080 tokens) from the budget at startup"));
+        CHECK_EQ(othersNote(Others{3328 * MiB, 205 * MiB}),
+                 std::string(" Other programs use 3.25 GiB of VRAM on this GPU now (0.20 GiB when the server started)."));
+        CHECK_EQ(othersNote(Others{1024 * MiB, std::nullopt}), std::string(" Other programs use 1.00 GiB of VRAM on this GPU now."));
+    }
+    // a spill already present at startup is seen against the sizing-time baseline (review P3-4): the server passes
+    // the read the pool was sized from, not a sample taken after everything was allocated
+    {
+        const Sample sized = smp(17640, 31760, 13692, 13576);       // before the pool: embedding + RAM tier pinned
+        Watch w(sized);
+        CHECK(w.check(smp(30260, 31760, 13692 + 600, 13576), 0.0).has_value());  // 600 MiB demoted while starting
+        Watch ok(sized);
+        CHECK(!ok.check(smp(30260, 31760, 13692 + 300, 13576 + 300), 0.0));     // 300 MiB pinned checkpoints (WHIRL_CKPT_HOST=1)
     }
     // config defaults (the server uses them: 256 MiB, 60 s)
     {
@@ -2099,8 +2124,7 @@ void testWddmWatch() {
         const auto b = d.report(300, 6000.0, 150, false);  // 25 tok/s at the same 40 ms per cycle: fewer tokens per cycle
         CHECK(b && !b->warn);
         CHECK(b && b->text == "decode slowed from 100.0 to 25.0 tok/s (75% slower than early in this request; 40.0 -> 40.0 ms per "
-                              "decode cycle); no GPU memory spill is seen, and each cycle is not slower: fewer tokens per cycle "
-                              "(fewer drafts accepted)");
+                              "decode cycle); each cycle is not slower: fewer tokens per cycle (fewer drafts accepted)");
         DecodeWatch e;
         CHECK(!e.report(200, 2000.0, 0, false));
         const auto c = e.report(300, 5000.0, 0, false);  // no cycle numbers
@@ -2108,6 +2132,29 @@ void testWddmWatch() {
         DecodeWatch f;
         CHECK(!f.report(200, 2000.0, 50, false));
         CHECK(!f.report(300, 3600.0, 75, false));  // 62.5 tok/s: -37.5%, under the 40% line
+        // review P3-5: a spill while each cycle is NOT slower is not blamed (draft acceptance fell)
+        DecodeWatch g;
+        CHECK(!g.report(200, 2000.0, 50, true));
+        const auto gs = g.report(300, 6000.0, 150, true);
+        CHECK(gs && !gs->warn);
+        CHECK(gs && gs->text == "decode slowed from 100.0 to 25.0 tok/s (75% slower than early in this request; 40.0 -> 40.0 ms per "
+                                "decode cycle); each cycle is not slower: fewer tokens per cycle (fewer drafts accepted), not the "
+                                "GPU memory spill");
+        // another request prefilled in the window (--parallel >= 2), no spill: named as the likely cause
+        DecodeWatch q;
+        CHECK(!q.report(200, 2000.0, 50, false, 1000));
+        const auto qs = q.report(300, 7000.0, 75, false, 9192);  // 100 tok in 5 s, 200 ms per cycle; 8192 prefill tokens since
+        CHECK(qs && !qs->warn);
+        CHECK(qs && qs->text == "decode slowed from 100.0 to 20.0 tok/s (80% slower than early in this request; 40.0 -> 200.0 ms per "
+                                "decode cycle); no GPU memory spill is seen; another request's prefill shared the GPU in this window "
+                                "(with --parallel 2 or more, prefill chunks run between decode cycles)");
+        // both: the spill is named, the prefill too
+        DecodeWatch r;
+        CHECK(!r.report(200, 2000.0, 50, true, 0));
+        const auto rs = r.report(300, 7000.0, 75, true, 4096);
+        CHECK(rs && rs->warn);
+        CHECK(rs && rs->text.find(", likely because of the GPU memory spill above; also, another request's prefill shared the GPU") !=
+                        std::string::npos);
     }
 }
 
@@ -2167,6 +2214,66 @@ void testPoolBudget() {
         const auto t = fitPool(8192, gib(10.0) + 1, gib(10.0) + margin, margin, per_tok, page, 4096);
         CHECK_EQ(t.pool_tokens, 8192u - page);
     }
+    // the shrink loop guard: another round only when the last free really lowered the local usage
+    {
+        using whirl::poolbudget::usageFell;
+        const std::uint64_t freed = gib(1.0);
+        CHECK(usageFell(gib(30.0), gib(29.0), freed));
+        CHECK(usageFell(gib(30.0), gib(29.5), freed));      // half: enough (WDDM counts in its own granularity)
+        CHECK(!usageFell(gib(30.0), gib(29.6), freed));     // stale counter: stop
+        CHECK(!usageFell(gib(30.0), gib(30.0), freed));
+        CHECK(!usageFell(gib(30.0), gib(30.2), freed));
+    }
+}
+
+// v0.2.2.1 default WDDM budget margin (owner 2026-10-21): max(2048 MiB, 3072 with a display, others x 1, 6% of the budget)
+void testPoolMargin() {
+    using namespace whirl::poolbudget;
+    constexpr std::uint64_t MiB = 1ull << 20;
+    auto m = [&](std::uint64_t budget_mib, bool display, bool known, std::uint64_t others_mib, bool moe = false) {
+        MarginIn in;
+        in.local_budget = budget_mib * MiB;
+        in.display = display;
+        in.others_known = known;
+        in.others = others_mib * MiB;
+        in.moe = moe;
+        return defaultMargin(in);
+    };
+    // R9700 headless (eGPU, nothing else on it): budget 31.02 GiB -> 6% = 1906 MiB < the 2048 floor
+    {
+        const Margin r = m(31764, false, true, 0);
+        CHECK_EQ(r.bytes, 2048 * MiB);
+        CHECK_EQ(r.why, std::string("2048 MiB floor (no display on this GPU)"));
+    }
+    // a monitor on the card: 3072 MiB floor
+    CHECK_EQ(m(31764, true, true, 1500).bytes, 3072 * MiB);
+    CHECK(m(31764, true, true, 1500).why.find("display is attached") != std::string::npos);
+    // other programs already hold more than the floor: margin = what they hold (they may double)
+    {
+        const Margin r = m(31764, true, true, 4000);
+        CHECK_EQ(r.bytes, 4000 * MiB);
+        CHECK_EQ(r.why, std::string("1 x the 4000 MiB other processes use on this GPU"));
+    }
+    // a large card: 6% of the budget (48 GiB card: 2949 MiB > 2048)
+    {
+        const Margin r = m(49152, false, true, 100);
+        CHECK_EQ(r.bytes, 2950 * MiB);  // 2949.12 rounded up to whole MiB
+        CHECK(r.why.rfind("6% of the 49152 MiB budget", 0) == 0);
+    }
+    // counters unreadable: the budget-only rule, said so
+    {
+        const Margin r = m(31764, false, false, 0);
+        CHECK_EQ(r.bytes, 2048 * MiB);
+        CHECK(r.why.find("other processes' VRAM unknown") != std::string::npos);
+        CHECK_EQ(m(31764, false, false, 99999).bytes, 2048 * MiB);  // unknown others are not used
+    }
+    // budget unknown: the floor
+    CHECK_EQ(m(0, false, true, 0).bytes, 2048 * MiB);
+    // whole MiB
+    CHECK_EQ(m(0, false, true, 3000).bytes % MiB, 0ull);
+    CHECK(m(0, false, true, 3000).bytes >= 3000 * MiB);
+    // MoE: the same rule (moe_extra_mb)
+    CHECK_EQ(m(31764, false, true, 0, true).bytes, (2048 + moe_extra_mb) * MiB);
 }
 
 int main() {
@@ -2193,6 +2300,7 @@ int main() {
     testUmaCheck();
     testWddmWatch();
     testPoolBudget();
+    testPoolMargin();
     std::printf("unit tests: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

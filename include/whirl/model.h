@@ -501,7 +501,8 @@ public:
     DevPtr output_norm = 0;
     std::vector<Layer> layers;
     std::vector<DevPtr> allocations;
-    std::uint64_t alloc_total = 0;  // bytes requested through alloc() so far (sizing self-check in load)
+    std::vector<std::uint64_t> alloc_sizes;  // parallel to allocations (freeAlloc keeps alloc_total live)
+    std::uint64_t alloc_total = 0;  // bytes live through alloc() (sizing self-check in load; freeAlloc subtracts)
     std::array<std::uint64_t, n_types> type_bytes{};
     Profile* prof = nullptr;
     hip::Stream stream = nullptr;

@@ -239,6 +239,7 @@ Model::~Model() {
     if (rpos_buf != 0) hip::free(rpos_buf);
     for (DevPtr p : allocations) hip::free(p);
     allocations.clear();
+    alloc_sizes.clear();
     if (embd_host) hip::hostFree(embd_host);
     if (stream) hip::streamDestroy(stream);
 }
@@ -246,6 +247,7 @@ Model::~Model() {
 DevPtr Model::alloc(u64 bytes) {
     const DevPtr p = hip::malloc(static_cast<std::size_t>(bytes));
     allocations.push_back(p);
+    alloc_sizes.push_back(bytes);
     alloc_total += bytes;
     return p;
 }
@@ -261,6 +263,9 @@ void Model::freeAlloc(DevPtr p) {
         if (allocations[i] == p) {
             allocations[i] = allocations.back();
             allocations.pop_back();
+            alloc_total -= alloc_sizes[i];  // WDDM-LOG review P3-8: alloc_total stays the live sum
+            alloc_sizes[i] = alloc_sizes.back();
+            alloc_sizes.pop_back();
             hip::free(p);
             return;
         }

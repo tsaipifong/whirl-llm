@@ -211,6 +211,26 @@ try {
         $out = @(Get-Content $log -ErrorAction SilentlyContinue)
         $ok = $false
         try { $ok = [bool](& $s.rule $out $c) } catch { $ok = $false }
+        # v0.2.2.1 (issues #5 / #6): a normal server run (no other program taking VRAM) must stay inside the WDDM
+        # budget: any server log of a server step that shows "over the WDDM budget" or a GPU memory spill
+        # warning fails the step. A server step with no server log to read fails too (the check must not pass
+        # vacuously).
+        $wddmNote = ""
+        if ($s.name -like "srv_*") {
+            $slogs = @(Get-ChildItem $wd -Recurse -File -Filter "server_*.log" -ErrorAction SilentlyContinue)
+            $hits = @($slogs | Select-String -Pattern "over the WDDM budget|GPU memory spill" -SimpleMatch:$false -ErrorAction SilentlyContinue)
+            if ($slogs.Count -eq 0) {
+                $ok = $false; $wddmNote = " | WDDM check: no server log found under $wd"
+            } elseif ($hits.Count -gt 0) {
+                $ok = $false
+                $h0 = $hits[0]
+                $wddmNote = " | WDDM check: $($hits.Count) line(s) over the budget / spill, first $($h0.Filename):$($h0.LineNumber): $("$($h0.Line)".Substring(0, [Math]::Min(200, "$($h0.Line)".Length)))"
+            } else {
+                $wddmNote = " | WDDM check: $($slogs.Count) server log(s), no budget overrun / spill"
+            }
+            "release gate: WDDM check: $($slogs.Count) server log(s) read, $($hits.Count) line(s) matched 'over the WDDM budget|GPU memory spill'" | Add-Content $log
+            foreach ($h in $hits) { "  $($h.Filename):$($h.LineNumber): $($h.Line)" | Add-Content $log }
+        }
         # CB-FLAKE: a failed step keeps its server logs (server_*.log / *.stdout.txt, small) next to the step log,
         # so an intermittent failure can be explained afterwards; the SSD tier files are deleted either way
         if (-not $ok -and (Test-Path $wd)) {
@@ -222,7 +242,7 @@ try {
         Remove-Item -Recurse -Force $wd -ErrorAction SilentlyContinue  # server gate work dirs (SSD tier files)
         $sec = [int]((Get-Date) - $t0).TotalSeconds
         $last = ($out | Where-Object { $_ -match "\S" -and $_ -notmatch "^:1:" } | Select-Object -Last 1)
-        $row = "{0,-4} {1,-22} exit {2,3}  {3,5} s  {4}" -f ($(if ($ok) { "PASS" } else { "FAIL" })), $s.name, $c, $sec, "$last".Trim()
+        $row = "{0,-4} {1,-22} exit {2,3}  {3,5} s  {4}{5}" -f ($(if ($ok) { "PASS" } else { "FAIL" })), $s.name, $c, $sec, "$last".Trim(), $wddmNote
         Write-Host $row
         $rows += [pscustomobject]@{ ok = $ok; line = $row }
     }

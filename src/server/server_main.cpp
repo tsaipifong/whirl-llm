@@ -132,8 +132,11 @@ const char* kHelpBody =
     "  -np, --parallel N        concurrent request slots (continuous batching, 1..16; default 4, 1 on cards < 20 GiB)\n"
     "  -c, --ctx N              shared KV pool in tokens; slots take pages on demand and idle slots'\n"
     "                           prefix caches are evicted (LRU) when it is full (default: all VRAM\n"
-    "                           left over, kept 768 MiB (MoE 1.5 GiB) under both the free VRAM and the\n"
-    "                           Windows (WDDM) budget; WHIRL_POOL_RESERVE_MB=N: free VRAM minus N only;\n"
+    "                           left over, kept 768 MiB (MoE 1.5 GiB) under the free VRAM and a margin\n"
+    "                           under the Windows (WDDM) budget: the largest of 2 GiB (3 GiB with a\n"
+    "                           monitor on the card), what other programs use on the GPU, 6% of the\n"
+    "                           budget; WHIRL_POOL_BUDGET_MARGIN_MB=N sets that margin;\n"
+    "                           WHIRL_POOL_RESERVE_MB=N: free VRAM minus N only, no WDDM budget;\n"
     "                           262144 on the Radeon 8060S)\n"
     "  --ctx-per-slot N         longest context of one request (default min(pool, 131072); up to 262144)\n"
     "  --precise | --balance | --fast\n"
@@ -524,6 +527,33 @@ int serveMain(int argc, char** argv, const char* program) {
             opt.parallel = card.parallel;
             if (!card.note.empty()) logI("{}", card.note);
         }
+        // v0.2.2.1 (owner 2026-10-21): what other processes already use on this GPU, before WHIRL loads anything;
+        // the WDDM budget margin grows with it and with a monitor on the card (poolbudget::defaultMargin)
+        const hip::GpuOthers others0 = hip::gpuOthers();
+        const char* const display0 = others0.display_known ? (others0.display ? "yes" : "no") : "unknown";
+        if (others0.ok)
+            logI("other processes use {:.2f} GiB of VRAM on this GPU (display attached: {}) (adapter {:.2f} GiB, this process {:.2f} "
+                 "GiB; read in {:.1f} ms)",
+                 others0.others / 1073741824.0, display0, others0.adapter_dedicated / 1073741824.0,
+                 others0.own_dedicated / 1073741824.0, others0.cost_us / 1000.0);
+        else
+            logI("other processes' VRAM on this GPU: unknown (GPU performance counters not readable; display attached: {}); the "
+                 "WDDM budget margin uses the budget-only rule ({:.1f} ms)",
+                 display0, others0.cost_us / 1000.0);
+        // the margin kept free under the WDDM local budget (pool sizing, the re-check after allocation)
+        const bool margin_explicit = env("POOL_BUDGET_MARGIN_MB").has_value();
+        const auto budgetMargin = [&](std::uint64_t budget) {
+            if (margin_explicit)
+                return poolbudget::Margin{static_cast<std::uint64_t>(envU32("POOL_BUDGET_MARGIN_MB", 0)) << 20,
+                                          "WHIRL_POOL_BUDGET_MARGIN_MB"};
+            poolbudget::MarginIn mi;
+            mi.local_budget = budget;
+            mi.moe = cfg.moe;
+            mi.others_known = others0.ok;
+            mi.others = others0.others;
+            mi.display = others0.display_known && others0.display;
+            return poolbudget::defaultMargin(mi);
+        };
 
         const Tokenizer tok = Tokenizer::fromGguf(f);
         const std::string_view tmpl_text = f.getStringOr("tokenizer.chat_template", "");
@@ -590,7 +620,7 @@ int serveMain(int argc, char** argv, const char* program) {
             const hip::WddmMemInfo w = hip::wddmMemInfo();
             const bool res_explicit = env("POOL_RESERVE_MB").has_value();
             const std::uint64_t res = static_cast<std::uint64_t>(envU32("POOL_RESERVE_MB", cfg.moe ? 1536 : (w.ok ? 768 : 3072))) << 20;
-            const std::uint64_t margin = static_cast<std::uint64_t>(envU32("POOL_BUDGET_MARGIN_MB", cfg.moe ? 1536 : 768)) << 20;
+            const std::uint64_t margin = budgetMargin(w.local_budget).bytes;
             std::uint64_t av = mf.free > res ? mf.free - res : 0;
             if (!res_explicit && w.ok) av = std::min(av, w.local_budget > w.local_usage + margin ? w.local_budget - w.local_usage - margin : 0);
             av = av > card.headroom ? av - card.headroom : 0;
@@ -1140,9 +1170,11 @@ int serveMain(int argc, char** argv, const char* program) {
         // WHIRL_POOL_RESERVE_MB keeps the old free-VRAM-only rule with that reserve.
         const bool reserve_explicit = env("POOL_RESERVE_MB").has_value();
         const hip::WddmMemInfo wddm0 = hip::wddmMemInfo();
+        const std::uint64_t pinned0 = hip::pinnedHostBytes();  // pinned host memory inside wddm0's non-local usage
         const std::uint64_t reserve =
             static_cast<std::uint64_t>(envU32("POOL_RESERVE_MB", cfg.moe ? 1536 : (wddm0.ok ? 768 : 3072))) << 20;
-        const std::uint64_t budget_margin = static_cast<std::uint64_t>(envU32("POOL_BUDGET_MARGIN_MB", cfg.moe ? 1536 : 768)) << 20;
+        const poolbudget::Margin margin0 = budgetMargin(wddm0.local_budget);
+        const std::uint64_t budget_margin = margin0.bytes;
         std::string budget_note;
         const std::uint64_t avail = [&] {
             const hip::MemInfo mf = hip::memInfo();
@@ -1151,10 +1183,10 @@ int serveMain(int argc, char** argv, const char* program) {
                 const std::uint64_t room = wddm0.local_budget > wddm0.local_usage + budget_margin
                                                ? wddm0.local_budget - wddm0.local_usage - budget_margin
                                                : 0;
-                budget_note = std::format("WDDM budget {:.2f} GiB, used {:.2f} GiB, margin {} MiB -> room {:.2f} GiB; free VRAM {:.2f} GiB "
-                                          "minus {} MiB -> {:.2f} GiB",
+                budget_note = std::format("WDDM budget {:.2f} GiB, used {:.2f} GiB, margin {} MiB ({}) -> room {:.2f} GiB; free "
+                                          "VRAM {:.2f} GiB minus {} MiB -> {:.2f} GiB",
                                           wddm0.local_budget / 1073741824.0, wddm0.local_usage / 1073741824.0, budget_margin >> 20,
-                                          room / 1073741824.0, mf.free / 1073741824.0, reserve >> 20, a / 1073741824.0);
+                                          margin0.why, room / 1073741824.0, mf.free / 1073741824.0, reserve >> 20, a / 1073741824.0);
                 a = std::min(a, room);
             } else if (reserve_explicit) {
                 budget_note = std::format("WHIRL_POOL_RESERVE_MB={}: free VRAM {:.2f} GiB minus the reserve, WDDM budget not applied",
@@ -1199,16 +1231,6 @@ int serveMain(int argc, char** argv, const char* program) {
                                              "  or close other programs that use the GPU.",
                                              pool_tokens));
         if (slot_ctx_eff != slot_ctx) engine.setCtx(slot_ctx_eff);
-        {
-            const std::uint64_t floor = static_cast<std::uint64_t>(slot_ctx_eff) + (opt.parallel > 1 ? std::min(floor_second_ctx, slot_ctx_eff) : 0);
-            if (pool_tokens < floor)
-                logW("kv pool {} tokens < {} (one {}-token request + a second one reaching {}): concurrent long requests wait in "
-                     "the queue, or end early while generating (finish_reason length, finish_cause kv_pool_exhausted){}",
-                     pool_tokens, floor, slot_ctx_eff, opt.parallel > 1 ? std::min(floor_second_ctx, slot_ctx_eff) : 0,
-                     model.kv_choice.kv == numerics::KvKind::f16 && !cfg.moe && nreq.mode == numerics::Mode::precise
-                         ? "; --balance allows int8 KV (a longer pool)"
-                         : "");
-        }
         try {
             model.allocKvPool(pool_tokens);
         } catch (const std::exception& ex) {
@@ -1217,39 +1239,108 @@ int serveMain(int argc, char** argv, const char* program) {
             throw;
         }
         // issue #5: the WDDM budget read when the pool was sized can be lower once the pool exists (31.02 ->
-        // 29.55 GiB on a user's R9700 with a 12 GiB RAM tier: started 0.37 GiB over the budget, decode slowed
-        // down as Windows moved GPU memory to system RAM). Read it again now and shrink the pool (whole pages,
-        // before anything uses it) until local usage + margin fits; up to 3 rounds. Same conditions as the
-        // budget rule above: a pool sized from memory, WDDM numbers available, not the UMA iGPU, no
-        // WHIRL_POOL_RESERVE_MB. Output is unchanged (only the pool's size changes).
-        if (!pool_req && !reserve_explicit && wddm0.ok && !is_uma) {
-            for (int round = 0; round < 3; ++round) {
-                const hip::WddmMemInfo wa = hip::wddmMemInfo();
-                if (!wa.ok) break;
-                const std::uint32_t have = model.pool_pages * kv_page;
-                const poolbudget::Trim tr =
-                    poolbudget::fitPool(have, wa.local_usage, wa.local_budget, budget_margin, per_tok, kv_page, 4096);
-                if (tr.over == 0) {
-                    if (round > 0 || wa.local_budget != wddm0.local_budget)
-                        logI("kv pool check: WDDM budget {:.2f} GiB now ({:.2f} GiB when the pool was sized), local {:.2f} GiB + "
-                             "margin {} MiB fits",
-                             wa.local_budget / 1073741824.0, wddm0.local_budget / 1073741824.0, wa.local_usage / 1073741824.0,
-                             budget_margin >> 20);
-                    break;
+        // 29.55 GiB on a user's R9700, ~220 ms later; why it fell is not known). Read it again now and shrink the
+        // pool (whole pages, before anything uses it) until local usage + margin fits; up to 3 rounds. A round
+        // only follows one whose free really lowered the local usage (WDDM counters can lag a free: re-polled for
+        // up to 0.5 s), so stale numbers cannot shrink it twice. Same conditions as the budget rule above: a pool
+        // sized from memory, WDDM numbers available, not the UMA iGPU, no WHIRL_POOL_RESERVE_MB. An explicit
+        // --ctx-per-slot is never lowered (refused, as when it does not fit at sizing). With an explicit -c or
+        // WHIRL_POOL_RESERVE_MB the pool is never resized: a warning says how many tokens would fit.
+        // Output is unchanged (only the pool's size changes).
+        if (wddm0.ok && !is_uma) {
+            const auto poolGib = [&](std::uint64_t tokens) { return static_cast<double>(per_tok * tokens) / 1073741824.0; };
+            if (!pool_req && !reserve_explicit) {
+                std::uint64_t prev_usage = 0, prev_freed = 0;
+                for (int round = 0; round < 3; ++round) {
+                    hip::WddmMemInfo wa = hip::wddmMemInfo();
+                    if (!wa.ok) break;
+                    if (round > 0 && !poolbudget::usageFell(prev_usage, wa.local_usage, prev_freed)) {
+                        for (int i = 0; i < 10 && !poolbudget::usageFell(prev_usage, wa.local_usage, prev_freed); ++i) {
+                            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                            wa = hip::wddmMemInfo();
+                        }
+                        if (!wa.ok) break;
+                        if (!poolbudget::usageFell(prev_usage, wa.local_usage, prev_freed)) {
+                            logW("kv pool check: local usage {:.2f} -> {:.2f} GiB after freeing {:.2f} GiB of KV pool (the WDDM "
+                                 "numbers did not follow within 0.5 s); not shrinking further",
+                                 prev_usage / 1073741824.0, wa.local_usage / 1073741824.0, prev_freed / 1073741824.0);
+                            break;
+                        }
+                    }
+                    const std::uint32_t have = model.pool_pages * kv_page;
+                    const poolbudget::Trim tr =
+                        poolbudget::fitPool(have, wa.local_usage, wa.local_budget, budget_margin, per_tok, kv_page, 4096);
+                    if (tr.over == 0) {
+                        if (round > 0 || wa.local_budget != wddm0.local_budget)
+                            logI("kv pool check: WDDM budget {:.2f} GiB now ({:.2f} GiB when the pool was sized), local {:.2f} GiB + "
+                                 "margin {} MiB fits (KV pool {} tokens)",
+                                 wa.local_budget / 1073741824.0, wddm0.local_budget / 1073741824.0, wa.local_usage / 1073741824.0,
+                                 budget_margin >> 20, have);
+                        break;
+                    }
+                    if (!tr.shrink) break;  // already at the smallest pool; the WDDM memory line below warns
+                    if (opt.ctx_per_slot && tr.pool_tokens < slot_ctx_eff)
+                        throw app::UserError(
+                            app::exit_vram,
+                            std::format("the Windows video memory (WDDM) budget is {:.2f} GiB now ({:.2f} GiB when the KV pool was "
+                                        "sized): with the {} MiB margin a KV pool of about {} tokens fits, less than --ctx-per-slot "
+                                        "{}.\n  Use a smaller --ctx-per-slot, close other programs that use the GPU, or set "
+                                        "WHIRL_POOL_BUDGET_MARGIN_MB lower.",
+                                        wa.local_budget / 1073741824.0, wddm0.local_budget / 1073741824.0, budget_margin >> 20,
+                                        tr.pool_tokens, slot_ctx_eff));
+                    logW("kv pool check: WDDM budget {:.2f} GiB now ({:.2f} GiB when the pool was sized), local {:.2f} GiB + margin "
+                         "{} MiB is {:.2f} GiB over -> shrinking the KV pool from {} to {} tokens ({:.2f} -> {:.2f} GiB) so WHIRL "
+                         "stays in VRAM{}",
+                         wa.local_budget / 1073741824.0, wddm0.local_budget / 1073741824.0, wa.local_usage / 1073741824.0,
+                         budget_margin >> 20, tr.over / 1073741824.0, have, tr.pool_tokens, poolGib(have), poolGib(tr.pool_tokens),
+                         tr.at_floor ? " (the smallest pool, 4096 tokens: it may still not fit)" : "");
+                    prev_usage = wa.local_usage;
+                    prev_freed = per_tok * (have - tr.pool_tokens);
+                    model.freeKvPool();
+                    try {
+                        model.allocKvPool(tr.pool_tokens);
+                    } catch (const std::exception& ex) {
+                        logE("cannot allocate the smaller KV pool of {} tokens ({:.2f} GiB): {}", tr.pool_tokens, poolGib(tr.pool_tokens),
+                             ex.what());
+                        throw;
+                    }
+                    if (slot_ctx_eff > tr.pool_tokens) {
+                        logW("kv pool check: context per request lowered to {} tokens (wanted {}): the pool that fits the WDDM "
+                             "budget is smaller",
+                             tr.pool_tokens, slot_ctx_eff);
+                        slot_ctx_eff = tr.pool_tokens;
+                        engine.setCtx(slot_ctx_eff);
+                    }
                 }
-                if (!tr.shrink) break;  // already at the smallest pool; warned below / by the WDDM memory line
-                logW("kv pool check: WDDM budget {:.2f} GiB now ({:.2f} GiB when the pool was sized), local {:.2f} GiB + margin {} "
-                     "MiB is {:.2f} GiB over -> shrinking the KV pool from {} to {} tokens so WHIRL stays in VRAM{}",
-                     wa.local_budget / 1073741824.0, wddm0.local_budget / 1073741824.0, wa.local_usage / 1073741824.0,
-                     budget_margin >> 20, tr.over / 1073741824.0, have, tr.pool_tokens,
-                     tr.at_floor ? " (the smallest pool, 4096 tokens: it may still not fit)" : "");
-                model.freeKvPool();
-                model.allocKvPool(tr.pool_tokens);
-                if (slot_ctx_eff > tr.pool_tokens) {
-                    slot_ctx_eff = tr.pool_tokens;
-                    engine.setCtx(slot_ctx_eff);
+            } else {
+                // explicit -c or WHIRL_POOL_RESERVE_MB: the pool is the user's; only say whether it fits the budget now
+                const hip::WddmMemInfo wa = hip::wddmMemInfo();
+                const std::uint32_t have = model.pool_pages * kv_page;
+                if (wa.ok) {
+                    const poolbudget::Trim tr = poolbudget::fitPool(have, wa.local_usage, wa.local_budget, budget_margin, per_tok, kv_page, kv_page);
+                    if (tr.over > 0)
+                        logW("kv pool check: local {:.2f} GiB + margin {} MiB is {:.2f} GiB over the WDDM budget of {:.2f} GiB with "
+                             "the KV pool of {} tokens ({:.2f} GiB), which is not resized because {}. About {} tokens fit: {}",
+                             wa.local_usage / 1073741824.0, budget_margin >> 20, tr.over / 1073741824.0, wa.local_budget / 1073741824.0,
+                             have, poolGib(have),
+                             pool_req ? "-c / --ctx was given" : "WHIRL_POOL_RESERVE_MB is set (free-VRAM rule, no WDDM budget)",
+                             tr.at_floor ? 0u : tr.pool_tokens,
+                             pool_req ? "restart with that -c or a smaller one, or close other programs that use the GPU"
+                                      : "unset WHIRL_POOL_RESERVE_MB (WHIRL_POOL_BUDGET_MARGIN_MB sets the margin), or close other "
+                                        "programs that use the GPU");
                 }
             }
+        }
+        {
+            const std::uint32_t pool_now = model.pool_pages * kv_page;
+            const std::uint64_t floor = static_cast<std::uint64_t>(slot_ctx_eff) + (opt.parallel > 1 ? std::min(floor_second_ctx, slot_ctx_eff) : 0);
+            if (pool_now < floor)
+                logW("kv pool {} tokens < {} (one {}-token request + a second one reaching {}): concurrent long requests wait in "
+                     "the queue, or end early while generating (finish_reason length, finish_cause kv_pool_exhausted){}",
+                     pool_now, floor, slot_ctx_eff, opt.parallel > 1 ? std::min(floor_second_ctx, slot_ctx_eff) : 0,
+                     model.kv_choice.kv == numerics::KvKind::f16 && !cfg.moe && nreq.mode == numerics::Mode::precise
+                         ? "; --balance allows int8 KV (a longer pool)"
+                         : "");
         }
         const double ck_mb = static_cast<double>(n_gdn * (conv_bytes + ssm_bytes) + static_cast<std::uint64_t>(V) * 4 +
                                                  static_cast<std::uint64_t>(cfg.n_embd) * 4) /
@@ -1303,6 +1394,21 @@ int serveMain(int argc, char** argv, const char* program) {
             logI("prompt-lookup (n-gram) drafting: {} (WHIRL_NGRAM{}), min match {}, up to {} drafts", eo.ngram ? "on" : "off",
                  eo.ngram ? "=0 turns it off" : "=1 turns it on", eo.ngram_min,
                  eo.ngram_max > 0 ? std::min(eo.ngram_max, qwen35::max_ng_drafts) : qwen35::max_ng_drafts);
+        // runtime watch baseline (P3-4): the sizing read, so a spill already present at startup is not hidden;
+        // pinned host memory WHIRL allocates after it is subtracted (wddmwatch::Sample::pinned)
+        const auto vramSampleOf = [](const hip::WddmMemInfo& m, std::uint64_t pinned) {
+            wddmwatch::Sample s;
+            s.ok = m.ok;
+            s.local_budget = m.local_budget;
+            s.local_usage = m.local_usage;
+            s.nonlocal_usage = m.nonlocal_usage;
+            s.pinned = pinned;
+            return s;
+        };
+        const wddmwatch::Sample vram_base = vramSampleOf(wddm0, pinned0);
+        wddmwatch::Config vram_cfg;
+        vram_cfg.pool_tokens = model.pool_pages * kv_page;
+        bool startup_spill = false;
         engine.setNumerics(numerics::propsJson(model.num_plan, model.kv_q8 ? (model.kv_q4 ? "q4" : model.kv_kf16 ? "q8v" : model.kv_rot ? "q8h" : "q8") : "f16"));
         engine.initPool();
         {
@@ -1311,29 +1417,26 @@ int serveMain(int argc, char** argv, const char* program) {
             // before that point, such as the embedding table and the RAM tier, are in the baseline)
             const hip::WddmMemInfo w = hip::wddmMemInfo();
             if (w.ok && wddm0.ok) {
+                const std::uint64_t pinned_now = hip::pinnedHostBytes();
                 const std::uint64_t grow = w.nonlocal_usage > wddm0.nonlocal_usage ? w.nonlocal_usage - wddm0.nonlocal_usage : 0;
-                const bool over = w.local_usage > w.local_budget || grow > (256ull << 20);
+                const std::uint64_t pinned_since = pinned_now > pinned0 ? pinned_now - pinned0 : 0;
                 const std::string msg = std::format(
                     "WDDM memory: local {:.2f} / budget {:.2f} GiB; non-local (GPU 'Shared Usage') {:.0f} MiB, of which {:.0f} MiB was there "
-                    "before the KV pool (declared pinned host memory: embedding {:.0f} MiB{}); growth {:.0f} MiB",
+                    "before the KV pool (declared pinned host memory: embedding {:.0f} MiB{}); growth {:.0f} MiB ({:.0f} MiB of it pinned "
+                    "host memory WHIRL allocated since)",
                     w.local_usage / 1073741824.0, w.local_budget / 1073741824.0, w.nonlocal_usage / 1048576.0,
-                    wddm0.nonlocal_usage / 1048576.0, embd_pinned / 1048576.0, tier_pre ? ", RAM tier" : "", grow / 1048576.0);
+                    wddm0.nonlocal_usage / 1048576.0, embd_pinned / 1048576.0, tier_pre ? ", RAM tier" : "", grow / 1048576.0,
+                    pinned_since / 1048576.0);
                 // same test and wording as the runtime watch (wddm_watch.h), against the same baseline
-                const auto smp = [](const hip::WddmMemInfo& m) {
-                    wddmwatch::Sample s;
-                    s.ok = m.ok;
-                    s.local_budget = m.local_budget;
-                    s.local_usage = m.local_usage;
-                    s.nonlocal_usage = m.nonlocal_usage;
-                    return s;
-                };
-                wddmwatch::Watch startup(smp(wddm0));
-                const auto ev = over && !is_uma ? startup.check(smp(w), 0.0) : std::nullopt;
-                if (ev && ev->warn)
+                const wddmwatch::Sample now_s = vramSampleOf(w, pinned_now);
+                wddmwatch::Watch startup(vram_base, vram_cfg);
+                const auto ev = !is_uma ? startup.check(now_s, 0.0) : std::nullopt;
+                startup_spill = ev.has_value() && ev->warn;
+                if (startup_spill)
                     logW("{} | at startup: {}", msg, ev->text);
-                else if (over)
+                else if (w.local_usage > w.local_budget)  // UMA iGPU only (no warning text there)
                     logW("{} -- over the WDDM budget, part of the GPU buffers may live in system memory and decode can be several "
-                         "times slower; set WHIRL_POOL_RESERVE_MB larger (e.g. 3072) or give --ctx",
+                         "times slower; give a smaller --ctx",
                          msg);
                 else
                     logI("{}", msg);
@@ -1521,7 +1624,13 @@ int serveMain(int argc, char** argv, const char* program) {
                 if (K32GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc))) s.rss = pmc.WorkingSetSize;
                 return s;
             },
-            !is_uma);
+            !is_uma, wddm0.ok ? std::optional<wddmwatch::Sample>(vram_base) : std::nullopt, vram_cfg, startup_spill,
+            // what other processes use on the GPU, read only when a spill warning is printed (one PDH read)
+            [others0]() -> std::optional<wddmwatch::Others> {
+                const hip::GpuOthers o = hip::gpuOthers();
+                if (!o.ok) return std::nullopt;
+                return wddmwatch::Others{o.others, others0.ok ? std::optional<std::uint64_t>(others0.others) : std::nullopt};
+            });
         HttpOptions ho;
         ho.cors_origins = opt.cors_origins;
         ho.allowed_hosts = opt.allowed_hosts;

@@ -32,7 +32,17 @@ std::string format(const Sample& s, const Sample& base);
 struct Config {
     std::uint64_t grow_warn = 256ull << 20;  // non-local growth since start that counts as a spill
     double min_gap_s = 60.0;                 // at most one spill warning per this many seconds
+    std::uint32_t pool_tokens = 0;           // the KV pool, named in the advice (0: left out)
+    double idle_sample_s = 60.0;             // the server samples once per this many seconds while idle
 };
+
+// What other processes use on this GPU (read only when a warning is printed); start: at server start.
+struct Others {
+    std::uint64_t now = 0;
+    std::optional<std::uint64_t> start;
+};
+// " Other programs use 3.10 GiB of VRAM on this GPU now (0.20 GiB when the server started)."
+std::string othersNote(const Others& o);
 
 struct Event {
     bool warn = false;  // true: a WARNING (spill), false: INFO (spill over)
@@ -77,9 +87,11 @@ public:
     DecodeWatch() = default;
     explicit DecodeWatch(Config c) : cfg_(c) {}
     void reset() { *this = DecodeWatch(cfg_); }
-    // n_gen, ms (since decode start) and cycles are cumulative; spill: a GPU memory spill is seen now.
+    // n_gen, ms (since decode start) and cycles are cumulative; spill: a GPU memory spill is seen now;
+    // prefill_cum: the server's cumulative prefill tokens (all slots), so a window in which another request
+    // prefilled is known. The spill is named only when each decode cycle got slower (or no cycle figure).
     // Returns the line (without the "req / slot" prefix) and whether it is a warning.
-    std::optional<Event> report(std::uint32_t n_gen, double ms, std::uint64_t cycles, bool spill);
+    std::optional<Event> report(std::uint32_t n_gen, double ms, std::uint64_t cycles, bool spill, std::uint64_t prefill_cum = 0);
 
 private:
     Config cfg_;
@@ -88,6 +100,7 @@ private:
     std::uint32_t prev_n_ = 0;
     double prev_ms_ = 0.0;
     std::uint64_t prev_cyc_ = 0;
+    std::uint64_t prev_pf_ = 0;
 };
 
 }  // namespace whirl::wddmwatch

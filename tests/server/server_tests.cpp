@@ -108,6 +108,10 @@ struct ServerSetup {
     HttpOptions http;
     // WDDM-LOG: injected video memory samples (Engine::setVramProbe), warn as on a discrete GPU
     std::function<whirl::wddmwatch::Sample()> vram_probe;
+    std::optional<whirl::wddmwatch::Sample> vram_base;  // the sizing-time baseline (nullopt: the first sample)
+    whirl::wddmwatch::Config vram_cfg;
+    bool vram_startup_warned = false;
+    std::function<std::optional<whirl::wddmwatch::Others>()> vram_others;
 };
 
 // vision: host mock encoder (real stb decode + preprocessing size rule, deterministic
@@ -192,7 +196,7 @@ public:
             engine_->attachTier(tier_.get());
             tier_->start(tc, lay, su.fingerprint);
         }
-        if (su.vram_probe) engine_->setVramProbe(su.vram_probe, true);
+        if (su.vram_probe) engine_->setVramProbe(su.vram_probe, true, su.vram_base, su.vram_cfg, su.vram_startup_warned, su.vram_others);
         http_ = std::make_unique<HttpServer>(*engine_, su.http);
         http_->start("127.0.0.1", 0);
         loop_ = std::thread([this] { engine_->runLoop(); });
@@ -724,7 +728,7 @@ void testVramWatch() {
     CHECK_EQ(srv.post("/v1/chat/completions", q).status, 200);
     CHECK(waitFor([&] {
         return g_log.count(" W GPU memory spill: WHIRL's GPU memory is 0.32 GiB over the Windows video memory (WDDM) budget, and "
-                           "Windows has moved part of WHIRL's GPU buffers to system RAM (shared GPU memory +600 MiB since startup).") == 1;
+                           "Windows has likely moved part of WHIRL's GPU buffers to system RAM (shared GPU memory +600 MiB since startup).") == 1;
     }, 5000));
     CHECK(waitFor([&] {
         return srv.get("/health").body.find("\"vram\":{\"local_mib\":29000,\"budget_mib\":28672,\"shared_mib\":1000,\"spill\":true}") !=
@@ -739,6 +743,46 @@ void testVramWatch() {
     CHECK_EQ(srv.post("/v1/chat/completions", q).status, 200);
     CHECK(waitFor([&] { return g_log.count(" I GPU memory spill is over (it lasted ") == 1; }, 5000));
     CHECK(waitFor([&] { return srv.get("/health").body.find("\"spill\":false") != std::string::npos; }, 5000));
+
+    // review P3-7: while idle the probe is still sampled (here every 0.2 s; the server: once a minute), so /health and
+    // the spill lines follow without a request; P3-3: the pool size and other programs' VRAM are in the warning
+    {
+        g_log.clear();
+        set(29000, 31232, 400);
+        ServerSetup si = baseSetup();
+        si.vram_probe = su.vram_probe;
+        si.vram_cfg.idle_sample_s = 0.2;
+        si.vram_cfg.pool_tokens = 334080;
+        si.vram_others = [] { return std::optional<whirl::wddmwatch::Others>(whirl::wddmwatch::Others{3328 * MiB, 205 * MiB}); };
+        TestServer idle(si);
+        CHECK(idle.get("/health").body.find("\"spill\":false") != std::string::npos);
+        set(29000, 28672, 1000);  // no request
+        CHECK(waitFor([&] { return idle.get("/health").body.find("\"budget_mib\":28672,\"shared_mib\":1000,\"spill\":true") != std::string::npos; },
+                      5000));
+        CHECK(waitFor([&] { return g_log.count(" W GPU memory spill: ") == 1; }, 5000));
+        CHECK_EQ(g_log.count("(the KV pool is now 334080 tokens)"), 1u);
+        CHECK_EQ(g_log.count("Other programs use 3.25 GiB of VRAM on this GPU now (0.20 GiB when the server started)."), 1u);
+        set(29000, 31232, 400);
+        CHECK(waitFor([&] { return g_log.count(" I GPU memory spill is over (it lasted ") == 1; }, 5000));
+        CHECK(waitFor([&] { return idle.get("/health").body.find("\"spill\":false") != std::string::npos; }, 5000));
+    }
+    // review P3-4: a spill already there at startup (against the sizing-time baseline) shows in /health at once; the
+    // startup line already warned, so the watch does not repeat it
+    {
+        g_log.clear();
+        set(29000, 31232, 1000);
+        ServerSetup ss = baseSetup();
+        ss.vram_probe = su.vram_probe;
+        whirl::wddmwatch::Sample base0 = cur;
+        base0.nonlocal_usage = 400 * MiB;  // the read the pool was sized from
+        ss.vram_base = base0;
+        ss.vram_startup_warned = true;
+        TestServer st(ss);
+        CHECK(st.get("/health").body.find("\"spill\":true") != std::string::npos);
+        CHECK_EQ(g_log.count(" W GPU memory spill"), 0u);
+        CHECK_EQ(g_log.count("(+600 MiB since start)"), 1u);  // the vram watch line, against the sizing baseline
+        set(29000, 31232, 400);
+    }
 }
 
 void testEndpoints() {

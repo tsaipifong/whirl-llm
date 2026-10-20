@@ -12,6 +12,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 
 namespace whirl::poolbudget {
 
@@ -28,5 +29,37 @@ struct Trim {
 // more per allocation, so the real fit is a little better). local_budget 0 (unknown): no change.
 Trim fitPool(std::uint32_t pool_tokens, std::uint64_t local_usage, std::uint64_t local_budget, std::uint64_t margin,
              std::uint64_t per_tok, std::uint32_t page, std::uint32_t min_tokens);
+
+// Default WDDM budget margin (v0.2.2.1). The owner, 2026-10-21: the margin must cover the other programs
+// that use the same GPU (desktop compositor, browser, Docker, other apps), and should look at what they
+// use when the server starts. The WDDM budget read at startup already leaves out what they use at that
+// moment; the margin is room for them to GROW afterwards (issue #5: the budget fell 1.47 GiB right after
+// startup). Rule, kept free under the WDDM local budget when the pool is sized and re-checked:
+//   max(floor, others_k x what other processes use on this GPU now, 6% of the budget)  [+ moe_extra_mb]
+//   floor = 3072 MiB with a monitor on the card (the desktop and whatever the user opens grow), else 2048.
+// Without the other-process counters: max(floor, 6% of the budget). Measurements: see CHANGELOG 0.2.2.1
+// (dev machine display GPU with a browser and an Electron app: other processes ~1.5-1.9 GiB).
+// WHIRL_POOL_BUDGET_MARGIN_MB overrides the whole rule.
+inline constexpr std::uint64_t margin_floor_mb = 2048;
+inline constexpr std::uint64_t margin_floor_display_mb = 3072;
+inline constexpr double margin_budget_frac = 0.06;
+inline constexpr double margin_others_k = 1.0;
+inline constexpr std::uint64_t moe_extra_mb = 0;
+struct MarginIn {
+    std::uint64_t local_budget = 0;  // 0: unknown
+    bool moe = false;
+    bool others_known = false;       // the other-process counters were read
+    std::uint64_t others = 0;        // VRAM other processes use on this GPU now
+    bool display = false;            // a monitor is attached to this GPU
+};
+struct Margin {
+    std::uint64_t bytes = 0;  // whole MiB
+    std::string why;          // "2048 MiB floor (no display on this GPU)", for the startup log
+};
+Margin defaultMargin(const MarginIn& in);
+
+// One shrink round freed `freed` bytes: true when the local usage read afterwards fell by at least half of it.
+// The re-check stops otherwise, so a WDDM counter that has not caught up yet cannot make it shrink again.
+bool usageFell(std::uint64_t usage_before, std::uint64_t usage_after, std::uint64_t freed);
 
 }  // namespace whirl::poolbudget

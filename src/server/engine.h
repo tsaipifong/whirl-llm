@@ -431,10 +431,15 @@ public:
     void setNumerics(std::string j) { opt_.numerics_json = std::move(j); }
     void setKvSsdMode(std::string m) { opt_.kv_ssd_mode = std::move(m); }
     // WDDM-LOG (issues #5 / #6): before runLoop, after everything sized at startup is allocated. The
-    // probe (hip::wddmMemInfo on Windows) is sampled for each "batch |" status line and at each request
-    // end, never per decode cycle; its first sample is the baseline for the non-local growth. warn =
-    // false (UMA iGPU, where "shared" is the same RAM) logs the numbers without the warning.
-    void setVramProbe(std::function<wddmwatch::Sample()> probe, bool warn);
+    // probe (hip::wddmMemInfo on Windows) is sampled for each "batch |" status line, at each request
+    // end and once a minute while idle, never per decode cycle. base: the baseline for the non-local
+    // growth (the server passes the read the KV pool was sized from, so a spill already there at startup
+    // is not hidden); nullopt = the first sample. warn = false (UMA iGPU, where "shared" is the same RAM)
+    // logs the numbers without the warning. startup_warned: the startup line already printed the spill
+    // warning (the watch counts it as its first). others: read only when a spill warning is printed.
+    void setVramProbe(std::function<wddmwatch::Sample()> probe, bool warn, std::optional<wddmwatch::Sample> base = std::nullopt,
+                      wddmwatch::Config cfg = {}, bool startup_warned = false,
+                      std::function<std::optional<wddmwatch::Others>()> others = nullptr);
     const Tokenizer& tokenizer() const { return tok_; }
     const ChatTokens& chatTokens() const { return ct_; }
     ServerModel& model() { return m_; }
@@ -565,6 +570,8 @@ private:
     void logBatchStats(bool force);
     // samples the WDDM probe (warns through vram_watch_); "" without a probe
     std::string vramNote();
+    // idle: one sample a minute so /health and the spill-over line stay current; returns the next due time
+    std::optional<TimePoint> vramIdleTick();
     void abortQueued(std::unique_lock<std::mutex>& lk);
     void initCkpt(Ckpt& c, bool host_ok);
     // vision: image embeddings (cache by content hash), per-slot image maps, idle release
@@ -636,7 +643,11 @@ private:
     std::uint64_t stat_dfl_cycles_ = 0, stat_dfl_drafted_ = 0, stat_dfl_accepted_ = 0, stat_dfl_cold_ = 0, stat_dfl_gap_ = 0;
     // WDDM-LOG: runtime video memory watch (setVramProbe)
     std::function<wddmwatch::Sample()> vram_probe_;
+    std::function<std::optional<wddmwatch::Others>()> vram_others_;
     wddmwatch::Watch vram_watch_;
+    TimePoint vram_idle_next_{};    // next idle sample (once a minute while no request runs)
+    double vram_idle_s_ = 60.0;
+    std::uint64_t prefill_tok_cum_ = 0;  // all slots, since start (DecodeWatch: was another request prefilling)
     bool vram_warn_ = false;
     std::mutex vram_mu_;  // vram_last_ / vram_spill_ for health() (HTTP threads)
     wddmwatch::Sample vram_last_;

@@ -1469,6 +1469,7 @@ void Engine::prefillStep(Slot& sl) {
     dflIngest(sl, static_cast<std::uint32_t>(n), 0, static_cast<std::uint32_t>(n), sl.reuse + static_cast<std::uint32_t>(sl.pf_off));
     sl.pf_off += n;
     stat_prefill_tok_ += n;
+    prefill_tok_cum_ += n;
     maybeSplitCkpt(sl, m_.hn() + static_cast<std::uint64_t>(n - 1) * m_.cfg().n_embd * 4);
     if (sl.pf_off == toks.size()) finishPrefill(sl);
 }
@@ -1552,6 +1553,7 @@ std::size_t Engine::prefillGroup(Slot& first, std::size_t row_budget) {
         return 0;
     }
     stat_prefill_tok_ += total;
+    prefill_tok_cum_ += total;
     stat_seg_batches_ += 1;
     stat_seg_chunks_ += grp.size();
     std::uint64_t r0 = 0;
@@ -2271,7 +2273,7 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
             sl.last_log_t = Clock::now();
             // WDDM-LOG: a sharp drop against the request's early speed; the spill is named as the likely
             // cause only while one is seen (vram_watch_ state from the last status-line sample)
-            if (const auto ev = sl.dec_watch.report(sl.n_gen, el, sl.cycles, vram_warn_ && vram_watch_.spilling())) {
+            if (const auto ev = sl.dec_watch.report(sl.n_gen, el, sl.cycles, vram_warn_ && vram_watch_.spilling(), prefill_tok_cum_)) {
                 if (ev->warn) logW("req {} | slot {} | {}", sl.reqId(), sl.id, ev->text);
                 else logI("req {} | slot {} | {}", sl.reqId(), sl.id, ev->text);
             }
@@ -3226,30 +3228,43 @@ void Engine::logBatchStats(bool force) {
     stat_floor_periods_ = stat_floor_waits_ = 0;
 }
 
-void Engine::setVramProbe(std::function<wddmwatch::Sample()> probe, bool warn) {
+void Engine::setVramProbe(std::function<wddmwatch::Sample()> probe, bool warn, std::optional<wddmwatch::Sample> base,
+                          wddmwatch::Config cfg, bool startup_warned, std::function<std::optional<wddmwatch::Others>()> others) {
     vram_probe_ = std::move(probe);
+    vram_others_ = std::move(others);
     vram_warn_ = warn;
     if (!vram_probe_) return;
-    // the baseline, and the cost of one sample (taken twice: the first also builds the DXGI factory's caches)
+    // the cost of one sample (taken twice: the first also builds the DXGI factory's caches)
     const TimePoint t0 = Clock::now();
-    const wddmwatch::Sample base = vram_probe_();
+    const wddmwatch::Sample first = vram_probe_();
     const double first_us = msSince(t0) * 1000.0;
     const TimePoint t1 = Clock::now();
-    (void)vram_probe_();
+    const wddmwatch::Sample s = vram_probe_();
     const double next_us = msSince(t1) * 1000.0;
-    vram_watch_ = wddmwatch::Watch(base);
-    if (!base.ok) {
+    const wddmwatch::Sample b = base && base->ok ? *base : first;
+    vram_watch_ = wddmwatch::Watch(b, cfg);
+    vram_idle_s_ = cfg.idle_sample_s > 0.0 ? cfg.idle_sample_s : 60.0;
+    if (!first.ok || !b.ok) {
         vram_probe_ = nullptr;
         return;
     }
+    logI("vram watch: {} | sampled with each 'batch |' line, at request end and once a minute while idle ({:.0f} us per sample, "
+         "first {:.0f} us){}",
+         wddmwatch::format(s, b), next_us, first_us,
+         warn ? "; warns while GPU memory spills (local usage over the budget, or shared grown by more than 256 MiB since the KV "
+                "pool was sized, not counting pinned host memory WHIRL allocated)"
+              : "; integrated GPU: numbers only, no warning");
+    if (warn) {
+        // a spill already there now: the startup line warned (counted as the watch's first warning), else warn here
+        const auto ev = vram_watch_.check(s, std::chrono::duration<double>(Clock::now().time_since_epoch()).count());
+        if (ev && !startup_warned) logW("{}", ev->text);
+    }
     {
         std::lock_guard<std::mutex> lk(vram_mu_);
-        vram_last_ = base;
+        vram_last_ = s;
+        vram_spill_ = warn && vram_watch_.spilling();
     }
-    logI("vram watch: {} | sampled with each 'batch |' line and at request end ({:.0f} us per sample, first {:.0f} us){}",
-         wddmwatch::format(base, base), next_us, first_us,
-         warn ? "; warns while GPU memory spills (local usage over the budget, or shared grown by more than 256 MiB)"
-              : "; integrated GPU: numbers only, no warning");
+    vram_idle_next_ = Clock::now() + std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(vram_idle_s_));
 }
 
 std::string Engine::vramNote() {
@@ -3258,8 +3273,14 @@ std::string Engine::vramNote() {
     if (vram_warn_) {
         const double now_s = std::chrono::duration<double>(Clock::now().time_since_epoch()).count();
         if (const auto ev = vram_watch_.check(s, now_s)) {
-            if (ev->warn) logW("{}", ev->text);
-            else logI("{}", ev->text);
+            if (ev->warn) {
+                std::string t = ev->text;
+                if (vram_others_)
+                    if (const auto o = vram_others_()) t += wddmwatch::othersNote(*o);
+                logW("{}", t);
+            } else {
+                logI("{}", ev->text);
+            }
         }
     }
     {
@@ -3267,7 +3288,14 @@ std::string Engine::vramNote() {
         vram_last_ = s;
         vram_spill_ = vram_warn_ && vram_watch_.spilling();
     }
+    vram_idle_next_ = Clock::now() + std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(vram_idle_s_));
     return wddmwatch::format(s, vram_watch_.baseline());
+}
+
+std::optional<TimePoint> Engine::vramIdleTick() {
+    if (!vram_probe_) return std::nullopt;
+    if (Clock::now() >= vram_idle_next_) (void)vramNote();  // logs only a spill warning / the spill-over line
+    return vram_idle_next_;
 }
 
 void Engine::submitAndWait(Job& job) {
@@ -3386,6 +3414,14 @@ void Engine::runLoop() {
                     flushTierOnStop();
                     return;
                 }
+                // WDDM-LOG: /health "vram" and the spill-over line stay current while idle (one sample a minute)
+                std::optional<TimePoint> vram_due;
+                if (vram_probe_) {
+                    lk.unlock();
+                    vram_due = vramIdleTick();
+                    lk.lock();
+                    if (!queue_.empty() || stop_) continue;
+                }
                 if (tier_ != nullptr) {
                     const std::uint64_t seq = wake_seq_;
                     lk.unlock();
@@ -3422,6 +3458,7 @@ void Engine::runLoop() {
                 std::optional<std::chrono::steady_clock::time_point> wake;
                 if (tier_ != nullptr) wake = tier_->nextWake();
                 if (const auto idle_due = idleFlushDue(); idle_due && (!wake || *idle_due < *wake)) wake = idle_due;  // TIER-IDLE
+                if (vram_due && (!wake || *vram_due < *wake)) wake = *vram_due;  // WDDM-LOG idle sample
                 if (wake) {
                     // an SSD write is due at a known time, the periodic SSD expiry check, or the idle write: wake
                     // then (re-checked every minute)

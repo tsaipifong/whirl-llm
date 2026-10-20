@@ -72,30 +72,40 @@ std::optional<Event> Watch::check(const Sample& s, double now_s) {
     // (1) what happened
     std::string what;
     if (over && grown)
-        what = std::format("WHIRL's GPU memory is {:.2f} GiB over the Windows video memory (WDDM) budget, and Windows has moved "
-                           "part of WHIRL's GPU buffers to system RAM (shared GPU memory +{:.0f} MiB since startup).",
+        what = std::format("WHIRL's GPU memory is {:.2f} GiB over the Windows video memory (WDDM) budget, and Windows has likely "
+                           "moved part of WHIRL's GPU buffers to system RAM (shared GPU memory +{:.0f} MiB since startup).",
                            (s.local_usage - s.local_budget) / gib, grow / mib);
     else if (over)
         what = std::format("WHIRL's GPU memory is {:.2f} GiB over the Windows video memory (WDDM) budget, so Windows can move "
                            "part of WHIRL's GPU buffers to system RAM at any time.",
                            (s.local_usage - s.local_budget) / gib);
     else
-        what = std::format("WHIRL's shared GPU memory grew by {:.0f} MiB since startup: Windows has moved part of WHIRL's GPU "
-                           "buffers to system RAM (Windows may also have lowered the video memory budget because other "
+        what = std::format("WHIRL's shared GPU memory grew by {:.0f} MiB since startup: Windows has likely moved part of WHIRL's "
+                           "GPU buffers to system RAM (Windows may also have lowered the video memory budget because other "
                            "programs use the GPU).",
                            grow / mib);
     // (2) the consequence, (3) what to do, (4) the numbers
-    const char* effect = grown ? "Generation is getting slower now: decode can become several times slower."
-                               : "Generation gets slower as soon as it does: decode can become several times slower.";
+    const char* effect = grown ? "Generation slows down if those buffers are used at every step: decode can become several times "
+                                 "slower."
+                               : "Generation slows down as soon as it does: decode can become several times slower.";
     std::string head = repeat ? std::format("GPU memory spill continues ({} so far): ", duration(now_s - spill_t0_))
                               : std::string("GPU memory spill: ");
+    // restarting re-reads the budget (the pool is sized from it); the margin variable keeps more room for other
+    // programs and keeps the budget rule (WHIRL_POOL_RESERVE_MB would turn the budget rule off)
+    const std::string pool = cfg_.pool_tokens ? std::format(" (the KV pool is now {} tokens)", cfg_.pool_tokens) : std::string();
     return Event{true, std::format("{}{} {} What you can do: close other programs that use the GPU (browsers, games, other AI "
-                                   "tools); or restart the server with a smaller -c, with --parallel 1, or with "
-                                   "WHIRL_POOL_RESERVE_MB=3072 (or larger). Now: {}",
-                                   head, what, effect, format(s, base_))};
+                                   "tools); or restart the server, which sizes the KV pool{} from the budget at startup, and set "
+                                   "WHIRL_POOL_BUDGET_MARGIN_MB=4096 (or more) to keep more room free for other programs. Now: {}",
+                                   head, what, effect, pool, format(s, base_))};
 }
 
-std::optional<Event> DecodeWatch::report(std::uint32_t n_gen, double ms, std::uint64_t cycles, bool spill) {
+std::string othersNote(const Others& o) {
+    std::string r = std::format(" Other programs use {:.2f} GiB of VRAM on this GPU now", o.now / gib);
+    if (o.start) r += std::format(" ({:.2f} GiB when the server started)", *o.start / gib);
+    return r + ".";
+}
+
+std::optional<Event> DecodeWatch::report(std::uint32_t n_gen, double ms, std::uint64_t cycles, bool spill, std::uint64_t prefill_cum) {
     if (!have_early_) {
         if (n_gen < cfg_.early_tok || ms <= 0.0) return std::nullopt;
         have_early_ = true;
@@ -104,28 +114,43 @@ std::optional<Event> DecodeWatch::report(std::uint32_t n_gen, double ms, std::ui
         prev_n_ = n_gen;
         prev_ms_ = ms;
         prev_cyc_ = cycles;
+        prev_pf_ = prefill_cum;
         return std::nullopt;
     }
     const double dms = ms - prev_ms_;
     if (dms < cfg_.min_window_ms || n_gen < prev_n_) return std::nullopt;  // the window keeps growing
     const double tps = (n_gen - prev_n_) * 1000.0 / dms;
     const double ms_cyc = cycles > prev_cyc_ && early_ms_cyc_ > 0.0 ? dms / static_cast<double>(cycles - prev_cyc_) : 0.0;
+    const bool other_prefill = prefill_cum > prev_pf_;
     prev_n_ = n_gen;
     prev_ms_ = ms;
     prev_cyc_ = cycles;
+    prev_pf_ = prefill_cum;
     if (fired_ || tps >= early_tps_ * (1.0 - cfg_.drop_frac)) return std::nullopt;
     fired_ = true;
     std::string t = std::format("decode slowed from {:.1f} to {:.1f} tok/s ({:.0f}% slower than early in this request", early_tps_,
                                 tps, 100.0 * (1.0 - tps / early_tps_));
     if (ms_cyc > 0.0) t += std::format("; {:.1f} -> {:.1f} ms per decode cycle", early_ms_cyc_, ms_cyc);
     t += ")";
-    if (spill)
+    // each cycle slower (or unknown): the spill or another request's prefill can explain it; not slower: fewer
+    // tokens per cycle (draft acceptance), whatever else is going on
+    const bool cycle_slower = !(ms_cyc > 0.0) || ms_cyc >= early_ms_cyc_ * 1.2;
+    const char* pf = "another request's prefill shared the GPU in this window (with --parallel 2 or more, prefill chunks run "
+                     "between decode cycles)";
+    bool warn = false;
+    if (spill && cycle_slower) {
+        warn = true;
         t += ", likely because of the GPU memory spill above";
-    else if (ms_cyc > 0.0 && ms_cyc < early_ms_cyc_ * 1.2)
-        t += "; no GPU memory spill is seen, and each cycle is not slower: fewer tokens per cycle (fewer drafts accepted)";
-    else
+        if (other_prefill) t += std::format("; also, {}", pf);
+    } else if (!cycle_slower) {
+        t += std::format("; each cycle is not slower: fewer tokens per cycle (fewer drafts accepted){}",
+                         spill ? ", not the GPU memory spill" : "");
+    } else if (other_prefill) {
+        t += std::format("; no GPU memory spill is seen; {}", pf);
+    } else {
         t += "; no GPU memory spill is seen";
-    return Event{spill, t};
+    }
+    return Event{warn, t};
 }
 
 }  // namespace whirl::wddmwatch
