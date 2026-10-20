@@ -255,7 +255,7 @@ MXFP4，28.3k token 上下文：完整 prefill TTFT 10.70 s、從 RAM 還原 0.6
 
 逐出壓力下的多 session agent（6 個 session 共享約 12k token 系統提示詞，各自讀取一個約 3.5k token 的檔案並問 3 個問題，4 個 slot，請求交錯使每個 session 都發現自己的 slot 被佔走）：關閉分層 435,697 個新 prefill token；開啟分層 129,968 個——新 prefill 數量與從未被逐出的單獨執行相同，文字完全相同。正常路徑（無逐出）沒有變慢。
 
-為什麼被逐出的 session 在某一種情況下會與單獨執行不同：若它自己的項目比共享系統檢查點長不到 512 個 token，server 會刻意從系統檢查點繼續，並重新 prefill 那幾個 token（原本由 decode 產生）。結果是那些 token 的正確冷計算——數值上等價，但與 decode 產生的 KV 並非逐位元相同。強制一律還原（`WHIRL_TIER_MIN_GAIN=1`）讓 28/28 次呼叫與單獨執行完全相同，而位元組驗證模式也確認每一次寫出/還原都位元組相同（共 115 次）。
+為什麼被逐出的 session 在某一種情況下會與單獨執行不同：若它自己的項目比共享系統檢查點長不到 512 個 token，server 會刻意從系統檢查點繼續，並重新 prefill 那幾個 token（原本由 decode 產生）。結果是那些 token 的正確冷計算——數值上等價，但與 decode 產生的 KV 並非逐位元相同。這只發生在 balance 與 fast，而且不是從快取層還原（沒有用到那個項目）；precise 的每次接續都從與冷算 prefill 相同的檢查點開始。強制一律還原（`WHIRL_TIER_MIN_GAIN=1`）讓 28/28 次呼叫與單獨執行完全相同，而位元組驗證模式也確認每一次寫出/還原都位元組相同（共 115 次）。
 
 **[eGPU] 環境限制：** 當還原佔滿 USB4 連線時，kernel 派送會變慢，其他 slot 的 decode 週期在還原進行期間會拉長。未做最佳化（[windows-hip.md](windows-hip.md#egpu)）；在直接 PCIe 上預期不會發生。
 

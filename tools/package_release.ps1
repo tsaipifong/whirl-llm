@@ -167,11 +167,14 @@ Copy-Item -Recurse (Join-Path $docsSrc "guide") $docsDst
 if (Test-Path (Join-Path $docsSrc "images")) { Copy-Item -Recurse (Join-Path $docsSrc "images") $docsDst }
 
 $first = @"
-WHIRL $version for Windows x64 - LLM inference for the AMD Radeon AI PRO R9700 (RDNA 4)
+WHIRL $version for Windows x64 - LLM inference for the Radeon 8060S (AMD Ryzen AI Max+ 395) and
+the AMD Radeon AI PRO R9700 (RDNA 4)
 
-Needs: Windows 11 (64-bit), an AMD Radeon AI PRO R9700 (gfx1201) and the graphics driver
-AMD Software: Adrenalin Edition 26.8.1 or newer. Nothing else to install (no HIP SDK,
-no ROCm, no Visual C++ Redistributable).
+Needs: Windows 11 (64-bit), a Radeon 8060S (gfx1151) or an AMD Radeon AI PRO R9700 (gfx1201),
+and the graphics driver AMD Software: Adrenalin Edition 26.8.1 or newer. Nothing else to install
+(no HIP SDK, no ROCm, no Visual C++ Redistributable).
+Radeon 8060S: first set the GPU memory (UMA frame buffer size) in Armoury Crate or the BIOS, then
+restart; README.md, Requirements, lists the size each model needs.
 
   .\whirl.exe devices
   .\whirl.exe chat MODEL.gguf "Explain TCP slow start in two sentences." --max-tokens 400

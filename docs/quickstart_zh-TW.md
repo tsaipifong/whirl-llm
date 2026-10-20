@@ -9,6 +9,7 @@
 | | |
 |---|---|
 | GPU | **AMD Radeon AI PRO R9700**（RDNA 4，gfx1201，32 GB）或 **Radeon 8060S**（RDNA 3.5，gfx1151，Ryzen AI Max+ 395）。一個行程一張 GPU；其他 GPU 不在正式支援範圍 |
+| Radeon 8060S：GPU 記憶體 | 先在 Armoury Crate 或 BIOS 設定 GPU 記憶體（UMA frame buffer 大小），再重新開機。各模型需要的大小見 [README 的需求表](README_zh-TW.md#需求)；設得太小時，WHIRL 會停下並說明要設多大 |
 | 作業系統 | Windows 11，64 位元 |
 | 驅動程式 | **AMD Software: Adrenalin Edition 26.8.1（驅動程式 32.0.31041.1004）或更新版**，兩張卡相同；更舊的版本未測試 |
 | 其他都不需要 | 不用 HIP SDK、不用 ROCm、不用另外安裝 Visual C++ 可轉散發套件、不用 Python、不用 WSL |

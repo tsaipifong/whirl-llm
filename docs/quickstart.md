@@ -10,6 +10,7 @@ PowerShell.
 | | |
 |---|---|
 | GPU | **AMD Radeon AI PRO R9700** (RDNA 4, gfx1201, 32 GB) or **Radeon 8060S** (RDNA 3.5, gfx1151, Ryzen AI Max+ 395). One GPU per process; other GPUs are not officially supported |
+| Radeon 8060S: GPU memory | Set the GPU memory (UMA frame buffer size) in Armoury Crate or the BIOS first, then restart. The size each model needs is in the [README requirements](../README.md#requirements); with too little, WHIRL stops with a message naming the size to set |
 | OS | Windows 11, 64-bit |
 | Driver | **AMD Software: Adrenalin Edition 26.8.1 (driver 32.0.31041.1004) or newer**, for both GPUs; older drivers are untested |
 | Nothing else | no HIP SDK, no ROCm, no Visual C++ Redistributable to install, no Python, no WSL |

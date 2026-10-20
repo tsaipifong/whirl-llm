@@ -10,8 +10,8 @@ All notable changes to WHIRL are listed here. Versions follow `project(whirl VER
 - Radeon 8060S, fast mode (MoE models, q4 KV): decode was no faster than balance, in a coding chat 3.5% slower
   (Ornith-1.5-35B-A3B MXFP4), because `attn_dq4` always launched its fixed 256-split grid and the split combine walked
   256 partials per head even when only a few splits held keys (8 at 2k). It now launches only the splits the rows'
-  keys use (the same key partition, so the output is bitwise unchanged). Measured on the Radeon 8060S (max power (80 W),
-  ASUS ROG Flow Z13), Ornith fast decode, 0.2.1 vs 0.2.2, mean of 5 interleaved rounds: QA document 2k 94.8 -> 99.8
+  keys use (the same key partition, so the output is bitwise unchanged). Measured on the Radeon 8060S at max power (80 W),
+  ASUS ROG Flow Z13,, Ornith fast decode, 0.2.1 vs 0.2.2, mean of 5 interleaved rounds: QA document 2k 94.8 -> 99.8
   tok/s (+5.2%), 96k 63.8 -> 66.7 (+4.6%), 128k 60.6 -> 62.7 (+3.4%), 32k 81.6 -> 82.9 (within the round-to-round
   range); coding chat 96.7 -> 99.6 (+3.0%, same text). Against balance (same rounds), fast is no longer behind:
   level in the coding chat (99.6 vs 100.2 tok/s; was 3.5% behind) and at 2k / 32k (within the round-to-round
@@ -53,7 +53,7 @@ All notable changes to WHIRL are listed here. Versions follow `project(whirl VER
   the previous prompt's tail checkpoint (kept for every prompt in precise), and re-prefills the rest (up to ~1,280
   tokens plus the previous reply). Cost, Swift-1.5 27B MXFP4-A, a 7k-token file and 3 follow-up questions (3
   interleaved rounds, the 0.2.2 exe, `WHIRL_COLD_RESUME=0` as the old behaviour): next-turn TTFT R9700 0.82-0.86 s
-  instead of 0.06-0.30 s, Radeon 8060S (max power (80 W), ASUS ROG Flow Z13) 2.8-3.1 s instead of 0.17-0.19 s; first
+  instead of 0.06-0.30 s, Radeon 8060S at max power (80 W), ASUS ROG Flow Z13, 2.8-3.1 s instead of 0.17-0.19 s; first
   turn unchanged; texts identical. Balance and
   fast are unchanged. `WHIRL_COLD_RESUME=0/1` overrides. COLD-RESUME.
 - Windows zip: it now also carries Microsoft's Visual C++ 2015-2022 x64 runtime (`msvcp140.dll`, `vcruntime140.dll`,

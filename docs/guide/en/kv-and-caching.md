@@ -513,7 +513,8 @@ Why an evicted session can differ from a solo run in one case: if its own entry 
 tokens longer than the shared system checkpoint, the server deliberately resumes from the system
 checkpoint and re-prefills those few tokens (originally produced by decode). The result is a correct
 cold computation of those tokens — numerically equivalent, not bit-identical to the decode-produced
-KV. Forcing restores always (`WHIRL_TIER_MIN_GAIN=1`) made 28/28 calls identical to solo, and a
+KV. This applies to balance and fast and is not a tier restore (the entry is not used); in precise
+every resume starts from a checkpoint equal to a cold prefill. Forcing restores always (`WHIRL_TIER_MIN_GAIN=1`) made 28/28 calls identical to solo, and a
 byte-verify mode confirmed every spill/restore byte-identical (115 of them).
 
 **[eGPU] environment limitation:** while a restore saturates the USB4 link, kernel dispatch slows and
