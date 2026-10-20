@@ -7,7 +7,7 @@
 #   whirl-device-tests: the module's own unit tests (CPU)
 
 add_library(whirl_device_null STATIC ${CMAKE_SOURCE_DIR}/src/device/null_backend.cpp)
-target_include_directories(whirl_device_null PUBLIC ${CMAKE_SOURCE_DIR}/src)
+target_include_directories(whirl_device_null PUBLIC ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/include)
 
 if(WHIRL_WITH_HIP)
   add_library(whirl_device STATIC ${CMAKE_SOURCE_DIR}/src/device/backend_hip.cpp)

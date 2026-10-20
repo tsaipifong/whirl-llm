@@ -303,7 +303,7 @@ void Model::gemmF16(const Mat& w, DevPtr x16in, DevPtr y, u32 n, i32 acc) {
         }();
         const hip::Function hv = n <= 16 ? k.gemvh[t] : k.gemvh2[t];
         if (gemvh_on && hv != nullptr) {
-            hip::launch(hv, D(arch == hip::Arch::gfx1151 ? kernels::gemvhGrid(w.nrows) : (w.nrows + 15) / 16), D(32), 0, stream, w.ptr, w.row_bytes, x16in, y, ncols, nrows, I(n),
+            hip::launch(hv, D(device::profile(arch).gemvh_grid_by_rows ? kernels::gemvhGrid(w.nrows) : (w.nrows + 15) / 16), D(32), 0, stream, w.ptr, w.row_bytes, x16in, y, ncols, nrows, I(n),
                         acc);
             return;
         }
@@ -386,7 +386,7 @@ bool Model::h16Out(const Mat& w, u32 n, std::uint8_t cls) const {
             // the tuned choices, so the output (f16 intermediates or not) does not depend on
             // autotune timings. The gfx1151 code object has no h16 fused / dequant GEMM, so
             // this is off for quantized weights while those are candidates.
-            if (arch == hip::Arch::gfx1151) {
+            if (device::profile(arch).h16_from_candidates) {
                 for (u32 cj = 0; cj < n_choices && cj < 64; ++cj) {
                     if ((tune_mask & (1ull << cj)) == 0) continue;
                     if (cj >= 2 * gemm_cfgs.size()) {
@@ -515,7 +515,7 @@ u32 Model::precChoice(const Mat& w, u32 n) const {
             // both hold n: narrower tile, then smaller row block; neither: wider tile
             // (gfx1151, GEMVH-2: the widest row block of a tile width is the fastest - gemms_c0 128 x 32 beats c5 64 x 32 by
             // 30-40% at n <= 32 - so ties go to the larger BM there; the other targets keep the narrower row block)
-            const bool tie_bigger_bm = arch == hip::Arch::gfx1151;
+            const bool tie_bigger_bm = device::profile(arch).gemms_tie_larger_bm;
             if (c_fits ? (c.bn < b.bn || (c.bn == b.bn && (tie_bigger_bm ? c.bm > b.bm : c.bm < b.bm))) : c.bn > b.bn) best = static_cast<int>(si);
         }
         if (best >= 0) return static_cast<u32>(2 * G + best);
@@ -760,7 +760,7 @@ void Model::attnBlock(const AttnW& a, const KvLayer& lkv, u32 n) {
         // measured and output-checked on the 8060S only; the R9700 keeps the fixed grid.
         // (the same conditions as the wsplit branch below, REVIEW-022 F10: otherwise attn_split would run with the
         // reduced split count, a different partition)
-        if (arch == hip::Arch::gfx1151 && !ws4_path && kv_q4 && attn_dq4 && dq4_dyn && k.attn_dq4 != nullptr && k.caps.attn_group1 && grp_q <= 8 && row_n == n &&
+        if (device::profile(arch).attn_dq4_dynamic_splits && !ws4_path && kv_q4 && attn_dq4 && dq4_dyn && k.attn_dq4 != nullptr && k.caps.attn_group1 && grp_q <= 8 && row_n == n &&
             k.attn_wsplit1 != nullptr && hd == 256 && (dbg_flags & 2) == 0)
             n_split = dq4Splits(std::span<const i32>(row_pos.data(), n), kva.win, n_split);
         if (ws4_path) {

@@ -103,7 +103,7 @@ void Model::autotuneGemm(std::size_t bucket, u32 reps, std::string* log) {
     // candidate whose first timed launch is far behind the best so far is not timed further
     // (batch >= kTuneRejectMinN only).
     // Every choice computes the same bits, so this only affects which fast kernel is found.
-    const bool fast = arch == hip::Arch::gfx1151 && !tune_cold;
+    const bool fast = device::profile(arch).tune_fast && !tune_cold;
     const bool early_reject = fast && n >= kTuneRejectMinN;  // else time like the full tune
     for (const Layer& L : layers) {
         const MatList all = layerMats(L);
@@ -852,7 +852,7 @@ void loadOrTune(Model& m, const std::string& model_path, std::string& log) {
     }
     // f16-WMMA chunked DeltaNet prefill and f16 GEMM outputs: balance items for MXFP4 models
     // and (KG-1) dense non-MXFP4 models on the R9700 (= nu::denseQuantRelaxed)
-    const bool dense_q = !has_mx && !m.cfg.moe && m.arch != hip::Arch::gfx1151;
+    const bool dense_q = !has_mx && !m.cfg.moe && !device::profile(m.arch).numerics_8060s;
     m.gdn_wmma = (has_mx || dense_q) && rq.has(nu::Item::gdnwmma);
     const auto wmma_env = envGet("GDN_WMMA");
     if (wmma_env) m.gdn_wmma = *wmma_env != "0";
@@ -886,7 +886,7 @@ void loadOrTune(Model& m, const std::string& model_path, std::string& log) {
     // WHIRL_GDN_STRIX_MIN sets the row threshold (default 256, strix's GGML_GDN_CHUNK_MIN).
     m.gdn_strix = false;
     const auto sx_env = envGet("GDN_STRIX");
-    if ((!sx_env || *sx_env != "0") && m.arch == hip::Arch::gfx1151 && m.k.gdn_sx_prep != nullptr &&
+    if ((!sx_env || *sx_env != "0") && device::profile(m.arch).gdn_strix && m.k.gdn_sx_prep != nullptr &&
         m.k.gdn_sx_scan != nullptr && m.gdn_chunked && (has_mx || !m.cfg.moe) && rq.has(nu::Item::gdnwmma) && m.cfg.d_state == 128 &&
         m.cfg.headV() == 128 && m.cfg.n_k_heads > 0 && m.cfg.n_v_heads % m.cfg.n_k_heads == 0 && m.cfg.n_v_heads / m.cfg.n_k_heads <= 4) {
         m.gdn_strix = true;
@@ -897,7 +897,7 @@ void loadOrTune(Model& m, const std::string& model_path, std::string& log) {
     {
         // numerics mode: capability table, per-item environment overrides, one log line
         nu::Target t;
-        t.gfx1151 = m.arch == hip::Arch::gfx1151;
+        t.gfx1151 = device::profile(m.arch).numerics_8060s;
         t.has_mxfp4 = has_mx;
         t.moe = m.cfg.moe;
         for (const Layer& L : m.layers)
@@ -977,7 +977,7 @@ void loadOrTune(Model& m, const std::string& model_path, std::string& log) {
             // the R9700 (gfx1201) keeps the plain file name; other code objects get their own.
             // gfx1151 table revision 2: the small-batch WMMA GEMMs (gemms) became candidates,
             // so tables written before them are tuned again.
-            const std::string sfx = m.arch == hip::Arch::gfx1151 ? "-gfx1151r2" : "";
+            const std::string sfx = device::profile(m.arch).tune_cache_suffix;
             const std::string bname = narrow(std::filesystem::path(widen(model_path)).filename().wstring());
             const std::string stem = bname + "-" + std::to_string(fsz) + sfx + ".txt";
             const std::string dir = base + "\\whirl";
@@ -1009,8 +1009,7 @@ void loadOrTune(Model& m, const std::string& model_path, std::string& log) {
     std::fprintf(stderr,
                  "First run with this model on this GPU: tuning the prefill kernels. This takes up to about\n"
                  "%s and happens only once%s%s.\n",
-                 m.arch == hip::Arch::gfx1151 ? "8 minutes on the Radeon 8060S (less for MXFP4 models)"
-                                              : "2 minutes (a few seconds for MXFP4 models)",
+                 device::profile(m.arch).tune_time_hint,
                  cache_path.empty() ? "" : "; the result is cached in ", cache_path.c_str());
     std::fflush(stderr);
     const double t0 = nowMs();

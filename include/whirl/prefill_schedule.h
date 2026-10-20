@@ -14,6 +14,8 @@
 
 #pragma once
 
+#include "whirl/device_profile.h"
+
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -36,11 +38,9 @@ inline std::size_t prefillChunkLen(std::size_t remaining) {
 // 128k (128k 248.0 vs 284.6 tok/s), while MoE 64k / 96k gain 3.0% / 4.3%, so the 8060S default is per
 // model. No extra memory either way (the prefill buffers are sized for the batch). Same bits (whole-chunk
 // grouping, section 7 of docs/guide/en/kv-and-caching.md; seqtest gates it). gfx1201 keeps 2048 until measured there.
+// (the 8060S MoE value is device::Profile::prefill_exec_moe)
 inline constexpr std::size_t prefill_exec_default = 2048;
-inline constexpr std::size_t prefill_exec_default_gfx1151_moe = 4096;
-inline constexpr std::size_t prefillExecDefault(bool gfx1151, bool moe) {
-    return gfx1151 && moe ? prefill_exec_default_gfx1151_moe : prefill_exec_default;
-}
+inline constexpr std::size_t prefillExecDefault(const device::Profile& p, bool moe) { return moe ? p.prefill_exec_moe : prefill_exec_default; }
 
 // EngineOptions::prefill_exec for a prefill batch: whole schedule chunks, and a forward (+ the merged
 // tail) must fit the batch; never below one chunk (the batch is >= prefill_chunk + prefill_merge,

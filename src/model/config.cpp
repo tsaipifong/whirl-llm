@@ -55,8 +55,8 @@ std::size_t tuneBucket(std::uint32_t n) {
     return 1;
 }
 
-GemvR defaultGemvR() { return {1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2}; }
-GemvR gfx1151GemvR() { return {1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2}; }
+static_assert(std::tuple_size_v<GemvR> == std::tuple_size_v<decltype(device::Profile::gemv_r)>);
+GemvR defaultGemvR() { return device::profile(hip::Arch::gfx1201).gemv_r; }
 
 GemvW defaultGemvW() {
     GemvW t{};
@@ -321,7 +321,7 @@ void applyGemvEnv(Model& m) {
 }
 
 MtpDefaults mtpDefaults(bool moe, hip::Arch arch) {
-    if (arch == hip::Arch::gfx1151) {
+    if (device::profile(arch).mtp_costly_verify_rows) {
         // Radeon 8060S (UMA, measured there): the draft counts, the draft-vocabulary default and
         // the n-gram minimum match measured the same as on the R9700 (within noise), but a verify
         // row costs far more: ~+11 ms per extra row on a ~95 ms 1-draft cycle at 9k context

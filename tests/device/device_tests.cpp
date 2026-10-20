@@ -1,12 +1,16 @@
 // Unit tests of the device module (src/device), CPU only, no GPU, no HIP:
 //   NullBackend (ARCH-1 D-3): host-memory semantics, counts, copy log, fault injection.
+//   device::Profile (D-4): the per-family table, field by field (a changed value must be a deliberate edit here).
 // SPDX-License-Identifier: Apache-2.0
 //
 // Written for WHIRL. Run: whirl-device-tests.exe (exit 0 = all passed).
 
 #include "device/null_backend.h"
+#include "whirl/device_profile.h"
 
+#include <array>
 #include <chrono>
+#include <string_view>
 #include <cstdio>
 #include <cstring>
 #include <stdexcept>
@@ -152,6 +156,33 @@ void testNullBackendFaults() {
     CHECK(b.clean());
 }
 
+void testProfiles() {
+    using whirl::hip::Arch;
+    namespace d = whirl::device;
+    const d::Profile& a = d::profile(Arch::gfx1201);
+    const d::Profile& b = d::profile(Arch::gfx1151);
+    CHECK(&a == &d::k_profile_gfx1201 && &b == &d::k_profile_gfx1151);
+    CHECK(a.arch == Arch::gfx1201 && b.arch == Arch::gfx1151);
+    // R9700 (gfx1201): discrete, the reference behaviour
+    CHECK(!a.uma_no_vram_fit_check && !a.gemvh_grid_by_rows && !a.h16_from_candidates && !a.gemms_tie_larger_bm);
+    CHECK(!a.attn_dq4_dynamic_splits && !a.tune_fast && !a.gdn_strix && !a.numerics_8060s && !a.mtp_costly_verify_rows);
+    CHECK(std::string_view(a.tune_cache_suffix).empty());
+    CHECK(std::string_view(a.tune_time_hint) == "2 minutes (a few seconds for MXFP4 models)");
+    CHECK(a.prefill_exec_moe == 2048 && !a.prefill_fill_batch && a.vision_attn_threads == 128);
+    const std::array<std::uint8_t, 17> ra = {1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2};
+    CHECK(a.gemv_r == ra);
+    // Radeon 8060S (gfx1151): UMA iGPU
+    CHECK(b.uma_no_vram_fit_check && b.gemvh_grid_by_rows && b.h16_from_candidates && b.gemms_tie_larger_bm);
+    CHECK(b.attn_dq4_dynamic_splits && b.tune_fast && b.gdn_strix && b.numerics_8060s && b.mtp_costly_verify_rows);
+    CHECK(std::string_view(b.tune_cache_suffix) == "-gfx1151r2");
+    CHECK(std::string_view(b.tune_time_hint) == "8 minutes on the Radeon 8060S (less for MXFP4 models)");
+    CHECK(b.prefill_exec_moe == 4096 && b.prefill_fill_batch && b.vision_attn_threads == 256);
+    const std::array<std::uint8_t, 17> rb = {1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2};
+    CHECK(b.gemv_r == rb);
+    // constexpr: the field reads fold like the arch comparisons they replaced
+    static_assert(d::profile(Arch::gfx1151).prefill_exec_moe == 4096 && !d::profile(Arch::gfx1201).tune_fast);
+}
+
 }  // namespace
 
 int main() {
@@ -159,6 +190,7 @@ int main() {
     testNullBackendHandles();
     testNullBackendCopyLog();
     testNullBackendFaults();
+    testProfiles();
     std::printf("device tests: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }

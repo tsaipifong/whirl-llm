@@ -750,8 +750,9 @@ int serveMain(int argc, char** argv, const char* program) {
         qwen35::Model& model = *mp;
         // whole schedule chunks that fit the prefill batch (a forward never exceeds the batch:
         // Engine::chunkLen caps it); default 2048 rows, gfx1151 MoE 4096 (SRV-PP; dense 2048, SRV-PP-DENSE)
-        const bool g1151 = model.arch == hip::Arch::gfx1151;
-        const std::size_t prefill_exec = prefillExecFor(exec_req.value_or(prefillExecDefault(g1151, model.cfg.moe)), lo.max_batch, g1151);
+        const device::Profile& prof = device::profile(model.arch);
+        const std::size_t prefill_exec =
+            prefillExecFor(exec_req.value_or(prefillExecDefault(prof, model.cfg.moe)), lo.max_batch, prof.prefill_fill_batch);
         {
             std::string tl;
             qwen35::loadOrTune(model, opt.path, tl);

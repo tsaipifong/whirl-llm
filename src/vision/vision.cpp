@@ -6,6 +6,7 @@
 // follows llama.cpp tools/mtmd (MIT): clip.cpp (qwen3vl), models/qwen3vl.cpp.
 
 #include "whirl/vision.h"
+#include "whirl/device_profile.h"
 
 #include "whirl/common.h"
 #include "whirl/gguf.h"
@@ -374,7 +375,7 @@ void Vision::loadModule() {
     if (img.empty())
         throw VisionError("NoVisionKernels", std::string("this build has no ") + hip::archName(arch) + " vision code object");
     module_ = hip::Module::loadData(img.data(), arch);
-    attn_threads_ = arch == hip::Arch::gfx1151 ? 256 : 128;  // kernels/vision/vision.hip vis_attn2 (per architecture)
+    attn_threads_ = device::profile(arch).vision_attn_threads;  // kernels/vision/vision.hip vis_attn2 (per architecture)
     f_.patchify = module_.getFunction("vis_patchify");
     f_.pos_ln = module_.getFunction("vis_pos_ln");
     f_.resid_ln = module_.getFunction("vis_resid_ln");

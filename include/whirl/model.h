@@ -26,6 +26,7 @@
 #pragma once
 
 #include "whirl/gguf.h"
+#include "whirl/device_profile.h"
 #include "whirl/hip.h"
 #include "whirl/kernels_abi.h"
 #include "whirl/numerics.h"
@@ -121,8 +122,7 @@ constexpr std::uint32_t n_gemvw = kernels::kNGemvw;
 inline constexpr const auto& gemvw_rows = kernels::kGemvwRows;
 using GemvR = std::array<std::uint8_t, max_small_batch + 1>;
 using GemvW = std::array<GemvR, n_types>;
-GemvR defaultGemvR();
-GemvR gfx1151GemvR();
+GemvR defaultGemvR();  // the gfx1201 row of device::Profile::gemv_r
 GemvW defaultGemvW();
 GemvR defaultGemvWHead();
 

@@ -506,7 +506,7 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
         // and never switched afterwards (no fallback to a lower-precision format when it does
         // not fit: the context shrinks or the load stops, below / in the server).
         const kernels::Caps caps = kernels::Caps::probe(m.module);
-        m.kv_choice = numerics::chooseKv(opt.numerics, cfg.moe, numerics::KvCaps{caps.kv_q8h, caps.kv_q8v, caps.kv_q4, m.arch == hip::Arch::gfx1151}, kvKindOf(kvm));
+        m.kv_choice = numerics::chooseKv(opt.numerics, cfg.moe, numerics::KvCaps{caps.kv_q8h, caps.kv_q8v, caps.kv_q4, device::profile(m.arch).numerics_8060s}, kvKindOf(kvm));
         const numerics::KvKind kv = m.kv_choice.kv;
         m.kv_q8 = kv != numerics::KvKind::f16;
         m.kv_rot = kv == numerics::KvKind::q8h || kv == numerics::KvKind::q4;
@@ -535,7 +535,7 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
     m.conv_state = std::span<DevPtr>(m.state_tables.back());
     m.state_tables.emplace_back(cfg.n_layer, 0);
     m.ssm_state = std::span<DevPtr>(m.state_tables.back());
-    if (m.arch == hip::Arch::gfx1151) m.gemv_r = gfx1151GemvR();
+    m.gemv_r = device::profile(m.arch).gemv_r;
 
     const std::size_t staging_len = 64u << 20;
     auto* staging = static_cast<std::uint8_t*>(hip::hostMalloc(staging_len));
@@ -549,7 +549,7 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
     // free VRAM (the simulated card's under WHIRL_VRAM_LIMIT_MB); a load that cannot fit
     // fails here with the sizes instead of an out-of-memory error part way through
     // (not on the UMA iGPU, gfx1151, unless a limit is set: its free VRAM does not bound what it can allocate)
-    if (m.arch != hip::Arch::gfx1151 || vram::limitBytes() != 0) {
+    if (!device::profile(m.arch).uma_no_vram_fit_check || vram::limitBytes() != 0) {
         const LoadEstimate est = estimateLoad(f, cfg, opt.embd_on_host);
         const u64 buf = bufferBytes(cfg, m.max_batch, est.ffs, est.max_elems, resolveFdSplits(m.kv_q4));
         const u64 need = est.weights + est.state + buf;

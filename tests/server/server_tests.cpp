@@ -1291,21 +1291,21 @@ void testPrefillSchedule() {
     // SRV-PP (gfx1151, fill): exec may fill the batch; the forward is capped at the batch (max_rows), so a merged tail
     // that does not fit after 4 chunks runs as its own forward
     CHECK_EQ(prefillExecFor(16384, 4096), std::size_t{3072});  // gfx1201: unchanged
-    CHECK_EQ(prefillExecFor(prefillExecDefault(false, false), 4096), std::size_t{2048});
-    CHECK_EQ(prefillExecFor(prefillExecDefault(false, false), 2048), std::size_t{1024});
-    CHECK_EQ(prefillExecFor(prefillExecDefault(false, true), 4096), std::size_t{2048});  // gfx1201 MoE: unchanged
+    CHECK_EQ(prefillExecFor(prefillExecDefault(whirl::device::k_profile_gfx1201, false), 4096), std::size_t{2048});
+    CHECK_EQ(prefillExecFor(prefillExecDefault(whirl::device::k_profile_gfx1201, false), 2048), std::size_t{1024});
+    CHECK_EQ(prefillExecFor(prefillExecDefault(whirl::device::k_profile_gfx1201, true), 4096), std::size_t{2048});  // gfx1201 MoE: unchanged
     // SRV-PP-DENSE: gfx1151 dense keeps 2-chunk forwards (4096 lost 13% at 128k), MoE fills the batch
-    CHECK_EQ(prefillExecDefault(true, false), std::size_t{2048});
-    CHECK_EQ(prefillExecDefault(true, true), std::size_t{4096});
-    CHECK_EQ(prefillExecFor(prefillExecDefault(true, false), 4096, true), std::size_t{2048});
+    CHECK_EQ(prefillExecDefault(whirl::device::k_profile_gfx1151, false), std::size_t{2048});
+    CHECK_EQ(prefillExecDefault(whirl::device::k_profile_gfx1151, true), std::size_t{4096});
+    CHECK_EQ(prefillExecFor(prefillExecDefault(whirl::device::k_profile_gfx1151, false), 4096, true), std::size_t{2048});
     CHECK_EQ(prefillExecFor(16384, 4096, true), std::size_t{4096});
-    CHECK_EQ(prefillExecFor(prefillExecDefault(true, true), 4096, true), std::size_t{4096});
+    CHECK_EQ(prefillExecFor(prefillExecDefault(whirl::device::k_profile_gfx1151, true), 4096, true), std::size_t{4096});
     CHECK_EQ(prefillExecFor(4096, 1280, true), std::size_t{1024});
     CHECK_EQ(prefillExecFor(4096, 4352, true), std::size_t{4096});
     for (std::size_t n : {std::size_t{4100}, std::size_t{8232}, std::size_t{9500}, std::size_t{32777}, std::size_t{131087}}) {
         for (std::uint32_t mb : {1280u, 2048u, 3000u, 4096u, 4352u, 8192u}) {
             for (bool moe : {false, true}) {
-                const std::size_t ex = prefillExecFor(prefillExecDefault(true, moe), mb, true);
+                const std::size_t ex = prefillExecFor(prefillExecDefault(whirl::device::k_profile_gfx1151, moe), mb, true);
                 const std::array<std::size_t, 1> st = {tailPoint(n, 0, 0, noimg)};
                 const std::vector<std::size_t> e = forwardEnds(n, 0, 0, noimg, 0, ex, st, mb);
                 std::size_t prev = 0;
