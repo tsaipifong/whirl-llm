@@ -36,8 +36,6 @@ public:
     // Release after the idle timeout; true when it released now.
     virtual bool idleTick() = 0;
     virtual std::uint32_t idleS() const = 0;
-    // Device memory counters now (for the release log; whirl/device_mem.h).
-    virtual hip::LocalMemSnap memSnap() const = 0;
 };
 
 // Projected image embeddings by content hash (host memory, LRU, engine thread only).

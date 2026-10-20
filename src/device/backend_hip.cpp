@@ -3,7 +3,9 @@
 
 #include "device/backend.h"
 
+#include "whirl/device_mem.h"
 #include "whirl/hip.h"
+#include "whirl/uma_mem.h"
 
 #include <string>
 
@@ -43,6 +45,10 @@ public:
         s = std::string(hip::lastErrorOp()) + ": " + hip::errorString(hip::lastErrorCode());
         return s.c_str();
     }
+    hip::MemInfo memInfo() override { return hip::memInfo(); }
+    hip::WddmMemInfo wddmMemInfo() override { return hip::wddmMemInfo(); }
+    hip::LocalMemSnap localMemSnap() override { return hip::localMemSnap(); }
+    hip::UmaMem umaMemory(int device) override { return hip::umaMemory(device); }
 };
 
 }  // namespace

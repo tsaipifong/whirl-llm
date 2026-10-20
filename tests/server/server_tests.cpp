@@ -135,7 +135,6 @@ public:
     bool loaded() const override { return loaded_; }
     bool idleTick() override { return false; }
     std::uint32_t idleS() const override { return 60; }
-    hip::LocalMemSnap memSnap() const override { return {}; }
     std::atomic<int> encodes{0};
 
 private:

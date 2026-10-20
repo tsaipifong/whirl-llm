@@ -1,5 +1,6 @@
 // Unit tests of the device module (src/device), CPU only, no GPU, no HIP:
-//   NullBackend (ARCH-1 D-3): host-memory semantics, counts, copy log, fault injection.
+//   NullBackend (ARCH-1 D-3): host-memory semantics, counts, copy log, fault injection;
+//   its memory model (D-5): memInfo / wddmMemInfo / localMemSnap / umaMemory return what the test set.
 //   device::Profile (D-4): the per-family table, field by field (a changed value must be a deliberate edit here).
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -183,6 +184,24 @@ void testProfiles() {
     static_assert(d::profile(Arch::gfx1151).prefill_exec_moe == 4096 && !d::profile(Arch::gfx1201).tune_fast);
 }
 
+void testNullBackendMemoryModel() {
+    NullBackend b;
+    whirl::device::Backend& be = b;  // through the interface the server uses
+    CHECK(be.memInfo().free == 0 && be.memInfo().total == 0 && !be.wddmMemInfo().ok && !be.umaMemory(0).integrated);
+    b.mem.info = {3ull << 30, 32ull << 30};
+    b.mem.wddm.ok = true;
+    b.mem.wddm.local_budget = 30ull << 30;
+    b.mem.local.hip_free = 5ull << 30;
+    b.mem.local.cls = whirl::hip::MemClass::integrated;
+    b.mem.uma.integrated = b.mem.uma.known = true;
+    b.mem.uma.dedicated = 64ull << 30;
+    CHECK(be.memInfo().free == (3ull << 30) && be.memInfo().total == (32ull << 30));
+    CHECK(be.wddmMemInfo().ok && be.wddmMemInfo().local_budget == (30ull << 30));
+    CHECK(be.localMemSnap().hip_free == (5ull << 30) && be.localMemSnap().cls == whirl::hip::MemClass::integrated);
+    const whirl::hip::UmaMem u = be.umaMemory(1);
+    CHECK(u.integrated && u.known && u.dedicated == (64ull << 30));
+}
+
 }  // namespace
 
 int main() {
@@ -190,6 +209,7 @@ int main() {
     testNullBackendHandles();
     testNullBackendCopyLog();
     testNullBackendFaults();
+    testNullBackendMemoryModel();
     testProfiles();
     std::printf("device tests: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

@@ -483,10 +483,12 @@ int serveMain(int argc, char** argv, const char* program) {
         else dev = qwen35::pickDevice(opt.device);
         const hip::DeviceInfo info = hip::describeDevice(dev);
         hip::setDevice(dev);
+        // the device backend: memory queries of the plan below, then the engine's / tiers' device operations (ARCH-1 D-5)
+        const std::unique_ptr<device::Backend> ops = device::makeHipBackend();
         // integrated GPU (Radeon 8060S): the "VRAM" is system memory shared with the CPU
         const bool is_uma = info.integrated;
         // its real dedicated memory is the BIOS carve-out (DXGI), not info.total_mem (UMA-1)
-        const hip::UmaMem uma = is_uma ? hip::umaMemory(dev) : hip::UmaMem{};
+        const hip::UmaMem uma = is_uma ? ops->umaMemory(dev) : hip::UmaMem{};
         std::optional<std::uint32_t> pool_req = opt.ctx ? opt.ctx : (is_uma ? std::optional<std::uint32_t>(262144) : std::nullopt);
         const std::uint32_t cap_max = 262144;
         const std::uint32_t slot_ctx = static_cast<std::uint32_t>(alignUp(
@@ -585,8 +587,8 @@ int serveMain(int argc, char** argv, const char* program) {
         // UMA iGPU, whose VRAM numbers do not bound what it can allocate.
         if (!is_uma) {
             const qwen35::LoadEstimate est = qwen35::estimateLoad(f, cfg, lo.embd_on_host, use_dflash);  // dflash: no MTP block
-            const hip::MemInfo mf = hip::memInfo();
-            const hip::WddmMemInfo w = hip::wddmMemInfo();
+            const hip::MemInfo mf = ops->memInfo();
+            const hip::WddmMemInfo w = ops->wddmMemInfo();
             const bool res_explicit = env("POOL_RESERVE_MB").has_value();
             const std::uint64_t res = static_cast<std::uint64_t>(envU32("POOL_RESERVE_MB", cfg.moe ? 1536 : (w.ok ? 768 : 3072))) << 20;
             const std::uint64_t margin = static_cast<std::uint64_t>(envU32("POOL_BUDGET_MARGIN_MB", cfg.moe ? 1536 : 768)) << 20;
@@ -737,7 +739,7 @@ int serveMain(int argc, char** argv, const char* program) {
                 pool_req = *cap;
             }
         }
-        const hip::MemInfo mem0 = hip::memInfo();
+        const hip::MemInfo mem0 = ops->memInfo();
         std::optional<std::size_t> exec_req;  // unset = the device default (prefillExecDefault, after the load)
         if (auto v = env("PREFILL_CHUNK")) {
             try {
@@ -765,7 +767,7 @@ int serveMain(int argc, char** argv, const char* program) {
                 p = e + 1;
             }
         }
-        const hip::MemInfo mem = hip::memInfo();
+        const hip::MemInfo mem = ops->memInfo();
         logI("loaded {} tensors, {:.2f} GiB in {:.1f} s ({:.2f} GB/s)", stats.tensors,
              static_cast<double>(stats.bytes) / (1024.0 * 1024.0 * 1024.0), stats.ms / 1000.0,
              static_cast<double>(stats.bytes) / (stats.ms * 1e6));
@@ -796,13 +798,13 @@ int serveMain(int argc, char** argv, const char* program) {
             for (const std::string& w : dfl_warn) logW("{}", w);
         if (use_dflash) {
             const std::string dm = *dm_resolved;
-            const hip::MemInfo d0 = hip::memInfo();
+            const hip::MemInfo d0 = ops->memInfo();
             const gguf::File& df = *dfile;
             qwen35::LoadStats ds;
             const std::uint64_t wb = model.loadDrafter(df, ds);
             const auto& dc = model.dflash->cfg;
             model.enableCapture(whirl::dflash::captureRows(dfl_par, dc.window, model.max_batch));
-            const hip::MemInfo d1 = hip::memInfo();
+            const hip::MemInfo d1 = ops->memInfo();
             std::string tl;
             for (const std::uint32_t l : dc.target_layers) tl += (tl.empty() ? "" : ",") + std::to_string(l);
             logI("draft model {}: DFlash2, {} layers, block {}, window {}, target layers {}, weights {:.2f} GiB, capture {} rows ({:.0f} MiB), "
@@ -913,14 +915,14 @@ int serveMain(int argc, char** argv, const char* program) {
 
         // slots: KV-cache regions, recurrent state, MTP hidden rows
         model.gdn_replay = envOn("GDN_REPLAY", true);
-        const hip::MemInfo mem_s0 = hip::memInfo();
+        const hip::MemInfo mem_s0 = ops->memInfo();
         model.setupSeqs(opt.parallel, slot_ctx);
         if (use_dflash) {
             // per-slot drafter context rings and the draft scratch (before the KV pool: it is sized
             // from the VRAM left after them)
-            const hip::MemInfo r0 = hip::memInfo();
+            const hip::MemInfo r0 = ops->memInfo();
             model.dflashSetup(opt.parallel, model.cap_rows);
-            const hip::MemInfo r1 = hip::memInfo();
+            const hip::MemInfo r1 = ops->memInfo();
             logI("DFlash2 speculative decoding: on, block {} (up to {} drafts per cycle), context ring {} rows x {} slots, VRAM +{:.0f} MiB; "
                  "p-min {:.2f}, n-min {}; n-gram drafts {}",
                  model.dfr->block, model.dfr->block - 1, model.dfr->ring, opt.parallel,
@@ -1066,12 +1068,11 @@ int serveMain(int argc, char** argv, const char* program) {
         eo.prefill_exec = prefill_exec;
         eo.seed = seed0;
 
-        auto ops = device::makeHipBackend();
         auto backend = makeQwen35Backend(model);
         Engine engine(*backend, *ops, tok, eo);
-        const hip::MemInfo mem_ck0 = hip::memInfo();
+        const hip::MemInfo mem_ck0 = ops->memInfo();
         engine.allocState();
-        const hip::MemInfo mem_ck1 = hip::memInfo();
+        const hip::MemInfo mem_ck1 = ops->memInfo();
 
         // host tiers, VRAM side first (tier stream, pinned arena mapped for the
         // GPU): the KV pool below is sized after it
@@ -1132,20 +1133,20 @@ int serveMain(int argc, char** argv, const char* program) {
         } else if (kv_ram_mb == 0 && n_ck > 0 && !no_pc) {
             logI("kv tier: RAM tier off ({})", rsz.reason);
         }
-        const hip::MemInfo mem_t1 = hip::memInfo();
+        const hip::MemInfo mem_t1 = ops->memInfo();
         // shared KV pool: --ctx, or (R9700) the VRAM left now minus a reserve
         // The reserve is kept below both the free VRAM and this process's WDDM budget: going over the
         // budget makes Windows demote allocations to system memory (seen as GPU 'Shared Usage'), and a
         // demoted KV array is read across PCIe on every step (FIX-1: ~128k agent decode 29 -> 68 tok/s).
         // WHIRL_POOL_RESERVE_MB keeps the old free-VRAM-only rule with that reserve.
         const bool reserve_explicit = env("POOL_RESERVE_MB").has_value();
-        const hip::WddmMemInfo wddm0 = hip::wddmMemInfo();
+        const hip::WddmMemInfo wddm0 = ops->wddmMemInfo();
         const std::uint64_t reserve =
             static_cast<std::uint64_t>(envU32("POOL_RESERVE_MB", cfg.moe ? 1536 : (wddm0.ok ? 768 : 3072))) << 20;
         const std::uint64_t budget_margin = static_cast<std::uint64_t>(envU32("POOL_BUDGET_MARGIN_MB", cfg.moe ? 1536 : 768)) << 20;
         std::string budget_note;
         const std::uint64_t avail = [&] {
-            const hip::MemInfo mf = hip::memInfo();
+            const hip::MemInfo mf = ops->memInfo();
             std::uint64_t a = mf.free > reserve ? mf.free - reserve : 0;
             if (!reserve_explicit && wddm0.ok) {
                 const std::uint64_t room = wddm0.local_budget > wddm0.local_usage + budget_margin
@@ -1250,7 +1251,7 @@ int serveMain(int argc, char** argv, const char* program) {
             logI("slots: {}; per slot: recurrent state {:.1f} MiB, prefix checkpoints {:.1f} MiB; shared: {} snapshot sets {:.1f} MiB",
                  opt.parallel, st_mib, ck_mb * static_cast<double>(n_ck), model.snap_sets, snap_mib);
         }
-        const hip::MemInfo mem2 = hip::memInfo();
+        const hip::MemInfo mem2 = ops->memInfo();
         if (tier_pre)
             logI("kv tier: VRAM taken by the tier stream / pinned arena mapping: {:.1f} MiB (before the pool was sized)",
                  static_cast<double>(mem_ck1.free > mem_t1.free ? mem_ck1.free - mem_t1.free : 0) / 1048576.0);
@@ -1274,7 +1275,7 @@ int serveMain(int argc, char** argv, const char* program) {
             // after everything sized at startup is allocated: any growth of the non-local segment
             // since the pool was sized is VRAM demoted to system memory (pinned host buffers made
             // before that point, such as the embedding table and the RAM tier, are in the baseline)
-            const hip::WddmMemInfo w = hip::wddmMemInfo();
+            const hip::WddmMemInfo w = ops->wddmMemInfo();
             if (w.ok && wddm0.ok) {
                 const std::uint64_t grow = w.nonlocal_usage > wddm0.nonlocal_usage ? w.nonlocal_usage - wddm0.nonlocal_usage : 0;
                 const bool over = w.local_usage > w.local_budget || grow > (256ull << 20);
@@ -1293,7 +1294,7 @@ int serveMain(int argc, char** argv, const char* program) {
             // integrated GPU: what this process holds of the carve-out now (its GPU "Dedicated Usage"), against
             // the pre-load estimate (UMA-1)
             if (uma.known) {
-                const hip::LocalMemSnap s = hip::localMemSnap();
+                const hip::LocalMemSnap s = ops->localMemSnap();
                 if (s.pdh_ok)
                     logI("UMA carve-out use after load: {:.2f} GiB of {:.1f} GiB dedicated (GPU Dedicated Usage of this process); "
                          "GPU Shared Usage {:.2f} GiB",
@@ -1383,7 +1384,7 @@ int serveMain(int argc, char** argv, const char* program) {
         std::unique_ptr<ServerVision> vis_srv;
         if (const std::optional<std::string> mmp = opt.mmproj ? opt.mmproj : env("MMPROJ")) {
             const TimePoint tv0 = Clock::now();
-            const hip::LocalMemSnap mem_v0 = hip::localMemSnap();
+            const hip::LocalMemSnap mem_v0 = ops->localMemSnap();
             try {
                 vis_store = vision::Vision::load(*mmp);
             } catch (const std::exception& ex) {
@@ -1438,7 +1439,7 @@ int serveMain(int argc, char** argv, const char* program) {
             std::uint64_t lent = 0;
             for (std::size_t k = 0; k < n_lend; ++k) lent += raw[k][1];
             tier::declarePinned(lad, embd_pinned + (tier_owned ? tier_owned->pinnedBytes() : 0) + v.pinnedBytes());
-            const hip::LocalMemTaken vis_taken = hip::localMemTaken(mem_v0, hip::localMemSnap());
+            const hip::LocalMemTaken vis_taken = hip::localMemTaken(mem_v0, ops->localMemSnap());
             engine.attachVision(vc);
             logI("vision: {}: {} layers, {} pinned MiB in host RAM ({:.1f} s; VRAM change {:.1f} MiB [{}; hipMemGetInfo free {:+.1f} MiB, GPU Shared Usage {:+.1f} MiB]); encoder loaded on demand, released "
                  "after {} s idle; weights {}; activations in the prefill scratch ({} buffers, {:.0f} MiB; one 4096-token image needs {:.0f} "

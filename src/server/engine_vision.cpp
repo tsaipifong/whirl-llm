@@ -18,7 +18,7 @@ void Engine::attachVision(const VisionConfig& vc) {
     if (vc.vis == nullptr) return;
     const std::size_t n = m_.lendScratch(vis_lend_raw_);
     for (std::size_t k = 0; k < n; ++k) vis_lend_.push_back({vis_lend_raw_[k][0], vis_lend_raw_[k][1]});
-    vis_snap0_ = vc.vis->memSnap();
+    vis_snap0_ = ops_.localMemSnap();
 }
 
 // The embeddings of image p (cache hit, or encode now on the model stream,
@@ -131,7 +131,7 @@ void Engine::visIdle() {
         // delta: hipMemGetInfo free, this process's view on both device classes (it returns exactly on
         // hipFree; on an integrated GPU it also drops by 2x any pinned host memory allocated since,
         // which the GPU Shared Usage growth shows). Dedicated / Shared Usage: whirl/device_mem.h.
-        const hip::LocalMemSnap now = v->memSnap();
+        const hip::LocalMemSnap now = ops_.localMemSnap();
         const hip::LocalMemTaken t = hip::localMemTaken(vis_snap0_, now);
         logI("vision: idle for {} s; encoder released; VRAM free {:.1f} MiB (before the first image {:.1f} MiB, delta {:.1f} MiB) "
              "[since the first image: GPU Dedicated Usage {:+.1f} MiB, Shared Usage {:+.1f} MiB{}]",

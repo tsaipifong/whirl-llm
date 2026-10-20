@@ -55,6 +55,18 @@ public:
     void free(DevPtr p) override;
     void setDevice(int) override {}
     const char* lastErrorString() const override { return "null backend"; }
+    hip::MemInfo memInfo() override { return mem.info; }
+    hip::WddmMemInfo wddmMemInfo() override { return mem.wddm; }
+    hip::LocalMemSnap localMemSnap() override { return mem.local; }
+    hip::UmaMem umaMemory(int) override { return mem.uma; }
+
+    // ---- memory model: the values memInfo / wddmMemInfo / localMemSnap / umaMemory return (a test sets them)
+    struct Memory {
+        hip::MemInfo info;
+        hip::WddmMemInfo wddm;
+        hip::LocalMemSnap local;
+        hip::UmaMem uma;
+    } mem;
 
     // ---- observation
     std::size_t liveAllocations() const;  // device + pinned host
