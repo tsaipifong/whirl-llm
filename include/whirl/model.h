@@ -31,6 +31,7 @@
 #include "whirl/kernels_abi.h"
 #include "whirl/ops/attention.h"
 #include "whirl/ops/matmul.h"
+#include "whirl/ops/moe.h"
 #include "whirl/numerics.h"
 #include "whirl/relax_accept.h"
 #include "whirl/value_scope.h"
@@ -859,12 +860,6 @@ public:
     std::string writeTune() const;
     bool readTune(std::string_view text, std::size_t n_buckets);
     bool useTiledFp8();
-    std::uint32_t moeTile(std::uint32_t n) const;
-    bool moeGuFused(const MoeW& mo) const;
-    bool moeFp8(const MoeW& mo) const;
-    bool moeGuR(const MoeW& mo) const;
-    hip::Function moeGu(GgmlType ty) const;
-    hip::Function moeDown(GgmlType ty) const;
 
     // ---- self-checks and microbenchmarks (bench / selftest)
     MatList layerMats(const Layer& L) const;

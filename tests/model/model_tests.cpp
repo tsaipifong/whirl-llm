@@ -704,7 +704,7 @@ GgufImage dflashImage(std::uint32_t embd, std::uint32_t vocab, bool mask = true,
     return g;
 }
 
-// FIX-K97 (FR-K97 P2-3): gemmr_moe* step k by 64 with no tail; the host gate (Model::moeGuR) refuses other E / F
+// FIX-K97 (FR-K97 P2-3): gemmr_moe* step k by 64 with no tail; the host gate (ops::chooseMoe's gemmr rule) refuses other E / F
 void testGemmrMoeShape() {
     namespace wk = whirl::kernels;
     check(wk::kGemmrMoeBk == 64, "gemmr_moe shape: k step 64");

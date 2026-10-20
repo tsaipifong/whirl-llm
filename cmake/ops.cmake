@@ -5,7 +5,8 @@
 #   whirl_ops        : src/ops (no HIP calls; kernels_abi.h types only)
 #   whirl-ops-tests  : the module's own unit tests (CPU, fake kernel tables)
 
-add_library(whirl_ops STATIC ${CMAKE_SOURCE_DIR}/src/ops/matmul.cpp ${CMAKE_SOURCE_DIR}/src/ops/attention.cpp)
+add_library(whirl_ops STATIC ${CMAKE_SOURCE_DIR}/src/ops/matmul.cpp ${CMAKE_SOURCE_DIR}/src/ops/attention.cpp
+            ${CMAKE_SOURCE_DIR}/src/ops/moe.cpp)
 target_include_directories(whirl_ops PUBLIC ${CMAKE_SOURCE_DIR}/include)
 
 add_executable(whirl-ops-tests ${CMAKE_SOURCE_DIR}/tests/ops/ops_tests.cpp)
