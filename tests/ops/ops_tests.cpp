@@ -14,6 +14,7 @@
 #include <cstring>
 #include <deque>
 #include <string>
+#include <type_traits>
 
 namespace {
 
@@ -335,13 +336,13 @@ void testAttnDecode() {
     // o-projection is on the int8 GEMV
     const kn::KernelTable k97 = attnTable(false, false, true, true);
     p.o_on_gemv = true;
-    auto pl = ops::chooseAttnDecode(p, f, k97, p97);
+    auto pl = ops::chooseAttnDecode(p, f, k97, k97.caps, p97);
     CHECK(nameOf(pl.f) == "attn_wsplit1" && pl.kind == ops::AttnDecodeKind::wsplit && pl.grid.x == 4 && pl.grid.y == 64 && pl.grid.z == 1);
     CHECK(pl.block.x == 128 && pl.combine_q8 && pl.combine_grid.x == 24 && pl.combine_grid.y == 1);
     // precise never takes the int8 combine
     ops::AttnDecodeFlags fp = f;
     fp.prec_dec = true;
-    CHECK(!ops::chooseAttnDecode(p, fp, k97, p97).combine_q8);
+    CHECK(!ops::chooseAttnDecode(p, fp, k97, k97.caps, p97).combine_q8);
     // a 4-row verify at consecutive positions of one sequence: one group of 2 (16 / 6 columns), then 2
     const std::int32_t pos[4] = {1000, 1001, 1002, 1003}, base[4] = {0, 0, 0, 0};
     p.n = 4;
@@ -349,39 +350,39 @@ void testAttnDecode() {
     p.row_pos = pos;
     p.row_base = base;
     f.attn_wide = false;
-    pl = ops::chooseAttnDecode(p, f, k97, p97);
+    pl = ops::chooseAttnDecode(p, f, k97, k97.caps, p97);
     CHECK(nameOf(pl.f) == "attn_wsplit1" && pl.grid.z == 2 && pl.groups.first[1] == 2 && pl.groups.count[0] == 2);
     // with attn_wide: attn_wsplit2 takes 5 rows per group (32 / 6): one group of 4
     f.attn_wide = true;
-    pl = ops::chooseAttnDecode(p, f, k97, p97);
+    pl = ops::chooseAttnDecode(p, f, k97, k97.caps, p97);
     CHECK(nameOf(pl.f) == "attn_wsplit2" && pl.grid.z == 1 && pl.groups.count[0] == 4);
     // q4 KV with attn_dq4: one query per group on attn_dq4, 256 threads; the R9700 keeps the fixed grid
     p.kv_q4 = true;
     f.fd_splits = 256;
-    pl = ops::chooseAttnDecode(p, f, k97, p97);
+    pl = ops::chooseAttnDecode(p, f, k97, k97.caps, p97);
     CHECK(nameOf(pl.f) == "attn_dq4" && pl.kind == ops::AttnDecodeKind::dq4 && pl.grid.z == 4 && pl.block.x == 256 && pl.n_split == 256);
     // the 8060S (attn_group1 set): the dynamic split count for short rows (same partition), FAST-8S-1
     const kn::KernelTable k8 = attnTable(true, true, true, false);
-    pl = ops::chooseAttnDecode(p, f, k8, p8s);
+    pl = ops::chooseAttnDecode(p, f, k8, k8.caps, p8s);
     CHECK(nameOf(pl.f) == "attn_dq4" && pl.n_split < 256 && pl.n_split == ops::dq4Splits(std::span<const std::int32_t>(pos, 4), 0, 256));
     // f16 KV on the 8060S (an f16-KV kernel table has no attn_dq4): attn_ws4g for a multi-row verify group (64 splits)
     const kn::KernelTable k8f = attnTable(true, true, false, false);
     p.kv_q4 = false;
     f.fd_splits = 64;
-    pl = ops::chooseAttnDecode(p, f, k8f, p8s);
+    pl = ops::chooseAttnDecode(p, f, k8f, k8f.caps, p8s);
     CHECK(pl.kind == ops::AttnDecodeKind::ws4g && nameOf(pl.f).rfind("attn_ws4g", 0) == 0 && pl.grid.y == 64 && pl.grid.z == 1 && pl.block.x == 256);
     // rows of two sequences never share a group
     const std::int32_t base2[4] = {0, 0, 4096, 4096};
     p.row_base = base2;
-    pl = ops::chooseAttnDecode(p, f, k8f, p8s);
+    pl = ops::chooseAttnDecode(p, f, k8f, k8f.caps, p8s);
     CHECK(pl.grid.z == 2);
     // WHIRL_ATTN_WS4=0 on the 8060S: attn_wsplit1, one query per group (attn_group1)
     f.attn_ws4 = false;
-    pl = ops::chooseAttnDecode(p, f, k8f, p8s);
+    pl = ops::chooseAttnDecode(p, f, k8f, k8f.caps, p8s);
     CHECK(nameOf(pl.f) == "attn_wsplit1" && pl.grid.z == 4);
     // dbg_flags bit 2 forces attn_split (grid.z = rows, 256 threads)
     f.dbg_flags = 2;
-    pl = ops::chooseAttnDecode(p, f, k8f, p8s);
+    pl = ops::chooseAttnDecode(p, f, k8f, k8f.caps, p8s);
     CHECK(nameOf(pl.f) == "attn_split" && pl.kind == ops::AttnDecodeKind::split && pl.grid.z == 4 && pl.block.x == 256);
     CHECK(ops::awPer(1, 64) == 64 && ops::awPer(4096, 64) == 64 && ops::awPer(4097, 64) == 128);
 }
@@ -499,52 +500,85 @@ void testMoe() {
     const kn::KernelTable k97 = moeTable(false), k8 = moeTable(true);
     // decode, balance: int8 experts, the MXFP4 whole-block twins, gate + up in one launch
     p.n = 1;
-    auto pl = ops::chooseMoe(p, bal, k97);
+    auto pl = ops::chooseMoe(p, bal, k97, k97.silu_mul_x8h);
     CHECK(pl.small && pl.small_q8 && pl.bits == ops::MoeBits::moe_q8_row && nameOf(pl.gu) == "moe_gu_mxw" && nameOf(pl.down) == "moe_down_mxw");
     CHECK(!pl.gu_split && pl.gu_grid.x == (2 * 512 + 7) / 8 && pl.gu_grid.y == 8 && pl.down_grid.x == 256 && pl.down_grid.y == 1 && pl.logits_grid.x == 32);
     ops::MoeFlags nomxw = bal;
     nomxw.moe_mxw = false;
-    CHECK(nameOf(ops::chooseMoe(p, nomxw, k97).gu) == "moe_gu_mxfp4");
+    CHECK(nameOf(ops::chooseMoe(p, nomxw, k97, k97.silu_mul_x8h).gu) == "moe_gu_mxfp4");
     // decode, precise: the f32-activation experts, the precise class
-    pl = ops::chooseMoe(p, pre, k97);
+    pl = ops::chooseMoe(p, pre, k97, k97.silu_mul_x8h);
     CHECK(pl.small && !pl.small_q8 && pl.bits == ops::MoeBits::moe_f32_row && nameOf(pl.gu) == "moe_gu_f_mxfp4" && nameOf(pl.down) == "moe_down_f_mxfp4");
     // precise: a 24-row verify (> 16) still takes the decode experts (MTP + n-gram == plain); balance does not
     p.n = 24;
-    CHECK(ops::chooseMoe(p, pre, k97).small && !ops::chooseMoe(p, bal, k97).small);
+    CHECK(ops::chooseMoe(p, pre, k97, k97.silu_mul_x8h).small && !ops::chooseMoe(p, bal, k97, k97.silu_mul_x8h).small);
     // gate and up of different types: two gate / up launches of F rows each
     ops::MoeProblem q = p;
     q.n = 2;
     q.up_ty = GgmlType::q8_0;
-    pl = ops::chooseMoe(q, bal, k97);
+    pl = ops::chooseMoe(q, bal, k97, k97.silu_mul_x8h);
     CHECK(pl.gu_split && nameOf(pl.gu) == "moe_gu_mxw" && nameOf(pl.gu_up) == "moe_gu_q8_0" && pl.gu_grid.x == 64 && pl.gu_grid.y == 16);
     // prefill on gfx1201, balance: MXFP4 x fp8, row-block-fast 1-D grids; 64-token tiles for a long prompt
     p.n = 4096;
-    pl = ops::chooseMoe(p, bal, k97);
+    pl = ops::chooseMoe(p, bal, k97, k97.silu_mul_x8h);
     CHECK(!pl.small && pl.kind == ops::MoePrefillKind::fp8 && pl.rbf && pl.bn == 64 && nameOf(pl.fgu) == "gemm8r_moeh" && nameOf(pl.fdn) == "gemm8r_moe");
     CHECK(pl.max_tiles == 4096 * 8 / 64 + 256 && pl.gu_pgrid.x == pl.max_tiles * 2 * 4 && pl.gu_pgrid.y == 1 && pl.dn_pgrid.x == pl.max_tiles * 16);
     // a short prompt: 32-token tiles
     p.n = 512;
-    pl = ops::chooseMoe(p, bal, k97);
+    pl = ops::chooseMoe(p, bal, k97, k97.silu_mul_x8h);
     CHECK(pl.bn == 32 && nameOf(pl.fgu) == "gemm8r_moe32h");
     // precise prefill on gfx1201: no fp8, the f16 MXFP4 gemmr grouped GEMMs
     p.n = 4096;
-    pl = ops::chooseMoe(p, pre, k97);
+    pl = ops::chooseMoe(p, pre, k97, k97.silu_mul_x8h);
     CHECK(pl.kind == ops::MoePrefillKind::gemmr && nameOf(pl.fgu) == "gemmr_moegu" && pl.bits == ops::MoeBits::moe_f16_gemm);
     // WHIRL_MOE_RBF=0: the generic grouped GEMM (gate, up, down separately; 2-D grids)
     ops::MoeFlags norbf = pre;
     norbf.moe_rbf = false;
-    pl = ops::chooseMoe(p, norbf, k97);
+    pl = ops::chooseMoe(p, norbf, k97, k97.silu_mul_x8h);
     CHECK(pl.kind == ops::MoePrefillKind::generic && nameOf(pl.g_gate) == "gemm_moe_mxfp4" && pl.gu_pgrid.y == 4 && pl.dn_pgrid.y == 16);
     // the 8060S: the fused gate + up + SwiGLU over 64-token tiles, down over 32-token tiles (bn 32)
-    pl = ops::chooseMoe(p, bal, k8);
+    pl = ops::chooseMoe(p, bal, k8, k8.silu_mul_x8h);
     CHECK(pl.kind == ops::MoePrefillKind::fused_gu && pl.bn == 32 && pl.max_tiles64 == 4096 * 8 / 64 + 256 && nameOf(pl.fgu) == "gemm_moegu_mxfp4");
     CHECK(pl.gu_pgrid.x == pl.max_tiles64 * 8 && pl.dn_pgrid.x == pl.max_tiles * 16);
     // WHIRL_MOE_BN forces the tile only where the fused path does not set it
     ops::MoeFlags bn64 = norbf;
     bn64.moe_bn_force = 64;
     p.n = 512;
-    CHECK(ops::chooseMoe(p, bn64, k97).bn == 64);
+    CHECK(ops::chooseMoe(p, bn64, k97, k97.silu_mul_x8h).bn == 64);
     CHECK(ops::moeTile(512, 8, 256) == 32 && ops::moeTile(4096, 8, 256) == 64);
+}
+
+// ---- per-op kernel tables (K-5): KernelTable is the union of the op tables; each choice reads only its own
+void testOpTables() {
+    static_assert(std::is_base_of_v<kn::MatmulKernels, kn::KernelTable> && std::is_base_of_v<kn::AttnKernels, kn::KernelTable> &&
+                  std::is_base_of_v<kn::MoeKernels, kn::KernelTable> && std::is_base_of_v<kn::DeltaNetKernels, kn::KernelTable> &&
+                  std::is_base_of_v<kn::MiscKernels, kn::KernelTable>);
+    // an attention table alone is enough for the attention choice (no matmul / MoE entries needed)
+    kn::AttnKernels a;
+    a.attn_prefill_wmma = tag("attn_prefill_wmma");
+    ops::AttnPrefillProblem p;
+    p.n = 256;
+    p.n_head = 24;
+    p.n_head_kv = 4;
+    p.scale = 0.1f;
+    const auto pl = ops::chooseAttnPrefill(p, ops::AttnPrefillFlags{}, a);
+    CHECK(pl.steps.size() == 1 && nameOf(pl.steps[0].f) == "attn_prefill_wmma");
+    // a matmul table alone for the matmul path
+    kn::MatmulKernels m;
+    m.gemvq[ti(GgmlType::q4_k)] = tag("gemvq");
+    CHECK(ops::chooseMatmulPath(mat(GgmlType::q4_k, 64, 256), 1, ops::MatmulFlags{}, m) == ops::MatmulPath::gemvq);
+    // the MoE choice takes the fp8 activation kernel from the misc table explicitly
+    kn::MoeKernels e;
+    ops::MoeProblem q;
+    q.n = 1;
+    q.E = 256;
+    q.K = 2;
+    q.F = 64;
+    q.R = 8;
+    q.gate_ty = q.up_ty = q.down_ty = GgmlType::q4_k;
+    e.moe_gu[ti(GgmlType::q4_k)] = tag("moe_gu");
+    e.moe_down[ti(GgmlType::q4_k)] = tag("moe_down");
+    CHECK(nameOf(ops::chooseMoe(q, ops::MoeFlags{}, e, nullptr).gu) == "moe_gu");
 }
 
 }  // namespace
@@ -558,6 +592,7 @@ int main() {
     testAttnDecode();
     testAttnPrefill();
     testMoe();
+    testOpTables();
     std::printf("ops tests: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }

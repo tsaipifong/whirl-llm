@@ -61,7 +61,8 @@ struct MoePlan {
     Dim3 gu_pgrid{}, dn_pgrid{};     // prefill gate+up (or gate, generic) / down grids
     std::uint32_t max_tiles64 = 0;   // fused: the 64-token tile list
 };
-MoePlan chooseMoe(const MoeProblem& p, const MoeFlags& f, const kernels::KernelTable& k);
+// silu_mul_x8h: the fp8 path's activation kernel (MiscKernels; null: no fp8 path)
+MoePlan chooseMoe(const MoeProblem& p, const MoeFlags& f, const kernels::MoeKernels& k, Function silu_mul_x8h);
 // token tile: 32 when experts average under ~48 tokens (short prompts), else 64
 std::uint32_t moeTile(std::uint32_t n, std::uint32_t K, std::uint32_t R);
 

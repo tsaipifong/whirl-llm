@@ -67,7 +67,8 @@ i32 awPer(i32 n_pos, u32 n_split) {
     return (q >= 0 ? q / span : -((-q + span - 1) / span)) * static_cast<i32>(fd_chunk);
 }
 
-AttnDecodePlan chooseAttnDecode(const AttnDecodeProblem& p, const AttnDecodeFlags& f, const kernels::KernelTable& k, const device::Profile& prof) {
+AttnDecodePlan chooseAttnDecode(const AttnDecodeProblem& p, const AttnDecodeFlags& f, const kernels::AttnKernels& k, const kernels::Caps& caps,
+                                const device::Profile& prof) {
     const u32 n = p.n, hd = p.head_dim;
     const u32 grp_q = p.n_head / p.n_head_kv;
     AttnDecodePlan pl;
@@ -84,7 +85,7 @@ AttnDecodePlan chooseAttnDecode(const AttnDecodeProblem& p, const AttnDecodeFlag
     // same as fd_splits' for every row: same partials, same combine order, so bitwise the same output. The
     // profile row says where this was measured and output-checked (the 8060S); the R9700 keeps the fixed grid.
     // (the same conditions as the wsplit branch below, REVIEW-022 F10)
-    if (prof.attn_dq4_dynamic_splits && !ws4_path && p.kv_q4 && f.attn_dq4 && f.dq4_dyn && k.attn_dq4 != nullptr && k.caps.attn_group1 && grp_q <= 8 &&
+    if (prof.attn_dq4_dynamic_splits && !ws4_path && p.kv_q4 && f.attn_dq4 && f.dq4_dyn && k.attn_dq4 != nullptr && caps.attn_group1 && grp_q <= 8 &&
         p.rows_known && k.attn_wsplit1 != nullptr && hd == 256 && (f.dbg_flags & 2) == 0)
         n_split = dq4Splits(p.row_pos.first(n), p.win, n_split);
     pl.n_split = n_split;
@@ -135,7 +136,7 @@ AttnDecodePlan chooseAttnDecode(const AttnDecodeProblem& p, const AttnDecodeFlag
         // real V row). q4 KV with attn_dq4 (FC-1c, gfx1201 too): every row its own group, so decode, verify and
         // MTP rows all take attn_dq4 (a row's partials never depend on its batch)
         const bool dq4_rows = p.kv_q4 && f.attn_dq4 && k.attn_dq4 != nullptr && grp_q <= 8;
-        const bool one_q = (f.dbg_flags & 4) != 0 || k.caps.attn_group1 || dq4_rows;
+        const bool one_q = (f.dbg_flags & 4) != 0 || caps.attn_group1 || dq4_rows;
         const bool known = p.rows_known && n > 1;
         auto group = [&](u32 max_q, kernels::AwGroups& groups) {
             u32 ng = 0, r = 0, widest = 0;
@@ -189,7 +190,7 @@ AttnDecodePlan chooseAttnDecode(const AttnDecodeProblem& p, const AttnDecodeFlag
 // one launch does at most ~4096 x 128k query-key pairs x all heads. Same results as one launch.
 // f16 / q8 / q8h / q8v KV: attn_kg (NP query heads of one KV head per block; bit-identical to attn_kx) when NP
 // divides the GQA group, the head ranges stay whole groups of NP and the softmax scale is a power of two.
-AttnPrefillPlan chooseAttnPrefill(const AttnPrefillProblem& p, const AttnPrefillFlags& f, const kernels::KernelTable& k) {
+AttnPrefillPlan chooseAttnPrefill(const AttnPrefillProblem& p, const AttnPrefillFlags& f, const kernels::AttnKernels& k) {
     AttnPrefillPlan pl;
     auto& st = pl.steps;
     const u32 n = p.n, n_head = p.n_head;

@@ -35,14 +35,14 @@ BitClass bitClassOf(MatmulPath p) {
     return BitClass::f16_gemm;
 }
 
-bool floatGemvN(const MatShape& w, std::uint32_t n, std::uint32_t gv_max, const kernels::KernelTable& k) {
+bool floatGemvN(const MatShape& w, std::uint32_t n, std::uint32_t gv_max, const kernels::MatmulKernels& k) {
     const std::size_t t = ti(w.ty);
     return n >= 2 && n <= gv_max && (w.ty == GgmlType::f32 || w.ty == GgmlType::f16) && k.gemvq[t] == nullptr && k.gemv1[t] != nullptr;
 }
 
 // Candidates in order of preference, each with its class; precise decode / verify rows (prec_dec, n <= gv_max)
 // skip every candidate outside the precise class, so they always reach the f16 GEMM.
-MatmulPath chooseMatmulPath(const MatShape& w, std::uint32_t n, const MatmulFlags& f, const kernels::KernelTable& k) {
+MatmulPath chooseMatmulPath(const MatShape& w, std::uint32_t n, const MatmulFlags& f, const kernels::MatmulKernels& k) {
     const std::size_t t = ti(w.ty);
     const bool precise_rows = f.prec_dec && n <= f.gv_max;
     auto allowed = [&](MatmulPath p) { return !precise_rows || preciseClass(bitClassOf(p)); };
@@ -63,7 +63,7 @@ std::uint32_t gvNmax(GgmlType ty, std::uint32_t gv_nmax_override) {
 // n <= 16: the one-token / multi-token int8 GEMV, its int8-WMMA (gemvw) or multi-row (gemvq_mr) variant from the
 // tuned tables, grouped over the matrices through the "g" twin when the group fits gvNmax. Every variant computes
 // each token row as the one-token gemvq does (class q8_row), so the tables only move speed.
-GemvPlan chooseGemvTile(const MatShape* mats, std::size_t n_mats, std::uint32_t n, const kernels::KernelTable& k, const GemvTune& tn) {
+GemvPlan chooseGemvTile(const MatShape* mats, std::size_t n_mats, std::uint32_t n, const kernels::MatmulKernels& k, const GemvTune& tn) {
     if (n_mats < 1 || n_mats > 3 || n < 1 || n > static_cast<std::uint32_t>(kernels::kMaxSmallBatch))
         throw std::invalid_argument("ops::chooseGemvTile: 1..3 matrices and 1..16 rows");
     const MatShape& w = mats[0];
@@ -102,7 +102,7 @@ GemvPlan chooseGemvTile(const MatShape* mats, std::size_t n_mats, std::uint32_t 
     return p;
 }
 
-GemvWide chooseGemvWide(const MatShape& w0, std::size_t n_mats, const kernels::KernelTable& k, bool head_gemvx) {
+GemvWide chooseGemvWide(const MatShape& w0, std::size_t n_mats, const kernels::MatmulKernels& k, bool head_gemvx) {
     const std::size_t t = ti(w0.ty);
     if (k.gemvx[t] != nullptr && (!w0.head || head_gemvx)) return GemvWide::gemvx;
     if (w0.head && w0.ty == GgmlType::q6_k && k.gemvw_head_s != nullptr && n_mats == 1) return GemvWide::head_split;
@@ -116,7 +116,7 @@ Dim3 headSplitGrid(std::uint32_t chunk_rows) { return D((chunk_rows + 31) / 32);
 std::size_t gemm8Cfg(std::uint32_t n) { return n <= 64 ? 3 : n <= 256 ? 1 : 0; }
 std::size_t gemm8tCfg(std::uint32_t n) { return n <= 32 ? 3 : n <= 48 ? 4 : n <= 64 ? 2 : n <= 192 ? 1 : 0; }
 
-Gemm8Plan chooseGemm8(std::uint32_t nrows, std::uint32_t n, bool out_h16, bool g8t, const kernels::KernelTable& k) {
+Gemm8Plan chooseGemm8(std::uint32_t nrows, std::uint32_t n, bool out_h16, bool g8t, const kernels::MatmulKernels& k) {
     const std::size_t ci = g8t ? gemm8tCfg(n) : gemm8Cfg(n);
     const kernels::GemmCfg c = g8t ? kernels::kGemm8tCfgs[ci] : kernels::kGemm8Cfgs[ci];
     Gemm8Plan p;
@@ -129,7 +129,7 @@ Gemm8Plan chooseGemm8(std::uint32_t nrows, std::uint32_t n, bool out_h16, bool g
 // Precise rows: the small-batch WMMA GEMM on the raw quantized bytes (gemms) with the narrowest token tile that
 // holds n (then the smaller row block; the larger one where the profile says so, GEMVH-2), else the tuned fused
 // config (gemm_c on the quantized bytes) - never the whole-matrix dequant into w16.
-std::uint32_t precChoice(const MatShape& w, std::uint32_t n, std::uint8_t tuned, const GemmFlags& f, const kernels::KernelTable& k) {
+std::uint32_t precChoice(const MatShape& w, std::uint32_t n, std::uint8_t tuned, const GemmFlags& f, const kernels::MatmulKernels& k) {
     const std::size_t G = kernels::kGemmCfgs.size();
     const std::size_t t = ti(w.ty);
     if (w.ty != GgmlType::f16 && w.ty != GgmlType::f32 && w.ncols % 256 == 0) {
@@ -159,7 +159,7 @@ std::uint32_t precChoice(const MatShape& w, std::uint32_t n, std::uint8_t tuned,
     return c >= 2 * G ? 0u : static_cast<std::uint32_t>(c % G);
 }
 
-GemmPlan chooseGemmF16(const MatShape& w, std::uint32_t n, std::uint8_t tuned, const GemmFlags& f, const kernels::KernelTable& k) {
+GemmPlan chooseGemmF16(const MatShape& w, std::uint32_t n, std::uint8_t tuned, const GemmFlags& f, const kernels::MatmulKernels& k) {
     const std::size_t t = ti(w.ty);
     const std::size_t G = kernels::kGemmCfgs.size();
     GemmPlan p;

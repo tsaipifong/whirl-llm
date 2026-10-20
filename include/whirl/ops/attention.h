@@ -56,7 +56,9 @@ struct AttnDecodePlan {
     bool combine_q8 = false;       // attn_combine_q8 (int8 o-projection input) instead of attn_combine
     Dim3 combine_grid{}, combine_block{256, 1, 1};
 };
-AttnDecodePlan chooseAttnDecode(const AttnDecodeProblem& p, const AttnDecodeFlags& f, const kernels::KernelTable& k, const device::Profile& prof);
+// caps: the module's markers (attn_group1)
+AttnDecodePlan chooseAttnDecode(const AttnDecodeProblem& p, const AttnDecodeFlags& f, const kernels::AttnKernels& k, const kernels::Caps& caps,
+                                const device::Profile& prof);
 // split rule helpers (kept in step with the kernels)
 std::int32_t awPer(std::int32_t n_pos, std::uint32_t n_split);
 std::uint32_t dq4Splits(std::span<const std::int32_t> row_pos, std::int32_t win, std::uint32_t full);
@@ -89,6 +91,6 @@ struct AttnStep {
 struct AttnPrefillPlan {
     std::vector<AttnStep> steps;
 };
-AttnPrefillPlan chooseAttnPrefill(const AttnPrefillProblem& p, const AttnPrefillFlags& f, const kernels::KernelTable& k);
+AttnPrefillPlan chooseAttnPrefill(const AttnPrefillProblem& p, const AttnPrefillFlags& f, const kernels::AttnKernels& k);
 
 }  // namespace whirl::ops

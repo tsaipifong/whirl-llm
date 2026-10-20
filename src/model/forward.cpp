@@ -636,7 +636,7 @@ void Model::attnBlock(const AttnW& a, const KvLayer& lkv, u32 n) {
         af.fd_splits = fd_splits;
         af.dbg_flags = dbg_flags;
         af.prec_dec = prec_dec;
-        const ops::AttnDecodePlan pl = ops::chooseAttnDecode(ap, af, k, device::profile(arch));
+        const ops::AttnDecodePlan pl = ops::chooseAttnDecode(ap, af, k, k.caps, device::profile(arch));
         if (pl.kind == ops::AttnDecodeKind::split)
             hip::launch(pl.f, pl.grid, pl.block, 0, stream, qf, kva, part_ml, part_acc, I(cfg.n_head), I(cfg.n_head_kv), I(hd), I(2 * hd), pos_buf,
                         scale, i32(1), gate);
@@ -811,7 +811,7 @@ void Model::moeBlock(DevPtr post_norm, const Mat& sg, const Mat& su, const Mat& 
     mf.moe_rbf = moe_rbf;
     mf.moe_fp8 = moe_fp8;
     mf.moe_bn_force = moe_bn_force;
-    const ops::MoePlan pl = ops::chooseMoe(mp, mf, k);
+    const ops::MoePlan pl = ops::chooseMoe(mp, mf, k, k.silu_mul_x8h);
     const bool small = pl.small;
     // precise decode: f32-activation experts (moe_gu_f / moe_down_f) and the shared expert on
     // the precise matmul path (no int8 activations); a token's output is the same alone or in

@@ -16,37 +16,37 @@ constexpr u32 moe_bm = 128;
 constexpr u32 moe_bn = 64;
 
 // MXFP4 decode experts: the whole-block kernels when present (WHIRL_MOE_MXW=0 -> generic)
-Function moeGu(GgmlType ty, bool mxw, const kernels::KernelTable& k) {
+Function moeGu(GgmlType ty, bool mxw, const kernels::MoeKernels& k) {
     return ty == GgmlType::mxfp4 && mxw && k.moe_gu_mxw != nullptr ? k.moe_gu_mxw : k.moe_gu[ti(ty)];
 }
-Function moeDown(GgmlType ty, bool mxw, const kernels::KernelTable& k) {
+Function moeDown(GgmlType ty, bool mxw, const kernels::MoeKernels& k) {
     return ty == GgmlType::mxfp4 && mxw && k.moe_down_mxw != nullptr ? k.moe_down_mxw : k.moe_down[ti(ty)];
 }
 // Prefill experts on the fused gate + up + SwiGLU grouped GEMM and the 32-token row-block-fast down GEMM (gfx1151
 // code object; gate and up of one type and row size).
-bool fusedGu(const MoeProblem& p, const kernels::KernelTable& k) {
+bool fusedGu(const MoeProblem& p, const kernels::MoeKernels& k) {
     return k.moe_tiles != nullptr && k.gemm_moegu[ti(p.gate_ty)] != nullptr && k.gemm_moe32r[ti(p.down_ty)] != nullptr && p.gate_ty == p.up_ty &&
            p.gate_rb == p.up_rb && p.tiles64_buf;
 }
 // Prefill experts on the f16-activation MXFP4 grouped GEMMs gemmr_moe* (gfx1201; WHIRL_MOE_RBF=0 -> gemm_moe +
 // moe_act_f16): all three expert tensors MXFP4, gate and up of one row size, E and F multiples of the k step.
-bool gemmrGu(const MoeProblem& p, const MoeFlags& f, const kernels::KernelTable& k) {
+bool gemmrGu(const MoeProblem& p, const MoeFlags& f, const kernels::MoeKernels& k) {
     return f.moe_rbf && p.gate_ty == GgmlType::mxfp4 && p.up_ty == GgmlType::mxfp4 && p.down_ty == GgmlType::mxfp4 && p.gate_rb == p.up_rb &&
            k.gemmr_moegu != nullptr && k.gemmr_moegu32 != nullptr && k.gemmr_moedn != nullptr && k.gemmr_moedn32 != nullptr &&
            kernels::gemmrMoeShapeOk(p.gate_ncols, p.down_ncols);
 }
 // Prefill experts on the MXFP4 x fp8 grouped GEMM: all three expert tensors MXFP4 with load-time row exponents,
 // fp8 prefill on (speed mode), kernels present.
-bool fp8Gu(const MoeProblem& p, const MoeFlags& f, const kernels::KernelTable& k) {
+bool fp8Gu(const MoeProblem& p, const MoeFlags& f, const kernels::MoeKernels& k, Function silu_mul_x8h) {
     return f.moe_fp8 && p.gate_ty == GgmlType::mxfp4 && p.up_ty == GgmlType::mxfp4 && p.down_ty == GgmlType::mxfp4 && p.refs && p.gate_rb == p.up_rb &&
            p.sx_buf && k.gemm8_moe != nullptr && k.gemm8_moe32 != nullptr && k.gemm8_moeh != nullptr && k.gemm8_moe32h != nullptr &&
-           k.moe_gather_fp8 != nullptr && k.silu_mul_x8h != nullptr;
+           k.moe_gather_fp8 != nullptr && silu_mul_x8h != nullptr;
 }
 }  // namespace
 
 u32 moeTile(u32 n, u32 K, u32 R) { return n * K < 48 * R ? 32 : moe_bn; }
 
-MoePlan chooseMoe(const MoeProblem& p, const MoeFlags& f, const kernels::KernelTable& k) {
+MoePlan chooseMoe(const MoeProblem& p, const MoeFlags& f, const kernels::MoeKernels& k, Function silu_mul_x8h) {
     const u32 n = p.n, E = p.E, K = p.K, F = p.F, R = p.R;
     MoePlan pl;
     // precise mode: every verify / decode batch (up to max_verify_rows rows) takes the decode experts, so a
@@ -76,7 +76,7 @@ MoePlan chooseMoe(const MoeProblem& p, const MoeFlags& f, const kernels::KernelT
     }
     // prefill: group (token, slot) pairs by expert, grouped GEMMs, combine
     const u32 pairs = n * K;
-    const bool fp8 = fp8Gu(p, f, k), fused = fusedGu(p, k);
+    const bool fp8 = fp8Gu(p, f, k, silu_mul_x8h), fused = fusedGu(p, k);
     pl.bn = fused && !fp8 ? 32 : (f.moe_bn_force == 32 || f.moe_bn_force == 64) ? f.moe_bn_force : moeTile(n, K, R);
     pl.max_tiles = (pairs + pl.bn - 1) / pl.bn + R;
     const u32 bn = pl.bn, max_tiles = pl.max_tiles;

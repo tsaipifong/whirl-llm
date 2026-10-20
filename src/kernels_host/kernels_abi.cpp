@@ -147,14 +147,13 @@ Caps Caps::probe(const hip::Module& m) {
     return c;
 }
 
-KernelTable KernelTable::load(const hip::Module& m, KvFormat kv) {
-    const Loader L{m};
-    KernelTable k;
-    k.caps = Caps::probe(m);
-    if (!k.caps.supports(kv))
-        throw std::invalid_argument(std::string("kernels: this GPU's code object has no ") + (kv == KvFormat::q8v ? "q8v" : kv == KvFormat::q4 ? "q4" : "q8h") +
-                                    " KV kernels");
+namespace {
 
+// ---- per-op loaders (ARCH-1 K-5): each fills its own table; only the attention table reads the KV format.
+// Every field is assigned in the same order as before the split (a field's later assignment overrides an earlier
+// one only within one loader), so the resolved table is the same.
+
+void loadMatmul(MatmulKernels& k, const Loader& L) {
     // Every type but MXFP4: the core kernels are required.
     constexpr QType base_types[] = {QType::f32, QType::f16, QType::q8_0, QType::q3_k, QType::q4_k,
                                     QType::q5_k, QType::q6_k, QType::iq4_nl, QType::iq3_s, QType::iq4_xs};
@@ -165,7 +164,6 @@ KernelTable KernelTable::load(const hip::Module& m, KvFormat kv) {
             k.gemv4[ti(t)] = L.opt("gemv_" + s + "_4");
             k.gemv8[ti(t)] = L.opt("gemv_" + s + "_8");
         }
-        k.get_rows[ti(t)] = L.req("get_rows_" + s);
         k.gemm[ti(t)] = L.req("gemm3_" + s);
         if (t != QType::f16) k.dequant_f16[ti(t)] = L.req("dequant_f16_" + s);
         k.gemmhq[ti(t)] = L.opt("gemmhq_" + s);
@@ -218,93 +216,105 @@ KernelTable KernelTable::load(const hip::Module& m, KvFormat kv) {
             }
         }
     }
-
     struct Named {
-        Function KernelTable::*f;
+        Function MatmulKernels::*f;
         const char* name;
     };
     static constexpr Named required[] = {
-        {&KernelTable::rmsnorm, "rmsnorm"},
-        {&KernelTable::l2norm, "l2norm"},
-        {&KernelTable::add_inplace, "add_inplace"},
-        {&KernelTable::silu_mul, "silu_mul"},
-        {&KernelTable::rope_neox, "rope_neox"},
-        {&KernelTable::attn_decode, "attn_decode"},
-        {&KernelTable::gdn_conv_seq, "gdn_conv_seq"},
-        {&KernelTable::gdn_gates, "gdn_gates"},
-        {&KernelTable::gdn_seq_128, "gdn_seq_128"},
-        {&KernelTable::gdn_gated_norm, "gdn_gated_norm"},
-        {&KernelTable::argmax, "argmax"},
         {&KernelTable::f32_to_f16, "f32_to_f16"},
         {&KernelTable::quantize_q8, "quantize_q8"},
+    };
+    for (const Named& n : required) k.*(n.f) = L.req(n.name);
+    for (int nt = 1; nt <= kMaxSmallBatch; ++nt) k.gemv_d2[nt - 1] = L.opt("gemv_d2_nt" + std::to_string(nt));
+    // MXFP4: every lookup optional (the fp8 kernels are gfx1201 only).
+    {
+        const QType t = QType::mxfp4;
+        const int i = ti(t);
+        k.gemv1[i] = L.opt("gemv_mxfp4_1");
+        k.gemm[i] = L.opt("gemm3_mxfp4");
+        k.dequant_f16[i] = L.opt("dequant_f16_mxfp4");
+        k.gemmhq[i] = L.opt("gemmhq_mxfp4");
+        k.gemmhqh[i] = L.opt("gemmhqh_mxfp4");
+        for (int ci = 0; ci < static_cast<int>(kGemmCfgs.size()); ++ci) k.gemmc[ci][i] = L.opt(gemmcName(t, ci));
+        k.gemvq[i] = L.opt("gemvq_mxfp4");
+        for (int nt = 2; nt <= kMaxSmallBatch; ++nt) {
+            k.gemvq_nt[nt - 2][i] = L.opt(gemvqNtName(t, nt, false));
+            k.gemvq_nt_g[nt - 2][i] = L.opt(gemvqNtName(t, nt, true));
+            for (int ri = 0; ri < 2; ++ri) {
+                k.gemvq_mr[ri][nt - 2][i] = L.opt(gemvqMrName(t, nt, ri == 0 ? 2 : 4, false));
+                k.gemvq_mr_g[ri][nt - 2][i] = L.opt(gemvqMrName(t, nt, ri == 0 ? 2 : 4, true));
+            }
+            for (int v = 1; v < kNGemvw; ++v) {
+                k.gemvw[v][nt - 2][i] = L.opt(gemvwName(t, nt, v, false));
+                k.gemvw_g[v][nt - 2][i] = L.opt(gemvwName(t, nt, v, true));
+            }
+        }
+        for (int ci = 0; ci < static_cast<int>(kGemm8Cfgs.size()); ++ci) {
+            k.gemm8[ci] = L.opt("gemm8_c" + std::to_string(ci));
+            k.gemm8h[ci] = L.opt("gemm8h_c" + std::to_string(ci));
+        }
+        for (int ci = 0; ci < static_cast<int>(kGemm8tCfgs.size()); ++ci) {
+            k.gemm8t[ci] = L.opt("gemm8t_c" + std::to_string(ci));
+            k.gemm8th[ci] = L.opt("gemm8th_c" + std::to_string(ci));
+        }
+        for (int ci = 0; ci < static_cast<int>(kGemmCfgs.size()); ++ci)
+            k.gemmch[ci] = L.opt("gemm_ch" + std::to_string(ci) + "_f16");
+        static constexpr Named mx[] = {
+            {&KernelTable::qact_fp8, "qact_fp8"},
+            {&KernelTable::qact_fp8t, "qact_fp8t"},
+            {&KernelTable::gemmh_f16, "gemmh_f16"},
+            {&KernelTable::gemmhh_f16, "gemmhh_f16"},
+        };
+        for (const Named& n : mx) k.*(n.f) = L.opt(n.name);
+    }
+    // Precise decode / verify matmul (absent on code objects without it: gemms / gemm_c then).
+    for (QType t : {QType::f16, QType::q8_0, QType::q3_k, QType::q4_k, QType::q5_k, QType::q6_k, QType::iq4_nl, QType::iq3_s,
+                    QType::iq4_xs, QType::mxfp4}) {
+        k.gemvh[ti(t)] = L.opt(std::string("gemvh_") + sfx(t));
+        k.gemvh2[ti(t)] = L.opt(std::string("gemvh2_") + sfx(t));
+    }
+    // Small-batch GEMM (absent configurations stay null).
+    for (QType t : {QType::q8_0, QType::q3_k, QType::q4_k, QType::q5_k, QType::q6_k, QType::iq4_nl, QType::iq3_s,
+                    QType::iq4_xs, QType::mxfp4}) {
+        for (int ci = 0; ci < static_cast<int>(kGemmsCfgs.size()); ++ci) {
+            k.gemms[ci][ti(t)] = L.opt(gemmsName(t, ci, false));
+            k.gemmsh[ci][ti(t)] = L.opt(gemmsName(t, ci, true));
+        }
+    }
+    // A code object whose small-batch GEMM slots have their own block geometry exports
+    // it (marker whirl_cap_gemms_geom + int32 whirl_gemms_geom[slot][BM, BN, threads]).
+    if (L.opt("whirl_cap_gemms_geom") != nullptr) {
+        std::size_t bytes = 0;
+        const DevPtr g = L.m.getGlobal("whirl_gemms_geom", &bytes);
+        std::array<std::int32_t, kGemmsCfgs.size() * 3> v{};
+        if (bytes != sizeof(v)) throw std::runtime_error("kernels: whirl_gemms_geom has an unexpected size");
+        hip::download(v.data(), g, sizeof(v));
+        for (std::size_t ci = 0; ci < kGemmsCfgs.size(); ++ci) k.gemms_geom[ci] = GemmCfg{v[3 * ci], v[3 * ci + 1], v[3 * ci + 2]};
+    }
+}
+
+// the only loader that reads the KV format: attn_* / kv_store / attn_prep(_m) variants
+void loadAttn(AttnKernels& k, const Loader& L, KvFormat kv) {
+    struct Named {
+        Function AttnKernels::*f;
+        const char* name;
+    };
+    static constexpr Named required[] = {
+        {&KernelTable::rope_neox, "rope_neox"},
+        {&KernelTable::attn_decode, "attn_decode"},
         {&KernelTable::kv_store, "kv_store"},
         {&KernelTable::attn_split, "attn_split"},
         {&KernelTable::attn_combine, "attn_combine"},
         {&KernelTable::attn_prefill_wmma, "attn_prefill_wmma"},
-        {&KernelTable::gdn_chunk_prep, "gdn_chunk_prep"},
-        {&KernelTable::gdn_chunk_scan, "gdn_chunk_scan"},
-        {&KernelTable::gdn_conv_par, "gdn_conv_par"},
-        {&KernelTable::gdn_conv_state, "gdn_conv_state"},
-        {&KernelTable::rmsnorm_q8, "rmsnorm_q8"},
-        {&KernelTable::silu_mul_q8, "silu_mul_q8"},
-        {&KernelTable::gdn_ab_q8_0, "gdn_ab_q8_0"},
-        {&KernelTable::gdn_conv_l2, "gdn_conv_l2"},
-        {&KernelTable::gdn_step_norm, "gdn_step_norm"},
-        {&KernelTable::requant_q6k_q4k, "requant_q6k_q4k"},
-        {&KernelTable::set_tokens, "set_tokens"},
-        {&KernelTable::argmax_rows, "argmax_rows"},
-        {&KernelTable::argmax_prob, "argmax_prob"},
-        {&KernelTable::draft_pick, "draft_pick"},
-        {&KernelTable::set_rows, "set_rows"},
-        {&KernelTable::rmsnorm_q8_rows, "rmsnorm_q8_rows"},
-        {&KernelTable::argmax_rows_to, "argmax_rows_to"},
-        {&KernelTable::draft_pick_rows, "draft_pick_rows"},
-        {&KernelTable::moe_logits_f32, "moe_logits_f32"},
-        {&KernelTable::moe_topk, "moe_topk"},
-        {&KernelTable::moe_route, "moe_route"},
-        {&KernelTable::moe_gather_f16, "moe_gather_f16"},
-        {&KernelTable::moe_act_f16, "moe_act_f16"},
-        {&KernelTable::moe_combine, "moe_combine"},
     };
     for (const Named& n : required) k.*(n.f) = L.req(n.name);
-
-    for (QType t : {QType::q4_k, QType::q5_k, QType::q6_k, QType::q8_0, QType::iq4_xs, QType::iq4_nl, QType::q3_k,
-                    QType::iq3_s}) {
-        const std::string s = sfx(t);
-        k.gdn_ab[ti(t)] = L.req("gdn_ab_" + s);
-        k.gdn_abconv[ti(t)] = L.opt("gdn_abconv_" + s);
-        k.moe_gu[ti(t)] = L.req("moe_gu_" + s);
-        k.moe_down[ti(t)] = L.req("moe_down_" + s);
-        k.gemm_moe[ti(t)] = L.req("gemm_moe_" + s);
-        k.gemm_moe32[ti(t)] = L.req("gemm_moe32_" + s);
-        k.gemm_moe32r[ti(t)] = L.opt("gemm_moe32r_" + s);
-        k.gemm_moegu[ti(t)] = L.opt("gemm_moegu_" + s);
-    }
-
     static constexpr Named optional[] = {
-        {&KernelTable::requant_q6k_d2, "requant_q6k_d2"},
-        {&KernelTable::requant_q80_q4k, "requant_q80_q4k"},
-        {&KernelTable::moe_tiles, "moe_tiles"},
-        {&KernelTable::gdn_wprep, "gdn_wprep"},
-        {&KernelTable::gdn_wscan8, "gdn_wscan8"},
-        {&KernelTable::gdn_sx_prep, "gdn_sx_prep"},
-        {&KernelTable::gdn_sx_scan, "gdn_sx_scan"},
-        {&KernelTable::rmsnorm_x8, "rmsnorm_x8"},
-        {&KernelTable::rmsnorm_x16, "rmsnorm_x16"},
-        {&KernelTable::silu_mul_x8, "silu_mul_x8"},
-        {&KernelTable::silu_mul_x16, "silu_mul_x16"},
-        {&KernelTable::gated_norm_x8, "gated_norm_x8"},
-        {&KernelTable::gated_norm_x16, "gated_norm_x16"},
         {&KernelTable::attn_prep, "attn_prep"},
         {&KernelTable::attn_combine_q8, "attn_combine_q8"},
         {&KernelTable::attn_wsplit1, "attn_wsplit1"},
         {&KernelTable::attn_wsplit2, "attn_wsplit2"},
-        {&KernelTable::topk_rows, "topk_rows"},
-        {&KernelTable::draft_sample_rows, "draft_sample_rows"},
-        {&KernelTable::gdn_gates_ba, "gdn_gates_ba"},
     };
     for (const Named& n : optional) k.*(n.f) = L.opt(n.name);
-
     // KV-format variants (same launch shapes as the f16 kernels).
     if (kv == KvFormat::q8v) {
         k.attn_decode = L.req("attn_decode_q8v");
@@ -360,42 +370,36 @@ KernelTable KernelTable::load(const hip::Module& m, KvFormat kv) {
     // vision: multi-section RoPE attention prep (same KV-format choice as attn_prep)
     k.attn_prep_m = L.opt(kv == KvFormat::q8v ? "attn_prep_m_q8v" : kv == KvFormat::q8h ? "attn_prep_m_q8h" : kv == KvFormat::q8 ? "attn_prep_m_q8" : kv == KvFormat::q4 ? "attn_prep_m_q4" : "attn_prep_m");
     k.set_rpos = L.opt("set_rpos");
-    for (int nt = 1; nt <= kMaxSmallBatch; ++nt) k.gemv_d2[nt - 1] = L.opt("gemv_d2_nt" + std::to_string(nt));
-    k.copy_rows_map = L.opt("copy_rows_map");
-    k.dflash_conv = L.opt("dflash_conv");
-    k.dflash_topk = L.opt("dflash_topk");
-    k.dflash_lattice = L.opt("dflash_lattice");
-    k.dflash_walk = L.opt("dflash_walk");
-    k.dflash_attn = L.opt("dflash_attn");
-    k.dflash_attn_long = L.opt("dflash_attn_long");
+}
 
-    // MXFP4: every lookup optional (the fp8 / whole-block expert kernels are gfx1201 only).
+void loadMoe(MoeKernels& k, const Loader& L) {
+    struct Named {
+        Function MoeKernels::*f;
+        const char* name;
+    };
+    static constexpr Named required[] = {
+        {&KernelTable::moe_logits_f32, "moe_logits_f32"},
+        {&KernelTable::moe_topk, "moe_topk"},
+        {&KernelTable::moe_route, "moe_route"},
+        {&KernelTable::moe_gather_f16, "moe_gather_f16"},
+        {&KernelTable::moe_act_f16, "moe_act_f16"},
+        {&KernelTable::moe_combine, "moe_combine"},
+    };
+    for (const Named& n : required) k.*(n.f) = L.req(n.name);
+    for (QType t : {QType::q4_k, QType::q5_k, QType::q6_k, QType::q8_0, QType::iq4_xs, QType::iq4_nl, QType::q3_k,
+                    QType::iq3_s}) {
+        const std::string s = sfx(t);
+        k.moe_gu[ti(t)] = L.req("moe_gu_" + s);
+        k.moe_down[ti(t)] = L.req("moe_down_" + s);
+        k.gemm_moe[ti(t)] = L.req("gemm_moe_" + s);
+        k.gemm_moe32[ti(t)] = L.req("gemm_moe32_" + s);
+        k.gemm_moe32r[ti(t)] = L.opt("gemm_moe32r_" + s);
+        k.gemm_moegu[ti(t)] = L.opt("gemm_moegu_" + s);
+    }
+    k.moe_tiles = L.opt("moe_tiles");
     {
-        const QType t = QType::mxfp4;
-        const int i = ti(t);
-        k.gemv1[i] = L.opt("gemv_mxfp4_1");
-        k.get_rows[i] = L.opt("get_rows_mxfp4");
-        k.gemm[i] = L.opt("gemm3_mxfp4");
-        k.dequant_f16[i] = L.opt("dequant_f16_mxfp4");
-        k.gemmhq[i] = L.opt("gemmhq_mxfp4");
-        k.gemmhqh[i] = L.opt("gemmhqh_mxfp4");
-        for (int ci = 0; ci < static_cast<int>(kGemmCfgs.size()); ++ci) k.gemmc[ci][i] = L.opt(gemmcName(t, ci));
-        k.gemvq[i] = L.opt("gemvq_mxfp4");
-        for (int nt = 2; nt <= kMaxSmallBatch; ++nt) {
-            k.gemvq_nt[nt - 2][i] = L.opt(gemvqNtName(t, nt, false));
-            k.gemvq_nt_g[nt - 2][i] = L.opt(gemvqNtName(t, nt, true));
-            for (int ri = 0; ri < 2; ++ri) {
-                k.gemvq_mr[ri][nt - 2][i] = L.opt(gemvqMrName(t, nt, ri == 0 ? 2 : 4, false));
-                k.gemvq_mr_g[ri][nt - 2][i] = L.opt(gemvqMrName(t, nt, ri == 0 ? 2 : 4, true));
-            }
-            for (int v = 1; v < kNGemvw; ++v) {
-                k.gemvw[v][nt - 2][i] = L.opt(gemvwName(t, nt, v, false));
-                k.gemvw_g[v][nt - 2][i] = L.opt(gemvwName(t, nt, v, true));
-            }
-        }
-        k.gdn_ab[i] = L.opt("gdn_ab_mxfp4");
-        k.gdn_abconv[i] = L.opt("gdn_abconv_mxfp4");
-        // routed experts: generic entries + whole-block decode + fp8 grouped GEMM
+        // routed experts, MXFP4: generic entries + whole-block decode + fp8 grouped GEMM (all optional)
+        const int i = ti(QType::mxfp4);
         k.moe_gu[i] = L.opt("moe_gu_mxfp4");
         k.moe_down[i] = L.opt("moe_down_mxfp4");
         k.gemm_moe[i] = L.opt("gemm_moe_mxfp4");
@@ -417,69 +421,138 @@ KernelTable KernelTable::load(const hip::Module& m, KvFormat kv) {
         k.gemmr_moedn = L.opt("gemmr_moedn_mxfp4");
         k.gemmr_moedn32 = L.opt("gemmr_moedn32_mxfp4");
         k.moe_gather_fp8 = L.opt("moe_gather_fp8");
-        for (int ci = 0; ci < static_cast<int>(kGemm8Cfgs.size()); ++ci) {
-            k.gemm8[ci] = L.opt("gemm8_c" + std::to_string(ci));
-            k.gemm8h[ci] = L.opt("gemm8h_c" + std::to_string(ci));
-        }
-        for (int ci = 0; ci < static_cast<int>(kGemm8tCfgs.size()); ++ci) {
-            k.gemm8t[ci] = L.opt("gemm8t_c" + std::to_string(ci));
-            k.gemm8th[ci] = L.opt("gemm8th_c" + std::to_string(ci));
-        }
-        for (int ci = 0; ci < static_cast<int>(kGemmCfgs.size()); ++ci)
-            k.gemmch[ci] = L.opt("gemm_ch" + std::to_string(ci) + "_f16");
-        static constexpr Named mx[] = {
-            {&KernelTable::qact_fp8, "qact_fp8"},
-            {&KernelTable::silu_mul_x8h, "silu_mul_x8h"},
-            {&KernelTable::gdn_conv_l2n, "gdn_conv_l2n"},
-            {&KernelTable::gdn_conv_l2n_h, "gdn_conv_l2n_h"},
-            {&KernelTable::gdn_conv_state_h, "gdn_conv_state_h"},
-            {&KernelTable::gated_norm_x8h, "gated_norm_x8h"},
-            {&KernelTable::silu_mul_x16h, "silu_mul_x16h"},
-            {&KernelTable::gated_norm_x16h, "gated_norm_x16h"},
-            {&KernelTable::qact_fp8t, "qact_fp8t"},
-            {&KernelTable::rmsnorm_x8t, "rmsnorm_x8t"},
-            {&KernelTable::rmsnorm_x8h16, "rmsnorm_x8h16"},
-            {&KernelTable::rmsnorm_x8h16t, "rmsnorm_x8h16t"},
-            {&KernelTable::silu_mul_x8t, "silu_mul_x8t"},
-            {&KernelTable::silu_mul_x8ht, "silu_mul_x8ht"},
-            {&KernelTable::gated_norm_x8t, "gated_norm_x8t"},
-            {&KernelTable::gated_norm_x8ht, "gated_norm_x8ht"},
-            {&KernelTable::gemmh_f16, "gemmh_f16"},
-            {&KernelTable::gemmhh_f16, "gemmhh_f16"},
-        };
-        for (const Named& n : mx) k.*(n.f) = L.opt(n.name);
-    }
-
-    // Precise decode / verify matmul (absent on code objects without it: gemms / gemm_c then).
-    for (QType t : {QType::f16, QType::q8_0, QType::q3_k, QType::q4_k, QType::q5_k, QType::q6_k, QType::iq4_nl, QType::iq3_s,
-                    QType::iq4_xs, QType::mxfp4}) {
-        k.gemvh[ti(t)] = L.opt(std::string("gemvh_") + sfx(t));
-        k.gemvh2[ti(t)] = L.opt(std::string("gemvh2_") + sfx(t));
     }
     for (QType t : {QType::q4_k, QType::q5_k, QType::q6_k, QType::q8_0, QType::iq4_xs, QType::iq4_nl, QType::q3_k, QType::iq3_s,
                     QType::mxfp4}) {
         k.moe_gu_f[ti(t)] = L.opt(std::string("moe_gu_f_") + sfx(t));
         k.moe_down_f[ti(t)] = L.opt(std::string("moe_down_f_") + sfx(t));
     }
+}
 
-    // Small-batch GEMM (absent configurations stay null).
-    for (QType t : {QType::q8_0, QType::q3_k, QType::q4_k, QType::q5_k, QType::q6_k, QType::iq4_nl, QType::iq3_s,
-                    QType::iq4_xs, QType::mxfp4}) {
-        for (int ci = 0; ci < static_cast<int>(kGemmsCfgs.size()); ++ci) {
-            k.gemms[ci][ti(t)] = L.opt(gemmsName(t, ci, false));
-            k.gemmsh[ci][ti(t)] = L.opt(gemmsName(t, ci, true));
-        }
+void loadDeltaNet(DeltaNetKernels& k, const Loader& L) {
+    struct Named {
+        Function DeltaNetKernels::*f;
+        const char* name;
+    };
+    static constexpr Named required[] = {
+        {&KernelTable::gdn_conv_seq, "gdn_conv_seq"},
+        {&KernelTable::gdn_gates, "gdn_gates"},
+        {&KernelTable::gdn_seq_128, "gdn_seq_128"},
+        {&KernelTable::gdn_gated_norm, "gdn_gated_norm"},
+        {&KernelTable::gdn_chunk_prep, "gdn_chunk_prep"},
+        {&KernelTable::gdn_chunk_scan, "gdn_chunk_scan"},
+        {&KernelTable::gdn_conv_par, "gdn_conv_par"},
+        {&KernelTable::gdn_conv_state, "gdn_conv_state"},
+        {&KernelTable::gdn_ab_q8_0, "gdn_ab_q8_0"},
+        {&KernelTable::gdn_conv_l2, "gdn_conv_l2"},
+        {&KernelTable::gdn_step_norm, "gdn_step_norm"},
+    };
+    for (const Named& n : required) k.*(n.f) = L.req(n.name);
+    for (QType t : {QType::q4_k, QType::q5_k, QType::q6_k, QType::q8_0, QType::iq4_xs, QType::iq4_nl, QType::q3_k,
+                    QType::iq3_s}) {
+        const std::string s = sfx(t);
+        k.gdn_ab[ti(t)] = L.req("gdn_ab_" + s);
+        k.gdn_abconv[ti(t)] = L.opt("gdn_abconv_" + s);
     }
-    // A code object whose small-batch GEMM slots have their own block geometry exports
-    // it (marker whirl_cap_gemms_geom + int32 whirl_gemms_geom[slot][BM, BN, threads]).
-    if (L.opt("whirl_cap_gemms_geom") != nullptr) {
-        std::size_t bytes = 0;
-        const DevPtr g = m.getGlobal("whirl_gemms_geom", &bytes);
-        std::array<std::int32_t, kGemmsCfgs.size() * 3> v{};
-        if (bytes != sizeof(v)) throw std::runtime_error("kernels: whirl_gemms_geom has an unexpected size");
-        hip::download(v.data(), g, sizeof(v));
-        for (std::size_t ci = 0; ci < kGemmsCfgs.size(); ++ci) k.gemms_geom[ci] = GemmCfg{v[3 * ci], v[3 * ci + 1], v[3 * ci + 2]};
+    static constexpr Named optional[] = {
+        {&KernelTable::gdn_wprep, "gdn_wprep"},
+        {&KernelTable::gdn_wscan8, "gdn_wscan8"},
+        {&KernelTable::gdn_sx_prep, "gdn_sx_prep"},
+        {&KernelTable::gdn_sx_scan, "gdn_sx_scan"},
+        {&KernelTable::gdn_gates_ba, "gdn_gates_ba"},
+    };
+    for (const Named& n : optional) k.*(n.f) = L.opt(n.name);
+    {
+        const int i = ti(QType::mxfp4);
+        k.gdn_ab[i] = L.opt("gdn_ab_mxfp4");
+        k.gdn_abconv[i] = L.opt("gdn_abconv_mxfp4");
+        static constexpr Named mx[] = {
+            {&KernelTable::gdn_conv_l2n, "gdn_conv_l2n"},
+            {&KernelTable::gdn_conv_l2n_h, "gdn_conv_l2n_h"},
+            {&KernelTable::gdn_conv_state_h, "gdn_conv_state_h"},
+        };
+        for (const Named& n : mx) k.*(n.f) = L.opt(n.name);
     }
+}
+
+void loadMisc(MiscKernels& k, const Loader& L) {
+    constexpr QType base_types[] = {QType::f32, QType::f16, QType::q8_0, QType::q3_k, QType::q4_k,
+                                    QType::q5_k, QType::q6_k, QType::iq4_nl, QType::iq3_s, QType::iq4_xs};
+    for (QType t : base_types) k.get_rows[ti(t)] = L.req("get_rows_" + sfx(t));
+    struct Named {
+        Function MiscKernels::*f;
+        const char* name;
+    };
+    static constexpr Named required[] = {
+        {&KernelTable::rmsnorm, "rmsnorm"},
+        {&KernelTable::l2norm, "l2norm"},
+        {&KernelTable::add_inplace, "add_inplace"},
+        {&KernelTable::silu_mul, "silu_mul"},
+        {&KernelTable::argmax, "argmax"},
+        {&KernelTable::rmsnorm_q8, "rmsnorm_q8"},
+        {&KernelTable::silu_mul_q8, "silu_mul_q8"},
+        {&KernelTable::requant_q6k_q4k, "requant_q6k_q4k"},
+        {&KernelTable::set_tokens, "set_tokens"},
+        {&KernelTable::argmax_rows, "argmax_rows"},
+        {&KernelTable::argmax_prob, "argmax_prob"},
+        {&KernelTable::draft_pick, "draft_pick"},
+        {&KernelTable::set_rows, "set_rows"},
+        {&KernelTable::rmsnorm_q8_rows, "rmsnorm_q8_rows"},
+        {&KernelTable::argmax_rows_to, "argmax_rows_to"},
+        {&KernelTable::draft_pick_rows, "draft_pick_rows"},
+    };
+    for (const Named& n : required) k.*(n.f) = L.req(n.name);
+    static constexpr Named optional[] = {
+        {&KernelTable::requant_q6k_d2, "requant_q6k_d2"},
+        {&KernelTable::requant_q80_q4k, "requant_q80_q4k"},
+        {&KernelTable::rmsnorm_x8, "rmsnorm_x8"},
+        {&KernelTable::rmsnorm_x16, "rmsnorm_x16"},
+        {&KernelTable::silu_mul_x8, "silu_mul_x8"},
+        {&KernelTable::silu_mul_x16, "silu_mul_x16"},
+        {&KernelTable::gated_norm_x8, "gated_norm_x8"},
+        {&KernelTable::gated_norm_x16, "gated_norm_x16"},
+        {&KernelTable::topk_rows, "topk_rows"},
+        {&KernelTable::draft_sample_rows, "draft_sample_rows"},
+    };
+    for (const Named& n : optional) k.*(n.f) = L.opt(n.name);
+    k.copy_rows_map = L.opt("copy_rows_map");
+    k.dflash_conv = L.opt("dflash_conv");
+    k.dflash_topk = L.opt("dflash_topk");
+    k.dflash_lattice = L.opt("dflash_lattice");
+    k.dflash_walk = L.opt("dflash_walk");
+    k.dflash_attn = L.opt("dflash_attn");
+    k.dflash_attn_long = L.opt("dflash_attn_long");
+    k.get_rows[ti(QType::mxfp4)] = L.opt("get_rows_mxfp4");
+    static constexpr Named mx[] = {
+        {&KernelTable::silu_mul_x8h, "silu_mul_x8h"},
+        {&KernelTable::gated_norm_x8h, "gated_norm_x8h"},
+        {&KernelTable::silu_mul_x16h, "silu_mul_x16h"},
+        {&KernelTable::gated_norm_x16h, "gated_norm_x16h"},
+        {&KernelTable::rmsnorm_x8t, "rmsnorm_x8t"},
+        {&KernelTable::rmsnorm_x8h16, "rmsnorm_x8h16"},
+        {&KernelTable::rmsnorm_x8h16t, "rmsnorm_x8h16t"},
+        {&KernelTable::silu_mul_x8t, "silu_mul_x8t"},
+        {&KernelTable::silu_mul_x8ht, "silu_mul_x8ht"},
+        {&KernelTable::gated_norm_x8t, "gated_norm_x8t"},
+        {&KernelTable::gated_norm_x8ht, "gated_norm_x8ht"},
+    };
+    for (const Named& n : mx) k.*(n.f) = L.opt(n.name);
+}
+
+}  // namespace
+
+KernelTable KernelTable::load(const hip::Module& m, KvFormat kv) {
+    const Loader L{m};
+    KernelTable k;
+    k.caps = Caps::probe(m);
+    if (!k.caps.supports(kv))
+        throw std::invalid_argument(std::string("kernels: this GPU's code object has no ") + (kv == KvFormat::q8v ? "q8v" : kv == KvFormat::q4 ? "q4" : "q8h") +
+                                    " KV kernels");
+    loadMatmul(k, L);
+    loadAttn(k, L, kv);
+    loadMoe(k, L);
+    loadDeltaNet(k, L);
+    loadMisc(k, L);
     return k;
 }
 
@@ -487,16 +560,16 @@ static void checkNt(int nt) {
     if (nt < 2 || nt > kMaxSmallBatch) throw std::out_of_range("kernels: token count must be 2..16");
 }
 
-Function KernelTable::gemvqNt(QType t, int nt, bool grouped) const {
+Function MatmulKernels::gemvqNt(QType t, int nt, bool grouped) const {
     checkNt(nt);
     return (grouped ? gemvq_nt_g : gemvq_nt)[nt - 2][ti(t)];
 }
-Function KernelTable::gemvqMr(QType t, int nt, int r, bool grouped) const {
+Function MatmulKernels::gemvqMr(QType t, int nt, int r, bool grouped) const {
     checkNt(nt);
     if (r != 2 && r != 4) throw std::out_of_range("kernels: multi-row R must be 2 or 4");
     return (grouped ? gemvq_mr_g : gemvq_mr)[r / 2 - 1][nt - 2][ti(t)];
 }
-Function KernelTable::gemvW(QType t, int nt, int v, bool grouped) const {
+Function MatmulKernels::gemvW(QType t, int nt, int v, bool grouped) const {
     checkNt(nt);
     if (v < 1 || v >= kNGemvw) throw std::out_of_range("kernels: gemvw variant must be 1..8");
     return (grouped ? gemvw_g : gemvw)[v][nt - 2][ti(t)];

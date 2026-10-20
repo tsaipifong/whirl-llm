@@ -440,23 +440,23 @@ struct Caps {
     }
 };
 
-// Every production kernel, resolved by name from a loaded module. Entries
-// indexed by weight type use the ggml type id (index < kNTypes); a null
-// Function means the kernel does not exist for that type (or device).
-struct KernelTable {
-    template <class T>
-    using PerType = std::array<T, kNTypes>;
-    using F = Function;
-    using Nt = std::array<PerType<F>, kMaxSmallBatch - 1>;  // [nt - 2][type]
+// Every production kernel, resolved by name from a loaded module, in one table per op (ARCH-1 K-5): the
+// matmul family (GEMV / GEMM and their activation converters), attention (the only table the KV format picks
+// variants for), MoE experts, the DeltaNet layer, and the rest (norms, activations, sampling, drafting). Each
+// op's kernel choice (src/ops) reads its own table; KernelTable is all of them (KernelTable::load). Entries
+// indexed by weight type use the ggml type id (index < kNTypes); a null Function means the kernel does not
+// exist for that type (or device).
+template <class T>
+using PerType = std::array<T, kNTypes>;
+using Nt = std::array<PerType<Function>, kMaxSmallBatch - 1>;  // [nt - 2][type]
 
-    Caps caps;            // capability flags of the module (Caps::probe)
+struct MatmulKernels {
+    using F = Function;
     bool gv_grp = false;  // gemvq_<T> / ggemv* take GvArgs (gemv_grouped_abi present)
-    PerType<F> gemv1{}, gemvq{}, get_rows{}, gemm{}, dequant_f16{};
-    PerType<F> gemv4{}, gemv8{};
+    PerType<F> gemv1{}, gemvq{}, gemm{}, dequant_f16{};
+    PerType<F> gemv4{}, gemv8{};  // gemv_<T>_4 / _8 (f32 / f16 only): n = 2..16 bitwise == gemv1 per token
     // gemvh_<T> / gemvh2_<T>: precise decode / verify matmul, f16 x, n <= 16 / 32, bitwise == gemm_c* (gfx1201)
     PerType<F> gemvh{}, gemvh2{};
-    // moe_gu_f_<T> / moe_down_f_<T>: precise MoE decode experts (f32 activations), both code objects
-    PerType<F> moe_gu_f{}, moe_down_f{};  // gemv_<T>_4 / _8 (f32 / f16 only): n = 2..16 bitwise == gemv1 per token
     Nt gemvq_nt{}, gemvq_nt_g{};
     std::array<Nt, 2> gemvq_mr{}, gemvq_mr_g{};      // [R/2 - 1][nt - 2][type], R = 2, 4
     std::array<Nt, kNGemvw> gemvw{}, gemvw_g{};      // [v][nt - 2][type], v = 1..8
@@ -466,7 +466,6 @@ struct KernelTable {
     // (marker whirl_cap_gemms_geom, int32 whirl_gemms_geom[slot][3] = BM, BN, threads).
     std::array<GemmCfg, kGemmsCfgs.size()> gemms_geom = kGemmsCfgs;
     PerType<F> gemmhq{}, gemmhqh{};
-    PerType<F> gdn_ab{}, gdn_abconv{}, moe_gu{}, moe_down{}, gemm_moe{}, gemm_moe32{}, gemm_moe32r{}, gemm_moegu{};
     PerType<F> gemvx{};  // gemvx_v6_<T>: 17..32-token GEMV (runtime token count)
     F gemvw_head_s{};    // gemvw_nt16v2s_q6_k: 16-token output head over a row range, separate y stride
     F gemvw_head_2p{};   // gemvw_nt16x2s_q6_k: wide-verify output head, both 16-token passes in one launch (optional)
@@ -474,8 +473,19 @@ struct KernelTable {
     std::array<F, kGemm8Cfgs.size()> gemm8{}, gemm8h{};
     std::array<F, kGemm8tCfgs.size()> gemm8t{}, gemm8th{};
     std::array<F, kGemmCfgs.size()> gemmch{};
+    F gemmh_f16{}, gemmhh_f16{};
+    // activation converters of the GEMV / GEMM inputs
+    F f32_to_f16{}, quantize_q8{}, qact_fp8{}, qact_fp8t{};
 
-    F rmsnorm{}, l2norm{}, add_inplace{}, silu_mul{}, rope_neox{};
+    // Accessors with range checks (nt = token count 2..16).
+    F gemvqNt(QType t, int nt, bool grouped = false) const;
+    F gemvqMr(QType t, int nt, int r, bool grouped = false) const;  // r = 2 or 4
+    F gemvW(QType t, int nt, int v, bool grouped = false) const;    // v = 1..8
+};
+
+struct AttnKernels {
+    using F = Function;
+    F rope_neox{};
     F attn_decode{}, kv_store{}, attn_split{}, attn_combine{}, attn_prep{}, attn_combine_q8{};
     F attn_wsplit1{}, attn_wsplit2{}, attn_prefill_wmma{}, attn_kx{};
     F attn_dq4{};  // q4 KV decode / verify (gfx1151 / gfx1201; null if not built): attn_wsplit1 arguments, 256 threads
@@ -490,44 +500,69 @@ struct KernelTable {
     // KG-3 (gfx1151): q8 / q8h / q4 prefill on dequantized rows: the f16 attn_prefill_wmma and its
     // key-range variant attn_prefill_wmma_s (softmax state carried; null when not in the code object)
     F attn_pwf{}, attn_pws{};
-    F gdn_conv_seq{}, gdn_gates{}, gdn_gates_ba{}, gdn_seq_128{}, f32_to_f16{}, gdn_gated_norm{};
-    F argmax{}, quantize_q8{};
-    F gdn_chunk_prep{}, gdn_chunk_scan{}, gdn_wprep{}, gdn_wscan8{}, gdn_sx_prep{}, gdn_sx_scan{};
-    F rmsnorm_x8{}, rmsnorm_x16{}, silu_mul_x8{}, silu_mul_x16{}, gated_norm_x8{}, gated_norm_x16{};
-    F gdn_conv_par{}, gdn_conv_state{}, rmsnorm_q8{}, silu_mul_q8{}, gdn_ab_q8_0{};
-    F gdn_conv_l2{}, gdn_step_norm{}, requant_q6k_q4k{}, requant_q6k_d2{}, requant_q80_q4k{};
-    F copy_rows_map{};  // optional
-    F dflash_conv{}, dflash_topk{}, dflash_lattice{}, dflash_walk{}, dflash_attn{}, dflash_attn_long{};  // optional (DFlash2 drafter)
-    F set_tokens{}, argmax_rows{}, argmax_prob{}, draft_pick{};
-    F set_rows{}, rmsnorm_q8_rows{}, argmax_rows_to{}, draft_pick_rows{};
-    F draft_sample_rows{};  // optional (null: specsample skipped)
-    F moe_logits_f32{}, moe_topk{}, moe_route{}, moe_gather_f16{}, moe_act_f16{}, moe_combine{}, moe_tiles{};
-    F qact_fp8{}, silu_mul_x8h{}, gdn_conv_l2n{}, gdn_conv_l2n_h{}, gdn_conv_state_h{}, gated_norm_x8h{};
-    F silu_mul_x16h{}, gated_norm_x16h{};
-    F rmsnorm_x8h16{}, rmsnorm_x8h16t{};
-    F qact_fp8t{}, rmsnorm_x8t{}, silu_mul_x8t{}, silu_mul_x8ht{}, gated_norm_x8t{}, gated_norm_x8ht{};
-    F gemmh_f16{}, gemmhh_f16{};
-    F topk_rows{};
     // vision: attn_prep with multi-section RoPE positions (image prompts; KV-format
     // variant like attn_prep) and set_rpos(rpos, Rpos16 tab, n). Optional.
     F attn_prep_m{}, set_rpos{};
+};
+
+struct MoeKernels {
+    using F = Function;
+    // moe_gu_f_<T> / moe_down_f_<T>: precise MoE decode experts (f32 activations), both code objects
+    PerType<F> moe_gu_f{}, moe_down_f{};
+    PerType<F> moe_gu{}, moe_down{}, gemm_moe{}, gemm_moe32{}, gemm_moe32r{}, gemm_moegu{};
+    F moe_logits_f32{}, moe_topk{}, moe_route{}, moe_gather_f16{}, moe_act_f16{}, moe_combine{}, moe_tiles{};
     // MXFP4 routed experts (optional): whole-block decode experts, MXFP4 x fp8
     // grouped expert GEMM (token tile 64 / 32, f32 / f16 output), fp8 gather.
     F moe_gu_mxw{}, moe_down_mxw{};
     F gemm8_moe{}, gemm8_moe32{}, gemm8_moeh{}, gemm8_moe32h{}, moe_gather_fp8{};
     F gemm8r_moe{}, gemm8r_moe32{}, gemm8r_moeh{}, gemm8r_moe32h{};  // optional
     F gemmr_moegu{}, gemmr_moegu32{}, gemmr_moedn{}, gemmr_moedn32{};  // optional (MXFP4, f16 activations)
+};
+
+struct DeltaNetKernels {
+    using F = Function;
+    PerType<F> gdn_ab{}, gdn_abconv{};
+    F gdn_conv_seq{}, gdn_gates{}, gdn_gates_ba{}, gdn_seq_128{}, gdn_gated_norm{};
+    F gdn_chunk_prep{}, gdn_chunk_scan{}, gdn_wprep{}, gdn_wscan8{}, gdn_sx_prep{}, gdn_sx_scan{};
+    F gdn_conv_par{}, gdn_conv_state{}, gdn_ab_q8_0{}, gdn_conv_l2{}, gdn_step_norm{};
+    F gdn_conv_l2n{}, gdn_conv_l2n_h{}, gdn_conv_state_h{};
+};
+
+// norms, activations (also the fused activation outputs of the FFN), embedding rows, sampling / drafting,
+// weight requantization, DFlash2
+struct MiscKernels {
+    using F = Function;
+    PerType<F> get_rows{};
+    F rmsnorm{}, l2norm{}, add_inplace{}, silu_mul{};
+    F argmax{};
+    F rmsnorm_x8{}, rmsnorm_x16{}, silu_mul_x8{}, silu_mul_x16{}, gated_norm_x8{}, gated_norm_x16{};
+    F rmsnorm_q8{}, silu_mul_q8{};
+    F requant_q6k_q4k{}, requant_q6k_d2{}, requant_q80_q4k{};
+    F copy_rows_map{};  // optional
+    F dflash_conv{}, dflash_topk{}, dflash_lattice{}, dflash_walk{}, dflash_attn{}, dflash_attn_long{};  // optional (DFlash2 drafter)
+    F set_tokens{}, argmax_rows{}, argmax_prob{}, draft_pick{};
+    F set_rows{}, rmsnorm_q8_rows{}, argmax_rows_to{}, draft_pick_rows{};
+    F draft_sample_rows{};  // optional (null: specsample skipped)
+    F silu_mul_x8h{}, gated_norm_x8h{};
+    F silu_mul_x16h{}, gated_norm_x16h{};
+    F rmsnorm_x8h16{}, rmsnorm_x8h16t{};
+    F rmsnorm_x8t{}, silu_mul_x8t{}, silu_mul_x8ht{}, gated_norm_x8t{}, gated_norm_x8ht{};
+    F topk_rows{};
+};
+
+struct KernelTable : MatmulKernels, AttnKernels, MoeKernels, DeltaNetKernels, MiscKernels {
+    template <class T>
+    using PerType = kernels::PerType<T>;
+    using F = Function;
+    using Nt = kernels::Nt;
+
+    Caps caps;  // capability flags of the module (Caps::probe)
 
     // Resolves every entry. Kernels the model always needs are required
     // (throws hip::Error naming the missing kernel); the others are optional.
-    // `kv` picks the KV-format variants of attn_* / kv_store (throws
+    // `kv` picks the KV-format variants of attn_* / kv_store (only AttnKernels; throws
     // std::invalid_argument when the module lacks that format, see Caps).
     static KernelTable load(const hip::Module& m, KvFormat kv);
-
-    // Accessors with range checks (nt = token count 2..16).
-    F gemvqNt(QType t, int nt, bool grouped = false) const;
-    F gemvqMr(QType t, int nt, int r, bool grouped = false) const;  // r = 2 or 4
-    F gemvW(QType t, int nt, int v, bool grouped = false) const;    // v = 1..8
 };
 
 // Kernel names (for diagnostics and for kernels outside the table, e.g. the

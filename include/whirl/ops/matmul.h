@@ -55,9 +55,9 @@ struct MatmulFlags {
 };
 
 // matmul path for n token rows of w (Model::matmulPath before K-1)
-MatmulPath chooseMatmulPath(const MatShape& w, std::uint32_t n, const MatmulFlags& f, const kernels::KernelTable& k);
+MatmulPath chooseMatmulPath(const MatShape& w, std::uint32_t n, const MatmulFlags& f, const kernels::MatmulKernels& k);
 // f32 / f16 weights at n = 2..gv_max without an int8 GEMV: the f32-activation GEMV instances
-bool floatGemvN(const MatShape& w, std::uint32_t n, std::uint32_t gv_max, const kernels::KernelTable& k);
+bool floatGemvN(const MatShape& w, std::uint32_t n, std::uint32_t gv_max, const kernels::MatmulKernels& k);
 
 // ---- int8 GEMV (MatmulPath::gemvq), n <= 16 token rows of 1..3 matrices of one type on the same input
 using GemvR = std::array<std::uint8_t, kernels::kMaxSmallBatch + 1>;
@@ -76,14 +76,14 @@ struct GemvPlan {
     BitClass bits = BitClass::q8_row;
 };
 // mats: 1..3 matrices of one type and ncols; n = 1..16
-GemvPlan chooseGemvTile(const MatShape* mats, std::size_t n_mats, std::uint32_t n, const kernels::KernelTable& k, const GemvTune& t);
+GemvPlan chooseGemvTile(const MatShape* mats, std::size_t n_mats, std::uint32_t n, const kernels::MatmulKernels& k, const GemvTune& t);
 // the most tokens of a grouped multi-token launch ("g" twins): gv_nmax_override, else 13 for mxfp4, 11 otherwise
 std::uint32_t gvNmax(GgmlType ty, std::uint32_t gv_nmax_override);
 
 // 17..32 token rows (wide batched verify): the two-tile WMMA GEMV, the output head's split q6_k kernel, or 16-row
 // pieces through chooseGemvTile. head_gemvx: WHIRL_HEAD_GEMVX (the head on gemvx too).
 enum class GemvWide : std::uint8_t { gemvx, head_split, pieces };
-GemvWide chooseGemvWide(const MatShape& w0, std::size_t n_mats, const kernels::KernelTable& k, bool head_gemvx);
+GemvWide chooseGemvWide(const MatShape& w0, std::size_t n_mats, const kernels::MatmulKernels& k, bool head_gemvx);
 // smallest batch that takes gemmh_f16 instead of the tuned f16 GEMM (= tune.cpp's candidate rule)
 inline constexpr std::uint32_t gemmh_min = 512;
 
@@ -120,9 +120,9 @@ struct GemmPlan {
 };
 // the tuned choice code for n rows: [0, G) fused gemm_c on the quantized bytes, [G, 2G) dequant + f16 gemm_c,
 // [2G, 2G + S) gemms slot (G = kGemmCfgs.size(), S = kGemmsCfgs.size())
-std::uint32_t precChoice(const MatShape& w, std::uint32_t n, std::uint8_t tuned, const GemmFlags& f, const kernels::KernelTable& k);
+std::uint32_t precChoice(const MatShape& w, std::uint32_t n, std::uint8_t tuned, const GemmFlags& f, const kernels::MatmulKernels& k);
 // w.row_bytes is read (an f16 matrix whose rows are padded is not gemmh's layout)
-GemmPlan chooseGemmF16(const MatShape& w, std::uint32_t n, std::uint8_t tuned, const GemmFlags& f, const kernels::KernelTable& k);
+GemmPlan chooseGemmF16(const MatShape& w, std::uint32_t n, std::uint8_t tuned, const GemmFlags& f, const kernels::MatmulKernels& k);
 
 // ---- MXFP4 x fp8 GEMM (MatmulPath::gemm_fp8; K-2), class fp8_gemm
 struct Gemm8Plan {
@@ -131,7 +131,7 @@ struct Gemm8Plan {
     BitClass bits = BitClass::fp8_gemm;
 };
 // g8t: the fragment-tiled fp8 set (Model::useTiledFp8)
-Gemm8Plan chooseGemm8(std::uint32_t nrows, std::uint32_t n, bool out_h16, bool g8t, const kernels::KernelTable& k);
+Gemm8Plan chooseGemm8(std::uint32_t nrows, std::uint32_t n, bool out_h16, bool g8t, const kernels::MatmulKernels& k);
 std::size_t gemm8Cfg(std::uint32_t n);
 std::size_t gemm8tCfg(std::uint32_t n);
 
