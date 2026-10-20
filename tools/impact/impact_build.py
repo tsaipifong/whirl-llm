@@ -80,7 +80,7 @@ PATHS = {
                           "desc": "HTTP transport, OpenAI protocol, streaming"},
     "load":              {"roots": ["Model::load", "loadOrTune", "Model::autotuneGemm", "Model::checkPreciseDecode"], "metric": "all",
                           "desc": "model load, kernel table, auto-tune, precise self-checks"},
-    "startup":           {"roots": ["serveMain", "gpuPreflight", "diagnose", "delayLoadFailureHook", "requireModelFile", "requirePortFree"],
+    "startup":           {"roots": ["serveMain", "gpuPreflight", "diagnose", "probeTable", "loadOrThrow", "requireModelFile", "requirePortFree"],
                           "metric": None, "depth": 1,
                           "desc": "server composition root, GPU / DLL preflight (packaging)"},
 }
@@ -88,7 +88,8 @@ PATHS = {
 PATH_FILES = {
     "http": ["src/server/http.cpp", "src/server/http.h", "src/server/protocol.cpp", "src/server/protocol.h"],
     "tokenizer": ["src/tokenizer/*", "src/chat/*", "include/whirl/tokenizer.h", "include/whirl/chat*.h", "src/server/tokens.*"],
-    "startup": ["src/release/*", "tools/package_release.ps1", "redist/*", "cmake/release.cmake"],
+    "startup": ["src/release/*", "tools/package_release.ps1", "redist/*", "cmake/release.cmake", "src/hip/runtime_loader.cpp",
+                "src/hip/hip_api.h", "include/whirl/hip_runtime_loader.h", "tests/hiprt/*"],
     "build": ["CMakeLists.txt", "cmake/*.cmake", "build.bat"],
 }
 PATHS.setdefault("tokenizer", {"roots": [], "metric": "all", "desc": "tokenizer, chat template, JSON"})
@@ -120,7 +121,7 @@ RELEASE_STEPS = {
     "cpu_tests": "exe:whirl-tests", "cpu_model": "exe:whirl-model-tests", "cpu_cache": "exe:whirl-cache-tests",
     "cpu_vision": "exe:whirl-vision-tests", "cpu_tier": "exe:whirl-tier-tests", "cpu_server": "exe:whirl-server-tests",
     "cpu_gate_selftest": "tool", "cpu_gate_nosuite": "tool", "cpu_server_only_typo": "tool", "cpu_golden_selftest": "tool",
-    "cpu_golden_xcheck": "tool", "kt_full": "exe:whirl-kernel-test",
+    "cpu_golden_xcheck": "tool", "kt_full": "exe:whirl-kernel-test", "cpu_hiprt": "exe:whirl-hiprt-tests",
 }
 CLI_GATES = {  # GPU gates run through whirl.exe subcommands: their roots are CLI functions (derived reach)
     "golden.single": ["goldenSingle"], "golden.pair": ["goldenPair"], "golden.ngram": ["goldenSingle"],

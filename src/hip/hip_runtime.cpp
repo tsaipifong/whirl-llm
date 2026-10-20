@@ -8,7 +8,7 @@
 #include "whirl/hip.h"
 #include "whirl/vram_limit.h"
 
-#include <hip/hip_runtime_api.h>
+#include "hip_api.h"
 
 #include <algorithm>
 #include <atomic>
@@ -21,6 +21,8 @@
 
 namespace whirl::hip {
 
+using runtime::rt;  // every HIP call goes through the loader's table (ARCH-1 D-1)
+
 namespace {
 
 thread_local const char* g_last_op = "";
@@ -31,7 +33,7 @@ void check(hipError_t st, const char* op) {
     if (st == hipSuccess) return;
     g_last_op = op;
     g_last_code = static_cast<int>(st);
-    throw Error(op, static_cast<int>(st), hipGetErrorString(st));
+    throw Error(op, static_cast<int>(st), rt().hipGetErrorString(st));
 }
 
 void* ptr(DevPtr p) { return reinterpret_cast<void*>(static_cast<std::uintptr_t>(p)); }
@@ -53,14 +55,14 @@ Error::Error(std::string op, int code, std::string message)
 
 const char* lastErrorOp() { return g_last_op; }
 int lastErrorCode() { return g_last_code; }
-std::string errorString(int code) { return hipGetErrorString(static_cast<hipError_t>(code)); }
+std::string errorString(int code) { return rt().hipGetErrorString(static_cast<hipError_t>(code)); }
 
 // ---------------------------------------------------------------------------
 // devices
 
 int deviceCount() {
     int n = 0;
-    hipError_t st = hipGetDeviceCount(&n);
+    hipError_t st = rt().hipGetDeviceCount(&n);
     if (st == hipErrorNoDevice) return 0;
     check(st, "hipGetDeviceCount");
     return n;
@@ -68,7 +70,7 @@ int deviceCount() {
 
 DeviceInfo describeDevice(int index) {
     hipDeviceProp_t p{};
-    check(hipGetDeviceProperties(&p, index), "hipGetDeviceProperties");
+    check(rt().hipGetDeviceProperties(&p, index), "hipGetDeviceProperties");
     DeviceInfo d;
     d.index = index;
     d.name = p.name;
@@ -106,11 +108,11 @@ int findDevice(std::string_view spec) {
     return -1;
 }
 
-void setDevice(int index) { check(hipSetDevice(index), "hipSetDevice"); }
+void setDevice(int index) { check(rt().hipSetDevice(index), "hipSetDevice"); }
 
 int getDevice() {
     int d = 0;
-    check(hipGetDevice(&d), "hipGetDevice");
+    check(rt().hipGetDevice(&d), "hipGetDevice");
     return d;
 }
 
@@ -151,7 +153,7 @@ DevPtr malloc(std::size_t bytes) {
     const std::uint64_t limit = vram::limitBytes();
     if (limit == 0) {
         void* p = nullptr;
-        check(hipMalloc(&p, n), "hipMalloc");
+        check(rt().hipMalloc(&p, n), "hipMalloc");
         return reinterpret_cast<std::uintptr_t>(p);
     }
     VramTrack& t = vramTrack();
@@ -159,7 +161,7 @@ DevPtr malloc(std::size_t bytes) {
     if (!t.init) {
         // cap = the simulated card's free VRAM before this process's first allocation
         std::size_t fr = 0, tot = 0;
-        check(hipMemGetInfo(&fr, &tot), "hipMemGetInfo");
+        check(rt().hipMemGetInfo(&fr, &tot), "hipMemGetInfo");
         t.counter.setCap(std::max<std::uint64_t>(vram::processCap(fr, tot, limit), 1));
         t.init = true;
     }
@@ -172,7 +174,7 @@ DevPtr malloc(std::size_t bytes) {
                                 n / 1048576.0, limit >> 20, t.counter.live() / 1048576.0, t.counter.cap() / 1048576.0));
     }
     void* p = nullptr;
-    const hipError_t st = hipMalloc(&p, n);
+    const hipError_t st = rt().hipMalloc(&p, n);
     if (st != hipSuccess) t.counter.release(n);
     check(st, "hipMalloc");
     t.sizes[reinterpret_cast<std::uintptr_t>(p)] = n;
@@ -181,7 +183,7 @@ DevPtr malloc(std::size_t bytes) {
 
 void free(DevPtr p) {
     if (!p) return;
-    (void)hipFree(ptr(p));
+    (void)rt().hipFree(ptr(p));
     if (vram::limitBytes() == 0) return;
     VramTrack& t = vramTrack();
     std::lock_guard<std::mutex> lk(t.mu);
@@ -193,51 +195,51 @@ void free(DevPtr p) {
 
 void* hostMalloc(std::size_t bytes) {
     void* p = nullptr;
-    check(hipHostMalloc(&p, std::max<std::size_t>(bytes, 1), 0), "hipHostMalloc");
+    check(rt().hipHostMalloc(&p, std::max<std::size_t>(bytes, 1), 0), "hipHostMalloc");
     return p;
 }
 
 void hostFree(void* p) {
-    if (p) (void)hipHostFree(p);
+    if (p) (void)rt().hipHostFree(p);
 }
 
 void upload(DevPtr dst, const void* src, std::size_t bytes) {
-    check(hipMemcpy(ptr(dst), src, bytes, hipMemcpyHostToDevice), "hipMemcpy H2D");
+    check(rt().hipMemcpy(ptr(dst), src, bytes, hipMemcpyHostToDevice), "hipMemcpy H2D");
 }
 
 void download(void* dst, DevPtr src, std::size_t bytes) {
-    check(hipMemcpy(dst, ptr(src), bytes, hipMemcpyDeviceToHost), "hipMemcpy D2H");
+    check(rt().hipMemcpy(dst, ptr(src), bytes, hipMemcpyDeviceToHost), "hipMemcpy D2H");
 }
 
 void uploadAsync(DevPtr dst, const void* src, std::size_t bytes, Stream s) {
-    check(hipMemcpyAsync(ptr(dst), src, bytes, hipMemcpyHostToDevice, strm(s)), "hipMemcpyAsync H2D");
+    check(rt().hipMemcpyAsync(ptr(dst), src, bytes, hipMemcpyHostToDevice, strm(s)), "hipMemcpyAsync H2D");
 }
 
 void downloadAsync(void* dst, DevPtr src, std::size_t bytes, Stream s) {
-    check(hipMemcpyAsync(dst, ptr(src), bytes, hipMemcpyDeviceToHost, strm(s)), "hipMemcpyAsync D2H");
+    check(rt().hipMemcpyAsync(dst, ptr(src), bytes, hipMemcpyDeviceToHost, strm(s)), "hipMemcpyAsync D2H");
 }
 
 void copyAsync(DevPtr dst, DevPtr src, std::size_t bytes, Stream s) {
-    check(hipMemcpyAsync(ptr(dst), ptr(src), bytes, hipMemcpyDeviceToDevice, strm(s)), "hipMemcpyAsync D2D");
+    check(rt().hipMemcpyAsync(ptr(dst), ptr(src), bytes, hipMemcpyDeviceToDevice, strm(s)), "hipMemcpyAsync D2D");
 }
 
 void copyAnyAsync(DevPtr dst, DevPtr src, std::size_t bytes, Stream s) {
-    check(hipMemcpyAsync(ptr(dst), ptr(src), bytes, hipMemcpyDefault, strm(s)), "hipMemcpyAsync default");
+    check(rt().hipMemcpyAsync(ptr(dst), ptr(src), bytes, hipMemcpyDefault, strm(s)), "hipMemcpyAsync default");
 }
 
 void memset(DevPtr dst, int value, std::size_t bytes) {
-    check(hipMemset(ptr(dst), value, bytes), "hipMemset");
+    check(rt().hipMemset(ptr(dst), value, bytes), "hipMemset");
 }
 
 void memsetAsync(DevPtr dst, int value, std::size_t bytes, Stream s) {
-    check(hipMemsetAsync(ptr(dst), value, bytes, strm(s)), "hipMemsetAsync");
+    check(rt().hipMemsetAsync(ptr(dst), value, bytes, strm(s)), "hipMemsetAsync");
 }
 
-void sync() { check(hipDeviceSynchronize(), "hipDeviceSynchronize"); }
+void sync() { check(rt().hipDeviceSynchronize(), "hipDeviceSynchronize"); }
 
 MemInfo memInfo() {
     MemInfo m;
-    check(hipMemGetInfo(&m.free, &m.total), "hipMemGetInfo");
+    check(rt().hipMemGetInfo(&m.free, &m.total), "hipMemGetInfo");
     if (const std::uint64_t limit = vram::limitBytes()) {
         const vram::Clamped c = vram::clampMemInfo(m.free, m.total, limit);
         m.free = static_cast<std::size_t>(c.free);
@@ -252,39 +254,39 @@ MemInfo memInfo() {
 Stream streamCreate(bool non_blocking) {
     hipStream_t s = nullptr;
     if (non_blocking)
-        check(hipStreamCreateWithFlags(&s, hipStreamNonBlocking), "hipStreamCreateWithFlags");
+        check(rt().hipStreamCreateWithFlags(&s, hipStreamNonBlocking), "hipStreamCreateWithFlags");
     else
-        check(hipStreamCreate(&s), "hipStreamCreate");
+        check(rt().hipStreamCreate(&s), "hipStreamCreate");
     return s;
 }
 
 void streamDestroy(Stream s) {
-    if (s) (void)hipStreamDestroy(strm(s));
+    if (s) (void)rt().hipStreamDestroy(strm(s));
 }
 
-void streamSync(Stream s) { check(hipStreamSynchronize(strm(s)), "hipStreamSynchronize"); }
+void streamSync(Stream s) { check(rt().hipStreamSynchronize(strm(s)), "hipStreamSynchronize"); }
 
-void streamWaitEvent(Stream s, Event e) { check(hipStreamWaitEvent(strm(s), evt(e), 0), "hipStreamWaitEvent"); }
+void streamWaitEvent(Stream s, Event e) { check(rt().hipStreamWaitEvent(strm(s), evt(e), 0), "hipStreamWaitEvent"); }
 
 Event eventCreate(bool timing) {
     hipEvent_t e = nullptr;
     if (timing)
-        check(hipEventCreate(&e), "hipEventCreate");
+        check(rt().hipEventCreate(&e), "hipEventCreate");
     else
-        check(hipEventCreateWithFlags(&e, hipEventDisableTiming), "hipEventCreateWithFlags");
+        check(rt().hipEventCreateWithFlags(&e, hipEventDisableTiming), "hipEventCreateWithFlags");
     return e;
 }
 
 void eventDestroy(Event e) {
-    if (e) (void)hipEventDestroy(evt(e));
+    if (e) (void)rt().hipEventDestroy(evt(e));
 }
 
-void eventRecord(Event e, Stream s) { check(hipEventRecord(evt(e), strm(s)), "hipEventRecord"); }
+void eventRecord(Event e, Stream s) { check(rt().hipEventRecord(evt(e), strm(s)), "hipEventRecord"); }
 
-void eventSync(Event e) { check(hipEventSynchronize(evt(e)), "hipEventSynchronize"); }
+void eventSync(Event e) { check(rt().hipEventSynchronize(evt(e)), "hipEventSynchronize"); }
 
 bool eventDone(Event e) {
-    const hipError_t st = hipEventQuery(evt(e));
+    const hipError_t st = rt().hipEventQuery(evt(e));
     if (st == hipSuccess) return true;
     if (st == hipErrorNotReady) return false;
     check(st, "hipEventQuery");
@@ -293,7 +295,7 @@ bool eventDone(Event e) {
 
 float eventElapsedMs(Event start, Event stop) {
     float ms = 0;
-    check(hipEventElapsedTime(&ms, evt(start), evt(stop)), "hipEventElapsedTime");
+    check(rt().hipEventElapsedTime(&ms, evt(start), evt(stop)), "hipEventElapsedTime");
     return ms;
 }
 
@@ -314,28 +316,28 @@ Graph& Graph::operator=(Graph&& o) noexcept {
 Graph::~Graph() { reset(); }
 
 void Graph::reset() {
-    if (exec_) (void)hipGraphExecDestroy(static_cast<hipGraphExec_t>(exec_));
-    if (graph_) (void)hipGraphDestroy(static_cast<hipGraph_t>(graph_));
+    if (exec_) (void)rt().hipGraphExecDestroy(static_cast<hipGraphExec_t>(exec_));
+    if (graph_) (void)rt().hipGraphDestroy(static_cast<hipGraph_t>(graph_));
     graph_ = exec_ = nullptr;
 }
 
 void Graph::beginCapture(Stream s) {
-    check(hipStreamBeginCapture(strm(s), hipStreamCaptureModeThreadLocal), "hipStreamBeginCapture");
+    check(rt().hipStreamBeginCapture(strm(s), hipStreamCaptureModeThreadLocal), "hipStreamBeginCapture");
 }
 
 Graph Graph::endCapture(Stream s) {
     Graph g;
     hipGraph_t graph = nullptr;
-    check(hipStreamEndCapture(strm(s), &graph), "hipStreamEndCapture");
+    check(rt().hipStreamEndCapture(strm(s), &graph), "hipStreamEndCapture");
     g.graph_ = graph;
     hipGraphExec_t exec = nullptr;
-    check(hipGraphInstantiateWithFlags(&exec, graph, 0), "hipGraphInstantiate");
+    check(rt().hipGraphInstantiateWithFlags(&exec, graph, 0), "hipGraphInstantiate");
     g.exec_ = exec;
     return g;
 }
 
 void Graph::launch(Stream s) const {
-    check(hipGraphLaunch(static_cast<hipGraphExec_t>(exec_), strm(s)), "hipGraphLaunch");
+    check(rt().hipGraphLaunch(static_cast<hipGraphExec_t>(exec_), strm(s)), "hipGraphLaunch");
 }
 
 // ---------------------------------------------------------------------------
@@ -349,7 +351,7 @@ const EmbeddedObject* embeddedObjectFor(Arch a) {
 
 Module& Module::operator=(Module&& o) noexcept {
     if (this != &o) {
-        if (handle_) (void)hipModuleUnload(static_cast<hipModule_t>(handle_));
+        if (handle_) (void)rt().hipModuleUnload(static_cast<hipModule_t>(handle_));
         handle_ = std::exchange(o.handle_, nullptr);
         arch_ = o.arch_;
     }
@@ -357,13 +359,13 @@ Module& Module::operator=(Module&& o) noexcept {
 }
 
 Module::~Module() {
-    if (handle_) (void)hipModuleUnload(static_cast<hipModule_t>(handle_));
+    if (handle_) (void)rt().hipModuleUnload(static_cast<hipModule_t>(handle_));
 }
 
 Module Module::loadData(const void* image, Arch arch) {
     Module m;
     hipModule_t h = nullptr;
-    check(hipModuleLoadData(&h, image), "hipModuleLoadData");
+    check(rt().hipModuleLoadData(&h, image), "hipModuleLoadData");
     m.handle_ = h;
     m.arch_ = arch;
     return m;
@@ -381,20 +383,20 @@ Module Module::loadEmbedded() {
 
 Function Module::getFunction(const char* name) const {
     hipFunction_t f = nullptr;
-    const hipError_t st = hipModuleGetFunction(&f, static_cast<hipModule_t>(handle_), name);
+    const hipError_t st = rt().hipModuleGetFunction(&f, static_cast<hipModule_t>(handle_), name);
     if (st != hipSuccess) {
-        (void)hipGetLastError();
+        (void)rt().hipGetLastError();
         g_last_op = "hipModuleGetFunction";
         g_last_code = static_cast<int>(st);
-        throw Error(std::string("hipModuleGetFunction(") + name + ")", static_cast<int>(st), hipGetErrorString(st));
+        throw Error(std::string("hipModuleGetFunction(") + name + ")", static_cast<int>(st), rt().hipGetErrorString(st));
     }
     return f;
 }
 
 Function Module::getFunctionOpt(const char* name) const {
     hipFunction_t f = nullptr;
-    if (hipModuleGetFunction(&f, static_cast<hipModule_t>(handle_), name) != hipSuccess) {
-        (void)hipGetLastError();  // clear the not-found status
+    if (rt().hipModuleGetFunction(&f, static_cast<hipModule_t>(handle_), name) != hipSuccess) {
+        (void)rt().hipGetLastError();  // clear the not-found status
         return nullptr;
     }
     return f;
@@ -403,14 +405,14 @@ Function Module::getFunctionOpt(const char* name) const {
 DevPtr Module::getGlobal(const char* name, std::size_t* bytes) const {
     hipDeviceptr_t p = nullptr;
     std::size_t n = 0;
-    check(hipModuleGetGlobal(&p, &n, static_cast<hipModule_t>(handle_), name), "hipModuleGetGlobal");
+    check(rt().hipModuleGetGlobal(&p, &n, static_cast<hipModule_t>(handle_), name), "hipModuleGetGlobal");
     if (bytes) *bytes = n;
     return reinterpret_cast<std::uintptr_t>(p);
 }
 
 void launchRaw(Function f, Dim3 grid, Dim3 block, unsigned shared_bytes, Stream s, void** params) {
     g_launch_count.fetch_add(1, std::memory_order_relaxed);
-    check(hipModuleLaunchKernel(static_cast<hipFunction_t>(f), grid.x, grid.y, grid.z, block.x, block.y, block.z,
+    check(rt().hipModuleLaunchKernel(static_cast<hipFunction_t>(f), grid.x, grid.y, grid.z, block.x, block.y, block.z,
                                 shared_bytes, strm(s), params, nullptr),
           "hipModuleLaunchKernel");
 }

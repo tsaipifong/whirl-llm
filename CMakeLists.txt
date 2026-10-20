@@ -40,7 +40,7 @@ if(WHIRL_WITH_HIP)
   set(WHIRL_HIP_ROOT "${WHIRL_HIP_ROOT_DEFAULT}" CACHE PATH "HIP SDK root")
   string(REGEX REPLACE "/$" "" WHIRL_HIP_ROOT "${WHIRL_HIP_ROOT}")
   find_program(WHIRL_HIP_CLANG clang PATHS "${WHIRL_HIP_ROOT}/bin" NO_DEFAULT_PATH REQUIRED)
-  find_library(WHIRL_AMDHIP_LIB amdhip64 PATHS "${WHIRL_HIP_ROOT}/lib" NO_DEFAULT_PATH REQUIRED)
+  # no amdhip64.lib: the driver's runtime is loaded at run time (src/hip/runtime_loader.cpp, ARCH-1 D-1)
   message(STATUS "WHIRL: HIP SDK ${WHIRL_HIP_ROOT}, device compiler ${WHIRL_HIP_CLANG}")
 endif()
 
@@ -123,6 +123,13 @@ if(WHIRL_WITH_HIP)
   endforeach()
   configure_file(src/hip/embedded_objects.cpp.in ${CMAKE_BINARY_DIR}/kernels/embedded_objects.cpp @ONLY)
 
+  # HIP runtime loader (ARCH-1 D-1): LoadLibrary + one function table, no import of amdhip64_7.dll.
+  # Its own library so its unit tests (whirl-hiprt-tests) link nothing else.
+  add_library(whirl_hiprt STATIC src/hip/runtime_loader.cpp)
+  target_include_directories(whirl_hiprt PUBLIC ${CMAKE_SOURCE_DIR}/include)
+  target_include_directories(whirl_hiprt SYSTEM PRIVATE "${WHIRL_HIP_ROOT}/include")
+  target_compile_definitions(whirl_hiprt PRIVATE __HIP_PLATFORM_AMD__)
+
   add_library(whirl_hip STATIC
     src/hip/hip_runtime.cpp
     src/hip/wddm_mem.cpp
@@ -133,7 +140,7 @@ if(WHIRL_WITH_HIP)
   target_include_directories(whirl_hip PUBLIC ${CMAKE_SOURCE_DIR}/include)
   target_include_directories(whirl_hip SYSTEM PRIVATE "${WHIRL_HIP_ROOT}/include")
   target_compile_definitions(whirl_hip PRIVATE __HIP_PLATFORM_AMD__)
-  target_link_libraries(whirl_hip PUBLIC "${WHIRL_AMDHIP_LIB}")
+  target_link_libraries(whirl_hip PUBLIC whirl_hiprt)
   if(WIN32)
     target_link_libraries(whirl_hip PUBLIC dxgi pdh)
   endif()
@@ -153,6 +160,29 @@ target_link_libraries(whirl-tests PRIVATE whirl)
 target_sources(whirl-tests PRIVATE src/release/dll_deps.cpp)
 target_include_directories(whirl-tests PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_compile_definitions(whirl-tests PRIVATE WHIRL_TEST_DLL_DEPS=1)
+
+if(WHIRL_WITH_HIP)
+  # HIP runtime loader tests (ARCH-1 D-1): load order, absent / fake DLLs, 126 / 127, a missing HIP function.
+  # The fake runtimes go to a subfolder so neither the test's own folder nor the current folder holds their imports.
+  set(WHIRL_FAKE_HIPRT_DIR "${CMAKE_BINARY_DIR}/hiprt_fakes")
+  add_library(whirl-fake-dep SHARED tests/hiprt/fake_dep.cpp)
+  add_library(whirl-fake-hiprt SHARED tests/hiprt/fake_hiprt.cpp)
+  add_library(whirl-fake-hiprt-drop SHARED tests/hiprt/fake_hiprt.cpp)
+  target_compile_definitions(whirl-fake-hiprt-drop PRIVATE WHIRL_FAKE_DROP_LAST=1)
+  add_library(whirl-fake-hiprt-dep SHARED tests/hiprt/fake_hiprt.cpp)
+  target_compile_definitions(whirl-fake-hiprt-dep PRIVATE WHIRL_FAKE_WITH_DEP=1)
+  target_link_libraries(whirl-fake-hiprt-dep PRIVATE whirl-fake-dep)
+  foreach(t whirl-fake-dep whirl-fake-hiprt whirl-fake-hiprt-drop whirl-fake-hiprt-dep)
+    string(REPLACE "-" "_" n ${t})
+    set_target_properties(${t} PROPERTIES OUTPUT_NAME ${n} RUNTIME_OUTPUT_DIRECTORY "${WHIRL_FAKE_HIPRT_DIR}")
+  endforeach()
+  add_executable(whirl-hiprt-tests tests/hiprt/hiprt_tests.cpp src/release/dll_deps.cpp)
+  target_link_libraries(whirl-hiprt-tests PRIVATE whirl_hiprt)
+  target_include_directories(whirl-hiprt-tests PRIVATE ${CMAKE_SOURCE_DIR}/src)
+  target_include_directories(whirl-hiprt-tests SYSTEM PRIVATE "${WHIRL_HIP_ROOT}/include")
+  target_compile_definitions(whirl-hiprt-tests PRIVATE __HIP_PLATFORM_AMD__)
+  add_dependencies(whirl-hiprt-tests whirl-fake-dep whirl-fake-hiprt whirl-fake-hiprt-drop whirl-fake-hiprt-dep)
+endif()
 
 if(WHIRL_LLAMACPP_SRC)
   add_subdirectory(tests/template_oracle)

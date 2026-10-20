@@ -9,6 +9,7 @@
 #include "whirl/common.h"
 #include "whirl/gguf.h"
 #include "whirl/hip.h"
+#include "whirl/hip_runtime_loader.h"
 #include "whirl/model.h"
 #include "whirl/uma_mem.h"
 #include "whirl/version.h"
@@ -25,8 +26,6 @@
 #include <windows.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
-// after windows.h
-#include <delayimp.h>
 
 namespace whirl::app {
 
@@ -52,26 +51,6 @@ bool isConsole(DWORD std_handle) {
 }
 
 }  // namespace
-
-// A HIP function the driver's runtime does not export (delay-load failure):
-// the driver predates something WHIRL uses.
-FARPROC WINAPI delayLoadFailureHook(unsigned notify, PDelayLoadInfo info) {
-    if (notify == dliFailLoadLib || notify == dliFailGetProc) {
-        const char* dll = info && info->szDll ? info->szDll : "?";
-        if (notify == dliFailLoadLib) {
-            std::fprintf(stderr, "error: the AMD GPU runtime (%s) could not be loaded.\n%s", dll, k_driver_advice);
-        } else {
-            char fn[128] = "?";
-            if (info && info->dlp.fImportByName && info->dlp.szProcName) std::snprintf(fn, sizeof fn, "%s", info->dlp.szProcName);
-            std::fprintf(stderr,
-                         "error: the installed AMD graphics driver is too old: its GPU runtime (%s) has no %s.\n%s", dll, fn,
-                         k_driver_advice);
-        }
-        std::fflush(stderr);
-        ExitProcess(static_cast<UINT>(exit_gpu));
-    }
-    return nullptr;
-}
 
 namespace {
 
@@ -126,22 +105,24 @@ void initConsole() {
 }
 
 int gpuPreflight() {
-    // the same search order the executable's import of the DLL uses
-    const UINT old_mode = SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX);  // no system dialog
-    HMODULE h = LoadLibraryW(L"amdhip64_7.dll");
-    const DWORD err = h == nullptr ? GetLastError() : 0;
-    SetErrorMode(old_mode);
-    if (h == nullptr) {
-        if (err == ERROR_MOD_NOT_FOUND) {
+    // the HIP runtime loader (src/hip/runtime_loader.cpp): the executable's folder, then the standard search
+    // order; every HIP function WHIRL calls is resolved here, before the first HIP call
+    const hip::runtime::LoadResult& r = hip::runtime::load();
+    if (!r.ok) {
+        // a file found in the executable's folder is diagnosed by its path, otherwise by name (searched as before)
+        const std::wstring dll = r.app_local ? r.path : std::wstring(hip::runtime::k_dll);
+        if (!r.missing_symbol.empty()) {
+            // a HIP function the driver's runtime does not export: the driver predates something WHIRL uses
+            std::fprintf(stderr, "error: the installed AMD graphics driver is too old: its GPU runtime (%s) has no %s.\n%s",
+                         k_gpu_runtime_dll, r.missing_symbol.c_str(), k_driver_advice);
+        } else if (r.error == ERROR_MOD_NOT_FOUND) {
             // 126 = the DLL or a DLL it imports is missing: tell them apart and name the missing one
             // (issue #2: the ROCm 10.1 driver's amdhip64_7.dll needs rocm_kpack.dll, which it does not install)
-            std::fputs(dlldeps::message126(k_gpu_runtime_dll, dlldeps::diagnose(L"amdhip64_7.dll"), k_driver_advice).c_str(),
-                       stderr);
-        } else if (err == ERROR_PROC_NOT_FOUND) {
+            std::fputs(dlldeps::message126(k_gpu_runtime_dll, dlldeps::diagnose(dll), k_driver_advice).c_str(), stderr);
+        } else if (r.error == ERROR_PROC_NOT_FOUND) {
             // 127 = a DLL it imports lacks a function: likely a DLL shipped next to whirl.exe
             // (rocm_kpack.dll, the app-local VC++ runtime) shadowing the version a newer driver expects
-            std::fputs(dlldeps::message127(k_gpu_runtime_dll, dlldeps::inspect127(L"amdhip64_7.dll", dlldeps::exeDir())).c_str(),
-                       stderr);
+            std::fputs(dlldeps::message127(k_gpu_runtime_dll, dlldeps::inspect127(dll, dlldeps::exeDir())).c_str(), stderr);
         } else {
             std::fprintf(stderr,
                          "error: the AMD GPU runtime (%s) could not be loaded, so WHIRL cannot use the GPU.\n"
@@ -150,7 +131,6 @@ int gpuPreflight() {
         }
         return exit_gpu;
     }
-    // keep it loaded: the delay-load stub binds to this module
     return exit_ok;
 }
 
@@ -477,7 +457,3 @@ std::string envHelp(unsigned scope) {
 }
 
 }  // namespace whirl::app
-
-// The delay-load failure hook (whirl.exe / whirl-server.exe link amdhip64_7.dll
-// with /DELAYLOAD so that a missing or too old driver gets a message, not a crash).
-extern "C" const PfnDliHook __pfnDliFailureHook2 = whirl::app::delayLoadFailureHook;

@@ -21,6 +21,7 @@
 #include "whirl/dflash_policy.h"
 #include "whirl/gguf.h"
 #include "whirl/hip.h"
+#include "whirl/hip_runtime_loader.h"
 #include "whirl/model.h"
 #include "whirl/tokenizer.h"
 #include "whirl/uma_mem.h"
@@ -505,6 +506,7 @@ int serveMain(int argc, char** argv, const char* program) {
         else
             logI("device {}: {} ({}), {:.1f} GiB VRAM{}", dev, info.name, info.gcn_arch,
                  static_cast<double>(info.total_mem) / (1024.0 * 1024.0 * 1024.0), vram::limitBytes() ? " (simulated limit)" : "");
+        logI("HIP runtime: {}", hip::runtime::describe(hip::runtime::load()));  // the exact DLL loaded (ARCH-1 D-1)
         if (vram::limitBytes()) logI("{}: memory sizes, the WDDM budget and allocations are capped as on a card of that size", vram::limitNote());
         // small cards (< 20 GiB, e.g. a 16 GB RX 9070 XT that also drives the desktop): 1 slot,
         // VRAM headroom for other apps (the KV format is the mode's, as on every card)

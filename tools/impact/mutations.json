@@ -24,6 +24,23 @@
     {"id": "tier-blockhash-constant", "module": "cache.spill", "kind": "replace", "file": "src/tier/kv_tier.cpp",
      "find": "constexpr std::uint64_t m0 = 0xff51afd7ed558ccdull", "replace": "constexpr std::uint64_t m0 = 0xff51afd7ed558ccfull",
      "what": "SSD block hash constant changed (files written by an older build no longer match)",
-     "run": "tier", "expect_test": "whirl-tier-tests:testSsd"}
+     "run": "tier", "expect_test": "whirl-tier-tests:testSsd"},
+    {"id": "hiprt-slot-wrong-symbol", "module": "hip.runtime_loader", "kind": "replace", "file": "src/hip/runtime_loader.cpp",
+     "find": "FARPROC f = GetProcAddress(h, k_names[i]);", "replace": "FARPROC f = GetProcAddress(h, k_names[i == 3 ? 2 : i]);",
+     "what": "one table slot resolved with the wrong export (hipGetDeviceCount bound to hipGetDevice)",
+     "run": "hiprt", "expect_test": "whirl-hiprt-tests:testFakes"},
+    {"id": "hiprt-order-reversed", "module": "hip.runtime_loader", "kind": "replace", "file": "src/hip/runtime_loader.cpp",
+     "find": "    if (!local.empty() && fileExists(local)) {", "replace": "    if (!local.empty() && fileExists(local) && searchPath(dll).empty()) {",
+     "what": "load order reversed: the search path wins over the executable's folder",
+     "run": "hiprt", "expect_test": "whirl-hiprt-tests:testFakes"},
+    {"id": "hiprt-fallback-on-broken-local", "module": "hip.runtime_loader", "kind": "replace", "file": "src/hip/runtime_loader.cpp",
+     "find": "        r.missing_symbol = miss;\n        FreeLibrary(h);\n        return r;",
+     "replace": "        FreeLibrary(h);\n        if (r.app_local) return probeTable(L\"\", dll, out, keep);\n        r.missing_symbol = miss;\n        return r;",
+     "what": "a broken runtime in the executable's folder silently falls back to another copy (no fixed order)",
+     "run": "hiprt", "expect_test": "whirl-hiprt-tests:testFakes"},
+    {"id": "hiprt-missing-symbol-ignored", "module": "hip.runtime_loader", "kind": "replace", "file": "src/hip/runtime_loader.cpp",
+     "find": "        if (!f) return k_names[i];", "replace": "        if (!f) continue;",
+     "what": "a HIP function missing from the runtime is ignored (null slot, crash at its first call)",
+     "run": "hiprt", "expect_test": "whirl-hiprt-tests:testFakes"}
   ]
 }

@@ -1,6 +1,7 @@
 # WHIRL release front-end: version header, Windows resources
 # (VERSIONINFO, icon, application manifest), the shared error-message /
-# help module, and delay-loading of the driver's GPU runtime.
+# help module (the driver's GPU runtime is loaded by src/hip/runtime_loader.cpp,
+# checked first by gpuPreflight()).
 # SPDX-License-Identifier: Apache-2.0
 #
 # Included last from the top-level CMakeLists.txt, so every executable target
@@ -71,12 +72,6 @@ if(WHIRL_WITH_HIP)
     if(TARGET ${t})
       target_link_libraries(${t} PRIVATE whirl_release)
       target_compile_definitions(${t} PRIVATE WHIRL_HAVE_RELEASE=1)
-      if(MSVC)
-        # the driver's GPU runtime is loaded on first use, after a check that it
-        # exists (plain-language message instead of the loader's dialog)
-        target_link_options(${t} PRIVATE /DELAYLOAD:amdhip64_7.dll)
-        target_link_libraries(${t} PRIVATE delayimp)
-      endif()
     endif()
   endforeach()
 

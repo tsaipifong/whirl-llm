@@ -15,6 +15,7 @@
 #include "whirl/dflash_policy.h"
 #include "whirl/gguf.h"
 #include "whirl/hip.h"
+#include "whirl/hip_runtime_loader.h"
 #include "whirl/model.h"
 #include "whirl/prefill_schedule.h"
 #include "whirl/tokenizer.h"
@@ -1041,7 +1042,9 @@ int selectDevice(const Args& a, std::string* info_line) {
         dev = q::pickDevice(a.get("--device") ? *a.get("--device") : std::string());
     const hip::DeviceInfo info = hip::describeDevice(dev);
     hip::setDevice(dev);
-    if (info_line) *info_line = fmt("  whirl build, device %d: %s (%s)\n", dev, info.name.c_str(), info.gcn_arch.c_str());
+    if (info_line)
+        *info_line = fmt("  whirl build, device %d: %s (%s)\n", dev, info.name.c_str(), info.gcn_arch.c_str()) +
+                     fmt("  HIP runtime: %s\n", hip::runtime::describe(hip::runtime::load()).c_str());  // the exact DLL loaded
     return dev;
 }
 

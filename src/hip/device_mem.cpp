@@ -9,7 +9,7 @@
 
 #include "whirl/hip.h"
 
-#include <hip/hip_runtime_api.h>
+#include "hip_api.h"
 
 #include <cstdio>
 #include <cstring>
@@ -27,15 +27,17 @@
 
 namespace whirl::hip {
 
+using runtime::rt;  // every HIP call goes through the loader's table (ARCH-1 D-1)
+
 namespace {
 
 #ifdef _WIN32
 // this process's "GPU Process Memory" counters on the current adapter
 bool readPdh(std::uint64_t& dedicated, std::uint64_t& shared) {
     int dev = 0;
-    if (hipGetDevice(&dev) != hipSuccess) return false;
+    if (rt().hipGetDevice(&dev) != hipSuccess) return false;
     hipDeviceProp_t prop{};
-    if (hipGetDeviceProperties(&prop, dev) != hipSuccess) return false;
+    if (rt().hipGetDeviceProperties(&prop, dev) != hipSuccess) return false;
     LUID luid{};
     static_assert(sizeof(luid) == sizeof(prop.luid));
     std::memcpy(&luid, prop.luid, sizeof(luid));

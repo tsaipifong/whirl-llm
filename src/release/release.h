@@ -41,10 +41,11 @@ std::string versionText(std::string_view program);       // multi-line text for 
 // back at exit). Redirected output is not affected (it is UTF-8 bytes either way).
 void initConsole();
 
-// Checks that the AMD GPU runtime of the graphics driver (amdhip64_7.dll) can be
-// loaded before any HIP call. Returns exit_ok, or prints a plain-language message
-// and returns exit_gpu. Also installs the handler for a driver that lacks a HIP
-// function WHIRL uses (an older driver): message + exit_gpu instead of a crash.
+// Loads the AMD GPU runtime of the graphics driver (amdhip64_7.dll) through the
+// HIP runtime loader (whirl/hip_runtime_loader.h) before any HIP call. Returns
+// exit_ok, or prints a plain-language message and returns exit_gpu: the DLL or
+// one of its imports missing (126, dll_deps names it), an import lacking a
+// function (127), or a driver too old to export a HIP function WHIRL uses.
 int gpuPreflight();
 
 // Throws UserError(exit_model) when the model file does not exist / is a directory.

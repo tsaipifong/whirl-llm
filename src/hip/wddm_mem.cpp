@@ -7,7 +7,7 @@
 #include "whirl/hip.h"
 #include "whirl/vram_limit.h"
 
-#include <hip/hip_runtime_api.h>
+#include "hip_api.h"
 
 #include <cstring>
 
@@ -24,13 +24,15 @@
 
 namespace whirl::hip {
 
+using runtime::rt;  // every HIP call goes through the loader's table (ARCH-1 D-1)
+
 WddmMemInfo wddmMemInfo() {
     WddmMemInfo r;
 #ifdef _WIN32
     int dev = 0;
-    if (hipGetDevice(&dev) != hipSuccess) return r;
+    if (rt().hipGetDevice(&dev) != hipSuccess) return r;
     hipDeviceProp_t prop{};
-    if (hipGetDeviceProperties(&prop, dev) != hipSuccess) return r;
+    if (rt().hipGetDeviceProperties(&prop, dev) != hipSuccess) return r;
     IDXGIFactory1* fac = nullptr;
     if (FAILED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&fac))) || !fac) return r;
     for (UINT i = 0;; ++i) {
