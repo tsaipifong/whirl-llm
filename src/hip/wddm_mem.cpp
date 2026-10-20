@@ -66,13 +66,12 @@ WddmMemInfo wddmMemInfo() {
     return r;
 }
 
-GpuOthers gpuOthers() {
+GpuOthers gpuOthers(int dev) {
     GpuOthers r;
 #ifdef _WIN32
     const auto t0 = std::chrono::steady_clock::now();
-    int dev = 0;
     hipDeviceProp_t prop{};
-    if (hipGetDevice(&dev) == hipSuccess && hipGetDeviceProperties(&prop, dev) == hipSuccess) {
+    if (hipGetDeviceProperties(&prop, dev) == hipSuccess) {
         LUID luid{};
         static_assert(sizeof(luid) == sizeof(prop.luid));
         std::memcpy(&luid, prop.luid, sizeof(luid));

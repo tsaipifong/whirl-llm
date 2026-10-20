@@ -76,8 +76,8 @@ std::optional<Event> Watch::check(const Sample& s, double now_s) {
                            "moved part of WHIRL's GPU buffers to system RAM (shared GPU memory +{:.0f} MiB since startup).",
                            (s.local_usage - s.local_budget) / gib, grow / mib);
     else if (over)
-        what = std::format("WHIRL's GPU memory is {:.2f} GiB over the Windows video memory (WDDM) budget, so Windows can move "
-                           "part of WHIRL's GPU buffers to system RAM at any time.",
+        what = std::format("WHIRL's GPU memory is {:.2f} GiB over the Windows video memory (WDDM) budget, so Windows can page "
+                           "part of WHIRL's GPU buffers out of VRAM (this can happen before the shared GPU memory number grows).",
                            (s.local_usage - s.local_budget) / gib);
     else
         what = std::format("WHIRL's shared GPU memory grew by {:.0f} MiB since startup: Windows has likely moved part of WHIRL's "
@@ -85,9 +85,10 @@ std::optional<Event> Watch::check(const Sample& s, double now_s) {
                            "programs use the GPU).",
                            grow / mib);
     // (2) the consequence, (3) what to do, (4) the numbers
-    const char* effect = grown ? "Generation slows down if those buffers are used at every step: decode can become several times "
-                                 "slower."
-                               : "Generation slows down as soon as it does: decode can become several times slower.";
+    // R9700 test (rel0221): 0.37 GiB over the budget with shared unchanged, decode fell from ~119 to 10-20 tok/s
+    const char* effect = over ? "Generation is likely slower now: decode can become several times slower."
+                              : "Generation slows down if those buffers are used at every step: decode can become several times "
+                                "slower.";
     std::string head = repeat ? std::format("GPU memory spill continues ({} so far): ", duration(now_s - spill_t0_))
                               : std::string("GPU memory spill: ");
     // restarting re-reads the budget (the pool is sized from it); the margin variable keeps more room for other

@@ -32,6 +32,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <future>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -527,31 +528,43 @@ int serveMain(int argc, char** argv, const char* program) {
             opt.parallel = card.parallel;
             if (!card.note.empty()) logI("{}", card.note);
         }
-        // v0.2.2.1 (owner 2026-10-21): what other processes already use on this GPU, before WHIRL loads anything;
-        // the WDDM budget margin grows with it and with a monitor on the card (poolbudget::defaultMargin)
-        const hip::GpuOthers others0 = hip::gpuOthers();
-        const char* const display0 = others0.display_known ? (others0.display ? "yes" : "no") : "unknown";
-        if (others0.ok)
-            logI("other processes use {:.2f} GiB of VRAM on this GPU (display attached: {}) (adapter {:.2f} GiB, this process {:.2f} "
-                 "GiB; read in {:.1f} ms)",
-                 others0.others / 1073741824.0, display0, others0.adapter_dedicated / 1073741824.0,
-                 others0.own_dedicated / 1073741824.0, others0.cost_us / 1000.0);
-        else
-            logI("other processes' VRAM on this GPU: unknown (GPU performance counters not readable; display attached: {}); the "
-                 "WDDM budget margin uses the budget-only rule ({:.1f} ms)",
-                 display0, others0.cost_us / 1000.0);
+        // v0.2.2.1 (owner 2026-10-21): what other processes already use on this GPU, read as WHIRL starts (on a
+        // helper thread while the tokenizer and the template load: the first PDH query takes ~0.2 s; this process's
+        // own usage is read in the same collection and subtracted); the WDDM budget margin grows with it and with a
+        // monitor on the card (poolbudget::defaultMargin)
+        std::future<hip::GpuOthers> others_f = std::async(std::launch::async, [dev] { return hip::gpuOthers(dev); });
+        const auto t_oth = Clock::now();
+        std::optional<hip::GpuOthers> others_v;
+        const auto othersNow = [&]() -> const hip::GpuOthers& {
+            if (!others_v) {
+                others_v = others_f.get();
+                const hip::GpuOthers& o = *others_v;
+                const char* const disp = o.display_known ? (o.display ? "yes" : "no") : "unknown";
+                if (o.ok)
+                    logI("other processes use {:.2f} GiB of VRAM on this GPU (display attached: {}) (adapter {:.2f} GiB, this process "
+                         "{:.2f} GiB; read in {:.0f} ms, waited {:.0f} ms)",
+                         o.others / 1073741824.0, disp, o.adapter_dedicated / 1073741824.0, o.own_dedicated / 1073741824.0,
+                         o.cost_us / 1000.0, msSince(t_oth) > o.cost_us / 1000.0 ? 0.0 : o.cost_us / 1000.0 - msSince(t_oth));
+                else
+                    logI("other processes' VRAM on this GPU: unknown (GPU performance counters not readable; display attached: {}); "
+                         "the WDDM budget margin uses the budget-only rule ({:.0f} ms)",
+                         disp, o.cost_us / 1000.0);
+            }
+            return *others_v;
+        };
         // the margin kept free under the WDDM local budget (pool sizing, the re-check after allocation)
         const bool margin_explicit = env("POOL_BUDGET_MARGIN_MB").has_value();
         const auto budgetMargin = [&](std::uint64_t budget) {
             if (margin_explicit)
                 return poolbudget::Margin{static_cast<std::uint64_t>(envU32("POOL_BUDGET_MARGIN_MB", 0)) << 20,
                                           "WHIRL_POOL_BUDGET_MARGIN_MB"};
+            const hip::GpuOthers& o = othersNow();
             poolbudget::MarginIn mi;
             mi.local_budget = budget;
             mi.moe = cfg.moe;
-            mi.others_known = others0.ok;
-            mi.others = others0.others;
-            mi.display = others0.display_known && others0.display;
+            mi.others_known = o.ok;
+            mi.others = o.others;
+            mi.display = o.display_known && o.display;
             return poolbudget::defaultMargin(mi);
         };
 
@@ -1254,15 +1267,21 @@ int serveMain(int argc, char** argv, const char* program) {
                 for (int round = 0; round < 3; ++round) {
                     hip::WddmMemInfo wa = hip::wddmMemInfo();
                     if (!wa.ok) break;
-                    if (round > 0 && !poolbudget::usageFell(prev_usage, wa.local_usage, prev_freed)) {
-                        for (int i = 0; i < 10 && !poolbudget::usageFell(prev_usage, wa.local_usage, prev_freed); ++i) {
+                    if (round > 0) {
+                        // the WDDM usage follows a free over ~0.1-0.3 s (R9700: 2.67 GiB freed, 1.78 GiB seen at once, the
+                        // rest later): wait until it has fallen and two reads 50 ms apart agree (at most 1 s), so the next
+                        // round is computed from settled numbers and does not shrink the pool further than needed
+                        std::uint64_t last = wa.local_usage;
+                        for (int i = 0; i < 20 && wa.ok; ++i) {
                             std::this_thread::sleep_for(std::chrono::milliseconds(50));
                             wa = hip::wddmMemInfo();
+                            if (wa.ok && wa.local_usage == last && poolbudget::usageFell(prev_usage, wa.local_usage, prev_freed)) break;
+                            last = wa.local_usage;
                         }
                         if (!wa.ok) break;
                         if (!poolbudget::usageFell(prev_usage, wa.local_usage, prev_freed)) {
                             logW("kv pool check: local usage {:.2f} -> {:.2f} GiB after freeing {:.2f} GiB of KV pool (the WDDM "
-                                 "numbers did not follow within 0.5 s); not shrinking further",
+                                 "numbers did not follow within 1 s); not shrinking further",
                                  prev_usage / 1073741824.0, wa.local_usage / 1073741824.0, prev_freed / 1073741824.0);
                             break;
                         }
@@ -1626,10 +1645,10 @@ int serveMain(int argc, char** argv, const char* program) {
             },
             !is_uma, wddm0.ok ? std::optional<wddmwatch::Sample>(vram_base) : std::nullopt, vram_cfg, startup_spill,
             // what other processes use on the GPU, read only when a spill warning is printed (one PDH read)
-            [others0]() -> std::optional<wddmwatch::Others> {
-                const hip::GpuOthers o = hip::gpuOthers();
+            [dev, o0 = othersNow()]() -> std::optional<wddmwatch::Others> {
+                const hip::GpuOthers o = hip::gpuOthers(dev);
                 if (!o.ok) return std::nullopt;
-                return wddmwatch::Others{o.others, others0.ok ? std::optional<std::uint64_t>(others0.others) : std::nullopt};
+                return wddmwatch::Others{o.others, o0.ok ? std::optional<std::uint64_t>(o0.others) : std::nullopt};
             });
         HttpOptions ho;
         ho.cors_origins = opt.cors_origins;

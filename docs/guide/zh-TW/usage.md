@@ -2,7 +2,7 @@
 
 # 使用參考：`whirl` 與 `whirl-server`
 
-本頁列出 WHIRL 0.2.2 的每一個指令、選項、環境變數與伺服器端點。內容依發行版執行檔的內建說明
+本頁列出 WHIRL 0.2.2.1 的每一個指令、選項、環境變數與伺服器端點。內容依發行版執行檔的內建說明
 （`whirl --help`、`whirl <指令> --help`、`whirl help env`、`whirl-server --help`）整理；若有出入，以你手上
 執行檔的說明文字為準。
 
@@ -187,7 +187,7 @@ whirl serve  MODEL.gguf [選項]      （同一支程式）
 | `--alias NAME` | `/v1/models` 回報的模型 id（預設：去掉 `.gguf` 的檔名） |
 | `--device D` | GPU：`r9700`、`8060s`、裝置索引，或名稱 / gfx 子字串（預設同 `chat`） |
 | `-np`、`--parallel N` | 同時處理的請求 slot 數（continuous batching），1～16，預設 4（VRAM 小於 20 GiB 的卡預設 1，見 `WHIRL_VRAM_HEADROOM_MB`） |
-| `-c`、`--ctx N` | 共用 KV 池的大小（token）。slot 依需要取用分頁；池滿時，閒置 slot 的前綴快取依最久未使用（LRU）逐出。預設：權重與緩衝區之後剩下的全部 VRAM 減 768 MiB（MoE：1.5 GiB） |
+| `-c`、`--ctx N` | 共用 KV 池的大小（token）。slot 依需要取用分頁；池滿時，閒置 slot 的前綴快取依最久未使用（LRU）逐出。預設：權重與緩衝區之後剩下的全部 VRAM，減去可用 VRAM 的 768 MiB（MoE：1.5 GiB），並在 Windows（WDDM）預算之下替其他程式留 margin（`WHIRL_POOL_BUDGET_MARGIN_MB`）；Radeon 8060S 上為 262144 |
 | `--ctx-per-slot N` | 單一請求的最長 context（預設 min(池大小, 131072)；最多 262144） |
 | `--precise` / `--balance` / `--fast` / `--mode M` | 數值模式（預設 balance；`--precise`：f16 KV；f16 池放不下一個完整請求時，會降低每個請求的 context 並警告；若有指定 `--ctx` / `--ctx-per-slot` 則拒絕啟動）。見[數值模式](#modes) |
 | `--mtp-drafts N` | 每回合固定的 MTP 草稿數，1～10（預設：依模型類型由成本模型決定） |
@@ -234,7 +234,7 @@ base URL `http://127.0.0.1:8080/v1`。任何 API key 都接受（沒有身分驗
 | `GET /v1/models` | 已載入的那一個模型（id = `--alias`）；`meta.n_ctx` 為每個 slot 的 context |
 | `GET /health` | 忙碌時也會立刻回應；回報忙碌狀態與佇列長度 |
 | `GET /props`（也接受 `/v1/props`） | 唯讀，llama.cpp server 形式的子集，供會自動偵測 context 長度的客戶端使用：`default_generation_settings.n_ctx`（每個 slot 的 context）、`default_generation_settings.model` 與 `model_alias`（= `--alias`）、`total_slots`、`model_path`（只有檔名，絕不含目錄）、`modalities`、`build_info` |
-| `GET /version` | `{"version":"0.2.2","name":"whirl"}` |
+| `GET /version` | `{"version":"0.2.2.1","name":"whirl"}` |
 | `OPTIONS`（CORS preflight） | 支援（允許的來源見 `--cors-origin`） |
 
 LM Studio（`/api/v1/models`）與 Ollama（`/api/tags`、`/api/show`、`/api/version`）的原生端點不模擬
@@ -427,8 +427,9 @@ PowerShell 中先用 `$env:WHIRL_MODE = "precise"` 設定再啟動程式。**一
 | `WHIRL_SYS_CKPTS=N` | 保留在 VRAM 的共用前綴檢查點數（預設 2） |
 | `WHIRL_SYS_LCP=0` | 不在多個 session 共同的前綴處建立檢查點 |
 | `WHIRL_CKPT_HOST=1` | 前綴檢查點放在 pinned 主記憶體，不放 VRAM |
-| `WHIRL_POOL_RESERVE_MB=N` | 決定 KV 池大小時保留不用的 VRAM（預設 768，MoE 1536） |
-| `WHIRL_VRAM_HEADROOM_MB=N` | 在上述保留之外，再留給桌面與其他程式的 VRAM。VRAM 小於 20 GiB 的卡（16 GB 的 RX 9070／9070 XT／9060 XT，通常同時負責顯示）預設 1536，這類卡的伺服器也預設 `--parallel 1`（KV 格式跟其他卡一樣由模式決定）；20 GiB 以上的卡預設 0，行為不變。0 = 不保留 |
+| `WHIRL_POOL_BUDGET_MARGIN_MB=N` | 決定 KV 池大小與事後重查時，在 Windows（WDDM）顯示記憶體預算之下留給其他程式的空間。預設取最大者：2048 MiB（GPU 接螢幕時 3072）、啟動時其他行程在 GPU 上的用量、預算的 6% |
+| `WHIRL_POOL_RESERVE_MB=N` | 舊的「只看可用 VRAM」規則：決定 KV 池大小時保留不用的 VRAM，同時關掉 WDDM 預算、margin 與池重查（預設保留 768，MoE 1536）。要替其他程式多留空間，請用 `WHIRL_POOL_BUDGET_MARGIN_MB` |
+| `WHIRL_VRAM_HEADROOM_MB=N` | 在保留量與 WDDM margin 之外，再額外留給桌面與其他程式的 VRAM。預設 0（0.2.2.1 起由 WDDM margin 涵蓋桌面：接螢幕時 3 GiB；之前 VRAM 小於 20 GiB 的卡預設 1536）。VRAM 小於 20 GiB 的卡（16 GB 的 RX 9070／9070 XT／9060 XT）仍預設 `--parallel 1`（KV 格式跟其他卡一樣由模式決定） |
 | `WHIRL_PREFILL_CHUNK=N` | 合併後單次 prefill forward 的最多列數（1024 的倍數，預設 2048，Radeon 8060S 上 MoE 模型為 4096；上限為 prefill batch） |
 | `WHIRL_SEG_PREFILL=0` | 每個請求各自 prefill，不把多個請求放進同一次 forward |
 | `WHIRL_GATHER_MS=MS` | 收集一波新請求的等待時間窗（預設 30，0 = 關閉） |

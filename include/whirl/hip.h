@@ -115,14 +115,15 @@ WddmMemInfo wddmMemInfo();
 // Dedicated Usage" minus this process's "GPU Process Memory(pid_P_luid_..._phys_0) Dedicated Usage",
 // read in one PDH collection; display = DXGI EnumOutputs finds a monitor on this adapter (a desktop on
 // the card grows with what the user opens). ok = false off Windows or when the counters cannot be read
-// (display_known can still be true). cost_us: what the call took.
+// (display_known can still be true). cost_us: what the call took (the first PDH query of a process takes
+// ~0.2 s, later ones a few ms). dev: the HIP device index (explicit: the server calls it on a helper thread).
 struct GpuOthers {
     bool ok = false;
     std::uint64_t adapter_dedicated = 0, own_dedicated = 0, others = 0;
     bool display_known = false, display = false;
     double cost_us = 0;
 };
-GpuOthers gpuOthers();
+GpuOthers gpuOthers(int dev);
 
 // ---- streams and events
 // Blocking streams order with the legacy null stream; non-blocking ones do not.

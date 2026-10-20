@@ -2,7 +2,7 @@
 
 # Usage reference: `whirl` and `whirl-server`
 
-This page lists every command, option, environment variable and server endpoint of WHIRL 0.2.2.
+This page lists every command, option, environment variable and server endpoint of WHIRL 0.2.2.1.
 It was written from the built-in help of the release executables (`whirl --help`,
 `whirl <command> --help`, `whirl help env`, `whirl-server --help`); when in doubt, the help text of
 your own executable is authoritative.
@@ -225,7 +225,7 @@ request slots, a prefix cache in VRAM and host RAM / SSD tiers for idle sessions
 | `--alias NAME` | model id reported by `/v1/models` (default: the file name without `.gguf`) |
 | `--device D` | GPU: `r9700`, `8060s`, a device index, or a name / gfx substring (default as for `chat`) |
 | `-np`, `--parallel N` | concurrent request slots (continuous batching), 1–16, default 4 (1 on cards with less than 20 GiB of VRAM, see `WHIRL_VRAM_HEADROOM_MB`) |
-| `-c`, `--ctx N` | size of the shared KV pool in tokens. Slots take pages on demand; when the pool is full, idle slots' prefix caches are evicted (least recently used first). Default: all VRAM left after weights and buffers minus 768 MiB (MoE: 1.5 GiB) |
+| `-c`, `--ctx N` | size of the shared KV pool in tokens. Slots take pages on demand; when the pool is full, idle slots' prefix caches are evicted (least recently used first). Default: all VRAM left after weights and buffers, minus 768 MiB (MoE: 1.5 GiB) of the free VRAM and a margin for other programs under the Windows (WDDM) budget (`WHIRL_POOL_BUDGET_MARGIN_MB`); 262144 on the Radeon 8060S |
 | `--ctx-per-slot N` | longest context of one request (default min(pool, 131072); up to 262144) |
 | `--precise` / `--balance` / `--fast` / `--mode M` | numerics mode (default balance; `--precise`: f16 KV; when the f16 pool cannot hold a full request the context per request is lowered with a warning, or the server refuses to start if `--ctx` / `--ctx-per-slot` was given). See [numerics modes](#modes) |
 | `--mtp-drafts N` | fixed MTP drafts per cycle, 1–10 (default: chosen per model type by a cost model) |
@@ -302,7 +302,7 @@ Base URL `http://127.0.0.1:8080/v1`. Any API key is accepted (there is no authen
 | `GET /v1/models` | the one loaded model (id = `--alias`); `meta.n_ctx` is the context per slot |
 | `GET /health` | answers immediately even while busy; reports the busy state and queue length |
 | `GET /props` (also `/v1/props`) | read-only, llama.cpp-server-style subset for clients that auto-detect the context length: `default_generation_settings.n_ctx` (context per slot), `default_generation_settings.model` and `model_alias` (= `--alias`), `total_slots`, `model_path` (file name only, never a directory), `modalities`, `build_info` |
-| `GET /version` | `{"version":"0.2.2","name":"whirl"}` |
+| `GET /version` | `{"version":"0.2.2.1","name":"whirl"}` |
 | `OPTIONS` (CORS preflight) | supported (allowed origins: see `--cors-origin`) |
 
 LM Studio (`/api/v1/models`) and Ollama (`/api/tags`, `/api/show`, `/api/version`) native endpoints
@@ -563,8 +563,9 @@ The output always equals plain greedy decoding (with sampling: the same distribu
 | `WHIRL_SYS_CKPTS=N` | shared prefix checkpoints kept in VRAM (default 2) |
 | `WHIRL_SYS_LCP=0` | no checkpoints at prefixes common to sessions |
 | `WHIRL_CKPT_HOST=1` | keep prefix checkpoints in pinned host memory instead of VRAM |
-| `WHIRL_POOL_RESERVE_MB=N` | VRAM left free when the KV pool is sized (default 768, MoE 1536) |
-| `WHIRL_VRAM_HEADROOM_MB=N` | VRAM kept free for the desktop and other programs, on top of the reserve. Default 1536 on cards with less than 20 GiB (16 GB RX 9070 / 9070 XT / 9060 XT, which usually also drive the display), where the server also defaults to `--parallel 1` (the KV format is the mode's, as on any card); 0 on larger cards, whose defaults are unchanged. 0 = no headroom |
+| `WHIRL_POOL_BUDGET_MARGIN_MB=N` | room kept free under the Windows (WDDM) video memory budget for other programs when the KV pool is sized and re-checked. Default: the largest of 2048 MiB (3072 when a monitor is attached to the GPU), what other processes use on the GPU at startup, and 6% of the budget |
+| `WHIRL_POOL_RESERVE_MB=N` | old free-VRAM-only rule: VRAM left free when the KV pool is sized, with the WDDM budget, its margin and the pool re-check turned off (default reserve 768, MoE 1536). To keep more room for other programs, use `WHIRL_POOL_BUDGET_MARGIN_MB` |
+| `WHIRL_VRAM_HEADROOM_MB=N` | extra VRAM kept free for the desktop and other programs, on top of the reserve and the WDDM margin. Default 0 (since 0.2.2.1 the WDDM margin covers the desktop: 3 GiB when a monitor is attached; it was 1536 on cards with less than 20 GiB). Cards with less than 20 GiB (16 GB RX 9070 / 9070 XT / 9060 XT) still default to `--parallel 1` (the KV format is the mode's, as on any card) |
 | `WHIRL_PREFILL_CHUNK=N` | most rows per merged prefill forward (multiple of 1024, default 2048, Radeon 8060S MoE models 4096; capped at the prefill batch) |
 | `WHIRL_SEG_PREFILL=0` | prefill each request on its own instead of several in one forward |
 | `WHIRL_GATHER_MS=MS` | window to gather a burst of new requests (default 30, 0 = off) |

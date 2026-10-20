@@ -43,7 +43,8 @@ Useful environment variables (all of them: [usage.md](../../usage.md#env)):
 | Variable | Effect |
 |---|---|
 | `WHIRL_KV=auto\|f16\|q8\|q8h\|q8v` | KV format; `auto` applies the floor rule ([kv-and-caching.md](kv-and-caching.md#kv-auto)) |
-| `WHIRL_POOL_RESERVE_MB` | VRAM reserve after the pool (default 768 dense / 1536 MoE) |
+| `WHIRL_POOL_BUDGET_MARGIN_MB` | room kept free under the WDDM budget for other programs (default: the largest of 2 GiB, 3 GiB with a monitor on the GPU, other processes' VRAM at startup, 6% of the budget; [details](#vram-log)) |
+| `WHIRL_POOL_RESERVE_MB` | old free-VRAM-only rule: VRAM reserve after the pool, WDDM budget not applied (default reserve 768 dense / 1536 MoE under the free VRAM) |
 | `WHIRL_NO_PREFIX_CACHE=1` | disable prefix caching |
 | `WHIRL_PREFIX_CACHE_VERIFY=1` | after every cache hit, re-prefill and compare logits (diagnostic) |
 | `WHIRL_SERVE_CKPTS` | checkpoints per slot (default 4 with one slot, 3 up to 4 slots, else 1; at most 8) |
@@ -318,41 +319,60 @@ an idle `kv tier |` summary; `vision:` lines for image input.
 ### <a id="vram-log"></a>Video memory while it runs (`vram`, "GPU memory spill")
 
 Decode that gets several times slower in a long session (GPU usage still 100%, GPU power down) is
-often Windows moving part of WHIRL's GPU memory to system RAM. These lines show whether that is
-happening:
+often Windows moving part of WHIRL's GPU memory to system RAM. WHIRL sizes its KV pool to stay inside
+the Windows (WDDM) video memory budget, and these lines show whether it still does:
 
-- `vram watch:` at startup, after everything is allocated: the baseline, and the cost of one sample.
+- `other processes use X GiB of VRAM on this GPU (display attached: yes/no)` at startup: what other
+  programs (desktop, browser, other AI tools, Docker) hold on the same GPU when the server starts.
+- `kv pool sizing: ... margin N MiB (...)`: the room kept free under the WDDM budget for other programs.
+  By default it is the largest of 2 GiB (3 GiB when a monitor is attached to this GPU), what other
+  processes use on it at startup, and 6% of the budget. `WHIRL_POOL_BUDGET_MARGIN_MB=N` sets it.
+  The budget Windows reports when the server starts does not always count other programs yet: on an
+  R9700 with another process holding 3.3 GiB, it read 31.02 GiB before the pool was allocated and
+  28.08 GiB right after.
+- `kv pool check:` right after the KV pool is allocated: the budget is read again; when WHIRL's usage
+  plus the margin no longer fits, the pool is made smaller (whole pages, before any request) so WHIRL
+  starts inside VRAM. It waits for the WDDM numbers to settle after each free (at most 1 s), so it does
+  not shrink more than needed. Output is unchanged; only fewer tokens fit in the pool. With an explicit
+  `-c` or `WHIRL_POOL_RESERVE_MB` the pool is not resized; a warning says how many tokens would fit.
+  An explicit `--ctx-per-slot` that no longer fits refuses to start (as it does when it does not fit
+  at sizing); a default per-request context is lowered with a warning.
+- `vram watch:` after everything is allocated: the numbers, and the cost of one sample (about 0.3 ms
+  on the R9700).
 - Every `batch |` status line (about every 5 s while a request runs) ends with
   `| vram local X / budget Y GiB, shared Z MiB (+D MiB since start), ram R GiB (pinned P GiB)`, and
-  each request end adds a `req N | slot S | vram ...` line next to its `finish_reason` line.
+  each request end adds a `req N | slot S | vram ...` line next to its `finish_reason` line. While
+  idle the server takes one sample a minute (no line unless a spill starts or ends), so `/health`
+  stays current.
   - `local` is WHIRL's GPU memory in VRAM, `budget` the share of VRAM Windows lets WHIRL keep there
     right now (it drops when other programs use the GPU).
   - `shared` is WHIRL's "Shared GPU memory" (Task Manager > GPU): GPU buffers that live in system RAM.
     Part of it is there from the start on purpose (pinned host memory such as the RAM tier of the
-    prefix cache), so what matters is the growth since start (`+D MiB`). Growth beyond the pinned
-    memory WHIRL itself allocated later means Windows moved GPU buffers out of VRAM: every access to
-    them crosses PCIe, and decode slows down.
+    prefix cache), so what matters is the growth since the KV pool was sized (`+D MiB`). Growth beyond
+    the pinned memory WHIRL itself allocated later likely means Windows moved GPU buffers out of VRAM:
+    every access to them crosses PCIe, and decode slows down when they are used at every step.
   - `ram` is the process working set, `pinned` the pinned host memory WHIRL allocated.
 - `W GPU memory spill: ...` when local usage goes over the budget or shared grows by more than
-  256 MiB since start (not counting pinned memory WHIRL allocated since): what happened, that
-  generation is getting slower, what to do (close other programs that use the GPU; restart with a
-  smaller `-c`, `--parallel 1` or a larger `WHIRL_POOL_RESERVE_MB`), and the numbers. While it lasts
-  it repeats at most once a minute (`GPU memory spill continues (N so far)`); `I GPU memory spill is
-  over` when it ends.
+  256 MiB since the pool was sized (not counting pinned memory WHIRL allocated since): what happened,
+  what it does to generation, what to do (close other programs that use the GPU; or restart the
+  server, which sizes the pool from the budget at startup, with `WHIRL_POOL_BUDGET_MARGIN_MB=4096` or
+  more to keep more room for other programs), the pool size, how much VRAM other programs use now and
+  at startup, and the numbers. The same text is printed at startup when the spill is already there.
+  While it lasts it repeats at most once a minute (`GPU memory spill continues (N so far)`);
+  `I GPU memory spill is over` when it ends.
 - `req N | slot S | decode slowed from X to Y tok/s (...)` once per request when a window of its
-  decode is more than 40% slower than its first 200 tokens; with the spill present it is a warning
-  that names the spill as the likely cause, otherwise an info line (with "each cycle is not slower"
-  when the drop comes from fewer accepted drafts rather than slower cycles).
-
-- `kv pool check:` at startup, right after the KV pool is allocated: the budget is read again, and when
-  it is now lower and WHIRL's usage + margin no longer fits, the pool is made smaller (whole pages, before
-  any request) so WHIRL starts inside VRAM (issue #5: 31.02 GiB budget when the pool was sized, 29.55 GiB
-  a moment later). Output is unchanged; only fewer tokens fit in the pool. Not done with an explicit `-c`
-  or `WHIRL_POOL_RESERVE_MB`.
+  decode is more than 40% slower than its first 200 tokens. It names the spill as the likely cause
+  (a warning) only when a spill is seen and each decode cycle got slower; when each cycle is not
+  slower it says fewer tokens per cycle (fewer drafts accepted); with `--parallel 2` or more it says
+  when another request's prefill shared the GPU in that window.
 - `GET /health` carries the last sample: `"vram":{"local_mib":..,"budget_mib":..,"shared_mib":..,"spill":false}`.
 
+`WHIRL_POOL_RESERVE_MB` is the old free-VRAM-only rule: it turns the WDDM budget, the margin and the
+pool check off. To keep more room for other programs, use `WHIRL_POOL_BUDGET_MARGIN_MB` instead.
+
 On the Radeon 8060S (integrated, "shared" is the same RAM) the numbers are logged without the spill
-warning, and the pool check is not done.
+warning; the pool there has a fixed default size (262144 tokens, checked against the carve-out at
+startup), so the margin and the pool check do not apply.
 
 ## <a id="limits"></a>8. Known limitations
 

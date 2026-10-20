@@ -118,7 +118,7 @@ Swift 27B，WHIRL balance。一段工作階段＝約 20k token 的系統＋工�
 
 | | |
 |---|---|
-| **下載就能跑** | 從 [Releases](https://github.com/tsaipifong/whirl-llm/releases) 下載 **`whirl-0.2.2-windows-x64.zip`**，解壓縮、執行。**只需要 AMD 驅動**：不需要 HIP SDK、ROCm，也不用另外安裝 Visual C++ 可轉散發套件（ROCm 10.1 驅動需要的幾個執行階段 DLL 已附在 zip 裡） |
+| **下載就能跑** | 從 [Releases](https://github.com/tsaipifong/whirl-llm/releases) 下載 **`whirl-0.2.2.1-windows-x64.zip`**，解壓縮、執行。**只需要 AMD 驅動**：不需要 HIP SDK、ROCm，也不用另外安裝 Visual C++ 可轉散發套件（ROCm 10.1 驅動需要的幾個執行階段 DLL 已附在 zip 裡） |
 | 驅動 | **AMD Software: Adrenalin Edition 26.8.1（驅動 32.0.31041.1004）或更新版**，兩張卡都一樣。更舊的版本未測試。使用 Adrenalin Edition for ROCm 10.1 驅動時，請讓 zip 裡的 `rocm_kpack.dll` 留在 `whirl.exe` 旁邊（該驅動的 GPU runtime 需要它，但驅動沒有安裝它），連同它用到的 Visual C++ 執行階段 DLL（`msvcp140.dll`、`vcruntime140.dll`、`vcruntime140_1.dll`，同樣附在 zip 裡） |
 | GPU | **Radeon 8060S**（RDNA 3.5，gfx1151，AMD Ryzen AI Max+ 395 內顯）或 **AMD Radeon AI PRO R9700**（RDNA 4，gfx1201，32 GB）；一個行程用一張 GPU |
 | Radeon 8060S：GPU 記憶體 | **先在 Armoury Crate 或 BIOS 設定 GPU 記憶體（UMA frame buffer 大小）**（其他筆電：AMD Software 的 *Variable Graphics Memory*），再重新開機。WHIRL 把模型、緩衝區和 KV 快取放在這塊專用記憶體；Windows 的「共用 GPU 記憶體」不拿來放這些（token 嵌入表和 RAM 快取層放在鎖定的系統 RAM，工作管理員會把它顯示成共用 GPU 記憶體）。**Swift-1.5 27B MXFP4 至少設 40 GB**（precise 模式搭配預設 KV 快取要 48 GB），**Ornith-1.5-35B-A3B MXFP4 至少 32 GB**（128 GB 的機器設 64 GB，任一模型、任一模式都能跑）。以 server 預設值量測（4 個 slot、262,144 token 的 KV 快取）：Swift 在 balance 用 29.9 GiB、fast 31.0 GiB、precise 38.2 GiB；Ornith 在 balance 與 precise 用 27.3 GiB、fast 23.4 GiB。設得比這少時，server 會縮小 KV 快取，或停下來並告訴你要設多大。`whirl devices` 會以「dedicated」顯示目前的大小 |
@@ -133,13 +133,13 @@ Swift 27B，WHIRL balance。一段工作階段＝約 20k token 的系統＋工�
 
 ## 快速上手
 
-1. 從 [Releases](https://github.com/tsaipifong/whirl-llm/releases) 下載 `whirl-0.2.2-windows-x64.zip`，以及一個模型，例如 [`Swift-1.5-Qwen3.8-27B-MXFP4-A-outQ6_K.gguf`](https://huggingface.co/tsaipifong/Swift-1.5-Qwen3.8-27b-MXFP4-GGUF)，存到 `C:\models\`。
+1. 從 [Releases](https://github.com/tsaipifong/whirl-llm/releases) 下載 `whirl-0.2.2.1-windows-x64.zip`，以及一個模型，例如 [`Swift-1.5-Qwen3.8-27B-MXFP4-A-outQ6_K.gguf`](https://huggingface.co/tsaipifong/Swift-1.5-Qwen3.8-27b-MXFP4-GGUF)，存到 `C:\models\`。
 2. 解壓縮後執行，在 PowerShell：
 
 ```powershell
-Unblock-File .\whirl-0.2.2-windows-x64.zip
-Expand-Archive .\whirl-0.2.2-windows-x64.zip -DestinationPath C:\whirl
-cd C:\whirl\whirl-0.2.2-windows-x64
+Unblock-File .\whirl-0.2.2.1-windows-x64.zip
+Expand-Archive .\whirl-0.2.2.1-windows-x64.zip -DestinationPath C:\whirl
+cd C:\whirl\whirl-0.2.2.1-windows-x64
 .\whirl.exe devices                                    # 應列出 Radeon 8060S（gfx1151）和／或 R9700（gfx1201）
 .\whirl.exe chat C:\models\Swift-1.5-Qwen3.8-27B-MXFP4-A-outQ6_K.gguf "用兩句話解釋 TCP slow start。" --max-tokens 400
 .\whirl-server.exe C:\models\Swift-1.5-Qwen3.8-27B-MXFP4-A-outQ6_K.gguf --port 8080      # 預設模式：balance

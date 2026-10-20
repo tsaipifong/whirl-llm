@@ -2061,9 +2061,10 @@ void testWddmWatch() {
         const auto a = w.check(smp(31300, 31232, 400), 0.0);
         CHECK(a && a->warn);
         CHECK(a && a->text.rfind("GPU memory spill: WHIRL's GPU memory is 0.07 GiB over the Windows video memory (WDDM) budget, "
-                                 "so Windows can move part of WHIRL's GPU buffers to system RAM at any time.",
+                                 "so Windows can page part of WHIRL's GPU buffers out of VRAM (this can happen before the shared "
+                                 "GPU memory number grows).",
                                  0) == 0);
-        CHECK(has(a, "Generation slows down as soon as it does: decode can become several times slower."));
+        CHECK(has(a, "Generation is likely slower now: decode can become several times slower."));
         CHECK(has(w.check(smp(30000, 31232, 400), 10.0), "GPU memory spill is over (it lasted 10 s)"));
         CHECK(!w.check(smp(31300, 31232, 400), 20.0));  // new spill, 20 s after the last warning: held
         CHECK(!w.check(smp(30000, 31232, 400), 30.0));  // over before it was reported: no INFO
@@ -2078,7 +2079,7 @@ void testWddmWatch() {
         const auto a = w.check(smp(31300, 31232, 1000), 0.0);
         CHECK(has(a, "GPU memory spill: WHIRL's GPU memory is 0.07 GiB over the Windows video memory (WDDM) budget, and Windows "
                      "has likely moved part of WHIRL's GPU buffers to system RAM (shared GPU memory +600 MiB since startup)."));
-        CHECK(has(a, "Generation slows down if those buffers are used at every step"));
+        CHECK(has(a, "Generation is likely slower now"));
     }
     // the KV pool size in the advice (review P3-3), other programs' VRAM note
     {

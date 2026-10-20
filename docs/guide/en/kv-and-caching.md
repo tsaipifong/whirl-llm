@@ -59,9 +59,12 @@ read-only into several slots; pages still being read by a background copy go to 
 list and return to the free list only after the copy's fence.
 
 - `--ctx N` = pool size in tokens; `--ctx-per-slot N` = per-request maximum.
-- Default pool = all VRAM left after weights, buffers, slot state and checkpoints, minus a reserve:
-  **768 MiB for dense models, 1.5 GiB for MoE** (the MoE model allocated ~0.5 GiB late and
-  overflowed into shared memory with a smaller reserve).
+- Default pool = all VRAM left after weights, buffers, slot state and checkpoints, kept under two
+  limits: the free VRAM minus **768 MiB for dense models, 1.5 GiB for MoE** (the MoE model once
+  allocated ~0.5 GiB late and overflowed into shared memory with a smaller reserve), and the Windows
+  (WDDM) budget minus a margin for other programs: the largest of 2 GiB (3 GiB with a monitor on the
+  GPU), what other processes use on the GPU at startup, and 6% of the budget (since 0.2.2.1; see
+  [server.md](server.md#vram-log)).
 
 ## <a id="formats"></a>3. KV formats: f16, q8, q8h, q8v
 
