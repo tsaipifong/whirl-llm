@@ -554,7 +554,7 @@ inline unsigned gemvhGridCap(unsigned nrows, unsigned cap) {
 // with fewer CUs gets proportionally fewer blocks. Read once per process (the gfx1151 path runs on one device).
 // WHIRL_GEMVH_WAVES=<n> overrides (tests).
 inline constexpr unsigned kGemvhWavesPerMp = 32;
-inline unsigned gemvhGrid(unsigned nrows) {
+inline unsigned gemvhCap() {
     static const unsigned cap = [] {
         if (const char* e = std::getenv("WHIRL_GEMVH_WAVES")) {
             const int v = std::atoi(e);
@@ -563,6 +563,7 @@ inline unsigned gemvhGrid(unsigned nrows) {
         const int mps = hip::describeDevice(hip::getDevice()).compute_units;
         return mps > 0 ? kGemvhWavesPerMp * static_cast<unsigned>(mps) : 640u;
     }();
-    return gemvhGridCap(nrows, cap);
+    return cap;
 }
+inline unsigned gemvhGrid(unsigned nrows) { return gemvhGridCap(nrows, gemvhCap()); }
 }  // namespace whirl::kernels

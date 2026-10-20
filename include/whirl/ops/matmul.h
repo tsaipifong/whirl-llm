@@ -40,6 +40,7 @@ BitClass bitClassOf(MatmulPath p);
 struct MatShape {
     GgmlType ty = GgmlType::f32;
     std::uint32_t nrows = 0, ncols = 0;
+    std::uint64_t row_bytes = 0;
     bool has_ref = false;  // MXFP4 load-time row exponents (fp8 GEMM operand)
     bool head = false;     // the output head (vocabulary rows)
 };
@@ -83,8 +84,55 @@ std::uint32_t gvNmax(GgmlType ty, std::uint32_t gv_nmax_override);
 // pieces through chooseGemvTile. head_gemvx: WHIRL_HEAD_GEMVX (the head on gemvx too).
 enum class GemvWide : std::uint8_t { gemvx, head_split, pieces };
 GemvWide chooseGemvWide(const MatShape& w0, std::size_t n_mats, const kernels::KernelTable& k, bool head_gemvx);
+// smallest batch that takes gemmh_f16 instead of the tuned f16 GEMM (= tune.cpp's candidate rule)
+inline constexpr std::uint32_t gemmh_min = 512;
+
 // grid of the wide kernels for one matrix (rows of a head chunk for head_split)
 Dim3 gemvxGrid(std::uint32_t nrows);
 Dim3 headSplitGrid(std::uint32_t chunk_rows);
+
+
+// ---- f16 GEMM (MatmulPath::gemm_f16; K-2): precise decode / verify rows and prefill. Every choice computes the
+// same bits (class f16_gemm, checkPrefillInvariance): the choice only moves speed.
+struct GemmFlags {
+    bool prec_dec = false;   // precise: decode / verify rows (n <= gv_max) take the decode-shaped choices
+    bool out_h16 = false;    // the consumer reads f16 outputs (h16 GEMM twins)
+    bool h16_dq = false;     // a fused quantized choice with f16 out takes its dequant twin (same bits)
+    bool gemmh_on = true;    // 128 x 256 f16 GEMM (gemmh_f16 / gemmhh_f16) for n >= 512
+    bool gemmhq_on = false;  // dequant fused into gemmh (gemmhq_<T>)
+    bool prec_gemvh = true;  // WHIRL_PREC_GEMVH (0: precise rows skip gemvh)
+    int prec_gs = -1;        // WHIRL_PREC_GS: forced gemms slot for precise rows (-1: chosen)
+    // device::Profile gemvh_grid_by_rows: the gemvh grid is kernels::gemvhGridCap(rows, cap) with this device's cap
+    // (kernels::gemvhCap(), read by the caller: the choice stays a pure function); 0: one block per 16 rows
+    unsigned gemvh_cap = 0;
+    bool gemms_tie_larger_bm = false; // device::Profile: precise gemms ties go to the larger row block
+    std::uint32_t gv_max = 16;
+};
+enum class GemmKind : std::uint8_t { gemvh, gemms, gemmhq, gemmh, gemmc };
+struct GemmPlan {
+    GemmKind kind = GemmKind::gemmc;
+    Function f = nullptr;
+    Dim3 grid{}, block{256, 1, 1};
+    bool dequant = false;          // dequant_f16 into the f16 weight scratch first (then f16 weights)
+    Function dq = nullptr;
+    Dim3 dq_grid{};
+    BitClass bits = BitClass::f16_gemm;
+};
+// the tuned choice code for n rows: [0, G) fused gemm_c on the quantized bytes, [G, 2G) dequant + f16 gemm_c,
+// [2G, 2G + S) gemms slot (G = kGemmCfgs.size(), S = kGemmsCfgs.size())
+std::uint32_t precChoice(const MatShape& w, std::uint32_t n, std::uint8_t tuned, const GemmFlags& f, const kernels::KernelTable& k);
+// w.row_bytes is read (an f16 matrix whose rows are padded is not gemmh's layout)
+GemmPlan chooseGemmF16(const MatShape& w, std::uint32_t n, std::uint8_t tuned, const GemmFlags& f, const kernels::KernelTable& k);
+
+// ---- MXFP4 x fp8 GEMM (MatmulPath::gemm_fp8; K-2), class fp8_gemm
+struct Gemm8Plan {
+    Function f = nullptr;
+    Dim3 grid{}, block{256, 1, 1};
+    BitClass bits = BitClass::fp8_gemm;
+};
+// g8t: the fragment-tiled fp8 set (Model::useTiledFp8)
+Gemm8Plan chooseGemm8(std::uint32_t nrows, std::uint32_t n, bool out_h16, bool g8t, const kernels::KernelTable& k);
+std::size_t gemm8Cfg(std::uint32_t n);
+std::size_t gemm8tCfg(std::uint32_t n);
 
 }  // namespace whirl::ops

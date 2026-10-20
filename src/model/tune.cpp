@@ -74,7 +74,7 @@ constexpr u32 kTuneRejectMinN = 512;
 // dispatch): {0, cfg} fused gemm_c, {1, cfg} dequant + gemm_c f16, {2, slot} gemms,
 // {3, 0} fused dequant gemmhq, {4, 0} dequant + gemmh_f16, {5, 0} gemmh_f16 on f16 weights.
 static std::pair<int, int> tuneKernelKey(const Model& m, const Mat& w, u32 cj, u32 n) {
-    constexpr u32 gemmh_min = 512;  // = forward.cpp
+    using ops::gemmh_min;  // the f16 GEMM's own threshold (include/whirl/ops/matmul.h)
     const u32 nc = static_cast<u32>(gemm_cfgs.size());
     if (cj >= 2 * nc) return {2, static_cast<int>(cj - 2 * nc)};
     const bool deq = cj >= nc && w.ty != GgmlType::f16;

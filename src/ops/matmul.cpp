@@ -4,6 +4,7 @@
 
 #include "whirl/ops/matmul.h"
 
+#include <algorithm>
 #include <stdexcept>
 
 namespace whirl::ops {
@@ -110,5 +111,117 @@ GemvWide chooseGemvWide(const MatShape& w0, std::size_t n_mats, const kernels::K
 
 Dim3 gemvxGrid(std::uint32_t nrows) { return D((nrows + 15) / 16); }
 Dim3 headSplitGrid(std::uint32_t chunk_rows) { return D((chunk_rows + 31) / 32); }
+
+
+std::size_t gemm8Cfg(std::uint32_t n) { return n <= 64 ? 3 : n <= 256 ? 1 : 0; }
+std::size_t gemm8tCfg(std::uint32_t n) { return n <= 32 ? 3 : n <= 48 ? 4 : n <= 64 ? 2 : n <= 192 ? 1 : 0; }
+
+Gemm8Plan chooseGemm8(std::uint32_t nrows, std::uint32_t n, bool out_h16, bool g8t, const kernels::KernelTable& k) {
+    const std::size_t ci = g8t ? gemm8tCfg(n) : gemm8Cfg(n);
+    const kernels::GemmCfg c = g8t ? kernels::kGemm8tCfgs[ci] : kernels::kGemm8Cfgs[ci];
+    Gemm8Plan p;
+    p.f = g8t ? ((out_h16 && k.gemm8th[ci] != nullptr) ? k.gemm8th[ci] : k.gemm8t[ci]) : ((out_h16 && k.gemm8h[ci] != nullptr) ? k.gemm8h[ci] : k.gemm8[ci]);
+    p.grid = Dim3{static_cast<unsigned>((n + c.bn - 1) / c.bn), static_cast<unsigned>((nrows + c.bm - 1) / c.bm), 1};
+    p.block = D(c.nth);
+    return p;
+}
+
+// Precise rows: the small-batch WMMA GEMM on the raw quantized bytes (gemms) with the narrowest token tile that
+// holds n (then the smaller row block; the larger one where the profile says so, GEMVH-2), else the tuned fused
+// config (gemm_c on the quantized bytes) - never the whole-matrix dequant into w16.
+std::uint32_t precChoice(const MatShape& w, std::uint32_t n, std::uint8_t tuned, const GemmFlags& f, const kernels::KernelTable& k) {
+    const std::size_t G = kernels::kGemmCfgs.size();
+    const std::size_t t = ti(w.ty);
+    if (w.ty != GgmlType::f16 && w.ty != GgmlType::f32 && w.ncols % 256 == 0) {
+        if (f.prec_gs >= 0 && static_cast<std::size_t>(f.prec_gs) < k.gemms.size() && k.gemms[f.prec_gs][t] != nullptr)
+            return static_cast<std::uint32_t>(2 * G + f.prec_gs);
+        int best = -1;
+        for (std::size_t si = 0; si < k.gemms.size(); ++si) {
+            if (k.gemms[si][t] == nullptr) continue;
+            const kernels::GemmCfg c = k.gemms_geom[si];
+            if (best < 0) {
+                best = static_cast<int>(si);
+                continue;
+            }
+            const kernels::GemmCfg b = k.gemms_geom[best];
+            const bool c_fits = static_cast<std::uint32_t>(c.bn) >= n, b_fits = static_cast<std::uint32_t>(b.bn) >= n;
+            if (c_fits != b_fits) {
+                if (c_fits) best = static_cast<int>(si);
+                continue;
+            }
+            // both hold n: narrower tile, then smaller row block (larger on gfx1151); neither: wider tile
+            const bool tie_bigger_bm = f.gemms_tie_larger_bm;
+            if (c_fits ? (c.bn < b.bn || (c.bn == b.bn && (tie_bigger_bm ? c.bm > b.bm : c.bm < b.bm))) : c.bn > b.bn) best = static_cast<int>(si);
+        }
+        if (best >= 0) return static_cast<std::uint32_t>(2 * G + best);
+    }
+    const std::uint32_t c = tuned;
+    return c >= 2 * G ? 0u : static_cast<std::uint32_t>(c % G);
+}
+
+GemmPlan chooseGemmF16(const MatShape& w, std::uint32_t n, std::uint8_t tuned, const GemmFlags& f, const kernels::KernelTable& k) {
+    const std::size_t t = ti(w.ty);
+    const std::size_t G = kernels::kGemmCfgs.size();
+    GemmPlan p;
+    if (f.prec_dec && n <= f.gv_max && n <= 32 && w.ncols % 256 == 0 && !f.out_h16) {
+        // precise decode / verify: the decode-shaped f16 GEMM (bitwise == every choice below)
+        const Function hv = n <= 16 ? k.gemvh[t] : k.gemvh2[t];
+        if (f.prec_gemvh && hv != nullptr) {
+            p.kind = GemmKind::gemvh;
+            p.f = hv;
+            p.grid = D(f.gemvh_cap != 0 ? kernels::gemvhGridCap(w.nrows, f.gemvh_cap) : (w.nrows + 15) / 16);
+            p.block = D(32);
+            return p;
+        }
+    }
+    std::uint32_t choice = f.prec_dec && n <= f.gv_max ? precChoice(w, n, tuned, f, k) : tuned;
+    // h16_dq: a fused quantized choice cannot write f16; its dequant twin (same bits) can
+    if (f.out_h16 && f.h16_dq && choice < G && w.ty != GgmlType::f16) choice += static_cast<std::uint32_t>(G);
+    const std::size_t gcfg = choice % G;
+    const kernels::GemmCfg c = kernels::kGemmCfgs[gcfg];
+    if (choice >= 2 * G) {
+        // small-batch GEMM straight from the quantized weights (bitwise == gemm_cN)
+        const std::size_t si = choice - 2 * G;
+        const kernels::GemmCfg sc = k.gemms_geom[si];  // a code object may export its own geometry (gfx1151)
+        p.kind = GemmKind::gemms;
+        p.f = f.out_h16 ? k.gemmsh[si][t] : k.gemms[si][t];
+        p.grid = Dim3{static_cast<unsigned>((n + sc.bn - 1) / sc.bn), static_cast<unsigned>((w.nrows + sc.bm - 1) / sc.bm), 1};
+        p.block = D(sc.nth);
+        return p;
+    }
+    const Function hq = (f.out_h16 && k.gemmch[gcfg] != nullptr) ? k.gemmhqh[t] : k.gemmhq[t];
+    if (choice >= G && w.ty != GgmlType::f16 && f.gemmh_on && f.gemmhq_on && hq != nullptr && n >= gemmh_min && w.ncols % 32 == 0) {
+        // dequant fused into the fragment-order f16 GEMM (bitwise == dequant_f16 + gemm_cN_f16)
+        p.kind = GemmKind::gemmhq;
+        p.f = hq;
+        p.grid = Dim3{(n + 255) / 256, (w.nrows + 127) / 128, 1};
+        return p;
+    }
+    std::uint64_t wrb = w.row_bytes;
+    GgmlType wty = w.ty;
+    if (choice >= G && w.ty != GgmlType::f16) {
+        const std::uint64_t groups = static_cast<std::uint64_t>(w.ncols / 8) * w.nrows;
+        p.dequant = true;
+        p.dq = k.dequant_f16[t];
+        p.dq_grid = D(std::min<std::uint64_t>((groups + 255) / 256, 65535));
+        wrb = static_cast<std::uint64_t>(w.ncols) * 2;
+        wty = GgmlType::f16;
+    }
+    const bool use_ch = f.out_h16 && wty == GgmlType::f16 && k.gemmch[gcfg] != nullptr;
+    const Function gf = use_ch ? k.gemmch[gcfg] : k.gemmc[gcfg][ti(wty)];
+    const Function hf = use_ch ? k.gemmhh_f16 : k.gemmh_f16;
+    if (f.gemmh_on && hf != nullptr && wty == GgmlType::f16 && n >= gemmh_min && w.ncols % 32 == 0 && wrb == static_cast<std::uint64_t>(w.ncols) * 2) {
+        // 128 rows x 256 tokens, bitwise the same as gf
+        p.kind = GemmKind::gemmh;
+        p.f = hf;
+        p.grid = Dim3{(n + 255) / 256, (w.nrows + 127) / 128, 1};
+    } else {
+        p.kind = GemmKind::gemmc;
+        p.f = gf;
+        p.grid = Dim3{static_cast<unsigned>((n + c.bn - 1) / c.bn), static_cast<unsigned>((w.nrows + c.bm - 1) / c.bm), 1};
+        p.block = D(c.nth);
+    }
+    return p;
+}
 
 }  // namespace whirl::ops

@@ -892,6 +892,7 @@ public:
     // f32 / f16 dispatch of RC-R1 / PREFILL-R2 is checked there, tests/ops, no GPU).
     ops::MatShape matShape(const Mat& w) const;
     ops::MatmulFlags matmulFlags() const;
+    ops::GemmFlags gemmFlags() const;
     // tokens per launch of the f32 / f16 multi-token GEMV loop: gemv_<T>_8 / _4 when present, else _1
     static std::uint32_t floatGemvStep(std::uint32_t left, bool has8, bool has4) {
         return left >= 8 && has8 ? 8 : left >= 4 && has4 ? 4 : 1;
@@ -921,9 +922,6 @@ private:
     // most tokens of the int8 GEMV path in the current forward
     std::uint32_t gvMax() const { return small_max > max_small_batch ? small_max : gemv_max; }
     void gemvKernels(std::span<const Mat> ws, std::span<const DevPtr> ys, std::uint32_t n, std::int32_t acc, DevPtr xqp, DevPtr xdp);
-    // precise decode: the f16 GEMM choice for a small batch (a small-batch / fused config,
-    // never the whole-matrix dequant; same bits as every other choice)
-    std::uint32_t precChoice(const Mat& w, std::uint32_t n) const;
     bool gdnAbFusable(const GdnW& g) const;
     void rmsnormQ8(DevPtr xin, DevPtr w, DevPtr out, std::uint32_t n);
     void elementwise(hip::Function f, DevPtr a, DevPtr b, std::uint32_t n);

@@ -206,6 +206,88 @@ void testGemvWide() {
     CHECK(ops::gemvxGrid(4096).x == 256 && ops::gemvxGrid(4097).x == 257 && ops::headSplitGrid(248320).x == 7760);
 }
 
+// ---- f16 / fp8 GEMM (K-2)
+kn::KernelTable gemmTable(bool gemvh, bool gemms, bool gemmh) {
+    kn::KernelTable k;
+    for (GgmlType t : {GgmlType::q4_k, GgmlType::mxfp4, GgmlType::f16}) {
+        const std::string s = std::to_string(static_cast<int>(t));
+        for (std::size_t c = 0; c < kn::kGemmCfgs.size(); ++c) k.gemmc[c][ti(t)] = tag("gemm_c" + std::to_string(c) + "_" + s);
+        if (t != GgmlType::f16) k.dequant_f16[ti(t)] = tag("dequant_f16_" + s);
+        if (gemvh) {
+            k.gemvh[ti(t)] = tag("gemvh_" + s);
+            k.gemvh2[ti(t)] = tag("gemvh2_" + s);
+        }
+        if (gemms && t != GgmlType::f16)
+            for (std::size_t c : {0u, 1u, 4u}) k.gemms[c][ti(t)] = tag("gemms_c" + std::to_string(c) + "_" + s);
+    }
+    if (gemmh) k.gemmh_f16 = tag("gemmh_f16");
+    for (std::size_t c = 0; c < kn::kGemm8Cfgs.size(); ++c) {
+        k.gemm8[c] = tag("gemm8_c" + std::to_string(c));
+        k.gemm8h[c] = tag("gemm8h_c" + std::to_string(c));
+        k.gemm8t[c] = tag("gemm8t_c" + std::to_string(c));
+    }
+    return k;
+}
+
+void testGemm() {
+    const std::uint32_t G = static_cast<std::uint32_t>(kn::kGemmCfgs.size());
+    auto q4 = mat(GgmlType::q4_k, 5120, 5120);
+    q4.row_bytes = 5120 / 256 * 144;
+    auto f16 = mat(GgmlType::f16, 4096, 5120);
+    f16.row_bytes = 5120 * 2;
+    ops::GemmFlags pre;
+    pre.prec_dec = true;
+    ops::GemmFlags bal;
+    // precise decode rows: gemvh (16 rows) / gemvh2 (17..32), one block per 16 rows, 32 threads; the profile's
+    // grid where it says so
+    kn::KernelTable k = gemmTable(true, true, true);
+    auto p = ops::chooseGemmF16(q4, 4, 0, pre, k);
+    CHECK(p.kind == ops::GemmKind::gemvh && nameOf(p.f).rfind("gemvh_", 0) == 0 && p.grid.x == 320 && p.block.x == 32 && p.bits == ops::BitClass::f16_gemm);
+    ops::GemmFlags pre8 = pre;
+    pre8.gemvh_cap = 64;  // fewer blocks than the 320 row tiles: 5 tiles per block
+    CHECK(ops::chooseGemmF16(q4, 4, 0, pre8, k).grid.x == kn::gemvhGridCap(5120, 64) && kn::gemvhGridCap(5120, 64) == 64);
+    // WHIRL_PREC_GEMVH=0: the precise gemms choice (narrowest tile that holds n, then the smaller row block)
+    ops::GemmFlags nog = pre;
+    nog.prec_gemvh = false;
+    p = ops::chooseGemmF16(q4, 4, 0, nog, k);
+    CHECK(p.kind == ops::GemmKind::gemms && nameOf(p.f).rfind("gemms_c4_", 0) == 0);  // c4 = 128 x 16
+    CHECK(ops::precChoice(q4, 4, 0, nog, k) == 2 * G + 4);
+    CHECK(ops::precChoice(q4, 20, 0, nog, k) == 2 * G + 0);  // 32-token tiles: c0 (64 x 32) over c1 (128 x 32)
+    ops::GemmFlags tie = nog;
+    tie.gemms_tie_larger_bm = true;
+    CHECK(ops::precChoice(q4, 20, 0, tie, k) == 2 * G + 1);  // the 8060S rule: ties to the larger row block
+    ops::GemmFlags gs = nog;
+    gs.prec_gs = 1;
+    CHECK(ops::precChoice(q4, 4, 0, gs, k) == 2 * G + 1);    // WHIRL_PREC_GS
+    // no gemms for the type (f16 weights): the tuned fused config, never the dequant choice
+    CHECK(ops::precChoice(f16, 4, static_cast<std::uint8_t>(G + 3), nog, k) == 3);
+    // prefill: the tuned choice; a dequant choice dequantizes into w16 then runs gemm_c on f16 (or gemmh for n >= 512)
+    p = ops::chooseGemmF16(q4, 256, 2, bal, k);
+    CHECK(p.kind == ops::GemmKind::gemmc && !p.dequant && nameOf(p.f) == "gemm_c2_" + std::to_string(static_cast<int>(GgmlType::q4_k)));
+    const kn::GemmCfg c2 = kn::kGemmCfgs[2];
+    CHECK(p.grid.x == (256 + c2.bn - 1) / c2.bn && p.grid.y == (5120 + c2.bm - 1) / c2.bm && p.block.x == static_cast<unsigned>(c2.nth));
+    p = ops::chooseGemmF16(q4, 256, static_cast<std::uint8_t>(G + 2), bal, k);
+    CHECK(p.kind == ops::GemmKind::gemmc && p.dequant && nameOf(p.dq).rfind("dequant_f16_", 0) == 0 &&
+          nameOf(p.f) == "gemm_c2_" + std::to_string(static_cast<int>(GgmlType::f16)));
+    p = ops::chooseGemmF16(q4, 1024, static_cast<std::uint8_t>(G + 2), bal, k);
+    CHECK(p.kind == ops::GemmKind::gemmh && p.dequant && nameOf(p.f) == "gemmh_f16" && p.grid.x == 4 && p.grid.y == 40);
+    // f16 weights with padded rows are not gemmh's layout
+    auto f16p = f16;
+    f16p.row_bytes = 5120 * 2 + 64;
+    CHECK(ops::chooseGemmF16(f16p, 1024, 1, bal, k).kind == ops::GemmKind::gemmc);
+    CHECK(ops::chooseGemmF16(f16, 1024, 1, bal, k).kind == ops::GemmKind::gemmh);
+    // a tuned gemms slot runs with the code object's geometry
+    k.gemms_geom[1] = kn::GemmCfg{64, 16, 128};
+    p = ops::chooseGemmF16(q4, 40, static_cast<std::uint8_t>(2 * G + 1), bal, k);
+    CHECK(p.kind == ops::GemmKind::gemms && p.grid.x == 3 && p.grid.y == 80 && p.block.x == 128);
+    // fp8: the configuration per batch, f16-out twin where present, tiled set when on
+    auto g = ops::chooseGemm8(4096, 32, false, false, k);
+    CHECK(nameOf(g.f) == "gemm8_c3" && g.bits == ops::BitClass::fp8_gemm);
+    CHECK(nameOf(ops::chooseGemm8(4096, 512, true, false, k).f) == "gemm8h_c0");
+    CHECK(nameOf(ops::chooseGemm8(4096, 40, true, true, k).f) == "gemm8t_c4");  // no gemm8th: the plain tiled one
+    CHECK(ops::gemm8Cfg(64) == 3 && ops::gemm8Cfg(65) == 1 && ops::gemm8Cfg(257) == 0 && ops::gemm8tCfg(48) == 4 && ops::gemm8tCfg(193) == 0);
+}
+
 }  // namespace
 
 int main() {
@@ -213,6 +295,7 @@ int main() {
     testMatmulPath();
     testGemvTile();
     testGemvWide();
+    testGemm();
     std::printf("ops tests: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }

@@ -29,8 +29,6 @@ inline i32 I(u64 v) { return static_cast<i32>(v); }
 constexpr u32 fd_chunk = 64;
 constexpr u32 moe_bm = 128;
 constexpr u32 moe_bn = 64;
-// smallest batch that takes gemmh_f16 instead of the tuned f16 GEMM
-constexpr u32 gemmh_min = 512;
 
 // attn_dq4 (kernels/gfx1151/attn.hip dq_per, DQ_NW 8, DQ_MAXS 128): keys per split for n_keys keys
 // under a grid of n_split splits; keep in step with the kernel.
@@ -75,11 +73,6 @@ i32 awPer(i32 n_pos, u32 n_split) {
     return (q >= 0 ? q / span : -((-q + span - 1) / span)) * static_cast<i32>(fd_chunk);
 }
 
-
-// gemm8 configuration for a batch of n tokens
-std::size_t gemm8Cfg(u32 n) { return n <= 64 ? 3 : n <= 256 ? 1 : 0; }
-// gemm8t configuration for a batch of n tokens
-std::size_t gemm8tCfg(u32 n) { return n <= 32 ? 3 : n <= 48 ? 4 : n <= 64 ? 2 : n <= 192 ? 1 : 0; }
 
 hip::Dim3 D(u64 x, u64 y = 1, u64 z = 1) { return hip::Dim3{static_cast<unsigned>(x), static_cast<unsigned>(y), static_cast<unsigned>(z)}; }
 
@@ -248,12 +241,8 @@ void Model::matmul(const Mat& w, DevPtr xin, DevPtr y, u32 n, bool accumulate) {
             x16_count = count;
             x16_fp8 = true;
         }
-        const std::size_t ci = g8t ? gemm8tCfg(n) : gemm8Cfg(n);
-        const GemmCfg c = g8t ? gemm8t_cfgs[ci] : gemm8_cfgs[ci];
-        const hip::Function g8 = g8t ? ((out_h16 && k.gemm8th[ci] != nullptr) ? k.gemm8th[ci] : k.gemm8t[ci])
-                                     : ((out_h16 && k.gemm8h[ci] != nullptr) ? k.gemm8h[ci] : k.gemm8[ci]);
-        hip::launch(g8, D((n + c.bn - 1) / c.bn, (w.nrows + c.bm - 1) / c.bm), D(c.nth), 0, stream, w.ptr, w.row_bytes, w.ref, x16, sx8, y,
-                    ncols, nrows, I(n), acc);
+        const ops::Gemm8Plan g8 = ops::chooseGemm8(w.nrows, n, out_h16, g8t, k);
+        hip::launch(g8.f, g8.grid, g8.block, 0, stream, w.ptr, w.row_bytes, w.ref, x16, sx8, y, ncols, nrows, I(n), acc);
     } else {
         const u32 count = n * w.ncols;
         if (x16_src != xin || x16_count != count || x16_fp8) {
@@ -267,65 +256,61 @@ void Model::matmul(const Mat& w, DevPtr xin, DevPtr y, u32 n, bool accumulate) {
     finish();
 }
 
-// The f16-activation GEMM of matmul: y[t][:] (+)= W x16in[t][:] (x16in: n rows
-// of w.ncols f16; not registered in the x16 cache).
+// The f16-activation GEMM of matmul: y[t][:] (+)= W x16in[t][:] (x16in: n rows of w.ncols f16; not registered in
+// the x16 cache). The kernel, the optional dequant into w16 and the grids come from ops::chooseGemmF16 (K-2).
 void Model::gemmF16(const Mat& w, DevPtr x16in, DevPtr y, u32 n, i32 acc) {
+    const ops::GemmPlan p = ops::chooseGemmF16(matShape(w), n, w.tune[tuneBucket(n)], gemmFlags(), k);
     const i32 ncols = I(w.ncols);
     const i32 nrows = I(w.nrows);
-    const std::size_t t = ti(w.ty);
-    if (prec_dec && n <= gvMax() && n <= 32 && w.ncols % 256 == 0 && !out_h16) {
-        // precise decode / verify: the decode-shaped f16 GEMM (bitwise == every choice below)
-        static const bool gemvh_on = [] {
-            const char* v = std::getenv("WHIRL_PREC_GEMVH");
-            return v == nullptr || *v != '0';
-        }();
-        const hip::Function hv = n <= 16 ? k.gemvh[t] : k.gemvh2[t];
-        if (gemvh_on && hv != nullptr) {
-            hip::launch(hv, D(device::profile(arch).gemvh_grid_by_rows ? kernels::gemvhGrid(w.nrows) : (w.nrows + 15) / 16), D(32), 0, stream, w.ptr, w.row_bytes, x16in, y, ncols, nrows, I(n),
-                        acc);
+    switch (p.kind) {
+        case ops::GemmKind::gemvh:
+            hip::launch(p.f, p.grid, p.block, 0, stream, w.ptr, w.row_bytes, x16in, y, ncols, nrows, I(n), acc);
             return;
-        }
-    }
-    u32 choice = prec_dec && n <= gvMax() ? precChoice(w, n) : w.tune[tuneBucket(n)];
-    // h16_dq: a fused quantized choice cannot write f16; its dequant twin (same bits) can
-    if (out_h16 && h16_dq && choice < gemm_cfgs.size() && w.ty != GgmlType::f16) choice += static_cast<u32>(gemm_cfgs.size());
-    const std::size_t gcfg = choice % gemm_cfgs.size();
-    const GemmCfg c = gemm_cfgs[gcfg];
-    if (choice >= 2 * gemm_cfgs.size()) {
-        // small-batch GEMM straight from the quantized weights (bitwise == gemm_cN)
-        const std::size_t si = choice - 2 * gemm_cfgs.size();
-        const GemmCfg sc = k.gemms_geom[si];  // a code object may export its own geometry (gfx1151)
-        const hip::Function sf = out_h16 ? k.gemmsh[si][t] : k.gemms[si][t];
-        hip::launch(sf, D((n + sc.bn - 1) / sc.bn, (w.nrows + sc.bm - 1) / sc.bm), D(sc.nth), 0, stream, w.ptr, w.row_bytes, x16in, y, ncols,
-                    nrows, I(n), acc);
-        return;
+        case ops::GemmKind::gemms:
+            hip::launch(p.f, p.grid, p.block, 0, stream, w.ptr, w.row_bytes, x16in, y, ncols, nrows, I(n), acc);
+            return;
+        case ops::GemmKind::gemmhq:
+            hip::launch(p.f, p.grid, p.block, 0, stream, w.ptr, w.row_bytes, x16in, y, ncols, nrows, I(n), acc);
+            return;
+        default:
+            break;
     }
     DevPtr wptr = w.ptr;
     u64 wrb = w.row_bytes;
-    GgmlType wty = w.ty;
-    const hip::Function hq = (out_h16 && k.gemmch[gcfg] != nullptr) ? k.gemmhqh[t] : k.gemmhq[t];
-    if (choice >= gemm_cfgs.size() && w.ty != GgmlType::f16 && gemmh_on && gemmhq_on && hq != nullptr && n >= gemmh_min && w.ncols % 32 == 0) {
-        // dequant fused into the fragment-order f16 GEMM (bitwise == dequant_f16 + gemm_cN_f16)
-        hip::launch(hq, D((n + 255) / 256, (w.nrows + 127) / 128), D(256), 0, stream, w.ptr, w.row_bytes, x16in, y, ncols, nrows, I(n), acc);
-        return;
-    }
-    if (choice >= gemm_cfgs.size() && w.ty != GgmlType::f16) {
-        const u64 groups = static_cast<u64>(w.ncols / 8) * w.nrows;
-        hip::launch(k.dequant_f16[t], D(std::min<u64>((groups + 255) / 256, 65535)), D(256), 0, stream, w.ptr, w.row_bytes, w16, ncols,
-                    nrows);
+    if (p.dequant) {
+        hip::launch(p.dq, p.dq_grid, D(256), 0, stream, w.ptr, w.row_bytes, w16, ncols, nrows);
         wptr = w16;
         wrb = static_cast<u64>(w.ncols) * 2;
-        wty = GgmlType::f16;
     }
-    const bool use_ch = out_h16 && wty == GgmlType::f16 && k.gemmch[gcfg] != nullptr;
-    const hip::Function gf = use_ch ? k.gemmch[gcfg] : k.gemmc[gcfg][ti(wty)];
-    const hip::Function hf = use_ch ? k.gemmhh_f16 : k.gemmh_f16;
-    if (gemmh_on && hf != nullptr && wty == GgmlType::f16 && n >= gemmh_min && w.ncols % 32 == 0 && wrb == static_cast<u64>(w.ncols) * 2) {
-        // 128 rows x 256 tokens, bitwise the same as gf
-        hip::launch(hf, D((n + 255) / 256, (w.nrows + 127) / 128), D(256), 0, stream, wptr, x16in, y, ncols, nrows, I(n), acc);
-    } else {
-        hip::launch(gf, D((n + c.bn - 1) / c.bn, (w.nrows + c.bm - 1) / c.bm), D(c.nth), 0, stream, wptr, wrb, x16in, y, ncols, nrows, I(n), acc);
-    }
+    if (p.kind == ops::GemmKind::gemmh)
+        hip::launch(p.f, p.grid, p.block, 0, stream, wptr, x16in, y, ncols, nrows, I(n), acc);
+    else
+        hip::launch(p.f, p.grid, p.block, 0, stream, wptr, wrb, x16in, y, ncols, nrows, I(n), acc);
+}
+
+// the f16 GEMM flags (precise rows, f16 outputs, the WHIRL_PREC_GEMVH / WHIRL_PREC_GS experiments, the profile's
+// precise-decode geometry)
+ops::GemmFlags Model::gemmFlags() const {
+    static const bool gemvh_on = [] {
+        const char* v = std::getenv("WHIRL_PREC_GEMVH");
+        return v == nullptr || *v != '0';
+    }();
+    static const int forced = [] {
+        const char* v = std::getenv("WHIRL_PREC_GS");
+        return v != nullptr && *v != 0 ? std::atoi(v) : -1;
+    }();
+    ops::GemmFlags f;
+    f.prec_dec = prec_dec;
+    f.out_h16 = out_h16;
+    f.h16_dq = h16_dq;
+    f.gemmh_on = gemmh_on;
+    f.gemmhq_on = gemmhq_on;
+    f.prec_gemvh = gemvh_on;
+    f.prec_gs = forced;
+    f.gemvh_cap = device::profile(arch).gemvh_grid_by_rows ? kernels::gemvhCap() : 0;
+    f.gemms_tie_larger_bm = device::profile(arch).gemms_tie_larger_bm;
+    f.gv_max = gvMax();
+    return f;
 }
 
 // Every fp8 activation producer writes the fragment-tiled layout and the fp8
@@ -445,6 +430,7 @@ ops::MatShape Model::matShape(const Mat& w) const {
     s.ty = w.ty;
     s.nrows = w.nrows;
     s.ncols = w.ncols;
+    s.row_bytes = w.row_bytes;
     s.has_ref = w.ref != 0;
     s.head = w.ptr == output.ptr;
     return s;
@@ -459,48 +445,6 @@ ops::MatmulFlags Model::matmulFlags() const {
     f.mm_class = mm_class;
     f.gv_max = gvMax();
     return f;
-}
-
-// Precise decode: the f16 GEMM choice for n <= gvMax() rows. Every choice computes the
-// same bits (checkPrefillInvariance), so this only picks a kernel that suits a few rows:
-// the small-batch WMMA GEMM on the raw quantized bytes (gemms) with the narrowest token
-// tile that holds n (then the most row blocks; on gfx1151 the widest, see below), else the tuned fused config (gemm_c on
-// the quantized bytes) - never the whole-matrix dequant into w16. WHIRL_PREC_GS=<slot>
-// forces a gemms slot (timing experiments).
-u32 Model::precChoice(const Mat& w, u32 n) const {
-    const std::size_t G = gemm_cfgs.size();
-    const std::size_t t = ti(w.ty);
-    static const int forced = [] {
-        const char* v = std::getenv("WHIRL_PREC_GS");
-        return v != nullptr && *v != 0 ? std::atoi(v) : -1;
-    }();
-    if (w.ty != GgmlType::f16 && w.ty != GgmlType::f32 && w.ncols % 256 == 0) {
-        if (forced >= 0 && static_cast<std::size_t>(forced) < k.gemms.size() && k.gemms[forced][t] != nullptr)
-            return static_cast<u32>(2 * G + forced);
-        int best = -1;
-        for (std::size_t si = 0; si < k.gemms.size(); ++si) {
-            if (k.gemms[si][t] == nullptr) continue;
-            const GemmCfg c = k.gemms_geom[si];
-            if (best < 0) {
-                best = static_cast<int>(si);
-                continue;
-            }
-            const GemmCfg b = k.gemms_geom[best];
-            const bool c_fits = static_cast<u32>(c.bn) >= n, b_fits = static_cast<u32>(b.bn) >= n;
-            if (c_fits != b_fits) {
-                if (c_fits) best = static_cast<int>(si);
-                continue;
-            }
-            // both hold n: narrower tile, then smaller row block; neither: wider tile
-            // (gfx1151, GEMVH-2: the widest row block of a tile width is the fastest - gemms_c0 128 x 32 beats c5 64 x 32 by
-            // 30-40% at n <= 32 - so ties go to the larger BM there; the other targets keep the narrower row block)
-            const bool tie_bigger_bm = device::profile(arch).gemms_tie_larger_bm;
-            if (c_fits ? (c.bn < b.bn || (c.bn == b.bn && (tie_bigger_bm ? c.bm > b.bm : c.bm < b.bm))) : c.bn > b.bn) best = static_cast<int>(si);
-        }
-        if (best >= 0) return static_cast<u32>(2 * G + best);
-    }
-    const u32 c = w.tune[tuneBucket(n)];
-    return c >= 2 * G ? 0u : static_cast<u32>(c % G);
 }
 
 // Precise decode needs, for every weight type of the model, the f16 GEMM on the quantized
