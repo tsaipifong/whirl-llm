@@ -29,6 +29,7 @@
 #include "whirl/device_profile.h"
 #include "whirl/hip.h"
 #include "whirl/kernels_abi.h"
+#include "whirl/ops/attention.h"
 #include "whirl/ops/matmul.h"
 #include "whirl/numerics.h"
 #include "whirl/relax_accept.h"
@@ -607,7 +608,7 @@ public:
     // FC-1c: attn_kgs softmax state (m, l per query row and head) between key ranges of a prefill
     // longer than dq_rows (and for q4: every prefill dequantizes its keys into ffn_g / ffn_u)
     DevPtr dq_st_ml = 0;
-    static constexpr std::uint32_t kDqMaxKeys = 1u << 22;  // dq_ptab covers keys [0, kDqMaxKeys)
+    static constexpr std::uint32_t kDqMaxKeys = ops::kDqMaxKeys;  // dq_ptab covers keys [0, kDqMaxKeys)
     bool attn_kg_on = true;  // GQA-grouped prefill attention (f16 / q8 / q8h / q8v KV; WHIRL_ATTN_KG=0 off)
     bool ffn_h16 = false;
     // KG-1: f16 outputs from quantized weights whatever the tuned choice (a fused quantized
