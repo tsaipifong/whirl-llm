@@ -19,7 +19,7 @@ All notable changes to WHIRL are listed here. Versions follow `project(whirl VER
   on this GPU) and the R9700 are unchanged. `WHIRL_DQ4_DYN=0` restores the fixed grid. FAST-8S-1.
 - Server: a client's next request could hang for 21 s and fail to connect (Windows error 10060), rarely (seen in our server
   stress tests). The server closed every connection first, so each finished connection stayed in
-  TIME_WAIT on the server side for 120 s; when Windows handed the client the same local port again and the earlier
+  TIME_WAIT on the server side for minutes; when Windows handed the client the same local port again and the earlier
   request had been large (tens of KB, as agent prompts are), that TIME_WAIT silently dropped the new connection
   attempt. The server now lets the client close first: after a response whose end the client can see it waits up to
   200 ms for the client to close, and streamed (SSE) responses to HTTP/1.1 requests are now sent with `Transfer-Encoding: chunked` (as
