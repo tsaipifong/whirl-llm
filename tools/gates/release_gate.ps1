@@ -218,7 +218,10 @@ try {
         $wddmNote = ""
         if ($s.name -like "srv_*") {
             $slogs = @(Get-ChildItem $wd -Recurse -File -Filter "server_*.log" -ErrorAction SilentlyContinue)
-            $hits = @($slogs | Select-String -Pattern "over the WDDM budget|GPU memory spill" -SimpleMatch:$false -ErrorAction SilentlyContinue)
+            # the warning lines themselves ("GPU memory spill:", "... continues", "... is over", the startup "over the WDDM
+            # budget"), not the "vram watch:" line that describes the rule ("warns while GPU memory spills")
+            $wpat = "over the WDDM budget|GPU memory spill(:| continues| is over)"
+            $hits = @($slogs | Select-String -Pattern $wpat -ErrorAction SilentlyContinue)
             if ($slogs.Count -eq 0) {
                 $ok = $false; $wddmNote = " | WDDM check: no server log found under $wd"
             } elseif ($hits.Count -gt 0) {
@@ -228,7 +231,7 @@ try {
             } else {
                 $wddmNote = " | WDDM check: $($slogs.Count) server log(s), no budget overrun / spill"
             }
-            "release gate: WDDM check: $($slogs.Count) server log(s) read, $($hits.Count) line(s) matched 'over the WDDM budget|GPU memory spill'" | Add-Content $log
+            "release gate: WDDM check: $($slogs.Count) server log(s) read, $($hits.Count) line(s) matched '$wpat'" | Add-Content $log
             foreach ($h in $hits) { "  $($h.Filename):$($h.LineNumber): $($h.Line)" | Add-Content $log }
         }
         # CB-FLAKE: a failed step keeps its server logs (server_*.log / *.stdout.txt, small) next to the step log,
