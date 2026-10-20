@@ -132,6 +132,7 @@ if(WHIRL_WITH_HIP)
 
   add_library(whirl_hip STATIC
     src/hip/hip_runtime.cpp
+    src/hip/launch_log.cpp
     src/hip/wddm_mem.cpp
     src/hip/device_mem.cpp
     src/hip/uma_mem.cpp

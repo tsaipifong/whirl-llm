@@ -5,7 +5,7 @@
 # verdict to whoever read the logs.
 #
 #   pwsh tools/gates/release_gate.ps1 -Device r9700|8060s [-Build DIR] [-ExpectCommit SHA] [-Steps a,b,...]
-#                                     [-Work DIR] [-Tag NAME] [-InjectFail] [-List]
+#                                     [-Work DIR] [-Tag NAME] [-InjectFail] [-List] [-LaunchLog DIR]
 #
 # Verdict: every step has an exit code AND an output rule (e.g. "(ALL PASS)", "seqtest: ok", three equal
 # DFlash2 hashes with drafts accepted); a step that does not run counts as failed. At the end a table of
@@ -36,6 +36,8 @@
 # (--kv auto: the formats the modes ship, not a pinned q8v).
 # -InjectFail: the golden steps compare against a copy of the references with one hash changed (a real
 # check that must turn the gate red; used to prove the gate fails).
+# -LaunchLog DIR: every GPU step runs with WHIRL_LAUNCH_LOG=DIR\<step>: each whirl process writes its kernel launch
+# table there (ARCH-1 K-0; tools/impact/launch_table.py builds and compares the tables).
 param(
     [ValidateSet("r9700", "8060s")][string]$Device = "r9700",
     [string]$Build = "",
@@ -44,7 +46,8 @@ param(
     [string]$Work = "",
     [string]$Tag = "",
     [switch]$InjectFail,
-    [switch]$List
+    [switch]$List,
+    [string]$LaunchLog = ""
 )
 $ErrorActionPreference = "Stop"
 $repo = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
@@ -214,6 +217,11 @@ try {
         $log = Join-Path $logDir "$($s.name).txt"
         $c = -1
         foreach ($k in $s.env.Keys) { [Environment]::SetEnvironmentVariable($k, $s.env[$k]) }
+        if ($LaunchLog -and $s.gpu) {
+            $ld = Join-Path $LaunchLog $s.name
+            New-Item -ItemType Directory -Force $ld | Out-Null
+            $env:WHIRL_LAUNCH_LOG = $ld
+        }
         try {
             # hold the R9700 lock for this step only, in this process (a child pwsh in between lost the
             # server gate's output after its first Ctrl+C server stop)
@@ -239,6 +247,7 @@ try {
             $c = -1
         }
         foreach ($k in $s.env.Keys) { [Environment]::SetEnvironmentVariable($k, $null) }
+        Remove-Item Env:WHIRL_LAUNCH_LOG -ErrorAction SilentlyContinue
         $out = @(Get-Content $log -ErrorAction SilentlyContinue)
         $ok = $false
         try { $ok = [bool](& $s.rule $out $c $wd $log) } catch { $ok = $false }

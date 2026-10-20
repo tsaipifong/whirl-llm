@@ -9,6 +9,7 @@
 #include "whirl/vram_limit.h"
 
 #include "hip_api.h"
+#include "launch_log.h"
 
 #include <algorithm>
 #include <atomic>
@@ -380,6 +381,7 @@ Module Module::loadEmbedded() {
 Function Module::getFunction(const char* name) const {
     hipFunction_t f = nullptr;
     const hipError_t st = rt().hipModuleGetFunction(&f, static_cast<hipModule_t>(handle_), name);
+    if (st == hipSuccess && launchlog::g_on) launchlog::onFunction(f, name);
     if (st != hipSuccess) {
         (void)rt().hipGetLastError();
         g_last_op = "hipModuleGetFunction";
@@ -395,6 +397,7 @@ Function Module::getFunctionOpt(const char* name) const {
         (void)rt().hipGetLastError();  // clear the not-found status
         return nullptr;
     }
+    if (launchlog::g_on) launchlog::onFunction(f, name);
     return f;
 }
 
@@ -408,6 +411,7 @@ DevPtr Module::getGlobal(const char* name, std::size_t* bytes) const {
 
 void launchRaw(Function f, Dim3 grid, Dim3 block, unsigned shared_bytes, Stream s, void** params) {
     g_launch_count.fetch_add(1, std::memory_order_relaxed);
+    if (launchlog::g_on) launchlog::onLaunch(f, grid.x, grid.y, grid.z, block.x, block.y, block.z, shared_bytes);  // ARCH-1 K-0
     check(rt().hipModuleLaunchKernel(static_cast<hipFunction_t>(f), grid.x, grid.y, grid.z, block.x, block.y, block.z,
                                 shared_bytes, strm(s), params, nullptr),
           "hipModuleLaunchKernel");
