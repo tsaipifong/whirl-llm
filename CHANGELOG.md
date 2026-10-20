@@ -3,6 +3,33 @@
 All notable changes to WHIRL are listed here. Versions follow `project(whirl VERSION ...)` in
 `CMakeLists.txt`.
 
+## Unreleased
+
+### Fixed
+
+- Server: with the default RAM tier the server could start over the Windows (WDDM) video memory budget, and decode then
+  got slower as a session grew (issue #5, R9700, Swift-1.5 27B MXFP4: the budget read 31.02 GiB when the KV pool was
+  sized and 29.55 GiB right after it was allocated, so the server started 0.37 GiB over it). The server now reads the
+  budget again once the pool is allocated and shrinks the pool (whole pages, before any request) until its usage plus
+  the margin fits, with a `kv pool check:` line saying what changed (in that case about 12.63 -> 11.50 GiB, from the
+  user's numbers). Output is unchanged; only the pool, and so how much context can be cached, is smaller. Not applied
+  with an explicit `-c` or `WHIRL_POOL_RESERVE_MB`, nor on the Radeon 8060S. WDDM-LOG.
+
+### Added
+
+- Server log: WHIRL's video memory and RAM while it runs, so a slowdown in a long session can be traced to
+  Windows moving GPU memory to system RAM (issues #5, #6). Each `batch |` status line and each request end
+  now show `vram local X / budget Y GiB, shared Z MiB (+D MiB since start), ram R GiB (pinned P GiB)`; a
+  plain-language `GPU memory spill` warning (what happened, that generation is getting slower, what to do,
+  the numbers) is printed when local usage goes over the WDDM budget or shared GPU memory grows by more than
+  256 MiB since start (not counting pinned host memory WHIRL allocated since), repeated at most once a minute while it lasts, with an info line when it is over; a
+  request whose decode gets more than 40% slower than its first 200 tokens gets one `decode slowed from X to
+  Y tok/s` line, naming the spill as the likely cause only while one is seen. `GET /health` has a `vram`
+  object with the last sample (`local_mib`, `budget_mib`, `shared_mib`, `spill`). One sample costs well under a
+  millisecond (the server prints its cost in the `vram watch:` line) and is taken only for those lines, not per
+  decode cycle; model output is unchanged. See
+  docs/guide/en/server.md, "Video memory while it runs". WDDM-LOG.
+
 ## 0.2.2 — 2026-10-20 (bug fixes)
 
 ### Fixed

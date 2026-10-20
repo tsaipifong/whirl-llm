@@ -276,6 +276,39 @@ I batch | slots busy 0/4 (decode 0, prefill 0) | 80 cycles, 3.79 slots/cycle, 11
 `checkpoint 'system' @B`；每次層寫出 / 還原 / SSD 寫入各一行，以及閒置時的 `kv tier |` 摘要；
 影像輸入的 `vision:` 行。
 
+### <a id="vram-log"></a>執行中的顯示記憶體（`vram`、"GPU memory spill"）
+
+長時間工作階段中解碼慢了好幾倍（GPU 使用率仍 100%、GPU 功耗下降），常見原因是 Windows 把 WHIRL
+的一部分 GPU 記憶體移到了系統 RAM。以下幾行可以看出是否正在發生：
+
+- 啟動時的 `vram watch:`（所有配置完成後）：基準值，以及取樣一次的成本。
+- 每一行 `batch |` 狀態行（有請求執行時約每 5 秒）結尾會加上
+  `| vram local X / budget Y GiB, shared Z MiB (+D MiB since start), ram R GiB (pinned P GiB)`；
+  每個請求結束時，在 `finish_reason` 行旁也多一行 `req N | slot S | vram ...`。
+  - `local` 是 WHIRL 放在 VRAM 裡的 GPU 記憶體，`budget` 是 Windows 此刻允許 WHIRL 留在 VRAM 的量
+    （其他程式使用 GPU 時會下降）。
+  - `shared` 是 WHIRL 的「共用 GPU 記憶體」（工作管理員 > GPU）：放在系統 RAM 的 GPU 緩衝區。其中一部分
+    從啟動起就刻意放在那裡（pinned 主機記憶體，例如前綴快取的 RAM 層），所以要看的是啟動以來的成長
+    （`+D MiB`）。扣除 WHIRL 之後自己配置的 pinned 記憶體仍有成長，表示 Windows 把 GPU 緩衝區移出了
+    VRAM：每次存取都要經過 PCIe，解碼就會變慢。
+  - `ram` 是行程的工作集，`pinned` 是 WHIRL 配置的 pinned 主機記憶體。
+- `W GPU memory spill: ...`：local 超過 budget，或 shared 比啟動時多出 256 MiB 以上（不計 WHIRL 之後
+  自己配置的 pinned 記憶體）時出現，內容說明發生了什麼、生成正在變慢、可以怎麼做（關閉其他使用 GPU
+  的程式；以較小的 `-c`、`--parallel 1` 或較大的 `WHIRL_POOL_RESERVE_MB` 重啟伺服器）以及數字。持續
+  期間最多每分鐘重複一次（`GPU memory spill continues (N so far)`）；結束時印一行
+  `I GPU memory spill is over`。
+- `req N | slot S | decode slowed from X to Y tok/s (...)`：某個請求的解碼在一段時間內比它最初 200 個
+  token 慢 40% 以上時，每個請求印一次；有溢出時是警告並指出溢出可能是原因，否則是資訊行（若每個
+  cycle 並沒有變慢、是接受的 draft 變少，會註明 "each cycle is not slower"）。
+
+- `kv pool check:`：啟動時 KV 池配置完立刻再讀一次 budget；若 budget 變低、WHIRL 的用量加上保留量已放不下，
+  就把池縮小（以整頁為單位，在任何請求之前），讓 WHIRL 一開始就留在 VRAM 內（issue #5：決定池大小時
+  budget 是 31.02 GiB，片刻後變成 29.55 GiB）。輸出不變，只是池能放的 token 變少。有明確指定 `-c` 或
+  `WHIRL_POOL_RESERVE_MB` 時不做。
+- `GET /health` 帶有最近一次取樣：`"vram":{"local_mib":..,"budget_mib":..,"shared_mib":..,"spill":false}`。
+
+在 Radeon 8060S（內顯，"shared" 就是同一份 RAM）上只記錄數字，不發溢出警告，也不做池檢查。
+
 ## <a id="limits"></a>8. 已知限制
 
 - 只支援 `qwen35` / `qwen35moe` GGUF（[architecture.md](architecture.md)）。

@@ -706,8 +706,13 @@ void handleConn(const ConnCtx& cx, SOCKET s) {
     if (path == "/health" || path == "/v1/health") {
         if (!is_get) return sendAll(w, errorResponse(405, "use GET"));
         const Engine::Health hs = e.health();
-        const std::string b = std::format("{{\"status\":\"ok\",\"busy\":{},\"slots_busy\":{},\"slots\":{},\"queued\":{}}}",
-                                          hs.active > 0 ? "true" : "false", hs.active, hs.slots, hs.queued);
+        // WDDM-LOG: this process's video memory at the last sample (Windows; absent without WDDM numbers)
+        const std::string vram =
+            hs.vram_ok ? std::format(",\"vram\":{{\"local_mib\":{},\"budget_mib\":{},\"shared_mib\":{},\"spill\":{}}}",
+                                     hs.vram_local >> 20, hs.vram_budget >> 20, hs.vram_shared >> 20, hs.vram_spill ? "true" : "false")
+                       : std::string();
+        const std::string b = std::format("{{\"status\":\"ok\",\"busy\":{},\"slots_busy\":{},\"slots\":{},\"queued\":{}{}}}",
+                                          hs.active > 0 ? "true" : "false", hs.active, hs.slots, hs.queued, vram);
         return sendAll(w, httpResponse(200, "application/json; charset=utf-8", b));
     }
     if (path == "/v1/models" || path == "/models") {

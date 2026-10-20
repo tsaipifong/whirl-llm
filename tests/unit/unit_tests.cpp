@@ -15,6 +15,8 @@
 #include "whirl/device_mem.h"
 #include "whirl/uma_mem.h"
 #include "whirl/vram_limit.h"
+#include "whirl/wddm_watch.h"
+#include "whirl/pool_budget.h"
 #include "whirl/value_scope.h"
 #if WHIRL_TEST_DLL_DEPS
 #include "release/dll_deps.h"
@@ -1965,6 +1967,208 @@ void testDllDeps() {
 }
 #endif
 
+// ---------------------------------------------------------------------------
+// WDDM-LOG: runtime video memory watch (formatting, spill thresholds, rate limit, recovery, decode drop)
+void testWddmWatch() {
+    using namespace whirl::wddmwatch;
+    constexpr std::uint64_t MiB = 1ull << 20;
+    auto smp = [&](std::uint64_t used_mib, std::uint64_t budget_mib, std::uint64_t shared_mib, std::uint64_t pinned_mib = 0) {
+        Sample s;
+        s.ok = true;
+        s.local_usage = used_mib * MiB;
+        s.local_budget = budget_mib * MiB;
+        s.nonlocal_usage = shared_mib * MiB;
+        s.pinned = pinned_mib * MiB;
+        return s;
+    };
+    auto has = [](const std::optional<Event>& e, const char* t) { return e && e->text.find(t) != std::string::npos; };
+    const Sample base = smp(29000, 31232, 400);
+    // formatting
+    CHECK_EQ(format(smp(29798, 31232, 412), base), std::string("vram local 29.10 / budget 30.50 GiB, shared 412 MiB (+12 MiB since start)"));
+    CHECK_EQ(format(base, base), std::string("vram local 28.32 / budget 30.50 GiB, shared 400 MiB (+0 MiB since start)"));
+    CHECK_EQ(format(smp(29000, 31232, 397), base), std::string("vram local 28.32 / budget 30.50 GiB, shared 397 MiB (-3 MiB since start)"));
+    CHECK_EQ(format(smp(29000, 31232, 400), Sample{}), std::string("vram local 28.32 / budget 30.50 GiB, shared 400 MiB"));
+    CHECK_EQ(format(Sample{}, base), std::string());
+    {
+        Sample r = smp(29000, 31232, 400, 9318);
+        r.rss = 18636ull * MiB;
+        CHECK_EQ(format(r, base), std::string("vram local 28.32 / budget 30.50 GiB, shared 400 MiB (+0 MiB since start), ram 18.20 GiB (pinned 9.10 GiB)"));
+        r.rss = 0;
+        CHECK_EQ(format(r, Sample{}), std::string("vram local 28.32 / budget 30.50 GiB, shared 400 MiB, pinned ram 9.10 GiB"));
+    }
+
+    // no WDDM numbers: never warns
+    {
+        Watch w(Sample{});
+        CHECK(!w.check(smp(40000, 31232, 9000), 0.0));
+        Watch w2(base);
+        CHECK(!w2.check(Sample{}, 0.0));
+    }
+    // under the budget, growth up to 256 MiB: quiet
+    {
+        Watch w(base);
+        CHECK(!w.check(base, 0.0));
+        CHECK(!w.check(smp(31232, 31232, 400 + 256), 10.0));  // at the budget, exactly +256: no spill
+        CHECK(!w.spilling());
+        CHECK_EQ(w.warnings(), 0u);
+    }
+    // pinned host memory WHIRL allocated later (vision encoder, checkpoints) is not a spill
+    {
+        Watch w(smp(29000, 31232, 400, 2000));
+        CHECK(!w.check(smp(29000, 31232, 400 + 1000, 3000), 0.0));
+        CHECK(w.check(smp(29000, 31232, 400 + 1300, 3000), 0.0).has_value());  // 300 MiB beyond the new pinned memory
+    }
+    // shared growth: warning at the start (all four parts), repeated at most once a minute while it lasts,
+    // INFO when it is over
+    {
+        Watch w(base);
+        const auto a = w.check(smp(29000, 31232, 400 + 300), 100.0);
+        CHECK(a && a->warn);
+        CHECK(a && a->text.rfind("GPU memory spill: WHIRL's shared GPU memory grew by 300 MiB since startup: Windows has moved part "
+                                 "of WHIRL's GPU buffers to system RAM", 0) == 0);
+        CHECK(has(a, "Generation is getting slower now: decode can become several times slower."));
+        CHECK(has(a, "What you can do: close other programs that use the GPU (browsers, games, other AI tools); or restart the "
+                     "server with a smaller -c, with --parallel 1, or with WHIRL_POOL_RESERVE_MB=3072 (or larger)."));
+        CHECK(has(a, "Now: vram local 28.32 / budget 30.50 GiB, shared 700 MiB (+300 MiB since start)"));
+        CHECK(!has(a, "over the Windows"));
+        CHECK(w.spilling());
+        CHECK(!w.check(smp(29000, 31232, 400 + 300), 130.0));  // within the minute
+        CHECK(!w.check(smp(29000, 31232, 400 + 900), 150.0));  // grew, still within the minute
+        const auto b = w.check(smp(29000, 31232, 400 + 900), 160.0);
+        CHECK(b && b->warn);
+        CHECK(b && b->text.rfind("GPU memory spill continues (60 s so far): WHIRL's shared GPU memory grew by 900 MiB", 0) == 0);
+        const auto c = w.check(smp(29000, 31232, 400 + 900), 400.0);
+        CHECK(c && c->text.rfind("GPU memory spill continues (5 min so far): ", 0) == 0);
+        const auto d = w.check(smp(29000, 31232, 400 + 100), 410.0);
+        CHECK(d && !d->warn);
+        CHECK(d && d->text.rfind("GPU memory spill is over (it lasted 5 min): WHIRL's GPU memory is back under the Windows video "
+                                 "memory budget and its shared GPU memory is back within 256 MiB of startup, so decode is no "
+                                 "longer slowed by it. Now: vram local 28.32",
+                                 0) == 0);
+        CHECK(!w.spilling());
+        CHECK(!w.check(smp(29000, 31232, 400 + 100), 420.0));  // one INFO only
+        CHECK_EQ(w.warnings(), 3u);
+    }
+    // local over the budget: named with the amount; a new spill within the minute after the last warning
+    // waits for the minute; one that ends before any warning gets no INFO line
+    {
+        Watch w(base);
+        const auto a = w.check(smp(31300, 31232, 400), 0.0);
+        CHECK(a && a->warn);
+        CHECK(a && a->text.rfind("GPU memory spill: WHIRL's GPU memory is 0.07 GiB over the Windows video memory (WDDM) budget, "
+                                 "so Windows can move part of WHIRL's GPU buffers to system RAM at any time.",
+                                 0) == 0);
+        CHECK(has(a, "Generation gets slower as soon as it does: decode can become several times slower."));
+        CHECK(has(w.check(smp(30000, 31232, 400), 10.0), "GPU memory spill is over (it lasted 10 s)"));
+        CHECK(!w.check(smp(31300, 31232, 400), 20.0));  // new spill, 20 s after the last warning: held
+        CHECK(!w.check(smp(30000, 31232, 400), 30.0));  // over before it was reported: no INFO
+        CHECK(!w.check(smp(31300, 31232, 400), 40.0));
+        const auto b = w.check(smp(31300, 31232, 400), 61.0);
+        CHECK(b && b->text.rfind("GPU memory spill: ", 0) == 0);  // a new spill, not "continues"
+        CHECK_EQ(w.warnings(), 2u);
+    }
+    // over the budget and grown: both in one sentence
+    {
+        Watch w(base);
+        const auto a = w.check(smp(31300, 31232, 1000), 0.0);
+        CHECK(has(a, "GPU memory spill: WHIRL's GPU memory is 0.07 GiB over the Windows video memory (WDDM) budget, and Windows "
+                     "has moved part of WHIRL's GPU buffers to system RAM (shared GPU memory +600 MiB since startup)."));
+        CHECK(has(a, "Generation is getting slower now"));
+    }
+    // config defaults (the server uses them: 256 MiB, 60 s)
+    {
+        Config c;
+        CHECK_EQ(c.grow_warn, 256 * MiB);
+        CHECK(c.min_gap_s == 60.0);
+    }
+
+    // decode speed drop within a request
+    {
+        DecodeWatch d;
+        CHECK(!d.report(100, 1000.0, 25, false));  // before the early window (200 tokens)
+        CHECK(!d.report(200, 2000.0, 50, false));  // early: 100 tok/s, 40 ms per cycle
+        CHECK(!d.report(300, 3000.0, 75, false));  // 1 s window: too short to judge, keeps growing
+        CHECK(!d.report(400, 4500.0, 100, false));  // 2.5 s window at 80 tok/s: -20%, fine
+        const auto a = d.report(500, 7000.0, 125, true);  // 100 tok in 2.5 s = 40 tok/s, 100 ms per cycle, spill seen
+        CHECK(a && a->warn);
+        CHECK(a && a->text == "decode slowed from 100.0 to 40.0 tok/s (60% slower than early in this request; 40.0 -> 100.0 ms "
+                              "per decode cycle), likely because of the GPU memory spill above");
+        CHECK(!d.report(600, 10000.0, 150, true));  // once per request
+        d.reset();
+        CHECK(!d.report(200, 2000.0, 50, false));
+        const auto b = d.report(300, 6000.0, 150, false);  // 25 tok/s at the same 40 ms per cycle: fewer tokens per cycle
+        CHECK(b && !b->warn);
+        CHECK(b && b->text == "decode slowed from 100.0 to 25.0 tok/s (75% slower than early in this request; 40.0 -> 40.0 ms per "
+                              "decode cycle); no GPU memory spill is seen, and each cycle is not slower: fewer tokens per cycle "
+                              "(fewer drafts accepted)");
+        DecodeWatch e;
+        CHECK(!e.report(200, 2000.0, 0, false));
+        const auto c = e.report(300, 5000.0, 0, false);  // no cycle numbers
+        CHECK(c && c->text == "decode slowed from 100.0 to 33.3 tok/s (67% slower than early in this request); no GPU memory spill is seen");
+        DecodeWatch f;
+        CHECK(!f.report(200, 2000.0, 50, false));
+        CHECK(!f.report(300, 3600.0, 75, false));  // 62.5 tok/s: -37.5%, under the 40% line
+    }
+}
+
+// ---------------------------------------------------------------------------
+// issue #5: KV pool re-fit to the WDDM budget read after the pool is allocated
+void testPoolBudget() {
+    using whirl::poolbudget::fitPool;
+    constexpr std::uint64_t MiB = 1ull << 20;
+    constexpr double GiB = 1073741824.0;
+    auto gib = [&](double g) { return static_cast<std::uint64_t>(g * GiB); };
+    const std::uint64_t per_tok = 36966;  // 36.1 KiB/token (q8h KV, Swift-1.5 27B), as in the issue #5 log
+    const std::uint32_t page = 256;
+    const std::uint64_t margin = 768 * MiB;
+    // the user's numbers: sized with budget 31.02 GiB, used 17.64 GiB -> room 12.63 GiB -> pool 366592 tokens
+    const std::uint64_t room = gib(31.02) - gib(17.64) - margin;
+    const std::uint32_t pool0 = static_cast<std::uint32_t>(room / per_tok / page * page);
+    CHECK(pool0 >= 366080 && pool0 <= 367104);  // within two pages of the log's 366592 (rounded GiB figures)
+    // with the pool allocated: local 29.92 GiB, budget 29.55 GiB (after pinning) -> must shrink
+    {
+        const auto t = fitPool(pool0, gib(29.92), gib(29.55), margin, per_tok, page, 4096);
+        CHECK(t.shrink);
+        CHECK(!t.at_floor);
+        CHECK_EQ(t.pool_tokens % page, 0u);
+        CHECK(t.over == gib(29.92) + margin - gib(29.55));
+        // after freeing the dropped pages, local + margin fits under the post-pin budget
+        const std::uint64_t freed = static_cast<std::uint64_t>(pool0 - t.pool_tokens) * per_tok;
+        CHECK(gib(29.92) - freed + margin <= gib(29.55));
+        // and not more than one page beyond what is needed
+        CHECK(gib(29.92) - freed + margin + page * per_tok > gib(29.55));
+        std::printf("pool budget: issue #5 numbers: pool %u -> %u tokens (%.2f -> %.2f GiB)\n", pool0, t.pool_tokens,
+                    pool0 * static_cast<double>(per_tok) / GiB, t.pool_tokens * static_cast<double>(per_tok) / GiB);
+    }
+    // fits: no change (also exactly at the line)
+    {
+        const auto t = fitPool(pool0, gib(29.00), gib(31.02), margin, per_tok, page, 4096);
+        CHECK(!t.shrink);
+        CHECK_EQ(t.over, 0u);
+        CHECK_EQ(t.pool_tokens, pool0);
+        const auto e = fitPool(pool0, gib(29.00), gib(29.00) + margin, margin, per_tok, page, 4096);
+        CHECK(!e.shrink);
+    }
+    // budget unknown: no change
+    CHECK(!fitPool(pool0, gib(40.0), 0, margin, per_tok, page, 4096).shrink);
+    // far over: kept at the smallest pool, flagged
+    {
+        const auto t = fitPool(65536, gib(40.0), gib(20.0), margin, per_tok, page, 4096);
+        CHECK(t.shrink);
+        CHECK(t.at_floor);
+        CHECK_EQ(t.pool_tokens, 4096u);
+        const auto u = fitPool(4096, gib(40.0), gib(20.0), margin, per_tok, page, 4096);  // already there
+        CHECK(!u.shrink);
+        CHECK(u.at_floor);
+        CHECK(u.over > 0);
+    }
+    // one byte over: one page less
+    {
+        const auto t = fitPool(8192, gib(10.0) + 1, gib(10.0) + margin, margin, per_tok, page, 4096);
+        CHECK_EQ(t.pool_tokens, 8192u - page);
+    }
+}
+
 int main() {
     whirl::test::clearWhirlEnv();  // FR-TEST P3-11
 #if WHIRL_TEST_DLL_DEPS
@@ -1987,6 +2191,8 @@ int main() {
     testDflashPolicy();
     testLocalMemTaken();
     testUmaCheck();
+    testWddmWatch();
+    testPoolBudget();
     std::printf("unit tests: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

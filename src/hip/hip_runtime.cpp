@@ -191,15 +191,42 @@ void free(DevPtr p) {
     t.sizes.erase(it);
 }
 
+namespace {
+// WDDM-LOG: live pinned host allocations (few, made at load / checkpoint / vision setup; never per token)
+struct PinnedTrack {
+    std::mutex mu;
+    std::unordered_map<std::uintptr_t, std::size_t> sizes;
+    std::atomic<std::uint64_t> total{0};
+};
+PinnedTrack& pinnedTrack() {
+    static PinnedTrack t;
+    return t;
+}
+}  // namespace
+
 void* hostMalloc(std::size_t bytes) {
     void* p = nullptr;
-    check(hipHostMalloc(&p, std::max<std::size_t>(bytes, 1), 0), "hipHostMalloc");
+    const std::size_t n = std::max<std::size_t>(bytes, 1);
+    check(hipHostMalloc(&p, n, 0), "hipHostMalloc");
+    PinnedTrack& t = pinnedTrack();
+    std::lock_guard<std::mutex> lk(t.mu);
+    t.sizes[reinterpret_cast<std::uintptr_t>(p)] = n;
+    t.total += n;
     return p;
 }
 
 void hostFree(void* p) {
-    if (p) (void)hipHostFree(p);
+    if (!p) return;
+    (void)hipHostFree(p);
+    PinnedTrack& t = pinnedTrack();
+    std::lock_guard<std::mutex> lk(t.mu);
+    const auto it = t.sizes.find(reinterpret_cast<std::uintptr_t>(p));
+    if (it == t.sizes.end()) return;
+    t.total -= it->second;
+    t.sizes.erase(it);
 }
+
+std::uint64_t pinnedHostBytes() { return pinnedTrack().total.load(); }
 
 void upload(DevPtr dst, const void* src, std::size_t bytes) {
     check(hipMemcpy(ptr(dst), src, bytes, hipMemcpyHostToDevice), "hipMemcpy H2D");

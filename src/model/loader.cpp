@@ -836,6 +836,32 @@ void Model::allocKvPool(u32 tokens) {
     }
 }
 
+void Model::freeKvPool() {
+    if (pool_pages == 0) return;
+    auto drop = [&](DevPtr& p) {
+        if (p != 0) freeAlloc(p);
+        p = 0;
+    };
+    drop(mtp_kc);
+    drop(mtp_vc);
+    drop(mtp_ks);
+    drop(mtp_vs);
+    for (u32 i = 0; i < cfg.n_layer; ++i) {
+        if (!cfg.isAttn(i)) continue;
+        drop(kcache[i]);
+        drop(vcache[i]);
+        drop(kscale[i]);
+        drop(vscale[i]);
+    }
+    if (seqs.empty()) {
+        // allocKvPool made the single-sequence page table
+        drop(ptab);
+        seq_pages = 0;
+        max_ctx = 0;
+    }
+    pool_pages = 0;
+}
+
 void Model::mapPages(u32 s, u32 first, std::span<const i32> phys) {
     if (phys.empty()) return;
     if (first + phys.size() > seq_pages) throw ModelError("ContextTooLong");

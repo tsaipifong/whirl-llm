@@ -779,6 +779,10 @@ public:
 
     // ---- KV pool and sequences
     void allocKvPool(std::uint32_t tokens);
+    // Frees the KV pool arrays so allocKvPool can run again with another size (issue #5: the server
+    // shrinks the pool when the WDDM budget read after allocation is lower). Only before anything
+    // used the pool; the page table of setupSeqs stays.
+    void freeKvPool();
     void mapPages(std::uint32_t s, std::uint32_t first, std::span<const std::int32_t> phys);
     void setupSeqs(std::uint32_t n, std::uint32_t slot_ctx);
     void selectSeq(std::uint32_t s);

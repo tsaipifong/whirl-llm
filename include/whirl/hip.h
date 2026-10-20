@@ -84,6 +84,8 @@ DevPtr malloc(std::size_t bytes);
 void free(DevPtr p);
 void* hostMalloc(std::size_t bytes);  // pinned host memory
 void hostFree(void* p);
+// pinned host bytes live from hostMalloc (WDDM-LOG: the server shows it next to the VRAM numbers)
+std::uint64_t pinnedHostBytes();
 void upload(DevPtr dst, const void* src, std::size_t bytes);
 void download(void* dst, DevPtr src, std::size_t bytes);
 void uploadAsync(DevPtr dst, const void* src, std::size_t bytes, Stream s);

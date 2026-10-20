@@ -294,8 +294,20 @@ std::string Engine::randId(std::string_view prefix, std::size_t n) {
 }
 
 Engine::Health Engine::health() {
-    std::lock_guard<std::mutex> lk(q_mutex_);
-    return {n_active_, queue_.size(), slots_.size()};
+    Health h;
+    {
+        std::lock_guard<std::mutex> lk(q_mutex_);
+        h.active = n_active_;
+        h.queued = queue_.size();
+        h.slots = slots_.size();
+    }
+    std::lock_guard<std::mutex> lk(vram_mu_);
+    h.vram_ok = vram_last_.ok;
+    h.vram_spill = vram_spill_;
+    h.vram_local = vram_last_.local_usage;
+    h.vram_budget = vram_last_.local_budget;
+    h.vram_shared = vram_last_.nonlocal_usage;
+    return h;
 }
 
 Engine::Stats Engine::stats() const {
@@ -1679,6 +1691,7 @@ void Engine::finishPrefill(Slot& sl) {
     sl.td0 = Clock::now();
     sl.last_log_t = sl.td0;
     sl.last_log_n = 0;
+    sl.dec_watch.reset();
     sl.done = emit(sl, first);
     flushOut(sl);
     sl.phase = Phase::decode;
@@ -2256,6 +2269,12 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
             }
             sl.last_log_n = sl.n_gen;
             sl.last_log_t = Clock::now();
+            // WDDM-LOG: a sharp drop against the request's early speed; the spill is named as the likely
+            // cause only while one is seen (vram_watch_ state from the last status-line sample)
+            if (const auto ev = sl.dec_watch.report(sl.n_gen, el, sl.cycles, vram_warn_ && vram_watch_.spilling())) {
+                if (ev->warn) logW("req {} | slot {} | {}", sl.reqId(), sl.id, ev->text);
+                else logI("req {} | slot {} | {}", sl.reqId(), sl.id, ev->text);
+            }
         }
     }
     if (p) {
@@ -2412,6 +2431,7 @@ void Engine::finishJob(Slot& sl) {
          "tok",
          job.id, sl.id, fin.reason, sl.st.gone ? " (client disconnected)" : "", n_out, fin.reason_len, fin.content_len,
          fin.n_tools, sl.cache_tokens.size());
+    if (const std::string vram = vramNote(); !vram.empty()) logI("req {} | slot {} | {}", job.id, sl.id, vram);
     releaseSlot(sl);
     // item G: copy the idle slot's new content to the host tier (async)
     try {
@@ -3185,11 +3205,14 @@ void Engine::logBatchStats(bool force) {
         const std::string lit = stat_lit_drafts_ > 0
                                     ? std::format(", {:.2f} literal drafts/cycle (DFlash2 / n-gram)", static_cast<double>(stat_lit_drafts_) / cyc)
                                     : std::string();
+        // WDDM-LOG: this process's video memory at the same cadence (issues #5 / #6)
+        const std::string vram = vramNote();
         logI("batch | slots busy {}/{} (decode {}, prefill {}) | {} cycles, {:.2f} slots/cycle, {:.2f} rows/cycle, {:.2f} "
-             "drafts/cycle{} | aggregate tg {:.1f} tok/s, prefill {:.0f} tok/s over {:.1f} s",
+             "drafts/cycle{} | aggregate tg {:.1f} tok/s, prefill {:.0f} tok/s over {:.1f} s{}{}",
              n_dec + n_pf, slots_.size(), n_dec, n_pf, stat_cycles_, static_cast<double>(stat_slots_) / cyc,
              static_cast<double>(stat_rows_) / cyc, static_cast<double>(stat_drafts_) / cyc, lit,
-             static_cast<double>(stat_tokens_) * 1000.0 / el, static_cast<double>(stat_prefill_tok_) * 1000.0 / el, el / 1000.0);
+             static_cast<double>(stat_tokens_) * 1000.0 / el, static_cast<double>(stat_prefill_tok_) * 1000.0 / el, el / 1000.0,
+             vram.empty() ? "" : " | ", vram);
     }
     stat_t0_ = Clock::now();
     stat_tokens_ = stat_cycles_ = stat_rows_ = stat_slots_ = stat_drafts_ = stat_lit_drafts_ = 0;
@@ -3201,6 +3224,50 @@ void Engine::logBatchStats(bool force) {
         logI("batch | decode floor: {} prefill forwards while decoding, {} decode cycles held prefill back", stat_floor_periods_,
              stat_floor_waits_);
     stat_floor_periods_ = stat_floor_waits_ = 0;
+}
+
+void Engine::setVramProbe(std::function<wddmwatch::Sample()> probe, bool warn) {
+    vram_probe_ = std::move(probe);
+    vram_warn_ = warn;
+    if (!vram_probe_) return;
+    // the baseline, and the cost of one sample (taken twice: the first also builds the DXGI factory's caches)
+    const TimePoint t0 = Clock::now();
+    const wddmwatch::Sample base = vram_probe_();
+    const double first_us = msSince(t0) * 1000.0;
+    const TimePoint t1 = Clock::now();
+    (void)vram_probe_();
+    const double next_us = msSince(t1) * 1000.0;
+    vram_watch_ = wddmwatch::Watch(base);
+    if (!base.ok) {
+        vram_probe_ = nullptr;
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lk(vram_mu_);
+        vram_last_ = base;
+    }
+    logI("vram watch: {} | sampled with each 'batch |' line and at request end ({:.0f} us per sample, first {:.0f} us){}",
+         wddmwatch::format(base, base), next_us, first_us,
+         warn ? "; warns while GPU memory spills (local usage over the budget, or shared grown by more than 256 MiB)"
+              : "; integrated GPU: numbers only, no warning");
+}
+
+std::string Engine::vramNote() {
+    if (!vram_probe_) return {};
+    const wddmwatch::Sample s = vram_probe_();
+    if (vram_warn_) {
+        const double now_s = std::chrono::duration<double>(Clock::now().time_since_epoch()).count();
+        if (const auto ev = vram_watch_.check(s, now_s)) {
+            if (ev->warn) logW("{}", ev->text);
+            else logI("{}", ev->text);
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lk(vram_mu_);
+        vram_last_ = s;
+        vram_spill_ = vram_warn_ && vram_watch_.spilling();
+    }
+    return wddmwatch::format(s, vram_watch_.baseline());
 }
 
 void Engine::submitAndWait(Job& job) {

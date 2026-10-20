@@ -21,6 +21,7 @@
 #include "whirl/model.h"
 #include "whirl/prefill_schedule.h"
 #include "whirl/tokenizer.h"
+#include "whirl/wddm_watch.h"
 
 #include <array>
 #include <atomic>
@@ -28,6 +29,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -257,6 +259,8 @@ struct Slot : cache::SlotCache {
     std::size_t n_batch = 0;
     std::uint32_t last_log_n = 0;
     TimePoint last_log_t{};
+    // WDDM-LOG: sharp decode slowdown within the request (checked at each "gen:" report)
+    wddmwatch::DecodeWatch dec_watch;
 
     std::uint64_t reqId() const { return job ? job->id : 0; }
 };
@@ -411,6 +415,9 @@ public:
         std::uint32_t active = 0;
         std::size_t queued = 0;
         std::size_t slots = 0;
+        // WDDM-LOG: the last video memory sample (vram_ok false: no probe / no sample yet)
+        bool vram_ok = false, vram_spill = false;
+        std::uint64_t vram_local = 0, vram_budget = 0, vram_shared = 0;
     };
     Health health();
 
@@ -423,6 +430,11 @@ public:
     }
     void setNumerics(std::string j) { opt_.numerics_json = std::move(j); }
     void setKvSsdMode(std::string m) { opt_.kv_ssd_mode = std::move(m); }
+    // WDDM-LOG (issues #5 / #6): before runLoop, after everything sized at startup is allocated. The
+    // probe (hip::wddmMemInfo on Windows) is sampled for each "batch |" status line and at each request
+    // end, never per decode cycle; its first sample is the baseline for the non-local growth. warn =
+    // false (UMA iGPU, where "shared" is the same RAM) logs the numbers without the warning.
+    void setVramProbe(std::function<wddmwatch::Sample()> probe, bool warn);
     const Tokenizer& tokenizer() const { return tok_; }
     const ChatTokens& chatTokens() const { return ct_; }
     ServerModel& model() { return m_; }
@@ -551,6 +563,8 @@ private:
     void failJobNoSlot(Job& job);
     void writeError(Job& job, int status, const std::string& msg);
     void logBatchStats(bool force);
+    // samples the WDDM probe (warns through vram_watch_); "" without a probe
+    std::string vramNote();
     void abortQueued(std::unique_lock<std::mutex>& lk);
     void initCkpt(Ckpt& c, bool host_ok);
     // vision: image embeddings (cache by content hash), per-slot image maps, idle release
@@ -620,6 +634,13 @@ private:
                   stat_lit_drafts_ = 0,  // FR-SRV P2-5: DFlash2 / n-gram drafts verified (all slots)
                   stat_prefill_tok_ = 0, stat_seg_batches_ = 0, stat_seg_chunks_ = 0;
     std::uint64_t stat_dfl_cycles_ = 0, stat_dfl_drafted_ = 0, stat_dfl_accepted_ = 0, stat_dfl_cold_ = 0, stat_dfl_gap_ = 0;
+    // WDDM-LOG: runtime video memory watch (setVramProbe)
+    std::function<wddmwatch::Sample()> vram_probe_;
+    wddmwatch::Watch vram_watch_;
+    bool vram_warn_ = false;
+    std::mutex vram_mu_;  // vram_last_ / vram_spill_ for health() (HTTP threads)
+    wddmwatch::Sample vram_last_;
+    bool vram_spill_ = false;
     std::vector<std::uint32_t> crlf_norm_;
     // host tiers
     tier::Tier* tier_ = nullptr;

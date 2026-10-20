@@ -22,9 +22,11 @@
 #include "whirl/gguf.h"
 #include "whirl/hip.h"
 #include "whirl/model.h"
+#include "whirl/pool_budget.h"
 #include "whirl/tokenizer.h"
 #include "whirl/uma_mem.h"
 #include "whirl/vram_limit.h"
+#include "whirl/wddm_watch.h"
 #include "release/release.h"
 
 #include <algorithm>
@@ -42,6 +44,7 @@
 #ifdef _WIN32
 #include <windows.h>
 #include <timeapi.h>
+#include <psapi.h>  // K32GetProcessMemoryInfo (kernel32; WDDM-LOG RAM figure)
 #pragma comment(lib, "winmm.lib")  // timeBeginPeriod (whirl-server and whirl serve)
 #endif
 
@@ -1213,6 +1216,41 @@ int serveMain(int argc, char** argv, const char* program) {
                  static_cast<double>(per_tok * pool_tokens) / (1024.0 * 1024.0 * 1024.0), ex.what());
             throw;
         }
+        // issue #5: the WDDM budget read when the pool was sized can be lower once the pool exists (31.02 ->
+        // 29.55 GiB on a user's R9700 with a 12 GiB RAM tier: started 0.37 GiB over the budget, decode slowed
+        // down as Windows moved GPU memory to system RAM). Read it again now and shrink the pool (whole pages,
+        // before anything uses it) until local usage + margin fits; up to 3 rounds. Same conditions as the
+        // budget rule above: a pool sized from memory, WDDM numbers available, not the UMA iGPU, no
+        // WHIRL_POOL_RESERVE_MB. Output is unchanged (only the pool's size changes).
+        if (!pool_req && !reserve_explicit && wddm0.ok && !is_uma) {
+            for (int round = 0; round < 3; ++round) {
+                const hip::WddmMemInfo wa = hip::wddmMemInfo();
+                if (!wa.ok) break;
+                const std::uint32_t have = model.pool_pages * kv_page;
+                const poolbudget::Trim tr =
+                    poolbudget::fitPool(have, wa.local_usage, wa.local_budget, budget_margin, per_tok, kv_page, 4096);
+                if (tr.over == 0) {
+                    if (round > 0 || wa.local_budget != wddm0.local_budget)
+                        logI("kv pool check: WDDM budget {:.2f} GiB now ({:.2f} GiB when the pool was sized), local {:.2f} GiB + "
+                             "margin {} MiB fits",
+                             wa.local_budget / 1073741824.0, wddm0.local_budget / 1073741824.0, wa.local_usage / 1073741824.0,
+                             budget_margin >> 20);
+                    break;
+                }
+                if (!tr.shrink) break;  // already at the smallest pool; warned below / by the WDDM memory line
+                logW("kv pool check: WDDM budget {:.2f} GiB now ({:.2f} GiB when the pool was sized), local {:.2f} GiB + margin {} "
+                     "MiB is {:.2f} GiB over -> shrinking the KV pool from {} to {} tokens so WHIRL stays in VRAM{}",
+                     wa.local_budget / 1073741824.0, wddm0.local_budget / 1073741824.0, wa.local_usage / 1073741824.0,
+                     budget_margin >> 20, tr.over / 1073741824.0, have, tr.pool_tokens,
+                     tr.at_floor ? " (the smallest pool, 4096 tokens: it may still not fit)" : "");
+                model.freeKvPool();
+                model.allocKvPool(tr.pool_tokens);
+                if (slot_ctx_eff > tr.pool_tokens) {
+                    slot_ctx_eff = tr.pool_tokens;
+                    engine.setCtx(slot_ctx_eff);
+                }
+            }
+        }
         const double ck_mb = static_cast<double>(n_gdn * (conv_bytes + ssm_bytes) + static_cast<std::uint64_t>(V) * 4 +
                                                  static_cast<std::uint64_t>(cfg.n_embd) * 4) /
                              (1024.0 * 1024.0);
@@ -1280,7 +1318,20 @@ int serveMain(int argc, char** argv, const char* program) {
                     "before the KV pool (declared pinned host memory: embedding {:.0f} MiB{}); growth {:.0f} MiB",
                     w.local_usage / 1073741824.0, w.local_budget / 1073741824.0, w.nonlocal_usage / 1048576.0,
                     wddm0.nonlocal_usage / 1048576.0, embd_pinned / 1048576.0, tier_pre ? ", RAM tier" : "", grow / 1048576.0);
-                if (over)
+                // same test and wording as the runtime watch (wddm_watch.h), against the same baseline
+                const auto smp = [](const hip::WddmMemInfo& m) {
+                    wddmwatch::Sample s;
+                    s.ok = m.ok;
+                    s.local_budget = m.local_budget;
+                    s.local_usage = m.local_usage;
+                    s.nonlocal_usage = m.nonlocal_usage;
+                    return s;
+                };
+                wddmwatch::Watch startup(smp(wddm0));
+                const auto ev = over && !is_uma ? startup.check(smp(w), 0.0) : std::nullopt;
+                if (ev && ev->warn)
+                    logW("{} | at startup: {}", msg, ev->text);
+                else if (over)
                     logW("{} -- over the WDDM budget, part of the GPU buffers may live in system memory and decode can be several "
                          "times slower; set WHIRL_POOL_RESERVE_MB larger (e.g. 3072) or give --ctx",
                          msg);
@@ -1455,6 +1506,22 @@ int serveMain(int argc, char** argv, const char* program) {
         if (timer_probe)
             logI("timer probe | sleep 1 ms: {:.2f} ms before, {:.2f} ms after timeBeginPeriod(1) | sleep 200 us: {:.2f} / {:.2f} ms",
                  probe_1ms, sleepMs(std::chrono::milliseconds(1), 50), probe_200us, sleepMs(std::chrono::microseconds(200), 50));
+        // WDDM-LOG (issues #5 / #6): video memory and RAM in the periodic status line and at request end, against a
+        // baseline taken now that the KV pool, RAM tier and vision buffers exist
+        engine.setVramProbe(
+            [] {
+                const hip::WddmMemInfo w = hip::wddmMemInfo();
+                wddmwatch::Sample s;
+                s.ok = w.ok;
+                s.local_budget = w.local_budget;
+                s.local_usage = w.local_usage;
+                s.nonlocal_usage = w.nonlocal_usage;
+                s.pinned = hip::pinnedHostBytes();
+                PROCESS_MEMORY_COUNTERS pmc{};
+                if (K32GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc))) s.rss = pmc.WorkingSetSize;
+                return s;
+            },
+            !is_uma);
         HttpOptions ho;
         ho.cors_origins = opt.cors_origins;
         ho.allowed_hosts = opt.allowed_hosts;

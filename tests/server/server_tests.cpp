@@ -106,6 +106,8 @@ struct ServerSetup {
     bool allow_files = false;
     std::uint32_t vis_ck_min = 1024;
     HttpOptions http;
+    // WDDM-LOG: injected video memory samples (Engine::setVramProbe), warn as on a discrete GPU
+    std::function<whirl::wddmwatch::Sample()> vram_probe;
 };
 
 // vision: host mock encoder (real stb decode + preprocessing size rule, deterministic
@@ -190,6 +192,7 @@ public:
             engine_->attachTier(tier_.get());
             tier_->start(tc, lay, su.fingerprint);
         }
+        if (su.vram_probe) engine_->setVramProbe(su.vram_probe, true);
         http_ = std::make_unique<HttpServer>(*engine_, su.http);
         http_->start("127.0.0.1", 0);
         loop_ = std::thread([this] { engine_->runLoop(); });
@@ -666,6 +669,76 @@ void testCompatEndpoints() {
     CHECK_EQ(g_log.count("thinking on, reasoning_effort xhigh"), 1u);
     CHECK_EQ(srv.post("/v1/chat/completions", q + R"("reasoning":{"enabled":false}})").status, 200);
     CHECK_EQ(g_log.count("thinking off"), 1u);
+}
+
+// WDDM-LOG (issues #5 / #6): injected WDDM samples -> request-end vram line, spill warning, recovery
+// line, /health "vram" object; model output is not affected (same text with and without a probe)
+void testVramWatch() {
+    auto waitFor = [](const std::function<bool()>& f, int ms) {
+        for (int i = 0; i < ms / 10; ++i) {
+            if (f()) return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        return f();
+    };
+    std::mutex mu;
+    whirl::wddmwatch::Sample cur;
+    constexpr std::uint64_t MiB = 1ull << 20;
+    cur.ok = true;
+    cur.local_usage = 29000 * MiB;
+    cur.local_budget = 31232 * MiB;
+    cur.nonlocal_usage = 400 * MiB;
+    auto set = [&](std::uint64_t used, std::uint64_t budget, std::uint64_t shared) {
+        std::lock_guard<std::mutex> lk(mu);
+        cur.local_usage = used * MiB;
+        cur.local_budget = budget * MiB;
+        cur.nonlocal_usage = shared * MiB;
+    };
+    const std::string q = R"({"messages":[{"role":"user","content":"q"}],"max_tokens":8,"temperature":0})";
+    std::string plain_text;
+    {
+        TestServer plain(baseSetup());
+        const auto r = plain.post("/v1/chat/completions", q);
+        CHECK_EQ(r.status, 200);
+        plain_text = r.body.substr(r.body.find("\"choices\""), r.body.find("\"usage\"") - r.body.find("\"choices\""));
+        CHECK(plain.get("/health").body.find("\"vram\"") == std::string::npos);  // no probe: no object
+    }
+    g_log.clear();
+    ServerSetup su = baseSetup();
+    su.vram_probe = [&] {
+        std::lock_guard<std::mutex> lk(mu);
+        return cur;
+    };
+    TestServer srv(su);
+    CHECK_EQ(g_log.count("vram watch: vram local 28.32 / budget 30.50 GiB, shared 400 MiB (+0 MiB since start)"), 1u);
+    CHECK(srv.get("/health").body.find("\"vram\":{\"local_mib\":29000,\"budget_mib\":31232,\"shared_mib\":400,\"spill\":false}") !=
+          std::string::npos);
+    auto r1 = srv.post("/v1/chat/completions", q);
+    CHECK_EQ(r1.status, 200);
+    CHECK(r1.body.substr(r1.body.find("\"choices\""), r1.body.find("\"usage\"") - r1.body.find("\"choices\"")) == plain_text);
+    // the request-end lines are logged after the response is sent
+    CHECK(waitFor([&] { return g_log.count("| vram local 28.32 / budget 30.50 GiB, shared 400 MiB (+0 MiB since start)") >= 1; }, 5000));
+    CHECK_EQ(g_log.count(" W GPU memory spill"), 0u);
+    // another program takes VRAM: the budget drops under WHIRL's usage, Windows moves 600 MiB out
+    set(29000, 28672, 1000);
+    CHECK_EQ(srv.post("/v1/chat/completions", q).status, 200);
+    CHECK(waitFor([&] {
+        return g_log.count(" W GPU memory spill: WHIRL's GPU memory is 0.32 GiB over the Windows video memory (WDDM) budget, and "
+                           "Windows has moved part of WHIRL's GPU buffers to system RAM (shared GPU memory +600 MiB since startup).") == 1;
+    }, 5000));
+    CHECK(waitFor([&] {
+        return srv.get("/health").body.find("\"vram\":{\"local_mib\":29000,\"budget_mib\":28672,\"shared_mib\":1000,\"spill\":true}") !=
+               std::string::npos;
+    }, 5000));
+    const std::size_t n_vram = g_log.count("| vram local 28.32 / budget 28.00 GiB");
+    CHECK_EQ(srv.post("/v1/chat/completions", q).status, 200);  // still over, within the minute: no repeat
+    CHECK(waitFor([&] { return g_log.count("| vram local 28.32 / budget 28.00 GiB") > n_vram; }, 5000));
+    CHECK_EQ(g_log.count("GPU memory spill continues"), 0u);
+    // the other program exits
+    set(29000, 31232, 450);
+    CHECK_EQ(srv.post("/v1/chat/completions", q).status, 200);
+    CHECK(waitFor([&] { return g_log.count(" I GPU memory spill is over (it lasted ") == 1; }, 5000));
+    CHECK(waitFor([&] { return srv.get("/health").body.find("\"spill\":false") != std::string::npos; }, 5000));
 }
 
 void testEndpoints() {
@@ -3646,6 +3719,7 @@ int main(int argc, char** argv) {
         {"sampler", testSampler},
         {"chat_tokens", testChatTokens},
         {"endpoints", testEndpoints},
+        {"vram_watch", testVramWatch},
         {"compat_endpoints", testCompatEndpoints},
         {"http_limits", testHttpLimits},
         {"http_conn_cap", testHttpConnCap},
