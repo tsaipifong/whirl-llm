@@ -1,0 +1,12 @@
+G model file=Ornith-1.5-35B-A3B-MXFP4.gguf bytes=19819767584
+G header format=1 suite=server
+G srv.short status=200 n=48 prompt=43 cached=0 finish=length h=790c48d3ef3df3a7
+G srv.think status=200 n=64 prompt=26 cached=0 finish=length h=e2302aa37bd05bfb
+G srv.long status=200 n=24 prompt=6059 cached=0 finish=stop h=7ee51ece394e0347
+G srv.vis.image file=shapes.png bytes=5673
+G srv.vis status=200 n=32 prompt=244 cached=0 finish=length h=cd6721dd1229ab85
+G srv.sessA.t1 status=200 n=32 prompt=3716 cached=0 finish=length h=b8ad33135a30db2a
+G srv.sessB.t1 status=200 n=32 prompt=3724 cached=0 finish=length h=7bb210dc3ccd95d1
+G srv.sessA.t2.ram status=200 n=32 prompt=3773 cached=3747 finish=length h=9ecf2a56cebd64af
+G srv.sessB.t2 status=200 n=32 prompt=3781 cached=3755 finish=length h=7fbd6fb544083df3
+G srv.sessA.t2.ssd status=200 n=32 prompt=3773 cached=3773 finish=length h=9ecf2a56cebd64af

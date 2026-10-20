@@ -1,0 +1,12 @@
+G model file=Swift-1.5-Qwen3.8-27B-MXFP4-A-outQ6_K.gguf bytes=15815469376
+G header format=1 suite=server
+G srv.short status=200 n=48 prompt=43 cached=0 finish=length h=9ad6d5603948738c
+G srv.think status=200 n=64 prompt=26 cached=0 finish=length h=7927e59547f548c6
+G srv.long status=200 n=32 prompt=6059 cached=0 finish=length h=83969c641c32dc41
+G srv.vis.image file=shapes.png bytes=5673
+G srv.vis status=200 n=32 prompt=244 cached=0 finish=length h=70fdce192ae5aaa2
+G srv.sessA.t1 status=200 n=22 prompt=3716 cached=0 finish=stop h=196813c31da89367
+G srv.sessB.t1 status=200 n=23 prompt=3724 cached=0 finish=stop h=d57a7e880ac3a347
+G srv.sessA.t2.ram status=200 n=12 prompt=3763 cached=3738 finish=stop h=df7867636b9db88b
+G srv.sessB.t2 status=200 n=12 prompt=3772 cached=3747 finish=stop h=503aa2a37b70273f
+G srv.sessA.t2.ssd status=200 n=12 prompt=3763 cached=3763 finish=stop h=df7867636b9db88b
