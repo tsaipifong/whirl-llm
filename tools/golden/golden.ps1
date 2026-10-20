@@ -167,9 +167,10 @@ if ($Action -eq "record") {
     Write-Host "golden: KL gate report $KlReport passed for this exe ($Arch)"
 }
 
-# (model paths above were read from WHIRL_GOLDEN_*; now drop every WHIRL_* variable, restored in the finally below)
+# (model paths above were read from WHIRL_GOLDEN_*; now drop every WHIRL_* variable, restored in the finally below;
+# kept: the R9700 lock marker and WHIRL_LAUNCH_LOG, the ARCH-1 K-0 launch table, which records and changes nothing)
 $savedEnv = @{}
-foreach ($v in @(Get-ChildItem Env: | Where-Object { $_.Name -like "WHIRL_*" -and $_.Name -ne "WHIRL_R9700_LOCK_HELD" })) {
+foreach ($v in @(Get-ChildItem Env: | Where-Object { $_.Name -like "WHIRL_*" -and $_.Name -ne "WHIRL_R9700_LOCK_HELD" -and $_.Name -ne "WHIRL_LAUNCH_LOG" })) {
     $savedEnv[$v.Name] = $v.Value
     [Environment]::SetEnvironmentVariable($v.Name, $null)
 }
