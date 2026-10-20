@@ -208,6 +208,12 @@ def analyze(changes, m, new_rev, old_rev):
                     if fn.idents & outside_ids:
                         users[(f, fn.name)] = fn.idents & outside_ids
             prod = [(f, n) for f, n in users if f"{f}::{n}" in F]
+            # a test function that reads a changed declaration itself (e.g. a table test of a constexpr row) covers it
+            # even when no product function's test list reaches it (ARCH3: device_profile.h field edits)
+            for f, n in users:
+                for exe, srcs in m["executables"].items():
+                    if f in srcs and f"{exe}:{n}" in m["tests"]:
+                        tests.add(f"{exe}:{n}")
             if prod:
                 for f, n in sorted(prod):
                     d = F[f"{f}::{n}"]
