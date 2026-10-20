@@ -9,16 +9,17 @@
 | | |
 |---|---|
 | GPU | **AMD Radeon AI PRO R9700**（RDNA 4，gfx1201，32 GB）或 **Radeon 8060S**（RDNA 3.5，gfx1151，Ryzen AI Max+ 395）。一個行程一張 GPU；其他 GPU 不在正式支援範圍 |
+| Radeon 8060S：GPU 記憶體 | 先在 Armoury Crate 或 BIOS 設定 GPU 記憶體（UMA frame buffer 大小），再重新開機。各模型需要的大小見 [README 的需求表](README_zh-TW.md#需求)；設得太小時，WHIRL 會停下並說明要設多大 |
 | 作業系統 | Windows 11，64 位元 |
 | 驅動程式 | **AMD Software: Adrenalin Edition 26.8.1（驅動程式 32.0.31041.1004）或更新版**，兩張卡相同；更舊的版本未測試 |
-| 其他都不需要 | 不用 HIP SDK、不用 ROCm、不用 Visual C++ 可轉散發套件、不用 Python、不用 WSL |
+| 其他都不需要 | 不用 HIP SDK、不用 ROCm、不用另外安裝 Visual C++ 可轉散發套件、不用 Python、不用 WSL |
 
-驅動程式會安裝 WHIRL 用到的兩個 AMD runtime 檔（`amdhip64_7.dll`、`amd_comgr_3.dll`）。zip 裡另附 AMD 的 `rocm_kpack.dll`：Adrenalin Edition for ROCm 10.1 驅動的 GPU runtime 需要它，但該驅動沒有安裝，所以請讓它留在 `whirl.exe` 旁邊。
+驅動程式會安裝 WHIRL 用到的兩個 AMD runtime 檔（`amdhip64_7.dll`、`amd_comgr_3.dll`）。zip 裡另附 AMD 的 `rocm_kpack.dll`：Adrenalin Edition for ROCm 10.1 驅動的 GPU runtime 需要它，但該驅動沒有安裝，所以請讓它留在 `whirl.exe` 旁邊；它用到的三個 Microsoft Visual C++ 執行階段 DLL（`msvcp140.dll`、`vcruntime140.dll`、`vcruntime140_1.dll`）也基於同樣原因附在 zip 裡，一併保留。
 
 ## 2. 下載
 
-1. 從 [WHIRL 發布頁](https://github.com/tsaipifong/whirl-llm/releases)下載 `whirl-0.2.1-windows-x64.zip`，並核對
-   旁邊公布的 SHA-256：`Get-FileHash .\whirl-0.2.1-windows-x64.zip -Algorithm SHA256`。
+1. 從 [WHIRL 發布頁](https://github.com/tsaipifong/whirl-llm/releases)下載 `whirl-0.2.2-windows-x64.zip`，並核對
+   旁邊公布的 SHA-256：`Get-FileHash .\whirl-0.2.2-windows-x64.zip -Algorithm SHA256`。
 2. 一個支援的 GGUF 模型（清單見 [README](README_zh-TW.md#支援的模型)）。最快的選擇是我們自己量化的 MXFP4
    [`Swift-1.5-Qwen3.8-27B-MXFP4-A-outQ6_K.gguf`](https://huggingface.co/tsaipifong/Swift-1.5-Qwen3.8-27b-MXFP4-GGUF)；
    以下指令假設它存在 `C:\models\`。
@@ -28,9 +29,9 @@
 在「下載」資料夾開啟 PowerShell，貼上：
 
 ```powershell
-Unblock-File .\whirl-0.2.1-windows-x64.zip
-Expand-Archive .\whirl-0.2.1-windows-x64.zip -DestinationPath C:\whirl
-cd C:\whirl\whirl-0.2.1-windows-x64
+Unblock-File .\whirl-0.2.2-windows-x64.zip
+Expand-Archive .\whirl-0.2.2-windows-x64.zip -DestinationPath C:\whirl
+cd C:\whirl\whirl-0.2.2-windows-x64
 .\whirl.exe devices
 .\whirl.exe chat C:\models\Swift-1.5-Qwen3.8-27B-MXFP4-A-outQ6_K.gguf "用兩句話說明 TCP 慢啟動（slow start）。" --max-tokens 400
 ```

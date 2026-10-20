@@ -327,6 +327,8 @@ public:
     // whole blocks shared with that in-flight write than with any file already on the SSD): it waits
     // for that write, so entries due in the same pass (the shutdown flush) share the prefix too.
     bool waitForDedupBase(const Entry* e) const;
+    // test hook (REVIEW-022 F4): entry_id has a write job the IO thread has finished and no tick has reaped yet
+    bool writeFinishedUnreaped(std::uint64_t entry_id) const;
 
     // Arena blocks for logical blocks [lb0, lb1) of e (allocating what is missing).
     bool ensureBlocks(Entry* e, std::size_t lb0, std::size_t lb1);

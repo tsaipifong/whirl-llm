@@ -1854,6 +1854,7 @@ void testDllDeps() {
     v.missing = {"VCRUNTIME140.dll", "MSVCP140.dll"};
     m = dd::message126("amdhip64_7.dll", v, "ADVICE\n");
     CHECK(m.find("missing: VCRUNTIME140.dll, MSVCP140.dll") != std::string::npos);
+    CHECK(m.find("from the WHIRL zip") != std::string::npos);  // 0.2.2 ships them app-locally
     CHECK(m.find("vc_redist.x64.exe") != std::string::npos);
 
     // present, nothing identifiable: still says "found", plus the driver advice
@@ -1875,6 +1876,91 @@ void testDllDeps() {
         CHECK(!r.found_at.empty());
         CHECK(has(r.missing, "rocm_kpack.dll"));
         std::printf("dll_deps: real 3684 case checked (%s)\n", p);
+    }
+
+    // ---- error 127 (0.2.2): a shipped DLL shadows the version a (future) driver expects.
+    // The message must say which file to rename/remove or to use the matching WHIRL release,
+    // and must never tell the user to update or install the driver.
+    auto no_driver_advice = [](const std::string& s) {
+        return s.find("update the driver") == std::string::npos && s.find("Install AMD Software") == std::string::npos &&
+               s.find("newer driver") == std::string::npos;
+    };
+    dd::Shadow127 s;
+    s.found_at = L"C:\\Windows\\System32\\amdhip64_7.dll";
+    s.app_dir = L"C:\\whirl";
+    s.bundled = {"rocm_kpack.dll", "msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll"};
+    s.other_kpack = L"C:\\Windows\\System32\\rocm_kpack.dll";
+    m = dd::message127("amdhip64_7.dll", s);
+    CHECK(m.find("error 127") != std::string::npos);
+    CHECK(m.find("at C:\\Windows\\System32\\amdhip64_7.dll") != std::string::npos);
+    CHECK(m.find("C:\\whirl\\rocm_kpack.dll") != std::string::npos);
+    CHECK(m.find("rename or remove rocm_kpack.dll in C:\\whirl") != std::string::npos);
+    CHECK(m.find("WHIRL release that matches your driver") != std::string::npos);
+    CHECK(m.find("own copy: C:\\Windows\\System32\\rocm_kpack.dll") != std::string::npos);
+    CHECK(m.find("also rename msvcp140.dll, vcruntime140.dll, vcruntime140_1.dll") != std::string::npos);
+    CHECK(no_driver_advice(m));
+    // kpack shipped, no driver copy found, no VC runtime next to it
+    s.bundled = {"rocm_kpack.dll"};
+    s.other_kpack.clear();
+    m = dd::message127("amdhip64_7.dll", s);
+    CHECK(m.find("rename or remove rocm_kpack.dll") != std::string::npos);
+    CHECK(m.find("own copy") == std::string::npos);
+    CHECK(m.find("also rename") == std::string::npos);
+    CHECK(no_driver_advice(m));
+    // only the VC++ runtime shipped (kpack removed by the user): names those files
+    s.bundled = {"msvcp140.dll", "vcruntime140.dll"};
+    m = dd::message127("amdhip64_7.dll", s);
+    CHECK(m.find("rename or remove msvcp140.dll, vcruntime140.dll in C:\\whirl") != std::string::npos);
+    CHECK(m.find("WHIRL release that matches your driver") != std::string::npos);
+    CHECK(no_driver_advice(m));
+    // nothing shipped present
+    s.bundled.clear();
+    m = dd::message127("amdhip64_7.dll", s);
+    CHECK(m.find("None of the DLLs WHIRL ships") != std::string::npos);
+    CHECK(m.find("WHIRL release that matches your driver") != std::string::npos);
+    CHECK(no_driver_advice(m));
+
+    // inspect127 on a real folder: finds the shipped files that exist, ignores the rest
+    {
+        wchar_t tmp[MAX_PATH];
+        CHECK(GetTempPathW(MAX_PATH, tmp) > 0);
+        const std::wstring dir = std::wstring(tmp) + L"whirl_test_127_" + std::to_wstring(GetCurrentProcessId());
+        CHECK(CreateDirectoryW(dir.c_str(), nullptr) != 0);
+        const std::wstring files[] = {dir + L"\\rocm_kpack.dll", dir + L"\\vcruntime140.dll", dir + L"\\amdhip64_7.dll"};
+        for (const std::wstring& f : files) {
+            HANDLE h = CreateFileW(f.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+            CHECK(h != INVALID_HANDLE_VALUE);
+            if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+        }
+        const dd::Shadow127 r = dd::inspect127(dir + L"\\amdhip64_7.dll", dir + L"\\");
+        CHECK(r.found_at == dir + L"\\amdhip64_7.dll");
+        CHECK(r.app_dir == dir);
+        CHECK(r.bundled.size() == 2 && has(r.bundled, "rocm_kpack.dll") && has(r.bundled, "vcruntime140.dll"));
+        // the runtime's own folder is the app folder here, so its kpack is ours, not "the driver's copy"
+        CHECK(r.other_kpack.find(dir) == std::wstring::npos);
+        for (const std::wstring& f : files) DeleteFileW(f.c_str());
+        RemoveDirectoryW(dir.c_str());
+    }
+    CHECK(!dd::exeDir().empty());
+
+    // Optional real case: WHIRL_TEST_KPACK127_DIR = folder with the ROCm 10.1 driver's amdhip64_7.dll
+    // and a rocm_kpack.dll that lacks its exports (a stand-in for a mismatched kpack). The loader must
+    // report 127 and the message must point at that folder's rocm_kpack.dll.
+    if (const char* p = std::getenv("WHIRL_TEST_KPACK127_DIR"); p && *p) {
+        const std::wstring dir(p, p + std::strlen(p));
+        const std::wstring hip = dir + L"\\amdhip64_7.dll";
+        const UINT old_mode = SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX);
+        HMODULE h = LoadLibraryExW(hip.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+        const DWORD e = h ? 0 : GetLastError();
+        SetErrorMode(old_mode);
+        CHECK(h == nullptr && e == ERROR_PROC_NOT_FOUND);
+        if (h) FreeLibrary(h);
+        const dd::Shadow127 r = dd::inspect127(hip, dir);
+        CHECK(has(r.bundled, "rocm_kpack.dll"));
+        const std::string msg = dd::message127("amdhip64_7.dll", r);
+        CHECK(msg.find("rename or remove rocm_kpack.dll in " + std::string(p)) != std::string::npos);
+        CHECK(no_driver_advice(msg));
+        std::printf("dll_deps: real 127 case checked (%s, LoadLibrary error %lu)\n%s", p, e, msg.c_str());
     }
 }
 #endif

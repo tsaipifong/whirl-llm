@@ -10,7 +10,7 @@
 //                     [--work DIR] [--port 8093] [--results OUT.json] [--compare REF.json]
 //                     [--cli EXE] [--no-lock] [--server-env NAME=VALUE ...] [--kv FORMAT]
 //   whirl-server-gate --selftest   (CPU only: the reply-comparison helpers, no server)
-// Suites: basic, mt_cache, pool, tier, sys, restore_conc, vis, fast_stream, golden (see each function;
+// Suites: basic, mt_cache, mt_cache_precise, pool, tier, sys, restore_conc, vis, fast_stream, golden (see each function;
 // vis / vis_speed need --mmproj MMPROJ.gguf and --images DIR).
 // A GPU lock file (WHIRL_GPU_LOCK, default %TEMP%\whirl-gpu.lock, opened with
 // share mode 0) is held while a server runs, unless WHIRL_R9700_LOCK_HELD is set
@@ -457,13 +457,19 @@ bool preciseMode(const std::optional<std::string>& mode) {
 struct CacheVerify {
     double maxd = 0, kl = 0;
     bool top1_same = false;
+    long long ndiff = -1;  // "bitwise differing logits N" (REVIEW-022 F3); -1: not in the line (older server)
 };
 std::optional<CacheVerify> parseCacheVerify(const std::string& line) {
     static const std::regex r(R"(prefix-cache verify: .*max abs diff ([0-9.]+), KL ([0-9.]+(?:e[-+]?[0-9]+)?), top1 (same|DIFFERENT))");
     std::smatch m;
     if (!std::regex_search(line, m, r)) return std::nullopt;
-    return CacheVerify{std::stod(m[1].str()), std::stod(m[2].str()), m[3].str() == "same"};
+    CacheVerify v{std::stod(m[1].str()), std::stod(m[2].str()), m[3].str() == "same"};
+    static const std::regex rd(R"(bitwise differing logits (\d+))");
+    if (std::smatch md; std::regex_search(line, md, rd)) v.ndiff = std::stoll(md[1].str());
+    return v;
 }
+// precise: bit-identical logits (max abs diff prints 4 decimals and KL can underflow, so the bit count decides)
+bool cacheVerifyBitwise(const CacheVerify& v) { return v.ndiff == 0 && v.maxd == 0 && v.kl == 0 && v.top1_same; }
 // The bound: the server's documented diagnostic threshold for a cache hit that is numerically equivalent, not
 // bit-identical (docs/guide/en/kv-and-caching.md section 5: KL <= 1e-2 and the same top-1). Measured on the
 // R9700, Swift-1.5 27B MXFP4-A (requant 2026-10-19), tier p1 gen-end state vs cold: balance KL 9e-5..2e-4,
@@ -969,19 +975,26 @@ struct Turn {
     std::string finish;
 };
 
-std::vector<Turn> runSession(const std::string& name, const std::string& sysmsg, const std::vector<std::string>& users, bool think,
-                             bool send_reasoning, bool tools, int max_tokens) {
+// one request of a session as it was sent (messages array + extra fields) and its reply
+struct MtReq {
+    std::string messages, extra;
+    ChatResult r;
+};
+
+std::vector<MtReq> runSessionRec(const std::string& tag, const std::string& name, const std::string& sysmsg,
+                                 const std::vector<std::string>& users, bool think, bool send_reasoning, bool tools, int max_tokens) {
     std::vector<std::string> msgs;
     if (!sysmsg.empty()) msgs.push_back(msg("system", sysmsg));
-    std::vector<Turn> turns;
+    std::vector<MtReq> reqs;
     int k = 0;
     for (const auto& q : users) {
         msgs.push_back(msg("user", q));
         for (int rt = 0; rt < 3; ++rt) {
             const std::string extra = greedy(max_tokens) + thinkKw(think) + (tools ? ",\"tools\":" + MT_TOOLS : "");
-            ChatResult r = chat(arr(msgs), extra);
-            turns.push_back({r.prompt, r.cached, r.completion, r.finish});
-            record(std::format("mt_cache/{}/{}", name, k++), r.text());
+            const std::string m = arr(msgs);
+            ChatResult r = chat(m, extra);
+            reqs.push_back({m, extra, r});
+            record(std::format("{}/{}/{}", tag, name, k++), r.text());
             std::string am = "{\"role\":\"assistant\",\"content\":" + (r.content.empty() ? std::string("null") : js(r.content));
             if (send_reasoning && !r.reasoning.empty()) am += ",\"reasoning_content\":" + js(r.reasoning);
             if (!r.tool_calls.empty()) {
@@ -1002,6 +1015,14 @@ std::vector<Turn> runSession(const std::string& name, const std::string& sysmsg,
             }
         }
     }
+    return reqs;
+}
+
+std::vector<Turn> runSession(const std::string& name, const std::string& sysmsg, const std::vector<std::string>& users, bool think,
+                             bool send_reasoning, bool tools, int max_tokens) {
+    std::vector<Turn> turns;
+    for (const MtReq& q : runSessionRec("mt_cache", name, sysmsg, users, think, send_reasoning, tools, max_tokens))
+        turns.push_back({q.r.prompt, q.r.cached, q.r.completion, q.r.finish});
     return turns;
 }
 
@@ -1025,30 +1046,139 @@ void evaluate(const std::string& name, const std::vector<Turn>& turns, const std
                     static_cast<long long>(t.prompt), static_cast<long long>(t.cached), static_cast<long long>(t.completion),
                     t.finish.c_str(), need ? std::format("  history {:5} {}", *need, hit ? "HIT" : "MISS").c_str() : "");
     }
+    if (mode == "info") {  // table only (mt_cache_precise: precise resumes only at cold-exact checkpoints)
+        logLine(std::format("INFO mt_cache: {}: hit ratio {:.3f}, full-history misses {} (not a gate here)", name,
+                            lp ? static_cast<double>(lc) / lp : 0.0, misses));
+        return;
+    }
     if (mode == "full" && misses > 0) ok = false;
     if (mode == "agent" && misses > 1) ok = false;
     check(std::format("mt_cache: {} ({}): prefix reuse across turns", name, mode), ok,
           std::format("hit ratio {:.3f}, full-history misses {}", lp ? static_cast<double>(lc) / lp : 0.0, misses));
 }
 
+// the mt_cache sessions (shared by mt_cache and mt_cache_precise)
+struct MtSpec {
+    std::string name, sys;
+    std::vector<std::string> users;
+    bool think, send_reasoning, tools;
+    int max_tokens;
+    std::string eval;  // evaluate() mode
+};
+std::vector<MtSpec> mtSpecs() {
+    const std::string big = "You are a coding agent working in a Python repository. Project notes follow.\n\n" + docsText(14000);
+    return {{"agent", big,
+             {"The test for parse_range fails. Read src/ranges.py and tell me why.", "Fix it and show only the corrected function.",
+              "Now run the tests again."},
+             false, true, true, 400, "agent"},
+            {"think", "", {"What is 17 * 23?", "Add 100 to that.", "Is the result a prime number?"}, true, true, false, 1200, "full"},
+            {"nothink", "You are a concise assistant.",
+             {"Name three planets of the solar system.", "Which of them is the largest? One sentence.", "How many moons does it have, roughly?",
+              "Thanks. One more fact about it, one sentence."},
+             false, true, false, 150, "full"},
+            {"noreason", "", {"What is 12 * 12?", "Double it.", "Now subtract 50."}, true, false, false, 1200, "prev"}};
+}
+
 void suiteMtCache() {
     logLine("== suite mt_cache");
     ServerLease s("mt_cache", {}, {});
-    const std::string big = "You are a coding agent working in a Python repository. Project notes follow.\n\n" + docsText(14000);
-    evaluate("agent", runSession("agent", big, {"The test for parse_range fails. Read src/ranges.py and tell me why.",
-                                                "Fix it and show only the corrected function.", "Now run the tests again."},
-                                 false, true, true, 400),
-             "agent");
-    evaluate("think", runSession("think", "", {"What is 17 * 23?", "Add 100 to that.", "Is the result a prime number?"}, true, true,
-                                 false, 1200),
-             "full");
-    evaluate("nothink", runSession("nothink", "You are a concise assistant.",
-                                   {"Name three planets of the solar system.", "Which of them is the largest? One sentence.",
-                                    "How many moons does it have, roughly?", "Thanks. One more fact about it, one sentence."},
-                                   false, true, false, 150),
-             "full");
-    evaluate("noreason", runSession("noreason", "", {"What is 12 * 12?", "Double it.", "Now subtract 50."}, true, false, false, 1200),
-             "prev");
+    for (const MtSpec& m : mtSpecs())
+        evaluate(m.name, runSession(m.name, m.sys, m.users, m.think, m.send_reasoning, m.tools, m.max_tokens), m.eval);
+}
+
+// ---------------------------------------------------------------------------
+// suite mt_cache_precise: in precise mode a multi-turn session with the prefix cache gives exactly what a
+// cold prefill gives (COLD-RESUME, 0.2.2). Three servers, all WHIRL_MODE=precise (the suite sets it; it
+// overrides --server-env):
+//   1. cache on: runs the mt_cache sessions, every request recorded; no 'gen-end' resume may be logged;
+//      the agent session (14k-token system prompt) must reuse a prefix on every turn after its first;
+//   2. cache on + WHIRL_PREFIX_CACHE_VERIFY=1: replays the recorded requests in the same order (same cache
+//      hits); for each hit the server compares the resumed state's logits with a from-scratch prefill:
+//      max abs diff 0 and KL 0 (bitwise), one verify line per reply with cached > 0;
+//   3. no prefix cache (every request cold): replays the recorded requests; each reply must equal run 1's
+//      reply (reasoning, content, tool calls) with the same prompt token count.
+
+// Precise: run 1 (cache) vs run 3 (cold), request by request. "" = all equal, else the differing requests.
+std::string mtColdDiff(const std::vector<ChatResult>& cached, const std::vector<ChatResult>& cold) {
+    if (cached.size() != cold.size()) return std::format("{} cached replies vs {} cold", cached.size(), cold.size());
+    if (cached.empty()) return "no replies";
+    std::string d;
+    for (std::size_t i = 0; i < cached.size(); ++i) {
+        const ChatResult &a = cached[i], &b = cold[i];
+        if (!sameText(a, b)) d += std::format("#{} text differs ({} / {}); ", i, brief(a), brief(b));
+        else if (a.prompt != b.prompt) d += std::format("#{} prompt {} vs {}; ", i, a.prompt, b.prompt);
+        else if (b.cached != 0) d += std::format("#{} cold reply has cached {}; ", i, b.cached);
+    }
+    return d;
+}
+
+// Precise: the verify lines of run 2. Bitwise means max abs diff 0, KL 0, same top-1, and one line per
+// reply with cached > 0 (at least one hit, or the check tests nothing).
+bool mtPreciseVerifyOk(const std::vector<CacheVerify>& v, std::size_t hits, std::string& d) {
+    d = std::format("{} verify lines, {} replies with cached > 0", v.size(), hits);
+    bool ok = hits > 0 && v.size() == hits;
+    for (std::size_t i = 0; i < v.size(); ++i)
+        if (!cacheVerifyBitwise(v[i])) {
+            ok = false;
+            d += std::format("; #{}: max abs diff {:.4f}, KL {:.2e}, top1 {}, differing logits {}", i, v[i].maxd, v[i].kl,
+                             v[i].top1_same ? "same" : "DIFFERENT", v[i].ndiff);
+        }
+    return ok;
+}
+
+void suiteMtCachePrecise() {
+    logLine("== suite mt_cache_precise");
+    const std::map<std::string, std::string> P = {{"WHIRL_MODE", "precise"}};
+    const std::vector<MtSpec> specs = mtSpecs();
+    std::vector<std::pair<std::string, std::vector<MtReq>>> rec;  // session name, its requests
+    {
+        ServerLease s("mtp_cache", {}, P);
+        for (const MtSpec& m : specs) {
+            rec.emplace_back(m.name, runSessionRec("mt_cache_precise", m.name, m.sys, m.users, m.think, m.send_reasoning, m.tools, m.max_tokens));
+            std::vector<Turn> turns;
+            for (const MtReq& q : rec.back().second) turns.push_back({q.r.prompt, q.r.cached, q.r.completion, q.r.finish});
+            // print the per-turn table (prefix-reuse figures); in precise only the agent session's reuse is a gate
+            evaluate(m.name, turns, "info");
+        }
+        const std::size_t ge = s->logCount(R"(reused \d+ tok \(checkpoint 'gen-end')");
+        check("mt_cache_precise: no request resumed from a 'gen-end' checkpoint", ge == 0, std::format("{} gen-end resumes logged", ge));
+        const auto& agent = rec.front().second;
+        bool reuse = agent.size() >= 2;
+        std::string d;
+        for (std::size_t i = 1; i < agent.size(); ++i) {
+            reuse = reuse && agent[i].r.cached > 0;
+            d += std::to_string(agent[i].r.cached) + " ";
+        }
+        check("mt_cache_precise: agent session reuses a cold-exact prefix on every turn after the first", reuse, "cached " + d);
+    }
+    {
+        auto env = P;
+        env["WHIRL_PREFIX_CACHE_VERIFY"] = "1";
+        ServerLease s("mtp_verify", {}, env);
+        std::size_t hits = 0;
+        for (const auto& [name, reqs] : rec)
+            for (const MtReq& q : reqs) hits += chat(q.messages, q.extra).cached > 0 ? 1 : 0;
+        std::vector<CacheVerify> v;
+        for (const auto& l : s->logLines())
+            if (auto c = parseCacheVerify(l)) v.push_back(*c);
+        std::string d;
+        check("mt_cache_precise: every resumed state == from-scratch prefill, bitwise (max abs diff 0, KL 0)", mtPreciseVerifyOk(v, hits, d), d);
+    }
+    {
+        auto env = P;
+        env["WHIRL_NO_PREFIX_CACHE"] = "1";
+        ServerLease s("mtp_cold", {"--kv-ram-mb", "0"}, env);
+        for (const auto& [name, reqs] : rec) {
+            std::vector<ChatResult> a, b;
+            for (const MtReq& q : reqs) {
+                a.push_back(q.r);
+                b.push_back(chat(q.messages, q.extra));
+            }
+            const std::string d = mtColdDiff(a, b);
+            check(std::format("mt_cache_precise: {}: every reply with the prefix cache == cold prefill ({} requests)", name, reqs.size()),
+                  d.empty(), d);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1283,8 +1413,9 @@ void tierMode(const std::string& mode) {
             check(precise_v ? std::format("tier p1: {} turn 2 SSD-restored state == from-scratch prefill, bitwise (precise)", S[i].name)
                             : std::format("tier p1: {} turn 2 SSD-restored state == from-scratch prefill (KL <= {:.0e}, same top-1)",
                                           S[i].name, kCacheVerifyMaxKl),
-                  precise_v ? (v[i].maxd == 0 && v[i].kl == 0 && v[i].top1_same) : cacheVerifyOk(v[i]),
-                  std::format("max abs diff {:.4f}, KL {:.2e}, top1 {}", v[i].maxd, v[i].kl, v[i].top1_same ? "same" : "DIFFERENT"));
+                  precise_v ? cacheVerifyBitwise(v[i]) : cacheVerifyOk(v[i]),
+                  std::format("max abs diff {:.4f}, KL {:.2e}, top1 {}, differing logits {}", v[i].maxd, v[i].kl,
+                              v[i].top1_same ? "same" : "DIFFERENT", v[i].ndiff));
     }
     fs::remove_all(widen(ssd), ec);
     if (p1) {
@@ -2321,10 +2452,48 @@ int selfTest() {
         check("selftest: verify line balance (KL 1.7e-4, same top-1) -> parsed, ok",
               a && std::abs(a->maxd - 2.873) < 1e-9 && std::abs(a->kl - 1.7e-4) < 1e-12 && a->top1_same && cacheVerifyOk(*a));
         check("selftest: verify line exact (KL 0) -> ok", b && b->kl == 0 && cacheVerifyOk(*b));
+        {
+            // REVIEW-022 F3: precise needs the bit count; 0.0000 / KL 0 with 3 differing logits is not bitwise
+            const auto z = parseCacheVerify("I req 1 | slot 0 | prefix-cache verify: cached vs from-scratch prefill logits: max abs diff "
+                                            "0.0000, KL 0.00e+00, top1 same (760 vs 760), bitwise differing logits 0");
+            const auto n3 = parseCacheVerify("I req 1 | slot 0 | prefix-cache verify: cached vs from-scratch prefill logits: max abs diff "
+                                             "0.0000, KL 0.00e+00, top1 same (760 vs 760), bitwise differing logits 3");
+            check("selftest: verify line differing logits 0 -> bitwise; 3 -> not; no count (old line) -> not",
+                  z && z->ndiff == 0 && cacheVerifyBitwise(*z) && n3 && n3->ndiff == 3 && !cacheVerifyBitwise(*n3) && b && !cacheVerifyBitwise(*b));
+        }
         check("selftest: verify line top-1 DIFFERENT -> not ok", c && !c->top1_same && !cacheVerifyOk(*c));
         check("selftest: verify line KL 2e-2 > 1e-2 (same top-1) -> not ok", e && e->top1_same && !cacheVerifyOk(*e));
         check("selftest: other log lines -> not a verify line",
               !parseCacheVerify("I req 2 | slot 0 | kv tier: restored 5615 tok from SSD in 165.1 ms (2.22 GB/s)") && !parseCacheVerify(""));
+    }
+    {
+        // mt_cache_precise: cached run vs cold run, request by request
+        ChatResult a = ok, a2 = ok2, cold = ok, cold2 = ok2;
+        a.prompt = cold.prompt = 120;
+        a2.prompt = cold2.prompt = 260;
+        a2.cached = 118;
+        check("selftest: mt_cache_precise cold diff, all equal (cold cached 0) -> \"\"", mtColdDiff({a, a2}, {cold, cold2}).empty());
+        check("selftest: mt_cache_precise cold diff, one text differs -> reported",
+              mtColdDiff({a, a2}, {cold, cold}).find("#1 text differs") != std::string::npos);
+        ChatResult p = cold2;
+        p.prompt = 261;
+        check("selftest: mt_cache_precise cold diff, prompt count differs -> reported",
+              mtColdDiff({a, a2}, {cold, p}).find("#1 prompt 260 vs 261") != std::string::npos);
+        ChatResult w = cold2;
+        w.cached = 5;
+        check("selftest: mt_cache_precise cold diff, the 'cold' reply was cached -> reported",
+              mtColdDiff({a, a2}, {cold, w}).find("cold reply has cached 5") != std::string::npos);
+        check("selftest: mt_cache_precise cold diff, two failed requests -> not equal", !mtColdDiff({err}, {err}).empty());
+        check("selftest: mt_cache_precise cold diff, count mismatch / empty -> not equal",
+              !mtColdDiff({a}, {cold, cold2}).empty() && !mtColdDiff({}, {}).empty());
+        const CacheVerify exact{0, 0, true, 0}, tiny{0.0001, 1e-9, true, 7}, flip{0, 0, false, 1}, hidden{0, 0, true, 2};
+        std::string vd;
+        check("selftest: mt_cache_precise verify, 0.0000 / KL 0 but 2 differing logits -> not ok", !mtPreciseVerifyOk({hidden}, 1, vd), vd);
+        check("selftest: mt_cache_precise verify, 2 exact lines for 2 hits -> ok", mtPreciseVerifyOk({exact, exact}, 2, vd), vd);
+        check("selftest: mt_cache_precise verify, KL 1e-9 (not bitwise) -> not ok", !mtPreciseVerifyOk({exact, tiny}, 2, vd), vd);
+        check("selftest: mt_cache_precise verify, top-1 different -> not ok", !mtPreciseVerifyOk({flip}, 1, vd), vd);
+        check("selftest: mt_cache_precise verify, a hit without a verify line -> not ok", !mtPreciseVerifyOk({exact}, 2, vd), vd);
+        check("selftest: mt_cache_precise verify, no hits at all -> not ok (tests nothing)", !mtPreciseVerifyOk({}, 0, vd), vd);
     }
     // suite golden: its prompts must never change silently (the expected hashes come from an independent Python
     // replica of goldenDoc / fnv64, ARCH-1 2026-10-20); a change here invalidates every srv.* golden reference
@@ -2403,7 +2572,7 @@ int wmain(int argc, wchar_t** wargv) {
     }
     if ((g.exe.empty() || g.model.empty()) && g.compare.empty()) {
         std::fprintf(stderr,
-                     "usage: whirl-server-gate --exe PATH --kind whirl|proto --model GGUF --suite basic,mt_cache,pool,tier,sys,restore_conc,vis,fast_stream\n"
+                     "usage: whirl-server-gate --exe PATH --kind whirl|proto --model GGUF --suite basic,mt_cache,mt_cache_precise,pool,tier,sys,restore_conc,vis,fast_stream\n"
                      "                         [--work DIR] [--port N] [--results OUT.json] [--compare REF.json] [--cli EXE] [--no-lock]\n"
                      "                         [--mmproj MMPROJ.gguf] [--images DIR]   (suite vis)\n"
                      "                         [--server-env NAME=VALUE ...] [--kv q8v|q8|f16|auto]   (default auto)\n"
@@ -2420,7 +2589,7 @@ int wmain(int argc, wchar_t** wargv) {
         if (const char* old_path = std::getenv("PATH")) pth += old_path;
         SetEnvironmentVariableW(L"PATH", widen(pth).c_str());
     }
-    const std::map<std::string, std::function<void()>> suites = {{"basic", suiteBasic}, {"mt_cache", suiteMtCache}, {"pool", suitePool},
+    const std::map<std::string, std::function<void()>> suites = {{"basic", suiteBasic}, {"mt_cache", suiteMtCache}, {"mt_cache_precise", suiteMtCachePrecise}, {"pool", suitePool},
                                                                  {"tier", suiteTier},   {"sys", suiteSys},           {"sys_burst", suiteSysBurst}, {"http_stress", suiteHttpStress}, {"sys_d", suiteSysD}, {"restore_conc", suiteRestoreConc},
                                                                  {"vis", suiteVis},     {"vis_speed", suiteVisSpeed},
                                                                  {"fast_stream", suiteFastStream}, {"golden", suiteGolden}};

@@ -29,7 +29,7 @@
 # precise + balance; with WHIRL_GATE_DENSE also the Q4_K_M selftest / golden / seqtest x 3 modes and bench
 # DFlash2 x 3 modes (hashes equal, drafts > 0; target Q4_K_M, Swift + DFlash2 not yet gated: inventory G10);
 # server gate (model Swift) balance + fast basic,mt_cache,
-# precise basic with --cli, fast_stream dense + MoE, tier,sys,restore_conc,pool in balance and precise
+# precise basic with --cli, precise mt_cache_precise (multi-turn cache == cold, bitwise), fast_stream dense + MoE, tier,sys,restore_conc,pool in balance and precise
 # (--kv auto: the formats the modes ship, not a pinned q8v).
 # -InjectFail: the golden steps compare against a copy of the references with one hash changed (a real
 # check that must turn the gate red; used to prove the gate fails).
@@ -121,6 +121,10 @@ $ram8s = @(if ($Device -eq "8060s") { "--server-env"; "WHIRL_KV_RAM_MB=8192" })
 AddStep "srv_balance" $true (GateCmd $SW "basic,mt_cache" "balance" $ssdOff) $gateRule
 AddStep "srv_fast" $true (GateCmd $SW "basic,mt_cache" "fast" $ssdOff) $gateRule
 AddStep "srv_precise_cli" $true (GateCmd $SW "basic" "precise" ($ssdOff + @("--cli", $exe["whirl"]))) $gateRule
+# precise multi-turn sessions with the prefix cache == cold prefill, bitwise (COLD-RESUME; the suite sets WHIRL_MODE=precise)
+AddStep "srv_mt_precise" $true (GateCmd $SW "mt_cache_precise" "" $ssdOff) $gateRule
+# the same for the MoE product model (REVIEW-022 F5: the precise cache-hit guarantee is documented for every model)
+AddStep "srv_mt_precise_moe" $true (GateCmd $MX "mt_cache_precise" "" $ssdOff) $gateRule
 AddStep "srv_fs_swift" $true (GateCmd $SW "fast_stream" "" $ssdOff) $gateRule
 AddStep "srv_fs_moe" $true (GateCmd $MX "fast_stream" "" $ssdOff) $gateRule
 # the cache suites run their own SSD dirs under --work (deleted after the step)

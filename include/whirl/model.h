@@ -1043,10 +1043,7 @@ DraftVocabChoice draftVocabChoice(const std::optional<std::string>& env_value, c
 // vocabulary size of the qwen35 tokenizer the embedded subset was built for
 inline constexpr std::uint32_t draft_vocab_embedded_n_vocab = 248320;
 // the default (embedded 64k) subset is used only for dense qwen35 models with that vocabulary
-// (FAST-8S-1: also MoE models on the Radeon 8060S, moe_ok; the R9700 MoE default stays the full head)
-inline bool draftVocabDefaultFits(bool moe, std::uint32_t n_vocab, bool moe_ok = false) {
-    return (!moe || moe_ok) && n_vocab == draft_vocab_embedded_n_vocab;
-}
+inline bool draftVocabDefaultFits(bool moe, std::uint32_t n_vocab) { return !moe && n_vocab == draft_vocab_embedded_n_vocab; }
 // the embedded 64k subset (data/draft_vocab/subset_64k.bin, built by whirl-cloud tools/vocab_subset);
 // defined in draft_vocab_embed.cpp (whirl_model only)
 std::vector<std::uint32_t> embeddedDraftVocab64k();

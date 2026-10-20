@@ -1,4 +1,4 @@
-G model file=Ornith-1.5-35B-A3B-MXFP4.gguf bytes=19819767136
+G model file=Ornith-1.5-35B-A3B-MXFP4.gguf bytes=19819767584
 G header format=1 suite=ngram decode=24
 G info kv=q4 (4-bit + f16 scale / 32, Hadamard-rotated q/k) max_ctx=8192 mtp=1 fused=1
 G mtp_ngram.cycles drafts=1 cycles=5 accepted=61 ng_cycles=4 ng_accepted=60

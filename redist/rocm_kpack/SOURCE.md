@@ -15,7 +15,7 @@ it and never loads it.
 | Taken from | `https://stable.repo.amd.com/rocm/whl-next/rocm-sdk-core/rocm_sdk_core-10.1.0-py3-none-win_amd64.whl` (776,978,384 bytes, SHA-256 `b12f1c4cde14ed1cd8864006d17586c6b1e6a4e4695b9597cfe04ed7715e952f`), path `_rocm_sdk_core/bin/rocm_kpack.dll`; the wheel's RECORD lists the same hash |
 | Matching runtime | the same wheel ships `amdhip64_7.dll` 10.0.3684.0, the version the ROCm 10.1 driver installs |
 | Signature | none (AMD does not Authenticode-sign the TheRock wheel binaries; the wheel's `amdhip64_7.dll` is unsigned too). No signed copy exists: the driver package does not contain the file |
-| Imports | KERNEL32, MSVCP140, VCRUNTIME140, VCRUNTIME140_1 and the Universal CRT (installed with the AMD driver, which bundles the Visual C++ 2015-2022 x64 redistributable) |
+| Imports | KERNEL32, MSVCP140, VCRUNTIME140, VCRUNTIME140_1 and the Universal CRT. Since 0.2.2 the zip ships the three Visual C++ runtime DLLs next to it (redist/vcruntime/SOURCE.md); the Universal CRT is part of Windows 10/11 |
 | Source code | ROCm/rocm-systems `shared/kpack` (https://github.com/ROCm/rocm-systems/tree/develop/shared/kpack) |
 | License | MIT, Copyright Advanced Micro Devices, Inc. (LICENSE in this folder). Statically linked: Zstandard (BSD-3-Clause, Meta Platforms) and msgpack-c C++ (header-only, Boost Software License 1.0); texts in THIRD_PARTY_NOTICES.md |
 

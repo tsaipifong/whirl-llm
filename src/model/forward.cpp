@@ -758,8 +758,10 @@ void Model::attnBlock(const AttnW& a, const KvLayer& lkv, u32 n) {
         // same partials, same combine order (empty splits are skipped there), so bitwise the same output.
         // gfx1151 only: gfx1201 also has attn_dq4 (kernels/attn.hip) and q4 KV in fast MoE, but this was
         // measured and output-checked on the 8060S only; the R9700 keeps the fixed grid.
+        // (the same conditions as the wsplit branch below, REVIEW-022 F10: otherwise attn_split would run with the
+        // reduced split count, a different partition)
         if (arch == hip::Arch::gfx1151 && !ws4_path && kv_q4 && attn_dq4 && dq4_dyn && k.attn_dq4 != nullptr && k.caps.attn_group1 && grp_q <= 8 && row_n == n &&
-            (dbg_flags & 2) == 0)
+            k.attn_wsplit1 != nullptr && hd == 256 && (dbg_flags & 2) == 0)
             n_split = dq4Splits(std::span<const i32>(row_pos.data(), n), kva.win, n_split);
         if (ws4_path) {
             // groups: consecutive rows of one sequence at consecutive positions whose split ranges

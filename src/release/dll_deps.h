@@ -39,4 +39,34 @@ Diagnosis diagnose(const std::wstring& dll);
 // `driver_advice` is appended when the DLL itself is not found.
 std::string message126(const std::string& dll_name, const Diagnosis& d, const char* driver_advice);
 
+// ERROR_PROC_NOT_FOUND (127): the DLL and all its imports were found, but one
+// import lacks a function the DLL needs. For WHIRL the likely cause is a DLL
+// shipped next to whirl.exe shadowing a different version the driver expects:
+// a future driver may ship its own rocm_kpack.dll (ours is the ROCm 10.1 one),
+// or DLLs built with a newer Visual C++ toolset than our app-local runtime.
+// The application folder is searched before System32, so ours wins.
+struct Shadow127 {
+    std::wstring found_at;              // the DLL that failed to load ("" = not located)
+    std::wstring app_dir;               // the WHIRL folder (no trailing separator)
+    std::vector<std::string> bundled;   // WHIRL-shipped DLLs present in app_dir (k_bundled_dlls order)
+    std::wstring other_kpack;           // a rocm_kpack.dll outside app_dir (next to the runtime, or System32), or ""
+};
+
+// DLLs the WHIRL zip places next to the executables (tools/package_release.ps1).
+inline constexpr const char* k_bundled_dlls[] = {"rocm_kpack.dll", "msvcp140.dll", "vcruntime140.dll",
+                                                 "vcruntime140_1.dll"};
+
+// Folder of the running executable, or "".
+std::wstring exeDir();
+
+// Collects the facts for a 127 failure of `dll` (a name, searched with findDll,
+// or a full path) for a program in `app_dir`. Only checks which files exist;
+// loads nothing.
+Shadow127 inspect127(const std::wstring& dll, const std::wstring& app_dir);
+
+// User-facing message for a 127 failure of `dll_name`. Says which shipped DLL to
+// rename or remove, or to use the WHIRL release that matches the driver; it does
+// not tell the user to update the driver (a newer driver is what causes this).
+std::string message127(const std::string& dll_name, const Shadow127& s);
+
 }  // namespace whirl::app::dlldeps

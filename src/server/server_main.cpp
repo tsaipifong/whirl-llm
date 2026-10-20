@@ -271,11 +271,11 @@ void applyDraftVocab(qwen35::Model& model, const Tokenizer& tok, const qwen35::D
     using K = qwen35::DraftVocabChoice::Kind;
     if (dv.kind != K::embedded_64k && dv.kind != K::file) return;
     if (dv.kind == K::embedded_64k) {
-        const bool fits = dv.by_default ? qwen35::draftVocabDefaultFits(model.cfg.moe, model.cfg.n_vocab, model.arch == hip::Arch::gfx1151)
+        const bool fits = dv.by_default ? qwen35::draftVocabDefaultFits(model.cfg.moe, model.cfg.n_vocab)
                                         : model.cfg.n_vocab == qwen35::draft_vocab_embedded_n_vocab;
         if (!fits) {
             if (dv.by_default)
-                logI("draft head: full vocabulary (the embedded 64k subset is for dense qwen35 models, and MoE on the Radeon 8060S, with a {}-token vocabulary)",
+                logI("draft head: full vocabulary (the embedded 64k subset is for dense qwen35 models with a {}-token vocabulary)",
                      qwen35::draft_vocab_embedded_n_vocab);
             else
                 logW("WHIRL_DRAFT_VOCAB=64k ignored: the embedded subset needs a {}-token vocabulary (model: {})",

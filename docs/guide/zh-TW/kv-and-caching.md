@@ -168,7 +168,7 @@ server 日誌顯示有兩個根本原因，而不是一開始懷疑的單一原�
 | `gen-end`（對話的下一輪） | balance／fast：**否，依設計**；**precise 不使用**（COLD-RESUME，0.2.2：改從上一個提示詞的尾端檢查點接續） | 歷史的 KV **與 DeltaNet 狀態**由 decode／verify kernel（int8 GEMV、decode attention、`gdn_step`）產生，而非 prefill GEMM |
 | `prompt-end`／`think-open` 之後再接更多 token | balance／fast：**否，依設計**；precise 只在其位置也是新提示詞排程點時使用（此時：是） | 接續部分的 chunk 切點與冷執行不同 |
 
-差異不只是「生成出來的 token 的 KV」：每個 DeltaNet 層的遞迴狀態帶著整段歷史，decode 產生的狀態與 prefill 產生的狀態在之後每個位置都不同。速度模式會擴大差距（冷執行的 prefill 用 fp8／f16 WMMA，重用的歷史來自精確的 int8 decode 路徑）。診斷模式（`WHIRL_PREFIX_CACHE_VERIFY=1`）會在每次快取命中後重新 prefill，並要求 KL ≤ 1e-2 且 top-1 相同（27B 實際上 KL ≤ 9e-5）；對表中「是」的列，目前尚未斷言逐位元相同。
+差異不只是「生成出來的 token 的 KV」：每個 DeltaNet 層的遞迴狀態帶著整段歷史，decode 產生的狀態與 prefill 產生的狀態在之後每個位置都不同。速度模式會擴大差距（冷執行的 prefill 用 fp8／f16 WMMA，重用的歷史來自精確的 int8 decode 路徑）。診斷模式（`WHIRL_PREFIX_CACHE_VERIFY=1`）會在每次快取命中後重新 prefill，並要求 KL ≤ 1e-2 且 top-1 相同。balance 的 gen-end 續接實測（Swift-1.5 27B MXFP4，CACHEBAL 2026-10-20）：R9700（gfx1201）KL 9e-5 到 2e-4，Radeon 8060S（gfx1151）9e-7 到 2.1e-5，top-1 皆相同；precise 自 COLD-RESUME 起續接為逐位元相同（KL 0）。診斷模式本身不對表中「是」的列斷言逐位元相同；server 關卡則對 precise 的 SSD 還原斷言（logits 最大絕對差 0，見 8.7 節）。
 
 ## <a id="system-ckpt"></a>6. 系統提示詞檢查點：新 session 跳過 prefill
 
@@ -255,13 +255,13 @@ MXFP4，28.3k token 上下文：完整 prefill TTFT 10.70 s、從 RAM 還原 0.6
 
 逐出壓力下的多 session agent（6 個 session 共享約 12k token 系統提示詞，各自讀取一個約 3.5k token 的檔案並問 3 個問題，4 個 slot，請求交錯使每個 session 都發現自己的 slot 被佔走）：關閉分層 435,697 個新 prefill token；開啟分層 129,968 個——新 prefill 數量與從未被逐出的單獨執行相同，文字完全相同。正常路徑（無逐出）沒有變慢。
 
-為什麼被逐出的 session 在某一種情況下會與單獨執行不同：若它自己的項目比共享系統檢查點長不到 512 個 token，server 會刻意從系統檢查點繼續，並重新 prefill 那幾個 token（原本由 decode 產生）。結果是那些 token 的正確冷計算——數值上等價，但與 decode 產生的 KV 並非逐位元相同。強制一律還原（`WHIRL_TIER_MIN_GAIN=1`）讓 28/28 次呼叫與單獨執行完全相同，而位元組驗證模式也確認每一次寫出/還原都位元組相同（共 115 次）。
+為什麼被逐出的 session 在某一種情況下會與單獨執行不同：若它自己的項目比共享系統檢查點長不到 512 個 token，server 會刻意從系統檢查點繼續，並重新 prefill 那幾個 token（原本由 decode 產生）。結果是那些 token 的正確冷計算——數值上等價，但與 decode 產生的 KV 並非逐位元相同。這只發生在 balance 與 fast，而且不是從快取層還原（沒有用到那個項目）；precise 的每次接續都從與冷算 prefill 相同的檢查點開始。強制一律還原（`WHIRL_TIER_MIN_GAIN=1`）讓 28/28 次呼叫與單獨執行完全相同，而位元組驗證模式也確認每一次寫出/還原都位元組相同（共 115 次）。
 
 **[eGPU] 環境限制：** 當還原佔滿 USB4 連線時，kernel 派送會變慢，其他 slot 的 decode 週期在還原進行期間會拉長。未做最佳化（[windows-hip.md](windows-hip.md#egpu)）；在直接 PCIe 上預期不會發生。
 
 ### 8.7 關卡（gate）
 
-- `tier_gate`：一個不帶分層的參考 server 在無逐出情況下跑每個 session 的第 1、2 回合；分層 server 跑完所有第一回合後被強制逐出，再跑第二回合（從 RAM 還原：文字與已快取 token 數必須與參考相同），然後重啟再跑一次（從 SSD 還原）。涵蓋 `--parallel 1`（f16 KV，思考與非思考 session，包括 `think-open`）與 `--parallel 4`（q8v，五個 session）。兩個模型都測。`--parallel 1` 另外以 `WHIRL_PREFIX_CACHE_VERIFY=1` 再從 SSD 還原一次：每個還原的狀態都要和從頭 prefill 相符（precise：逐位元，logits 最大絕對差 0；balance／fast：KL <= 1e-2、top-1 相同，R9700 Swift MXFP4 實測 balance KL 約 2e-4），而且從該次從頭 prefill 接續的輸出必須與不開前綴快取的 server 逐字相同。「重啟後文字 == 不開前綴快取」在 precise 是關卡（COLD-RESUME 讓 precise 每次續接都與冷算相同，分層 server 的 log 不得出現 `gen-end` 續接）；balance 下還原的歷史屬 gen-end 重用，與冷算數值等價但非逐位元相同（第 5 節），貪婪解碼的文字可能在幾個 token 後分岔（CACHEBAL，0.2.2）。
+- `tier_gate`：一個不帶分層的參考 server 在無逐出情況下跑每個 session 的第 1、2 回合；分層 server 跑完所有第一回合後被強制逐出，再跑第二回合（從 RAM 還原：文字與已快取 token 數必須與參考相同），然後重啟再跑一次（從 SSD 還原）。涵蓋 `--parallel 1`（思考與非思考 session，包括 `think-open`）與 `--parallel 4`（五個 session）。這個 suite 不固定 KV 格式：兩部分都用 server 所在模式內建的格式（`--kv auto`，見[第 3 節](#formats)：dense precise f16、balance q8h、fast q4；MoE 在 precise 與 balance 都是 f16）。release gate 以 Swift（dense）在 balance 與 precise 執行（`srv_cache_balance`、`srv_cache_precise`，搭配 `tier,sys,restore_conc,pool`）。`--parallel 1` 另外以 `WHIRL_PREFIX_CACHE_VERIFY=1` 再從 SSD 還原一次：每個還原的狀態都要和從頭 prefill 相符（precise：逐位元，logits 最大絕對差 0；balance／fast：KL <= 1e-2、top-1 相同，R9700 Swift MXFP4 實測 balance KL 約 2e-4），而且從該次從頭 prefill 接續的輸出必須與不開前綴快取的 server 逐字相同。「重啟後文字 == 不開前綴快取」在 precise 是關卡（COLD-RESUME 讓 precise 每次續接都與冷算相同，分層 server 的 log 不得出現 `gen-end` 續接）；balance 下還原的歷史屬 gen-end 重用，與冷算數值等價但非逐位元相同（第 5 節），貪婪解碼的文字可能在幾個 token 後分岔（CACHEBAL，0.2.2）。
 - `sys_gate`：共享系統檢查點重用（cached == B、text == cold）、4 個並行新 session、逐出到 RAM 與還原、重啟後的 SSD、關閉分層、突發，以及 `prefix` 檢查點。
 - `restore_conc_gate`：在 3 個正在 decode 的 slot 旁做 RAM 還原 == 從未被逐出；共享項目在 RAM / SSD 上的突發；為排隊中請求做 SSD 預取。
 - 每個測試 server 都有自己的 SSD 目錄；否則前一個測試寫出的項目會把下一個測試的 prefill 變成還原（fingerprint 相同），改變了受測的內容。

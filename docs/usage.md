@@ -2,7 +2,7 @@
 
 # Usage reference: `whirl` and `whirl-server`
 
-This page lists every command, option, environment variable and server endpoint of WHIRL 0.1.1.
+This page lists every command, option, environment variable and server endpoint of WHIRL 0.2.2.
 It was written from the built-in help of the release executables (`whirl --help`,
 `whirl <command> --help`, `whirl help env`, `whirl-server --help`); when in doubt, the help text of
 your own executable is authoritative.
@@ -302,7 +302,7 @@ Base URL `http://127.0.0.1:8080/v1`. Any API key is accepted (there is no authen
 | `GET /v1/models` | the one loaded model (id = `--alias`); `meta.n_ctx` is the context per slot |
 | `GET /health` | answers immediately even while busy; reports the busy state and queue length |
 | `GET /props` (also `/v1/props`) | read-only, llama.cpp-server-style subset for clients that auto-detect the context length: `default_generation_settings.n_ctx` (context per slot), `default_generation_settings.model` and `model_alias` (= `--alias`), `total_slots`, `model_path` (file name only, never a directory), `modalities`, `build_info` |
-| `GET /version` | `{"version":"0.1.1","name":"whirl"}` |
+| `GET /version` | `{"version":"0.2.2","name":"whirl"}` |
 | `OPTIONS` (CORS preflight) | supported (allowed origins: see `--cors-origin`) |
 
 LM Studio (`/api/v1/models`) and Ollama (`/api/tags`, `/api/show`, `/api/version`) native endpoints
@@ -538,7 +538,7 @@ The output always equals plain greedy decoding (with sampling: the same distribu
 | `WHIRL_MTP_Q4=0` | keep the MTP block's Q6_K / Q8_0 matrices (default: Q4_K copies, used for drafts only) |
 | `WHIRL_DRAFT_HEAD=q4` | Q4_K draft head instead of the 2-bit one |
 | `WHIRL_MTP_FULLHEAD=1` | drafts use the full output head |
-| `WHIRL_DRAFT_VOCAB=off\|64k\|48k\|FILE\|N` | MTP draft head over a frequency subset of the vocabulary. Default: the 64k subset embedded in the executable, used only for dense qwen35 models, and MoE models on the Radeon 8060S, with the 2-bit draft head and a 248,320-token vocabulary (outputs unchanged). `off` = full draft head; `48k` = `draft_vocab\subset_48k.bin` next to the exe; FILE = uint32 little-endian token ids; N = the first N rows |
+| `WHIRL_DRAFT_VOCAB=off\|64k\|48k\|FILE\|N` | MTP draft head over a frequency subset of the vocabulary. Default: the 64k subset embedded in the executable, used only for dense qwen35 models with the 2-bit draft head and a 248,320-token vocabulary (outputs unchanged). `off` = full draft head; `48k` = `draft_vocab\subset_48k.bin` next to the exe; FILE = uint32 little-endian token ids; N = the first N rows |
 | `WHIRL_NGRAM=0` | no n-gram (prompt-lookup) drafts |
 | `WHIRL_DRAFT_MODEL=FILE` | DFlash2 drafter GGUF for `--draft dflash` when `--draft-model` is not given (debug override; `--draft-model` wins) |
 | `WHIRL_DFLASH_PMIN=P` | `--draft dflash`: end the DFlash2 draft walk at a token whose probability is below P, 0..1 (default 0: the whole block) *(debug)* |
@@ -557,6 +557,7 @@ The output always equals plain greedy decoding (with sampling: the same distribu
 |---|---|
 | `WHIRL_NO_PREFIX_CACHE=1` | disable the prefix cache |
 | `WHIRL_PREFIX_CACHE_VERIFY=1` | re-prefill after every cache hit and compare *(diagnostic)* |
+| `WHIRL_COLD_RESUME=0\|1` | resume a cached conversation only from checkpoints that are bitwise equal to a cold prefill (default: on in `--precise`, off otherwise; `0` in precise restores the faster but not bitwise 0.2.1 behaviour) |
 | `WHIRL_SERVE_CKPTS=N` | prefix checkpoints per slot (default 4 with one slot, 3 up to 4 slots, else 1; at most 8; 3 or more keep a [tail checkpoint](#prefix-cache)) |
 | `WHIRL_SYS_MIN=N` | system messages of at least N tokens get their own checkpoint (default 2048, 0 = off) |
 | `WHIRL_SYS_CKPTS=N` | shared prefix checkpoints kept in VRAM (default 2) |
@@ -643,6 +644,7 @@ Alternatives kept for A/B tests and numerics comparisons. The lossy ones are the
 | Variable | Meaning |
 |---|---|
 | `WHIRL_KV=f16\|q8\|q8h\|q8v\|q4` | *(debug)* force a KV cache format instead of the mode's ([numerics modes](#modes)); `auto` or unset = the mode decides. A forced format skips the fit check (the pool is sized from what is free) and in precise mode a quantized value is logged as a user-requested lossy override. A format the GPU has no kernels for is refused. See [kv-and-caching.md](guide/en/kv-and-caching.md#formats) |
+| `WHIRL_DQ4_DYN=0` | Radeon 8060S, q4 KV (fast, MoE): launch the fixed attention split grid instead of only the splits that hold keys (default on; output is the same either way) |
 | `WHIRL_FD_SPLITS=64\|128\|192\|256` | *(debug)* split count of the decode / verify attention (default 64, q4 KV 256). Another value changes the attention's partial sums, so output bits differ from the default |
 | `WHIRL_FD_SPLITS`, `WHIRL_GEMV_MAX`, `WHIRL_GV_NMAX`, `WHIRL_GV_GROUP`, `WHIRL_NO_FUSE`, `WHIRL_FLOAT_GEMV`, `WHIRL_GDN_SEQ`, `WHIRL_NAIVE_ATTN`, `WHIRL_DBG`, `WHIRL_ATTN_WIDE`, `WHIRL_ATTN_DQ4`, `WHIRL_ATTN_WS4`, `WHIRL_MOE_BN` | A/B switches that pick other kernel paths. Any of them set is logged at start-up as an override and the mode label becomes `MODE+overrides` (also in `GET /props`): the run is not the mode's tested path, and e.g. `WHIRL_GEMV_MAX=8` in balance makes 9–16-row verifies take another GEMM than 1-token decode, so MTP is no longer equal to plain decode |
 | `WHIRL_TOKENIZE_ONLY=1` | print the prompt token ids and stop |

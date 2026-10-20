@@ -102,6 +102,7 @@ DENSE_ONLY_FUNCS = {"Model::ffnBlock"}  # the dense FFN; MoE layers run moeBlock
 GATE_SUITES = {
     "basic":        ["server.prefill", "server.decode", "server.mtp", "server.sampling", "server.loop", "http", "cache.prefix", "tokenizer"],
     "mt_cache":     ["cache.prefix", "server.prefill"],
+    "mt_cache_precise": ["cache.prefix", "cache.restore", "server.prefill", "server.decode"],  # 0.2.2: precise multi-turn cache == cold
     "pool":         ["cache.prefix", "server.loop", "server.prefill"],
     "tier":         ["cache.spill", "cache.restore", "cache.fingerprint", "cache.prefix"],
     "sys":          ["cache.prefix", "cache.spill", "cache.restore"],

@@ -3,20 +3,28 @@
 All notable changes to WHIRL are listed here. Versions follow `project(whirl VERSION ...)` in
 `CMakeLists.txt`.
 
-## 0.2.2 — unreleased
-
-### Faster
-
-- Radeon 8060S, fast mode (q4 KV) decode: `attn_dq4` launches only as many attention splits as the rows' keys use
-  (same key partition as the fixed 256-split grid, so the output is bitwise unchanged); the split combine no longer
-  walks 256 partials per head. Ornith-1.5-35B-A3B MXFP4 verify cycle 2.3% to 3.7% shorter at 2k to 128k
-  (`WHIRL_DQ4_DYN=0`: the fixed grid). FAST-8S-1.
-- Radeon 8060S, MoE models: the embedded 64k draft-head vocabulary subset is now the default there too (it was dense
-  only); output text unchanged in every mode (verify decides it), Ornith decode +2% to +4% in balance, +2% to +9% in
-  fast (`WHIRL_DRAFT_VOCAB=off`: the full head). The R9700 MoE default is unchanged. FAST-8S-1.
+## 0.2.2 — 2026-10-20 (bug fixes)
 
 ### Fixed
 
+- Radeon 8060S, fast mode (MoE models, q4 KV): decode was no faster than balance, in a coding chat 3.5% slower
+  (Ornith-1.5-35B-A3B MXFP4), because `attn_dq4` always launched its fixed 256-split grid and the split combine walked
+  256 partials per head even when only a few splits held keys (8 at 2k). It now launches only the splits the rows'
+  keys use (the same key partition, so the output is bitwise unchanged). Measured on the Radeon 8060S at max power (80 W),
+  ASUS ROG Flow Z13, Ornith fast decode, 0.2.1 vs 0.2.2, mean of 5 interleaved rounds: QA document 2k 94.8 -> 99.8
+  tok/s (+5.2%), 96k 63.8 -> 66.7 (+4.6%), 128k 60.6 -> 62.7 (+3.4%), 32k 81.6 -> 82.9 (within the round-to-round
+  range); coding chat 96.7 -> 99.6 (+3.0%, same text). Against balance (same rounds), fast is no longer behind:
+  level in the coding chat (99.6 vs 100.2 tok/s; was 3.5% behind) and at 2k / 32k (within the round-to-round
+  range), ahead at 96k / 128k (+12%; was +7% / +9%); it is not yet clearly faster at short lengths. Swift-1.5 27B MXFP4 (q8h KV in fast
+  on this GPU) and the R9700 are unchanged. `WHIRL_DQ4_DYN=0` restores the fixed grid. FAST-8S-1.
+- Server: a client's next request could hang for 21 s and fail to connect (Windows error 10060), rarely (seen in our server
+  stress tests). The server closed every connection first, so each finished connection stayed in
+  TIME_WAIT on the server side for minutes; when Windows handed the client the same local port again and the earlier
+  request had been large (tens of KB, as agent prompts are), that TIME_WAIT silently dropped the new connection
+  attempt. The server now lets the client close first: after a response whose end the client can see it waits up to
+  200 ms for the client to close, and streamed (SSE) responses to HTTP/1.1 requests are now sent with `Transfer-Encoding: chunked` (as
+  llama.cpp's server does) so clients see where a stream ends without waiting for the server to close. Clients that
+  only stop at the server's close get it 200 ms later. Response bodies and model output are unchanged. HTTP/1.0 requests get their streams unframed, ended by the server's close, as before. HTTP-DROP.
 - Radeon 8060S: `whirl devices` and the server log showed the HIP runtime's total (99.7 GiB on a 64 GB carve-out,
   which adds a share of system RAM) as the GPU's memory. They now show the dedicated memory set in Armoury Crate / the
   BIOS (the UMA carve-out) and the shared size, e.g. "dedicated 63.8 GiB (+ shared 47.6 GiB)". With a carve-out too
@@ -43,10 +51,30 @@ All notable changes to WHIRL are listed here. Versions follow `project(whirl VER
   Swift-1.5 27B MXFP4-A: max abs logit difference 0.016 to 0.029, KL 1e-8 to 7e-8 against a fresh prefill; also in
   0.2.0). precise now resumes only at checkpoints on the new prompt's chunk schedule that prefill produced, normally
   the previous prompt's tail checkpoint (kept for every prompt in precise), and re-prefills the rest (up to ~1,280
-  tokens plus the previous reply). Cost, Swift-1.5 27B MXFP4-A, a 7k-token file and 3 follow-up questions (2 rounds,
-  same exe, `WHIRL_COLD_RESUME=0` as the old behaviour): next-turn TTFT R9700 0.82-0.85 s instead of 0.06-0.30 s,
-  Radeon 8060S 2.6-3.0 s instead of 0.16-0.17 s; first turn unchanged; texts identical in this session. Balance and
+  tokens plus the previous reply). Cost, Swift-1.5 27B MXFP4-A, a 7k-token file and 3 follow-up questions (3
+  interleaved rounds, the 0.2.2 exe, `WHIRL_COLD_RESUME=0` as the old behaviour): next-turn TTFT R9700 0.82-0.86 s
+  instead of 0.06-0.30 s, Radeon 8060S at max power (80 W), ASUS ROG Flow Z13, 2.8-3.1 s instead of 0.17-0.19 s; first
+  turn unchanged; texts identical. Balance and
   fast are unchanged. `WHIRL_COLD_RESUME=0/1` overrides. COLD-RESUME.
+- Windows zip: it now also carries Microsoft's Visual C++ 2015-2022 x64 runtime (`msvcp140.dll`, `vcruntime140.dll`,
+  `vcruntime140_1.dll`, 14.44.35211.0, unmodified, Visual Studio redistributable terms). `rocm_kpack.dll` (shipped
+  since 0.2.1 for the Adrenalin Edition for ROCm 10.1 driver) and that driver's `amd_comgr_3.dll` import them, so on a
+  PC without the Visual C++ Redistributable the GPU runtime would not load. WHIRL itself still links the C runtime
+  statically; nothing needs to be installed besides the driver, with either driver branch.
+- GPU pre-flight: when the AMD GPU runtime fails with Windows error 127 (a DLL it uses lacks a function), the message
+  now names the likely cause, a DLL shipped next to `whirl.exe` that does not match the driver (for example a future
+  driver that brings its own `rocm_kpack.dll`), and says to rename or remove that file in the WHIRL folder or use the
+  WHIRL release that matches the driver. It used to tell the user to install the driver. The missing-DLL (126) message
+  for the Visual C++ runtime now points at the copies in the zip first.
+- Docs: kv-and-caching.md (en / zh-TW) gave "27B KL <= 9e-5 in practice" for a cache hit; it now gives the measured
+  balance gen-end range per GPU (R9700 9e-5 to 2e-4, Radeon 8060S 9e-7 to 2.1e-5; precise bitwise). The tier gate
+  description said `--parallel 1` runs f16 KV and `--parallel 4` q8v; the suite pins no format (`--kv auto`, the
+  format of the server's mode).
+- Server gate: new suite `mt_cache_precise` (release gate steps `srv_mt_precise` for Swift-1.5 27B MXFP4-A and
+  `srv_mt_precise_moe` for Ornith-1.5-35B-A3B MXFP4): the mt_cache multi-turn sessions in precise must give, request by
+  request, the same replies as a server without the prefix cache, and every resumed state must equal a from-scratch
+  prefill bit for bit (`WHIRL_PREFIX_CACHE_VERIFY=1`: 0 logits whose bits differ, KL 0; the verify log line now counts
+  the bitwise-differing logits).
 
 ## 0.2.1 — 2026-10-20 (bug fixes)
 

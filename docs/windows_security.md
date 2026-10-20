@@ -21,12 +21,12 @@ To avoid the prompt for every file, unblock the zip **before** extracting it:
 right-click the zip → **Properties** → tick **Unblock** → **OK**, or in PowerShell:
 
 ```powershell
-Unblock-File .\whirl-0.2.1-windows-x64.zip
+Unblock-File .\whirl-0.2.2-windows-x64.zip
 ```
 
 Only do this for a zip you downloaded from the official WHIRL release page.
 Compare its SHA-256 with the value published next to it:
-`Get-FileHash .\whirl-0.2.1-windows-x64.zip -Algorithm SHA256`.
+`Get-FileHash .\whirl-0.2.2-windows-x64.zip -Algorithm SHA256`.
 
 ## Smart App Control
 

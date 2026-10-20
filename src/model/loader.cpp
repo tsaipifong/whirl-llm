@@ -459,12 +459,21 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
         const hip::UmaMem u = hip::umaMemory(hip::getDevice());
         if (u.integrated && u.known) {
             const LoadEstimate est = estimateLoad(f, cfg, opt.embd_on_host, opt.no_mtp);
+            // the KV format this load will choose below (numerics::chooseKv, same inputs; the 8060S code
+            // object has every KV kernel), not f16: a balance / fast load with an explicit --ctx was refused
+            // although its q8 / q4 cache fits (REVIEW-022 F6)
+            const KvMode kvm_est = opt.kv_mode == KvMode::automatic ? kvModeFromEnv().value_or(KvMode::automatic) : opt.kv_mode;
+            const numerics::KvKind kv_est =
+                numerics::chooseKv(opt.numerics, cfg.moe, numerics::KvCaps{true, true, true, true}, kvKindOf(kvm_est)).kv;
             hip::UmaNeed n;
             n.weights = est.weights;
             n.fixed = est.weights + est.state +
                       bufferBytes(cfg, std::clamp<u32>(opt.max_batch, 1, max_batch_limit), est.ffs, est.max_elems, resolveFdSplits(true)) +
                       (256ull << 20);
-            n.kv_per_token = est.kv_f16;
+            n.kv_per_token = kv_est == numerics::KvKind::f16   ? est.kv_f16
+                             : kv_est == numerics::KvKind::q8v ? est.kv_q8v
+                             : kv_est == numerics::KvKind::q4  ? est.kv_q4
+                                                               : est.kv_q8h;
             n.min_tokens = std::max<u32>(max_ctx_req, 4096);
             n.want_tokens = n.min_tokens;
             if (const std::string why = hip::umaRefusal(u, n, hip::describeDevice(hip::getDevice()).name); !why.empty())

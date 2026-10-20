@@ -2167,8 +2167,17 @@ static void testDedupFinishedUnreaped(MockDeviceOps& ops, const fs::path& dir) {
             Entry* first = ea->io_busy ? ea : eb;
             Entry* second = ea->io_busy ? eb : ea;
             CHECK(!first->ssd.has_value());
-            // let the IO thread finish the write; no tick runs, so the job is finished but not reaped
-            sleepMs(500);
+            // let the IO thread finish the write; no tick runs, so the job is finished but not reaped.
+            // A fixed sleep could check too early, while the write is still in flight, and then pass without
+            // exercising the race (an in-flight write was always waited for). REVIEW-022 F4: poll the job's own
+            // finished flag (test hook) for up to 20 s, and fail if it never gets there; no timing assumption is left.
+            bool written = false;
+            for (int ms = 0; ms < 20000 && !written; ms += 10) {
+                sleepMs(10);
+                written = t->writeFinishedUnreaped(first->id);
+            }
+            std::printf("dedup base finished, not reaped: first write finished (job not reaped): %s\n", written ? "yes" : "NO");
+            CHECK(written);
             CHECK(first->io_busy);  // not reaped yet
             const bool waits = t->waitForDedupBase(second);
             std::printf("dedup base finished, not reaped: second entry %s\n", waits ? "waits (shares the prefix)" : "does NOT wait");

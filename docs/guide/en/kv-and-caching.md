@@ -279,8 +279,11 @@ The difference is not limited to "the generated tokens' KV": every DeltaNet laye
 carries the whole history, so a decode-produced state differs from a prefill-produced one at every
 later position. Speed mode widens the gap (a cold run's prefill uses fp8 / f16 WMMA, the reused
 history came from the exact int8 decode path). The diagnostic mode (`WHIRL_PREFIX_CACHE_VERIFY=1`)
-re-prefills after each cache hit and requires KL ≤ 1e-2 and identical top-1 (27B KL ≤ 9e-5 in
-practice); it does not yet assert bit equality for the "yes" rows.
+re-prefills after each cache hit and requires KL ≤ 1e-2 and identical top-1. Measured for a balance
+gen-end resume (Swift-1.5 27B MXFP4, CACHEBAL 2026-10-20): KL 9e-5 to 2e-4 on the R9700 (gfx1201), 9e-7 to
+2.1e-5 on the Radeon 8060S (gfx1151), top-1 always the same; precise resumes are bitwise (KL 0) since
+COLD-RESUME. The diagnostic mode itself does not assert bit equality for the "yes" rows; the server
+gate does for precise SSD restores (max abs logit difference 0, section 8.7).
 
 ## <a id="system-ckpt"></a>6. System-prompt checkpoints: new sessions skip the prefill
 
@@ -510,7 +513,8 @@ Why an evicted session can differ from a solo run in one case: if its own entry 
 tokens longer than the shared system checkpoint, the server deliberately resumes from the system
 checkpoint and re-prefills those few tokens (originally produced by decode). The result is a correct
 cold computation of those tokens — numerically equivalent, not bit-identical to the decode-produced
-KV. Forcing restores always (`WHIRL_TIER_MIN_GAIN=1`) made 28/28 calls identical to solo, and a
+KV. This applies to balance and fast and is not a tier restore (the entry is not used); in precise
+every resume starts from a checkpoint equal to a cold prefill. Forcing restores always (`WHIRL_TIER_MIN_GAIN=1`) made 28/28 calls identical to solo, and a
 byte-verify mode confirmed every spill/restore byte-identical (115 of them).
 
 **[eGPU] environment limitation:** while a restore saturates the USB4 link, kernel dispatch slows and
@@ -521,8 +525,11 @@ the other slots' decode cycles stretch for the duration of the restore. Not opti
 - `tier_gate`: a reference server without tiers runs turns 1 and 2 of each session without
   eviction; the tier server runs all first turns, is forced to evict, runs the second turns
   (restored from RAM: text and cached-token count must equal the reference), restarts and runs them
-  again (restored from SSD). With `--parallel 1` (f16 KV, thinking and non-thinking sessions,
-  including `think-open`) and `--parallel 4` (q8v, five sessions). Both models.
+  again (restored from SSD). With `--parallel 1` (thinking and non-thinking sessions, including
+  `think-open`) and `--parallel 4` (five sessions). The suite does not pin a KV format: both parts use the
+  format the server's mode ships (`--kv auto`, [section 3](#formats): dense precise f16, balance q8h, fast q4;
+  MoE f16 in precise and balance). The release gate runs it on Swift (dense) in balance and precise
+  (`srv_cache_balance`, `srv_cache_precise`, with `tier,sys,restore_conc,pool`).
   With `--parallel 1` the SSD entries are also restored once more with `WHIRL_PREFIX_CACHE_VERIFY=1`: each
   restored state must match a from-scratch prefill (precise: bitwise, max abs logit difference 0; balance / fast:
   KL <= 1e-2 and the same top-1, R9700 Swift MXFP4 balance KL ~2e-4), and the continuation from that fresh prefill

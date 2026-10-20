@@ -303,7 +303,7 @@ void applyDraftVocab(q::Model& model, const Tokenizer& tok) {
     }
     if (dv.kind == K::full) return;
     if (dv.kind == K::embedded_64k) {
-        const bool fits = dv.by_default ? q::draftVocabDefaultFits(model.cfg.moe, model.cfg.n_vocab, model.arch == hip::Arch::gfx1151)
+        const bool fits = dv.by_default ? q::draftVocabDefaultFits(model.cfg.moe, model.cfg.n_vocab)
                                         : model.cfg.n_vocab == q::draft_vocab_embedded_n_vocab;
         if (!fits || (dv.by_default && !model.draft_d2)) {
             if (!dv.by_default) std::fprintf(stderr, "WHIRL_DRAFT_VOCAB=64k ignored: the embedded subset needs a 248320-token vocabulary\n");

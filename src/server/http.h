@@ -37,6 +37,9 @@ struct HttpOptions {
     // (DNS rebinding guard; "*" = any Host)
     std::vector<std::string> allowed_hosts;
     int sndbuf = 0;                           // test hook: SO_SNDBUF of accepted sockets (0 = system default)
+    // after a response: wait this long for the client to close first, then close (HTTP-DROP: a
+    // server-side TIME_WAIT can silently drop the client's next SYN from the same port; 0 = close at once)
+    std::uint32_t close_wait_ms = 200;
 };
 
 // CORS headers for a request's Origin header value ("" = no CORS headers);

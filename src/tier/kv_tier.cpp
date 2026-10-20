@@ -1184,6 +1184,12 @@ std::vector<std::uint64_t> Tier::dependentClosure(const Entry* e) const {
 // them more whole shared blocks than the files already on disk. Writes run one at a time on the IO
 // thread, so the wait costs about one tick. No wait cycle: only entries not yet started wait, and only
 // for writes already submitted (which always finish). Entries that depend on e are not bases (cycles).
+bool Tier::writeFinishedUnreaped(std::uint64_t entry_id) const {
+    for (const Job* j : jobs_)
+        if (j->kind == JobKind::write && j->entry_id == entry_id && j->finished.load(std::memory_order_acquire)) return true;
+    return false;
+}
+
 bool Tier::waitForDedupBase(const Entry* e) const {
     if (!cfg.dedup || lay.page_tokens == 0 || e->n_tok == 0) return false;
     const auto blocksOf = [&](std::size_t l) {

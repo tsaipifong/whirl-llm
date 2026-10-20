@@ -592,8 +592,7 @@ void testDraftVocab() {
     check(c48.kind == DK::file && c48.file == d48 && cn.kind == DK::first_n && cn.n == 150000,
           "draft vocab: 48k = file next to the exe, N = first N rows");
     check(q::draftVocabDefaultFits(false, 248320) && !q::draftVocabDefaultFits(true, 248320) &&
-              !q::draftVocabDefaultFits(false, 151936) && q::draftVocabDefaultFits(true, 248320, true) &&
-              !q::draftVocabDefaultFits(true, 151936, true),
+              !q::draftVocabDefaultFits(false, 151936),
           "draft vocab: default only for dense qwen35 with the 248320-token vocabulary");
     const std::vector<std::uint32_t> e64 = q::embeddedDraftVocab64k();
     bool asc = e64.size() == 65536;

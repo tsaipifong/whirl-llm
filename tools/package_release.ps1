@@ -19,8 +19,14 @@
 # Since 0.2.1 the zip also carries AMD's rocm_kpack.dll (redist\rocm_kpack, MIT), the one
 # non-system DLL allowed in it: the ROCm 10.1 driver's amdhip64_7.dll imports it but does not
 # install it (issue #2). Its SHA-256 must match redist\rocm_kpack\SOURCE.md and its own imports
-# may only be Windows system DLLs, the Universal CRT and the Visual C++ 2015-2022 runtime that the
-# AMD driver installs.
+# may only be Windows system DLLs, the Universal CRT and the Visual C++ 2015-2022 runtime.
+#
+# Since 0.2.2 the zip also carries that Visual C++ runtime app-locally (redist\vcruntime:
+# msvcp140.dll, vcruntime140.dll, vcruntime140_1.dll from Microsoft's VC143 redist folder),
+# because rocm_kpack.dll and the ROCm 10.1 driver's amd_comgr_3.dll import it and a PC need not
+# have the Visual C++ Redistributable. Each file must match the SHA-256 pinned here and in
+# redist\vcruntime\SOURCE.md, and every import of rocm_kpack.dll that is not a system DLL or an
+# API set must be one of the shipped files.
 
 param(
     [string]$BuildDir = "",
@@ -99,12 +105,36 @@ if (-not (Test-Path $kpack)) { throw "missing $kpack" }
 $h = (Get-FileHash $kpack -Algorithm SHA256).Hash.ToLowerInvariant()
 if ($h -ne $kpackSha) { throw "rocm_kpack.dll sha256 $h, expected $kpackSha (redist\rocm_kpack\SOURCE.md)" }
 if (-not (Select-String -Path (Join-Path $repo "redist\rocm_kpack\SOURCE.md") -SimpleMatch $kpackSha -Quiet)) { throw "SOURCE.md does not record $kpackSha" }
-$kpackAllowed = @("kernel32.dll", "msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll")
+# ---- app-local Microsoft Visual C++ 2015-2022 x64 runtime (0.2.2): exact files
+$vcrtDir = Join-Path $repo "redist\vcruntime"
+$vcrt = [ordered]@{
+    "msvcp140.dll"       = "0f885b509a685d2bbfa652fed26b5fb31d88fbdab0a978c641d1c7b8aa460aa9"
+    "vcruntime140.dll"   = "d5e4d9a3e835fa679450145d6a7d94e36573a509317111904d9b3712c30d9066"
+    "vcruntime140_1.dll" = "1f2d41c4aa5db0bc33ebf7b66d72943a817d7ce6cbe880502a9403823633093f"
+}
+$vcrtSource = Join-Path $vcrtDir "SOURCE.md"
+foreach ($f in $vcrt.Keys) {
+    $p = Join-Path $vcrtDir $f
+    if (-not (Test-Path $p)) { throw "missing $p (redist\vcruntime\SOURCE.md)" }
+    $h = (Get-FileHash $p -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($h -ne $vcrt[$f]) { throw "$f sha256 $h, expected $($vcrt[$f]) (redist\vcruntime\SOURCE.md)" }
+    if (-not (Select-String -Path $vcrtSource -SimpleMatch $vcrt[$f] -Quiet)) { throw "redist\vcruntime\SOURCE.md does not record $f $($vcrt[$f])" }
+    # the runtime itself may only import KERNEL32, the Universal CRT and the other shipped runtime files
+    foreach ($i in (Get-PeImports $p)) {
+        $d = $i.dll.ToLowerInvariant()
+        $ok = ($d -eq "kernel32.dll") -or $d.StartsWith("api-ms-win-crt-") -or $vcrt.Contains($d)
+        if (-not $ok) { throw "$f imports $($i.dll), which the zip does not ship" }
+    }
+    Write-Host ("  {0}: sha256 ok, {1}" -f $f, (Get-Item $p).VersionInfo.FileVersion)
+}
+
+# rocm_kpack.dll: every import is a Windows system DLL, a Universal CRT API set, or a shipped runtime file
 foreach ($i in (Get-PeImports $kpack)) {
     $d = $i.dll.ToLowerInvariant()
-    $ok = ($kpackAllowed -contains $d) -or $d.StartsWith("api-ms-win-crt-")
-    Write-Host ("  rocm_kpack.dll: {0}{1}" -f $i.dll, $(if ($ok) { "" } else { "   <-- not allowed" }))
-    if (-not $ok) { throw "rocm_kpack.dll imports $($i.dll), not a system / VC++ runtime DLL" }
+    $shipped = $vcrt.Contains($d)
+    $ok = ($d -eq "kernel32.dll") -or $d.StartsWith("api-ms-win-crt-") -or $shipped
+    Write-Host ("  rocm_kpack.dll: {0}{1}" -f $i.dll, $(if (-not $ok) { "   <-- not allowed" } elseif ($shipped) { " (shipped, redist\vcruntime)" } else { "" }))
+    if (-not $ok) { throw "rocm_kpack.dll imports $($i.dll): not a system DLL and not shipped in the zip (add it to redist\vcruntime with its license, or it fails on PCs without it)" }
 }
 
 # ---- stage
@@ -113,6 +143,7 @@ if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
 New-Item -ItemType Directory -Force $stage | Out-Null
 foreach ($e in $exes) { Copy-Item (Join-Path $BuildDir $e) $stage }
 Copy-Item $kpack $stage
+foreach ($f in $vcrt.Keys) { Copy-Item (Join-Path $vcrtDir $f) $stage }
 Copy-Item (Join-Path $repo "LICENSE") $stage
 Copy-Item (Join-Path $repo "NOTICE") $stage
 Copy-Item (Join-Path $repo "THIRD_PARTY_NOTICES.md") $stage
@@ -136,11 +167,14 @@ Copy-Item -Recurse (Join-Path $docsSrc "guide") $docsDst
 if (Test-Path (Join-Path $docsSrc "images")) { Copy-Item -Recurse (Join-Path $docsSrc "images") $docsDst }
 
 $first = @"
-WHIRL $version for Windows x64 - LLM inference for the AMD Radeon AI PRO R9700 (RDNA 4)
+WHIRL $version for Windows x64 - LLM inference for the Radeon 8060S (AMD Ryzen AI Max+ 395) and
+the AMD Radeon AI PRO R9700 (RDNA 4)
 
-Needs: Windows 11 (64-bit), an AMD Radeon AI PRO R9700 (gfx1201) and the graphics driver
-AMD Software: Adrenalin Edition 26.8.1 or newer. Nothing else (no HIP SDK, no ROCm,
-no Visual C++ runtime).
+Needs: Windows 11 (64-bit), a Radeon 8060S (gfx1151) or an AMD Radeon AI PRO R9700 (gfx1201),
+and the graphics driver AMD Software: Adrenalin Edition 26.8.1 or newer. Nothing else to install
+(no HIP SDK, no ROCm, no Visual C++ Redistributable).
+Radeon 8060S: first set the GPU memory (UMA frame buffer size) in Armoury Crate or the BIOS, then
+restart; README.md, Requirements, lists the size each model needs.
 
   .\whirl.exe devices
   .\whirl.exe chat MODEL.gguf "Explain TCP slow start in two sentences." --max-tokens 400
@@ -148,7 +182,9 @@ no Visual C++ runtime).
 
 rocm_kpack.dll is part of AMD's ROCm runtime (MIT). Keep it next to whirl.exe: the GPU runtime
 of the "Adrenalin Edition for ROCm 10.1" driver needs it and that driver does not install it.
-With other drivers it is not used.
+With other drivers it is not used. msvcp140.dll, vcruntime140.dll and vcruntime140_1.dll are
+Microsoft's Visual C++ runtime, which rocm_kpack.dll and that driver need; they are here so you
+do not have to install the Visual C++ Redistributable. Keep them next to whirl.exe too.
 
 Read next:
   README.md                     overview, supported models, performance

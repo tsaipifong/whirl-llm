@@ -245,3 +245,17 @@ FOR ANY DAMAGES OR OTHER LIABILITY, WHETHER IN CONTRACT, TORT OR OTHERWISE,
 ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 ```
+
+## Microsoft Visual C++ 2015-2022 runtime (x64), redistributed in the release zip
+
+- Files: msvcp140.dll, vcruntime140.dll, vcruntime140_1.dll, version 14.44.35211.0, unmodified,
+  Authenticode-signed by Microsoft. Taken from the Visual Studio Build Tools 2022 redist folder
+  (VC\Redist\MSVC\14.44.35112\x64\Microsoft.VC143.CRT). Hashes and provenance:
+  redist/vcruntime/SOURCE.md.
+- Used for: nothing in WHIRL's own code (WHIRL links the C runtime statically). They ship next to
+  whirl.exe and whirl-server.exe because rocm_kpack.dll (above) and the ROCm 10.1 driver's
+  amd_comgr_3.dll import them, so the zip runs without installing the Visual C++ Redistributable.
+- License: Microsoft Visual Studio 2022 license terms, "Distributable Code". The files under
+  [VisualStudioFolder]\VC\redist may be copied and distributed, unmodified, with a program:
+  https://learn.microsoft.com/visualstudio/releases/2022/redistribution
+  Copyright (c) Microsoft Corporation. All rights reserved.

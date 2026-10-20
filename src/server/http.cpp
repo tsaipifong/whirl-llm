@@ -10,6 +10,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 
+#include <cctype>
 #include <chrono>
 #include <cstring>
 #include <functional>
@@ -42,16 +43,19 @@ void setTimeout(SOCKET s, int opt, std::uint32_t ms) {
 // unread request body, the rest of an oversized header) until it closes, for at
 // most budget_ms / 1 MiB. Closing with unread received data makes Windows reset
 // the connection, and the client may then lose the response it was sent.
-void lingerDrain(SOCKET s, std::uint32_t budget_ms) {
+// Also used before our own FIN, to let the client close first (connThread).
+// Returns true when the client closed (its FIN arrived).
+bool lingerDrain(SOCKET s, std::uint32_t budget_ms) {
     const auto end = SteadyClock::now() + std::chrono::milliseconds(budget_ms);
     char buf[4096];
     std::size_t total = 0;
     for (;;) {
         const auto left = std::chrono::ceil<std::chrono::milliseconds>(end - SteadyClock::now()).count();
-        if (left <= 0 || total > (1u << 20)) return;
+        if (left <= 0 || total > (1u << 20)) return false;
         setTimeout(s, SO_RCVTIMEO, static_cast<std::uint32_t>(left));
         const int n = ::recv(s, buf, sizeof buf, 0);
-        if (n <= 0) return;
+        if (n == 0) return true;
+        if (n < 0) return false;
         total += static_cast<std::size_t>(n);
     }
 }
@@ -67,22 +71,69 @@ void lingerDrain(SOCKET s, std::uint32_t budget_ms) {
 // response.
 class SocketConn final : public Conn {
 public:
-    SocketConn(SOCKET s, std::uint32_t send_timeout_ms) : s_(s), stall_ms_(send_timeout_ms) { buf_.reserve(16384); }
+    // framed_out (optional): set at destruction to whether a complete response the client can tell
+    // the end of (Content-Length, or chunked and finished) was handed to the socket, so the client can
+    // close first (HTTP-DROP)
+    SocketConn(SOCKET s, std::uint32_t send_timeout_ms, bool* framed_out = nullptr)
+        : s_(s), stall_ms_(send_timeout_ms), framed_out_(framed_out) {
+        buf_.reserve(16384);
+    }
+    ~SocketConn() override {
+        if (framed_out_) *framed_out_ = (framed_ || (chunked_ && finished_)) && !bad_;
+    }
     void setCors(std::string h) { cors_ = std::move(h); }
+    // the request was HTTP/1.0: no Transfer-Encoding may be sent (RFC 9112 section 6.1), so a stream goes
+    // out unframed and ends at the server's close, as before HTTP-DROP
+    void setHttp10(bool v) { http10_ = v; }
     bool write(std::string_view data) override {
         if (bad_) return false;
+        std::string head10;  // HTTP/1.0: the first write without its Transfer-Encoding line
         if (!started_) {
             started_ = true;
+            // the first write carries the whole response header
+            const std::size_t he = data.find("\r\n\r\n");
+            if (data.starts_with("HTTP/") && he != std::string_view::npos) {
+                std::string h(data.substr(0, he + 2));
+                for (auto& ch : h) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+                framed_ = h.find("\r\ncontent-length:") != std::string::npos;
+                const std::size_t te = h.find("\r\ntransfer-encoding: chunked\r\n");
+                chunked_ = te != std::string::npos;
+                if (chunked_ && http10_) {
+                    head10.assign(data.substr(0, te + 2));
+                    head10.append(data.substr(te + 2 + std::string_view("transfer-encoding: chunked\r\n").size()));
+                    data = head10;
+                    chunked_ = false;
+                }
+            }
             const std::size_t eol = data.find("\r\n");
             if (!cors_.empty() && data.starts_with("HTTP/") && eol != std::string_view::npos) {
                 buf_.append(data.substr(0, eol + 2));
                 buf_.append(cors_);
                 data.remove_prefix(eol + 2);
             }
+            if (chunked_) {  // the header as it is; what follows it is body
+                const std::size_t e = data.find("\r\n\r\n");
+                buf_.append(data.substr(0, e + 4));
+                data.remove_prefix(e + 4);
+            }
         }
-        buf_.append(data);
+        if (chunked_) {
+            // HTTP-DROP: an SSE stream is sent chunked, so the client sees where it ends without
+            // waiting for the server to close (and can close first); one chunk per write
+            if (data.empty() || finished_) return true;
+            buf_ += std::format("{:x}\r\n", data.size());
+            buf_.append(data);
+            buf_ += "\r\n";
+        } else {
+            buf_.append(data);
+        }
         if (buf_.size() - off_ >= 16384) return flush();
         return true;
+    }
+    // the response is complete: a chunked one gets its last (empty) chunk
+    void finish() {
+        if (chunked_ && !finished_ && !bad_) buf_ += "0\r\n\r\n";
+        finished_ = true;
     }
     bool flush() override {
         if (bad_) return false;
@@ -155,6 +206,11 @@ private:
     bool bad_ = false;
     bool nonblocking_ = false;
     bool stalled_ = false;
+    bool* framed_out_ = nullptr;
+    bool http10_ = false;
+    bool framed_ = false;
+    bool chunked_ = false;
+    bool finished_ = false;
     SteadyClock::time_point stall_t0_{};
 };
 
@@ -522,6 +578,7 @@ struct ConnCtx {
     const HttpOptions& o;
     std::string_view bound;  // the listening address
     std::function<void()> on_read;  // the request has been read (stop() no longer cuts it)
+    bool* framed = nullptr;         // out: the response had a Content-Length (SocketConn framed_out)
 };
 
 void handleConn(const ConnCtx& cx, SOCKET s) {
@@ -537,7 +594,7 @@ void handleConn(const ConnCtx& cx, SOCKET s) {
     } guard{e, building};
     Reader r(s, cx.o.recv_timeout_ms);
     r.setDeadline(SteadyClock::now() + std::chrono::milliseconds(cx.o.header_timeout_ms));
-    SocketConn w(s, cx.o.send_timeout_ms);
+    SocketConn w(s, cx.o.send_timeout_ms, cx.framed);
     auto timedOut = [&] {
         if (r.deadlineHit()) sendAll(w, errorResponse(408, "request headers not received in time"));
     };
@@ -559,6 +616,7 @@ void handleConn(const ConnCtx& cx, SOCKET s) {
     const std::string method(nextTok());
     const std::string_view target = nextTok();
     if (method.empty() || target.empty()) return sendAll(w, errorResponse(400, "malformed request line"));
+    w.setHttp10(nextTok() == "HTTP/1.0");
     std::string path(target.substr(0, target.find('?')));
     std::size_t content_len = 0;
     bool have_len = false;
@@ -709,6 +767,7 @@ void handleConn(const ConnCtx& cx, SOCKET s) {
     w.setNonBlocking(true);
     e.submitAndWait(job);
     w.setNonBlocking(false);
+    w.finish();
     w.flush();
 }
 
@@ -950,11 +1009,25 @@ void HttpServer::acceptLoop() {
 
 void HttpServer::connThread(std::uintptr_t sock) {
     const SOCKET s = static_cast<SOCKET>(sock);
+    bool framed = false;
     try {
-        const ConnCtx cx{e_, o_, bound_, [this, sock] { setReading(sock, false); }};
+        const ConnCtx cx{e_, o_, bound_, [this, sock] { setReading(sock, false); }, &framed};
         handleConn(cx, s);
     } catch (const std::exception& ex) {
         logE("connection error: {}", ex.what());
+    }
+    // HTTP-DROP: the response is complete and the client can tell its end (Content-Length, or a
+    // chunked SSE stream with its last chunk); give the client close_wait_ms to close first. The side that
+    // closes first keeps the connection's TIME_WAIT (120 s). On the server side it broke the client's
+    // next connect: Windows hands the same client port out again, and the server's TIME_WAIT silently
+    // drops that SYN when the earlier request was large (tens of KB), so connect() hung for 21 s
+    // (WSAETIMEDOUT). Kept on the client side, the TIME_WAIT keeps the OS from reusing that port for
+    // this server. Clients that read up to the end of the response close at once (curl, browsers,
+    // Python requests / httpx, the OpenAI SDKs); one that waits for our FIN gets it after close_wait_ms.
+    bool peer_closed = false;
+    if (framed && o_.close_wait_ms > 0 && !stopping_) {
+        setReading(sock, true);  // an idle wait: stop() ends it at once
+        peer_closed = lingerDrain(s, o_.close_wait_ms);
     }
     {
         std::lock_guard<std::mutex> lk(conns_mu_);
@@ -962,7 +1035,7 @@ void HttpServer::connThread(std::uintptr_t sock) {
         reading_.erase(sock);
     }
     shutdown(s, SD_SEND);
-    lingerDrain(s, 500);
+    if (!peer_closed) lingerDrain(s, 500);
     closesocket(s);
     n_conn_.fetch_sub(1);
 }

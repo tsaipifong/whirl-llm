@@ -23,6 +23,10 @@ compile_commands.json
 *.dll
 # redistributed AMD DLL shipped in the release zip (redist/rocm_kpack/SOURCE.md)
 !redist/rocm_kpack/rocm_kpack.dll
+# app-local Microsoft VC++ runtime shipped in the release zip (redist/vcruntime/SOURCE.md)
+!redist/vcruntime/msvcp140.dll
+!redist/vcruntime/vcruntime140.dll
+!redist/vcruntime/vcruntime140_1.dll
 *.pdb
 *.ilk
 *.res

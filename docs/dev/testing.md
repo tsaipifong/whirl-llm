@@ -256,7 +256,7 @@ set. The R9700 set is checked once, when the change is merged.
 checks: the CPU test binaries and self-tests, golden xcheck, `whirl-kernel-test --require-all`,
 selftest, golden check (with its in-run cross-checks), seqtest (Swift precise / balance / fast, MoE
 precise / balance), and the server gate with Swift as the dense model (balance and fast
-basic,mt_cache; precise basic with `--cli`; fast_stream dense and MoE; tier,sys,restore_conc,pool in
+basic,mt_cache; precise basic with `--cli`; precise `mt_cache_precise` (the mt_cache sessions with the prefix cache, replayed with `WHIRL_PREFIX_CACHE_VERIFY=1` (every resumed state == a from-scratch prefill, max abs logit difference 0) and on a server without the prefix cache (every reply equal); 0.2.2); fast_stream dense and MoE; tier,sys,restore_conc,pool in
 balance and precise with `--kv auto`). Each step has an exit code and an output rule; the gate prints a
 table, writes `PASS_<tag>` or `FAIL_<tag>` and exits 0 only when every selected step passed (1 a step
 failed, 2 setup error such as a missing model or the wrong `-ExpectCommit`). Model and text paths come

@@ -10,17 +10,18 @@ PowerShell.
 | | |
 |---|---|
 | GPU | **AMD Radeon AI PRO R9700** (RDNA 4, gfx1201, 32 GB) or **Radeon 8060S** (RDNA 3.5, gfx1151, Ryzen AI Max+ 395). One GPU per process; other GPUs are not officially supported |
+| Radeon 8060S: GPU memory | Set the GPU memory (UMA frame buffer size) in Armoury Crate or the BIOS first, then restart. The size each model needs is in the [README requirements](../README.md#requirements); with too little, WHIRL stops with a message naming the size to set |
 | OS | Windows 11, 64-bit |
 | Driver | **AMD Software: Adrenalin Edition 26.8.1 (driver 32.0.31041.1004) or newer**, for both GPUs; older drivers are untested |
-| Nothing else | no HIP SDK, no ROCm, no Visual C++ redistributable, no Python, no WSL |
+| Nothing else | no HIP SDK, no ROCm, no Visual C++ Redistributable to install, no Python, no WSL |
 
-The driver installs the two AMD runtime files WHIRL uses (`amdhip64_7.dll`, `amd_comgr_3.dll`). The zip also carries AMD's `rocm_kpack.dll`: the GPU runtime of the Adrenalin Edition for ROCm 10.1 driver needs it and that driver does not install it, so keep it next to `whirl.exe`.
+The driver installs the two AMD runtime files WHIRL uses (`amdhip64_7.dll`, `amd_comgr_3.dll`). The zip also carries AMD's `rocm_kpack.dll`: the GPU runtime of the Adrenalin Edition for ROCm 10.1 driver needs it and that driver does not install it, so keep it next to `whirl.exe`, with the three Microsoft Visual C++ runtime DLLs it uses (`msvcp140.dll`, `vcruntime140.dll`, `vcruntime140_1.dll`), which are in the zip for the same reason.
 
 ## 2. Download
 
-1. `whirl-0.2.1-windows-x64.zip` from the [WHIRL releases page](https://github.com/tsaipifong/whirl-llm/releases).
+1. `whirl-0.2.2-windows-x64.zip` from the [WHIRL releases page](https://github.com/tsaipifong/whirl-llm/releases).
    Compare its SHA-256 with the value published next to it:
-   `Get-FileHash .\whirl-0.2.1-windows-x64.zip -Algorithm SHA256`.
+   `Get-FileHash .\whirl-0.2.2-windows-x64.zip -Algorithm SHA256`.
 2. A supported GGUF model (list in the [README](../README.md#supported-models)). The fastest choice is our own
    MXFP4 quantization
    [`Swift-1.5-Qwen3.8-27B-MXFP4-A-outQ6_K.gguf`](https://huggingface.co/tsaipifong/Swift-1.5-Qwen3.8-27b-MXFP4-GGUF);
@@ -31,9 +32,9 @@ The driver installs the two AMD runtime files WHIRL uses (`amdhip64_7.dll`, `amd
 Open PowerShell in your Downloads folder and paste:
 
 ```powershell
-Unblock-File .\whirl-0.2.1-windows-x64.zip
-Expand-Archive .\whirl-0.2.1-windows-x64.zip -DestinationPath C:\whirl
-cd C:\whirl\whirl-0.2.1-windows-x64
+Unblock-File .\whirl-0.2.2-windows-x64.zip
+Expand-Archive .\whirl-0.2.2-windows-x64.zip -DestinationPath C:\whirl
+cd C:\whirl\whirl-0.2.2-windows-x64
 .\whirl.exe devices
 .\whirl.exe chat C:\models\Swift-1.5-Qwen3.8-27B-MXFP4-A-outQ6_K.gguf "Explain TCP slow start in two sentences." --max-tokens 400
 ```
