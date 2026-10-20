@@ -2732,6 +2732,12 @@ void testCloseReused() {
         ask(srv, p0);
         ask(srv, p1);
         ask(srv, p2);
+        // the spill to the RAM tier runs after the response is sent (finishJob -> spillSlot): wait for the third spill
+        // line before reading the entries from this thread (test-side race, failed 1 run in 10 on v0.2.2 and more under
+        // load; ARCH4 746a596 fixes it with an engine-thread hook, which would change product code, so 0.2.2.1 waits on
+        // the log line instead: the engine is idle after it)
+        for (int i = 0; i < 500 && g_log.count("kv tier: spill ") < 3; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        CHECK(g_log.count("kv tier: spill ") >= 3);
         for (const tier::Entry* e : t->entries) {
             if (e->tokens.size() >= p2.size() && std::equal(p2.begin(), p2.end(), e->tokens.begin())) sess_id = e->id;
             if (e->tokens.size() >= p0.size() && std::equal(p0.begin(), p0.end(), e->tokens.begin())) one_id = e->id;
