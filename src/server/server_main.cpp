@@ -32,7 +32,6 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
-#include <future>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -528,37 +527,30 @@ int serveMain(int argc, char** argv, const char* program) {
             opt.parallel = card.parallel;
             if (!card.note.empty()) logI("{}", card.note);
         }
-        // v0.2.2.1 (owner 2026-10-21): what other processes already use on this GPU, read as WHIRL starts (on a
-        // helper thread while the tokenizer and the template load: the first PDH query takes ~0.2 s; this process's
-        // own usage is read in the same collection and subtracted); the WDDM budget margin grows with it and with a
-        // monitor on the card (poolbudget::defaultMargin)
-        std::future<hip::GpuOthers> others_f = std::async(std::launch::async, [dev] { return hip::gpuOthers(dev); });
-        const auto t_oth = Clock::now();
-        std::optional<hip::GpuOthers> others_v;
-        const auto othersNow = [&]() -> const hip::GpuOthers& {
-            if (!others_v) {
-                others_v = others_f.get();
-                const hip::GpuOthers& o = *others_v;
-                const char* const disp = o.display_known ? (o.display ? "yes" : "no") : "unknown";
-                if (o.ok)
-                    logI("other processes use {:.2f} GiB of VRAM on this GPU (display attached: {}) (adapter {:.2f} GiB, this process "
-                         "{:.2f} GiB; read in {:.0f} ms, waited {:.0f} ms)",
-                         o.others / 1073741824.0, disp, o.adapter_dedicated / 1073741824.0, o.own_dedicated / 1073741824.0,
-                         o.cost_us / 1000.0, msSince(t_oth) > o.cost_us / 1000.0 ? 0.0 : o.cost_us / 1000.0 - msSince(t_oth));
-                else
-                    logI("other processes' VRAM on this GPU: unknown (GPU performance counters not readable; display attached: {}); "
-                         "the WDDM budget margin uses the budget-only rule ({:.0f} ms)",
-                         disp, o.cost_us / 1000.0);
-            }
-            return *others_v;
-        };
+        // v0.2.2.1 (owner 2026-10-21): what other processes already use on this GPU, read once now, synchronously,
+        // before WHIRL loads or sizes anything (the first PDH query of a process takes ~0.2-0.3 s; owner: 「查記憶體整個
+        // 才不到1秒，不慢」). This process's own usage is read in the same collection and subtracted. The WDDM budget
+        // margin grows with it and with a monitor on the card (poolbudget::defaultMargin).
+        const hip::GpuOthers others0 = hip::gpuOthers(dev);
+        {
+            const char* const disp = others0.display_known ? (others0.display ? "yes" : "no") : "unknown";
+            if (others0.ok)
+                logI("other processes use {:.2f} GiB of VRAM on this GPU (display attached: {}) (adapter {:.2f} GiB, this process "
+                     "{:.2f} GiB; read in {:.0f} ms)",
+                     others0.others / 1073741824.0, disp, others0.adapter_dedicated / 1073741824.0,
+                     others0.own_dedicated / 1073741824.0, others0.cost_us / 1000.0);
+            else
+                logI("other processes' VRAM on this GPU: unknown (GPU performance counters not readable; display attached: {}); "
+                     "the WDDM budget margin uses the budget-only rule ({:.0f} ms)",
+                     disp, others0.cost_us / 1000.0);
+        }
         // the margin kept free under the WDDM local budget (pool sizing, the re-check after allocation)
         const bool margin_explicit = env("POOL_BUDGET_MARGIN_MB").has_value();
         const auto budgetMargin = [&](std::uint64_t budget) {
             if (margin_explicit)
                 return poolbudget::Margin{static_cast<std::uint64_t>(envU32("POOL_BUDGET_MARGIN_MB", 0)) << 20,
                                           "WHIRL_POOL_BUDGET_MARGIN_MB"};
-            const hip::GpuOthers& o = othersNow();
+            const hip::GpuOthers& o = others0;
             poolbudget::MarginIn mi;
             mi.local_budget = budget;
             mi.moe = cfg.moe;
@@ -1645,7 +1637,7 @@ int serveMain(int argc, char** argv, const char* program) {
             },
             !is_uma, wddm0.ok ? std::optional<wddmwatch::Sample>(vram_base) : std::nullopt, vram_cfg, startup_spill,
             // what other processes use on the GPU, read only when a spill warning is printed (one PDH read)
-            [dev, o0 = othersNow()]() -> std::optional<wddmwatch::Others> {
+            [dev, o0 = others0]() -> std::optional<wddmwatch::Others> {
                 const hip::GpuOthers o = hip::gpuOthers(dev);
                 if (!o.ok) return std::nullopt;
                 return wddmwatch::Others{o.others, o0.ok ? std::optional<std::uint64_t>(o0.others) : std::nullopt};

@@ -2838,6 +2838,9 @@ void testSupersedeCompressCuts() {
     CHECK_EQ(completionText(srv.post("/v1/completions", completionBody(c1, 40))), decode(out_c1));
     const auto c2 = cb.next(c1, out_c1, 200, 915);
     CHECK_EQ(completionText(srv.post("/v1/completions", completionBody(c2, 40))), decode(srv.model().greedyReference(c2, 40, true)));
+    // the tier work after the response writes the line (v0.2.2 test flaked 3 of 20 runs reading it at once)
+    for (int i = 0; i < 500 && g_log.count("superseded (compact / compress): cut") == 0; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
     CHECK(g_log.count("superseded (compact / compress): cut") >= 1);
     CHECK(srv.tierp()->stats.superseded >= 1);
     CHECK_EQ(srv.model().poison(), 0u);
