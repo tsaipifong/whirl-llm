@@ -238,7 +238,7 @@ kn::KernelTable gemmTable(bool gemvh, bool gemms, bool gemmh) {
     return k;
 }
 
-void testGemm() {
+void testOpsGemm() {
     const std::uint32_t G = static_cast<std::uint32_t>(kn::kGemmCfgs.size());
     auto q4 = mat(GgmlType::q4_k, 5120, 5120);
     q4.row_bytes = 5120 / 256 * 144;
@@ -488,7 +488,7 @@ kn::KernelTable moeTable(bool g1151) {
     return k;
 }
 
-void testMoe() {
+void testOpsMoe() {
     ops::MoeProblem p;  // Ornith-like: E 2048, 8 of 256 experts, F 512, all MXFP4 with row exponents
     p.E = 2048;
     p.K = 8;
@@ -596,10 +596,10 @@ int main() {
     testMatmulPath();
     testGemvTile();
     testGemvWide();
-    testGemm();
+    testOpsGemm();
     testAttnDecode();
     testAttnPrefill();
-    testMoe();
+    testOpsMoe();
     testOpTables();
     std::printf("ops tests: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
