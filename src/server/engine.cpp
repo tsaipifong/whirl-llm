@@ -1193,6 +1193,8 @@ bool Engine::startJob(Slot& sl, Job& job) {
     sl.job = &job;
     sl.last_used = pc_->touch();
     if (N + nd_max + 2 >= ctx_ || static_cast<std::uint64_t>(N) + nd_max + 2 >= static_cast<std::uint64_t>(pool_pages_) * kv_page) {
+        if (!opt_.ctx_note.empty())
+            logW("req {} | prompt of {} tokens does not fit the context per request of {} tokens ({})", job.id, N, ctx_, opt_.ctx_note);
         writeError(job, 400, "prompt is too long for the context size");
         return false;
     }

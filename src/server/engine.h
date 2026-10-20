@@ -303,6 +303,8 @@ struct EngineOptions {
     std::string model_file;  // GGUF file name without directory (GET /props model_path)
     std::uint32_t ctx = 131072;  // context per slot (cap)
     std::string numerics_json;   // GET /props "numerics" (numerics::propsJson; empty: not reported)
+    std::string startup_json;    // GET /props and /health "startup": effective values and startup adjustments (v0.2.2.1)
+    std::string ctx_note;        // why the context per request is what it is when startup lowered it (logged on a too-long prompt)
     std::string kv_ssd_mode = "off";  // --kv-ssd-mode as in effect (GET /props kv_ssd)
     bool kv_supersede = true;         // CACHE-1 superseded-session cut (WHIRL_KV_SUPERSEDE=0: off)
     // TIER-IDLE: --kv-ssd-mode shutdown writes reused entries to SSD after this long idle (tier/idle_flush.h);
@@ -429,6 +431,10 @@ public:
         opt_.ctx = c;
     }
     void setNumerics(std::string j) { opt_.numerics_json = std::move(j); }
+    void setStartup(std::string j, std::string ctx_note) {
+        opt_.startup_json = std::move(j);
+        opt_.ctx_note = std::move(ctx_note);
+    }
     void setKvSsdMode(std::string m) { opt_.kv_ssd_mode = std::move(m); }
     // WDDM-LOG (issues #5 / #6): before runLoop, after everything sized at startup is allocated. The
     // probe (hip::wddmMemInfo on Windows) is sampled for each "batch |" status line, at each request

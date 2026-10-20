@@ -33,7 +33,7 @@ DeltaNet 狀態本身每個序列是固定大小，與上下文長度無關。se
 **server 的池管理。** 一個空閒頁堆疊；每個 slot 擁有一份頁清單（閒置時保留，供前綴重用）。在每個 prefill chunk 與每個 decode 週期之前，slot 會確保頁數涵蓋到 `pos + drafts + 2`。池用盡時，會逐出最久未使用的*閒置* slot（丟棄其前綴快取並收回其頁——若啟用分層，則先寫出，見 §8）。若所有頁都被執行中的請求佔用：即將開始的請求會留在佇列，等池放得下它的 prompt 才開始（只剩它自己時一定開始）；decode 中的請求以 `finish_reason: "length"` 結束，choice 裡另加 `"finish_cause": "kv_pool_exhausted"`（max_tokens 或 context 用完時沒有這個欄位）；prefill 途中仍然不夠（decode 中的請求用掉了它預估的頁）時回 HTTP 503 加 `Retry-After: 5`，不會是 500。頁帶有參考計數，讓共享前綴（§5）能以唯讀方式映射到多個 slot；仍被背景複製讀取中的頁會進入隔離清單，等該複製的 fence 通過後才回到空閒清單。
 
 - `--ctx N` = 池大小（以 token 計）；`--ctx-per-slot N` = 每個請求的上限。
-- 預設池 = 扣除權重、緩衝區、slot 狀態與檢查點後剩下的全部 VRAM，並同時受兩個上限限制：可用 VRAM 減去保留量 **dense 模型 768 MiB，MoE 1.5 GiB**（MoE 模型曾較晚配置約 0.5 GiB，保留量較小時會溢入共享記憶體）；以及 Windows（WDDM）預算減去留給其他程式的 margin：取 2 GiB（GPU 接螢幕時 3 GiB）、啟動時其他行程在 GPU 上的用量、預算的 6% 三者最大者（0.2.2.1 起；見 [server.md](server.md#vram-log)）。
+- 預設池 = 扣除權重、緩衝區、slot 狀態與檢查點後剩下的全部 VRAM，並同時受兩個上限限制：可用 VRAM 減去保留量 **dense 模型 768 MiB，MoE 1.5 GiB**（MoE 模型曾較晚配置約 0.5 GiB，保留量較小時會溢入共享記憶體）；以及 Windows（WDDM）預算減去留給其他程式的 margin：其他程式的 VRAM 中預算還沒反映的部分，加上 2 GiB（GPU 接螢幕時 3 GiB）與預算 6% 中較大者的成長空間（0.2.2.1 起；見 [server.md](server.md#vram-log)）。
 
 ## <a id="formats"></a>3. KV 格式：f16、q8、q8h、q8v
 

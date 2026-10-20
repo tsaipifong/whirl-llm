@@ -43,7 +43,7 @@ Useful environment variables (all of them: [usage.md](../../usage.md#env)):
 | Variable | Effect |
 |---|---|
 | `WHIRL_KV=auto\|f16\|q8\|q8h\|q8v` | KV format; `auto` applies the floor rule ([kv-and-caching.md](kv-and-caching.md#kv-auto)) |
-| `WHIRL_POOL_BUDGET_MARGIN_MB` | room kept free under the WDDM budget for other programs (default: the largest of 2 GiB, 3 GiB with a monitor on the GPU, other processes' VRAM at startup, 6% of the budget; [details](#vram-log)) |
+| `WHIRL_POOL_BUDGET_MARGIN_MB` | room kept free under the WDDM budget for other programs to grow (default: the larger of 2 GiB, 3 GiB with a monitor on the GPU, and 6% of the budget; other programs' VRAM that the budget does not show yet is kept free on top; [details](#vram-log)) |
 | `WHIRL_POOL_RESERVE_MB` | old free-VRAM-only rule: VRAM reserve after the pool, WDDM budget not applied (default reserve 768 dense / 1536 MoE under the free VRAM) |
 | `WHIRL_NO_PREFIX_CACHE=1` | disable prefix caching |
 | `WHIRL_PREFIX_CACHE_VERIFY=1` | after every cache hit, re-prefill and compare logits (diagnostic) |
@@ -324,19 +324,29 @@ the Windows (WDDM) video memory budget, and these lines show whether it still do
 
 - `other processes use X GiB of VRAM on this GPU (display attached: yes/no)` at startup: what other
   programs (desktop, browser, other AI tools, Docker) hold on the same GPU when the server starts.
-- `kv pool sizing: ... margin N MiB (...)`: the room kept free under the WDDM budget for other programs.
-  By default it is the largest of 2 GiB (3 GiB when a monitor is attached to this GPU), what other
-  processes use on it at startup, and 6% of the budget. `WHIRL_POOL_BUDGET_MARGIN_MB=N` sets it.
-  The budget Windows reports when the server starts does not always count other programs yet: on an
-  R9700 with another process holding 3.3 GiB, it read 31.02 GiB before the pool was allocated and
-  28.08 GiB right after.
+- `kv pool sizing: ... margin N MiB (...)`: what is kept free under the WDDM budget. The budget Windows
+  reports when the server starts does not always count other programs yet: on an R9700 with another
+  process holding 3.3 GiB, it read 31.02 GiB before the pool was allocated and 28.08 GiB right after.
+  So the margin is what other processes used at startup that the budget does not show yet, plus room
+  for them to grow: the larger of 2 GiB (3 GiB when a monitor is attached to this GPU) and 6% of the
+  budget. `WHIRL_POOL_BUDGET_MARGIN_MB=N` sets the room.
+- `adjusted: ...` at startup: a setting you gave that does not fit what the server measured (RAM, the
+  WDDM budget with the margin, other programs' VRAM) is lowered to what fits, one line each with the
+  reason, in this order: the RAM tier (`--kv-ram-mb`, more than half of the available RAM: lowered to
+  the default size), `--parallel` (each slot's state and checkpoints are fixed VRAM; lowered when one
+  full request no longer fits next to them), `WHIRL_PREFILL_BATCH` / checkpoint counts, `-c` (the
+  pool), then `--ctx-per-slot` (it reserves no memory by itself, so it is capped to the pool last).
+  `startup adjustments (N): ...` sums them up (`none` when everything fits), and `GET /props` and
+  `GET /health` show the effective values in a `startup` object. A prompt longer than an adjusted
+  context per request is rejected as too long for the context, and the log says it was adjusted. The
+  server refuses to start only when even one slot with a 4096-token pool does not fit. Not on the
+  Radeon 8060S, which keeps its carve-out check.
 - `kv pool check:` right after the KV pool is allocated: the budget is read again; when WHIRL's usage
   plus the margin no longer fits, the pool is made smaller (whole pages, before any request) so WHIRL
   starts inside VRAM. It waits for the WDDM numbers to settle after each free (at most 1 s), so it does
   not shrink more than needed. Output is unchanged; only fewer tokens fit in the pool. With an explicit
-  `-c` or `WHIRL_POOL_RESERVE_MB` the pool is not resized; a warning says how many tokens would fit.
-  An explicit `--ctx-per-slot` that no longer fits refuses to start (as it does when it does not fit
-  at sizing); a default per-request context is lowered with a warning.
+  `WHIRL_POOL_RESERVE_MB` the pool is not resized; a warning says how many tokens would fit. An
+  explicit `-c` or `--ctx-per-slot` that no longer fits is lowered with an `adjusted:` line.
 - `vram watch:` after everything is allocated: the numbers, and the cost of one sample (about 0.3 ms
   on the R9700).
 - Every `batch |` status line (about every 5 s while a request runs) ends with

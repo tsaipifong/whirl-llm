@@ -41,7 +41,7 @@ Base URL 為 `http://127.0.0.1:8080/v1`；接受任何 API key。模型只載入
 | 變數 | 效果 |
 |---|---|
 | `WHIRL_KV=auto\|f16\|q8\|q8h\|q8v` | KV 格式；`auto` 套用下限規則（[kv-and-caching.md](kv-and-caching.md#kv-auto)） |
-| `WHIRL_POOL_BUDGET_MARGIN_MB` | 在 WDDM 預算之下留給其他程式的空間（預設取最大者：2 GiB、GPU 接螢幕時 3 GiB、啟動時其他行程的 VRAM 用量、預算的 6%；[說明](#vram-log)） |
+| `WHIRL_POOL_BUDGET_MARGIN_MB` | 在 WDDM 預算之下替其他程式成長留的空間（預設取 2 GiB（GPU 接螢幕時 3 GiB）與預算 6% 的較大者；其他程式的 VRAM 中預算還沒反映的部分另外保留；[說明](#vram-log)） |
 | `WHIRL_POOL_RESERVE_MB` | 舊的「只看可用 VRAM」規則：池之後保留的 VRAM，不套用 WDDM 預算（可用 VRAM 之下的預設保留量 dense 768 / MoE 1536） |
 | `WHIRL_NO_PREFIX_CACHE=1` | 停用前綴快取 |
 | `WHIRL_PREFIX_CACHE_VERIFY=1` | 每次快取命中後重新 prefill 並比對 logits（診斷用） |
@@ -285,15 +285,24 @@ I batch | slots busy 0/4 (decode 0, prefill 0) | 80 cycles, 3.79 slots/cycle, 11
 
 - 啟動時的 `other processes use X GiB of VRAM on this GPU (display attached: yes/no)`：伺服器啟動時，
   其他程式（桌面、瀏覽器、其他 AI 工具、Docker）在同一張 GPU 上佔用的量。
-- `kv pool sizing: ... margin N MiB (...)`：在 WDDM 預算之下留給其他程式的空間。預設取以下最大者：
-  2 GiB（這張 GPU 接了螢幕時 3 GiB）、啟動時其他行程在這張 GPU 上的用量、預算的 6%。
-  `WHIRL_POOL_BUDGET_MARGIN_MB=N` 可以指定。伺服器啟動時 Windows 回報的預算不一定已經算進其他程式：
-  在 R9700 上另一個行程佔用 3.3 GiB 時，配置池之前讀到 31.02 GiB，配置之後立刻變成 28.08 GiB。
+- `kv pool sizing: ... margin N MiB (...)`：在 WDDM 預算之下保留的量。伺服器啟動時 Windows 回報的預算
+  不一定已經算進其他程式：在 R9700 上另一個行程佔用 3.3 GiB 時，配置池之前讀到 31.02 GiB，配置之後
+  立刻變成 28.08 GiB。所以 margin = 啟動時其他行程的用量中預算還沒反映的部分，加上替它們之後成長留的
+  空間：2 GiB（這張 GPU 接了螢幕時 3 GiB）與預算的 6% 取較大者。`WHIRL_POOL_BUDGET_MARGIN_MB=N` 可以
+  指定後者。
+- 啟動時的 `adjusted: ...`：你指定的設定若放不下伺服器量到的資源（RAM、扣掉 margin 的 WDDM 預算、
+  其他程式的 VRAM），會降到放得下的值，每項一行並附原因。順序：RAM 層（`--kv-ram-mb` 超過可用 RAM
+  的一半時，降到預設大小）、`--parallel`（每個 slot 的狀態與檢查點是固定的 VRAM；放不下一個完整請求
+  時才減少）、`WHIRL_PREFILL_BATCH`／檢查點數量、`-c`（池），最後是 `--ctx-per-slot`（它本身不佔記憶體，
+  所以最後才依池的大小設上限）。`startup adjustments (N): ...` 會總結全部調整（全都放得下時為 `none`），
+  `GET /props` 與 `GET /health` 的 `startup` 物件會顯示實際生效的值。超過調整後每請求 context 的提示
+  會照常以「超出 context」拒絕，記錄中會說明那是啟動時調整的結果。只有連一個 slot 加 4096 token 的
+  池都放不下時，伺服器才拒絕啟動。Radeon 8060S 不適用，它維持原本的 carve-out 檢查。
 - `kv pool check:`：KV 池配置完立刻再讀一次預算；若 WHIRL 的用量加上 margin 已放不下，就把池縮小
   （以整頁為單位，在任何請求之前），讓 WHIRL 一開始就留在 VRAM 內。每次釋放後會等 WDDM 的數字穩定
-  （最多 1 秒）再判斷，不會縮得比需要的多。輸出不變，只是池能放的 token 變少。有明確指定 `-c` 或
-  `WHIRL_POOL_RESERVE_MB` 時不調整池，而是印警告說明大約放得下多少 token。明確指定的 `--ctx-per-slot`
-  若放不下就拒絕啟動（與決定池大小時放不下的處理相同）；預設的每請求 context 則會降低並印警告。
+  （最多 1 秒）再判斷，不會縮得比需要的多。輸出不變，只是池能放的 token 變少。設了
+  `WHIRL_POOL_RESERVE_MB` 時不調整池，而是印警告說明大約放得下多少 token。明確指定的 `-c` 或
+  `--ctx-per-slot` 放不下時，會降低並印一行 `adjusted:`。
 - 所有配置完成後的 `vram watch:`：目前的數字，以及取樣一次的成本（R9700 上約 0.3 ms）。
 - 每一行 `batch |` 狀態行（有請求執行時約每 5 秒）結尾會加上
   `| vram local X / budget Y GiB, shared Z MiB (+D MiB since start), ram R GiB (pinned P GiB)`；

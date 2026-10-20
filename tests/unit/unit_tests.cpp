@@ -17,6 +17,7 @@
 #include "whirl/vram_limit.h"
 #include "whirl/wddm_watch.h"
 #include "whirl/pool_budget.h"
+#include "whirl/startup_fit.h"
 #include "whirl/value_scope.h"
 #if WHIRL_TEST_DLL_DEPS
 #include "release/dll_deps.h"
@@ -2227,54 +2228,187 @@ void testPoolBudget() {
     }
 }
 
-// v0.2.2.1 default WDDM budget margin (owner 2026-10-21): max(2048 MiB, 3072 with a display, others x 1, 6% of the budget)
+// v0.2.2.1 default WDDM budget margin (owner 2026-10-21): other processes' VRAM the budget does not show yet + room
 void testPoolMargin() {
     using namespace whirl::poolbudget;
     constexpr std::uint64_t MiB = 1ull << 20;
-    auto m = [&](std::uint64_t budget_mib, bool display, bool known, std::uint64_t others_mib, bool moe = false) {
+    auto m = [&](std::uint64_t budget_mib, std::uint64_t start_mib, bool display, bool known, std::uint64_t others_mib) {
         MarginIn in;
         in.local_budget = budget_mib * MiB;
+        in.budget_start = start_mib * MiB;
         in.display = display;
         in.others_known = known;
         in.others = others_mib * MiB;
-        in.moe = moe;
         return defaultMargin(in);
     };
-    // R9700 headless (eGPU, nothing else on it): budget 31.02 GiB -> 6% = 1906 MiB < the 2048 floor
+    // R9700 headless, nothing else on it: budget 31.02 GiB, 6% = 1906 MiB < the 2048 floor
     {
-        const Margin r = m(31764, false, true, 0);
+        const Margin r = m(31764, 31764, false, true, 0);
         CHECK_EQ(r.bytes, 2048 * MiB);
-        CHECK_EQ(r.why, std::string("2048 MiB floor (no display on this GPU)"));
+        CHECK_EQ(r.room, 2048 * MiB);
+        CHECK_EQ(r.pending, 0ull);
+        CHECK(r.why.rfind("2048 MiB room (no display on this GPU)", 0) == 0);
     }
-    // a monitor on the card: 3072 MiB floor
-    CHECK_EQ(m(31764, true, true, 1500).bytes, 3072 * MiB);
-    CHECK(m(31764, true, true, 1500).why.find("display is attached") != std::string::npos);
-    // other programs already hold more than the floor: margin = what they hold (they may double)
+    // the hog test: another process holds 3307 MiB, the budget does not show it yet -> counted, plus the room
     {
-        const Margin r = m(31764, true, true, 4000);
-        CHECK_EQ(r.bytes, 4000 * MiB);
-        CHECK_EQ(r.why, std::string("1 x the 4000 MiB other processes use on this GPU"));
+        const Margin r = m(31764, 31764, false, true, 3307);
+        CHECK_EQ(r.pending, 3307 * MiB);
+        CHECK_EQ(r.bytes, (3307 + 2048) * MiB);
+        CHECK(r.why.find("+ 3307 MiB of the 3307 MiB other processes use that the budget does not show yet") != std::string::npos);
     }
-    // a large card: 6% of the budget (48 GiB card: 2949 MiB > 2048)
+    // ... after the pool was allocated the budget dropped 2.94 GiB (31.02 -> 28.08): only the rest is still pending
     {
-        const Margin r = m(49152, false, true, 100);
-        CHECK_EQ(r.bytes, 2950 * MiB);  // 2949.12 rounded up to whole MiB
-        CHECK(r.why.rfind("6% of the 49152 MiB budget", 0) == 0);
+        const Margin r = m(28754, 31764, false, true, 3307);
+        CHECK_EQ(r.pending, (3307 - (31764 - 28754)) * MiB);
+        CHECK(r.why.find("(it dropped 3010 MiB since startup)") != std::string::npos);
+        // dropped more than the others used: never negative, never counted twice
+        CHECK_EQ(m(24000, 31764, false, true, 3307).pending, 0ull);
+    }
+    // a monitor on the card: 3072 MiB room
+    CHECK_EQ(m(31764, 31764, true, true, 0).room, 3072 * MiB);
+    CHECK(m(31764, 31764, true, true, 0).why.find("display is attached") != std::string::npos);
+    // a large card: 6% of the budget (48 GiB budget: 2949.12 -> 2950 MiB)
+    {
+        const Margin r = m(49152, 49152, false, true, 0);
+        CHECK_EQ(r.room, 2950 * MiB);
+        CHECK(r.why.rfind("2950 MiB room (6% of the 49152 MiB budget)", 0) == 0);
     }
     // counters unreadable: the budget-only rule, said so
     {
-        const Margin r = m(31764, false, false, 0);
+        const Margin r = m(31764, 31764, false, false, 99999);
         CHECK_EQ(r.bytes, 2048 * MiB);
         CHECK(r.why.find("other processes' VRAM unknown") != std::string::npos);
-        CHECK_EQ(m(31764, false, false, 99999).bytes, 2048 * MiB);  // unknown others are not used
     }
-    // budget unknown: the floor
-    CHECK_EQ(m(0, false, true, 0).bytes, 2048 * MiB);
+    // budget at start unknown: treated as now (nothing dropped)
+    CHECK_EQ(m(31764, 0, false, true, 1000).pending, 1000 * MiB);
+    // WHIRL_POOL_BUDGET_MARGIN_MB sets the room; pending is still counted
+    {
+        MarginIn in;
+        in.local_budget = 31764 * MiB;
+        in.budget_start = 31764 * MiB;
+        in.others_known = true;
+        in.others = 500 * MiB;
+        in.room_override = 4096 * MiB;
+        const Margin r = defaultMargin(in);
+        CHECK_EQ(r.room, 4096 * MiB);
+        CHECK_EQ(r.bytes, (4096 + 500) * MiB);
+        CHECK(r.why.rfind("4096 MiB room (WHIRL_POOL_BUDGET_MARGIN_MB)", 0) == 0);
+    }
     // whole MiB
-    CHECK_EQ(m(0, false, true, 3000).bytes % MiB, 0ull);
-    CHECK(m(0, false, true, 3000).bytes >= 3000 * MiB);
-    // MoE: the same rule (moe_extra_mb)
-    CHECK_EQ(m(31764, false, true, 0, true).bytes, (2048 + moe_extra_mb) * MiB);
+    CHECK_EQ(m(31764, 31764, false, true, 1).bytes % MiB, 0ull);
+}
+
+// v0.2.2.1 startup fit of explicit settings (owner 2026-10-21: adjust, log, refuse only below the minimum)
+void testStartupFit() {
+    using namespace whirl;
+    constexpr std::uint64_t MiB = 1ull << 20, GiB = 1ull << 30;
+    // 1. RAM tier: more than half of the available RAM -> half, whole 512 MiB; otherwise unchanged
+    CHECK(!startfit::ramTierCap(12288, 48 * GiB, 16384).has_value());          // 12 GiB of 48 GiB available: kept
+    CHECK(!startfit::ramTierCap(20480, 48 * GiB, 16384).has_value());          // above the default but within half: kept
+    CHECK_EQ(startfit::ramTierCap(65536, 48955 * MiB, 16384).value_or(0), 16384ull);  // R9700 box: 64 GiB asked -> the default 16 GiB
+    CHECK_EQ(startfit::ramTierCap(32768, 40 * GiB, 0).value_or(0), 20480ull);  // no default known: half of 40 GiB
+    CHECK_EQ(startfit::ramTierCap(9000, 17000 * MiB, 0).value_or(0), 8192ull);  // half = 8500 MiB -> 8192 (512 steps)
+    CHECK_EQ(startfit::ramTierCap(9000, 12 * GiB, 8192).value_or(0), 6144ull);  // the default above half: half wins
+    CHECK(!startfit::ramTierCap(0, 8 * GiB, 8192).has_value());               // 0 = tiers off: kept
+    CHECK(!startfit::ramTierCap(4096, 0, 8192).has_value());                  // RAM unknown: kept
+    // a Swift-like card: 16 GiB weights, 0.75 GiB fixed per slot, 36 KiB / token, ~11 GiB left with 1 slot
+    vram::FitInput fi;
+    fi.avail = 28 * GiB;
+    fi.weights = 16 * GiB;
+    fi.fixed = 512 * MiB;
+    fi.buf_per_row = 64 * 1024;
+    fi.buf_fixed = 256 * MiB;
+    fi.ckpt_bytes = 150 * MiB;
+    fi.kv_per_token = 36966;
+    fi.pool_min_tokens = 16384;
+    fi.batch = 4096;
+    fi.n_ck = 4;
+    fi.n_spe = 2;
+    const std::uint64_t per_slot = 150 * MiB;
+    // 2. --parallel 4 fits: unchanged
+    {
+        vram::FitInput a = fi;
+        a.parallel = 4;
+        a.fixed += 4 * per_slot;
+        const auto r = startfit::fitParallel(a, per_slot, true);
+        CHECK_EQ(r.parallel, 4u);
+        CHECK(r.plan.pool_tokens >= startfit::wantTokens(a));
+    }
+    // --parallel 16 on a card with less room (another program holds VRAM): lowered until one 16k request fits
+    {
+        vram::FitInput a = fi;
+        a.avail = 24 * GiB;
+        a.parallel = 16;
+        a.fixed += 16 * per_slot;
+        a.ck_fixed = true;  // keep the checkpoint plan out of it
+        a.batch_fixed = true;
+        const auto r = startfit::fitParallel(a, per_slot, true);
+        CHECK(r.parallel < 16u && r.parallel >= 1u);
+        CHECK(r.pool_requested < startfit::wantTokens(a));
+        CHECK(r.plan.pool_tokens >= startfit::wantTokens(r.fi));
+        // one slot more would not fit (the least reduction)
+        vram::FitInput b = r.fi;
+        b.parallel = r.parallel + 1;
+        b.fixed += per_slot;
+        CHECK(vram::planFit(b).pool_tokens < startfit::wantTokens(b));
+        // not given (a default): never lowered here
+        const auto d = startfit::fitParallel(a, per_slot, false);
+        CHECK_EQ(d.parallel, 16u);
+    }
+    // even one slot does not fit: kept at 1, still short (the server then refuses at sizing)
+    {
+        vram::FitInput a = fi;
+        a.avail = 17 * GiB;
+        a.parallel = 4;
+        a.fixed += 4 * per_slot;
+        a.batch_fixed = a.ck_fixed = true;
+        const auto r = startfit::fitParallel(a, per_slot, true);
+        CHECK_EQ(r.parallel, 1u);
+        CHECK(r.plan.pool_tokens < startfit::wantTokens(r.fi));
+    }
+    // 3. user-set prefill batch / checkpoints: lowered only when short, and only if it helps
+    {
+        vram::FitInput a = fi;
+        a.avail = 16 * GiB + 1600 * MiB;  // tight
+        a.parallel = 1;
+        a.fixed += per_slot;
+        a.batch_fixed = a.ck_fixed = true;
+        const vram::FitPlan p = vram::planFit(a);
+        CHECK(p.pool_tokens < startfit::wantTokens(a));
+        const auto r = startfit::fitFixed(a, p);
+        CHECK(r.changed);
+        CHECK(r.batch_changed || r.ck_changed);
+        CHECK(r.plan.pool_tokens > p.pool_tokens);
+        CHECK(!r.fi.batch_fixed && !r.fi.ck_fixed);
+        // with room: nothing changes
+        vram::FitInput roomy = a;
+        roomy.avail = 30 * GiB;
+        const auto q = startfit::fitFixed(roomy, vram::planFit(roomy));
+        CHECK(!q.changed);
+        // nothing user-set: nothing to lower
+        vram::FitInput autoset = a;
+        autoset.batch_fixed = autoset.ck_fixed = false;
+        CHECK(!startfit::fitFixed(autoset, vram::planFit(autoset)).changed);
+    }
+    // 4. / 5. -c and --ctx-per-slot: serverPoolFit as "not explicit" lowers instead of refusing
+    {
+        const std::uint64_t per_tok = 36966;
+        const std::uint64_t avail = 11 * GiB;
+        const auto refused = numerics::serverPoolFit(avail, per_tok, 400000u, true, 131072, true, 256, 8 * 262144);
+        CHECK(refused.refuse);  // the old contract (still used where nothing is adjusted)
+        const auto r = numerics::serverPoolFit(avail, per_tok, 400000u, false, 131072, false, 256, 8 * 262144);
+        CHECK(!r.refuse);
+        CHECK(r.pool < 400000u && r.pool >= 4096u && r.pool % 256 == 0);
+        CHECK(static_cast<std::uint64_t>(r.pool) * per_tok <= avail);
+        CHECK_EQ(r.slot_ctx, 131072u);  // still fits one 131072-token request
+        const auto s = numerics::serverPoolFit(3 * GiB, per_tok, 400000u, false, 131072, false, 256, 8 * 262144);
+        CHECK(!s.refuse);
+        CHECK(s.slot_ctx == s.pool && s.slot_ctx < 131072u);  // context per request capped to the pool
+        // below the minimum pool: refused with a clear message
+        const auto z = numerics::serverPoolFit(100 * MiB, per_tok, 400000u, false, 131072, false, 256, 8 * 262144);
+        CHECK(z.refuse);
+        CHECK(z.msg.find("at least 4096 needed") != std::string::npos);
+    }
 }
 
 int main() {
@@ -2302,6 +2436,7 @@ int main() {
     testWddmWatch();
     testPoolBudget();
     testPoolMargin();
+    testStartupFit();
     std::printf("unit tests: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

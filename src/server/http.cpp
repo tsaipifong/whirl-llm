@@ -547,6 +547,7 @@ std::string propsJson(Engine& e) {
     b += std::format(",\"modalities\":{{\"vision\":{},\"audio\":false}},\"build_info\":\"whirl {}\"",
                      e.visionConfig().vis ? "true" : "false", WHIRL_VERSION_STRING);
     if (!o.numerics_json.empty()) b += ",\"numerics\":" + o.numerics_json;
+    if (!o.startup_json.empty()) b += ",\"startup\":" + o.startup_json;
     const Engine::Stats st = e.statsShared();
     b += ",\"kv_ssd\":{\"mode\":";
     appendJsonStr(b, o.kv_ssd_mode);
@@ -711,8 +712,11 @@ void handleConn(const ConnCtx& cx, SOCKET s) {
             hs.vram_ok ? std::format(",\"vram\":{{\"local_mib\":{},\"budget_mib\":{},\"shared_mib\":{},\"spill\":{}}}",
                                      hs.vram_local >> 20, hs.vram_budget >> 20, hs.vram_shared >> 20, hs.vram_spill ? "true" : "false")
                        : std::string();
-        const std::string b = std::format("{{\"status\":\"ok\",\"busy\":{},\"slots_busy\":{},\"slots\":{},\"queued\":{}{}}}",
-                                          hs.active > 0 ? "true" : "false", hs.active, hs.slots, hs.queued, vram);
+        // v0.2.2.1: effective values after the startup fit (ctx per request, pool, slots, RAM tier, margin, adjustments)
+        const std::string& su = e.options().startup_json;
+        const std::string b = std::format("{{\"status\":\"ok\",\"busy\":{},\"slots_busy\":{},\"slots\":{},\"queued\":{}{}{}}}",
+                                          hs.active > 0 ? "true" : "false", hs.active, hs.slots, hs.queued, vram,
+                                          su.empty() ? std::string() : ",\"startup\":" + su);
         return sendAll(w, httpResponse(200, "application/json; charset=utf-8", b));
     }
     if (path == "/v1/models" || path == "/models") {

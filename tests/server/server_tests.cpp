@@ -112,6 +112,8 @@ struct ServerSetup {
     whirl::wddmwatch::Config vram_cfg;
     bool vram_startup_warned = false;
     std::function<std::optional<whirl::wddmwatch::Others>()> vram_others;
+    // v0.2.2.1 startup fit: the "startup" JSON for /props and /health, and the context note
+    std::string startup_json, ctx_note;
 };
 
 // vision: host mock encoder (real stb decode + preprocessing size rule, deterministic
@@ -196,6 +198,7 @@ public:
             engine_->attachTier(tier_.get());
             tier_->start(tc, lay, su.fingerprint);
         }
+        if (!su.startup_json.empty() || !su.ctx_note.empty()) engine_->setStartup(su.startup_json, su.ctx_note);
         if (su.vram_probe) engine_->setVramProbe(su.vram_probe, true, su.vram_base, su.vram_cfg, su.vram_startup_warned, su.vram_others);
         http_ = std::make_unique<HttpServer>(*engine_, su.http);
         http_->start("127.0.0.1", 0);
@@ -783,6 +786,36 @@ void testVramWatch() {
         CHECK_EQ(g_log.count("(+600 MiB since start)"), 1u);  // the vram watch line, against the sizing baseline
         set(29000, 31232, 400);
     }
+}
+
+// v0.2.2.1: effective values after the startup fit in /props and /health; a prompt over a context per request that
+// startup lowered is rejected as usual, and the log says why
+void testStartupAdjust() {
+    ServerSetup su = baseSetup();
+    su.startup_json = R"({"ctx_per_request":16384,"pool_tokens":65536,"parallel":4,"kv_ram_mb":0,"wddm_margin_mib":2048,)"
+                      R"("other_processes_mib":3307,"display_attached":false,"adjusted":["--ctx-per-slot 131072 -> 16384"]})";
+    su.ctx_note = "adjusted at startup to fit the GPU memory: --ctx-per-slot 131072 -> 16384";
+    TestServer srv(su);
+    const auto h = srv.get("/health");
+    CHECK_EQ(h.status, 200);
+    CHECK(h.body.find(",\"startup\":{\"ctx_per_request\":16384,") != std::string::npos);
+    CHECK(h.body.find("\"adjusted\":[\"--ctx-per-slot 131072 -> 16384\"]") != std::string::npos);
+    const auto pr = srv.get("/props");
+    CHECK_EQ(pr.status, 200);
+    CHECK(pr.body.find(",\"startup\":{\"ctx_per_request\":16384,") != std::string::npos);
+    g_log.clear();
+    const auto p = makePrompt(16400, 3);
+    auto r = srv.post("/v1/completions", completionBody(p, 4));
+    CHECK_EQ(r.status, 400);
+    CHECK(r.body.find("prompt is too long for the context size") != std::string::npos);
+    CHECK(g_log.count("does not fit the context per request of 16384 tokens (adjusted at startup to fit the GPU memory: "
+                      "--ctx-per-slot 131072 -> 16384)") == 1);
+    // without an adjustment: no startup object, no note
+    TestServer plain(baseSetup());
+    CHECK(plain.get("/health").body.find("\"startup\"") == std::string::npos);
+    g_log.clear();
+    CHECK_EQ(plain.post("/v1/completions", completionBody(p, 4)).status, 400);
+    CHECK_EQ(g_log.count("does not fit the context per request"), 0u);
 }
 
 void testEndpoints() {
@@ -3767,6 +3800,7 @@ int main(int argc, char** argv) {
         {"chat_tokens", testChatTokens},
         {"endpoints", testEndpoints},
         {"vram_watch", testVramWatch},
+        {"startup_adjust", testStartupAdjust},
         {"compat_endpoints", testCompatEndpoints},
         {"http_limits", testHttpLimits},
         {"http_conn_cap", testHttpConnCap},

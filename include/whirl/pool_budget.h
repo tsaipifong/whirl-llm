@@ -12,6 +12,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string>
 
 namespace whirl::poolbudget {
@@ -30,31 +31,34 @@ struct Trim {
 Trim fitPool(std::uint32_t pool_tokens, std::uint64_t local_usage, std::uint64_t local_budget, std::uint64_t margin,
              std::uint64_t per_tok, std::uint32_t page, std::uint32_t min_tokens);
 
-// Default WDDM budget margin (v0.2.2.1). The owner, 2026-10-21: the margin must cover the other programs
-// that use the same GPU (desktop compositor, browser, Docker, other apps), and should look at what they
-// use when the server starts. The WDDM budget read at startup already leaves out what they use at that
-// moment; the margin is room for them to GROW afterwards (issue #5: the budget fell 1.47 GiB right after
-// startup). Rule, kept free under the WDDM local budget when the pool is sized and re-checked:
-//   max(floor, others_k x what other processes use on this GPU now, 6% of the budget)  [+ moe_extra_mb]
-//   floor = 3072 MiB with a monitor on the card (the desktop and whatever the user opens grow), else 2048.
-// Without the other-process counters: max(floor, 6% of the budget). Measurements: see CHANGELOG 0.2.2.1
-// (dev machine display GPU with a browser and an Electron app: other processes ~1.5-1.9 GiB).
-// WHIRL_POOL_BUDGET_MARGIN_MB overrides the whole rule.
+// Default WDDM budget margin (v0.2.2.1). The owner, 2026-10-21: the margin must cover the other programs that use
+// the same GPU (desktop compositor, browser, Docker, other apps), looking at what they use when the server starts.
+// Measured on the R9700 (rel0221): with another process holding 3.3 GiB, the budget read 31.02 GiB before WHIRL
+// allocated its pool (the others not counted yet) and 28.08 GiB right after (now counted). So the margin has two parts:
+//   pending = what other processes used at startup minus what the budget has dropped since startup (the part of
+//             their usage the budget does not show yet; 0 once it does, so it is never counted twice);
+//   room    = max(floor, 6% of the budget): room for other programs to grow later (issue #5: the budget fell
+//             1.47 GiB right after startup); floor = 3072 MiB with a monitor on the card, else 2048.
+// margin = pending + room. Without the other-process counters: pending = 0 (budget-only rule).
+// WHIRL_POOL_BUDGET_MARGIN_MB sets the room part (pending is always counted).
 inline constexpr std::uint64_t margin_floor_mb = 2048;
 inline constexpr std::uint64_t margin_floor_display_mb = 3072;
 inline constexpr double margin_budget_frac = 0.06;
-inline constexpr double margin_others_k = 1.0;
 inline constexpr std::uint64_t moe_extra_mb = 0;
 struct MarginIn {
-    std::uint64_t local_budget = 0;  // 0: unknown
+    std::uint64_t local_budget = 0;   // the budget now (0: unknown)
+    std::uint64_t budget_start = 0;   // the budget read when the server started (0: unknown, treated as now)
     bool moe = false;
-    bool others_known = false;       // the other-process counters were read
-    std::uint64_t others = 0;        // VRAM other processes use on this GPU now
-    bool display = false;            // a monitor is attached to this GPU
+    bool others_known = false;        // the other-process counters were read at startup
+    std::uint64_t others = 0;         // VRAM other processes used on this GPU at startup
+    bool display = false;             // a monitor is attached to this GPU
+    std::optional<std::uint64_t> room_override;  // WHIRL_POOL_BUDGET_MARGIN_MB (bytes)
 };
 struct Margin {
-    std::uint64_t bytes = 0;  // whole MiB
-    std::string why;          // "2048 MiB floor (no display on this GPU)", for the startup log
+    std::uint64_t bytes = 0;    // pending + room, whole MiB
+    std::uint64_t pending = 0;  // other processes' VRAM the budget does not show yet
+    std::uint64_t room = 0;     // room for growth
+    std::string why;            // for the startup log
 };
 Margin defaultMargin(const MarginIn& in);
 

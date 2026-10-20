@@ -62,9 +62,9 @@ list and return to the free list only after the copy's fence.
 - Default pool = all VRAM left after weights, buffers, slot state and checkpoints, kept under two
   limits: the free VRAM minus **768 MiB for dense models, 1.5 GiB for MoE** (the MoE model once
   allocated ~0.5 GiB late and overflowed into shared memory with a smaller reserve), and the Windows
-  (WDDM) budget minus a margin for other programs: the largest of 2 GiB (3 GiB with a monitor on the
-  GPU), what other processes use on the GPU at startup, and 6% of the budget (since 0.2.2.1; see
-  [server.md](server.md#vram-log)).
+  (WDDM) budget minus a margin for other programs: their VRAM that the budget does not show yet, plus
+  room to grow, the larger of 2 GiB (3 GiB with a monitor on the GPU) and 6% of the budget (since
+  0.2.2.1; see [server.md](server.md#vram-log)).
 
 ## <a id="formats"></a>3. KV formats: f16, q8, q8h, q8v
 

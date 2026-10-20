@@ -10,27 +10,34 @@ All notable changes to WHIRL are listed here. Versions follow `project(whirl VER
 - Server, R9700 and other discrete GPUs: decode could get several times slower in a long session because the server
   ran over the Windows (WDDM) video memory budget (issue #5, reported by @CJure and @DanGTG; issue #6, reported by
   @Triazic). @CJure's startup log found it: the KV pool was sized against a budget of 31.02 GiB, Windows reported
-  29.55 GiB about 0.2 s later, and the server started 0.37 GiB over it. Why the budget fell there is not known for
-  certain. On our R9700 the same thing happens when another process holds VRAM: with 3.3 GiB taken by another
+  29.55 GiB about 0.2 s later, and the server started 0.37 GiB over it. Why the budget fell in that case is not known
+  for certain. On our R9700 the same thing happens when another process holds VRAM: with 3.3 GiB taken by another
   process, the budget read 31.02 GiB when the pool was sized and 28.08 GiB right after the pool was allocated, so the
-  budget seen at startup does not always count other programs yet. Over the budget, decode slowed from about 119 to
-  10-20 tok/s in that test, with "Shared GPU memory" unchanged (as in @CJure's report), and recovered when the other
-  process exited. Three changes:
-  - The default room kept free under the budget for other programs (the desktop, a browser, Docker, other apps) was
-    768 MiB (MoE 1.5 GiB). It is now the largest of 2 GiB (3 GiB when a monitor is attached to the GPU), what other
-    processes use on the GPU when the server starts (read once at startup, logged as `other processes use X GiB of
-    VRAM on this GPU (display attached: yes/no)`), and 6% of the budget. `WHIRL_POOL_BUDGET_MARGIN_MB` still sets it.
-    Cost on an R9700 with nothing else on it, balance: the KV pool of Swift-1.5 27B MXFP4 goes from 366592 to
-    330240 tokens with `--parallel 1` and from 308736 to 272384 with the default 4 slots; Ornith-1.5-35B-A3B MXFP4
-    from 418816 to 395008 and from 381952 to 358144. Every request still gets its full 131072-token context.
-    On cards with less than 20 GiB the extra 1536 MiB desktop headroom is dropped, since the margin now covers it.
+  budget seen at startup does not always count other programs yet. Over the budget, decode slowed from about 100-119
+  to 10-43 tok/s in those tests, with "Shared GPU memory" unchanged (as in @CJure's report), and recovered when the
+  other process exited. Changes:
+  - The server reads, once at startup and before it loads anything, how much VRAM other processes use on its GPU and
+    whether a monitor is attached to it (`other processes use X GiB of VRAM on this GPU (display attached: yes/no)`;
+    about 0.2-0.3 s). The room kept free under the budget was 768 MiB (MoE 1.5 GiB). It is now what other processes
+    use that the budget does not show yet, plus room for them to grow: the larger of 2 GiB (3 GiB with a monitor on
+    the GPU) and 6% of the budget. `WHIRL_POOL_BUDGET_MARGIN_MB` sets the room. Cost on an R9700 with nothing else on
+    it, balance: the KV pool of Swift-1.5 27B MXFP4 goes from 366592 to 330240 tokens with `--parallel 1` and from
+    308736 to 272384 with the default 4 slots; Ornith-1.5-35B-A3B MXFP4 from 418816 to 395008 and from 381952 to
+    358144. Every request still gets its full 131072-token context. On cards with less than 20 GiB the extra
+    1536 MiB desktop headroom is dropped, since the margin now covers it.
   - Right after the KV pool is allocated the server reads the budget again and, when its usage plus the margin no
     longer fits, frees the pool and allocates a smaller one (whole pages, before any request), logging
-    `kv pool check: ...`. It waits for the WDDM numbers to settle after each free, so it does not shrink more than
-    needed. In the test above it shrank the pool from 294656 to 191488 tokens and started 3.8 GiB under the lowered
-    budget. An explicit `--ctx-per-slot` that no longer fits refuses to start, as it does when it does not fit at
-    sizing; with an explicit `-c` or `WHIRL_POOL_RESERVE_MB` the pool is not resized and a warning says how many
-    tokens would fit. Not on the Radeon 8060S, whose pool has a fixed default size.
+    `kv pool check: ...`; it waits for the WDDM numbers to settle after each free. In the 3.3 GiB test the pool was
+    sized at 236544 tokens and fit the lowered budget with 2.5 GiB to spare.
+  - Settings given on the command line that do not fit what the server measured are lowered to what fits instead of
+    refusing to start or running over the budget, never silently: one `adjusted:` line each with the reason, a
+    `startup adjustments` summary, and the effective values in a `startup` object in `GET /props` and `GET /health`.
+    In order: the RAM tier (`--kv-ram-mb` above half of the available RAM goes to the default size), `--parallel`
+    (when one full request no longer fits next to every slot's state and checkpoints), `WHIRL_PREFILL_BATCH` /
+    checkpoint counts, `-c`, then `--ctx-per-slot`. With 7.2 GiB taken by another process,
+    `--parallel 16 -c 600000 --ctx-per-slot 262144 --kv-ram-mb 65536` started as 15 slots, a 13312-token pool and
+    context, and an 18 GiB RAM tier, and served requests. The server refuses to start only when even one slot with a
+    4096-token pool does not fit. The Radeon 8060S keeps its carve-out check.
   - Output is unchanged; only the pool, and so how much context can be cached at once, is smaller.
 
 ### Added
@@ -48,10 +55,9 @@ All notable changes to WHIRL are listed here. Versions follow `project(whirl VER
   to Y tok/s` line; it names the spill only when one is seen and each decode cycle got slower, and with
   `--parallel 2` or more it says when another request's prefill shared the GPU. `GET /health` has a `vram` object
   with the last sample (`local_mib`, `budget_mib`, `shared_mib`, `spill`). One sample takes about 0.3 ms on the R9700
-  (measured in the server: 264-294 us, including the HIP device query); it is taken every 5 s while a request runs,
-  at request end and once a minute while idle, never per decode cycle. The other-process VRAM read takes 0.2-0.3 s
-  and runs once at startup on a helper thread while the model loads, and again only when a spill warning is printed.
-  Model output is unchanged. See docs/guide/en/server.md, "Video memory while it runs".
+  (measured in the server: 262-321 us, including the HIP device query); it is taken every 5 s while a request runs,
+  at request end and once a minute while idle, never per decode cycle. Model output is unchanged. See
+  docs/guide/en/server.md, "Video memory while it runs".
 
 ### Changed
 

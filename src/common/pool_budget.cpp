@@ -33,22 +33,34 @@ Trim fitPool(std::uint32_t pool_tokens, std::uint64_t local_usage, std::uint64_t
 Margin defaultMargin(const MarginIn& in) {
     constexpr std::uint64_t MiB = 1ull << 20;
     const auto up = [](double b) { return (static_cast<std::uint64_t>(b) + MiB - 1) / MiB * MiB; };
-    const std::uint64_t floor = (in.display ? margin_floor_display_mb : margin_floor_mb) * MiB;
-    const std::uint64_t frac = up(static_cast<double>(in.local_budget) * margin_budget_frac);
-    const std::uint64_t oth = in.others_known ? up(static_cast<double>(in.others) * margin_others_k) : 0;
     Margin m;
-    m.bytes = std::max({floor, frac, oth});
-    if (m.bytes == floor)
-        m.why = std::format("{} MiB floor ({})", floor / MiB, in.display ? "a display is attached to this GPU" : "no display on this GPU");
-    else if (m.bytes == oth)
-        m.why = std::format("{:g} x the {} MiB other processes use on this GPU", margin_others_k, in.others / MiB);
-    else
-        m.why = std::format("{:g}% of the {} MiB budget", margin_budget_frac * 100.0, in.local_budget / MiB);
-    if (!in.others_known) m.why += "; other processes' VRAM unknown";
-    if (in.moe && moe_extra_mb > 0) {
-        m.bytes += moe_extra_mb * MiB;
-        m.why += std::format(" + {} MiB (MoE)", moe_extra_mb);
+    // room for growth
+    if (in.room_override) {
+        m.room = *in.room_override / MiB * MiB;
+        m.why = std::format("{} MiB room (WHIRL_POOL_BUDGET_MARGIN_MB)", m.room / MiB);
+    } else {
+        const std::uint64_t floor = (in.display ? margin_floor_display_mb : margin_floor_mb) * MiB;
+        const std::uint64_t frac = up(static_cast<double>(in.local_budget) * margin_budget_frac);
+        m.room = std::max(floor, frac);
+        m.why = m.room == floor ? std::format("{} MiB room ({})", floor / MiB, in.display ? "a display is attached to this GPU" : "no display on this GPU")
+                                : std::format("{} MiB room (6% of the {} MiB budget)", m.room / MiB, in.local_budget / MiB);
+        if (in.moe && moe_extra_mb > 0) {
+            m.room += moe_extra_mb * MiB;
+            m.why += std::format(" + {} MiB (MoE)", moe_extra_mb);
+        }
     }
+    // other processes' usage at startup that the budget does not show yet
+    if (in.others_known) {
+        const std::uint64_t start = in.budget_start ? in.budget_start : in.local_budget;
+        const std::uint64_t dropped = start > in.local_budget ? start - in.local_budget : 0;
+        m.pending = in.others > dropped ? up(static_cast<double>(in.others - dropped)) : 0;
+        m.why += std::format(" + {} MiB of the {} MiB other processes use that the budget does not show yet", m.pending / MiB,
+                             up(static_cast<double>(in.others)) / MiB);
+        if (dropped > 0) m.why += std::format(" (it dropped {} MiB since startup)", dropped / MiB);
+    } else {
+        m.why += "; other processes' VRAM unknown";
+    }
+    m.bytes = m.pending + m.room;
     return m;
 }
 

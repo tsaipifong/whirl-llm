@@ -103,6 +103,7 @@ add_library(whirl STATIC
   src/common/vram_limit.cpp
   src/common/wddm_watch.cpp
   src/common/pool_budget.cpp
+  src/common/startup_fit.cpp
   src/common/numerics.cpp
   src/common/spec_sample.cpp
   src/gguf/gguf.cpp
