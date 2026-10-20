@@ -11,7 +11,7 @@
 #include "cache/prefix_cache.h"
 #include "decode_floor.h"
 #include "protocol.h"
-#include "tier/device_ops.h"
+#include "device/backend.h"
 #include "tier/idle_flush.h"
 #include "tier/kv_tier.h"
 #include "tokens.h"
@@ -226,7 +226,7 @@ struct Slot : cache::SlotCache {
     // host tiers
     std::uint64_t tier_id = 0;
     std::uint32_t tier_pages = 0;
-    tier::Event spill_ev = nullptr;
+    device::Event spill_ev = nullptr;
     bool spill_busy = false;
     std::uint32_t spill_upto = 0;
     bool spill_wanted = false;
@@ -267,14 +267,14 @@ struct Spe : cache::SpeKey {
     std::vector<std::int32_t> pages;
     Ckpt ck;
     std::uint64_t tier_id = 0;
-    tier::Event spill_ev = nullptr;
+    device::Event spill_ev = nullptr;
     bool spill_busy = false;
-    tier::Event ready_ev = nullptr;
+    device::Event ready_ev = nullptr;
 };
 
 struct QBatch {
     std::vector<std::int32_t> pages;
-    tier::Event ev = nullptr;
+    device::Event ev = nullptr;
 };
 
 struct CycleProf;
@@ -375,7 +375,7 @@ struct EngineOptions {
 
 class Engine {
 public:
-    Engine(ServerModel& model, tier::DeviceOps& ops, const Tokenizer& tok, const EngineOptions& opt);
+    Engine(ServerModel& model, device::Backend& ops, const Tokenizer& tok, const EngineOptions& opt);
     ~Engine();
     Engine(const Engine&) = delete;
     Engine& operator=(const Engine&) = delete;
@@ -564,7 +564,7 @@ private:
     void freeCkpt(Ckpt& c);
 
     ServerModel& m_;
-    tier::DeviceOps& ops_;
+    device::Backend& ops_;
     const Tokenizer& tok_;
     ChatTokens ct_;
     EngineOptions opt_;

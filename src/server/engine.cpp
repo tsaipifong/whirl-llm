@@ -98,7 +98,7 @@ struct CycleProf {
 // ---------------------------------------------------------------------------
 // construction
 
-Engine::Engine(ServerModel& model, tier::DeviceOps& ops, const Tokenizer& tok, const EngineOptions& opt)
+Engine::Engine(ServerModel& model, device::Backend& ops, const Tokenizer& tok, const EngineOptions& opt)
     : m_(model), ops_(ops), tok_(tok), ct_(tok), opt_(opt), ctx_(opt.ctx), id_prng_(opt.seed) {
     if (opt_.parallel < 1 || opt_.parallel > gdn_max_seg) throw std::runtime_error("parallel must be 1..16");
     if (opt_.n_ck == 0 || opt_.no_prefix_cache) opt_.n_spe = 0;
@@ -526,7 +526,7 @@ std::optional<std::int32_t> Engine::takePage(Slot* sl) {
 void Engine::quarantinePages(std::span<const std::int32_t> pages) {
     if (pages.empty()) return;
     if (!tier_) throw std::runtime_error("NoTier");
-    tier::Event ev = ops_.eventCreate();
+    device::Event ev = ops_.eventCreate();
     try {
         ops_.eventRecord(ev, tier_->stream);
     } catch (...) {
@@ -2829,7 +2829,7 @@ void Engine::cutTail(Slot& sl) {
     t->pumpRestoreNoThrow(r);  // (a throw marks the restore failed: the tail checkpoints stay invalid)
     for (std::size_t i = r->cursor; i < r->pieces.size(); ++i)
         if (r->pieces[i].ck != kNoTag) sl.rs_tail[r->pieces[i].ck] = false;
-    tier::Event ev = nullptr;
+    device::Event ev = nullptr;
     try {
         ev = t->cutTail(r);
     } catch (const std::exception&) {

@@ -1,5 +1,5 @@
 // Tests of the host prefix-cache tiers (src/tier/kv_tier) against a
-// host-memory DeviceOps mock (no GPU): device addresses are host addresses,
+// host-memory device::Backend mock (no GPU): device addresses are host addresses,
 // copies run immediately, events are always complete.
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -36,6 +36,7 @@
 #include <vector>
 
 using namespace whirl::tier;
+using namespace whirl::device;
 namespace fs = std::filesystem;
 
 static int g_pass = 0;
@@ -53,7 +54,7 @@ static int g_fail = 0;
 
 // ---- mock ---------------------------------------------------------------------
 
-class MockDeviceOps final : public DeviceOps {
+class MockDeviceOps final : public Backend {
 public:
     std::atomic<long> live_events{0}, live_host{0}, live_streams{0};
     std::atomic<std::uint64_t> copies{0};

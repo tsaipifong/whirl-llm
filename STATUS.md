@@ -73,7 +73,7 @@ gfx1151（Radeon 8060S）：`gfx1151` 分支上為預覽版（結果正確、尚
 ## 4. 伺服器與 KV 分層快取
 
 - `src/server/`：OpenAI 相容 HTTP（/health、/v1/models、/v1/chat/completions、/v1/completions、SSE、CORS）、tool calls、reasoning_content、取樣參數、continuous batching（1..16 slots）、每 slot 的 MTP / n-gram 草稿、prefix cache、共用 system / prefix checkpoint、page refcount / copy-on-write、host tiers（RAM → SSD、QD4 讀取、prefetch、delay hit、restore tail）。
-- `src/tier/`：KV 分層快取，裝置操作經 `DeviceOps` 介面（可換成 host 記憶體 mock）。
+- `src/tier/`：KV 分層快取，裝置操作經 `device::Backend` 介面（src/device，可換成 host 記憶體實作）。
 - 無 GPU 測試：`whirl-tier-tests`、`whirl-server-tests`（mock 模型跑 HTTP 端到端：greedy == 參考、stream == non-stream、多輪 prefix cache == 冷啟動、C=4 / C=16 併發、LRU 驅逐、共用 checkpoint、RAM / SSD 還原與重啟索引、seeded sampling、stop / eos）。
 - 真模型關卡 `whirl-server-gate.exe`：Qwen3.8-27B UD-Q4_K_M，每個 suite 先跑原型 exe 留參考，再跑 WHIRL 逐字比對：basic 23/23、mt_cache 5/5、pool 7/7、tier 25/25、sys 11/11、restore_conc 12/12，記錄輸出全部相同。Ornith MXFP4 同樣全過。
 - 未做：`WHIRL_PROFILE=2` 的 GPU 分段計時；`WHIRL_GEMV_R/W/WH` 在 server 被忽略。

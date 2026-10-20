@@ -15,7 +15,7 @@ public:
     explicit Qwen35Backend(qwen35::Model& m) : m_(m) { topk_ = m_.module.getFunction("topk_rows"); }
 
     const qwen35::Config& cfg() const override { return m_.cfg; }
-    tier::Stream stream() const override { return m_.stream; }
+    device::Stream stream() const override { return m_.stream; }
     bool hasMtp() const override { return m_.mtp.has_value(); }
 
     DevPtr logits() const override { return m_.logits; }

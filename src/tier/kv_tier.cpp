@@ -172,7 +172,7 @@ struct Job {
     std::atomic<bool> failed{false};
     // read: tier-stream work enqueued before the job (copies that may still
     // touch the arena blocks it fills) must finish before the file is read
-    Event fence = nullptr;
+    device::Event fence = nullptr;
     // SSD -> RAM read started ahead of a restore (queued request); cleared
     // when a restore takes the job over (it then runs at restore priority)
     std::atomic<bool> prefetch{false};
@@ -254,9 +254,9 @@ bool Entry::hasDirty() const {
 
 // ---- Tier: create / start -----------------------------------------------------
 
-Tier::Tier(DeviceOps& ops, std::uint64_t seed, int device) : ops_(ops), rng_(seed), dev_(device) {}
+Tier::Tier(device::Backend& ops, std::uint64_t seed, int device) : ops_(ops), rng_(seed), dev_(device) {}
 
-std::unique_ptr<Tier> Tier::create(DeviceOps& ops, std::uint64_t ram_bytes, std::uint64_t seed, int device) {
+std::unique_ptr<Tier> Tier::create(device::Backend& ops, std::uint64_t ram_bytes, std::uint64_t seed, int device) {
     std::unique_ptr<Tier> t(new Tier(ops, seed, device));
     t->cfg.ram_bytes = ram_bytes;
     t->stream = ops.streamCreateNonBlocking();
@@ -308,7 +308,7 @@ Tier::~Tier() {
         delete e;
     }
     entries.clear();
-    for (Event ev : ev_pool_) {
+    for (device::Event ev : ev_pool_) {
         try {
             ops_.eventDestroy(ev);
         } catch (...) {
@@ -486,16 +486,16 @@ void Tier::touch(Entry* e) {
     touchOwners(e);
 }
 
-Event Tier::newEvent() {
+device::Event Tier::newEvent() {
     if (!ev_pool_.empty()) {
-        Event ev = ev_pool_.back();
+        device::Event ev = ev_pool_.back();
         ev_pool_.pop_back();
         return ev;
     }
     return ops_.eventCreate();
 }
 
-void Tier::poolEvent(Event ev) {
+void Tier::poolEvent(device::Event ev) {
     try {
         ev_pool_.push_back(ev);
     } catch (...) {
@@ -781,7 +781,7 @@ std::uint64_t Tier::copyOut(Entry* e, std::span<const Span> spans) {
     return bytes;
 }
 
-void Tier::fence(Entry* e, Event extra) {
+void Tier::fence(Entry* e, device::Event extra) {
     ops_.eventRecord(e->ev, stream);
     e->gpu_busy = true;
     if (extra != nullptr) ops_.eventRecord(extra, stream);
@@ -1073,7 +1073,7 @@ Tier::Verify Tier::verifySpans(const Entry* e, std::span<const Span> spans) {
     return v;
 }
 
-Event Tier::cutTail(Restore* r) {
+device::Event Tier::cutTail(Restore* r) {
     pumpRestore(r);
     r->pieces.resize(std::max(r->cursor, r->n_main));
     if (r->ev_cut == nullptr) r->ev_cut = newEvent();

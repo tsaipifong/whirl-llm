@@ -39,9 +39,8 @@ if(WHIRL_WITH_HIP)
   if(TARGET whirl_server_core)
     target_sources(whirl-cli PRIVATE
       ${CMAKE_SOURCE_DIR}/src/server/server_main.cpp
-      ${CMAKE_SOURCE_DIR}/src/server/backend_qwen35.cpp
-      ${CMAKE_SOURCE_DIR}/src/tier/device_ops_hip.cpp)
-    target_link_libraries(whirl-cli PRIVATE whirl_server_core)
+      ${CMAKE_SOURCE_DIR}/src/server/backend_qwen35.cpp)
+    target_link_libraries(whirl-cli PRIVATE whirl_server_core whirl_device)
     target_compile_definitions(whirl-cli PRIVATE WHIRL_HAVE_SERVER=1)
   endif()
 

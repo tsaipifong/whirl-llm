@@ -41,11 +41,11 @@
 // after each job; set it before start().
 //
 // All device memory / stream / event / pinned-host operations go through
-// DeviceOps (device_ops.h); this file never includes HIP headers.
+// device::Backend (device/backend.h); this file never includes HIP headers.
 
 #pragma once
 
-#include "device_ops.h"
+#include "device/backend.h"
 #include "evict_policy.h"
 
 #include <array>
@@ -193,7 +193,7 @@ struct Entry {
     std::vector<std::uint8_t> dirty;
     bool in_ram = false;
     std::optional<SsdSnap> ssd;
-    Event ev = nullptr;  // last tier-stream operation on this entry (spill / restore)
+    device::Event ev = nullptr;  // last tier-stream operation on this entry (spill / restore)
     bool gpu_busy = false;
     // an SSD write or read job holds the entry (no RAM eviction / in-place update)
     bool io_busy = false;
@@ -230,12 +230,12 @@ struct Entry {
 
 // (device address, logical offset in the entry, bytes)
 struct Span {
-    DevPtr dev = 0;
+    device::DevPtr dev = 0;
     std::uint64_t off = 0, len = 0;
     std::uint8_t ck = 0xff;
 };
 struct Piece {
-    DevPtr dev = 0;
+    device::DevPtr dev = 0;
     std::uint64_t host = 0;
     std::uint32_t len = 0, lb = 0;
     std::uint8_t ck = 0xff;
@@ -258,15 +258,15 @@ struct Restore {
     // KV pages); the rest (the slot's other checkpoints) follow on the same
     // stream after the request has started (tail)
     std::size_t n_main = 0;
-    Event ev_main = nullptr;
+    device::Event ev_main = nullptr;
     bool main_rec = false;
     // tail cut short (saveCkpt): the main stream waits for what was enqueued
-    Event ev_cut = nullptr;
+    device::Event ev_cut = nullptr;
     // SSD read: index of each logical block in the read job's order (0xffffffff: not read)
     std::vector<std::uint32_t> pos_of_lb;
     Job* job = nullptr;  // SSD read job (nullptr: entry already in RAM)
     bool enqueued = false;
-    Event ev = nullptr;
+    device::Event ev = nullptr;
     std::chrono::steady_clock::time_point t0;
     bool from_ssd = false;
     std::uint64_t bytes = 0;
@@ -286,7 +286,7 @@ class Tier {
 public:
     // Arena + stream (everything that touches device memory), before the KV
     // pool is sized. Throws on failure.
-    static std::unique_ptr<Tier> create(DeviceOps& ops, std::uint64_t ram_bytes, std::uint64_t seed, int device);
+    static std::unique_ptr<Tier> create(device::Backend& ops, std::uint64_t ram_bytes, std::uint64_t seed, int device);
     // Stops the IO thread (joins it after its current job), frees the
     // entries, jobs, events, arena and stream. End every Restore first.
     ~Tier();
@@ -342,7 +342,7 @@ public:
     // Device -> entry (spill). Blocks must exist.
     std::uint64_t copyOut(Entry* e, std::span<const Span> spans);
     // Mark the end of a batch of copies on e (record its event).
-    void fence(Entry* e, Event extra /*nullable*/);
+    void fence(Entry* e, device::Event extra /*nullable*/);
 
     // Longest usable prefix of toks among the entries (RAM or SSD).
     // accept (optional): a checkpoint (position, kind code) may be resumed from; the longest accepted one
@@ -369,7 +369,7 @@ public:
     Verify verifySpans(const Entry* e, std::span<const Span> spans);
 
     // Stop the tail where it is; returns the event after the enqueued pieces.
-    Event cutTail(Restore* r);
+    device::Event cutTail(Restore* r);
     // true once everything (tail pieces, the SSD read) is done.
     bool pumpTail(Restore* r);
     bool pumpTailNoThrow(Restore* r);  // exception -> r->failed, done
@@ -423,7 +423,7 @@ public:
     Config cfg;
     Layout lay;
     Stats stats;
-    Stream stream = nullptr;
+    device::Stream stream = nullptr;
     std::vector<Entry*> entries;
     std::uint64_t ssd_bytes = 0;
     std::function<void(std::string_view)> log_fn;
@@ -440,12 +440,12 @@ private:
         std::int64_t t;
     };
 
-    Tier(DeviceOps& ops, std::uint64_t seed, int device);
+    Tier(device::Backend& ops, std::uint64_t seed, int device);
 
     std::uint64_t blockAddr(std::uint32_t b) const;
     void touch(Entry* e);
-    Event newEvent();
-    void poolEvent(Event ev);
+    device::Event newEvent();
+    void poolEvent(device::Event ev);
     void releaseBlocks(Entry* e, std::size_t from_lb);
     void dropRam(Entry* e);
     bool evictable(Entry* e, Entry* keep);
@@ -485,7 +485,7 @@ private:
     Job* pendingRestoreRead();
     void runJob(Job* j);
 
-    DeviceOps& ops_;
+    device::Backend& ops_;
     std::uint64_t fingerprint_ = 0;
     std::vector<void*> chunks_;
     std::vector<std::uint64_t> chunk_len_;
@@ -504,7 +504,7 @@ private:
     std::vector<Job*> jobs_;
     std::function<void()> wake_fn_;
     std::mt19937_64 rng_;
-    std::vector<Event> ev_pool_;
+    std::vector<device::Event> ev_pool_;
     int dev_ = 0;  // device (the IO thread waits on tier-stream events)
     void* dir_lock_ = nullptr;  // HANDLE of <ssd dir>\whirl.lock (delete on close)
     bool dir_busy_ = false;

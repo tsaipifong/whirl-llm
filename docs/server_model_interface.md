@@ -13,7 +13,7 @@ so that it also runs (in tests, without a GPU) against a host-memory mock:
 
 | Interface | File | Production implementation |
 |---|---|---|
-| `tier::DeviceOps` (copies, streams, events, pinned / device memory) | `src/tier/device_ops.h` | `src/tier/device_ops_hip.cpp` → `whirl/hip.h` |
+| `device::Backend` (copies, streams, events, pinned / device memory) | `src/device/backend.h` | `src/device/backend_hip.cpp` → `whirl/hip.h` |
 | `server::ServerModel` (model operations) | `src/server/backend.h` | `src/server/backend_qwen35.cpp` → `qwen35::Model` |
 
 `backend_qwen35.cpp` is a thin forwarder; every `ServerModel` call has the

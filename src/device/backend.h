@@ -1,9 +1,12 @@
-// Device memory / stream / event operations used by the server engine and
-// the host prefix-cache tiers, behind an interface so that the scheduling,
-// prefix-cache and tier logic can run against a host-memory mock in tests
-// (no GPU). The production implementation forwards to whirl/hip.h.
+// Device backend (ARCH-1 D-2): the device memory / copy / stream / event
+// operations the host-side logic (server engine, prefix-cache tiers) uses,
+// behind one interface, so that the scheduling, prefix-cache and tier logic
+// can run against a host-memory backend in tests (no GPU). The production
+// implementation forwards to whirl/hip.h (src/device/backend_hip.cpp).
+// Replaces tier::DeviceOps (src/tier/device_ops.h), which it absorbed.
 // SPDX-License-Identifier: Apache-2.0
 //
+// Written for WHIRL. This header never includes HIP headers.
 // Addresses are plain uint64 values (hip::DevPtr): device pointers or
 // pinned host pointers; copyAsync infers the direction (hipMemcpyDefault).
 
@@ -12,15 +15,15 @@
 #include <cstdint>
 #include <memory>
 
-namespace whirl::tier {
+namespace whirl::device {
 
 using DevPtr = std::uint64_t;
 using Stream = void*;  // opaque (hipStream_t for the HIP implementation)
 using Event = void*;   // opaque (hipEvent_t)
 
-class DeviceOps {
+class Backend {
 public:
-    virtual ~DeviceOps() = default;
+    virtual ~Backend() = default;
 
     // Any address pair (device or pinned host), asynchronous on stream s.
     virtual void copyAsync(DevPtr dst, DevPtr src, std::uint64_t bytes, Stream s) = 0;
@@ -59,7 +62,7 @@ public:
     virtual const char* lastErrorString() const = 0;
 };
 
-// Forwarding implementation over whirl/hip.h (src/tier/device_ops_hip.cpp).
-std::unique_ptr<DeviceOps> makeHipDeviceOps();
+// Forwarding implementation over whirl/hip.h (src/device/backend_hip.cpp).
+std::unique_ptr<Backend> makeHipBackend();
 
-}  // namespace whirl::tier
+}  // namespace whirl::device

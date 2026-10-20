@@ -1,17 +1,17 @@
-// DeviceOps over the whirl HIP runtime wrapper.
+// device::Backend over the whirl HIP runtime wrapper (ARCH-1 D-2; formerly tier::DeviceOps).
 // SPDX-License-Identifier: Apache-2.0
 
-#include "device_ops.h"
+#include "device/backend.h"
 
 #include "whirl/hip.h"
 
 #include <string>
 
-namespace whirl::tier {
+namespace whirl::device {
 
 namespace {
 
-class HipDeviceOps final : public DeviceOps {
+class HipBackend final : public Backend {
 public:
     void copyAsync(DevPtr dst, DevPtr src, std::uint64_t bytes, Stream s) override {
         hip::copyAnyAsync(dst, src, bytes, s);
@@ -47,6 +47,6 @@ public:
 
 }  // namespace
 
-std::unique_ptr<DeviceOps> makeHipDeviceOps() { return std::make_unique<HipDeviceOps>(); }
+std::unique_ptr<Backend> makeHipBackend() { return std::make_unique<HipBackend>(); }
 
-}  // namespace whirl::tier
+}  // namespace whirl::device

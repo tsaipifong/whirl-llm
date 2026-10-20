@@ -30,7 +30,7 @@ void spinUs(double us) {
 
 MockDeviceOps::~MockDeviceOps() = default;
 
-bool MockDeviceOps::isHost(tier::DevPtr p) const {
+bool MockDeviceOps::isHost(device::DevPtr p) const {
     std::lock_guard<std::mutex> lk(mu_);
     auto it = host_.upper_bound(static_cast<std::uintptr_t>(p));
     if (it == host_.begin()) return false;
@@ -38,7 +38,7 @@ bool MockDeviceOps::isHost(tier::DevPtr p) const {
     return p >= it->first && p < it->first + it->second;
 }
 
-void MockDeviceOps::copyAsync(tier::DevPtr dst, tier::DevPtr src, std::uint64_t bytes, tier::Stream) {
+void MockDeviceOps::copyAsync(device::DevPtr dst, device::DevPtr src, std::uint64_t bytes, device::Stream) {
     if (bytes == 0) return;
     if (const std::uint64_t nth = fail_host_copy_.load(); nth != 0 && isHost(src) && ++host_copies_ == nth) {
         fail_host_copy_ = 0;
@@ -48,19 +48,19 @@ void MockDeviceOps::copyAsync(tier::DevPtr dst, tier::DevPtr src, std::uint64_t 
     copied_ += bytes;
 }
 
-void MockDeviceOps::download(void* dst, tier::DevPtr src, std::uint64_t bytes) {
+void MockDeviceOps::download(void* dst, device::DevPtr src, std::uint64_t bytes) {
     std::memcpy(dst, reinterpret_cast<const void*>(src), bytes);
 }
 
-tier::Stream MockDeviceOps::streamCreateNonBlocking() {
-    return reinterpret_cast<tier::Stream>(next_handle_.fetch_add(16));
+device::Stream MockDeviceOps::streamCreateNonBlocking() {
+    return reinterpret_cast<device::Stream>(next_handle_.fetch_add(16));
 }
 
-void MockDeviceOps::streamDestroy(tier::Stream) {}
+void MockDeviceOps::streamDestroy(device::Stream) {}
 
-tier::Event MockDeviceOps::eventCreate() { return reinterpret_cast<tier::Event>(next_handle_.fetch_add(16)); }
+device::Event MockDeviceOps::eventCreate() { return reinterpret_cast<device::Event>(next_handle_.fetch_add(16)); }
 
-void MockDeviceOps::eventDestroy(tier::Event) {}
+void MockDeviceOps::eventDestroy(device::Event) {}
 
 void* MockDeviceOps::hostMalloc(std::uint64_t bytes) {
     void* p = _aligned_malloc(bytes ? bytes : 1, 4096);
@@ -81,16 +81,16 @@ void MockDeviceOps::hostFree(void* p) {
     _aligned_free(p);
 }
 
-tier::DevPtr MockDeviceOps::malloc(std::uint64_t bytes) {
+device::DevPtr MockDeviceOps::malloc(std::uint64_t bytes) {
     void* p = _aligned_malloc(bytes ? bytes : 1, 256);
     if (!p) throw std::bad_alloc();
     std::memset(p, 0, bytes);
     std::lock_guard<std::mutex> lk(mu_);
     live_.insert(p);
-    return reinterpret_cast<tier::DevPtr>(p);
+    return reinterpret_cast<device::DevPtr>(p);
 }
 
-void MockDeviceOps::free(tier::DevPtr p) {
+void MockDeviceOps::free(device::DevPtr p) {
     void* q = reinterpret_cast<void*>(p);
     {
         std::lock_guard<std::mutex> lk(mu_);
@@ -135,7 +135,7 @@ std::uint64_t MockModel::stepH(std::uint64_t h, std::uint32_t tok, std::uint32_t
     return mc_.markov > 0 ? mix(0x5EEDull, tok, 0) : mix(h, tok, pos);
 }
 
-MockModel::MockModel(tier::DeviceOps& ops, const Tokenizer& tok, const MockConfig& mc) : ops_(ops), tok_(tok), mc_(mc) {
+MockModel::MockModel(device::Backend& ops, const Tokenizer& tok, const MockConfig& mc) : ops_(ops), tok_(tok), mc_(mc) {
     cfg_.n_layer = mc.n_layer;
     cfg_.n_embd = mc.n_embd;
     cfg_.n_ff = 64;

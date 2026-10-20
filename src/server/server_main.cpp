@@ -13,7 +13,7 @@
 #include "engine.h"
 #include "http.h"
 #include "log.h"
-#include "tier/device_ops.h"
+#include "device/backend.h"
 #include "tier/kv_tier.h"
 #include "tier/ram_size.h"
 #include "whirl/common.h"
@@ -1065,7 +1065,7 @@ int serveMain(int argc, char** argv, const char* program) {
         eo.prefill_exec = prefill_exec;
         eo.seed = seed0;
 
-        auto ops = tier::makeHipDeviceOps();
+        auto ops = device::makeHipBackend();
         auto backend = makeQwen35Backend(model);
         Engine engine(*backend, *ops, tok, eo);
         const hip::MemInfo mem_ck0 = hip::memInfo();

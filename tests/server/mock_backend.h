@@ -21,7 +21,7 @@
 #pragma once
 
 #include "server/backend.h"
-#include "tier/device_ops.h"
+#include "device/backend.h"
 #include "whirl/tokenizer.h"
 
 #include <atomic>
@@ -34,24 +34,24 @@
 
 namespace whirl::test {
 
-class MockDeviceOps final : public tier::DeviceOps {
+class MockDeviceOps final : public device::Backend {
 public:
     ~MockDeviceOps() override;
-    void copyAsync(tier::DevPtr dst, tier::DevPtr src, std::uint64_t bytes, tier::Stream s) override;
-    void download(void* dst, tier::DevPtr src, std::uint64_t bytes) override;
-    tier::Stream streamCreateNonBlocking() override;
-    void streamDestroy(tier::Stream s) override;
-    void streamSync(tier::Stream) override {}
-    void streamWaitEvent(tier::Stream, tier::Event) override {}
-    tier::Event eventCreate() override;
-    void eventDestroy(tier::Event e) override;
-    void eventRecord(tier::Event, tier::Stream) override {}
-    bool eventDone(tier::Event) override { return true; }
-    void eventSync(tier::Event) override {}
+    void copyAsync(device::DevPtr dst, device::DevPtr src, std::uint64_t bytes, device::Stream s) override;
+    void download(void* dst, device::DevPtr src, std::uint64_t bytes) override;
+    device::Stream streamCreateNonBlocking() override;
+    void streamDestroy(device::Stream s) override;
+    void streamSync(device::Stream) override {}
+    void streamWaitEvent(device::Stream, device::Event) override {}
+    device::Event eventCreate() override;
+    void eventDestroy(device::Event e) override;
+    void eventRecord(device::Event, device::Stream) override {}
+    bool eventDone(device::Event) override { return true; }
+    void eventSync(device::Event) override {}
     void* hostMalloc(std::uint64_t bytes) override;
     void hostFree(void* p) override;
-    tier::DevPtr malloc(std::uint64_t bytes) override;
-    void free(tier::DevPtr p) override;
+    device::DevPtr malloc(std::uint64_t bytes) override;
+    void free(device::DevPtr p) override;
     void setDevice(int) override {}
     const char* lastErrorString() const override { return "mock"; }
 
@@ -66,7 +66,7 @@ public:
     bool hostCopyFailArmed() const { return fail_host_copy_.load() != 0; }
 
 private:
-    bool isHost(tier::DevPtr p) const;
+    bool isHost(device::DevPtr p) const;
     mutable std::mutex mu_;
     std::set<void*> live_;
     std::map<std::uintptr_t, std::uint64_t> host_;  // pinned host allocations (start -> bytes)
@@ -118,11 +118,11 @@ struct MockConfig {
 
 class MockModel final : public server::ServerModel {
 public:
-    MockModel(tier::DeviceOps& ops, const Tokenizer& tok, const MockConfig& mc);
+    MockModel(device::Backend& ops, const Tokenizer& tok, const MockConfig& mc);
     ~MockModel() override;
 
     const qwen35::Config& cfg() const override { return cfg_; }
-    tier::Stream stream() const override { return stream_; }
+    device::Stream stream() const override { return stream_; }
     bool hasMtp() const override { return mc_.mtp; }
     server::DevPtr logits() const override { return logits_; }
     server::DevPtr hn() const override { return hn_; }
@@ -243,11 +243,11 @@ private:
     std::vector<std::map<std::uint32_t, State>> dfl_ctx_;
     std::uint64_t dfl_bad_ = 0, dfl_stale_ = 0, dfl_blocks_ = 0, dfl_holes_ = 0;
 
-    tier::DeviceOps& ops_;
+    device::Backend& ops_;
     const Tokenizer& tok_;
     MockConfig mc_;
     qwen35::Config cfg_;
-    tier::Stream stream_ = nullptr;
+    device::Stream stream_ = nullptr;
     server::DevPtr logits_ = 0, hn_ = 0;
     std::vector<Seq> seqs_;
     std::uint32_t cur_ = 0;

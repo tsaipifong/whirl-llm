@@ -8,7 +8,7 @@
 
 #pragma once
 
-#include "tier/device_ops.h"
+#include "device/backend.h"
 #include "vision_iface.h"
 #include "whirl/model.h"
 
@@ -22,7 +22,7 @@
 
 namespace whirl::server {
 
-using tier::DevPtr;
+using device::DevPtr;
 using qwen35::MSeg;
 using qwen35::PSeg;
 using qwen35::VSeg;
@@ -40,7 +40,7 @@ public:
     virtual ~ServerModel() = default;
 
     virtual const qwen35::Config& cfg() const = 0;
-    virtual tier::Stream stream() const = 0;
+    virtual device::Stream stream() const = 0;
     virtual bool hasMtp() const = 0;
 
     // ---- device buffers (see Model members of the same names)

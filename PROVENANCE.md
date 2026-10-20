@@ -94,10 +94,10 @@ see "gfx1151 (Radeon 8060S)" below).
 
 | File | Origin | Notes |
 |---|---|---|
-| src/tier/kv_tier.h, src/tier/kv_tier.cpp | reimplemented from the prototype (`kv_tier.zig`) | constants, file layout, LRU / eviction / dirty-block logic, QD4 overlapped reads, prefetch, restore main part + tail, cutTail, startup index; device operations through `src/tier/device_ops.h`; file magic `WHKVTIER`, extension `.wkv`, pinned declaration under `%LOCALAPPDATA%\whirl\pinned`; the IO thread is joined on destruction |
-| tests/server/tier_tests.cpp | new | host-memory DeviceOps mock; RAM / SSD / prefetch / index / cutTail tests |
+| src/tier/kv_tier.h, src/tier/kv_tier.cpp | reimplemented from the prototype (`kv_tier.zig`) | constants, file layout, LRU / eviction / dirty-block logic, QD4 overlapped reads, prefetch, restore main part + tail, cutTail, startup index; device operations through `src/device/backend.h`; file magic `WHKVTIER`, extension `.wkv`, pinned declaration under `%LOCALAPPDATA%\whirl\pinned`; the IO thread is joined on destruction |
+| tests/server/tier_tests.cpp | new | host-memory device::Backend mock; RAM / SSD / prefetch / index / cutTail tests |
 | cmake/tier.cmake | new | |
-| src/tier/device_ops.h, src/tier/device_ops_hip.cpp | new | device-operation interface of the engine / tiers and its forwarding implementation over `whirl/hip.h` |
+| src/device/backend.h, src/device/backend_hip.cpp | new | device backend of the engine / tiers (ARCH-1 D-2; formerly src/tier/device_ops.h / device_ops_hip.cpp) and its forwarding implementation over `whirl/hip.h` |
 | src/server/log.h, src/server/log.cpp | reimplemented from the prototype (`server.zig`: `Log`) | same line format; file handling new |
 | src/server/protocol.h, src/server/protocol.cpp | reimplemented from the prototype (`server.zig`: text helpers, `parseParams`, `Out.view`, `parseToolCalls`, `Timings`, `writeUsage`, HTTP status / error responses) | tool-call argument floats use the Python repr of `whirl::json` |
 | src/server/tokens.h, src/server/tokens.cpp | new | think-open split, system-message boundary and CR LF map written from the Qwen3.x chat format |
@@ -105,7 +105,7 @@ see "gfx1151 (Radeon 8060S)" below).
 | src/server/engine.h, src/server/engine.cpp | reimplemented from the prototype (`server.zig`: `Engine`, `Slot`, `Ckpt`, `Spe`, `Sampler`, `StreamState`, `CycleProf`, `runLoop`) | profile hooks behind `ServerModel`; shutdown (`stop`, queued requests answered 503) is new; `system_fingerprint` / `owned_by` are "whirl" |
 | src/server/http.h, src/server/http.cpp | reimplemented from the prototype (`server.zig`: `handleConn`, `buildJob`, `acceptLoop`) | Winsock sockets, buffered reader / writer and clean `stop()` are new |
 | src/server/server_main.h, src/server/server_main.cpp, src/server/whirl_server.cpp | reimplemented from the prototype (`server.zig`: `main`, `defaultBatchDrafts`, `tierFingerprint`, usage text) | `WHIRL_*` environment names (via `envGet`); default directories under `%LOCALAPPDATA%\whirl` |
-| tests/server/mock_backend.h, tests/server/mock_backend.cpp | new | deterministic toy model behind `ServerModel` / `DeviceOps` that detects wrong state copies, page tables and KV rows |
+| tests/server/mock_backend.h, tests/server/mock_backend.cpp | new | deterministic toy model behind `ServerModel` / `device::Backend` that detects wrong state copies, page tables and KV rows |
 | tests/server/http_client.h, tests/server/http_client.cpp | new | |
 | tests/server/server_tests.cpp | new | protocol / sampler unit tests and HTTP end-to-end tests against the mock |
 | tests/server/server_gate.cpp | new | C++ version of the project's own server gate scripts (basic / mt_cache / pool / tier / sys / restore_conc / vis); test texts are llama.cpp sources / docs read from an external checkout at run time (`WHIRL_GATE_TEXT_ROOT`) |

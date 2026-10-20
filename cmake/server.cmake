@@ -47,7 +47,7 @@ endif()
 # OpenAI-compatible server (src/server)
 
 # engine + HTTP front end; HIP-free (the GPU comes in through the ServerModel /
-# DeviceOps interfaces), so the tests can run it against a host-memory mock
+# device::Backend interfaces), so the tests can run it against a host-memory backend
 add_library(whirl_server_core STATIC
   ${CMAKE_SOURCE_DIR}/src/server/log.cpp
   ${CMAKE_SOURCE_DIR}/src/server/protocol.cpp
@@ -61,13 +61,17 @@ target_include_directories(whirl_server_core PRIVATE ${CMAKE_BINARY_DIR}/generat
 target_link_libraries(whirl_server_core PUBLIC whirl whirl_cache whirl_tier_core ws2_32)
 
 if(WHIRL_WITH_HIP)
+  # device backend over HIP (src/device, ARCH-1 D-2): the engine's / tiers' device operations
+  add_library(whirl_device STATIC ${CMAKE_SOURCE_DIR}/src/device/backend_hip.cpp)
+  target_include_directories(whirl_device PUBLIC ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/include)
+  target_link_libraries(whirl_device PUBLIC whirl)
+
   # whirl-server.exe: the production server (qwen35::Model on HIP)
   add_executable(whirl-server
     ${CMAKE_SOURCE_DIR}/src/server/whirl_server.cpp
     ${CMAKE_SOURCE_DIR}/src/server/server_main.cpp
-    ${CMAKE_SOURCE_DIR}/src/server/backend_qwen35.cpp
-    ${CMAKE_SOURCE_DIR}/src/tier/device_ops_hip.cpp)
-  target_link_libraries(whirl-server PRIVATE whirl_server_core whirl_model)
+    ${CMAKE_SOURCE_DIR}/src/server/backend_qwen35.cpp)
+  target_link_libraries(whirl-server PRIVATE whirl_server_core whirl_model whirl_device)
   if(MSVC)
     target_link_options(whirl-server PRIVATE /ENTRY:wmainCRTStartup)
   endif()
