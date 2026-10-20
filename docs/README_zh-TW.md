@@ -175,7 +175,7 @@ precise 會犧牲速度。R9700 上代價最大的是 MXFP4 檔的 prefill，因
 <!-- /gen -->
 
 <!-- gen:fast.zh -->
-**fast 模式還沒有完全優化，之後的 0.2.x 小版本會再改進。** 目前實測的效果：主要加快稠密 Swift 27B 的 decode（R9700：2k token 文件之後 115.5 對 balance 87.6 tok/s，寫程式對話 130.4 對 109.6；8060S（最大功率 80 W，ASUS ROG Flow Z13）8k：37.7 對 32.5），以及 Ornith MoE 的長上下文 decode（R9700 ~250k：125.3 對 101.7）。在 Ornith 上，**約 64k token 以下 fast 比 balance 慢**（R9700：2k 208.3 對 238.4、32k 183.5 對 199.1；64k 174.9 對 169.1；8060S 2k：93.8 對 101.4），因為 4-bit KV 快取每個 token 有固定的額外成本，要到長上下文才划算。以上是 0.2.0 的量測；0.2.2 讓 Radeon 8060S 上 Ornith 的 fast 快了 3-5%，在 2k-32k 與寫程式對話中與 balance 持平（見 CHANGELOG）。fast 目前不會加快 prefill（R9700 Swift 32k：2,790 對 2,805 tok/s）。
+**fast 模式還沒有完全優化，之後的 0.2.x 小版本會再改進。** 目前實測的效果：主要加快稠密 Swift 27B 的 decode（R9700：2k token 文件之後 115.5 對 balance 87.6 tok/s，寫程式對話 130.4 對 109.6；8060S（最大功率 80 W，ASUS ROG Flow Z13）8k：37.7 對 32.5），以及 Ornith MoE 的長上下文 decode（R9700 ~250k：125.3 對 101.7）。在 Ornith 上，**約 64k token 以下 fast 比 balance 慢**（R9700：2k 208.3 對 238.4、32k 183.5 對 199.1；64k 174.9 對 169.1；8060S 2k：93.8 對 101.4），因為 4-bit KV 快取每個 token 有固定的額外成本，要到長上下文才划算。以上是 0.2.0 的量測；0.2.2 讓 Radeon 8060S 上 Ornith 的 fast 快了 3-5%（文件問答 2k、96k、128k 與寫程式對話；32k 在雜訊範圍內），在 2k、32k 與寫程式對話中與 balance 持平（見 CHANGELOG）。fast 目前不會加快 prefill（R9700 Swift 32k：2,790 對 2,805 tok/s）。
 <!-- /gen -->
 
 各模式的完整說明：[usage.md 的數值模式](guide/zh-TW/usage.md#modes)。

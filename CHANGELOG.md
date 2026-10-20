@@ -11,7 +11,7 @@ All notable changes to WHIRL are listed here. Versions follow `project(whirl VER
   (Ornith-1.5-35B-A3B MXFP4), because `attn_dq4` always launched its fixed 256-split grid and the split combine walked
   256 partials per head even when only a few splits held keys (8 at 2k). It now launches only the splits the rows'
   keys use (the same key partition, so the output is bitwise unchanged). Measured on the Radeon 8060S at max power (80 W),
-  ASUS ROG Flow Z13,, Ornith fast decode, 0.2.1 vs 0.2.2, mean of 5 interleaved rounds: QA document 2k 94.8 -> 99.8
+  ASUS ROG Flow Z13, Ornith fast decode, 0.2.1 vs 0.2.2, mean of 5 interleaved rounds: QA document 2k 94.8 -> 99.8
   tok/s (+5.2%), 96k 63.8 -> 66.7 (+4.6%), 128k 60.6 -> 62.7 (+3.4%), 32k 81.6 -> 82.9 (within the round-to-round
   range); coding chat 96.7 -> 99.6 (+3.0%, same text). Against balance (same rounds), fast is no longer behind:
   level in the coding chat (99.6 vs 100.2 tok/s; was 3.5% behind) and at 2k / 32k (within the round-to-round
