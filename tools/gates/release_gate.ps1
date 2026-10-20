@@ -207,6 +207,13 @@ foreach ($v in @(Get-ChildItem Env: | Where-Object { $_.Name -like "WHIRL_*" -an
 }
 if (-not $env:AMD_LOG_LEVEL) { $env:AMD_LOG_LEVEL = "1" }
 $env:PYTHONIOENCODING = "utf-8"
+# the tier / server unit tests keep their SSD folders under WHIRL_TEST_TMP, else %TEMP%\whirl-tests: two gates at
+# once (one per GPU, or two agents) shared that folder and broke each other's cpu_tier / cpu_server (rel0221 rc3,
+# 2026-10-21 03:56: tier_tests.cpp:600 crash + close_reused). One folder per gate Work, removed afterwards.
+$testTmp = Join-Path $Work "test_tmp"
+Remove-Item -Recurse -Force $testTmp -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Force $testTmp | Out-Null
+$env:WHIRL_TEST_TMP = $testTmp
 $lock = $env:WHIRL_GATE_LOCK_SCRIPT
 $rows = @()
 try {
@@ -268,6 +275,8 @@ try {
         $rows += [pscustomobject]@{ ok = $ok; line = $row }
     }
 } finally {
+    Remove-Item Env:WHIRL_TEST_TMP -ErrorAction SilentlyContinue
+    Remove-Item -Recurse -Force $testTmp -ErrorAction SilentlyContinue
     foreach ($k in $saved.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k]) }
 }
 $nf = @($rows | Where-Object { -not $_.ok }).Count
