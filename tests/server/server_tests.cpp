@@ -220,6 +220,23 @@ public:
     MockVision* vision() { return vis_.get(); }
     Engine& engine() { return *engine_; }
     tier::Tier* tierp() { return tier_.get(); }
+    // REVIEW-ARCH3 P2-1: the tier (entries, statistics) belongs to the engine thread, and the engine spills a slot
+    // only after it sent the response. Read tier state through these: they run on the engine thread at the start of
+    // its next loop iteration, i.e. after the last answered request's spill. Only while the engine loop runs.
+    template <class F>
+    void onEngine(F&& f) {
+        engine_->runOnLoop(std::function<void()>(std::forward<F>(f)));
+    }
+    tier::Stats tierStats() {
+        tier::Stats st;
+        onEngine([&] { st = tier_->stats; });
+        return st;
+    }
+    std::size_t ssdEntries() {
+        std::size_t n = 0;
+        onEngine([&] { n = tier_->ssdEntries(); });
+        return n;
+    }
     NullBackend& ops() { return ops_; }
     std::uint16_t port() const { return http_->port(); }
 
@@ -800,7 +817,11 @@ void testHttpLimits() {
         test::rawClose(s);
         CHECK(closed && nowSeconds() - t0 < 2.0);
     }
-    CHECK_EQ(srv.get("/health").status, 200);
+    // REVIEW-ARCH3: this request once took 21 s and failed (1 of 10 full runs). Print what the client saw (a connect
+    // timeout carries the local port and its TCP rows: the open CB-FLAKE lost-connect item), not only the status.
+    const auto h = srv.get("/health");
+    CHECK_EQ(h.status, 200);
+    if (h.status != 200) std::fprintf(stderr, "  /health after the limit checks: status %d after %.0f ms: %s\n", h.status, h.ms, h.err.c_str());
 }
 
 void testHttpConnCap() {
@@ -1716,7 +1737,7 @@ void testDFlashTier() {
         pa2 = makePrompt(static_cast<std::uint32_t>(pa2.size() + 300), 603, pa2);
         auto r3 = srv.post("/v1/completions", completionBody(pa2, 40));
         CHECK_EQ(completionText(r3), decode(srv.model().greedyReference(pa2, 40, true)));
-        CHECK(srv.tierp()->stats.restores_ram >= 1);
+        CHECK(srv.tierStats().restores_ram >= 1);
         CHECK(srv.engine().stats().dfl_cycles > 0);
         CHECK_EQ(srv.model().poison(), 0u);
         CHECK_EQ(srv.model().dflBad(), 0u);
@@ -2161,12 +2182,12 @@ void testTiers() {
         auto r3 = srv.post("/v1/completions", completionBody(pa2, 40));
         CHECK_EQ(completionText(r3), decode(srv.model().greedyReference(pa2, 40, true)));
         CHECK(cachedTokens(r3) >= pa.size());
-        CHECK(srv.tierp()->stats.restores_ram >= 1);
+        CHECK(srv.tierStats().restores_ram >= 1);
         CHECK(g_log.count("kv tier: restored") >= 1);
         // let the SSD writes finish (delay 0). A was reused (restored) and is written; B is a one-shot
         // prompt and, with the seen-once filter, is not
-        for (int i = 0; i < 400 && srv.tierp()->ssdEntries() < 1; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        CHECK(srv.tierp()->ssdEntries() >= 1);
+        for (int i = 0; i < 400 && srv.ssdEntries() < 1; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        CHECK(srv.ssdEntries() >= 1);
         CHECK_EQ(srv.model().poison(), 0u);
         CHECK_EQ(srv.model().hidMismatch(), 0u);
     }
@@ -2174,10 +2195,10 @@ void testTiers() {
         // restart: the SSD index brings the entries back; A's turn restores from SSD
         TestServer srv(su);
         g_log.clear();
-        CHECK(srv.tierp()->ssdEntries() >= 1);
+        CHECK(srv.ssdEntries() >= 1);
         auto r = srv.post("/v1/completions", completionBody(pa2, 40));
         CHECK_EQ(completionText(r), decode(srv.model().greedyReference(pa2, 40, true)));
-        CHECK(srv.tierp()->stats.restores_ssd >= 1);
+        CHECK(srv.tierStats().restores_ssd >= 1);
         CHECK(cachedTokens(r) >= pa.size());
         CHECK_EQ(srv.model().poison(), 0u);
     }
@@ -2188,7 +2209,7 @@ void testTiers() {
         TestServer srv(su2);
         auto r = srv.post("/v1/completions", completionBody(pa2, 40));
         CHECK_EQ(completionText(r), decode(srv.model().greedyReference(pa2, 40, true)));
-        CHECK_EQ(srv.tierp()->stats.restores_ssd + srv.tierp()->stats.restores_ram, 0u);
+        CHECK_EQ(srv.tierStats().restores_ssd + srv.tierStats().restores_ram, 0u);
         CHECK_EQ(cachedTokens(r), 0u);
     }
     std::filesystem::remove_all(dir, ec);
@@ -2222,6 +2243,7 @@ void testTierInPlaceRegen() {
     const auto out3 = srv.model().greedyReference(p3, 40, true);
     auto r3 = srv.post("/v1/completions", completionBody(p3, 40));
     CHECK_EQ(completionText(r3), decode(out3));
+    srv.onEngine([] {});  // r3's spill (logged after its response) is done
     const std::size_t inplace = g_log.count("in place");
     CHECK(inplace >= 1);
     // B evicts the slot
@@ -2231,11 +2253,11 @@ void testTierInPlaceRegen() {
     p4 = makePrompt(static_cast<std::uint32_t>(p4.size() + 200), 805, p4);
     auto r4 = srv.post("/v1/completions", completionBody(p4, 40));
     CHECK_EQ(completionText(r4), decode(srv.model().greedyReference(p4, 40, true)));
-    CHECK(srv.tierp()->stats.restores_ram >= 1);
+    CHECK(srv.tierStats().restores_ram >= 1);
     CHECK(cachedTokens(r4) > base.size());
     CHECK_EQ(srv.model().poison(), 0u);
     std::fprintf(stderr, "  (tier_inplace: in-place spills %zu, restores_ram %llu, cached %u)\n", inplace,
-                 static_cast<unsigned long long>(srv.tierp()->stats.restores_ram), static_cast<unsigned>(cachedTokens(r4)));
+                 static_cast<unsigned long long>(srv.tierStats().restores_ram), static_cast<unsigned>(cachedTokens(r4)));
 }
 
 // FIX-CACHE P2-3 (FR-CACHE): more prefix checkpoints per slot than a tier entry holds (WHIRL_SERVE_CKPTS=12).
@@ -2262,12 +2284,15 @@ void testServeCkptsClamp() {
     pa2 = makePrompt(static_cast<std::uint32_t>(pa2.size() + 300), 813, pa2);
     auto r = srv.post("/v1/completions", completionBody(pa2, 40));
     CHECK_EQ(completionText(r), decode(srv.model().greedyReference(pa2, 40, true)));
-    CHECK(srv.tierp()->stats.restores_ram >= 1);
+    CHECK(srv.tierStats().restores_ram >= 1);
     CHECK(cachedTokens(r) >= pa.size());
-    std::size_t over = 0;
-    for (const tier::Entry* e : srv.tierp()->entries) over += e->nck > tier::max_ck ? 1 : 0;
+    std::size_t over = 0, n_entries = 0;
+    srv.onEngine([&] {
+        for (const tier::Entry* e : srv.tierp()->entries) over += e->nck > tier::max_ck ? 1 : 0;
+        n_entries = srv.tierp()->entries.size();
+    });
     CHECK_EQ(over, 0u);
-    CHECK(!srv.tierp()->entries.empty());
+    CHECK(n_entries > 0);
     CHECK_EQ(srv.model().poison(), 0u);
 }
 
@@ -2357,9 +2382,13 @@ void testShutdownEvictSys() {
                 CHECK_EQ(completionText(r), decode(srv.model().greedyReference(p, 16, true)));
             }
             tier::Tier* t = srv.tierp();
-            for (int i = 0; i < 400 && t->stats.ssd_writes < t->stats.evict_writes; ++i)
+            for (int i = 0; i < 400; ++i) {
+                const tier::Stats st = srv.tierStats();
+                if (st.ssd_writes >= st.evict_writes) break;
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
             CHECK(srv.engine().stats().spe_hits >= 5);
+            srv.onEngine([&] {
             // writes while running: only the eviction writes of reused entries
             CHECK_EQ(t->stats.ssd_writes, t->stats.evict_writes);
             if (mode == 0) {
@@ -2383,19 +2412,21 @@ void testShutdownEvictSys() {
                          mode, static_cast<unsigned long long>(su.tier_ram_mb), static_cast<unsigned long long>(t->stats.ram_evictions),
                          static_cast<unsigned long long>(t->stats.evict_writes), static_cast<unsigned long long>(t->stats.dropped),
                          t->entries.size());
+            });
             CHECK_EQ(srv.model().poison(), 0u);
         }
         if (mode == 0 && sys_id != 0) {
             // restart: the system checkpoint is on the SSD; a new conversation with the same system message reuses it
             TestServer srv(su);
             g_log.clear();
-            const tier::Entry* e = srv.tierp()->find(sys_id);
-            CHECK(e != nullptr);
+            bool found = false;
+            srv.onEngine([&] { found = srv.tierp()->find(sys_id) != nullptr; });
+            CHECK(found);
             const auto p = cb.conv(2000, 951, {{300, 990}});
             auto r = srv.post("/v1/completions", completionBody(p, 16));
             CHECK_EQ(completionText(r), decode(srv.model().greedyReference(p, 16, true)));
             CHECK(cachedTokens(r) >= sys_n);
-            CHECK(srv.tierp()->stats.restores_ssd >= 1);
+            CHECK(srv.tierStats().restores_ssd >= 1);
             CHECK(g_log.count("checkpoint 'system'") >= 1);
             CHECK_EQ(srv.model().poison(), 0u);
         }
@@ -2475,8 +2506,13 @@ void testIdleWrite() {
         ask(srv, p1);
         ask(srv, p2);
         // the idle write: the session only
-        CHECK(waitFor([&] { return t->stats.idle_writes >= 1 && !t->idleWriting(); }, 10000));
+        CHECK(waitFor([&] {
+            bool done = false;
+            srv.onEngine([&] { done = t->stats.idle_writes >= 1 && !t->idleWriting(); });
+            return done;
+        }, 10000));
         CHECK(g_log.count("idle write done") >= 1);
+        srv.onEngine([&] {
         const tier::Entry* sess = nullptr;
         const tier::Entry* one = nullptr;
         for (const tier::Entry* e : t->entries) {
@@ -2491,12 +2527,15 @@ void testIdleWrite() {
         if (one) CHECK(!one->reused && !one->ssd.has_value());  // one-shot: never written while running
         CHECK_EQ(t->stats.idle_writes, 1u);
         CHECK_EQ(t->stats.ssd_writes, t->stats.idle_writes);  // nothing else written while running
+        });
         // staying idle (5 idle delays): no second pass, no write
-        const std::uint64_t passes = t->stats.idle_passes, writes = t->stats.ssd_writes;
+        const tier::Stats st0 = srv.tierStats();
+        const std::uint64_t passes = st0.idle_passes, writes = st0.ssd_writes;
         const std::size_t fired = g_log.count("idle for ");
         std::this_thread::sleep_for(std::chrono::milliseconds(1500));
-        CHECK_EQ(t->stats.idle_passes, passes);
-        CHECK_EQ(t->stats.ssd_writes, writes);
+        const tier::Stats st1 = srv.tierStats();
+        CHECK_EQ(st1.idle_passes, passes);
+        CHECK_EQ(st1.ssd_writes, writes);
         CHECK_EQ(g_log.count("idle for "), fired);
         // baseline latency of a fresh request with no idle write running
         double ms_base = 0, ms_mid = 0;
@@ -2514,11 +2553,15 @@ void testIdleWrite() {
         CHECK(g_log.count("idle write stopped by a request") >= 1);
         // the write that was running completes; nothing else was started for the one-shot prompts
         CHECK(waitFor([&] {
-            for (const tier::Entry* e : t->entries)
-                if (e->io_busy) return false;
-            return true;
+            bool idle = true;
+            srv.onEngine([&] {
+                for (const tier::Entry* e : t->entries)
+                    if (e->io_busy) idle = false;
+            });
+            return idle;
         }, 20000));
         tier::g_write_sim.store(nullptr);
+        srv.onEngine([&] {
         CHECK_EQ(t->stats.ssd_writes, t->stats.idle_writes);
         if (const tier::Entry* s = t->find(sess_id)) CHECK(s->ssd.has_value() && s->ssd->n_tok >= p3.size() - 64);
         for (const tier::Entry* e : t->entries)
@@ -2526,6 +2569,7 @@ void testIdleWrite() {
         std::fprintf(stderr, "  (idle_write: request latency %.1f ms with no idle write, %.1f ms while one ran; idle writes %llu, passes %llu)\n",
                      ms_base, ms_mid, static_cast<unsigned long long>(t->stats.idle_writes),
                      static_cast<unsigned long long>(t->stats.idle_passes));
+        });
         CHECK(ms_mid < ms_base + 2000.0);  // not held behind the slowed write
         CHECK_EQ(srv.model().poison(), 0u);
         // the close flush below does not rewrite it (clean)
@@ -2533,11 +2577,13 @@ void testIdleWrite() {
     {
         TestServer srv(su);
         g_log.clear();
-        CHECK(srv.tierp()->find(sess_id) != nullptr);
+        bool found = false;
+        srv.onEngine([&] { found = srv.tierp()->find(sess_id) != nullptr; });
+        CHECK(found);
         const auto p4 = makePrompt(3900, 607, p3);
         auto r = ask(srv, p4);
         CHECK(cachedTokens(r) >= p2.size());
-        CHECK(srv.tierp()->stats.restores_ssd >= 1);
+        CHECK(srv.tierStats().restores_ssd >= 1);
         CHECK_EQ(srv.model().poison(), 0u);
     }
     std::filesystem::remove_all(dir, ec);
@@ -2581,12 +2627,16 @@ void testCloseReused() {
         ask(srv, p0);
         ask(srv, p1);
         ask(srv, p2);
-        for (const tier::Entry* e : t->entries) {
-            if (e->tokens.size() >= p2.size() && std::equal(p2.begin(), p2.end(), e->tokens.begin())) sess_id = e->id;
-            if (e->tokens.size() >= p0.size() && std::equal(p0.begin(), p0.end(), e->tokens.begin())) one_id = e->id;
-        }
+        std::uint64_t writes = 0;
+        srv.onEngine([&] {  // after p2's spill (REVIEW-ARCH3 P2-1: the response comes first)
+            for (const tier::Entry* e : t->entries) {
+                if (e->tokens.size() >= p2.size() && std::equal(p2.begin(), p2.end(), e->tokens.begin())) sess_id = e->id;
+                if (e->tokens.size() >= p0.size() && std::equal(p0.begin(), p0.end(), e->tokens.begin())) one_id = e->id;
+            }
+            writes = t->stats.ssd_writes;
+        });
         CHECK(sess_id != 0 && one_id != 0);
-        CHECK_EQ(t->stats.ssd_writes, 0u);  // nothing while running
+        CHECK_EQ(writes, 0u);  // nothing while running
         srv.stopEngine();                   // graceful stop: Engine::flushTierOnStop
         const tier::Entry* sess = t->find(sess_id);
         const tier::Entry* one = t->find(one_id);
@@ -2603,13 +2653,15 @@ void testCloseReused() {
         TestServer srv(su);
         tier::Tier* t = srv.tierp();
         g_log.clear();
-        CHECK_EQ(t->ssdEntries(), 1u);
-        CHECK(t->find(sess_id) != nullptr);
-        CHECK(t->find(one_id) == nullptr);
+        srv.onEngine([&] {
+            CHECK_EQ(t->ssdEntries(), 1u);
+            CHECK(t->find(sess_id) != nullptr);
+            CHECK(t->find(one_id) == nullptr);
+        });
         const auto p3 = makePrompt(3600, 704, p2);
         auto r = ask(srv, p3);
         CHECK(cachedTokens(r) >= p2.size());  // the reused session comes back from SSD
-        CHECK(t->stats.restores_ssd >= 1);
+        CHECK(srv.tierStats().restores_ssd >= 1);
         auto r0 = ask(srv, p0);  // the one-shot prompt: cold, same output
         CHECK_EQ(cachedTokens(r0), 0u);
         CHECK_EQ(srv.model().poison(), 0u);
@@ -2647,12 +2699,12 @@ void testAgentIdleMain(bool supersede) {
     CHECK_EQ(completionText(r), decode(srv.model().greedyReference(main2, 40, true)));
     std::fprintf(stderr, "  (agent supersede=%d: main resumed with %llu cached of %zu, restores_ram %llu, superseded %llu, demoted %llu)" "\n",
                  supersede ? 1 : 0, static_cast<unsigned long long>(cachedTokens(r)), main1.size(),
-                 static_cast<unsigned long long>(srv.tierp()->stats.restores_ram), static_cast<unsigned long long>(srv.tierp()->stats.superseded),
-                 static_cast<unsigned long long>(srv.tierp()->stats.demoted));
+                 static_cast<unsigned long long>(srv.tierStats().restores_ram), static_cast<unsigned long long>(srv.tierStats().superseded),
+                 static_cast<unsigned long long>(srv.tierStats().demoted));
     CHECK(cachedTokens(r) >= main1.size());
-    CHECK(srv.tierp()->stats.restores_ram >= 1);
-    CHECK_EQ(srv.tierp()->stats.superseded, 0u);
-    if (supersede) CHECK(srv.tierp()->stats.demoted >= 1);
+    CHECK(srv.tierStats().restores_ram >= 1);
+    CHECK_EQ(srv.tierStats().superseded, 0u);
+    if (supersede) CHECK(srv.tierStats().demoted >= 1);
     CHECK_EQ(srv.model().poison(), 0u);
 }
 void testAgentIdleMainNoSupersede() { testAgentIdleMain(false); }
@@ -2686,7 +2738,7 @@ void testBranchFromEarlierTurn() {
     const auto b2 = cb.next(t1, o1, 300, 925);
     auto rb = srv.post("/v1/completions", completionBody(b2, 40));
     CHECK_EQ(completionText(rb), decode(srv.model().greedyReference(b2, 40, true)));
-    const std::uint64_t restores_b = srv.tierp()->stats.restores_ram;
+    const std::uint64_t restores_b = srv.tierStats().restores_ram;
     // the original session resumes
     const auto t3 = cb.next(t2, o2, 200, 926);
     auto r = srv.post("/v1/completions", completionBody(t3, 40));
@@ -2720,8 +2772,9 @@ void testSupersedeCompressCuts() {
     CHECK_EQ(completionText(srv.post("/v1/completions", completionBody(c1, 40))), decode(out_c1));
     const auto c2 = cb.next(c1, out_c1, 200, 915);
     CHECK_EQ(completionText(srv.post("/v1/completions", completionBody(c2, 40))), decode(srv.model().greedyReference(c2, 40, true)));
+    srv.onEngine([] {});  // c2's spill (which applies the cut) runs after its response (REVIEW-ARCH3 P2-1)
     CHECK(g_log.count("superseded (compact / compress): cut") >= 1);
-    CHECK(srv.tierp()->stats.superseded >= 1);
+    CHECK(srv.tierStats().superseded >= 1);
     CHECK_EQ(srv.model().poison(), 0u);
 }
 
@@ -2758,7 +2811,9 @@ void testRestoreThrows() {
         // the tier is touched by the engine thread only; wait until it is quiet, then look
         for (int i = 0; i < 300; ++i) {
             bool busy = false;
-            for (const tier::Entry* e : srv.tierp()->entries) busy = busy || e->io_busy || e->loading || e->pin > 0;
+            srv.onEngine([&] {
+                for (const tier::Entry* e : srv.tierp()->entries) busy = busy || e->io_busy || e->loading || e->pin > 0;
+            });
             if (!busy) return true;
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
@@ -2778,14 +2833,14 @@ void testRestoreThrows() {
         srv.ops().failHostToDevCopy(0);
         CHECK_EQ(completionText(r3), decode(srv.model().greedyReference(pa2, 40, true)));
         CHECK(settled(srv));  // the restore target is not left pinned (it could never be evicted again)
-        CHECK_EQ(srv.tierp()->stats.restores_ram, 0u);
-        for (int i = 0; i < 400 && srv.tierp()->ssdEntries() < 1; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        CHECK_EQ(srv.tierStats().restores_ram, 0u);
+        for (int i = 0; i < 400 && srv.ssdEntries() < 1; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
         CHECK_EQ(srv.model().poison(), 0u);
     }
     {
         // restart: A's turn restores from SSD; a later restore copy throws (first pump or pollRestores)
         TestServer srv(su);
-        CHECK(srv.tierp()->ssdEntries() >= 1);
+        CHECK(srv.ssdEntries() >= 1);
         g_log.clear();
         srv.ops().failHostToDevCopy(3);
         auto r = srv.post("/v1/completions", completionBody(pa2, 40));
@@ -2829,7 +2884,7 @@ void testRestoreConcurrent() {
         th.emplace_back([&, i] { got[i] = completionText(srv.post("/v1/completions", completionBody(ps[i], 16))); });
     for (auto& t : th) t.join();
     for (std::uint32_t i = 0; i < 3; ++i) CHECK_EQ(got[i], decode(srv.model().greedyReference(ps[i], 16, true)));
-    const auto& st = srv.tierp()->stats;
+    const auto st = srv.tierStats();
     if (g_verbose) std::fprintf(stderr, "  restores ram %llu ssd %llu, waits %zu\n", static_cast<unsigned long long>(st.restores_ram),
                                 static_cast<unsigned long long>(st.restores_ssd), g_log.count("waiting for the restore"));
     CHECK(st.restores_ram >= 1);

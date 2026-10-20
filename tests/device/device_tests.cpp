@@ -182,6 +182,15 @@ void testProfiles() {
     CHECK(b.gemv_r == rb);
     // constexpr: the field reads fold like the arch comparisons they replaced
     static_assert(d::profile(Arch::gfx1151).prefill_exec_moe == 4096 && !d::profile(Arch::gfx1201).tune_fast);
+    // REVIEW-ARCH3 P3-3: a value with no row throws instead of getting the gfx1201 row (a new enumerator without a
+    // case does not compile: tools/impact/profile_switch_check.ps1)
+    bool threw = false;
+    try {
+        (void)d::profile(static_cast<Arch>(7));
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    CHECK(threw);
 }
 
 void testNullBackendMemoryModel() {

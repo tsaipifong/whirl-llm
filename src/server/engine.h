@@ -28,6 +28,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -396,6 +397,11 @@ public:
     // tier writes are flushed (bounded, shutdown_flush_ms), then it returns.
     void runLoop();
     void stop();
+    // Tests (REVIEW-ARCH3 P2-1): run fn on the engine thread at the start of the next loop iteration, i.e. after the
+    // job whose response the caller already received has finished its spill; blocks until fn ran. Engine state
+    // (tier entries, statistics) read inside fn is synchronized with the engine. Throws when the loop does not run
+    // fn within timeout (not started / stopped). Not used by the product.
+    void runOnLoop(std::function<void()> fn, std::chrono::milliseconds timeout = std::chrono::milliseconds(60000));
     // flush bound: --kv-ssd-mode always (a few entries are pending); shutdown (everything in RAM is
     // written at stop, so it may be gigabytes)
     static constexpr std::uint64_t shutdown_flush_ms = 10000;
@@ -614,6 +620,8 @@ private:
     std::mutex rng_mutex_;
     std::mt19937_64 id_prng_;
     bool stop_ = false;
+    std::vector<std::function<void()>> loop_calls_;  // under q_mutex_: runOnLoop (tests)
+    void runLoopCalls(std::unique_lock<std::mutex>& lk);
     // batch statistics
     TimePoint stat_t0_{};
     std::uint64_t stat_tokens_ = 0, stat_cycles_ = 0, stat_rows_ = 0, stat_slots_ = 0, stat_drafts_ = 0,

@@ -13,6 +13,7 @@
 #include <cstring>
 #include <ctime>
 #include <limits>
+#include <future>
 #include <stdexcept>
 #include <thread>
 
@@ -286,6 +287,36 @@ void Engine::stop() {
     std::lock_guard<std::mutex> lk(q_mutex_);
     stop_ = true;
     q_cond_.notify_all();
+}
+
+void Engine::runOnLoop(std::function<void()> fn, std::chrono::milliseconds timeout) {
+    auto done = std::make_shared<std::promise<void>>();
+    std::future<void> f = done->get_future();
+    {
+        std::lock_guard<std::mutex> lk(q_mutex_);
+        loop_calls_.push_back([fn = std::move(fn), done] {
+            try {
+                fn();
+                done->set_value();
+            } catch (...) {
+                done->set_exception(std::current_exception());
+            }
+        });
+        ++wake_seq_;
+        q_cond_.notify_all();
+    }
+    if (f.wait_for(timeout) != std::future_status::ready) throw std::runtime_error("Engine::runOnLoop: the engine loop did not run the call");
+    f.get();
+}
+
+// called with lk held; runs the queued test calls without the lock
+void Engine::runLoopCalls(std::unique_lock<std::mutex>& lk) {
+    if (loop_calls_.empty()) return;
+    std::vector<std::function<void()>> calls;
+    calls.swap(loop_calls_);
+    lk.unlock();
+    for (auto& f : calls) f();
+    lk.lock();
 }
 
 std::string Engine::randId(std::string_view prefix, std::size_t n) {
@@ -3293,10 +3324,13 @@ void Engine::runLoop() {
         for (const Slot& sl : slots_)
             if (sl.phase != Phase::idle) ++n_busy;
         std::unique_lock<std::mutex> lk(q_mutex_);
+        runLoopCalls(lk);
         if (stop_ && n_busy == 0) {
             abortQueued(lk);
             lk.unlock();
             flushTierOnStop();
+            lk.lock();
+            runLoopCalls(lk);
             return;
         }
         // shutting down: no new requests are admitted while the running ones finish
@@ -3313,10 +3347,16 @@ void Engine::runLoop() {
             // request arrives or the tier IO thread wakes us
             bool logged = false;
             while (queue_.empty()) {
+                if (!loop_calls_.empty()) {
+                    runLoopCalls(lk);
+                    continue;
+                }
                 if (stop_) {
                     abortQueued(lk);
                     lk.unlock();
                     flushTierOnStop();
+                    lk.lock();
+                    runLoopCalls(lk);
                     return;
                 }
                 if (tier_ != nullptr) {
@@ -3335,7 +3375,7 @@ void Engine::runLoop() {
                         // tier IO thread) ends the wait at once (a sleep here delayed a
                         // request by up to one Windows timer tick, 10-16 ms)
                         q_cond_.wait_for(lk, std::chrono::milliseconds(5),
-                                         [&] { return wake_seq_ != seq || !queue_.empty() || stop_; });
+                                         [&] { return wake_seq_ != seq || !queue_.empty() || stop_ || !loop_calls_.empty(); });
                         continue;
                     }
                 }
@@ -3348,7 +3388,7 @@ void Engine::runLoop() {
                     lk.lock();
                     tier_wake_ = false;
                     if (queue_.empty() && !stop_)
-                        q_cond_.wait_for(lk, std::chrono::milliseconds(100), [&] { return !queue_.empty() || tier_wake_ || stop_; });
+                        q_cond_.wait_for(lk, std::chrono::milliseconds(100), [&] { return !queue_.empty() || tier_wake_ || stop_ || !loop_calls_.empty(); });
                     continue;
                 }
                 tier_wake_ = false;
@@ -3359,9 +3399,9 @@ void Engine::runLoop() {
                     // an SSD write is due at a known time, the periodic SSD expiry check, or the idle write: wake
                     // then (re-checked every minute)
                     const auto due = std::min(*wake + std::chrono::milliseconds(2), std::chrono::steady_clock::now() + std::chrono::seconds(60));
-                    q_cond_.wait_until(lk, due, [&] { return !queue_.empty() || tier_wake_ || stop_; });
+                    q_cond_.wait_until(lk, due, [&] { return !queue_.empty() || tier_wake_ || stop_ || !loop_calls_.empty(); });
                 } else {
-                    q_cond_.wait(lk, [&] { return !queue_.empty() || tier_wake_ || stop_; });
+                    q_cond_.wait(lk, [&] { return !queue_.empty() || tier_wake_ || stop_ || !loop_calls_.empty(); });
                 }
             }
             // a request arrived: the idle period ends, an idle write stops starting new entries (TIER-IDLE)

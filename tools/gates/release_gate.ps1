@@ -50,7 +50,8 @@ $ErrorActionPreference = "Stop"
 $repo = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 if (-not $Build) { $Build = Join-Path $repo "build\Release" }
 if (-not $Tag) { $Tag = "gate_$Device" }
-if (-not $Work) { $Work = Join-Path ([System.IO.Path]::GetTempPath()) "whirl-release-gate" }
+# one folder per GPU: two gates at once must not share the server steps' SSD tier folders (ARCH3 d5 srv_cache_balance)
+if (-not $Work) { $Work = Join-Path ([System.IO.Path]::GetTempPath()) "whirl-release-gate-$Device" }
 $Steps = @($Steps | ForEach-Object { $_ -split "," } | Where-Object { $_ })
 $arch = if ($Device -eq "8060s") { "gfx1151" } else { "gfx1201" }
 $port = if ($Device -eq "8060s") { 8095 } else { 8093 }
@@ -79,6 +80,8 @@ foreach ($t in "whirl-tests", "whirl-model-tests", "whirl-cache-tests", "whirl-v
 # HIP runtime loader (ARCH-1 D-1): fake / absent runtimes, then this machine's runtime through load()
 # (a runtime that does not import rocm_kpack.dll must never load it)
 AddStep "cpu_hiprt" $false @($exe["whirl-hiprt-tests"]) { param($o, $c) $c -eq 0 -and ($o -match "hiprt tests: [1-9]\d* passed, 0 failed") -and ($o -match "^real runtime: ok=1") } @{ WHIRL_TEST_REAL_HIPRT = "1" }
+# REVIEW-ARCH3 P3-3: a new hip::Arch enumerator without a device::Profile row must not compile (MSVC)
+AddStep "cpu_profile_switch" $false @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\impact\profile_switch_check.ps1"), "-Work", "@WORK@") { param($o, $c) $c -eq 0 -and ($o -match "^profile switch check: ok") }
 AddStep "cpu_server" $false @($exe["whirl-server-tests"], "--gguf", $SW) { param($o, $c) $c -eq 0 -and ($o -match "server tests: [1-9]\d* passed, 0 failed") }
 AddStep "cpu_gate_selftest" $false @($exe["whirl-server-gate"], "--selftest") { param($o, $c) $c -eq 0 -and ($o -match ", 0 failed") }
 AddStep "cpu_gate_nosuite" $false @($exe["whirl-server-gate"], "--exe", $exe["whirl-server"], "--model", $SW) { param($o, $c) $c -eq 2 }
@@ -137,6 +140,21 @@ AddStep "srv_fs_moe" $true (GateCmd $MX "fast_stream" "" $ssdOff) $gateRule
 # the cache suites run their own SSD dirs under --work (deleted after the step)
 AddStep "srv_cache_balance" $true (GateCmd $SW "tier,sys,restore_conc,pool" "balance" $ram8s) $gateRule
 AddStep "srv_cache_precise" $true (GateCmd $SW "tier,sys,restore_conc,pool" "precise" $ram8s) $gateRule
+# REVIEW-ARCH3 P2-2: the tier suite with WHIRL_TIER_VERIFY=1: the server reads every spill back from the device and
+# compares it with the host copy, and every restore with the entry. The step passes only when the gate passes, the
+# server logs show >= 1 byte-identical spill and >= 1 byte-identical restore, and no verify line says "differ"
+# (a device copy short by 1/64 survived golden server: both restore paths went through the same broken copy).
+$verifyRule = {
+    param($o, $c, $wd, $log)
+    $lines = @(Get-ChildItem $wd -Filter "server_*.log" -File -ErrorAction SilentlyContinue | ForEach-Object { Get-Content $_.FullName } |
+               Where-Object { $_ -match "kv tier verify:" })
+    $sp = @($lines | Where-Object { $_ -match "spill of \d+ tok byte-identical" }).Count
+    $rs = @($lines | Where-Object { $_ -match "restore of \d+ tok byte-identical" }).Count
+    $df = @($lines | Where-Object { $_ -match "differ" }).Count
+    "tier verify: $sp spill(s) and $rs restore(s) byte-identical, $df line(s) differ" | Add-Content $log
+    (& $gateRule $o $c) -and $sp -ge 1 -and $rs -ge 1 -and $df -eq 0
+}
+AddStep "srv_tier_verify" $true (GateCmd $SW "tier" "balance" ($ram8s + @("--server-env", "WHIRL_TIER_VERIFY=1"))) $verifyRule
 
 if ($List) { $S | ForEach-Object { "{0,-22} {1}" -f $_.name, ($(if ($_.gpu) { "GPU" } else { "CPU" })) }; exit 0 }
 
@@ -223,7 +241,8 @@ try {
         foreach ($k in $s.env.Keys) { [Environment]::SetEnvironmentVariable($k, $null) }
         $out = @(Get-Content $log -ErrorAction SilentlyContinue)
         $ok = $false
-        try { $ok = [bool](& $s.rule $out $c) } catch { $ok = $false }
+        try { $ok = [bool](& $s.rule $out $c $wd $log) } catch { $ok = $false }
+        $out = @(Get-Content $log -ErrorAction SilentlyContinue)  # a rule may append its own summary line
         # CB-FLAKE: a failed step keeps its server logs (server_*.log / *.stdout.txt, small) next to the step log,
         # so an intermittent failure can be explained afterwards; the SSD tier files are deleted either way
         if (-not $ok -and (Test-Path $wd)) {

@@ -17,6 +17,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <stdexcept>
 
 namespace whirl::device {
 
@@ -94,7 +95,27 @@ inline constexpr Profile k_profile_gfx1151{
     .vision_attn_threads = 256,
 };
 
-// The profile of a code-object family (the one arch test outside src/hip).
-inline constexpr const Profile& profile(hip::Arch a) { return a == hip::Arch::gfx1151 ? k_profile_gfx1151 : k_profile_gfx1201; }
+// The profile of a code-object family (the one arch test outside src/hip). REVIEW-ARCH3 P3-3: a switch with no
+// default, so a new hip::Arch enumerator without a row is a compile error (MSVC C4062 / clang -Wswitch raised to
+// errors here) instead of silently getting the gfx1201 row; a value outside the enumerators throws.
+#if defined(_MSC_VER) && !defined(__clang__)
+#pragma warning(push)
+#pragma warning(error : 4062)
+#elif defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic error "-Wswitch"
+#endif
+inline constexpr const Profile& profile(hip::Arch a) {
+    switch (a) {
+    case hip::Arch::gfx1201: return k_profile_gfx1201;
+    case hip::Arch::gfx1151: return k_profile_gfx1151;
+    }
+    throw std::invalid_argument("device::profile: no profile row for this hip::Arch value");
+}
+#if defined(_MSC_VER) && !defined(__clang__)
+#pragma warning(pop)
+#elif defined(__clang__)
+#pragma clang diagnostic pop
+#endif
 
 }  // namespace whirl::device

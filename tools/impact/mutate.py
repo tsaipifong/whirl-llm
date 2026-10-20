@@ -59,7 +59,8 @@ def impact_lists(expect):
     except (ValueError, IndexError):
         return False, "impact.py failed"
     exe, _, name = expect.partition(":")
-    listed = name in rep["cpu_tests"].get(exe, []) or name in rep["kernel_tests"]
+    # "release:<step>": a GPU mutation caught by a release_gate step (e.g. release:srv_tier_verify)
+    listed = name in rep["release_gate_steps"] if exe == "release" else (name in rep["cpu_tests"].get(exe, []) or name in rep["kernel_tests"])
     return listed, f"{len(rep['paths'])} path(s): {', '.join(rep['paths'])}"
 
 

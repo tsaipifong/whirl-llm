@@ -123,6 +123,9 @@ RELEASE_STEPS = {
     "cpu_gate_selftest": "tool", "cpu_gate_nosuite": "tool", "cpu_server_only_typo": "tool", "cpu_golden_selftest": "tool",
     "cpu_golden_xcheck": "tool", "kt_full": "exe:whirl-kernel-test", "cpu_hiprt": "exe:whirl-hiprt-tests",
     "cpu_device": "exe:whirl-device-tests",
+    # REVIEW-ARCH3 P3-3: device::profile() does not compile with an hip::Arch enumerator without a row (listed with
+    # the device tests: both guard include/whirl/device_profile.h)
+    "cpu_profile_switch": "exe:whirl-device-tests",
 }
 CLI_GATES = {  # GPU gates run through whirl.exe subcommands: their roots are CLI functions (derived reach)
     "golden.single": ["goldenSingle"], "golden.pair": ["goldenPair"], "golden.ngram": ["goldenSingle"],
