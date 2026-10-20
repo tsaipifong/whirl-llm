@@ -47,8 +47,10 @@ uses 2022. Outputs in `build\Release\`:
 
 Host code is compiled by MSVC with a static C++ runtime (`/MT`). Device code is compiled by the
 HIP SDK's clang into one code object per GPU architecture, turned into a byte array by
-`tools/bin2c` and embedded in the executable. `amdhip64_7.dll` is delay-loaded, so the
-executables start without the HIP SDK installed. The default builds both kernel sets, gfx1201
+`tools/bin2c` and embedded in the executable. The driver's `amdhip64_7.dll` is loaded at run
+time (src/hip/runtime_loader.cpp: the executable's folder first, then the standard DLL search
+order; the file actually loaded is logged as "HIP runtime: ..."), so the executables start
+without the HIP SDK installed and link no import library for it. The default builds both kernel sets, gfx1201
 (R9700) and gfx1151 (Radeon 8060S); at run time the code object matching the selected GPU's
 `gcnArchName` is loaded. One set alone builds faster (useful while working on one GPU's kernels):
 

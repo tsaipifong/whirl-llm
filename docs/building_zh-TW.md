@@ -40,7 +40,7 @@ build.bat Release
 | `whirl-server-gate.exe`、`whirl-parity.exe` | 伺服器端到端關卡，以及對外部參考的一致性檢查 |
 
 host 端由 MSVC 以靜態 C++ runtime（`/MT`）編譯。device 端由 HIP SDK 的 clang 為每種 GPU 架構各編一個 code
-object，經 `tools/bin2c` 轉成位元組陣列內嵌在執行檔裡。`amdhip64_7.dll` 採延遲載入，所以沒有安裝 HIP SDK 也
+object，經 `tools/bin2c` 轉成位元組陣列內嵌在執行檔裡。驅動程式的 `amdhip64_7.dll` 在執行時才載入（src/hip/runtime_loader.cpp：先找執行檔所在資料夾，再照標準 DLL 搜尋順序；實際載入的檔案會記成「HIP runtime: ...」），所以沒有安裝 HIP SDK 也
 能啟動執行檔。預設會編兩套 kernel：gfx1201（R9700）與 gfx1151（Radeon 8060S）；執行時依所選 GPU 的
 `gcnArchName` 載入對應的 code object。只編一套比較快（專心改某一張 GPU 的 kernel 時很方便）：
 

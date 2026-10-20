@@ -9,7 +9,7 @@
 | 元件 | 版本／細節 |
 |---|---|
 | OS | Windows 11 Home，build 26200（量測期間 2026-09-25 → 2026-10-02） |
-| HIP SDK | 7.2（`C:\Program Files\AMD\ROCm\7.2`）：用於裝置端程式碼的 clang、`amdhip64.lib`、標頭檔 |
+| HIP SDK | 7.2（`C:\Program Files\AMD\ROCm\7.2`）：用於裝置端程式碼的 clang、標頭檔（不連結 `amdhip64.lib`：runtime 由 LoadLibrary 載入，src/hip/runtime_loader.cpp） |
 | HIP runtime | `C:\Windows\System32\amdhip64_7.dll` 10.0.3679.0，由 Adrenalin 驅動程式安裝 |
 | 主機端編譯器 | MSVC 19.44（Visual Studio 2022 Build Tools 17.14），C++20 |
 | GPU 0 | AMD Radeon 8060S（Ryzen AI Max+ 395），gfx1151，統一記憶體（HIP 回報 99.7 GiB） |

@@ -13,7 +13,7 @@ which it was observed.
 | Component | Version / detail |
 |---|---|
 | OS | Windows 11 Home, build 26200 (measurements 2026-09-25 → 2026-10-02) |
-| HIP SDK | 7.2 (`C:\Program Files\AMD\ROCm\7.2`): clang for device code, `amdhip64.lib`, headers |
+| HIP SDK | 7.2 (`C:\Program Files\AMD\ROCm\7.2`): clang for device code, headers (no `amdhip64.lib`: the runtime is loaded with LoadLibrary, src/hip/runtime_loader.cpp) |
 | HIP runtime | `C:\Windows\System32\amdhip64_7.dll` 10.0.3679.0, installed by the Adrenalin driver |
 | Host compiler | MSVC 19.44 (Visual Studio 2022 Build Tools 17.14), C++20 |
 | GPU 0 | AMD Radeon 8060S (Ryzen AI Max+ 395), gfx1151, unified memory (HIP reports 99.7 GiB) |
