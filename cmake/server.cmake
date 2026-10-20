@@ -23,6 +23,8 @@ if(MSVC)
 endif()
 
 # ---------------------------------------------------------------------------
+# device module (src/device): backends, own fragment (before the tiers, whose tests link it)
+include(${CMAKE_CURRENT_LIST_DIR}/device.cmake)
 # host prefix-cache tiers (src/tier): own fragment
 include(${CMAKE_CURRENT_LIST_DIR}/tier.cmake OPTIONAL)
 
@@ -61,11 +63,6 @@ target_include_directories(whirl_server_core PRIVATE ${CMAKE_BINARY_DIR}/generat
 target_link_libraries(whirl_server_core PUBLIC whirl whirl_cache whirl_tier_core ws2_32)
 
 if(WHIRL_WITH_HIP)
-  # device backend over HIP (src/device, ARCH-1 D-2): the engine's / tiers' device operations
-  add_library(whirl_device STATIC ${CMAKE_SOURCE_DIR}/src/device/backend_hip.cpp)
-  target_include_directories(whirl_device PUBLIC ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/include)
-  target_link_libraries(whirl_device PUBLIC whirl)
-
   # whirl-server.exe: the production server (qwen35::Model on HIP)
   add_executable(whirl-server
     ${CMAKE_SOURCE_DIR}/src/server/whirl_server.cpp
@@ -85,7 +82,7 @@ add_executable(whirl-server-tests
   ${CMAKE_SOURCE_DIR}/tests/server/http_client.cpp
   ${CMAKE_SOURCE_DIR}/src/model/spec.cpp)
 target_include_directories(whirl-server-tests PRIVATE ${CMAKE_SOURCE_DIR}/tests/server)
-target_link_libraries(whirl-server-tests PRIVATE whirl_server_core)
+target_link_libraries(whirl-server-tests PRIVATE whirl_server_core whirl_device_null)
 # FR-DFL P3-4: source-order checks on server_main.cpp (not linked into the test binary)
 target_compile_definitions(whirl-server-tests PRIVATE WHIRL_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 

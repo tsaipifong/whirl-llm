@@ -1,5 +1,5 @@
 // Tests of the host prefix-cache tiers (src/tier/kv_tier) against a
-// host-memory device::Backend mock (no GPU): device addresses are host addresses,
+// host-memory device::NullBackend (no GPU): device addresses are host addresses,
 // copies run immediately, events are always complete.
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -7,6 +7,7 @@
 //   (default: %WHIRL_TEST_TMP%\tier_test_tmp, else %TEMP%\whirl-tests\tier_test_tmp)
 
 #include "../test_env.h"
+#include "device/null_backend.h"
 #include "tier/kv_tier.h"
 #include "tier/ram_size.h"
 #include "tier/evict_policy.h"
@@ -52,91 +53,7 @@ static int g_fail = 0;
         }                                                                     \
     } while (0)
 
-// ---- mock ---------------------------------------------------------------------
-
-class MockDeviceOps final : public Backend {
-public:
-    std::atomic<long> live_events{0}, live_host{0}, live_streams{0};
-    std::atomic<std::uint64_t> copies{0};
-    // fault injection: copyAsync call number `throw_at` (counted from `copy_calls`) throws
-    std::atomic<std::uint64_t> copy_calls{0}, throw_at{0};
-
-    void copyAsync(DevPtr dst, DevPtr src, std::uint64_t bytes, Stream) override {
-        if (const std::uint64_t n = ++copy_calls; n == throw_at.load()) throw std::runtime_error("injected copyAsync failure");
-        std::memcpy(reinterpret_cast<void*>(dst), reinterpret_cast<const void*>(src), bytes);
-        copies += 1;
-    }
-    void download(void* dst, DevPtr src, std::uint64_t bytes) override {
-        std::memcpy(dst, reinterpret_cast<const void*>(src), bytes);
-    }
-    Stream streamCreateNonBlocking() override {
-        live_streams += 1;
-        return new int(0);
-    }
-    void streamDestroy(Stream s) override {
-        live_streams -= 1;
-        delete static_cast<int*>(s);
-    }
-    void streamSync(Stream) override {}
-    void streamWaitEvent(Stream, Event) override {}
-    Event eventCreate() override {
-        live_events += 1;
-        return new int(0);
-    }
-    void eventDestroy(Event e) override {
-        live_events -= 1;
-        delete static_cast<int*>(e);
-    }
-    void eventRecord(Event, Stream) override {}
-    bool eventDone(Event) override { return true; }  // like HipDeviceOps: a query error reads as complete
-    // fault injection: an asynchronous device error (the work before the event failed)
-    std::atomic<bool> event_error{false};
-    bool eventDoneChecked(Event) override {
-        if (event_error.load()) throw std::runtime_error("injected asynchronous device error");
-        return true;
-    }
-    // the IO thread waits here on a read job's fence: the gate lets a test
-    // hold SSD reads back deterministically
-    void eventSync(Event) override {
-        std::unique_lock<std::mutex> lk(gate_m_);
-        gate_cv_.wait(lk, [&] { return gate_open_; });
-    }
-    void* hostMalloc(std::uint64_t bytes) override {
-        void* p = _aligned_malloc(static_cast<std::size_t>(bytes), 4096);
-        if (p == nullptr) throw std::bad_alloc();
-        live_host += 1;
-        return p;
-    }
-    void hostFree(void* p) override {
-        live_host -= 1;
-        _aligned_free(p);
-    }
-    DevPtr malloc(std::uint64_t bytes) override {
-        void* p = _aligned_malloc(static_cast<std::size_t>(bytes), 4096);
-        if (p == nullptr) throw std::bad_alloc();
-        return reinterpret_cast<DevPtr>(p);
-    }
-    void free(DevPtr p) override { _aligned_free(reinterpret_cast<void*>(p)); }
-    void setDevice(int) override {}
-    const char* lastErrorString() const override { return "mock"; }
-
-    void closeGate() {
-        std::lock_guard<std::mutex> lk(gate_m_);
-        gate_open_ = false;
-    }
-    void openGate() {
-        {
-            std::lock_guard<std::mutex> lk(gate_m_);
-            gate_open_ = true;
-        }
-        gate_cv_.notify_all();
-    }
-
-private:
-    std::mutex gate_m_;
-    std::condition_variable gate_cv_;
-    bool gate_open_ = true;
-};
+// ---- device: device::NullBackend (src/device/null_backend.h, ARCH-1 D-3)
 
 // ---- helpers ------------------------------------------------------------------
 
@@ -176,12 +93,12 @@ static std::vector<std::uint32_t> makeTokens(std::size_t n, std::uint64_t seed) 
 
 // device-side copy of one slot: checkpoints + KV pages
 struct DevSlot {
-    MockDeviceOps* ops = nullptr;
+    NullBackend* ops = nullptr;
     std::uint32_t nck = 0, pages = 0;
     std::vector<DevPtr> ck;
     DevPtr kv = 0;
 
-    DevSlot(MockDeviceOps& o, std::uint32_t nck_, std::uint32_t pages_) : ops(&o), nck(nck_), pages(pages_) {
+    DevSlot(NullBackend& o, std::uint32_t nck_, std::uint32_t pages_) : ops(&o), nck(nck_), pages(pages_) {
         for (std::uint32_t k = 0; k < nck; ++k) {
             ck.push_back(o.malloc(kLay.ck_bytes));
             std::memset(reinterpret_cast<void*>(ck.back()), 0, kLay.ck_bytes);
@@ -321,7 +238,7 @@ static std::vector<std::uint32_t> prefixPlus(const std::vector<std::uint32_t>& a
 
 // ---- tests ------------------------------------------------------------------------
 
-static void testLookup(MockDeviceOps& ops) {
+static void testLookup(NullBackend& ops) {
     auto t = Tier::create(ops, 64ull << 20, 1, 0);
     Config c;
     t->start(c, kLay, 0x1234);
@@ -386,7 +303,7 @@ static void testLookup(MockDeviceOps& ops) {
     CHECK(t->ramUsedBytes() == 0);
 }
 
-static void testEvictLru(MockDeviceOps& ops) {
+static void testEvictLru(NullBackend& ops) {
     // 8 blocks; each entry: ck (2 blocks) + 2 pages (3 MiB at 4 MiB: 2 blocks)
     auto t = Tier::create(ops, 16ull << 20, 2, 0);
     t->start(Config{}, kLay, 1);
@@ -426,7 +343,7 @@ static void testEvictLru(MockDeviceOps& ops) {
     CHECK(t->ramUsedBytes() == before);
 }
 
-static void testTrimDropCk(MockDeviceOps& ops) {
+static void testTrimDropCk(NullBackend& ops) {
     auto t = Tier::create(ops, 64ull << 20, 3, 0);
     t->start(Config{}, kLay, 1);
     DevSlot d(ops, 2, 4);  // ck 4 blocks + KV 6 MiB (3 blocks)
@@ -454,7 +371,7 @@ static void testTrimDropCk(MockDeviceOps& ops) {
     CHECK(r[0] == 3 && r[1] == 5);
 }
 
-static void testRestoreRam(MockDeviceOps& ops) {
+static void testRestoreRam(NullBackend& ops) {
     auto t = Tier::create(ops, 64ull << 20, 4, 0);
     t->start(Config{}, kLay, 1);
     DevSlot src(ops, 2, 5);
@@ -515,7 +432,7 @@ struct SsdEnv {
     }
 };
 
-static void testSsd(MockDeviceOps& ops, const fs::path& dir) {
+static void testSsd(NullBackend& ops, const fs::path& dir) {
     std::error_code ec;
     fs::remove_all(dir, ec);
     SsdEnv env{dir};
@@ -648,7 +565,7 @@ static void testSsd(MockDeviceOps& ops, const fs::path& dir) {
         g = spill(*t, fsrc, makeTokens(1700, 15));
         CHECK(g != nullptr && !e->in_ram);
         if (g) t->removeEntry(g);
-        ops.closeGate();
+        ops.holdEventSync();
         CHECK(t->prefetch(e));
         {
             DevSlot dst(ops, nck, pages);
@@ -659,13 +576,13 @@ static void testSsd(MockDeviceOps& ops, const fs::path& dir) {
                 CHECK(r->from_ssd && r->job != nullptr && !e->prefetching);
                 CHECK(r->cursor == 0);
                 CHECK(!t->pumpRestore(r));
-                ops.openGate();
+                ops.releaseEventSync();
                 CHECK(runRestore(*t, r));
                 t->endRestore(r);
                 CHECK(dst.ckEq(src, 0) && dst.ckEq(src, 1) && dst.kvEq(src));
                 CHECK(!e->io_busy && !e->loading && e->pin == 0);
             } else {
-                ops.openGate();
+                ops.releaseEventSync();
             }
         }
         CHECK(!t->tick());
@@ -674,7 +591,7 @@ static void testSsd(MockDeviceOps& ops, const fs::path& dir) {
         g = spill(*t, fsrc, makeTokens(1700, 16));
         CHECK(g != nullptr && !e->in_ram);
         if (g) t->removeEntry(g);
-        ops.closeGate();
+        ops.holdEventSync();
         {
             DevSlot dst(ops, nck, pages);
             const auto sp = dst.spans(e, 1, &nm);
@@ -685,19 +602,19 @@ static void testSsd(MockDeviceOps& ops, const fs::path& dir) {
                 Event cut = t->cutTail(r);
                 CHECK(cut != nullptr && r->ev_cut == cut);
                 CHECK(r->pieces.size() == r->n_main);
-                ops.openGate();
+                ops.releaseEventSync();
                 CHECK(runRestore(*t, r));
                 t->endRestore(r);
                 CHECK(dst.ckEq(src, 1) && dst.kvEq(src));
                 CHECK(dst.ckZero(0));
             } else {
-                ops.openGate();
+                ops.releaseEventSync();
             }
         }
         CHECK(!t->tick());
         CHECK(countFiles(dir) == 1);
     }
-    CHECK(ops.live_events.load() == 0 && ops.live_host.load() == 0 && ops.live_streams.load() == 0);
+    CHECK(ops.liveEvents() == 0 && ops.liveHost() == 0 && ops.liveStreams() == 0);
 
     // startup index, same fingerprint: the entry is kept (SSD-only)
     {
@@ -784,7 +701,7 @@ static void testSsd(MockDeviceOps& ops, const fs::path& dir) {
             CHECK(countFiles(dir) == 0 && t->ssd_bytes == 0 && t->stats.ssd_evictions == 1);
         }
     }
-    CHECK(ops.live_events.load() == 0 && ops.live_host.load() == 0 && ops.live_streams.load() == 0);
+    CHECK(ops.liveEvents() == 0 && ops.liveHost() == 0 && ops.liveStreams() == 0);
     if (g_fail == 0) fs::remove_all(dir, ec);
 }
 
@@ -983,13 +900,13 @@ static void testRamTierSize() {
 // tokens up to the end of page j (a token prefix always has the same KV
 // bytes), checkpoints from the whole token list.
 struct Sess {
-    MockDeviceOps* ops;
+    NullBackend* ops;
     DevSlot d;
     std::vector<std::uint32_t> toks;
     Entry* e = nullptr;  // valid only right after spillSess (use id later)
     std::uint64_t id = 0;
     std::uint64_t seq = 0;
-    Sess(MockDeviceOps& o, std::uint32_t max_pages) : ops(&o), d(o, 2, max_pages) {}
+    Sess(NullBackend& o, std::uint32_t max_pages) : ops(&o), d(o, 2, max_pages) {}
     std::uint32_t pages() const { return static_cast<std::uint32_t>((toks.size() + kLay.page_tokens - 1) / kLay.page_tokens); }
     static std::uint64_t sumOf(const std::vector<std::uint32_t>& t, std::size_t n) {
         std::uint64_t h = 1469598103934665603ull;
@@ -1137,7 +1054,7 @@ static std::vector<std::uint32_t> freshToks(std::size_t n, std::uint64_t& seed) 
 }
 
 // Byte-compare a restore of entry e with the slot that produced it.
-static bool restoreMatches(Tier& t, MockDeviceOps& ops, Entry* e, const Sess& s) {
+static bool restoreMatches(Tier& t, NullBackend& ops, Entry* e, const Sess& s) {
     DevSlot dst(ops, 2, s.d.pages);
     std::uint32_t k = 0;
     for (std::uint32_t i = 0; i < 2; ++i)
@@ -1156,7 +1073,7 @@ static bool restoreMatches(Tier& t, MockDeviceOps& ops, Entry* e, const Sess& s)
     return ck_ok && kv_ok;
 }
 
-static void testDedupRestart(MockDeviceOps& ops, const fs::path& dir) {
+static void testDedupRestart(NullBackend& ops, const fs::path& dir) {
     std::error_code ec;
     fs::remove_all(dir, ec);
     SsdEnv env{dir};
@@ -1258,7 +1175,7 @@ static void testDedupRestart(MockDeviceOps& ops, const fs::path& dir) {
     fs::remove_all(dir, ec);
 }
 
-static void testOwnerRewrite(MockDeviceOps& ops, const fs::path& dir) {
+static void testOwnerRewrite(NullBackend& ops, const fs::path& dir) {
     // an owner rewritten in place under a block others reference: the
     // referencing file is dropped first (its RAM copy is written again)
     std::error_code ec;
@@ -1311,7 +1228,7 @@ static void testOwnerRewrite(MockDeviceOps& ops, const fs::path& dir) {
     fs::remove_all(dir, ec);
 }
 
-static void testModesLock(MockDeviceOps& ops, const fs::path& dir) {
+static void testModesLock(NullBackend& ops, const fs::path& dir) {
     std::error_code ec;
     fs::remove_all(dir, ec);
     SsdEnv env{dir};
@@ -1350,7 +1267,7 @@ static void testModesLock(MockDeviceOps& ops, const fs::path& dir) {
 // MAIN-001: a truncated SSD file is never restored as valid KV. Cut at startup (header only, mid
 // payload, last sector) the entry is not indexed and the file is removed; cut after the index the
 // read job fails (restore failed -> cold prefill). A legal partial last block stays restorable.
-static void testSsdTruncated(MockDeviceOps& ops, const fs::path& dir) {
+static void testSsdTruncated(NullBackend& ops, const fs::path& dir) {
     std::error_code ec;
     fs::remove_all(dir, ec);
     SsdEnv env{dir};
@@ -1439,7 +1356,7 @@ static void testSsdTruncated(MockDeviceOps& ops, const fs::path& dir) {
 
 // RESTORE-EXC: a throwing device copy during a restore marks it failed (cold prefill), it is never
 // reported as done-and-valid; the tier stays consistent and the entry restores later.
-static void testRestoreCopyThrows(MockDeviceOps& ops, const fs::path& dir) {
+static void testRestoreCopyThrows(NullBackend& ops, const fs::path& dir) {
     std::error_code ec;
     fs::remove_all(dir, ec);
     SsdEnv env{dir};
@@ -1467,20 +1384,20 @@ static void testRestoreCopyThrows(MockDeviceOps& ops, const fs::path& dir) {
         DevSlot dst(ops, nck, pages);
         std::size_t nm = 0;
         const auto sp = dst.spans(e, 1, &nm);
-        ops.closeGate();  // the SSD read waits: no copy happens inside beginRestore
+        ops.holdEventSync();  // the SSD read waits: no copy happens inside beginRestore
         Restore* r = t->beginRestore(e, sp, nm);
         CHECK(r != nullptr);
         if (!r) {
-            ops.openGate();
+            ops.releaseEventSync();
             return;
         }
         // the 2nd copy of this restore throws
-        ops.throw_at = ops.copy_calls.load() + 2;
-        ops.openGate();
+        ops.failCopyCall(ops.copyCalls() + 2);
+        ops.releaseEventSync();
         const auto dl = std::chrono::steady_clock::now() + std::chrono::seconds(20);
         while (!t->pumpRestoreNoThrow(r) && std::chrono::steady_clock::now() < dl)
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        ops.throw_at = 0;
+        ops.failCopyCall(0);
         CHECK(r->failed);
         t->endRestore(r);
         tickIdle(*t);
@@ -1504,7 +1421,7 @@ static void testRestoreCopyThrows(MockDeviceOps& ops, const fs::path& dir) {
 // TIER-LOCK-FAILOPEN: when the directory lock cannot be taken for a reason other than another
 // server holding it (here: whirl.lock is a directory -> access denied), the SSD tier stays off
 // instead of running unlocked.
-static void testLockFailClosed(MockDeviceOps& ops, const fs::path& dir) {
+static void testLockFailClosed(NullBackend& ops, const fs::path& dir) {
     std::error_code ec;
     fs::remove_all(dir, ec);
     fs::create_directories(dir / L"whirl.lock", ec);
@@ -1532,7 +1449,7 @@ static void testLockFailClosed(MockDeviceOps& ops, const fs::path& dir) {
 // TIER-DEP-CYCLE: A owns the shared prefix and B references it. A is then rewritten to B's
 // content; its new blocks must not become references to B (A <-> B), otherwise dropping either
 // one recursed forever. Also: a cycle that already exists is survivable (guard in dropSsdCopy).
-static void testDedupCycle(MockDeviceOps& ops, const fs::path& dir) {
+static void testDedupCycle(NullBackend& ops, const fs::path& dir) {
     std::error_code ec;
     fs::remove_all(dir, ec);
     SsdEnv env{dir};
@@ -1592,7 +1509,7 @@ static void testDedupCycle(MockDeviceOps& ops, const fs::path& dir) {
     fs::remove_all(dir, ec);
 }
 
-static void testSupersedeTrim(MockDeviceOps& ops, const fs::path& dir) {
+static void testSupersedeTrim(NullBackend& ops, const fs::path& dir) {
     std::error_code ec;
     fs::remove_all(dir, ec);
     SsdEnv env{dir};
@@ -1684,7 +1601,7 @@ struct WfResult {
     double written_gib = 0, used_gib = 0, hit = 0;
 };
 
-static WfResult runWorkflow(MockDeviceOps& ops, const fs::path& dir, int kind, bool cache1) {
+static WfResult runWorkflow(NullBackend& ops, const fs::path& dir, int kind, bool cache1) {
     std::error_code ec;
     fs::remove_all(dir, ec);
     SsdEnv env{dir};
@@ -1786,7 +1703,7 @@ static WfResult runWorkflow(MockDeviceOps& ops, const fs::path& dir, int kind, b
     return r;
 }
 
-static void testWorkflows(MockDeviceOps& ops, const fs::path& dir) {
+static void testWorkflows(NullBackend& ops, const fs::path& dir) {
     const char* names[] = {"periodic compact", "sliding window + tool output cut", "regenerate"};
     for (int k = 0; k < 3; ++k) {
         const WfResult b = runWorkflow(ops, dir, k, false);
@@ -1827,7 +1744,7 @@ static void testQuietDefaults() {
 
 // An entry is written once unchanged for ssd_delay_ms; every change (or use) restarts the clock; while
 // it only waits, tick() reports wait-only work and the due time.
-static void testWriteDelay(MockDeviceOps& ops, const fs::path& dir) {
+static void testWriteDelay(NullBackend& ops, const fs::path& dir) {
     std::error_code ec;
     fs::remove_all(dir, ec);
     SsdEnv env{dir};
@@ -1871,7 +1788,7 @@ static void testWriteDelay(MockDeviceOps& ops, const fs::path& dir) {
 }
 
 // RAM pressure before the delay: the evicted entry is written when it has >= min_tokens, else dropped.
-static void testEvictionWrite(MockDeviceOps& ops, const fs::path& dir) {
+static void testEvictionWrite(NullBackend& ops, const fs::path& dir) {
     for (int mode = 0; mode < 3; ++mode) {  // 0: written, 1: below min_tokens (dropped), 2: shutdown mode (dropped)
         std::error_code ec;
         fs::remove_all(dir, ec);
@@ -1924,7 +1841,7 @@ static void testEvictionWrite(MockDeviceOps& ops, const fs::path& dir) {
 // worth a write. Restoring (or prefetching) an SSD-only entry makes room in RAM; the eviction write of the
 // dirty victim makes room on SSD (LRU). The entry being restored is the SSD LRU entry at that point and
 // must never be the one dropped (it was deleted under beginRestore: use after free).
-static void testEvictionWriteSsdFull(MockDeviceOps& ops, const fs::path& dir) {
+static void testEvictionWriteSsdFull(NullBackend& ops, const fs::path& dir) {
     for (int mode = 0; mode < 2; ++mode) {  // 0: beginRestore, 1: prefetch
         std::error_code ec;
         fs::remove_all(dir, ec);
@@ -2020,7 +1937,7 @@ static void testEvictionWriteSsdFull(MockDeviceOps& ops, const fs::path& dir) {
 // Shutdown mode: no write while running even with delay 0, a flush writes every reused entry (CLOSE-REUSED:
 // only those; a one-shot prompt is not written, testCloseReusedTier); always mode: the flush (delay forced to
 // 0 like Engine::flushTierOnStop) does not wait for the delay either.
-static void testShutdownFlush(MockDeviceOps& ops, const fs::path& dir) {
+static void testShutdownFlush(NullBackend& ops, const fs::path& dir) {
     for (int mode = 0; mode < 2; ++mode) {
         std::error_code ec;
         fs::remove_all(dir, ec);
@@ -2059,7 +1976,7 @@ static void testShutdownFlush(MockDeviceOps& ops, const fs::path& dir) {
 // common prefix: an entry whose prefix another entry is writing right now waits for that write instead of
 // writing its own copy. Before the fix every startWrite of the pass saw no SSD base (the first file was still
 // in flight) and the system prompt was written once per session.
-static void testFlushDedup(MockDeviceOps& ops, const fs::path& dir) {
+static void testFlushDedup(NullBackend& ops, const fs::path& dir) {
     for (int mode = 0; mode < 2; ++mode) {
         std::error_code ec;
         fs::remove_all(dir, ec);
@@ -2133,7 +2050,7 @@ static void testFlushDedup(MockDeviceOps& ops, const fs::path& dir) {
 // before the fix waitForDedupBase saw neither an in-flight write nor a file on disk and the second entry
 // wrote the shared prefix in full (server gate sys: "0 of 2 SSD writes with shared blocks", ~1 in 24 runs
 // on the R9700).
-static void testDedupFinishedUnreaped(MockDeviceOps& ops, const fs::path& dir) {
+static void testDedupFinishedUnreaped(NullBackend& ops, const fs::path& dir) {
     std::error_code ec;
     fs::remove_all(dir, ec);
     SsdEnv env{dir};
@@ -2198,7 +2115,7 @@ static void testDedupFinishedUnreaped(MockDeviceOps& ops, const fs::path& dir) {
 
 // Graceful flush order: most recently used first (a restore counts as use), so when the time bound runs
 // out the oldest sessions are the ones not written. Writes run in submission order on the IO thread.
-static void testFlushOrder(MockDeviceOps& ops, const fs::path& dir) {
+static void testFlushOrder(NullBackend& ops, const fs::path& dir) {
     std::error_code ec;
     fs::remove_all(dir, ec);
     SsdEnv env{dir};
@@ -2247,7 +2164,7 @@ static void testFlushOrder(MockDeviceOps& ops, const fs::path& dir) {
 // `always` mode seen-once filter: only entries whose prefix was reused (restored) or that were resumed
 // (updated in place) are written; a stream of distinct one-shot prompts writes nothing. Shutdown mode's flush
 // (when WHIRL is closed) writes only the reused entries too (CLOSE-REUSED; it used to write everything).
-static void testSeenOnce(MockDeviceOps& ops, const fs::path& dir) {
+static void testSeenOnce(NullBackend& ops, const fs::path& dir) {
     std::error_code ec;
     fs::remove_all(dir, ec);
     SsdEnv env{dir};
@@ -2359,7 +2276,7 @@ static void writeJunk(const fs::path& p, std::size_t n, std::uint64_t seed) {
 // Startup: every kind of file in the directory is accounted for: corrupt / half-written files are deleted,
 // valid files of another model count against the cap and go first, the directory never holds more than
 // the cap (real bytes) and the log has one summary line.
-static void testStartupCleanupCap(MockDeviceOps& ops, const fs::path& dir) {
+static void testStartupCleanupCap(NullBackend& ops, const fs::path& dir) {
     std::error_code ec;
     fs::remove_all(dir, ec);
     SsdEnv env{dir};
@@ -2442,7 +2359,7 @@ static void testStartupCleanupCap(MockDeviceOps& ops, const fs::path& dir) {
 }
 
 // The cap holds on every write and the LRU victim takes the files borrowing its blocks with it.
-static void testCapLruDedup(MockDeviceOps& ops, const fs::path& dir) {
+static void testCapLruDedup(NullBackend& ops, const fs::path& dir) {
     std::error_code ec;
     fs::remove_all(dir, ec);
     SsdEnv env{dir};
@@ -2509,7 +2426,7 @@ static void testCapLruDedup(MockDeviceOps& ops, const fs::path& dir) {
 
 // Files unused for the expiry time are deleted (start-up and periodic); use refreshes them (also the
 // owners of borrowed blocks).
-static void testExpiry(MockDeviceOps& ops, const fs::path& dir) {
+static void testExpiry(NullBackend& ops, const fs::path& dir) {
     std::error_code ec;
     fs::remove_all(dir, ec);
     SsdEnv env{dir};
@@ -2613,7 +2530,7 @@ static void testExpiry(MockDeviceOps& ops, const fs::path& dir) {
 // FIX-RC4-A P2-2: an SSD entry used from the RAM tier, unchanged (a shared system prompt / tool prefix),
 // is never rewritten; its use must still reach the file (graceful shutdown flush) or it expires at a
 // restart although it was used two days before. Both SSD modes.
-static void testRamUsePersisted(MockDeviceOps& ops, const fs::path& dir) {
+static void testRamUsePersisted(NullBackend& ops, const fs::path& dir) {
     for (int mode = 0; mode < 2; ++mode) {  // 0: always, 1: shutdown
         std::error_code ec;
         fs::remove_all(dir, ec);
@@ -2668,7 +2585,7 @@ static void testRamUsePersisted(MockDeviceOps& ops, const fs::path& dir) {
 // FIX-RC4-A P3-2: shutdown mode writes nothing to the SSD while running -- not the header / table rewrite
 // of a trimmed (superseded) entry, not the "last used" time of an entry restored from SSD; both are written
 // at the shutdown flush.
-static void testShutdownNoWrites(MockDeviceOps& ops, const fs::path& dir) {
+static void testShutdownNoWrites(NullBackend& ops, const fs::path& dir) {
     std::error_code ec;
     fs::remove_all(dir, ec);
     SsdEnv env{dir};
@@ -2739,7 +2656,7 @@ static void testShutdownNoWrites(MockDeviceOps& ops, const fs::path& dir) {
 // was pushed out of RAM and lost). One-shot prompts are still dropped, below min_tokens is dropped, a file
 // that cannot fit the cap is skipped (one log line, dropped), and without RAM pressure nothing is written.
 // Before the fix modes 0 and 1 dropped a (no file; the restart found nothing).
-static void testShutdownEvictReused(MockDeviceOps& ops, const fs::path& dir) {
+static void testShutdownEvictReused(NullBackend& ops, const fs::path& dir) {
     // 0: reused LRU victim -> written, survives a restart; the one-shot b is dropped (not written)
     // 1: seen filter off: still only reused entries (b dropped, a written)
     // 2: cap smaller than a's file -> skipped with one log line, dropped, spill not blocked
@@ -2928,7 +2845,7 @@ static void testClosePolicy() {
 // Engine::flushTierOnStop) writes the reused entries (restored, resumed, and a demoted reused one) and never
 // the one-shot prompt; a restart restores the reused ones bit-exactly and has no trace of the one-shot one.
 // Always mode keeps its seen-once filter at the flush (the one-shot one is written with the filter off).
-static void testCloseReusedTier(MockDeviceOps& ops, const fs::path& dir) {
+static void testCloseReusedTier(NullBackend& ops, const fs::path& dir) {
     std::error_code ec;
     fs::remove_all(dir, ec);
     SsdEnv env{dir};
@@ -3018,7 +2935,7 @@ static void testCloseReusedTier(MockDeviceOps& ops, const fs::path& dir) {
 // clock fired) writes the reused entries, one write at a time, never the one-shot one, then ends the pass by
 // itself; staying idle writes nothing more; a new pass rewrites only an entry that changed since (dirty);
 // endIdleWrite (a request) stops starting writes after the one running; always mode ignores it.
-static void testIdleWriteTier(MockDeviceOps& ops, const fs::path& dir) {
+static void testIdleWriteTier(NullBackend& ops, const fs::path& dir) {
     std::error_code ec;
     fs::remove_all(dir, ec);
     SsdEnv env{dir};
@@ -3138,7 +3055,7 @@ static void testIdleWriteTier(MockDeviceOps& ops, const fs::path& dir) {
 // FIX-RC4-A P3-3: a cache file that cannot be deleted (another program holds it) stays counted against the
 // cap -- at an LRU eviction, for a corrupt file at startup -- and a file that cannot be opened at startup is
 // kept and counted (aged by its last-write time), not reported as expired and dropped from the accounting.
-static void testDeleteFails(MockDeviceOps& ops, const fs::path& dir) {
+static void testDeleteFails(NullBackend& ops, const fs::path& dir) {
     std::error_code ec;
     fs::remove_all(dir, ec);
     SsdEnv env{dir};
@@ -3201,7 +3118,7 @@ static void testDeleteFails(MockDeviceOps& ops, const fs::path& dir) {
 
 // FIX-RC4-A P3-6: an asynchronous copy error (reported by the event query, not thrown by copyAsync) fails
 // the restore (cold prefill); it used to read as "complete and valid".
-static void testRestoreAsyncError(MockDeviceOps& ops) {
+static void testRestoreAsyncError(NullBackend& ops) {
     auto t = Tier::create(ops, 64ull << 20, 99, 0);
     t->start(Config{}, kLay, 1);
     DevSlot src(ops, 2, 7);
@@ -3213,7 +3130,7 @@ static void testRestoreAsyncError(MockDeviceOps& ops) {
     DevSlot dst(ops, 2, 7);
     std::size_t nm = 0;
     const auto sp = dst.spans(e, 1, &nm);
-    ops.event_error = true;
+    ops.failEventQueries(true);
     Restore* r = t->beginRestore(e, sp, nm);
     CHECK(r != nullptr);
     if (r) {
@@ -3222,7 +3139,7 @@ static void testRestoreAsyncError(MockDeviceOps& ops) {
         CHECK(done && r->failed);
         t->endRestore(r);
     }
-    ops.event_error = false;
+    ops.failEventQueries(false);
     CHECK(e->pin == 0);
     DevSlot ok(ops, 2, 7);
     const auto sp2 = ok.spans(e, 1, &nm);
@@ -3238,7 +3155,7 @@ static void testRestoreAsyncError(MockDeviceOps& ops) {
 // FIX-RC4-A P3-5: an idle engine sleeps until Tier::nextWake(); with nothing waiting for a write it must
 // still wake for the periodic expiry check (nextDue() alone is empty then: it slept forever).
 // P3-1: a spill larger than the whole RAM tier does not leave roomPending() set (busy loop).
-static void testIdleWakeRoomPending(MockDeviceOps& ops, const fs::path& dir) {
+static void testIdleWakeRoomPending(NullBackend& ops, const fs::path& dir) {
     std::error_code ec;
     fs::remove_all(dir, ec);
     SsdEnv env{dir};
@@ -3287,7 +3204,7 @@ static void testIdleWakeRoomPending(MockDeviceOps& ops, const fs::path& dir) {
 
 // FIX-RC4-A P3-7 (FLAKE-1 rest): a restore taking over a running prefetch removed the prefetch job from the
 // job list with a swapRemove, so the writes queued after it were reaped -- and logged -- out of order.
-static void testTakeoverKeepsJobOrder(MockDeviceOps& ops, const fs::path& dir) {
+static void testTakeoverKeepsJobOrder(NullBackend& ops, const fs::path& dir) {
     std::error_code ec;
     fs::remove_all(dir, ec);
     SsdEnv env{dir};
@@ -3308,7 +3225,7 @@ static void testTakeoverKeepsJobOrder(MockDeviceOps& ops, const fs::path& dir) {
     Entry* ep = t->find(p.id);
     CHECK(ep != nullptr && !ep->in_ram);
     if (!ep) return;
-    ops.closeGate();  // the prefetch read waits (the IO thread holds it)
+    ops.holdEventSync();  // the prefetch read waits (the IO thread holds it)
     CHECK(t->prefetch(ep));
     Sess a(ops, 24), b(ops, 24), c(ops, 24);
     Sess* w[3] = {&a, &b, &c};
@@ -3324,7 +3241,7 @@ static void testTakeoverKeepsJobOrder(MockDeviceOps& ops, const fs::path& dir) {
     sp.push_back(Span{dst.kv, ep->kvOff(kLay), static_cast<std::uint64_t>(ep->pages) * kLay.page_bytes, 0xff});
     Restore* r = t->beginRestore(ep, sp, sp.size());  // takes the prefetch over
     CHECK(r != nullptr);
-    ops.openGate();
+    ops.releaseEventSync();
     if (r) {
         CHECK(runRestore(*t, r));
         t->endRestore(r);
@@ -3356,7 +3273,7 @@ static Header readHeader(const fs::path& f) {
     return h;
 }
 
-static void testDedupStartupCycleOwnerTrunc(MockDeviceOps& ops, const fs::path& dir) {
+static void testDedupStartupCycleOwnerTrunc(NullBackend& ops, const fs::path& dir) {
     const std::uint64_t fp = 83;
     for (int mode = 0; mode < 3; ++mode) {  // 0: cycle on disk, 1: owner cut at startup, 2: owner cut while running
         std::error_code ec;
@@ -3460,12 +3377,12 @@ static void testDedupStartupCycleOwnerTrunc(MockDeviceOps& ops, const fs::path& 
 
 namespace amp {
 struct Sim {
-    MockDeviceOps& ops;
+    NullBackend& ops;
     Layout lay;
     std::uint32_t nck = 4;
     DevPtr ck_dev = 0, kv_dev = 0;
     std::uint32_t max_pages = 0;
-    Sim(MockDeviceOps& o, int div, std::uint32_t max_tokens) : ops(o) {
+    Sim(NullBackend& o, int div, std::uint32_t max_tokens) : ops(o) {
         lay.ck_bytes = static_cast<std::uint64_t>(51.2 * 1048576.0) / div;
         lay.page_bytes = (9ull << 20) / div;
         lay.page_tokens = 256;
@@ -3533,7 +3450,7 @@ struct Sim {
 };
 }  // namespace amp
 
-static void testWriteAmplification(MockDeviceOps& ops, const fs::path& dir) {
+static void testWriteAmplification(NullBackend& ops, const fs::path& dir) {
     const char* full = std::getenv("WHIRL_TIER_AMP");
     const int div = full != nullptr && std::strcmp(full, "full") == 0 ? 1 : 8;
     std::error_code ec;
@@ -3665,7 +3582,7 @@ private:
 // first write: the next start must never restore bytes the file's header does not describe
 // (the old version or a cold miss; the new version only when nothing was lost). Before
 // FIX-HDR0, (a) kept the old valid header over half-new data and restored wrong KV.
-static void testPowerLoss(MockDeviceOps& ops, const fs::path& dir) {
+static void testPowerLoss(NullBackend& ops, const fs::path& dir) {
     std::error_code ec;
     SsdEnv env{dir};
     int crash_runs = 0, wrong = 0, cold = 0, old_ok = 0;
@@ -3774,7 +3691,7 @@ static void testPowerLoss(MockDeviceOps& ops, const fs::path& dir) {
 // immediately due, its write dropped b's copy, ... an endless rewrite loop (the engine never idle, the SSD
 // written continuously). Now: a write never drops the SSD copy of a RAM entry; b is skipped (logged once),
 // the cap holds, the tier goes idle.
-static void testCapTightRamEntries(MockDeviceOps& ops, const fs::path& dir) {
+static void testCapTightRamEntries(NullBackend& ops, const fs::path& dir) {
     for (int mode = 0; mode < 2; ++mode) {
         std::error_code ec;
         fs::remove_all(dir, ec);
@@ -3828,7 +3745,7 @@ static void testCapTightRamEntries(MockDeviceOps& ops, const fs::path& dir) {
 // reservation charged the whole new file, so ssd_bytes ended up to one old copy over the cap. Now the room
 // is made again for the whole file; here it cannot be (c, in RAM, is newer than a: its copy is not dropped
 // for a write), so b's write is skipped and the cap holds.
-static void testCapOwnCopyDropped(MockDeviceOps& ops, const fs::path& dir) {
+static void testCapOwnCopyDropped(NullBackend& ops, const fs::path& dir) {
     std::error_code ec;
     fs::remove_all(dir, ec);
     SsdEnv env{dir};
@@ -3897,7 +3814,7 @@ static void testCapOwnCopyDropped(MockDeviceOps& ops, const fs::path& dir) {
 
 // FIX-CACHE P2-4: Tier::demote (an entry that shares only its system prompt with a newer conversation): kept,
 // the first RAM eviction victim, dropped instead of written to SSD; any use undoes it.
-static void testDemote(MockDeviceOps& ops, const fs::path& dir) {
+static void testDemote(NullBackend& ops, const fs::path& dir) {
     std::error_code ec;
     fs::remove_all(dir, ec);
     SsdEnv env{dir};
@@ -3945,7 +3862,7 @@ static void testDemote(MockDeviceOps& ops, const fs::path& dir) {
 // VRAM-based auto-shrink) changes the file layout (dataOff). Before: the files of the same fingerprint were
 // deleted as corrupt. Now: kept like foreign files (counted against the cap, evicted first), and used again
 // by a server with the old context.
-static void testTokCapRestart(MockDeviceOps& ops, const fs::path& dir) {
+static void testTokCapRestart(NullBackend& ops, const fs::path& dir) {
     std::error_code ec;
     fs::remove_all(dir, ec);
     SsdEnv env{dir};
@@ -4034,7 +3951,7 @@ int main(int argc, char** argv) {
     if (const wchar_t* t = _wgetenv(L"WHIRL_TEST_TMP"); t && *t) base = fs::path(t);
     else base = fs::temp_directory_path() / L"whirl-tests";
     fs::path dir = argc > 1 ? fs::path(argv[1]) : base / L"tier_test_tmp";
-    MockDeviceOps ops;
+    NullBackend ops;
     if (want("testHelpers")) {
         std::printf("-- %s\n", "testHelpers");
         testHelpers();
@@ -4063,7 +3980,7 @@ int main(int argc, char** argv) {
         std::printf("-- %s\n", "testRestoreRam");
         testRestoreRam(ops);
     }
-    CHECK(ops.live_events.load() == 0 && ops.live_host.load() == 0 && ops.live_streams.load() == 0);
+    CHECK(ops.liveEvents() == 0 && ops.liveHost() == 0 && ops.liveStreams() == 0);
     if (want("testSsd")) {
         std::printf("-- %s\n", "testSsd");
         testSsd(ops, dir);

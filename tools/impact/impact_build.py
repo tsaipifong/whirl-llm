@@ -122,6 +122,7 @@ RELEASE_STEPS = {
     "cpu_vision": "exe:whirl-vision-tests", "cpu_tier": "exe:whirl-tier-tests", "cpu_server": "exe:whirl-server-tests",
     "cpu_gate_selftest": "tool", "cpu_gate_nosuite": "tool", "cpu_server_only_typo": "tool", "cpu_golden_selftest": "tool",
     "cpu_golden_xcheck": "tool", "kt_full": "exe:whirl-kernel-test", "cpu_hiprt": "exe:whirl-hiprt-tests",
+    "cpu_device": "exe:whirl-device-tests",
 }
 CLI_GATES = {  # GPU gates run through whirl.exe subcommands: their roots are CLI functions (derived reach)
     "golden.single": ["goldenSingle"], "golden.pair": ["goldenPair"], "golden.ngram": ["goldenSingle"],

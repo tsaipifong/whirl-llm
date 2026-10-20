@@ -47,7 +47,7 @@ using namespace whirl;
 using namespace whirl::server;
 using whirl::test::HttpResult;
 using whirl::test::MockConfig;
-using whirl::test::MockDeviceOps;
+using whirl::device::NullBackend;
 using whirl::test::MockModel;
 
 namespace {
@@ -221,12 +221,12 @@ public:
     MockVision* vision() { return vis_.get(); }
     Engine& engine() { return *engine_; }
     tier::Tier* tierp() { return tier_.get(); }
-    MockDeviceOps& ops() { return ops_; }
+    NullBackend& ops() { return ops_; }
     std::uint16_t port() const { return http_->port(); }
 
 private:
     ServerSetup su_;
-    MockDeviceOps ops_;
+    NullBackend ops_;
     std::unique_ptr<MockVision> vis_;
     std::unique_ptr<MockModel> model_;
     std::unique_ptr<Engine> engine_;

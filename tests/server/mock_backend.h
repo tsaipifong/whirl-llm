@@ -21,7 +21,7 @@
 #pragma once
 
 #include "server/backend.h"
-#include "device/backend.h"
+#include "device/null_backend.h"
 #include "whirl/tokenizer.h"
 
 #include <atomic>
@@ -33,47 +33,6 @@
 #include <vector>
 
 namespace whirl::test {
-
-class MockDeviceOps final : public device::Backend {
-public:
-    ~MockDeviceOps() override;
-    void copyAsync(device::DevPtr dst, device::DevPtr src, std::uint64_t bytes, device::Stream s) override;
-    void download(void* dst, device::DevPtr src, std::uint64_t bytes) override;
-    device::Stream streamCreateNonBlocking() override;
-    void streamDestroy(device::Stream s) override;
-    void streamSync(device::Stream) override {}
-    void streamWaitEvent(device::Stream, device::Event) override {}
-    device::Event eventCreate() override;
-    void eventDestroy(device::Event e) override;
-    void eventRecord(device::Event, device::Stream) override {}
-    bool eventDone(device::Event) override { return true; }
-    void eventSync(device::Event) override {}
-    void* hostMalloc(std::uint64_t bytes) override;
-    void hostFree(void* p) override;
-    device::DevPtr malloc(std::uint64_t bytes) override;
-    void free(device::DevPtr p) override;
-    void setDevice(int) override {}
-    const char* lastErrorString() const override { return "mock"; }
-
-    std::size_t liveAllocations() const;
-    std::uint64_t copiedBytes() const { return copied_.load(); }
-    // fault injection: the nth copy (from now) whose source is pinned host memory (a tier restore
-    // copy) throws; 0: off
-    void failHostToDevCopy(std::uint64_t nth) {
-        host_copies_ = 0;
-        fail_host_copy_ = nth;
-    }
-    bool hostCopyFailArmed() const { return fail_host_copy_.load() != 0; }
-
-private:
-    bool isHost(device::DevPtr p) const;
-    mutable std::mutex mu_;
-    std::set<void*> live_;
-    std::map<std::uintptr_t, std::uint64_t> host_;  // pinned host allocations (start -> bytes)
-    std::atomic<std::uint64_t> fail_host_copy_{0}, host_copies_{0};
-    std::atomic<std::uint64_t> copied_{0};
-    std::atomic<std::uintptr_t> next_handle_{0x1000};
-};
 
 struct MockConfig {
     std::uint32_t n_layer = 8;     // attention every 4th layer
