@@ -231,10 +231,6 @@ void memset(DevPtr dst, int value, std::size_t bytes) {
     check(rt().hipMemset(ptr(dst), value, bytes), "hipMemset");
 }
 
-void memsetAsync(DevPtr dst, int value, std::size_t bytes, Stream s) {
-    check(rt().hipMemsetAsync(ptr(dst), value, bytes, strm(s)), "hipMemsetAsync");
-}
-
 void sync() { check(rt().hipDeviceSynchronize(), "hipDeviceSynchronize"); }
 
 MemInfo memInfo() {

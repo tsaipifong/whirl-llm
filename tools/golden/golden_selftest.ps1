@@ -13,6 +13,8 @@
 #   - record without a KL gate report, with one for another exe, or with a failing one: exit 2, nothing written
 #   - suite server (ARCH-1, fake_gate.cmd): record + check, a changed hash (exit 1), a failing in-run check or a
 #     run without "(ALL PASS)" (exit 2); exe / reference-set hashes printed; refhash follows the reference bytes
+#   - default suites (ARCH3, REVIEW-ARCH-D1 P3-7): dense skips suite server while swift runs it; a configured mmproj
+#     that is missing fails the swift server case and record writes nothing
 $ErrorActionPreference = "Stop"
 $gate = Join-Path $PSScriptRoot "golden.ps1"
 $fake = Join-Path $PSScriptRoot "fake_whirl.cmd"
@@ -150,6 +152,41 @@ try {
     $h2 = @(& pwsh -NoProfile -File $gate refhash -Models dense -Modes precise -Suites server -GoldenRoot $g7 2>&1 | ForEach-Object { "$_" })
     $okh = $rc1 -eq 0 -and $LASTEXITCODE -eq 0 -and ($h1[0] -match "sha256 [0-9a-f]{64} \(2 files") -and $h1[0] -ne $h2[0]
     Expect "refhash: prints the reference-set hash (2 files) and it follows the reference bytes" @{ rc = $(if ($okh) { 0 } else { 1 }); out = $h1 + $h2 } 0
+    # 8) default suites (no -Suites; REVIEW-ARCH-D1 P3-7): the dense Q4_K_M model skips suite server, a product model
+    #    (swift) runs it; a configured mmproj that is missing fails the server case and record writes nothing
+    $swiftModel = Join-Path $tmp "fake-swift.gguf"
+    [System.IO.File]::WriteAllBytes($swiftModel, [byte[]](1..300 | ForEach-Object { [byte](($_ * 7) % 256) }))
+    $mmproj = Join-Path $tmp "fake-mmproj.gguf"
+    [System.IO.File]::WriteAllBytes($mmproj, [byte[]](1..50))
+    $imgs = Join-Path $tmp "images"
+    New-Item -ItemType Directory -Force $imgs | Out-Null
+    [System.IO.File]::WriteAllBytes((Join-Path $imgs "shapes.png"), [byte[]](1..10))
+    $klBoth = Join-Path $tmp "kl_both.json"
+    @{ exe_sha256 = $fakeSha; device = "default"; pass = $true; summary = "selftest"; modes = @("balance", "fast"); positions = 3
+       lengths = @(8192, 32768, 98304, 131072); models = @{ dense = "fake-model.gguf"; swift = "fake-swift.gguf" } } |
+        ConvertTo-Json -Depth 4 | Set-Content $klBoth
+    function RunDefault([string]$root, [string]$mm) {
+        $saved = @{}
+        foreach ($k in @("WHIRL_GOLDEN_SWIFT", "WHIRL_GOLDEN_MMPROJ_SWIFT", "WHIRL_GOLDEN_IMAGES")) { $saved[$k] = [Environment]::GetEnvironmentVariable($k) }
+        $env:WHIRL_GOLDEN_DENSE = $model; $env:WHIRL_GOLDEN_SWIFT = $swiftModel; $env:WHIRL_GOLDEN_MMPROJ_SWIFT = $mm; $env:WHIRL_GOLDEN_IMAGES = $imgs
+        $o = & pwsh -NoProfile -File $gate record -Models "dense,swift" -Modes precise -Exe $fake -ServerExe $fake -GateExe $fakeGate `
+            -GoldenRoot $root -Out (Join-Path $tmp "out") -KlReport $klBoth 2>&1 | ForEach-Object { "$_" }
+        $c = $LASTEXITCODE
+        foreach ($k in $saved.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k]) }
+        return @{ rc = $c; out = $o }
+    }
+    $g8 = Join-Path $tmp "g8"
+    $r = RunDefault $g8 $mmproj
+    Expect "default suites: dense skips suite server, swift runs it (record)" $r 0 {
+        $d = Join-Path $g8 "gfx1201"
+        (Test-Path "$d\dense\precise_single.txt") -and (Test-Path "$d\dense\precise_ngram.txt") -and
+        -not (Test-Path "$d\dense\precise_server.txt") -and (Test-Path "$d\swift\precise_server.txt") -and
+        (Test-Path "$d\swift\precise_single.txt") -and -not ($r.out -match "dense/precise_server") }
+    $g9 = Join-Path $tmp "g9"
+    $r = RunDefault $g9 (Join-Path $tmp "no-such-mmproj.gguf")
+    Expect "default suites: a missing mmproj fails swift/precise_server and record writes nothing" $r 2 {
+        ($r.out -match "FAIL  swift/precise_server suite server needs the mmproj") -and
+        -not (Test-Path (Join-Path $g9 "gfx1201\swift\precise_single.txt")) -and -not (Test-Path (Join-Path $g9 "models.txt")) }
 } finally {
     $env:WHIRL_GOLDEN_DENSE = $savedDense
     Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue

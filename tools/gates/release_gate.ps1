@@ -24,6 +24,9 @@
 #   WHIRL_GATE_TEXT_ROOT  llama.cpp checkout (server gate texts)
 #   WHIRL_GATE_LOCK_SCRIPT  optional: a script defining Enter-R9700Lock; each GPU step then holds
 #                           that lock for its own duration only (other agents interleave)
+#                           The 8060s gate never takes the R9700 lock: its GPU steps run with
+#                           WHIRL_R9700_LOCK_HELD set, else whirl-server-gate's lock (which waits for any
+#                           whirl.exe, also one on the R9700) stalls each server step 10 min (REVIEW-ARCH-D1 P3-8)
 # Steps (-List prints them): CPU test binaries, gate / golden self-tests, golden xcheck; kernel test
 # --require-all; selftest Swift + MoE x 3 modes; golden check Swift + MoE; seqtest Swift x 3 modes and MoE
 # precise + balance; with WHIRL_GATE_DENSE also the Q4_K_M selftest / golden / seqtest x 3 modes and bench
@@ -197,15 +200,21 @@ try {
             # hold the R9700 lock for this step only, in this process (a child pwsh in between lost the
             # server gate's output after its first Ctrl+C server stop)
             $held = $null
+            $s8held = $false
             if ($s.gpu -and $lock -and -not $env:WHIRL_R9700_LOCK_HELD -and $Device -eq "r9700") {
                 . $lock
                 $held = Enter-R9700Lock
+            }
+            # 8060s: the R9700 lock is not this GPU's; mark it held so the server gate does not wait for the R9700
+            if ($s.gpu -and $Device -eq "8060s" -and -not $env:WHIRL_R9700_LOCK_HELD) {
+                $env:WHIRL_R9700_LOCK_HELD = "release_gate-8060s"; $s8held = $true
             }
             try {
                 & $cmd[0] @($cmd | Select-Object -Skip 1) *> $log
                 $c = $LASTEXITCODE
             } finally {
                 if ($held) { $held.Close(); Remove-Item Env:WHIRL_R9700_LOCK_HELD -ErrorAction SilentlyContinue }
+                if ($s8held) { Remove-Item Env:WHIRL_R9700_LOCK_HELD -ErrorAction SilentlyContinue }
             }
         } catch {
             "release gate: step did not run: $_" | Add-Content $log

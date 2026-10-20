@@ -33,7 +33,6 @@
     X(hipError_t, hipMemcpy, (void*, const void*, size_t, hipMemcpyKind))                                             \
     X(hipError_t, hipMemcpyAsync, (void*, const void*, size_t, hipMemcpyKind, hipStream_t))                           \
     X(hipError_t, hipMemset, (void*, int, size_t))                                                                    \
-    X(hipError_t, hipMemsetAsync, (void*, int, size_t, hipStream_t))                                                  \
     X(hipError_t, hipMemGetInfo, (size_t*, size_t*))                                                                  \
     X(hipError_t, hipStreamCreate, (hipStream_t*))                                                                    \
     X(hipError_t, hipStreamCreateWithFlags, (hipStream_t*, unsigned int))                                             \

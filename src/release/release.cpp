@@ -112,9 +112,11 @@ int gpuPreflight() {
         // a file found in the executable's folder is diagnosed by its path, otherwise by name (searched as before)
         const std::wstring dll = r.app_local ? r.path : std::wstring(hip::runtime::k_dll);
         if (!r.missing_symbol.empty()) {
-            // a HIP function the driver's runtime does not export: the driver predates something WHIRL uses
-            std::fprintf(stderr, "error: the installed AMD graphics driver is too old: its GPU runtime (%s) has no %s.\n%s",
-                         k_gpu_runtime_dll, r.missing_symbol.c_str(), k_driver_advice);
+            // a HIP function the runtime does not export: from the search path the driver predates something WHIRL
+            // uses; a copy in the executable's folder must be removed or replaced (a driver update would not help)
+            std::fputs(dlldeps::messageMissingSymbol(k_gpu_runtime_dll, r.missing_symbol, r.app_local, r.path, k_driver_advice)
+                           .c_str(),
+                       stderr);
         } else if (r.error == ERROR_MOD_NOT_FOUND) {
             // 126 = the DLL or a DLL it imports is missing: tell them apart and name the missing one
             // (issue #2: the ROCm 10.1 driver's amdhip64_7.dll needs rocm_kpack.dll, which it does not install)

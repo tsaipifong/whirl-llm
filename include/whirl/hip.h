@@ -92,7 +92,6 @@ void copyAsync(DevPtr dst, DevPtr src, std::size_t bytes, Stream s);  // device 
 // Any pointer pair (device or pinned host); the runtime infers the direction.
 void copyAnyAsync(DevPtr dst, DevPtr src, std::size_t bytes, Stream s);
 void memset(DevPtr dst, int value, std::size_t bytes);
-void memsetAsync(DevPtr dst, int value, std::size_t bytes, Stream s);
 void sync();
 struct MemInfo {
     std::size_t free = 0, total = 0;

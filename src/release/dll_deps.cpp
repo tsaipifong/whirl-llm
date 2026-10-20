@@ -264,6 +264,19 @@ Shadow127 inspect127(const std::wstring& dll, const std::wstring& app_dir) {
     return s;
 }
 
+std::string messageMissingSymbol(const std::string& dll_name, const std::string& symbol, bool app_local,
+                                 const std::wstring& path, const char* driver_advice) {
+    if (!app_local)
+        return std::format("error: the installed AMD graphics driver is too old: its GPU runtime ({}) has no {}.\n{}", dll_name,
+                           symbol, driver_advice);
+    return std::format("error: the GPU runtime in the WHIRL folder ({}) has no {}, a function WHIRL needs,\n"
+                       "  so WHIRL cannot use the GPU. A {} next to the executable is used instead of the one the\n"
+                       "  AMD graphics driver installs, so updating the driver does not fix this.\n"
+                       "  Remove that file (WHIRL then uses the driver's runtime) or replace it with a newer version,\n"
+                       "  and run the command again.\n",
+                       narrowUtf8(path), symbol, dll_name);
+}
+
 std::string message127(const std::string& dll_name, const Shadow127& s) {
     auto has = [&](const char* name) {
         for (const std::string& b : s.bundled)

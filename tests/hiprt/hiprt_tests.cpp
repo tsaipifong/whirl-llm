@@ -107,8 +107,9 @@ void testTable() {
     CHECK(rt::symbolCount() == sizeof(rt::Api) / sizeof(void*));
     CHECK(rt::symbolName(rt::symbolCount()) == nullptr);
     for (const char* n : k_v022_imports) CHECKD(names.count(n) == 1, n);
-    // memsetAsync is the only wrapper whose function the 0.2.2 linker dropped (no caller); nothing else is new
-    CHECK(names.size() == std::size(k_v022_imports) + 1 && names.count("hipMemsetAsync") == 1);
+    // exactly the functions v0.2.2 imported: hipMemsetAsync (no caller, dropped by the 0.2.2 linker) is not
+    // required at start-up (REVIEW-ARCH-D1 P3-1)
+    CHECK(names.size() == std::size(k_v022_imports) && names.count("hipMemsetAsync") == 0);
 }
 
 void testFakes(const std::wstring& fakes) {
@@ -151,6 +152,13 @@ void testFakes(const std::wstring& fakes) {
         CHECKD(!r.ok && r.error == 0 && r.missing_symbol == last && r.path == p, r.missing_symbol);
         CHECK(!loaded(p));
         CHECKD(rt::failureText(r).find("has no " + last) != std::string::npos, rt::failureText(r));
+        // the user message (gpuPreflight): a copy in the executable's folder -> remove or replace that file,
+        // named by its path; no "driver too old" text or driver advice (REVIEW-ARCH-D1 P2-2)
+        const std::string m = dd::messageMissingSymbol("amdhip64_7.dll", r.missing_symbol, r.app_local, r.path, "ADVICE\n");
+        CHECKD(r.app_local && m.find(n8(p)) != std::string::npos && m.find("has no " + last) != std::string::npos &&
+                   m.find("Remove that file") != std::string::npos && m.find("replace it") != std::string::npos &&
+                   m.find("ADVICE") == std::string::npos && m.find("too old") == std::string::npos,
+               m);
     }
     // fixed order: the executable's folder before the search path; a file found there that fails is the
     // result (no fallback to a working copy further down); not in the folder -> the search path, exact path
@@ -168,6 +176,13 @@ void testFakes(const std::wstring& fakes) {
         CHECKD(!r6.ok && r6.app_local && r6.path == a + L"\\whirl_t6.dll" && !r6.missing_symbol.empty(), n8(r6.path));
         const rt::LoadResult r5b = rt::probe(empty, L"whirl_t5b.dll");
         CHECKD(!r5b.ok && !r5b.app_local && r5b.path == b + L"\\whirl_t5b.dll" && !r5b.missing_symbol.empty(), n8(r5b.path));
+        // found by the search path (System32 for the real driver): the driver wording and advice, unchanged
+        {
+            const std::string m = dd::messageMissingSymbol("amdhip64_7.dll", r5b.missing_symbol, r5b.app_local, r5b.path, "ADVICE\n");
+            CHECKD(m == "error: the installed AMD graphics driver is too old: its GPU runtime (amdhip64_7.dll) has no " +
+                            r5b.missing_symbol + ".\nADVICE\n",
+                   m);
+        }
         const rt::LoadResult r5c = rt::probe(empty, L"whirl_t5.dll");  // search path only: the broken copy in b
         CHECKD(!r5c.ok && !r5c.app_local && r5c.path == b + L"\\whirl_t5.dll", n8(r5c.path));
         SetEnvironmentVariableW(L"PATH", old.c_str());

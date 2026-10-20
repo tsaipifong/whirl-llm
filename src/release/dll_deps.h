@@ -69,4 +69,12 @@ Shadow127 inspect127(const std::wstring& dll, const std::wstring& app_dir);
 // not tell the user to update the driver (a newer driver is what causes this).
 std::string message127(const std::string& dll_name, const Shadow127& s);
 
+// A runtime that loads but lacks a HIP function WHIRL calls (src/hip/runtime_loader.cpp,
+// LoadResult.missing_symbol). Found by the search path (System32: the driver's runtime),
+// the driver is too old and `driver_advice` is appended. Found in the executable's
+// folder (`app_local`, `path`), it shadows the driver's runtime, so the message names
+// that file and says to remove or replace it; a driver update would not help.
+std::string messageMissingSymbol(const std::string& dll_name, const std::string& symbol, bool app_local,
+                                 const std::wstring& path, const char* driver_advice);
+
 }  // namespace whirl::app::dlldeps
