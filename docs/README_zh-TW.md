@@ -118,7 +118,7 @@ Swift 27B，WHIRL balance。一段工作階段＝約 20k token 的系統＋工�
 
 | | |
 |---|---|
-| **下載就能跑** | 從 [Releases](https://github.com/tsaipifong/whirl-llm/releases) 下載 **`whirl-0.2.1-windows-x64.zip`**，解壓縮、執行。**只需要 AMD 驅動**：不需要 HIP SDK、ROCm，也不用另外安裝 Visual C++ 可轉散發套件（ROCm 10.1 驅動需要的幾個執行階段 DLL 已附在 zip 裡） |
+| **下載就能跑** | 從 [Releases](https://github.com/tsaipifong/whirl-llm/releases) 下載 **`whirl-0.2.2-windows-x64.zip`**，解壓縮、執行。**只需要 AMD 驅動**：不需要 HIP SDK、ROCm，也不用另外安裝 Visual C++ 可轉散發套件（ROCm 10.1 驅動需要的幾個執行階段 DLL 已附在 zip 裡） |
 | 驅動 | **AMD Software: Adrenalin Edition 26.8.1（驅動 32.0.31041.1004）或更新版**，兩張卡都一樣。更舊的版本未測試。使用 Adrenalin Edition for ROCm 10.1 驅動時，請讓 zip 裡的 `rocm_kpack.dll` 留在 `whirl.exe` 旁邊（該驅動的 GPU runtime 需要它，但驅動沒有安裝它），連同它用到的 Visual C++ 執行階段 DLL（`msvcp140.dll`、`vcruntime140.dll`、`vcruntime140_1.dll`，同樣附在 zip 裡） |
 | GPU | **Radeon 8060S**（RDNA 3.5，gfx1151，AMD Ryzen AI Max+ 395 內顯）或 **AMD Radeon AI PRO R9700**（RDNA 4，gfx1201，32 GB）；一個行程用一張 GPU |
 | Radeon 8060S：GPU 記憶體 | **先在 Armoury Crate 或 BIOS 設定 GPU 記憶體（UMA frame buffer 大小）**（其他筆電：AMD Software 的 *Variable Graphics Memory*），再重新開機。WHIRL 把模型、緩衝區和 KV 快取放在這塊專用記憶體；Windows 的「共用 GPU 記憶體」不拿來放這些。**Swift-1.5 27B MXFP4 至少設 40 GB**（precise 模式搭配預設 KV 快取要 48 GB），**Ornith-1.5-35B-A3B MXFP4 至少 32 GB**（128 GB 的機器設 64 GB 兩個都能跑）。以 server 預設值量測（4 個 slot、262,144 token 的 KV 快取）：Swift 在 balance 用 29.9 GiB、fast 31.0 GiB、precise 38.2 GiB；Ornith 在 balance 與 precise 用 27.3 GiB、fast 23.4 GiB。設得比這少時，server 會縮小 KV 快取，或停下來並告訴你要設多大。`whirl devices` 會以「dedicated」顯示目前的大小 |
@@ -133,13 +133,13 @@ Swift 27B，WHIRL balance。一段工作階段＝約 20k token 的系統＋工�
 
 ## 快速上手
 
-1. 從 [Releases](https://github.com/tsaipifong/whirl-llm/releases) 下載 `whirl-0.2.1-windows-x64.zip`，以及一個模型，例如 [`Swift-1.5-Qwen3.8-27B-MXFP4-A-outQ6_K.gguf`](https://huggingface.co/tsaipifong/Swift-1.5-Qwen3.8-27b-MXFP4-GGUF)，存到 `C:\models\`。
+1. 從 [Releases](https://github.com/tsaipifong/whirl-llm/releases) 下載 `whirl-0.2.2-windows-x64.zip`，以及一個模型，例如 [`Swift-1.5-Qwen3.8-27B-MXFP4-A-outQ6_K.gguf`](https://huggingface.co/tsaipifong/Swift-1.5-Qwen3.8-27b-MXFP4-GGUF)，存到 `C:\models\`。
 2. 解壓縮後執行，在 PowerShell：
 
 ```powershell
-Unblock-File .\whirl-0.2.1-windows-x64.zip
-Expand-Archive .\whirl-0.2.1-windows-x64.zip -DestinationPath C:\whirl
-cd C:\whirl\whirl-0.2.1-windows-x64
+Unblock-File .\whirl-0.2.2-windows-x64.zip
+Expand-Archive .\whirl-0.2.2-windows-x64.zip -DestinationPath C:\whirl
+cd C:\whirl\whirl-0.2.2-windows-x64
 .\whirl.exe devices                                    # 應列出 Radeon 8060S（gfx1151）和／或 R9700（gfx1201）
 .\whirl.exe chat C:\models\Swift-1.5-Qwen3.8-27B-MXFP4-A-outQ6_K.gguf "用兩句話解釋 TCP slow start。" --max-tokens 400
 .\whirl-server.exe C:\models\Swift-1.5-Qwen3.8-27B-MXFP4-A-outQ6_K.gguf --port 8080      # 預設模式：balance
@@ -160,13 +160,13 @@ WHIRL 0.2.0 有三種數值模式，每個行程選一種（`--precise`、`--bal
 | 模式 | 是什麼 | 輸出保證 |
 |---|---|---|
 | **precise** | **逐位元無損**：除了 GGUF 本身的權重之外，不再量化任何東西；f16 KV 快取，激活值全程 f16／f32 | 輸出與單純 greedy 解碼**逐位元相同**：有沒有投機草稿、單獨跑或和其他使用者合批、命中前綴快取或還原工作階段，位元都相同 |
-| **balance**（預設） | 近乎無損，預設 | MTP／n-gram 草稿、合批、快取還原，輸出的 token 都和 balance 模式下單純 greedy 解碼相同；對話的下一回合從上一段回覆結尾的快取接續，與冷算數值等價，但非逐位元相同 |
+| **balance**（預設） | 近乎無損，預設 | MTP／n-gram 草稿、合批、快取還原，輸出的 token 都和 balance 模式下單純 greedy 解碼相同；對話的下一回合從上一段回覆結尾的快取接續，與冷算數值等價，但非逐位元相同，回覆可能不同 |
 | **fast**（自選） | 在通過關卡的可接受損失內求最高速度：balance 再加 4-bit KV 快取與放寬的 MTP 接受規則（Radeon 8060S 上的稠密模型保留 int8 KV 快取，在那張卡上 decode 較快） | 有損，但在公布的 KL 門檻內；文字可能隨草稿與其他使用者而不同 |
 
 實際上代表：
 
 - **precise** 是有逐位元保證的模式：逐位元無損，輸出與單純 greedy 解碼完全相同，兩張卡都一樣。
-- 在 **precise 與 balance**，每一項加速輸出的 token 都和該模式下單純 greedy 解碼相同：MTP 與 n-gram 投機解碼、多人合批、共用系統提示的前綴快取命中、對同一份長文件的第二個問題、從 RAM 或 SSD 層還原的工作階段。常駐測試把關（`whirl selftest`、kernel 測試、server 關卡、兩張卡的 golden 輸出）。兩者有一處不同：balance 下，對話的下一回合從上一段回覆結尾的快取接續，那段歷史是 decode kernel 算出來的，所以和把整段對話送給一個新啟動的 server 相比，最後幾個位元可能不同（數值等價，KL 約 2e-4；還原的工作階段仍與從未離開 VRAM 的同一工作階段逐位元相同）。precise 則改從上一個提示詞最後一個 chunk 的起點重新 prefill，與冷算逐位元相同。
+- 在 **precise 與 balance**，每一項加速輸出的 token 都和該模式下單純 greedy 解碼相同：MTP 與 n-gram 投機解碼、多人合批、共用系統提示的前綴快取命中、對同一份長文件以新請求提出的第二個問題、從 RAM 或 SSD 層還原的工作階段。常駐測試把關（`whirl selftest`、kernel 測試、server 關卡、兩張卡的 golden 輸出）。兩者有一處不同：balance 下，對話的下一回合從上一段回覆結尾的快取接續，那段歷史是 decode kernel 算出來的，所以回覆可能和把整段對話送給一個新啟動的 server 得到的不同（數值等價，KL 最多約 2e-4；還原的工作階段仍與從未離開 VRAM 的同一工作階段逐位元相同）。precise 則改從上一個提示詞最後一個 chunk 的起點重新 prefill，與冷算逐位元相同。
 - **precise 與 balance 絕不使用 4-bit KV、3-bit 權重或 fp8 attention。** 只有 fast 可能用到 4-bit KV，而且只在你要求時。
 - **權重**就是你選的 GGUF，WHIRL 照檔案原樣計算。在 balance 與 fast，接續對話時沿用上一輪算好的狀態，數值上等價，但和把整段歷史當成一個 prompt 重新處理並非逐位元相同；precise 則逐位元相同（[kv-and-caching.md](guide/zh-TW/kv-and-caching.md)）。
 
@@ -408,7 +408,7 @@ Ryzen AI Max+ 395。WHIRL 每格單次量測（2026-10-17）；llama.cpp 為 1 �
 
 1. **專為 Windows 上的 AMD GPU 打造**：原生 Windows 的 C++／HIP 推論引擎，針對 RDNA 架構逐一手寫、調校 kernel。不需要 WSL、Docker 或 Linux 虛擬機，裝好 AMD 驅動就能跑。
 2. **完整開源，包含每一支 kernel**：從 host 端排程到 GPU kernel，全部原始碼以 Apache-2.0 公開，沒有封閉的二進位元件。歡迎回報問題、提供量測數據，或直接貢獻程式碼。
-3. **精度優先於速度**：在 precise 與 balance 模式下，所有加速手段（投機解碼、多人合批、前綴快取、快取還原）輸出的 token 都和該模式的單純 greedy 解碼相同（balance 下對話的下一回合與冷算數值等價、非逐位元），有常駐測試把關。任何損失更多的做法都是自選（`--fast`），並受 KL 與準確度門檻管控。
+3. **精度優先於速度**：在 precise 與 balance 模式下，所有加速手段（投機解碼、多人合批、前綴快取、快取還原）輸出的 token 都和該模式的單純 greedy 解碼相同（balance 下對話的下一回合與冷算數值等價、非逐位元，回覆可能不同），有常駐測試把關。任何損失更多的做法都是自選（`--fast`），並受 KL 與準確度門檻管控。
 4. **少數模型，做到極致**：針對特定模型與硬體，把效能推到接近硬體極限，支援的架構一個一個加。目前支援 `qwen35`（稠密）與 `qwen35moe`（混合專家）。
 5. **數字透明、可驗證**：所有數字都是實測，量測方法、指令和提示全部公開，包括 WHIRL 領先不多的地方。
 6. **為真實工作流程設計**：以 coding agent 和長上下文為核心場景：長 prompt 快速處理、多人同時使用時主對話不卡頓、VRAM → RAM → SSD 三層快取，server 重啟後對話也能接回來。

@@ -118,7 +118,7 @@ Every kernel is open source in this repository; nothing is closed or downloaded 
 
 | | |
 |---|---|
-| **Download and run** | Download **`whirl-0.2.1-windows-x64.zip`** from [Releases](https://github.com/tsaipifong/whirl-llm/releases), unzip, run. **Only the AMD driver is needed**: no HIP SDK, no ROCm, no Visual C++ Redistributable to install (the few runtime DLLs the ROCm 10.1 driver needs are in the zip) |
+| **Download and run** | Download **`whirl-0.2.2-windows-x64.zip`** from [Releases](https://github.com/tsaipifong/whirl-llm/releases), unzip, run. **Only the AMD driver is needed**: no HIP SDK, no ROCm, no Visual C++ Redistributable to install (the few runtime DLLs the ROCm 10.1 driver needs are in the zip) |
 | Driver | **AMD Software: Adrenalin Edition 26.8.1 (driver 32.0.31041.1004) or newer**, for both GPUs. Older drivers are untested. With the Adrenalin Edition for ROCm 10.1 driver, keep the `rocm_kpack.dll` from the zip next to `whirl.exe` (that driver's GPU runtime needs it but does not install it), together with the Visual C++ runtime DLLs it uses (`msvcp140.dll`, `vcruntime140.dll`, `vcruntime140_1.dll`, also in the zip) |
 | GPU | **Radeon 8060S** (RDNA 3.5, gfx1151, the AMD Ryzen AI Max+ 395 iGPU) or **AMD Radeon AI PRO R9700** (RDNA 4, gfx1201, 32 GB); one GPU per process |
 | Radeon 8060S: GPU memory | **Set the GPU memory (UMA frame buffer size) in Armoury Crate or the BIOS first** (other laptops: *Variable Graphics Memory* in AMD Software), then restart. WHIRL keeps the model, its buffers and the KV cache in this dedicated memory; Windows' "shared GPU memory" is not used for them. Set **at least 40 GB for Swift-1.5 27B MXFP4** (48 GB for its precise mode with the default KV cache) and **32 GB for Ornith-1.5-35B-A3B MXFP4** (64 GB on a 128 GB machine runs both). Measured with the server defaults (4 slots, 262,144-token KV cache): Swift uses 29.9 GiB in balance, 31.0 GiB in fast, 38.2 GiB in precise; Ornith 27.3 GiB in balance and precise, 23.4 GiB in fast. With less, the server shrinks the KV cache, or stops with a message naming the size to set. `whirl devices` shows the current size as "dedicated" |
@@ -133,13 +133,13 @@ Our R9700 is connected as a USB4 / Thunderbolt eGPU; that works. A card in a dir
 
 ## Quick start
 
-1. Download `whirl-0.2.1-windows-x64.zip` from [Releases](https://github.com/tsaipifong/whirl-llm/releases) and a model, for example [`Swift-1.5-Qwen3.8-27B-MXFP4-A-outQ6_K.gguf`](https://huggingface.co/tsaipifong/Swift-1.5-Qwen3.8-27b-MXFP4-GGUF) saved in `C:\models\`.
+1. Download `whirl-0.2.2-windows-x64.zip` from [Releases](https://github.com/tsaipifong/whirl-llm/releases) and a model, for example [`Swift-1.5-Qwen3.8-27B-MXFP4-A-outQ6_K.gguf`](https://huggingface.co/tsaipifong/Swift-1.5-Qwen3.8-27b-MXFP4-GGUF) saved in `C:\models\`.
 2. Unzip and run, in PowerShell:
 
 ```powershell
-Unblock-File .\whirl-0.2.1-windows-x64.zip
-Expand-Archive .\whirl-0.2.1-windows-x64.zip -DestinationPath C:\whirl
-cd C:\whirl\whirl-0.2.1-windows-x64
+Unblock-File .\whirl-0.2.2-windows-x64.zip
+Expand-Archive .\whirl-0.2.2-windows-x64.zip -DestinationPath C:\whirl
+cd C:\whirl\whirl-0.2.2-windows-x64
 .\whirl.exe devices                                    # lists the Radeon 8060S (gfx1151) and/or the R9700 (gfx1201)
 .\whirl.exe chat C:\models\Swift-1.5-Qwen3.8-27B-MXFP4-A-outQ6_K.gguf "Explain TCP slow start in two sentences." --max-tokens 400
 .\whirl-server.exe C:\models\Swift-1.5-Qwen3.8-27B-MXFP4-A-outQ6_K.gguf --port 8080      # default mode: balance
@@ -160,13 +160,13 @@ WHIRL 0.2.0 has three numerics modes. You pick one per process (`--precise`, `--
 | Mode | What it is | Output guarantee |
 |---|---|---|
 | **precise** | **bitwise lossless**: nothing is quantized beyond the GGUF's own weights; f16 KV cache, f16 / f32 activations everywhere | output **bitwise identical** to plain greedy decoding: the same bits with or without speculative drafts, alone or batched with other users, and from a prefix-cache hit or a restored session |
-| **balance** (default) | near-lossless, default | MTP / n-gram drafts, batching and cache restores give the same tokens as plain greedy decoding in balance mode; a conversation's next turn, continued from the cached end of the previous reply, is numerically equivalent to a cold run, not bitwise |
+| **balance** (default) | near-lossless, default | MTP / n-gram drafts, batching and cache restores give the same tokens as plain greedy decoding in balance mode; a conversation's next turn, continued from the cached end of the previous reply, is numerically equivalent to a cold run, not bitwise, so its reply can differ |
 | **fast** (opt-in) | maximum speed within an accepted, gated loss: balance plus a 4-bit KV cache and relaxed MTP acceptance (on the Radeon 8060S the dense model keeps an int8 KV cache, which decodes faster there) | lossy within published KL limits; the text can depend on the drafts and on other users |
 
 What this means in practice:
 
 - **precise** is the mode with the bitwise guarantee: bitwise lossless, output identical to plain greedy decoding, on both GPUs.
-- In **precise and balance**, every acceleration gives the same tokens as plain greedy decoding of that mode: MTP and n-gram speculative decoding, several users batched together, prefix-cache hits on shared system prompts, a second question about the same long document, and sessions restored from the RAM or SSD tier. Standing tests enforce it (`whirl selftest`, kernel tests, server gates, golden outputs on both GPUs). One difference between the two: in balance, a conversation's next turn continues from the cached end of the previous reply, whose history the decode kernels produced, so it can differ in the last bits from sending the whole conversation to a fresh server (numerically equivalent, KL about 2e-4; a restored session still equals the same session that never left VRAM, bit for bit). precise re-prefills from the previous prompt's last chunk start instead and stays bitwise identical to the cold run.
+- In **precise and balance**, every acceleration gives the same tokens as plain greedy decoding of that mode: MTP and n-gram speculative decoding, several users batched together, prefix-cache hits on shared system prompts, a second question about the same long document sent as a new request, and sessions restored from the RAM or SSD tier. Standing tests enforce it (`whirl selftest`, kernel tests, server gates, golden outputs on both GPUs). One difference between the two: in balance, a conversation's next turn continues from the cached end of the previous reply, whose history the decode kernels produced, so its reply can differ from what a fresh server gives for the whole conversation (numerically equivalent, KL up to about 2e-4; a restored session still equals the same session that never left VRAM, bit for bit). precise re-prefills from the previous prompt's last chunk start instead and stays bitwise identical to the cold run.
 - **precise and balance never use 4-bit KV, 3-bit weights or fp8 attention.** fast is the only mode that can use 4-bit KV, and only when you ask for it.
 - **Weights** are whatever GGUF you choose; WHIRL computes with them as stored. In balance and fast, continuing a conversation reuses the state computed for the previous turn, which is numerically equivalent but not bit-identical to re-processing the whole history as one prompt; in precise it is bit-identical ([kv-and-caching.md](docs/guide/en/kv-and-caching.md)).
 
@@ -408,7 +408,7 @@ Full list: [CHANGELOG.md](CHANGELOG.md).
 
 1. **Built for AMD GPUs on Windows.** A native Windows C++/HIP inference engine with hand-written, hand-tuned kernels for RDNA. No WSL, no Docker, no Linux VM: install the AMD driver and run.
 2. **Fully open, kernels included.** Everything from host-side scheduling to every GPU kernel is open source under Apache-2.0, with no closed binary components. Bug reports, benchmark results and code contributions are all welcome.
-3. **Accuracy before speed.** In the precise and balance modes every speedup (speculative decoding, batching, prefix caching, cache restore) gives the same tokens as plain greedy decoding of that mode (in balance, a conversation's next turn is numerically equivalent to a cold run, not bitwise), enforced by standing tests. Anything lossier is opt-in (`--fast`) and gated by KL and accuracy limits.
+3. **Accuracy before speed.** In the precise and balance modes every speedup (speculative decoding, batching, prefix caching, cache restore) gives the same tokens as plain greedy decoding of that mode (in balance, a conversation's next turn is numerically equivalent to a cold run, not bitwise, so its reply can differ), enforced by standing tests. Anything lossier is opt-in (`--fast`) and gated by KL and accuracy limits.
 4. **Few models, pushed to the limit.** WHIRL targets specific models on specific hardware and pushes them close to the hardware limit, adding architectures one at a time. The architectures supported today are `qwen35` (dense) and `qwen35moe` (mixture of experts).
 5. **Transparent, verifiable numbers.** Every figure is measured, with methods, commands and prompts published, including where WHIRL does not lead by much.
 6. **Designed for real workflows.** Coding agents and long contexts come first: fast long-prompt processing, a responsive main conversation while others share the GPU, and a VRAM → RAM → SSD cache that survives server restarts.

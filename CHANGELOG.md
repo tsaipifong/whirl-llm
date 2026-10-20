@@ -14,8 +14,8 @@ All notable changes to WHIRL are listed here. Versions follow `project(whirl VER
   ASUS ROG Flow Z13), Ornith fast decode, 0.2.1 vs 0.2.2, mean of 5 interleaved rounds: QA document 2k 94.8 -> 99.8
   tok/s (+5.2%), 96k 63.8 -> 66.7 (+4.6%), 128k 60.6 -> 62.7 (+3.4%), 32k 81.6 -> 82.9 (within the round-to-round
   range); coding chat 96.7 -> 99.6 (+3.0%, same text). Against balance (same rounds), fast is no longer behind:
-  level in the coding chat (99.6 vs 100.2 tok/s; was 3.5% behind) and at 2k / 32k, ahead at 96k / 128k (+12%), as
-  before; it is not yet clearly faster at short lengths. Swift-1.5 27B MXFP4 (q8h KV in fast
+  level in the coding chat (99.6 vs 100.2 tok/s; was 3.5% behind) and at 2k / 32k (within the round-to-round
+  range), ahead at 96k / 128k (+12%; was +7% / +9%); it is not yet clearly faster at short lengths. Swift-1.5 27B MXFP4 (q8h KV in fast
   on this GPU) and the R9700 are unchanged. `WHIRL_DQ4_DYN=0` restores the fixed grid. FAST-8S-1.
 - Server: a client's next request could hang for 21 s and fail to connect (Windows error 10060), rarely (seen in our server
   stress tests). The server closed every connection first, so each finished connection stayed in
