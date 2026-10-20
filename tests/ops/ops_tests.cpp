@@ -193,6 +193,12 @@ void testGemvTile() {
     const kn::KernelTable k0 = fakeTable(false, false, false, false);
     p = ops::chooseGemvTile(abc, 3, 1, k0, tn);
     CHECK(!p.grouped && p.grid[0].x == 768 && p.grid[1].x == 128);
+    // grids round up: a matrix whose rows are not a multiple of the rows per block keeps its last rows
+    const ops::MatShape odd[2] = {mat(GgmlType::q4_k, 1001, 5120), mat(GgmlType::q4_k, 17, 5120)};
+    p = ops::chooseGemvTile(odd, 2, 1, k, tn);
+    CHECK(p.grouped && p.grid[0].x == 126 + 3);
+    p = ops::chooseGemvTile(odd, 2, 12, k, tn);  // R = 2: 16 rows per block, one launch per matrix
+    CHECK(!p.grouped && p.grid[0].x == 63 && p.grid[1].x == 2);
     // every plan is class q8_row
     CHECK(p.bits == ops::BitClass::q8_row);
 }
@@ -365,6 +371,8 @@ void testAttnDecode() {
     const kn::KernelTable k8 = attnTable(true, true, true, false);
     pl = ops::chooseAttnDecode(p, f, k8, k8.caps, p8s);
     CHECK(nameOf(pl.f) == "attn_dq4" && pl.n_split < 256 && pl.n_split == ops::dq4Splits(std::span<const std::int32_t>(pos, 4), 0, 256));
+    // ... a profile row decides it, not the kernel set: the same kernels under the gfx1201 row keep the fixed grid
+    CHECK(ops::chooseAttnDecode(p, f, k8, k8.caps, p97).n_split == 256);
     // f16 KV on the 8060S (an f16-KV kernel table has no attn_dq4): attn_ws4g for a multi-row verify group (64 splits)
     const kn::KernelTable k8f = attnTable(true, true, false, false);
     p.kv_q4 = false;
