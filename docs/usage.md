@@ -300,8 +300,8 @@ Base URL `http://127.0.0.1:8080/v1`. Any API key is accepted (there is no authen
 | `POST /v1/chat/completions` | messages, streaming (SSE) or not, tools / tool calls, thinking (`reasoning_content`), images (with `--mmproj`) |
 | `POST /v1/completions` | raw prompt, no chat template |
 | `GET /v1/models` | the one loaded model (id = `--alias`); `meta.n_ctx` is the context per slot |
-| `GET /health` | answers immediately even while busy; reports the busy state and queue length |
-| `GET /props` (also `/v1/props`) | read-only, llama.cpp-server-style subset for clients that auto-detect the context length: `default_generation_settings.n_ctx` (context per slot), `default_generation_settings.model` and `model_alias` (= `--alias`), `total_slots`, `model_path` (file name only, never a directory), `modalities`, `build_info` |
+| `GET /health` | answers immediately even while busy; reports the busy state and queue length; on Windows `vram` (the last video memory sample: `local_mib`, `budget_mib`, `shared_mib`, `spill`) and `startup` (effective values after the startup fit: `ctx_per_request`, `pool_tokens`, `parallel`, `kv_ram_mb`, `wddm_margin_mib`, `other_processes_mib`, `display_attached`, `adjusted`: the settings the server lowered) |
+| `GET /props` (also `/v1/props`) | read-only, llama.cpp-server-style subset for clients that auto-detect the context length: `default_generation_settings.n_ctx` (context per slot), `default_generation_settings.model` and `model_alias` (= `--alias`), `total_slots`, `model_path` (file name only, never a directory), `modalities`, `build_info`, and the `startup` object as in `GET /health` |
 | `GET /version` | `{"version":"0.2.2.1","name":"whirl"}` |
 | `OPTIONS` (CORS preflight) | supported (allowed origins: see `--cors-origin`) |
 

@@ -232,8 +232,8 @@ base URL `http://127.0.0.1:8080/v1`。任何 API key 都接受（沒有身分驗
 | `POST /v1/chat/completions` | messages、串流（SSE）或不串流、工具 / 工具呼叫、思考（`reasoning_content`）、圖片（需 `--mmproj`） |
 | `POST /v1/completions` | 原始提示，不套聊天樣板 |
 | `GET /v1/models` | 已載入的那一個模型（id = `--alias`）；`meta.n_ctx` 為每個 slot 的 context |
-| `GET /health` | 忙碌時也會立刻回應；回報忙碌狀態與佇列長度 |
-| `GET /props`（也接受 `/v1/props`） | 唯讀，llama.cpp server 形式的子集，供會自動偵測 context 長度的客戶端使用：`default_generation_settings.n_ctx`（每個 slot 的 context）、`default_generation_settings.model` 與 `model_alias`（= `--alias`）、`total_slots`、`model_path`（只有檔名，絕不含目錄）、`modalities`、`build_info` |
+| `GET /health` | 忙碌時也會立刻回應；回報忙碌狀態與佇列長度；Windows 上另有 `vram`（最近一次顯示記憶體取樣：`local_mib`、`budget_mib`、`shared_mib`、`spill`）與 `startup`（啟動配適後實際生效的值：`ctx_per_request`、`pool_tokens`、`parallel`、`kv_ram_mb`、`wddm_margin_mib`、`other_processes_mib`、`display_attached`、`adjusted`：伺服器調低的設定） |
+| `GET /props`（也接受 `/v1/props`） | 唯讀，llama.cpp server 形式的子集，供會自動偵測 context 長度的客戶端使用：`default_generation_settings.n_ctx`（每個 slot 的 context）、`default_generation_settings.model` 與 `model_alias`（= `--alias`）、`total_slots`、`model_path`（只有檔名，絕不含目錄）、`modalities`、`build_info`，以及與 `GET /health` 相同的 `startup` 物件 |
 | `GET /version` | `{"version":"0.2.2.1","name":"whirl"}` |
 | `OPTIONS`（CORS preflight） | 支援（允許的來源見 `--cors-origin`） |
 
