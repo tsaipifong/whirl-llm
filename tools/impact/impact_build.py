@@ -126,6 +126,7 @@ RELEASE_STEPS = {
     # REVIEW-ARCH3 P3-3: device::profile() does not compile with an hip::Arch enumerator without a row (listed with
     # the device tests: both guard include/whirl/device_profile.h)
     "cpu_profile_switch": "exe:whirl-device-tests",
+    "cpu_ops": "exe:whirl-ops-tests",  # kernel choice per op (ARCH-1 K-1..K-5)
 }
 CLI_GATES = {  # GPU gates run through whirl.exe subcommands: their roots are CLI functions (derived reach)
     "golden.single": ["goldenSingle"], "golden.pair": ["goldenPair"], "golden.ngram": ["goldenSingle"],

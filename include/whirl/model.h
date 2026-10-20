@@ -29,6 +29,7 @@
 #include "whirl/device_profile.h"
 #include "whirl/hip.h"
 #include "whirl/kernels_abi.h"
+#include "whirl/ops/matmul.h"
 #include "whirl/numerics.h"
 #include "whirl/relax_accept.h"
 #include "whirl/value_scope.h"
@@ -887,10 +888,10 @@ public:
     void gemvLaunch(std::span<const Mat> ws, DevPtr xin, std::span<const DevPtr> ys, std::uint32_t n, std::int32_t acc);
     void matmulGroup(std::span<const Mat> ws, DevPtr xin, std::span<const DevPtr> ys, std::uint32_t n);
     void matmul(const Mat& w, DevPtr xin, DevPtr y, std::uint32_t n, bool accumulate);
-    // The kernel family matmul() runs for w at n rows (host-only decision; tests/model checks the
-    // f32 / f16 dispatch of RC-R1 / PREFILL-R2 with it, no GPU).
-    enum class MatmulPath { gemvq, gemv1, float_gemv, gemm_fp8, gemm_f16 };
-    MatmulPath matmulPath(const Mat& w, std::uint32_t n) const;
+    // The matmul problem / flags matmul() hands to ops::chooseMatmulPath and ops::chooseGemvTile (K-1; the
+    // f32 / f16 dispatch of RC-R1 / PREFILL-R2 is checked there, tests/ops, no GPU).
+    ops::MatShape matShape(const Mat& w) const;
+    ops::MatmulFlags matmulFlags() const;
     // tokens per launch of the f32 / f16 multi-token GEMV loop: gemv_<T>_8 / _4 when present, else _1
     static std::uint32_t floatGemvStep(std::uint32_t left, bool has8, bool has4) {
         return left >= 8 && has8 ? 8 : left >= 4 && has4 ? 4 : 1;
@@ -920,7 +921,6 @@ private:
     // most tokens of the int8 GEMV path in the current forward
     std::uint32_t gvMax() const { return small_max > max_small_batch ? small_max : gemv_max; }
     void gemvKernels(std::span<const Mat> ws, std::span<const DevPtr> ys, std::uint32_t n, std::int32_t acc, DevPtr xqp, DevPtr xdp);
-    bool floatGemvN(const Mat& w, std::uint32_t n) const;
     // precise decode: the f16 GEMM choice for a small batch (a small-batch / fused config,
     // never the whole-matrix dequant; same bits as every other choice)
     std::uint32_t precChoice(const Mat& w, std::uint32_t n) const;

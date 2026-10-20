@@ -5,6 +5,8 @@
 
 #include "whirl/model.h"
 
+#include "whirl/ops/matmul.h"
+
 #include "../../kernels/gfx1151/attn_ws4_index.h"  // ws4::block_range (attn_ws4 / attn_ws4g split rule)
 
 #include <algorithm>
@@ -74,11 +76,6 @@ i32 awPer(i32 n_pos, u32 n_split) {
 }
 
 
-u32 gvNmax(GgmlType ty) {
-    if (gv_nmax != 0) return gv_nmax;
-    return ty == GgmlType::mxfp4 ? 13 : 11;
-}
-
 // gemm8 configuration for a batch of n tokens
 std::size_t gemm8Cfg(u32 n) { return n <= 64 ? 3 : n <= 256 ? 1 : 0; }
 // gemm8t configuration for a batch of n tokens
@@ -92,10 +89,9 @@ void Model::mark(OpClass cls) {
     if (prof) prof->record(stream, cls);
 }
 
-// int8 GEMV of the matrices ws (same type and ncols) on input x (n tokens)
-// into ys: one launch through the grouped ABI (the one-token entries, or the
-// "g" twins of the multi-token entries for groups of n <= gv_nmax), else one
-// plain launch per matrix. Per-row arithmetic is that of the single launch.
+// int8 GEMV of the matrices ws (same type and ncols) on input x (n tokens) into ys. The kernel and grid come from
+// ops::chooseGemvTile / chooseGemvWide (K-1); here the input is quantized and the arguments are built. Per-row
+// arithmetic is that of the single launch (class q8_row).
 void Model::gemvLaunch(std::span<const Mat> ws, DevPtr xin, std::span<const DevPtr> ys, u32 n, i32 acc) {
     const Mat& w = ws[0];
     if (xq_src != xin || xq_n != n) {
@@ -112,24 +108,25 @@ void Model::gemvLaunch(std::span<const Mat> ws, DevPtr xin, std::span<const DevP
     // 17..32 tokens (wide batched verify): the two-tile WMMA GEMV where the type has one
     // (weights read once), else 16-token pieces through the multi-token kernels. Either
     // way every token row is computed exactly as the one-token GEMV computes it.
-    const std::size_t t = ti(w.ty);
-    const bool head = w.ptr == output.ptr;
-    if (k.gemvx[t] != nullptr && (!head || envFlag("HEAD_GEMVX", false))) {
+    const ops::MatShape w0 = matShape(w);
+    const bool head_gemvx = w0.head && k.gemvx[ti(w.ty)] != nullptr && envFlag("HEAD_GEMVX", false);
+    const ops::GemvWide wide = ops::chooseGemvWide(w0, ws.size(), k, head_gemvx);
+    if (wide == ops::GemvWide::gemvx) {
         for (std::size_t si = 0; si < ws.size(); ++si) {
             const Mat& wi = ws[si];
-            hip::launch(k.gemvx[t], D((wi.nrows + 15) / 16), D(256), 0, stream, wi.ptr, wi.row_bytes, xq, xd, ys[si], I(wi.ncols), I(wi.nrows),
-                        acc, gate, I(n));
+            hip::launch(k.gemvx[ti(wi.ty)], ops::gemvxGrid(wi.nrows), D(256), 0, stream, wi.ptr, wi.row_bytes, xq, xd, ys[si], I(wi.ncols),
+                        I(wi.nrows), acc, gate, I(n));
         }
         return;
     }
-    if (head && n > max_small_batch && w.ty == GgmlType::q6_k && k.gemvw_head_s != nullptr && ws.size() == 1) {
+    if (wide == ops::GemvWide::head_split) {
         // output head: per range of rows, tokens [0, 16) then [n - 16, n) (rows of the overlap are
         // computed twice, to the same bits); the second pass finds the range's weights in cache
         const u32 V = w.nrows, chunk = head_chunk;
         for (u32 r0 = 0; r0 < V; r0 += chunk) {
             const u32 cr = std::min(chunk, V - r0);
             for (const u32 t0 : {0u, n - max_small_batch}) {
-                hip::launch(k.gemvw_head_s, D((cr + 31) / 32), D(256), 0, stream, w.ptr + static_cast<u64>(r0) * w.row_bytes, w.row_bytes,
+                hip::launch(k.gemvw_head_s, ops::headSplitGrid(cr), D(256), 0, stream, w.ptr + static_cast<u64>(r0) * w.row_bytes, w.row_bytes,
                             xq + static_cast<u64>(t0) * w.ncols, xd + static_cast<u64>(t0) * (w.ncols / 32) * 4,
                             ys[0] + (static_cast<u64>(t0) * V + r0) * 4, I(w.ncols), I(cr), I(V), acc, gate);
             }
@@ -145,32 +142,14 @@ void Model::gemvLaunch(std::span<const Mat> ws, DevPtr xin, std::span<const DevP
     }
 }
 
-// The int8 GEMV launches for n <= 16 tokens of xqp / xdp (already quantized).
+// The int8 GEMV launches for n <= 16 tokens of xqp / xdp (already quantized): ops::chooseGemvTile's plan.
 void Model::gemvKernels(std::span<const Mat> ws, std::span<const DevPtr> ys, u32 n, i32 acc, DevPtr xqp, DevPtr xdp) {
-    const Mat& w = ws[0];
-    const i32 ncols = I(w.ncols);
-    const std::size_t t = ti(w.ty);
-    hip::Function f = n == 1 ? k.gemvq[t] : k.gemvq_nt[n - 2][t];
-    hip::Function fg = n == 1 ? nullptr : k.gemvq_nt_g[n - 2][t];
-    u32 rows_per_block = 8;
-    const std::uint8_t wv = n < 2 ? 0 : (w.ty == GgmlType::q6_k && w.ptr == output.ptr) ? gemv_w_head[n] : gemv_w[t % n_types][n];
-    const hip::Function wf = wv > 0 ? k.gemvw[wv][n - 2][t] : nullptr;
-    if (wf != nullptr) {
-        f = wf;
-        fg = k.gemvw_g[wv][n - 2][t];
-        rows_per_block = gemvw_rows[wv];
-    } else if (n >= 2 && gemv_r[n] > 1) {
-        const hip::Function mr = k.gemvq_mr[gemv_r[n] / 2 - 1][n - 2][t];
-        if (mr != nullptr) {
-            f = mr;
-            fg = k.gemvq_mr_g[gemv_r[n] / 2 - 1][n - 2][t];
-            rows_per_block = 8 * static_cast<u32>(gemv_r[n]);
-        }
-    }
-    // one-token entries always take GvArgs (gv_grp); a multi-token group takes the twin
-    const bool twin = n >= 2 && ws.size() > 1 && fg != nullptr && n <= gvNmax(w.ty);
-    if (twin) f = fg;
-    if ((k.gv_grp && n == 1) || twin) {
+    ops::MatShape sh[3];
+    for (std::size_t si = 0; si < ws.size(); ++si) sh[si] = matShape(ws[si]);
+    const ops::GemvTune tn{&gemv_r, &gemv_w, &gemv_w_head, gv_nmax};
+    const ops::GemvPlan p = ops::chooseGemvTile(sh, ws.size(), n, k, tn);
+    const i32 ncols = I(ws[0].ncols);
+    if (p.grouped) {
         GvArgs g;
         u32 nb = 0;
         for (std::size_t si = 0; si < ws.size(); ++si) {
@@ -181,14 +160,13 @@ void Model::gemvKernels(std::span<const Mat> ws, std::span<const DevPtr> ys, u32
             g.y[si] = ys[si];
             g.rb[si] = wi.row_bytes;
             g.n[si] = I(wi.nrows);
-            nb += (wi.nrows + rows_per_block - 1) / rows_per_block;
+            nb += (wi.nrows + p.rows_per_block - 1) / p.rows_per_block;
         }
-        hip::launch(f, D(nb), D(256), 0, stream, g, xqp, xdp, ncols, acc, gate);
+        hip::launch(p.f, p.grid[0], p.block, 0, stream, g, xqp, xdp, ncols, acc, gate);
     } else {
         for (std::size_t si = 0; si < ws.size(); ++si) {
             const Mat& wi = ws[si];
-            hip::launch(f, D((wi.nrows + rows_per_block - 1) / rows_per_block), D(256), 0, stream, wi.ptr, wi.row_bytes, xqp, xdp, ys[si],
-                        ncols, I(wi.nrows), acc, gate);
+            hip::launch(p.f, p.grid[si], p.block, 0, stream, wi.ptr, wi.row_bytes, xqp, xdp, ys[si], ncols, I(wi.nrows), acc, gate);
         }
     }
 }
@@ -239,15 +217,15 @@ void Model::matmul(const Mat& w, DevPtr xin, DevPtr y, u32 n, bool accumulate) {
         if (prof) prof->matmul_bytes += w.row_bytes * w.nrows;
         mark(head_phase ? OpClass::head : OpClass::matmul);
     };
-    const MatmulPath path = matmulPath(w, n);
-    if (path == MatmulPath::gemvq) {
+    const ops::MatmulPath path = ops::chooseMatmulPath(matShape(w), n, matmulFlags(), k);
+    if (path == ops::MatmulPath::gemvq) {
         const DevPtr yy[1] = {y};
         gemvLaunch(std::span<const Mat>(&w, 1), xin, yy, n, acc);
-    } else if (path == MatmulPath::gemv1) {
+    } else if (path == ops::MatmulPath::gemv1) {
         const u32 rows_per_block = 8;
         hip::launch(k.gemv1[t], D((w.nrows + rows_per_block - 1) / rows_per_block), D(256), 0, stream, w.ptr, w.row_bytes, xin, y, ncols,
                     nrows, ncols, nrows, acc);
-    } else if (path == MatmulPath::float_gemv) {
+    } else if (path == ops::MatmulPath::float_gemv) {
         // f32 / f16 weights, n = 2..gvMax() (16; 17..32 in a wide verify): f32 activations through
         // gemv_<T>_8 / _4 / _1, each token bitwise == the n = 1 gemv_<T>_1 (C-13; the f16 GEMM is
         // not). A code object without the _4 / _8 instances runs the _1 kernel per token.
@@ -261,7 +239,7 @@ void Model::matmul(const Mat& w, DevPtr xin, DevPtr y, u32 n, bool accumulate) {
                         y + static_cast<DevPtr>(t0) * w.nrows * 4, ncols, nrows, ncols, nrows, acc);
             t0 += nt;
         }
-    } else if (path == MatmulPath::gemm_fp8) {
+    } else if (path == ops::MatmulPath::gemm_fp8) {
         // MXFP4 x fp8 (per-token scaled activations, folded block exponents)
         const u32 count = n * w.ncols;
         if (x16_src != xin || x16_count != count || !x16_fp8) {
@@ -372,7 +350,7 @@ void Model::rmsnorm(DevPtr xin, DevPtr w, DevPtr out, u32 n, u32 count, u32 in_s
 Model::ActIn Model::actIn(const Mat& w, u32 n, std::uint8_t cls) const {
     if (prec_dec && n <= gvMax()) return ActIn::f16;
     if (n <= gvMax() && k.gemvq[ti(w.ty)] != nullptr && !float_gemv) return ActIn::gemv;
-    if (n == 1 || floatGemvN(w, n)) return ActIn::f32in;
+    if (n == 1 || ops::floatGemvN(matShape(w), n, gvMax(), k)) return ActIn::f32in;
     if (fp8_prefill && (fp8_mask & cls) != 0 && w.ty == GgmlType::mxfp4 && w.ref != 0 && k.gemm8[0] != nullptr) return ActIn::fp8;
     return ActIn::f16;
 }
@@ -460,26 +438,27 @@ bool Model::gdnIn2(const GdnW& g, u32 n) const {
     return pin && *pin == ActIn::fp8 && bin && *bin == ActIn::f16;
 }
 
-// f32 / f16 weights (no int8 GEMV) at n = 2..gvMax() run the f32-activation GEMV
-// instances, bitwise == n = 1 per token (C-13). gvMax() is what the quantized matrices use for the
-// GEMV family too: 16, or 32 rows in a wide verify (RC-R1: those used to fall to the f16 GEMM,
-// which is not bitwise == n = 1). Only the n = 1 kernel is required (PREFILL-R2): without the
-// multi-token instances the launch loop runs it once per token.
-Model::MatmulPath Model::matmulPath(const Mat& w, u32 n) const {
-    const std::size_t t = ti(w.ty);
-    // precise decode: every small batch (n = 1 too) on the f16 GEMM
-    const bool prec_small = prec_dec && n <= gvMax();
-    if (n <= gvMax() && k.gemvq[t] != nullptr && !float_gemv && !prec_dec) return MatmulPath::gemvq;
-    if (n == 1 && !prec_small) return MatmulPath::gemv1;
-    if (!prec_small && floatGemvN(w, n)) return MatmulPath::float_gemv;
-    if (!prec_small && fp8_prefill && (fp8_mask & mm_class) != 0 && w.ty == GgmlType::mxfp4 && w.ref != 0 && k.gemm8[0] != nullptr)
-        return MatmulPath::gemm_fp8;
-    return MatmulPath::gemm_f16;
+// The matmul path of n rows of w: ops::chooseMatmulPath (K-1; the precise rule lives there). f32 / f16 weights
+// (no int8 GEMV) at n = 2..gvMax() run the f32-activation GEMV instances, bitwise == n = 1 per token (C-13).
+ops::MatShape Model::matShape(const Mat& w) const {
+    ops::MatShape s;
+    s.ty = w.ty;
+    s.nrows = w.nrows;
+    s.ncols = w.ncols;
+    s.has_ref = w.ref != 0;
+    s.head = w.ptr == output.ptr;
+    return s;
 }
 
-bool Model::floatGemvN(const Mat& w, u32 n) const {
-    const std::size_t t = ti(w.ty);
-    return n >= 2 && n <= gvMax() && (w.ty == GgmlType::f32 || w.ty == GgmlType::f16) && k.gemvq[t] == nullptr && k.gemv1[t] != nullptr;
+ops::MatmulFlags Model::matmulFlags() const {
+    ops::MatmulFlags f;
+    f.prec_dec = prec_dec;
+    f.float_gemv = float_gemv;
+    f.fp8_prefill = fp8_prefill;
+    f.fp8_mask = fp8_mask;
+    f.mm_class = mm_class;
+    f.gv_max = gvMax();
+    return f;
 }
 
 // Precise decode: the f16 GEMM choice for n <= gvMax() rows. Every choice computes the

@@ -192,6 +192,7 @@ endif()
 # ---------------------------------------------------------------------------
 # area fragments: each source area has its own cmake/<area>.cmake
 
+include(cmake/ops.cmake)  # kernel choice per op (ARCH-1 K-1..K-5)
 include(cmake/server.cmake OPTIONAL)
 include(cmake/model.cmake OPTIONAL)
 include(cmake/vision.cmake OPTIONAL)  # Phase 3 (vision)

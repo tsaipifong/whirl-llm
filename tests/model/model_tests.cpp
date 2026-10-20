@@ -1404,38 +1404,40 @@ void testLoadEstimate() {
 // RC-R1 / PREFILL-R2: f32 / f16 matrices (no int8 GEMV) at n = 2..gvMax() rows take the multi-token
 // GEMV loop, bitwise == n = 1 per token: up to 16 rows, up to 32 inside a wide verify (small_max 32),
 // and only the n = 1 kernel is required (without gemv_<T>_4 / _8 the loop runs _1 per token).
-// Host-only: Model::matmulPath is the decision matmul() dispatches on (no GPU, no kernels loaded).
+// Host-only: ops::chooseMatmulPath on the Model's matShape / matmulFlags is the decision matmul() dispatches on
+// (no GPU, no kernels loaded; K-1 moved it out of Model).
 void testFloatGemvDispatch() {
-    using MP = q::Model::MatmulPath;
+    using MP = whirl::ops::MatmulPath;
     static int fake_kernel = 0;
     for (const gguf::GgmlType ty : {gguf::GgmlType::f16, gguf::GgmlType::f32}) {
         const std::string tag = ty == gguf::GgmlType::f16 ? " (f16)" : " (f32)";
         const std::size_t t = static_cast<std::size_t>(ty);
         q::Model m;
+        auto path = [&m](const q::Mat& w, std::uint32_t n) { return whirl::ops::chooseMatmulPath(m.matShape(w), n, m.matmulFlags(), m.k); };
         m.k.gemv1[t] = &fake_kernel;  // only the n = 1 instance
         q::Mat w;
         w.ty = ty;
         w.nrows = 64;
         w.ncols = 64;
-        check(m.matmulPath(w, 1) == MP::gemv1, "float dispatch: n = 1 -> gemv1" + tag);
+        check(path(w, 1) == MP::gemv1, "float dispatch: n = 1 -> gemv1" + tag);
         bool all = true;
-        for (std::uint32_t n = 2; n <= 16; ++n) all = all && m.matmulPath(w, n) == MP::float_gemv;
+        for (std::uint32_t n = 2; n <= 16; ++n) all = all && path(w, n) == MP::float_gemv;
         check(all, "float dispatch: n = 2..16 -> GEMV loop with only gemv_1" + tag);
-        check(m.matmulPath(w, 17) == MP::gemm_f16, "float dispatch: n = 17 outside a wide verify -> f16 GEMM" + tag);
+        check(path(w, 17) == MP::gemm_f16, "float dispatch: n = 17 outside a wide verify -> f16 GEMM" + tag);
         m.small_max = 32;  // inside a wide verify / MTP step
         all = true;
-        for (std::uint32_t n = 2; n <= 32; ++n) all = all && m.matmulPath(w, n) == MP::float_gemv;
+        for (std::uint32_t n = 2; n <= 32; ++n) all = all && path(w, n) == MP::float_gemv;
         check(all, "float dispatch: wide verify n = 2..32 -> GEMV loop with only gemv_1 (RC-R1)" + tag);
-        check(m.matmulPath(w, 33) == MP::gemm_f16, "float dispatch: n = 33 -> f16 GEMM" + tag);
+        check(path(w, 33) == MP::gemm_f16, "float dispatch: n = 33 -> f16 GEMM" + tag);
         m.k.gemv4[t] = m.k.gemv8[t] = &fake_kernel;
         all = true;
-        for (std::uint32_t n = 2; n <= 32; ++n) all = all && m.matmulPath(w, n) == MP::float_gemv;
+        for (std::uint32_t n = 2; n <= 32; ++n) all = all && path(w, n) == MP::float_gemv;
         check(all, "float dispatch: wide verify n = 2..32 with gemv_4 / _8 -> GEMV loop" + tag);
         m.prec_dec = true;  // precise decode: every small batch on the f16 GEMM (unchanged by RC-R1)
-        check(m.matmulPath(w, 1) == MP::gemm_f16 && m.matmulPath(w, 20) == MP::gemm_f16, "float dispatch: precise decode -> f16 GEMM" + tag);
+        check(path(w, 1) == MP::gemm_f16 && path(w, 20) == MP::gemm_f16, "float dispatch: precise decode -> f16 GEMM" + tag);
         m.prec_dec = false;
         m.k.gemvq[t] = &fake_kernel;  // a type with the int8 GEMV keeps it
-        check(m.matmulPath(w, 20) == MP::gemvq, "float dispatch: int8 GEMV present -> gemvq" + tag);
+        check(path(w, 20) == MP::gemvq, "float dispatch: int8 GEMV present -> gemvq" + tag);
     }
     // the loop covers every token exactly once whatever instances the code object has
     bool cover = true;
