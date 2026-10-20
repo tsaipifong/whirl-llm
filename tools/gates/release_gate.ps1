@@ -91,7 +91,8 @@ foreach ($m in @($denseKeys) + @("moe")) {
     }
 }
 foreach ($m in @($denseKeys) + @("moe")) {
-    AddStep "golden_$m" $true @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\golden\golden.ps1"), "check", "-Arch", $arch, "-Models", $m, "-Exe", $exe["whirl"], "-GoldenRoot", "@GOLDEN@") `
+    AddStep "golden_$m" $true @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\golden\golden.ps1"), "check", "-Arch", $arch, "-Models", $m, "-Exe", $exe["whirl"], "-GoldenRoot", "@GOLDEN@",
+                         "-ServerExe", $exe["whirl-server"], "-GateExe", $exe["whirl-server-gate"], "-Port", "$($port + 4)") `
         { param($o, $c) $c -eq 0 -and ($o -match "golden check $arch`: ok") } @{ WHIRL_GOLDEN_SWIFT = $SW; WHIRL_GOLDEN_DENSE = $Q; WHIRL_GOLDEN_MOE = $MX }
 }
 $seqSet = @(foreach ($m in $denseKeys) { foreach ($mode in "precise", "balance", "fast") { ,@($m, $mode) } }) + @(,@("moe", "precise")) + @(,@("moe", "balance"))

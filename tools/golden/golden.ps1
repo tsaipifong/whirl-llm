@@ -21,14 +21,19 @@
 # is an error (exit 2); a step line is a "G" line other than G model / G header / G info. record writes the
 # references and models.txt only when every case ran. CPU self-test: tools/golden/golden_selftest.ps1. The runner clears every WHIRL_* environment variable (a stray WHIRL_HIP_DEVICE
 # or WHIRL_MODE would change what is measured; --device selects the GPU) and restores them on exit.
-# Suites: single, pair, ngram (forced n-gram MTP drafts on a copy-the-text prompt); all three are the
-# default for both architectures. server (ARCH-1): the server paths through whirl-server-gate --suite golden
+# Suites: single, pair, ngram (forced n-gram MTP drafts on a copy-the-text prompt) and server; all four are the
+# default for both architectures (server only for the product models swift / moe: the optional Q4_K_M dense
+# model has no server references; -Suites ...,server asks for it). server (ARCH-1): the server paths through
+# whirl-server-gate --suite golden
 # (whirl-server.exe on the engine schedule: prefill, streaming, prefix cache, RAM restore, SSD restore after a
 # restart, and in precise a no-prefix-cache server + two concurrent requests, all cross-checked in the gate);
 # -ServerExe / -GateExe (default build\Release\whirl-server.exe / whirl-server-gate.exe of this checkout). Vision
-# joins when WHIRL_GOLDEN_MMPROJ_<MODEL> (e.g. WHIRL_GOLDEN_MMPROJ_SWIFT) and WHIRL_GOLDEN_IMAGES (folder with
-# shapes.png) are set; record and check must agree on that. server is opt-in (-Suites single,pair,ngram,server)
-# until its references are recorded on both GPUs (after 0.2.2; see progress/arch1.HANDOFF.md).
+# (one image request, tests/golden/images/shapes.png) is part of the server case: the mmproj is
+# WHIRL_GOLDEN_MMPROJ_<MODEL> (e.g. WHIRL_GOLDEN_MMPROJ_SWIFT), else the mmproj-*.gguf next to the default
+# swift / moe model file (dense: none, no vision case); the image folder WHIRL_GOLDEN_IMAGES, else
+# tests/golden/images. A configured mmproj that is missing is an error for suite server (the references hold
+# the srv.vis lines). References recorded 2026-10-20 on both GPUs with the
+# v0.2.2 exes (progress/arch2.decisions.tsv).
 # Every check / record prints the SHA-256 of the executables and of the reference set it compares against
 # ("golden: reference set <arch> sha256 ..."): the hash over the sorted relative paths and bytes of the selected
 # reference files plus models.txt; refhash prints it without running anything (release_check can derive it).
@@ -68,9 +73,12 @@ if ($Action -notin @("xcheck", "refhash") -and -not (Test-Path $Exe)) { Write-Ho
 $Models = @($Models | ForEach-Object { $_ -split "," } | Where-Object { $_ })
 $Modes = @($Modes | ForEach-Object { $_ -split "," } | Where-Object { $_ })
 $Suites = @($Suites | ForEach-Object { $_ -split "," } | Where-Object { $_ })
-if ($Suites.Count -eq 0 -and -not $PSBoundParameters.ContainsKey("Suites")) {
-    $Suites = @("single", "pair", "ngram")
+$defaultSuites = $Suites.Count -eq 0 -and -not $PSBoundParameters.ContainsKey("Suites")
+if ($defaultSuites) {
+    $Suites = @("single", "pair", "ngram", "server")
 }
+# default suites: no server case for the optional Q4_K_M dense model (no server references; product models only)
+function SkipCase([string]$mk, [string]$su) { return $defaultSuites -and $mk -eq "dense" -and $su -eq "server" }
 if ($Models.Count -eq 0 -or $Modes.Count -eq 0 -or $Suites.Count -eq 0) {
     Write-Host "golden: empty model / mode / suite list (models=$($Models.Count) modes=$($Modes.Count) suites=$($Suites.Count)): nothing would be checked"
     exit 2
@@ -93,7 +101,7 @@ if ($Impact) {
     Write-Host "golden: impact map for '$Impact' on $Arch`: models $($Models -join ','), suites $($Suites -join ',')"
 }
 foreach ($s in $Suites) { if ($s -notin @("single", "pair", "ngram", "server")) { Write-Host "golden: unknown suite '$s'"; exit 2 } }
-if ($Action -in @("check", "record") -and $Suites -contains "server") {
+if ($Action -in @("check", "record") -and @($Models | Where-Object { -not (SkipCase $_ "server") }).Count -gt 0 -and $Suites -contains "server") {
     foreach ($x in @($ServerExe, $GateExe)) { if (-not (Test-Path $x)) { Write-Host "golden: suite server needs $x (build first or pass -ServerExe / -GateExe)"; exit 2 } }
 }
 
@@ -104,12 +112,17 @@ $modelPath = @{
     moe   = if ($env:WHIRL_GOLDEN_MOE) { $env:WHIRL_GOLDEN_MOE } else { Join-Path $lms "ornith-ai\Ornith-1.5-35B-A3B-MXFP4\Ornith-1.5-35B-A3B-MXFP4.gguf" }
 }
 # suite server, vision (optional): mmproj per model + the image folder (read before the WHIRL_* variables are cleared)
-$mmprojPath = @{ dense = $env:WHIRL_GOLDEN_MMPROJ_DENSE; swift = $env:WHIRL_GOLDEN_MMPROJ_SWIFT; moe = $env:WHIRL_GOLDEN_MMPROJ_MOE }
-$goldImages = $env:WHIRL_GOLDEN_IMAGES
+$mmprojPath = @{
+    dense = $env:WHIRL_GOLDEN_MMPROJ_DENSE
+    swift = if ($env:WHIRL_GOLDEN_MMPROJ_SWIFT) { $env:WHIRL_GOLDEN_MMPROJ_SWIFT } else { Join-Path $lms "ukisai\Swift-1.5-Qwen3.8-27b-MXFP4\mmproj-Swift-1.5-Qwen3.8-27B-F16.gguf" }
+    moe   = if ($env:WHIRL_GOLDEN_MMPROJ_MOE) { $env:WHIRL_GOLDEN_MMPROJ_MOE } else { Join-Path $lms "ornith-ai\Ornith-1.5-35B-A3B-MXFP4\mmproj-Ornith-1.5-35B-A3B-F16.gguf" }
+}
+$goldImages = if ($env:WHIRL_GOLDEN_IMAGES) { $env:WHIRL_GOLDEN_IMAGES } else { Join-Path $root "tests\golden\images" }
 # SHA-256 over the selected reference files (sorted relative path + bytes) and models.txt
-function RefSetHash([string]$groot, [string]$arch, [string[]]$models, [string[]]$modes, [string[]]$suites) {
+function RefSetHash([string]$groot, [string]$arch, [string[]]$models, [string[]]$modes, [string[]]$suites, [bool]$all = $false) {
     $files = @()
     foreach ($mk in $models) { foreach ($md in $modes) { foreach ($su in $suites) {
+        if (-not $all -and (SkipCase $mk $su)) { continue }
         $f = Join-Path $groot "$arch\$mk\${md}_$su.txt"
         if (Test-Path $f) { $files += (Resolve-Path $f).Path }
     } } }
@@ -282,7 +295,7 @@ function CrossCheck([string]$suite, [string]$mode, [string[]]$l) {
     return ,$bad
 }
 $rs = RefSetHash $GoldenRoot $Arch $Models $Modes $Suites
-$rsAll = RefSetHash $GoldenRoot $Arch @("dense", "swift", "moe") @("precise", "balance", "fast") @("single", "pair", "ngram", "server")
+$rsAll = RefSetHash $GoldenRoot $Arch @("dense", "swift", "moe") @("precise", "balance", "fast") @("single", "pair", "ngram", "server") $true
 if ($Action -eq "refhash") {
     Write-Host "golden: reference set $Arch sha256 $($rs.hash) ($($rs.n) files: models $($Models -join ','), modes $($Modes -join ','), suites $($Suites -join ','))"
     Write-Host "golden: reference set $Arch (all files) sha256 $($rsAll.hash) ($($rsAll.n) files)"
@@ -292,6 +305,7 @@ if ($Action -eq "refhash") {
 if ($Action -eq "xcheck") {
     $nf = 0; $nx = 0
     foreach ($mk in $Models) { foreach ($mode in $Modes) { foreach ($suite in $Suites) {
+        if (SkipCase $mk $suite) { continue }
         $gold = Join-Path $goldDir "$mk\${mode}_$suite.txt"
         if (-not (Test-Path $gold)) { Write-Host "MISS  $mk/${mode}_$suite ($gold)"; $nx++; continue }
         $nf++
@@ -329,6 +343,7 @@ foreach ($mk in $Models) {
     }
     foreach ($mode in $Modes) {
         foreach ($suite in $Suites) {
+            if (SkipCase $mk $suite) { continue }
             $name = "$mk/${mode}_$suite"
             $ts = Get-Date
             if ($suite -eq "server") {
@@ -337,7 +352,14 @@ foreach ($mk in $Models) {
                 $gargs = @("--exe", $ServerExe, "--kind", "whirl", "--model", $mp, "--suite", "golden", "--port", "$Port",
                            "--work", $gw, "--kv", "auto", "--server-env", "WHIRL_MODE=$mode")
                 if ($Arch -eq "gfx1151") { $gargs += @("--server-env", "WHIRL_DEVICE=8060s", "--server-env", "WHIRL_KV_RAM_MB=8192") }
-                if ($mmprojPath[$mk] -and $goldImages) { $gargs += @("--mmproj", $mmprojPath[$mk], "--images", $goldImages) }
+                if ($mmprojPath[$mk]) {
+                    if (-not ((Test-Path $mmprojPath[$mk]) -and (Test-Path (Join-Path $goldImages "shapes.png")))) {
+                        Write-Host "FAIL  $name suite server needs the mmproj ($($mmprojPath[$mk])) and $goldImages\shapes.png (vision case)"
+                        $err++
+                        continue
+                    }
+                    $gargs += @("--mmproj", $mmprojPath[$mk], "--images", $goldImages)
+                }
                 $raw = & $GateExe @gargs 2>&1 | ForEach-Object { "$_" }
                 $rc = $LASTEXITCODE
                 if ($rc -eq 0 -and -not ($raw -match "\(ALL PASS\)")) { $rc = 9 }

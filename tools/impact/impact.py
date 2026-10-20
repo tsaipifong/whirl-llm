@@ -274,6 +274,8 @@ def build_report(m, paths, models, archs, tests, reruns, notes, hits):
     not_in_gate = []
     for s in suites:
         hit = [st for st, d in m["release_srv_steps"].items() if s in d["suites"]]
+        if s == "golden":  # suite server of golden.ps1 (default suites, ARCH2): run by the golden_<model> steps
+            hit += [f"golden_{'swift' if md == 'dense' else 'moe'}" for md in models]
         steps |= set(hit)
         if not hit:
             not_in_gate.append(s)
