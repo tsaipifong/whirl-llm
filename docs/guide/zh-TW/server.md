@@ -41,6 +41,7 @@ Base URL 為 `http://127.0.0.1:8080/v1`；接受任何 API key。模型只載入
 | 變數 | 效果 |
 |---|---|
 | `WHIRL_KV=auto\|f16\|q8\|q8h\|q8v` | KV 格式；`auto` 套用下限規則（[kv-and-caching.md](kv-and-caching.md#kv-auto)） |
+| `WHIRL_HIP_CACHE_LIMIT=0` | 保留 HIP runtime 自己對已釋放 GPU 記憶體的快取（最多 VRAM 的 1/8）。預設 whirl-server 會替自己的行程設 `GPU_RESOURCE_CACHE_SIZE=256`（MiB；你自己設了就不動），讓它釋放的記憶體（縮小重配的 KV 池、閒置後卸下的視覺編碼器）真的還給 Windows（0.2.2.2） |
 | `WHIRL_GOVERNOR=0` | 關閉執行中的記憶體調節（0.2.2.2：伺服器執行中 WDDM 預算下降時，釋放快取、讓新請求排隊，並在所有 slot 閒置時以較小的大小重新配置 KV 池；[說明](#vram-log)） |
 | `WHIRL_POOL_BUDGET_MARGIN_MB` | 在 WDDM 預算之下替其他程式成長留的空間（預設取 2 GiB（GPU 接螢幕時 3 GiB）與預算 6% 的較大者；其他程式的 VRAM 中預算還沒反映的部分另外保留；[說明](#vram-log)） |
 | `WHIRL_POOL_RESERVE_MB` | 舊的「只看可用 VRAM」規則：池之後保留的 VRAM，不套用 WDDM 預算（可用 VRAM 之下的預設保留量 dense 768 / MoE 1536） |
@@ -334,7 +335,8 @@ I batch | slots busy 0/4 (decode 0, prefill 0) | 80 cycles, 3.79 slots/cycle, 11
   3. 較小的 KV 池在等執行中的請求結束時，新請求先排隊；
   4. 較小的池放不下時，降低新請求的 context（執行中的請求維持原本的值）；
   5. 所有 slot 閒置時立刻以較小的大小重新配置 KV 池（`KV pool re-allocated A -> B tokens ... in N ms`），
-     這一步才真正把 VRAM 還給 Windows。執行中請求的 KV 絕不搬動，所以預算下降時正在跑的請求會一直
+     這一步才真正把 VRAM 還給 Windows（為此 whirl-server 把 HIP runtime 對已釋放記憶體的快取限制在
+     256 MiB，見 `WHIRL_HIP_CACHE_LIMIT`）。執行中請求的 KV 絕不搬動，所以預算下降時正在跑的請求會一直
      較慢，直到它結束；
   6. 最後，若仍超過預算，才印出下面的 `GPU memory spill` 警告。
   預算之下剩餘超過 margin 的 1.5 倍並持續 30 秒、且距離上次下降至少 60 秒（預算反覆上下時加倍，最多

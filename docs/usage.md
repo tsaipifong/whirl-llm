@@ -563,6 +563,7 @@ The output always equals plain greedy decoding (with sampling: the same distribu
 | `WHIRL_SYS_CKPTS=N` | shared prefix checkpoints kept in VRAM (default 2) |
 | `WHIRL_SYS_LCP=0` | no checkpoints at prefixes common to sessions |
 | `WHIRL_CKPT_HOST=1` | keep prefix checkpoints in pinned host memory instead of VRAM |
+| `WHIRL_HIP_CACHE_LIMIT=0` | keep the HIP runtime's own cache of freed GPU memory (up to 1/8 of the VRAM). By default whirl-server sets `GPU_RESOURCE_CACHE_SIZE=256` (MiB) for its process, unless you set it, so memory it frees (a KV pool re-allocated smaller, the vision encoder after its idle time) goes back to Windows (0.2.2.2) |
 | `WHIRL_GOVERNOR=0` | turns the server's runtime memory governor off (0.2.2.2): when the WDDM budget drops while the server runs, it frees cache, queues new requests and re-allocates the KV pool smaller when every slot is idle, and grows it back when the budget recovers (server guide, section 7) |
 | `WHIRL_POOL_BUDGET_MARGIN_MB=N` | room kept free under the Windows (WDDM) video memory budget for other programs to grow, when the KV pool is sized and re-checked. Default: the larger of 2048 MiB (3072 when a monitor is attached to the GPU) and 6% of the budget. Other programs' VRAM at startup that the budget does not show yet is kept free on top |
 | `WHIRL_POOL_RESERVE_MB=N` | old free-VRAM-only rule: VRAM left free when the KV pool is sized, with the WDDM budget, its margin and the pool re-check turned off (default reserve 768, MoE 1536). To keep more room for other programs, use `WHIRL_POOL_BUDGET_MARGIN_MB` |

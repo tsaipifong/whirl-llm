@@ -23,6 +23,12 @@ All notable changes to WHIRL are listed here. Versions follow `project(whirl VER
   finishes. `GET /health` and `GET /props` show the effective values in a `governor` object; `/props` `n_ctx` is the
   context for new requests. Output is unchanged: only how many tokens the pool holds changes. Not on the Radeon 8060S
   (its pool is a fixed carve-out) and not with `WHIRL_POOL_RESERVE_MB`; `WHIRL_GOVERNOR=0` turns it off.
+  Part of the fix: the HIP runtime keeps freed GPU memory below 1/8 of the VRAM (4 GiB on the R9700) in a cache for
+  reuse instead of giving it back to Windows, so a smaller KV pool still counted most of the old one (R9700, Ornith:
+  1.7 GiB of a 4 GiB shrink stayed counted against the budget and decode stayed at 57 tok/s). whirl-server now sets
+  `GPU_RESOURCE_CACHE_SIZE=256` (MiB) for its own process unless you set it (`WHIRL_HIP_CACHE_LIMIT=0` keeps the runtime
+  default); a 3.9 GiB shrink then lowered WHIRL's VRAM by 3.9 GiB. Because memory freed while loading now goes back too,
+  the default KV pool on the R9700 is about 3% larger (Swift-1.5 27B, `--parallel 1`: 329728 -> 340480 tokens).
   GOV_RESULTS_PLACEHOLDER
 - Server: the RAM tier cap of 0.2.2.1 ran after the half-of-available-RAM rule, so asking for more could give less
   (R9700, 47348 MiB available: `--kv-ram-mb 22528` -> 20480 MiB, `--kv-ram-mb 24064` -> 16384 MiB). The 20480 MiB cap

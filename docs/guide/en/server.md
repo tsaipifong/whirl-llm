@@ -43,6 +43,7 @@ Useful environment variables (all of them: [usage.md](../../usage.md#env)):
 | Variable | Effect |
 |---|---|
 | `WHIRL_KV=auto\|f16\|q8\|q8h\|q8v` | KV format; `auto` applies the floor rule ([kv-and-caching.md](kv-and-caching.md#kv-auto)) |
+| `WHIRL_HIP_CACHE_LIMIT=0` | keep the HIP runtime's own cache of freed GPU memory (up to 1/8 of the VRAM). By default whirl-server sets `GPU_RESOURCE_CACHE_SIZE=256` (MiB) for its process, unless you set it, so memory it frees (a KV pool re-allocated smaller, the vision encoder after its idle time) goes back to Windows (0.2.2.2) |
 | `WHIRL_GOVERNOR=0` | turns the runtime memory governor off (0.2.2.2: when the WDDM budget drops while the server runs, it frees cache, queues new requests and re-allocates the KV pool smaller when every slot is idle; [details](#vram-log)) |
 | `WHIRL_POOL_BUDGET_MARGIN_MB` | room kept free under the WDDM budget for other programs to grow (default: the larger of 2 GiB, 3 GiB with a monitor on the GPU, and 6% of the budget; other programs' VRAM that the budget does not show yet is kept free on top; [details](#vram-log)) |
 | `WHIRL_POOL_RESERVE_MB` | old free-VRAM-only rule: VRAM reserve after the pool, WDDM budget not applied (default reserve 768 dense / 1536 MoE under the free VRAM) |
@@ -387,7 +388,8 @@ the Windows (WDDM) video memory budget, and these lines show whether it still do
   3. queues new requests while a smaller KV pool waits for the running requests to finish;
   4. lowers the context for new requests if the smaller pool holds less (running requests keep theirs);
   5. re-allocates the KV pool smaller as soon as every slot is idle (`KV pool re-allocated A -> B tokens
-     ... in N ms`): this is what gives the VRAM back to Windows. A running request's KV is never moved,
+     ... in N ms`): this is what gives the VRAM back to Windows (whirl-server limits the HIP runtime's cache of
+     freed memory to 256 MiB for this, see `WHIRL_HIP_CACHE_LIMIT`). A running request's KV is never moved,
      so a request that was running when the budget dropped stays slower until it finishes;
   6. only then the `GPU memory spill` warning below, if WHIRL is still over the budget.
   When more than 1.5 times the margin has been free for 30 s, and at least 60 s after the last drop
