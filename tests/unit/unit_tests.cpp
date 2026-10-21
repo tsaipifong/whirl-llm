@@ -2587,6 +2587,87 @@ void testMemGovernor() {
     }
 }
 
+// REVIEW-GOV-2 C-1: a grow that costs more than expected (R9700 Swift R2b_nolim1 19:14:48: WHIRL 25.87 -> 32.50 GiB with
+// the budget at 31.02 GiB, the HIP resource cache kept the freed pool) leaves WHIRL over the budget. The governor must not
+// report the end of the episode ("back to the startup settings") while the measured usage is over the budget, and must act
+// on it at once instead of trusting the expected usage for trust_s (120 s: the next episode started 115 s later).
+// Written from the review's description, before the fix.
+void testMemGovernorGrowOvershoot() {
+    using namespace whirl::memgov;
+    constexpr std::uint64_t MiB = 1ull << 20, GiB = 1ull << 30;
+    Config r;
+    r.per_tok = 22528;
+    r.page = 256;
+    r.pool_start = 393984;
+    r.pool_min = 4096;
+    r.ctx = 393984;
+    const std::uint64_t Mr = 2068 * MiB, Br = 31764 * MiB, Lr0 = Br - Mr;
+    auto usage = [&](std::uint32_t pool) { return Lr0 - static_cast<std::uint64_t>(393984 - pool) * 22528; };
+    auto inr = [&](double t, std::uint64_t local, std::uint64_t budget, std::uint32_t pool) {
+        Input x;
+        x.now_s = t;
+        x.local = local;
+        x.budget = budget;
+        x.margin = Mr;
+        x.pool = pool;
+        x.all_idle = true;
+        return x;
+    };
+    // overshoot: what the grow costs above the expected usage, kept until the next re-allocation
+    auto run = [&](std::uint64_t overshoot, double& t_grow, double& t_act, double& t_bad_end, std::uint64_t& measured_after) {
+        Governor g(r);
+        std::uint32_t pool = 393984;
+        bool grown = false;
+        t_grow = t_act = t_bad_end = -1;
+        measured_after = 0;
+        for (double t = 0; t < 1200; t += 5) {
+            const std::uint64_t b = t < 300 ? Br - 4 * GiB : Br;
+            const std::uint64_t measured = usage(pool) + (grown ? overshoot : 0);
+            const Plan p = g.tick(inr(t, measured, b, pool));
+            if (grown) {
+                if (p.episode_end && measured > b && t_bad_end < 0) t_bad_end = t;
+                if ((p.free_cache || p.shrink || p.episode_start) && t_act < 0) t_act = t;
+                if (t_act >= 0) break;
+            }
+            if (p.pool_target) {
+                const std::uint32_t np = *p.pool_target;
+                g.resized(np, np > pool, t, usage(np));
+                if (np > pool && !grown) {
+                    grown = true;
+                    t_grow = t;
+                    measured_after = usage(np) + overshoot;
+                }
+                pool = np;
+            }
+        }
+    };
+    // the measured R2b_nolim1 case: after the grow WHIRL is 1.48 GiB over the budget
+    {
+        const std::uint64_t over = Mr + 1515 * MiB;  // expected leaves the margin free; measured = budget + 1.48 GiB
+        double t_grow, t_act, t_bad_end;
+        std::uint64_t m;
+        run(over, t_grow, t_act, t_bad_end, m);
+        std::printf("C-1 overshoot: grow at t=%.0f, measured after it %.2f GiB vs budget %.2f GiB; episode_end while over the "
+                    "budget at t=%.0f; first action after the grow at t=%.0f (%.0f s after it)\n",
+                    t_grow, m / double(GiB), Br / double(GiB), t_bad_end, t_act, t_act >= 0 ? t_act - t_grow : -1.0);
+        CHECK(t_grow > 0);
+        CHECK(m > Br);
+        CHECK(t_bad_end < 0);                                   // no "back to the startup settings" while over the budget
+        CHECK(t_act > 0 && t_act - t_grow <= r.settle_s + 10);  // acted on within the next samples, not after trust_s
+    }
+    // control: a grow whose reading stays under the budget (counters catching up) is not acted on within trust_s
+    {
+        const std::uint64_t over = Mr - 300 * MiB;  // measured 300 MiB under the budget
+        double t_grow, t_act, t_bad_end;
+        std::uint64_t m;
+        run(over, t_grow, t_act, t_bad_end, m);
+        CHECK(t_grow > 0);
+        CHECK(m < Br);
+        CHECK(t_bad_end < 0);
+        CHECK(t_act < 0 || t_act - t_grow >= r.trust_s - 5);  // not shrunk back while the counters may lag
+    }
+}
+
 // v0.2.2.1 startup fit of explicit settings (owner 2026-10-21: adjust, log, refuse only below the minimum)
 void testStartupFit() {
     using namespace whirl;
@@ -2798,6 +2879,7 @@ int main() {
     testPoolMargin();
     testStartupFit();
     testMemGovernor();
+    testMemGovernorGrowOvershoot();
     std::printf("unit tests: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }
