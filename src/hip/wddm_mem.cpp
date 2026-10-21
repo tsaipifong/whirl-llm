@@ -151,6 +151,20 @@ GpuPinned gpuPinnedNow() {
         }
     }
     PdhCloseQuery(q);
+    IDXGIFactory1* fac = nullptr;
+    if (SUCCEEDED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&fac))) && fac) {
+        for (UINT i = 0;; ++i) {
+            IDXGIAdapter1* ad = nullptr;
+            if (fac->EnumAdapters1(i, &ad) == DXGI_ERROR_NOT_FOUND || !ad) break;
+            DXGI_ADAPTER_DESC1 d{};
+            if (SUCCEEDED(ad->GetDesc1(&d)) && !(d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE))
+                r.shared_system = std::max<std::uint64_t>(r.shared_system, d.SharedSystemMemory);
+            ad->Release();
+        }
+        fac->Release();
+    }
+    int n = 0;
+    if (hipGetDeviceCount(&n) == hipSuccess && n > 0) r.hip_devices = n;
 #endif
     return r;
 }

@@ -2307,33 +2307,52 @@ void testStartupFit() {
     CHECK(!startfit::ramTierFit(12288, 48 * GiB, 16384, true).has_value());
     CHECK(!startfit::ramTierFit(20480, 48 * GiB, 16384, true).has_value());
     CHECK(!startfit::ramTierFit(24064, 49247 * MiB, 16384, true).has_value());  // nothing known about pinned memory: kept
-    // kvram719 repro (the R9700 test PC): 65175 MiB RAM -> GPU-pinned limit 32587 MiB; another WHIRL server on the
-    // 8060S had ~10.9 GiB pinned (PDH Shared Usage, also shown on the R9700 adapter) + this server's 1288 MiB embedding.
-    // --kv-ram-mb 24064 crossed the limit (hipError 719 on the first request); 20480 crossed it too (v0.2.2, 10:41).
+    // kvram719 repro (the R9700 test PC: 65175 MiB RAM, non-local budget 48026 MiB, R9700 + 8060S both HIP GPUs)
     {
-        const std::uint64_t total = 65175 * MiB, pinned = (10890 + 1288) * MiB;
-        const std::uint64_t room = startfit::pinnedRoomMb(total, pinned);
-        CHECK_EQ(room, 17920ull);  // 32587 - 12178 - 2048 = 18361 -> whole 512 MiB
-        const auto r = startfit::ramTierFit(24064, 47 * GiB, 16384, true, room);
-        CHECK(r.has_value() && r->mb == 17920ull && r->pinned && !r->half);
-        const auto r2 = startfit::ramTierFit(20480, 47 * GiB, 16384, true, room);
-        CHECK(r2.has_value() && r2->mb == 17920ull && r2->pinned);
-        CHECK(r->mb * MiB + pinned <= total / 2);  // the tier plus what is pinned stays under the limit
+        startfit::PinnedState s;
+        s.total_phys = 65175 * MiB;
+        s.nonlocal_budget = 48026 * MiB;
+        s.hip_devices = 2;
+        s.own_nonlocal = 1288 * MiB;  // the embedding
+        s.pinned_max = 1288 * MiB;    // nobody else
+        // per process: 24013 - 1288 - 2048 = 20677 -> 20480; machine: 32587 - 1288 - 6144 = 25155
+        CHECK_EQ(startfit::pinnedRoomMb(s), 20480ull);
+        // D6: --kv-ram-mb 24064 failed (hipError 719) -> lowered; D7: 20480 worked -> kept
+        const auto r = startfit::ramTierFit(24064, 55 * GiB, 16384, true, startfit::pinnedRoomMb(s));
+        CHECK(r.has_value() && r->mb == 20480ull && r->pinned && !r->half);
+        CHECK(!startfit::ramTierFit(20480, 55 * GiB, 16384, true, startfit::pinnedRoomMb(s)).has_value());
+        // 10:41: another WHIRL server had 10890 MiB pinned: v0.2.2 --kv-ram-mb 20480 failed -> lowered now
+        s.pinned_max = (10890 + 1288) * MiB;
+        CHECK_EQ(startfit::pinnedRoomMb(s), 13824ull);  // 32587 - 12178 - 6144 = 14265 -> 13824
+        // 11:06: 8610 MiB by others, the default 16384 MiB tier worked (17672 + 8610 under the limit): kept
+        s.pinned_max = (8610 + 1288) * MiB;
+        CHECK_EQ(startfit::pinnedRoomMb(s), 16384ull);  // 32587 - 9898 - 6144 = 16545 -> 16384
+        // probe 11:03: 20480 MiB with 8648 MiB by others failed: lowered
+        CHECK(startfit::pinnedRoomMb(s) < 20480ull);
     }
-    // nothing else pinned: 24064 fits on the same PC (only the embedding): kept
+    // one GPU, 128 GB PC (non-local budget about half the RAM): the automatic 32 GiB tier fits: no fixed cap any more
     {
-        const std::uint64_t room = startfit::pinnedRoomMb(65175 * MiB, 1288 * MiB);
-        CHECK_EQ(room, 29184ull);  // 32587 - 1288 - 2048 = 29251 -> 29184
-        CHECK(!startfit::ramTierFit(24064, 55 * GiB, 16384, true, room).has_value());
+        startfit::PinnedState s;
+        s.total_phys = 128 * GiB;
+        s.nonlocal_budget = 63 * GiB;
+        s.own_nonlocal = s.pinned_max = 1288 * MiB;
+        CHECK(!startfit::ramTierFit(32768, 100 * GiB, 32768, false, startfit::pinnedRoomMb(s)).has_value());
     }
-    // a 128 GB PC: the automatic 32 GiB tier (1/4 rule cap) fits under its 64 GiB limit: no fixed cap any more
-    CHECK(!startfit::ramTierFit(32768, 100 * GiB, 32768, false, startfit::pinnedRoomMb(128 * GiB, 1288 * MiB)).has_value());
-    // 64 GB PC with 30 GiB pinned by other programs: room 0 -> the tier is off rather than crashing
+    // everything used by other programs: room 0 -> the tier is off rather than crashing
     {
-        const auto r = startfit::ramTierFit(16384, 30 * GiB, 16384, false, startfit::pinnedRoomMb(64 * GiB, 30 * GiB));
+        startfit::PinnedState s;
+        s.total_phys = 64 * GiB;
+        s.pinned_max = 30 * GiB;
+        const auto r = startfit::ramTierFit(16384, 30 * GiB, 16384, false, startfit::pinnedRoomMb(s));
         CHECK(r.has_value() && r->mb == 0ull && r->pinned);
     }
-    CHECK_EQ(startfit::pinnedRoomMb(0, 0), startfit::pinned_room_unknown);  // RAM unknown
+    CHECK_EQ(startfit::pinnedRoomMb(startfit::PinnedState{}), startfit::pinned_room_unknown);  // nothing known
+    {
+        startfit::PinnedState s;  // budget only, hip_devices 0 counts as 1: 48026 - 2048 = 45978 -> 45568
+        s.nonlocal_budget = 48026 * MiB;
+        s.hip_devices = 0;
+        CHECK_EQ(startfit::pinnedRoomMb(s), 45568ull);
+    }
     // more than half of the available RAM: the default size (16 GiB here), not half
     {
         const auto r = startfit::ramTierFit(65536, 48955 * MiB, 16384, true);

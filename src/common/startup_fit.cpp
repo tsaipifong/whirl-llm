@@ -8,11 +8,16 @@
 
 namespace whirl::startfit {
 
-std::uint64_t pinnedRoomMb(std::uint64_t total_phys_bytes, std::uint64_t pinned_now_bytes) {
-    if (total_phys_bytes == 0) return pinned_room_unknown;
-    const std::uint64_t limit_mb = (total_phys_bytes / 2) >> 20;
-    const std::uint64_t used_mb = ((pinned_now_bytes + (1ull << 20) - 1) >> 20) + pinned_reserve_mb;
-    return limit_mb > used_mb ? (limit_mb - used_mb) / 512 * 512 : 0;
+std::uint64_t pinnedRoomMb(const PinnedState& s) {
+    constexpr std::uint64_t MiB = 1ull << 20;
+    std::uint64_t room = pinned_room_unknown;
+    const auto take = [&](std::uint64_t limit_b, std::uint64_t used_b, std::uint64_t reserve_mb) {
+        const std::uint64_t free_mb = limit_b > used_b ? (limit_b - used_b) / MiB : 0;
+        room = std::min(room, free_mb > reserve_mb ? (free_mb - reserve_mb) / 512 * 512 : 0);
+    };
+    if (s.nonlocal_budget > 0) take(s.nonlocal_budget / static_cast<std::uint64_t>(std::max(s.hip_devices, 1)), s.own_nonlocal, pinned_reserve_mb);
+    if (s.total_phys > 0) take(s.total_phys / 2, s.pinned_max, pinned_machine_reserve_mb);
+    return room;
 }
 
 std::optional<RamFit> ramTierFit(std::uint64_t mb, std::uint64_t avail_phys_bytes, std::uint64_t auto_mb, bool explicit_size,

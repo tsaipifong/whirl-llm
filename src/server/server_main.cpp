@@ -1252,14 +1252,23 @@ int serveMain(int argc, char** argv, const char* program) {
             a.explicit_mb.reset();
             return tier::ramTierSize(a).mb;
         }();
-        // kvram719: GPU-pinned memory of all processes now (this one's embedding included) against the Windows limit
+        // kvram719: pinned memory against the two Windows limits (this process: non-local budget / HIP GPUs; the
+        // machine: half of the RAM, all programs), measured now (this process's embedding included)
         const hip::GpuPinned gp = hip::gpuPinnedNow();
-        const std::uint64_t pinned_room = gp.ok ? startfit::pinnedRoomMb(rin.total_phys, gp.max_shared) : startfit::pinned_room_unknown;
-        if (gp.ok && kv_ram_mb > 0 && n_ck > 0 && !no_pc)
-            logI("kv tier: GPU-pinned system memory now {} MiB (largest of {} adapter(s), all processes); limit ~{} MiB (half of the "
-                 "RAM), room for the RAM tier {} MiB (after a {} MiB reserve)",
-                 gp.max_shared >> 20, gp.adapters, rin.total_phys >> 21, pinned_room == startfit::pinned_room_unknown ? 0 : pinned_room,
-                 startfit::pinned_reserve_mb);
+        const hip::WddmMemInfo wm = hip::wddmMemInfo();
+        startfit::PinnedState pst;
+        pst.total_phys = rin.total_phys;
+        pst.pinned_max = gp.ok ? gp.max_shared : 0;
+        pst.nonlocal_budget = wm.ok ? wm.nonlocal_budget : 0;
+        pst.own_nonlocal = wm.ok ? wm.nonlocal_usage : 0;
+        pst.hip_devices = gp.hip_devices;
+        const std::uint64_t pinned_room = startfit::pinnedRoomMb(pst);
+        if (kv_ram_mb > 0 && n_ck > 0 && !no_pc)
+            logI("kv tier: pinned memory now: this process {} MiB of the {} MiB non-local budget / {} HIP GPU(s); all programs {} MiB "
+                 "(largest adapter) of half the RAM ({} MiB) -> room for the RAM tier {} MiB (reserves {} / {} MiB)",
+                 pst.own_nonlocal >> 20, pst.nonlocal_budget >> 20, pst.hip_devices, pst.pinned_max >> 20, pst.total_phys >> 21,
+                 pinned_room == startfit::pinned_room_unknown ? std::string("unknown") : std::to_string(pinned_room),
+                 startfit::pinned_reserve_mb, startfit::pinned_machine_reserve_mb);
         if (const auto rf = startfit::ramTierFit(kv_ram_mb, rin.avail_phys, ram_auto_mb, rin.explicit_mb.has_value(), pinned_room);
             rf && n_ck > 0 && !no_pc) {
             std::string why;
@@ -1268,9 +1277,9 @@ int serveMain(int argc, char** argv, const char* program) {
                                   "the system would page; lowered to the default size",
                                   kv_ram_mb, rin.avail_phys >> 20);
             if (rf->pinned)
-                why += std::format("{}Windows lets GPUs lock about half of the RAM ({} MiB) and {} MiB is GPU-pinned already (all programs); "
-                                   "a larger RAM tier fails with hipError 719 on the first request",
-                                   why.empty() ? "" : "; ", rin.total_phys >> 21, gp.max_shared >> 20);
+                why += std::format("{}pinned host memory the GPU can keep resident is limited (this process: {} MiB budget / {} GPU(s); all "
+                                   "programs: {} MiB in use of half the RAM); a larger RAM tier fails with hipError 719 on the first request",
+                                   why.empty() ? "" : "; ", pst.nonlocal_budget >> 20, pst.hip_devices, pst.pinned_max >> 20);
             adjust(std::format("{} {} -> {} MiB", rin.explicit_mb ? std::string(rin.explicit_src) : std::string("RAM tier (default)"),
                                kv_ram_mb, rf->mb),
                    why);

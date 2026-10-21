@@ -27,19 +27,32 @@
 
 namespace whirl::startfit {
 
-// 1. RAM tier. Windows lets the GPUs lock only about half of the physical RAM in total (all processes, all
-// adapters; a hipHostMalloc buffer is mapped to every GPU). Past that limit the pinned allocations still succeed,
-// but the driver cannot make them resident when work is submitted (AMD_LOG_LEVEL=1: "PAL failed to submit CMD!
-// result:-5") and the first request fails with hipError 719 (kvram719: --kv-ram-mb 24064 on a 63.6 GiB PC with
-// another WHIRL server pinning ~10 GiB; a standalone hipHostMalloc probe fails the same way, without WHIRL).
-// So the RAM tier, explicit or automatic, is lowered to what the limit leaves: pinnedRoomMb(total RAM, the GPU-pinned
-// memory of all processes now). An explicit size above half of the RAM available now is also lowered: to the default
-// size (auto_mb; 0 = none), never above half of the available RAM (whole 512 MiB).
-inline constexpr std::uint64_t pinned_reserve_mb = 2048;  // pinned after the tier (HIP staging, vision, checkpoints) + slack
+// 1. RAM tier. The RAM tier is pinned host memory mapped to the GPU, and Windows limits how much of it the GPUs can keep
+// resident. Past the limit the allocations still succeed, but the driver cannot make them resident when work is
+// submitted (AMD_LOG_LEVEL=1: "PAL failed to submit CMD! result:-5") and the first request fails with hipError 719
+// (kvram719; a standalone hipHostMalloc probe fails the same way, without WHIRL). Two limits were measured on the
+// R9700 test PC (65175 MiB RAM, R9700 + 8060S both HIP GPUs, DXGI non-local budget 48026 MiB):
+//   per process: a hipHostMalloc buffer is mapped to every HIP GPU and charged on each, so this process's pinned
+//     memory must stay within the non-local (shared) budget / the number of HIP GPUs: 22528 MiB worked, 23552 and
+//     24064 MiB failed (24013 = 48026 / 2, minus the runtime's own pinned buffers);
+//   machine: this process's plus every other program's GPU-pinned memory (PDH Shared Usage, largest adapter) must stay
+//     well under half of the RAM: 16384 + 9640 and 17672 + 8610 MiB worked, 20480 + 8648 and 21768 + 10890 MiB failed.
+// pinnedRoomMb takes the smaller room, with pinned_reserve_mb (per process) and pinned_machine_reserve_mb (machine,
+// calibrated on the failures above) kept free for what is pinned after the tier and for the drift of these numbers.
+// The RAM tier, explicit or automatic, is lowered to that room. An explicit size above half of the RAM available now is
+// also lowered: to the default size (auto_mb; 0 = none), never above half of the available RAM (whole 512 MiB).
+inline constexpr std::uint64_t pinned_reserve_mb = 2048;
+inline constexpr std::uint64_t pinned_machine_reserve_mb = 6144;
 inline constexpr std::uint64_t pinned_room_unknown = ~0ull;
-// MiB the RAM tier may still pin: total_phys / 2 - pinned_now - pinned_reserve_mb, whole 512 MiB, 0 when none is
-// left; pinned_room_unknown when total_phys is unknown (0).
-std::uint64_t pinnedRoomMb(std::uint64_t total_phys_bytes, std::uint64_t pinned_now_bytes);
+struct PinnedState {
+    std::uint64_t total_phys = 0;       // bytes; 0 = unknown
+    std::uint64_t pinned_max = 0;       // bytes: GPU Shared Usage of the largest adapter (all processes, this one included)
+    std::uint64_t nonlocal_budget = 0;  // bytes: this process's DXGI non-local budget on its GPU; 0 = unknown
+    std::uint64_t own_nonlocal = 0;     // bytes: this process's non-local usage on its GPU (pinned so far)
+    int hip_devices = 1;                // GPUs a pinned buffer is mapped to
+};
+// MiB the RAM tier may still pin, whole 512 MiB (0: none); pinned_room_unknown when nothing is known.
+std::uint64_t pinnedRoomMb(const PinnedState& s);
 struct RamFit {
     std::uint64_t mb = 0;
     bool half = false;    // lowered because it was more than half of the available RAM

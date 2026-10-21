@@ -124,16 +124,17 @@ struct GpuOthers {
     double cost_us = 0;
 };
 GpuOthers gpuOthers(int dev);
-// GPU-mapped (pinned) system memory of ALL processes now (kvram719): PDH "GPU Adapter Memory(*)\Shared Usage"
-// per adapter. Windows lets GPUs lock only about half of the physical RAM in total; past that limit the
-// allocations still succeed but the driver cannot make them resident at submit time (PAL "failed to submit CMD!
-// result:-5") and the first kernel fails with hipError 719. hipHostMalloc maps a buffer to every GPU, so one
-// buffer shows on each adapter: max_shared (the largest adapter) is the machine-wide amount, not the sum.
-// ok = false off Windows or when the counters cannot be read.
+// GPU-mapped (pinned) system memory now (kvram719): PDH "GPU Adapter Memory(*)\Shared Usage" per adapter (all
+// processes; max_shared = the largest adapter, sum_shared = all adapters), DXGI SharedSystemMemory (the "shared GPU
+// memory"), and the number of HIP GPUs: hipHostMalloc maps a buffer to every HIP GPU and each adapter counts it
+// (measured on the R9700 + 8060S PC: a 16 GiB probe shows on both). Over the limits (startfit::pinnedRoomMb) pinned
+// allocations still succeed, but the driver cannot make them resident at submit time (AMD_LOG_LEVEL=1: "PAL failed to
+// submit CMD! result:-5") and the first kernel fails with hipError 719. ok = false off Windows or when the counters
+// cannot be read.
 struct GpuPinned {
     bool ok = false;
-    std::uint64_t max_shared = 0, sum_shared = 0;
-    int adapters = 0;
+    std::uint64_t max_shared = 0, sum_shared = 0, shared_system = 0;
+    int adapters = 0, hip_devices = 1;
 };
 GpuPinned gpuPinnedNow();
 
