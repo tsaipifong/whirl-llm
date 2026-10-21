@@ -24,13 +24,15 @@ Plan Governor::tick(const Input& in) {
     if (in.budget == 0 || cfg_.per_tok == 0 || cfg_.page == 0) return p;
     // just re-allocated: the WDDM usage may not show the free yet (R9700: part of a 2.7 GiB free showed ~0.3 s later)
     if (in.now_s - t_resized_ < cfg_.settle_s) return p;
+    std::uint64_t local = in.local;
+    if (expected_local_ > 0 && in.now_s - t_resized_ < cfg_.trust_s) local = std::min(local, expected_local_);
     const double hold = hold_ < 0.0 ? cfg_.hold_s : hold_;
     const auto i64 = [](std::uint64_t v) { return static_cast<std::int64_t>(v); };
     // what is short for the full state (startup margin free, parked checkpoint buffers back): > 0 short
-    const std::int64_t def = i64(in.local) + i64(in.parked) + i64(in.margin) - i64(in.budget);
+    const std::int64_t def = i64(local) + i64(in.parked) + i64(in.margin) - i64(in.budget);
     p.deficit = def;
     // act when less than half the margin is free under the budget
-    const bool trigger = i64(in.local) + i64(in.margin / 2) > i64(in.budget);
+    const bool trigger = i64(local) + i64(in.margin / 2) > i64(in.budget);
     const std::uint32_t pool_min = (std::max(cfg_.pool_min, cfg_.page) + cfg_.page - 1) / cfg_.page * cfg_.page;
     if (trigger) {
         recover_since_.reset();
@@ -92,8 +94,13 @@ Plan Governor::tick(const Input& in) {
     return p;
 }
 
-void Governor::resized(std::uint32_t pool, bool grew, double now_s) {
+void Governor::growDenied(double now_s) {
+    recover_since_ = now_s;  // the recovery time starts again
+}
+
+void Governor::resized(std::uint32_t pool, bool grew, double now_s, std::uint64_t expected_local) {
     t_resized_ = now_s;
+    expected_local_ = expected_local;
     if (grew) {
         t_grow_ = now_s;
         ++n_grow_;

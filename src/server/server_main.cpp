@@ -1790,7 +1790,8 @@ int serveMain(int argc, char** argv, const char* program) {
             // test overrides (no CLI flag): recovery time, hold after a shrink
             if (auto v = env("GOV_RECOVER_S")) gc.recover_s = std::strtod(v->c_str(), nullptr);
             if (auto v = env("GOV_HOLD_S")) gc.hold_s = std::strtod(v->c_str(), nullptr);
-            engine.setGovernor(gc, [&](std::uint64_t budget) { return budgetMargin(budget).bytes; }, tier_owned ? kv_ram_mb : 0);
+            engine.setGovernor(gc, [&](std::uint64_t budget) { return budgetMargin(budget).bytes; }, tier_owned ? kv_ram_mb : 0,
+                               hip::memInfo().total);
             const poolbudget::Margin mg = budgetMargin(wddm0.local_budget);
             logI("memory governor: on: when less than {} MiB (half the {} MiB margin) is free under the WDDM budget while the server "
                  "runs, it frees cache, queues new requests and re-allocates the KV pool smaller when every slot is idle; it grows "

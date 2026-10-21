@@ -3,6 +3,44 @@
 All notable changes to WHIRL are listed here. Versions follow `project(whirl VERSION ...)` in
 `CMakeLists.txt`.
 
+## 0.2.2.2 — 2026-10-21 (bug fixes)
+
+### Fixed
+
+- Server, R9700 and other discrete GPUs: when another program took more VRAM while the server ran, the server stayed
+  over the Windows (WDDM) video memory budget until it was restarted, and decode stayed several times slower (0.2.2.1
+  only warned; issues #5 and #6). A memory governor now acts on the samples the server already takes (each `batch |`
+  status line, each request end, an idle sample; never in the decode loop). When less than half of the margin is free
+  under the budget (about 1-1.5 GiB) it acts in this order, one `memory governor:` line per action with numbers: frees
+  reusable cache (idle slots' prefix cache, which went to the RAM tier at request end; while a request still runs, also
+  the checkpoint buffers of idle slots and shared prefix checkpoints, VRAM back to Windows at once); keeps the RAM tier
+  (pinned host memory does not count against the VRAM budget: 17 GiB pinned left the R9700's budget unchanged in our
+  test); queues new requests while a smaller KV pool waits; lowers the context for new requests if the smaller pool
+  holds less; re-allocates the KV pool smaller as soon as every slot is idle, which is what returns the VRAM to Windows;
+  and only then warns. When the budget has room again (more than 1.5 times the margin free for 30 s, at least 60 s after
+  the last drop, longer if the budget keeps going up and down) the pool grows back while idle, up to its startup size.
+  A running request's KV is never moved, so a request that was running when the budget dropped stays slower until it
+  finishes. `GET /health` and `GET /props` show the effective values in a `governor` object; `/props` `n_ctx` is the
+  context for new requests. Output is unchanged: only how many tokens the pool holds changes. Not on the Radeon 8060S
+  (its pool is a fixed carve-out) and not with `WHIRL_POOL_RESERVE_MB`; `WHIRL_GOVERNOR=0` turns it off.
+  GOV_RESULTS_PLACEHOLDER
+- Server: the RAM tier cap of 0.2.2.1 ran after the half-of-available-RAM rule, so asking for more could give less
+  (R9700, 47348 MiB available: `--kv-ram-mb 22528` -> 20480 MiB, `--kv-ram-mb 24064` -> 16384 MiB). The 20480 MiB cap
+  now comes first, and a size above half of the available RAM goes to half of it (not to the default size, which was
+  not monotonic either). The automatic size, which the user never chose, is capped with an info line instead of an
+  `adjusted:` line, and the wording no longer quotes the HIP error: "capped at 20480 MiB while a crash with larger RAM
+  tiers is investigated" (the cause is still open).
+- Server, `--draft dflash` with `--parallel`: the re-fit of `--parallel` after loading did not count the DFlash2
+  drafter's per-slot context ring, so it could keep a slot too many (the `-c` adjustment caught it later).
+- CHANGELOG 0.2.2.1: the other process held 3.2 GiB (3308 MiB), not 3.3 GiB, and the "4 GiB test" is now described
+  where it is cited.
+
+### Known
+
+- The close_reused server test still waits for log lines instead of an engine-thread hook; the hook (746a596) lands
+  with the engine split (ARCH).
+- Root cause of the crash with RAM tiers above about 20 GiB: still open (the cap stays).
+
 ## 0.2.2.1 — 2026-10-21 (bug fixes)
 
 ### Fixed

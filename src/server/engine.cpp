@@ -3319,8 +3319,10 @@ constexpr double kMiB = 1048576.0;
 double monoS() { return std::chrono::duration<double>(Clock::now().time_since_epoch()).count(); }
 }  // namespace
 
-void Engine::setGovernor(const memgov::Config& c, std::function<std::uint64_t(std::uint64_t)> margin, std::uint64_t ram_tier_mb) {
+void Engine::setGovernor(const memgov::Config& c, std::function<std::uint64_t(std::uint64_t)> margin, std::uint64_t ram_tier_mb,
+                         std::uint64_t vram_total) {
     gov_.emplace(c);
+    gov_vram_total_ = vram_total;
     gov_margin_ = std::move(margin);
     gov_ram_mb_ = ram_tier_mb;
     ctx_new_ = std::min(ctx_, c.ctx > 0 ? c.ctx : ctx_);
@@ -3499,6 +3501,7 @@ void Engine::govFreeCache(bool park) {
 }
 
 void Engine::govRestoreCache() {
+    gov_restored_ = 0;
     if (gov_parked_ == 0) return;
     std::uint64_t bytes = 0;
     std::size_t n = 0;
@@ -3528,6 +3531,7 @@ void Engine::govRestoreCache() {
         return;
     }
     gov_parked_ = 0;
+    gov_restored_ = bytes;
     logI("memory governor: checkpoint buffers restored ({:.0f} MiB, {} slot(s){}): every slot takes requests again", bytes / kMiB, n,
          opt_.n_spe > 0 ? " and the shared prefix checkpoints" : "");
 }
@@ -3579,7 +3583,8 @@ bool Engine::govResize(std::uint32_t tokens, bool shrink) {
         gov_last_ = std::format("re-allocation to {} tokens failed", tokens);
         return false;
     }
-    if (gov_) gov_->resized(now_tok, !shrink, monoS());
+    gov_resize_before_ = before.ok ? before.local_usage : 0;
+    gov_resize_delta_ = (static_cast<std::int64_t>(now_tok) - static_cast<std::int64_t>(old)) * static_cast<std::int64_t>(kvTokBytes());
     std::string vr;
     if (before.ok && after.ok)
         vr = std::format("; WHIRL's VRAM {:.2f} -> {:.2f} GiB, budget {:.2f} GiB", before.local_usage / kGiB, after.local_usage / kGiB,
@@ -3607,12 +3612,48 @@ void Engine::govApply() {
     ctx_new_ = p.ctx_new;
     // 5. the pool, with every slot idle
     bool resized = false;
-    if (resize_now) {
-        resized = govResize(*p.pool_target, p.shrink);
+    std::optional<std::uint32_t> target = resize_now ? p.pool_target : std::nullopt;
+    if (target && !p.shrink && gov_vram_total_ > 0 && vram_others_ && vram_probe_) {
+        // a grow: the budget alone can read high again while another program still holds VRAM (R9700: 31.02 GiB with a 4 GiB
+        // hog alive once WHIRL had shrunk), so cap it to what fits next to what the other programs use now (one PDH read,
+        // ~0.3 s, only here, while idle)
+        const auto o = vram_others_();
+        const wddmwatch::Sample s = vram_probe_();
+        if (o && s.ok) {
+            const std::uint64_t margin = gov_margin_ ? gov_margin_(s.local_budget) : 0;
+            const std::uint64_t used = s.local_usage + o->now + margin;
+            const std::uint64_t room = gov_vram_total_ > used ? gov_vram_total_ - used : 0;
+            const std::uint32_t pool = pool_pages_ * kv_page;
+            const std::uint64_t page_b = kvTokBytes() * kv_page;
+            const std::uint32_t add = page_b ? static_cast<std::uint32_t>(room / page_b) * kv_page : 0;
+            const std::uint32_t capped = std::min(*target, pool + add);
+            const std::uint64_t min_add = std::min<std::uint64_t>(gov_->config().min_grow / std::max<std::uint64_t>(kvTokBytes(), 1),
+                                                                  *target - pool);
+            if (capped <= pool || capped - pool < min_add) {
+                if (!gov_grow_denied_logged_)
+                    logI("memory governor: the KV pool stays at {} tokens for now: other programs use {:.2f} GiB of this GPU's {:.2f} GiB "
+                         "(WHIRL {:.2f} GiB, margin {} MiB), although the WDDM budget ({:.2f} GiB) would allow more; checked again later",
+                         pool, o->now / kGiB, gov_vram_total_ / kGiB, s.local_usage / kGiB, margin >> 20, s.local_budget / kGiB);
+                gov_grow_denied_logged_ = true;
+                gov_->growDenied(monoS());
+                target.reset();
+            } else {
+                target = capped;
+            }
+        }
+    }
+    if (target) {
+        resized = govResize(*target, p.shrink);
         if (resized && p.shrink) gov_hold_ = false;
-        if (resized) ctx_new_ = gov_->ctxNew();
     }
     if (gov_parked_ > 0 && (p.restore_cache || resized)) govRestoreCache();
+    if (resized) {
+        // the usage this should give, for the governor while the WDDM counters catch up (they show a free late)
+        const std::int64_t exp = static_cast<std::int64_t>(gov_resize_before_) + gov_resize_delta_ + static_cast<std::int64_t>(gov_restored_);
+        gov_->resized(pool_pages_ * kv_page, !p.shrink, monoS(), gov_resize_before_ > 0 && exp > 0 ? static_cast<std::uint64_t>(exp) : 0);
+        ctx_new_ = gov_->ctxNew();
+        if (!p.shrink) gov_grow_denied_logged_ = false;
+    }
     if (p.episode_end) {
         logI("memory governor: back to the startup settings (KV pool {} tokens, context {} tokens per request, {} slot(s))",
              pool_pages_ * kv_page, ctxForNew(), slots_.size());

@@ -2431,6 +2431,43 @@ void testMemGovernor() {
         CHECK(g3.hold() > 60.0);
         CHECK(g3.shrinks() >= 1u);
     }
+    // lagging WDDM counters after a re-allocation (R9700 S1, 2026-10-21: a 4.8 GiB grow first read +8.1 GiB, so the governor
+    // shrank right back): within trust_s the usage counts as at most the expected one; afterwards the measured one
+    {
+        Governor g5(c);
+        const std::uint64_t B1 = B0 - 4 * GiB;
+        Plan p = g5.tick(in(0, L0, B1, 330240, true));
+        CHECK(p.shrink);
+        const std::uint32_t small = *p.pool_target;
+        const std::uint64_t L1 = L0 - static_cast<std::uint64_t>(330240 - small) * 36966;
+        g5.resized(small, false, 0, L1);
+        // the free shows only partly (1.8 GiB still counted): no second shrink while the counters catch up
+        for (double t = 5; t < 20; t += 5) CHECK(!g5.tick(in(t, L1 + 1843 * MiB, B1, small, true)).pool_target.has_value());
+        // a real further drop after the window is still acted on
+        p = g5.tick(in(25, L1 + 1843 * MiB, B1, small, true));
+        CHECK(p.shrink);
+        // a grow that first reads too high (stale old pool) is not shrunk back within the window
+        Governor g6(c);
+        g6.tick(in(0, L0, B1, 330240, true));
+        g6.resized(small, false, 0, L1);
+        g6.resized(330240, true, 200, L0);
+        for (double t = 205; t < 220; t += 5) CHECK(!g6.tick(in(t, L0 + 3 * GiB, B0, 330240, true)).pool_target.has_value());
+        // growDenied restarts the recovery time
+        Governor g7(c);
+        g7.tick(in(0, L0, B1, 330240, true));
+        g7.resized(small, false, 0, L1);
+        bool asked = false;
+        double t_ask = 0;
+        for (double t = 100; t < 300 && !asked; t += 5)
+            if (g7.tick(in(t, L1, B0, small, true)).pool_target) {
+                asked = true;
+                t_ask = t;
+            }
+        CHECK(asked);
+        g7.growDenied(t_ask);
+        CHECK(!g7.tick(in(t_ask + 5, L1, B0, small, true)).pool_target.has_value());
+        CHECK(g7.tick(in(t_ask + 35, L1, B0, small, true)).pool_target.has_value());
+    }
     // unknown budget: nothing
     {
         Governor g4(c);

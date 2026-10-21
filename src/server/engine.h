@@ -455,7 +455,10 @@ public:
     // v0.2.2.2 memory governor (after setVramProbe, before runLoop): acts on the samples of the vram probe when the WDDM
     // budget drops while the server runs (whirl/mem_governor.h). margin: what must stay free under a given budget
     // (poolbudget::defaultMargin); ram_tier_mb: the RAM tier in use (0: none), for its log line.
-    void setGovernor(const memgov::Config& c, std::function<std::uint64_t(std::uint64_t)> margin, std::uint64_t ram_tier_mb);
+    // vram_total: the GPU's dedicated VRAM (0: unknown); a grow is capped so WHIRL + what other programs use now (vram others
+    // probe) + the margin fit it
+    void setGovernor(const memgov::Config& c, std::function<std::uint64_t(std::uint64_t)> margin, std::uint64_t ram_tier_mb,
+                     std::uint64_t vram_total = 0);
     // "governor" object of /health and /props ("" when off); context per request for new requests (/props n_ctx)
     std::string governorJson();
     std::uint32_t ctxPublished() const { return ctx_pub_.load(std::memory_order_relaxed); }
@@ -699,6 +702,11 @@ private:
     bool spe_parked_ = false;     // shared prefix checkpoint buffers freed
     std::uint64_t gov_parked_ = 0;  // checkpoint VRAM freed (to restore)
     std::uint64_t gov_ram_mb_ = 0;
+    std::uint64_t gov_vram_total_ = 0;
+    bool gov_grow_denied_logged_ = false;
+    std::uint64_t gov_restored_ = 0;  // checkpoint bytes the last govRestoreCache allocated
+    std::uint64_t gov_resize_before_ = 0;  // local usage read right before the last re-allocation
+    std::int64_t gov_resize_delta_ = 0;    // bytes it added (> 0) or freed (< 0)
     std::uint32_t ctx_new_ = 0xffffffffu;  // context per request for new requests (governor); running requests keep ctx_
     std::string gov_warn_;        // the spill warning, logged after the governor's actions
     std::string gov_last_;

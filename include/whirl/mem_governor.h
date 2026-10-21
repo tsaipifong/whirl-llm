@@ -44,6 +44,11 @@ struct Config {
     double osc_window_s = 600.0;
     std::uint64_t min_grow = 1ull << 30;  // grow by at least this much (or up to pool_start)
     double settle_s = 3.0;           // no decision this soon after a re-allocation (the WDDM counters follow a free late)
+    // for this long after a re-allocation the local usage counts as at most what the re-allocation should give (the
+    // usage before it + the bytes it added or freed): on the R9700 the WDDM usage showed the old pool's free over several
+    // seconds (a grow of 4.8 GiB first read +8.1 GiB, a shrink of 1.0 GiB read -1.8 GiB), and acting on those reads
+    // shrank and grew the pool back and forth
+    double trust_s = 20.0;
 };
 
 // One sample, with the engine's state.
@@ -77,8 +82,11 @@ public:
     Governor() = default;
     explicit Governor(const Config& c) : cfg_(c), ctx_new_(c.ctx) {}
     Plan tick(const Input& in);
-    // the engine re-allocated the pool to `pool` tokens at now_s
-    void resized(std::uint32_t pool, bool grew, double now_s);
+    // the engine re-allocated the pool to `pool` tokens at now_s; expected_local: the local usage it should give (the
+    // usage before + the bytes added or freed; 0 = unknown)
+    void resized(std::uint32_t pool, bool grew, double now_s, std::uint64_t expected_local = 0);
+    // a grow the plan asked for did not fit the VRAM other programs use now (the engine checked): wait recover_s again
+    void growDenied(double now_s);
     bool reduced() const { return episode_; }
     double hold() const { return hold_; }
     std::uint32_t ctxNew() const { return ctx_new_; }
@@ -93,6 +101,7 @@ private:
     bool episode_ = false;
     double hold_ = -1.0;                  // < 0: cfg_.hold_s
     double t_shrink_ = -1e18, t_grow_ = -1e18, t_resized_ = -1e18;
+    std::uint64_t expected_local_ = 0;
     std::optional<double> recover_since_;
     std::uint32_t ctx_new_ = 0;
     std::uint32_t n_shrink_ = 0, n_grow_ = 0;
