@@ -2303,35 +2303,58 @@ void testStartupFit() {
     using namespace whirl;
     constexpr std::uint64_t MiB = 1ull << 20, GiB = 1ull << 30;
     // 1. RAM tier (ramTierFit)
-    // explicit: kept when within half of the available RAM and within the 20480 MiB cap
+    // explicit: kept when within half of the available RAM and within the GPU-pinned room
     CHECK(!startfit::ramTierFit(12288, 48 * GiB, 16384, true).has_value());
     CHECK(!startfit::ramTierFit(20480, 48 * GiB, 16384, true).has_value());
-    // the hipError 719 repro (REVIEW-0221 C1): 24064 MiB on a box with 49247 MiB available is within half, but capped
+    CHECK(!startfit::ramTierFit(24064, 49247 * MiB, 16384, true).has_value());  // nothing known about pinned memory: kept
+    // kvram719 repro (the R9700 test PC): 65175 MiB RAM -> GPU-pinned limit 32587 MiB; another WHIRL server on the
+    // 8060S had ~10.9 GiB pinned (PDH Shared Usage, also shown on the R9700 adapter) + this server's 1288 MiB embedding.
+    // --kv-ram-mb 24064 crossed the limit (hipError 719 on the first request); 20480 crossed it too (v0.2.2, 10:41).
     {
-        const auto r = startfit::ramTierFit(24064, 49247 * MiB, 16384, true);
-        CHECK(r.has_value() && r->mb == 20480ull && r->safe && !r->half);
+        const std::uint64_t total = 65175 * MiB, pinned = (10890 + 1288) * MiB;
+        const std::uint64_t room = startfit::pinnedRoomMb(total, pinned);
+        CHECK_EQ(room, 17920ull);  // 32587 - 12178 - 2048 = 18361 -> whole 512 MiB
+        const auto r = startfit::ramTierFit(24064, 47 * GiB, 16384, true, room);
+        CHECK(r.has_value() && r->mb == 17920ull && r->pinned && !r->half);
+        const auto r2 = startfit::ramTierFit(20480, 47 * GiB, 16384, true, room);
+        CHECK(r2.has_value() && r2->mb == 17920ull && r2->pinned);
+        CHECK(r->mb * MiB + pinned <= total / 2);  // the tier plus what is pinned stays under the limit
     }
+    // nothing else pinned: 24064 fits on the same PC (only the embedding): kept
+    {
+        const std::uint64_t room = startfit::pinnedRoomMb(65175 * MiB, 1288 * MiB);
+        CHECK_EQ(room, 29184ull);  // 32587 - 1288 - 2048 = 29251 -> 29184
+        CHECK(!startfit::ramTierFit(24064, 55 * GiB, 16384, true, room).has_value());
+    }
+    // a 128 GB PC: the automatic 32 GiB tier (1/4 rule cap) fits under its 64 GiB limit: no fixed cap any more
+    CHECK(!startfit::ramTierFit(32768, 100 * GiB, 32768, false, startfit::pinnedRoomMb(128 * GiB, 1288 * MiB)).has_value());
+    // 64 GB PC with 30 GiB pinned by other programs: room 0 -> the tier is off rather than crashing
+    {
+        const auto r = startfit::ramTierFit(16384, 30 * GiB, 16384, false, startfit::pinnedRoomMb(64 * GiB, 30 * GiB));
+        CHECK(r.has_value() && r->mb == 0ull && r->pinned);
+    }
+    CHECK_EQ(startfit::pinnedRoomMb(0, 0), startfit::pinned_room_unknown);  // RAM unknown
     // more than half of the available RAM: the default size (16 GiB here), not half
     {
         const auto r = startfit::ramTierFit(65536, 48955 * MiB, 16384, true);
-        CHECK(r.has_value() && r->mb == 16384ull && r->half && !r->safe);
+        CHECK(r.has_value() && r->mb == 16384ull && r->half && !r->pinned);
     }
-    // more than half, no default known: half, then the cap
+    // more than half, no default known: half, then the pinned room
     {
-        const auto r = startfit::ramTierFit(65536, 64 * GiB, 0, true);
-        CHECK(r.has_value() && r->mb == 20480ull && r->half && r->safe);
+        const auto r = startfit::ramTierFit(65536, 64 * GiB, 0, true, 20480);
+        CHECK(r.has_value() && r->mb == 20480ull && r->half && r->pinned);
     }
     CHECK_EQ(startfit::ramTierFit(9000, 17000 * MiB, 0, true)->mb, 8192ull);  // half = 8500 MiB -> 8192 (512 steps)
     CHECK_EQ(startfit::ramTierFit(9000, 12 * GiB, 8192, true)->mb, 6144ull);  // the default above half: half wins
-    // the automatic size (a PC with 128 GB RAM: 32 GiB by the 1/4 rule) is capped too, never the half rule
+    // the automatic size is lowered by the pinned room too, never by the half rule
     {
-        const auto r = startfit::ramTierFit(32768, 100 * GiB, 32768, false);
-        CHECK(r.has_value() && r->mb == 20480ull && r->safe && !r->half);
-        CHECK(!startfit::ramTierFit(16384, 20 * GiB, 16384, false).has_value());  // auto within the cap: kept (half rule not applied)
+        const auto r = startfit::ramTierFit(32768, 100 * GiB, 32768, false, 20480);
+        CHECK(r.has_value() && r->mb == 20480ull && r->pinned && !r->half);
+        CHECK(!startfit::ramTierFit(16384, 20 * GiB, 16384, false).has_value());  // auto: half rule not applied
     }
-    CHECK(!startfit::ramTierFit(0, 8 * GiB, 8192, true).has_value());  // 0 = tiers off: kept
+    CHECK(!startfit::ramTierFit(0, 8 * GiB, 8192, true, 0).has_value());  // 0 = tiers off: kept
     CHECK(!startfit::ramTierFit(4096, 0, 8192, true).has_value());     // RAM unknown, small: kept
-    CHECK_EQ(startfit::ramTierFit(30000, 0, 0, true)->mb, 20480ull);    // RAM unknown, large: capped
+    CHECK(!startfit::ramTierFit(30000, 0, 0, true).has_value());       // RAM and pinned memory unknown: kept
     // 2b. slots after the weights: the C5 case (15 slots left 13312 tokens for a 16384-token request) -> fewer slots
     {
         const std::uint64_t per_tok = 36966, per_slot = 380 * MiB, shared = 556 * MiB;

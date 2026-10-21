@@ -8,7 +8,15 @@
 
 namespace whirl::startfit {
 
-std::optional<RamFit> ramTierFit(std::uint64_t mb, std::uint64_t avail_phys_bytes, std::uint64_t auto_mb, bool explicit_size) {
+std::uint64_t pinnedRoomMb(std::uint64_t total_phys_bytes, std::uint64_t pinned_now_bytes) {
+    if (total_phys_bytes == 0) return pinned_room_unknown;
+    const std::uint64_t limit_mb = (total_phys_bytes / 2) >> 20;
+    const std::uint64_t used_mb = ((pinned_now_bytes + (1ull << 20) - 1) >> 20) + pinned_reserve_mb;
+    return limit_mb > used_mb ? (limit_mb - used_mb) / 512 * 512 : 0;
+}
+
+std::optional<RamFit> ramTierFit(std::uint64_t mb, std::uint64_t avail_phys_bytes, std::uint64_t auto_mb, bool explicit_size,
+                                 std::uint64_t pinned_room_mb) {
     if (mb == 0) return std::nullopt;
     RamFit r;
     r.mb = mb;
@@ -17,11 +25,11 @@ std::optional<RamFit> ramTierFit(std::uint64_t mb, std::uint64_t avail_phys_byte
         r.mb = auto_mb > 0 ? std::min(half, auto_mb) : half;
         r.half = true;
     }
-    if (r.mb > ram_tier_safe_mb) {
-        r.mb = ram_tier_safe_mb;
-        r.safe = true;
+    if (pinned_room_mb != pinned_room_unknown && r.mb > pinned_room_mb) {
+        r.mb = pinned_room_mb;
+        r.pinned = true;
     }
-    if (!r.half && !r.safe) return std::nullopt;
+    if (!r.half && !r.pinned) return std::nullopt;
     return r;
 }
 

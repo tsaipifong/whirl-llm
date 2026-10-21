@@ -124,6 +124,18 @@ struct GpuOthers {
     double cost_us = 0;
 };
 GpuOthers gpuOthers(int dev);
+// GPU-mapped (pinned) system memory of ALL processes now (kvram719): PDH "GPU Adapter Memory(*)\Shared Usage"
+// per adapter. Windows lets GPUs lock only about half of the physical RAM in total; past that limit the
+// allocations still succeed but the driver cannot make them resident at submit time (PAL "failed to submit CMD!
+// result:-5") and the first kernel fails with hipError 719. hipHostMalloc maps a buffer to every GPU, so one
+// buffer shows on each adapter: max_shared (the largest adapter) is the machine-wide amount, not the sum.
+// ok = false off Windows or when the counters cannot be read.
+struct GpuPinned {
+    bool ok = false;
+    std::uint64_t max_shared = 0, sum_shared = 0;
+    int adapters = 0;
+};
+GpuPinned gpuPinnedNow();
 
 // ---- streams and events
 // Blocking streams order with the legacy null stream; non-blocking ones do not.

@@ -11,7 +11,9 @@
 
 #include <chrono>
 #include <cstdio>
+#include <algorithm>
 #include <cstring>
+#include <vector>
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -23,6 +25,7 @@
 #include <windows.h>
 #include <dxgi1_4.h>
 #include <pdh.h>
+#include <pdhmsg.h>
 #endif
 
 namespace whirl::hip {
@@ -119,6 +122,35 @@ GpuOthers gpuOthers(int dev) {
         }
     }
     r.cost_us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
+#endif
+    return r;
+}
+
+GpuPinned gpuPinnedNow() {
+    GpuPinned r;
+#ifdef _WIN32
+    PDH_HQUERY q = nullptr;
+    if (PdhOpenQueryW(nullptr, 0, &q) != ERROR_SUCCESS) return r;
+    PDH_HCOUNTER c = nullptr;
+    if (PdhAddEnglishCounterW(q, L"\\GPU Adapter Memory(*)\\Shared Usage", 0, &c) == ERROR_SUCCESS &&
+        PdhCollectQueryData(q) == ERROR_SUCCESS) {
+        DWORD bytes = 0, n = 0;
+        if (PdhGetFormattedCounterArrayW(c, PDH_FMT_LARGE, &bytes, &n, nullptr) == PDH_MORE_DATA && bytes > 0) {
+            std::vector<unsigned char> buf(bytes);
+            auto* items = reinterpret_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(buf.data());
+            if (PdhGetFormattedCounterArrayW(c, PDH_FMT_LARGE, &bytes, &n, items) == ERROR_SUCCESS) {
+                for (DWORD i = 0; i < n; ++i) {
+                    if (items[i].FmtValue.CStatus != PDH_CSTATUS_VALID_DATA && items[i].FmtValue.CStatus != PDH_CSTATUS_NEW_DATA) continue;
+                    const auto v = static_cast<std::uint64_t>(std::max<LONGLONG>(items[i].FmtValue.largeValue, 0));
+                    r.max_shared = std::max(r.max_shared, v);
+                    r.sum_shared += v;
+                    ++r.adapters;
+                }
+                r.ok = r.adapters > 0;
+            }
+        }
+    }
+    PdhCloseQuery(q);
 #endif
     return r;
 }

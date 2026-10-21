@@ -556,7 +556,7 @@ int serveMain(int argc, char** argv, const char* program) {
         //      measured after the weights are loaded, before any slot is allocated;
         //   2. prefill batch / checkpoint counts set by the user (the VRAM-tight plan; only if still short);
         //   3. RAM tier (--kv-ram-mb): system RAM, not VRAM (17 GiB pinned did not move the R9700's WDDM budget): above
-        //      half of the available RAM -> the default size; every RAM tier capped at 20480 MiB (hipError 719 above it,
+        //      half of the available RAM -> the default size; every RAM tier lowered to the GPU-pinned room (kvram719,
         //      task_063b1573);
         //   4. -c / --ctx (the shared pool) down to what fits under the budget with the margin;
         //   5. --ctx-per-slot down to the pool. The per-request context reserves no memory by itself (the pool is
@@ -1252,17 +1252,25 @@ int serveMain(int argc, char** argv, const char* program) {
             a.explicit_mb.reset();
             return tier::ramTierSize(a).mb;
         }();
-        if (const auto rf = startfit::ramTierFit(kv_ram_mb, rin.avail_phys, ram_auto_mb, rin.explicit_mb.has_value());
+        // kvram719: GPU-pinned memory of all processes now (this one's embedding included) against the Windows limit
+        const hip::GpuPinned gp = hip::gpuPinnedNow();
+        const std::uint64_t pinned_room = gp.ok ? startfit::pinnedRoomMb(rin.total_phys, gp.max_shared) : startfit::pinned_room_unknown;
+        if (gp.ok && kv_ram_mb > 0 && n_ck > 0 && !no_pc)
+            logI("kv tier: GPU-pinned system memory now {} MiB (largest of {} adapter(s), all processes); limit ~{} MiB (half of the "
+                 "RAM), room for the RAM tier {} MiB (after a {} MiB reserve)",
+                 gp.max_shared >> 20, gp.adapters, rin.total_phys >> 21, pinned_room == startfit::pinned_room_unknown ? 0 : pinned_room,
+                 startfit::pinned_reserve_mb);
+        if (const auto rf = startfit::ramTierFit(kv_ram_mb, rin.avail_phys, ram_auto_mb, rin.explicit_mb.has_value(), pinned_room);
             rf && n_ck > 0 && !no_pc) {
             std::string why;
             if (rf->half)
                 why = std::format("the RAM tier is pinned host memory; {} MiB is more than half of the {} MiB of RAM available now, and "
                                   "the system would page; lowered to the default size",
                                   kv_ram_mb, rin.avail_phys >> 20);
-            if (rf->safe)
-                why += std::format("{}capped at {} MiB: larger pinned RAM tiers crash on some systems (hipError 719 on the first request), "
-                                   "investigating",
-                                   why.empty() ? "" : "; ", startfit::ram_tier_safe_mb);
+            if (rf->pinned)
+                why += std::format("{}Windows lets GPUs lock about half of the RAM ({} MiB) and {} MiB is GPU-pinned already (all programs); "
+                                   "a larger RAM tier fails with hipError 719 on the first request",
+                                   why.empty() ? "" : "; ", rin.total_phys >> 21, gp.max_shared >> 20);
             adjust(std::format("{} {} -> {} MiB", rin.explicit_mb ? std::string(rin.explicit_src) : std::string("RAM tier (default)"),
                                kv_ram_mb, rf->mb),
                    why);

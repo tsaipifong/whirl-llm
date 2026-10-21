@@ -27,18 +27,27 @@
 
 namespace whirl::startfit {
 
-// 1. RAM tier. A 24064 MiB RAM tier failed with hipError 719 on the first request on the R9700 test machine (0.2.2 too;
-// 20480 MiB works; cause not known yet, task_063b1573), so every RAM tier, explicit or automatic, is capped at
-// ram_tier_safe_mb until the cause is known. An explicit size above half of the RAM available now is also lowered: to
-// the default size (auto_mb; 0 = none), never above half of the available RAM (whole 512 MiB).
-inline constexpr std::uint64_t ram_tier_safe_mb = 20480;
+// 1. RAM tier. Windows lets the GPUs lock only about half of the physical RAM in total (all processes, all
+// adapters; a hipHostMalloc buffer is mapped to every GPU). Past that limit the pinned allocations still succeed,
+// but the driver cannot make them resident when work is submitted (AMD_LOG_LEVEL=1: "PAL failed to submit CMD!
+// result:-5") and the first request fails with hipError 719 (kvram719: --kv-ram-mb 24064 on a 63.6 GiB PC with
+// another WHIRL server pinning ~10 GiB; a standalone hipHostMalloc probe fails the same way, without WHIRL).
+// So the RAM tier, explicit or automatic, is lowered to what the limit leaves: pinnedRoomMb(total RAM, the GPU-pinned
+// memory of all processes now). An explicit size above half of the RAM available now is also lowered: to the default
+// size (auto_mb; 0 = none), never above half of the available RAM (whole 512 MiB).
+inline constexpr std::uint64_t pinned_reserve_mb = 2048;  // pinned after the tier (HIP staging, vision, checkpoints) + slack
+inline constexpr std::uint64_t pinned_room_unknown = ~0ull;
+// MiB the RAM tier may still pin: total_phys / 2 - pinned_now - pinned_reserve_mb, whole 512 MiB, 0 when none is
+// left; pinned_room_unknown when total_phys is unknown (0).
+std::uint64_t pinnedRoomMb(std::uint64_t total_phys_bytes, std::uint64_t pinned_now_bytes);
 struct RamFit {
     std::uint64_t mb = 0;
-    bool half = false;  // lowered because it was more than half of the available RAM
-    bool safe = false;  // capped at ram_tier_safe_mb
+    bool half = false;    // lowered because it was more than half of the available RAM
+    bool pinned = false;  // lowered to the GPU-pinned room (pinned_room_mb)
 };
 // nullopt: unchanged. explicit_size: the user gave the size (--kv-ram-mb / WHIRL_KV_RAM_MB).
-std::optional<RamFit> ramTierFit(std::uint64_t mb, std::uint64_t avail_phys_bytes, std::uint64_t auto_mb, bool explicit_size);
+std::optional<RamFit> ramTierFit(std::uint64_t mb, std::uint64_t avail_phys_bytes, std::uint64_t auto_mb, bool explicit_size,
+                                 std::uint64_t pinned_room_mb = pinned_room_unknown);
 
 // the pool the plan must reach: max(pool_min_tokens, pool_hard_min)
 std::uint64_t wantTokens(const vram::FitInput& fi);
