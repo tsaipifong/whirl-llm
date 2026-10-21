@@ -1,0 +1,61 @@
+=== c1_test on 14ba714 (scratch\gov3review\b_14ba714\c1_test.exe, mem_governor.cpp from git show 14ba714)
+C-1 [grow costs 2.94 GiB more than expected]
+    t=  20 local 29.00 GiB budget 27.02 GiB episode_start shrink
+    t=  20 re-allocate 340480 -> 220416 (expected 25.00 GiB)
+    t= 230 local 25.00 GiB budget 31.02 GiB grow
+    t= 230 re-allocate 220416 -> 340480 (expected 29.00 GiB)
+    t= 233 local 31.94 GiB budget 31.02 GiB episode_end
+    t= 350 local 31.94 GiB budget 31.02 GiB episode_start shrink
+    t= 350 re-allocate 340480 -> 252160 (expected 29.00 GiB)
+  FAIL line 133: r.end_over_t < 0 | no episode_end while measured usage is over the budget (episode_end at t=233, 943 MiB over)
+  FAIL line 136: r.act_t >= 0 && r.act_t - r.t_grow <= 10.0 | the governor acts within 10 s of the grow at t=230 (first action t=350, 120 s later)
+  grow t=230 to 340480 | episode_end t=233 (over budget: yes) | first action t=350 | 120 s over the budget after the grow
+control [exact grow]
+  grow t=230 | episode_end t=233 | action after the grow: no
+probe [read lag after an exact grow, not counted]
+  lag 3.30 GiB for    2 s: episode_end t=233, new episode/action after the grow: no (t=-1), reduced at end 0
+  lag 3.30 GiB for    5 s: episode_end t=233, new episode/action after the grow: no (t=-1), reduced at end 0
+  lag 3.30 GiB for   10 s: episode_end t=233, new episode/action after the grow: no (t=-1), reduced at end 0
+  lag 3.30 GiB for   30 s: episode_end t=233, new episode/action after the grow: no (t=-1), reduced at end 0
+probe [grow overshoot 1.27 GiB: under the budget, inside the trigger band; not counted]
+    t=  20 local 29.00 GiB budget 27.02 GiB episode_start shrink
+    t=  20 re-allocate 340480 -> 220416 (expected 25.00 GiB)
+    t= 230 local 25.00 GiB budget 31.02 GiB grow
+    t= 230 re-allocate 220416 -> 340480 (expected 29.00 GiB)
+    t= 233 local 30.27 GiB budget 31.02 GiB episode_end
+    t= 350 local 30.27 GiB budget 31.02 GiB episode_start shrink
+    t= 350 re-allocate 340480 -> 302336 (expected 29.00 GiB)
+  grow t=230 | episode_end t=233 | first action after the grow t=350 (120 s later)
+probe [overshoot 3.33 GiB given back at the next re-allocation, 3600 s; not counted]
+  first grow after the hog t=230 | re-allocations: 6 grows, 6 shrinks | reduced at the end 0 | 700 s over the budget after the first grow
+review_gov3 C-1 tests: 5 passed, 2 failed
+exit=1
+=== c1_test on fbdbe38 (scratch\gov3review\b_fbdbe38\c1_test.exe, mem_governor.cpp from git show fbdbe38)
+C-1 [grow costs 2.94 GiB more than expected]
+    t=  20 local 29.00 GiB budget 27.02 GiB episode_start shrink
+    t=  20 re-allocate 340480 -> 220416 (expected 25.00 GiB)
+    t= 230 local 25.00 GiB budget 31.02 GiB grow
+    t= 230 re-allocate 220416 -> 340480 (expected 29.00 GiB)
+    t= 233 local 31.94 GiB budget 31.02 GiB shrink
+    t= 233 re-allocate 340480 -> 252160 (expected 29.00 GiB)
+  grow t=230 to 340480 | episode_end t=-1 (over budget: no) | first action t=233 | 3 s over the budget after the grow
+control [exact grow]
+  grow t=230 | episode_end t=233 | action after the grow: no
+probe [read lag after an exact grow, not counted]
+  lag 3.30 GiB for    2 s: episode_end t=233, new episode/action after the grow: no (t=-1), reduced at end 0
+  lag 3.30 GiB for    5 s: episode_end t=-1, new episode/action after the grow: YES (t=233), reduced at end 1
+  lag 3.30 GiB for   10 s: episode_end t=-1, new episode/action after the grow: YES (t=233), reduced at end 1
+  lag 3.30 GiB for   30 s: episode_end t=-1, new episode/action after the grow: YES (t=233), reduced at end 1
+probe [grow overshoot 1.27 GiB: under the budget, inside the trigger band; not counted]
+    t=  20 local 29.00 GiB budget 27.02 GiB episode_start shrink
+    t=  20 re-allocate 340480 -> 220416 (expected 25.00 GiB)
+    t= 230 local 25.00 GiB budget 31.02 GiB grow
+    t= 230 re-allocate 220416 -> 340480 (expected 29.00 GiB)
+    t= 233 local 30.27 GiB budget 31.02 GiB episode_end
+    t= 350 local 30.27 GiB budget 31.02 GiB episode_start shrink
+    t= 350 re-allocate 340480 -> 302336 (expected 29.00 GiB)
+  grow t=230 | episode_end t=233 | first action after the grow t=350 (120 s later)
+probe [overshoot 3.33 GiB given back at the next re-allocation, 3600 s; not counted]
+  first grow after the hog t=230 | re-allocations: 6 grows, 7 shrinks | reduced at the end 1 | 18 s over the budget after the first grow
+review_gov3 C-1 tests: 7 passed, 0 failed
+exit=0
