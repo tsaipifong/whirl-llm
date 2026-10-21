@@ -3563,7 +3563,16 @@ bool Engine::govResize(std::uint32_t tokens, bool shrink) {
     // 3. page bookkeeping and the tier's view of the pool arrays (the per-token layout is unchanged)
     initPool();
     const double ms = msSince(t0);
-    const wddmwatch::Sample after = vram_probe_ ? vram_probe_() : wddmwatch::Sample{};
+    // the WDDM usage follows a free over ~0.1-0.3 s: read it until two reads 50 ms apart agree (at most 1 s; every slot is
+    // idle, a request that arrives meanwhile waits at most that long)
+    wddmwatch::Sample after = vram_probe_ ? vram_probe_() : wddmwatch::Sample{};
+    for (int i = 0; i < 20 && after.ok; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        const wddmwatch::Sample a2 = vram_probe_();
+        const bool same = a2.ok && a2.local_usage == after.local_usage;
+        after = a2;
+        if (same) break;
+    }
     const std::uint32_t now_tok = pool_pages_ * kv_page;
     if (!ok) {
         logW("memory governor: the KV pool could not be re-allocated to {} tokens; kept at {} tokens ({:.0f} ms)", tokens, now_tok, ms);

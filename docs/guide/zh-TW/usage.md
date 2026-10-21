@@ -192,7 +192,7 @@ whirl serve  MODEL.gguf [選項]      （同一支程式）
 | `--precise` / `--balance` / `--fast` / `--mode M` | 數值模式（預設 balance；`--precise`：f16 KV；f16 池放不下一個完整請求時，會降低每個請求的 context 並警告；若有指定 `--ctx` / `--ctx-per-slot` 則拒絕啟動）。見[數值模式](#modes) |
 | `--mtp-drafts N` | 每回合固定的 MTP 草稿數，1～10（預設：依模型類型由成本模型決定） |
 | `--decode-min-tps N` | decode 保底速度：其他請求在 prefill 時，每個串流中（decode 中）的請求至少維持 N tok/s；做法是縮短 prefill forward、穿插 decode cycle（預設 20；`0` = 關閉，prefill forward 不受限）。任何 N 的輸出都相同（[server.md](server.md#batching)） |
-| `--kv-ram-mb N` | 前綴快取的主記憶體層，單位 MiB 的 pinned 記憶體（預設：實體記憶體的 1/4，至少 8 GiB 或一個完整長度 session（若更大；27B 模型約 9 GiB），最多 32 GiB，且不超過啟動時可用記憶體的一半；64 GB 的電腦為 16 GiB；0.2.2.1 起不論指定或自動，RAM 層一律以 20480 MiB 為上限並印出 `adjusted:`，因為在測試機上更大的 pinned RAM 層會在第一個請求出現 hipError 719（原因調查中）；整合式 GPU（Radeon 8060S）：作業系統可見記憶體的 1/8，下限為一個最大 context 的條目（27B 模型在 262k 約 6 GiB），上限 16 GiB，且不超過啟動時可用記憶體的 1/4；作業系統可見記憶體低於 32 GB 則關閉（BIOS 的 VRAM 保留區不計；64 GB 的電腦為 8 GiB））。啟動日誌會印出選定的大小與原因。閒置 session 會複製到這裡，下次直接還原而不必重新 prefill。`0` 會關閉兩個 host 層。**Radeon 8060S**（內顯）：預設開啟，大小如上（KV pool 是 BIOS 保留區，主記憶體層是另外 pin 住的作業系統記憶體；128k 的 session 從 RAM 或 SSD 還原，不必重新 prefill）；`--kv-ram-mb 0` 關閉兩個 host 層，`--kv-ssd-gb 0` / `--kv-ssd-mode off` 只關 SSD 層 |
+| `--kv-ram-mb N` | 前綴快取的主記憶體層，單位 MiB 的 pinned 記憶體（預設：實體記憶體的 1/4，至少 8 GiB 或一個完整長度 session（若更大；27B 模型約 9 GiB），最多 32 GiB，且不超過啟動時可用記憶體的一半；64 GB 的電腦為 16 GiB；0.2.2.1 起不論指定或自動，RAM 層一律以 20480 MiB 為上限（測試機上更大的 pinned RAM 層會在第一個請求當機，原因調查中；0.2.2.2 起自動大小以一般訊息註明，指定的大小印 `adjusted:`，且先套上限再檢查是否超過可用記憶體的一半，超過時降到一半）；整合式 GPU（Radeon 8060S）：作業系統可見記憶體的 1/8，下限為一個最大 context 的條目（27B 模型在 262k 約 6 GiB），上限 16 GiB，且不超過啟動時可用記憶體的 1/4；作業系統可見記憶體低於 32 GB 則關閉（BIOS 的 VRAM 保留區不計；64 GB 的電腦為 8 GiB））。啟動日誌會印出選定的大小與原因。閒置 session 會複製到這裡，下次直接還原而不必重新 prefill。`0` 會關閉兩個 host 層。**Radeon 8060S**（內顯）：預設開啟，大小如上（KV pool 是 BIOS 保留區，主記憶體層是另外 pin 住的作業系統記憶體；128k 的 session 從 RAM 或 SSD 還原，不必重新 prefill）；`--kv-ram-mb 0` 關閉兩個 host 層，`--kv-ssd-gb 0` / `--kv-ssd-mode off` 只關 SSD 層 |
 | `--kv-ssd-dir PATH` | SSD 層目錄（預設 `%LOCALAPPDATA%\whirl\kvcache`） |
 | `--kv-ssd-gb N` | SSD 層容量上限，GiB（預設 64；`0` = 不用 SSD 層） |
 | `--kv-ssd-mode M` | SSD 層何時寫入：`shutdown`（預設；只寫重用過的項目：關閉 WHIRL 時——Ctrl+C、關閉主控台視窗、登出、作業系統關機，後三者只有約 5 秒——、主記憶體層必須擠出時，以及閒置約 5 分鐘後；一次性的 prompt 永遠不寫）、`always`（閒置超過 `--kv-ssd-delay` 後寫入）、`off`（不寫 SSD 檔案）。見[SSD 層如何儲存 session](#ssd-tier) |
@@ -427,6 +427,7 @@ PowerShell 中先用 `$env:WHIRL_MODE = "precise"` 設定再啟動程式。**一
 | `WHIRL_SYS_CKPTS=N` | 保留在 VRAM 的共用前綴檢查點數（預設 2） |
 | `WHIRL_SYS_LCP=0` | 不在多個 session 共同的前綴處建立檢查點 |
 | `WHIRL_CKPT_HOST=1` | 前綴檢查點放在 pinned 主記憶體，不放 VRAM |
+| `WHIRL_GOVERNOR=0` | 關閉伺服器執行中的記憶體調節（0.2.2.2）：WDDM 預算在執行中下降時，它會釋放快取、讓新請求排隊、所有 slot 閒置時以較小的大小重新配置 KV 池，預算恢復後再長回來（見 server.md 第 7 節） |
 | `WHIRL_POOL_BUDGET_MARGIN_MB=N` | 決定 KV 池大小與事後重查時，在 Windows（WDDM）顯示記憶體預算之下替其他程式成長留的空間。預設取 2048 MiB（GPU 接螢幕時 3072）與預算 6% 的較大者。啟動時其他程式的 VRAM 中預算還沒反映的部分另外保留 |
 | `WHIRL_POOL_RESERVE_MB=N` | 舊的「只看可用 VRAM」規則：決定 KV 池大小時保留不用的 VRAM，同時關掉 WDDM 預算、margin 與池重查（預設保留 768，MoE 1536）。要替其他程式多留空間，請用 `WHIRL_POOL_BUDGET_MARGIN_MB` |
 | `WHIRL_VRAM_HEADROOM_MB=N` | 在保留量與 WDDM margin 之外，再額外留給桌面與其他程式的 VRAM。預設 0（0.2.2.1 起由 WDDM margin 涵蓋桌面：接螢幕時 3 GiB；之前 VRAM 小於 20 GiB 的卡預設 1536）。VRAM 小於 20 GiB 的卡（16 GB 的 RX 9070／9070 XT／9060 XT）仍預設 `--parallel 1`（KV 格式跟其他卡一樣由模式決定） |

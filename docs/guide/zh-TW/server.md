@@ -41,6 +41,7 @@ Base URL 為 `http://127.0.0.1:8080/v1`；接受任何 API key。模型只載入
 | 變數 | 效果 |
 |---|---|
 | `WHIRL_KV=auto\|f16\|q8\|q8h\|q8v` | KV 格式；`auto` 套用下限規則（[kv-and-caching.md](kv-and-caching.md#kv-auto)） |
+| `WHIRL_GOVERNOR=0` | 關閉執行中的記憶體調節（0.2.2.2：伺服器執行中 WDDM 預算下降時，釋放快取、讓新請求排隊，並在所有 slot 閒置時以較小的大小重新配置 KV 池；[說明](#vram-log)） |
 | `WHIRL_POOL_BUDGET_MARGIN_MB` | 在 WDDM 預算之下替其他程式成長留的空間（預設取 2 GiB（GPU 接螢幕時 3 GiB）與預算 6% 的較大者；其他程式的 VRAM 中預算還沒反映的部分另外保留；[說明](#vram-log)） |
 | `WHIRL_POOL_RESERVE_MB` | 舊的「只看可用 VRAM」規則：池之後保留的 VRAM，不套用 WDDM 預算（可用 VRAM 之下的預設保留量 dense 768 / MoE 1536） |
 | `WHIRL_NO_PREFIX_CACHE=1` | 停用前綴快取 |
@@ -286,15 +287,15 @@ I batch | slots busy 0/4 (decode 0, prefill 0) | 80 cycles, 3.79 slots/cycle, 11
 - 啟動時的 `other processes use X GiB of VRAM on this GPU (display attached: yes/no)`：伺服器啟動時，
   其他程式（桌面、瀏覽器、其他 AI 工具、Docker）在同一張 GPU 上佔用的量。
 - `kv pool sizing: ... margin N MiB (...)`：在 WDDM 預算之下保留的量。伺服器啟動時 Windows 回報的預算
-  不一定已經算進其他程式：在 R9700 上另一個行程佔用 3.3 GiB 時，配置池之前讀到 31.02 GiB，配置之後
+  不一定已經算進其他程式：在 R9700 上另一個行程佔用 3.2 GiB 時，配置池之前讀到 31.02 GiB，配置之後
   立刻變成 28.08 GiB。所以 margin = 啟動時其他行程的用量中預算還沒反映的部分，加上替它們之後成長留的
   空間：2 GiB（這張 GPU 接了螢幕時 3 GiB）與預算的 6% 取較大者。`WHIRL_POOL_BUDGET_MARGIN_MB=N` 可以
   指定後者。
 - 啟動時的 `adjusted: ...`：你指定的設定若放不下伺服器量到的資源（RAM、扣掉 margin 的 WDDM 預算、
   其他程式的 VRAM），會降到放得下的值，每項一行並附原因。順序：`--parallel`（每個 slot 的狀態與檢查點是
   固定的 VRAM；放不下一個完整請求時才減少，先依估算，載入權重後再依實測的 VRAM 檢查一次）、
-  `WHIRL_PREFILL_BATCH`／檢查點數量、RAM 層（`--kv-ram-mb` 超過可用 RAM 的一半時降到預設大小；RAM 層一律
-  以 20480 MiB 為上限，因為在測試機上更大的會出現 hipError 719，原因調查中）、`-c`（池），最後是
+  `WHIRL_PREFILL_BATCH`／檢查點數量、RAM 層（測試機上更大的 RAM 層出現當機、原因調查中，所以 RAM 層一律以
+  20480 MiB 為上限：自動大小以一般訊息註明，你指定的大小則印 `adjusted:`；之後超過可用 RAM 一半的大小降到一半）、`-c`（池），最後是
   `--ctx-per-slot`（它本身不佔記憶體，所以最後才依池的大小設上限）。若仍放不下一個完整請求，總結會寫
   `target not reached`。`startup adjustments (N): ...` 會總結全部調整（全都放得下時為 `none`），
   `GET /props` 與 `GET /health` 的 `startup` 物件會顯示實際生效的值。超過調整後每請求 context 的提示
@@ -323,6 +324,25 @@ I batch | slots busy 0/4 (decode 0, prefill 0) | 80 cycles, 3.79 slots/cycle, 11
   或更大的值替其他程式多留空間）、池的大小、其他程式現在與啟動時用了多少 VRAM，以及數字。啟動時若已
   在溢出，也會印同樣的內容。持續期間最多每分鐘重複一次（`GPU memory spill continues (N so far)`）；
   結束時印一行 `I GPU memory spill is over`。
+- `memory governor:`（0.2.2.2）：伺服器執行中預算下降時（其他程式佔用了 VRAM）。預算之下剩餘的空間一少於
+  margin 的一半（約 1–1.5 GiB），就依下列順序處理，每個動作一行並附數字：
+  1. 釋放可重用的快取：閒置 slot 在 KV 池裡的前綴快取（請求結束時若 RAM 層有空間已經複製過去）；若仍有
+     請求在跑，再釋放閒置 slot 與共用前綴檢查點的檢查點緩衝區，這些 VRAM 會立刻還給 Windows（緩衝區
+     恢復之前，這些 slot 不接新請求）；
+  2. RAM 層保留不縮（它是 pinned 主機記憶體，不是 VRAM：我們的測試中 pin 住 17 GiB 時 R9700 的預算沒有
+     改變，縮小它只會損失前綴快取）；
+  3. 較小的 KV 池在等執行中的請求結束時，新請求先排隊；
+  4. 較小的池放不下時，降低新請求的 context（執行中的請求維持原本的值）；
+  5. 所有 slot 閒置時立刻以較小的大小重新配置 KV 池（`KV pool re-allocated A -> B tokens ... in N ms`），
+     這一步才真正把 VRAM 還給 Windows。執行中請求的 KV 絕不搬動，所以預算下降時正在跑的請求會一直
+     較慢，直到它結束；
+  6. 最後，若仍超過預算，才印出下面的 `GPU memory spill` 警告。
+  預算之下剩餘超過 margin 的 1.5 倍並持續 30 秒、且距離上次下降至少 60 秒（預算反覆上下時加倍，最多
+  15 分鐘）後，池會在閒置時長回啟動時的大小（`back to the startup settings`）。`GET /health` 與
+  `GET /props` 的 `governor` 物件會顯示目前生效的值（`pool_tokens`、`ctx_per_request`、
+  `slots_admitting`、`admission_held`、`parked_mib`、`shrinks`、`grows`、`last_action`）；`/props` 的
+  `n_ctx` 是新請求的 context。輸出不變：只改變池能放多少 token。Radeon 8060S（池固定在保留區）與設了
+  `WHIRL_POOL_RESERVE_MB` 時不啟用；`WHIRL_GOVERNOR=0` 可關閉。
 - `req N | slot S | decode slowed from X to Y tok/s (...)`：某個請求的解碼在一段時間內比它最初 200 個
   token 慢 40% 以上時，每個請求印一次。只有在看到溢出、而且每個 decode cycle 確實變慢時，才指出溢出
   可能是原因（警告）；每個 cycle 沒有變慢時，會說是每個 cycle 產出的 token 變少（接受的 draft 變少）；

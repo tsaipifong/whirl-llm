@@ -22,6 +22,8 @@ Plan Governor::tick(const Input& in) {
     Plan p;
     p.ctx_new = ctx_new_;
     if (in.budget == 0 || cfg_.per_tok == 0 || cfg_.page == 0) return p;
+    // just re-allocated: the WDDM usage may not show the free yet (R9700: part of a 2.7 GiB free showed ~0.3 s later)
+    if (in.now_s - t_resized_ < cfg_.settle_s) return p;
     const double hold = hold_ < 0.0 ? cfg_.hold_s : hold_;
     const auto i64 = [](std::uint64_t v) { return static_cast<std::int64_t>(v); };
     // what is short for the full state (startup margin free, parked checkpoint buffers back): > 0 short
@@ -91,6 +93,7 @@ Plan Governor::tick(const Input& in) {
 }
 
 void Governor::resized(std::uint32_t pool, bool grew, double now_s) {
+    t_resized_ = now_s;
     if (grew) {
         t_grow_ = now_s;
         ++n_grow_;

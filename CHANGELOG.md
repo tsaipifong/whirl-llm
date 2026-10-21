@@ -11,7 +11,7 @@ All notable changes to WHIRL are listed here. Versions follow `project(whirl VER
   ran over the Windows (WDDM) video memory budget (issue #5, reported by @CJure and @DanGTG; issue #6, reported by
   @Triazic). @CJure's startup log found it: the KV pool was sized against a budget of 31.02 GiB, Windows reported
   29.55 GiB about 0.2 s later, and the server started 0.37 GiB over it. Why the budget fell in that case is not known
-  for certain. On our R9700 the same thing happens when another process holds VRAM: with 3.3 GiB taken by another
+  for certain. On our R9700 the same thing happens when another process holds VRAM: with 3.2 GiB taken by another
   process, the budget read 31.02 GiB when the pool was sized and 28.08 GiB right after the pool was allocated, so the
   budget seen at startup does not always count other programs yet. Over the budget, decode slowed from about 100-119
   to 10-43 tok/s in those tests, with "Shared GPU memory" unchanged (as in @CJure's report), and recovered when the
@@ -27,7 +27,7 @@ All notable changes to WHIRL are listed here. Versions follow `project(whirl VER
     1536 MiB desktop headroom is dropped, since the margin now covers it.
   - Right after the KV pool is allocated the server reads the budget again and, when its usage plus the margin no
     longer fits, frees the pool and allocates a smaller one (whole pages, before any request), logging
-    `kv pool check: ...`; it waits for the WDDM numbers to settle after each free. In the 3.3 GiB test the pool was
+    `kv pool check: ...`; it waits for the WDDM numbers to settle after each free. In the 3.2 GiB test the pool was
     sized at 236544 tokens and fit the lowered budget with 2.5 GiB to spare.
   - Settings given on the command line that do not fit what the server measured are lowered to what fits instead of
     refusing to start or running over the budget, never silently: one `adjusted:` line each with the reason, a
@@ -39,7 +39,8 @@ All notable changes to WHIRL are listed here. Versions follow `project(whirl VER
     refuses to start only when even one slot with a 4096-token pool does not fit. The Radeon 8060S keeps its
     carve-out check.
   - Not covered yet: when other programs take more VRAM than the room while the server runs, Windows can still move
-    WHIRL's memory and decode slows down (in the 4 GiB test above: about 100 -> 10-43 tok/s). The server now says so
+    WHIRL's memory and decode slows down (on our R9700, when another process took 4 GiB more while a request
+    ran, decode fell from about 100 to 10-43 tok/s). The server now says so
     in the log (below), and a restart sizes the pool for the VRAM free at that time. Adjusting the pool while running
     comes in 0.2.2.2.
   - Output is unchanged; only the pool, and so how much context can be cached at once, is smaller.

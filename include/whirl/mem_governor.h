@@ -43,6 +43,7 @@ struct Config {
     double hold_max_s = 900.0;
     double osc_window_s = 600.0;
     std::uint64_t min_grow = 1ull << 30;  // grow by at least this much (or up to pool_start)
+    double settle_s = 3.0;           // no decision this soon after a re-allocation (the WDDM counters follow a free late)
 };
 
 // One sample, with the engine's state.
@@ -91,7 +92,7 @@ private:
     Config cfg_;
     bool episode_ = false;
     double hold_ = -1.0;                  // < 0: cfg_.hold_s
-    double t_shrink_ = -1e18, t_grow_ = -1e18;
+    double t_shrink_ = -1e18, t_grow_ = -1e18, t_resized_ = -1e18;
     std::optional<double> recover_since_;
     std::uint32_t ctx_new_ = 0;
     std::uint32_t n_shrink_ = 0, n_grow_ = 0;

@@ -43,6 +43,7 @@ Useful environment variables (all of them: [usage.md](../../usage.md#env)):
 | Variable | Effect |
 |---|---|
 | `WHIRL_KV=auto\|f16\|q8\|q8h\|q8v` | KV format; `auto` applies the floor rule ([kv-and-caching.md](kv-and-caching.md#kv-auto)) |
+| `WHIRL_GOVERNOR=0` | turns the runtime memory governor off (0.2.2.2: when the WDDM budget drops while the server runs, it frees cache, queues new requests and re-allocates the KV pool smaller when every slot is idle; [details](#vram-log)) |
 | `WHIRL_POOL_BUDGET_MARGIN_MB` | room kept free under the WDDM budget for other programs to grow (default: the larger of 2 GiB, 3 GiB with a monitor on the GPU, and 6% of the budget; other programs' VRAM that the budget does not show yet is kept free on top; [details](#vram-log)) |
 | `WHIRL_POOL_RESERVE_MB` | old free-VRAM-only rule: VRAM reserve after the pool, WDDM budget not applied (default reserve 768 dense / 1536 MoE under the free VRAM) |
 | `WHIRL_NO_PREFIX_CACHE=1` | disable prefix caching |
@@ -326,7 +327,7 @@ the Windows (WDDM) video memory budget, and these lines show whether it still do
   programs (desktop, browser, other AI tools, Docker) hold on the same GPU when the server starts.
 - `kv pool sizing: ... margin N MiB (...)`: what is kept free under the WDDM budget. The budget Windows
   reports when the server starts does not always count other programs yet: on an R9700 with another
-  process holding 3.3 GiB, it read 31.02 GiB before the pool was allocated and 28.08 GiB right after.
+  process holding 3.2 GiB, it read 31.02 GiB before the pool was allocated and 28.08 GiB right after.
   So the margin is what other processes used at startup that the budget does not show yet, plus room
   for them to grow: the larger of 2 GiB (3 GiB when a monitor is attached to this GPU) and 6% of the
   budget. `WHIRL_POOL_BUDGET_MARGIN_MB=N` sets the room.
@@ -334,9 +335,10 @@ the Windows (WDDM) video memory budget, and these lines show whether it still do
   WDDM budget with the margin, other programs' VRAM) is lowered to what fits, one line each with the
   reason, in this order: `--parallel` (each slot's state and checkpoints are fixed VRAM; lowered when one
   full request no longer fits next to them, first from an estimate, then again with the VRAM measured
-  after the weights are loaded), `WHIRL_PREFILL_BATCH` / checkpoint counts, the RAM tier (`--kv-ram-mb`
-  above half of the available RAM goes to the default size; every RAM tier is capped at 20480 MiB,
-  because a larger one crashed with hipError 719 on a test machine, cause under investigation), `-c`
+  after the weights are loaded), `WHIRL_PREFILL_BATCH` / checkpoint counts, the RAM tier (every RAM tier
+  is capped at 20480 MiB while a crash with larger ones on a test machine is investigated; the automatic
+  size is capped with an info line, a size you gave with an `adjusted:` line; then a size above half of
+  the available RAM goes to half of it), `-c`
   (the pool), then `--ctx-per-slot` (it reserves no memory by itself, so it is capped to the pool last).
   If one full request still does not fit, the summary says `target not reached`.
   `startup adjustments (N): ...` sums them up (`none` when everything fits), and `GET /props` and
@@ -373,6 +375,29 @@ the Windows (WDDM) video memory budget, and these lines show whether it still do
   at startup, and the numbers. The same text is printed at startup when the spill is already there.
   While it lasts it repeats at most once a minute (`GPU memory spill continues (N so far)`);
   `I GPU memory spill is over` when it ends.
+- `memory governor:` lines (0.2.2.2) when the budget drops while the server runs (another program
+  takes VRAM): as soon as less than half of the margin is free under the budget (about 1-1.5 GiB), it
+  acts in this order, one line per action with numbers:
+  1. frees reusable cache: idle slots' prefix cache in the KV pool (it went to the RAM tier at request
+     end when the tier had room) and, while a request still runs, the checkpoint buffers of idle slots
+     and of the shared prefix checkpoints, which returns that VRAM to Windows at once (those slots take
+     no new request until the buffers are restored);
+  2. keeps the RAM tier (it is pinned host memory, not VRAM: 17 GiB pinned left the R9700's budget
+     unchanged in our test, so shrinking it would only lose prefix cache);
+  3. queues new requests while a smaller KV pool waits for the running requests to finish;
+  4. lowers the context for new requests if the smaller pool holds less (running requests keep theirs);
+  5. re-allocates the KV pool smaller as soon as every slot is idle (`KV pool re-allocated A -> B tokens
+     ... in N ms`): this is what gives the VRAM back to Windows. A running request's KV is never moved,
+     so a request that was running when the budget dropped stays slower until it finishes;
+  6. only then the `GPU memory spill` warning below, if WHIRL is still over the budget.
+  When more than 1.5 times the margin has been free for 30 s, and at least 60 s after the last drop
+  (doubling up to 15 min when the budget keeps going up and down), the pool grows back while idle,
+  up to its startup size (`back to the startup settings`). `GET /health` and `GET /props` show the
+  effective values in a `governor` object (`pool_tokens`, `ctx_per_request`, `slots_admitting`,
+  `admission_held`, `parked_mib`, `shrinks`, `grows`, `last_action`); `/props` `n_ctx` is the context
+  for new requests. Output is unchanged: only how many tokens the pool holds changes. Not on the
+  Radeon 8060S (fixed carve-out pool) and not with `WHIRL_POOL_RESERVE_MB`; `WHIRL_GOVERNOR=0` turns
+  it off.
 - `req N | slot S | decode slowed from X to Y tok/s (...)` once per request when a window of its
   decode is more than 40% slower than its first 200 tokens. It names the spill as the likely cause
   (a warning) only when a spill is seen and each decode cycle got slower; when each cycle is not

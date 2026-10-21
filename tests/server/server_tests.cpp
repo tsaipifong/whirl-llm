@@ -840,6 +840,7 @@ void testGovernor() {
     gc.ctx = 16384;
     gc.recover_s = 0.4;
     gc.hold_s = 0.6;
+    gc.settle_s = 0.5;
     su.gov = gc;
     std::uint64_t pool0 = 0;  // pool bytes at startup, set below
     su.gov_margin = [&](std::uint64_t) { return pool0 / 2; };
