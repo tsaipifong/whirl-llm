@@ -45,8 +45,9 @@ All notable changes to WHIRL are listed here. Versions follow `project(whirl VER
   - Output is unchanged; only the pool, and so how much context can be cached at once, is smaller.
 - Server: a RAM tier of the prefix cache above about 20 GiB could fail the first request with hipError 719 (R9700:
   `--kv-ram-mb 24064` failed, 20480 worked; 0.2.2 too). The automatic size is above 20 GiB on PCs with more than about 80 GB of
-  RAM or more. Until the cause is found, every RAM tier, given or automatic, is capped at 20480 MiB, with an
-  `adjusted:` line. With the cap, `--kv-ram-mb 24064` starts with 20480 MiB and serves requests.
+  RAM. Until the cause is found, every RAM tier, given or automatic, is capped at 20480 MiB, with an `adjusted:` line.
+  Measured on the R9700 with 0.2.2.1: `--kv-ram-mb 22528` started with 20480 MiB (the cap), `--kv-ram-mb 24064` with
+  16384 MiB (it was more than half of the RAM available then, so it went to the default size); both served requests.
 
 ### Added
 
