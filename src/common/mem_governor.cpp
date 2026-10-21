@@ -28,9 +28,10 @@ Plan Governor::tick(const Input& in) {
     // free must not shrink again), grow decisions the larger (R9700 S1c: a grow sized from the expected usage, 0.86 GiB
     // below the measured one, overshot and was shrunk back)
     std::uint64_t local = in.local, local_g = in.local;
-    // After a grow, a measured usage over the budget is not masked (REVIEW-GOV-2 C-1, R9700 R2b_nolim1: a grow to 32.50 GiB
-    // with the budget at 31.02 GiB was hidden for trust_s and logged as the end of the episode).
-    const bool grow_over = last_grew_ && in.local > in.budget;
+    // After a grow, a measured usage inside the trigger band (less than margin/2 free) is not masked (REVIEW-GOV-2 C-1, R9700
+    // R2b_nolim1: a grow to 32.50 GiB with the budget at 31.02 GiB was hidden for trust_s and logged as the end of the
+    // episode; REVIEW-GOV-3 C-2: the same for a grow that lands under the budget but inside the band).
+    const bool grow_over = last_grew_ && in.local + in.margin / 2 > in.budget;
     if (expected_local_ > 0 && in.now_s - t_resized_ < cfg_.trust_s) {
         if (!grow_over) local = std::min(local, expected_local_);
         local_g = std::max(local_g, expected_local_);

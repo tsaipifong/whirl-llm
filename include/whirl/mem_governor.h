@@ -22,9 +22,10 @@
 // endMargin (3/4 of the margin) free: then the episode ends and new requests get the startup context again. hold_s
 // doubles (up to hold_max_s) when a shrink follows a grow within osc_window_s, and goes back to hold_s after
 // quiet_reset_s without a shrink. For trust_s after a re-allocation the local usage counts as at most what it should be (the WDDM
-// counters show a free late, on the R9700 until the next memory operation), except after a grow whose measured usage is over the
-// budget: that is a real overshoot (REVIEW-GOV-2 C-1: the HIP resource cache kept the freed pool), acted on at once and never
-// reported as the end of the episode.
+// counters show a free late, on the R9700 until the next memory operation), except after a grow whose measured usage is inside the
+// trigger band (less than margin/2 free, over the budget or not): that is a real overshoot (REVIEW-GOV-2 C-1, REVIEW-GOV-3 C-2;
+// R9700 with WHIRL_HIP_CACHE_LIMIT=0, probably the HIP resource cache keeping the freed pool, not shown directly), acted on at
+// once and never reported as the end of the episode.
 // A running request's KV is never touched: the pool changes only while every slot is idle. Output is unchanged
 // (only how many tokens the pool holds changes; tokens never depend on it).
 //
