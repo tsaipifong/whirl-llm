@@ -1,0 +1,66 @@
+######## C-2 test on fbdbe38 (fbdbe38)
+C-2 [residual 0 MiB, grow costs 1100 MiB more than expected: under the budget, in the band]
+  FAIL line 140: r.end_band_t < 0 | no episode_end with less than margin/2 free (episode_end at t=233 with 968 MiB free, trigger 1034)
+  FAIL line 142: r.act_t >= 0 && r.act_t - r.t_grow <= 10.0 | acts within 10 s of the grow at t=230 (first action t=350, 120 s later)
+  grow t=230 to 340480 | first episode_end t=233 (in band: yes, 968 MiB free) | first action t=350 | reduced at end 1
+C-2 [residual 0 MiB, grow costs 1300 MiB more than expected: under the budget, in the band]
+  FAIL line 140: r.end_band_t < 0 | no episode_end with less than margin/2 free (episode_end at t=233 with 768 MiB free, trigger 1034)
+  FAIL line 142: r.act_t >= 0 && r.act_t - r.t_grow <= 10.0 | acts within 10 s of the grow at t=230 (first action t=350, 120 s later)
+  grow t=230 to 340480 | first episode_end t=233 (in band: yes, 768 MiB free) | first action t=350 | reduced at end 1
+C-2 [residual 400 MiB, grow costs 700 MiB more than expected: under the budget, in the band]
+  FAIL line 140: r.end_band_t < 0 | no episode_end with less than margin/2 free (episode_end at t=233 with 968 MiB free, trigger 1034)
+  FAIL line 142: r.act_t >= 0 && r.act_t - r.t_grow <= 10.0 | acts within 10 s of the grow at t=230 (first action t=350, 120 s later)
+  grow t=230 to 340480 | first episode_end t=233 (in band: yes, 968 MiB free) | first action t=350 | reduced at end 1
+control [residual 0 MiB, grow overshoot 0 MiB, outside the band]
+  grow t=230 | episode_end t=233 | action after the grow: no
+control [residual 0 MiB, grow overshoot 900 MiB, outside the band]
+  grow t=230 | episode_end t=233 | action after the grow: no
+control [residual 400 MiB, grow overshoot 0 MiB, outside the band]
+  grow t=230 | episode_end t=233 | action after the grow: no
+probe [read lag inside the band after an exact grow; not counted]
+  lag  600 MiB for    2 s: episode_end t=233, action after the grow: no (t=-1), grows 1 shrinks 1, reduced at end 0
+  lag  600 MiB for    5 s: episode_end t=233, action after the grow: no (t=-1), grows 1 shrinks 1, reduced at end 0
+  lag  600 MiB for   10 s: episode_end t=233, action after the grow: no (t=-1), grows 1 shrinks 1, reduced at end 0
+  lag 1300 MiB for    2 s: episode_end t=233, action after the grow: no (t=-1), grows 1 shrinks 1, reduced at end 0
+  lag 1300 MiB for    5 s: episode_end t=233, action after the grow: no (t=-1), grows 1 shrinks 1, reduced at end 0
+  lag 1300 MiB for   10 s: episode_end t=233, action after the grow: no (t=-1), grows 1 shrinks 1, reduced at end 0
+review_gov4 C-2 tests: 15 passed, 6 failed
+exit 1
+######## pool test on fbdbe38
+Swift --mmproj: reserve 0 MiB, pool room 12014 MiB, after the encoder's measured 900 MiB: free 1168 MiB, 134 MiB above the trigger
+  FAIL line 68: to_trigger >= static_cast<std::int64_t>(512 * MiB) | Swift: at least 512 MiB above the trigger after the image (134 MiB)
+  FAIL line 71: free_after + static_cast<std::int64_t>(16 * MiB) >= static_cast<std::int64_t>(margin) | Swift: the reserve covers the measured use (free 1168 MiB vs margin 2068)
+Ornith --mmproj: reserve 0 MiB, pool room 8471 MiB, after the encoder's measured 1007 MiB: free 1061 MiB, 27 MiB above the trigger
+  FAIL line 68: to_trigger >= static_cast<std::int64_t>(512 * MiB) | Ornith: at least 512 MiB above the trigger after the image (27 MiB)
+  FAIL line 71: free_after + static_cast<std::int64_t>(16 * MiB) >= static_cast<std::int64_t>(margin) | Ornith: the reserve covers the measured use (free 1061 MiB vs margin 2068)
+text-only: kvAvail(a, visionReserve({})) == a
+review_gov4 pool tests: 4 passed, 4 failed
+exit 1
+######## C-2 test on cb6c9b4 (cb6c9b4)
+C-2 [residual 0 MiB, grow costs 1100 MiB more than expected: under the budget, in the band]
+  grow t=230 to 340480 | first episode_end t=-1 (in band: no, 0 MiB free) | first action t=233 | reduced at end 1
+C-2 [residual 0 MiB, grow costs 1300 MiB more than expected: under the budget, in the band]
+  grow t=230 to 340480 | first episode_end t=-1 (in band: no, 0 MiB free) | first action t=233 | reduced at end 1
+C-2 [residual 400 MiB, grow costs 700 MiB more than expected: under the budget, in the band]
+  grow t=230 to 340480 | first episode_end t=-1 (in band: no, 0 MiB free) | first action t=233 | reduced at end 1
+control [residual 0 MiB, grow overshoot 0 MiB, outside the band]
+  grow t=230 | episode_end t=233 | action after the grow: no
+control [residual 0 MiB, grow overshoot 900 MiB, outside the band]
+  grow t=230 | episode_end t=233 | action after the grow: no
+control [residual 400 MiB, grow overshoot 0 MiB, outside the band]
+  grow t=230 | episode_end t=233 | action after the grow: no
+probe [read lag inside the band after an exact grow; not counted]
+  lag  600 MiB for    2 s: episode_end t=233, action after the grow: no (t=-1), grows 1 shrinks 1, reduced at end 0
+  lag  600 MiB for    5 s: episode_end t=233, action after the grow: no (t=-1), grows 1 shrinks 1, reduced at end 0
+  lag  600 MiB for   10 s: episode_end t=233, action after the grow: no (t=-1), grows 1 shrinks 1, reduced at end 0
+  lag 1300 MiB for    2 s: episode_end t=233, action after the grow: no (t=-1), grows 1 shrinks 1, reduced at end 0
+  lag 1300 MiB for    5 s: episode_end t=-1, action after the grow: YES (t=233), grows 3 shrinks 4, reduced at end 1
+  lag 1300 MiB for   10 s: episode_end t=-1, action after the grow: YES (t=233), grows 3 shrinks 4, reduced at end 1
+review_gov4 C-2 tests: 21 passed, 0 failed
+exit 0
+######## pool test on cb6c9b4
+Swift --mmproj: reserve 903 MiB, pool room 11111 MiB, after the encoder's measured 900 MiB: free 2071 MiB, 1037 MiB above the trigger
+Ornith --mmproj: reserve 1281 MiB, pool room 7190 MiB, after the encoder's measured 1007 MiB: free 2342 MiB, 1308 MiB above the trigger
+text-only: kvAvail(a, visionReserve({})) == a
+review_gov4 pool tests: 9 passed, 0 failed
+exit 0
