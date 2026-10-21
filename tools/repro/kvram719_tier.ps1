@@ -47,7 +47,8 @@ if ($up) {
 }
 if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force; $p.WaitForExit() }
 $txt = @(Get-Content $log -ErrorAction SilentlyContinue)
-$bad = @($txt | Select-String -Pattern "hipError|\| failed:")
+# error lines only: the "adjusted:" line names hipError 719 as the reason, so match E lines and "(hipError N)"
+$bad = @($txt | Select-String -Pattern '^\S+ \S+ E |\(hipError \d+\)')
 $tierLine = @($txt | Select-String -Pattern "kv tier: RAM tier size|adjusted: .*kv-ram-mb|kv tier: RAM tier off")
 $tierLine | ForEach-Object { Write-Host "  log: $($_.Line)" }
 $bad | Select-Object -First 3 | ForEach-Object { Write-Host "  log: $($_.Line)" }

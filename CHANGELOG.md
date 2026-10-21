@@ -43,10 +43,16 @@ All notable changes to WHIRL are listed here. Versions follow `project(whirl VER
     in the log (below), and a restart sizes the pool for the VRAM free at that time. Adjusting the pool while running
     comes in 0.2.2.2.
   - Output is unchanged; only the pool, and so how much context can be cached at once, is smaller.
-- Server: a RAM tier of the prefix cache above about 20 GiB could fail the first request with hipError 719 (R9700:
-  `--kv-ram-mb 24064` failed, 20480 worked; 0.2.2 too). The automatic size is above 20 GiB on PCs with more than about 80 GB of
-  RAM or more. Until the cause is found, every RAM tier, given or automatic, is capped at 20480 MiB, with an
-  `adjusted:` line. With the cap, `--kv-ram-mb 24064` starts with 20480 MiB and serves requests.
+- Server: a large RAM tier of the prefix cache could fail the first request with hipError 719 (R9700:
+  `--kv-ram-mb 24064` failed; 0.2.2 too). Cause (kvram719): Windows limits how much pinned host memory the GPUs can
+  keep resident. Past the limit the memory is still allocated, but the driver cannot submit work (AMD_LOG_LEVEL=1:
+  `PAL failed to submit CMD! result:-5`), and the first kernel fails. A small test program that only pins memory fails
+  the same way, without WHIRL. Two limits were measured: per process, the GPU's non-local (shared) budget divided by the
+  number of GPUs HIP sees (a pinned buffer is charged on every GPU: on a PC with the R9700 and the 8060S, about 23 GiB);
+  and per machine, about half of the RAM for the pinned memory of all programs together (another WHIRL server pinning
+  ~10 GiB made 20480 MiB fail too). The server now reads both at startup (DXGI budget, PDH GPU Shared Usage) and lowers
+  the RAM tier, given or automatic, to what they leave, with an `adjusted:` line; the fixed 20480 MiB cap is gone (a
+  128 GB PC keeps its automatic 32 GiB tier).
 
 ### Added
 

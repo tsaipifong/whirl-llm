@@ -294,7 +294,7 @@ I batch | slots busy 0/4 (decode 0, prefill 0) | 80 cycles, 3.79 slots/cycle, 11
   其他程式的 VRAM），會降到放得下的值，每項一行並附原因。順序：`--parallel`（每個 slot 的狀態與檢查點是
   固定的 VRAM；放不下一個完整請求時才減少，先依估算，載入權重後再依實測的 VRAM 檢查一次）、
   `WHIRL_PREFILL_BATCH`／檢查點數量、RAM 層（`--kv-ram-mb` 超過可用 RAM 的一半時降到預設大小；RAM 層一律
-  以 20480 MiB 為上限，因為在測試機上更大的會出現 hipError 719，原因調查中）、`-c`（池），最後是
+  降到 GPU 還能常駐的 pinned 記憶體以內：本程序在 GPU 共用記憶體預算中的份額除以 GPU 數，以及所有程式合計約 RAM 的一半；超過時第一個請求會出現 hipError 719）、`-c`（池），最後是
   `--ctx-per-slot`（它本身不佔記憶體，所以最後才依池的大小設上限）。若仍放不下一個完整請求，總結會寫
   `target not reached`。`startup adjustments (N): ...` 會總結全部調整（全都放得下時為 `none`），
   `GET /props` 與 `GET /health` 的 `startup` 物件會顯示實際生效的值。超過調整後每請求 context 的提示

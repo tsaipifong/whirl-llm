@@ -335,8 +335,9 @@ the Windows (WDDM) video memory budget, and these lines show whether it still do
   reason, in this order: `--parallel` (each slot's state and checkpoints are fixed VRAM; lowered when one
   full request no longer fits next to them, first from an estimate, then again with the VRAM measured
   after the weights are loaded), `WHIRL_PREFILL_BATCH` / checkpoint counts, the RAM tier (`--kv-ram-mb`
-  above half of the available RAM goes to the default size; every RAM tier is capped at 20480 MiB,
-  because a larger one crashed with hipError 719 on a test machine, cause under investigation), `-c`
+  above half of the available RAM goes to the default size; every RAM tier is lowered to the pinned
+  memory the GPUs can still keep resident: this process's share of the GPU's shared budget, divided by the number of
+  GPUs, and about half of the RAM for all programs together; above that the first request fails with hipError 719), `-c`
   (the pool), then `--ctx-per-slot` (it reserves no memory by itself, so it is capped to the pool last).
   If one full request still does not fit, the summary says `target not reached`.
   `startup adjustments (N): ...` sums them up (`none` when everything fits), and `GET /props` and
