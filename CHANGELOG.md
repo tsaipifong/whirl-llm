@@ -24,8 +24,9 @@ All notable changes to WHIRL are listed here. Versions follow `project(whirl VER
   until it finishes. `GET /health` and `GET /props` show the effective values in a `governor` object; `/props` `n_ctx`
   is the context for new requests. Output is unchanged: only how many tokens the pool holds changes. Not on the Radeon
   8060S (its pool is a fixed carve-out) and not with `WHIRL_POOL_RESERVE_MB`; `WHIRL_GOVERNOR=0` turns it off.
-  The HIP runtime keeps freed GPU memory in a cache for reuse instead of giving it back to Windows (up to 4 GiB on the
-  R9700), so a smaller KV pool still counted much of the old one. whirl-server now sets `GPU_RESOURCE_CACHE_SIZE=256`
+  The HIP runtime keeps freed GPU memory in a cache for reuse instead of giving it back to Windows, so a smaller KV
+  pool still counted part of the old one (R9700: 0.87 GiB of a 3.91 GiB shrink, Swift-1.5 27B; 1.7 GiB of a 4 GiB
+  shrink, Ornith-1.5-35B-A3B). whirl-server now sets `GPU_RESOURCE_CACHE_SIZE=256`
   (MiB) for its own process unless you set it (`WHIRL_HIP_CACHE_LIMIT=0` keeps the runtime default): a 3.93 GiB shrink
   then lowered WHIRL's VRAM by 3.90 GiB, against 2.55 GiB with the default cache (Swift-1.5 27B in the test below: a
   4.03 GiB shrink lowered it by 4.09 GiB with the limit, 3 of 3 runs; a 3.91 GiB shrink by 3.04 GiB without it, 3 of 3).
@@ -40,28 +41,31 @@ All notable changes to WHIRL are listed here. Versions follow `project(whirl VER
     (393984 -> 200960 tokens) with the other process still holding its 4 GiB, the first request ran at 95-120 tok/s in
     5 of 6 runs (57.7 in one) and the next one was back at 260-261 tok/s in 4 of 6 runs (57.6 and 134.6 tok/s in the
     other two). After the other process exited, decode was back at 259-261 tok/s by the second request in 5 of 6 runs
-    (the first one 121 tok/s in one of them); one run (build before
-    the review fixes) stayed at 160 tok/s (38% slower) for at least 5 minutes with no warning, cause unknown. The release
+    (the first one 121 tok/s in one of them); one run (build before the review fixes) stayed at 160 tok/s (38% slower)
+    for at least 5 minutes with no warning, cause unknown. After the other process exited, only 2 runs were on the
+    release build (both back at 259-260 tok/s from the first request); the other 4 were on the build before the review
+    fixes, whose grow-back differs (it stopped at 364032 tokens). The release
     build's pool grew back to its startup size and context (393984 tokens, 131072 per request) in one step in 2 of 2
     runs (the build before the fixes stopped at 364032 tokens in 4 of 4). With the HIP runtime's default cache, 2 of 2
     runs stayed at 57 tok/s after the re-allocation.
   - 0.2.2.1 (no governor), same Ornith test, 4 runs: 13.1 tok/s while the other process held its 4 GiB, and still
-    13.1 tok/s about 8 minutes after it exited (no warning once the spill warning had ended) in 4 of 4 runs. Windows did
-    not move WHIRL's paged-out buffers back by itself in that time; a slow state that outlasts the other program is not
-    new in 0.2.2.2.
+    13.1 tok/s about 8 minutes after it exited (no warning once the spill warning had ended) in 4 of 4 runs. The cause
+    is unknown: the budget was back at its startup value and WHIRL's shared GPU memory never grew. A slow state that
+    outlasts the other program is not new in 0.2.2.2.
   - Swift-1.5 27B MXFP4, 3 runs on the release build: 89-90 tok/s before, about 16 tok/s during. The first request
     after the re-allocation ran at 16.9, 18.9 and 69.3 tok/s (15-60 s for 1000 tokens instead of 11 s); the next one at
-    90 tok/s in 2 of 3 runs (39.8 in one, 85-89 from the request after that); 88-90 tok/s in 3 of 3 runs after the other
-    process exited, with the pool back at its startup size (340480 tokens). With the default cache the first request
+    90 tok/s in 2 of 3 runs (39.8 in one, 85-89 from the request after that); 85-90 tok/s in 3 of 3 runs after the other
+    process exited (88-90 from the second request), with the pool back at its startup size (340480 tokens). With the default cache the first request
     after the re-allocation already ran at 89-90 tok/s (3 of 3), but the grow-back went over the budget (above).
   - Radeon 8060S (no governor there; the HIP cache limit is the only change that touches allocation), Swift-1.5 27B and
     Ornith-1.5-35B-A3B MXFP4, balance, 3 rounds against 0.2.2.1: prefill at 2k and 32k tokens and decode of a fixed chat
     prompt -1.9% to +0.6% on average, and no cell more than 1% slower in all 3 rounds (the -1.9%, Swift 2k prefill,
     comes from one round at -5.7%; the other two -0.1% and +0.1%).
-  - Vision (`--mmproj`, R9700): no governor action in 6 of 6 runs (Swift-1.5 27B 4, Ornith-1.5-35B-A3B 2). The first
-    image after the encoder was released took 2.08-2.14 s on Swift, against 2.09 s with 0.2.2.1 and 2.07-2.15 s with the
-    default cache, and 0.86-0.87 s on Ornith (0.86 s with 0.2.2.1). With the encoder loaded, 134 MiB (Swift) and 164 MiB
-    (Ornith) were left above the point where the governor acts.
+  - Vision (`--mmproj`, R9700): no governor action in 6 of 6 runs (Swift-1.5 27B 4, Ornith-1.5-35B-A3B 2), with the
+    encoder's first load only. The first image after the encoder's idle release was not measured: every later image in
+    these runs was a repeat whose embeddings were cached, so the encoder never loaded again (re-run pending). With the
+    encoder loaded, 134 MiB (Swift) and 164 MiB (Ornith) were left above the point where the governor acts (images of
+    1280x720 and 1024x683 only).
 - Server: the RAM tier cap of 0.2.2.1 ran after the half-of-available-RAM rule, so asking for more could give less
   (R9700, 47348 MiB available: `--kv-ram-mb 22528` -> 20480 MiB, `--kv-ram-mb 24064` -> 16384 MiB). The 20480 MiB cap
   now comes first, and a size above half of the available RAM goes to half of it (not to the default size, which was
@@ -72,9 +76,11 @@ All notable changes to WHIRL are listed here. Versions follow `project(whirl VER
   drafter's per-slot context ring, so it could keep a slot too many (the `-c` adjustment caught it later).
 - CHANGELOG 0.2.2.1: the other process held 3.2 GiB (3308 MiB), not 3.3 GiB, and the "4 GiB test" is now described
   where it is cited.
-- CHANGELOG 0.2.2.1 said decode "recovered when the other process exited". That held in the 3.2 GiB test it came from,
-  but not in general: in the Ornith test above, 0.2.2.1 stayed at 13.1 tok/s about 8 minutes after a 4 GiB process
-  exited, in 4 of 4 runs. On 0.2.2.1, closing the other program does not always bring the speed back. With 0.2.2.2 on the R9700, the governor brings it back in 5 of 6 runs (above).
+- CHANGELOG 0.2.2.1 said decode "recovered when the other process exited". That was not measured: the 0.2.2.1 tests ran
+  no full request after the other process exited, only one 32-token request (19-76 tok/s, issued 0-2 s after the exit
+  while the budget was still low). In the Ornith test above, 0.2.2.1 stayed at 13.1 tok/s about 8 minutes after a
+  4 GiB process exited, in 4 of 4 runs: on 0.2.2.1, closing the other program does not always bring the speed back.
+  With 0.2.2.2 on the R9700 decode came back in 5 of 6 runs (above; 2 of them on the release build).
 
 ### Known
 
@@ -83,6 +89,9 @@ All notable changes to WHIRL are listed here. Versions follow `project(whirl VER
 - Root cause of the crash with RAM tiers above about 20 GiB: still open (the cap stays).
 - R9700 memory governor: one Ornith run in 6 stayed 38% slower after the other program exited (above), cause unknown.
   `WHIRL_HIP_CACHE_LIMIT=0` is not recommended while the governor is on: its grow-back can go over the budget (above).
+- R9700 memory governor, Swift-1.5 27B: the first request after the KV pool was re-allocated with the HIP cache limit on
+  ran slower in 6 of 6 runs (16.9, 18.9 and 69.3 tok/s in the 3 runs above, against about 89), cause unknown; it
+  recovered by itself from a later request and the output was identical.
 
 ## 0.2.2.1 — 2026-10-21 (bug fixes)
 

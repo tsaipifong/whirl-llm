@@ -383,8 +383,8 @@ int serveMain(int argc, char** argv, const char* program) {
             return app::exit_ok;
         }
     }
-    // v0.2.2.2 memory governor: ROCclr keeps freed device allocations smaller than its resource cache limit (by default 1/8
-    // of the VRAM: 4 GiB on the R9700) for reuse instead of returning them to Windows, and reuses a cached block for any
+    // v0.2.2.2 memory governor: ROCclr keeps freed device allocations smaller than its resource cache limit (its default size
+    // was not checked in the ROCclr source; REVIEW-GOV-2 A-5) for reuse instead of returning them to Windows, and reuses a cached block for any
     // request between half its size and its size. A KV pool re-allocated smaller then kept most of the old pool's VRAM
     // (R9700 S2c: 1.7 GiB of a 4 GiB shrink still counted against the WDDM budget, decode stayed 57 instead of 259 tok/s).
     // Set before the first HIP API call: gpuPreflight has already loaded amdhip64_7.dll by now, but ROCclr reads its flags
@@ -1814,7 +1814,7 @@ int serveMain(int argc, char** argv, const char* program) {
             logI("memory governor: HIP resource cache {} (freed GPU memory larger than that goes back to Windows at once)",
                  hip_cache_set ? std::string("limited to 256 MiB (GPU_RESOURCE_CACHE_SIZE; WHIRL_HIP_CACHE_LIMIT=0 keeps the runtime default)")
                  : hip_cache_user ? std::format("set by GPU_RESOURCE_CACHE_SIZE={} MiB", std::getenv("GPU_RESOURCE_CACHE_SIZE"))
-                                  : std::string("at the runtime default (WHIRL_HIP_CACHE_LIMIT=0: up to 1/8 of the VRAM is kept)"));
+                                  : std::string("at the runtime default (WHIRL_HIP_CACHE_LIMIT=0: part of freed GPU memory is kept, 0.87 GiB of a 3.91 GiB shrink in our R9700 test)"));
         } else if (wddm0.ok && !is_uma) {
             logI("memory governor: off ({})", reserve_explicit ? "WHIRL_POOL_RESERVE_MB is set: the pool is never resized" : "WHIRL_GOVERNOR=0");
         }

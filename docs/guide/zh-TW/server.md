@@ -41,7 +41,7 @@ Base URL 為 `http://127.0.0.1:8080/v1`；接受任何 API key。模型只載入
 | 變數 | 效果 |
 |---|---|
 | `WHIRL_KV=auto\|f16\|q8\|q8h\|q8v` | KV 格式；`auto` 套用下限規則（[kv-and-caching.md](kv-and-caching.md#kv-auto)） |
-| `WHIRL_HIP_CACHE_LIMIT=0` | 保留 HIP runtime 自己對已釋放 GPU 記憶體的快取（最多 VRAM 的 1/8）。預設 whirl-server 會替自己的行程設 `GPU_RESOURCE_CACHE_SIZE=256`（MiB；你自己設了就不動），讓它釋放的記憶體（縮小重配的 KV 池、閒置後卸下的視覺編碼器）真的還給 Windows（0.2.2.2）。副作用：載入時釋放的記憶體也會還回去，所以 R9700 上啟動時的 KV 池比 0.2.2.1 大約 3%（Swift-1.5 27B、`--parallel 1`：329728 -> 340480 tokens）；啟動時的配置仍保留完整的 WDDM margin。R9700 實測（Swift-1.5 27B MXFP4、另一個程式佔 4 GiB）：有這個限制時，governor 重配 KV 池後的第一個請求是 17–69 tok/s（原本 89，3 次中 3 次），之後的請求 3 次中 2 次回到全速；設 `=0` 時縮小 3.91 GiB 只還回 3.04 GiB，且池長回去時超過預算（3 次中 3 次），所以 governor 開著時不建議設 `=0`。Radeon 8060S 與視覺編碼器閒置卸下後的第一張圖：量不出速度差異 |
+| `WHIRL_HIP_CACHE_LIMIT=0` | 保留 HIP runtime 自己對已釋放 GPU 記憶體的快取（R9700 實測：KV 池縮小 3.91 GiB 時它留住 0.87 GiB，Swift-1.5 27B）。預設 whirl-server 會替自己的行程設 `GPU_RESOURCE_CACHE_SIZE=256`（MiB；你自己設了就不動），讓它釋放的記憶體（縮小重配的 KV 池）真的還給 Windows（0.2.2.2）。副作用：載入時釋放的記憶體也會還回去，所以 R9700 上啟動時的 KV 池比 0.2.2.1 大約 3%（Swift-1.5 27B、`--parallel 1`：329728 -> 340480 tokens）；啟動時的配置仍保留完整的 WDDM margin。R9700 實測（Swift-1.5 27B MXFP4、另一個程式佔 4 GiB）：有這個限制時，governor 重配 KV 池後的第一個請求是 17–69 tok/s（原本 89，3 次中 3 次），之後的請求 3 次中 2 次回到全速；設 `=0` 時縮小 3.91 GiB 只還回 3.04 GiB，且池長回去時超過預算（3 次中 3 次），所以 governor 開著時不建議設 `=0`。Radeon 8060S：量不出速度差異；視覺編碼器閒置卸下後的第一張圖：尚未量測 |
 | `WHIRL_GOVERNOR=0` | 關閉執行中的記憶體調節（0.2.2.2：伺服器執行中 WDDM 預算下降時，釋放快取、讓新請求排隊，並在所有 slot 閒置時以較小的大小重新配置 KV 池；[說明](#vram-log)） |
 | `WHIRL_POOL_BUDGET_MARGIN_MB` | 在 WDDM 預算之下替其他程式成長留的空間（預設取 2 GiB（GPU 接螢幕時 3 GiB）與預算 6% 的較大者；其他程式的 VRAM 中預算還沒反映的部分另外保留；[說明](#vram-log)） |
 | `WHIRL_POOL_RESERVE_MB` | 舊的「只看可用 VRAM」規則：池之後保留的 VRAM，不套用 WDDM 預算（可用 VRAM 之下的預設保留量 dense 768 / MoE 1536） |
