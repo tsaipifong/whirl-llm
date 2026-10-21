@@ -5,8 +5,12 @@
 //
 // Every kernel carries a bit-equivalence class (BitClass): kernels of one class give the same bits for the same
 // token row, so the choice inside a class is free (tuning, geometry, grouping), and a choice across classes is a
-// numerics decision. Precise picks only the precise class (the f16 GEMM family, bitwise == prefill); the rule is
-// written once, in chooseMatmulPath. Tests: tests/ops/ops_tests.cpp (CPU, fake kernel tables).
+// numerics decision. Precise picks only the precise class (the f16 GEMM family, bitwise == prefill) for decode /
+// verify rows; that rule is written once, in preciseRows / preciseAllows below, and every row-count gate asks it
+// (chooseMatmulPath, chooseGemmF16 / precChoice, and in src/model/forward.cpp the grouped int8 GEMV, actIn, the
+// fused silu_mul_q8 and the fused GDN [beta; alpha] step). Mode-level precise gates that do not depend on the row
+// count stay with their op: the attention combine (attention.cpp), the MoE decode experts (moe.cpp, which extends
+// precise rows to max_verify_rows) and wideCapable. Tests: tests/ops/ops_tests.cpp (CPU, fake kernel tables).
 
 #pragma once
 
@@ -32,6 +36,13 @@ enum class BitClass : std::uint8_t {
 const char* bitClassName(BitClass b);
 // the classes precise mode may launch for decode / verify rows: bitwise the prefill (and any batch) result
 constexpr bool preciseClass(BitClass b) { return b == BitClass::f16_gemm; }
+// precise decode / verify rows: precise mode and n within the row range of the path being chosen (rows_max: gv_max
+// for the matmul / GEMV choices, small_max for the fused decode kernels, which only run when n <= small_max)
+constexpr bool preciseRows(bool prec_dec, std::uint32_t n, std::uint32_t rows_max) { return prec_dec && n <= rows_max; }
+// whether a kernel of class b may run for these rows: anything outside precise rows, only the precise class inside
+constexpr bool preciseAllows(BitClass b, bool prec_dec, std::uint32_t n, std::uint32_t rows_max) {
+    return !preciseRows(prec_dec, n, rows_max) || preciseClass(b);
+}
 
 enum class MatmulPath : std::uint8_t { gemvq, gemv1, float_gemv, gemm_fp8, gemm_f16 };
 BitClass bitClassOf(MatmulPath p);

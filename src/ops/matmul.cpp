@@ -44,9 +44,8 @@ bool floatGemvN(const MatShape& w, std::uint32_t n, std::uint32_t gv_max, const 
 // skip every candidate outside the precise class, so they always reach the f16 GEMM.
 MatmulPath chooseMatmulPath(const MatShape& w, std::uint32_t n, const MatmulFlags& f, const kernels::MatmulKernels& k) {
     const std::size_t t = ti(w.ty);
-    const bool precise_rows = f.prec_dec && n <= f.gv_max;
-    auto allowed = [&](MatmulPath p) { return !precise_rows || preciseClass(bitClassOf(p)); };
-    if (allowed(MatmulPath::gemvq) && n <= f.gv_max && k.gemvq[t] != nullptr && !f.float_gemv && !f.prec_dec) return MatmulPath::gemvq;
+    auto allowed = [&](MatmulPath p) { return preciseAllows(bitClassOf(p), f.prec_dec, n, f.gv_max); };
+    if (allowed(MatmulPath::gemvq) && n <= f.gv_max && k.gemvq[t] != nullptr && !f.float_gemv) return MatmulPath::gemvq;
     if (allowed(MatmulPath::gemv1) && n == 1) return MatmulPath::gemv1;
     if (allowed(MatmulPath::float_gemv) && floatGemvN(w, n, f.gv_max, k)) return MatmulPath::float_gemv;
     if (allowed(MatmulPath::gemm_fp8) && f.fp8_prefill && (f.fp8_mask & f.mm_class) != 0 && w.ty == GgmlType::mxfp4 && w.has_ref &&
@@ -163,7 +162,8 @@ GemmPlan chooseGemmF16(const MatShape& w, std::uint32_t n, std::uint8_t tuned, c
     const std::size_t t = ti(w.ty);
     const std::size_t G = kernels::kGemmCfgs.size();
     GemmPlan p;
-    if (f.prec_dec && n <= f.gv_max && n <= 32 && w.ncols % 256 == 0 && !f.out_h16) {
+    const bool precise_rows = preciseRows(f.prec_dec, n, f.gv_max);
+    if (precise_rows && n <= 32 && w.ncols % 256 == 0 && !f.out_h16) {
         // precise decode / verify: the decode-shaped f16 GEMM (bitwise == every choice below)
         const Function hv = n <= 16 ? k.gemvh[t] : k.gemvh2[t];
         if (f.prec_gemvh && hv != nullptr) {
@@ -174,7 +174,7 @@ GemmPlan chooseGemmF16(const MatShape& w, std::uint32_t n, std::uint8_t tuned, c
             return p;
         }
     }
-    std::uint32_t choice = f.prec_dec && n <= f.gv_max ? precChoice(w, n, tuned, f, k) : tuned;
+    std::uint32_t choice = precise_rows ? precChoice(w, n, tuned, f, k) : tuned;
     // h16_dq: a fused quantized choice cannot write f16; its dequant twin (same bits) can
     if (f.out_h16 && f.h16_dq && choice < G && w.ty != GgmlType::f16) choice += static_cast<std::uint32_t>(G);
     const std::size_t gcfg = choice % G;

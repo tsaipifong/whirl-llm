@@ -118,7 +118,7 @@ void Model::gemvKernels(std::span<const Mat> ws, std::span<const DevPtr> ys, u32
 // Matmuls (no accumulate) of ws on the same input into ys. On the int8 GEMV
 // path the matrices of one type run as one grouped launch (bitwise the same).
 void Model::matmulGroup(std::span<const Mat> ws, DevPtr xin, std::span<const DevPtr> ys, u32 n) {
-    const bool ok = gv_group && k.gv_grp && n <= gvMax() && !float_gemv && !prec_dec;
+    const bool ok = gv_group && k.gv_grp && n <= gvMax() && !float_gemv && ops::preciseAllows(ops::BitClass::q8_row, prec_dec, n, gvMax());
     bool done[3] = {false, false, false};
     for (std::size_t i = 0; i < ws.size(); ++i) {
         if (done[i]) continue;
@@ -284,7 +284,7 @@ void Model::rmsnorm(DevPtr xin, DevPtr w, DevPtr out, u32 n, u32 count, u32 in_s
 }
 
 Model::ActIn Model::actIn(const Mat& w, u32 n, std::uint8_t cls) const {
-    if (prec_dec && n <= gvMax()) return ActIn::f16;
+    if (ops::preciseRows(prec_dec, n, gvMax())) return ActIn::f16;
     if (n <= gvMax() && k.gemvq[ti(w.ty)] != nullptr && !float_gemv) return ActIn::gemv;
     if (n == 1 || ops::floatGemvN(matShape(w), n, gvMax(), k)) return ActIn::f32in;
     if (fp8_prefill && (fp8_mask & cls) != 0 && w.ty == GgmlType::mxfp4 && w.ref != 0 && k.gemm8[0] != nullptr) return ActIn::fp8;
@@ -751,7 +751,7 @@ void Model::ffnBlock(DevPtr post_norm, const Mat& gate_w, const Mat& up, const M
         silu_x = *down_in == ActIn::fp8 ? x8(k.silu_mul_x8h, k.silu_mul_x8ht) : k.silu_mul_x16h;
     else if (down_in)
         silu_x = *down_in == ActIn::fp8 ? x8(k.silu_mul_x8, k.silu_mul_x8t) : k.silu_mul_x16;
-    if (fused(n) && !prec_dec) {
+    if (fused(n) && ops::preciseAllows(ops::BitClass::q8_row, prec_dec, n, small_max)) {  // fused(n): n <= small_max
         hip::launch(k.silu_mul_q8, D(n * cfg.n_ff / 256), D(256), 0, stream, ffn_g, ffn_u, xq, xd, I(n * cfg.n_ff));
         xq_src = ffn_g;
         xq_n = n;
@@ -1571,7 +1571,7 @@ void Model::run(u32 n) {
                 const u32 n_seg = bplan ? static_cast<u32>(bplan->segs.size()) : 1;
                 const GdnSegs segs_c = bplan ? gdnSegsBatch(*bplan, i, true) : gdnSegsSingle(i, true, n);
                 const hip::Function abconv = (dbg_flags & 1) != 0 ? nullptr : k.gdn_abconv[ti(g.beta.ty)];
-                if (prec_dec) {
+                if (!ops::preciseAllows(ops::BitClass::q8_row, prec_dec, n, small_max)) {  // gdn_fusable: n <= small_max
                     // precise decode: [beta; alpha] on the f16 GEMM from h (f32, written by
                     // rmsnormQ8), the gates, then the same conv step as below
                     const u32 nhr = n * nh;

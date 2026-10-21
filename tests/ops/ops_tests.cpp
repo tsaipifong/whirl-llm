@@ -90,6 +90,22 @@ void testBitClasses() {
     CHECK(!ops::preciseClass(ops::BitClass::q8_row) && !ops::preciseClass(ops::BitClass::f32_row) && !ops::preciseClass(ops::BitClass::fp8_gemm));
 }
 
+// REVIEW-ARCH4 P3-1: the one precise-class rule every row-count gate asks (matmul.h preciseRows / preciseAllows).
+// Its truth table, exhaustively over the row ranges the callers pass (gv_max 16 / 32, small_max 16 / 32).
+void testPreciseRule() {
+    const ops::BitClass all[] = {ops::BitClass::q8_row, ops::BitClass::f32_row, ops::BitClass::f16_gemm, ops::BitClass::fp8_gemm};
+    for (std::uint32_t rmax : {16u, 32u})
+        for (std::uint32_t n = 1; n <= 64; ++n)
+            for (bool pd : {false, true}) {
+                const bool rows = pd && n <= rmax;
+                CHECK(ops::preciseRows(pd, n, rmax) == rows);
+                for (ops::BitClass b : all) CHECK(ops::preciseAllows(b, pd, n, rmax) == (!rows || b == ops::BitClass::f16_gemm));
+            }
+    // the boundary rows the callers hit: the last precise row and the first one past it
+    CHECK(ops::preciseRows(true, 16, 16) && !ops::preciseRows(true, 17, 16));
+    CHECK(!ops::preciseAllows(ops::BitClass::q8_row, true, 32, 32) && ops::preciseAllows(ops::BitClass::q8_row, true, 33, 32));
+}
+
 // the matmul path table: rows x flags -> path; precise rows only ever get the precise class
 void testMatmulPath() {
     const kn::KernelTable k = fakeTable(true, true, true, true);
@@ -593,6 +609,7 @@ void testOpTables() {
 
 int main() {
     testBitClasses();
+    testPreciseRule();
     testMatmulPath();
     testGemvTile();
     testGemvWide();
