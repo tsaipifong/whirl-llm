@@ -72,6 +72,9 @@ All notable changes to WHIRL are listed here. Versions follow `project(whirl VER
   drafter's per-slot context ring, so it could keep a slot too many (the `-c` adjustment caught it later).
 - CHANGELOG 0.2.2.1: the other process held 3.2 GiB (3308 MiB), not 3.3 GiB, and the "4 GiB test" is now described
   where it is cited.
+- CHANGELOG 0.2.2.1 said decode "recovered when the other process exited". That held in the 3.2 GiB test it came from,
+  but not in general: in the Ornith test above, 0.2.2.1 stayed at 13.1 tok/s about 8 minutes after a 4 GiB process
+  exited, in 4 of 4 runs. On 0.2.2.1, closing the other program does not always bring the speed back. With 0.2.2.2 on the R9700, the governor brings it back in 5 of 6 runs (above).
 
 ### Known
 
