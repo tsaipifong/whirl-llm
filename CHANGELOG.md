@@ -62,17 +62,19 @@ All notable changes to WHIRL are listed here. Versions follow `project(whirl VER
     Ornith-1.5-35B-A3B MXFP4, balance, 3 rounds against 0.2.2.1: prefill at 2k and 32k tokens and decode of a fixed chat
     prompt -1.9% to +0.6% on average, and no cell more than 1% slower in all 3 rounds (the -1.9%, Swift 2k prefill,
     comes from one round at -5.7%; the other two -0.1% and +0.1%).
-  - Vision (`--mmproj`, R9700): the numbers below are from the build before the `--mmproj` KV pool fix (below); pending
-    re-run on the final build, which also gives the new `--mmproj` pool sizes (pending re-run).
-    Build before that fix: (`--vis-idle-s 30`, 5 images per run: code.png, photo.jpg, then after a 45 s idle a new 1920x1080
-    image, shapes.png, and after another 45 s idle dialog.png): no governor action in 4 of 4 runs of this build (Swift-1.5 27B 2,
-    Ornith-1.5-35B-A3B 2) and none in the 2 runs of 0.2.2.1 (1 each); every run encoded 5 images, none from the embedding cache,
-    and released the encoder twice (so the 1920x1080 image and dialog.png each loaded the encoder again). Wall time per request, this build
-    (2 runs) vs 0.2.2.1 (1 run), first image / 1920x1080 image after idle / dialog.png after idle: Swift 2.55 and 2.52 s / 3.64 and
-    3.59 s / 2.53 and 2.46 s vs 2.52 s / 3.56 s / 2.52 s; Ornith 1.19 and 1.19 s / 1.56 and 1.56 s / 1.11 and 1.12 s vs 1.19 s / 1.53 s /
-    1.09 s. The generated text hash of each of the 5 images is the same in this build and in 0.2.2.1, for both models. Largest
-    VRAM use seen in any health reply of this build (budget 31767 MiB, trigger 1034 MiB below it): Swift 30599 MiB, 134 MiB
-    below the trigger point; Ornith 30703 MiB (after the 1920x1080 image), 30 MiB below it. No spill warning in any of the 6 runs.
+  - Vision (`--mmproj`, R9700, `--vis-idle-s 30`, 5 images per run: code.png, photo.jpg, then after a 45 s idle a new
+    1920x1080 image, shapes.png, and after another 45 s idle dialog.png): no governor action in 4 of 4 runs of this build
+    (Swift-1.5 27B 2, Ornith-1.5-35B-A3B 2) and none in the 2 runs of 0.2.2.1 (1 each); every run encoded 5 images, none from
+    the embedding cache, and released the encoder twice (so the 1920x1080 image and dialog.png each loaded the encoder again).
+    Wall time per request, this build (2 runs) vs 0.2.2.1 (1 run), first image / 1920x1080 image after idle / dialog.png after
+    idle: Swift 2.52 and 2.51 s / 3.59 and 3.58 s / 2.49 and 2.53 s vs 2.52 s / 3.56 s / 2.52 s; Ornith 1.19 and 1.19 s / 1.56
+    and 1.56 s / 1.12 and 1.11 s vs 1.19 s / 1.53 s / 1.09 s. The generated text hash of each of the 5 images is the same in
+    this build and in 0.2.2.1, for both models. Largest VRAM use seen in any health reply of this build (budget 31767 MiB,
+    trigger 1034 MiB below it): Swift 29696 MiB, 1037 MiB below the trigger point; Ornith 29422 MiB, 1311 MiB below it (on the
+    build before the `--mmproj` KV pool fix below: 134 MiB and 30 MiB). No spill warning in any of the 6 runs.
+    Radeon 8060S (`--mmproj`, same 5 images and idle gaps, 1 run per model of this build and of 0.2.2.1; timings not
+    measured): every run encoded 5 images and released the encoder twice, and the generated text hash of each image is the
+    same in this build and in 0.2.2.1, for both models (device gfx1151 in every server log).
 - Server, R9700 (the governor above): after the KV pool grew back, a measured VRAM use with less than half of the margin
   free (over the budget or just under it) was replaced by the expected use for 120 s, so the governor logged "back to
   the startup settings" and started a new episode about 2 minutes later, staying over the budget or close to it
@@ -86,7 +88,8 @@ All notable changes to WHIRL are listed here. Versions follow `project(whirl VER
   before the governor would act; a governor episode started in that state could not end (the pool could not grow back
   with the margin free). The pool now leaves room for the encoder's weights, the activations of the largest image that
   do not fit the prefill scratch, and 16 MiB (the startup line `kv pool sizing: ... minus N MiB for the vision encoder`).
-  With `--mmproj` the pool is about 1 GiB smaller (R9700 pool sizes: pending re-run); `--parallel 1` keeps the full
+  With `--mmproj` the pool is about 1 GiB smaller (R9700, `--parallel 1`: Swift-1.5 27B 340480 -> 314880 tokens, 903 MiB
+  for the encoder; Ornith-1.5-35B-A3B 393984 -> 334336 tokens, 1281 MiB); `--parallel 1` keeps the full
   131072-token context. Without `--mmproj`, on the Radeon 8060S and with `WHIRL_POOL_RESERVE_MB` the pool is unchanged.
 - Server: the RAM tier cap of 0.2.2.1 ran after the half-of-available-RAM rule, so asking for more could give less
   (R9700, 47348 MiB available: `--kv-ram-mb 22528` -> 20480 MiB, `--kv-ram-mb 24064` -> 16384 MiB). The 20480 MiB cap
