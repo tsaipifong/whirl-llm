@@ -24,12 +24,19 @@ Plan Governor::tick(const Input& in) {
     if (in.budget == 0 || cfg_.per_tok == 0 || cfg_.page == 0) return p;
     // just re-allocated: the WDDM usage may not show the free yet (R9700: part of a 2.7 GiB free showed ~0.3 s later)
     if (in.now_s - t_resized_ < cfg_.settle_s) return p;
-    std::uint64_t local = in.local;
-    if (expected_local_ > 0 && in.now_s - t_resized_ < cfg_.trust_s) local = std::min(local, expected_local_);
+    // within trust_s of a re-allocation: shrink decisions take the smaller of the measured and the expected usage (a late
+    // free must not shrink again), grow decisions the larger (R9700 S1c: a grow sized from the expected usage, 0.86 GiB
+    // below the measured one, overshot and was shrunk back)
+    std::uint64_t local = in.local, local_g = in.local;
+    if (expected_local_ > 0 && in.now_s - t_resized_ < cfg_.trust_s) {
+        local = std::min(local, expected_local_);
+        local_g = std::max(local_g, expected_local_);
+    }
     const double hold = hold_ < 0.0 ? cfg_.hold_s : hold_;
     const auto i64 = [](std::uint64_t v) { return static_cast<std::int64_t>(v); };
     // what is short for the full state (startup margin free, parked checkpoint buffers back): > 0 short
     const std::int64_t def = i64(local) + i64(in.parked) + i64(in.margin) - i64(in.budget);
+    const std::int64_t def_g = i64(local_g) + i64(in.parked) + i64(in.margin) - i64(in.budget);
     p.deficit = def;
     // act when less than half the margin is free under the budget
     const bool trigger = i64(local) + i64(in.margin / 2) > i64(in.budget);
@@ -58,11 +65,11 @@ Plan Governor::tick(const Input& in) {
             }
         } else if (!trigger && def <= 0) {
             // the parked checkpoint buffers fit with the full margin: back now
-            if (in.parked > 0) p.restore_cache = true;
+            if (in.parked > 0 && def_g <= 0) p.restore_cache = true;
             // grow back (when idle) once more than margin + margin/2 has been free for recover_s, hold_s after the last
             // over-budget sample
             const std::int64_t band = i64(in.margin / 2);
-            if (def < -band) {
+            if (def_g < -band) {
                 if (!recover_since_) recover_since_ = in.now_s;
             } else {
                 recover_since_.reset();
@@ -70,7 +77,7 @@ Plan Governor::tick(const Input& in) {
             if (in.all_idle && recover_since_ && in.now_s - *recover_since_ >= cfg_.recover_s && in.now_s - t_shrink_ >= hold &&
                 in.pool < cfg_.pool_start) {
                 // to margin + margin/4 free (a grow to exactly the margin left nothing for the counters' noise)
-                const std::int64_t room = -def - i64(in.margin / 4);
+                const std::int64_t room = -def_g - i64(in.margin / 4);
                 const std::uint64_t add =
                     room > 0 ? static_cast<std::uint64_t>(pagesDown(static_cast<std::uint64_t>(room))) * cfg_.page : 0;
                 const std::uint32_t target = static_cast<std::uint32_t>(std::min<std::uint64_t>(cfg_.pool_start, in.pool + add));

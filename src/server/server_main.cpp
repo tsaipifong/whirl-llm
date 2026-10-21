@@ -383,6 +383,15 @@ int serveMain(int argc, char** argv, const char* program) {
             return app::exit_ok;
         }
     }
+    // v0.2.2.2 memory governor: ROCclr keeps freed device allocations smaller than its resource cache limit (by default 1/8
+    // of the VRAM: 4 GiB on the R9700) for reuse instead of returning them to Windows, and reuses a cached block for any
+    // request between half its size and its size. A KV pool re-allocated smaller then kept most of the old pool's VRAM
+    // (R9700 S2c: 1.7 GiB of a 4 GiB shrink still counted against the WDDM budget, decode stayed 57 instead of 259 tok/s).
+    // Set before the HIP runtime reads it (first HIP call); a value the user set wins; WHIRL_HIP_CACHE_LIMIT=0 leaves the
+    // runtime default. Allocation only: kernels and output are not affected.
+    const bool hip_cache_user = std::getenv("GPU_RESOURCE_CACHE_SIZE") != nullptr;
+    const bool hip_cache_set = !hip_cache_user && envOn("HIP_CACHE_LIMIT", true);
+    if (hip_cache_set) _putenv_s("GPU_RESOURCE_CACHE_SIZE", "256");
     Options opt;
     for (std::size_t i = 0; i < args.size(); ++i) {
         const std::string arg = args[i];
@@ -1797,6 +1806,10 @@ int serveMain(int argc, char** argv, const char* program) {
                  "runs, it frees cache, queues new requests and re-allocates the KV pool smaller when every slot is idle; it grows "
                  "back to {} tokens after more than {} MiB has been free for {:.0f} s (WHIRL_GOVERNOR=0 turns it off)",
                  mg.bytes / 2 >> 20, mg.bytes >> 20, gc.pool_start, (mg.bytes + mg.bytes / 2) >> 20, gc.recover_s);
+            logI("memory governor: HIP resource cache {} (freed GPU memory larger than that goes back to Windows at once)",
+                 hip_cache_set ? std::string("limited to 256 MiB (GPU_RESOURCE_CACHE_SIZE; WHIRL_HIP_CACHE_LIMIT=0 keeps the runtime default)")
+                 : hip_cache_user ? std::format("set by GPU_RESOURCE_CACHE_SIZE={} MiB", std::getenv("GPU_RESOURCE_CACHE_SIZE"))
+                                  : std::string("at the runtime default (WHIRL_HIP_CACHE_LIMIT=0: up to 1/8 of the VRAM is kept)"));
         } else if (wddm0.ok && !is_uma) {
             logI("memory governor: off ({})", reserve_explicit ? "WHIRL_POOL_RESERVE_MB is set: the pool is never resized" : "WHIRL_GOVERNOR=0");
         }

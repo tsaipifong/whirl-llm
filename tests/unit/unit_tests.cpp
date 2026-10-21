@@ -2468,6 +2468,26 @@ void testMemGovernor() {
         CHECK(!g7.tick(in(t_ask + 5, L1, B0, small, true)).pool_target.has_value());
         CHECK(g7.tick(in(t_ask + 35, L1, B0, small, true)).pool_target.has_value());
     }
+    // a grow within trust_s is sized from the larger of measured and expected usage (R9700 S1c: sized from the expected
+    // one, 0.86 GiB under the measured, it overshot and was shrunk back)
+    {
+        const std::uint64_t B1 = B0 - 4 * GiB;
+        auto growTarget = [&](std::uint64_t measured_extra) {
+            Governor g8(c);
+            const Plan p0 = g8.tick(in(0, L0, B1, 330240, true));
+            const std::uint32_t small = *p0.pool_target;
+            const std::uint64_t L1 = L0 - static_cast<std::uint64_t>(330240 - small) * 36966;
+            g8.resized(small, false, 0, L1);
+            for (double t = 5; t < 110; t += 5) {
+                const Plan p = g8.tick(in(t, L1 + measured_extra, B0, small, true));
+                if (p.pool_target) return *p.pool_target - small;
+            }
+            return 0u;
+        };
+        const std::uint32_t a = growTarget(0), b = growTarget(880 * MiB);
+        CHECK(a > 0u && b > 0u && b < a);
+        CHECK(static_cast<std::uint64_t>(a - b) * 36966 >= 800 * MiB);
+    }
     // unknown budget: nothing
     {
         Governor g4(c);
