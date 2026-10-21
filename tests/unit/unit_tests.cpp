@@ -2457,12 +2457,15 @@ void testMemGovernor() {
         // a real further drop after the window (trust_s, 120 s) is still acted on
         p = g5.tick(in(125, L1 + 1843 * MiB, B1, small, true));
         CHECK(p.shrink);
-        // a grow that first reads too high (stale old pool) is not shrunk back within the window
+        // a grow that first reads too high (stale old pool) but stays under the budget is not shrunk back within the window
+        // (REVIEW-GOV-2 C-1: a reading over the budget after a grow is a real overshoot and is acted on, see
+        // testMemGovernorGrowOvershoot; this case used L0 + 3 GiB, 0.7 GiB over the budget, before that fix)
         Governor g6(c);
         g6.tick(in(0, L0, B1, 330240, true));
         g6.resized(small, false, 0, L1);
         g6.resized(330240, true, 200, L0);
-        for (double t = 205; t < 220; t += 5) CHECK(!g6.tick(in(t, L0 + 3 * GiB, B0, 330240, true)).pool_target.has_value());
+        for (double t = 205; t < 220; t += 5) CHECK(!g6.tick(in(t, L0 + 2 * GiB, B0, 330240, true)).pool_target.has_value());
+        CHECK(L0 + 2 * GiB < B0 && L0 + 2 * GiB + M / 2 > B0);  // under the budget, but inside the trigger band
         // growDenied restarts the recovery time
         Governor g7(c);
         g7.tick(in(0, L0, B1, 330240, true));
