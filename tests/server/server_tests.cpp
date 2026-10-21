@@ -813,6 +813,7 @@ void testGovernor() {
     };
     constexpr std::uint64_t MiB = 1ull << 20;
     std::atomic<std::uint64_t> budget{28000 * MiB + (1ull << 40)};  // room until the test sets it
+    std::atomic<std::uint64_t> extra{0};  // usage outside the pool that grew after startup (R9700 S2: 0.19 GiB)
     std::atomic<MockDeviceOps*> opsp{nullptr};
     const std::uint64_t fixed = 28000 * MiB;  // "the weights" (not allocated by the mock)
     ServerSetup su = baseSetup();
@@ -826,7 +827,7 @@ void testGovernor() {
         whirl::wddmwatch::Sample x;
         MockDeviceOps* o = opsp.load();
         x.ok = true;
-        x.local_usage = fixed + (o ? o->deviceBytes() : 0);
+        x.local_usage = fixed + extra.load() + (o ? o->deviceBytes() : 0);
         x.local_budget = budget.load();
         x.nonlocal_usage = 400 * MiB;
         return x;
@@ -849,7 +850,7 @@ void testGovernor() {
     for (const KvArr& a : srv.model().kvArrays()) pool0 += a.row * 131072;
     const std::uint64_t M = pool0 / 2;
     const std::uint64_t local0 = fixed + srv.ops().deviceBytes();
-    budget = local0 + M + M / 4;  // 1.25 x margin free: no action
+    budget = local0 + M;  // exactly the margin free, as the startup sizing leaves it: no action
     opsp = &srv.ops();
     const auto pA = makePrompt(3000, 71), pB = makePrompt(700, 72), pC = makePrompt(2600, 73);
     const std::uint32_t gA = 1500, gB = 8, gC = 16;
@@ -894,12 +895,18 @@ void testGovernor() {
     CHECK_EQ(srv.model().resizes(), 1u);  // stable: no second shrink
     // a prompt longer than the smaller context for new requests is rejected as too long (and logged why)
     CHECK(srv.get("/props").body.find("\"n_ctx\":16384") != std::string::npos);  // the pool still holds 16384
-    // (3) the other program exits: budget back with room; after recover_s + hold the pool grows back when idle
-    budget = local0 + 3 * M;
+    // (3) the other program exits: the budget is back at its startup value (not more: REVIEW-GOV-1 P2-1, the real GPU never
+    // gives more back), and usage outside the pool grew by M/8 meanwhile; after recover_s + hold the pool grows straight back
+    // to its startup size when idle (one grow) and the episode ends
+    budget = local0 + M;
+    extra = M / 8;
     CHECK(waitFor([&] { return srv.model().resizes() == 2u; }, 6000));
     CHECK(waitFor([&] { return g_log.count("memory governor: back to the startup settings (KV pool 131072 tokens") == 1; }, 3000));
     CHECK_EQ(srv.model().poolPages() * qwen35::kv_page, 131072u);
     CHECK(waitFor([&] { return srv.get("/health").body.find("\"reduced\":false,\"pool_tokens\":131072,") != std::string::npos; }, 3000));
+    CHECK(srv.get("/health").body.find("\"ctx_per_request\":16384,") != std::string::npos);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+    CHECK_EQ(srv.model().resizes(), 2u);  // stable with 7/8 of the margin free: no shrink back
     CHECK(completionText(srv.post("/v1/completions", completionBody(pA, 64))) == decode(srv.model().greedyReference(pA, 64, true)));
     CHECK_EQ(srv.model().poison(), 0u);
     CHECK_EQ(srv.model().hidMismatch(), 0u);
@@ -914,6 +921,89 @@ void testGovernor() {
         CHECK(waitFor([&] { return g_log.count("memory governor: the KV pool could not be re-allocated to ") >= 1; }, 3000));
         CHECK(completionText(srv.post("/v1/completions", completionBody(pB, gB))) == refB);
         budget = local0 + 3 * M;
+    }
+}
+
+// REVIEW-GOV-1 P2-2: a checkpoint-buffer restore that fails part way (allocation error) frees what it got, the slot stays
+// parked, the next sample tries again, and once it succeeds the device memory is exactly what it was before the episode
+// (no leaked buffers). nth = 2: the parked slot's second checkpoint fails; nth = 4: the second shared prefix checkpoint.
+void testGovernorRestore() {
+    auto waitFor = [](const std::function<bool()>& f, int ms) {
+        for (int i = 0; i < ms / 10; ++i) {
+            if (f()) return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        return f();
+    };
+    constexpr std::uint64_t MiB = 1ull << 20;
+    for (const std::uint64_t nth : {2ull, 4ull}) {
+        std::atomic<std::uint64_t> budget{28000 * MiB + (1ull << 40)};
+        std::atomic<MockDeviceOps*> opsp{nullptr};
+        const std::uint64_t fixed = 28000 * MiB;
+        ServerSetup su = baseSetup();
+        su.mc.parallel = 2;
+        su.mc.pool_tokens = 131072;
+        su.mc.slot_ctx = 16384;
+        su.mc.cycle_us = 2000;
+        su.tier = true;
+        su.tier_ram_mb = 256;
+        su.vram_probe = [&] {
+            whirl::wddmwatch::Sample x;
+            MockDeviceOps* o = opsp.load();
+            x.ok = true;
+            x.local_usage = fixed + (o ? o->deviceBytes() : 0);
+            x.local_budget = budget.load();
+            x.nonlocal_usage = 400 * MiB;
+            return x;
+        };
+        su.vram_cfg.idle_sample_s = 0.2;
+        su.vram_cfg.governor = true;
+        whirl::memgov::Config gc;
+        gc.page = qwen35::kv_page;
+        gc.pool_start = 131072;
+        gc.pool_min = 4096;
+        gc.ctx = 16384;
+        gc.recover_s = 0.4;
+        gc.hold_s = 0.6;
+        gc.settle_s = 0.5;
+        su.gov = gc;
+        std::uint64_t pool0 = 0;
+        su.gov_margin = [&](std::uint64_t) { return pool0 / 2; };
+        g_log.clear();
+        TestServer srv(su);
+        for (const KvArr& a : srv.model().kvArrays()) pool0 += a.row * 131072;
+        const std::uint64_t M = pool0 / 2;
+        const std::uint64_t dev0 = srv.ops().deviceBytes();
+        const std::uint64_t local0 = fixed + dev0;
+        budget = local0 + M;
+        opsp = &srv.ops();
+        const auto pA = makePrompt(3000, 81), pB = makePrompt(700, 82);
+        const std::uint32_t gA = 1500, gB = 8;
+        const std::string refA = decode(srv.model().greedyReference(pA, gA, true));
+        const std::string refB = decode(srv.model().greedyReference(pB, gB, true));
+        std::string gotA;
+        std::thread ta([&] { gotA = completionText(srv.post("/v1/completions", completionBody(pA, gA))); });
+        CHECK(waitFor([&] { return srv.get("/health").body.find("\"slots_busy\":1") != std::string::npos; }, 5000));
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        budget = local0 + M / 4;
+        // B ends while A runs: B's slot (and the shared checkpoints) are parked: their buffers are freed
+        CHECK(completionText(srv.post("/v1/completions", completionBody(pB, gB))) == refB);
+        CHECK(waitFor([&] { return g_log.count("MiB of checkpoint buffers freed now") >= 1; }, 3000));
+        CHECK(srv.ops().deviceBytes() < dev0);
+        // the budget has room again before A ends: the restore runs; its nth allocation fails once
+        srv.ops().failMalloc(nth);
+        budget = local0 + 3 * M;
+        CHECK(waitFor([&] { return g_log.count("memory governor: restoring the checkpoint buffers failed") >= 1; }, 6000));
+        CHECK(waitFor([&] { return g_log.count("memory governor: checkpoint buffers restored") >= 1; }, 6000));
+        ta.join();
+        CHECK(gotA == refA);
+        CHECK(waitFor([&] { return srv.get("/health").body.find("\"reduced\":false,") != std::string::npos; }, 3000));
+        CHECK_EQ(srv.model().resizes(), 0u);
+        // exactly the buffers of before: nothing leaked by the failed try
+        CHECK_EQ(srv.ops().deviceBytes(), dev0);
+        CHECK(completionText(srv.post("/v1/completions", completionBody(pB, gB))) == refB);
+        CHECK_EQ(srv.model().poison(), 0u);
+        CHECK(srv.get("/health").body.find("\"parked_mib\":0,") != std::string::npos);
     }
 }
 
@@ -3937,6 +4027,7 @@ int main(int argc, char** argv) {
         {"vram_watch", testVramWatch},
         {"startup_adjust", testStartupAdjust},
         {"governor", testGovernor},
+        {"governor_restore", testGovernorRestore},
         {"compat_endpoints", testCompatEndpoints},
         {"http_limits", testHttpLimits},
         {"http_conn_cap", testHttpConnCap},

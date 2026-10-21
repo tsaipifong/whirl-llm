@@ -10,16 +10,18 @@
 //   1. free reusable cache: idle slots' prefix cache (already spilled to the RAM tier at request end when it had
 //      room) and, while a request still runs, the VRAM checkpoint buffers of idle slots and of shared prefix
 //      checkpoints (returned to Windows at once; those slots take no new request until they are restored);
-//   2. the pinned RAM tier: kept (pinned host memory is not VRAM; it does not count against the VRAM budget:
-//      17 GiB pinned left the R9700 budget at 31.02 GiB, rel0221), logged once per episode;
-//   3. concurrency: while a smaller KV pool waits for the running requests to finish, new requests queue;
-//   4. context for new requests: at most the smaller pool;
-//   5. the KV pool is re-allocated smaller as soon as every slot is idle (this returns the VRAM to Windows);
-//   6. only then, if still over the budget while a request runs, the "generation is slower" warning.
+//   2. concurrency: while a smaller KV pool waits for the running requests to finish, new requests queue;
+//   3. context for new requests: at most the smaller pool;
+//   4. the KV pool is re-allocated smaller as soon as every slot is idle (this returns the VRAM to Windows);
+//   5. only then, if still over the budget while a request runs, the "generation is slower" warning.
+// The goal is WHIRL's own VRAM: the pinned RAM tier is system RAM, not VRAM (17 GiB pinned left the R9700 budget at
+// 31.02 GiB, rel0221), so it is never shrunk for the VRAM budget (one info line per episode says so).
 // It restores with hysteresis: shrink when less than margin/2 is free under the budget, back to the full margin;
 // grow (when idle) only after more than margin + margin/2 has been free for recover_s seconds and at least hold_s
-// after the last shrink, to margin + margin/4 free; hold_s doubles (up to hold_max_s) when a shrink follows a grow
-// within osc_window_s. For trust_s after a re-allocation the local usage counts as at most what it should be (the WDDM
+// after the last shrink, to margin + margin/4 free, or straight back to the startup pool once that fits with
+// endMargin (3/4 of the margin) free: then the episode ends and new requests get the startup context again. hold_s
+// doubles (up to hold_max_s) when a shrink follows a grow within osc_window_s, and goes back to hold_s after
+// quiet_reset_s without a shrink. For trust_s after a re-allocation the local usage counts as at most what it should be (the WDDM
 // counters show a free late, on the R9700 until the next memory operation).
 // A running request's KV is never touched: the pool changes only while every slot is idle. Output is unchanged
 // (only how many tokens the pool holds changes; tokens never depend on it).
@@ -54,7 +56,13 @@ struct Config {
     // in an episode, a shrink that is not urgent (more than half the margin still free) needs at least this deficit: a
     // re-allocation drops the VRAM prefix cache, so a few pages are not worth it
     std::uint64_t min_shrink = 256ull << 20;
+    // this long without an over-budget sample: the doubled hold goes back to hold_s
+    double quiet_reset_s = 1800.0;
 };
+
+// what must stay free under the budget for the governor to grow straight back to the startup pool (and end the
+// episode): 3/4 of the margin (startup sized the pool with the full margin; the trigger is at margin/2)
+inline std::uint64_t endMargin(std::uint64_t margin) { return margin - margin / 4; }
 
 // One sample, with the engine's state.
 struct Input {
@@ -71,12 +79,12 @@ struct Input {
 struct Plan {
     bool episode_start = false;       // this sample started an over-budget episode
     bool free_cache = false;          // 1. free idle prefix cache and park checkpoint buffers
-    bool ram_tier_note = false;       // 2. log the RAM tier decision
-    bool hold_admission = false;      // 3. new requests queue (a smaller pool waits for idle)
-    std::uint32_t ctx_new = 0;        // 4. context per request for new requests
-    std::optional<std::uint32_t> pool_target;  // 5. re-allocate to this many tokens when every slot is idle
+    bool ram_tier_note = false;       // log once that the RAM tier is untouched (system RAM, not VRAM)
+    bool hold_admission = false;      // 2. new requests queue (a smaller pool waits for idle)
+    std::uint32_t ctx_new = 0;        // 3. context per request for new requests
+    std::optional<std::uint32_t> pool_target;  // 4. re-allocate to this many tokens when every slot is idle
     bool shrink = false;              // pool_target is smaller than the pool
-    bool warn_slow = false;           // 6. over the budget with a request running
+    bool warn_slow = false;           // 5. over the budget with a request running
     bool restore_cache = false;       // re-allocate the parked checkpoint buffers now (they fit)
     bool episode_end = false;         // back to the startup pool, nothing parked
     std::int64_t deficit = 0;         // local + parked + margin - budget (bytes; > 0: short)

@@ -387,8 +387,10 @@ int serveMain(int argc, char** argv, const char* program) {
     // of the VRAM: 4 GiB on the R9700) for reuse instead of returning them to Windows, and reuses a cached block for any
     // request between half its size and its size. A KV pool re-allocated smaller then kept most of the old pool's VRAM
     // (R9700 S2c: 1.7 GiB of a 4 GiB shrink still counted against the WDDM budget, decode stayed 57 instead of 259 tok/s).
-    // Set before the HIP runtime reads it (first HIP call); a value the user set wins; WHIRL_HIP_CACHE_LIMIT=0 leaves the
-    // runtime default. Allocation only: kernels and output are not affected.
+    // Set before the first HIP API call: gpuPreflight has already loaded amdhip64_7.dll by now, but ROCclr reads its flags
+    // when the runtime initialises at the first API call, not at DLL load (measured: setting it here == setting it in the
+    // parent environment, cache_test V1 == V2). A value the user set wins; WHIRL_HIP_CACHE_LIMIT=0 leaves the runtime
+    // default. Allocation only: kernels and output are not affected.
     const bool hip_cache_user = std::getenv("GPU_RESOURCE_CACHE_SIZE") != nullptr;
     const bool hip_cache_set = !hip_cache_user && envOn("HIP_CACHE_LIMIT", true);
     if (hip_cache_set) _putenv_s("GPU_RESOURCE_CACHE_SIZE", "256");
@@ -565,9 +567,10 @@ int serveMain(int argc, char** argv, const char* program) {
         //      (min(ctx-per-slot, 16384)) no longer fits next to them: in the pre-load estimate, then again with the VRAM
         //      measured after the weights are loaded, before any slot is allocated;
         //   2. prefill batch / checkpoint counts set by the user (the VRAM-tight plan; only if still short);
-        //   3. RAM tier (--kv-ram-mb): system RAM, not VRAM (17 GiB pinned did not move the R9700's WDDM budget): above
-        //      half of the available RAM -> the default size; every RAM tier capped at 20480 MiB (hipError 719 above it,
-        //      task_063b1573);
+        //   3. RAM tier (--kv-ram-mb): system RAM, not VRAM (17 GiB pinned did not move the R9700's WDDM budget), so it is
+        //      never lowered to make room in VRAM. RAM-side rules only, in this order (0.2.2.2): every RAM tier capped at
+        //      20480 MiB while a crash with larger pinned RAM tiers is investigated (task_063b1573; the automatic size gets
+        //      an info line, an explicit one an "adjusted:" line), then a size above half of the available RAM -> half;
         //   4. -c / --ctx (the shared pool) down to what fits under the budget with the margin;
         //   5. --ctx-per-slot down to the pool. The per-request context reserves no memory by itself (the pool is
         //      shared), so lowering it first frees nothing: it is capped after the pool is known.
@@ -1804,8 +1807,10 @@ int serveMain(int argc, char** argv, const char* program) {
             const poolbudget::Margin mg = budgetMargin(wddm0.local_budget);
             logI("memory governor: on: when less than {} MiB (half the {} MiB margin) is free under the WDDM budget while the server "
                  "runs, it frees cache, queues new requests and re-allocates the KV pool smaller when every slot is idle; it grows "
-                 "back to {} tokens after more than {} MiB has been free for {:.0f} s (WHIRL_GOVERNOR=0 turns it off)",
-                 mg.bytes / 2 >> 20, mg.bytes >> 20, gc.pool_start, (mg.bytes + mg.bytes / 2) >> 20, gc.recover_s);
+                 "back when idle after {:.0f} s with room (more than {} MiB free), straight to {} tokens (the startup pool, startup "
+                 "context again) once that fits with {} MiB free (WHIRL_GOVERNOR=0 turns it off)",
+                 mg.bytes / 2 >> 20, mg.bytes >> 20, gc.recover_s, (mg.bytes + mg.bytes / 2) >> 20, gc.pool_start,
+                 memgov::endMargin(mg.bytes) >> 20);
             logI("memory governor: HIP resource cache {} (freed GPU memory larger than that goes back to Windows at once)",
                  hip_cache_set ? std::string("limited to 256 MiB (GPU_RESOURCE_CACHE_SIZE; WHIRL_HIP_CACHE_LIMIT=0 keeps the runtime default)")
                  : hip_cache_user ? std::format("set by GPU_RESOURCE_CACHE_SIZE={} MiB", std::getenv("GPU_RESOURCE_CACHE_SIZE"))

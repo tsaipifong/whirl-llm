@@ -32,6 +32,8 @@ Plan Governor::tick(const Input& in) {
         local = std::min(local, expected_local_);
         local_g = std::max(local_g, expected_local_);
     }
+    // a long quiet time since the last over-budget sample: the doubled hold goes back to hold_s (REVIEW-GOV-1 P3-1)
+    if (hold_ >= 0.0 && in.now_s - t_shrink_ >= cfg_.quiet_reset_s) hold_ = -1.0;
     const double hold = hold_ < 0.0 ? cfg_.hold_s : hold_;
     const auto i64 = [](std::uint64_t v) { return static_cast<std::int64_t>(v); };
     // what is short for the full state (startup margin free, parked checkpoint buffers back): > 0 short
@@ -54,8 +56,14 @@ Plan Governor::tick(const Input& in) {
         p.free_cache = true;
     }
     if (episode_) {
-        if (def > 0 && (trigger || in.parked > 0 || static_cast<std::uint64_t>(def) >= cfg_.min_shrink)) {
-            // 5. the pool that covers the deficit (whole pages), never below the smallest pool
+        if (!trigger && in.pool >= cfg_.pool_start && in.parked == 0) {
+            // back at the startup pool, nothing parked, no trigger: the episode ends (checked first: the last grow may leave
+            // up to a quarter of the margin less free than startup did, which must not count as a deficit to shrink for)
+            episode_ = false;
+            p.episode_end = true;
+            recover_since_.reset();
+        } else if (def > 0 && (trigger || in.parked > 0 || static_cast<std::uint64_t>(def) >= cfg_.min_shrink)) {
+            // 4. the pool that covers the deficit (whole pages), never below the smallest pool
             const std::uint64_t cut = static_cast<std::uint64_t>(pagesUp(static_cast<std::uint64_t>(def))) * cfg_.page;
             std::uint32_t target = in.pool > cut ? static_cast<std::uint32_t>(in.pool - cut) : 0;
             target = std::max(target, std::min(pool_min, in.pool));
@@ -69,37 +77,44 @@ Plan Governor::tick(const Input& in) {
             // grow back (when idle) once more than margin + margin/2 has been free for recover_s, hold_s after the last
             // over-budget sample
             const std::int64_t band = i64(in.margin / 2);
-            if (def_g < -band) {
+            // the startup pool fits again with at least endMargin (3/4 of the margin) free: the next grow goes all the way
+            // back, so the episode really ends (REVIEW-GOV-1 P2-1: a grow to margin + margin/4 free always stopped ~margin/4
+            // short of the startup pool, which startup sized with exactly the margin free; usage outside the pool also grows a
+            // little after startup: R9700 S2 runs 0.19 GiB). The trigger stays at margin/2 free, so this keeps a quarter of the
+            // margin of hysteresis.
+            const std::uint64_t need_end =
+                in.pool < cfg_.pool_start ? static_cast<std::uint64_t>(cfg_.pool_start - in.pool) * cfg_.per_tok : 0;
+            const bool end_fits = need_end > 0 && -def_g + i64(in.margin - endMargin(in.margin)) >= i64(need_end);
+            if (def_g < -band || end_fits) {
                 if (!recover_since_) recover_since_ = in.now_s;
             } else {
                 recover_since_.reset();
             }
             if (in.all_idle && recover_since_ && in.now_s - *recover_since_ >= cfg_.recover_s && in.now_s - t_shrink_ >= hold &&
                 in.pool < cfg_.pool_start) {
-                // to margin + margin/4 free (a grow to exactly the margin left nothing for the counters' noise)
+                // to margin + margin/4 free (a grow to exactly the margin left nothing for the counters' noise), or straight to
+                // the startup pool when it fits with endMargin free
                 const std::int64_t room = -def_g - i64(in.margin / 4);
                 const std::uint64_t add =
                     room > 0 ? static_cast<std::uint64_t>(pagesDown(static_cast<std::uint64_t>(room))) * cfg_.page : 0;
                 const std::uint32_t target = static_cast<std::uint32_t>(std::min<std::uint64_t>(cfg_.pool_start, in.pool + add));
                 const std::uint64_t min_add =
                     std::min<std::uint64_t>(static_cast<std::uint64_t>(pagesUp(cfg_.min_grow)) * cfg_.page, cfg_.pool_start - in.pool);
-                if (target > in.pool && target - in.pool >= min_add) p.pool_target = target;
-            }
-            if (in.pool >= cfg_.pool_start && in.parked == 0) {
-                episode_ = false;
-                p.episode_end = true;
-                recover_since_.reset();
+                if (end_fits)
+                    p.pool_target = cfg_.pool_start;
+                else if (target > in.pool && target - in.pool >= min_add)
+                    p.pool_target = target;
             }
         }
     }
-    // 3. queue new requests only while a needed shrink waits for the running ones
+    // 2. queue new requests only while a needed shrink waits for the running ones
     p.hold_admission = p.shrink && trigger && !in.all_idle;
-    // 4. new requests get at most the pool they will run in, while it is smaller than at startup (at the startup pool the
+    // 3. new requests get at most the pool they will run in, while it is smaller than at startup (at the startup pool the
     // context is the startup one, whatever it is: normal runs are unchanged)
     const std::uint32_t pool_eff = p.shrink ? *p.pool_target : in.pool;
     ctx_new_ = pool_eff < cfg_.pool_start ? std::min(cfg_.ctx, pool_eff) : cfg_.ctx;
     p.ctx_new = ctx_new_;
-    // 6. over the budget with a request running (its KV cannot move): it is slower until it finishes
+    // 5. over the budget with a request running (its KV cannot move): it is slower until it finishes
     p.warn_slow = in.local > in.budget && !in.all_idle;
     return p;
 }

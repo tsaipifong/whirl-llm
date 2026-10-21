@@ -2430,6 +2430,17 @@ void testMemGovernor() {
         CHECK(resizes <= 20u);
         CHECK(g3.hold() > 60.0);
         CHECK(g3.shrinks() >= 1u);
+        // REVIEW-GOV-1 P3-1: after quiet_reset_s (30 min) without an over-budget sample the doubled hold goes back to hold_s
+        for (double t = 3600; t < 3600 + 1900; t += 5) {
+            const Plan p = g3.tick(in(t, L0 - static_cast<std::uint64_t>(330240 - pool) * 36966, B0, pool, true));
+            if (p.pool_target) {
+                g3.resized(*p.pool_target, *p.pool_target > pool, t);
+                pool = *p.pool_target;
+            }
+        }
+        CHECK_EQ(pool, 330240u);
+        g3.tick(in(5600, L0, B0 - 4 * GiB, 330240, true));
+        CHECK(g3.hold() <= 60.0);
     }
     // lagging WDDM counters after a re-allocation (R9700 S1, 2026-10-21: a 4.8 GiB grow first read +8.1 GiB, so the governor
     // shrank right back): within trust_s the usage counts as at most the expected one; afterwards the measured one
@@ -2487,6 +2498,72 @@ void testMemGovernor() {
         const std::uint32_t a = growTarget(0), b = growTarget(880 * MiB);
         CHECK(a > 0u && b > 0u && b < a);
         CHECK(static_cast<std::uint64_t>(a - b) * 36966 >= 800 * MiB);
+    }
+    // REVIEW-GOV-1 P2-1: with the budget back at its startup value the episode really ends: the pool grows back to its startup
+    // size and new requests get the startup context again. Driven by the governor's own targets (no hand-set pool), with
+    // the R9700 S2 numbers (Ornith, budget 31.02 GiB, margin 2068 MiB, startup sized with exactly the margin free) and the
+    // 0.19 GiB that usage outside the pool grew by after the episode in those runs
+    {
+        Config r;
+        r.per_tok = 22528;
+        r.page = 256;
+        r.pool_start = 393984;
+        r.pool_min = 4096;
+        r.ctx = 393984;  // --parallel 1 on a card where the context per request is the whole pool
+        const std::uint64_t Mr = 2068 * MiB, Br = 31764 * MiB, Lr0 = Br - Mr, drift = 195 * MiB;
+        auto inr = [&](double t, std::uint64_t local, std::uint64_t budget, std::uint32_t pool) {
+            Input x;
+            x.now_s = t;
+            x.local = local;
+            x.budget = budget;
+            x.margin = Mr;
+            x.pool = pool;
+            x.all_idle = true;
+            return x;
+        };
+        auto usage = [&](std::uint32_t pool, std::uint64_t extra) {
+            return Lr0 - static_cast<std::uint64_t>(393984 - pool) * 22528 + extra;
+        };
+        // run the episode: budget drop of 4 GiB at t=0, back to Br at t_back; returns the pool at the end
+        auto episode = [&](Governor& g, std::uint64_t b_back, double t_back, double t_end, bool& ended) {
+            std::uint32_t pool = 393984;
+            ended = false;
+            for (double t = 0; t < t_end; t += 5) {
+                const std::uint64_t b = t < t_back ? Br - 4 * GiB : b_back;
+                const Plan p = g.tick(inr(t, usage(pool, t >= 5 ? drift : 0), b, pool));
+                if (p.episode_end) ended = true;
+                if (p.pool_target) {
+                    const std::uint32_t np = *p.pool_target;
+                    g.resized(np, np > pool, t, usage(np, 0));
+                    pool = np;
+                }
+            }
+            return pool;
+        };
+        Governor g(r);
+        bool ended = false;
+        const std::uint32_t pool = episode(g, Br, 300, 1200, ended);
+        CHECK_EQ(g.shrinks(), 1u);
+        CHECK_EQ(g.grows(), 1u);  // one grow, straight back
+        CHECK_EQ(pool, 393984u);
+        CHECK(ended);
+        CHECK(!g.reduced());
+        CHECK_EQ(g.ctxNew(), 393984u);
+        // stable afterwards: an hour of samples at the startup budget with the drift: no action
+        for (double t = 1200; t < 4800; t += 5) {
+            const Plan p = g.tick(inr(t, usage(393984, drift), Br, 393984));
+            CHECK(!p.pool_target && !p.free_cache && !p.episode_start);
+        }
+        // the budget comes back only partly (1 GiB still taken): the startup pool would leave less than endMargin free, so
+        // the pool grows only part way and new requests keep the smaller context (no spill risk taken)
+        Governor h(r);
+        bool ended_h = false;
+        const std::uint32_t pool_h = episode(h, Br - 1 * GiB, 300, 1200, ended_h);
+        CHECK(!ended_h);
+        CHECK(h.reduced());
+        CHECK(pool_h < 393984u);
+        CHECK_EQ(h.ctxNew(), pool_h);
+        CHECK(Br - 1 * GiB >= usage(pool_h, drift) + Mr);  // the full margin stays free
     }
     // unknown budget: nothing
     {

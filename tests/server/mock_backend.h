@@ -66,6 +66,11 @@ public:
         fail_host_copy_ = nth;
     }
     bool hostCopyFailArmed() const { return fail_host_copy_.load() != 0; }
+    // fault injection: the nth device malloc (from now) throws; 0: off
+    void failMalloc(std::uint64_t nth) {
+        mallocs_ = 0;
+        fail_malloc_ = nth;
+    }
 
 private:
     bool isHost(tier::DevPtr p) const;
@@ -73,6 +78,7 @@ private:
     std::set<void*> live_;
     std::map<std::uintptr_t, std::uint64_t> host_;  // pinned host allocations (start -> bytes)
     std::atomic<std::uint64_t> fail_host_copy_{0}, host_copies_{0};
+    std::atomic<std::uint64_t> fail_malloc_{0}, mallocs_{0};
     std::atomic<std::uint64_t> copied_{0};
     std::map<std::uintptr_t, std::uint64_t> dev_;  // device allocations (start -> bytes)
     std::atomic<std::uint64_t> dev_bytes_{0};

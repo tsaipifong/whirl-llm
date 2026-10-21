@@ -82,6 +82,10 @@ void MockDeviceOps::hostFree(void* p) {
 }
 
 tier::DevPtr MockDeviceOps::malloc(std::uint64_t bytes) {
+    if (const std::uint64_t nth = fail_malloc_.load(); nth != 0 && ++mallocs_ == nth) {
+        fail_malloc_ = 0;
+        throw std::runtime_error("injected malloc failure");
+    }
     void* p = _aligned_malloc(bytes ? bytes : 1, 256);
     if (!p) throw std::bad_alloc();
     std::memset(p, 0, bytes);

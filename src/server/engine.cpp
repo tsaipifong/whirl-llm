@@ -3402,12 +3402,12 @@ void Engine::govTick(const wddmwatch::Sample& s) {
     const double free_gib = (static_cast<double>(in.budget) - static_cast<double>(in.local)) / kGiB;
     if (p.episode_start)
         logW("memory governor: {:.2f} GiB free under the Windows video memory (WDDM) budget of {:.2f} GiB (WHIRL uses {:.2f} GiB), "
-             "less than half of the {} MiB margin (another program likely took VRAM); acting in this order: free cache, RAM tier, "
+             "less than half of the {} MiB margin (another program likely took VRAM); acting in this order: free cache, "
              "queue new requests, context for new requests, a smaller KV pool when every slot is idle",
              free_gib, in.budget / kGiB, in.local / kGiB, in.margin >> 20);
     if (p.ram_tier_note && gov_ram_mb_ > 0)
-        logI("memory governor: RAM tier kept at {} MiB: it is pinned host memory, not VRAM, and does not count against the VRAM "
-             "budget (17 GiB pinned left the R9700 budget unchanged in our test), so shrinking it would only drop prefix cache",
+        logI("memory governor: RAM tier kept at {} MiB (untouched: it is pinned system RAM, not VRAM, and does not count against "
+             "the VRAM budget; 17 GiB pinned left the R9700 budget unchanged in our test)",
              gov_ram_mb_);
     if (p.hold_admission && !gov_hold_)
         logW("memory governor: new requests queue until the running request(s) finish, then the KV pool is re-allocated smaller "
@@ -3503,31 +3503,48 @@ void Engine::govFreeCache(bool park) {
 void Engine::govRestoreCache() {
     gov_restored_ = 0;
     if (gov_parked_ == 0) return;
-    std::uint64_t bytes = 0;
+    std::uint64_t bytes = 0;  // of the slots / shared checkpoints restored completely
     std::size_t n = 0;
+    Slot* cur = nullptr;      // the slot being restored (its partial buffers are freed on failure)
+    bool cur_spe = false;
     try {
         for (Slot& sl : slots_) {
             if (!sl.parked) continue;
+            cur = &sl;
+            // a parked slot holds no checkpoint buffer (govFreeCache cleared them; a failed restore frees its partial ones)
+            sl.ckpts.clear();
             sl.ckpts.resize(opt_.n_ck);
-            for (Ckpt& c : sl.ckpts) {
-                initCkpt(c, true);
-                bytes += ckptVram(true);
-            }
+            for (Ckpt& c : sl.ckpts) initCkpt(c, true);
+            bytes += sl.ckpts.size() * ckptVram(true);
             sl.parked = false;
+            cur = nullptr;
             ++n;
         }
         if (spe_parked_) {
+            cur_spe = true;
+            spes_.clear();
             spes_.resize(opt_.n_spe);
-            for (Spe& sp : spes_) {
-                initCkpt(sp.ck, false);
-                bytes += ckptVram(false);
-            }
+            for (Spe& sp : spes_) initCkpt(sp.ck, false);
+            bytes += spes_.size() * ckptVram(false);
             spe_parked_ = false;
+            cur_spe = false;
         }
     } catch (const std::exception& ex) {
-        logW("memory governor: restoring the checkpoint buffers failed after {:.0f} MiB ({}); the other slots stay parked", bytes / kMiB,
-             ex.what());
+        // REVIEW-GOV-1 P2-2: free what the unfinished slot / shared checkpoints got, so they stay parked holding nothing and
+        // the next try starts clean (initCkpt overwrites its pointers: a retry over partial buffers leaked them)
+        if (cur != nullptr) {
+            for (Ckpt& c : cur->ckpts) freeCkpt(c);
+            cur->ckpts.clear();
+        }
+        if (cur_spe) {
+            for (Spe& sp : spes_) freeCkpt(sp.ck);
+            spes_.clear();
+        }
         gov_parked_ = gov_parked_ > bytes ? gov_parked_ - bytes : 0;
+        gov_restored_ = bytes;
+        logW("memory governor: restoring the checkpoint buffers failed after {:.0f} MiB ({}); the slots not restored stay parked and "
+             "are tried again later",
+             bytes / kMiB, ex.what());
         return;
     }
     gov_parked_ = 0;
@@ -3620,13 +3637,22 @@ void Engine::govApply() {
         const auto o = vram_others_();
         const wddmwatch::Sample s = vram_probe_();
         if (o && s.ok) {
-            const std::uint64_t margin = gov_margin_ ? gov_margin_(s.local_budget) : 0;
-            const std::uint64_t used = s.local_usage + o->now + margin;
-            const std::uint64_t room = gov_vram_total_ > used ? gov_vram_total_ - used : 0;
+            const std::uint64_t margin_full = gov_margin_ ? gov_margin_(s.local_budget) : 0;
             const std::uint32_t pool = pool_pages_ * kv_page;
             const std::uint64_t page_b = kvTokBytes() * kv_page;
-            const std::uint32_t add = page_b ? static_cast<std::uint32_t>(room / page_b) * kv_page : 0;
-            const std::uint32_t capped = std::min(*target, pool + add);
+            const auto addFor = [&](std::uint64_t m) {
+                const std::uint64_t used = s.local_usage + o->now + m;
+                const std::uint64_t room = gov_vram_total_ > used ? gov_vram_total_ - used : 0;
+                return page_b ? static_cast<std::uint32_t>(room / page_b) * kv_page : 0u;
+            };
+            // the governor plans the last step straight to the startup pool with endMargin free: the cap allows the same for
+            // that step only (a partial grow keeps the full margin)
+            std::uint64_t margin = margin_full;
+            std::uint32_t capped = std::min(*target, pool + addFor(margin_full));
+            if (*target >= gov_->config().pool_start && capped < *target && pool + addFor(memgov::endMargin(margin_full)) >= *target) {
+                margin = memgov::endMargin(margin_full);
+                capped = *target;
+            }
             const std::uint64_t min_add = std::min<std::uint64_t>(gov_->config().min_grow / std::max<std::uint64_t>(kvTokBytes(), 1),
                                                                   *target - pool);
             if (capped <= pool || capped - pool < min_add) {

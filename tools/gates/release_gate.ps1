@@ -214,33 +214,39 @@ try {
         # v0.2.2.1 (issues #5 / #6): a normal server run (no other program taking VRAM) must stay inside the WDDM
         # budget: any server log of a server step that shows "over the WDDM budget" or a GPU memory spill
         # warning fails the step. A server step with no server log to read fails too (the check must not pass
-        # vacuously).
+        # vacuously). v0.2.2.2 (REVIEW-GOV-1 P2-3): the memory governor repairs a drift under the margin before it
+        # becomes a spill, which would hide a budget regression, so a governor episode start ("memory governor: N GiB
+        # free under the Windows video memory") or a KV pool re-allocation fails a server step too: gate runs have no
+        # other program taking VRAM.
         $wddmNote = ""
         if ($s.name -like "srv_*") {
             $slogs = @(Get-ChildItem $wd -Recurse -File -Filter "server_*.log" -ErrorAction SilentlyContinue)
             # the warning lines themselves ("GPU memory spill:", "... continues", "... is over", the startup "over the WDDM
             # budget"), not the "vram watch:" line that describes the rule ("warns while GPU memory spills")
-            $wpat = "over the WDDM budget|GPU memory spill(:| continues| is over)"
+            $wpat = "over the WDDM budget|GPU memory spill(:| continues| is over)|memory governor: .* free under the Windows video memory|memory governor: KV pool re-allocated"
             $hits = @($slogs | Select-String -Pattern $wpat -ErrorAction SilentlyContinue)
             if ($slogs.Count -eq 0) {
                 $ok = $false; $wddmNote = " | WDDM check: no server log found under $wd"
             } elseif ($hits.Count -gt 0) {
                 $ok = $false
                 $h0 = $hits[0]
-                $wddmNote = " | WDDM check: $($hits.Count) line(s) over the budget / spill, first $($h0.Filename):$($h0.LineNumber): $("$($h0.Line)".Substring(0, [Math]::Min(200, "$($h0.Line)".Length)))"
+                $wddmNote = " | WDDM check: $($hits.Count) line(s) over the budget / spill / governor action, first $($h0.Filename):$($h0.LineNumber): $("$($h0.Line)".Substring(0, [Math]::Min(200, "$($h0.Line)".Length)))"
             } else {
-                $wddmNote = " | WDDM check: $($slogs.Count) server log(s), no budget overrun / spill"
+                $wddmNote = " | WDDM check: $($slogs.Count) server log(s), no budget overrun / spill / governor action"
             }
             "release gate: WDDM check: $($slogs.Count) server log(s) read, $($hits.Count) line(s) matched '$wpat'" | Add-Content $log
             foreach ($h in $hits) { "  $($h.Filename):$($h.LineNumber): $($h.Line)" | Add-Content $log }
         }
-        # CB-FLAKE: a failed step keeps its server logs (server_*.log / *.stdout.txt, small) next to the step log,
-        # so an intermittent failure can be explained afterwards; the SSD tier files are deleted either way
-        if (-not $ok -and (Test-Path $wd)) {
+        # CB-FLAKE: a step keeps its server logs (server_*.log / *.stdout.txt, small) next to the step log, so a
+        # failure can be explained afterwards and a pass can be audited (REVIEW-GOV-1 P2-3: whether a governor episode
+        # fired in a gate run could not be checked once the logs were gone); the SSD tier files are deleted either way
+        if (Test-Path $wd) {
             $keep = Join-Path $logDir "$($s.name)_server_logs"
-            New-Item -ItemType Directory -Force $keep | Out-Null
-            Get-ChildItem $wd -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "server_*.log" -or $_.Name -like "*.stdout.txt" -or $_.Name -like "*.json" } |
-                Copy-Item -Destination $keep -ErrorAction SilentlyContinue
+            $kl = @(Get-ChildItem $wd -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "server_*.log" -or $_.Name -like "*.stdout.txt" -or $_.Name -like "*.json" })
+            if ($kl.Count -gt 0) {
+                New-Item -ItemType Directory -Force $keep | Out-Null
+                $kl | Copy-Item -Destination $keep -ErrorAction SilentlyContinue
+            }
         }
         Remove-Item -Recurse -Force $wd -ErrorAction SilentlyContinue  # server gate work dirs (SSD tier files)
         $sec = [int]((Get-Date) - $t0).TotalSeconds

@@ -13,29 +13,34 @@ All notable changes to WHIRL are listed here. Versions follow `project(whirl VER
   status line, each request end, an idle sample; never in the decode loop). When less than half of the margin is free
   under the budget (about 1-1.5 GiB) it acts in this order, one `memory governor:` line per action with numbers: frees
   reusable cache (idle slots' prefix cache, which went to the RAM tier at request end; while a request still runs, also
-  the checkpoint buffers of idle slots and shared prefix checkpoints, VRAM back to Windows at once); keeps the RAM tier
-  (pinned host memory does not count against the VRAM budget: 17 GiB pinned left the R9700's budget unchanged in our
-  test); queues new requests while a smaller KV pool waits; lowers the context for new requests if the smaller pool
-  holds less; re-allocates the KV pool smaller as soon as every slot is idle, which is what returns the VRAM to Windows;
-  and only then warns. When the budget has room again (more than 1.5 times the margin free for 30 s, at least 60 s after
-  the last drop, longer if the budget keeps going up and down) the pool grows back while idle, up to its startup size.
-  A running request's KV is never moved, so a request that was running when the budget dropped stays slower until it
-  finishes. `GET /health` and `GET /props` show the effective values in a `governor` object; `/props` `n_ctx` is the
-  context for new requests. Output is unchanged: only how many tokens the pool holds changes. Not on the Radeon 8060S
-  (its pool is a fixed carve-out) and not with `WHIRL_POOL_RESERVE_MB`; `WHIRL_GOVERNOR=0` turns it off.
-  Part of the fix: the HIP runtime keeps freed GPU memory below 1/8 of the VRAM (4 GiB on the R9700) in a cache for
-  reuse instead of giving it back to Windows, so a smaller KV pool still counted most of the old one (R9700, Ornith:
-  1.7 GiB of a 4 GiB shrink stayed counted against the budget and decode stayed at 57 tok/s). whirl-server now sets
-  `GPU_RESOURCE_CACHE_SIZE=256` (MiB) for its own process unless you set it (`WHIRL_HIP_CACHE_LIMIT=0` keeps the runtime
-  default); a 3.9 GiB shrink then lowered WHIRL's VRAM by 3.9 GiB. Because memory freed while loading now goes back too,
-  the default KV pool on the R9700 is about 3% larger (Swift-1.5 27B, `--parallel 1`: 329728 -> 340480 tokens).
+  the checkpoint buffers of idle slots and shared prefix checkpoints, VRAM back to Windows at once); queues new requests
+  while a smaller KV pool waits; lowers the context for new requests if the smaller pool holds less; re-allocates the KV
+  pool smaller as soon as every slot is idle, which is what returns the VRAM to Windows; and only then warns. It only
+  shrinks WHIRL's own VRAM: the RAM tier is pinned system RAM, not VRAM (17 GiB pinned left the R9700's budget unchanged
+  in our test), and is never shrunk for the VRAM budget. When the budget has room again for 30 s, at least 60 s after
+  the last drop (longer if the budget keeps going up and down), the pool grows back while idle: straight to its startup
+  size once that fits with 3/4 of the margin free, which also gives new requests the startup context again; otherwise
+  part way. A running request's KV is never moved, so a request that was running when the budget dropped stays slower
+  until it finishes. `GET /health` and `GET /props` show the effective values in a `governor` object; `/props` `n_ctx`
+  is the context for new requests. Output is unchanged: only how many tokens the pool holds changes. Not on the Radeon
+  8060S (its pool is a fixed carve-out) and not with `WHIRL_POOL_RESERVE_MB`; `WHIRL_GOVERNOR=0` turns it off.
+  The HIP runtime keeps freed GPU memory in a cache for reuse instead of giving it back to Windows (up to 4 GiB on the
+  R9700), so a smaller KV pool still counted much of the old one. whirl-server now sets `GPU_RESOURCE_CACHE_SIZE=256`
+  (MiB) for its own process unless you set it (`WHIRL_HIP_CACHE_LIMIT=0` keeps the runtime default): a 3.93 GiB shrink
+  then lowered WHIRL's VRAM by 3.90 GiB, against 2.55 GiB with the default cache. Whether it also speeds up the recovery
+  of decode is not established (see below). Because memory freed while loading now goes back too, the default KV pool on
+  the R9700 is about 3% larger (Swift-1.5 27B, `--parallel 1`: 329728 -> 340480 tokens).
   Measured on the R9700 (another process takes 4 GiB while a long request runs, `--parallel 1`, balance; same prompt
-  before and after, identical output every time): Ornith-1.5-35B-A3B MXFP4 decoded 259 tok/s before, about 19 tok/s
-  while the running request was over the budget, and 259-261 tok/s again about 16 s after the pool was re-allocated
-  (393984 -> 200960 tokens), with the other process still holding its 4 GiB; when it exited the pool grew back to 364032
-  tokens. Swift-1.5 27B MXFP4: 90 tok/s before, 16-25 tok/s during, 89-91 tok/s after the re-allocation (in one run
-  only after about 60 s: Windows moves the buffers back on its own schedule). With the HIP runtime's default cache the
-  same Ornith run stayed at 57 tok/s after the re-allocation.
+  before and after, identical output every time; build before the 0.2.2.2 review fixes, whose pool grew back only to
+  364032 of 393984 tokens): Ornith-1.5-35B-A3B MXFP4, 4 runs: 259-261 tok/s before, about 19 tok/s while the running
+  request was over the budget. After the pool was re-allocated (393984 -> 200960 tokens) with the other process still
+  holding its 4 GiB, decode came back to about 260 tok/s in 2 of 4 runs and stayed at 57.6 and 95-135 tok/s in the
+  other two. After the other process exited and the pool grew back, 3 of 4 runs were back at 259-261 tok/s; one stayed
+  at 160 tok/s (38% slower) for at least 5 minutes with no warning, cause unknown and under investigation. Windows moves
+  WHIRL's paged-out buffers back on its own schedule. With the HIP runtime's default cache, 2 of 2 Ornith runs stayed at
+  57 tok/s after the re-allocation. Swift-1.5 27B MXFP4, one run: 90 tok/s before, 16 tok/s during, 18.9 tok/s for the
+  first request after the re-allocation and 89-91 tok/s from about 60 s later (with the default cache the first request
+  was already fast in 2 of 2 runs).
 - Server: the RAM tier cap of 0.2.2.1 ran after the half-of-available-RAM rule, so asking for more could give less
   (R9700, 47348 MiB available: `--kv-ram-mb 22528` -> 20480 MiB, `--kv-ram-mb 24064` -> 16384 MiB). The 20480 MiB cap
   now comes first, and a size above half of the available RAM goes to half of it (not to the default size, which was
