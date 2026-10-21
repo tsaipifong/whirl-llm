@@ -183,6 +183,12 @@ struct Dim3 {
 void launchRaw(Function f, Dim3 grid, Dim3 block, unsigned shared_bytes, Stream s, void** params);
 std::uint64_t launchCount();
 
+// launch log (src/hip/launch_log.h, WHIRL_LAUNCH_LOG): off by default; when on, launch() hands it the arguments
+namespace launchlog {
+extern const bool g_on;
+void stageArgs(void* const* params, const std::uint32_t* sizes, std::size_t n);
+}  // namespace launchlog
+
 // Launches `f` with by-value arguments. Each argument type must match the
 // kernel's parameter type exactly (DevPtr / pointers for pointers, int32_t,
 // uint32_t, float, uint64_t, or a trivially copyable struct).
@@ -195,6 +201,10 @@ void launch(Function f, Dim3 grid, Dim3 block, unsigned shared_bytes, Stream s, 
         std::size_t i = 0;
         ((params[i++] = static_cast<void*>(&a)), ...);
     }, copy);
+    if (launchlog::g_on) {
+        const std::uint32_t sizes[sizeof...(Args) > 0 ? sizeof...(Args) : 1] = {static_cast<std::uint32_t>(sizeof(Args))...};
+        launchlog::stageArgs(params, sizes, sizeof...(Args));
+    }
     launchRaw(f, grid, block, shared_bytes, s, params);
 }
 

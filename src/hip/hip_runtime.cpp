@@ -155,6 +155,7 @@ DevPtr malloc(std::size_t bytes) {
     if (limit == 0) {
         void* p = nullptr;
         check(rt().hipMalloc(&p, n), "hipMalloc");
+        if (launchlog::g_on) launchlog::onAlloc(reinterpret_cast<std::uintptr_t>(p), n);
         return reinterpret_cast<std::uintptr_t>(p);
     }
     VramTrack& t = vramTrack();
@@ -179,11 +180,13 @@ DevPtr malloc(std::size_t bytes) {
     if (st != hipSuccess) t.counter.release(n);
     check(st, "hipMalloc");
     t.sizes[reinterpret_cast<std::uintptr_t>(p)] = n;
+    if (launchlog::g_on) launchlog::onAlloc(reinterpret_cast<std::uintptr_t>(p), n);
     return reinterpret_cast<std::uintptr_t>(p);
 }
 
 void free(DevPtr p) {
     if (!p) return;
+    if (launchlog::g_on) launchlog::onFree(p);
     (void)rt().hipFree(ptr(p));
     if (vram::limitBytes() == 0) return;
     VramTrack& t = vramTrack();
@@ -406,6 +409,7 @@ DevPtr Module::getGlobal(const char* name, std::size_t* bytes) const {
     std::size_t n = 0;
     check(rt().hipModuleGetGlobal(&p, &n, static_cast<hipModule_t>(handle_), name), "hipModuleGetGlobal");
     if (bytes) *bytes = n;
+    if (launchlog::g_on) launchlog::onAlloc(reinterpret_cast<std::uintptr_t>(p), n);
     return reinterpret_cast<std::uintptr_t>(p);
 }
 
