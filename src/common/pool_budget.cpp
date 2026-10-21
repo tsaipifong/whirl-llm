@@ -69,4 +69,12 @@ bool usageFell(std::uint64_t usage_before, std::uint64_t usage_after, std::uint6
     return usage_before - usage_after >= freed / 2;
 }
 
+// fbdbe38 behaviour, kept for the failing test (REVIEW-GOV-3 question 4): the encoder is not counted
+std::uint64_t visionReserve(const VisionVram& v) {
+    (void)v;
+    return 0;
+}
+
+std::uint64_t kvAvail(std::uint64_t avail, std::uint64_t reserve) { return avail > reserve ? avail - reserve : 0; }
+
 }  // namespace whirl::poolbudget

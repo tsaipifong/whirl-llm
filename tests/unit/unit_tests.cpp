@@ -2693,6 +2693,44 @@ void testMemGovernorGrowOvershoot() {
     }
 }
 
+// REVIEW-GOV-3 question 4 (R9700 Ornith --mmproj, gov3 orn_new3): startup left exactly the margin free (29696 MiB local,
+// budget 31767 MiB, margin 2068 MiB); the first image added 873 MiB (encoder weights, 860.5 MiB pinned, made resident) and a
+// 1920x1080 image 134 MiB more (activations that did not fit the lent prefill scratch), so 30 MiB were left before the
+// governor's trigger (margin/2 free) and a false episode could never end. With --mmproj the startup KV pool must leave room
+// for what the encoder adds; without it (text only) the pool must be exactly what it was. Written before the fix.
+void testVisionPoolReserve() {
+    using namespace whirl;
+    namespace nu = whirl::numerics;
+    constexpr std::uint64_t KiB = 1ull << 10, MiB = 1ull << 20;
+    const std::uint64_t per_tok = 22528;                   // Ornith MXFP4 KV bytes per token
+    const std::uint64_t avail = 8468 * MiB;                // orn_new3: room 8.27 GiB (budget - used - margin)
+    const std::uint64_t added = 873 * MiB + 134 * MiB;     // measured local usage the encoder added (orn_new3 health)
+    poolbudget::VisionVram vv;
+    vv.weights = 860 * MiB + 512 * KiB;                    // the mmproj's weights (the startup log's pinned MiB)
+    vv.act_extra = 134 * MiB;                              // beyond the lent scratch (the 1920x1080 step)
+    const std::uint64_t r = poolbudget::visionReserve(vv);
+    const nu::PoolFit text = nu::serverPoolFit(avail, per_tok, std::nullopt, false, 131072, false, 256, 8 * 262144);
+    const nu::PoolFit text2 =
+        nu::serverPoolFit(poolbudget::kvAvail(avail, poolbudget::visionReserve({})), per_tok, std::nullopt, false, 131072, false, 256, 8 * 262144);
+    const nu::PoolFit vis =
+        nu::serverPoolFit(poolbudget::kvAvail(avail, r), per_tok, std::nullopt, false, 131072, false, 256, 8 * 262144);
+    std::printf("vision pool reserve: reserve %llu MiB (encoder added %llu MiB); KV pool text-only %u tokens, no-mmproj via "
+                "kvAvail %u, --mmproj %u tokens (%lld tokens less)\n",
+                static_cast<unsigned long long>(r / MiB), static_cast<unsigned long long>(added / MiB), text.pool, text2.pool,
+                vis.pool, static_cast<long long>(text.pool) - static_cast<long long>(vis.pool));
+    // text only: exactly the same pool (no reserve, kvAvail is the identity)
+    CHECK_EQ(poolbudget::visionReserve({}), 0ull);
+    CHECK_EQ(text2.pool, text.pool);
+    for (std::uint64_t a : {0ull, 1ull, 4096ull * MiB, 8468ull * MiB, 31767ull * MiB}) CHECK_EQ(poolbudget::kvAvail(a, 0), a);
+    // --mmproj: the reserve covers what the encoder really added, without reserving much more
+    CHECK(r >= added);
+    CHECK(r <= added + 64 * MiB);
+    // and the pool is smaller by at least that much, so after the encoder and the 1920x1080 image the margin is still free
+    CHECK(vis.pool < text.pool);
+    CHECK((text.pool - vis.pool) * per_tok >= added);
+    CHECK(vis.pool >= 131072);  // one 131072-token request still fits
+}
+
 // v0.2.2.1 startup fit of explicit settings (owner 2026-10-21: adjust, log, refuse only below the minimum)
 void testStartupFit() {
     using namespace whirl;
@@ -2903,6 +2941,7 @@ int main() {
     testPoolBudget();
     testPoolMargin();
     testStartupFit();
+    testVisionPoolReserve();
     testMemGovernor();
     testMemGovernorGrowOvershoot();
     std::printf("unit tests: %d passed, %d failed\n", g_pass, g_fail);
