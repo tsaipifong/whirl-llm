@@ -66,8 +66,12 @@ public:
         const std::uint32_t old = m_.pool_pages * qwen35::kv_page;
         hip::sync();
         m_.freeKvPool();
+        // (R9700: the WDDM usage showed part of a freed pool only after a later synchronize; sync after the free so the
+        // driver can release it before the new arrays are allocated, and after the allocation)
+        hip::sync();
         try {
             m_.allocKvPool(tokens);
+            hip::sync();
         } catch (const std::exception&) {
             // free what the failed allocation got (freeKvPool frees every non-null array once pool_pages != 0), then
             // the previous size again (throws if even that fails)

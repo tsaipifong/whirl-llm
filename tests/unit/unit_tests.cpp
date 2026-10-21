@@ -2442,9 +2442,9 @@ void testMemGovernor() {
         const std::uint64_t L1 = L0 - static_cast<std::uint64_t>(330240 - small) * 36966;
         g5.resized(small, false, 0, L1);
         // the free shows only partly (1.8 GiB still counted): no second shrink while the counters catch up
-        for (double t = 5; t < 20; t += 5) CHECK(!g5.tick(in(t, L1 + 1843 * MiB, B1, small, true)).pool_target.has_value());
-        // a real further drop after the window is still acted on
-        p = g5.tick(in(25, L1 + 1843 * MiB, B1, small, true));
+        for (double t = 5; t < 120; t += 5) CHECK(!g5.tick(in(t, L1 + 1843 * MiB, B1, small, true)).pool_target.has_value());
+        // a real further drop after the window (trust_s, 120 s) is still acted on
+        p = g5.tick(in(125, L1 + 1843 * MiB, B1, small, true));
         CHECK(p.shrink);
         // a grow that first reads too high (stale old pool) is not shrunk back within the window
         Governor g6(c);

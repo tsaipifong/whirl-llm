@@ -18,7 +18,9 @@
 //   6. only then, if still over the budget while a request runs, the "generation is slower" warning.
 // It restores with hysteresis: shrink when less than margin/2 is free under the budget, back to the full margin;
 // grow (when idle) only after more than margin + margin/2 has been free for recover_s seconds and at least hold_s
-// after the last shrink; hold_s doubles (up to hold_max_s) when a shrink follows a grow within osc_window_s.
+// after the last shrink, to margin + margin/4 free; hold_s doubles (up to hold_max_s) when a shrink follows a grow
+// within osc_window_s. For trust_s after a re-allocation the local usage counts as at most what it should be (the WDDM
+// counters show a free late, on the R9700 until the next memory operation).
 // A running request's KV is never touched: the pool changes only while every slot is idle. Output is unchanged
 // (only how many tokens the pool holds changes; tokens never depend on it).
 //
@@ -48,7 +50,10 @@ struct Config {
     // usage before it + the bytes it added or freed): on the R9700 the WDDM usage showed the old pool's free over several
     // seconds (a grow of 4.8 GiB first read +8.1 GiB, a shrink of 1.0 GiB read -1.8 GiB), and acting on those reads
     // shrank and grew the pool back and forth
-    double trust_s = 20.0;
+    double trust_s = 120.0;
+    // in an episode, a shrink that is not urgent (more than half the margin still free) needs at least this deficit: a
+    // re-allocation drops the VRAM prefix cache, so a few pages are not worth it
+    std::uint64_t min_shrink = 256ull << 20;
 };
 
 // One sample, with the engine's state.

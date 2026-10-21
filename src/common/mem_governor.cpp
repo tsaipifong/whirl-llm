@@ -47,7 +47,7 @@ Plan Governor::tick(const Input& in) {
         p.free_cache = true;
     }
     if (episode_) {
-        if (def > 0) {
+        if (def > 0 && (trigger || in.parked > 0 || static_cast<std::uint64_t>(def) >= cfg_.min_shrink)) {
             // 5. the pool that covers the deficit (whole pages), never below the smallest pool
             const std::uint64_t cut = static_cast<std::uint64_t>(pagesUp(static_cast<std::uint64_t>(def))) * cfg_.page;
             std::uint32_t target = in.pool > cut ? static_cast<std::uint32_t>(in.pool - cut) : 0;
@@ -56,7 +56,7 @@ Plan Governor::tick(const Input& in) {
                 p.pool_target = target;
                 p.shrink = true;
             }
-        } else if (!trigger) {
+        } else if (!trigger && def <= 0) {
             // the parked checkpoint buffers fit with the full margin: back now
             if (in.parked > 0) p.restore_cache = true;
             // grow back (when idle) once more than margin + margin/2 has been free for recover_s, hold_s after the last
@@ -69,7 +69,10 @@ Plan Governor::tick(const Input& in) {
             }
             if (in.all_idle && recover_since_ && in.now_s - *recover_since_ >= cfg_.recover_s && in.now_s - t_shrink_ >= hold &&
                 in.pool < cfg_.pool_start) {
-                const std::uint64_t add = static_cast<std::uint64_t>(pagesDown(static_cast<std::uint64_t>(-def))) * cfg_.page;
+                // to margin + margin/4 free (a grow to exactly the margin left nothing for the counters' noise)
+                const std::int64_t room = -def - i64(in.margin / 4);
+                const std::uint64_t add =
+                    room > 0 ? static_cast<std::uint64_t>(pagesDown(static_cast<std::uint64_t>(room))) * cfg_.page : 0;
                 const std::uint32_t target = static_cast<std::uint32_t>(std::min<std::uint64_t>(cfg_.pool_start, in.pool + add));
                 const std::uint64_t min_add =
                     std::min<std::uint64_t>(static_cast<std::uint64_t>(pagesUp(cfg_.min_grow)) * cfg_.page, cfg_.pool_start - in.pool);
