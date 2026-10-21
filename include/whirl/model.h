@@ -714,6 +714,9 @@ public:
     // Buffers for `slots` contexts (ring = the drafter's window, else 2048) and ingest batches of
     // up to `ingest_rows` rows; `debug` keeps every layer's block hidden for dflash-check.
     void dflashSetup(std::uint32_t slots, std::uint32_t ingest_rows, bool debug = false);
+    // VRAM dflashSetup allocates per slot (the context ring of every drafter layer); 0 without a drafter (v0.2.2.2: the
+    // server counts it when it re-fits --parallel after loading)
+    std::uint64_t dflashSlotBytes() const;
     // Context rows for positions pos0 .. pos0 + n - 1 from target features in layer-major layout
     // (feature of row r, target layer j at feats + (j * stride + r) * n_embd floats): fc + norm,
     // then each layer's K (k_norm, RoPE) and V into the slot's ring.

@@ -56,6 +56,8 @@ public:
     const char* lastErrorString() const override { return "mock"; }
 
     std::size_t liveAllocations() const;
+    // bytes of device allocations alive (the memory governor test's "WDDM local usage")
+    std::uint64_t deviceBytes() const { return dev_bytes_.load(); }
     std::uint64_t copiedBytes() const { return copied_.load(); }
     // fault injection: the nth copy (from now) whose source is pinned host memory (a tier restore
     // copy) throws; 0: off
@@ -72,6 +74,8 @@ private:
     std::map<std::uintptr_t, std::uint64_t> host_;  // pinned host allocations (start -> bytes)
     std::atomic<std::uint64_t> fail_host_copy_{0}, host_copies_{0};
     std::atomic<std::uint64_t> copied_{0};
+    std::map<std::uintptr_t, std::uint64_t> dev_;  // device allocations (start -> bytes)
+    std::atomic<std::uint64_t> dev_bytes_{0};
     std::atomic<std::uintptr_t> next_handle_{0x1000};
 };
 
@@ -142,6 +146,11 @@ public:
     bool fusedDecode() const override { return true; }
     bool canSegment() const override { return true; }
     std::vector<server::KvArr> kvArrays() const override;
+    // v0.2.2.2 memory governor: new pool arrays (the old rows are gone: a stale page table or a restore into the old
+    // arrays poisons the output); fail_resize: the next resize fails (keeps the size)
+    bool resizePool(std::uint32_t tokens) override;
+    std::uint32_t resizes() const { return resizes_.load(); }
+    std::atomic<bool> fail_resize{false};
 
     void selectSeq(std::uint32_t s) override { cur_ = s; }
     void commitSeq(std::uint32_t s) override;
@@ -257,6 +266,7 @@ private:
     std::vector<std::uint32_t> text_ids_;
     std::uint32_t im_end_ = 0, eot_ = 0;
     mutable std::atomic<std::uint64_t> poison_{0};
+    std::atomic<std::uint32_t> resizes_{0};
     std::atomic<std::uint32_t> max_pf_rows_{0};
     mutable std::atomic<std::uint64_t> hid_mismatch_{0};
     std::uint64_t rows_run_ = 0;

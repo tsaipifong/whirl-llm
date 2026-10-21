@@ -7,7 +7,7 @@
 cmake_minimum_required(VERSION 3.24)
 # The project version is the single version source: --version texts, the
 # Windows VERSIONINFO resources and the release package name derive from it.
-project(whirl VERSION 0.2.2.1 LANGUAGES CXX)
+project(whirl VERSION 0.2.2.2 LANGUAGES CXX)
 if(MSVC)
   enable_language(RC)
   # static C++ runtime (/MT): the executables need no Visual C++ redistributable
@@ -104,6 +104,7 @@ add_library(whirl STATIC
   src/common/wddm_watch.cpp
   src/common/pool_budget.cpp
   src/common/startup_fit.cpp
+  src/common/mem_governor.cpp
   src/common/numerics.cpp
   src/common/spec_sample.cpp
   src/gguf/gguf.cpp

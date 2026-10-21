@@ -18,6 +18,7 @@
 #include "whirl/wddm_watch.h"
 #include "whirl/pool_budget.h"
 #include "whirl/startup_fit.h"
+#include "whirl/mem_governor.h"
 #include "whirl/value_scope.h"
 #if WHIRL_TEST_DLL_DEPS
 #include "release/dll_deps.h"
@@ -2298,6 +2299,160 @@ void testPoolMargin() {
     CHECK_EQ(m(31764, 31764, false, true, 1).bytes % MiB, 0ull);
 }
 
+// v0.2.2.2 runtime memory governor: decisions with injected budgets (R9700-like numbers: Swift balance 36966 B/token,
+// pool 330240 tokens = 11.37 GiB, margin 2048 MiB)
+void testMemGovernor() {
+    using namespace whirl::memgov;
+    constexpr std::uint64_t MiB = 1ull << 20, GiB = 1ull << 30;
+    Config c;
+    c.per_tok = 36966;
+    c.page = 256;
+    c.pool_start = 330240;
+    c.pool_min = 4096;
+    c.ctx = 131072;
+    c.recover_s = 30;
+    c.hold_s = 60;
+    const std::uint64_t M = 2048 * MiB;
+    const std::uint64_t B0 = 31764 * MiB;          // budget at startup
+    const std::uint64_t L0 = B0 - M - 300 * MiB;   // sized with the margin (+ rounding)
+    auto in = [&](double t, std::uint64_t local, std::uint64_t budget, std::uint32_t pool, bool idle, std::uint64_t parked = 0,
+                  std::uint64_t freeable = 0) {
+        Input x;
+        x.now_s = t;
+        x.local = local;
+        x.budget = budget;
+        x.margin = M;
+        x.pool = pool;
+        x.all_idle = idle;
+        x.parked = parked;
+        x.freeable = freeable;
+        return x;
+    };
+    // normal runs: the budget wiggles by up to 1 GiB: never an action
+    {
+        Governor g(c);
+        for (int i = 0; i < 200; ++i) {
+            const std::uint64_t b = B0 - static_cast<std::uint64_t>((i * 37) % 1000) * MiB;
+            const Plan p = g.tick(in(i * 5.0, L0, b, 330240, i % 3 == 0));
+            CHECK(!p.free_cache && !p.pool_target && !p.hold_admission && !p.warn_slow && !p.episode_start);
+            CHECK_EQ(p.ctx_new, 131072u);
+        }
+        CHECK(!g.reduced());
+    }
+    // drop mid-run: another program takes 4 GiB while a request runs
+    Governor g(c);
+    {
+        const std::uint64_t B1 = B0 - 4 * GiB;
+        Plan p = g.tick(in(100, L0, B1, 330240, false, 0, 600 * MiB));
+        CHECK(p.episode_start && p.free_cache && p.ram_tier_note && p.hold_admission && p.shrink && p.warn_slow);
+        CHECK(p.pool_target.has_value());
+        // the deficit (local + margin - budget = 4096 - 300 MiB) in whole pages
+        const std::uint64_t def = L0 + M - B1;
+        const std::uint32_t pages = static_cast<std::uint32_t>((def + 36966ull * 256 - 1) / (36966ull * 256));
+        CHECK_EQ(*p.pool_target, 330240u - pages * 256);
+        CHECK_EQ(p.ctx_new, 131072u);  // the smaller pool still holds 131072
+        // still running, 600 MiB of checkpoint buffers parked by step 1: same target (the parked buffers come back after)
+        p = g.tick(in(105, L0 - 600 * MiB, B1, 330240, false, 600 * MiB));
+        CHECK(!p.episode_start && !p.ram_tier_note && p.hold_admission);
+        CHECK_EQ(*p.pool_target, 330240u - pages * 256);
+        // the request ends: every slot idle -> the target is applied by the engine
+        p = g.tick(in(110, L0 - 600 * MiB, B1, 330240, true, 600 * MiB));
+        CHECK(p.shrink && !p.hold_admission && !p.warn_slow);
+        const std::uint32_t small = *p.pool_target;
+        g.resized(small, false, 110);
+        CHECK_EQ(g.shrinks(), 1u);
+        // after the re-allocation and the parked buffers' return: the full margin free, no further action
+        const std::uint64_t L1 = L0 - static_cast<std::uint64_t>(330240 - small) * 36966;
+        for (int i = 0; i < 20; ++i) {
+            p = g.tick(in(115 + i * 5.0, L1, B1, small, i % 2 == 0));
+            CHECK(!p.pool_target && !p.free_cache && !p.hold_admission);
+        }
+        CHECK(B1 - L1 >= M);
+        CHECK(g.reduced());
+        // recovery: the other program exits; nothing before recover_s (30 s) of room and hold (60 s after the last trigger)
+        const std::uint64_t B2 = B0;
+        bool grew = false;
+        double t_grow = 0;
+        for (double t = 220; t < 400 && !grew; t += 5) {
+            p = g.tick(in(t, L1, B2, small, true));
+            if (p.pool_target) {
+                grew = true;
+                t_grow = t;
+                CHECK(*p.pool_target > small);
+                CHECK(*p.pool_target <= 330240u);
+                g.resized(*p.pool_target, true, t);
+            }
+        }
+        CHECK(grew);
+        CHECK(t_grow >= 220 + 30);
+        // grown back to the startup pool: the episode ends at the next sample
+        p = g.tick(in(t_grow + 5, L0, B2, 330240, true));
+        CHECK(p.episode_end);
+        CHECK(!g.reduced());
+        CHECK_EQ(g.grows(), 1u);
+        // no grow while a request runs
+        Governor h(c);
+        h.tick(in(0, L0, B1, 330240, true));
+        h.resized(small, false, 0);
+        for (double t = 5; t < 300; t += 5) CHECK(!h.tick(in(t, L1, B2, small, false)).pool_target.has_value());
+    }
+    // the context for new requests follows a pool smaller than ctx (8 GiB taken from a 5 GiB pool's server)
+    {
+        Config c2 = c;
+        c2.pool_start = 147456;  // 5.08 GiB
+        Governor g2(c2);
+        const std::uint64_t L = B0 - M - 100 * MiB;
+        const Plan p = g2.tick(in(0, L, B0 - 4 * GiB, 147456, false));
+        CHECK(p.shrink && p.ctx_new == *p.pool_target && p.ctx_new < 131072u);
+        CHECK(p.ctx_new >= 4096u);
+        // more than the pool can give: the smallest pool, never below pool_min
+        const Plan q = g2.tick(in(5, L, B0 - 12 * GiB, 147456, true));
+        CHECK(q.shrink && *q.pool_target == 4096u);
+    }
+    // repeated oscillation (another program starts and exits every 40 s for an hour): the hysteresis and the doubling
+    // hold keep re-allocations rare
+    {
+        Governor g3(c);
+        std::uint32_t pool = 330240;
+        std::uint32_t resizes = 0;
+        for (double t = 0; t < 3600; t += 5) {
+            const bool hog = static_cast<int>(t / 40) % 2 == 1;
+            const std::uint64_t b = hog ? B0 - 4 * GiB : B0;
+            const std::uint64_t local = L0 - static_cast<std::uint64_t>(330240 - pool) * 36966;
+            const Plan p = g3.tick(in(t, local, b, pool, true));
+            if (p.pool_target) {
+                g3.resized(*p.pool_target, *p.pool_target > pool, t);
+                pool = *p.pool_target;
+                ++resizes;
+            }
+        }
+        // every 40 s an episode would be 90 changes; the hold (60 s, doubling up to 15 min) caps it
+        CHECK(resizes <= 20u);
+        CHECK(g3.hold() > 60.0);
+        CHECK(g3.shrinks() >= 1u);
+    }
+    // unknown budget: nothing
+    {
+        Governor g4(c);
+        CHECK(!g4.tick(in(0, L0, 0, 330240, true)).free_cache);
+    }
+    // the status object
+    {
+        Status st;
+        st.on = true;
+        st.reduced = true;
+        st.pool_tokens = 218112;
+        st.pool_tokens_start = 330240;
+        st.ctx_per_request = 131072;
+        st.slots = 1;
+        st.slots_admitting = 1;
+        st.last_action = "pool 330240 -> \"218112\"";
+        const std::string j = statusJson(st);
+        CHECK(j.find("{\"on\":true,\"reduced\":true,\"pool_tokens\":218112,\"pool_tokens_start\":330240,\"ctx_per_request\":131072,") == 0);
+        CHECK(j.find("\"last_action\":\"pool 330240 -> \\\"218112\\\"\"}") != std::string::npos);
+    }
+}
+
 // v0.2.2.1 startup fit of explicit settings (owner 2026-10-21: adjust, log, refuse only below the minimum)
 void testStartupFit() {
     using namespace whirl;
@@ -2311,18 +2466,38 @@ void testStartupFit() {
         const auto r = startfit::ramTierFit(24064, 49247 * MiB, 16384, true);
         CHECK(r.has_value() && r->mb == 20480ull && r->safe && !r->half);
     }
-    // more than half of the available RAM: the default size (16 GiB here), not half
+    // v0.2.2.2: the cap first, then half of the available RAM on the capped size: 65536 with 48955 MiB available -> the cap
+    // (20480 is within half), no longer the default size
     {
         const auto r = startfit::ramTierFit(65536, 48955 * MiB, 16384, true);
-        CHECK(r.has_value() && r->mb == 16384ull && r->half && !r->safe);
+        CHECK(r.has_value() && r->mb == 20480ull && !r->half && r->safe);
     }
-    // more than half, no default known: half, then the cap
     {
         const auto r = startfit::ramTierFit(65536, 64 * GiB, 0, true);
-        CHECK(r.has_value() && r->mb == 20480ull && r->half && r->safe);
+        CHECK(r.has_value() && r->mb == 20480ull && !r->half && r->safe);
+    }
+    // the cap, then half: 30 GiB available -> 15360
+    {
+        const auto r = startfit::ramTierFit(65536, 30 * GiB, 8192, true);
+        CHECK(r.has_value() && r->mb == 15360ull && r->half && r->safe);
     }
     CHECK_EQ(startfit::ramTierFit(9000, 17000 * MiB, 0, true)->mb, 8192ull);  // half = 8500 MiB -> 8192 (512 steps)
-    CHECK_EQ(startfit::ramTierFit(9000, 12 * GiB, 8192, true)->mb, 6144ull);  // the default above half: half wins
+    CHECK_EQ(startfit::ramTierFit(9000, 12 * GiB, 8192, true)->mb, 6144ull);  // half
+    // monotonic (0.2.2.2 item 1; 0.2.2.1 gave 22528 -> 20480 but 24064 -> 16384 with 47348 MiB available): asking for more
+    // never gives less, for any available RAM
+    for (const std::uint64_t avail_mb : {8192ull, 17000ull, 30720ull, 47348ull, 49247ull, 65536ull, 131072ull}) {
+        std::uint64_t prev = 0;
+        bool mono = true;
+        for (std::uint64_t ask = 512; ask <= 65536; ask += 512) {
+            const auto r = startfit::ramTierFit(ask, avail_mb * MiB, 16384, true);
+            const std::uint64_t got = r ? r->mb : ask;
+            mono = mono && got >= prev;
+            prev = got;
+        }
+        CHECK(mono);
+    }
+    CHECK_EQ(startfit::ramTierFit(22528, 47348 * MiB, 16384, true)->mb, 20480ull);
+    CHECK_EQ(startfit::ramTierFit(24064, 47348 * MiB, 16384, true)->mb, 20480ull);
     // the automatic size (a PC with 128 GB RAM: 32 GiB by the 1/4 rule) is capped too, never the half rule
     {
         const auto r = startfit::ramTierFit(32768, 100 * GiB, 32768, false);
@@ -2488,6 +2663,7 @@ int main() {
     testPoolBudget();
     testPoolMargin();
     testStartupFit();
+    testMemGovernor();
     std::printf("unit tests: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

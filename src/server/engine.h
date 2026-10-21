@@ -18,11 +18,13 @@
 #include "vision_iface.h"
 #include "whirl/chat.h"
 #include "whirl/json.h"
+#include "whirl/mem_governor.h"
 #include "whirl/model.h"
 #include "whirl/prefill_schedule.h"
 #include "whirl/tokenizer.h"
 #include "whirl/wddm_watch.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -261,6 +263,9 @@ struct Slot : cache::SlotCache {
     TimePoint last_log_t{};
     // WDDM-LOG: sharp decode slowdown within the request (checked at each "gen:" report)
     wddmwatch::DecodeWatch dec_watch;
+    // v0.2.2.2 memory governor: the checkpoint buffers were freed (VRAM back to Windows); the slot takes no new
+    // request until they are restored
+    bool parked = false;
 
     std::uint64_t reqId() const { return job ? job->id : 0; }
 };
@@ -429,6 +434,7 @@ public:
     void setCtx(std::uint32_t c) {
         ctx_ = c;
         opt_.ctx = c;
+        ctx_pub_.store(c, std::memory_order_relaxed);
     }
     void setNumerics(std::string j) { opt_.numerics_json = std::move(j); }
     void setStartup(std::string j, std::string ctx_note) {
@@ -446,6 +452,13 @@ public:
     void setVramProbe(std::function<wddmwatch::Sample()> probe, bool warn, std::optional<wddmwatch::Sample> base = std::nullopt,
                       wddmwatch::Config cfg = {}, bool startup_warned = false,
                       std::function<std::optional<wddmwatch::Others>()> others = nullptr);
+    // v0.2.2.2 memory governor (after setVramProbe, before runLoop): acts on the samples of the vram probe when the WDDM
+    // budget drops while the server runs (whirl/mem_governor.h). margin: what must stay free under a given budget
+    // (poolbudget::defaultMargin); ram_tier_mb: the RAM tier in use (0: none), for its log line.
+    void setGovernor(const memgov::Config& c, std::function<std::uint64_t(std::uint64_t)> margin, std::uint64_t ram_tier_mb);
+    // "governor" object of /health and /props ("" when off); context per request for new requests (/props n_ctx)
+    std::string governorJson();
+    std::uint32_t ctxPublished() const { return ctx_pub_.load(std::memory_order_relaxed); }
     const Tokenizer& tokenizer() const { return tok_; }
     const ChatTokens& chatTokens() const { return ct_; }
     ServerModel& model() { return m_; }
@@ -579,6 +592,23 @@ private:
     // idle: one sample a minute so /health and the spill-over line stay current; returns the next due time
     std::optional<TimePoint> vramIdleTick();
     void abortQueued(std::unique_lock<std::mutex>& lk);
+    // v0.2.2.2 memory governor
+    void govTick(const wddmwatch::Sample& s);   // after each sample: decide (and log the decisions)
+    void govApply();                            // at a safe point of runLoop (no forward in flight): act
+    bool govAllIdle() const;
+    std::uint64_t ckptVram(bool slot_ckpt) const;  // VRAM of one checkpoint buffer
+    std::uint64_t govFreeable() const;
+    void govFreeCache(bool park);
+    void govRestoreCache();
+    bool govResize(std::uint32_t tokens, bool shrink);
+    void govDrain();
+    void govPublish();
+    std::uint32_t ctxForNew() const { return std::min(ctx_, ctx_new_); }
+    std::uint64_t kvTokBytes() const {
+        std::uint64_t b = 0;
+        for (const KvArr& a : kv_arrays_) b += a.row;
+        return b;
+    }
     void initCkpt(Ckpt& c, bool host_ok);
     // vision: image embeddings (cache by content hash), per-slot image maps, idle release
     EmbEntry* embGet(const vision::Prepared& p, std::uint64_t req, std::uint32_t slot);
@@ -659,6 +689,21 @@ private:
     wddmwatch::Sample vram_last_;
     bool vram_spill_ = false;
     std::vector<std::uint32_t> crlf_norm_;
+    TimePoint vram_last_t_{};  // last probe sample
+    // v0.2.2.2 memory governor (main thread; gov_json_ under vram_mu_)
+    std::optional<memgov::Governor> gov_;
+    std::function<std::uint64_t(std::uint64_t)> gov_margin_;
+    memgov::Plan gov_plan_;
+    bool gov_pending_ = false;
+    bool gov_hold_ = false;       // new requests queue (a smaller pool waits for the running ones)
+    bool spe_parked_ = false;     // shared prefix checkpoint buffers freed
+    std::uint64_t gov_parked_ = 0;  // checkpoint VRAM freed (to restore)
+    std::uint64_t gov_ram_mb_ = 0;
+    std::uint32_t ctx_new_ = 0xffffffffu;  // context per request for new requests (governor); running requests keep ctx_
+    std::string gov_warn_;        // the spill warning, logged after the governor's actions
+    std::string gov_last_;
+    std::string gov_json_;
+    std::atomic<std::uint32_t> ctx_pub_{0};
     // host tiers
     tier::Tier* tier_ = nullptr;
     std::vector<KvArr> kv_arrays_;

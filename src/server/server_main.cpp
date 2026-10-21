@@ -24,6 +24,7 @@
 #include "whirl/model.h"
 #include "whirl/pool_budget.h"
 #include "whirl/startup_fit.h"
+#include "whirl/mem_governor.h"
 #include "whirl/tokenizer.h"
 #include "whirl/uma_mem.h"
 #include "whirl/vram_limit.h"
@@ -1030,7 +1031,8 @@ int serveMain(int argc, char** argv, const char* program) {
             const std::uint64_t pend = ng * (static_cast<std::uint64_t>(qwen35::max_small_batch) * cfg.convCh() * 4 +
                                              static_cast<std::uint64_t>(qwen35::max_small_batch) * cfg.n_v_heads * (cfg.d_state + cfg.headV() + 2) * 4);
             const std::uint64_t ck = envOn("CKPT_HOST", false) ? 0 : st + static_cast<std::uint64_t>(cfg.n_vocab) * 4 + static_cast<std::uint64_t>(cfg.n_embd) * 4;
-            const std::uint64_t per_slot = (st + pend + n_ck * ck) * 104 / 100;
+            // v0.2.2.2: + the DFlash2 context ring per slot (dflashSetup runs after setupSeqs, below; REVIEW-0221-2)
+            const std::uint64_t per_slot = (st + pend + n_ck * ck + (use_dflash ? model.dflashSlotBytes() : 0)) * 104 / 100;
             const std::uint64_t shared = (n_spe_plan * ck + static_cast<std::uint64_t>(model.snap_sets) * st) * 104 / 100 + (256ull << 20);
             const std::uint64_t target = std::min<std::uint32_t>(slot_ctx, vram_tight_pool);
             const std::uint64_t per_tok_est = model.kvBytesPerToken();
@@ -1246,7 +1248,9 @@ int serveMain(int argc, char** argv, const char* program) {
         }
         const tier::RamTierSize rsz = tier::ramTierSize(rin);
         std::uint64_t kv_ram_mb = rsz.mb;
-        // 1. an explicit RAM tier larger than half of the RAM available now is lowered (the system would page)
+        // 1. RAM tier: capped at 20480 MiB (a larger one crashed on the first request on the R9700 test box, cause not known
+        // yet), then an explicit size above half of the RAM available now is lowered to half (v0.2.2.2: cap first, so asking
+        // for more never gives less). The automatic size the user never chose is capped with an info line, not an adjustment.
         const std::uint64_t ram_auto_mb = [&] {
             tier::RamTierInput a = rin;
             a.explicit_mb.reset();
@@ -1254,18 +1258,20 @@ int serveMain(int argc, char** argv, const char* program) {
         }();
         if (const auto rf = startfit::ramTierFit(kv_ram_mb, rin.avail_phys, ram_auto_mb, rin.explicit_mb.has_value());
             rf && n_ck > 0 && !no_pc) {
-            std::string why;
-            if (rf->half)
-                why = std::format("the RAM tier is pinned host memory; {} MiB is more than half of the {} MiB of RAM available now, and "
-                                  "the system would page; lowered to the default size",
-                                  kv_ram_mb, rin.avail_phys >> 20);
-            if (rf->safe)
-                why += std::format("{}capped at {} MiB: larger pinned RAM tiers crash on some systems (hipError 719 on the first request), "
-                                   "investigating",
-                                   why.empty() ? "" : "; ", startfit::ram_tier_safe_mb);
-            adjust(std::format("{} {} -> {} MiB", rin.explicit_mb ? std::string(rin.explicit_src) : std::string("RAM tier (default)"),
-                               kv_ram_mb, rf->mb),
-                   why);
+            if (!rin.explicit_mb) {
+                logI("kv tier: RAM tier capped at {} MiB (the automatic size would be {} MiB) while a crash with larger RAM tiers "
+                     "is investigated",
+                     rf->mb, kv_ram_mb);
+            } else {
+                std::string why;
+                if (rf->safe)
+                    why = std::format("capped at {} MiB while a crash with larger RAM tiers is investigated", startfit::ram_tier_safe_mb);
+                if (rf->half)
+                    why += std::format("{}the RAM tier is pinned host memory; more than half of the {} MiB of RAM available now "
+                                       "would make the system page, so it is lowered to half",
+                                       why.empty() ? "" : "; ", rin.avail_phys >> 20);
+                adjust(std::format("{} {} -> {} MiB", std::string(rin.explicit_src), kv_ram_mb, rf->mb), why);
+            }
             kv_ram_mb = rf->mb;
         }
         std::unique_ptr<tier::Tier> tier_pre;
@@ -1547,6 +1553,10 @@ int serveMain(int argc, char** argv, const char* program) {
         const wddmwatch::Sample vram_base = vramSampleOf(wddm0, pinned0);
         wddmwatch::Config vram_cfg;
         vram_cfg.pool_tokens = model.pool_pages * kv_page;
+        // v0.2.2.2 memory governor: discrete GPU with WDDM numbers, the budget rule in use (not WHIRL_POOL_RESERVE_MB, whose
+        // pool is never resized), WHIRL_GOVERNOR=0 turns it off
+        const bool gov_on = wddm0.ok && !is_uma && !reserve_explicit && envOn("GOVERNOR", true);
+        vram_cfg.governor = gov_on;
         bool startup_spill = false;
         engine.setNumerics(numerics::propsJson(model.num_plan, model.kv_q8 ? (model.kv_q4 ? "q4" : model.kv_kf16 ? "q8v" : model.kv_rot ? "q8h" : "q8") : "f16"));
         engine.initPool();
@@ -1770,6 +1780,25 @@ int serveMain(int argc, char** argv, const char* program) {
                 if (!o.ok) return std::nullopt;
                 return wddmwatch::Others{o.others, o0.ok ? std::optional<std::uint64_t>(o0.others) : std::nullopt};
             });
+        if (gov_on) {
+            memgov::Config gc;
+            gc.per_tok = per_tok;
+            gc.page = kv_page;
+            gc.pool_start = model.pool_pages * kv_page;
+            gc.pool_min = std::min<std::uint32_t>(gc.pool_start, 4096);
+            gc.ctx = slot_ctx_eff;  // the engine's context per request (the governor lowers it only below the startup pool)
+            // test overrides (no CLI flag): recovery time, hold after a shrink
+            if (auto v = env("GOV_RECOVER_S")) gc.recover_s = std::strtod(v->c_str(), nullptr);
+            if (auto v = env("GOV_HOLD_S")) gc.hold_s = std::strtod(v->c_str(), nullptr);
+            engine.setGovernor(gc, [&](std::uint64_t budget) { return budgetMargin(budget).bytes; }, tier_owned ? kv_ram_mb : 0);
+            const poolbudget::Margin mg = budgetMargin(wddm0.local_budget);
+            logI("memory governor: on: when less than {} MiB (half the {} MiB margin) is free under the WDDM budget while the server "
+                 "runs, it frees cache, queues new requests and re-allocates the KV pool smaller when every slot is idle; it grows "
+                 "back to {} tokens after more than {} MiB has been free for {:.0f} s (WHIRL_GOVERNOR=0 turns it off)",
+                 mg.bytes / 2 >> 20, mg.bytes >> 20, gc.pool_start, (mg.bytes + mg.bytes / 2) >> 20, gc.recover_s);
+        } else if (wddm0.ok && !is_uma) {
+            logI("memory governor: off ({})", reserve_explicit ? "WHIRL_POOL_RESERVE_MB is set: the pool is never resized" : "WHIRL_GOVERNOR=0");
+        }
         {
             // v0.2.2.1: one line with every startup adjustment, and the effective values for /props and /health, set before
             // the HTTP server starts (REVIEW-0221 C5: /health readers on other threads)

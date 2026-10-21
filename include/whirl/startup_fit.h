@@ -29,8 +29,8 @@ namespace whirl::startfit {
 
 // 1. RAM tier. A 24064 MiB RAM tier failed with hipError 719 on the first request on the R9700 test machine (0.2.2 too;
 // 20480 MiB works; cause not known yet, task_063b1573), so every RAM tier, explicit or automatic, is capped at
-// ram_tier_safe_mb until the cause is known. An explicit size above half of the RAM available now is also lowered: to
-// the default size (auto_mb; 0 = none), never above half of the available RAM (whole 512 MiB).
+// ram_tier_safe_mb until the cause is known. Then (v0.2.2.2: the cap first, so asking for more never gives less) an explicit
+// size above half of the RAM available now is lowered to half of it (whole 512 MiB). auto_mb: unused (kept for callers).
 inline constexpr std::uint64_t ram_tier_safe_mb = 20480;
 struct RamFit {
     std::uint64_t mb = 0;

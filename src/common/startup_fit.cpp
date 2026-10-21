@@ -9,17 +9,19 @@
 namespace whirl::startfit {
 
 std::optional<RamFit> ramTierFit(std::uint64_t mb, std::uint64_t avail_phys_bytes, std::uint64_t auto_mb, bool explicit_size) {
+    (void)auto_mb;
     if (mb == 0) return std::nullopt;
     RamFit r;
     r.mb = mb;
-    if (explicit_size && avail_phys_bytes > 0 && (mb << 20) > avail_phys_bytes / 2) {
-        const std::uint64_t half = (avail_phys_bytes / 2 >> 20) / 512 * 512;
-        r.mb = auto_mb > 0 ? std::min(half, auto_mb) : half;
-        r.half = true;
-    }
+    // v0.2.2.2: the cap first, then the half-of-available-RAM rule on the capped size, which lowers to half (whole
+    // 512 MiB): asking for more never gives less (0.2.2.1: 22528 -> 20480 but 24064 -> 16384)
     if (r.mb > ram_tier_safe_mb) {
         r.mb = ram_tier_safe_mb;
         r.safe = true;
+    }
+    if (explicit_size && avail_phys_bytes > 0 && (r.mb << 20) > avail_phys_bytes / 2) {
+        r.mb = (avail_phys_bytes / 2 >> 20) / 512 * 512;
+        r.half = true;
     }
     if (!r.half && !r.safe) return std::nullopt;
     return r;

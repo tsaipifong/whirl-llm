@@ -87,6 +87,8 @@ tier::DevPtr MockDeviceOps::malloc(std::uint64_t bytes) {
     std::memset(p, 0, bytes);
     std::lock_guard<std::mutex> lk(mu_);
     live_.insert(p);
+    dev_[reinterpret_cast<std::uintptr_t>(p)] = bytes;
+    dev_bytes_.fetch_add(bytes);
     return reinterpret_cast<tier::DevPtr>(p);
 }
 
@@ -95,6 +97,10 @@ void MockDeviceOps::free(tier::DevPtr p) {
     {
         std::lock_guard<std::mutex> lk(mu_);
         live_.erase(q);
+        if (const auto it = dev_.find(reinterpret_cast<std::uintptr_t>(q)); it != dev_.end()) {
+            dev_bytes_.fetch_sub(it->second);
+            dev_.erase(it);
+        }
     }
     _aligned_free(q);
 }
@@ -207,6 +213,23 @@ MockModel::~MockModel() {
     ops_.free(logits_);
     ops_.free(hn_);
     ops_.streamDestroy(stream_);
+}
+
+bool MockModel::resizePool(std::uint32_t tokens) {
+    if (fail_resize.exchange(false)) return false;
+    for (auto p : kc_) ops_.free(p);
+    for (auto p : vc_) ops_.free(p);
+    const std::size_t n_arr = kc_.size();
+    kc_.clear();
+    vc_.clear();
+    pool_pages_ = (tokens + kPage - 1) / kPage;
+    for (std::size_t a = 0; a < n_arr; ++a) {
+        kc_.push_back(ops_.malloc(static_cast<std::uint64_t>(pool_pages_) * kPage * kKRow));
+        vc_.push_back(ops_.malloc(static_cast<std::uint64_t>(pool_pages_) * kPage * kVRow));
+    }
+    for (Seq& sq : seqs_) sq.ptab.assign(seq_pages_, -1);
+    resizes_.fetch_add(1);
+    return true;
 }
 
 std::vector<server::KvArr> MockModel::kvArrays() const {

@@ -94,6 +94,12 @@ std::optional<Event> Watch::check(const Sample& s, double now_s) {
     // restarting re-reads the budget (the pool is sized from it); the margin variable keeps more room for other
     // programs and keeps the budget rule (WHIRL_POOL_RESERVE_MB would turn the budget rule off)
     const std::string pool = cfg_.pool_tokens ? std::format(" (the KV pool is now {} tokens)", cfg_.pool_tokens) : std::string();
+    if (cfg_.governor)
+        // v0.2.2.2: the memory governor frees cache and re-allocates the pool smaller when every slot is idle (its lines above)
+        return Event{true, std::format("{}{} {} WHIRL's memory governor frees cache and re-allocates the KV pool smaller as soon "
+                                       "as every slot is idle (the 'memory governor:' lines); closing other programs that use the "
+                                       "GPU (browsers, games, other AI tools) helps too. Now: {}",
+                                       head, what, effect, format(s, base_))};
     return Event{true, std::format("{}{} {} What you can do: close other programs that use the GPU (browsers, games, other AI "
                                    "tools); or restart the server, which sizes the KV pool{} from the budget at startup, and set "
                                    "WHIRL_POOL_BUDGET_MARGIN_MB=4096 (or more) to keep more room free for other programs. Now: {}",

@@ -34,6 +34,7 @@ struct Config {
     double min_gap_s = 60.0;                 // at most one spill warning per this many seconds
     std::uint32_t pool_tokens = 0;           // the KV pool, named in the advice (0: left out)
     double idle_sample_s = 60.0;             // the server samples once per this many seconds while idle
+    bool governor = false;                   // v0.2.2.2: the memory governor acts (the advice names it)
 };
 
 // What other processes use on this GPU (read only when a warning is printed); start: at server start.

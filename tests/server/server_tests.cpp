@@ -17,6 +17,7 @@
 #include "server/tokens.h"
 #include "tier/kv_tier.h"
 #include "whirl/vram_limit.h"
+#include "whirl/mem_governor.h"
 #include "whirl/common.h"
 #include "whirl/gguf.h"
 #include "whirl/json.h"
@@ -114,6 +115,9 @@ struct ServerSetup {
     std::function<std::optional<whirl::wddmwatch::Others>()> vram_others;
     // v0.2.2.1 startup fit: the "startup" JSON for /props and /health, and the context note
     std::string startup_json, ctx_note;
+    // v0.2.2.2 memory governor (per_tok is filled in from the mock's pool arrays)
+    std::optional<whirl::memgov::Config> gov;
+    std::function<std::uint64_t(std::uint64_t)> gov_margin;
 };
 
 // vision: host mock encoder (real stb decode + preprocessing size rule, deterministic
@@ -200,6 +204,12 @@ public:
         }
         if (!su.startup_json.empty() || !su.ctx_note.empty()) engine_->setStartup(su.startup_json, su.ctx_note);
         if (su.vram_probe) engine_->setVramProbe(su.vram_probe, true, su.vram_base, su.vram_cfg, su.vram_startup_warned, su.vram_others);
+        if (su.gov) {
+            whirl::memgov::Config gc = *su.gov;
+            gc.per_tok = 0;
+            for (const KvArr& a : model_->kvArrays()) gc.per_tok += a.row;
+            engine_->setGovernor(gc, su.gov_margin, su.tier ? su.tier_ram_mb : 0);
+        }
         http_ = std::make_unique<HttpServer>(*engine_, su.http);
         http_->start("127.0.0.1", 0);
         loop_ = std::thread([this] { engine_->runLoop(); });
@@ -785,6 +795,124 @@ void testVramWatch() {
         CHECK_EQ(g_log.count(" W GPU memory spill"), 0u);
         CHECK_EQ(g_log.count("(+600 MiB since start)"), 1u);  // the vram watch line, against the sizing baseline
         set(29000, 31232, 400);
+    }
+}
+
+// v0.2.2.2 memory governor on the mock engine with injected budgets: the WDDM local usage is the mock's live device
+// bytes, so freeing checkpoint buffers or re-allocating the pool lowers it as on the GPU. (1) nothing happens while the
+// budget has room; (2) the budget drops while a long request runs: idle cache is freed, new requests queue, the running
+// request's output is untouched and the pool is re-allocated smaller only once every slot is idle; (3) the budget
+// recovers: after the hold the pool grows back to its startup size (hysteresis); every output equals the reference.
+void testGovernor() {
+    auto waitFor = [](const std::function<bool()>& f, int ms) {
+        for (int i = 0; i < ms / 10; ++i) {
+            if (f()) return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        return f();
+    };
+    constexpr std::uint64_t MiB = 1ull << 20;
+    std::atomic<std::uint64_t> budget{28000 * MiB + (1ull << 40)};  // room until the test sets it
+    std::atomic<MockDeviceOps*> opsp{nullptr};
+    const std::uint64_t fixed = 28000 * MiB;  // "the weights" (not allocated by the mock)
+    ServerSetup su = baseSetup();
+    su.mc.parallel = 2;
+    su.mc.pool_tokens = 131072;
+    su.mc.slot_ctx = 16384;
+    su.mc.cycle_us = 2000;
+    su.tier = true;
+    su.tier_ram_mb = 256;
+    su.vram_probe = [&] {
+        whirl::wddmwatch::Sample x;
+        MockDeviceOps* o = opsp.load();
+        x.ok = true;
+        x.local_usage = fixed + (o ? o->deviceBytes() : 0);
+        x.local_budget = budget.load();
+        x.nonlocal_usage = 400 * MiB;
+        return x;
+    };
+    su.vram_cfg.idle_sample_s = 0.2;
+    su.vram_cfg.governor = true;
+    whirl::memgov::Config gc;
+    gc.page = qwen35::kv_page;
+    gc.pool_start = 131072;
+    gc.pool_min = 4096;
+    gc.ctx = 16384;
+    gc.recover_s = 0.4;
+    gc.hold_s = 0.6;
+    su.gov = gc;
+    std::uint64_t pool0 = 0;  // pool bytes at startup, set below
+    su.gov_margin = [&](std::uint64_t) { return pool0 / 2; };
+    g_log.clear();
+    TestServer srv(su);
+    for (const KvArr& a : srv.model().kvArrays()) pool0 += a.row * 131072;
+    const std::uint64_t M = pool0 / 2;
+    const std::uint64_t local0 = fixed + srv.ops().deviceBytes();
+    budget = local0 + M + M / 4;  // 1.25 x margin free: no action
+    opsp = &srv.ops();
+    const auto pA = makePrompt(3000, 71), pB = makePrompt(700, 72), pC = makePrompt(2600, 73);
+    const std::uint32_t gA = 1500, gB = 8, gC = 16;
+    const std::string refA = decode(srv.model().greedyReference(pA, gA, true));
+    const std::string refB = decode(srv.model().greedyReference(pB, gB, true));
+    const std::string refC = decode(srv.model().greedyReference(pC, gC, true));
+    // (1) room: requests run, the governor stays quiet
+    CHECK(completionText(srv.post("/v1/completions", completionBody(pB, gB))) == refB);
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    CHECK_EQ(g_log.count("memory governor:"), 0u);
+    CHECK(srv.get("/health").body.find("\"governor\":{\"on\":true,\"reduced\":false,\"pool_tokens\":131072,") != std::string::npos);
+    // (2) a long request runs; the budget drops to a quarter of the margin free
+    std::string gotA, gotC;
+    std::thread ta([&] { gotA = completionText(srv.post("/v1/completions", completionBody(pA, gA))); });
+    CHECK(waitFor([&] { return srv.get("/health").body.find("\"slots_busy\":1") != std::string::npos; }, 5000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    budget = local0 + M / 4;
+    // B ends while A runs: the request-end sample sees the drop (A busy): B's slot is parked, new requests queue
+    CHECK(completionText(srv.post("/v1/completions", completionBody(pB, gB))) == refB);
+    CHECK(waitFor([&] { return g_log.count(" W memory governor: new requests queue until the running request(s) finish") == 1; }, 3000));
+    CHECK_EQ(g_log.count("memory governor: RAM tier kept at 256 MiB"), 1u);
+    CHECK(waitFor([&] { return g_log.count("memory governor: freed reusable cache:") >= 1; }, 3000));
+    CHECK(waitFor([&] { return srv.get("/health").body.find("\"admission_held\":true") != std::string::npos; }, 3000));
+    std::thread tc([&] { gotC = completionText(srv.post("/v1/completions", completionBody(pC, gC))); });
+    CHECK(waitFor([&] { return srv.get("/health").body.find("\"queued\":1") != std::string::npos; }, 3000));
+    // the running request's KV is untouched: no re-allocation while it runs
+    CHECK_EQ(srv.model().resizes(), 0u);
+    CHECK(gotA.empty());
+    ta.join();
+    tc.join();
+    CHECK(gotA == refA);
+    CHECK(gotC == refC);
+    CHECK_EQ(srv.model().resizes(), 1u);
+    CHECK(srv.model().poolPages() * qwen35::kv_page < 131072u);
+    CHECK_EQ(g_log.count(" W memory governor: KV pool re-allocated 131072 -> "), 1u);
+    CHECK(g_log.count("memory governor: checkpoint buffers restored") >= 1);
+    // after the shrink the full margin is free again (within a page and the parked buffers' rounding)
+    const std::uint64_t local1 = fixed + srv.ops().deviceBytes();
+    CHECK(budget.load() > local1 && budget.load() - local1 + qwen35::kv_page * 96 >= M);
+    // the same prompt again: served from the RAM tier or recomputed, the output is the same
+    CHECK(completionText(srv.post("/v1/completions", completionBody(pC, gC))) == refC);
+    CHECK_EQ(srv.model().resizes(), 1u);  // stable: no second shrink
+    // a prompt longer than the smaller context for new requests is rejected as too long (and logged why)
+    CHECK(srv.get("/props").body.find("\"n_ctx\":16384") != std::string::npos);  // the pool still holds 16384
+    // (3) the other program exits: budget back with room; after recover_s + hold the pool grows back when idle
+    budget = local0 + 3 * M;
+    CHECK(waitFor([&] { return srv.model().resizes() == 2u; }, 6000));
+    CHECK(waitFor([&] { return g_log.count("memory governor: back to the startup settings (KV pool 131072 tokens") == 1; }, 3000));
+    CHECK_EQ(srv.model().poolPages() * qwen35::kv_page, 131072u);
+    CHECK(waitFor([&] { return srv.get("/health").body.find("\"reduced\":false,\"pool_tokens\":131072,") != std::string::npos; }, 3000));
+    CHECK(completionText(srv.post("/v1/completions", completionBody(pA, 64))) == decode(srv.model().greedyReference(pA, 64, true)));
+    CHECK_EQ(srv.model().poison(), 0u);
+    CHECK_EQ(srv.model().hidMismatch(), 0u);
+    // the spill warning names the governor (the watch's advice), logged after the governor's own lines
+    if (const std::size_t w = g_log.count(" W GPU memory spill"); w > 0) CHECK(g_log.count("WHIRL's memory governor frees cache") >= 1);
+
+    // (4) a re-allocation that fails keeps the old pool (logged), and the server keeps serving
+    {
+        g_log.clear();
+        srv.model().fail_resize = true;
+        budget = local0 + M / 4;
+        CHECK(waitFor([&] { return g_log.count("memory governor: the KV pool could not be re-allocated to ") >= 1; }, 3000));
+        CHECK(completionText(srv.post("/v1/completions", completionBody(pB, gB))) == refB);
+        budget = local0 + 3 * M;
     }
 }
 
@@ -3807,6 +3935,7 @@ int main(int argc, char** argv) {
         {"endpoints", testEndpoints},
         {"vram_watch", testVramWatch},
         {"startup_adjust", testStartupAdjust},
+        {"governor", testGovernor},
         {"compat_endpoints", testCompatEndpoints},
         {"http_limits", testHttpLimits},
         {"http_conn_cap", testHttpConnCap},

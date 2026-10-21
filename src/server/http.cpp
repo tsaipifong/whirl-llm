@@ -535,7 +535,8 @@ std::string propsJson(Engine& e) {
     const EngineOptions& o = e.options();
     const Engine::Health hs = e.health();
     std::string b = "{\"default_generation_settings\":{\"id\":0,\"n_ctx\":";
-    b += std::to_string(o.ctx);
+    // (v0.2.2.2: the context per request for new requests; the memory governor lowers it while the WDDM budget is low)
+    b += std::to_string(e.ctxPublished());
     b += ",\"model\":";
     appendJsonStr(b, o.model_name);
     b += std::format(",\"speculative\":{},\"is_processing\":{}}}", o.use_mtp ? "true" : "false",
@@ -548,6 +549,7 @@ std::string propsJson(Engine& e) {
                      e.visionConfig().vis ? "true" : "false", WHIRL_VERSION_STRING);
     if (!o.numerics_json.empty()) b += ",\"numerics\":" + o.numerics_json;
     if (!o.startup_json.empty()) b += ",\"startup\":" + o.startup_json;
+    if (const std::string gj = e.governorJson(); !gj.empty()) b += ",\"governor\":" + gj;
     const Engine::Stats st = e.statsShared();
     b += ",\"kv_ssd\":{\"mode\":";
     appendJsonStr(b, o.kv_ssd_mode);
@@ -714,9 +716,12 @@ void handleConn(const ConnCtx& cx, SOCKET s) {
                        : std::string();
         // v0.2.2.1: effective values after the startup fit (ctx per request, pool, slots, RAM tier, margin, adjustments)
         const std::string& su = e.options().startup_json;
-        const std::string b = std::format("{{\"status\":\"ok\",\"busy\":{},\"slots_busy\":{},\"slots\":{},\"queued\":{}{}{}}}",
+        // v0.2.2.2: the memory governor's effective values (absent when it is off)
+        const std::string gj = e.governorJson();
+        const std::string b = std::format("{{\"status\":\"ok\",\"busy\":{},\"slots_busy\":{},\"slots\":{},\"queued\":{}{}{}{}}}",
                                           hs.active > 0 ? "true" : "false", hs.active, hs.slots, hs.queued, vram,
-                                          su.empty() ? std::string() : ",\"startup\":" + su);
+                                          su.empty() ? std::string() : ",\"startup\":" + su,
+                                          gj.empty() ? std::string() : ",\"governor\":" + gj);
         return sendAll(w, httpResponse(200, "application/json; charset=utf-8", b));
     }
     if (path == "/v1/models" || path == "/models") {
@@ -727,7 +732,7 @@ void handleConn(const ConnCtx& cx, SOCKET s) {
         b += std::format(
             ",\"object\":\"model\",\"created\":{},\"owned_by\":\"whirl\",\"meta\":{{\"arch\":\"{}\",\"n_ctx\":{},\"n_vocab\":{},"
             "\"n_embd\":{},\"n_layer\":{},\"mtp\":{}}}}}]}}",
-            static_cast<long long>(std::time(nullptr)), cfg.archName(), e.options().ctx, cfg.n_vocab, cfg.n_embd,
+            static_cast<long long>(std::time(nullptr)), cfg.archName(), e.ctxPublished(), cfg.n_vocab, cfg.n_embd,
             cfg.n_layer, e.options().use_mtp ? "true" : "false");
         return sendAll(w, httpResponse(200, "application/json; charset=utf-8", b));
     }

@@ -66,6 +66,10 @@ public:
     virtual bool fusedDecode() const = 0;
     virtual bool canSegment() const = 0;
     virtual std::vector<KvArr> kvArrays() const = 0;
+    // v0.2.2.2 memory governor: free the KV pool and allocate one of `tokens` tokens (whole pages) while no sequence
+    // uses it (every slot idle; the engine re-runs initPool). false: not supported. On an allocation failure the
+    // implementation allocates the previous size again and throws only if that fails too.
+    virtual bool resizePool(std::uint32_t tokens) { (void)tokens; return false; }
 
     // ---- sequences
     virtual void selectSeq(std::uint32_t s) = 0;
