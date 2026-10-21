@@ -61,11 +61,15 @@ All notable changes to WHIRL are listed here. Versions follow `project(whirl VER
     Ornith-1.5-35B-A3B MXFP4, balance, 3 rounds against 0.2.2.1: prefill at 2k and 32k tokens and decode of a fixed chat
     prompt -1.9% to +0.6% on average, and no cell more than 1% slower in all 3 rounds (the -1.9%, Swift 2k prefill,
     comes from one round at -5.7%; the other two -0.1% and +0.1%).
-  - Vision (`--mmproj`, R9700): no governor action in 6 of 6 runs (Swift-1.5 27B 4, Ornith-1.5-35B-A3B 2), with the
-    encoder's first load only. The first image after the encoder's idle release was not measured: every later image in
-    these runs was a repeat whose embeddings were cached, so the encoder never loaded again (re-run pending). With the
-    encoder loaded, 134 MiB (Swift) and 164 MiB (Ornith) were left above the point where the governor acts (images of
-    1280x720 and 1024x683 only).
+  - Vision (`--mmproj`, R9700, `--vis-idle-s 30`, 5 images per run: code.png, photo.jpg, then after a 45 s idle a new 1920x1080
+    image, shapes.png, and after another 45 s idle dialog.png): no governor action in 4 of 4 runs of this build (Swift-1.5 27B 2,
+    Ornith-1.5-35B-A3B 2) and none in the 2 runs of 0.2.2.1 (1 each); every run encoded 5 images, none from the embedding cache,
+    and released the encoder twice (so the 1920x1080 image and dialog.png each loaded the encoder again). Wall time per request, this build
+    (2 runs) vs 0.2.2.1 (1 run), first image / 1920x1080 image after idle / dialog.png after idle: Swift 2.55 and 2.52 s / 3.64 and
+    3.59 s / 2.53 and 2.46 s vs 2.52 s / 3.56 s / 2.52 s; Ornith 1.19 and 1.19 s / 1.56 and 1.56 s / 1.11 and 1.12 s vs 1.19 s / 1.53 s /
+    1.09 s. The generated text hash of each of the 5 images is the same in this build and in 0.2.2.1, for both models. Largest
+    VRAM use seen in any health reply of this build (budget 31767 MiB, trigger 1034 MiB below it): Swift 30599 MiB, 134 MiB above
+    the trigger point; Ornith 30703 MiB (after the 1920x1080 image), 30 MiB above it. No spill warning in any of the 6 runs.
 - Server: the RAM tier cap of 0.2.2.1 ran after the half-of-available-RAM rule, so asking for more could give less
   (R9700, 47348 MiB available: `--kv-ram-mb 22528` -> 20480 MiB, `--kv-ram-mb 24064` -> 16384 MiB). The 20480 MiB cap
   now comes first, and a size above half of the available RAM goes to half of it (not to the default size, which was
