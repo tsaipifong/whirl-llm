@@ -19,9 +19,9 @@ The driver installs the two AMD runtime files WHIRL uses (`amdhip64_7.dll`, `amd
 
 ## 2. Download
 
-1. `whirl-0.2.2.1-windows-x64.zip` from the [WHIRL releases page](https://github.com/tsaipifong/whirl-llm/releases).
+1. `whirl-0.2.2.2-windows-x64.zip` from the [WHIRL releases page](https://github.com/tsaipifong/whirl-llm/releases).
    Compare its SHA-256 with the value published next to it:
-   `Get-FileHash .\whirl-0.2.2.1-windows-x64.zip -Algorithm SHA256`.
+   `Get-FileHash .\whirl-0.2.2.2-windows-x64.zip -Algorithm SHA256`.
 2. A supported GGUF model (list in the [README](../README.md#supported-models)). The fastest choice is our own
    MXFP4 quantization
    [`Swift-1.5-Qwen3.8-27B-MXFP4-A-outQ6_K.gguf`](https://huggingface.co/tsaipifong/Swift-1.5-Qwen3.8-27b-MXFP4-GGUF);
@@ -32,9 +32,9 @@ The driver installs the two AMD runtime files WHIRL uses (`amdhip64_7.dll`, `amd
 Open PowerShell in your Downloads folder and paste:
 
 ```powershell
-Unblock-File .\whirl-0.2.2.1-windows-x64.zip
-Expand-Archive .\whirl-0.2.2.1-windows-x64.zip -DestinationPath C:\whirl
-cd C:\whirl\whirl-0.2.2.1-windows-x64
+Unblock-File .\whirl-0.2.2.2-windows-x64.zip
+Expand-Archive .\whirl-0.2.2.2-windows-x64.zip -DestinationPath C:\whirl
+cd C:\whirl\whirl-0.2.2.2-windows-x64
 .\whirl.exe devices
 .\whirl.exe chat C:\models\Swift-1.5-Qwen3.8-27B-MXFP4-A-outQ6_K.gguf "Explain TCP slow start in two sentences." --max-tokens 400
 ```
