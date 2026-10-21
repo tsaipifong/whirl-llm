@@ -84,6 +84,8 @@ DevPtr malloc(std::size_t bytes);
 void free(DevPtr p);
 void* hostMalloc(std::size_t bytes);  // pinned host memory
 void hostFree(void* p);
+// pinned host bytes live from hostMalloc (WDDM-LOG: the server shows it next to the VRAM numbers)
+std::uint64_t pinnedHostBytes();
 void upload(DevPtr dst, const void* src, std::size_t bytes);
 void download(void* dst, DevPtr src, std::size_t bytes);
 void uploadAsync(DevPtr dst, const void* src, std::size_t bytes, Stream s);
@@ -107,6 +109,20 @@ struct WddmMemInfo {
     std::uint64_t local_budget = 0, local_usage = 0, nonlocal_budget = 0, nonlocal_usage = 0;
 };
 WddmMemInfo wddmMemInfo();
+// VRAM that OTHER processes use on the current adapter now (v0.2.2.1, owner 2026-10-21: look at what
+// is already in use before choosing the KV pool's margin). PDH "GPU Adapter Memory(luid_..._phys_0)
+// Dedicated Usage" minus this process's "GPU Process Memory(pid_P_luid_..._phys_0) Dedicated Usage",
+// read in one PDH collection; display = DXGI EnumOutputs finds a monitor on this adapter (a desktop on
+// the card grows with what the user opens). ok = false off Windows or when the counters cannot be read
+// (display_known can still be true). cost_us: what the call took (the first PDH query of a process takes
+// ~0.2 s, later ones a few ms). dev: the HIP device index (explicit: the server calls it on a helper thread).
+struct GpuOthers {
+    bool ok = false;
+    std::uint64_t adapter_dedicated = 0, own_dedicated = 0, others = 0;
+    bool display_known = false, display = false;
+    double cost_us = 0;
+};
+GpuOthers gpuOthers(int dev);
 
 // ---- streams and events
 // Blocking streams order with the legacy null stream; non-blocking ones do not.

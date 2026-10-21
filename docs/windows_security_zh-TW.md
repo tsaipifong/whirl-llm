@@ -19,11 +19,11 @@ SmartScreen 可能顯示 **「Windows 已保護您的電腦」**。若要照常�
 勾選 **解除封鎖** → **確定**；或在 PowerShell 執行：
 
 ```powershell
-Unblock-File .\whirl-0.2.2-windows-x64.zip
+Unblock-File .\whirl-0.2.2.2-windows-x64.zip
 ```
 
 只對從 WHIRL 官方發布頁下載的 zip 這樣做，並核對旁邊公布的 SHA-256：
-`Get-FileHash .\whirl-0.2.2-windows-x64.zip -Algorithm SHA256`。
+`Get-FileHash .\whirl-0.2.2.2-windows-x64.zip -Algorithm SHA256`。
 
 ## 智慧型應用程式控制（Smart App Control）
 

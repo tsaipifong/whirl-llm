@@ -239,6 +239,7 @@ Model::~Model() {
     if (rpos_buf != 0) hip::free(rpos_buf);
     for (DevPtr p : allocations) hip::free(p);
     allocations.clear();
+    alloc_sizes.clear();
     if (embd_host) hip::hostFree(embd_host);
     if (stream) hip::streamDestroy(stream);
 }
@@ -246,6 +247,7 @@ Model::~Model() {
 DevPtr Model::alloc(u64 bytes) {
     const DevPtr p = hip::malloc(static_cast<std::size_t>(bytes));
     allocations.push_back(p);
+    alloc_sizes.push_back(bytes);
     alloc_total += bytes;
     return p;
 }
@@ -261,6 +263,9 @@ void Model::freeAlloc(DevPtr p) {
         if (allocations[i] == p) {
             allocations[i] = allocations.back();
             allocations.pop_back();
+            alloc_total -= alloc_sizes[i];  // WDDM-LOG review P3-8: alloc_total stays the live sum
+            alloc_sizes[i] = alloc_sizes.back();
+            alloc_sizes.pop_back();
             hip::free(p);
             return;
         }
@@ -834,6 +839,32 @@ void Model::allocKvPool(u32 tokens) {
         hip::upload(ptab, idv.data(), idv.size() * 4);
         max_ctx = static_cast<u32>(rows);
     }
+}
+
+void Model::freeKvPool() {
+    if (pool_pages == 0) return;
+    auto drop = [&](DevPtr& p) {
+        if (p != 0) freeAlloc(p);
+        p = 0;
+    };
+    drop(mtp_kc);
+    drop(mtp_vc);
+    drop(mtp_ks);
+    drop(mtp_vs);
+    for (u32 i = 0; i < cfg.n_layer; ++i) {
+        if (!cfg.isAttn(i)) continue;
+        drop(kcache[i]);
+        drop(vcache[i]);
+        drop(kscale[i]);
+        drop(vscale[i]);
+    }
+    if (seqs.empty()) {
+        // allocKvPool made the single-sequence page table
+        drop(ptab);
+        seq_pages = 0;
+        max_ctx = 0;
+    }
+    pool_pages = 0;
 }
 
 void Model::mapPages(u32 s, u32 first, std::span<const i32> phys) {

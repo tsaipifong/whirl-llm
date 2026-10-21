@@ -1,0 +1,159 @@
+// Runtime memory governor (see include/whirl/mem_governor.h).
+// SPDX-License-Identifier: Apache-2.0
+
+#include "whirl/mem_governor.h"
+
+#include <algorithm>
+#include <format>
+
+namespace whirl::memgov {
+
+std::uint32_t Governor::pagesUp(std::uint64_t bytes) const {
+    const std::uint64_t pb = cfg_.per_tok * cfg_.page;
+    return pb ? static_cast<std::uint32_t>((bytes + pb - 1) / pb) : 0;
+}
+
+std::uint32_t Governor::pagesDown(std::uint64_t bytes) const {
+    const std::uint64_t pb = cfg_.per_tok * cfg_.page;
+    return pb ? static_cast<std::uint32_t>(bytes / pb) : 0;
+}
+
+Plan Governor::tick(const Input& in) {
+    Plan p;
+    p.ctx_new = ctx_new_;
+    if (in.budget == 0 || cfg_.per_tok == 0 || cfg_.page == 0) return p;
+    // just re-allocated: the WDDM usage may not show the free yet (R9700: part of a 2.7 GiB free showed ~0.3 s later)
+    if (in.now_s - t_resized_ < cfg_.settle_s) return p;
+    // within trust_s of a re-allocation: shrink decisions take the smaller of the measured and the expected usage (a late
+    // free must not shrink again), grow decisions the larger (R9700 S1c: a grow sized from the expected usage, 0.86 GiB
+    // below the measured one, overshot and was shrunk back)
+    std::uint64_t local = in.local, local_g = in.local;
+    // After a grow, a measured usage inside the trigger band (less than margin/2 free) is not masked (REVIEW-GOV-2 C-1, R9700
+    // R2b_nolim1: a grow to 32.50 GiB with the budget at 31.02 GiB was hidden for trust_s and logged as the end of the
+    // episode; REVIEW-GOV-3 C-2: the same for a grow that lands under the budget but inside the band).
+    const bool grow_over = last_grew_ && in.local + in.margin / 2 > in.budget;
+    if (expected_local_ > 0 && in.now_s - t_resized_ < cfg_.trust_s) {
+        if (!grow_over) local = std::min(local, expected_local_);
+        local_g = std::max(local_g, expected_local_);
+    }
+    // a long quiet time since the last over-budget sample: the doubled hold goes back to hold_s (REVIEW-GOV-1 P3-1)
+    if (hold_ >= 0.0 && in.now_s - t_shrink_ >= cfg_.quiet_reset_s) hold_ = -1.0;
+    const double hold = hold_ < 0.0 ? cfg_.hold_s : hold_;
+    const auto i64 = [](std::uint64_t v) { return static_cast<std::int64_t>(v); };
+    // what is short for the full state (startup margin free, parked checkpoint buffers back): > 0 short
+    const std::int64_t def = i64(local) + i64(in.parked) + i64(in.margin) - i64(in.budget);
+    const std::int64_t def_g = i64(local_g) + i64(in.parked) + i64(in.margin) - i64(in.budget);
+    p.deficit = def;
+    // act when less than half the margin is free under the budget
+    const bool trigger = i64(local) + i64(in.margin / 2) > i64(in.budget);
+    const std::uint32_t pool_min = (std::max(cfg_.pool_min, cfg_.page) + cfg_.page - 1) / cfg_.page * cfg_.page;
+    if (trigger) {
+        recover_since_.reset();
+        // a grow since the last over-budget sample, and over again soon after it: the budget oscillates
+        if (t_grow_ > t_shrink_ && in.now_s - t_grow_ < cfg_.osc_window_s) hold_ = std::min(hold * 2.0, cfg_.hold_max_s);
+        t_shrink_ = in.now_s;
+        if (!episode_) {
+            episode_ = true;
+            p.episode_start = true;
+            p.ram_tier_note = true;
+        }
+        p.free_cache = true;
+    }
+    if (episode_) {
+        if (!trigger && in.pool >= cfg_.pool_start && in.parked == 0) {
+            // back at the startup pool, nothing parked, no trigger: the episode ends (checked first: the last grow may leave
+            // up to a quarter of the margin less free than startup did, which must not count as a deficit to shrink for)
+            episode_ = false;
+            p.episode_end = true;
+            recover_since_.reset();
+        } else if (def > 0 && (trigger || in.parked > 0 || static_cast<std::uint64_t>(def) >= cfg_.min_shrink)) {
+            // 4. the pool that covers the deficit (whole pages), never below the smallest pool
+            const std::uint64_t cut = static_cast<std::uint64_t>(pagesUp(static_cast<std::uint64_t>(def))) * cfg_.page;
+            std::uint32_t target = in.pool > cut ? static_cast<std::uint32_t>(in.pool - cut) : 0;
+            target = std::max(target, std::min(pool_min, in.pool));
+            if (target < in.pool) {
+                p.pool_target = target;
+                p.shrink = true;
+            }
+        } else if (!trigger && def <= 0) {
+            // the parked checkpoint buffers fit with the full margin: back now
+            if (in.parked > 0 && def_g <= 0) p.restore_cache = true;
+            // grow back (when idle) once more than margin + margin/2 has been free for recover_s, hold_s after the last
+            // over-budget sample
+            const std::int64_t band = i64(in.margin / 2);
+            // the startup pool fits again with at least endMargin (3/4 of the margin) free: the next grow goes all the way
+            // back, so the episode really ends (REVIEW-GOV-1 P2-1: a grow to margin + margin/4 free always stopped ~margin/4
+            // short of the startup pool, which startup sized with exactly the margin free; usage outside the pool also grows a
+            // little after startup: R9700 S2 runs 0.19 GiB). The trigger stays at margin/2 free, so this keeps a quarter of the
+            // margin of hysteresis.
+            const std::uint64_t need_end =
+                in.pool < cfg_.pool_start ? static_cast<std::uint64_t>(cfg_.pool_start - in.pool) * cfg_.per_tok : 0;
+            const bool end_fits = need_end > 0 && -def_g + i64(in.margin - endMargin(in.margin)) >= i64(need_end);
+            if (def_g < -band || end_fits) {
+                if (!recover_since_) recover_since_ = in.now_s;
+            } else {
+                recover_since_.reset();
+            }
+            if (in.all_idle && recover_since_ && in.now_s - *recover_since_ >= cfg_.recover_s && in.now_s - t_shrink_ >= hold &&
+                in.pool < cfg_.pool_start) {
+                // to margin + margin/4 free (a grow to exactly the margin left nothing for the counters' noise), or straight to
+                // the startup pool when it fits with endMargin free
+                const std::int64_t room = -def_g - i64(in.margin / 4);
+                const std::uint64_t add =
+                    room > 0 ? static_cast<std::uint64_t>(pagesDown(static_cast<std::uint64_t>(room))) * cfg_.page : 0;
+                const std::uint32_t target = static_cast<std::uint32_t>(std::min<std::uint64_t>(cfg_.pool_start, in.pool + add));
+                const std::uint64_t min_add =
+                    std::min<std::uint64_t>(static_cast<std::uint64_t>(pagesUp(cfg_.min_grow)) * cfg_.page, cfg_.pool_start - in.pool);
+                if (end_fits)
+                    p.pool_target = cfg_.pool_start;
+                else if (target > in.pool && target - in.pool >= min_add)
+                    p.pool_target = target;
+            }
+        }
+    }
+    // 2. queue new requests only while a needed shrink waits for the running ones
+    p.hold_admission = p.shrink && trigger && !in.all_idle;
+    // 3. new requests get at most the pool they will run in, while it is smaller than at startup (at the startup pool the
+    // context is the startup one, whatever it is: normal runs are unchanged)
+    const std::uint32_t pool_eff = p.shrink ? *p.pool_target : in.pool;
+    ctx_new_ = pool_eff < cfg_.pool_start ? std::min(cfg_.ctx, pool_eff) : cfg_.ctx;
+    p.ctx_new = ctx_new_;
+    // 5. over the budget with a request running (its KV cannot move): it is slower until it finishes
+    p.warn_slow = in.local > in.budget && !in.all_idle;
+    return p;
+}
+
+void Governor::growDenied(double now_s) {
+    recover_since_ = now_s;  // the recovery time starts again
+}
+
+void Governor::resized(std::uint32_t pool, bool grew, double now_s, std::uint64_t expected_local) {
+    t_resized_ = now_s;
+    expected_local_ = expected_local;
+    last_grew_ = grew;
+    if (grew) {
+        t_grow_ = now_s;
+        ++n_grow_;
+    } else {
+        ++n_shrink_;
+    }
+    recover_since_.reset();
+    ctx_new_ = pool < cfg_.pool_start ? std::min(cfg_.ctx, pool) : cfg_.ctx;
+}
+
+std::string statusJson(const Status& s) {
+    std::string j = std::format("{{\"on\":{},\"reduced\":{},\"pool_tokens\":{},\"pool_tokens_start\":{},\"ctx_per_request\":{},"
+                                "\"slots_admitting\":{},\"slots\":{},\"admission_held\":{},\"parked_mib\":{},\"shrinks\":{},"
+                                "\"grows\":{},\"last_action\":\"",
+                                s.on ? "true" : "false", s.reduced ? "true" : "false", s.pool_tokens, s.pool_tokens_start,
+                                s.ctx_per_request, s.slots_admitting, s.slots, s.admission_held ? "true" : "false", s.parked_mib,
+                                s.shrinks, s.grows);
+    for (const char ch : s.last_action) {
+        if (ch == '"' || ch == '\\') j += '\\';
+        if (static_cast<unsigned char>(ch) < 0x20) continue;
+        j += ch;
+    }
+    return j + "\"}";
+}
+
+}  // namespace whirl::memgov

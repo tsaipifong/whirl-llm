@@ -114,15 +114,16 @@ FitPlan planFit(const FitInput& in);
 // or WHIRL_VRAM_LIMIT_MB below that) usually also drives the desktop and other
 // programs, so the server defaults to what such a card really holds:
 //  - one request slot (--parallel 1) unless --parallel was given;
-//  - 1536 MiB of VRAM is kept free for the desktop / other apps (headroom),
-//    on top of the usual reserve and WDDM margin.
+//  - room for the desktop / other apps: since 0.2.2.1 the WDDM budget margin covers it (3 GiB when a
+//    monitor is attached to the card, pool_budget.h), so the default extra headroom is 0 (it was 1536 MiB
+//    on top of a 768 MiB margin).
 // WHIRL_VRAM_HEADROOM_MB sets the headroom on any card (0 = none); an explicit
 // WHIRL_POOL_RESERVE_MB (the user's own reserve) turns the default headroom off.
 // Cards with 20 GiB or more (R9700 32 GB, RX 7900 XTX 24 GB) and the UMA iGPU
 // keep the regular defaults (4 slots, no headroom). The KV format does not depend on the
 // card: it is the numerics mode's (numerics::chooseKv).
 inline constexpr std::uint64_t small_card_below = 20ull << 30;
-inline constexpr std::uint32_t small_card_headroom_mb = 1536;
+inline constexpr std::uint32_t small_card_headroom_mb = 0;
 
 struct CardInput {
     std::uint64_t total = 0;          // describeDevice total_mem (the simulated size under WHIRL_VRAM_LIMIT_MB)

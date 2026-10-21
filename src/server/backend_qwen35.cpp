@@ -62,6 +62,27 @@ public:
         return out;
     }
 
+    bool resizePool(std::uint32_t tokens) override {
+        const std::uint32_t old = m_.pool_pages * qwen35::kv_page;
+        hip::sync();
+        m_.freeKvPool();
+        // (R9700: the WDDM usage showed part of a freed pool only after a later synchronize; sync after the free so the
+        // driver can release it before the new arrays are allocated, and after the allocation)
+        hip::sync();
+        try {
+            m_.allocKvPool(tokens);
+            hip::sync();
+        } catch (const std::exception&) {
+            // free what the failed allocation got (freeKvPool frees every non-null array once pool_pages != 0), then
+            // the previous size again (throws if even that fails)
+            m_.pool_pages = 1;
+            m_.freeKvPool();
+            m_.allocKvPool(old);
+            return false;
+        }
+        return true;
+    }
+
     void selectSeq(std::uint32_t s) override { m_.selectSeq(s); }
     void commitSeq(std::uint32_t s) override { m_.commitSeq(s); }
     void dropPending(std::uint32_t s) override { m_.dropPending(s); }

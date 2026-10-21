@@ -40,7 +40,7 @@ if ($OutDir -eq "") { $OutDir = Join-Path $repo "out\release" }
 
 # ---- version (single source: CMakeLists.txt)
 $cm = Get-Content (Join-Path $repo "CMakeLists.txt") -Raw
-if ($cm -notmatch 'project\(whirl\s+VERSION\s+([0-9]+\.[0-9]+\.[0-9]+)') { throw "no project(whirl VERSION x.y.z) in CMakeLists.txt" }
+if ($cm -notmatch 'project\(whirl\s+VERSION\s+([0-9]+\.[0-9]+\.[0-9]+(?:\.[0-9]+)?)\s') { throw "no project(whirl VERSION x.y.z[.t]) in CMakeLists.txt" }
 $version = $Matches[1]
 $name = "whirl-$version-windows-x64"
 Write-Host "WHIRL $version from $BuildDir"

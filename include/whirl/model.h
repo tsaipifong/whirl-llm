@@ -504,7 +504,8 @@ public:
     DevPtr output_norm = 0;
     std::vector<Layer> layers;
     std::vector<DevPtr> allocations;
-    std::uint64_t alloc_total = 0;  // bytes requested through alloc() so far (sizing self-check in load)
+    std::vector<std::uint64_t> alloc_sizes;  // parallel to allocations (freeAlloc keeps alloc_total live)
+    std::uint64_t alloc_total = 0;  // bytes live through alloc() (sizing self-check in load; freeAlloc subtracts)
     std::array<std::uint64_t, n_types> type_bytes{};
     Profile* prof = nullptr;
     hip::Stream stream = nullptr;
@@ -716,6 +717,9 @@ public:
     // Buffers for `slots` contexts (ring = the drafter's window, else 2048) and ingest batches of
     // up to `ingest_rows` rows; `debug` keeps every layer's block hidden for dflash-check.
     void dflashSetup(std::uint32_t slots, std::uint32_t ingest_rows, bool debug = false);
+    // VRAM dflashSetup allocates per slot (the context ring of every drafter layer); 0 without a drafter (v0.2.2.2: the
+    // server counts it when it re-fits --parallel after loading)
+    std::uint64_t dflashSlotBytes() const;
     // Context rows for positions pos0 .. pos0 + n - 1 from target features in layer-major layout
     // (feature of row r, target layer j at feats + (j * stride + r) * n_embd floats): fc + norm,
     // then each layer's K (k_norm, RoPE) and V into the slot's ring.
@@ -782,6 +786,10 @@ public:
 
     // ---- KV pool and sequences
     void allocKvPool(std::uint32_t tokens);
+    // Frees the KV pool arrays so allocKvPool can run again with another size (issue #5: the server
+    // shrinks the pool when the WDDM budget read after allocation is lower). Only before anything
+    // used the pool; the page table of setupSeqs stays.
+    void freeKvPool();
     void mapPages(std::uint32_t s, std::uint32_t first, std::span<const std::int32_t> phys);
     void setupSeqs(std::uint32_t n, std::uint32_t slot_ctx);
     void selectSeq(std::uint32_t s);

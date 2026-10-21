@@ -11,6 +11,12 @@
 # version header (single source: project(whirl VERSION ...))
 
 string(REPLACE ";" ", " WHIRL_GPU_ARCHS_TEXT "${WHIRL_GPU_ARCHS}")
+# fourth version part (a bug-fix point release such as 0.2.2.1); 0 for x.y.z versions
+if("${PROJECT_VERSION_TWEAK}" STREQUAL "")
+  set(WHIRL_VERSION_TWEAK 0)
+else()
+  set(WHIRL_VERSION_TWEAK ${PROJECT_VERSION_TWEAK})
+endif()
 configure_file(${CMAKE_SOURCE_DIR}/src/release/version.h.in
                ${CMAKE_BINARY_DIR}/generated/whirl/version.h @ONLY)
 

@@ -76,6 +76,8 @@ public:
     bool clean() const { return liveAllocations() == 0 && liveStreams() == 0 && liveEvents() == 0; }
     std::uint64_t copyCalls() const { return copy_calls_.load(); }  // every copyAsync call, also 0 bytes
     std::uint64_t copiedBytes() const { return copied_.load(); }
+    // bytes of device allocations alive (the memory governor test's "WDDM local usage")
+    std::uint64_t deviceBytes() const { return dev_bytes_.load(); }
     bool isHost(DevPtr p) const;  // inside a hostMalloc block
     struct Copy {
         std::uint64_t bytes = 0;
@@ -93,6 +95,11 @@ public:
         fail_host_copy_ = nth;
     }
     bool hostCopyFailArmed() const { return fail_host_copy_.load() != 0; }
+    // the nth device malloc (from now) throws (once); 0: off
+    void failMalloc(std::uint64_t nth) {
+        mallocs_ = 0;
+        fail_malloc_ = nth;
+    }
     // eventDoneChecked throws (an asynchronous failure of the work before the event)
     void failEventQueries(bool on) { event_error_ = on; }
     // eventSync blocks until released (deterministic hold of an IO thread)
@@ -106,6 +113,9 @@ private:
     std::atomic<long> live_host_{0}, live_streams_{0}, live_events_{0};
     std::atomic<std::uint64_t> copy_calls_{0}, copied_{0}, fail_call_{0};
     std::atomic<std::uint64_t> fail_host_copy_{0}, host_copies_{0};
+    std::atomic<std::uint64_t> fail_malloc_{0}, mallocs_{0};
+    std::map<std::uintptr_t, std::uint64_t> dev_;  // device allocations (start -> bytes)
+    std::atomic<std::uint64_t> dev_bytes_{0};
     std::atomic<bool> event_error_{false}, record_{false};
     std::vector<Copy> log_;
     std::mutex gate_m_;

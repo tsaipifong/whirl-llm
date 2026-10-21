@@ -134,6 +134,13 @@ void Model::dflashSetup(u32 slots, u32 ingest_rows, bool debug) {
     dfr = std::move(r);
 }
 
+u64 Model::dflashSlotBytes() const {
+    if (!dflash) return 0;
+    const DFlashConfig& c = dflash->cfg;
+    const u64 ring = ::whirl::dflash::ringRows(c.window), kvw = static_cast<u64>(c.n_head_kv) * c.head_dim;
+    return static_cast<u64>(c.n_layer) * 2 * ring * kvw * 4 + ring * 4;
+}
+
 void Model::dflashIngest(u32 slot, DevPtr feats, u32 stride, u32 row0, u32 n, u32 pos0) {
     if (!dfr || slot >= dfr->slots.size() || n == 0) return;
     const DFlashConfig& c = dflash->cfg;

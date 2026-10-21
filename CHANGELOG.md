@@ -3,6 +3,193 @@
 All notable changes to WHIRL are listed here. Versions follow `project(whirl VERSION ...)` in
 `CMakeLists.txt`.
 
+## 0.2.2.2 — 2026-10-22 (bug fixes)
+
+### Fixed
+
+- Server, R9700 and other discrete GPUs: when another program took more VRAM while the server ran, the server stayed
+  over the Windows (WDDM) video memory budget until it was restarted, and decode stayed several times slower (0.2.2.1
+  only warned; issues #5 and #6). A memory governor now acts on the samples the server already takes (each `batch |`
+  status line, each request end, an idle sample; never in the decode loop). When less than half of the margin is free
+  under the budget (about 1-1.5 GiB) it acts in this order, one `memory governor:` line per action with numbers: frees
+  reusable cache (idle slots' prefix cache, which went to the RAM tier at request end; while a request still runs, also
+  the checkpoint buffers of idle slots and shared prefix checkpoints, VRAM back to Windows at once); queues new requests
+  while a smaller KV pool waits; lowers the context for new requests if the smaller pool holds less; re-allocates the KV
+  pool smaller as soon as every slot is idle, which is what returns the VRAM to Windows; and only then warns. It only
+  shrinks WHIRL's own VRAM: the RAM tier is pinned system RAM, not VRAM (17 GiB pinned left the R9700's budget unchanged
+  in our test), and is never shrunk for the VRAM budget. When the budget has room again for 30 s, at least 60 s after
+  the last drop (longer if the budget keeps going up and down), the pool grows back while idle: straight to its startup
+  size once that fits with 3/4 of the margin free, which also gives new requests the startup context again; otherwise
+  part way. A running request's KV is never moved, so a request that was running when the budget dropped stays slower
+  until it finishes. `GET /health` and `GET /props` show the effective values in a `governor` object; `/props` `n_ctx`
+  is the context for new requests. Output is unchanged: only how many tokens the pool holds changes. Not on the Radeon
+  8060S (its pool is a fixed carve-out) and not with `WHIRL_POOL_RESERVE_MB`; `WHIRL_GOVERNOR=0` turns it off.
+  The HIP runtime keeps freed GPU memory in a cache for reuse instead of giving it back to Windows, so a smaller KV
+  pool still counted part of the old one (R9700: 0.87 GiB of a 3.91 GiB shrink, Swift-1.5 27B; 1.7 GiB of a 4 GiB
+  shrink, Ornith-1.5-35B-A3B). whirl-server now sets `GPU_RESOURCE_CACHE_SIZE=256`
+  (MiB) for its own process unless you set it (`WHIRL_HIP_CACHE_LIMIT=0` keeps the runtime default): a 3.93 GiB shrink
+  then lowered WHIRL's VRAM by 3.90 GiB, against 2.55 GiB with the default cache (Swift-1.5 27B in the test below: a
+  4.03 GiB shrink lowered it by 4.09 GiB with the limit, 3 of 3 runs; a 3.91 GiB shrink by 3.04 GiB without it, 3 of 3).
+  With the default cache the pool's grow-back also went over the budget (by 1.47 GiB at the end, after a second shrink
+  and grow) in 3 of 3 Swift runs on the build before the grow-back fix below (not re-measured after it), so the limit stays on for every model and GPU; its cost is a slower first request
+  after the re-allocation on Swift-1.5 27B (below). Because memory freed while loading now goes back too, the default
+  KV pool on the R9700 is about 3% larger (Swift-1.5 27B, `--parallel 1`: 329728 -> 340480 tokens).
+  Measured on the R9700 (another process takes 4 GiB while a long request runs, `--parallel 1`, balance; same prompt
+  before and after, identical output in every run; HIP cache limit on unless said otherwise):
+  - Ornith-1.5-35B-A3B MXFP4, 6 runs (4 on the build before the 0.2.2.2 review fixes, 2 on the release build): 259-261
+    tok/s before, about 19 tok/s while the running request was over the budget. After the pool was re-allocated
+    (393984 -> 200960 tokens) with the other process still holding its 4 GiB, the first request ran at 95-120 tok/s in
+    5 of 6 runs (57.7 in one) and the next one was back at 260-261 tok/s in 4 of 6 runs (57.6 and 134.6 tok/s in the
+    other two). After the other process exited, decode was back at 259-261 tok/s by the second request in 5 of 6 runs
+    (the first one 121 tok/s in one of them); one run (build before the review fixes) stayed at 160 tok/s (38% slower)
+    for at least 5 minutes with no warning, cause unknown. After the other process exited, only 2 runs were on the
+    release build (both back at 259-260 tok/s from the first request); the other 4 were on the build before the review
+    fixes, whose grow-back differs (it stopped at 364032 tokens). The release
+    build's pool grew back to its startup size and context (393984 tokens, 131072 per request) in one step in 2 of 2
+    runs (the build before the fixes stopped at 364032 tokens in 4 of 4). With the HIP runtime's default cache, 2 of 2
+    runs stayed at 57 tok/s after the re-allocation.
+  - 0.2.2.1 (no governor), same Ornith test, 4 runs: 13.1 tok/s while the other process held its 4 GiB, and still
+    13.1 tok/s about 8 minutes after it exited (no warning once the spill warning had ended) in 4 of 4 runs. The cause
+    is unknown: the budget was back at its startup value and WHIRL's shared GPU memory never grew. A slow state that
+    outlasts the other program is not new in 0.2.2.2.
+  - Swift-1.5 27B MXFP4, 3 runs on the release build: 89-90 tok/s before, about 16 tok/s during. The first request
+    after the re-allocation ran at 16.9, 18.9 and 69.3 tok/s (15-60 s for 1000 tokens instead of 11 s); the next one at
+    90 tok/s in 2 of 3 runs (39.8 in one, 85-89 from the request after that); 85-90 tok/s in 3 of 3 runs after the other
+    process exited (88-90 from the second request), with the pool back at its startup size (340480 tokens). With the default cache the first request
+    after the re-allocation already ran at 89-90 tok/s (3 of 3), but the grow-back went over the budget (above; build
+    before the grow-back fix below).
+  - Radeon 8060S (no governor there; the HIP cache limit is the only change that touches allocation), Swift-1.5 27B and
+    Ornith-1.5-35B-A3B MXFP4, balance, 3 rounds against 0.2.2.1: prefill at 2k and 32k tokens and decode of a fixed chat
+    prompt -1.9% to +0.6% on average, and no cell more than 1% slower in all 3 rounds (the -1.9%, Swift 2k prefill,
+    comes from one round at -5.7%; the other two -0.1% and +0.1%).
+  - Vision (`--mmproj`, R9700, `--vis-idle-s 30`, 5 images per run: code.png, photo.jpg, then after a 45 s idle a new
+    1920x1080 image, shapes.png, and after another 45 s idle dialog.png): no governor action in 4 of 4 runs of this build
+    (Swift-1.5 27B 2, Ornith-1.5-35B-A3B 2) and none in the 2 runs of 0.2.2.1 (1 each); every run encoded 5 images, none from
+    the embedding cache, and released the encoder twice (so the 1920x1080 image and dialog.png each loaded the encoder again).
+    Wall time per request, this build (2 runs) vs 0.2.2.1 (1 run), first image / 1920x1080 image after idle / dialog.png after
+    idle: Swift 2.52 and 2.51 s / 3.59 and 3.58 s / 2.49 and 2.53 s vs 2.52 s / 3.56 s / 2.52 s; Ornith 1.19 and 1.19 s / 1.56
+    and 1.56 s / 1.12 and 1.11 s vs 1.19 s / 1.53 s / 1.09 s. The generated text hash of each of the 5 images is the same in
+    this build and in 0.2.2.1, for both models. Largest VRAM use seen in any health reply of this build (budget 31767 MiB,
+    trigger 1034 MiB below it): Swift 29696 MiB, 1037 MiB below the trigger point; Ornith 29422 MiB, 1311 MiB below it (on the
+    build before the `--mmproj` KV pool fix below: 134 MiB and 30 MiB). No spill warning in any of the 6 runs.
+    Radeon 8060S (`--mmproj`, same 5 images and idle gaps, 1 run per model of this build and of 0.2.2.1; timings not
+    measured): every run encoded 5 images and released the encoder twice, and the generated text hash of each image is the
+    same in this build and in 0.2.2.1, for both models (device gfx1151 in every server log).
+- Server, R9700 (the governor above): after the KV pool grew back, a measured VRAM use with less than half of the margin
+  free (over the budget or just under it) was replaced by the expected use for 120 s, so the governor logged "back to
+  the startup settings" and started a new episode about 2 minutes later, staying over the budget or close to it
+  meanwhile. It now acts at the next sample. Seen with `WHIRL_HIP_CACHE_LIMIT=0` (Swift-1.5 27B, 3 of 3 runs, 1.47 GiB
+  over the budget at the end) on the build before this fix; with the default limit every grow-back left more than half of the margin free
+  (5 of 5 runs, 29.19 of 31.02 GiB),
+  so the default path decides the same. Checked with CPU tests only; not re-measured on the GPU.
+- Server, `--mmproj` on discrete GPUs (R9700): the startup KV pool did not count the vision encoder, which after the
+  first image keeps its weights in VRAM (and, for large images, activation buffers that do not fit the prefill scratch).
+  On the R9700 with Ornith-1.5-35B-A3B, the first image added 873 MiB and a 1920x1080 image 134 MiB more, leaving 30 MiB
+  before the governor would act; a governor episode started in that state could not end (the pool could not grow back
+  with the margin free). The pool now leaves room for the encoder's weights, the activations of the largest image that
+  do not fit the prefill scratch, and 16 MiB (the startup line `kv pool sizing: ... minus N MiB for the vision encoder`).
+  With `--mmproj` the pool is about 1 GiB smaller (R9700, `--parallel 1`: Swift-1.5 27B 340480 -> 314880 tokens, 903 MiB
+  for the encoder; Ornith-1.5-35B-A3B 393984 -> 334336 tokens, 1281 MiB); `--parallel 1` keeps the full
+  131072-token context. Without `--mmproj`, on the Radeon 8060S and with `WHIRL_POOL_RESERVE_MB` the pool is unchanged.
+- Server: the RAM tier cap of 0.2.2.1 ran after the half-of-available-RAM rule, so asking for more could give less
+  (R9700, 47348 MiB available: `--kv-ram-mb 22528` -> 20480 MiB, `--kv-ram-mb 24064` -> 16384 MiB). The 20480 MiB cap
+  now comes first, and a size above half of the available RAM goes to half of it (not to the default size, which was
+  not monotonic either). The automatic size, which the user never chose, is capped with an info line instead of an
+  `adjusted:` line, and the wording no longer quotes the HIP error: "capped at 20480 MiB while a crash with larger RAM
+  tiers is investigated" (the cause is still open).
+- Server, `--draft dflash` with `--parallel`: the re-fit of `--parallel` after loading did not count the DFlash2
+  drafter's per-slot context ring, so it could keep a slot too many (the `-c` adjustment caught it later).
+- CHANGELOG 0.2.2.1: the other process held 3.2 GiB (3308 MiB), not 3.3 GiB, and the "4 GiB test" is now described
+  where it is cited.
+- CHANGELOG 0.2.2.1 said decode "recovered when the other process exited". That was not measured: the 0.2.2.1 tests ran
+  no full request after the other process exited, only one 32-token request (19-76 tok/s, issued 0-2 s after the exit
+  while the budget was still low). In the Ornith test above, 0.2.2.1 stayed at 13.1 tok/s about 8 minutes after a
+  4 GiB process exited, in 4 of 4 runs: on 0.2.2.1, closing the other program does not always bring the speed back.
+  With 0.2.2.2 on the R9700 decode came back in 5 of 6 runs (above; 2 of them on the release build).
+
+### Known
+
+- The close_reused server test still waits for log lines instead of an engine-thread hook; the hook (746a596) lands
+  with the engine split (ARCH).
+- Root cause of the crash with RAM tiers above about 20 GiB: still open (the cap stays).
+- R9700 memory governor: one Ornith run in 6 stayed 38% slower after the other program exited (above), cause unknown.
+  `WHIRL_HIP_CACHE_LIMIT=0` is not recommended while the governor is on: its grow-back can go over the budget (above).
+- R9700 memory governor, Swift-1.5 27B: the first request after the KV pool was re-allocated with the HIP cache limit on
+  ran slower in 6 of 6 runs (16.9, 18.9 and 69.3 tok/s in the 3 runs above, against about 89), cause unknown; it
+  recovered by itself from a later request and the output was identical.
+
+## 0.2.2.1 — 2026-10-21 (bug fixes)
+
+### Fixed
+
+- Server, R9700 and other discrete GPUs: decode could get several times slower in a long session because the server
+  ran over the Windows (WDDM) video memory budget (issue #5, reported by @CJure and @DanGTG; issue #6, reported by
+  @Triazic). @CJure's startup log found it: the KV pool was sized against a budget of 31.02 GiB, Windows reported
+  29.55 GiB about 0.2 s later, and the server started 0.37 GiB over it. Why the budget fell in that case is not known
+  for certain. On our R9700 the same thing happens when another process holds VRAM: with 3.2 GiB taken by another
+  process, the budget read 31.02 GiB when the pool was sized and 28.08 GiB right after the pool was allocated, so the
+  budget seen at startup does not always count other programs yet. Over the budget, decode slowed from about 100-119
+  to 10-43 tok/s in those tests, with "Shared GPU memory" unchanged (as in @CJure's report), and recovered when the
+  other process exited. Changes:
+  - The server reads, once at startup and before it loads anything, how much VRAM other processes use on its GPU and
+    whether a monitor is attached to it (`other processes use X GiB of VRAM on this GPU (display attached: yes/no)`;
+    about 0.2-0.3 s). The room kept free under the budget was 768 MiB (MoE 1.5 GiB). It is now what other processes
+    use that the budget does not show yet, plus room for them to grow: the larger of 2 GiB (3 GiB with a monitor on
+    the GPU) and 6% of the budget. `WHIRL_POOL_BUDGET_MARGIN_MB` sets the room. Cost on an R9700 with nothing else on
+    it, balance: the KV pool of Swift-1.5 27B MXFP4 goes from 366592 to 330240 tokens with `--parallel 1` and from
+    308736 to 272384 with the default 4 slots; Ornith-1.5-35B-A3B MXFP4 from 418816 to 395008 and from 381952 to
+    358144. On the R9700 every request still gets its full 131072-token context. On cards with less than 20 GiB the extra
+    1536 MiB desktop headroom is dropped, since the margin now covers it.
+  - Right after the KV pool is allocated the server reads the budget again and, when its usage plus the margin no
+    longer fits, frees the pool and allocates a smaller one (whole pages, before any request), logging
+    `kv pool check: ...`; it waits for the WDDM numbers to settle after each free. In the 3.2 GiB test the pool was
+    sized at 236544 tokens and fit the lowered budget with 2.5 GiB to spare.
+  - Settings given on the command line that do not fit what the server measured are lowered to what fits instead of
+    refusing to start or running over the budget, never silently: one `adjusted:` line each with the reason, a
+    `startup adjustments` summary, and the effective values in a `startup` object in `GET /props` and `GET /health`.
+    In order: `--parallel` (when one full request no longer fits next to every slot's state and checkpoints: from an
+    estimate before loading, then again with the VRAM measured after the weights are loaded), `WHIRL_PREFILL_BATCH` /
+    checkpoint counts, the RAM tier (`--kv-ram-mb` above half of the available RAM goes to the default size), `-c`,
+    then `--ctx-per-slot`; `target not reached` in the summary when one full request still does not fit. The server
+    refuses to start only when even one slot with a 4096-token pool does not fit. The Radeon 8060S keeps its
+    carve-out check.
+  - Not covered yet: when other programs take more VRAM than the room while the server runs, Windows can still move
+    WHIRL's memory and decode slows down (on our R9700, when another process took 4 GiB more while a request
+    ran, decode fell from about 100 to 10-43 tok/s). The server now says so
+    in the log (below), and a restart sizes the pool for the VRAM free at that time. Adjusting the pool while running
+    comes in 0.2.2.2.
+  - Output is unchanged; only the pool, and so how much context can be cached at once, is smaller.
+- Server: a RAM tier of the prefix cache above about 20 GiB could fail the first request with hipError 719 (R9700:
+  `--kv-ram-mb 24064` failed, 20480 worked; 0.2.2 too). The automatic size is above 20 GiB on PCs with more than about 80 GB of
+  RAM. Until the cause is found, every RAM tier, given or automatic, is capped at 20480 MiB, with an `adjusted:` line.
+  Measured on the R9700 with 0.2.2.1: `--kv-ram-mb 22528` started with 20480 MiB (the cap), `--kv-ram-mb 24064` with
+  16384 MiB (it was more than half of the RAM available then, so it went to the default size); both served requests.
+
+### Added
+
+- Server log: WHIRL's video memory and RAM while it runs, so a slowdown can be traced to the budget (issues #5, #6).
+  Each `batch |` status line and each request end show
+  `vram local X / budget Y GiB, shared Z MiB (+D MiB since start), ram R GiB (pinned P GiB)`. A plain-language
+  `GPU memory spill` warning is printed when local usage goes over the budget or shared GPU memory grows by more than
+  256 MiB since the pool was sized (not counting pinned host memory WHIRL allocated since): what happened, what it
+  does to generation, what to do (close other programs that use the GPU, or restart with a larger
+  `WHIRL_POOL_BUDGET_MARGIN_MB`), the KV pool size, how much VRAM other programs use now and at startup, and the
+  numbers. It is also printed at startup when the server already starts over the budget, repeats at most once a
+  minute while the spill lasts, and an info line says when it is over. While idle the server takes one sample a
+  minute. A request whose decode gets more than 40% slower than its first 200 tokens gets one `decode slowed from X
+  to Y tok/s` line; it names the spill only when one is seen and each decode cycle got slower, and with
+  `--parallel 2` or more it says when another request's prefill shared the GPU. `GET /health` has a `vram` object
+  with the last sample (`local_mib`, `budget_mib`, `shared_mib`, `spill`). One sample takes about 0.3 ms on the R9700
+  (measured in the server: 262-321 us, including the HIP device query); it is taken every 5 s while a request runs,
+  at request end and once a minute while idle, never per decode cycle. Model output is unchanged. See
+  docs/guide/en/server.md, "Video memory while it runs".
+
+### Changed
+
+- The startup warning for a server over the budget, and the docs, recommended `WHIRL_POOL_RESERVE_MB`, which turns
+  the budget-based sizing off. They now recommend `WHIRL_POOL_BUDGET_MARGIN_MB`, which keeps it and only leaves more
+  room.
+
 ## 0.2.2 — 2026-10-20 (bug fixes)
 
 ### Fixed

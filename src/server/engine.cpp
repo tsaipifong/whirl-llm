@@ -139,6 +139,7 @@ Engine::Engine(ServerModel& model, device::Backend& ops, const Tokenizer& tok, c
     }
     floor_.configure(opt_.decode_min_tps);
     floor_epoch_ = Clock::now();
+    ctx_pub_.store(ctx_, std::memory_order_relaxed);
 }
 
 Engine::~Engine() {
@@ -335,8 +336,20 @@ std::string Engine::randId(std::string_view prefix, std::size_t n) {
 }
 
 Engine::Health Engine::health() {
-    std::lock_guard<std::mutex> lk(q_mutex_);
-    return {n_active_, queue_.size(), slots_.size()};
+    Health h;
+    {
+        std::lock_guard<std::mutex> lk(q_mutex_);
+        h.active = n_active_;
+        h.queued = queue_.size();
+        h.slots = slots_.size();
+    }
+    std::lock_guard<std::mutex> lk(vram_mu_);
+    h.vram_ok = vram_last_.ok;
+    h.vram_spill = vram_spill_;
+    h.vram_local = vram_last_.local_usage;
+    h.vram_budget = vram_last_.local_budget;
+    h.vram_shared = vram_last_.nonlocal_usage;
+    return h;
 }
 
 Engine::Stats Engine::stats() const {
@@ -981,7 +994,7 @@ Slot* Engine::pickSlot(std::span<const std::uint32_t> toks) {
         return s ? s->n : 0u;
     }();
     for (Slot& sl : slots_) {
-        if (sl.phase != Phase::idle) continue;
+        if (sl.phase != Phase::idle || sl.parked) continue;
         const std::uint32_t r = std::max(cacheMatch(sl, toks).reuse, spe_n);
         if (!best || r > best_reuse || (r == best_reuse && sl.last_used < best->last_used)) {
             best = &sl;
@@ -1221,11 +1234,19 @@ bool Engine::startJob(Slot& sl, Job& job) {
     const auto& cfg = m_.cfg();
     sl.job = &job;
     sl.last_used = pc_->touch();
-    if (N + nd_max + 2 >= ctx_ || static_cast<std::uint64_t>(N) + nd_max + 2 >= static_cast<std::uint64_t>(pool_pages_) * kv_page) {
+    // (v0.2.2.2: ctxForNew = the context per request, lowered by the memory governor for new requests only)
+    const std::uint32_t ctx_new = ctxForNew();
+    if (N + nd_max + 2 >= ctx_new || static_cast<std::uint64_t>(N) + nd_max + 2 >= static_cast<std::uint64_t>(pool_pages_) * kv_page) {
+        if (ctx_new < ctx_ && N + nd_max + 2 < ctx_)
+            logW("req {} | prompt of {} tokens does not fit the context per request of {} tokens (lowered from {} by the memory "
+                 "governor while the WDDM budget is low)",
+                 job.id, N, ctx_new, ctx_);
+        else if (!opt_.ctx_note.empty())
+            logW("req {} | prompt of {} tokens does not fit the context per request of {} tokens ({})", job.id, N, ctx_, opt_.ctx_note);
         writeError(job, 400, "prompt is too long for the context size");
         return false;
     }
-    const std::uint32_t room = ctx_ - N - nd_max - 2;
+    const std::uint32_t room = ctx_new - N - nd_max - 2;
     sl.max_tokens = std::min(p.max_tokens.value_or(room), room);
     sl.greedy = p.temperature <= 0 || !std::isfinite(1.0f / p.temperature);
     sl.ignore_eos = p.ignore_eos;
@@ -1498,6 +1519,7 @@ void Engine::prefillStep(Slot& sl) {
     dflIngest(sl, static_cast<std::uint32_t>(n), 0, static_cast<std::uint32_t>(n), sl.reuse + static_cast<std::uint32_t>(sl.pf_off));
     sl.pf_off += n;
     stat_prefill_tok_ += n;
+    prefill_tok_cum_ += n;
     maybeSplitCkpt(sl, m_.hn() + static_cast<std::uint64_t>(n - 1) * m_.cfg().n_embd * 4);
     if (sl.pf_off == toks.size()) finishPrefill(sl);
 }
@@ -1581,6 +1603,7 @@ std::size_t Engine::prefillGroup(Slot& first, std::size_t row_budget) {
         return 0;
     }
     stat_prefill_tok_ += total;
+    prefill_tok_cum_ += total;
     stat_seg_batches_ += 1;
     stat_seg_chunks_ += grp.size();
     std::uint64_t r0 = 0;
@@ -1720,6 +1743,7 @@ void Engine::finishPrefill(Slot& sl) {
     sl.td0 = Clock::now();
     sl.last_log_t = sl.td0;
     sl.last_log_n = 0;
+    sl.dec_watch.reset();
     sl.done = emit(sl, first);
     flushOut(sl);
     sl.phase = Phase::decode;
@@ -2297,6 +2321,12 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
             }
             sl.last_log_n = sl.n_gen;
             sl.last_log_t = Clock::now();
+            // WDDM-LOG: a sharp drop against the request's early speed; the spill is named as the likely
+            // cause only while one is seen (vram_watch_ state from the last status-line sample)
+            if (const auto ev = sl.dec_watch.report(sl.n_gen, el, sl.cycles, vram_warn_ && vram_watch_.spilling(), prefill_tok_cum_)) {
+                if (ev->warn) logW("req {} | slot {} | {}", sl.reqId(), sl.id, ev->text);
+                else logI("req {} | slot {} | {}", sl.reqId(), sl.id, ev->text);
+            }
         }
     }
     if (p) {
@@ -2453,6 +2483,7 @@ void Engine::finishJob(Slot& sl) {
          "tok",
          job.id, sl.id, fin.reason, sl.st.gone ? " (client disconnected)" : "", n_out, fin.reason_len, fin.content_len,
          fin.n_tools, sl.cache_tokens.size());
+    if (const std::string vram = vramNote(); !vram.empty()) logI("req {} | slot {} | {}", job.id, sl.id, vram);
     releaseSlot(sl);
     // item G: copy the idle slot's new content to the host tier (async)
     try {
@@ -2724,7 +2755,7 @@ bool Engine::tryRestore(Slot& sl, Job& job) {
     if (!job.params.cache_prompt || opt_.no_prefix_cache) return false;
     const std::span<const std::uint32_t> toks = job.tokens;
     const std::uint32_t nd_max = draftRoom();
-    if (toks.size() + nd_max + 2 >= ctx_ || toks.size() + nd_max + 2 >= static_cast<std::uint64_t>(pool_pages_) * kv_page)
+    if (toks.size() + nd_max + 2 >= ctxForNew() || toks.size() + nd_max + 2 >= static_cast<std::uint64_t>(pool_pages_) * kv_page)
         return false;
     const auto mt = opt_.cold_resume ? t->lookup(toks, [&](std::uint32_t p, std::uint8_t k) { return resumeOk(toks, p, k); })
                                      : t->lookup(toks);
@@ -3237,11 +3268,14 @@ void Engine::logBatchStats(bool force) {
         const std::string lit = stat_lit_drafts_ > 0
                                     ? std::format(", {:.2f} literal drafts/cycle (DFlash2 / n-gram)", static_cast<double>(stat_lit_drafts_) / cyc)
                                     : std::string();
+        // WDDM-LOG: this process's video memory at the same cadence (issues #5 / #6)
+        const std::string vram = vramNote();
         logI("batch | slots busy {}/{} (decode {}, prefill {}) | {} cycles, {:.2f} slots/cycle, {:.2f} rows/cycle, {:.2f} "
-             "drafts/cycle{} | aggregate tg {:.1f} tok/s, prefill {:.0f} tok/s over {:.1f} s",
+             "drafts/cycle{} | aggregate tg {:.1f} tok/s, prefill {:.0f} tok/s over {:.1f} s{}{}",
              n_dec + n_pf, slots_.size(), n_dec, n_pf, stat_cycles_, static_cast<double>(stat_slots_) / cyc,
              static_cast<double>(stat_rows_) / cyc, static_cast<double>(stat_drafts_) / cyc, lit,
-             static_cast<double>(stat_tokens_) * 1000.0 / el, static_cast<double>(stat_prefill_tok_) * 1000.0 / el, el / 1000.0);
+             static_cast<double>(stat_tokens_) * 1000.0 / el, static_cast<double>(stat_prefill_tok_) * 1000.0 / el, el / 1000.0,
+             vram.empty() ? "" : " | ", vram);
     }
     stat_t0_ = Clock::now();
     stat_tokens_ = stat_cycles_ = stat_rows_ = stat_slots_ = stat_drafts_ = stat_lit_drafts_ = 0;
@@ -3253,6 +3287,470 @@ void Engine::logBatchStats(bool force) {
         logI("batch | decode floor: {} prefill forwards while decoding, {} decode cycles held prefill back", stat_floor_periods_,
              stat_floor_waits_);
     stat_floor_periods_ = stat_floor_waits_ = 0;
+}
+
+void Engine::setVramProbe(std::function<wddmwatch::Sample()> probe, bool warn, std::optional<wddmwatch::Sample> base,
+                          wddmwatch::Config cfg, bool startup_warned, std::function<std::optional<wddmwatch::Others>()> others) {
+    vram_probe_ = std::move(probe);
+    vram_others_ = std::move(others);
+    vram_warn_ = warn;
+    if (!vram_probe_) return;
+    // the cost of one sample (taken twice: the first also builds the DXGI factory's caches)
+    const TimePoint t0 = Clock::now();
+    const wddmwatch::Sample first = vram_probe_();
+    const double first_us = msSince(t0) * 1000.0;
+    const TimePoint t1 = Clock::now();
+    const wddmwatch::Sample s = vram_probe_();
+    const double next_us = msSince(t1) * 1000.0;
+    const wddmwatch::Sample b = base && base->ok ? *base : first;
+    vram_watch_ = wddmwatch::Watch(b, cfg);
+    vram_idle_s_ = cfg.idle_sample_s > 0.0 ? cfg.idle_sample_s : 60.0;
+    if (!first.ok || !b.ok) {
+        vram_probe_ = nullptr;
+        return;
+    }
+    logI("vram watch: {} | sampled with each 'batch |' line, at request end and once a minute while idle ({:.0f} us per sample, "
+         "first {:.0f} us){}",
+         wddmwatch::format(s, b), next_us, first_us,
+         warn ? "; warns while GPU memory spills (local usage over the budget, or shared grown by more than 256 MiB since the KV "
+                "pool was sized, not counting pinned host memory WHIRL allocated)"
+              : "; integrated GPU: numbers only, no warning");
+    if (warn) {
+        // a spill already there now: the startup line warned (counted as the watch's first warning), else warn here
+        const auto ev = vram_watch_.check(s, std::chrono::duration<double>(Clock::now().time_since_epoch()).count());
+        if (ev && !startup_warned) logW("{}", ev->text);
+    }
+    {
+        std::lock_guard<std::mutex> lk(vram_mu_);
+        vram_last_ = s;
+        vram_spill_ = warn && vram_watch_.spilling();
+    }
+    vram_idle_next_ = Clock::now() + std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(vram_idle_s_));
+}
+
+std::string Engine::vramNote() {
+    if (!vram_probe_) return {};
+    const wddmwatch::Sample s = vram_probe_();
+    vram_last_t_ = Clock::now();
+    // v0.2.2.2: the memory governor decides first; its actions run at the next safe point of the loop (govApply), and the
+    // spill warning is logged after them (the warning comes last)
+    govTick(s);
+    if (vram_warn_) {
+        const double now_s = std::chrono::duration<double>(Clock::now().time_since_epoch()).count();
+        if (const auto ev = vram_watch_.check(s, now_s)) {
+            if (ev->warn) {
+                std::string t = ev->text;
+                if (vram_others_)
+                    if (const auto o = vram_others_()) t += wddmwatch::othersNote(*o);
+                if (gov_) gov_warn_ = t;
+                else logW("{}", t);
+            } else {
+                logI("{}", ev->text);
+            }
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lk(vram_mu_);
+        vram_last_ = s;
+        vram_spill_ = vram_warn_ && vram_watch_.spilling();
+    }
+    // while the governor has reduced something, idle samples every 5 s (recovery, the re-allocation when idle)
+    const double idle_s = gov_ && gov_->reduced() ? std::min(vram_idle_s_, 5.0) : vram_idle_s_;
+    vram_idle_next_ = Clock::now() + std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(idle_s));
+    return wddmwatch::format(s, vram_watch_.baseline());
+}
+
+// ---------------------------------------------------------------------------
+// v0.2.2.2 memory governor (whirl/mem_governor.h): decisions at each probe sample (govTick), actions at a safe point
+// of runLoop (govApply: no forward in flight). The KV pool changes only while every slot is idle, so a running
+// request's KV is never touched.
+
+namespace {
+constexpr double kGiB = 1073741824.0;
+constexpr double kMiB = 1048576.0;
+double monoS() { return std::chrono::duration<double>(Clock::now().time_since_epoch()).count(); }
+}  // namespace
+
+void Engine::setGovernor(const memgov::Config& c, std::function<std::uint64_t(std::uint64_t)> margin, std::uint64_t ram_tier_mb,
+                         std::uint64_t vram_total) {
+    gov_.emplace(c);
+    gov_vram_total_ = vram_total;
+    gov_margin_ = std::move(margin);
+    gov_ram_mb_ = ram_tier_mb;
+    ctx_new_ = std::min(ctx_, c.ctx > 0 ? c.ctx : ctx_);
+    ctx_pub_.store(ctxForNew(), std::memory_order_relaxed);
+    gov_last_ = "none";
+    govPublish();
+}
+
+std::string Engine::governorJson() {
+    std::lock_guard<std::mutex> lk(vram_mu_);
+    return gov_json_;
+}
+
+void Engine::govPublish() {
+    if (!gov_) return;
+    memgov::Status st;
+    st.on = true;
+    st.reduced = gov_->reduced();
+    st.pool_tokens = pool_pages_ * kv_page;
+    st.pool_tokens_start = gov_->config().pool_start;
+    st.ctx_per_request = ctxForNew();
+    st.slots = static_cast<std::uint32_t>(slots_.size());
+    std::uint32_t parked = 0;
+    for (const Slot& sl : slots_) parked += sl.parked ? 1 : 0;
+    st.slots_admitting = gov_hold_ ? 0 : st.slots - parked;
+    st.admission_held = gov_hold_;
+    st.parked_mib = gov_parked_ >> 20;
+    st.shrinks = gov_->shrinks();
+    st.grows = gov_->grows();
+    st.last_action = gov_last_;
+    ctx_pub_.store(ctxForNew(), std::memory_order_relaxed);
+    std::lock_guard<std::mutex> lk(vram_mu_);
+    gov_json_ = memgov::statusJson(st);
+}
+
+bool Engine::govAllIdle() const {
+    for (const Slot& sl : slots_)
+        if (sl.phase != Phase::idle || sl.job != nullptr || sl.restore != nullptr) return false;
+    return true;
+}
+
+std::uint64_t Engine::ckptVram(bool slot_ckpt) const {
+    const auto& cfg = m_.cfg();
+    const auto ssm0 = m_.ssmState();
+    std::uint64_t n_gdn = 0;
+    for (std::uint32_t li = 0; li < cfg.n_layer; ++li)
+        if (ssm0[li] != 0) ++n_gdn;
+    auto al = [](std::uint64_t x) { return (x + 255) / 256 * 256; };
+    const std::uint64_t hid = al(static_cast<std::uint64_t>(cfg.n_embd) * 4);
+    if (slot_ckpt && opt_.ckpt_host) return hid;  // WHIRL_CKPT_HOST: only the hidden row is in VRAM
+    return n_gdn * (al(conv_bytes_) + al(ssm_bytes_)) + hid + static_cast<std::uint64_t>(cfg.n_vocab) * 4;
+}
+
+std::uint64_t Engine::govFreeable() const {
+    std::uint64_t b = 0;
+    bool pf = false;
+    for (const Slot& sl : slots_) {
+        pf = pf || sl.phase == Phase::prefill || sl.phase == Phase::restore;
+        if (sl.phase == Phase::idle && sl.job == nullptr && sl.restore == nullptr && !sl.parked) b += sl.ckpts.size() * ckptVram(true);
+    }
+    if (!pf && !spe_parked_) b += spes_.size() * ckptVram(false);
+    return b;
+}
+
+void Engine::govTick(const wddmwatch::Sample& s) {
+    if (!gov_ || !s.ok || s.local_budget == 0) return;
+    memgov::Input in;
+    in.now_s = monoS();
+    in.local = s.local_usage;
+    in.budget = s.local_budget;
+    in.margin = gov_margin_ ? gov_margin_(s.local_budget) : 0;
+    in.pool = pool_pages_ * kv_page;
+    in.all_idle = govAllIdle();
+    in.parked = gov_parked_;
+    in.freeable = in.all_idle ? 0 : govFreeable();
+    const memgov::Plan p = gov_->tick(in);
+    const double free_gib = (static_cast<double>(in.budget) - static_cast<double>(in.local)) / kGiB;
+    if (p.episode_start)
+        logW("memory governor: {:.2f} GiB free under the Windows video memory (WDDM) budget of {:.2f} GiB (WHIRL uses {:.2f} GiB), "
+             "less than half of the {} MiB margin (another program likely took VRAM); acting in this order: free cache, "
+             "queue new requests, context for new requests, a smaller KV pool when every slot is idle",
+             free_gib, in.budget / kGiB, in.local / kGiB, in.margin >> 20);
+    if (p.ram_tier_note && gov_ram_mb_ > 0)
+        logI("memory governor: RAM tier kept at {} MiB (untouched: it is pinned system RAM, not VRAM, and does not count against "
+             "the VRAM budget; 17 GiB pinned left the R9700 budget unchanged in our test)",
+             gov_ram_mb_);
+    if (p.hold_admission && !gov_hold_)
+        logW("memory governor: new requests queue until the running request(s) finish, then the KV pool is re-allocated smaller "
+             "({} -> {} tokens, {:.2f} -> {:.2f} GiB)",
+             in.pool, p.pool_target.value_or(in.pool), static_cast<double>(m_.poolPages()) * kv_page * kvTokBytes() / kGiB,
+             static_cast<double>(p.pool_target.value_or(in.pool)) * kvTokBytes() / kGiB);
+    if (p.ctx_new != ctxForNew())
+        logI("memory governor: context for new requests {} -> {} tokens ({}; running requests keep theirs)", ctxForNew(), p.ctx_new,
+             p.ctx_new < ctxForNew() ? "the smaller KV pool holds no more" : "the KV pool holds it again");
+    gov_plan_ = p;
+    gov_pending_ = true;
+}
+
+void Engine::govDrain() {
+    // tier IO that reads or writes the pool or the checkpoint buffers: spills (device -> pinned copies on the tier stream)
+    for (Slot& sl : slots_) {
+        if (sl.spill_ev != nullptr && !ops_.eventDone(sl.spill_ev)) ops_.eventSync(sl.spill_ev);
+        sl.spill_busy = false;
+    }
+    for (Spe& sp : spes_) {
+        if (sp.spill_ev != nullptr && !ops_.eventDone(sp.spill_ev)) ops_.eventSync(sp.spill_ev);
+        if (sp.ready_ev != nullptr && !ops_.eventDone(sp.ready_ev)) ops_.eventSync(sp.ready_ev);
+        sp.spill_busy = false;
+    }
+    reclaimPages(true);
+    ops_.streamSync(m_.stream());
+    if (tier_ != nullptr) ops_.streamSync(tier_->stream);
+}
+
+void Engine::govFreeCache(bool park) {
+    std::size_t n_sl = 0, n_pages = 0, n_spe = 0, n_park = 0;
+    std::uint64_t ck_bytes = 0;
+    bool pf = false;
+    for (const Slot& sl : slots_) pf = pf || sl.phase == Phase::prefill || sl.phase == Phase::restore;
+    for (Slot& sl : slots_) {
+        if (sl.phase != Phase::idle || sl.job != nullptr || sl.restore != nullptr) continue;
+        if (!sl.pages.empty()) {
+            ++n_sl;
+            n_pages += sl.pages.size();
+            freePages(sl);
+        }
+        if (park && !sl.parked && !sl.ckpts.empty()) {
+            // the spill to the RAM tier may still read the checkpoint buffers
+            if (sl.spill_ev != nullptr && !ops_.eventDone(sl.spill_ev)) ops_.eventSync(sl.spill_ev);
+            for (Ckpt& c : sl.ckpts) {
+                ck_bytes += ckptVram(true);
+                freeCkpt(c);
+            }
+            sl.ckpts.clear();
+            sl.parked = true;
+            ++n_park;
+        }
+    }
+    if (!pf) {
+        for (Spe& sp : spes_) {
+            if (!sp.valid) continue;
+            ++n_spe;
+            n_pages += sp.pages.size();
+            dropSpe(sp);
+        }
+        if (park && !spe_parked_ && !spes_.empty()) {
+            for (Spe& sp : spes_) {
+                if (sp.spill_ev != nullptr && !ops_.eventDone(sp.spill_ev)) ops_.eventSync(sp.spill_ev);
+                if (sp.ready_ev != nullptr && !ops_.eventDone(sp.ready_ev)) ops_.eventSync(sp.ready_ev);
+            }
+            reclaimPages(true);
+            for (Spe& sp : spes_) {
+                ck_bytes += ckptVram(false);
+                freeCkpt(sp.ck);
+                if (sp.spill_ev) ops_.eventDestroy(sp.spill_ev);
+                if (sp.ready_ev) ops_.eventDestroy(sp.ready_ev);
+            }
+            spes_.clear();
+            spe_parked_ = true;
+        }
+    }
+    gov_parked_ += ck_bytes;
+    if (n_sl == 0 && n_spe == 0 && ck_bytes == 0) return;
+    std::string t = std::format("memory governor: freed reusable cache: prefix cache of {} idle slot(s) and {} shared prefix "
+                                "checkpoint(s) dropped from the KV pool ({} pages; their content went to the RAM tier at request "
+                                "end when it had room)",
+                                n_sl, n_spe, n_pages);
+    if (ck_bytes > 0)
+        t += std::format("; {:.0f} MiB of checkpoint buffers freed now (VRAM back to Windows; until they are restored {} idle slot(s) "
+                         "take no new request{})",
+                         ck_bytes / kMiB, n_park, spe_parked_ ? " and no shared prefix checkpoint is kept" : "");
+    else
+        t += "; the pool's VRAM itself returns to Windows only when the pool is re-allocated smaller";
+    logI("{}", t);
+    gov_last_ = std::format("freed cache: {} slot(s), {} shared, {} pages, {:.0f} MiB checkpoint buffers", n_sl, n_spe, n_pages, ck_bytes / kMiB);
+}
+
+void Engine::govRestoreCache() {
+    gov_restored_ = 0;
+    if (gov_parked_ == 0) return;
+    std::uint64_t bytes = 0;  // of the slots / shared checkpoints restored completely
+    std::size_t n = 0;
+    Slot* cur = nullptr;      // the slot being restored (its partial buffers are freed on failure)
+    bool cur_spe = false;
+    try {
+        for (Slot& sl : slots_) {
+            if (!sl.parked) continue;
+            cur = &sl;
+            // a parked slot holds no checkpoint buffer (govFreeCache cleared them; a failed restore frees its partial ones)
+            sl.ckpts.clear();
+            sl.ckpts.resize(opt_.n_ck);
+            for (Ckpt& c : sl.ckpts) initCkpt(c, true);
+            bytes += sl.ckpts.size() * ckptVram(true);
+            sl.parked = false;
+            cur = nullptr;
+            ++n;
+        }
+        if (spe_parked_) {
+            cur_spe = true;
+            spes_.clear();
+            spes_.resize(opt_.n_spe);
+            for (Spe& sp : spes_) initCkpt(sp.ck, false);
+            bytes += spes_.size() * ckptVram(false);
+            spe_parked_ = false;
+            cur_spe = false;
+        }
+    } catch (const std::exception& ex) {
+        // REVIEW-GOV-1 P2-2: free what the unfinished slot / shared checkpoints got, so they stay parked holding nothing and
+        // the next try starts clean (initCkpt overwrites its pointers: a retry over partial buffers leaked them)
+        if (cur != nullptr) {
+            for (Ckpt& c : cur->ckpts) freeCkpt(c);
+            cur->ckpts.clear();
+        }
+        if (cur_spe) {
+            for (Spe& sp : spes_) freeCkpt(sp.ck);
+            spes_.clear();
+        }
+        gov_parked_ = gov_parked_ > bytes ? gov_parked_ - bytes : 0;
+        gov_restored_ = bytes;
+        logW("memory governor: restoring the checkpoint buffers failed after {:.0f} MiB ({}); the slots not restored stay parked and "
+             "are tried again later",
+             bytes / kMiB, ex.what());
+        return;
+    }
+    gov_parked_ = 0;
+    gov_restored_ = bytes;
+    logI("memory governor: checkpoint buffers restored ({:.0f} MiB, {} slot(s){}): every slot takes requests again", bytes / kMiB, n,
+         opt_.n_spe > 0 ? " and the shared prefix checkpoints" : "");
+}
+
+bool Engine::govResize(std::uint32_t tokens, bool shrink) {
+    const std::uint32_t old = pool_pages_ * kv_page;
+    if (tokens == old) return false;
+    const TimePoint t0 = Clock::now();
+    const wddmwatch::Sample before = vram_probe_ ? vram_probe_() : wddmwatch::Sample{};
+    // 1. the tier IO that reads or writes the pool, then the VRAM prefix cache (its content is in the RAM tier when it had
+    // room: the next request restores from there)
+    govDrain();
+    std::size_t n_sl = 0, n_spe = 0;
+    for (Slot& sl : slots_) {
+        if (sl.pages.empty() && sl.cache_tokens.empty()) continue;
+        ++n_sl;
+        freePages(sl);
+    }
+    for (Spe& sp : spes_) {
+        if (!sp.valid) continue;
+        ++n_spe;
+        dropSpe(sp);
+    }
+    reclaimPages(true);
+    // 2. the pool itself (the decode path of the server keeps no captured graph: model.use_graph is off in whirl-server)
+    bool ok = false;
+    try {
+        ok = m_.resizePool(tokens);
+    } catch (const std::exception& ex) {
+        logE("memory governor: the KV pool could not be allocated again ({}): {}", ex.what(), ops_.lastErrorString());
+        throw;
+    }
+    // 3. page bookkeeping and the tier's view of the pool arrays (the per-token layout is unchanged)
+    initPool();
+    const double ms = msSince(t0);
+    // the WDDM usage follows a free over ~0.1-0.3 s: read it until two reads 50 ms apart agree (at most 1 s; every slot is
+    // idle, a request that arrives meanwhile waits at most that long)
+    wddmwatch::Sample after = vram_probe_ ? vram_probe_() : wddmwatch::Sample{};
+    for (int i = 0; i < 20 && after.ok; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        const wddmwatch::Sample a2 = vram_probe_();
+        const bool same = a2.ok && a2.local_usage == after.local_usage;
+        after = a2;
+        if (same) break;
+    }
+    const std::uint32_t now_tok = pool_pages_ * kv_page;
+    if (!ok) {
+        logW("memory governor: the KV pool could not be re-allocated to {} tokens; kept at {} tokens ({:.0f} ms)", tokens, now_tok, ms);
+        gov_last_ = std::format("re-allocation to {} tokens failed", tokens);
+        return false;
+    }
+    gov_resize_before_ = before.ok ? before.local_usage : 0;
+    gov_resize_delta_ = (static_cast<std::int64_t>(now_tok) - static_cast<std::int64_t>(old)) * static_cast<std::int64_t>(kvTokBytes());
+    std::string vr;
+    if (before.ok && after.ok)
+        vr = std::format("; WHIRL's VRAM {:.2f} -> {:.2f} GiB, budget {:.2f} GiB", before.local_usage / kGiB, after.local_usage / kGiB,
+                         after.local_budget / kGiB);
+    logW("memory governor: KV pool re-allocated {} -> {} tokens ({:.2f} -> {:.2f} GiB) in {:.0f} ms with every slot idle; VRAM "
+         "prefix cache of {} slot(s) and {} shared checkpoint(s) dropped first (the RAM tier keeps what it had){}",
+         old, now_tok, static_cast<double>(old) * kvTokBytes() / kGiB, static_cast<double>(now_tok) * kvTokBytes() / kGiB, ms, n_sl,
+         n_spe, vr);
+    gov_last_ = std::format("pool {} -> {} tokens", old, now_tok);
+    return true;
+}
+
+void Engine::govApply() {
+    if (!gov_ || !gov_pending_) return;
+    gov_pending_ = false;
+    const memgov::Plan p = gov_plan_;
+    const bool idle = govAllIdle();
+    const bool resize_now = p.pool_target && idle && *p.pool_target != pool_pages_ * kv_page;
+    // 1. free reusable cache (idle prefix cache; while requests run, the checkpoint buffers of idle slots / shared ones)
+    if (p.free_cache) govFreeCache(!resize_now && !idle);
+    // 3. / 4. admission and context for new requests
+    const bool hold = p.hold_admission && !idle;
+    if (!hold && gov_hold_ && !resize_now) logI("memory governor: new requests are admitted again (the budget has room)");
+    gov_hold_ = hold;
+    ctx_new_ = p.ctx_new;
+    // 5. the pool, with every slot idle
+    bool resized = false;
+    std::optional<std::uint32_t> target = resize_now ? p.pool_target : std::nullopt;
+    if (target && !p.shrink && gov_vram_total_ > 0 && vram_others_ && vram_probe_) {
+        // a grow: the budget alone can read high again while another program still holds VRAM (R9700: 31.02 GiB with a 4 GiB
+        // hog alive once WHIRL had shrunk), so cap it to what fits next to what the other programs use now (one PDH read,
+        // ~0.3 s, only here, while idle)
+        const auto o = vram_others_();
+        const wddmwatch::Sample s = vram_probe_();
+        if (o && s.ok) {
+            const std::uint64_t margin_full = gov_margin_ ? gov_margin_(s.local_budget) : 0;
+            const std::uint32_t pool = pool_pages_ * kv_page;
+            const std::uint64_t page_b = kvTokBytes() * kv_page;
+            const auto addFor = [&](std::uint64_t m) {
+                const std::uint64_t used = s.local_usage + o->now + m;
+                const std::uint64_t room = gov_vram_total_ > used ? gov_vram_total_ - used : 0;
+                return page_b ? static_cast<std::uint32_t>(room / page_b) * kv_page : 0u;
+            };
+            // the governor plans the last step straight to the startup pool with endMargin free: the cap allows the same for
+            // that step only (a partial grow keeps the full margin)
+            std::uint64_t margin = margin_full;
+            std::uint32_t capped = std::min(*target, pool + addFor(margin_full));
+            if (*target >= gov_->config().pool_start && capped < *target && pool + addFor(memgov::endMargin(margin_full)) >= *target) {
+                margin = memgov::endMargin(margin_full);
+                capped = *target;
+            }
+            const std::uint64_t min_add = std::min<std::uint64_t>(gov_->config().min_grow / std::max<std::uint64_t>(kvTokBytes(), 1),
+                                                                  *target - pool);
+            if (capped <= pool || capped - pool < min_add) {
+                if (!gov_grow_denied_logged_)
+                    logI("memory governor: the KV pool stays at {} tokens for now: other programs use {:.2f} GiB of this GPU's {:.2f} GiB "
+                         "(WHIRL {:.2f} GiB, margin {} MiB), although the WDDM budget ({:.2f} GiB) would allow more; checked again later",
+                         pool, o->now / kGiB, gov_vram_total_ / kGiB, s.local_usage / kGiB, margin >> 20, s.local_budget / kGiB);
+                gov_grow_denied_logged_ = true;
+                gov_->growDenied(monoS());
+                target.reset();
+            } else {
+                target = capped;
+            }
+        }
+    }
+    if (target) {
+        resized = govResize(*target, p.shrink);
+        if (resized && p.shrink) gov_hold_ = false;
+    }
+    if (gov_parked_ > 0 && (p.restore_cache || resized)) govRestoreCache();
+    if (resized) {
+        // the usage this should give, for the governor while the WDDM counters catch up (they show a free late)
+        const std::int64_t exp = static_cast<std::int64_t>(gov_resize_before_) + gov_resize_delta_ + static_cast<std::int64_t>(gov_restored_);
+        gov_->resized(pool_pages_ * kv_page, !p.shrink, monoS(), gov_resize_before_ > 0 && exp > 0 ? static_cast<std::uint64_t>(exp) : 0);
+        ctx_new_ = gov_->ctxNew();
+        if (!p.shrink) gov_grow_denied_logged_ = false;
+    }
+    if (p.episode_end) {
+        logI("memory governor: back to the startup settings (KV pool {} tokens, context {} tokens per request, {} slot(s))",
+             pool_pages_ * kv_page, ctxForNew(), slots_.size());
+        gov_last_ = "back to the startup settings";
+    }
+    // 6. the warning last
+    if (!gov_warn_.empty()) {
+        logW("{}{}", gov_warn_,
+             resized ? " (the KV pool was re-allocated smaller just now: see the line above)"
+                     : (p.warn_slow ? " The running request(s) stay slower until they finish: their KV cannot move." : ""));
+        gov_warn_.clear();
+    }
+    govPublish();
+}
+
+std::optional<TimePoint> Engine::vramIdleTick() {
+    if (!vram_probe_) return std::nullopt;
+    if (Clock::now() >= vram_idle_next_) (void)vramNote();  // logs only a spill warning / the spill-over line
+    return vram_idle_next_;
 }
 
 void Engine::submitAndWait(Job& job) {
@@ -3340,6 +3838,8 @@ void Engine::runLoop() {
     bool was_busy = false;
     for (;;) {
         const TimePoint tl0 = Clock::now();
+        // v0.2.2.2 memory governor: its pending actions (safe here: no forward in flight)
+        govApply();
         // ---- admit
         std::uint32_t n_busy = 0;
         for (const Slot& sl : slots_)
@@ -3380,6 +3880,15 @@ void Engine::runLoop() {
                     runLoopCalls(lk);
                     return;
                 }
+                // WDDM-LOG: /health "vram" and the spill-over line stay current while idle (one sample a minute)
+                std::optional<TimePoint> vram_due;
+                if (vram_probe_) {
+                    lk.unlock();
+                    vram_due = vramIdleTick();
+                    govApply();
+                    lk.lock();
+                    if (!queue_.empty() || stop_) continue;
+                }
                 if (tier_ != nullptr) {
                     const std::uint64_t seq = wake_seq_;
                     lk.unlock();
@@ -3416,6 +3925,7 @@ void Engine::runLoop() {
                 std::optional<std::chrono::steady_clock::time_point> wake;
                 if (tier_ != nullptr) wake = tier_->nextWake();
                 if (const auto idle_due = idleFlushDue(); idle_due && (!wake || *idle_due < *wake)) wake = idle_due;  // TIER-IDLE
+                if (vram_due && (!wake || *vram_due < *wake)) wake = *vram_due;  // WDDM-LOG idle sample
                 if (wake) {
                     // an SSD write is due at a known time, the periodic SSD expiry check, or the idle write: wake
                     // then (re-checked every minute)
@@ -3429,12 +3939,28 @@ void Engine::runLoop() {
             idle_clock_.activity();
             if (tier_ != nullptr) tier_->endIdleWrite();
             stat_t0_ = Clock::now();
+            // v0.2.2.2: the governor sees the budget before the first request after an idle period (one probe sample,
+            // ~0.3 ms) when the last sample is older than 5 s, so a pool that must shrink does so before the request runs
+            if (gov_ && vram_probe_ && msSince(vram_last_t_) > 5000.0) {
+                lk.unlock();
+                (void)vramNote();
+                govApply();
+                lk.lock();
+            }
         }
         const std::uint64_t wake_seq0 = wake_seq_;  // a later arrival ends this iteration's wait (below)
         std::vector<Job*> admit;
         std::size_t qi = 0;
         std::optional<std::size_t> pool_avail;  // FR-SRV P2-3 (computed when a request is about to start)
-        while (qi < queue_.size() && n_busy + admit.size() < slots_.size()) {
+        // v0.2.2.2 memory governor: parked slots take no request; while a smaller pool waits for the running requests,
+        // none is admitted (they queue)
+        std::size_t admit_cap = slots_.size();
+        if (gov_) {
+            std::size_t n_parked = 0;
+            for (const Slot& sl : slots_) n_parked += sl.parked ? 1 : 0;
+            admit_cap = gov_hold_ && n_busy > 0 ? n_busy : slots_.size() - n_parked;
+        }
+        while (qi < queue_.size() && n_busy + admit.size() < admit_cap) {
             // item S: a new session whose system message another request is
             // prefilling right now waits for that checkpoint
             if (waitsForSys(*queue_[qi]) || waitsForTier(*queue_[qi])) {

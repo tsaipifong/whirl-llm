@@ -9,6 +9,8 @@
 
 #include "hip_api.h"
 
+#include <chrono>
+#include <cstdio>
 #include <cstring>
 
 #ifdef _WIN32
@@ -20,6 +22,7 @@
 #endif
 #include <windows.h>
 #include <dxgi1_4.h>
+#include <pdh.h>
 #endif
 
 namespace whirl::hip {
@@ -61,6 +64,63 @@ WddmMemInfo wddmMemInfo() {
         if (match) break;
     }
     fac->Release();
+#endif
+    return r;
+}
+
+GpuOthers gpuOthers(int dev) {
+    GpuOthers r;
+#ifdef _WIN32
+    const auto t0 = std::chrono::steady_clock::now();
+    hipDeviceProp_t prop{};
+    if (rt().hipGetDeviceProperties(&prop, dev) == hipSuccess) {
+        LUID luid{};
+        static_assert(sizeof(luid) == sizeof(prop.luid));
+        std::memcpy(&luid, prop.luid, sizeof(luid));
+        // display attached: a monitor on one of this adapter's outputs
+        IDXGIFactory1* fac = nullptr;
+        if (SUCCEEDED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&fac))) && fac) {
+            for (UINT i = 0;; ++i) {
+                IDXGIAdapter1* ad = nullptr;
+                if (fac->EnumAdapters1(i, &ad) == DXGI_ERROR_NOT_FOUND || !ad) break;
+                DXGI_ADAPTER_DESC1 d{};
+                const bool match = SUCCEEDED(ad->GetDesc1(&d)) && std::memcmp(&d.AdapterLuid, &luid, sizeof(luid)) == 0;
+                if (match) {
+                    IDXGIOutput* out = nullptr;
+                    r.display_known = true;
+                    r.display = ad->EnumOutputs(0, &out) != DXGI_ERROR_NOT_FOUND && out != nullptr;
+                    if (out) out->Release();
+                }
+                ad->Release();
+                if (match) break;
+            }
+            fac->Release();
+        }
+        PDH_HQUERY q = nullptr;
+        if (PdhOpenQueryW(nullptr, 0, &q) == ERROR_SUCCESS) {
+            wchar_t pa[192], pp[192];
+            std::swprintf(pa, 192, L"\\GPU Adapter Memory(luid_0x%08lX_0x%08lX_phys_0)\\Dedicated Usage",
+                          static_cast<unsigned long>(luid.HighPart), static_cast<unsigned long>(luid.LowPart));
+            std::swprintf(pp, 192, L"\\GPU Process Memory(pid_%lu_luid_0x%08lX_0x%08lX_phys_0)\\Dedicated Usage", GetCurrentProcessId(),
+                          static_cast<unsigned long>(luid.HighPart), static_cast<unsigned long>(luid.LowPart));
+            PDH_HCOUNTER ca = nullptr, cp = nullptr;
+            bool ok = PdhAddEnglishCounterW(q, pa, 0, &ca) == ERROR_SUCCESS;
+            // this process may have no counter instance yet (nothing allocated on the adapter): own = 0
+            const bool own_ok = PdhAddEnglishCounterW(q, pp, 0, &cp) == ERROR_SUCCESS;
+            ok = ok && PdhCollectQueryData(q) == ERROR_SUCCESS;
+            PDH_FMT_COUNTERVALUE fv{};
+            if (ok && PdhGetFormattedCounterValue(ca, PDH_FMT_LARGE, nullptr, &fv) == ERROR_SUCCESS) {
+                r.adapter_dedicated = static_cast<std::uint64_t>(fv.largeValue);
+                PDH_FMT_COUNTERVALUE fp{};
+                if (own_ok && PdhGetFormattedCounterValue(cp, PDH_FMT_LARGE, nullptr, &fp) == ERROR_SUCCESS)
+                    r.own_dedicated = static_cast<std::uint64_t>(fp.largeValue);
+                r.others = r.adapter_dedicated > r.own_dedicated ? r.adapter_dedicated - r.own_dedicated : 0;
+                r.ok = true;
+            }
+            PdhCloseQuery(q);
+        }
+    }
+    r.cost_us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
 #endif
     return r;
 }

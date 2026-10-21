@@ -164,7 +164,8 @@ CardDefaults cardDefaults(const CardInput& in) {
     std::string hr;
     if (in.headroom_mb_env) hr = std::format("{} MiB of VRAM kept free for the desktop and other apps (WHIRL_VRAM_HEADROOM_MB)", mb);
     else if (d.small && in.reserve_explicit) hr = "no desktop headroom (WHIRL_POOL_RESERVE_MB given; WHIRL_VRAM_HEADROOM_MB adds one)";
-    else if (d.small) hr = std::format("{} MiB of VRAM kept free for the desktop and other apps (WHIRL_VRAM_HEADROOM_MB to change, 0 = none)", mb);
+    else if (d.small && mb > 0) hr = std::format("{} MiB of VRAM kept free for the desktop and other apps (WHIRL_VRAM_HEADROOM_MB to change, 0 = none)", mb);
+    else if (d.small) hr = "room for the desktop and other apps comes from the WDDM budget margin (WHIRL_VRAM_HEADROOM_MB adds more)";
     if (d.small) {
         const std::string par = d.parallel_auto ? std::format("--parallel 1 (default {} on cards >= 20 GiB; pass --parallel N for more)", in.parallel_default)
                                                 : std::format("--parallel {} (given)", d.parallel);

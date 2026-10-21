@@ -2,7 +2,7 @@
 
 # 使用參考：`whirl` 與 `whirl-server`
 
-本頁列出 WHIRL 0.2.2 的每一個指令、選項、環境變數與伺服器端點。內容依發行版執行檔的內建說明
+本頁列出 WHIRL 0.2.2.1 的每一個指令、選項、環境變數與伺服器端點。內容依發行版執行檔的內建說明
 （`whirl --help`、`whirl <指令> --help`、`whirl help env`、`whirl-server --help`）整理；若有出入，以你手上
 執行檔的說明文字為準。
 
@@ -187,12 +187,12 @@ whirl serve  MODEL.gguf [選項]      （同一支程式）
 | `--alias NAME` | `/v1/models` 回報的模型 id（預設：去掉 `.gguf` 的檔名） |
 | `--device D` | GPU：`r9700`、`8060s`、裝置索引，或名稱 / gfx 子字串（預設同 `chat`） |
 | `-np`、`--parallel N` | 同時處理的請求 slot 數（continuous batching），1～16，預設 4（VRAM 小於 20 GiB 的卡預設 1，見 `WHIRL_VRAM_HEADROOM_MB`） |
-| `-c`、`--ctx N` | 共用 KV 池的大小（token）。slot 依需要取用分頁；池滿時，閒置 slot 的前綴快取依最久未使用（LRU）逐出。預設：權重與緩衝區之後剩下的全部 VRAM 減 768 MiB（MoE：1.5 GiB） |
+| `-c`、`--ctx N` | 共用 KV 池的大小（token）。slot 依需要取用分頁；池滿時，閒置 slot 的前綴快取依最久未使用（LRU）逐出。預設：權重與緩衝區之後剩下的全部 VRAM，減去可用 VRAM 的 768 MiB（MoE：1.5 GiB），並在 Windows（WDDM）預算之下替其他程式留 margin（`WHIRL_POOL_BUDGET_MARGIN_MB`）；Radeon 8060S 上為 262144 |
 | `--ctx-per-slot N` | 單一請求的最長 context（預設 min(池大小, 131072)；最多 262144） |
 | `--precise` / `--balance` / `--fast` / `--mode M` | 數值模式（預設 balance；`--precise`：f16 KV；f16 池放不下一個完整請求時，會降低每個請求的 context 並警告；若有指定 `--ctx` / `--ctx-per-slot` 則拒絕啟動）。見[數值模式](#modes) |
 | `--mtp-drafts N` | 每回合固定的 MTP 草稿數，1～10（預設：依模型類型由成本模型決定） |
 | `--decode-min-tps N` | decode 保底速度：其他請求在 prefill 時，每個串流中（decode 中）的請求至少維持 N tok/s；做法是縮短 prefill forward、穿插 decode cycle（預設 20；`0` = 關閉，prefill forward 不受限）。任何 N 的輸出都相同（[server.md](server.md#batching)） |
-| `--kv-ram-mb N` | 前綴快取的主記憶體層，單位 MiB 的 pinned 記憶體（預設：實體記憶體的 1/4，至少 8 GiB 或一個完整長度 session（若更大；27B 模型約 9 GiB），最多 32 GiB，且不超過啟動時可用記憶體的一半；64 GB 的電腦為 16 GiB；整合式 GPU（Radeon 8060S）：作業系統可見記憶體的 1/8，下限為一個最大 context 的條目（27B 模型在 262k 約 6 GiB），上限 16 GiB，且不超過啟動時可用記憶體的 1/4；作業系統可見記憶體低於 32 GB 則關閉（BIOS 的 VRAM 保留區不計；64 GB 的電腦為 8 GiB））。啟動日誌會印出選定的大小與原因。閒置 session 會複製到這裡，下次直接還原而不必重新 prefill。`0` 會關閉兩個 host 層。**Radeon 8060S**（內顯）：預設開啟，大小如上（KV pool 是 BIOS 保留區，主記憶體層是另外 pin 住的作業系統記憶體；128k 的 session 從 RAM 或 SSD 還原，不必重新 prefill）；`--kv-ram-mb 0` 關閉兩個 host 層，`--kv-ssd-gb 0` / `--kv-ssd-mode off` 只關 SSD 層 |
+| `--kv-ram-mb N` | 前綴快取的主記憶體層，單位 MiB 的 pinned 記憶體（預設：實體記憶體的 1/4，至少 8 GiB 或一個完整長度 session（若更大；27B 模型約 9 GiB），最多 32 GiB，且不超過啟動時可用記憶體的一半；64 GB 的電腦為 16 GiB；0.2.2.1 起不論指定或自動，RAM 層一律以 20480 MiB 為上限（測試機上更大的 pinned RAM 層會在第一個請求當機，原因調查中；0.2.2.2 起自動大小以一般訊息註明，指定的大小印 `adjusted:`，且先套上限再檢查是否超過可用記憶體的一半，超過時降到一半）；整合式 GPU（Radeon 8060S）：作業系統可見記憶體的 1/8，下限為一個最大 context 的條目（27B 模型在 262k 約 6 GiB），上限 16 GiB，且不超過啟動時可用記憶體的 1/4；作業系統可見記憶體低於 32 GB 則關閉（BIOS 的 VRAM 保留區不計；64 GB 的電腦為 8 GiB））。啟動日誌會印出選定的大小與原因。閒置 session 會複製到這裡，下次直接還原而不必重新 prefill。`0` 會關閉兩個 host 層。**Radeon 8060S**（內顯）：預設開啟，大小如上（KV pool 是 BIOS 保留區，主記憶體層是另外 pin 住的作業系統記憶體；128k 的 session 從 RAM 或 SSD 還原，不必重新 prefill）；`--kv-ram-mb 0` 關閉兩個 host 層，`--kv-ssd-gb 0` / `--kv-ssd-mode off` 只關 SSD 層 |
 | `--kv-ssd-dir PATH` | SSD 層目錄（預設 `%LOCALAPPDATA%\whirl\kvcache`） |
 | `--kv-ssd-gb N` | SSD 層容量上限，GiB（預設 64；`0` = 不用 SSD 層） |
 | `--kv-ssd-mode M` | SSD 層何時寫入：`shutdown`（預設；只寫重用過的項目：關閉 WHIRL 時——Ctrl+C、關閉主控台視窗、登出、作業系統關機，後三者只有約 5 秒——、主記憶體層必須擠出時，以及閒置約 5 分鐘後；一次性的 prompt 永遠不寫）、`always`（閒置超過 `--kv-ssd-delay` 後寫入）、`off`（不寫 SSD 檔案）。見[SSD 層如何儲存 session](#ssd-tier) |
@@ -232,9 +232,9 @@ base URL `http://127.0.0.1:8080/v1`。任何 API key 都接受（沒有身分驗
 | `POST /v1/chat/completions` | messages、串流（SSE）或不串流、工具 / 工具呼叫、思考（`reasoning_content`）、圖片（需 `--mmproj`） |
 | `POST /v1/completions` | 原始提示，不套聊天樣板 |
 | `GET /v1/models` | 已載入的那一個模型（id = `--alias`）；`meta.n_ctx` 為每個 slot 的 context |
-| `GET /health` | 忙碌時也會立刻回應；回報忙碌狀態與佇列長度 |
-| `GET /props`（也接受 `/v1/props`） | 唯讀，llama.cpp server 形式的子集，供會自動偵測 context 長度的客戶端使用：`default_generation_settings.n_ctx`（每個 slot 的 context）、`default_generation_settings.model` 與 `model_alias`（= `--alias`）、`total_slots`、`model_path`（只有檔名，絕不含目錄）、`modalities`、`build_info` |
-| `GET /version` | `{"version":"0.2.2","name":"whirl"}` |
+| `GET /health` | 忙碌時也會立刻回應；回報忙碌狀態與佇列長度；Windows 上另有 `vram`（最近一次顯示記憶體取樣：`local_mib`、`budget_mib`、`shared_mib`、`spill`）與 `startup`（啟動配適後實際生效的值：`ctx_per_request`、`pool_tokens`、`parallel`、`kv_ram_mb`、`wddm_margin_mib`、`other_processes_mib`、`display_attached`、`adjusted`：伺服器調低的設定；`wddm_margin_mib` 是決定 KV 池大小時用的 margin，`other_processes_mib` 是啟動時其他行程的用量） |
+| `GET /props`（也接受 `/v1/props`） | 唯讀，llama.cpp server 形式的子集，供會自動偵測 context 長度的客戶端使用：`default_generation_settings.n_ctx`（每個 slot 的 context）、`default_generation_settings.model` 與 `model_alias`（= `--alias`）、`total_slots`、`model_path`（只有檔名，絕不含目錄）、`modalities`、`build_info`，以及與 `GET /health` 相同的 `startup` 物件 |
+| `GET /version` | `{"version":"0.2.2.1","name":"whirl"}` |
 | `OPTIONS`（CORS preflight） | 支援（允許的來源見 `--cors-origin`） |
 
 LM Studio（`/api/v1/models`）與 Ollama（`/api/tags`、`/api/show`、`/api/version`）的原生端點不模擬
@@ -427,8 +427,11 @@ PowerShell 中先用 `$env:WHIRL_MODE = "precise"` 設定再啟動程式。**一
 | `WHIRL_SYS_CKPTS=N` | 保留在 VRAM 的共用前綴檢查點數（預設 2） |
 | `WHIRL_SYS_LCP=0` | 不在多個 session 共同的前綴處建立檢查點 |
 | `WHIRL_CKPT_HOST=1` | 前綴檢查點放在 pinned 主記憶體，不放 VRAM |
-| `WHIRL_POOL_RESERVE_MB=N` | 決定 KV 池大小時保留不用的 VRAM（預設 768，MoE 1536） |
-| `WHIRL_VRAM_HEADROOM_MB=N` | 在上述保留之外，再留給桌面與其他程式的 VRAM。VRAM 小於 20 GiB 的卡（16 GB 的 RX 9070／9070 XT／9060 XT，通常同時負責顯示）預設 1536，這類卡的伺服器也預設 `--parallel 1`（KV 格式跟其他卡一樣由模式決定）；20 GiB 以上的卡預設 0，行為不變。0 = 不保留 |
+| `WHIRL_HIP_CACHE_LIMIT=0` | 保留 HIP runtime 自己對已釋放 GPU 記憶體的快取（R9700 實測：KV 池縮小 3.91 GiB 時它留住 0.87 GiB，Swift-1.5 27B）。預設 whirl-server 會替自己的行程設 `GPU_RESOURCE_CACHE_SIZE=256`（MiB；你自己設了就不動），讓它釋放的記憶體（縮小重配的 KV 池）真的還給 Windows（0.2.2.2）。R9700 實測（Swift-1.5 27B MXFP4、另一個程式佔 4 GiB）：有這個限制時，governor 重配 KV 池後的第一個請求是 17–69 tok/s（原本 89，3 次中 3 次），之後的請求 3 次中 2 次回到全速；設 `=0` 時縮小 3.91 GiB 只還回 3.04 GiB，且池長回去時超過預算（3 次中 3 次；這是 0.2.2.2 修正前的版本，修正後 governor 遇到這種長回去會立刻處理，尚未重測），所以 governor 開著時不建議設 `=0`。Radeon 8060S（這個限制是那裡唯一的改動）：對 0.2.2.1 的 2k／32k prefill 與 decode 三輪平均 -1.9% 到 +0.6%（Swift 2k prefill 有一輪 -5.7%），加 `--mmproj` 時 5 張圖（編碼器兩次閒置卸下後重新載入）的生成文字都與 0.2.2.1 相同（Swift-1.5 27B 與 Ornith-1.5-35B-A3B 各 1 次；8060S 上未量時間）。R9700 加 `--mmproj`（最終 0.2.2.2 版本，每個模型 2 次）：編碼器閒置卸下後的第一張圖（1920x1080）Swift-1.5 27B 3.58–3.59 秒、Ornith-1.5-35B-A3B 1.56 秒，0.2.2.1 為 3.56 秒與 1.53 秒（各 1 次），4 次中 4 次 governor 都沒有動作，詳見 CHANGELOG |
+| `WHIRL_GOVERNOR=0` | 關閉伺服器執行中的記憶體調節（0.2.2.2）：WDDM 預算在執行中下降時，它會釋放快取、讓新請求排隊、所有 slot 閒置時以較小的大小重新配置 KV 池，預算恢復後再長回來（見 server.md 第 7 節） |
+| `WHIRL_POOL_BUDGET_MARGIN_MB=N` | 決定 KV 池大小與事後重查時，在 Windows（WDDM）顯示記憶體預算之下替其他程式成長留的空間。預設取 2048 MiB（GPU 接螢幕時 3072）與預算 6% 的較大者。啟動時其他程式的 VRAM 中預算還沒反映的部分另外保留 |
+| `WHIRL_POOL_RESERVE_MB=N` | 舊的「只看可用 VRAM」規則：決定 KV 池大小時保留不用的 VRAM，同時關掉 WDDM 預算、margin 與池重查（預設保留 768，MoE 1536）。要替其他程式多留空間，請用 `WHIRL_POOL_BUDGET_MARGIN_MB` |
+| `WHIRL_VRAM_HEADROOM_MB=N` | 在保留量與 WDDM margin 之外，再額外留給桌面與其他程式的 VRAM。預設 0（0.2.2.1 起由 WDDM margin 涵蓋桌面：接螢幕時 3 GiB；之前 VRAM 小於 20 GiB 的卡預設 1536）。VRAM 小於 20 GiB 的卡（16 GB 的 RX 9070／9070 XT／9060 XT）仍預設 `--parallel 1`（KV 格式跟其他卡一樣由模式決定） |
 | `WHIRL_PREFILL_CHUNK=N` | 合併後單次 prefill forward 的最多列數（1024 的倍數，預設 2048，Radeon 8060S 上 MoE 模型為 4096；上限為 prefill batch） |
 | `WHIRL_SEG_PREFILL=0` | 每個請求各自 prefill，不把多個請求放進同一次 forward |
 | `WHIRL_GATHER_MS=MS` | 收集一波新請求的等待時間窗（預設 30，0 = 關閉） |

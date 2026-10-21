@@ -107,11 +107,17 @@ void NullBackend::hostFree(void* p) {
 }
 
 DevPtr NullBackend::malloc(std::uint64_t bytes) {
+    if (const std::uint64_t nth = fail_malloc_.load(); nth != 0 && ++mallocs_ == nth) {
+        fail_malloc_ = 0;
+        throw std::runtime_error("injected malloc failure");
+    }
     void* p = _aligned_malloc(bytes ? static_cast<std::size_t>(bytes) : 1, 4096);
     if (p == nullptr) throw std::bad_alloc();
     std::memset(p, 0, static_cast<std::size_t>(bytes));
     std::lock_guard<std::mutex> lk(mu_);
     live_.insert(p);
+    dev_[reinterpret_cast<std::uintptr_t>(p)] = bytes;
+    dev_bytes_.fetch_add(bytes);
     return reinterpret_cast<DevPtr>(p);
 }
 
@@ -121,6 +127,10 @@ void NullBackend::free(DevPtr p) {
     {
         std::lock_guard<std::mutex> lk(mu_);
         live_.erase(q);
+        if (const auto it = dev_.find(reinterpret_cast<std::uintptr_t>(q)); it != dev_.end()) {
+            dev_bytes_.fetch_sub(it->second);
+            dev_.erase(it);
+        }
     }
     _aligned_free(q);
 }

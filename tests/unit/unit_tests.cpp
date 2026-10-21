@@ -15,6 +15,10 @@
 #include "whirl/device_mem.h"
 #include "whirl/uma_mem.h"
 #include "whirl/vram_limit.h"
+#include "whirl/wddm_watch.h"
+#include "whirl/pool_budget.h"
+#include "whirl/startup_fit.h"
+#include "whirl/mem_governor.h"
 #include "whirl/value_scope.h"
 #if WHIRL_TEST_DLL_DEPS
 #include "release/dll_deps.h"
@@ -666,15 +670,16 @@ void testCardDefaults() {
         const vram::CardDefaults d = vram::cardDefaults(in);
         CHECK(!d.small && d.parallel == 4 && !d.parallel_auto && d.headroom == 0 && d.note.empty());
     }
-    // 16 GB card (or WHIRL_VRAM_LIMIT_MB=16384 / 14336): 1 slot, 1536 MiB headroom; no KV preference (BAL-Q8)
+    // 16 GB card (or WHIRL_VRAM_LIMIT_MB=16384 / 14336): 1 slot; no KV preference (BAL-Q8); no extra headroom since
+    // 0.2.2.1 (the WDDM margin, 3 GiB with a display attached, covers the desktop)
     for (std::uint64_t t : {16 * GiB, 14336 * MiB, 20 * GiB - 1}) {
         vram::CardInput in;
         in.total = t;
         const vram::CardDefaults d = vram::cardDefaults(in);
         CHECK(d.small && d.parallel == 1 && d.parallel_auto);
-        CHECK_EQ(d.headroom, 1536 * MiB);
+        CHECK_EQ(d.headroom, 0ull);
         CHECK(d.note.find("small card") != std::string::npos && d.note.find("--parallel 1") != std::string::npos &&
-              d.note.find("KV") == std::string::npos && d.note.find("1536 MiB") != std::string::npos);
+              d.note.find("KV") == std::string::npos && d.note.find("WDDM budget margin") != std::string::npos);
     }
     vram::CardInput s16;
     s16.total = 16 * GiB;
@@ -1965,6 +1970,951 @@ void testDllDeps() {
 }
 #endif
 
+// ---------------------------------------------------------------------------
+// WDDM-LOG: runtime video memory watch (formatting, spill thresholds, rate limit, recovery, decode drop)
+void testWddmWatch() {
+    using namespace whirl::wddmwatch;
+    constexpr std::uint64_t MiB = 1ull << 20;
+    auto smp = [&](std::uint64_t used_mib, std::uint64_t budget_mib, std::uint64_t shared_mib, std::uint64_t pinned_mib = 0) {
+        Sample s;
+        s.ok = true;
+        s.local_usage = used_mib * MiB;
+        s.local_budget = budget_mib * MiB;
+        s.nonlocal_usage = shared_mib * MiB;
+        s.pinned = pinned_mib * MiB;
+        return s;
+    };
+    auto has = [](const std::optional<Event>& e, const char* t) { return e && e->text.find(t) != std::string::npos; };
+    const Sample base = smp(29000, 31232, 400);
+    // formatting
+    CHECK_EQ(format(smp(29798, 31232, 412), base), std::string("vram local 29.10 / budget 30.50 GiB, shared 412 MiB (+12 MiB since start)"));
+    CHECK_EQ(format(base, base), std::string("vram local 28.32 / budget 30.50 GiB, shared 400 MiB (+0 MiB since start)"));
+    CHECK_EQ(format(smp(29000, 31232, 397), base), std::string("vram local 28.32 / budget 30.50 GiB, shared 397 MiB (-3 MiB since start)"));
+    CHECK_EQ(format(smp(29000, 31232, 400), Sample{}), std::string("vram local 28.32 / budget 30.50 GiB, shared 400 MiB"));
+    CHECK_EQ(format(Sample{}, base), std::string());
+    {
+        Sample r = smp(29000, 31232, 400, 9318);
+        r.rss = 18636ull * MiB;
+        CHECK_EQ(format(r, base), std::string("vram local 28.32 / budget 30.50 GiB, shared 400 MiB (+0 MiB since start), ram 18.20 GiB (pinned 9.10 GiB)"));
+        r.rss = 0;
+        CHECK_EQ(format(r, Sample{}), std::string("vram local 28.32 / budget 30.50 GiB, shared 400 MiB, pinned ram 9.10 GiB"));
+    }
+
+    // no WDDM numbers: never warns
+    {
+        Watch w(Sample{});
+        CHECK(!w.check(smp(40000, 31232, 9000), 0.0));
+        Watch w2(base);
+        CHECK(!w2.check(Sample{}, 0.0));
+    }
+    // under the budget, growth up to 256 MiB: quiet
+    {
+        Watch w(base);
+        CHECK(!w.check(base, 0.0));
+        CHECK(!w.check(smp(31232, 31232, 400 + 256), 10.0));  // at the budget, exactly +256: no spill
+        CHECK(!w.spilling());
+        CHECK_EQ(w.warnings(), 0u);
+    }
+    // pinned host memory WHIRL allocated later (vision encoder, checkpoints) is not a spill
+    {
+        Watch w(smp(29000, 31232, 400, 2000));
+        CHECK(!w.check(smp(29000, 31232, 400 + 1000, 3000), 0.0));
+        CHECK(w.check(smp(29000, 31232, 400 + 1300, 3000), 0.0).has_value());  // 300 MiB beyond the new pinned memory
+    }
+    // shared growth: warning at the start (all four parts), repeated at most once a minute while it lasts,
+    // INFO when it is over
+    {
+        Watch w(base);
+        const auto a = w.check(smp(29000, 31232, 400 + 300), 100.0);
+        CHECK(a && a->warn);
+        CHECK(a && a->text.rfind("GPU memory spill: WHIRL's shared GPU memory grew by 300 MiB since startup: Windows has likely "
+                                 "moved part of WHIRL's GPU buffers to system RAM", 0) == 0);
+        CHECK(has(a, "Generation slows down if those buffers are used at every step: decode can become several times slower."));
+        CHECK(has(a, "What you can do: close other programs that use the GPU (browsers, games, other AI tools); or restart the "
+                     "server, which sizes the KV pool from the budget at startup, and set WHIRL_POOL_BUDGET_MARGIN_MB=4096 (or "
+                     "more) to keep more room free for other programs."));
+        // review P2-1 / P3-1: never the variable that turns the budget rule off, never --parallel 1
+        CHECK(!has(a, "WHIRL_POOL_RESERVE_MB"));
+        CHECK(!has(a, "--parallel"));
+        CHECK(has(a, "Now: vram local 28.32 / budget 30.50 GiB, shared 700 MiB (+300 MiB since start)"));
+        CHECK(!has(a, "over the Windows"));
+        CHECK(w.spilling());
+        CHECK(!w.check(smp(29000, 31232, 400 + 300), 130.0));  // within the minute
+        CHECK(!w.check(smp(29000, 31232, 400 + 900), 150.0));  // grew, still within the minute
+        const auto b = w.check(smp(29000, 31232, 400 + 900), 160.0);
+        CHECK(b && b->warn);
+        CHECK(b && b->text.rfind("GPU memory spill continues (60 s so far): WHIRL's shared GPU memory grew by 900 MiB", 0) == 0);
+        const auto c = w.check(smp(29000, 31232, 400 + 900), 400.0);
+        CHECK(c && c->text.rfind("GPU memory spill continues (5 min so far): ", 0) == 0);
+        const auto d = w.check(smp(29000, 31232, 400 + 100), 410.0);
+        CHECK(d && !d->warn);
+        CHECK(d && d->text.rfind("GPU memory spill is over (it lasted 5 min): WHIRL's GPU memory is back under the Windows video "
+                                 "memory budget and its shared GPU memory is back within 256 MiB of startup, so decode is no "
+                                 "longer slowed by it. Now: vram local 28.32",
+                                 0) == 0);
+        CHECK(!w.spilling());
+        CHECK(!w.check(smp(29000, 31232, 400 + 100), 420.0));  // one INFO only
+        CHECK_EQ(w.warnings(), 3u);
+    }
+    // local over the budget: named with the amount; a new spill within the minute after the last warning
+    // waits for the minute; one that ends before any warning gets no INFO line
+    {
+        Watch w(base);
+        const auto a = w.check(smp(31300, 31232, 400), 0.0);
+        CHECK(a && a->warn);
+        CHECK(a && a->text.rfind("GPU memory spill: WHIRL's GPU memory is 0.07 GiB over the Windows video memory (WDDM) budget, "
+                                 "so Windows can page part of WHIRL's GPU buffers out of VRAM (this can happen before the shared "
+                                 "GPU memory number grows).",
+                                 0) == 0);
+        CHECK(has(a, "Generation is likely slower now: decode can become several times slower."));
+        CHECK(has(w.check(smp(30000, 31232, 400), 10.0), "GPU memory spill is over (it lasted 10 s)"));
+        CHECK(!w.check(smp(31300, 31232, 400), 20.0));  // new spill, 20 s after the last warning: held
+        CHECK(!w.check(smp(30000, 31232, 400), 30.0));  // over before it was reported: no INFO
+        CHECK(!w.check(smp(31300, 31232, 400), 40.0));
+        const auto b = w.check(smp(31300, 31232, 400), 61.0);
+        CHECK(b && b->text.rfind("GPU memory spill: ", 0) == 0);  // a new spill, not "continues"
+        CHECK_EQ(w.warnings(), 2u);
+    }
+    // over the budget and grown: both in one sentence
+    {
+        Watch w(base);
+        const auto a = w.check(smp(31300, 31232, 1000), 0.0);
+        CHECK(has(a, "GPU memory spill: WHIRL's GPU memory is 0.07 GiB over the Windows video memory (WDDM) budget, and Windows "
+                     "has likely moved part of WHIRL's GPU buffers to system RAM (shared GPU memory +600 MiB since startup)."));
+        CHECK(has(a, "Generation is likely slower now"));
+    }
+    // the KV pool size in the advice (review P3-3), other programs' VRAM note
+    {
+        Config c;
+        c.pool_tokens = 334080;
+        Watch w(base, c);
+        const auto a = w.check(smp(31300, 31232, 400), 0.0);
+        CHECK(has(a, "or restart the server, which sizes the KV pool (the KV pool is now 334080 tokens) from the budget at startup"));
+        CHECK_EQ(othersNote(Others{3328 * MiB, 205 * MiB}),
+                 std::string(" Other programs use 3.25 GiB of VRAM on this GPU now (0.20 GiB when the server started)."));
+        CHECK_EQ(othersNote(Others{1024 * MiB, std::nullopt}), std::string(" Other programs use 1.00 GiB of VRAM on this GPU now."));
+    }
+    // a spill already present at startup is seen against the sizing-time baseline (review P3-4): the server passes
+    // the read the pool was sized from, not a sample taken after everything was allocated
+    {
+        const Sample sized = smp(17640, 31760, 13692, 13576);       // before the pool: embedding + RAM tier pinned
+        Watch w(sized);
+        CHECK(w.check(smp(30260, 31760, 13692 + 600, 13576), 0.0).has_value());  // 600 MiB demoted while starting
+        Watch ok(sized);
+        CHECK(!ok.check(smp(30260, 31760, 13692 + 300, 13576 + 300), 0.0));     // 300 MiB pinned checkpoints (WHIRL_CKPT_HOST=1)
+    }
+    // config defaults (the server uses them: 256 MiB, 60 s)
+    {
+        Config c;
+        CHECK_EQ(c.grow_warn, 256 * MiB);
+        CHECK(c.min_gap_s == 60.0);
+    }
+
+    // decode speed drop within a request
+    {
+        DecodeWatch d;
+        CHECK(!d.report(100, 1000.0, 25, false));  // before the early window (200 tokens)
+        CHECK(!d.report(200, 2000.0, 50, false));  // early: 100 tok/s, 40 ms per cycle
+        CHECK(!d.report(300, 3000.0, 75, false));  // 1 s window: too short to judge, keeps growing
+        CHECK(!d.report(400, 4500.0, 100, false));  // 2.5 s window at 80 tok/s: -20%, fine
+        const auto a = d.report(500, 7000.0, 125, true);  // 100 tok in 2.5 s = 40 tok/s, 100 ms per cycle, spill seen
+        CHECK(a && a->warn);
+        CHECK(a && a->text == "decode slowed from 100.0 to 40.0 tok/s (60% slower than early in this request; 40.0 -> 100.0 ms "
+                              "per decode cycle), likely because of the GPU memory spill above");
+        CHECK(!d.report(600, 10000.0, 150, true));  // once per request
+        d.reset();
+        CHECK(!d.report(200, 2000.0, 50, false));
+        const auto b = d.report(300, 6000.0, 150, false);  // 25 tok/s at the same 40 ms per cycle: fewer tokens per cycle
+        CHECK(b && !b->warn);
+        CHECK(b && b->text == "decode slowed from 100.0 to 25.0 tok/s (75% slower than early in this request; 40.0 -> 40.0 ms per "
+                              "decode cycle); each cycle is not slower: fewer tokens per cycle (fewer drafts accepted)");
+        DecodeWatch e;
+        CHECK(!e.report(200, 2000.0, 0, false));
+        const auto c = e.report(300, 5000.0, 0, false);  // no cycle numbers
+        CHECK(c && c->text == "decode slowed from 100.0 to 33.3 tok/s (67% slower than early in this request); no GPU memory spill is seen");
+        DecodeWatch f;
+        CHECK(!f.report(200, 2000.0, 50, false));
+        CHECK(!f.report(300, 3600.0, 75, false));  // 62.5 tok/s: -37.5%, under the 40% line
+        // review P3-5: a spill while each cycle is NOT slower is not blamed (draft acceptance fell)
+        DecodeWatch g;
+        CHECK(!g.report(200, 2000.0, 50, true));
+        const auto gs = g.report(300, 6000.0, 150, true);
+        CHECK(gs && !gs->warn);
+        CHECK(gs && gs->text == "decode slowed from 100.0 to 25.0 tok/s (75% slower than early in this request; 40.0 -> 40.0 ms per "
+                                "decode cycle); each cycle is not slower: fewer tokens per cycle (fewer drafts accepted), not the "
+                                "GPU memory spill");
+        // another request prefilled in the window (--parallel >= 2), no spill: named as the likely cause
+        DecodeWatch q;
+        CHECK(!q.report(200, 2000.0, 50, false, 1000));
+        const auto qs = q.report(300, 7000.0, 75, false, 9192);  // 100 tok in 5 s, 200 ms per cycle; 8192 prefill tokens since
+        CHECK(qs && !qs->warn);
+        CHECK(qs && qs->text == "decode slowed from 100.0 to 20.0 tok/s (80% slower than early in this request; 40.0 -> 200.0 ms per "
+                                "decode cycle); no GPU memory spill is seen; another request's prefill shared the GPU in this window "
+                                "(with --parallel 2 or more, prefill chunks run between decode cycles)");
+        // both: the spill is named, the prefill too
+        DecodeWatch r;
+        CHECK(!r.report(200, 2000.0, 50, true, 0));
+        const auto rs = r.report(300, 7000.0, 75, true, 4096);
+        CHECK(rs && rs->warn);
+        CHECK(rs && rs->text.find(", likely because of the GPU memory spill above; also, another request's prefill shared the GPU") !=
+                        std::string::npos);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// issue #5: KV pool re-fit to the WDDM budget read after the pool is allocated
+void testPoolBudget() {
+    using whirl::poolbudget::fitPool;
+    constexpr std::uint64_t MiB = 1ull << 20;
+    constexpr double GiB = 1073741824.0;
+    auto gib = [&](double g) { return static_cast<std::uint64_t>(g * GiB); };
+    const std::uint64_t per_tok = 36966;  // 36.1 KiB/token (q8h KV, Swift-1.5 27B), as in the issue #5 log
+    const std::uint32_t page = 256;
+    const std::uint64_t margin = 768 * MiB;
+    // the user's numbers: sized with budget 31.02 GiB, used 17.64 GiB -> room 12.63 GiB -> pool 366592 tokens
+    const std::uint64_t room = gib(31.02) - gib(17.64) - margin;
+    const std::uint32_t pool0 = static_cast<std::uint32_t>(room / per_tok / page * page);
+    CHECK(pool0 >= 366080 && pool0 <= 367104);  // within two pages of the log's 366592 (rounded GiB figures)
+    // with the pool allocated: local 29.92 GiB, budget 29.55 GiB (after pinning) -> must shrink
+    {
+        const auto t = fitPool(pool0, gib(29.92), gib(29.55), margin, per_tok, page, 4096);
+        CHECK(t.shrink);
+        CHECK(!t.at_floor);
+        CHECK_EQ(t.pool_tokens % page, 0u);
+        CHECK(t.over == gib(29.92) + margin - gib(29.55));
+        // after freeing the dropped pages, local + margin fits under the post-pin budget
+        const std::uint64_t freed = static_cast<std::uint64_t>(pool0 - t.pool_tokens) * per_tok;
+        CHECK(gib(29.92) - freed + margin <= gib(29.55));
+        // and not more than one page beyond what is needed
+        CHECK(gib(29.92) - freed + margin + page * per_tok > gib(29.55));
+        std::printf("pool budget: issue #5 numbers: pool %u -> %u tokens (%.2f -> %.2f GiB)\n", pool0, t.pool_tokens,
+                    pool0 * static_cast<double>(per_tok) / GiB, t.pool_tokens * static_cast<double>(per_tok) / GiB);
+    }
+    // fits: no change (also exactly at the line)
+    {
+        const auto t = fitPool(pool0, gib(29.00), gib(31.02), margin, per_tok, page, 4096);
+        CHECK(!t.shrink);
+        CHECK_EQ(t.over, 0u);
+        CHECK_EQ(t.pool_tokens, pool0);
+        const auto e = fitPool(pool0, gib(29.00), gib(29.00) + margin, margin, per_tok, page, 4096);
+        CHECK(!e.shrink);
+    }
+    // budget unknown: no change
+    CHECK(!fitPool(pool0, gib(40.0), 0, margin, per_tok, page, 4096).shrink);
+    // far over: kept at the smallest pool, flagged
+    {
+        const auto t = fitPool(65536, gib(40.0), gib(20.0), margin, per_tok, page, 4096);
+        CHECK(t.shrink);
+        CHECK(t.at_floor);
+        CHECK_EQ(t.pool_tokens, 4096u);
+        const auto u = fitPool(4096, gib(40.0), gib(20.0), margin, per_tok, page, 4096);  // already there
+        CHECK(!u.shrink);
+        CHECK(u.at_floor);
+        CHECK(u.over > 0);
+    }
+    // one byte over: one page less
+    {
+        const auto t = fitPool(8192, gib(10.0) + 1, gib(10.0) + margin, margin, per_tok, page, 4096);
+        CHECK_EQ(t.pool_tokens, 8192u - page);
+    }
+    // the shrink loop guard: another round only when the last free really lowered the local usage
+    {
+        using whirl::poolbudget::usageFell;
+        const std::uint64_t freed = gib(1.0);
+        CHECK(usageFell(gib(30.0), gib(29.0), freed));
+        CHECK(usageFell(gib(30.0), gib(29.5), freed));      // half: enough (WDDM counts in its own granularity)
+        CHECK(!usageFell(gib(30.0), gib(29.6), freed));     // stale counter: stop
+        CHECK(!usageFell(gib(30.0), gib(30.0), freed));
+        CHECK(!usageFell(gib(30.0), gib(30.2), freed));
+    }
+}
+
+// v0.2.2.1 default WDDM budget margin (owner 2026-10-21): other processes' VRAM the budget does not show yet + room
+void testPoolMargin() {
+    using namespace whirl::poolbudget;
+    constexpr std::uint64_t MiB = 1ull << 20;
+    auto m = [&](std::uint64_t budget_mib, std::uint64_t start_mib, bool display, bool known, std::uint64_t others_mib) {
+        MarginIn in;
+        in.local_budget = budget_mib * MiB;
+        in.budget_start = start_mib * MiB;
+        in.display = display;
+        in.others_known = known;
+        in.others = others_mib * MiB;
+        return defaultMargin(in);
+    };
+    // R9700 headless, nothing else on it: budget 31.02 GiB, 6% = 1906 MiB < the 2048 floor
+    {
+        const Margin r = m(31764, 31764, false, true, 0);
+        CHECK_EQ(r.bytes, 2048 * MiB);
+        CHECK_EQ(r.room, 2048 * MiB);
+        CHECK_EQ(r.pending, 0ull);
+        CHECK(r.why.rfind("2048 MiB room (no display on this GPU)", 0) == 0);
+    }
+    // the hog test: another process holds 3307 MiB, the budget does not show it yet -> counted, plus the room
+    {
+        const Margin r = m(31764, 31764, false, true, 3307);
+        CHECK_EQ(r.pending, 3307 * MiB);
+        CHECK_EQ(r.bytes, (3307 + 2048) * MiB);
+        CHECK(r.why.find("+ 3307 MiB of the 3307 MiB other processes use that the budget does not show yet") != std::string::npos);
+    }
+    // ... after the pool was allocated the budget dropped 2.94 GiB (31.02 -> 28.08): only the rest is still pending
+    {
+        const Margin r = m(28754, 31764, false, true, 3307);
+        CHECK_EQ(r.pending, (3307 - (31764 - 28754)) * MiB);
+        CHECK(r.why.find("(it dropped 3010 MiB since startup)") != std::string::npos);
+        // dropped more than the others used: never negative, never counted twice
+        CHECK_EQ(m(24000, 31764, false, true, 3307).pending, 0ull);
+    }
+    // a monitor on the card: 3072 MiB room
+    CHECK_EQ(m(31764, 31764, true, true, 0).room, 3072 * MiB);
+    CHECK(m(31764, 31764, true, true, 0).why.find("display is attached") != std::string::npos);
+    // a large card: 6% of the budget (48 GiB budget: 2949.12 -> 2950 MiB)
+    {
+        const Margin r = m(49152, 49152, false, true, 0);
+        CHECK_EQ(r.room, 2950 * MiB);
+        CHECK(r.why.rfind("2950 MiB room (6% of the 49152 MiB budget)", 0) == 0);
+    }
+    // counters unreadable: the budget-only rule, said so
+    {
+        const Margin r = m(31764, 31764, false, false, 99999);
+        CHECK_EQ(r.bytes, 2048 * MiB);
+        CHECK(r.why.find("other processes' VRAM unknown") != std::string::npos);
+    }
+    // budget at start unknown: treated as now (nothing dropped)
+    CHECK_EQ(m(31764, 0, false, true, 1000).pending, 1000 * MiB);
+    // WHIRL_POOL_BUDGET_MARGIN_MB sets the room; pending is still counted
+    {
+        MarginIn in;
+        in.local_budget = 31764 * MiB;
+        in.budget_start = 31764 * MiB;
+        in.others_known = true;
+        in.others = 500 * MiB;
+        in.room_override = 4096 * MiB;
+        const Margin r = defaultMargin(in);
+        CHECK_EQ(r.room, 4096 * MiB);
+        CHECK_EQ(r.bytes, (4096 + 500) * MiB);
+        CHECK(r.why.rfind("4096 MiB room (WHIRL_POOL_BUDGET_MARGIN_MB)", 0) == 0);
+    }
+    // whole MiB
+    CHECK_EQ(m(31764, 31764, false, true, 1).bytes % MiB, 0ull);
+}
+
+// v0.2.2.2 runtime memory governor: decisions with injected budgets (R9700-like numbers: Swift balance 36966 B/token,
+// pool 330240 tokens = 11.37 GiB, margin 2048 MiB)
+void testMemGovernor() {
+    using namespace whirl::memgov;
+    constexpr std::uint64_t MiB = 1ull << 20, GiB = 1ull << 30;
+    Config c;
+    c.per_tok = 36966;
+    c.page = 256;
+    c.pool_start = 330240;
+    c.pool_min = 4096;
+    c.ctx = 131072;
+    c.recover_s = 30;
+    c.hold_s = 60;
+    const std::uint64_t M = 2048 * MiB;
+    const std::uint64_t B0 = 31764 * MiB;          // budget at startup
+    const std::uint64_t L0 = B0 - M - 300 * MiB;   // sized with the margin (+ rounding)
+    auto in = [&](double t, std::uint64_t local, std::uint64_t budget, std::uint32_t pool, bool idle, std::uint64_t parked = 0,
+                  std::uint64_t freeable = 0) {
+        Input x;
+        x.now_s = t;
+        x.local = local;
+        x.budget = budget;
+        x.margin = M;
+        x.pool = pool;
+        x.all_idle = idle;
+        x.parked = parked;
+        x.freeable = freeable;
+        return x;
+    };
+    // normal runs: the budget wiggles by up to 1 GiB: never an action
+    {
+        Governor g(c);
+        for (int i = 0; i < 200; ++i) {
+            const std::uint64_t b = B0 - static_cast<std::uint64_t>((i * 37) % 1000) * MiB;
+            const Plan p = g.tick(in(i * 5.0, L0, b, 330240, i % 3 == 0));
+            CHECK(!p.free_cache && !p.pool_target && !p.hold_admission && !p.warn_slow && !p.episode_start);
+            CHECK_EQ(p.ctx_new, 131072u);
+        }
+        CHECK(!g.reduced());
+    }
+    // drop mid-run: another program takes 4 GiB while a request runs
+    Governor g(c);
+    {
+        const std::uint64_t B1 = B0 - 4 * GiB;
+        Plan p = g.tick(in(100, L0, B1, 330240, false, 0, 600 * MiB));
+        CHECK(p.episode_start && p.free_cache && p.ram_tier_note && p.hold_admission && p.shrink && p.warn_slow);
+        CHECK(p.pool_target.has_value());
+        // the deficit (local + margin - budget = 4096 - 300 MiB) in whole pages
+        const std::uint64_t def = L0 + M - B1;
+        const std::uint32_t pages = static_cast<std::uint32_t>((def + 36966ull * 256 - 1) / (36966ull * 256));
+        CHECK_EQ(*p.pool_target, 330240u - pages * 256);
+        CHECK_EQ(p.ctx_new, 131072u);  // the smaller pool still holds 131072
+        // still running, 600 MiB of checkpoint buffers parked by step 1: same target (the parked buffers come back after)
+        p = g.tick(in(105, L0 - 600 * MiB, B1, 330240, false, 600 * MiB));
+        CHECK(!p.episode_start && !p.ram_tier_note && p.hold_admission);
+        CHECK_EQ(*p.pool_target, 330240u - pages * 256);
+        // the request ends: every slot idle -> the target is applied by the engine
+        p = g.tick(in(110, L0 - 600 * MiB, B1, 330240, true, 600 * MiB));
+        CHECK(p.shrink && !p.hold_admission && !p.warn_slow);
+        const std::uint32_t small = *p.pool_target;
+        g.resized(small, false, 110);
+        CHECK_EQ(g.shrinks(), 1u);
+        // after the re-allocation and the parked buffers' return: the full margin free, no further action
+        const std::uint64_t L1 = L0 - static_cast<std::uint64_t>(330240 - small) * 36966;
+        for (int i = 0; i < 20; ++i) {
+            p = g.tick(in(115 + i * 5.0, L1, B1, small, i % 2 == 0));
+            CHECK(!p.pool_target && !p.free_cache && !p.hold_admission);
+        }
+        CHECK(B1 - L1 >= M);
+        CHECK(g.reduced());
+        // recovery: the other program exits; nothing before recover_s (30 s) of room and hold (60 s after the last trigger)
+        const std::uint64_t B2 = B0;
+        bool grew = false;
+        double t_grow = 0;
+        for (double t = 220; t < 400 && !grew; t += 5) {
+            p = g.tick(in(t, L1, B2, small, true));
+            if (p.pool_target) {
+                grew = true;
+                t_grow = t;
+                CHECK(*p.pool_target > small);
+                CHECK(*p.pool_target <= 330240u);
+                g.resized(*p.pool_target, true, t);
+            }
+        }
+        CHECK(grew);
+        CHECK(t_grow >= 220 + 30);
+        // grown back to the startup pool: the episode ends at the next sample
+        p = g.tick(in(t_grow + 5, L0, B2, 330240, true));
+        CHECK(p.episode_end);
+        CHECK(!g.reduced());
+        CHECK_EQ(g.grows(), 1u);
+        // no grow while a request runs
+        Governor h(c);
+        h.tick(in(0, L0, B1, 330240, true));
+        h.resized(small, false, 0);
+        for (double t = 5; t < 300; t += 5) CHECK(!h.tick(in(t, L1, B2, small, false)).pool_target.has_value());
+    }
+    // the context for new requests follows a pool smaller than ctx (8 GiB taken from a 5 GiB pool's server)
+    {
+        Config c2 = c;
+        c2.pool_start = 147456;  // 5.08 GiB
+        Governor g2(c2);
+        const std::uint64_t L = B0 - M - 100 * MiB;
+        const Plan p = g2.tick(in(0, L, B0 - 4 * GiB, 147456, false));
+        CHECK(p.shrink && p.ctx_new == *p.pool_target && p.ctx_new < 131072u);
+        CHECK(p.ctx_new >= 4096u);
+        // more than the pool can give: the smallest pool, never below pool_min
+        const Plan q = g2.tick(in(5, L, B0 - 12 * GiB, 147456, true));
+        CHECK(q.shrink && *q.pool_target == 4096u);
+    }
+    // repeated oscillation (another program starts and exits every 40 s for an hour): the hysteresis and the doubling
+    // hold keep re-allocations rare
+    {
+        Governor g3(c);
+        std::uint32_t pool = 330240;
+        std::uint32_t resizes = 0;
+        for (double t = 0; t < 3600; t += 5) {
+            const bool hog = static_cast<int>(t / 40) % 2 == 1;
+            const std::uint64_t b = hog ? B0 - 4 * GiB : B0;
+            const std::uint64_t local = L0 - static_cast<std::uint64_t>(330240 - pool) * 36966;
+            const Plan p = g3.tick(in(t, local, b, pool, true));
+            if (p.pool_target) {
+                g3.resized(*p.pool_target, *p.pool_target > pool, t);
+                pool = *p.pool_target;
+                ++resizes;
+            }
+        }
+        // every 40 s an episode would be 90 changes; the hold (60 s, doubling up to 15 min) caps it
+        CHECK(resizes <= 20u);
+        CHECK(g3.hold() > 60.0);
+        CHECK(g3.shrinks() >= 1u);
+        // REVIEW-GOV-1 P3-1: after quiet_reset_s (30 min) without an over-budget sample the doubled hold goes back to hold_s
+        for (double t = 3600; t < 3600 + 1900; t += 5) {
+            const Plan p = g3.tick(in(t, L0 - static_cast<std::uint64_t>(330240 - pool) * 36966, B0, pool, true));
+            if (p.pool_target) {
+                g3.resized(*p.pool_target, *p.pool_target > pool, t);
+                pool = *p.pool_target;
+            }
+        }
+        CHECK_EQ(pool, 330240u);
+        g3.tick(in(5600, L0, B0 - 4 * GiB, 330240, true));
+        CHECK(g3.hold() <= 60.0);
+    }
+    // lagging WDDM counters after a re-allocation (R9700 S1, 2026-10-21: a 4.8 GiB grow first read +8.1 GiB, so the governor
+    // shrank right back): within trust_s the usage counts as at most the expected one; afterwards the measured one
+    {
+        Governor g5(c);
+        const std::uint64_t B1 = B0 - 4 * GiB;
+        Plan p = g5.tick(in(0, L0, B1, 330240, true));
+        CHECK(p.shrink);
+        const std::uint32_t small = *p.pool_target;
+        const std::uint64_t L1 = L0 - static_cast<std::uint64_t>(330240 - small) * 36966;
+        g5.resized(small, false, 0, L1);
+        // the free shows only partly (1.8 GiB still counted): no second shrink while the counters catch up
+        for (double t = 5; t < 120; t += 5) CHECK(!g5.tick(in(t, L1 + 1843 * MiB, B1, small, true)).pool_target.has_value());
+        // a real further drop after the window (trust_s, 120 s) is still acted on
+        p = g5.tick(in(125, L1 + 1843 * MiB, B1, small, true));
+        CHECK(p.shrink);
+        // a grow that first reads too high (stale old pool) but leaves more than half the margin free is not shrunk back
+        // within the window (REVIEW-GOV-2 C-1 / REVIEW-GOV-3 C-2: a reading inside the trigger band after a grow is a real
+        // overshoot and is acted on, see testMemGovernorGrowOvershoot; this case used L0 + 3 GiB, 0.7 GiB over the budget,
+        // before the C-1 fix, and L0 + 2 GiB, inside the trigger band, before the C-2 fix)
+        Governor g6(c);
+        g6.tick(in(0, L0, B1, 330240, true));
+        g6.resized(small, false, 0, L1);
+        g6.resized(330240, true, 200, L0);
+        for (double t = 205; t < 220; t += 5) CHECK(!g6.tick(in(t, L0 + 1 * GiB, B0, 330240, true)).pool_target.has_value());
+        CHECK(L0 + 1 * GiB + M / 2 < B0);  // 1 GiB high, but more than half the margin still free (outside the trigger band)
+        // growDenied restarts the recovery time
+        Governor g7(c);
+        g7.tick(in(0, L0, B1, 330240, true));
+        g7.resized(small, false, 0, L1);
+        bool asked = false;
+        double t_ask = 0;
+        for (double t = 100; t < 300 && !asked; t += 5)
+            if (g7.tick(in(t, L1, B0, small, true)).pool_target) {
+                asked = true;
+                t_ask = t;
+            }
+        CHECK(asked);
+        g7.growDenied(t_ask);
+        CHECK(!g7.tick(in(t_ask + 5, L1, B0, small, true)).pool_target.has_value());
+        CHECK(g7.tick(in(t_ask + 35, L1, B0, small, true)).pool_target.has_value());
+    }
+    // a grow within trust_s is sized from the larger of measured and expected usage (R9700 S1c: sized from the expected
+    // one, 0.86 GiB under the measured, it overshot and was shrunk back)
+    {
+        const std::uint64_t B1 = B0 - 4 * GiB;
+        auto growTarget = [&](std::uint64_t measured_extra) {
+            Governor g8(c);
+            const Plan p0 = g8.tick(in(0, L0, B1, 330240, true));
+            const std::uint32_t small = *p0.pool_target;
+            const std::uint64_t L1 = L0 - static_cast<std::uint64_t>(330240 - small) * 36966;
+            g8.resized(small, false, 0, L1);
+            for (double t = 5; t < 110; t += 5) {
+                const Plan p = g8.tick(in(t, L1 + measured_extra, B0, small, true));
+                if (p.pool_target) return *p.pool_target - small;
+            }
+            return 0u;
+        };
+        const std::uint32_t a = growTarget(0), b = growTarget(880 * MiB);
+        CHECK(a > 0u && b > 0u && b < a);
+        CHECK(static_cast<std::uint64_t>(a - b) * 36966 >= 800 * MiB);
+    }
+    // REVIEW-GOV-1 P2-1: with the budget back at its startup value the episode really ends: the pool grows back to its startup
+    // size and new requests get the startup context again. Driven by the governor's own targets (no hand-set pool), with
+    // the R9700 S2 numbers (Ornith, budget 31.02 GiB, margin 2068 MiB, startup sized with exactly the margin free) and the
+    // 0.19 GiB that usage outside the pool grew by after the episode in those runs
+    {
+        Config r;
+        r.per_tok = 22528;
+        r.page = 256;
+        r.pool_start = 393984;
+        r.pool_min = 4096;
+        r.ctx = 393984;  // --parallel 1 on a card where the context per request is the whole pool
+        const std::uint64_t Mr = 2068 * MiB, Br = 31764 * MiB, Lr0 = Br - Mr, drift = 195 * MiB;
+        auto inr = [&](double t, std::uint64_t local, std::uint64_t budget, std::uint32_t pool) {
+            Input x;
+            x.now_s = t;
+            x.local = local;
+            x.budget = budget;
+            x.margin = Mr;
+            x.pool = pool;
+            x.all_idle = true;
+            return x;
+        };
+        auto usage = [&](std::uint32_t pool, std::uint64_t extra) {
+            return Lr0 - static_cast<std::uint64_t>(393984 - pool) * 22528 + extra;
+        };
+        // run the episode: budget drop of 4 GiB at t=0, back to Br at t_back; returns the pool at the end
+        auto episode = [&](Governor& g, std::uint64_t b_back, double t_back, double t_end, bool& ended) {
+            std::uint32_t pool = 393984;
+            ended = false;
+            for (double t = 0; t < t_end; t += 5) {
+                const std::uint64_t b = t < t_back ? Br - 4 * GiB : b_back;
+                const Plan p = g.tick(inr(t, usage(pool, t >= 5 ? drift : 0), b, pool));
+                if (p.episode_end) ended = true;
+                if (p.pool_target) {
+                    const std::uint32_t np = *p.pool_target;
+                    g.resized(np, np > pool, t, usage(np, 0));
+                    pool = np;
+                }
+            }
+            return pool;
+        };
+        Governor g(r);
+        bool ended = false;
+        const std::uint32_t pool = episode(g, Br, 300, 1200, ended);
+        CHECK_EQ(g.shrinks(), 1u);
+        CHECK_EQ(g.grows(), 1u);  // one grow, straight back
+        CHECK_EQ(pool, 393984u);
+        CHECK(ended);
+        CHECK(!g.reduced());
+        CHECK_EQ(g.ctxNew(), 393984u);
+        // stable afterwards: an hour of samples at the startup budget with the drift: no action
+        for (double t = 1200; t < 4800; t += 5) {
+            const Plan p = g.tick(inr(t, usage(393984, drift), Br, 393984));
+            CHECK(!p.pool_target && !p.free_cache && !p.episode_start);
+        }
+        // the budget comes back only partly (1 GiB still taken): the startup pool would leave less than endMargin free, so
+        // the pool grows only part way and new requests keep the smaller context (no spill risk taken)
+        Governor h(r);
+        bool ended_h = false;
+        const std::uint32_t pool_h = episode(h, Br - 1 * GiB, 300, 1200, ended_h);
+        CHECK(!ended_h);
+        CHECK(h.reduced());
+        CHECK(pool_h < 393984u);
+        CHECK_EQ(h.ctxNew(), pool_h);
+        CHECK(Br - 1 * GiB >= usage(pool_h, drift) + Mr);  // the full margin stays free
+    }
+    // unknown budget: nothing
+    {
+        Governor g4(c);
+        CHECK(!g4.tick(in(0, L0, 0, 330240, true)).free_cache);
+    }
+    // the status object
+    {
+        Status st;
+        st.on = true;
+        st.reduced = true;
+        st.pool_tokens = 218112;
+        st.pool_tokens_start = 330240;
+        st.ctx_per_request = 131072;
+        st.slots = 1;
+        st.slots_admitting = 1;
+        st.last_action = "pool 330240 -> \"218112\"";
+        const std::string j = statusJson(st);
+        CHECK(j.find("{\"on\":true,\"reduced\":true,\"pool_tokens\":218112,\"pool_tokens_start\":330240,\"ctx_per_request\":131072,") == 0);
+        CHECK(j.find("\"last_action\":\"pool 330240 -> \\\"218112\\\"\"}") != std::string::npos);
+    }
+}
+
+// REVIEW-GOV-2 C-1: a grow that costs more than expected (R9700 Swift R2b_nolim1 19:14:48: WHIRL 25.87 -> 32.50 GiB with
+// the budget at 31.02 GiB, the HIP resource cache kept the freed pool) leaves WHIRL over the budget. The governor must not
+// report the end of the episode ("back to the startup settings") while the measured usage is over the budget, and must act
+// on it at once instead of trusting the expected usage for trust_s (120 s: the next episode started 115 s later).
+// Written from the review's description, before the fix.
+void testMemGovernorGrowOvershoot() {
+    using namespace whirl::memgov;
+    constexpr std::uint64_t MiB = 1ull << 20, GiB = 1ull << 30;
+    Config r;
+    r.per_tok = 22528;
+    r.page = 256;
+    r.pool_start = 393984;
+    r.pool_min = 4096;
+    r.ctx = 393984;
+    const std::uint64_t Mr = 2068 * MiB, Br = 31764 * MiB, Lr0 = Br - Mr;
+    auto usage = [&](std::uint32_t pool) { return Lr0 - static_cast<std::uint64_t>(393984 - pool) * 22528; };
+    auto inr = [&](double t, std::uint64_t local, std::uint64_t budget, std::uint32_t pool) {
+        Input x;
+        x.now_s = t;
+        x.local = local;
+        x.budget = budget;
+        x.margin = Mr;
+        x.pool = pool;
+        x.all_idle = true;
+        return x;
+    };
+    // overshoot: what the grow costs above the expected usage, kept until the next re-allocation
+    double t_band_end = -1;  // episode_end while inside the trigger band (less than margin/2 free), REVIEW-GOV-3 C-2
+    auto run = [&](std::uint64_t overshoot, double& t_grow, double& t_act, double& t_bad_end, std::uint64_t& measured_after) {
+        Governor g(r);
+        std::uint32_t pool = 393984;
+        bool grown = false;
+        t_grow = t_act = t_bad_end = t_band_end = -1;
+        measured_after = 0;
+        for (double t = 0; t < 1200; t += 5) {
+            const std::uint64_t b = t < 300 ? Br - 4 * GiB : Br;
+            const std::uint64_t measured = usage(pool) + (grown ? overshoot : 0);
+            const Plan p = g.tick(inr(t, measured, b, pool));
+            if (grown) {
+                if (p.episode_end && measured > b && t_bad_end < 0) t_bad_end = t;
+                if (p.episode_end && measured + Mr / 2 > b && t_band_end < 0) t_band_end = t;
+                if ((p.free_cache || p.shrink || p.episode_start) && t_act < 0) t_act = t;
+                if (t_act >= 0) break;
+            }
+            if (p.pool_target) {
+                const std::uint32_t np = *p.pool_target;
+                g.resized(np, np > pool, t, usage(np));
+                if (np > pool && !grown) {
+                    grown = true;
+                    t_grow = t;
+                    measured_after = usage(np) + overshoot;
+                }
+                pool = np;
+            }
+        }
+    };
+    // the measured R2b_nolim1 case: after the grow WHIRL is 1.48 GiB over the budget
+    {
+        const std::uint64_t over = Mr + 1515 * MiB;  // expected leaves the margin free; measured = budget + 1.48 GiB
+        double t_grow, t_act, t_bad_end;
+        std::uint64_t m;
+        run(over, t_grow, t_act, t_bad_end, m);
+        std::printf("C-1 overshoot: grow at t=%.0f, measured after it %.2f GiB vs budget %.2f GiB; episode_end while over the "
+                    "budget at t=%.0f; first action after the grow at t=%.0f (%.0f s after it)\n",
+                    t_grow, m / double(GiB), Br / double(GiB), t_bad_end, t_act, t_act >= 0 ? t_act - t_grow : -1.0);
+        CHECK(t_grow > 0);
+        CHECK(m > Br);
+        CHECK(t_bad_end < 0);                                   // no "back to the startup settings" while over the budget
+        CHECK(t_act > 0 && t_act - t_grow <= r.settle_s + 10);  // acted on within the next samples, not after trust_s
+    }
+    // REVIEW-GOV-3 C-2: a grow that costs 1.52 GiB more than expected lands under the budget but inside the trigger band
+    // (500 MiB free, the trigger is at margin/2 = 1034 MiB): it must be acted on at once too, not min()-masked for trust_s
+    // with the episode end logged and a new episode ~117 s later (the review's probe: episode_end t=233, episode_start t=350)
+    {
+        const std::uint64_t over = Mr - 500 * MiB;  // measured 500 MiB under the budget
+        double t_grow, t_act, t_bad_end;
+        std::uint64_t m;
+        run(over, t_grow, t_act, t_bad_end, m);
+        std::printf("C-2 overshoot in the trigger band: grow at t=%.0f, measured after it %.2f GiB vs budget %.2f GiB "
+                    "(trigger at %.2f GiB); episode_end inside the band at t=%.0f; first action after the grow at t=%.0f "
+                    "(%.0f s after it)\n",
+                    t_grow, m / double(GiB), Br / double(GiB), (Br - Mr / 2) / double(GiB), t_band_end, t_act,
+                    t_act >= 0 ? t_act - t_grow : -1.0);
+        CHECK(t_grow > 0);
+        CHECK(m < Br && m + Mr / 2 > Br);                       // under the budget, inside the trigger band
+        CHECK(t_band_end < 0);                                  // no "back to the startup settings" inside the band
+        CHECK(t_act > 0 && t_act - t_grow <= r.settle_s + 10);  // acted on within the next samples, not after trust_s
+    }
+    // control: a grow whose reading is high but leaves more than half the margin free (counters catching up) is not acted
+    // on within trust_s (this control read 300 MiB under the budget, inside the trigger band, before the C-2 fix)
+    {
+        const std::uint64_t over = Mr - 1300 * MiB;  // measured 1300 MiB under the budget, 266 MiB outside the band
+        double t_grow, t_act, t_bad_end;
+        std::uint64_t m;
+        run(over, t_grow, t_act, t_bad_end, m);
+        CHECK(t_grow > 0);
+        CHECK(m + Mr / 2 < Br);
+        CHECK(t_bad_end < 0);
+        CHECK(t_act < 0 || t_act - t_grow >= r.trust_s - 5);  // not shrunk back while the counters may lag
+    }
+}
+
+// REVIEW-GOV-3 question 4 (R9700 Ornith --mmproj, gov3 orn_new3): startup left exactly the margin free (29696 MiB local,
+// budget 31767 MiB, margin 2068 MiB); the first image added 873 MiB (encoder weights, 860.5 MiB pinned, made resident) and a
+// 1920x1080 image 134 MiB more (activations that did not fit the lent prefill scratch), so 30 MiB were left before the
+// governor's trigger (margin/2 free) and a false episode could never end. With --mmproj the startup KV pool must leave room
+// for what the encoder adds; without it (text only) the pool must be exactly what it was. Written before the fix.
+void testVisionPoolReserve() {
+    using namespace whirl;
+    namespace nu = whirl::numerics;
+    constexpr std::uint64_t KiB = 1ull << 10, MiB = 1ull << 20;
+    const std::uint64_t per_tok = 22528;                   // Ornith MXFP4 KV bytes per token
+    const std::uint64_t avail = 8468 * MiB;                // orn_new3: room 8.27 GiB (budget - used - margin)
+    const std::uint64_t added = 873 * MiB + 134 * MiB;     // measured local usage the encoder added (orn_new3 health)
+    poolbudget::VisionVram vv;
+    vv.weights = 860 * MiB + 512 * KiB;                    // the mmproj's weights (the startup log's pinned MiB)
+    vv.act_extra = 134 * MiB;                              // beyond the lent scratch (the 1920x1080 step)
+    const std::uint64_t r = poolbudget::visionReserve(vv);
+    const nu::PoolFit text = nu::serverPoolFit(avail, per_tok, std::nullopt, false, 131072, false, 256, 8 * 262144);
+    const nu::PoolFit text2 =
+        nu::serverPoolFit(poolbudget::kvAvail(avail, poolbudget::visionReserve({})), per_tok, std::nullopt, false, 131072, false, 256, 8 * 262144);
+    const nu::PoolFit vis =
+        nu::serverPoolFit(poolbudget::kvAvail(avail, r), per_tok, std::nullopt, false, 131072, false, 256, 8 * 262144);
+    std::printf("vision pool reserve: reserve %llu MiB (encoder added %llu MiB); KV pool text-only %u tokens, no-mmproj via "
+                "kvAvail %u, --mmproj %u tokens (%lld tokens less)\n",
+                static_cast<unsigned long long>(r / MiB), static_cast<unsigned long long>(added / MiB), text.pool, text2.pool,
+                vis.pool, static_cast<long long>(text.pool) - static_cast<long long>(vis.pool));
+    // text only: exactly the same pool (no reserve, kvAvail is the identity)
+    CHECK_EQ(poolbudget::visionReserve({}), 0ull);
+    CHECK_EQ(text2.pool, text.pool);
+    for (std::uint64_t a : {0ull, 1ull, 4096ull * MiB, 8468ull * MiB, 31767ull * MiB}) CHECK_EQ(poolbudget::kvAvail(a, 0), a);
+    // --mmproj: the reserve covers what the encoder really added, without reserving much more
+    CHECK(r >= added);
+    CHECK(r <= added + 64 * MiB);
+    // and the pool is smaller by at least that much, so after the encoder and the 1920x1080 image the margin is still free
+    CHECK(vis.pool < text.pool);
+    CHECK((text.pool - vis.pool) * per_tok >= added);
+    CHECK(vis.pool >= 131072);  // one 131072-token request still fits
+}
+
+// v0.2.2.1 startup fit of explicit settings (owner 2026-10-21: adjust, log, refuse only below the minimum)
+void testStartupFit() {
+    using namespace whirl;
+    constexpr std::uint64_t MiB = 1ull << 20, GiB = 1ull << 30;
+    // 1. RAM tier (ramTierFit)
+    // explicit: kept when within half of the available RAM and within the 20480 MiB cap
+    CHECK(!startfit::ramTierFit(12288, 48 * GiB, 16384, true).has_value());
+    CHECK(!startfit::ramTierFit(20480, 48 * GiB, 16384, true).has_value());
+    // the hipError 719 repro (REVIEW-0221 C1): 24064 MiB on a box with 49247 MiB available is within half, but capped
+    {
+        const auto r = startfit::ramTierFit(24064, 49247 * MiB, 16384, true);
+        CHECK(r.has_value() && r->mb == 20480ull && r->safe && !r->half);
+    }
+    // v0.2.2.2: the cap first, then half of the available RAM on the capped size: 65536 with 48955 MiB available -> the cap
+    // (20480 is within half), no longer the default size
+    {
+        const auto r = startfit::ramTierFit(65536, 48955 * MiB, 16384, true);
+        CHECK(r.has_value() && r->mb == 20480ull && !r->half && r->safe);
+    }
+    {
+        const auto r = startfit::ramTierFit(65536, 64 * GiB, 0, true);
+        CHECK(r.has_value() && r->mb == 20480ull && !r->half && r->safe);
+    }
+    // the cap, then half: 30 GiB available -> 15360
+    {
+        const auto r = startfit::ramTierFit(65536, 30 * GiB, 8192, true);
+        CHECK(r.has_value() && r->mb == 15360ull && r->half && r->safe);
+    }
+    CHECK_EQ(startfit::ramTierFit(9000, 17000 * MiB, 0, true)->mb, 8192ull);  // half = 8500 MiB -> 8192 (512 steps)
+    CHECK_EQ(startfit::ramTierFit(9000, 12 * GiB, 8192, true)->mb, 6144ull);  // half
+    // monotonic (0.2.2.2 item 1; 0.2.2.1 gave 22528 -> 20480 but 24064 -> 16384 with 47348 MiB available): asking for more
+    // never gives less, for any available RAM
+    for (const std::uint64_t avail_mb : {8192ull, 17000ull, 30720ull, 47348ull, 49247ull, 65536ull, 131072ull}) {
+        std::uint64_t prev = 0;
+        bool mono = true;
+        for (std::uint64_t ask = 512; ask <= 65536; ask += 512) {
+            const auto r = startfit::ramTierFit(ask, avail_mb * MiB, 16384, true);
+            const std::uint64_t got = r ? r->mb : ask;
+            mono = mono && got >= prev;
+            prev = got;
+        }
+        CHECK(mono);
+    }
+    CHECK_EQ(startfit::ramTierFit(22528, 47348 * MiB, 16384, true)->mb, 20480ull);
+    CHECK_EQ(startfit::ramTierFit(24064, 47348 * MiB, 16384, true)->mb, 20480ull);
+    // the automatic size (a PC with 128 GB RAM: 32 GiB by the 1/4 rule) is capped too, never the half rule
+    {
+        const auto r = startfit::ramTierFit(32768, 100 * GiB, 32768, false);
+        CHECK(r.has_value() && r->mb == 20480ull && r->safe && !r->half);
+        CHECK(!startfit::ramTierFit(16384, 20 * GiB, 16384, false).has_value());  // auto within the cap: kept (half rule not applied)
+    }
+    CHECK(!startfit::ramTierFit(0, 8 * GiB, 8192, true).has_value());  // 0 = tiers off: kept
+    CHECK(!startfit::ramTierFit(4096, 0, 8192, true).has_value());     // RAM unknown, small: kept
+    CHECK_EQ(startfit::ramTierFit(30000, 0, 0, true)->mb, 20480ull);    // RAM unknown, large: capped
+    // 2b. slots after the weights: the C5 case (15 slots left 13312 tokens for a 16384-token request) -> fewer slots
+    {
+        const std::uint64_t per_tok = 36966, per_slot = 380 * MiB, shared = 556 * MiB;
+        const std::uint64_t avail = shared + 15 * per_slot + 13312 * per_tok;  // 15 slots: exactly 13312 tokens
+        const std::uint32_t p = startfit::slotsThatFit(15, avail, per_slot, shared, per_tok, 16384);
+        CHECK(p < 15u && p >= 1u);
+        CHECK(avail - shared - per_slot * p >= 16384 * per_tok);
+        CHECK(avail - shared - per_slot * (p + 1) < 16384 * per_tok);  // the least reduction
+        CHECK_EQ(startfit::slotsThatFit(4, 40 * GiB, per_slot, shared, per_tok, 16384), 4u);  // fits: unchanged
+        CHECK_EQ(startfit::slotsThatFit(8, 1 * GiB, per_slot, shared, per_tok, 16384), 1u);   // never below 1
+    }
+    // the startup JSON (REVIEW-0221 A1: kv_ram_mb is the RAM tier in use)
+    {
+        startfit::StartupInfo si;
+        si.ctx_per_request = 13312;
+        si.pool_tokens = 13312;
+        si.parallel = 15;
+        si.kv_ram_mb = 18432;
+        si.wddm_margin_mib = 9468;
+        si.other_processes_mib = 7412;
+        si.display_attached = false;
+        si.adjusted = {"--parallel 16 -> 15", "say \"hi\" \\ ok"};
+        CHECK_EQ(startfit::startupJson(si),
+                 std::string("{\"ctx_per_request\":13312,\"pool_tokens\":13312,\"parallel\":15,\"kv_ram_mb\":18432,\"wddm_margin_mib\":9468,"
+                             "\"other_processes_mib\":7412,\"display_attached\":false,\"adjusted\":[\"--parallel 16 -> 15\",\"say \\\"hi\\\" "
+                             "\\\\ ok\"]}"));
+        CHECK_EQ(startfit::startupJson(startfit::StartupInfo{}),
+                 std::string("{\"ctx_per_request\":0,\"pool_tokens\":0,\"parallel\":0,\"kv_ram_mb\":0,\"wddm_margin_mib\":0,"
+                             "\"other_processes_mib\":0,\"display_attached\":false,\"adjusted\":[]}"));
+    }
+    // a Swift-like card: 16 GiB weights, 0.75 GiB fixed per slot, 36 KiB / token, ~11 GiB left with 1 slot
+    vram::FitInput fi;
+    fi.avail = 28 * GiB;
+    fi.weights = 16 * GiB;
+    fi.fixed = 512 * MiB;
+    fi.buf_per_row = 64 * 1024;
+    fi.buf_fixed = 256 * MiB;
+    fi.ckpt_bytes = 150 * MiB;
+    fi.kv_per_token = 36966;
+    fi.pool_min_tokens = 16384;
+    fi.batch = 4096;
+    fi.n_ck = 4;
+    fi.n_spe = 2;
+    const std::uint64_t per_slot = 150 * MiB;
+    // 2. --parallel 4 fits: unchanged
+    {
+        vram::FitInput a = fi;
+        a.parallel = 4;
+        a.fixed += 4 * per_slot;
+        const auto r = startfit::fitParallel(a, per_slot, true);
+        CHECK_EQ(r.parallel, 4u);
+        CHECK(r.plan.pool_tokens >= startfit::wantTokens(a));
+    }
+    // --parallel 16 on a card with less room (another program holds VRAM): lowered until one 16k request fits
+    {
+        vram::FitInput a = fi;
+        a.avail = 24 * GiB;
+        a.parallel = 16;
+        a.fixed += 16 * per_slot;
+        a.ck_fixed = true;  // keep the checkpoint plan out of it
+        a.batch_fixed = true;
+        const auto r = startfit::fitParallel(a, per_slot, true);
+        CHECK(r.parallel < 16u && r.parallel >= 1u);
+        CHECK(r.pool_requested < startfit::wantTokens(a));
+        CHECK(r.plan.pool_tokens >= startfit::wantTokens(r.fi));
+        // one slot more would not fit (the least reduction)
+        vram::FitInput b = r.fi;
+        b.parallel = r.parallel + 1;
+        b.fixed += per_slot;
+        CHECK(vram::planFit(b).pool_tokens < startfit::wantTokens(b));
+        // not given (a default): never lowered here
+        const auto d = startfit::fitParallel(a, per_slot, false);
+        CHECK_EQ(d.parallel, 16u);
+    }
+    // even one slot does not fit: kept at 1, still short (the server then refuses at sizing)
+    {
+        vram::FitInput a = fi;
+        a.avail = 17 * GiB;
+        a.parallel = 4;
+        a.fixed += 4 * per_slot;
+        a.batch_fixed = a.ck_fixed = true;
+        const auto r = startfit::fitParallel(a, per_slot, true);
+        CHECK_EQ(r.parallel, 1u);
+        CHECK(r.plan.pool_tokens < startfit::wantTokens(r.fi));
+    }
+    // 3. user-set prefill batch / checkpoints: lowered only when short, and only if it helps
+    {
+        vram::FitInput a = fi;
+        a.avail = 16 * GiB + 1600 * MiB;  // tight
+        a.parallel = 1;
+        a.fixed += per_slot;
+        a.batch_fixed = a.ck_fixed = true;
+        const vram::FitPlan p = vram::planFit(a);
+        CHECK(p.pool_tokens < startfit::wantTokens(a));
+        const auto r = startfit::fitFixed(a, p);
+        CHECK(r.changed);
+        CHECK(r.batch_changed || r.ck_changed);
+        CHECK(r.plan.pool_tokens > p.pool_tokens);
+        CHECK(!r.fi.batch_fixed && !r.fi.ck_fixed);
+        // with room: nothing changes
+        vram::FitInput roomy = a;
+        roomy.avail = 30 * GiB;
+        const auto q = startfit::fitFixed(roomy, vram::planFit(roomy));
+        CHECK(!q.changed);
+        // nothing user-set: nothing to lower
+        vram::FitInput autoset = a;
+        autoset.batch_fixed = autoset.ck_fixed = false;
+        CHECK(!startfit::fitFixed(autoset, vram::planFit(autoset)).changed);
+    }
+    // 4. / 5. -c and --ctx-per-slot: serverPoolFit as "not explicit" lowers instead of refusing
+    {
+        const std::uint64_t per_tok = 36966;
+        const std::uint64_t avail = 11 * GiB;
+        const auto refused = numerics::serverPoolFit(avail, per_tok, 400000u, true, 131072, true, 256, 8 * 262144);
+        CHECK(refused.refuse);  // the old contract (still used where nothing is adjusted)
+        const auto r = numerics::serverPoolFit(avail, per_tok, 400000u, false, 131072, false, 256, 8 * 262144);
+        CHECK(!r.refuse);
+        CHECK(r.pool < 400000u && r.pool >= 4096u && r.pool % 256 == 0);
+        CHECK(static_cast<std::uint64_t>(r.pool) * per_tok <= avail);
+        CHECK_EQ(r.slot_ctx, 131072u);  // still fits one 131072-token request
+        const auto s = numerics::serverPoolFit(3 * GiB, per_tok, 400000u, false, 131072, false, 256, 8 * 262144);
+        CHECK(!s.refuse);
+        CHECK(s.slot_ctx == s.pool && s.slot_ctx < 131072u);  // context per request capped to the pool
+        // below the minimum pool: refused with a clear message
+        const auto z = numerics::serverPoolFit(100 * MiB, per_tok, 400000u, false, 131072, false, 256, 8 * 262144);
+        CHECK(z.refuse);
+        CHECK(z.msg.find("at least 4096 needed") != std::string::npos);
+    }
+}
+
 int main() {
     whirl::test::clearWhirlEnv();  // FR-TEST P3-11
 #if WHIRL_TEST_DLL_DEPS
@@ -1987,6 +2937,13 @@ int main() {
     testDflashPolicy();
     testLocalMemTaken();
     testUmaCheck();
+    testWddmWatch();
+    testPoolBudget();
+    testPoolMargin();
+    testStartupFit();
+    testVisionPoolReserve();
+    testMemGovernor();
+    testMemGovernorGrowOvershoot();
     std::printf("unit tests: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }
