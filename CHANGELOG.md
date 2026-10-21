@@ -29,7 +29,13 @@ All notable changes to WHIRL are listed here. Versions follow `project(whirl VER
   `GPU_RESOURCE_CACHE_SIZE=256` (MiB) for its own process unless you set it (`WHIRL_HIP_CACHE_LIMIT=0` keeps the runtime
   default); a 3.9 GiB shrink then lowered WHIRL's VRAM by 3.9 GiB. Because memory freed while loading now goes back too,
   the default KV pool on the R9700 is about 3% larger (Swift-1.5 27B, `--parallel 1`: 329728 -> 340480 tokens).
-  GOV_RESULTS_PLACEHOLDER
+  Measured on the R9700 (another process takes 4 GiB while a long request runs, `--parallel 1`, balance; same prompt
+  before and after, identical output every time): Ornith-1.5-35B-A3B MXFP4 decoded 259 tok/s before, about 19 tok/s
+  while the running request was over the budget, and 259-261 tok/s again about 16 s after the pool was re-allocated
+  (393984 -> 200960 tokens), with the other process still holding its 4 GiB; when it exited the pool grew back to 364032
+  tokens. Swift-1.5 27B MXFP4: 90 tok/s before, 16-25 tok/s during, 89-91 tok/s after the re-allocation (in one run
+  only after about 60 s: Windows moves the buffers back on its own schedule). With the HIP runtime's default cache the
+  same Ornith run stayed at 57 tok/s after the re-allocation.
 - Server: the RAM tier cap of 0.2.2.1 ran after the half-of-available-RAM rule, so asking for more could give less
   (R9700, 47348 MiB available: `--kv-ram-mb 22528` -> 20480 MiB, `--kv-ram-mb 24064` -> 16384 MiB). The 20480 MiB cap
   now comes first, and a size above half of the available RAM goes to half of it (not to the default size, which was
