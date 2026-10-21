@@ -2457,15 +2457,16 @@ void testMemGovernor() {
         // a real further drop after the window (trust_s, 120 s) is still acted on
         p = g5.tick(in(125, L1 + 1843 * MiB, B1, small, true));
         CHECK(p.shrink);
-        // a grow that first reads too high (stale old pool) but stays under the budget is not shrunk back within the window
-        // (REVIEW-GOV-2 C-1: a reading over the budget after a grow is a real overshoot and is acted on, see
-        // testMemGovernorGrowOvershoot; this case used L0 + 3 GiB, 0.7 GiB over the budget, before that fix)
+        // a grow that first reads too high (stale old pool) but leaves more than half the margin free is not shrunk back
+        // within the window (REVIEW-GOV-2 C-1 / REVIEW-GOV-3 C-2: a reading inside the trigger band after a grow is a real
+        // overshoot and is acted on, see testMemGovernorGrowOvershoot; this case used L0 + 3 GiB, 0.7 GiB over the budget,
+        // before the C-1 fix, and L0 + 2 GiB, inside the trigger band, before the C-2 fix)
         Governor g6(c);
         g6.tick(in(0, L0, B1, 330240, true));
         g6.resized(small, false, 0, L1);
         g6.resized(330240, true, 200, L0);
-        for (double t = 205; t < 220; t += 5) CHECK(!g6.tick(in(t, L0 + 2 * GiB, B0, 330240, true)).pool_target.has_value());
-        CHECK(L0 + 2 * GiB < B0 && L0 + 2 * GiB + M / 2 > B0);  // under the budget, but inside the trigger band
+        for (double t = 205; t < 220; t += 5) CHECK(!g6.tick(in(t, L0 + 1 * GiB, B0, 330240, true)).pool_target.has_value());
+        CHECK(L0 + 1 * GiB + M / 2 < B0);  // 1 GiB high, but more than half the margin still free (outside the trigger band)
         // growDenied restarts the recovery time
         Governor g7(c);
         g7.tick(in(0, L0, B1, 330240, true));
@@ -2617,11 +2618,12 @@ void testMemGovernorGrowOvershoot() {
         return x;
     };
     // overshoot: what the grow costs above the expected usage, kept until the next re-allocation
+    double t_band_end = -1;  // episode_end while inside the trigger band (less than margin/2 free), REVIEW-GOV-3 C-2
     auto run = [&](std::uint64_t overshoot, double& t_grow, double& t_act, double& t_bad_end, std::uint64_t& measured_after) {
         Governor g(r);
         std::uint32_t pool = 393984;
         bool grown = false;
-        t_grow = t_act = t_bad_end = -1;
+        t_grow = t_act = t_bad_end = t_band_end = -1;
         measured_after = 0;
         for (double t = 0; t < 1200; t += 5) {
             const std::uint64_t b = t < 300 ? Br - 4 * GiB : Br;
@@ -2629,6 +2631,7 @@ void testMemGovernorGrowOvershoot() {
             const Plan p = g.tick(inr(t, measured, b, pool));
             if (grown) {
                 if (p.episode_end && measured > b && t_bad_end < 0) t_bad_end = t;
+                if (p.episode_end && measured + Mr / 2 > b && t_band_end < 0) t_band_end = t;
                 if ((p.free_cache || p.shrink || p.episode_start) && t_act < 0) t_act = t;
                 if (t_act >= 0) break;
             }
@@ -2658,14 +2661,33 @@ void testMemGovernorGrowOvershoot() {
         CHECK(t_bad_end < 0);                                   // no "back to the startup settings" while over the budget
         CHECK(t_act > 0 && t_act - t_grow <= r.settle_s + 10);  // acted on within the next samples, not after trust_s
     }
-    // control: a grow whose reading stays under the budget (counters catching up) is not acted on within trust_s
+    // REVIEW-GOV-3 C-2: a grow that costs 1.52 GiB more than expected lands under the budget but inside the trigger band
+    // (500 MiB free, the trigger is at margin/2 = 1034 MiB): it must be acted on at once too, not min()-masked for trust_s
+    // with the episode end logged and a new episode ~117 s later (the review's probe: episode_end t=233, episode_start t=350)
     {
-        const std::uint64_t over = Mr - 300 * MiB;  // measured 300 MiB under the budget
+        const std::uint64_t over = Mr - 500 * MiB;  // measured 500 MiB under the budget
+        double t_grow, t_act, t_bad_end;
+        std::uint64_t m;
+        run(over, t_grow, t_act, t_bad_end, m);
+        std::printf("C-2 overshoot in the trigger band: grow at t=%.0f, measured after it %.2f GiB vs budget %.2f GiB "
+                    "(trigger at %.2f GiB); episode_end inside the band at t=%.0f; first action after the grow at t=%.0f "
+                    "(%.0f s after it)\n",
+                    t_grow, m / double(GiB), Br / double(GiB), (Br - Mr / 2) / double(GiB), t_band_end, t_act,
+                    t_act >= 0 ? t_act - t_grow : -1.0);
+        CHECK(t_grow > 0);
+        CHECK(m < Br && m + Mr / 2 > Br);                       // under the budget, inside the trigger band
+        CHECK(t_band_end < 0);                                  // no "back to the startup settings" inside the band
+        CHECK(t_act > 0 && t_act - t_grow <= r.settle_s + 10);  // acted on within the next samples, not after trust_s
+    }
+    // control: a grow whose reading is high but leaves more than half the margin free (counters catching up) is not acted
+    // on within trust_s (this control read 300 MiB under the budget, inside the trigger band, before the C-2 fix)
+    {
+        const std::uint64_t over = Mr - 1300 * MiB;  // measured 1300 MiB under the budget, 266 MiB outside the band
         double t_grow, t_act, t_bad_end;
         std::uint64_t m;
         run(over, t_grow, t_act, t_bad_end, m);
         CHECK(t_grow > 0);
-        CHECK(m < Br);
+        CHECK(m + Mr / 2 < Br);
         CHECK(t_bad_end < 0);
         CHECK(t_act < 0 || t_act - t_grow >= r.trust_s - 5);  // not shrunk back while the counters may lag
     }
