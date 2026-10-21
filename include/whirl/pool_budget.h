@@ -71,7 +71,9 @@ struct VisionVram {
     std::uint64_t weights = 0;    // encoder weights made resident on the first image (0 in stream mode)
     std::uint64_t act_extra = 0;  // activation buffers of the largest image that do not fit the lent prefill scratch
 };
-// The bytes to keep free for the encoder when the KV pool is sized.
+// The bytes to keep free for the encoder when the KV pool is sized: weights + act_extra + vision_fixed_mb (measured
+// 12.5 MiB on the R9700 for both product models, see pool_budget.cpp); 0 when both are 0.
+inline constexpr std::uint64_t vision_fixed_mb = 16;
 std::uint64_t visionReserve(const VisionVram& v);
 // The bytes left for the KV pool: avail minus the reserve (0 when it does not fit). reserve 0 (no --mmproj): avail.
 std::uint64_t kvAvail(std::uint64_t avail, std::uint64_t reserve);

@@ -28,6 +28,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <utility>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -125,6 +126,11 @@ struct Region {
 };
 
 enum class Mode { automatic, resident, stream };
+
+// First fit of the encoder's buffers into lent regions, largest buffer first (Vision::encode). at[k] = {region, offset},
+// region -1: does not fit (hipMalloc'ed). Returns the bytes that do not fit (each buffer aligned to 256 bytes).
+std::uint64_t placeFirstFit(const std::array<std::uint64_t, 7>& need, std::span<const std::uint64_t> lens,
+                            std::array<std::pair<int, std::uint64_t>, 7>& at);
 std::optional<Mode> parseMode(std::string_view s);  // "auto" | "resident" | "stream"
 const char* modeName(Mode m);
 
@@ -174,6 +180,9 @@ public:
 
     // Bytes of lent device memory an encode of n_tok tokens uses (stream mode).
     std::uint64_t arenaBytes(std::uint32_t n_tok) const;
+    // Bytes encode() hipMallocs for an image of n_tok tokens because they do not fit the lent regions of these sizes
+    // (resident: weights in VRAM, else streamed), with the same first-fit placement as encode().
+    std::uint64_t extraBytes(std::uint32_t n_tok, bool resident, std::span<const std::uint64_t> lend_lens) const;
 
     // Encode one preprocessed image: out (host, n_tok * proj_dim f32) gets the
     // projected embeddings in token order (row-major over the nx x ny grid).

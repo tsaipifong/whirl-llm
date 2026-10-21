@@ -69,10 +69,13 @@ bool usageFell(std::uint64_t usage_before, std::uint64_t usage_after, std::uint6
     return usage_before - usage_after >= freed / 2;
 }
 
-// fbdbe38 behaviour, kept for the failing test (REVIEW-GOV-3 question 4): the encoder is not counted
+// REVIEW-GOV-3 question 4: what the encoder adds after startup is its resident weights, the activation buffers of the
+// largest image that do not fit the lent prefill scratch, and a fixed part: R9700 gov3 runs, local usage after the first
+// image minus the weights = 12.5 MiB on both models (Swift 900 - 887.5, Ornith 873 - 860.5 MiB; the encoder's code object
+// and its small device buffers), counted as vision_fixed_mb. No --mmproj: nothing (the pool is exactly as before).
 std::uint64_t visionReserve(const VisionVram& v) {
-    (void)v;
-    return 0;
+    if (v.weights == 0 && v.act_extra == 0) return 0;
+    return v.weights + v.act_extra + (vision_fixed_mb << 20);
 }
 
 std::uint64_t kvAvail(std::uint64_t avail, std::uint64_t reserve) { return avail > reserve ? avail - reserve : 0; }

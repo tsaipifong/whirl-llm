@@ -360,6 +360,35 @@ std::array<u64, 7> Vision::needs(u32 n_tok, bool stream_w) const {
     };
 }
 
+u64 placeFirstFit(const std::array<u64, 7>& need, std::span<const u64> lens, std::array<std::pair<int, u64>, 7>& at) {
+    std::array<u64, 16> used{};
+    std::array<int, 7> order = {0, 1, 2, 3, 4, 5, 6};
+    // (the prototype sorts with an unstable pdq sort on strictly greater; ties keep
+    // any order, and equal sizes are interchangeable for first fit)
+    std::stable_sort(order.begin(), order.end(), [&](int a, int b) { return need[a] > need[b]; });
+    u64 extra = 0;
+    at.fill({-1, 0});
+    for (int k : order) {
+        if (need[k] == 0) continue;
+        const u64 sz = alignUp(need[k], 256);
+        for (std::size_t ri = 0; ri < lens.size(); ++ri) {
+            if (ri >= used.size()) break;
+            if (lens[ri] - used[ri] >= sz) {
+                at[k] = {static_cast<int>(ri), used[ri]};
+                used[ri] += sz;
+                break;
+            }
+        }
+        if (at[k].first < 0) extra += sz;
+    }
+    return extra;
+}
+
+u64 Vision::extraBytes(u32 n_tok, bool resident, std::span<const u64> lend_lens) const {
+    std::array<std::pair<int, u64>, 7> at{};
+    return placeFirstFit(needs(n_tok, !resident), lend_lens, at);
+}
+
 u64 Vision::arenaBytes(u32 n_tok) const {
     u64 s = 0;
     for (u64 b : needs(n_tok, true)) s += alignUp(b, 256);
@@ -479,23 +508,18 @@ EncodeStats Vision::encode(const Prepared& p, std::span<const Region> lend, hip:
         }
     } extra;
     {
-        std::array<u64, 16> used{};
-        std::array<int, 7> order = {0, 1, 2, 3, 4, 5, 6};
-        // (the prototype sorts with an unstable pdq sort on strictly greater; ties keep
-        // any order, and equal sizes are interchangeable for first fit)
-        std::stable_sort(order.begin(), order.end(), [&](int a, int b) { return need[a] > need[b]; });
-        for (int k : order) {
+        // placeFirstFit: the same placement Vision::extraBytes() reports at startup (the KV pool leaves room for it)
+        std::array<u64, 16> lens{};
+        const std::size_t nl = std::min(lend.size(), lens.size());
+        for (std::size_t ri = 0; ri < nl; ++ri) lens[ri] = lend[ri].len;
+        std::array<std::pair<int, u64>, 7> at{};
+        placeFirstFit(need, std::span<const u64>(lens.data(), nl), at);
+        for (int k = 0; k < 7; ++k) {
             if (need[k] == 0) continue;
-            const u64 sz = alignUp(need[k], 256);
-            for (std::size_t ri = 0; ri < lend.size(); ++ri) {
-                if (ri >= used.size()) break;
-                if (lend[ri].len - used[ri] >= sz) {
-                    ptr[k] = lend[ri].ptr + used[ri];
-                    used[ri] += sz;
-                    break;
-                }
-            }
-            if (ptr[k] == 0) {
+            if (at[k].first >= 0) {
+                ptr[k] = lend[static_cast<std::size_t>(at[k].first)].ptr + at[k].second;
+            } else {
+                const u64 sz = alignUp(need[k], 256);
                 extra.p[k] = hip::malloc(sz);
                 ptr[k] = extra.p[k];
                 st.borrowed_extra += sz;

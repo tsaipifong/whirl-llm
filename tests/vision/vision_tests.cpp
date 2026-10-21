@@ -223,6 +223,35 @@ static void testImageKey() {
     std::printf("image key: %s\n", hex(k).c_str());
 }
 
+// placeFirstFit (Vision::encode's placement, and Vision::extraBytes at server startup): largest first, first region with
+// room, 256-byte aligned; what does not fit is reported as extra (REVIEW-GOV-3 question 4: the KV pool leaves room for it)
+static void testPlaceFirstFit() {
+    using whirl::vision::placeFirstFit;
+    std::array<std::pair<int, std::uint64_t>, 7> at{};
+    // all fit: 100 -> region 0 (300), 200 (aligned 256) -> region 0 at 0 first (largest first), then 100 at 256
+    {
+        const std::array<std::uint64_t, 7> need = {100, 200, 0, 0, 0, 0, 0};
+        const std::uint64_t lens[] = {512};
+        CHECK(placeFirstFit(need, lens, at) == 0);
+        CHECK(at[1].first == 0 && at[1].second == 0);
+        CHECK(at[0].first == 0 && at[0].second == 256);
+        CHECK(at[2].first == -1);
+    }
+    // one does not fit: 1000 into regions {512, 768} -> extra 1024 (aligned); 600 -> region 1
+    {
+        const std::array<std::uint64_t, 7> need = {1000, 600, 0, 0, 0, 0, 0};
+        const std::uint64_t lens[] = {512, 768};
+        CHECK(placeFirstFit(need, lens, at) == 1024);
+        CHECK(at[0].first == -1);
+        CHECK(at[1].first == 1 && at[1].second == 0);
+    }
+    // no regions: everything is extra
+    {
+        const std::array<std::uint64_t, 7> need = {1, 2, 3, 0, 0, 0, 0};
+        CHECK(placeFirstFit(need, std::span<const std::uint64_t>(), at) == 3 * 256);
+    }
+}
+
 int main(int argc, char** argv) {
     whirl::test::clearWhirlEnv();  // FR-TEST P3-11
     testSha();
@@ -231,6 +260,7 @@ int main(int argc, char** argv) {
     testResize();
     testExpandRope();
     testImageKey();
+    testPlaceFirstFit();
     if (argc > 1) testRgbRefs(argv[1]);
     std::printf("vision tests: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

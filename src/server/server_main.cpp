@@ -1301,6 +1301,43 @@ int serveMain(int argc, char** argv, const char* program) {
         } else if (kv_ram_mb == 0 && n_ck > 0 && !no_pc) {
             logI("kv tier: RAM tier off ({})", rsz.reason);
         }
+        // ---- vision encoder, discrete GPU: read the mmproj now (pinned host memory only, no VRAM) so the KV pool below
+        // leaves room for what the encoder adds after startup (REVIEW-GOV-3 question 4: on the R9700 the first image added
+        // 873 MiB on Ornith and a 1920x1080 image 134 MiB more, leaving 30 MiB before the governor's trigger). Text-only
+        // runs and the integrated GPU (where a pinned allocation lowers hipMemGetInfo free) keep the old order and pool.
+        const std::optional<std::string> mmp_path = opt.mmproj ? opt.mmproj : env("MMPROJ");
+        std::unique_ptr<vision::Vision> vis_store;
+        std::optional<hip::LocalMemTaken> vis_load_taken;
+        double vis_load_s = 0;
+        std::uint64_t vis_reserve = 0;
+        std::string vis_reserve_note;
+        if (mmp_path && !is_uma) {
+            const TimePoint tl0 = Clock::now();
+            const hip::LocalMemSnap ml0 = hip::localMemSnap();
+            try {
+                vis_store = vision::Vision::load(*mmp_path);
+            } catch (const std::exception& ex) {
+                logE("vision: cannot load mmproj {}: {}", *mmp_path, ex.what());
+                throw;
+            }
+            vis_load_taken = hip::localMemTaken(ml0, hip::localMemSnap());
+            vis_load_s = msSince(tl0) / 1000.0;
+            vision::Mode vm = *vision::parseMode(opt.vis_mode);
+            if (auto x = env("VIS_MODE")) vm = vision::parseMode(*x).value_or(vm);
+            const bool resident = vm != vision::Mode::stream;  // auto: resident when it fits, which the reserve makes room for
+            std::array<std::array<std::uint64_t, 2>, 16> raw{};
+            const std::size_t n_lend = backend->lendScratch(raw);
+            std::array<std::uint64_t, 16> lens{};
+            for (std::size_t k = 0; k < n_lend; ++k) lens[k] = raw[k][1];
+            poolbudget::VisionVram vv;
+            vv.weights = resident ? vis_store->totalBytes() : 0;
+            vv.act_extra = vis_store->extraBytes(vis_store->hp.max_tokens, resident, std::span<const std::uint64_t>(lens.data(), n_lend));
+            vis_reserve = poolbudget::visionReserve(vv);
+            vis_reserve_note = std::format("{} MiB for the vision encoder (--mmproj: weights {} MiB{}, activations of a {}-token image "
+                                           "beyond the prefill scratch {} MiB, fixed {} MiB)",
+                                           vis_reserve >> 20, vv.weights >> 20, resident ? "" : " (stream mode: none)",
+                                           vis_store->hp.max_tokens, vv.act_extra >> 20, poolbudget::vision_fixed_mb);
+        }
         const hip::MemInfo mem_t1 = hip::memInfo();
         // shared KV pool: --ctx, or (R9700) the VRAM left now minus a reserve
         // The reserve is kept below both the free VRAM and this process's WDDM budget: going over the
@@ -1337,6 +1374,11 @@ int serveMain(int argc, char** argv, const char* program) {
                 budget_note += std::format("; minus {} MiB desktop headroom (WHIRL_VRAM_HEADROOM_MB) -> {:.2f} GiB", card.headroom >> 20,
                                            (a > card.headroom ? a - card.headroom : 0) / 1073741824.0);
                 a = a > card.headroom ? a - card.headroom : 0;
+            }
+            // --mmproj (discrete GPU, not WHIRL_POOL_RESERVE_MB): room for the vision encoder; text only: vis_reserve 0, a unchanged
+            if (vis_reserve > 0 && !reserve_explicit) {
+                a = poolbudget::kvAvail(a, vis_reserve);
+                budget_note += std::format("; minus {} -> {:.2f} GiB", vis_reserve_note, a / 1073741824.0);
             }
             return a;
         }();
@@ -1690,17 +1732,19 @@ int serveMain(int argc, char** argv, const char* program) {
             }
         }
 
-        // ---- vision encoder (after the KV pool: the pool size does not depend on it)
-        std::unique_ptr<vision::Vision> vis_store;
+        // ---- vision encoder (discrete GPU: read above, before the KV pool, which leaves room for it; integrated GPU: here,
+        // after the KV pool, whose size does not depend on it)
         std::unique_ptr<ServerVision> vis_srv;
-        if (const std::optional<std::string> mmp = opt.mmproj ? opt.mmproj : env("MMPROJ")) {
+        if (const std::optional<std::string> mmp = mmp_path) {
             const TimePoint tv0 = Clock::now();
             const hip::LocalMemSnap mem_v0 = hip::localMemSnap();
-            try {
-                vis_store = vision::Vision::load(*mmp);
-            } catch (const std::exception& ex) {
-                logE("vision: cannot load mmproj {}: {}", *mmp, ex.what());
-                throw;
+            if (!vis_store) {
+                try {
+                    vis_store = vision::Vision::load(*mmp);
+                } catch (const std::exception& ex) {
+                    logE("vision: cannot load mmproj {}: {}", *mmp, ex.what());
+                    throw;
+                }
             }
             vision::Vision& v = *vis_store;
             v.idle_s = opt.vis_idle_s;
@@ -1750,12 +1794,18 @@ int serveMain(int argc, char** argv, const char* program) {
             std::uint64_t lent = 0;
             for (std::size_t k = 0; k < n_lend; ++k) lent += raw[k][1];
             tier::declarePinned(lad, embd_pinned + (tier_owned ? tier_owned->pinnedBytes() : 0) + v.pinnedBytes());
-            const hip::LocalMemTaken vis_taken = hip::localMemTaken(mem_v0, hip::localMemSnap());
+            hip::LocalMemTaken vis_taken = hip::localMemTaken(mem_v0, hip::localMemSnap());
+            if (vis_load_taken) {
+                // read before the KV pool: the load's change plus the attach's change here
+                vis_taken.mib += vis_load_taken->mib;
+                vis_taken.hip_free_mib += vis_load_taken->hip_free_mib;
+                vis_taken.shared_mib += vis_load_taken->shared_mib;
+            }
             engine.attachVision(vc);
             logI("vision: {}: {} layers, {} pinned MiB in host RAM ({:.1f} s; VRAM change {:.1f} MiB [{}; hipMemGetInfo free {:+.1f} MiB, GPU Shared Usage {:+.1f} MiB]); encoder loaded on demand, released "
                  "after {} s idle; weights {}; activations in the prefill scratch ({} buffers, {:.0f} MiB; one 4096-token image needs {:.0f} "
                  "MiB); embedding cache {} MiB; local image files {}",
-                 *mmp, v.hp.n_layer, v.pinnedBytes() >> 20, msSince(tv0) / 1000.0,
+                 *mmp, v.hp.n_layer, v.pinnedBytes() >> 20, msSince(tv0) / 1000.0 + vis_load_s,
                  vis_taken.mib, vis_taken.how, -vis_taken.hip_free_mib, vis_taken.shared_mib, v.idle_s, vision::modeName(v.mode), n_lend,
                  static_cast<double>(lent) / 1048576.0, static_cast<double>(v.arenaBytes(v.hp.max_tokens)) / 1048576.0, cache_mb,
                  vc.allow_files ? "allowed" : "off");
