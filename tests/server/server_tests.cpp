@@ -3528,6 +3528,25 @@ void testDFlashFit() {
 }
 
 // P3-1: a request arriving after the engine loop has stopped gets 503 at once (no hang)
+// REVIEW-ARCH4 P3-5: a runOnLoop call that times out is cancelled: when the loop later runs its queued calls, the
+// timed-out closure (which may capture the caller's locals by reference) must not run.
+void testRunOnLoopTimeoutCancels() {
+    ServerSetup su = baseSetup();
+    TestServer srv(su);
+    srv.stopEngine();  // the loop has returned: nothing runs the queued call
+    auto ran = std::make_shared<std::atomic<bool>>(false);
+    bool threw = false;
+    try {
+        srv.engine().runOnLoop([ran] { ran->store(true); }, std::chrono::milliseconds(50));
+    } catch (const std::runtime_error&) {
+        threw = true;
+    }
+    CHECK(threw);
+    srv.engine().runLoop();  // stop_ is set: runs the queued calls once and returns
+    CHECK(!ran->load());
+    // (the claimed path, a call the running loop executes, is what every onEngine() reader in this file uses)
+}
+
 void testFrShutdown503() {
     ServerSetup su = baseSetup();
     TestServer srv(su);
@@ -3757,6 +3776,7 @@ int main(int argc, char** argv) {
         {"fr_dflash_noreplay", testFrDFlashNoReplay},
         {"dflash_fit", testDFlashFit},
         {"fr_shutdown_503", testFrShutdown503},
+        {"run_on_loop_timeout_cancels", testRunOnLoopTimeoutCancels},
         {"fr_protocol", testFrProtocol},
         {"fr_stop_tokens", testFrStopTokens},
         {"fr_log_injection", testFrLogInjection},

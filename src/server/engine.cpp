@@ -291,10 +291,16 @@ void Engine::stop() {
 
 void Engine::runOnLoop(std::function<void()> fn, std::chrono::milliseconds timeout) {
     auto done = std::make_shared<std::promise<void>>();
+    // REVIEW-ARCH4 P3-5: 0 queued, 1 claimed by the loop, 2 cancelled by a timed-out caller. fn usually captures the
+    // caller's locals by reference, so it may only run while the caller waits: the loop claims the call before
+    // running it, and a timed-out caller either cancels it (never runs) or, when already claimed, waits for it.
+    auto state = std::make_shared<std::atomic<int>>(0);
     std::future<void> f = done->get_future();
     {
         std::lock_guard<std::mutex> lk(q_mutex_);
-        loop_calls_.push_back([fn = std::move(fn), done] {
+        loop_calls_.push_back([fn = std::move(fn), done, state] {
+            int queued = 0;
+            if (!state->compare_exchange_strong(queued, 1)) return;  // cancelled: the caller is gone
             try {
                 fn();
                 done->set_value();
@@ -305,7 +311,11 @@ void Engine::runOnLoop(std::function<void()> fn, std::chrono::milliseconds timeo
         ++wake_seq_;
         q_cond_.notify_all();
     }
-    if (f.wait_for(timeout) != std::future_status::ready) throw std::runtime_error("Engine::runOnLoop: the engine loop did not run the call");
+    if (f.wait_for(timeout) != std::future_status::ready) {
+        int queued = 0;
+        if (state->compare_exchange_strong(queued, 2)) throw std::runtime_error("Engine::runOnLoop: the engine loop did not run the call");
+        f.wait();  // claimed just now: fn is running on the engine thread with the caller's references
+    }
     f.get();
 }
 
@@ -2597,17 +2607,25 @@ void Engine::spillSlot(Slot& sl) {
     if (sl.spill_ev == nullptr) sl.spill_ev = ops_.eventCreate();
     t->fence(x, sl.spill_ev);
     if (opt_.tier_verify) {
+        // REVIEW-ARCH4 P3-4: every verify attempt leaves exactly one line (byte-identical, differ or error), so the
+        // release gate can count attempts against spills / restores and fail on a verify that threw
+        bool sync_ok = true;
         try {
             ops_.eventSync(sl.spill_ev);
-        } catch (const std::exception&) {
+        } catch (const std::exception& ex) {
+            sync_ok = false;
+            logE("slot {} | kv tier verify: spill of {} tok: error (event sync: {})", sl.id, P, ex.what());
         }
-        try {
-            const auto v = t->verifySpans(x, tier_spans_);
-            if (v.bad > 0) logE("slot {} | kv tier verify: spill of {} tok: {} pieces differ", sl.id, P, v.bad);
-            else
-                logI("slot {} | kv tier verify: spill of {} tok byte-identical ({:.1f} MiB)", sl.id, P,
-                     static_cast<double>(v.bytes) / 1048576.0);
-        } catch (const std::exception&) {
+        if (sync_ok) {
+            try {
+                const auto v = t->verifySpans(x, tier_spans_);
+                if (v.bad > 0) logE("slot {} | kv tier verify: spill of {} tok: {} pieces differ", sl.id, P, v.bad);
+                else
+                    logI("slot {} | kv tier verify: spill of {} tok byte-identical ({:.1f} MiB)", sl.id, P,
+                         static_cast<double>(v.bytes) / 1048576.0);
+            } catch (const std::exception& ex) {
+                logE("slot {} | kv tier verify: spill of {} tok: error ({})", sl.id, P, ex.what());
+            }
         }
     }
     sl.spill_busy = true;
@@ -2811,7 +2829,7 @@ void Engine::finishTail(Slot& sl, bool wait) {
     tier::Entry* x = t->find(r->entry_id);
     if (opt_.tier_verify && !r->failed && x != nullptr && r->cursor > r->n_main) {
         // (pieces of a checkpoint saveCkpt has overwritten since differ by design)
-        std::size_t n_bad = 0, n = 0;
+        std::size_t n_bad = 0, n = 0, n_err = 0;
         for (std::size_t i = r->n_main; i < r->cursor; ++i) {
             const tier::Piece& pc = r->pieces[i];
             if (pc.ck == kNoTag || !sl.rs_tail[pc.ck]) continue;
@@ -2821,9 +2839,11 @@ void Engine::finishTail(Slot& sl, bool wait) {
             try {
                 n_bad += t->verifyPieces(std::span<const tier::Piece>(&pc, 1)).bad;
             } catch (const std::exception&) {
+                ++n_err;
             }
         }
-        if (n_bad > 0) logE("slot {} | kv tier verify: restore tail: {} of {} pieces differ", sl.id, n_bad, n);
+        if (n_err > 0) logE("slot {} | kv tier verify: restore tail: error ({} of {} pieces could not be verified, {} differ)", sl.id, n_err, n, n_bad);
+        else if (n_bad > 0) logE("slot {} | kv tier verify: restore tail: {} of {} pieces differ", sl.id, n_bad, n);
         else logI("slot {} | kv tier verify: restore tail byte-identical ({} pieces)", sl.id, n);
     }
     if (r->failed || x == nullptr) {
@@ -2946,7 +2966,8 @@ void Engine::pollRestores() {
                     else
                         logI("req {} | slot {} | kv tier verify: restore of {} tok byte-identical ({:.1f} MiB)", job.id, sl.id,
                              en.n_tok, static_cast<double>(v.bytes) / 1048576.0);
-                } catch (const std::exception&) {
+                } catch (const std::exception& ex) {
+                    logE("req {} | slot {} | kv tier verify: restore of {} tok: error ({})", job.id, sl.id, en.n_tok, ex.what());
                 }
             }
             logI("req {} | slot {} | kv tier: restored {} tok from {} in {:.1f} ms ({:.2f} GB/s){}", job.id, sl.id, en.n_tok,

@@ -147,15 +147,23 @@ AddStep "srv_cache_precise" $true (GateCmd $SW "tier,sys,restore_conc,pool" "pre
 # compares it with the host copy, and every restore with the entry. The step passes only when the gate passes, the
 # server logs show >= 1 byte-identical spill and >= 1 byte-identical restore, and no verify line says "differ"
 # (a device copy short by 1/64 survived golden server: both restore paths went through the same broken copy).
+# REVIEW-ARCH4 P3-4: a verify that throws now logs "kv tier verify: ... error"; the step also fails on any such
+# line, and every spill ("kv tier: spill N tok to RAM") and restore ("kv tier: restored N tok") must have exactly one
+# verify line (attempts == spills / restores, passes == attempts), so a verify that is skipped or swallowed fails.
 $verifyRule = {
     param($o, $c, $wd, $log)
-    $lines = @(Get-ChildItem $wd -Filter "server_*.log" -File -ErrorAction SilentlyContinue | ForEach-Object { Get-Content $_.FullName } |
-               Where-Object { $_ -match "kv tier verify:" })
+    $all = @(Get-ChildItem $wd -Filter "server_*.log" -File -ErrorAction SilentlyContinue | ForEach-Object { Get-Content $_.FullName })
+    $lines = @($all | Where-Object { $_ -match "kv tier verify:" })
+    $vsp = @($lines | Where-Object { $_ -match "kv tier verify: spill of \d+ tok" }).Count
+    $vrs = @($lines | Where-Object { $_ -match "kv tier verify: restore of \d+ tok" }).Count
     $sp = @($lines | Where-Object { $_ -match "spill of \d+ tok byte-identical" }).Count
     $rs = @($lines | Where-Object { $_ -match "restore of \d+ tok byte-identical" }).Count
     $df = @($lines | Where-Object { $_ -match "differ" }).Count
-    "tier verify: $sp spill(s) and $rs restore(s) byte-identical, $df line(s) differ" | Add-Content $log
-    (& $gateRule $o $c) -and $sp -ge 1 -and $rs -ge 1 -and $df -eq 0
+    $er = @($lines | Where-Object { $_ -match "kv tier verify: .*error" }).Count
+    $nsp = @($all | Where-Object { $_ -match "kv tier: spill \d+ tok to RAM" }).Count
+    $nrs = @($all | Where-Object { $_ -match "kv tier: restored \d+ tok from" }).Count
+    "tier verify: spills $nsp, verify attempts $vsp, byte-identical $sp; restores $nrs, verify attempts $vrs, byte-identical $rs; $df line(s) differ, $er error(s)" | Add-Content $log
+    (& $gateRule $o $c) -and $sp -ge 1 -and $rs -ge 1 -and $df -eq 0 -and $er -eq 0 -and $vsp -eq $nsp -and $sp -eq $vsp -and $vrs -eq $nrs -and $rs -eq $vrs
 }
 AddStep "srv_tier_verify" $true (GateCmd $SW "tier" "balance" ($ram8s + @("--server-env", "WHIRL_TIER_VERIFY=1"))) $verifyRule
 

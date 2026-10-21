@@ -398,9 +398,11 @@ public:
     void runLoop();
     void stop();
     // Tests (REVIEW-ARCH3 P2-1): run fn on the engine thread at the start of the next loop iteration, i.e. after the
-    // job whose response the caller already received has finished its spill; blocks until fn ran. Engine state
-    // (tier entries, statistics) read inside fn is synchronized with the engine. Throws when the loop does not run
-    // fn within timeout (not started / stopped). Not used by the product.
+    // job whose response the caller already received has finished, including its spill when that spill ran at once
+    // (a deferred spill, spill_wanted, runs later in tierTick: not covered). Blocks until fn ran. Engine state (tier
+    // entries, statistics) read inside fn is synchronized with the engine. Throws when the loop does not claim fn
+    // within timeout (not started / stopped); fn is then cancelled and never runs, so it may capture the caller's
+    // locals by reference (REVIEW-ARCH4 P3-5). Not used by the product.
     void runOnLoop(std::function<void()> fn, std::chrono::milliseconds timeout = std::chrono::milliseconds(60000));
     // flush bound: --kv-ssd-mode always (a few entries are pending); shutdown (everything in RAM is
     // written at stop, so it may be gigabytes)
