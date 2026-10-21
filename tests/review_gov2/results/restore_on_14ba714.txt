@@ -1,0 +1,11 @@
+P2-2 [slot checkpoints]
+  device bytes: startup 24536456, parked 22543240, after the failed restore 22543240 (allocations tried while armed: 996608 996608 996608)
+  after the successful retry: device bytes 24536456 (startup 24536456), live allocations 38 (startup 38), resizes 0
+P2-2 [shared prefix checkpoints]
+  device bytes: startup 24534856, parked 22541640, after the failed restore 22541640 (allocations tried while armed: 996608 996608 996608)
+  after the successful retry: device bytes 24534856 (startup 24534856), live allocations 25 (startup 25), resizes 0
+P2-2 [slot checkpoints, WHIRL_CKPT_HOST: pinned slot checkpoints]
+  device bytes: startup 20550280, parked 20550152, after the failed restore 20550152 (allocations tried while armed: 64 64 64)
+  after the successful retry: device bytes 20550280 (startup 20550280), live allocations 42 (startup 42), resizes 0
+review_gov2 restore tests: 27 passed, 0 failed
+exit=0 

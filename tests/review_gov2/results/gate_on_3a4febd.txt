@@ -1,0 +1,10 @@
+gate: C:\ClaudeWorkspace\whirl-work\scratch\gov2review\old_tree\tools\gates\release_gate.ps1
+pattern: over the WDDM budget|GPU memory spill(:| continues| is over)
+filter:  server_*.log (-Recurse)
+ok   clean.log              expected PASS, step PASS (1 log(s), 0 hit(s))
+ok   startup_on.log         expected PASS, step PASS (1 log(s), 0 hit(s))
+ok   spill.log              expected FAIL, step FAIL (1 log(s), 1 hit(s): 2026-10-21 17:51:01.427 W GPU memory spill: WHIRL's GPU memory is 1.92 GiB over the Window)
+FAIL episode_start.log      expected FAIL, step PASS (1 log(s), 0 hit(s))
+FAIL pool_reallocated.log   expected FAIL, step PASS (1 log(s), 0 hit(s))
+review_gov2 gate check tests: 3 passed, 2 failed
+exit=1

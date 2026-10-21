@@ -1,0 +1,18 @@
+P2-1 [drift 0.19 GiB (R9700 Ornith R2a)]
+  FAIL line 120: e.grew && e.to == s.cfg.pool_start | the first grow goes straight to pool_start (203264 -> 360704, pool_start 393984)
+  FAIL line 122: s.pool == s.cfg.pool_start | pool back at startup size (pool 360704)
+  FAIL line 123: s.ended | episode_end reported
+  FAIL line 124: !s.g.reduced() | reduced() false after the episode (reduced 1)
+  resizes: t=60 393984->203264 t=630 203264->360704 | end t=-1 | free under budget at the end 2588 MiB
+P2-1 [no drift]
+  FAIL line 120: e.grew && e.to == s.cfg.pool_start | the first grow goes straight to pool_start (203264 -> 369920, pool_start 393984)
+  FAIL line 122: s.pool == s.cfg.pool_start | pool back at startup size (pool 369920)
+  FAIL line 123: s.ended | episode_end reported
+  FAIL line 124: !s.g.reduced() | reduced() false after the episode (reduced 1)
+  resizes: t=60 393984->203264 t=630 203264->369920 | end t=-1 | free under budget at the end 2585 MiB
+P3-1
+  FAIL line 174: after_quiet == s.cfg.hold_s | hold back to hold_s after 1800 s quiet (hold 120, hold_s 60)
+  FAIL line 191: t_grow > 0 && t_grow - t_over < 1.5 * s.cfg.hold_s | grow after the new episode 115 s after the last over-budget sample (must be < 90; doubled hold would give >= 120)
+  hold: doubled 120, after quiet 120; new-episode grow 115 s after the last over-budget sample
+review_gov2 governor tests: 12 passed, 10 failed
+exit=1 

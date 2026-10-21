@@ -1,0 +1,3 @@
+PROBE C-1 (grow overshoot)
+  resizes: t=30 329728->213504 t=330 213504->314880 t=450 314880->242432
+  episode_end at t=-1 with measured usage 0.00 GiB over the budget; next episode start t=-1 (0 s later)

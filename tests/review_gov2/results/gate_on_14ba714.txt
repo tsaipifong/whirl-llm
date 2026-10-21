@@ -1,0 +1,10 @@
+gate: C:\ClaudeWorkspace\whirl-work\wt_review_gov2\tools\gates\release_gate.ps1
+pattern: over the WDDM budget|GPU memory spill(:| continues| is over)|memory governor: .* free under the Windows video memory|memory governor: KV pool re-allocated
+filter:  server_*.log (-Recurse)
+ok   clean.log              expected PASS, step PASS (1 log(s), 0 hit(s))
+ok   startup_on.log         expected PASS, step PASS (1 log(s), 0 hit(s))
+ok   spill.log              expected FAIL, step FAIL (1 log(s), 1 hit(s): 2026-10-21 17:51:01.427 W GPU memory spill: WHIRL's GPU memory is 1.92 GiB over the Window)
+ok   episode_start.log      expected FAIL, step FAIL (1 log(s), 1 hit(s): 2026-10-21 17:50:56.392 W memory governor: 0.08 GiB free under the Windows video memory (W)
+ok   pool_reallocated.log   expected FAIL, step FAIL (1 log(s), 1 hit(s): 2026-10-21 17:54:22.094 W memory governor: KV pool re-allocated 393984 -> 200960 tokens (8)
+review_gov2 gate check tests: 5 passed, 0 failed
+exit=0

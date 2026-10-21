@@ -1,0 +1,20 @@
+P2-2 [slot checkpoints]
+  device bytes: startup 24536456, parked 22543240, after the failed restore 23539848 (allocations tried while armed: 996608 996608 996608)
+  FAIL line 267: dev_failed == dev_parked | device bytes after the failed restore equal those before it (23539848 vs 22543240, +996608)
+  after the successful retry: device bytes 25533064 (startup 24536456), live allocations 39 (startup 38), resizes 0
+  FAIL line 283: dev_end == dev0 | no leak after the retry: device bytes back at startup (25533064 vs 24536456, +996608)
+  FAIL line 284: live_end == live0 | live allocations back at startup (39 vs 38)
+P2-2 [shared prefix checkpoints]
+  device bytes: startup 24534856, parked 22541640, after the failed restore 23538248 (allocations tried while armed: 996608 996608 996608)
+  FAIL line 267: dev_failed == dev_parked | device bytes after the failed restore equal those before it (23538248 vs 22541640, +996608)
+  after the successful retry: device bytes 25531464 (startup 24534856), live allocations 26 (startup 25), resizes 0
+  FAIL line 283: dev_end == dev0 | no leak after the retry: device bytes back at startup (25531464 vs 24534856, +996608)
+  FAIL line 284: live_end == live0 | live allocations back at startup (26 vs 25)
+P2-2 [slot checkpoints, WHIRL_CKPT_HOST: pinned slot checkpoints]
+  device bytes: startup 20550280, parked 20550152, after the failed restore 20550216 (allocations tried while armed: 64 64 64)
+  FAIL line 267: dev_failed == dev_parked | device bytes after the failed restore equal those before it (20550216 vs 20550152, +64)
+  after the successful retry: device bytes 20550344 (startup 20550280), live allocations 46 (startup 42), resizes 0
+  FAIL line 283: dev_end == dev0 | no leak after the retry: device bytes back at startup (20550344 vs 20550280, +64)
+  FAIL line 284: live_end == live0 | live allocations back at startup (46 vs 42)
+review_gov2 restore tests: 18 passed, 9 failed
+exit=1 

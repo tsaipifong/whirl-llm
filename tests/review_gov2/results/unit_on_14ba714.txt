@@ -1,0 +1,8 @@
+P2-1 [drift 0.19 GiB (R9700 Ornith R2a)]
+  resizes: t=60 393984->203264 t=630 203264->393984 | end t=635 | free under budget at the end 1873 MiB
+P2-1 [no drift]
+  resizes: t=60 393984->203264 t=630 203264->393984 | end t=635 | free under budget at the end 2068 MiB
+P3-1
+  hold: doubled 120, after quiet 60; new-episode grow 55 s after the last over-budget sample
+review_gov2 governor tests: 22 passed, 0 failed
+exit=0 
