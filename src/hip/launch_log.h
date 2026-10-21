@@ -4,11 +4,20 @@
 // it launches exactly the same kernels with the same geometry (tools/impact/launch_table.py compares two runs).
 // SPDX-License-Identifier: Apache-2.0
 //
-// Off (the default): one predictable branch per launch and per function lookup, nothing recorded. Decode graph
-// replays do not pass through launchRaw (only their capture does), like the launch counter.
+// Off (the default): one predictable branch per launch, per function lookup and per allocation, nothing recorded.
+// Decode graph replays do not pass through launchRaw (only their capture does), like the launch counter.
+//
+// REVIEW-ARCH4 P3-2: each launch also carries a digest of its arguments (hip::launch stages them): scalars as they
+// are, and every 8-byte word that points into (or just below) a device allocation as (allocation ordinal, offset),
+// so the digest is the same from run to run while it still pins head0 / r0 / r1 / copy offsets / n_split / group
+// tables. The per-(kernel, geometry, digest) counts and an argument-sequence hash are written as extra lines
+// ("# argseqhash", "@ ..."); a table without them (older builds) compares on kernels and geometry only.
+// REVIEW-ARCH4 P3-6: the recorder is never destroyed; it is written once at exit (atexit / at_quick_exit) under its
+// lock, and launches after that are ignored.
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 namespace whirl::hip::launchlog {
@@ -18,5 +27,10 @@ extern const bool g_on;
 
 void onFunction(const void* f, const char* name);
 void onLaunch(const void* f, unsigned gx, unsigned gy, unsigned gz, unsigned bx, unsigned by, unsigned bz, unsigned shared);
+// the arguments of the next onLaunch on this thread (hip::launch, include/whirl/hip.h)
+void stageArgs(void* const* params, const std::uint32_t* sizes, std::size_t n);
+// device allocations (hip::malloc / free, module globals): the address space argument pointers are normalized against
+void onAlloc(std::uint64_t base, std::uint64_t bytes);
+void onFree(std::uint64_t base);
 
 }  // namespace whirl::hip::launchlog

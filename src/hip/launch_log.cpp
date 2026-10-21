@@ -5,11 +5,13 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <map>
 #include <mutex>
 #include <string>
 #include <tuple>
 #include <unordered_map>
+#include <utility>
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -35,18 +37,52 @@ struct Key {
     }
 };
 
+constexpr std::uint64_t kFnvBasis = 1469598103934665603ull;
+constexpr std::uint64_t kFnvPrime = 1099511628211ull;
+void fnv(std::uint64_t& h, const void* p, std::size_t len) {
+    const auto* c = static_cast<const unsigned char*>(p);
+    for (std::size_t i = 0; i < len; ++i) h = (h ^ c[i]) * kFnvPrime;
+}
+
+struct Alloc {
+    std::uint64_t bytes, ordinal;
+};
+
 struct Recorder {
     std::mutex mu;
+    bool closed = false;  // written at exit; later launches are ignored
     std::unordered_map<const void*, std::string> names;
     std::map<Key, std::uint64_t> counts;
+    std::map<std::pair<Key, std::uint64_t>, std::uint64_t> arg_counts;
+    std::map<std::uint64_t, Alloc> allocs;  // live device allocations by base address
+    std::uint64_t n_alloc = 0;
     std::uint64_t n = 0;
-    std::uint64_t seq = 1469598103934665603ull;  // FNV-1a 64 over the launch sequence (names, not addresses)
-    void mix(const void* p, std::size_t len) {
-        const auto* c = static_cast<const unsigned char*>(p);
-        for (std::size_t i = 0; i < len; ++i) seq = (seq ^ c[i]) * 1099511628211ull;
+    std::uint64_t seq = kFnvBasis;   // FNV-1a 64 over the launch sequence (names, not addresses)
+    std::uint64_t aseq = kFnvBasis;  // the same with each launch's argument digest
+
+    // one 8-byte argument word: inside an allocation (one past its end included) -> (ordinal, offset); below the
+    // next allocation by at most its size (a base shifted back by a row offset, e.g. KvArgs k - r0 * row) ->
+    // (ordinal, -distance); anything else as it is. Called with mu held.
+    void mixWord(std::uint64_t& h, std::uint64_t v) const {
+        auto it = allocs.upper_bound(v);  // first base > v
+        if (it != allocs.begin()) {
+            const auto& [base, a] = *std::prev(it);
+            if (v - base <= a.bytes) {
+                const std::uint64_t rec[3] = {1, a.ordinal, v - base};
+                fnv(h, rec, sizeof rec);
+                return;
+            }
+        }
+        if (it != allocs.end() && it->first - v <= it->second.bytes) {
+            const std::uint64_t rec[3] = {2, it->second.ordinal, it->first - v};
+            fnv(h, rec, sizeof rec);
+            return;
+        }
+        const std::uint64_t rec[2] = {0, v};
+        fnv(h, rec, sizeof rec);
     }
-    ~Recorder() {
-        if (!g_on) return;
+
+    void write() {
         std::string cmd;
 #ifdef _WIN32
         const wchar_t* w = GetCommandLineW();
@@ -64,23 +100,44 @@ struct Recorder {
         if (f == nullptr) return;
         std::fprintf(f, "# whirl launch log v1\n# cmd: %s\n# launches %llu seqhash %016llx kinds %zu\n", cmd.c_str(),
                      static_cast<unsigned long long>(n), static_cast<unsigned long long>(seq), counts.size());
+        std::fprintf(f, "# argseqhash %016llx argkinds %zu\n", static_cast<unsigned long long>(aseq), arg_counts.size());
         for (const auto& [k, c] : counts)
             std::fprintf(f, "%s %ux%ux%u %ux%ux%u %u %llu\n", k.name.c_str(), k.g[0], k.g[1], k.g[2], k.b[0], k.b[1], k.b[2], k.shared,
                          static_cast<unsigned long long>(c));
+        for (const auto& [ka, c] : arg_counts) {
+            const Key& k = ka.first;
+            std::fprintf(f, "@ %s %ux%ux%u %ux%ux%u %u %016llx %llu\n", k.name.c_str(), k.g[0], k.g[1], k.g[2], k.b[0], k.b[1], k.b[2],
+                         k.shared, static_cast<unsigned long long>(ka.second), static_cast<unsigned long long>(c));
+        }
         std::fclose(f);
     }
 };
 
+// never destroyed (REVIEW-ARCH4 P3-6): a thread still launching during static destruction finds it alive
 Recorder& rec() {
-    static Recorder r;
-    return r;
+    static Recorder* r = new Recorder;
+    return *r;
+}
+
+// the arguments hip::launch staged for this thread's next launch
+thread_local bool t_staged = false;
+thread_local std::uint64_t t_digest = 0;
+
+void writeAtExit() {
+    Recorder& r = rec();
+    std::lock_guard<std::mutex> lk(r.mu);
+    if (r.closed) return;
+    r.closed = true;
+    r.write();
 }
 
 }  // namespace
 
 const bool g_on = [] {
     if (folder().empty()) return false;
-    (void)rec();  // constructed now, so it is destroyed (and writes) after anything that launches
+    (void)rec();
+    std::atexit(writeAtExit);
+    std::at_quick_exit(writeAtExit);
     return true;
 }();
 
@@ -91,17 +148,59 @@ void onFunction(const void* f, const char* name) {
     r.names[f] = name;
 }
 
-void onLaunch(const void* f, unsigned gx, unsigned gy, unsigned gz, unsigned bx, unsigned by, unsigned bz, unsigned shared) {
-    if (!g_on) return;
+void onAlloc(std::uint64_t base, std::uint64_t bytes) {
+    if (!g_on || base == 0) return;
     Recorder& r = rec();
     std::lock_guard<std::mutex> lk(r.mu);
+    r.allocs[base] = Alloc{bytes, r.n_alloc++};
+}
+
+void onFree(std::uint64_t base) {
+    if (!g_on || base == 0) return;
+    Recorder& r = rec();
+    std::lock_guard<std::mutex> lk(r.mu);
+    r.allocs.erase(base);
+}
+
+void stageArgs(void* const* params, const std::uint32_t* sizes, std::size_t n) {
+    if (!g_on) return;
+    Recorder& r = rec();
+    std::uint64_t h = kFnvBasis;
+    std::lock_guard<std::mutex> lk(r.mu);
+    for (std::size_t i = 0; i < n; ++i) {
+        const auto* p = static_cast<const unsigned char*>(params[i]);
+        const std::uint32_t sz = sizes[i];
+        fnv(h, &sz, sizeof sz);
+        std::uint32_t off = 0;
+        for (; off + 8 <= sz; off += 8) {
+            std::uint64_t v;
+            std::memcpy(&v, p + off, 8);
+            r.mixWord(h, v);
+        }
+        fnv(h, p + off, sz - off);
+    }
+    t_digest = h;
+    t_staged = true;
+}
+
+void onLaunch(const void* f, unsigned gx, unsigned gy, unsigned gz, unsigned bx, unsigned by, unsigned bz, unsigned shared) {
+    if (!g_on) return;
+    const std::uint64_t digest = t_staged ? t_digest : 0;
+    t_staged = false;
+    Recorder& r = rec();
+    std::lock_guard<std::mutex> lk(r.mu);
+    if (r.closed) return;
     const auto it = r.names.find(f);
     Key k{it != r.names.end() ? it->second : std::string("?"), {gx, gy, gz}, {bx, by, bz}, shared};
-    r.counts[k] += 1;
     r.n += 1;
-    r.mix(k.name.data(), k.name.size());
+    fnv(r.seq, k.name.data(), k.name.size());
     const unsigned geo[7] = {gx, gy, gz, bx, by, bz, shared};
-    r.mix(geo, sizeof geo);
+    fnv(r.seq, geo, sizeof geo);
+    fnv(r.aseq, k.name.data(), k.name.size());
+    fnv(r.aseq, geo, sizeof geo);
+    fnv(r.aseq, &digest, sizeof digest);
+    r.counts[k] += 1;
+    r.arg_counts[{std::move(k), digest}] += 1;
 }
 
 }  // namespace whirl::hip::launchlog

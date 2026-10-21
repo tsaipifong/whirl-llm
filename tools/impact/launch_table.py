@@ -10,6 +10,11 @@ table exactly (same kernels, same grids, same sequence).
     python tools/impact/launch_table.py table <folder> [-o table.txt]       # one table per run folder
     python tools/impact/launch_table.py diff <table_or_folder_a> <table_or_folder_b>
 
+REVIEW-ARCH4 P3-2: logs from builds with the argument digest also carry, per (kernel, geometry, argument digest),
+a count ("@" lines) and an argument-sequence hash; when both sides have them they are compared too (scalars and
+allocation-relative pointer offsets: head0, r0 / r1, copy offsets, n_split, group tables). A side without them (an
+older build) is compared on kernels and geometry only; the summary line says in how many runs arguments were compared.
+
 Only deterministic processes are compared by default: whirl.exe CLI runs (golden single / pair / ngram, seqtest,
 selftest). Server processes (whirl-server.exe) batch requests by arrival time, so their sequences legitimately
 vary; `--all` includes them (count tables only, no sequence hash).
@@ -46,7 +51,7 @@ def norm_cmd(cmd: str) -> str:
 
 
 def read_log(path):
-    cmd, n, seq, rows = "", 0, "", {}
+    cmd, n, seq, rows, aseq, args = "", 0, "", {}, "", None
     with open(path, encoding="utf-8", errors="replace") as f:
         for line in f:
             line = line.rstrip("\n")
@@ -56,10 +61,15 @@ def read_log(path):
                 m = re.match(r"# launches (\d+) seqhash ([0-9a-f]+)", line)
                 if m:
                     n, seq = int(m.group(1)), m.group(2)
+            elif line.startswith("# argseqhash "):
+                aseq, args = line.split()[2], {}
+            elif line.startswith("@ "):
+                k, _, c = line[2:].rpartition(" ")
+                args[k] = args.get(k, 0) + int(c)
             elif line and not line.startswith("#"):
                 k, _, c = line.rpartition(" ")
                 rows[k] = rows.get(k, 0) + int(c)
-    return cmd, n, seq, rows
+    return cmd, n, seq, rows, aseq, args
 
 
 def table_of(folder, include_all=False):
@@ -67,7 +77,7 @@ def table_of(folder, include_all=False):
     for fn in sorted(os.listdir(folder)):
         if not (fn.startswith("launch_") and fn.endswith(".txt")):
             continue
-        cmd, n, seq, rows = read_log(os.path.join(folder, fn))
+        cmd, n, seq, rows, aseq, args = read_log(os.path.join(folder, fn))
         key = norm_cmd(cmd)
         server = key.startswith("whirl-server")
         if server and not include_all:
@@ -80,7 +90,7 @@ def table_of(folder, include_all=False):
             while f"{key} #{i}" in runs:
                 i += 1
             key = f"{key} #{i}"
-        runs[key] = {"n": n, "seq": "" if server else seq, "rows": rows}
+        runs[key] = {"n": n, "seq": "" if server else seq, "rows": rows, "aseq": "" if server else aseq, "args": args}
     return runs
 
 
@@ -88,8 +98,12 @@ def write_table(runs, out):
     for key in sorted(runs):
         r = runs[key]
         out.write(f"== {key}\n   launches {r['n']} seqhash {r['seq'] or '-'} kinds {len(r['rows'])}\n")
+        if r.get("args") is not None:
+            out.write(f"   argseqhash {r['aseq'] or '-'} argkinds {len(r['args'])}\n")
         for k in sorted(r["rows"]):
             out.write(f"   {k} {r['rows'][k]}\n")
+        for k in sorted(r.get("args") or {}):
+            out.write(f"   @ {k} {r['args'][k]}\n")
 
 
 def read_table(path):
@@ -98,11 +112,17 @@ def read_table(path):
         for line in f:
             line = line.rstrip("\n")
             if line.startswith("== "):
-                cur = {"n": 0, "seq": "", "rows": {}}
+                cur = {"n": 0, "seq": "", "rows": {}, "aseq": "", "args": None}
                 runs[line[3:]] = cur
             elif line.startswith("   launches "):
                 m = re.match(r"   launches (\d+) seqhash (\S+)", line)
                 cur["n"], cur["seq"] = int(m.group(1)), "" if m.group(2) == "-" else m.group(2)
+            elif line.startswith("   argseqhash "):
+                v = line.split()[1]
+                cur["aseq"], cur["args"] = "" if v == "-" else v, {}
+            elif line.startswith("   @ "):
+                k, _, c = line[5:].rpartition(" ")
+                cur["args"][k] = int(c)
             elif line.startswith("   "):
                 k, _, c = line.strip().rpartition(" ")
                 cur["rows"][k] = int(c)
@@ -115,6 +135,7 @@ def load(p, include_all):
 
 def diff(a, b):
     bad = 0
+    n_args = 0
     for key in sorted(set(a) | set(b)):
         if key not in a or key not in b:
             print(f"ONLY {'B' if key not in a else 'A'}  {key}")
@@ -123,16 +144,26 @@ def diff(a, b):
         ra, rb = a[key], b[key]
         same_rows = ra["rows"] == rb["rows"]
         same_seq = ra["seq"] == rb["seq"]
-        if same_rows and same_seq and ra["n"] == rb["n"]:
-            print(f"SAME  {key}  ({ra['n']} launches, {len(ra['rows'])} kinds)")
+        has_args = ra.get("args") is not None and rb.get("args") is not None
+        same_args = not has_args or (ra["args"] == rb["args"] and ra["aseq"] == rb["aseq"])
+        n_args += 1 if has_args else 0
+        if same_rows and same_seq and same_args and ra["n"] == rb["n"]:
+            extra = f", arguments {len(ra['args'])} kinds" if has_args else ""
+            print(f"SAME  {key}  ({ra['n']} launches, {len(ra['rows'])} kinds{extra})")
             continue
         bad += 1
-        print(f"DIFF  {key}  launches {ra['n']} vs {rb['n']}, seqhash {ra['seq'] or '-'} vs {rb['seq'] or '-'}")
+        extra = f", argseqhash {ra['aseq'] or '-'} vs {rb['aseq'] or '-'}" if has_args else ""
+        print(f"DIFF  {key}  launches {ra['n']} vs {rb['n']}, seqhash {ra['seq'] or '-'} vs {rb['seq'] or '-'}{extra}")
         for k in sorted(set(ra["rows"]) | set(rb["rows"])):
             ca, cb = ra["rows"].get(k, 0), rb["rows"].get(k, 0)
             if ca != cb:
                 print(f"      {k}: {ca} vs {cb}")
-    print(f"launch tables: {len(set(a) | set(b)) - bad} same, {bad} different")
+        if has_args:
+            for k in sorted(set(ra["args"]) | set(rb["args"])):
+                ca, cb = ra["args"].get(k, 0), rb["args"].get(k, 0)
+                if ca != cb:
+                    print(f"      @ {k}: {ca} vs {cb}")
+    print(f"launch tables: {len(set(a) | set(b)) - bad} same, {bad} different; arguments compared in {n_args}")
     return 1 if bad else 0
 
 
