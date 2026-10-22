@@ -1272,16 +1272,53 @@ int serveMain(int argc, char** argv, const char* program) {
             a.explicit_mb.reset();
             return tier::ramTierSize(a).mb;
         }();
-        if (const auto rf = startfit::ramTierFit(kv_ram_mb, rin.avail_phys, ram_auto_mb, rin.explicit_mb.has_value());
+        // s8-719 / kvram719: pinned host memory the HIP GPUs can keep resident (startfit::pinnedRoomMb), measured now (the
+        // embedding is already pinned)
+        std::uint64_t pinned_room = startfit::pinned_room_unknown;
+        std::string pinned_why;
+        if (kv_ram_mb > 0 && n_ck > 0 && !no_pc) {
+            const hip::GpuPinned gp = hip::gpuPinnedNow();
+            startfit::PinnedState pst;
+            pst.total_phys = rin.total_phys;
+            pst.pinned_max = gp.ok ? gp.max_shared : 0;
+            std::string per;
+            for (const hip::GpuPinnedDev& g : gp.devs) {
+                const std::uint64_t own = std::max(g.nonlocal_usage, g.own_shared);  // iGPU: DXGI says 0 (REVIEW C4)
+                pst.gpus.push_back({g.nonlocal_budget, own, g.shared_system});
+                per += std::format("{}{} MiB {} (this process {} MiB)", per.empty() ? "" : ", ",
+                                   (g.nonlocal_budget > 0 ? g.nonlocal_budget : g.shared_system) >> 20,
+                                   g.nonlocal_budget > 0 ? "non-local budget" : "shared GPU memory", own >> 20);
+            }
+            pinned_room = startfit::pinnedRoomMb(pst);
+            logI("kv tier: pinned memory now: {} HIP GPU(s) [{}] (a pinned buffer counts on each; a non-local budget is shared "
+                 "by them); all programs {} MiB (largest adapter) of half the RAM ({} MiB) -> room for the RAM tier {} "
+                 "(reserves {} / {} MiB)",
+                 pst.gpus.size(), per, pst.pinned_max >> 20, pst.total_phys >> 21,
+                 pinned_room == startfit::pinned_room_unknown ? std::string("unknown") : std::format("{} MiB", pinned_room),
+                 startfit::pinned_reserve_mb, startfit::pinned_machine_reserve_mb);
+            pinned_why = startfit::pinnedWhy(pinned_room == startfit::pinned_room_unknown ? 0 : pinned_room, pst.gpus.size());
+        }
+        std::string ram_off_reason = rsz.reason;  // what the "RAM tier off" line names (REVIEW-S8-719 N3)
+        if (const auto rf = startfit::ramTierFit(kv_ram_mb, rin.avail_phys, ram_auto_mb, rin.explicit_mb.has_value(), pinned_room,
+                                                 entry_mb);
             rf && n_ck > 0 && !no_pc) {
+            if (rf->mb == 0 && rf->pinned) {
+                pinned_why += startfit::pinnedOffWhy(rf->below_entry, entry_mb);
+                ram_off_reason = std::format("{} {} MiB asked: {}", rin.explicit_mb ? std::string(rin.explicit_src) : std::string("auto"),
+                                             kv_ram_mb, pinned_why);
+            }
             if (!rin.explicit_mb) {
-                logI("kv tier: RAM tier capped at {} MiB (the automatic size would be {} MiB) while a crash with larger RAM tiers "
-                     "is investigated",
-                     rf->mb, kv_ram_mb);
+                if (rf->pinned)
+                    logW("kv tier: RAM tier {} MiB (the automatic size would be {} MiB): {}", rf->mb, kv_ram_mb, pinned_why);
+                else
+                    logI("kv tier: RAM tier capped at {} MiB (the automatic size would be {} MiB) while a crash with larger RAM "
+                         "tiers is investigated",
+                         rf->mb, kv_ram_mb);
             } else {
                 std::string why;
                 if (rf->safe)
                     why = std::format("capped at {} MiB while a crash with larger RAM tiers is investigated", startfit::ram_tier_safe_mb);
+                if (rf->pinned) why += std::format("{}{}", why.empty() ? "" : "; ", pinned_why);
                 if (rf->half)
                     why += std::format("{}the RAM tier is pinned host memory; more than half of the {} MiB of RAM available now "
                                        "would make the system page, so it is lowered to half",
@@ -1303,7 +1340,7 @@ int serveMain(int argc, char** argv, const char* program) {
             }
             tier_alloc_s = msSince(t_alloc0) / 1000.0;
         } else if (kv_ram_mb == 0 && n_ck > 0 && !no_pc) {
-            logI("kv tier: RAM tier off ({})", rsz.reason);
+            logI("kv tier: RAM tier off ({})", ram_off_reason);
         }
         // ---- vision encoder, discrete GPU: read the mmproj now (pinned host memory only, no VRAM) so the KV pool below
         // leaves room for what the encoder adds after startup (REVIEW-GOV-3 question 4: on the R9700 the first image added

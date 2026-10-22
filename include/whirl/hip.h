@@ -124,6 +124,22 @@ struct GpuOthers {
     double cost_us = 0;
 };
 GpuOthers gpuOthers(int dev);
+// GPU-mapped (pinned) system memory now (kvram719 / s8-719; the sizing rule is startfit::pinnedRoomMb): PDH "GPU Adapter
+// Memory(*)\Shared Usage" (all processes; max_shared = the largest adapter, sum_shared = all adapters) and, for every HIP
+// GPU (a hipHostMalloc buffer is mapped to each and each adapter counts it), this process's DXGI non-local budget and
+// usage on that adapter and its SharedSystemMemory. A HIP GPU whose adapter cannot be matched by LUID keeps zeros (it
+// still counts as a GPU). ok = false off Windows or when the PDH counters cannot be read.
+struct GpuPinnedDev {
+    std::uint64_t nonlocal_budget = 0, nonlocal_usage = 0, shared_system = 0;
+    std::uint64_t own_shared = 0;  // PDH "GPU Process Memory" Shared Usage of this process on that adapter (0: unknown)
+};
+struct GpuPinned {
+    bool ok = false;
+    std::uint64_t max_shared = 0, sum_shared = 0;
+    int adapters = 0;
+    std::vector<GpuPinnedDev> devs;  // one per HIP GPU
+};
+GpuPinned gpuPinnedNow();
 
 // ---- streams and events
 // Blocking streams order with the legacy null stream; non-blocking ones do not.

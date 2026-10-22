@@ -8,22 +8,69 @@
 
 namespace whirl::startfit {
 
-std::optional<RamFit> ramTierFit(std::uint64_t mb, std::uint64_t avail_phys_bytes, std::uint64_t auto_mb, bool explicit_size) {
+std::uint64_t pinnedRoomMb(const PinnedState& s) {
+    constexpr std::uint64_t MiB = 1ull << 20;
+    std::uint64_t room = pinned_room_unknown;
+    const auto take = [&](std::uint64_t limit_b, std::uint64_t used_b, std::uint64_t reserve_mb) {
+        const std::uint64_t free_mb = limit_b > used_b ? (limit_b - used_b) / MiB : 0;
+        room = std::min(room, free_mb > reserve_mb ? (free_mb - reserve_mb) / 512 * 512 : 0);
+    };
+    // per HIP GPU: a hipHostMalloc buffer is mapped to every HIP GPU and charged on each. A discrete GPU's DXGI non-local
+    // budget holds this process's pinned memory times the number of HIP GPUs (kvram719, R9700 box: 22528 MiB worked,
+    // 23552 failed at 48026 / 2). An integrated GPU reports a non-local budget of 0 (the 8060S); its shared GPU memory
+    // (SharedSystemMemory) is the limit there, without the division (kvram719: 22528 MiB fit the 8060S's 32587).
+    const std::uint64_t n = std::max<std::uint64_t>(s.gpus.size(), 1);
+    for (const PinnedGpu& g : s.gpus) {
+        if (g.nonlocal_budget > 0) take(g.nonlocal_budget / n, g.own_nonlocal, pinned_reserve_mb);
+        else if (g.shared_system > 0) take(g.shared_system, g.own_nonlocal, pinned_reserve_mb);
+    }
+    // machine: every program's GPU-pinned memory (largest adapter) well under half of the RAM (kvram719)
+    if (s.total_phys > 0) take(s.total_phys / 2, s.pinned_max, pinned_machine_reserve_mb);
+    return room;
+}
+
+std::string pinnedWhy(std::uint64_t room_mb, std::size_t n_gpus) {
+    // no "hip" anywhere, no "failed:" (REVIEW-S8-719 A1): log scanners match hipError / hip...719 case-insensitively
+    return std::format("lowered to {} MiB: the GPUs can keep only so much pinned host memory resident ({} GPU(s) map it; "
+                       "a larger RAM tier makes the first request fail with GPU error 719)",
+                       room_mb, n_gpus);
+}
+
+std::string pinnedOffWhy(bool below_entry, std::uint64_t entry_mb) {
+    return below_entry ? std::format("; that is below one max-context entry ({} MiB), so the host tiers are off (RAM and SSD)",
+                                     entry_mb)
+                       : std::string("; no room left, so the host tiers are off (RAM and SSD)");
+}
+
+std::optional<RamFit> ramTierFit(std::uint64_t mb, std::uint64_t avail_phys_bytes, std::uint64_t auto_mb, bool explicit_size,
+                                 std::uint64_t pinned_room_mb, std::uint64_t entry_mb) {
     (void)auto_mb;
     if (mb == 0) return std::nullopt;
     RamFit r;
     r.mb = mb;
     // v0.2.2.2: the cap first, then the half-of-available-RAM rule on the capped size, which lowers to half (whole
-    // 512 MiB): asking for more never gives less (0.2.2.1: 22528 -> 20480 but 24064 -> 16384)
+    // 512 MiB): asking for more never gives less (0.2.2.1: 22528 -> 20480 but 24064 -> 16384). s8-719: the GPU-pinned
+    // room after the cap (explicit and automatic sizes alike; each step is a min, so an explicit size stays monotonic).
     if (r.mb > ram_tier_safe_mb) {
         r.mb = ram_tier_safe_mb;
         r.safe = true;
+    }
+    if (pinned_room_mb != pinned_room_unknown && r.mb > pinned_room_mb) {
+        r.mb = pinned_room_mb;
+        r.pinned = true;
+        // FR-CACHE P3-4 (src/tier/ram_size.h): the automatic size holds one max-context entry, else off (REVIEW-S8-719
+        // C2). Not an explicit size: it is clamped to the room and used as given (ram_size.h), so asking for more never
+        // gives less (REVIEW-S8-719-2 X1/X2: golden's 8192 on two GPUs at 96 GB -> 4096, not off).
+        if (!explicit_size && r.mb > 0 && r.mb < entry_mb) {
+            r.mb = 0;
+            r.below_entry = true;
+        }
     }
     if (explicit_size && avail_phys_bytes > 0 && (r.mb << 20) > avail_phys_bytes / 2) {
         r.mb = (avail_phys_bytes / 2 >> 20) / 512 * 512;
         r.half = true;
     }
-    if (!r.half && !r.safe) return std::nullopt;
+    if (!r.half && !r.safe && !r.pinned) return std::nullopt;
     return r;
 }
 

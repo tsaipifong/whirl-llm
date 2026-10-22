@@ -32,13 +32,58 @@ namespace whirl::startfit {
 // ram_tier_safe_mb until the cause is known. Then (v0.2.2.2: the cap first, so asking for more never gives less) an explicit
 // size above half of the RAM available now is lowered to half of it (whole 512 MiB). auto_mb: unused (kept for callers).
 inline constexpr std::uint64_t ram_tier_safe_mb = 20480;
+// GPU-pinned room for the RAM tier (kvram719 / s8-719). The RAM tier is pinned host memory mapped to every HIP GPU, and
+// Windows limits how much of it the GPUs can keep resident: past the limit the allocations still succeed, but the first
+// request fails with hipError 719 (AMD_LOG_LEVEL=1: "PAL failed to submit CMD! result:-5"). pinnedRoomMb takes the
+// smallest room of: each HIP GPU (a discrete GPU's DXGI non-local budget / the number of HIP GPUs; an integrated GPU,
+// which reports a non-local budget of 0, its SharedSystemMemory), minus this process's pinned memory there and
+// pinned_reserve_mb; and the machine (half of the RAM minus every program's GPU-pinned memory, largest adapter, minus
+// pinned_machine_reserve_mb). Measured: kvram719 (R9700 box, 64 GB carve-out) and s8-719 (8060S at 96 GB with the
+// R9700 attached: 4096 MiB worked, 8192 failed; the R9700's 15435 MiB budget / 2 was the limit). Every RAM tier,
+// explicit or automatic, is lowered to that room after the 20480 MiB cap, with an "adjusted:" line for an explicit
+// size (a server that answers with a smaller tier instead of a server whose every request fails); a room below one
+// max-context entry turns the automatic tier off (ramTierFit entry_mb); an explicit size is only clamped.
+// Machine reserve 2048 (REVIEW-S8-719 A2; was 6144, carried over from kvram719): the largest value every recorded data
+// point admits. It still catches kvram719's failure (another server had 10890 MiB pinned: 32587 - 12178 - 2048 = 18361
+// < 20480 failed) and admits s23_ram12288_vis (8704 answered at 10161 MiB 8060S Shared Usage: 16203 - 1441 - 2048 =
+// 12714); 6144 would have cut that to 8192 and lowered single-R9700 32 GB-RAM hosts' automatic tier with no failure
+// on record.
+inline constexpr std::uint64_t pinned_reserve_mb = 2048;
+inline constexpr std::uint64_t pinned_machine_reserve_mb = 2048;
+inline constexpr std::uint64_t pinned_room_unknown = ~0ull;
+struct PinnedGpu {                     // one HIP GPU's adapter, as this process sees it (DXGI)
+    std::uint64_t nonlocal_budget = 0;  // bytes: DXGI non-local budget; 0 on an integrated GPU (the 8060S reports 0)
+    std::uint64_t own_nonlocal = 0;     // bytes: this process's pinned memory on that adapter so far (DXGI non-local usage;
+                                        // on an integrated GPU, which reports 0 there, PDH process Shared Usage)
+    std::uint64_t shared_system = 0;    // bytes: DXGI SharedSystemMemory of that adapter ("shared GPU memory")
+};
+struct PinnedState {
+    std::uint64_t total_phys = 0;  // bytes; 0 = unknown
+    std::uint64_t pinned_max = 0;  // bytes: GPU Shared Usage of the largest adapter (all processes, this one included)
+    std::vector<PinnedGpu> gpus;   // every HIP GPU a pinned buffer is mapped to (empty = unknown)
+};
+// MiB the RAM tier may still pin, whole 512 MiB (0: none); pinned_room_unknown when nothing is known.
+std::uint64_t pinnedRoomMb(const PinnedState& s);
+// The reason text of a RAM tier lowered to the pinned room (log and "adjusted:" line). It must match none of the error
+// patterns the gates and repro scripts scan server logs for (golden.ps1, kvram719_tier.ps1, fix719.ps1: "hipError",
+// "hip ... 719", "| failed:", "PAL failed"): a healthy, adjusted server must not read as a failed one (REVIEW-S8-719 A1).
+std::string pinnedWhy(std::uint64_t room_mb, std::size_t n_gpus);
+// What is appended to pinnedWhy when the pinned room turns the tier off (mb 0): below_entry (the room is below one
+// max-context entry, automatic size only) or no room at all. With the RAM tier the SSD tier behind it is off too, and
+// the text says so (REVIEW-S8-719-2 C-1).
+std::string pinnedOffWhy(bool below_entry, std::uint64_t entry_mb);
 struct RamFit {
     std::uint64_t mb = 0;
-    bool half = false;  // lowered because it was more than half of the available RAM
-    bool safe = false;  // capped at ram_tier_safe_mb
+    bool half = false;    // lowered because it was more than half of the available RAM
+    bool safe = false;    // capped at ram_tier_safe_mb
+    bool pinned = false;  // lowered to the GPU-pinned room (pinned_room_mb)
+    bool below_entry = false;  // automatic size: the pinned room is below one max-context entry (entry_mb): off (mb 0)
 };
 // nullopt: unchanged. explicit_size: the user gave the size (--kv-ram-mb / WHIRL_KV_RAM_MB).
-std::optional<RamFit> ramTierFit(std::uint64_t mb, std::uint64_t avail_phys_bytes, std::uint64_t auto_mb, bool explicit_size);
+// entry_mb: one max-context entry (MiB); an automatic tier the pinned room lowers below it is turned off (FR-CACHE P3-4,
+// ram_size.h). An explicit size is clamped to the room and otherwise used as given (monotonic in the request).
+std::optional<RamFit> ramTierFit(std::uint64_t mb, std::uint64_t avail_phys_bytes, std::uint64_t auto_mb, bool explicit_size,
+                                 std::uint64_t pinned_room_mb = pinned_room_unknown, std::uint64_t entry_mb = 0);
 
 // the pool the plan must reach: max(pool_min_tokens, pool_hard_min)
 std::uint64_t wantTokens(const vram::FitInput& fi);
