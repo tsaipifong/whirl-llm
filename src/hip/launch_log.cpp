@@ -178,6 +178,19 @@ void onFree(std::uint64_t base) {
     r.allocs.erase(base);
 }
 
+void testAlloc(std::uint64_t base, std::uint64_t bytes) {
+    Recorder& r = rec();
+    std::lock_guard<std::mutex> lk(r.mu);
+    r.allocs[base] = Alloc{bytes, r.n_alloc++};
+}
+
+void testClearAllocs() {
+    Recorder& r = rec();
+    std::lock_guard<std::mutex> lk(r.mu);
+    r.allocs.clear();
+    r.n_alloc = 0;
+}
+
 namespace {
 // the argument digest (see launch_log.h); called with r.mu held; raw != nullptr also writes the words out
 std::uint64_t digestLocked(const Recorder& r, void* const* params, const std::uint32_t* sizes, std::size_t n, std::string* raw) {

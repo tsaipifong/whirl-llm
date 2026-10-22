@@ -39,5 +39,9 @@ std::uint64_t argDigest(void* const* params, const std::uint32_t* sizes, std::si
 // device allocations (hip::malloc / free, module globals): the address space argument pointers are normalized against
 void onAlloc(std::uint64_t base, std::uint64_t bytes);
 void onFree(std::uint64_t base);
+// unit tests (arch6f): register / clear allocations whether or not the log is on, to digest the same arguments
+// against two address layouts
+void testAlloc(std::uint64_t base, std::uint64_t bytes);
+void testClearAllocs();
 
 }  // namespace whirl::hip::launchlog
