@@ -75,8 +75,8 @@ def read_log(path):
 def table_of(folder, include_all=False):
     runs = {}
     for fn in sorted(os.listdir(folder)):
-        if not (fn.startswith("launch_") and fn.endswith(".txt")):
-            continue
+        if not (fn.startswith("launch_") and fn.endswith(".txt")) or fn.endswith(".raw.txt"):
+            continue  # launch_<pid>.raw.txt: the WHIRL_LAUNCH_LOG_RAW per-launch dump (arch6e/rawcmp.py reads it)
         cmd, n, seq, rows, aseq, args = read_log(os.path.join(folder, fn))
         key = norm_cmd(cmd)
         server = key.startswith("whirl-server")
