@@ -3451,6 +3451,51 @@ void testGpuSelect() {
         const std::string l = listingText(chain, autoPick(chain));
         CHECK(has(l, "pci:71:0 (PCI bus 71, device 0)") && has(l, "pci:74:0 (PCI bus 74, device 0)") && has(l, "pci:196:0 (PCI bus 196, device 0)"));
     }
+
+    // default with a model (owner 2026-10-23: "VRAM must fit first, then discrete > APU"): among GPUs with
+    // kernels, those the model fits in; among them discrete first, then more memory, then lowest index.
+    // None fits: the same order over all supported GPUs, and the reason says so and names the largest.
+    {
+        auto fit = [](std::vector<GpuRecord> g, int i, std::uint64_t mib) {
+            g[i].fit_mib = mib;
+            return g;
+        };
+        const std::vector<GpuRecord> host = fit(two, 0, 96 * 1024);  // this machine: 8060S carve-out 96 GiB, R9700 31.9 GiB
+        const std::uint64_t swift = modelNeedMib(16000ull << 20, 0), ornith35 = modelNeedMib(20000ull << 20, 900ull << 20),
+                            ornith122 = modelNeedMib(70000ull << 20, 0), huge = modelNeedMib(200000ull << 20, 0);
+        CHECK_EQ(swift, std::uint64_t(16000 + 2048));
+        CHECK_EQ(ornith35, std::uint64_t(20900 + 2048));
+        CHECK_EQ(modelNeedMib(0, 0), std::uint64_t(0));  // unknown model: no fit step
+        CHECK(selectGpus(host, "", swift) == std::vector<int>{1});      // fits both: discrete R9700 (as today)
+        CHECK(selectGpus(host, "", ornith35) == std::vector<int>{1});
+        CHECK(selectGpus(host, "", ornith122) == std::vector<int>{0});  // fits only the 8060S: the 8060S
+        CHECK(selectGpus(host, "", huge) == std::vector<int>{1});       // none fits: the order over all
+        CHECK(selectGpus(host, "", 0) == std::vector<int>{1});
+        CHECK(selectGpus(host, "8060s", swift) == std::vector<int>{0});  // an explicit choice is never overridden
+        CHECK(selectGpus(host, "r9700", ornith122) == std::vector<int>{1});
+        CHECK(selectGpus(igpu_only, "", ornith122) == std::vector<int>{0});
+        CHECK(selectGpus(r9700_only, "", huge) == std::vector<int>{0});
+        CHECK_EQ(autoPick(host, ornith122), 0);
+        CHECK_EQ(autoPick(host), 1);  // no model: the rule without the fit step ([default] in the device list)
+        CHECK(selectGpus(four, "", 20 * 1024) == std::vector<int>{0});  // 20 GiB: only the R9700s fit
+        CHECK(selectGpus(four, "", 12 * 1024) == std::vector<int>{0});  // fits all: more memory -> an R9700
+        CHECK(selectGpus(four, "", 40 * 1024) == std::vector<int>{0});  // none fits
+        {
+            // a small model on a host of one R9700 and one 9070 XT listed first: the R9700 (more memory)
+            const std::vector<GpuRecord> mixed = {rec(0, k9070, "gfx1201", 7, false, true, 16304), rec(1, kR97, "gfx1201", 3, false, true, 32624)};
+            CHECK(selectGpus(mixed, "", 8 * 1024) == std::vector<int>{1});
+        }
+        const std::string r1 = autoReason(host, 1, swift);
+        CHECK(has(r1, "fits") && has(r1, "discrete") && has(r1, "17.6 GiB") && has(r1, "--device"));
+        const std::string r2 = autoReason(host, 0, ornith122);
+        CHECK(has(r2, "fits") && has(r2, "70.4 GiB"));
+        const std::string r3 = autoReason(host, 1, huge);
+        CHECK(has(r3, "no GPU") && has(r3, "largest") && has(r3, "AMD Radeon(TM) 8060S Graphics"));
+        CHECK(!has(r1 + r2 + r3, "function"));
+        // the probe carries the usable memory
+        const std::vector<GpuRecord> back = parseRecords(formatRecord(host[0]));
+        CHECK(back.size() == 1 && back[0].fit_mib == host[0].fit_mib);
+    }
     // a list of two: a clear error, never a silent fallback to one of them
     CHECK(has(errOf(two, "r9700,8060s"), "only one GPU is supported in this version"));
     CHECK(has(errOf(two, "0,1"), "only one GPU is supported in this version"));

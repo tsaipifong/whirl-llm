@@ -46,6 +46,8 @@ struct GpuRecord {
     int pci_function = 0;
     std::uint64_t total_mib = 0;  // memory the runtime reports (an integrated GPU: carve-out + shared RAM)
     int compute_units = 0;
+    std::uint64_t fit_mib = 0;    // memory a model can use: VRAM of a discrete GPU, the BIOS carve-out of an integrated one
+                                  // (DXGI); 0 = unknown (total_mib is used)
     std::string uuid;             // hipDeviceProp_t::uuid as 8-4-4-4-12 hex, "" if the runtime reports none (all zero)
     std::string luid;             // 16 hex digits (Windows adapter LUID: changes every boot), "" if unknown
     std::string mem_text;         // the memory as the device list prints it ("" = total_mib in GiB)
@@ -80,10 +82,21 @@ std::vector<std::string> parseDeviceList(std::string_view spec);
 // Empty spec: among the GPUs this build has kernels for, a discrete GPU before an integrated one, then the
 // most memory, then the lowest index. This version uses one GPU: a list of two or more throws
 // "only one GPU is supported in this version". Throws SelectError (listing the GPUs) when nothing matches.
-std::vector<int> selectGpus(const std::vector<GpuRecord>& gpus, std::string_view spec);
+// need_mib: what the model needs (modelNeedMib; 0 = unknown). Only the automatic pick uses it: among the
+// GPUs with kernels, those with fit_mib >= need_mib first (owner 2026-10-23: fit first, then discrete >
+// integrated, then more memory, then lowest index); when none fits, the same order over all of them.
+std::vector<int> selectGpus(const std::vector<GpuRecord>& gpus, std::string_view spec, std::uint64_t need_mib = 0);
+
+// Estimate (MiB) of what a model needs on the GPU before any context: the GGUF file + the mmproj file +
+// 2048 MiB for the smallest context and buffers. 0 when the model size is unknown. The memory checks at
+// load (startup fit, UMA check, governor) still decide the context; this only orders the GPUs.
+std::uint64_t modelNeedMib(std::uint64_t model_bytes, std::uint64_t mmproj_bytes);
+
+// Why the automatic pick chose `index` (one clause for the startup line).
+std::string autoReason(const std::vector<GpuRecord>& gpus, int index, std::uint64_t need_mib);
 
 // The automatic pick alone (-1 when no GPU has kernels in this build).
-int autoPick(const std::vector<GpuRecord>& gpus);
+int autoPick(const std::vector<GpuRecord>& gpus, std::uint64_t need_mib = 0);
 
 // The PCI location in DECIMAL, as Windows shows it (Task Manager > Performance > GPU > Physical location,
 // Device Manager > Location: "PCI bus 71, device 0, function 0"). pciText / pciLongText are the full
