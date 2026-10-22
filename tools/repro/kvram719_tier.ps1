@@ -47,7 +47,8 @@ if ($up) {
 }
 if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force; $p.WaitForExit() }
 $txt = @(Get-Content $log -ErrorAction SilentlyContinue)
-$bad = @($txt | Select-String -Pattern "hipError|\| failed:")
+# "(hipError N)" is how a HIP failure is logged; the fixed server's "adjusted:" line names the error number too (s8-719)
+$bad = @($txt | Select-String -Pattern "\(hipError \d+\)|\| failed:")
 $tierLine = @($txt | Select-String -Pattern "kv tier: RAM tier size|adjusted: .*kv-ram-mb|kv tier: RAM tier off")
 $tierLine | ForEach-Object { Write-Host "  log: $($_.Line)" }
 $bad | Select-Object -First 3 | ForEach-Object { Write-Host "  log: $($_.Line)" }

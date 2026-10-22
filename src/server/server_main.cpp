@@ -1283,10 +1283,11 @@ int serveMain(int argc, char** argv, const char* program) {
             pst.pinned_max = gp.ok ? gp.max_shared : 0;
             std::string per;
             for (const hip::GpuPinnedDev& g : gp.devs) {
-                pst.gpus.push_back({g.nonlocal_budget, g.nonlocal_usage, g.shared_system});
+                const std::uint64_t own = std::max(g.nonlocal_usage, g.own_shared);  // iGPU: DXGI says 0 (REVIEW C4)
+                pst.gpus.push_back({g.nonlocal_budget, own, g.shared_system});
                 per += std::format("{}{} MiB {} (this process {} MiB)", per.empty() ? "" : ", ",
                                    (g.nonlocal_budget > 0 ? g.nonlocal_budget : g.shared_system) >> 20,
-                                   g.nonlocal_budget > 0 ? "non-local budget" : "shared GPU memory", g.nonlocal_usage >> 20);
+                                   g.nonlocal_budget > 0 ? "non-local budget" : "shared GPU memory", own >> 20);
             }
             pinned_room = startfit::pinnedRoomMb(pst);
             logI("kv tier: pinned memory now: {} HIP GPU(s) [{}] (a pinned buffer counts on each; a non-local budget is shared "
@@ -1297,8 +1298,17 @@ int serveMain(int argc, char** argv, const char* program) {
                  startfit::pinned_reserve_mb, startfit::pinned_machine_reserve_mb);
             pinned_why = startfit::pinnedWhy(pinned_room == startfit::pinned_room_unknown ? 0 : pinned_room, pst.gpus.size());
         }
-        if (const auto rf = startfit::ramTierFit(kv_ram_mb, rin.avail_phys, ram_auto_mb, rin.explicit_mb.has_value(), pinned_room);
+        std::string ram_off_reason = rsz.reason;  // what the "RAM tier off" line names (REVIEW-S8-719 N3)
+        if (const auto rf = startfit::ramTierFit(kv_ram_mb, rin.avail_phys, ram_auto_mb, rin.explicit_mb.has_value(), pinned_room,
+                                                 entry_mb);
             rf && n_ck > 0 && !no_pc) {
+            if (rf->mb == 0 && rf->pinned) {
+                pinned_why += rf->below_entry
+                                  ? std::format("; that is below one max-context entry ({} MiB), so the RAM tier is off", entry_mb)
+                                  : std::string("; no room left, so the RAM tier is off");
+                ram_off_reason = std::format("{} {} MiB asked: {}", rin.explicit_mb ? std::string(rin.explicit_src) : std::string("auto"),
+                                             kv_ram_mb, pinned_why);
+            }
             if (!rin.explicit_mb) {
                 if (rf->pinned)
                     logW("kv tier: RAM tier {} MiB (the automatic size would be {} MiB): {}", rf->mb, kv_ram_mb, pinned_why);
@@ -1332,7 +1342,7 @@ int serveMain(int argc, char** argv, const char* program) {
             }
             tier_alloc_s = msSince(t_alloc0) / 1000.0;
         } else if (kv_ram_mb == 0 && n_ck > 0 && !no_pc) {
-            logI("kv tier: RAM tier off ({})", rsz.reason);
+            logI("kv tier: RAM tier off ({})", ram_off_reason);
         }
         // ---- vision encoder, discrete GPU: read the mmproj now (pinned host memory only, no VRAM) so the KV pool below
         // leaves room for what the encoder adds after startup (REVIEW-GOV-3 question 4: on the R9700 the first image added

@@ -171,6 +171,20 @@ GpuPinned gpuPinnedNow() {
                 if (match) {
                     GpuPinnedDev& g = r.devs[static_cast<std::size_t>(d)];
                     g.shared_system = desc.SharedSystemMemory;
+                    // this process's Shared Usage there: an integrated GPU reports a non-local usage of 0 (REVIEW-S8-719 C4)
+                    PDH_HQUERY qp = nullptr;
+                    if (PdhOpenQueryW(nullptr, 0, &qp) == ERROR_SUCCESS) {
+                        wchar_t pp[192];
+                        std::swprintf(pp, 192, L"\\GPU Process Memory(pid_%lu_luid_0x%08lX_0x%08lX_phys_0)\\Shared Usage",
+                                      GetCurrentProcessId(), static_cast<unsigned long>(desc.AdapterLuid.HighPart),
+                                      static_cast<unsigned long>(desc.AdapterLuid.LowPart));
+                        PDH_HCOUNTER cp = nullptr;
+                        PDH_FMT_COUNTERVALUE fp{};
+                        if (PdhAddEnglishCounterW(qp, pp, 0, &cp) == ERROR_SUCCESS && PdhCollectQueryData(qp) == ERROR_SUCCESS &&
+                            PdhGetFormattedCounterValue(cp, PDH_FMT_LARGE, nullptr, &fp) == ERROR_SUCCESS && fp.largeValue > 0)
+                            g.own_shared = static_cast<std::uint64_t>(fp.largeValue);
+                        PdhCloseQuery(qp);
+                    }
                     IDXGIAdapter3* a3 = nullptr;
                     if (SUCCEEDED(ad->QueryInterface(__uuidof(IDXGIAdapter3), reinterpret_cast<void**>(&a3))) && a3) {
                         DXGI_QUERY_VIDEO_MEMORY_INFO nl{};

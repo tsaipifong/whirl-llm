@@ -41,13 +41,20 @@ inline constexpr std::uint64_t ram_tier_safe_mb = 20480;
 // pinned_machine_reserve_mb). Measured: kvram719 (R9700 box, 64 GB carve-out) and s8-719 (8060S at 96 GB with the
 // R9700 attached: 4096 MiB worked, 8192 failed; the R9700's 15435 MiB budget / 2 was the limit). Every RAM tier,
 // explicit or automatic, is lowered to that room after the 20480 MiB cap, with an "adjusted:" line for an explicit
-// size (a server that answers with a smaller tier instead of a server whose every request fails).
+// size (a server that answers with a smaller tier instead of a server whose every request fails); a room below one
+// max-context entry turns the tier off (ramTierFit entry_mb).
+// Machine reserve 2048 (REVIEW-S8-719 A2; was 6144, carried over from kvram719): the largest value every recorded data
+// point admits. It still catches kvram719's failure (another server had 10890 MiB pinned: 32587 - 12178 - 2048 = 18361
+// < 20480 failed) and admits s23_ram12288_vis (8704 answered at 10161 MiB 8060S Shared Usage: 16203 - 1441 - 2048 =
+// 12714); 6144 would have cut that to 8192 and lowered single-R9700 32 GB-RAM hosts' automatic tier with no failure
+// on record.
 inline constexpr std::uint64_t pinned_reserve_mb = 2048;
-inline constexpr std::uint64_t pinned_machine_reserve_mb = 6144;
+inline constexpr std::uint64_t pinned_machine_reserve_mb = 2048;
 inline constexpr std::uint64_t pinned_room_unknown = ~0ull;
 struct PinnedGpu {                     // one HIP GPU's adapter, as this process sees it (DXGI)
     std::uint64_t nonlocal_budget = 0;  // bytes: DXGI non-local budget; 0 on an integrated GPU (the 8060S reports 0)
-    std::uint64_t own_nonlocal = 0;     // bytes: this process's non-local usage on that adapter (pinned so far)
+    std::uint64_t own_nonlocal = 0;     // bytes: this process's pinned memory on that adapter so far (DXGI non-local usage;
+                                        // on an integrated GPU, which reports 0 there, PDH process Shared Usage)
     std::uint64_t shared_system = 0;    // bytes: DXGI SharedSystemMemory of that adapter ("shared GPU memory")
 };
 struct PinnedState {

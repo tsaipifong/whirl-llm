@@ -30,15 +30,15 @@ std::uint64_t pinnedRoomMb(const PinnedState& s) {
 }
 
 std::string pinnedWhy(std::uint64_t room_mb, std::size_t n_gpus) {
-    return std::format("lowered to {} MiB: the GPUs can keep only so much pinned host memory resident ({} HIP GPU(s); "
-                       "a larger RAM tier fails with hipError 719 on the first request)",
+    // no "hip" anywhere, no "failed:" (REVIEW-S8-719 A1): log scanners match hipError / hip...719 case-insensitively
+    return std::format("lowered to {} MiB: the GPUs can keep only so much pinned host memory resident ({} GPU(s) map it; "
+                       "a larger RAM tier makes the first request fail with GPU error 719)",
                        room_mb, n_gpus);
 }
 
 std::optional<RamFit> ramTierFit(std::uint64_t mb, std::uint64_t avail_phys_bytes, std::uint64_t auto_mb, bool explicit_size,
                                  std::uint64_t pinned_room_mb, std::uint64_t entry_mb) {
     (void)auto_mb;
-    (void)entry_mb;
     if (mb == 0) return std::nullopt;
     RamFit r;
     r.mb = mb;
@@ -52,6 +52,11 @@ std::optional<RamFit> ramTierFit(std::uint64_t mb, std::uint64_t avail_phys_byte
     if (pinned_room_mb != pinned_room_unknown && r.mb > pinned_room_mb) {
         r.mb = pinned_room_mb;
         r.pinned = true;
+        // FR-CACHE P3-4 (src/tier/ram_size.h): one max-context entry always fits, else off (REVIEW-S8-719 C2)
+        if (r.mb > 0 && r.mb < entry_mb) {
+            r.mb = 0;
+            r.below_entry = true;
+        }
     }
     if (explicit_size && avail_phys_bytes > 0 && (r.mb << 20) > avail_phys_bytes / 2) {
         r.mb = (avail_phys_bytes / 2 >> 20) / 512 * 512;
