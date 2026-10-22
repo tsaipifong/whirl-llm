@@ -37,8 +37,9 @@ std::string pinnedWhy(std::uint64_t room_mb, std::size_t n_gpus) {
 }
 
 std::string pinnedOffWhy(bool below_entry, std::uint64_t entry_mb) {
-    return below_entry ? std::format("; that is below one max-context entry ({} MiB), so the RAM tier is off", entry_mb)
-                       : std::string("; no room left, so the RAM tier is off");
+    return below_entry ? std::format("; that is below one max-context entry ({} MiB), so the host tiers are off (RAM and SSD)",
+                                     entry_mb)
+                       : std::string("; no room left, so the host tiers are off (RAM and SSD)");
 }
 
 std::optional<RamFit> ramTierFit(std::uint64_t mb, std::uint64_t avail_phys_bytes, std::uint64_t auto_mb, bool explicit_size,
@@ -49,7 +50,7 @@ std::optional<RamFit> ramTierFit(std::uint64_t mb, std::uint64_t avail_phys_byte
     r.mb = mb;
     // v0.2.2.2: the cap first, then the half-of-available-RAM rule on the capped size, which lowers to half (whole
     // 512 MiB): asking for more never gives less (0.2.2.1: 22528 -> 20480 but 24064 -> 16384). s8-719: the GPU-pinned
-    // room after the cap (explicit and automatic sizes alike; each step only lowers, so the order stays monotonic).
+    // room after the cap (explicit and automatic sizes alike; each step is a min, so an explicit size stays monotonic).
     if (r.mb > ram_tier_safe_mb) {
         r.mb = ram_tier_safe_mb;
         r.safe = true;
@@ -57,8 +58,10 @@ std::optional<RamFit> ramTierFit(std::uint64_t mb, std::uint64_t avail_phys_byte
     if (pinned_room_mb != pinned_room_unknown && r.mb > pinned_room_mb) {
         r.mb = pinned_room_mb;
         r.pinned = true;
-        // FR-CACHE P3-4 (src/tier/ram_size.h): one max-context entry always fits, else off (REVIEW-S8-719 C2)
-        if (r.mb > 0 && r.mb < entry_mb) {
+        // FR-CACHE P3-4 (src/tier/ram_size.h): the automatic size holds one max-context entry, else off (REVIEW-S8-719
+        // C2). Not an explicit size: it is clamped to the room and used as given (ram_size.h), so asking for more never
+        // gives less (REVIEW-S8-719-2 X1/X2: golden's 8192 on two GPUs at 96 GB -> 4096, not off).
+        if (!explicit_size && r.mb > 0 && r.mb < entry_mb) {
             r.mb = 0;
             r.below_entry = true;
         }

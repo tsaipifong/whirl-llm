@@ -42,7 +42,7 @@ inline constexpr std::uint64_t ram_tier_safe_mb = 20480;
 // R9700 attached: 4096 MiB worked, 8192 failed; the R9700's 15435 MiB budget / 2 was the limit). Every RAM tier,
 // explicit or automatic, is lowered to that room after the 20480 MiB cap, with an "adjusted:" line for an explicit
 // size (a server that answers with a smaller tier instead of a server whose every request fails); a room below one
-// max-context entry turns the tier off (ramTierFit entry_mb).
+// max-context entry turns the automatic tier off (ramTierFit entry_mb); an explicit size is only clamped.
 // Machine reserve 2048 (REVIEW-S8-719 A2; was 6144, carried over from kvram719): the largest value every recorded data
 // point admits. It still catches kvram719's failure (another server had 10890 MiB pinned: 32587 - 12178 - 2048 = 18361
 // < 20480 failed) and admits s23_ram12288_vis (8704 answered at 10161 MiB 8060S Shared Usage: 16203 - 1441 - 2048 =
@@ -77,10 +77,11 @@ struct RamFit {
     bool half = false;    // lowered because it was more than half of the available RAM
     bool safe = false;    // capped at ram_tier_safe_mb
     bool pinned = false;  // lowered to the GPU-pinned room (pinned_room_mb)
-    bool below_entry = false;  // the pinned room is below one max-context entry (entry_mb): off (mb 0)
+    bool below_entry = false;  // automatic size: the pinned room is below one max-context entry (entry_mb): off (mb 0)
 };
 // nullopt: unchanged. explicit_size: the user gave the size (--kv-ram-mb / WHIRL_KV_RAM_MB).
-// entry_mb: one max-context entry (MiB); a tier the pinned room lowers below it is turned off (FR-CACHE P3-4, ram_size.h).
+// entry_mb: one max-context entry (MiB); an automatic tier the pinned room lowers below it is turned off (FR-CACHE P3-4,
+// ram_size.h). An explicit size is clamped to the room and otherwise used as given (monotonic in the request).
 std::optional<RamFit> ramTierFit(std::uint64_t mb, std::uint64_t avail_phys_bytes, std::uint64_t auto_mb, bool explicit_size,
                                  std::uint64_t pinned_room_mb = pinned_room_unknown, std::uint64_t entry_mb = 0);
 
