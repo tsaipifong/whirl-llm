@@ -376,7 +376,9 @@ foreach ($mk in $Models) {
                 # s8-719: a failing server case keeps its work dir (server logs) for the diagnosis; a passing one is removed
                 if ($rc -ne 0 -or ($raw -match "hipError")) {
                     $raw | Where-Object { $_ -notlike "G *" } | Out-File -FilePath (Join-Path $Out "$mk`_${mode}_server.diag.txt") -Encoding utf8
-                    Write-Host "      $name server work dir kept: $gw"
+                    # keep the logs, not the SSD-tier files (golden_ssd writes *.wkv into the work dir; disk rule)
+                    Get-ChildItem $gw -Recurse -File -Filter *.wkv -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+                    Write-Host "      $name server work dir kept (logs; *.wkv removed): $gw"
                 } else {
                     Remove-Item -Recurse -Force $gw -ErrorAction SilentlyContinue
                 }
