@@ -36,6 +36,11 @@ std::string pinnedWhy(std::uint64_t room_mb, std::size_t n_gpus) {
                        room_mb, n_gpus);
 }
 
+std::string pinnedOffWhy(bool below_entry, std::uint64_t entry_mb) {
+    return below_entry ? std::format("; that is below one max-context entry ({} MiB), so the RAM tier is off", entry_mb)
+                       : std::string("; no room left, so the RAM tier is off");
+}
+
 std::optional<RamFit> ramTierFit(std::uint64_t mb, std::uint64_t avail_phys_bytes, std::uint64_t auto_mb, bool explicit_size,
                                  std::uint64_t pinned_room_mb, std::uint64_t entry_mb) {
     (void)auto_mb;

@@ -68,6 +68,10 @@ std::uint64_t pinnedRoomMb(const PinnedState& s);
 // patterns the gates and repro scripts scan server logs for (golden.ps1, kvram719_tier.ps1, fix719.ps1: "hipError",
 // "hip ... 719", "| failed:", "PAL failed"): a healthy, adjusted server must not read as a failed one (REVIEW-S8-719 A1).
 std::string pinnedWhy(std::uint64_t room_mb, std::size_t n_gpus);
+// What is appended to pinnedWhy when the pinned room turns the tier off (mb 0): below_entry (the room is below one
+// max-context entry, automatic size only) or no room at all. With the RAM tier the SSD tier behind it is off too, and
+// the text says so (REVIEW-S8-719-2 C-1).
+std::string pinnedOffWhy(bool below_entry, std::uint64_t entry_mb);
 struct RamFit {
     std::uint64_t mb = 0;
     bool half = false;    // lowered because it was more than half of the available RAM

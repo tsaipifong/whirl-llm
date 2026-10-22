@@ -3010,13 +3010,131 @@ void testStartupFit() {
     // REVIEW-S8-719 C2 (FR-CACHE P3-4, src/tier/ram_size.h): a RAM tier the pinned room lowers below one max-context entry
     // is off (the longest session could never be kept), not a tier smaller than one entry
     {
+        // REVIEW-S8-719-2 X1/X2: only the automatic size; an explicit size is clamped to the room and used as given
+        // (ram_size.h), so golden's 8192 on two GPUs at 96 GB gets 4096 (round 1, 709d575: gate 8/8), not off
         const auto e = startfit::ramTierFit(8192, 19374 * MiB, 0, true, 4096, 9216);  // explicit, room 4096 < entry 9216
-        CHECK(e.has_value() && e->mb == 0ull && e->pinned && e->below_entry);
+        CHECK(e.has_value() && e->mb == 4096ull && e->pinned && !e->below_entry);
         const auto a = startfit::ramTierFit(9216, 19374 * MiB, 9216, false, 4096, 9216);  // automatic = one entry
         CHECK(a.has_value() && a->mb == 0ull && a->below_entry);
         const auto k = startfit::ramTierFit(8192, 19374 * MiB, 0, true, 4096, 4096);  // room holds one entry: 4096
         CHECK(k.has_value() && k->mb == 4096ull && k->pinned && !k->below_entry);
         CHECK(!startfit::ramTierFit(4096, 19374 * MiB, 0, true, startfit::pinned_room_unknown, 9216).has_value());  // user's own size
+    }
+    // REVIEW-S8-719-2 X2: an explicit size is monotonic in the request (asking for more never gives a smaller tier), and a
+    // room > 0 never turns an explicit tier off. Sweep 0..20480 step 512 over room / entry / available-RAM configurations,
+    // including the measured two-GPU room 4096 with entry 10240 (8060S 96 GB + R9700, golden slot).
+    {
+        struct Cfg { std::uint64_t room, entry, avail_mb; };
+        const Cfg cfgs[] = {{4096, 10240, 19032}, {4096, 9216, 19374}, {4096, 4096, 19374}, {0, 10240, 19032},
+                            {12288, 10240, 17643}, {12288, 0, 17643}, {20480, 9216, 50000}, {19456, 10240, 50000},
+                            {8192, 16384, 12000}, {startfit::pinned_room_unknown, 10240, 30000}, {512, 9216, 40000}};
+        for (const Cfg& c : cfgs) {
+            std::uint64_t prev = 0;
+            bool mono = true, never_off = true, within = true;
+            for (std::uint64_t ask = 0; ask <= 20480; ask += 512) {
+                const auto r = startfit::ramTierFit(ask, c.avail_mb * MiB, 0, true, c.room, c.entry);
+                const std::uint64_t got = r ? r->mb : ask;
+                if (got < prev) mono = false;
+                if (ask > 0 && c.room != startfit::pinned_room_unknown && c.room > 0 && got == 0) never_off = false;
+                if (got > ask || (c.room != startfit::pinned_room_unknown && got > c.room)) within = false;
+                if (r && r->below_entry) never_off = false;  // the entry rule is for the automatic size only
+                prev = got;
+            }
+            CHECK(mono);
+            CHECK(never_off);
+            CHECK(within);
+        }
+    }
+    // REVIEW-S8-719-2 C-1: when the pinned room turns the tier off, the text says the SSD tier is off with it (both forms),
+    // and still matches none of the log-scan error patterns
+    {
+        const std::regex bad(R"(hipError|hip.*\b719\b|\b719\b.*hip|\| failed:|PAL failed|Failed PAL|result:-5|unspecified launch)",
+                             std::regex::icase);
+        for (const bool be : {true, false}) {
+            const std::string off = startfit::pinnedOffWhy(be, 10240);
+            CHECK(off.find("SSD") != std::string::npos);
+            CHECK(off.find("RAM") != std::string::npos);
+            const std::string line = "2026-10-23 00:21:26.686 W kv tier: RAM tier 0 MiB (the automatic size would be 10240 MiB): " +
+                                     startfit::pinnedWhy(4096, 2) + off;
+            CHECK(!std::regex_search(line, bad));
+        }
+    }
+    // REVIEW-S8-719-2 independent tests (scratch\s8_719\review2\indep_test.cpp, written from the problem statement), ported:
+    // measured inputs of fixb_case_g23_swift 00:21:26 (8060S 96 GB + R9700) and the 64 GB / 64/64 configurations
+    {
+        const auto two96 = [&](std::uint64_t own_r, std::uint64_t own_i, std::uint64_t pmax) {
+            startfit::PinnedState s;
+            s.total_phys = 33982058496ull;
+            s.pinned_max = pmax * MiB;
+            s.gpus = {{0, own_i * MiB, 16203 * MiB}, {15435 * MiB, own_r * MiB, 0}};
+            return s;
+        };
+        const auto fit = [&](std::uint64_t mb, std::uint64_t avail_mb, bool expl, std::uint64_t room, std::uint64_t entry) {
+            const auto r = startfit::ramTierFit(mb, avail_mb * MiB, 0, expl, room, entry);
+            return r ? r->mb : mb;
+        };
+        const std::uint64_t room2 = startfit::pinnedRoomMb(two96(1294, 1381, 1453));
+        // T1/T1b/T1c: explicit 8192 lowered, > 0, at most the measured-working 4096 (also with own usage reported doubled)
+        CHECK(fit(8192, 19032, true, room2, 0) > 0ull && fit(8192, 19032, true, room2, 0) <= 4096ull);
+        CHECK(fit(8192, 19032, true, startfit::pinnedRoomMb(two96(2588, 1381, 1453)), 0) <= 4096ull);
+        // T2 (lead judgment): explicit 8192 with entry 10240 -> 4096, not off; T2b: automatic one entry (10240) -> off
+        CHECK_EQ(fit(8192, 19032, true, room2, 10240), 4096ull);
+        {
+            const auto a = startfit::ramTierFit(10240, 19032 * MiB, 0, false, room2, 10240);
+            CHECK(a.has_value() && a->mb == 0ull && a->below_entry);
+        }
+        // T3: explicit 4096 on two GPUs kept
+        CHECK_EQ(fit(4096, 19032, true, room2, 0), 4096ull);
+        // T4/T5/T5b: 8060S only visible: 8192 kept, 12288 -> 8704 by the half rule (not the pinned room), also with entry 10240
+        startfit::PinnedState one;
+        one.total_phys = 33982058496ull;
+        one.pinned_max = 1453 * MiB;
+        one.gpus = {{0, 1381 * MiB, 16203 * MiB}};
+        const std::uint64_t room1 = startfit::pinnedRoomMb(one);
+        CHECK_EQ(fit(8192, 17643, true, room1, 0), 8192ull);
+        {
+            const auto r = startfit::ramTierFit(12288, 17643 * MiB, 0, true, room1, 0);
+            CHECK(r.has_value() && r->mb == 8704ull && r->half && !r->pinned);
+        }
+        CHECK_EQ(fit(8192, 17643, true, room1, 10240), 8192ull);
+        // T6/T6b/T6c: single R9700 (64 GB host: auto 16384, explicit 20480; 32 GB desktop: auto 10240) kept
+        startfit::PinnedState r64;
+        r64.total_phys = 65174 * MiB;
+        r64.pinned_max = 1500 * MiB;
+        r64.gpus = {{48026 * MiB, 1294 * MiB, 0}};
+        CHECK_EQ(fit(16384, 40000, false, startfit::pinnedRoomMb(r64), 9216), 16384ull);
+        CHECK_EQ(fit(20480, 50000, true, startfit::pinnedRoomMb(r64), 9216), 20480ull);
+        startfit::PinnedState d32;
+        d32.total_phys = 32407 * MiB;
+        d32.pinned_max = (1294 + 600) * MiB;
+        d32.gpus = {{15435 * MiB, 1294 * MiB, 0}};
+        CHECK_EQ(fit(10240, 22000, false, startfit::pinnedRoomMb(d32), 10240), 10240ull);
+        // T7/T7b: single 8060S 64 GB: auto 10240 and golden 8192 kept
+        startfit::PinnedState i64;
+        i64.total_phys = 65174 * MiB;
+        i64.pinned_max = 1453 * MiB;
+        i64.gpus = {{0, 1381 * MiB, 32587 * MiB}};
+        CHECK_EQ(fit(10240, 40000, false, startfit::pinnedRoomMb(i64), 10240), 10240ull);
+        CHECK_EQ(fit(8192, 40000, true, startfit::pinnedRoomMb(i64), 10240), 8192ull);
+        // T8/T8b/T8c: 64/64 two GPUs: golden 8192, auto 16384, explicit 20480 kept (T8d, the 197 MiB margin, is noted only)
+        startfit::PinnedState t64 = i64;
+        t64.gpus.push_back({48026 * MiB, 1294 * MiB, 0});
+        const std::uint64_t rt = startfit::pinnedRoomMb(t64);
+        CHECK_EQ(fit(8192, 40000, true, rt, 10240), 8192ull);
+        CHECK_EQ(fit(16384, 40000, false, rt, 9216), 16384ull);
+        CHECK_EQ(fit(20480, 50000, true, rt, 9216), 20480ull);
+        // T10: explicit sizes monotonic at the measured two-GPU room (512..24576)
+        std::uint64_t prev = 0;
+        bool mono = true;
+        for (std::uint64_t ask = 512; ask <= 24576; ask += 512) {
+            const std::uint64_t got = fit(ask, 19032, true, room2, 10240);
+            if (got < prev) mono = false;
+            prev = got;
+        }
+        CHECK(mono);
+        // T11/T11b: nothing known -> room unknown, explicit 8192 unchanged
+        CHECK_EQ(startfit::pinnedRoomMb(startfit::PinnedState{}), startfit::pinned_room_unknown);
+        CHECK(!startfit::ramTierFit(8192, 40000 * MiB, 0, true, startfit::pinned_room_unknown, 10240).has_value());
     }
     // 2b. slots after the weights: the C5 case (15 slots left 13312 tokens for a 16384-token request) -> fewer slots
     {

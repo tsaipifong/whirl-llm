@@ -1303,9 +1303,7 @@ int serveMain(int argc, char** argv, const char* program) {
                                                  entry_mb);
             rf && n_ck > 0 && !no_pc) {
             if (rf->mb == 0 && rf->pinned) {
-                pinned_why += rf->below_entry
-                                  ? std::format("; that is below one max-context entry ({} MiB), so the RAM tier is off", entry_mb)
-                                  : std::string("; no room left, so the RAM tier is off");
+                pinned_why += startfit::pinnedOffWhy(rf->below_entry, entry_mb);
                 ram_off_reason = std::format("{} {} MiB asked: {}", rin.explicit_mb ? std::string(rin.explicit_src) : std::string("auto"),
                                              kv_ram_mb, pinned_why);
             }
