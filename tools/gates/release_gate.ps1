@@ -169,6 +169,11 @@ $verifyRule = {
     (& $gateRule $o $c) -and $sp -ge 1 -and $rs -ge 1 -and $df -eq 0 -and $er -eq 0 -and $vsp -eq $nsp -and $sp -eq $vsp -and $vrs -eq $nrs -and $rs -eq $vrs
 }
 AddStep "srv_tier_verify" $true (GateCmd $SW "tier" "balance" ($ram8s + @("--server-env", "WHIRL_TIER_VERIFY=1"))) $verifyRule
+# s8-719 (hipError 719 with two GPUs), permanent: with more than one GPU, an 8192 MiB RAM tier on this GPU with
+# --device pci:<bus>:<device> (and without --device when it is the default) answers, keeps 8192, names the GPU and
+# the hidden ones, and does not charge the other adapter. One GPU: SKIP.
+AddStep "srv_gpu_select" $true @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\gates\gpu_select_check.ps1"), "-Build", $Build, "-Model", $SW,
+                                 "-Device", $Device, "-Port", "$($port + 3)", "-Work", "@WORK@") { param($o, $c) $c -eq 0 -and ($o -match "(?m)^gpu select check: (ok|SKIP)") }
 
 if ($List) { $S | ForEach-Object { "{0,-22} {1}" -f $_.name, ($(if ($_.gpu) { "GPU" } else { "CPU" })) }; exit 0 }
 
