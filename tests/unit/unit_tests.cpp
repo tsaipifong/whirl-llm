@@ -1685,6 +1685,126 @@ void testSpecSample() {
 
 }  // namespace specsample_test
 
+// REVIEW-ARCH4 P3-2 / arch6e: the launch-log argument digest must be the same for the same argument values,
+// whatever memory the argument struct was built in (two runs of one build differed: the GEMV launches' GvArgs
+// were built on stack memory that held different bytes), and must still change when an argument changes.
+void testLaunchDigest() {
+    using whirl::kernels::GvArgs;
+    auto build = [](unsigned char fill, unsigned char* buf) {
+        std::memset(buf, fill, sizeof(GvArgs));  // what the stack held before (differs from run to run)
+        GvArgs* g = new (buf) GvArgs;            // as forward.cpp's gemvKernels builds it: `GvArgs g;` + fields
+        g->w[0] = 0x358f40000;
+        g->w[1] = 0x359f40000;
+        g->y[0] = 0x7dddd0000;
+        g->y[1] = 0x7ddde0000;
+        g->rb[0] = g->rb[1] = 0x440;
+        g->n[0] = g->n[1] = 512;
+        g->b1 = 64;
+        return g;
+    };
+    alignas(GvArgs) unsigned char a[sizeof(GvArgs)], b[sizeof(GvArgs)];
+    GvArgs* ga = build(0xAA, a);
+    GvArgs* gb = build(0x55, b);
+    auto digest = [](const GvArgs* g) {
+        std::int32_t ncols = 2048;  // the scalar arguments that follow it in the real launch
+        void* params[2] = {const_cast<GvArgs*>(g), &ncols};
+        const std::uint32_t sizes[2] = {sizeof(GvArgs), sizeof(ncols)};
+        return whirl::hip::launchlog::argDigest(params, sizes, 2);
+    };
+    const std::uint64_t da = digest(ga), db = digest(gb);
+    CHECK_EQ(da, db);  // same argument values -> same digest
+    CHECK(std::memcmp(a, b, sizeof(GvArgs)) == 0);  // ... because the struct carries no undefined bytes
+    // still sensitive to a real argument change (one field of one matrix)
+    GvArgs* gc = build(0xAA, b);
+    gc->n[1] = 513;
+    CHECK(digest(gc) != da);
+    gc = build(0xAA, b);
+    gc->b1 = 65;
+    CHECK(digest(gc) != da);
+    gc = build(0xAA, b);
+    gc->b2 = 96;
+    CHECK(digest(gc) != da);
+}
+
+// arch6f (REVIEW-ARCH4 P3-2): the launch-log digest of the same argument values must not depend on where the
+// device allocations happen to lie. The golden runs E_r97 / E2_r97 (same build) differed in 2 of 8 steps: int32
+// pairs of all-integer argument structs (AwGroups first[0..1] = 0,5 -> word 0x500000000, Tok16, RowIdx, the
+// row0/nrows of GdnSegs, KvArgs tab0/win) were read as "inside allocation 597" in one run and as a value in the other.
+void testLaunchDigestLayout() {
+    using namespace whirl::kernels;
+    namespace ll = whirl::hip::launchlog;
+    struct Layout {
+        std::uint64_t base[3];
+    };
+    // A: the bases put 0x500000000, 0x800000ae0 and 0x4000000000 inside allocations 0..2 (as in the failing runs);
+    // B: nowhere near them
+    const Layout la{{0x4FE000000ull, 0x7FF000000ull, 0x3F00000000ull}};
+    const Layout lb{{0x2000000000ull, 0x2100000000ull, 0x6000000000ull}};
+    const std::uint64_t bytes[3] = {0x4000000ull, 0x2000000ull, 0x200000000ull};
+    auto with = [&](const Layout& l, auto&& f) {
+        ll::testClearAllocs();
+        for (int i = 0; i < 3; ++i) ll::testAlloc(l.base[i], bytes[i]);
+        const std::uint64_t d = f(l);
+        ll::testClearAllocs();
+        return d;
+    };
+    AwGroups aw;
+    aw.first[1] = 5;
+    aw.count[0] = aw.count[1] = 5;
+    Tok16 tk;
+    tk.t[4] = 0xae0;
+    tk.t[5] = 8;
+    RowIdx ri;
+    ri.v[1] = 0x40;
+    auto dAw = [&](const AwGroups& g) {
+        return [&g](const Layout&) { return ll::launchArgDigest(g, std::int32_t{4}); };
+    };
+    auto dKv = [](std::int32_t win, std::uint64_t koff, int kalloc) {
+        return [=](const Layout& l) {
+            KvArgs kv;
+            kv.k = l.base[kalloc] + koff;
+            kv.v = l.base[1] + 0x40;
+            kv.tab0 = 0;
+            kv.win = win;
+            return ll::launchArgDigest(kv, DevPtr{l.base[0] + 0x2000}, std::int32_t{7});
+        };
+    };
+    auto dGdn = [](std::int32_t nrows0) {
+        return [=](const Layout& l) {
+            GdnSegs s;
+            s.s[0].state = l.base[2] + 0x80;
+            s.s[0].row0 = 0;
+            s.s[0].nrows = nrows0;
+            s.s[1].state = l.base[2] + 0x1080;
+            s.s[1].row0 = 5;
+            s.s[1].nrows = 5;
+            return ll::launchArgDigest(s);
+        };
+    };
+    // same values -> same digest in both layouts
+    CHECK_EQ(with(la, dAw(aw)), with(lb, dAw(aw)));
+    CHECK_EQ(with(la, [&](const Layout&) { return ll::launchArgDigest(tk); }), with(lb, [&](const Layout&) { return ll::launchArgDigest(tk); }));
+    CHECK_EQ(with(la, [&](const Layout&) { return ll::launchArgDigest(ri); }), with(lb, [&](const Layout&) { return ll::launchArgDigest(ri); }));
+    CHECK_EQ(with(la, dKv(5, 0x100, 0)), with(lb, dKv(5, 0x100, 0)));
+    CHECK_EQ(with(la, dGdn(5)), with(lb, dGdn(5)));
+    // still sensitive to a real argument change: an integer field, a pointer offset, the allocation pointed into
+    AwGroups aw2 = aw;
+    aw2.first[1] = 6;
+    CHECK(with(la, dAw(aw2)) != with(la, dAw(aw)));
+    CHECK(with(lb, dAw(aw2)) != with(lb, dAw(aw)));
+    Tok16 tk2 = tk;
+    tk2.t[5] = 9;
+    CHECK(with(la, [&](const Layout&) { return ll::launchArgDigest(tk2); }) != with(la, [&](const Layout&) { return ll::launchArgDigest(tk); }));
+    CHECK(with(la, dKv(6, 0x100, 0)) != with(la, dKv(5, 0x100, 0)));
+    CHECK(with(la, dKv(5, 0x110, 0)) != with(la, dKv(5, 0x100, 0)));
+    CHECK(with(lb, dKv(5, 0x110, 0)) != with(lb, dKv(5, 0x100, 0)));
+    CHECK(with(la, dKv(5, 0x100, 1)) != with(la, dKv(5, 0x100, 0)));
+    CHECK(with(la, dGdn(4)) != with(la, dGdn(5)));
+    // a pointer is still normalized: the same (allocation, offset) in both layouts gives the same digest although
+    // the raw addresses differ (checked above through KvArgs / GdnSegs), and a raw address change alone does not
+    // count as an argument change
+}
+
 // OVH-C1: the MTP draft window (Model::attn_win) must be restored when the draft attention throws,
 // otherwise the next request's trunk attention would inherit the window and drop keys.
 void testValueScope() {
@@ -1983,6 +2103,8 @@ int main() {
     testKvChoice();
     testKernelFetchBounds();
     testValueScope();
+    testLaunchDigest();
+    testLaunchDigestLayout();
     specsample_test::testSpecSample();
     testDflashPolicy();
     testLocalMemTaken();

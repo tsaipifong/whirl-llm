@@ -187,6 +187,7 @@ std::uint64_t launchCount();
 namespace launchlog {
 extern const bool g_on;
 void stageArgs(void* const* params, const std::uint32_t* sizes, std::size_t n);
+std::uint64_t argDigest(void* const* params, const std::uint32_t* sizes, std::size_t n);
 }  // namespace launchlog
 
 // A struct argument must have no padding: padding bytes are whatever the memory held, and the launch log digests
@@ -215,6 +216,17 @@ void launch(Function f, Dim3 grid, Dim3 block, unsigned shared_bytes, Stream s, 
     }
     launchRaw(f, grid, block, shared_bytes, s, params);
 }
+
+namespace launchlog {
+// The digest hip::launch stages for these arguments, against the allocations registered so far (unit tests,
+// arch6f; the launch itself is not involved).
+template <class... Args>
+std::uint64_t launchArgDigest(const Args&... args) {
+    void* params[sizeof...(Args) > 0 ? sizeof...(Args) : 1] = {const_cast<void*>(static_cast<const void*>(&args))...};
+    const std::uint32_t sizes[sizeof...(Args) > 0 ? sizeof...(Args) : 1] = {static_cast<std::uint32_t>(sizeof(Args))...};
+    return argDigest(params, sizes, sizeof...(Args));
+}
+}  // namespace launchlog
 
 // Runs the smoke kernel on the current device; returns an empty string on
 // success, otherwise a description of the failure.
