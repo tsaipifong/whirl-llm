@@ -352,7 +352,9 @@ foreach ($mk in $Models) {
                 $gw = Join-Path $Out "srvwork_$mk`_$mode"
                 $gargs = @("--exe", $ServerExe, "--kind", "whirl", "--model", $mp, "--suite", "golden", "--port", "$Port",
                            "--work", $gw, "--kv", "auto", "--server-env", "WHIRL_MODE=$mode")
+                # explicit on every GPU: since 0.2.3 the default is the GPU with the most memory (the 8060S on the dev box)
                 if ($Arch -eq "gfx1151") { $gargs += @("--server-env", "WHIRL_DEVICE=8060s", "--server-env", "WHIRL_KV_RAM_MB=8192") }
+                else { $gargs += @("--server-env", "WHIRL_DEVICE=r9700") }
                 if ($mmprojPath[$mk]) {
                     if (-not ((Test-Path $mmprojPath[$mk]) -and (Test-Path (Join-Path $goldImages "shapes.png")))) {
                         Write-Host "FAIL  $name suite server needs the mmproj ($($mmprojPath[$mk])) and $goldImages\shapes.png (vision case)"

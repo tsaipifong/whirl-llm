@@ -94,6 +94,8 @@ def main():
                        "--kv", "auto", "--server-env", f"WHIRL_MODE={a.mode}"] + ([] if a.ssd else ["--server-env", "WHIRL_KV_SSD_MODE=off"])
                 if a.device == "8s":
                     cmd += ["--server-env", "WHIRL_DEVICE=8060s", "--server-env", "WHIRL_KV_RAM_MB=8192"]
+                else:  # explicit: since 0.2.3 the default is the GPU with the most memory (the 8060S on the dev box)
+                    cmd += ["--server-env", "WHIRL_DEVICE=r9700"]
                 env = dict(os.environ, WHIRL_GATE_TEXT_ROOT=r"C:\ClaudeWorkspace\refsrc\llama.cpp")
                 t = time.time()
                 with open(os.path.join(OUT, f"gate_{tag}.log"), "w", encoding="utf-8", errors="replace") as fo:

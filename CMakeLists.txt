@@ -104,6 +104,7 @@ add_library(whirl STATIC
   src/common/wddm_watch.cpp
   src/common/pool_budget.cpp
   src/common/startup_fit.cpp
+  src/common/gpu_select.cpp
   src/common/mem_governor.cpp
   src/common/numerics.cpp
   src/common/spec_sample.cpp
@@ -140,6 +141,7 @@ if(WHIRL_WITH_HIP)
     src/hip/wddm_mem.cpp
     src/hip/device_mem.cpp
     src/hip/uma_mem.cpp
+    src/hip/gpu_restrict.cpp
     ${CMAKE_BINARY_DIR}/kernels/embedded_objects.cpp
     ${WHIRL_EMBED_SOURCES})
   target_include_directories(whirl_hip PUBLIC ${CMAKE_SOURCE_DIR}/include)

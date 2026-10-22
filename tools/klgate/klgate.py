@@ -347,7 +347,7 @@ def main():
     ap.add_argument("--exe", required=True)
     ap.add_argument("--model", action="append", required=True, help="NAME=PATH (repeat)")
     ap.add_argument("--corpus", required=True)
-    ap.add_argument("--device", default="")
+    ap.add_argument("--device", default="r9700")  # explicit: since 0.2.3 the default GPU is the one with the most memory
     ap.add_argument("--lengths", default="8192,32768,98304,131072")
     ap.add_argument("--modes", default="balance,fast")
     ap.add_argument("--report", default="")

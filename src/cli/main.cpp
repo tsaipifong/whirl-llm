@@ -15,6 +15,7 @@
 #include "whirl/dflash_policy.h"
 #include "whirl/gguf.h"
 #include "whirl/hip.h"
+#include "whirl/gpu_select.h"
 #include "whirl/hip_runtime_loader.h"
 #include "whirl/model.h"
 #include "whirl/prefill_schedule.h"
@@ -108,7 +109,9 @@ const char* k_help_chat =
     "                             stay on); the MTP block is not loaded. Without a matching drafter: mtp\n"
     "  --mmproj MMPROJ.gguf       vision encoder (Qwen3-VL style mmproj, F16 / BF16) for --image\n"
     "  --image IMAGE              an image placed before the prompt text (repeatable; needs --mmproj)\n"
-    "  --device SPEC              GPU: r9700 (default), 8060s, an index, or a name / gfx substring\n"
+    "  --device SPEC, -dev SPEC   GPU: pci:BUS:DEVICE (Task Manager > Performance > GPU > Physical location: PCI bus 71,\n"
+    "                             device 0 -> pci:71:0), an index from 'whirl devices', r9700, 8060s, or a part of the\n"
+    "                             name. Default: the GPU with the most GPU memory\n"
     WHIRL_HELP_MODES
     "  -h, --help                 this text\n";
 
@@ -128,7 +131,9 @@ const char* k_help_bench =
     "  --draft mtp|dflash         draft source (default mtp; dflash: --draft-model, see whirl chat)\n"
     "  --draft-model FILE         DFlash2 drafter GGUF for --draft dflash (wins over env WHIRL_DRAFT_MODEL)\n"
     "  --no-think / --think       thinking off / on for the decode prompt (default on)\n"
-    "  --device SPEC              GPU: r9700 (default), 8060s, an index, or a name / gfx substring\n"
+    "  --device SPEC, -dev SPEC   GPU: pci:BUS:DEVICE (Task Manager > Performance > GPU > Physical location: PCI bus 71,\n"
+    "                             device 0 -> pci:71:0), an index from 'whirl devices', r9700, 8060s, or a part of the\n"
+    "                             name. Default: the GPU with the most GPU memory\n"
     WHIRL_HELP_MODES
     "  -h, --help                 this text\n";
 
@@ -140,7 +145,9 @@ const char* k_help_selftest =
     "invariance, grouped vs per-query decode attention. Prints 'selftest: ok' or FAIL (exit 1).\n"
     "\n"
     "options:\n"
-    "  --device SPEC              GPU: r9700 (default), 8060s, an index, or a name / gfx substring\n"
+    "  --device SPEC, -dev SPEC   GPU: pci:BUS:DEVICE (Task Manager > Performance > GPU > Physical location: PCI bus 71,\n"
+    "                             device 0 -> pci:71:0), an index from 'whirl devices', r9700, 8060s, or a part of the\n"
+    "                             name. Default: the GPU with the most GPU memory\n"
     WHIRL_HELP_MODES
     "  -h, --help                 this text\n";
 
@@ -162,7 +169,9 @@ const char* k_help_dflash_check =
     "if a layer differs by more than 3e-2 (Q8_0 weights, int8 GEMV activations).\n"
     "\n"
     "options:\n"
-    "  --device SPEC              GPU: r9700 (default), 8060s, an index, or a name / gfx substring\n"
+    "  --device SPEC, -dev SPEC   GPU: pci:BUS:DEVICE (Task Manager > Performance > GPU > Physical location: PCI bus 71,\n"
+    "                             device 0 -> pci:71:0), an index from 'whirl devices', r9700, 8060s, or a part of the\n"
+    "                             name. Default: the GPU with the most GPU memory\n"
     "  -h, --help                 this text\n";
 
 const char* k_help_seqtest =
@@ -174,7 +183,9 @@ const char* k_help_seqtest =
     "\n"
     "options:\n"
     "  --decode N                 tokens generated per sequence (default 24)\n"
-    "  --device SPEC              GPU: r9700 (default), 8060s, an index, or a name / gfx substring\n"
+    "  --device SPEC, -dev SPEC   GPU: pci:BUS:DEVICE (Task Manager > Performance > GPU > Physical location: PCI bus 71,\n"
+    "                             device 0 -> pci:71:0), an index from 'whirl devices', r9700, 8060s, or a part of the\n"
+    "                             name. Default: the GPU with the most GPU memory\n"
     WHIRL_HELP_MODES
     "  -h, --help                 this text\n";
 
@@ -183,17 +194,19 @@ const char* k_help_devices =
     "\n"
     "Lists the AMD GPUs the driver reports (index, name, architecture, memory, compute units),\n"
     "whether this build has GPU kernels for each of them, and which one is used by default\n"
-    "(the first R9700, else the first supported GPU; --device / WHIRL_DEVICE pick another).\n";
+    "(the GPU with the most GPU memory; --device / WHIRL_DEVICE pick another: pci:BUS:DEVICE, as Task Manager >\n"
+    "Performance > GPU > Physical location shows it, stays the same when GPUs are added or removed; an index can change).\n";
 
 const char* k_help_vis =
-    "usage: whirl vis-encode MMPROJ.gguf IMAGE [OUT.f32] [--reps N] [--mode auto|resident|stream]\n"
+    "usage: whirl vis-encode MMPROJ.gguf IMAGE [OUT.f32] [--reps N] [--mode auto|resident|stream] [--device D]\n"
     "\n"
     "Encodes one image with a vision encoder (diagnostic) and reports the timing; OUT.f32\n"
     "receives the projected embeddings.\n"
     "\n"
     "options:\n"
     "  --reps N                   encode N times (timing)\n"
-    "  --mode M                   auto (default), resident (weights in VRAM), stream (layer by layer)\n";
+    "  --mode M                   auto (default), resident (weights in VRAM), stream (layer by layer)\n"
+    "  --device D, -dev D         the GPU, as for whirl chat (default: the one with the most GPU memory)\n";
 
 void out(const std::string& s) {
     std::fwrite(s.data(), 1, s.size(), stdout);
@@ -246,7 +259,8 @@ bool takesValue(const std::string& o) {
 Args parseArgs(const std::vector<std::string>& argv, std::size_t from) {
     Args a;
     for (std::size_t i = from; i < argv.size(); ++i) {
-        const std::string& s = argv[i];
+        const std::string& s = argv[i] == "-dev" ? std::string("--device") : argv[i];  // llama.cpp's short name
+        if (s == "--device" && a.has("--device")) throw std::runtime_error("give --device only once");
         if (s.size() > 2 && s[0] == '-' && s[1] == '-') {
             std::string mspec;
             bool mnext = false;
@@ -1036,14 +1050,24 @@ struct Loaded {
 
 int selectDevice(const Args& a, std::string* info_line) {
     int dev;
-    if (auto v = envGet("HIP_DEVICE"))
-        dev = std::stoi(*v);
-    else
-        dev = q::pickDevice(a.get("--device") ? *a.get("--device") : std::string());
+    int shown;  // the index as `whirl devices` prints it (before the restriction)
+    std::string gpu_note;
+    if (auto v = envGet("HIP_DEVICE")) {
+        dev = shown = std::stoi(*v);
+    } else {
+        // s8-719 root fix: choose the GPU and make the HIP runtime see only it, before the first HIP call
+        const std::string spec = a.get("--device") ? *a.get("--device") : std::string();
+        const whirl::gpusel::Restriction& r = q::restrictDevice(spec);
+        gpu_note = r.note;
+        dev = q::pickDevice(spec);
+        shown = r.active ? r.all[r.selected[0]].index : dev;
+        if (!gpu_note.empty()) std::fprintf(stderr, "whirl: %s\n", gpu_note.c_str());
+    }
     const hip::DeviceInfo info = hip::describeDevice(dev);
     hip::setDevice(dev);
     if (info_line)
-        *info_line = fmt("  whirl build, device %d: %s (%s)\n", dev, info.name.c_str(), info.gcn_arch.c_str()) +
+        *info_line = fmt("  whirl build, device %d: %s (%s)\n", shown, info.name.c_str(), info.gcn_arch.c_str()) +
+                     (gpu_note.empty() ? std::string() : "  " + gpu_note + "\n") +
                      fmt("  HIP runtime: %s\n", hip::runtime::describe(hip::runtime::load()).c_str());  // the exact DLL loaded
     return dev;
 }
@@ -2516,7 +2540,7 @@ int cmdSelftest(const Args& a) {
 }
 
 int cmdDevices() {
-    const std::vector<hip::DeviceInfo> devs = hip::listDevices();
+    const std::vector<whirl::gpusel::GpuRecord> devs = whirl::gpusel::enumerate();
     if (devs.empty()) {
         std::fputs("whirl: error: the AMD graphics driver reports no GPU.\n"
                    "  WHIRL needs an AMD Radeon AI PRO R9700 (gfx1201) or a Radeon 8060S (gfx1151). If one is\n"
@@ -2525,30 +2549,10 @@ int cmdDevices() {
                    stderr);
         return app::exit_gpu;
     }
-    auto haveKernels = [](const hip::DeviceInfo& d) {
-        for (const hip::EmbeddedObject& o : hip::embeddedObjects())
-            if (d.gcn_arch.rfind(o.arch, 0) == 0) return true;
-        return false;
-    };
-    // the device used without --device / WHIRL_DEVICE (pickDevice's rule)
-    int def = -1;
-    for (const hip::DeviceInfo& d : devs)
-        if (def < 0 && d.gcn_arch.rfind("gfx1201", 0) == 0 && haveKernels(d)) def = d.index;
-    for (const hip::DeviceInfo& d : devs)
-        if (def < 0 && haveKernels(d)) def = d.index;
-    for (const hip::DeviceInfo& d : devs) {
-        std::string tags;
-        if (!haveKernels(d)) tags += "  [no GPU kernels for this architecture in this build]";
-        else tags += "  [supported]";
-        if (d.integrated) tags += " [integrated: memory shared with the CPU]";
-        if (d.index == def) tags += " [default]";
-        // integrated GPU: the carve-out (DXGI), not the runtime's total, which adds a share of system RAM (UMA-1)
-        std::string mem = fmt("%.1f GiB", d.total_mem / (1024.0 * 1024.0 * 1024.0));
-        if (d.integrated)
-            if (const hip::UmaMem u = hip::umaMemory(d.index); u.known) mem = hip::umaSizeText(u);
-        out(fmt("  device %d: %s (%s), %s, %d CUs%s\n", d.index, d.name.c_str(), d.gcn_arch.c_str(), mem.c_str(), d.compute_units,
-                tags.c_str()));
-    }
+    // every GPU (this command never restricts the runtime); [default] = the GPU used without --device /
+    // WHIRL_DEVICE (gpusel::defaultGpu: the most GPU memory; an integrated GPU counts its carve-out, UMA-1)
+    if (const char* v = std::getenv("HIP_VISIBLE_DEVICES")) out(fmt("  (HIP_VISIBLE_DEVICES=%s is set: only those GPUs are listed, numbered from 0)\n", v));
+    out(whirl::gpusel::listingText(devs, whirl::gpusel::defaultGpu(devs).index));
     return 0;
 }
 
@@ -2605,6 +2609,9 @@ int wmain(int argc, wchar_t** wargv) {
     app::initConsole();
     std::vector<std::string> argv;
     for (int i = 0; i < argc; ++i) argv.push_back(narrow(wargv[i]));
+    // s8-719 root fix: the GPU list helper (a child of this program, see gpu_select.h); never interactive
+    if (argv.size() == 2 && argv[1] == whirl::gpusel::k_probe_arg) return whirl::gpusel::probeMain();
+    if (argv.size() >= 2 && argv[1] == "--list-devices") argv[1] = "devices";  // llama.cpp's name for it
     if (argv.size() < 2) {
         std::fputs(k_help_main, stderr);
         return app::exit_usage;

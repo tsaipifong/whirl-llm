@@ -167,7 +167,7 @@ speed and, with MTP, the verify cycles and draft acceptance.
 | `--draft-model FILE` | DFlash2 drafter GGUF for `--draft dflash`. Wins over `WHIRL_DRAFT_MODEL` (the environment variable is only used when `--draft-model` is not given; the log says which one was used) |
 | `--mmproj MMPROJ.gguf` | vision encoder (Qwen3-VL style mmproj, F16 / BF16), needed for `--image` |
 | `--image IMAGE` | an image placed before the prompt text; repeatable |
-| `--device SPEC` | GPU: `r9700`, `8060s`, an index, or a substring of the name / gfx architecture (also `WHIRL_DEVICE`). Default: the first R9700, else the first GPU the build has kernels for (a Radeon 8060S on its own) |
+| `--device SPEC`, `-dev SPEC` | GPU (also `WHIRL_DEVICE`): `pci:<bus>:<device>` as Task Manager > Performance > GPU > Physical location shows it ("PCI bus 71, device 0" = `pci:71:0`; tells identical cards apart), an index from `whirl devices`, `r9700`, `8060s`, or a part of the name (refused when it matches more than one GPU). Default: the GPU with the most GPU memory (integrated GPUs count their dedicated memory; if equal, the first one in `--list-devices`); the startup log shows which GPU it uses. |
 | `--precise` / `--balance` / `--fast` / `--mode M` | numerics mode (default balance; also `WHIRL_MODE`); `--balance=ITEMS` picks items. See [numerics modes](#modes) |
 | `-h`, `--help` | help |
 
@@ -223,7 +223,8 @@ request slots, a prefix cache in VRAM and host RAM / SSD tiers for idle sessions
 | `--host ADDR` | address to listen on. Default `127.0.0.1` (this computer only). `0.0.0.0` listens on every network: anyone who can reach the PC can use the server — there is no authentication |
 | `--port N` | TCP port (default 8080). If it is taken, the server exits with code 6 before loading the model |
 | `--alias NAME` | model id reported by `/v1/models` (default: the file name without `.gguf`) |
-| `--device D` | GPU: `r9700`, `8060s`, a device index, or a name / gfx substring (default as for `chat`) |
+| `--device D`, `-dev D` | GPU, as for `chat` (`pci:71:0`, ...) |
+| `--list-devices` | list the GPUs (index, name, memory, `pci:<bus>:<device>`) and exit |
 | `-np`, `--parallel N` | concurrent request slots (continuous batching), 1–16, default 4 (1 on cards with less than 20 GiB of VRAM, see `WHIRL_VRAM_HEADROOM_MB`) |
 | `-c`, `--ctx N` | size of the shared KV pool in tokens. Slots take pages on demand; when the pool is full, idle slots' prefix caches are evicted (least recently used first). Default: all VRAM left after weights and buffers, minus 768 MiB (MoE: 1.5 GiB) of the free VRAM and a margin for other programs under the Windows (WDDM) budget (`WHIRL_POOL_BUDGET_MARGIN_MB`); 262144 on the Radeon 8060S |
 | `--ctx-per-slot N` | longest context of one request (default min(pool, 131072); up to 262144) |

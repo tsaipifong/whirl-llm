@@ -980,11 +980,19 @@ void applyGemvEnv(Model& m);
 // ---------------------------------------------------------------------------
 // device selection
 
-// HIP device for `spec` (index, "r9700" / "8060s" alias, or a substring of
-// the name / gcnArchName); empty: WHIRL_DEVICE, else the first R9700, else the
-// first device with an embedded code object (a Radeon 8060S on its own).
-// Takes the per-GPU process mutex (WHIRL_GPU_SHARE=1 skips it).
+// HIP device for `spec` (gpusel::selectGpus: pci:BUS:DEVICE, index, uuid:, r9700 / 8060s, a name part);
+// empty: WHIRL_DEVICE, else gpusel::defaultGpu (the most GPU memory). After restrictDevice() restricted
+// the runtime it is the one visible GPU. Takes the per-GPU process mutex, keyed by uuid / PCI address
+// (WHIRL_GPU_SHARE=1 skips it).
 int pickDevice(std::string_view spec);
+}  // namespace whirl::qwen35
+namespace whirl::gpusel {
+struct Restriction;
+}
+namespace whirl::qwen35 {
+// s8-719 root fix: decide the GPU and make the HIP runtime see only it (gpusel::restrictToSelected), before
+// the first HIP call of whirl.exe / whirl-server.exe; a bad --device becomes ModelError("DeviceChoice").
+const gpusel::Restriction& restrictDevice(std::string_view spec);
 
 // ---------------------------------------------------------------------------
 // MTP draft-count control and n-gram (prompt-lookup) drafting

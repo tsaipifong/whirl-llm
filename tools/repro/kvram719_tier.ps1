@@ -28,7 +28,7 @@ Write-Host ("kvram719: RAM {0} MiB, GPU-pinned limit ~{1} MiB, pinned now {2} Mi
 $log = Join-Path $Work "kvram719_$RamMb.server.log"
 Remove-Item $log -ErrorAction SilentlyContinue
 $env:AMD_LOG_LEVEL = "1"
-if ($Device -eq "8060s") { $env:WHIRL_DEVICE = "8060s" }
+$env:WHIRL_DEVICE = $Device  # explicit: since 0.2.3 the default is the GPU with the most memory
 $a = @($Model, "--port", "$Port", "--log-file", $log, "--kv-ssd-mode", "off", "--kv-ram-mb", "$RamMb")
 $p = Start-Process -FilePath $Exe -ArgumentList $a -NoNewWindow -PassThru -RedirectStandardOutput (Join-Path $Work "stdout.txt") -RedirectStandardError (Join-Path $Work "stderr.txt")
 $up = $false

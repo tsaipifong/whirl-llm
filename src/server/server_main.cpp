@@ -20,6 +20,7 @@
 #include "whirl/device_mem.h"
 #include "whirl/dflash_policy.h"
 #include "whirl/gguf.h"
+#include "whirl/gpu_select.h"
 #include "whirl/hip.h"
 #include "whirl/hip_runtime_loader.h"
 #include "whirl/model.h"
@@ -131,7 +132,10 @@ const char* kHelpBody =
     "                           0.0.0.0 = every network: anyone who can reach this PC can use it)\n"
     "  --port N                 TCP port (default 8080)\n"
     "  --alias NAME             model id reported by /v1/models (default: the file name without .gguf)\n"
-    "  --device D               GPU: r9700 (default), 8060s, a device index, or a name / gfx substring\n"
+    "  --device D, -dev D       GPU: pci:BUS:DEVICE (Task Manager > Performance > GPU > Physical location: PCI bus 71,\n"
+    "                           device 0 -> pci:71:0), an index from --list-devices, r9700, 8060s, or a part of the name.\n"
+    "                           Default: the GPU with the most GPU memory\n"
+    "  --list-devices           list the GPUs (index, name, memory, pci:BUS:DEVICE) and exit\n"
     "  -np, --parallel N        concurrent request slots (continuous batching, 1..16; default 4, 1 on cards < 20 GiB)\n"
     "  -c, --ctx N              shared KV pool in tokens; slots take pages on demand and idle slots'\n"
     "                           prefix caches are evicted (LRU) when it is full (default: all VRAM\n"
@@ -383,6 +387,20 @@ int serveMain(int argc, char** argv, const char* program) {
             std::fwrite(v.data(), 1, v.size(), stdout);
             return app::exit_ok;
         }
+        if (a == "--list-devices") {
+            // every GPU (never restricted here); [default] = the GPU used without --device
+            try {
+                const std::vector<gpusel::GpuRecord> devs = gpusel::enumerate();
+                if (const char* hv = std::getenv("HIP_VISIBLE_DEVICES"))
+                    std::printf("  (HIP_VISIBLE_DEVICES=%s is set: only those GPUs are listed, numbered from 0)\n", hv);
+                if (devs.empty()) std::printf("  (the AMD graphics driver reports no GPU)\n");
+                else std::fputs(gpusel::listingText(devs, gpusel::defaultGpu(devs).index).c_str(), stdout);
+            } catch (const std::exception& ex) {
+                std::fprintf(stderr, "%s: error: %s\n", program, ex.what());
+                return app::exit_gpu;
+            }
+            return app::exit_ok;
+        }
     }
     // v0.2.2.2 memory governor: ROCclr keeps freed device allocations smaller than its resource cache limit (its default size
     // was not checked in the ROCclr source; REVIEW-GOV-2 A-5) for reuse instead of returning them to Windows, and reuses a cached block for any
@@ -396,6 +414,7 @@ int serveMain(int argc, char** argv, const char* program) {
     const bool hip_cache_set = !hip_cache_user && envOn("HIP_CACHE_LIMIT", true);
     if (hip_cache_set) _putenv_s("GPU_RESOURCE_CACHE_SIZE", "256");
     Options opt;
+    bool device_given = false;  // --device / -dev seen
     for (std::size_t i = 0; i < args.size(); ++i) {
         const std::string arg = args[i];
         std::string mspec;
@@ -446,7 +465,15 @@ int serveMain(int argc, char** argv, const char* program) {
                 die("invalid --kv-ssd-mode " + *vm + " (expected always, shutdown or off)");
             opt.kv_ssd_mode = *vm;
         }
-        else if (auto v12 = argValue(args, i, "--device")) opt.device = *v12;
+        else if (auto v12 = argValue(args, i, "--device")) {
+            if (device_given) die("give --device only once");  // same rule as whirl
+            device_given = true;
+            opt.device = *v12;
+        } else if (auto v12b = argValue(args, i, "-dev")) {  // llama.cpp's short name
+            if (device_given) die("give --device only once");
+            device_given = true;
+            opt.device = *v12b;
+        }
         else if (auto v13 = argValue(args, i, "--mmproj")) opt.mmproj = *v13;
         else if (auto v14 = argValue(args, i, "--vis-idle-s")) opt.vis_idle_s = parseNum<std::uint32_t>(*v14, "--vis-idle-s");
         else if (auto v15 = argValue(args, i, "--vis-mode")) {
@@ -499,8 +526,17 @@ int serveMain(int argc, char** argv, const char* program) {
         const gguf::File f = gguf::File::open(opt.path);
         const qwen35::Config cfg = qwen35::Config::fromGguf(f);
         int dev = 0;
-        if (env("HIP_DEVICE")) dev = static_cast<int>(envU32("HIP_DEVICE", 0));
-        else dev = qwen35::pickDevice(opt.device);
+        int dev_shown = 0;  // the index as --list-devices prints it (before the restriction)
+        if (env("HIP_DEVICE")) {
+            dev = dev_shown = static_cast<int>(envU32("HIP_DEVICE", 0));
+        } else {
+            // s8-719 root fix: choose the GPU and make the HIP runtime see only it, before the first HIP call
+            // (a pinned host buffer is charged on every GPU the runtime sees: hipError 719 with two GPUs)
+            const gpusel::Restriction& gr = qwen35::restrictDevice(opt.device);
+            if (!gr.note.empty()) logI("{}", gr.note);
+            dev = qwen35::pickDevice(opt.device);
+            dev_shown = gr.active ? gr.all[gr.selected[0]].index : dev;
+        }
         const hip::DeviceInfo info = hip::describeDevice(dev);
         hip::setDevice(dev);
         // the device backend: memory queries of the plan below, then the engine's / tiers' device operations (ARCH-1 D-5)
@@ -523,10 +559,10 @@ int serveMain(int argc, char** argv, const char* program) {
         if (uma.known)
             logI("device {}: {} ({}), {} GPU memory (UMA carve-out from the BIOS / Armoury Crate; the runtime reports {:.1f} GiB, "
                  "which includes system RAM){}",
-                 dev, info.name, info.gcn_arch, hip::umaSizeText(uma), static_cast<double>(info.total_mem) / (1024.0 * 1024.0 * 1024.0),
+                 dev_shown, info.name, info.gcn_arch, hip::umaSizeText(uma), static_cast<double>(info.total_mem) / (1024.0 * 1024.0 * 1024.0),
                  vram::limitBytes() ? " (simulated limit)" : "");
         else
-            logI("device {}: {} ({}), {:.1f} GiB VRAM{}", dev, info.name, info.gcn_arch,
+            logI("device {}: {} ({}), {:.1f} GiB VRAM{}", dev_shown, info.name, info.gcn_arch,
                  static_cast<double>(info.total_mem) / (1024.0 * 1024.0 * 1024.0), vram::limitBytes() ? " (simulated limit)" : "");
         logI("HIP runtime: {}", hip::runtime::describe(hip::runtime::load()));  // the exact DLL loaded (ARCH-1 D-1)
         if (vram::limitBytes()) logI("{}: memory sizes, the WDDM budget and allocations are capped as on a card of that size", vram::limitNote());
@@ -1290,8 +1326,7 @@ int serveMain(int argc, char** argv, const char* program) {
                                    g.nonlocal_budget > 0 ? "non-local budget" : "shared GPU memory", own >> 20);
             }
             pinned_room = startfit::pinnedRoomMb(pst);
-            logI("kv tier: pinned memory now: {} HIP GPU(s) [{}] (a pinned buffer counts on each; a non-local budget is shared "
-                 "by them); all programs {} MiB (largest adapter) of half the RAM ({} MiB) -> room for the RAM tier {} "
+            logI("kv tier: pinned memory now: {} HIP GPU(s) [{}]; all programs {} MiB (largest adapter) of half the RAM ({} MiB) -> room for the RAM tier {} "
                  "(reserves {} / {} MiB)",
                  pst.gpus.size(), per, pst.pinned_max >> 20, pst.total_phys >> 21,
                  pinned_room == startfit::pinned_room_unknown ? std::string("unknown") : std::format("{} MiB", pinned_room),

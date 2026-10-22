@@ -4,12 +4,15 @@
 #include "server_main.h"
 #include "release/release.h"
 #include "whirl/common.h"
+#include "whirl/gpu_select.h"
 
 #include <string>
 #include <vector>
 
 int wmain(int argc, wchar_t** wargv) {
     whirl::app::initConsole();
+    // s8-719 root fix: the GPU list helper (a child of this program, see gpu_select.h); never interactive
+    if (argc == 2 && std::wstring(wargv[1]) == L"--whirl-gpu-probe") return whirl::gpusel::probeMain();
     std::vector<std::string> args;
     bool info_only = false;  // --help / --version need no GPU
     for (int i = 0; i < argc; ++i) {

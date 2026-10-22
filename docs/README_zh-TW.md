@@ -147,7 +147,19 @@ cd C:\whirl\whirl-0.2.3-windows-x64
 
 server 在 `http://127.0.0.1:8080/v1` 提供 OpenAI API（`/v1/chat/completions`、`/v1/completions`、`/v1/models`、`/health`），任何相容 OpenAI 的用戶端都能用。加 `--precise` 得到逐位元無損輸出，加 `--fast` 追求最高速度。用 Ctrl+C 停止 server，會先把重複使用過的工作階段寫進 SSD 層。
 
-兩張卡都在時預設用 R9700；`--device 8060s`（或 `WHIRL_DEVICE=8060s`）選 8060S。長文件可加大每個 slot 的上下文，例如 `--ctx-per-slot 262144`；見 [recipes_zh-TW.md](recipes_zh-TW.md#long-context)。
+長文件可加大每個 slot 的上下文，例如 `--ctx-per-slot 262144`；見 [recipes_zh-TW.md](recipes_zh-TW.md#long-context)。
+
+### 選擇 GPU
+
+- 沒加 `--device` 時，WHIRL 使用 GPU 記憶體最大的那張（內顯以專用記憶體計算；一樣大時，選 `--list-devices`
+  列出的第一張），啟動紀錄會寫出用的是哪張。
+- 要改用別張，請加 `--device pci:匯流排:裝置`，號碼可在工作管理員 →「效能」→ 選顯示卡 →「實體位置」查到。
+- 例如：工作管理員顯示實體位置為「PCI 匯流排 71，裝置 0，函數 0」→ `whirl-server.exe <模型.gguf> --device pci:71:0`
+
+`-dev` 和環境變數 `WHIRL_DEVICE` 的作用與 `--device` 相同（`whirl` 與 `whirl-server` 都適用）。
+
+`whirl devices`（或 `--list-devices`）會列出每張卡的 `pci:` 編號。只有一張卡符合時，也可以用編號、`r9700`、
+`8060s` 或名稱的一部分。USB4／Thunderbolt 外接顯卡在接上時才分配匯流排編號，重新插拔後請再看一次工作管理員。
 
 每個模型第一次執行時會調校一次 GPU kernel，結果快取在 `%LOCALAPPDATA%\whirl`（R9700 上我們的 MXFP4 檔只要幾秒；8060S 較久）。完整步驟：[快速上手](quickstart_zh-TW.md)。所有選項：[使用參考](guide/zh-TW/usage.md)。
 

@@ -3,6 +3,21 @@
 All notable changes to WHIRL are listed here. Versions follow `project(whirl VERSION ...)` in
 `CMakeLists.txt`.
 
+## 0.2.3 — unreleased
+
+### Fixed
+
+- Fixed hipError 719 on systems with more than one AMD GPU.
+
+  Choosing the GPU
+
+  - Without `--device`, WHIRL uses the GPU with the most GPU memory (integrated GPUs count their dedicated memory; if
+    equal, the first one in `--list-devices`); the startup log shows which GPU it uses.
+  - To use another GPU, add `--device pci:<bus>:<device>`; the numbers are in Task Manager > Performance > (select the
+    GPU) > Physical location.
+  - Example: Task Manager shows Physical location "PCI bus 71, device 0, function 0" →
+    `whirl-server.exe <model.gguf> --device pci:71:0`
+
 ## 0.2.2.2 — 2026-10-22 (bug fixes)
 
 ### Fixed

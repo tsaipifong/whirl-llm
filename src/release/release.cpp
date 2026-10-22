@@ -213,6 +213,10 @@ std::string explainText(const std::exception& e, int* exit_code) {
             msg = "no supported AMD GPU found (" + what + ").\n  WHIRL needs an AMD Radeon AI PRO R9700 (RDNA 4, gfx1201) or a Radeon 8060S\n  (Ryzen AI Max, RDNA 3.5, gfx1151); this build has GPU kernels for: " +
                   supportedArchList() + ".\n  GPUs reported by the driver:\n" + deviceListText() +
                   "  If the GPU is installed but not listed, update the driver:\n" + k_driver_advice;
+        } else if (c == "DeviceChoice") {
+            // --device / WHIRL_DEVICE did not name exactly one GPU: the text lists the GPUs and how to choose
+            code = exit_usage;
+            msg = (what.size() > c.size() + 2 ? what.substr(c.size() + 2) : what) + "\n";
         } else if (c == "GpuBusy") {
             code = exit_gpu;
             msg = "the GPU is still in use by another WHIRL process (waited WHIRL_GPU_WAIT seconds).\n"
@@ -318,8 +322,10 @@ constexpr unsigned GPU = C | B | T | Q | S;
 constexpr unsigned TUNED = C | B | Q | S;
 
 constexpr EnvDoc k_env[] = {
-    {"GPU and loading", "DEVICE=SPEC", "GPU to use: r9700 (default), 8060s, an index, or a name / gfx substring (= --device)", GPU | V},
-    {"GPU and loading", "HIP_DEVICE=N", "device index, bypassing device matching and the one-process-per-GPU lock", GPU},
+    {"GPU and loading", "DEVICE=SPEC", "GPU to use (= --device): pci:BUS:DEVICE as Task Manager > Performance > GPU > Physical location "
+                                       "shows it, an index, r9700, 8060s, or a part of the name; default: the GPU with the most GPU memory", GPU | V},
+    {"GPU and loading", "GPU_RESTRICT=0", "keep every GPU visible to the GPU runtime", GPU},
+    {"GPU and loading", "HIP_DEVICE=N", "device index, bypassing device matching, the GPU restriction and the one-process-per-GPU lock", GPU},
     {"GPU and loading", "GPU_SHARE=1", "do not wait for other WHIRL processes on the same GPU", GPU},
     {"GPU and loading", "GPU_WAIT=S", "seconds to wait for another WHIRL process to free the GPU (default 1800)", GPU},
     {"GPU and loading", "MODE=precise|balance|fast[:ITEMS]", "numerics mode (= --precise / --balance / --fast / --mode; default balance; "

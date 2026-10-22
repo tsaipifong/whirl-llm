@@ -131,7 +131,7 @@ decode 速度；開 MTP 時另列驗證回合數與草稿接受率。
 | `--out FILE` | 把最後一個提示位置的 logits（f32，每個詞彙一個值）寫進 FILE；會停用 MTP |
 | `--mmproj MMPROJ.gguf` | 視覺編碼器（Qwen3-VL 形式的 mmproj，F16 / BF16），`--image` 需要它 |
 | `--image IMAGE` | 放在提示文字前面的圖片；可重複指定 |
-| `--device SPEC` | GPU：`r9700`、`8060s`、索引，或名稱 / gfx 架構的子字串（也可用 `WHIRL_DEVICE`）。預設：第一張 R9700，沒有的話用第一張這個建置有 kernel 的 GPU（例如只有 Radeon 8060S 的機器） |
+| `--device SPEC`、`-dev SPEC` | GPU（也可用 `WHIRL_DEVICE`）：`pci:匯流排:裝置`，即工作管理員 > 效能 > GPU > 實體位置（「PCI 匯流排 71，裝置 0」= `pci:71:0`，可分辨同型號的卡）、`whirl devices` 的編號、`r9700`、`8060s` 或名稱的一部分（符合多張時拒絕）。預設：GPU 記憶體最大的那張（內顯以專用記憶體計算；一樣大時，選 `--list-devices` 列出的第一張），啟動紀錄會寫出用的是哪張。 |
 | `--precise` / `--balance` / `--fast` / `--mode M` | 數值模式（預設 balance；也可用 `WHIRL_MODE`）；`--balance=項目` 只選部分項目。見[數值模式](#modes) |
 | `-h`、`--help` | 說明 |
 
