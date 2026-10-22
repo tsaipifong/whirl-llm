@@ -8,8 +8,16 @@
 
 namespace whirl::startfit {
 
-std::optional<RamFit> ramTierFit(std::uint64_t mb, std::uint64_t avail_phys_bytes, std::uint64_t auto_mb, bool explicit_size) {
+// s8-719 test seam: not implemented yet (behaves like the released code: no GPU-pinned limit known)
+std::uint64_t pinnedRoomMb(const PinnedState& s) {
+    (void)s;
+    return pinned_room_unknown;
+}
+
+std::optional<RamFit> ramTierFit(std::uint64_t mb, std::uint64_t avail_phys_bytes, std::uint64_t auto_mb, bool explicit_size,
+                                 std::uint64_t pinned_room_mb) {
     (void)auto_mb;
+    (void)pinned_room_mb;
     if (mb == 0) return std::nullopt;
     RamFit r;
     r.mb = mb;

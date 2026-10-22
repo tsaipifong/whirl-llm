@@ -32,13 +32,31 @@ namespace whirl::startfit {
 // ram_tier_safe_mb until the cause is known. Then (v0.2.2.2: the cap first, so asking for more never gives less) an explicit
 // size above half of the RAM available now is lowered to half of it (whole 512 MiB). auto_mb: unused (kept for callers).
 inline constexpr std::uint64_t ram_tier_safe_mb = 20480;
+// GPU-pinned room for the RAM tier (kvram719 / s8-719), see pinnedRoomMb.
+inline constexpr std::uint64_t pinned_reserve_mb = 2048;
+inline constexpr std::uint64_t pinned_machine_reserve_mb = 6144;
+inline constexpr std::uint64_t pinned_room_unknown = ~0ull;
+struct PinnedGpu {                     // one HIP GPU's adapter, as this process sees it (DXGI)
+    std::uint64_t nonlocal_budget = 0;  // bytes: DXGI non-local budget; 0 on an integrated GPU (the 8060S reports 0)
+    std::uint64_t own_nonlocal = 0;     // bytes: this process's non-local usage on that adapter (pinned so far)
+    std::uint64_t shared_system = 0;    // bytes: DXGI SharedSystemMemory of that adapter ("shared GPU memory")
+};
+struct PinnedState {
+    std::uint64_t total_phys = 0;  // bytes; 0 = unknown
+    std::uint64_t pinned_max = 0;  // bytes: GPU Shared Usage of the largest adapter (all processes, this one included)
+    std::vector<PinnedGpu> gpus;   // every HIP GPU a pinned buffer is mapped to (empty = unknown)
+};
+// MiB the RAM tier may still pin, whole 512 MiB (0: none); pinned_room_unknown when nothing is known.
+std::uint64_t pinnedRoomMb(const PinnedState& s);
 struct RamFit {
     std::uint64_t mb = 0;
-    bool half = false;  // lowered because it was more than half of the available RAM
-    bool safe = false;  // capped at ram_tier_safe_mb
+    bool half = false;    // lowered because it was more than half of the available RAM
+    bool safe = false;    // capped at ram_tier_safe_mb
+    bool pinned = false;  // lowered to the GPU-pinned room (pinned_room_mb)
 };
 // nullopt: unchanged. explicit_size: the user gave the size (--kv-ram-mb / WHIRL_KV_RAM_MB).
-std::optional<RamFit> ramTierFit(std::uint64_t mb, std::uint64_t avail_phys_bytes, std::uint64_t auto_mb, bool explicit_size);
+std::optional<RamFit> ramTierFit(std::uint64_t mb, std::uint64_t avail_phys_bytes, std::uint64_t auto_mb, bool explicit_size,
+                                 std::uint64_t pinned_room_mb = pinned_room_unknown);
 
 // the pool the plan must reach: max(pool_min_tokens, pool_hard_min)
 std::uint64_t wantTokens(const vram::FitInput& fi);

@@ -2906,6 +2906,46 @@ void testStartupFit() {
     CHECK(!startfit::ramTierFit(0, 8 * GiB, 8192, true).has_value());  // 0 = tiers off: kept
     CHECK(!startfit::ramTierFit(4096, 0, 8192, true).has_value());     // RAM unknown, small: kept
     CHECK_EQ(startfit::ramTierFit(30000, 0, 0, true)->mb, 20480ull);    // RAM unknown, large: capped
+    // s8-719 repro (scratch\s8_719\results.txt, 2026-10-22 23:34-23:43): the 8060S at a 96 GB carve-out (32407 MiB RAM,
+    // SharedSystemMemory 16203 MiB on every adapter), the R9700 also a HIP GPU (DXGI non-local budget 15435 MiB), the
+    // embedding (1288 MiB) pinned, Swift precise server. --kv-ram-mb 4096 answered, 8192 failed with hipError 719 on the
+    // first request (0.2.3 and v0.2.2.2); with only the 8060S visible to HIP, 8192 answered.
+    {
+        startfit::PinnedState s;
+        s.total_phys = 32407 * MiB;
+        s.pinned_max = 1441 * MiB;  // 8060S adapter Shared Usage with the embedding pinned (case s23_ram0)
+        s.gpus = {{0, 0, 16203 * MiB}, {15435 * MiB, 1288 * MiB, 16203 * MiB}};  // 8060S (integrated: budget 0), R9700
+        const std::uint64_t room = startfit::pinnedRoomMb(s);
+        CHECK(room >= 4096ull && room < 8192ull);
+        const auto r = startfit::ramTierFit(8192, 19374 * MiB, 0, true, room);  // 19374 MiB available (case g23_swift)
+        CHECK(r.has_value() && r->mb < 8192ull && r->mb >= 4096ull && r->pinned);
+        CHECK(!startfit::ramTierFit(4096, 19374 * MiB, 0, true, room).has_value());  // 4096 answered: kept
+        // only the 8060S visible to HIP (HIP_VISIBLE_DEVICES): 8192 answered -> kept
+        s.gpus = {{0, 0, 16203 * MiB}};
+        CHECK(!startfit::ramTierFit(8192, 19430 * MiB, 0, true, startfit::pinnedRoomMb(s)).has_value());
+    }
+    // kvram719 (the same PC at a 64/64 carve-out: 65175 MiB RAM, R9700 non-local budget 48026 MiB, the 8060S's
+    // SharedSystemMemory 32587 MiB, both HIP GPUs, process on the R9700): 24064 failed, 20480 worked
+    {
+        startfit::PinnedState s;
+        s.total_phys = 65175 * MiB;
+        s.pinned_max = 1288 * MiB;
+        s.gpus = {{48026 * MiB, 1288 * MiB, 32587 * MiB}, {0, 0, 32587 * MiB}};
+        const std::uint64_t room = startfit::pinnedRoomMb(s);
+        CHECK(room >= 20480ull && room < 24064ull);
+        CHECK(!startfit::ramTierFit(20480, 55 * GiB, 16384, true, room).has_value());
+        s.pinned_max = (10890 + 1288) * MiB;  // another server had 10890 MiB pinned: 20480 failed (kvram719 10:41)
+        CHECK(startfit::pinnedRoomMb(s) < 20480ull);
+    }
+    CHECK_EQ(startfit::pinnedRoomMb(startfit::PinnedState{}), startfit::pinned_room_unknown);  // nothing known
+    // everything pinned by other programs: room 0 -> the tier is off rather than crashing
+    {
+        startfit::PinnedState s;
+        s.total_phys = 64 * GiB;
+        s.pinned_max = 30 * GiB;
+        const auto r = startfit::ramTierFit(16384, 30 * GiB, 16384, false, startfit::pinnedRoomMb(s));
+        CHECK(r.has_value() && r->mb == 0ull && r->pinned);
+    }
     // 2b. slots after the weights: the C5 case (15 slots left 13312 tokens for a 16384-token request) -> fewer slots
     {
         const std::uint64_t per_tok = 36966, per_slot = 380 * MiB, shared = 556 * MiB;
