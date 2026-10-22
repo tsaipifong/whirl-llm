@@ -9,9 +9,11 @@
 
 #include "hip_api.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <vector>
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -23,6 +25,7 @@
 #include <windows.h>
 #include <dxgi1_4.h>
 #include <pdh.h>
+#include <pdhmsg.h>
 #endif
 
 namespace whirl::hip {
@@ -121,6 +124,69 @@ GpuOthers gpuOthers(int dev) {
         }
     }
     r.cost_us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
+#endif
+    return r;
+}
+
+GpuPinned gpuPinnedNow() {
+    GpuPinned r;
+#ifdef _WIN32
+    PDH_HQUERY q = nullptr;
+    if (PdhOpenQueryW(nullptr, 0, &q) == ERROR_SUCCESS) {
+        PDH_HCOUNTER c = nullptr;
+        if (PdhAddEnglishCounterW(q, L"\\GPU Adapter Memory(*)\\Shared Usage", 0, &c) == ERROR_SUCCESS &&
+            PdhCollectQueryData(q) == ERROR_SUCCESS) {
+            DWORD bytes = 0, n = 0;
+            if (PdhGetFormattedCounterArrayW(c, PDH_FMT_LARGE, &bytes, &n, nullptr) == PDH_MORE_DATA && bytes > 0) {
+                std::vector<unsigned char> buf(bytes);
+                auto* items = reinterpret_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(buf.data());
+                if (PdhGetFormattedCounterArrayW(c, PDH_FMT_LARGE, &bytes, &n, items) == ERROR_SUCCESS) {
+                    for (DWORD i = 0; i < n; ++i) {
+                        if (items[i].FmtValue.CStatus != PDH_CSTATUS_VALID_DATA && items[i].FmtValue.CStatus != PDH_CSTATUS_NEW_DATA) continue;
+                        const auto v = static_cast<std::uint64_t>(std::max<LONGLONG>(items[i].FmtValue.largeValue, 0));
+                        r.max_shared = std::max(r.max_shared, v);
+                        r.sum_shared += v;
+                        ++r.adapters;
+                    }
+                    r.ok = r.adapters > 0;
+                }
+            }
+        }
+        PdhCloseQuery(q);
+    }
+    int ndev = 0;
+    if (rt().hipGetDeviceCount(&ndev) != hipSuccess || ndev < 1) ndev = 1;
+    r.devs.assign(static_cast<std::size_t>(ndev), GpuPinnedDev{});
+    IDXGIFactory1* fac = nullptr;
+    if (SUCCEEDED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&fac))) && fac) {
+        for (int d = 0; d < ndev; ++d) {
+            hipDeviceProp_t prop{};
+            if (rt().hipGetDeviceProperties(&prop, d) != hipSuccess) continue;
+            for (UINT i = 0;; ++i) {
+                IDXGIAdapter1* ad = nullptr;
+                if (fac->EnumAdapters1(i, &ad) == DXGI_ERROR_NOT_FOUND || !ad) break;
+                DXGI_ADAPTER_DESC1 desc{};
+                const bool match = SUCCEEDED(ad->GetDesc1(&desc)) && sizeof(desc.AdapterLuid) == sizeof(prop.luid) &&
+                                   std::memcmp(&desc.AdapterLuid, prop.luid, sizeof(prop.luid)) == 0;
+                if (match) {
+                    GpuPinnedDev& g = r.devs[static_cast<std::size_t>(d)];
+                    g.shared_system = desc.SharedSystemMemory;
+                    IDXGIAdapter3* a3 = nullptr;
+                    if (SUCCEEDED(ad->QueryInterface(__uuidof(IDXGIAdapter3), reinterpret_cast<void**>(&a3))) && a3) {
+                        DXGI_QUERY_VIDEO_MEMORY_INFO nl{};
+                        if (SUCCEEDED(a3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL, &nl))) {
+                            g.nonlocal_budget = nl.Budget;
+                            g.nonlocal_usage = nl.CurrentUsage;
+                        }
+                        a3->Release();
+                    }
+                }
+                ad->Release();
+                if (match) break;
+            }
+        }
+        fac->Release();
+    }
 #endif
     return r;
 }

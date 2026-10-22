@@ -32,7 +32,16 @@ namespace whirl::startfit {
 // ram_tier_safe_mb until the cause is known. Then (v0.2.2.2: the cap first, so asking for more never gives less) an explicit
 // size above half of the RAM available now is lowered to half of it (whole 512 MiB). auto_mb: unused (kept for callers).
 inline constexpr std::uint64_t ram_tier_safe_mb = 20480;
-// GPU-pinned room for the RAM tier (kvram719 / s8-719), see pinnedRoomMb.
+// GPU-pinned room for the RAM tier (kvram719 / s8-719). The RAM tier is pinned host memory mapped to every HIP GPU, and
+// Windows limits how much of it the GPUs can keep resident: past the limit the allocations still succeed, but the first
+// request fails with hipError 719 (AMD_LOG_LEVEL=1: "PAL failed to submit CMD! result:-5"). pinnedRoomMb takes the
+// smallest room of: each HIP GPU (a discrete GPU's DXGI non-local budget / the number of HIP GPUs; an integrated GPU,
+// which reports a non-local budget of 0, its SharedSystemMemory), minus this process's pinned memory there and
+// pinned_reserve_mb; and the machine (half of the RAM minus every program's GPU-pinned memory, largest adapter, minus
+// pinned_machine_reserve_mb). Measured: kvram719 (R9700 box, 64 GB carve-out) and s8-719 (8060S at 96 GB with the
+// R9700 attached: 4096 MiB worked, 8192 failed; the R9700's 15435 MiB budget / 2 was the limit). Every RAM tier,
+// explicit or automatic, is lowered to that room after the 20480 MiB cap, with an "adjusted:" line for an explicit
+// size (a server that answers with a smaller tier instead of a server whose every request fails).
 inline constexpr std::uint64_t pinned_reserve_mb = 2048;
 inline constexpr std::uint64_t pinned_machine_reserve_mb = 6144;
 inline constexpr std::uint64_t pinned_room_unknown = ~0ull;
