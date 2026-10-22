@@ -14,6 +14,10 @@
 // ("# argseqhash", "@ ..."); a table without them (older builds) compares on kernels and geometry only.
 // REVIEW-ARCH4 P3-6: the recorder is never destroyed; it is written once at exit (atexit / at_quick_exit) under its
 // lock, and launches after that are ignored.
+// Debug aid (arch6e): WHIRL_LAUNCH_LOG_RAW set as well writes launch_<pid>.raw.txt next to the table, one line per
+// launch (index, kernel, geometry, digest, then per argument "|size" and each 8-byte word as in:ordinal:offset /
+// below:ordinal:distance / v:value with "=raw value" after a normalised pointer, tail bytes as t:hex), so two runs can
+// be diffed launch by launch.
 
 #pragma once
 
@@ -29,6 +33,9 @@ void onFunction(const void* f, const char* name);
 void onLaunch(const void* f, unsigned gx, unsigned gy, unsigned gz, unsigned bx, unsigned by, unsigned bz, unsigned shared);
 // the arguments of the next onLaunch on this thread (hip::launch, include/whirl/hip.h)
 void stageArgs(void* const* params, const std::uint32_t* sizes, std::size_t n);
+// the digest stageArgs stages for these arguments, against the allocations registered so far (none while the log is
+// off); also callable with the log off (unit tests)
+std::uint64_t argDigest(void* const* params, const std::uint32_t* sizes, std::size_t n);
 // device allocations (hip::malloc / free, module globals): the address space argument pointers are normalized against
 void onAlloc(std::uint64_t base, std::uint64_t bytes);
 void onFree(std::uint64_t base);

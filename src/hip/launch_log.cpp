@@ -12,6 +12,7 @@
 #include <tuple>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -63,24 +64,32 @@ struct Recorder {
     // one 8-byte argument word: inside an allocation (one past its end included) -> (ordinal, offset); below the
     // next allocation by at most its size (a base shifted back by a row offset, e.g. KvArgs k - r0 * row) ->
     // (ordinal, -distance); anything else as it is. Called with mu held.
-    void mixWord(std::uint64_t& h, std::uint64_t v) const {
+    // raw: WHIRL_LAUNCH_LOG_RAW set -> each word is also written out ("kind:ordinal:offset" or "v:value", then
+    // "=raw" with the unnormalised value) so two runs can be diffed launch by launch (debug aid, arch6e)
+    void mixWord(std::uint64_t& h, std::uint64_t v, std::string* raw) const {
+        char b[96];
         auto it = allocs.upper_bound(v);  // first base > v
         if (it != allocs.begin()) {
             const auto& [base, a] = *std::prev(it);
             if (v - base <= a.bytes) {
                 const std::uint64_t rec[3] = {1, a.ordinal, v - base};
                 fnv(h, rec, sizeof rec);
+                if (raw) { std::snprintf(b, sizeof b, " in:%llu:%llu=%llx", (unsigned long long)a.ordinal, (unsigned long long)(v - base), (unsigned long long)v); *raw += b; }
                 return;
             }
         }
         if (it != allocs.end() && it->first - v <= it->second.bytes) {
             const std::uint64_t rec[3] = {2, it->second.ordinal, it->first - v};
             fnv(h, rec, sizeof rec);
+            if (raw) { std::snprintf(b, sizeof b, " below:%llu:%llu=%llx", (unsigned long long)it->second.ordinal, (unsigned long long)(it->first - v), (unsigned long long)v); *raw += b; }
             return;
         }
         const std::uint64_t rec[2] = {0, v};
         fnv(h, rec, sizeof rec);
+        if (raw) { std::snprintf(b, sizeof b, " v:%llx", (unsigned long long)v); *raw += b; }
     }
+    bool raw_on = std::getenv("WHIRL_LAUNCH_LOG_RAW") != nullptr;
+    std::vector<std::string> raw_lines;
 
     void write() {
         std::string cmd;
@@ -110,6 +119,12 @@ struct Recorder {
                          k.shared, static_cast<unsigned long long>(ka.second), static_cast<unsigned long long>(c));
         }
         std::fclose(f);
+        if (!raw_on) return;
+        const std::string rp = folder() + "\\launch_" + std::to_string(pid) + ".raw.txt";
+        std::FILE* g = std::fopen(rp.c_str(), "wb");
+        if (g == nullptr) return;
+        for (const std::string& l : raw_lines) std::fprintf(g, "%s\n", l.c_str());
+        std::fclose(g);
     }
 };
 
@@ -122,6 +137,7 @@ Recorder& rec() {
 // the arguments hip::launch staged for this thread's next launch
 thread_local bool t_staged = false;
 thread_local std::uint64_t t_digest = 0;
+thread_local std::string t_raw;
 
 void writeAtExit() {
     Recorder& r = rec();
@@ -162,24 +178,45 @@ void onFree(std::uint64_t base) {
     r.allocs.erase(base);
 }
 
-void stageArgs(void* const* params, const std::uint32_t* sizes, std::size_t n) {
-    if (!g_on) return;
-    Recorder& r = rec();
+namespace {
+// the argument digest (see launch_log.h); called with r.mu held; raw != nullptr also writes the words out
+std::uint64_t digestLocked(const Recorder& r, void* const* params, const std::uint32_t* sizes, std::size_t n, std::string* raw) {
     std::uint64_t h = kFnvBasis;
-    std::lock_guard<std::mutex> lk(r.mu);
+    if (raw) raw->clear();
     for (std::size_t i = 0; i < n; ++i) {
         const auto* p = static_cast<const unsigned char*>(params[i]);
         const std::uint32_t sz = sizes[i];
         fnv(h, &sz, sizeof sz);
+        if (raw) *raw += " |" + std::to_string(sz);
         std::uint32_t off = 0;
         for (; off + 8 <= sz; off += 8) {
             std::uint64_t v;
             std::memcpy(&v, p + off, 8);
-            r.mixWord(h, v);
+            r.mixWord(h, v, raw);
         }
         fnv(h, p + off, sz - off);
+        if (raw)
+            for (std::uint32_t j = off; j < sz; ++j) {
+                char b[8];
+                std::snprintf(b, sizeof b, "%s%02x", j == off ? " t:" : "", p[j]);
+                *raw += b;
+            }
     }
-    t_digest = h;
+    return h;
+}
+}  // namespace
+
+std::uint64_t argDigest(void* const* params, const std::uint32_t* sizes, std::size_t n) {
+    Recorder& r = rec();
+    std::lock_guard<std::mutex> lk(r.mu);
+    return digestLocked(r, params, sizes, n, nullptr);
+}
+
+void stageArgs(void* const* params, const std::uint32_t* sizes, std::size_t n) {
+    if (!g_on) return;
+    Recorder& r = rec();
+    std::lock_guard<std::mutex> lk(r.mu);
+    t_digest = digestLocked(r, params, sizes, n, r.raw_on ? &t_raw : nullptr);
     t_staged = true;
 }
 
@@ -200,6 +237,13 @@ void onLaunch(const void* f, unsigned gx, unsigned gy, unsigned gz, unsigned bx,
     fnv(r.aseq, geo, sizeof geo);
     fnv(r.aseq, &digest, sizeof digest);
     r.counts[k] += 1;
+    if (r.raw_on) {
+        char b[160];
+        std::snprintf(b, sizeof b, "%llu %s %ux%ux%u %ux%ux%u %u %016llx", (unsigned long long)r.n, k.name.c_str(), gx, gy, gz, bx, by, bz, shared,
+                      (unsigned long long)digest);
+        r.raw_lines.push_back(std::string(b) + t_raw);
+        t_raw.clear();
+    }
     r.arg_counts[{std::move(k), digest}] += 1;
 }
 
