@@ -167,6 +167,20 @@ const Restriction& current();
 inline constexpr const char* k_probe_arg = "--whirl-gpu-probe";
 int probeMain();
 
+// How long the parent waits for the probe child before it kills it and keeps every GPU visible.
+inline constexpr unsigned k_probe_timeout_ms = 60000;
+
+// Runs one helper process (the probe) and captures its stdout; stdin and stderr are NUL. Never waits longer
+// than timeout_ms (then the child is terminated). out is empty unless the child exited with code 0.
+struct ChildRun {
+    bool started = false;
+    bool timed_out = false;
+    unsigned long exit_code = 1;
+    std::string out;
+    std::string why;  // "" on success
+};
+ChildRun runChild(const std::wstring& exe, const std::wstring& cmdline, unsigned timeout_ms);
+
 // Every GPU this process sees, as records (HIP calls).
 std::vector<GpuRecord> enumerate();
 

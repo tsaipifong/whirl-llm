@@ -43,6 +43,15 @@
 #include <new>
 #include <string>
 #include <vector>
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
 
 using namespace whirl;
 
@@ -3624,7 +3633,61 @@ void testGpuSelect() {
     }
 }
 
-int main() {
+// s8-719 review C1 (written from the finding, 2026-10-23): the GPU probe is a hidden helper process, so
+// (a) a crash in it must never show a Windows error dialog, (b) the parent must not hand it every inheritable
+// handle (log file, listening socket), only the pipe and NUL, and (c) it must give up after 10 s, not 60 s.
+// The child is this test program itself (helper modes in main()).
+#if WHIRL_WITH_HIP && defined(_WIN32)
+void testProbeChild(const wchar_t* self) {
+    using namespace whirl::gpusel;
+    CHECK_EQ(k_probe_timeout_ms, 10000u);
+    const std::wstring exe = self;
+    const std::wstring q = L"\"" + exe + L"\" ";
+    // (a) error mode of the child: SEM_NOGPFAULTERRORBOX even when the parent has none
+    const UINT old = SetErrorMode(0);
+    ChildRun em = runChild(exe, q + L"--child-error-mode", 10000);
+    SetErrorMode(old);
+    CHECK(em.started && em.exit_code == 0);
+    const unsigned long mode = em.out.empty() ? 0 : std::stoul(em.out);
+    CHECK((mode & SEM_NOGPFAULTERRORBOX) != 0);
+    // (b) an inheritable handle of the parent must not reach the child
+    SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
+    HANDLE ev = CreateEventW(&sa, TRUE, TRUE, nullptr);  // inheritable, manual reset, signaled
+    CHECK(ev != nullptr);
+    ChildRun hi = runChild(exe, q + L"--child-has-handle " + std::to_wstring(reinterpret_cast<std::uintptr_t>(ev)), 10000);
+    CHECK(hi.started && hi.exit_code == 0);
+    CHECK(hi.out.rfind("0", 0) == 0);  // "0" = not inherited
+    CloseHandle(ev);
+    // (c) a child that hangs is killed after the bound
+    const ULONGLONG t0 = GetTickCount64();
+    ChildRun hang = runChild(exe, q + L"--child-sleep-ms 30000", 1000);
+    const ULONGLONG dt = GetTickCount64() - t0;
+    CHECK(hang.timed_out);
+    CHECK(hang.out.empty());
+    CHECK(dt < 8000);
+    // a normal child: output captured
+    ChildRun ok = runChild(exe, q + L"--child-echo", 10000);
+    CHECK(ok.started && ok.exit_code == 0 && ok.why.empty());
+    CHECK(ok.out.rfind("echo-ok", 0) == 0);
+}
+#endif
+
+int main(int argc, char** argv) {
+#if WHIRL_WITH_HIP && defined(_WIN32)
+    if (argc >= 2) {  // helper modes for testProbeChild (the test runs this program as the child)
+        const std::string m = argv[1];
+        if (m == "--child-error-mode") { std::printf("%u", GetErrorMode()); return 0; }
+        if (m == "--child-has-handle" && argc == 3) {
+            HANDLE h = reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(std::stoull(argv[2])));
+            DWORD f = 0;
+            const bool live = GetHandleInformation(h, &f) && WaitForSingleObject(h, 0) == WAIT_OBJECT_0;
+            std::printf("%d", live ? 1 : 0);
+            return 0;
+        }
+        if (m == "--child-sleep-ms" && argc == 3) { Sleep(static_cast<DWORD>(std::stoul(argv[2]))); return 0; }
+        if (m == "--child-echo") { std::printf("echo-ok"); return 0; }
+    }
+#endif
     whirl::test::clearWhirlEnv();  // FR-TEST P3-11
 #if WHIRL_TEST_DLL_DEPS
     testDllDeps();
@@ -3656,6 +3719,14 @@ int main() {
     testMemGovernor();
     testMemGovernorGrowOvershoot();
     testGpuSelect();
+#if WHIRL_WITH_HIP && defined(_WIN32)
+    {
+        wchar_t self[1024];
+        const DWORD n = GetModuleFileNameW(nullptr, self, 1024);
+        if (n > 0 && n < 1024) testProbeChild(self);
+        else CHECK(false);
+    }
+#endif
     std::printf("unit tests: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

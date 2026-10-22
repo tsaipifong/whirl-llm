@@ -71,11 +71,21 @@ std::string runProbe(std::string* why) {
         return {};
     }
     exe.resize(n);
+    const std::wstring cmd = L"\"" + exe + L"\" " + std::wstring(k_probe_arg, k_probe_arg + std::strlen(k_probe_arg));
+    ChildRun r = runChild(exe, cmd, k_probe_timeout_ms);
+    *why = r.why;
+    return r.out;
+}
+
+}  // namespace
+
+ChildRun runChild(const std::wstring& exe, const std::wstring& cmdline, unsigned timeout_ms) {
+    ChildRun r;
     SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
     HANDLE rd = nullptr, wr = nullptr;
     if (!CreatePipe(&rd, &wr, &sa, 0)) {
-        *why = "no pipe";
-        return {};
+        r.why = "no pipe";
+        return r;
     }
     SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);
     HANDLE nul = CreateFileW(L"NUL", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_EXISTING, 0, nullptr);
@@ -86,19 +96,20 @@ std::string runProbe(std::string* why) {
     si.hStdOutput = wr;
     si.hStdError = nul;   // AMD_LOG_LEVEL output of the child is not needed
     PROCESS_INFORMATION pi{};
-    std::wstring cmd = L"\"" + exe + L"\" " + std::wstring(k_probe_arg, k_probe_arg + std::strlen(k_probe_arg));
+    std::wstring cmd = cmdline;
     const BOOL ok = CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
     CloseHandle(wr);
     if (nul != INVALID_HANDLE_VALUE) CloseHandle(nul);
     if (!ok) {
         CloseHandle(rd);
-        *why = std::format("the helper process did not start (error {})", GetLastError());
-        return {};
+        r.why = std::format("the helper process did not start (error {})", GetLastError());
+        return r;
     }
+    r.started = true;
     std::string out;
     char buf[4096];
     DWORD got = 0;
-    // the child exits after enumerating; the pipe closes with it. Bounded: 60 s
+    // the child exits after enumerating; the pipe closes with it. Bounded by timeout_ms
     const ULONGLONG t0 = GetTickCount64();
     for (;;) {
         DWORD avail = 0;
@@ -113,9 +124,10 @@ std::string runProbe(std::string* why) {
                 out.append(buf, got);
             break;
         }
-        if (GetTickCount64() - t0 > 60000) {
+        if (GetTickCount64() - t0 > timeout_ms) {
             TerminateProcess(pi.hProcess, 1);
-            *why = "the helper process did not finish in 60 s";
+            r.timed_out = true;
+            r.why = std::format("the helper process did not finish in {} s", (timeout_ms + 999) / 1000);
             out.clear();
             break;
         }
@@ -126,9 +138,13 @@ std::string runProbe(std::string* why) {
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
     CloseHandle(rd);
-    if (code != 0 && why->empty()) *why = std::format("the helper process ended with code {}", code);
-    return code == 0 ? out : std::string();
+    r.exit_code = code;
+    if (code != 0 && r.why.empty()) r.why = std::format("the helper process ended with code {}", code);
+    if (code == 0) r.out = std::move(out);
+    return r;
 }
+
+namespace {
 
 void setEnv(const char* k, const std::string& v) {
     _putenv_s(k, v.c_str());           // this module's CRT and the process environment
