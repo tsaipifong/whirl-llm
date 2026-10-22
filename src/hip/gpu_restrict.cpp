@@ -224,6 +224,14 @@ int probeMain() {
 
 const Restriction& current() { return g_r; }
 
+int chosenPosition(const std::vector<GpuRecord>& recs, std::string_view spec_arg) {
+    if (g_r.active) return 0;  // identity proven in restrictToSelected
+    std::string spec(spec_arg);
+    if (spec.empty())
+        if (const char* v = std::getenv("WHIRL_DEVICE")) spec = v;
+    return selectGpus(recs, spec)[0];
+}
+
 const Restriction& restrictToSelected(std::string_view spec_arg) {
     std::call_once(g_once, [&] {
         g_r.done = true;

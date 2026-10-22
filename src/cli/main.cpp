@@ -198,14 +198,15 @@ const char* k_help_devices =
     "Performance > GPU > Physical location shows it, stays the same when GPUs are added or removed; an index can change).\n";
 
 const char* k_help_vis =
-    "usage: whirl vis-encode MMPROJ.gguf IMAGE [OUT.f32] [--reps N] [--mode auto|resident|stream]\n"
+    "usage: whirl vis-encode MMPROJ.gguf IMAGE [OUT.f32] [--reps N] [--mode auto|resident|stream] [--device D]\n"
     "\n"
     "Encodes one image with a vision encoder (diagnostic) and reports the timing; OUT.f32\n"
     "receives the projected embeddings.\n"
     "\n"
     "options:\n"
     "  --reps N                   encode N times (timing)\n"
-    "  --mode M                   auto (default), resident (weights in VRAM), stream (layer by layer)\n";
+    "  --mode M                   auto (default), resident (weights in VRAM), stream (layer by layer)\n"
+    "  --device D, -dev D         the GPU, as for whirl chat (default: the one with the most GPU memory)\n";
 
 void out(const std::string& s) {
     std::fwrite(s.data(), 1, s.size(), stdout);

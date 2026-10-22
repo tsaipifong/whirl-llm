@@ -61,18 +61,12 @@ int pickDevice(std::string_view spec_arg) {
     std::vector<gpusel::GpuRecord> recs = gpusel::enumerate();
     if (recs.empty()) throw ModelError("NoTargetGpu", "the AMD graphics driver reports no GPU");
     int pos = 0;
-    if (gpusel::current().active) {
-        pos = 0;  // the GPU runtime shows only the chosen GPU (identity proven in restrictToSelected)
-    } else {
-        std::string spec(spec_arg);
-        if (spec.empty())
-            if (auto v = envGet("DEVICE")) spec = *v;
-        try {
-            pos = gpusel::selectGpus(recs, spec)[0];
-        } catch (const gpusel::SelectError& e) {
-            if (spec.empty()) throw ModelError("NoTargetGpu", e.what());
-            throw ModelError("DeviceChoice", e.what());
-        }
+    try {
+        pos = gpusel::chosenPosition(recs, spec_arg);  // 0 when restricted, else --device / WHIRL_DEVICE / default
+    } catch (const gpusel::SelectError& e) {
+        const bool none = spec_arg.empty() && !envGet("DEVICE");
+        if (none) throw ModelError("NoTargetGpu", e.what());
+        throw ModelError("DeviceChoice", e.what());
     }
     lockGpu(recs[pos]);
     return recs[pos].index;

@@ -2,20 +2,23 @@
 // model), shared by whirl-vis.exe and `whirl vis-encode`.
 // SPDX-License-Identifier: Apache-2.0
 //
-//   vis-encode MMPROJ.gguf IMAGE [OUT.f32] [--reps N] [--mode auto|resident|stream]
+//   vis-encode MMPROJ.gguf IMAGE [OUT.f32] [--reps N] [--mode auto|resident|stream] [--device D]
 //
-// Environment: WHIRL_DEVICE (default: the first R9700), WHIRL_VIS_DUMP_RGB=FILE
+// GPU: --device / -dev / WHIRL_DEVICE, default = the most GPU memory (same rules as whirl and
+// whirl-server, gpusel). Environment: WHIRL_VIS_DUMP_RGB=FILE
 // (preprocessed RGB bytes), WHIRL_VIS_PRE=IMAGE (encode another image first in
 // the same arena), WHIRL_VIS_PROF=1 (synchronized per-op profile of the last rep).
 // Output format follows the prototype's `whirl vis-encode` (item VIS).
 
 #include "whirl/common.h"
+#include "whirl/gpu_select.h"
 #include "whirl/hip.h"
 #include "whirl/vision.h"
 
 #include <algorithm>
 #include <cmath>
 #include <optional>
+#include <stdexcept>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -46,21 +49,30 @@ int cliVisEncode(std::span<const std::string> args) {
     std::uint32_t reps = 2;
     vision::Mode mode = vision::Mode::automatic;
     std::string out_path;
+    std::string device_spec;
+    bool device_given = false;
     for (std::size_t i = 2; i < args.size(); ++i) {
         if (args[i] == "--reps" && i + 1 < args.size()) {
             reps = static_cast<std::uint32_t>(std::strtoul(args[++i].c_str(), nullptr, 10));
         } else if (args[i] == "--mode" && i + 1 < args.size()) {
             mode = vision::parseMode(args[++i]).value_or(vision::Mode::automatic);
+        } else if ((args[i] == "--device" || args[i] == "-dev") && i + 1 < args.size()) {
+            if (device_given) throw std::runtime_error("give --device once (a comma list: --device a,b)");
+            device_given = true;
+            device_spec = args[++i];
         } else {
             out_path = args[i];
         }
     }
-    const char* dev_spec = envRaw("WHIRL_DEVICE");
-    const int dev = hip::findDevice(dev_spec != nullptr ? dev_spec : "R9700");
-    if (dev < 0) {
-        std::printf("no such device: %s\n", dev_spec != nullptr ? dev_spec : "R9700");
+    // the same choice and restriction as whirl / whirl-server, before the first HIP call
+    const gpusel::Restriction& r = gpusel::restrictToSelected(device_spec);  // throws SelectError (a bad --device)
+    if (!r.note.empty()) std::fprintf(stderr, "whirl: %s\n", r.note.c_str());
+    const std::vector<gpusel::GpuRecord> recs = gpusel::enumerate();
+    if (recs.empty()) {
+        std::printf("no GPU: the AMD graphics driver reports none\n");
         return 1;
     }
+    const int dev = recs[static_cast<std::size_t>(gpusel::chosenPosition(recs, device_spec))].index;
     hip::setDevice(dev);
     const double tl = nowSeconds();
     auto v = vision::Vision::load(mm);
