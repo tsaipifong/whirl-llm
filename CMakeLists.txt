@@ -104,6 +104,7 @@ add_library(whirl STATIC
   src/common/wddm_watch.cpp
   src/common/pool_budget.cpp
   src/common/startup_fit.cpp
+  src/common/gpu_select.cpp
   src/common/mem_governor.cpp
   src/common/numerics.cpp
   src/common/spec_sample.cpp
