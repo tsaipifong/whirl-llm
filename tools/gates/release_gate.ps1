@@ -90,6 +90,8 @@ AddStep "cpu_profile_switch" $false @($pwsh, "-NoProfile", "-File", (Join-Path $
 AddStep "cpu_server" $false @($exe["whirl-server-tests"], "--gguf", $SW) { param($o, $c) $c -eq 0 -and ($o -match "server tests: [1-9]\d* passed, 0 failed") }
 AddStep "cpu_gate_selftest" $false @($exe["whirl-server-gate"], "--selftest") { param($o, $c) $c -eq 0 -and ($o -match ", 0 failed") }
 AddStep "cpu_gate_nosuite" $false @($exe["whirl-server-gate"], "--exe", $exe["whirl-server"], "--model", $SW) { param($o, $c) $c -eq 2 }
+# s8-719 review C4: whirl-server refuses a repeated --device like whirl (CPU only: refused before any model or GPU work)
+AddStep "cpu_device_once" $false @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\repro\server_device_once.ps1"), "-Build", $Build) { param($o, $c) $c -eq 0 -and ($o -match "(?m)^server_device_once: PASS") }
 AddStep "cpu_server_only_typo" $false @($exe["whirl-server-tests"], "--gguf", $SW, "--only", "no_such_test") { param($o, $c) $c -eq 2 }
 AddStep "cpu_golden_selftest" $false @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\golden\golden_selftest.ps1")) { param($o, $c) $c -eq 0 -and ($o -match "all cases as expected") }
 AddStep "cpu_golden_xcheck" $false @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\golden\golden.ps1"), "xcheck", "-Arch", $arch, "-Models", $gmodels) { param($o, $c) $c -eq 0 -and ($o -match "file\(s\) ok") }
@@ -170,8 +172,10 @@ $verifyRule = {
 }
 AddStep "srv_tier_verify" $true (GateCmd $SW "tier" "balance" ($ram8s + @("--server-env", "WHIRL_TIER_VERIFY=1"))) $verifyRule
 # s8-719 (hipError 719 with two GPUs), permanent: with more than one GPU, an 8192 MiB RAM tier on this GPU with
-# --device pci:<bus>:<device> (and without --device when it is the default) answers, keeps 8192, names the GPU and
-# the hidden ones, and does not charge the other adapter. One GPU: SKIP.
+# --device pci:<bus>:<device> (and without --device when it is the default): HTTP 200, no hipError, not cut by the
+# pinned-room limit (the half-of-available-RAM rule may lower it and is reported), "1 HIP GPU(s)", the startup
+# line names this GPU, the other adapter's shared usage rises <= 1024 MiB. Only this gate's GPU runs (the runs are
+# one after the other); the other GPU's gate is a separate release_gate invocation. One GPU: SKIP.
 AddStep "srv_gpu_select" $true @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\gates\gpu_select_check.ps1"), "-Build", $Build, "-Model", $SW,
                                  "-Device", $Device, "-Port", "$($port + 3)", "-Work", "@WORK@") { param($o, $c) $c -eq 0 -and ($o -match "(?m)^gpu select check: (ok|SKIP)") }
 

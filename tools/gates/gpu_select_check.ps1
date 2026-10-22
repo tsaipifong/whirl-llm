@@ -2,10 +2,12 @@
 # Release-gate regression check for s8-719 (hipError 719 with two GPUs) - permanent, owner 2026-10-23.
 # On a host with more than one AMD GPU: start whirl-server on THIS gate's GPU with an explicit 8192 MiB RAM tier
 # (a) with --device pci:<bus>:<device> and (b) without --device when this GPU is the default; one request each.
-# PASS per run (tools\repro\s8_719_root.ps1): HTTP 200, no "(hipError N)" / "| failed:" line, the RAM tier stays
-# 8192 MiB, the startup line names the expected GPU and "N other GPU(s) ... hidden", and no other adapter's
-# "GPU Adapter Memory Shared Usage" rose by more than 1024 MiB. One GPU only: prints SKIP (exit 0).
-# Only this gate's GPU is used (the other GPU stays idle; never two GPUs at once).
+# PASS per run (tools\repro\s8_719_root.ps1): HTTP 200, no "(hipError" / "| failed:" line, no adjustment by the
+# pinned-room limit (the half-of-available-RAM adjustment is allowed; the size used must then equal it, and the
+# run's REPORT line says which rule applied), "kv tier: pinned memory now: 1 HIP GPU(s)", the startup line names
+# the expected GPU, and no other adapter's "GPU Adapter Memory Shared Usage" rose by more than 1024 MiB.
+# One GPU only: prints SKIP (exit 0).
+# Only this gate's GPU is used, one run after the other (the other GPU stays idle; never two GPUs at once).
 #   pwsh tools/gates/gpu_select_check.ps1 -Build DIR -Model SWIFT.gguf -Device r9700|8060s [-Port 8096] [-Work DIR]
 # Last line: "gpu select check: ok", "gpu select check: SKIP (...)" or "gpu select check: FAIL (...)".
 param([string]$Build, [string]$Model, [ValidateSet("r9700", "8060s")][string]$Device = "r9700", [int]$Port = 8096, [string]$Work = "")
