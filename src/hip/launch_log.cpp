@@ -193,7 +193,8 @@ void testClearAllocs() {
 
 namespace {
 // the argument digest (see launch_log.h); called with r.mu held; raw != nullptr also writes the words out
-std::uint64_t digestLocked(const Recorder& r, void* const* params, const std::uint32_t* sizes, std::size_t n, std::string* raw) {
+std::uint64_t digestLocked(const Recorder& r, void* const* params, const std::uint32_t* sizes, const PtrWords* ptr_words,
+                           std::size_t n, std::string* raw) {
     std::uint64_t h = kFnvBasis;
     if (raw) raw->clear();
     for (std::size_t i = 0; i < n; ++i) {
@@ -202,10 +203,21 @@ std::uint64_t digestLocked(const Recorder& r, void* const* params, const std::ui
         fnv(h, &sz, sizeof sz);
         if (raw) *raw += " |" + std::to_string(sz);
         std::uint32_t off = 0;
+        const PtrWords may_ptr = ptr_words != nullptr ? ptr_words[i] : nullptr;
         for (; off + 8 <= sz; off += 8) {
             std::uint64_t v;
             std::memcpy(&v, p + off, 8);
-            r.mixWord(h, v, raw);
+            if (may_ptr == nullptr || may_ptr(off / 8)) {
+                r.mixWord(h, v, raw);
+            } else {  // not an address by the argument's type (arch6f): its value, whatever allocation it may hit
+                const std::uint64_t rec[2] = {0, v};
+                fnv(h, rec, sizeof rec);
+                if (raw) {
+                    char b[40];
+                    std::snprintf(b, sizeof b, " v:%llx", (unsigned long long)v);
+                    *raw += b;
+                }
+            }
         }
         fnv(h, p + off, sz - off);
         if (raw)
@@ -219,17 +231,17 @@ std::uint64_t digestLocked(const Recorder& r, void* const* params, const std::ui
 }
 }  // namespace
 
-std::uint64_t argDigest(void* const* params, const std::uint32_t* sizes, std::size_t n) {
+std::uint64_t argDigest(void* const* params, const std::uint32_t* sizes, const PtrWords* ptr_words, std::size_t n) {
     Recorder& r = rec();
     std::lock_guard<std::mutex> lk(r.mu);
-    return digestLocked(r, params, sizes, n, nullptr);
+    return digestLocked(r, params, sizes, ptr_words, n, nullptr);
 }
 
-void stageArgs(void* const* params, const std::uint32_t* sizes, std::size_t n) {
+void stageArgs(void* const* params, const std::uint32_t* sizes, const PtrWords* ptr_words, std::size_t n) {
     if (!g_on) return;
     Recorder& r = rec();
     std::lock_guard<std::mutex> lk(r.mu);
-    t_digest = digestLocked(r, params, sizes, n, r.raw_on ? &t_raw : nullptr);
+    t_digest = digestLocked(r, params, sizes, ptr_words, n, r.raw_on ? &t_raw : nullptr);
     t_staged = true;
 }
 
