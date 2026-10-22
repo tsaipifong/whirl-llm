@@ -292,6 +292,10 @@ struct GvArgs {
     std::int32_t n[3] = {0, 0, 0};
     std::int32_t b1 = 0x7fffffff;
     std::int32_t b2 = 0x7fffffff;
+    // the 4 bytes the kernel's struct has as tail padding, named and zeroed here: an unnamed tail held whatever
+    // the stack held, and the launch log digests every argument byte (REVIEW-ARCH4 P3-2, arch6e). Not read by
+    // the kernels; the layout (and the bytes the kernels read) is unchanged.
+    std::int32_t pad_ = 0;
 };
 static_assert(sizeof(GvArgs) == 96);
 // Single-matrix GvArgs (one launch, nrows rows).
@@ -333,6 +337,13 @@ struct DSampArgs {
     std::uint32_t key_hi[kMaxVerifyRows] = {};
 };
 static_assert(sizeof(DSampArgs) == 1024);
+}  // namespace whirl::kernels
+// DSampArgs holds floats, so std::has_unique_object_representations is false for it (hip::launch's no-padding
+// check); its 8 arrays of 4-byte elements fill sizeof exactly, so it has no padding
+static_assert(sizeof(whirl::kernels::DSampArgs) == 8 * whirl::kernels::kMaxVerifyRows * 4);
+template <>
+struct whirl::hip::LaunchArgNoPadding<whirl::kernels::DSampArgs> : std::true_type {};
+namespace whirl::kernels {
 static_assert(sizeof(Tok16) == 64 && sizeof(RowTab) == 384 && sizeof(RowIdx) == 128 && sizeof(AwGroups) == 256);
 
 // Recurrent-state segment of the fused DeltaNet decode kernels: rows

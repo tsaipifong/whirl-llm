@@ -205,12 +205,20 @@ extern const bool g_on;
 void stageArgs(void* const* params, const std::uint32_t* sizes, std::size_t n);
 }  // namespace launchlog
 
+// A struct argument must have no padding: padding bytes are whatever the memory held, and the launch log digests
+// every argument byte (REVIEW-ARCH4 P3-2, arch6e: GvArgs' unnamed tail made the digest differ from run to run).
+// Name such bytes as a zeroed field (GvArgs::pad_, GdnSeg::pad_). A struct with float members (no unique object
+// representation) that is checked to have no padding opts in with a specialization next to its definition.
+template <class T>
+struct LaunchArgNoPadding : std::bool_constant<!std::is_class_v<T> || std::has_unique_object_representations_v<T>> {};
+
 // Launches `f` with by-value arguments. Each argument type must match the
 // kernel's parameter type exactly (DevPtr / pointers for pointers, int32_t,
-// uint32_t, float, uint64_t, or a trivially copyable struct).
+// uint32_t, float, uint64_t, or a trivially copyable struct without padding).
 template <class... Args>
 void launch(Function f, Dim3 grid, Dim3 block, unsigned shared_bytes, Stream s, const Args&... args) {
     static_assert((std::is_trivially_copyable_v<Args> && ...), "kernel arguments must be trivially copyable");
+    static_assert((LaunchArgNoPadding<Args>::value && ...), "kernel argument structs must have no padding (see LaunchArgNoPadding)");
     std::tuple<Args...> copy(args...);
     void* params[sizeof...(Args) > 0 ? sizeof...(Args) : 1] = {};
     std::apply([&](auto&... a) {
