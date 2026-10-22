@@ -3376,10 +3376,11 @@ void testGpuSelect() {
         CHECK_EQ(pciText(dom), std::string("1:99:0.0"));  // a non-zero PCI domain is shown in front
     }
 
-    // default (no option): kernels in this build, discrete before integrated, most memory, lowest index.
-    // Unchanged on every host measured before: R9700 + 8060S -> R9700, R9700 alone, 8060S alone.
-    CHECK(selectGpus(two, "") == std::vector<int>{1});
-    CHECK(selectGpus(r9700_first, "") == std::vector<int>{0});
+    // default (no option; owner 2026-10-23 「預設用vram最大的卡」「不管是不是獨顯」): among the GPUs this build
+    // has kernels for, the most GPU memory (an integrated GPU: its dedicated carve-out), discrete or
+    // integrated alike; a tie -> the lowest index. On this host that is now the 8060S (was the R9700).
+    CHECK(selectGpus(two, "") == std::vector<int>{0});
+    CHECK(selectGpus(r9700_first, "") == std::vector<int>{1});
     CHECK(selectGpus(igpu_only, "") == std::vector<int>{0});
     CHECK(selectGpus(r9700_only, "") == std::vector<int>{0});
     CHECK(selectGpus(unsupported_first, "") == std::vector<int>{1});
@@ -3390,7 +3391,7 @@ void testGpuSelect() {
         const std::vector<GpuRecord> twins = {rec(0, kR97, "gfx1201", 0x09, false, true, 32624), rec(1, kR97, "gfx1201", 0x03, false, true, 32624)};
         CHECK(selectGpus(twins, "") == std::vector<int>{0});  // identical cards: lowest index
     }
-    CHECK_EQ(autoPick(two), 1);
+    CHECK_EQ(autoPick(two), 0);
     CHECK_EQ(autoPick(std::vector<GpuRecord>{rec(0, "AMD Radeon RX 6800", "gfx1030", 1, false, false, 16368)}), -1);
     CHECK(throws([&] { selectGpus(std::vector<GpuRecord>{rec(0, "AMD Radeon RX 6800", "gfx1030", 1, false, false, 16368)}, ""); }));
     CHECK(throws([&] { selectGpus(std::vector<GpuRecord>{}, ""); }));
@@ -3431,7 +3432,7 @@ void testGpuSelect() {
         CHECK(has(l2, std::string("device 0: AMD Radeon RX 6800 (gfx1030), 16.0 GiB, 32 CUs, pci:16:0 (PCI bus 16, device 0), uuid " + unsupported_first[0].uuid + "  [no GPU kernels for this architecture in this build]")));
         CHECK(has(l2, "[integrated: memory shared with the CPU] [default]"));
         // the PCI function number is never part of what users read (one card = one bus number)
-        CHECK(!has(l, "function") && !has(errOf(four, "r9700"), "function") && !has(restrictionNote(four, {2}), "function"));
+        CHECK(!has(l, "function") && !has(errOf(four, "r9700"), "function") && !has(restrictionNote(four, {2}, ""), "function"));
         CHECK(!has(errOf(four, "rtx4090"), "function") && !has(l, ":0.0"));
     }
 
@@ -3446,52 +3447,45 @@ void testGpuSelect() {
         CHECK(selectGpus(chain, "pci:74:0") == std::vector<int>{2});
         CHECK(selectGpus(chain, "pci:196:0") == std::vector<int>{0});
         CHECK(selectGpus(chain, "8060s") == std::vector<int>{0});
-        CHECK(selectGpus(chain, "") == std::vector<int>{1});  // discrete, most memory, lowest index
+        CHECK(selectGpus(chain, "") == std::vector<int>{0});  // the 8060S: most memory
         CHECK(has(errOf(chain, "pci:74"), "pci:74:0"));
         const std::string l = listingText(chain, autoPick(chain));
         CHECK(has(l, "pci:71:0 (PCI bus 71, device 0)") && has(l, "pci:74:0 (PCI bus 74, device 0)") && has(l, "pci:196:0 (PCI bus 196, device 0)"));
     }
 
-    // default with a model (owner 2026-10-23: "VRAM must fit first, then discrete > APU"): among GPUs with
-    // kernels, those the model fits in; among them discrete first, then more memory, then lowest index.
-    // None fits: the same order over all supported GPUs, and the reason says so and names the largest.
+    // the default rule in one function (defaultGpu): most GPU memory, tie -> lowest index, kernels required
     {
         auto fit = [](std::vector<GpuRecord> g, int i, std::uint64_t mib) {
             g[i].fit_mib = mib;
             return g;
         };
-        const std::vector<GpuRecord> host = fit(two, 0, 96 * 1024);  // this machine: 8060S carve-out 96 GiB, R9700 31.9 GiB
-        const std::uint64_t swift = modelNeedMib(16000ull << 20, 0), ornith35 = modelNeedMib(20000ull << 20, 900ull << 20),
-                            ornith122 = modelNeedMib(70000ull << 20, 0), huge = modelNeedMib(200000ull << 20, 0);
-        CHECK_EQ(swift, std::uint64_t(16000 + 2048));
-        CHECK_EQ(ornith35, std::uint64_t(20900 + 2048));
-        CHECK_EQ(modelNeedMib(0, 0), std::uint64_t(0));  // unknown model: no fit step
-        CHECK(selectGpus(host, "", swift) == std::vector<int>{1});      // fits both: discrete R9700 (as today)
-        CHECK(selectGpus(host, "", ornith35) == std::vector<int>{1});
-        CHECK(selectGpus(host, "", ornith122) == std::vector<int>{0});  // fits only the 8060S: the 8060S
-        CHECK(selectGpus(host, "", huge) == std::vector<int>{1});       // none fits: the order over all
-        CHECK(selectGpus(host, "", 0) == std::vector<int>{1});
-        CHECK(selectGpus(host, "8060s", swift) == std::vector<int>{0});  // an explicit choice is never overridden
-        CHECK(selectGpus(host, "r9700", ornith122) == std::vector<int>{1});
-        CHECK(selectGpus(igpu_only, "", ornith122) == std::vector<int>{0});
-        CHECK(selectGpus(r9700_only, "", huge) == std::vector<int>{0});
-        CHECK_EQ(autoPick(host, ornith122), 0);
-        CHECK_EQ(autoPick(host), 1);  // no model: the rule without the fit step ([default] in the device list)
-        CHECK(selectGpus(four, "", 20 * 1024) == std::vector<int>{0});  // 20 GiB: only the R9700s fit
-        CHECK(selectGpus(four, "", 12 * 1024) == std::vector<int>{0});  // fits all: more memory -> an R9700
-        CHECK(selectGpus(four, "", 40 * 1024) == std::vector<int>{0});  // none fits
+        const std::vector<GpuRecord> host = fit(two, 0, 98099);  // this machine: 8060S dedicated 95.8 GiB, R9700 31.9 GiB
+        CHECK_EQ(defaultGpu(host).index, 0);
+        CHECK_EQ(defaultGpu(fit(two, 0, 16 * 1024)).index, 1);  // an 8060S with a 16 GiB carve-out: the R9700 has more
+        CHECK_EQ(defaultGpu(r9700_only).index, 0);
+        CHECK_EQ(defaultGpu(igpu_only).index, 0);
+        CHECK_EQ(defaultGpu(four).index, 0);
         {
-            // a small model on a host of one R9700 and one 9070 XT listed first: the R9700 (more memory)
-            const std::vector<GpuRecord> mixed = {rec(0, k9070, "gfx1201", 7, false, true, 16304), rec(1, kR97, "gfx1201", 3, false, true, 32624)};
-            CHECK(selectGpus(mixed, "", 8 * 1024) == std::vector<int>{1});
+            const std::vector<GpuRecord> eq = {rec(0, k9070, "gfx1201", 9, false, true, 16304), rec(1, k9070, "gfx1201", 3, false, true, 16304)};
+            CHECK_EQ(defaultGpu(eq).index, 0);  // equal memory: lowest index
+            const std::vector<GpuRecord> big_unsup = {rec(0, "AMD Instinct MI300X", "gfx942", 5, false, false, 196608), rec(1, kR97, "gfx1201", 3, false, true, 32624)};
+            CHECK_EQ(defaultGpu(big_unsup).index, 1);  // a larger card without kernels in this build is ignored
+            CHECK_EQ(defaultGpu(std::vector<GpuRecord>{rec(0, "AMD Instinct MI300X", "gfx942", 5, false, false, 196608)}).index, -1);
         }
-        const std::string r1 = autoReason(host, 1, swift);
-        CHECK(has(r1, "fits") && has(r1, "discrete") && has(r1, "17.6 GiB") && has(r1, "--device"));
-        const std::string r2 = autoReason(host, 0, ornith122);
-        CHECK(has(r2, "fits") && has(r2, "70.4 GiB"));
-        const std::string r3 = autoReason(host, 1, huge);
-        CHECK(has(r3, "no GPU") && has(r3, "largest") && has(r3, "AMD Radeon(TM) 8060S Graphics"));
-        CHECK(!has(r1 + r2 + r3, "function"));
+        // the reason, for the startup line: "GPU pci:196:0 (NAME) selected: most GPU memory (95.8 GiB); ..."
+        const std::vector<GpuRecord> h2 = fit({rec(0, k8060, "gfx1151", 196, true, true, 110490), rec(1, kR97, "gfx1201", 71, false, true, 32624)}, 0, 98099);
+        const AutoChoice c = defaultGpu(h2);
+        CHECK_EQ(c.index, 0);
+        CHECK(has(c.reason, "most GPU memory (95.8 GiB)"));
+        const std::string n = restrictionNote(h2, {0}, c.reason);
+        CHECK(has(n, "GPU pci:196:0 (AMD Radeon(TM) 8060S Graphics) selected: most GPU memory (95.8 GiB)"));
+        CHECK(has(n, "1 other GPU (device 1 AMD Radeon AI PRO R9700 pci:71:0) hidden from HIP"));
+        CHECK(has(n, "use --device to change"));
+        CHECK(!has(n, "function"));
+        const std::string ne = restrictionNote(h2, {1}, "");  // chosen with --device: no automatic reason
+        CHECK(has(ne, "GPU pci:71:0 (AMD Radeon AI PRO R9700) selected") && has(ne, "1 other GPU"));
+        // the list marks the same default and shows the dedicated memory of the iGPU
+        CHECK(has(listingText(h2, defaultGpu(h2).index), "[integrated: memory shared with the CPU] [default]"));
         // the probe carries the usable memory
         const std::vector<GpuRecord> back = parseRecords(formatRecord(host[0]));
         CHECK(back.size() == 1 && back[0].fit_mib == host[0].fit_mib);
@@ -3566,7 +3560,7 @@ void testGpuSelect() {
         const std::string l = listingText(four, 0);
         CHECK(has(l, "uuid " + four[0].uuid));
         CHECK(!has(listingText(nouuid, 1), "uuid"));
-        CHECK(has(restrictionNote(four, {1}), "uuid " + four[1].uuid));
+        CHECK(has(restrictionNote(four, {1}, ""), "uuid " + four[1].uuid));
     }
     // the GPU lock is keyed by the PCI address: index 0 after the restriction is not "GPU 0"
     {
@@ -3612,17 +3606,17 @@ void testGpuSelect() {
 
     // the log line names the GPU used (name, index, pci), how many are hidden, and how to change it
     {
-        const std::string n = restrictionNote(two, {1});
+        const std::string n = restrictionNote(two, {1}, "");
         CHECK(has(n, "device 1") && has(n, kR97) && has(n, "pci:99:0") && !has(n, "pci:99:0.") && has(n, "PCI bus 99, device 0"));
         CHECK(has(n, "1 other GPU") && has(n, k8060) && has(n, "hidden"));
         CHECK(has(n, "--device"));
-        const std::string n4 = restrictionNote(four, {2});
+        const std::string n4 = restrictionNote(four, {2}, "");
         CHECK(has(n4, "3 other GPUs"));
         // must not look like a HIP error to the log scanners (golden.ps1 / kvram719_tier.ps1 patterns)
         CHECK(!std::regex_search(
             n + n4, std::regex("hipError|hip.*\\b719\\b|\\b719\\b.*hip|\\| failed:|PAL failed|Failed PAL|result:-5|unspecified launch",
                                std::regex::icase)));
-        const std::string one = restrictionNote(igpu_only, {0});
+        const std::string one = restrictionNote(igpu_only, {0}, "");
         CHECK(!has(one, "hidden"));  // nothing to hide
         CHECK(has(one, k8060));
         const std::string u = userVarNote("HIP_VISIBLE_DEVICES", "1");

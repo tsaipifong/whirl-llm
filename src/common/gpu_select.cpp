@@ -12,15 +12,15 @@ std::vector<std::string> parseDeviceList(std::string_view spec) {
     if (spec.empty()) return {};
     return {std::string(spec)};
 }
-std::vector<int> selectGpus(const std::vector<GpuRecord>&, std::string_view, std::uint64_t) { return {}; }
-int autoPick(const std::vector<GpuRecord>&, std::uint64_t) { return -1; }
+std::vector<int> selectGpus(const std::vector<GpuRecord>&, std::string_view) { return {}; }
+int autoPick(const std::vector<GpuRecord>&) { return -1; }
 std::string listText(const std::vector<GpuRecord>&) { return {}; }
 std::string visibleDevicesValue(const std::vector<int>&) { return {}; }
 std::string userVisibilityVar(const std::function<const char*(const char*)>&) { return {}; }
 bool sameGpu(const GpuRecord&, const GpuRecord&) { return true; }
 std::string formatRecord(const GpuRecord&) { return {}; }
 std::vector<GpuRecord> parseRecords(std::string_view) { return {}; }
-std::string restrictionNote(const std::vector<GpuRecord>&, const std::vector<int>&) { return {}; }
+std::string restrictionNote(const std::vector<GpuRecord>&, const std::vector<int>&, const std::string&) { return {}; }
 
 }  // namespace whirl::gpusel
 
@@ -36,6 +36,5 @@ std::string pciId(const std::vector<GpuRecord>&, const GpuRecord&) { return {}; 
 std::string pciIdLong(const std::vector<GpuRecord>&, const GpuRecord&) { return {}; }
 }  // namespace whirl::gpusel
 namespace whirl::gpusel {
-std::uint64_t modelNeedMib(std::uint64_t, std::uint64_t) { return 0; }
-std::string autoReason(const std::vector<GpuRecord>&, int, std::uint64_t) { return {}; }
+AutoChoice defaultGpu(const std::vector<GpuRecord>&) { return {}; }
 }  // namespace whirl::gpusel

@@ -79,24 +79,22 @@ std::vector<std::string> parseDeviceList(std::string_view spec);
 //     GPU; strix = gfx1151; an architecture prefix ("gfx1201"); or a part of the name ("9070", "AMD Radeon
 //     AI PRO R9700"); case is ignored. A name / alias / architecture that matches MORE than one GPU is an
 //     error that lists the matching GPUs (index, name, PCI address, memory) - never the first match.
-// Empty spec: among the GPUs this build has kernels for, a discrete GPU before an integrated one, then the
-// most memory, then the lowest index. This version uses one GPU: a list of two or more throws
+// Empty spec: defaultGpu(). This version uses one GPU: a list of two or more throws
 // "only one GPU is supported in this version". Throws SelectError (listing the GPUs) when nothing matches.
-// need_mib: what the model needs (modelNeedMib; 0 = unknown). Only the automatic pick uses it: among the
-// GPUs with kernels, those with fit_mib >= need_mib first (owner 2026-10-23: fit first, then discrete >
-// integrated, then more memory, then lowest index); when none fits, the same order over all of them.
-std::vector<int> selectGpus(const std::vector<GpuRecord>& gpus, std::string_view spec, std::uint64_t need_mib = 0);
+std::vector<int> selectGpus(const std::vector<GpuRecord>& gpus, std::string_view spec);
 
-// Estimate (MiB) of what a model needs on the GPU before any context: the GGUF file + the mmproj file +
-// 2048 MiB for the smallest context and buffers. 0 when the model size is unknown. The memory checks at
-// load (startup fit, UMA check, governor) still decide the context; this only orders the GPUs.
-std::uint64_t modelNeedMib(std::uint64_t model_bytes, std::uint64_t mmproj_bytes);
-
-// Why the automatic pick chose `index` (one clause for the startup line).
-std::string autoReason(const std::vector<GpuRecord>& gpus, int index, std::uint64_t need_mib);
+// The default GPU (no --device): among the GPUs this build has kernels for, the one with the most GPU
+// memory (fit_mib: VRAM of a discrete GPU, the dedicated carve-out of an integrated one, as Task Manager
+// shows "Dedicated GPU memory"), discrete or integrated alike; a tie -> the lowest index (owner
+// 2026-10-23). index -1 = none. reason: one clause for the startup line.
+struct AutoChoice {
+    int index = -1;
+    std::string reason;
+};
+AutoChoice defaultGpu(const std::vector<GpuRecord>& gpus);
 
 // The automatic pick alone (-1 when no GPU has kernels in this build).
-int autoPick(const std::vector<GpuRecord>& gpus, std::uint64_t need_mib = 0);
+int autoPick(const std::vector<GpuRecord>& gpus);  // defaultGpu(gpus).index
 
 // The PCI location in DECIMAL, as Windows shows it (Task Manager > Performance > GPU > Physical location,
 // Device Manager > Location: "PCI bus 71, device 0, function 0"). pciText / pciLongText are the full
@@ -140,7 +138,8 @@ std::vector<GpuRecord> parseRecords(std::string_view text);  // ignores other li
 
 // The log line for a restriction: the GPU used (name, index, pci, uuid), how many others are hidden and
 // how to choose another.
-std::string restrictionNote(const std::vector<GpuRecord>& all, const std::vector<int>& selected);
+// reason: defaultGpu().reason for the automatic pick, "" for a --device choice.
+std::string restrictionNote(const std::vector<GpuRecord>& all, const std::vector<int>& selected, const std::string& reason);
 // The log line when the user set a visibility variable (WHIRL leaves it; indices count the visible GPUs).
 std::string userVarNote(const std::string& var, const std::string& value);
 
