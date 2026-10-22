@@ -31,3 +31,7 @@ std::string listingText(const std::vector<GpuRecord>&, int) { return {}; }
 std::string userVarNote(const std::string&, const std::string&) { return {}; }
 }  // namespace whirl::gpusel
 namespace whirl::gpusel { std::string pciLongText(const GpuRecord&) { return {}; } }
+namespace whirl::gpusel {
+std::string pciId(const std::vector<GpuRecord>&, const GpuRecord&) { return {}; }
+std::string pciIdLong(const std::vector<GpuRecord>&, const GpuRecord&) { return {}; }
+}  // namespace whirl::gpusel

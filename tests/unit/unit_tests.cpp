@@ -3346,12 +3346,12 @@ void testGpuSelect() {
     // PCI address forms (hex), stable when cards are added / removed
     // (decimal, as Task Manager > Performance > GPU > Physical location and Device Manager show it:
     // "PCI bus 99, device 0, function 0" -> pci:99:0.0; never hex)
-    CHECK(selectGpus(two, "pci:99:0.0") == std::vector<int>{1});
     CHECK(selectGpus(two, "pci:99:0") == std::vector<int>{1});
-    CHECK(selectGpus(two, "pci:99") == std::vector<int>{1});
-    CHECK(selectGpus(two, "PCI:195:0.0") == std::vector<int>{0});
-    CHECK(has(errOf(two, "pci:100:0.0"), "pci:100:0.0"));
-    CHECK(has(errOf(two, "pci:63"), "no GPU matches"));  // hex 0x63 = 99 is not accepted as 63
+    CHECK(selectGpus(two, "pci:99:0.0") == std::vector<int>{1});  // a pasted full form works too
+    CHECK(selectGpus(two, "PCI:195:0") == std::vector<int>{0});
+    CHECK(has(errOf(two, "pci:99"), "pci:99:0"));  // bus alone: error that says how to write it
+    CHECK(has(errOf(two, "pci:100:0"), "pci:100:0"));
+    CHECK(has(errOf(two, "pci:63:0"), "no GPU matches"));  // hex 0x63 = 99 is not accepted as 63
     CHECK_EQ(pciText(two[1]), std::string("99:0.0"));
     CHECK_EQ(pciLongText(two[1]), std::string("PCI bus 99, device 0, function 0"));
     {
@@ -3361,8 +3361,16 @@ void testGpuSelect() {
         CHECK_EQ(pciText(fn), std::string("99:1.2"));
         CHECK_EQ(pciLongText(fn), std::string("PCI bus 99, device 1, function 2"));
         const std::vector<GpuRecord> same_bus = {two[1], fn};
-        CHECK(has(errOf(same_bus, "pci:99"), "more than one GPU"));  // bus alone ambiguous here
         CHECK(selectGpus(same_bus, "pci:99:1.2") == std::vector<int>{1});
+        // the bus number is what users see and type; the full form only where two GPUs share a bus
+        CHECK_EQ(pciId(two, two[1]), std::string("99:0"));
+        CHECK_EQ(pciIdLong(two, two[1]), std::string("PCI bus 99, device 0"));
+        CHECK_EQ(pciId(same_bus, same_bus[0]), std::string("99:0"));
+        CHECK_EQ(pciId(same_bus, same_bus[1]), std::string("99:1"));
+        CHECK_EQ(pciIdLong(same_bus, same_bus[1]), std::string("PCI bus 99, device 1"));
+        CHECK(has(listingText(same_bus, 0), "pci:99:1 (PCI bus 99, device 1)"));
+        CHECK(selectGpus(same_bus, "pci:99:1") == std::vector<int>{1});  // bus:device, as the list prints it
+        CHECK(selectGpus(same_bus, "pci:99:0") == std::vector<int>{0});
         GpuRecord dom = two[1];
         dom.pci_domain = 1;
         CHECK_EQ(pciText(dom), std::string("1:99:0.0"));  // a non-zero PCI domain is shown in front
@@ -3401,14 +3409,14 @@ void testGpuSelect() {
     {
         const std::string e = errOf(four, "r9700");
         CHECK(has(e, "more than one GPU"));
-        CHECK(has(e, "device 0: AMD Radeon AI PRO R9700 (gfx1201), pci:3:0.0, 31.9 GiB"));
-        CHECK(has(e, "device 1: AMD Radeon AI PRO R9700 (gfx1201), pci:4:0.0, 31.9 GiB"));
+        CHECK(has(e, "device 0: AMD Radeon AI PRO R9700 (gfx1201), pci:3:0, 31.9 GiB"));
+        CHECK(has(e, "device 1: AMD Radeon AI PRO R9700 (gfx1201), pci:4:0, 31.9 GiB"));
         CHECK(!has(e, "device 2:") && !has(e, "device 3:"));
-        CHECK(has(e, "--device 0") && has(e, "--device pci:3:0.0"));
+        CHECK(has(e, "--device 0") && has(e, "--device pci:3:0"));
         const std::string e2 = errOf(four, "9070");
         CHECK(has(e2, "more than one GPU"));
-        CHECK(has(e2, "device 2: AMD Radeon RX 9070 XT (gfx1201), pci:7:0.0, 15.9 GiB"));
-        CHECK(has(e2, "device 3: AMD Radeon RX 9070 XT (gfx1201), pci:10:0.0, 15.9 GiB"));
+        CHECK(has(e2, "device 2: AMD Radeon RX 9070 XT (gfx1201), pci:7:0, 15.9 GiB"));
+        CHECK(has(e2, "device 3: AMD Radeon RX 9070 XT (gfx1201), pci:10:0, 15.9 GiB"));
         CHECK(!has(e2, "device 0:") && !has(e2, "device 1:"));
         CHECK(selectGpus(four, "2") == std::vector<int>{2});
         CHECK(selectGpus(four, "pci:10:0.0") == std::vector<int>{3});
@@ -3416,14 +3424,33 @@ void testGpuSelect() {
         CHECK(has(errOf(four, "gfx1201"), "more than one GPU"));
         // the list
         const std::string l = listingText(four, autoPick(four));
-        CHECK(has(l, std::string("device 0: AMD Radeon AI PRO R9700 (gfx1201), 31.9 GiB, 32 CUs, pci:3:0.0 (PCI bus 3, device 0, function 0), uuid " + four[0].uuid + "  [supported] [default]")));
-        CHECK(has(l, std::string("device 3: AMD Radeon RX 9070 XT (gfx1201), 15.9 GiB, 32 CUs, pci:10:0.0 (PCI bus 10, device 0, function 0), uuid " + four[3].uuid + "  [supported]\n")));
+        CHECK(has(l, std::string("device 0: AMD Radeon AI PRO R9700 (gfx1201), 31.9 GiB, 32 CUs, pci:3:0 (PCI bus 3, device 0), uuid " + four[0].uuid + "  [supported] [default]")));
+        CHECK(has(l, std::string("device 3: AMD Radeon RX 9070 XT (gfx1201), 15.9 GiB, 32 CUs, pci:10:0 (PCI bus 10, device 0), uuid " + four[3].uuid + "  [supported]\n")));
         CHECK(has(l, "can change") && has(l, "pci:") && has(l, "Physical location"));
         const std::string l2 = listingText(unsupported_first, autoPick(unsupported_first));
-        CHECK(has(l2, std::string("device 0: AMD Radeon RX 6800 (gfx1030), 16.0 GiB, 32 CUs, pci:16:0.0 (PCI bus 16, device 0, function 0), uuid " + unsupported_first[0].uuid + "  [no GPU kernels for this architecture in this build]")));
+        CHECK(has(l2, std::string("device 0: AMD Radeon RX 6800 (gfx1030), 16.0 GiB, 32 CUs, pci:16:0 (PCI bus 16, device 0), uuid " + unsupported_first[0].uuid + "  [no GPU kernels for this architecture in this build]")));
         CHECK(has(l2, "[integrated: memory shared with the CPU] [default]"));
+        // the PCI function number is never part of what users read (one card = one bus number)
+        CHECK(!has(l, "function") && !has(errOf(four, "r9700"), "function") && !has(restrictionNote(four, {2}), "function"));
+        CHECK(!has(errOf(four, "rtx4090"), "function") && !has(l, ":0.0"));
     }
 
+    // daisy-chained USB4 eGPUs: two identical R9700 (bus numbers given at connect time) + the 8060S
+    {
+        const std::vector<GpuRecord> chain = {rec(0, k8060, "gfx1151", 196, true, true, 110490), rec(1, kR97, "gfx1201", 71, false, true, 32624),
+                                              rec(2, kR97, "gfx1201", 74, false, true, 32624)};
+        const std::string e = errOf(chain, "r9700");
+        CHECK(has(e, "more than one GPU") && has(e, "pci:71:0") && has(e, "pci:74:0") && !has(e, "pci:196:0"));
+        CHECK(has(errOf(chain, "R9700"), "Physical location"));
+        CHECK(selectGpus(chain, "pci:71:0") == std::vector<int>{1});
+        CHECK(selectGpus(chain, "pci:74:0") == std::vector<int>{2});
+        CHECK(selectGpus(chain, "pci:196:0") == std::vector<int>{0});
+        CHECK(selectGpus(chain, "8060s") == std::vector<int>{0});
+        CHECK(selectGpus(chain, "") == std::vector<int>{1});  // discrete, most memory, lowest index
+        CHECK(has(errOf(chain, "pci:74"), "pci:74:0"));
+        const std::string l = listingText(chain, autoPick(chain));
+        CHECK(has(l, "pci:71:0 (PCI bus 71, device 0)") && has(l, "pci:74:0 (PCI bus 74, device 0)") && has(l, "pci:196:0 (PCI bus 196, device 0)"));
+    }
     // a list of two: a clear error, never a silent fallback to one of them
     CHECK(has(errOf(two, "r9700,8060s"), "only one GPU is supported in this version"));
     CHECK(has(errOf(two, "0,1"), "only one GPU is supported in this version"));
@@ -3541,7 +3568,7 @@ void testGpuSelect() {
     // the log line names the GPU used (name, index, pci), how many are hidden, and how to change it
     {
         const std::string n = restrictionNote(two, {1});
-        CHECK(has(n, "device 1") && has(n, kR97) && has(n, "pci:99:0.0") && has(n, "PCI bus 99, device 0, function 0"));
+        CHECK(has(n, "device 1") && has(n, kR97) && has(n, "pci:99:0") && !has(n, "pci:99:0.") && has(n, "PCI bus 99, device 0"));
         CHECK(has(n, "1 other GPU") && has(n, k8060) && has(n, "hidden"));
         CHECK(has(n, "--device"));
         const std::string n4 = restrictionNote(four, {2});

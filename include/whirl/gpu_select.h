@@ -69,7 +69,8 @@ std::vector<std::string> parseDeviceList(std::string_view spec);
 //     driver and the environment stay the same (HIP_VISIBLE_DEVICES renumbers);
 //   - "uuid:<id>" (the full id the device list prints, or a unique prefix; case ignored), when the
 //     runtime reports one;
-//   - the PCI location, decimal as Task Manager / Device Manager show it: "pci:71:0.0", "pci:71:0", "pci:71".
+//   - the PCI bus and device numbers, decimal as Task Manager / Device Manager show them: "pci:71:0"
+//     ("PCI bus 71, device 0"; a pasted "pci:71:0.0" works too).
 //     Stable while the card stays in the same slot; a USB4 / Thunderbolt eGPU can get another bus number on
 //     another port or after a replug;
 //   - an alias, matched on the marketing NAME: r9700 ("R9700" in the name), 8060s; igpu = an integrated
@@ -85,21 +86,26 @@ std::vector<int> selectGpus(const std::vector<GpuRecord>& gpus, std::string_view
 int autoPick(const std::vector<GpuRecord>& gpus);
 
 // The PCI location in DECIMAL, as Windows shows it (Task Manager > Performance > GPU > Physical location,
-// Device Manager > Location: "PCI bus 71, device 0, function 0"): pciText "71:0.0" (a non-zero PCI domain
-// in front: "1:71:0.0"), pciLongText "PCI bus 71, device 0, function 0". --device takes "pci:71:0.0",
-// "pci:71:0" or "pci:71" (when one GPU is on that bus).
+// Device Manager > Location: "PCI bus 71, device 0, function 0"). pciText / pciLongText are the full
+// internal form ("71:0.0"; a non-zero PCI domain in front) for the lock key and logs of the probe.
+// Users read and type bus + device, always: pciId "71:0", pciIdLong "PCI bus 71, device 0" (the function
+// number is never shown). --device takes pci:71:0 and (silently) a pasted pci:71:0.0; pci:71 alone is an
+// error that says to write pci:71:0.
 std::string pciText(const GpuRecord& r);
 std::string pciLongText(const GpuRecord& r);
+// (see above; `all` is kept for a later shared-bus rule)
+std::string pciId(const std::vector<GpuRecord>& all, const GpuRecord& r);
+std::string pciIdLong(const std::vector<GpuRecord>& all, const GpuRecord& r);
 
 // Name of the one-process-per-GPU mutex: keyed by the uuid when the runtime reports one, else the PCI
 // address; never the index (after the restriction every process sees its GPU as index 0).
 std::string lockName(const GpuRecord& r);
 
-// "    device 0: NAME (ARCH), pci:3:0.0, 31.9 GiB" lines, for error texts.
+// "    device 0: NAME (ARCH), pci:3:0, 31.9 GiB" lines, for error texts.
 std::string listText(const std::vector<GpuRecord>& gpus);
 
 // The device list (whirl devices / --list-devices): one line per GPU
-// "  device 0: NAME (ARCH), 31.9 GiB, 32 CUs, pci:3:0.0 (PCI bus 3, device 0, function 0)[, uuid U]  [supported] [default]"
+// "  device 0: NAME (ARCH), 31.9 GiB, 32 CUs, pci:3:0 (PCI bus 3, device 0)[, uuid U]  [supported] [default]"
 // and a closing note on index vs pci / uuid stability. def = autoPick (-1 = none).
 std::string listingText(const std::vector<GpuRecord>& gpus, int def);
 
