@@ -83,6 +83,8 @@ foreach ($t in "whirl-tests", "whirl-model-tests", "whirl-cache-tests", "whirl-v
 # HIP runtime loader (ARCH-1 D-1): fake / absent runtimes, then this machine's runtime through load()
 # (a runtime that does not import rocm_kpack.dll must never load it)
 AddStep "cpu_hiprt" $false @($exe["whirl-hiprt-tests"]) { param($o, $c) $c -eq 0 -and ($o -match "hiprt tests: [1-9]\d* passed, 0 failed") -and ($o -match "^real runtime: ok=1") } @{ WHIRL_TEST_REAL_HIPRT = "1" }
+# arch6b: without hiprt_fakes\ next to the exe the test must fail with a message, not crash (0xC0000005 in gate M_r97)
+AddStep "cpu_hiprt_nofakes" $false @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\gates\hiprt_nofakes_check.ps1"), "-Build", $Build, "-Work", "@WORK@") { param($o, $c) $c -eq 0 -and ($o -match "^hiprt nofakes check: ok") }
 # REVIEW-ARCH3 P3-3: a new hip::Arch enumerator without a device::Profile row must not compile (MSVC)
 AddStep "cpu_profile_switch" $false @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\impact\profile_switch_check.ps1"), "-Work", "@WORK@") { param($o, $c) $c -eq 0 -and ($o -match "^profile switch check: ok") }
 AddStep "cpu_server" $false @($exe["whirl-server-tests"], "--gguf", $SW) { param($o, $c) $c -eq 0 -and ($o -match "server tests: [1-9]\d* passed, 0 failed") }

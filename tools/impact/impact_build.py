@@ -121,7 +121,7 @@ RELEASE_STEPS = {
     "cpu_tests": "exe:whirl-tests", "cpu_model": "exe:whirl-model-tests", "cpu_cache": "exe:whirl-cache-tests",
     "cpu_vision": "exe:whirl-vision-tests", "cpu_tier": "exe:whirl-tier-tests", "cpu_server": "exe:whirl-server-tests",
     "cpu_gate_selftest": "tool", "cpu_gate_nosuite": "tool", "cpu_server_only_typo": "tool", "cpu_golden_selftest": "tool",
-    "cpu_golden_xcheck": "tool", "kt_full": "exe:whirl-kernel-test", "cpu_hiprt": "exe:whirl-hiprt-tests",
+    "cpu_golden_xcheck": "tool", "kt_full": "exe:whirl-kernel-test", "cpu_hiprt": "exe:whirl-hiprt-tests", "cpu_hiprt_nofakes": "exe:whirl-hiprt-tests",
     "cpu_device": "exe:whirl-device-tests",
     # REVIEW-ARCH3 P3-3: device::profile() does not compile with an hip::Arch enumerator without a row (listed with
     # the device tests: both guard include/whirl/device_profile.h)
