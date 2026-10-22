@@ -8,13 +8,16 @@
 #
 #   pwsh tools/repro/s8_719_root.ps1 -Exe <whirl-server.exe> -Model <gguf> [-RamMb 8192] [-Device 8060s|r9700|auto]
 #        [-Select env|option] [-Port 8198] [-Work DIR] [-Mmproj <gguf>]
-# -Select env: WHIRL_DEVICE=<Device>; option: --device <Device> (the command-line option); auto: neither.
+# -Select env: WHIRL_DEVICE=<Device>; option: --device <Device> (the command-line option); -Device auto: neither.
+# -DeviceSpec: the value given instead of -Device (e.g. pci:196:0). -ExpectMb: the RAM tier size expected (default
+# -RamMb; e.g. 8704 when the half-of-available-RAM rule lowers 12288). -ExpectGpu: "pci:196:0" = the line must name it.
 # PASS (exit 0): answered, no "(hipError N)" / "| failed:" line, "kv tier: RAM tier size <RamMb> MiB" with no
 # "adjusted: --kv-ram-mb" line, the log names the GPU used and the hidden one, and no other adapter's
 # "GPU Adapter Memory Shared Usage" rose by more than 1024 MiB while the server was up. FAIL: exit 1. Setup: exit 2.
 # Kills only the server it started (by PID); --kv-ssd-mode off (no SSD files).
 param([string]$Exe, [string]$Model, [int]$RamMb = 8192, [ValidateSet("8060s", "r9700", "auto")][string]$Device = "8060s",
-      [ValidateSet("env", "option")][string]$Select = "env", [int]$Port = 8198, [string]$Work = "", [string]$Mmproj = "")
+      [ValidateSet("env", "option")][string]$Select = "env", [int]$Port = 8198, [string]$Work = "", [string]$Mmproj = "",
+      [string]$DeviceSpec = "", [int]$ExpectMb = 0, [string]$ExpectGpu = "")
 $ErrorActionPreference = "Stop"
 if (-not $Exe -or -not (Test-Path $Exe) -or -not $Model -or -not (Test-Path $Model)) { Write-Host "s8_719_root: -Exe and -Model must exist"; exit 2 }
 foreach ($v in "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES", "GPU_DEVICE_ORDINAL", "WHIRL_HIP_DEVICE", "WHIRL_KV_RAM_MB") {
@@ -36,9 +39,11 @@ $env:AMD_LOG_LEVEL = "1"
 if (Test-Path env:WHIRL_DEVICE) { Remove-Item env:WHIRL_DEVICE }
 $a = @($Model, "--port", "$Port", "--log-file", $log, "--kv-ssd-mode", "off", "--kv-ram-mb", "$RamMb")
 if ($Mmproj) { $a += @("--mmproj", $Mmproj) }
-if ($Device -ne "auto") {
-    if ($Select -eq "env") { $env:WHIRL_DEVICE = $Device } else { $a += @("--device", $Device) }
+$spec = if ($DeviceSpec) { $DeviceSpec } else { $Device }
+if ($Device -ne "auto" -or $DeviceSpec) {
+    if ($Select -eq "env") { $env:WHIRL_DEVICE = $spec } else { $a += @("--device", $spec) }
 }
+if ($ExpectMb -le 0) { $ExpectMb = $RamMb }
 Write-Host "s8_719_root: $Exe $($a -join ' ')  (WHIRL_DEVICE=$env:WHIRL_DEVICE)"
 $p = Start-Process -FilePath $Exe -ArgumentList $a -NoNewWindow -PassThru -RedirectStandardOutput (Join-Path $Work "stdout.txt") -RedirectStandardError (Join-Path $Work "stderr.txt")
 $up = $false
@@ -62,19 +67,20 @@ $rise = @($rise | Sort-Object rise -Descending)
 $rise | ForEach-Object { Write-Host ("  shared usage luid {0}: {1} -> {2} MiB (rise {3})" -f $_.luid, $_.before, $_.up, $_.rise) }
 $txt = @(Get-Content $log -ErrorAction SilentlyContinue)
 $bad = @($txt | Select-String -Pattern "\(hipError \d+\)|\| failed:")
-$adj = @($txt | Select-String -Pattern "adjusted: .*kv-ram-mb")
-$size = @($txt | Select-String -Pattern "kv tier: RAM tier size $RamMb MiB")
-$gpu = @($txt | Select-String -Pattern "^.* I GPU: using ")
-$hidden = @($gpu | Where-Object { $_.Line -match "hidden" })
-@($txt | Select-String -Pattern "I GPU: |I device |kv tier: RAM tier|adjusted: |kv tier: pinned memory now") | ForEach-Object { Write-Host "  log: $($_.Line)" }
+$adj = @($txt | Select-String -Pattern "adjusted: .*kv-ram-mb" | Where-Object { $ExpectMb -eq $RamMb -or $_.Line -notmatch "-> $ExpectMb MiB" })
+$size = @($txt | Select-String -Pattern "kv tier: RAM tier size $ExpectMb MiB")
+# the restriction line (0.2.3 wording: "GPU pci:B:D (NAME) selected...; N other GPU(s) (...) hidden from HIP")
+$gpu = @($txt | Select-String -Pattern " I GPU pci:\d+:\d+ \(.+\) selected")
+$hidden = @($gpu | Where-Object { $_.Line -match "hidden" -and (-not $ExpectGpu -or $_.Line -match [regex]::Escape("GPU $ExpectGpu ")) })
+@($txt | Select-String -Pattern "I GPU |I device |kv tier: RAM tier|adjusted: |kv tier: pinned memory now") | ForEach-Object { Write-Host "  log: $($_.Line)" }
 $bad | Select-Object -First 3 | ForEach-Object { Write-Host "  log: $($_.Line)" }
 $other = if ($rise.Count -ge 2) { $rise[1].rise } else { 0 }
 $why = @()
 if ($res -notlike "answered*") { $why += $res }
 if ($bad.Count) { $why += "HIP error line in the log" }
 if ($adj.Count) { $why += "RAM tier adjusted" }
-if (-not $size.Count) { $why += "no 'RAM tier size $RamMb MiB' line" }
-if (-not $hidden.Count) { $why += "no 'GPU: using ... hidden' line" }
+if (-not $size.Count) { $why += "no 'RAM tier size $ExpectMb MiB' line" }
+if (-not $hidden.Count) { $why += "no 'GPU pci:... selected ... hidden' line$(if ($ExpectGpu) { " for $ExpectGpu" })" }
 if ($other -gt 1024) { $why += "another adapter's shared usage rose $other MiB" }
 $pass = $why.Count -eq 0
 Write-Host "s8_719_root: $res; second-largest adapter rise $other MiB"
