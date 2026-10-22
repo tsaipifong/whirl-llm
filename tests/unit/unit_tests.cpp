@@ -33,6 +33,7 @@
 #include <cstdio>
 #include <cstring>
 #include <optional>
+#include <regex>
 #include <stdexcept>
 #include <functional>
 #include <map>
@@ -2945,6 +2946,77 @@ void testStartupFit() {
         s.pinned_max = 30 * GiB;
         const auto r = startfit::ramTierFit(16384, 30 * GiB, 16384, false, startfit::pinnedRoomMb(s));
         CHECK(r.has_value() && r->mb == 0ull && r->pinned);
+    }
+    // REVIEW-S8-719 A1: the reason text of an adjusted (healthy) server must match none of the error patterns the gates and
+    // repro scripts scan server logs for (kvram719_tier.ps1:50 "hipError|\| failed:", golden.ps1:377/393/397, fix719.ps1:190;
+    // PowerShell -match / Select-String are case-insensitive), and it still names the error the user would have seen (719)
+    {
+        const std::regex bad(R"(hipError|hip.*\b719\b|\b719\b.*hip|\| failed:|PAL failed|Failed PAL|result:-5|unspecified launch)",
+                             std::regex::icase);
+        for (const std::uint64_t room : {0ull, 512ull, 4096ull, 8192ull, 12288ull, 20480ull})
+            for (const std::size_t n : {std::size_t{1}, std::size_t{2}, std::size_t{3}}) {
+                const std::string why = startfit::pinnedWhy(room, n);
+                const std::string line = "2026-10-23 00:05:55.955 W adjusted: --kv-ram-mb 8192 -> " + std::to_string(room) + " MiB (" + why + ")";
+                CHECK(!std::regex_search(line, bad));
+                CHECK(why.find("719") != std::string::npos);
+            }
+    }
+    // REVIEW-S8-719 A2: every measured working size stays admitted, and single-GPU defaults with no failure on record keep
+    // their tier (the machine reserve 6144 MiB cut them)
+    {
+        // 8060S only visible (HIP_VISIBLE_DEVICES), 96 GB carve-out, case s23_ram12288_vis (scratch\s8_719\results.txt 23:39):
+        // --kv-ram-mb 12288 was lowered to 8704 by the half rule (17643 MiB available) and answered (8060S Shared Usage 10161 MiB)
+        startfit::PinnedState s;
+        s.total_phys = 32407 * MiB;
+        s.pinned_max = 1441 * MiB;
+        for (const std::uint64_t own : {0ull, 1441ull}) {  // DXGI reports 0 for the iGPU; PDH 1441 (REVIEW C4)
+            s.gpus = {{0, own * MiB, 16203 * MiB}};
+            const auto r = startfit::ramTierFit(12288, 17643 * MiB, 0, true, startfit::pinnedRoomMb(s));
+            CHECK(r.has_value() && r->mb == 8704ull && r->half && !r->pinned);
+            // golden's 8192 on the 8060S alone with other programs holding 1000 MiB more shared GPU memory: kept
+            startfit::PinnedState s2 = s;
+            s2.pinned_max = (1441 + 1000) * MiB;
+            CHECK(!startfit::ramTierFit(8192, 18930 * MiB, 0, true, startfit::pinnedRoomMb(s2)).has_value());
+        }
+        // single R9700 on a 32 GB-RAM host (DXGI non-local budget as measured, 15435 MiB), other programs 700 MiB of shared
+        // GPU memory: the automatic tier (1/4 of RAM, 8192) and one max-context entry (9216) are kept
+        startfit::PinnedState r9;
+        r9.total_phys = 32407 * MiB;
+        r9.pinned_max = (1294 + 700) * MiB;
+        r9.gpus = {{15435 * MiB, 1294 * MiB, 16203 * MiB}};
+        CHECK(!startfit::ramTierFit(8192, 20000 * MiB, 8192, false, startfit::pinnedRoomMb(r9), 9216).has_value());
+        CHECK(!startfit::ramTierFit(9216, 20000 * MiB, 9216, false, startfit::pinnedRoomMb(r9), 9216).has_value());
+        // single R9700 at 64 GB (kvram719 numbers), automatic 16384: kept
+        r9.total_phys = 65175 * MiB;
+        r9.pinned_max = 1300 * MiB;
+        r9.gpus = {{48026 * MiB, 1294 * MiB, 32587 * MiB}};
+        CHECK(!startfit::ramTierFit(16384, 50000 * MiB, 16384, false, startfit::pinnedRoomMb(r9), 9216).has_value());
+        // single 8060S at 64 GB, automatic 8192: kept
+        startfit::PinnedState i8;
+        i8.total_phys = 65175 * MiB;
+        i8.pinned_max = 1441 * MiB;
+        i8.gpus = {{0, 1441 * MiB, 32587 * MiB}};
+        CHECK(!startfit::ramTierFit(8192, 50000 * MiB, 8192, false, startfit::pinnedRoomMb(i8), 9216).has_value());
+        // R9700 + 8060S at 64/64: process on the 8060S (golden 8192), on the R9700 (automatic 16384, explicit 20480): kept
+        startfit::PinnedState both;
+        both.total_phys = 65175 * MiB;
+        both.pinned_max = 1441 * MiB;
+        both.gpus = {{0, 1441 * MiB, 32587 * MiB}, {48026 * MiB, 1294 * MiB, 32587 * MiB}};
+        const std::uint64_t rb = startfit::pinnedRoomMb(both);
+        CHECK(!startfit::ramTierFit(8192, 50000 * MiB, 0, true, rb, 9216).has_value());
+        CHECK(!startfit::ramTierFit(16384, 50000 * MiB, 16384, false, rb, 9216).has_value());
+        CHECK(!startfit::ramTierFit(20480, 50000 * MiB, 16384, true, rb, 9216).has_value());
+    }
+    // REVIEW-S8-719 C2 (FR-CACHE P3-4, src/tier/ram_size.h): a RAM tier the pinned room lowers below one max-context entry
+    // is off (the longest session could never be kept), not a tier smaller than one entry
+    {
+        const auto e = startfit::ramTierFit(8192, 19374 * MiB, 0, true, 4096, 9216);  // explicit, room 4096 < entry 9216
+        CHECK(e.has_value() && e->mb == 0ull && e->pinned && e->below_entry);
+        const auto a = startfit::ramTierFit(9216, 19374 * MiB, 9216, false, 4096, 9216);  // automatic = one entry
+        CHECK(a.has_value() && a->mb == 0ull && a->below_entry);
+        const auto k = startfit::ramTierFit(8192, 19374 * MiB, 0, true, 4096, 4096);  // room holds one entry: 4096
+        CHECK(k.has_value() && k->mb == 4096ull && k->pinned && !k->below_entry);
+        CHECK(!startfit::ramTierFit(4096, 19374 * MiB, 0, true, startfit::pinned_room_unknown, 9216).has_value());  // user's own size
     }
     // 2b. slots after the weights: the C5 case (15 slots left 13312 tokens for a 16384-token request) -> fewer slots
     {

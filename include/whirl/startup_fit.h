@@ -57,15 +57,21 @@ struct PinnedState {
 };
 // MiB the RAM tier may still pin, whole 512 MiB (0: none); pinned_room_unknown when nothing is known.
 std::uint64_t pinnedRoomMb(const PinnedState& s);
+// The reason text of a RAM tier lowered to the pinned room (log and "adjusted:" line). It must match none of the error
+// patterns the gates and repro scripts scan server logs for (golden.ps1, kvram719_tier.ps1, fix719.ps1: "hipError",
+// "hip ... 719", "| failed:", "PAL failed"): a healthy, adjusted server must not read as a failed one (REVIEW-S8-719 A1).
+std::string pinnedWhy(std::uint64_t room_mb, std::size_t n_gpus);
 struct RamFit {
     std::uint64_t mb = 0;
     bool half = false;    // lowered because it was more than half of the available RAM
     bool safe = false;    // capped at ram_tier_safe_mb
     bool pinned = false;  // lowered to the GPU-pinned room (pinned_room_mb)
+    bool below_entry = false;  // the pinned room is below one max-context entry (entry_mb): off (mb 0)
 };
 // nullopt: unchanged. explicit_size: the user gave the size (--kv-ram-mb / WHIRL_KV_RAM_MB).
+// entry_mb: one max-context entry (MiB); a tier the pinned room lowers below it is turned off (FR-CACHE P3-4, ram_size.h).
 std::optional<RamFit> ramTierFit(std::uint64_t mb, std::uint64_t avail_phys_bytes, std::uint64_t auto_mb, bool explicit_size,
-                                 std::uint64_t pinned_room_mb = pinned_room_unknown);
+                                 std::uint64_t pinned_room_mb = pinned_room_unknown, std::uint64_t entry_mb = 0);
 
 // the pool the plan must reach: max(pool_min_tokens, pool_hard_min)
 std::uint64_t wantTokens(const vram::FitInput& fi);

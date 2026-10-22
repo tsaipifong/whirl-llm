@@ -29,9 +29,16 @@ std::uint64_t pinnedRoomMb(const PinnedState& s) {
     return room;
 }
 
+std::string pinnedWhy(std::uint64_t room_mb, std::size_t n_gpus) {
+    return std::format("lowered to {} MiB: the GPUs can keep only so much pinned host memory resident ({} HIP GPU(s); "
+                       "a larger RAM tier fails with hipError 719 on the first request)",
+                       room_mb, n_gpus);
+}
+
 std::optional<RamFit> ramTierFit(std::uint64_t mb, std::uint64_t avail_phys_bytes, std::uint64_t auto_mb, bool explicit_size,
-                                 std::uint64_t pinned_room_mb) {
+                                 std::uint64_t pinned_room_mb, std::uint64_t entry_mb) {
     (void)auto_mb;
+    (void)entry_mb;
     if (mb == 0) return std::nullopt;
     RamFit r;
     r.mb = mb;

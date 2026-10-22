@@ -1295,9 +1295,7 @@ int serveMain(int argc, char** argv, const char* program) {
                  pst.gpus.size(), per, pst.pinned_max >> 20, pst.total_phys >> 21,
                  pinned_room == startfit::pinned_room_unknown ? std::string("unknown") : std::format("{} MiB", pinned_room),
                  startfit::pinned_reserve_mb, startfit::pinned_machine_reserve_mb);
-            pinned_why = std::format("lowered to {} MiB: the GPUs can keep only so much pinned host memory resident ({} HIP GPU(s); "
-                                     "a larger RAM tier fails with hipError 719 on the first request)",
-                                     pinned_room == startfit::pinned_room_unknown ? 0 : pinned_room, pst.gpus.size());
+            pinned_why = startfit::pinnedWhy(pinned_room == startfit::pinned_room_unknown ? 0 : pinned_room, pst.gpus.size());
         }
         if (const auto rf = startfit::ramTierFit(kv_ram_mb, rin.avail_phys, ram_auto_mb, rin.explicit_mb.has_value(), pinned_room);
             rf && n_ck > 0 && !no_pc) {
