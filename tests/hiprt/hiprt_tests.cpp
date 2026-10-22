@@ -115,7 +115,18 @@ void testTable() {
 void testFakes(const std::wstring& fakes) {
     const std::wstring full = fakes + L"\\whirl_fake_hiprt.dll", drop = fakes + L"\\whirl_fake_hiprt_drop.dll",
                        withdep = fakes + L"\\whirl_fake_hiprt_dep.dll", dep = fakes + L"\\whirl_fake_dep.dll";
-    for (const auto& f : {full, drop, withdep, dep}) CHECKD(GetFileAttributesW(f.c_str()) != INVALID_FILE_ATTRIBUTES, n8(f));
+    bool have = true;
+    for (const auto& f : {full, drop, withdep, dep}) {
+        const bool e = GetFileAttributesW(f.c_str()) != INVALID_FILE_ATTRIBUTES;
+        CHECKD(e, n8(f));
+        have = have && e;
+    }
+    // arch6b: without the fakes every probe below fails and the API slots stay null; calling one crashed the test
+    // (0xC0000005, empty log) in a saved bin that held only the *.exe. Stop here: the FAIL lines above name the files.
+    if (!have) {
+        std::printf("FAIL: fake runtimes missing; copy the build's hiprt_fakes folder next to whirl-hiprt-tests.exe\n");
+        return;
+    }
     TempDirs t;
     const std::wstring empty = t.dir(L"empty");
 
