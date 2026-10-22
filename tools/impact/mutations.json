@@ -2,7 +2,7 @@
   "_doc": "Mutations for tools/impact/mutate.py (audit/ARCH-1_modules.md 8.4). run = the --cmd key that builds and runs the module's tests; expect_test = exe:test the impact map must list for the mutated diff. Add one per module as modules appear (ops, device, config), and one per fixed bug (re-introduce it with kind revert).",
   "mutations": [
     {"id": "fingerprint-diag-env", "module": "cache.fingerprint", "kind": "replace", "file": "src/cache/fingerprint.cpp",
-     "find": "\"WHIRL_TIMER_PROBE\", \"WHIRL_PREFIX_CACHE_VERIFY\"};", "replace": "\"WHIRL_TIMER_PROBE\"};",
+     "find": "\"WHIRL_PREFIX_CACHE_VERIFY\", \"WHIRL_LAUNCH_LOG\"};", "replace": "\"WHIRL_LAUNCH_LOG\"};",
      "what": "re-introduce today's bug: the diagnostic WHIRL_PREFIX_CACHE_VERIFY enters the SSD tier fingerprint",
      "run": "cache", "expect_test": "whirl-cache-tests:testFingerprint"},
     {"id": "tier-dedup-race", "module": "cache.spill", "kind": "revert", "commit": "bf31527", "file": "src/tier/kv_tier.cpp",
