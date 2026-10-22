@@ -111,7 +111,7 @@ const char* k_help_chat =
     "  --image IMAGE              an image placed before the prompt text (repeatable; needs --mmproj)\n"
     "  --device SPEC, -dev SPEC   GPU: pci:BUS:DEVICE (Task Manager > Performance > GPU > Physical location: PCI bus 71,\n"
     "                             device 0 -> pci:71:0), an index from 'whirl devices', r9700, 8060s, or a part of the\n"
-    "                             name. Default: the GPU with the most GPU memory. One GPU in this version\n"
+    "                             name. Default: the GPU with the most GPU memory\n"
     WHIRL_HELP_MODES
     "  -h, --help                 this text\n";
 
@@ -133,7 +133,7 @@ const char* k_help_bench =
     "  --no-think / --think       thinking off / on for the decode prompt (default on)\n"
     "  --device SPEC, -dev SPEC   GPU: pci:BUS:DEVICE (Task Manager > Performance > GPU > Physical location: PCI bus 71,\n"
     "                             device 0 -> pci:71:0), an index from 'whirl devices', r9700, 8060s, or a part of the\n"
-    "                             name. Default: the GPU with the most GPU memory. One GPU in this version\n"
+    "                             name. Default: the GPU with the most GPU memory\n"
     WHIRL_HELP_MODES
     "  -h, --help                 this text\n";
 
@@ -147,7 +147,7 @@ const char* k_help_selftest =
     "options:\n"
     "  --device SPEC, -dev SPEC   GPU: pci:BUS:DEVICE (Task Manager > Performance > GPU > Physical location: PCI bus 71,\n"
     "                             device 0 -> pci:71:0), an index from 'whirl devices', r9700, 8060s, or a part of the\n"
-    "                             name. Default: the GPU with the most GPU memory. One GPU in this version\n"
+    "                             name. Default: the GPU with the most GPU memory\n"
     WHIRL_HELP_MODES
     "  -h, --help                 this text\n";
 
@@ -171,7 +171,7 @@ const char* k_help_dflash_check =
     "options:\n"
     "  --device SPEC, -dev SPEC   GPU: pci:BUS:DEVICE (Task Manager > Performance > GPU > Physical location: PCI bus 71,\n"
     "                             device 0 -> pci:71:0), an index from 'whirl devices', r9700, 8060s, or a part of the\n"
-    "                             name. Default: the GPU with the most GPU memory. One GPU in this version\n"
+    "                             name. Default: the GPU with the most GPU memory\n"
     "  -h, --help                 this text\n";
 
 const char* k_help_seqtest =
@@ -185,7 +185,7 @@ const char* k_help_seqtest =
     "  --decode N                 tokens generated per sequence (default 24)\n"
     "  --device SPEC, -dev SPEC   GPU: pci:BUS:DEVICE (Task Manager > Performance > GPU > Physical location: PCI bus 71,\n"
     "                             device 0 -> pci:71:0), an index from 'whirl devices', r9700, 8060s, or a part of the\n"
-    "                             name. Default: the GPU with the most GPU memory. One GPU in this version\n"
+    "                             name. Default: the GPU with the most GPU memory\n"
     WHIRL_HELP_MODES
     "  -h, --help                 this text\n";
 
@@ -260,7 +260,7 @@ Args parseArgs(const std::vector<std::string>& argv, std::size_t from) {
     Args a;
     for (std::size_t i = from; i < argv.size(); ++i) {
         const std::string& s = argv[i] == "-dev" ? std::string("--device") : argv[i];  // llama.cpp's short name
-        if (s == "--device" && a.has("--device")) throw std::runtime_error("give --device once (a comma list: --device a,b)");
+        if (s == "--device" && a.has("--device")) throw std::runtime_error("give --device only once");
         if (s.size() > 2 && s[0] == '-' && s[1] == '-') {
             std::string mspec;
             bool mnext = false;

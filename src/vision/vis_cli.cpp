@@ -57,7 +57,7 @@ int cliVisEncode(std::span<const std::string> args) {
         } else if (args[i] == "--mode" && i + 1 < args.size()) {
             mode = vision::parseMode(args[++i]).value_or(vision::Mode::automatic);
         } else if ((args[i] == "--device" || args[i] == "-dev") && i + 1 < args.size()) {
-            if (device_given) throw std::runtime_error("give --device once (a comma list: --device a,b)");
+            if (device_given) throw std::runtime_error("give --device only once");
             device_given = true;
             device_spec = args[++i];
         } else {

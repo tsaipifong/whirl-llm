@@ -167,7 +167,7 @@ speed and, with MTP, the verify cycles and draft acceptance.
 | `--draft-model FILE` | DFlash2 drafter GGUF for `--draft dflash`. Wins over `WHIRL_DRAFT_MODEL` (the environment variable is only used when `--draft-model` is not given; the log says which one was used) |
 | `--mmproj MMPROJ.gguf` | vision encoder (Qwen3-VL style mmproj, F16 / BF16), needed for `--image` |
 | `--image IMAGE` | an image placed before the prompt text; repeatable |
-| `--device SPEC`, `-dev SPEC` | GPU (also `WHIRL_DEVICE`): `pci:<bus>:<device>` as Task Manager > Performance > GPU > Physical location shows it ("PCI bus 71, device 0" = `pci:71:0`; tells identical cards apart), an index from `whirl devices`, `r9700`, `8060s`, or a part of the name (refused when it matches more than one GPU). Default: the GPU with the most GPU memory (integrated GPUs count their dedicated memory; if equal, the first one in `--list-devices`); the startup log shows which GPU it uses. One GPU per model in this version. |
+| `--device SPEC`, `-dev SPEC` | GPU (also `WHIRL_DEVICE`): `pci:<bus>:<device>` as Task Manager > Performance > GPU > Physical location shows it ("PCI bus 71, device 0" = `pci:71:0`; tells identical cards apart), an index from `whirl devices`, `r9700`, `8060s`, or a part of the name (refused when it matches more than one GPU). Default: the GPU with the most GPU memory (integrated GPUs count their dedicated memory; if equal, the first one in `--list-devices`); the startup log shows which GPU it uses. |
 | `--precise` / `--balance` / `--fast` / `--mode M` | numerics mode (default balance; also `WHIRL_MODE`); `--balance=ITEMS` picks items. See [numerics modes](#modes) |
 | `-h`, `--help` | help |
 

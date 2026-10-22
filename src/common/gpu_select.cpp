@@ -209,8 +209,7 @@ std::vector<int> selectGpus(const std::vector<GpuRecord>& gpus, std::string_view
     }
     if (items.size() > 1)
         throw SelectError(std::format(
-            "--device {}: only one GPU is supported in this version (splitting a model across several GPUs is planned); "
-            "give one GPU",
+            "--device {}: only one GPU can be given with --device",
             spec));
     return matchOne(gpus, items[0]);
 }

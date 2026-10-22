@@ -134,7 +134,7 @@ const char* kHelpBody =
     "  --alias NAME             model id reported by /v1/models (default: the file name without .gguf)\n"
     "  --device D, -dev D       GPU: pci:BUS:DEVICE (Task Manager > Performance > GPU > Physical location: PCI bus 71,\n"
     "                           device 0 -> pci:71:0), an index from --list-devices, r9700, 8060s, or a part of the name.\n"
-    "                           Default: the GPU with the most GPU memory. One GPU in this version\n"
+    "                           Default: the GPU with the most GPU memory\n"
     "  --list-devices           list the GPUs (index, name, memory, pci:BUS:DEVICE) and exit\n"
     "  -np, --parallel N        concurrent request slots (continuous batching, 1..16; default 4, 1 on cards < 20 GiB)\n"
     "  -c, --ctx N              shared KV pool in tokens; slots take pages on demand and idle slots'\n"
@@ -466,11 +466,11 @@ int serveMain(int argc, char** argv, const char* program) {
             opt.kv_ssd_mode = *vm;
         }
         else if (auto v12 = argValue(args, i, "--device")) {
-            if (device_given) die("give --device once (a comma list: --device a,b)");  // same rule as whirl
+            if (device_given) die("give --device only once");  // same rule as whirl
             device_given = true;
             opt.device = *v12;
         } else if (auto v12b = argValue(args, i, "-dev")) {  // llama.cpp's short name
-            if (device_given) die("give --device once (a comma list: --device a,b)");
+            if (device_given) die("give --device only once");
             device_given = true;
             opt.device = *v12b;
         }
