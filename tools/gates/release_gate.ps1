@@ -92,6 +92,10 @@ AddStep "cpu_gate_selftest" $false @($exe["whirl-server-gate"], "--selftest") { 
 AddStep "cpu_gate_nosuite" $false @($exe["whirl-server-gate"], "--exe", $exe["whirl-server"], "--model", $SW) { param($o, $c) $c -eq 2 }
 # s8-719 review C4: whirl-server refuses a repeated --device like whirl (CPU only: refused before any model or GPU work)
 AddStep "cpu_device_once" $false @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\repro\server_device_once.ps1"), "-Build", $Build) { param($o, $c) $c -eq 0 -and ($o -match "(?m)^server_device_once: PASS") }
+# s8-719 review-2 C4: every exe that restricts HIP to the chosen GPU (whirl, whirl-server, whirl-vis) answers
+# --whirl-gpu-probe with a well-formed GPU list, the same list from each (an exe that forgets the dispatch silently keeps
+# every GPU visible). No kernels, no model, no GPU memory: the probe only lists the GPUs, like --list-devices.
+AddStep "cpu_probe_dispatch" $false @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\repro\probe_dispatch_check.ps1"), "-Build", $Build) { param($o, $c) $c -eq 0 -and ($o -match "(?m)^probe_dispatch_check: PASS") }
 AddStep "cpu_server_only_typo" $false @($exe["whirl-server-tests"], "--gguf", $SW, "--only", "no_such_test") { param($o, $c) $c -eq 2 }
 AddStep "cpu_golden_selftest" $false @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\golden\golden_selftest.ps1")) { param($o, $c) $c -eq 0 -and ($o -match "all cases as expected") }
 AddStep "cpu_golden_xcheck" $false @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\golden\golden.ps1"), "xcheck", "-Arch", $arch, "-Models", $gmodels) { param($o, $c) $c -eq 0 -and ($o -match "file\(s\) ok") }

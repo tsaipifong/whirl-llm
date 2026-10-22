@@ -3501,8 +3501,14 @@ void testGpuSelect() {
         CHECK(back.size() == 1 && back[0].fit_mib == host[0].fit_mib);
     }
     // a list of two: a clear error, never a silent fallback to one of them
-    CHECK(has(errOf(two, "r9700,8060s"), "only one GPU is supported in this version"));
-    CHECK(has(errOf(two, "0,1"), "only one GPU is supported in this version"));
+    // owner 2026-10-23: WHIRL always used one GPU, so the error says only that (no "in this version", no "planned")
+    for (const char* lst : {"r9700,8060s", "0,1"}) {
+        const std::string msg = errOf(two, lst);
+        CHECK(has(msg, "only one GPU can be given with --device"));
+        CHECK(!has(msg, "in this version"));
+        CHECK(!has(msg, "planned"));
+        CHECK(!has(msg, "splitting"));
+    }
     CHECK(throws([&] { selectGpus(two, "1,1"); }));
     // unknown name / index out of range: the error names the value and lists the GPUs present
     for (const char* bad : {"rtx4090", "7", "ROCm5", "gfx90a"}) {
