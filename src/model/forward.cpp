@@ -2000,6 +2000,7 @@ void Model::visCommit(u32 n) {
     if (n <= max_small_batch && k.set_rpos != nullptr) {
         struct Rpos16 {
             i32 v[48];
+            static bool launchPtrWord(std::uint32_t) { return false; }  // positions only (launch-log digest)
         } tab{};
         std::copy(rpos_host.begin(), rpos_host.begin() + 3 * static_cast<std::size_t>(n), tab.v);
         hip::launch(k.set_rpos, D(1), D(64), 0, stream, rpos_buf, tab, I(n));

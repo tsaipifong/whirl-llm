@@ -1714,10 +1714,8 @@ void testLaunchDigest() {
     GvArgs* ga = build(0xAA, a);
     GvArgs* gb = build(0x55, b);
     auto digest = [](const GvArgs* g) {
-        std::int32_t ncols = 2048;  // the scalar arguments that follow it in the real launch
-        void* params[2] = {const_cast<GvArgs*>(g), &ncols};
-        const std::uint32_t sizes[2] = {sizeof(GvArgs), sizeof(ncols)};
-        return whirl::hip::launchlog::argDigest(params, sizes, 2);
+        const std::int32_t ncols = 2048;  // the scalar arguments that follow it in the real launch
+        return whirl::hip::launchlog::launchArgDigest(*g, ncols);
     };
     const std::uint64_t da = digest(ga), db = digest(gb);
     CHECK_EQ(da, db);  // same argument values -> same digest

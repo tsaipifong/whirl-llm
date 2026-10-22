@@ -369,6 +369,49 @@ struct Int4 {
     std::int32_t x = 0, y = 0, z = 0, w = 0;
 };
 
+// Which 8-byte words of each argument struct hold device addresses (hip::LaunchArgPtrWords, the launch-log digest;
+// REVIEW-ARCH4 P3-2, arch6f). Integer words are digested as values even when they happen to fall inside an
+// allocation. The offsets are checked against the layouts here.
+static_assert(offsetof(KvArgs, kvbase) == 40 && offsetof(KvArgs, tab0) == 48);
+static_assert(offsetof(GvArgs, y) == 24 && offsetof(GvArgs, rb) == 48);
+static_assert(offsetof(GdnSeg, snap) == 8 && offsetof(GdnSeg, row0) == 8 + 8 * kGdnMaxSnap &&
+              offsetof(GdnSeg, pend) == 16 + 8 * kGdnMaxSnap && offsetof(GdnSeg, npend) == 24 + 8 * kGdnMaxSnap &&
+              sizeof(GdnSeg) % 8 == 0);
+}  // namespace whirl::kernels
+template <>
+struct whirl::hip::LaunchArgPtrWords<whirl::kernels::KvArgs> {  // k v ks vs ptab kvbase; then tab0 / win
+    static bool ptr(std::uint32_t w) { return w < 6; }
+};
+template <>
+struct whirl::hip::LaunchArgPtrWords<whirl::kernels::GvArgs> {  // w[3] y[3]; then rb[3] (row bytes) and ints
+    static bool ptr(std::uint32_t w) { return w < 6; }
+};
+template <>
+struct whirl::hip::LaunchArgPtrWords<whirl::kernels::GdnSegs> {  // per segment: state snap[]; row0 / nrows; pend; npend
+    static bool ptr(std::uint32_t w) {
+        constexpr std::uint32_t kWords = sizeof(whirl::kernels::GdnSeg) / 8;
+        constexpr std::uint32_t kInts = offsetof(whirl::kernels::GdnSeg, row0) / 8;
+        constexpr std::uint32_t kPend = offsetof(whirl::kernels::GdnSeg, pend) / 8;
+        const std::uint32_t i = w % kWords;
+        return i < kInts || i == kPend;
+    }
+};
+template <>
+struct whirl::hip::LaunchArgPtrWords<whirl::kernels::GdnSeg> : whirl::hip::LaunchArgPtrWords<whirl::kernels::GdnSegs> {};
+template <>
+struct whirl::hip::LaunchArgPtrWords<whirl::kernels::Tok16> : whirl::hip::LaunchArgNoPtrWords {};
+template <>
+struct whirl::hip::LaunchArgPtrWords<whirl::kernels::RowTab> : whirl::hip::LaunchArgNoPtrWords {};
+template <>
+struct whirl::hip::LaunchArgPtrWords<whirl::kernels::RowIdx> : whirl::hip::LaunchArgNoPtrWords {};
+template <>
+struct whirl::hip::LaunchArgPtrWords<whirl::kernels::AwGroups> : whirl::hip::LaunchArgNoPtrWords {};
+template <>
+struct whirl::hip::LaunchArgPtrWords<whirl::kernels::DSampArgs> : whirl::hip::LaunchArgNoPtrWords {};
+template <>
+struct whirl::hip::LaunchArgPtrWords<whirl::kernels::Int4> : whirl::hip::LaunchArgNoPtrWords {};
+namespace whirl::kernels {
+
 // ---------------------------------------------------------------------------
 // Configuration tables (must match the kernel instantiations)
 

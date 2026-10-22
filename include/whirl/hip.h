@@ -9,6 +9,7 @@
 
 #pragma once
 
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -202,9 +203,36 @@ std::uint64_t launchCount();
 // launch log (src/hip/launch_log.h, WHIRL_LAUNCH_LOG): off by default; when on, launch() hands it the arguments
 namespace launchlog {
 extern const bool g_on;
-void stageArgs(void* const* params, const std::uint32_t* sizes, std::size_t n);
-std::uint64_t argDigest(void* const* params, const std::uint32_t* sizes, std::size_t n);
+// which 8-byte words (index from the start of the argument) of one argument may hold a device address
+using PtrWords = bool (*)(std::uint32_t word);
+void stageArgs(void* const* params, const std::uint32_t* sizes, const PtrWords* ptr_words, std::size_t n);
+std::uint64_t argDigest(void* const* params, const std::uint32_t* sizes, const PtrWords* ptr_words, std::size_t n);
 }  // namespace launchlog
+
+// Which 8-byte words of a kernel argument may hold a device address. The launch log digests those as
+// (allocation ordinal, offset) and every other word as its value (REVIEW-ARCH4 P3-2, arch6f: deciding that from the
+// value alone read int32 pairs such as AwGroups first[0..1] = 0,5 = 0x500000000 as "inside allocation 597" in one
+// run and as a value in the next, depending on where the allocations happened to lie).
+// A scalar may be one (DevPtr is uint64_t). Every struct passed to hip::launch says which: a specialization next
+// to its definition (kernels_abi.h), or, for a struct local to a function, a member
+// `static bool launchPtrWord(std::uint32_t word)`. A new struct with neither fails the build here.
+template <class T>
+struct LaunchArgPtrWords {
+    static bool ptr(std::uint32_t w) {
+        if constexpr (!std::is_class_v<T>) {
+            return true;
+        } else if constexpr (requires { { T::launchPtrWord(w) } -> std::same_as<bool>; }) {
+            return T::launchPtrWord(w);
+        } else {
+            static_assert(sizeof(T) == 0, "kernel argument struct needs a LaunchArgPtrWords specialization or a static launchPtrWord member (which 8-byte words hold device addresses)");
+            return true;
+        }
+    }
+};
+// a struct without any device address
+struct LaunchArgNoPtrWords {
+    static bool ptr(std::uint32_t) { return false; }
+};
 
 // A struct argument must have no padding: padding bytes are whatever the memory held, and the launch log digests
 // every argument byte (REVIEW-ARCH4 P3-2, arch6e: GvArgs' unnamed tail made the digest differ from run to run).
@@ -228,7 +256,8 @@ void launch(Function f, Dim3 grid, Dim3 block, unsigned shared_bytes, Stream s, 
     }, copy);
     if (launchlog::g_on) {
         const std::uint32_t sizes[sizeof...(Args) > 0 ? sizeof...(Args) : 1] = {static_cast<std::uint32_t>(sizeof(Args))...};
-        launchlog::stageArgs(params, sizes, sizeof...(Args));
+        const launchlog::PtrWords ptr[sizeof...(Args) > 0 ? sizeof...(Args) : 1] = {&LaunchArgPtrWords<Args>::ptr...};
+        launchlog::stageArgs(params, sizes, ptr, sizeof...(Args));
     }
     launchRaw(f, grid, block, shared_bytes, s, params);
 }
@@ -240,7 +269,8 @@ template <class... Args>
 std::uint64_t launchArgDigest(const Args&... args) {
     void* params[sizeof...(Args) > 0 ? sizeof...(Args) : 1] = {const_cast<void*>(static_cast<const void*>(&args))...};
     const std::uint32_t sizes[sizeof...(Args) > 0 ? sizeof...(Args) : 1] = {static_cast<std::uint32_t>(sizeof(Args))...};
-    return argDigest(params, sizes, sizeof...(Args));
+    const PtrWords ptr[sizeof...(Args) > 0 ? sizeof...(Args) : 1] = {&LaunchArgPtrWords<Args>::ptr...};
+    return argDigest(params, sizes, ptr, sizeof...(Args));
 }
 }  // namespace launchlog
 

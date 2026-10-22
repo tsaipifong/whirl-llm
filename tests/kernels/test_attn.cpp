@@ -1335,6 +1335,7 @@ void testAttn(Ctx& c) {
     if (auto fr = c.fnOpt("set_rpos")) {
         struct Rpos16 {
             int v[48];
+            static bool launchPtrWord(std::uint32_t) { return false; }  // positions only (launch-log digest)
         } tab{};
         for (int i = 0; i < 48; ++i) tab.v[i] = 1000 * i - 7;
         for (int n : {1, 7, 16}) {

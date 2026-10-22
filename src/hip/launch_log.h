@@ -8,7 +8,8 @@
 // Decode graph replays do not pass through launchRaw (only their capture does), like the launch counter.
 //
 // REVIEW-ARCH4 P3-2: each launch also carries a digest of its arguments (hip::launch stages them): scalars as they
-// are, and every 8-byte word that points into (or just below) a device allocation as (allocation ordinal, offset),
+// are, and every 8-byte word that may hold an address (by its argument's type: hip::LaunchArgPtrWords, arch6f) and
+// points into (or just below) a device allocation as (allocation ordinal, offset),
 // so the digest is the same from run to run while it still pins head0 / r0 / r1 / copy offsets / n_split / group
 // tables. The per-(kernel, geometry, digest) counts and an argument-sequence hash are written as extra lines
 // ("# argseqhash", "@ ..."); a table without them (older builds) compares on kernels and geometry only.
@@ -24,6 +25,8 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "whirl/hip.h"
+
 namespace whirl::hip::launchlog {
 
 // set once at static initialization from WHIRL_LAUNCH_LOG (a folder); never changes afterwards
@@ -32,10 +35,10 @@ extern const bool g_on;
 void onFunction(const void* f, const char* name);
 void onLaunch(const void* f, unsigned gx, unsigned gy, unsigned gz, unsigned bx, unsigned by, unsigned bz, unsigned shared);
 // the arguments of the next onLaunch on this thread (hip::launch, include/whirl/hip.h)
-void stageArgs(void* const* params, const std::uint32_t* sizes, std::size_t n);
+void stageArgs(void* const* params, const std::uint32_t* sizes, const PtrWords* ptr_words, std::size_t n);
 // the digest stageArgs stages for these arguments, against the allocations registered so far (none while the log is
 // off); also callable with the log off (unit tests)
-std::uint64_t argDigest(void* const* params, const std::uint32_t* sizes, std::size_t n);
+std::uint64_t argDigest(void* const* params, const std::uint32_t* sizes, const PtrWords* ptr_words, std::size_t n);
 // device allocations (hip::malloc / free, module globals): the address space argument pointers are normalized against
 void onAlloc(std::uint64_t base, std::uint64_t bytes);
 void onFree(std::uint64_t base);
