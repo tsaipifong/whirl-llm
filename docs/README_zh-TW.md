@@ -147,7 +147,28 @@ cd C:\whirl\whirl-0.2.3-windows-x64
 
 server 在 `http://127.0.0.1:8080/v1` 提供 OpenAI API（`/v1/chat/completions`、`/v1/completions`、`/v1/models`、`/health`），任何相容 OpenAI 的用戶端都能用。加 `--precise` 得到逐位元無損輸出，加 `--fast` 追求最高速度。用 Ctrl+C 停止 server，會先把重複使用過的工作階段寫進 SSD 層。
 
-兩張卡都在時預設用 R9700；`--device 8060s`（或 `WHIRL_DEVICE=8060s`）選 8060S。長文件可加大每個 slot 的上下文，例如 `--ctx-per-slot 262144`；見 [recipes_zh-TW.md](recipes_zh-TW.md#long-context)。
+長文件可加大每個 slot 的上下文，例如 `--ctx-per-slot 262144`；見 [recipes_zh-TW.md](recipes_zh-TW.md#long-context)。
+
+### 選擇 GPU
+
+沒有指定 `--device` 時，WHIRL 用 GPU 記憶體最大的那張卡（Radeon 8060S 算它的專用記憶體，也就是工作管理員顯示的數字）。Ryzen AI Max 機器設 96 GB 專用記憶體、再接一張 R9700 外接顯卡時，預設就是 8060S。WHIRL 只用一張卡，並讓 GPU 執行環境在這個程式裡看不到其他卡；啟動後第一行記錄會寫用哪張卡、藏了幾張。
+
+要指定卡，在 `whirl` 或 `whirl-server` 加 `--device`（或 `-dev`、或環境變數 `WHIRL_DEVICE`）：
+
+1. 開啟工作管理員 > 效能，點選要用的 GPU。
+2. 看 **實體位置**，例如「PCI 匯流排 71，裝置 0，函數 0」。
+3. 用 `--device pci:71:0`（匯流排、再來是裝置）啟動 WHIRL。
+
+`whirl devices`（或 `--list-devices`）會列出每張卡的同一組數字，例如兩張 R9700 加兩張 RX 9070 XT 的機器：
+
+```
+  device 0: AMD Radeon AI PRO R9700 (gfx1201), 31.9 GiB, 32 CUs, pci:3:0 (PCI bus 3, device 0)  [supported] [default]
+  device 1: AMD Radeon AI PRO R9700 (gfx1201), 31.9 GiB, 32 CUs, pci:4:0 (PCI bus 4, device 0)  [supported]
+  device 2: AMD Radeon RX 9070 XT (gfx1201), 15.9 GiB, 32 CUs, pci:7:0 (PCI bus 7, device 0)  [supported]
+  device 3: AMD Radeon RX 9070 XT (gfx1201), 15.9 GiB, 32 CUs, pci:10:0 (PCI bus 10, device 0)  [supported]
+```
+
+這台機器上 `--device pci:4:0` 是第二張 R9700；`--device r9700` 會被拒絕，因為有兩張符合，錯誤訊息會列出兩張和它們的 `pci:` 編號。編號（`--device 1`）也能用，但那是 GPU 執行環境的順序，加卡、拔卡、換驅動或設定 `HIP_VISIBLE_DEVICES` 都可能改變；`pci:` 編號只要卡的接法不變就不變。USB4／Thunderbolt 外接顯卡（包括同一個埠串接多張）在接上時才分配匯流排編號，重新插拔、換埠或改串接順序後請再看一次工作管理員。只有一張卡符合時也可以用 `r9700`、`8060s` 或名稱的一部分。這個版本一個模型只用一張卡，`--device a,b` 會被拒絕。如果您自己設定了 `HIP_VISIBLE_DEVICES`，WHIRL 不會改它，編號只算它留下的卡。
 
 每個模型第一次執行時會調校一次 GPU kernel，結果快取在 `%LOCALAPPDATA%\whirl`（R9700 上我們的 MXFP4 檔只要幾秒；8060S 較久）。完整步驟：[快速上手](quickstart_zh-TW.md)。所有選項：[使用參考](guide/zh-TW/usage.md)。
 

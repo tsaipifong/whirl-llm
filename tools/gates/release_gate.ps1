@@ -128,7 +128,8 @@ function GateCmd([string]$model, [string]$suites, [string]$mode, [string[]]$extr
     $a = @($exe["whirl-server-gate"], "--exe", $exe["whirl-server"], "--kind", "whirl", "--model", $model, "--suite", $suites,
            "--port", "$port", "--work", "@WORK@", "--kv", "auto")
     if ($mode) { $a += @("--server-env", "WHIRL_MODE=$mode") }
-    if ($Device -eq "8060s") { $a += @("--server-env", "WHIRL_DEVICE=8060s") }
+    # explicit on every GPU: since 0.2.3 the default is the GPU with the most memory (the 8060S on the dev box)
+    $a += @("--server-env", "WHIRL_DEVICE=$Device")
     return @($a + @($extra | Where-Object { $_ }))
 }
 $ssdOff = @("--server-env", "WHIRL_KV_SSD_MODE=off")

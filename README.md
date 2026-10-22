@@ -147,7 +147,28 @@ cd C:\whirl\whirl-0.2.3-windows-x64
 
 The server speaks the OpenAI API at `http://127.0.0.1:8080/v1` (`/v1/chat/completions`, `/v1/completions`, `/v1/models`, `/health`), so any OpenAI-compatible client works. Add `--precise` for bitwise-lossless output or `--fast` for maximum speed. Stop the server with Ctrl+C; reused sessions are written to the SSD tier first.
 
-With both GPUs present the R9700 is the default; `--device 8060s` (or `WHIRL_DEVICE=8060s`) selects the 8060S. For long documents give a slot a longer context, for example `--ctx-per-slot 262144`; see [recipes.md](docs/recipes.md#long-context).
+For long documents give a slot a longer context, for example `--ctx-per-slot 262144`; see [recipes.md](docs/recipes.md#long-context).
+
+### Choosing the GPU
+
+Without `--device`, WHIRL uses the GPU with the most GPU memory (for a Radeon 8060S: its dedicated memory, as Task Manager shows it). On a Ryzen AI Max machine with a 96 GB carve-out and an R9700 eGPU that is the 8060S. WHIRL uses one GPU and hides the others from the GPU runtime for its process; the first log line says which GPU it uses and how many it hid.
+
+To choose a GPU, give `--device` (or `-dev`, or `WHIRL_DEVICE`) to `whirl` or `whirl-server`:
+
+1. Open Task Manager > Performance and click the GPU you want.
+2. Read **Physical location**, for example `PCI bus 71, device 0, function 0`.
+3. Start WHIRL with `--device pci:71:0` (bus, then device).
+
+`whirl devices` (or `--list-devices`) prints the same numbers for every GPU:
+
+```
+  device 0: AMD Radeon AI PRO R9700 (gfx1201), 31.9 GiB, 32 CUs, pci:3:0 (PCI bus 3, device 0)  [supported] [default]
+  device 1: AMD Radeon AI PRO R9700 (gfx1201), 31.9 GiB, 32 CUs, pci:4:0 (PCI bus 4, device 0)  [supported]
+  device 2: AMD Radeon RX 9070 XT (gfx1201), 15.9 GiB, 32 CUs, pci:7:0 (PCI bus 7, device 0)  [supported]
+  device 3: AMD Radeon RX 9070 XT (gfx1201), 15.9 GiB, 32 CUs, pci:10:0 (PCI bus 10, device 0)  [supported]
+```
+
+On this example machine with two R9700 and two RX 9070 XT, `--device pci:4:0` is the second R9700. `--device r9700` is refused because two GPUs match; the error lists both with their `pci:` numbers. The index (`--device 1`) also works, but it is the GPU runtime's order and can change when a GPU is added or removed, the driver changes, or `HIP_VISIBLE_DEVICES` is set; the `pci:` numbers stay the same while the card stays connected the same way. An external USB4 / Thunderbolt GPU (also several chained on one port) gets its bus number when it is connected, so check Task Manager again after replugging it or changing the port or the chain order. `r9700`, `8060s` and a part of the name work when only one GPU matches. This version runs a model on one GPU; `--device a,b` is refused. If you set `HIP_VISIBLE_DEVICES` yourself, WHIRL leaves it as it is and indices count only the GPUs it leaves visible.
 
 The first run with a model tunes the GPU kernels once and caches the result in `%LOCALAPPDATA%\whirl` (a few seconds for our MXFP4 files on the R9700; longer on the 8060S). Full walkthrough: [quick start](docs/quickstart.md). Every option: [usage reference](docs/usage.md).
 
