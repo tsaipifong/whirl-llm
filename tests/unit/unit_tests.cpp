@@ -3481,18 +3481,19 @@ void testGpuSelect() {
             CHECK_EQ(defaultGpu(big_unsup).index, 1);  // a larger card without kernels in this build is ignored
             CHECK_EQ(defaultGpu(std::vector<GpuRecord>{rec(0, "AMD Instinct MI300X", "gfx942", 5, false, false, 196608)}).index, -1);
         }
-        // the reason, for the startup line: "GPU pci:196:0 (NAME) selected: most GPU memory (95.8 GiB); ..."
+        // the startup line (owner 2026-10-23: usage only, no cause): "GPU pci:196:0 (NAME): most GPU memory (95.8 GiB);
+        // use --device pci:<bus>:<device> to choose another (see --list-devices)"
         const std::vector<GpuRecord> h2 = fit({rec(0, k8060, "gfx1151", 196, true, true, 110490), rec(1, kR97, "gfx1201", 71, false, true, 32624)}, 0, 98099);
         const AutoChoice c = defaultGpu(h2);
         CHECK_EQ(c.index, 0);
         CHECK(has(c.reason, "most GPU memory (95.8 GiB)"));
         const std::string n = restrictionNote(h2, {0}, c.reason);
-        CHECK(has(n, "GPU pci:196:0 (AMD Radeon(TM) 8060S Graphics) selected: most GPU memory (95.8 GiB)"));
-        CHECK(has(n, "1 other GPU (device 1 AMD Radeon AI PRO R9700 pci:71:0) hidden from HIP"));
-        CHECK(has(n, "use --device to change"));
+        CHECK_EQ(n, std::string("GPU pci:196:0 (AMD Radeon(TM) 8060S Graphics): most GPU memory (95.8 GiB); use --device "
+                                "pci:<bus>:<device> to choose another (see --list-devices)"));
         CHECK(!has(n, "function"));
         const std::string ne = restrictionNote(h2, {1}, "");  // chosen with --device: no automatic reason
-        CHECK(has(ne, "GPU pci:71:0 (AMD Radeon AI PRO R9700) selected") && has(ne, "1 other GPU"));
+        CHECK_EQ(ne, std::string("GPU pci:71:0 (AMD Radeon AI PRO R9700): chosen with --device or WHIRL_DEVICE; use --device "
+                                 "pci:<bus>:<device> to choose another (see --list-devices)"));
         // the list marks the same default and shows the dedicated memory of the iGPU
         CHECK(has(listingText(h2, defaultGpu(h2).index), "[integrated: memory shared with the CPU] [default]"));
         // the probe carries the usable memory
@@ -3569,7 +3570,7 @@ void testGpuSelect() {
         const std::string l = listingText(four, 0);
         CHECK(has(l, "uuid " + four[0].uuid));
         CHECK(!has(listingText(nouuid, 1), "uuid"));
-        CHECK(has(restrictionNote(four, {1}, ""), "uuid " + four[1].uuid));
+        CHECK(!has(restrictionNote(four, {1}, ""), "uuid"));  // the startup line stays short (owner 2026-10-23)
     }
     // the GPU lock is keyed by the PCI address: index 0 after the restriction is not "GPU 0"
     {
@@ -3613,21 +3614,23 @@ void testGpuSelect() {
         CHECK(parseRecords("").empty());
     }
 
-    // the log line names the GPU used (name, index, pci), how many are hidden, and how to change it
+    // the log line names the GPU used (name, pci) and how to choose another; owner 2026-10-23: usage only, the cause
+    // is not public (no "hidden from HIP", no "pinned host memory", no HIP_VISIBLE_DEVICES)
     {
         const std::string n = restrictionNote(two, {1}, "");
-        CHECK(has(n, "device 1") && has(n, kR97) && has(n, "pci:99:0") && !has(n, "pci:99:0.") && has(n, "PCI bus 99, device 0"));
-        CHECK(has(n, "1 other GPU") && has(n, k8060) && has(n, "hidden"));
-        CHECK(has(n, "--device"));
+        CHECK(has(n, kR97) && has(n, "GPU pci:99:0 (") && !has(n, "pci:99:0."));
+        CHECK(has(n, "use --device pci:<bus>:<device> to choose another (see --list-devices)"));
         const std::string n4 = restrictionNote(four, {2}, "");
-        CHECK(has(n4, "3 other GPUs"));
+        for (const std::string& t : {n, n4}) {
+            CHECK(!has(t, "hidden") && !has(t, "HIP") && !has(t, "pinned") && !has(t, "other GPU"));
+        }
         // must not look like a HIP error to the log scanners (golden.ps1 / kvram719_tier.ps1 patterns)
         CHECK(!std::regex_search(
             n + n4, std::regex("hipError|hip.*\\b719\\b|\\b719\\b.*hip|\\| failed:|PAL failed|Failed PAL|result:-5|unspecified launch",
                                std::regex::icase)));
         const std::string one = restrictionNote(igpu_only, {0}, "");
         CHECK(!has(one, "hidden"));  // nothing to hide
-        CHECK(has(one, k8060));
+        CHECK(has(one, k8060) && has(one, "the only GPU"));
         const std::string u = userVarNote("HIP_VISIBLE_DEVICES", "1");
         CHECK(has(u, "HIP_VISIBLE_DEVICES=1") && has(u, "visible"));
     }
