@@ -361,10 +361,25 @@ foreach ($mk in $Models) {
                     }
                     $gargs += @("--mmproj", $mmprojPath[$mk], "--images", $goldImages)
                 }
+                Remove-Item -Recurse -Force $gw -ErrorAction SilentlyContinue  # a work dir kept by an earlier failing run
                 $raw = & $GateExe @gargs 2>&1 | ForEach-Object { "$_" }
                 $rc = $LASTEXITCODE
                 if ($rc -eq 0 -and -not ($raw -match "\(ALL PASS\)")) { $rc = 9 }
-                Remove-Item -Recurse -Force $gw -ErrorAction SilentlyContinue
+                # the GPU the server ran on (device line of its log), so a log shows which card was measured (s8-719)
+                $devl = @($raw | Where-Object { $_ -match "\bdevice \d+: .*\(gfx\d+\)" } | Select-Object -First 1)
+                if ($devl.Count -eq 0 -and (Test-Path $gw)) {
+                    $devl = @(Get-ChildItem $gw -Recurse -File -Include *.log, *.txt -ErrorAction SilentlyContinue |
+                        Select-String -Pattern "\bdevice \d+: .*\(gfx\d+\)" -List -ErrorAction SilentlyContinue |
+                        Select-Object -First 1 | ForEach-Object { $_.Line })
+                }
+                if ($devl.Count -gt 0) { Write-Host "      $name server $(($devl[0] -replace '^.*?(device \d+:)', '$1').Trim())" }
+                # s8-719: a failing server case keeps its work dir (server logs) for the diagnosis; a passing one is removed
+                if ($rc -ne 0 -or ($raw -match "hipError")) {
+                    $raw | Where-Object { $_ -notlike "G *" } | Out-File -FilePath (Join-Path $Out "$mk`_${mode}_server.diag.txt") -Encoding utf8
+                    Write-Host "      $name server work dir kept: $gw"
+                } else {
+                    Remove-Item -Recurse -Force $gw -ErrorAction SilentlyContinue
+                }
             } else {
                 $raw = & $Exe golden $mp --suite $suite "--$mode" --device $Arch 2>&1 | ForEach-Object { "$_" }
                 $rc = $LASTEXITCODE
