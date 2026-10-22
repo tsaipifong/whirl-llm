@@ -414,6 +414,7 @@ int serveMain(int argc, char** argv, const char* program) {
     const bool hip_cache_set = !hip_cache_user && envOn("HIP_CACHE_LIMIT", true);
     if (hip_cache_set) _putenv_s("GPU_RESOURCE_CACHE_SIZE", "256");
     Options opt;
+    bool device_given = false;  // --device / -dev seen
     for (std::size_t i = 0; i < args.size(); ++i) {
         const std::string arg = args[i];
         std::string mspec;
@@ -464,8 +465,15 @@ int serveMain(int argc, char** argv, const char* program) {
                 die("invalid --kv-ssd-mode " + *vm + " (expected always, shutdown or off)");
             opt.kv_ssd_mode = *vm;
         }
-        else if (auto v12 = argValue(args, i, "--device")) opt.device = *v12;
-        else if (auto v12b = argValue(args, i, "-dev")) opt.device = *v12b;  // llama.cpp's short name
+        else if (auto v12 = argValue(args, i, "--device")) {
+            if (device_given) die("give --device once (a comma list: --device a,b)");  // same rule as whirl
+            device_given = true;
+            opt.device = *v12;
+        } else if (auto v12b = argValue(args, i, "-dev")) {  // llama.cpp's short name
+            if (device_given) die("give --device once (a comma list: --device a,b)");
+            device_given = true;
+            opt.device = *v12b;
+        }
         else if (auto v13 = argValue(args, i, "--mmproj")) opt.mmproj = *v13;
         else if (auto v14 = argValue(args, i, "--vis-idle-s")) opt.vis_idle_s = parseNum<std::uint32_t>(*v14, "--vis-idle-s");
         else if (auto v15 = argValue(args, i, "--vis-mode")) {

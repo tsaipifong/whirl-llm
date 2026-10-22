@@ -168,10 +168,11 @@ inline constexpr const char* k_probe_arg = "--whirl-gpu-probe";
 int probeMain();
 
 // How long the parent waits for the probe child before it kills it and keeps every GPU visible.
-inline constexpr unsigned k_probe_timeout_ms = 60000;
+inline constexpr unsigned k_probe_timeout_ms = 10000;  // the probe itself takes about 0.1 s
 
 // Runs one helper process (the probe) and captures its stdout; stdin and stderr are NUL. Never waits longer
 // than timeout_ms (then the child is terminated). out is empty unless the child exited with code 0.
+// The child inherits only the pipe and NUL, and runs with SEM_NOGPFAULTERRORBOX (no crash dialog).
 struct ChildRun {
     bool started = false;
     bool timed_out = false;

@@ -89,20 +89,39 @@ ChildRun runChild(const std::wstring& exe, const std::wstring& cmdline, unsigned
     }
     SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);
     HANDLE nul = CreateFileW(L"NUL", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_EXISTING, 0, nullptr);
-    STARTUPINFOW si{};
-    si.cb = sizeof(si);
-    si.dwFlags = STARTF_USESTDHANDLES;
-    si.hStdInput = nul;   // never interactive
-    si.hStdOutput = wr;
-    si.hStdError = nul;   // AMD_LOG_LEVEL output of the child is not needed
+    STARTUPINFOEXW si{};
+    si.StartupInfo.cb = sizeof(si);
+    si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    si.StartupInfo.hStdInput = nul;   // never interactive
+    si.StartupInfo.hStdOutput = wr;
+    si.StartupInfo.hStdError = nul;   // AMD_LOG_LEVEL output of the child is not needed
+    // the child inherits exactly the pipe and NUL, not every inheritable handle of the parent (log file, socket)
+    HANDLE inherit[2] = {wr, nul};
+    const DWORD n_inherit = nul != INVALID_HANDLE_VALUE ? 2 : 1;
+    SIZE_T attr_size = 0;
+    InitializeProcThreadAttributeList(nullptr, 1, 0, &attr_size);
+    std::string attr_buf(attr_size, '\0');
+    auto* attrs = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attr_buf.data());
+    bool have_list = attr_size > 0 && InitializeProcThreadAttributeList(attrs, 1, 0, &attr_size) &&
+                     UpdateProcThreadAttribute(attrs, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherit, n_inherit * sizeof(HANDLE), nullptr, nullptr);
+    si.lpAttributeList = have_list ? attrs : nullptr;
     PROCESS_INFORMATION pi{};
     std::wstring cmd = cmdline;
-    const BOOL ok = CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
+    // no Windows error dialog for a crash in the hidden helper: the child inherits this error mode
+    const UINT old_mode = GetErrorMode();
+    SetErrorMode(old_mode | SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
+    const BOOL ok = have_list ? CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, TRUE,
+                                               CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT, nullptr, nullptr, &si.StartupInfo, &pi)
+                              : FALSE;
+    const DWORD create_err = GetLastError();
+    SetErrorMode(old_mode);
+    if (have_list) DeleteProcThreadAttributeList(attrs);
     CloseHandle(wr);
     if (nul != INVALID_HANDLE_VALUE) CloseHandle(nul);
     if (!ok) {
         CloseHandle(rd);
-        r.why = std::format("the helper process did not start (error {})", GetLastError());
+        r.why = have_list ? std::format("the helper process did not start (error {})", create_err)
+                          : std::string("the helper process could not be limited to its own handles");
         return r;
     }
     r.started = true;
@@ -192,6 +211,7 @@ std::vector<GpuRecord> enumerate() {
 }
 
 int probeMain() {
+    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);  // a crash here never shows a dialog
     if (!hip::runtime::load().ok) return 3;
     try {
         for (const GpuRecord& r : enumerate()) std::printf("%s\n", formatRecord(r).c_str());
