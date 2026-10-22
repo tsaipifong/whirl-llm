@@ -20,6 +20,8 @@
 #include "whirl/startup_fit.h"
 #include "whirl/mem_governor.h"
 #include "whirl/value_scope.h"
+#include "whirl/kernels_abi.h"
+#include "hip/launch_log.h"
 #if WHIRL_TEST_DLL_DEPS
 #include "release/dll_deps.h"
 #endif
@@ -34,6 +36,7 @@
 #include <stdexcept>
 #include <functional>
 #include <map>
+#include <new>
 #include <string>
 #include <vector>
 
@@ -1690,6 +1693,47 @@ void testSpecSample() {
 
 }  // namespace specsample_test
 
+// REVIEW-ARCH4 P3-2 / arch6e: the launch-log argument digest must be the same for the same argument values,
+// whatever memory the argument struct was built in (two runs of one build differed: the GEMV launches' GvArgs
+// were built on stack memory that held different bytes), and must still change when an argument changes.
+void testLaunchDigest() {
+    using whirl::kernels::GvArgs;
+    auto build = [](unsigned char fill, unsigned char* buf) {
+        std::memset(buf, fill, sizeof(GvArgs));  // what the stack held before (differs from run to run)
+        GvArgs* g = new (buf) GvArgs;            // as forward.cpp's gemvKernels builds it: `GvArgs g;` + fields
+        g->w[0] = 0x358f40000;
+        g->w[1] = 0x359f40000;
+        g->y[0] = 0x7dddd0000;
+        g->y[1] = 0x7ddde0000;
+        g->rb[0] = g->rb[1] = 0x440;
+        g->n[0] = g->n[1] = 512;
+        g->b1 = 64;
+        return g;
+    };
+    alignas(GvArgs) unsigned char a[sizeof(GvArgs)], b[sizeof(GvArgs)];
+    GvArgs* ga = build(0xAA, a);
+    GvArgs* gb = build(0x55, b);
+    auto digest = [](const GvArgs* g) {
+        std::int32_t ncols = 2048;  // the scalar arguments that follow it in the real launch
+        void* params[2] = {const_cast<GvArgs*>(g), &ncols};
+        const std::uint32_t sizes[2] = {sizeof(GvArgs), sizeof(ncols)};
+        return whirl::hip::launchlog::argDigest(params, sizes, 2);
+    };
+    const std::uint64_t da = digest(ga), db = digest(gb);
+    CHECK_EQ(da, db);  // same argument values -> same digest
+    CHECK(std::memcmp(a, b, sizeof(GvArgs)) == 0);  // ... because the struct carries no undefined bytes
+    // still sensitive to a real argument change (one field of one matrix)
+    GvArgs* gc = build(0xAA, b);
+    gc->n[1] = 513;
+    CHECK(digest(gc) != da);
+    gc = build(0xAA, b);
+    gc->b1 = 65;
+    CHECK(digest(gc) != da);
+    gc = build(0xAA, b);
+    gc->b2 = 96;
+    CHECK(digest(gc) != da);
+}
+
 // OVH-C1: the MTP draft window (Model::attn_win) must be restored when the draft attention throws,
 // otherwise the next request's trunk attention would inherit the window and drop keys.
 void testValueScope() {
@@ -2933,6 +2977,7 @@ int main() {
     testKvChoice();
     testKernelFetchBounds();
     testValueScope();
+    testLaunchDigest();
     specsample_test::testSpecSample();
     testDflashPolicy();
     testLocalMemTaken();
