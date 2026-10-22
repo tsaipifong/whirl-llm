@@ -246,7 +246,7 @@ const Restriction& restrictToSelected(std::string_view spec_arg) {
             return;
         }
         if (const char* off = std::getenv("WHIRL_GPU_RESTRICT"); off && off[0] == '0') {
-            g_r.note = "GPU: WHIRL_GPU_RESTRICT=0: every GPU stays visible to the GPU runtime (pinned host memory is counted on each)";
+            g_r.note = "GPU: WHIRL_GPU_RESTRICT=0: every GPU stays visible to the GPU runtime";
             return;
         }
         std::string why;

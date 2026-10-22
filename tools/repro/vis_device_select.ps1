@@ -45,7 +45,7 @@ $bad = @()
 foreach ($c in $cases) {
     if (-not (Test-Path $c.exe)) { $bad += "$($c.n) (exe missing)"; continue }
     $r = Run $c.exe $c.a $c.env
-    $ok = if ($c.want) { $r.code -eq 0 -and $r.text -match ("GPU " + [regex]::Escape($c.want) + " \(.+\) selected") } else { $r.code -ne 0 -and $r.code -ne -1 -and $r.text -match "only one GPU" }
+    $ok = if ($c.want) { $r.code -eq 0 -and $r.text -match ("GPU " + [regex]::Escape($c.want) + " \(.+?\): ") } else { $r.code -ne 0 -and $r.code -ne -1 -and $r.text -match "only one GPU" }
     Write-Host ("  {0}: exit {1} {2} ; {3}" -f $c.n, $r.code, $(if ($ok) { "ok" } else { "FAIL" }), ($r.text.Substring(0, [Math]::Min(400, $r.text.Length))))
     if (-not $ok) { $bad += $c.n }
 }

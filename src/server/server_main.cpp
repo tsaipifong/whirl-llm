@@ -1326,8 +1326,7 @@ int serveMain(int argc, char** argv, const char* program) {
                                    g.nonlocal_budget > 0 ? "non-local budget" : "shared GPU memory", own >> 20);
             }
             pinned_room = startfit::pinnedRoomMb(pst);
-            logI("kv tier: pinned memory now: {} HIP GPU(s) [{}] (a pinned buffer counts on each; a non-local budget is shared "
-                 "by them); all programs {} MiB (largest adapter) of half the RAM ({} MiB) -> room for the RAM tier {} "
+            logI("kv tier: pinned memory now: {} HIP GPU(s) [{}]; all programs {} MiB (largest adapter) of half the RAM ({} MiB) -> room for the RAM tier {} "
                  "(reserves {} / {} MiB)",
                  pst.gpus.size(), per, pst.pinned_max >> 20, pst.total_phys >> 21,
                  pinned_room == startfit::pinned_room_unknown ? std::string("unknown") : std::format("{} MiB", pinned_room),

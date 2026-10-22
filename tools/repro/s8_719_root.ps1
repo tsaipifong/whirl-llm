@@ -17,7 +17,7 @@
 #     half-of-available-RAM adjustment ("more than half of the N MiB of RAM available now") is allowed and is
 #     reported, and then the size used must equal its "-> N MiB"; without any adjustment the size used = -RamMb;
 #   - the "kv tier: pinned memory now:" line says "1 HIP GPU(s)";
-#   - the startup line "GPU pci:B:D (NAME) selected" names -ExpectGpu (when given);
+#   - the startup line "GPU pci:B:D (NAME): <why>" names -ExpectGpu (when given);
 #   - no other adapter's "GPU Adapter Memory Shared Usage" rose by more than 1024 MiB while the server was up.
 # The last line before the verdict is "s8_719_root: REPORT key=value ..." (requested, used, rule, available RAM at
 # start, other-adapter rise, 1-HIP-GPU line, HTTP status, hipError count, selected GPU). FAIL: exit 1. Setup: exit 2.
@@ -94,9 +94,9 @@ if ($adjHalf.Count -and $adjHalf[-1].Line -match "half of the (\d+) MiB of RAM a
 $rule = if ($adjPinned.Count) { "pinned-room(719-limit)" } elseif ($adjHalf.Count) { "half-of-available-RAM" } elseif ($adjAll.Count) { "other" } else { "none" }
 $pinLine = @($txt | Select-String -Pattern "kv tier: pinned memory now: (\d+) HIP GPU\(s\)")
 $hip1 = $pinLine.Count -gt 0 -and $pinLine[-1].Line -match "pinned memory now: 1 HIP GPU\(s\)"
-$gpu = @($txt | Select-String -Pattern " I GPU pci:\d+:\d+ \(.+\) selected")
+$gpu = @($txt | Select-String -Pattern " I GPU pci:\d+:\d+ \(.+?\): ")
 $gpuOk = $gpu.Count -gt 0 -and (-not $ExpectGpu -or $gpu[0].Line -match [regex]::Escape("GPU $ExpectGpu "))
-$gpuName = if ($gpu.Count -and $gpu[0].Line -match "GPU (pci:\d+:\d+ \(.+\)) selected") { $Matches[1] } else { "none" }
+$gpuName = if ($gpu.Count -and $gpu[0].Line -match "GPU (pci:\d+:\d+ \(.+?\)): ") { $Matches[1] } else { "none" }
 @($txt | Select-String -Pattern "I GPU |I device |kv tier: RAM tier|adjusted: |kv tier: pinned memory now") | ForEach-Object { Write-Host "  log: $($_.Line)" }
 @($hipErr + $failed) | Select-Object -First 3 | ForEach-Object { Write-Host "  log: $($_.Line)" }
 $other = if ($rise.Count -ge 2) { $rise[1].rise } else { 0 }
@@ -108,7 +108,7 @@ if ($adjPinned.Count) { $why += "RAM tier cut by the pinned-room limit" }
 if ($adjAll.Count -gt ($adjPinned.Count + $adjHalf.Count)) { $why += "an adjustment of another kind" }
 if ($used -ne $expect) { $why += "RAM tier size $used MiB, expected $expect MiB" }
 if (-not $hip1) { $why += "no 'pinned memory now: 1 HIP GPU(s)' line" }
-if (-not $gpuOk) { $why += "no 'GPU pci:... selected' line$(if ($ExpectGpu) { " for $ExpectGpu" })" }
+if (-not $gpuOk) { $why += "no 'GPU pci:B:D (NAME): ...' line$(if ($ExpectGpu) { " for $ExpectGpu" })" }
 if ($other -gt 1024) { $why += "another adapter's shared usage rose $other MiB" }
 Write-Host ("s8_719_root: REPORT requested={0} used={1} rule={2} avail_start_mib={3} avail_log_mib={4} other_rise_mib={5} one_hip_gpu={6} http={7} hiperror={8} gpu={9}" -f `
     $RamMb, $used, $rule, $availStart, $(if ($availLog) { $availLog } else { "-" }), $other, $(if ($hip1) { "yes" } else { "no" }), $http, $hipErr.Count, ($gpuName -replace ' ', '_'))

@@ -348,27 +348,13 @@ std::vector<GpuRecord> parseRecords(std::string_view text) {
     return out;
 }
 
+// the startup line: which GPU and how to choose another - usage only (owner 2026-10-23: the cause is not public)
 std::string restrictionNote(const std::vector<GpuRecord>& all, const std::vector<int>& selected, const std::string& reason) {
-    std::string used, hidden;
-    int n_hidden = 0;
-    for (int s : selected) {
-        const GpuRecord& g = all[s];
-        used += std::format("{}GPU pci:{} ({}) selected{}; device {} at {}{}", used.empty() ? "" : "; ", pciId(all, g), g.name,
-                            reason.empty() ? std::string() : ": " + reason, g.index, pciIdLong(all, g),
-                            g.uuid.empty() ? std::string() : ", uuid " + g.uuid);
-    }
-    for (int i = 0; i < static_cast<int>(all.size()); ++i) {
-        bool sel = false;
-        for (int s : selected) sel = sel || s == i;
-        if (sel) continue;
-        ++n_hidden;
-        hidden += std::format("{}device {} {} pci:{}", hidden.empty() ? "" : ", ", all[i].index, all[i].name, pciId(all, all[i]));
-    }
-    if (n_hidden == 0) return used + " (the only GPU)";
-    return std::format(
-        "{}; {} other GPU{} ({}) hidden from HIP for this process (HIP_VISIBLE_DEVICES={}), so pinned host memory is counted "
-        "on this GPU only; use --device to change (whirl devices lists the GPUs)",
-        used, n_hidden, n_hidden == 1 ? "" : "s", hidden, visibleDevicesValue(selected));
+    std::string used;
+    for (int s : selected) used += std::format("{}GPU pci:{} ({})", used.empty() ? "" : ", ", pciId(all, all[s]), all[s].name);
+    if (all.size() <= selected.size()) return used + ": the only GPU";
+    return std::format("{}: {}; use --device pci:<bus>:<device> to choose another (see --list-devices)", used,
+                       reason.empty() ? std::string("chosen with --device or WHIRL_DEVICE") : reason);
 }
 
 std::string userVarNote(const std::string& var, const std::string& value) {
