@@ -151,13 +151,14 @@ For long documents give a slot a longer context, for example `--ctx-per-slot 262
 
 ### Choosing the GPU
 
-Without `--device`, WHIRL uses the GPU with the most GPU memory (integrated GPUs count their dedicated memory; if
-equal, the first one in `--list-devices`); the startup log shows which. To choose another, give `--device
-pci:<bus>:<device>` (also `-dev`, or `WHIRL_DEVICE`) to `whirl` or `whirl-server`, with the numbers Task Manager >
-Performance > GPU > Physical location shows.
+- Without `--device`, WHIRL uses the GPU with the most GPU memory (integrated GPUs count their dedicated memory; if
+  equal, the first one in `--list-devices`); the startup log shows which GPU it uses.
+- To use another GPU, add `--device pci:<bus>:<device>`; the numbers are in Task Manager > Performance > (select the
+  GPU) > Physical location.
+- Example: Task Manager shows Physical location "PCI bus 71, device 0, function 0" →
+  `whirl-server.exe <model.gguf> --device pci:71:0`
 
-Example: Task Manager shows Physical location: PCI bus 71, device 0, function 0 → start with
-`whirl-server.exe <model.gguf> --device pci:71:0`
+`-dev` and `WHIRL_DEVICE` do the same as `--device`, for `whirl` and `whirl-server`.
 
 `whirl devices` (or `--list-devices`) prints the same `pci:` numbers for every GPU. An index, `r9700`, `8060s` or a
 part of the name also work when only one GPU matches. An external USB4 / Thunderbolt GPU gets its bus number when it

@@ -151,12 +151,12 @@ server 在 `http://127.0.0.1:8080/v1` 提供 OpenAI API（`/v1/chat/completions`
 
 ### 選擇 GPU
 
-沒有指定 `--device` 時，WHIRL 使用 GPU 記憶體最大的那張（內顯以專用記憶體計算；一樣大時用 `--list-devices`
-列出的第一張），啟動記錄會寫出用哪張。要改用其他卡，在 `whirl` 或 `whirl-server` 加 `--device pci:<匯流排>:<裝置>`
-（或 `-dev`、環境變數 `WHIRL_DEVICE`），數字看工作管理員 > 效能 > GPU > 實體位置。
+- 沒加 `--device` 時，WHIRL 使用 GPU 記憶體最大的那張（內顯以專用記憶體計算；一樣大時，選 `--list-devices`
+  列出的第一張），啟動紀錄會寫出用的是哪張。
+- 要改用別張，請加 `--device pci:匯流排:裝置`，號碼可在工作管理員 →「效能」→ 選顯示卡 →「實體位置」查到。
+- 例如：工作管理員顯示實體位置為「PCI 匯流排 71，裝置 0，函數 0」→ `whirl-server.exe <模型.gguf> --device pci:71:0`
 
-例如：工作管理員顯示實體位置為「PCI 匯流排 71，裝置 0，函數 0」→ 啟動時加 --device pci:71:0，例如
-`whirl-server.exe <模型.gguf> --device pci:71:0`
+`-dev` 和環境變數 `WHIRL_DEVICE` 的作用與 `--device` 相同（`whirl` 與 `whirl-server` 都適用）。
 
 `whirl devices`（或 `--list-devices`）會列出每張卡的 `pci:` 編號。只有一張卡符合時，也可以用編號、`r9700`、
 `8060s` 或名稱的一部分。USB4／Thunderbolt 外接顯卡在接上時才分配匯流排編號，重新插拔後請再看一次工作管理員。
