@@ -37,6 +37,9 @@ $bad = @()
 foreach ($r in $runs) {
     $o = @(& pwsh -NoProfile -File $repro -Exe $srv -Model $Model -RamMb 8192 -Port $Port -Work (Join-Path $Work $r.n) -ExpectGpu $pci @($r.a) 2>&1 | ForEach-Object { "$_" })
     $rc = $LASTEXITCODE
+    # the release gate's WDDM check reads server_*.log under the step's work dir (and keeps them): the repro writes server.log
+    $sl = Join-Path (Join-Path $Work $r.n) "server.log"
+    if (Test-Path $sl) { Copy-Item $sl (Join-Path (Join-Path $Work $r.n) "server_$($r.n).log") -Force }
     $o | ForEach-Object { Write-Host "  [$($r.n)] $_" }
     if ($rc -ne 0) { $bad += "$($r.n) (exit $rc)" }
 }
