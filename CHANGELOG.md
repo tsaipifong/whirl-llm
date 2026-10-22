@@ -7,27 +7,13 @@ All notable changes to WHIRL are listed here. Versions follow `project(whirl VER
 
 ### Fixed
 
-- Radeon 8060S (or any GPU) with a second AMD GPU in the machine, for example an R9700 eGPU: a server with a RAM tier of
-  8 GiB failed every request with GPU error 719 (hipError 719; 0.2.2.2 is affected). The GPU runtime counted every
-  pinned host buffer on every GPU it could see, so the second GPU's limit was reached. whirl and whirl-server now make
-  the GPU runtime see only the GPU they use (they set `HIP_VISIBLE_DEVICES` for their own process before the runtime
-  starts, and check that the GPU left is the chosen one by its PCI bus and device number). The first log line says
-  which GPU is used and how many were hidden. A `HIP_VISIBLE_DEVICES` you set yourself is left as it is.
-  `WHIRL_GPU_RESTRICT=0` keeps every GPU visible. The RAM tier is still lowered when the pinned memory would not fit.
+- Fixed hipError 719 on systems with more than one AMD GPU.
 
-### Changed
-
-- **Default GPU**: without `--device`, WHIRL now uses the GPU with the most GPU memory (a Radeon 8060S counts its
-  dedicated memory). On a Ryzen AI Max machine with a large carve-out and an R9700 eGPU, the default is now the 8060S
-  (it was the R9700). Use `--device pci:<bus>:<device>` to choose.
-- `--device` (also `-dev`, `WHIRL_DEVICE`) takes `pci:<bus>:<device>`: open Task Manager > Performance, click the GPU,
-  read Physical location ("PCI bus 71, device 0") and use `--device pci:71:0`. This tells identical cards apart and
-  stays the same when other GPUs are added or removed (an external USB4 / Thunderbolt GPU can get another bus number
-  after a replug). An index, `r9700`, `8060s` or a part of the name still work, but a name that matches more than one
-  GPU is now an error listing them (before, the first match was used; `r9700` also matched an RX 9070 XT).
-  `--device a,b` is refused: one GPU per model in this version.
-- `whirl devices` and the new `--list-devices` (whirl and whirl-server) show `pci:<bus>:<device>` for every GPU.
-- The one-process-per-GPU lock is keyed by the GPU's PCI address instead of its index.
+  Choosing the GPU: without `--device`, WHIRL uses the GPU with the most GPU memory (integrated GPUs count their
+  dedicated memory; if equal, the first one in `--list-devices`); the startup log shows which. To choose another:
+  `--device pci:<bus>:<device>` (Task Manager > Performance > GPU > Physical location).
+  Example: Task Manager shows Physical location: PCI bus 71, device 0, function 0 → start with
+  `whirl-server.exe <model.gguf> --device pci:71:0`
 
 ## 0.2.2.2 — 2026-10-22 (bug fixes)
 

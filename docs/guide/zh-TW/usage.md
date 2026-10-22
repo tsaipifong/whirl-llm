@@ -131,7 +131,7 @@ decode 速度；開 MTP 時另列驗證回合數與草稿接受率。
 | `--out FILE` | 把最後一個提示位置的 logits（f32，每個詞彙一個值）寫進 FILE；會停用 MTP |
 | `--mmproj MMPROJ.gguf` | 視覺編碼器（Qwen3-VL 形式的 mmproj，F16 / BF16），`--image` 需要它 |
 | `--image IMAGE` | 放在提示文字前面的圖片；可重複指定 |
-| `--device SPEC`、`-dev SPEC` | GPU（也可用 `WHIRL_DEVICE`）：`pci:匯流排:裝置`，即工作管理員 > 效能 > GPU > 實體位置（「PCI 匯流排 71，裝置 0」= `pci:71:0`，可分辨同型號的卡）、`whirl devices` 的編號、`r9700`、`8060s` 或名稱的一部分（符合多張時拒絕）。預設：GPU 記憶體最大的卡（8060S 算專用記憶體）。這個版本一個模型只用一張卡，其他卡對這個程式隱藏 |
+| `--device SPEC`、`-dev SPEC` | GPU（也可用 `WHIRL_DEVICE`）：`pci:匯流排:裝置`，即工作管理員 > 效能 > GPU > 實體位置（「PCI 匯流排 71，裝置 0」= `pci:71:0`，可分辨同型號的卡）、`whirl devices` 的編號、`r9700`、`8060s` 或名稱的一部分（符合多張時拒絕）。預設：GPU 記憶體最大的卡（8060S 算專用記憶體）。這個版本一個模型只用一張卡 |
 | `--precise` / `--balance` / `--fast` / `--mode M` | 數值模式（預設 balance；也可用 `WHIRL_MODE`）；`--balance=項目` 只選部分項目。見[數值模式](#modes) |
 | `-h`、`--help` | 說明 |
 

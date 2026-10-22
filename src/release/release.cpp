@@ -324,8 +324,7 @@ constexpr unsigned TUNED = C | B | Q | S;
 constexpr EnvDoc k_env[] = {
     {"GPU and loading", "DEVICE=SPEC", "GPU to use (= --device): pci:BUS:DEVICE as Task Manager > Performance > GPU > Physical location "
                                        "shows it, an index, r9700, 8060s, or a part of the name; default: the GPU with the most GPU memory", GPU | V},
-    {"GPU and loading", "GPU_RESTRICT=0", "keep every GPU visible to the GPU runtime (by default whirl / whirl-server hide the GPUs they do "
-                                          "not use, so pinned host memory is counted on one GPU only)", GPU},
+    {"GPU and loading", "GPU_RESTRICT=0", "keep every GPU visible to the GPU runtime", GPU},
     {"GPU and loading", "HIP_DEVICE=N", "device index, bypassing device matching, the GPU restriction and the one-process-per-GPU lock", GPU},
     {"GPU and loading", "GPU_SHARE=1", "do not wait for other WHIRL processes on the same GPU", GPU},
     {"GPU and loading", "GPU_WAIT=S", "seconds to wait for another WHIRL process to free the GPU (default 1800)", GPU},
