@@ -184,6 +184,20 @@ AddStep "srv_tier_verify" $true (GateCmd $SW "tier" "balance" ($ram8s + @("--ser
 # one after the other); the other GPU's gate is a separate release_gate invocation. One GPU: SKIP.
 AddStep "srv_gpu_select" $true @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\gates\gpu_select_check.ps1"), "-Build", $Build, "-Model", $SW,
                                  "-Device", $Device, "-Port", "$($port + 3)", "-Work", "@WORK@") { param($o, $c) $c -eq 0 -and ($o -match "(?m)^gpu select check: (ok|SKIP)") }
+# arch024-S14 (PLAN c-3) environment matrix on this gate's GPU (tools/gates/env_matrix.ps1; one server at a time, the
+# other GPU only enumerated): E1 one vs two GPUs visible x default / --device + another program's pinned memory;
+# E3 the other GPU hidden; E4 VRAM + pinned held by another program during server gate basic; E7 WHIRL_CKPT_HOST=1
+# (golden server + gpu_select_check). The CPU tables (E2 / E5 and the selection rows) are in cpu_device / cpu_server.
+# srv_* names: release_gate scans their server_*.log (wddm, owner). One GPU on the host: SKIP.
+$envRule = { param($o, $c) $c -eq 0 -and ($o -match "(?m)^env matrix: (ok|SKIP)") }
+function EnvCmd([string]$cell) {
+    return @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\gates\env_matrix.ps1"), "-Build", $Build, "-Model", $SW, "-Device", $Device,
+             "-Cells", $cell, "-Port", "$($port + 10)", "-Work", "@WORK@")
+}
+AddStep "srv_env_e1" $true (EnvCmd "E1") $envRule
+AddStep "srv_env_e3" $true (EnvCmd "E3") $envRule
+AddStep "srv_env_e4" $true (EnvCmd "E4") $envRule
+AddStep "srv_env_e7" $true @((EnvCmd "E7") + "-Golden") $envRule @{ WHIRL_GOLDEN_SWIFT = $SW; WHIRL_GOLDEN_MOE = $MX }
 
 if ($List) { $S | ForEach-Object { "{0,-22} {1}" -f $_.name, ($(if ($_.gpu) { "GPU" } else { "CPU" })) }; exit 0 }
 
