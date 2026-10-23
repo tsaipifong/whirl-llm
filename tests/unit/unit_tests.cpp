@@ -494,6 +494,11 @@ void testChat() {
     CHECK_EQ(render(chat::TemplateKind::a,
                     R"({"messages":[{"role":"system","content":"S"},{"role":"user","content":"q"}],"reasoning_effort":"medium"})"),
              std::string("<|im_start|>system\nS<|im_end|>\n<|im_start|>user\nq<|im_end|>\n<|im_start|>assistant\n<think>\n"));
+    // arch024-S11b P3: leading system messages are merged into one system block with one newline between them (the
+    // mutation that dropped the newline survived every CPU test and the prompt token pin: no pinned request had two)
+    CHECK_EQ(render(chat::TemplateKind::a,
+                    R"({"messages":[{"role":"system","content":"A"},{"role":"system","content":"B"},{"role":"user","content":"q"}],"reasoning_effort":"medium"})"),
+             std::string("<|im_start|>system\nA\nB<|im_end|>\n<|im_start|>user\nq<|im_end|>\n<|im_start|>assistant\n<think>\n"));
     CHECK(throws([&] { render(chat::TemplateKind::a, R"({"messages":[]})"); }));
     // reasoning effort: aliases, the OpenRouter-style "reasoning" object, unknown values
     {
