@@ -109,9 +109,11 @@ MockModel::MockModel(device::Backend& ops, const Tokenizer& tok, const MockConfi
     // KV pool
     pool_pages_ = mc.pool_tokens / kPage;
     const std::size_t n_arr = attn_layers_.size() + (mc.mtp ? 1 : 0);
+    xrow_ = mc.kv_extra_rows;
     for (std::size_t a = 0; a < n_arr; ++a) {
         kc_.push_back(ops_.malloc(static_cast<std::uint64_t>(pool_pages_) * kPage * kKRow));
         vc_.push_back(ops_.malloc(static_cast<std::uint64_t>(pool_pages_) * kPage * kVRow));
+        for (std::uint32_t r : xrow_) xc_.push_back(ops_.malloc(static_cast<std::uint64_t>(pool_pages_) * kPage * r));
     }
 }
 
@@ -125,6 +127,7 @@ MockModel::~MockModel() {
     }
     for (auto p : kc_) ops_.free(p);
     for (auto p : vc_) ops_.free(p);
+    for (auto p : xc_) ops_.free(p);
     ops_.free(logits_);
     ops_.free(hn_);
     ops_.streamDestroy(stream_);
@@ -134,13 +137,16 @@ bool MockModel::resizePool(std::uint32_t tokens) {
     if (fail_resize.exchange(false)) return false;
     for (auto p : kc_) ops_.free(p);
     for (auto p : vc_) ops_.free(p);
+    for (auto p : xc_) ops_.free(p);
     const std::size_t n_arr = kc_.size();
     kc_.clear();
     vc_.clear();
+    xc_.clear();
     pool_pages_ = (tokens + kPage - 1) / kPage;
     for (std::size_t a = 0; a < n_arr; ++a) {
         kc_.push_back(ops_.malloc(static_cast<std::uint64_t>(pool_pages_) * kPage * kKRow));
         vc_.push_back(ops_.malloc(static_cast<std::uint64_t>(pool_pages_) * kPage * kVRow));
+        for (std::uint32_t r : xrow_) xc_.push_back(ops_.malloc(static_cast<std::uint64_t>(pool_pages_) * kPage * r));
     }
     for (Seq& sq : seqs_) sq.ptab.assign(seq_pages_, -1);
     resizes_.fetch_add(1);
@@ -152,6 +158,7 @@ std::vector<server::KvArr> MockModel::kvArrays() const {
     for (std::size_t a = 0; a < kc_.size(); ++a) {
         out.push_back({kc_[a], kKRow});
         out.push_back({vc_[a], kVRow});
+        for (std::size_t j = 0; j < xrow_.size(); ++j) out.push_back({xc_[a * xrow_.size() + j], xrow_[j]});
     }
     return out;
 }

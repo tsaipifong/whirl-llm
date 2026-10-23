@@ -95,6 +95,18 @@ add_executable(whirl-page-bench
 target_include_directories(whirl-page-bench PRIVATE ${CMAKE_SOURCE_DIR}/tests/server)
 target_link_libraries(whirl-page-bench PRIVATE whirl_server_core whirl_device_null)
 
+# arch024 S0a: CPU pins (prompt tokens, engine memory / copy sequence), recorded on the B0 base (tests/pins)
+add_executable(whirl-pins
+  ${CMAKE_SOURCE_DIR}/tests/pins/pins.cpp
+  ${CMAKE_SOURCE_DIR}/tests/server/mock_backend.cpp
+  ${CMAKE_SOURCE_DIR}/tests/server/http_client.cpp
+  ${CMAKE_SOURCE_DIR}/src/model/spec.cpp)
+target_include_directories(whirl-pins PRIVATE ${CMAKE_SOURCE_DIR}/tests/server)
+target_link_libraries(whirl-pins PRIVATE whirl_server_core whirl_device_null)
+# arch024 S0a (PLAN v3 N3): startup sizing replay from a "startup inputs:" line (pure functions only)
+add_executable(whirl-startup-replay ${CMAKE_SOURCE_DIR}/tests/pins/startup_replay.cpp)
+target_link_libraries(whirl-startup-replay PRIVATE whirl_server_core)
+
 # end-to-end gates on a real model (GPU): drives whirl-server.exe or, as a
 # black box, the prototype exe; records outputs for cross-run comparison
 add_executable(whirl-server-gate

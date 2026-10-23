@@ -73,6 +73,10 @@ struct MockConfig {
     // restoreSeqSnapshot(s, j) rolls it back to snapshot set j. Sets are allocated lazily by a verify
     // that needs them (like Model::verifyBatchEnqueue) or up front by ensureSnapshots.
     bool replay = true;
+    // arch024-S0a (KvArr copy pin, PLAN M3 / A1 / C8): extra pool arrays per attention layer (and MTP) after K and V,
+    // with these row bytes, in kvArrays() order K, V, extra...: none = f16-shaped (K, V), two = q8h / q4-shaped (K, V,
+    // K scales, V scales). The mock never reads them; the engine copies, spills and restores them like the real ones.
+    std::vector<std::uint32_t> kv_extra_rows;
 };
 
 class MockModel final : public server::ServerModel {
@@ -217,6 +221,8 @@ private:
     std::uint32_t cur_ = 0;
     std::uint32_t pool_pages_ = 0, seq_pages_ = 0;
     std::vector<server::DevPtr> kc_, vc_;  // per attention layer + MTP (last)
+    std::vector<std::uint32_t> xrow_;      // MockConfig::kv_extra_rows
+    std::vector<server::DevPtr> xc_;       // extra arrays: [array * xrow_.size() + j]
     std::vector<std::uint32_t> attn_layers_;
     std::vector<std::uint32_t> text_ids_;
     std::uint32_t im_end_ = 0, eot_ = 0;

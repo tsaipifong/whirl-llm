@@ -1,0 +1,21 @@
+template a (8952 B)
+req user_en tokens 65 fnv 8ac842b36e818764 prompt_bytes 348 prompt_fnv 8b44a55550ac94ab
+req user_zh tokens 71 fnv c2332ea73ab79c14 prompt_bytes 376 prompt_fnv 2b132740eee54040
+req system tokens 71 fnv 7ab5cf4fee50522f prompt_bytes 370 prompt_fnv cdeab3d46921179d
+req think_off_kwargs tokens 16 fnv 300c66d4107e046e prompt_bytes 73 prompt_fnv ad20a1a1955d1b01
+req think_off_top tokens 16 fnv 300c66d4107e046e prompt_bytes 73 prompt_fnv ad20a1a1955d1b01
+req effort_low tokens 51 fnv c4f83b5693472ae4 prompt_bytes 247 prompt_fnv 462a8c1a2b089e41
+req effort_xhigh tokens 62 fnv fb167df327bb94c0 prompt_bytes 328 prompt_fnv 6adeb31e76541c3b
+req effort_none tokens 13 fnv 046473fc49a3099e prompt_bytes 74 prompt_fnv f0da6310c91e697f
+req reasoning_enabled tokens 53 fnv 1f0991cc001fed7f prompt_bytes 300 prompt_fnv 89bd47fbebead200
+req multi_turn tokens 83 fnv bc4c34517b6ffade prompt_bytes 446 prompt_fnv 2a33c72e4b418afd
+req multi_turn_reasoning tokens 84 fnv b93f7a7cd9c77fc7 prompt_bytes 429 prompt_fnv 4566e9e9b313b774
+req preserve_thinking tokens 82 fnv 621ebd24e86cc0f3 prompt_bytes 420 prompt_fnv 6cdd23bfef0f3b33
+req tools tokens 312 fnv 3a4ac93ea69eaa23 prompt_bytes 1417 prompt_fnv 135e73e423800a1e
+req tools_none tokens 59 fnv cabbce0a61e81f05 prompt_bytes 325 prompt_fnv 037e879f75b51dd5
+req tool_history tokens 356 fnv 70e599c3af3f86f3 prompt_bytes 1616 prompt_fnv 8278643ee85e05a8
+req content_parts tokens 58 fnv 4f14f37077ea6de9 prompt_bytes 314 prompt_fnv ef8d9fb97e04c162
+req vision_placeholder tokens 61 fnv 27c7b6eb2cda7230 prompt_bytes 360 prompt_fnv 90bdde315f2e054f
+req special_text tokens 63 fnv c0d30d467e1c6325 prompt_bytes 350 prompt_fnv c1bb26eeeeb9b353
+req long_code tokens 111 fnv e00c47fca3f37b26 prompt_bytes 472 prompt_fnv 2832077cfc1d10b0
+requests 19 errors 0

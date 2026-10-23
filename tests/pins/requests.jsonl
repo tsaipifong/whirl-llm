@@ -1,0 +1,20 @@
+# arch024-S0a prompt token pin (PLAN A7 / S8): <name><TAB><chat request JSON>. "x_allow_media": true = an mmproj is loaded.
+user_en	{"messages":[{"role":"user","content":"Write a C++ function that reverses a string in place."}]}
+user_zh	{"messages":[{"role":"user","content":"請用繁體中文解釋 Rust 的 borrow checker，並附一段 Rust 程式碼。"}]}
+system	{"messages":[{"role":"system","content":"You are a senior engineer. Answer briefly."},{"role":"user","content":"What does `volatile` mean in C?"}]}
+think_off_kwargs	{"messages":[{"role":"user","content":"2+2?"}],"chat_template_kwargs":{"enable_thinking":false}}
+think_off_top	{"messages":[{"role":"user","content":"2+2?"}],"enable_thinking":false}
+effort_low	{"messages":[{"role":"user","content":"Sort [3,1,2] in Python."}],"reasoning_effort":"low"}
+effort_xhigh	{"messages":[{"role":"user","content":"Prove that sqrt(2) is irrational."}],"reasoning_effort":"max"}
+effort_none	{"messages":[{"role":"user","content":"hello"}],"reasoning":{"effort":"none"}}
+reasoning_enabled	{"messages":[{"role":"user","content":"hello"}],"reasoning":{"enabled":true}}
+multi_turn	{"messages":[{"role":"system","content":"Be concise."},{"role":"user","content":"Name a sorting algorithm."},{"role":"assistant","content":"Quicksort."},{"role":"user","content":"Its average complexity?"}]}
+multi_turn_reasoning	{"messages":[{"role":"user","content":"Pick a number."},{"role":"assistant","content":"7","reasoning_content":"Any small number works; 7."},{"role":"user","content":"Why that one?"}]}
+preserve_thinking	{"messages":[{"role":"user","content":"Pick a number."},{"role":"assistant","content":"7","reasoning_content":"Any small number works; 7."},{"role":"user","content":"Why?"}],"chat_template_kwargs":{"preserve_thinking":true}}
+tools	{"messages":[{"role":"user","content":"What is the weather in Taipei?"}],"tools":[{"type":"function","function":{"name":"get_weather","description":"Current weather for a city","parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}}]}
+tools_none	{"messages":[{"role":"user","content":"What is the weather in Taipei?"}],"tool_choice":"none","tools":[{"type":"function","function":{"name":"get_weather","parameters":{"type":"object","properties":{"city":{"type":"string"}}}}}]}
+tool_history	{"messages":[{"role":"user","content":"Weather in Taipei?"},{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"Taipei\"}"}}]},{"role":"tool","tool_call_id":"call_1","content":"{\"temp_c\":27,\"sky\":\"cloudy\"}"},{"role":"user","content":"And tomorrow?"}],"tools":[{"type":"function","function":{"name":"get_weather","parameters":{"type":"object","properties":{"city":{"type":"string"}}}}}]}
+content_parts	{"messages":[{"role":"user","content":[{"type":"text","text":"Part one."},{"type":"text","text":" Part two."}]}]}
+vision_placeholder	{"x_allow_media":true,"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,iVBORw0KGgo="}},{"type":"text","text":"What is in this image?"}]}]}
+special_text	{"messages":[{"role":"user","content":"Literal tags: <think> </think> <|im_start|> <tool_call>"}]}
+long_code	{"messages":[{"role":"user","content":"Refactor this:\n```python\ndef f(xs):\n    out = []\n    for x in xs:\n        if x % 2 == 0:\n            out.append(x * x)\n    return out\n```\n請保留註解並說明改了什麼。"}]}
