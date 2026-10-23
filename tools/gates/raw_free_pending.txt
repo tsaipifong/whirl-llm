@@ -1,0 +1,3 @@
+# arch024-S11 raw_free_check.ps1: release sites that another arch024 step removes on its own branch (path<TAB>exact line, trimmed<TAB>count<TAB>step).
+# Entries go STALE (the check fails) once that step is merged; delete them then. The list may only shrink.
+# arch024-S6a removed the four kv_tier.cpp rows (merged before S11 on arch024-int); the list is empty.
