@@ -62,7 +62,8 @@ param(
     [string]$GateExe = "",    # suite server: whirl-server-gate.exe (default build\Release\whirl-server-gate.exe)
     [int]$Port = 8097,        # suite server: the port of the servers the gate starts
     [string]$Impact = "",     # check: run only the golden cases tools/impact/impact.py lists for a diff (A..B, or worktree)
-    [switch]$KeepServerWork   # suite server: keep each case's server work dir (server_*.log; *.wkv removed) also when it passes
+    [switch]$KeepServerWork,  # suite server: keep each case's server work dir (server_*.log; *.wkv removed) also when it passes
+    [string[]]$ServerEnv = @()  # suite server: extra NAME=VALUE for its servers (--server-env; e.g. WHIRL_CKPT_HOST=1, arch024-S14 E7)
 )
 # arch024-S0b: with WHIRL_LAUNCH_LOG=DIR the server case's servers write their launch tables to DIR\srv_<model>_<mode>
 # (passed with --server-env: whirl-server-gate gives its servers no WHIRL_* variable of its own environment except
@@ -364,6 +365,7 @@ foreach ($mk in $Models) {
                     New-Item -ItemType Directory -Force $sll | Out-Null
                     $gargs += @("--server-env", "WHIRL_LAUNCH_LOG=$sll")
                 }
+                foreach ($se in @($ServerEnv | ForEach-Object { $_ -split "," } | Where-Object { $_ })) { $gargs += @("--server-env", $se) }
                 if ($mmprojPath[$mk]) {
                     if (-not ((Test-Path $mmprojPath[$mk]) -and (Test-Path (Join-Path $goldImages "shapes.png")))) {
                         Write-Host "FAIL  $name suite server needs the mmproj ($($mmprojPath[$mk])) and $goldImages\shapes.png (vision case)"
