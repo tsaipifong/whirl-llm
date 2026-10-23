@@ -97,13 +97,10 @@ std::optional<RamFit> ramTierFit(std::uint64_t mb, std::uint64_t avail_phys_byte
 struct RamStatus {
     std::uint64_t total_phys = 0;    // ullTotalPhys (bytes; 0 = unknown)
     std::uint64_t avail_phys = 0;    // ullAvailPhys: standby + free + zero (bytes; 0 = unknown)
-    std::uint64_t commit_limit = 0;  // ullTotalPageFile: the commit limit (bytes; 0 = unknown)
-    std::uint64_t commit_avail = 0;  // ullAvailPageFile: what this process can still commit (bytes)
+    std::uint64_t modified = 0;      // PDH \Memory\Modified Page List Bytes (bytes; 0 = none or unknown)
 };
 struct RamForTier {
-    std::uint64_t avail = 0;        // bytes the sizing counts as available
-    bool from_commit = false;       // avail is the uncommitted RAM (Available was lower)
-    std::uint64_t uncommitted = 0;  // total_phys - commit charge - reserve (bytes; 0 = unknown or none)
+    std::uint64_t avail = 0;  // bytes the sizing counts as available
 };
 RamForTier ramForTier(const RamStatus& s);
 // The texts of the RAM tier's startup lines (server_main.cpp), from the fit. rf: ramTierFit's result (nullopt: unchanged or

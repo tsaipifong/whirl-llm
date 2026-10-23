@@ -2940,10 +2940,12 @@ void testVisionPoolReserve() {
 }
 
 // fix024-ramdip (S0b, scratch\s0b2\ram_avail_table.txt): the 8060S golden servers sampled 233-587 MiB of available RAM at
-// startup while 70 GB of model files were being written / read (Windows' Available leaves out the modified list and the
-// mapped file pages in working sets), and both host tiers stayed off for the whole server life; 15-25 s later the next
-// server saw 16-21 GB. A low Available made of file pages (not committed memory) must not turn the tiers off; a real
-// shortage (the RAM is committed) still must; and with enough Available nothing changes.
+// startup while 70 GB of GGUF were being written (llama-gguf-split --merge) and read, and both host tiers stayed off for
+// the whole server life; 15-25 s later the next server saw 16-21 GB. Windows' Available (standby + free + zero) leaves
+// out the modified list: pages written but not yet on disk, reusable as soon as the writer flushes them. A low
+// Available that is mostly modified pages must not turn the tiers off; a real shortage (Available low, little on the
+// modified list) still must; and with an empty modified list nothing changes. (The commit charge cannot tell these
+// apart: measured on this box 63948 MiB committed on 32407 MiB of RAM.)
 namespace ramdip {
 struct Out {
     std::uint64_t final_mb = 0;
@@ -2973,46 +2975,34 @@ void testRamDip() {
     using namespace whirl;
     constexpr std::uint64_t MiB = 1ull << 20, GiB = 1ull << 30;
     const std::uint64_t total = 33981464576ull;     // ram.total_phys of the 8060S / R9700 host (S0b logs)
-    const std::uint64_t limit = total + 8 * GiB;    // commit limit: RAM + an 8 GiB page file
-    const auto st = [&](std::uint64_t avail, std::uint64_t committed) {
+    const auto st = [&](std::uint64_t avail, std::uint64_t modified) {
         startfit::RamStatus s;
         s.total_phys = total;
         s.avail_phys = avail;
-        s.commit_limit = limit;
-        s.commit_avail = limit - committed;
+        s.modified = modified;
         return s;
     };
-    // 1. the S0b dip: 470 MiB available, 12 GiB committed -> golden's WHIRL_KV_RAM_MB=8192 keeps a RAM tier (and with it
-    //    the SSD tier), on the integrated GPU and on a discrete one; never more than half of the uncommitted RAM
+    // 1. the S0b dip: 470 MiB available while 16 GiB of written data waits on the modified list -> golden's
+    //    WHIRL_KV_RAM_MB=8192 keeps a RAM tier (and with it the SSD tier), on the integrated GPU and on a discrete one;
+    //    never more than half of what the two hold together (the half rule stays)
     for (const bool igpu : {true, false}) {
-        const ramdip::Out o = ramdip::decide(st(470 * MiB, 12 * GiB), 8192, igpu);
+        const ramdip::Out o = ramdip::decide(st(470 * MiB, 16 * GiB), 8192, igpu);
         CHECK(o.final_mb > 0);
         CHECK(o.final_mb <= 8192ull);
-        CHECK((o.final_mb << 20) <= (total - 12 * GiB) / 2);
+        CHECK((o.final_mb << 20) <= (470 * MiB + 16 * GiB) / 2);
     }
-    for (const std::uint64_t dip_mb : {233ull, 563ull, 587ull}) CHECK(ramdip::decide(st(dip_mb * MiB, 12 * GiB), 8192, true).final_mb > 0);
+    for (const std::uint64_t dip_mb : {233ull, 563ull, 587ull}) CHECK(ramdip::decide(st(dip_mb * MiB, 16 * GiB), 8192, true).final_mb > 0);
     //    the automatic size too (discrete GPU: 1/4 of RAM = 8 GiB, floor one entry)
-    CHECK(ramdip::decide(st(470 * MiB, 12 * GiB), std::nullopt, false).final_mb > 0);
-    // 2. a real shortage: the RAM is committed (30 GiB of 31.6) -> still off
-    CHECK_EQ(ramdip::decide(st(470 * MiB, 30 * GiB), 8192, true).final_mb, 0ull);
-    CHECK_EQ(ramdip::decide(st(470 * MiB, 30 * GiB), std::nullopt, false).final_mb, 0ull);
-    // 3. enough Available (the normal case): exactly the Available sample, and the same size as from the sample alone
-    //    (16302 MiB: half is 8151, so 8192 is lowered to 7680 by the half rule, as before)
-    for (const std::uint64_t av_mb : {16302ull, 18352ull, 21123ull}) {
-        const ramdip::Out o = ramdip::decide(st(av_mb * MiB, 12 * GiB), 8192, true);
-        startfit::RamStatus raw;
-        raw.total_phys = total;
-        raw.avail_phys = av_mb * MiB;
+    CHECK(ramdip::decide(st(470 * MiB, 16 * GiB), std::nullopt, false).final_mb > 0);
+    // 2. a real shortage: Available low and almost nothing on the modified list -> still off
+    CHECK_EQ(ramdip::decide(st(470 * MiB, 100 * MiB), 8192, true).final_mb, 0ull);
+    CHECK_EQ(ramdip::decide(st(470 * MiB, 100 * MiB), std::nullopt, false).final_mb, 0ull);
+    // 3. an empty (or unknown) modified list: exactly the Available sample and the same sizes as before
+    //    (16302 MiB: half is 8151, so 8192 is lowered to 7680 by the half rule)
+    for (const std::uint64_t av_mb : {470ull, 16302ull, 18352ull, 21123ull}) {
+        const ramdip::Out o = ramdip::decide(st(av_mb * MiB, 0), 8192, true);
         CHECK_EQ(o.avail, av_mb * MiB);
-        CHECK_EQ(o.final_mb, ramdip::decide(raw, 8192, true).final_mb);
-        CHECK_EQ(o.final_mb, av_mb == 16302ull ? 7680ull : 8192ull);
-    }
-    // 4. no commit numbers (old Windows call failed / unknown): the Available sample as before
-    {
-        startfit::RamStatus s;
-        s.total_phys = total;
-        s.avail_phys = 470 * MiB;
-        CHECK_EQ(startfit::ramForTier(s).avail, 470 * MiB);
+        CHECK_EQ(o.final_mb, av_mb == 470ull ? 0ull : av_mb == 16302ull ? 7680ull : 8192ull);
     }
 }
 

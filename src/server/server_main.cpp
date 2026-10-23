@@ -1364,8 +1364,6 @@ int serveMain(int argc, char** argv, const char* program) {
             if (GlobalMemoryStatusEx(&ms)) {
                 ram_st.total_phys = ms.ullTotalPhys;
                 ram_st.avail_phys = ms.ullAvailPhys;
-                ram_st.commit_limit = ms.ullTotalPageFile;
-                ram_st.commit_avail = ms.ullAvailPageFile;
             }
         }
         const startfit::RamForTier ram_for = startfit::ramForTier(ram_st);
