@@ -10,7 +10,7 @@
 //                     [--work DIR] [--port 8093] [--results OUT.json] [--compare REF.json]
 //                     [--cli EXE] [--no-lock] [--server-env NAME=VALUE ...] [--kv FORMAT]
 //   whirl-server-gate --selftest   (CPU only: the reply-comparison helpers, no server)
-// Suites: basic, mt_cache, mt_cache_precise, pool, tier, sys, restore_conc, vis, fast_stream, golden (see each function;
+// Suites: basic, mt_cache, mt_cache_precise, pool, tier, sys, restore_conc, vis, fast_stream, golden, par4 (see each function;
 // vis / vis_speed need --mmproj MMPROJ.gguf and --images DIR).
 // A GPU lock file (WHIRL_GPU_LOCK, default %TEMP%\whirl-gpu.lock, opened with
 // share mode 0) is held while a server runs, unless WHIRL_R9700_LOCK_HELD is set
@@ -40,6 +40,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <condition_variable>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -261,6 +262,7 @@ public:
         }
         CloseHandle(out);
         proc_ = pi.hProcess;
+        pid_ = pi.dwProcessId;
         CloseHandle(pi.hThread);
         logLine(std::format("server {} started (pid {}): {}", tag, pi.dwProcessId, narrow(cmd)));
         const auto t0 = std::chrono::steady_clock::now();
@@ -312,6 +314,7 @@ public:
             logLine(std::format("server {}: {}; terminating", tag_, sent ? "no exit 30 s after Ctrl+C" : "Ctrl+C could not be sent"));
             TerminateProcess(proc_, 1);
         } else {
+            graceful_ = true;
             logLine(std::format("server {} stopped (Ctrl+C) in {:.1f} s", tag_,
                                 std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count()));
         }
@@ -374,10 +377,15 @@ public:
         return false;
     }
     const std::string& ssd() const { return ssd_; }
+    DWORD pid() const { return pid_; }
+    // arch024-par4: the last stop() ended the server by the Ctrl+C path (its atexit handlers ran), not TerminateProcess
+    bool stoppedGracefully() const { return graceful_; }
 
 private:
     std::string tag_, log_, ssd_;
     HANDLE proc_ = nullptr;
+    DWORD pid_ = 0;
+    bool graceful_ = false;
 };
 
 // ---------------------------------------------------------------------------
@@ -2392,6 +2400,147 @@ void suiteGolden() {
     }
 }
 
+// suite par4 (arch024-par4; spec: arch024-S0b scratch\s0b\par4.py): a fixed set of 4 different prompts on one precise
+// server with --parallel 4. Rounds: conc1 (all 4 at once, cold), solo (each alone, one after the other), conc2 (all 4 at
+// once again: prefix-cache hits). Precise promises a request the same output whatever it is batched with, whichever slot
+// it gets and whether its prefix is cached (llama.cpp's test_completion.py:392-394 FIXME says it cannot), so every
+// prompt's reasoning + content, completion tokens and finish reason must be byte-identical over the three rounds.
+// The server runs with the launch log on (WHIRL_LAUNCH_LOG: --server-env, else this process's environment, else
+// <work>\launch_par4) and is stopped with the gate's Ctrl+C, so its atexit writer leaves launch_<pid>.txt (checked).
+// Self-contained prompts (no text root). WHIRL_GATE_PAR4_TOKENS: max_tokens (default 160, as par4.py).
+
+const char* const kPar4Rounds[] = {"conc1", "solo", "conc2"};
+
+// par4.py long_prompt(): ~2.5k tokens of fixed text, made here so it can never change between runs
+std::string par4LongPrompt() {
+    std::string o = "下面是一段 Python 程式，請用中文說明它在做什麼，並指出哪一個函式的回傳值範圍最大：\n\n";
+    for (int i = 0; i < 160; ++i)
+        o += std::format("{}def step_{}(x):\n    return (x * {}) % {}  # 第 {} 步", i ? "\n" : "", i, i * 7 + 3, i + 11, i);
+    return o;
+}
+
+const std::vector<std::pair<std::string, std::string>>& par4Prompts() {
+    static const std::vector<std::pair<std::string, std::string>> p = {
+        {"zh_code", "請用 Python 寫一個函式，判斷一個字串是不是回文（忽略大小寫與標點），並附上三個測試。"},
+        {"en_cpp", "Write a C++17 function that merges two sorted std::vector<int> into one sorted vector. Explain the complexity."},
+        {"long_zh", par4LongPrompt()},
+        {"short_en", "List five prime numbers greater than 100, one per line."},
+    };
+    return p;
+}
+
+// Per prompt i: "" when round 0's reply to it equals every other round's (all answered: HTTP 200 and a non-empty
+// text; same reasoning + content + tool calls, completion tokens and finish reason), else what differs.
+// A round with the wrong number of replies makes every prompt differ.
+std::vector<std::string> par4Diffs(const std::vector<std::vector<ChatResult>>& rounds, std::size_t n_prompts) {
+    std::vector<std::string> out(n_prompts);
+    if (rounds.empty()) {
+        for (auto& d : out) d = "no rounds";
+        return out;
+    }
+    for (std::size_t i = 0; i < n_prompts; ++i) {
+        std::string& d = out[i];
+        for (std::size_t k = 0; k < rounds.size(); ++k) {
+            const char* rn = k < std::size(kPar4Rounds) ? kPar4Rounds[k] : "round";
+            if (rounds[k].size() != n_prompts) {
+                d += std::format("{} has {} replies (expected {}); ", rn, rounds[k].size(), n_prompts);
+                continue;
+            }
+            const ChatResult& r = rounds[k][i];
+            if (!answered(r)) {
+                d += std::format("{} not answered (status {}); ", rn, r.status);
+                continue;
+            }
+            if (k == 0) continue;
+            if (rounds[0].size() != n_prompts || !answered(rounds[0][i])) continue;  // already reported
+            const ChatResult& a = rounds[0][i];
+            if (r.text() != a.text()) d += std::format("{} text h={:016x} vs {} h={:016x}; ", rn, fnv64(r.text()), kPar4Rounds[0], fnv64(a.text()));
+            if (r.completion != a.completion) d += std::format("{} completion {} vs {}; ", rn, r.completion, a.completion);
+            if (r.finish != a.finish) d += std::format("{} finish {} vs {}; ", rn, r.finish, a.finish);
+        }
+    }
+    return out;
+}
+
+// all requests released together (par4.py: threading.Barrier), so the 4 prompts really share batches
+std::vector<ChatResult> parallelTogether(const std::vector<std::function<ChatResult()>>& jobs) {
+    std::vector<ChatResult> res(jobs.size());
+    std::mutex mu;
+    std::condition_variable cv;
+    std::size_t ready = 0;
+    std::vector<std::thread> th;
+    for (std::size_t i = 0; i < jobs.size(); ++i)
+        th.emplace_back([&, i] {
+            {
+                std::unique_lock<std::mutex> lk(mu);
+                if (++ready == jobs.size()) cv.notify_all();
+                else cv.wait(lk, [&] { return ready == jobs.size(); });
+            }
+            res[i] = jobs[i]();
+        });
+    for (auto& t : th) t.join();
+    return res;
+}
+
+// the launch-log folder par4's server gets: --server-env, else this process's environment, else <work>\launch_par4
+std::string par4LaunchDir() {
+    if (auto it = g.server_env.find("WHIRL_LAUNCH_LOG"); it != g.server_env.end() && !it->second.empty()) return it->second;
+    if (const char* e = std::getenv("WHIRL_LAUNCH_LOG"); e && *e) return e;
+    return g.work + "\\launch_par4";
+}
+
+void suitePar4() {
+    logLine("== suite par4");
+    int max_tokens = 160;
+    if (const char* e = std::getenv("WHIRL_GATE_PAR4_TOKENS")) max_tokens = std::max(1, std::atoi(e));
+    const auto& P = par4Prompts();
+    const std::string ll = par4LaunchDir();
+    std::error_code ec;
+    fs::create_directories(widen(ll), ec);
+    // precise is the suite's own setting (it overrides --server-env); the launch log goes through the same env path
+    const std::map<std::string, std::string> env = {{"WHIRL_MODE", "precise"}, {"WHIRL_LAUNCH_LOG", ll}};
+    const std::string extra = std::format(",\"temperature\":0,\"seed\":1,\"max_tokens\":{},\"stream\":false", max_tokens);
+    auto ask = [&](std::size_t i) { return chat(arr({msg("user", P[i].second)}), extra); };
+    std::vector<std::function<ChatResult()>> jobs;
+    for (std::size_t i = 0; i < P.size(); ++i) jobs.push_back([&, i] { return ask(i); });
+    std::vector<std::vector<ChatResult>> rounds;
+    DWORD pid = 0;
+    bool graceful = false;
+    {
+        ServerLease s("par4", {"--parallel", "4", "--kv-ssd-mode", "off"}, env);
+        pid = s->pid();
+        rounds.push_back(parallelTogether(jobs));  // conc1
+        std::vector<ChatResult> solo;
+        for (std::size_t i = 0; i < P.size(); ++i) solo.push_back(ask(i));
+        rounds.push_back(std::move(solo));
+        rounds.push_back(parallelTogether(jobs));  // conc2
+        s->stop();
+        graceful = s->stoppedGracefully();
+    }
+    for (std::size_t k = 0; k < rounds.size(); ++k)
+        for (std::size_t i = 0; i < P.size() && i < rounds[k].size(); ++i) {
+            const ChatResult& r = rounds[k][i];
+            logLine(std::format("P par4.{}.{} status={} n={} prompt={} cached={} finish={} h={:016x} {:.0f} ms", P[i].first, kPar4Rounds[k], r.status,
+                                r.completion, r.prompt, r.cached, r.finish.empty() ? "-" : r.finish, fnv64(r.text()), r.ms));
+            record("par4." + P[i].first + "." + kPar4Rounds[k], r.text());
+        }
+    const auto diffs = par4Diffs(rounds, P.size());
+    std::size_t same = 0;
+    for (std::size_t i = 0; i < P.size(); ++i) {
+        same += diffs[i].empty() ? 1 : 0;
+        check("par4: " + P[i].first + " identical over conc1 / solo / conc2 (precise, --parallel 4)", diffs[i].empty(),
+              diffs[i].empty() ? brief(rounds[0][i]) : diffs[i]);
+    }
+    logLine(std::format("par4: {} ({}/{} prompts equal over conc1 / solo / conc2)", same == P.size() ? "SAME" : "DIFF", same, P.size()));
+    // conc2 must really be the cache-hit round: the long prompt (~2.5k tokens) is cached; the short ones may fall
+    // under the cache granularity (their counts are in the P lines)
+    const ChatResult& lz = rounds[2][2];
+    check("par4: conc2 hits the prefix cache (long_zh cached > 0)", lz.cached > 0, std::format("long_zh cached {}", lz.cached));
+    check("par4: server stopped by Ctrl+C (not terminated), so its atexit handlers ran", graceful);
+    const std::string table = ll + "\\launch_" + std::to_string(pid) + ".txt";
+    check("par4: launch table written at exit (" + table + ")", pid != 0 && fs::exists(widen(table), ec) && fs::file_size(widen(table), ec) > 0);
+}
+
 int selfTest() {
     auto mk = [](int status, std::string content, std::string reasoning = "") {
         ChatResult r;
@@ -2495,6 +2644,116 @@ int selfTest() {
         check("selftest: mt_cache_precise verify, a hit without a verify line -> not ok", !mtPreciseVerifyOk({exact}, 2, vd), vd);
         check("selftest: mt_cache_precise verify, no hits at all -> not ok (tests nothing)", !mtPreciseVerifyOk({}, 0, vd), vd);
     }
+    {
+        // suite par4 (arch024-par4): the comparison over conc1 / solo / conc2, and the prompts pinned to par4.py
+        // (expected hashes from scratch\s0b\par4.py PROMPTS, FNV-1a 64 of the UTF-8 text, computed in Python)
+        const auto& P = par4Prompts();
+        check("selftest: par4 prompts == par4.py (names, count, FNV-1a 64 of each text)",
+              P.size() == 4 && P[0].first == "zh_code" && P[1].first == "en_cpp" && P[2].first == "long_zh" && P[3].first == "short_en" &&
+                  fnv64(P[0].second) == 0x312c5230d67a9b1cull && fnv64(P[1].second) == 0xf3e2778862a6aedcull &&
+                  fnv64(P[2].second) == 0x743cd23e0ab41842ull && P[2].second.size() == 9253 && fnv64(P[3].second) == 0xce186a010757282dull,
+              std::format("{:016x} {:016x} {:016x} ({} bytes) {:016x}", fnv64(P[0].second), fnv64(P[1].second), fnv64(P[2].second),
+                          P[2].second.size(), fnv64(P[3].second)));
+        auto rep4 = [](const std::vector<ChatResult>& v) { return std::vector<std::vector<ChatResult>>{v, v, v}; };
+        std::vector<ChatResult> base;
+        for (int i = 0; i < 4; ++i) {
+            ChatResult r = mk(200, "answer " + std::to_string(i), "think " + std::to_string(i));
+            r.completion = 100 + i;
+            r.finish = "length";
+            base.push_back(r);
+        }
+        auto allEmpty = [](const std::vector<std::string>& d) { return std::all_of(d.begin(), d.end(), [](const std::string& x) { return x.empty(); }); };
+        // exactly prompt i differs, and its description names `what`
+        auto only = [](const std::vector<std::string>& d, std::size_t i, const char* what) {
+            for (std::size_t k = 0; k < d.size(); ++k)
+                if ((k == i) == d[k].empty() || (k == i && d[k].find(what) == std::string::npos)) return false;
+            return d.size() == 4;
+        };
+        const auto d0 = par4Diffs(rep4(base), 4);
+        check("selftest: par4 three equal rounds -> all 4 prompts same", allEmpty(d0));
+        {
+            auto r = rep4(base);
+            r[2][1].content += "!";
+            const auto dd = par4Diffs(r, 4);
+            check("selftest: par4 conc2 content differs for en_cpp -> only en_cpp reported (conc2 text)", only(dd, 1, "conc2 text"), dd[1]);
+        }
+        {
+            auto r = rep4(base);
+            r[1][3].reasoning = "other thought";
+            const auto dd = par4Diffs(r, 4);
+            check("selftest: par4 solo reasoning differs (content same) -> reported (solo text)", only(dd, 3, "solo text"), dd[3]);
+        }
+        {
+            auto r = rep4(base);
+            r[1][0].completion = 99;
+            const auto dd = par4Diffs(r, 4);
+            check("selftest: par4 solo completion tokens differ (same text) -> reported", only(dd, 0, "solo completion 99 vs 100"), dd[0]);
+        }
+        {
+            auto r = rep4(base);
+            r[2][2].finish = "stop";
+            const auto dd = par4Diffs(r, 4);
+            check("selftest: par4 conc2 finish differs -> reported", only(dd, 2, "conc2 finish stop vs length"), dd[2]);
+        }
+        {
+            auto r = rep4(base);
+            r[0][2] = err;
+            r[1][2] = err;
+            r[2][2] = err;
+            const auto dd = par4Diffs(r, 4);
+            check("selftest: par4 a prompt failing (500) in every round -> not same", only(dd, 2, "not answered (status 500)"), dd[2]);
+        }
+        {
+            auto r = rep4(base);
+            r[0][0] = empty200;
+            r[1][0] = empty200;
+            r[2][0] = empty200;
+            check("selftest: par4 empty 200 replies in every round -> not same", only(par4Diffs(r, 4), 0, "not answered (status 200)"));
+        }
+        {
+            auto r = rep4(base);
+            r[0][1] = err;  // conc1 failed: no reference, the other rounds must not count as equal
+            check("selftest: par4 conc1 failed for one prompt -> that prompt not same", only(par4Diffs(r, 4), 1, "conc1 not answered"));
+        }
+        {
+            auto r = rep4(base);
+            r[1].pop_back();
+            const auto dd = par4Diffs(r, 4);
+            check("selftest: par4 a round with 3 replies -> every prompt not same",
+                  std::all_of(dd.begin(), dd.end(), [](const std::string& x) { return x.find("solo has 3 replies") != std::string::npos; }));
+            const auto e = par4Diffs({}, 4);
+            check("selftest: par4 no rounds -> every prompt not same",
+                  e.size() == 4 && std::all_of(e.begin(), e.end(), [](const std::string& x) { return !x.empty(); }));
+        }
+        {
+            // the 4 requests of a concurrent round are in flight at the same time
+            std::atomic<int> in{0};
+            std::vector<std::function<ChatResult()>> jobs;
+            for (int i = 0; i < 4; ++i)
+                jobs.push_back([&, i] {
+                    ++in;
+                    for (int t = 0; t < 500 && in.load() < 4; ++t) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                    return in.load() == 4 ? mk(200, std::to_string(i)) : mk(0, "");
+                });
+            const auto res = parallelTogether(jobs);
+            check("selftest: par4 concurrent round: all 4 jobs in flight at once, results in order",
+                  res.size() == 4 && res[0].content == "0" && res[1].content == "1" && res[2].content == "2" && res[3].content == "3");
+        }
+        {
+            const auto saved = g.server_env;
+            const std::string saved_work = g.work;
+            g.work = "C:\\w";
+            g.server_env["WHIRL_LAUNCH_LOG"] = "D:\\ll\\par4";
+            const bool from_env = par4LaunchDir() == "D:\\ll\\par4";
+            g.server_env.erase("WHIRL_LAUNCH_LOG");
+            const char* own = std::getenv("WHIRL_LAUNCH_LOG");
+            const bool fallback = (own && *own) ? par4LaunchDir() == own : par4LaunchDir() == "C:\\w\\launch_par4";
+            g.server_env = saved;
+            g.work = saved_work;
+            check("selftest: par4 launch-log folder: --server-env first, then this process's WHIRL_LAUNCH_LOG, then <work>\\launch_par4",
+                  from_env && fallback);
+        }
+    }
     // suite golden: its prompts must never change silently (the expected hashes come from an independent Python
     // replica of goldenDoc / fnv64, ARCH-1 2026-10-20); a change here invalidates every srv.* golden reference
     check("selftest: golden fnv64 of \"\" is the FNV-1a offset basis", fnv64("") == 1469598103934665603ull);
@@ -2564,19 +2823,19 @@ int wmain(int argc, wchar_t** wargv) {
     }
     if (g.images.empty())
         if (const char* im = std::getenv("WHIRL_GATE_IMAGES")) g.images = im;
-    // suite golden is self-contained (fixed prompts); every other suite reads test texts from the text root
-    const bool needs_text = std::any_of(g.suites.begin(), g.suites.end(), [](const std::string& x) { return x != "golden"; });
+    // suites golden and par4 are self-contained (fixed prompts); every other suite reads test texts from the text root
+    const bool needs_text = std::any_of(g.suites.begin(), g.suites.end(), [](const std::string& x) { return x != "golden" && x != "par4"; });
     if (g.text_root.empty() && !g.exe.empty() && !g.model.empty() && needs_text) {
         std::fprintf(stderr, "set WHIRL_GATE_TEXT_ROOT to the root of a llama.cpp source checkout (test texts)\n");
         return 2;
     }
     if ((g.exe.empty() || g.model.empty()) && g.compare.empty()) {
         std::fprintf(stderr,
-                     "usage: whirl-server-gate --exe PATH --kind whirl|proto --model GGUF --suite basic,mt_cache,mt_cache_precise,pool,tier,sys,restore_conc,vis,fast_stream\n"
+                     "usage: whirl-server-gate --exe PATH --kind whirl|proto --model GGUF --suite basic,mt_cache,mt_cache_precise,pool,tier,sys,restore_conc,vis,fast_stream,golden,par4\n"
                      "                         [--work DIR] [--port N] [--results OUT.json] [--compare REF.json] [--cli EXE] [--no-lock]\n"
                      "                         [--mmproj MMPROJ.gguf] [--images DIR]   (suite vis)\n"
                      "                         [--server-env NAME=VALUE ...] [--kv q8v|q8|f16|auto]   (default auto)\n"
-                     "  env: WHIRL_GATE_TEXT_ROOT (required), WHIRL_GATE_WORK, WHIRL_GATE_IMAGES, WHIRL_GPU_LOCK\n"
+                     "  env: WHIRL_GATE_TEXT_ROOT (required except golden / par4), WHIRL_GATE_PAR4_TOKENS, WHIRL_GATE_WORK, WHIRL_GATE_IMAGES, WHIRL_GPU_LOCK\n"
                      "       whirl-server-gate --results A.json --compare B.json   (compare two result files only)\n");
         return 2;
     }
@@ -2592,7 +2851,7 @@ int wmain(int argc, wchar_t** wargv) {
     const std::map<std::string, std::function<void()>> suites = {{"basic", suiteBasic}, {"mt_cache", suiteMtCache}, {"mt_cache_precise", suiteMtCachePrecise}, {"pool", suitePool},
                                                                  {"tier", suiteTier},   {"sys", suiteSys},           {"sys_burst", suiteSysBurst}, {"http_stress", suiteHttpStress}, {"sys_d", suiteSysD}, {"restore_conc", suiteRestoreConc},
                                                                  {"vis", suiteVis},     {"vis_speed", suiteVisSpeed},
-                                                                 {"fast_stream", suiteFastStream}, {"golden", suiteGolden}};
+                                                                 {"fast_stream", suiteFastStream}, {"golden", suiteGolden}, {"par4", suitePar4}};
     if (!g.exe.empty()) {
         // a gate that runs nothing must not be green (REVIEW-RC4-C P2-1): no --suite is an error
         if (g.suites.empty()) {
