@@ -43,7 +43,10 @@ FIELDS = [
     ("'kv tier: RAM tier off (reason)'", "C", 1382, "ramTierText.off_reason"),
     ("'adjusted: --kv-ram-mb A -> B MiB (why)'", "C", 1365, "ramTierFit + ramTierText.adjusted_why"),
     ("'slots: N;'", "C", 1651, "startfit::slotsThatFit (or fitParallel's slots when not re-checked)"),
-    ("'kv pool: N tokens'", "C", 1478, "numerics::serverPoolFit (glue: the issue-#5 re-check may shrink it later)"),
+    ("'kv pool: N tokens'", "C", 1478, "numerics::serverPoolFit; after an issue-#5 re-check the replay must equal the first "
+     "'shrinking the KV pool from A' and the rounds must chain (smaller, whole pages, <= 3) to N"),
+    ("'kv pool check: ... shrinking the KV pool from A to B tokens'", "glue", 1661,
+     "the issue-#5 re-check (WDDM read again after the alloc, not in the inputs line): chain checked, values not replayed"),
     ("'adjusted: --parallel p -> p-1' lines", "glue", 1100, "the adjust loop that prints each step"),
     ("'startup adjustments (...)'", "glue", 2062, "summary of the adjusted: lines"),
     ("'adjusted: -c / --ctx-per-slot'", "glue", 1488, "from serverPoolFit's result, formatted by the glue"),
@@ -160,8 +163,38 @@ def compare(log: str, rep: list, inp: dict) -> list:
         m = find(r"\bkv pool: (\d+) tokens")
         if not m:
             bad.append("pool: no 'kv pool: N tokens' line")
-        elif m[0].group(1) != g["pool"]["pool"] and not find(r"kv pool: .*(shrunk|lowered)"):
-            bad.append(f"pool: {m[0].group(1)} tokens in the log, replay {g['pool']['pool']}")
+        else:
+            bad += pool_chain(int(g["pool"]["pool"]), int(m[0].group(1)),
+                              [(int(x.group(1)), int(x.group(2))) for x in find(RECHECK_RE)],
+                              int(inp.get("pool.page", "256") or 256))
+    return bad
+
+
+# server_main's issue-#5 re-check after the pool is allocated: it reads the WDDM budget / usage again (measured values
+# that are not in the "startup inputs:" line) and shrinks the pool by whole pages, up to 3 rounds, one line per round.
+# The replay decides the pool before it (serverPoolFit); the re-check is glue, checked here for consistency only.
+RECHECK_RE = r"kv pool check: .* -> shrinking the KV pool from (\d+) to (\d+) tokens"
+
+
+def pool_chain(replay: int, logged: int, rounds: list, page: int) -> list:
+    """The replay's pool, then each re-check round (from, to), must lead to the logged 'kv pool: N tokens'."""
+    if not rounds:
+        return [] if logged == replay else [f"pool: {logged} tokens in the log, replay {replay}"]
+    bad = []
+    have = replay
+    for i, (a, b) in enumerate(rounds, 1):
+        if a != have:
+            what = "the replay's pool" if i == 1 else f"round {i - 1}'s result"
+            bad.append(f"pool: re-check round {i} shrinks from {a} tokens, {what} is {have}")
+        if not b < a:
+            bad.append(f"pool: re-check round {i} goes from {a} to {b} tokens (not smaller)")
+        if page > 0 and b % page:
+            bad.append(f"pool: re-check round {i} result {b} tokens is not whole pages of {page}")
+        have = b
+    if len(rounds) > 3:
+        bad.append(f"pool: {len(rounds)} re-check rounds (server_main does at most 3)")
+    if logged != have:
+        bad.append(f"pool: {logged} tokens in the log, re-check ended at {have} (replay {replay})")
     return bad
 
 
