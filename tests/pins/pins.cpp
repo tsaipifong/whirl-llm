@@ -92,6 +92,23 @@ int tokensPin(const gguf::File& f, const Tokenizer& tok, const std::string& req_
         ++n;
         try {
             const json::Value root = json::parse(body);
+            // arch024-S8: /v1/completions rows ("prompt"), as http.cpp buildJob's completion branch
+            if (const json::Value* pv = root.asObject().find("prompt")) {
+                std::string prompt;
+                std::vector<std::uint32_t> v;
+                const json::Value* p0 = pv->isArray() && !pv->asArray().empty() ? &pv->asArray()[0] : pv;
+                if (p0->isString()) {
+                    prompt = p0->asString();
+                    const auto ids = tok.encode(prompt, true);
+                    v.assign(ids.begin(), ids.end());
+                } else {
+                    for (const json::Value& it : pv->asArray()) v.push_back(static_cast<std::uint32_t>(it.asInt()));
+                }
+                std::printf("req %s tokens %zu fnv %016llx prompt_bytes %zu prompt_fnv %016llx\n", name.c_str(), v.size(),
+                            static_cast<unsigned long long>(fnv(v.data(), v.size() * 4)), prompt.size(),
+                            static_cast<unsigned long long>(fnv(prompt.data(), prompt.size())));
+                continue;
+            }
             chat::ChatRequest req = chat::parseChatRequest(root);
             const json::Value* am = root.asObject().find("x_allow_media");
             req.options.allow_media = am != nullptr && am->isBool() && am->asBool();

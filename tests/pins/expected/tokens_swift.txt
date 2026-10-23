@@ -18,4 +18,18 @@ req content_parts tokens 58 fnv 4f14f37077ea6de9 prompt_bytes 314 prompt_fnv ef8
 req vision_placeholder tokens 61 fnv 27c7b6eb2cda7230 prompt_bytes 360 prompt_fnv 90bdde315f2e054f
 req special_text tokens 63 fnv c0d30d467e1c6325 prompt_bytes 350 prompt_fnv c1bb26eeeeb9b353
 req long_code tokens 111 fnv e00c47fca3f37b26 prompt_bytes 472 prompt_fnv 2832077cfc1d10b0
-requests 19 errors 0
+req golden_short tokens 43 fnv 2049146ee36ecdcf prompt_bytes 193 prompt_fnv b8a0b87eb1371fe2
+req golden_short_stream tokens 43 fnv 2049146ee36ecdcf prompt_bytes 193 prompt_fnv b8a0b87eb1371fe2
+req golden_think tokens 26 fnv f6577b60eaccc68a prompt_bytes 128 prompt_fnv 7aa271e32a6bc072
+req golden_long tokens 6059 fnv dea068b3a494029f prompt_bytes 22003 prompt_fnv a021a2a1c4dd9757
+req golden_vis tokens 25 fnv 2e4ca21bc841a70f prompt_bytes 161 prompt_fnv 6ae5f847313cf063
+req golden_sessA_t1 tokens 3716 fnv 3e65d9e03cb54d03 prompt_bytes 13716 prompt_fnv f96bb0a7a3bef3fe
+req golden_sessB_t1 tokens 3724 fnv a144e7bd956725ed prompt_bytes 13680 prompt_fnv 984b41dd4cc629c7
+req golden_sessA_t2 tokens 3758 fnv fba8deba7af6fa6b prompt_bytes 13913 prompt_fnv 73d6279ef2e03edc
+req golden_sessB_t2 tokens 3766 fnv bab1ade565fbf501 prompt_bytes 13877 prompt_fnv cb54595aa7e34313
+req golden_solo0 tokens 28 fnv 4a43a74add43e159 prompt_bytes 139 prompt_fnv 48f8fdc6523d5dcb
+req golden_solo1 tokens 36 fnv f27a28fa12a7df19 prompt_bytes 174 prompt_fnv 74e1b521975c18c8
+req cmpl_string tokens 7 fnv 0e10e34f9b73e0e0 prompt_bytes 23 prompt_fnv 8c4f1a00a714a8e9
+req cmpl_list1 tokens 21 fnv af6fc68d76b1d50d prompt_bytes 95 prompt_fnv 5786b8f45544b56d
+req cmpl_ids tokens 5 fnv 9b44522cde7a43d7 prompt_bytes 0 prompt_fnv 14650fb0739d0383
+requests 33 errors 0
