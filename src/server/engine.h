@@ -9,6 +9,7 @@
 
 #include "backend.h"
 #include "cache/ckpt_store.h"
+#include "cache/page_pool.h"
 #include "cache/prefix_cache.h"
 #include "decode_floor.h"
 #include "protocol.h"
@@ -331,11 +332,6 @@ private:
 // slot holds no checkpoint buffer (parked). Returns the VRAM freed. A free function so the F1 tests drive this call.
 std::uint64_t parkSlotCkpts(CkptStore& cs, Slot& sl);
 
-struct QBatch {
-    std::vector<std::int32_t> pages;
-    device::EventH ev;
-};
-
 struct CycleProf;
 
 // One decoding slot as the per-slot draft planner (WHIRL_SLOT_DRAFTS=2) sees it.
@@ -547,15 +543,10 @@ private:
     void saveCkpt(Slot& sl, std::uint32_t pos, const char* kind, std::optional<DevPtr> hid, std::optional<DevPtr> logits);
     void dropCache(Slot& sl);
     void freePages(Slot& sl);
-    // pages
-    std::optional<std::int32_t> takeFreePage();
-    void refPage(std::int32_t p) { page_ref_[static_cast<std::size_t>(p)] += 1; }
-    void unrefPages(std::span<const std::int32_t> pages);
-    bool sharedFrom(const Slot& sl, std::uint32_t reuse) const;
-    void copyPage(std::int32_t dst, std::int32_t src);
+    // pages (arch024 M3: the bookkeeping is pool_'s; these pass the slot's pages and the evictor)
+    struct SlotEvictor;  // PagePool::Evictor over the idle slots and shared checkpoints (prefix cache's choice)
+    bool evictFor(Slot* sl);
     std::optional<std::int32_t> takePage(Slot* sl);
-    void quarantinePages(std::span<const std::int32_t> pages);
-    void reclaimPages(bool force);
     void cowPages(Slot& sl, std::uint32_t reuse, bool spill);
     bool ensurePages(Slot& sl, std::uint64_t n_tok);
     // shared prefix checkpoints
@@ -678,8 +669,6 @@ private:
     EngineOptions opt_;
     std::uint32_t ctx_;
     CkptStore ck_;  // checkpoint buffers (arch024 M2)
-    std::vector<std::int32_t> free_pages_;
-    std::uint32_t pool_pages_ = 0;
     std::array<qwen35::DraftTiming, gdn_max_seg + 1> timing_{};
     // WHIRL_SLOT_DRAFTS=2: cycle time per number of decoding slots, global acceptance pool
     std::array<qwen35::CycleCost, gdn_max_seg + 1> ccost_{};
@@ -770,12 +759,10 @@ private:
     bool tier_wake_ = false;
     std::uint64_t wake_seq_ = 0;  // under q_mutex_: bumped by a queued request, a finished build, the tier IO thread
     std::uint64_t stat_spill_waits_ = 0;
-    std::vector<QBatch> quarantine_;
-    std::uint64_t stat_cow_pages_ = 0;
-    std::uint64_t stat_q_waits_ = 0;
+    PagePool pool_;  // KV pool pages (arch024 M3); here, where its quarantine was, so ~Engine destroys its events in
+                     // the same order
     TimePoint last_tick_{};
     TimePoint last_reap_{};
-    std::vector<std::uint16_t> page_ref_;
     std::vector<Spe> spes_;
     std::uint64_t stat_spe_new_ = 0, stat_spe_hits_ = 0, stat_spe_tok_ = 0, stat_spe_evict_ = 0, stat_unshare_ = 0;
     std::uint64_t stat_evictions_ = 0;

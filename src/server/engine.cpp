@@ -101,7 +101,8 @@ struct CycleProf {
 
 Engine::Engine(ServerModel& model, device::Backend& ops, const Tokenizer& tok, const EngineOptions& opt)
     : m_(model), ops_(ops), tok_(tok), ct_(tok), opt_(opt), ctx_(opt.ctx),
-      ck_(ops, model, CkptStore::Layout{model.convBytes(), model.ssmBytes(), opt.ckpt_host}), id_prng_(opt.seed) {
+      ck_(ops, model, CkptStore::Layout{model.convBytes(), model.ssmBytes(), opt.ckpt_host}), pool_(ops, model),
+      id_prng_(opt.seed) {
     if (opt_.parallel < 1 || opt_.parallel > gdn_max_seg) throw std::runtime_error("parallel must be 1..16");
     if (opt_.n_ck == 0 || opt_.no_prefix_cache) opt_.n_spe = 0;
     if (opt_.no_prefix_cache) opt_.n_ck = 0;
@@ -187,20 +188,14 @@ void Engine::allocState() {
 }
 
 void Engine::initPool() {
-    pool_pages_ = m_.poolPages();
-    page_ref_.assign(pool_pages_, 0);
-    free_pages_.clear();
-    free_pages_.reserve(pool_pages_);
-    // every page free (popped in increasing order)
-    for (std::uint32_t pg = pool_pages_; pg > 0;) {
-        --pg;
-        free_pages_.push_back(static_cast<std::int32_t>(pg));
-    }
+    const std::uint32_t n = m_.poolPages();
     kv_arrays_ = m_.kvArrays();
+    pool_.init(n, kv_arrays_);
 }
 
 void Engine::attachTier(tier::Tier* t) {
     tier_ = t;
+    pool_.setQuarantineStream(t ? &t->stream : nullptr);
     tier_view_ = t ? cache::makeTierAdapter(*t) : nullptr;
     pc_->attachTier(tier_view_.get());
     if (t) {
@@ -290,8 +285,8 @@ Engine::Stats Engine::stats() const {
     s.spe_evict = stat_spe_evict_;
     s.unshare = stat_unshare_;
     s.evictions = stat_evictions_;
-    s.cow_pages = stat_cow_pages_;
-    s.q_waits = stat_q_waits_;
+    s.cow_pages = pool_.stats().cow_pages;
+    s.q_waits = pool_.stats().q_waits;
     s.spill_waits = stat_spill_waits_;
     s.vis_enc = stat_vis_enc_;
     s.vis_hit = stat_vis_hit_;
@@ -395,7 +390,7 @@ void Engine::freePages(Slot& sl) {
     dropCache(sl);
     if (busy) {
         try {
-            quarantinePages(sl.pages);
+            pool_.quarantine(sl.pages);
         } catch (const std::exception&) {
             // cannot track them: order the main stream after the spill instead
             stat_spill_waits_ += 1;
@@ -403,10 +398,10 @@ void Engine::freePages(Slot& sl) {
                 ops_.streamWaitEvent(m_.stream(), sl.spill_ev.get());
             } catch (const std::exception&) {
             }
-            unrefPages(sl.pages);
+            pool_.unref(sl.pages);
         }
     } else {
-        unrefPages(sl.pages);
+        pool_.unref(sl.pages);
     }
     sl.pages.clear();
 }
@@ -414,147 +409,68 @@ void Engine::freePages(Slot& sl) {
 // ---------------------------------------------------------------------------
 // pool pages (item S: reference counts)
 
-std::optional<std::int32_t> Engine::takeFreePage() {
-    if (free_pages_.empty()) return std::nullopt;
-    const std::int32_t p = free_pages_.back();
-    free_pages_.pop_back();
-    page_ref_[static_cast<std::size_t>(p)] = 1;
-    return p;
-}
+struct Engine::SlotEvictor final : PagePool::Evictor {
+    Engine& e;
+    Slot* sl;
+    SlotEvictor(Engine& e_, Slot* sl_) : e(e_), sl(sl_) {}
+    bool evictOne() override { return e.evictFor(sl); }
+};
 
-void Engine::unrefPages(std::span<const std::int32_t> pages) {
-    for (std::int32_t p : pages) {
-        std::uint16_t& r = page_ref_[static_cast<std::size_t>(p)];
-        r -= 1;
-        if (r == 0) free_pages_.push_back(p);
+// the prefix cache's victim for a page sl (nullptr: none) needs: a shared checkpoint dropped or an idle slot's pages
+// freed (true), or nothing to evict (false)
+bool Engine::evictFor(Slot* sl) {
+    const cache::Victim v = pc_->evictVictim(
+        slots_,
+        [&](std::size_t i) {
+            const Slot& o = slots_[i];
+            return !((sl != nullptr && &o == sl) || o.phase != Phase::idle || o.pages.empty());
+        },
+        spes_);
+    Slot* victim = v.kind == cache::Victim::slot ? &slots_[v.index] : nullptr;
+    Spe* vspe = v.kind == cache::Victim::spe ? &spes_[v.index] : nullptr;
+    if (vspe) {
+        logI("kv pool full: dropping shared {} checkpoint @{} ({} pages)", vspe->kind, vspe->n, vspe->pages.size());
+        dropSpe(*vspe);
+        return true;
     }
-}
-
-bool Engine::sharedFrom(const Slot& sl, std::uint32_t reuse) const {
-    const std::size_t keep = reuse == 0 ? 0 : (reuse - 1) / kv_page;
-    if (keep >= sl.pages.size()) return false;
-    for (std::size_t i = keep; i < sl.pages.size(); ++i)
-        if (page_ref_[static_cast<std::size_t>(sl.pages[i])] > 1) return true;
-    return false;
-}
-
-void Engine::copyPage(std::int32_t dst_p, std::int32_t src_p) {
-    const std::uint64_t src = static_cast<std::uint64_t>(src_p);
-    const std::uint64_t dst = static_cast<std::uint64_t>(dst_p);
-    for (const KvArr& a : kv_arrays_) {
-        const std::uint64_t len = static_cast<std::uint64_t>(kv_page) * a.row;
-        ops_.copyAsync(a.base + dst * len, a.base + src * len, len, m_.stream());
+    if (!victim) return false;
+    if (sl) {
+        logI("kv pool full: evicting idle slot {} ({} pages, {} cached tokens) for slot {}", victim->id,
+             victim->pages.size(), victim->cache_tokens.size(), sl->id);
+    } else {
+        logI("kv pool full: evicting idle slot {} ({} pages, {} cached tokens)", victim->id, victim->pages.size(),
+             victim->cache_tokens.size());
     }
+    stat_evictions_ += 1;
+    freePages(*victim);
+    return true;
 }
 
 std::optional<std::int32_t> Engine::takePage(Slot* sl) {
-    for (;;) {
-        if (free_pages_.empty() && !quarantine_.empty()) reclaimPages(false);
-        if (auto p = takeFreePage()) return p;
-        const cache::Victim v = pc_->evictVictim(
-            slots_,
-            [&](std::size_t i) {
-                const Slot& o = slots_[i];
-                return !((sl != nullptr && &o == sl) || o.phase != Phase::idle || o.pages.empty());
-            },
-            spes_);
-        Slot* victim = v.kind == cache::Victim::slot ? &slots_[v.index] : nullptr;
-        Spe* vspe = v.kind == cache::Victim::spe ? &spes_[v.index] : nullptr;
-        if (vspe) {
-            logI("kv pool full: dropping shared {} checkpoint @{} ({} pages)", vspe->kind, vspe->n, vspe->pages.size());
-            dropSpe(*vspe);
-            continue;
-        }
-        if (!victim) {
-            // only pages a spill still reads: wait for it on the GPU
-            if (!quarantine_.empty()) {
-                reclaimPages(true);
-                continue;
-            }
-            return std::nullopt;
-        }
-        if (sl) {
-            logI("kv pool full: evicting idle slot {} ({} pages, {} cached tokens) for slot {}", victim->id,
-                 victim->pages.size(), victim->cache_tokens.size(), sl->id);
-        } else {
-            logI("kv pool full: evicting idle slot {} ({} pages, {} cached tokens)", victim->id, victim->pages.size(),
-                 victim->cache_tokens.size());
-        }
-        stat_evictions_ += 1;
-        freePages(*victim);
-    }
-}
-
-void Engine::quarantinePages(std::span<const std::int32_t> pages) {
-    if (pages.empty()) return;
-    if (!tier_) throw std::runtime_error("NoTier");
-    device::EventH ev = device::EventH::create(ops_);
-    ops_.eventRecord(ev.get(), tier_->stream);  // a throw destroys ev
-    quarantine_.push_back({std::vector<std::int32_t>(pages.begin(), pages.end()), std::move(ev)});
-}
-
-void Engine::reclaimPages(bool force) {
-    std::size_t i = 0;
-    while (i < quarantine_.size()) {
-        QBatch& q = quarantine_[i];
-        bool done = ops_.eventDone(q.ev.get());
-        if (!done && force) {
-            stat_q_waits_ += 1;
-            try {
-                ops_.streamWaitEvent(m_.stream(), q.ev.get());
-            } catch (const std::exception&) {
-            }
-            done = true;
-        }
-        if (!done) {
-            ++i;
-            continue;
-        }
-        unrefPages(q.pages);
-        quarantine_.erase(quarantine_.begin() + static_cast<std::ptrdiff_t>(i));
-    }
+    SlotEvictor ev(*this, sl);
+    return pool_.take(ev);
 }
 
 void Engine::cowPages(Slot& sl, std::uint32_t reuse, bool spill) {
     const std::size_t keep = reuse == 0 ? 0 : (reuse - 1) / kv_page;
-    if (keep >= sl.pages.size()) return;
-    std::optional<std::int32_t> newp;
-    if (reuse > 0) {
-        newp = takePage(&sl);
-        if (!newp) {
-            if (!spill) throw KvPoolFull();
-            waitSpill(sl);
-            return;
-        }
-        copyPage(*newp, sl.pages[keep]);
+    SlotEvictor ev(*this, &sl);
+    switch (pool_.cow(sl.pages, sl.id, reuse, spill, ev)) {
+    case PagePool::Cow::unchanged:
+        return;
+    case PagePool::Cow::no_page:
+        if (!spill) throw KvPoolFull();
+        waitSpill(sl);
+        return;
+    case PagePool::Cow::done:
+        break;
     }
-    const std::span<const std::int32_t> old(sl.pages.data() + keep, sl.pages.size() - keep);
-    if (spill) quarantinePages(old);
-    else unrefPages(old);
-    if (spill) stat_cow_pages_ += sl.pages.size() - keep;
-    else stat_unshare_ += 1;
-    sl.pages.resize(keep);
-    if (newp) {
-        sl.pages.push_back(*newp);
-        m_.mapPages(sl.id, static_cast<std::uint32_t>(keep), std::span<const std::int32_t>(sl.pages.data() + keep, 1));
-    }
+    if (!spill) stat_unshare_ += 1;
     sl.tier_pages = std::min(sl.tier_pages, static_cast<std::uint32_t>(keep));
 }
 
 bool Engine::ensurePages(Slot& sl, std::uint64_t n_tok) {
-    const std::size_t need = static_cast<std::size_t>((n_tok + kv_page - 1) / kv_page);
-    if (need <= sl.pages.size()) return true;
-    if (need > m_.seqPages()) return false;
-    const std::size_t first = sl.pages.size();
-    sl.pages.reserve(need);
-    while (sl.pages.size() < need) {
-        auto p = takePage(&sl);
-        if (!p) break;
-        sl.pages.push_back(*p);
-    }
-    m_.mapPages(sl.id, static_cast<std::uint32_t>(first),
-                std::span<const std::int32_t>(sl.pages.data() + first, sl.pages.size() - first));
-    return sl.pages.size() >= need;
+    SlotEvictor ev(*this, &sl);
+    return pool_.ensure(sl.pages, sl.id, n_tok, ev);
 }
 
 // ---------------------------------------------------------------------------
@@ -599,17 +515,17 @@ void Engine::dropSpe(Spe& s) {
     s.spill_busy = false;
     if (busy) {
         try {
-            quarantinePages(s.pages);
+            pool_.quarantine(s.pages);
         } catch (const std::exception&) {
             stat_spill_waits_ += 1;
             try {
                 ops_.streamWaitEvent(m_.stream(), s.spill_ev.get());
             } catch (const std::exception&) {
             }
-            unrefPages(s.pages);
+            pool_.unref(s.pages);
         }
     } else {
-        unrefPages(s.pages);
+        pool_.unref(s.pages);
     }
     s.pages.clear();
     s.tokens.clear();
@@ -644,9 +560,9 @@ void Engine::createSpe(Slot& sl, std::span<const std::uint32_t> toks_all, std::u
     s.pages.reserve(last + 1);
     auto np = takePage(&sl);
     if (!np) return;
-    copyPage(*np, sl.pages[last]);
+    pool_.copy(*np, sl.pages[last]);
     for (std::size_t i = 0; i < last; ++i) {
-        refPage(sl.pages[i]);
+        pool_.ref(sl.pages[i]);
         s.pages.push_back(sl.pages[i]);
     }
     s.pages.push_back(*np);
@@ -713,11 +629,11 @@ void Engine::attachSpe(Slot& sl, Spe& s) {
     auto np = takePage(&sl);
     if (!np) throw KvPoolFull();
     for (std::size_t i = 0; i < last; ++i) {
-        refPage(s.pages[i]);
+        pool_.ref(s.pages[i]);
         sl.pages.push_back(s.pages[i]);
     }
     sl.pages.push_back(*np);
-    copyPage(*np, s.pages[last]);
+    pool_.copy(*np, s.pages[last]);
     m_.mapPages(sl.id, 0, sl.pages);
     sl.cache_tokens.insert(sl.cache_tokens.end(), s.tokens.begin(), s.tokens.end());
     // another lineage's KV: no drafter context for it
@@ -1128,7 +1044,7 @@ bool Engine::startJob(Slot& sl, Job& job) {
     sl.last_used = pc_->touch();
     // (v0.2.2.2: ctxForNew = the context per request, lowered by the memory governor for new requests only)
     const std::uint32_t ctx_new = ctxForNew();
-    if (N + nd_max + 2 >= ctx_new || static_cast<std::uint64_t>(N) + nd_max + 2 >= static_cast<std::uint64_t>(pool_pages_) * kv_page) {
+    if (N + nd_max + 2 >= ctx_new || static_cast<std::uint64_t>(N) + nd_max + 2 >= static_cast<std::uint64_t>(pool_.pages()) * kv_page) {
         if (ctx_new < ctx_ && N + nd_max + 2 < ctx_)
             logW("req {} | prompt of {} tokens does not fit the context per request of {} tokens (lowered from {} by the memory "
                  "governor while the WDDM budget is low)",
@@ -1196,7 +1112,7 @@ bool Engine::startJob(Slot& sl, Job& job) {
         if (ops_.eventDone(sl.spill_ev.get())) sl.spill_busy = false;
         else spill = true;
     }
-    if (spill || sharedFrom(sl, mt.reuse)) cowPages(sl, mt.reuse, spill);
+    if (spill || pool_.sharedFrom(sl.pages, mt.reuse)) cowPages(sl, mt.reuse, spill);
     sl.tier_pages = std::min(sl.tier_pages, mt.reuse / kv_page);
     // a request that reuses nothing of the slot starts a new lineage
     if (mt.reuse == 0) {
@@ -1229,8 +1145,8 @@ bool Engine::startJob(Slot& sl, Job& job) {
             static_cast<std::size_t>((static_cast<std::uint64_t>(N) + nd_max + 2 + kv_page - 1) / kv_page);
         if (sl.pages.size() > need_p) {
             const std::span<const std::int32_t> extra(sl.pages.data() + need_p, sl.pages.size() - need_p);
-            if (sl.spill_busy && !ops_.eventDone(sl.spill_ev.get())) quarantinePages(extra);
-            else unrefPages(extra);
+            if (sl.spill_busy && !ops_.eventDone(sl.spill_ev.get())) pool_.quarantine(extra);
+            else pool_.unref(extra);
             sl.pages.resize(need_p);
             sl.tier_pages = std::min(sl.tier_pages, static_cast<std::uint32_t>(need_p));
         }
@@ -1549,7 +1465,7 @@ void Engine::finishPrefill(Slot& sl) {
         ops_.download(cached.data(), m_.logits(), static_cast<std::uint64_t>(V) * 4);
         {
             const bool busy = sl.spill_busy && !ops_.eventDone(sl.spill_ev.get());
-            if (busy || sharedFrom(sl, 0)) {
+            if (busy || pool_.sharedFrom(sl.pages, 0)) {
                 cowPages(sl, 0, busy);
                 if (!ensurePages(sl, N)) throw KvPoolFull();
             }
@@ -2647,7 +2563,7 @@ bool Engine::tryRestore(Slot& sl, Job& job) {
     if (!job.params.cache_prompt || opt_.no_prefix_cache) return false;
     const std::span<const std::uint32_t> toks = job.tokens;
     const std::uint32_t nd_max = draftRoom();
-    if (toks.size() + nd_max + 2 >= ctxForNew() || toks.size() + nd_max + 2 >= static_cast<std::uint64_t>(pool_pages_) * kv_page)
+    if (toks.size() + nd_max + 2 >= ctxForNew() || toks.size() + nd_max + 2 >= static_cast<std::uint64_t>(pool_.pages()) * kv_page)
         return false;
     const auto mt = opt_.cold_resume ? t->lookup(toks, [&](std::uint32_t p, std::uint8_t k) { return resumeOk(toks, p, k); })
                                      : t->lookup(toks);
@@ -2680,8 +2596,8 @@ bool Engine::beginRestore(Slot& sl, Job& job, const tier::Match& mt) {
     if (!ensurePages(sl, x->n_tok)) {
         logW("req {} | slot {} | kv tier: not restoring {} tok: the kv pool has no room ({} of {} pages for this slot, {} "
              "free, {} quarantined batches)",
-             job.id, sl.id, x->n_tok, sl.pages.size(), (x->n_tok + kv_page - 1) / kv_page, free_pages_.size(),
-             quarantine_.size());
+             job.id, sl.id, x->n_tok, sl.pages.size(), (x->n_tok + kv_page - 1) / kv_page, pool_.freeCount(),
+             pool_.batches());
         sl.phase = Phase::prefill;
         return false;
     }
@@ -2935,9 +2851,9 @@ bool Engine::tierTick() {
     stat_ssd_used_.store(t->ssd_bytes, std::memory_order_relaxed);
     stat_superseded_.store(t->stats.superseded, std::memory_order_relaxed);
     stat_ssd_entries_.store(t->ssdEntries(), std::memory_order_relaxed);
-    if (!quarantine_.empty()) {
-        reclaimPages(false);
-        busy = busy || !quarantine_.empty();
+    if (!pool_.quarantineEmpty()) {
+        pool_.reclaim(false);
+        busy = busy || !pool_.quarantineEmpty();
     }
     for (Slot& sl : slots_) {
         if (sl.phase == Phase::idle && sl.spill_wanted) {
@@ -2963,7 +2879,7 @@ void Engine::logTier() {
          t->countRam(), static_cast<double>(t->ssd_bytes) / 1073741824.0, t->ssdEntries(), s.spills,
          static_cast<double>(s.spill_bytes) / 1048576.0, s.restores_ram, s.restores_ssd,
          static_cast<double>(s.restore_bytes) / 1048576.0, s.ssd_writes, static_cast<double>(s.ssd_write_bytes) / 1048576.0,
-         static_cast<double>(s.ssd_dedup_bytes) / 1048576.0, s.ram_evictions, s.dropped, s.superseded, s.demoted, stat_spill_waits_, stat_cow_pages_, stat_q_waits_);
+         static_cast<double>(s.ssd_dedup_bytes) / 1048576.0, s.ram_evictions, s.dropped, s.superseded, s.demoted, stat_spill_waits_, pool_.stats().cow_pages, pool_.stats().q_waits);
 }
 
 // Shutdown (stop()): finished sessions still waiting for their spill go to the RAM
@@ -3068,16 +2984,12 @@ void Engine::failSlot(Slot& sl, const std::string& err) {
 }
 
 std::size_t Engine::pagesFor(std::uint64_t n_tok) const {
-    return static_cast<std::size_t>((n_tok + draftRoom() + 2 + kv_page - 1) / kv_page);
+    return PagePool::pagesFor(n_tok + draftRoom() + 2);
 }
 
 std::size_t Engine::poolAvailable() const {
-    std::size_t n = free_pages_.size(), owed = 0;
-    for (const QBatch& q : quarantine_) n += q.pages.size();
-    auto own = [&](const std::vector<std::int32_t>& pages) {
-        for (std::int32_t pg : pages)
-            if (page_ref_[static_cast<std::size_t>(pg)] == 1) ++n;
-    };
+    std::size_t n = pool_.reclaimable(), owed = 0;
+    auto own = [&](const std::vector<std::int32_t>& pages) { n += pool_.soleOwned(pages); };
     for (const Slot& sl : slots_) {
         if (sl.phase == Phase::idle) {
             own(sl.pages);  // evictable (its prefix cache is dropped)
@@ -3273,7 +3185,7 @@ void Engine::govPublish() {
     memgov::Status st;
     st.on = true;
     st.reduced = gov_->reduced();
-    st.pool_tokens = pool_pages_ * kv_page;
+    st.pool_tokens = pool_.pages() * kv_page;
     st.pool_tokens_start = gov_->config().pool_start;
     st.ctx_per_request = ctxForNew();
     st.slots = static_cast<std::uint32_t>(slots_.size());
@@ -3314,7 +3226,7 @@ void Engine::govTick(const wddmwatch::Sample& s) {
     in.local = s.local_usage;
     in.budget = s.local_budget;
     in.margin = gov_margin_ ? gov_margin_(s.local_budget) : 0;
-    in.pool = pool_pages_ * kv_page;
+    in.pool = pool_.pages() * kv_page;
     in.all_idle = govAllIdle();
     in.parked = gov_parked_;
     in.freeable = in.all_idle ? 0 : govFreeable();
@@ -3352,7 +3264,7 @@ void Engine::govDrain() {
         sp.ready_ev.waitIfPending();
         sp.spill_busy = false;
     }
-    reclaimPages(true);
+    pool_.reclaim(true);
     ops_.streamSync(m_.stream());
     if (tier_ != nullptr) ops_.streamSync(tier_->stream);
 }
@@ -3395,7 +3307,7 @@ void Engine::govFreeCache(bool park) {
                 sp.spill_ev.waitIfPending();
                 sp.ready_ev.waitIfPending();
             }
-            reclaimPages(true);
+            pool_.reclaim(true);
             for (Spe& sp : spes_) {
                 ck_bytes += ck_.bytes(false);
                 ck_.release(sp.ck, {sp.spill_ev.get(), sp.ready_ev.get()});
@@ -3475,7 +3387,7 @@ void Engine::govRestoreCache() {
 }
 
 bool Engine::govResize(std::uint32_t tokens, bool shrink) {
-    const std::uint32_t old = pool_pages_ * kv_page;
+    const std::uint32_t old = pool_.pages() * kv_page;
     if (tokens == old) return false;
     const TimePoint t0 = Clock::now();
     const wddmwatch::Sample before = vram_probe_ ? vram_probe_() : wddmwatch::Sample{};
@@ -3493,7 +3405,7 @@ bool Engine::govResize(std::uint32_t tokens, bool shrink) {
         ++n_spe;
         dropSpe(sp);
     }
-    reclaimPages(true);
+    pool_.reclaim(true);
     // 2. the pool itself (the decode path of the server keeps no captured graph: model.use_graph is off in whirl-server)
     bool ok = false;
     try {
@@ -3515,7 +3427,7 @@ bool Engine::govResize(std::uint32_t tokens, bool shrink) {
         after = a2;
         if (same) break;
     }
-    const std::uint32_t now_tok = pool_pages_ * kv_page;
+    const std::uint32_t now_tok = pool_.pages() * kv_page;
     if (!ok) {
         logW("memory governor: the KV pool could not be re-allocated to {} tokens; kept at {} tokens ({:.0f} ms)", tokens, now_tok, ms);
         gov_last_ = std::format("re-allocation to {} tokens failed", tokens);
@@ -3540,7 +3452,7 @@ void Engine::govApply() {
     gov_pending_ = false;
     const memgov::Plan p = gov_plan_;
     const bool idle = govAllIdle();
-    const bool resize_now = p.pool_target && idle && *p.pool_target != pool_pages_ * kv_page;
+    const bool resize_now = p.pool_target && idle && *p.pool_target != pool_.pages() * kv_page;
     // 1. free reusable cache (idle prefix cache; while requests run, the checkpoint buffers of idle slots / shared ones)
     if (p.free_cache) govFreeCache(!resize_now && !idle);
     // 3. / 4. admission and context for new requests
@@ -3559,7 +3471,7 @@ void Engine::govApply() {
         const wddmwatch::Sample s = vram_probe_();
         if (o && s.ok) {
             const std::uint64_t margin_full = gov_margin_ ? gov_margin_(s.local_budget) : 0;
-            const std::uint32_t pool = pool_pages_ * kv_page;
+            const std::uint32_t pool = pool_.pages() * kv_page;
             const std::uint64_t page_b = kvTokBytes() * kv_page;
             const auto addFor = [&](std::uint64_t m) {
                 const std::uint64_t used = s.local_usage + o->now + m;
@@ -3597,13 +3509,13 @@ void Engine::govApply() {
     if (resized) {
         // the usage this should give, for the governor while the WDDM counters catch up (they show a free late)
         const std::int64_t exp = static_cast<std::int64_t>(gov_resize_before_) + gov_resize_delta_ + static_cast<std::int64_t>(gov_restored_);
-        gov_->resized(pool_pages_ * kv_page, !p.shrink, monoS(), gov_resize_before_ > 0 && exp > 0 ? static_cast<std::uint64_t>(exp) : 0);
+        gov_->resized(pool_.pages() * kv_page, !p.shrink, monoS(), gov_resize_before_ > 0 && exp > 0 ? static_cast<std::uint64_t>(exp) : 0);
         ctx_new_ = gov_->ctxNew();
         if (!p.shrink) gov_grow_denied_logged_ = false;
     }
     if (p.episode_end) {
         logI("memory governor: back to the startup settings (KV pool {} tokens, context {} tokens per request, {} slot(s))",
-             pool_pages_ * kv_page, ctxForNew(), slots_.size());
+             pool_.pages() * kv_page, ctxForNew(), slots_.size());
         gov_last_ = "back to the startup settings";
     }
     // 6. the warning last
@@ -3843,7 +3755,7 @@ void Engine::runLoop() {
                 if (!pool_avail) pool_avail = poolAvailable();
                 Job& qj = *queue_[qi];
                 const std::size_t need = pagesFor(qj.tokens.size());
-                if (n_busy + admit.size() > 0 && need <= pool_pages_ && need > *pool_avail) {
+                if (n_busy + admit.size() > 0 && need <= pool_.pages() && need > *pool_avail) {
                     if (!qj.pool_wait_logged) {
                         qj.pool_wait_logged = true;
                         logI("req {} | queued: the KV pool cannot hold this prompt next to the running requests ({} pages needed, "

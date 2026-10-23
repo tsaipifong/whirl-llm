@@ -3526,6 +3526,331 @@ void testVision() {
 
 std::uint64_t al256(std::uint64_t x) { return (x + 255) / 256 * 256; }
 
+// ---------------------------------------------------------------------------
+// arch024-S4 PagePool (M3). Modeled on vLLM tests/v1/core/test_prefix_caching.py (shared-prefix ref counts, free
+// queue order, eviction order) and llama.cpp's "a failed find_slot changes nothing" (progress/arch024-S4.PRIOR_ART.md).
+
+struct PpRig {
+    NullBackend nb;
+    std::unique_ptr<MockModel> model;
+    std::unique_ptr<PagePool> pool;
+    device::Stream ts = nullptr;  // the tier stream (quarantine events)
+    std::vector<KvArr> arrs;
+    explicit PpRig(std::uint32_t pages = 8, std::vector<std::uint32_t> extra = {}) {
+        MockConfig mc;
+        mc.parallel = 2;
+        mc.pool_tokens = pages * kv_page;
+        mc.kv_extra_rows = std::move(extra);
+        model = std::make_unique<MockModel>(nb, tok(), mc);
+        pool = std::make_unique<PagePool>(nb, *model);
+        arrs = model->kvArrays();
+        pool->init(model->poolPages(), arrs);
+        ts = nb.streamCreateNonBlocking();
+    }
+    ~PpRig() { nb.streamDestroy(ts); }
+    // holders of every page counted once per holder: free + quarantined + held == pages (no page lost or doubled)
+    std::size_t refSum() const {
+        std::size_t n = 0;
+        for (std::uint32_t p = 0; p < pool->pages(); ++p) n += pool->refCount(static_cast<std::int32_t>(p));
+        return n;
+    }
+    // work on the tier stream that the next event there covers (a spill still reading)
+    void spillWork() {
+        static std::uint8_t buf[64];
+        nb.copyAsync(reinterpret_cast<DevPtr>(buf), reinterpret_cast<DevPtr>(buf + 32), 16, ts);
+    }
+};
+
+// scripted evictor: each call frees the next holder's pages (unref), false when none is left
+struct ListEvictor final : PagePool::Evictor {
+    PagePool& pool;
+    std::vector<std::vector<std::int32_t>*> victims;
+    std::size_t calls = 0;
+    explicit ListEvictor(PagePool& p) : pool(p) {}
+    bool evictOne() override {
+        ++calls;
+        for (auto* v : victims) {
+            if (v->empty()) continue;
+            pool.unref(*v);
+            v->clear();
+            return true;
+        }
+        return false;
+    }
+};
+
+void testPagePool() {
+    // ---- init and the free order: increasing page ids, then LIFO reuse (free stack like vLLM's free queue tail)
+    {
+        PpRig r(8);
+        CHECK_EQ(r.pool->pages(), 8u);
+        CHECK_EQ(r.pool->freeCount(), 8u);
+        CHECK_EQ(r.refSum(), 0u);
+        std::vector<std::int32_t> got;
+        for (int i = 0; i < 3; ++i) got.push_back(*r.pool->takeFree());
+        CHECK(got == (std::vector<std::int32_t>{0, 1, 2}));
+        CHECK_EQ(r.pool->refCount(1), 1u);
+        const std::int32_t one[] = {1};
+        r.pool->unref(one);
+        CHECK_EQ(r.pool->refCount(1), 0u);
+        CHECK_EQ(*r.pool->takeFree(), 1);  // the page just freed comes back first
+        CHECK_EQ(*r.pool->takeFree(), 3);
+        CHECK_EQ(r.pool->freeCount(), 4u);
+        CHECK_EQ(r.pool->reclaimable(), 4u);
+        CHECK_EQ(PagePool::pagesFor(0), 0u);
+        CHECK_EQ(PagePool::pagesFor(1), 1u);
+        CHECK_EQ(PagePool::pagesFor(kv_page), 1u);
+        CHECK_EQ(PagePool::pagesFor(kv_page + 1), 2u);
+        // init again (govResize): every page free, no holder
+        r.pool->init(5, r.arrs);
+        CHECK_EQ(r.pool->freeCount(), 5u);
+        CHECK_EQ(r.refSum(), 0u);
+        CHECK_EQ(*r.pool->takeFree(), 0);
+    }
+    // ---- shared prefix: ref counts (vLLM test_prefill: two requests on one prefix -> ref_cnt 2)
+    {
+        PpRig r(8);
+        ListEvictor ev(*r.pool);
+        std::vector<std::int32_t> a, b;
+        CHECK(r.pool->ensure(a, 0, 3 * kv_page, ev));
+        CHECK(a == (std::vector<std::int32_t>{0, 1, 2}));
+        // b shares a's first two pages (attachSpe / createSpe: ref + push)
+        for (std::size_t i = 0; i < 2; ++i) {
+            r.pool->ref(a[i]);
+            b.push_back(a[i]);
+        }
+        CHECK_EQ(r.pool->refCount(0), 2u);
+        CHECK_EQ(r.pool->refCount(1), 2u);
+        CHECK_EQ(r.pool->refCount(2), 1u);
+        CHECK(r.pool->sharedFrom(a, 0));
+        CHECK(r.pool->sharedFrom(a, kv_page + 1));       // keep 1: page 1 still shared
+        CHECK(!r.pool->sharedFrom(a, 2 * kv_page + 1));  // keep 2: only page 2 from there, own
+        CHECK(!r.pool->sharedFrom(a, 3 * kv_page + 1));  // keep past the list
+        CHECK_EQ(r.pool->soleOwned(a), 1u);
+        CHECK_EQ(r.pool->soleOwned(b), 0u);
+        // b goes: nothing freed (a still holds them)
+        r.pool->unref(b);
+        b.clear();
+        CHECK_EQ(r.pool->freeCount(), 5u);
+        CHECK_EQ(r.pool->refCount(0), 1u);
+        CHECK(!r.pool->sharedFrom(a, 0));
+        r.pool->unref(a);
+        a.clear();
+        CHECK_EQ(r.pool->freeCount(), 8u);
+        CHECK_EQ(r.refSum(), 0u);
+        CHECK_EQ(ev.calls, 0u);
+    }
+    // ---- copy: every pool array, page length kv_page * row, at the page offsets (f16 K/V and q8h / q4 shaped K, V,
+    // K scales, V scales)
+    for (const auto& extra : {std::vector<std::uint32_t>{}, std::vector<std::uint32_t>{8, 8}, std::vector<std::uint32_t>{4, 12}}) {
+        PpRig r(4, extra);
+        for (const KvArr& x : r.arrs) {
+            auto* p = reinterpret_cast<std::uint8_t*>(x.base);
+            const std::uint64_t len = static_cast<std::uint64_t>(kv_page) * x.row;
+            for (std::uint64_t i = 0; i < len; ++i) p[1 * len + i] = static_cast<std::uint8_t>(i * 7 + x.row);
+        }
+        const std::uint64_t c0 = r.nb.copyCalls(), b0 = r.nb.copiedBytes();
+        r.pool->copy(3, 1);
+        CHECK_EQ(r.nb.copyCalls() - c0, r.arrs.size());
+        std::uint64_t bytes = 0;
+        bool same = true, others = true;
+        for (const KvArr& x : r.arrs) {
+            auto* p = reinterpret_cast<const std::uint8_t*>(x.base);
+            const std::uint64_t len = static_cast<std::uint64_t>(kv_page) * x.row;
+            bytes += len;
+            for (std::uint64_t i = 0; i < len; ++i) {
+                same = same && p[3 * len + i] == p[1 * len + i];
+                others = others && p[0 * len + i] == 0 && p[2 * len + i] == 0;
+            }
+        }
+        CHECK(same);
+        CHECK(others);
+        CHECK_EQ(r.nb.copiedBytes() - b0, bytes);
+    }
+    // ---- COW (cowPages): reuse > 0 copies the boundary page, releases the rest; spill quarantines them
+    {
+        PpRig r(8);
+        ListEvictor ev(*r.pool);
+        std::vector<std::int32_t> a, b;
+        CHECK(r.pool->ensure(a, 0, 3 * kv_page, ev));
+        for (std::int32_t p : a) {
+            r.pool->ref(p);
+            b.push_back(p);
+        }
+        const std::uint64_t c0 = r.nb.copyCalls();
+        CHECK(r.pool->cow(a, 0, kv_page + 10, false, ev) == PagePool::Cow::done);  // keep 1
+        CHECK_EQ(a.size(), 2u);
+        CHECK_EQ(a[0], 0);
+        CHECK_EQ(a[1], 3);  // the next free page, a copy of page 1
+        CHECK_EQ(r.nb.copyCalls() - c0, r.arrs.size());
+        CHECK_EQ(r.pool->refCount(0), 2u);
+        CHECK_EQ(r.pool->refCount(1), 1u);  // only b now
+        CHECK_EQ(r.pool->refCount(2), 1u);
+        CHECK_EQ(r.pool->refCount(3), 1u);
+        CHECK_EQ(r.pool->stats().cow_pages, 0u);  // counted for spills only
+        CHECK(!r.pool->sharedFrom(a, kv_page + 10));
+        // keep past the list: unchanged, no copy
+        const std::uint64_t c1 = r.nb.copyCalls();
+        CHECK(r.pool->cow(a, 0, 2 * kv_page + 1, false, ev) == PagePool::Cow::unchanged);
+        CHECK_EQ(r.nb.copyCalls(), c1);
+        // reuse 0: every page released, no copy
+        CHECK(r.pool->cow(b, 1, 0, false, ev) == PagePool::Cow::done);
+        CHECK(b.empty());
+        CHECK_EQ(r.nb.copyCalls(), c1);
+        CHECK_EQ(r.pool->refCount(0), 1u);
+        CHECK_EQ(r.pool->freeCount() + r.refSum(), 8u);
+        // spill: the released pages are quarantined (held until the spill's event), counted in cow_pages
+        r.pool->setQuarantineStream(&r.ts);
+        CHECK(r.pool->cow(a, 0, 0, true, ev) == PagePool::Cow::done);
+        CHECK(a.empty());
+        CHECK_EQ(r.pool->batches(), 1u);
+        CHECK_EQ(r.pool->stats().cow_pages, 2u);
+        r.pool->reclaim(false);  // tracking off: every event done
+        CHECK(r.pool->quarantineEmpty());
+        CHECK_EQ(r.pool->freeCount(), 8u);
+        // no page for the copy: no_page, the list and the counts untouched
+        std::vector<std::int32_t> c, d;
+        CHECK(r.pool->ensure(c, 0, 8 * kv_page, ev));
+        for (std::int32_t p : c) {
+            r.pool->ref(p);
+            d.push_back(p);
+        }
+        const std::size_t refs = r.refSum();
+        const std::uint64_t c2 = r.nb.copyCalls();
+        CHECK(r.pool->cow(c, 0, kv_page + 1, false, ev) == PagePool::Cow::no_page);
+        CHECK_EQ(c.size(), 8u);
+        CHECK_EQ(r.refSum(), refs);
+        CHECK_EQ(r.nb.copyCalls(), c2);
+    }
+    // ---- quarantine: reclaimed only after its event (tracking mode); reclaim(force) orders the model stream instead
+    {
+        PpRig r(4);
+        ListEvictor ev(*r.pool);
+        std::vector<std::int32_t> a;
+        CHECK(r.pool->ensure(a, 0, 2 * kv_page, ev));
+        // no tier: quarantine throws NoTier and keeps nothing
+        bool threw = false;
+        try {
+            r.pool->quarantine(a);
+        } catch (const std::runtime_error& ex) {
+            threw = std::string(ex.what()) == "NoTier";
+        }
+        CHECK(threw);
+        CHECK(r.pool->quarantineEmpty());
+        r.pool->setQuarantineStream(&r.ts);
+        r.nb.trackPending(true);
+        r.spillWork();
+        r.pool->quarantine(a);  // freePages of a slot whose spill still reads them
+        a.clear();
+        CHECK_EQ(r.pool->batches(), 1u);
+        CHECK_EQ(r.pool->freeCount(), 2u);
+        CHECK_EQ(r.pool->reclaimable(), 4u);
+        r.pool->reclaim(false);
+        CHECK_EQ(r.pool->batches(), 1u);  // event pending: still held
+        CHECK_EQ(r.pool->refCount(0), 1u);
+        r.nb.completeAll();
+        r.pool->reclaim(false);
+        CHECK(r.pool->quarantineEmpty());
+        CHECK_EQ(r.pool->freeCount(), 4u);
+        CHECK_EQ(r.pool->stats().q_waits, 0u);
+        // two batches, the first done, the second pending: reclaim(false) takes the first only
+        std::vector<std::int32_t> x, y;
+        CHECK(r.pool->ensure(x, 0, kv_page, ev));
+        CHECK(r.pool->ensure(y, 1, kv_page, ev));
+        r.spillWork();
+        r.pool->quarantine(x);
+        r.nb.completeAll();
+        r.spillWork();
+        r.pool->quarantine(y);
+        r.pool->reclaim(false);
+        CHECK_EQ(r.pool->batches(), 1u);
+        CHECK_EQ(r.pool->refCount(x[0]), 0u);
+        CHECK_EQ(r.pool->refCount(y[0]), 1u);
+        // force: the pending one back without a host wait (stream order on the GPU), counted in q_waits
+        const std::uint64_t s0 = r.nb.syncCalls();
+        r.pool->reclaim(true);
+        CHECK(r.pool->quarantineEmpty());
+        CHECK_EQ(r.pool->refCount(y[0]), 0u);
+        CHECK_EQ(r.pool->stats().q_waits, 1u);
+        CHECK_EQ(r.nb.syncCalls(), s0);
+        CHECK_EQ(r.nb.pendingFreeViolations(), 0u);
+        r.nb.completeAll();
+        r.nb.trackPending(false);
+    }
+    // ---- take: free first; then the done quarantine; then the evictor (in its order); then the pending quarantine
+    {
+        PpRig r(4);
+        r.pool->setQuarantineStream(&r.ts);
+        ListEvictor ev(*r.pool);
+        std::vector<std::int32_t> v1, v2, q;
+        CHECK(r.pool->ensure(v1, 0, kv_page, ev));      // page 0
+        CHECK(r.pool->ensure(v2, 1, 2 * kv_page, ev));  // pages 1, 2
+        CHECK(r.pool->ensure(q, 0, kv_page, ev));       // page 3
+        CHECK_EQ(r.pool->freeCount(), 0u);
+        CHECK_EQ(ev.calls, 0u);
+        r.nb.trackPending(true);
+        r.spillWork();
+        r.pool->quarantine(q);  // pending
+        ev.victims = {&v2, &v1};
+        auto p = r.pool->take(ev);
+        CHECK(p.has_value());
+        CHECK_EQ(ev.calls, 1u);  // the evictor before the pending quarantine
+        CHECK_EQ(*p, 2);         // v2 freed 1 then 2: LIFO
+        CHECK(v2.empty() && !v1.empty());
+        CHECK_EQ(r.pool->batches(), 1u);
+        CHECK_EQ(*r.pool->take(ev), 1);
+        CHECK_EQ(ev.calls, 1u);  // a free page: no evictor call
+        CHECK_EQ(*r.pool->take(ev), 0);
+        CHECK_EQ(ev.calls, 2u);  // v1 next
+        // nothing left to evict: the pending quarantine with the model stream ordered after it
+        CHECK_EQ(*r.pool->take(ev), 3);
+        CHECK_EQ(ev.calls, 3u);
+        CHECK_EQ(r.pool->stats().q_waits, 1u);
+        // done quarantine: taken back before the evictor is asked
+        std::vector<std::int32_t> back = {3};
+        r.pool->quarantine(back);
+        r.nb.completeAll();
+        CHECK_EQ(*r.pool->take(ev), 3);
+        CHECK_EQ(ev.calls, 3u);
+        // all held, nothing to evict, no quarantine: nullopt, counts unchanged
+        const std::size_t refs = r.refSum();
+        CHECK(!r.pool->take(ev).has_value());
+        CHECK_EQ(ev.calls, 4u);
+        CHECK_EQ(r.refSum(), refs);
+        CHECK_EQ(r.pool->freeCount(), 0u);
+        r.nb.trackPending(false);
+    }
+    // ---- ensure: already enough (no change); more than one sequence may hold (false, nothing taken); failure keeps the
+    // pages taken so far (WHIRL's partial grow; the caller throws KvPoolFull / waits) and loses none
+    {
+        PpRig r(4);
+        ListEvictor ev(*r.pool);
+        std::vector<std::int32_t> a;
+        CHECK(r.pool->ensure(a, 0, 0, ev));
+        CHECK(a.empty());
+        CHECK(r.pool->ensure(a, 0, kv_page, ev));
+        CHECK(r.pool->ensure(a, 0, kv_page - 5, ev));
+        CHECK_EQ(a.size(), 1u);
+        std::vector<std::int32_t> big;
+        CHECK(!r.pool->ensure(big, 1, static_cast<std::uint64_t>(r.model->seqPages() + 1) * kv_page, ev));
+        CHECK(big.empty());
+        CHECK_EQ(r.pool->freeCount(), 3u);
+        CHECK_EQ(ev.calls, 0u);
+        std::vector<std::int32_t> b;
+        CHECK(!r.pool->ensure(b, 1, 6 * kv_page, ev));
+        CHECK_EQ(b.size(), 3u);  // partial
+        CHECK_EQ(r.pool->freeCount(), 0u);
+        CHECK_EQ(r.refSum(), 4u);
+        CHECK_EQ(ev.calls, 1u);
+        // the evictor frees a: the retry grows b by those pages
+        ev.victims = {&a};
+        CHECK(!r.pool->ensure(b, 1, 6 * kv_page, ev));
+        CHECK_EQ(b.size(), 4u);
+        CHECK_EQ(r.refSum(), 4u);
+        CHECK(r.pool->ensure(b, 1, 4 * kv_page, ev));
+    }
+}
+
 struct CkRig {
     NullBackend nb;
     std::unique_ptr<MockModel> model;
@@ -4463,6 +4788,7 @@ int main(int argc, char** argv) {
         {"ckpt_f1", testCkptF1},
         {"ckpt_restore_fail", testCkptRestoreFail},
         {"ckpt_engine_teardown", testCkptEngineTeardown},
+        {"page_pool", testPagePool},
         {"compat_endpoints", testCompatEndpoints},
         {"http_limits", testHttpLimits},
         {"http_conn_cap", testHttpConnCap},
