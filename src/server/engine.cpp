@@ -663,10 +663,6 @@ std::uint32_t Engine::sysSplit(std::span<const std::uint32_t> toks) const {
     return static_cast<std::uint32_t>(sched::sysSplit(ct_.sysBoundary(toks), toks.size(), opt_.sys_min));
 }
 
-std::size_t Engine::schedNext(std::size_t n, std::size_t sys, std::size_t think, std::size_t pos) {
-    return sched::schedNext(n, sys, think, {}, pos);
-}
-
 // vision: schedNext with the prompt's image-end splits (imgs sorted; empty for text)
 std::size_t Engine::schedNextV(std::size_t n, std::size_t sys, std::size_t think, std::span<const std::uint32_t> imgs,
                                std::size_t pos) {
