@@ -89,7 +89,10 @@ RamTierText ramTierText(const std::optional<RamFit>& rf, std::uint64_t asked_mb,
     t.off_reason = std::string(size_reason);  // what the "RAM tier off" line names (REVIEW-S8-719 N3)
     t.size_reason = std::string(size_reason);
     if (!rf) return t;
-    if (rf->mb == 0 && rf->pinned) {
+    // the pinned room itself turned the tier off (room 0, or below one entry for the automatic size); when the half rule
+    // did it after the room (REVIEW-S8-719-3 N3-2) the room was > 0, so "no room left" would be wrong: the half rule is named
+    const bool room_off = rf->mb == 0 && rf->pinned && !rf->half;
+    if (room_off) {
         t.pinned_why += pinnedOffWhy(rf->below_entry, entry_mb);
         t.off_reason = std::format("{} {} MiB asked: {}", explicit_size ? std::string(src) : std::string("auto"), asked_mb, t.pinned_why);
     }
@@ -101,6 +104,10 @@ RamTierText ramTierText(const std::optional<RamFit>& rf, std::uint64_t asked_mb,
             why += std::format("{}the RAM tier is pinned host memory; more than half of the {} MiB of RAM available now "
                                "would make the system page, so it is lowered to half",
                                why.empty() ? "" : "; ", avail_mb);
+        if (rf->mb == 0 && rf->half) {
+            why += "; that leaves 0 MiB, so the host tiers are off (RAM and SSD)";
+            t.off_reason = std::format("{} {} MiB asked: {}", std::string(src), asked_mb, why);
+        }
         t.adjusted_why = why;
     }
     return t;
