@@ -96,6 +96,10 @@ RamTierText ramTierText(const std::optional<RamFit>& rf, std::uint64_t asked_mb,
         t.pinned_why += pinnedOffWhy(rf->below_entry, entry_mb);
         t.off_reason = std::format("{} {} MiB asked: {}", explicit_size ? std::string(src) : std::string("auto"), asked_mb, t.pinned_why);
     }
+    // REVIEW-S8-719-3 N3-6: the size line names the reason of the size asked; say it was lowered, and to what
+    if (rf->mb > 0 && rf->mb != asked_mb)
+        t.size_reason = explicit_size ? std::format("{} asked, lowered to {} MiB: see the adjusted: line", size_reason, rf->mb)
+                                      : std::format("{}; lowered to {} MiB: see the line above", size_reason, rf->mb);
     if (explicit_size) {
         std::string why;
         if (rf->safe) why = std::format("capped at {} MiB while a crash with larger RAM tiers is investigated", ram_tier_safe_mb);
