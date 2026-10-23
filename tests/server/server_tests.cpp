@@ -5548,6 +5548,271 @@ void testTierBridgeFlush() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// arch024-S7: TierBridge restore half driven directly (TbRig: MockModel + NullBackend + a RAM-only tier::Tier).
+// The engine-level versions (restore_conc, restore_throws, tier_inplace) stay; these call TierBridge itself:
+// restoreMatch / startRestore / pumpRestore / restoreDone / restoreFailed / finishTail / cutTail / queuedReuse.
+
+namespace {
+
+// fill a slot's KV pages with a pattern (per array, page and byte), so a restore that reads the wrong place shows
+void tbFillPages(TbRig& r, const std::vector<std::int32_t>& pages, std::uint8_t salt) {
+    for (std::size_t a = 0; a < r.kv.size(); ++a) {
+        const std::uint64_t len = static_cast<std::uint64_t>(qwen35::kv_page) * r.kv[a].row;
+        for (std::size_t i = 0; i < pages.size(); ++i) {
+            auto* p = reinterpret_cast<std::uint8_t*>(r.kv[a].base + static_cast<std::uint64_t>(pages[i]) * len);
+            for (std::uint64_t b = 0; b < len; ++b) p[b] = static_cast<std::uint8_t>(salt + a * 31 + i * 7 + b);
+        }
+    }
+}
+
+// pages src[i] and dst[i] hold the same bytes in every pool array (the first n of them)
+bool tbSamePages(TbRig& r, const std::vector<std::int32_t>& src, const std::vector<std::int32_t>& dst, std::size_t n) {
+    for (std::size_t a = 0; a < r.kv.size(); ++a) {
+        const std::uint64_t len = static_cast<std::uint64_t>(qwen35::kv_page) * r.kv[a].row;
+        for (std::size_t i = 0; i < n; ++i) {
+            const auto* p = reinterpret_cast<const void*>(r.kv[a].base + static_cast<std::uint64_t>(src[i]) * len);
+            const auto* q = reinterpret_cast<const void*>(r.kv[a].base + static_cast<std::uint64_t>(dst[i]) * len);
+            if (std::memcmp(p, q, len) != 0) return false;
+        }
+    }
+    return true;
+}
+
+bool tbSameCk(TbRig& r, const Ckpt& a, const Ckpt& b) {
+    const std::size_t n = static_cast<std::size_t>(r.cs->bytes(true));
+    return std::memcmp(reinterpret_cast<const void*>(a.dev.get()), reinterpret_cast<const void*>(b.dev.get()), n) == 0;
+}
+
+// the steps the engine passes, recorded in call order
+struct TbSteps {
+    std::vector<std::string> calls;
+    TierBridge::RestoreSteps steps(SlotPrefix& sp) {
+        TierBridge::RestoreSteps s;
+        s.drop_cache = [this, &sp] {
+            calls.push_back("drop");
+            for (Ckpt& c : sp.ckpts) c.valid = false;
+            sp.cache_tokens.clear();
+        };
+        s.drafter_reset = [this](std::uint32_t n) { calls.push_back("dfl" + std::to_string(n)); };
+        s.share = [this](Ckpt&, std::uint64_t) { calls.push_back("share"); };
+        return s;
+    }
+};
+
+}  // namespace
+
+void testTierBridgeRestore() {
+    constexpr std::uint32_t KP = qwen35::kv_page;
+    // a session of N tokens (19 pages - 16), checkpoints at 600 / 1100 / N (seq 1 / 2 / 3), spilled from pages 5..
+    const std::uint32_t N = 19 * KP - 16;
+    for (const std::vector<std::uint32_t>& extra : {std::vector<std::uint32_t>{}, std::vector<std::uint32_t>{4, 6}}) {
+        TierBridge::Config tc;
+        tc.verify = true;
+        TbRig r(extra, tc);
+        const auto toks = tbTokens(N, 5);
+        auto src = r.slot(toks, {600, 1100, N}, {1, 2, 3}, 5);
+        tbFillPages(r, src->sp.pages, 0x21);
+        r.tb->spillSlot(0, true, src->sp, src->st);
+        r.nb.eventSync(src->st.spill_ev.get());
+        const std::uint64_t eid = src->st.tier_id;
+        CHECK(eid != 0);
+        tier::Entry* x = r.tier->find(eid);
+        CHECK(x != nullptr);
+        if (!x) return;
+        // the next turn: the session plus 300 tokens
+        std::vector<std::uint32_t> next = toks;
+        const auto more = tbTokens(300, 9);
+        next.insert(next.end(), more.begin(), more.end());
+
+        // (1) restoreMatch: an empty slot gets the entry (reuse N: the last checkpoint); a slot already holding the
+        // session does not (no gain); a short prompt (gain under min_gain) does not
+        auto dst = r.slot({}, {0, 0, 0}, {0, 0, 0}, 0);
+        dst->sp.pages.clear();
+        dst->sp.ckpt_seq = 0;
+        const auto mt = r.tb->restoreMatch(dst->sp, next);
+        CHECK(mt.has_value());
+        if (!mt) return;
+        CHECK_EQ(mt->e, x);
+        CHECK_EQ(mt->reuse, N);
+        CHECK(!r.tb->restoreMatch(src->sp, next).has_value());
+        CHECK(!r.tb->restoreMatch(dst->sp, tbTokens(400, 5)).has_value());
+
+        // (2) startRestore into pages 100.. (the scheduler gave them), main part = matched checkpoint + pages
+        for (std::uint32_t p = 0; p < x->pages; ++p) dst->sp.pages.push_back(100 + static_cast<std::int32_t>(p));
+        g_log.clear();
+        const auto t0 = std::chrono::steady_clock::now();
+        CHECK(r.tb->startRestore(7, 1, next, dst->sp, dst->st, *mt, t0));
+        CHECK(dst->st.restore != nullptr);
+        CHECK(!dst->st.rs_shared);
+        CHECK_EQ(x->owner, 1u);
+        CHECK_EQ(g_log.count("req 7 | slot 1 | kv tier: restoring " + std::to_string(N) + " tok from RAM (checkpoint 'prompt-end' @" +
+                             std::to_string(N)),
+                 static_cast<std::size_t>(1));
+        // matched checkpoint (entry k of pos N) -> slot checkpoint 0, the others follow by position as the tail
+        std::size_t k_main = mt->ck, n_tail = 0;
+        for (std::size_t k = 0; k < x->nck; ++k) n_tail += dst->st.rs_tail[k] ? 1 : 0;
+        CHECK_EQ(n_tail, static_cast<std::size_t>(2));
+        CHECK(!dst->st.rs_tail[k_main]);
+        CHECK(dst->st.rs_map[k_main] >= 0);
+        // span order: checkpoint pieces, then one piece per pool array per page, then the tail checkpoints
+        const std::size_t per_ck = 2 * r.n_gdn + 2;
+        CHECK_EQ(r.tb->spans().size(), 3 * per_ck + x->pages * r.kv.size());
+        // queuedReuse: a queued request on the same session sees the restore's prefix; a slot not restoring: 0
+        CHECK_EQ(r.tb->queuedReuse(dst->st, next), N);
+        CHECK_EQ(r.tb->queuedReuse(src->st, next), 0u);
+        CHECK_EQ(r.tb->queuedReuse(dst->st, tbTokens(N, 77)), 0u);
+
+        // (3) pump until restored, then restoreDone: tokens, checkpoints (main valid, tail not yet), tier entry
+        TierBridge::Pump p = TierBridge::Pump::pending;
+        for (int i = 0; i < 1000 && p == TierBridge::Pump::pending; ++i) p = r.tb->pumpRestore(dst->st);
+        CHECK(p == TierBridge::Pump::restored);
+        TbSteps ts;
+        g_log.clear();
+        r.tb->restoreDone(7, 1, dst->sp, dst->st, ts.steps(dst->sp));
+        CHECK_EQ(ts.calls.size(), static_cast<std::size_t>(1));
+        if (!ts.calls.empty()) CHECK_EQ(ts.calls[0], "dfl" + std::to_string(N));
+        CHECK(dst->sp.cache_tokens == toks);
+        CHECK_EQ(dst->st.tier_id, eid);
+        CHECK_EQ(dst->st.tier_pages, N / KP);
+        CHECK_EQ(dst->sp.ckpt_seq, static_cast<std::uint64_t>(3));
+        const Ckpt& m0 = dst->sp.ckpts[static_cast<std::size_t>(dst->st.rs_map[k_main])];
+        CHECK(m0.valid);
+        CHECK_EQ(m0.pos, N);
+        CHECK(tbSameCk(r, m0, src->sp.ckpts[2]));
+        CHECK(tbSamePages(r, src->sp.pages, dst->sp.pages, x->pages));
+        CHECK_EQ(g_log.count("kv tier verify: restore of " + std::to_string(N) + " tok byte-identical"), static_cast<std::size_t>(1));
+        CHECK_EQ(g_log.count("kv tier: restored " + std::to_string(N) + " tok from RAM"), static_cast<std::size_t>(1));
+        CHECK_EQ(r.tier->stats.restores_ram, static_cast<std::uint64_t>(1));
+        std::size_t valid = 0;
+        for (const Ckpt& c : dst->sp.ckpts) valid += c.valid ? 1 : 0;
+        CHECK_EQ(valid, static_cast<std::size_t>(1));
+
+        // (4) finishTail: the tail checkpoints become valid (pos <= reuse) with their bytes, the restore ends
+        dst->sp.reuse = N;
+        g_log.clear();
+        r.tb->finishTail(1, dst->sp, dst->st, true);
+        CHECK(dst->st.restore == nullptr);
+        CHECK_EQ(x->pin, 0u);
+        valid = 0;
+        for (const Ckpt& c : dst->sp.ckpts) valid += c.valid ? 1 : 0;
+        CHECK_EQ(valid, static_cast<std::size_t>(3));
+        for (std::size_t k = 0; k < x->nck; ++k) {
+            const std::int32_t j = dst->st.rs_map[k];
+            if (j < 0) continue;
+            const Ckpt& c = dst->sp.ckpts[static_cast<std::size_t>(j)];
+            // source checkpoint of the same position
+            for (const Ckpt& s : src->sp.ckpts)
+                if (s.pos == c.pos) CHECK(tbSameCk(r, c, s));
+        }
+        CHECK_EQ(g_log.count("kv tier verify: restore tail byte-identical (" ), static_cast<std::size_t>(1));
+        CHECK(std::none_of(dst->st.rs_tail.begin(), dst->st.rs_tail.end(), [](bool b) { return b; }));
+
+        // (5) in-place regeneration: the restored slot goes on 200 tokens, its next spill updates the same entry in place
+        dst->sp.cache_tokens.insert(dst->sp.cache_tokens.end(), more.begin(), more.begin() + 200);
+        dst->sp.pages.push_back(200);
+        dst->sp.pages.push_back(201);
+        dst->sp.ckpts[0].pos = N + 200;
+        dst->sp.ckpts[0].seq = 4;
+        g_log.clear();
+        r.tb->spillSlot(1, true, dst->sp, dst->st);
+        CHECK_EQ(dst->st.tier_id, eid);
+        CHECK_EQ(g_log.count("kv tier: spill " + std::to_string(N + 200) + " tok to RAM (in place"), static_cast<std::size_t>(1));
+        r.nb.eventSync(dst->st.spill_ev.get());
+        CHECK_EQ(r.tier->verifySpans(x, r.tb->spans()).bad, static_cast<std::uint64_t>(0));
+
+        // (6) concurrent: two slots restore the same entry; the second starts while the first's tail is still open
+        auto a = r.slot({}, {0, 0}, {0, 0}, 0);
+        auto b = r.slot({}, {0, 0}, {0, 0}, 0);
+        a->sp.pages.clear();
+        b->sp.pages.clear();
+        const auto mt2 = r.tb->restoreMatch(a->sp, next);
+        CHECK(mt2.has_value());
+        if (mt2) {
+            for (std::uint32_t q = 0; q < mt2->e->pages; ++q) {
+                a->sp.pages.push_back(300 + static_cast<std::int32_t>(q));
+                b->sp.pages.push_back(360 + static_cast<std::int32_t>(q));
+            }
+            CHECK(r.tb->startRestore(8, 2, next, a->sp, a->st, *mt2, t0));
+            const auto mt3 = r.tb->restoreMatch(b->sp, next);
+            CHECK(mt3.has_value());
+            if (mt3) CHECK(r.tb->startRestore(9, 3, next, b->sp, b->st, *mt3, t0));
+            CHECK_EQ(r.tb->queuedReuse(a->st, next), mt2->reuse);
+            TbSteps sa, sb;
+            for (auto* s : {a.get(), b.get()}) {
+                if (!s->st.restore) continue;
+                TierBridge::Pump q = TierBridge::Pump::pending;
+                for (int i = 0; i < 1000 && q == TierBridge::Pump::pending; ++i) q = r.tb->pumpRestore(s->st);
+                CHECK(q == TierBridge::Pump::restored);
+                r.tb->restoreDone(9, 3, s->sp, s->st, (s == a.get() ? sa : sb).steps(s->sp));
+                s->sp.reuse = mt2->reuse;
+                r.tb->cutTail(3, s->sp, s->st);  // saveCkpt: the tail is cut (what is in counts)
+                r.tb->finishTail(3, s->sp, s->st, true);
+                CHECK(s->st.restore == nullptr);
+            }
+            CHECK(tbSamePages(r, a->sp.pages, b->sp.pages, mt2->e->pages));
+            CHECK(a->sp.cache_tokens == b->sp.cache_tokens);
+            CHECK_EQ(x->pin, 0u);
+            CHECK_EQ(r.tier->stats.restores_ram, static_cast<std::uint64_t>(3));
+        }
+
+        // (7) a restore copy throws (F1 path): the restore fails cleanly (fence, drop_cache, end), the entry is not
+        // left pinned, and the same entry restores afterwards
+        auto f = r.slot({}, {0, 0}, {0, 0}, 0);
+        f->sp.pages.clear();
+        f->sp.cache_tokens = tbTokens(100, 3);
+        const auto mt4 = r.tb->restoreMatch(f->sp, next);
+        CHECK(mt4.has_value());
+        if (mt4) {
+            for (std::uint32_t q = 0; q < mt4->e->pages; ++q) f->sp.pages.push_back(420 + static_cast<std::int32_t>(q));
+            r.nb.failHostToDevCopy(2);
+            bool threw = false, started = false;
+            try {
+                started = r.tb->startRestore(10, 4, next, f->sp, f->st, *mt4, t0);
+            } catch (const std::exception&) {
+                threw = true;  // Engine::tryRestore logs "restore failed to start" and prefills cold
+            }
+            TbSteps sf;
+            if (started) {
+                TierBridge::Pump q = TierBridge::Pump::pending;
+                for (int i = 0; i < 1000 && q == TierBridge::Pump::pending; ++i) q = r.tb->pumpRestore(f->st);
+                CHECK(q == TierBridge::Pump::failed);
+                g_log.clear();
+                r.tb->restoreFailed(10, 4, f->st, sf.steps(f->sp));
+                CHECK_EQ(g_log.count("req 10 | slot 4 | kv tier: restore failed; prefilling from scratch"), static_cast<std::size_t>(1));
+                CHECK_EQ(sf.calls.size(), static_cast<std::size_t>(1));
+                if (!sf.calls.empty()) CHECK_EQ(sf.calls[0], std::string("drop"));
+                CHECK(f->sp.cache_tokens.empty());
+                CHECK(f->st.restore == nullptr);
+                CHECK(std::none_of(f->st.rs_tail.begin(), f->st.rs_tail.end(), [](bool v) { return v; }));
+            }
+            CHECK(threw || started);
+            CHECK(!r.nb.hostCopyFailArmed());
+            r.nb.failHostToDevCopy(0);
+            CHECK_EQ(x->pin, 0u);
+            CHECK_EQ(r.tier->stats.restores_ram, static_cast<std::uint64_t>(3));
+            // again, no failure: restores
+            auto g = r.slot({}, {0, 0}, {0, 0}, 0);
+            g->sp.pages.clear();
+            const auto mt5 = r.tb->restoreMatch(g->sp, next);
+            CHECK(mt5.has_value());
+            if (mt5) {
+                for (std::uint32_t q = 0; q < mt5->e->pages; ++q) g->sp.pages.push_back(450 + static_cast<std::int32_t>(q));
+                CHECK(r.tb->startRestore(11, 5, next, g->sp, g->st, *mt5, t0));
+                TierBridge::Pump q = TierBridge::Pump::pending;
+                for (int i = 0; i < 1000 && q == TierBridge::Pump::pending; ++i) q = r.tb->pumpRestore(g->st);
+                CHECK(q == TierBridge::Pump::restored);
+                TbSteps sg;
+                r.tb->restoreDone(11, 5, g->sp, g->st, sg.steps(g->sp));
+                r.tb->finishTail(5, g->sp, g->st, true);
+                CHECK(tbSamePages(r, a->sp.pages, g->sp.pages, mt5->e->pages));
+                CHECK_EQ(x->pin, 0u);
+            }
+        }
+        src.reset();
+    }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -5609,6 +5874,7 @@ int main(int argc, char** argv) {
         {"tier_bridge_spill", testTierBridgeSpill},
         {"tier_bridge_supersede", testTierBridgeSupersede},
         {"tier_bridge_flush", testTierBridgeFlush},
+        {"tier_bridge_restore", testTierBridgeRestore},
         {"prefix_store", testPrefixStore},
         {"cold_resume_engine", testColdResumeEngine},
         {"vision_split_engine", testVisionSplitEngine},

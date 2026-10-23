@@ -1,4 +1,4 @@
-// Tier bridge, spill half (arch024 M5): see tier_bridge.h.
+// Tier bridge (arch024 M5: spill half S6b, restore half S7): see tier_bridge.h.
 // SPDX-License-Identifier: Apache-2.0
 #include "server/tier_bridge.h"
 
@@ -8,6 +8,8 @@
 #include <algorithm>
 #include <array>
 #include <limits>
+#include <optional>
+#include <span>
 #include <stdexcept>
 #include <thread>
 
@@ -345,7 +347,7 @@ void TierBridge::supersedeApply(std::uint32_t slot_id, tier::Entry* x) {
 // of after the usual delay (shutdown mode: reused entries only, CLOSE-REUSED -- the
 // rule lives in Tier::tick / evict_policy.h; always mode: its seen-once filter), so a
 // graceful stop (Ctrl+C, Ctrl+Break, console close) does not lose the last turns. Bounded by
-// flush_ms; runs on the engine thread like every other tier step (tick: Engine::tierTick).
+// flush_ms; runs on the engine thread like every other tier step (tick: Engine::tierTick, which calls tick()).
 bool TierBridge::flushOnStop(const std::function<bool()>& tick) {
     tier::Tier* t = tier_;
     if (!t) return false;
@@ -394,6 +396,330 @@ std::optional<std::chrono::steady_clock::time_point> TierBridge::idleDue() const
     const auto d = idle_clock_.deadline(cfg_.idle_flush_ms);
     if (!d) return std::nullopt;
     return std::chrono::steady_clock::time_point(std::chrono::milliseconds(*d));
+}
+
+// ---------------------------------------------------------------------------
+// restores (arch024-S7: moved out of Engine::tryRestore / beginRestore / finishTail / cutTail / pollRestores /
+// waitsForTier / prefetchFor / tierTick / logTier; Engine keeps the scheduler's part around these calls)
+
+std::optional<tier::Match> TierBridge::restoreMatch(SlotPrefix& sp, std::span<const std::uint32_t> toks) {
+    tier::Tier* t = tier_;
+    if (!t) return std::nullopt;
+    const auto mt = ps_.config().cold_resume
+                        ? t->lookup(toks, [&](std::uint32_t p, std::uint8_t k) { return ps_.resumeOk(toks, p, k); })
+                        : t->lookup(toks);
+    if (!mt) return std::nullopt;
+    // item S: a shared prefix entry off this prompt's schedule would not give
+    // the cold result; one already in VRAM needs no restore
+    if (mt->e->ck[mt->ck].kind >= 4 && !ps_.onSchedule(toks, mt->reuse)) return std::nullopt;
+    std::uint32_t vr = ps_.cacheMatch(sp, toks).reuse;
+    if (Spe* s = ps_.speMatch(toks)) vr = std::max(vr, s->n);
+    if (mt->reuse <= vr) return std::nullopt;
+    const std::uint32_t gain = mt->reuse - vr;
+    if (gain < cfg_.min_gain || (cfg_.min_gain >= 512 && gain < mt->reuse / 40)) return std::nullopt;
+    return mt;
+}
+
+bool TierBridge::startRestore(std::uint64_t job_id, std::uint32_t id, std::span<const std::uint32_t> toks, SlotPrefix& sp,
+                              SlotTier& st, const tier::Match& mt, Clock::time_point t0) {
+    tier::Tier* t = tier_;
+    tier::Entry* x = mt.e;
+    const tier::Layout lay = t->lay;
+    // checkpoints: the matched one first, then the others by position, up to the slot's count
+    std::array<bool, tier::max_ck> chosen{};
+    st.rs_map.fill(-1);
+    chosen[mt.ck] = true;
+    for (std::size_t n_sel = 1; n_sel < sp.ckpts.size(); ++n_sel) {
+        std::optional<std::size_t> best;
+        for (std::size_t k = 0; k < x->nck; ++k) {
+            if (chosen[k] || x->ck[k].valid == 0) continue;
+            if (!best || x->ck[k].pos > x->ck[*best].pos) best = k;
+        }
+        if (!best) break;
+        chosen[*best] = true;
+    }
+    std::int32_t nj = 0;
+    for (std::size_t k = 0; k < x->nck; ++k) {
+        if (!chosen[k]) continue;
+        st.rs_map[k] = nj;
+        ++nj;
+    }
+    // item T3: the request's part first (the matched checkpoint and the KV
+    // pages); the slot's other checkpoints follow on the tier stream (tail)
+    spans_.clear();
+    ckSpans(sp.ckpts[static_cast<std::size_t>(st.rs_map[mt.ck])], static_cast<std::uint64_t>(mt.ck) * lay.ckStride());
+    const std::uint64_t kv_off = x->kvOff(lay);
+    for (std::uint32_t pg = 0; pg < x->pages; ++pg)
+        pageSpans(sp.pages[pg], kv_off + static_cast<std::uint64_t>(pg) * lay.page_bytes);
+    const std::size_t n_main = spans_.size();
+    st.rs_tail.fill(false);
+    for (std::size_t k = 0; k < x->nck; ++k) {
+        if (!chosen[k] || k == mt.ck) continue;
+        ckSpans(sp.ckpts[static_cast<std::size_t>(st.rs_map[k])], static_cast<std::uint64_t>(k) * lay.ckStride(),
+                static_cast<std::uint8_t>(k));
+        st.rs_tail[k] = true;
+    }
+    tier::Restore* r = t->beginRestore(x, spans_, n_main);
+    if (!r) return false;
+    r->t0 = t0;
+    st.restore = r;
+    // item S: a shared prefix entry is never updated in place by a slot
+    st.rs_shared = x->ck[mt.ck].kind >= 4;
+    if (!st.rs_shared) x->owner = id;
+    logI("req {} | slot {} | kv tier: restoring {} tok from {} (checkpoint '{}' @{}, {:.1f} MiB; VRAM prefix was {})", job_id,
+         id, x->n_tok, r->from_ssd ? "SSD" : "RAM", ckKindStr(x->ck[mt.ck].kind), mt.reuse,
+         static_cast<double>(r->bytes) / 1048576.0, ps_.cacheMatch(sp, toks).reuse);
+    return true;
+}
+
+void TierBridge::finishTail(std::uint32_t id, SlotPrefix& sp, SlotTier& st, bool wait) {
+    tier::Tier* t = tier_;
+    if (!t) return;
+    tier::Restore* r = st.restore;
+    if (!r) return;
+    for (;;) {
+        // (an exception marks the restore failed: the tail checkpoints stay invalid)
+        const bool done = t->pumpTailNoThrow(r);
+        if (done) break;
+        if (!wait) return;
+        std::this_thread::sleep_for(std::chrono::microseconds(200));
+    }
+    st.restore = nullptr;
+    tier::Entry* x = t->find(r->entry_id);
+    if (cfg_.verify && !r->failed && x != nullptr && r->cursor > r->n_main) {
+        // (pieces of a checkpoint saveCkpt has overwritten since differ by design)
+        std::size_t n_bad = 0, n = 0, n_err = 0;
+        for (std::size_t i = r->n_main; i < r->cursor; ++i) {
+            const tier::Piece& pc = r->pieces[i];
+            if (pc.ck == kNoTag || !st.rs_tail[pc.ck]) continue;
+            const std::int32_t j = st.rs_map[pc.ck];
+            if (j >= 0 && sp.ckpts[static_cast<std::size_t>(j)].valid) continue;
+            ++n;
+            try {
+                n_bad += t->verifyPieces(std::span<const tier::Piece>(&pc, 1)).bad;
+            } catch (const std::exception&) {
+                ++n_err;
+            }
+        }
+        if (n_err > 0) logE("slot {} | kv tier verify: restore tail: error ({} of {} pieces could not be verified, {} differ)", id, n_err, n, n_bad);
+        else if (n_bad > 0) logE("slot {} | kv tier verify: restore tail: {} of {} pieces differ", id, n_bad, n);
+        else logI("slot {} | kv tier verify: restore tail byte-identical ({} pieces)", id, n);
+    }
+    if (r->failed || x == nullptr) {
+        // copies may still be in flight into the tail buffers: order the main stream after them
+        try {
+            ops_.eventRecord(r->ev, t->stream());
+            ops_.streamWaitEvent(m_.stream(), r->ev);
+        } catch (const std::exception&) {
+        }
+    } else if (!sp.cache_tokens.empty()) {
+        for (std::size_t k = 0; k < x->nck; ++k) {
+            if (!st.rs_tail[k]) continue;
+            const std::int32_t j = st.rs_map[k];
+            if (j < 0) continue;
+            Ckpt& c = sp.ckpts[static_cast<std::size_t>(j)];
+            const tier::CkMeta cm = x->ck[k];
+            if (c.valid || cm.valid == 0 || cm.pos > sp.reuse || cm.pos > sp.cache_tokens.size()) continue;
+            c.valid = true;
+            c.pos = cm.pos;
+            c.seq = cm.seq;
+            c.kind = ckKindStr(cm.kind);
+            c.has_logits = cm.has_logits != 0;
+        }
+    }
+    st.rs_tail.fill(false);
+    t->endRestore(r);
+}
+
+void TierBridge::cutTail(std::uint32_t id, SlotPrefix& sp, SlotTier& st) {
+    finishTail(id, sp, st, false);
+    tier::Restore* r = st.restore;
+    if (!r) return;
+    tier::Tier* t = tier_;
+    t->pumpRestoreNoThrow(r);  // (a throw marks the restore failed: the tail checkpoints stay invalid)
+    for (std::size_t i = r->cursor; i < r->pieces.size(); ++i)
+        if (r->pieces[i].ck != kNoTag) st.rs_tail[r->pieces[i].ck] = false;
+    device::Event ev = nullptr;
+    try {
+        ev = t->cutTail(r);
+    } catch (const std::exception&) {
+        finishTail(id, sp, st, true);
+        return;
+    }
+    try {
+        ops_.streamWaitEvent(m_.stream(), ev);
+    } catch (const std::exception&) {
+        finishTail(id, sp, st, true);
+    }
+}
+
+TierBridge::Pump TierBridge::pumpRestore(SlotTier& st) {
+    tier::Tier* t = tier_;
+    tier::Restore* r = st.restore;
+    // an exception from the copies marks the restore failed (cold prefill), never a valid one
+    const bool done = t->pumpRestoreNoThrow(r);
+    if (!done) return Pump::pending;
+    if (r->failed || t->find(r->entry_id) == nullptr) return Pump::failed;
+    return Pump::restored;
+}
+
+void TierBridge::restoreFailed(std::uint64_t job_id, std::uint32_t id, SlotTier& st, const RestoreSteps& steps) {
+    tier::Tier* t = tier_;
+    tier::Restore* r = st.restore;
+    logW("req {} | slot {} | kv tier: restore failed; prefilling from scratch", job_id, id);
+    // copies already enqueued may still write the slot's pages / checkpoints
+    try {
+        ops_.eventRecord(r->ev, t->stream());
+        ops_.streamWaitEvent(m_.stream(), r->ev);
+    } catch (const std::exception&) {
+    }
+    st.restore = nullptr;
+    st.rs_tail.fill(false);
+    steps.drop_cache();
+    t->endRestore(r);
+}
+
+void TierBridge::restoreDone(std::uint64_t job_id, std::uint32_t id, SlotPrefix& sp, SlotTier& st, const RestoreSteps& steps) {
+    tier::Tier* t = tier_;
+    tier::Restore* r = st.restore;
+    tier::Entry& en = *t->find(r->entry_id);
+    sp.cache_tokens.assign(en.tokens.begin(), en.tokens.begin() + en.n_tok);
+    // the tier holds KV and state, not drafter features
+    steps.drafter_reset(en.n_tok);
+    for (Ckpt& c : sp.ckpts) c.valid = false;
+    std::uint64_t max_seq = 0;
+    for (std::size_t k = 0; k < en.nck; ++k) {
+        const std::int32_t j = st.rs_map[k];
+        if (j < 0) continue;
+        max_seq = std::max(max_seq, en.ck[k].seq);
+        if (st.rs_tail[k]) continue;  // item T3: valid once the tail is in
+        Ckpt& c = sp.ckpts[static_cast<std::size_t>(j)];
+        const tier::CkMeta cm = en.ck[k];
+        c.valid = true;
+        c.pos = cm.pos;
+        c.seq = cm.seq;
+        c.kind = ckKindStr(cm.kind);
+        c.has_logits = cm.has_logits != 0;
+        max_seq = std::max(max_seq, cm.seq);
+    }
+    sp.ckpt_seq = std::max(sp.ckpt_seq, max_seq);
+    if (st.rs_shared) {
+        st.tier_id = 0;
+        st.tier_pages = 0;
+    } else {
+        st.tier_id = en.id;
+        st.tier_pages = en.n_tok / kv_page;
+        en.owner = id;
+    }
+    const double ms = msSince(r->t0);
+    if (r->from_ssd) t->stats.restores_ssd += 1;
+    else t->stats.restores_ram += 1;
+    t->stats.restore_bytes += r->bytes;
+    std::uint64_t main_bytes = 0;
+    for (std::size_t i = 0; i < r->n_main; ++i) main_bytes += r->pieces[i].len;
+    if (cfg_.verify) {
+        try {
+            const auto v = t->verifyPieces(std::span<const tier::Piece>(r->pieces.data(), r->n_main));
+            if (v.bad > 0)
+                logE("req {} | slot {} | kv tier verify: restore of {} tok: {} of {} pieces differ from the entry", job_id,
+                     id, en.n_tok, v.bad, r->n_main);
+            else
+                logI("req {} | slot {} | kv tier verify: restore of {} tok byte-identical ({:.1f} MiB)", job_id, id,
+                     en.n_tok, static_cast<double>(v.bytes) / 1048576.0);
+        } catch (const std::exception& ex) {
+            logE("req {} | slot {} | kv tier verify: restore of {} tok: error ({})", job_id, id, en.n_tok, ex.what());
+        }
+    }
+    logI("req {} | slot {} | kv tier: restored {} tok from {} in {:.1f} ms ({:.2f} GB/s){}", job_id, id, en.n_tok,
+         r->from_ssd ? "SSD" : "RAM", ms, static_cast<double>(main_bytes) / (ms * 1e6),
+         r->n_main < r->pieces.size() ? "; other checkpoints follow" : "");
+    // item S: a restored shared prefix entry becomes a VRAM shared checkpoint again
+    if (st.rs_shared && en.nck >= 1) {
+        for (Ckpt& c : sp.ckpts) {
+            if (!c.valid || ckKindCode(c.kind) < 4) continue;
+            try {
+                steps.share(c, en.id);
+            } catch (const std::exception& ex) {
+                logW("req {} | slot {} | shared prefix: not kept from the restored entry: {}", job_id, id, ex.what());
+            }
+            break;
+        }
+    }
+}
+
+std::uint32_t TierBridge::queuedReuse(const SlotTier& st, std::span<const std::uint32_t> toks) const {
+    const tier::Tier* t = tier_;
+    tier::Restore* r = st.restore;
+    if (!t || !r) return 0;
+    const cache::Tier::Entry x = ps_.tierView()->find(r->entry_id);
+    if (!x) return 0;
+    const auto [reuse, kind] =
+        ps_.config().cold_resume ? ps_.cache().matchTierEntry(x, toks, [&](std::uint32_t p, std::uint8_t k) { return ps_.resumeOk(toks, p, k); })
+                                 : ps_.cache().matchTierEntry(x, toks);
+    if (reuse < t->cfg.min_tokens) return 0;
+    if (kind >= 4 && !ps_.onSchedule(toks, reuse)) return 0;
+    return reuse;
+}
+
+std::optional<tier::Match> TierBridge::prefetchCandidate(std::span<const std::uint32_t> toks) {
+    tier::Tier* t = tier_;
+    if (!t) return std::nullopt;
+    const auto mt = ps_.config().cold_resume
+                        ? t->lookup(toks, [&](std::uint32_t p, std::uint8_t k) { return ps_.resumeOk(toks, p, k); })
+                        : t->lookup(toks);
+    if (!mt) return std::nullopt;
+    tier::Entry* x = mt->e;
+    if (x->in_ram || x->loading || x->io_busy) return std::nullopt;
+    if (x->ck[mt->ck].kind >= 4 && !ps_.onSchedule(toks, mt->reuse)) return std::nullopt;
+    return mt;
+}
+
+void TierBridge::prefetch(std::uint64_t job_id, tier::Entry* x) {
+    bool ok = false;
+    try {
+        ok = tier_->prefetch(x);
+    } catch (const std::exception&) {
+        ok = false;
+    }
+    if (ok) logI("req {} | kv tier: prefetching {} tok from SSD into RAM while queued", job_id, x->n_tok);
+}
+
+bool TierBridge::tick() {
+    tier::Tier* t = tier_;
+    if (!t) return false;
+    bool busy = t->tick();
+    // only waiting for write delays (minutes): not polled every few ms; the idle loop sleeps until due
+    if (t->waitOnly()) busy = false;
+    pub_ssd_written_.store(t->stats.ssd_write_bytes, std::memory_order_relaxed);
+    pub_ssd_dedup_.store(t->stats.ssd_dedup_bytes, std::memory_order_relaxed);
+    pub_ssd_used_.store(t->ssd_bytes, std::memory_order_relaxed);
+    pub_superseded_.store(t->stats.superseded, std::memory_order_relaxed);
+    pub_ssd_entries_.store(t->ssdEntries(), std::memory_order_relaxed);
+    return busy;
+}
+
+TierBridge::Published TierBridge::published() const {
+    Published p;
+    p.ssd_written = pub_ssd_written_.load(std::memory_order_relaxed);
+    p.ssd_dedup = pub_ssd_dedup_.load(std::memory_order_relaxed);
+    p.ssd_used = pub_ssd_used_.load(std::memory_order_relaxed);
+    p.ssd_entries = pub_ssd_entries_.load(std::memory_order_relaxed);
+    p.superseded = pub_superseded_.load(std::memory_order_relaxed);
+    return p;
+}
+
+void TierBridge::logStats(std::uint64_t cow_pages, std::uint64_t q_waits) const {
+    const tier::Tier* t = tier_;
+    if (!t) return;
+    const tier::Stats& s = t->stats;
+    logI("kv tier | RAM {:.2f} / {:.2f} GiB in {} entries, SSD {:.2f} GiB in {} entries | spills {} ({:.0f} MiB), restores RAM "
+         "{} / SSD {} ({:.0f} MiB), SSD writes {} ({:.0f} MiB written since start, {:.0f} MiB shared instead of written), RAM "
+         "evictions {}, dropped {}, superseded {} (demoted {}), spill waits {}, pages copied on write {}, quarantine waits {}",
+         static_cast<double>(t->ramUsedBytes()) / 1073741824.0, static_cast<double>(t->cfg.ram_bytes) / 1073741824.0,
+         t->countRam(), static_cast<double>(t->ssd_bytes) / 1073741824.0, t->ssdEntries(), s.spills,
+         static_cast<double>(s.spill_bytes) / 1048576.0, s.restores_ram, s.restores_ssd,
+         static_cast<double>(s.restore_bytes) / 1048576.0, s.ssd_writes, static_cast<double>(s.ssd_write_bytes) / 1048576.0,
+         static_cast<double>(s.ssd_dedup_bytes) / 1048576.0, s.ram_evictions, s.dropped, s.superseded, s.demoted, spill_waits_, cow_pages, q_waits);
 }
 
 }  // namespace whirl::server

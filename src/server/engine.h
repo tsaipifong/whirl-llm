@@ -191,7 +191,6 @@ struct SlotData : SlotPrefix, SlotTier {
     std::uint32_t max_tokens = 0;
     std::uint32_t n_prompt = 0;
     std::size_t pf_off = 0;
-    bool rs_shared = false;
     TimePoint tp0{};
     TimePoint td0{};
     double prompt_ms = 0;
@@ -210,10 +209,8 @@ struct SlotData : SlotPrefix, SlotTier {
     double relax_gap = 0;       // relaxacc greedy: sum of ln p(argmax) - ln p(kept draft)
     std::uint32_t pos = 0;
     std::uint32_t next = 0;
-    // host tiers (tier_id, tier_pages, spill_ev, spill_busy, spill_upto, spill_wanted: SlotTier)
-    tier::Restore* restore = nullptr;
-    std::array<std::int32_t, tier::max_ck> rs_map{};
-    std::array<bool, tier::max_ck> rs_tail{};
+    // host tiers (tier_id, tier_pages, spill_ev, spill_busy, spill_upto, spill_wanted, restore, rs_map, rs_tail,
+    // rs_shared: SlotTier)
     std::optional<TimePoint> tp0_pre;
     std::array<std::uint32_t, max_small_batch> pend{};
     std::size_t n_pend = 0;
@@ -537,13 +534,12 @@ private:
     bool dflReady(const Slot& sl) const;
     void finishJob(Slot& sl);
     // host tiers (the spill half, the span lists and the idle / shutdown flush: tb_)
+    // the scheduler's part of a restore (whether the request fits, the slot's pages and phase, startJob); the tier
+    // part is TierBridge's (arch024-S7)
     bool tryRestore(Slot& sl, Job& job);
-    bool beginRestore(Slot& sl, Job& job, const tier::Match& mt);
-    void finishTail(Slot& sl, bool wait);
-    void cutTail(Slot& sl);
     void pollRestores();
     bool tierTick();
-    void logTier();
+    TierBridge::RestoreSteps restoreSteps(Slot& sl);
     // shutdown: tb_.flushOnStop over tierTick, then the tier line
     void flushTierOnStop();
     void releaseSlot(Slot& sl);
@@ -694,7 +690,6 @@ private:
     std::uint64_t emb_bytes_ = 0;
     std::uint64_t emb_seq_ = 0;
     std::uint64_t stat_vis_enc_ = 0, stat_vis_hit_ = 0;
-    std::atomic<std::uint64_t> stat_ssd_written_{0}, stat_ssd_dedup_{0}, stat_ssd_used_{0}, stat_ssd_entries_{0}, stat_superseded_{0};
     std::array<std::array<std::uint64_t, 2>, 16> vis_lend_raw_{};
     std::vector<vision::Region> vis_lend_;
     hip::LocalMemSnap vis_snap0_;  // device memory counters right after the mmproj was loaded (no image yet)
