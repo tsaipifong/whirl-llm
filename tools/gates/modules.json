@@ -77,16 +77,15 @@
   },
   "engine_gov": {
    "id": "M7", "desc": "memory governor glue (engine_gov.cpp; policy memgov::Governor unchanged)",
-   "paths": ["src/server/engine_gov.cpp"], "lands_on": "arch024 S9 (not written yet)",
+   "paths": ["src/server/engine_gov.cpp"], "lands_on": "arch024 S9 (a214b6f)",
    "steps": ["cpu_server", "srv_balance", "srv_gpu_select"],
    "gpus": {"srv_balance": 1, "srv_gpu_select": 2},
    "manual": ["whirl-server-tests governor / governor_restore / startup_adjust / vram_watch", "vram_hog scenario once", "P-719", "P-size"]
   },
   "threads": {
    "id": "M8", "desc": "engine thread ownership checks",
-   "paths": [], "lands_on": "arch024 S10 (not written yet; S10 names its source file, then add it here)",
-   "steps": ["cpu_server"], "callers": ["ckpt_store", "page_pool", "prefix_store", "tier_bridge", "engine_gov"],
-   "pending": [{"step": "cpu_server_log_scan", "lands_in": "S10 (tools/gates/server_log_scan.ps1)"}],
+   "paths": ["src/server/engine_thread.cpp", "src/server/engine_thread.h"], "lands_on": "arch024 S10 (1b17eb9)",
+   "steps": ["cpu_server", "cpu_logscan_selftest"], "callers": ["ckpt_store", "page_pool", "prefix_store", "tier_bridge", "engine_gov"],
    "manual": ["P-speed d5fc637 vs HEAD"]
   },
   "contract": {
