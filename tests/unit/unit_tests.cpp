@@ -1825,6 +1825,78 @@ void testLaunchDigestLayout() {
     // count as an argument change
 }
 
+// arch024-S0a (REVIEW-ARCH6-code C-1): a pointer word whose value is 0 (an unused pointer: single-matrix GvArgs
+// w[1..2] / y[1..2], the f16 pool's KvArgs ks / vs) and a small u64 scalar (forward.cpp w.row_bytes) are values. Before
+// the fix they fell into the "below the next allocation" rule whenever the lowest allocation was at least as large as
+// its base address (one allocation of ~12 GB or more), and were then digested as (ordinal, base - v), which depends on
+// where that allocation lies. Also pins the adjacent-allocation case: a pointer inside an allocation that touches the
+// next one stays "inside" its own allocation in both layouts.
+void testLaunchDigestZeroAndAdjacent() {
+    namespace ll = whirl::hip::launchlog;
+    using whirl::kernels::KvArgs;
+    const auto with = [&](std::initializer_list<std::pair<std::uint64_t, std::uint64_t>> al, auto&& f) {
+        ll::testClearAllocs();
+        for (const auto& [b, n] : al) ll::testAlloc(b, n);
+        const std::uint64_t d = f();
+        ll::testClearAllocs();
+        return d;
+    };
+    // the lowest allocation is larger than its base address in both layouts, at different bases
+    const std::uint64_t big = 0x400000000ull;  // 16 GiB
+    const auto la = {std::pair{0x300000000ull, big}, std::pair{0x800000000ull, 0x1000000ull}};
+    const auto lb = {std::pair{0x380000000ull, big}, std::pair{0x900000000ull, 0x1000000ull}};
+    const auto zero = [] { return ll::launchArgDigest(std::uint64_t{0}, std::int32_t{3}); };
+    CHECK_EQ(with(la, zero), with(lb, zero));
+    const auto small = [] { return ll::launchArgDigest(std::uint64_t{0x440}); };
+    CHECK_EQ(with(la, small), with(lb, small));
+    const auto kv0 = [](std::uint64_t kbase) {
+        return [=] {
+            KvArgs kv;
+            kv.k = kbase + 0x100;
+            kv.v = kbase + 0x200;
+            kv.ks = 0;  // f16 pool: no scale arrays
+            kv.vs = 0;
+            return ll::launchArgDigest(kv);
+        };
+    };
+    CHECK_EQ(with(la, kv0(0x300000000ull)), with(lb, kv0(0x380000000ull)));
+    // a value of 0 still differs from a real pointer, and from another value
+    CHECK(with(la, zero) != with(la, [] { return ll::launchArgDigest(std::uint64_t{0x300000040ull}, std::int32_t{3}); }));
+    CHECK(with(la, small) != with(la, [] { return ll::launchArgDigest(std::uint64_t{0x448}); }));
+    // adjacent allocations (A ends where B starts) vs a gap between them: a pointer inside A near its end, and one
+    // inside B, give the same digest in both layouts
+    const auto adj = {std::pair{0x10000000ull, 0x100000ull}, std::pair{0x10100000ull, 0x100000ull}};
+    const auto gap = {std::pair{0x20000000ull, 0x100000ull}, std::pair{0x28000000ull, 0x100000ull}};
+    const auto two = [](std::uint64_t a, std::uint64_t b) {
+        return [=] { return ll::launchArgDigest(std::uint64_t{a + 0xFFF00}, std::uint64_t{b + 0x80}); };
+    };
+    CHECK_EQ(with(adj, two(0x10000000ull, 0x10100000ull)), with(gap, two(0x20000000ull, 0x28000000ull)));
+}
+
+// arch024-S0a (REVIEW-ARCH6-code C-2): the RAW dump keeps at most max_lines lines and counts the rest; the server
+// turns it off unless WHIRL_LAUNCH_LOG_RAW=server.
+void testLaunchRawCap() {
+    namespace ll = whirl::hip::launchlog;
+    const ll::RawStats before = ll::rawStats();
+    ll::testRaw(true, 3);
+    for (int i = 0; i < 5; ++i) ll::testRawPush("x");
+    ll::RawStats s = ll::rawStats();
+    CHECK(s.on);
+    CHECK_EQ(s.kept, std::size_t{3});
+    CHECK_EQ(s.dropped, std::uint64_t{2});
+    CHECK_EQ(s.max_lines, std::size_t{3});
+    // the default cap (no WHIRL_LAUNCH_LOG_RAW_MAX in the test environment) is finite
+    CHECK(before.max_lines > 0 && before.max_lines <= 1000000);
+    // server process: off unless WHIRL_LAUNCH_LOG_RAW=server (the unit tests run without the variable, or with
+    // WHIRL_LAUNCH_LOG_RAW=1 from a gate shell: both are "not server")
+    ll::testRaw(true, 3);
+    ll::serverProcess();
+    const char* rv = std::getenv("WHIRL_LAUNCH_LOG_RAW");
+    const bool want_on = rv != nullptr && std::string(rv) == "server";
+    CHECK_EQ(ll::rawStats().on, want_on);
+    ll::testRaw(before.on, before.max_lines);
+}
+
 // OVH-C1: the MTP draft window (Model::attn_win) must be restored when the draft attention throws,
 // otherwise the next request's trunk attention would inherit the window and drop keys.
 void testValueScope() {
@@ -3934,6 +4006,8 @@ int main(int argc, char** argv) {
     testValueScope();
     testLaunchDigest();
     testLaunchDigestLayout();
+    testLaunchDigestZeroAndAdjacent();
+    testLaunchRawCap();
     specsample_test::testSpecSample();
     testDflashPolicy();
     testLocalMemTaken();

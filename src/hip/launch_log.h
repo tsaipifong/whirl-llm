@@ -18,7 +18,7 @@
 // Debug aid (arch6e): WHIRL_LAUNCH_LOG_RAW set as well writes launch_<pid>.raw.txt next to the table, one line per
 // launch (index, kernel, geometry, digest, then per argument "|size" and each 8-byte word as in:ordinal:offset /
 // below:ordinal:distance / v:value with "=raw value" after a normalised pointer, tail bytes as t:hex), so two runs can
-// be diffed launch by launch.
+// be diffed launch by launch. arch024-S0a: capped, and off in whirl-server unless WHIRL_LAUNCH_LOG_RAW=server (below).
 
 #pragma once
 
@@ -46,5 +46,21 @@ void onFree(std::uint64_t base);
 // against two address layouts
 void testAlloc(std::uint64_t base, std::uint64_t bytes);
 void testClearAllocs();
+
+// arch024-S0a (REVIEW-ARCH6-code C-2): the RAW dump is off in the server process unless WHIRL_LAUNCH_LOG_RAW=server
+// (release_gate sets WHIRL_LAUNCH_LOG for srv_* steps too; a long server would hold every launch line until exit).
+// serveMain calls this before it launches anything. Kept lines are capped (WHIRL_LAUNCH_LOG_RAW_MAX, default 200000);
+// the rest are counted and named in the dump's last line.
+void serverProcess();
+struct RawStats {
+    bool on = false;
+    std::size_t kept = 0;
+    std::uint64_t dropped = 0;
+    std::size_t max_lines = 0;
+};
+RawStats rawStats();
+// unit tests: set the RAW state (whether or not the log is on) and push one line through the cap
+void testRaw(bool on, std::size_t max_lines);
+void testRawPush(const char* line);
 
 }  // namespace whirl::hip::launchlog

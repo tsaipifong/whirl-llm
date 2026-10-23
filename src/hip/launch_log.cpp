@@ -66,8 +66,20 @@ struct Recorder {
     // (ordinal, -distance); anything else as it is. Called with mu held.
     // raw: WHIRL_LAUNCH_LOG_RAW set -> each word is also written out ("kind:ordinal:offset" or "v:value", then
     // "=raw" with the unnormalised value) so two runs can be diffed launch by launch (debug aid, arch6e)
+    // arch024-S0a (REVIEW-ARCH6-code C-1): a word below kLowestAddress is a value, whatever allocation it may seem to
+    // hit: 0 is an unused pointer (single-matrix GvArgs w[1..2], the f16 pool's KvArgs ks / vs) and a small u64 is a
+    // scalar (forward.cpp w.row_bytes); with one allocation at least as large as its base address they fell into the
+    // "below" rule as (ordinal, base - v), which depends on where that allocation lies. Windows never maps the lowest
+    // 64 KiB of an address space (the null-pointer region), so no device address and no allocation base is below it.
+    static constexpr std::uint64_t kLowestAddress = 0x10000;
     void mixWord(std::uint64_t& h, std::uint64_t v, std::string* raw) const {
         char b[96];
+        if (v < kLowestAddress) {
+            const std::uint64_t rec[2] = {0, v};
+            fnv(h, rec, sizeof rec);
+            if (raw) { std::snprintf(b, sizeof b, " v:%llx", (unsigned long long)v); *raw += b; }
+            return;
+        }
         auto it = allocs.upper_bound(v);  // first base > v
         if (it != allocs.begin()) {
             const auto& [base, a] = *std::prev(it);
@@ -90,6 +102,22 @@ struct Recorder {
     }
     bool raw_on = std::getenv("WHIRL_LAUNCH_LOG_RAW") != nullptr;
     std::vector<std::string> raw_lines;
+    // arch024-S0a (REVIEW-ARCH6-code C-2): the per-launch dump is held in memory until exit, ~7 KB a line with a
+    // GdnSegs argument; at most raw_max lines are kept (WHIRL_LAUNCH_LOG_RAW_MAX, default kRawMaxDefault), the rest
+    // only counted and named in the dump's last line, so a long process (the server) cannot grow without bound
+    static constexpr std::size_t kRawMaxDefault = 200000;
+    std::size_t raw_max = [] {
+        const char* v = std::getenv("WHIRL_LAUNCH_LOG_RAW_MAX");
+        if (v == nullptr) return kRawMaxDefault;
+        char* end = nullptr;
+        const unsigned long long n = std::strtoull(v, &end, 10);
+        return end != v ? static_cast<std::size_t>(n) : kRawMaxDefault;
+    }();
+    std::uint64_t raw_dropped = 0;
+    void keepRaw(std::string&& line) {
+        if (raw_lines.size() < raw_max) raw_lines.push_back(std::move(line));
+        else ++raw_dropped;
+    }
 
     void write() {
         std::string cmd;
@@ -124,6 +152,9 @@ struct Recorder {
         std::FILE* g = std::fopen(rp.c_str(), "wb");
         if (g == nullptr) return;
         for (const std::string& l : raw_lines) std::fprintf(g, "%s\n", l.c_str());
+        if (raw_dropped > 0)
+            std::fprintf(g, "# raw lines dropped %llu (kept the first %zu; WHIRL_LAUNCH_LOG_RAW_MAX)\n",
+                         static_cast<unsigned long long>(raw_dropped), raw_max);
         std::fclose(g);
     }
 };
@@ -182,6 +213,34 @@ void testAlloc(std::uint64_t base, std::uint64_t bytes) {
     Recorder& r = rec();
     std::lock_guard<std::mutex> lk(r.mu);
     r.allocs[base] = Alloc{bytes, r.n_alloc++};
+}
+
+void serverProcess() {
+    Recorder& r = rec();
+    std::lock_guard<std::mutex> lk(r.mu);
+    const char* v = std::getenv("WHIRL_LAUNCH_LOG_RAW");
+    r.raw_on = v != nullptr && std::strcmp(v, "server") == 0;
+}
+
+RawStats rawStats() {
+    Recorder& r = rec();
+    std::lock_guard<std::mutex> lk(r.mu);
+    return RawStats{r.raw_on, r.raw_lines.size(), r.raw_dropped, r.raw_max};
+}
+
+void testRaw(bool on, std::size_t max_lines) {
+    Recorder& r = rec();
+    std::lock_guard<std::mutex> lk(r.mu);
+    r.raw_on = on;
+    r.raw_max = max_lines;
+    r.raw_lines.clear();
+    r.raw_dropped = 0;
+}
+
+void testRawPush(const char* line) {
+    Recorder& r = rec();
+    std::lock_guard<std::mutex> lk(r.mu);
+    r.keepRaw(std::string(line));
 }
 
 void testClearAllocs() {
@@ -266,7 +325,7 @@ void onLaunch(const void* f, unsigned gx, unsigned gy, unsigned gz, unsigned bx,
         char b[160];
         std::snprintf(b, sizeof b, "%llu %s %ux%ux%u %ux%ux%u %u %016llx", (unsigned long long)r.n, k.name.c_str(), gx, gy, gz, bx, by, bz, shared,
                       (unsigned long long)digest);
-        r.raw_lines.push_back(std::string(b) + t_raw);
+        r.keepRaw(std::string(b) + t_raw);
         t_raw.clear();
     }
     r.arg_counts[{std::move(k), digest}] += 1;
