@@ -40,7 +40,9 @@ SRC_EXT = (".cpp", ".h", ".hip", ".inc", ".in")
 SCAN_DIRS = ("src", "include", "kernels", "tests", "tools")
 DEBUG = {}  # internals for --why
 MAX_FANOUT = 8  # a called name defined in more places than this is too generic to resolve
-STOP_NAMES = cxxscan.STD_CALLS | {"main", "wmain", "check", "CHECK", "fmt", "out", "log", "run", "ti", "I", "alignUp",
+# arch024-S12: "check" is no longer cut: only two functions define it (Watch::check, hip_runtime check) and cutting it
+# hid testWddmWatch -> Watch::check (392874b); MAX_FANOUT still cuts names that are really generic
+STOP_NAMES = cxxscan.STD_CALLS | {"main", "wmain", "CHECK", "fmt", "out", "log", "run", "ti", "I", "alignUp",
                                   "msSince", "nowMs", "unixNow", "env", "die"}
 
 # ------------------------------------------------------------------------------------------------

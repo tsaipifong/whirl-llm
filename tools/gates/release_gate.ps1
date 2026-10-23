@@ -6,6 +6,16 @@
 #
 #   pwsh tools/gates/release_gate.ps1 -Device r9700|8060s [-Build DIR] [-ExpectCommit SHA] [-Steps a,b,...]
 #                                     [-Work DIR] [-Tag NAME] [-InjectFail] [-List] [-LaunchLog DIR]
+#                                     [-Module name[,name]] [-ModulesFile PATH]
+#
+# -Module (arch024-S12): select the steps of one or more modules from tools/gates/modules.json (PLAN c-1);
+# -Steps given as well adds those steps (e.g. a module's `when` steps that impact.py prints). DEV-TIME FAST
+# FEEDBACK ONLY: not for a release, an rc merge or a bug-fix release until the owner signs off O1 / O2 (arch024
+# PLAN); those run the full gate on both GPUs. The default -Tag is module_<names>_<device>, so a module run never
+# writes the PASS_gate_<device> marker of a full gate. Exit 2 (setup error): unknown module, a module step that the
+# gate does not have and modules.json does not mark pending, a pending step that already exists (stale list), a
+# module with paths but none present in this tree and no lands_on. A module whose files have not landed on this
+# branch (lands_on set) is printed as such and its steps still run. With -List only the selected steps are listed.
 #
 # Verdict: every step has an exit code AND an output rule (e.g. "(ALL PASS)", "seqtest: ok", three equal
 # DFlash2 hashes with drafts accepted); a step that does not run counts as failed. At the end a table of
@@ -48,7 +58,9 @@ param(
     [string]$Tag = "",
     [switch]$InjectFail,
     [switch]$List,
-    [string]$LaunchLog = ""
+    [string]$LaunchLog = "",
+    [string[]]$Module = @(),
+    [string]$ModulesFile = ""
 )
 $ErrorActionPreference = "Stop"
 $repo = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
@@ -57,6 +69,8 @@ if (-not $Tag) { $Tag = "gate_$Device" }
 # one folder per GPU: two gates at once must not share the server steps' SSD tier folders (ARCH3 d5 srv_cache_balance)
 if (-not $Work) { $Work = Join-Path ([System.IO.Path]::GetTempPath()) "whirl-release-gate-$Device" }
 $Steps = @($Steps | ForEach-Object { $_ -split "," } | Where-Object { $_ })
+$Module = @($Module | ForEach-Object { $_ -split "," } | Where-Object { $_ })
+if ($Module.Count -gt 0 -and -not $PSBoundParameters.ContainsKey("Tag")) { $Tag = "module_$($Module -join '+')_$Device" }
 $arch = if ($Device -eq "8060s") { "gfx1151" } else { "gfx1201" }
 $port = if ($Device -eq "8060s") { 8095 } else { 8093 }
 $Q = $env:WHIRL_GATE_DENSE; $MX = $env:WHIRL_GATE_MOE; $DF = $env:WHIRL_GATE_DFLASH
@@ -101,6 +115,8 @@ AddStep "cpu_server_only_typo" $false @($exe["whirl-server-tests"], "--gguf", $S
 AddStep "cpu_golden_selftest" $false @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\golden\golden_selftest.ps1")) { param($o, $c) $c -eq 0 -and ($o -match "all cases as expected") }
 AddStep "cpu_logscan_selftest" $false @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\gates\server_log_scan_selftest.ps1")) { param($o, $c) $c -eq 0 -and ($o -match "server log scan selftest: \d+/\d+ as expected") }
 AddStep "cpu_golden_xcheck" $false @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\golden\golden.ps1"), "xcheck", "-Arch", $arch, "-Models", $gmodels) { param($o, $c) $c -eq 0 -and ($o -match "file\(s\) ok") }
+# arch024-S12: the -Module step-selection table (tools/gates/module_gate_cases.tsv; CPU, runs this script with -List)
+AddStep "cpu_module_gate" $false @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\gates\module_gate_test.ps1"), "-Work", "@WORK@") { param($o, $c) $c -eq 0 -and ($o -match "^module gate test: (\d+)/\1 cases ok") }
 $ktArgs = @($exe["whirl-kernel-test"], "--device", $Device, "--require-all", "--mx", $SW, "--moemx", $MX) + @(if ($hasQ) { "--q4"; $Q })
 AddStep "kt_full" $true $ktArgs { param($o, $c) $c -eq 0 -and ($o -match "^PASS: 0 failing") -and ($o -match "--require-all: 0 required kernel") }
 foreach ($m in @($denseKeys) + @("moe")) {
@@ -199,6 +215,55 @@ AddStep "srv_env_e3" $true (EnvCmd "E3") $envRule
 AddStep "srv_env_e4" $true (EnvCmd "E4") $envRule
 AddStep "srv_env_e7" $true @((EnvCmd "E7") + "-Golden") $envRule @{ WHIRL_GOLDEN_SWIFT = $SW; WHIRL_GOLDEN_MOE = $MX }
 
+# ---------------------------------------------------------------------------------------------------
+# -Module: steps from tools/gates/modules.json (arch024-S12; dev-time fast feedback only, see the header)
+if ($Module.Count -gt 0) {
+    if (-not $ModulesFile) { $ModulesFile = Join-Path $PSScriptRoot "modules.json" }
+    $mj = $null
+    try { $mj = Get-Content -Raw $ModulesFile -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop } catch { Write-Host "release gate -Module: cannot read $ModulesFile`: $_"; exit 2 }
+    Write-Host "release gate -Module $($Module -join ','): DEV-TIME FAST FEEDBACK ONLY, not for releases / rc merges / bug-fix releases until owner sign-off O1/O2 (arch024 PLAN); those run the full gate on both GPUs"
+    $have = @($S | ForEach-Object { $_.name })
+    $treeFiles = @(& git -C $repo ls-files 2>$null)
+    $msel = [System.Collections.Generic.List[string]]::new()
+    $merr = @()
+    $full = $false
+    foreach ($mn in $Module) {
+        $md = $mj.modules.PSObject.Properties[$mn]
+        if (-not $md) { $merr += "unknown module '$mn' (modules: $(@($mj.modules.PSObject.Properties.Name) -join ', '))"; continue }
+        $md = $md.Value
+        $pend = @{}
+        foreach ($p in @($md.pending | Where-Object { $_ })) {
+            if ($have -contains $p.step) { $merr += "module $mn`: pending step '$($p.step)' exists in the gate now: move it to steps" } else { $pend[$p.step] = $p.lands_in }
+        }
+        $globs = @($md.paths | Where-Object { $_ })
+        $present = @($treeFiles | Where-Object { $f = $_; @($globs | Where-Object { $f -like $_ }).Count -gt 0 })
+        if ($globs.Count -gt 0 -and $present.Count -eq 0) {
+            if ($md.lands_on) { Write-Host "release gate -Module: module $mn ($($md.id)) is declared, its files are not on this branch (lands on $($md.lands_on)); its steps run anyway" }
+            else { $merr += "module $mn`: none of its paths ($($globs -join ', ')) is in this tree and it has no lands_on" }
+        } elseif ($globs.Count -eq 0) {
+            Write-Host "release gate -Module: module $mn ($($md.id)) has no paths yet (lands on $($md.lands_on))"
+        }
+        if ($md.full) { $full = $true; Write-Host "release gate -Module: module $mn ($($md.id)): full gate (cross-module contract)" }
+        foreach ($st in @($md.steps | Where-Object { $_ })) {
+            if ($have -contains $st) { if (-not $msel.Contains($st)) { $msel.Add($st) } }
+            elseif ($pend.ContainsKey($st)) { }
+            else { $merr += "module $mn`: step '$st' is not in this gate (-List) and not marked pending" }
+        }
+        foreach ($k in $pend.Keys) { Write-Host "release gate -Module: module $mn`: pending step $k (lands in $($pend[$k])): not run" }
+        if ($md.when) { foreach ($w in $md.when.PSObject.Properties) { Write-Host "release gate -Module: module $mn`: when $($w.Name) changes add -Steps $(@($w.Value) -join ',')"
+                foreach ($st in @($w.Value)) { if ($have -notcontains $st) { $merr += "module $mn`: when-step '$st' is not in this gate" } } } }
+        if ($md.gpus) { $two = @($md.gpus.PSObject.Properties | Where-Object { $_.Value -ge 2 } | ForEach-Object { $_.Name })
+            if ($two.Count) { Write-Host "release gate -Module: module $mn`: run on both GPUs, one after the other: $($two -join ', ')" } }
+        foreach ($x in @($md.manual | Where-Object { $_ })) { Write-Host "release gate -Module: module $mn`: also (not in this gate): $x" }
+    }
+    if ($merr.Count -gt 0) { $merr | ForEach-Object { Write-Host "release gate -Module: $_" }; exit 2 }
+    if (-not $full -and $msel.Count -eq 0 -and $Steps.Count -eq 0) { Write-Host "release gate -Module: 0 steps selected (an empty selection must not mean the full gate)"; exit 2 }
+    if ($full) { $Steps = @() } else { $Steps = @($msel) + @($Steps | Where-Object { $msel -notcontains $_ }) }
+}
+if ($List -and $Module.Count -gt 0) {
+    foreach ($n in $Steps) { if (-not ($S | Where-Object { $_.name -eq $n })) { Write-Host "release gate: unknown step '$n' (-List shows them)"; exit 2 } }
+    $S | Where-Object { $Steps.Count -eq 0 -or $Steps -contains $_.name } | ForEach-Object { "{0,-22} {1}" -f $_.name, ($(if ($_.gpu) { "GPU" } else { "CPU" })) }; exit 0
+}
 if ($List) { $S | ForEach-Object { "{0,-22} {1}" -f $_.name, ($(if ($_.gpu) { "GPU" } else { "CPU" })) }; exit 0 }
 
 # ---------------------------------------------------------------------------------------------------

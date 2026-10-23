@@ -1,0 +1,97 @@
+{
+ "_doc": [
+  "Module -> release_gate.ps1 steps (arch024 PLAN (c) c-1). Read by `release_gate.ps1 -Module <name>` (step selection),",
+  "tools/gates/modules_check.py (validation against a tree and the gate's step list) and tools/impact/impact.py",
+  "(which modules a diff touches).",
+  "STATUS: DEV-TIME FAST FEEDBACK ONLY. Not for releases, rc merges or bug-fix releases until the owner signs",
+  "off O1 and O2 (arch024 PLAN, sign-off list). Until then a release / rc / bug-fix release runs the full",
+  "release_gate.ps1 on both GPUs under the current bug-fix rules (docs/dev/testing.md).",
+  "Fields: id (PLAN module id); paths (globs, repo-relative, '/' separators; a diff file matching one belongs to",
+  "the module); lands_on (the branch / step that adds the module's files: when no path matches a file in the",
+  "tree, the module is 'declared, not on this branch' instead of an error); steps (release_gate step names; one",
+  "GPU = run the gate on one card, two = both cards one after the other); pending (steps a later arch024 step",
+  "adds to release_gate: printed, not run, never silently dropped; an entry here whose step already exists in",
+  "the gate is an error, so the list is cleaned when the step lands); manual (checks outside release_gate,",
+  "printed for the runner); when (extra steps when a named file changes); full (the full gate on both GPUs).",
+  "Every step name must exist in release_gate.ps1 -List or be in pending, else release_gate exits 2."
+ ],
+ "status": "dev-only: not for releases until owner sign-off O1/O2 (arch024 PLAN)",
+ "modules": {
+  "handles": {
+   "id": "M1", "desc": "RAII device handles (DevBuf / PinnedBuf / EventH / StreamH)",
+   "paths": ["src/device/handles.h"],
+   "steps": ["cpu_device", "srv_gpu_select"],
+   "gpus": {"srv_gpu_select": 2},
+   "pending": [{"step": "cpu_raw_free_check", "lands_in": "S11 (tools/gates/raw_free_check.ps1)"}],
+   "manual": ["the steps of every caller's module (handles are used by M2-M5, M7)", "P-719: kvram719 R9700 (tools/repro/kvram719_tier.ps1)"]
+  },
+  "ckpt_store": {
+   "id": "M2", "desc": "checkpoint buffers (CkptStore)",
+   "paths": ["src/cache/ckpt_store.*"],
+   "steps": ["cpu_cache", "cpu_server", "cpu_device", "golden_swift", "golden_moe", "srv_mt_precise", "srv_mt_precise_moe",
+             "srv_cache_balance", "srv_cache_precise", "srv_gpu_select"],
+   "gpus": {"golden_swift": 2, "golden_moe": 2, "srv_mt_precise": 2, "srv_mt_precise_moe": 2, "srv_cache_balance": 1,
+            "srv_cache_precise": 1, "srv_gpu_select": 2},
+   "manual": ["whirl-server-tests prefix/sys/pool/doc_qa/tail_ck x20 (flake check)", "P-719: kvram719 R9700",
+              "P-size: startup sizing lines == S0 baseline", "P-sess: session anchors d5fc637 vs HEAD, both GPUs"]
+  },
+  "page_pool": {
+   "id": "M3", "desc": "KV page pool (PagePool)",
+   "paths": ["src/cache/page_pool.*"], "lands_on": "arch024-s4 (S4)",
+   "steps": ["cpu_cache", "cpu_server", "cpu_device", "golden_swift", "golden_moe", "srv_mt_precise", "srv_mt_precise_moe",
+             "srv_cache_balance", "srv_cache_precise"],
+   "gpus": {"golden_swift": 2, "golden_moe": 2, "srv_mt_precise": 2, "srv_mt_precise_moe": 2, "srv_cache_balance": 1, "srv_cache_precise": 1},
+   "when": {"include/whirl/prefill_schedule.h": ["seq_swift_precise", "seq_swift_balance", "seq_swift_fast", "seq_moe_precise",
+                                                  "seq_moe_balance", "srv_precise_cli"]},
+   "manual": ["KvArr copy sequence f16 / q8h / q4 == S0 snapshot", "P-size", "P-sess"]
+  },
+  "prefix_store": {
+   "id": "M4", "desc": "prefix cache owner (PrefixStore, SlotPrefix)",
+   "paths": ["src/server/prefix_store.*"], "lands_on": "arch024-s5a (S5a)",
+   "steps": ["cpu_cache", "cpu_server", "cpu_device", "golden_swift", "golden_moe", "srv_mt_precise", "srv_mt_precise_moe",
+             "srv_cache_balance", "srv_cache_precise"],
+   "gpus": {"golden_swift": 2, "golden_moe": 2, "srv_mt_precise": 2, "srv_mt_precise_moe": 2, "srv_cache_balance": 1, "srv_cache_precise": 1},
+   "when": {"include/whirl/prefill_schedule.h": ["seq_swift_precise", "seq_swift_balance", "seq_swift_fast", "seq_moe_precise",
+                                                  "seq_moe_balance", "srv_precise_cli"]},
+   "manual": ["COLD-RESUME table (prefix_store tests in whirl-server-tests)", "P-size", "P-sess"]
+  },
+  "tier_bridge": {
+   "id": "M5", "desc": "tier glue (TierBridge) and the KV tier",
+   "paths": ["src/server/tier_bridge.*", "src/tier/kv_tier.*", "src/tier/evict_policy.h", "src/tier/idle_flush.h"],
+   "lands_on": "arch024-s6b (S6a / S6b; restore half on arch024-s7)",
+   "steps": ["cpu_tier", "cpu_server", "cpu_device", "golden_swift", "golden_moe", "srv_tier_verify", "srv_cache_balance",
+             "srv_cache_precise", "srv_gpu_select"],
+   "gpus": {"golden_swift": 2, "golden_moe": 2, "srv_tier_verify": 2, "srv_cache_balance": 1, "srv_cache_precise": 1, "srv_gpu_select": 2},
+   "manual": ["RAM tier size changed: run srv_cache_balance / srv_cache_precise on the 8060S", "P-719: kvram719 R9700", "P-size", "P-sess"]
+  },
+  "protocol": {
+   "id": "M6", "desc": "HTTP / OpenAI protocol / streaming (stream, EngineApi)",
+   "paths": ["src/server/stream.*", "src/server/engine_api.h", "src/server/http.*", "src/server/protocol.*"],
+   "lands_on": "arch024-proto (S8)",
+   "steps": ["cpu_server", "srv_fs_swift", "srv_fs_moe", "golden_swift"],
+   "gpus": {"srv_fs_swift": 1, "srv_fs_moe": 1, "golden_swift": 1},
+   "manual": ["prompt token hash == S0 (whirl-server-tests)", "golden_swift stays until S11b proves the token hash catches a template regression"]
+  },
+  "engine_gov": {
+   "id": "M7", "desc": "memory governor glue (engine_gov.cpp; policy memgov::Governor unchanged)",
+   "paths": ["src/server/engine_gov.cpp"], "lands_on": "arch024 S9 (not written yet)",
+   "steps": ["cpu_server", "srv_balance", "srv_gpu_select"],
+   "gpus": {"srv_balance": 1, "srv_gpu_select": 2},
+   "manual": ["whirl-server-tests governor / governor_restore / startup_adjust / vram_watch", "vram_hog scenario once", "P-719", "P-size"]
+  },
+  "threads": {
+   "id": "M8", "desc": "engine thread ownership checks",
+   "paths": [], "lands_on": "arch024 S10 (not written yet; S10 names its source file, then add it here)",
+   "steps": ["cpu_server"],
+   "pending": [{"step": "cpu_server_log_scan", "lands_in": "S10 (tools/gates/server_log_scan.ps1)"}],
+   "manual": ["the steps of every caller's module", "P-speed d5fc637 vs HEAD"]
+  },
+  "contract": {
+   "id": "X", "desc": "cross-module contracts (ServerModel, device::Backend, kernels_abi, numerics): the full gate",
+   "paths": ["src/server/backend.h", "src/device/backend.h", "src/device/backend_hip.cpp", "include/whirl/kernels_abi.h",
+             "src/kernels_host/kernels_abi.cpp", "include/whirl/numerics.h", "src/common/numerics.cpp"],
+   "full": true,
+   "manual": ["full release_gate on both GPUs (ARCH-1 3.3)"]
+  }
+ }
+}

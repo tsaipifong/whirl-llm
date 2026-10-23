@@ -149,6 +149,7 @@ def analyze(changes, m, new_rev, old_rev):
         archs |= {"gfx1201", "gfx1151"}
         touched = set()
         outside_ids = set()   # identifiers on changed lines outside any function (declarations, tables)
+        outside_types = set()  # the class / struct bodies those lines are in (fallback when no function uses the ids)
         outside = False
         code_changed = False
         for rev, key in ((new_rev, "new"), (old_rev, "old")):
@@ -174,6 +175,8 @@ def analyze(changes, m, new_rev, old_rev):
                 if f is None:
                     outside = True
                     outside_ids |= {x for x in re.findall(r"[A-Za-z_]\w*", txt) if len(x) > 2} - DECL_NOISE
+                    if key == "new":
+                        outside_types |= set(cxxscan.classes_at(sc, ln)) - DECL_NOISE
                 else:
                     touched.add(f.name)
         if not code_changed:
@@ -199,14 +202,26 @@ def analyze(changes, m, new_rev, old_rev):
             # the changed identifiers; if none is found, every function of those files
             scope = [path] + (m["includers"].get(path, []) if path.endswith(".h") else [])
             users = {}
+            scans = {}
             for f in scope:
                 src = show(new_rev, f) if new_rev else (open(os.path.join(ROOT, f), encoding="utf-8", errors="replace").read()
                                                         if os.path.exists(os.path.join(ROOT, f)) else None)
                 if src is None:
                     continue
-                for fn in cxxscan.scan(src).funcs:
+                scans[f] = cxxscan.scan(src)
+                for fn in scans[f].funcs:
                     if fn.idents & outside_ids:
                         users[(f, fn.name)] = fn.idents & outside_ids
+            # arch024-S12: a member added to a struct that no function reads yet (a test lands before its fix, e.g.
+            # a4626b9 PinnedGpu::adapter_shared) changes every user of the struct: fall back to the enclosing types
+            if not users and outside_types:
+                for f, sc2 in scans.items():
+                    for fn in sc2.funcs:
+                        if fn.idents & outside_types:
+                            users[(f, fn.name)] = fn.idents & outside_types
+                if users:
+                    notes.append(f"{path}: no function uses {', '.join(sorted(outside_ids)[:4])}: using the users of "
+                                 f"{', '.join(sorted(outside_types))}")
             prod = [(f, n) for f, n in users if f"{f}::{n}" in F]
             # a test function that reads a changed declaration itself (e.g. a table test of a constexpr row) covers it
             # even when no product function's test list reaches it (ARCH3: device_profile.h field edits)
@@ -236,7 +251,53 @@ def analyze(changes, m, new_rev, old_rev):
         models = {"dense", "moe"}
     if not archs and paths:
         archs = {"gfx1201", "gfx1151"}
-    return build_report(m, paths, models, archs, tests, reruns, notes, hits)
+    rep = build_report(m, paths, models, archs, tests, reruns, notes, hits)
+    rep.update(module_gate(changes))
+    return rep
+
+
+def load_modules(root=None):
+    """tools/gates/modules.json of the tree (arch024-S12), or None when the tree has none"""
+    p = os.path.join(root or ROOT, "tools", "gates", "modules.json")
+    try:
+        return json.load(open(p, encoding="utf-8"))["modules"]
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+def module_gate(changes, mods=None):
+    """Which modules (tools/gates/modules.json) the changed product files belong to, and the dev-time module gate
+    to run. Product code outside every module, two modules, or a contract file -> the full gate. Dev-time fast
+    feedback only until the owner signs off O1 / O2 (arch024 PLAN): releases run the full gate."""
+    mods = load_modules() if mods is None else mods
+    if mods is None:
+        return {"modules": {}, "module_gate": None}
+    hit = defaultdict(list)
+    loose = []
+    for path in sorted(changes):
+        if not path.startswith(("src/", "include/", "kernels/")):
+            continue
+        ms = [n for n, d in mods.items() if any(fnmatch.fnmatch(path, g) for g in d.get("paths", []))]
+        for n in ms:
+            hit[n].append(path)
+        if not ms:
+            loose.append(path)
+    when = sorted({st for n in hit for f, sts in (mods[n].get("when") or {}).items() if f in changes for st in sts})
+    # a module's `when` file (e.g. prefill_schedule.h for M3 / M4, PLAN C6) adds steps instead of forcing the full gate
+    loose = [f for f in loose if not any(f in (mods[n].get("when") or {}) for n in hit)]
+    full = [n for n in hit if mods[n].get("full")]
+    if not hit and not loose:
+        gate = "none (no product code)"
+    elif full:
+        gate = f"full gate, both GPUs (contract module {', '.join(full)})"
+    elif loose:
+        gate = f"full gate or the release steps above: {len(loose)} product file(s) in no module ({', '.join(loose[:4])}{' ...' if len(loose) > 4 else ''})"
+    elif len(hit) > 1:
+        gate = f"full gate, both GPUs (cross-module: {', '.join(sorted(hit))})"
+    else:
+        n = next(iter(hit))
+        gate = f"release_gate.ps1 -Module {n}" + (f" -Steps {','.join(when)}" if when else "")
+    return {"modules": {n: v for n, v in sorted(hit.items())}, "module_gate": gate}
 
 
 def build_report(m, paths, models, archs, tests, reruns, notes, hits):
@@ -342,6 +403,10 @@ def print_report(title, r, why=False):
         print(f"   also     {k}  ({', '.join(v[:3])})")
     if r["matrix_cells"]:
         print(f"   cells    {', '.join(r['matrix_cells'])}")
+    if r.get("module_gate"):
+        for n, fl in r["modules"].items():
+            print(f"   module   {n}: {', '.join(fl[:4])}{' ...' if len(fl) > 4 else ''}")
+        print(f"   mod-gate {r['module_gate']}  (dev-time only until owner sign-off O1/O2; releases run the full gate)")
     for n in r["notes"]:
         print(f"   note     {n}")
 

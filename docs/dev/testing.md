@@ -122,6 +122,42 @@ python tools/impact/impact_build.py --check        # is the committed map curren
 python tools/impact/validate.py                    # replay real fix commits: does the map flag their tests?
 ```
 
+`validate.py` is the map's acceptance test (arch024-S12): every named case (a real bug, the fix commit
+and the gate that caught it) must be hit by the map built at that fix commit, and the history replay
+(`--history 200`: every commit that changed product code and a registered test together) must list that
+test for >= 95 % of the pairs. It prints the selectivity next to the hit rate (a map that lists
+everything would hit everything) and every miss with its commit.
+
+### <a id="module-gate"></a>Module gate (dev-time only)
+
+`tools/gates/modules.json` maps each engine module (arch024 M1-M8, plus the cross-module contracts) to
+its source globs and the `release_gate.ps1` steps of its row in the arch024 plan, table c-1.
+
+```
+pwsh tools/gates/release_gate.ps1 -Device r9700 -Module ckpt_store -List      # the steps it selects
+pwsh tools/gates/release_gate.ps1 -Device r9700 -Module page_pool -Steps seq_swift_precise   # plus extra steps
+python tools/gates/modules_check.py [--rev arch024-s6b]   # modules.json against a tree and the gate's steps
+python tools/impact/impact.py --worktree                  # "module" / "mod-gate" lines: which module gate fits
+pwsh tools/gates/module_gate_test.ps1                     # -Module step-selection table test (CPU)
+python tools/gates/modules_check_test.py                  # modules_check / impact module mapping block + pass tests
+```
+
+**This is fast feedback while developing, not a release rule.** Until the owner signs off O1 and O2
+(arch024 plan), a release, an rc merge and a bug-fix release run the full gate on both GPUs under the
+rules above. A `-Module` run writes `PASS_module_<names>_<device>`, never the `PASS_gate_<device>` of a
+full gate. The gate prints the module's checks that are not release_gate steps (P-719, P-size, P-sess,
+flake loops) and which steps need both GPUs.
+
+- A module whose files are not on the current branch yet (`lands_on`) is reported, and its steps still run;
+  a module with paths of which none exists and no `lands_on` is a setup error (exit 2), as are an
+  unknown module, a step name that the gate does not have and that is not listed as `pending`, a
+  `pending` step that already exists in the gate, and an empty selection.
+- `impact.py` suggests `-Module X` only when every changed product file belongs to one module (plus
+  that module's `when` files, e.g. `prefill_schedule.h` for M3 / M4); product code in no module, two
+  modules or a contract file (ServerModel, `device::Backend`, kernels_abi, numerics) means the full gate.
+  During the arch024 moves every step also edits `engine.cpp` / `engine.h`, so the suggestion is the
+  full gate there; the module gate is for later changes that stay inside one module.
+
 The map lists all three modes for every change: a change is shown to be mode-confined only by the
 golden hashes (precise unchanged). Host code that branches on the GPU inside a shared function is listed
 for both GPUs.

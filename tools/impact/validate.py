@@ -80,8 +80,8 @@ def map_at(rev, cache={}):
     return cache[rev]
 
 
-def touched_tests(rev):
-    """registered-test-style functions (test*) touched by commit rev in tests/ files"""
+def touched_tests(rev, with_file=False):
+    """registered-test-style functions (test*) touched by commit rev in tests/ files ({name} or, with_file, {(file, name)})"""
     out = set()
     ch = impact.parse_diff(git("diff", "-U0", "--no-color", f"{rev}^", rev))
     for path, c in ch.items():
@@ -94,7 +94,7 @@ def touched_tests(rev):
         for ln in c["new"]:
             f = cxxscan.func_at(sc, ln)
             if f and re.match(r"(test|bench)[A-Z]", f.short):
-                out.add(f.short)
+                out.add((path, f.short) if with_file else f.short)
     return out
 
 
@@ -189,11 +189,14 @@ def run_history(n, rev):
         prod = {p: c for p, c in ch.items() if p.startswith(("src/", "include/", "kernels/"))}
         if not prod:
             continue
-        tt = touched_tests(s)
+        tt = touched_tests(s, with_file=True)
         regs = {}
-        for t in tt:
-            for tid in m["tests"]:
-                if tid.endswith(":" + t):
+        # arch024-S12: only the executables that link the touched test file (58f340b touched model_tests.cpp testMoe;
+        # matching by name alone counted whirl-kernel-test:testMoe, a different function, as the test for the change)
+        for path, t in tt:
+            for exe, srcs in m["executables"].items():
+                tid = f"{exe}:{t}"
+                if path in srcs and tid in m["tests"]:
                     regs[tid] = m["tests"][tid]["exe"]
         if not regs:
             continue
