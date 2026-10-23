@@ -34,8 +34,8 @@ WHIRL's modularization (the kernel and device layer), with stricter release gate
   2k-token QA document prompt, decode on a fixed coding-chat prompt and the wall time of one agent session (positive =
   0.2.3 faster). R9700, 3 rounds: -0.14 % to +4.90 % (the +4.90 % is Ornith-1.5-35B-A3B 2k prefill, where the per-round
   ranges of the two versions overlap; the other cells -0.14 % to +0.41 %). Radeon 8060S (max power (80 W), ASUS ROG Flow
-  Z13, 96 GB carve-out): 2k prefill, 5 rounds: +0.03 % to +0.07 %; coding-chat decode and agent session, 1 round: -0.19 %
-  to +1.17 %. Decode with MTP moves with the draft acceptance of the generated text; per-round numbers and acceptance
+  Z13, 96 GB carve-out): 2k prefill, 5 rounds: +0.03 % to +0.07 % (decode and the agent session were checked in one
+  round only, with the same output, so no number is given for them). Decode with MTP moves with the draft acceptance of the generated text; per-round numbers and acceptance
   are in the release measurement record.
 
 ### Changed (internal)
