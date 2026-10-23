@@ -23,6 +23,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace whirl::startfit {
@@ -84,6 +85,18 @@ struct RamFit {
 // ram_size.h). An explicit size is clamped to the room and otherwise used as given (monotonic in the request).
 std::optional<RamFit> ramTierFit(std::uint64_t mb, std::uint64_t avail_phys_bytes, std::uint64_t auto_mb, bool explicit_size,
                                  std::uint64_t pinned_room_mb = pinned_room_unknown, std::uint64_t entry_mb = 0);
+// The texts of the RAM tier's startup lines (server_main.cpp), from the fit. rf: ramTierFit's result (nullopt: unchanged or
+// no host tiers); asked_mb: the size before the fit; src: where an explicit size came from (--kv-ram-mb / WHIRL_KV_RAM_MB);
+// size_reason: tier::RamTierSize::reason; pinned_why: pinnedWhy() ("" when the room was not measured); avail_mb: RAM
+// available now.
+struct RamTierText {
+    std::string pinned_why;    // pinnedWhy, plus pinnedOffWhy when the room turns the tier off
+    std::string adjusted_why;  // explicit size: the reason of the "adjusted:" line ("" when unchanged)
+    std::string off_reason;    // what "kv tier: RAM tier off (...)" names
+    std::string size_reason;   // what "kv tier: RAM tier size N MiB (...)" names
+};
+RamTierText ramTierText(const std::optional<RamFit>& rf, std::uint64_t asked_mb, bool explicit_size, std::string_view src,
+                        std::string_view size_reason, std::string pinned_why, std::uint64_t entry_mb, std::uint64_t avail_mb);
 
 // the pool the plan must reach: max(pool_min_tokens, pool_hard_min)
 std::uint64_t wantTokens(const vram::FitInput& fi);

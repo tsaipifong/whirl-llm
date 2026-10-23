@@ -1333,40 +1333,31 @@ int serveMain(int argc, char** argv, const char* program) {
                  startfit::pinned_reserve_mb, startfit::pinned_machine_reserve_mb);
             pinned_why = startfit::pinnedWhy(pinned_room == startfit::pinned_room_unknown ? 0 : pinned_room, pst.gpus.size());
         }
-        std::string ram_off_reason = rsz.reason;  // what the "RAM tier off" line names (REVIEW-S8-719 N3)
-        if (const auto rf = startfit::ramTierFit(kv_ram_mb, rin.avail_phys, ram_auto_mb, rin.explicit_mb.has_value(), pinned_room,
-                                                 entry_mb);
-            rf && n_ck > 0 && !no_pc) {
-            if (rf->mb == 0 && rf->pinned) {
-                pinned_why += startfit::pinnedOffWhy(rf->below_entry, entry_mb);
-                ram_off_reason = std::format("{} {} MiB asked: {}", rin.explicit_mb ? std::string(rin.explicit_src) : std::string("auto"),
-                                             kv_ram_mb, pinned_why);
-            }
+        std::optional<startfit::RamFit> rf =
+            startfit::ramTierFit(kv_ram_mb, rin.avail_phys, ram_auto_mb, rin.explicit_mb.has_value(), pinned_room, entry_mb);
+        if (n_ck == 0 || no_pc) rf.reset();
+        // the line texts (startfit::ramTierText, unit-tested): REVIEW-S8-719 N3, REVIEW-S8-719-3 N3-2 / N3-6
+        const startfit::RamTierText ram_text = startfit::ramTierText(rf, kv_ram_mb, rin.explicit_mb.has_value(), rin.explicit_src,
+                                                                     rsz.reason, pinned_why, entry_mb, rin.avail_phys >> 20);
+        const std::string& ram_off_reason = ram_text.off_reason;
+        if (rf) {
             if (!rin.explicit_mb) {
                 if (rf->pinned)
-                    logW("kv tier: RAM tier {} MiB (the automatic size would be {} MiB): {}", rf->mb, kv_ram_mb, pinned_why);
+                    logW("kv tier: RAM tier {} MiB (the automatic size would be {} MiB): {}", rf->mb, kv_ram_mb, ram_text.pinned_why);
                 else
                     logI("kv tier: RAM tier capped at {} MiB (the automatic size would be {} MiB) while a crash with larger RAM "
                          "tiers is investigated",
                          rf->mb, kv_ram_mb);
             } else {
-                std::string why;
-                if (rf->safe)
-                    why = std::format("capped at {} MiB while a crash with larger RAM tiers is investigated", startfit::ram_tier_safe_mb);
-                if (rf->pinned) why += std::format("{}{}", why.empty() ? "" : "; ", pinned_why);
-                if (rf->half)
-                    why += std::format("{}the RAM tier is pinned host memory; more than half of the {} MiB of RAM available now "
-                                       "would make the system page, so it is lowered to half",
-                                       why.empty() ? "" : "; ", rin.avail_phys >> 20);
-                adjust(std::format("{} {} -> {} MiB", std::string(rin.explicit_src), kv_ram_mb, rf->mb), why);
+                adjust(std::format("{} {} -> {} MiB", std::string(rin.explicit_src), kv_ram_mb, rf->mb), ram_text.adjusted_why);
             }
             kv_ram_mb = rf->mb;
         }
         std::unique_ptr<tier::Tier> tier_pre;
         double tier_alloc_s = 0.0;
         if (kv_ram_mb > 0 && n_ck > 0 && !no_pc) {
-            if (rsz.avail_limited) logW("kv tier: RAM tier size {} MiB ({})", kv_ram_mb, rsz.reason);
-            else logI("kv tier: RAM tier size {} MiB ({})", kv_ram_mb, rsz.reason);
+            if (rsz.avail_limited) logW("kv tier: RAM tier size {} MiB ({})", kv_ram_mb, ram_text.size_reason);
+            else logI("kv tier: RAM tier size {} MiB ({})", kv_ram_mb, ram_text.size_reason);
             const TimePoint t_alloc0 = Clock::now();
             try {
                 tier_pre = tier::Tier::create(*ops, kv_ram_mb << 20, seed0 ^ 0x5bd1e995ull, dev);

@@ -74,6 +74,30 @@ std::optional<RamFit> ramTierFit(std::uint64_t mb, std::uint64_t avail_phys_byte
     return r;
 }
 
+RamTierText ramTierText(const std::optional<RamFit>& rf, std::uint64_t asked_mb, bool explicit_size, std::string_view src,
+                        std::string_view size_reason, std::string pinned_why, std::uint64_t entry_mb, std::uint64_t avail_mb) {
+    RamTierText t;
+    t.pinned_why = std::move(pinned_why);
+    t.off_reason = std::string(size_reason);  // what the "RAM tier off" line names (REVIEW-S8-719 N3)
+    t.size_reason = std::string(size_reason);
+    if (!rf) return t;
+    if (rf->mb == 0 && rf->pinned) {
+        t.pinned_why += pinnedOffWhy(rf->below_entry, entry_mb);
+        t.off_reason = std::format("{} {} MiB asked: {}", explicit_size ? std::string(src) : std::string("auto"), asked_mb, t.pinned_why);
+    }
+    if (explicit_size) {
+        std::string why;
+        if (rf->safe) why = std::format("capped at {} MiB while a crash with larger RAM tiers is investigated", ram_tier_safe_mb);
+        if (rf->pinned) why += std::format("{}{}", why.empty() ? "" : "; ", t.pinned_why);
+        if (rf->half)
+            why += std::format("{}the RAM tier is pinned host memory; more than half of the {} MiB of RAM available now "
+                               "would make the system page, so it is lowered to half",
+                               why.empty() ? "" : "; ", avail_mb);
+        t.adjusted_why = why;
+    }
+    return t;
+}
+
 std::uint64_t wantTokens(const vram::FitInput& fi) { return std::max<std::uint64_t>(fi.pool_min_tokens, fi.pool_hard_min); }
 
 ParallelFit fitParallel(const vram::FitInput& fi, std::uint64_t per_slot_bytes, bool given) {
