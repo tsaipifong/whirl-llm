@@ -3346,6 +3346,26 @@ void testB0SizingFollowUps() {
         const std::uint64_t ri = startfit::pinnedRoomMb(i);
         CHECK(ri * MiB + (1441 + 6000) * MiB + startfit::pinned_reserve_mb * MiB <= 16384 * MiB);
     }
+    // N3-1 (REVIEW-S8-719-3:55-57): an explicit size is monotonic in the request at every MiB, not only at multiples of 512
+    // (fixb s23_ram12288_vis: 17643 MiB available, ask 8800 -> 8800 but 8822 -> 8704), and never above the ask
+    for (const std::uint64_t avail_mb : {17643ull, 17000ull, 19032ull, 8191ull, 40001ull})
+        for (const std::uint64_t room : {startfit::pinned_room_unknown, 4096ull, 12288ull}) {
+            std::uint64_t prev = 0;
+            bool mono = true, within = true;
+            for (std::uint64_t ask = 1; ask <= 20480; ++ask) {
+                const auto r = startfit::ramTierFit(ask, avail_mb * MiB, 0, true, room, 0);
+                const std::uint64_t got = r ? r->mb : ask;
+                if (got < prev) mono = false;
+                if (got > ask) within = false;
+                prev = got;
+            }
+            CHECK(mono);
+            CHECK(within);
+        }
+    {
+        const auto r = startfit::ramTierFit(12288, 17643 * MiB, 0, true);  // the measured case keeps its 8704
+        CHECK(r.has_value() && r->mb == 8704ull && r->half);
+    }
 }
 
 // ---------------------------------------------------------------------------
