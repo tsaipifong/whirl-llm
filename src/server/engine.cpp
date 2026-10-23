@@ -145,18 +145,12 @@ Engine::Engine(ServerModel& model, device::Backend& ops, const Tokenizer& tok, c
 Engine::~Engine() {
     for (Slot& sl : slots_) {
         for (Ckpt& c : sl.ckpts) freeCkpt(c);
-        if (sl.spill_ev) ops_.eventDestroy(sl.spill_ev);
     }
     for (Spe& s : spes_) {
         freeCkpt(s.ck);
-        if (s.spill_ev) ops_.eventDestroy(s.spill_ev);
-        if (s.ready_ev) ops_.eventDestroy(s.ready_ev);
     }
-    for (QBatch& q : quarantine_)
-        if (q.ev) ops_.eventDestroy(q.ev);
-    if (samp_dev_) ops_.free(samp_dev_);
-    if (relax_dev_) ops_.free(relax_dev_);
-    if (big_dev_) ops_.free(big_dev_);
+    // the events (slots, shared checkpoints, quarantine) and the sampling buffers release themselves (device::EventH,
+    // device::DevBuf) when the members are destroyed
 }
 
 void Engine::initCkpt(Ckpt& c, bool host_ok) {
@@ -235,8 +229,8 @@ void Engine::allocState() {
     // sampling buffers
     const std::uint64_t samp_bytes = sampBytes();
     const std::uint64_t big_bytes = static_cast<std::uint64_t>(k_big) * 8 + 8;
-    samp_dev_ = ops_.malloc(samp_bytes);
-    big_dev_ = ops_.malloc(big_bytes);
+    samp_dev_ = device::DevBuf::alloc(ops_, samp_bytes);
+    big_dev_ = device::DevBuf::alloc(ops_, big_bytes);
     samp_host_.assign(samp_bytes, 0);
     big_host_.assign(big_bytes, 0);
     row_host_.assign(V, 0.0f);
@@ -245,7 +239,7 @@ void Engine::allocState() {
     ctl_host_.assign(static_cast<std::size_t>(opt_.parallel) * qwen35::ctl_words, 0);
     if (opt_.relax.on) {
         const std::uint64_t rb = static_cast<std::uint64_t>(max_rows) * opt_.relax.topk() * 8 + max_rows * 8;
-        relax_dev_ = ops_.malloc(rb);
+        relax_dev_ = device::DevBuf::alloc(ops_, rb);
         relax_host_.assign(rb, 0);
         logI("decode: relaxed draft acceptance (relaxacc, fast): greedy top-{} with p >= {:.2f} p_max; sampling typical "
              "acceptance eps {:.2f} delta {:.2f} - output differs from exact speculative decoding",
@@ -478,7 +472,7 @@ bool Engine::dflReady(const Slot& sl) const {
 }
 
 void Engine::freePages(Slot& sl) {
-    const bool busy = sl.spill_busy && !ops_.eventDone(sl.spill_ev);
+    const bool busy = sl.spill_busy && !ops_.eventDone(sl.spill_ev.get());
     sl.spill_busy = false;
     if (sl.spill_wanted) logW("slot {} | kv tier: deferred spill dropped (pages evicted)", sl.id);
     sl.spill_wanted = false;
@@ -492,7 +486,7 @@ void Engine::freePages(Slot& sl) {
             // cannot track them: order the main stream after the spill instead
             stat_spill_waits_ += 1;
             try {
-                ops_.streamWaitEvent(m_.stream(), sl.spill_ev);
+                ops_.streamWaitEvent(m_.stream(), sl.spill_ev.get());
             } catch (const std::exception&) {
             }
             unrefPages(sl.pages);
@@ -580,25 +574,20 @@ std::optional<std::int32_t> Engine::takePage(Slot* sl) {
 void Engine::quarantinePages(std::span<const std::int32_t> pages) {
     if (pages.empty()) return;
     if (!tier_) throw std::runtime_error("NoTier");
-    device::Event ev = ops_.eventCreate();
-    try {
-        ops_.eventRecord(ev, tier_->stream);
-    } catch (...) {
-        ops_.eventDestroy(ev);
-        throw;
-    }
-    quarantine_.push_back({std::vector<std::int32_t>(pages.begin(), pages.end()), ev});
+    device::EventH ev = device::EventH::create(ops_);
+    ops_.eventRecord(ev.get(), tier_->stream);  // a throw destroys ev
+    quarantine_.push_back({std::vector<std::int32_t>(pages.begin(), pages.end()), std::move(ev)});
 }
 
 void Engine::reclaimPages(bool force) {
     std::size_t i = 0;
     while (i < quarantine_.size()) {
         QBatch& q = quarantine_[i];
-        bool done = ops_.eventDone(q.ev);
+        bool done = ops_.eventDone(q.ev.get());
         if (!done && force) {
             stat_q_waits_ += 1;
             try {
-                ops_.streamWaitEvent(m_.stream(), q.ev);
+                ops_.streamWaitEvent(m_.stream(), q.ev.get());
             } catch (const std::exception&) {
             }
             done = true;
@@ -608,7 +597,6 @@ void Engine::reclaimPages(bool force) {
             continue;
         }
         unrefPages(q.pages);
-        ops_.eventDestroy(q.ev);
         quarantine_.erase(quarantine_.begin() + static_cast<std::ptrdiff_t>(i));
     }
 }
@@ -693,7 +681,7 @@ Spe* Engine::speMatch(std::span<const std::uint32_t> toks) {
 
 void Engine::dropSpe(Spe& s) {
     if (!s.valid) return;
-    const bool busy = s.spill_busy && !ops_.eventDone(s.spill_ev);
+    const bool busy = s.spill_busy && !ops_.eventDone(s.spill_ev.get());
     s.spill_busy = false;
     if (busy) {
         try {
@@ -701,7 +689,7 @@ void Engine::dropSpe(Spe& s) {
         } catch (const std::exception&) {
             stat_spill_waits_ += 1;
             try {
-                ops_.streamWaitEvent(m_.stream(), s.spill_ev);
+                ops_.streamWaitEvent(m_.stream(), s.spill_ev.get());
             } catch (const std::exception&) {
             }
             unrefPages(s.pages);
@@ -749,9 +737,9 @@ void Engine::createSpe(Slot& sl, std::span<const std::uint32_t> toks_all, std::u
     }
     s.pages.push_back(*np);
     // a spill of the previous content may still read the state buffers
-    if (s.spill_ev != nullptr && !ops_.eventDone(s.spill_ev)) {
+    if (s.spill_ev && !ops_.eventDone(s.spill_ev.get())) {
         stat_spill_waits_ += 1;
-        ops_.streamWaitEvent(m_.stream(), s.spill_ev);
+        ops_.streamWaitEvent(m_.stream(), s.spill_ev.get());
     }
     Ckpt& c = s.ck;
     const auto& cfg = m_.cfg();
@@ -860,9 +848,9 @@ void Engine::spillSpe(Spe& s) {
     }
     // the state / page copies into the checkpoint run on the main stream
     // (mid-prefill): the tier stream starts after them
-    if (s.ready_ev == nullptr) s.ready_ev = ops_.eventCreate();
-    ops_.eventRecord(s.ready_ev, m_.stream());
-    ops_.streamWaitEvent(t->stream, s.ready_ev);
+    if (!s.ready_ev) s.ready_ev = device::EventH::create(ops_);
+    ops_.eventRecord(s.ready_ev.get(), m_.stream());
+    ops_.streamWaitEvent(t->stream, s.ready_ev.get());
     tier_spans_.clear();
     ckSpans(s.ck, 0);
     for (std::size_t j = 0; j < s.pages.size(); ++j) pageSpans(s.pages[j], kv_off + j * lay.page_bytes);
@@ -874,8 +862,8 @@ void Engine::spillSpe(Spe& s) {
     t->trim(x);
     x->t_mod = Clock::now();
     x->owner.reset();
-    if (s.spill_ev == nullptr) s.spill_ev = ops_.eventCreate();
-    t->fence(x, s.spill_ev);
+    if (!s.spill_ev) s.spill_ev = device::EventH::create(ops_);
+    t->fence(x, s.spill_ev.get());
     s.spill_busy = true;
     s.tier_id = x->id;
     t->stats.spills += 1;
@@ -1011,8 +999,8 @@ void Engine::launchTopk(std::uint32_t row0, std::uint32_t rows, std::uint32_t k,
 
 void Engine::fetchCands(Sampler& s, std::uint32_t rows) {
     s.row_base = 0;
-    launchTopk(0, rows, k_small, s.inv_t, samp_dev_, max_rows, 0);
-    ops_.download(samp_host_.data(), samp_dev_, sampBytes());
+    launchTopk(0, rows, k_small, s.inv_t, samp_dev_.get(), max_rows, 0);
+    ops_.download(samp_host_.data(), samp_dev_.get(), sampBytes());
 }
 
 bool filterCands(Sampler& s, std::size_t count, bool complete) {
@@ -1097,8 +1085,8 @@ void Engine::prepareRow(Sampler& s, std::uint32_t r) {
     if (filterCands(s, k_small, false)) return;
     // escalate: a larger device top-k for this row, then the full row
     s.big_used += 1;
-    launchTopk(gr, 1, k_big, s.inv_t, big_dev_, 1, 0);
-    ops_.download(big_host_.data(), big_dev_, big_host_.size());
+    launchTopk(gr, 1, k_big, s.inv_t, big_dev_.get(), 1, 0);
+    ops_.download(big_host_.data(), big_dev_.get(), big_host_.size());
     {
         const auto* bids = reinterpret_cast<const std::int32_t*>(big_host_.data());
         const auto* bvals = reinterpret_cast<const float*>(big_host_.data() + static_cast<std::size_t>(k_big) * 4);
@@ -1291,7 +1279,7 @@ bool Engine::startJob(Slot& sl, Job& job) {
     // are shared, are replaced (copy on write), never waited for
     bool spill = false;
     if (sl.spill_busy && mt.reuse < sl.spill_upto) {
-        if (ops_.eventDone(sl.spill_ev)) sl.spill_busy = false;
+        if (ops_.eventDone(sl.spill_ev.get())) sl.spill_busy = false;
         else spill = true;
     }
     if (spill || sharedFrom(sl, mt.reuse)) cowPages(sl, mt.reuse, spill);
@@ -1327,7 +1315,7 @@ bool Engine::startJob(Slot& sl, Job& job) {
             static_cast<std::size_t>((static_cast<std::uint64_t>(N) + nd_max + 2 + kv_page - 1) / kv_page);
         if (sl.pages.size() > need_p) {
             const std::span<const std::int32_t> extra(sl.pages.data() + need_p, sl.pages.size() - need_p);
-            if (sl.spill_busy && !ops_.eventDone(sl.spill_ev)) quarantinePages(extra);
+            if (sl.spill_busy && !ops_.eventDone(sl.spill_ev.get())) quarantinePages(extra);
             else unrefPages(extra);
             sl.pages.resize(need_p);
             sl.tier_pages = std::min(sl.tier_pages, static_cast<std::uint32_t>(need_p));
@@ -1646,7 +1634,7 @@ void Engine::finishPrefill(Slot& sl) {
         std::vector<float> cached(V);
         ops_.download(cached.data(), m_.logits(), static_cast<std::uint64_t>(V) * 4);
         {
-            const bool busy = sl.spill_busy && !ops_.eventDone(sl.spill_ev);
+            const bool busy = sl.spill_busy && !ops_.eventDone(sl.spill_ev.get());
             if (busy || sharedFrom(sl, 0)) {
                 cowPages(sl, 0, busy);
                 if (!ensurePages(sl, N)) throw KvPoolFull();
@@ -2080,12 +2068,12 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
         if (sl.greedy) {
             if (relaxes(k) && nd_of[k] > 0) {
                 any_relax = true;
-                launchTopk(row_of[k], nd_of[k], rk, 1.0f, relax_dev_, max_rows, row_of[k]);
+                launchTopk(row_of[k], nd_of[k], rk, 1.0f, relax_dev_.get(), max_rows, row_of[k]);
             }
             continue;
         }
         any_sampling = true;
-        launchTopk(row_of[k], nd_of[k] + 1, k_small, sl.sm.inv_t, samp_dev_, max_rows, row_of[k]);
+        launchTopk(row_of[k], nd_of[k] + 1, k_small, sl.sm.inv_t, samp_dev_.get(), max_rows, row_of[k]);
     }
     const TimePoint t_enq = Clock::now();
     m_.readCtl(std::span<std::int32_t>(ctl_host_.data(), slots_.size() * qwen35::ctl_words));
@@ -2093,8 +2081,8 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
         p->t_ready = Clock::now();
         p->enq_ms[pa] += std::chrono::duration<double, std::milli>(t_enq - tc0).count();
     }
-    if (any_sampling) ops_.download(samp_host_.data(), samp_dev_, sampBytes());
-    if (any_relax) ops_.download(relax_host_.data(), relax_dev_, relax_host_.size());
+    if (any_sampling) ops_.download(samp_host_.data(), samp_dev_.get(), sampBytes());
+    if (any_relax) ops_.download(relax_host_.data(), relax_dev_.get(), relax_host_.size());
     // relaxacc: the kept tokens depend on which drafts were proposed, so the draft-count policy
     // must not see wall-clock times (run-to-run jitter would change the output). It sees a
     // deterministic cycle cost instead: a base per slot, + ngram_slope per extra verify row (the
@@ -2489,11 +2477,11 @@ void Engine::finishJob(Slot& sl) {
 void Engine::waitSpill(Slot& sl) {
     // (also after an eviction cleared spill_busy: the spill may still read the
     // checkpoint buffers; item S)
-    if (sl.spill_ev == nullptr) return;
+    if (!sl.spill_ev) return;
     sl.spill_busy = false;
-    if (ops_.eventDone(sl.spill_ev)) return;
+    if (ops_.eventDone(sl.spill_ev.get())) return;
     stat_spill_waits_ += 1;
-    ops_.streamWaitEvent(m_.stream(), sl.spill_ev);
+    ops_.streamWaitEvent(m_.stream(), sl.spill_ev.get());
 }
 
 void Engine::ckSpans(const Ckpt& c, std::uint64_t base, std::uint8_t tag) {
@@ -2625,14 +2613,14 @@ void Engine::spillSlot(Slot& sl) {
     t->trim(x);
     x->t_mod = Clock::now();
     x->owner = sl.id;
-    if (sl.spill_ev == nullptr) sl.spill_ev = ops_.eventCreate();
-    t->fence(x, sl.spill_ev);
+    if (!sl.spill_ev) sl.spill_ev = device::EventH::create(ops_);
+    t->fence(x, sl.spill_ev.get());
     if (opt_.tier_verify) {
         // REVIEW-ARCH4 P3-4: every verify attempt leaves exactly one line (byte-identical, differ or error), so the
         // release gate can count attempts against spills / restores and fail on a verify that threw
         bool sync_ok = true;
         try {
-            ops_.eventSync(sl.spill_ev);
+            ops_.eventSync(sl.spill_ev.get());
         } catch (const std::exception& ex) {
             sync_ok = false;
             logE("slot {} | kv tier verify: spill of {} tok: error (event sync: {})", sl.id, P, ex.what());
@@ -3454,12 +3442,12 @@ void Engine::govTick(const wddmwatch::Sample& s) {
 void Engine::govDrain() {
     // tier IO that reads or writes the pool or the checkpoint buffers: spills (device -> pinned copies on the tier stream)
     for (Slot& sl : slots_) {
-        if (sl.spill_ev != nullptr && !ops_.eventDone(sl.spill_ev)) ops_.eventSync(sl.spill_ev);
+        sl.spill_ev.waitIfPending();
         sl.spill_busy = false;
     }
     for (Spe& sp : spes_) {
-        if (sp.spill_ev != nullptr && !ops_.eventDone(sp.spill_ev)) ops_.eventSync(sp.spill_ev);
-        if (sp.ready_ev != nullptr && !ops_.eventDone(sp.ready_ev)) ops_.eventSync(sp.ready_ev);
+        sp.spill_ev.waitIfPending();
+        sp.ready_ev.waitIfPending();
         sp.spill_busy = false;
     }
     reclaimPages(true);
@@ -3481,7 +3469,7 @@ void Engine::govFreeCache(bool park) {
         }
         if (park && !sl.parked && !sl.ckpts.empty()) {
             // the spill to the RAM tier may still read the checkpoint buffers
-            if (sl.spill_ev != nullptr && !ops_.eventDone(sl.spill_ev)) ops_.eventSync(sl.spill_ev);
+            sl.spill_ev.waitIfPending();
             for (Ckpt& c : sl.ckpts) {
                 ck_bytes += ckptVram(true);
                 freeCkpt(c);
@@ -3500,17 +3488,15 @@ void Engine::govFreeCache(bool park) {
         }
         if (park && !spe_parked_ && !spes_.empty()) {
             for (Spe& sp : spes_) {
-                if (sp.spill_ev != nullptr && !ops_.eventDone(sp.spill_ev)) ops_.eventSync(sp.spill_ev);
-                if (sp.ready_ev != nullptr && !ops_.eventDone(sp.ready_ev)) ops_.eventSync(sp.ready_ev);
+                sp.spill_ev.waitIfPending();
+                sp.ready_ev.waitIfPending();
             }
             reclaimPages(true);
             for (Spe& sp : spes_) {
                 ck_bytes += ckptVram(false);
                 freeCkpt(sp.ck);
-                if (sp.spill_ev) ops_.eventDestroy(sp.spill_ev);
-                if (sp.ready_ev) ops_.eventDestroy(sp.ready_ev);
             }
-            spes_.clear();
+            spes_.clear();  // destroys the events (device::EventH)
             spe_parked_ = true;
         }
     }

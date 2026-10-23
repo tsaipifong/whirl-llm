@@ -12,6 +12,7 @@
 #include "decode_floor.h"
 #include "protocol.h"
 #include "device/backend.h"
+#include "device/handles.h"
 #include "tier/idle_flush.h"
 #include "tier/kv_tier.h"
 #include "tokens.h"
@@ -230,7 +231,7 @@ struct Slot : cache::SlotCache {
     // host tiers
     std::uint64_t tier_id = 0;
     std::uint32_t tier_pages = 0;
-    device::Event spill_ev = nullptr;
+    device::EventH spill_ev;  // fence of the slot's last spill (tier stream)
     bool spill_busy = false;
     std::uint32_t spill_upto = 0;
     bool spill_wanted = false;
@@ -276,14 +277,14 @@ struct Spe : cache::SpeKey {
     std::vector<std::int32_t> pages;
     Ckpt ck;
     std::uint64_t tier_id = 0;
-    device::Event spill_ev = nullptr;
+    device::EventH spill_ev;
     bool spill_busy = false;
-    device::Event ready_ev = nullptr;
+    device::EventH ready_ev;
 };
 
 struct QBatch {
     std::vector<std::int32_t> pages;
-    device::Event ev = nullptr;
+    device::EventH ev;
 };
 
 struct CycleProf;
@@ -652,8 +653,8 @@ private:
     TimePoint floor_log_t_{};
     std::uint64_t stat_floor_waits_ = 0, stat_floor_periods_ = 0;
     // sampling buffers
-    DevPtr samp_dev_ = 0, big_dev_ = 0;
-    DevPtr relax_dev_ = 0;                  // relaxacc: top-K of the greedy verify rows [ids | vals | stats]
+    device::DevBuf samp_dev_, big_dev_;
+    device::DevBuf relax_dev_;                // relaxacc: top-K of the greedy verify rows [ids | vals | stats]
     std::vector<std::uint8_t> relax_host_;
     std::vector<std::uint8_t> samp_host_, big_host_;
     std::vector<float> row_host_;
