@@ -185,6 +185,20 @@ GpuPinned gpuPinnedNow() {
                             g.own_shared = static_cast<std::uint64_t>(fp.largeValue);
                         PdhCloseQuery(qp);
                     }
+                    // every process's Shared Usage on that adapter (REVIEW-S8-719 C3); instance luid_0x<high>_0x<low>_phys_0
+                    PDH_HQUERY qa = nullptr;
+                    if (PdhOpenQueryW(nullptr, 0, &qa) == ERROR_SUCCESS) {
+                        wchar_t pa[160];
+                        std::swprintf(pa, 160, L"\\GPU Adapter Memory(luid_0x%08lx_0x%08lx_phys_0)\\Shared Usage",
+                                      static_cast<unsigned long>(desc.AdapterLuid.HighPart),
+                                      static_cast<unsigned long>(desc.AdapterLuid.LowPart));
+                        PDH_HCOUNTER ca = nullptr;
+                        PDH_FMT_COUNTERVALUE fa{};
+                        if (PdhAddEnglishCounterW(qa, pa, 0, &ca) == ERROR_SUCCESS && PdhCollectQueryData(qa) == ERROR_SUCCESS &&
+                            PdhGetFormattedCounterValue(ca, PDH_FMT_LARGE, nullptr, &fa) == ERROR_SUCCESS && fa.largeValue > 0)
+                            g.adapter_shared = static_cast<std::uint64_t>(fa.largeValue);
+                        PdhCloseQuery(qa);
+                    }
                     IDXGIAdapter3* a3 = nullptr;
                     if (SUCCEEDED(ad->QueryInterface(__uuidof(IDXGIAdapter3), reinterpret_cast<void**>(&a3))) && a3) {
                         DXGI_QUERY_VIDEO_MEMORY_INFO nl{};

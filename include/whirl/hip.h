@@ -132,6 +132,7 @@ GpuOthers gpuOthers(int dev);
 struct GpuPinnedDev {
     std::uint64_t nonlocal_budget = 0, nonlocal_usage = 0, shared_system = 0;
     std::uint64_t own_shared = 0;  // PDH "GPU Process Memory" Shared Usage of this process on that adapter (0: unknown)
+    std::uint64_t adapter_shared = 0;  // PDH "GPU Adapter Memory" Shared Usage of that adapter, every process (0: unknown)
 };
 struct GpuPinned {
     bool ok = false;

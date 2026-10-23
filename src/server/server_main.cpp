@@ -1320,10 +1320,11 @@ int serveMain(int argc, char** argv, const char* program) {
             std::string per;
             for (const hip::GpuPinnedDev& g : gp.devs) {
                 const std::uint64_t own = std::max(g.nonlocal_usage, g.own_shared);  // iGPU: DXGI says 0 (REVIEW C4)
-                pst.gpus.push_back({g.nonlocal_budget, own, g.shared_system});
-                per += std::format("{}{} MiB {} (this process {} MiB)", per.empty() ? "" : ", ",
+                pst.gpus.push_back({g.nonlocal_budget, own, g.shared_system, g.adapter_shared});
+                per += std::format("{}{} MiB {} (this process {} MiB, all programs {})", per.empty() ? "" : ", ",
                                    (g.nonlocal_budget > 0 ? g.nonlocal_budget : g.shared_system) >> 20,
-                                   g.nonlocal_budget > 0 ? "non-local budget" : "shared GPU memory", own >> 20);
+                                   g.nonlocal_budget > 0 ? "non-local budget" : "shared GPU memory", own >> 20,
+                                   g.adapter_shared ? std::format("{} MiB", g.adapter_shared >> 20) : std::string("unknown"));
             }
             pinned_room = startfit::pinnedRoomMb(pst);
             logI("kv tier: pinned memory now: {} HIP GPU(s) [{}]; all programs {} MiB (largest adapter) of half the RAM ({} MiB) -> room for the RAM tier {} "
