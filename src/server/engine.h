@@ -12,6 +12,7 @@
 #include "cache/page_pool.h"
 #include "cache/prefix_cache.h"
 #include "decode_floor.h"
+#include "prefix_store.h"
 #include "protocol.h"
 #include "device/backend.h"
 #include "device/handles.h"
@@ -177,31 +178,18 @@ private:
     void send(const std::string& b);
 };
 
-// cache_tokens, last_used: cache::SlotCache. The members; Slot adds the F1 wait (below).
-struct SlotData : cache::SlotCache {
+// cache_tokens, last_used: cache::SlotCache; pages, checkpoints and checkpoint points: SlotPrefix (arch024 M4).
+// The members; Slot adds the F1 wait (below).
+struct SlotData : SlotPrefix {
     std::uint32_t id = 0;
     Phase phase = Phase::idle;
     Job* job = nullptr;
-    std::vector<std::int32_t> pages;
-    std::vector<Ckpt> ckpts;
-    std::uint64_t ckpt_seq = 0;
     Sampler sm;
     bool greedy = true;
     bool ignore_eos = false;
     std::uint32_t max_tokens = 0;
     std::uint32_t n_prompt = 0;
-    std::uint32_t reuse = 0;
-    std::optional<DevPtr> ck_hid;
     std::size_t pf_off = 0;
-    std::uint32_t pf_split = 0;
-    std::uint32_t sys_split = 0;
-    std::uint32_t lcp_ck = 0;
-    // vision: end of the prompt's last image (after <|vision_end|>), a chunk split
-    // where a shared 'prefix' checkpoint is kept (0 = none)
-    std::uint32_t img_ck = 0;
-    // TAIL-CK: slot checkpoint at the start of the prompt's last schedule chunk (0 = none)
-    std::uint32_t tail_ck = 0;
-    bool on_sched = false;
     bool rs_shared = false;
     TimePoint tp0{};
     TimePoint td0{};
@@ -287,42 +275,6 @@ private:
     void waitSpill() noexcept {
         try {
             spill_ev.waitIfPending();
-        } catch (...) {
-        }
-    }
-};
-
-// Shared prefix checkpoint (item S).
-// index fields (valid, n, kind, tokens, last_used, pin, uses): cache::SpeKey
-struct SpeData : cache::SpeKey {
-    std::vector<std::int32_t> pages;
-    Ckpt ck;
-    std::uint64_t tier_id = 0;
-    device::EventH spill_ev;
-    bool spill_busy = false;
-    device::EventH ready_ev;
-};
-
-// F1 as for Slot: waits for the spill (reads ck) and the ready fence (the copy into ck) before ck is freed.
-struct Spe : SpeData {
-    Spe() = default;
-    Spe(Spe&&) noexcept = default;
-    Spe& operator=(Spe&& o) noexcept {
-        if (this != &o) {
-            waitFences();
-            SpeData::operator=(std::move(o));
-        }
-        return *this;
-    }
-    ~Spe() { waitFences(); }
-    Spe(const Spe&) = delete;
-    Spe& operator=(const Spe&) = delete;
-
-private:
-    void waitFences() noexcept {
-        try {
-            spill_ev.waitIfPending();
-            ready_ev.waitIfPending();
         } catch (...) {
         }
     }
@@ -549,30 +501,15 @@ private:
     std::optional<std::int32_t> takePage(Slot* sl);
     void cowPages(Slot& sl, std::uint32_t reuse, bool spill);
     bool ensurePages(Slot& sl, std::uint64_t n_tok);
-    // shared prefix checkpoints
-    std::uint32_t sysSplit(std::span<const std::uint32_t> toks) const;
-    std::vector<std::uint32_t> imgSplits(std::span<const std::uint32_t> toks) const;
-    std::size_t schedFloor(std::span<const std::uint32_t> toks, std::size_t lim) const;
-    bool onSchedule(std::span<const std::uint32_t> toks, std::size_t a) const;
-    // COLD-RESUME: may a request with these tokens resume from a checkpoint (position, kind code)?
-    bool resumeOk(std::span<const std::uint32_t> toks, std::uint32_t pos, std::uint8_t kind) const;
-    Spe* speMatch(std::span<const std::uint32_t> toks);
+    // shared prefix checkpoints (the table, the lookups and the schedule: ps_)
     void dropSpe(Spe& s);
     void createSpe(Slot& sl, std::span<const std::uint32_t> toks_all, std::uint32_t pos, const char* kind,
                    std::optional<DevPtr> hid_row, const Ckpt* src, std::uint64_t tier_id);
     void attachSpe(Slot& sl, Spe& s);
     void spillSpe(Spe& s);
-    std::uint32_t lcpTarget(std::span<const std::uint32_t> toks, std::uint32_t reuse, std::uint32_t sys);
     bool waitsForSys(Job& job);
     bool waitsForTier(Job& job);
     void prefetchFor(Job& job);
-    struct CacheMatch {
-        std::uint32_t reuse = 0;
-        Ckpt* ck = nullptr;
-        std::size_t lcp = 0;
-    };
-    CacheMatch cacheMatch(Slot& sl, std::span<const std::uint32_t> toks);
-    Slot* pickSlot(std::span<const std::uint32_t> toks);
     // sampling
     void launchTopk(std::uint32_t row0, std::uint32_t rows, std::uint32_t k, float inv_t, DevPtr dst,
                     std::uint32_t dst_rows, std::uint32_t out0);
@@ -699,9 +636,6 @@ private:
     bool spec_on_ = false;
     std::uint64_t conv_bytes_ = 0, ssm_bytes_ = 0;
     std::vector<Slot> slots_;
-    // prefix cache decisions (lookup / insertion / eviction); tier_view_: tier_ seen through cache::Tier
-    std::unique_ptr<cache::PrefixCache> pc_;
-    std::unique_ptr<cache::Tier> tier_view_;
     // queue
     std::mutex q_mutex_;
     std::condition_variable q_cond_;
@@ -763,7 +697,9 @@ private:
                      // the same order
     TimePoint last_tick_{};
     TimePoint last_reap_{};
-    std::vector<Spe> spes_;
+    // shared prefix checkpoints, prefix cache decisions, chunk schedule (arch024 M4); here, where spes_ was, so
+    // ~Engine destroys the shared checkpoints (and their events) at the same point
+    PrefixStore ps_;
     std::uint64_t stat_spe_new_ = 0, stat_spe_hits_ = 0, stat_spe_tok_ = 0, stat_spe_evict_ = 0, stat_unshare_ = 0;
     std::uint64_t stat_evictions_ = 0;
     // vision

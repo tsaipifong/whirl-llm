@@ -14,6 +14,7 @@ namespace whirl::server {
 
 void Engine::attachVision(const VisionConfig& vc) {
     vis_cfg_ = vc;
+    ps_.setVision({vc.vis != nullptr, vc.vision_end_id, vc.ck_min});
     vis_lend_.clear();
     if (vc.vis == nullptr) return;
     const std::size_t n = m_.lendScratch(vis_lend_raw_);

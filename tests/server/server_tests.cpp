@@ -13,6 +13,7 @@
 #include "server/engine.h"
 #include "server/http.h"
 #include "server/log.h"
+#include "server/prefix_store.h"
 #include "server/protocol.h"
 #include "server/tokens.h"
 #include "tier/kv_tier.h"
@@ -22,6 +23,7 @@
 #include "whirl/gguf.h"
 #include "whirl/json.h"
 #include "whirl/tokenizer.h"
+#include "whirl/vismap.h"
 
 #include <algorithm>
 #include <fstream>
@@ -3579,6 +3581,281 @@ struct ListEvictor final : PagePool::Evictor {
     }
 };
 
+// ---------------------------------------------------------------------------
+// arch024-S5a: PrefixStore (M4) driven directly: the chunk schedule, the COLD-RESUME table, cacheMatch / pickSlot,
+// the shared prefix table (match / eviction) and the TAIL-CK point. Synthetic chat ids, no model.
+
+namespace ps_test {
+constexpr std::uint32_t kImStart = 1, kImEnd = 2, kNl = 3, kSystem = 4, kThink = 5, kVisEnd = 6;
+
+ChatTokens chatIds() {
+    ChatTokens ct;
+    ct.im_start = kImStart;
+    ct.im_end = kImEnd;
+    ct.nl = kNl;
+    ct.system = kSystem;
+    ct.think = kThink;
+    return ct;
+}
+
+// n tokens: filler 1000 + i (seed shifts it, so two seeds share nothing); sys > 0: a leading system message whose
+// boundary (the next <|im_start|>) is at sys; think: ends with "<think>" "\n"
+std::vector<std::uint32_t> prompt(std::size_t n, std::size_t sys = 0, bool think = false, std::uint32_t seed = 0) {
+    std::vector<std::uint32_t> t(n);
+    for (std::size_t i = 0; i < n; ++i) t[i] = 1000 + seed * 1000000 + static_cast<std::uint32_t>(i);
+    if (sys > 0) {
+        t[0] = kImStart;
+        t[1] = kSystem;
+        t[sys - 2] = kImEnd;
+        t[sys - 1] = kNl;
+        t[sys] = kImStart;
+    }
+    if (think) {
+        t[n - 2] = kThink;
+        t[n - 1] = kNl;
+    }
+    return t;
+}
+
+PrefixStore::Config cfgFor(bool precise) {
+    PrefixStore::Config c;
+    c.cold_resume = precise;  // --precise turns COLD-RESUME on; balance / fast leave it off
+    c.sys_min = sched::sys_min_default;
+    c.kv_page = kv_page;
+    return c;
+}
+
+void setCk(Ckpt& c, std::uint32_t pos, const char* kind, std::uint64_t seq) {
+    c.valid = true;
+    c.pos = pos;
+    c.kind = kind;
+    c.seq = seq;
+    c.has_logits = true;
+}
+
+struct TSlot : SlotPrefix {
+    bool idle = true;
+};
+}  // namespace ps_test
+
+void testPrefixStore() {
+    using namespace ps_test;
+    const ChatTokens ct = chatIds();
+    // ---- the chunk schedule: the store's functions are the prefill_schedule.h ones over the prompt's splits
+    {
+        PrefixStore st(ct, cfgFor(false));
+        const auto a = prompt(9500, 3000);
+        CHECK_EQ(ct.sysBoundary(a), std::size_t{3000});
+        CHECK_EQ(st.sysSplit(a), 3000u);
+        CHECK_EQ(st.sysSplit(prompt(9500, 1000)), 0u);  // shorter than sys_min (2048): no split
+        CHECK_EQ(st.sysSplit(prompt(9500)), 0u);        // no system message
+        PrefixStore::Config off = cfgFor(false);
+        off.sys_min = 0;  // WHIRL_SYS_MIN=0
+        CHECK_EQ(PrefixStore(ct, off).sysSplit(a), 0u);
+        CHECK(st.imgSplits(a).empty());  // no mmproj
+        const std::vector<std::uint32_t> noimg;
+        bool same = true;
+        const std::vector<std::vector<std::uint32_t>> ps = {prompt(9500), prompt(9500, 3000), prompt(9500, 0, true),
+                                                            prompt(20000, 2500, true)};
+        for (const auto& p : ps) {
+            const std::size_t sys = sched::sysSplit(ct.sysBoundary(p), p.size(), sched::sys_min_default);
+            const std::size_t th = ct.thinkOpenSplit(p);
+            for (std::size_t x = 0; x <= p.size(); x += 37) {
+                same = same && st.onSchedule(p, x) == sched::onSchedule(p.size(), sys, th, noimg, x);
+                same = same && st.schedFloor(p, x) == sched::schedFloor(p.size(), sys, th, noimg, x);
+            }
+        }
+        CHECK(same);
+        // known points (no system message, 9500 tokens): 1024-token chunks, the 1308-token tail split at 9216
+        const auto b = prompt(9500);
+        CHECK(st.onSchedule(b, 0) && st.onSchedule(b, 4096) && st.onSchedule(b, 8192) && st.onSchedule(b, 9216));
+        CHECK(!st.onSchedule(b, 4100) && !st.onSchedule(b, 8256));
+        CHECK(st.onSchedule(a, 3000) && st.onSchedule(a, 4024) && !st.onSchedule(a, 3072));  // chunks restart at sys
+        // vision: image ends at >= ck_min are splits once an mmproj is attached
+        std::vector<std::uint32_t> v = prompt(6000);
+        for (std::size_t i = 1500; i < 2100; ++i) v[i] = qwen35::image_id_base + 7;
+        v[2100] = kVisEnd;
+        st.setVision({true, kVisEnd, sched::img_split_min_default});
+        CHECK(st.imgSplits(v) == (std::vector<std::uint32_t>{2101}));
+        CHECK(st.onSchedule(v, 2101) && !st.onSchedule(v, 2048));
+        st.setVision({true, kVisEnd, 4000});  // the image ends below ck_min: no split
+        CHECK(st.imgSplits(v).empty());
+        st.setVision({});
+        CHECK(st.imgSplits(v).empty());
+    }
+    // ---- COLD-RESUME table: precise / balance x checkpoint kind x on / off the schedule of the new prompt
+    {
+        struct Row {
+            bool precise;
+            const char* kind;
+            bool on;
+            bool ok;
+        };
+        const Row rows[] = {
+            {false, "prompt-end", true, true}, {false, "prompt-end", false, true},
+            {false, "think-open", true, true}, {false, "think-open", false, true},
+            {false, "gen-end", true, true},    {false, "gen-end", false, true},
+            {false, "system", true, true},     {false, "system", false, true},
+            {false, "prefix", true, true},     {false, "prefix", false, true},
+            {false, "restored", true, true},   {false, "restored", false, true},
+            {true, "prompt-end", true, true},  {true, "prompt-end", false, false},
+            {true, "think-open", true, true},  {true, "think-open", false, false},
+            {true, "gen-end", true, false},    {true, "gen-end", false, false},
+            {true, "system", true, true},      {true, "system", false, false},
+            {true, "prefix", true, true},      {true, "prefix", false, false},
+            {true, "restored", true, true},    {true, "restored", false, false},
+        };
+        const auto toks = prompt(10000);  // schedule 0, 1024, ..., 8192, 9216, 10000
+        const std::uint32_t pos_on = 4096, pos_off = 4100;
+        int bad = 0;
+        for (const Row& r : rows) {
+            PrefixStore st(ct, cfgFor(r.precise));
+            const std::uint32_t pos = r.on ? pos_on : pos_off;
+            if (st.resumeOk(toks, pos, ckKindCode(r.kind)) != r.ok) {
+                ++bad;
+                std::fprintf(stderr, "  resumeOk %s %s %s: expected %d\n", r.precise ? "precise" : "balance", r.kind,
+                             r.on ? "on" : "off", r.ok ? 1 : 0);
+            }
+            // the same rule through cacheMatch: one checkpoint of that kind at pos in a slot that cached the prompt
+            TSlot sl;
+            sl.cache_tokens = toks;
+            sl.ckpts.resize(3);
+            setCk(sl.ckpts[1], pos, r.kind, 1);
+            const PrefixStore::Match m = st.cacheMatch(sl, toks);
+            const bool used = m.ck == &sl.ckpts[1] && m.reuse == pos && m.lcp == toks.size();
+            const bool none = m.ck == nullptr && m.reuse == 0 && m.lcp == toks.size();
+            if (r.ok ? !used : !none) {
+                ++bad;
+                std::fprintf(stderr, "  cacheMatch %s %s %s: reuse %u\n", r.precise ? "precise" : "balance", r.kind,
+                             r.on ? "on" : "off", m.reuse);
+            }
+            // the slot's checkpoints are untouched (the filter works on a copy)
+            if (!sl.ckpts[1].valid) ++bad;
+        }
+        CHECK_EQ(bad, 0);
+        CHECK_EQ(int{ckKindCode("gen-end")}, 3);
+        CHECK_EQ(std::string(ckKindStr(ckKindCode("prefix"))), std::string("prefix"));
+        CHECK_EQ(std::string(ckKindStr(0)), std::string("restored"));
+        // an older turn's gen-end (9000) and a cold 'prefix' (8192): balance resumes at the longer, precise at the cold
+        TSlot sl;
+        sl.cache_tokens = toks;
+        sl.ckpts.resize(3);
+        setCk(sl.ckpts[0], 9000, "gen-end", 2);
+        setCk(sl.ckpts[2], 8192, "prefix", 1);
+        const auto more = prompt(10500);  // the same prefix, 500 tokens more
+        CHECK_EQ(PrefixStore(ct, cfgFor(false)).cacheMatch(sl, more).reuse, 9000u);
+        const PrefixStore::Match mp = PrefixStore(ct, cfgFor(true)).cacheMatch(sl, more);
+        CHECK(mp.ck == &sl.ckpts[2] && mp.reuse == 8192 && mp.lcp == 10000);
+        // a checkpoint past the common prefix is never used
+        CHECK_EQ(PrefixStore(ct, cfgFor(false)).cacheMatch(sl, prompt(10000, 0, false, 1)).reuse, 0u);
+        // --no-prefix-cache: nothing matches
+        PrefixStore::Config dis = cfgFor(false);
+        dis.enabled = false;
+        CHECK_EQ(PrefixStore(ct, dis).cacheMatch(sl, more).reuse, 0u);
+    }
+    // ---- shared prefix checkpoints: match (prefix, on the schedule, longest) and the replacement victim
+    {
+        PrefixStore st(ct, cfgFor(false));
+        auto& sp = st.spes();
+        sp.resize(3);
+        const auto a = prompt(9500, 3000);
+        auto keep = [&](Spe& s, std::size_t n, const char* kind, std::uint64_t used) {
+            s.valid = true;
+            s.n = static_cast<std::uint32_t>(n);
+            s.kind = kind;
+            s.tokens.assign(a.begin(), a.begin() + static_cast<std::ptrdiff_t>(n));
+            s.last_used = used;
+        };
+        CHECK(st.speMatch(a) == nullptr);
+        keep(sp[0], 3000, "system", 5);
+        CHECK(st.speMatch(a) == &sp[0]);
+        CHECK(st.speMatch(prompt(9500, 3000, false, 1)) == nullptr);  // another system message
+        CHECK(st.speMatch(std::span<const std::uint32_t>(a).subspan(0, 3000)) == nullptr);  // n must be < the prompt
+        keep(sp[1], 5048, "prefix", 6);  // longer and on the schedule (3000 + 2 x 1024)
+        CHECK(st.speMatch(a) == &sp[1]);
+        keep(sp[2], 7000, "prefix", 7);  // longer but off the new prompt's schedule
+        CHECK(st.onSchedule(a, 5048) && !st.onSchedule(a, 7000));
+        CHECK(st.speMatch(a) == &sp[1]);
+        // victim: a free entry first, else the least recently used one that is not pinned
+        sp[2].valid = false;
+        CHECK_EQ(st.cache().sharedVictim(sp), 2);
+        keep(sp[2], 7000, "prefix", 7);
+        CHECK_EQ(st.cache().sharedVictim(sp), 0);
+        sp[0].pin = true;
+        CHECK_EQ(st.cache().sharedVictim(sp), 1);
+        sp[1].pin = sp[2].pin = true;
+        CHECK_EQ(st.cache().sharedVictim(sp), -1);
+        sp[0].pin = sp[1].pin = sp[2].pin = false;
+        CHECK_EQ(st.cache().findShared(sp, std::span<const std::uint32_t>(a).subspan(0, 5048)), 1);
+        CHECK_EQ(st.cache().findShared(sp, std::span<const std::uint32_t>(a).subspan(0, 5000)), -1);
+        // pickSlot: the shared entry counts for every free slot, so the tie goes to the least recently used slot;
+        // a slot whose own checkpoint resumes further wins; a busy slot is never picked
+        std::vector<TSlot> slots(3);
+        for (std::size_t i = 0; i < slots.size(); ++i) {
+            slots[i].ckpts.resize(3);
+            slots[i].last_used = 10 + i;
+        }
+        auto avail = [](const TSlot& s) { return s.idle; };
+        CHECK(st.pickSlot(std::span<TSlot>(slots), a, avail) == &slots[0]);
+        slots[2].cache_tokens = a;
+        setCk(slots[2].ckpts[0], 8192, "prompt-end", 1);
+        CHECK(st.pickSlot(std::span<TSlot>(slots), a, avail) == &slots[2]);
+        slots[2].idle = false;
+        CHECK(st.pickSlot(std::span<TSlot>(slots), a, avail) == &slots[0]);
+        slots[0].last_used = 20;
+        CHECK(st.pickSlot(std::span<TSlot>(slots), a, avail) == &slots[1]);
+        for (TSlot& s : slots) s.idle = false;
+        CHECK(st.pickSlot(std::span<TSlot>(slots), a, avail) == nullptr);
+        // no shared entry and no own checkpoint: plain LRU over the free slots (llama.cpp's fallback too)
+        for (Spe& s : sp) s.valid = false;
+        slots[0].idle = slots[1].idle = true;
+        CHECK(st.pickSlot(std::span<TSlot>(slots), prompt(4000, 0, false, 2), avail) == &slots[1]);
+    }
+    // ---- TAIL-CK: the slot checkpoint at the start of the prompt's last schedule chunk
+    {
+        const PrefixStore bal(ct, cfgFor(false)), pre(ct, cfgFor(true));
+        auto slotFor = [](std::size_t n_ck) {
+            TSlot s;
+            s.ckpts.resize(n_ck);
+            s.on_sched = true;
+            return s;
+        };
+        TSlot s = slotFor(3);
+        const auto big = prompt(9500);
+        CHECK_EQ(bal.tailCk(s, big), 9216u);
+        CHECK_EQ(pre.tailCk(s, big), 9216u);
+        const auto small = prompt(4000);  // below tail_ck_min (4096): balance keeps none, precise always keeps one
+        CHECK_EQ(bal.tailCk(s, small), 0u);
+        CHECK_EQ(pre.tailCk(s, small), 3072u);
+        CHECK_EQ(bal.tailCk(slotFor(2), big), 0u);  // fewer than ckpt_keep_prefix_min checkpoints
+        TSlot off = slotFor(3);
+        off.on_sched = false;  // resumed off the cold schedule
+        CHECK_EQ(bal.tailCk(off, big), 0u);
+        PrefixStore::Config nt = cfgFor(false);
+        nt.tail_ck = false;  // WHIRL_TAIL_CK=0
+        CHECK_EQ(PrefixStore(ct, nt).tailCk(s, big), 0u);
+        s.reuse = 9216;  // resumes there already
+        CHECK_EQ(bal.tailCk(s, big), 0u);
+        s.reuse = 0;
+        std::uint32_t SlotPrefix::* const others[] = {&SlotPrefix::sys_split, &SlotPrefix::lcp_ck, &SlotPrefix::img_ck};
+        for (std::uint32_t SlotPrefix::* f : others) {
+            TSlot t = slotFor(3);
+            t.*f = 9216;  // another checkpoint is kept there
+            CHECK_EQ(bal.tailCk(t, big), 0u);
+        }
+        // think-open prompt (9500, the split at 9499): balance drops the tail (it is the think-open split itself),
+        // precise moves it one schedule point earlier (the think-open split moves with the conversation)
+        const auto th = prompt(9500, 0, true);
+        TSlot t = slotFor(3);
+        t.pf_split = static_cast<std::uint32_t>(ct.thinkOpenSplit(th));
+        CHECK_EQ(t.pf_split, 9499u);
+        CHECK_EQ(bal.tailCk(t, th), 0u);
+        CHECK_EQ(pre.tailCk(t, th), 9216u);
+        // with a system message the chunks restart at it: 3000 + 6 x 1024 = 9144, tail 356 tokens
+        CHECK_EQ(bal.tailCk(s, prompt(9500, 3000)), 9144u);
+    }
+}
+
 void testPagePool() {
     // ---- init and the free order: increasing page ids, then LIFO reuse (free stack like vLLM's free queue tail)
     {
@@ -4789,6 +5066,7 @@ int main(int argc, char** argv) {
         {"ckpt_restore_fail", testCkptRestoreFail},
         {"ckpt_engine_teardown", testCkptEngineTeardown},
         {"page_pool", testPagePool},
+        {"prefix_store", testPrefixStore},
         {"compat_endpoints", testCompatEndpoints},
         {"http_limits", testHttpLimits},
         {"http_conn_cap", testHttpConnCap},

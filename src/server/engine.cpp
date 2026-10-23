@@ -23,26 +23,6 @@ namespace {
 
 constexpr std::uint8_t kNoTag = 0xff;
 
-std::uint8_t ckKindCode(std::string_view k) {
-    if (k == "prompt-end") return 1;
-    if (k == "think-open") return 2;
-    if (k == "gen-end") return 3;
-    if (k == "system") return 4;
-    if (k == "prefix") return 5;
-    return 0;
-}
-
-const char* ckKindStr(std::uint8_t c) {
-    switch (c) {
-        case 1: return "prompt-end";
-        case 2: return "think-open";
-        case 3: return "gen-end";
-        case 4: return "system";
-        case 5: return "prefix";
-        default: return "restored";
-    }
-}
-
 using cache::lcpLen;
 using cache::prefixEq;
 
@@ -99,10 +79,25 @@ struct CycleProf {
 // ---------------------------------------------------------------------------
 // construction
 
+namespace {
+// the prefix store's settings (arch024 M4); the constructor body changes none of these options
+PrefixStore::Config storeConfig(const EngineOptions& o) {
+    PrefixStore::Config c;
+    c.enabled = !o.no_prefix_cache;
+    c.lcp_on = o.lcp_on;
+    c.cold_resume = o.cold_resume;
+    c.sys_min = o.sys_min;
+    c.tail_ck = o.tail_ck;
+    c.tail_ck_min = o.tail_ck_min;
+    c.kv_page = kv_page;
+    return c;
+}
+}  // namespace
+
 Engine::Engine(ServerModel& model, device::Backend& ops, const Tokenizer& tok, const EngineOptions& opt)
     : m_(model), ops_(ops), tok_(tok), ct_(tok), opt_(opt), ctx_(opt.ctx),
       ck_(ops, model, CkptStore::Layout{model.convBytes(), model.ssmBytes(), opt.ckpt_host}), pool_(ops, model),
-      id_prng_(opt.seed) {
+      id_prng_(opt.seed), ps_(ct_, storeConfig(opt_)) {
     if (opt_.parallel < 1 || opt_.parallel > gdn_max_seg) throw std::runtime_error("parallel must be 1..16");
     if (opt_.n_ck == 0 || opt_.no_prefix_cache) opt_.n_spe = 0;
     if (opt_.no_prefix_cache) opt_.n_ck = 0;
@@ -114,14 +109,6 @@ Engine::Engine(ServerModel& model, device::Backend& ops, const Tokenizer& tok, c
     if (opt_.n_ck > tier::max_ck) {
         logW("prefix checkpoints per slot {} above the maximum {}; using {}", opt_.n_ck, tier::max_ck, tier::max_ck);
         opt_.n_ck = tier::max_ck;
-    }
-    {
-        cache::Config pc;
-        pc.enabled = !opt_.no_prefix_cache;
-        pc.lcp_on = opt_.lcp_on;
-        pc.sys_min = opt_.sys_min;
-        pc.kv_page = kv_page;
-        pc_ = cache::makePrefixCache(pc);
     }
     if (opt_.profile > 0) {
         prof_ = std::make_unique<CycleProf>();
@@ -161,8 +148,8 @@ void Engine::allocState() {
         sl.ckpts.resize(opt_.n_ck);
         ck_.unpark(sl.ckpts, true);
     }
-    spes_.resize(opt_.n_spe);
-    for (Spe& s : spes_) ck_.init(s.ck, false);
+    ps_.spes().resize(opt_.n_spe);
+    for (Spe& s : ps_.spes()) ck_.init(s.ck, false);
     // sampling buffers
     const std::uint64_t samp_bytes = sampBytes();
     const std::uint64_t big_bytes = static_cast<std::uint64_t>(k_big) * 8 + 8;
@@ -196,8 +183,7 @@ void Engine::initPool() {
 void Engine::attachTier(tier::Tier* t) {
     tier_ = t;
     pool_.setQuarantineStream(t ? &t->stream : nullptr);
-    tier_view_ = t ? cache::makeTierAdapter(*t) : nullptr;
-    pc_->attachTier(tier_view_.get());
+    ps_.attachTier(t);
     if (t) {
         t->setWake([this] {
             std::lock_guard<std::mutex> lk(q_mutex_);
@@ -329,7 +315,7 @@ void Engine::saveCkpt(Slot& sl, std::uint32_t pos, const char* kind, std::option
     if (sl.restore != nullptr && sl.phase != Phase::restore) cutTail(sl);
     // a spill to the host tier may still be reading the checkpoint buffers
     waitSpill(sl);
-    Ckpt* slot = &sl.ckpts[pc_->ckptSlotFor(sl.ckpts, pos)];
+    Ckpt* slot = &sl.ckpts[ps_.cache().ckptSlotFor(sl.ckpts, pos)];
     ck_.save(*slot, hid, logits);
     sl.ckpt_seq += 1;
     slot->valid = true;
@@ -419,15 +405,15 @@ struct Engine::SlotEvictor final : PagePool::Evictor {
 // the prefix cache's victim for a page sl (nullptr: none) needs: a shared checkpoint dropped or an idle slot's pages
 // freed (true), or nothing to evict (false)
 bool Engine::evictFor(Slot* sl) {
-    const cache::Victim v = pc_->evictVictim(
+    const cache::Victim v = ps_.cache().evictVictim(
         slots_,
         [&](std::size_t i) {
             const Slot& o = slots_[i];
             return !((sl != nullptr && &o == sl) || o.phase != Phase::idle || o.pages.empty());
         },
-        spes_);
+        ps_.spes());
     Slot* victim = v.kind == cache::Victim::slot ? &slots_[v.index] : nullptr;
-    Spe* vspe = v.kind == cache::Victim::spe ? &spes_[v.index] : nullptr;
+    Spe* vspe = v.kind == cache::Victim::spe ? &ps_.spes()[v.index] : nullptr;
     if (vspe) {
         logI("kv pool full: dropping shared {} checkpoint @{} ({} pages)", vspe->kind, vspe->n, vspe->pages.size());
         dropSpe(*vspe);
@@ -476,39 +462,6 @@ bool Engine::ensurePages(Slot& sl, std::uint64_t n_tok) {
 // ---------------------------------------------------------------------------
 // item S: shared prefix checkpoints
 
-std::uint32_t Engine::sysSplit(std::span<const std::uint32_t> toks) const {
-    if (opt_.sys_min == 0) return 0;
-    return static_cast<std::uint32_t>(sched::sysSplit(ct_.sysBoundary(toks), toks.size(), opt_.sys_min));
-}
-
-// vision: the image-end splits of toks (position after the <|vision_end|> that follows a
-// run of image ids), those >= ck_min; a function of the tokens only, so every prompt
-// with the same prefix gets the same splits there (at most 32)
-std::vector<std::uint32_t> Engine::imgSplits(std::span<const std::uint32_t> toks) const {
-    if (vis_cfg_.vis == nullptr) return {};
-    // shared with the CLI (include/whirl/prefill_schedule.h, CLI-SCHED)
-    return sched::imageSplits(toks, qwen35::image_id_base, vis_cfg_.vision_end_id, vis_cfg_.ck_min);
-}
-
-std::size_t Engine::schedFloor(std::span<const std::uint32_t> toks, std::size_t lim) const {
-    const std::vector<std::uint32_t> imgs = imgSplits(toks);
-    return sched::schedFloor(toks.size(), sysSplit(toks), ct_.thinkOpenSplit(toks), imgs, lim);
-}
-
-bool Engine::onSchedule(std::span<const std::uint32_t> toks, std::size_t a) const {
-    const std::vector<std::uint32_t> imgs = imgSplits(toks);
-    return sched::onSchedule(toks.size(), sysSplit(toks), ct_.thinkOpenSplit(toks), imgs, a);
-}
-
-bool Engine::resumeOk(std::span<const std::uint32_t> toks, std::uint32_t pos, std::uint8_t kind) const {
-    return !opt_.cold_resume || (kind != ckKindCode("gen-end") && onSchedule(toks, pos));
-}
-
-Spe* Engine::speMatch(std::span<const std::uint32_t> toks) {
-    const int i = pc_->matchShared(spes_, toks, [&](std::size_t a) { return onSchedule(toks, a); });
-    return i < 0 ? nullptr : &spes_[static_cast<std::size_t>(i)];
-}
-
 void Engine::dropSpe(Spe& s) {
     if (!s.valid) return;
     const bool busy = s.spill_busy && !ops_.eventDone(s.spill_ev.get());
@@ -537,18 +490,18 @@ void Engine::dropSpe(Spe& s) {
 
 void Engine::createSpe(Slot& sl, std::span<const std::uint32_t> toks_all, std::uint32_t pos, const char* kind,
                        std::optional<DevPtr> hid_row, const Ckpt* src, std::uint64_t tier_id) {
-    if (spes_.empty() || opt_.no_prefix_cache || pos == 0 || pos > toks_all.size()) return;
+    if (ps_.spes().empty() || opt_.no_prefix_cache || pos == 0 || pos > toks_all.size()) return;
     const auto toks = toks_all.subspan(0, pos);
-    const std::uint64_t use = pc_->touch();
-    if (const int i = pc_->findShared(spes_, toks); i >= 0) {
-        spes_[static_cast<std::size_t>(i)].last_used = use;
+    const std::uint64_t use = ps_.cache().touch();
+    if (const int i = ps_.cache().findShared(ps_.spes(), toks); i >= 0) {
+        ps_.spes()[static_cast<std::size_t>(i)].last_used = use;
         return;
     }
     const std::size_t last = (pos - 1) / kv_page;
     if (sl.pages.size() <= last) return;
-    const int vi = pc_->sharedVictim(spes_);
+    const int vi = ps_.cache().sharedVictim(ps_.spes());
     if (vi < 0) return;
-    Spe& s = spes_[static_cast<std::size_t>(vi)];
+    Spe& s = ps_.spes()[static_cast<std::size_t>(vi)];
     if (s.valid) logI("shared prefix: replacing {} checkpoint @{} (used {}x)", s.kind, s.n, s.uses);
     dropSpe(s);
     s.pin = true;
@@ -638,7 +591,7 @@ void Engine::attachSpe(Slot& sl, Spe& s) {
     sl.cache_tokens.insert(sl.cache_tokens.end(), s.tokens.begin(), s.tokens.end());
     // another lineage's KV: no drafter context for it
     dflReset(sl, s.n);
-    s.last_used = pc_->touch();
+    s.last_used = ps_.cache().touch();
     s.uses += 1;
     stat_spe_hits_ += 1;
     // the checkpoint's RAM tier entry was reused (served from VRAM here, so no tier restore marked it):
@@ -654,7 +607,7 @@ void Engine::spillSpe(Spe& s) {
     if (s.n < t->cfg.min_tokens) return;
     // already there (restored from it, or written before a restart)
     // (s.tokens.size() == s.n)
-    if (const std::uint64_t id = pc_->findTierShared(s.tokens); id != 0) {
+    if (const std::uint64_t id = ps_.cache().findTierShared(s.tokens); id != 0) {
         s.tier_id = id;
         return;
     }
@@ -701,16 +654,12 @@ void Engine::spillSpe(Spe& s) {
     logI("shared prefix: spill {} checkpoint @{} to RAM ({:.1f} MiB)", s.kind, s.n, static_cast<double>(bytes) / 1048576.0);
 }
 
-std::uint32_t Engine::lcpTarget(std::span<const std::uint32_t> toks, std::uint32_t reuse, std::uint32_t sys) {
-    return pc_->lcpTarget(slots_, spes_, toks, reuse, sys, [&](std::size_t lim) { return schedFloor(toks, lim); });
-}
-
 bool Engine::waitsForSys(Job& job) {
-    if (spes_.empty() || opt_.no_prefix_cache || !job.params.cache_prompt) return false;
+    if (ps_.spes().empty() || opt_.no_prefix_cache || !job.params.cache_prompt) return false;
     const std::span<const std::uint32_t> toks = job.tokens;
-    const std::uint32_t b = sysSplit(toks);
+    const std::uint32_t b = ps_.sysSplit(toks);
     if (b == 0) return false;
-    if (Spe* s = speMatch(toks); s && s->n >= b) return false;
+    if (Spe* s = ps_.speMatch(toks); s && s->n >= b) return false;
     for (Slot& sl : slots_) {
         if (sl.phase != Phase::prefill || !sl.on_sched || sl.sys_split != b) continue;
         if (sl.reuse + sl.pf_off >= b) continue;
@@ -734,17 +683,17 @@ bool Engine::waitsForTier(Job& job) {
         if (sl.phase != Phase::restore) continue;
         tier::Restore* r = sl.restore;
         if (!r) continue;
-        const cache::Tier::Entry x = tier_view_->find(r->entry_id);
+        const cache::Tier::Entry x = ps_.tierView()->find(r->entry_id);
         if (!x) continue;
         const auto [reuse, kind] =
-            opt_.cold_resume ? pc_->matchTierEntry(x, toks, [&](std::uint32_t p, std::uint8_t k) { return resumeOk(toks, p, k); })
-                             : pc_->matchTierEntry(x, toks);
+            opt_.cold_resume ? ps_.cache().matchTierEntry(x, toks, [&](std::uint32_t p, std::uint8_t k) { return ps_.resumeOk(toks, p, k); })
+                             : ps_.cache().matchTierEntry(x, toks);
         if (reuse < t->cfg.min_tokens) continue;
-        if (kind >= 4 && !onSchedule(toks, reuse)) continue;
+        if (kind >= 4 && !ps_.onSchedule(toks, reuse)) continue;
         std::uint32_t vr = 0;
-        if (Spe* s = speMatch(toks)) vr = s->n;
+        if (Spe* s = ps_.speMatch(toks)) vr = s->n;
         for (Slot& o : slots_)
-            if (o.phase == Phase::idle) vr = std::max(vr, cacheMatch(o, toks).reuse);
+            if (o.phase == Phase::idle) vr = std::max(vr, ps_.cacheMatch(o, toks).reuse);
         if (reuse <= vr || reuse - vr < 512) continue;
         if (!job.tier_wait_logged) {
             logI("req {} | waiting for the restore of its prefix ({} tok) into slot {}", job.id, reuse, sl.id);
@@ -762,15 +711,15 @@ void Engine::prefetchFor(Job& job) {
     job.pf_checked = true;
     if (!job.params.cache_prompt || opt_.no_prefix_cache) return;
     const std::span<const std::uint32_t> toks = job.tokens;
-    const auto mt = opt_.cold_resume ? t->lookup(toks, [&](std::uint32_t p, std::uint8_t k) { return resumeOk(toks, p, k); })
+    const auto mt = opt_.cold_resume ? t->lookup(toks, [&](std::uint32_t p, std::uint8_t k) { return ps_.resumeOk(toks, p, k); })
                                      : t->lookup(toks);
     if (!mt) return;
     tier::Entry* x = mt->e;
     if (x->in_ram || x->loading || x->io_busy) return;
-    if (x->ck[mt->ck].kind >= 4 && !onSchedule(toks, mt->reuse)) return;
+    if (x->ck[mt->ck].kind >= 4 && !ps_.onSchedule(toks, mt->reuse)) return;
     std::uint32_t vr = 0;
-    if (Spe* s = speMatch(toks)) vr = s->n;
-    for (Slot& o : slots_) vr = std::max(vr, cacheMatch(o, toks).reuse);
+    if (Spe* s = ps_.speMatch(toks)) vr = s->n;
+    for (Slot& o : slots_) vr = std::max(vr, ps_.cacheMatch(o, toks).reuse);
     if (mt->reuse <= vr || mt->reuse - vr < 512) return;
     bool ok = false;
     try {
@@ -779,37 +728,6 @@ void Engine::prefetchFor(Job& job) {
         ok = false;
     }
     if (ok) logI("req {} | kv tier: prefetching {} tok from SSD into RAM while queued", job.id, x->n_tok);
-}
-
-Engine::CacheMatch Engine::cacheMatch(Slot& sl, std::span<const std::uint32_t> toks) {
-    if (opt_.cold_resume) {
-        // COLD-RESUME: the checkpoints a cold-exact resume may use (same indices, the others marked invalid)
-        std::vector<cache::CkptKey> ks(sl.ckpts.begin(), sl.ckpts.end());
-        for (cache::CkptKey& k : ks)
-            if (k.valid && !resumeOk(toks, k.pos, ckKindCode(k.kind))) k.valid = false;
-        const cache::SlotMatch m = pc_->matchSlot(sl.cache_tokens, ks, toks);
-        return {m.reuse, m.ck < 0 ? nullptr : &sl.ckpts[static_cast<std::size_t>(m.ck)], m.lcp};
-    }
-    const cache::SlotMatch m = pc_->matchSlot(sl.cache_tokens, sl.ckpts, toks);
-    return {m.reuse, m.ck < 0 ? nullptr : &sl.ckpts[static_cast<std::size_t>(m.ck)], m.lcp};
-}
-
-Slot* Engine::pickSlot(std::span<const std::uint32_t> toks) {
-    Slot* best = nullptr;
-    std::uint32_t best_reuse = 0;
-    const std::uint32_t spe_n = [&] {
-        Spe* s = speMatch(toks);
-        return s ? s->n : 0u;
-    }();
-    for (Slot& sl : slots_) {
-        if (sl.phase != Phase::idle || sl.parked) continue;
-        const std::uint32_t r = std::max(cacheMatch(sl, toks).reuse, spe_n);
-        if (!best || r > best_reuse || (r == best_reuse && sl.last_used < best->last_used)) {
-            best = &sl;
-            best_reuse = r;
-        }
-    }
-    return best;
 }
 
 // ---------------------------------------------------------------------------
@@ -1041,7 +959,7 @@ bool Engine::startJob(Slot& sl, Job& job) {
     const std::uint32_t nd_max = draftRoom();
     const auto& cfg = m_.cfg();
     sl.job = &job;
-    sl.last_used = pc_->touch();
+    sl.last_used = ps_.cache().touch();
     // (v0.2.2.2: ctxForNew = the context per request, lowered by the memory governor for new requests only)
     const std::uint32_t ctx_new = ctxForNew();
     if (N + nd_max + 2 >= ctx_new || static_cast<std::uint64_t>(N) + nd_max + 2 >= static_cast<std::uint64_t>(pool_.pages()) * kv_page) {
@@ -1088,22 +1006,22 @@ bool Engine::startJob(Slot& sl, Job& job) {
     }
 
     // ---- prefix cache lookup (this slot's KV region and checkpoints)
-    CacheMatch mt = p.cache_prompt ? cacheMatch(sl, toks) : CacheMatch{};
+    PrefixStore::Match mt = p.cache_prompt ? ps_.cacheMatch(sl, toks) : PrefixStore::Match{};
     // item S: a shared prefix checkpoint longer than the slot's own reusable prefix
     Spe* spe_hit = nullptr;
     if (p.cache_prompt) {
-        if (Spe* s = speMatch(toks); s && s->n > mt.reuse) spe_hit = s;
+        if (Spe* s = ps_.speMatch(toks); s && s->n > mt.reuse) spe_hit = s;
     }
-    const std::uint32_t sys = sysSplit(toks);
-    const std::uint32_t lcp_t = lcpTarget(toks, spe_hit ? spe_hit->n : mt.reuse, sys);
+    const std::uint32_t sys = ps_.sysSplit(toks);
+    const std::uint32_t lcp_t = ps_.lcpTarget(slots_, toks, spe_hit ? spe_hit->n : mt.reuse, sys);
     if (spe_hit) {
         attachSpe(sl, *spe_hit);
-        mt = CacheMatch{spe_hit->n, &spe_hit->ck, std::max<std::size_t>(mt.lcp, spe_hit->n)};
+        mt = PrefixStore::Match{spe_hit->n, &spe_hit->ck, std::max<std::size_t>(mt.lcp, spe_hit->n)};
     }
     sl.reuse = mt.reuse;
     // the state at reuse is the cold one (a shared checkpoint is cold-exact)
     sl.on_sched = mt.reuse == 0 || spe_hit != nullptr ||
-                  (mt.ck != nullptr && ckKindCode(mt.ck->kind) >= 4 && onSchedule(toks, mt.reuse)) ||
+                  (mt.ck != nullptr && ckKindCode(mt.ck->kind) >= 4 && ps_.onSchedule(toks, mt.reuse)) ||
                   (opt_.cold_resume && mt.ck != nullptr);  // COLD-RESUME: every accepted checkpoint is cold-exact
     // positions >= reuse are rewritten: pages a spill still reads, or that
     // are shared, are replaced (copy on write), never waited for
@@ -1199,7 +1117,7 @@ bool Engine::startJob(Slot& sl, Job& job) {
         // about the same image in new conversations start there)
         sl.img_ck = 0;
         if (sl.on_sched && job.vis) {
-            const std::vector<std::uint32_t> imgs = imgSplits(toks);
+            const std::vector<std::uint32_t> imgs = ps_.imgSplits(toks);
             if (!imgs.empty()) {
                 const std::uint32_t b = imgs.back();
                 if (b > mt.reuse && b != sl.sys_split && b != sl.lcp_ck) {
@@ -1214,20 +1132,10 @@ bool Engine::startJob(Slot& sl, Job& job) {
         // of re-prefilling the whole document. Only on the cold schedule (kind 'prefix': reused only
         // where it is on the new prompt's schedule too, as for the shared checkpoints), and only with
         // enough slots that prompt-end / gen-end stay (EngineOptions::tail_ck, tail_ck_slots).
-        sl.tail_ck = 0;
-        // COLD-RESUME (precise): the tail checkpoint is what a conversation's next turn resumes from (gen-end is not
-        // cold-exact), so every prompt keeps one, and when the tail point is a forced split of this prompt only (the
-        // think-open split moves with the conversation) it goes one schedule point earlier
-        if (opt_.tail_ck && sl.on_sched && sl.ckpts.size() >= tail_ck_slots && (opt_.cold_resume || N >= opt_.tail_ck_min)) {
-            const std::vector<std::uint32_t> imgs = imgSplits(toks);
-            std::uint32_t t = static_cast<std::uint32_t>(sched::tailPoint(N, sysSplit(toks), ct_.thinkOpenSplit(toks), imgs));
-            if (opt_.cold_resume && t > 0 && t == sl.pf_split)
-                t = static_cast<std::uint32_t>(sched::schedFloor(N, sysSplit(toks), ct_.thinkOpenSplit(toks), imgs, t - 1));
-            if (t > mt.reuse && t != sl.sys_split && t != sl.lcp_ck && t != sl.img_ck && t != sl.pf_split) {
-                sl.tail_ck = t;
-                logI("req {} | slot {} | keeping a tail checkpoint @{} ({} tokens before the prompt end)", job.id, sl.id, t, N - t);
-            }
-        }
+        sl.tail_ck = ps_.tailCk(sl, toks);
+        if (sl.tail_ck > 0)
+            logI("req {} | slot {} | keeping a tail checkpoint @{} ({} tokens before the prompt end)", job.id, sl.id,
+                 sl.tail_ck, N - sl.tail_ck);
     }
     sl.phase = Phase::prefill;
     // reset per-request counters
@@ -1275,7 +1183,7 @@ bool Engine::startJob(Slot& sl, Job& job) {
 
 std::size_t Engine::chunkLen(const Slot& sl) const {
     const std::size_t cur = sl.reuse + sl.pf_off;
-    const std::vector<std::uint32_t> imgs = imgSplits(sl.job->tokens);
+    const std::vector<std::uint32_t> imgs = ps_.imgSplits(sl.job->tokens);
     const std::size_t N = sl.job->tokens.size();
     // With the decode floor on, any decoding slot keeps forwards at one chunk, also
     // an unprotected one of the same burst: next to a long prompt a 2048-row forward
@@ -1472,9 +1380,9 @@ void Engine::finishPrefill(Slot& sl) {
         }
         m_.selectSeq(sl.id);
         m_.reset();
-        const std::size_t v_sys = sysSplit(toks);
+        const std::size_t v_sys = ps_.sysSplit(toks);
         const std::size_t v_th = ct_.thinkOpenSplit(toks);
-        const std::vector<std::uint32_t> v_imgs = imgSplits(toks);
+        const std::vector<std::uint32_t> v_imgs = ps_.imgSplits(toks);
         std::size_t off = 0;
         while (off < toks.size()) {
             const std::size_t n = prefillChunkLen(sched::schedNext(toks.size(), v_sys, v_th, v_imgs, off) - off);
@@ -2565,14 +2473,14 @@ bool Engine::tryRestore(Slot& sl, Job& job) {
     const std::uint32_t nd_max = draftRoom();
     if (toks.size() + nd_max + 2 >= ctxForNew() || toks.size() + nd_max + 2 >= static_cast<std::uint64_t>(pool_.pages()) * kv_page)
         return false;
-    const auto mt = opt_.cold_resume ? t->lookup(toks, [&](std::uint32_t p, std::uint8_t k) { return resumeOk(toks, p, k); })
+    const auto mt = opt_.cold_resume ? t->lookup(toks, [&](std::uint32_t p, std::uint8_t k) { return ps_.resumeOk(toks, p, k); })
                                      : t->lookup(toks);
     if (!mt) return false;
     // item S: a shared prefix entry off this prompt's schedule would not give
     // the cold result; one already in VRAM needs no restore
-    if (mt->e->ck[mt->ck].kind >= 4 && !onSchedule(toks, mt->reuse)) return false;
-    std::uint32_t vr = cacheMatch(sl, toks).reuse;
-    if (Spe* s = speMatch(toks)) vr = std::max(vr, s->n);
+    if (mt->e->ck[mt->ck].kind >= 4 && !ps_.onSchedule(toks, mt->reuse)) return false;
+    std::uint32_t vr = ps_.cacheMatch(sl, toks).reuse;
+    if (Spe* s = ps_.speMatch(toks)) vr = std::max(vr, s->n);
     if (mt->reuse <= vr) return false;
     const std::uint32_t gain = mt->reuse - vr;
     if (gain < opt_.tier_min_gain || (opt_.tier_min_gain >= 512 && gain < mt->reuse / 40)) return false;
@@ -2648,7 +2556,7 @@ bool Engine::beginRestore(Slot& sl, Job& job, const tier::Match& mt) {
     if (!sl.rs_shared) x->owner = sl.id;
     logI("req {} | slot {} | kv tier: restoring {} tok from {} (checkpoint '{}' @{}, {:.1f} MiB; VRAM prefix was {})", job.id,
          sl.id, x->n_tok, r->from_ssd ? "SSD" : "RAM", ckKindStr(x->ck[mt.ck].kind), mt.reuse,
-         static_cast<double>(r->bytes) / 1048576.0, cacheMatch(sl, job.tokens).reuse);
+         static_cast<double>(r->bytes) / 1048576.0, ps_.cacheMatch(sl, job.tokens).reuse);
     return true;
 }
 
@@ -2998,7 +2906,7 @@ std::size_t Engine::poolAvailable() const {
             if (want > sl.pages.size()) owed += want - sl.pages.size();
         }
     }
-    for (const Spe& s : spes_) own(s.pages);
+    for (const Spe& s : ps_.spes()) own(s.pages);
     return n > owed ? n - owed : 0;
 }
 
@@ -3215,7 +3123,7 @@ std::uint64_t Engine::govFreeable() const {
         pf = pf || sl.phase == Phase::prefill || sl.phase == Phase::restore;
         if (sl.phase == Phase::idle && sl.job == nullptr && sl.restore == nullptr && !sl.parked) b += sl.ckpts.size() * ck_.bytes(true);
     }
-    if (!pf && !spe_parked_) b += spes_.size() * ck_.bytes(false);
+    if (!pf && !spe_parked_) b += ps_.spes().size() * ck_.bytes(false);
     return b;
 }
 
@@ -3259,7 +3167,7 @@ void Engine::govDrain() {
         sl.spill_ev.waitIfPending();
         sl.spill_busy = false;
     }
-    for (Spe& sp : spes_) {
+    for (Spe& sp : ps_.spes()) {
         sp.spill_ev.waitIfPending();
         sp.ready_ev.waitIfPending();
         sp.spill_busy = false;
@@ -3296,23 +3204,23 @@ void Engine::govFreeCache(bool park) {
         }
     }
     if (!pf) {
-        for (Spe& sp : spes_) {
+        for (Spe& sp : ps_.spes()) {
             if (!sp.valid) continue;
             ++n_spe;
             n_pages += sp.pages.size();
             dropSpe(sp);
         }
-        if (park && !spe_parked_ && !spes_.empty()) {
-            for (Spe& sp : spes_) {
+        if (park && !spe_parked_ && !ps_.spes().empty()) {
+            for (Spe& sp : ps_.spes()) {
                 sp.spill_ev.waitIfPending();
                 sp.ready_ev.waitIfPending();
             }
             pool_.reclaim(true);
-            for (Spe& sp : spes_) {
+            for (Spe& sp : ps_.spes()) {
                 ck_bytes += ck_.bytes(false);
                 ck_.release(sp.ck, {sp.spill_ev.get(), sp.ready_ev.get()});
             }
-            spes_.clear();  // destroys the events (device::EventH)
+            ps_.spes().clear();  // destroys the events (device::EventH)
             spe_parked_ = true;
         }
     }
@@ -3354,10 +3262,10 @@ void Engine::govRestoreCache() {
         }
         if (spe_parked_) {
             cur_spe = true;
-            spes_.clear();
-            spes_.resize(opt_.n_spe);
-            for (Spe& sp : spes_) ck_.init(sp.ck, false);
-            bytes += spes_.size() * ck_.bytes(false);
+            ps_.spes().clear();
+            ps_.spes().resize(opt_.n_spe);
+            for (Spe& sp : ps_.spes()) ck_.init(sp.ck, false);
+            bytes += ps_.spes().size() * ck_.bytes(false);
             spe_parked_ = false;
             cur_spe = false;
         }
@@ -3370,8 +3278,8 @@ void Engine::govRestoreCache() {
             cur->ckpts.clear();
         }
         if (cur_spe) {
-            for (Spe& sp : spes_) ck_.release(sp.ck, {});
-            spes_.clear();
+            for (Spe& sp : ps_.spes()) ck_.release(sp.ck, {});
+            ps_.spes().clear();
         }
         gov_parked_ = gov_parked_ > bytes ? gov_parked_ - bytes : 0;
         gov_restored_ = bytes;
@@ -3400,7 +3308,7 @@ bool Engine::govResize(std::uint32_t tokens, bool shrink) {
         ++n_sl;
         freePages(sl);
     }
-    for (Spe& sp : spes_) {
+    for (Spe& sp : ps_.spes()) {
         if (!sp.valid) continue;
         ++n_spe;
         dropSpe(sp);
@@ -3793,7 +3701,8 @@ void Engine::runLoop() {
                 n_active_ -= 1;
                 continue;
             }
-            Slot& sl = *pickSlot(job->tokens);
+            Slot& sl = *ps_.pickSlot(std::span<Slot>(slots_), job->tokens,
+                                            [](const Slot& o) { return o.phase == Phase::idle && !o.parked; });
             const double wait_ms = msSince(job->t_arrive);
             if (wait_ms > 50) logI("req {} | slot {} | starting after {:.0f} ms in queue", job->id, sl.id, wait_ms);
             else logI("req {} | slot {} | assigned", job->id, sl.id);
