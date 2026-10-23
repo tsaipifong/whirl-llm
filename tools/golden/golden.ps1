@@ -8,7 +8,10 @@
 #   pwsh tools/golden/golden.ps1 refhash [-Arch ...] [-Models ...] [-Modes ...] [-Suites ...]   (CPU: reference-set hash only)
 #   pwsh tools/golden/golden.ps1 check -Impact A..B|worktree [-Arch ...]   only the cases tools/impact/impact.py lists
 #
-# Exit code: 0 all match, 1 mismatch (first differing step per file printed), 2 a run failed / setup error.
+# Exit code: 0 all match, 1 mismatch (first differing step per file printed), 2 a run failed / setup error,
+# 3 no failure and no mismatch, but a case was INVALID: its precondition did not hold, so it gave no verdict
+# (arch024-S0b2: suite server's tier-restore checks need the host tiers; a server that started with too little RAM
+# available turns them off by design (B0 N3-1), so those checks fail for the environment, not for the product).
 # Models (SWIFT-GATES): swift = Swift-1.5 27B MXFP4-A (dense, the headline dense model) and moe =
 # Ornith-1.5-35B-A3B MXFP4 are the default and required set; dense = Qwen3.8-27B UD-Q4_K_M is optional
 # (-Models dense, or swift,moe,dense).
@@ -62,7 +65,9 @@ param(
     [string]$GateExe = "",    # suite server: whirl-server-gate.exe (default build\Release\whirl-server-gate.exe)
     [int]$Port = 8097,        # suite server: the port of the servers the gate starts
     [string]$Impact = "",     # check: run only the golden cases tools/impact/impact.py lists for a diff (A..B, or worktree)
-    [switch]$KeepServerWork   # suite server: keep each case's server work dir (server_*.log; *.wkv removed) also when it passes
+    [switch]$KeepServerWork,  # suite server: keep each case's server work dir (server_*.log; *.wkv removed) also when it passes
+    [string[]]$ServerEnv = @()  # suite server: extra NAME=VALUE for the servers (--server-env), e.g. WHIRL_MTP_ADAPT=0 for a
+                                # fixed draft count (arch024-S0b2: the launch-table HEAD-vs-HEAD runs; precise output must not change)
 )
 # arch024-S0b: with WHIRL_LAUNCH_LOG=DIR the server case's servers write their launch tables to DIR\srv_<model>_<mode>
 # (passed with --server-env: whirl-server-gate gives its servers no WHIRL_* variable of its own environment except
@@ -233,6 +238,26 @@ if (Test-Path $hashFile) { foreach ($l in (Get-Content $hashFile)) { $p = $l -sp
 $hashesChanged = $false
 # step lines: every "G ..." line except the model / header / info lines (a file or run without one proves nothing)
 function StepCount([string[]]$l) { return @($l | Where-Object { $_ -like "G *" -and $_ -notmatch "^G (model|header|info)( |$)" }).Count }
+# arch024-S0b2: suite server: a failing run is INVALID (not FAIL) when every failed check is a tier-restore check
+# ("... restored from the RAM / SSD tier ...") and a server of the case whose tiers the check needs started with
+# its host tiers turned off for lack of available RAM (the server's own "adjusted: ... host tiers are off" line;
+# golden_cold runs with --kv-ram-mb 0 on purpose and is not looked at). Returns the reason, or $null (a real FAIL).
+# like llama.cpp's server tests, which assert a feature is enabled in the log before they test it, and skip a test
+# whose precondition the machine did not give (tools/server/tests/unit/test_kv_keep_only_active.py, test_stream.py)
+function TierPrecondition([string[]]$raw, [string]$gw) {
+    if (($raw -match "hipError")) { return $null }
+    $failed = @($raw | ForEach-Object { if ($_ -match "^\s*FAILED: (.*)$") { $Matches[1] } })
+    if ($failed.Count -eq 0) { return $null }
+    if (@($failed | Where-Object { $_ -notmatch "restored from the (RAM|SSD) tier" }).Count -gt 0) { return $null }
+    if (-not (Test-Path $gw)) { return $null }
+    $why = @()
+    foreach ($lg in @(Get-ChildItem $gw -File -Filter "server_*.log" -ErrorAction SilentlyContinue | Where-Object { $_.Name -notlike "*_cold*" })) {
+        $hit = Select-String -Path $lg.FullName -Pattern "adjusted: .*half of the (\d+) MiB of RAM available now.*host tiers are off" -List -ErrorAction SilentlyContinue
+        if ($hit) { $why += "$($lg.Name): host tiers off ($($hit.Matches[0].Groups[1].Value) MiB of RAM available at startup)" }
+    }
+    if ($why.Count -eq 0) { return $null }
+    return ($why -join "; ")
+}
 # record: references are staged here and written with models.txt only when every case ran
 $staged = [ordered]@{}
 
@@ -325,7 +350,7 @@ if ($Action -eq "xcheck") {
     exit 0
 }
 
-$fail = 0; $err = 0; $ran = 0; $t0 = Get-Date
+$fail = 0; $err = 0; $ran = 0; $inv = 0; $t0 = Get-Date
 Write-Host "golden: exe $Exe sha256 $((Get-FileHash -Algorithm SHA256 $Exe).Hash.ToLower())"
 if ($Suites -contains "server") {
     Write-Host "golden: server exe $ServerExe sha256 $((Get-FileHash -Algorithm SHA256 $ServerExe).Hash.ToLower())"
@@ -359,6 +384,7 @@ foreach ($mk in $Models) {
                 # explicit on every GPU: since 0.2.3 the default is the GPU with the most memory (the 8060S on the dev box)
                 if ($Arch -eq "gfx1151") { $gargs += @("--server-env", "WHIRL_DEVICE=8060s", "--server-env", "WHIRL_KV_RAM_MB=8192") }
                 else { $gargs += @("--server-env", "WHIRL_DEVICE=r9700") }
+                foreach ($se in $ServerEnv) { $gargs += @("--server-env", $se) }
                 if ($env:WHIRL_LAUNCH_LOG) {
                     $sll = Join-Path $env:WHIRL_LAUNCH_LOG "srv_$mk`_$mode"
                     New-Item -ItemType Directory -Force $sll | Out-Null
@@ -376,6 +402,7 @@ foreach ($mk in $Models) {
                 $raw = & $GateExe @gargs 2>&1 | ForEach-Object { "$_" }
                 $rc = $LASTEXITCODE
                 if ($rc -eq 0 -and -not ($raw -match "\(ALL PASS\)")) { $rc = 9 }
+                $invalid = if ($rc -ne 0) { TierPrecondition $raw $gw } else { $null }
                 # the GPU the server ran on (device line of its log), so a log shows which card was measured (s8-719)
                 $devl = @($raw | Where-Object { $_ -match "\bdevice \d+: .*\(gfx\d+\)" } | Select-Object -First 1)
                 if ($devl.Count -eq 0 -and (Test-Path $gw)) {
@@ -394,8 +421,15 @@ foreach ($mk in $Models) {
                     Remove-Item -Recurse -Force $gw -ErrorAction SilentlyContinue
                 }
             } else {
+                $invalid = $null
                 $raw = & $Exe golden $mp --suite $suite "--$mode" --device $Arch 2>&1 | ForEach-Object { "$_" }
                 $rc = $LASTEXITCODE
+            }
+            if ($invalid) {
+                Write-Host ("INVALID {0,-22} precondition not met: {1}; failed only: {2} (environment, not a product verdict: rerun with more RAM available)" -f $name, $invalid,
+                    ((@($raw | ForEach-Object { if ($_ -match "^\s*FAILED: (.*)$") { $Matches[1] } })) -join " | "))
+                $inv++
+                continue
             }
             $sec = ((Get-Date) - $ts).TotalSeconds
             $glines = @($raw | Where-Object { $_ -like "G *" })
@@ -475,7 +509,7 @@ foreach ($mk in $Models) {
 }
 # record: the references and models.txt are written together, and only when no case failed (a partial
 # record would leave new references next to a stale model hash)
-if ($Action -eq "record" -and $err -eq 0) {
+if ($Action -eq "record" -and $err -eq 0 -and $inv -eq 0) {  # an INVALID case is not recorded either
     foreach ($gold in $staged.Keys) {
         New-Item -ItemType Directory -Force (Split-Path $gold) | Out-Null
         [System.IO.File]::WriteAllLines($gold, $staged[$gold])
@@ -485,11 +519,12 @@ if ($Action -eq "record" -and $err -eq 0) {
         [System.IO.File]::WriteAllLines($hashFile, [string[]]@($hashes.Keys | Sort-Object | ForEach-Object { $hashes[$_] -join " " }))
     }
 } elseif ($Action -eq "record" -and $staged.Count -gt 0) {
-    Write-Host "golden record: $err case(s) failed: nothing written ($($staged.Count) staged reference(s) discarded, models.txt unchanged)"
+    Write-Host "golden record: $err case(s) failed, $inv INVALID: nothing written ($($staged.Count) staged reference(s) discarded, models.txt unchanged)"
 }
 $tot = ((Get-Date) - $t0).TotalSeconds
+if ($err -gt 0) { Write-Host ("golden {0} {1}: {2} run(s) failed, {3} mismatch(es), {5} INVALID, {4:N0} s" -f $Action, $Arch, $err, $fail, $tot, $inv); exit 2 }
+if ($fail -eq 0 -and $inv -gt 0) { Write-Host ("golden {0} {1}: {2} case(s) INVALID (precondition not met), {3} ok, 0 mismatch(es), {4:N0} s" -f $Action, $Arch, $inv, $ran, $tot); exit 3 }
 if ($ran -eq 0) { Write-Host "golden: no case ran: refusing to report success"; exit 2 }
-if ($err -gt 0) { Write-Host ("golden {0} {1}: {2} run(s) failed, {3} mismatch(es), {4:N0} s" -f $Action, $Arch, $err, $fail, $tot); exit 2 }
 if ($fail -gt 0) { Write-Host ("golden check {0}: {1} mismatch(es), {2:N0} s" -f $Arch, $fail, $tot); exit 1 }
 Write-Host ("golden {0} {1}: ok, {2:N0} s" -f $Action, $Arch, $tot)
 exit 0

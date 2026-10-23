@@ -124,13 +124,13 @@ try {
     #    a gate run without its ALL PASS line; the exe and reference-set hashes are printed; refhash follows the files
     $fakeGate = Join-Path $PSScriptRoot "fake_gate.cmd"
     function RunSrv([string]$action, [string]$root, [hashtable]$ge) {
-        foreach ($k in @("FAKEGATE_FAIL", "FAKEGATE_NOPASS", "FAKEGATE_H")) { [Environment]::SetEnvironmentVariable($k, $null) }
+        foreach ($k in @("FAKEGATE_FAIL", "FAKEGATE_NOPASS", "FAKEGATE_H", "FAKEGATE_TIER")) { [Environment]::SetEnvironmentVariable($k, $null) }
         foreach ($k in $ge.Keys) { [Environment]::SetEnvironmentVariable($k, $ge[$k]) }
         $env:WHIRL_GOLDEN_DENSE = $model
         $o = & pwsh -NoProfile -File $gate $action -Models dense -Modes precise -Suites server -Exe $fake -ServerExe $fake -GateExe $fakeGate `
             -GoldenRoot $root -Out (Join-Path $tmp "out") -KlReport $klGood 2>&1 | ForEach-Object { "$_" }
         $c = $LASTEXITCODE
-        foreach ($k in @("FAKEGATE_FAIL", "FAKEGATE_NOPASS", "FAKEGATE_H")) { [Environment]::SetEnvironmentVariable($k, $null) }
+        foreach ($k in @("FAKEGATE_FAIL", "FAKEGATE_NOPASS", "FAKEGATE_H", "FAKEGATE_TIER")) { [Environment]::SetEnvironmentVariable($k, $null) }
         return @{ rc = $c; out = $o }
     }
     $g7 = Join-Path $tmp "g7"
@@ -146,6 +146,19 @@ try {
     Expect "suite server: a failing in-run check of the gate is an error" $r 2
     $r = RunSrv "check" $g7 @{ FAKEGATE_NOPASS = "1" }
     Expect "suite server: a gate run without '(ALL PASS)' is an error" $r 2
+    # arch024-S0b2: tier-restore checks that failed because the server turned its host tiers off (too little RAM
+    # available at startup) are INVALID (exit 3, nothing recorded); without that log line, or with another failed
+    # check beside them, it stays an error
+    $r = RunSrv "check" $g7 @{ FAKEGATE_TIER = "off" }
+    Expect "suite server: tier checks failed with the host tiers off -> INVALID (exit 3)" $r 3 {
+        ($r.out -match "INVALID dense/precise_server .*host tiers off \(587 MiB of RAM available") -and ($r.out -match "1 case\(s\) INVALID") }
+    $g7r = Join-Path $tmp "g7r"
+    $r = RunSrv "record" $g7r @{ FAKEGATE_TIER = "off" }
+    Expect "suite server: record of an INVALID case writes nothing" $r 3 { -not (Test-Path (Join-Path $g7r "gfx1201\dense\precise_server.txt")) }
+    $r = RunSrv "check" $g7 @{ FAKEGATE_TIER = "nolog" }
+    Expect "suite server: tier checks failed with the host tiers on is an error (a product FAIL)" $r 2 { -not ($r.out -match "^\s*INVALID ") }
+    $r = RunSrv "check" $g7 @{ FAKEGATE_TIER = "mixed" }
+    Expect "suite server: host tiers off but a non-tier check failed too is an error" $r 2 { -not ($r.out -match "^\s*INVALID ") }
     $h1 = @(& pwsh -NoProfile -File $gate refhash -Models dense -Modes precise -Suites server -GoldenRoot $g7 2>&1 | ForEach-Object { "$_" })
     $rc1 = $LASTEXITCODE
     Add-Content (Join-Path $g7 "gfx1201\dense\precise_server.txt") "G srv.extra h=0"
