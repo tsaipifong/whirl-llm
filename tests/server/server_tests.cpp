@@ -19,7 +19,10 @@
 #include "server/tier_bridge.h"
 #include "server/tokens.h"
 #include "tier/kv_tier.h"
+#include "tier/ram_size.h"
 #include "whirl/vram_limit.h"
+#include "whirl/gpu_select.h"
+#include "whirl/startup_fit.h"
 #include "whirl/mem_governor.h"
 #include "whirl/pool_budget.h"
 #include "whirl/common.h"
@@ -4751,6 +4754,216 @@ void testTierIoThreadCalls() {
 // ~Engine with the tier attached, tracking on from before the last request (its request-end spill and the stop's
 // flush are tracked): walks the server's teardown order once (tier, then engine, then model) and reports whether a
 // slot's spill was still pending when ~Engine ran (the Slot destructor's wait); ~Engine frees nothing past a fence
+// arch024-S14 (PLAN c-3): the CPU part of the environment matrix, as tables over the pure functions the server and
+// --list-devices call (no re-implementation of server_main's glue; the GPU cells are tools/gates/env_matrix.ps1).
+// The machine is the owner's: R9700 (gfx1201, 31.9 GiB, USB4 eGPU at pci:71:0) and the Radeon 8060S (gfx1151, BIOS
+// carve-out 96 GB = 95.8 GiB dedicated, pci:196:0) in a 128 GB ROG Flow Z13 (Windows sees 33981464576 bytes at 96 GB).
+//   E1 one vs two GPUs visible: the default and --device in both enumeration orders; the RAM tier's pinned room with
+//      one and with two HIP GPUs (a pinned buffer is charged on each: s8-719); "another program pins memory" (v3 C-b2):
+//      the room shrinks by what that program pins (startup inputs' adapter_shared / pinned_max), never grows.
+//   E2 (selection part) the default GPU follows the carve-out: at 16 GB the R9700 has more memory and is the default.
+//   E3 R9700 hidden (HIP_VISIBLE_DEVICES): the default is the 8060S, --device pci:71:0 / r9700 fail with a text that
+//      lists the GPU that is there.
+//   E4 a program holding VRAM (vram_hog) raises the startup margin; one holding pinned memory lowers the room.
+//   E5 the automatic RAM tier at 32 / 64 / 128 GB of system RAM, then the 20480 MiB cap first (v0.2.2.2 order).
+//   E6 (CPU part) the eGPU replugged on another port gets another bus number: pci:71:0 then fails, r9700 still works.
+void testEnvMatrix() {
+    using namespace whirl::gpusel;
+    constexpr std::uint64_t MiB = 1ull << 20;
+    const auto r9700 = [](int index, int bus) {
+        GpuRecord g;
+        g.index = index;
+        g.name = "AMD Radeon AI PRO R9700";
+        g.arch = "gfx1201";
+        g.pci_bus = bus;
+        g.total_mib = g.fit_mib = 32624;
+        g.compute_units = 64;
+        g.supported = true;
+        return g;
+    };
+    const auto s8060 = [](int index, std::uint64_t carve_mib) {
+        GpuRecord g;
+        g.index = index;
+        g.name = "AMD Radeon(TM) 8060S Graphics";
+        g.arch = "gfx1151";
+        g.pci_bus = 196;
+        g.fit_mib = carve_mib;
+        g.total_mib = carve_mib + 16204;
+        g.compute_units = 40;
+        g.integrated = g.supported = true;
+        return g;
+    };
+    const auto nameOf = [](const std::vector<GpuRecord>& v, const std::vector<int>& sel) {
+        return sel.size() == 1 ? v[static_cast<std::size_t>(sel[0])].name : std::string("?");
+    };
+    const auto errorOf = [](const std::vector<GpuRecord>& v, std::string_view spec) {
+        try {
+            (void)selectGpus(v, spec);
+        } catch (const SelectError& e) {
+            return std::string(e.what());
+        }
+        return std::string();
+    };
+    // ---- E1: both visible, both enumeration orders (the HIP order is the runtime's; the choice must not depend on it)
+    for (int order = 0; order < 2; ++order) {
+        const std::vector<GpuRecord> both =
+            order == 0 ? std::vector<GpuRecord>{r9700(0, 71), s8060(1, 98099)} : std::vector<GpuRecord>{s8060(0, 98099), r9700(1, 71)};
+        CHECK(nameOf(both, selectGpus(both, "")).find("8060S") != std::string::npos);  // most GPU memory (owner 2026-10-23)
+        CHECK(defaultGpu(both).reason.find("most GPU memory") == 0);
+        CHECK(nameOf(both, selectGpus(both, "pci:71:0")).find("R9700") != std::string::npos);
+        CHECK(nameOf(both, selectGpus(both, "pci:196:0")).find("8060S") != std::string::npos);
+        CHECK(nameOf(both, selectGpus(both, "r9700")).find("R9700") != std::string::npos);
+        CHECK(nameOf(both, selectGpus(both, "8060s")).find("8060S") != std::string::npos);
+        // the listing marks exactly one [default], the 8060S
+        const std::string lt = listingText(both, autoPick(both));
+        CHECK(lt.find("[default]") != std::string::npos && lt.find("[default]") == lt.rfind("[default]"));
+        const std::size_t dp = lt.find("[default]"), ls = lt.rfind(static_cast<char>(10), dp);
+        CHECK(dp != std::string::npos && lt.substr(ls == std::string::npos ? 0 : ls + 1, dp - (ls == std::string::npos ? 0 : ls + 1)).find("8060S") != std::string::npos);
+        // E2 selection part: a 16 GB carve-out (15.8 GiB) makes the R9700 the default
+        const std::vector<GpuRecord> small =
+            order == 0 ? std::vector<GpuRecord>{r9700(0, 71), s8060(1, 16179)} : std::vector<GpuRecord>{s8060(0, 16179), r9700(1, 71)};
+        CHECK(nameOf(small, selectGpus(small, "")).find("R9700") != std::string::npos);
+        CHECK(selectGpus(both, "") != selectGpus(both, "pci:71:0"));
+        // two GPUs, one asked for: the startup line names it and how to choose the other
+        const std::vector<int> pick = selectGpus(both, "pci:71:0");
+        CHECK(restrictionNote(both, pick, "").find("GPU pci:71:0 (AMD Radeon AI PRO R9700): chosen with --device") == 0);
+    }
+    // E1 one visible (HIP_VISIBLE_DEVICES=<the R9700's ordinal>: the runtime renumbers it to 0)
+    {
+        const std::vector<GpuRecord> one = {r9700(0, 71)};
+        CHECK(nameOf(one, selectGpus(one, "")).find("R9700") != std::string::npos);
+        CHECK(nameOf(one, selectGpus(one, "pci:71:0")).find("R9700") != std::string::npos);
+        CHECK(restrictionNote(one, selectGpus(one, ""), "").find(": the only GPU") != std::string::npos);
+        // the user's variable is reported, never overridden
+        const std::string var = userVisibilityVar([](const char* k) { return std::string_view(k) == "HIP_VISIBLE_DEVICES" ? "1" : nullptr; });
+        CHECK(var == "HIP_VISIBLE_DEVICES");
+        CHECK(userVarNote(var, "1").find("HIP_VISIBLE_DEVICES=1 is set, so WHIRL leaves the GPU visibility as given") == 5);
+    }
+    // ---- E3: the eGPU is not there (hidden, or unplugged before the start)
+    {
+        const std::vector<GpuRecord> igpu = {s8060(0, 98099)};
+        CHECK(nameOf(igpu, selectGpus(igpu, "")).find("8060S") != std::string::npos);
+        for (const char* spec : {"pci:71:0", "r9700"}) {
+            const std::string e = errorOf(igpu, spec);
+            if (e.empty()) std::printf("  E3: --device %s did not fail with only the 8060S\n", spec);
+            CHECK(!e.empty());
+            // clear: it names what was asked, lists the GPU that is there and says how to choose
+            CHECK(e.find(spec) != std::string::npos);
+            CHECK(e.find("GPUs in this computer:") != std::string::npos && e.find("8060S Graphics (gfx1151), pci:196:0") != std::string::npos);
+            CHECK(e.find("Choose one with --device") != std::string::npos);
+            CHECK(e.find("hip") == std::string::npos);  // a selection text, not a runtime error
+        }
+        CHECK(!errorOf(igpu, "1").empty());  // an index that is not there
+    }
+    // ---- E6 (CPU part): replugged on another port, the R9700 comes back with bus 72
+    {
+        const std::vector<GpuRecord> moved = {s8060(0, 98099), r9700(1, 72)};
+        const std::string e = errorOf(moved, "pci:71:0");
+        CHECK(!e.empty() && e.find("R9700 (gfx1201), pci:72:0") != std::string::npos);
+        CHECK(nameOf(moved, selectGpus(moved, "r9700")).find("R9700") != std::string::npos);
+        CHECK(listingText(moved, autoPick(moved)).find("check again after replugging it") != std::string::npos);
+    }
+    // ---- E1 / E4: the RAM tier's pinned room (startfit::pinnedRoomMb, the "startup inputs:" pin.* fields)
+    // 8060S at 96 GB: SharedSystemMemory 16991223808, this process 1448083456 pinned (embedding), every program 1575485440
+    // (tests/pins/startup_table.txt s8060_explicit_17346); the R9700's non-local budget 16185819136.
+    const std::uint64_t ram = 33981464576ull;
+    const auto igpuState = [&](std::uint64_t hog) {
+        startfit::PinnedState s;
+        s.total_phys = ram;
+        s.pinned_max = 1575485440ull + hog;
+        s.gpus.push_back({0, 1448083456ull, 16991223808ull, 1575485440ull + hog});
+        return s;
+    };
+    const auto bothState = [&](std::uint64_t hog) {
+        startfit::PinnedState s = igpuState(hog);
+        s.gpus.push_back({16185819136ull, 1448083456ull, 16991223808ull, 1575485440ull + hog});  // the R9700 maps it too
+        return s;
+    };
+    const std::uint64_t room1 = startfit::pinnedRoomMb(igpuState(0));
+    const std::uint64_t room2 = startfit::pinnedRoomMb(bothState(0));
+    CHECK_EQ(room1, 12288u);  // min(16204 - 1502 - 2048, 16203 - 1502 - 2048) = 12653 -> whole 512 MiB
+    CHECK_EQ(room2, 4096u);   // the R9700's 15435 MiB budget / 2 GPUs - 1502 - 2048 = 4167 (s8-719: 4096 worked, 8192 failed)
+    CHECK(room2 >= 4096 && room2 < 8192);
+    // golden's explicit 8192 MiB tier: as given with one HIP GPU (the s8-719 root fix), clamped with two (not off)
+    const auto fit = [](std::uint64_t mb, std::uint64_t room, bool expl) {
+        return startfit::ramTierFit(mb, 24696061952ull, 0, expl, room, 9216);
+    };
+    CHECK(!fit(8192, room1, true).has_value() || fit(8192, room1, true)->mb == 8192);
+    CHECK(fit(8192, room2, true).has_value() && fit(8192, room2, true)->mb == room2 && fit(8192, room2, true)->pinned);
+    // another program pins memory (v3 C-b2): the room follows it down, by about what it pins, and never goes up
+    std::uint64_t prev = room1;
+    for (const std::uint64_t hog_mb : {0ull, 512ull, 2048ull, 4096ull, 8192ull, 12288ull}) {
+        const std::uint64_t r = startfit::pinnedRoomMb(igpuState(hog_mb * MiB));
+        CHECK(r <= prev);
+        CHECK(r + hog_mb + 512 > room1 && r + hog_mb <= room1 + 512);  // whole 512 MiB steps (or 0 at the end)
+        prev = r;
+        const std::uint64_t r2 = startfit::pinnedRoomMb(bothState(hog_mb * MiB));
+        CHECK(r2 <= r);  // two HIP GPUs never have more room than one
+    }
+    CHECK_EQ(startfit::pinnedRoomMb(igpuState(12288 * MiB)), 0u);  // 12288 MiB pinned elsewhere: no room left
+    // the same on the R9700 alone in a 128 GB machine: half the RAM is far away, so only the adapter's own count (every
+    // program's pinned memory on it, PDH adapter_shared; REVIEW-S8-719 C3) can lower the room
+    const auto r97State = [&](std::uint64_t hog) {
+        startfit::PinnedState s;
+        s.total_phys = (128ull << 30) - 378273792ull;
+        s.pinned_max = 950009856ull + hog;
+        s.gpus.push_back({16185819136ull, 1048576000ull, 16991223808ull, 950009856ull + hog});
+        return s;
+    };
+    CHECK_EQ(startfit::pinnedRoomMb(r97State(0)), 12288u);           // 15436 - 1000 (this process) - 2048 = 12388
+    CHECK_EQ(startfit::pinnedRoomMb(r97State(4096 * MiB)), 8192u);   // 15436 - 5002 (906 + 4096 of the other program) - 2048
+    // the automatic tier the room turns off is reported as off, with a reason that no log scanner reads as a failure
+    const std::optional<startfit::RamFit> off = fit(8192, startfit::pinnedRoomMb(igpuState(8192 * MiB)), false);  // room 4096 < entry
+    CHECK(off.has_value() && off->mb == 0 && off->below_entry);
+    const std::string why = startfit::pinnedWhy(4096, 2) + startfit::pinnedOffWhy(true, 9216);
+    CHECK(why.find("hipError") == std::string::npos && why.find("| failed:") == std::string::npos && why.find("PAL failed") == std::string::npos);
+    // ---- E4: a program holding VRAM (vram_hog) on the card: the startup margin grows (through device::Backend)
+    {
+        NullBackend nb;
+        device::Backend& be = nb;
+        nb.mem.others.ok = true;
+        std::uint64_t last = 0;
+        for (const std::uint64_t hog_mb : {0ull, 2048ull, 4096ull, 8192ull}) {
+            nb.mem.others.others = hog_mb * MiB;
+            const hip::GpuOthers o = be.gpuOthers(0);
+            poolbudget::MarginIn mi;
+            mi.local_budget = mi.budget_start = 30000 * MiB;
+            mi.others_known = o.ok;
+            mi.others = o.others;
+            const std::uint64_t m = poolbudget::defaultMargin(mi).bytes;
+            CHECK(m >= last);
+            last = m;
+        }
+    }
+    // ---- E5: the automatic RAM tier by system RAM (discrete GPU), then the startup fit with the 20480 MiB cap first
+    struct E5 {
+        std::uint64_t gb, auto_mb, fit_mb;
+        bool safe;
+    };
+    for (const E5& r : {E5{32, 8192, 8192, false}, E5{64, 16384, 16384, false}, E5{128, 32768, 20480, true}}) {
+        tier::RamTierInput in;
+        in.total_phys = (r.gb << 30) - 378273792ull;  // what Windows reports (33981464576 on the 32 GB R9700 box: measured)
+        in.avail_phys = in.total_phys * 3 / 4;
+        in.entry_mb = 9216;
+        const tier::RamTierSize sz = tier::ramTierSize(in);
+        if (sz.mb != r.auto_mb) std::printf("  E5 %llu GB: auto %llu MiB (%s)\n", static_cast<unsigned long long>(r.gb),
+                                            static_cast<unsigned long long>(sz.mb), sz.reason.c_str());
+        CHECK_EQ(sz.mb, r.auto_mb);
+        const std::optional<startfit::RamFit> f = startfit::ramTierFit(sz.mb, in.avail_phys, sz.mb, false);
+        CHECK_EQ(f ? f->mb : sz.mb, r.fit_mb);
+        CHECK((f && f->safe) == r.safe);
+    }
+    // explicit sizes: the cap first, so asking for more never gives less (0.2.2.1 gave 22528 -> 20480 but 24064 -> 16384)
+    std::uint64_t last = 0;
+    for (const std::uint64_t ask : {8192ull, 16384ull, 20480ull, 22528ull, 24064ull, 32768ull}) {
+        const std::optional<startfit::RamFit> f = startfit::ramTierFit(ask, 64ull << 30, 0, true);
+        const std::uint64_t got = f ? f->mb : ask;
+        CHECK(got >= last && got <= startfit::ram_tier_safe_mb);
+        last = got;
+    }
+    CHECK_EQ(last, 20480u);
+}
+
 void testCkptEngineTeardown() {
     ServerSetup su = baseSetup(false);
     su.mc.parallel = 2;
@@ -6290,6 +6503,7 @@ int main(int argc, char** argv) {
         {"ckpt_restore_fail", testCkptRestoreFail},
         {"gov_park_spes", testGovParkSpes},
         {"backend_others_pinned", testBackendOthersPinned},
+        {"env_matrix", testEnvMatrix},
         {"ckpt_engine_teardown", testCkptEngineTeardown},
         {"tier_io_thread_calls", testTierIoThreadCalls},
         {"page_pool", testPagePool},

@@ -8,11 +8,14 @@
 
 #include "device/handles.h"
 #include "device/null_backend.h"
+#include "tier/ram_size.h"
 #include "whirl/device_profile.h"
+#include "whirl/uma_mem.h"
 
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <cstdio>
@@ -442,6 +445,107 @@ void testReleaseThreads() {
     CHECK(b.clean());
 }
 
+// arch024-S14 E2 (PLAN c-3): the 8060S carve-out sizes 0.5 (issue #7) / 16 / 32 / 64 / 96 GB on the owner's 128 GB
+// ROG Flow Z13, as NullBackend's umaMemory returns them, through the decisions server_main takes from it: the pre-load
+// refusal (hip::umaRefusal), the KV pool cap (hip::umaPoolCap) and the automatic RAM tier of the OS-visible RAM that is
+// left (tier::ramTierSize, integrated rule). The pool re-check of issue #5 (poolbudget) is not on this path: the iGPU
+// keeps its carve-out rule (server_main.cpp "fit_explicit = !is_uma"), so it is not in this table.
+// The load is Swift-1.5 27B MXFP4 as its startup log prints it ("UMA carve-out check (estimate): weights 13.46 + ...
+// = 20.12 GiB, KV 36.1 KiB/token" and the 68.0 KiB/token format), the default 131072-token slot and 262144-token pool.
+// Expected values are written out (a changed rule must be a deliberate edit here).
+void testEnvCarveOutTable() {
+    constexpr std::uint64_t MiB = 1ull << 20;
+    struct Row {
+        const char* bios;           // the BIOS / Armoury Crate setting
+        std::uint64_t dedicated;    // DXGI DedicatedVideoMemory (95.8 GiB at 96 GB, 63.8 at 64: measured)
+        std::uint64_t os_ram;       // GlobalMemoryStatusEx ullTotalPhys (33981464576 at 96 GB: measured)
+        bool refuse_kv36, refuse_kv68;
+        bool cap_kv36, cap_kv68;    // the default 262144-token pool is lowered
+        std::uint64_t ram_tier_mb;  // automatic RAM tier
+    };
+    const auto carve = [](double gb) { return static_cast<std::uint64_t>(gb * 1024) * MiB - (gb >= 1 ? 205 * MiB : 0); };
+    // Windows sees 360.75 MiB less than 128 GB minus the carve-out (33981464576 bytes at 96 GB, measured)
+    const auto osram = [](double gb) { return static_cast<std::uint64_t>((128 - gb) * 1024) * MiB - 378273792ull; };
+    const Row rows[] = {
+        {"0.5 GB", carve(0.5), osram(0.5), true, true, false, false, 16384},
+        {"16 GB", carve(16), osram(16), true, true, false, false, 14336},
+        {"32 GB", carve(32), osram(32), false, false, false, true, 12288},
+        {"64 GB", carve(64), osram(64), false, false, false, false, 8192},
+        {"96 GB", carve(96), osram(96), false, false, false, false, 4096},
+    };
+    CHECK(osram(96) == 33981464576ull && carve(96) == 98099 * MiB);
+    whirl::hip::UmaNeed n36, n68;
+    n36.weights = n68.weights = 13783 * MiB;  // 13.46 GiB
+    n36.fixed = n68.fixed = 20603 * MiB;      // 20.12 GiB (weights + state + buffers + slots + checkpoints + 8%)
+    n36.kv_per_token = 36966;                 // 36.1 KiB
+    n68.kv_per_token = 69632;                 // 68.0 KiB
+    n36.min_tokens = n68.min_tokens = 131072;
+    n36.want_tokens = n68.want_tokens = 262144;
+    constexpr std::uint32_t page = 256;
+    for (const Row& r : rows) {
+        NullBackend b;
+        whirl::device::Backend& be = b;
+        b.mem.uma.integrated = b.mem.uma.known = true;
+        b.mem.uma.dedicated = r.dedicated;
+        b.mem.uma.shared = r.os_ram / 2;
+        const whirl::hip::UmaMem u = be.umaMemory(0);
+        CHECK(u.dedicated == r.dedicated);
+        for (int k = 0; k < 2; ++k) {
+            const whirl::hip::UmaNeed& n = k == 0 ? n36 : n68;
+            const bool want_refuse = k == 0 ? r.refuse_kv36 : r.refuse_kv68;
+            const bool want_cap = k == 0 ? r.cap_kv36 : r.cap_kv68;
+            const std::string why = whirl::hip::umaRefusal(u, n, "AMD Radeon(TM) 8060S Graphics");
+            const std::optional<std::uint32_t> cap = whirl::hip::umaPoolCap(u, n, page);
+            if (want_refuse != !why.empty()) std::printf("  E2 %s kv%d: refusal %s\n", r.bios, k ? 68 : 36, why.empty() ? "none" : "given");
+            CHECK(want_refuse == !why.empty());
+            if (!why.empty()) {
+                // a clear error: the size now, the setting to change and the size to set (issue #7)
+                CHECK(why.find("Armoury Crate") != std::string::npos && why.find("UMA frame buffer size") != std::string::npos);
+                CHECK(why.find(k == 0 ? "at least 27 GB" : "at least 31 GB") != std::string::npos);
+                CHECK(why.find(k == 0 ? "or 31 GB for the full 262144-token context" : "or 39 GB for the full 262144-token context") !=
+                      std::string::npos);
+                CHECK(why.find("hipError 719") != std::string::npos);  // why a smaller carve-out is not just slower
+            } else {
+                if (want_cap != cap.has_value()) std::printf("  E2 %s kv%d: pool cap %s\n", r.bios, k ? 68 : 36, cap ? "set" : "none");
+                CHECK(want_cap == cap.has_value());
+                if (cap) {  // lowered, still at least one slot's context, a page multiple, inside the carve-out
+                    CHECK(*cap >= n.min_tokens && *cap < n.want_tokens && *cap % page == 0);
+                    CHECK(n.at(*cap) <= r.dedicated);
+                }
+            }
+        }
+        // the RAM tier of what the BIOS leaves to Windows (integrated rule: 1/8, at most 16 GiB)
+        whirl::tier::RamTierInput ri;
+        ri.total_phys = r.os_ram;
+        ri.avail_phys = r.os_ram / 4 * 3;
+        ri.integrated = true;
+        const whirl::tier::RamTierSize rs = whirl::tier::ramTierSize(ri);
+        if (rs.mb != r.ram_tier_mb) std::printf("  E2 %s: RAM tier %llu MiB (%s)\n", r.bios, static_cast<unsigned long long>(rs.mb), rs.reason.c_str());
+        CHECK(rs.mb == r.ram_tier_mb && !rs.avail_limited);
+        CHECK(rs.reason.find("integrated GPU: 1/8 of") == 0);
+        // the startup line's size text (hip::umaSizeText) names the carve-out, not the runtime's carve-out + shared total
+        CHECK(whirl::hip::umaSizeText(u).find("dedicated ") == 0);
+    }
+    // the 16 GiB cap of the integrated rule (1/8 of 128 GB is exactly 16 GiB, so no Strix Halo carve-out reaches it; a
+    // 192 GB machine would)
+    whirl::tier::RamTierInput big;
+    big.total_phys = 192ull << 30;
+    big.integrated = true;
+    const whirl::tier::RamTierSize rb = whirl::tier::ramTierSize(big);
+    CHECK(rb.mb == 16384 && rb.reason.find("capped at 16 GiB") != std::string::npos);
+    // a carve-out that leaves less than 32 GB to Windows turns the automatic tier off with a reason (not a silent 0)
+    whirl::tier::RamTierInput lo;
+    lo.total_phys = 31000000000ull;
+    lo.integrated = true;
+    const whirl::tier::RamTierSize rl = whirl::tier::ramTierSize(lo);
+    CHECK(rl.mb == 0 && rl.reason.find("under 32 GB): off; --kv-ram-mb N turns it on") != std::string::npos);
+    // the fake carve-out of the GPU smoke (WHIRL_FAKE_DEDICATED_GB) is marked in the refusal
+    whirl::hip::UmaMem f;
+    f.integrated = f.known = f.fake = true;
+    f.dedicated = 512 * MiB;
+    CHECK(whirl::hip::umaRefusal(f, n36, "8060S").find("[simulated: WHIRL_FAKE_DEDICATED_GB]") != std::string::npos);
+}
+
 }  // namespace
 
 int main() {
@@ -454,6 +558,7 @@ int main() {
     testHandles();
     testTracking();
     testReleaseThreads();
+    testEnvCarveOutTable();
     std::printf("device tests: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }

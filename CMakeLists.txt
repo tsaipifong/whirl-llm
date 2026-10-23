@@ -160,6 +160,11 @@ endif()
 
 add_executable(whirl-tool tools/whirl-tool/main.cpp)
 target_link_libraries(whirl-tool PRIVATE whirl)
+if(WHIRL_WITH_HIP)
+  # arch024-S14: another program holding VRAM / pinned memory (tools/gates/env_matrix.ps1 E1 / E4)
+  add_executable(whirl-mem-hog tools/mem-hog/main.cpp)
+  target_link_libraries(whirl-mem-hog PRIVATE whirl)
+endif()
 
 add_executable(whirl-tests tests/unit/unit_tests.cpp)
 target_link_libraries(whirl-tests PRIVATE whirl)
