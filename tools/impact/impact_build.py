@@ -71,7 +71,7 @@ PATHS = {
     "cache.restore":     {"roots": ["Engine::tryRestore", "Engine::beginRestore", "Engine::pollRestores", "Engine::finishTail",
                                     "Tier::beginRestore", "Tier::lookup", "Tier::pumpRestore", "Tier::endRestore"],
                           "metric": "agent", "desc": "RAM / SSD tier restore into VRAM (warm: RAM, cold: SSD after a restart)"},
-    "cache.spill":       {"roots": ["Engine::spillSlot", "Engine::spillSpe", "Engine::flushTierOnStop", "Tier::startWrite", "Tier::tick",
+    "cache.spill":       {"roots": ["TierBridge::spillSlot", "TierBridge::spillSpe", "TierBridge::supersedeApply", "TierBridge::flushOnStop", "Engine::flushTierOnStop", "Tier::startWrite", "Tier::tick",
                                     "Tier::runJob", "Tier::waitForDedupBase"],
                           "metric": "agent", "desc": "VRAM -> RAM -> SSD spill, dedup, flush on stop"},
     "cache.fingerprint": {"roots": ["tierFingerprint", "serverFingerprintInputs", "fingerprintEnv", "Tier::index", "Tier::indexFile"],

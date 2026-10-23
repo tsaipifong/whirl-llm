@@ -15,6 +15,7 @@
 #include "server/log.h"
 #include "server/prefix_store.h"
 #include "server/protocol.h"
+#include "server/tier_bridge.h"
 #include "server/tokens.h"
 #include "tier/kv_tier.h"
 #include "whirl/vram_limit.h"
@@ -32,6 +33,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <functional>
 #include <map>
@@ -5146,6 +5148,408 @@ void testFrLogInjection() {
     CHECK_EQ(g_log.count("\x1b"), std::size_t(0));
 }
 
+namespace {
+
+// ---------------------------------------------------------------------------
+// arch024-S6b: TierBridge (M5, spill half) driven directly. MockModel + NullBackend (host memory) and a real RAM-only
+// tier::Tier as the tier (no SSD directory, so its IO thread copies nothing): the spans are checked against the
+// model's pool arrays and checkpoint buffers, and the arena against the sources (Tier::verifySpans).
+
+struct TbRig {
+    NullBackend nb;
+    std::unique_ptr<MockModel> model;
+    std::vector<KvArr> kv;
+    std::unique_ptr<ChatTokens> ct;
+    std::unique_ptr<PrefixStore> ps;
+    std::unique_ptr<CkptStore> cs;
+    std::unique_ptr<tier::Tier> tier;
+    std::unique_ptr<TierBridge> tb;
+    std::uint32_t n_gdn = 0;
+    explicit TbRig(std::vector<std::uint32_t> extra_rows = {}, const TierBridge::Config& tc = {}, std::uint32_t min_tok = 64) {
+        MockConfig mc;
+        mc.parallel = 2;
+        mc.slot_ctx = 16384;
+        mc.pool_tokens = 131072;  // 512 pages of the mock's KV page
+        mc.mtp = false;
+        mc.kv_extra_rows = std::move(extra_rows);
+        model = std::make_unique<MockModel>(nb, tok(), mc);
+        kv = model->kvArrays();
+        ct = std::make_unique<ChatTokens>(tok());
+        ps = std::make_unique<PrefixStore>(*ct, PrefixStore::Config{});
+        cs = std::make_unique<CkptStore>(nb, *model, CkptStore::Layout{model->convBytes(), model->ssmBytes(), false});
+        tier = tier::Tier::create(nb, 64ull << 20, 42, 0);
+        tier::Config c;
+        c.ram_bytes = 64ull << 20;
+        c.min_tokens = min_tok;
+        c.ssd_delay_ms = 0;
+        tier::Layout lay;
+        const auto& cfg = model->cfg();
+        for (auto p : model->ssmState())
+            if (p) ++n_gdn;
+        lay.ck_bytes = n_gdn * (model->convBytes() + model->ssmBytes()) + static_cast<std::uint64_t>(cfg.n_embd) * 4 +
+                       static_cast<std::uint64_t>(cfg.n_vocab) * 4;
+        std::uint64_t per_tok = 0;
+        for (const KvArr& a : kv) per_tok += a.row;
+        lay.page_bytes = per_tok * qwen35::kv_page;
+        lay.page_tokens = qwen35::kv_page;
+        lay.tok_cap = mc.slot_ctx;
+        tb = std::make_unique<TierBridge>(nb, *model, *ct, *ps, kv, tc);
+        tb->attach(tier.get());
+        ps->attachTier(tier.get());
+        tier->start(c, lay, 7);
+    }
+    ~TbRig() {
+        tb->attach(nullptr);
+        ps->attachTier(nullptr);
+        tier.reset();
+    }
+    // a slot holding toks with n checkpoints (seq order given), pages first_page.. (enough for the tokens)
+    struct S {
+        SlotPrefix sp;
+        SlotTier st;
+    };
+    std::unique_ptr<S> slot(const std::vector<std::uint32_t>& toks, std::vector<std::uint32_t> ck_pos,
+                            std::vector<std::uint64_t> ck_seq, std::int32_t first_page) {
+        auto s = std::make_unique<S>();
+        s->sp.cache_tokens = toks;
+        s->sp.ckpts.resize(ck_pos.size());
+        for (std::size_t j = 0; j < ck_pos.size(); ++j) {
+            Ckpt& c = s->sp.ckpts[j];
+            cs->init(c, true);
+            // distinct bytes per checkpoint, so a swapped source shows in the arena
+            std::vector<std::uint8_t> fill(static_cast<std::size_t>(cs->bytes(true)), static_cast<std::uint8_t>(0x10 + j));
+            std::memcpy(reinterpret_cast<void*>(c.dev.get()), fill.data(), fill.size());
+            c.valid = ck_pos[j] > 0;
+            c.pos = ck_pos[j];
+            c.seq = ck_seq[j];
+            c.kind = "prompt-end";
+        }
+        const std::size_t np = (toks.size() + qwen35::kv_page - 1) / qwen35::kv_page;
+        for (std::size_t p = 0; p < np; ++p) s->sp.pages.push_back(first_page + static_cast<std::int32_t>(p));
+        s->sp.ckpt_seq = 10;
+        return s;
+    }
+    // "kv<a>:p<page>" or "ck<j>.<part>" for a span source, "?" when it is neither
+    std::string where(DevPtr p, const S& s) const {
+        const std::uint64_t pool_pages = model->poolPages();
+        for (std::size_t a = 0; a < kv.size(); ++a) {
+            const std::uint64_t len = static_cast<std::uint64_t>(qwen35::kv_page) * kv[a].row;
+            if (p >= kv[a].base && p < kv[a].base + pool_pages * len) {
+                if ((p - kv[a].base) % len != 0) return "kv" + std::to_string(a) + ":unaligned";
+                return "kv" + std::to_string(a) + ":p" + std::to_string((p - kv[a].base) / len);
+            }
+        }
+        for (std::size_t j = 0; j < s.sp.ckpts.size(); ++j) {
+            const Ckpt& c = s.sp.ckpts[j];
+            if (p == c.hid) return "ck" + std::to_string(j) + ".hid";
+            if (p == c.logits) return "ck" + std::to_string(j) + ".logits";
+            for (std::size_t l = 0; l < c.conv.size(); ++l) {
+                if (c.conv[l] != 0 && p == c.conv[l]) return "ck" + std::to_string(j) + ".conv" + std::to_string(l);
+                if (c.ssm[l] != 0 && p == c.ssm[l]) return "ck" + std::to_string(j) + ".ssm" + std::to_string(l);
+            }
+        }
+        return "?";
+    }
+    std::string spanText(const S& s) const {
+        std::string t;
+        for (const tier::Span& sp : tb->spans())
+            t += where(sp.dev, s) + " @" + std::to_string(sp.off) + " n" + std::to_string(sp.len) + " t" + std::to_string(sp.ck) + "\n";
+        return t;
+    }
+};
+
+std::uint64_t fnvText(const std::string& s) {
+    std::uint64_t h = 1469598103934665603ull;
+    for (unsigned char c : s) h = (h ^ c) * 1099511628211ull;
+    return h;
+}
+
+std::vector<std::uint32_t> tbTokens(std::size_t n, std::uint32_t salt) {
+    std::vector<std::uint32_t> v(n);
+    for (std::size_t i = 0; i < n; ++i) v[i] = static_cast<std::uint32_t>(1000 + (i * 7 + salt) % 5000);
+    return v;
+}
+
+void testTierBridgeSpill() {
+    // spill span sequence, three KV formats (pool arrays: f16 = K, V; q8h / q4 = K, V, K scales, V scales; the
+    // extra row sizes are the S0a pin's). Snapshot hashes recorded on arch024-s6b (after the move; the move itself is
+    // pinned by whirl-pins engine --tier, recorded on 906e367 before it).
+    struct Fmt {
+        const char* name;
+        std::vector<std::uint32_t> extra;
+        std::uint64_t fresh_hash, inplace_hash;
+    };
+    const std::vector<Fmt> fmts = {
+        {"f16", {}, 0x83168f9bf3c62e8aull, 0x68a026a3b2084d92ull},
+        {"q8h", {4, 6}, 0x7f632464c775016dull, 0x05b94f8ef68bce42ull},
+        {"q4", {2, 10}, 0x3572179c3aa3f550ull, 0x9ebc20c1243b0759ull},
+    };
+    for (const Fmt& f : fmts) {
+        TbRig r(f.extra);
+        const std::size_t arrs = r.kv.size();
+        CHECK(arrs > 0);
+        CHECK_EQ(arrs % (f.extra.empty() ? 2 : 4), static_cast<std::size_t>(0));
+        // P1 = 3 pages - 20 tokens, 3 checkpoints at KP - 50 / P1 / 2 KP with seq 3 / 1 / 2 (the spill writes older ones
+        // first); pages 5, 6, 7
+        constexpr std::uint32_t KP = qwen35::kv_page;
+        const std::uint32_t P1 = 3 * KP - 20, P2 = 5 * KP - 10;
+        const auto toks = tbTokens(P1, 1);
+        auto s = r.slot(toks, {KP - 50, P1, 2 * KP}, {3, 1, 2}, 5);
+        const std::uint64_t spills0 = r.tier->stats.spills;
+        // not idle: nothing
+        r.tb->spillSlot(0, false, s->sp, s->st);
+        CHECK_EQ(r.tier->stats.spills, spills0);
+        CHECK_EQ(s->st.tier_id, static_cast<std::uint64_t>(0));
+        // idle: a new entry
+        g_log.clear();
+        r.tb->spillSlot(0, true, s->sp, s->st);
+        CHECK_EQ(r.tier->stats.spills, spills0 + 1);
+        CHECK(s->st.tier_id != 0);
+        CHECK(s->st.spill_busy);
+        CHECK_EQ(s->st.spill_upto, P1);
+        CHECK_EQ(s->st.tier_pages, P1 / KP);
+        CHECK_EQ(g_log.count("kv tier: spill " + std::to_string(P1) + " tok to RAM (new entry, pages 0..3"), static_cast<std::size_t>(1));
+        const std::string t1 = r.spanText(*s);
+        // structure: checkpoints in seq order (ck1, ck2, ck0), each 2 * n_gdn + 2 pieces, contiguous from j * stride;
+        // then 3 pages, each one piece per pool array in kvArrays() order, contiguous from kv_off + page * page_bytes
+        const tier::Layout lay = r.tier->lay;
+        tier::Entry* x = r.tier->find(s->st.tier_id);
+        CHECK(x != nullptr);
+        const auto& sp = r.tb->spans();
+        const std::size_t per_ck = 2 * r.n_gdn + 2;
+        CHECK_EQ(sp.size(), 3 * per_ck + 3 * arrs);
+        bool ck_ok = sp.size() == 3 * per_ck + 3 * arrs;
+        const std::size_t ck_order[3] = {1, 2, 0};
+        for (std::size_t k = 0; ck_ok && k < 3; ++k) {
+            std::uint64_t off = ck_order[k] * lay.ckStride();
+            for (std::size_t i = 0; i < per_ck; ++i) {
+                const tier::Span& a = sp[k * per_ck + i];
+                const std::string w = r.where(a.dev, *s);
+                ck_ok = ck_ok && a.off == off && w.rfind("ck" + std::to_string(ck_order[k]) + ".", 0) == 0;
+                off += a.len;
+            }
+            ck_ok = ck_ok && off - ck_order[k] * lay.ckStride() == lay.ck_bytes;
+        }
+        CHECK(ck_ok);
+        bool pg_ok = x != nullptr;
+        for (std::size_t pg = 0; pg_ok && pg < 3; ++pg) {
+            std::uint64_t off = x->kvOff(lay) + pg * lay.page_bytes;
+            for (std::size_t a = 0; a < arrs; ++a) {
+                const tier::Span& e = sp[3 * per_ck + pg * arrs + a];
+                pg_ok = pg_ok && e.off == off && r.where(e.dev, *s) == "kv" + std::to_string(a) + ":p" + std::to_string(5 + pg) &&
+                        e.ck == 0xff;
+                off += e.len;
+            }
+            pg_ok = pg_ok && off - (x->kvOff(lay) + pg * lay.page_bytes) == lay.page_bytes;
+        }
+        CHECK(pg_ok);
+        // the arena holds the sources (NullBackend copies at once)
+        r.nb.eventSync(s->st.spill_ev.get());
+        if (x) CHECK_EQ(r.tier->verifySpans(x, sp).bad, static_cast<std::uint64_t>(0));
+        // in place: the slot went on to P2 (5 pages - 10), one new checkpoint at P2 replaced the oldest (ck1, seq 1 -> 4);
+        // only it and pages 2.. are written (vp = min(tier_pages 2, n_tok / KP 2))
+        const auto toks2 = tbTokens(P2, 1);
+        s->sp.cache_tokens = toks2;
+        s->sp.pages.push_back(10);
+        s->sp.pages.push_back(11);
+        s->sp.ckpts[1].pos = P2;
+        s->sp.ckpts[1].seq = 4;
+        const std::uint64_t id1 = s->st.tier_id;
+        g_log.clear();
+        r.tb->spillSlot(0, true, s->sp, s->st);
+        CHECK_EQ(s->st.tier_id, id1);
+        CHECK_EQ(g_log.count("kv tier: spill " + std::to_string(P2) + " tok to RAM (in place, pages 2..5"), static_cast<std::size_t>(1));
+        CHECK_EQ(r.tb->spans().size(), per_ck + 3 * arrs);
+        const std::string t2 = r.spanText(*s);
+        r.nb.eventSync(s->st.spill_ev.get());
+        if (x) CHECK_EQ(r.tier->verifySpans(x, r.tb->spans()).bad, static_cast<std::uint64_t>(0));
+        // below the tier's minimum: nothing
+        auto small = r.slot(tbTokens(40, 2), {40}, {1}, 100);
+        const std::uint64_t spills1 = r.tier->stats.spills;
+        r.tb->spillSlot(1, true, small->sp, small->st);
+        CHECK_EQ(r.tier->stats.spills, spills1);
+        const std::uint64_t h1 = fnvText(t1), h2 = fnvText(t2);
+        if (g_verbose || f.fresh_hash == 0)
+            std::printf("  tier_bridge %s: fresh spans %zu fnv %016llx, in place fnv %016llx\n", f.name, 3 * per_ck + 3 * arrs,
+                        static_cast<unsigned long long>(h1), static_cast<unsigned long long>(h2));
+        if (g_verbose) std::printf("%s", t1.c_str());
+        if (f.fresh_hash != 0) {
+            CHECK_EQ(h1, f.fresh_hash);
+            CHECK_EQ(h2, f.inplace_hash);
+        }
+        s.reset();
+        small.reset();
+    }
+    // a shared prefix checkpoint: its checkpoint (one piece set at 0) then its pages; once
+    {
+        TbRig r;
+        Spe e;
+        r.cs->init(e.ck, false);
+        e.valid = true;
+        e.n = 128;
+        e.kind = "system";
+        e.tokens = tbTokens(128, 3);
+        e.pages = {40, 41};
+        r.tb->spillSpe(e);
+        CHECK(e.tier_id != 0);
+        CHECK(e.spill_busy);
+        CHECK(static_cast<bool>(e.ready_ev));
+        CHECK_EQ(r.tb->spans().size(), (2 * r.n_gdn + 2) + 2 * r.kv.size());
+        CHECK_EQ(r.tb->spans().front().off, static_cast<std::uint64_t>(0));
+        const std::uint64_t spills = r.tier->stats.spills;
+        Spe e2;
+        e2.valid = true;
+        e2.n = 128;
+        e2.tokens = e.tokens;
+        r.tb->spillSpe(e2);  // already in the tier: no copy, the same entry
+        CHECK_EQ(r.tier->stats.spills, spills);
+        CHECK_EQ(e2.tier_id, e.tier_id);
+        r.nb.eventSync(e.spill_ev.get());
+    }
+}
+
+// a chat prompt: system, first user message, then the tail (assistant turns) as filler tokens
+std::vector<std::uint32_t> tbChat(const std::string& user, std::size_t total, std::uint32_t salt) {
+    const std::string head = "<|im_start|>system\nYou are a careful coding assistant.<|im_end|>\n<|im_start|>user\n" + user +
+                             "<|im_end|>\n<|im_start|>assistant\n";
+    const auto ids = tok().encode(head, true);
+    std::vector<std::uint32_t> v(ids.begin(), ids.end());
+    const auto fill = tbTokens(total > v.size() ? total - v.size() : 0, salt);
+    v.insert(v.end(), fill.begin(), fill.end());
+    return v;
+}
+
+void testTierBridgeSupersede() {
+    // CACHE-1 through TierBridge: the old session (slot 0, 6400 tokens) and a compacted one (slot 1, same system prompt
+    // and first user message, 1200 tokens). Its first spill (a new entry) marks the old entry; its second (in place)
+    // cuts it to the shared prefix -- unless the old entry was used again in between.
+    for (int variant = 0; variant < 4; ++variant) {
+        // 0: mark -> apply cuts; 1: the old entry updated between mark and apply (not cut); 2: only the system prompt
+        // shared (demoted, not cut); 3: supersede off (no mark)
+        TierBridge::Config tc;
+        tc.supersede = variant != 3;
+        TbRig r({}, tc);
+        const auto old_t = tbChat("Refactor the tier code.", 6400, 11);
+        // a checkpoint inside the shared prefix (a cut keeps the entry) and two after it (their RAM blocks are what a cut
+        // frees: the mock's KV pages are too small to fill a tier block)
+        auto a = r.slot(old_t, {16, 3000, 6400}, {1, 2, 3}, 0);
+        r.tb->spillSlot(0, true, a->sp, a->st);
+        tier::Entry* eo = r.tier->find(a->st.tier_id);
+        CHECK(eo != nullptr);
+        if (!eo) continue;
+        const std::uint32_t old_n = eo->n_tok;
+        CHECK_EQ(old_n, 6400u);
+        const std::string user = variant == 2 ? "Write the release notes." : "Refactor the tier code.";
+        auto new_t = tbChat(user, 1200, 99);
+        auto b = r.slot(new_t, {1200}, {1}, 200);
+        r.nb.eventSync(a->st.spill_ev.get());
+        g_log.clear();
+        r.tb->spillSlot(1, true, b->sp, b->st);  // first spill: mark (before apply: the old entry is untouched)
+        CHECK_EQ(r.tb->supersedePending(), static_cast<std::size_t>(variant == 3 ? 0 : 1));
+        CHECK_EQ(g_log.count("looks superseded by this conversation"), static_cast<std::size_t>(variant == 3 ? 0 : 1));
+        CHECK_EQ(eo->n_tok, old_n);
+        CHECK_EQ(r.tier->stats.superseded, static_cast<std::uint64_t>(0));
+        if (variant == 1) {
+            // the old session goes on (in place): its stamp changes, the mark no longer applies
+            auto more = tbChat("Refactor the tier code.", 6400 + qwen35::kv_page, 11);
+            a->sp.cache_tokens = more;
+            a->sp.pages.push_back(150);
+            a->sp.ckpts[2].pos = 6400 + qwen35::kv_page;
+            a->sp.ckpts[2].seq = 4;
+            r.tb->spillSlot(0, true, a->sp, a->st);
+            CHECK_EQ(a->st.tier_id, eo->id);
+            CHECK_EQ(eo->n_tok, 6400u + qwen35::kv_page);
+            r.nb.eventSync(a->st.spill_ev.get());
+        }
+        const std::uint32_t before_apply = eo->n_tok;
+        // second spill of the new conversation (it went on, in place): apply
+        auto nt2 = new_t;
+        const auto tail = tbTokens(100, 5);
+        nt2.insert(nt2.end(), tail.begin(), tail.end());
+        b->sp.cache_tokens = nt2;
+        b->sp.pages.push_back(230);
+        b->sp.pages.push_back(231);
+        b->sp.ckpts[0].pos = 1300;
+        b->sp.ckpts[0].seq = 2;
+        r.nb.eventSync(b->st.spill_ev.get());
+        g_log.clear();
+        r.tb->spillSlot(1, true, b->sp, b->st);
+        CHECK_EQ(g_log.count("kv tier: spill 1300 tok to RAM (in place"), static_cast<std::size_t>(1));
+        CHECK_EQ(r.tb->supersedePending(), static_cast<std::size_t>(0));
+        tier::Entry* e2 = r.tier->find(eo->id);
+        if (variant == 0) {
+            // cut to the checkpoint inside the shared prefix (the "cut to" line needs freed RAM blocks; the mock's
+            // entries fit in the same blocks before and after, so the counter is the check here)
+            CHECK_EQ(r.tier->stats.superseded, static_cast<std::uint64_t>(1));
+            CHECK(e2 != nullptr && e2->n_tok < old_n);
+            CHECK(e2 != nullptr && e2->n_tok <= cache::lcpLen(old_t, new_t));
+            CHECK(e2 != nullptr && e2->n_tok == 16u);
+        } else if (variant == 2) {
+            CHECK_EQ(g_log.count("kept, evicted first under RAM / SSD pressure"), static_cast<std::size_t>(1));
+            CHECK(e2 != nullptr && e2->n_tok == old_n);
+            CHECK_EQ(r.tier->stats.demoted, static_cast<std::uint64_t>(1));
+        } else {
+            CHECK_EQ(g_log.count("superseded (compact / compress)"), static_cast<std::size_t>(0));
+            CHECK(e2 != nullptr && e2->n_tok == before_apply);
+        }
+        r.nb.eventSync(b->st.spill_ev.get());
+        a.reset();
+        b.reset();
+    }
+}
+
+void testTierBridgeFlush() {
+    // the shutdown flush is bounded: a tick that stays busy returns "pending" once the bound passed (not after the
+    // tick gives up at ~2000 calls); during it the SSD delay is 0 and the tier is flushing, after it both are back
+    for (const bool shutdown_mode : {false, true}) {
+        TierBridge::Config tc;
+        tc.flush_ms = 150;
+        tc.flush_long_ms = 450;
+        TbRig r({}, tc);
+        r.tier->cfg.ssd_delay_ms = 1234;
+        r.tier->cfg.ssd_shutdown_only = shutdown_mode;
+        int calls = 0;
+        bool seen_flush = true;
+        const double t0 = nowSeconds();
+        const bool pending = r.tb->flushOnStop([&] {
+            ++calls;
+            seen_flush = seen_flush && r.tier->flushing && r.tier->cfg.ssd_delay_ms == 0;
+            return calls < 2000;
+        });
+        const double ms = (nowSeconds() - t0) * 1000.0;
+        const double bound = shutdown_mode ? 450.0 : 150.0;
+        CHECK(pending);
+        CHECK(seen_flush);
+        CHECK(ms >= bound);
+        CHECK(ms < bound + 2000.0);
+        CHECK(calls < 2000);
+        CHECK_EQ(r.tier->cfg.ssd_delay_ms, static_cast<std::uint64_t>(1234));
+        CHECK(!r.tier->flushing);
+    }
+    {
+        // nothing pending: one tick, returns at once
+        TbRig r;
+        int calls = 0;
+        const bool pending = r.tb->flushOnStop([&] {
+            ++calls;
+            return false;
+        });
+        CHECK(!pending);
+        CHECK_EQ(calls, 1);
+    }
+    {
+        // no tier: no tick
+        TbRig r;
+        r.tb->attach(nullptr);
+        int calls = 0;
+        CHECK(!r.tb->flushOnStop([&] { return ++calls > 0; }));
+        CHECK_EQ(calls, 0);
+        r.tb->attach(r.tier.get());
+    }
+}
+
+}  // namespace
+
 int main(int argc, char** argv) {
     whirl::test::clearWhirlEnv();  // FR-TEST P3-11
     std::set<std::string> only;
@@ -5202,6 +5606,9 @@ int main(int argc, char** argv) {
         {"ckpt_engine_teardown", testCkptEngineTeardown},
         {"tier_io_thread_calls", testTierIoThreadCalls},
         {"page_pool", testPagePool},
+        {"tier_bridge_spill", testTierBridgeSpill},
+        {"tier_bridge_supersede", testTierBridgeSupersede},
+        {"tier_bridge_flush", testTierBridgeFlush},
         {"prefix_store", testPrefixStore},
         {"cold_resume_engine", testColdResumeEngine},
         {"vision_split_engine", testVisionSplitEngine},

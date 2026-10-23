@@ -13,6 +13,7 @@
 #include "cache/prefix_cache.h"
 #include "decode_floor.h"
 #include "prefix_store.h"
+#include "tier_bridge.h"
 #include "protocol.h"
 #include "device/backend.h"
 #include "device/handles.h"
@@ -178,9 +179,9 @@ private:
     void send(const std::string& b);
 };
 
-// cache_tokens, last_used: cache::SlotCache; pages, checkpoints and checkpoint points: SlotPrefix (arch024 M4).
-// The members; Slot adds the F1 wait (below).
-struct SlotData : SlotPrefix {
+// cache_tokens, last_used: cache::SlotCache; pages, checkpoints and checkpoint points: SlotPrefix (arch024 M4);
+// the tier entry and the spill fence: SlotTier (M5). The members; Slot adds the F1 wait (below).
+struct SlotData : SlotPrefix, SlotTier {
     std::uint32_t id = 0;
     Phase phase = Phase::idle;
     Job* job = nullptr;
@@ -209,13 +210,7 @@ struct SlotData : SlotPrefix {
     double relax_gap = 0;       // relaxacc greedy: sum of ln p(argmax) - ln p(kept draft)
     std::uint32_t pos = 0;
     std::uint32_t next = 0;
-    // host tiers
-    std::uint64_t tier_id = 0;
-    std::uint32_t tier_pages = 0;
-    device::EventH spill_ev;  // fence of the slot's last spill (tier stream)
-    bool spill_busy = false;
-    std::uint32_t spill_upto = 0;
-    bool spill_wanted = false;
+    // host tiers (tier_id, tier_pages, spill_ev, spill_busy, spill_upto, spill_wanted: SlotTier)
     tier::Restore* restore = nullptr;
     std::array<std::int32_t, tier::max_ck> rs_map{};
     std::array<bool, tier::max_ck> rs_tail{};
@@ -506,7 +501,6 @@ private:
     void createSpe(Slot& sl, std::span<const std::uint32_t> toks_all, std::uint32_t pos, const char* kind,
                    std::optional<DevPtr> hid_row, const Ckpt* src, std::uint64_t tier_id);
     void attachSpe(Slot& sl, Spe& s);
-    void spillSpe(Spe& s);
     bool waitsForSys(Job& job);
     bool waitsForTier(Job& job);
     void prefetchFor(Job& job);
@@ -542,11 +536,7 @@ private:
     void dflIngest(Slot& sl, std::uint32_t run_rows, std::uint32_t r0, std::uint32_t n, std::uint32_t pos0);
     bool dflReady(const Slot& sl) const;
     void finishJob(Slot& sl);
-    // host tiers
-    void waitSpill(Slot& sl);
-    void ckSpans(const Ckpt& c, std::uint64_t base, std::uint8_t tag = 0xff);
-    void pageSpans(std::int32_t phys, std::uint64_t base);
-    void spillSlot(Slot& sl);
+    // host tiers (the spill half, the span lists and the idle / shutdown flush: tb_)
     bool tryRestore(Slot& sl, Job& job);
     bool beginRestore(Slot& sl, Job& job, const tier::Match& mt);
     void finishTail(Slot& sl, bool wait);
@@ -554,11 +544,8 @@ private:
     void pollRestores();
     bool tierTick();
     void logTier();
+    // shutdown: tb_.flushOnStop over tierTick, then the tier line
     void flushTierOnStop();
-    // TIER-IDLE hooks (runLoop's idle wait): start the idle write once idle long enough; when it is due
-    void idleFlushPoll();
-    std::optional<std::chrono::steady_clock::time_point> idleFlushDue() const;
-    tier::IdleFlushClock idle_clock_;
     void releaseSlot(Slot& sl);
     void failSlot(Slot& sl, const std::string& err);
     // FR-SRV P2-2: queued / running requests whose client disconnected end (slot freed)
@@ -686,13 +673,10 @@ private:
     std::string gov_last_;
     std::string gov_json_;
     std::atomic<std::uint32_t> ctx_pub_{0};
-    // host tiers
-    tier::Tier* tier_ = nullptr;
+    // host tiers (the tier itself: tb_.tier())
     std::vector<KvArr> kv_arrays_;
-    std::vector<tier::Span> tier_spans_;
     bool tier_wake_ = false;
     std::uint64_t wake_seq_ = 0;  // under q_mutex_: bumped by a queued request, a finished build, the tier IO thread
-    std::uint64_t stat_spill_waits_ = 0;
     PagePool pool_;  // KV pool pages (arch024 M3); here, where its quarantine was, so ~Engine destroys its events in
                      // the same order
     TimePoint last_tick_{};
@@ -700,6 +684,8 @@ private:
     // shared prefix checkpoints, prefix cache decisions, chunk schedule (arch024 M4); here, where spes_ was, so
     // ~Engine destroys the shared checkpoints (and their events) at the same point
     PrefixStore ps_;
+    // host tier bridge, spill half (arch024 M5): after ps_ and kv_arrays_ (it keeps references to both)
+    TierBridge tb_;
     std::uint64_t stat_spe_new_ = 0, stat_spe_hits_ = 0, stat_spe_tok_ = 0, stat_spe_evict_ = 0, stat_unshare_ = 0;
     std::uint64_t stat_evictions_ = 0;
     // vision
@@ -709,9 +695,6 @@ private:
     std::uint64_t emb_seq_ = 0;
     std::uint64_t stat_vis_enc_ = 0, stat_vis_hit_ = 0;
     std::atomic<std::uint64_t> stat_ssd_written_{0}, stat_ssd_dedup_{0}, stat_ssd_used_{0}, stat_ssd_entries_{0}, stat_superseded_{0};
-    void supersedeMark(const Slot& sl, tier::Entry* x);
-    void supersedeApply(const Slot& sl, tier::Entry* x);
-    cache::SupersedeTracker supersede_;
     std::array<std::array<std::uint64_t, 2>, 16> vis_lend_raw_{};
     std::vector<vision::Region> vis_lend_;
     hip::LocalMemSnap vis_snap0_;  // device memory counters right after the mmproj was loaded (no image yet)
