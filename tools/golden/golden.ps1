@@ -61,8 +61,12 @@ param(
     [string]$ServerExe = "",  # suite server: whirl-server.exe (default build\Release\whirl-server.exe)
     [string]$GateExe = "",    # suite server: whirl-server-gate.exe (default build\Release\whirl-server-gate.exe)
     [int]$Port = 8097,        # suite server: the port of the servers the gate starts
-    [string]$Impact = ""      # check: run only the golden cases tools/impact/impact.py lists for a diff (A..B, or worktree)
+    [string]$Impact = "",     # check: run only the golden cases tools/impact/impact.py lists for a diff (A..B, or worktree)
+    [switch]$KeepServerWork   # suite server: keep each case's server work dir (server_*.log; *.wkv removed) also when it passes
 )
+# arch024-S0b: with WHIRL_LAUNCH_LOG=DIR the server case's servers write their launch tables to DIR\srv_<model>_<mode>
+# (passed with --server-env: whirl-server-gate gives its servers no WHIRL_* variable of its own environment except
+# WHIRL_DEVICE / WHIRL_VRAM_LIMIT_MB / WHIRL_MODE, so before this only the CLI cases were recorded)
 $ErrorActionPreference = "Stop"
 $root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 if (-not $Exe) { $Exe = Join-Path $root "build\Release\whirl.exe" }
@@ -355,6 +359,11 @@ foreach ($mk in $Models) {
                 # explicit on every GPU: since 0.2.3 the default is the GPU with the most memory (the 8060S on the dev box)
                 if ($Arch -eq "gfx1151") { $gargs += @("--server-env", "WHIRL_DEVICE=8060s", "--server-env", "WHIRL_KV_RAM_MB=8192") }
                 else { $gargs += @("--server-env", "WHIRL_DEVICE=r9700") }
+                if ($env:WHIRL_LAUNCH_LOG) {
+                    $sll = Join-Path $env:WHIRL_LAUNCH_LOG "srv_$mk`_$mode"
+                    New-Item -ItemType Directory -Force $sll | Out-Null
+                    $gargs += @("--server-env", "WHIRL_LAUNCH_LOG=$sll")
+                }
                 if ($mmprojPath[$mk]) {
                     if (-not ((Test-Path $mmprojPath[$mk]) -and (Test-Path (Join-Path $goldImages "shapes.png")))) {
                         Write-Host "FAIL  $name suite server needs the mmproj ($($mmprojPath[$mk])) and $goldImages\shapes.png (vision case)"
@@ -376,7 +385,7 @@ foreach ($mk in $Models) {
                 }
                 if ($devl.Count -gt 0) { Write-Host "      $name server $(($devl[0] -replace '^.*?(device \d+:)', '$1').Trim())" }
                 # s8-719: a failing server case keeps its work dir (server logs) for the diagnosis; a passing one is removed
-                if ($rc -ne 0 -or ($raw -match "hipError")) {
+                if ($rc -ne 0 -or ($raw -match "hipError") -or $KeepServerWork) {
                     $raw | Where-Object { $_ -notlike "G *" } | Out-File -FilePath (Join-Path $Out "$mk`_${mode}_server.diag.txt") -Encoding utf8
                     # keep the logs, not the SSD-tier files (golden_ssd writes *.wkv into the work dir; disk rule)
                     Get-ChildItem $gw -Recurse -File -Filter *.wkv -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue

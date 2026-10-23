@@ -86,9 +86,12 @@ def table_of(folder, include_all=False, server_seq=False):
     """include_all: server runs as counts only (no sequence hash); server_seq: server runs with their hashes."""
     include_all = include_all or server_seq
     runs = {}
-    for fn in sorted(os.listdir(folder)):
-        if not (fn.startswith("launch_") and fn.endswith(".txt")) or fn.endswith(".raw.txt"):
-            continue  # launch_<pid>.raw.txt: the WHIRL_LAUNCH_LOG_RAW per-launch dump (arch6e/rawcmp.py reads it)
+    # arch024-S0b: in the order the processes exited (a log is written at exit), not by file name: launch_<pid>.txt
+    # names sort by PID, which is not the run order, so the "#2" suffix of a repeated command (a gate that starts the
+    # same server twice) would pair different runs across two folders
+    names = [fn for fn in os.listdir(folder) if fn.startswith("launch_") and fn.endswith(".txt") and not fn.endswith(".raw.txt")]
+    names.sort(key=lambda fn: (os.stat(os.path.join(folder, fn)).st_mtime_ns, fn))
+    for fn in names:
         cmd, n, seq, rows, aseq, args = read_log(os.path.join(folder, fn))
         key = norm_cmd(cmd)
         server = key.startswith("whirl-server")
@@ -246,6 +249,18 @@ def selftest():
                   srv_args={"k_a 1x1x1 64x1x1 0 00000000000000aa": 10, "k_tick 1x1x1 32x1x1 0 00000000000000bb": 5}, srv_seq="7777",
                   srv_n=15)
         arg = mk("arg", srv_args={"k_a 1x1x1 64x1x1 0 00000000000000ab": 10, "k_tick 1x1x1 32x1x1 0 00000000000000bb": 3})
+        # a repeated server command: paired by exit order (file time), not by PID
+        def mk_rep(name, first_pid, first_n):
+            d = os.path.join(td, name)
+            os.makedirs(d)
+            _log(d, first_pid, srv, first_n, "aaaa", {"k_a 1x1x1 64x1x1 0": first_n})
+            os.utime(os.path.join(d, f"launch_{first_pid}.txt"), ns=(10**18, 10**18))
+            other = 5 if first_pid == 9 else 9
+            _log(d, other, srv, 20, "bbbb", {"k_a 1x1x1 64x1x1 0": 20})
+            os.utime(os.path.join(d, f"launch_{other}.txt"), ns=(2 * 10**18, 2 * 10**18))
+            return d
+        rep_a = mk_rep("rep_a", 5, 7)
+        rep_b = mk_rep("rep_b", 9, 7)
         q = lambda *x: x
         cases = [
             ("default excludes the server", q(a, seq), {}, 0),
@@ -256,6 +271,7 @@ def selftest():
             ("--server --ignore k_tick: the same passes", q(a, tick), {"server_seq": True, "ignore": [r"^k_tick "]}, 0),
             ("--server --ignore k_tick: an argument change of another kernel still blocks", q(a, arg),
              {"server_seq": True, "ignore": [r"^k_tick "]}, 1),
+            ("--server: a repeated command is paired by exit order, not by PID", q(rep_a, rep_b), {"server_seq": True}, 0),
         ]
         bad = 0
         for name, (x, y), kw, want in cases:

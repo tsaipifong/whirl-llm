@@ -37,7 +37,8 @@
 # -InjectFail: the golden steps compare against a copy of the references with one hash changed (a real
 # check that must turn the gate red; used to prove the gate fails).
 # -LaunchLog DIR: every GPU step runs with WHIRL_LAUNCH_LOG=DIR\<step>: each whirl process writes its kernel launch
-# table there (ARCH-1 K-0; tools/impact/launch_table.py builds and compares the tables).
+# table there (ARCH-1 K-0; tools/impact/launch_table.py builds and compares the tables); server-gate steps pass the
+# folder to their servers with --server-env (arch024-S0b).
 param(
     [ValidateSet("r9700", "8060s")][string]$Device = "r9700",
     [string]$Build = "",
@@ -252,6 +253,9 @@ try {
             $ld = Join-Path $LaunchLog $s.name
             New-Item -ItemType Directory -Force $ld | Out-Null
             $env:WHIRL_LAUNCH_LOG = $ld
+            # arch024-S0b: whirl-server-gate gives its servers no WHIRL_* variable of its own environment (except
+            # WHIRL_DEVICE / WHIRL_VRAM_LIMIT_MB / WHIRL_MODE), so the servers get the folder with --server-env
+            if ($cmd[0] -eq $exe["whirl-server-gate"]) { $cmd += @("--server-env", "WHIRL_LAUNCH_LOG=$ld") }
         }
         try {
             # hold the R9700 lock for this step only, in this process (a child pwsh in between lost the
