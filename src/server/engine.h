@@ -470,7 +470,6 @@ public:
     std::string governorJson();
     std::uint32_t ctxPublished() const { return ctx_pub_.load(std::memory_order_relaxed); }
     const Tokenizer& tokenizer() const { return tok_; }
-    const ChatTokens& chatTokens() const { return ct_; }
     ServerModel& model() { return m_; }
     std::string randId(std::string_view prefix, std::size_t n);
 
