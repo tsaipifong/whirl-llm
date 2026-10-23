@@ -1327,11 +1327,12 @@ int serveMain(int argc, char** argv, const char* program) {
                                    g.adapter_shared ? std::format("{} MiB", g.adapter_shared >> 20) : std::string("unknown"));
             }
             // REVIEW-S8-719-3 N3-4: the vision encoder's weights are pinned after this (Vision::load, discrete GPU below, the
-            // integrated GPU later): count the mmproj file (an upper bound of its tensors) now
+            // integrated GPU later): count them now, from the mmproj file size plus its padding (startfit::mmprojPinnedBytes;
+            // the file size alone is below what is pinned, REVIEW-B0 N1)
             if (const std::optional<std::string> mm = opt.mmproj ? opt.mmproj : env("MMPROJ")) {
                 std::error_code ec;
                 const std::uintmax_t sz = std::filesystem::file_size(*mm, ec);
-                if (!ec) pst.later = static_cast<std::uint64_t>(sz);
+                if (!ec) pst.later = startfit::mmprojPinnedBytes(static_cast<std::uint64_t>(sz));
             }
             pinned_room = startfit::pinnedRoomMb(pst);
             logI("kv tier: pinned memory now: {} HIP GPU(s) [{}]; all programs {} MiB (largest adapter) of half the RAM ({} MiB){} -> room for the RAM tier {} "

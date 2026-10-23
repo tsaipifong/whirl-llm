@@ -32,7 +32,11 @@ std::uint64_t pinnedRoomMb(const PinnedState& s) {
     return room;
 }
 
-std::uint64_t mmprojPinnedBytes(std::uint64_t file_bytes) { return file_bytes; }
+std::uint64_t mmprojPinnedBytes(std::uint64_t file_bytes) {
+    // REVIEW-B0 N1: the padded layout is a little larger than the file (measured +0.27%: 884.6 MiB file, 887 MiB pinned);
+    // + 1/32 + 32 MiB covers alignment, n_ff_pad and the f16 -> f32 position embedding with room to spare
+    return file_bytes ? file_bytes + file_bytes / 32 + (32ull << 20) : 0;
+}
 
 std::string pinnedWhy(std::uint64_t room_mb, std::size_t n_gpus) {
     // no "hip" anywhere, no "failed:" (REVIEW-S8-719 A1): log scanners match hipError / hip...719 case-insensitively
