@@ -4,6 +4,7 @@
 // setupSeqs, snapshots, requantMtpQ4, buildDraftHeadEx).
 
 #include "whirl/model.h"
+#include "device/backend.h"
 #include "whirl/vram_limit.h"
 #include "whirl/uma_mem.h"
 
@@ -87,12 +88,12 @@ struct Loader {
     }
 
     // Like mat(), but the data stays in pinned host memory (device-accessible).
-    Mat matHost(const char* name, void** keep) {
+    Mat matHost(const char* name, device::PinnedBuf* keep) {
         const gguf::TensorInfo* t = f.tensor(name);
         if (!t) throw ModelError("MissingTensor", name);
         const u64 nbytes = t->nbytes();
-        void* buf = hip::hostMalloc(static_cast<std::size_t>(nbytes));
-        *keep = buf;
+        *keep = device::PinnedBuf::alloc(device::hipBackend(), nbytes);
+        void* buf = keep->get();
         file.read(buf, static_cast<std::size_t>(nbytes), f.absOffset(*t));
         stats.bytes += nbytes;
         stats.tensors += 1;
@@ -235,19 +236,20 @@ struct Loader {
 // ---------------------------------------------------------------------------
 
 Model::~Model() {
+    // the release order of before arch024 S11 (graph, rpos, allocations in order, pinned embedding, stream);
+    // the members would otherwise be destroyed in reverse declaration order
     decode_graph.reset();
-    if (rpos_buf != 0) hip::free(rpos_buf);
-    for (DevPtr p : allocations) hip::free(p);
+    rpos_own.reset();
+    for (device::DevBuf& b : allocations) b.reset();
     allocations.clear();
-    alloc_sizes.clear();
-    if (embd_host) hip::hostFree(embd_host);
-    if (stream) hip::streamDestroy(stream);
+    embd_host.reset();
+    stream_own.reset();
 }
 
 DevPtr Model::alloc(u64 bytes) {
-    const DevPtr p = hip::malloc(static_cast<std::size_t>(bytes));
-    allocations.push_back(p);
-    alloc_sizes.push_back(bytes);
+    device::DevBuf b = device::DevBuf::alloc(device::hipBackend(), bytes);
+    const DevPtr p = b.get();
+    allocations.push_back(std::move(b));
     alloc_total += bytes;
     return p;
 }
@@ -260,13 +262,12 @@ DevPtr Model::allocZero(u64 bytes) {
 
 void Model::freeAlloc(DevPtr p) {
     for (std::size_t i = 0; i < allocations.size(); ++i)
-        if (allocations[i] == p) {
-            allocations[i] = allocations.back();
+        if (allocations[i].get() == p) {
+            device::DevBuf gone = std::move(allocations[i]);
+            if (i + 1 != allocations.size()) allocations[i] = std::move(allocations.back());
             allocations.pop_back();
-            alloc_total -= alloc_sizes[i];  // WDDM-LOG review P3-8: alloc_total stays the live sum
-            alloc_sizes[i] = alloc_sizes.back();
-            alloc_sizes.pop_back();
-            hip::free(p);
+            alloc_total -= gone.bytes();  // WDDM-LOG review P3-8: alloc_total stays the live sum
+            gone.reset();
             return;
         }
 }
@@ -499,7 +500,8 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
         m.module = hip::Module::loadEmbedded();
     }
     m.arch = m.module.arch();
-    m.stream = hip::streamCreate();
+    m.stream_own = device::StreamH::adopt(device::hipBackend(), hip::streamCreate());  // blocking, as before
+    m.stream = m.stream_own.get();
     m.max_ctx = max_ctx_req;
     m.max_batch = std::clamp<u32>(opt.max_batch, 1, max_batch_limit);
     KvMode kvm = opt.kv_mode;
@@ -543,11 +545,8 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
     m.gemv_r = device::profile(m.arch).gemv_r;
 
     const std::size_t staging_len = 64u << 20;
-    auto* staging = static_cast<std::uint8_t*>(hip::hostMalloc(staging_len));
-    struct StagingFree {
-        void* p;
-        ~StagingFree() { hip::hostFree(p); }
-    } staging_free{staging};
+    const device::PinnedBuf staging_buf = device::PinnedBuf::alloc(device::hipBackend(), staging_len);
+    auto* staging = static_cast<std::uint8_t*>(staging_buf.get());
     Loader ld{m, f, Reader(f.path()), staging, staging_len, stats};
 
     // fit check before any weight is uploaded: weights + state + buffers against the
@@ -976,11 +975,8 @@ u64 Model::loadDrafter(const gguf::File& f, LoadStats& stats) {
     DFlashConfig dc = DFlashConfig::fromGguf(f);
     dc.validate(cfg, f);
     const std::size_t staging_len = 64u << 20;
-    auto* staging = static_cast<std::uint8_t*>(hip::hostMalloc(staging_len));
-    struct StagingFree {
-        void* p;
-        ~StagingFree() { hip::hostFree(p); }
-    } staging_free{staging};
+    const device::PinnedBuf staging_buf = device::PinnedBuf::alloc(device::hipBackend(), staging_len);
+    auto* staging = static_cast<std::uint8_t*>(staging_buf.get());
     const u64 bytes0 = stats.bytes;
     Loader ld{*this, f, Reader(f.path()), staging, staging_len, stats};
     auto d = std::make_unique<DFlashW>();
@@ -1142,22 +1138,21 @@ std::vector<Mat*> Model::tuneMats(Layer& L) {
 // ---------------------------------------------------------------------------
 // profiling
 
-Profile::Profile() : events(cap, nullptr), classes(cap, OpClass::misc) {}
+Profile::Profile() : events(cap), classes(cap, OpClass::misc) {}
 Profile::~Profile() {
-    for (hip::Event e : events)
-        if (e) hip::eventDestroy(e);
+    for (device::EventH& e : events) e.reset();  // in index order, as before arch024 S11
 }
 void Profile::record(hip::Stream s, OpClass cls) {
     if (count == cap) flush();
-    if (events[count] == nullptr) events[count] = hip::eventCreate();
-    hip::eventRecord(events[count], s);
+    if (!events[count]) events[count] = device::EventH::adopt(device::hipBackend(), hip::eventCreate());  // timing event
+    hip::eventRecord(events[count].get(), s);
     classes[count] = cls;
     count += 1;
 }
 void Profile::flush() {
     if (count == 0) return;
     hip::sync();
-    for (std::size_t i = 1; i < count; ++i) ms[static_cast<std::size_t>(classes[i])] += hip::eventElapsedMs(events[i - 1], events[i]);
+    for (std::size_t i = 1; i < count; ++i) ms[static_cast<std::size_t>(classes[i])] += hip::eventElapsedMs(events[i - 1].get(), events[i].get());
     std::swap(events[count - 1], events[0]);
     classes[0] = classes[count - 1];
     count = 1;

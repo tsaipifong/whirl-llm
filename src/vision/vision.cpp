@@ -253,9 +253,9 @@ std::unique_ptr<Vision> Vision::load(const std::string& path) {
     v->merger_ = v->layer0_ + static_cast<u64>(hp.n_layer) * lo.bytes;
     v->total_ = v->merger_ + mo.bytes;
 
-    v->host_ = static_cast<std::uint8_t*>(hip::hostMalloc(v->total_));
-    std::memset(v->host_, 0, v->total_);
-    std::uint8_t* const H = v->host_;
+    v->host_ = device::PinnedBuf::alloc(device::hipBackend(), v->total_);
+    std::memset(v->host_.get(), 0, v->total_);
+    std::uint8_t* const H = static_cast<std::uint8_t*>(v->host_.get());
     // patch embedding: [E][2 * 768] = [W0 row | W1 row]
     {
         std::vector<std::uint8_t> tmp(static_cast<std::size_t>(E) * 768 * 2);
@@ -312,7 +312,7 @@ std::unique_ptr<Vision> Vision::load(const std::string& path) {
 
 Vision::~Vision() {
     release();
-    if (host_ != nullptr) hip::hostFree(host_);
+    host_.reset();
 }
 
 Prepared Vision::prepare(std::span<const std::uint8_t> bytes) const {
@@ -413,37 +413,29 @@ void Vision::loadModule() {
     f_.gelu = module_.getFunction("vis_gelu");
     f_.bias = module_.getFunction("vis_bias");
     f_.gemm = module_.getFunction("vis_gemm");
-    if (copy_stream_ == nullptr) {
-        copy_stream_ = hip::streamCreate(true);
-        for (auto& e : ev_copy_) e = hip::eventCreate(false);
-        for (auto& e : ev_free_) e = hip::eventCreate(false);
-        ev_start_ = hip::eventCreate(false);
+    if (!copy_stream_) {
+        // the Backend's kinds: non-blocking stream, events without timing (hip::streamCreate(true) / eventCreate(false))
+        device::Backend& b = device::hipBackend();
+        copy_stream_ = device::StreamH::create(b);
+        for (auto& e : ev_copy_) e = device::EventH::create(b);
+        for (auto& e : ev_free_) e = device::EventH::create(b);
+        ev_start_ = device::EventH::create(b);
     }
 }
 
 void Vision::release() {
     try {
-        if (copy_stream_ != nullptr) hip::streamSync(copy_stream_);
+        if (copy_stream_) hip::streamSync(copy_stream_.get());
     } catch (...) {
     }
-    if (resident_ != 0) {
-        hip::free(resident_);
-        resident_ = 0;
-    }
+    resident_.reset();
     if (module_.loaded()) module_ = hip::Module();
-    if (copy_stream_ != nullptr) {
-        for (auto& e : ev_copy_) {
-            hip::eventDestroy(e);
-            e = nullptr;
-        }
-        for (auto& e : ev_free_) {
-            hip::eventDestroy(e);
-            e = nullptr;
-        }
-        hip::eventDestroy(ev_start_);
-        ev_start_ = nullptr;
-        hip::streamDestroy(copy_stream_);
-        copy_stream_ = nullptr;
+    // the order of before arch024 S11: copy events, free events, start event, then the stream
+    if (copy_stream_) {
+        for (auto& e : ev_copy_) e.reset();
+        for (auto& e : ev_free_) e.reset();
+        ev_start_.reset();
+        copy_stream_.reset();
     }
 }
 
@@ -480,32 +472,32 @@ EncodeStats Vision::encode(const Prepared& p, std::span<const Region> lend, hip:
     st.n_patches = N;
     loadModule();
     // resident weights when they fit (auto) / forced
-    if (resident_ == 0 && mode != Mode::stream) {
+    if (!resident_ && mode != Mode::stream) {
         const hip::MemInfo mi = hip::memInfo();
         if (mode == Mode::resident || mi.free > total_ + resident_margin) {
             const double tu = nowSeconds();
             try {
-                resident_ = hip::malloc(total_);
+                resident_ = device::DevBuf::alloc(device::hipBackend(), total_);
             } catch (const hip::Error&) {
-                resident_ = 0;
+                resident_.reset();
             }
-            if (resident_ != 0) {
-                hip::copyAnyAsync(resident_, reinterpret_cast<DevPtr>(host_), total_, copy_stream_);
-                hip::streamSync(copy_stream_);
+            if (resident_) {
+                hip::copyAnyAsync(resident_.get(), host_.addr(), total_, copy_stream_.get());
+                hip::streamSync(copy_stream_.get());
                 st.ms_upload = msSince(tu);
             }
         }
     }
-    const bool res = resident_ != 0;
+    const bool res = static_cast<bool>(resident_);
+    const DevPtr resident = resident_.get();
     st.resident = res;
     // carve the lent regions (first fit, largest first); hipMalloc what does not fit
     const std::array<u64, 7> need = needs(n_tok, !res);
     std::array<DevPtr, 7> ptr{};
     struct Extra {
-        std::array<DevPtr, 7> p{};
+        std::array<device::DevBuf, 7> p{};
         ~Extra() {
-            for (DevPtr e : p)
-                if (e != 0) hip::free(e);
+            for (device::DevBuf& e : p) e.reset();  // in index order (a plain array would release in reverse)
         }
     } extra;
     {
@@ -521,8 +513,8 @@ EncodeStats Vision::encode(const Prepared& p, std::span<const Region> lend, hip:
                 ptr[k] = lend[static_cast<std::size_t>(at[k].first)].ptr + at[k].second;
             } else {
                 const u64 sz = alignUp(need[k], 256);
-                extra.p[k] = hip::malloc(sz);
-                ptr[k] = extra.p[k];
+                extra.p[k] = device::DevBuf::alloc(device::hipBackend(), sz);
+                ptr[k] = extra.p[k].get();
                 st.borrowed_extra += sz;
             }
         }
@@ -535,51 +527,51 @@ EncodeStats Vision::encode(const Prepared& p, std::span<const Region> lend, hip:
     const u32 pw = p.nx * 2;
     const u32 ph = p.ny * 2;
     const u64 lb = lo_.bytes;
-    const DevPtr host0 = reinterpret_cast<DevPtr>(host_);
+    const DevPtr host0 = host_.addr();
     // weight pointers: resident buffer, or the stream slots
     //   slot 0 = W, slot 1 = W + lb (misc first, then odd layers); merger at W + lb
     const DevPtr slot[2] = {W, W + lb};
-    hip::Stream cs = copy_stream_;
+    hip::Stream cs = copy_stream_.get();
     if (!res) {
         // the lent regions may still be read by queued work on `stream`
-        hip::eventRecord(ev_start_, stream);
-        hip::streamWaitEvent(cs, ev_start_);
+        hip::eventRecord(ev_start_.get(), stream);
+        hip::streamWaitEvent(cs, ev_start_.get());
         hip::copyAnyAsync(slot[1], host0 + 0, so_.bytes, cs);
-        hip::eventRecord(ev_copy_[1], cs);
+        hip::eventRecord(ev_copy_[1].get(), cs);
         hip::copyAnyAsync(slot[0], host0 + layer0_, lb, cs);
-        hip::eventRecord(ev_copy_[0], cs);
+        hip::eventRecord(ev_copy_[0].get(), cs);
     }
-    const DevPtr misc = res ? resident_ : slot[1];
+    const DevPtr misc = res ? resident : slot[1];
     // image -> M (u8), patch rows -> T (f16), patch GEMM -> X
     prof_t_ = -1;
     pm(stream, 7);
     // pageable source: drain the stream first (queued LM work may still use the lent regions)
     hip::streamSync(stream);
     hip::uploadAsync(M, p.rgb.px.data(), p.rgb.px.size(), stream);
-    if (!res) hip::streamWaitEvent(stream, ev_copy_[1]);
+    if (!res) hip::streamWaitEvent(stream, ev_copy_[1].get());
     hip::launch(f_.patchify, Dim3{N, 1, 1}, Dim3{256, 1, 1}, 0, stream, M, T, static_cast<i32>(p.rgb.w), static_cast<i32>(pw), hp.mean[0],
                 hp.mean[1], hp.mean[2], hp.sd[0], hp.sd[1], hp.sd[2]);
     launchGemm(stream, misc + so_.patch_w, T, X, patch_k, E, N);
-    const DevPtr lw0 = res ? resident_ + layer0_ : slot[0];
+    const DevPtr lw0 = res ? resident + layer0_ : slot[0];
     hip::launch(f_.pos_ln, Dim3{N, 1, 1}, Dim3{256, 1, 1}, 0, stream, X, misc + so_.pos, misc + so_.patch_b, static_cast<i32>(pw),
                 static_cast<i32>(ph), static_cast<i32>(hp.n_side), lw0 + lo_.ln1_g, lw0 + lo_.ln1_b, Hb, hp.eps);
     pm(stream, 0);
     if (!res) {
-        hip::eventRecord(ev_free_[1], stream);
+        hip::eventRecord(ev_free_[1].get(), stream);
         if (hp.n_layer > 1) {
-            hip::streamWaitEvent(cs, ev_free_[1]);
+            hip::streamWaitEvent(cs, ev_free_[1].get());
             hip::copyAnyAsync(slot[1], host0 + layer0_ + lb, lb, cs);
-            hip::eventRecord(ev_copy_[1], cs);
+            hip::eventRecord(ev_copy_[1].get(), cs);
         }
     }
     const float theta_scale = static_cast<float>(std::pow(10000.0, -2.0 / 36.0));
     const float scale_log2 = static_cast<float>(1.0 / std::sqrt(static_cast<double>(head_dim)) * std::numbers::log2e);
-    const DevPtr mbase = res ? resident_ + merger_ : W + lb;
+    const DevPtr mbase = res ? resident + merger_ : W + lb;
     const LayerOff lo = lo_;
     for (u32 l = 0; l < hp.n_layer; ++l) {
         const u32 s = l % 2;
-        const DevPtr L = res ? resident_ + layer0_ + static_cast<u64>(l) * lb : slot[s];
-        if (!res) hip::streamWaitEvent(stream, ev_copy_[s]);
+        const DevPtr L = res ? resident + layer0_ + static_cast<u64>(l) * lb : slot[s];
+        if (!res) hip::streamWaitEvent(stream, ev_copy_[s].get());
         pm(stream, 7);
         launchGemm(stream, L + lo.qkv_w, Hb, T, E, QKV, N);
         pm(stream, 1);
@@ -602,27 +594,27 @@ EncodeStats Vision::encode(const Prepared& p, std::span<const Region> lend, hip:
         // residual, then the next layer's ln1 (or post_ln after the last layer)
         const bool last = l + 1 == hp.n_layer;
         // the next layer's ln1 lives in the other slot (already waited for below)
-        if (!last && !res) hip::streamWaitEvent(stream, ev_copy_[1 - s]);
+        if (!last && !res) hip::streamWaitEvent(stream, ev_copy_[1 - s].get());
         if (last && !res) {
             // merger weights were queued after layer n_layer - 2 freed slot 1
-            hip::streamWaitEvent(stream, ev_copy_[1]);
+            hip::streamWaitEvent(stream, ev_copy_[1].get());
         }
-        const DevPtr Ln = res ? resident_ + layer0_ + static_cast<u64>(l + 1) * lb : slot[1 - s];
+        const DevPtr Ln = res ? resident + layer0_ + static_cast<u64>(l + 1) * lb : slot[1 - s];
         const DevPtr g = last ? mbase + mo_.post_g : Ln + lo.ln1_g;
         const DevPtr b = last ? mbase + mo_.post_b : Ln + lo.ln1_b;
         hip::launch(f_.resid_ln, Dim3{N, 1, 1}, Dim3{256, 1, 1}, 0, stream, X, T, L + lo.down_b, g, b, Hb, hp.eps);
         pm(stream, 4);
         if (!res) {
-            hip::eventRecord(ev_free_[s], stream);
+            hip::eventRecord(ev_free_[s].get(), stream);
             if (l + 2 < hp.n_layer) {
-                hip::streamWaitEvent(cs, ev_free_[s]);
+                hip::streamWaitEvent(cs, ev_free_[s].get());
                 hip::copyAnyAsync(slot[s], host0 + layer0_ + static_cast<u64>(l + 2) * lb, lb, cs);
-                hip::eventRecord(ev_copy_[s], cs);
+                hip::eventRecord(ev_copy_[s].get(), cs);
             } else if (l + 2 == hp.n_layer) {
                 // slot 1 free for good: merger weights into W + lb .. (overlaps the last layer)
-                hip::streamWaitEvent(cs, ev_free_[1]);
+                hip::streamWaitEvent(cs, ev_free_[1].get());
                 hip::copyAnyAsync(W + lb, host0 + merger_, mo_.bytes, cs);
-                hip::eventRecord(ev_copy_[1], cs);
+                hip::eventRecord(ev_copy_[1].get(), cs);
             }
         }
     }

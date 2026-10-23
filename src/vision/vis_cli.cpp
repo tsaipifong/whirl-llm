@@ -103,11 +103,13 @@ int cliVisEncode(std::span<const std::string> args) {
         std::printf("content hash %s; token ids %08x %08x ...\n", hx.c_str(), vision::tokenId(p.hash, 0), vision::tokenId(p.hash, 1));
     }
     std::fflush(stdout);
-    hip::Stream stream = hip::streamCreate();
+    const device::StreamH stream_own = device::StreamH::adopt(device::hipBackend(), hip::streamCreate());  // blocking
+    hip::Stream stream = stream_own.get();
     std::optional<vision::Prepared> pre;
     if (const char* pp = envRaw("WHIRL_VIS_PRE")) pre = v->prepare(readBytes(pp));
     const std::uint64_t need = std::max(v->arenaBytes(p.nTokens()), pre ? v->arenaBytes(pre->nTokens()) : 0);
-    const hip::DevPtr arena = hip::malloc(need);
+    device::DevBuf arena_own = device::DevBuf::alloc(device::hipBackend(), need);
+    const hip::DevPtr arena = arena_own.get();
     const vision::Region lend[1] = {{arena, need}};
     if (pre) {
         std::vector<float> pout(static_cast<std::size_t>(pre->nTokens()) * v->hp.proj_dim);
@@ -140,9 +142,8 @@ int cliVisEncode(std::span<const std::string> args) {
         writeFile(out_path, std::string_view(reinterpret_cast<const char*>(out.data()), out.size() * 4));
         std::printf("wrote %s\n", out_path.c_str());
     }
-    hip::free(arena);
+    arena_own.reset();  // arena, encoder, then the stream (the order of before arch024 S11)
     v.reset();
-    hip::streamDestroy(stream);
     return 0;
 }
 

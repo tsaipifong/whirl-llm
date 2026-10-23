@@ -20,6 +20,7 @@
 
 #pragma once
 
+#include "device/handles.h"  // src/: RAII owners of the pinned weights, resident copy, copy stream and events (arch024 S11)
 #include "whirl/hip.h"
 #include "whirl/vismap.h"
 
@@ -216,7 +217,7 @@ private:
     void launchGemm(hip::Stream s, DevPtr w, DevPtr x, DevPtr y, std::uint32_t ncols, std::uint32_t nrows, std::uint32_t n);
     void pm(hip::Stream s, int c);
 
-    std::uint8_t* host_ = nullptr;
+    device::PinnedBuf host_;  // every weight, pinned (the streamed path copies from it)
     LayerOff lo_;
     MiscOff so_;
     MergerOff mo_;
@@ -224,10 +225,10 @@ private:
     hip::Module module_;
     std::uint32_t attn_threads_ = 128;  // vis_attn2 block: 128 (gfx1201), 256 (gfx1151: 8 waves x 16 queries)
     Funcs f_;
-    DevPtr resident_ = 0;
-    hip::Stream copy_stream_ = nullptr;
-    std::array<hip::Event, 2> ev_copy_{}, ev_free_{};
-    hip::Event ev_start_ = nullptr;
+    device::DevBuf resident_;  // the weights in VRAM when they fit (else empty: streamed)
+    device::StreamH copy_stream_;
+    std::array<device::EventH, 2> ev_copy_{}, ev_free_{};
+    device::EventH ev_start_;
     double last_use_ = -1;  // nowSeconds() of the last encode, < 0: none
     double prof_t_ = -1;
 };

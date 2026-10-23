@@ -25,6 +25,7 @@
 
 #pragma once
 
+#include "device/handles.h"  // src/: RAII owners of the device / pinned buffers, events and streams (arch024 S11)
 #include "whirl/gguf.h"
 #include "whirl/device_profile.h"
 #include "whirl/hip.h"
@@ -407,7 +408,7 @@ const char* opClassName(OpClass c);
 struct Profile {
     std::array<double, n_classes> ms{};
     std::uint64_t matmul_bytes = 0;
-    std::vector<hip::Event> events;
+    std::vector<device::EventH> events;  // timing events, made on first use (adopted from hip::eventCreate())
     std::vector<OpClass> classes;
     std::size_t count = 0;
     static constexpr std::size_t cap = 2048;
@@ -499,16 +500,16 @@ public:
     Kernels k;
     hip::Module module;
     Mat tok_embd;
-    void* embd_host = nullptr;
+    device::PinnedBuf embd_host;  // token_embd in pinned host memory (embd_on_host), else empty
     Mat output;
     DevPtr output_norm = 0;
     std::vector<Layer> layers;
-    std::vector<DevPtr> allocations;
-    std::vector<std::uint64_t> alloc_sizes;  // parallel to allocations (freeAlloc keeps alloc_total live)
+    std::vector<device::DevBuf> allocations;  // owners of alloc(); bytes() is each one's size
     std::uint64_t alloc_total = 0;  // bytes live through alloc() (sizing self-check in load; freeAlloc subtracts)
     std::array<std::uint64_t, n_types> type_bytes{};
     Profile* prof = nullptr;
-    hip::Stream stream = nullptr;
+    hip::Stream stream = nullptr;  // the work stream (owned by stream_own; every kernel call reads this value)
+    device::StreamH stream_own;
     std::unique_ptr<hip::Graph> decode_graph;
     bool use_graph = true;
     bool head_phase = false;
@@ -755,6 +756,7 @@ public:
     std::int32_t rdelta = 0;
     // [max_batch][3] i32 (allocated on first image use, freed by visRelease) and its host staging
     DevPtr rpos_buf = 0;
+    device::DevBuf rpos_own;  // owns rpos_buf (visEnsure / visRelease)
     std::vector<std::int32_t> rpos_host;
     // image rows injected into x after the embedding lookup of the next run() / MTP step
     struct Inj {

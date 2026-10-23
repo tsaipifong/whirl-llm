@@ -55,4 +55,10 @@ public:
 
 std::unique_ptr<Backend> makeHipBackend() { return std::make_unique<HipBackend>(); }
 
+Backend& hipBackend() {
+    // never destroyed: a handle released during static destruction (a static Model, an exit path) still finds it
+    static HipBackend* const b = new HipBackend();
+    return *b;
+}
+
 }  // namespace whirl::device

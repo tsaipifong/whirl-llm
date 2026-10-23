@@ -269,6 +269,33 @@ void testHandles() {
     CHECK(b.clean());
 }
 
+// arch024 S11: adopt() takes over values made outside the Backend's factories (timing events, blocking streams
+// in the model / vision / CLI) and releases them like the others: once, through the same Backend.
+void testAdopt() {
+    using whirl::device::DevBuf;
+    using whirl::device::EventH;
+    using whirl::device::PinnedBuf;
+    using whirl::device::StreamH;
+    NullBackend b;
+    {
+        DevBuf d = DevBuf::adopt(b, b.malloc(256), 256);
+        PinnedBuf h = PinnedBuf::adopt(b, b.hostMalloc(4096), 4096);
+        EventH e = EventH::adopt(b, b.eventCreate());
+        StreamH s = StreamH::adopt(b, b.streamCreateNonBlocking());
+        CHECK(d && h && e && s && d.bytes() == 256 && h.bytes() == 4096 && b.isHost(h.addr()));
+        CHECK(b.liveAllocations() == 2 && b.liveEvents() == 1 && b.liveStreams() == 1);
+        DevBuf d2 = std::move(d);
+        CHECK(!d && d2.bytes() == 256 && b.liveAllocations() == 2);  // NOLINT(bugprone-use-after-move)
+        // adopting nothing gives an empty handle that releases nothing
+        DevBuf none = DevBuf::adopt(b, 0, 0);
+        EventH none_e = EventH::adopt(b, nullptr);
+        CHECK(!none && !none_e && none.bytes() == 0);
+        e.reset();
+        CHECK(b.liveEvents() == 0);
+    }
+    CHECK(b.clean());
+}
+
 // arch024 M1 F1 harness: NullBackend tracking mode, stream-order semantics
 void testTracking() {
     using whirl::device::EventH;
@@ -430,6 +457,7 @@ int main() {
     testNullBackendMemoryModel();
     testProfiles();
     testHandles();
+    testAdopt();
     testTracking();
     testReleaseThreads();
     std::printf("device tests: %d passed, %d failed\n", g_pass, g_fail);

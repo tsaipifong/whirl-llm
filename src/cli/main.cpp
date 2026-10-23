@@ -544,14 +544,15 @@ DecodeResult plainDecode(q::Model& model, const Tok& tok, u32 first, std::size_t
     DecodeResult r;
     Streamer st{tok, opt.stream};
     constexpr int ring_n = 4;
-    auto* ring = static_cast<std::int32_t*>(hip::hostMalloc(4 * ring_n));
-    hip::Event events[ring_n];
-    for (auto& e : events) e = hip::eventCreate();
+    device::PinnedBuf ring_buf = device::PinnedBuf::alloc(device::hipBackend(), 4 * ring_n);
+    auto* ring = static_cast<std::int32_t*>(ring_buf.get());
+    device::EventH events[ring_n];
+    for (auto& e : events) e = device::EventH::adopt(device::hipBackend(), hip::eventCreate());  // timing, as before
     auto enq = [&](std::size_t kk) {
         model.decodeStep();
         const std::size_t slot = kk % ring_n;
         hip::downloadAsync(&ring[slot], model.out_tok, 4, model.stream);
-        hip::eventRecord(events[slot], model.stream);
+        hip::eventRecord(events[slot].get(), model.stream);
     };
     Timer timer;
     timer.begin();
@@ -569,15 +570,15 @@ DecodeResult plainDecode(q::Model& model, const Tok& tok, u32 first, std::size_t
         tps.tick(n_gen);
         if (n_gen == opt.max_tokens) break;
         if (n_gen + 1 < opt.max_tokens) enq(kk + 2);
-        hip::eventSync(events[(kk + 1) % ring_n]);
+        hip::eventSync(events[(kk + 1) % ring_n].get());
         cur = static_cast<u32>(ring[(kk + 1) % ring_n]);
         kk += 1;
         st.update(r.tokens);
     }
     r.decode_ms = timer.end();
     r.steps = n_gen > 0 ? n_gen - 1 : 0;
-    for (auto e : events) hip::eventDestroy(e);
-    hip::hostFree(ring);
+    for (auto& e : events) e.reset();  // events, then the ring (the order of before arch024 S11)
+    ring_buf.reset();
     if (!opt.stream && opt.print_text) out(tok.decode(r.tokens));
     return r;
 }
@@ -648,12 +649,14 @@ DecodeResult specDecode(q::Model& model, const Tok& tok, u32 first, u32 n_prompt
     const whirl::relax::Params& rx = model.relax;
     const u32 rk = rx.topk();
     hip::Function rx_topk = nullptr;
+    device::DevBuf rx_own;
     hip::DevPtr rx_dev = 0;
     std::vector<std::uint8_t> rx_host;
     if (rx.on) {
         rx_topk = model.module.getFunction("topk_rows");
         const std::size_t rb = static_cast<std::size_t>(q::max_small_batch) * rk * 8 + q::max_small_batch * 8;
-        rx_dev = hip::malloc(rb);
+        rx_own = device::DevBuf::alloc(device::hipBackend(), rb);
+        rx_dev = rx_own.get();
         rx_host.assign(rb, 0);
     }
     u32 relaxed = 0;
@@ -795,7 +798,7 @@ DecodeResult specDecode(q::Model& model, const Tok& tok, u32 first, u32 n_prompt
     }
     res.decode_ms = timer.end();
     model.draft_p_min = 0;
-    if (rx_dev) hip::free(rx_dev);
+    rx_own.reset();
     if (rx.on)
         std::fprintf(stderr, "relaxacc: %u of %u accepted drafts kept by the relaxed rule (top-%u, alpha %.2f)\n", relaxed, accepted, rk, rx.alpha);
     if (!opt.stream && opt.print_text) out(tok.decode(generated));
@@ -1281,14 +1284,11 @@ int cmdChat(const Args& a) {
     q::VisMap vmap;
     // projected embeddings in pinned host memory (as the prototype CLI)
     struct Pinned {
+        device::PinnedBuf b;  // owner; p is its address as float*
         float* p = nullptr;
         std::size_t n = 0;
-        explicit Pinned(std::size_t count) : p(static_cast<float*>(hip::hostMalloc(count * 4))), n(count) {}
-        Pinned(Pinned&& o) noexcept : p(o.p), n(o.n) { o.p = nullptr; }
-        Pinned(const Pinned&) = delete;
-        ~Pinned() {
-            if (p) hip::hostFree(p);
-        }
+        explicit Pinned(std::size_t count)
+            : b(device::PinnedBuf::alloc(device::hipBackend(), count * 4)), p(static_cast<float*>(b.get())), n(count) {}
     };
     std::vector<Pinned> embs;
     if (!a.images.empty()) {
@@ -2214,7 +2214,8 @@ int goldenSingle(const Args& a, const gguf::File& f, const Tok& tok, u32 n_dec, 
     const std::vector<u32> sp = tok.encode(chatWrap(
         ngram_only ? std::string("Copy the following text word for word, twice, and add nothing else.\n\n") + k_bench_text : std::string(k_golden_short), false));
     const std::vector<u32> lp = goldenLongIds(tok, 4000);
-    auto* tk = static_cast<std::int32_t*>(hip::hostMalloc(4));
+    device::PinnedBuf tk_buf = device::PinnedBuf::alloc(device::hipBackend(), 4);
+    auto* tk = static_cast<std::int32_t*>(tk_buf.get());
     // the chat prefill (the server's forwards, CLI-SCHED), then the pipelined decode step chat runs (graph / fused path)
     auto plain = [&](const char* name, const std::vector<u32>& ids, u32 nd) {
         m.reset();
@@ -2236,7 +2237,7 @@ int goldenSingle(const Args& a, const gguf::File& f, const Tok& tok, u32 n_dec, 
         plain("short", sp, n_dec);
         plain("long4k", lp, 8);
     }
-    hip::hostFree(tk);
+    tk_buf.reset();
     if (ngram_only && !mtp) throw std::runtime_error("golden: suite ngram needs a model with an MTP head (and WHIRL_MTP != 0)");
     if (mtp) {
         bool head = false;
