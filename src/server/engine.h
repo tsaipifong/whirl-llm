@@ -12,12 +12,14 @@
 #include "cache/page_pool.h"
 #include "cache/prefix_cache.h"
 #include "decode_floor.h"
+#include "engine_api.h"
 #include "engine_thread.h"
 #include "prefix_store.h"
 #include "tier_bridge.h"
 #include "protocol.h"
 #include "device/backend.h"
 #include "device/handles.h"
+#include "stream.h"
 #include "tier/idle_flush.h"
 #include "tier/kv_tier.h"
 #include "tokens.h"
@@ -47,9 +49,6 @@
 
 namespace whirl::server {
 
-using Clock = std::chrono::steady_clock;
-using TimePoint = Clock::time_point;
-
 inline double msSince(TimePoint t0) {
     return std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
 }
@@ -70,39 +69,6 @@ using sched::prefillChunkLen;
 using sched::prefillExecFor;
 using sched::prefill_exec_default;
 using sched::prefillExecDefault;
-
-// Connection writer (buffered; errors make it "gone").
-class Conn {
-public:
-    virtual ~Conn() = default;
-    virtual bool write(std::string_view data) = 0;
-    virtual bool flush() = 0;
-    // false once the client has closed the connection (FR-SRV P2-2: polled by the engine for
-    // requests that write nothing for a long time: queued, prefilling, non-streaming)
-    virtual bool alive() { return true; }
-};
-
-enum class JobKind { chat, completion };
-
-struct Job {
-    std::uint64_t id = 0;
-    JobKind kind = JobKind::chat;
-    std::string endpoint;
-    Conn* w = nullptr;
-    std::vector<std::uint32_t> tokens;
-    Params params;
-    bool think = false;
-    json::Array tools;
-    bool tools_on = false;
-    TimePoint t_arrive{};
-    bool sys_wait_logged = false;
-    bool tier_wait_logged = false;
-    bool pool_wait_logged = false;  // FR-SRV P2-3
-    bool pf_checked = false;
-    // vision: the request's images (preprocessed), their spans and embeddings
-    std::shared_ptr<JobVis> vis;
-    bool done = false;  // guarded by Engine::q_mutex
-};
 
 struct Cand {
     std::uint32_t id;
@@ -144,41 +110,6 @@ struct Sampler {
 bool filterCands(Sampler& s, std::size_t count, bool complete);
 
 enum class Phase { idle, prefill, decode, restore };
-
-class Engine;
-
-struct Final {
-    std::string reason;
-    std::size_t reason_len = 0;
-    std::size_t content_len = 0;
-    std::size_t n_tools = 0;
-    std::optional<std::vector<ToolCall>> calls;
-    std::string content;
-    std::string reasoning;
-    // FR-SRV P3-8: why a "length" ended early ("" = max_tokens / context; "kv_pool_exhausted")
-    std::string cause;
-};
-
-struct StreamState {
-    Job* job = nullptr;
-    Engine* e = nullptr;
-    bool gone = false;
-    std::string id;
-    std::int64_t created = 0;
-
-    void begin();
-    void fail();
-    // *n_after: tokens of toks that come after a matched stop string (not counted as completion)
-    bool push(Out& out, std::span<const std::uint32_t> toks, std::uint32_t* n_after = nullptr);
-    Final finish(Out& out, const std::string& reason);
-    void end(Out& out, const Final& f, const Timings& tim, std::uint32_t n_prompt);
-
-private:
-    void chunkBegin(std::string& b) const;
-    static void chunkEnd(std::string& b, const char* fin_reason);
-    void sendDelta(Out& out, const Out::View& v);
-    void send(const std::string& b);
-};
 
 // cache_tokens, last_used: cache::SlotCache; pages, checkpoints and checkpoint points: SlotPrefix (arch024 M4);
 // the tier entry and the spill fence: SlotTier (M5). The members; Slot adds the F1 wait (below).
@@ -375,7 +306,7 @@ struct EngineOptions {
     whirl::relax::Params relax;
 };
 
-class Engine {
+class Engine final : public EngineApi {
 public:
     Engine(ServerModel& model, device::Backend& ops, const Tokenizer& tok, const EngineOptions& opt);
     ~Engine();
@@ -417,23 +348,15 @@ public:
     static constexpr std::uint64_t shutdown_flush_ms = 10000;
     static constexpr std::uint64_t shutdown_flush_long_ms = 60000;
 
-    // Connection threads
-    std::uint64_t nextJobId() { return next_id_.fetch_add(1); }
-    // Queue a built job and wait until the main thread has answered it.
-    void submitAndWait(Job& job);
-    void beginBuilding() { n_building_.fetch_add(1); }
-    void endBuilding();
-    struct Health {
-        std::uint32_t active = 0;
-        std::size_t queued = 0;
-        std::size_t slots = 0;
-        // WDDM-LOG: the last video memory sample (vram_ok false: no probe / no sample yet)
-        bool vram_ok = false, vram_spill = false;
-        std::uint64_t vram_local = 0, vram_budget = 0, vram_shared = 0;
-    };
-    Health health();
+    // Connection threads (EngineApi)
+    std::uint64_t nextJobId() override { return next_id_.fetch_add(1); }
+    void submitAndWait(Job& job) override;
+    void beginBuilding() override { n_building_.fetch_add(1); }
+    void endBuilding() override;
+    Health health() override;
 
-    // read-only facts for the HTTP layer
+    // the HTTP layer's facts (EngineApi; taken once by HttpServer, after the setters below)
+    EngineFacts facts() const override;
     const EngineOptions& options() const { return opt_; }
     // before initPool: precise f16 KV lowered the context per request; numerics mode for /props
     void setCtx(std::uint32_t c) {
@@ -464,33 +387,16 @@ public:
     // probe) + the margin fit it
     void setGovernor(const memgov::Config& c, std::function<std::uint64_t(std::uint64_t)> margin, std::uint64_t ram_tier_mb,
                      std::uint64_t vram_total = 0);
-    // "governor" object of /health and /props ("" when off); context per request for new requests (/props n_ctx)
-    std::string governorJson();
-    std::uint32_t ctxPublished() const { return ctx_pub_.load(std::memory_order_relaxed); }
+    std::string governorJson() override;
+    std::uint32_t ctxPublished() const override { return ctx_pub_.load(std::memory_order_relaxed); }
     const Tokenizer& tokenizer() const { return tok_; }
     ServerModel& model() { return m_; }
-    std::string randId(std::string_view prefix, std::size_t n);
 
-    // statistics for tests
-    struct Stats {
-        std::uint64_t spe_new = 0, spe_hits = 0, spe_tok = 0, spe_evict = 0, unshare = 0, evictions = 0;
-        std::uint64_t cow_pages = 0, q_waits = 0, spill_waits = 0;
-        std::uint64_t vis_enc = 0, vis_hit = 0;  // vision: images encoded / embedding cache hits
-        // SSD tier: bytes written since start, bytes not written (shared
-        // blocks), bytes in use, superseded sessions trimmed
-        std::uint64_t ssd_written = 0, ssd_dedup = 0, ssd_used = 0, ssd_entries = 0, superseded = 0;
-        // DFlash2: cycles that drafted with it, its drafts / accepted, cycles of a slot whose drafter
-        // context was not ready (no DFlash2 drafts), positions without features (forward rows
-        // outside the capture, restores)
-        std::uint64_t dfl_cycles = 0, dfl_drafted = 0, dfl_accepted = 0, dfl_cold = 0, dfl_gap = 0;
-    };
+    // statistics for tests (Stats: EngineApi)
     Stats stats() const;
-    // FR-SRV P3-5: the counters other threads may read (HTTP /props): atomics only
-    Stats statsShared() const;
+    Stats statsShared() const override;
 
 private:
-    friend struct StreamState;
-
     // checkpoints
     void saveCkpt(Slot& sl, std::uint32_t pos, const char* kind, std::optional<DevPtr> hid, std::optional<DevPtr> logits);
     void dropCache(Slot& sl);
@@ -635,8 +541,8 @@ private:
     std::uint32_t n_active_ = 0;
     std::atomic<std::uint32_t> n_building_{0};
     std::atomic<std::uint64_t> next_id_{1};
-    std::mutex rng_mutex_;
-    std::mt19937_64 id_prng_;
+    IdGen ids_;         // response / tool-call ids and default sampling seeds (one stream)
+    ResponseCtx rcx_;   // what each slot's StreamState reads (model id, tokenizer, ids_)
     bool stop_ = false;
     std::vector<std::function<void()>> loop_calls_;  // under q_mutex_: runOnLoop (tests)
     void runLoopCalls(std::unique_lock<std::mutex>& lk);

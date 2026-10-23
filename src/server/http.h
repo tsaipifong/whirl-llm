@@ -6,7 +6,7 @@
 
 #pragma once
 
-#include "engine.h"
+#include "engine_api.h"
 
 #include <atomic>
 #include <cstdint>
@@ -14,6 +14,7 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -52,9 +53,22 @@ bool isLoopbackOrigin(std::string_view origin);
 // `extra` ("*" = any); an optional :port; no Host header (non-browser HTTP/1.0 clients).
 bool hostAllowed(std::string_view host, const std::vector<std::string>& extra, std::string_view bound);
 
+// A chat request's prompt, as the connection thread builds it (arch024 A7: the prompt token pin calls this):
+// image / video parts checked (media: an mmproj is loaded), the template rendered (image parts as the Qwen
+// placeholder when media), then encoded with special tokens. Throws RequestError.
+struct ChatPrompt {
+    std::string text;
+    std::vector<TokenId> ids;
+};
+ChatPrompt chatPrompt(const Tokenizer& tok, chat::TemplateKind tmpl, chat::ChatRequest& req, bool media);
+// The token ids of a /v1/completions request's "prompt": a string, a list with one string, or a list of token ids
+// (each in [0, n_vocab)). Throws RequestError.
+std::vector<std::uint32_t> completionTokens(const Tokenizer& tok, std::uint32_t n_vocab, const json::Object& obj);
+
 class HttpServer {
 public:
-    explicit HttpServer(Engine& e, HttpOptions o = {});
+    // Takes e.facts() once (every startup setter of the engine has run before).
+    explicit HttpServer(EngineApi& e, HttpOptions o = {});
     ~HttpServer();
     HttpServer(const HttpServer&) = delete;
     HttpServer& operator=(const HttpServer&) = delete;
@@ -74,7 +88,8 @@ private:
     void connThread(std::uintptr_t sock);
     void setReading(std::uintptr_t sock, bool on);
 
-    Engine& e_;
+    EngineApi& e_;
+    const EngineFacts facts_;
     HttpOptions o_;
     std::string bound_;  // the --host address (Host header allow-list)
     std::mutex conns_mu_;
