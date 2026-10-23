@@ -6,33 +6,39 @@ case	modules_file	args	exit	steps	line
 # line: a regex that must match one output line ("-" = none).
 # Not in c-1's text but in its intent: srv_gpu_select = P-719's GPU half (PLAN A3: pinned-memory owners M1/M2/M5/M7);
 # cpu_device = the F1 tracking-mode tests (NullBackend, whirl-device-tests, S2) that c-1 names for M2-M5.
-M1 handles: callers by includers; engine.* include handles.h and are in no module = full gate	repo	-Module handles	0	*	includer\(s\) in no module
-M2 ckpt_store	repo	-Module ckpt_store	0	cpu_cache,cpu_device,cpu_server,golden_swift,golden_moe,srv_mt_precise,srv_mt_precise_moe,srv_cache_balance,srv_cache_precise,srv_gpu_select	P-sess
-M3 page_pool	repo	-Module page_pool	0	cpu_cache,cpu_device,cpu_server,golden_swift,golden_moe,srv_mt_precise,srv_mt_precise_moe,srv_cache_balance,srv_cache_precise	when include/whirl/prefill_schedule.h changes add -Steps seq_swift_precise
-M4 prefix_store	repo	-Module prefix_store	0	cpu_cache,cpu_device,cpu_server,golden_swift,golden_moe,srv_mt_precise,srv_mt_precise_moe,srv_cache_balance,srv_cache_precise	COLD-RESUME
-M5 tier_bridge	repo	-Module tier_bridge	0	cpu_tier,cpu_device,cpu_server,golden_swift,golden_moe,srv_cache_balance,srv_cache_precise,srv_tier_verify,srv_gpu_select	both GPUs.*srv_tier_verify
-M6 protocol	repo	-Module protocol	0	cpu_server,golden_swift,srv_fs_swift,srv_fs_moe	prompt token hash
-M7 engine_gov	repo	-Module engine_gov	0	cpu_server,srv_balance,srv_gpu_select	vram_hog
-M8 threads: owner checks sit in M2-M5, M7 (c-1: by caller) = their union	repo	-Module threads	0	cpu_cache,cpu_tier,cpu_device,cpu_server,golden_swift,golden_moe,srv_balance,srv_mt_precise,srv_mt_precise_moe,srv_cache_balance,srv_cache_precise,srv_tier_verify,srv_gpu_select	pending step cpu_server_log_scan
-X contract = full gate	repo	-Module contract	0	*	full gate
-dev-only notice printed	repo	-Module ckpt_store	0	-	DEV-TIME FAST FEEDBACK ONLY
-two modules = union	repo	-Module protocol,engine_gov	0	cpu_server,golden_swift,srv_balance,srv_fs_swift,srv_fs_moe,srv_gpu_select	-
--Steps adds to a module	repo	-Module page_pool -Steps seq_swift_precise	0	cpu_cache,cpu_device,cpu_server,golden_swift,golden_moe,seq_swift_precise,srv_mt_precise,srv_mt_precise_moe,srv_cache_balance,srv_cache_precise	-
+M1 handles: callers by includers; engine.* include handles.h and are in no module = full gate	repo	-Module handles -NoMapSteps	0	*	includer\(s\) in no module
+M2 ckpt_store	repo	-Module ckpt_store -NoMapSteps	0	cpu_cache,cpu_device,cpu_server,golden_swift,golden_moe,srv_mt_precise,srv_mt_precise_moe,srv_cache_balance,srv_cache_precise,srv_gpu_select	P-sess
+M3 page_pool	repo	-Module page_pool -NoMapSteps	0	cpu_cache,cpu_device,cpu_server,golden_swift,golden_moe,srv_mt_precise,srv_mt_precise_moe,srv_cache_balance,srv_cache_precise	when include/whirl/prefill_schedule.h changes add -Steps seq_swift_precise
+M4 prefix_store	repo	-Module prefix_store -NoMapSteps	0	cpu_cache,cpu_device,cpu_server,golden_swift,golden_moe,srv_mt_precise,srv_mt_precise_moe,srv_cache_balance,srv_cache_precise	COLD-RESUME
+M5 tier_bridge	repo	-Module tier_bridge -NoMapSteps	0	cpu_tier,cpu_device,cpu_server,golden_swift,golden_moe,srv_cache_balance,srv_cache_precise,srv_tier_verify,srv_gpu_select	both GPUs.*srv_tier_verify
+M6 protocol	repo	-Module protocol -NoMapSteps	0	cpu_server,golden_swift,srv_fs_swift,srv_fs_moe	prompt token hash
+M7 engine_gov	repo	-Module engine_gov -NoMapSteps	0	cpu_server,srv_balance,srv_gpu_select	vram_hog
+M8 threads: owner checks sit in M2-M5, M7 (c-1: by caller) = their union	repo	-Module threads -NoMapSteps	0	cpu_cache,cpu_tier,cpu_device,cpu_server,golden_swift,golden_moe,srv_balance,srv_mt_precise,srv_mt_precise_moe,srv_cache_balance,srv_cache_precise,srv_tier_verify,srv_gpu_select	pending step cpu_server_log_scan
+X contract = full gate	repo	-Module contract -NoMapSteps	0	*	full gate
+dev-only notice printed	repo	-Module ckpt_store -NoMapSteps	0	-	DEV-TIME FAST FEEDBACK ONLY
+two modules = union	repo	-Module protocol,engine_gov -NoMapSteps	0	cpu_server,golden_swift,srv_balance,srv_fs_swift,srv_fs_moe,srv_gpu_select	-
+-Steps adds to a module	repo	-Module page_pool -Steps seq_swift_precise -NoMapSteps	0	cpu_cache,cpu_device,cpu_server,golden_swift,golden_moe,seq_swift_precise,srv_mt_precise,srv_mt_precise_moe,srv_cache_balance,srv_cache_precise	-
 plain -List unchanged	repo	-List	0	*	-
-block: unknown module	repo	-Module no_such_module	2	-	unknown module 'no_such_module'
-block: unknown step	bad_step	-Module m	2	-	step 'no_such_step' is not in this gate
-block: stale pending	stale_pending	-Module m	2	-	pending step 'cpu_server' exists in the gate now
-block: paths missing, no lands_on	missing_nolands	-Module m	2	-	none of its paths
-block: zero steps	zero_steps	-Module m	2	-	0 steps selected
-block: unreadable modules file	bad_json	-Module m	2	-	cannot read
-block: unknown when-step	bad_when	-Module m	2	-	when-step 'no_such_step'
-tolerate: paths missing, lands_on set	missing_lands	-Module m	0	cpu_server	declared, its files are not on this branch
-tolerate: pending step	pending_ok	-Module m	0	cpu_server	pending step cpu_future_check
-tag printed	repo	-Module protocol	0	-	tag module_protocol_r9700
-block: -Tag gate_r9700 with -Module	repo	-Module protocol -Tag gate_r9700	2	-	-Tag 'gate_r9700' refused
-block: -Tag without module_ prefix	repo	-Module protocol -Tag mytag	2	-	must start with module_
-tolerate: -Tag module_x with -Module	repo	-Module protocol -Tag module_x	0	cpu_server,golden_swift,srv_fs_swift,srv_fs_moe	tag module_x
-rdeps: includers' module joins	rdeps_ok	-Module h	0	cpu_device,cpu_server	callers' modules \(includers\): rest
-list callers join	callers_list	-Module m	0	cpu_cache,cpu_server	callers' modules: c
-block: unknown caller module	callers_bad	-Module m	2	-	unknown module 'nope'
-two modules warn	repo	-Module protocol,engine_gov	0	-	WARNING: 2 modules
+block: unknown module	repo	-Module no_such_module -NoMapSteps	2	-	unknown module 'no_such_module'
+block: unknown step	bad_step	-Module m -NoMapSteps	2	-	step 'no_such_step' is not in this gate
+block: stale pending	stale_pending	-Module m -NoMapSteps	2	-	pending step 'cpu_server' exists in the gate now
+block: paths missing, no lands_on	missing_nolands	-Module m -NoMapSteps	2	-	none of its paths
+block: zero steps	zero_steps	-Module m -NoMapSteps	2	-	0 steps selected
+block: unreadable modules file	bad_json	-Module m -NoMapSteps	2	-	cannot read
+block: unknown when-step	bad_when	-Module m -NoMapSteps	2	-	when-step 'no_such_step'
+tolerate: paths missing, lands_on set	missing_lands	-Module m -NoMapSteps	0	cpu_server	declared, its files are not on this branch
+tolerate: pending step	pending_ok	-Module m -NoMapSteps	0	cpu_server	pending step cpu_future_check
+tag printed	repo	-Module protocol -NoMapSteps	0	-	tag module_protocol_r9700
+block: -Tag gate_r9700 with -Module	repo	-Module protocol -Tag gate_r9700 -NoMapSteps	2	-	-Tag 'gate_r9700' refused
+block: -Tag without module_ prefix	repo	-Module protocol -Tag mytag -NoMapSteps	2	-	must start with module_
+tolerate: -Tag module_x with -Module	repo	-Module protocol -Tag module_x -NoMapSteps	0	cpu_server,golden_swift,srv_fs_swift,srv_fs_moe	tag module_x
+rdeps: includers' module joins	rdeps_ok	-Module h -NoMapSteps	0	cpu_device,cpu_server	callers' modules \(includers\): rest
+list callers join	callers_list	-Module m -NoMapSteps	0	cpu_cache,cpu_server	callers' modules: c
+block: unknown caller module	callers_bad	-Module m -NoMapSteps	2	-	unknown module 'nope'
+two modules warn	repo	-Module protocol,engine_gov -NoMapSteps	0	-	WARNING: 2 modules
+K2 block: -Module without -ImpactRange / -NoMapSteps	repo	-Module tier_bridge	2	-	give -ImpactRange
+K2 block: both -ImpactRange and -NoMapSteps	repo	-Module tier_bridge -NoMapSteps -ImpactRange bf31527^..bf31527	2	-	-ImpactRange and -NoMapSteps together
+K2 pass: bf31527 (kv tier dedup race): the map's c-2 steps join the table	repo	-Module tier_bridge -ImpactRange bf31527^..bf31527	0	cpu_tier,cpu_device,cpu_server,golden_swift,golden_moe,srv_balance,srv_fast,srv_precise_cli,srv_mt_precise,srv_mt_precise_moe,srv_fs_swift,srv_fs_moe,srv_cache_balance,srv_cache_precise,srv_tier_verify,srv_gpu_select	steps added beyond the module table: run on both GPUs, one after the other: srv_balance, srv_fast
+K2 block: impact maps the change to another module	repo	-Module protocol -ImpactRange bf31527^..bf31527	2	-	maps the change to tier_bridge
+K2 full: impact says full gate (7ec63b4 fingerprint.cpp in no module)	repo	-Module tier_bridge -ImpactRange 7ec63b4^..7ec63b4	0	*	impact.py says full gate
+K1: -Steps beyond the table get the both-GPU hint	repo	-Module protocol -NoMapSteps -Steps srv_balance	0	cpu_server,golden_swift,srv_balance,srv_fs_swift,srv_fs_moe	steps added beyond the module table: run on both GPUs, one after the other: srv_balance

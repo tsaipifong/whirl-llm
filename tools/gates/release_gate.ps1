@@ -6,7 +6,7 @@
 #
 #   pwsh tools/gates/release_gate.ps1 -Device r9700|8060s [-Build DIR] [-ExpectCommit SHA] [-Steps a,b,...]
 #                                     [-Work DIR] [-Tag NAME] [-InjectFail] [-List] [-LaunchLog DIR]
-#                                     [-Module name[,name]] [-ModulesFile PATH]
+#                                     [-Module name[,name]] [-ModulesFile PATH] (-ImpactRange A..B|worktree | -NoMapSteps)
 #
 # -Module (arch024-S12): select the steps of one or more modules from tools/gates/modules.json (PLAN c-1);
 # -Steps given as well adds those steps (e.g. a module's `when` steps that impact.py prints). DEV-TIME FAST
@@ -22,6 +22,13 @@
 # module with paths but none present in this tree and no lands_on, an empty selection, a -Tag not starting with
 # module_. A module whose files have not landed on this branch (lands_on set) is printed as such and its steps still
 # run. With -List only the selected steps are listed (and the tag).
+# -Module needs -ImpactRange or -NoMapSteps (review K2: exit 2 otherwise). -ImpactRange A..B (or "worktree") runs
+# tools/impact/impact.py on that diff and adds what its mod-gate line says: the `when` steps and the steps the map
+# selects beyond the module table (PLAN c-2); impact.py's "full gate" turns the run into the full gate; a module it
+# names that -Module does not list is exit 2. -NoMapSteps runs the table only and says so in the summary header.
+# Steps added beyond the module table (by -Steps or -ImpactRange) are printed as "run on both GPUs" (review K1).
+# Python (impact.py, cpu_modules_check): WHIRL_GATE_PYTHON, else C:\ClaudeWorkspace\tools\pyref\Scripts\python.exe when it
+# exists, else python / py on PATH.
 #
 # Verdict: every step has an exit code AND an output rule (e.g. "(ALL PASS)", "seqtest: ok", three equal
 # DFlash2 hashes with drafts accepted); a step that does not run counts as failed. At the end a table of
@@ -66,7 +73,9 @@ param(
     [switch]$List,
     [string]$LaunchLog = "",
     [string[]]$Module = @(),
-    [string]$ModulesFile = ""
+    [string]$ModulesFile = "",
+    [string]$ImpactRange = "",
+    [switch]$NoMapSteps
 )
 $ErrorActionPreference = "Stop"
 $repo = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
@@ -86,6 +95,15 @@ $port = if ($Device -eq "8060s") { 8095 } else { 8093 }
 $Q = $env:WHIRL_GATE_DENSE; $MX = $env:WHIRL_GATE_MOE; $DF = $env:WHIRL_GATE_DFLASH
 $SW = if ($env:WHIRL_GATE_SWIFT) { $env:WHIRL_GATE_SWIFT } else { $env:WHIRL_GATE_MX }
 $hasQ = [bool]$Q  # Q4_K_M is optional (SWIFT-GATES): Swift + Ornith are the required models
+# python for impact.py and cpu_modules_check: WHIRL_GATE_PYTHON (authoritative when set), else the workspace's pyref
+# interpreter, else python / py on PATH (a release machine's gate shell often has no python on PATH)
+$py = $env:WHIRL_GATE_PYTHON
+if (-not $py) {
+    $pyref = "C:\ClaudeWorkspace\tools\pyref\Scripts\python.exe"
+    if (Test-Path $pyref) { $py = $pyref }
+    else { $py = @(@(Get-Command python, py -ErrorAction SilentlyContinue | Select-Object -First 1) | ForEach-Object { $_.Source })[0] }
+}
+if (-not $py) { $py = "python-not-found" }
 $exe = @{}
 foreach ($n in "whirl", "whirl-server", "whirl-server-gate", "whirl-kernel-test", "whirl-tests", "whirl-model-tests", "whirl-cache-tests",
                "whirl-vision-tests", "whirl-tier-tests", "whirl-server-tests", "whirl-hiprt-tests", "whirl-device-tests", "whirl-ops-tests") { $exe[$n] = Join-Path $Build "$n.exe" }
@@ -129,10 +147,8 @@ AddStep "cpu_golden_xcheck" $false @($pwsh, "-NoProfile", "-File", (Join-Path $r
 AddStep "cpu_module_gate" $false @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\gates\module_gate_test.ps1"), "-Work", "@WORK@") { param($o, $c) $c -eq 0 -and ($o -match "^module gate test: ([1-9]\d*)/\1 cases ok") }
 # review C7: modules.json against this tree and this gate, and the block / pass tests of that check and of impact.py's
 # module mapping (python: WHIRL_GATE_PYTHON, else python on PATH; none found = the step fails)
-$py = if ($env:WHIRL_GATE_PYTHON) { $env:WHIRL_GATE_PYTHON } else { (Get-Command python -ErrorAction SilentlyContinue | Select-Object -First 1).Source }
-if (-not $py) { $py = "python-not-found" }
-AddStep "cpu_modules_check" $false @($pwsh, "-NoProfile", "-Command", "& '$py' -I '$(Join-Path $repo "tools\gates\modules_check_test.py")'; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\gates\modules_check.py")'; exit `$LASTEXITCODE") `
-    { param($o, $c) $c -eq 0 -and ($o -match "^modules check test: ([1-9]\d*)/\1 ok") -and ($o -match "^modules check: ok") }
+AddStep "cpu_modules_check" $false @($pwsh, "-NoProfile", "-Command", "& '$py' -I '$(Join-Path $repo "tools\gates\modules_check_test.py")'; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\impact\validate_test.py")'; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\gates\modules_check.py")'; exit `$LASTEXITCODE") `
+    { param($o, $c) $c -eq 0 -and ($o -match "^modules check test: ([1-9]\d*)/\1 ok") -and ($o -match "^validate test: ([1-9]\d*)/\1 ok") -and ($o -match "^modules check: ok") }
 $ktArgs = @($exe["whirl-kernel-test"], "--device", $Device, "--require-all", "--mx", $SW, "--moemx", $MX) + @(if ($hasQ) { "--q4"; $Q })
 AddStep "kt_full" $true $ktArgs { param($o, $c) $c -eq 0 -and ($o -match "^PASS: 0 failing") -and ($o -match "--require-all: 0 required kernel") }
 foreach ($m in @($denseKeys) + @("moe")) {
@@ -308,7 +324,29 @@ if ($Module.Count -gt 0) {
         foreach ($x in @($md.manual | Where-Object { $_ })) { Write-Host "release gate -Module: module $mn`: also (not in this gate): $x" }
     }
     if ($merr.Count -gt 0) { $merr | ForEach-Object { Write-Host "release gate -Module: $_" }; exit 2 }
-    Write-Host "release gate -Module: steps the impact map selects beyond this table (PLAN c-2, e.g. server.mtp -> srv_balance, srv_fast): see the mod-gate line of tools/impact/impact.py and pass them with -Steps"
+    # review K2: the conditional steps of PLAN c-2 come from the impact map of the change, not from memory
+    if (-not $ImpactRange -and -not $NoMapSteps) { Write-Host "release gate -Module: give -ImpactRange A..B (or worktree) so the impact map's steps are added (PLAN c-2), or -NoMapSteps to run the table only"; exit 2 }
+    if ($ImpactRange -and $NoMapSteps) { Write-Host "release gate -Module: -ImpactRange and -NoMapSteps together"; exit 2 }
+    if ($NoMapSteps) { Write-Host "release gate -Module: -NoMapSteps: the impact map's extra steps (PLAN c-2) are NOT added" }
+    if ($ImpactRange) {
+        $ia = if ($ImpactRange -eq "worktree") { @("--worktree") } else { @("--range", $ImpactRange) }
+        $ij = $null
+        try { $ij = (& $py -I (Join-Path $repo "tools\impact\impact.py") @ia --json 2>$null | Out-String) | ConvertFrom-Json -ErrorAction Stop } catch { $ij = $null }
+        if (-not $ij -or $LASTEXITCODE -ne 0) { Write-Host "release gate -Module: impact.py $($ia -join ' ') failed (python $py)"; exit 2 }
+        foreach ($jp in $ij.PSObject.Properties) {
+            $mg = "$($jp.Value.module_gate)"
+            Write-Host "release gate -Module: impact $($jp.Name): $mg"
+            if ($mg -like "release_gate.ps1 -Module *") {
+                $im = @(($mg -split " ")[2] -split ",")
+                $miss = @($im | Where-Object { $expand -notcontains $_ })
+                if ($miss.Count) { Write-Host "release gate -Module: impact.py maps the change to $($im -join ','), -Module covers $($expand -join ',') (missing: $($miss -join ','))"; exit 2 }
+                if ($mg -match "-Steps (\S+)") { foreach ($st in @($Matches[1] -split ",")) { if ($Steps -notcontains $st) { $Steps += $st } } }
+            } elseif ($mg -like "full gate*") { Write-Host "release gate -Module: impact.py says full gate: running the full gate"; $full = $true }
+        }
+    }
+    $added = @($Steps | Where-Object { $msel -notcontains $_ })
+    $addedGpu = @($added | Where-Object { $n = $_; @($S | Where-Object { $_.name -eq $n -and $_.gpu }).Count -gt 0 })
+    if ($addedGpu.Count) { Write-Host "release gate -Module: steps added beyond the module table: run on both GPUs, one after the other: $($addedGpu -join ', ')" }
     if (-not $full -and $msel.Count -eq 0 -and $Steps.Count -eq 0) { Write-Host "release gate -Module: 0 steps selected (an empty selection must not mean the full gate)"; exit 2 }
     if ($full) { $Steps = @() } else { $Steps = @($msel) + @($Steps | Where-Object { $msel -notcontains $_ }) }
 }
@@ -341,7 +379,7 @@ New-Item -ItemType Directory -Force $logDir | Out-Null
 Remove-Item (Join-Path $Work "PASS_$Tag"), (Join-Path $Work "FAIL_$Tag") -ErrorAction SilentlyContinue
 $whirlTime = (Get-Item $exe["whirl"]).LastWriteTime.ToString("s")
 $qnote = if ($hasQ) { "optional Q4_K_M steps on" } else { "optional Q4_K_M steps off (WHIRL_GATE_DENSE unset)" }
-$mnote = if ($Module.Count -gt 0) { " module=$($Module -join ',') (dev-time module gate, not a release gate; steps $($sel.Count))," } else { "" }
+$mnote = if ($Module.Count -gt 0) { " module=$($Module -join ',') (dev-time module gate, not a release gate; steps $($sel.Count); map steps $(if ($NoMapSteps) { 'NOT added (-NoMapSteps)' } else { "from impact $ImpactRange" }))," } else { "" }
 $hdr = "release gate $Tag on $Device ($arch),$mnote models Swift + Ornith, $qnote`: tree $repo commit $head (dirty tracked files: $dirty), exe $Build (whirl.exe $whirlTime), $(Get-Date -Format s)"
 Write-Host $hdr
 $golden = Join-Path $repo "tests\golden"

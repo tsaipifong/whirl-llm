@@ -73,14 +73,22 @@ def main():
     # a module with a when-file and only its own files: -Steps added
     mods2 = {"a": dict(BASE["modules"]["a"], paths=["src/cache/ckpt_store.*", "include/whirl/prefill_schedule.h"])}
     g = impact.module_gate(ch("src/cache/ckpt_store.cpp", "include/whirl/prefill_schedule.h"), mods2)["module_gate"]
-    good = g == "release_gate.ps1 -Module a -Steps seq_swift_precise"
+    good = g.startswith("release_gate.ps1 -Module a -Steps seq_swift_precise")
     print(f"{'ok  ' if good else 'FAIL'} map: when-file adds -Steps: {g}")
     ok, bad = ok + good, bad + (not good)
     # review A3: steps the impact map selects beyond the module table are added as -Steps (PLAN c-2)
     rep = {"release_gate_steps": ["cpu_cache", "golden_swift", "srv_balance", "srv_fast", "seq_moe_<mode>", "dfl_<mode> (R9700, Q4_K_M)"]}
     g = impact.module_gate(ch("src/cache/ckpt_store.cpp"), mods, rep=rep)["module_gate"]
-    good = g == "release_gate.ps1 -Module a -Steps seq_moe_balance,seq_moe_precise,srv_balance,srv_fast"
+    good = g.startswith("release_gate.ps1 -Module a -Steps seq_moe_balance,seq_moe_precise,srv_balance,srv_fast")
     print(f"{'ok  ' if good else 'FAIL'} map: map steps beyond the table are added: {g}")
+    ok, bad = ok + good, bad + (not good)
+    # review K1: GPU steps added beyond the table carry the both-GPU hint; one-GPU (arch-specific) changes do not
+    good = g.endswith("[both GPUs, one after the other: seq_moe_balance,seq_moe_precise,srv_balance,srv_fast]")
+    print(f"{'ok  ' if good else 'FAIL'} map: added GPU steps say both GPUs: {g}")
+    ok, bad = ok + good, bad + (not good)
+    g1 = impact.module_gate(ch("src/cache/ckpt_store.cpp"), mods, rep=dict(rep, gpus=["gfx1151"]))["module_gate"]
+    good = "both GPUs" not in g1 and "-Steps" in g1
+    print(f"{'ok  ' if good else 'FAIL'} map: an 8060S-only change gets no both-GPU hint: {g1}")
     ok, bad = ok + good, bad + (not good)
     # review A4: callers by includers (rdeps): includer in a module joins, includer in no module = full gate
     mods3 = {"h": {"id": "H", "paths": ["src/device/handles.h"], "callers": "rdeps", "steps": ["cpu_device"]},
