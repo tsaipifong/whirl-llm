@@ -3858,8 +3858,10 @@ void testCkptEngineTeardown() {
     for (const auto& v : srv.ops().violations())
         std::printf("  ckpt_engine_teardown: violation: stream %llu work %llu release #%llu %s\n", static_cast<unsigned long long>(v.stream),
                     static_cast<unsigned long long>(v.seq), static_cast<unsigned long long>(v.order), v.host ? "hostFree" : "free");
-    std::printf("  ckpt_engine_teardown: violations before ~Tier %zu, before ~Engine %zu, after %zu; host syncs in ~Engine %llu (%s)\n",
-                viol_tier, viol_engine, viol_after, static_cast<unsigned long long>(syncs_after - syncs_engine),
+    // the number of syncs in ~Engine varies run to run (1 or 2: how many slots' spills were still unsynced); print only
+    // whether one ran
+    std::printf("  ckpt_engine_teardown: violations before ~Tier %zu, before ~Engine %zu, after %zu; %s\n", viol_tier, viol_engine,
+                viol_after,
                 syncs_after > syncs_engine ? "a spill was pending at ~Engine: the Slot / Spe wait ran"
                                            : "no spill pending at ~Engine");
     srv.ops().completeAll();
