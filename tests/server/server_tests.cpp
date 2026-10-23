@@ -1557,6 +1557,43 @@ ServerSetup tailSetup(std::uint32_t np, std::size_t n_ck, bool tail = true) {
     return su;
 }
 
+// arch024-S5a: COLD-RESUME through the engine (the PrefixStore settings come from EngineOptions). Turn 2 = turn 1 +
+// its output + a new message. balance resumes from turn 1's gen-end checkpoint; precise (cold_resume) may not (gen-end
+// is not cold-exact, and turn 1's prompt-end at 3000 is off turn 2's schedule), so it resumes from the TAIL-CK 'prefix'
+// checkpoint at the start of turn 1's last schedule chunk (2048; precise keeps one for every prompt). Both answers equal
+// a cold run.
+void testColdResumeEngine() {
+    for (const bool precise : {false, true}) {
+        ServerSetup su = baseSetup();
+        su.eo.n_ck = 3;  // enough for the tail checkpoint (cache::ckpt_keep_prefix_min)
+        su.eo.cold_resume = precise;
+        ServerSetup su_nc = su;
+        su_nc.eo.no_prefix_cache = true;
+        TestServer srv(su);
+        TestServer cold(su_nc);
+        const auto p1 = makePrompt(3000, 31);
+        auto r1 = srv.post("/v1/completions", completionBody(p1, 40));
+        const auto out1 = srv.model().greedyReference(p1, 40, true);
+        CHECK_EQ(completionText(r1), decode(out1));
+        std::vector<std::uint32_t> p2 = p1;
+        p2.insert(p2.end(), out1.begin(), out1.end());
+        const auto p2b = makePrompt(static_cast<std::uint32_t>(p2.size() + 400), 32, p2);
+        auto r2 = srv.post("/v1/completions", completionBody(p2b, 40));
+        auto r2c = cold.post("/v1/completions", completionBody(p2b, 40));
+        CHECK_EQ(completionText(r2), completionText(r2c));
+        const std::uint64_t cached = cachedTokens(r2);
+        if (precise) {
+            CHECK_EQ(cached, coldTail(p1.size()));
+            CHECK(g_log.count("keeping a tail checkpoint @2048") > 0);
+        } else {
+            CHECK(cached >= p1.size());
+        }
+        if (g_verbose) std::fprintf(stderr, "  cold_resume %d: turn 2 cached %llu\n", precise ? 1 : 0, static_cast<unsigned long long>(cached));
+        CHECK_EQ(srv.model().poison(), 0u);
+        CHECK_EQ(srv.model().hidMismatch(), 0u);
+    }
+}
+
 // TAIL-CK (PREFIX-QA, REL3): the same long document with a different question, one message each.
 // Before, the 2nd question re-prefilled the whole document (no checkpoint at or before the
 // divergence on first sight; the LCP 'prefix' checkpoint only helped the 3rd). Now the tail
@@ -5067,6 +5104,7 @@ int main(int argc, char** argv) {
         {"ckpt_engine_teardown", testCkptEngineTeardown},
         {"page_pool", testPagePool},
         {"prefix_store", testPrefixStore},
+        {"cold_resume_engine", testColdResumeEngine},
         {"compat_endpoints", testCompatEndpoints},
         {"http_limits", testHttpLimits},
         {"http_conn_cap", testHttpConnCap},
