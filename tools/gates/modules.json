@@ -70,7 +70,7 @@
   "protocol": {
    "id": "M6", "desc": "HTTP / OpenAI protocol / streaming (stream, EngineApi)",
    "paths": ["src/server/stream.*", "src/server/engine_api.h", "src/server/http.*", "src/server/protocol.*"],
-   "lands_on": "arch024-proto (S8)",
+   "lands_on": "arch024 S8 (40b637e on arch024-proto; 51de103 on arch024-int)",
    "steps": ["cpu_server", "srv_fs_swift", "srv_fs_moe", "golden_swift"],
    "gpus": {"srv_fs_swift": 1, "srv_fs_moe": 1, "golden_swift": 1},
    "manual": ["prompt token hash == S0 (whirl-server-tests)", "golden_swift stays until S11b proves the token hash catches a template regression"]

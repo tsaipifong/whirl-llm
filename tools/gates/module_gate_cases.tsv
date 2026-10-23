@@ -13,7 +13,7 @@ M4 prefix_store	repo	-Module prefix_store -NoMapSteps	0	cpu_cache,cpu_device,cpu
 M5 tier_bridge	repo	-Module tier_bridge -NoMapSteps	0	cpu_tier,cpu_device,cpu_server,golden_swift,golden_moe,srv_cache_balance,srv_cache_precise,srv_tier_verify,srv_gpu_select	both GPUs.*srv_tier_verify
 M6 protocol	repo	-Module protocol -NoMapSteps	0	cpu_server,golden_swift,srv_fs_swift,srv_fs_moe	prompt token hash
 M7 engine_gov	repo	-Module engine_gov -NoMapSteps	0	cpu_server,srv_balance,srv_gpu_select	vram_hog
-M8 threads: owner checks sit in M2-M5, M7 (c-1: by caller) = their union	repo	-Module threads -NoMapSteps	0	cpu_cache,cpu_tier,cpu_device,cpu_server,golden_swift,golden_moe,srv_balance,srv_mt_precise,srv_mt_precise_moe,srv_cache_balance,srv_cache_precise,srv_tier_verify,srv_gpu_select	pending step cpu_server_log_scan
+M8 threads: owner checks sit in M2-M5, M7 (c-1: by caller) = their union + the gate log scan (c-1 M8 row)	repo	-Module threads -NoMapSteps	0	cpu_cache,cpu_tier,cpu_device,cpu_server,cpu_logscan_selftest,golden_swift,golden_moe,srv_balance,srv_mt_precise,srv_mt_precise_moe,srv_cache_balance,srv_cache_precise,srv_tier_verify,srv_gpu_select	module threads: callers' modules: ckpt_store, page_pool, prefix_store, tier_bridge, engine_gov
 X contract = full gate	repo	-Module contract -NoMapSteps	0	*	full gate
 dev-only notice printed	repo	-Module ckpt_store -NoMapSteps	0	-	DEV-TIME FAST FEEDBACK ONLY
 two modules = union	repo	-Module protocol,engine_gov -NoMapSteps	0	cpu_server,golden_swift,srv_balance,srv_fs_swift,srv_fs_moe,srv_gpu_select	-

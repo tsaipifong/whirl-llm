@@ -9,9 +9,13 @@ which state, how other threads reach it, and how the rule is checked. The check 
 | Thread | Started by | Does |
 |---|---|---|
 | engine thread | `Engine::runLoop` (whirl-server: the main thread after startup; tests: a `std::thread`) | scheduling, prefill / decode, the prefix cache, the page pool, spills and restores, the memory governor |
-| HTTP accept + connection threads | `HttpServer::start` (`http.cpp`) | parse a request, render the chat template, tokenize, build a `Job`, `submitAndWait`, stream the reply |
+| HTTP accept + connection threads | `HttpServer::start` (`http.cpp`) | parse a request, render the chat template, tokenize, build a `Job`, `submitAndWait`, stream the reply; they reach the engine only through `EngineApi` (`src/server/engine_api.h`, arch024 S8) |
 | Tier IO thread | `tier::Tier::start` (`kv_tier.cpp`) | SSD reads / writes of the host tier (`WriteFile` / `ReadFile`), wakes the engine |
 | startup (before `runLoop`) | `serveMain` | sizing, `allocState`, `initPool`, `attachTier`, `attachVision`, `setVramProbe`, `setGovernor` |
+
+The HTTP threads hold an `EngineApi&`, not the `Engine`: every `EngineApi` method reads atomics, takes the queue or
+VRAM mutex, or returns facts taken once at startup. A new `EngineApi` method must not reach a function with an
+`owner.check` (the module entry points below); work for the engine thread goes through a `Job`.
 
 ## Who owns what
 
