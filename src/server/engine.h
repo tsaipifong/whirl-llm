@@ -593,7 +593,6 @@ private:
     // what the running prefills still need
     std::size_t pagesFor(std::uint64_t n_tok) const;
     std::size_t poolAvailable() const;
-    void failJobNoSlot(Job& job);
     void writeError(Job& job, int status, const std::string& msg);
     void logBatchStats(bool force);
     // samples the WDDM probe (warns through vram_watch_); "" without a probe

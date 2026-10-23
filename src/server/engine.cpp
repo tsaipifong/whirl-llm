@@ -3232,18 +3232,6 @@ void Engine::reapDisconnected() {
     }
 }
 
-void Engine::failJobNoSlot(Job& job) {
-    const std::string r = errorResponse(500, "OutOfMemory");
-    if (job.w) {
-        job.w->write(r);
-        job.w->flush();
-    }
-    std::lock_guard<std::mutex> lk(q_mutex_);
-    job.done = true;
-    n_active_ -= 1;
-    q_cond_.notify_all();
-}
-
 void Engine::writeError(Job& job, int status, const std::string& msg) {
     logW("req {} | {} {}", job.id, status, msg);
     const std::string r = errorResponse(status, msg);
