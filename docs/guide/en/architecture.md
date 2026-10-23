@@ -152,8 +152,8 @@ Why per-GPU code objects rather than one portable kernel set:
   only architecture checks left choose tuning tables, the tune-cache file name and the vision code
   object (gfx1201 only).
 
-Default device: the first R9700 when the build has gfx1201 kernels, else the first GPU the build
-has kernels for (a Radeon 8060S on its own); `--device` / `WHIRL_DEVICE` pick another
+Default device: the GPU with the most GPU memory (an integrated GPU counts its dedicated memory;
+if equal, the first one in `--list-devices`); `--device` / `WHIRL_DEVICE` pick another
 (`whirl devices` marks the default).
 
 File split: `kernels/common.hip` (types, wave primitives, block decoders), `gemv_*.hip`,

@@ -39,7 +39,7 @@ cd C:\whirl\whirl-0.2.3-windows-x64
 .\whirl.exe chat C:\models\Swift-1.5-Qwen3.8-27B-MXFP4-A-outQ6_K.gguf "Explain TCP slow start in two sentences." --max-tokens 400
 ```
 
-`whirl devices` should list `AMD Radeon AI PRO R9700 (gfx1201)` and/or the Radeon 8060S (gfx1151); with both present the R9700 is the default, `--device 8060s` selects the 8060S. (`Unblock-File` removes the
+`whirl devices` should list `AMD Radeon AI PRO R9700 (gfx1201)` and/or the Radeon 8060S (gfx1151); with both present the default is the GPU with the most GPU memory (an 8060S with a 96 GB carve-out comes before the R9700); `--device pci:<bus>:<device>` (Task Manager > Performance > GPU > Physical location) picks another card, see README "Choosing the GPU". (`Unblock-File` removes the
 "downloaded from the internet" mark so that Windows does not ask about every file; see
 [Windows security prompts](windows_security.md).)
 

@@ -90,7 +90,7 @@ Tokenizer 不是小細節：原型中一個空白切分的 bug，讓每個有縮
 - **選用 kernel。** 有些 kernel 只存在於某一種架構（int8 WMMA 中批次 GEMV、MXFP4×fp8 GEMM、`q8v` KV 格式只存在於 gfx1201）。主機以 `getFunctionOpt` 查找它們；缺少的 kernel 會回傳 null 並清除 HIP 黏著的 last error，接著在載入時改走後備路徑或拒絕載入。
 - **看能力旗標，不看架構名稱。** 光靠「kernel 不存在」無法決定的地方，會從載入的 code object 探測一次 `kernels::Caps`（`include/whirl/kernels_abi.h`）：`fp8_gemm`、`kv_q8v`、`kv_q8h`、`gemvw`、`gdn_replay`、`mrope`，以及只有 gfx1151 object 才有的兩個標記 kernel —— `xd_sum`（int8 activation 的 scale word 內含區塊總和）與 `attn_group1`（其 WMMA P·V 只有每個 attention 群組一個 query 時才逐位元精確）。KV 格式自動選擇、attention query 分組、DeltaNet replay 與 kernel 測試都讀這些旗標；剩下的架構判斷只用來選調校表、tune 快取檔名與視覺 code object（只有 gfx1201）。
 
-預設裝置：build 含 gfx1201 kernel 時用第一張 R9700，否則用第一張 build 有 kernel 的 GPU（例如只有 Radeon 8060S 的機器）；`--device` / `WHIRL_DEVICE` 可指定其他裝置（`whirl devices` 會標出預設）。
+預設裝置：GPU 記憶體最大的那張（內顯以專用記憶體計算；一樣大時，選 `--list-devices` 列出的第一張）；`--device` / `WHIRL_DEVICE` 可指定其他裝置（`whirl devices` 會標出預設）。
 
 檔案切分：`kernels/common.hip`（型別、wave 基本操作、區塊解碼器）、`gemv_*.hip`、`gemm_prefill.hip` / `gemm_fp8*.hip` / `gemm_small.hip`、`attn*.hip`、`gdn_*.hip`（DeltaNet）、`moe.hip` / `moe_mxfp4.hip`、`fused_decode.hip`、`misc_*.hip`、`sample_*.hip`、`draft_d2.hip`，全部由 `kernels/whirl_kernels.hip` 引入；視覺編碼器的 kernel 是 `kernels/vision/` 下另一個 code object。gfx1151 的 kernel 集在 `kernels/gfx1151/`（kernel 名稱與參數 ABI 相同、自己的檔案切分，只在編譯 gfx1151 時由 `whirl_kernels.hip` 引入）；它缺少的家族列在 [kernels.md](kernels.md#gfx1151)。
 

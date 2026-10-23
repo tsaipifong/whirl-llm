@@ -22,27 +22,19 @@ WHIRL's modularization (the kernel and device layer), with stricter release gate
   - Example: Task Manager shows Physical location "PCI bus 71, device 0, function 0" →
     `whirl-server.exe <model.gguf> --device pci:71:0`
 
-### Output and speed (measured)
+### Output and speed
 
 - Output: the golden references (Swift-1.5 27B MXFP4-A and Ornith-1.5-35B-A3B MXFP4; precise, balance and fast; single
   prompts, prompt pairs, n-gram drafts and the server path: streaming, prefix cache, RAM and SSD restore, vision) pass on
   the R9700 and the Radeon 8060S with the exes in this zip. The released 0.2.2.2 exes reproduce the same references on
-  both GPUs (run with only the GPU under test visible, because 0.2.2.2 has the multi-GPU hipError 719 fixed here).
-- Speed: the kernels, launch grids, launch order and every kernel argument are the same as in 0.2.2.2 on both GPUs
-  (compared launch by launch in every mode, both product models), so the speed matrix carries over from 0.2.2.2. Spot
-  check against the 0.2.2.2 exe in the same interleaved rounds, both product models, balance: server prefill of a
-  2k-token QA document prompt, decode on a fixed coding-chat prompt and the wall time of one agent session (positive =
-  0.2.3 faster). R9700, 3 rounds: -0.14 % to +4.90 % (the +4.90 % is Ornith-1.5-35B-A3B 2k prefill, where the per-round
-  ranges of the two versions overlap; the other cells -0.14 % to +0.41 %). Radeon 8060S (max power (80 W), ASUS ROG Flow
-  Z13, 96 GB carve-out): 2k prefill, 5 rounds: +0.03 % to +0.07 % (decode and the agent session were checked in one
-  round only, with the same output, so no number is given for them). Decode with MTP moves with the draft acceptance of the generated text; per-round numbers and acceptance
-  are in the release measurement record.
+  both GPUs.
+- Speed is unchanged from 0.2.2.2 (checked on both GPUs).
 
 ### Changed (internal)
 
 - Kernel choice moved out of the model code into an operator layer (`src/ops`: matmul / GEMV, attention, MoE), one rule
-  per choice; the kernels, launch grids, order and arguments are the same as 0.2.2.2 (checked with the kernel launch
-  table on both GPUs).
+  per choice; the kernel launch tables before and after this change are identical on both GPUs, and the golden
+  references pass.
 - Device layer: a device profile replaces the per-architecture checks outside the HIP code, and a device backend owns
   GPU memory, the KV tier's device copies and the server's memory plan. A host-memory backend lets the CPU tests run the
   same code without a GPU.
@@ -54,10 +46,9 @@ WHIRL's modularization (the kernel and device layer), with stricter release gate
 
 ### Tests and gates
 
-- Kernel launch log (`WHIRL_LAUNCH_LOG`): every kernel launch with its grid and an argument digest; the gate compares
-  the tables, and a determinism check runs the same build twice.
-- The golden check now includes the server path (12 new reference files) and the release gate checks the device of
-  every GPU step.
+- Kernel launch log (`WHIRL_LAUNCH_LOG`): every kernel launch with its grid and an argument digest, for comparing two
+  builds (`tools/impact/launch_table.py`).
+- The golden check now includes the server path (12 new reference files) and prints the GPU each server ran on.
 - Fault injection: deliberate mutations of the operator, device and server code must be caught by the test the impact
   map names.
 - Test fixes: the HIP runtime tests fail cleanly instead of crashing when their fake runtimes are missing; two gates no

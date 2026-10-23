@@ -185,7 +185,8 @@ whirl serve  MODEL.gguf [選項]      （同一支程式）
 | `--host ADDR` | 監聽位址。預設 `127.0.0.1`（只有這台電腦）。`0.0.0.0` 會監聽所有網路：任何連得到這台電腦的人都能使用——伺服器沒有身分驗證 |
 | `--port N` | TCP port（預設 8080）。若已被占用，伺服器會在載入模型之前以代碼 6 結束 |
 | `--alias NAME` | `/v1/models` 回報的模型 id（預設：去掉 `.gguf` 的檔名） |
-| `--device D` | GPU：`r9700`、`8060s`、裝置索引，或名稱 / gfx 子字串（預設同 `chat`） |
+| `--device D`、`-dev D` | GPU，同 `chat`（`pci:71:0`…） |
+| `--list-devices` | 列出 GPU（編號、名稱、記憶體、`pci:匯流排:裝置`）後結束 |
 | `-np`、`--parallel N` | 同時處理的請求 slot 數（continuous batching），1～16，預設 4（VRAM 小於 20 GiB 的卡預設 1，見 `WHIRL_VRAM_HEADROOM_MB`） |
 | `-c`、`--ctx N` | 共用 KV 池的大小（token）。slot 依需要取用分頁；池滿時，閒置 slot 的前綴快取依最久未使用（LRU）逐出。預設：權重與緩衝區之後剩下的全部 VRAM，減去可用 VRAM 的 768 MiB（MoE：1.5 GiB），並在 Windows（WDDM）預算之下替其他程式留 margin（`WHIRL_POOL_BUDGET_MARGIN_MB`）；Radeon 8060S 上為 262144 |
 | `--ctx-per-slot N` | 單一請求的最長 context（預設 min(池大小, 131072)；最多 262144） |
@@ -367,7 +368,7 @@ PowerShell 中先用 `$env:WHIRL_MODE = "precise"` 設定再啟動程式。**一
 
 | 變數 | 說明 |
 |---|---|
-| `WHIRL_DEVICE=SPEC` | 使用的 GPU：`r9700`、`8060s`、索引，或名稱 / gfx 子字串（= `--device`；預設：第一張 R9700，否則第一張支援的 GPU） |
+| `WHIRL_DEVICE=SPEC` | 使用的 GPU：`r9700`、`8060s`、索引，或名稱 / gfx 子字串（= `--device`；預設：GPU 記憶體最大的那張） |
 | `WHIRL_HIP_DEVICE=N` | 裝置索引，略過裝置比對與「一張 GPU 一個行程」的鎖 |
 | `WHIRL_GPU_SHARE=1` | 不等待同一張 GPU 上的其他 WHIRL 行程 |
 | `WHIRL_GPU_WAIT=S` | 等待其他 WHIRL 行程釋放 GPU 的秒數（預設 1800） |

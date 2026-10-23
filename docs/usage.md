@@ -497,7 +497,7 @@ experiments and measurements.
 
 | Variable | Meaning |
 |---|---|
-| `WHIRL_DEVICE=SPEC` | GPU to use: `r9700`, `8060s`, an index, or a name / gfx substring (= `--device`; default: the first R9700, else the first supported GPU) |
+| `WHIRL_DEVICE=SPEC` | GPU to use: `r9700`, `8060s`, an index, or a name / gfx substring (= `--device`; default: the GPU with the most GPU memory) |
 | `WHIRL_HIP_DEVICE=N` | device index, bypassing device matching and the one-process-per-GPU lock |
 | `WHIRL_GPU_SHARE=1` | do not wait for other WHIRL processes on the same GPU |
 | `WHIRL_GPU_WAIT=S` | seconds to wait for another WHIRL process to free the GPU (default 1800) |
