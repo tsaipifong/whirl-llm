@@ -1,0 +1,28 @@
+case	modules_file	args	exit	steps	line
+# Step-selection table for release_gate.ps1 -Module (arch024-S12). Hand-written from arch024 PLAN (c) c-1, NOT
+# derived from modules.json: a change to modules.json that does not match the plan's table fails here.
+# modules_file: "repo" = tools/gates/modules.json, else a fixture name written by module_gate_test.ps1.
+# steps: the exact -List output (names, in gate order); "*" = every step of the plain -List; "-" = not checked.
+# line: a regex that must match one output line ("-" = none).
+M1 handles	repo	-Module handles	0	cpu_device,srv_gpu_select	pending step cpu_raw_free_check
+M2 ckpt_store	repo	-Module ckpt_store	0	cpu_cache,cpu_device,cpu_server,golden_swift,golden_moe,srv_mt_precise,srv_mt_precise_moe,srv_cache_balance,srv_cache_precise,srv_gpu_select	P-sess
+M3 page_pool	repo	-Module page_pool	0	cpu_cache,cpu_device,cpu_server,golden_swift,golden_moe,srv_mt_precise,srv_mt_precise_moe,srv_cache_balance,srv_cache_precise	when include/whirl/prefill_schedule.h changes add -Steps seq_swift_precise
+M4 prefix_store	repo	-Module prefix_store	0	cpu_cache,cpu_device,cpu_server,golden_swift,golden_moe,srv_mt_precise,srv_mt_precise_moe,srv_cache_balance,srv_cache_precise	COLD-RESUME
+M5 tier_bridge	repo	-Module tier_bridge	0	cpu_tier,cpu_device,cpu_server,golden_swift,golden_moe,srv_cache_balance,srv_cache_precise,srv_tier_verify,srv_gpu_select	both GPUs.*srv_tier_verify
+M6 protocol	repo	-Module protocol	0	cpu_server,golden_swift,srv_fs_swift,srv_fs_moe	prompt token hash
+M7 engine_gov	repo	-Module engine_gov	0	cpu_server,srv_balance,srv_gpu_select	vram_hog
+M8 threads	repo	-Module threads	0	cpu_server	pending step cpu_server_log_scan
+X contract = full gate	repo	-Module contract	0	*	full gate
+dev-only notice printed	repo	-Module ckpt_store	0	-	DEV-TIME FAST FEEDBACK ONLY
+two modules = union	repo	-Module protocol,engine_gov	0	cpu_server,golden_swift,srv_balance,srv_fs_swift,srv_fs_moe,srv_gpu_select	-
+-Steps adds to a module	repo	-Module page_pool -Steps seq_swift_precise	0	cpu_cache,cpu_device,cpu_server,golden_swift,golden_moe,seq_swift_precise,srv_mt_precise,srv_mt_precise_moe,srv_cache_balance,srv_cache_precise	-
+plain -List unchanged	repo	-List	0	*	-
+block: unknown module	repo	-Module no_such_module	2	-	unknown module 'no_such_module'
+block: unknown step	bad_step	-Module m	2	-	step 'no_such_step' is not in this gate
+block: stale pending	stale_pending	-Module m	2	-	pending step 'cpu_server' exists in the gate now
+block: paths missing, no lands_on	missing_nolands	-Module m	2	-	none of its paths
+block: zero steps	zero_steps	-Module m	2	-	0 steps selected
+block: unreadable modules file	bad_json	-Module m	2	-	cannot read
+block: unknown when-step	bad_when	-Module m	2	-	when-step 'no_such_step'
+tolerate: paths missing, lands_on set	missing_lands	-Module m	0	cpu_server	declared, its files are not on this branch
+tolerate: pending step	pending_ok	-Module m	0	cpu_server	pending step cpu_future_check

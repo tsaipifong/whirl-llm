@@ -46,6 +46,7 @@ class FileScan:
     includes: list    # (header text, guard) guard: None | "gfx1151" | "not_gfx1151" | other macro text
     funcs: list       # Func
     strings: list     # (line, literal) string literals (kernel names, env names)
+    classes: list = field(default_factory=list)  # (name, start line, end line) of class / struct / union bodies (arch024-S12)
 
 
 _ws = re.compile(r"\s+")
@@ -201,6 +202,7 @@ def scan(raw: str) -> FileScan:
     # preprocessor lines -> blank (keep newlines)
     clean = re.sub(r"(?m)^[ \t]*#.*(?:\\\n.*)*$", lambda m: re.sub(r"[^\n]", " ", m.group(0)), clean)
     funcs = []
+    classes = []
     stack = []  # (kind, name, start_pos, start_line)
     last = 0
     line = 1
@@ -238,6 +240,8 @@ def scan(raw: str) -> FileScan:
         elif c == "}":
             if stack:
                 kind, name, spos, sline = stack.pop()
+                if kind == "class":
+                    classes.append((name, sline, cur_line))
                 if kind == "func":
                     cls = [s[1] for s in stack if s[0] == "class"]
                     q = "::".join(cls + [name]) if cls and "::" not in name else name
@@ -255,7 +259,7 @@ def scan(raw: str) -> FileScan:
             if not stack or stack[-1][0] != "func":
                 seg_start = i + 1
         i += 1
-    return FileScan(includes=_includes(raw), funcs=funcs, strings=lits)
+    return FileScan(includes=_includes(raw), funcs=funcs, strings=lits, classes=classes)
 
 
 def func_at(fs: FileScan, line: int):
@@ -265,6 +269,11 @@ def func_at(fs: FileScan, line: int):
         if f.start <= line <= f.end and (best is None or f.end - f.start < best.end - best.start):
             best = f
     return best
+
+
+def classes_at(fs: FileScan, line: int):
+    """Names of the class / struct / union bodies that contain line, innermost last."""
+    return [n for n, a, b in sorted(fs.classes, key=lambda c: c[1]) if a <= line <= b]
 
 
 def blank_code(raw: str) -> str:
