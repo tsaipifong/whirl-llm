@@ -24,6 +24,10 @@ $fx = @{
     pending_ok      = '{"modules":{"m":{"id":"T","paths":["src/server/engine.cpp"],"steps":["cpu_server","cpu_future_check"],"pending":[{"step":"cpu_future_check","lands_in":"S99"}]}}}'
     bad_when        = '{"modules":{"m":{"id":"T","paths":["src/server/engine.cpp"],"steps":["cpu_server"],"when":{"include/whirl/prefill_schedule.h":["no_such_step"]}}}}'
     bad_json        = '{"modules": {'
+    rdeps_ok        = '{"modules":{"h":{"id":"T","paths":["src/device/handles.h"],"callers":"rdeps","steps":["cpu_device"]},"rest":{"id":"R","paths":["src/server/*","src/cache/*","src/tier/*","src/device/null_backend.*","src/device/backend*"],"steps":["cpu_server"]}}}'
+    callers_list    = '{"modules":{"m":{"id":"T","paths":["src/server/engine.cpp"],"callers":["c"],"steps":["cpu_server"]},"c":{"id":"C","paths":["src/cache/*"],"steps":["cpu_cache"]}}}'
+    callers_bad     = '{"modules":{"m":{"id":"T","paths":["src/server/engine.cpp"],"callers":["nope"],"steps":["cpu_server"]}}}'
+    one_cpu         = '{"modules":{"m":{"id":"T","paths":["src/server/engine.cpp"],"steps":["cpu_server"]}}}'
 }
 foreach ($k in $fx.Keys) { [System.IO.File]::WriteAllText((Join-Path $Work "$k.json"), $fx[$k]) }
 
@@ -36,6 +40,7 @@ function Listed($out) { @($out | Where-Object { $_ -match "^(\S+)\s+(CPU|GPU)\s*
 $all = Listed (RunGate @("-List")).out
 if ($all.Count -lt 10) { Write-Host "module gate test: plain -List gave $($all.Count) steps"; exit 2 }
 $rows = @(Get-Content $Cases | Where-Object { $_ -and -not $_.StartsWith("#") } | Select-Object -Skip 1)
+if ($rows.Count -eq 0) { Write-Host "module gate test: no cases in $Cases"; exit 2 }
 $ok = 0; $bad = 0
 foreach ($r in $rows) {
     $c = $r -split "`t"
@@ -56,6 +61,34 @@ foreach ($r in $rows) {
     if ($why.Count -eq 0) { $ok++; Write-Host "ok   $name" }
     else { $bad++; Write-Host "FAIL $name`: $($why -join '; ')"; $res.out | Select-Object -First 12 | ForEach-Object { Write-Host "       | $_" } }
 }
+
+# review A5: a real (not -List) module run: summary header names the module, markers are module_*, never *gate_<device>.
+# Fake build: every exe is a copy of whoami.exe (exits non-zero at once on unknown options): the step fails, fast, CPU.
+$fb = Join-Path $Work "fakebuild"; New-Item -ItemType Directory -Force $fb | Out-Null
+$who = Join-Path $env:SystemRoot "System32\whoami.exe"
+foreach ($n in "whirl", "whirl-server", "whirl-server-gate", "whirl-kernel-test", "whirl-tests", "whirl-model-tests", "whirl-cache-tests",
+               "whirl-vision-tests", "whirl-tier-tests", "whirl-server-tests", "whirl-hiprt-tests", "whirl-device-tests", "whirl-ops-tests") {
+    Copy-Item $who (Join-Path $fb "$n.exe") -Force
+}
+$dm = Join-Path $Work "dummy.gguf"; "x" | Set-Content $dm
+$gw = Join-Path $Work "gw"
+$keep = @{}; foreach ($v in "WHIRL_GATE_SWIFT", "WHIRL_GATE_MOE", "WHIRL_GATE_TEXT_ROOT", "WHIRL_GATE_DENSE") { $keep[$v] = [Environment]::GetEnvironmentVariable($v) }
+$env:WHIRL_GATE_SWIFT = $dm; $env:WHIRL_GATE_MOE = $dm; $env:WHIRL_GATE_TEXT_ROOT = $Work; Remove-Item Env:WHIRL_GATE_DENSE -ErrorAction SilentlyContinue
+try {
+    $o = @(& $pwsh -NoProfile -File $Gate -Device r9700 -Build $fb -Work $gw -Module m -ModulesFile (Join-Path $Work "one_cpu.json") 2>&1 | ForEach-Object { "$_" })
+    $code = $LASTEXITCODE
+} finally { foreach ($v in $keep.Keys) { [Environment]::SetEnvironmentVariable($v, $keep[$v]) } }
+$sum = Join-Path $gw "module_m_r9700_summary.txt"
+$why = @()
+if ($code -ne 1) { $why += "exit $code, want 1 (the fake step fails)" }
+if (-not (Test-Path $sum)) { $why += "no $sum" }
+elseif (-not ((Get-Content $sum -TotalCount 1) -match "module=m \(dev-time module gate")) { $why += "summary header does not say module=m" }
+if (-not (Test-Path (Join-Path $gw "FAIL_module_m_r9700"))) { $why += "no FAIL_module_m_r9700 marker" }
+$gm = @(Get-ChildItem $gw -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "*gate_r9700*" })
+if ($gm.Count) { $why += "full-gate marker / summary written: $($gm.Name -join ', ')" }
+if ($why.Count -eq 0) { $ok++; Write-Host "ok   real module run: header module=m, marker FAIL_module_m_r9700, no *gate_r9700* file" }
+else { $bad++; Write-Host "FAIL real module run: $($why -join '; ')"; $o | Select-Object -Last 8 | ForEach-Object { Write-Host "       | $_" } }
+
 Remove-Item -Recurse -Force $Work -ErrorAction SilentlyContinue
 Write-Host "module gate test: $ok/$($ok + $bad) cases ok"
 if ($bad -gt 0) { exit 1 }

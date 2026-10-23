@@ -214,7 +214,9 @@ def analyze(changes, m, new_rev, old_rev):
                         users[(f, fn.name)] = fn.idents & outside_ids
             # arch024-S12: a member added to a struct that no function reads yet (a test lands before its fix, e.g.
             # a4626b9 PinnedGpu::adapter_shared) changes every user of the struct: fall back to the enclosing types
+            struct_fallback = False
             if not users and outside_types:
+                struct_fallback = True
                 for f, sc2 in scans.items():
                     for fn in sc2.funcs:
                         if fn.idents & outside_types:
@@ -238,7 +240,10 @@ def analyze(changes, m, new_rev, old_rev):
                     tests |= set(d["tests"])
                 hits.append((path, f"declarations ({', '.join(sorted(outside_ids)[:6])}{'...' if len(outside_ids) > 6 else ''}): "
                                    f"{len(prod)} function(s) in {len({f for f, _ in prod})} file(s) use them"))
-            else:
+            if not prod or struct_fallback:
+                # no function uses the changed identifiers: every path of the file and its includers (fail closed).
+                # The struct-user fallback above only ADDS tests / paths to this (review A1: a4626b9 lost 5 GPU steps
+                # when it replaced it)
                 for f in scope:
                     for p in m["files"].get(f, []):
                         paths[p].add(f"{path} (file-scope change; no user function found)")
@@ -252,7 +257,7 @@ def analyze(changes, m, new_rev, old_rev):
     if not archs and paths:
         archs = {"gfx1201", "gfx1151"}
     rep = build_report(m, paths, models, archs, tests, reruns, notes, hits)
-    rep.update(module_gate(changes))
+    rep.update(module_gate(changes, rep=rep, m=m))
     return rep
 
 
@@ -265,39 +270,102 @@ def load_modules(root=None):
         return None
 
 
-def module_gate(changes, mods=None):
-    """Which modules (tools/gates/modules.json) the changed product files belong to, and the dev-time module gate
-    to run. Product code outside every module, two modules, or a contract file -> the full gate. Dev-time fast
-    feedback only until the owner signs off O1 / O2 (arch024 PLAN): releases run the full gate."""
+BUILD_WIDE = ("CMakeLists.txt", "cmake/*", "build.bat", "redist/*", "tools/package_release.ps1")  # review C6: full gate
+
+
+def expand_steps(steps):
+    """release-step names of a report as release_gate.ps1 names them (<mode> expanded; the gate has seq MoE precise /
+    balance only; dfl_* are Q4_K_M compatibility steps, not product steps)"""
+    out = set()
+    for x in steps:
+        x = x.split(" ")[0]
+        if x.startswith("dfl_"):
+            continue
+        for md in (["precise", "balance", "fast"] if "<mode>" in x else [None]):
+            y = x.replace("<mode>", md) if md else x
+            if not (y.startswith("seq_moe_") and md == "fast"):
+                out.add(y)
+    return out
+
+
+def module_steps(mods, n):
+    d = mods[n]
+    return set(d.get("steps") or []) | {p.get("step") for p in d.get("pending") or []}
+
+
+def module_gate(changes, mods=None, rep=None, m=None):
+    """Which modules (tools/gates/modules.json) the changed files belong to, and the dev-time module gate to run.
+    Full gate: product code in no module, two modules, a contract module, a build-wide file (C6), or a header whose
+    includers lie outside every module (rdeps, A4). A module with "callers": "rdeps" (M1 handles) is run with the modules
+    of every file that includes it; "callers": [names] (M8 threads) with the named modules. Steps the impact map selects
+    beyond the module's table (PLAN c-2, e.g. server.mtp -> srv_balance + srv_fast) are added as -Steps (A3).
+    Dev-time fast feedback only until the owner signs off O1 / O2 (arch024 PLAN): releases run the full gate."""
     mods = load_modules() if mods is None else mods
     if mods is None:
-        return {"modules": {}, "module_gate": None}
+        return {"modules": {}, "module_gate": None, "module_extra_steps": []}
     hit = defaultdict(list)
-    loose = []
+    loose, why = [], []
+
+    def owner(path):
+        return [n for n, d in mods.items() if any(fnmatch.fnmatch(path, g) for g in d.get("paths", []))]
+
     for path in sorted(changes):
+        if any(fnmatch.fnmatch(path, g) for g in BUILD_WIDE):
+            loose.append(path)
+            why.append(f"{path} is build-wide")
+            continue
         if not path.startswith(("src/", "include/", "kernels/")):
             continue
-        ms = [n for n, d in mods.items() if any(fnmatch.fnmatch(path, g) for g in d.get("paths", []))]
+        ms = owner(path)
         for n in ms:
             hit[n].append(path)
         if not ms:
             loose.append(path)
-    when = sorted({st for n in hit for f, sts in (mods[n].get("when") or {}).items() if f in changes for st in sts})
     # a module's `when` file (e.g. prefill_schedule.h for M3 / M4, PLAN C6) adds steps instead of forcing the full gate
     loose = [f for f in loose if not any(f in (mods[n].get("when") or {}) for n in hit)]
-    full = [n for n in hit if mods[n].get("full")]
+    callers = defaultdict(set)  # module -> modules of its callers
+    for n in list(hit):
+        c = mods[n].get("callers")
+        if c == "rdeps":
+            for f in hit[n]:
+                inc = [x for x in ((m or {}).get("includers", {}).get(f, [])) if x.startswith(("src/", "include/", "kernels/"))]
+                if m is None:
+                    why.append(f"{n}: callers by includers need the impact map")
+                    loose.append(f)
+                for x in inc:
+                    om = [k for k in owner(x) if k != n]
+                    if om:
+                        callers[n] |= set(om)
+                    elif not owner(x):
+                        loose.append(x)
+                        why.append(f"{x} includes {f} and is in no module")
+        elif isinstance(c, list):
+            callers[n] |= set(c)
+    when = sorted({st for n in hit for f, sts in (mods[n].get("when") or {}).items() if f in changes for st in sts})
+    full = [n for n in hit if mods[n].get("full")] + [k for n in callers for k in callers[n] if mods.get(k, {}).get("full")]
+    direct = sorted(hit)
+    extra = []
     if not hit and not loose:
         gate = "none (no product code)"
     elif full:
-        gate = f"full gate, both GPUs (contract module {', '.join(full)})"
+        gate = f"full gate, both GPUs (contract module {', '.join(sorted(set(full)))})"
     elif loose:
-        gate = f"full gate or the release steps above: {len(loose)} product file(s) in no module ({', '.join(loose[:4])}{' ...' if len(loose) > 4 else ''})"
-    elif len(hit) > 1:
-        gate = f"full gate, both GPUs (cross-module: {', '.join(sorted(hit))})"
+        lz = sorted(set(loose))
+        gate = (f"full gate or the release steps above: {len(lz)} file(s) in no module ({', '.join(lz[:4])}{' ...' if len(lz) > 4 else ''})"
+                + (f"; {why[0]}" if why else ""))
+    elif len(direct) > 1:
+        gate = f"full gate, both GPUs (cross-module: {', '.join(direct)})"
     else:
-        n = next(iter(hit))
-        gate = f"release_gate.ps1 -Module {n}" + (f" -Steps {','.join(when)}" if when else "")
-    return {"modules": {n: v for n, v in sorted(hit.items())}, "module_gate": gate}
+        n = direct[0]
+        run = [n] + sorted(callers[n] - {n})
+        have = set(when)
+        for k in run:
+            have |= module_steps(mods, k)
+        extra = sorted(expand_steps((rep or {}).get("release_gate_steps", [])) - have)
+        add = when + extra
+        gate = f"release_gate.ps1 -Module {','.join(run)}" + (f" -Steps {','.join(add)}" if add else "")
+    return {"modules": {n: v for n, v in sorted(hit.items())}, "module_gate": gate, "module_extra_steps": extra,
+            "module_callers": {n: sorted(v) for n, v in callers.items()}}
 
 
 def build_report(m, paths, models, archs, tests, reruns, notes, hits):
@@ -406,6 +474,10 @@ def print_report(title, r, why=False):
     if r.get("module_gate"):
         for n, fl in r["modules"].items():
             print(f"   module   {n}: {', '.join(fl[:4])}{' ...' if len(fl) > 4 else ''}")
+        for n, cl in (r.get("module_callers") or {}).items():
+            print(f"   callers  {n}: run with {', '.join(cl)}")
+        if r.get("module_extra_steps"):
+            print(f"   mod-add  steps the map selects beyond the module table (PLAN c-2): {', '.join(r['module_extra_steps'])}")
         print(f"   mod-gate {r['module_gate']}  (dev-time only until owner sign-off O1/O2; releases run the full gate)")
     for n in r["notes"]:
         print(f"   note     {n}")

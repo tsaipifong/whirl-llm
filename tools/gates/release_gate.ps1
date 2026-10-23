@@ -11,11 +11,17 @@
 # -Module (arch024-S12): select the steps of one or more modules from tools/gates/modules.json (PLAN c-1);
 # -Steps given as well adds those steps (e.g. a module's `when` steps that impact.py prints). DEV-TIME FAST
 # FEEDBACK ONLY: not for a release, an rc merge or a bug-fix release until the owner signs off O1 / O2 (arch024
-# PLAN); those run the full gate on both GPUs. The default -Tag is module_<names>_<device>, so a module run never
-# writes the PASS_gate_<device> marker of a full gate. Exit 2 (setup error): unknown module, a module step that the
+# PLAN); those run the full gate on both GPUs. The -Tag of a module run is module_<names>_<device> (an explicit -Tag
+# must start with module_: exit 2 otherwise), so a module run never writes the PASS_gate_<device> marker of a full
+# gate, and its summary header says "module=<names>" (release/release_check.py R1 rejects such summaries).
+# A module with "callers": "rdeps" (M1 handles) also runs the modules of every src/include file that includes its
+# files (transitive); an includer in no module turns the run into the full gate. "callers": [names] (M8) runs the
+# named modules too. Steps the impact map selects beyond the table (PLAN c-2): `python tools/impact/impact.py` prints
+# them on its mod-gate line as -Steps. Exit 2 (setup error): unknown module, a module step that the
 # gate does not have and modules.json does not mark pending, a pending step that already exists (stale list), a
-# module with paths but none present in this tree and no lands_on. A module whose files have not landed on this
-# branch (lands_on set) is printed as such and its steps still run. With -List only the selected steps are listed.
+# module with paths but none present in this tree and no lands_on, an empty selection, a -Tag not starting with
+# module_. A module whose files have not landed on this branch (lands_on set) is printed as such and its steps still
+# run. With -List only the selected steps are listed (and the tag).
 #
 # Verdict: every step has an exit code AND an output rule (e.g. "(ALL PASS)", "seqtest: ok", three equal
 # DFlash2 hashes with drafts accepted); a step that does not run counts as failed. At the end a table of
@@ -70,7 +76,11 @@ if (-not $Tag) { $Tag = "gate_$Device" }
 if (-not $Work) { $Work = Join-Path ([System.IO.Path]::GetTempPath()) "whirl-release-gate-$Device" }
 $Steps = @($Steps | ForEach-Object { $_ -split "," } | Where-Object { $_ })
 $Module = @($Module | ForEach-Object { $_ -split "," } | Where-Object { $_ })
-if ($Module.Count -gt 0 -and -not $PSBoundParameters.ContainsKey("Tag")) { $Tag = "module_$($Module -join '+')_$Device" }
+if ($Module.Count -gt 0) {
+    if (-not $PSBoundParameters.ContainsKey("Tag")) { $Tag = "module_$($Module -join '+')_$Device" }
+    # review A5: a module run must never write the marker / summary of a full gate (PASS_gate_<device>)
+    elseif ($Tag -notlike "module_*") { Write-Host "release gate -Module: -Tag '$Tag' refused: a module run's tag must start with module_ (dev-time only, never PASS_gate_*)"; exit 2 }
+}
 $arch = if ($Device -eq "8060s") { "gfx1151" } else { "gfx1201" }
 $port = if ($Device -eq "8060s") { 8095 } else { 8093 }
 $Q = $env:WHIRL_GATE_DENSE; $MX = $env:WHIRL_GATE_MOE; $DF = $env:WHIRL_GATE_DFLASH
@@ -115,7 +125,13 @@ AddStep "cpu_server_only_typo" $false @($exe["whirl-server-tests"], "--gguf", $S
 AddStep "cpu_golden_selftest" $false @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\golden\golden_selftest.ps1")) { param($o, $c) $c -eq 0 -and ($o -match "all cases as expected") }
 AddStep "cpu_golden_xcheck" $false @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\golden\golden.ps1"), "xcheck", "-Arch", $arch, "-Models", $gmodels) { param($o, $c) $c -eq 0 -and ($o -match "file\(s\) ok") }
 # arch024-S12: the -Module step-selection table (tools/gates/module_gate_cases.tsv; CPU, runs this script with -List)
-AddStep "cpu_module_gate" $false @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\gates\module_gate_test.ps1"), "-Work", "@WORK@") { param($o, $c) $c -eq 0 -and ($o -match "^module gate test: (\d+)/\1 cases ok") }
+AddStep "cpu_module_gate" $false @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\gates\module_gate_test.ps1"), "-Work", "@WORK@") { param($o, $c) $c -eq 0 -and ($o -match "^module gate test: ([1-9]\d*)/\1 cases ok") }
+# review C7: modules.json against this tree and this gate, and the block / pass tests of that check and of impact.py's
+# module mapping (python: WHIRL_GATE_PYTHON, else python on PATH; none found = the step fails)
+$py = if ($env:WHIRL_GATE_PYTHON) { $env:WHIRL_GATE_PYTHON } else { (Get-Command python -ErrorAction SilentlyContinue | Select-Object -First 1).Source }
+if (-not $py) { $py = "python-not-found" }
+AddStep "cpu_modules_check" $false @($pwsh, "-NoProfile", "-Command", "& '$py' -I '$(Join-Path $repo "tools\gates\modules_check_test.py")'; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\gates\modules_check.py")'; exit `$LASTEXITCODE") `
+    { param($o, $c) $c -eq 0 -and ($o -match "^modules check test: ([1-9]\d*)/\1 ok") -and ($o -match "^modules check: ok") }
 $ktArgs = @($exe["whirl-kernel-test"], "--device", $Device, "--require-all", "--mx", $SW, "--moemx", $MX) + @(if ($hasQ) { "--q4"; $Q })
 AddStep "kt_full" $true $ktArgs { param($o, $c) $c -eq 0 -and ($o -match "^PASS: 0 failing") -and ($o -match "--require-all: 0 required kernel") }
 foreach ($m in @($denseKeys) + @("moe")) {
@@ -212,7 +228,42 @@ if ($Module.Count -gt 0) {
     $msel = [System.Collections.Generic.List[string]]::new()
     $merr = @()
     $full = $false
+    if ($Module.Count -gt 1) { Write-Host "release gate -Module: WARNING: $($Module.Count) modules: impact.py recommends the full gate for a change in two modules; this union is dev-time feedback only" }
+    # review A4: transitive includers (src/include/kernels) of a set of files
+    function Includers([string[]]$files) {
+        $seen = @{}; $todo = [System.Collections.Generic.Queue[string]]::new()
+        foreach ($f in $files) { $todo.Enqueue($f) }
+        while ($todo.Count) {
+            $f = $todo.Dequeue(); $b = [regex]::Escape([System.IO.Path]::GetFileName($f))
+            $pat = '^[[:space:]]*#[[:space:]]*include[[:space:]]*[<"]([^>"]*/)?' + $b + '[>"]'
+            foreach ($x in @(& git -C $repo grep -l -E $pat -- src include kernels 2>$null)) {
+                if (-not $seen.ContainsKey($x) -and $files -notcontains $x) { $seen[$x] = 1; if ($x -like "*.h" -or $x -like "*.hpp" -or $x -like "*.inc") { $todo.Enqueue($x) } }
+            }
+        }
+        return @($seen.Keys | Sort-Object)
+    }
+    $ownerOf = { param($f) @($mj.modules.PSObject.Properties | Where-Object { $g = @($_.Value.paths | Where-Object { $_ }); @($g | Where-Object { $f -like $_ }).Count -gt 0 } | ForEach-Object { $_.Name }) }
+    $expand = [System.Collections.Generic.List[string]]::new()
     foreach ($mn in $Module) {
+        if (-not $expand.Contains($mn)) { $expand.Add($mn) }
+        $md = $mj.modules.PSObject.Properties[$mn]
+        if (-not $md) { continue }
+        $md = $md.Value
+        if ($md.callers -is [string] -and $md.callers -eq "rdeps") {
+            $own = @($treeFiles | Where-Object { $f = $_; @(@($md.paths | Where-Object { $_ }) | Where-Object { $f -like $_ }).Count -gt 0 })
+            if ($own.Count -eq 0) { Write-Host "release gate -Module: module $mn`: callers by includers, but its files are not in this tree: full gate"; $full = $true; continue }
+            $inc = Includers $own
+            $lone = @($inc | Where-Object { (& $ownerOf $_).Count -eq 0 })
+            $cm = @($inc | ForEach-Object { & $ownerOf $_ } | Where-Object { $_ -ne $mn } | Sort-Object -Unique)
+            if ($lone.Count -gt 0) { Write-Host "release gate -Module: module $mn`: $($lone.Count) includer(s) in no module ($(@($lone | Select-Object -First 4) -join ', ')): full gate"; $full = $true }
+            if ($cm.Count) { Write-Host "release gate -Module: module $mn`: callers' modules (includers): $($cm -join ', ')" }
+            foreach ($k in $cm) { if (-not $expand.Contains($k)) { $expand.Add($k) } }
+        } elseif ($md.callers) {
+            Write-Host "release gate -Module: module $mn`: callers' modules: $(@($md.callers) -join ', ')"
+            foreach ($k in @($md.callers)) { if (-not $expand.Contains($k)) { $expand.Add($k) } }
+        }
+    }
+    foreach ($mn in $expand) {
         $md = $mj.modules.PSObject.Properties[$mn]
         if (-not $md) { $merr += "unknown module '$mn' (modules: $(@($mj.modules.PSObject.Properties.Name) -join ', '))"; continue }
         $md = $md.Value
@@ -242,11 +293,13 @@ if ($Module.Count -gt 0) {
         foreach ($x in @($md.manual | Where-Object { $_ })) { Write-Host "release gate -Module: module $mn`: also (not in this gate): $x" }
     }
     if ($merr.Count -gt 0) { $merr | ForEach-Object { Write-Host "release gate -Module: $_" }; exit 2 }
+    Write-Host "release gate -Module: steps the impact map selects beyond this table (PLAN c-2, e.g. server.mtp -> srv_balance, srv_fast): see the mod-gate line of tools/impact/impact.py and pass them with -Steps"
     if (-not $full -and $msel.Count -eq 0 -and $Steps.Count -eq 0) { Write-Host "release gate -Module: 0 steps selected (an empty selection must not mean the full gate)"; exit 2 }
     if ($full) { $Steps = @() } else { $Steps = @($msel) + @($Steps | Where-Object { $msel -notcontains $_ }) }
 }
 if ($List -and $Module.Count -gt 0) {
     foreach ($n in $Steps) { if (-not ($S | Where-Object { $_.name -eq $n })) { Write-Host "release gate: unknown step '$n' (-List shows them)"; exit 2 } }
+    Write-Host "release gate -Module: tag $Tag"
     $S | Where-Object { $Steps.Count -eq 0 -or $Steps -contains $_.name } | ForEach-Object { "{0,-22} {1}" -f $_.name, ($(if ($_.gpu) { "GPU" } else { "CPU" })) }; exit 0
 }
 if ($List) { $S | ForEach-Object { "{0,-22} {1}" -f $_.name, ($(if ($_.gpu) { "GPU" } else { "CPU" })) }; exit 0 }
@@ -273,7 +326,8 @@ New-Item -ItemType Directory -Force $logDir | Out-Null
 Remove-Item (Join-Path $Work "PASS_$Tag"), (Join-Path $Work "FAIL_$Tag") -ErrorAction SilentlyContinue
 $whirlTime = (Get-Item $exe["whirl"]).LastWriteTime.ToString("s")
 $qnote = if ($hasQ) { "optional Q4_K_M steps on" } else { "optional Q4_K_M steps off (WHIRL_GATE_DENSE unset)" }
-$hdr = "release gate $Tag on $Device ($arch), models Swift + Ornith, $qnote`: tree $repo commit $head (dirty tracked files: $dirty), exe $Build (whirl.exe $whirlTime), $(Get-Date -Format s)"
+$mnote = if ($Module.Count -gt 0) { " module=$($Module -join ',') (dev-time module gate, not a release gate; steps $($sel.Count))," } else { "" }
+$hdr = "release gate $Tag on $Device ($arch),$mnote models Swift + Ornith, $qnote`: tree $repo commit $head (dirty tracked files: $dirty), exe $Build (whirl.exe $whirlTime), $(Get-Date -Format s)"
 Write-Host $hdr
 $golden = Join-Path $repo "tests\golden"
 if ($InjectFail) {

@@ -231,8 +231,9 @@ def scan(raw: str) -> FileScan:
                     stack.append(("func", fname, i, max(1, hl)))
                 elif re.match(r"^(?:inline\s+)?namespace\b", hs) or re.match(r'^extern\s+"?C?', hs) or hs.startswith("extern"):
                     stack.append(("ns", None, i, cur_line))
-                elif re.search(r"\b(class|struct|union)\s+(?:alignas\([^)]*\)\s*)?([A-Za-z_]\w*)[^(){};]*$", hs):
-                    m = re.search(r"\b(class|struct|union)\s+(?:alignas\([^)]*\)\s*)?([A-Za-z_]\w*)[^(){};]*$", hs)
+                elif re.search(r"\b(class|struct|union)\s+(?:alignas\([^)]*\)\s*)?([A-Za-z_]\w*)[^(){};]*$", _untemplate(hs)):
+                    # arch024-S12 (review N5): `template <class T> struct Foo {` names Foo, not T
+                    m = re.search(r"\b(class|struct|union)\s+(?:alignas\([^)]*\)\s*)?([A-Za-z_]\w*)[^(){};]*$", _untemplate(hs))
                     stack.append(("class", m.group(2), i, cur_line))
                 else:
                     stack.append(("other", None, i, cur_line))
@@ -260,6 +261,18 @@ def scan(raw: str) -> FileScan:
                 seg_start = i + 1
         i += 1
     return FileScan(includes=_includes(raw), funcs=funcs, strings=lits, classes=classes)
+
+
+def _untemplate(h: str) -> str:
+    """header text without a leading template parameter list (nested <> allowed)"""
+    m = re.match(r"\s*template\s*<", h)
+    if not m:
+        return h
+    depth, i = 1, m.end()
+    while i < len(h) and depth:
+        depth += {"<": 1, ">": -1}.get(h[i], 0)
+        i += 1
+    return h[i:]
 
 
 def func_at(fs: FileScan, line: int):
