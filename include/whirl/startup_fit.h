@@ -92,6 +92,20 @@ struct RamFit {
 // ram_size.h). An explicit size is clamped to the room and otherwise used as given (monotonic in the request).
 std::optional<RamFit> ramTierFit(std::uint64_t mb, std::uint64_t avail_phys_bytes, std::uint64_t auto_mb, bool explicit_size,
                                  std::uint64_t pinned_room_mb = pinned_room_unknown, std::uint64_t entry_mb = 0);
+// fix024-ramdip: one sample of the system memory status (server_main.cpp fills it from GlobalMemoryStatusEx; tests
+// inject it). ramForTier picks the RAM the tier sizing (tier::ramTierSize, ramTierFit) counts as available.
+struct RamStatus {
+    std::uint64_t total_phys = 0;    // ullTotalPhys (bytes; 0 = unknown)
+    std::uint64_t avail_phys = 0;    // ullAvailPhys: standby + free + zero (bytes; 0 = unknown)
+    std::uint64_t commit_limit = 0;  // ullTotalPageFile: the commit limit (bytes; 0 = unknown)
+    std::uint64_t commit_avail = 0;  // ullAvailPageFile: what this process can still commit (bytes)
+};
+struct RamForTier {
+    std::uint64_t avail = 0;        // bytes the sizing counts as available
+    bool from_commit = false;       // avail is the uncommitted RAM (Available was lower)
+    std::uint64_t uncommitted = 0;  // total_phys - commit charge - reserve (bytes; 0 = unknown or none)
+};
+RamForTier ramForTier(const RamStatus& s);
 // The texts of the RAM tier's startup lines (server_main.cpp), from the fit. rf: ramTierFit's result (nullopt: unchanged or
 // no host tiers); asked_mb: the size before the fit; src: where an explicit size came from (--kv-ram-mb / WHIRL_KV_RAM_MB);
 // size_reason: tier::RamTierSize::reason; pinned_why: pinnedWhy() ("" when the room was not measured); avail_mb: RAM

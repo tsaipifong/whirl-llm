@@ -18,6 +18,7 @@
 #include "whirl/wddm_watch.h"
 #include "whirl/pool_budget.h"
 #include "whirl/startup_fit.h"
+#include "tier/ram_size.h"
 #include "whirl/gpu_select.h"
 #include "whirl/mem_governor.h"
 #include "whirl/value_scope.h"
@@ -2938,6 +2939,83 @@ void testVisionPoolReserve() {
     CHECK(vis.pool >= 131072);  // one 131072-token request still fits
 }
 
+// fix024-ramdip (S0b, scratch\s0b2\ram_avail_table.txt): the 8060S golden servers sampled 233-587 MiB of available RAM at
+// startup while 70 GB of model files were being written / read (Windows' Available leaves out the modified list and the
+// mapped file pages in working sets), and both host tiers stayed off for the whole server life; 15-25 s later the next
+// server saw 16-21 GB. A low Available made of file pages (not committed memory) must not turn the tiers off; a real
+// shortage (the RAM is committed) still must; and with enough Available nothing changes.
+namespace ramdip {
+struct Out {
+    std::uint64_t final_mb = 0;
+    std::uint64_t avail = 0;
+};
+// the server's RAM tier decision from one memory-status sample (the same pure steps as server_main / startup_replay)
+Out decide(const whirl::startfit::RamStatus& st, std::optional<std::uint64_t> explicit_mb, bool integrated) {
+    using namespace whirl;
+    tier::RamTierInput rin;
+    rin.explicit_mb = explicit_mb;
+    rin.explicit_src = "WHIRL_KV_RAM_MB";
+    rin.floor_mb = 9216;
+    rin.entry_mb = 9216;
+    rin.integrated = integrated;
+    rin.total_phys = st.total_phys;
+    rin.avail_phys = startfit::ramForTier(st).avail;
+    const tier::RamTierSize rsz = tier::ramTierSize(rin);
+    tier::RamTierInput a = rin;
+    a.explicit_mb.reset();
+    const std::uint64_t auto_mb = tier::ramTierSize(a).mb;
+    const auto rf = startfit::ramTierFit(rsz.mb, rin.avail_phys, auto_mb, rin.explicit_mb.has_value());
+    return {rf ? rf->mb : rsz.mb, rin.avail_phys};
+}
+}  // namespace ramdip
+
+void testRamDip() {
+    using namespace whirl;
+    constexpr std::uint64_t MiB = 1ull << 20, GiB = 1ull << 30;
+    const std::uint64_t total = 33981464576ull;     // ram.total_phys of the 8060S / R9700 host (S0b logs)
+    const std::uint64_t limit = total + 8 * GiB;    // commit limit: RAM + an 8 GiB page file
+    const auto st = [&](std::uint64_t avail, std::uint64_t committed) {
+        startfit::RamStatus s;
+        s.total_phys = total;
+        s.avail_phys = avail;
+        s.commit_limit = limit;
+        s.commit_avail = limit - committed;
+        return s;
+    };
+    // 1. the S0b dip: 470 MiB available, 12 GiB committed -> golden's WHIRL_KV_RAM_MB=8192 keeps a RAM tier (and with it
+    //    the SSD tier), on the integrated GPU and on a discrete one; never more than half of the uncommitted RAM
+    for (const bool igpu : {true, false}) {
+        const ramdip::Out o = ramdip::decide(st(470 * MiB, 12 * GiB), 8192, igpu);
+        CHECK(o.final_mb > 0);
+        CHECK(o.final_mb <= 8192ull);
+        CHECK((o.final_mb << 20) <= (total - 12 * GiB) / 2);
+    }
+    for (const std::uint64_t dip_mb : {233ull, 563ull, 587ull}) CHECK(ramdip::decide(st(dip_mb * MiB, 12 * GiB), 8192, true).final_mb > 0);
+    //    the automatic size too (discrete GPU: 1/4 of RAM = 8 GiB, floor one entry)
+    CHECK(ramdip::decide(st(470 * MiB, 12 * GiB), std::nullopt, false).final_mb > 0);
+    // 2. a real shortage: the RAM is committed (30 GiB of 31.6) -> still off
+    CHECK_EQ(ramdip::decide(st(470 * MiB, 30 * GiB), 8192, true).final_mb, 0ull);
+    CHECK_EQ(ramdip::decide(st(470 * MiB, 30 * GiB), std::nullopt, false).final_mb, 0ull);
+    // 3. enough Available (the normal case): exactly the Available sample, and the same size as from the sample alone
+    //    (16302 MiB: half is 8151, so 8192 is lowered to 7680 by the half rule, as before)
+    for (const std::uint64_t av_mb : {16302ull, 18352ull, 21123ull}) {
+        const ramdip::Out o = ramdip::decide(st(av_mb * MiB, 12 * GiB), 8192, true);
+        startfit::RamStatus raw;
+        raw.total_phys = total;
+        raw.avail_phys = av_mb * MiB;
+        CHECK_EQ(o.avail, av_mb * MiB);
+        CHECK_EQ(o.final_mb, ramdip::decide(raw, 8192, true).final_mb);
+        CHECK_EQ(o.final_mb, av_mb == 16302ull ? 7680ull : 8192ull);
+    }
+    // 4. no commit numbers (old Windows call failed / unknown): the Available sample as before
+    {
+        startfit::RamStatus s;
+        s.total_phys = total;
+        s.avail_phys = 470 * MiB;
+        CHECK_EQ(startfit::ramForTier(s).avail, 470 * MiB);
+    }
+}
+
 // v0.2.2.1 startup fit of explicit settings (owner 2026-10-21: adjust, log, refuse only below the minimum)
 void testStartupFit() {
     using namespace whirl;
@@ -4016,6 +4094,7 @@ int main(int argc, char** argv) {
     testPoolBudget();
     testPoolMargin();
     testStartupFit();
+    testRamDip();
     testB0SizingFollowUps();
     testVisionPoolReserve();
     testMemGovernor();

@@ -51,6 +51,12 @@ std::string pinnedOffWhy(bool below_entry, std::uint64_t entry_mb) {
                        : std::string("; no room left, so the host tiers are off (RAM and SSD)");
 }
 
+RamForTier ramForTier(const RamStatus& s) {
+    RamForTier r;
+    r.avail = s.avail_phys;
+    return r;
+}
+
 std::optional<RamFit> ramTierFit(std::uint64_t mb, std::uint64_t avail_phys_bytes, std::uint64_t auto_mb, bool explicit_size,
                                  std::uint64_t pinned_room_mb, std::uint64_t entry_mb) {
     (void)auto_mb;

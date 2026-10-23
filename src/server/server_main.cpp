@@ -1357,14 +1357,20 @@ int serveMain(int argc, char** argv, const char* program) {
                 logW("kv tier: WHIRL_KV_RAM_MB=\"{}\" is not a number; using the automatic size", *v);
             }
         }
+        startfit::RamStatus ram_st;  // fix024-ramdip: one sample, read by startfit::ramForTier
         {
             MEMORYSTATUSEX ms{};
             ms.dwLength = sizeof(ms);
             if (GlobalMemoryStatusEx(&ms)) {
-                rin.total_phys = ms.ullTotalPhys;
-                rin.avail_phys = ms.ullAvailPhys;
+                ram_st.total_phys = ms.ullTotalPhys;
+                ram_st.avail_phys = ms.ullAvailPhys;
+                ram_st.commit_limit = ms.ullTotalPageFile;
+                ram_st.commit_avail = ms.ullAvailPageFile;
             }
         }
+        const startfit::RamForTier ram_for = startfit::ramForTier(ram_st);
+        rin.total_phys = ram_st.total_phys;
+        rin.avail_phys = ram_for.avail;
         const tier::RamTierSize rsz = tier::ramTierSize(rin);
         std::uint64_t kv_ram_mb = rsz.mb;
         // 1. RAM tier: capped at 20480 MiB (a larger one crashed on the first request on the R9700 test box, cause not known
