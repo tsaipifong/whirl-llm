@@ -10,8 +10,9 @@
 #        [-Device r9700|8060s] [-Work DIR]
 # -RamMb: the --kv-ram-mb to request; default = the limit left now (half of the RAM minus the largest adapter's
 #         "GPU Adapter Memory Shared Usage") plus -OverMb, so the request is over the limit by design.
-# PASS (exit 0): the request is answered, no hipError / "failed:" line in the server log, and the RAM tier in use
-# plus what was pinned before is within the limit. FAIL: exit 1. Setup error: exit 2.
+# PASS (exit 0): the request is answered, no hipError / "failed:" line in the server log, a RAM tier is in use, and
+# the GPU Adapter Memory Shared Usage of all adapters together stays within half of the RAM (Windows' shared GPU memory).
+# FAIL: exit 1. Setup error: exit 2. INVALID (no RAM tier in use, so nothing was tested): exit 3.
 # Kills only the server it started (by PID); uses --kv-ssd-mode off (no SSD files).
 #   pwsh tools/repro/kvram719_tier.ps1 -SelfTest   checks the pass judgement on recorded numbers (no GPU, no server)
 param([string]$Exe, [string]$Model, [int]$RamMb = 0, [int]$OverMb = 2048, [int]$Port = 8197,
@@ -20,9 +21,15 @@ $ErrorActionPreference = "Stop"
 # The verdict from what one run saw: res = the request result text, bad = hipError / "failed:" lines in the server log,
 # tierMb = the RAM tier in use (-1: no size line), maxMiB / sumMiB = GPU Adapter Memory Shared Usage with the server up
 # (largest adapter / all adapters), limitMiB = half of the RAM. Returns PASS, FAIL or INVALID.
+# REVIEW-S8-719-2 C-3: the s8-719 failure (8192 on two HIP GPUs) stayed far under "largest adapter <= half the RAM", and a
+# tier that is off proves nothing. So: a failed request or an error line = FAIL; no RAM tier in use = INVALID (not a
+# pass); the Shared Usage of ALL adapters together (a pinned buffer is charged on every HIP GPU it is mapped to) must stay
+# within Windows' shared GPU memory (DXGI SharedSystemMemory, half of the RAM on Windows: 16203 of 32407 MiB here).
 function Get-Kvram719Verdict([string]$res, [int]$bad, [int64]$tierMb, [int64]$maxMiB, [int64]$sumMiB, [int64]$limitMiB) {
-    if ($res -like "answered*" -and $bad -eq 0 -and $maxMiB -le $limitMiB) { return "PASS" }
-    return "FAIL"
+    if ($res -notlike "answered*" -or $bad -gt 0) { return "FAIL" }
+    if ($tierMb -le 0) { return "INVALID" }
+    if ($sumMiB -gt $limitMiB -or $maxMiB -gt $limitMiB) { return "FAIL" }
+    return "PASS"
 }
 if ($SelfTest) {
     # REVIEW-S8-719-2 C-3: recorded numbers (scratch\s8_719 results / fixb, 8060S 96 GB + R9700, 32407 MiB RAM, limit 16203)
@@ -51,6 +58,7 @@ if (-not $Exe -or -not (Test-Path $Exe) -or -not $Model -or -not (Test-Path $Mod
 if (-not $Work) { $Work = Join-Path ([System.IO.Path]::GetTempPath()) "whirl-kvram719" }
 New-Item -ItemType Directory -Force $Work | Out-Null
 function PinnedNowMiB { [int64](((Get-Counter '\GPU Adapter Memory(*)\Shared Usage').CounterSamples | Measure-Object CookedValue -Maximum).Maximum / 1MB) }
+function PinnedSumMiB { [int64](((Get-Counter '\GPU Adapter Memory(*)\Shared Usage').CounterSamples | Measure-Object CookedValue -Sum).Sum / 1MB) }
 $totalMiB = [int64]((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1MB)
 $pinned0 = PinnedNowMiB
 $limit = [int64]($totalMiB / 2)
@@ -69,6 +77,7 @@ for ($i = 0; $i -lt 180 -and -not $p.HasExited; $i++) {
 }
 $res = "server did not come up"
 $pinnedUp = PinnedNowMiB
+$pinnedSum = PinnedSumMiB
 if ($up) {
     $body = @{ model = "x"; messages = @(@{ role = "user"; content = "Write one sentence about the sea." }); max_tokens = 32; temperature = 0 } | ConvertTo-Json -Depth 5
     try {
@@ -83,7 +92,10 @@ $bad = @($txt | Select-String -Pattern "\(hipError \d+\)|\| failed:")
 $tierLine = @($txt | Select-String -Pattern "kv tier: RAM tier size|adjusted: .*kv-ram-mb|kv tier: RAM tier off")
 $tierLine | ForEach-Object { Write-Host "  log: $($_.Line)" }
 $bad | Select-Object -First 3 | ForEach-Object { Write-Host "  log: $($_.Line)" }
-Write-Host ("kvram719: {0}; GPU-pinned with the server up: {1} MiB (limit ~{2})" -f $res, $pinnedUp, $limit)
-$verdict = Get-Kvram719Verdict $res $bad.Count -1 $pinnedUp $pinnedUp $limit
+$sizeM = @($txt | Select-String -Pattern "kv tier: RAM tier size (\d+) MiB") | Select-Object -Last 1
+$tierMb = if ($sizeM) { [int64]$sizeM.Matches[0].Groups[1].Value } elseif (@($txt | Select-String -Pattern "kv tier: RAM tier off|kv tier: off").Count) { 0 } else { -1 }
+Write-Host ("kvram719: {0}; RAM tier in use {1} MiB; GPU-pinned with the server up: largest adapter {2} MiB, all adapters {3} MiB (limit ~{4})" -f $res, $tierMb, $pinnedUp, $pinnedSum, $limit)
+$verdict = Get-Kvram719Verdict $res $bad.Count $tierMb $pinnedUp $pinnedSum $limit
+if ($verdict -eq "INVALID") { Write-Host "kvram719: INVALID - no RAM tier was in use, so this run says nothing about the 719 limit" }
 Write-Host "kvram719: $verdict"
-exit $(if ($verdict -eq "PASS") { 0 } else { 1 })
+exit $(if ($verdict -eq "PASS") { 0 } elseif ($verdict -eq "INVALID") { 3 } else { 1 })
