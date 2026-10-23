@@ -3893,6 +3893,30 @@ void testPrefixStore() {
     }
 }
 
+// arch024-S5a: the image-end split through the engine (attachVision passes the vision splits to the PrefixStore).
+// With WHIRL_VIS_CKPT_MIN low enough for the mock's 54-token image, the first request keeps a shared 'prefix'
+// checkpoint at the end of the image; the default (1024) keeps none for it.
+void testVisionSplitEngine() {
+    const std::string img = "data:image/bmp;base64," + b64enc(makeBmp(300, 200, 3));
+    for (const std::uint32_t ck_min : {16u, 1024u}) {
+        ServerSetup su;
+        su.vision = true;
+        su.mc.slot_ctx = 16384;
+        su.vis_ck_min = ck_min;
+        TestServer srv(su);
+        const std::size_t before = g_log.count("at the end of the image @");
+        auto a = srv.post("/v1/chat/completions", visBody({imagePart(img)}, "What is this?"));
+        CHECK_EQ(a.status, 200);
+        const std::size_t kept = g_log.count("at the end of the image @") - before;
+        if (ck_min == 16) {
+            CHECK_EQ(kept, 1u);
+            CHECK(srv.engine().stats().spe_new >= 1);
+        } else {
+            CHECK_EQ(kept, 0u);
+        }
+    }
+}
+
 void testPagePool() {
     // ---- init and the free order: increasing page ids, then LIFO reuse (free stack like vLLM's free queue tail)
     {
@@ -5105,6 +5129,7 @@ int main(int argc, char** argv) {
         {"page_pool", testPagePool},
         {"prefix_store", testPrefixStore},
         {"cold_resume_engine", testColdResumeEngine},
+        {"vision_split_engine", testVisionSplitEngine},
         {"compat_endpoints", testCompatEndpoints},
         {"http_limits", testHttpLimits},
         {"http_conn_cap", testHttpConnCap},
