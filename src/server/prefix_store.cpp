@@ -85,6 +85,37 @@ std::uint32_t PrefixStore::tailCk(const SlotPrefix& sl, std::span<const std::uin
     return 0;
 }
 
+void PrefixStore::waitSpeFences() {
+    for (Spe& sp : spes_) {
+        sp.spill_ev.waitIfPending();
+        sp.ready_ev.waitIfPending();
+    }
+}
+
+std::uint64_t PrefixStore::parkSpes(CkptStore& cs) {
+    std::uint64_t b = 0;
+    for (Spe& sp : spes_) {
+        b += cs.bytes(false);
+        cs.release(sp.ck, {sp.spill_ev.get(), sp.ready_ev.get()});
+    }
+    spes_.clear();  // destroys the events (device::EventH)
+    return b;
+}
+
+std::uint64_t PrefixStore::unparkSpes(CkptStore& cs, std::size_t n) {
+    try {
+        spes_.clear();
+        spes_.resize(n);
+        for (Spe& sp : spes_) cs.init(sp.ck, false);
+    } catch (const std::exception&) {
+        // REVIEW-GOV-1 P2-2: free what the unfinished table got, so it stays parked holding nothing
+        for (Spe& sp : spes_) cs.release(sp.ck, {});
+        spes_.clear();
+        throw;
+    }
+    return spes_.size() * cs.bytes(false);
+}
+
 Spe* PrefixStore::speMatch(std::span<const std::uint32_t> toks) {
     const int i = pc_->matchShared(spes_, toks, [&](std::size_t a) { return onSchedule(toks, a); });
     return i < 0 ? nullptr : &spes_[static_cast<std::size_t>(i)];

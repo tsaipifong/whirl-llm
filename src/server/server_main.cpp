@@ -632,7 +632,7 @@ int serveMain(int argc, char** argv, const char* program) {
         // before WHIRL loads or sizes anything (the first PDH query of a process takes ~0.2-0.3 s; owner: 「查記憶體整個
         // 才不到1秒，不慢」). This process's own usage is read in the same collection and subtracted. The WDDM budget
         // margin grows with it and with a monitor on the card (poolbudget::defaultMargin).
-        const hip::GpuOthers others0 = hip::gpuOthers(dev);
+        const hip::GpuOthers others0 = ops->gpuOthers(dev);
         const hip::WddmMemInfo wddm_start = ops->wddmMemInfo();  // the budget before WHIRL allocates (MarginIn::budget_start)
         {
             const char* const disp = others0.display_known ? (others0.display ? "yes" : "no") : "unknown";
@@ -1511,7 +1511,7 @@ int serveMain(int argc, char** argv, const char* program) {
         // WHIRL_POOL_RESERVE_MB keeps the old free-VRAM-only rule with that reserve.
         const bool reserve_explicit = env("POOL_RESERVE_MB").has_value();
         const hip::WddmMemInfo wddm0 = ops->wddmMemInfo();
-        const std::uint64_t pinned0 = hip::pinnedHostBytes();  // pinned host memory inside wddm0's non-local usage
+        const std::uint64_t pinned0 = ops->pinnedHostBytes();  // pinned host memory inside wddm0's non-local usage
         const std::uint64_t reserve =
             static_cast<std::uint64_t>(envU32("POOL_RESERVE_MB", cfg.moe ? 1536 : (wddm0.ok ? 768 : 3072))) << 20;
         const poolbudget::Margin margin0 = budgetMargin(wddm0.local_budget);
@@ -1799,7 +1799,7 @@ int serveMain(int argc, char** argv, const char* program) {
             // before that point, such as the embedding table and the RAM tier, are in the baseline)
             const hip::WddmMemInfo w = ops->wddmMemInfo();
             if (w.ok && wddm0.ok) {
-                const std::uint64_t pinned_now = hip::pinnedHostBytes();
+                const std::uint64_t pinned_now = ops->pinnedHostBytes();
                 const std::uint64_t grow = w.nonlocal_usage > wddm0.nonlocal_usage ? w.nonlocal_usage - wddm0.nonlocal_usage : 0;
                 const std::uint64_t pinned_since = pinned_now > pinned0 ? pinned_now - pinned0 : 0;
                 const std::string msg = std::format(
@@ -2009,15 +2009,15 @@ int serveMain(int argc, char** argv, const char* program) {
                 s.local_budget = w.local_budget;
                 s.local_usage = w.local_usage;
                 s.nonlocal_usage = w.nonlocal_usage;
-                s.pinned = hip::pinnedHostBytes();
+                s.pinned = be->pinnedHostBytes();
                 PROCESS_MEMORY_COUNTERS pmc{};
                 if (K32GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc))) s.rss = pmc.WorkingSetSize;
                 return s;
             },
             !is_uma, wddm0.ok ? std::optional<wddmwatch::Sample>(vram_base) : std::nullopt, vram_cfg, startup_spill,
             // what other processes use on the GPU, read only when a spill warning is printed (one PDH read)
-            [dev, o0 = others0]() -> std::optional<wddmwatch::Others> {
-                const hip::GpuOthers o = hip::gpuOthers(dev);
+            [be = ops.get(), dev, o0 = others0]() -> std::optional<wddmwatch::Others> {
+                const hip::GpuOthers o = be->gpuOthers(dev);
                 if (!o.ok) return std::nullopt;
                 return wddmwatch::Others{o.others, o0.ok ? std::optional<std::uint64_t>(o0.others) : std::nullopt};
             });

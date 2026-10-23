@@ -75,6 +75,17 @@ public:
     virtual hip::LocalMemSnap localMemSnap() = 0;
     // the carve-out of an integrated GPU (UMA); integrated = false on a discrete GPU
     virtual hip::UmaMem umaMemory(int device) = 0;
+    // ---- other processes and pinned host memory (arch024 S9, C-3): what the startup margin, the 719 room and the
+    // spill warning read. Defaults: nothing known (ok = false / 0), for test backends that do not model them.
+    // VRAM other processes use on HIP device `device` now (hip::gpuOthers: one PDH collection). Stateless: also
+    // called off the engine thread (the spill warning's helper reads it through the vram probe's "others").
+    virtual hip::GpuOthers gpuOthers(int device) {
+        (void)device;
+        return {};
+    }
+    // pinned host memory this process holds now (hip::pinnedHostBytes): the 719 room's measurement point at startup
+    // (server_main.cpp pinned0) and the spill baseline
+    virtual std::uint64_t pinnedHostBytes() { return 0; }
 };
 
 // Forwarding implementation over whirl/hip.h (src/device/backend_hip.cpp).

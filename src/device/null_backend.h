@@ -85,13 +85,24 @@ public:
         noteThread(Call::uma_memory);
         return mem.uma;
     }
+    hip::GpuOthers gpuOthers(int) override {
+        noteThread(Call::gpu_others);
+        return mem.others;
+    }
+    std::uint64_t pinnedHostBytes() override {
+        noteThread(Call::pinned_host_bytes);
+        return mem.pinned;
+    }
 
-    // ---- memory model: the values memInfo / wddmMemInfo / localMemSnap / umaMemory return (a test sets them)
+    // ---- memory model: the values memInfo / wddmMemInfo / localMemSnap / umaMemory / gpuOthers / pinnedHostBytes
+    // return (a test sets them)
     struct Memory {
         hip::MemInfo info;
         hip::WddmMemInfo wddm;
         hip::LocalMemSnap local;
         hip::UmaMem uma;
+        hip::GpuOthers others;
+        std::uint64_t pinned = 0;
     } mem;
 
     // ---- observation
@@ -129,7 +140,7 @@ public:
     enum class Call {
         copy_async, download, stream_create, stream_destroy, stream_sync, stream_wait_event, event_create,
         event_destroy, event_record, event_done, event_done_checked, event_sync, host_malloc, host_free, malloc,
-        free, set_device, mem_info, wddm_mem_info, local_mem_snap, uma_memory
+        free, set_device, mem_info, wddm_mem_info, local_mem_snap, uma_memory, gpu_others, pinned_host_bytes
     };
     // free / hostFree / eventDestroy / streamDestroy
     static bool isRelease(Call c) {

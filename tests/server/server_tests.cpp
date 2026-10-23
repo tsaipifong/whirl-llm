@@ -20,6 +20,7 @@
 #include "tier/kv_tier.h"
 #include "whirl/vram_limit.h"
 #include "whirl/mem_governor.h"
+#include "whirl/pool_budget.h"
 #include "whirl/common.h"
 #include "whirl/gguf.h"
 #include "whirl/json.h"
@@ -4444,6 +4445,182 @@ void testCkptF1() {
     }
 }
 
+// arch024-S9 (M7, F1): the governor parks the shared prefix checkpoints through PrefixStore. A pending spill (reads
+// ck) and a pending ready copy (writes ck) must be waited for before the buffers go: waitSpeFences syncs both, and
+// parkSpes alone (no wait first) still syncs through the fences it passes to CkptStore::release (0 violations either
+// way). unparkSpes gives every entry fresh buffers; a failure part way frees what it got and rethrows (no leak, table
+// empty, retry works).
+void testGovParkSpes() {
+    using namespace ps_test;
+    const ChatTokens ct = chatIds();
+    auto fill = [](CkRig& r, PrefixStore& ps, device::Stream s2) {
+        ps.spes().resize(2);
+        for (Spe& sp : ps.spes()) r.cs->init(sp.ck, false);
+        r.spill(std::span<const Ckpt>(&ps.spes()[0].ck, 1), ps.spes()[0].spill_ev);
+        r.nb.copyAsync(ps.spes()[1].ck.dev.get(), reinterpret_cast<DevPtr>(r.dst), 64, s2);
+        ps.spes()[1].ready_ev = device::EventH::create(r.nb);
+        r.nb.eventRecord(ps.spes()[1].ready_ev.get(), s2);
+    };
+    for (const bool wait_first : {true, false}) {
+        CkRig r;
+        PrefixStore ps(ct, cfgFor(false));
+        device::Stream s2 = r.nb.streamCreateNonBlocking();
+        fill(r, ps, s2);
+        CHECK(r.nb.liveAllocations() > r.live0);
+        const auto s0 = r.nb.syncCalls();
+        if (wait_first) {
+            ps.waitSpeFences();
+            CHECK(r.nb.syncCalls() >= s0 + 2);  // the spill and the ready fence
+        }
+        const std::uint64_t b = ps.parkSpes(*r.cs);
+        CHECK(r.nb.syncCalls() >= s0 + 2);      // without the wait first, release syncs the fences itself
+        CHECK_EQ(r.nb.pendingFreeViolations(), 0u);
+        CHECK_EQ(b, 2 * r.cs->bytes(false));
+        CHECK(ps.spes().empty());
+        CHECK_EQ(r.nb.liveAllocations(), r.live0);
+        r.nb.streamDestroy(s2);
+        CHECK(r.finish());
+    }
+    {  // unpark: fresh buffers for every entry; then a failure part way (the 2nd allocation) frees the first
+        CkRig r;
+        PrefixStore ps(ct, cfgFor(false));
+        const std::size_t live = r.nb.liveAllocations();
+        const std::uint64_t dev = r.nb.deviceBytes();
+        CHECK_EQ(ps.unparkSpes(*r.cs, 3), 3 * r.cs->bytes(false));
+        CHECK_EQ(ps.spes().size(), 3u);
+        CHECK(r.nb.liveAllocations() > live);
+        CHECK_EQ(r.nb.deviceBytes() - dev, 3 * r.cs->bytes(false));
+        CHECK_EQ(ps.parkSpes(*r.cs), 3 * r.cs->bytes(false));
+        CHECK_EQ(r.nb.liveAllocations(), live);
+        r.nb.failMalloc(2);
+        bool threw = false;
+        try {
+            (void)ps.unparkSpes(*r.cs, 3);
+        } catch (const std::exception&) {
+            threw = true;
+        }
+        CHECK(threw);
+        CHECK(ps.spes().empty());
+        CHECK_EQ(r.nb.liveAllocations(), live);
+        CHECK_EQ(r.nb.deviceBytes(), dev);
+        CHECK_EQ(r.nb.pendingFreeViolations(), 0u);
+        CHECK_EQ(ps.unparkSpes(*r.cs, 2), 2 * r.cs->bytes(false));  // the next try starts clean
+        CHECK_EQ(ps.parkSpes(*r.cs), 2 * r.cs->bytes(false));
+        CHECK(r.finish());
+    }
+}
+
+// arch024-S9 C-3: server_main.cpp reads other processes' VRAM and its pinned host memory through device::Backend.
+// (1) the NullBackend fakes and their thread record; (2) the startup margin input (poolbudget::MarginIn as
+// server_main's budgetMargin builds it from others0) follows the backend's value; (3) the spill warning path as
+// server_main wires it (the probe's pinned from pinnedHostBytes, the others lambda from gpuOthers): pinned growth is
+// not a spill, other growth is, and the warning names the other programs' VRAM now and at startup.
+void testBackendOthersPinned() {
+    constexpr std::uint64_t MiB = 1ull << 20;
+    {  // (1)
+        NullBackend nb;
+        CHECK(!nb.gpuOthers(0).ok);
+        CHECK_EQ(nb.pinnedHostBytes(), 0u);
+        nb.mem.others.ok = true;
+        nb.mem.others.others = 3 * 1024 * MiB;
+        nb.mem.pinned = 17 * 1024 * MiB;
+        nb.recordThreads(true);
+        CHECK(nb.gpuOthers(1).ok);
+        CHECK_EQ(nb.gpuOthers(1).others, 3 * 1024 * MiB);
+        CHECK_EQ(nb.pinnedHostBytes(), 17 * 1024 * MiB);
+        const auto calls = nb.callThreads();
+        CHECK_EQ(calls.size(), 3u);
+        if (calls.size() == 3) {
+            CHECK(std::string(NullBackend::callName(calls[0].first)) == "gpuOthers");
+            CHECK(std::string(NullBackend::callName(calls[2].first)) == "pinnedHostBytes");
+        }
+        nb.recordThreads(false);
+    }
+    {  // (2)
+        NullBackend nb;
+        device::Backend& be = nb;
+        auto margin = [&] {
+            const hip::GpuOthers o = be.gpuOthers(0);
+            poolbudget::MarginIn mi;
+            mi.local_budget = 30000 * MiB;
+            mi.budget_start = 30000 * MiB;
+            mi.others_known = o.ok;
+            mi.others = o.others;
+            mi.display = o.display_known && o.display;
+            return poolbudget::defaultMargin(mi).bytes;
+        };
+        const std::uint64_t unknown = margin();
+        nb.mem.others.ok = true;
+        nb.mem.others.others = 0;
+        const std::uint64_t none = margin();
+        nb.mem.others.others = 4096 * MiB;
+        nb.mem.others.display_known = nb.mem.others.display = true;
+        const std::uint64_t busy = margin();
+        CHECK(unknown > 0 && none > 0);
+        CHECK(busy > none);  // the margin grows with what other programs use (and a monitor on the card)
+    }
+    {  // (3)
+        auto waitFor = [](const std::function<bool()>& f, int ms) {
+            for (int i = 0; i < ms / 10; ++i) {
+                if (f()) return true;
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+            return f();
+        };
+        std::mutex mu;
+        std::uint64_t shared = 400 * MiB;
+        std::atomic<NullBackend*> opsp{nullptr};
+        ServerSetup su = baseSetup();
+        su.vram_probe = [&] {
+            std::lock_guard<std::mutex> lk(mu);
+            whirl::wddmwatch::Sample x;
+            x.ok = true;
+            x.local_usage = 29000 * MiB;
+            x.local_budget = 31232 * MiB;
+            x.nonlocal_usage = shared;
+            NullBackend* o = opsp.load();
+            x.pinned = o ? o->pinnedHostBytes() : 0;  // server_main: s.pinned = be->pinnedHostBytes()
+            return x;
+        };
+        su.vram_cfg.idle_sample_s = 0.2;
+        const hip::GpuOthers o0{true, 0, 0, 205 * MiB, false, false, 0};  // others0, read at startup
+        su.vram_others = [&opsp, o0]() -> std::optional<whirl::wddmwatch::Others> {
+            NullBackend* o = opsp.load();
+            if (!o) return std::nullopt;
+            const hip::GpuOthers g = o->gpuOthers(0);  // server_main: be->gpuOthers(dev)
+            if (!g.ok) return std::nullopt;
+            return whirl::wddmwatch::Others{g.others, o0.ok ? std::optional<std::uint64_t>(o0.others) : std::nullopt};
+        };
+        g_log.clear();
+        TestServer srv(su);
+        {
+            std::lock_guard<std::mutex> lk(mu);
+            srv.ops().mem.others.ok = true;
+            srv.ops().mem.others.others = 3328 * MiB;
+            opsp = &srv.ops();
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        // 600 MiB more non-local, all of it pinned host memory WHIRL allocated: not a spill
+        {
+            std::lock_guard<std::mutex> lk(mu);
+            srv.ops().mem.pinned = 600 * MiB;
+            shared = 1000 * MiB;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(800));
+        CHECK_EQ(g_log.count(" W GPU memory spill"), 0u);
+        CHECK(srv.get("/health").body.find("\"spill\":false") != std::string::npos);
+        // 600 MiB more that is not pinned: a spill; the warning names the other programs' VRAM (gpuOthers)
+        {
+            std::lock_guard<std::mutex> lk(mu);
+            shared = 1600 * MiB;
+        }
+        CHECK(waitFor([&] { return g_log.count(" W GPU memory spill: ") == 1; }, 5000));
+        CHECK_EQ(g_log.count("Other programs use 3.25 GiB of VRAM on this GPU now (0.20 GiB when the server started)."), 1u);
+        CHECK(waitFor([&] { return srv.get("/health").body.find("\"spill\":true") != std::string::npos; }, 5000));
+        opsp = nullptr;
+    }
+}
+
 // govRestoreCache's failure cleanup passes {}: the buffers it frees were just allocated, so no spill has read them;
 // another slot's spill still pending on the tier stream does not count against them (0 violations, no sync needed)
 void testCkptRestoreFail() {
@@ -5868,6 +6045,8 @@ int main(int argc, char** argv) {
         {"ckpt_store", testCkptStore},
         {"ckpt_f1", testCkptF1},
         {"ckpt_restore_fail", testCkptRestoreFail},
+        {"gov_park_spes", testGovParkSpes},
+        {"backend_others_pinned", testBackendOthersPinned},
         {"ckpt_engine_teardown", testCkptEngineTeardown},
         {"tier_io_thread_calls", testTierIoThreadCalls},
         {"page_pool", testPagePool},

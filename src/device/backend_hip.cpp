@@ -49,6 +49,8 @@ public:
     hip::WddmMemInfo wddmMemInfo() override { return hip::wddmMemInfo(); }
     hip::LocalMemSnap localMemSnap() override { return hip::localMemSnap(); }
     hip::UmaMem umaMemory(int device) override { return hip::umaMemory(device); }
+    hip::GpuOthers gpuOthers(int device) override { return hip::gpuOthers(device); }
+    std::uint64_t pinnedHostBytes() override { return hip::pinnedHostBytes(); }
 };
 
 }  // namespace

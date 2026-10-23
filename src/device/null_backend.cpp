@@ -228,8 +228,9 @@ const char* NullBackend::callName(Call c) {
                                             "streamSync", "streamWaitEvent", "eventCreate", "eventDestroy",
                                             "eventRecord", "eventDone", "eventDoneChecked", "eventSync",
                                             "hostMalloc", "hostFree", "malloc", "free", "setDevice", "memInfo",
-                                            "wddmMemInfo", "localMemSnap", "umaMemory"};
-    static_assert(std::size(names) == static_cast<std::size_t>(Call::uma_memory) + 1);
+                                            "wddmMemInfo", "localMemSnap", "umaMemory", "gpuOthers",
+                                            "pinnedHostBytes"};
+    static_assert(std::size(names) == static_cast<std::size_t>(Call::pinned_host_bytes) + 1);
     return names[static_cast<std::size_t>(c)];
 }
 

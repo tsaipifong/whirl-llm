@@ -145,6 +145,15 @@ public:
     std::vector<Spe>& spes() { return spes_; }
     const std::vector<Spe>& spes() const { return spes_; }
     Spe* speMatch(std::span<const std::uint32_t> toks);
+    // memory governor (arch024 M7, engine_gov.cpp): the shared prefix checkpoints' buffers parked / back.
+    // waitSpeFences: every entry's spill and ready fences (before the pool's quarantine is reclaimed and the buffers go).
+    void waitSpeFences();
+    // parkSpes: every entry's checkpoint buffers released with its fences (F1) and the table dropped; the bytes freed.
+    std::uint64_t parkSpes(CkptStore& cs);
+    // unparkSpes: a new table of n entries with fresh checkpoint buffers; the bytes allocated. On a failure the
+    // buffers allocated so far are released ({}: just allocated, no spill has read them), the table is dropped and
+    // the error rethrown.
+    std::uint64_t unparkSpes(CkptStore& cs, std::size_t n);
 
     // ---- lookup over the slots
     Match cacheMatch(SlotPrefix& sl, std::span<const std::uint32_t> toks) const;
