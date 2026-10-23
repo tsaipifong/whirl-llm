@@ -69,9 +69,14 @@ std::optional<RamFit> ramTierFit(std::uint64_t mb, std::uint64_t avail_phys_byte
             r.below_entry = true;
         }
     }
-    if (explicit_size && avail_phys_bytes > 0 && (r.mb << 20) > avail_phys_bytes / 2) {
-        r.mb = (avail_phys_bytes / 2 >> 20) / 512 * 512;
-        r.half = true;
+    // the half rule is a min with half of the available RAM in whole 512 MiB, so it is monotonic at every MiB too
+    // (REVIEW-S8-719-3 N3-1: comparing the ask with the unrounded half gave 8800 -> 8800 but 8822 -> 8704)
+    if (explicit_size && avail_phys_bytes > 0) {
+        const std::uint64_t half_mb = (avail_phys_bytes / 2 >> 20) / 512 * 512;
+        if (r.mb > half_mb) {
+            r.mb = half_mb;
+            r.half = true;
+        }
     }
     if (!r.half && !r.safe && !r.pinned) return std::nullopt;
     return r;
