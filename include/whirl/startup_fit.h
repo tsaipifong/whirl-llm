@@ -93,7 +93,12 @@ struct RamFit {
 std::optional<RamFit> ramTierFit(std::uint64_t mb, std::uint64_t avail_phys_bytes, std::uint64_t auto_mb, bool explicit_size,
                                  std::uint64_t pinned_room_mb = pinned_room_unknown, std::uint64_t entry_mb = 0);
 // fix024-ramdip: one sample of the system memory status (server_main.cpp fills it from GlobalMemoryStatusEx; tests
-// inject it). ramForTier picks the RAM the tier sizing (tier::ramTierSize, ramTierFit) counts as available.
+// inject it). ramForTier picks the RAM the tier sizing (tier::ramTierSize, ramTierFit) counts as available: Windows'
+// Available (standby + free + zero) plus the modified list (pages written but not yet on disk; reusable once the
+// writer flushes them, which pinning makes Windows do first). Available alone fell to 233-587 MiB for minutes while
+// 70 GB of GGUF were written (S0b) and the one startup sample turned both host tiers off for the server's life.
+// Linux's MemAvailable counts dirty file pages the same way; llama.cpp never gates its prompt cache on the startup
+// Available at all (server-task.cpp). File pages mapped in another program's working set are still not counted.
 struct RamStatus {
     std::uint64_t total_phys = 0;    // ullTotalPhys (bytes; 0 = unknown)
     std::uint64_t avail_phys = 0;    // ullAvailPhys: standby + free + zero (bytes; 0 = unknown)

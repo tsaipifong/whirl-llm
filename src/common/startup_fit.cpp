@@ -54,6 +54,9 @@ std::string pinnedOffWhy(bool below_entry, std::uint64_t entry_mb) {
 RamForTier ramForTier(const RamStatus& s) {
     RamForTier r;
     r.avail = s.avail_phys;
+    if (s.avail_phys == 0) return r;  // Available unknown: stays unknown (the sizing then ignores it)
+    r.avail = s.avail_phys + s.modified;
+    if (s.total_phys > 0) r.avail = std::min(r.avail, s.total_phys);
     return r;
 }
 

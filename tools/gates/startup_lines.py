@@ -32,6 +32,7 @@ FIELDS = [
     ("fitf.* (FitInput + plan)", "B", 796, "input of startfit::fitFixed"),
     ("slots.*", "B", 1104, "after-load VRAM fed to startfit::slotsThatFit (av is glue over memInfo / WDDM)"),
     ("ram.total_phys / ram.avail_phys", "B", 1300, "GlobalMemoryStatusEx"),
+    ("ram.modified", "B", 1300, "PDH Modified Page List Bytes (fix024-ramdip: startfit::ramForTier, replayed)"),
     ("ram.explicit_mb / ram.explicit_src", "A", 1290, "--kv-ram-mb / WHIRL_KV_RAM_MB"),
     ("ram.floor_mb / ram.entry_mb / ram.integrated / ram.n_ck / ram.no_pc", "A", 1270, "model, slot context and settings"),
     ("pin.* (PinnedState)", "B", 1320, "DXGI / PDH pinned memory of this process and every program (B0-1 adapter_shared)"),

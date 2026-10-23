@@ -51,6 +51,7 @@
 #include <windows.h>
 #include <timeapi.h>
 #include <psapi.h>  // K32GetProcessMemoryInfo (kernel32; WDDM-LOG RAM figure)
+#include <pdh.h>    // fix024-ramdip: Modified Page List Bytes
 #pragma comment(lib, "winmm.lib")  // timeBeginPeriod (whirl-server and whirl serve)
 #endif
 
@@ -1366,9 +1367,29 @@ int serveMain(int argc, char** argv, const char* program) {
                 ram_st.avail_phys = ms.ullAvailPhys;
             }
         }
+        // fix024-ramdip: the modified list (PDH, documented counter, no privilege); 0 when PDH has no answer
+        bool modified_ok = false;
+        {
+            PDH_HQUERY q = nullptr;
+            if (PdhOpenQueryW(nullptr, 0, &q) == ERROR_SUCCESS) {
+                PDH_HCOUNTER c = nullptr;
+                PDH_FMT_COUNTERVALUE v{};
+                if (PdhAddEnglishCounterW(q, L"\\Memory\\Modified Page List Bytes", 0, &c) == ERROR_SUCCESS &&
+                    PdhCollectQueryData(q) == ERROR_SUCCESS &&
+                    PdhGetFormattedCounterValue(c, PDH_FMT_LARGE, nullptr, &v) == ERROR_SUCCESS && v.largeValue >= 0) {
+                    ram_st.modified = static_cast<std::uint64_t>(v.largeValue);
+                    modified_ok = true;
+                }
+                PdhCloseQuery(q);
+            }
+        }
         const startfit::RamForTier ram_for = startfit::ramForTier(ram_st);
         rin.total_phys = ram_st.total_phys;
         rin.avail_phys = ram_for.avail;
+        logI("kv tier: RAM available now {} MiB + {} MiB on the modified list (written, not yet on disk; reusable once "
+             "flushed) = {} MiB counted for the RAM tier{}",
+             ram_st.avail_phys >> 20, ram_st.modified >> 20, ram_for.avail >> 20,
+             modified_ok ? "" : " (modified list unknown: Available alone)");
         const tier::RamTierSize rsz = tier::ramTierSize(rin);
         std::uint64_t kv_ram_mb = rsz.mb;
         // 1. RAM tier: capped at 20480 MiB (a larger one crashed on the first request on the R9700 test box, cause not known
@@ -1429,7 +1450,8 @@ int serveMain(int argc, char** argv, const char* program) {
         sin.put("ram.explicit_mb", rin.explicit_mb ? std::to_string(*rin.explicit_mb) : std::string("-"));
         sin.put("ram.explicit_src", std::string_view(rin.explicit_src));
         sin.put("ram.total_phys", rin.total_phys);
-        sin.put("ram.avail_phys", rin.avail_phys);
+        sin.put("ram.avail_phys", ram_st.avail_phys);  // the raw sample; the replay applies ramForTier (fix024-ramdip)
+        sin.put("ram.modified", ram_st.modified);
         sin.put("ram.floor_mb", rin.floor_mb);
         sin.put("ram.entry_mb", rin.entry_mb);
         sin.put("ram.integrated", rin.integrated);
