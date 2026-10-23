@@ -82,6 +82,7 @@ if ($Action -notin @("xcheck", "refhash") -and -not (Test-Path $Exe)) { Write-Ho
 $Models = @($Models | ForEach-Object { $_ -split "," } | Where-Object { $_ })
 $Modes = @($Modes | ForEach-Object { $_ -split "," } | Where-Object { $_ })
 $Suites = @($Suites | ForEach-Object { $_ -split "," } | Where-Object { $_ })
+$ServerEnv = @($ServerEnv | ForEach-Object { $_ -split "," } | Where-Object { $_ })  # pwsh -File passes "A=1,B=2" as one string
 $defaultSuites = $Suites.Count -eq 0 -and -not $PSBoundParameters.ContainsKey("Suites")
 if ($defaultSuites) {
     $Suites = @("single", "pair", "ngram", "server")

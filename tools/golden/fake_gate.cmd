@@ -6,7 +6,9 @@ rem FAKEGATE_H=HEX: the hash of srv.sessA.t2.ssd (default 1111111111111111).
 rem FAKEGATE_TIER (arch024-S0b2): the two tier-restore checks fail (exit 1) and the work dir gets a server log:
 rem   off = its "adjusted: ... host tiers are off" line (the server started with too little RAM available);
 rem   nolog = a log without that line; mixed = tiers off, and a check that is not a tier check fails too.
+rem FAKEGATE_ARGS=1: also prints its arguments (a non-G line).
 if not defined FAKEGATE_H set FAKEGATE_H=1111111111111111
+if defined FAKEGATE_ARGS echo   args: %*
 set "FG_WORK="
 :args
 if "%~1"=="" goto argsdone

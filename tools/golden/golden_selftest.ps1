@@ -123,14 +123,14 @@ try {
     # 7) suite server (ARCH-1) through a fake whirl-server-gate: record / check, a hash change, a failing in-run check,
     #    a gate run without its ALL PASS line; the exe and reference-set hashes are printed; refhash follows the files
     $fakeGate = Join-Path $PSScriptRoot "fake_gate.cmd"
-    function RunSrv([string]$action, [string]$root, [hashtable]$ge) {
-        foreach ($k in @("FAKEGATE_FAIL", "FAKEGATE_NOPASS", "FAKEGATE_H", "FAKEGATE_TIER")) { [Environment]::SetEnvironmentVariable($k, $null) }
+    function RunSrv([string]$action, [string]$root, [hashtable]$ge, [string[]]$extra = @()) {
+        foreach ($k in @("FAKEGATE_FAIL", "FAKEGATE_NOPASS", "FAKEGATE_H", "FAKEGATE_TIER", "FAKEGATE_ARGS")) { [Environment]::SetEnvironmentVariable($k, $null) }
         foreach ($k in $ge.Keys) { [Environment]::SetEnvironmentVariable($k, $ge[$k]) }
         $env:WHIRL_GOLDEN_DENSE = $model
         $o = & pwsh -NoProfile -File $gate $action -Models dense -Modes precise -Suites server -Exe $fake -ServerExe $fake -GateExe $fakeGate `
-            -GoldenRoot $root -Out (Join-Path $tmp "out") -KlReport $klGood 2>&1 | ForEach-Object { "$_" }
+            -GoldenRoot $root -Out (Join-Path $tmp "out") -KlReport $klGood @extra 2>&1 | ForEach-Object { "$_" }
         $c = $LASTEXITCODE
-        foreach ($k in @("FAKEGATE_FAIL", "FAKEGATE_NOPASS", "FAKEGATE_H", "FAKEGATE_TIER")) { [Environment]::SetEnvironmentVariable($k, $null) }
+        foreach ($k in @("FAKEGATE_FAIL", "FAKEGATE_NOPASS", "FAKEGATE_H", "FAKEGATE_TIER", "FAKEGATE_ARGS")) { [Environment]::SetEnvironmentVariable($k, $null) }
         return @{ rc = $c; out = $o }
     }
     $g7 = Join-Path $tmp "g7"
@@ -159,6 +159,11 @@ try {
     Expect "suite server: tier checks failed with the host tiers on is an error (a product FAIL)" $r 2 { -not ($r.out -match "^\s*INVALID ") }
     $r = RunSrv "check" $g7 @{ FAKEGATE_TIER = "mixed" }
     Expect "suite server: host tiers off but a non-tier check failed too is an error" $r 2 { -not ($r.out -match "^\s*INVALID ") }
+    # -ServerEnv "A=1,B=2" (one string, as pwsh -File passes it) reaches the gate as two --server-env arguments
+    $r = RunSrv "check" $g7 @{ FAKEGATE_ARGS = "1" } @("-ServerEnv", "WHIRL_MTP_ADAPT=0,WHIRL_NGRAM=0", "-KeepServerWork")
+    $da = Join-Path $tmp "out\dense_precise_server.diag.txt"
+    Expect "suite server: -ServerEnv adds --server-env per NAME=VALUE" $r 0 {
+        (Test-Path $da) -and ((Get-Content $da -Raw) -match "--server-env WHIRL_MTP_ADAPT=0 --server-env WHIRL_NGRAM=0") }
     $h1 = @(& pwsh -NoProfile -File $gate refhash -Models dense -Modes precise -Suites server -GoldenRoot $g7 2>&1 | ForEach-Object { "$_" })
     $rc1 = $LASTEXITCODE
     Add-Content (Join-Path $g7 "gfx1201\dense\precise_server.txt") "G srv.extra h=0"
