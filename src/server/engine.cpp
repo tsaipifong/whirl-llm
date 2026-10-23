@@ -100,7 +100,8 @@ struct CycleProf {
 // construction
 
 Engine::Engine(ServerModel& model, device::Backend& ops, const Tokenizer& tok, const EngineOptions& opt)
-    : m_(model), ops_(ops), tok_(tok), ct_(tok), opt_(opt), ctx_(opt.ctx), id_prng_(opt.seed) {
+    : m_(model), ops_(ops), tok_(tok), ct_(tok), opt_(opt), ctx_(opt.ctx),
+      ck_(ops, model, CkptStore::Layout{model.convBytes(), model.ssmBytes(), opt.ckpt_host}), id_prng_(opt.seed) {
     if (opt_.parallel < 1 || opt_.parallel > gdn_max_seg) throw std::runtime_error("parallel must be 1..16");
     if (opt_.n_ck == 0 || opt_.no_prefix_cache) opt_.n_spe = 0;
     if (opt_.no_prefix_cache) opt_.n_ck = 0;
@@ -143,73 +144,8 @@ Engine::Engine(ServerModel& model, device::Backend& ops, const Tokenizer& tok, c
 }
 
 Engine::~Engine() {
-    for (Slot& sl : slots_) {
-        for (Ckpt& c : sl.ckpts) freeCkpt(c);
-    }
-    for (Spe& s : spes_) {
-        freeCkpt(s.ck);
-    }
-    // the events (slots, shared checkpoints, quarantine) and the sampling buffers release themselves (device::EventH,
-    // device::DevBuf) when the members are destroyed
-}
-
-void Engine::initCkpt(Ckpt& c, bool host_ok) {
-    const auto& cfg = m_.cfg();
-    const std::uint32_t L = cfg.n_layer;
-    const std::uint64_t V = cfg.n_vocab;
-    c.conv.assign(L, 0);
-    c.ssm.assign(L, 0);
-    const auto ssm0 = m_.ssmState();
-    std::uint64_t n_gdn = 0;
-    for (std::uint32_t li = 0; li < L; ++li)
-        if (ssm0[li] != 0) ++n_gdn;
-    auto al = [](std::uint64_t x) { return (x + 255) / 256 * 256; };
-    if (host_ok && opt_.ckpt_host) {
-        // one pinned host buffer per checkpoint; save / load copy over PCIe
-        const std::uint64_t total = n_gdn * (al(conv_bytes_) + al(ssm_bytes_)) + V * 4;
-        c.host = ops_.hostMalloc(total);
-        std::uint64_t p = reinterpret_cast<std::uint64_t>(c.host);
-        for (std::uint32_t li = 0; li < L; ++li) {
-            if (ssm0[li] == 0) continue;
-            c.conv[li] = p;
-            p += al(conv_bytes_);
-            c.ssm[li] = p;
-            p += al(ssm_bytes_);
-        }
-        c.logits = p;
-        // the MTP hidden row stays in VRAM (prefill reads it as a device pointer)
-        c.hid = ops_.malloc(static_cast<std::uint64_t>(cfg.n_embd) * 4);
-        return;
-    }
-    // one VRAM allocation per checkpoint, sliced like the pinned layout (256-byte aligned parts);
-    // separate allocations per GDN layer (~98 on the 27B models) cost allocation granularity
-    const std::uint64_t hid_bytes = al(static_cast<std::uint64_t>(cfg.n_embd) * 4);
-    c.dev = ops_.malloc(n_gdn * (al(conv_bytes_) + al(ssm_bytes_)) + hid_bytes + V * 4);
-    std::uint64_t p = c.dev;
-    for (std::uint32_t li = 0; li < L; ++li) {
-        if (ssm0[li] == 0) continue;
-        c.conv[li] = p;
-        p += al(conv_bytes_);
-        c.ssm[li] = p;
-        p += al(ssm_bytes_);
-    }
-    c.hid = p;
-    p += hid_bytes;
-    c.logits = p;
-}
-
-void Engine::freeCkpt(Ckpt& c) {
-    if (c.host) {
-        ops_.hostFree(c.host);
-        c.host = nullptr;
-        if (c.hid) ops_.free(c.hid);
-    } else if (c.dev) {
-        ops_.free(c.dev);  // conv / ssm / hid / logits are slices of it
-        c.dev = 0;
-    }
-    c.conv.clear();
-    c.ssm.clear();
-    c.hid = c.logits = 0;
+    // the checkpoint buffers (Ckpt), events (slots, shared checkpoints, quarantine) and sampling buffers release
+    // themselves when the members are destroyed; Slot / Spe wait for their spill / ready fences first (F1)
 }
 
 void Engine::allocState() {
@@ -222,10 +158,10 @@ void Engine::allocState() {
         sl.id = si;
         sl.rs_map.fill(-1);
         sl.ckpts.resize(opt_.n_ck);
-        for (Ckpt& c : sl.ckpts) initCkpt(c, true);
+        ck_.unpark(sl.ckpts, true);
     }
     spes_.resize(opt_.n_spe);
-    for (Spe& s : spes_) initCkpt(s.ck, false);
+    for (Spe& s : spes_) ck_.init(s.ck, false);
     // sampling buffers
     const std::uint64_t samp_bytes = sampBytes();
     const std::uint64_t big_bytes = static_cast<std::uint64_t>(k_big) * 8 + 8;
@@ -399,34 +335,12 @@ void Engine::saveCkpt(Slot& sl, std::uint32_t pos, const char* kind, std::option
     // a spill to the host tier may still be reading the checkpoint buffers
     waitSpill(sl);
     Ckpt* slot = &sl.ckpts[pc_->ckptSlotFor(sl.ckpts, pos)];
-    m_.commitSeq(m_.curSeq());
-    const auto conv = m_.convState();
-    const auto ssm = m_.ssmState();
-    const auto& cfg = m_.cfg();
-    for (std::uint32_t i = 0; i < cfg.n_layer; ++i) {
-        if (ssm[i] == 0) continue;
-        ops_.copyAsync(slot->conv[i], conv[i], conv_bytes_, m_.stream());
-        ops_.copyAsync(slot->ssm[i], ssm[i], ssm_bytes_, m_.stream());
-    }
-    if (hid) ops_.copyAsync(slot->hid, *hid, static_cast<std::uint64_t>(cfg.n_embd) * 4, m_.stream());
-    if (logits) ops_.copyAsync(slot->logits, *logits, static_cast<std::uint64_t>(cfg.n_vocab) * 4, m_.stream());
-    slot->has_logits = logits.has_value();
+    ck_.save(*slot, hid, logits);
     sl.ckpt_seq += 1;
     slot->valid = true;
     slot->pos = pos;
     slot->seq = sl.ckpt_seq;
     slot->kind = kind;
-}
-
-void Engine::loadCkpt(const Ckpt& c) {
-    m_.dropPending(m_.curSeq());
-    const auto conv = m_.convState();
-    const auto ssm = m_.ssmState();
-    for (std::uint32_t i = 0; i < m_.cfg().n_layer; ++i) {
-        if (ssm[i] == 0) continue;
-        ops_.copyAsync(conv[i], c.conv[i], conv_bytes_, m_.stream());
-        ops_.copyAsync(ssm[i], c.ssm[i], ssm_bytes_, m_.stream());
-    }
 }
 
 void Engine::dropCache(Slot& sl) {
@@ -1338,7 +1252,7 @@ bool Engine::startJob(Slot& sl, Job& job) {
     sl.ck_hid.reset();
     if (mt.ck) {
         const Ckpt& c = *mt.ck;
-        loadCkpt(c);
+        ck_.load(c);
         sl.ck_hid = c.hid;
         if (spe_hit != nullptr && opt_.use_mtp) {
             // own copy of the MTP hidden row: the shared checkpoint may be
@@ -3382,26 +3296,14 @@ bool Engine::govAllIdle() const {
     return true;
 }
 
-std::uint64_t Engine::ckptVram(bool slot_ckpt) const {
-    const auto& cfg = m_.cfg();
-    const auto ssm0 = m_.ssmState();
-    std::uint64_t n_gdn = 0;
-    for (std::uint32_t li = 0; li < cfg.n_layer; ++li)
-        if (ssm0[li] != 0) ++n_gdn;
-    auto al = [](std::uint64_t x) { return (x + 255) / 256 * 256; };
-    const std::uint64_t hid = al(static_cast<std::uint64_t>(cfg.n_embd) * 4);
-    if (slot_ckpt && opt_.ckpt_host) return hid;  // WHIRL_CKPT_HOST: only the hidden row is in VRAM
-    return n_gdn * (al(conv_bytes_) + al(ssm_bytes_)) + hid + static_cast<std::uint64_t>(cfg.n_vocab) * 4;
-}
-
 std::uint64_t Engine::govFreeable() const {
     std::uint64_t b = 0;
     bool pf = false;
     for (const Slot& sl : slots_) {
         pf = pf || sl.phase == Phase::prefill || sl.phase == Phase::restore;
-        if (sl.phase == Phase::idle && sl.job == nullptr && sl.restore == nullptr && !sl.parked) b += sl.ckpts.size() * ckptVram(true);
+        if (sl.phase == Phase::idle && sl.job == nullptr && sl.restore == nullptr && !sl.parked) b += sl.ckpts.size() * ck_.bytes(true);
     }
-    if (!pf && !spe_parked_) b += spes_.size() * ckptVram(false);
+    if (!pf && !spe_parked_) b += spes_.size() * ck_.bytes(false);
     return b;
 }
 
@@ -3455,6 +3357,15 @@ void Engine::govDrain() {
     if (tier_ != nullptr) ops_.streamSync(tier_->stream);
 }
 
+std::uint64_t parkSlotCkpts(CkptStore& cs, Slot& sl) {
+    // the spill to the RAM tier may still read the checkpoint buffers: its fence goes to park (F1)
+    const std::uint64_t b = sl.ckpts.size() * cs.bytes(true);
+    cs.park(sl.ckpts, {sl.spill_ev.get()});
+    sl.ckpts.clear();
+    sl.parked = true;
+    return b;
+}
+
 void Engine::govFreeCache(bool park) {
     std::size_t n_sl = 0, n_pages = 0, n_spe = 0, n_park = 0;
     std::uint64_t ck_bytes = 0;
@@ -3468,14 +3379,7 @@ void Engine::govFreeCache(bool park) {
             freePages(sl);
         }
         if (park && !sl.parked && !sl.ckpts.empty()) {
-            // the spill to the RAM tier may still read the checkpoint buffers
-            sl.spill_ev.waitIfPending();
-            for (Ckpt& c : sl.ckpts) {
-                ck_bytes += ckptVram(true);
-                freeCkpt(c);
-            }
-            sl.ckpts.clear();
-            sl.parked = true;
+            ck_bytes += parkSlotCkpts(ck_, sl);
             ++n_park;
         }
     }
@@ -3493,8 +3397,8 @@ void Engine::govFreeCache(bool park) {
             }
             reclaimPages(true);
             for (Spe& sp : spes_) {
-                ck_bytes += ckptVram(false);
-                freeCkpt(sp.ck);
+                ck_bytes += ck_.bytes(false);
+                ck_.release(sp.ck, {sp.spill_ev.get(), sp.ready_ev.get()});
             }
             spes_.clear();  // destroys the events (device::EventH)
             spe_parked_ = true;
@@ -3530,8 +3434,8 @@ void Engine::govRestoreCache() {
             // a parked slot holds no checkpoint buffer (govFreeCache cleared them; a failed restore frees its partial ones)
             sl.ckpts.clear();
             sl.ckpts.resize(opt_.n_ck);
-            for (Ckpt& c : sl.ckpts) initCkpt(c, true);
-            bytes += sl.ckpts.size() * ckptVram(true);
+            ck_.unpark(sl.ckpts, true);
+            bytes += sl.ckpts.size() * ck_.bytes(true);
             sl.parked = false;
             cur = nullptr;
             ++n;
@@ -3540,20 +3444,21 @@ void Engine::govRestoreCache() {
             cur_spe = true;
             spes_.clear();
             spes_.resize(opt_.n_spe);
-            for (Spe& sp : spes_) initCkpt(sp.ck, false);
-            bytes += spes_.size() * ckptVram(false);
+            for (Spe& sp : spes_) ck_.init(sp.ck, false);
+            bytes += spes_.size() * ck_.bytes(false);
             spe_parked_ = false;
             cur_spe = false;
         }
     } catch (const std::exception& ex) {
         // REVIEW-GOV-1 P2-2: free what the unfinished slot / shared checkpoints got, so they stay parked holding nothing and
-        // the next try starts clean (initCkpt overwrites its pointers: a retry over partial buffers leaked them)
+        // the next try starts clean (before arch024 S3 initCkpt overwrote raw pointers: a retry over partial buffers leaked them)
+        // {}: these buffers were just allocated, no spill has read them (F1; arch024 S3 test ckpt_restore_fail)
         if (cur != nullptr) {
-            for (Ckpt& c : cur->ckpts) freeCkpt(c);
+            ck_.park(cur->ckpts, {});
             cur->ckpts.clear();
         }
         if (cur_spe) {
-            for (Spe& sp : spes_) freeCkpt(sp.ck);
+            for (Spe& sp : spes_) ck_.release(sp.ck, {});
             spes_.clear();
         }
         gov_parked_ = gov_parked_ > bytes ? gov_parked_ - bytes : 0;

@@ -36,7 +36,9 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <stdexcept>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 #ifndef NOMINMAX
@@ -231,6 +233,22 @@ public:
         tier_.reset();
         engine_.reset();
         model_.reset();
+    }
+    // arch024 S3: shutdown() with a callback before each step ("tier": the tier is destroyed next, "engine", "model",
+    // "end"), so a test can watch what the destructors do
+    void shutdownSteps(const std::function<void(const char*)>& at) {
+        engine_->stop();
+        if (loop_.joinable()) loop_.join();
+        http_->stop();
+        http_.reset();
+        engine_->attachTier(nullptr);
+        at("tier");
+        tier_.reset();
+        at("engine");
+        engine_.reset();
+        at("model");
+        model_.reset();
+        at("end");
     }
     HttpResult post(const std::string& path, const std::string& body) {
         return test::httpRequest("127.0.0.1", http_->port(), "POST", path, body);
@@ -3500,6 +3518,353 @@ void testVision() {
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// arch024 S3: CkptStore (M2) and invariant F1 (never free a checkpoint buffer a spill may still read), on NullBackend's
+// tracking mode (stream order). A spill is modelled the way Tier::copyOut + Tier::fence do it: copies that read the
+// checkpoint buffers on a tier stream, then the slot's spill_ev recorded on that stream.
+
+std::uint64_t al256(std::uint64_t x) { return (x + 255) / 256 * 256; }
+
+struct CkRig {
+    NullBackend nb;
+    std::unique_ptr<MockModel> model;
+    std::unique_ptr<CkptStore> cs;
+    device::Stream ts = nullptr;  // the tier stream
+    void* dst = nullptr;          // the RAM tier block the spill writes
+    std::size_t live0 = 0;
+    std::uint64_t dev0 = 0;
+    explicit CkRig(bool ckpt_host = false) {
+        MockConfig mc;
+        mc.parallel = 2;
+        mc.pool_tokens = 4096;
+        model = std::make_unique<MockModel>(nb, tok(), mc);
+        cs = std::make_unique<CkptStore>(nb, *model, CkptStore::Layout{model->convBytes(), model->ssmBytes(), ckpt_host});
+        ts = nb.streamCreateNonBlocking();
+        dst = nb.hostMalloc(1 << 20);
+        live0 = nb.liveAllocations();
+        dev0 = nb.deviceBytes();
+        nb.trackPending(true);
+    }
+    static DevPtr base(const Ckpt& c) { return c.dev ? c.dev.get() : c.host.addr(); }
+    // spill of these checkpoints, fenced by ev (made if empty)
+    void spill(std::span<const Ckpt> cks, device::EventH& ev) {
+        for (const Ckpt& c : cks) nb.copyAsync(reinterpret_cast<DevPtr>(dst), base(c), 64, ts);
+        if (!ev) ev = device::EventH::create(nb);
+        nb.eventRecord(ev.get(), ts);
+    }
+    void spill(Slot& sl) { spill(sl.ckpts, sl.spill_ev); }
+    Slot slot(std::size_t n = 2) {
+        Slot sl;
+        sl.ckpts.resize(n);
+        cs->unpark(sl.ckpts, true);
+        return sl;
+    }
+    // the rest of the teardown is not under test; true when nothing leaked
+    bool finish() {
+        nb.completeAll();
+        nb.hostFree(dst);
+        nb.streamDestroy(ts);
+        cs.reset();
+        model.reset();
+        return nb.clean();
+    }
+};
+
+void testCkptStore() {
+    // ---- host_ok branch and sizes (the formula of Engine::initCkpt / ckptVram before arch024 S3)
+    for (const bool ckpt_host : {false, true}) {
+        CkRig r(ckpt_host);
+        const auto& cfg = r.model->cfg();
+        std::uint64_t n_gdn = 0;
+        for (auto p : r.model->ssmState())
+            if (p) ++n_gdn;
+        CHECK(n_gdn > 0);
+        const std::uint64_t parts = n_gdn * (al256(32) + al256(64));
+        const std::uint64_t hid = al256(static_cast<std::uint64_t>(cfg.n_embd) * 4);
+        const std::uint64_t full = parts + hid + static_cast<std::uint64_t>(cfg.n_vocab) * 4;
+        CHECK_EQ(r.cs->bytes(false), full);
+        CHECK_EQ(r.cs->bytes(true), ckpt_host ? hid : full);
+        Ckpt a, b;
+        const long host0 = r.nb.liveHost();
+        r.cs->init(a, true);   // a per-slot checkpoint
+        r.cs->init(b, false);  // a shared prefix checkpoint: always VRAM
+        if (ckpt_host) {
+            CHECK(static_cast<bool>(a.host) && static_cast<bool>(a.hid_buf) && !a.dev);
+            CHECK_EQ(a.host.bytes(), parts + static_cast<std::uint64_t>(cfg.n_vocab) * 4);
+            CHECK_EQ(a.hid_buf.bytes(), static_cast<std::uint64_t>(cfg.n_embd) * 4);
+            CHECK_EQ(a.hid, a.hid_buf.get());
+            CHECK_EQ(a.logits, a.host.addr() + parts);
+            CHECK_EQ(r.nb.liveHost(), host0 + 1);
+            CHECK_EQ(r.nb.liveAllocations(), r.live0 + 3);
+        } else {
+            CHECK(static_cast<bool>(a.dev) && !a.host && !a.hid_buf);
+            CHECK_EQ(a.dev.bytes(), full);
+            CHECK_EQ(a.hid, a.dev.get() + parts);
+            CHECK_EQ(a.logits, a.dev.get() + parts + hid);
+            CHECK_EQ(r.nb.liveHost(), host0);
+            CHECK_EQ(r.nb.liveAllocations(), r.live0 + 2);
+        }
+        CHECK(static_cast<bool>(b.dev) && !b.host);
+        CHECK_EQ(b.dev.bytes(), full);
+        CHECK_EQ(r.nb.deviceBytes(), r.dev0 + (ckpt_host ? a.hid_buf.bytes() : full) + full);
+        // conv / ssm slices exactly on the DeltaNet layers, in layer order, 256-byte aligned parts
+        std::uint64_t at = CkRig::base(a);
+        bool slices = a.conv.size() == cfg.n_layer && a.ssm.size() == cfg.n_layer;
+        for (std::uint32_t li = 0; slices && li < cfg.n_layer; ++li) {
+            if (r.model->ssmState()[li] == 0) {
+                slices = a.conv[li] == 0 && a.ssm[li] == 0;
+                continue;
+            }
+            slices = a.conv[li] == at && a.ssm[li] == at + al256(32);
+            at += al256(32) + al256(64);
+        }
+        CHECK(slices);
+        // park -> unpark: live counts and device bytes back to the same
+        const std::size_t live1 = r.nb.liveAllocations();
+        const std::uint64_t dev1 = r.nb.deviceBytes();
+        std::vector<Ckpt> v(1);
+        v[0] = std::move(a);
+        r.cs->park(v, {});
+        CHECK(v[0].conv.empty() && v[0].hid == 0 && v[0].logits == 0 && !v[0].dev && !v[0].host && !v[0].hid_buf);
+        CHECK(r.nb.liveAllocations() < live1);
+        r.cs->unpark(v, true);
+        CHECK_EQ(r.nb.liveAllocations(), live1);
+        CHECK_EQ(r.nb.deviceBytes(), dev1);
+        r.cs->release(v[0], {});
+        r.cs->release(b, {});
+        CHECK_EQ(r.nb.liveAllocations(), r.live0);
+        CHECK_EQ(r.nb.pendingFreeViolations(), 0u);
+        CHECK(r.finish());
+    }
+    // ---- save / load: the copies between the current sequence's state and the checkpoint
+    {
+        CkRig r;
+        Ckpt c;
+        r.cs->init(c, true);
+        r.nb.trackPending(false);
+        std::uint64_t n_gdn = 0;
+        for (auto p : r.model->ssmState())
+            if (p) ++n_gdn;
+        const std::uint64_t n0 = r.nb.copyCalls();
+        r.cs->save(c, std::nullopt, r.model->logits());
+        CHECK_EQ(r.nb.copyCalls() - n0, 2 * n_gdn + 1);
+        CHECK(c.has_logits);
+        const std::uint64_t n1 = r.nb.copyCalls();
+        r.cs->save(c, r.model->mtpH(), std::nullopt);
+        CHECK_EQ(r.nb.copyCalls() - n1, 2 * n_gdn + 1);
+        CHECK(!c.has_logits);
+        const std::uint64_t n2 = r.nb.copyCalls();
+        r.cs->load(c);
+        CHECK_EQ(r.nb.copyCalls() - n2, 2 * n_gdn);
+        r.cs->release(c, {});
+        CHECK(r.finish());
+    }
+}
+
+// F1: every way a slot / shared checkpoint can go away with a spill pending waits first (0 violations, a sync ran);
+// freeing past the fence is caught (the harness is not blind)
+void testCkptF1() {
+    static_assert(std::is_nothrow_move_constructible_v<Slot> && std::is_nothrow_move_assignable_v<Slot>);
+    static_assert(std::is_nothrow_move_constructible_v<Spe> && std::is_nothrow_move_assignable_v<Spe>);
+    static_assert(!std::is_copy_constructible_v<Slot> && !std::is_copy_assignable_v<Slot>);
+    static_assert(!std::is_copy_constructible_v<Spe> && !std::is_copy_assignable_v<Spe>);
+    auto pass = [](CkRig& r, std::uint64_t syncs0, const char* what) {
+        const bool ok = r.nb.pendingFreeViolations() == 0 && r.nb.syncCalls() > syncs0;
+        if (!ok)
+            std::fprintf(stderr, "  F1 %s: violations %zu, syncs %llu -> %llu\n", what, r.nb.pendingFreeViolations(),
+                         static_cast<unsigned long long>(syncs0), static_cast<unsigned long long>(r.nb.syncCalls()));
+        CHECK(ok);
+    };
+    {  // vector clear
+        CkRig r;
+        std::vector<Slot> v;
+        v.push_back(r.slot());
+        v.push_back(r.slot());
+        r.spill(v[0]);
+        r.spill(v[1]);
+        const auto s0 = r.nb.syncCalls();
+        v.clear();
+        pass(r, s0, "clear");
+        CHECK(r.finish());
+    }
+    {  // vector growth (moves free nothing, need no wait), then resize smaller
+        CkRig r;
+        std::vector<Slot> v;
+        v.push_back(r.slot());
+        r.spill(v[0]);
+        const auto sg = r.nb.syncCalls();
+        for (int i = 0; i < 8; ++i) v.push_back(r.slot());  // reallocations move v[0] with its spill pending
+        CHECK_EQ(r.nb.syncCalls(), sg);
+        CHECK_EQ(r.nb.pendingFreeViolations(), 0u);
+        r.spill(v[8]);
+        const auto s0 = r.nb.syncCalls();
+        v.resize(8);
+        pass(r, s0, "resize");
+        v.clear();
+        CHECK(r.finish());
+    }
+    {  // exception unwinding
+        CkRig r;
+        const auto s0 = r.nb.syncCalls();
+        try {
+            Slot sl = r.slot();
+            r.spill(sl);
+            throw std::runtime_error("restore failed");
+        } catch (const std::runtime_error&) {
+        }
+        pass(r, s0, "unwind");
+        CHECK(r.finish());
+    }
+    {  // move-assign over a slot whose spill is pending
+        CkRig r;
+        Slot a = r.slot();
+        Slot b = r.slot();
+        const DevPtr b_dev = b.ckpts[0].dev.get();
+        r.spill(a);
+        const auto s0 = r.nb.syncCalls();
+        a = std::move(b);
+        pass(r, s0, "move-assign");
+        CHECK(a.ckpts.size() == 2 && a.ckpts[0].dev.get() == b_dev);
+        CHECK(b.ckpts.empty() && !b.spill_ev);
+        CHECK_EQ(r.nb.liveAllocations(), r.live0 + 2);
+        a = Slot{};
+        CHECK(r.finish());
+    }
+    {  // governor park (govFreeCache's call: parkSlotCkpts passes the slot's spill fence)
+        CkRig r;
+        Slot sl = r.slot();
+        r.spill(sl);
+        const auto s0 = r.nb.syncCalls();
+        const std::uint64_t freed = parkSlotCkpts(*r.cs, sl);
+        pass(r, s0, "park");
+        CHECK_EQ(freed, 2 * r.cs->bytes(true));
+        CHECK(sl.parked && sl.ckpts.empty());
+        CHECK_EQ(r.nb.liveAllocations(), r.live0);
+        sl.spill_ev.reset();
+        CHECK(r.finish());
+    }
+    {  // shared prefix checkpoints: spill (reads ck) and ready (a copy into ck on another stream)
+        CkRig r;
+        device::Stream s2 = r.nb.streamCreateNonBlocking();
+        std::vector<Spe> v(2);
+        for (Spe& sp : v) r.cs->init(sp.ck, false);
+        r.spill(std::span<const Ckpt>(&v[0].ck, 1), v[0].spill_ev);
+        r.nb.copyAsync(v[1].ck.dev.get(), reinterpret_cast<DevPtr>(r.dst), 64, s2);
+        v[1].ready_ev = device::EventH::create(r.nb);
+        r.nb.eventRecord(v[1].ready_ev.get(), s2);
+        const auto s0 = r.nb.syncCalls();
+        v.clear();
+        pass(r, s0, "spe clear");
+        CHECK(r.nb.syncCalls() >= s0 + 2);
+        // release with the fences passed (govFreeCache's shared part)
+        Spe sp;
+        r.cs->init(sp.ck, false);
+        r.spill(std::span<const Ckpt>(&sp.ck, 1), sp.spill_ev);
+        const auto s1 = r.nb.syncCalls();
+        r.cs->release(sp.ck, {sp.spill_ev.get(), sp.ready_ev.get()});
+        pass(r, s1, "spe release");
+        sp = Spe{};
+        r.nb.streamDestroy(s2);
+        CHECK(r.finish());
+    }
+    {  // the harness catches a free past the fence: release without the fence, with a spill pending
+        CkRig r;
+        Slot sl = r.slot(1);
+        r.spill(sl);
+        r.cs->release(sl.ckpts[0], {});
+        CHECK_EQ(r.nb.pendingFreeViolations(), 1u);
+        sl = Slot{};
+        CHECK(r.finish());
+    }
+}
+
+// govRestoreCache's failure cleanup passes {}: the buffers it frees were just allocated, so no spill has read them;
+// another slot's spill still pending on the tier stream does not count against them (0 violations, no sync needed)
+void testCkptRestoreFail() {
+    for (const std::uint64_t nth : {1ull, 2ull}) {
+        CkRig r;
+        Slot busy = r.slot();
+        r.spill(busy);  // pending all through the restore
+        Slot sl = r.slot();
+        r.spill(sl);
+        parkSlotCkpts(*r.cs, sl);  // the slot was parked after its spill
+        const std::size_t live_parked = r.nb.liveAllocations();
+        const auto s0 = r.nb.syncCalls();
+        r.nb.failMalloc(nth);
+        bool threw = false;
+        try {
+            sl.ckpts.clear();
+            sl.ckpts.resize(2);
+            r.cs->unpark(sl.ckpts, true);
+        } catch (const std::exception&) {
+            threw = true;
+            r.cs->park(sl.ckpts, {});
+            sl.ckpts.clear();
+        }
+        CHECK(threw);
+        CHECK_EQ(r.nb.pendingFreeViolations(), 0u);
+        CHECK_EQ(r.nb.syncCalls(), s0);
+        CHECK_EQ(r.nb.liveAllocations(), live_parked);
+        // the shared prefix checkpoints' cleanup the same way
+        std::vector<Spe> spes(2);
+        r.nb.failMalloc(2);
+        threw = false;
+        try {
+            for (Spe& sp : spes) r.cs->init(sp.ck, false);
+        } catch (const std::exception&) {
+            threw = true;
+            for (Spe& sp : spes) r.cs->release(sp.ck, {});
+            spes.clear();
+        }
+        CHECK(threw);
+        CHECK_EQ(r.nb.pendingFreeViolations(), 0u);
+        CHECK_EQ(r.nb.liveAllocations(), live_parked);
+        r.nb.failMalloc(0);
+        busy = Slot{};
+        sl = Slot{};
+        CHECK(r.finish());
+    }
+}
+
+// ~Engine with the tier attached, tracking on from before the last request (its request-end spill and the stop's
+// flush are tracked): walks the server's teardown order once (tier, then engine, then model) and reports whether a
+// slot's spill was still pending when ~Engine ran (the Slot destructor's wait); ~Engine frees nothing past a fence
+void testCkptEngineTeardown() {
+    ServerSetup su = baseSetup(false);
+    su.mc.parallel = 2;
+    su.tier = true;
+    su.tier_min = 512;
+    TestServer srv(su);
+    const auto p1 = makePrompt(1500, 301), p2 = makePrompt(1500, 302);
+    CHECK_EQ(completionText(srv.post("/v1/completions", completionBody(p1, 8))), decode(srv.model().greedyReference(p1, 8, true)));
+    srv.ops().trackPending(true);
+    CHECK_EQ(completionText(srv.post("/v1/completions", completionBody(p2, 8))), decode(srv.model().greedyReference(p2, 8, true)));
+    std::uint64_t syncs_engine = 0, syncs_after = 0;
+    std::size_t viol_tier = 0, viol_engine = 0, viol_after = 0;
+    srv.shutdownSteps([&](const char* step) {
+        const std::string s = step;
+        if (s == "tier") viol_tier = srv.ops().pendingFreeViolations();
+        if (s == "engine") {
+            syncs_engine = srv.ops().syncCalls();
+            viol_engine = srv.ops().pendingFreeViolations();
+        }
+        if (s == "model") {
+            syncs_after = srv.ops().syncCalls();
+            viol_after = srv.ops().pendingFreeViolations();
+        }
+    });
+    CHECK_EQ(viol_after, viol_engine);  // ~Engine freed nothing past a fence
+    for (const auto& v : srv.ops().violations())
+        std::printf("  ckpt_engine_teardown: violation: stream %llu work %llu release #%llu %s\n", static_cast<unsigned long long>(v.stream),
+                    static_cast<unsigned long long>(v.seq), static_cast<unsigned long long>(v.order), v.host ? "hostFree" : "free");
+    std::printf("  ckpt_engine_teardown: violations before ~Tier %zu, before ~Engine %zu, after %zu; host syncs in ~Engine %llu (%s)\n",
+                viol_tier, viol_engine, viol_after, static_cast<unsigned long long>(syncs_after - syncs_engine),
+                syncs_after > syncs_engine ? "a spill was pending at ~Engine: the Slot / Spe wait ran"
+                                           : "no spill pending at ~Engine");
+    srv.ops().completeAll();
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -4092,6 +4457,10 @@ int main(int argc, char** argv) {
         {"startup_adjust", testStartupAdjust},
         {"governor", testGovernor},
         {"governor_restore", testGovernorRestore},
+        {"ckpt_store", testCkptStore},
+        {"ckpt_f1", testCkptF1},
+        {"ckpt_restore_fail", testCkptRestoreFail},
+        {"ckpt_engine_teardown", testCkptEngineTeardown},
         {"compat_endpoints", testCompatEndpoints},
         {"http_limits", testHttpLimits},
         {"http_conn_cap", testHttpConnCap},

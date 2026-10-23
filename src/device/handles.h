@@ -69,6 +69,12 @@ inline void destroyStream(Backend& b, Stream s) { b.streamDestroy(s); }
 
 }  // namespace detail
 
+// F1: the host waits for the work before e if it is still pending (no event: nothing). The one place that waits
+// before a free: EventH::waitIfPending and CkptStore's fences (arch024 S3) go through it.
+inline void waitIfPending(Backend& b, Event e) {
+    if (e != Event{} && !b.eventDone(e)) b.eventSync(e);
+}
+
 // Device memory: Backend::malloc / free.
 class DevBuf {
 public:
@@ -119,7 +125,7 @@ public:
     // F1: the host waits for the work before this event (if any is still pending). Every "wait before free"
     // goes through here (govFreeCache's hand-written line before arch024).
     void waitIfPending() const {
-        if (Backend* b = h_.backend(); b != nullptr && h_ && !b->eventDone(h_.get())) b->eventSync(h_.get());
+        if (Backend* b = h_.backend(); b != nullptr && h_) device::waitIfPending(*b, h_.get());
     }
 
 private:

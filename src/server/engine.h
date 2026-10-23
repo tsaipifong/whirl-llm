@@ -8,6 +8,7 @@
 #pragma once
 
 #include "backend.h"
+#include "cache/ckpt_store.h"
 #include "cache/prefix_cache.h"
 #include "decode_floor.h"
 #include "protocol.h"
@@ -99,15 +100,6 @@ struct Job {
     bool done = false;  // guarded by Engine::q_mutex
 };
 
-// index fields (valid, pos, seq, kind, has_logits): cache::CkptKey
-struct Ckpt : cache::CkptKey {
-    std::vector<DevPtr> conv, ssm;
-    DevPtr hid = 0;
-    DevPtr logits = 0;
-    void* host = nullptr;  // pinned host buffer (WHIRL_CKPT_HOST)
-    DevPtr dev = 0;        // the one VRAM allocation that conv / ssm / hid / logits are slices of
-};
-
 struct Cand {
     std::uint32_t id;
     float logit;
@@ -184,8 +176,8 @@ private:
     void send(const std::string& b);
 };
 
-// cache_tokens, last_used: cache::SlotCache
-struct Slot : cache::SlotCache {
+// cache_tokens, last_used: cache::SlotCache. The members; Slot adds the F1 wait (below).
+struct SlotData : cache::SlotCache {
     std::uint32_t id = 0;
     Phase phase = Phase::idle;
     Job* job = nullptr;
@@ -271,9 +263,37 @@ struct Slot : cache::SlotCache {
     std::uint64_t reqId() const { return job ? job->id : 0; }
 };
 
+// F1 (arch024 M1 / M2): a slot that goes away or is overwritten (vector clear / resize, exception unwinding,
+// move-assign) first waits for its last spill, which may still read the checkpoint buffers; only then are the
+// members (Ckpt's DevBuf / PinnedBuf) destroyed. All five special members are written out: a destructor alone would
+// suppress the implicit moves, and slots_.resize needs the noexcept move constructor.
+struct Slot : SlotData {
+    Slot() = default;
+    Slot(Slot&&) noexcept = default;  // resources change hands, nothing is freed: no wait
+    Slot& operator=(Slot&& o) noexcept {
+        if (this != &o) {
+            waitSpill();
+            SlotData::operator=(std::move(o));
+        }
+        return *this;
+    }
+    ~Slot() { waitSpill(); }
+    Slot(const Slot&) = delete;
+    Slot& operator=(const Slot&) = delete;
+
+private:
+    // a destructor cannot throw: an event error (device lost) leaves nothing to wait for
+    void waitSpill() noexcept {
+        try {
+            spill_ev.waitIfPending();
+        } catch (...) {
+        }
+    }
+};
+
 // Shared prefix checkpoint (item S).
 // index fields (valid, n, kind, tokens, last_used, pin, uses): cache::SpeKey
-struct Spe : cache::SpeKey {
+struct SpeData : cache::SpeKey {
     std::vector<std::int32_t> pages;
     Ckpt ck;
     std::uint64_t tier_id = 0;
@@ -281,6 +301,35 @@ struct Spe : cache::SpeKey {
     bool spill_busy = false;
     device::EventH ready_ev;
 };
+
+// F1 as for Slot: waits for the spill (reads ck) and the ready fence (the copy into ck) before ck is freed.
+struct Spe : SpeData {
+    Spe() = default;
+    Spe(Spe&&) noexcept = default;
+    Spe& operator=(Spe&& o) noexcept {
+        if (this != &o) {
+            waitFences();
+            SpeData::operator=(std::move(o));
+        }
+        return *this;
+    }
+    ~Spe() { waitFences(); }
+    Spe(const Spe&) = delete;
+    Spe& operator=(const Spe&) = delete;
+
+private:
+    void waitFences() noexcept {
+        try {
+            spill_ev.waitIfPending();
+            ready_ev.waitIfPending();
+        } catch (...) {
+        }
+    }
+};
+
+// govFreeCache's checkpoint part for one idle slot: F1 passes the slot's spill fence to CkptStore::park, then the
+// slot holds no checkpoint buffer (parked). Returns the VRAM freed. A free function so the F1 tests drive this call.
+std::uint64_t parkSlotCkpts(CkptStore& cs, Slot& sl);
 
 struct QBatch {
     std::vector<std::int32_t> pages;
@@ -496,7 +545,6 @@ private:
 
     // checkpoints
     void saveCkpt(Slot& sl, std::uint32_t pos, const char* kind, std::optional<DevPtr> hid, std::optional<DevPtr> logits);
-    void loadCkpt(const Ckpt& c);
     void dropCache(Slot& sl);
     void freePages(Slot& sl);
     // pages
@@ -602,7 +650,6 @@ private:
     void govTick(const wddmwatch::Sample& s);   // after each sample: decide (and log the decisions)
     void govApply();                            // at a safe point of runLoop (no forward in flight): act
     bool govAllIdle() const;
-    std::uint64_t ckptVram(bool slot_ckpt) const;  // VRAM of one checkpoint buffer
     std::uint64_t govFreeable() const;
     void govFreeCache(bool park);
     void govRestoreCache();
@@ -615,7 +662,6 @@ private:
         for (const KvArr& a : kv_arrays_) b += a.row;
         return b;
     }
-    void initCkpt(Ckpt& c, bool host_ok);
     // vision: image embeddings (cache by content hash), per-slot image maps, idle release
     EmbEntry* embGet(const vision::Prepared& p, std::uint64_t req, std::uint32_t slot);
     void embUnpin(EmbEntry* ent);
@@ -624,7 +670,6 @@ private:
     void visDone(Slot& sl, Job& job);
     void visIdle();
     bool visWakeNeeded() const;
-    void freeCkpt(Ckpt& c);
 
     ServerModel& m_;
     device::Backend& ops_;
@@ -632,6 +677,7 @@ private:
     ChatTokens ct_;
     EngineOptions opt_;
     std::uint32_t ctx_;
+    CkptStore ck_;  // checkpoint buffers (arch024 M2)
     std::vector<std::int32_t> free_pages_;
     std::uint32_t pool_pages_ = 0;
     std::array<qwen35::DraftTiming, gdn_max_seg + 1> timing_{};
