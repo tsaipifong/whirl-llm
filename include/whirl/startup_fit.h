@@ -68,6 +68,10 @@ struct PinnedState {
 };
 // MiB the RAM tier may still pin, whole 512 MiB (0: none); pinned_room_unknown when nothing is known.
 std::uint64_t pinnedRoomMb(const PinnedState& s);
+// Bytes the vision encoder pins for an mmproj file of file_bytes (PinnedState::later). The file size alone is not an
+// upper bound (REVIEW-B0 N1): Vision::load pads its layout (vision.cpp: 256-byte / 4-KiB alignment, n_ff_pad, f32
+// position embedding and biases), so Swift's 884.6 MiB mmproj pinned 887 MiB (REVIEW-S8-719-3 N3-4).
+std::uint64_t mmprojPinnedBytes(std::uint64_t file_bytes);
 // The reason text of a RAM tier lowered to the pinned room (log and "adjusted:" line). It must match none of the error
 // patterns the gates and repro scripts scan server logs for (golden.ps1, kvram719_tier.ps1, fix719.ps1: "hipError",
 // "hip ... 719", "| failed:", "PAL failed"): a healthy, adjusted server must not read as a failed one (REVIEW-S8-719 A1).

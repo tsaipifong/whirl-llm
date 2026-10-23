@@ -3429,6 +3429,12 @@ void testB0SizingFollowUps() {
         startfit::PinnedState igl = ig;
         igl.later = 887 * MiB;
         CHECK(startfit::pinnedRoomMb(igl) * MiB + (1441 + 887) * MiB + startfit::pinned_reserve_mb * MiB <= 16203 * MiB);
+        // REVIEW-B0 N1: the mmproj file size is not an upper bound of what Vision::load pins. MEASURED: Swift's
+        // mmproj-Swift-1.5-Qwen3.8-27B-F16.gguf is 927607584 B (884.6 MiB) and pinned 887 MiB (REVIEW-S8-719-3 N3-4)
+        constexpr std::uint64_t swift_mmproj = 927607584;
+        CHECK(startfit::mmprojPinnedBytes(swift_mmproj) >= 887 * MiB);
+        CHECK(startfit::mmprojPinnedBytes(swift_mmproj) <= swift_mmproj + 128 * MiB);  // a bound, not a guess of 2x
+        CHECK(startfit::mmprojPinnedBytes(0) == 0);  // no mmproj: nothing later
     }
     // N3-2 (REVIEW-S8-719-3:59): when the half-of-available-RAM rule (not the pinned room) turns an explicit tier off, the
     // texts must not say "no room left"; they must name the half rule. A room of 0 still says "no room left".

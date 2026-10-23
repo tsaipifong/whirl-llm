@@ -32,6 +32,8 @@ std::uint64_t pinnedRoomMb(const PinnedState& s) {
     return room;
 }
 
+std::uint64_t mmprojPinnedBytes(std::uint64_t file_bytes) { return file_bytes; }
+
 std::string pinnedWhy(std::uint64_t room_mb, std::size_t n_gpus) {
     // no "hip" anywhere, no "failed:" (REVIEW-S8-719 A1): log scanners match hipError / hip...719 case-insensitively
     return std::format("lowered to {} MiB: the GPUs can keep only so much pinned host memory resident ({} GPU(s) map it; "
