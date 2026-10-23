@@ -230,9 +230,9 @@ if ($Cells -contains "E7") {
     $hostOk = $sel.Count -gt 0 -and @($sel | Select-String -SimpleMatch "(in pinned host memory)" -List).Count -eq $sel.Count
     Note "E7_gpu_select" ($gsc -eq 0 -and ($o -match "^gpu select check: ok") -and $hostOk) "WHIRL_CKPT_HOST=1 gpu_select_check exit $gsc ($(@($o | Select-Object -Last 1))); logs naming '(in pinned host memory)' $(@($sel | Select-String -SimpleMatch '(in pinned host memory)' -List).Count)/$($sel.Count)"
     if ($Golden) {
-        $golden = Join-Path $PSScriptRoot "..\golden\golden.ps1"
+        $goldenPs = Join-Path $PSScriptRoot "..\golden\golden.ps1"
         $gout = Join-Path $Work "e7_golden"
-        $o = @(& pwsh -NoProfile -File $golden check -Arch $arch -Suites server -Models swift,moe -Modes precise,balance,fast -Exe $cli -ServerExe $srv -GateExe $gate `
+        $o = @(& pwsh -NoProfile -File $goldenPs check -Arch $arch -Suites server -Models swift,moe -Modes precise,balance,fast -Exe $cli -ServerExe $srv -GateExe $gate `
                 -Out $gout -KeepServerWork -Port ($Port + 2) -ServerEnv "WHIRL_CKPT_HOST=1" 2>&1 | ForEach-Object { "$_" })
         $gc = $LASTEXITCODE
         $o | Set-Content (Join-Path $Work "e7_golden.txt")
