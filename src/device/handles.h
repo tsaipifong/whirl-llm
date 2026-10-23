@@ -13,6 +13,9 @@
 // - A moved-from handle is empty; destroying or resetting an empty handle calls nothing.
 // - Move-assign releases what the target held first, then takes over.
 // - No release(): ownership never leaves a handle as a raw value.
+// - adopt() (arch024 S11) takes over a value made outside the Backend, for the kinds the Backend does not create:
+//   timing events (hip::eventCreate()), blocking streams (hip::streamCreate()). It is released through `b`
+//   like any other; the value must be one `b` can release (made by the same HIP runtime).
 
 #pragma once
 
@@ -80,6 +83,7 @@ class DevBuf {
 public:
     DevBuf() noexcept = default;
     static DevBuf alloc(Backend& b, std::uint64_t bytes) { return DevBuf(b, b.malloc(bytes), bytes); }
+    static DevBuf adopt(Backend& b, DevPtr p, std::uint64_t bytes) noexcept { return DevBuf(b, p, bytes); }
     DevPtr get() const noexcept { return h_.get(); }
     std::uint64_t bytes() const noexcept { return h_ ? bytes_ : 0; }
     explicit operator bool() const noexcept { return static_cast<bool>(h_); }
@@ -99,6 +103,7 @@ class PinnedBuf {
 public:
     PinnedBuf() noexcept = default;
     static PinnedBuf alloc(Backend& b, std::uint64_t bytes) { return PinnedBuf(b, b.hostMalloc(bytes), bytes); }
+    static PinnedBuf adopt(Backend& b, void* p, std::uint64_t bytes) noexcept { return PinnedBuf(b, p, bytes); }
     void* get() const noexcept { return h_.get(); }
     DevPtr addr() const noexcept { return reinterpret_cast<DevPtr>(h_.get()); }
     std::uint64_t bytes() const noexcept { return h_ ? bytes_ : 0; }
@@ -119,6 +124,7 @@ class EventH {
 public:
     EventH() noexcept = default;
     static EventH create(Backend& b) { return EventH(b, b.eventCreate()); }
+    static EventH adopt(Backend& b, Event e) noexcept { return EventH(b, e); }
     Event get() const noexcept { return h_.get(); }
     explicit operator bool() const noexcept { return static_cast<bool>(h_); }
     void reset() noexcept { h_.reset(); }
@@ -138,6 +144,7 @@ class StreamH {
 public:
     StreamH() noexcept = default;
     static StreamH create(Backend& b) { return StreamH(b, b.streamCreateNonBlocking()); }
+    static StreamH adopt(Backend& b, Stream s) noexcept { return StreamH(b, s); }
     Stream get() const noexcept { return h_.get(); }
     explicit operator bool() const noexcept { return static_cast<bool>(h_); }
     void reset() noexcept { h_.reset(); }

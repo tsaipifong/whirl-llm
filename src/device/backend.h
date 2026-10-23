@@ -90,5 +90,8 @@ public:
 
 // Forwarding implementation over whirl/hip.h (src/device/backend_hip.cpp).
 std::unique_ptr<Backend> makeHipBackend();
+// The process's one HIP Backend for code that has none passed in (model, vision, CLI; arch024 S11): the RAII
+// handles of src/device/handles.h release through it. Stateless (every call forwards to whirl/hip.h).
+Backend& hipBackend();
 
 }  // namespace whirl::device

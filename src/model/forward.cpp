@@ -1960,7 +1960,8 @@ void Model::visEnsure() {
     if (rpos_buf != 0) return;
     if (rpos_host.empty()) rpos_host.assign(static_cast<std::size_t>(max_batch) * 3, 0);
     // (not in `allocations`: visRelease frees it again once no sequence has images)
-    rpos_buf = hip::malloc(static_cast<std::size_t>(max_batch) * 3 * 4);
+    rpos_own = device::DevBuf::alloc(device::hipBackend(), static_cast<std::uint64_t>(max_batch) * 3 * 4);
+    rpos_buf = rpos_own.get();
 }
 
 void Model::visRelease() {
@@ -1969,7 +1970,7 @@ void Model::visRelease() {
         hip::sync();
     } catch (...) {
     }
-    hip::free(rpos_buf);
+    rpos_own.reset();
     rpos_buf = 0;
 }
 

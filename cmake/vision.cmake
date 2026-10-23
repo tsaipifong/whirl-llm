@@ -45,7 +45,8 @@ if(WHIRL_WITH_HIP)
     ${CMAKE_SOURCE_DIR}/src/vision/stb_image_impl.cpp
     ${WHIRL_VISION_CCS})
   target_include_directories(whirl_vision PUBLIC ${CMAKE_SOURCE_DIR}/include)
-  target_link_libraries(whirl_vision PUBLIC whirl)
+  # whirl_device: device::hipBackend() and the src/device RAII handles that own the encoder buffers (arch024 S11)
+  target_link_libraries(whirl_vision PUBLIC whirl whirl_device)
   set_source_files_properties(${CMAKE_SOURCE_DIR}/src/vision/kernel_image.cpp PROPERTIES COMPILE_DEFINITIONS "${WHIRL_VISION_DEFS}")
   if(MSVC)
     # third-party single-header library: keep its warnings out of the /W4 build
