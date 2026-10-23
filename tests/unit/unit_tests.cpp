@@ -3322,6 +3322,30 @@ void testB0SizingFollowUps() {
         one.gpus = {{15435 * MiB, 1294 * MiB, 16203 * MiB}};
         CHECK(!startfit::ramTierFit(8192, 20000 * MiB, 8192, false, startfit::pinnedRoomMb(one), 8192).has_value());
     }
+    // C3 (REVIEW-S8-719:65-69): the per-GPU term must count every process's pinned memory on that adapter, not only this
+    // process's. 8060S at 96 GB (32407 MiB RAM), this server on the R9700 alone (n = 1, non-local budget 15435), another
+    // server holding 6000 MiB pinned on the R9700 adapter: the room + all of that adapter's Shared Usage + the reserve must
+    // stay within the budget (the machine term, half of the RAM, is looser here by 768 MiB).
+    {
+        startfit::PinnedState s;
+        s.total_phys = 32407 * MiB;
+        s.pinned_max = (1294 + 6000) * MiB;
+        s.gpus = {{15435 * MiB, 1294 * MiB, 0, (1294 + 6000) * MiB}};
+        const std::uint64_t room = startfit::pinnedRoomMb(s);
+        CHECK(room * MiB + (1294 + 6000) * MiB + startfit::pinned_reserve_mb * MiB <= 15435 * MiB);
+        CHECK(room > 0ull);
+        // the adapter's usage unknown (0): this process only, as in 0.2.3
+        s.gpus = {{15435 * MiB, 1294 * MiB, 0, 0}};
+        s.pinned_max = 1294 * MiB;
+        CHECK_EQ(startfit::pinnedRoomMb(s), 11776ull);  // 15435 - 1294 - 2048 = 12093 -> 11776
+        // integrated GPU (C4): a SharedSystemMemory below half of the RAM, other programs 6000 MiB on that adapter
+        startfit::PinnedState i;
+        i.total_phys = 65536 * MiB;
+        i.pinned_max = (1441 + 6000) * MiB;
+        i.gpus = {{0, 1441 * MiB, 16384 * MiB, (1441 + 6000) * MiB}};
+        const std::uint64_t ri = startfit::pinnedRoomMb(i);
+        CHECK(ri * MiB + (1441 + 6000) * MiB + startfit::pinned_reserve_mb * MiB <= 16384 * MiB);
+    }
 }
 
 // ---------------------------------------------------------------------------

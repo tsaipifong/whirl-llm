@@ -57,6 +57,8 @@ struct PinnedGpu {                     // one HIP GPU's adapter, as this process
     std::uint64_t own_nonlocal = 0;     // bytes: this process's pinned memory on that adapter so far (DXGI non-local usage;
                                         // on an integrated GPU, which reports 0 there, PDH process Shared Usage)
     std::uint64_t shared_system = 0;    // bytes: DXGI SharedSystemMemory of that adapter ("shared GPU memory")
+    std::uint64_t adapter_shared = 0;   // bytes: PDH "GPU Adapter Memory" Shared Usage of that adapter, every process
+                                        // (this one included; 0: unknown) (REVIEW-S8-719 C3)
 };
 struct PinnedState {
     std::uint64_t total_phys = 0;  // bytes; 0 = unknown
