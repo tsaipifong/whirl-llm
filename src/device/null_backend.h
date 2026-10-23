@@ -13,6 +13,17 @@
 // Fault injection: copy call n throws; the nth copy from pinned host memory
 // (a tier restore) throws; event queries report an asynchronous device error;
 // eventSync can be held closed so a test controls when an IO thread proceeds.
+//
+// Tracking mode (arch024 M1, invariant F1 "never free what the GPU may still read"), off by default: with
+// trackPending(true) the backend models stream order. Each stream (the null stream is stream 0) has an issued
+// work counter and a completion mark; copyAsync marks its source and destination allocation with
+// {stream, issued}; eventRecord(ev, s) captures s's counter (and what s waited for); eventSync / complete
+// move the completion mark of that stream up to the event (so a later event covers earlier work on the same
+// stream), streamSync to the newest work. streamWaitEvent orders the GPU side only: it moves no host-side
+// mark, but events recorded on that stream later carry the dependency. eventDone reports pending work as
+// not done. free / hostFree of an allocation with a pending mark is counted in pendingFreeViolations()
+// (never thrown: free runs from destructors). With tracking off every call behaves as before.
+// recordThreads(true) logs the thread of every release call (free, hostFree, eventDestroy, streamDestroy).
 
 #pragma once
 
@@ -25,6 +36,8 @@
 #include <map>
 #include <mutex>
 #include <set>
+#include <thread>
+#include <utility>
 #include <vector>
 
 namespace whirl::device {
@@ -41,14 +54,14 @@ public:
     void download(void* dst, DevPtr src, std::uint64_t bytes) override;
     Stream streamCreateNonBlocking() override;
     void streamDestroy(Stream s) override;
-    void streamSync(Stream) override {}
-    void streamWaitEvent(Stream, Event) override {}
+    void streamSync(Stream s) override;
+    void streamWaitEvent(Stream s, Event e) override;
     Event eventCreate() override;
     void eventDestroy(Event e) override;
-    void eventRecord(Event, Stream) override {}
-    bool eventDone(Event) override { return true; }  // like the HIP backend: a query error reads as complete
-    bool eventDoneChecked(Event) override;
-    void eventSync(Event) override;
+    void eventRecord(Event e, Stream s) override;
+    bool eventDone(Event e) override;  // like the HIP backend: a query error reads as complete
+    bool eventDoneChecked(Event e) override;
+    void eventSync(Event e) override;
     void* hostMalloc(std::uint64_t bytes) override;  // zero-filled, 4 KiB aligned
     void hostFree(void* p) override;
     DevPtr malloc(std::uint64_t bytes) override;     // zero-filled, 4 KiB aligned
@@ -86,6 +99,24 @@ public:
     void recordCopies(bool on);
     std::vector<Copy> copies() const;  // recorded copies (non-empty ones), in call order
 
+    // ---- tracking mode (F1; see the header comment). Turning it on or off clears its state.
+    void trackPending(bool on);
+    bool tracking() const { return track_.load(); }
+    void complete(Event e);  // the work before e finished (a test moves time forward)
+    void completeAll();      // all work on every stream finished
+    std::uint64_t syncCalls() const { return sync_calls_.load(); }  // eventSync + streamSync while tracking
+    struct Violation {
+        std::uint64_t stream = 0, seq = 0;  // the pending work: stream id (0: null stream), its work number
+        std::uint64_t order = 0;            // release call number (1 = first free / hostFree while tracking)
+        bool host = false;                  // hostFree
+    };
+    std::size_t pendingFreeViolations() const;
+    std::vector<Violation> violations() const;
+    // ---- threads of the release calls
+    enum class Release { free, host_free, event_destroy, stream_destroy };
+    void recordThreads(bool on);
+    std::vector<std::pair<Release, std::thread::id>> releaseThreads() const;
+
     // ---- fault injection
     // copyAsync call number n (as counted by copyCalls(), so "copyCalls() + 2" is the second call from now) throws; 0: off
     void failCopyCall(std::uint64_t n) { fail_call_ = n; }
@@ -118,6 +149,30 @@ private:
     std::atomic<std::uint64_t> dev_bytes_{0};
     std::atomic<bool> event_error_{false}, record_{false};
     std::vector<Copy> log_;
+    // tracking mode (under mu_)
+    using Mark = std::pair<std::uint64_t, std::uint64_t>;  // {stream id, work number}
+    struct StreamState {
+        std::uint64_t issued = 0, done = 0;
+        std::vector<Mark> deps;  // work of other streams this stream waited for (GPU side)
+    };
+    struct EventRec {
+        Mark at{0, 0};
+        std::vector<Mark> deps;
+    };
+    static std::uint64_t idOf(Stream s) { return s == nullptr ? 0 : static_cast<std::uint64_t>(*static_cast<int*>(s)); }
+    std::uintptr_t allocOf(std::uintptr_t p) const;  // start of the allocation holding p (0: none)
+    void advance(const Mark& m, const std::vector<Mark>& deps);
+    void checkRelease(std::uintptr_t start, bool host);
+    void noteThread(Release r);
+    std::atomic<bool> track_{false}, rec_threads_{false};
+    std::atomic<std::uint64_t> sync_calls_{0};
+    std::atomic<int> next_id_{0};
+    std::map<std::uint64_t, StreamState> streams_;
+    std::map<void*, EventRec> events_;
+    std::map<std::uintptr_t, std::vector<Mark>> marks_;
+    std::vector<Violation> violations_;
+    std::uint64_t releases_ = 0;
+    std::vector<std::pair<Release, std::thread::id>> threads_;
     std::mutex gate_m_;
     std::condition_variable gate_cv_;
     bool gate_open_ = true;

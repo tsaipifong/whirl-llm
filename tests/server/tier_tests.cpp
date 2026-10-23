@@ -7,6 +7,7 @@
 //   (default: %WHIRL_TEST_TMP%\tier_test_tmp, else %TEMP%\whirl-tests\tier_test_tmp)
 
 #include "../test_env.h"
+#include "device/handles.h"
 #include "device/null_backend.h"
 #include "tier/kv_tier.h"
 #include "tier/ram_size.h"
@@ -3933,6 +3934,66 @@ static void testTokCapRestart(NullBackend& ops, const fs::path& dir) {
     fs::remove_all(dir, ec);
 }
 
+// arch024 S2 (F1 harness, PLAN M1 / N1): NullBackend tracking mode on the real Tier::fence shape. spillSlot copies
+// the slot's checkpoint (and page) buffers out with Tier::copyOut, then Tier::fence(x, spill_ev) records x->ev and
+// spill_ev on the tier stream back to back; the engine waits only for spill_ev (govFreeCache, engine.cpp
+// spill_ev.waitIfPending) before it frees a checkpoint buffer.
+//   pass: waitIfPending(spill_ev), then free -> 0 violations (no false alarm), and the sync really ran
+//   block: free without the wait -> exactly 1 violation (the one buffer freed)
+static void testF1SpillFence() {
+    for (const bool wait : {true, false}) {
+        NullBackend nb;
+        nb.trackPending(true);
+        {
+            auto t = Tier::create(nb, 64ull << 20, 21, 0);
+            t->start(Config{}, kLay, 0x5e1);
+            DevSlot d(nb, 2, 3);
+            d.fill(7);
+            Entry* x = t->newEntry(d.nck);
+            std::vector<std::uint32_t> toks(d.pages * kLay.page_tokens, 5);
+            x->tokens = toks;
+            x->n_tok = static_cast<std::uint32_t>(toks.size());
+            x->pages = d.pages;
+            for (std::uint32_t k = 0; k < d.nck; ++k) {
+                x->ck[k].pos = (k + 1) * x->n_tok / d.nck;
+                x->ck[k].valid = 1;
+                x->ck[k].seq = k + 1;
+            }
+            std::size_t n_main = 0;
+            const auto sp = d.spans(x, d.nck - 1, &n_main);
+            bool blocks = true;
+            for (const Span& s : sp) {
+                const auto r = Tier::lbRange(s.off, s.len);
+                blocks = blocks && t->ensureBlocks(x, r[0], r[1]);
+            }
+            CHECK(blocks);
+            t->copyOut(x, sp);
+            EventH spill_ev = EventH::create(nb);
+            t->fence(x, spill_ev.get());
+            CHECK(!nb.eventDone(spill_ev.get()));  // tracking: the spill is pending until a sync
+            const std::uint64_t syncs0 = nb.syncCalls();
+            if (wait) spill_ev.waitIfPending();
+            // free one checkpoint buffer, the way govFreeCache's freeCkpt does
+            nb.free(d.ck[0]);
+            d.ck[0] = 0;
+            if (wait) {
+                CHECK(nb.syncCalls() > syncs0);
+                CHECK(nb.pendingFreeViolations() == 0);
+            } else {
+                CHECK(nb.pendingFreeViolations() == 1);
+                const auto v = nb.violations();
+                CHECK(v.size() == 1 && !v.empty() && v[0].stream != 0 && !v[0].host);
+            }
+            const std::size_t before_rest = nb.pendingFreeViolations();
+            nb.completeAll();  // the rest of the teardown is not under test
+            spill_ev.reset();
+            t.reset();
+            CHECK(nb.pendingFreeViolations() == before_rest);
+        }
+        CHECK(nb.clean());
+    }
+}
+
 // WHIRL_TIER_ONLY=<test name>: run only that test (regression proofs). A name that matches no test is
 // a usage error (exit 2; FIX-TEST-A, FR-TEST P3-3: a typo used to run 1 check in main and pass).
 static int g_only_matched = 0;
@@ -4140,6 +4201,10 @@ int main(int argc, char** argv) {
     if (want("testPowerLoss")) {
         std::printf("-- %s\n", "testPowerLoss");
         testPowerLoss(ops, dir);
+    }
+    if (want("testF1SpillFence")) {
+        std::printf("-- %s\n", "testF1SpillFence");
+        testF1SpillFence();
     }
     std::printf("tier tests: %d passed, %d failed\n", g_pass, g_fail);
     if (const char* only = std::getenv("WHIRL_TIER_ONLY"); only && *only && g_only_matched == 0) {

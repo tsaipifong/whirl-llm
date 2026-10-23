@@ -6,6 +6,7 @@
 //
 // Written for WHIRL. Run: whirl-device-tests.exe (exit 0 = all passed).
 
+#include "device/handles.h"
 #include "device/null_backend.h"
 #include "whirl/device_profile.h"
 
@@ -16,6 +17,8 @@
 #include <cstring>
 #include <stdexcept>
 #include <thread>
+#include <utility>
+#include <vector>
 
 namespace {
 
@@ -211,6 +214,212 @@ void testNullBackendMemoryModel() {
     CHECK(u.integrated && u.known && u.dedicated == (64ull << 30));
 }
 
+// arch024 M1: every handle releases on destruction, a moved-from handle releases nothing, move-assign releases
+// the old value of the target first, reset() releases once; NullBackend::clean() at the end
+void testHandles() {
+    using whirl::device::DevBuf;
+    using whirl::device::EventH;
+    using whirl::device::PinnedBuf;
+    using whirl::device::StreamH;
+    NullBackend b;
+    {
+        DevBuf d = DevBuf::alloc(b, 1000);
+        PinnedBuf h = PinnedBuf::alloc(b, 4096);
+        EventH e = EventH::create(b);
+        StreamH s = StreamH::create(b);
+        CHECK(d && h && e && s && d.bytes() == 1000 && h.bytes() == 4096);
+        CHECK(b.liveAllocations() == 2 && b.liveEvents() == 1 && b.liveStreams() == 1 && b.isHost(h.addr()));
+        // move construction: the source is empty, nothing released
+        DevBuf d2 = std::move(d);
+        EventH e2 = std::move(e);
+        CHECK(!d && !e && d.get() == 0 && e.get() == nullptr && d.bytes() == 0);  // NOLINT(bugprone-use-after-move)
+        CHECK(d2 && e2 && b.liveAllocations() == 2 && b.liveEvents() == 1);
+        // move-assign over a live handle releases the old one first
+        DevBuf d3 = DevBuf::alloc(b, 64);
+        CHECK(b.liveAllocations() == 3);
+        d3 = std::move(d2);
+        CHECK(b.liveAllocations() == 2 && d3.bytes() == 1000);
+        EventH e3 = EventH::create(b);
+        e3 = std::move(e2);
+        CHECK(b.liveEvents() == 1 && e3);
+        // self move-assign keeps the value
+        DevBuf& alias = d3;
+        d3 = std::move(alias);
+        CHECK(d3 && b.liveAllocations() == 2);
+        // reset releases once, a second reset calls nothing
+        h.reset();
+        h.reset();
+        CHECK(!h && b.liveAllocations() == 1 && b.liveHost() == 0);
+        s.reset();
+        CHECK(b.liveStreams() == 0);
+        // handles in a vector: push_back / erase / resize move them, no double release
+        std::vector<EventH> v;
+        for (int i = 0; i < 5; ++i) v.push_back(EventH::create(b));
+        CHECK(b.liveEvents() == 6);
+        v.erase(v.begin() + 1);
+        CHECK(b.liveEvents() == 5);
+        v.resize(20);
+        CHECK(b.liveEvents() == 5);
+        v.clear();
+        CHECK(b.liveEvents() == 1);
+        // waitIfPending on an empty handle calls nothing (it has no backend)
+        EventH none;
+        none.waitIfPending();
+    }
+    CHECK(b.clean());
+}
+
+// arch024 M1 F1 harness: NullBackend tracking mode, stream-order semantics
+void testTracking() {
+    using whirl::device::EventH;
+    using whirl::device::StreamH;
+    // (a) off (default): eventDone always true, no sync counted, no violation
+    {
+        NullBackend b;
+        CHECK(!b.tracking());
+        const DevPtr d = b.malloc(256), h = reinterpret_cast<DevPtr>(b.hostMalloc(256));
+        StreamH s = StreamH::create(b);
+        EventH e = EventH::create(b);
+        b.copyAsync(h, d, 256, s.get());
+        b.eventRecord(e.get(), s.get());
+        CHECK(b.eventDone(e.get()) && b.eventDoneChecked(e.get()));
+        e.waitIfPending();
+        b.free(d);
+        CHECK(b.syncCalls() == 0 && b.pendingFreeViolations() == 0);
+        b.hostFree(reinterpret_cast<void*>(h));
+    }
+    // (d) "if (!eventDone) eventSync" really syncs while tracking; a later event covers earlier work on its stream
+    {
+        NullBackend b;
+        b.trackPending(true);
+        const DevPtr d = b.malloc(256), h = reinterpret_cast<DevPtr>(b.hostMalloc(256));
+        StreamH s = StreamH::create(b);
+        EventH e1 = EventH::create(b), e2 = EventH::create(b), never = EventH::create(b);
+        CHECK(b.eventDone(never.get()));  // never recorded: done
+        b.copyAsync(h, d, 256, s.get());
+        b.eventRecord(e1.get(), s.get());
+        b.copyAsync(h, d, 128, s.get());
+        b.eventRecord(e2.get(), s.get());
+        CHECK(!b.eventDone(e1.get()) && !b.eventDone(e2.get()));
+        e2.waitIfPending();
+        CHECK(b.syncCalls() == 1 && b.eventDone(e1.get()) && b.eventDone(e2.get()));
+        e1.waitIfPending();  // already done: no second sync
+        CHECK(b.syncCalls() == 1);
+        b.free(d);
+        b.hostFree(reinterpret_cast<void*>(h));
+        CHECK(b.pendingFreeViolations() == 0);
+    }
+    // an earlier event does not cover later work; freeing a pending source is one violation (with its stream)
+    {
+        NullBackend b;
+        b.trackPending(true);
+        const DevPtr d = b.malloc(256), h = reinterpret_cast<DevPtr>(b.hostMalloc(256));
+        StreamH s = StreamH::create(b);
+        EventH e1 = EventH::create(b);
+        b.copyAsync(h, d, 256, s.get());
+        b.eventRecord(e1.get(), s.get());
+        b.copyAsync(h, d, 64, s.get());
+        e1.waitIfPending();
+        b.free(d);
+        CHECK(b.pendingFreeViolations() == 1);
+        const auto v = b.violations();
+        CHECK(v.size() == 1 && v[0].seq == 2 && v[0].stream != 0 && !v[0].host && v[0].order == 1);
+        b.completeAll();
+        b.hostFree(reinterpret_cast<void*>(h));
+        CHECK(b.pendingFreeViolations() == 1);
+    }
+    // (e) streamWaitEvent is GPU-side ordering: a free right after it is still a violation; an event recorded later
+    // on the waiting stream carries the dependency, so syncing it clears the first stream's work up to ev
+    {
+        NullBackend b;
+        b.trackPending(true);
+        const DevPtr d = b.malloc(256), h = reinterpret_cast<DevPtr>(b.hostMalloc(256));
+        const DevPtr d2 = b.malloc(256), d3 = b.malloc(256);
+        StreamH tier = StreamH::create(b), main = StreamH::create(b);
+        EventH ev = EventH::create(b), later = EventH::create(b);
+        b.copyAsync(h, d, 256, tier.get());
+        b.eventRecord(ev.get(), tier.get());
+        b.streamWaitEvent(main.get(), ev.get());
+        b.free(d);
+        CHECK(b.pendingFreeViolations() == 1);
+        b.copyAsync(d3, d2, 256, tier.get());  // tier work after ev
+        b.eventRecord(later.get(), main.get());
+        later.waitIfPending();
+        CHECK(b.eventDone(ev.get()));
+        b.hostFree(reinterpret_cast<void*>(h));  // covered through the dependency
+        CHECK(b.pendingFreeViolations() == 1);
+        b.free(d2);  // tier work after ev is not covered
+        CHECK(b.pendingFreeViolations() == 2);
+        b.free(d3);
+        CHECK(b.pendingFreeViolations() == 3);
+    }
+    // (f) streamSync clears every mark of that stream (and only that stream); complete() moves time, not a host sync
+    {
+        NullBackend b;
+        b.trackPending(true);
+        const DevPtr a = b.malloc(64), c = b.malloc(64), x = b.malloc(64), y = b.malloc(64);
+        StreamH s1 = StreamH::create(b), s2 = StreamH::create(b);
+        EventH e = EventH::create(b);
+        b.copyAsync(c, a, 64, s1.get());
+        b.copyAsync(c, a, 64, s1.get());
+        b.copyAsync(y, x, 64, s2.get());
+        b.eventRecord(e.get(), s2.get());
+        b.streamSync(s1.get());
+        CHECK(b.syncCalls() == 1);
+        b.free(a);
+        b.free(c);
+        CHECK(b.pendingFreeViolations() == 0);
+        CHECK(!b.eventDone(e.get()));
+        b.complete(e.get());
+        CHECK(b.syncCalls() == 1 && b.eventDone(e.get()));
+        b.free(x);
+        b.free(y);
+        CHECK(b.pendingFreeViolations() == 0);
+    }
+    // the null stream is its own stream; download leaves no mark (synchronous)
+    {
+        NullBackend b;
+        b.trackPending(true);
+        const DevPtr a = b.malloc(64), c = b.malloc(64);
+        unsigned char buf[64];
+        b.download(buf, a, sizeof buf);
+        b.free(a);
+        CHECK(b.pendingFreeViolations() == 0);
+        const DevPtr a2 = b.malloc(64);
+        b.copyAsync(c, a2, 64, nullptr);
+        b.free(a2);
+        CHECK(b.pendingFreeViolations() == 1 && b.violations()[0].stream == 0);
+        b.streamSync(nullptr);
+        b.free(c);
+        CHECK(b.pendingFreeViolations() == 1);
+        // turning tracking off clears its state
+        b.trackPending(false);
+        CHECK(b.pendingFreeViolations() == 0 && b.syncCalls() == 0);
+    }
+}
+
+// arch024 M1 (A4): the thread of every release call is recorded
+void testReleaseThreads() {
+    using whirl::device::DevBuf;
+    using whirl::device::EventH;
+    NullBackend b;
+    b.recordThreads(true);
+    DevBuf d = DevBuf::alloc(b, 64);
+    EventH e = EventH::create(b);
+    std::thread::id other;
+    std::thread t([&] {
+        other = std::this_thread::get_id();
+        d.reset();
+    });
+    t.join();
+    e.reset();
+    const auto r = b.releaseThreads();
+    CHECK(r.size() == 2);
+    CHECK(r.size() == 2 && r[0].first == NullBackend::Release::free && r[0].second == other);
+    CHECK(r.size() == 2 && r[1].first == NullBackend::Release::event_destroy && r[1].second == std::this_thread::get_id());
+    CHECK(b.clean());
+}
+
 }  // namespace
 
 int main() {
@@ -220,6 +429,9 @@ int main() {
     testNullBackendFaults();
     testNullBackendMemoryModel();
     testProfiles();
+    testHandles();
+    testTracking();
+    testReleaseThreads();
     std::printf("device tests: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }

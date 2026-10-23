@@ -3,6 +3,7 @@
 
 #include "device/null_backend.h"
 
+#include <algorithm>
 #include <cstring>
 #include <malloc.h>
 #include <new>
@@ -20,7 +21,7 @@ bool NullBackend::isHost(DevPtr p) const {
     return p >= it->first && p < it->first + it->second;
 }
 
-void NullBackend::copyAsync(DevPtr dst, DevPtr src, std::uint64_t bytes, Stream) {
+void NullBackend::copyAsync(DevPtr dst, DevPtr src, std::uint64_t bytes, Stream s) {
     if (const std::uint64_t n = ++copy_calls_; n == fail_call_.load()) throw std::runtime_error("injected copyAsync failure");
     if (bytes == 0) return;
     const bool from_host = isHost(src);
@@ -30,6 +31,14 @@ void NullBackend::copyAsync(DevPtr dst, DevPtr src, std::uint64_t bytes, Stream)
     }
     std::memmove(reinterpret_cast<void*>(dst), reinterpret_cast<const void*>(src), static_cast<std::size_t>(bytes));
     copied_ += bytes;
+    if (track_.load()) {
+        std::lock_guard<std::mutex> lk(mu_);
+        StreamState& st = streams_[idOf(s)];
+        const Mark m{idOf(s), ++st.issued};
+        // the source too: a spill is the GPU still reading the checkpoint / page buffers
+        for (const std::uintptr_t a : {allocOf(static_cast<std::uintptr_t>(dst)), allocOf(static_cast<std::uintptr_t>(src))})
+            if (a != 0) marks_[a].push_back(m);
+    }
     if (record_.load()) {
         const bool to_host = isHost(dst);
         std::lock_guard<std::mutex> lk(mu_);
@@ -43,12 +52,51 @@ void NullBackend::download(void* dst, DevPtr src, std::uint64_t bytes) {
 
 Stream NullBackend::streamCreateNonBlocking() {
     live_streams_ += 1;
-    return new int(0);
+    return new int(++next_id_);  // the stream id of tracking mode (0 is the null stream)
 }
 
 void NullBackend::streamDestroy(Stream s) {
+    noteThread(Release::stream_destroy);
     live_streams_ -= 1;
     delete static_cast<int*>(s);
+}
+
+void NullBackend::streamSync(Stream s) {
+    if (!track_.load()) return;
+    std::lock_guard<std::mutex> lk(mu_);
+    sync_calls_ += 1;
+    StreamState& st = streams_[idOf(s)];
+    const std::vector<Mark> deps = st.deps;
+    advance({idOf(s), st.issued}, deps);
+}
+
+void NullBackend::streamWaitEvent(Stream s, Event e) {
+    if (!track_.load()) return;
+    std::lock_guard<std::mutex> lk(mu_);
+    const auto it = events_.find(e);
+    if (it == events_.end()) return;  // never recorded: nothing to wait for
+    StreamState& st = streams_[idOf(s)];
+    st.deps.push_back(it->second.at);
+    st.deps.insert(st.deps.end(), it->second.deps.begin(), it->second.deps.end());
+}
+
+void NullBackend::eventRecord(Event e, Stream s) {
+    if (!track_.load()) return;
+    std::lock_guard<std::mutex> lk(mu_);
+    const StreamState& st = streams_[idOf(s)];
+    events_[e] = EventRec{{idOf(s), st.issued}, st.deps};
+}
+
+bool NullBackend::eventDone(Event e) {
+    if (!track_.load()) return true;
+    std::lock_guard<std::mutex> lk(mu_);
+    const auto it = events_.find(e);
+    if (it == events_.end()) return true;  // never recorded
+    // done when its own stream got there and so did everything that stream waited for before the record
+    if (it->second.at.second > streams_[it->second.at.first].done) return false;
+    for (const Mark& d : it->second.deps)
+        if (d.second > streams_[d.first].done) return false;
+    return true;
 }
 
 Event NullBackend::eventCreate() {
@@ -57,18 +105,116 @@ Event NullBackend::eventCreate() {
 }
 
 void NullBackend::eventDestroy(Event e) {
+    noteThread(Release::event_destroy);
+    if (track_.load()) {
+        std::lock_guard<std::mutex> lk(mu_);
+        events_.erase(e);
+    }
     live_events_ -= 1;
     delete static_cast<int*>(e);
 }
 
-bool NullBackend::eventDoneChecked(Event) {
+bool NullBackend::eventDoneChecked(Event e) {
     if (event_error_.load()) throw std::runtime_error("injected asynchronous device error");
-    return true;
+    return eventDone(e);
 }
 
-void NullBackend::eventSync(Event) {
-    std::unique_lock<std::mutex> lk(gate_m_);
-    gate_cv_.wait(lk, [&] { return gate_open_; });
+void NullBackend::eventSync(Event e) {
+    {
+        std::unique_lock<std::mutex> lk(gate_m_);
+        gate_cv_.wait(lk, [&] { return gate_open_; });
+    }
+    if (!track_.load()) return;
+    std::lock_guard<std::mutex> lk(mu_);
+    sync_calls_ += 1;
+    if (const auto it = events_.find(e); it != events_.end()) {
+        const EventRec r = it->second;
+        advance(r.at, r.deps);
+    }
+}
+
+void NullBackend::complete(Event e) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (const auto it = events_.find(e); it != events_.end()) {
+        const EventRec r = it->second;
+        advance(r.at, r.deps);
+    }
+}
+
+void NullBackend::completeAll() {
+    std::lock_guard<std::mutex> lk(mu_);
+    for (auto& [id, st] : streams_) st.done = st.issued;
+}
+
+void NullBackend::advance(const Mark& m, const std::vector<Mark>& deps) {
+    StreamState& st = streams_[m.first];
+    st.done = std::max(st.done, m.second);
+    // deps are flattened when streamWaitEvent adds them (an event's own deps come along), so one level suffices
+    for (const Mark& d : deps) {
+        StreamState& ds = streams_[d.first];
+        ds.done = std::max(ds.done, d.second);
+    }
+}
+
+std::uintptr_t NullBackend::allocOf(std::uintptr_t p) const {
+    for (const auto* m : {&dev_, &host_}) {
+        auto it = m->upper_bound(p);
+        if (it == m->begin()) continue;
+        --it;
+        if (p >= it->first && p < it->first + std::max<std::uint64_t>(it->second, 1)) return it->first;
+    }
+    return 0;
+}
+
+void NullBackend::checkRelease(std::uintptr_t start, bool host) {
+    // under mu_, tracking on
+    const std::uint64_t order = ++releases_;
+    const auto it = marks_.find(start);
+    if (it == marks_.end()) return;
+    for (const Mark& m : it->second)
+        if (m.second > streams_[m.first].done) {
+            violations_.push_back({m.first, m.second, order, host});
+            break;  // one violation per release
+        }
+    marks_.erase(it);
+}
+
+void NullBackend::trackPending(bool on) {
+    std::lock_guard<std::mutex> lk(mu_);
+    track_ = on;
+    sync_calls_ = 0;
+    streams_.clear();
+    events_.clear();
+    marks_.clear();
+    violations_.clear();
+    releases_ = 0;
+}
+
+std::size_t NullBackend::pendingFreeViolations() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return violations_.size();
+}
+
+std::vector<NullBackend::Violation> NullBackend::violations() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return violations_;
+}
+
+void NullBackend::noteThread(Release r) {
+    if (!rec_threads_.load()) return;
+    std::lock_guard<std::mutex> lk(mu_);
+    threads_.push_back({r, std::this_thread::get_id()});
+}
+
+void NullBackend::recordThreads(bool on) {
+    std::lock_guard<std::mutex> lk(mu_);
+    rec_threads_ = on;
+    if (on) threads_.clear();
+}
+
+std::vector<std::pair<NullBackend::Release, std::thread::id>> NullBackend::releaseThreads() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return threads_;
 }
 
 void NullBackend::holdEventSync() {
@@ -97,8 +243,10 @@ void* NullBackend::hostMalloc(std::uint64_t bytes) {
 
 void NullBackend::hostFree(void* p) {
     if (p == nullptr) return;  // like hipHostFree(nullptr)
+    noteThread(Release::host_free);
     {
         std::lock_guard<std::mutex> lk(mu_);
+        if (track_.load()) checkRelease(reinterpret_cast<std::uintptr_t>(p), true);
         live_.erase(p);
         host_.erase(reinterpret_cast<std::uintptr_t>(p));
     }
@@ -123,9 +271,11 @@ DevPtr NullBackend::malloc(std::uint64_t bytes) {
 
 void NullBackend::free(DevPtr p) {
     if (p == 0) return;  // like hipFree(nullptr)
+    noteThread(Release::free);
     void* q = reinterpret_cast<void*>(p);
     {
         std::lock_guard<std::mutex> lk(mu_);
+        if (track_.load()) checkRelease(static_cast<std::uintptr_t>(p), false);
         live_.erase(q);
         if (const auto it = dev_.find(reinterpret_cast<std::uintptr_t>(q)); it != dev_.end()) {
             dev_bytes_.fetch_sub(it->second);
