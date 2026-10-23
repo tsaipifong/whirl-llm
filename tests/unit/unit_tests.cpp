@@ -3366,6 +3366,29 @@ void testB0SizingFollowUps() {
         const auto r = startfit::ramTierFit(12288, 17643 * MiB, 0, true);  // the measured case keeps its 8704
         CHECK(r.has_value() && r->mb == 8704ull && r->half);
     }
+    // N3-4 (REVIEW-S8-719-3:61, REVIEW-S8-719 N2): pinned memory this process allocates after the measurement (the
+    // discrete-GPU mmproj, 887 MiB in s23_ram8192_mm) must come out of the room, the same as if it were pinned already
+    {
+        startfit::PinnedState s;
+        s.total_phys = 32407 * MiB;
+        s.pinned_max = 1294 * MiB;
+        s.gpus = {{15435 * MiB, 1294 * MiB, 0, 1294 * MiB}};
+        startfit::PinnedState l = s;
+        l.later = 887 * MiB;
+        startfit::PinnedState now = s;
+        now.pinned_max += 887 * MiB;
+        now.gpus[0].own_nonlocal += 887 * MiB;
+        now.gpus[0].adapter_shared += 887 * MiB;
+        CHECK_EQ(startfit::pinnedRoomMb(l), startfit::pinnedRoomMb(now));
+        CHECK(startfit::pinnedRoomMb(l) < startfit::pinnedRoomMb(s));
+        startfit::PinnedState ig;  // the integrated GPU and the machine term too
+        ig.total_phys = 32407 * MiB;
+        ig.pinned_max = 1441 * MiB;
+        ig.gpus = {{0, 1441 * MiB, 16203 * MiB, 1441 * MiB}};
+        startfit::PinnedState igl = ig;
+        igl.later = 887 * MiB;
+        CHECK(startfit::pinnedRoomMb(igl) * MiB + (1441 + 887) * MiB + startfit::pinned_reserve_mb * MiB <= 16203 * MiB);
+    }
 }
 
 // ---------------------------------------------------------------------------

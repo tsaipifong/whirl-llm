@@ -64,6 +64,7 @@ struct PinnedState {
     std::uint64_t total_phys = 0;  // bytes; 0 = unknown
     std::uint64_t pinned_max = 0;  // bytes: GPU Shared Usage of the largest adapter (all processes, this one included)
     std::vector<PinnedGpu> gpus;   // every HIP GPU a pinned buffer is mapped to (empty = unknown)
+    std::uint64_t later = 0;       // bytes this process pins after the measurement (the mmproj; REVIEW-S8-719-3 N3-4)
 };
 // MiB the RAM tier may still pin, whole 512 MiB (0: none); pinned_room_unknown when nothing is known.
 std::uint64_t pinnedRoomMb(const PinnedState& s);
