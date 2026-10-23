@@ -3389,6 +3389,25 @@ void testB0SizingFollowUps() {
         igl.later = 887 * MiB;
         CHECK(startfit::pinnedRoomMb(igl) * MiB + (1441 + 887) * MiB + startfit::pinned_reserve_mb * MiB <= 16203 * MiB);
     }
+    // N3-2 (REVIEW-S8-719-3:59): when the half-of-available-RAM rule (not the pinned room) turns an explicit tier off, the
+    // texts must not say "no room left"; they must name the half rule. A room of 0 still says "no room left".
+    {
+        const std::string pw = startfit::pinnedWhy(4096, 1);
+        const auto h = startfit::ramTierFit(8192, 700 * MiB, 0, true, 4096, 0);  // room 4096, then half of 700 MiB -> 0
+        CHECK(h.has_value() && h->mb == 0ull && h->half);
+        const auto th = startfit::ramTierText(h, 8192, true, "--kv-ram-mb", "--kv-ram-mb 8192", pw, 0, 700);
+        CHECK(th.adjusted_why.find("no room left") == std::string::npos);
+        CHECK(th.off_reason.find("no room left") == std::string::npos);
+        CHECK(th.off_reason.find("half") != std::string::npos);
+        CHECK(th.off_reason.find("SSD") != std::string::npos);
+        const auto h2 = startfit::ramTierFit(4096, 700 * MiB, 0, true);  // the half rule alone
+        const auto th2 = startfit::ramTierText(h2, 4096, true, "--kv-ram-mb", "--kv-ram-mb 4096", "", 0, 700);
+        CHECK(th2.off_reason.find("half") != std::string::npos);
+        const auto z = startfit::ramTierFit(8192, 40000 * MiB, 0, true, 0, 0);  // room 0
+        CHECK(z.has_value() && z->mb == 0ull && z->pinned);
+        const auto tz = startfit::ramTierText(z, 8192, true, "--kv-ram-mb", "--kv-ram-mb 8192", startfit::pinnedWhy(0, 1), 0, 40000);
+        CHECK(tz.off_reason.find("no room left") != std::string::npos);
+    }
 }
 
 // ---------------------------------------------------------------------------
