@@ -511,8 +511,6 @@ private:
     bool ensurePages(Slot& sl, std::uint64_t n_tok);
     // shared prefix checkpoints
     std::uint32_t sysSplit(std::span<const std::uint32_t> toks) const;
-    // vision: schedNext with the prompt's image-end splits (sorted; empty for text)
-    static std::size_t schedNextV(std::size_t n, std::size_t sys, std::size_t think, std::span<const std::uint32_t> imgs, std::size_t pos);
     std::vector<std::uint32_t> imgSplits(std::span<const std::uint32_t> toks) const;
     std::size_t schedFloor(std::span<const std::uint32_t> toks, std::size_t lim) const;
     bool onSchedule(std::span<const std::uint32_t> toks, std::size_t a) const;

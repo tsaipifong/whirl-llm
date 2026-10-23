@@ -663,12 +663,6 @@ std::uint32_t Engine::sysSplit(std::span<const std::uint32_t> toks) const {
     return static_cast<std::uint32_t>(sched::sysSplit(ct_.sysBoundary(toks), toks.size(), opt_.sys_min));
 }
 
-// vision: schedNext with the prompt's image-end splits (imgs sorted; empty for text)
-std::size_t Engine::schedNextV(std::size_t n, std::size_t sys, std::size_t think, std::span<const std::uint32_t> imgs,
-                               std::size_t pos) {
-    return sched::schedNext(n, sys, think, imgs, pos);
-}
-
 // vision: the image-end splits of toks (position after the <|vision_end|> that follows a
 // run of image ids), those >= ck_min; a function of the tokens only, so every prompt
 // with the same prefix gets the same splits there (at most 32)
@@ -1665,7 +1659,7 @@ void Engine::finishPrefill(Slot& sl) {
         const std::vector<std::uint32_t> v_imgs = imgSplits(toks);
         std::size_t off = 0;
         while (off < toks.size()) {
-            const std::size_t n = prefillChunkLen(schedNextV(toks.size(), v_sys, v_th, v_imgs, off) - off);
+            const std::size_t n = prefillChunkLen(sched::schedNext(toks.size(), v_sys, v_th, v_imgs, off) - off);
             if (opt_.use_mtp) m_.prefillMtpChunk(toks, 0, off, n, std::nullopt);
             else m_.forward(toks.subspan(off, n), static_cast<std::uint32_t>(off));
             off += n;
