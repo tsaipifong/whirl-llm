@@ -1326,10 +1326,18 @@ int serveMain(int argc, char** argv, const char* program) {
                                    g.nonlocal_budget > 0 ? "non-local budget" : "shared GPU memory", own >> 20,
                                    g.adapter_shared ? std::format("{} MiB", g.adapter_shared >> 20) : std::string("unknown"));
             }
+            // REVIEW-S8-719-3 N3-4: the vision encoder's weights are pinned after this (Vision::load, discrete GPU below, the
+            // integrated GPU later): count the mmproj file (an upper bound of its tensors) now
+            if (const std::optional<std::string> mm = opt.mmproj ? opt.mmproj : env("MMPROJ")) {
+                std::error_code ec;
+                const std::uintmax_t sz = std::filesystem::file_size(*mm, ec);
+                if (!ec) pst.later = static_cast<std::uint64_t>(sz);
+            }
             pinned_room = startfit::pinnedRoomMb(pst);
-            logI("kv tier: pinned memory now: {} HIP GPU(s) [{}]; all programs {} MiB (largest adapter) of half the RAM ({} MiB) -> room for the RAM tier {} "
+            logI("kv tier: pinned memory now: {} HIP GPU(s) [{}]; all programs {} MiB (largest adapter) of half the RAM ({} MiB){} -> room for the RAM tier {} "
                  "(reserves {} / {} MiB)",
                  pst.gpus.size(), per, pst.pinned_max >> 20, pst.total_phys >> 21,
+                 pst.later ? std::format("; the vision encoder pins {} MiB more later", pst.later >> 20) : std::string(),
                  pinned_room == startfit::pinned_room_unknown ? std::string("unknown") : std::format("{} MiB", pinned_room),
                  startfit::pinned_reserve_mb, startfit::pinned_machine_reserve_mb);
             pinned_why = startfit::pinnedWhy(pinned_room == startfit::pinned_room_unknown ? 0 : pinned_room, pst.gpus.size());

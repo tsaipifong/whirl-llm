@@ -23,12 +23,12 @@ std::uint64_t pinnedRoomMb(const PinnedState& s) {
     // this one; this process alone when the adapter's counter is unknown (0)
     const std::uint64_t n = std::max<std::uint64_t>(s.gpus.size(), 1);
     for (const PinnedGpu& g : s.gpus) {
-        const std::uint64_t used = std::max(g.own_nonlocal, g.adapter_shared);
+        const std::uint64_t used = std::max(g.own_nonlocal, g.adapter_shared) + s.later;  // + what is pinned later (N3-4)
         if (g.nonlocal_budget > 0) take(g.nonlocal_budget / n, used, pinned_reserve_mb);
         else if (g.shared_system > 0) take(g.shared_system, used, pinned_reserve_mb);
     }
     // machine: every program's GPU-pinned memory (largest adapter) well under half of the RAM (kvram719)
-    if (s.total_phys > 0) take(s.total_phys / 2, s.pinned_max, pinned_machine_reserve_mb);
+    if (s.total_phys > 0) take(s.total_phys / 2, s.pinned_max + s.later, pinned_machine_reserve_mb);
     return room;
 }
 
