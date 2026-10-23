@@ -36,10 +36,11 @@ $ErrorActionPreference = "Stop"
 function Get-Kvram719Verdict([string]$res, [int]$bad, [int64]$tierMb, [object[]]$adapters, [int64]$limitMiB) {
     if ($res -notlike "answered*" -or $bad -gt 0) { return @{ v = "FAIL"; why = "request" } }
     if ($tierMb -le 0) { return @{ v = "INVALID"; why = "tier_off" } }
-    # a13eccb's bar, re-expressed on the adapter table (the test commit; the fix replaces it): largest adapter and the sum
-    # of ALL adapters <= the limit
-    $mx = @($adapters | ForEach-Object { $_.up } | Measure-Object -Maximum -Sum)
-    if ($mx[0].Sum -gt $limitMiB -or $mx[0].Maximum -gt $limitMiB) { return @{ v = "FAIL"; why = "over_limit" } }
+    $sel = @($adapters | Where-Object { $_.sel })
+    if ($sel.Count -ne 1) { return @{ v = "FAIL"; why = "no_selected_adapter" } }
+    if ($sel[0].up -gt $limitMiB) { return @{ v = "FAIL"; why = "over_limit" } }
+    $rise = @($adapters | Where-Object { $_.hip -and -not $_.sel } | ForEach-Object { $_.up - $_.before } | Measure-Object -Maximum).Maximum
+    if ($rise -gt 1024) { return @{ v = "FAIL"; why = "other_hip_rise" } }
     return @{ v = "PASS"; why = "ok" }
 }
 function A([string]$luid, [string]$name, [bool]$hip, [bool]$sel, [int64]$before, [int64]$up) {
@@ -94,7 +95,7 @@ New-Item -ItemType Directory -Force $Work | Out-Null
 $dx = @{}
 foreach ($k in (Get-ChildItem HKLM:\SOFTWARE\Microsoft\DirectX -ErrorAction SilentlyContinue)) {
     $p = Get-ItemProperty $k.PSPath
-    if ($null -eq $p.AdapterLuid) { continue }
+    if ($null -eq $p.AdapterLuid -or [uint64]$p.AdapterLuid -eq 0) { continue }  # a stale entry of an earlier install has LUID 0
     $l = [uint64]$p.AdapterLuid
     $dx[("{0:x8}_{1:x8}" -f ($l -shr 32), ($l -band 0xffffffff))] = $p
 }
@@ -106,14 +107,15 @@ function SharedByAdapter {
     $h
 }
 $want = if ($Device -eq "r9700") { "R9700" } else { "8060S" }
-$selKey = @($dx.Keys | Where-Object { $dx[$_].VendorId -eq 0x1002 -and $dx[$_].Description -like "*$want*" })
+$s0 = SharedByAdapter
+# only LUIDs of this boot (the registry keeps entries of earlier boots / installs)
+$selKey = @($dx.Keys | Where-Object { $s0.ContainsKey($_) -and $dx[$_].VendorId -eq 0x1002 -and $dx[$_].Description -like "*$want*" })
 if ($selKey.Count -ne 1) { Write-Host "kvram719: no single DXGI adapter named *$want* (found $($selKey.Count))"; exit 2 }
 $selKey = $selKey[0]
-$totalMiB = [int64]((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1MB)
-$s0 = SharedByAdapter
+$totalMiB = [int64][math]::Floor((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1MB)
 $pinned0 = [int64](($s0.Values | Measure-Object -Maximum).Maximum)
-$limit = [int64]($totalMiB / 2)
-if ($dx[$selKey].SharedSystemMemory) { $limit = [math]::Min($limit, [int64]([uint64]$dx[$selKey].SharedSystemMemory / 1MB)) }
+$limit = [int64][math]::Floor($totalMiB / 2)
+if ($dx[$selKey].SharedSystemMemory) { $limit = [math]::Min($limit, [int64][math]::Floor([uint64]$dx[$selKey].SharedSystemMemory / 1MB)) }
 if ($RamMb -le 0) { $RamMb = [int]([math]::Max(1024, [int64]($totalMiB / 2) - $pinned0 + $OverMb)) }
 Write-Host ("kvram719: RAM {0} MiB, selected adapter {1} ({2}), its limit ~{3} MiB, largest adapter now {4} MiB, request --kv-ram-mb {5}" -f $totalMiB, $selKey, $dx[$selKey].Description, $limit, $pinned0, $RamMb)
 $log = Join-Path $Work "kvram719_$RamMb.server.log"
@@ -150,7 +152,7 @@ $tierMb = if ($sizeM) { [int64]$sizeM.Matches[0].Groups[1].Value } elseif (@($tx
 $pin = @($txt | Select-String -Pattern "kv tier: pinned memory now: (\d+) HIP GPU\(s\) \[(.*?)\]") | Select-Object -Last 1
 if ($pin) {
     $n = [int64]$pin.Matches[0].Groups[1].Value
-    foreach ($m in [regex]::Matches($pin.Matches[0].Groups[2].Value, "(\d+) MiB non-local budget")) { $limit = [math]::Min($limit, [int64]([int64]$m.Groups[1].Value / [math]::Max($n, 1))) }
+    foreach ($m in [regex]::Matches($pin.Matches[0].Groups[2].Value, "(\d+) MiB non-local budget")) { $limit = [math]::Min($limit, [int64][math]::Floor([int64]$m.Groups[1].Value / [math]::Max($n, 1))) }
 }
 $ads = @()
 foreach ($k in $s1.Keys) {
