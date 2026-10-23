@@ -18,6 +18,16 @@ older build) is compared on kernels and geometry only; the summary line says in 
 Only deterministic processes are compared by default: whirl.exe CLI runs (golden single / pair / ngram, seqtest,
 selftest). Server processes (whirl-server.exe) batch requests by arrival time, so their sequences legitimately
 vary; `--all` includes them (count tables only, no sequence hash).
+
+arch024-S0a (REVIEW-ARCH6-code C-4 / REVIEW-ARCH6 C-M4): `--server` includes whirl-server.exe runs with their
+sequence hashes kept, so the server's multi-slot / batch paths are pinned too. Whether a server table is deterministic
+for a given workload is what S0b proves (same build twice, HEAD vs HEAD); kernels whose counts depend on time (tier
+IO completion, prefetch, idle flush, governor ticks, loop wake-ups) are named with `--ignore REGEX` (repeatable,
+matched against the row key "kernel grid block shared"; with `--ignore-file`, one regex per line, # comments). A
+run with an ignored row has its sequence hashes not compared (they cover every launch) and says so.
+
+    python tools/impact/launch_table.py diff A B --server [--ignore REGEX ...] [--ignore-file F]
+    python tools/impact/launch_table.py selftest
 """
 from __future__ import annotations
 
@@ -72,7 +82,9 @@ def read_log(path):
     return cmd, n, seq, rows, aseq, args
 
 
-def table_of(folder, include_all=False):
+def table_of(folder, include_all=False, server_seq=False):
+    """include_all: server runs as counts only (no sequence hash); server_seq: server runs with their hashes."""
+    include_all = include_all or server_seq
     runs = {}
     for fn in sorted(os.listdir(folder)):
         if not (fn.startswith("launch_") and fn.endswith(".txt")) or fn.endswith(".raw.txt"):
@@ -90,8 +102,37 @@ def table_of(folder, include_all=False):
             while f"{key} #{i}" in runs:
                 i += 1
             key = f"{key} #{i}"
-        runs[key] = {"n": n, "seq": "" if server else seq, "rows": rows, "aseq": "" if server else aseq, "args": args}
+        drop = server and not server_seq
+        runs[key] = {"n": n, "seq": "" if drop else seq, "rows": rows, "aseq": "" if drop else aseq, "args": args}
     return runs
+
+
+def apply_ignore(runs, pats):
+    """Rows (and "@" rows) whose key matches one of pats are left out; such a run's launch count and sequence
+    hashes are cleared (they cover every launch) and the run is marked."""
+    if not pats:
+        return runs
+    rx = [re.compile(p) for p in pats]
+    out = {}
+    for key, r in runs.items():
+        hit = lambda k: any(x.search(k) for x in rx)
+        rows = {k: v for k, v in r["rows"].items() if not hit(k)}
+        args = None if r.get("args") is None else {k: v for k, v in r["args"].items() if not hit(k.rsplit(" ", 1)[0])}
+        cut = len(rows) != len(r["rows"]) or (args is not None and len(args) != len(r["args"]))
+        out[key] = dict(r, rows=rows, args=args)
+        if cut:
+            out[key].update(n=sum(rows.values()), seq="", aseq="" if args is not None else r.get("aseq", ""), ignored=True)
+    return out
+
+
+def read_ignore_file(path):
+    pats = []
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#"):
+                pats.append(line)
+    return pats
 
 
 def write_table(runs, out):
@@ -129,8 +170,9 @@ def read_table(path):
     return runs
 
 
-def load(p, include_all):
-    return table_of(p, include_all) if os.path.isdir(p) else read_table(p)
+def load(p, include_all, server_seq=False, ignore=()):
+    runs = table_of(p, include_all, server_seq) if os.path.isdir(p) else read_table(p)
+    return apply_ignore(runs, ignore)
 
 
 def diff(a, b):
@@ -149,6 +191,8 @@ def diff(a, b):
         n_args += 1 if has_args else 0
         if same_rows and same_seq and same_args and ra["n"] == rb["n"]:
             extra = f", arguments {len(ra['args'])} kinds" if has_args else ""
+            if ra.get("ignored") or rb.get("ignored"):
+                extra += ", ignored rows left out, sequence not compared"
             print(f"SAME  {key}  ({ra['n']} launches, {len(ra['rows'])} kinds{extra})")
             continue
         bad += 1
@@ -167,6 +211,65 @@ def diff(a, b):
     return 1 if bad else 0
 
 
+def _log(folder, pid, cmd, launches, seq, rows, aseq=None, args=None):
+    with open(os.path.join(folder, f"launch_{pid}.txt"), "w", encoding="utf-8", newline="\n") as f:
+        f.write(f"# whirl launch log v1\n# cmd: {cmd}\n# launches {launches} seqhash {seq} kinds {len(rows)}\n")
+        if aseq is not None:
+            f.write(f"# argseqhash {aseq} argkinds {len(args)}\n")
+        for k, c in rows.items():
+            f.write(f"{k} {c}\n")
+        for k, c in (args or {}).items():
+            f.write(f"@ {k} {c}\n")
+
+
+def selftest():
+    """Block / pass cases of the server mode (arch024-S0a C-4) on synthetic logs."""
+    import contextlib
+    import io
+    import tempfile
+    srv = r'"C:\x\whirl-server.exe" m.gguf --port 8091 --parallel 4'
+    cli = r'"C:\x\whirl.exe" m.gguf -p hi'
+    rows = {"k_a 1x1x1 64x1x1 0": 10, "k_tick 1x1x1 32x1x1 0": 3}
+    args = {"k_a 1x1x1 64x1x1 0 00000000000000aa": 10, "k_tick 1x1x1 32x1x1 0 00000000000000bb": 3}
+    cases = []
+    with tempfile.TemporaryDirectory() as td:
+        def mk(name, srv_seq="1111", srv_rows=rows, srv_args=args, srv_n=13):
+            d = os.path.join(td, name)
+            os.makedirs(d)
+            _log(d, 1, cli, 5, "c0c0", {"k_a 1x1x1 64x1x1 0": 5}, "c1c1", {"k_a 1x1x1 64x1x1 0 00000000000000aa": 5})
+            _log(d, 2, srv, srv_n, srv_seq, srv_rows, "2222" if srv_seq == "1111" else "3333", srv_args)
+            return d
+        a = mk("a")
+        same = mk("same")
+        seq = mk("seq", srv_seq="9999")
+        tick = mk("tick", srv_rows={"k_a 1x1x1 64x1x1 0": 10, "k_tick 1x1x1 32x1x1 0": 5},
+                  srv_args={"k_a 1x1x1 64x1x1 0 00000000000000aa": 10, "k_tick 1x1x1 32x1x1 0 00000000000000bb": 5}, srv_seq="7777",
+                  srv_n=15)
+        arg = mk("arg", srv_args={"k_a 1x1x1 64x1x1 0 00000000000000ab": 10, "k_tick 1x1x1 32x1x1 0 00000000000000bb": 3})
+        q = lambda *x: x
+        cases = [
+            ("default excludes the server", q(a, seq), {}, 0),
+            ("--all: server counts only, a sequence change passes", q(a, seq), {"include_all": True}, 0),
+            ("--server: same logs pass", q(a, same), {"server_seq": True}, 0),
+            ("--server: a server sequence change blocks", q(a, seq), {"server_seq": True}, 1),
+            ("--server: a time-dependent kernel's count blocks", q(a, tick), {"server_seq": True}, 1),
+            ("--server --ignore k_tick: the same passes", q(a, tick), {"server_seq": True, "ignore": [r"^k_tick "]}, 0),
+            ("--server --ignore k_tick: an argument change of another kernel still blocks", q(a, arg),
+             {"server_seq": True, "ignore": [r"^k_tick "]}, 1),
+        ]
+        bad = 0
+        for name, (x, y), kw, want in cases:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                got = diff(load(x, kw.get("include_all", False), kw.get("server_seq", False), kw.get("ignore", ())),
+                           load(y, kw.get("include_all", False), kw.get("server_seq", False), kw.get("ignore", ())))
+            ok = got == want
+            bad += 0 if ok else 1
+            print(f"{'ok  ' if ok else 'FAIL'} {name}: rc {got} (want {want})")
+    print(f"launch_table selftest: {len(cases) - bad}/{len(cases)} as expected")
+    return 0 if bad == 0 else 1
+
+
 def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -174,13 +277,20 @@ def main():
     t.add_argument("folder")
     t.add_argument("-o")
     t.add_argument("--all", action="store_true")
+    t.add_argument("--server", action="store_true")
     d = sub.add_parser("diff")
     d.add_argument("a")
     d.add_argument("b")
     d.add_argument("--all", action="store_true")
+    d.add_argument("--server", action="store_true")
+    d.add_argument("--ignore", action="append", default=[])
+    d.add_argument("--ignore-file")
+    sub.add_parser("selftest")
     a = ap.parse_args()
+    if a.cmd == "selftest":
+        return selftest()
     if a.cmd == "table":
-        runs = table_of(a.folder, a.all)
+        runs = table_of(a.folder, a.all, a.server)
         if a.o:
             with open(a.o, "w", encoding="utf-8", newline="\n") as f:
                 write_table(runs, f)
@@ -188,7 +298,8 @@ def main():
             write_table(runs, sys.stdout)
         print(f"launch table: {len(runs)} run(s) from {a.folder}", file=sys.stderr)
         return 0 if runs else 1
-    return diff(load(a.a, a.all), load(a.b, a.all))
+    ign = list(a.ignore) + (read_ignore_file(a.ignore_file) if a.ignore_file else [])
+    return diff(load(a.a, a.all, a.server, ign), load(a.b, a.all, a.server, ign))
 
 
 if __name__ == "__main__":
