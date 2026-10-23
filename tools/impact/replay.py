@@ -53,7 +53,10 @@ with tarfile.open(fileobj=io.BytesIO(data)) as t:
 m = impact_build.build(d)
 shutil.rmtree(d, ignore_errors=True)
 res = {}
+roots = set(git("rev-list", "--max-parents=0", a.rev).split())
 for s in git("log", "--format=%h", "--no-merges", f"--skip={a.skip}", f"-{a.n}", a.rev).split():
+    if any(r.startswith(s) for r in roots):
+        continue  # root commit: no parent to diff against
     ch = impact.parse_diff(git("diff", "-U0", "--no-color", "-M", f"{s}^", s))
     prod = {p: c for p, c in ch.items() if p.startswith(("src/", "include/", "kernels/"))}
     if not prod:

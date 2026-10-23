@@ -130,7 +130,11 @@ everything would hit everything) and every miss with its commit. The history rat
 only**; it is not evidence for the GPU steps. For those, `--baseline REV` replays REV's `tools/impact`
 on the same commits (`tools/impact/replay.py`) and fails on every commit for which the current tools
 select fewer release steps or paths. `--skip N` reports on older commits the tools were not tuned on
-(hold-out). Exit 0 = every named case hit, every rate >= 95 %, nothing narrowed; 1 otherwise.
+(hold-out). A touched test that no executable of the map registers counts as missed (UNPAIRED), so a test
+executable missing from the map cannot shrink the denominator. "Not narrower than the old tools" is a
+regression check only, not GPU recall: what the old map missed, the new one may miss too. Exit 0 = every
+named case hit, every rate >= 95 %, nothing narrowed; 1 otherwise. A changed host function that dispatches
+kernels (a host user of a `.hip` file) lists those kernels' tests (kernel-test functions, `kt_full`).
 
 ### <a id="module-gate"></a>Module gate (dev-time only)
 
@@ -138,8 +142,9 @@ select fewer release steps or paths. `--skip N` reports on older commits the too
 its source globs and the `release_gate.ps1` steps of its row in the arch024 plan, table c-1.
 
 ```
-pwsh tools/gates/release_gate.ps1 -Device r9700 -Module ckpt_store -List      # the steps it selects
-pwsh tools/gates/release_gate.ps1 -Device r9700 -Module page_pool -Steps seq_swift_precise   # plus extra steps
+pwsh tools/gates/release_gate.ps1 -Device r9700 -Module tier_bridge -ImpactRange main..HEAD -List   # table + the map's steps
+pwsh tools/gates/release_gate.ps1 -Device r9700 -Module ckpt_store -ImpactRange worktree           # uncommitted changes
+pwsh tools/gates/release_gate.ps1 -Device r9700 -Module ckpt_store -NoMapSteps -List   # the table only (said in the summary)
 python tools/gates/modules_check.py [--rev arch024-s6b]   # modules.json against a tree and the gate's steps
 python tools/impact/impact.py --worktree                  # "module" / "mod-gate" lines: which module gate fits
 pwsh tools/gates/module_gate_test.ps1                     # -Module step-selection table test (CPU)
@@ -154,8 +159,13 @@ full gate (a `-Tag` that does not start with `module_` is refused), its summary 
 The gate prints the module's checks that are not release_gate steps (P-719, P-size, P-sess, flake
 loops) and which steps need both GPUs. M1 handles runs with the modules of every file that includes
 it (an includer in no module, e.g. `engine.h`, means the full gate); M8 threads runs with M2-M5 and M7.
-Steps the impact map selects beyond the module's row (PLAN c-2, e.g. `server.mtp` -> `srv_balance`,
-`srv_fast`) are on impact.py's `mod-gate` line as `-Steps`; pass them.
+`-Module` needs `-ImpactRange A..B` (or `worktree`) or `-NoMapSteps`. With `-ImpactRange` the gate runs
+impact.py on that diff and adds the steps the map selects beyond the module's row (PLAN c-2, e.g.
+`server.mtp` -> `srv_balance`, `srv_fast`) and the module's `when` steps; impact.py's "full gate" runs the full
+gate, and a change that impact.py maps to a module `-Module` does not list is refused. Steps added beyond the
+table are printed as "run on both GPUs, one after the other". Python for impact.py and `cpu_modules_check`:
+`WHIRL_GATE_PYTHON`, else `C:\ClaudeWorkspace\tools\pyref\Scripts\python.exe` when it exists, else `python` /
+`py` on PATH.
 
 - A module whose files are not on the current branch yet (`lands_on`) is reported, and its steps still run;
   a module with paths of which none exists and no `lands_on` is a setup error (exit 2), as are an

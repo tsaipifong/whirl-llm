@@ -75,19 +75,37 @@ $gw = Join-Path $Work "gw"
 $keep = @{}; foreach ($v in "WHIRL_GATE_SWIFT", "WHIRL_GATE_MOE", "WHIRL_GATE_TEXT_ROOT", "WHIRL_GATE_DENSE") { $keep[$v] = [Environment]::GetEnvironmentVariable($v) }
 $env:WHIRL_GATE_SWIFT = $dm; $env:WHIRL_GATE_MOE = $dm; $env:WHIRL_GATE_TEXT_ROOT = $Work; Remove-Item Env:WHIRL_GATE_DENSE -ErrorAction SilentlyContinue
 try {
-    $o = @(& $pwsh -NoProfile -File $Gate -Device r9700 -Build $fb -Work $gw -Module m -ModulesFile (Join-Path $Work "one_cpu.json") 2>&1 | ForEach-Object { "$_" })
+    $o = @(& $pwsh -NoProfile -File $Gate -Device r9700 -Build $fb -Work $gw -Module m -NoMapSteps -ModulesFile (Join-Path $Work "one_cpu.json") 2>&1 | ForEach-Object { "$_" })
     $code = $LASTEXITCODE
 } finally { foreach ($v in $keep.Keys) { [Environment]::SetEnvironmentVariable($v, $keep[$v]) } }
 $sum = Join-Path $gw "module_m_r9700_summary.txt"
 $why = @()
 if ($code -ne 1) { $why += "exit $code, want 1 (the fake step fails)" }
 if (-not (Test-Path $sum)) { $why += "no $sum" }
-elseif (-not ((Get-Content $sum -TotalCount 1) -match "module=m \(dev-time module gate")) { $why += "summary header does not say module=m" }
+elseif (-not ((Get-Content $sum -TotalCount 1) -match "module=m \(dev-time module gate.*map steps NOT added \(-NoMapSteps\)")) { $why += "summary header does not say module=m ... map steps NOT added" }
 if (-not (Test-Path (Join-Path $gw "FAIL_module_m_r9700"))) { $why += "no FAIL_module_m_r9700 marker" }
 $gm = @(Get-ChildItem $gw -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "*gate_r9700*" })
 if ($gm.Count) { $why += "full-gate marker / summary written: $($gm.Name -join ', ')" }
 if ($why.Count -eq 0) { $ok++; Write-Host "ok   real module run: header module=m, marker FAIL_module_m_r9700, no *gate_r9700* file" }
 else { $bad++; Write-Host "FAIL real module run: $($why -join '; ')"; $o | Select-Object -Last 8 | ForEach-Object { Write-Host "       | $_" } }
+
+# review item 3: with WHIRL_GATE_PYTHON unset and no python on PATH the gate still finds the workspace interpreter
+# (pass); an explicit WHIRL_GATE_PYTHON that does not exist is authoritative and fails the impact call (block)
+$pyref = "C:\ClaudeWorkspace\tools\pyref\Scripts\python.exe"
+if (Test-Path $pyref) {
+    $keepP = $env:PATH; $keepW = $env:WHIRL_GATE_PYTHON
+    try {
+        Remove-Item Env:WHIRL_GATE_PYTHON -ErrorAction SilentlyContinue
+        $env:PATH = (@($env:PATH -split ";" | Where-Object { $_ -and -not (Test-Path (Join-Path $_ "python.exe")) -and -not (Test-Path (Join-Path $_ "py.exe")) }) -join ";")
+        $o1 = @(& $pwsh -NoProfile -File $Gate -Device r9700 -Module tier_bridge -ImpactRange "bf31527^..bf31527" -List 2>&1 | ForEach-Object { "$_" }); $c1 = $LASTEXITCODE
+        $env:WHIRL_GATE_PYTHON = Join-Path $Work "no_python.exe"
+        $o2 = @(& $pwsh -NoProfile -File $Gate -Device r9700 -Module tier_bridge -ImpactRange "bf31527^..bf31527" -List 2>&1 | ForEach-Object { "$_" }); $c2 = $LASTEXITCODE
+    } finally { $env:PATH = $keepP; if ($keepW) { $env:WHIRL_GATE_PYTHON = $keepW } else { Remove-Item Env:WHIRL_GATE_PYTHON -ErrorAction SilentlyContinue } }
+    if ($c1 -eq 0 -and ($o1 | Where-Object { $_ -match "^srv_balance\s+GPU" })) { $ok++; Write-Host "ok   python: no python on PATH -> the pyref interpreter runs impact.py" }
+    else { $bad++; Write-Host "FAIL python: no python on PATH: exit $c1"; $o1 | Select-Object -Last 4 | ForEach-Object { Write-Host "       | $_" } }
+    if ($c2 -eq 2 -and ($o2 | Where-Object { $_ -match "impact.py .* failed" })) { $ok++; Write-Host "ok   python: WHIRL_GATE_PYTHON set to a missing file -> exit 2" }
+    else { $bad++; Write-Host "FAIL python: missing WHIRL_GATE_PYTHON: exit $c2" }
+} else { Write-Host "skip python default test: $pyref not on this machine" }
 
 Remove-Item -Recurse -Force $Work -ErrorAction SilentlyContinue
 Write-Host "module gate test: $ok/$($ok + $bad) cases ok"

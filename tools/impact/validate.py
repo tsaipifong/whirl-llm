@@ -215,13 +215,34 @@ def pair(m, tt):
     return regs, unp
 
 
+def score_pairs(regs, unp, rep):
+    """(test id, verdict) per touched test: HIT, "exe only", MISS, or UNPAIRED (review K3: a touched test that no
+    executable of the map registers counts as a miss, so an executable missing from the map cannot shrink the
+    denominator and hide its misses)"""
+    listed = {f"{e}:{x}" for e, v in rep["cpu_tests"].items() for x in v} | {f"whirl-kernel-test:{x}" for x in rep["kernel_tests"]}
+    out = []
+    for tid, exe in regs.items():
+        if tid in listed:
+            out.append((tid, "HIT"))
+        elif exe in rep["cpu_tests"] or (exe == "whirl-kernel-test" and rep["kernel_tests"]):
+            out.append((tid, "exe only"))
+        else:
+            out.append((tid, "MISS"))
+    out += [(f"{p}:{t}", "UNPAIRED") for p, t in unp]
+    return out
+
+
 def run_history(n, rev, skip=0, at_commit=False):
     m_head = impact_build.build(ROOT) if rev == "HEAD" else map_at(rev)[0]
     shas = git("log", "--format=%h", "--no-merges", f"--skip={skip}", f"-{n}", rev).split()
     tot = fhit = ehit = 0
     misses, unpaired, at_rev = [], [], []
     nprod = ngpu = 0
+    roots = set(git("rev-list", "--max-parents=0", rev).split())
     for s in shas:
+        if any(r.startswith(s) for r in roots):
+            print(f"   note     {s} is a root commit (no parent to diff against): skipped")
+            continue
         ch = impact.parse_diff(git("diff", "-U0", "--no-color", "-M", f"{s}^", s))
         prod = {p: c for p, c in ch.items() if p.startswith(("src/", "include/", "kernels/"))}
         if not prod:
@@ -238,34 +259,28 @@ def run_history(n, rev, skip=0, at_commit=False):
             if len(regs2) >= len(regs):
                 m, regs, unp = m_s, regs2, unp2
                 at_rev.append(s)
-            unpaired += [(s, p, t) for p, t in unp]
+        unpaired += [(s, p, t) for p, t in unp]  # review N2: also in --map-at-commit mode
         rep = impact.analyze(prod, m, s, f"{s}^")
         if gpu_steps(rep):
             ngpu += 1
-        if not regs:
-            continue
-        listed = {f"{e}:{x}" for e, v in rep["cpu_tests"].items() for x in v} | {f"whirl-kernel-test:{x}" for x in rep["kernel_tests"]}
-        for tid, exe in regs.items():
+        for tid, v in score_pairs(regs, unp, rep):
             tot += 1
-            if tid in listed:
+            if v == "HIT":
                 fhit += 1
-            elif exe in rep["cpu_tests"] or (exe == "whirl-kernel-test" and rep["kernel_tests"]):
-                ehit += 1
-                misses.append((s, tid, "exe only"))
             else:
-                misses.append((s, tid, "MISS"))
+                ehit += v == "exe only"
+                misses.append((s, tid, v))
     subj = lambda s: git("log", "-1", "--format=%s", s).strip()[:70]
     print(f"== history replay: {n} commits of {rev} skipping the newest {skip}{' (map built at every commit)' if at_commit else ''}: {nprod} change product code; {tot} (commit, test) pairs "
           f"where a commit changed product code and a test")
     rate = 100 * fhit / tot if tot else 0.0
     if tot:
-        print(f"   CPU test listed by the map: {fhit}/{tot} ({rate:.0f}%); executable listed only: {ehit}; missed: {tot - fhit - ehit}"
-              f"  [CPU tests only: not evidence for the GPU step selection]")
+        print(f"   test listed by the map: {fhit}/{tot} ({rate:.1f}%); executable listed only: {ehit}; missed: {tot - fhit - ehit} "
+              f"(UNPAIRED included: {len(unpaired)})  [test functions only (CPU tests and kernel-test functions): not evidence "
+              f"for the GPU release steps]")
     print(f"   GPU release steps: {ngpu}/{nprod} product commits get >= 1 GPU step; {nprod - ngpu} get none (check them with --baseline)")
     if at_rev:
         print(f"   paired with the map at the commit itself (test renamed / removed later): {', '.join(at_rev)}")
-    for s, p, t in unpaired:
-        print(f"   UNPAIRED {s} {p}:{t}  (no executable registers it at REV or at the commit)  ({subj(s)})")
     for s, t, w in misses:
         print(f"   {w:8} {s} {t}  ({subj(s)})")
     near = m_head.get("fanout_near_cut") or {}
@@ -335,7 +350,7 @@ def main():
     if a.history or not a.cases:
         tot, fhit, ehit, rate = run_history(a.history or 150, a.rev, a.skip, a.map_at_commit)
         if not tot or rate < 95:
-            bad.append(f"history: CPU hit rate {rate:.0f}% < 95% ({fhit}/{tot})")
+            bad.append(f"history: test hit rate {rate:.1f}% < 95% ({fhit}/{tot}, UNPAIRED counted as missed)")
     if a.baseline:
         nn = run_baseline(a.baseline, a.history or 150, a.rev, a.skip)
         if nn is None:

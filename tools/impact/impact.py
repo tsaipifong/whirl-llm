@@ -110,6 +110,14 @@ def analyze(changes, m, new_rev, old_rev):
     notes = []
     hits = []                   # (file, what)
     host_code = False
+    # arch024-S12 (hold-out misses 1e18b8f, a5fe163, 65b84f6): a host function that dispatches kernels (a host_user of a
+    # .hip file: it selects / launches them through KernelTable fields) is covered by those kernels' tests too. Before,
+    # only a change to the .hip file itself listed them, so Model::matmul / moeGuR / precChoice changes missed
+    # testGemv / testMoeMx / benchGemvh.
+    dispatch_tests = defaultdict(set)
+    for h in m["hip"].values():
+        for u in h["host_users"]:
+            dispatch_tests[u] |= set(h["tests"])
     for path, ch in sorted(changes.items()):
         rule = next((r for r in FILE_RULES if fnmatch.fnmatch(path, r[0])), None)
         if rule and not path.endswith((".cpp", ".h", ".hip")) or (rule and path.startswith(("tests/", "tools/"))):
@@ -196,6 +204,7 @@ def analyze(changes, m, new_rev, old_rev):
                     paths[p].add(f"{name}")
                 models |= set(d["models"])
                 tests |= set(d["tests"])
+                tests |= dispatch_tests.get(d["name"], set())
             hits.append((path, f"function {name}"))
         if outside:
             # declarations / tables: the functions (in this file and, for a header, in every includer) that use one of
@@ -238,6 +247,7 @@ def analyze(changes, m, new_rev, old_rev):
                         paths[p].add(f"{n} (uses {', '.join(sorted(users[(f, n)])[:3])} of {path})")
                     models |= set(d["models"])
                     tests |= set(d["tests"])
+                    tests |= dispatch_tests.get(d["name"], set())
                 hits.append((path, f"declarations ({', '.join(sorted(outside_ids)[:6])}{'...' if len(outside_ids) > 6 else ''}): "
                                    f"{len(prod)} function(s) in {len({f for f, _ in prod})} file(s) use them"))
             if not prod or struct_fallback:
@@ -364,6 +374,10 @@ def module_gate(changes, mods=None, rep=None, m=None):
         extra = sorted(expand_steps((rep or {}).get("release_gate_steps", [])) - have)
         add = when + extra
         gate = f"release_gate.ps1 -Module {','.join(run)}" + (f" -Steps {','.join(add)}" if add else "")
+        # review K1: the map's steps are for every GPU it lists (both, unless the change is arch-specific)
+        two = [x for x in add if not x.startswith("cpu_")]
+        if two and len((rep or {}).get("gpus", ["gfx1201", "gfx1151"])) > 1:
+            gate += f" [both GPUs, one after the other: {','.join(two)}]"
     return {"modules": {n: v for n, v in sorted(hit.items())}, "module_gate": gate, "module_extra_steps": extra,
             "module_callers": {n: sorted(v) for n, v in callers.items()}}
 
