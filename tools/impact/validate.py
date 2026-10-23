@@ -3,7 +3,10 @@
 
     python tools/impact/validate.py            named cases (today's bugs) + history replay
     python tools/impact/validate.py --cases    named cases only
-    python tools/impact/validate.py --history N [--rev REV]   replay the last N commits of REV (default HEAD)
+    python tools/impact/validate.py --history N [--rev REV] [--skip K]   replay N commits of REV (default HEAD), skipping the
+                                                newest K (hold-out: the commits the tools were not tuned on)
+    python tools/impact/validate.py --baseline REV2 [--history N --rev REV --skip K]   also replay REV2's tools/impact on
+                                                the same commits and list every commit the current tools select less for
 
 Named cases: a fix commit (product code only: its test changes are left out of the diff, so the map has to
 find the test from the code), the test that reproduces the bug (the repro commit's touched test functions)
@@ -12,7 +15,11 @@ into a temp folder, then impact_build.py), so tests that exist only on that bran
 History replay: every commit that changes product code AND a registered test function in the same commit; the
 touched test functions are taken as "the test for this change". Hit = the map lists that test for the product
 part of the diff. Executable hit = it lists at least that test executable.
-Exit 0 always (it is a report); the numbers go to the decision log.
+The history hit rate counts CPU tests only (a test touched in the same commit). It says nothing about the GPU steps:
+those are reported separately (commits with / without a GPU release step) and checked against a baseline with
+--baseline (narrowed commits). Cases marked "lock" pin a fix the tools were tuned on (regression lock, not evidence).
+Exit (arch024-S12, review C7): 0 every named case hit, every history hit rate >= 95 %, no narrowed commit; 1 otherwise;
+2 setup error.
 """
 from __future__ import annotations
 
@@ -20,6 +27,7 @@ import argparse
 import io
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -54,6 +62,14 @@ CASES = [
      "fix": ["2d2621e", "0f3ee97"], "repro": [], "map_at": "0f3ee97",
      "caught_by": "a user (GitHub issue #2); no gate existed",
      "expect": ["extra:package smoke", "test:whirl-tests:testDllDeps"]},
+    {"name": "lock: struct member added before any reader (PinnedGpu::adapter_shared, B0-1 C3 test first)", "lock": True,
+     "fix": ["a4626b9"], "repro": [], "map_at": "a4626b9",
+     "caught_by": "S12 history replay miss; review A1 (the struct fallback must add to the whole-file fallback, not replace it)",
+     "expect": ["test:whirl-tests:testB0SizingFollowUps", "release:srv_cache_balance", "release:srv_cache_precise", "release:golden_swift"]},
+    {"name": "lock: Watch::check -> testWddmWatch edge ('check' is not a stop name; fan-out after the class filter)", "lock": True,
+     "fix": ["392874b"], "repro": [], "map_at": "392874b",
+     "caught_by": "S12 history replay miss; review C2 (fan-out margin)",
+     "expect": ["test:whirl-tests:testWddmWatch"]},
     {"name": "Server gate asserted the wrong thing for precise (history reuse instead of no gen-end resume)",
      "fix": ["56dea43"], "repro": [], "map_at": "56dea43", "keep_tests": True,
      "caught_by": "COLD-RESUME review: the gate passed on wrong behaviour",
@@ -76,7 +92,8 @@ def map_at(rev, cache={}):
         t.extractall(d, filter="data")
     m = impact_build.build(d)
     m["source_commit"] = rev
-    cache[rev] = (m, d)
+    shutil.rmtree(d, ignore_errors=True)  # the map is all that is used; one tree per replayed commit filled %TEMP%
+    cache[rev] = (m, None)
     return cache[rev]
 
 
@@ -179,28 +196,54 @@ def merge(reports):
     return out
 
 
-def run_history(n, rev):
-    m = impact_build.build(ROOT) if rev == "HEAD" else map_at(rev)[0]
-    shas = git("log", "--format=%h", "--no-merges", f"-{n}", rev).split()
+def gpu_steps(rep):
+    return sorted(x for x in impact.expand_steps(rep["release_gate_steps"]) if not x.startswith("cpu_"))
+
+
+def pair(m, tt):
+    """touched (file, test) -> registered test ids of the executables that link the file; and the unpaired ones"""
+    regs, unp = {}, []
+    for path, t in tt:
+        got = False
+        for exe, srcs in m["executables"].items():
+            tid = f"{exe}:{t}"
+            if path in srcs and tid in m["tests"]:
+                regs[tid] = m["tests"][tid]["exe"]
+                got = True
+        if not got:
+            unp.append((path, t))
+    return regs, unp
+
+
+def run_history(n, rev, skip=0, at_commit=False):
+    m_head = impact_build.build(ROOT) if rev == "HEAD" else map_at(rev)[0]
+    shas = git("log", "--format=%h", "--no-merges", f"--skip={skip}", f"-{n}", rev).split()
     tot = fhit = ehit = 0
-    misses = []
+    misses, unpaired, at_rev = [], [], []
+    nprod = ngpu = 0
     for s in shas:
         ch = impact.parse_diff(git("diff", "-U0", "--no-color", "-M", f"{s}^", s))
         prod = {p: c for p, c in ch.items() if p.startswith(("src/", "include/", "kernels/"))}
         if not prod:
             continue
+        nprod += 1
         tt = touched_tests(s, with_file=True)
-        regs = {}
-        # arch024-S12: only the executables that link the touched test file (58f340b touched model_tests.cpp testMoe;
-        # matching by name alone counted whirl-kernel-test:testMoe, a different function, as the test for the change)
-        for path, t in tt:
-            for exe, srcs in m["executables"].items():
-                tid = f"{exe}:{t}"
-                if path in srcs and tid in m["tests"]:
-                    regs[tid] = m["tests"][tid]["exe"]
+        m = map_at(s)[0] if at_commit else m_head
+        regs, unp = pair(m, tt)
+        if unp and not at_commit:
+            # review C3: a test renamed or removed after this commit is not in the map of REV: pair and analyze this
+            # commit with the map built at the commit itself, and report what still does not pair
+            m_s = map_at(s)[0]
+            regs2, unp2 = pair(m_s, tt)
+            if len(regs2) >= len(regs):
+                m, regs, unp = m_s, regs2, unp2
+                at_rev.append(s)
+            unpaired += [(s, p, t) for p, t in unp]
+        rep = impact.analyze(prod, m, s, f"{s}^")
+        if gpu_steps(rep):
+            ngpu += 1
         if not regs:
             continue
-        rep = impact.analyze(prod, m, s, f"{s}^")
         listed = {f"{e}:{x}" for e, v in rep["cpu_tests"].items() for x in v} | {f"whirl-kernel-test:{x}" for x in rep["kernel_tests"]}
         for tid, exe in regs.items():
             tot += 1
@@ -212,12 +255,68 @@ def run_history(n, rev):
             else:
                 misses.append((s, tid, "MISS"))
     subj = lambda s: git("log", "-1", "--format=%s", s).strip()[:70]
-    print(f"== history replay: last {n} commits of {rev}: {tot} (commit, test) pairs where a commit changed product code and a test")
+    print(f"== history replay: {n} commits of {rev} skipping the newest {skip}{' (map built at every commit)' if at_commit else ''}: {nprod} change product code; {tot} (commit, test) pairs "
+          f"where a commit changed product code and a test")
+    rate = 100 * fhit / tot if tot else 0.0
     if tot:
-        print(f"   test listed by the map: {fhit}/{tot} ({100 * fhit / tot:.0f}%); executable listed only: {ehit}; missed: {tot - fhit - ehit}")
+        print(f"   CPU test listed by the map: {fhit}/{tot} ({rate:.0f}%); executable listed only: {ehit}; missed: {tot - fhit - ehit}"
+              f"  [CPU tests only: not evidence for the GPU step selection]")
+    print(f"   GPU release steps: {ngpu}/{nprod} product commits get >= 1 GPU step; {nprod - ngpu} get none (check them with --baseline)")
+    if at_rev:
+        print(f"   paired with the map at the commit itself (test renamed / removed later): {', '.join(at_rev)}")
+    for s, p, t in unpaired:
+        print(f"   UNPAIRED {s} {p}:{t}  (no executable registers it at REV or at the commit)  ({subj(s)})")
     for s, t, w in misses:
         print(f"   {w:8} {s} {t}  ({subj(s)})")
-    return tot, fhit, ehit
+    near = m_head.get("fanout_near_cut") or {}
+    if near:
+        print(f"   WARN     called names within 2 of MAX_FANOUT {impact_build.MAX_FANOUT} (one more definition cuts their edges): "
+              + ", ".join(f"{k}={v}" for k, v in near.items()))
+    return tot, fhit, ehit, rate
+
+
+def run_baseline(base_rev, n, rev, skip):
+    """replay.py with base_rev's tools/impact and with these tools on the same commits; list narrowed commits"""
+    import json as _json
+    tmp = tempfile.mkdtemp(prefix="validate_base_")
+    data = subprocess.run(["git", "-C", ROOT, "archive", "--format=tar", base_rev, "tools/impact"], capture_output=True)
+    if data.returncode != 0:
+        print(f"validate: git archive {base_rev} tools/impact failed")
+        return None
+    with tarfile.open(fileobj=io.BytesIO(data.stdout)) as t:
+        t.extractall(tmp, filter="data")
+    here = os.path.dirname(os.path.abspath(__file__))
+    outs, procs = {}, []
+    for tag, tools in (("base", os.path.join(tmp, "tools", "impact")), ("new", here)):
+        outs[tag] = os.path.join(tmp, f"{tag}.json")
+        procs.append(subprocess.Popen([sys.executable, "-I", os.path.join(here, "replay.py"), "--tools", tools, "--root", ROOT,
+                                       "--rev", rev, "--n", str(n), "--skip", str(skip), "--out", outs[tag]]))
+    if any(p.wait() != 0 for p in procs):
+        print("validate: replay failed")
+        return None
+    b = _json.load(open(outs["base"], encoding="utf-8"))
+    w = _json.load(open(outs["new"], encoding="utf-8"))
+    shutil.rmtree(tmp, ignore_errors=True)
+    nar, grew = [], 0
+    nsteps = {"base": 0, "new": 0}
+    for s in b:
+        nsteps["base"] += len(b[s]["steps"])
+        nsteps["new"] += len(w[s]["steps"])
+        lost = {k: sorted(set(b[s][k]) - set(w[s][k])) for k in ("steps", "paths", "cpu", "kt")}
+        if any(lost[k] for k in ("steps", "paths")):
+            nar.append((s, lost))
+        if any(set(w[s][k]) - set(b[s][k]) for k in ("steps", "paths", "cpu", "kt")):
+            grew += 1
+    print(f"== baseline: tools/impact of {base_rev} vs these tools on {len(b)} product commits of {rev} (skip {skip}): "
+          f"release steps {nsteps['base']} -> {nsteps['new']}; {grew} commit(s) select more; {len(nar)} narrowed")
+    for s, lost in nar:
+        print(f"   NARROWED {s}: steps {lost['steps']} paths {lost['paths']}")
+    for s in b:
+        lc = sorted(set(b[s]["cpu"]) - set(w[s]["cpu"]))
+        if lc and not any(s == x for x, _ in nar):
+            print(f"   note     {s}: {len(lc)} CPU test(s) fewer, steps / paths unchanged: {lc[:4]}")
+    return len(nar)
+
 
 
 def main():
@@ -225,12 +324,28 @@ def main():
     ap.add_argument("--cases", action="store_true")
     ap.add_argument("--history", type=int, default=0)
     ap.add_argument("--rev", default="HEAD")
+    ap.add_argument("--skip", type=int, default=0)
+    ap.add_argument("--baseline")
+    ap.add_argument("--map-at-commit", action="store_true", help="diagnostic: build the map at every replayed commit")
     a = ap.parse_args()
+    bad = []
     if not a.history or a.cases:
-        run_cases()
+        for c, rep, rows in run_cases():
+            bad += [f"named case {c['name']}: MISS {e}" for e, ok in rows if not ok]
     if a.history or not a.cases:
-        run_history(a.history or 150, a.rev)
-    return 0
+        tot, fhit, ehit, rate = run_history(a.history or 150, a.rev, a.skip, a.map_at_commit)
+        if not tot or rate < 95:
+            bad.append(f"history: CPU hit rate {rate:.0f}% < 95% ({fhit}/{tot})")
+    if a.baseline:
+        nn = run_baseline(a.baseline, a.history or 150, a.rev, a.skip)
+        if nn is None:
+            return 2
+        if nn:
+            bad.append(f"baseline {a.baseline}: {nn} narrowed commit(s)")
+    for b in bad:
+        print(f"validate: FAIL {b}")
+    print("validate: " + ("ok" if not bad else f"FAIL ({len(bad)})"))
+    return 1 if bad else 0
 
 
 if __name__ == "__main__":

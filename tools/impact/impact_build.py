@@ -349,6 +349,7 @@ def build(root):
     # (file-local helpers), and a method of class C is linked only when C (or a base of C) is visible in the
     # caller's file (TpsTrace::tick in the CLI is not Tier::tick).
     edges = defaultdict(set)
+    near_cut = {}  # called name -> largest visible fan-out seen, for names within 2 of MAX_FANOUT (or over it)
     for nid, (f, fn) in nodes.items():
         caller_cls = fn.name.split("::")[-2] if "::" in fn.name else None
         # constructions (`TestServer srv(su);`, `Engine e{...}`): a class named in the body links to its constructors
@@ -363,13 +364,20 @@ def build(root):
             local = [t for t in tg if nodes[t][0] == f]
             if local:
                 tg = local
-            if not tg or len(tg) > MAX_FANOUT:
-                continue
+            # arch024-S12 (review C2): drop methods of classes the caller cannot see BEFORE counting the fan-out, so
+            # a name is cut for being generic only by targets that could really be meant
+            vis_tg = []
             for t in tg:
                 tq = nodes[t][1].name.split("::")
                 cls = tq[-2] if len(tq) >= 2 else None
                 if cls and cls in classes and cls != caller_cls and nodes[t][0] != f and not class_seen(cls, visible[f]):
                     continue
+                vis_tg.append(t)
+            if vis_tg and len(vis_tg) >= MAX_FANOUT - 2:
+                near_cut[c] = max(near_cut.get(c, 0), len(vis_tg))
+            if not vis_tg or len(vis_tg) > MAX_FANOUT:
+                continue
+            for t in vis_tg:
                 edges[nid].add(t)
     # kernel dispatch layer
     hip_files = [f for f in scans if f.endswith(".hip")]
@@ -586,6 +594,7 @@ def build(root):
         "release_gate_steps": rg_steps,
         "release_srv_steps": srv_steps,
         "includers": includers,
+        "fanout_near_cut": {k: v for k, v in sorted(near_cut.items())},  # arch024-S12 C2: > MAX_FANOUT = cut
         "stats": {"files_scanned": len(scans), "functions": len(nodes), "edges": sum(len(v) for v in edges.values()),
                   "tests": len(tests), "hip_files": len(hips), "kernel_fields": len(kfields)},
         "errors": errors,

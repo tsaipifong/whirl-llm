@@ -126,7 +126,11 @@ python tools/impact/validate.py                    # replay real fix commits: do
 and the gate that caught it) must be hit by the map built at that fix commit, and the history replay
 (`--history 200`: every commit that changed product code and a registered test together) must list that
 test for >= 95 % of the pairs. It prints the selectivity next to the hit rate (a map that lists
-everything would hit everything) and every miss with its commit.
+everything would hit everything) and every miss with its commit. The history rate counts **CPU tests
+only**; it is not evidence for the GPU steps. For those, `--baseline REV` replays REV's `tools/impact`
+on the same commits (`tools/impact/replay.py`) and fails on every commit for which the current tools
+select fewer release steps or paths. `--skip N` reports on older commits the tools were not tuned on
+(hold-out). Exit 0 = every named case hit, every rate >= 95 %, nothing narrowed; 1 otherwise.
 
 ### <a id="module-gate"></a>Module gate (dev-time only)
 
@@ -145,8 +149,13 @@ python tools/gates/modules_check_test.py                  # modules_check / impa
 **This is fast feedback while developing, not a release rule.** Until the owner signs off O1 and O2
 (arch024 plan), a release, an rc merge and a bug-fix release run the full gate on both GPUs under the
 rules above. A `-Module` run writes `PASS_module_<names>_<device>`, never the `PASS_gate_<device>` of a
-full gate. The gate prints the module's checks that are not release_gate steps (P-719, P-size, P-sess,
-flake loops) and which steps need both GPUs.
+full gate (a `-Tag` that does not start with `module_` is refused), its summary header says
+`module=<names>`, and `release/release_check.py` (R1) rejects such a summary for a bug-fix release.
+The gate prints the module's checks that are not release_gate steps (P-719, P-size, P-sess, flake
+loops) and which steps need both GPUs. M1 handles runs with the modules of every file that includes
+it (an includer in no module, e.g. `engine.h`, means the full gate); M8 threads runs with M2-M5 and M7.
+Steps the impact map selects beyond the module's row (PLAN c-2, e.g. `server.mtp` -> `srv_balance`,
+`srv_fast`) are on impact.py's `mod-gate` line as `-Steps`; pass them.
 
 - A module whose files are not on the current branch yet (`lands_on`) is reported, and its steps still run;
   a module with paths of which none exists and no `lands_on` is a setup error (exit 2), as are an
@@ -154,7 +163,9 @@ flake loops) and which steps need both GPUs.
   `pending` step that already exists in the gate, and an empty selection.
 - `impact.py` suggests `-Module X` only when every changed product file belongs to one module (plus
   that module's `when` files, e.g. `prefill_schedule.h` for M3 / M4); product code in no module, two
-  modules or a contract file (ServerModel, `device::Backend`, kernels_abi, numerics) means the full gate.
+  modules, a contract file (ServerModel, `device::Backend`, kernels_abi, numerics) or a build-wide file
+  (CMakeLists.txt, cmake/*, build.bat, redist/*, tools/package_release.ps1) means the full gate.
+  `release_gate.ps1 -Module a,b` accepts two modules with a warning (dev-time union only).
   During the arch024 moves every step also edits `engine.cpp` / `engine.h`, so the suggestion is the
   full gate there; the module gate is for later changes that stay inside one module.
 

@@ -12,18 +12,21 @@
   "GPU = run the gate on one card, two = both cards one after the other); pending (steps a later arch024 step",
   "adds to release_gate: printed, not run, never silently dropped; an entry here whose step already exists in",
   "the gate is an error, so the list is cleaned when the step lands); manual (checks outside release_gate,",
-  "printed for the runner); when (extra steps when a named file changes); full (the full gate on both GPUs).",
+  "printed for the runner); when (extra steps when a named file changes); full (the full gate on both GPUs);",
+  "callers: \"rdeps\" = also run the modules of every src/include file that includes the module's files (transitive;",
+  "an includer in no module = the full gate), or a list of module names (review A4). release_gate prints, and",
+  "impact.py adds as -Steps, the steps the impact map selects beyond this table (PLAN c-2).",
   "Every step name must exist in release_gate.ps1 -List or be in pending, else release_gate exits 2."
  ],
  "status": "dev-only: not for releases until owner sign-off O1/O2 (arch024 PLAN)",
  "modules": {
   "handles": {
    "id": "M1", "desc": "RAII device handles (DevBuf / PinnedBuf / EventH / StreamH)",
-   "paths": ["src/device/handles.h"],
+   "paths": ["src/device/handles.h"], "callers": "rdeps",
    "steps": ["cpu_device", "srv_gpu_select"],
    "gpus": {"srv_gpu_select": 2},
    "pending": [{"step": "cpu_raw_free_check", "lands_in": "S11 (tools/gates/raw_free_check.ps1)"}],
-   "manual": ["the steps of every caller's module (handles are used by M2-M5, M7)", "P-719: kvram719 R9700 (tools/repro/kvram719_tier.ps1)"]
+   "manual": ["P-719: kvram719 R9700 (tools/repro/kvram719_tier.ps1)"]
   },
   "ckpt_store": {
    "id": "M2", "desc": "checkpoint buffers (CkptStore)",
@@ -82,9 +85,9 @@
   "threads": {
    "id": "M8", "desc": "engine thread ownership checks",
    "paths": [], "lands_on": "arch024 S10 (not written yet; S10 names its source file, then add it here)",
-   "steps": ["cpu_server"],
+   "steps": ["cpu_server"], "callers": ["ckpt_store", "page_pool", "prefix_store", "tier_bridge", "engine_gov"],
    "pending": [{"step": "cpu_server_log_scan", "lands_in": "S10 (tools/gates/server_log_scan.ps1)"}],
-   "manual": ["the steps of every caller's module", "P-speed d5fc637 vs HEAD"]
+   "manual": ["P-speed d5fc637 vs HEAD"]
   },
   "contract": {
    "id": "X", "desc": "cross-module contracts (ServerModel, device::Backend, kernels_abi, numerics): the full gate",

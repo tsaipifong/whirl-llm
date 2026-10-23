@@ -42,6 +42,8 @@ CASES = [  # name, modules json, expect ok, substring of an error (block cases)
     ("block: file in two modules", mut(lambda m: m.update(b={"id": "MC", "paths": ["src/cache/*"], "steps": ["cpu_cache"]})), False, "two modules"),
     ("block: no steps, not full", mut(lambda m: m["a"].update(steps=[])), False, "no steps"),
     ("block: no id", mut(lambda m: m["a"].pop("id")), False, "no id"),
+    ("pass: callers rdeps / list", mut(lambda m: (m["a"].update(callers="rdeps"), m["later"].update(callers=["a"]))), True, None),
+    ("block: callers names an unknown module", mut(lambda m: m["a"].update(callers=["nope"])), False, "callers must be"),
 ]
 
 
@@ -73,6 +75,29 @@ def main():
     g = impact.module_gate(ch("src/cache/ckpt_store.cpp", "include/whirl/prefill_schedule.h"), mods2)["module_gate"]
     good = g == "release_gate.ps1 -Module a -Steps seq_swift_precise"
     print(f"{'ok  ' if good else 'FAIL'} map: when-file adds -Steps: {g}")
+    ok, bad = ok + good, bad + (not good)
+    # review A3: steps the impact map selects beyond the module table are added as -Steps (PLAN c-2)
+    rep = {"release_gate_steps": ["cpu_cache", "golden_swift", "srv_balance", "srv_fast", "seq_moe_<mode>", "dfl_<mode> (R9700, Q4_K_M)"]}
+    g = impact.module_gate(ch("src/cache/ckpt_store.cpp"), mods, rep=rep)["module_gate"]
+    good = g == "release_gate.ps1 -Module a -Steps seq_moe_balance,seq_moe_precise,srv_balance,srv_fast"
+    print(f"{'ok  ' if good else 'FAIL'} map: map steps beyond the table are added: {g}")
+    ok, bad = ok + good, bad + (not good)
+    # review A4: callers by includers (rdeps): includer in a module joins, includer in no module = full gate
+    mods3 = {"h": {"id": "H", "paths": ["src/device/handles.h"], "callers": "rdeps", "steps": ["cpu_device"]},
+             "c": {"id": "C", "paths": ["src/cache/*"], "steps": ["cpu_cache"]},
+             "t": {"id": "T", "paths": [], "callers": ["c"], "steps": ["cpu_server"]}}
+    for name, inc, want in (("map: rdeps includer in a module joins", ["src/cache/ckpt_store.h", "tests/x.cpp"], "release_gate.ps1 -Module h,c"),
+                            ("map: rdeps includer in no module = full", ["src/cache/ckpt_store.h", "src/server/engine.h"], "full gate or"),
+                            ("map: rdeps without the map = full", None, "full gate or")):
+        mm = None if inc is None else {"includers": {"src/device/handles.h": inc}}
+        g = impact.module_gate(ch("src/device/handles.h"), mods3, m=mm)["module_gate"]
+        good = g.startswith(want)
+        print(f"{'ok  ' if good else 'FAIL'} {name}: {g}")
+        ok, bad = ok + good, bad + (not good)
+    # review C6: a build-wide file with a module file = full gate
+    g = impact.module_gate(ch("src/cache/ckpt_store.cpp", "cmake/server.cmake"), mods)["module_gate"]
+    good = g.startswith("full gate or") and "build-wide" in g
+    print(f"{'ok  ' if good else 'FAIL'} map: build-wide file = full gate: {g}")
     ok, bad = ok + good, bad + (not good)
     print(f"modules check test: {ok}/{ok + bad} ok")
     return 1 if bad else 0

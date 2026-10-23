@@ -81,6 +81,9 @@ def check(mj, files, steps):
             for s in sts:
                 if s not in steps:
                     errs.append(f"{n}: when {f}: step {s} is not in release_gate.ps1")
+        c = d.get("callers")
+        if c is not None and c != "rdeps" and not (isinstance(c, list) and all(x in mods and x != n for x in c)):
+            errs.append(f"{n}: callers must be \"rdeps\" or a list of other module names, got {c!r}")
         globs = list(d.get("paths") or [])
         present = [f for f in files if any(fnmatch.fnmatch(f, g) for g in globs)]
         for f in present:
