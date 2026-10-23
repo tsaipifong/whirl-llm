@@ -3408,6 +3408,20 @@ void testB0SizingFollowUps() {
         const auto tz = startfit::ramTierText(z, 8192, true, "--kv-ram-mb", "--kv-ram-mb 8192", startfit::pinnedWhy(0, 1), 0, 40000);
         CHECK(tz.off_reason.find("no room left") != std::string::npos);
     }
+    // N3-6 (REVIEW-S8-719-3:63): "kv tier: RAM tier size 4096 MiB (WHIRL_KV_RAM_MB 8192)" shows the asked size next to the
+    // clamped one; a lowered size must say it was lowered (explicit and automatic). Unchanged: the reason as before.
+    {
+        const auto e = startfit::ramTierFit(8192, 19374 * MiB, 0, true, 4096, 9216);
+        const auto te = startfit::ramTierText(e, 8192, true, "WHIRL_KV_RAM_MB", "WHIRL_KV_RAM_MB 8192", startfit::pinnedWhy(4096, 1), 9216, 19374);
+        CHECK(te.size_reason.find("lowered") != std::string::npos);
+        const auto a = startfit::ramTierFit(16384, 30 * GiB, 16384, false, 12288, 9216);
+        CHECK(a.has_value() && a->mb == 12288ull);
+        const auto ta = startfit::ramTierText(a, 16384, false, "--kv-ram-mb", "auto: 1/4 of 64 GiB RAM", startfit::pinnedWhy(12288, 1), 9216, 30720);
+        CHECK(ta.size_reason.find("lowered") != std::string::npos);
+        const auto tu = startfit::ramTierText(std::nullopt, 8192, true, "--kv-ram-mb", "--kv-ram-mb 8192", "", 9216, 30720);
+        CHECK_EQ(tu.size_reason, std::string("--kv-ram-mb 8192"));
+        CHECK_EQ(tu.off_reason, std::string("--kv-ram-mb 8192"));
+    }
 }
 
 // ---------------------------------------------------------------------------
