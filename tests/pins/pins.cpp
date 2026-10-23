@@ -22,6 +22,11 @@
 //       the same with a 64 MiB RAM tier (min 256 tokens, no SSD tier) and three more requests (a long session, its
 //       compacted form and the next turn of that): the spill copies into the arena (TierBridge span sequence, M5), the tier's allocations, and a
 //       last line with the tier counters (spills, superseded, demoted).
+//   whirl-pins engine --gguf MODEL.gguf --kv f16|q8h|q4 --restore   (arch024-S7, recorded on 869e56c before the move)
+//       --tier plus five more requests: a document session under a short system prompt (below sys_min: no shared
+//       prefix), two unrelated sessions that take both slots (the document's VRAM copy goes), the document again
+//       and its next turn: restores from the RAM tier (TierBridge restore half: the copies from the arena into the
+//       slot's pages and checkpoints, main part then tail) and the in-place spill after a restore.
 // Output goes to stdout; tests/pins/check.ps1 compares it with the recorded file.
 
 #include "http_client.h"
@@ -201,7 +206,7 @@ std::string chatBody(const std::string& messages) {
     return "{\"messages\":" + messages + ",\"max_tokens\":8,\"temperature\":0,\"stream\":false}";
 }
 
-int enginePin(const Tokenizer& tok, const std::string& kv, bool with_tier) {
+int enginePin(const Tokenizer& tok, const std::string& kv, bool with_tier, bool with_restore) {
     test::MockConfig mc;
     mc.parallel = 2;
     mc.slot_ctx = 16384;
@@ -288,6 +293,27 @@ int enginePin(const Tokenizer& tok, const std::string& kv, bool with_tier) {
                                         "{\"role\":\"user\",\"content\":\"繼續。\"},{\"role\":\"assistant\",\"content\":\"OK.\"},"
                                         "{\"role\":\"user\",\"content\":\"再一個。\"}]"});
     }
+    // --restore (arch024-S7): a document session, two unrelated sessions that take both slots, then the document
+    // again and its next turn (restores from the RAM tier; the spill after a restore is in place)
+    if (with_restore) {
+        std::string doc;
+        for (int i = 0; i < 260; ++i) doc += " Section " + std::to_string(i) + ": the parser keeps a stack of open scopes.";
+        const std::string du = "{\"role\":\"user\",\"content\":\"Summarize this design note:" + doc + "\"}";
+        const std::string dsys = "{\"role\":\"system\",\"content\":\"You review design notes.\"}";
+        auto filler = [](const char* word, int salt) {
+            std::string f;
+            for (int i = 0; i < 150; ++i) f += std::string(" ") + word + " " + std::to_string(i * salt) + " is listed.";
+            return f;
+        };
+        all.push_back({"doc", "[" + dsys + "," + du + "]"});
+        all.push_back({"fillA", "[{\"role\":\"system\",\"content\":\"You count apples.\"},{\"role\":\"user\",\"content\":\"" +
+                                    filler("apple", 3) + "\"}]"});
+        all.push_back({"fillB", "[{\"role\":\"system\",\"content\":\"You count pears.\"},{\"role\":\"user\",\"content\":\"" +
+                                    filler("pear", 7) + "\"}]"});
+        all.push_back({"doc-again", "[" + dsys + "," + du + "]"});
+        all.push_back({"doc+turn2", "[" + dsys + "," + du + ",{\"role\":\"assistant\",\"content\":\"A scope stack.\"},"
+                                    "{\"role\":\"user\",\"content\":\"再詳細一點。\"}]"});
+    }
     int bad = 0;
     for (const auto& [name, msgs] : all) {
         // --tier: the previous request's spill (finishJob, after the reply) is done before the next phase mark
@@ -341,13 +367,14 @@ int main(int argc, char** argv) {
     }
     const std::string cmd = argv[1];
     std::string gguf_path, req_path, kv = "f16";
-    bool with_tier = false;
+    bool with_tier = false, with_restore = false;
     for (int i = 2; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--gguf" && i + 1 < argc) gguf_path = argv[++i];
         else if (a == "--requests" && i + 1 < argc) req_path = argv[++i];
         else if (a == "--kv" && i + 1 < argc) kv = argv[++i];
         else if (a == "--tier") with_tier = true;
+        else if (a == "--restore") with_tier = with_restore = true;
         else {
             std::fprintf(stderr, "unknown argument %s\n", a.c_str());
             return 2;
@@ -371,7 +398,7 @@ int main(int argc, char** argv) {
         if (req_path.empty()) return 2;
         return tokensPin(*file, *tok, req_path);
     }
-    if (cmd == "engine") return enginePin(*tok, kv, with_tier);
+    if (cmd == "engine") return enginePin(*tok, kv, with_tier, with_restore);
     std::fprintf(stderr, "unknown command %s\n", cmd.c_str());
     return 2;
 }
