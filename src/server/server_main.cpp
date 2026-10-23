@@ -14,6 +14,7 @@
 #include "http.h"
 #include "log.h"
 #include "device/backend.h"
+#include "hip/launch_log.h"
 #include "tier/kv_tier.h"
 #include "tier/ram_size.h"
 #include "whirl/common.h"
@@ -43,6 +44,7 @@
 #include <random>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 #ifdef _WIN32
@@ -58,6 +60,49 @@ namespace whirl::server {
 static_assert(vram::min_prefill_batch >= prefill_chunk + prefill_merge);
 
 namespace {
+
+// arch024-S0a (PLAN v3 N3, P-size): the inputs of the startup sizing's pure functions (startfit::*, vram::planFit,
+// numerics::serverPoolFit, tier::ramTierSize), gathered while the server sizes itself and logged as one line
+// "startup inputs: key=value ..." so tests/pins/startup_replay can recompute the decisions from a real log. Log only:
+// nothing here feeds a decision. Values are percent-encoded (space %20, % %25, = %3D, newline %0A).
+std::string inEnc(std::string_view s) {
+    std::string o;
+    for (const char c : s) {
+        if (c == ' ') o += "%20";
+        else if (c == '%') o += "%25";
+        else if (c == '=') o += "%3D";
+        else if (c == '\n') o += "%0A";
+        else o += c;
+    }
+    return o.empty() ? std::string("%") : o;  // "%" alone: the empty string
+}
+struct StartupInputs {
+    std::string line;
+    template <class T>
+    void put(std::string_view k, const T& v) {
+        if constexpr (std::is_same_v<T, bool>) line += std::format(" {}={}", k, v ? 1 : 0);
+        else if constexpr (std::is_convertible_v<const T&, std::string_view>) line += std::format(" {}={}", k, inEnc(std::string_view(v)));
+        else line += std::format(" {}={}", k, v);
+    }
+    void putFit(std::string_view p, const vram::FitInput& fi) {
+        const std::string s(p);
+        put(s + ".avail", fi.avail);
+        put(s + ".weights", fi.weights);
+        put(s + ".fixed", fi.fixed);
+        put(s + ".buf_per_row", fi.buf_per_row);
+        put(s + ".buf_fixed", fi.buf_fixed);
+        put(s + ".ckpt_bytes", fi.ckpt_bytes);
+        put(s + ".parallel", fi.parallel);
+        put(s + ".kv_per_token", fi.kv_per_token);
+        put(s + ".pool_min_tokens", fi.pool_min_tokens);
+        put(s + ".pool_hard_min", fi.pool_hard_min);
+        put(s + ".batch", fi.batch);
+        put(s + ".n_ck", fi.n_ck);
+        put(s + ".n_spe", fi.n_spe);
+        put(s + ".batch_fixed", fi.batch_fixed);
+        put(s + ".ck_fixed", fi.ck_fixed);
+    }
+};
 
 // Graceful shutdown: Ctrl+C / Ctrl+Break / closing the console window (and logoff /
 // system shutdown) stop the engine, which answers queued requests 503, lets the
@@ -373,6 +418,8 @@ std::string serveHelp(const char* program) {
 int serveMain(int argc, char** argv, const char* program) {
     // argv: UTF-8, argv[0] = the program (or the `serve` subcommand), options from argv[1]
     g_program = program;
+    // launch log (WHIRL_LAUNCH_LOG): no per-launch RAW dump in a server unless WHIRL_LAUNCH_LOG_RAW=server (C-2)
+    hip::launchlog::serverProcess();
     std::vector<std::string> args;
     for (int k = 1; k < argc; ++k) args.push_back(argv[k]);
     for (const std::string& a : args) {
@@ -615,6 +662,12 @@ int serveMain(int argc, char** argv, const char* program) {
         //   5. --ctx-per-slot down to the pool. The per-request context reserves no memory by itself (the pool is
         //      shared), so lowering it first frees nothing: it is capped after the pool is known.
         std::vector<std::string> adjusted;
+        StartupInputs sin;  // arch024-S0a: logged as "startup inputs:" at the end of the sizing (log only)
+        sin.put("others.ok", others0.ok);
+        sin.put("others.mib", others0.others >> 20);
+        sin.put("others.display", others0.display_known ? (others0.display ? 1 : 0) : -1);
+        sin.put("wddm_start.ok", wddm_start.ok);
+        sin.put("wddm_start.budget", wddm_start.ok ? wddm_start.local_budget : 0);
         const auto adjust = [&](const std::string& what, const std::string& why) {
             logW("adjusted: {} ({})", what, why);
             adjusted.push_back(what);
@@ -782,6 +835,9 @@ int serveMain(int argc, char** argv, const char* program) {
                 }
                 // 3. --parallel given: fewer slots while even one request does not fit next to every slot's fixed memory
                 const std::uint32_t par0 = opt.parallel;
+                sin.putFit("fitp", fi);
+                sin.put("fitp.per_slot", (st1 + pend1) + (st1 + pend1) / 25);
+                sin.put("fitp.given", opt.parallel_given);
                 const startfit::ParallelFit pfit = startfit::fitParallel(fi, (st1 + pend1) + (st1 + pend1) / 25, opt.parallel_given);
                 if (pfit.parallel != par0) {
                     opt.parallel = pfit.parallel;
@@ -793,6 +849,11 @@ int serveMain(int argc, char** argv, const char* program) {
                                        par0, pfit.pool_requested, want(), budget_why));
                 }
                 // 2. prefill batch / checkpoint counts set by the user: lowered only when the minimum still does not fit
+                sin.putFit("fitf", fi);
+                sin.put("fitf.plan.batch", plan.batch);
+                sin.put("fitf.plan.n_ck", plan.n_ck);
+                sin.put("fitf.plan.n_spe", plan.n_spe);
+                sin.put("fitf.plan.pool_tokens", plan.pool_tokens);
                 const startfit::FixedFit ffit = startfit::fitFixed(fi, plan);
                 if (ffit.changed) {
                     if (ffit.batch_changed)
@@ -1098,6 +1159,12 @@ int serveMain(int argc, char** argv, const char* program) {
                        std::format("measured after loading the weights: with {} slots the KV pool would hold about {} tokens, less than one "
                                    "{}-token request ({:.2f} GiB usable, {:.0f} MiB per slot)",
                                    p, poolFor(p), target, av / 1073741824.0, per_slot / 1048576.0));
+            sin.put("slots.parallel", opt.parallel);
+            sin.put("slots.avail", av);
+            sin.put("slots.per_slot", per_slot);
+            sin.put("slots.shared", shared);
+            sin.put("slots.per_token", per_tok_est);
+            sin.put("slots.target", target);
             opt.parallel = startfit::slotsThatFit(opt.parallel, av, per_slot, shared, per_tok_est, target);
         }
         const hip::MemInfo mem_s0 = ops->memInfo();
@@ -1335,6 +1402,18 @@ int serveMain(int argc, char** argv, const char* program) {
                 if (!ec) pst.later = startfit::mmprojPinnedBytes(static_cast<std::uint64_t>(sz));
             }
             pinned_room = startfit::pinnedRoomMb(pst);
+            sin.put("pin.measured", true);
+            sin.put("pin.total_phys", pst.total_phys);
+            sin.put("pin.pinned_max", pst.pinned_max);
+            sin.put("pin.later", pst.later);
+            sin.put("pin.gpus", pst.gpus.size());
+            for (std::size_t gi = 0; gi < pst.gpus.size(); ++gi) {
+                const std::string g = std::format("pin.g{}", gi);
+                sin.put(g + ".nonlocal_budget", pst.gpus[gi].nonlocal_budget);
+                sin.put(g + ".own_nonlocal", pst.gpus[gi].own_nonlocal);
+                sin.put(g + ".shared_system", pst.gpus[gi].shared_system);
+                sin.put(g + ".adapter_shared", pst.gpus[gi].adapter_shared);
+            }
             logI("kv tier: pinned memory now: {} HIP GPU(s) [{}]; all programs {} MiB (largest adapter) of half the RAM ({} MiB){} -> room for the RAM tier {} "
                  "(reserves {} / {} MiB)",
                  pst.gpus.size(), per, pst.pinned_max >> 20, pst.total_phys >> 21,
@@ -1343,6 +1422,15 @@ int serveMain(int argc, char** argv, const char* program) {
                  startfit::pinned_reserve_mb, startfit::pinned_machine_reserve_mb);
             pinned_why = startfit::pinnedWhy(pinned_room == startfit::pinned_room_unknown ? 0 : pinned_room, pst.gpus.size());
         }
+        sin.put("ram.explicit_mb", rin.explicit_mb ? std::to_string(*rin.explicit_mb) : std::string("-"));
+        sin.put("ram.explicit_src", std::string_view(rin.explicit_src));
+        sin.put("ram.total_phys", rin.total_phys);
+        sin.put("ram.avail_phys", rin.avail_phys);
+        sin.put("ram.floor_mb", rin.floor_mb);
+        sin.put("ram.entry_mb", rin.entry_mb);
+        sin.put("ram.integrated", rin.integrated);
+        sin.put("ram.n_ck", n_ck);
+        sin.put("ram.no_pc", no_pc);
         std::optional<startfit::RamFit> rf =
             startfit::ramTierFit(kv_ram_mb, rin.avail_phys, ram_auto_mb, rin.explicit_mb.has_value(), pinned_room, entry_mb);
         if (n_ck == 0 || no_pc) rf.reset();
@@ -1472,6 +1560,20 @@ int serveMain(int argc, char** argv, const char* program) {
             // v0.2.2.1: explicit -c / --ctx-per-slot that do not fit are lowered (adjusted: lines), not refused; the UMA
             // iGPU keeps its carve-out rule (pool_req there is the 262144 default or -c, checked by umaRefusal above)
             const bool fit_explicit = !is_uma;
+            {
+                const numerics::KvFitLabel lb = numerics::kvFitLabel(nreq, cfg.moe, model.kv_choice.kv);
+                sin.put("pool.avail", avail);
+                sin.put("pool.per_token", model.kvBytesPerToken());
+                sin.put("pool.req", pool_req ? std::to_string(*pool_req) : std::string("-"));
+                sin.put("pool.pool_explicit", opt.ctx.has_value() && !fit_explicit);
+                sin.put("pool.slot_ctx", slot_ctx);
+                sin.put("pool.slot_explicit", opt.ctx_per_slot.has_value() && !fit_explicit);
+                sin.put("pool.page", kv_page);
+                sin.put("pool.cap", 8 * cap_max);
+                sin.put("pool.mode", std::string_view(lb.mode));
+                sin.put("pool.fmt", std::string_view(lb.fmt));
+                sin.put("pool.alt", std::string_view(lb.alt));
+            }
             const numerics::PoolFit pf = numerics::serverPoolFit(avail, model.kvBytesPerToken(), pool_req,
                                                                  opt.ctx.has_value() && !fit_explicit, slot_ctx,
                                                                  opt.ctx_per_slot.has_value() && !fit_explicit, kv_page, 8 * cap_max,
@@ -1953,6 +2055,8 @@ int serveMain(int argc, char** argv, const char* program) {
             if (opt.parallel_given && ctx_eff < target_ctx)
                 adjusted.push_back(std::format("target not reached: context {} tokens per request with {} slot(s), less than {}", ctx_eff,
                                                opt.parallel, target_ctx));
+            // arch024-S0a (PLAN v3 N3): every input of the sizing's pure functions, for tests/pins startup_replay (log only)
+            logI("startup inputs:{}", sin.line);
             if (adjusted.empty()) {
                 logI("startup adjustments: none (the requested settings fit)");
             } else {
