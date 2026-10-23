@@ -4,11 +4,13 @@
 // Written for WHIRL. Recorded once on the B0 base (06a1540, before S1) and compared byte for byte at every later
 // step (tests/pins/*.txt; approval style: a mismatch fails, --record is explicit). Uses only interfaces that exist at
 // 06a1540 (Engine, HttpServer, MockModel, NullBackend, chat::*, Tokenizer, device::Backend), so the same file builds
-// on the base worktree.
+// on the base worktree. Exception (arch024-S8): the tokens mode calls server::chatPrompt / completionTokens, which
+// exist from S8 on; the base recording ran an inline copy of the same steps (scratch\s8\base_pins.cpp).
 //
 //   whirl-pins tokens --gguf MODEL.gguf --requests tests/pins/requests.jsonl
-//       prompt token pin (A7): each chat request -> chat::parseChatRequest -> chat::renderChat (the GGUF's template
-//       kind) -> Tokenizer::encode(prompt, true), as http.cpp buildJob does; one line per request: token count and
+//       prompt token pin (A7): each chat request -> chat::parseChatRequest -> server::chatPrompt (http.cpp: media
+//       check, chat::renderChat with the GGUF's template kind, Tokenizer::encode(prompt, true)), the code buildJob runs;
+//       completion rows -> server::completionTokens; one line per request: token count and
 //       FNV-1a 64 of the ids. Reads the GGUF's tokenizer metadata only (no weights).
 //   whirl-pins engine --gguf MODEL.gguf --kv f16|q8h|q4
 //       the Engine's device-memory sequence over MockModel + NullBackend (wrapped by a recording Backend): every
@@ -74,29 +76,23 @@ int tokensPin(const gguf::File& f, const Tokenizer& tok, const std::string& req_
         ++n;
         try {
             const json::Value root = json::parse(body);
-            // arch024-S8: /v1/completions rows ("prompt"), as http.cpp buildJob's completion branch
+            // /v1/completions rows ("prompt"): the product's completionTokens (http.cpp buildJob, arch024-S8); the
+            // printed prompt bytes are the request's string (none for token ids)
             if (const json::Value* pv = root.asObject().find("prompt")) {
-                std::string prompt;
-                std::vector<std::uint32_t> v;
                 const json::Value* p0 = pv->isArray() && !pv->asArray().empty() ? &pv->asArray()[0] : pv;
-                if (p0->isString()) {
-                    prompt = p0->asString();
-                    const auto ids = tok.encode(prompt, true);
-                    v.assign(ids.begin(), ids.end());
-                } else {
-                    for (const json::Value& it : pv->asArray()) v.push_back(static_cast<std::uint32_t>(it.asInt()));
-                }
+                const std::string prompt = p0->isString() ? p0->asString() : std::string();
+                const std::vector<std::uint32_t> v = completionTokens(tok, static_cast<std::uint32_t>(tok.size()), root.asObject());
                 std::printf("req %s tokens %zu fnv %016llx prompt_bytes %zu prompt_fnv %016llx\n", name.c_str(), v.size(),
                             static_cast<unsigned long long>(fnv(v.data(), v.size() * 4)), prompt.size(),
                             static_cast<unsigned long long>(fnv(prompt.data(), prompt.size())));
                 continue;
             }
+            // chat rows: the product's chatPrompt (http.cpp buildJob, arch024-S8): media check, render, encode
             chat::ChatRequest req = chat::parseChatRequest(root);
             const json::Value* am = root.asObject().find("x_allow_media");
-            req.options.allow_media = am != nullptr && am->isBool() && am->asBool();
-            const std::string prompt = chat::renderChat(kind, req.messages, req.tools, req.options);
-            const auto ids = tok.encode(prompt, true);
-            std::vector<std::uint32_t> v(ids.begin(), ids.end());
+            const ChatPrompt cp = chatPrompt(tok, kind, req, am != nullptr && am->isBool() && am->asBool());
+            const std::string& prompt = cp.text;
+            std::vector<std::uint32_t> v(cp.ids.begin(), cp.ids.end());
             std::printf("req %s tokens %zu fnv %016llx prompt_bytes %zu prompt_fnv %016llx\n", name.c_str(), v.size(),
                         static_cast<unsigned long long>(fnv(v.data(), v.size() * 4)), prompt.size(),
                         static_cast<unsigned long long>(fnv(prompt.data(), prompt.size())));

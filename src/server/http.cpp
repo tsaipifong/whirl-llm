@@ -5,6 +5,7 @@
 #include "http.h"
 
 #include "log.h"
+#include "whirl/common.h"
 #include "whirl/version.h"
 
 #include <winsock2.h>
@@ -13,6 +14,7 @@
 #include <cctype>
 #include <chrono>
 #include <cstring>
+#include <ctime>
 #include <functional>
 #include <optional>
 #include <format>
@@ -453,8 +455,54 @@ std::shared_ptr<JobVis> buildVis(const VisionConfig& vc, const std::vector<std::
     return jv;
 }
 
+}  // namespace
+
+// (exported, http.h)
+ChatPrompt chatPrompt(const Tokenizer& tok, chat::TemplateKind tmpl, chat::ChatRequest& req, bool media) {
+    checkMediaParts(req.messages, media);
+    req.options.allow_media = media;
+    ChatPrompt cp;
+    cp.text = chat::renderChat(tmpl, req.messages, req.tools, req.options);
+    cp.ids = tok.encode(cp.text, true);
+    return cp;
+}
+
+// (exported, http.h)
+std::vector<std::uint32_t> completionTokens(const Tokenizer& tok, std::uint32_t n_vocab, const json::Object& obj) {
+    std::vector<std::uint32_t> out;
+    const json::Value* pv = obj.find("prompt");
+    if (!pv || pv->isNull()) throw RequestError("'prompt' is required");
+    const char* shape = "'prompt' must be a string, a list with one string, or a list of token ids";
+    if (pv->isString()) {
+        const auto ids = tok.encode(pv->asString(), true);
+        out.assign(ids.begin(), ids.end());
+    } else if (pv->isArray()) {
+        const json::Array& arr = pv->asArray();
+        if (arr.empty()) throw RequestError("'prompt' must not be empty");
+        if (arr[0].isString()) {
+            if (arr.size() > 1) throw RequestError("only one prompt per request is supported");
+            const auto ids = tok.encode(arr[0].asString(), true);
+            out.assign(ids.begin(), ids.end());
+        } else if (arr[0].kind() == json::Value::Kind::integer) {
+            const std::int64_t V = n_vocab;
+            for (const json::Value& it : arr) {
+                if (it.kind() != json::Value::Kind::integer || it.asInt() < 0 || it.asInt() >= V)
+                    throw RequestError("prompt token ids must be integers in [0, n_vocab)");
+                out.push_back(static_cast<std::uint32_t>(it.asInt()));
+            }
+        } else {
+            throw RequestError(shape);
+        }
+    } else {
+        throw RequestError(shape);
+    }
+    return out;
+}
+
+namespace {
+
 // Builds a job from the request body (throws RequestError for HTTP 400).
-void buildJob(Engine& e, Job& job, std::string_view path, std::string_view body, bool web) {
+void buildJob(const EngineFacts& f, Job& job, std::string_view path, std::string_view body, bool web) {
     json::Value root;
     try {
         root = json::parse(body);
@@ -466,13 +514,10 @@ void buildJob(Engine& e, Job& job, std::string_view path, std::string_view body,
     if (job.kind == JobKind::chat) {
         chat::ChatRequest req = chat::parseChatRequest(root);
         for (const std::string& warn : req.warnings) logW("req {} | POST {} | {}", job.id, path, warn);
-        const VisionConfig& vc = e.visionConfig();
+        const VisionConfig& vc = f.vision;
         // vision: image parts render as the Qwen placeholder when an mmproj is loaded
-        checkMediaParts(req.messages, vc.vis != nullptr);
-        req.options.allow_media = vc.vis != nullptr;
-        const std::string prompt = chat::renderChat(e.options().tmpl, req.messages, req.tools, req.options);
-        const auto ids = e.tokenizer().encode(prompt, true);
-        job.tokens.assign(ids.begin(), ids.end());
+        const ChatPrompt cp = chatPrompt(*f.tok, f.tmpl, req, vc.vis != nullptr);
+        job.tokens.assign(cp.ids.begin(), cp.ids.end());
         // vision: image parts -> per-image content ids (decoding here, on the connection thread)
         if (vc.vis != nullptr) {
             const std::vector<std::string> srcs = collectImages(req.messages);
@@ -488,32 +533,7 @@ void buildJob(Engine& e, Job& job, std::string_view path, std::string_view body,
              req.options.think ? "on" : "off", req.options.effort ? ", reasoning_effort " : "",
              req.options.effort ? *req.options.effort : std::string());
     } else {
-        const json::Value* pv = obj.find("prompt");
-        if (!pv || pv->isNull()) throw RequestError("'prompt' is required");
-        const char* shape = "'prompt' must be a string, a list with one string, or a list of token ids";
-        if (pv->isString()) {
-            const auto ids = e.tokenizer().encode(pv->asString(), true);
-            job.tokens.assign(ids.begin(), ids.end());
-        } else if (pv->isArray()) {
-            const json::Array& arr = pv->asArray();
-            if (arr.empty()) throw RequestError("'prompt' must not be empty");
-            if (arr[0].isString()) {
-                if (arr.size() > 1) throw RequestError("only one prompt per request is supported");
-                const auto ids = e.tokenizer().encode(arr[0].asString(), true);
-                job.tokens.assign(ids.begin(), ids.end());
-            } else if (arr[0].kind() == json::Value::Kind::integer) {
-                const std::int64_t V = e.model().cfg().n_vocab;
-                for (const json::Value& it : arr) {
-                    if (it.kind() != json::Value::Kind::integer || it.asInt() < 0 || it.asInt() >= V)
-                        throw RequestError("prompt token ids must be integers in [0, n_vocab)");
-                    job.tokens.push_back(static_cast<std::uint32_t>(it.asInt()));
-                }
-            } else {
-                throw RequestError(shape);
-            }
-        } else {
-            throw RequestError(shape);
-        }
+        job.tokens = completionTokens(*f.tok, f.n_vocab, obj);
         job.params = parseParams(obj, true, false);
         logI("req {} | POST {} | stream {}", job.id, path, job.params.stream ? "on" : "off");
     }
@@ -522,7 +542,7 @@ void buildJob(Engine& e, Job& job, std::string_view path, std::string_view body,
 
 // The model's file name for GET /props: never a directory (the option is set to
 // the bare file name; anything before a path separator is dropped regardless).
-std::string_view modelFileName(const EngineOptions& o) {
+std::string_view modelFileName(const EngineFacts& o) {
     std::string_view f = o.model_file.empty() ? std::string_view(o.model_name) : std::string_view(o.model_file);
     if (const std::size_t sep = f.find_last_of("/\\:"); sep != std::string_view::npos) f = f.substr(sep + 1);
     return f;
@@ -531,9 +551,8 @@ std::string_view modelFileName(const EngineOptions& o) {
 // GET /props: the subset of llama.cpp server's /props that clients read to
 // auto-detect the context window and slot count (written from the documented
 // JSON shape). No chat_template: WHIRL renders built-in templates, not Jinja.
-std::string propsJson(Engine& e) {
-    const EngineOptions& o = e.options();
-    const Engine::Health hs = e.health();
+std::string propsJson(EngineApi& e, const EngineFacts& o) {
+    const EngineApi::Health hs = e.health();
     std::string b = "{\"default_generation_settings\":{\"id\":0,\"n_ctx\":";
     // (v0.2.2.2: the context per request for new requests; the memory governor lowers it while the WDDM budget is low)
     b += std::to_string(e.ctxPublished());
@@ -546,11 +565,11 @@ std::string propsJson(Engine& e) {
     b += ",\"model_alias\":";
     appendJsonStr(b, o.model_name);
     b += std::format(",\"modalities\":{{\"vision\":{},\"audio\":false}},\"build_info\":\"whirl {}\"",
-                     e.visionConfig().vis ? "true" : "false", WHIRL_VERSION_STRING);
+                     o.vision.vis ? "true" : "false", WHIRL_VERSION_STRING);
     if (!o.numerics_json.empty()) b += ",\"numerics\":" + o.numerics_json;
     if (!o.startup_json.empty()) b += ",\"startup\":" + o.startup_json;
     if (const std::string gj = e.governorJson(); !gj.empty()) b += ",\"governor\":" + gj;
-    const Engine::Stats st = e.statsShared();
+    const EngineApi::Stats st = e.statsShared();
     b += ",\"kv_ssd\":{\"mode\":";
     appendJsonStr(b, o.kv_ssd_mode);
     b += std::format(",\"bytes_written\":{},\"bytes_shared\":{},\"bytes_used\":{},\"entries\":{},\"superseded\":{}}}",
@@ -577,7 +596,8 @@ bool firstProbe(std::string_view path) {
 
 // Per-connection context from the server.
 struct ConnCtx {
-    Engine& e;
+    EngineApi& e;
+    const EngineFacts& f;
     const HttpOptions& o;
     std::string_view bound;  // the listening address
     std::function<void()> on_read;  // the request has been read (stop() no longer cuts it)
@@ -585,11 +605,12 @@ struct ConnCtx {
 };
 
 void handleConn(const ConnCtx& cx, SOCKET s) {
-    Engine& e = cx.e;
+    EngineApi& e = cx.e;
+    const EngineFacts& f = cx.f;
     e.beginBuilding();
     bool building = true;
     struct Guard {
-        Engine& e;
+        EngineApi& e;
         bool& b;
         ~Guard() {
             if (b) e.endBuilding();
@@ -708,14 +729,14 @@ void handleConn(const ConnCtx& cx, SOCKET s) {
     const bool is_post = method == "POST";
     if (path == "/health" || path == "/v1/health") {
         if (!is_get) return sendAll(w, errorResponse(405, "use GET"));
-        const Engine::Health hs = e.health();
+        const EngineApi::Health hs = e.health();
         // WDDM-LOG: this process's video memory at the last sample (Windows; absent without WDDM numbers)
         const std::string vram =
             hs.vram_ok ? std::format(",\"vram\":{{\"local_mib\":{},\"budget_mib\":{},\"shared_mib\":{},\"spill\":{}}}",
                                      hs.vram_local >> 20, hs.vram_budget >> 20, hs.vram_shared >> 20, hs.vram_spill ? "true" : "false")
                        : std::string();
         // v0.2.2.1: effective values after the startup fit (ctx per request, pool, slots, RAM tier, margin, adjustments)
-        const std::string& su = e.options().startup_json;
+        const std::string& su = f.startup_json;
         // v0.2.2.2: the memory governor's effective values (absent when it is off)
         const std::string gj = e.governorJson();
         const std::string b = std::format("{{\"status\":\"ok\",\"busy\":{},\"slots_busy\":{},\"slots\":{},\"queued\":{}{}{}{}}}",
@@ -726,19 +747,18 @@ void handleConn(const ConnCtx& cx, SOCKET s) {
     }
     if (path == "/v1/models" || path == "/models") {
         if (!is_get) return sendAll(w, errorResponse(405, "use GET"));
-        const auto& cfg = e.model().cfg();
         std::string b = "{\"object\":\"list\",\"data\":[{\"id\":";
-        appendJsonStr(b, e.options().model_name);
+        appendJsonStr(b, f.model_name);
         b += std::format(
             ",\"object\":\"model\",\"created\":{},\"owned_by\":\"whirl\",\"meta\":{{\"arch\":\"{}\",\"n_ctx\":{},\"n_vocab\":{},"
             "\"n_embd\":{},\"n_layer\":{},\"mtp\":{}}}}}]}}",
-            static_cast<long long>(std::time(nullptr)), cfg.archName(), e.ctxPublished(), cfg.n_vocab, cfg.n_embd,
-            cfg.n_layer, e.options().use_mtp ? "true" : "false");
+            static_cast<long long>(std::time(nullptr)), f.arch, e.ctxPublished(), f.n_vocab, f.n_embd,
+            f.n_layer, f.use_mtp ? "true" : "false");
         return sendAll(w, httpResponse(200, "application/json; charset=utf-8", b));
     }
     if (path == "/props" || path == "/v1/props") {
         if (!is_get) return sendAll(w, errorResponse(405, "use GET"));
-        return sendAll(w, httpResponse(200, "application/json; charset=utf-8", propsJson(e)));
+        return sendAll(w, httpResponse(200, "application/json; charset=utf-8", propsJson(e, f)));
     }
     if (path == "/version" || path == "/v1/version") {
         if (!is_get) return sendAll(w, errorResponse(405, "use GET"));
@@ -766,7 +786,7 @@ void handleConn(const ConnCtx& cx, SOCKET s) {
     job.endpoint = path;
     job.w = &w;
     try {
-        buildJob(e, job, path, body, have_origin && !isLoopbackOrigin(origin));
+        buildJob(f, job, path, body, have_origin && !isLoopbackOrigin(origin));
     } catch (const RequestError& ex) {
         logW("req {} | POST {} -> 400: {}", job.id, path, ex.what());
         return sendAll(w, errorResponse(400, ex.what()));
@@ -894,7 +914,7 @@ void netInit() {
     });
 }
 
-HttpServer::HttpServer(Engine& e, HttpOptions o) : e_(e), o_(std::move(o)) { netInit(); }
+HttpServer::HttpServer(EngineApi& e, HttpOptions o) : e_(e), facts_(e.facts()), o_(std::move(o)) { netInit(); }
 
 HttpServer::~HttpServer() { stop(); }
 
@@ -1025,7 +1045,7 @@ void HttpServer::connThread(std::uintptr_t sock) {
     const SOCKET s = static_cast<SOCKET>(sock);
     bool framed = false;
     try {
-        const ConnCtx cx{e_, o_, bound_, [this, sock] { setReading(sock, false); }, &framed};
+        const ConnCtx cx{e_, facts_, o_, bound_, [this, sock] { setReading(sock, false); }, &framed};
         handleConn(cx, s);
     } catch (const std::exception& ex) {
         logE("connection error: {}", ex.what());

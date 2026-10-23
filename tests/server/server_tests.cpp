@@ -31,9 +31,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <format>
 #include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <string>
 #include <stdexcept>
@@ -4409,6 +4411,274 @@ void testFrLogInjection() {
     CHECK_EQ(g_log.count("\x1b"), std::size_t(0));
 }
 
+// ---------------------------------------------------------------------------
+// arch024-S8: the HTTP front end against a fake EngineApi (M6). No Engine, no model: the fake answers each job
+// through the real response writer (StreamState over a ResponseCtx), so the endpoints, /props, /health, the error
+// paths and stream == non-stream are checked on http.cpp + stream.cpp alone.
+
+class FakeApi final : public EngineApi {
+public:
+    FakeApi() : ids_(7), rcx_{"fake-model", tok(), ids_} {
+        f_.model_name = "fake-model";
+        f_.model_file = "C:\\models\\fake-file.gguf";
+        f_.tmpl = chat::TemplateKind::a;
+        f_.tok = &tok();
+        f_.use_mtp = true;
+        f_.numerics_json = "{\"mode\":\"fake\"}";
+        f_.startup_json = "{\"slots\":3}";
+        f_.kv_ssd_mode = "always";
+        f_.arch = "qwen35";
+        f_.n_vocab = static_cast<std::uint32_t>(tok().size());
+        f_.n_embd = 64;
+        f_.n_layer = 4;
+    }
+    std::uint64_t nextJobId() override { return next_id_.fetch_add(1); }
+    void submitAndWait(Job& job) override {
+        building_.fetch_sub(1);  // as Engine::submitAndWait: the queued job is no longer being built
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            jobs_.push_back({job.kind, job.tokens, job.params.stream, job.think, job.endpoint});
+        }
+        // the reply: one token per push, as the decode cycle does; a thinking chat starts inside <think>
+        const std::string reply = job.think ? "Short reasoning here.</think>\n\nThe answer is 42, said the fake engine."
+                                            : "The answer is 42, said the fake engine.";
+        const auto ids = tok().encode(reply, true);
+        Out out;
+        out.chat = job.kind == JobKind::chat;
+        out.think_open = job.kind == JobKind::chat && job.think;
+        out.stops = job.params.stop;
+        StreamState st;
+        st.job = &job;
+        st.cx = &rcx_;
+        st.begin();
+        std::uint32_t n = 0;
+        bool stopped = false, cut = false;
+        for (TokenId t : ids) {
+            if (job.params.max_tokens && n >= *job.params.max_tokens) {
+                cut = true;
+                break;
+            }
+            const std::uint32_t u = static_cast<std::uint32_t>(t);
+            ++n;
+            if (st.push(out, std::span<const std::uint32_t>(&u, 1))) {
+                stopped = true;
+                break;
+            }
+        }
+        const Final f = st.finish(out, cut && !stopped ? "length" : "stop");
+        Timings tim;
+        tim.prompt_n = static_cast<std::uint32_t>(job.tokens.size());
+        tim.predicted_n = n;
+        st.end(out, f, tim, static_cast<std::uint32_t>(job.tokens.size()));
+    }
+    void beginBuilding() override { building_.fetch_add(1); }
+    void endBuilding() override { building_.fetch_sub(1); }
+    Health health() override {
+        Health h;
+        h.active = 1;
+        h.queued = 2;
+        h.slots = 3;
+        h.vram_ok = true;
+        h.vram_local = 5ull << 20;
+        h.vram_budget = 7ull << 20;
+        return h;
+    }
+    Stats statsShared() const override {
+        Stats s;
+        s.ssd_written = 11;
+        s.ssd_entries = 2;
+        return s;
+    }
+    std::string governorJson() override { return "{\"fake_governor\":true}"; }
+    std::uint32_t ctxPublished() const override { return ctx_.load(); }
+    EngineFacts facts() const override {
+        ++facts_calls_;
+        return f_;
+    }
+    struct Seen {
+        JobKind kind;
+        std::vector<std::uint32_t> tokens;
+        bool stream, think;
+        std::string endpoint;
+    };
+    std::vector<Seen> jobs() {
+        std::lock_guard<std::mutex> lk(mu_);
+        return jobs_;
+    }
+    EngineFacts f_;
+    std::atomic<std::uint32_t> ctx_{4096};
+    std::atomic<int> building_{0};
+    mutable std::atomic<int> facts_calls_{0};
+
+private:
+    IdGen ids_;
+    ResponseCtx rcx_;
+    std::atomic<std::uint64_t> next_id_{1};
+    std::mutex mu_;
+    std::vector<Seen> jobs_;
+};
+
+void testHttpFakeEngine() {
+    FakeApi api;
+    auto http = std::make_unique<HttpServer>(api);
+    http->start("127.0.0.1", 0);
+    const std::uint16_t port = http->port();
+    auto get = [&](const char* p) { return test::httpRequest("127.0.0.1", port, "GET", p, {}); };
+    auto post = [&](const char* p, const std::string& b) { return test::httpRequest("127.0.0.1", port, "POST", p, b); };
+    // facts: taken once, when the HttpServer was built; later changes of the source are not seen
+    CHECK_EQ(api.facts_calls_.load(), 1);
+    api.f_.model_name = "changed-after-start";
+    // /health: health() + the startup / governor JSON
+    {
+        const auto h = get("/health");
+        CHECK_EQ(h.status, 200);
+        const std::string want = "{\"status\":\"ok\",\"busy\":true,\"slots_busy\":1,\"slots\":3,\"queued\":2,\"vram\":{\"local_mib\":5,"
+                                 "\"budget_mib\":7,\"shared_mib\":0,\"spill\":false},\"startup\":{\"slots\":3},\"governor\":{\"fake_governor\":true}}";
+        CHECK(h.body == want);
+        if (h.body != want) std::fprintf(stderr, "  health: %s\n", h.body.c_str());
+        CHECK_EQ(get("/v1/health").status, 200);
+        CHECK_EQ(post("/health", "").status, 405);
+    }
+    // /v1/models: facts (id, arch, n_vocab, n_embd, n_layer, mtp) + the published context
+    {
+        const auto m = get("/v1/models");
+        CHECK_EQ(m.status, 200);
+        CHECK(m.body.find("\"id\":\"fake-model\"") != std::string::npos);
+        CHECK(m.body.find(std::format("\"meta\":{{\"arch\":\"qwen35\",\"n_ctx\":4096,\"n_vocab\":{},\"n_embd\":64,\"n_layer\":4,\"mtp\":true}}",
+                                      tok().size())) != std::string::npos);
+        CHECK_EQ(get("/models").status, 200);
+    }
+    // /props: facts + the live context (ctxPublished is a call, not a fact) + stats + governor
+    {
+        api.ctx_ = 2048;
+        const auto p = get("/props");
+        CHECK_EQ(p.status, 200);
+        // (build_info carries the version: compared up to "whirl " and from the closing quote on)
+        const std::string pre = "{\"default_generation_settings\":{\"id\":0,\"n_ctx\":2048,\"model\":\"fake-model\",\"speculative\":true,"
+                                "\"is_processing\":true},\"total_slots\":3,\"model_path\":\"fake-file.gguf\",\"model_alias\":\"fake-model\","
+                                "\"modalities\":{\"vision\":false,\"audio\":false},\"build_info\":\"whirl ";
+        const std::string post_ = "\",\"numerics\":{\"mode\":\"fake\"},\"startup\":{\"slots\":3},\"governor\":{\"fake_governor\":true},"
+                                  "\"kv_ssd\":{\"mode\":\"always\",\"bytes_written\":11,\"bytes_shared\":0,\"bytes_used\":0,\"entries\":2,\"superseded\":0}}";
+        const bool ok = p.body.starts_with(pre) && p.body.ends_with(post_) && p.body.size() > pre.size() + post_.size() &&
+                        p.body.find('"', pre.size()) == p.body.size() - post_.size();
+        CHECK(ok);
+        if (!ok) std::fprintf(stderr, "  props: %s\n", p.body.c_str());
+        CHECK_EQ(get("/v1/props").status, 200);
+        CHECK(get("/version").body.find("\"name\":\"whirl\"") != std::string::npos);
+    }
+    CHECK_EQ(api.facts_calls_.load(), 1);
+    // error paths: answered by the HTTP layer, never queued (submitAndWait not called)
+    {
+        CHECK_EQ(get("/nope").status, 404);
+        CHECK_EQ(get("/api/tags").status, 404);  // known probe
+        CHECK_EQ(get("/v1/chat/completions").status, 405);
+        const auto bad = post("/v1/chat/completions", "{not json");
+        CHECK_EQ(bad.status, 400);
+        CHECK(bad.body.find("request body is not valid JSON") != std::string::npos);
+        CHECK(post("/v1/chat/completions", "[1]").body.find("request body must be a JSON object") != std::string::npos);
+        CHECK(post("/v1/chat/completions", "{}").body.find("'messages' is required") != std::string::npos);
+        CHECK(post("/v1/completions", "{}").body.find("'prompt' is required") != std::string::npos);
+        CHECK(post("/v1/completions", R"({"prompt":[]})").body.find("'prompt' must not be empty") != std::string::npos);
+        CHECK(post("/v1/completions", R"({"prompt":["a","b"]})").body.find("only one prompt per request") != std::string::npos);
+        CHECK(post("/v1/completions", R"({"prompt":true})").body.find("'prompt' must be a string") != std::string::npos);
+        // n_vocab comes from the facts: the first id past it is refused
+        CHECK(post("/v1/completions", std::format("{{\"prompt\":[{}]}}", tok().size())).body.find("prompt token ids must be integers") !=
+              std::string::npos);
+        CHECK(post("/v1/completions", R"({"prompt":""})").body.find("the prompt is empty") != std::string::npos);
+        const auto img = post("/v1/chat/completions",
+                              R"({"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:x"}}]}]})");
+        CHECK_EQ(img.status, 400);
+        CHECK(img.body.find("image content needs an mmproj") != std::string::npos);
+        CHECK(post("/v1/chat/completions", R"({"messages":[{"role":"user","content":[{"type":"video","video":"x"}]}]})")
+                  .body.find("video content is not supported") != std::string::npos);
+        CHECK(api.jobs().empty());
+    }
+    // completions: stream == non-stream; the job's tokens are the product's completionTokens
+    {
+        const auto a = post("/v1/completions", R"({"prompt":"def quicksort(xs):\n    ","max_tokens":64})");
+        const auto b = post("/v1/completions",
+                            R"({"prompt":"def quicksort(xs):\n    ","max_tokens":64,"stream":true,"stream_options":{"include_usage":true}})");
+        CHECK_EQ(a.status, 200);
+        CHECK_EQ(b.status, 200);
+        CHECK(b.headers.find("text/event-stream") != std::string::npos);
+        std::string fin;
+        CHECK_EQ(streamText(b, false, &fin), completionText(a));
+        CHECK_EQ(completionText(a), std::string("The answer is 42, said the fake engine."));
+        CHECK_EQ(fin, std::string("stop"));
+        const auto evs = test::sseEvents(b.body);
+        CHECK(!evs.empty() && evs.back() == "[DONE]");
+        CHECK(evs.size() >= 3 && evs[evs.size() - 2].find("\"choices\":[]") != std::string::npos);
+        const auto js = api.jobs();
+        CHECK_EQ(js.size(), std::size_t(2));
+        if (js.size() == 2) {
+            const auto want = tok().encode("def quicksort(xs):\n    ", true);
+            CHECK(js[0].kind == JobKind::completion && !js[0].stream && js[1].stream);
+            CHECK(js[0].tokens == std::vector<std::uint32_t>(want.begin(), want.end()));
+            CHECK(js[1].tokens == js[0].tokens);
+        }
+        // a max_tokens cut: finish_reason length in both
+        const auto c = post("/v1/completions", R"({"prompt":"x","max_tokens":3})");
+        const auto d = post("/v1/completions", R"({"prompt":"x","max_tokens":3,"stream":true})");
+        std::string fin2;
+        CHECK_EQ(streamText(d, false, &fin2), completionText(c));
+        CHECK_EQ(fin2, std::string("length"));
+        CHECK(c.body.find("\"finish_reason\":\"length\"") != std::string::npos);
+    }
+    // chat: stream == non-stream (content and reasoning), the first chunk is the role delta; tokens = chatPrompt
+    {
+        const std::string msgs = R"("messages":[{"role":"user","content":"What is 6 x 7?"}])";
+        for (bool think : {false, true}) {
+            const std::string kw = think ? R"("chat_template_kwargs":{"enable_thinking":true})" : R"("chat_template_kwargs":{"enable_thinking":false})";
+            const auto n0 = api.jobs().size();
+            const auto c1 = post("/v1/chat/completions", "{" + msgs + ",\"max_tokens\":64," + kw + "}");
+            const auto c2 = post("/v1/chat/completions", "{" + msgs + ",\"max_tokens\":64,\"stream\":true," + kw + "}");
+            CHECK_EQ(c1.status, 200);
+            const json::Value v1 = parseBody(c1);
+            std::string content1, reason1;
+            if (const json::Value* ch = v1.get("choices"))
+                if (const json::Value* m = ch->asArray()[0].get("message")) {
+                    if (const json::Value* c = m->get("content"); c && c->isString()) content1 = c->asString();
+                    if (const json::Value* r = m->get("reasoning_content"); r && r->isString()) reason1 = r->asString();
+                }
+            CHECK_EQ(content1, std::string("The answer is 42, said the fake engine."));
+            CHECK_EQ(streamText(c2, true), content1);
+            CHECK_EQ(reason1, std::string(think ? "Short reasoning here." : ""));
+            std::string reason2;
+            for (const std::string& ev : test::sseEvents(c2.body)) {
+                if (ev == "[DONE]") continue;
+                const json::Value v = json::parse(ev);
+                const json::Value* ch = v.get("choices");
+                if (!ch || ch->asArray().empty()) continue;
+                if (const json::Value* dl = ch->asArray()[0].get("delta"))
+                    if (const json::Value* r = dl->get("reasoning_content"); r && r->isString()) reason2 += r->asString();
+            }
+            CHECK_EQ(reason2, reason1);
+            CHECK(test::sseEvents(c2.body).front().find("{\"role\":\"assistant\",\"content\":null}") != std::string::npos);
+            const auto js = api.jobs();
+            CHECK_EQ(js.size(), n0 + 2);
+            if (js.size() == n0 + 2) {
+                chat::ChatRequest req = chat::parseChatRequest(json::parse("{" + msgs + "," + kw + "}"));
+                const ChatPrompt cp = chatPrompt(tok(), chat::TemplateKind::a, req, false);
+                CHECK(js[n0].kind == JobKind::chat && js[n0].think == think);
+                CHECK(js[n0].tokens == std::vector<std::uint32_t>(cp.ids.begin(), cp.ids.end()));
+                CHECK(js[n0 + 1].tokens == js[n0].tokens);
+            }
+        }
+    }
+    // ids: the chatcmpl- prefix from the IdGen; the same seed gives the same sequence
+    {
+        IdGen a(7), b(7);
+        CHECK_EQ(a.id("x-", 24), b.id("x-", 24));
+        CHECK_EQ(a.next(), b.next());
+        const json::Value v = parseBody(post("/v1/chat/completions", R"({"messages":[{"role":"user","content":"hi"}]})"));
+        const json::Value* id = v.get("id");
+        CHECK(id && id->isString() && id->asString().starts_with("chatcmpl-") && id->asString().size() == 9 + 24);
+    }
+    http->stop();
+    http.reset();
+    CHECK_EQ(api.building_.load(), 0);  // every connection's beginBuilding has its endBuilding
+}
+
 int main(int argc, char** argv) {
     whirl::test::clearWhirlEnv();  // FR-TEST P3-11
     std::set<std::string> only;
@@ -4455,6 +4725,7 @@ int main(int argc, char** argv) {
         {"sampler", testSampler},
         {"chat_tokens", testChatTokens},
         {"endpoints", testEndpoints},
+        {"http_fake_engine", testHttpFakeEngine},
         {"vram_watch", testVramWatch},
         {"startup_adjust", testStartupAdjust},
         {"governor", testGovernor},
