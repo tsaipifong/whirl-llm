@@ -36,14 +36,14 @@ function KlRep([string]$name, [bool]$pass, [string]$sha, [int]$positions = 3) {
 $fakeSha = (Get-FileHash -Algorithm SHA256 $fake).Hash.ToLower()
 $klGood = KlRep "kl_good.json" $true $fakeSha
 function RunGate([string]$action, [string]$root, [hashtable]$fakeEnv, [string]$kl = $klGood) {
-    foreach ($k in @("FAKEGOLD_FAIL_SUITE", "FAKEGOLD_NOSTEPS", "FAKEGOLD_DIR")) { [Environment]::SetEnvironmentVariable($k, $null) }
+    foreach ($k in @("FAKEGOLD_FAIL_SUITE", "FAKEGOLD_NOSTEPS", "FAKEGOLD_DIR", "FAKEGOLD_NODEV")) { [Environment]::SetEnvironmentVariable($k, $null) }
     foreach ($k in $fakeEnv.Keys) { [Environment]::SetEnvironmentVariable($k, $fakeEnv[$k]) }
     $env:WHIRL_GOLDEN_DENSE = $model
     $klArg = if ($kl) { @("-KlReport", $kl) } else { @() }
     $out = & pwsh -NoProfile -File $gate $action -Models dense -Modes precise -Suites "single,pair" -Exe $fake `
         -GoldenRoot $root -Out (Join-Path $tmp "out") @klArg 2>&1 | ForEach-Object { "$_" }
     $rc = $LASTEXITCODE
-    foreach ($k in @("FAKEGOLD_FAIL_SUITE", "FAKEGOLD_NOSTEPS", "FAKEGOLD_DIR")) { [Environment]::SetEnvironmentVariable($k, $null) }
+    foreach ($k in @("FAKEGOLD_FAIL_SUITE", "FAKEGOLD_NOSTEPS", "FAKEGOLD_DIR", "FAKEGOLD_NODEV")) { [Environment]::SetEnvironmentVariable($k, $null) }
     return @{ rc = $rc; out = $out }
 }
 function Expect([string]$name, $r, [int]$want, [scriptblock]$extra = { $true }) {
@@ -59,6 +59,15 @@ try {
     Expect "record of a normal run" $r 0 { (Test-Path (Join-Path $g1 "gfx1201\dense\precise_single.txt")) -and (Test-Path (Join-Path $g1 "models.txt")) }
     $r = RunGate "check" $g1 @{}
     Expect "check of the same run" $r 0
+    # 1b) REVIEW-ARCH6 C-M3: every CLI case prints the GPU it ran on (pass path), also a failing one; none without it
+    Expect "check prints the CLI device line of every case" $r 0 {
+        @($r.out | Where-Object { $_ -match "dense/precise_(single|pair) cli device 0: Fake GPU \(gfx1201\)" }).Count -eq 2 }
+    $r = RunGate "check" $g1 @{ FAKEGOLD_FAIL_SUITE = "pair" }
+    Expect "a failing case still prints its device line" $r 2 {
+        @($r.out | Where-Object { $_ -match "dense/precise_pair cli device 0: Fake GPU \(gfx1201\)" }).Count -eq 1 }
+    $r = RunGate "check" $g1 @{ FAKEGOLD_NODEV = "1" }
+    Expect "an exe without a device line gives no device line (block path for devcheck)" $r 0 {
+        @($r.out | Where-Object { $_ -match " cli device \d+:" }).Count -eq 0 }
     # 2) run without step lines vs a normal reference
     $r = RunGate "check" $g1 @{ FAKEGOLD_NOSTEPS = "1" }
     Expect "run with header + info only (no step lines) is an error" $r 2

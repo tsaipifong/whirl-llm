@@ -2512,7 +2512,7 @@ int cmdDflashCheck(const Args& a) {
 int cmdSelftest(const Args& a) {
     if (a.pos.empty()) throw std::runtime_error("selftest: missing MODEL.gguf");
     gguf::File f = gguf::File::open(a.pos[0]);
-    selectDevice(a, nullptr);
+    { std::string dev_line; selectDevice(a, &dev_line); out(dev_line); }  // "device N: <name> (gfxNNNN)" for gate logs (REVIEW-ARCH6 C-M3)
     Loaded L = loadModel(a, f, 4096);
     q::Model& m = *L.model;
     hip::memset(m.h, 0, 4ull * m.max_batch * m.cfg.n_embd);

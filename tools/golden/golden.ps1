@@ -387,6 +387,10 @@ foreach ($mk in $Models) {
             } else {
                 $raw = & $Exe golden $mp --suite $suite "--$mode" --device $Arch 2>&1 | ForEach-Object { "$_" }
                 $rc = $LASTEXITCODE
+                # the GPU the CLI ran on ("whirl build, device N: <name> (gfxNNNN)"), printed for every case, pass or
+                # fail, so the log carries device evidence independent of the result (REVIEW-ARCH6 C-M3)
+                $devl = @($raw | Where-Object { $_ -match "\bdevice \d+: .*\(gfx[0-9a-f]+\)" } | Select-Object -First 1)
+                if ($devl.Count -gt 0) { Write-Host "      $name cli $(($devl[0] -replace '^.*?(device \d+:)', '$1').Trim())" }
             }
             $sec = ((Get-Date) - $ts).TotalSeconds
             $glines = @($raw | Where-Object { $_ -like "G *" })
