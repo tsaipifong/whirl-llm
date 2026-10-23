@@ -3422,6 +3422,32 @@ void testB0SizingFollowUps() {
         CHECK_EQ(tu.size_reason, std::string("--kv-ram-mb 8192"));
         CHECK_EQ(tu.off_reason, std::string("--kv-ram-mb 8192"));
     }
+    // N3-5 blind spot: every line form the server builds from these texts ("adjusted:", "RAM tier off (...)", "RAM tier
+    // size N MiB (...)", the automatic W line) matches none of the log-scan error patterns, over a grid of fits
+    {
+        int lines = 0;
+        bool clean = true;
+        for (const std::uint64_t ask : {0ull, 4096ull, 8192ull, 8822ull, 24064ull})
+            for (const std::uint64_t avail : {700ull, 17643ull, 50000ull})
+                for (const std::uint64_t room : {startfit::pinned_room_unknown, 0ull, 4096ull})
+                    for (const bool ex : {true, false}) {
+                        const auto f = startfit::ramTierFit(ask, avail * MiB, ask, ex, room, 9216);
+                        const auto t = startfit::ramTierText(f, ask, ex, "--kv-ram-mb", ex ? "--kv-ram-mb N" : "auto: 1/4 of 64 GiB RAM",
+                                                             room == startfit::pinned_room_unknown ? "" : startfit::pinnedWhy(room, 1), 9216, avail);
+                        const std::uint64_t mb = f ? f->mb : ask;
+                        for (const std::string& l :
+                             {std::format("2026-10-23 18:00:00.000 W adjusted: --kv-ram-mb {} -> {} MiB ({})", ask, mb, t.adjusted_why),
+                              std::format("2026-10-23 18:00:00.000 I kv tier: RAM tier off ({})", t.off_reason),
+                              std::format("2026-10-23 18:00:00.000 I kv tier: RAM tier size {} MiB ({})", mb, t.size_reason),
+                              std::format("2026-10-23 18:00:00.000 W kv tier: RAM tier {} MiB (the automatic size would be {} MiB): {}", mb, ask,
+                                          t.pinned_why)}) {
+                            ++lines;
+                            if (std::regex_search(l, bad)) clean = false;
+                        }
+                    }
+        CHECK(clean);
+        CHECK(lines > 0);
+    }
 }
 
 // ---------------------------------------------------------------------------
