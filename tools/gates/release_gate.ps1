@@ -99,6 +99,7 @@ AddStep "cpu_device_once" $false @($pwsh, "-NoProfile", "-File", (Join-Path $rep
 AddStep "cpu_probe_dispatch" $false @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\repro\probe_dispatch_check.ps1"), "-Build", $Build) { param($o, $c) $c -eq 0 -and ($o -match "(?m)^probe_dispatch_check: PASS") }
 AddStep "cpu_server_only_typo" $false @($exe["whirl-server-tests"], "--gguf", $SW, "--only", "no_such_test") { param($o, $c) $c -eq 2 }
 AddStep "cpu_golden_selftest" $false @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\golden\golden_selftest.ps1")) { param($o, $c) $c -eq 0 -and ($o -match "all cases as expected") }
+AddStep "cpu_logscan_selftest" $false @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\gates\server_log_scan_selftest.ps1")) { param($o, $c) $c -eq 0 -and ($o -match "server log scan selftest: \d+/\d+ as expected") }
 AddStep "cpu_golden_xcheck" $false @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\golden\golden.ps1"), "xcheck", "-Arch", $arch, "-Models", $gmodels) { param($o, $c) $c -eq 0 -and ($o -match "file\(s\) ok") }
 $ktArgs = @($exe["whirl-kernel-test"], "--device", $Device, "--require-all", "--mx", $SW, "--moemx", $MX) + @(if ($hasQ) { "--q4"; $Q })
 AddStep "kt_full" $true $ktArgs { param($o, $c) $c -eq 0 -and ($o -match "^PASS: 0 failing") -and ($o -match "--require-all: 0 required kernel") }
@@ -294,24 +295,21 @@ try {
         # becomes a spill, which would hide a budget regression, so a governor episode start ("memory governor: N GiB
         # free under the Windows video memory") or a KV pool re-allocation fails a server step too: gate runs have no
         # other program taking VRAM.
+        # arch024-S10 (PLAN M8, C-b1): the scan is tools/gates/server_log_scan.ps1, shared with golden.ps1 and the GPU
+        # runners. srv_* steps: the WDDM lines above and owner check violations ("E owner check:", a call into the engine
+        # state from another thread; docs/dev/threads.md). golden_swift / golden_moe: golden.ps1 scans each server case
+        # itself (its passing cases delete their server logs), so the step needs its "server log scan: PASS" lines.
         $wddmNote = ""
         if ($s.name -like "srv_*") {
-            $slogs = @(Get-ChildItem $wd -Recurse -File -Filter "server_*.log" -ErrorAction SilentlyContinue)
-            # the warning lines themselves ("GPU memory spill:", "... continues", "... is over", the startup "over the WDDM
-            # budget"), not the "vram watch:" line that describes the rule ("warns while GPU memory spills")
-            $wpat = "over the WDDM budget|GPU memory spill(:| continues| is over)|memory governor: .* free under the Windows video memory|memory governor: KV pool re-allocated"
-            $hits = @($slogs | Select-String -Pattern $wpat -ErrorAction SilentlyContinue)
-            if ($slogs.Count -eq 0) {
-                $ok = $false; $wddmNote = " | WDDM check: no server log found under $wd"
-            } elseif ($hits.Count -gt 0) {
-                $ok = $false
-                $h0 = $hits[0]
-                $wddmNote = " | WDDM check: $($hits.Count) line(s) over the budget / spill / governor action, first $($h0.Filename):$($h0.LineNumber): $("$($h0.Line)".Substring(0, [Math]::Min(200, "$($h0.Line)".Length)))"
-            } else {
-                $wddmNote = " | WDDM check: $($slogs.Count) server log(s), no budget overrun / spill / governor action"
-            }
-            "release gate: WDDM check: $($slogs.Count) server log(s) read, $($hits.Count) line(s) matched '$wpat'" | Add-Content $log
-            foreach ($h in $hits) { "  $($h.Filename):$($h.LineNumber): $($h.Line)" | Add-Content $log }
+            $scan = @(& (Join-Path $PSScriptRoot "server_log_scan.ps1") -Dir $wd -Step $s.name *>&1 | ForEach-Object { "$_" })
+            if ($LASTEXITCODE -ne 0) { $ok = $false }
+            $wddmNote = " | $("$($scan[0])" -replace '^server log scan: ', 'log scan: ')"
+            $scan | ForEach-Object { "release gate: $_" } | Add-Content $log
+        } elseif ($s.name -in @("golden_swift", "golden_moe")) {
+            $gp = @($out | Where-Object { $_ -match "server log scan: PASS" }).Count
+            $gf = @($out | Where-Object { $_ -match "server log scan: FAIL" }).Count
+            if ($gp -lt 1 -or $gf -gt 0) { $ok = $false }
+            $wddmNote = " | log scan: golden server cases $gp PASS, $gf FAIL"
         }
         # CB-FLAKE: a step keeps its server logs (server_*.log / *.stdout.txt, small) next to the step log, so a
         # failure can be explained afterwards and a pass can be audited (REVIEW-GOV-1 P2-3: whether a governor episode
