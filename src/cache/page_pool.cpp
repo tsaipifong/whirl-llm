@@ -73,7 +73,7 @@ void PagePool::quarantine(std::span<const std::int32_t> pages) {
     if (pages.empty()) return;
     if (q_stream_ == nullptr) throw std::runtime_error("NoTier");
     device::EventH ev = device::EventH::create(ops_);
-    ops_.eventRecord(ev.get(), *q_stream_);  // a throw destroys ev
+    ops_.eventRecord(ev.get(), q_stream_);  // a throw destroys ev
     quarantine_.push_back({std::vector<std::int32_t>(pages.begin(), pages.end()), std::move(ev)});
 }
 

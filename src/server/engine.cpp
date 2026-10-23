@@ -182,7 +182,7 @@ void Engine::initPool() {
 
 void Engine::attachTier(tier::Tier* t) {
     tier_ = t;
-    pool_.setQuarantineStream(t ? &t->stream : nullptr);
+    pool_.setQuarantineStream(t ? t->stream() : nullptr);
     ps_.attachTier(t);
     if (t) {
         t->setWake([this] {
@@ -633,7 +633,7 @@ void Engine::spillSpe(Spe& s) {
     // (mid-prefill): the tier stream starts after them
     if (!s.ready_ev) s.ready_ev = device::EventH::create(ops_);
     ops_.eventRecord(s.ready_ev.get(), m_.stream());
-    ops_.streamWaitEvent(t->stream, s.ready_ev.get());
+    ops_.streamWaitEvent(t->stream(), s.ready_ev.get());
     tier_spans_.clear();
     ckSpans(s.ck, 0);
     for (std::size_t j = 0; j < s.pages.size(); ++j) pageSpans(s.pages[j], kv_off + j * lay.page_bytes);
@@ -2596,7 +2596,7 @@ void Engine::finishTail(Slot& sl, bool wait) {
     if (r->failed || x == nullptr) {
         // copies may still be in flight into the tail buffers: order the main stream after them
         try {
-            ops_.eventRecord(r->ev, t->stream);
+            ops_.eventRecord(r->ev, t->stream());
             ops_.streamWaitEvent(m_.stream(), r->ev);
         } catch (const std::exception&) {
         }
@@ -2660,7 +2660,7 @@ void Engine::pollRestores() {
             logW("req {} | slot {} | kv tier: restore failed; prefilling from scratch", job.id, sl.id);
             // copies already enqueued may still write the slot's pages / checkpoints
             try {
-                ops_.eventRecord(r->ev, t->stream);
+                ops_.eventRecord(r->ev, t->stream());
                 ops_.streamWaitEvent(m_.stream(), r->ev);
             } catch (const std::exception&) {
             }
@@ -3174,7 +3174,7 @@ void Engine::govDrain() {
     }
     pool_.reclaim(true);
     ops_.streamSync(m_.stream());
-    if (tier_ != nullptr) ops_.streamSync(tier_->stream);
+    if (tier_ != nullptr) ops_.streamSync(tier_->stream());
 }
 
 std::uint64_t parkSlotCkpts(CkptStore& cs, Slot& sl) {

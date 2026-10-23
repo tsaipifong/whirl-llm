@@ -10,8 +10,10 @@
 #include "device/null_backend.h"
 #include "whirl/device_profile.h"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
+#include <string>
 #include <string_view>
 #include <cstdio>
 #include <cstring>
@@ -398,10 +400,11 @@ void testTracking() {
     }
 }
 
-// arch024 M1 (A4): the thread of every release call is recorded
+// arch024 M1 (A4), S6a: the thread of every Backend call is recorded, in call order
 void testReleaseThreads() {
     using whirl::device::DevBuf;
     using whirl::device::EventH;
+    using Call = NullBackend::Call;
     NullBackend b;
     b.recordThreads(true);
     DevBuf d = DevBuf::alloc(b, 64);
@@ -409,14 +412,33 @@ void testReleaseThreads() {
     std::thread::id other;
     std::thread t([&] {
         other = std::this_thread::get_id();
+        b.setDevice(0);
+        b.eventSync(e.get());
         d.reset();
     });
     t.join();
     e.reset();
-    const auto r = b.releaseThreads();
+    const auto all = b.callThreads();
+    std::vector<std::pair<Call, std::thread::id>> r;
+    for (const auto& c : all)
+        if (NullBackend::isRelease(c.first)) r.push_back(c);
     CHECK(r.size() == 2);
-    CHECK(r.size() == 2 && r[0].first == NullBackend::Release::free && r[0].second == other);
-    CHECK(r.size() == 2 && r[1].first == NullBackend::Release::event_destroy && r[1].second == std::this_thread::get_id());
+    CHECK(r.size() == 2 && r[0].first == Call::free && r[0].second == other);
+    CHECK(r.size() == 2 && r[1].first == Call::event_destroy && r[1].second == std::this_thread::get_id());
+    // every call, in order: malloc, eventCreate (this thread), setDevice, eventSync, free (the other), eventDestroy
+    const std::vector<Call> want = {Call::malloc, Call::event_create, Call::set_device, Call::event_sync, Call::free,
+                                    Call::event_destroy};
+    CHECK(all.size() == want.size());
+    for (std::size_t i = 0; i < std::min(all.size(), want.size()); ++i) {
+        CHECK(all[i].first == want[i]);
+        const bool on_other = i >= 2 && i <= 4;
+        CHECK(all[i].second == (on_other ? other : std::this_thread::get_id()));
+    }
+    CHECK(std::string(NullBackend::callName(Call::uma_memory)) == "umaMemory");
+    CHECK(std::string(NullBackend::callName(Call::copy_async)) == "copyAsync");
+    b.recordThreads(false);
+    b.setDevice(0);
+    CHECK(b.callThreads().size() == all.size());  // off: nothing more recorded
     CHECK(b.clean());
 }
 

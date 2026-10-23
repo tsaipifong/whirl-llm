@@ -259,18 +259,16 @@ Tier::Tier(device::Backend& ops, std::uint64_t seed, int device) : ops_(ops), rn
 std::unique_ptr<Tier> Tier::create(device::Backend& ops, std::uint64_t ram_bytes, std::uint64_t seed, int device) {
     std::unique_ptr<Tier> t(new Tier(ops, seed, device));
     t->cfg.ram_bytes = ram_bytes;
-    t->stream = ops.streamCreateNonBlocking();
+    t->stream_ = device::StreamH::create(ops);
     // pinned arena (512 MiB chunks: one huge pinned allocation can be refused)
     std::uint64_t left = alignUp(ram_bytes, block_bytes);
     while (left > 0) {
         const std::uint64_t n = std::min(left, chunk_bytes);
-        void* buf = ops.hostMalloc(n);
-        t->chunks_.push_back(buf);
-        t->chunk_len_.push_back(n);
+        t->chunks_.push_back(device::PinnedBuf::alloc(ops, n));
         left -= n;
     }
     std::uint32_t nb = 0;
-    for (auto len : t->chunk_len_) nb += static_cast<std::uint32_t>(len / block_bytes);
+    for (const device::PinnedBuf& c : t->chunks_) nb += static_cast<std::uint32_t>(c.bytes() / block_bytes);
     t->n_blocks_ = nb;
     t->free_blocks_.reserve(nb);
     std::uint32_t b = nb;
@@ -279,7 +277,12 @@ std::unique_ptr<Tier> Tier::create(device::Backend& ops, std::uint64_t ram_bytes
         t->free_blocks_.push_back(b);
     }
     // a few events up front (no allocations later on the hot path)
-    for (int i = 0; i < 16; ++i) t->ev_pool_.push_back(ops.eventCreate());
+    t->ev_all_.reserve(16);
+    t->ev_pool_.reserve(16);
+    for (int i = 0; i < 16; ++i) {
+        t->ev_all_.push_back(device::EventH::create(ops));
+        t->ev_pool_.push_back(t->ev_all_.back().get());
+    }
     return t;
 }
 
@@ -302,32 +305,21 @@ Tier::~Tier() {
     q_writes_.clear();
     jobs_.clear();
     for (Job* j : all) freeJob(j);
-    // entries: memory only (their SSD files stay for the next start)
-    for (Entry* e : entries) {
-        if (e->ev != nullptr) poolEvent(e->ev);
-        delete e;
-    }
+    // entries: memory only (their SSD files stay for the next start; their events are ev_all_'s)
+    for (Entry* e : entries) delete e;
     entries.clear();
-    for (device::Event ev : ev_pool_) {
+    // F1: the IO thread is joined; tier-stream copies may still write the arena (a spill) or read it (a
+    // restore): wait for them before the arena goes (arch024 S6a; hipHostFree used to do this implicitly)
+    if (stream_) {
         try {
-            ops_.eventDestroy(ev);
+            ops_.streamSync(stream_.get());
         } catch (...) {
         }
     }
     ev_pool_.clear();
-    for (void* c : chunks_) {
-        try {
-            ops_.hostFree(c);
-        } catch (...) {
-        }
-    }
+    ev_all_.clear();
     chunks_.clear();
-    if (stream != nullptr) {
-        try {
-            ops_.streamDestroy(stream);
-        } catch (...) {
-        }
-    }
+    stream_.reset();
 }
 
 void Tier::start(const Config& cfg_in, const Layout& lay_in, std::uint64_t fingerprint) {
@@ -400,7 +392,7 @@ void Tier::start(const Config& cfg_in, const Layout& lay_in, std::uint64_t finge
 
 std::uint64_t Tier::pinnedBytes() const {
     std::uint64_t s = 0;
-    for (auto len : chunk_len_) s += len;
+    for (const device::PinnedBuf& c : chunks_) s += c.bytes();
     return s;
 }
 
@@ -408,7 +400,7 @@ void Tier::setWake(std::function<void()> f) { wake_fn_ = std::move(f); }
 
 std::uint64_t Tier::blockAddr(std::uint32_t b) const {
     const std::uint32_t per = static_cast<std::uint32_t>(chunk_bytes / block_bytes);
-    return reinterpret_cast<std::uint64_t>(chunks_[b / per]) + static_cast<std::uint64_t>(b % per) * block_bytes;
+    return chunks_[b / per].addr() + static_cast<std::uint64_t>(b % per) * block_bytes;
 }
 
 Entry* Tier::find(std::uint64_t id) {
@@ -492,14 +484,15 @@ device::Event Tier::newEvent() {
         ev_pool_.pop_back();
         return ev;
     }
-    return ops_.eventCreate();
+    ev_all_.push_back(device::EventH::create(ops_));  // a throw destroys the new event
+    return ev_all_.back().get();
 }
 
+// ev back into the pool (it stays ev_all_'s: if the pool cannot grow, it is just not reused)
 void Tier::poolEvent(device::Event ev) {
     try {
         ev_pool_.push_back(ev);
     } catch (...) {
-        ops_.eventDestroy(ev);
     }
 }
 
@@ -772,7 +765,7 @@ std::uint64_t Tier::copyOut(Entry* e, std::span<const Span> spans) {
             const std::size_t lb = static_cast<std::size_t>(off / block_bytes);
             const std::uint64_t inner = off % block_bytes;
             const std::uint64_t n = std::min(std::min(s.len - done, block_bytes - inner), max_piece);
-            ops_.copyAsync(blockAddr(e->blocks[lb]) + inner, s.dev + done, n, stream);
+            ops_.copyAsync(blockAddr(e->blocks[lb]) + inner, s.dev + done, n, stream_.get());
             e->dirty[lb] = 1;
             done += n;
         }
@@ -782,9 +775,9 @@ std::uint64_t Tier::copyOut(Entry* e, std::span<const Span> spans) {
 }
 
 void Tier::fence(Entry* e, device::Event extra) {
-    ops_.eventRecord(e->ev, stream);
+    ops_.eventRecord(e->ev, stream_.get());
     e->gpu_busy = true;
-    if (extra != nullptr) ops_.eventRecord(extra, stream);
+    if (extra != nullptr) ops_.eventRecord(extra, stream_.get());
 }
 
 // ---- lookup ---------------------------------------------------------------------
@@ -926,7 +919,7 @@ Restore* Tier::beginRestore(Entry* e, std::span<const Span> spans, std::size_t n
         job->data_off = lay.dataOff();
         readSources(job.get(), e);
         job->fence = newEvent();
-        ops_.eventRecord(job->fence, stream);
+        ops_.eventRecord(job->fence, stream_.get());
         r->pos_of_lb.assign(e->blocks.size(), 0xffffffffu);
         for (std::size_t k = 0; k < job->lbs.size(); ++k) {
             if (job->lbs[k] < r->pos_of_lb.size()) r->pos_of_lb[job->lbs[k]] = static_cast<std::uint32_t>(k);
@@ -976,7 +969,7 @@ bool Tier::prefetch(Entry* e) {
     readSources(job.get(), e);
     job->fence = newEvent();
     job->prefetch.store(true, std::memory_order_release);
-    ops_.eventRecord(job->fence, stream);
+    ops_.eventRecord(job->fence, stream_.get());
     e->in_ram = true;
     e->io_busy = true;
     e->loading = true;
@@ -1005,17 +998,17 @@ bool Tier::pumpRestore(Restore* r) {
     }
     while (r->cursor < r->pieces.size()) {
         if (!r->main_rec && r->cursor == r->n_main) {
-            ops_.eventRecord(r->ev_main, stream);
+            ops_.eventRecord(r->ev_main, stream_.get());
             r->main_rec = true;
         }
         const Piece& p = r->pieces[r->cursor];
         if (r->job != nullptr && (p.lb >= r->pos_of_lb.size() || r->pos_of_lb[p.lb] >= done_n)) break;
-        ops_.copyAsync(p.dev, p.host, p.len, stream);
+        ops_.copyAsync(p.dev, p.host, p.len, stream_.get());
         r->cursor += 1;
     }
     if (!r->main_rec) {
         if (r->cursor < r->n_main) return false;
-        ops_.eventRecord(r->ev_main, stream);
+        ops_.eventRecord(r->ev_main, stream_.get());
         r->main_rec = true;
         return false;
     }
@@ -1077,7 +1070,7 @@ device::Event Tier::cutTail(Restore* r) {
     pumpRestore(r);
     r->pieces.resize(std::max(r->cursor, r->n_main));
     if (r->ev_cut == nullptr) r->ev_cut = newEvent();
-    ops_.eventRecord(r->ev_cut, stream);
+    ops_.eventRecord(r->ev_cut, stream_.get());
     return r->ev_cut;
 }
 
@@ -1095,8 +1088,8 @@ bool Tier::pumpTail(Restore* r) {
             r->failed = true;
             return true;
         }
-        ops_.eventRecord(r->ev, stream);
-        ops_.eventRecord(e->ev, stream);
+        ops_.eventRecord(r->ev, stream_.get());
+        ops_.eventRecord(e->ev, stream_.get());
         e->gpu_busy = true;
         r->enqueued = true;
         return false;

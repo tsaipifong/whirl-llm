@@ -70,7 +70,7 @@ public:
     // page src into page dst in every pool array, on the model stream
     void copy(std::int32_t dst, std::int32_t src);
     // the stream quarantine records its event on (the RAM tier's stream); nullptr: no tier (quarantine throws)
-    void setQuarantineStream(const device::Stream* s) { q_stream_ = s; }
+    void setQuarantineStream(device::Stream s) { q_stream_ = s; }
     // pages a spill still reads: held until an event recorded now on the quarantine stream is done
     void quarantine(std::span<const std::int32_t> pages);
     // the quarantine batches whose event is done back (one holder fewer each); force: all of them, the model stream
@@ -91,7 +91,7 @@ public:
 private:
     device::Backend& ops_;
     ServerModel& m_;
-    const device::Stream* q_stream_ = nullptr;
+    device::Stream q_stream_ = nullptr;
     std::uint32_t pages_ = 0;
     std::vector<std::int32_t> free_;
     std::vector<std::uint16_t> ref_;

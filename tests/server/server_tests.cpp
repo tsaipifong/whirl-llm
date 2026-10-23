@@ -4038,7 +4038,7 @@ void testPagePool() {
         CHECK_EQ(r.pool->refCount(0), 1u);
         CHECK_EQ(r.pool->freeCount() + r.refSum(), 8u);
         // spill: the released pages are quarantined (held until the spill's event), counted in cow_pages
-        r.pool->setQuarantineStream(&r.ts);
+        r.pool->setQuarantineStream(r.ts);
         CHECK(r.pool->cow(a, 0, 0, true, ev) == PagePool::Cow::done);
         CHECK(a.empty());
         CHECK_EQ(r.pool->batches(), 1u);
@@ -4075,7 +4075,7 @@ void testPagePool() {
         }
         CHECK(threw);
         CHECK(r.pool->quarantineEmpty());
-        r.pool->setQuarantineStream(&r.ts);
+        r.pool->setQuarantineStream(r.ts);
         r.nb.trackPending(true);
         r.spillWork();
         r.pool->quarantine(a);  // freePages of a slot whose spill still reads them
@@ -4118,7 +4118,7 @@ void testPagePool() {
     // ---- take: free first; then the done quarantine; then the evictor (in its order); then the pending quarantine
     {
         PpRig r(4);
-        r.pool->setQuarantineStream(&r.ts);
+        r.pool->setQuarantineStream(r.ts);
         ListEvictor ev(*r.pool);
         std::vector<std::int32_t> v1, v2, q;
         CHECK(r.pool->ensure(v1, 0, kv_page, ev));      // page 0
@@ -4488,6 +4488,80 @@ void testCkptRestoreFail() {
         sl = Slot{};
         CHECK(r.finish());
     }
+}
+
+// arch024 S6a: the tier IO thread through the server -- every Backend call it makes is setDevice or eventSync,
+// including what the engine's wake callback (Engine::attachTier's setWake lambda, run on the IO thread after each
+// job) does. Spills and SSD writes on one server, an SSD restore (a read job with a fence) after a restart.
+void testTierIoThreadCalls() {
+    using Call = NullBackend::Call;
+    std::filesystem::path base;
+    if (const char* t = std::getenv("WHIRL_TEST_TMP"); t && *t) base = std::filesystem::path(widen(t));
+    else base = std::filesystem::temp_directory_path() / L"whirl-tests";
+    const std::string dir = narrow((base / L"server_test_ssd_io").wstring());
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    std::filesystem::create_directories(dir, ec);
+    ServerSetup su = baseSetup();
+    su.mc.parallel = 2;
+    su.mc.slot_ctx = 8192;
+    su.mc.pool_tokens = 4096;
+    su.tier = true;
+    su.ssd_dir = dir;
+    su.tier_min = 512;
+    su.eo.n_ck = 2;
+    const auto pa = makePrompt(3000, 511);
+    const auto pb = makePrompt(3200, 512);
+    std::vector<std::uint32_t> pa2;
+    std::size_t io_calls = 0, io_sync = 0, io_other = 0, io_dev = 0;
+    auto tally = [&](TestServer& srv, std::thread::id io) {
+        for (const auto& [c, th] : srv.ops().callThreads()) {
+            if (th != io) continue;
+            ++io_calls;
+            if (c == Call::event_sync) {
+                ++io_sync;
+            } else if (c == Call::set_device) {
+                ++io_dev;
+            } else {
+                ++io_other;
+                std::printf("  tier_io_thread_calls: the IO thread called %s\n", NullBackend::callName(c));
+            }
+        }
+    };
+    {
+        TestServer srv(su);
+        const std::thread::id io = srv.tierp()->ioThreadId();
+        CHECK(io != std::thread::id{});
+        srv.ops().recordThreads(true);
+        const auto outa = srv.model().greedyReference(pa, 40, true);
+        CHECK_EQ(completionText(srv.post("/v1/completions", completionBody(pa, 40))), decode(outa));
+        CHECK_EQ(completionText(srv.post("/v1/completions", completionBody(pb, 40))), decode(srv.model().greedyReference(pb, 40, true)));
+        pa2 = pa;
+        pa2.insert(pa2.end(), outa.begin(), outa.end());
+        pa2 = makePrompt(static_cast<std::uint32_t>(pa2.size() + 300), 513, pa2);
+        CHECK_EQ(completionText(srv.post("/v1/completions", completionBody(pa2, 40))), decode(srv.model().greedyReference(pa2, 40, true)));
+        for (int i = 0; i < 400 && srv.ssdEntries() < 1; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        CHECK(srv.ssdEntries() >= 1);
+        srv.shutdown();
+        tally(srv, io);
+    }
+    const std::size_t calls_first = io_calls;
+    {
+        TestServer srv(su);
+        const std::thread::id io = srv.tierp()->ioThreadId();
+        srv.ops().recordThreads(true);
+        CHECK(srv.ssdEntries() >= 1);
+        auto r = srv.post("/v1/completions", completionBody(pa2, 40));
+        CHECK_EQ(completionText(r), decode(srv.model().greedyReference(pa2, 40, true)));
+        CHECK(srv.tierStats().restores_ssd >= 1);
+        srv.shutdown();
+        tally(srv, io);
+    }
+    std::printf("  tier_io_thread_calls: IO-thread calls %zu (first server %zu): eventSync %zu, setDevice %zu, other %zu\n", io_calls,
+                calls_first, io_sync, io_dev, io_other);
+    CHECK_EQ(io_other, 0u);
+    CHECK(io_sync >= 1);  // the SSD restore's read waited for its fence on the IO thread (the test is not blind)
+    std::filesystem::remove_all(dir, ec);
 }
 
 // ~Engine with the tier attached, tracking on from before the last request (its request-end spill and the stop's
@@ -5126,6 +5200,7 @@ int main(int argc, char** argv) {
         {"ckpt_f1", testCkptF1},
         {"ckpt_restore_fail", testCkptRestoreFail},
         {"ckpt_engine_teardown", testCkptEngineTeardown},
+        {"tier_io_thread_calls", testTierIoThreadCalls},
         {"page_pool", testPagePool},
         {"prefix_store", testPrefixStore},
         {"cold_resume_engine", testColdResumeEngine},

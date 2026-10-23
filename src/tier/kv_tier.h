@@ -46,6 +46,7 @@
 #pragma once
 
 #include "device/backend.h"
+#include "device/handles.h"
 #include "evict_policy.h"
 
 #include <array>
@@ -287,8 +288,9 @@ public:
     // Arena + stream (everything that touches device memory), before the KV
     // pool is sized. Throws on failure.
     static std::unique_ptr<Tier> create(device::Backend& ops, std::uint64_t ram_bytes, std::uint64_t seed, int device);
-    // Stops the IO thread (joins it after its current job), frees the
-    // entries, jobs, events, arena and stream. End every Restore first.
+    // Stops the IO thread (joins it after its current job), frees the entries and jobs, waits for the
+    // tier stream (F1: a spill copy may still write the arena, a restore still read it), then releases
+    // the events, the arena and the stream (RAII handles, in that order). End every Restore first.
     ~Tier();
     Tier(const Tier&) = delete;
     Tier& operator=(const Tier&) = delete;
@@ -418,12 +420,14 @@ public:
     std::size_t beginIdleWrite();
     void endIdleWrite();
     bool idleWriting() const { return idle_writing_; }
+    // the IO thread (after start(); ownership checks: it calls only Backend::setDevice / eventSync)
+    std::thread::id ioThreadId() const { return io_thread_.get_id(); }
 
     // public state read by the engine
     Config cfg;
     Layout lay;
     Stats stats;
-    device::Stream stream = nullptr;
+    device::Stream stream() const { return stream_.get(); }
     std::vector<Entry*> entries;
     std::uint64_t ssd_bytes = 0;
     std::function<void(std::string_view)> log_fn;
@@ -487,8 +491,8 @@ private:
 
     device::Backend& ops_;
     std::uint64_t fingerprint_ = 0;
-    std::vector<void*> chunks_;
-    std::vector<std::uint64_t> chunk_len_;
+    device::StreamH stream_;
+    std::vector<device::PinnedBuf> chunks_;  // the pinned arena
     std::uint32_t n_blocks_ = 0;
     std::vector<std::uint32_t> free_blocks_;
     std::uint64_t lru_seq_ = 0;
@@ -504,6 +508,9 @@ private:
     std::vector<Job*> jobs_;
     std::function<void()> wake_fn_;
     std::mt19937_64 rng_;
+    // events: ev_all_ owns every event the tier made; ev_pool_ holds the ones free for reuse (raw values,
+    // so the hot path never allocates)
+    std::vector<device::EventH> ev_all_;
     std::vector<device::Event> ev_pool_;
     int dev_ = 0;  // device (the IO thread waits on tier-stream events)
     void* dir_lock_ = nullptr;  // HANDLE of <ssd dir>\whirl.lock (delete on close)

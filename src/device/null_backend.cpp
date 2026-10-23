@@ -4,6 +4,7 @@
 #include "device/null_backend.h"
 
 #include <algorithm>
+#include <iterator>
 #include <cstring>
 #include <malloc.h>
 #include <new>
@@ -22,6 +23,7 @@ bool NullBackend::isHost(DevPtr p) const {
 }
 
 void NullBackend::copyAsync(DevPtr dst, DevPtr src, std::uint64_t bytes, Stream s) {
+    noteThread(Call::copy_async);
     if (const std::uint64_t n = ++copy_calls_; n == fail_call_.load()) throw std::runtime_error("injected copyAsync failure");
     if (bytes == 0) return;
     const bool from_host = isHost(src);
@@ -47,21 +49,24 @@ void NullBackend::copyAsync(DevPtr dst, DevPtr src, std::uint64_t bytes, Stream 
 }
 
 void NullBackend::download(void* dst, DevPtr src, std::uint64_t bytes) {
+    noteThread(Call::download);
     std::memcpy(dst, reinterpret_cast<const void*>(src), static_cast<std::size_t>(bytes));
 }
 
 Stream NullBackend::streamCreateNonBlocking() {
+    noteThread(Call::stream_create);
     live_streams_ += 1;
     return new int(++next_id_);  // the stream id of tracking mode (0 is the null stream)
 }
 
 void NullBackend::streamDestroy(Stream s) {
-    noteThread(Release::stream_destroy);
+    noteThread(Call::stream_destroy);
     live_streams_ -= 1;
     delete static_cast<int*>(s);
 }
 
 void NullBackend::streamSync(Stream s) {
+    noteThread(Call::stream_sync);
     if (!track_.load()) return;
     std::lock_guard<std::mutex> lk(mu_);
     sync_calls_ += 1;
@@ -71,6 +76,7 @@ void NullBackend::streamSync(Stream s) {
 }
 
 void NullBackend::streamWaitEvent(Stream s, Event e) {
+    noteThread(Call::stream_wait_event);
     if (!track_.load()) return;
     std::lock_guard<std::mutex> lk(mu_);
     const auto it = events_.find(e);
@@ -81,6 +87,7 @@ void NullBackend::streamWaitEvent(Stream s, Event e) {
 }
 
 void NullBackend::eventRecord(Event e, Stream s) {
+    noteThread(Call::event_record);
     if (!track_.load()) return;
     std::lock_guard<std::mutex> lk(mu_);
     const StreamState& st = streams_[idOf(s)];
@@ -88,8 +95,13 @@ void NullBackend::eventRecord(Event e, Stream s) {
 }
 
 bool NullBackend::eventDone(Event e) {
+    noteThread(Call::event_done);
     if (!track_.load()) return true;
     std::lock_guard<std::mutex> lk(mu_);
+    return doneLocked(e);
+}
+
+bool NullBackend::doneLocked(Event e) {
     const auto it = events_.find(e);
     if (it == events_.end()) return true;  // never recorded
     // done when its own stream got there and so did everything that stream waited for before the record
@@ -100,12 +112,13 @@ bool NullBackend::eventDone(Event e) {
 }
 
 Event NullBackend::eventCreate() {
+    noteThread(Call::event_create);
     live_events_ += 1;
     return new int(0);
 }
 
 void NullBackend::eventDestroy(Event e) {
-    noteThread(Release::event_destroy);
+    noteThread(Call::event_destroy);
     if (track_.load()) {
         std::lock_guard<std::mutex> lk(mu_);
         events_.erase(e);
@@ -115,11 +128,15 @@ void NullBackend::eventDestroy(Event e) {
 }
 
 bool NullBackend::eventDoneChecked(Event e) {
+    noteThread(Call::event_done_checked);
     if (event_error_.load()) throw std::runtime_error("injected asynchronous device error");
-    return eventDone(e);
+    if (!track_.load()) return true;
+    std::lock_guard<std::mutex> lk(mu_);
+    return doneLocked(e);
 }
 
 void NullBackend::eventSync(Event e) {
+    noteThread(Call::event_sync);
     {
         std::unique_lock<std::mutex> lk(gate_m_);
         gate_cv_.wait(lk, [&] { return gate_open_; });
@@ -200,10 +217,20 @@ std::vector<NullBackend::Violation> NullBackend::violations() const {
     return violations_;
 }
 
-void NullBackend::noteThread(Release r) {
+void NullBackend::noteThread(Call c) {
     if (!rec_threads_.load()) return;
     std::lock_guard<std::mutex> lk(mu_);
-    threads_.push_back({r, std::this_thread::get_id()});
+    threads_.push_back({c, std::this_thread::get_id()});
+}
+
+const char* NullBackend::callName(Call c) {
+    static constexpr const char* names[] = {"copyAsync", "download", "streamCreateNonBlocking", "streamDestroy",
+                                            "streamSync", "streamWaitEvent", "eventCreate", "eventDestroy",
+                                            "eventRecord", "eventDone", "eventDoneChecked", "eventSync",
+                                            "hostMalloc", "hostFree", "malloc", "free", "setDevice", "memInfo",
+                                            "wddmMemInfo", "localMemSnap", "umaMemory"};
+    static_assert(std::size(names) == static_cast<std::size_t>(Call::uma_memory) + 1);
+    return names[static_cast<std::size_t>(c)];
 }
 
 void NullBackend::recordThreads(bool on) {
@@ -212,7 +239,7 @@ void NullBackend::recordThreads(bool on) {
     if (on) threads_.clear();
 }
 
-std::vector<std::pair<NullBackend::Release, std::thread::id>> NullBackend::releaseThreads() const {
+std::vector<std::pair<NullBackend::Call, std::thread::id>> NullBackend::callThreads() const {
     std::lock_guard<std::mutex> lk(mu_);
     return threads_;
 }
@@ -231,6 +258,7 @@ void NullBackend::releaseEventSync() {
 }
 
 void* NullBackend::hostMalloc(std::uint64_t bytes) {
+    noteThread(Call::host_malloc);
     void* p = _aligned_malloc(bytes ? static_cast<std::size_t>(bytes) : 1, 4096);
     if (p == nullptr) throw std::bad_alloc();
     std::memset(p, 0, static_cast<std::size_t>(bytes));
@@ -243,7 +271,7 @@ void* NullBackend::hostMalloc(std::uint64_t bytes) {
 
 void NullBackend::hostFree(void* p) {
     if (p == nullptr) return;  // like hipHostFree(nullptr)
-    noteThread(Release::host_free);
+    noteThread(Call::host_free);
     {
         std::lock_guard<std::mutex> lk(mu_);
         if (track_.load()) checkRelease(reinterpret_cast<std::uintptr_t>(p), true);
@@ -255,6 +283,7 @@ void NullBackend::hostFree(void* p) {
 }
 
 DevPtr NullBackend::malloc(std::uint64_t bytes) {
+    noteThread(Call::malloc);
     if (const std::uint64_t nth = fail_malloc_.load(); nth != 0 && ++mallocs_ == nth) {
         fail_malloc_ = 0;
         throw std::runtime_error("injected malloc failure");
@@ -271,7 +300,7 @@ DevPtr NullBackend::malloc(std::uint64_t bytes) {
 
 void NullBackend::free(DevPtr p) {
     if (p == 0) return;  // like hipFree(nullptr)
-    noteThread(Release::free);
+    noteThread(Call::free);
     void* q = reinterpret_cast<void*>(p);
     {
         std::lock_guard<std::mutex> lk(mu_);

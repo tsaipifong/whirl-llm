@@ -23,7 +23,8 @@
 // mark, but events recorded on that stream later carry the dependency. eventDone reports pending work as
 // not done. free / hostFree of an allocation with a pending mark is counted in pendingFreeViolations()
 // (never thrown: free runs from destructors). With tracking off every call behaves as before.
-// recordThreads(true) logs the thread of every release call (free, hostFree, eventDestroy, streamDestroy).
+// recordThreads(true) logs the thread of every Backend call (its Call kind, in call order), e.g. "the tier IO
+// thread only calls setDevice and eventSync" (arch024 S6a). lastErrorString is not logged (const, no device work).
 
 #pragma once
 
@@ -66,12 +67,24 @@ public:
     void hostFree(void* p) override;
     DevPtr malloc(std::uint64_t bytes) override;     // zero-filled, 4 KiB aligned
     void free(DevPtr p) override;
-    void setDevice(int) override {}
+    void setDevice(int) override { noteThread(Call::set_device); }
     const char* lastErrorString() const override { return "null backend"; }
-    hip::MemInfo memInfo() override { return mem.info; }
-    hip::WddmMemInfo wddmMemInfo() override { return mem.wddm; }
-    hip::LocalMemSnap localMemSnap() override { return mem.local; }
-    hip::UmaMem umaMemory(int) override { return mem.uma; }
+    hip::MemInfo memInfo() override {
+        noteThread(Call::mem_info);
+        return mem.info;
+    }
+    hip::WddmMemInfo wddmMemInfo() override {
+        noteThread(Call::wddm_mem_info);
+        return mem.wddm;
+    }
+    hip::LocalMemSnap localMemSnap() override {
+        noteThread(Call::local_mem_snap);
+        return mem.local;
+    }
+    hip::UmaMem umaMemory(int) override {
+        noteThread(Call::uma_memory);
+        return mem.uma;
+    }
 
     // ---- memory model: the values memInfo / wddmMemInfo / localMemSnap / umaMemory return (a test sets them)
     struct Memory {
@@ -112,10 +125,19 @@ public:
     };
     std::size_t pendingFreeViolations() const;
     std::vector<Violation> violations() const;
-    // ---- threads of the release calls
-    enum class Release { free, host_free, event_destroy, stream_destroy };
+    // ---- threads of the Backend calls
+    enum class Call {
+        copy_async, download, stream_create, stream_destroy, stream_sync, stream_wait_event, event_create,
+        event_destroy, event_record, event_done, event_done_checked, event_sync, host_malloc, host_free, malloc,
+        free, set_device, mem_info, wddm_mem_info, local_mem_snap, uma_memory
+    };
+    // free / hostFree / eventDestroy / streamDestroy
+    static bool isRelease(Call c) {
+        return c == Call::free || c == Call::host_free || c == Call::event_destroy || c == Call::stream_destroy;
+    }
+    static const char* callName(Call c);
     void recordThreads(bool on);
-    std::vector<std::pair<Release, std::thread::id>> releaseThreads() const;
+    std::vector<std::pair<Call, std::thread::id>> callThreads() const;  // in call order
 
     // ---- fault injection
     // copyAsync call number n (as counted by copyCalls(), so "copyCalls() + 2" is the second call from now) throws; 0: off
@@ -163,7 +185,8 @@ private:
     std::uintptr_t allocOf(std::uintptr_t p) const;  // start of the allocation holding p (0: none)
     void advance(const Mark& m, const std::vector<Mark>& deps);
     void checkRelease(std::uintptr_t start, bool host);
-    void noteThread(Release r);
+    void noteThread(Call c);
+    bool doneLocked(Event e);  // eventDone's answer with tracking on, under mu_
     std::atomic<bool> track_{false}, rec_threads_{false};
     std::atomic<std::uint64_t> sync_calls_{0};
     std::atomic<int> next_id_{0};
@@ -172,7 +195,7 @@ private:
     std::map<std::uintptr_t, std::vector<Mark>> marks_;
     std::vector<Violation> violations_;
     std::uint64_t releases_ = 0;
-    std::vector<std::pair<Release, std::thread::id>> threads_;
+    std::vector<std::pair<Call, std::thread::id>> threads_;
     std::mutex gate_m_;
     std::condition_variable gate_cv_;
     bool gate_open_ = true;

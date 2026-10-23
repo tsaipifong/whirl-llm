@@ -3994,6 +3994,169 @@ static void testF1SpillFence() {
     }
 }
 
+// arch024 S6a: helpers for the IO-thread tests. A tier with one session written to the SSD (its first tier is gone),
+// so a second tier finds it SSD-only and a prefetch / restore of it is a read job with a fence (the IO thread's
+// eventSync).
+static std::uint64_t writeOneSession(NullBackend& nb, const SsdEnv& env, Sess& p, std::uint64_t fp, std::uint64_t& seed) {
+    p.toks = freshToks(3000, seed);
+    auto t = Tier::create(nb, 256ull << 20, 107, 0);
+    t->start(env.cfg(4ull << 30), kLay, fp);
+    CHECK(spillSess(*t, p, 0));
+    CHECK(tickIdle(*t));
+    for (int i = 0; i < 2000 && countFiles(env.dir) < 1; ++i) sleepMs(5);
+    CHECK(countFiles(env.dir) >= 1);
+    return p.id;
+}
+
+// arch024 S6a (ownership table, arch024.PRIOR_ART.md:104): the tier IO thread calls only Backend::setDevice
+// (kv_tier.cpp ioThread) and Backend::eventSync (a read job's fence) -- every other device call (copies, events,
+// pinned memory) stays on the thread that owns the tier. NullBackend records the thread of every call; a
+// workload with an SSD write, a prefetch read and a restore read runs, and every call off the test thread is
+// one of the two.
+static void testIoThreadCalls(const fs::path& dir) {
+    using Call = NullBackend::Call;
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    SsdEnv env{dir};
+    std::uint64_t seed = 9700;
+    const std::uint64_t fp = 83;
+    NullBackend nb;
+    nb.recordThreads(true);
+    {
+        Sess p(nb, 24);
+        const std::uint64_t id = writeOneSession(nb, env, p, fp, seed);  // tier 1: a write job
+        auto t = Tier::create(nb, 256ull << 20, 108, 0);                  // tier 2: a prefetch, then a restore
+        t->start(env.cfg(4ull << 30), kLay, fp);
+        Entry* ep = t->find(id);
+        CHECK(ep != nullptr && !ep->in_ram);
+        if (ep != nullptr) {
+            CHECK(t->prefetch(ep));
+            CHECK(restoreMatches(*t, nb, ep, p));
+        }
+        Sess q(nb, 24);  // and a spill + write on tier 2 too
+        q.toks = freshToks(3000, seed);
+        CHECK(spillSess(*t, q, 0));
+        CHECK(tickIdle(*t));
+        t.reset();
+    }
+    const std::thread::id me = std::this_thread::get_id();
+    const auto calls = nb.callThreads();
+    std::vector<std::thread::id> io;
+    std::size_t set_dev = 0, ev_sync = 0, other = 0;
+    for (const auto& [c, th] : calls) {
+        if (th == me) continue;
+        if (std::find(io.begin(), io.end(), th) == io.end()) io.push_back(th);
+        if (c == Call::set_device) {
+            ++set_dev;
+        } else if (c == Call::event_sync) {
+            ++ev_sync;
+        } else {
+            ++other;
+            std::printf("  io_thread_calls: the IO thread called %s\n", NullBackend::callName(c));
+        }
+    }
+    std::printf("  io_thread_calls: %zu calls in all, IO threads %zu: setDevice %zu, eventSync %zu, other %zu\n", calls.size(),
+                io.size(), set_dev, ev_sync, other);
+    CHECK(other == 0);
+    CHECK(io.size() == 2);    // one IO thread per tier
+    CHECK(set_dev == 2);      // each made the tier's device current
+    CHECK(ev_sync >= 1);      // the read jobs waited for their fence (the test is not blind)
+    CHECK(calls.size() > set_dev + ev_sync);  // and the owner's calls were recorded too
+    CHECK(nb.clean());
+    fs::remove_all(dir, ec);
+}
+
+// arch024 S6a: ~Tier joins the IO thread before it releases anything. The IO thread is held inside a read job
+// (NullBackend::holdEventSync: the prefetch's fence wait); a second thread destroys the tier. While the IO thread
+// is held, ~Tier must not return and must not have released a pinned block, an event or the stream; after the
+// hold opens, every release comes after the IO thread's last call.
+static void testTierFreesAfterJoin(const fs::path& dir) {
+    using Call = NullBackend::Call;
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    SsdEnv env{dir};
+    std::uint64_t seed = 9800;
+    const std::uint64_t fp = 84;
+    NullBackend nb;
+    {
+        Sess p(nb, 24);
+        const std::uint64_t id = writeOneSession(nb, env, p, fp, seed);
+        auto t = Tier::create(nb, 256ull << 20, 109, 0);
+        t->start(env.cfg(4ull << 30), kLay, fp);
+        Entry* ep = t->find(id);
+        CHECK(ep != nullptr && !ep->in_ram);
+        nb.recordThreads(true);
+        nb.holdEventSync();
+        const bool pf = ep != nullptr && t->prefetch(ep);
+        CHECK(pf);
+        const std::thread::id me = std::this_thread::get_id();
+        auto ioHeld = [&] {
+            for (const auto& [c, th] : nb.callThreads())
+                if (th != me && c == Call::event_sync) return true;
+            return false;
+        };
+        bool held = false;
+        for (int i = 0; i < 1000 && pf && !(held = ioHeld()); ++i) sleepMs(5);
+        CHECK(held);  // the IO thread is inside the read job's eventSync
+        std::atomic<bool> done{false};
+        std::thread::id killer_id;
+        std::thread killer([&] {
+            killer_id = std::this_thread::get_id();
+            t.reset();
+            done = true;
+        });
+        sleepMs(300);
+        std::size_t rel_held = 0;
+        for (const auto& [c, th] : nb.callThreads()) rel_held += NullBackend::isRelease(c) ? 1 : 0;
+        const bool returned_held = done.load();
+        nb.releaseEventSync();
+        killer.join();
+        CHECK(!returned_held);  // ~Tier waited for the IO thread
+        CHECK(rel_held == 0);   // and released nothing meanwhile
+        const auto calls = nb.callThreads();
+        std::size_t last_io = 0, first_rel = calls.size(), host_frees = 0;
+        for (std::size_t i = 0; i < calls.size(); ++i) {
+            const auto& [c, th] = calls[i];
+            if (th != me && th != killer_id) last_io = i;
+            if (NullBackend::isRelease(c) && first_rel == calls.size()) first_rel = i;
+            if (c == Call::host_free && th == killer_id) ++host_frees;
+        }
+        std::printf("  tier_frees_after_join: releases while held %zu, ~Tier returned while held %d, last IO call #%zu, first release #%zu, "
+                    "arena hostFree %zu\n",
+                    rel_held, returned_held ? 1 : 0, last_io, first_rel, host_frees);
+        CHECK(first_rel < calls.size() && first_rel > last_io);
+        CHECK(host_frees == 1);  // the 256 MiB arena: one 512 MiB-or-less chunk
+    }
+    CHECK(nb.clean());
+    fs::remove_all(dir, ec);
+}
+
+// arch024 S6a (S3's finding, F1): ~Tier with a spill copy still in flight (tracking mode: nobody waited for the
+// tier stream) waits for the tier stream before it releases its pinned blocks: 0 violations, one host sync. Before
+// S6a ~Tier freed the arena at once (1 violation: hostFree of the block the spill still writes) and relied on
+// hipHostFree's implicit device sync.
+static void testTierDtorSpillPending() {
+    NullBackend nb;
+    nb.trackPending(true);
+    {
+        DevSlot d(nb, 2, 3);  // the GPU side outlives the tier (as the engine's pool does)
+        d.fill(11);
+        auto t = Tier::create(nb, 64ull << 20, 23, 0);
+        t->start(Config{}, kLay, 0x5e3);
+        Entry* x = spill(*t, d, std::vector<std::uint32_t>(d.pages * kLay.page_tokens, 6));
+        CHECK(x != nullptr);
+        if (x != nullptr) CHECK(!nb.eventDone(x->ev));  // the spill is pending
+        const std::uint64_t syncs0 = nb.syncCalls();
+        t.reset();
+        std::printf("  tier_dtor_spill_pending: violations %zu, host syncs in ~Tier %llu\n", nb.pendingFreeViolations(),
+                    static_cast<unsigned long long>(nb.syncCalls() - syncs0));
+        CHECK(nb.pendingFreeViolations() == 0);
+        CHECK(nb.syncCalls() > syncs0);
+    }
+    CHECK(nb.pendingFreeViolations() == 0);  // nor the slot's buffers (the spill's source) afterwards
+    CHECK(nb.clean());
+}
+
 // WHIRL_TIER_ONLY=<test name>: run only that test (regression proofs). A name that matches no test is
 // a usage error (exit 2; FIX-TEST-A, FR-TEST P3-3: a typo used to run 1 check in main and pass).
 static int g_only_matched = 0;
@@ -4205,6 +4368,18 @@ int main(int argc, char** argv) {
     if (want("testF1SpillFence")) {
         std::printf("-- %s\n", "testF1SpillFence");
         testF1SpillFence();
+    }
+    if (want("testIoThreadCalls")) {
+        std::printf("-- %s\n", "testIoThreadCalls");
+        testIoThreadCalls(dir);
+    }
+    if (want("testTierFreesAfterJoin")) {
+        std::printf("-- %s\n", "testTierFreesAfterJoin");
+        testTierFreesAfterJoin(dir);
+    }
+    if (want("testTierDtorSpillPending")) {
+        std::printf("-- %s\n", "testTierDtorSpillPending");
+        testTierDtorSpillPending();
     }
     std::printf("tier tests: %d passed, %d failed\n", g_pass, g_fail);
     if (const char* only = std::getenv("WHIRL_TIER_ONLY"); only && *only && g_only_matched == 0) {
