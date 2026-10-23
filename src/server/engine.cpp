@@ -139,6 +139,10 @@ Engine::Engine(ServerModel& model, device::Backend& ops, const Tokenizer& tok, c
     floor_.configure(opt_.decode_min_tps);
     floor_epoch_ = Clock::now();
     ctx_pub_.store(ctx_, std::memory_order_relaxed);
+    ck_.setOwner(&owner_);
+    pool_.setOwner(&owner_);
+    ps_.setOwner(&owner_);
+    tb_.setOwner(&owner_);
 }
 
 Engine::~Engine() {
@@ -2474,6 +2478,12 @@ std::vector<DecodeFloor::SlotTok> Engine::floorProtected() const {
 }
 
 void Engine::runLoop() {
+    // arch024 M8: this thread owns the engine state until runLoop returns (startup before it: no owner, allowed)
+    struct Owned {
+        EngineThread& o;
+        explicit Owned(EngineThread& t) : o(t) { o.enter(); }
+        ~Owned() { o.leave(); }
+    } owned(owner_);
     stat_t0_ = Clock::now();
     bool was_busy = false;
     for (;;) {

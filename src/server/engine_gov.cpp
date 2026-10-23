@@ -23,6 +23,7 @@ namespace whirl::server {
 
 void Engine::setVramProbe(std::function<wddmwatch::Sample()> probe, bool warn, std::optional<wddmwatch::Sample> base,
                           wddmwatch::Config cfg, bool startup_warned, std::function<std::optional<wddmwatch::Others>()> others) {
+    owner_.check("Engine::setVramProbe");
     vram_probe_ = std::move(probe);
     vram_others_ = std::move(others);
     vram_warn_ = warn;
@@ -105,6 +106,7 @@ double monoS() { return std::chrono::duration<double>(Clock::now().time_since_ep
 
 void Engine::setGovernor(const memgov::Config& c, std::function<std::uint64_t(std::uint64_t)> margin, std::uint64_t ram_tier_mb,
                          std::uint64_t vram_total) {
+    owner_.check("Engine::setGovernor");
     gov_.emplace(c);
     gov_vram_total_ = vram_total;
     gov_margin_ = std::move(margin);
@@ -160,6 +162,7 @@ std::uint64_t Engine::govFreeable() const {
 }
 
 void Engine::govTick(const wddmwatch::Sample& s) {
+    owner_.check("Engine::govTick");
     if (!gov_ || !s.ok || s.local_budget == 0) return;
     memgov::Input in;
     in.now_s = monoS();
@@ -194,6 +197,7 @@ void Engine::govTick(const wddmwatch::Sample& s) {
 }
 
 void Engine::govDrain() {
+    owner_.check("Engine::govDrain");
     // tier IO that reads or writes the pool or the checkpoint buffers: spills (device -> pinned copies on the tier stream)
     for (Slot& sl : slots_) {
         sl.spill_ev.waitIfPending();
@@ -219,6 +223,7 @@ std::uint64_t parkSlotCkpts(CkptStore& cs, Slot& sl) {
 }
 
 void Engine::govFreeCache(bool park) {
+    owner_.check("Engine::govFreeCache");
     std::size_t n_sl = 0, n_pages = 0, n_spe = 0, n_park = 0;
     std::uint64_t ck_bytes = 0;
     bool pf = false;
@@ -266,6 +271,7 @@ void Engine::govFreeCache(bool park) {
 }
 
 void Engine::govRestoreCache() {
+    owner_.check("Engine::govRestoreCache");
     gov_restored_ = 0;
     if (gov_parked_ == 0) return;
     std::uint64_t bytes = 0;  // of the slots / shared checkpoints restored completely
@@ -311,6 +317,7 @@ void Engine::govRestoreCache() {
 }
 
 bool Engine::govResize(std::uint32_t tokens, bool shrink) {
+    owner_.check("Engine::govResize");
     const std::uint32_t old = pool_.pages() * kv_page;
     if (tokens == old) return false;
     const TimePoint t0 = Clock::now();
@@ -372,6 +379,7 @@ bool Engine::govResize(std::uint32_t tokens, bool shrink) {
 }
 
 void Engine::govApply() {
+    owner_.check("Engine::govApply");
     if (!gov_ || !gov_pending_) return;
     gov_pending_ = false;
     const memgov::Plan p = gov_plan_;
@@ -453,6 +461,7 @@ void Engine::govApply() {
 }
 
 std::optional<TimePoint> Engine::vramIdleTick() {
+    owner_.check("Engine::vramIdleTick");
     if (!vram_probe_) return std::nullopt;
     if (Clock::now() >= vram_idle_next_) (void)vramNote();  // logs only a spill warning / the spill-over line
     return vram_idle_next_;

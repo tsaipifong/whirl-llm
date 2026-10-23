@@ -12,6 +12,7 @@
 #include "cache/page_pool.h"
 #include "cache/prefix_cache.h"
 #include "decode_floor.h"
+#include "engine_thread.h"
 #include "prefix_store.h"
 #include "tier_bridge.h"
 #include "protocol.h"
@@ -404,6 +405,13 @@ public:
     // within timeout (not started / stopped); fn is then cancelled and never runs, so it may capture the caller's
     // locals by reference (REVIEW-ARCH4 P3-5). Not used by the product.
     void runOnLoop(std::function<void()> fn, std::chrono::milliseconds timeout = std::chrono::milliseconds(60000));
+    // arch024 M8: the thread inside runLoop (none before / after it); the modules check their entry points against it
+    const EngineThread& owner() const { return owner_; }
+    // tests: every module checks against owner()
+    bool modulesOwned() const {
+        return ck_.ownerThread() == &owner_ && pool_.ownerThread() == &owner_ && ps_.ownerThread() == &owner_ &&
+               tb_.ownerThread() == &owner_;
+    }
     // flush bound: --kv-ssd-mode always (a few entries are pending); shutdown (everything in RAM is
     // written at stop, so it may be gigabytes)
     static constexpr std::uint64_t shutdown_flush_ms = 10000;
@@ -588,6 +596,7 @@ private:
     ChatTokens ct_;
     EngineOptions opt_;
     std::uint32_t ctx_;
+    EngineThread owner_;  // arch024 M8: set by runLoop; ck_, pool_, ps_, tb_ and the governor glue check against it
     CkptStore ck_;  // checkpoint buffers (arch024 M2)
     std::array<qwen35::DraftTiming, gdn_max_seg + 1> timing_{};
     // WHIRL_SLOT_DRAFTS=2: cycle time per number of decoding slots, global acceptance pool

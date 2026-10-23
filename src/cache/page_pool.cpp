@@ -10,6 +10,7 @@ namespace whirl::server {
 using qwen35::kv_page;
 
 void PagePool::init(std::uint32_t n, std::vector<KvArr> arrs) {
+    ownerCheck(owner_, "PagePool::init");
     pages_ = n;
     ref_.assign(pages_, 0);
     free_.clear();
@@ -23,6 +24,7 @@ void PagePool::init(std::uint32_t n, std::vector<KvArr> arrs) {
 }
 
 std::optional<std::int32_t> PagePool::takeFree() {
+    ownerCheck(owner_, "PagePool::takeFree");
     if (free_.empty()) return std::nullopt;
     const std::int32_t p = free_.back();
     free_.pop_back();
@@ -31,6 +33,7 @@ std::optional<std::int32_t> PagePool::takeFree() {
 }
 
 void PagePool::unref(std::span<const std::int32_t> pages) {
+    ownerCheck(owner_, "PagePool::unref");
     for (std::int32_t p : pages) {
         std::uint16_t& r = ref_[static_cast<std::size_t>(p)];
         r -= 1;
@@ -47,6 +50,7 @@ bool PagePool::sharedFrom(std::span<const std::int32_t> pages, std::uint32_t reu
 }
 
 void PagePool::copy(std::int32_t dst_p, std::int32_t src_p) {
+    ownerCheck(owner_, "PagePool::copy");
     const std::uint64_t src = static_cast<std::uint64_t>(src_p);
     const std::uint64_t dst = static_cast<std::uint64_t>(dst_p);
     for (const KvArr& a : arrs_) {
@@ -56,6 +60,7 @@ void PagePool::copy(std::int32_t dst_p, std::int32_t src_p) {
 }
 
 std::optional<std::int32_t> PagePool::take(Evictor& ev) {
+    ownerCheck(owner_, "PagePool::take");
     for (;;) {
         if (free_.empty() && !quarantine_.empty()) reclaim(false);
         if (auto p = takeFree()) return p;
@@ -70,6 +75,7 @@ std::optional<std::int32_t> PagePool::take(Evictor& ev) {
 }
 
 void PagePool::quarantine(std::span<const std::int32_t> pages) {
+    ownerCheck(owner_, "PagePool::quarantine");
     if (pages.empty()) return;
     if (q_stream_ == nullptr) throw std::runtime_error("NoTier");
     device::EventH ev = device::EventH::create(ops_);
@@ -78,6 +84,7 @@ void PagePool::quarantine(std::span<const std::int32_t> pages) {
 }
 
 void PagePool::reclaim(bool force) {
+    ownerCheck(owner_, "PagePool::reclaim");
     std::size_t i = 0;
     while (i < quarantine_.size()) {
         QBatch& q = quarantine_[i];
@@ -101,6 +108,7 @@ void PagePool::reclaim(bool force) {
 
 PagePool::Cow PagePool::cow(std::vector<std::int32_t>& pages, std::uint32_t seq, std::uint32_t reuse, bool spill,
                             Evictor& ev) {
+    ownerCheck(owner_, "PagePool::cow");
     const std::size_t keep = reuse == 0 ? 0 : (reuse - 1) / kv_page;
     if (keep >= pages.size()) return Cow::unchanged;
     std::optional<std::int32_t> newp;
@@ -122,6 +130,7 @@ PagePool::Cow PagePool::cow(std::vector<std::int32_t>& pages, std::uint32_t seq,
 }
 
 bool PagePool::ensure(std::vector<std::int32_t>& pages, std::uint32_t seq, std::uint64_t n_tok, Evictor& ev) {
+    ownerCheck(owner_, "PagePool::ensure");
     const std::size_t need = pagesFor(n_tok);
     if (need <= pages.size()) return true;
     if (need > m_.seqPages()) return false;

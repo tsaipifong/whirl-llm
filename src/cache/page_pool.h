@@ -18,6 +18,7 @@
 #include "device/backend.h"
 #include "device/handles.h"
 #include "server/backend.h"
+#include "server/engine_thread.h"
 
 #include <cstdint>
 #include <optional>
@@ -48,6 +49,9 @@ public:
     enum class Cow { unchanged, no_page, done };
 
     PagePool(device::Backend& ops, ServerModel& m) : ops_(ops), m_(m) {}
+    // arch024 M8: the engine thread that may call the entry points below (nullptr: unchecked; docs/dev/threads.md)
+    void setOwner(const EngineThread* o) { owner_ = o; }
+    const EngineThread* ownerThread() const { return owner_; }
 
     // n pages, every one free (taken in increasing order), no holder; arrs: the pool arrays a page copy covers
     void init(std::uint32_t n, std::vector<KvArr> arrs);
@@ -62,7 +66,10 @@ public:
     std::optional<std::int32_t> takeFree();
     // a page: free, else reclaim the done quarantine, else ev.evictOne(), else wait (on the GPU) for the quarantine
     std::optional<std::int32_t> take(Evictor& ev);
-    void ref(std::int32_t p) { ref_[static_cast<std::size_t>(p)] += 1; }
+    void ref(std::int32_t p) {
+        ownerCheck(owner_, "PagePool::ref");
+        ref_[static_cast<std::size_t>(p)] += 1;
+    }
     // one holder fewer each; free at 0
     void unref(std::span<const std::int32_t> pages);
     // a page from index (reuse - 1) / kv_page on has another holder
@@ -70,7 +77,10 @@ public:
     // page src into page dst in every pool array, on the model stream
     void copy(std::int32_t dst, std::int32_t src);
     // the stream quarantine records its event on (the RAM tier's stream); nullptr: no tier (quarantine throws)
-    void setQuarantineStream(device::Stream s) { q_stream_ = s; }
+    void setQuarantineStream(device::Stream s) {
+        ownerCheck(owner_, "PagePool::setQuarantineStream");
+        q_stream_ = s;
+    }
     // pages a spill still reads: held until an event recorded now on the quarantine stream is done
     void quarantine(std::span<const std::int32_t> pages);
     // the quarantine batches whose event is done back (one holder fewer each); force: all of them, the model stream
@@ -98,6 +108,7 @@ private:
     std::vector<QBatch> quarantine_;
     std::vector<KvArr> arrs_;
     Stats stats_;
+    const EngineThread* owner_ = nullptr;
 };
 
 }  // namespace whirl::server

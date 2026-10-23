@@ -19,6 +19,7 @@
 #include "device/backend.h"
 #include "device/handles.h"
 #include "server/backend.h"
+#include "server/engine_thread.h"
 
 #include <cstdint>
 #include <initializer_list>
@@ -46,6 +47,9 @@ public:
         bool ckpt_host = false;                       // WHIRL_CKPT_HOST: per-slot checkpoints in pinned host memory
     };
     CkptStore(device::Backend& ops, ServerModel& m, Layout lay) : ops_(ops), m_(m), lay_(lay) {}
+    // arch024 M8: the engine thread that may call the entry points below (nullptr: unchecked; docs/dev/threads.md)
+    void setOwner(const EngineThread* o) { owner_ = o; }
+    const EngineThread* ownerThread() const { return owner_; }
 
     // Allocates c's buffers (c holds none). host_ok: a per-slot checkpoint (pinned with WHIRL_CKPT_HOST); shared
     // prefix checkpoints are always in VRAM. On an allocation error the buffers already made stay in c.
@@ -70,6 +74,7 @@ private:
     device::Backend& ops_;
     ServerModel& m_;
     Layout lay_;
+    const EngineThread* owner_ = nullptr;
 };
 
 }  // namespace whirl::server

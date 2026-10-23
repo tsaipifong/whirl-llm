@@ -40,6 +40,7 @@ PrefixStore::PrefixStore(const ChatTokens& ct, const Config& cfg) : ct_(ct), cfg
 }
 
 void PrefixStore::attachTier(tier::Tier* t) {
+    ownerCheck(owner_, "PrefixStore::attachTier");
     tier_view_ = t ? cache::makeTierAdapter(*t) : nullptr;
     pc_->attachTier(tier_view_.get());
 }
@@ -86,6 +87,7 @@ std::uint32_t PrefixStore::tailCk(const SlotPrefix& sl, std::span<const std::uin
 }
 
 void PrefixStore::waitSpeFences() {
+    ownerCheck(owner_, "PrefixStore::waitSpeFences");
     for (Spe& sp : spes_) {
         sp.spill_ev.waitIfPending();
         sp.ready_ev.waitIfPending();
@@ -93,6 +95,7 @@ void PrefixStore::waitSpeFences() {
 }
 
 std::uint64_t PrefixStore::parkSpes(CkptStore& cs) {
+    ownerCheck(owner_, "PrefixStore::parkSpes");
     std::uint64_t b = 0;
     for (Spe& sp : spes_) {
         b += cs.bytes(false);
@@ -103,6 +106,7 @@ std::uint64_t PrefixStore::parkSpes(CkptStore& cs) {
 }
 
 std::uint64_t PrefixStore::unparkSpes(CkptStore& cs, std::size_t n) {
+    ownerCheck(owner_, "PrefixStore::unparkSpes");
     try {
         spes_.clear();
         spes_.resize(n);
@@ -117,6 +121,7 @@ std::uint64_t PrefixStore::unparkSpes(CkptStore& cs, std::size_t n) {
 }
 
 Spe* PrefixStore::speMatch(std::span<const std::uint32_t> toks) {
+    ownerCheck(owner_, "PrefixStore::speMatch");
     const int i = pc_->matchShared(spes_, toks, [&](std::size_t a) { return onSchedule(toks, a); });
     return i < 0 ? nullptr : &spes_[static_cast<std::size_t>(i)];
 }

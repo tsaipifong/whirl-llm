@@ -81,17 +81,26 @@ public:
     // m: the model (main stream, state geometry); kv: the pool arrays (Engine's, set by initPool)
     TierBridge(device::Backend& ops, ServerModel& m, const ChatTokens& ct, PrefixStore& ps,
                const std::vector<KvArr>& kv, const Config& cfg);
+    // arch024 M8: the engine thread that may call the entry points below (nullptr: unchecked; docs/dev/threads.md)
+    void setOwner(const EngineThread* o) { owner_ = o; }
+    const EngineThread* ownerThread() const { return owner_; }
 
     const Config& config() const { return cfg_; }
     tier::Tier* tier() const { return tier_; }
-    void attach(tier::Tier* t) { tier_ = t; }  // nullptr: none
+    void attach(tier::Tier* t) {  // nullptr: none
+        ownerCheck(owner_, "TierBridge::attach");
+        tier_ = t;
+    }
 
     // ---- spill fences
     // the main stream waits for the slot's last spill, which may still read its checkpoint buffers (item S: also
     // after an eviction cleared spill_busy)
     void waitSpill(SlotTier& st);
     // other places that order the main stream after a spill (page eviction, shared prefix replacement) count here
-    void countSpillWait() { spill_waits_ += 1; }
+    void countSpillWait() {
+        ownerCheck(owner_, "TierBridge::countSpillWait");
+        spill_waits_ += 1;
+    }
     std::uint64_t spillWaits() const { return spill_waits_; }
 
     // ---- span lists (the order of the pieces in a tier entry; spills and restores)
@@ -152,7 +161,10 @@ public:
     // ---- TIER-IDLE (policy: tier/idle_flush.h), from runLoop's idle wait. building: a request is being built
     void idlePoll(bool building);
     std::optional<std::chrono::steady_clock::time_point> idleDue() const;
-    void idleActivity() { idle_clock_.activity(); }
+    void idleActivity() {
+        ownerCheck(owner_, "TierBridge::idleActivity");
+        idle_clock_.activity();
+    }
 
 private:
     device::Backend& ops_;
@@ -168,6 +180,7 @@ private:
     cache::SupersedeTracker supersede_;
     tier::IdleFlushClock idle_clock_;
     std::atomic<std::uint64_t> pub_ssd_written_{0}, pub_ssd_dedup_{0}, pub_ssd_used_{0}, pub_ssd_entries_{0}, pub_superseded_{0};
+    const EngineThread* owner_ = nullptr;
 };
 
 }  // namespace whirl::server

@@ -10,6 +10,7 @@ std::uint64_t al(std::uint64_t x) { return (x + 255) / 256 * 256; }
 }  // namespace
 
 void CkptStore::init(Ckpt& c, bool host_ok) {
+    ownerCheck(owner_, "CkptStore::init");
     const auto& cfg = m_.cfg();
     const std::uint32_t L = cfg.n_layer;
     const std::uint64_t V = cfg.n_vocab;
@@ -55,6 +56,7 @@ void CkptStore::init(Ckpt& c, bool host_ok) {
 }
 
 void CkptStore::save(Ckpt& c, std::optional<DevPtr> hid, std::optional<DevPtr> logits) {
+    ownerCheck(owner_, "CkptStore::save");
     m_.commitSeq(m_.curSeq());
     const auto conv = m_.convState();
     const auto ssm = m_.ssmState();
@@ -70,6 +72,7 @@ void CkptStore::save(Ckpt& c, std::optional<DevPtr> hid, std::optional<DevPtr> l
 }
 
 void CkptStore::load(const Ckpt& c) {
+    ownerCheck(owner_, "CkptStore::load");
     m_.dropPending(m_.curSeq());
     const auto conv = m_.convState();
     const auto ssm = m_.ssmState();
@@ -105,16 +108,19 @@ void CkptStore::free(Ckpt& c) {
 }
 
 void CkptStore::park(std::span<Ckpt> cks, std::initializer_list<device::Event> wait_for) {
+    ownerCheck(owner_, "CkptStore::park");
     wait(wait_for);
     for (Ckpt& c : cks) free(c);
 }
 
 void CkptStore::release(Ckpt& c, std::initializer_list<device::Event> wait_for) {
+    ownerCheck(owner_, "CkptStore::release");
     wait(wait_for);
     free(c);
 }
 
 void CkptStore::unpark(std::span<Ckpt> cks, bool host_ok) {
+    ownerCheck(owner_, "CkptStore::unpark");
     for (Ckpt& c : cks) init(c, host_ok);
 }
 

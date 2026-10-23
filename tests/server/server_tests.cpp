@@ -11,6 +11,7 @@
 #include "mock_backend.h"
 #include "server/draft_caps.h"
 #include "server/engine.h"
+#include "server/engine_thread.h"
 #include "server/http.h"
 #include "server/log.h"
 #include "server/prefix_store.h"
@@ -32,14 +33,18 @@
 #include <iterator>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <functional>
+#include <future>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <set>
+#include <sstream>
 #include <string>
 #include <stdexcept>
 #include <thread>
@@ -5992,8 +5997,246 @@ void testTierBridgeRestore() {
 
 }  // namespace
 
+// arch024 S10 (M8): thread ownership. FakeLoop is a thread that owns an EngineThread the way runLoop does (enter at the
+// start, leave at the end) and runs the calls given to it.
+int g_owner_expected = 0;  // violations a test causes on purpose (main compares each test's count with it)
+
+struct FakeLoop {
+    EngineThread& o;
+    std::thread th;
+    std::mutex mu;
+    std::condition_variable cv;
+    std::function<void()> job;
+    bool quit = false;
+    std::exception_ptr err;
+    explicit FakeLoop(EngineThread& t) : o(t) {
+        std::promise<void> up;
+        auto f = up.get_future();
+        th = std::thread([this, &up] {
+            o.enter();
+            up.set_value();
+            std::unique_lock<std::mutex> lk(mu);
+            for (;;) {
+                cv.wait(lk, [&] { return quit || job; });
+                if (job) {
+                    try {
+                        job();
+                    } catch (...) {
+                        err = std::current_exception();
+                    }
+                    job = nullptr;
+                    cv.notify_all();
+                    continue;
+                }
+                break;
+            }
+            o.leave();
+        });
+        f.wait();
+    }
+    // fn on the owner thread; rethrows what it threw
+    void run(std::function<void()> fn) {
+        std::unique_lock<std::mutex> lk(mu);
+        job = std::move(fn);
+        err = nullptr;
+        cv.notify_all();
+        cv.wait(lk, [&] { return !job; });
+        if (err) std::rethrow_exception(err);
+    }
+    void stop() {
+        if (!th.joinable()) return;
+        {
+            std::lock_guard<std::mutex> lk(mu);
+            quit = true;
+        }
+        cv.notify_all();
+        th.join();
+    }
+    ~FakeLoop() { stop(); }
+};
+
+// fn from a thread that is not the owner: must throw std::logic_error (throwing mode) and count one violation
+bool blocked(const std::function<void()>& fn) {
+    const std::uint64_t v0 = EngineThread::violations();
+    bool threw = false;
+    try {
+        fn();
+    } catch (const std::logic_error& e) {
+        threw = std::string_view(e.what()).starts_with("owner check: ");
+    }
+    g_owner_expected += 1;
+    return threw && EngineThread::violations() == v0 + 1;
+}
+
+// fn without a violation (the owner thread, or no owner)
+bool allowed(const std::function<void()>& fn) {
+    const std::uint64_t v0 = EngineThread::violations();
+    try {
+        fn();
+    } catch (const std::logic_error&) {
+        return false;
+    }
+    return EngineThread::violations() == v0;
+}
+
+void testOwnerCheck() {
+    CHECK(EngineThread::throwing());  // main: test programs run in throwing mode (PLAN M8 "test build")
+    // ---- PagePool (M3): startup (no owner) allowed; a call from another thread while the owner runs is blocked
+    //      before anything changes; the same calls on the owner thread pass
+    {
+        EngineThread own;  // before the rig: the modules keep a pointer to it until the rig is gone
+        PpRig r(8);
+        r.pool->setOwner(&own);
+        CHECK(!own.running());
+        CHECK(allowed([&] { r.pool->init(r.model->poolPages(), r.arrs); }));  // startup (initPool before runLoop)
+        CHECK(allowed([&] { (void)r.pool->takeFree(); }));
+        {
+            FakeLoop L(own);
+            CHECK(own.running());
+            const std::size_t free0 = r.pool->freeCount();
+            std::vector<std::int32_t> pages;
+            struct NoEvict final : PagePool::Evictor {
+                bool evictOne() override { return false; }
+            } ev;
+            const std::int32_t one[] = {0};
+            CHECK(blocked([&] { (void)r.pool->takeFree(); }));
+            CHECK(blocked([&] { (void)r.pool->take(ev); }));
+            CHECK(blocked([&] { r.pool->ref(0); }));
+            CHECK(blocked([&] { r.pool->unref(one); }));
+            CHECK(blocked([&] { (void)r.pool->ensure(pages, 0, 100, ev); }));
+            CHECK(blocked([&] { (void)r.pool->cow(pages, 0, 1, false, ev); }));
+            CHECK(blocked([&] { r.pool->copy(1, 0); }));
+            CHECK(blocked([&] { r.pool->quarantine(one); }));
+            CHECK(blocked([&] { r.pool->reclaim(true); }));
+            CHECK(blocked([&] { r.pool->setQuarantineStream(r.ts); }));
+            CHECK(blocked([&] { r.pool->init(4, r.arrs); }));
+            CHECK_EQ(r.pool->freeCount(), free0);  // nothing changed
+            CHECK_EQ(r.pool->refCount(0), 1u);
+            // the owner thread (runOnLoop / a Job): no violation
+            CHECK(allowed([&] {
+                L.run([&] {
+                    auto p = r.pool->takeFree();
+                    r.pool->ref(*p);
+                    const std::int32_t pp[] = {*p, *p};
+                    r.pool->unref(pp);
+                    (void)r.pool->ensure(pages, 0, 100, ev);
+                    r.pool->unref(pages);
+                    r.pool->reclaim(false);
+                });
+            }));
+            CHECK_EQ(r.pool->freeCount(), free0);
+        }
+        CHECK(!own.running());  // the loop returned: allowed again
+        CHECK(allowed([&] { (void)r.pool->takeFree(); }));
+    }
+    // ---- CkptStore (M2), PrefixStore (M4), TierBridge (M5)
+    {
+        EngineThread own;
+        TbRig r;
+        r.cs->setOwner(&own);
+        r.ps->setOwner(&own);
+        r.tb->setOwner(&own);
+        Ckpt c;
+        CHECK(allowed([&] { r.cs->init(c, false); }));  // startup (allocState)
+        const std::vector<std::uint32_t> toks(200, 7u);
+        {
+            FakeLoop L(own);
+            SlotTier st;
+            CHECK(blocked([&] { r.cs->release(c, {}); }));
+            CHECK(blocked([&] { r.cs->save(c, std::nullopt, std::nullopt); }));
+            CHECK(blocked([&] { r.cs->load(c); }));
+            CHECK(blocked([&] { Ckpt d; r.cs->init(d, false); }));
+            CHECK(blocked([&] { r.ps->waitSpeFences(); }));
+            CHECK(blocked([&] { (void)r.ps->speMatch(toks); }));
+            CHECK(blocked([&] { r.ps->setVision(PrefixStore::Vision{}); }));
+            CHECK(blocked([&] { r.ps->attachTier(r.tier.get()); }));
+            CHECK(blocked([&] { (void)r.tb->tick(); }));
+            CHECK(blocked([&] { r.tb->waitSpill(st); }));
+            CHECK(blocked([&] { r.tb->idleActivity(); }));
+            CHECK(blocked([&] { r.tb->countSpillWait(); }));
+            CHECK(blocked([&] { r.tb->attach(r.tier.get()); }));
+            CHECK(blocked([&] { r.tb->pageSpans(0, 0); }));
+            CHECK(c.dev);  // release was blocked before it freed anything
+            CHECK(allowed([&] {
+                L.run([&] {
+                    (void)r.ps->speMatch(toks);
+                    r.ps->waitSpeFences();
+                    (void)r.tb->tick();
+                    r.tb->waitSpill(st);
+                    r.tb->idleActivity();
+                    r.cs->release(c, {});
+                });
+            }));
+            CHECK(!c.dev);
+        }
+    }
+    // ---- release mode (the product): no exception, the call goes on, one "E owner check:" line per call site, every
+    //      violation counted
+    {
+        EngineThread own;
+        PpRig r(8);
+        r.pool->setOwner(&own);
+        FakeLoop L(own);
+        EngineThread::setThrowing(false);
+        EngineThread::resetLoggedForTests();
+        g_log.clear();
+        const std::uint64_t v0 = EngineThread::violations();
+        std::optional<std::int32_t> a, b;
+        bool threw = false;
+        try {
+            a = r.pool->takeFree();
+            b = r.pool->takeFree();
+        } catch (...) {
+            threw = true;
+        }
+        EngineThread::setThrowing(true);
+        g_owner_expected += 2;
+        CHECK(!threw);
+        CHECK(a && b && *a != *b);  // both calls did their work, as before S10
+        CHECK_EQ(EngineThread::violations(), v0 + 2);
+        std::ostringstream id;
+        id << std::this_thread::get_id();
+        CHECK_EQ(g_log.count("E owner check: PagePool::takeFree called on thread " + id.str()), 1u);
+        CHECK_EQ(g_log.count("owner check:"), 1u);
+    }
+    // ---- Engine: runLoop owns, runOnLoop runs on it (no throw), the governor glue (M7) is checked, startup allowed
+    {
+        ServerSetup su = baseSetup();
+        TestServer srv(su);
+        Engine& e = srv.engine();
+        std::thread::id inside;
+        bool ran = false;
+        CHECK(allowed([&] {
+            e.runOnLoop([&] {
+                inside = std::this_thread::get_id();
+                e.owner().check("test::runOnLoop");
+                e.setVramProbe(nullptr, false);  // M7 entry point on the owner thread
+                ran = true;
+            });
+        }));
+        CHECK(ran);
+        CHECK(e.owner().running());
+        CHECK(inside == e.owner().owner());
+        CHECK(inside != std::this_thread::get_id());
+        CHECK(blocked([&] { e.setVramProbe(nullptr, false); }));
+        CHECK(blocked([&] { e.setGovernor(whirl::memgov::Config{}, nullptr, 0); }));
+        // the engine's modules are wired to its owner: an Engine entry point that goes straight to them is blocked there
+        CHECK(e.modulesOwned());
+        CHECK(blocked([&] { e.attachTier(nullptr); }));  // TierBridge::attach, before anything is detached
+        // an HTTP request after the blocked calls still works (nothing was left half done)
+        const auto res = test::httpRequest("127.0.0.1", srv.port(), "POST", "/v1/completions", completionBody(makePrompt(8, 40), 4), 30);
+        CHECK_EQ(res.status, 200);
+        srv.stopEngine();
+        CHECK(!e.owner().running());
+        CHECK(allowed([&] { e.setVramProbe(nullptr, false); }));  // no loop: allowed
+    }
+}
+
 int main(int argc, char** argv) {
     whirl::test::clearWhirlEnv();  // FR-TEST P3-11
+    // arch024 M8: the test program is the "test build": an owner check violation throws std::logic_error; every test
+    // must end with no violation other than the ones it causes on purpose (g_owner_expected)
+    EngineThread::setThrowing(true);
     std::set<std::string> only;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -6119,6 +6362,7 @@ int main(int argc, char** argv) {
         {"fr_stop_tokens", testFrStopTokens},
         {"fr_log_injection", testFrLogInjection},
         {"fr_short_followup", testFrShortFollowUp},
+        {"owner_check", testOwnerCheck},
     };
     // FIX-TEST-A (FR-TEST P3-3): an --only name that matches no test, or a run with 0 checks, is a usage
     // error (exit 2), never "0 passed, 0 failed" with exit 0
@@ -6135,17 +6379,27 @@ int main(int argc, char** argv) {
         if (!only.empty() && !only.count(t.name)) continue;
         const int f0 = g_fail, p0 = g_pass;
         const double t0 = nowSeconds();
+        const std::uint64_t ov0 = EngineThread::violations();
+        const int oe0 = g_owner_expected;
         try {
             t.fn();
         } catch (const std::exception& ex) {
             ++g_fail;
             std::fprintf(stderr, "  FAIL %s: exception %s\n", t.name, ex.what());
         }
+        // arch024 M8: a violation on an HTTP thread may be turned into a 500 by the handler: count them, not only throws
+        if (EngineThread::violations() - ov0 != static_cast<std::uint64_t>(g_owner_expected - oe0)) {
+            ++g_fail;
+            std::fprintf(stderr, "  FAIL %s: %llu owner check violation(s), %d expected\n", t.name,
+                         static_cast<unsigned long long>(EngineThread::violations() - ov0), g_owner_expected - oe0);
+        }
         std::printf("%-18s %s (%d checks, %.1f s)\n", t.name, g_fail == f0 ? "ok" : "FAILED", g_pass - p0 + g_fail - f0,
                     nowSeconds() - t0);
         std::fflush(stdout);
     }
     std::printf("server tests: %d passed, %d failed\n", g_pass, g_fail);
+    std::printf("server tests: owner check violations %llu (%d caused on purpose by owner_check)\n",
+                static_cast<unsigned long long>(EngineThread::violations()), g_owner_expected);
     Log::setHook(nullptr, nullptr);
     if (g_pass + g_fail == 0) {
         std::printf("server tests: 0 checks ran: refusing to report success\n");

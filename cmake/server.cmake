@@ -55,6 +55,7 @@ add_library(whirl_server_core STATIC
   ${CMAKE_SOURCE_DIR}/src/server/protocol.cpp
   ${CMAKE_SOURCE_DIR}/src/server/tokens.cpp
   ${CMAKE_SOURCE_DIR}/src/server/engine.cpp
+  ${CMAKE_SOURCE_DIR}/src/server/engine_thread.cpp
   ${CMAKE_SOURCE_DIR}/src/server/engine_vision.cpp
   ${CMAKE_SOURCE_DIR}/src/server/engine_gov.cpp
   ${CMAKE_SOURCE_DIR}/src/cache/ckpt_store.cpp

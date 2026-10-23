@@ -43,6 +43,7 @@ TierBridge::TierBridge(device::Backend& ops, ServerModel& m, const ChatTokens& c
 // item G: host tiers
 
 void TierBridge::waitSpill(SlotTier& st) {
+    ownerCheck(owner_, "TierBridge::waitSpill");
     // (also after an eviction cleared spill_busy: the spill may still read the
     // checkpoint buffers; item S)
     if (!st.spill_ev) return;
@@ -53,6 +54,7 @@ void TierBridge::waitSpill(SlotTier& st) {
 }
 
 void TierBridge::ckSpans(const Ckpt& c, std::uint64_t base, std::uint8_t tag) {
+    ownerCheck(owner_, "TierBridge::ckSpans");
     const auto& cfg = m_.cfg();
     std::uint64_t off = base;
     for (std::uint32_t i = 0; i < cfg.n_layer; ++i) {
@@ -69,6 +71,7 @@ void TierBridge::ckSpans(const Ckpt& c, std::uint64_t base, std::uint8_t tag) {
 }
 
 void TierBridge::pageSpans(std::int32_t phys, std::uint64_t base) {
+    ownerCheck(owner_, "TierBridge::pageSpans");
     std::uint64_t off = base;
     for (const KvArr& a : kv_) {
         const std::uint64_t len = static_cast<std::uint64_t>(kv_page) * a.row;
@@ -78,6 +81,7 @@ void TierBridge::pageSpans(std::int32_t phys, std::uint64_t base) {
 }
 
 void TierBridge::spillSpe(Spe& s) {
+    ownerCheck(owner_, "TierBridge::spillSpe");
     tier::Tier* t = tier_;
     if (!t) return;
     if (s.n < t->cfg.min_tokens) return;
@@ -131,6 +135,7 @@ void TierBridge::spillSpe(Spe& s) {
 }
 
 void TierBridge::spillSlot(std::uint32_t id, bool idle, SlotPrefix& sp, SlotTier& st) {
+    ownerCheck(owner_, "TierBridge::spillSlot");
     tier::Tier* t = tier_;
     if (!t) return;
     if (!idle || sp.pages.empty()) return;
@@ -282,6 +287,7 @@ void TierBridge::spillSlot(std::uint32_t id, bool idle, SlotPrefix& sp, SlotTier
 // system prompts never match; a parallel session that keeps using its entry
 // is left alone.
 void TierBridge::supersedeMark(std::uint32_t slot_id, tier::Entry* x) {
+    ownerCheck(owner_, "TierBridge::supersedeMark");
     tier::Tier* t = tier_;
     if (!t || !x || !cfg_.supersede) return;
     const cache::Tokens nt(x->tokens.data(), x->n_tok);
@@ -304,6 +310,7 @@ void TierBridge::supersedeMark(std::uint32_t slot_id, tier::Entry* x) {
 }
 
 void TierBridge::supersedeApply(std::uint32_t slot_id, tier::Entry* x) {
+    ownerCheck(owner_, "TierBridge::supersedeApply");
     tier::Tier* t = tier_;
     if (!t || !x) return;
     std::vector<cache::SupersedeTracker::Pending> pend = supersede_.take(x->id);
@@ -349,6 +356,7 @@ void TierBridge::supersedeApply(std::uint32_t slot_id, tier::Entry* x) {
 // graceful stop (Ctrl+C, Ctrl+Break, console close) does not lose the last turns. Bounded by
 // flush_ms; runs on the engine thread like every other tier step (tick: Engine::tierTick, which calls tick()).
 bool TierBridge::flushOnStop(const std::function<bool()>& tick) {
+    ownerCheck(owner_, "TierBridge::flushOnStop");
     tier::Tier* t = tier_;
     if (!t) return false;
     const std::uint64_t saved_delay = t->cfg.ssd_delay_ms;
@@ -375,6 +383,7 @@ bool TierBridge::flushOnStop(const std::function<bool()>& tick) {
 // TIER-IDLE (policy: tier/idle_flush.h). Called from the idle wait of runLoop: once the server has been idle
 // for idle_flush_ms, the tier writes its reused entries to SSD in the background (shutdown mode only).
 void TierBridge::idlePoll(bool building) {
+    ownerCheck(owner_, "TierBridge::idlePoll");
     tier::Tier* t = tier_;
     if (!t || !tier::idleFlushEnabled(t->cfg.ssd_shutdown_only, t->hasSsd(), cfg_.idle_flush_ms)) return;
     if (building) {  // a request is being built: not idle
@@ -403,6 +412,7 @@ std::optional<std::chrono::steady_clock::time_point> TierBridge::idleDue() const
 // waitsForTier / prefetchFor / tierTick / logTier; Engine keeps the scheduler's part around these calls)
 
 std::optional<tier::Match> TierBridge::restoreMatch(SlotPrefix& sp, std::span<const std::uint32_t> toks) {
+    ownerCheck(owner_, "TierBridge::restoreMatch");
     tier::Tier* t = tier_;
     if (!t) return std::nullopt;
     const auto mt = ps_.config().cold_resume
@@ -422,6 +432,7 @@ std::optional<tier::Match> TierBridge::restoreMatch(SlotPrefix& sp, std::span<co
 
 bool TierBridge::startRestore(std::uint64_t job_id, std::uint32_t id, std::span<const std::uint32_t> toks, SlotPrefix& sp,
                               SlotTier& st, const tier::Match& mt, Clock::time_point t0) {
+    ownerCheck(owner_, "TierBridge::startRestore");
     tier::Tier* t = tier_;
     tier::Entry* x = mt.e;
     const tier::Layout lay = t->lay;
@@ -473,6 +484,7 @@ bool TierBridge::startRestore(std::uint64_t job_id, std::uint32_t id, std::span<
 }
 
 void TierBridge::finishTail(std::uint32_t id, SlotPrefix& sp, SlotTier& st, bool wait) {
+    ownerCheck(owner_, "TierBridge::finishTail");
     tier::Tier* t = tier_;
     if (!t) return;
     tier::Restore* r = st.restore;
@@ -532,6 +544,7 @@ void TierBridge::finishTail(std::uint32_t id, SlotPrefix& sp, SlotTier& st, bool
 }
 
 void TierBridge::cutTail(std::uint32_t id, SlotPrefix& sp, SlotTier& st) {
+    ownerCheck(owner_, "TierBridge::cutTail");
     finishTail(id, sp, st, false);
     tier::Restore* r = st.restore;
     if (!r) return;
@@ -554,6 +567,7 @@ void TierBridge::cutTail(std::uint32_t id, SlotPrefix& sp, SlotTier& st) {
 }
 
 TierBridge::Pump TierBridge::pumpRestore(SlotTier& st) {
+    ownerCheck(owner_, "TierBridge::pumpRestore");
     tier::Tier* t = tier_;
     tier::Restore* r = st.restore;
     // an exception from the copies marks the restore failed (cold prefill), never a valid one
@@ -564,6 +578,7 @@ TierBridge::Pump TierBridge::pumpRestore(SlotTier& st) {
 }
 
 void TierBridge::restoreFailed(std::uint64_t job_id, std::uint32_t id, SlotTier& st, const RestoreSteps& steps) {
+    ownerCheck(owner_, "TierBridge::restoreFailed");
     tier::Tier* t = tier_;
     tier::Restore* r = st.restore;
     logW("req {} | slot {} | kv tier: restore failed; prefilling from scratch", job_id, id);
@@ -580,6 +595,7 @@ void TierBridge::restoreFailed(std::uint64_t job_id, std::uint32_t id, SlotTier&
 }
 
 void TierBridge::restoreDone(std::uint64_t job_id, std::uint32_t id, SlotPrefix& sp, SlotTier& st, const RestoreSteps& steps) {
+    ownerCheck(owner_, "TierBridge::restoreDone");
     tier::Tier* t = tier_;
     tier::Restore* r = st.restore;
     tier::Entry& en = *t->find(r->entry_id);
@@ -662,6 +678,7 @@ std::uint32_t TierBridge::queuedReuse(const SlotTier& st, std::span<const std::u
 }
 
 std::optional<tier::Match> TierBridge::prefetchCandidate(std::span<const std::uint32_t> toks) {
+    ownerCheck(owner_, "TierBridge::prefetchCandidate");
     tier::Tier* t = tier_;
     if (!t) return std::nullopt;
     const auto mt = ps_.config().cold_resume
@@ -675,6 +692,7 @@ std::optional<tier::Match> TierBridge::prefetchCandidate(std::span<const std::ui
 }
 
 void TierBridge::prefetch(std::uint64_t job_id, tier::Entry* x) {
+    ownerCheck(owner_, "TierBridge::prefetch");
     bool ok = false;
     try {
         ok = tier_->prefetch(x);
@@ -685,6 +703,7 @@ void TierBridge::prefetch(std::uint64_t job_id, tier::Entry* x) {
 }
 
 bool TierBridge::tick() {
+    ownerCheck(owner_, "TierBridge::tick");
     tier::Tier* t = tier_;
     if (!t) return false;
     bool busy = t->tick();

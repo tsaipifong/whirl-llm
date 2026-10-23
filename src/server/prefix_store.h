@@ -16,6 +16,7 @@
 #include "cache/prefix_cache.h"
 #include "device/handles.h"
 #include "server/backend.h"
+#include "server/engine_thread.h"
 #include "server/tokens.h"
 #include "whirl/prefill_schedule.h"
 
@@ -119,12 +120,18 @@ public:
     };
 
     PrefixStore(const ChatTokens& ct, const Config& cfg);
+    // arch024 M8: the engine thread that may call the entry points below (nullptr: unchecked; docs/dev/threads.md)
+    void setOwner(const EngineThread* o) { owner_ = o; }
+    const EngineThread* ownerThread() const { return owner_; }
 
     const Config& config() const { return cfg_; }
     cache::PrefixCache& cache() { return *pc_; }
     const cache::Tier* tierView() const { return tier_view_.get(); }
     void attachTier(tier::Tier* t);  // nullptr: none
-    void setVision(const Vision& v) { vis_ = v; }
+    void setVision(const Vision& v) {
+        ownerCheck(owner_, "PrefixStore::setVision");
+        vis_ = v;
+    }
 
     // ---- the chunk schedule of a prompt (functions of the tokens and the settings)
     std::uint32_t sysSplit(std::span<const std::uint32_t> toks) const;
@@ -163,6 +170,7 @@ public:
     // the least recently used; nullptr: none free
     template <class S, class Avail>
     S* pickSlot(std::span<S> slots, std::span<const std::uint32_t> toks, Avail avail) {
+        ownerCheck(owner_, "PrefixStore::pickSlot");
         S* best = nullptr;
         std::uint32_t best_reuse = 0;
         const std::uint32_t spe_n = [&] {
@@ -188,6 +196,7 @@ private:
     std::unique_ptr<cache::PrefixCache> pc_;
     std::unique_ptr<cache::Tier> tier_view_;
     std::vector<Spe> spes_;
+    const EngineThread* owner_ = nullptr;
 };
 
 }  // namespace whirl::server
