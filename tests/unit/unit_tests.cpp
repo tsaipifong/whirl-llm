@@ -3287,9 +3287,10 @@ void testB0SizingFollowUps() {
     constexpr std::uint64_t MiB = 1ull << 20, GiB = 1ull << 30;
     const std::regex bad(R"(hipError|hip.*\b719\b|\b719\b.*hip|\| failed:|PAL failed|Failed PAL|result:-5|unspecified launch)",
                          std::regex::icase);
-    // C5 (REVIEW-S8-719:77-80): a desktop R9700 host whose Ryzen iGPU (gfx1036, no WHIRL kernels) is a HIP GPU. Since 0.2.3
-    // (C1 root fix) the default is the R9700 and HIP_VISIBLE_DEVICES is set to it alone (gpu_restrict.cpp), so the pinned
-    // room sees n = 1 and the 32 GB host keeps v0.2.2.2's automatic 8192 (C5 feared n = 2 -> about 4096). Either order.
+    // C5 (REVIEW-S8-719:77-80): a desktop R9700 host whose Ryzen iGPU (gfx1036, no WHIRL kernels) is a HIP GPU. What makes
+    // n = 1 is restrictToSelected (gpu_restrict.cpp, since 0.2.3): HIP_VISIBLE_DEVICES names the chosen GPU alone, whichever
+    // GPU that is (REVIEW-B0 K2); on this host the chosen one happens to be the R9700 because the iGPU has no kernels. So
+    // the pinned room sees n = 1 and the 32 GB host keeps v0.2.2.2's automatic 8192 (C5 feared n = 2 -> about 4096). Either order.
     {
         using namespace whirl::gpusel;
         auto rec = [](int i, const char* name, const char* arch, int bus, bool integ, bool sup, std::uint64_t mib) {
@@ -3321,6 +3322,46 @@ void testB0SizingFollowUps() {
         one.pinned_max = (1294 + 300) * MiB;
         one.gpus = {{15435 * MiB, 1294 * MiB, 16203 * MiB}};
         CHECK(!startfit::ramTierFit(8192, 20000 * MiB, 8192, false, startfit::pinnedRoomMb(one), 8192).has_value());
+    }
+    // REVIEW-B0 K2: the owner's host, 8060S + R9700 (scratch\s8_719\devices_all.txt: device 0 8060S gfx1151 integrated,
+    // 95.8 GiB carve-out, pci:196:0; device 1 R9700 gfx1201 31.9 GiB, pci:71:0). The default is the 8060S (the most GPU
+    // memory, owner 2026-10-23), --device pci:71:0 the R9700; either way ONE ordinal is made visible, and the enumeration
+    // HIP then shows (the chosen GPU alone, as ordinal 0) passes restrictToSelected's identity check with n = 1. (The
+    // runtime call hipGetDeviceCount itself is GPU-only: s8_719_root.ps1's "1 HIP GPU(s)" and release_gate srv_gpu_select.)
+    {
+        using namespace whirl::gpusel;
+        auto rec = [](int i, const char* name, const char* arch, int bus, bool integ, std::uint64_t total, std::uint64_t fit,
+                      int cu) {
+            GpuRecord r;
+            r.index = i;
+            r.name = name;
+            r.arch = arch;
+            r.pci_bus = bus;
+            r.luid = std::format("{:016x}", i == 0 ? 0x182faull : 0x1aa96ull);
+            r.integrated = integ;
+            r.supported = true;
+            r.total_mib = total;
+            r.fit_mib = fit;
+            r.compute_units = cu;
+            r.uuid = std::format("{:08x}-0000-0000-0000-{:012x}", 0xd0 + i, 0xbeef00 + bus);
+            return r;
+        };
+        const std::vector<GpuRecord> host = {
+            rec(0, "AMD Radeon(TM) 8060S Graphics", "gfx1151", 196, true, (958 + 158) * 1024 / 10, 958 * 1024 / 10, 20),
+            rec(1, "AMD Radeon AI PRO R9700", "gfx1201", 71, false, 319 * 1024 / 10, 319 * 1024 / 10, 32)};
+        CHECK_EQ(defaultGpu(host).index, 0);  // the 8060S, not the R9700
+        for (const char* spec : {"", "pci:196:0", "pci:71:0"}) {
+            const std::vector<int> sel = selectGpus(host, spec);
+            CHECK_EQ(sel.size(), 1u);
+            const GpuRecord& chosen = host[sel[0]];
+            CHECK_EQ(chosen.arch, std::string(std::string_view(spec) == "pci:71:0" ? "gfx1201" : "gfx1151"));
+            CHECK_EQ(visibleDevicesValue({chosen.index}), std::to_string(chosen.index));  // one ordinal
+            GpuRecord seen = chosen;  // what HIP enumerates after HIP_VISIBLE_DEVICES: that GPU alone, renumbered 0
+            seen.index = 0;
+            const std::vector<GpuRecord> now = {seen};
+            CHECK(now.size() == sel.size() && sameGpu(now[0], chosen));
+            CHECK(!sameGpu(now[0], host[1 - sel[0]]));  // and the other GPU would not pass for it
+        }
     }
     // C3 (REVIEW-S8-719:65-69): the per-GPU term must count every process's pinned memory on that adapter, not only this
     // process's. 8060S at 96 GB (32407 MiB RAM), this server on the R9700 alone (n = 1, non-local budget 15435), another
