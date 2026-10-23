@@ -3280,6 +3280,51 @@ void testStartupFit() {
 }
 
 // ---------------------------------------------------------------------------
+// arch024-B0 (0.2.4 bug-fix line): REVIEW-S8-719 C3 / C5, REVIEW-S8-719-3 N3-1 / N3-2 / N3-4 / N3-6 (+ the N3-5 blind spot).
+// Each block is written from the review finding, before its fix (progress\arch024-B0.log has the before/after runs).
+void testB0SizingFollowUps() {
+    using namespace whirl;
+    constexpr std::uint64_t MiB = 1ull << 20, GiB = 1ull << 30;
+    const std::regex bad(R"(hipError|hip.*\b719\b|\b719\b.*hip|\| failed:|PAL failed|Failed PAL|result:-5|unspecified launch)",
+                         std::regex::icase);
+    // C5 (REVIEW-S8-719:77-80): a desktop R9700 host whose Ryzen iGPU (gfx1036, no WHIRL kernels) is a HIP GPU. Since 0.2.3
+    // (C1 root fix) the default is the R9700 and HIP_VISIBLE_DEVICES is set to it alone (gpu_restrict.cpp), so the pinned
+    // room sees n = 1 and the 32 GB host keeps v0.2.2.2's automatic 8192 (C5 feared n = 2 -> about 4096). Either order.
+    {
+        using namespace whirl::gpusel;
+        auto rec = [](int i, const char* name, const char* arch, int bus, bool integ, bool sup, std::uint64_t mib) {
+            GpuRecord r;
+            r.index = i;
+            r.name = name;
+            r.arch = arch;
+            r.pci_bus = bus;
+            r.luid = std::format("{:016x}", 0x2a000 + 0x1000 * i);
+            r.integrated = integ;
+            r.supported = sup;
+            r.total_mib = mib;
+            r.compute_units = integ ? 2 : 64;
+            r.uuid = std::format("{:08x}-0000-0000-0000-{:012x}", 0xc0 + i, 0xfeed00 + bus);
+            return r;
+        };
+        for (const bool igpu_first : {false, true}) {
+            const int ri = igpu_first ? 1 : 0;
+            std::vector<GpuRecord> g = {rec(ri, "AMD Radeon AI PRO R9700", "gfx1201", 0x03, false, true, 32624),
+                                        rec(1 - ri, "AMD Radeon(TM) Graphics", "gfx1036", 0x7c, true, false, 16300)};
+            if (igpu_first) std::swap(g[0], g[1]);
+            CHECK_EQ(defaultGpu(g).index, ri);
+            const std::vector<int> sel = selectGpus(g, "");
+            CHECK(sel.size() == 1 && g[sel[0]].arch == "gfx1201");
+            CHECK_EQ(visibleDevicesValue({g[sel[0]].index}), std::to_string(ri));  // one ordinal: HIP sees one GPU
+        }
+        startfit::PinnedState one;
+        one.total_phys = 32407 * MiB;
+        one.pinned_max = (1294 + 300) * MiB;
+        one.gpus = {{15435 * MiB, 1294 * MiB, 16203 * MiB}};
+        CHECK(!startfit::ramTierFit(8192, 20000 * MiB, 8192, false, startfit::pinnedRoomMb(one), 8192).has_value());
+    }
+}
+
+// ---------------------------------------------------------------------------
 // s8-719 root fix: GPU selection (--device / -dev list), the HIP_VISIBLE_DEVICES value, user variables,
 // the identity check, the probe protocol, the stable lock name, the device list (written from the bug
 // description and the owner / lead requirements of 2026-10-23: a process that uses one GPU must make HIP
@@ -3724,6 +3769,7 @@ int main(int argc, char** argv) {
     testPoolBudget();
     testPoolMargin();
     testStartupFit();
+    testB0SizingFollowUps();
     testVisionPoolReserve();
     testMemGovernor();
     testMemGovernorGrowOvershoot();
