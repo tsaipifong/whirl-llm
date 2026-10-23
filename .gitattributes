@@ -13,3 +13,5 @@ src/vision/stb_image.h -text
 *.ico binary
 *.bin binary
 *.dll binary
+# byte-exact: CPU pins compared byte for byte by tests/pins/check.ps1 (arch024-S0a)
+tests/pins/expected/** -text
