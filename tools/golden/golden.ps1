@@ -384,6 +384,16 @@ foreach ($mk in $Models) {
                         Select-Object -First 1 | ForEach-Object { $_.Line })
                 }
                 if ($devl.Count -gt 0) { Write-Host "      $name server $(($devl[0] -replace '^.*?(device \d+:)', '$1').Trim())" }
+                # arch024-S10 (PLAN M8): the case's server logs must hold no owner check violation ("E owner check:", a
+                # call into the engine state from another thread), and a case with no server log fails (the check must
+                # not pass vacuously). tools/gates/server_log_scan.ps1, owner set only: the WDDM lines stay release_gate's.
+                $scan = @(& (Join-Path $root "tools\gates\server_log_scan.ps1") -Dir $gw -Patterns owner *>&1 | ForEach-Object { "$_" })
+                $scanRc = $LASTEXITCODE
+                Write-Host "      $name $($scan[0])"
+                if ($scanRc -ne 0) {
+                    $scan | Select-Object -Skip 1 -First 5 | ForEach-Object { Write-Host "      $_" }
+                    if ($rc -eq 0) { $rc = 10 }
+                }
                 # s8-719: a failing server case keeps its work dir (server logs) for the diagnosis; a passing one is removed
                 if ($rc -ne 0 -or ($raw -match "hipError") -or $KeepServerWork) {
                     $raw | Where-Object { $_ -notlike "G *" } | Out-File -FilePath (Join-Path $Out "$mk`_${mode}_server.diag.txt") -Encoding utf8

@@ -13,6 +13,8 @@
 #   - record without a KL gate report, with one for another exe, or with a failing one: exit 2, nothing written
 #   - suite server (ARCH-1, fake_gate.cmd): record + check, a changed hash (exit 1), a failing in-run check or a
 #     run without "(ALL PASS)" (exit 2); exe / reference-set hashes printed; refhash follows the reference bytes
+#   - suite server log scan (arch024-S10, tools/gates/server_log_scan.ps1 owner set): a PASS line per case; an
+#     "E owner check:" line in the case's server log, or no server log at all, fails it (exit 2); a WDDM line does not
 #   - default suites (ARCH3, REVIEW-ARCH-D1 P3-7): dense skips suite server while swift runs it; a configured mmproj
 #     that is missing fails the swift server case and record writes nothing
 $ErrorActionPreference = "Stop"
@@ -124,13 +126,13 @@ try {
     #    a gate run without its ALL PASS line; the exe and reference-set hashes are printed; refhash follows the files
     $fakeGate = Join-Path $PSScriptRoot "fake_gate.cmd"
     function RunSrv([string]$action, [string]$root, [hashtable]$ge) {
-        foreach ($k in @("FAKEGATE_FAIL", "FAKEGATE_NOPASS", "FAKEGATE_H")) { [Environment]::SetEnvironmentVariable($k, $null) }
+        foreach ($k in @("FAKEGATE_FAIL", "FAKEGATE_NOPASS", "FAKEGATE_H", "FAKEGATE_NOLOG", "FAKEGATE_LOGLINE")) { [Environment]::SetEnvironmentVariable($k, $null) }
         foreach ($k in $ge.Keys) { [Environment]::SetEnvironmentVariable($k, $ge[$k]) }
         $env:WHIRL_GOLDEN_DENSE = $model
         $o = & pwsh -NoProfile -File $gate $action -Models dense -Modes precise -Suites server -Exe $fake -ServerExe $fake -GateExe $fakeGate `
             -GoldenRoot $root -Out (Join-Path $tmp "out") -KlReport $klGood 2>&1 | ForEach-Object { "$_" }
         $c = $LASTEXITCODE
-        foreach ($k in @("FAKEGATE_FAIL", "FAKEGATE_NOPASS", "FAKEGATE_H")) { [Environment]::SetEnvironmentVariable($k, $null) }
+        foreach ($k in @("FAKEGATE_FAIL", "FAKEGATE_NOPASS", "FAKEGATE_H", "FAKEGATE_NOLOG", "FAKEGATE_LOGLINE")) { [Environment]::SetEnvironmentVariable($k, $null) }
         return @{ rc = $c; out = $o }
     }
     $g7 = Join-Path $tmp "g7"
@@ -146,6 +148,16 @@ try {
     Expect "suite server: a failing in-run check of the gate is an error" $r 2
     $r = RunSrv "check" $g7 @{ FAKEGATE_NOPASS = "1" }
     Expect "suite server: a gate run without '(ALL PASS)' is an error" $r 2
+    # arch024-S10 (PLAN M8): the server log scan of each server case (tools/gates/server_log_scan.ps1, owner set)
+    $r = RunSrv "check" $g7 @{}
+    Expect "suite server: the case's server log is scanned (PASS line)" $r 0 { $r.out -match "dense/precise_server server log scan: PASS 1 server log\(s\)" }
+    $r = RunSrv "check" $g7 @{ FAKEGATE_LOGLINE = "2026-01-01 00:00:01.000 E owner check: PagePool::take called on thread 4242" }
+    Expect "suite server: an owner check line in a server log fails the case" $r 2 {
+        ($r.out -match "server log scan: FAIL 1 line\(s\) matched \[owner\]") -and ($r.out -match "whirl exit 10") }
+    $r = RunSrv "check" $g7 @{ FAKEGATE_NOLOG = "1" }
+    Expect "suite server: a case with no server log fails" $r 2 { $r.out -match "server log scan: FAIL no server log" }
+    $r = RunSrv "check" $g7 @{ FAKEGATE_LOGLINE = "2026-01-01 00:00:01.000 W GPU memory spill: 1.0 GiB" }
+    Expect "suite server: a WDDM line is not golden's (owner set only)" $r 0 { $r.out -match "server log scan: PASS" }
     $h1 = @(& pwsh -NoProfile -File $gate refhash -Models dense -Modes precise -Suites server -GoldenRoot $g7 2>&1 | ForEach-Object { "$_" })
     $rc1 = $LASTEXITCODE
     Add-Content (Join-Path $g7 "gfx1201\dense\precise_server.txt") "G srv.extra h=0"
