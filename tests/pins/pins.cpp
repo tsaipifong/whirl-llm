@@ -27,6 +27,13 @@
 //       prefix), two unrelated sessions that take both slots (the document's VRAM copy goes), the document again
 //       and its next turn: restores from the RAM tier (TierBridge restore half: the copies from the arena into the
 //       slot's pages and checkpoints, main part then tail) and the in-place spill after a restore.
+//   whirl-pins engine --gguf MODEL.gguf --kv f16|q8h|q4 --gov   (arch024-S9, recorded on 511271d before the move)
+//       the base requests with the memory governor on (an injected WDDM probe: usage = fixed + the NullBackend's device
+//       bytes, budget set by phase; every time rule of memgov::Config at 0), then: the budget drops to a quarter of the
+//       margin free while idle (free the idle prefix cache, re-allocate the KV pool smaller: govTick / govApply /
+//       govFreeCache / govResize / govDrain), a request in the smaller pool, the budget back (the pool grows back to
+//       its startup size: the episode ends), a last request. The governor status (/health "governor") after each phase
+//       is printed after the device sequence.
 // Output goes to stdout; tests/pins/check.ps1 compares it with the recorded file.
 
 #include "http_client.h"
@@ -41,6 +48,8 @@
 #include "whirl/tokenizer.h"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <fstream>
@@ -206,7 +215,7 @@ std::string chatBody(const std::string& messages) {
     return "{\"messages\":" + messages + ",\"max_tokens\":8,\"temperature\":0,\"stream\":false}";
 }
 
-int enginePin(const Tokenizer& tok, const std::string& kv, bool with_tier, bool with_restore) {
+int enginePin(const Tokenizer& tok, const std::string& kv, bool with_tier, bool with_restore, bool with_gov) {
     test::MockConfig mc;
     mc.parallel = 2;
     mc.slot_ctx = 16384;
@@ -260,6 +269,54 @@ int enginePin(const Tokenizer& tok, const std::string& kv, bool with_tier, bool 
         engine->attachTier(tr.get());
         tr->start(tc, lay, 7);
     }
+    // arch024-S9: --gov, the memory governor over an injected WDDM probe (deterministic: each budget change waits for
+    // the governor's action before the next request; idle samples every 20 ms)
+    constexpr std::uint64_t kFixed = 20000ull << 20;  // "the weights" (not allocated by the mock)
+    std::atomic<std::uint64_t> budget{0};
+    std::uint64_t local0 = 0, gM = 0;
+    std::uint32_t pool_start = 0;
+    if (with_gov) {
+        std::uint64_t per_tok = 0;
+        for (const KvArr& a : model->kvArrays()) per_tok += a.row;
+        pool_start = model->poolPages() * qwen35::kv_page;
+        gM = per_tok * pool_start / 2;
+        local0 = kFixed + null_ops.deviceBytes();
+        budget = local0 + gM;  // exactly the margin free, as the startup sizing leaves it
+        wddmwatch::Config vc;
+        vc.idle_sample_s = 0.02;
+        vc.governor = true;
+        engine->setVramProbe(
+            [&] {
+                wddmwatch::Sample x;
+                x.ok = true;
+                x.local_usage = kFixed + null_ops.deviceBytes();
+                x.local_budget = budget.load();
+                x.nonlocal_usage = 400ull << 20;
+                return x;
+            },
+            true, std::nullopt, vc, false, nullptr);
+        memgov::Config gc;
+        gc.per_tok = per_tok;
+        gc.page = qwen35::kv_page;
+        gc.pool_start = pool_start;
+        gc.pool_min = 4096;
+        gc.ctx = mc.slot_ctx;
+        gc.recover_s = 0.0;
+        gc.hold_s = 0.0;
+        gc.settle_s = 0.0;
+        gc.trust_s = 0.0;
+        gc.osc_window_s = 0.0;
+        engine->setGovernor(gc, [gM](std::uint64_t) { return gM; }, 0);
+    }
+    std::vector<std::string> gov_lines;
+    auto govWait = [&](const char* what, const std::string& needle) {
+        for (int i = 0; i < 500; ++i) {
+            if (engine->governorJson().find(needle) != std::string::npos) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        engine->runOnLoop([] {}, std::chrono::milliseconds(10000));
+        gov_lines.push_back(std::string("gov ") + what + ": " + engine->governorJson());
+    };
     auto http = std::make_unique<HttpServer>(*engine);
     http->start("127.0.0.1", 0);
     std::thread loop([&] { engine->runLoop(); });
@@ -326,6 +383,29 @@ int enginePin(const Tokenizer& tok, const std::string& kv, bool with_tier, bool 
         }
     }
     if (with_tier) engine->runOnLoop([] {}, std::chrono::milliseconds(10000));
+    if (with_gov) {
+        auto post = [&](const char* name, const std::string& msgs) {
+            ops.record(true, name);
+            const auto res = test::httpRequest("127.0.0.1", http->port(), "POST", "/v1/chat/completions", chatBody(msgs));
+            if (res.status != 200) {
+                std::printf("request %s: HTTP %d %s\n", name, res.status, res.err.c_str());
+                ++bad;
+            }
+        };
+        govWait("start", "\"shrinks\":0");
+        // the budget drops to a quarter of the margin free while every slot is idle: the pool is re-allocated smaller
+        ops.record(true, "gov-squeeze");
+        budget = local0 + gM / 4;
+        govWait("squeeze", "\"shrinks\":1");
+        post("gov-small", "[" + sys + ",{\"role\":\"user\",\"content\":\"Explain RAII in one sentence.\"}]");
+        govWait("small", "\"shrinks\":1");
+        // the budget back: the pool grows to its startup size, the episode ends
+        ops.record(true, "gov-recover");
+        budget = local0 + gM;
+        govWait("recover", "\"pool_tokens\":" + std::to_string(pool_start) + ",");
+        post("gov-after", "[" + sys + ",{\"role\":\"user\",\"content\":\"What is a mutex?\"}]");
+        govWait("after", "\"grows\":1");
+    }
     ops.record(true, "stop");
     engine->stop();
     loop.join();
@@ -353,6 +433,7 @@ int enginePin(const Tokenizer& tok, const std::string& kv, bool with_tier, bool 
         if (l.rfind("C ", 0) == 0) ++copies;
         if (l.rfind("M ", 0) == 0 || l.rfind("H ", 0) == 0) ++allocs;
     }
+    for (const std::string& l : gov_lines) std::printf("%s\n", l.c_str());
     const bool clean = null_ops.clean();
     std::printf("kv %s: allocations %zu copies %zu errors %d backend %s\n", kv.c_str(), allocs, copies, bad, clean ? "clean" : "LEAK");
     return bad == 0 && clean && copies > 0 ? 0 : 1;
@@ -367,7 +448,7 @@ int main(int argc, char** argv) {
     }
     const std::string cmd = argv[1];
     std::string gguf_path, req_path, kv = "f16";
-    bool with_tier = false, with_restore = false;
+    bool with_tier = false, with_restore = false, with_gov = false;
     for (int i = 2; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--gguf" && i + 1 < argc) gguf_path = argv[++i];
@@ -375,6 +456,7 @@ int main(int argc, char** argv) {
         else if (a == "--kv" && i + 1 < argc) kv = argv[++i];
         else if (a == "--tier") with_tier = true;
         else if (a == "--restore") with_tier = with_restore = true;
+        else if (a == "--gov") with_gov = true;
         else {
             std::fprintf(stderr, "unknown argument %s\n", a.c_str());
             return 2;
@@ -398,7 +480,7 @@ int main(int argc, char** argv) {
         if (req_path.empty()) return 2;
         return tokensPin(*file, *tok, req_path);
     }
-    if (cmd == "engine") return enginePin(*tok, kv, with_tier, with_restore);
+    if (cmd == "engine") return enginePin(*tok, kv, with_tier, with_restore, with_gov);
     std::fprintf(stderr, "unknown command %s\n", cmd.c_str());
     return 2;
 }
