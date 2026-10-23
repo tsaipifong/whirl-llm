@@ -18,6 +18,8 @@ What is declared, not derived (and says so in the JSON, "declared": true):
   * the root functions of each path, the server-gate suites' paths (the gate drives a server over HTTP, so
     there is no call edge), the path -> release-matrix metric, and the model-type narrowing name rules.
 --check: rebuild in memory and exit 1 if the committed map differs (stale map).
+Exit 1 in every mode (map not written) when a declared root (PATHS, CLI_GATES) resolves to no function
+(arch024 A9); tools/impact/impact_build_test.py tests the block and pass paths.
 """
 from __future__ import annotations
 
@@ -606,6 +608,15 @@ def main():
     a = ap.parse_args()
     out_path = a.out or os.path.join(a.root, "tools", "impact_map.json")
     m = build(a.root)
+    # arch024 A9: a root (path or CLI gate) that resolves to nothing means a declared path lost its entry point
+    # (renamed / moved / deleted function): the map would silently drop that path's functions and tests. Every mode
+    # fails with exit 1 and nothing is written, so the step that moved the symbol must update the roots.
+    if m["errors"]:
+        for e in m["errors"]:
+            print("impact_build: ERROR " + e, file=sys.stderr)
+        print(f"impact_build: {len(m['errors'])} error(s); map not written. Update the roots in tools/impact/impact_build.py "
+              "(PATHS / CLI_GATES) in the same commit that renames, moves or deletes the function.", file=sys.stderr)
+        return 1
     if a.why:
         e, nd, res = DEBUG["edges"], DEBUG["nodes"], DEBUG["resolve"]
         src, dst = res(a.why[0]), set(res(a.why[1]))
@@ -627,9 +638,6 @@ def main():
             x = prev[x]
         print("\n  -> ".join(reversed(ch)))
         return 0
-    if m["errors"]:
-        for e in m["errors"]:
-            print("impact_build: ERROR " + e, file=sys.stderr)
     text = json.dumps(m, separators=(",", ":"), ensure_ascii=False) + "\n"
     if a.check:
         try:
@@ -646,8 +654,8 @@ def main():
         fo.write(text)
     s = m["stats"]
     print(f"impact_build: {out_path}: {s['files_scanned']} files, {s['functions']} functions, {s['edges']} call edges, "
-          f"{s['tests']} tests, {s['hip_files']} .hip files, {s['kernel_fields']} kernel-table fields, {len(m['errors'])} error(s)")
-    return 2 if m["errors"] else 0
+          f"{s['tests']} tests, {s['hip_files']} .hip files, {s['kernel_fields']} kernel-table fields, 0 error(s)")
+    return 0
 
 
 if __name__ == "__main__":
