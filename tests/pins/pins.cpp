@@ -18,6 +18,10 @@
 //       mock's K / V rows are its own 24 / 8 bytes). A fixed sequence of chat requests (shared system prompt, second
 //       user, multi-turn continuation) is sent one at a time; no tier (no IO thread), so the order is fixed. The system prompt is above EngineOptions::sys_min (2048 tokens), so a
 //       shared prefix entry is made and attached (page copies).
+//   whirl-pins engine --gguf MODEL.gguf --kv f16|q8h|q4 --tier   (arch024-S6b, recorded on 906e367 before the move)
+//       the same with a 64 MiB RAM tier (min 256 tokens, no SSD tier) and three more requests (a long session, its
+//       compacted form and the next turn of that): the spill copies into the arena (TierBridge span sequence, M5), the tier's allocations, and a
+//       last line with the tier counters (spills, superseded, demoted).
 // Output goes to stdout; tests/pins/check.ps1 compares it with the recorded file.
 
 #include "http_client.h"
@@ -197,7 +201,7 @@ std::string chatBody(const std::string& messages) {
     return "{\"messages\":" + messages + ",\"max_tokens\":8,\"temperature\":0,\"stream\":false}";
 }
 
-int enginePin(const Tokenizer& tok, const std::string& kv) {
+int enginePin(const Tokenizer& tok, const std::string& kv, bool with_tier) {
     test::MockConfig mc;
     mc.parallel = 2;
     mc.slot_ctx = 16384;
@@ -226,6 +230,31 @@ int enginePin(const Tokenizer& tok, const std::string& kv) {
     engine->allocState();
     ops.record(true, "initPool");
     engine->initPool();
+    // arch024-S6b: --tier adds a RAM tier (no SSD tier, so the IO thread copies nothing): the spill copies (span
+    // sequence of ckSpans / pageSpans into the arena, M5 TierBridge) and the tier's own allocations are pinned too
+    std::unique_ptr<tier::Tier> tr;
+    if (with_tier) {
+        ops.record(true, "tier");
+        tr = tier::Tier::create(ops, 64ull << 20, 42, 0);
+        tier::Config tc;
+        tc.ram_bytes = 64ull << 20;
+        tc.min_tokens = 256;
+        tc.ssd_delay_ms = 0;
+        tier::Layout lay;
+        const auto& cfg = model->cfg();
+        std::uint64_t n_gdn = 0;
+        for (auto p : model->ssmState())
+            if (p) ++n_gdn;
+        lay.ck_bytes = n_gdn * (model->convBytes() + model->ssmBytes()) + static_cast<std::uint64_t>(cfg.n_embd) * 4 +
+                       static_cast<std::uint64_t>(cfg.n_vocab) * 4;
+        std::uint64_t per_tok = 0;
+        for (const KvArr& a : model->kvArrays()) per_tok += a.row;
+        lay.page_bytes = per_tok * qwen35::kv_page;
+        lay.page_tokens = qwen35::kv_page;
+        lay.tok_cap = mc.slot_ctx;
+        engine->attachTier(tr.get());
+        tr->start(tc, lay, 7);
+    }
     auto http = std::make_unique<HttpServer>(*engine);
     http->start("127.0.0.1", 0);
     std::thread loop([&] { engine->runLoop(); });
@@ -243,8 +272,26 @@ int enginePin(const Tokenizer& tok, const std::string& kv) {
         {"short", "[" + sys + ",{\"role\":\"user\",\"content\":\"hi\"}]"},
         {"sys+u3", "[" + sys2 + ",{\"role\":\"user\",\"content\":\"What is a mutex?\"}]"},
     };
+    // --tier: three more requests after these: a long session (an abandoned tail over SupersedeRule::min_tail), its
+    // compacted form (same system prompt and first user message, much shorter) and the next turn of that, so the superseded-session rule marks the old entry on the first
+    // spill and applies (cut / demote) on the second (CACHE-1)
+    std::vector<std::pair<const char*, std::string>> all = reqs;
+    if (with_tier) {
+        const std::string u1 = "{\"role\":\"user\",\"content\":\"請用一句話說明 Python 的 list comprehension。\"}";
+        std::string longa;
+        for (int i = 0; i < 700; ++i) longa += " Step " + std::to_string(i) + ": the list grows by one item here.";
+        all.push_back({"long", "[" + sys2 + "," + u1 + ",{\"role\":\"assistant\",\"content\":\"" + longa + "\"},"
+                               "{\"role\":\"user\",\"content\":\"繼續。\"}]"});
+        all.push_back({"compact", "[" + sys2 + "," + u1 + ",{\"role\":\"assistant\",\"content\":\"(summary) list comprehension.\"},"
+                                  "{\"role\":\"user\",\"content\":\"繼續。\"}]"});
+        all.push_back({"compact+turn2", "[" + sys2 + "," + u1 + ",{\"role\":\"assistant\",\"content\":\"(summary) list comprehension.\"},"
+                                        "{\"role\":\"user\",\"content\":\"繼續。\"},{\"role\":\"assistant\",\"content\":\"OK.\"},"
+                                        "{\"role\":\"user\",\"content\":\"再一個。\"}]"});
+    }
     int bad = 0;
-    for (const auto& [name, msgs] : reqs) {
+    for (const auto& [name, msgs] : all) {
+        // --tier: the previous request's spill (finishJob, after the reply) is done before the next phase mark
+        if (with_tier) engine->runOnLoop([] {}, std::chrono::milliseconds(10000));
         ops.record(true, name);
         const auto res = test::httpRequest("127.0.0.1", http->port(), "POST", "/v1/chat/completions", chatBody(msgs));
         if (res.status != 200) {
@@ -252,11 +299,23 @@ int enginePin(const Tokenizer& tok, const std::string& kv) {
             ++bad;
         }
     }
+    if (with_tier) engine->runOnLoop([] {}, std::chrono::milliseconds(10000));
     ops.record(true, "stop");
     engine->stop();
     loop.join();
     http->stop();
     http.reset();
+    if (tr) {
+        const tier::Stats& ts = tr->stats;
+        std::printf("tier: spills %llu spill_bytes %llu restores_ram %llu restore_bytes %llu superseded %llu demoted %llu entries %zu\n",
+                    static_cast<unsigned long long>(ts.spills), static_cast<unsigned long long>(ts.spill_bytes),
+                    static_cast<unsigned long long>(ts.restores_ram), static_cast<unsigned long long>(ts.restore_bytes),
+                    static_cast<unsigned long long>(ts.superseded), static_cast<unsigned long long>(ts.demoted),
+                    tr->countRam());
+        engine->attachTier(nullptr);
+        ops.record(true, "~Tier");
+        tr.reset();
+    }
     ops.record(true, "~Engine");
     engine.reset();
     ops.record(true, "~MockModel");
@@ -282,11 +341,13 @@ int main(int argc, char** argv) {
     }
     const std::string cmd = argv[1];
     std::string gguf_path, req_path, kv = "f16";
+    bool with_tier = false;
     for (int i = 2; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--gguf" && i + 1 < argc) gguf_path = argv[++i];
         else if (a == "--requests" && i + 1 < argc) req_path = argv[++i];
         else if (a == "--kv" && i + 1 < argc) kv = argv[++i];
+        else if (a == "--tier") with_tier = true;
         else {
             std::fprintf(stderr, "unknown argument %s\n", a.c_str());
             return 2;
@@ -310,7 +371,7 @@ int main(int argc, char** argv) {
         if (req_path.empty()) return 2;
         return tokensPin(*file, *tok, req_path);
     }
-    if (cmd == "engine") return enginePin(*tok, kv);
+    if (cmd == "engine") return enginePin(*tok, kv, with_tier);
     std::fprintf(stderr, "unknown command %s\n", cmd.c_str());
     return 2;
 }

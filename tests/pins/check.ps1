@@ -1,5 +1,6 @@
 # arch024-S0a CPU pins (PLAN v3 (b) P-cpu): run whirl-pins and whirl-startup-replay and compare their output with the
 # files recorded on the B0 base (06a1540) in tests/pins/expected, byte for byte. CPU only.
+# engine_*_tier (arch024-S6b: the spill span sequence through a RAM tier) were recorded on 906e367, before the TierBridge move.
 # SPDX-License-Identifier: Apache-2.0
 #   pwsh -NoProfile -File tests/pins/check.ps1 -Bin <build\Release> -Swift <gguf> -Moe <gguf> [-Out <dir>] [-Record]
 # -Record writes the outputs into tests/pins/expected instead of comparing (approval style: only on the base, by hand).
@@ -21,6 +22,9 @@ $runs = @(
     @{ name = "engine_f16"; exe = "whirl-pins"; args = @("engine", "--gguf", $Swift, "--kv", "f16") },
     @{ name = "engine_q8h"; exe = "whirl-pins"; args = @("engine", "--gguf", $Swift, "--kv", "q8h") },
     @{ name = "engine_q4"; exe = "whirl-pins"; args = @("engine", "--gguf", $Swift, "--kv", "q4") },
+    @{ name = "engine_f16_tier"; exe = "whirl-pins"; args = @("engine", "--gguf", $Swift, "--kv", "f16", "--tier") },
+    @{ name = "engine_q8h_tier"; exe = "whirl-pins"; args = @("engine", "--gguf", $Swift, "--kv", "q8h", "--tier") },
+    @{ name = "engine_q4_tier"; exe = "whirl-pins"; args = @("engine", "--gguf", $Swift, "--kv", "q4", "--tier") },
     @{ name = "startup_table"; exe = "whirl-startup-replay"; args = @("--table", (Join-Path $here "startup_table.txt")) }
 )
 $bad = 0
