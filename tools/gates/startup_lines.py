@@ -202,6 +202,32 @@ def selftest(exe: str) -> int:
         text = "\n".join(ls) + "\n"
         return mutate(text) if mutate else text
 
+    # the KV pool line and the issue-#5 re-check (server_main: "kv pool check: ... -> shrinking the KV pool from A to
+    # B tokens", one line per round, up to 3 rounds, measured WDDM reads that are not in the inputs line)
+    pool_in = base_in + (" pool.avail=10578939904 pool.per_token=36992 pool.req=- pool.pool_explicit=0 pool.slot_ctx=131072"
+                         " pool.slot_explicit=0 pool.page=256 pool.cap=2097152 pool.mode=balance pool.fmt=q8h pool.alt=%")
+
+    def pool_log(shrinks: list, final=None, first_from=None) -> str:
+        """log_for(pool_in) plus the pool lines: shrinks = the 'to' value of each re-check round (in tokens below
+        the replay's pool); final = the 'kv pool:' value (default: the last 'to'); first_from = the first round's
+        'from' (default: the replay's pool)."""
+        p = int(groups(replay_lines(exe, pool_in))["pool"]["pool"])
+        ls = []
+        have = p if first_from is None else first_from
+        for to in shrinks:
+            ls.append(f"2026-10-24 00:21:10.389 W kv pool check: WDDM budget 31.02 GiB now (31.02 GiB when the pool was "
+                      f"sized), local 28.97 GiB + margin 2101 MiB is 0.00 GiB over -> shrinking the KV pool from {have} to "
+                      f"{p - to} tokens (9.85 -> 9.84 GiB) so WHIRL stays in VRAM")
+            have = p - to
+        if shrinks:
+            ls.append(f"2026-10-24 00:21:10.840 I kv pool check: WDDM budget 31.02 GiB now (31.02 GiB when the pool was "
+                      f"sized), local 28.91 GiB + margin 2101 MiB fits (KV pool {have} tokens)")
+        n = have if final is None else final
+        ls.append(f"2026-10-24 00:21:10.840 I kv pool: {n} tokens ({n // 256} pages of 256), q8h KV, 36.1 KiB/token, "
+                  f"shared by 4 slots; max 131072 tokens per request")
+        return log_for(pool_in) + "\n".join(ls) + "\n"
+
+    p0 = int(groups(replay_lines(exe, pool_in))["pool"]["pool"])
     b_changed = base_in.replace("pin.g0.adapter_shared=1575485440", "pin.g0.adapter_shared=9663676416").replace(
         "pin.pinned_max=1575485440", "pinned_max_placeholder")
     b_changed = b_changed.replace("pinned_max_placeholder", "pin.pinned_max=9663676416")
@@ -215,6 +241,16 @@ def selftest(exe: str) -> int:
         ("block: a (B) value changed but the (C) lines kept", good.replace(base_in, b_changed), 1),
         ("block: no startup inputs line", "\n".join(l for l in good.splitlines() if "startup inputs:" not in l), 1),
         ("block: malformed inputs line", good.replace("ram.n_ck=8", "ram.n_ck 8"), 1),
+        ("pass: kv pool line = the replay (no re-check)", pool_log([]), 0),
+        ("block: kv pool line one page off, no re-check line", pool_log([], final=p0 - 256), 1),
+        ("pass: issue-#5 re-check shrank the replay's pool by one page (S3 run, 11 logs)", pool_log([256]), 0),
+        ("pass: re-check in two rounds, chain ends at the kv pool line", pool_log([256, 768]), 0),
+        ("block: re-check started from a pool the replay did not decide", pool_log([256], first_from=p0 + 256), 1),
+        ("block: kv pool line differs from the re-check's last value", pool_log([256], final=p0 - 512), 1),
+        ("block: re-check chain broken (round 2 starts elsewhere)",
+         pool_log([256, 512]).replace(f"from {p0 - 256} to {p0 - 512}", f"from {p0 - 1024} to {p0 - 512}"), 1),
+        ("block: re-check 'shrank' to a larger pool", pool_log([-256]), 1),
+        ("block: re-check to a size that is not whole pages", pool_log([100]), 1),
     ]
     bad = 0
     for name, log, want in cases:
