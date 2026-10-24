@@ -7233,6 +7233,72 @@ void testRevS5aTurnsProbe() {
     }
 }
 
+
+// review round 2 probes (print only): (a) dropContained after a lost lineage (failed restore), then the same
+// conversation's turn 2 is regenerated with another last message: which entry / checkpoint serves it?
+// (b) two different sessions on one slot with the same long document: is the shared LCP copy still made?
+void testRevS5aR2Probe() {
+    using namespace rev5a;
+    for (const bool precise : {false, true}) {
+        {
+            ServerSetup su = baseSetup();
+            su.mc.parallel = 1;
+            su.mc.slot_ctx = 8192;
+            su.mc.pool_tokens = 4096;
+            su.tier = true;
+            su.tier_min = 512;
+            su.eo.n_ck = 3;
+            su.eo.cold_resume = precise;
+            TestServer srv(su);
+            g_log.clear();
+            const auto pa = makePrompt(3000, 7601), pb = makePrompt(3200, 7602);
+            const auto outa = srv.model().greedyReference(pa, 40, true);
+            CHECK_EQ(completionText(srv.post("/v1/completions", completionBody(pa, 40))), decode(outa));
+            CHECK_EQ(completionText(srv.post("/v1/completions", completionBody(pb, 40))), decode(srv.model().greedyReference(pb, 40, true)));
+            const auto pa2 = next(pa, outa, 300, 7603);
+            srv.ops().failHostToDevCopy(1);
+            auto r2 = srv.post("/v1/completions", completionBody(pa2, 40));
+            srv.ops().failHostToDevCopy(0);
+            CHECK_EQ(completionText(r2), decode(srv.model().greedyReference(pa2, 40, true)));
+            srv.onEngine([] {});
+            CHECK_EQ(completionText(srv.post("/v1/completions", completionBody(pb, 40))), decode(srv.model().greedyReference(pb, 40, true)));
+            srv.onEngine([] {});
+            // regenerate turn 2 with another last user message (diverges right after turn 1's answer)
+            const auto pa2b = next(pa, outa, 300, 7604);
+            auto r3 = srv.post("/v1/completions", completionBody(pa2b, 40));
+            CHECK_EQ(completionText(r3), decode(srv.model().greedyReference(pa2b, 40, true)));
+            std::fprintf(stderr, "  (rev5a r2 regen-after-lost-lineage precise %d: turn-1 len %zu, regen cached %llu, contained-drops %zu)\n",
+                         precise ? 1 : 0, pa.size() + outa.size(), static_cast<unsigned long long>(cachedTokens(r3)),
+                         g_log.count("is contained in the new entry"));
+            CHECK_EQ(srv.model().poison(), 0u);
+        }
+        {
+            ServerSetup su = baseSetup();
+            su.mc.parallel = 1;
+            su.mc.slot_ctx = 8192;
+            su.mc.pool_tokens = 8192;
+            su.tier = true;
+            su.tier_min = 512;
+            su.eo.n_ck = 3;
+            su.eo.cold_resume = precise;
+            TestServer srv(su);
+            g_log.clear();
+            const auto doc = makePrompt(6000, 7701);
+            std::string cs;
+            for (std::uint64_t q = 0; q < 3; ++q) {
+                const auto p = makePrompt(static_cast<std::uint32_t>(6090 + 10 * q), 7702 + q, doc);
+                auto r = srv.post("/v1/completions", completionBody(p, 24));
+                CHECK_EQ(completionText(r), decode(srv.model().greedyReference(p, 24, true)));
+                srv.onEngine([] {});
+                cs += std::format(" q{}:{}", q + 1, cachedTokens(r));
+            }
+            std::fprintf(stderr, "  (rev5a r2 same-doc sessions precise %d:%s; 'common prefix with an earlier session' %zu, shared spills %zu)\n",
+                         precise ? 1 : 0, cs.c_str(), g_log.count("common prefix with an earlier session"), g_log.count("shared prefix: spill"));
+            CHECK_EQ(srv.model().poison(), 0u);
+        }
+    }
+}
+
 int main(int argc, char** argv) {
     whirl::test::clearWhirlEnv();  // FR-TEST P3-11
     // arch024 M8: the test program is the "test build": an owner check violation throws std::logic_error; every test
@@ -7308,6 +7374,7 @@ int main(int argc, char** argv) {
         {"rev5a_guards", testRevS5aGuards},
         {"rev5a_long_probe", testRevS5aLongAnswerProbe},
         {"rev5a_turns_probe", testRevS5aTurnsProbe},
+        {"rev5a_r2_probe", testRevS5aR2Probe},
         {"vision_split_engine", testVisionSplitEngine},
         {"compat_endpoints", testCompatEndpoints},
         {"http_limits", testHttpLimits},
