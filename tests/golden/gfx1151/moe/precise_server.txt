@@ -9,7 +9,7 @@ G srv.sessA.t1 status=200 n=32 prompt=3716 cached=0 finish=length h=eb110ead95f1
 G srv.sessB.t1 status=200 n=29 prompt=3724 cached=0 finish=stop h=3947798d5f0d726a
 G srv.sessA.t2.ram status=200 n=32 prompt=3773 cached=3072 finish=length h=07a49b3de7602a29
 G srv.sessB.t2 status=200 n=32 prompt=3778 cached=3072 finish=length h=7b30be85b27d158d
-G srv.sessA.t2.ssd status=200 n=32 prompt=3773 cached=3072 finish=length h=07a49b3de7602a29
+G srv.sessA.t2.ssd status=200 n=32 prompt=3773 cached=3773 finish=length h=07a49b3de7602a29
 G srv.sessA.t2.cold status=200 n=32 prompt=3773 cached=0 finish=length h=07a49b3de7602a29
 G srv.solo0 status=200 n=48 prompt=28 cached=0 finish=length h=347e00608dd48833
 G srv.solo1 status=200 n=48 prompt=36 cached=0 finish=length h=b3e860c50659caad
