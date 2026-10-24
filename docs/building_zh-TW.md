@@ -76,7 +76,7 @@ build\Release\whirl.exe seqtest MODEL.gguf
 |---|---|---|
 | `WHIRL_TEST_GGUF` | `whirl-server-tests`（只用其 tokenizer，模型本身是 mock）、`whirl-kernel-test`（`--q4` 的備援） | 無：`whirl-server-tests` 需要 `--gguf` 或此變數 |
 | `WHIRL_TEST_Q4`、`WHIRL_TEST_MX`、`WHIRL_TEST_MOE`、`WHIRL_TEST_MOEMX` | `whirl-kernel-test`（等同 `--q4` / `--mx` / `--moe` / `--moemx`：Qwen3.8-27B Q4_K_M、Qwen3.8-27B MXFP4、Ornith-1.5-35B-A3B Q4_K_M、Ornith-1.5-35B-A3B MXFP4） | 未設定：該家族改用合成資料，需要模型張量的檢查標為略過 |
-| `WHIRL_TEST_TMP` | `whirl-server-tests`、`whirl-tier-tests`（SSD 層的暫存目錄） | `%TEMP%\whirl-tests` |
+| `WHIRL_TEST_TMP` | `whirl-server-tests`、`whirl-tier-tests`（SSD 層的暫存目錄；照原樣使用、不會刪除） | `%TEMP%\whirl-tests\<pid>`（每個測試行程各自一個，結束時刪除） |
 | `WHIRL_GATE_TEXT_ROOT` | `whirl-server-gate`（測試文字：llama.cpp 原始碼目錄的根，只當資料讀取） | 無（必填） |
 | `WHIRL_GATE_WORK` | `whirl-server-gate`（等同 `--work`：記錄檔、SSD 目錄） | `%TEMP%\whirl-tests\gate` |
 | `WHIRL_GATE_IMAGES` | `whirl-server-gate` 的 `vis` suite（等同 `--images`：`shapes.png`、`dialog.png`、`s1080.png`） | 無 |

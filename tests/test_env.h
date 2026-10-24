@@ -6,9 +6,12 @@
 #pragma once
 
 #include <cstdio>
+#include <cstdlib>
 #include <cwchar>
 #include <cwctype>
+#include <filesystem>
 #include <initializer_list>
+#include <system_error>
 #include <string>
 #include <vector>
 
@@ -55,6 +58,46 @@ inline std::vector<std::wstring> clearWhirlEnv(std::initializer_list<const wchar
     }
 #endif
     return cleared;
+}
+
+// arch024-S11c: the base folder of a test's scratch files (SSD tier folders etc.). WHIRL_TEST_TMP when set: used as
+// given and never removed (a gate or runner owns it). Else %TEMP%\whirl-tests\<pid>: private to this process (agents
+// ran test executables at the same time and collided in the shared %TEMP%\whirl-tests, S7 / S11 HANDOFFs), emptied
+// first (a dead process with the same pid) and removed when the process exits normally (static destruction).
+inline std::filesystem::path testTmpBase() {
+    namespace fs = std::filesystem;
+    struct Owned {
+        fs::path p;
+        bool remove = false;
+        ~Owned() {
+            if (!remove) return;
+            std::error_code ec;
+            fs::remove_all(p, ec);
+        }
+    };
+    // the explicit folder, or empty for the private default
+    static const fs::path given = []() -> fs::path {
+#ifdef _WIN32
+        if (const wchar_t* t = _wgetenv(L"WHIRL_TEST_TMP"); t && *t) return fs::path(t);
+#else
+        if (const char* t = std::getenv("WHIRL_TEST_TMP"); t && *t) return fs::path(t);
+#endif
+        return {};
+    }();
+    if (!given.empty()) return given;
+    static const Owned base{[] {
+#ifdef _WIN32
+        const unsigned long pid = GetCurrentProcessId();
+#else
+        const unsigned long pid = 0;
+#endif
+        const fs::path p = fs::temp_directory_path() / L"whirl-tests" / std::to_wstring(pid);
+        std::error_code ec;
+        fs::remove_all(p, ec);
+        fs::create_directories(p, ec);
+        return p;
+    }(), true};
+    return base.p;
 }
 
 }  // namespace whirl::test

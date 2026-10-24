@@ -2148,9 +2148,7 @@ void testDFlashTrimRing() {
 // host tier restore with DFlash2: the restored session has KV and state but no drafter rows (reset
 // at the restore point); outputs equal the reference and no stale row reaches a draft
 void testDFlashTier() {
-    std::filesystem::path base;
-    if (const char* t = std::getenv("WHIRL_TEST_TMP"); t && *t) base = std::filesystem::path(widen(t));
-    else base = std::filesystem::temp_directory_path() / L"whirl-tests";
+    const std::filesystem::path base = whirl::test::testTmpBase();  // WHIRL_TEST_TMP, else %TEMP%\whirl-tests\<pid>
     const std::string dir = narrow((base / L"server_test_dflash_ssd").wstring());
     std::error_code ec;
     std::filesystem::remove_all(dir, ec);
@@ -2583,10 +2581,8 @@ void testSharedSystemPrompt() {
 // host tiers: an evicted session is restored from RAM, then (new engine on
 // the same SSD directory) from SSD; outputs equal the cold result
 void testTiers() {
-    // WHIRL_TEST_TMP, else %TEMP%\whirl-tests; this test uses <base>\server_test_ssd
-    std::filesystem::path base;
-    if (const char* t = std::getenv("WHIRL_TEST_TMP"); t && *t) base = std::filesystem::path(widen(t));
-    else base = std::filesystem::temp_directory_path() / L"whirl-tests";
+    // this test uses <base>\server_test_ssd
+    const std::filesystem::path base = whirl::test::testTmpBase();  // WHIRL_TEST_TMP, else %TEMP%\whirl-tests\<pid>
     const std::string dir = narrow((base / L"server_test_ssd").wstring());
     std::error_code ec;
     std::filesystem::remove_all(dir, ec);
@@ -2785,9 +2781,7 @@ struct ChatBuild {
 // entry reused and RAM pressure writes it to SSD (async) instead of dropping it; one-shot sessions are still
 // never written while running, and with enough RAM nothing is written while running.
 void testShutdownEvictSys() {
-    std::filesystem::path base;
-    if (const char* t = std::getenv("WHIRL_TEST_TMP"); t && *t) base = std::filesystem::path(widen(t));
-    else base = std::filesystem::temp_directory_path() / L"whirl-tests";
+    const std::filesystem::path base = whirl::test::testTmpBase();  // WHIRL_TEST_TMP, else %TEMP%\whirl-tests\<pid>
     const std::string dir = narrow((base / L"server_test_ssd_evict").wstring());
     const ChatBuild cb;
     const std::uint64_t ram_small = []() -> std::uint64_t {
@@ -2900,9 +2894,7 @@ public:
 };
 
 void testIdleWrite() {
-    std::filesystem::path base;
-    if (const char* t = std::getenv("WHIRL_TEST_TMP"); t && *t) base = std::filesystem::path(widen(t));
-    else base = std::filesystem::temp_directory_path() / L"whirl-tests";
+    const std::filesystem::path base = whirl::test::testTmpBase();  // WHIRL_TEST_TMP, else %TEMP%\whirl-tests\<pid>
     const std::string dir = narrow((base / L"server_test_ssd_idle").wstring());
     std::error_code ec;
     std::filesystem::remove_all(dir, ec);
@@ -3032,9 +3024,7 @@ void testIdleWrite() {
 // end to end: one one-shot prompt + a 2-turn session, idle write off; on the graceful stop only the session is
 // written; the restart restores it from SSD and the one-shot prompt is a cold prefill (exact output both times).
 void testCloseReused() {
-    std::filesystem::path base;
-    if (const char* t = std::getenv("WHIRL_TEST_TMP"); t && *t) base = std::filesystem::path(widen(t));
-    else base = std::filesystem::temp_directory_path() / L"whirl-tests";
+    const std::filesystem::path base = whirl::test::testTmpBase();  // WHIRL_TEST_TMP, else %TEMP%\whirl-tests\<pid>
     const std::string dir = narrow((base / L"server_test_ssd_close").wstring());
     std::error_code ec;
     std::filesystem::remove_all(dir, ec);
@@ -3221,9 +3211,7 @@ void testSupersedeCompressCuts() {
 // fails the restore cleanly through the engine: the request is prefilled cold (same output), no entry
 // stays pinned, nothing stays loading / busy, and the entry restores again afterwards.
 void testRestoreThrows() {
-    std::filesystem::path base;
-    if (const char* t = std::getenv("WHIRL_TEST_TMP"); t && *t) base = std::filesystem::path(widen(t));
-    else base = std::filesystem::temp_directory_path() / L"whirl-tests";
+    const std::filesystem::path base = whirl::test::testTmpBase();  // WHIRL_TEST_TMP, else %TEMP%\whirl-tests\<pid>
     const std::string dir = narrow((base / L"server_test_ssd_throw").wstring());
     std::error_code ec;
     std::filesystem::remove_all(dir, ec);
@@ -4683,9 +4671,7 @@ void testCkptRestoreFail() {
 // job) does. Spills and SSD writes on one server, an SSD restore (a read job with a fence) after a restart.
 void testTierIoThreadCalls() {
     using Call = NullBackend::Call;
-    std::filesystem::path base;
-    if (const char* t = std::getenv("WHIRL_TEST_TMP"); t && *t) base = std::filesystem::path(widen(t));
-    else base = std::filesystem::temp_directory_path() / L"whirl-tests";
+    const std::filesystem::path base = whirl::test::testTmpBase();  // WHIRL_TEST_TMP, else %TEMP%\whirl-tests\<pid>
     const std::string dir = narrow((base / L"server_test_ssd_io").wstring());
     std::error_code ec;
     std::filesystem::remove_all(dir, ec);
@@ -6714,6 +6700,20 @@ void testHttpFakeEngine() {
     CHECK_EQ(api.building_.load(), 0);  // every connection's beginBuilding has its endBuilding
 }
 
+// arch024-S11c: test scratch folders are private to the process unless WHIRL_TEST_TMP names one
+// (%TEMP%\whirl-tests was shared: concurrent agents' test runs collided)
+void testTestTmpBase() {
+    const std::filesystem::path b = whirl::test::testTmpBase();
+    CHECK(b == whirl::test::testTmpBase());  // one folder per process
+    if (const char* t = std::getenv("WHIRL_TEST_TMP"); t && *t) {
+        CHECK(b == std::filesystem::path(widen(t)));
+    } else {
+        CHECK_EQ(b.filename().wstring(), std::to_wstring(GetCurrentProcessId()));
+        CHECK_EQ(b.parent_path().filename().wstring(), std::wstring(L"whirl-tests"));
+        CHECK(std::filesystem::is_directory(b));
+    }
+}
+
 int main(int argc, char** argv) {
     whirl::test::clearWhirlEnv();  // FR-TEST P3-11
     // arch024 M8: the test program is the "test build": an owner check violation throws std::logic_error; every test
@@ -6776,6 +6776,7 @@ int main(int argc, char** argv) {
         {"env_matrix", testEnvMatrix},
         {"ckpt_engine_teardown", testCkptEngineTeardown},
         {"tier_io_thread_calls", testTierIoThreadCalls},
+        {"test_tmp_base", testTestTmpBase},
         {"page_pool", testPagePool},
         {"tier_bridge_spill", testTierBridgeSpill},
         {"tier_bridge_supersede", testTierBridgeSupersede},

@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // Usage: whirl-tier-tests [temp dir for the SSD tier]
-//   (default: %WHIRL_TEST_TMP%\tier_test_tmp, else %TEMP%\whirl-tests\tier_test_tmp)
+//   (default: %WHIRL_TEST_TMP%\tier_test_tmp, else %TEMP%\whirl-tests\<pid>\tier_test_tmp)
 
 #include "../test_env.h"
 #include "device/handles.h"
@@ -4170,10 +4170,8 @@ static bool want(const char* name) {
 int main(int argc, char** argv) {
     whirl::test::clearWhirlEnv({L"WHIRL_TIER_ONLY", L"WHIRL_TIER_AMP"});  // FR-TEST P3-11
     std::setvbuf(stdout, nullptr, _IONBF, 0);
-    // default: WHIRL_TEST_TMP, else %TEMP%\whirl-tests; this test uses <base>\tier_test_tmp
-    fs::path base;
-    if (const wchar_t* t = _wgetenv(L"WHIRL_TEST_TMP"); t && *t) base = fs::path(t);
-    else base = fs::temp_directory_path() / L"whirl-tests";
+    // default: WHIRL_TEST_TMP, else %TEMP%\whirl-tests\<pid> (whirl::test::testTmpBase); this test uses <base>\tier_test_tmp
+    const fs::path base = whirl::test::testTmpBase();
     fs::path dir = argc > 1 ? fs::path(argv[1]) : base / L"tier_test_tmp";
     NullBackend ops;
     if (want("testHelpers")) {

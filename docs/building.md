@@ -89,7 +89,7 @@ environment variables:
 |---|---|---|
 | `WHIRL_TEST_GGUF` | `whirl-server-tests` (tokenizer only; the model is mocked), `whirl-kernel-test` (fallback for `--q4`) | none: `whirl-server-tests` needs `--gguf` or this variable |
 | `WHIRL_TEST_Q4`, `WHIRL_TEST_MX`, `WHIRL_TEST_MOE`, `WHIRL_TEST_MOEMX` | `whirl-kernel-test` (same as `--q4` / `--mx` / `--moe` / `--moemx`: Qwen3.8-27B Q4_K_M, Qwen3.8-27B MXFP4, Ornith-1.5-35B-A3B Q4_K_M, Ornith-1.5-35B-A3B MXFP4) | unset: that family runs on synthetic data and reports the model-tensor checks as skipped |
-| `WHIRL_TEST_TMP` | `whirl-server-tests`, `whirl-tier-tests` (scratch directories for the SSD tier) | `%TEMP%\whirl-tests` |
+| `WHIRL_TEST_TMP` | `whirl-server-tests`, `whirl-tier-tests` (scratch directories for the SSD tier; used as given, never removed) | `%TEMP%\whirl-tests\<pid>` (private to the test process, removed at exit) |
 | `WHIRL_GATE_TEXT_ROOT` | `whirl-server-gate` (test texts: the root of a llama.cpp source checkout, read as data) | none (required) |
 | `WHIRL_GATE_WORK` | `whirl-server-gate` (same as `--work`: logs, SSD directories) | `%TEMP%\whirl-tests\gate` |
 | `WHIRL_GATE_IMAGES` | `whirl-server-gate` suite `vis` (same as `--images`: `shapes.png`, `dialog.png`, `s1080.png`) | none |
