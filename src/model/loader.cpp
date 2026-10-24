@@ -4,6 +4,7 @@
 // setupSeqs, snapshots, requantMtpQ4, buildDraftHeadEx).
 
 #include "whirl/model.h"
+#include "whirl/kv_layout.h"
 #include "device/backend.h"
 #include "whirl/vram_limit.h"
 #include "whirl/uma_mem.h"
@@ -396,9 +397,7 @@ u64 kvBytesPerTokenCfg(const Config& cfg, bool has_mtp, bool q8, bool kf16, bool
     for (u32 i = 0; i < cfg.n_layer; ++i)
         if (cfg.isAttn(i)) layers += 1;
     const u64 e = static_cast<u64>(cfg.n_head_kv) * cfg.head_dim;
-    if (q4) return layers * 2 * (e / 2 + e / 32 * 2);
-    const u64 q = e + e / 32 * 2;
-    return layers * ((q8 && !kf16 ? q : e * 2) + (q8 ? q : e * 2));
+    return layers * kv::layerBytes(e, q8, kf16, q4);  // whirl/kv_layout.h (arch024-S11c F-6)
 }
 
 LoadEstimate estimateLoad(const gguf::File& f, const Config& cfg, bool embd_on_host, bool no_mtp) {
@@ -784,9 +783,7 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
 
 u64 Model::kvBytesPerTokenFmt(bool q8, bool kf16, bool q4) const {
     const u64 e = static_cast<u64>(cfg.n_head_kv) * cfg.head_dim;
-    if (q4) return kvLayers() * 2 * (e / 2 + e / 32 * 2);
-    const u64 q = e + e / 32 * 2;
-    return kvLayers() * ((q8 && !kf16 ? q : e * 2) + (q8 ? q : e * 2));
+    return kvLayers() * kv::layerBytes(e, q8, kf16, q4);  // whirl/kv_layout.h (arch024-S11c F-6)
 }
 
 const char* Model::kvName() const {

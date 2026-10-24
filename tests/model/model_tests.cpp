@@ -7,6 +7,7 @@
 #include "whirl/dflash_policy.h"
 #include "whirl/gguf.h"
 #include "whirl/kernels_abi.h"
+#include "whirl/kv_layout.h"
 #include "whirl/model.h"
 
 #include <algorithm>
@@ -1504,8 +1505,37 @@ void testDraftWindowRestore() {
 #endif
 }
 
+// arch024-S11c (F-6, S11b mutant Q2): the KV page layout of one layer per format (whirl/kv_layout.h, the rows of
+// ServerModel::kvArrays) and the KV bytes the model sizes the pool with (Model::kvBytesPerTokenFmt) must agree: the
+// server compares the two (server_main.cpp page_row == per_tok) and turns the RAM tier off silently when they differ.
+void testKvLayout() {
+    using whirl::kv::Part;
+    const std::uint64_t e = 4ull * 256;  // Swift-1.5 27B: n_head_kv 4 x head_dim 256
+    struct Fmt {
+        const char* name;
+        bool q8, kf16, q4;
+        std::vector<std::pair<Part, std::uint64_t>> want;
+    };
+    const std::vector<Fmt> fmts = {
+        {"f16", false, false, false, {{Part::k, 2 * e}, {Part::v, 2 * e}}},
+        {"q8h", true, false, false, {{Part::k, e}, {Part::v, e}, {Part::k_scale, e / 16}, {Part::v_scale, e / 16}}},
+        {"q8v", true, true, false, {{Part::k, 2 * e}, {Part::v, e}, {Part::v_scale, e / 16}}},
+        {"q4", true, false, true, {{Part::k, e / 2}, {Part::v, e / 2}, {Part::k_scale, e / 16}, {Part::v_scale, e / 16}}},
+    };
+    for (const Fmt& f : fmts) {
+        const whirl::kv::LayerRows L = whirl::kv::layerRows(e, f.q8, f.kf16, f.q4);
+        bool same = L.n == f.want.size();
+        for (std::size_t i = 0; same && i < L.n; ++i) same = L.a[i].part == f.want[i].first && L.a[i].bytes == f.want[i].second;
+        check(same, std::format("kv layout {}: arrays and row bytes in page order", f.name));
+        check(L.total() == whirl::kv::layerBytes(e, f.q8, f.kf16, f.q4),
+              std::format("kv layout {}: page row {} == model KV bytes per token per layer {}", f.name, L.total(),
+                          whirl::kv::layerBytes(e, f.q8, f.kf16, f.q4)));
+    }
+}
+
 int main() {
     whirl::test::clearWhirlEnv();  // FR-TEST P3-11
+    testKvLayout();
     testDraftWindowRestore();
     testFloatGemvDispatch();
     testArchWhitelist();

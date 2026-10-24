@@ -5,6 +5,7 @@
 #include "vision_iface.h"
 
 #include "whirl/hip.h"
+#include "whirl/kv_layout.h"
 
 namespace whirl::server {
 
@@ -38,27 +39,23 @@ public:
     bool canSegment() const override { return m_.canSegment(); }
 
     // KV pool arrays of every attention layer then the MTP layer, in the
-    // order of a tier entry's page layout: K, V, K scales (q8 / q8h), V scales (q8*).
+    // order of a tier entry's page layout: K, V, K scales (q8 / q8h), V scales (q8*); rows from whirl/kv_layout.h
+    // (the same definition as Model::kvBytesPerToken, arch024-S11c F-6).
     std::vector<KvArr> kvArrays() const override {
         std::vector<KvArr> out;
         const std::uint64_t elems = static_cast<std::uint64_t>(m_.cfg.n_head_kv) * m_.cfg.head_dim;
-        const bool kq8 = m_.kv_q8 && !m_.kv_kf16;
-        const std::uint64_t rk = m_.kv_q4 ? elems / 2 : elems * (kq8 ? 1 : 2);
-        const std::uint64_t rv = m_.kv_q4 ? elems / 2 : elems * (m_.kv_q8 ? 1 : 2);
-        const std::uint64_t rs = elems / 32 * 2;
+        const kv::LayerRows L = kv::layerRows(elems, m_.kv_q8, m_.kv_kf16, m_.kv_q4);
+        const auto layer = [&](DevPtr k, DevPtr v, DevPtr ks, DevPtr vs) {
+            for (std::size_t j = 0; j < L.n; ++j) {
+                const kv::Part p = L.a[j].part;
+                out.push_back({p == kv::Part::k ? k : p == kv::Part::v ? v : p == kv::Part::k_scale ? ks : vs, L.a[j].bytes});
+            }
+        };
         for (std::uint32_t i = 0; i < m_.cfg.n_layer; ++i) {
             if (!m_.cfg.isAttn(i)) continue;
-            out.push_back({m_.kcache[i], rk});
-            out.push_back({m_.vcache[i], rv});
-            if (kq8) out.push_back({m_.kscale[i], rs});
-            if (m_.kv_q8) out.push_back({m_.vscale[i], rs});
+            layer(m_.kcache[i], m_.vcache[i], m_.kscale[i], m_.vscale[i]);
         }
-        if (m_.mtp) {
-            out.push_back({m_.mtp_kc, rk});
-            out.push_back({m_.mtp_vc, rv});
-            if (kq8) out.push_back({m_.mtp_ks, rs});
-            if (m_.kv_q8) out.push_back({m_.mtp_vs, rs});
-        }
+        if (m_.mtp) layer(m_.mtp_kc, m_.mtp_vc, m_.mtp_ks, m_.mtp_vs);
         return out;
     }
 
