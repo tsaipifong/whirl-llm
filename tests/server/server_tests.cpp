@@ -2813,6 +2813,9 @@ void testTierDropContained() {
                     busy = busy || e->io_busy || e->loading || e->pin > 0;
                     if (e->n_tok < 2048 || e->tokens.size() < 2048) continue;
                     if (!std::equal(pa.begin(), pa.begin() + 2048, e->tokens.begin())) continue;
+                    // a shared prefix entry (one checkpoint at its end; the cold prefill keeps an LCP checkpoint
+                    // with the old entry, which is right: the lineage was lost) is not a session entry
+                    if (e->nck == 1 && e->ck[0].valid != 0 && e->ck[0].kind >= 4 && e->ck[0].pos == e->n_tok) continue;
                     na += 1;
                     longest = std::max(longest, e->n_tok);
                 }
