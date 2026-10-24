@@ -106,7 +106,8 @@ if (-not $py) {
 if (-not $py) { $py = "python-not-found" }
 $exe = @{}
 foreach ($n in "whirl", "whirl-server", "whirl-server-gate", "whirl-kernel-test", "whirl-tests", "whirl-model-tests", "whirl-cache-tests",
-               "whirl-vision-tests", "whirl-tier-tests", "whirl-server-tests", "whirl-hiprt-tests", "whirl-device-tests", "whirl-ops-tests") { $exe[$n] = Join-Path $Build "$n.exe" }
+               "whirl-vision-tests", "whirl-tier-tests", "whirl-server-tests", "whirl-hiprt-tests", "whirl-device-tests", "whirl-ops-tests",
+               "whirl-pins", "whirl-startup-replay") { $exe[$n] = Join-Path $Build "$n.exe" }
 
 # ---------------------------------------------------------------------------------------------------
 # step table: name, gpu, command (array: exe + args), rule (scriptblock over the output lines + exit code)
@@ -130,6 +131,10 @@ AddStep "cpu_hiprt" $false @($exe["whirl-hiprt-tests"]) { param($o, $c) $c -eq 0
 AddStep "cpu_hiprt_nofakes" $false @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\gates\hiprt_nofakes_check.ps1"), "-Build", $Build, "-Work", "@WORK@") { param($o, $c) $c -eq 0 -and ($o -match "^hiprt nofakes check: ok") }
 # REVIEW-ARCH3 P3-3: a new hip::Arch enumerator without a device::Profile row must not compile (MSVC)
 AddStep "cpu_profile_switch" $false @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\impact\profile_switch_check.ps1"), "-Work", "@WORK@") { param($o, $c) $c -eq 0 -and ($o -match "^profile switch check: ok") }
+# arch024-S11c (F-3): the CPU pins (tests/pins/check.ps1: prompt token hash of tests/pins/requests.jsonl for Swift and
+# Ornith, engine page-copy / tier / restore / governor pins on the mock model, startup_replay decision table), byte for
+# byte against tests/pins/expected. The S11b mutants P1 / P4 (template) and Q1 / N3 were caught by them and by no step.
+AddStep "cpu_pins" $false @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tests\pins\check.ps1"), "-Bin", $Build, "-Swift", $SW, "-Moe", $MX, "-Out", "@WORK@") { param($o, $c) $c -eq 0 -and ($o -match "(?m)^pins: ok") }
 AddStep "cpu_server" $false @($exe["whirl-server-tests"], "--gguf", $SW) { param($o, $c) $c -eq 0 -and ($o -match "server tests: [1-9]\d* passed, 0 failed") }
 AddStep "cpu_gate_selftest" $false @($exe["whirl-server-gate"], "--selftest") { param($o, $c) $c -eq 0 -and ($o -match ", 0 failed") }
 AddStep "cpu_gate_nosuite" $false @($exe["whirl-server-gate"], "--exe", $exe["whirl-server"], "--model", $SW) { param($o, $c) $c -eq 2 }
