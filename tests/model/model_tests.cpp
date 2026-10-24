@@ -1533,9 +1533,62 @@ void testKvLayout() {
     }
 }
 
+// arch024-S11c (F-8, S11b mutant D1): ~Model releases in the order of before arch024 S11 (graph, rpos, allocations in
+// order, pinned embedding, stream), not in reverse declaration order (which frees the stream before the buffers).
+// The handles carry their Backend (device/handles.h), so a recording Backend observes the order without a GPU.
+class ReleaseLog final : public whirl::device::Backend {
+    using DevPtr = whirl::device::DevPtr;
+    using Stream = whirl::device::Stream;
+    using Event = whirl::device::Event;
+
+public:
+    std::vector<std::string> log;
+    void copyAsync(DevPtr, DevPtr, std::uint64_t, Stream) override {}
+    void download(void*, DevPtr, std::uint64_t) override {}
+    Stream streamCreateNonBlocking() override { return reinterpret_cast<Stream>(0x5100); }
+    void streamDestroy(Stream s) override { log.push_back(std::format("stream {:x}", reinterpret_cast<std::uintptr_t>(s))); }
+    void streamSync(Stream) override {}
+    void streamWaitEvent(Stream, Event) override {}
+    Event eventCreate() override { return reinterpret_cast<Event>(0x5200); }
+    void eventDestroy(Event) override { log.push_back("event"); }
+    void eventRecord(Event, Stream) override {}
+    bool eventDone(Event) override { return true; }
+    void eventSync(Event) override {}
+    void* hostMalloc(std::uint64_t) override { return reinterpret_cast<void*>(static_cast<std::uintptr_t>(0x7000 + 0x100 * host_++)); }
+    void hostFree(void* p) override { log.push_back(std::format("host {:x}", reinterpret_cast<std::uintptr_t>(p))); }
+    DevPtr malloc(std::uint64_t) override { return 0x1000 + 0x100 * dev_++; }
+    void free(DevPtr p) override { log.push_back(std::format("dev {:x}", p)); }
+    void setDevice(int) override {}
+    const char* lastErrorString() const override { return "release log"; }
+    whirl::hip::MemInfo memInfo() override { return {}; }
+    whirl::hip::WddmMemInfo wddmMemInfo() override { return {}; }
+    whirl::hip::LocalMemSnap localMemSnap() override { return {}; }
+    whirl::hip::UmaMem umaMemory(int) override { return {}; }
+
+private:
+    int host_ = 0, dev_ = 0;
+};
+
+void testModelReleaseOrder() {
+    namespace dv = whirl::device;
+    ReleaseLog b;
+    {
+        q::Model m;
+        m.embd_host = dv::PinnedBuf::alloc(b, 64);                                     // host 7000
+        for (int i = 0; i < 3; ++i) m.allocations.push_back(dv::DevBuf::alloc(b, 64));  // dev 1000, 1100, 1200
+        m.stream_own = dv::StreamH::adopt(b, reinterpret_cast<dv::Stream>(0x5100));
+        m.rpos_own = dv::DevBuf::alloc(b, 64);  // dev 1300
+    }
+    const std::vector<std::string> want = {"dev 1300", "dev 1000", "dev 1100", "dev 1200", "host 7000", "stream 5100"};
+    std::string got;
+    for (const std::string& s : b.log) got += s + "; ";
+    check(b.log == want, "~Model release order: rpos, allocations in order, pinned embedding, stream (got " + got + ")");
+}
+
 int main() {
     whirl::test::clearWhirlEnv();  // FR-TEST P3-11
     testKvLayout();
+    testModelReleaseOrder();
     testDraftWindowRestore();
     testFloatGemvDispatch();
     testArchWhitelist();
