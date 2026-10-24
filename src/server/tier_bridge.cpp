@@ -297,7 +297,6 @@ void TierBridge::dropContained(std::uint32_t slot_id, tier::Entry* x) {
     tier::Tier* t = tier_;
     if (!t || !x || x->n_tok == 0) return;
     const bool cold = ps_.config().cold_resume;
-    const std::uint8_t gen_end = ckKindCode("gen-end");
     std::vector<tier::Entry*> drop;
     for (tier::Entry* e : t->entries) {
         if (e == x || e->n_tok == 0 || e->n_tok > x->n_tok || e->tokens.size() < e->n_tok) continue;
@@ -309,20 +308,36 @@ void TierBridge::dropContained(std::uint32_t slot_id, tier::Entry* x) {
         // pages alone are no restore point), unlike llama.cpp's pure-attention case where the KV truncates to any
         // prefix. So e goes only when x keeps a restore point at least as deep as e's deepest one (and inside e's
         // tokens, where both hold the same history); otherwise e stays, evicted first (x covers e's tokens).
-        // COLD-RESUME (precise) never resumes at a gen-end checkpoint, so those are no restore point there (the
-        // schedule test of resumeOk depends on the request's length, so it is left to the lookup)
+        // COLD-RESUME (precise, review R3-1) resumes only on the cold schedule: system / prefix checkpoints, or
+        // another kind that sits on the schedule of e's tokens (resumeOk; a prompt-end or gen-end inside a
+        // schedule chunk is never a restore point there)
+        const std::span<const std::uint32_t> et(e->tokens.data(), e->n_tok);
+        auto restorePoint = [&](const tier::CkMeta& c) {
+            return c.valid != 0 && c.pos <= e->n_tok && (!cold || c.kind >= 4 || ps_.resumeOk(et, c.pos, c.kind));
+        };
         std::uint32_t deep = 0;
         bool any = false;
         for (std::uint32_t j = 0; j < tier::max_ck; ++j) {
             const tier::CkMeta& c = e->ck[j];
-            if (c.valid == 0 || c.pos > e->n_tok || (cold && c.kind == gen_end)) continue;
+            if (!restorePoint(c)) continue;
             deep = any ? std::max(deep, c.pos) : c.pos;
             any = true;
         }
         bool covered = !any;
         for (std::uint32_t j = 0; j < tier::max_ck && !covered; ++j) {
             const tier::CkMeta& c = x->ck[j];
-            covered = c.valid != 0 && c.pos >= deep && c.pos <= e->n_tok && !(cold && c.kind == gen_end);
+            covered = c.pos >= deep && restorePoint(c);
+        }
+        // or another entry kept beside it holds that restore point of the same history (the cold prefill of a lost
+        // lineage keeps its LCP checkpoint with the old entry as a shared prefix entry, e.g. precise 'prefix' @2048)
+        for (const tier::Entry* o : t->entries) {
+            if (covered) break;
+            if (o == e || o == x || o->n_tok == 0 || std::find(drop.begin(), drop.end(), o) != drop.end()) continue;
+            for (std::uint32_t j = 0; j < tier::max_ck && !covered; ++j) {
+                const tier::CkMeta& c = o->ck[j];
+                covered = c.pos >= deep && c.pos <= o->n_tok && o->tokens.size() >= c.pos && restorePoint(c) &&
+                          std::equal(o->tokens.begin(), o->tokens.begin() + c.pos, e->tokens.begin());
+            }
         }
         if (!covered) {
             if (!e->demoted) {
@@ -331,7 +346,10 @@ void TierBridge::dropContained(std::uint32_t slot_id, tier::Entry* x) {
                      "point ({}): kept, evicted first",
                      slot_id, e->id, e->n_tok, x->n_tok, deep);
             }
+            // R3-1: x takes over 'reused', so the close flush (which writes a reused entry even when demoted)
+            // writes x only: one SSD file per session; a later restore from e marks it reused again
             x->reused = x->reused || e->reused;
+            e->reused = false;
             continue;
         }
         drop.push_back(e);

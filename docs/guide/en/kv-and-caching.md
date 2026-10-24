@@ -442,7 +442,10 @@ then KV page j at `nck × ck_stride + j × page_bytes` (13.0 MiB per page for q8
   mode writes only reused entries, ever — when WHIRL is closed, on RAM eviction and after about 5 minutes
   idle; a one-shot prompt is never written in any of these cases. The close flush writes every reused entry
   not yet current on the SSD (the eviction rule, except that a demoted reused entry is written too: the
-  close is its last chance). On RAM eviction: a reused entry (restored,
+  close is its last chance). When a new entry holds an older RAM-only entry of the same conversation whole
+  (the slot lost track of it, e.g. a failed restore), the older one is dropped if the new entry, or another
+  entry, still keeps a restore point at least as deep as its deepest one; otherwise it is kept but demoted, and
+  the new entry takes over its "reused" mark, so the close flush writes one file for that conversation. On RAM eviction: a reused entry (restored,
   resumed, or a shared system-message checkpoint that requests attached) of at least 2048 tokens that RAM
   pressure pushes out is written in the background instead of dropped (size cap and dedup apply as for any
   write; the spill that needed the room is retried when the write is done). After about 5 minutes with no request (none running, none arriving), the reused entries not yet current on the SSD are also written in the background, one at a time; a request that arrives stops it (it waits at most for the one write already running), and nothing more is written while the server stays idle. Console close, logoff and OS shutdown allow only about 5 s, so Ctrl+C is the way to guarantee a full write. The idle rule is the eviction rule (reused, not demoted, at least 2048 tokens, not already current on the SSD), with the same crash-safe header protocol, cap, LRU and 7-day expiry as any write.
