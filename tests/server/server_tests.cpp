@@ -7117,6 +7117,9 @@ void testRevS5aLongAnswerProbe() {
         });
         std::fprintf(stderr, "  (rev5a long-answer probe precise %d: A turn-1 entry %zu tok answer, cached a2 %llu, A entries %zu (reused %zu), in place %zu)\n",
                      precise ? 1 : 0, oa1.size(), (unsigned long long)cachedTokens(r2), na, nre, g_log.count("in place"));
+        // bug-s5a-cachemiss review F1 (hard since the F1 fix): a long answer leaves one reused entry per session
+        CHECK_EQ(na, std::size_t{1});
+        CHECK_EQ(nre, std::size_t{1});
         CHECK_EQ(srv.model().poison(), 0u);
     }
 }
@@ -7156,6 +7159,11 @@ void testRevS5aTurnsProbe() {
                     for (const tier::Entry* e : withPrefix(srv.tierp(), s == 0 ? ka_v : kb_v)) (isSpeEntry(e) ? ns : nl) += 1;
                 });
                 trace += std::format(" {}{}:c{}/L{}/S{}", s == 0 ? 'A' : 'B', t + 1, cachedTokens(r), nl, ns);
+                // bug-s5a-cachemiss review F2 (hard since the F2 fix): every turn keeps one lineage entry and no shared
+                // copy of the session's own earlier turn (A and B share no prefix)
+                CHECK_EQ(nl, std::size_t{1});
+                CHECK_EQ(ns, std::size_t{0});
+                if (t > 0) CHECK(cachedTokens(r) >= 2048);  // turns 2, 3 resume from the session's own entry
                 p = next(p, ref, 300, 7510 + static_cast<std::uint64_t>(t * 2 + s));
             }
         }
