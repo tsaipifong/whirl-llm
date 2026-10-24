@@ -1322,9 +1322,10 @@ int serveMain(int argc, char** argv, const char* program) {
 
         auto backend = makeQwen35Backend(model);
         Engine engine(*backend, *ops, tok, eo);
-        const hip::MemInfo mem_ck0 = ops->memInfo();
-        engine.allocState();
-        const hip::MemInfo mem_ck1 = ops->memInfo();
+        // the checkpoint VRAM is measured around allocState only (F-7: Engine::allocStateMeasured, CPU-tested order)
+        const Engine::StateMem mem_ck = engine.allocStateMeasured();
+        const hip::MemInfo mem_ck0 = mem_ck.before;
+        const hip::MemInfo mem_ck1 = mem_ck.after;
 
         // host tiers, VRAM side first (tier stream, pinned arena mapped for the
         // GPU): the KV pool below is sized after it

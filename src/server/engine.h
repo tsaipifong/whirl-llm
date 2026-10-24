@@ -316,6 +316,13 @@ public:
     // Startup phases (the caller logs memory around them):
     // checkpoint / shared checkpoint / sampling buffers ...
     void allocState();
+    // ... the same between two memInfo reads of the engine's Backend (arch024-S11c, F-7): the startup log's
+    // "checkpoints" VRAM is the difference, so the reads must sit right around this allocation (S11b mutant C1 moved
+    // allocState before the first read; a CPU test checks the call order on NullBackend).
+    struct StateMem {
+        hip::MemInfo before, after;
+    };
+    StateMem allocStateMeasured();
     // ... and, once the model's KV pool exists, the page bookkeeping.
     void initPool();
     // Host tiers (optional; the Tier was created / started by the caller).

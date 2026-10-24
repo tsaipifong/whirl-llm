@@ -147,6 +147,14 @@ Engine::~Engine() {
     // themselves when the members are destroyed; Slot / Spe wait for their spill / ready fences first (F1)
 }
 
+Engine::StateMem Engine::allocStateMeasured() {
+    StateMem r;
+    r.before = ops_.memInfo();
+    allocState();
+    r.after = ops_.memInfo();
+    return r;
+}
+
 void Engine::allocState() {
     const auto& cfg = m_.cfg();
     const std::uint32_t V = cfg.n_vocab;

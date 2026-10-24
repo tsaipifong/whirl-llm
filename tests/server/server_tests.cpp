@@ -6700,6 +6700,37 @@ void testHttpFakeEngine() {
     CHECK_EQ(api.building_.load(), 0);  // every connection's beginBuilding has its endBuilding
 }
 
+// arch024-S11c (F-7, S11b mutant C1): the startup's checkpoint VRAM ("VRAM use: ... checkpoints X GiB") is
+// memInfo before and after allocState; allocStateMeasured must read memInfo first, allocate, then read it again
+// (C1 = allocState before the first read: the checkpoints show 0 GiB and "other" absorbs them).
+void testAllocStateMeasured() {
+    using Call = NullBackend::Call;
+    NullBackend ops;
+    ServerSetup su;
+    MockModel model(ops, tok(), su.mc);
+    EngineOptions eo = su.eo;
+    eo.parallel = su.mc.parallel;
+    eo.ctx = su.mc.slot_ctx;
+    eo.model_name = "mock";
+    eo.use_mtp = su.mc.mtp && eo.use_mtp;
+    eo.use_dflash = false;
+    Engine e(model, ops, tok(), eo);
+    ops.recordThreads(true);
+    const Engine::StateMem r = e.allocStateMeasured();
+    ops.recordThreads(false);
+    const auto calls = ops.callThreads();
+    std::size_t mallocs = 0, infos = 0;
+    for (const auto& c : calls) {
+        mallocs += c.first == Call::malloc || c.first == Call::host_malloc;
+        infos += c.first == Call::mem_info;
+    }
+    CHECK(eo.n_ck > 0 && mallocs > 0);  // the checkpoint buffers are allocated through the Backend
+    CHECK_EQ(infos, std::size_t{2});
+    CHECK(!calls.empty() && calls.front().first == Call::mem_info);
+    CHECK(!calls.empty() && calls.back().first == Call::mem_info);
+    CHECK(r.before.total == ops.mem.info.total && r.after.total == ops.mem.info.total);
+}
+
 // arch024-S11c: test scratch folders are private to the process unless WHIRL_TEST_TMP names one
 // (%TEMP%\whirl-tests was shared: concurrent agents' test runs collided)
 void testTestTmpBase() {
@@ -6776,6 +6807,7 @@ int main(int argc, char** argv) {
         {"env_matrix", testEnvMatrix},
         {"ckpt_engine_teardown", testCkptEngineTeardown},
         {"tier_io_thread_calls", testTierIoThreadCalls},
+        {"alloc_state_measured", testAllocStateMeasured},
         {"test_tmp_base", testTestTmpBase},
         {"page_pool", testPagePool},
         {"tier_bridge_spill", testTierBridgeSpill},
