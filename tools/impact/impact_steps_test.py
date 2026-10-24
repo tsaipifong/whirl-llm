@@ -56,6 +56,11 @@ case("F-3 pass: tests/pins/requests.jsonl -> cpu_pins", steps("tests/pins/reques
 hip = next(h for h in sorted(m["hip"]) if h.startswith("kernels/"))
 case(f"F-3 block: {hip} -> no cpu_pins", steps(hip, 1), [], ["cpu_pins"])
 case("F-3 block: docs -> no cpu_pins", steps("docs/building.md", 1), [], ["cpu_pins"])
+case("F-4 pass: spec::raceE -> srv_balance + srv_fast",
+     steps("src/common/spec_sample.cpp", fn_line("src/common/spec_sample.cpp", "raceE")), ["srv_balance", "srv_fast", "cpu_tests"])
+case("F-4 note: spec::sampleRace (test reference) -> cpu_tests + kt_full only",
+     steps("src/common/spec_sample.cpp", fn_line("src/common/spec_sample.cpp", "sampleRace")), ["cpu_tests", "kt_full"],
+     ["srv_balance", "srv_fast"])
 ok = 0
 for name, good, bad, got in cases:
     ok += good
