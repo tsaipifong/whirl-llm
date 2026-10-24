@@ -153,6 +153,13 @@ std::vector<std::string> replay(const In& in) {
         rin.explicit_src = src.c_str();
         rin.total_phys = in.u("ram.total_phys");
         rin.avail_phys = in.u("ram.avail_phys");
+        if (in.has("ram.file_ws")) {  // fix-ramtier: the raw Available sample plus another program's file pages
+            startfit::RamStatus st;
+            st.total_phys = rin.total_phys;
+            st.avail_phys = rin.avail_phys;
+            st.file_ws = in.u("ram.file_ws");
+            rin.avail_phys = startfit::ramForTier(st);
+        }
         rin.floor_mb = in.u("ram.floor_mb");
         rin.entry_mb = in.u("ram.entry_mb");
         rin.integrated = in.b("ram.integrated");

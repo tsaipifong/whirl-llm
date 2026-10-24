@@ -93,7 +93,12 @@ struct RamFit {
 std::optional<RamFit> ramTierFit(std::uint64_t mb, std::uint64_t avail_phys_bytes, std::uint64_t auto_mb, bool explicit_size,
                                  std::uint64_t pinned_room_mb = pinned_room_unknown, std::uint64_t entry_mb = 0);
 // fix-ramtier: the RAM the host-tier sizing (tier::ramTierSize, ramTierFit) counts as available, from one sample taken
-// at startup (server_main.cpp fills it; tests and the startup replay inject it).
+// at startup (server_main.cpp fills it; tests and the startup replay inject it): Windows' Available (standby + free +
+// zero) plus the clean file pages the largest other program holds in its working set (fileWsOfOthers), at most the RAM.
+// B0 N3-1 / S0b: a program reading GGUF files through a read-only memory map (GGUFReader np.memmap) held tens of GB of
+// such pages; Available read 121-587 MiB and the one startup sample turned both host tiers off for the server's life,
+// although Windows drops those pages first when the pin needs memory. Programs this one cannot open (elevated,
+// protected) and an OS without PROCESS_MEMORY_COUNTERS_EX2 (before Windows 10/11 22H2 + 2023-09 update) count nothing.
 struct ProcMemSample {  // one other process (PROCESS_MEMORY_COUNTERS_EX2), bytes
     std::uint32_t pid = 0;
     std::uint64_t working_set = 0;          // WorkingSetSize

@@ -1358,14 +1358,63 @@ int serveMain(int argc, char** argv, const char* program) {
                 logW("kv tier: WHIRL_KV_RAM_MB=\"{}\" is not a number; using the automatic size", *v);
             }
         }
+        startfit::RamStatus ram_st;  // fix-ramtier: one sample, read by startfit::ramForTier
         {
             MEMORYSTATUSEX ms{};
             ms.dwLength = sizeof(ms);
             if (GlobalMemoryStatusEx(&ms)) {
-                rin.total_phys = ms.ullTotalPhys;
-                rin.avail_phys = ms.ullAvailPhys;
+                ram_st.total_phys = ms.ullTotalPhys;
+                ram_st.avail_phys = ms.ullAvailPhys;
             }
         }
+        // fix-ramtier: clean file pages another program holds in its working set (a reader of a memory-mapped file):
+        // PROCESS_MEMORY_COUNTERS_EX2 of every process this one may open with PROCESS_QUERY_LIMITED_INFORMATION (no
+        // privilege; ~7 ms for 364 processes). Layout of the SDK's struct, declared here because the SDK guards it
+        // behind NTDDI_WIN10_CU; an OS without the EX2 fields leaves PrivateWorkingSetSize 0 (counted as unknown).
+        startfit::FileWs file_ws;
+        std::string file_ws_name;
+        {
+            struct PmcEx2 {
+                DWORD cb, PageFaultCount;
+                SIZE_T PeakWorkingSetSize, WorkingSetSize, QuotaPeakPagedPoolUsage, QuotaPagedPoolUsage,
+                    QuotaPeakNonPagedPoolUsage, QuotaNonPagedPoolUsage, PagefileUsage, PeakPagefileUsage, PrivateUsage,
+                    PrivateWorkingSetSize;
+                ULONG64 SharedCommitUsage;
+            };
+            static_assert(sizeof(PmcEx2) == 96, "PROCESS_MEMORY_COUNTERS_EX2 layout");
+            std::vector<DWORD> pids(8192);
+            DWORD got = 0;
+            std::vector<startfit::ProcMemSample> procs;
+            if (K32EnumProcesses(pids.data(), static_cast<DWORD>(pids.size() * sizeof(DWORD)), &got)) {
+                for (DWORD i = 0; i < got / sizeof(DWORD); ++i) {
+                    if (pids[i] == 0) continue;
+                    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pids[i]);
+                    if (!h) continue;
+                    PmcEx2 c{};
+                    c.cb = sizeof(c);
+                    if (K32GetProcessMemoryInfo(h, reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&c), sizeof(c)))
+                        procs.push_back({pids[i], c.WorkingSetSize, c.PrivateWorkingSetSize, c.SharedCommitUsage});
+                    CloseHandle(h);
+                }
+            }
+            file_ws = startfit::fileWsOfOthers(procs, GetCurrentProcessId());
+            if (file_ws.pid) {
+                if (HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, file_ws.pid)) {
+                    char nm[MAX_PATH];
+                    DWORD n = MAX_PATH;
+                    if (QueryFullProcessImageNameA(h, 0, nm, &n)) file_ws_name = std::filesystem::path(std::string(nm, n)).filename().string();
+                    CloseHandle(h);
+                }
+            }
+            ram_st.file_ws = file_ws.bytes;
+        }
+        rin.total_phys = ram_st.total_phys;
+        rin.avail_phys = startfit::ramForTier(ram_st);
+        logI("kv tier: RAM available now {} MiB + {} MiB of clean file pages in another program's working set{} (Windows drops "
+             "them first) = {} MiB counted for the RAM tier",
+             ram_st.avail_phys >> 20, ram_st.file_ws >> 20,
+             file_ws.pid ? std::format(" (pid {}{})", file_ws.pid, file_ws_name.empty() ? "" : " " + file_ws_name) : std::string(),
+             rin.avail_phys >> 20);
         const tier::RamTierSize rsz = tier::ramTierSize(rin);
         std::uint64_t kv_ram_mb = rsz.mb;
         // 1. RAM tier: capped at 20480 MiB (a larger one crashed on the first request on the R9700 test box, cause not known
@@ -1426,7 +1475,8 @@ int serveMain(int argc, char** argv, const char* program) {
         sin.put("ram.explicit_mb", rin.explicit_mb ? std::to_string(*rin.explicit_mb) : std::string("-"));
         sin.put("ram.explicit_src", std::string_view(rin.explicit_src));
         sin.put("ram.total_phys", rin.total_phys);
-        sin.put("ram.avail_phys", rin.avail_phys);
+        sin.put("ram.avail_phys", ram_st.avail_phys);  // the raw sample; the replay applies ramForTier (fix-ramtier)
+        sin.put("ram.file_ws", ram_st.file_ws);
         sin.put("ram.floor_mb", rin.floor_mb);
         sin.put("ram.entry_mb", rin.entry_mb);
         sin.put("ram.integrated", rin.integrated);

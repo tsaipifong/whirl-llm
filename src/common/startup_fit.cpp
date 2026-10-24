@@ -52,13 +52,26 @@ std::string pinnedOffWhy(bool below_entry, std::uint64_t entry_mb) {
 }
 
 FileWs fileWsOfOthers(const std::vector<ProcMemSample>& procs, std::uint32_t self_pid) {
-    (void)procs;
-    (void)self_pid;
-    return {};  // fix-ramtier seam (test commit): nothing counted yet, the old behaviour
+    // the shareable part of a working set (WS - private WS) holds mapped files, images and pagefile-backed shared
+    // sections; the shared commit is what the last ones are charged, so what is left are file pages, which Windows
+    // trims and reuses before it pages anything out. Only the largest one program holds: pages of one working set are
+    // distinct, while a sum would add up DLL pages every program shares (a lower bound of the union, never more).
+    FileWs best;
+    for (const ProcMemSample& p : procs) {
+        if (p.pid == self_pid) continue;  // the server's own pages are not given back to its own pin
+        if (p.private_working_set == 0 || p.private_working_set >= p.working_set) continue;  // no EX2 fields: unknown
+        const std::uint64_t shareable = p.working_set - p.private_working_set;
+        if (shareable <= p.shared_commit) continue;
+        const std::uint64_t file = shareable - p.shared_commit;
+        if (file > best.bytes) best = {file, p.pid};
+    }
+    return best;
 }
 
 std::uint64_t ramForTier(const RamStatus& s) {
-    return s.avail_phys;  // fix-ramtier seam (test commit): Available alone, the old behaviour
+    if (s.avail_phys == 0) return 0;  // Available unknown stays unknown (the sizing then ignores it)
+    const std::uint64_t r = s.avail_phys + s.file_ws;
+    return s.total_phys > 0 ? std::min(r, s.total_phys) : r;
 }
 
 std::optional<RamFit> ramTierFit(std::uint64_t mb, std::uint64_t avail_phys_bytes, std::uint64_t auto_mb, bool explicit_size,
