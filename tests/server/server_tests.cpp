@@ -2779,12 +2779,21 @@ void testTierPreciseContinuation() {
 // keeps a restore point as deep as the old one's deepest; otherwise the old one stays, demoted. Both modes.
 void testTierDropContained() {
     for (const bool precise : {false, true}) {
+        // fix-r21 R3-1: an SSD tier in shutdown mode (written only at close), to count the session's SSD files
+        const std::filesystem::path base = whirl::test::testTmpBase();
+        const std::string dir = narrow((base / (precise ? L"server_test_drop_contained_p" : L"server_test_drop_contained_b")).wstring());
+        std::error_code ec;
+        std::filesystem::remove_all(dir, ec);
+        std::filesystem::create_directories(dir, ec);
         ServerSetup su = baseSetup();
         su.mc.parallel = 1;
         su.mc.slot_ctx = 8192;
         su.mc.pool_tokens = 4096;
         su.tier = true;
         su.tier_min = 512;
+        su.ssd_dir = dir;
+        su.tier_shutdown = true;
+        su.eo.kv_idle_flush_ms = 0;
         su.eo.n_ck = 3;
         su.eo.cold_resume = precise;
         TestServer srv(su);
@@ -2828,14 +2837,30 @@ void testTierDropContained() {
         }
         std::fprintf(stderr, "  (tier_drop_contained precise %d: A entries %zu, longest %u tok)\n", precise ? 1 : 0, na,
                      static_cast<unsigned>(longest));
-        // fix-r21 (review R2-1): the cold-prefill entry holds A's turn 1 whole but not its deepest restore point
-        // (balance: gen-end 3039; precise: 3000), so turn 1's entry stays, demoted (first eviction victim)
-        CHECK_EQ(na, std::size_t{2});
-        CHECK_EQ(nd, std::size_t{1});
+        // fix-r21 (review R2-1): balance -- the cold-prefill entry holds A's turn 1 whole but not its gen-end 3039
+        // (its deepest restore point), so turn 1's entry stays, demoted (first eviction victim). R3-1: precise
+        // resumes only at system / prefix checkpoints (turn 1's prompt-end 3000 is never on the cold schedule of a
+        // longer request), and the new entry keeps turn 1's 2048 one, so turn 1's entry is replaced
+        CHECK_EQ(na, (precise ? std::size_t{1} : std::size_t{2}));
+        CHECK_EQ(nd, (precise ? std::size_t{0} : std::size_t{1}));
         CHECK(longest >= pa2.size());
-        CHECK_EQ(g_log.count("tok): replaced"), 0u);
-        CHECK(g_log.count("holds a deeper restore point") >= 1);
+        if (precise) CHECK(g_log.count("tok): replaced") >= 1);
+        else CHECK_EQ(g_log.count("tok): replaced"), 0u);
+        CHECK_EQ(g_log.count("holds a deeper restore point"), (precise ? std::size_t{0} : std::size_t{1}));
         CHECK_EQ(srv.model().poison(), 0u);
+        // R3-1: one SSD file per session at close -- a kept duplicate hands 'reused' to the new entry, so the
+        // close flush (which writes reused entries even when demoted) does not write it
+        srv.stopEngine();
+        std::size_t na_ssd = 0;
+        for (const tier::Entry* e : srv.tierp()->entries) {
+            if (e->n_tok < 2048 || e->tokens.size() < 2048) continue;
+            if (!std::equal(pa.begin(), pa.begin() + 2048, e->tokens.begin())) continue;
+            if (e->nck == 1 && e->ck[0].valid != 0 && e->ck[0].kind >= 4 && e->ck[0].pos == e->n_tok) continue;
+            na_ssd += e->ssd.has_value() ? 1 : 0;
+        }
+        std::fprintf(stderr, "  (tier_drop_contained precise %d: A session entries on SSD after close %zu)\n", precise ? 1 : 0, na_ssd);
+        CHECK(na_ssd <= std::size_t{1});
+        std::filesystem::remove_all(dir, ec);
     }
     // fix-r21: the drop path -- a retry of exactly turn 1's history whose restore fails: the cold prefill keeps a
     // checkpoint at its prompt end, as deep as the old entry's deepest, so the old entry is replaced (balance)
