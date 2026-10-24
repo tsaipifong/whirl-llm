@@ -2773,6 +2773,62 @@ void testTierPreciseContinuation() {
     }
 }
 
+// bug-s5a-cachemiss review F4: a slot that lost the lineage (here: the RAM restore of A's turn 1 fails, so turn 2
+// is prefilled cold) spills a fresh entry that holds A's turn-1 entry whole. Like llama.cpp's server_prompt_cache
+// (drop cached prompts fully contained in the new one), the old copy is replaced: one entry per session. Both modes.
+void testTierDropContained() {
+    for (const bool precise : {false, true}) {
+        ServerSetup su = baseSetup();
+        su.mc.parallel = 1;
+        su.mc.slot_ctx = 8192;
+        su.mc.pool_tokens = 4096;
+        su.tier = true;
+        su.tier_min = 512;
+        su.eo.n_ck = 3;
+        su.eo.cold_resume = precise;
+        TestServer srv(su);
+        g_log.clear();
+        const auto pa = makePrompt(3000, 841);
+        const auto pb = makePrompt(3200, 842);
+        const auto outa = srv.model().greedyReference(pa, 40, true);
+        CHECK_EQ(completionText(srv.post("/v1/completions", completionBody(pa, 40))), decode(outa));
+        CHECK_EQ(completionText(srv.post("/v1/completions", completionBody(pb, 40))), decode(srv.model().greedyReference(pb, 40, true)));
+        std::vector<std::uint32_t> pa2 = pa;
+        pa2.insert(pa2.end(), outa.begin(), outa.end());
+        pa2 = makePrompt(static_cast<std::uint32_t>(pa2.size() + 300), 843, pa2);
+        srv.ops().failHostToDevCopy(1);
+        auto r2 = srv.post("/v1/completions", completionBody(pa2, 40));
+        CHECK(!srv.ops().hostCopyFailArmed());  // the restore failed
+        srv.ops().failHostToDevCopy(0);
+        CHECK_EQ(completionText(r2), decode(srv.model().greedyReference(pa2, 40, true)));
+        srv.onEngine([] {});
+        std::size_t na = 0;
+        std::uint32_t longest = 0;
+        for (int i = 0; i < 300; ++i) {
+            bool busy = false;
+            srv.onEngine([&] {
+                na = 0;
+                longest = 0;
+                for (const tier::Entry* e : srv.tierp()->entries) {
+                    busy = busy || e->io_busy || e->loading || e->pin > 0;
+                    if (e->n_tok < 2048 || e->tokens.size() < 2048) continue;
+                    if (!std::equal(pa.begin(), pa.begin() + 2048, e->tokens.begin())) continue;
+                    na += 1;
+                    longest = std::max(longest, e->n_tok);
+                }
+            });
+            if (!busy) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        std::fprintf(stderr, "  (tier_drop_contained precise %d: A entries %zu, longest %u tok)\n", precise ? 1 : 0, na,
+                     static_cast<unsigned>(longest));
+        CHECK_EQ(na, std::size_t{1});
+        CHECK(longest >= pa2.size());
+        CHECK(g_log.count("is contained in the new entry") >= 1);
+        CHECK_EQ(srv.model().poison(), 0u);
+    }
+}
+
 // FIX-CACHE P2-3 (FR-CACHE): more prefix checkpoints per slot than a tier entry holds (WHIRL_SERVE_CKPTS=12).
 // Before: tier::Entry::ck, Slot::rs_map / rs_tail and beginRestore's `chosen` (max_ck = 8) were read and
 // written out of bounds. Now the count is clamped to max_ck (warning); spill / restore stay exact.
@@ -7293,6 +7349,7 @@ int main(int argc, char** argv) {
         {"restore_throws", testRestoreThrows},
         {"tier_inplace", testTierInPlaceRegen},
         {"tier_precise_cont", testTierPreciseContinuation},
+        {"tier_drop_contained", testTierDropContained},
         {"ckpts_clamp", testServeCkptsClamp},
         {"branch_turn", testBranchFromEarlierTurn},
         {"agent_idle_main", testAgentIdleMainNoSupersede},
