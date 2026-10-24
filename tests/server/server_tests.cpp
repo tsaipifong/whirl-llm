@@ -6824,6 +6824,348 @@ void testTestTmpBase() {
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// review/s5a-cachemiss: independent test, written from the symptom description only (not from tier_precise_cont).
+// Symptom: in precise (COLD-RESUME) a session's next turn resumes at its own tail checkpoint (kind 'prefix'); the
+// restore was taken as a shared-prefix restore, so the next spill made a NEW RAM entry instead of updating the
+// session's entry in place: two entries per session, the new one not reused and not written to SSD at shutdown.
+// Expected: one entry per session, in place, reused, one SSD file per session; a true shared system entry and
+// another question on the same document unchanged. Every answer equals the cold greedy reference (bitwise).
+namespace rev5a {
+
+// entries of the tier whose tokens start with `pre`
+std::vector<const tier::Entry*> withPrefix(tier::Tier* t, std::span<const std::uint32_t> pre) {
+    std::vector<const tier::Entry*> v;
+    for (const tier::Entry* e : t->entries) {
+        if (e->n_tok < pre.size() || e->tokens.size() < pre.size()) continue;
+        if (std::equal(pre.begin(), pre.end(), e->tokens.begin())) v.push_back(e);
+    }
+    return v;
+}
+
+// a shared prefix entry (spillSpe: one checkpoint of a shared kind at the entry's end)
+bool isSpeEntry(const tier::Entry* e) { return e->nck == 1 && e->ck[0].kind >= 4 && e->ck[0].pos == e->n_tok; }
+
+// the session's own (lineage) entries among withPrefix
+std::vector<const tier::Entry*> lineage(tier::Tier* t, std::span<const std::uint32_t> pre) {
+    std::vector<const tier::Entry*> v;
+    for (const tier::Entry* e : withPrefix(t, pre))
+        if (!isSpeEntry(e)) v.push_back(e);
+    return v;
+}
+
+std::vector<std::uint32_t> next(const std::vector<std::uint32_t>& p, const std::vector<std::uint32_t>& out, std::uint32_t add,
+                                std::uint64_t seed) {
+    std::vector<std::uint32_t> v = p;
+    v.insert(v.end(), out.begin(), out.end());
+    return makePrompt(static_cast<std::uint32_t>(v.size() + add), seed, v);
+}
+
+}  // namespace rev5a
+
+void testRevS5aSessions() {
+    using namespace rev5a;
+    const std::filesystem::path base = whirl::test::testTmpBase();
+    const std::string dir = narrow((base / L"server_test_rev5a").wstring());
+    for (const bool precise : {false, true}) {
+        std::error_code ec;
+        std::filesystem::remove_all(dir, ec);
+        std::filesystem::create_directories(dir, ec);
+        ServerSetup su = baseSetup();
+        su.mc.parallel = 1;
+        su.mc.slot_ctx = 8192;
+        su.mc.pool_tokens = 4096;  // one session in VRAM: the other one is spilled / restored every turn
+        su.tier = true;
+        su.ssd_dir = dir;
+        su.tier_min = 512;
+        su.tier_shutdown = true;  // --kv-ssd-mode shutdown: only reused entries reach the SSD (at close)
+        su.eo.n_ck = 3;           // room for the tail checkpoint
+        su.eo.cold_resume = precise;
+        const auto a1 = makePrompt(3000, 7101);
+        const auto b1 = makePrompt(3200, 7102);
+        const std::span<const std::uint32_t> a_key(a1.data(), 1024), b_key(b1.data(), 1024);
+        std::vector<std::uint32_t> a4;
+        std::size_t a3_len = 0;
+        {
+            TestServer srv(su);
+            g_log.clear();
+            auto turn = [&](const std::vector<std::uint32_t>& p) {
+                const auto ref = srv.model().greedyReference(p, 40, true);
+                auto r = srv.post("/v1/completions", completionBody(p, 40));
+                CHECK_EQ(completionText(r), decode(ref));
+                srv.onEngine([] {});  // the spill after the response is done
+                return std::make_pair(ref, cachedTokens(r));
+            };
+            const auto [oa1, ca1] = turn(a1);
+            const auto [ob1, cb1] = turn(b1);
+            const auto a2 = next(a1, oa1, 300, 7103);
+            const auto [oa2, ca2] = turn(a2);  // restored from RAM (precise: at A's own tail checkpoint)
+            CHECK(ca2 >= 2048);
+            const auto b2 = next(b1, ob1, 300, 7104);
+            const auto [ob2, cb2] = turn(b2);  // evicts A after its turn 2 spill
+            CHECK(cb2 >= 2048);
+            const std::size_t inplace_after_b2 = g_log.count("in place");
+            const auto a3 = next(a2, oa2, 300, 7105);
+            a3_len = a3.size();
+            const auto [oa3, ca3] = turn(a3);
+            CHECK(ca3 > a2.size() - 1300);  // turn 2's own KV came back (past turn 1)
+            CHECK(ca3 > a1.size() + oa1.size());
+            std::size_t na = 0, nb = 0, n_all = 0;
+            bool a_reused = false, b_reused = false;
+            srv.onEngine([&] {
+                const auto ea = lineage(srv.tierp(), a_key), eb = lineage(srv.tierp(), b_key);
+                na = ea.size();
+                nb = eb.size();
+                n_all = srv.tierp()->entries.size();
+                a_reused = na == 1 && ea[0]->reused;
+                b_reused = nb == 1 && eb[0]->reused;
+            });
+            std::fprintf(stderr, "  (rev5a precise %d: A entries %zu reused %d, B entries %zu reused %d, all %zu, in place %zu/%zu, cached a2 %llu a3 %llu)\n",
+                         precise ? 1 : 0, na, a_reused ? 1 : 0, nb, b_reused ? 1 : 0, n_all, inplace_after_b2, g_log.count("in place"),
+                         static_cast<unsigned long long>(ca2), static_cast<unsigned long long>(ca3));
+            CHECK_EQ(na, 1u);
+            CHECK_EQ(nb, 1u);
+            CHECK(a_reused);
+            CHECK(b_reused);
+            CHECK(inplace_after_b2 >= 2);  // A turn 2 and B turn 2 updated their entries in place
+            a4 = next(a3, oa3, 200, 7106);
+            CHECK_EQ(srv.model().poison(), 0u);
+            CHECK_EQ(srv.model().hidMismatch(), 0u);
+        }  // close: shutdown mode writes the reused entries
+        {
+            TestServer srv(su);
+            g_log.clear();
+            std::size_t na = 0, nb = 0, nssd = 0;
+            srv.onEngine([&] {
+                na = lineage(srv.tierp(), a_key).size();
+                nb = lineage(srv.tierp(), b_key).size();
+                nssd = srv.tierp()->ssdEntries();
+            });
+            std::fprintf(stderr, "  (rev5a precise %d restart: SSD entries %zu, A %zu, B %zu)\n", precise ? 1 : 0, nssd, na, nb);
+            CHECK_EQ(na, 1u);
+            CHECK_EQ(nb, 1u);
+            const auto ref = srv.model().greedyReference(a4, 40, true);
+            auto r = srv.post("/v1/completions", completionBody(a4, 40));
+            CHECK_EQ(completionText(r), decode(ref));
+            CHECK(srv.tierStats().restores_ssd >= 1);
+            CHECK(cachedTokens(r) > a3_len - 1300);  // A's newest turn (3) came back from the SSD
+            CHECK_EQ(srv.model().poison(), 0u);
+        }
+        std::filesystem::remove_all(dir, ec);
+    }
+}
+
+// guards: (1) two sessions sharing a long system message, then diverging (tail > the near-end threshold): the shared
+// system entry is never extended / owned, each session keeps exactly one entry; (2) another question on the same
+// document (lcp < n_tok of the first question's entry): the first entry is left as it was, the second is its own.
+void testRevS5aGuards() {
+    using namespace rev5a;
+    const ChatBuild cb;
+    for (const bool precise : {false, true}) {
+        {
+            ServerSetup su = baseSetup();
+            su.mc.parallel = 1;
+            su.mc.slot_ctx = 8192;
+            su.mc.pool_tokens = 8192;
+            su.tier = true;
+            su.tier_min = 512;
+            su.eo.sys_min = 512;
+            su.eo.n_ck = 3;
+            su.eo.cold_resume = precise;
+            TestServer srv(su);
+            g_log.clear();
+            const auto s1 = cb.conv(2000, 7201, {{4500, 7202}});
+            const auto s2 = cb.conv(2000, 7201, {{4500, 7203}});
+            std::vector<std::uint32_t> sys_toks;
+            std::uint32_t sys_n = 0;
+            std::uint64_t sys_id = 0;
+            auto turn = [&](const std::vector<std::uint32_t>& p) {
+                const auto ref = srv.model().greedyReference(p, 24, true);
+                auto r = srv.post("/v1/completions", completionBody(p, 24));
+                CHECK_EQ(completionText(r), decode(ref));
+                srv.onEngine([] {});
+                return std::make_pair(ref, cachedTokens(r));
+            };
+            const auto [o11, c11] = turn(s1);
+            const auto [o21, c21] = turn(s2);
+            CHECK(c21 >= 2000);
+            const auto s1b = next(s1, o11, 200, 7204);
+            const auto [o12, c12] = turn(s1b);
+            CHECK(c12 > 2100);
+            const auto s2b = next(s2, o21, 200, 7205);
+            const auto [o22, c22] = turn(s2b);
+            CHECK(c22 > 2100);
+            const auto s1c = next(s1b, o12, 200, 7206);
+            const auto [o13, c13] = turn(s1c);
+            CHECK(c13 >= (precise ? 6101u : s1.size()));  // precise: s1c's own tail (schedule 2005 + k * 1024)
+            const std::span<const std::uint32_t> k1(s1.data(), 2600), k2(s2.data(), 2600);
+            std::size_t n1 = 0, n2 = 0, nsys = 0, sys_owned = 0, all = 0;
+            srv.onEngine([&] {
+                n1 = lineage(srv.tierp(), k1).size();
+                n2 = lineage(srv.tierp(), k2).size();
+                all = srv.tierp()->entries.size();
+                for (const tier::Entry* e : srv.tierp()->entries)
+                    if (e->nck >= 1 && e->ck[0].kind == 4 && e->ck[0].pos == e->n_tok) {
+                        ++nsys;
+                        sys_n = e->n_tok;
+                        sys_id = e->id;
+                        if (e->owner) ++sys_owned;
+                    }
+            });
+            std::fprintf(stderr, "  (rev5a guard sys precise %d: S1 %zu, S2 %zu, sys entries %zu (n %u, owned %zu), all %zu; cached %llu %llu %llu %llu)\n",
+                         precise ? 1 : 0, n1, n2, nsys, sys_n, sys_owned, all, (unsigned long long)c21, (unsigned long long)c12,
+                         (unsigned long long)c22, (unsigned long long)c13);
+            CHECK_EQ(n1, 1u);
+            CHECK_EQ(n2, 1u);
+            CHECK(nsys <= 1);
+            CHECK_EQ(sys_owned, 0u);
+            CHECK_EQ(srv.model().poison(), 0u);
+            (void)sys_id;
+        }
+        {
+            ServerSetup su = baseSetup();
+            su.mc.parallel = 1;
+            su.mc.slot_ctx = 8192;
+            su.mc.pool_tokens = 8192;
+            su.tier = true;
+            su.tier_min = 512;
+            su.eo.n_ck = 3;
+            su.eo.cold_resume = precise;
+            TestServer srv(su);
+            g_log.clear();
+            const auto doc = makePrompt(6000, 7301);
+            const auto q1 = makePrompt(6090, 7302, doc);
+            const auto q2 = makePrompt(6100, 7303, doc);
+            const auto other = makePrompt(7000, 7304);
+            auto turn = [&](const std::vector<std::uint32_t>& p) {
+                const auto ref = srv.model().greedyReference(p, 24, true);
+                auto r = srv.post("/v1/completions", completionBody(p, 24));
+                CHECK_EQ(completionText(r), decode(ref));
+                srv.onEngine([] {});
+                return std::make_pair(ref, cachedTokens(r));
+            };
+            const auto [oq1, cq1] = turn(q1);
+            std::vector<std::uint32_t> q1_toks;
+            std::uint32_t q1_n = 0;
+            std::uint64_t q1_id = 0;
+            srv.onEngine([&] {
+                for (const tier::Entry* e : withPrefix(srv.tierp(), q1)) {
+                    q1_id = e->id;
+                    q1_n = e->n_tok;
+                    q1_toks.assign(e->tokens.begin(), e->tokens.begin() + e->n_tok);
+                }
+            });
+            const auto [oo, co] = turn(other);  // evicts the document
+            const auto [oq2, cq2] = turn(q2);   // restored from q1's entry, diverges inside it
+            CHECK(cq2 >= 4096);
+            const auto [oo2, co2] = turn(other);  // evicts again: q2 spilled
+            bool q1_same = false;
+            std::size_t nq2 = 0, ndoc = 0;
+            srv.onEngine([&] {
+                if (const tier::Entry* e = srv.tierp()->find(q1_id))
+                    q1_same = e->n_tok == q1_n && std::equal(q1_toks.begin(), q1_toks.end(), e->tokens.begin());
+                nq2 = withPrefix(srv.tierp(), q2).size();
+                ndoc = withPrefix(srv.tierp(), doc).size();
+            });
+            std::fprintf(stderr, "  (rev5a guard doc precise %d: q1 entry %016llx n %u unchanged %d, q2 entries %zu, doc entries %zu, cached q2 %llu)\n",
+                         precise ? 1 : 0, (unsigned long long)q1_id, q1_n, q1_same ? 1 : 0, nq2, ndoc, (unsigned long long)cq2);
+            CHECK(q1_id != 0);
+            CHECK(q1_same);
+            CHECK_EQ(nq2, 1u);
+            CHECK_EQ(srv.model().poison(), 0u);
+        }
+    }
+}
+
+// probe (reported, not a pass condition): precise turn 2 after a long answer (tail past the near-end threshold of
+// spillSlot): does the session still end with one entry?
+void testRevS5aLongAnswerProbe() {
+    using namespace rev5a;
+    for (const bool precise : {false, true}) {
+        ServerSetup su = baseSetup();
+        su.mc.parallel = 1;
+        su.mc.slot_ctx = 16384;
+        su.mc.pool_tokens = 12288;
+        su.tier = true;
+        su.tier_min = 512;
+        su.eo.n_ck = 3;
+        su.eo.cold_resume = precise;
+        TestServer srv(su);
+        g_log.clear();
+        const auto a1 = makePrompt(3000, 7401);
+        const auto b1 = makePrompt(11000, 7402);
+        const auto oa1 = srv.model().greedyReference(a1, 4800, true);
+        auto r1 = srv.post("/v1/completions", completionBody(a1, 4800));
+        CHECK_EQ(completionText(r1), decode(oa1));
+        srv.onEngine([] {});
+        CHECK_EQ(completionText(srv.post("/v1/completions", completionBody(b1, 16))), decode(srv.model().greedyReference(b1, 16, true)));
+        srv.onEngine([] {});
+        const auto a2 = next(a1, oa1, 300, 7403);
+        const auto ref2 = srv.model().greedyReference(a2, 24, true);
+        auto r2 = srv.post("/v1/completions", completionBody(a2, 24));
+        CHECK_EQ(completionText(r2), decode(ref2));
+        srv.onEngine([] {});
+        CHECK_EQ(completionText(srv.post("/v1/completions", completionBody(b1, 16))), decode(srv.model().greedyReference(b1, 16, true)));
+        srv.onEngine([] {});
+        std::size_t na = 0, nre = 0;
+        srv.onEngine([&] {
+            for (const tier::Entry* e : lineage(srv.tierp(), std::span<const std::uint32_t>(a1.data(), 1024))) {
+                ++na;
+                nre += e->reused ? 1 : 0;
+            }
+        });
+        std::fprintf(stderr, "  (rev5a long-answer probe precise %d: A turn-1 entry %zu tok answer, cached a2 %llu, A entries %zu (reused %zu), in place %zu)\n",
+                     precise ? 1 : 0, oa1.size(), (unsigned long long)cachedTokens(r2), na, nre, g_log.count("in place"));
+        CHECK_EQ(srv.model().poison(), 0u);
+    }
+}
+
+
+// probe (reported): precise, two sessions alternating 4 turns each on one slot. Does a session's own earlier turn
+// become a "shared prefix" (lcpTarget counts the session's own tier entry) and does a later turn then restore from
+// that shared copy (restoreIsShared: pos == n_tok -> shared -> lineage lost again)?
+void testRevS5aTurnsProbe() {
+    using namespace rev5a;
+    for (const bool precise : {false, true}) {
+        ServerSetup su = baseSetup();
+        su.mc.parallel = 1;
+        su.mc.slot_ctx = 8192;
+        su.mc.pool_tokens = 4096;
+        su.tier = true;
+        su.tier_min = 512;
+        su.eo.n_ck = 3;
+        su.eo.cold_resume = precise;
+        TestServer srv(su);
+        g_log.clear();
+        std::vector<std::uint32_t> pa = makePrompt(3000, 7501), pb = makePrompt(3200, 7502);
+        const std::span<const std::uint32_t> ka(pa.data(), 1024);
+        const std::vector<std::uint32_t> kb_v(pb.begin(), pb.begin() + 1024);
+        const std::vector<std::uint32_t> ka_v(pa.begin(), pa.begin() + 1024);
+        (void)ka;
+        std::string trace;
+        for (int t = 0; t < 3; ++t) {  // (a 4th B turn exceeds slot_ctx)
+            for (int s = 0; s < 2; ++s) {
+                std::vector<std::uint32_t>& p = s == 0 ? pa : pb;
+                const auto ref = srv.model().greedyReference(p, 40, true);
+                auto r = srv.post("/v1/completions", completionBody(p, 40));
+                CHECK_EQ(completionText(r), decode(ref));
+                srv.onEngine([] {});
+                std::size_t nl = 0, ns = 0;
+                srv.onEngine([&] {
+                    for (const tier::Entry* e : withPrefix(srv.tierp(), s == 0 ? ka_v : kb_v)) (isSpeEntry(e) ? ns : nl) += 1;
+                });
+                trace += std::format(" {}{}:c{}/L{}/S{}", s == 0 ? 'A' : 'B', t + 1, cachedTokens(r), nl, ns);
+                p = next(p, ref, 300, 7510 + static_cast<std::uint64_t>(t * 2 + s));
+            }
+        }
+        std::fprintf(stderr, "  (rev5a turns probe precise %d:%s; in place %zu, new entry %zu, shared spills %zu)\n", precise ? 1 : 0,
+                     trace.c_str(), g_log.count("(in place"), g_log.count("(new entry"), g_log.count("shared prefix: spill"));
+        CHECK_EQ(srv.model().poison(), 0u);
+        CHECK_EQ(srv.model().hidMismatch(), 0u);
+    }
+}
+
 int main(int argc, char** argv) {
     whirl::test::clearWhirlEnv();  // FR-TEST P3-11
     // arch024 M8: the test program is the "test build": an owner check violation throws std::logic_error; every test
@@ -6895,6 +7237,10 @@ int main(int argc, char** argv) {
         {"tier_bridge_restore", testTierBridgeRestore},
         {"prefix_store", testPrefixStore},
         {"cold_resume_engine", testColdResumeEngine},
+        {"rev5a_sessions", testRevS5aSessions},
+        {"rev5a_guards", testRevS5aGuards},
+        {"rev5a_long_probe", testRevS5aLongAnswerProbe},
+        {"rev5a_turns_probe", testRevS5aTurnsProbe},
         {"vision_split_engine", testVisionSplitEngine},
         {"compat_endpoints", testCompatEndpoints},
         {"http_limits", testHttpLimits},
