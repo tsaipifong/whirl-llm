@@ -119,6 +119,7 @@ public:
     void spillSpe(Spe& s);
 
     // ---- CACHE-1 superseded sessions (spillSlot calls these: mark on a new entry, apply on an in-place update)
+    void dropContained(std::uint32_t slot_id, tier::Entry* x);
     void supersedeMark(std::uint32_t slot_id, tier::Entry* x);
     void supersedeApply(std::uint32_t slot_id, tier::Entry* x);
     std::size_t supersedePending() const { return supersede_.size(); }  // marks not yet applied (tests)

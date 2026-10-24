@@ -256,6 +256,19 @@ static void testLcpTarget() {
     CHECK(pc->lcpTarget(slots, spes, toks, 0, 0, floor64) == 8960);
     // at most the request length - 1
     CHECK(pc->lcpTarget(slots, spes, seq(9000), 0, 0, floor64) == 8960);
+    // bug-s5a-cachemiss F2: the request's own slot / tier entry continued whole is not another session
+    {
+        std::vector<Sp> sp0(2);
+        CHECK(pc->lcpTarget(slots, sp0, toks, 0, 0, floor64) == 6976);                  // tier entry 5 (7000 tok)
+        CHECK(pc->lcpTarget(slots, sp0, toks, 0, 0, floor64, 9, 5) == 4992);            // own entry left out: slot 1
+        CHECK(pc->lcpTarget(slots, sp0, toks, 0, 0, floor64, 1, 5) == 4992);            // slot 1 diverges at its end: counts
+        CHECK(pc->lcpTarget(slots, sp0, toks, 0, 0, floor64, 1, 0) == 6976);            // own slot only
+        std::vector<Sl> s3(2);
+        s3[0].cache_tokens = seq(6000);                                                  // continued whole by toks
+        CHECK(pc->lcpTarget(s3, sp0, toks, 0, 0, floor64, 0, 5) == 0);                  // own slot + own entry
+        CHECK(pc->lcpTarget(s3, sp0, toks, 0, 0, floor64, 1, 5) == 5952);               // another slot's session counts
+        CHECK(pc->lcpTarget(slots, sp0, seq(4000), 0, 0, floor64, 1, 5) == 3968);       // diverges inside them: counts
+    }
     // minimum: sys_min, else 2048
     std::vector<Sl> s2(1);
     s2[0].cache_tokens = seq(2000);

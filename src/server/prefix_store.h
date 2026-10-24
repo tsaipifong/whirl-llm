@@ -165,7 +165,8 @@ public:
     // ---- lookup over the slots
     Match cacheMatch(SlotPrefix& sl, std::span<const std::uint32_t> toks) const;
     std::uint32_t lcpTarget(cache::View<const cache::SlotCache> slots, std::span<const std::uint32_t> toks,
-                            std::uint32_t reuse, std::uint32_t sys) const;
+                            std::uint32_t reuse, std::uint32_t sys, std::size_t self_slot = static_cast<std::size_t>(-1),
+                            std::uint64_t self_tier = 0) const;
     // the free slot (avail(slot)) that resumes the longest prefix (its own checkpoints, or a shared one), ties to
     // the least recently used; nullptr: none free
     template <class S, class Avail>

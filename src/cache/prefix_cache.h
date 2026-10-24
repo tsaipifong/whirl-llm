@@ -150,8 +150,13 @@ public:
     virtual int findShared(View<const SpeKey> spes, Tokens prefix) const = 0;
     virtual TierResume matchTierEntry(Tier::Entry e, Tokens toks, const ResumePred& accept = {}) const = 0;
     virtual std::uint64_t findTierShared(Tokens prefix) const = 0;  // tier id of a 1-checkpoint copy, 0 none
+    // self_slot / self_tier: the requesting slot and the tier entry of its lineage (bug-s5a-cachemiss F2): when the
+    // request continues one of them whole it is this session's own earlier state, not another session sharing a
+    // prefix, and does not count (precise resumes at a tail checkpoint 4+ pages before it: a copy of the own
+    // session would be made). npos / 0: none.
     virtual std::uint32_t lcpTarget(View<const SlotCache> slots, View<const SpeKey> spes, Tokens toks,
-                                    std::uint32_t reuse, std::uint32_t sys, const FloorFn& floor) const = 0;
+                                    std::uint32_t reuse, std::uint32_t sys, const FloorFn& floor,
+                                    std::size_t self_slot = static_cast<std::size_t>(-1), std::uint64_t self_tier = 0) const = 0;
 
     // insertion / eviction
     // slot to write a checkpoint at pos: the one already at pos, else a free one, else the oldest

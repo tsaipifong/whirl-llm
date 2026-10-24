@@ -155,7 +155,12 @@ void TierBridge::spillSlot(std::uint32_t id, bool idle, SlotPrefix& sp, SlotTier
             // branch -- a conversation that shares only a prefix (a subagent with the same system
             // prompt on the main agent's slot, or another slot that restored a shorter checkpoint of
             // it): a new entry, the old branch stays in the tiers (FR-CACHE P3-3).
-            const bool near_end = cache::nearEndDivergence(old->n_tok, static_cast<std::size_t>(st.tier_pages) * kv_page);
+            // bug-s5a-cachemiss F1: the content holds the whole entry (the session went on; precise resumed at a
+            // tail checkpoint, so tier_pages is short of the entry by the tail + the answer): in place
+            const bool contains = P >= old->n_tok && old->tokens.size() >= old->n_tok &&
+                                  std::equal(old->tokens.begin(), old->tokens.begin() + old->n_tok, sp.cache_tokens.begin());
+            const bool near_end =
+                contains || cache::nearEndDivergence(old->n_tok, static_cast<std::size_t>(st.tier_pages) * kv_page);
             if (old->in_ram && old->owner && *old->owner == id && old->pin == 0 && !old->loading &&
                 old->nck == sp.ckpts.size() && near_end) {
                 if (old->io_busy) {
@@ -275,8 +280,36 @@ void TierBridge::spillSlot(std::uint32_t id, bool idle, SlotPrefix& sp, SlotTier
          id, P, fresh ? "new entry" : "in place", vp, npages, static_cast<double>(ck_bytes) / 1048576.0,
          static_cast<double>(bytes) / 1048576.0, static_cast<double>(t->ramUsedBytes()) / 1073741824.0,
          static_cast<double>(t->cfg.ram_bytes) / 1073741824.0);
+    if (fresh) dropContained(id, x);
     if (fresh) supersedeMark(id, x);
     else supersedeApply(id, x);
+}
+
+// bug-s5a-cachemiss F4 (llama.cpp server_prompt_cache::alloc: "remove any cached prompts that are fully contained
+// in the current prompt"): a new entry replaces the session entries whose tokens it holds whole -- an older copy of
+// the same conversation (a slot that lost the lineage: another slot extended it, a restore from a shared copy or a
+// failed restore, an entry no longer in place). Left alone: shared prefix entries (one checkpoint at their end, the
+// VRAM shared checkpoints refer to them), entries another slot extends, entries a restore / SSD job / other entry
+// still reads, and entries with an SSD copy (other files may share its blocks; RAM pressure and expiry handle them).
+// The new entry inherits 'reused' (a multi-turn session stays worth an SSD write).
+void TierBridge::dropContained(std::uint32_t slot_id, tier::Entry* x) {
+    tier::Tier* t = tier_;
+    if (!t || !x || x->n_tok == 0) return;
+    std::vector<tier::Entry*> drop;
+    for (tier::Entry* e : t->entries) {
+        if (e == x || e->n_tok == 0 || e->n_tok > x->n_tok || e->tokens.size() < e->n_tok) continue;
+        if (e->nck == 1 && e->ck[0].valid != 0 && e->ck[0].kind >= 4 && e->ck[0].pos == e->n_tok) continue;  // shared prefix
+        if (e->owner && *e->owner != slot_id) continue;
+        if (e->ssd || !e->in_ram || e->pin != 0 || e->io_busy || e->ext_pin != 0 || e->loading || !t->gpuIdle(e)) continue;
+        if (!std::equal(e->tokens.begin(), e->tokens.begin() + e->n_tok, x->tokens.begin())) continue;
+        drop.push_back(e);
+    }
+    for (tier::Entry* e : drop) {
+        x->reused = x->reused || e->reused;
+        logI("slot {} | kv tier: entry {:016x} ({} tok) is contained in the new entry ({} tok): replaced", slot_id, e->id, e->n_tok,
+             x->n_tok);
+        t->removeEntry(e);
+    }
 }
 
 // CACHE-1 superseded sessions (agent compact / compress: same system prompt,

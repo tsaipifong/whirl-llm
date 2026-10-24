@@ -153,14 +153,23 @@ public:
     }
 
     std::uint32_t lcpTarget(View<const SlotCache> slots, View<const SpeKey> spes, Tokens toks, std::uint32_t reuse,
-                            std::uint32_t sys, const FloorFn& floor) const override {
+                            std::uint32_t sys, const FloorFn& floor, std::size_t self_slot,
+                            std::uint64_t self_tier) const override {
         if (!cfg_.lcp_on || spes.empty() || !cfg_.enabled) return 0;
         std::size_t L = 0;
-        for (std::size_t i = 0; i < slots.size(); ++i) L = std::max(L, lcpLen(slots[i].cache_tokens, toks));
+        // the own lineage continued whole (lcp == its length) is not another session (bug-s5a-cachemiss F2)
+        const auto other = [&](Tokens t, bool self) {
+            const std::size_t l = lcpLen(t, toks);
+            return self && l == t.size() ? std::size_t{0} : l;
+        };
+        for (std::size_t i = 0; i < slots.size(); ++i) L = std::max(L, other(slots[i].cache_tokens, i == self_slot));
         for (std::size_t i = 0; i < spes.size(); ++i)
             if (spes[i].valid) L = std::max(L, lcpLen(spes[i].tokens, toks));
         if (tier_)
-            for (std::size_t i = 0; i < tier_->entryCount(); ++i) L = std::max(L, lcpLen(tier_->tokens(tier_->entryAt(i)), toks));
+            for (std::size_t i = 0; i < tier_->entryCount(); ++i) {
+                const Tier::Entry e = tier_->entryAt(i);
+                L = std::max(L, other(tier_->tokens(e), self_tier != 0 && tier_->id(e) == self_tier));
+            }
         const std::size_t mn = cfg_.sys_min > 0 ? cfg_.sys_min : 2048;
         if (L < mn || L < 2) return 0;
         const std::size_t a = floor(std::min(L, toks.size() - 1));

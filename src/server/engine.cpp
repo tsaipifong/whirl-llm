@@ -973,7 +973,7 @@ bool Engine::startJob(Slot& sl, Job& job) {
         if (Spe* s = ps_.speMatch(toks); s && s->n > mt.reuse) spe_hit = s;
     }
     const std::uint32_t sys = ps_.sysSplit(toks);
-    const std::uint32_t lcp_t = ps_.lcpTarget(slots_, toks, spe_hit ? spe_hit->n : mt.reuse, sys);
+    const std::uint32_t lcp_t = ps_.lcpTarget(slots_, toks, spe_hit ? spe_hit->n : mt.reuse, sys, sl.id, sl.tier_id);
     if (spe_hit) {
         attachSpe(sl, *spe_hit);
         mt = PrefixStore::Match{spe_hit->n, &spe_hit->ck, std::max<std::size_t>(mt.lcp, spe_hit->n)};

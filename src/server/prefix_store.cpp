@@ -140,8 +140,10 @@ PrefixStore::Match PrefixStore::cacheMatch(SlotPrefix& sl, std::span<const std::
 }
 
 std::uint32_t PrefixStore::lcpTarget(cache::View<const cache::SlotCache> slots, std::span<const std::uint32_t> toks,
-                                     std::uint32_t reuse, std::uint32_t sys) const {
-    return pc_->lcpTarget(slots, spes_, toks, reuse, sys, [&](std::size_t lim) { return schedFloor(toks, lim); });
+                                     std::uint32_t reuse, std::uint32_t sys, std::size_t self_slot,
+                                     std::uint64_t self_tier) const {
+    return pc_->lcpTarget(slots, spes_, toks, reuse, sys, [&](std::size_t lim) { return schedFloor(toks, lim); }, self_slot,
+                          self_tier);
 }
 
 }  // namespace whirl::server
