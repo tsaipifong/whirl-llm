@@ -144,10 +144,13 @@ Config Config::fromGguf(const gguf::File& f) {
     inRange(moe ? "expert_shared_feed_forward_length" : "feed_forward_length", c.n_ff, 1, 1u << 20);
     inRange("attention.head_count", c.n_head, 1, 1024);
     inRange("attention.head_count_kv", c.n_head_kv, 1, c.n_head);
-    // flash decoding keeps up to 8 query heads per KV head in shared memory
-    if (c.n_head % c.n_head_kv != 0 || c.n_head / c.n_head_kv > 8)
-        bad("attention.head_count / head_count_kv = " + std::to_string(c.n_head) + " / " + std::to_string(c.n_head_kv) +
-            " (must divide evenly, at most 8 query heads per KV head)");
+    // query heads per KV head: up to 8 at any head_dim (attn_split), up to 16 at head_dim 256 (the WMMA split-K
+    // decode kernels; Ornith-1.5-122B: 32 / 2), kernels_abi.h gqaGroupOk (fix122-gqa16)
+    if (!kernels::gqaGroupOk(c.n_head, c.n_head_kv, c.head_dim))
+        bad("attention.head_count / head_count_kv = " + std::to_string(c.n_head) + " / " + std::to_string(c.n_head_kv) + " with key_length " +
+            std::to_string(c.head_dim) + " (must divide evenly; at most " + std::to_string(kernels::kAttnSplitMaxGroup) +
+            " query heads per KV head, or " + std::to_string(kernels::kAttnTileMaxGroup) + " with key_length " +
+            std::to_string(kernels::kHeadDim) + ")");
     // attention kernels keep one head (<= 256 values) per shared-memory row
     inRange("attention.key_length", c.head_dim, 32, 256);
     if (c.head_dim % 32 != 0) bad("attention.key_length " + std::to_string(c.head_dim) + " is not a multiple of 32");

@@ -205,6 +205,18 @@ inline constexpr int kGdnMaxSnap = 15;       // GDN_MAX_SNAP
 inline constexpr int kMaxSmallBatch = 16;    // multi-token GEMV / small-batch kernels: 2..16 tokens
 inline constexpr int kMaxVerifyRows = 32;    // rows of one batched verify / MTP step (gemvx_v6_* past 16)
 inline constexpr int kMaxDrafts = 10;        // MTP drafts per verify cycle
+// GQA group (query heads per KV head) each decode attention kernel holds (fix122-gqa16):
+inline constexpr int kAttnSplitMaxGroup = 8;  // FD_MAXG: attn_split keeps <= 8 heads of a group in shared rows
+inline constexpr int kAttnDq4MaxGroup = 8;    // DQ_C: attn_dq4 has <= 8 columns (one query x its group)
+inline constexpr int kAttnTileMaxGroup = 16;  // attn_ws4 / attn_ws4g / attn_wsplit*: a row's heads in one 16-column WMMA tile
+// a group some decode kernel serves: <= 8 at any head_dim (attn_split), <= 16 at head_dim kHeadDim (the WMMA
+// split-K kernels; attn_split / attn_dq4 are never chosen above 8, ops::chooseAttnDecode)
+inline constexpr bool gqaGroupOk(std::uint32_t n_head, std::uint32_t n_head_kv, std::uint32_t head_dim) {
+    if (n_head_kv == 0 || n_head % n_head_kv != 0) return false;
+    const std::uint32_t g = n_head / n_head_kv;
+    return g <= static_cast<std::uint32_t>(kAttnSplitMaxGroup) ||
+           (g <= static_cast<std::uint32_t>(kAttnTileMaxGroup) && head_dim == static_cast<std::uint32_t>(kHeadDim));
+}
 inline constexpr int kDFlashAttnKeys = 2304;  // DF_MAXK: keys (context ring + block) of dflash_attn; more: dflash_attn_long
 inline constexpr int kDFlashMaxKeys = 65536;  // host limit on ring + block for dflash_attn_long (ring VRAM, int indexing)
 inline constexpr int kGemm3Bm = 256, kGemm3Bn = 256, kGemm3Threads = 512;  // GEMM3_*

@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <cstring>
 #include <deque>
+#include <stdexcept>
 #include <string>
 #include <type_traits>
 
@@ -473,6 +474,22 @@ void testAttnDecodeGqa16() {
         CHECK(group8safe(ops::chooseAttnDecode(p, f, k8, k8.caps, p8s)));
         CHECK(group8safe(ops::chooseAttnDecode(p, f, k97, k97.caps, p97)));
     }
+    // no attn_wsplit1 in the table (an older code object): a clear error, never attn_split with an overflowing group
+    kn::KernelTable knw = k97;
+    knw.attn_wsplit1 = nullptr;
+    f.dbg_flags = 0;
+    p.kv_q4 = false;
+    bool threw = false;
+    try {
+        (void)ops::chooseAttnDecode(p, f, knw, knw.caps, p97);
+    } catch (const std::logic_error&) {
+        threw = true;
+    }
+    CHECK(threw);
+    // ... while group 8 without attn_wsplit1 still takes attn_split (unchanged)
+    p.n_head = 16;
+    CHECK(nameOf(ops::chooseAttnDecode(p, f, knw, knw.caps, p97).f) == "attn_split");
+    p.n_head = 32;
     // prefill: attn_kg4 (4 divides 16, 6 does not), 32 / 4 = 8 head blocks
     ops::AttnPrefillProblem pp;
     pp.n = 512;

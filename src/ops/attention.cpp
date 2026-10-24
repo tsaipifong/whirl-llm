@@ -10,6 +10,8 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <stdexcept>
+#include <string>
 #include <utility>
 
 namespace whirl::ops {
@@ -71,6 +73,12 @@ AttnDecodePlan chooseAttnDecode(const AttnDecodeProblem& p, const AttnDecodeFlag
                                 const device::Profile& prof) {
     const u32 n = p.n, hd = p.head_dim;
     const u32 grp_q = p.n_head / p.n_head_kv;
+    // GQA group limits of the kernels (kernels_abi.h, fix122-gqa16): attn_split and attn_dq4 hold <= 8 heads of a
+    // group, the WMMA split-K kernels a row's <= 16 heads in one 16-column tile. Above 8, dbg_flags bit 2 (force
+    // attn_split) is ignored; at <= 8 every condition below is the one it replaced (same choices and grids).
+    const u32 max_split = static_cast<u32>(kernels::kAttnSplitMaxGroup), max_dq4 = static_cast<u32>(kernels::kAttnDq4MaxGroup),
+              max_tile = static_cast<u32>(kernels::kAttnTileMaxGroup);
+    const bool no_force_split = (f.dbg_flags & 2) == 0 || grp_q > max_split;
     AttnDecodePlan pl;
     // gfx1151, f16 / int8 KV: attn_ws4 (groups of one row) and attn_ws4g (multi-row verify
     // groups; DES-ATTN-8S T2 / T3). Every row's partials are bitwise those of an attn_wsplit1
@@ -79,14 +87,14 @@ AttnDecodePlan chooseAttnDecode(const AttnDecodeProblem& p, const AttnDecodeFlag
     // ws4::kNs (64): the ranges depend on n_pos (and the draft window) only, WHIRL_FD_SPLITS
     // does not apply. WHIRL_ATTN_WS4=0: the old path below.
     const bool ws4_path = f.attn_ws4 && k.attn_ws4 != nullptr && k.attn_ws4g[0] != nullptr && k.attn_ws4g[1] != nullptr && k.attn_ws4g[2] != nullptr &&
-                          k.attn_wsplit1 != nullptr && !p.kv_q4 && hd == ws4::kD && grp_q <= 16 && (f.dbg_flags & 2) == 0;
+                          k.attn_wsplit1 != nullptr && !p.kv_q4 && hd == ws4::kD && grp_q <= max_tile && no_force_split;
     u32 n_split = ws4_path ? std::min<u32>(ws4::kNs, (p.max_ctx + fd_chunk - 1) / fd_chunk) : std::min(f.fd_splits, (p.max_ctx + fd_chunk - 1) / fd_chunk);
     // FAST-8S-1 (gfx1151, q4 KV through attn_dq4): the smallest split count whose key partition (dq_per) is the
     // same as fd_splits' for every row: same partials, same combine order, so bitwise the same output. The
     // profile row says where this was measured and output-checked (the 8060S); the R9700 keeps the fixed grid.
     // (the same conditions as the wsplit branch below, REVIEW-022 F10)
-    if (prof.attn_dq4_dynamic_splits && !ws4_path && p.kv_q4 && f.attn_dq4 && f.dq4_dyn && k.attn_dq4 != nullptr && caps.attn_group1 && grp_q <= 8 &&
-        p.rows_known && k.attn_wsplit1 != nullptr && hd == 256 && (f.dbg_flags & 2) == 0)
+    if (prof.attn_dq4_dynamic_splits && !ws4_path && p.kv_q4 && f.attn_dq4 && f.dq4_dyn && k.attn_dq4 != nullptr && caps.attn_group1 && grp_q <= max_dq4 &&
+        p.rows_known && k.attn_wsplit1 != nullptr && hd == 256 && no_force_split)
         n_split = dq4Splits(p.row_pos.first(n), p.win, n_split);
     pl.n_split = n_split;
     if (ws4_path) {
@@ -129,13 +137,13 @@ AttnDecodePlan chooseAttnDecode(const AttnDecodeProblem& p, const AttnDecodeFlag
             pl.grid = D(p.n_head_kv * ((widest + rpb - 1) / rpb), n_split, ng);
             pl.block = D(256);
         }
-    } else if (k.attn_wsplit1 != nullptr && hd == 256 && grp_q <= 16 && (f.dbg_flags & 2) == 0) {
+    } else if (k.attn_wsplit1 != nullptr && hd == 256 && grp_q <= max_tile && no_force_split) {
         // query groups: consecutive rows of one sequence whose split size `per` (a function of the position)
         // matches, <= 16 columns each (attn_wsplit1) or <= 32 (attn_wsplit2: one K/V pass for up to 32 / grp_q rows).
         // caps.attn_group1 (gfx1151): one query per group (its WMMA P.V is not exact when a masked key carries a
         // real V row). q4 KV with attn_dq4 (FC-1c, gfx1201 too): every row its own group, so decode, verify and
         // MTP rows all take attn_dq4 (a row's partials never depend on its batch)
-        const bool dq4_rows = p.kv_q4 && f.attn_dq4 && k.attn_dq4 != nullptr && grp_q <= 8;
+        const bool dq4_rows = p.kv_q4 && f.attn_dq4 && k.attn_dq4 != nullptr && grp_q <= max_dq4;
         const bool one_q = (f.dbg_flags & 4) != 0 || caps.attn_group1 || dq4_rows;
         const bool known = p.rows_known && n > 1;
         auto group = [&](u32 max_q, kernels::AwGroups& groups) {
@@ -169,13 +177,19 @@ AttnDecodePlan chooseAttnDecode(const AttnDecodeProblem& p, const AttnDecodeFlag
             }
         }
         if (!wide) ng = group(max_q1, pl.groups).first;
-        // q4 KV: attn_dq4 (one query per group, GQA group <= 8; lossy fast-mode path)
-        const bool dq4 = !wide && max_q1 == 1 && f.attn_dq4 && k.attn_dq4 != nullptr && grp_q <= 8;
+        // q4 KV: attn_dq4 (one query per group, GQA group <= 8; lossy fast-mode path); above 8 attn_wsplit1 (its
+        // q4 twin attn_wsplit1_q4 in a q4-KV kernel table)
+        const bool dq4 = !wide && max_q1 == 1 && f.attn_dq4 && k.attn_dq4 != nullptr && grp_q <= max_dq4;
         pl.kind = dq4 ? AttnDecodeKind::dq4 : AttnDecodeKind::wsplit;
         pl.f = dq4 ? k.attn_dq4 : aw;
         pl.grid = D(p.n_head_kv, n_split, ng);
         pl.block = D(dq4 ? 256 : 128);
     } else {
+        // attn_split cannot hold a group above 8 (FD_MAXG); the model config refuses such shapes unless
+        // head_dim is 256 (kernels::gqaGroupOk), so this is a missing-kernel case, never a silent overflow
+        if (grp_q > max_split)
+            throw std::logic_error("attention decode: GQA group " + std::to_string(grp_q) + " needs head_dim 256 and attn_wsplit1 (got head_dim " +
+                                   std::to_string(hd) + ")");
         pl.kind = AttnDecodeKind::split;
         pl.f = k.attn_split;
         pl.grid = D(p.n_head_kv, n_split, n);
