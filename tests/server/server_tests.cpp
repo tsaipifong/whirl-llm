@@ -7368,6 +7368,67 @@ void testRevS5aR2Probe() {
     }
 }
 
+
+// review round 4 probe (print only): lost lineage (failed restore) in --kv-ssd-mode shutdown, close, restart, then
+// regenerate turn 2 (diverges right after turn 1's answer): which restore point survived the restart?
+void testRevS5aR4RestartProbe() {
+    using namespace rev5a;
+    const std::filesystem::path base = whirl::test::testTmpBase();
+    const std::string dir = narrow((base / L"server_test_rev5a_r4").wstring());
+    for (const bool precise : {false, true}) {
+        std::error_code ec;
+        std::filesystem::remove_all(dir, ec);
+        std::filesystem::create_directories(dir, ec);
+        ServerSetup su = baseSetup();
+        su.mc.parallel = 1;
+        su.mc.slot_ctx = 8192;
+        su.mc.pool_tokens = 4096;
+        su.tier = true;
+        su.ssd_dir = dir;
+        su.tier_min = 512;
+        su.tier_shutdown = true;
+        su.eo.n_ck = 3;
+        su.eo.cold_resume = precise;
+        const auto pa = makePrompt(3000, 7601), pb = makePrompt(3200, 7602);
+        std::vector<std::uint32_t> outa;
+        std::uint64_t pre_cached = 0;
+        std::size_t n_before = 0;
+        {
+            TestServer srv(su);
+            g_log.clear();
+            outa = srv.model().greedyReference(pa, 40, true);
+            CHECK_EQ(completionText(srv.post("/v1/completions", completionBody(pa, 40))), decode(outa));
+            CHECK_EQ(completionText(srv.post("/v1/completions", completionBody(pb, 40))), decode(srv.model().greedyReference(pb, 40, true)));
+            const auto pa2 = next(pa, outa, 300, 7603);
+            srv.ops().failHostToDevCopy(1);
+            auto r2 = srv.post("/v1/completions", completionBody(pa2, 40));
+            srv.ops().failHostToDevCopy(0);
+            CHECK_EQ(completionText(r2), decode(srv.model().greedyReference(pa2, 40, true)));
+            srv.onEngine([] {});
+            CHECK_EQ(completionText(srv.post("/v1/completions", completionBody(pb, 40))), decode(srv.model().greedyReference(pb, 40, true)));
+            srv.onEngine([] {});
+            srv.onEngine([&] { n_before = withPrefix(srv.tierp(), std::span<const std::uint32_t>(pa.data(), 1024)).size(); });
+            (void)pre_cached;
+        }
+        {
+            TestServer srv(su);
+            g_log.clear();
+            std::size_t na = 0, nssd = 0;
+            srv.onEngine([&] {
+                na = withPrefix(srv.tierp(), std::span<const std::uint32_t>(pa.data(), 1024)).size();
+                nssd = srv.tierp()->ssdEntries();
+            });
+            const auto pa2b = next(pa, outa, 300, 7604);
+            auto r3 = srv.post("/v1/completions", completionBody(pa2b, 40));
+            CHECK_EQ(completionText(r3), decode(srv.model().greedyReference(pa2b, 40, true)));
+            std::fprintf(stderr, "  (rev5a r4 restart precise %d: A entries before close %zu, SSD entries %zu, A after restart %zu, regen cached %llu)\n",
+                         precise ? 1 : 0, n_before, nssd, na, static_cast<unsigned long long>(cachedTokens(r3)));
+            CHECK_EQ(srv.model().poison(), 0u);
+        }
+        std::filesystem::remove_all(dir, ec);
+    }
+}
+
 int main(int argc, char** argv) {
     whirl::test::clearWhirlEnv();  // FR-TEST P3-11
     // arch024 M8: the test program is the "test build": an owner check violation throws std::logic_error; every test
@@ -7444,6 +7505,7 @@ int main(int argc, char** argv) {
         {"rev5a_long_probe", testRevS5aLongAnswerProbe},
         {"rev5a_turns_probe", testRevS5aTurnsProbe},
         {"rev5a_r2_probe", testRevS5aR2Probe},
+        {"rev5a_r4_restart", testRevS5aR4RestartProbe},
         {"vision_split_engine", testVisionSplitEngine},
         {"compat_endpoints", testCompatEndpoints},
         {"http_limits", testHttpLimits},
