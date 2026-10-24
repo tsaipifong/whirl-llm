@@ -7270,6 +7270,13 @@ void testRevS5aR2Probe() {
             std::fprintf(stderr, "  (rev5a r2 regen-after-lost-lineage precise %d: turn-1 len %zu, regen cached %llu, contained-drops %zu)\n",
                          precise ? 1 : 0, pa.size() + outa.size(), static_cast<unsigned long long>(cachedTokens(r3)),
                          g_log.count("is contained in the new entry"));
+            // fix-r21 (review R2-1): the cold-prefill entry of turn 2 holds turn 1 whole but not its gen-end
+            // checkpoint, so turn 1's entry must stay (demoted): the regenerated turn 2 resumes at turn 1's gen-end
+            // in balance (as before fix v2: 3039 of 3040), and precise keeps its 2048 (cold schedule) restore
+            const std::size_t len1 = pa.size() + outa.size();
+            if (precise) CHECK(cachedTokens(r3) >= 2048);
+            else CHECK(cachedTokens(r3) + 1 >= len1);
+            if (!precise) CHECK_EQ(g_log.count("is contained in the new entry"), 0u);
             CHECK_EQ(srv.model().poison(), 0u);
         }
         {
