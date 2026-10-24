@@ -53,11 +53,17 @@ foreach ($v in "WHIRL_DEVICE", "WHIRL_HIP_DEVICE", "WHIRL_KV_RAM_MB", "WHIRL_VRA
 }
 if (-not $env:AMD_LOG_LEVEL) { $env:AMD_LOG_LEVEL = "1" }
 
+# set or restore one environment variable for the child processes; $null removes it. PowerShell turns a $null
+# argument of [Environment]::SetEnvironmentVariable into "", which leaves the variable defined as empty: the 2026-10-24
+# S14 GPU run restored HIP_VISIBLE_DEVICES that way and the later "nothing set" cells saw no GPU (env_matrix_selftest.ps1)
+function SetEnv([string]$k, $v) {
+    if ($null -eq $v) { Remove-Item "env:$k" -ErrorAction SilentlyContinue } else { [Environment]::SetEnvironmentVariable($k, "$v") }
+}
 function Devs([hashtable]$envs) {
     $saved = @{}
-    foreach ($k in $envs.Keys) { $saved[$k] = [Environment]::GetEnvironmentVariable($k); [Environment]::SetEnvironmentVariable($k, $envs[$k]) }
+    foreach ($k in $envs.Keys) { $saved[$k] = [Environment]::GetEnvironmentVariable($k); SetEnv $k $envs[$k] }
     $o = @(& $cli --list-devices 2>&1 | ForEach-Object { "$_" })
-    foreach ($k in $saved.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k]) }
+    foreach ($k in $saved.Keys) { SetEnv $k $saved[$k] }
     return $o
 }
 $list = Devs @{}
@@ -91,11 +97,11 @@ function Srv([string]$tag, [hashtable]$envs, [string[]]$xargs, [bool]$expectUp =
     Remove-Item $log, $so, $se -ErrorAction SilentlyContinue
     $a = @($Model, "--port", "$Port", "--log-file", $log, "--kv-ssd-mode", "off", "--kv-ram-mb", "4096") + $xargs
     $saved = @{}
-    foreach ($k in $envs.Keys) { $saved[$k] = [Environment]::GetEnvironmentVariable($k); [Environment]::SetEnvironmentVariable($k, $envs[$k]) }
+    foreach ($k in $envs.Keys) { $saved[$k] = [Environment]::GetEnvironmentVariable($k); SetEnv $k $envs[$k] }
     Write-Host "  [$tag] $(($envs.Keys | ForEach-Object { "$_=$($envs[$_])" }) -join ' ') whirl-server $($a -join ' ')"
     $p = Start-Process -FilePath $srv -ArgumentList $a -NoNewWindow -PassThru -RedirectStandardOutput $so -RedirectStandardError $se
     $null = $p.Handle  # keeps ExitCode readable after a -PassThru start
-    foreach ($k in $saved.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k]) }
+    foreach ($k in $saved.Keys) { SetEnv $k $saved[$k] }
     $r = [ordered]@{ tag = $tag; up = $false; http = 0; exit = $null; arch = ""; hip = 0; log = $log; text = ""; room = ""; shared = ""; pinnedHost = $false }
     $limit = if ($expectUp) { 420 } else { 180 }
     for ($i = 0; $i -lt $limit -and -not $p.HasExited; $i++) {
@@ -134,11 +140,11 @@ function StartHog([string]$tag, [int]$vram, [int]$pinned) {
     $ready = Join-Path $Work "hog_$tag.ready"
     Remove-Item $ready -ErrorAction SilentlyContinue
     $saved = [Environment]::GetEnvironmentVariable("HIP_VISIBLE_DEVICES")
-    [Environment]::SetEnvironmentVariable("HIP_VISIBLE_DEVICES", "$myOrd")  # the hog sees (and pins on) this GPU only
+    SetEnv "HIP_VISIBLE_DEVICES" "$myOrd"  # the hog sees (and pins on) this GPU only
     $h = Start-Process -FilePath $hog -ArgumentList @("--device", "0", "--vram-mb", "$vram", "--pinned-mb", "$pinned", "--seconds", "900", "--ready", $ready) `
         -NoNewWindow -PassThru -RedirectStandardOutput (Join-Path $Work "hog_$tag.txt") -RedirectStandardError (Join-Path $Work "hog_${tag}_err.txt")
     $null = $h.Handle
-    [Environment]::SetEnvironmentVariable("HIP_VISIBLE_DEVICES", $saved)
+    SetEnv "HIP_VISIBLE_DEVICES" $saved
     for ($i = 0; $i -lt 120 -and -not (Test-Path $ready) -and -not $h.HasExited; $i++) { Start-Sleep 1 }
     Start-Sleep 3
     Write-Host "  [hog $tag] pid $($h.Id) $(Get-Content (Join-Path $Work "hog_$tag.txt") -ErrorAction SilentlyContinue)"
@@ -220,10 +226,10 @@ if ($Cells -contains "E2") {
 }
 if ($Cells -contains "E7") {
     $gs = Join-Path $PSScriptRoot "gpu_select_check.ps1"
-    [Environment]::SetEnvironmentVariable("WHIRL_CKPT_HOST", "1")
+    SetEnv "WHIRL_CKPT_HOST" "1"
     $o = @(& pwsh -NoProfile -File $gs -Build $Build -Model $Model -Device $Device -Port ($Port + 1) -Work (Join-Path $Work "e7_gpusel") 2>&1 | ForEach-Object { "$_" })
     $gsc = $LASTEXITCODE
-    [Environment]::SetEnvironmentVariable("WHIRL_CKPT_HOST", $null)
+    SetEnv "WHIRL_CKPT_HOST" $null
     $o | Set-Content (Join-Path $Work "e7_gpusel.txt")
     $sel = @(Get-ChildItem (Join-Path $Work "e7_gpusel") -Recurse -File -Filter "server.log" -ErrorAction SilentlyContinue)
     foreach ($l in $sel) { Copy-Item $l.FullName (Join-Path $Work "server_e7_gpusel_$($l.Directory.Name).log") -Force }
