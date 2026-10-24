@@ -267,8 +267,34 @@ def analyze(changes, m, new_rev, old_rev):
     if not archs and paths:
         archs = {"gfx1201", "gfx1151"}
     rep = build_report(m, paths, models, archs, tests, reruns, notes, hits)
+    pins = pins_files(changes, m)
+    if pins:
+        rep["release_gate_steps"] = sorted(set(rep["release_gate_steps"]) | {"cpu_pins"})
+        rep["notes"].append(f"cpu_pins: {', '.join(pins[:4])}{' ...' if len(pins) > 4 else ''} linked by whirl-pins / whirl-startup-replay")
     rep.update(module_gate(changes, rep=rep, m=m))
     return rep
+
+
+# arch024-S11c (F-3, S11b P1 / P4: template changes caught only by the prompt token pin, which no step ran): the CPU pins
+# (tests/pins/check.ps1) cover every product source whirl-pins / whirl-startup-replay link (tokenizer, chat template,
+# server engine, cache, tier, startup decisions) and every header such a source includes; tests/pins/* themselves too.
+PIN_EXES = ("whirl-pins", "whirl-startup-replay")
+
+
+def pins_files(changes, m):
+    linked = set()
+    for e in PIN_EXES:
+        linked |= set(m.get("executables", {}).get(e, []))
+    out = []
+    for path in sorted(changes):
+        if path.startswith("tests/pins/"):
+            out.append(path)
+            continue
+        if not path.startswith(("src/", "include/")) or not path.endswith((".cpp", ".h", ".inc")):
+            continue
+        if path in linked or any(x in linked for x in m.get("includers", {}).get(path, [])):
+            out.append(path)
+    return out
 
 
 def load_modules(root=None):

@@ -41,7 +41,9 @@ muts = [
     ("gate: no both-GPU hint for added steps (review K1)", gate,
      '    if ($addedGpu.Count) {', '    if ($false) {'),
     ("modules.json: protocol drops golden_swift", mods,
-     '"steps": ["cpu_server", "srv_fs_swift", "srv_fs_moe", "golden_swift"]', '"steps": ["cpu_server", "srv_fs_swift", "srv_fs_moe"]'),
+     '"steps": ["cpu_pins", "cpu_server", "srv_fs_swift", "srv_fs_moe", "golden_swift"]', '"steps": ["cpu_pins", "cpu_server", "srv_fs_swift", "srv_fs_moe"]'),
+    ("modules.json: protocol drops cpu_pins (arch024-S11c F-3)", mods,
+     '"steps": ["cpu_pins", "cpu_server", "srv_fs_swift", "srv_fs_moe", "golden_swift"]', '"steps": ["cpu_server", "srv_fs_swift", "srv_fs_moe", "golden_swift"]'),
 ]
 fails = 0
 for name, f, old, new in muts:

@@ -71,9 +71,9 @@
    "id": "M6", "desc": "HTTP / OpenAI protocol / streaming (stream, EngineApi)",
    "paths": ["src/server/stream.*", "src/server/engine_api.h", "src/server/http.*", "src/server/protocol.*"],
    "lands_on": "arch024 S8 (40b637e on arch024-proto; 51de103 on arch024-int)",
-   "steps": ["cpu_server", "srv_fs_swift", "srv_fs_moe", "golden_swift"],
+   "steps": ["cpu_pins", "cpu_server", "srv_fs_swift", "srv_fs_moe", "golden_swift"],
    "gpus": {"srv_fs_swift": 1, "srv_fs_moe": 1, "golden_swift": 1},
-   "manual": ["prompt token hash == S0 (whirl-server-tests)", "golden_swift stays until S11b proves the token hash catches a template regression"]
+   "manual": ["prompt token hash == S0: cpu_pins (tests/pins/check.ps1, arch024-S11c F-3) plus unit + server-tests (S11b P2: the hash alone misses an alias-table change)", "golden_swift stays until owner sign-off O1 (S11b: M6 files 3/3 caught on CPU)"]
   },
   "engine_gov": {
    "id": "M7", "desc": "memory governor glue (engine_gov.cpp; policy memgov::Governor unchanged)",

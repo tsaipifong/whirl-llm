@@ -152,8 +152,8 @@ AddStep "cpu_golden_xcheck" $false @($pwsh, "-NoProfile", "-File", (Join-Path $r
 AddStep "cpu_module_gate" $false @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\gates\module_gate_test.ps1"), "-Work", "@WORK@") { param($o, $c) $c -eq 0 -and ($o -match "^module gate test: ([1-9]\d*)/\1 cases ok") }
 # review C7: modules.json against this tree and this gate, and the block / pass tests of that check and of impact.py's
 # module mapping (python: WHIRL_GATE_PYTHON, else python on PATH; none found = the step fails)
-AddStep "cpu_modules_check" $false @($pwsh, "-NoProfile", "-Command", "& '$py' -I '$(Join-Path $repo "tools\gates\modules_check_test.py")'; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\impact\validate_test.py")'; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\gates\modules_check.py")'; exit `$LASTEXITCODE") `
-    { param($o, $c) $c -eq 0 -and ($o -match "^modules check test: ([1-9]\d*)/\1 ok") -and ($o -match "^validate test: ([1-9]\d*)/\1 ok") -and ($o -match "^modules check: ok") }
+AddStep "cpu_modules_check" $false @($pwsh, "-NoProfile", "-Command", "& '$py' -I '$(Join-Path $repo "tools\gates\modules_check_test.py")'; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\impact\validate_test.py")'; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\impact\impact_steps_test.py")'; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\gates\modules_check.py")'; exit `$LASTEXITCODE") `
+    { param($o, $c) $c -eq 0 -and ($o -match "^modules check test: ([1-9]\d*)/\1 ok") -and ($o -match "^validate test: ([1-9]\d*)/\1 ok") -and ($o -match "^impact steps test: ([1-9]\d*)/\1 ok") -and ($o -match "^modules check: ok") }
 $ktArgs = @($exe["whirl-kernel-test"], "--device", $Device, "--require-all", "--mx", $SW, "--moemx", $MX) + @(if ($hasQ) { "--q4"; $Q })
 AddStep "kt_full" $true $ktArgs { param($o, $c) $c -eq 0 -and ($o -match "^PASS: 0 failing") -and ($o -match "--require-all: 0 required kernel") }
 foreach ($m in @($denseKeys) + @("moe")) {

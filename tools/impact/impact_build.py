@@ -134,6 +134,9 @@ RELEASE_STEPS = {
     # the device tests: both guard include/whirl/device_profile.h)
     "cpu_profile_switch": "exe:whirl-device-tests",
     "cpu_ops": "exe:whirl-ops-tests",  # kernel choice per op (ARCH-1 K-1..K-5)
+    # arch024-S11c (F-3): tests/pins/check.ps1 runs whirl-pins (prompt token hash, engine pins on the mock model) and
+    # whirl-startup-replay (startup decision table); impact.py selects it for every product file those two link
+    "cpu_pins": "tool",
 }
 CLI_GATES = {  # GPU gates run through whirl.exe subcommands: their roots are CLI functions (derived reach)
     "golden.single": ["goldenSingle"], "golden.pair": ["goldenPair"], "golden.ngram": ["goldenSingle"],
