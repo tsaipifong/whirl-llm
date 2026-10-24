@@ -381,6 +381,30 @@ void testLoadValidation() {
             expectCode(m, "UnsupportedConfig", "head_count_kv not dividing head_count rejected");
         }
         {
+            // fix122-gqa16: GQA groups up to 16 with head_dim 256 (Ornith-1.5-122B: 32 / 2 heads, head_dim 256) are served
+            // by the WMMA split-K decode kernels (16 columns per tile) and the NP | group prefill kernels
+            auto gqa = [&](std::uint64_t nh, std::uint64_t nkv, std::uint64_t hd, const char* code, const char* what) {
+                TinyModel m(moe);
+                m.hp["attention.head_count"] = nh;
+                m.hp["attention.head_count_kv"] = nkv;
+                m.hp["attention.key_length"] = hd;
+                m.hp["attention.value_length"] = hd;
+                m.hp["rope.dimension_count"] = hd / 2;
+                m.makeTensors();
+                expectCode(m, code, what);
+            };
+            gqa(32, 2, 256, "", "GQA group 16 with head_dim 256 accepted (122B shape)");
+            gqa(16, 1, 256, "", "GQA group 16 with one KV head accepted");
+            gqa(24, 2, 256, "", "GQA group 12 with head_dim 256 accepted");
+            gqa(16, 2, 32, "", "GQA group 8 with head_dim 32 still accepted");
+            gqa(16, 2, 256, "", "GQA group 8 with head_dim 256 still accepted (Ornith-35B shape)");
+            // above 8 the only kernels are the head_dim 256 ones (attn_split keeps <= 8 heads in shared memory)
+            gqa(32, 2, 128, "UnsupportedConfig", "GQA group 16 with head_dim 128 rejected");
+            // above 16 no decode kernel holds a row's heads in one 16-column tile
+            gqa(34, 2, 256, "UnsupportedConfig", "GQA group 17 rejected");
+            gqa(64, 2, 256, "UnsupportedConfig", "GQA group 32 rejected");
+        }
+        {
             TinyModel m(moe);
             m.hp["full_attention_interval"] = 0;  // isAttn() would divide by zero
             expectCode(m, "UnsupportedConfig", "full_attention_interval 0 rejected");

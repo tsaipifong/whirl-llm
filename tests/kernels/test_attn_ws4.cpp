@@ -25,12 +25,13 @@ namespace kt {
 namespace {
 
 // heads: the 27B (24 q / 4 kv heads, GQA 6) by default; the second pass of ws4 / ws4g uses the
-// qwen35moe shape (16 / 2, GQA 8: one 8-column group per row, tiles aligned with rows)
+// qwen35moe shape (16 / 2, GQA 8: one 8-column group per row, tiles aligned with rows), the third the
+// Ornith-1.5-122B shape (32 / 2, GQA 16: one row is one whole 16-column tile; fix122-gqa16)
 int kH = 24, kNkv = 4;
 constexpr int kD = 256, kQStr = 2 * kD, kNs = 64;
-// the GQA-8 pass: reduced context list (the 27B pass covers 256k), result names tagged
-bool g_grp8 = false;
-const char* grpTag() { return g_grp8 ? " [grp 8: 16 / 2 heads]" : ""; }
+// the GQA-8 / GQA-16 passes: reduced context list (the 27B pass covers 256k), result names tagged
+int g_grp = 0;  // 0: the 27B pass; 8 / 16: the extra passes
+const char* grpTag() { return g_grp == 8 ? " [grp 8: 16 / 2 heads]" : g_grp == 16 ? " [grp 16: 32 / 2 heads]" : ""; }
 const float kSc = 1.0f / 16.0f;
 
 enum class F { f16, q8, q4 };
@@ -254,9 +255,11 @@ void testAttnWs4(Ctx& c) {
     c.rep.family = "ws4";
     ws4IndexChecks(c);
     ws4Pass(c);
-    kH = 16, kNkv = 2, g_grp8 = true;
+    kH = 16, kNkv = 2, g_grp = 8;
     ws4Pass(c);
-    kH = 24, kNkv = 4, g_grp8 = false;
+    kH = 32, kNkv = 2, g_grp = 16;
+    ws4Pass(c);
+    kH = 24, kNkv = 4, g_grp = 0;
 }
 
 static void ws4Pass(Ctx& c) {
@@ -264,10 +267,10 @@ static void ws4Pass(Ctx& c) {
         c.rep.skip("ws4", "attn_ws4", "kernel not in this code object");
         return;
     }
-    const int maxpos = (c.quick || g_grp8) ? 70000 : 262144;
+    const int maxpos = (c.quick || g_grp != 0) ? 70000 : 262144;
     const int pages = (maxpos + wk::kKvPage - 1) / wk::kKvPage;
     std::vector<int> ctxs = {1, 2, 31, 32, 33, 63, 64, 65, 255, 256, 257, 511, 4095, 4096, 4097, 8191, 32767, 32768, 32769, 65613};
-    if (!c.quick && !g_grp8)
+    if (!c.quick && g_grp == 0)
         for (int x : {98304, 131071, 131072, 131073, 196613, 262143, 262144}) ctxs.push_back(x);
     for (int i = 0; i < 24; ++i) ctxs.push_back(1 + static_cast<int>(c.rng() % static_cast<std::uint64_t>(maxpos)));
     const std::vector<float> q = c.randn(static_cast<std::size_t>(8) * kH * kQStr);
@@ -529,9 +532,11 @@ Partials runG(Ctx& c, hip::Function fn, int cg, const Pool& p, const Buf& dq, co
 void testAttnWs4g(Ctx& c) {
     c.rep.family = "ws4g";
     ws4gPass(c);
-    kH = 16, kNkv = 2, g_grp8 = true;
+    kH = 16, kNkv = 2, g_grp = 8;
     ws4gPass(c);
-    kH = 24, kNkv = 4, g_grp8 = false;
+    kH = 32, kNkv = 2, g_grp = 16;
+    ws4gPass(c);
+    kH = 24, kNkv = 4, g_grp = 0;
 }
 
 static void ws4gPass(Ctx& c) {
@@ -550,10 +555,10 @@ static void ws4gPass(Ctx& c) {
         c.rep.skip("ws4g", "attn_ws4g3", "kernel not in this code object");
         return;
     }
-    const int maxpos = (c.quick || g_grp8) ? 70000 : 262144;
+    const int maxpos = (c.quick || g_grp != 0) ? 70000 : 262144;
     const int pages = (maxpos + wk::kKvPage - 1) / wk::kKvPage;
     std::vector<int> ctxs = {1, 2, 3, 8, 31, 32, 33, 40, 63, 64, 65, 255, 256, 257, 4095, 4096, 4097, 4100, 8191, 32767, 32768, 32769, 65613};
-    if (!c.quick && !g_grp8)
+    if (!c.quick && g_grp == 0)
         for (int x : {98304, 131071, 131072, 131073, 196613, 262143, 262144}) ctxs.push_back(x);
     for (int i = 0; i < 8; ++i) ctxs.push_back(1 + static_cast<int>(c.rng() % static_cast<std::uint64_t>(maxpos)));
     const std::vector<float> q = c.randn(static_cast<std::size_t>(32) * kH * kQStr);

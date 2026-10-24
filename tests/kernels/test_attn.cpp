@@ -1033,7 +1033,8 @@ void testAttn(Ctx& c) {
         }
     }
     // ---- attn_prefill_wmma, long KV: random cache contents (f16 / q8 / q8v / q4) behind a shuffled
-    // page table of a 17000-position context (9000 for q8v / q4 heads 3 / 6), KV heads 4 / 3 / 6,
+    // page table of a 17000-position context (9000 for q8v / q4 at 3 / 6 / 2 KV heads), 24 query heads over KV heads
+    // 4 / 3 / 6 / 2 (groups 6 / 8 / 4 / 12) and 32 over 2 (group 16, the Ornith-1.5-122B shape; fix122-gqa16),
     // query counts that are and are not multiples of the 128-query block, at the end of the context
     // (and from position 0): a few rows vs the CPU, and two head-range launches == one launch
     // (bitwise); decode (n 1): attn_split and attn_wsplit1 + attn_combine vs the CPU too
@@ -1041,7 +1042,8 @@ void testAttn(Ctx& c) {
         if (!fmtOk(c, fmt)) continue;
         const std::string fs = fmtSuffix(fmt);
         const bool kq = kQ8(fmt), vq = vQ8(fmt), q4 = fmt == Fmt::q4;
-        for (const int nkv : {4, 3, 6}) {
+        for (const auto& shape : {std::pair{24, 4}, std::pair{24, 3}, std::pair{24, 6}, std::pair{32, 2}, std::pair{24, 2}}) {
+        const int kHeads = shape.first, nkv = shape.second;  // shadows the file's 24-head constant in this section
         const int Lk = c.quick ? 3000 : (nkv == 4 || fmt == Fmt::f16 || fmt == Fmt::q8) ? 17000 : 9000;
         const int pages = (Lk + wk::kKvPage - 1) / wk::kKvPage;
         const std::size_t prow = static_cast<std::size_t>(pages) * wk::kKvPage;
@@ -1101,7 +1103,7 @@ void testAttn(Ctx& c) {
                 hip::launch(c.fn("attn_prefill_wmma" + fs), {cdiv(n, 128), static_cast<unsigned>(kHeads), 1}, {256, 1, 1}, 0, c.s, dq.p(), a,
                             rb.p(), kHeads, nkv, kQStride, dpos.p(), n, kScale, 0);
                 for (int h0 : {0, kHeads / 2})
-                    hip::launch(c.fn("attn_prefill_wmma" + fs), {cdiv(n, 128), kHeads / 2, 1}, {256, 1, 1}, 0, c.s, dq.p(), a, sb.p(), kHeads,
+                    hip::launch(c.fn("attn_prefill_wmma" + fs), {cdiv(n, 128), static_cast<unsigned>(kHeads / 2), 1}, {256, 1, 1}, 0, c.s, dq.p(), a, sb.p(), kHeads,
                                 nkv, kQStride, dpos.p(), n, kScale, h0);
                 c.sync();
                 const auto got = rb.down<float>(on);
@@ -1311,6 +1313,9 @@ void testAttn(Ctx& c) {
                 for (int kind = 0; kind < 3; ++kind) {
                     static const char* const kNames[3] = {"attn_split", "attn_wsplit1", "attn_dq4"};
                     if (kind == 2 && !q4) continue;
+                    // attn_split (FD_MAXG 8 shared rows) and attn_dq4 (DQ_C 8 columns) hold at most 8 heads of a
+                    // group; the host never picks them above that (ops tests: chooseAttnDecode at group 16)
+                    if (kind != 1 && grp > 8) continue;
                     const auto f = c.fnOpt(kind == 2 ? std::string(kNames[2]) : kNames[kind] + fs);
                     if (!f) continue;
                     if (kind == 0) {
@@ -1324,7 +1329,7 @@ void testAttn(Ctx& c) {
                                     ml.p(), acc.p(), kHeads, nkv, kQStride, dps.p(), kScale, DevPtr{0}, g1);
                     }
                     Buf out(on * 4);
-                    hip::launch(c.k.attn_combine, {kHeads, 1, 1}, {256, 1, 1}, 0, c.s, ml.p(), acc.p(), dq.p(), out.p(), kHeads, kHd, kQStride, ns);
+                    hip::launch(c.k.attn_combine, {static_cast<unsigned>(kHeads), 1, 1}, {256, 1, 1}, 0, c.s, ml.p(), acc.p(), dq.p(), out.p(), kHeads, kHd, kQStride, ns);
                     c.sync();
                     c.rep.add(cmpTol(std::string(kNames[kind]) + (kind == 2 ? "" : fs) + " + combine vs CPU" + where, out.down<float>(on), ro, rsc,
                                      1e-2, 1e-4));

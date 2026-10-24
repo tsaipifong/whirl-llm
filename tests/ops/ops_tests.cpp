@@ -411,6 +411,80 @@ void testAttnDecode() {
     CHECK(ops::awPer(1, 64) == 64 && ops::awPer(4096, 64) == 64 && ops::awPer(4097, 64) == 128);
 }
 
+// fix122-gqa16: the Ornith-1.5-122B shape (32 query heads over 2 KV heads = GQA group 16, head_dim 256). The decode
+// choice may only take kernels whose tiles hold 16 heads of a row (attn_ws4 / attn_ws4g / attn_wsplit1 / attn_wsplit2);
+// attn_split (FD_MAXG 8 shared rows) and attn_dq4 (DQ_C 8 columns) hold at most 8 and must never be chosen.
+void testAttnDecodeGqa16() {
+    const auto& p97 = whirl::device::k_profile_gfx1201;
+    const auto& p8s = whirl::device::k_profile_gfx1151;
+    ops::AttnDecodeProblem p;
+    p.n = 1;
+    p.head_dim = 256;
+    p.n_head = 32;
+    p.n_head_kv = 2;
+    p.max_ctx = 32768;
+    ops::AttnDecodeFlags f;
+    auto group8safe = [](const ops::AttnDecodePlan& pl) {
+        return pl.kind != ops::AttnDecodeKind::split && pl.kind != ops::AttnDecodeKind::dq4 && nameOf(pl.f) != "attn_split" &&
+               nameOf(pl.f) != "attn_dq4";
+    };
+    // gfx1201, f16 KV: one decode row = 16 columns of attn_wsplit1, grid (2 KV heads, 64 splits, 1)
+    const kn::KernelTable k97 = attnTable(false, false, true, true);
+    auto pl = ops::chooseAttnDecode(p, f, k97, k97.caps, p97);
+    CHECK(nameOf(pl.f) == "attn_wsplit1" && pl.grid.x == 2 && pl.grid.y == 64 && pl.grid.z == 1 && pl.block.x == 128);
+    CHECK(pl.combine_grid.x == 32);
+    // a 4-row verify: attn_wsplit1 takes 16 / 16 = 1 row per group; attn_wsplit2 2 rows (32 / 16)
+    const std::int32_t pos[4] = {1000, 1001, 1002, 1003}, base[4] = {0, 0, 0, 0};
+    p.n = 4;
+    p.rows_known = true;
+    p.row_pos = pos;
+    p.row_base = base;
+    f.attn_wide = false;
+    pl = ops::chooseAttnDecode(p, f, k97, k97.caps, p97);
+    CHECK(nameOf(pl.f) == "attn_wsplit1" && pl.grid.z == 4 && pl.groups.count[0] == 1);
+    f.attn_wide = true;
+    pl = ops::chooseAttnDecode(p, f, k97, k97.caps, p97);
+    CHECK(nameOf(pl.f) == "attn_wsplit2" && pl.grid.z == 2 && pl.groups.count[0] == 2 && pl.groups.first[1] == 2);
+    // q4 KV with attn_dq4 present (fast mode): not attn_dq4 (8 columns); attn_wsplit1 (the q4 table's attn_wsplit1_q4)
+    p.kv_q4 = true;
+    f.fd_splits = 256;
+    pl = ops::chooseAttnDecode(p, f, k97, k97.caps, p97);
+    CHECK(group8safe(pl) && pl.kind == ops::AttnDecodeKind::wsplit && pl.block.x == 128);
+    // the 8060S, q4 KV: one query per group (attn_group1) on attn_wsplit1, the fixed split count (no dq4 dynamic splits)
+    const kn::KernelTable k8 = attnTable(true, true, true, false);
+    pl = ops::chooseAttnDecode(p, f, k8, k8.caps, p8s);
+    CHECK(group8safe(pl) && nameOf(pl.f) == "attn_wsplit1" && pl.grid.z == 4 && pl.n_split == 256);
+    // the 8060S, f16 KV: attn_ws4 for one row, attn_ws4g for the 4-row verify (CG 3 = 3 rows per block, 2 column groups)
+    const kn::KernelTable k8f = attnTable(true, true, false, false);
+    p.kv_q4 = false;
+    f.fd_splits = 64;
+    pl = ops::chooseAttnDecode(p, f, k8f, k8f.caps, p8s);
+    CHECK(pl.kind == ops::AttnDecodeKind::ws4g && nameOf(pl.f) == "attn_ws4g3" && pl.grid.x == 2 * 2 && pl.grid.y == 64 && pl.grid.z == 1);
+    p.n = 1;
+    p.rows_known = false;
+    pl = ops::chooseAttnDecode(p, f, k8f, k8f.caps, p8s);
+    CHECK(pl.kind == ops::AttnDecodeKind::ws4 && nameOf(pl.f) == "attn_ws4" && pl.grid.x == 2);
+    // dbg_flags bit 2 (force attn_split, an A/B switch): above group 8 attn_split cannot hold the group, so the switch
+    // must not reach it, on either GPU and either KV format
+    f.dbg_flags = 2;
+    for (const bool q4 : {false, true}) {
+        p.kv_q4 = q4;
+        CHECK(group8safe(ops::chooseAttnDecode(p, f, k8f, k8f.caps, p8s)));
+        CHECK(group8safe(ops::chooseAttnDecode(p, f, k8, k8.caps, p8s)));
+        CHECK(group8safe(ops::chooseAttnDecode(p, f, k97, k97.caps, p97)));
+    }
+    // prefill: attn_kg4 (4 divides 16, 6 does not), 32 / 4 = 8 head blocks
+    ops::AttnPrefillProblem pp;
+    pp.n = 512;
+    pp.head_dim = 256;
+    pp.n_head = 32;
+    pp.n_head_kv = 2;
+    pp.scale = 1.0f / 16.0f;
+    const kn::KernelTable kp = attnTable(false, false, false, true);
+    const auto ppl = ops::chooseAttnPrefill(pp, ops::AttnPrefillFlags{}, kp);
+    CHECK(ppl.steps.size() == 1 && nameOf(ppl.steps[0].f) == "attn_kg4" && ppl.steps[0].grid.y == 8 && ppl.steps[0].block.x == 256);
+}
+
 void testAttnPrefill() {
     ops::AttnPrefillProblem p;
     p.n = 512;
@@ -615,6 +689,7 @@ int main() {
     testGemvWide();
     testOpsGemm();
     testAttnDecode();
+    testAttnDecodeGqa16();
     testAttnPrefill();
     testOpsMoe();
     testOpTables();
