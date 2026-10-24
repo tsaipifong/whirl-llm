@@ -2848,8 +2848,9 @@ void testTierDropContained() {
         else CHECK_EQ(g_log.count("tok): replaced"), 0u);
         CHECK_EQ(g_log.count("holds a deeper restore point"), (precise ? std::size_t{0} : std::size_t{1}));
         CHECK_EQ(srv.model().poison(), 0u);
-        // R3-1: one SSD file per session at close -- a kept duplicate hands 'reused' to the new entry, so the
-        // close flush (which writes reused entries even when demoted) does not write it
+        // R3-1 / R4-1 (lead decision: restore points after a restart over one file per session): precise writes
+        // one session file (the replaced entry's 2048 point lives in the shared prefix entry, which inherits
+        // 'reused' and is written too); balance also writes the kept entry -- it alone holds the gen-end 3039
         srv.stopEngine();
         std::size_t na_ssd = 0;
         for (const tier::Entry* e : srv.tierp()->entries) {
@@ -2859,7 +2860,7 @@ void testTierDropContained() {
             na_ssd += e->ssd.has_value() ? 1 : 0;
         }
         std::fprintf(stderr, "  (tier_drop_contained precise %d: A session entries on SSD after close %zu)\n", precise ? 1 : 0, na_ssd);
-        CHECK(na_ssd <= std::size_t{1});
+        CHECK_EQ(na_ssd, (precise ? std::size_t{1} : std::size_t{2}));
         std::filesystem::remove_all(dir, ec);
     }
     // fix-r21: the drop path -- a retry of exactly turn 1's history whose restore fails: the cold prefill keeps a
@@ -7423,6 +7424,10 @@ void testRevS5aR4RestartProbe() {
             CHECK_EQ(completionText(r3), decode(srv.model().greedyReference(pa2b, 40, true)));
             std::fprintf(stderr, "  (rev5a r4 restart precise %d: A entries before close %zu, SSD entries %zu, A after restart %zu, regen cached %llu)\n",
                          precise ? 1 : 0, n_before, nssd, na, static_cast<unsigned long long>(cachedTokens(r3)));
+            // fix-r21 R4-1 / R4-2: the restore point of turn 1 survives the restart -- balance its gen-end (kept
+            // entry stays reused, so the close flush writes it), precise the 2048 prefix checkpoint (the entry that
+            // covers it inherits 'reused'); as on 28f21a3
+            CHECK_EQ(cachedTokens(r3), (precise ? std::uint64_t{2048} : std::uint64_t{pa.size() + outa.size() - 1}));
             CHECK_EQ(srv.model().poison(), 0u);
         }
         std::filesystem::remove_all(dir, ec);
