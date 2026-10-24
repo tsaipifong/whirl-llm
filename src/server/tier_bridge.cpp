@@ -329,8 +329,9 @@ void TierBridge::dropContained(std::uint32_t slot_id, tier::Entry* x) {
             covered = c.pos >= deep && restorePoint(c);
         }
         // or another entry kept beside it holds that restore point of the same history (the cold prefill of a lost
-        // lineage keeps its LCP checkpoint with the old entry as a shared prefix entry, e.g. precise 'prefix' @2048)
-        for (const tier::Entry* o : t->entries) {
+        // lineage keeps its LCP checkpoint with the old entry as a shared prefix entry, e.g. precise 'prefix' @2048).
+        // Review R4-2: o then inherits e's 'reused', so it reaches the SSD with x and the point survives a restart
+        for (tier::Entry* o : t->entries) {
             if (covered) break;
             if (o == e || o == x || o->n_tok == 0 || std::find(drop.begin(), drop.end(), o) != drop.end()) continue;
             for (std::uint32_t j = 0; j < tier::max_ck && !covered; ++j) {
@@ -338,6 +339,7 @@ void TierBridge::dropContained(std::uint32_t slot_id, tier::Entry* x) {
                 covered = c.pos >= deep && c.pos <= o->n_tok && o->tokens.size() >= c.pos && restorePoint(c) &&
                           std::equal(o->tokens.begin(), o->tokens.begin() + c.pos, e->tokens.begin());
             }
+            if (covered) o->reused = o->reused || e->reused;
         }
         if (!covered) {
             if (!e->demoted) {
@@ -346,10 +348,10 @@ void TierBridge::dropContained(std::uint32_t slot_id, tier::Entry* x) {
                      "point ({}): kept, evicted first",
                      slot_id, e->id, e->n_tok, x->n_tok, deep);
             }
-            // R3-1: x takes over 'reused', so the close flush (which writes a reused entry even when demoted)
-            // writes x only: one SSD file per session; a later restore from e marks it reused again
+            // x inherits 'reused' (the session stays worth an SSD write). Review R4-1 (lead decision): e keeps its
+            // own 'reused' -- no other entry holds its deepest restore point, so the close flush writes it too and
+            // that point survives a restart (2 SSD files for this session on this rare path)
             x->reused = x->reused || e->reused;
-            e->reused = false;
             continue;
         }
         drop.push_back(e);
