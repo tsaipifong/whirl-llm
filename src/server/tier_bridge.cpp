@@ -291,10 +291,13 @@ void TierBridge::spillSlot(std::uint32_t id, bool idle, SlotPrefix& sp, SlotTier
 // failed restore, an entry no longer in place). Left alone: shared prefix entries (one checkpoint at their end, the
 // VRAM shared checkpoints refer to them), entries another slot extends, entries a restore / SSD job / other entry
 // still reads, and entries with an SSD copy (other files may share its blocks; RAM pressure and expiry handle them).
-// The new entry inherits 'reused' (a multi-turn session stays worth an SSD write).
+// The new entry inherits 'reused' (a multi-turn session stays worth an SSD write). fix-r21: an older entry whose
+// deepest restore point the new entry does not keep is not replaced but demoted (first eviction victim).
 void TierBridge::dropContained(std::uint32_t slot_id, tier::Entry* x) {
     tier::Tier* t = tier_;
     if (!t || !x || x->n_tok == 0) return;
+    const bool cold = ps_.config().cold_resume;
+    const std::uint8_t gen_end = ckKindCode("gen-end");
     std::vector<tier::Entry*> drop;
     for (tier::Entry* e : t->entries) {
         if (e == x || e->n_tok == 0 || e->n_tok > x->n_tok || e->tokens.size() < e->n_tok) continue;
@@ -302,6 +305,35 @@ void TierBridge::dropContained(std::uint32_t slot_id, tier::Entry* x) {
         if (e->owner && *e->owner != slot_id) continue;
         if (e->ssd || !e->in_ram || e->pin != 0 || e->io_busy || e->ext_pin != 0 || e->loading || !t->gpuIdle(e)) continue;
         if (!std::equal(e->tokens.begin(), e->tokens.begin() + e->n_tok, x->tokens.begin())) continue;
+        // fix-r21 (review R2-1): a hybrid model resumes only at a stored checkpoint (the SSM / conv state; the KV
+        // pages alone are no restore point), unlike llama.cpp's pure-attention case where the KV truncates to any
+        // prefix. So e goes only when x keeps a restore point at least as deep as e's deepest one (and inside e's
+        // tokens, where both hold the same history); otherwise e stays, evicted first (x covers e's tokens).
+        // COLD-RESUME (precise) never resumes at a gen-end checkpoint, so those are no restore point there (the
+        // schedule test of resumeOk depends on the request's length, so it is left to the lookup)
+        std::uint32_t deep = 0;
+        bool any = false;
+        for (std::uint32_t j = 0; j < tier::max_ck; ++j) {
+            const tier::CkMeta& c = e->ck[j];
+            if (c.valid == 0 || c.pos > e->n_tok || (cold && c.kind == gen_end)) continue;
+            deep = any ? std::max(deep, c.pos) : c.pos;
+            any = true;
+        }
+        bool covered = !any;
+        for (std::uint32_t j = 0; j < tier::max_ck && !covered; ++j) {
+            const tier::CkMeta& c = x->ck[j];
+            covered = c.valid != 0 && c.pos >= deep && c.pos <= e->n_tok && !(cold && c.kind == gen_end);
+        }
+        if (!covered) {
+            if (!e->demoted) {
+                t->demote(e);
+                logI("slot {} | kv tier: entry {:016x} ({} tok) is contained in the new entry ({} tok) but holds a deeper restore "
+                     "point ({}): kept, evicted first",
+                     slot_id, e->id, e->n_tok, x->n_tok, deep);
+            }
+            x->reused = x->reused || e->reused;
+            continue;
+        }
         drop.push_back(e);
     }
     for (tier::Entry* e : drop) {

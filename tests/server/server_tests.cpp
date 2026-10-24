@@ -2775,7 +2775,8 @@ void testTierPreciseContinuation() {
 
 // bug-s5a-cachemiss review F4: a slot that lost the lineage (here: the RAM restore of A's turn 1 fails, so turn 2
 // is prefilled cold) spills a fresh entry that holds A's turn-1 entry whole. Like llama.cpp's server_prompt_cache
-// (drop cached prompts fully contained in the new one), the old copy is replaced: one entry per session. Both modes.
+// (drop cached prompts fully contained in the new one), the old copy is replaced -- fix-r21: only when the new entry
+// keeps a restore point as deep as the old one's deepest; otherwise the old one stays, demoted. Both modes.
 void testTierDropContained() {
     for (const bool precise : {false, true}) {
         ServerSetup su = baseSetup();
@@ -2802,12 +2803,13 @@ void testTierDropContained() {
         srv.ops().failHostToDevCopy(0);
         CHECK_EQ(completionText(r2), decode(srv.model().greedyReference(pa2, 40, true)));
         srv.onEngine([] {});
-        std::size_t na = 0;
+        std::size_t na = 0, nd = 0;
         std::uint32_t longest = 0;
         for (int i = 0; i < 300; ++i) {
             bool busy = false;
             srv.onEngine([&] {
                 na = 0;
+                nd = 0;
                 longest = 0;
                 for (const tier::Entry* e : srv.tierp()->entries) {
                     busy = busy || e->io_busy || e->loading || e->pin > 0;
@@ -2817,6 +2819,7 @@ void testTierDropContained() {
                     // with the old entry, which is right: the lineage was lost) is not a session entry
                     if (e->nck == 1 && e->ck[0].valid != 0 && e->ck[0].kind >= 4 && e->ck[0].pos == e->n_tok) continue;
                     na += 1;
+                    nd += e->demoted ? 1 : 0;
                     longest = std::max(longest, e->n_tok);
                 }
             });
@@ -2825,9 +2828,43 @@ void testTierDropContained() {
         }
         std::fprintf(stderr, "  (tier_drop_contained precise %d: A entries %zu, longest %u tok)\n", precise ? 1 : 0, na,
                      static_cast<unsigned>(longest));
-        CHECK_EQ(na, std::size_t{1});
+        // fix-r21 (review R2-1): the cold-prefill entry holds A's turn 1 whole but not its deepest restore point
+        // (balance: gen-end 3039; precise: 3000), so turn 1's entry stays, demoted (first eviction victim)
+        CHECK_EQ(na, std::size_t{2});
+        CHECK_EQ(nd, std::size_t{1});
         CHECK(longest >= pa2.size());
-        CHECK(g_log.count("is contained in the new entry") >= 1);
+        CHECK_EQ(g_log.count("tok): replaced"), 0u);
+        CHECK(g_log.count("holds a deeper restore point") >= 1);
+        CHECK_EQ(srv.model().poison(), 0u);
+    }
+    // fix-r21: the drop path -- a retry of exactly turn 1's history whose restore fails: the cold prefill keeps a
+    // checkpoint at its prompt end, as deep as the old entry's deepest, so the old entry is replaced (balance)
+    {
+        ServerSetup su = baseSetup();
+        su.mc.parallel = 1;
+        su.mc.slot_ctx = 8192;
+        su.mc.pool_tokens = 4096;
+        su.tier = true;
+        su.tier_min = 512;
+        su.eo.n_ck = 3;
+        TestServer srv(su);
+        g_log.clear();
+        const auto pa = makePrompt(3000, 851);
+        const auto pb = makePrompt(3200, 852);
+        const auto outa = srv.model().greedyReference(pa, 40, true);
+        CHECK_EQ(completionText(srv.post("/v1/completions", completionBody(pa, 40))), decode(outa));
+        CHECK_EQ(completionText(srv.post("/v1/completions", completionBody(pb, 40))), decode(srv.model().greedyReference(pb, 40, true)));
+        std::vector<std::uint32_t> pr = pa;
+        pr.insert(pr.end(), outa.begin(), outa.end() - 1);  // turn 1's entry holds pa + outa minus the last token
+        srv.ops().failHostToDevCopy(1);
+        auto r2 = srv.post("/v1/completions", completionBody(pr, 40));
+        srv.ops().failHostToDevCopy(0);
+        CHECK_EQ(completionText(r2), decode(srv.model().greedyReference(pr, 40, true)));
+        srv.onEngine([] {});
+        std::fprintf(stderr, "  (tier_drop_contained retry: replaced %zu, kept %zu)\n", g_log.count("tok): replaced"),
+                     g_log.count("holds a deeper restore point"));
+        CHECK(g_log.count("tok): replaced") >= 1);
+        CHECK_EQ(g_log.count("holds a deeper restore point"), 0u);
         CHECK_EQ(srv.model().poison(), 0u);
     }
 }
@@ -7276,7 +7313,7 @@ void testRevS5aR2Probe() {
             const std::size_t len1 = pa.size() + outa.size();
             if (precise) CHECK(cachedTokens(r3) >= 2048);
             else CHECK(cachedTokens(r3) + 1 >= len1);
-            if (!precise) CHECK_EQ(g_log.count("is contained in the new entry"), 0u);
+            if (!precise) CHECK_EQ(g_log.count("tok): replaced"), 0u);
             CHECK_EQ(srv.model().poison(), 0u);
         }
         {
