@@ -18,6 +18,7 @@
 #include "whirl/wddm_watch.h"
 #include "whirl/pool_budget.h"
 #include "whirl/startup_fit.h"
+#include "tier/ram_size.h"
 #include "whirl/gpu_select.h"
 #include "whirl/mem_governor.h"
 #include "whirl/value_scope.h"
@@ -2905,6 +2906,124 @@ void testMemGovernorGrowOvershoot() {
     }
 }
 
+// fix-ramtier (B0 N3-1, S0b; progress\ramdip-repro.HANDOFF.md): while another program read GGUF files through a read-only
+// memory map (GGUFReader np.memmap; ram_dip.py --mode mmap), Windows' Available fell to 121-587 MiB with ~1 MiB on the
+// modified list (8060S, 12:55: "RAM available now 121 MiB + 1 MiB on the modified list" -> tier off). The RAM was there:
+// clean file pages in that reader's working set, which Windows drops first when a pin needs memory, but which neither
+// Available nor the modified list counts. One startup sample then turned both host tiers off for the server's life.
+// A startup during such a dip must size the tier as if those pages were available; a real shortage (the memory is
+// private, or pagefile-backed shared sections such as a GPU program's) must still turn it off; with no such reader
+// nothing changes. Written from the bug description, before the fix.
+namespace ramtier {
+using whirl::startfit::ProcMemSample;
+constexpr std::uint64_t MiB = 1ull << 20, GiB = 1ull << 30;
+constexpr std::uint64_t total = 33981464576ull;  // ram.total_phys of the 8060S / R9700 host (S0b logs)
+constexpr std::uint32_t self = 4242;
+// the server's RAM tier decision from one startup sample (the same pure steps as server_main / startup_replay)
+std::uint64_t decide(std::uint64_t avail, const std::vector<ProcMemSample>& procs, std::optional<std::uint64_t> explicit_mb,
+                     bool integrated, std::uint64_t entry_mb) {
+    using namespace whirl;
+    startfit::RamStatus st;
+    st.total_phys = total;
+    st.avail_phys = avail;
+    st.file_ws = startfit::fileWsOfOthers(procs, self).bytes;
+    tier::RamTierInput rin;
+    rin.explicit_mb = explicit_mb;
+    rin.explicit_src = "WHIRL_KV_RAM_MB";
+    rin.floor_mb = std::max<std::uint64_t>(8192, entry_mb);
+    rin.entry_mb = entry_mb;
+    rin.integrated = integrated;
+    rin.total_phys = total;
+    rin.avail_phys = startfit::ramForTier(st);
+    const tier::RamTierSize rsz = tier::ramTierSize(rin);
+    tier::RamTierInput a = rin;
+    a.explicit_mb.reset();
+    const auto rf = startfit::ramTierFit(rsz.mb, rin.avail_phys, tier::ramTierSize(a).mb, rin.explicit_mb.has_value(),
+                                         startfit::pinned_room_unknown, entry_mb);
+    return rf ? rf->mb : rsz.mb;
+}
+// a desktop: small programs (DLL pages shared, little shared commit) and a GPU program whose working set is private and
+// whose shared commit is its GPU sections (ws_probe.py: whirl-server ws 9710 MiB, shareable 79, shared commit 29786)
+std::vector<ProcMemSample> desktop() {
+    return {{self, 900 * MiB, 850 * MiB, 30 * MiB},     {11, 101 * MiB, 33 * MiB, 20 * MiB},
+            {12, 82 * MiB, 36 * MiB, 80 * MiB},         {13, 397 * MiB, 353 * MiB, 0},
+            {37000, 9710 * MiB, 9631 * MiB, 29786 * MiB}};
+}
+std::vector<ProcMemSample> withReader(std::uint64_t file_bytes) {
+    auto v = desktop();
+    v.push_back({5150, file_bytes + 30 * MiB, 27 * MiB, 3 * MiB});  // mmap_self.py: shareable +512 MiB, shared commit 3 -> 3
+    return v;
+}
+}  // namespace ramtier
+
+void testRamTierMappedDip() {
+    using namespace whirl;
+    using namespace ramtier;
+    const std::uint64_t dip = 121 * MiB;  // the GPU repro's Available
+    const std::uint64_t held = 16 * GiB;  // clean file pages in the reader's working set (model: ~half of the RAM)
+    // 1. the dip with a reader: golden's WHIRL_KV_RAM_MB=8192 and the automatic size keep a RAM tier, on the integrated
+    //    GPU (8060S) and on a discrete one, the same size as a normal start with that much RAM available
+    for (const bool igpu : {true, false}) {
+        const std::uint64_t got = decide(dip, withReader(held), 8192, igpu, 4096);
+        CHECK(got > 0);
+        CHECK_EQ(got, decide(dip + held, desktop(), 8192, igpu, 4096));
+        CHECK((got << 20) <= (dip + held) / 2);  // never more than half of what is counted (the half rule stays)
+    }
+    CHECK(decide(dip, withReader(held), std::nullopt, true, 4096) > 0);   // 8060S automatic: 1/8 of RAM = 4 GiB
+    CHECK_EQ(decide(dip, withReader(held), std::nullopt, true, 4096), decide(dip + held, desktop(), std::nullopt, true, 4096));
+    CHECK(decide(dip, withReader(held), std::nullopt, false, 9216) > 0);  // discrete automatic
+    for (const std::uint64_t av_mb : {121ull, 549ull, 587ull}) CHECK(decide(av_mb * MiB, withReader(held), 8192, true, 4096) > 0);
+    // 2. a real shortage: Available low and no reader -> still off (explicit and automatic, both GPU kinds)
+    for (const bool igpu : {true, false}) {
+        CHECK_EQ(decide(dip, desktop(), 8192, igpu, 4096), 0ull);
+        CHECK_EQ(decide(dip, desktop(), std::nullopt, igpu, 4096), 0ull);
+    }
+    //    shared memory that is pagefile-backed (shared commit) is not file pages: a program holding 12 GiB of shared
+    //    sections in its working set does not count
+    {
+        auto v = desktop();
+        v.push_back({777, 12 * GiB + 200 * MiB, 200 * MiB, 12 * GiB});
+        CHECK_EQ(decide(dip, v, 8192, true, 4096), 0ull);
+        CHECK_EQ(startfit::fileWsOfOthers(v, self).bytes, 0ull + startfit::fileWsOfOthers(desktop(), self).bytes);
+    }
+    //    the server's own working set never counts (it is not given back for its own pin)
+    {
+        std::vector<ProcMemSample> v = {{self, held + 30 * MiB, 27 * MiB, 0}};
+        CHECK_EQ(startfit::fileWsOfOthers(v, self).bytes, 0ull);
+        CHECK_EQ(decide(dip, v, 8192, true, 4096), 0ull);
+    }
+    //    an OS without the EX2 fields (PrivateWorkingSetSize 0): unknown, not counted
+    {
+        std::vector<ProcMemSample> v = {{5150, held, 0, 0}};
+        CHECK_EQ(startfit::fileWsOfOthers(v, self).bytes, 0ull);
+    }
+    // 3. what is counted: the largest one other program holds (pages of one working set are distinct; DLL pages shared by
+    //    many programs are not added up), named by pid; never more than the RAM
+    {
+        auto v = withReader(held);
+        v.push_back({5151, 6 * GiB + 30 * MiB, 27 * MiB, 3 * MiB});
+        const startfit::FileWs f = startfit::fileWsOfOthers(v, self);
+        CHECK_EQ(f.pid, 5150u);
+        CHECK(f.bytes >= held && f.bytes <= held + 30 * MiB);
+        startfit::RamStatus st;
+        st.total_phys = total;
+        st.avail_phys = 20 * GiB;
+        st.file_ws = 20 * GiB;
+        CHECK_EQ(startfit::ramForTier(st), total);
+        st.avail_phys = 0;  // Available unknown stays unknown (the sizing then ignores it)
+        CHECK_EQ(startfit::ramForTier(st), 0ull);
+    }
+    // 4. no reader: exactly the Available sample, the same sizes as before (16302 MiB: half 8151 -> 8192 lowered to 7680)
+    for (const std::uint64_t av_mb : {470ull, 16302ull, 18352ull, 21123ull}) {
+        startfit::RamStatus st;
+        st.total_phys = total;
+        st.avail_phys = av_mb * MiB;
+        CHECK_EQ(startfit::ramForTier(st), av_mb * MiB);
+        std::vector<ProcMemSample> none;
+        CHECK_EQ(decide(av_mb * MiB, none, 8192, true, 9216), av_mb == 470ull ? 0ull : av_mb == 16302ull ? 7680ull : 8192ull);
+    }
+}
+
 // REVIEW-GOV-3 question 4 (R9700 Ornith --mmproj, gov3 orn_new3): startup left exactly the margin free (29696 MiB local,
 // budget 31767 MiB, margin 2068 MiB); the first image added 873 MiB (encoder weights, 860.5 MiB pinned, made resident) and a
 // 1920x1080 image 134 MiB more (activations that did not fit the lent prefill scratch), so 30 MiB were left before the
@@ -4023,6 +4142,7 @@ int main(int argc, char** argv) {
     testStartupFit();
     testB0SizingFollowUps();
     testVisionPoolReserve();
+    testRamTierMappedDip();
     testMemGovernor();
     testMemGovernorGrowOvershoot();
     testGpuSelect();

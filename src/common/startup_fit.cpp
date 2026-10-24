@@ -51,6 +51,16 @@ std::string pinnedOffWhy(bool below_entry, std::uint64_t entry_mb) {
                        : std::string("; no room left, so the host tiers are off (RAM and SSD)");
 }
 
+FileWs fileWsOfOthers(const std::vector<ProcMemSample>& procs, std::uint32_t self_pid) {
+    (void)procs;
+    (void)self_pid;
+    return {};  // fix-ramtier seam (test commit): nothing counted yet, the old behaviour
+}
+
+std::uint64_t ramForTier(const RamStatus& s) {
+    return s.avail_phys;  // fix-ramtier seam (test commit): Available alone, the old behaviour
+}
+
 std::optional<RamFit> ramTierFit(std::uint64_t mb, std::uint64_t avail_phys_bytes, std::uint64_t auto_mb, bool explicit_size,
                                  std::uint64_t pinned_room_mb, std::uint64_t entry_mb) {
     (void)auto_mb;

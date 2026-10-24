@@ -92,6 +92,25 @@ struct RamFit {
 // ram_size.h). An explicit size is clamped to the room and otherwise used as given (monotonic in the request).
 std::optional<RamFit> ramTierFit(std::uint64_t mb, std::uint64_t avail_phys_bytes, std::uint64_t auto_mb, bool explicit_size,
                                  std::uint64_t pinned_room_mb = pinned_room_unknown, std::uint64_t entry_mb = 0);
+// fix-ramtier: the RAM the host-tier sizing (tier::ramTierSize, ramTierFit) counts as available, from one sample taken
+// at startup (server_main.cpp fills it; tests and the startup replay inject it).
+struct ProcMemSample {  // one other process (PROCESS_MEMORY_COUNTERS_EX2), bytes
+    std::uint32_t pid = 0;
+    std::uint64_t working_set = 0;          // WorkingSetSize
+    std::uint64_t private_working_set = 0;  // PrivateWorkingSetSize (0 = unknown: the OS has no EX2 fields)
+    std::uint64_t shared_commit = 0;        // SharedCommitUsage (pagefile-backed sections)
+};
+struct FileWs {
+    std::uint64_t bytes = 0;  // clean file pages counted (0 = none or unknown)
+    std::uint32_t pid = 0;    // the process they are in (0 = none)
+};
+FileWs fileWsOfOthers(const std::vector<ProcMemSample>& procs, std::uint32_t self_pid);
+struct RamStatus {
+    std::uint64_t total_phys = 0;  // ullTotalPhys (bytes; 0 = unknown)
+    std::uint64_t avail_phys = 0;  // ullAvailPhys: standby + free + zero (bytes; 0 = unknown)
+    std::uint64_t file_ws = 0;     // fileWsOfOthers().bytes
+};
+std::uint64_t ramForTier(const RamStatus& s);
 // The texts of the RAM tier's startup lines (server_main.cpp), from the fit. rf: ramTierFit's result (nullopt: unchanged or
 // no host tiers); asked_mb: the size before the fit; src: where an explicit size came from (--kv-ram-mb / WHIRL_KV_RAM_MB);
 // size_reason: tier::RamTierSize::reason; pinned_why: pinnedWhy() ("" when the room was not measured); avail_mb: RAM
