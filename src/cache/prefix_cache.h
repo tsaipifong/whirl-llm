@@ -185,6 +185,15 @@ struct Supersede {
 // near the end (retry / regenerate / edit-last: the abandoned tail is short) -- not another branch worth
 // keeping. The same threshold as supersedes().
 bool nearEndDivergence(std::size_t old_n, std::size_t keep, const SupersedeRule& r = {});
+// item S / bug-s5a-cachemiss: a host-tier restore at checkpoint (ck_kind, ck_pos) of an n_tok-token entry, for a
+// request sharing lcp tokens with it, is a restore of a shared prefix (the slot never updates the entry in place,
+// another conversation may still need it) when the checkpoint is a shared kind (system / prefix: code >= 4) --
+// except when the request continues the whole entry past that checkpoint (lcp >= n_tok > ck_pos): then it is the
+// same session, as a gen-end restore is (precise / COLD-RESUME never resumes at gen-end, so its next turn always
+// comes back at the session's own tail checkpoint). A shared prefix entry spilled from VRAM ends at its checkpoint
+// (ck_pos == n_tok) and stays shared; another question about the same document diverges inside the entry
+// (lcp < n_tok) and stays a branch. (llama.cpp server_prompt_cache keeps one state per continued prompt too.)
+bool restoreIsShared(std::uint8_t ck_kind, std::uint32_t ck_pos, std::uint32_t n_tok, std::size_t lcp);
 // old_t / new_t: token ids of the old entry and of the new conversation;
 // sys: end of the new conversation's system message (0: none / unknown -> no).
 // task_end: end of the new conversation's first message after the system message (the start of the turn

@@ -24,6 +24,12 @@ bool nearEndDivergence(std::size_t old_n, std::size_t keep, const SupersedeRule&
     return static_cast<double>(tail) < need;
 }
 
+bool restoreIsShared(std::uint8_t ck_kind, std::uint32_t ck_pos, std::uint32_t n_tok, std::size_t lcp) {
+    if (ck_kind < 4) return false;
+    const bool continues = ck_pos < n_tok && lcp >= n_tok;
+    return !continues;
+}
+
 Supersede supersedes(Tokens old_t, Tokens new_t, std::size_t sys, const SupersedeRule& r, std::size_t task_end) {
     Supersede s;
     const std::size_t lo = old_t.size(), ln = new_t.size();

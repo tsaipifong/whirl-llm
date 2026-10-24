@@ -474,8 +474,9 @@ bool TierBridge::startRestore(std::uint64_t job_id, std::uint32_t id, std::span<
     if (!r) return false;
     r->t0 = t0;
     st.restore = r;
-    // item S: a shared prefix entry is never updated in place by a slot
-    st.rs_shared = x->ck[mt.ck].kind >= 4;
+    // item S: a shared prefix entry is never updated in place by a slot; a session entry restored at its own
+    // tail checkpoint for its next turn (precise) is not one (bug-s5a-cachemiss)
+    st.rs_shared = cache::restoreIsShared(x->ck[mt.ck].kind, x->ck[mt.ck].pos, x->n_tok, std::min<std::size_t>(mt.lcp, x->n_tok));
     if (!st.rs_shared) x->owner = id;
     logI("req {} | slot {} | kv tier: restoring {} tok from {} (checkpoint '{}' @{}, {:.1f} MiB; VRAM prefix was {})", job_id,
          id, x->n_tok, r->from_ssd ? "SSD" : "RAM", ckKindStr(x->ck[mt.ck].kind), mt.reuse,

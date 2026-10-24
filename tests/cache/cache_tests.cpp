@@ -557,6 +557,15 @@ static void testSupersede() {
     CHECK(!nearEndDivergence(23000, 3000) && !nearEndDivergence(23000, 23000 - 5750));
     CHECK(nearEndDivergence(6000, 3000) && !nearEndDivergence(9000, 3000));  // min_tail 4096
     CHECK(nearEndDivergence(5000, 6000));  // continues past the end
+    // bug-s5a-cachemiss: restore classification (kind codes: gen-end / prompt-end < 4, system 4, prefix 5)
+    CHECK(!restoreIsShared(1, 3876, 3876, 3909));  // gen-end: the session itself
+    CHECK(!restoreIsShared(5, 3072, 3876, 3876));  // own tail checkpoint, the request continues the whole entry
+    CHECK(!restoreIsShared(5, 3072, 3876, 3909));
+    CHECK(restoreIsShared(5, 3072, 3876, 3875));   // diverges inside the entry: another question (doc_qa)
+    CHECK(restoreIsShared(5, 3072, 3876, 3100));
+    CHECK(restoreIsShared(4, 11433, 11433, 15017)); // a shared system entry (ends at its checkpoint)
+    CHECK(restoreIsShared(5, 8192, 8192, 9000));    // a shared LCP prefix entry
+    CHECK(!restoreIsShared(4, 2048, 6000, 6000));   // a session entry continued at its system checkpoint
     // too short for the host tiers
     CHECK(tooShortForTier(2047, 2048) && !tooShortForTier(2048, 2048));
     // deferred marks: taken once per new entry, re-marking updates, forget drops
