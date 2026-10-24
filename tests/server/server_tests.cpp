@@ -2694,6 +2694,85 @@ void testTierInPlaceRegen() {
                  static_cast<unsigned long long>(srv.tierStats().restores_ram), static_cast<unsigned>(cachedTokens(r4)));
 }
 
+// bug-s5a-cachemiss (R9700 srv_cache_precise tier p4, 2026-10-24): in precise (COLD-RESUME) a session's next turn
+// can never resume at its gen-end checkpoint, so the RAM restore picks the session's own tail checkpoint (kind
+// 'prefix'). The restore then treated the entry as a shared prefix entry (item S: checkpoint kind >= 4): the slot
+// lost the lineage, the turn's spill made a NEW entry next to the old one (two entries per session, about twice the
+// RAM tier), the new entry was not marked reused (not written to SSD at shutdown), and under a smaller RAM tier the
+// copy pushed another session's entry out (gate: E turn 2 cached 0, 4 SSD files for 5 sessions). Balance resumes at
+// gen-end and updates the entry in place. Expected in both modes: one entry per session lineage, extended in place,
+// marked reused. Guard: another question about the same document (diverging inside the entry) is still a branch
+// that leaves the entry as it was.
+void testTierPreciseContinuation() {
+    for (const bool precise : {false, true}) {
+        ServerSetup su = baseSetup();
+        su.mc.parallel = 1;
+        su.mc.slot_ctx = 8192;
+        su.mc.pool_tokens = 4096;  // B evicts A
+        su.tier = true;
+        su.tier_min = 512;
+        su.eo.n_ck = 3;  // room for the tail checkpoint
+        su.eo.cold_resume = precise;
+        TestServer srv(su);
+        g_log.clear();
+        const auto pa = makePrompt(3000, 821);
+        const auto pb = makePrompt(3200, 822);
+        const auto outa = srv.model().greedyReference(pa, 40, true);
+        CHECK_EQ(completionText(srv.post("/v1/completions", completionBody(pa, 40))), decode(outa));
+        CHECK_EQ(completionText(srv.post("/v1/completions", completionBody(pb, 40))), decode(srv.model().greedyReference(pb, 40, true)));
+        std::vector<std::uint32_t> pa2 = pa;
+        pa2.insert(pa2.end(), outa.begin(), outa.end());
+        pa2 = makePrompt(static_cast<std::uint32_t>(pa2.size() + 300), 823, pa2);
+        auto r2 = srv.post("/v1/completions", completionBody(pa2, 40));
+        CHECK_EQ(completionText(r2), decode(srv.model().greedyReference(pa2, 40, true)));
+        CHECK(srv.tierStats().restores_ram >= 1);
+        if (precise) CHECK_EQ(cachedTokens(r2), coldTail(pa.size()));
+        else CHECK(cachedTokens(r2) >= pa.size());
+        // the entries of A's lineage (they start with A's first 2048 tokens)
+        struct Lin {
+            std::size_t n = 0;
+            std::uint32_t max_tok = 0;
+            std::uint64_t id = 0;
+            bool reused = false;
+        };
+        const auto lineage = [&] {
+            Lin l;
+            srv.onEngine([&] {
+                for (const tier::Entry* e : srv.tierp()->entries) {
+                    if (e->n_tok < 2048 || e->tokens.size() < 2048) continue;
+                    if (!std::equal(pa.begin(), pa.begin() + 2048, e->tokens.begin())) continue;
+                    l.n += 1;
+                    if (e->n_tok > l.max_tok) {
+                        l.max_tok = e->n_tok;
+                        l.id = e->id;
+                        l.reused = e->reused;
+                    }
+                }
+            });
+            return l;
+        };
+        const Lin a = lineage();
+        std::fprintf(stderr, "  (tier_precise_cont precise %d: A entries %zu, longest %u tok, reused %d, cached %u)\n", precise ? 1 : 0,
+                     a.n, a.max_tok, a.reused ? 1 : 0, static_cast<unsigned>(cachedTokens(r2)));
+        CHECK_EQ(a.n, std::size_t{1});              // turn 2 extended turn 1's entry (no second copy)
+        CHECK(a.max_tok >= pa2.size());             // ... up to turn 2's end
+        CHECK(a.reused);                            // a multi-turn session: written to SSD at shutdown
+        CHECK(g_log.count("(in place") >= 1);
+        // guard: another question about the same document (diverges at 2900, inside the entry) is a branch
+        CHECK_EQ(completionText(srv.post("/v1/completions", completionBody(pb, 40))), decode(srv.model().greedyReference(pb, 40, true)));
+        const std::vector<std::uint32_t> doc(pa.begin(), pa.begin() + 2900);
+        const auto q = makePrompt(3100, 824, doc);
+        CHECK_EQ(completionText(srv.post("/v1/completions", completionBody(q, 40))), decode(srv.model().greedyReference(q, 40, true)));
+        bool kept = false;
+        srv.onEngine([&] {
+            if (const tier::Entry* e = srv.tierp()->find(a.id)) kept = e->n_tok == a.max_tok;
+        });
+        CHECK(kept);  // the branch left A's entry as it was
+        CHECK_EQ(srv.model().poison(), 0u);
+        CHECK_EQ(srv.model().hidMismatch(), 0u);
+    }
+}
+
 // FIX-CACHE P2-3 (FR-CACHE): more prefix checkpoints per slot than a tier entry holds (WHIRL_SERVE_CKPTS=12).
 // Before: tier::Entry::ck, Slot::rs_map / rs_tail and beginRestore's `chosen` (max_ck = 8) were read and
 // written out of bounds. Now the count is clamped to max_ck (warning); spill / restore stay exact.
@@ -6859,6 +6938,7 @@ int main(int argc, char** argv) {
         {"restore_conc", testRestoreConcurrent},
         {"restore_throws", testRestoreThrows},
         {"tier_inplace", testTierInPlaceRegen},
+        {"tier_precise_cont", testTierPreciseContinuation},
         {"ckpts_clamp", testServeCkptsClamp},
         {"branch_turn", testBranchFromEarlierTurn},
         {"agent_idle_main", testAgentIdleMainNoSupersede},
