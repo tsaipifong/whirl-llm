@@ -415,6 +415,24 @@ void testMisc(Ctx& c) {
             rk.pass = bad == 0;
             c.rep.add(rk);
             c.rep.add(cmpTolRel("draft_sample_rows q probabilities vs CPU", gp, rp, 1e-4, 1e-7));
+            // feat026-draftq: qbuf null (product runs; the host never reads q) -> the same drawn tokens, the rest of
+            // the control area untouched (bit-identical to the run with a q buffer)
+            {
+                Buf ctl0(static_cast<std::size_t>(tr) * 64 * 4);
+                ctl0.zero();
+                hip::launch(c.k.draft_sample_rows, {static_cast<unsigned>(tr), 1, 1}, {1024, 1, 1}, 0, c.s, dx.p(), n, ctl0.p(), area, r,
+                            DevPtr{0}, da, DevPtr{0});
+                c.sync();
+                const auto hc0 = ctl0.down<int>(static_cast<std::size_t>(tr) * 64);
+                std::size_t bad0 = 0;
+                for (std::size_t i = 0; i < hc0.size(); ++i) bad0 += hc0[i] != hc[i];
+                Result r0;
+                r0.name = "draft_sample_rows qbuf null: control area (drawn tokens) == run with q buffer";
+                r0.n = hc0.size();
+                r0.mismatches = bad0;
+                r0.pass = bad0 == 0;
+                c.rep.add(r0);
+            }
             // FIX-K97 (FR-K97 P3-2): NaN logits (the row's argmax and two more set to NaN) are never candidates and do
             // not poison the normalizer: q == the CPU distribution with those logits at -inf, finite, drawn token not NaN
             {

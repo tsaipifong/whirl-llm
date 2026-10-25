@@ -671,9 +671,15 @@ public:
     // speculative sampling of MTP drafts (numerics item specsample, server): per sequence; a
     // sequence with on = true gets draft_sample_rows after draft_pick_rows (q per draft step in
     // draft_qbuf: [seq][max_drafts][spec::q_words] i32)
+    // feat026-draftq: the host never reads q (race coupling), so draft_qbuf is allocated only when
+    // want_draft_q is set before setupSeqs (tests / diagnostics); otherwise it stays 0 and the kernel
+    // skips the q writes (same drawn tokens). draft_samp_ok = setupSeqs ran with the MTP head loaded
+    // (the condition under which draft_qbuf used to be allocated).
     std::vector<spec::DraftSample> draft_samp;
     DevPtr draft_qbuf = 0;
-    bool draftSampleOk() const { return k.draft_sample_rows != nullptr && draft_qbuf != 0; }
+    bool want_draft_q = false;
+    bool draft_samp_ok = false;
+    bool draftSampleOk() const { return k.draft_sample_rows != nullptr && draft_samp_ok; }
     void readDraftQ(std::span<std::int32_t> dst);
     std::optional<Mat> draft_head;
     std::optional<DevPtr> draft_d2;

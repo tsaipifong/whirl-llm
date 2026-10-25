@@ -124,7 +124,8 @@
 //            map (null: identity) = token id of each draft-head row (vocabulary subset)
 //   draft_sample_rows(x, n, int* ctl_all, RowIdx area, int r, const int* map, DSampArgs a, int* qbuf)
 //            (optional) after draft_pick_rows: rows with a.on draw draft r from the filtered draft
-//            distribution q and write q to qbuf + a.qoff (whirl/spec_sample.h layout)
+//            distribution q and write q to qbuf + a.qoff (whirl/spec_sample.h layout); qbuf null: no
+//            q writes, same drawn tokens (product runs; only kernel tests read q)
 //   set_tokens(ids, pos, dev_src, Tok16 toks, n, n_host, pos0)
 //   set_rows(ids, pos, kvbase, dev_src, RowTab tab, n)
 //   topk_rows(x, n, K, float inv_t, int* ids, float* vals, float* stats)
