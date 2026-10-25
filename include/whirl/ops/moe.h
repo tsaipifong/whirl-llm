@@ -63,6 +63,30 @@ struct MoePlan {
 };
 // silu_mul_x8h: the fp8 path's activation kernel (MiscKernels; null: no fp8 path)
 MoePlan chooseMoe(const MoeProblem& p, const MoeFlags& f, const kernels::MoeKernels& k, Function silu_mul_x8h);
+// feat026-moedec: the fused precise decode launch (kernels/moe_fused.hip) - routed gate/up + SwiGLU and the shared
+// expert's gate/up gemvh tiles + SwiGLU (f16 output for the shared down gemvh) in one launch, bitwise the chain
+// moe_gu_f + silu_mul / f32_to_f16 + gemvh x2 + silu_mul + f32_to_f16 it replaces. Taken only where that chain would
+// run with exactly those kernels (the old path stays the default until GPU verification: WHIRL_MOE_FUSE=1 turns it on).
+struct MoeFuseProblem {
+    std::uint32_t n = 0, C = 0, F = 0, K = 0;  // token rows, n_embd, expert FFN width, experts per token
+    GgmlType gate_ty = GgmlType::f32, up_ty = GgmlType::f32;
+    std::uint64_t gate_rb = 0, up_rb = 0;
+    bool shared = false;  // the layer has a shared expert (sh_gate)
+    GgmlType sg_ty = GgmlType::f32, su_ty = GgmlType::f32;
+    std::uint64_t sg_rb = 0, su_rb = 0;
+    std::uint32_t sg_nrows = 0, su_nrows = 0, sg_ncols = 0, su_ncols = 0;
+    // the old chain's shared gate / up / down each take matmul's f16 path with the gemvh GEMV (gate / up) - the bits
+    // the fused tiles and the plain gemmF16 of the down matrix reproduce (host: chooseMatmulPath + chooseGemmF16)
+    bool shared_gemvh = false;
+};
+struct MoeFusePlan {
+    bool use = false;
+    Function f = nullptr;
+    Dim3 grid{};
+    std::uint32_t nsb = 0, nrb = 0;  // shared blocks (4 tile pairs each), routed blocks per pair (4 rows each)
+    const char* why = "";            // why not taken (diagnostics / tests)
+};
+MoeFusePlan chooseMoeFuse(const MoeFuseProblem& p, bool enabled, const MoePlan& pl, const kernels::MoeKernels& k);
 // token tile: 32 when experts average under ~48 tokens (short prompts), else 64
 std::uint32_t moeTile(std::uint32_t n, std::uint32_t K, std::uint32_t R);
 

@@ -117,7 +117,7 @@ int main(int argc, char** argv) {
             return 2;
         }
     }
-    const char* fam_names[] = {"quant", "gemv", "gemm", "attn", "attndq4", "gdn", "moe", "moemx", "moef", "misc", "attnbench",
+    const char* fam_names[] = {"quant", "gemv", "gemm", "attn", "attndq4", "gdn", "moe", "moemx", "moef", "moefuse", "misc", "attnbench",
                                "gemvh", "gemvhbench", "dflash", "ws4", "ws4bench", "ws4g", "ws4gbench", "vision"};  // = fams below
     const bool bench = !bo.families.empty();
     if (!bench && (!bo.jsonl.empty() || !bo.ab_hsaco.empty())) {
@@ -227,7 +227,7 @@ int main(int argc, char** argv) {
     };
     const Fam fams[] = {{"quant", kt::testQuant}, {"gemv", kt::testGemv}, {"gemm", kt::testGemm},
                         {"attn", kt::testAttn},   {"attndq4", kt::testAttnDq4},   {"gdn", kt::testGdn},   {"moe", kt::testMoe},
-                        {"moemx", kt::testMoeMx}, {"moef", kt::testMoeF}, {"misc", kt::testMisc},   {"attnbench", kt::benchAttn},
+                        {"moemx", kt::testMoeMx}, {"moef", kt::testMoeF}, {"moefuse", kt::testMoeFused}, {"misc", kt::testMisc},   {"attnbench", kt::benchAttn},
                         {"gemvh", kt::testGemvh}, {"gemvhbench", kt::benchGemvh}, {"dflash", kt::testDflash},
                         {"ws4", kt::testAttnWs4}, {"ws4bench", kt::benchAttnWs4},
                         {"ws4g", kt::testAttnWs4g}, {"ws4gbench", kt::benchAttnWs4g},

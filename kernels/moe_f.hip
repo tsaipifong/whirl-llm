@@ -125,6 +125,14 @@ __device__ __forceinline__ float mxf_blk(const uint8_t *__restrict__ row, int b,
     s1 = mxf_dot4(mxf_lut4((q.w >> 4) & 0x0F0F0F0Fu), xp[7], s1);
     return dl * (s0 + s1);
 }
+// one gate / up row of one pair: the sum over the row's 32-value blocks (lane b, b + 32, ...) and warp_sum, every
+// lane holding the result (moe_gu_f_mxfp4 and the fused moe_gus*_f_mxfp4 of moe_fused.hip share it, feat026)
+__device__ __forceinline__ float mxf_gu_dot(const uint8_t *__restrict__ wr, const float *__restrict__ x, int C) {
+    const int lane = threadIdx.x % WARP;
+    float acc = 0.f;
+    for (int b = lane; b < C / 32; b += WARP) acc += mxf_blk(wr, b, x);
+    return warp_sum(acc);
+}
 extern "C" __global__ void __launch_bounds__(256) moe_gu_f_mxfp4(const uint8_t *__restrict__ W1, const uint8_t *__restrict__ W2,
                                                                 uint64_t row_bytes, int ff, int nrows, const float *__restrict__ h,
                                                                 const int *__restrict__ ids, float *__restrict__ y1,
@@ -137,10 +145,7 @@ extern "C" __global__ void __launch_bounds__(256) moe_gu_f_mxfp4(const uint8_t *
     const bool second = row >= ff;
     const int r = second ? row - ff : row;
     const uint8_t *wr = (second ? W2 : W1) + ((size_t)e * ff + r) * row_bytes;
-    const float *x = h + (size_t)t * C;
-    float acc = 0.f;
-    for (int b = lane; b < C / 32; b += WARP) acc += mxf_blk(wr, b, x);
-    acc = warp_sum(acc);
+    const float acc = mxf_gu_dot(wr, h + (size_t)t * C, C);
     if (lane == 0) (second ? y2 : y1)[(size_t)p * ff + r] = acc;
 }
 extern "C" __global__ void __launch_bounds__(256) moe_down_f_mxfp4(const uint8_t *__restrict__ W, uint64_t row_bytes, int E,

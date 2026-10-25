@@ -936,6 +936,8 @@ private:
     void prefillAttn(DevPtr q, const KvArgs& kva, DevPtr out, DevPtr pos, std::uint32_t n, std::uint32_t pos0, float scale);
     void ffnBlock(DevPtr post_norm, const Mat& gate_w, const Mat& up, const Mat& down, std::uint32_t n);
     void moeBlock(DevPtr post_norm, const Mat& sg, const Mat& su, const Mat& sd, const MoeW& mo, std::uint32_t n);
+    // feat026-moedec: the fused precise decode MoE tail (WHIRL_MOE_FUSE=1); false = not taken, run the old chain
+    bool moeFusedPrecise(const ops::MoePlan& pl, const Mat& sg, const Mat& su, const Mat& sd, const MoeW& mo, DevPtr ysh, std::uint32_t n);
     void setTokensDev(DevPtr ids_dev, std::span<const std::uint32_t> host, DevPtr dev_src, std::uint32_t n_dev,
                       std::uint32_t pos0);
     void setTokens(DevPtr ids_dev, std::span<const std::uint32_t> tokens, std::uint32_t pos0);

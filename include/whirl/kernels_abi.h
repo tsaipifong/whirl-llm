@@ -511,6 +511,8 @@ struct MatmulKernels {
     PerType<F> gemv4{}, gemv8{};  // gemv_<T>_4 / _8 (f32 / f16 only): n = 2..16 bitwise == gemv1 per token
     // gemvh_<T> / gemvh2_<T>: precise decode / verify matmul, f16 x, n <= 16 / 32, bitwise == gemm_c* (gfx1201)
     PerType<F> gemvh{}, gemvh2{};
+    // gemvhf_<T> / gemvhf2_<T> (feat026, optional): the same on f32 x (rounded to f16 in the kernel as f32_to_f16 does)
+    PerType<F> gemvhf{}, gemvhf2{};
     Nt gemvq_nt{}, gemvq_nt_g{};
     std::array<Nt, 2> gemvq_mr{}, gemvq_mr_g{};      // [R/2 - 1][nt - 2][type], R = 2, 4
     std::array<Nt, kNGemvw> gemvw{}, gemvw_g{};      // [v][nt - 2][type], v = 1..8
@@ -571,6 +573,9 @@ struct MoeKernels {
     F gemm8_moe{}, gemm8_moe32{}, gemm8_moeh{}, gemm8_moe32h{}, moe_gather_fp8{};
     F gemm8r_moe{}, gemm8r_moe32{}, gemm8r_moeh{}, gemm8r_moe32h{};  // optional
     F gemmr_moegu{}, gemmr_moegu32{}, gemmr_moedn{}, gemmr_moedn32{};  // optional (MXFP4, f16 activations)
+    // feat026-moedec (optional, both code objects): precise MXFP4 decode, routed + shared expert gate/up + SwiGLU in
+    // one launch, n <= 16 / n <= 32 (kernels/moe_fused.hip; host plan ops::chooseMoeFuse)
+    F moe_gus_f{}, moe_gus2_f{};
 };
 
 struct DeltaNetKernels {
