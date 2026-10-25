@@ -1503,6 +1503,153 @@ void testDflashWidth() {
     }
 }
 
+// feat029-dflash2-r1 (review A3 / C1 / C2): whirl chat / bench's DFlash2 width path (src/cli/main.cpp dflashDecode:
+// dflash_policy.h draftCycle + afterCycle) replayed on the CPU with a mock target, a mock drafter and an injected clock,
+// so the drafter-skip path runs deterministically: every width mode emits exactly the target's tokens (exact verify),
+// the same settings give the same width sequence, forced width 0 never calls the drafter, a drafter that yields no
+// draft is counted apart from a skip and its time stays out of the n = 0 verify time, and T(n) = verify + own drafter.
+namespace dflash_cycle_ref {
+struct Run {
+    std::vector<std::uint32_t> out, widths;
+    whirl::dflash::WidthState st;
+    whirl::dflash::VerifyCost vc;
+    whirl::dflash::DrafterCost dc;
+    std::uint64_t drafter_calls = 0, drafted = 0, accepted = 0, cycles = 0;
+};
+// verify: 10 ms + row_ms per draft; drafter: drafter_ms per call, a block of 7 (each token wrong with probability miss),
+// every empty_every-th call returns no draft (a walk cut by p_min / n_min)
+inline Run decode(const whirl::dflash::WidthParams& wp, const std::vector<std::uint32_t>& target, double miss, float drafter_ms,
+                  float row_ms, std::uint32_t empty_every, std::uint64_t seed) {
+    namespace d = whirl::dflash;
+    Run R;
+    dflash_width_ref::Lcg r{seed};
+    double clock = 0;
+    std::array<float, 15> alpha;
+    alpha.fill(0.75f);
+    std::size_t p = 0;  // position of the last emitted token
+    R.out.push_back(target[0]);
+    while (p + 1 < target.size()) {
+        const double c0 = clock;
+        const std::uint32_t room = static_cast<std::uint32_t>(std::min<std::size_t>(7, target.size() - 1 - p));
+        std::array<std::uint32_t, 15> dr{};
+        auto drafter = [&] {
+            R.drafter_calls += 1;
+            clock += drafter_ms;
+            std::vector<std::uint32_t> blk;
+            if (empty_every > 0 && R.drafter_calls % empty_every == 0) return blk;
+            for (std::uint32_t k = 0; k < 7; ++k) {
+                const std::size_t q = p + 1 + k;
+                const std::uint32_t truth = q < target.size() ? target[q] : 0;
+                blk.push_back(r.unit() < miss ? (truth + 1) % 50 : truth);
+            }
+            return blk;
+        };
+        const d::CycleDraft cd = d::draftCycle(
+            wp, R.st, alpha.data(), 15, room, [&](std::uint32_t k) { return d::widthMeasured(R.vc, R.dc, k); }, drafter,
+            [&] { return clock; }, dr.data(), static_cast<std::uint32_t>(dr.size()));
+        CHECK(cd.n <= room && cd.lim == room);
+        // the target's verify of [last, drafts]: row j is the target's token at p + 1 + j
+        clock += 10.0 + row_ms * cd.n;
+        std::uint32_t acc = 0;
+        while (acc < cd.n && dr[acc] == target[p + 1 + acc]) ++acc;
+        for (std::uint32_t k = 0; k < cd.n && k < 15; ++k) {  // per-position acceptance (like DraftAccept)
+            if (k < acc) alpha[k] = 0.9f * alpha[k] + 0.1f;
+            else if (k == acc) alpha[k] = 0.9f * alpha[k];
+        }
+        d::afterCycle(R.st, R.vc, R.dc, cd, acc, static_cast<float>(clock - c0));
+        for (std::uint32_t k = 0; k <= acc && p + 1 + k < target.size(); ++k) R.out.push_back(target[p + 1 + k]);
+        p += acc + 1;
+        R.widths.push_back(cd.n);
+        R.drafted += cd.n;
+        R.accepted += acc;
+        R.cycles += 1;
+    }
+    return R;
+}
+}  // namespace dflash_cycle_ref
+
+void testDflashCycle() {
+    namespace d = whirl::dflash;
+    using dflash_cycle_ref::decode;
+    dflash_width_ref::Lcg rng{4242};
+    std::vector<std::uint32_t> target(900);
+    for (auto& x : target) x = rng.next() % 50;
+    d::WidthParams fx, au, zr;
+    au.mode = d::Width::automatic;
+    au.probe_every = 8;
+    zr.mode = d::Width::zero;
+    // fixed: the drafter every cycle, the full room, no controller state
+    {
+        const auto R = decode(fx, target, 0.2, 9.3f, 0.84f, 0, 3);
+        CHECK(R.out == target);
+        CHECK_EQ(R.drafter_calls, R.cycles);
+        CHECK(R.st.cycles == 0 && R.st.skipped == 0 && R.st.probes == 0 && R.st.empty == 0);
+        CHECK(R.accepted > 0 && R.accepted < R.drafted);
+    }
+    // auto, expensive drafter and poor drafts: the skip path runs (deterministically), output == target, and the same
+    // settings replay the same width sequence
+    for (double miss : {0.9, 0.97}) {
+        const auto A = decode(au, target, miss, 200.0f, 1.0f, 0, 5);
+        const auto B = decode(au, target, miss, 200.0f, 1.0f, 0, 5);
+        CHECK(A.out == target);
+        CHECK(A.st.skipped > 0);
+        CHECK(A.st.probes > 0);
+        CHECK(A.drafter_calls > 0 && A.drafter_calls < A.cycles);
+        CHECK_EQ(A.drafter_calls + A.st.skipped, A.st.cycles);
+        CHECK(A.widths == B.widths && A.st.skipped == B.st.skipped && A.st.probes == B.st.probes);
+        CHECK(A.vc.n[0] > 0);  // a real n = 0 cycle was timed: 10 ms, no drafter in it
+        CHECK(std::fabs(A.vc.t[0] - 10.0f) < 1e-3f);
+    }
+    // auto, cheap drafter and right drafts: never skipped, mostly the full width; T(n) = verify(n) + the drafter's own ms
+    {
+        const auto R = decode(au, target, 0.0, 0.5f, 0.84f, 0, 7);
+        CHECK(R.out == target);
+        CHECK_EQ(R.st.skipped, 0u);
+        CHECK_EQ(R.drafter_calls, R.cycles);
+        CHECK(R.accepted * 10 >= R.drafted * 9);
+        const auto t7 = d::widthMeasured(R.vc, R.dc, 7);
+        CHECK(t7.has_value() && std::fabs(*t7 - (10.0f + 7 * 0.84f + 0.5f)) < 1e-3f);
+        CHECK(!d::widthMeasured(R.vc, d::DrafterCost{}, 7).has_value());  // no drafter timed: not measured
+    }
+    // forced width 0 (WHIRL_DFLASH_WIDTH=0): the drafter never runs, every cycle verifies one row, output == target
+    {
+        const auto R = decode(zr, target, 0.0, 9.3f, 0.84f, 0, 9);
+        CHECK(R.out == target);
+        CHECK_EQ(R.drafter_calls, 0u);
+        CHECK_EQ(R.drafted, 0u);
+        CHECK_EQ(R.st.skipped, R.cycles);
+        CHECK_EQ(R.cycles, static_cast<std::uint64_t>(target.size() - 1));
+        // zero ignores probes
+        d::WidthParams z2 = zr;
+        z2.probe_every = 2;
+        const auto Q = decode(z2, target, 0.0, 9.3f, 0.84f, 0, 9);
+        CHECK(Q.widths == R.widths && Q.st.probes == 0);
+    }
+    // the drafter ran but yielded no draft (every 3rd call): counted as empty, not skipped; its time goes to the drafter
+    // average, the n = 0 verify bucket stays the 10 ms one-row verify (review C2)
+    {
+        const auto R = decode(fx, target, 0.0, 9.3f, 0.84f, 3, 13);
+        CHECK(R.out == target);
+        CHECK_EQ(R.st.skipped, 0u);
+        CHECK_EQ(R.st.empty, R.drafter_calls / 3);
+        CHECK(R.vc.n[0] == R.st.empty && std::fabs(R.vc.t[0] - 10.0f) < 1e-3f);
+        CHECK(R.dc.n == R.drafter_calls && std::fabs(R.dc.ms - 9.3f) < 1e-3f);
+    }
+    // WHIRL_DFLASH_WIDTH=0 parses; other spellings keep the default
+    {
+        auto envOf = [](std::map<std::string, std::string> m) {
+            return [m](const char* n) -> std::optional<std::string> {
+                auto it = m.find(n);
+                if (it == m.end()) return std::nullopt;
+                return it->second;
+            };
+        };
+        std::vector<std::string> w;
+        CHECK(d::parseParams(envOf({{"DFLASH_WIDTH", "0"}}), w).width.mode == d::Width::zero && w.empty());
+        CHECK(d::parseParams(envOf({{"DFLASH_WIDTH", "00"}}), w).width.mode == d::Width::fixed && w.size() == 1);
+    }
+}
+
 void testDflashPolicy() {
     namespace d = whirl::dflash;
     // --draft parsing
@@ -4332,6 +4479,7 @@ int main(int argc, char** argv) {
     specsample_test::testSpecSample();
     testDflashPolicy();
     testDflashWidth();
+    testDflashCycle();
     testLocalMemTaken();
     testUmaCheck();
     testWddmWatch();

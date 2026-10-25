@@ -1984,9 +1984,11 @@ void testDFlashGreedy() {
     }
 }
 
-// feat029-dflash2: WHIRL_DFLASH_WIDTH=auto (the per-slot draft-width cost model, dflash_policy.h chooseWidth) only
-// changes how many DFlash2 drafts a slot verifies, so greedy outputs stay the greedy reference and a seeded sampled
-// request matches the fixed width; full-width probes run, every cycle with a decided width is counted
+// feat029-dflash2: WHIRL_DFLASH_WIDTH=auto (the per-slot draft-width cost model, dflash_policy.h chooseWidth) is designed
+// to change only how many DFlash2 drafts a slot verifies; on the mock (whose verify rows do not depend on the row count)
+// greedy outputs stay the greedy reference and a seeded sampled request matches the fixed width; full-width probes
+// run, every cycle with a decided width is counted. The width sequence here follows the wall clock (skipped may be 0):
+// the deterministic skip path is testDFlashWidthSkip; the GPU per-row-count proof is the feat029 runner's BITWISE cells
 void testDFlashWidthAuto() {
     for (double miss : {0.1, 0.8}) {
         ServerSetup fx = dflashSetup(false);
@@ -2029,6 +2031,121 @@ void testDFlashWidthAuto() {
                         miss, (unsigned long long)sa.dfl_cycles, (unsigned long long)sa.dfl_drafted, (unsigned long long)sa.dfl_accepted,
                         (unsigned long long)sa.dfl_skipped, (unsigned long long)sa.dfl_probes, (unsigned long long)sb.dfl_drafted,
                         (unsigned long long)sb.dfl_accepted);
+    }
+}
+
+// feat029-dflash2-r1 (review A3): the drafter-skip path made deterministic. The auto width's costs come from
+// EngineOptions::dfl_cost_override (or WHIRL_DFLASH_WIDTH=0 forces width 0), so skipped cycles happen in every run,
+// not only when the mock's wall clock happens to favour them: outputs stay the greedy reference, the drafter context
+// stays consistent after skipped cycles (a later request in the same slot drafts and accepts), two fresh servers give
+// the same statistics, and 2 / 4 concurrent slots with one skipping and another drafting in the same verify all match.
+void testDFlashWidthSkip() {
+    const auto cost_skip = [](std::uint32_t, std::uint32_t n) { return std::optional<float>(n == 0 ? 1.0f : 1000.0f); };
+    const auto cost_draft = [](std::uint32_t, std::uint32_t n) { return std::optional<float>(n == 0 ? 1000.0f : 1.0f); };
+    // (1) forced width 0 and auto with width-0 costs: sequential requests, the same statistics on two fresh servers
+    for (int mode = 0; mode < 2; ++mode) {
+        Engine::Stats st[2];
+        for (int rep = 0; rep < 2; ++rep) {
+            ServerSetup su = dflashSetup(false);
+            su.mc.dfl_miss = 0.0;
+            su.eo.dfl_width.mode = mode == 0 ? whirl::dflash::Width::zero : whirl::dflash::Width::automatic;
+            su.eo.dfl_width.probe_every = 4;
+            if (mode == 1) su.eo.dfl_cost_override = cost_skip;
+            TestServer srv(su);
+            for (std::uint32_t n : {5u, 300u, 1500u}) {
+                const auto p = makePrompt(n, 190 + n);
+                const auto ref = srv.model().greedyReference(p, 120, true);
+                auto r = srv.post("/v1/completions", completionBody(p, 120, n == 300));
+                CHECK_EQ(r.status, 200);
+                CHECK_EQ(n == 300 ? streamText(r, false) : completionText(r), decode(ref));
+            }
+            st[rep] = srv.engine().stats();
+            CHECK(st[rep].dfl_skipped > 0);
+            if (mode == 0) {
+                CHECK_EQ(st[rep].dfl_drafted, 0u);  // the drafter never ran
+                CHECK_EQ(st[rep].dfl_probes, 0u);
+            } else {
+                CHECK(st[rep].dfl_probes > 0 && st[rep].dfl_drafted > 0);  // only the probes drafted
+                CHECK(st[rep].dfl_skipped > st[rep].dfl_probes);
+                // the probes' drafts come from a drafter context fed through skipped cycles: all right (miss 0)
+                CHECK(st[rep].dfl_accepted * 10 >= st[rep].dfl_drafted * 9);
+            }
+            CHECK_EQ(st[rep].dfl_empty, 0u);
+            CHECK_EQ(st[rep].dfl_gap, 0u);
+            CHECK_EQ(srv.model().poison(), 0u);
+            CHECK_EQ(srv.model().dflBad(), 0u);
+            CHECK_EQ(srv.model().dflStale(), 0u);
+        }
+        CHECK_EQ(st[0].dfl_skipped, st[1].dfl_skipped);
+        CHECK_EQ(st[0].dfl_probes, st[1].dfl_probes);
+        CHECK_EQ(st[0].dfl_drafted, st[1].dfl_drafted);
+        CHECK_EQ(st[0].dfl_accepted, st[1].dfl_accepted);
+        if (g_verbose)
+            std::printf("  width skip mode %s: skipped %llu probes %llu drafted %llu accepted %llu (both runs equal)\n",
+                        mode == 0 ? "0" : "auto+override", (unsigned long long)st[0].dfl_skipped, (unsigned long long)st[0].dfl_probes,
+                        (unsigned long long)st[0].dfl_drafted, (unsigned long long)st[0].dfl_accepted);
+    }
+    // (2) skipped cycles, then drafting in the same slot: turn 1 skips every cycle (no probes), turn 2 (= turn 1 + its
+    // output + new text, prefix reuse) drafts every cycle from the context that the skipped cycles kept feeding
+    {
+        std::atomic<bool> skip{true};
+        ServerSetup su = dflashSetup(false);
+        su.mc.parallel = 1;
+        su.mc.dfl_miss = 0.0;
+        su.eo.dfl_width.mode = whirl::dflash::Width::automatic;
+        su.eo.dfl_width.probe_every = 0;
+        su.eo.dfl_cost_override = [&](std::uint32_t s, std::uint32_t n) { return skip ? cost_skip(s, n) : cost_draft(s, n); };
+        TestServer srv(su);
+        const auto p1 = makePrompt(900, 71);
+        auto r1 = srv.post("/v1/completions", completionBody(p1, 100));
+        const auto o1 = srv.model().greedyReference(p1, 100, true);
+        CHECK_EQ(completionText(r1), decode(o1));
+        const Engine::Stats s1 = srv.engine().stats();
+        CHECK(s1.dfl_skipped > 0);
+        CHECK_EQ(s1.dfl_drafted, 0u);
+        skip = false;
+        std::vector<std::uint32_t> p2 = p1;
+        p2.insert(p2.end(), o1.begin(), o1.end());
+        const auto p2b = makePrompt(static_cast<std::uint32_t>(p2.size() + 200), 72, p2);
+        auto r2 = srv.post("/v1/completions", completionBody(p2b, 100));
+        CHECK_EQ(completionText(r2), decode(srv.model().greedyReference(p2b, 100, true)));
+        CHECK(cachedTokens(r2) >= p1.size());
+        const Engine::Stats s2 = srv.engine().stats();
+        CHECK_EQ(s2.dfl_skipped, s1.dfl_skipped);
+        const std::uint64_t dd = s2.dfl_drafted - s1.dfl_drafted, da = s2.dfl_accepted - s1.dfl_accepted;
+        CHECK(dd > 0 && da * 10 >= dd * 9);
+        CHECK_EQ(s2.dfl_cold, 0u);
+        CHECK_EQ(srv.model().dflBad(), 0u);
+        CHECK_EQ(srv.model().dflStale(), 0u);
+    }
+    // (3) 2 and 4 slots at once, even slot ids skip and odd ones draft: mixed verifies, every output == its reference
+    for (std::uint32_t np : {2u, 4u}) {
+        ServerSetup su = dflashSetup(false);
+        su.mc.parallel = np;
+        su.mc.dfl_miss = 0.2;
+        su.eo.dfl_width.mode = whirl::dflash::Width::automatic;
+        su.eo.dfl_width.probe_every = 0;
+        su.eo.dfl_cost_override = [&](std::uint32_t s, std::uint32_t n) { return s % 2 == 0 ? cost_skip(s, n) : cost_draft(s, n); };
+        TestServer srv(su);
+        g_log.clear();
+        std::vector<std::vector<std::uint32_t>> prompts;
+        for (std::uint32_t i = 0; i < 2 * np; ++i) prompts.push_back(makePrompt(300 + 157 * i, 800 + 10 * np + i));
+        std::vector<std::string> got(prompts.size());
+        std::vector<std::thread> th;
+        for (std::size_t i = 0; i < prompts.size(); ++i)
+            th.emplace_back([&, i] { got[i] = completionText(srv.post("/v1/completions", completionBody(prompts[i], 160))); });
+        for (auto& t : th) t.join();
+        for (std::size_t i = 0; i < prompts.size(); ++i) CHECK_EQ(got[i], decode(srv.model().greedyReference(prompts[i], 160, true)));
+        const Engine::Stats st = srv.engine().stats();
+        CHECK(st.dfl_skipped > 0);
+        CHECK(st.dfl_drafted > 0 && st.dfl_accepted > 0);
+        CHECK_EQ(st.dfl_probes, 0u);
+        CHECK_EQ(srv.model().poison(), 0u);
+        CHECK_EQ(srv.model().dflBad(), 0u);
+        CHECK_EQ(srv.model().dflStale(), 0u);
+        if (g_verbose)
+            std::printf("  width skip %u slots mixed: skipped %llu drafted %llu accepted %llu\n", np, (unsigned long long)st.dfl_skipped,
+                        (unsigned long long)st.dfl_drafted, (unsigned long long)st.dfl_accepted);
     }
 }
 
@@ -7754,6 +7871,7 @@ int main(int argc, char** argv) {
         {"dflash_greedy", testDFlashGreedy},
         {"dflash_relax_exact", testDFlashRelaxExact},
         {"dflash_width_auto", testDFlashWidthAuto},
+        {"dflash_width_skip", testDFlashWidthSkip},
         {"dflash_ngram", testDFlashNgram},
         {"dflash_rollback", testDFlashRollback},
         {"dflash_tier", testDFlashTier},
