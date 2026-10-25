@@ -223,6 +223,9 @@ void Model::gemmF16(const Mat& w, DevPtr x16in, DevPtr y, u32 n, i32 acc) {
         case ops::GemmKind::gemmhq:
             hip::launch(p.f, p.grid, p.block, 0, stream, w.ptr, w.row_bytes, x16in, y, ncols, nrows, I(n), acc);
             return;
+        case ops::GemmKind::gemmfq:
+            hip::launch(p.f, p.grid, p.block, 0, stream, w.ptr, w.row_bytes, x16in, y, ncols, nrows, I(n), acc);
+            return;
         default:
             break;
     }
@@ -250,6 +253,20 @@ ops::GemmFlags Model::gemmFlags() const {
         const char* v = std::getenv("WHIRL_PREC_GS");
         return v != nullptr && *v != 0 ? std::atoi(v) : -1;
     }();
+    // feat026-fdq: WHIRL_FDQ8S = c2 | t2 | c2l | t2l | c2f (or 1..5) runs the fused MXFP4 gemmfq slot for the dequant
+    // choices (bitwise the same; unset / 0 = the old dequant + f16 GEMM); WHIRL_FDQ8S_MIN = row threshold (default 1025)
+    static const int fdq = [] {
+        const char* v = std::getenv("WHIRL_FDQ8S");
+        if (v == nullptr || *v == 0) return 0;
+        for (std::size_t i = 0; i < kernels::kGemmFqNames.size(); ++i)
+            if (std::strcmp(v, kernels::kGemmFqNames[i]) == 0) return static_cast<int>(i) + 1;
+        const int i = std::atoi(v);
+        return i >= 1 && i <= static_cast<int>(kernels::kGemmFqNames.size()) ? i : 0;
+    }();
+    static const std::uint32_t fdq_min = [] {
+        const char* v = std::getenv("WHIRL_FDQ8S_MIN");
+        return v != nullptr && *v != 0 ? static_cast<std::uint32_t>(std::strtoul(v, nullptr, 10)) : 1025u;
+    }();
     ops::GemmFlags f;
     f.prec_dec = prec_dec;
     f.out_h16 = out_h16;
@@ -261,6 +278,8 @@ ops::GemmFlags Model::gemmFlags() const {
     f.gemvh_cap = device::profile(arch).gemvh_grid_by_rows ? kernels::gemvhCap() : 0;
     f.gemms_tie_larger_bm = device::profile(arch).gemms_tie_larger_bm;
     f.gv_max = gvMax();
+    f.fdq = fdq;
+    f.fdq_min = fdq_min;
     return f;
 }
 
