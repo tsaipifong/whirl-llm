@@ -120,6 +120,32 @@ void testRelaxAccept() {
     const std::int32_t tid[2] = {5, 4};
     const float tl[2] = {1.0f, 1.0f};  // tie: lower id is the argmax
     CHECK(!whirl::relax::acceptGreedy(p, tid, tl, 1.0f, 5) && whirl::relax::acceptGreedy(p, tid, tl, 1.0f, 4));
+    // feat027-relaxdet: ties at the K-th logit. The rule judged on the top-K candidate set equals the
+    // rule judged on the full row only when the set holds the LOWEST ids among the tied logits (what
+    // topk_rows now guarantees); with another tied id (the old shared-atomic arrival order) a draft
+    // past rank K is kept, so the same prompt could be kept on one run and rejected on the next.
+    {
+        Params q;
+        q.on = true;
+        q.k = 4;
+        q.alpha = 0.01f;
+        const float row[10] = {0, 2, 5, 0, 2, 0, 4, 2, 3, 0};  // 2 > 6 > 8 > ties {1, 4, 7} at the 4th place
+        auto fullRow = [&](std::uint32_t d) {
+            std::int32_t all[10];
+            for (int i = 0; i < 10; ++i) all[i] = i;
+            return whirl::relax::acceptGreedy(q, std::span<const std::int32_t>(all, 10), std::span<const float>(row, 10), 5.0f, d);
+        };
+        auto onSet = [&](std::int32_t tie, std::uint32_t d) {
+            const std::int32_t s[4] = {2, 6, 8, tie};
+            const float v[4] = {row[2], row[6], row[8], row[tie]};
+            return whirl::relax::acceptGreedy(q, s, v, 5.0f, d);
+        };
+        bool same_lowest = true;
+        for (std::uint32_t d : {1u, 2u, 4u, 6u, 7u, 8u}) same_lowest = same_lowest && onSet(1, d) == fullRow(d);
+        CHECK(same_lowest);                       // lowest tied id (1): every verdict = the full row's
+        CHECK(!fullRow(7) && onSet(7, 7));        // another tied id (7): draft 7 (full-row rank 5) kept
+        CHECK(fullRow(1) && !onSet(7, 1));        // ... and draft 1 (rank 3) rejected
+    }
     // repetition guard (6-gram)
     {
         const std::uint32_t h[8] = {1, 2, 3, 4, 5, 6, 9, 1};

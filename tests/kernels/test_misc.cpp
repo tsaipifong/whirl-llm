@@ -352,6 +352,62 @@ void testMisc(Ctx& c) {
             c.rep.add(rk);
             c.rep.add(cmpTolRel("topk_rows softmax normalizer vs CPU", gsum, rsum, 1e-4, 1e-9));
         }
+        // topk_rows ties at the K-th value (feat027-relaxdet): more tied logits than free places must
+        // give the LOWEST ids among the ties (the argmax rule), the same set on every launch. Before the
+        // fix the shared-atomic arrival order chose them, so relaxacc's rank test (whirl/relax_accept.h,
+        // ties: lower id first) could keep a draft on one run and reject it on the next.
+        if (c.k.topk_rows) {
+            const int tn = n, tr = 3;
+            std::vector<float> xt(static_cast<std::size_t>(tr) * tn);
+            for (std::size_t i = 0; i < xt.size(); ++i) xt[i] = -10.0f - static_cast<float>(i % 977) * 1e-3f;
+            const int Ks[tr] = {4, 4, 40};
+            std::vector<std::vector<int>> want(tr);
+            for (int r = 0; r < tr; ++r) {
+                float* xr = xt.data() + static_cast<std::size_t>(r) * tn;
+                const int K = Ks[r];
+                std::vector<int> top;  // K - 1 distinct values above the tie, spread over the row
+                for (int j = 0; j < K - 1; ++j) {
+                    const int at = static_cast<int>((static_cast<long long>(j) * 7919 + 131 * (r + 1)) % tn);
+                    xr[at] = 5.0f + static_cast<float>(j) * 0.25f;
+                    top.push_back(at);
+                }
+                // ties: the lowest one sits in the last wave of the first sweep (thread 1023), the others
+                // in waves 0..15 of later sweeps, so arrival order differs from index order
+                std::vector<int> ties = {1023 + r};
+                for (int it = 1; it < tn / 1024; it += 3)
+                    for (int t = 0; t < 512; t += 37) ties.push_back(it * 1024 + t);
+                for (int at : ties)
+                    if (std::find(top.begin(), top.end(), at) == top.end()) xr[at] = 1.0f;
+                std::vector<int> tsorted;
+                for (int at : ties)
+                    if (std::find(top.begin(), top.end(), at) == top.end()) tsorted.push_back(at);
+                std::sort(tsorted.begin(), tsorted.end());
+                want[static_cast<std::size_t>(r)] = top;
+                want[static_cast<std::size_t>(r)].push_back(tsorted[0]);  // K - (K - 1) = 1 free place
+                std::sort(want[static_cast<std::size_t>(r)].begin(), want[static_cast<std::size_t>(r)].end());
+            }
+            Buf dxt(xt);
+            std::size_t bad = 0, launches = 0;
+            for (int rep = 0; rep < 20; ++rep) {
+                for (int r = 0; r < tr; ++r) {
+                    const int K = Ks[r];
+                    Buf tid(static_cast<std::size_t>(K) * 4), tval(static_cast<std::size_t>(K) * 4), st(8);
+                    hip::launch(c.k.topk_rows, {1, 1, 1}, {1024, 1, 1}, 0, c.s, dxt.p() + static_cast<std::uint64_t>(r) * tn * 4, tn, K,
+                                1.0f, tid.p(), tval.p(), st.p());
+                    c.sync();
+                    std::vector<int> got = tid.down<int>(static_cast<std::size_t>(K));
+                    std::sort(got.begin(), got.end());
+                    bad += got != want[static_cast<std::size_t>(r)];
+                    ++launches;
+                }
+            }
+            Result rt;
+            rt.name = "topk_rows ties at the K-th value: lowest ids, same set every launch";
+            rt.n = launches;
+            rt.mismatches = bad;
+            rt.pass = bad == 0;
+            c.rep.add(rt);
+        }
         // draft_sample_rows: draft distribution q (ids exact, probabilities vs whirl::spec::draftDist)
         // and the drawn token = the race draw from the written q (whirl::spec::sampleRace)
         if (c.k.draft_sample_rows) {
