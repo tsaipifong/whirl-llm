@@ -10,7 +10,7 @@
 // families: quant gemv gemm attn attndq4 gdn moe moemx moef misc gemvh dflash ws4 ws4g vision
 //
 // Timing (measure-tools P2, tests/kernels/kt_bench.h + bench_kernels.cpp): --bench FAMILY[,FAMILY] runs the timing cells
-// of gemv gemvh gemm attn moe gdn instead of the test families (each cell checks its output vs the CPU first);
+// of gemv gemvh gemm attn moe gdn argmax instead of the test families (each cell checks its output vs the CPU first);
 // --jsonl FILE appends one row per cell (db_record.py jsonl); --ab HSACO times the same kernels of a candidate code
 // object against the built-in ones (ABBA, paired ratio). Tuning: --burst-idle S (idle before a cell that would end
 // a burst group past 8 s; runner: 60), --bench-max-s S (per cell, default 3), --rot-mb N (rotation target; default
@@ -88,7 +88,7 @@ int main(int argc, char** argv) {
                 std::string f;
                 while (std::getline(ss, f, ',')) {
                     if (!kt::benchFamilyKnown(f)) {
-                        std::printf("whirl-kernel-test: --bench: no timing family named \"%s\" (gemv gemvh gemm attn moe gdn)\n", f.c_str());
+                        std::printf("whirl-kernel-test: --bench: no timing family named \"%s\" (gemv gemvh gemm attn moe gdn argmax)\n", f.c_str());
                         return usage();
                     }
                     bo.families.insert(f);

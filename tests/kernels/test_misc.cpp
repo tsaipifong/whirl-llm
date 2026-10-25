@@ -4,6 +4,8 @@
 //     silu_mul_q8 int8 copies == quantize_q8 of their f32 output (exact);
 //     rmsnorm_q8_rows == rmsnorm_q8 on the gathered rows (bitwise);
 //   * argmax / argmax_rows / argmax_rows_to / argmax_prob / draft_pick(_rows)
+//     (feat026-argmax: argmax_rows_to_mb == the legacy scan and == argmax_rows_to on GPU for ties across
+//     tiles, -inf rows, NaN (incl. index 0), -0 / +0, +inf, partial tiles, odd n; workspace self-reset)
 //     tokens and control words exact (first maximum wins), probabilities vs
 //     CPU; set_tokens / set_rows exact; topk_rows candidate sets exact;
 //   * requant_q6k_q4k / requant_q80_q4k exact (CPU emulation); requant_q6k_d2 + gemv_d2_nt*
@@ -26,6 +28,18 @@
 namespace kt {
 
 namespace {
+
+// The legacy argmax_rows / argmax_rows_to scan (sample_pick.hip): best = -inf, idx = 0, x[i] > best.
+int legacyArgmax(const float* x, int n) {
+    float best = -std::numeric_limits<float>::infinity();
+    int idx = 0;
+    for (int i = 0; i < n; ++i)
+        if (x[i] > best) {
+            best = x[i];
+            idx = i;
+        }
+    return idx;
+}
 
 int firstMax(const float* x, int n) {
     int b = 0;
@@ -187,6 +201,80 @@ void testMisc(Ctx& c) {
         rt.mismatches = bad;
         rt.pass = bad == 0;
         c.rep.add(rt);
+        // feat026-argmax: multi-block argmax_rows_to_mb (grid (ceil(n / 4096), rows) x 256, last-block finish)
+        if (c.k.argmax_rows_to_mb != nullptr) {
+            const float inf = std::numeric_limits<float>::infinity(), nan = std::numeric_limits<float>::quiet_NaN();
+            Buf ws(512);
+            ws.fill(0);
+            std::size_t runs = 0, bad_cpu = 0, bad_gpu = 0, bad_ws = 0;
+            std::string first;
+            for (const int nn : {248320, 248321, 4096, 4097, 1000, 1}) {
+                const int R = 12;
+                std::vector<float> e = c.randn(static_cast<std::size_t>(R) * nn, 3.f);
+                auto row = [&](int r) { return e.data() + static_cast<std::size_t>(r) * nn; };
+                auto at = [&](int r, int i) -> float& { return row(r)[std::min(i, nn - 1)]; };
+                // r0 random; r1 tie across tiles; r2 max at the last element; r3 all -inf; r4 NaN at 0 and spread
+                // + one max; r5 -0 then +0 as the maximum (others negative); r6 all NaN; r7 tie at a tile edge
+                // and +inf twice; r8 -inf / NaN mix with one finite; r9 all equal; r10 +0 then -0; r11 max at 0
+                at(1, 100) = 50.f;
+                at(1, 9000) = 50.f;
+                at(2, nn - 1) = 60.f;
+                for (int i = 0; i < nn; ++i) row(3)[i] = -inf;
+                for (int i = 0; i < nn; i += 7) row(4)[i] = nan;
+                at(4, nn / 2 + 1) = 40.f;
+                for (int i = 0; i < nn; ++i) row(5)[i] = -1.f - std::fabs(row(5)[i]);
+                at(5, 3) = -0.f;
+                at(5, nn / 3 + 5) = 0.f;
+                for (int i = 0; i < nn; ++i) row(6)[i] = nan;
+                at(7, 4095) = 70.f;
+                at(7, 4096) = 70.f;
+                at(7, 8191) = inf;
+                at(7, 12288) = inf;
+                for (int i = 0; i < nn; ++i) row(8)[i] = (i % 2) ? nan : -inf;
+                at(8, nn - 2) = -1e30f;
+                for (int i = 0; i < nn; ++i) row(9)[i] = 1.25f;
+                for (int i = 0; i < nn; ++i) row(10)[i] = -1.f - std::fabs(row(10)[i]);
+                at(10, 2) = 0.f;
+                at(10, 1) = -0.f;
+                at(11, 0) = 99.f;
+                Buf de(e), o1(64 * 4), o2(64 * 4);
+                wk::RowIdx d2;
+                for (int r = 0; r < R; ++r) d2.v[r] = 50 - 4 * r;
+                for (int rep = 0; rep < 2; ++rep) {  // the second launch runs on the workspace the first reset
+                    o1.fill(0xff);
+                    o2.fill(0xff);
+                    hip::launch(c.k.argmax_rows_to, {static_cast<unsigned>(R), 1, 1}, {1024, 1, 1}, 0, c.s, de.p(), nn, o1.p(), d2);
+                    hip::launch(c.k.argmax_rows_to_mb, {static_cast<unsigned>((nn + 4095) / 4096), static_cast<unsigned>(R), 1}, {256, 1, 1}, 0,
+                                c.s, de.p(), nn, o2.p(), d2, ws.p(), ws.p() + 32 * 8);
+                    c.sync();
+                    const auto g1 = o1.down<int>(64), g2 = o2.down<int>(64);
+                    const auto gw = ws.down<std::uint32_t>(128);
+                    ++runs;
+                    for (int r = 0; r < R; ++r) {
+                        const std::size_t s = static_cast<std::size_t>(d2.v[r]);
+                        const int want_r = legacyArgmax(row(r), nn);
+                        const bool cok = g2[s] == want_r, gok = g2[s] == g1[s];
+                        bad_cpu += !cok;
+                        bad_gpu += !gok;
+                        if ((!cok || !gok) && first.empty())
+                            first = "n=" + std::to_string(nn) + " row " + std::to_string(r) + ": mb " + std::to_string(g2[s]) + ", cpu " +
+                                    std::to_string(want_r) + ", argmax_rows_to " + std::to_string(g1[s]);
+                    }
+                    const bool wok = std::all_of(gw.begin(), gw.end(), [](std::uint32_t u) { return u == 0; });
+                    bad_ws += !wok;
+                    if (!wok && first.empty()) first = "n=" + std::to_string(nn) + ": workspace not reset";
+                }
+            }
+            Result rm;
+            rm.name = "argmax_rows_to_mb == legacy scan (CPU) == argmax_rows_to (GPU); ties / -inf / NaN / -0 / +inf / odd n; ws reset (" +
+                      std::to_string(runs) + " launches x 12 rows)";
+            rm.n = runs * 12;
+            rm.mismatches = bad_cpu + bad_gpu + bad_ws;
+            rm.pass = rm.mismatches == 0;
+            if (!first.empty())
+                rm.note = "first " + first + " (cpu " + std::to_string(bad_cpu) + ", gpu " + std::to_string(bad_gpu) + ", ws " + std::to_string(bad_ws) + ")";
+            c.rep.add(rm);
+        }
         // argmax_prob
         Buf tok(4), prob(4);
         hip::launch(c.k.argmax_prob, {1, 1, 1}, {1024, 1, 1}, 0, c.s, dx.p(), n, tok.p(), prob.p());

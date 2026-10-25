@@ -108,11 +108,61 @@ void Model::gemvKernels(std::span<const Mat> ws, std::span<const DevPtr> ys, u32
         }
         hip::launch(p.f, p.grid[0], p.block, 0, stream, g, xqp, xdp, ncols, acc, gate);
     } else {
+        if (ws.size() == 1 && acc == 0 && headArgmaxFused(ws[0], p.f, n, xqp, xdp, ys[0])) return;  // feat026-argmax
         for (std::size_t si = 0; si < ws.size(); ++si) {
             const Mat& wi = ws[si];
             hip::launch(p.f, p.grid[si], p.block, 0, stream, wi.ptr, wi.row_bytes, xqp, xdp, ys[si], ncols, I(wi.nrows), acc, gate);
         }
     }
+}
+
+// feat026-argmax: the armed greedy argmax fused into this output-head launch when f has a q6_k "_am" twin
+// (same grid, same y bits; the last block writes am_req.out[dst.v[t]]). Only for the one launch that holds
+// all n rows of the head (n <= 16, no skip gate). Returns true when it launched.
+bool Model::headArgmaxFused(const Mat& w, hip::Function f, u32 n, DevPtr xqp, DevPtr xdp, DevPtr y) {
+    if (!am_armed || am_done || !head_phase || w.ptr != output.ptr || w.ty != GgmlType::q6_k || gate != 0 || y != logits || n < 2 ||
+        n > max_small_batch || w.nrows != cfg.n_vocab)
+        return false;
+    const std::size_t q6 = ti(GgmlType::q6_k);
+    hip::Function af = nullptr;
+    u32 rows_per_block = 8;
+    if (f == k.gemvq_nt[n - 2][q6]) {
+        af = k.gemvq_nt_am[n - 2];
+    } else {
+        for (u32 ri = 0; ri < 2; ++ri)
+            if (f == k.gemvq_mr[ri][n - 2][q6]) {
+                af = k.gemvq_mr_am[ri][n - 2];
+                rows_per_block = 16 * (ri + 1);
+            }
+    }
+    if (af == nullptr) return false;
+    hip::launch(af, D((w.nrows + rows_per_block - 1) / rows_per_block), D(256), 0, stream, w.ptr, w.row_bytes, xqp, xdp, y, I(w.ncols),
+                I(w.nrows), i32(0), DevPtr{0}, am_req);
+    am_done = true;
+    return true;
+}
+
+void Model::armHeadArgmax(DevPtr out, const RowIdx& dst) {
+    am_armed = argmax_mode == 2 && am_ws != 0;
+    am_done = false;
+    am_req.key = am_ws;
+    am_req.cnt = am_ws + 32 * 8 + 32 * 4;
+    am_req.out = out;
+    am_req.dst = dst;
+}
+
+void Model::argmaxRowsTo(u32 n, DevPtr out, const RowIdx& dst) {
+    const bool fused = am_armed && am_done && am_req.out == out;
+    am_armed = false;
+    am_done = false;
+    if (fused) return;
+    if (argmax_mode != 0 && am_ws != 0 && k.argmax_rows_to_mb != nullptr) {
+        const u32 tiles = (cfg.n_vocab + 4095) / 4096;
+        hip::launch(k.argmax_rows_to_mb, hip::Dim3{tiles, n, 1}, D(256), 0, stream, logits, I(cfg.n_vocab), out, dst, am_ws,
+                    am_ws + 32 * 8);
+        return;
+    }
+    hip::launch(k.argmax_rows_to, D(n), D(1024), 0, stream, logits, I(cfg.n_vocab), out, dst);
 }
 
 // Matmuls (no accumulate) of ws on the same input into ys. On the int8 GEMV
@@ -1199,15 +1249,17 @@ u32 Model::verifyBatchEnqueue(std::span<const VSeg> segs) {
             m.all_logits = false;
             m.bplan = nullptr;
             m.small_max = max_small_batch;
+            m.am_armed = false;  // feat026-argmax
         }
     } reset_flags{*this};
     xq_src = 0;
     x16_src = 0;
+    armHeadArgmax(out_tok, dst);  // feat026-argmax
     run(n);
     // the kept rows of the previous verify are in the state now
     if (gdn_replay)
         for (const VSeg& sg : segs) seqs[sg.seq].npend = 0;
-    hip::launch(k.argmax_rows_to, D(n), D(1024), 0, stream, logits, I(cfg.n_vocab), out_tok, dst);
+    argmaxRowsTo(n, out_tok, dst);  // feat026-argmax: legacy argmax_rows_to unless WHIRL_ARGMAX
     return n;
 }
 
@@ -1360,6 +1412,12 @@ void Model::argmaxRows(u32 n, std::span<u32> out) {
 }
 
 void Model::argmaxRowsEnqueue(u32 n) {
+    if (argmax_mode != 0) {  // feat026-argmax: argmax_rows == argmax_rows_to with dst = identity
+        RowIdx id;
+        for (u32 r = 0; r < n; ++r) id.v[r] = static_cast<i32>(r);
+        argmaxRowsTo(n, ctlSlot(ctl_rows), id);
+        return;
+    }
     hip::launch(k.argmax_rows, D(n), D(1024), 0, stream, logits, I(cfg.n_vocab), ctlSlot(ctl_rows));
 }
 
@@ -1378,6 +1436,7 @@ void Model::verifyEnqueueEx(u32 next, u32 n_draft, std::optional<std::span<const
             m.keep_hidden = false;
             m.all_logits = false;
             m.snap_rows = 0;
+            m.am_armed = false;  // feat026-argmax
         }
     } reset_flags{*this};
     xq_src = 0;
@@ -1390,6 +1449,11 @@ void Model::verifyEnqueueEx(u32 next, u32 n_draft, std::optional<std::span<const
     } else {
         const u32 one[1] = {next};
         setTokensDev(ids, one, draftSlot(0), n_draft, pos0);
+    }
+    if (argmax_mode == 2) {  // feat026-argmax: fuse into the head GEMV of run(n)
+        RowIdx id;
+        for (u32 r = 0; r < n; ++r) id.v[r] = static_cast<i32>(r);
+        armHeadArgmax(ctlSlot(ctl_rows), id);
     }
     run(n);
     argmaxRowsEnqueue(n);

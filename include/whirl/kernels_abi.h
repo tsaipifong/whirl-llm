@@ -118,6 +118,10 @@
 //  tokens / picks:
 //   argmax(x, n, int* out, int* ids, int* pos, int advance)
 //   argmax_rows(x, n, out); argmax_rows_to(x, n, out, RowIdx dst)
+//   argmax_rows_to_mb(x, n, out, RowIdx dst, u64* ws_key, u32* ws_cnt): grid (ceil(n / 4096), rows) x 256,
+//            same index as argmax_rows_to; ws_key[32] / ws_cnt[32] zeroed once, reset by the kernel (feat026-argmax, optional)
+//   gemvq_nt<n>_q6_k_am / gemvq_nt<n>r<R>_q6_k_am(gemvq_nt args, AmArgs am): the q6_k head GEMV plus the
+//            greedy argmax of each token row into am.out[am.dst.v[t]] (gfx1151, feat026-argmax, optional)
 //   argmax_prob(x, n, int* out_tok, float* out_prob)
 //   draft_pick(x, n, int* tok, float* prob, int* ctl, int r, int n_min, float p_min, const int* map)
 //   draft_pick_rows(x, n, int* ctl_all, RowIdx area, int r, int n_min, float p_min, const int* map)
@@ -320,6 +324,14 @@ struct RowTab {
 struct RowIdx {
     std::int32_t v[kMaxVerifyRows] = {};
 };
+// feat026-argmax: fused-argmax epilogue of a head GEMV (kernels/argmax_key.h AmArgs): key[t] / *cnt are zeroed
+// workspace (reset by the kernel), the last block writes out[dst.v[t]].
+struct AmArgs {
+    DevPtr key = 0;
+    DevPtr cnt = 0;
+    DevPtr out = 0;
+    RowIdx dst{};
+};
 // attn_wsplit query groups: queries first[z] .. first[z] + count[z] - 1.
 struct AwGroups {
     std::int32_t first[kMaxVerifyRows] = {};
@@ -404,6 +416,10 @@ template <>
 struct whirl::hip::LaunchArgPtrWords<whirl::kernels::RowTab> : whirl::hip::LaunchArgNoPtrWords {};
 template <>
 struct whirl::hip::LaunchArgPtrWords<whirl::kernels::RowIdx> : whirl::hip::LaunchArgNoPtrWords {};
+template <>
+struct whirl::hip::LaunchArgPtrWords<whirl::kernels::AmArgs> {  // feat026-argmax: key, cnt, out
+    static bool ptr(std::uint32_t w) { return w < 3; }
+};
 template <>
 struct whirl::hip::LaunchArgPtrWords<whirl::kernels::AwGroups> : whirl::hip::LaunchArgNoPtrWords {};
 template <>
@@ -523,6 +539,9 @@ struct MatmulKernels {
     PerType<F> gemvx{};  // gemvx_v6_<T>: 17..32-token GEMV (runtime token count)
     F gemvw_head_s{};    // gemvw_nt16v2s_q6_k: 16-token output head over a row range, separate y stride
     F gemvw_head_2p{};   // gemvw_nt16x2s_q6_k: wide-verify output head, both 16-token passes in one launch (optional)
+    // feat026-argmax: q6_k head GEMV + fused argmax twins of gemvq_nt[nt - 2][q6_k] / gemvq_mr[ri][nt - 2][q6_k] (optional)
+    std::array<F, kMaxSmallBatch - 1> gemvq_nt_am{};
+    std::array<std::array<F, kMaxSmallBatch - 1>, 2> gemvq_mr_am{};
     std::array<F, kMaxSmallBatch> gemv_d2{};       // [nt - 1]
     std::array<F, kGemm8Cfgs.size()> gemm8{}, gemm8h{};
     std::array<F, kGemm8tCfgs.size()> gemm8t{}, gemm8th{};
@@ -597,6 +616,7 @@ struct MiscKernels {
     F set_tokens{}, argmax_rows{}, argmax_prob{}, draft_pick{};
     F set_rows{}, rmsnorm_q8_rows{}, argmax_rows_to{}, draft_pick_rows{};
     F draft_sample_rows{};  // optional (null: specsample skipped)
+    F argmax_rows_to_mb{};  // optional (feat026-argmax: multi-block argmax_rows_to)
     F silu_mul_x8h{}, gated_norm_x8h{};
     F silu_mul_x16h{}, gated_norm_x16h{};
     F rmsnorm_x8h16{}, rmsnorm_x8h16t{};

@@ -141,6 +141,7 @@ using KvArgs = kernels::KvArgs;
 using Tok16 = kernels::Tok16;
 using RowTab = kernels::RowTab;
 using RowIdx = kernels::RowIdx;
+using AmArgs = kernels::AmArgs;
 using AwGroups = kernels::AwGroups;
 static_assert(kv_page == kernels::kKvPage && gdn_max_seg == kernels::kGdnMaxSeg && gdn_max_snap == kernels::kGdnMaxSnap &&
               max_small_batch == kernels::kMaxSmallBatch && max_drafts == kernels::kMaxDrafts && n_types == kernels::kNTypes &&
@@ -742,6 +743,10 @@ public:
     DevPtr moe_sx = 0;
     bool moe_fp8 = true;
     bool moe_mxw = true;
+    std::uint8_t argmax_mode = 0;  // feat026-argmax: 0 legacy argmax_rows(_to), 1 mb, 2 fused (+ mb fallback)
+    DevPtr am_ws = 0;              // feat026-argmax workspace: 32 u64 keys + 33 u32 counters, zeroed (am_ws_bytes)
+    bool am_armed = false, am_done = false;
+    AmArgs am_req{};
     bool moe_rbf = true;  // MXFP4 x fp8 grouped GEMM: row-block-fast gemm8r_* when present (WHIRL_MOE_RBF=0 -> gemm8_moe*)
 
     // ---- vision (image prompts; see whirl/vismap.h). Text-only sequences never take
@@ -942,6 +947,12 @@ private:
     void draftHeadMatmul(const Mat& head, std::uint32_t n);
     Mat requantQ4k(const Mat& w);
     void argmaxRowsEnqueue(std::uint32_t n);
+    // feat026-argmax selector (WHIRL_ARGMAX = legacy (default) | mb | fused): greedy argmax of n logits rows
+    // into out[dst.v[r]]; armHeadArgmax asks the next q6_k head GEMV to fuse it (gfx1151 twins), argmaxRowsTo
+    // then launches only what the head did not do. Every choice gives the index of argmax_rows_to.
+    void armHeadArgmax(DevPtr out, const RowIdx& dst);
+    void argmaxRowsTo(std::uint32_t n, DevPtr out, const RowIdx& dst);
+    bool headArgmaxFused(const Mat& w, hip::Function f, std::uint32_t n, DevPtr xqp, DevPtr xdp, DevPtr y);
     GdnSegs gdnSegsSingle(std::size_t i, bool conv, std::uint32_t n) const;
     GdnSegs gdnSegsBatch(const BatchPlan& bp, std::size_t i, bool conv) const;
     std::uint64_t pendSsmOff() const;

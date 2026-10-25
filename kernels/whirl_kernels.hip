@@ -52,5 +52,6 @@
 #endif
 
 #include "spec_sample.hip"           // speculative sampling of MTP drafts (both kernel sets)
+#include "argmax_mb.hip"             // multi-block greedy argmax, last-block finish (both kernel sets, feat026-argmax)
 #include "dflash.hip"                // DFlash2 drafter: dynamic conv, top-k, selector lattice / walk, attention
                                      // (both kernel sets: plain f32 code, h2f from either common.hip)

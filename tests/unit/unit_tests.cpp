@@ -29,6 +29,7 @@
 #endif
 
 #include "../../kernels/gemm_small_addr.h"
+#include "../../kernels/argmax_key.h"
 
 #include <algorithm>
 #include <cmath>
@@ -36,6 +37,7 @@
 #include <format>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <optional>
 #include <regex>
 #include <stdexcept>
@@ -1249,6 +1251,82 @@ void testKernelFetchBounds() {
     CHECK(old_caught > 0);     // the check does see the pre-fix over-read (every type reads >= 16 B past)
     CHECK(s2_cases > 0);       // the S = 2 addressing was replayed
     CHECK(s2_old_caught > 0);  // and the check bites there too
+}
+
+// ---------------------------------------------------------------------------
+// feat026-argmax: the argmax keys of kernels/argmax_key.h (argmax_rows_to_mb, the fused q6_k head) combined over
+// random block partitions in random order (atomicMax is order-free) == the legacy argmax_rows scan
+// (best = -inf, idx = 0, x[i] > best) on rows with ties, -inf, NaN (incl. index 0), -0 / +0, +inf, denormals.
+namespace {
+int amLegacy(const std::vector<float>& x) {
+    float best = -std::numeric_limits<float>::infinity();
+    int idx = 0;
+    for (int i = 0; i < static_cast<int>(x.size()); ++i)
+        if (x[i] > best) {
+            best = x[i];
+            idx = i;
+        }
+    return idx;
+}
+}  // namespace
+
+void testArgmaxKeys() {
+    const float inf = std::numeric_limits<float>::infinity(), nan = std::numeric_limits<float>::quiet_NaN();
+    const float den = std::numeric_limits<float>::denorm_min();
+    std::uint64_t st = 0x9E3779B97F4A7C15ull;
+    auto rnd = [&]() {
+        st ^= st << 13;
+        st ^= st >> 7;
+        st ^= st << 17;
+        return st;
+    };
+    // pool of values that stress the order: signed zeros, infinities, NaNs, denormals, near-equal values
+    const float pool[] = {0.f, -0.f, inf, -inf, nan, -nan, den, -den, 1.f, -1.f, 1.0000001f, 0.99999994f, 3.4e38f, -3.4e38f, 2.5f, -2.5f};
+    int cases = 0, bad = 0;
+    for (int it = 0; it < 4000; ++it) {
+        const int n = 1 + static_cast<int>(rnd() % (it < 2000 ? 64 : 9000));
+        std::vector<float> x(static_cast<std::size_t>(n));
+        const int mode = static_cast<int>(rnd() % 4);
+        for (float& v : x) {
+            const std::uint64_t r = rnd();
+            if (mode == 0)
+                v = pool[r % (sizeof pool / sizeof pool[0])];
+            else if (mode == 1)
+                v = static_cast<float>(static_cast<int>(r % 7) - 3);  // many exact ties
+            else if (mode == 2)
+                v = (r % 3 == 0) ? nan : -inf;  // no finite value at all
+            else
+                v = static_cast<float>(static_cast<std::int64_t>(r % 2000001) - 1000000) * 1e-3f;
+        }
+        // blocks: random tile size; each block folds its tile in any order, then blocks combine in random order
+        const int tile = 1 + static_cast<int>(rnd() % 300);
+        std::vector<am_key_t> part;
+        for (int b = 0; b < n; b += tile) {
+            am_key_t k = 0;
+            const int e = std::min(n, b + tile);
+            for (int i = e - 1; i >= b; --i) k = am_max(k, am_key(x[static_cast<std::size_t>(i)], i));  // reverse order on purpose
+            part.push_back(k);
+        }
+        for (std::size_t i = part.size(); i > 1; --i) std::swap(part[i - 1], part[rnd() % i]);
+        am_key_t g = 0;  // the zeroed workspace key
+        for (const am_key_t k : part) g = am_max(g, k);
+        ++cases;
+        if (am_idx(g) != amLegacy(x)) {
+            if (bad < 5) std::printf("FAIL argmax key: n %d mode %d tile %d: key idx %d, legacy %d\n", n, mode, tile, am_idx(g), amLegacy(x));
+            ++bad;
+        }
+    }
+    CHECK_EQ(bad, 0);
+    CHECK(cases == 4000);
+    // fixed cases
+    CHECK_EQ(am_idx(am_key(-inf, 0)), 0);
+    CHECK(am_key(-inf, 7) > 0ull);                          // every key beats the zeroed workspace
+    CHECK(am_key(0.f, 3) == am_key(-0.f, 3));               // -0 == +0
+    CHECK(am_key(nan, 5) == am_key(-inf, 5));               // NaN never wins
+    CHECK(am_key(1.f, 9) > am_key(1.f, 10));                // lower index wins a tie
+    CHECK(am_key(inf, 1000) > am_key(3.4e38f, 0));
+    CHECK(am_key(-den, 0) < am_key(den, 99));
+    CHECK_EQ(am_idx(am_key(2.f, 248319)), 248319);
 }
 
 // ---------------------------------------------------------------------------
@@ -4074,6 +4152,7 @@ int main(int argc, char** argv) {
     testNumerics();
     testKvChoice();
     testKernelFetchBounds();
+    testArgmaxKeys();
     testValueScope();
     testLaunchDigest();
     testLaunchDigestLayout();

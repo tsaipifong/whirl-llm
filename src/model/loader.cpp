@@ -354,6 +354,7 @@ u64 bufferBytes(const Config& cfg, u32 Bq, u64 ffs, u64 max_elems, u32 fd_splits
     n += static_cast<u64>(max_small_batch) * cfg.n_embd * f4;  // mtp_h
     n += B * 4 * 3;                                       // mtp_ids, ids, pos_buf
     n += ctl_words * 4;                                   // out_tok
+    n += 512;                                             // am_ws (feat026-argmax)
     const u64 n_split = fd_splits;
     n += max_verify_rows * n_split * cfg.n_head * 2 * f4;  // part_ml
     n += max_verify_rows * n_split * cfg.n_head * cfg.head_dim * f4;  // part_acc
@@ -538,6 +539,10 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
     m.moe_mxw = envFlag("MOE_MXW", true);
     m.moe_wide = envFlag("MOE_WIDE", false);  // MoE wide verify (balance / fast, opt-in), see wideCapable
     m.moe_rbf = envFlag("MOE_RBF", true);
+    {  // feat026-argmax: WHIRL_ARGMAX = legacy (default) | mb | fused
+        const std::string am = envGet("ARGMAX").value_or("legacy");
+        m.argmax_mode = am == "fused" ? 2 : am == "mb" ? 1 : 0;
+    }
     m.layers.resize(cfg.n_layer);
     m.kcache.assign(cfg.n_layer, 0);
     m.vcache.assign(cfg.n_layer, 0);
@@ -686,6 +691,7 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
     m.host_ids.assign(static_cast<std::size_t>(2 * B), 0);
     m.pos_buf = m.alloc(B * 4);
     m.out_tok = m.allocZero(ctl_words * 4);
+    m.am_ws = m.allocZero(512);  // feat026-argmax: argmax keys / tickets (kernels reset them)
     m.fd_splits = resolveFdSplits(m.kv_q4);
     const u64 n_split = m.fd_splits;
     m.part_ml = m.alloc(max_verify_rows * n_split * cfg.n_head * 2 * f4);

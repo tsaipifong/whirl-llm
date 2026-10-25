@@ -22,6 +22,7 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <limits>
 #include <memory>
 #include <numeric>
 
@@ -932,9 +933,135 @@ void benchGdn(Env& e) {
     runCell(e, k);
 }
 
+// ---------------------------------------------------------------- argmax (feat026-argmax)
+// The Swift verify cycle's greedy pick: 4 rows x 248320 logits (audit\PROF-8S.md 2.3, argmax_rows_to 1.8%).
+// Cells: argmax_rows_to (1 block per row) vs argmax_rows_to_mb (tiles x rows, last-block finish), logits not
+// rotated (in decode they come straight from the head GEMV, so they sit in the last-level cache); and the q6_k
+// output head at n = 4: gemvq_nt4_q6_k + argmax_rows_to (2 launches, today), + argmax_rows_to_mb, and the fused
+// gemvq_nt4_q6_k_am (1 launch; gfx1151). Every cell checks the index against the legacy CPU scan first.
+int benchLegacyArgmax(const float* x, int n) {
+    float best = -std::numeric_limits<float>::infinity();
+    int idx = 0;
+    for (int i = 0; i < n; ++i)
+        if (x[i] > best) {
+            best = x[i];
+            idx = i;
+        }
+    return idx;
+}
+
+void benchArgmax(Env& e) {
+    Ctx& c = e.c;
+    c.rep.family = "argmax";
+    constexpr int R = 4;
+    wk::RowIdx dst;
+    for (int r = 0; r < R; ++r) dst.v[r] = r;
+    Buf out(64 * 4), ws(512);
+    ws.fill(0);
+    auto outIdx = [&]() {
+        const auto o = out.down<int>(R);
+        return std::vector<float>(o.begin(), o.end());
+    };
+    {
+        const int V = 248320;
+        const std::vector<float> x = c.randn(static_cast<std::size_t>(R) * V, 3.f);
+        Buf dx(x);
+        std::vector<float> want(R);
+        for (int r = 0; r < R; ++r) want[static_cast<std::size_t>(r)] = static_cast<float>(benchLegacyArgmax(x.data() + static_cast<std::size_t>(r) * V, V));
+        for (const bool mb : {false, true}) {
+            hip::Function f = mb ? c.k.argmax_rows_to_mb : c.k.argmax_rows_to;
+            const std::string kn = mb ? "argmax_rows_to_mb" : "argmax_rows_to";
+            if (!f) {
+                c.rep.skip("argmax", "bench " + kn, "kernel not in this code object");
+                continue;
+            }
+            Cell k;
+            k.ci = e.info("argmax", kn, "swift.verify.r4", shapeStr(R, V));
+            k.ci.settings = e.settings(0, 1);
+            k.ci.bytes = static_cast<double>(R) * V * 4;
+            k.kernel = kn;
+            k.fa = f;
+            k.call = [&, mb, V](hip::Function fn, std::uint64_t) {
+                if (mb)
+                    hip::launch(fn, {cdiv(V, 4096), R, 1}, {256, 1, 1}, 0, c.s, dx.p(), V, out.p(), dst, ws.p(), ws.p() + 32 * 8);
+                else
+                    hip::launch(fn, {R, 1, 1}, {1024, 1, 1}, 0, c.s, dx.p(), V, out.p(), dst);
+            };
+            k.run = [&](hip::Function fn) {
+                out.fill(0xff);
+                k.call(fn, 0);
+                c.sync();
+                return outIdx();
+            };
+            k.verify = [&](const std::vector<float>& got) { return cmpExact("index == legacy scan (CPU)", got, want, Kind::invariant); };
+            runCell(e, k);
+        }
+    }
+    // q6_k output head at n = 4 (Swift / Ornith)
+    const Weights w = denseWeights(c, {"output.weight"});
+    for (const auto& [tn, m] : w.mats) {
+        if (m.type != QType::q6_k || tn != "output.weight") continue;
+        const hip::Function plain = c.k.gemvqNt(m.type, R, false);
+        if (!plain) continue;
+        const int ncols = m.ncols, nrows = m.nrows;
+        const std::vector<float> x = c.randn(static_cast<std::size_t>(R) * ncols);
+        Buf dx(x), xq(static_cast<std::size_t>(R) * ncols), xd(static_cast<std::size_t>(R) * ncols / 32 * 4), y(static_cast<std::size_t>(R) * nrows * 4);
+        hip::launch(c.k.quantize_q8, {cdiv(static_cast<std::uint64_t>(R) * ncols, 256), 1, 1}, {256, 1, 1}, 0, c.s, dx.p(), xq.p(), xd.p(), R * ncols);
+        const DevCopies wc = upload(e, m.data);
+        const std::uint64_t rb = m.row_bytes;
+        y.fill(0);
+        hip::launch(plain, {cdiv(nrows, 8), 1, 1}, {256, 1, 1}, 0, c.s, wc.at(0), rb, xq.p(), xd.p(), y.p(), ncols, nrows, 0, DevPtr{0});
+        c.sync();
+        const auto y0 = y.down<float>(static_cast<std::size_t>(R) * nrows);
+        std::vector<float> want(R);
+        for (int r = 0; r < R; ++r) want[static_cast<std::size_t>(r)] = static_cast<float>(benchLegacyArgmax(y0.data() + static_cast<std::size_t>(r) * nrows, nrows));
+        // 0: plain + argmax_rows_to, 1: plain + argmax_rows_to_mb, 2: fused _am
+        for (int v = 0; v < 3; ++v) {
+            const hip::Function am = c.k.gemvq_nt_am[R - 2];
+            if (v == 1 && !c.k.argmax_rows_to_mb) continue;
+            if (v == 2 && !am) {
+                c.rep.skip("argmax", "bench gemvq_nt4_q6_k_am", "fused head twin not in this code object");
+                continue;
+            }
+            const std::string kn = v == 0 ? "gemvq_nt4_q6_k+argmax_rows_to" : v == 1 ? "gemvq_nt4_q6_k+argmax_rows_to_mb" : "gemvq_nt4_q6_k_am";
+            Cell k;
+            k.ci = e.info("argmax", kn, w.label + ".head.n4", shapeStr(nrows, ncols));
+            k.ci.settings = e.settings(static_cast<std::uint64_t>(wc.n()) * m.data.size(), wc.n());
+            k.ci.bytes = static_cast<double>(m.data.size()) + static_cast<double>(R) * ncols;
+            k.ci.launches_per_call = v == 2 ? 1 : 2;
+            k.kernel = v == 2 ? "gemvq_nt4_q6_k_am" : "gemvq_nt4_q6_k";
+            k.fa = v == 2 ? am : plain;
+            k.call = [&, v, ncols, nrows, rb](hip::Function fn, std::uint64_t r) {
+                if (v == 2) {
+                    wk::AmArgs a;
+                    a.key = ws.p();
+                    a.cnt = ws.p() + 32 * 8 + 32 * 4;
+                    a.out = out.p();
+                    a.dst = dst;
+                    hip::launch(fn, {cdiv(nrows, 8), 1, 1}, {256, 1, 1}, 0, c.s, wc.at(r), rb, xq.p(), xd.p(), y.p(), ncols, nrows, 0, DevPtr{0}, a);
+                    return;
+                }
+                hip::launch(fn, {cdiv(nrows, 8), 1, 1}, {256, 1, 1}, 0, c.s, wc.at(r), rb, xq.p(), xd.p(), y.p(), ncols, nrows, 0, DevPtr{0});
+                if (v == 1)
+                    hip::launch(c.k.argmax_rows_to_mb, {cdiv(nrows, 4096), R, 1}, {256, 1, 1}, 0, c.s, y.p(), nrows, out.p(), dst, ws.p(), ws.p() + 32 * 8);
+                else
+                    hip::launch(c.k.argmax_rows_to, {R, 1, 1}, {1024, 1, 1}, 0, c.s, y.p(), nrows, out.p(), dst);
+            };
+            k.run = [&](hip::Function fn) {
+                out.fill(0xff);
+                k.call(fn, 0);
+                c.sync();
+                return outIdx();
+            };
+            k.verify = [&](const std::vector<float>& got) { return cmpExact("index == legacy scan of the head logits (CPU)", got, want, Kind::invariant); };
+            runCell(e, k);
+        }
+    }
+}
+
 }  // namespace
 
-const char* const kBenchFamilies[] = {"gemv", "gemvh", "gemm", "attn", "moe", "gdn"};
+const char* const kBenchFamilies[] = {"gemv", "gemvh", "gemm", "attn", "moe", "gdn", "argmax"};
 
 bool benchFamilyKnown(const std::string& f) {
     for (const char* n : kBenchFamilies)
@@ -984,7 +1111,7 @@ void runBench(Ctx& c, const BenchOpts& o) {
         const char* name;
         void (*fn)(Env&);
     };
-    const F fams[] = {{"gemv", benchGemv}, {"gemvh", benchGemvh}, {"gemm", benchGemm}, {"attn", benchAttnDecode}, {"moe", benchMoe}, {"gdn", benchGdn}};
+    const F fams[] = {{"gemv", benchGemv}, {"gemvh", benchGemvh}, {"gemm", benchGemm}, {"attn", benchAttnDecode}, {"moe", benchMoe}, {"gdn", benchGdn}, {"argmax", benchArgmax}};
     for (const F& f : fams) {
         if (!o.families.count(f.name)) continue;
         std::printf("== bench %s\n", f.name);

@@ -11,6 +11,8 @@
 // half n = w & 1 of the superblocks b = w / 2 (mod 4), i.e. slices 4w .. 4w+3.
 // Values are fed as signed int8 (q - 32), so no x sums are needed.
 // ---------------------------------------------------------------------------
+#include "../argmax_key.h"  // feat026-argmax: fused head argmax keys (gemvw6_impl AM)
+
 struct WUnit6 {
     int w[8];
     float s0, s1;
@@ -74,13 +76,16 @@ __device__ void gemv1s6_impl(const uint8_t *__restrict__ W, uint64_t row_bytes, 
     if (lane == 0) y[row] = accumulate ? y[row] + acc : acc;
 }
 
-template <int NT, int TILES, bool HALF>
+// AM (feat026-argmax): also the greedy argmax of each token row of y (am_gemv_finish, argmax_key.h);
+// the y stores are the same expression, so y is bitwise the AM = false kernel's.
+template <int NT, int TILES, bool HALF, bool AM = false>
 __device__ void gemvw6_impl(const uint8_t *__restrict__ W, uint64_t row_bytes, const int8_t *__restrict__ xq,
                             const float *__restrict__ xd, float *__restrict__ y, int ncols, int nrows, int accumulate,
-                            const int *__restrict__ skip, int bid = -1) {
+                            const int *__restrict__ skip, int bid = -1, AmArgs am = AmArgs{}) {
     constexpr int ROWS = HALF ? 8 : 16 * TILES;
     constexpr int NTV = (NT + 1) / 2;
     __shared__ float red[8][NT][ROWS];
+    __shared__ am_key_t amk[AM ? NT : 1][AM ? ROWS : 1];
     if (skip != nullptr && *skip) return;
     const int lane = threadIdx.x % WARP, w = threadIdx.x / WARP, h = lane >> 4, n = lane & 15;
     const int r0 = (bid < 0 ? (int)blockIdx.x : bid) * ROWS;
@@ -140,9 +145,14 @@ __device__ void gemvw6_impl(const uint8_t *__restrict__ W, uint64_t row_bytes, c
                         ((red[4][t][nn] + red[5][t][nn]) + (red[6][t][nn] + red[7][t][nn]));
         if (row < nrows) {
             float *dst = y + (size_t)t * nrows + row;
-            *dst = accumulate ? *dst + s : s;
+            const float v = accumulate ? *dst + s : s;
+            *dst = v;
+            if constexpr (AM) amk[t][nn] = am_key(v, row);
+        } else if constexpr (AM) {
+            amk[t][nn] = 0ull;
         }
     }
+    if constexpr (AM) am_gemv_finish<NT, ROWS>(amk, am);
 }
 
 template <int T, int NT, int R>
@@ -222,6 +232,8 @@ __device__ void gemvq_mr_impl(const uint8_t *__restrict__ W, uint64_t row_bytes,
              int ncols, int nrows, int accumulate, const int *skip) {                            \
         gemvw6_impl<NT, TILES, HALF>(W, row_bytes, xq, xd, y, ncols, nrows, accumulate, skip);   \
     }
+// feat026-argmax: output-head entries with the fused argmax (args of the plain entry + AmArgs)
+#define GEMVW6_AM_ENTRY(NAME, NT, TILES, HALF)                                                       extern "C" __global__ void __launch_bounds__(256)                                                    NAME(const uint8_t *W, uint64_t row_bytes, const int8_t *xq, const float *xd, float *y,              int ncols, int nrows, int accumulate, const int *skip, AmArgs am) {                        gemvw6_impl<NT, TILES, HALF, true>(W, row_bytes, xq, xd, y, ncols, nrows, accumulate, skip, -1, am);     }
 // "g" twins (grouped ABI, GvArgs): one launch covers up to 3 matrices sharing the input;
 // each block runs its segment's rows with the plain entry's code (bitwise the same rows).
 #define GGEMVQ_NT_ENTRY(NT, SUF, T)                                                              \
@@ -247,7 +259,7 @@ __device__ void gemvq_mr_impl(const uint8_t *__restrict__ W, uint64_t row_bytes,
     GEMVW_ENTRY(gemvq_nt##NT##_q5_k, QT_Q5_K, NT, 1, true)     \
     GEMVW_ENTRY(gemvq_nt##NT##_iq4_xs, QT_IQ4_XS, NT, 1, true) \
     GEMVW_ENTRY(gemvq_nt##NT##_mxfp4, QT_MXFP4, NT, 1, true) \
-    GEMVW6_ENTRY(gemvq_nt##NT##_q6_k, NT, 1, true) \
+    GEMVW6_ENTRY(gemvq_nt##NT##_q6_k, NT, 1, true)     GEMVW6_AM_ENTRY(gemvq_nt##NT##_q6_k_am, NT, 1, true) \
     GEMVQ_NT_ENTRY(NT, iq4_nl, QT_IQ4_NL) \
     GEMVQ_NT_ENTRY(NT, q8_0, QT_Q8_0)     \
     GEMVQ_NT_ENTRY(NT, q3_k, QT_Q3_K)     \
@@ -307,7 +319,7 @@ GEMVQ_NT_TYPES(16)
     GEMVW_ENTRY(gemvq_nt##NT##r##R##_q5_k, QT_Q5_K, NT, R / 2, false)     \
     GEMVW_ENTRY(gemvq_nt##NT##r##R##_iq4_xs, QT_IQ4_XS, NT, R / 2, false) \
     GEMVW_ENTRY(gemvq_nt##NT##r##R##_mxfp4, QT_MXFP4, NT, R / 2, false) \
-    GEMVW6_ENTRY(gemvq_nt##NT##r##R##_q6_k, NT, R / 2, false) \
+    GEMVW6_ENTRY(gemvq_nt##NT##r##R##_q6_k, NT, R / 2, false)     GEMVW6_AM_ENTRY(gemvq_nt##NT##r##R##_q6_k_am, NT, R / 2, false) \
     GGEMVW_ENTRY(ggemvq_nt##NT##r##R##_q4_k, QT_Q4_K, NT, R / 2, false)     \
     GGEMVW_ENTRY(ggemvq_nt##NT##r##R##_q5_k, QT_Q5_K, NT, R / 2, false)     \
     GGEMVW_ENTRY(ggemvq_nt##NT##r##R##_iq4_xs, QT_IQ4_XS, NT, R / 2, false) \

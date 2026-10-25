@@ -9,7 +9,14 @@
 //   * the 2-bit MTP draft head GEMV (gemv_d2_nt*) multi-token == 1-token;
 //   * the wide GEMV gemvx_v6_<T> (17..32 tokens) == 1-token, rows past the count untouched;
 //   * the one-launch wide-verify head gemvw_nt16x2s_q6_k == 1-token == two gemvw_nt16v2s_q6_k launches.
+//   * feat026-argmax: the q6_k head twins with the fused argmax (gemvq_nt<n>[r<R>]_q6_k_am) write y bitwise
+//     == 1-token and out[dst.v[t]] == the legacy argmax_rows scan of y (also with tied rows across blocks,
+//     twice in a row on the self-reset workspace, which must end zeroed).
 // SPDX-License-Identifier: Apache-2.0
+
+#include <algorithm>
+#include <cstring>
+#include <limits>
 
 #include "cpu_ref.h"
 
@@ -20,6 +27,18 @@ namespace kt {
 namespace {
 
 constexpr int kNt = wk::kMaxSmallBatch;
+
+// The legacy argmax_rows / argmax_rows_to scan (sample_pick.hip): best = -inf, idx = 0, x[i] > best.
+int legacyArgmax(const float* x, int n) {
+    float best = -std::numeric_limits<float>::infinity();
+    int idx = 0;
+    for (int i = 0; i < n; ++i)
+        if (x[i] > best) {
+            best = x[i];
+            idx = i;
+        }
+    return idx;
+}
 
 // One-token int8 GEMV of token t through the GvArgs entry.
 void gemvq1(Ctx& c, QType t, const Buf& w, std::uint64_t rb, int nrows, DevPtr xq, DevPtr xd, DevPtr y, int ncols,
@@ -348,6 +367,78 @@ void testGemv(Ctx& c) {
             if (!first.empty()) rw.note = "first " + first + " (1tok " + std::to_string(bad1) + ", 2x " + std::to_string(bad2) + ", untouched " +
                                           std::to_string(badu) + ")";
             c.rep.add(rw);
+        }
+        // feat026-argmax: fused head argmax twins (q6_k; gfx1151 code object)
+        if (m.type == QType::q6_k && c.k.gemvq_nt_am[0] != nullptr) {
+            // tied copy: row r = row (r % 64) of m, so every token row has its maximum in every period of 64
+            // rows (many blocks apart); the lowest index must win
+            std::vector<std::uint8_t> tied(m.data.size());
+            for (int r = 0; r < nrows; ++r)
+                std::memcpy(tied.data() + static_cast<std::size_t>(r) * m.row_bytes, m.data.data() + static_cast<std::size_t>(r % 64) * m.row_bytes,
+                            m.row_bytes);
+            Buf wt(tied), ws(512), out(64 * 4), yt(static_cast<std::size_t>(kNt) * nrows * 4);
+            ws.fill(0);
+            std::size_t runs = 0, bad_y = 0, bad_i = 0, bad_ws = 0;
+            std::string first;
+            for (const bool use_tied : {false, true}) {
+                const Buf& wm = use_tied ? wt : w;
+                // reference y of the tied matrix: the plain nt entry (== 1-token, checked above for m)
+                for (int nt = 2; nt <= kNt; ++nt) {
+                    struct V {
+                        hip::Function f, plain;
+                        int rows;
+                        const char* label;
+                    };
+                    const V vs[3] = {{c.k.gemvq_nt_am[nt - 2], c.k.gemvqNt(m.type, nt, false), 8, "nt"},
+                                     {c.k.gemvq_mr_am[0][nt - 2], c.k.gemvqMr(m.type, nt, 2, false), 16, "R2"},
+                                     {c.k.gemvq_mr_am[1][nt - 2], c.k.gemvqMr(m.type, nt, 4, false), 32, "R4"}};
+                    yt.fill(0xff);
+                    hip::launch(vs[0].plain, {cdiv(nrows, 8), 1, 1}, {256, 1, 1}, 0, c.s, wm.p(), m.row_bytes, xq.p(), xd.p(), yt.p(), ncols,
+                                nrows, 0, DevPtr{0});
+                    c.sync();
+                    const auto want_y = yt.down<float>(static_cast<std::size_t>(nt) * nrows);
+                    for (const V& v : vs) {
+                        if (v.f == nullptr) continue;
+                        for (int rep = 0; rep < 2; ++rep) {  // the second launch runs on the workspace the first reset
+                            wk::AmArgs am;
+                            am.key = ws.p();
+                            am.cnt = ws.p() + 32 * 8 + 32 * 4;
+                            am.out = out.p();
+                            for (int t = 0; t < nt; ++t) am.dst.v[t] = 40 - 2 * t;
+                            out.fill(0xff);
+                            y.fill(0xff);
+                            hip::launch(v.f, {cdiv(nrows, static_cast<unsigned>(v.rows)), 1, 1}, {256, 1, 1}, 0, c.s, wm.p(), m.row_bytes, xq.p(),
+                                        xd.p(), y.p(), ncols, nrows, 0, DevPtr{0}, am);
+                            c.sync();
+                            ++runs;
+                            const auto got_y = y.down<float>(static_cast<std::size_t>(nt) * nrows);
+                            const auto got_o = out.down<int>(64);
+                            const auto got_ws = ws.down<std::uint32_t>(128);
+                            const bool yok = std::memcmp(got_y.data(), want_y.data(), got_y.size() * 4) == 0;
+                            bool iok = true;
+                            for (int t = 0; t < nt; ++t)
+                                iok = iok && got_o[static_cast<std::size_t>(40 - 2 * t)] ==
+                                                 legacyArgmax(want_y.data() + static_cast<std::size_t>(t) * nrows, nrows);
+                            const bool wok = std::all_of(got_ws.begin(), got_ws.end(), [](std::uint32_t u) { return u == 0; });
+                            bad_y += !yok;
+                            bad_i += !iok;
+                            bad_ws += !wok;
+                            if ((!yok || !iok || !wok) && first.empty())
+                                first = std::string(use_tied ? "tied " : "") + "nt=" + std::to_string(nt) + " " + v.label + " rep " + std::to_string(rep);
+                        }
+                    }
+                }
+            }
+            Result ra;
+            ra.name = "gemvq_nt*_q6_k_am fused head argmax: y == plain bitwise, index == legacy argmax, workspace reset (" +
+                      std::to_string(runs) + " launches, tied rows incl.) " + m.name;
+            ra.kind = Kind::invariant;
+            ra.n = runs;
+            ra.mismatches = bad_y + bad_i + bad_ws;
+            ra.pass = ra.mismatches == 0 && runs > 0;
+            if (!first.empty())
+                ra.note = "first " + first + " (y " + std::to_string(bad_y) + ", idx " + std::to_string(bad_i) + ", ws " + std::to_string(bad_ws) + ")";
+            c.rep.add(ra);
         }
         Result r;
         r.name = "multi-token/multi-row/WMMA GEMV == 1-token (" + std::to_string(variants) + " kernels) " + m.name;

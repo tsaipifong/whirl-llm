@@ -204,7 +204,7 @@ struct BenchOpts {
     std::string state = "burst";         // declared power state (DESIGN (d))
     std::string tool_ver, code_hash, code_hash_b, gpu_arch, gpu_pci;
 };
-extern const char* const kBenchFamilies[6];
+extern const char* const kBenchFamilies[7];  // feat026-argmax: + "argmax" (keep in step with bench_kernels.cpp)
 bool benchFamilyKnown(const std::string& f);
 struct Ctx;
 void runBench(Ctx& c, const BenchOpts& o);
