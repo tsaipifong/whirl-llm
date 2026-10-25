@@ -4190,6 +4190,38 @@ static void testPl1bEnvReads() {
 #endif
 }
 
+// bug-launchlogroot: an empty log folder at exit (WHIRL_LAUNCH_LOG / WHIRL_ALLOC_LOG unset or "", e.g. whirl-tests'
+// clearWhirlEnv after the static initializer saw the variable) means "do not write": the exit path is empty instead
+// of "\launch_<pid>.txt" (the root of the current drive). A folder keeps the v0.2.4 text byte for byte. Only path
+// text is checked; nothing is opened.
+static void testLogFolderEmpty() {
+    namespace pe = whirl::platform::env;
+    namespace al = whirl::hip::alloclog;
+    namespace ll = whirl::hip::launchlog;
+    CHECK(ll::exitPath("", 4242, false).empty());
+    CHECK(ll::exitPath("", 4242, true).empty());
+    CHECK(al::exitPath("", 4242).empty());
+    CHECK_EQ(ll::exitPath("D:\\logs", 4242, false), std::string("D:\\logs\\launch_4242.txt"));
+    CHECK_EQ(ll::exitPath("D:\\logs", 4242, true), std::string("D:\\logs\\launch_4242.raw.txt"));
+    CHECK_EQ(al::exitPath("D:\\logs", 4242), std::string("D:\\logs\\alloc_4242.txt"));
+    CHECK_EQ(ll::exitPath("rel dir", 7, false), std::string("rel dir\\launch_7.txt"));
+#ifdef _WIN32
+    // through the platform::env seam, the read the exit writer makes ("" deletes the variable in-process)
+    const char* names[] = {"WHIRL_LAUNCH_LOG", "WHIRL_ALLOC_LOG"};
+    std::optional<std::string> saved[2];
+    for (int i = 0; i < 2; ++i) saved[i] = pe::get(names[i]);
+    for (const char* n : names) CHECK(pe::set(n, "") == 0);
+    CHECK(ll::exitPathNow(4242, false).empty());
+    CHECK(ll::exitPathNow(4242, true).empty());
+    CHECK(al::exitPathNow(4242).empty());
+    CHECK(pe::set("WHIRL_LAUNCH_LOG", "D:\\logs") == 0);
+    CHECK(pe::set("WHIRL_ALLOC_LOG", "D:\\logs") == 0);
+    CHECK_EQ(ll::exitPathNow(4242, false), std::string("D:\\logs\\launch_4242.txt"));
+    CHECK_EQ(al::exitPathNow(4242), std::string("D:\\logs\\alloc_4242.txt"));
+    for (int i = 0; i < 2; ++i) CHECK(pe::set(names[i], saved[i] ? saved[i]->c_str() : "") == 0);
+#endif
+}
+
 static void testPlatformConsoleTime() {
 #ifdef _WIN32
     namespace pc = whirl::platform::console;
@@ -4264,6 +4296,7 @@ int main(int argc, char** argv) {
     testPlatformPaths();        // arch025 PL1
     testPlatformEnv();
     testPl1bEnvReads();  // arch025 PL1b
+    testLogFolderEmpty();  // bug-launchlogroot
     testPlatformConsoleTime();
     specsample_test::testSpecSample();
     testDflashPolicy();

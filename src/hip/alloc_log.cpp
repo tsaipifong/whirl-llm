@@ -26,6 +26,16 @@ namespace {
 // arch025 PL1b: through platform::env::get; read where it was (g_on's static initializer and the write at exit)
 std::string folder() { return platform::env::get("WHIRL_ALLOC_LOG").value_or(std::string()); }
 
+}  // namespace
+
+std::string exitPath(const std::string& dir, unsigned long pid) {
+    return dir + "\\alloc_" + std::to_string(pid) + ".txt";
+}
+
+std::string exitPathNow(unsigned long pid) { return exitPath(folder(), pid); }
+
+namespace {
+
 constexpr std::uint64_t kFnvBasis = 1469598103934665603ull;
 constexpr std::uint64_t kFnvPrime = 1099511628211ull;
 
@@ -161,7 +171,7 @@ struct Recorder {
 #else
         const unsigned long pid = 0;
 #endif
-        const std::string path = folder() + "\\alloc_" + std::to_string(pid) + ".txt";
+        const std::string path = exitPathNow(pid);
         std::FILE* f = std::fopen(path.c_str(), "wb");
         if (f == nullptr) return;
         const std::string body = text();

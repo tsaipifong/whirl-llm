@@ -29,6 +29,16 @@ namespace {
 // arch025 PL1b: through platform::env::get; read where it was (g_on's static initializer and the writes at exit)
 std::string folder() { return platform::env::get("WHIRL_LAUNCH_LOG").value_or(std::string()); }
 
+}  // namespace
+
+std::string exitPath(const std::string& dir, unsigned long pid, bool raw) {
+    return dir + "\\launch_" + std::to_string(pid) + (raw ? ".raw.txt" : ".txt");
+}
+
+std::string exitPathNow(unsigned long pid, bool raw) { return exitPath(folder(), pid, raw); }
+
+namespace {
+
 struct Key {
     std::string name;
     unsigned g[3], b[3], shared;
@@ -133,7 +143,7 @@ struct Recorder {
 #else
         const unsigned long pid = 0;
 #endif
-        const std::string path = folder() + "\\launch_" + std::to_string(pid) + ".txt";
+        const std::string path = exitPathNow(pid, false);
         std::FILE* f = std::fopen(path.c_str(), "wb");
         if (f == nullptr) return;
         std::fprintf(f, "# whirl launch log v1\n# cmd: %s\n# launches %llu seqhash %016llx kinds %zu\n", cmd.c_str(),
@@ -149,7 +159,7 @@ struct Recorder {
         }
         std::fclose(f);
         if (!raw_on) return;
-        const std::string rp = folder() + "\\launch_" + std::to_string(pid) + ".raw.txt";
+        const std::string rp = exitPathNow(pid, true);
         std::FILE* g = std::fopen(rp.c_str(), "wb");
         if (g == nullptr) return;
         for (const std::string& l : raw_lines) std::fprintf(g, "%s\n", l.c_str());
