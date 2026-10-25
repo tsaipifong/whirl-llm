@@ -7,6 +7,11 @@
   analyze_check.py check   <build_dir> <baseline.txt> exit 1 on an incomplete run or on a key that occurs more often than in the baseline
   analyze_check.py update  <build_dir> <baseline.txt> write the baseline (sorted "count<TAB>key" lines); refuses an incomplete run
   analyze_check.py list    <build_dir>                print the keys
+  analyze_check.py reasons <baseline.txt> <whitelist.tsv> [<build_dir>]
+                                                      arch025-Q3: every baseline key has one whitelist row "key<TAB>file:line<TAB>reason"
+                                                      (reason >= 10 chars, file:line in the key's file), no row for a key outside the
+                                                      baseline; with <build_dir> (a complete run) the line must be one cl reports for
+                                                      that key now (a moved warning prints its new line)
 
 Input is the SARIF 2.1.0 file cl writes next to each object with /analyze:log:format:sarif (<obj>.nativecodeanalysis.sarif), not the
 console text: the console text follows the installed MSVC language pack (e.g. zh-TW in code page 950; VSLANG=1033 does nothing
@@ -56,14 +61,26 @@ def sarif_of(obj):
     return base + ".nativecodeanalysis.sarif"
 
 
+def analyze_on(cmd):
+    """True when a cl command line compiles with /analyze: the last plain /analyze or /analyze- wins (arch025-Q3: the bin2c kernel
+    byte arrays get /analyze- from cmake/safety.cmake and write no SARIF, so they are not expected)"""
+    flags = re.findall(r"(?:^|\s)[/-]analyze(-?)(?=\s|$)", cmd)
+    return bool(flags) and flags[-1] == ""
+
+
 def expected_objects(build_dir, targets):
     ninja = cache_var(build_dir, "CMAKE_MAKE_PROGRAM") or "ninja"
+    # arch025-Q135 run 2: a changed cmake file re-runs CMake only inside the build, AFTER prepare had read the old build.ninja
+    # (4 kernel byte-array TUs expected with /analyze although the new build.ninja says /analyze-). Bring build.ninja up to date first.
+    regen = subprocess.run([ninja, "-C", build_dir, "build.ninja"], capture_output=True, text=True, errors="replace")
+    if regen.returncode != 0:
+        raise SystemExit(f"prepare: ninja build.ninja (CMake re-run) failed ({regen.returncode}): {(regen.stdout + regen.stderr).strip()[-400:]}")
     out = subprocess.run([ninja, "-C", build_dir, "-t", "commands", *targets], capture_output=True, text=True, errors="replace")
     if out.returncode != 0:
         raise SystemExit(f"prepare: ninja -t commands failed ({out.returncode}): {out.stderr.strip()[:400]}")
     objs = []
     for line in out.stdout.splitlines():
-        if "cl.exe" not in line.lower() or "/analyze" not in line:
+        if "cl.exe" not in line.lower() or not analyze_on(line):
             continue
         m = re.search(r'/Fo"?([^"\s]+\.obj)"?', line)
         if m:
@@ -136,7 +153,7 @@ def completeness(build_dir):
     return probs, sarifs
 
 
-def keys(build_dir, sarifs):
+def keys(build_dir, sarifs, lines=None):
     src = norm(cache_var(build_dir, "CMAKE_HOME_DIRECTORY") or "")
     bld = norm(os.path.abspath(build_dir))
     out = collections.Counter()
@@ -170,6 +187,8 @@ def keys(build_dir, sarifs):
                     continue
                 seen.add(dedup)
                 out[key] += 1
+                if lines is not None:
+                    lines.setdefault(key, set()).add(reg.get("startLine"))
     return out
 
 
@@ -185,11 +204,69 @@ def load_baseline(path):
     return c
 
 
+def reasons(baseline, whitelist, build_dir=None):
+    """arch025-Q3: the baseline's false-positive / accepted-warning whitelist (file:line + reason per key)."""
+    probs = []
+    base = load_baseline(baseline)
+    rows = {}
+    try:
+        with open(whitelist, encoding="utf-8") as f:
+            text = f.read().splitlines()
+    except OSError:
+        text = None
+        probs.append(f"whitelist {whitelist} missing")
+    for i, line in enumerate(text or [], 1):
+        if not line.strip() or line.startswith("#"):
+            continue
+        parts = line.split("\t")
+        if len(parts) != 3:
+            probs.append(f"whitelist line {i}: need key<TAB>file:line<TAB>reason, got {len(parts)} column(s)")
+            continue
+        k, fl, why = (x.strip() for x in parts)
+        m = re.match(r"^(.+):(\d+)$", fl)
+        if k in rows:
+            probs.append(f"whitelist line {i}: key listed twice: {k}")
+        elif not m or m.group(1) != k.split("|", 1)[0]:
+            probs.append(f"whitelist line {i}: file:line {fl!r} is not in the key's file {k.split('|', 1)[0]}")
+        elif len(why) < 10 or why.upper().startswith("TODO"):
+            probs.append(f"whitelist line {i}: no reason for {k}")
+        rows[k] = (int(m.group(2)) if m else None, why)
+    for k in sorted(base):
+        if k not in rows:
+            probs.append(f"baseline key without a whitelist reason: {k}")
+    for k in sorted(rows):
+        if k not in base:
+            probs.append(f"whitelist row for a key not in the baseline (stale): {k}")
+    checked = 0
+    if build_dir:
+        cp, sarifs = completeness(build_dir)
+        if cp:
+            probs += [f"build dir incomplete: {p}" for p in cp]
+        else:
+            lines = {}
+            keys(build_dir, sarifs, lines)
+            for k, (ln, _) in sorted(rows.items()):
+                now = sorted(x for x in lines.get(k, set()) if x is not None)
+                if k in base and ln is not None and now and ln not in now:
+                    probs.append(f"{k}: whitelist says line {ln}, cl reports line(s) {', '.join(map(str, now))} now")
+                checked += 1
+    for p in probs:
+        print("FAIL", p)
+    print(f"analyze reasons: {'ok' if not probs else 'FAIL'} ({len(rows)} row(s), {len(base)} baseline key(s)"
+          + (f", {checked} line(s) checked against the SARIF of {build_dir}" if build_dir else ", lines not checked (no build dir)") + ")")
+    return 1 if probs else 0
+
+
 def main(argv):
     if len(argv) < 3:
         print(__doc__)
         return 2
     cmd, bdir = argv[1], argv[2]
+    if cmd == "reasons":
+        if len(argv) < 4:
+            print(__doc__)
+            return 2
+        return reasons(argv[2], argv[3], argv[4] if len(argv) > 4 else None)
     if cmd == "prepare":
         return prepare(bdir, argv[3:])
     probs, sarifs = completeness(bdir)

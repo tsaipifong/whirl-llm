@@ -271,8 +271,88 @@ def analyze(changes, m, new_rev, old_rev):
     if pins:
         rep["release_gate_steps"] = sorted(set(rep["release_gate_steps"]) | {"cpu_pins"})
         rep["notes"].append(f"cpu_pins: {', '.join(pins[:4])}{' ...' if len(pins) > 4 else ''} linked by whirl-pins / whirl-startup-replay")
+    sst, snotes = safety_steps(changes, new_rev, old_rev)
+    if sst:
+        rep["release_gate_steps"] = sorted(set(rep["release_gate_steps"]) | sst)
+        rep["notes"] += snotes
     rep.update(module_gate(changes, rep=rep, m=m))
     return rep
+
+
+# arch025-Q1 / Q3 (PLAN (e)): every C / C++ change -> cpu_analyze; a lifetime-class change -> cpu_asan; the safety tools themselves
+# -> all of them. Rules in tools/gates/modules.json "safety" (cxx / lifetime / own).
+def load_safety(root=None):
+    p = os.path.join(root or ROOT, "tools", "gates", "modules.json")
+    try:
+        d = json.load(open(p, encoding="utf-8"))
+        return d.get("safety"), d.get("modules") or {}
+    except (OSError, ValueError):
+        return None, {}
+
+
+def changed_text(path, ch, new_rev, old_rev):
+    """the changed lines (new and old side) of one file; None when a side cannot be read (callers fail closed)"""
+    out = []
+    for rev, key, p in ((new_rev, "new", path), (old_rev, "old", ch.get("old_path") or path)):
+        if not ch.get(key):
+            continue
+        if rev:
+            src = show(rev, p)
+        else:
+            try:
+                src = open(os.path.join(ROOT, p), encoding="utf-8", errors="replace").read()
+            except OSError:
+                src = None
+        if src is None:
+            return None
+        lines = src.splitlines()
+        out += [lines[i - 1] for i in ch[key] if 0 < i <= len(lines)]
+    return out
+
+
+def safety_steps(changes, new_rev, old_rev, safety=None, mods=None):
+    if safety is None:
+        safety, mods = load_safety()
+    if not safety:
+        return set(), []
+    mods = mods or {}
+    steps, notes = set(), []
+    cx, lt, own = safety.get("cxx", {}), safety.get("lifetime", {}), safety.get("own", {})
+    ext = tuple(cx.get("ext", []))
+    tok = re.compile(lt.get("tokens", r"(?!)"))
+    lt_globs = list(lt.get("globs", []))
+    for n in lt.get("modules", []):
+        lt_globs += list((mods.get(n) or {}).get("paths", []))
+    why_a, why_l, why_o = [], [], []
+    for path, ch in sorted(changes.items()):
+        if any(fnmatch.fnmatch(path, g) for g in own.get("globs", [])):
+            steps |= set(own.get("steps", []))
+            why_o.append(path)
+        is_cxx = path.endswith(ext) and any(fnmatch.fnmatch(path, g) for g in cx.get("globs", []))
+        if not is_cxx:
+            continue
+        steps |= set(cx.get("steps", []))
+        why_a.append(path)
+        if any(fnmatch.fnmatch(path, g) for g in lt_globs):
+            steps |= set(lt.get("steps", []))
+            why_l.append(f"{path} (lifetime module / path)")
+            continue
+        txt = changed_text(path, ch, new_rev, old_rev)
+        if txt is None:
+            steps |= set(lt.get("steps", []))
+            why_l.append(f"{path} (text not readable: fail closed)")
+            continue
+        hit = sorted({mt.group(0).strip() for l in txt for mt in tok.finditer(l)})
+        if hit:
+            steps |= set(lt.get("steps", []))
+            why_l.append(f"{path} (changed lines use {', '.join(hit[:4])})")
+    if why_a:
+        notes.append(f"cpu_analyze: C / C++ change in {', '.join(why_a[:4])}{' ...' if len(why_a) > 4 else ''}")
+    if why_l:
+        notes.append(f"cpu_asan: lifetime-class change: {'; '.join(why_l[:4])}{' ...' if len(why_l) > 4 else ''}")
+    if why_o:
+        notes.append(f"cpu_asan + cpu_analyze: safety tools changed ({', '.join(why_o[:4])})")
+    return steps, notes
 
 
 # arch024-S11c (F-3, S11b P1 / P4: template changes caught only by the prompt token pin, which no step ran): the CPU pins
