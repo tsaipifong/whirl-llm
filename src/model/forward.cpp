@@ -1329,10 +1329,6 @@ void Model::mtpBatchStepEx(std::span<const MSeg> segs, u32 r, bool draft) {
     }
 }
 
-void Model::readDraftQ(std::span<i32> dst) {
-    if (draft_qbuf != 0) hip::download(dst.data(), draft_qbuf, dst.size() * 4);
-}
-
 void Model::readCtl(std::span<i32> dst) { hip::download(dst.data(), out_tok, dst.size() * 4); }
 
 // Draft-head logits for the n rows of h into logits: the 2-bit head when

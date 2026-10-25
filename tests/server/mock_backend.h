@@ -86,7 +86,6 @@ public:
 
     const qwen35::Config& cfg() const override { return cfg_; }
     device::Stream stream() const override { return stream_; }
-    bool hasMtp() const override { return mc_.mtp; }
     server::DevPtr logits() const override { return logits_; }
     server::DevPtr hn() const override { return hn_; }
     server::DevPtr mtpH() const override { return seqs_[cur_].hid; }
@@ -134,7 +133,6 @@ public:
     void topkRows(std::uint32_t row0, std::uint32_t rows, std::uint32_t k, float inv_t, server::DevPtr ids,
                   server::DevPtr vals, server::DevPtr stats) override;
 
-    bool hasDFlash() const override { return mc_.dflash; }
     std::uint32_t dflashMaxDrafts() const override { return mc_.dflash ? mc_.dfl_block - 1 : 0; }
     std::uint32_t captureN() const override;
     void dflashIngest(std::uint32_t s, std::uint32_t row0, std::uint32_t n, std::uint32_t pos0) override;

@@ -17,7 +17,6 @@ public:
 
     const qwen35::Config& cfg() const override { return m_.cfg; }
     device::Stream stream() const override { return m_.stream; }
-    bool hasMtp() const override { return m_.mtp.has_value(); }
 
     DevPtr logits() const override { return m_.logits; }
     DevPtr hn() const override { return m_.hn; }
@@ -112,7 +111,6 @@ public:
     void setDraftSample(std::uint32_t s, const spec::DraftSample& ds) override {
         if (s < m_.draft_samp.size()) m_.draft_samp[s] = ds;
     }
-    void readDraftQ(std::span<std::int32_t> dst) override { m_.readDraftQ(dst); }
     void mtpEnqueue(DevPtr hidden, std::span<const std::uint32_t> tokens, std::uint32_t pos0) override {
         m_.mtpEnqueue(hidden, tokens, 0, pos0, std::nullopt);
     }
@@ -135,7 +133,6 @@ public:
     }
     void profileStop() override { m_.prof = nullptr; }
     std::uint32_t verifyRows() const override { return m_.verifyRows(); }
-    bool hasDFlash() const override { return m_.dfr != nullptr; }
     std::uint32_t dflashMaxDrafts() const override { return m_.dfr ? m_.dfr->block - 1 : 0; }
     std::uint32_t captureN() const override { return m_.cap_buf ? m_.cap_n : 0; }
     void dflashIngest(std::uint32_t s, std::uint32_t row0, std::uint32_t n, std::uint32_t pos0) override {

@@ -674,7 +674,6 @@ public:
     std::vector<spec::DraftSample> draft_samp;
     DevPtr draft_qbuf = 0;
     bool draftSampleOk() const { return k.draft_sample_rows != nullptr && draft_qbuf != 0; }
-    void readDraftQ(std::span<std::int32_t> dst);
     std::optional<Mat> draft_head;
     std::optional<DevPtr> draft_d2;
     // draft-head vocabulary subset (setDraftVocab): rows of draft_d2 and their token ids on the device
