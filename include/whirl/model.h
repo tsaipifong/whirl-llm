@@ -30,6 +30,7 @@
 #include "whirl/device_profile.h"
 #include "whirl/hip.h"
 #include "whirl/kernels_abi.h"
+#include "whirl/ops/act.h"
 #include "whirl/ops/attention.h"
 #include "whirl/ops/matmul.h"
 #include "whirl/ops/moe.h"
@@ -885,7 +886,6 @@ public:
     void freeAlloc(DevPtr p);
 
     // ---- internals (public for tests; not part of the stable API)
-    enum class ActIn { gemv, f32in, fp8, f16 };
     void gemvLaunch(std::span<const Mat> ws, DevPtr xin, std::span<const DevPtr> ys, std::uint32_t n, std::int32_t acc);
     void matmulGroup(std::span<const Mat> ws, DevPtr xin, std::span<const DevPtr> ys, std::uint32_t n);
     void matmul(const Mat& w, DevPtr xin, DevPtr y, std::uint32_t n, bool accumulate);
@@ -915,15 +915,13 @@ private:
     hip::Function x8(hip::Function f, hip::Function ft) const { return g8t ? ft : f; }
     void rmsnorm(DevPtr xin, DevPtr w, DevPtr out, std::uint32_t n, std::uint32_t count, std::uint32_t in_stride,
                  std::uint32_t out_stride);
-    ActIn actIn(const Mat& w, std::uint32_t n, std::uint8_t cls) const;
     bool h16Out(const Mat& w, std::uint32_t n, std::uint8_t cls) const;
-    std::optional<ActIn> actCommon(std::span<const Mat> consumers, std::uint32_t n, std::uint8_t cls) const;
+    std::optional<ops::ActIn> actCommon(std::span<const Mat> consumers, std::uint32_t n, std::uint8_t cls) const;
     void rmsnormIn(DevPtr xin, DevPtr w, DevPtr out, std::uint32_t n, std::span<const Mat> consumers, std::uint8_t cls);
     bool fused(std::uint32_t n) const;
     // most tokens of the int8 GEMV path in the current forward
     std::uint32_t gvMax() const { return small_max > max_small_batch ? small_max : gemv_max; }
     void gemvKernels(std::span<const Mat> ws, std::span<const DevPtr> ys, std::uint32_t n, std::int32_t acc, DevPtr xqp, DevPtr xdp);
-    bool gdnAbFusable(const GdnW& g) const;
     void rmsnormQ8(DevPtr xin, DevPtr w, DevPtr out, std::uint32_t n);
     void elementwise(hip::Function f, DevPtr a, DevPtr b, std::uint32_t n);
     void decodeStepLaunches();

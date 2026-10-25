@@ -1,6 +1,7 @@
 // Model forward, matmul dispatch (arch025-F1, moved from src/model/forward.cpp): profiler marks, GEMV / GEMM
-// launches and grouping, the activation-input choice (actIn / h16Out / actCommon / rmsnormIn), the fused-path
-// predicates, rmsnorm / elementwise helpers and Model::step.
+// launches and grouping, the activation-input problems (h16Out / actCommon / rmsnormIn / gdnIn2; the choices are in
+// src/ops/act.cpp since arch025-F5), the fused-path predicates (rules in ops/act.h), rmsnorm / elementwise helpers
+// and Model::step.
 // SPDX-License-Identifier: Apache-2.0
 
 #include "../forward_internal.h"
@@ -261,59 +262,32 @@ void Model::rmsnorm(DevPtr xin, DevPtr w, DevPtr out, u32 n, u32 count, u32 in_s
     mark(OpClass::norm);
 }
 
-Model::ActIn Model::actIn(const Mat& w, u32 n, std::uint8_t cls) const {
-    if (ops::preciseRows(prec_dec, n, gvMax())) return ActIn::f16;
-    if (n <= gvMax() && k.gemvq[ti(w.ty)] != nullptr && !float_gemv) return ActIn::gemv;
-    if (n == 1 || ops::floatGemvN(matShape(w), n, gvMax(), k)) return ActIn::f32in;
-    if (fp8_prefill && (fp8_mask & cls) != 0 && w.ty == GgmlType::mxfp4 && w.ref != 0 && k.gemm8[0] != nullptr) return ActIn::fp8;
-    return ActIn::f16;
-}
+// The activation-input choice (arch025-F5): ops::chooseH16Out / chooseActCommon / chooseRmsnormIn / chooseGdnIn2
+// (src/ops/act.cpp). Here the matrices become ops::MatShape, the flags are gathered (the device profile's
+// h16_from_candidates among them) and the norm is launched.
+namespace {
+// the consumers of one activation as ops shapes (every caller passes 1..4 matrices)
+struct ConsumerShapes {
+    ops::MatShape s[4];
+    std::size_t n = 0;
+    std::span<const ops::MatShape> span() const { return {s, n}; }
+};
+}  // namespace
 
 bool Model::h16Out(const Mat& w, u32 n, std::uint8_t cls) const {
-    switch (actIn(w, n, cls)) {
-        case ActIn::fp8:
-            return k.gemm8h[0] != nullptr;
-        case ActIn::f16:
-            // Radeon 8060S: decided by the kernel set and the tuner's candidate list, never by
-            // the tuned choices, so the output (f16 intermediates or not) does not depend on
-            // autotune timings. The gfx1151 code object has no h16 fused / dequant GEMM, so
-            // this is off for quantized weights while those are candidates.
-            if (device::profile(arch).h16_from_candidates) {
-                for (u32 cj = 0; cj < n_choices && cj < 64; ++cj) {
-                    if ((tune_mask & (1ull << cj)) == 0) continue;
-                    if (cj >= 2 * gemm_cfgs.size()) {
-                        const std::size_t si = cj - 2 * gemm_cfgs.size();
-                        if (k.gemms[si][ti(w.ty)] == nullptr || w.ncols % 256 != 0) continue;  // not a candidate (= tune.cpp)
-                        if (k.gemmsh[si][ti(w.ty)] == nullptr) return false;
-                        continue;
-                    }
-                    if (!((cj >= gemm_cfgs.size() || w.ty == GgmlType::f16) && k.gemmch[cj % gemm_cfgs.size()] != nullptr)) return false;
-                }
-                // (and the table must agree: a cached table may predate the candidate list)
-            }
-            // every bucket (not just n's), so the choice is the same for a request's
-            // solo chunks and a segmented forward of any total size
-            for (std::uint8_t choice : w.tune) {
-                if (choice >= 2 * gemm_cfgs.size()) {
-                    if (k.gemmsh[choice - 2 * gemm_cfgs.size()][ti(w.ty)] == nullptr) return false;
-                    continue;
-                }
-                if (!((choice >= gemm_cfgs.size() || w.ty == GgmlType::f16 || h16_dq) && k.gemmch[choice % gemm_cfgs.size()] != nullptr))
-                    return false;
-            }
-            return true;
-        default:
-            return false;
-    }
+    ops::H16Tune h;
+    h.from_candidates = device::profile(arch).h16_from_candidates;
+    h.tune_mask = tune_mask;
+    h.n_choices = n_choices;
+    h.h16_dq = h16_dq;
+    return ops::chooseH16Out(matShape(w), w.tune, n, cls, matmulFlags(), h, k);
 }
 
-std::optional<Model::ActIn> Model::actCommon(std::span<const Mat> consumers, u32 n, std::uint8_t cls) const {
-    if (!act_fuse || consumers.empty()) return std::nullopt;
-    const ActIn mode = actIn(consumers[0], n, cls);
-    if (mode != ActIn::fp8 && mode != ActIn::f16) return std::nullopt;
-    for (std::size_t i = 1; i < consumers.size(); ++i)
-        if (actIn(consumers[i], n, cls) != mode) return std::nullopt;
-    return mode;
+std::optional<ops::ActIn> Model::actCommon(std::span<const Mat> consumers, u32 n, std::uint8_t cls) const {
+    if (consumers.size() > 4) throw ModelError("ActCommonConsumers");
+    ConsumerShapes cs;
+    for (const Mat& w : consumers) cs.s[cs.n++] = matShape(w);
+    return ops::chooseActCommon(cs.span(), n, cls, act_fuse, matmulFlags(), k);
 }
 
 // Prefill rmsnorm of x (n rows of n_embd) for the matmuls `consumers`: when
@@ -322,19 +296,18 @@ std::optional<Model::ActIn> Model::actCommon(std::span<const Mat> consumers, u32
 // conversion); else a plain rmsnorm into out.
 void Model::rmsnormIn(DevPtr xin, DevPtr w, DevPtr out, u32 n, std::span<const Mat> consumers, std::uint8_t cls) {
     const u32 E = cfg.n_embd;
-    if (E <= 256 * 32) {
-        if (auto mode = actCommon(consumers, n, cls)) {
-            const hip::Function f = *mode == ActIn::fp8 ? x8(k.rmsnorm_x8, k.rmsnorm_x8t) : k.rmsnorm_x16;
-            if (f != nullptr) {
-                hip::launch(f, D(n), D(256), 0, stream, xin, w, x16, sx8, I(E), cfg.eps);
-                xq_src = 0;
-                x16_src = out;
-                x16_count = n * E;
-                x16_fp8 = *mode == ActIn::fp8;
-                mark(OpClass::norm);
-                return;
-            }
-        }
+    if (consumers.size() > 4) throw ModelError("RmsnormInConsumers");
+    ConsumerShapes cs;
+    for (const Mat& m : consumers) cs.s[cs.n++] = matShape(m);
+    const ops::RmsnormInPlan p = ops::chooseRmsnormIn(E, cs.span(), n, cls, act_fuse, g8t, matmulFlags(), k);
+    if (p.f != nullptr) {
+        hip::launch(p.f, D(n), D(256), 0, stream, xin, w, x16, sx8, I(E), cfg.eps);
+        xq_src = 0;
+        x16_src = out;
+        x16_count = n * E;
+        x16_fp8 = p.fp8;
+        mark(OpClass::norm);
+        return;
     }
     rmsnorm(xin, w, out, E, n, E, E);
 }
@@ -342,14 +315,22 @@ void Model::rmsnormIn(DevPtr xin, DevPtr w, DevPtr out, u32 n, std::span<const M
 // n>16 GDN prefill with qkv / gate on fp8 and contiguous [beta; alpha] on f16:
 // one rmsnorm_x8h16(t) writes both inputs (WHIRL_GDN_IN2=0 off).
 bool Model::gdnIn2(const GdnW& g, u32 n) const {
-    if (!gdn_in2_on || fused(n) || n <= 16 || cfg.n_embd > 8192) return false;
-    if (x8(k.rmsnorm_x8h16, k.rmsnorm_x8h16t) == nullptr) return false;
-    if (!gdn_ba_on || k.gdn_gates_ba == nullptr || ba_buf == 0 || !rowsContiguous(g.beta, g.alpha)) return false;
-    const Mat pc[2] = {g.qkv, g.gate};
-    const Mat bc[2] = {g.beta, g.alpha};
-    const auto pin = actCommon(pc, n, 1);
-    const auto bin = actCommon(bc, n, 1);
-    return pin && *pin == ActIn::fp8 && bin && *bin == ActIn::f16;
+    ops::GdnIn2Problem p;
+    p.qkv = matShape(g.qkv);
+    p.gate = matShape(g.gate);
+    p.beta = matShape(g.beta);
+    p.alpha = matShape(g.alpha);
+    p.n = n;
+    p.n_embd = cfg.n_embd;
+    p.fused = fused(n);
+    p.ba_buf = ba_buf != 0;
+    p.ba_contiguous = rowsContiguous(g.beta, g.alpha);
+    ops::GdnIn2Flags f;
+    f.gdn_in2_on = gdn_in2_on;
+    f.gdn_ba_on = gdn_ba_on;
+    f.act_fuse = act_fuse;
+    f.g8t = g8t;
+    return ops::chooseGdnIn2(p, f, matmulFlags(), k);
 }
 
 // The matmul path of n rows of w: ops::chooseMatmulPath (K-1; the precise rule lives there). f32 / f16 weights
@@ -417,30 +398,26 @@ std::string Model::precMissing() const {
     return {};
 }
 
-// Decode fusions apply to small batches on the int8 GEMV path.
-bool Model::fused(u32 n) const { return n <= small_max && !float_gemv && !no_fuse; }
+// Decode fusions apply to small batches on the int8 GEMV path (ops::fusedRows).
+bool Model::fused(u32 n) const { return ops::fusedRows(n, small_max, float_gemv, no_fuse); }
 
 bool Model::fusedDecode() const {
     if (!fused(max_small_batch)) return false;
     for (const Layer& L : layers) {
         if (L.kind != LayerKind::gdn) continue;
-        if (!gdnAbFusable(L.gdn) || cfg.d_conv != 4 || cfg.d_state != 128 || cfg.headV() != 128 || cfg.convCh() % 128 != 0) return false;
+        if (!ops::gdnAbFusable(matShape(L.gdn.beta), matShape(L.gdn.alpha), k) || !ops::gdnDecodeShape(cfg.d_conv, cfg.d_state, cfg.headV(), cfg.convCh()))
+            return false;
     }
     return true;
 }
 
 // MoE: balance / fast with WHIRL_MOE_WIDE=1 only (17..32 rows on the int8 decode experts, see
-// moeBlock); precise MoE keeps 16-row verifies
+// moeBlock); precise MoE keeps 16-row verifies (ops::wideAllowed)
 bool Model::wideCapable() const {
-    return wide_verify && (!cfg.moe || (moe_wide && !prec_dec)) && fusedDecode() && k.gemvx[ti(GgmlType::q4_k)] != nullptr;
+    return ops::wideAllowed(wide_verify, cfg.moe, moe_wide, prec_dec) && fusedDecode() && ops::wideKernels(k);
 }
 
 bool Model::wideOk() const { return wideCapable() && gdn_replay; }
-
-bool Model::gdnAbFusable(const GdnW& g) const {
-    return k.gdn_ab[ti(g.beta.ty) % n_types] != nullptr && g.beta.ty == g.alpha.ty && g.beta.row_bytes == g.alpha.row_bytes &&
-           g.beta.ncols % 256 == 0;
-}
 
 void Model::rmsnormQ8(DevPtr xin, DevPtr w, DevPtr out, u32 n) {
     hip::launch(k.rmsnorm_q8, D(n), D(1024), 0, stream, xin, w, out, xq, xd, I(cfg.n_embd), cfg.eps);

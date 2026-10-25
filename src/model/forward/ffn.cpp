@@ -18,13 +18,13 @@ void Model::ffnBlock(DevPtr post_norm, const Mat& gate_w, const Mat& up, const M
         ~ClassReset() { c = 1; }
     } class_reset{mm_class};
     mm_class = 2;
-    std::optional<ActIn> down_in;
+    std::optional<ops::ActIn> down_in;
     if (!fused(n) && cfg.n_ff % 4 == 0 && cfg.n_ff <= 1024 * 24) down_in = actCommon(std::span<const Mat>(&down, 1), n, 4);
     // f16 gate / up outputs straight into silu -> fp8 (MXFP4 speed mode)
-    const ActIn gu_in = actCommon(gu, n, 2).value_or(ActIn::gemv);
+    const ops::ActIn gu_in = actCommon(gu, n, 2).value_or(ops::ActIn::gemv);
     const bool h16 = ffn_h16 && down_in.has_value() && cfg.n_ff % 8 == 0 && h16Out(gate_w, n, 2) && h16Out(up, n, 2) &&
-                     ((gu_in == ActIn::fp8 && *down_in == ActIn::fp8 && k.silu_mul_x8h != nullptr) ||
-                      (gu_in == ActIn::f16 && *down_in == ActIn::f16 && k.silu_mul_x16h != nullptr));
+                     ((gu_in == ops::ActIn::fp8 && *down_in == ops::ActIn::fp8 && k.silu_mul_x8h != nullptr) ||
+                      (gu_in == ops::ActIn::f16 && *down_in == ops::ActIn::f16 && k.silu_mul_x16h != nullptr));
     out_h16 = h16;
     {
         const DevPtr ys[2] = {ffn_g, ffn_u};
@@ -34,9 +34,9 @@ void Model::ffnBlock(DevPtr post_norm, const Mat& gate_w, const Mat& up, const M
     mm_class = 4;
     hip::Function silu_x = nullptr;
     if (h16)
-        silu_x = *down_in == ActIn::fp8 ? x8(k.silu_mul_x8h, k.silu_mul_x8ht) : k.silu_mul_x16h;
+        silu_x = *down_in == ops::ActIn::fp8 ? x8(k.silu_mul_x8h, k.silu_mul_x8ht) : k.silu_mul_x16h;
     else if (down_in)
-        silu_x = *down_in == ActIn::fp8 ? x8(k.silu_mul_x8, k.silu_mul_x8t) : k.silu_mul_x16;
+        silu_x = *down_in == ops::ActIn::fp8 ? x8(k.silu_mul_x8, k.silu_mul_x8t) : k.silu_mul_x16;
     if (fused(n) && ops::preciseAllows(ops::BitClass::q8_row, prec_dec, n, small_max)) {  // fused(n): n <= small_max
         hip::launch(k.silu_mul_q8, D(n * cfg.n_ff / 256), D(256), 0, stream, ffn_g, ffn_u, xq, xd, I(n * cfg.n_ff));
         xq_src = ffn_g;
@@ -49,7 +49,7 @@ void Model::ffnBlock(DevPtr post_norm, const Mat& gate_w, const Mat& up, const M
         xq_src = 0;
         x16_src = ffn_g;
         x16_count = n * cfg.n_ff;
-        x16_fp8 = *down_in == ActIn::fp8;
+        x16_fp8 = *down_in == ops::ActIn::fp8;
         mark(OpClass::misc);
     } else {
         elementwise(k.silu_mul, ffn_g, ffn_u, n * cfg.n_ff);

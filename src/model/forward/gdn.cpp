@@ -92,10 +92,10 @@ void Model::gdnLayer(std::size_t i, const GdnW& g, u32 n, bool gdn_in2) {
                    h16Out(g.qkv, n, 1) && h16Out(g.gate, n, 1);
     if (gdn_h16) {
         const Mat pc[2] = {g.qkv, g.gate};
-        const ActIn pin = actCommon(pc, n, 1).value_or(ActIn::gemv);
-        const ActIn oin = actCommon(std::span<const Mat>(&g.out, 1), n, 1).value_or(ActIn::gemv);
-        gdn_h16 = (pin == ActIn::fp8 && oin == ActIn::fp8 && k.gated_norm_x8h != nullptr) ||
-                  (pin == ActIn::f16 && oin == ActIn::f16 && k.gated_norm_x16h != nullptr);
+        const ops::ActIn pin = actCommon(pc, n, 1).value_or(ops::ActIn::gemv);
+        const ops::ActIn oin = actCommon(std::span<const Mat>(&g.out, 1), n, 1).value_or(ops::ActIn::gemv);
+        gdn_h16 = (pin == ops::ActIn::fp8 && oin == ops::ActIn::fp8 && k.gated_norm_x8h != nullptr) ||
+                  (pin == ops::ActIn::f16 && oin == ops::ActIn::f16 && k.gated_norm_x16h != nullptr);
     }
     out_h16 = gdn_h16;
     {
@@ -104,7 +104,7 @@ void Model::gdnLayer(std::size_t i, const GdnW& g, u32 n, bool gdn_in2) {
         matmulGroup(ws, h, ys, n);
     }
     out_h16 = false;
-    const bool gdn_fusable = fused(n) && gdnAbFusable(g) && cfg.d_conv == 4 && cfg.d_state == 128 && cfg.headV() == 128 && ch % 128 == 0;
+    const bool gdn_fusable = fused(n) && ops::gdnAbFusable(matShape(g.beta), matShape(g.alpha), k) && cfg.d_conv == 4 && cfg.d_state == 128 && cfg.headV() == 128 && ch % 128 == 0;
     if (gdn_fusable) {
         const u32 nh = cfg.n_v_heads;
         const u32 n_seg = bplan ? static_cast<u32>(bplan->segs.size()) : 1;
@@ -225,19 +225,19 @@ void Model::gdnLayer(std::size_t i, const GdnW& g, u32 n, bool gdn_in2) {
         }
         mark(OpClass::gdn_rec);
         // gated norm straight into the out-proj GEMM input when possible
-        std::optional<ActIn> out_in;
+        std::optional<ops::ActIn> out_in;
         if (cfg.headV() == 128 && cfg.n_v_heads <= 64) out_in = actCommon(std::span<const Mat>(&g.out, 1), n, 1);
         hip::Function gn_x = nullptr;
         if (gdn_h16)
-            gn_x = *out_in == ActIn::fp8 ? x8(k.gated_norm_x8h, k.gated_norm_x8ht) : k.gated_norm_x16h;
+            gn_x = *out_in == ops::ActIn::fp8 ? x8(k.gated_norm_x8h, k.gated_norm_x8ht) : k.gated_norm_x16h;
         else if (out_in)
-            gn_x = *out_in == ActIn::fp8 ? x8(k.gated_norm_x8, k.gated_norm_x8t) : k.gated_norm_x16;
+            gn_x = *out_in == ops::ActIn::fp8 ? x8(k.gated_norm_x8, k.gated_norm_x8t) : k.gated_norm_x16;
         if (gn_x != nullptr) {
             hip::launch(gn_x, D(n), D(256), 0, stream, gdn_out, z, g.norm, x16, sx8, I(cfg.n_v_heads), cfg.eps);
             xq_src = 0;
             x16_src = gdn_out;
             x16_count = n * cfg.n_v_heads * 128;
-            x16_fp8 = *out_in == ActIn::fp8;
+            x16_fp8 = *out_in == ops::ActIn::fp8;
         } else {
             hip::launch(k.gdn_gated_norm, D(nh), D(128), 0, stream, gdn_out, z, g.norm, I(cfg.headV()), cfg.eps);
             xq_src = 0;
