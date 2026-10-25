@@ -330,8 +330,9 @@ constexpr EnvDoc k_env[] = {
     {"GPU and loading", "GPU_WAIT=S", "seconds to wait for another WHIRL process to free the GPU (default 1800)", GPU},
     {"GPU and loading", "MODE=precise|balance|fast[:ITEMS]", "numerics mode (= --precise / --balance / --fast / --mode; default balance; "
      "ITEMS e.g. fp8,kvq8 picks lossy items)", GPU},
-    {"GPU and loading", "KV=auto|f16|q8|q8h|q8v", "KV cache format (auto: f16; in balance / fast mode dense models fall back to q8v, then q8h, "
-     "when f16 does not fit; MoE f16). A q8 value in precise mode is a user-requested lossy override",
+    {"GPU and loading", "KV=auto|f16|q8|q8h|q8v|q4", "KV cache format (auto: the numerics mode decides: precise f16, balance q8h on dense "
+     "and MoE models, fast q4 (q8h for dense models on the Radeon 8060S)). Any other value is a debug override; a q8 value in "
+     "precise mode is a user-requested lossy override",
      GPU},
     {"GPU and loading", "PREFILL_BATCH=N", "prefill rows per forward (default 4096, up to 16384)", C | B | T | S},
     {"GPU and loading", "MAX_CTX=N", "default context size of chat (= --ctx; default 8192)", C},

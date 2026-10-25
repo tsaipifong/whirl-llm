@@ -22,6 +22,7 @@
 #include "whirl/mem_governor.h"
 #include "whirl/value_scope.h"
 #include "whirl/kernels_abi.h"
+#include "whirl/kv_layout.h"
 #include "hip/alloc_log.h"
 #include "hip/launch_log.h"
 #if WHIRL_TEST_DLL_DEPS
@@ -834,8 +835,10 @@ void testNumerics() {
         const nu::Plan p = nu::plan(bal, swift);
         CHECK(p.on(Item::fp8) && !p.on(Item::moefp8) && p.on(Item::gdnwmma) && p.on(Item::h16) && p.on(Item::kvq8));
         CHECK(p.items[static_cast<std::size_t>(Item::moefp8)].note == "dense model");
-        const nu::Plan po = nu::plan(bal, ornith);  // MODES-MXFP4: MoE balance = fp8 + moefp8 + gdnwmma + h16 + q8dec, f16 KV
-        CHECK(po.on(Item::fp8) && po.on(Item::moefp8) && po.on(Item::gdnwmma) && po.on(Item::h16) && !po.on(Item::kvq8));
+        // MODES-MXFP4: MoE balance = fp8 + moefp8 + gdnwmma + h16 + q8dec; feat027-ornkv: + kvq8 (q8h KV, was f16)
+        const nu::Plan po = nu::plan(bal, ornith);
+        CHECK(po.on(Item::fp8) && po.on(Item::moefp8) && po.on(Item::gdnwmma) && po.on(Item::h16) && po.on(Item::kvq8));
+        CHECK(po.items[static_cast<std::size_t>(Item::kvq8)].note.find("MoE") == std::string::npos);
         CHECK(po.on(Item::specsample) && po.q8dec && po.q8dec_default);
         const nu::Plan pq = nu::plan(bal, q4);
         CHECK(!pq.on(Item::fp8) && pq.on(Item::gdnwmma) && pq.on(Item::h16) && pq.on(Item::kvq8));  // KG-1: dense Q4_K_M on the R9700
@@ -942,8 +945,8 @@ void testNumerics() {
         const std::string l = nu::logLine(pb);
         CHECK(l.find("numerics: balance - enabled: fp8, moefp8, gdnwmma, h16") == 0 && l.find("fast only") == std::string::npos &&
               l.find("decode: q8dec") != std::string::npos && l.find("f16 decode / verify") == std::string::npos);
-        const std::string j = nu::propsJson(pb, "f16");
-        CHECK(j.find("\"enabled\":[\"fp8\",\"moefp8\",\"gdnwmma\",\"h16\",\"specsample\"]") != std::string::npos &&
+        const std::string j = nu::propsJson(pb, "q8h");  // feat027-ornkv: kvq8 enabled on MoE (was f16, skipped)
+        CHECK(j.find("\"enabled\":[\"fp8\",\"moefp8\",\"gdnwmma\",\"h16\",\"kvq8\",\"specsample\"]") != std::string::npos &&
               j.find("fast only") == std::string::npos);
         // MoE balance vs fast on the R9700: the same items except q4 KV
         nu::Target ornith_q4 = ornith;
@@ -951,8 +954,9 @@ void testNumerics() {
         const nu::Plan pf = nu::plan(fast, ornith_q4);
         CHECK(pf.on(Item::fp8) && pf.on(Item::moefp8) && pf.on(Item::gdnwmma) && pf.on(Item::h16) && pf.on(Item::kvq4));
         CHECK(!nu::plan(cust, ornith).on(Item::fp8) && !nu::plan(cust, ornith).on(Item::moefp8));
-        // KV: MoE balance f16, MoE fast q4 (where the kernels exist), dense balance q8h
-        CHECK(nu::chooseKv(rb, true, nu::KvCaps{true, true, true}, std::nullopt).kv == nu::KvKind::f16);
+        // KV: MoE balance q8h (feat027-ornkv; was f16), MoE fast q4 (where the kernels exist), dense balance q8h
+        CHECK(nu::chooseKv(rb, true, nu::KvCaps{true, true, true}, std::nullopt).kv == nu::KvKind::q8h);
+        CHECK(nu::chooseKv(nu::forModel(pre, true), true, nu::KvCaps{true, true, true}, std::nullopt).kv == nu::KvKind::f16);
         CHECK(nu::chooseKv(nu::forModel(fast, true), true, nu::KvCaps{true, true, true}, std::nullopt).kv == nu::KvKind::q4);
         CHECK(nu::chooseKv(nu::forModel(bal, false), false, nu::KvCaps{true, true, true}, std::nullopt).kv == nu::KvKind::q8h);
         // a user override turning fp8 off in MoE balance is a (non-lossy) override; turning it on adds nothing
@@ -964,11 +968,11 @@ void testNumerics() {
         const nu::Plan pq = nu::plan(bal, q4);
         CHECK(!pq.on(Item::fp8) && pq.on(Item::gdnwmma) && pq.on(Item::h16) && pq.on(Item::kvq8) && !pq.items[0].moved);
         // Radeon 8060S MoE: no fp8 WMMA there, so fp8 / moefp8 stay skipped with the hardware reason and
-        // the enabled set is the same as under MOE-BAL (h16, specsample; f16 KV): 8060S MoE balance unchanged
+        // the enabled set is the MOE-BAL one (h16, specsample) plus kvq8 (feat027-ornkv: q8h KV, was f16)
         nu::Target s8m = s8060;
         s8m.moe = s8m.moe_mxfp4 = true;
         const nu::Plan p8 = nu::plan(bal, s8m);
-        CHECK(!p8.on(Item::fp8) && !p8.on(Item::moefp8) && !p8.on(Item::gdnwmma) && p8.on(Item::h16) && !p8.on(Item::kvq8) && p8.on(Item::specsample));
+        CHECK(!p8.on(Item::fp8) && !p8.on(Item::moefp8) && !p8.on(Item::gdnwmma) && p8.on(Item::h16) && p8.on(Item::kvq8) && p8.on(Item::specsample));
         CHECK(p8.items[static_cast<std::size_t>(Item::fp8)].note.find("gfx1151") != std::string::npos);
         CHECK(p8.items[static_cast<std::size_t>(Item::moefp8)].note.find("gfx1151") != std::string::npos);
         std::uint32_t en_old = 0, en_new = 0;  // old = the MOE-BAL table (gdnwmma, h16, specsample)
@@ -977,7 +981,7 @@ void testNumerics() {
             if (p8o.items[i].enabled) en_old |= 1u << i;
             if (p8.items[i].enabled) en_new |= 1u << i;
         }
-        CHECK(en_old == en_new);
+        CHECK((en_old | nu::bit(Item::kvq8)) == en_new && (en_old & nu::bit(Item::kvq8)) == 0);
         CHECK(p8.q8dec && p8o.q8dec);  // MOE-BAL-3: q8dec on in 8060S MoE balance too
     }
     // MOE-BAL-3 (2026-10-15): q8dec back in MoE balance (MOE-BAL-2 had made it fast-only); the
@@ -1089,7 +1093,7 @@ void testKvChoice() {
     for (const nu::KvCaps& c : {noq4, r9700, s8060}) {
         for (bool moe : {false, true}) {
             CHECK(nu::chooseKv(pre, moe, c, std::nullopt).kv == K::f16);
-            CHECK(nu::chooseKv(bal, moe, c, std::nullopt).kv == (moe ? K::f16 : K::q8h));
+            CHECK(nu::chooseKv(bal, moe, c, std::nullopt).kv == K::q8h);  // feat027-ornkv: MoE too (was f16)
             // fast: q4 where the kernels exist; else f16 (no int8 stand-in)
             CHECK(nu::chooseKv(fast, moe, c, std::nullopt).kv == (c.q4 ? K::q4 : K::f16));
             CHECK(!nu::chooseKv(bal, moe, c, std::nullopt).debug);
@@ -1142,7 +1146,8 @@ void testKvChoice() {
     const nu::KvFitLabel lb_bal = nu::kvFitLabel(bal, false, K::q8h);
     CHECK(lb_bal.mode == "balance" && lb_bal.fmt == "q8h" && lb_bal.alt.empty());
     CHECK(nu::kvFitLabel(pre, false, K::f16).alt.find("--balance") != std::string::npos);
-    CHECK(nu::kvFitLabel(pre, true, K::f16).alt.empty());  // MoE: balance is f16 as well
+    CHECK(nu::kvFitLabel(pre, true, K::f16).alt.find("--balance") != std::string::npos);  // MoE: balance is q8h too now
+    CHECK(nu::kvFitLabel(bal, true, K::q8h).alt.empty() && nu::kvFitLabel(bal, true, K::q8h).fmt == "q8h");
     {
         // CLI: 32 GB card (~12 GiB left): 128k q8h fits, unchanged
         const nu::CtxFit a = nu::cliCtxFit(131072, false, 1000, 13 * GiB, GiB, q8h_pt, 256, lb_bal);
@@ -1153,9 +1158,10 @@ void testKvChoice() {
         CHECK(b.msg.find("--balance") == std::string::npos);
         const nu::CtxFit c = nu::cliCtxFit(131072, true, 1000, 5 * GiB, GiB, q8h_pt, 256, lb_bal);
         CHECK(c.refuse && c.msg.find("q8h") != std::string::npos && c.msg.find("--ctx") != std::string::npos);
-        // MoE balance (f16) on 16 GB
-        const nu::CtxFit d = nu::cliCtxFit(131072, false, 1000, 5 * GiB, GiB, f16_pt, 256, nu::kvFitLabel(bal, true, K::f16));
-        CHECK(d.shrunk && d.ctx == 65536 && d.msg.find("balance mode keeps the KV cache in f16") == 0);
+        // MoE precise (f16) on 16 GB
+        const nu::CtxFit d = nu::cliCtxFit(131072, false, 1000, 5 * GiB, GiB, f16_pt, 256, nu::kvFitLabel(pre, true, K::f16));
+        CHECK(d.shrunk && d.ctx == 65536 && d.msg.find("precise mode keeps the KV cache in f16") == 0);
+        CHECK(d.msg.find("--balance allows int8 KV") != std::string::npos);
     }
     {
         // server: 32 GB (~11 GiB) holds a 131072 request in q8h; 16 GB (~4 GiB): per-request ctx lowered / refused
@@ -1170,6 +1176,45 @@ void testKvChoice() {
         CHECK(d.refuse && d.msg.find("q8h") != std::string::npos);
         const nu::PoolFit e = nu::serverPoolFit(GiB / 16, q8h_pt, std::nullopt, false, 131072, false, 256, 8 * 262144, lb_bal);
         CHECK(e.refuse && e.msg.find("q8h KV cache (balance mode)") != std::string::npos);
+    }
+    // feat027-ornkv: Ornith-1.5-35B-A3B shape (10 full-attention layers + the MTP layer, 2 KV heads x 256) - the
+    // per-token bytes the loader / server estimate take for the format chooseKv picks (the loader's mapping:
+    // q8 = !f16, kf16 = q8v, q4), and the pool / context that buys
+    {
+        const std::uint64_t elems = 2 * 256, layers = 10 + 1;
+        const auto perTok = [&](K k) { return layers * whirl::kv::layerBytes(elems, k != K::f16, k == K::q8v, k == K::q4); };
+        const nu::Request rbm = nu::forModel(bal, true), rpm = nu::forModel(pre, true), rfm = nu::forModel(fast, true);
+        for (const nu::KvCaps& c : {r9700, nu::KvCaps{true, true, true, true}}) {  // R9700, 8060S (fast_q8h)
+            CHECK(nu::chooseKv(rbm, true, c, std::nullopt).kv == K::q8h);
+            CHECK(nu::chooseKv(rbm, true, c, std::nullopt).why == "balance, MoE model: q8h");
+            CHECK(nu::chooseKv(rpm, true, c, std::nullopt).kv == K::f16);
+            CHECK(nu::chooseKv(rfm, true, c, std::nullopt).kv == K::q4);  // fast MoE unchanged
+            CHECK(nu::chooseKv(rbm, true, c, K::f16).kv == K::f16 && nu::chooseKv(rbm, true, c, K::f16).debug);  // WHIRL_KV=f16 A/B
+        }
+        // no q8h kernels: plain q8 for MoE balance too (never q8v)
+        CHECK(nu::chooseKv(rbm, true, nu::KvCaps{false, true, false}, std::nullopt).kv == K::q8);
+        // custom balance list without kvq8: f16 (the user's choice)
+        CHECK(nu::chooseKv(nu::forModel(nu::parseMode("balance:fp8,moefp8", "t"), true), true, r9700, std::nullopt).kv == K::f16);
+        const std::uint64_t f16m = perTok(K::f16), q8hm = perTok(K::q8h), q8vm = perTok(K::q8v);
+        CHECK(f16m == 22528);                  // 22 KiB / token (PREC-1: ~22 KiB, 2.8 GB at 128k)
+        CHECK(q8hm == 11968);                  // int8 K + V + one f16 scale / 32 each: 53.1% of f16
+        CHECK(q8vm == 17248 && q8vm > q8hm);   // q8v saves V only (76.6% of f16)
+        CHECK(perTok(nu::chooseKv(rbm, true, r9700, std::nullopt).kv) == q8hm);
+        // 128k for one request: 2.75 GiB f16 -> 1.46 GiB q8h
+        CHECK(131072 * f16m == 2952790016ull && 131072 * q8hm == 1568669696ull);
+        // server pool in the same VRAM: q8h holds 1.88x the f16 tokens
+        const nu::PoolFit pf = nu::serverPoolFit(4 * GiB, f16m, std::nullopt, false, 131072, false, 256, 8 * 262144,
+                                                 nu::kvFitLabel(rpm, true, K::f16));
+        const nu::PoolFit pq = nu::serverPoolFit(4 * GiB, q8hm, std::nullopt, false, 131072, false, 256, 8 * 262144,
+                                                 nu::kvFitLabel(rbm, true, K::q8h));
+        CHECK(pf.pool == 4 * GiB / f16m / 256 * 256 && pq.pool == 4 * GiB / q8hm / 256 * 256);
+        CHECK(pq.pool > pf.pool && pq.pool * 100 / pf.pool == 188);
+        CHECK(!pq.refuse && !pf.refuse);
+        // CLI: a 1.5 GiB room holds 128k in q8h but not in f16 (f16 would shrink to the page-aligned fit)
+        const nu::CtxFit cq = nu::cliCtxFit(131072, false, 1000, GiB * 5 / 2, GiB, q8hm, 256, nu::kvFitLabel(rbm, true, K::q8h));
+        CHECK(!cq.shrunk && !cq.refuse && cq.ctx == 131072);
+        const nu::CtxFit cf = nu::cliCtxFit(131072, false, 1000, GiB * 5 / 2, GiB, f16m, 256, nu::kvFitLabel(rpm, true, K::f16));
+        CHECK(cf.shrunk && cf.ctx == (GiB * 3 / 2) / f16m / 256 * 256);
     }
     // the card's defaults carry no KV choice: 16 GB and 32 GB pick the same format
     {

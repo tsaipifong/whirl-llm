@@ -196,7 +196,7 @@ const char* kHelpBody =
     "  --ctx-per-slot N         longest context of one request (default min(pool, 131072); up to 262144)\n"
     "  --precise | --balance | --fast\n"
     "                           numerics mode (default balance: dense fp8 MXFP4 prefill, q8h KV, int8\n"
-    "                           decode activations; MoE f16 KV; --precise: f16/f32 activations,\n"
+    "                           decode activations; --precise: f16/f32 activations,\n"
     "                           f16 KV; --fast: balance + 4-bit KV, relaxed MTP acceptance).\n"
     "                           --balance=fp8,kvq8 picks items; --mode M;\n"
     "                           WHIRL_MODE\n"
@@ -1731,7 +1731,7 @@ int serveMain(int argc, char** argv, const char* program) {
                 logW("kv pool {} tokens < {} (one {}-token request + a second one reaching {}): concurrent long requests wait in "
                      "the queue, or end early while generating (finish_reason length, finish_cause kv_pool_exhausted){}",
                      pool_now, floor, slot_ctx_eff, opt.parallel > 1 ? std::min(floor_second_ctx, slot_ctx_eff) : 0,
-                     model.kv_choice.kv == numerics::KvKind::f16 && !cfg.moe && nreq.mode == numerics::Mode::precise
+                     model.kv_choice.kv == numerics::KvKind::f16 && nreq.mode == numerics::Mode::precise
                          ? "; --balance allows int8 KV (a longer pool)"
                          : "");
         }

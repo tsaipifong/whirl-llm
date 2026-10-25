@@ -7,7 +7,8 @@
 //    WHIRL_KV). If f16 KV does not fit, the context shrinks (when not given explicitly) or the load
 //    stops with a message pointing to --balance / a shorter context.
 //  - balance: the speed-oriented defaults (MXFP4 fp8 prefill activations, f16-WMMA DeltaNet,
-//    f16 GEMM intermediates, int8 decode activations q8dec); KV q8h on dense models, f16 on MoE models.
+//    f16 GEMM intermediates, int8 decode activations q8dec); KV q8h on dense and MoE models (MoE: f16
+//    before feat027-ornkv).
 //    Balance is defined by its allowed items (owner policy 2026-10-16, MODES-MXFP4): fp8, moefp8,
 //    q8dec, f16 intermediates (h16, gdnwmma), int8 KV - near-lossless, not bitwise. MoE models get
 //    the same items (fp8 + moefp8 back in MoE balance; MOE-BAL 2026-10-13 had made them fast-only).
@@ -40,7 +41,7 @@ enum class Item : std::uint8_t {
     moefp8,   // MoE routed experts (MXFP4) with fp8 activations in prefill
     gdnwmma,  // f16-WMMA DeltaNet chunked prefill (vs the f32 chunk path)
     h16,      // f16 FFN / DeltaNet GEMM outputs before the elementwise ops
-    kvq8,     // dense models: q8h KV (int8 K and V + f16 scale / 32, Hadamard-rotated q / k)
+    kvq8,     // q8h KV (int8 K and V + f16 scale / 32, Hadamard-rotated q / k), dense and MoE models
     specsample,  // temperature > 0: MTP drafts drawn from the draft distribution, accepted with min(1, p/q)
                  // (same output distribution as plain sampling, not the same tokens for a seed)
     // fast items (kvq4 and relaxacc implemented, the rest not yet)
@@ -187,9 +188,9 @@ struct KvChoice {
 };
 // The request's KV format: WHIRL_KV (forced) wins; else kvq4 -> q4 (where the kernels exist,
 // else f16: R9700 has no q4 KV kernels yet, and int8 is no stand-in), dense and MoE, except a dense
-// model where caps.fast_q8h (gfx1151) -> q8h; else kvq8 on
-// a dense model -> q8h (q8 where the code object has no q8h kernels);
-// else f16 (precise, MoE in balance). Independent of free memory and card size.
+// model where caps.fast_q8h (gfx1151) -> q8h; else kvq8 (dense and MoE, feat027-ornkv) -> q8h
+// (q8 where the code object has no q8h kernels);
+// else f16 (precise, custom lists without kvq8). Independent of free memory and card size.
 KvChoice chooseKv(const Request& r, bool moe, const KvCaps& caps, std::optional<KvKind> forced);
 
 // Wording of the "does not fit" messages for the chosen format

@@ -84,7 +84,7 @@ const char* k_help_main =
 #define WHIRL_HELP_MODES                                                                            \
     "  --precise | --balance | --fast\n"                                                            \
     "                             numerics mode (default balance: dense fp8 MXFP4 prefill, q8h KV,\n" \
-    "                             int8 decode activations; MoE f16 KV; --precise: f16/f32\n" \
+    "                             int8 decode activations; --precise: f16/f32\n" \
     "                             activations, f16 KV; --fast: balance + 4-bit KV, relaxed MTP\n" \
     "                             acceptance). --balance=fp8,kvq8 picks\n" \
     "                             items; --mode M also works; env WHIRL_MODE\n"

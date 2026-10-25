@@ -274,7 +274,7 @@ struct MatList {
 // KV formats: f16; q8 = int8 + f16 scale per 32 values (K and V); q8h = q8
 // with Hadamard-rotated q / k; q8v = K f16, V q8. q4 = 4-bit K and V (+ f16 scale per
 // 32 values) with Hadamard-rotated q / k (gfx1151). automatic: the numerics mode decides
-// (numerics::chooseKv: precise f16; balance q8h on dense models, f16 on MoE; fast q4,
+// (numerics::chooseKv: precise f16; balance q8h on dense and MoE models; fast q4,
 // q8h on dense models on the Radeon 8060S); any other value is a debug override (WHIRL_KV).
 enum class KvMode { automatic, f16, q8, q8h, q8v, q4 };
 

@@ -20,7 +20,7 @@ constexpr std::array<ItemInfo, n_items> k_items = {{
     {"moefp8", "MoE expert prefill GEMMs with fp8 activations"},
     {"gdnwmma", "f16-WMMA DeltaNet prefill chunks"},
     {"h16", "f16 FFN / DeltaNet GEMM outputs"},
-    {"kvq8", "q8h KV on dense models"},
+    {"kvq8", "q8h KV (dense and MoE models)"},
     {"specsample", "race-coupled sampled MTP drafts (temperature > 0)"},
     {"kvq4", "4-bit KV"},
     {"relaxacc", "relaxed speculative acceptance"},
@@ -224,8 +224,9 @@ Plan plan(const Request& r_in, const Target& t) {
                 else if (t.gfx1151) note = "f16 weights only on this GPU";
                 break;
             case Item::kvq8:
-                if (t.moe) why = "MoE models keep f16 KV";
-                else note = t.k_kv_q8h ? "q8h KV (int8 + f16 scale / 32, Hadamard-rotated q/k)" : "q8 KV (int8 + f16 scale / 32)";
+                // feat027-ornkv: MoE models too (int8 KV is a balance item, owner 2026-10-16; the 10-07 "MoE keeps
+                // f16 KV" rule was a KL veto, research:mode-standard-audit-2026-10-26)
+                note = t.k_kv_q8h ? "q8h KV (int8 + f16 scale / 32, Hadamard-rotated q/k)" : "q8 KV (int8 + f16 scale / 32)";
                 break;
             case Item::specsample:
                 if (!t.mtp) why = "no MTP head";
@@ -427,7 +428,11 @@ KvChoice chooseKv(const Request& r, bool moe, const KvCaps& caps, std::optional<
         }
         return c;
     }
-    if (r.has(Item::kvq8) && !moe) {
+    // feat027-ornkv: dense and MoE alike (before: MoE kept f16 in balance). q8h, not q8v, on MoE too: half the
+    // KV bytes (q8v saves V only), the dq_rows prefill (Q8P) and the gfx1151 q8h decode are q8h-only paths, and
+    // q8h is the int8 format with an Ornith task-accuracy result (kv:itemD paired QA 334 vs f16 333 / 350);
+    // progress\feat027-ornkv.PRIOR_ART.md section 4
+    if (r.has(Item::kvq8)) {
         c.kv = q8;
         c.why = std::format("{}, {}: {}", modeName(r.mode), model, kvKindName(q8));
         return c;
@@ -441,8 +446,9 @@ KvFitLabel kvFitLabel(const Request& r, bool moe, KvKind kv) {
     KvFitLabel l;
     l.mode = modeName(r.mode);
     l.fmt = kvKindName(kv);
-    // a lower-precision mode only helps where it changes the format (precise, dense: balance is q8h)
-    l.alt = r.mode == Mode::precise && !moe && kv == KvKind::f16 ? "--balance allows int8 KV" : "";
+    // a lower-precision mode only helps where it changes the format (precise: balance is q8h, dense and MoE)
+    (void)moe;
+    l.alt = r.mode == Mode::precise && kv == KvKind::f16 ? "--balance allows int8 KV" : "";
     return l;
 }
 
