@@ -111,6 +111,12 @@ public:
     long liveStreams() const { return live_streams_.load(); }
     long liveEvents() const { return live_events_.load(); }
     bool clean() const { return liveAllocations() == 0 && liveStreams() == 0 && liveEvents() == 0; }
+    // safe025 leak check (WHIRL_LEAKCHECK builds only; otherwise these are no-ops and the destructor is the default):
+    // a backend destroyed while an allocation / pinned block / stream / event is still alive is counted in
+    // leaksFound() and reported on stderr; the test program then exits non-zero (see null_backend.cpp). A test that
+    // leaves resources on purpose calls allowLeak().
+    void allowLeak() { allow_leak_ = true; }
+    static long leaksFound();
     std::uint64_t copyCalls() const { return copy_calls_.load(); }  // every copyAsync call, also 0 bytes
     std::uint64_t copiedBytes() const { return copied_.load(); }
     // bytes of device allocations alive (the memory governor test's "WDDM local usage")
@@ -181,6 +187,7 @@ private:
     std::map<std::uintptr_t, std::uint64_t> dev_;  // device allocations (start -> bytes)
     std::atomic<std::uint64_t> dev_bytes_{0};
     std::atomic<bool> event_error_{false}, record_{false};
+    std::atomic<bool> allow_leak_{false};
     std::vector<Copy> log_;
     // tracking mode (under mu_)
     using Mark = std::pair<std::uint64_t, std::uint64_t>;  // {stream id, work number}
