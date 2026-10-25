@@ -81,7 +81,8 @@ def _prep(src: str):
                 match[stack[-1][2]] = p
                 stack.pop()
             seg = p + 1
-    _cache.clear()  # one source at a time is enough (impact.py walks a file's lines together)
+    if len(_cache) >= 8:  # a few sources at a time (impact.py walks one file's two sides and its scope order)
+        _cache.pop(next(iter(_cache)))
     _cache[key] = (clean, clines, starts, frames_at, match, pp)
     return _cache[key]
 
@@ -164,6 +165,14 @@ def _parse_stmt(stmt: str, cls, term: str):
                  r"(?:[A-Z_][A-Z0-9_]+\s+)?([A-Za-z_]\w*)\s*(?::(?!:)(.*))?$", s, re.S)
     if m and (term in "{;" or term == ""):
         return "decl", [_d(m.group(1), None if term == "{" else cls, "type", m.group(2) or "")]
+    # mt-p1 review A3: operators first (operator== has '=' in its name), then mask template arguments and decltype(...)
+    # (same length, so positions map back to the original text): std::function<void(int)> on_done is the member
+    # on_done, decltype(&hipFree) free_fn is free_fn; the masked text is searched, the types come from the original
+    mo = re.search(r"\boperator\s*(\(\)|\[\]|[^\w\s(]+|\s+[\w:<>*& ]+?)\s*\(", s)
+    if mo:
+        return "decl", [_d("operator" + re.sub(r"\s+", "", mo.group(1)), cls, "function", s[:mo.start()] + s[mo.end():])]
+    orig = s
+    s = _mask(s)
     eq = _top(s, "=")
     head = s[:eq[0]] if eq else s
     par = _top(head, "(")
@@ -181,7 +190,7 @@ def _parse_stmt(stmt: str, cls, term: str):
     if first_paren is not None:
         fp = re.match(r"\(\s*[*&]\s*(?:[A-Za-z_]\w*::\s*\*)?\s*([A-Za-z_]\w*)\s*\)", head[first_paren:])
         if fp:
-            return "decl", [_d(fp.group(1), cls, "variable", head[:first_paren])]
+            return "decl", [_d(fp.group(1), cls, "variable", orig[:first_paren])]
         pre = head[:first_paren].rstrip()
         mo = re.search(r"(operator\s*(?:\(\)|[^\s(]+|\s+[\w:<>*& ]+?))\s*$", pre)
         if mo:
@@ -194,35 +203,65 @@ def _parse_stmt(stmt: str, cls, term: str):
                 cl = q.group(1) if q else None
             else:
                 cl = cls
-            return "decl", [_d(nm, cl, "function", pre[:mn.start()] + head[first_paren:])]
+            return "decl", [_d(nm, cl, "function", orig[:mn.start()] + orig[first_paren:len(head)])]
         if not mn:
             return "unparsed", []
     # variables: cut the initializer, the bit-field width and array bounds; split the declarators
     parts = []
     last = 0
     for k in _top(s, ","):
-        parts.append(s[last:k])
+        parts.append((last, s[last:k]))
         last = k + 1
-    parts.append(s[last:])
+    parts.append((last, s[last:]))
     decls = []
     typetxt = ""
-    for n, p in enumerate(parts):
+    for n, (p0, p) in enumerate(parts):
         e = _top(p, "=")
         p = p[:e[0]] if e else p
         bf = [k for k in _top(p, ":") if not (p[k - 1:k] == ":" or p[k + 1:k + 2] == ":")]
         p = p[:bf[0]] if bf else p
-        p = re.sub(r"\[[^\]]*\]", " ", p)
-        p = re.sub(r"\{[^{}]*\}", " ", p)
+        p = re.sub(r"\[[^\]]*\]", lambda x: " " * len(x.group(0)), p)
+        p = re.sub(r"\{[^{}]*\}", lambda x: " " * len(x.group(0)), p)
         ids = [x for x in re.findall(r"[A-Za-z_]\w*", p)]
         if not ids:
             continue
         nm = ids[-1]
         if n == 0:
-            typetxt = p[:p.rfind(nm)]
+            typetxt = orig[p0:p0 + p.rfind(nm)]
         decls.append(_d(nm, cls, "member" if cls else "variable", typetxt))
     if not decls:
         return "unparsed", []
     return "decl", decls
+
+
+def _mask(s: str) -> str:
+    """s with the contents of template argument lists (after an identifier) and of decltype(...) blanked (same length)"""
+    out = list(s)
+    for m in re.finditer(r"\bdecltype\s*\(", s):
+        d, k = 1, m.end()
+        while k < len(s) and d:
+            d += {"(": 1, ")": -1}.get(s[k], 0)
+            k += 1
+        for i in range(m.start(), k):
+            out[i] = " "
+    t = "".join(out)
+    out = list(t)
+    k = 0
+    while k < len(t):
+        if t[k] == "<" and k and (t[k - 1].isalnum() or t[k - 1] == "_") and t[k + 1:k + 2] != "<" and t[k - 1:k] != "<":
+            d, j = 1, k + 1
+            while j < len(t) and d:
+                d += {"<": 1, ">": -1}.get(t[j], 0)
+                if t[j] in ";{}":
+                    break
+                j += 1
+            if d == 0:
+                for i in range(k + 1, j - 1):
+                    out[i] = " "
+                k = j
+                continue
+        k += 1
+    return "".join(out)
 
 
 def _d(name, cls, what, typetxt, sig=None):
@@ -346,6 +385,38 @@ def declared(src: str, line: int) -> dict:
         if k in kinds:
             return {"kind": k, "decls": [], "target": None}
     return {"kind": "punct", "decls": [], "target": None}
+
+
+def scope_order(src: str, cls: str) -> list:
+    """mt-p1 review A1: the declared names of the class / struct / enum `cls` in declaration order (members, member
+    functions, enumerators; nested types and inline function bodies left out)"""
+    clean, clines, starts, frames_at, match, pp = _prep(src)
+    out, seen = [], set()
+    for ln in range(1, len(clines) + 1):
+        fr = frames_at.get(ln, ())
+        if not fr or fr[-1][0] not in ("class", "enum") or fr[-1][1] != cls or ln in pp or not clines[ln - 1].strip():
+            continue
+        for x in declared(src, ln)["decls"]:
+            if x["cls"] == cls and x["name"] not in seen:
+                seen.add(x["name"])
+                out.append(x["name"])
+    return out
+
+
+def scope_order(src: str, cls: str) -> list:
+    """mt-p1 review A1: the declared names of the class / struct / enum `cls` in declaration order (members, member
+    functions, enumerators; nested types and inline function bodies left out)"""
+    clean, clines, starts, frames_at, match, pp = _prep(src)
+    out, seen = [], set()
+    for ln in range(1, len(clines) + 1):
+        fr = frames_at.get(ln, ())
+        if not fr or fr[-1][0] not in ("class", "enum") or fr[-1][1] != cls or ln in pp or not clines[ln - 1].strip():
+            continue
+        for x in declared(src, ln)["decls"]:
+            if x["cls"] == cls and x["name"] not in seen:
+                seen.add(x["name"])
+                out.append(x["name"])
+    return out
 
 
 def brace_partners(src: str, line: int) -> list:

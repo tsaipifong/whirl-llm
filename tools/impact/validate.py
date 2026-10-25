@@ -106,7 +106,7 @@ RANGE_CASES = [
 # server logs); kvram719 / visab / E2 / E6 = the named check outside release_gate. fit = the steps the P1 rules were
 # designed on (S11 and the S15 range via the s15-blast GAP list); every other step is hold-out.
 ARCH024_STEPS = [
-    {"step": "B0", "fit": False, "commits": ["06a1540", "8e79cbc", "fd07e8a", "d754891", "b0acad1", "cf3f4f3"],
+    {"step": "B0", "fit": True, "commits": ["06a1540", "8e79cbc", "fd07e8a", "d754891", "b0acad1", "cf3f4f3"],
      "needed": ["check:kvram719", "golden", "check:P-size"]},
     {"step": "S0a", "fit": False, "commits": ["cc03dd3", "703c666"], "needed": ["golden", "check:P-size"]},
     {"step": "S2", "fit": False, "commits": ["9fd84f3", "25accd6"], "needed": ["release:srv_mt_precise", "release:srv_mt_precise_moe"]},
@@ -121,10 +121,10 @@ ARCH024_STEPS = [
     {"step": "S6a", "fit": False, "commits": ["b5ed025"], "needed": ["golden", "release:srv_tier_verify", "release:srv_gpu_select",
                                                                     "release:srv_cache_balance", "check:kvram719", "release:srv_mt_precise",
                                                                     "release:srv_mt_precise_moe", "check:P-size"]},
-    {"step": "S6b", "fit": False, "commits": ["d96dc9d"], "needed": ["golden", "release:srv_tier_verify", "release:srv_cache_balance",
+    {"step": "S6b", "fit": True, "commits": ["d96dc9d"], "needed": ["golden", "release:srv_tier_verify", "release:srv_cache_balance",
                                                                     "release:srv_mt_precise", "release:srv_mt_precise_moe",
                                                                     "release:srv_gpu_select", "check:kvram719", "check:P-size"]},
-    {"step": "S7", "fit": False, "commits": ["43205f5"], "needed": ["golden", "release:srv_tier_verify", "release:srv_mt_precise",
+    {"step": "S7", "fit": True, "commits": ["43205f5"], "needed": ["golden", "release:srv_tier_verify", "release:srv_mt_precise",
                                                                    "release:srv_mt_precise_moe", "release:srv_cache_precise",
                                                                    "release:srv_cache_balance", "check:P-size"]},
     {"step": "S8", "fit": False, "commits": ["51de103"], "needed": ["golden", "release:srv_fs_swift", "release:srv_fs_moe", "check:P-size"]},
@@ -136,6 +136,11 @@ ARCH024_STEPS = [
                                                                    "release:srv_mt_precise_moe", "release:srv_gpu_select", "check:P-size"]},
     {"step": "S11c", "fit": False, "commits": ["9cd2100", "6251d2f"], "needed": ["golden"]},
 ]
+
+
+# review A4: commits the P1 rules were tuned on after a validation miss (never hold-out evidence): f6e4236 (vision ->
+# golden), the B0 / S6b / S7 / S11 arch024 commits (golden steps, P-719 pinned class, removed-declaration rule, design)
+TUNED = {"f6e4236", "06a1540", "8e79cbc", "fd07e8a", "d754891", "b0acad1", "cf3f4f3", "d96dc9d", "43205f5", "3bfaac7"}
 
 
 def covered(rep, item):
@@ -370,9 +375,9 @@ def score_pairs(regs, unp, rep):
     return out
 
 
-def run_history(n, rev, skip=0, at_commit=False):
+def run_history(n, rev, skip=0, at_commit=False, exclude=()):
     m_head = impact_build.build(ROOT) if rev == "HEAD" else map_at(rev)[0]
-    shas = git("log", "--format=%h", "--no-merges", f"--skip={skip}", f"-{n}", rev).split()
+    shas = [x for x in git("log", "--format=%h", "--no-merges", f"--skip={skip}", f"-{n}", rev).split() if x[:7] not in exclude]
     tot = fhit = ehit = 0
     misses, unpaired, at_rev = [], [], []
     nprod = ngpu = 0
@@ -444,34 +449,100 @@ def ground_truth():
     return gt
 
 
-def classify_narrowed(nar, w, gt=None):
-    """measure-tools P1: the declared-name rule narrows by design. A narrowed commit is accepted only when (1) the new
-    tools saw a declaration change in it (declared names / moved declarations: the only narrowing mechanism of P1) and
-    (2) it does not lose a step its ground truth needed (ARCH024_STEPS, named CASES). Returns (failing commits, report
-    lines, explained commits, explained commits that lose a GPU step)."""
+RULES = {
+    "R-decl": "the step was reached only through identifiers the declared-name rule drops: types / template arguments / "
+              "decltype (a type changes on its own declaration line), parameter names and types (no meaning outside the "
+              "declaration), initializer references (read, not changed), qualifiers",
+    "R-member": "no identifier was dropped: the 0.2.4 rule matched functions that only name a same-named local / other "
+                "member; the P1 rule requires .n / ->n, a member function of the class, or the class named with n",
+    "R-moved": "the statement is identical in another file on the other side of the diff (moved between headers)",
+    "R-block": "a namespace / brace block added or removed whole (both braces changed; a lone brace still fails closed): "
+               "the 0.2.4 rule read the identifier-less brace lines as a file-scope change",
+}
+
+
+def attribute(nar, rev, skip_cpu=True):
+    """review A4: for every narrowed commit that loses a GPU step, re-run these tools with the legacy switches (map built
+    at REV, as replay.py does): steps that come back with legacy "ids" / "moved", and the dropped identifiers by kind"""
+    m = map_at(rev)[0]
+    out = {}
+    for s, lost in nar:
+        gl = [x for x in impact.expand_steps(lost["steps"]) if not x.startswith("cpu_")]
+        if not gl and skip_cpu:
+            out[s] = {"ids": [], "moved": [], "dropped": {}}
+            continue
+        ch = impact.parse_diff(git("diff", "-U0", "--no-color", "-M", f"{s}^", s))
+        prod = {p_: c for p_, c in ch.items() if p_.startswith(("src/", "include/", "kernels/"))}
+        r = impact.analyze(prod, m, s, f"{s}^")
+        base = impact.expand_steps(r["release_gate_steps"])
+        li = impact.expand_steps(impact.analyze(prod, m, s, f"{s}^", legacy=("ids",))["release_gate_steps"])
+        lm = impact.expand_steps(impact.analyze(prod, m, s, f"{s}^", legacy=("moved",))["release_gate_steps"])
+        lb = impact.expand_steps(impact.analyze(prod, m, s, f"{s}^", legacy=("ids", "moved"))["release_gate_steps"])
+        lk = impact.expand_steps(impact.analyze(prod, m, s, f"{s}^", legacy=("braces",))["release_gate_steps"])
+        out[s] = {"ids": sorted(li - base), "moved": sorted(lm - base), "both": sorted(lb - base), "braces": sorted(lk - base),
+                  "dropped": r.get("dropped_ids", {})}
+    return out
+
+
+def classify_narrowed(nar, w, gt=None, attrib=None):
+    """measure-tools P1 + review A4. A narrowed commit (the base tools select a step / path these tools do not) passes
+    only when it loses no ground-truth needed step AND every lost GPU step is shown unneeded by a named rule (RULES):
+    R-moved = the step comes back with the moved rule off; R-decl / R-member = it comes back with the 0.2.4 identifier
+    rule and every dropped identifier is of a named kind (type / param / init / qualifier; none dropped = R-member).
+    A dropped identifier of kind "other" (declarator position, not declared) or a step no variant brings back fails.
+    attrib: commit -> {"ids": steps back with legacy ids, "moved": steps back with legacy moved, "dropped": {id: kind}}.
+    Returns (failing commits, report lines, accepted commits, accepted commits that lose a GPU step)."""
     gt = ground_truth() if gt is None else gt
     fails, lines, expl, gpu_expl = [], [], [], 0
     for s, lost in nar:
         ls = impact.expand_steps(lost["steps"])
         gpu_lost = sorted(x for x in ls if not x.startswith("cpu_"))
-        why = w[s].get("decl") or []
         need_lost = sorted(set(ls) & gt.get(s[:7], set()))
         if need_lost:
             fails.append(s)
-            lines.append(f"   NARROWED-GT {s}: ground-truth commit loses needed steps {need_lost} (all lost {gpu_lost}, paths {lost['paths']})")
-        elif not why and not w[s].get("moved"):
+            lines.append(f"   NARROWED-GT {s}: ground-truth commit loses needed steps {need_lost} (all lost {gpu_lost})")
+            continue
+        if not gpu_lost:
+            expl.append(s)
+            lines.append(f"   narrowed {s}: no GPU step lost (CPU tests / paths {lost['paths'] or '-'})")
+            continue
+        a = (attrib or {}).get(s)
+        if a is None:
             fails.append(s)
-            lines.append(f"   NARROWED-UNEXPLAINED {s}: steps {lost['steps']} paths {lost['paths']} (no declaration change seen)")
+            lines.append(f"   NARROWED-UNATTRIBUTED {s}: GPU steps {gpu_lost} (no attribution run)")
+            continue
+        dropped = a.get("dropped") or {}
+        kinds = {}
+        for x, k in dropped.items():
+            kinds.setdefault(k, []).append(x)
+        per, bad = {}, []
+        for st in gpu_lost:
+            if st in a.get("moved", []):
+                per[st] = "R-moved"
+            elif st in a.get("ids", []):
+                if kinds.get("other"):
+                    bad.append(f"{st} (dropped identifier(s) of kind other: {', '.join(sorted(kinds['other'])[:4])})")
+                else:
+                    per[st] = "R-decl" if dropped else "R-member"
+            elif st in a.get("braces", []):
+                per[st] = "R-block"
+            elif st in a.get("both", []) and not kinds.get("other"):
+                per[st] = "R-decl+R-moved"
+            else:
+                bad.append(f"{st} (no legacy variant brings it back)")
+        ev = "; ".join(f"{k}: {', '.join(sorted(v)[:5])}{' ...' if len(v) > 5 else ''}" for k, v in sorted(kinds.items())) or "none"
+        if bad:
+            fails.append(s)
+            lines.append(f"   NARROWED-UNEXPLAINED {s}: {'; '.join(bad)} | dropped {ev}")
         else:
             expl.append(s)
-            gpu_expl += bool(gpu_lost)
-            lines.append(f"   narrowed {s} (declared-name rule; declared {', '.join(why[:5])}{' ...' if len(why) > 5 else ''}"
-                         f"{'; moved ' + str(w[s].get('moved')) if w[s].get('moved') else ''}): GPU steps {gpu_lost or '-'} "
-                         f"paths {lost['paths'] or '-'}")
+            gpu_expl += 1
+            rules = sorted(set(per.values()))
+            lines.append(f"   narrowed {s}: GPU steps {gpu_lost} -> {', '.join(rules)} | dropped {ev}")
     return fails, lines, expl, gpu_expl
 
 
-def run_baseline(base_rev, n, rev, skip):
+def run_baseline(base_rev, n, rev, skip, exclude=()):
     """replay.py with base_rev's tools/impact and with these tools on the same commits; list narrowed commits"""
     import json as _json
     tmp = tempfile.mkdtemp(prefix="validate_base_")
@@ -486,7 +557,8 @@ def run_baseline(base_rev, n, rev, skip):
     for tag, tools in (("base", os.path.join(tmp, "tools", "impact")), ("new", here)):
         outs[tag] = os.path.join(tmp, f"{tag}.json")
         procs.append(subprocess.Popen([sys.executable, "-I", os.path.join(here, "replay.py"), "--tools", tools, "--root", ROOT,
-                                       "--rev", rev, "--n", str(n), "--skip", str(skip), "--out", outs[tag]]))
+                                       "--rev", rev, "--n", str(n), "--skip", str(skip), "--out", outs[tag]]
+                                      + (["--exclude", ",".join(sorted(exclude))] if exclude else [])))
     if any(p.wait() != 0 for p in procs):
         print("validate: replay failed")
         return None
@@ -505,7 +577,7 @@ def run_baseline(base_rev, n, rev, skip):
             grew += 1
     print(f"== baseline: tools/impact of {base_rev} vs these tools on {len(b)} product commits of {rev} (skip {skip}): "
           f"release steps {nsteps['base']} -> {nsteps['new']}; {grew} commit(s) select more; {len(nar)} narrowed")
-    fails, lines, expl, gpu_expl = classify_narrowed(nar, w)
+    fails, lines, expl, gpu_expl = classify_narrowed(nar, w, attrib=attribute(nar, rev))
     for ln in lines:
         print(ln)
     print(f"   narrowed: {len(expl)} explained by the declared-name rule ({gpu_expl} lose a GPU step), {len(fails)} failing "
@@ -527,6 +599,7 @@ def main():
     ap.add_argument("--baseline")
     ap.add_argument("--map-at-commit", action="store_true", help="diagnostic: build the map at every replayed commit")
     ap.add_argument("--arch024", action="store_true", help="measure-tools P1: needed GPU checks of the arch024 steps (fit / hold-out)")
+    ap.add_argument("--exclude-tuned", action="store_true", help="review A4: leave the TUNED commits out of the replay (hold-out)")
     a = ap.parse_args()
     bad = []
     if (not a.history and not a.arch024) or a.cases:
@@ -536,11 +609,14 @@ def main():
     if a.arch024:
         bad += run_arch024()
     if a.history or not (a.cases or a.arch024):
-        tot, fhit, ehit, rate = run_history(a.history or 150, a.rev, a.skip, a.map_at_commit)
+        ex = TUNED if a.exclude_tuned else ()
+        if ex:
+            print(f"   excluded (tuned on): {', '.join(sorted(ex))}")
+        tot, fhit, ehit, rate = run_history(a.history or 150, a.rev, a.skip, a.map_at_commit, exclude=ex)
         if not tot or rate < 95:
             bad.append(f"history: test hit rate {rate:.1f}% < 95% ({fhit}/{tot}, UNPAIRED counted as missed)")
     if a.baseline:
-        nn = run_baseline(a.baseline, a.history or 150, a.rev, a.skip)
+        nn = run_baseline(a.baseline, a.history or 150, a.rev, a.skip, exclude=TUNED if a.exclude_tuned else ())
         if nn is None:
             return 2
         if nn:

@@ -27,6 +27,7 @@ ap.add_argument("--rev", default="HEAD")
 ap.add_argument("--n", type=int, default=200)
 ap.add_argument("--skip", type=int, default=0)
 ap.add_argument("--out", required=True)
+ap.add_argument("--exclude", default="", help="comma-separated commits to leave out (validate.py --exclude-tuned)")
 a = ap.parse_args()
 sys.path.insert(0, a.tools)
 import impact  # noqa: E402
@@ -57,6 +58,8 @@ roots = set(git("rev-list", "--max-parents=0", a.rev).split())
 for s in git("log", "--format=%h", "--no-merges", f"--skip={a.skip}", f"-{a.n}", a.rev).split():
     if any(r.startswith(s) for r in roots):
         continue  # root commit: no parent to diff against
+    if s[:7] in set(x[:7] for x in a.exclude.split(",") if x):
+        continue
     ch = impact.parse_diff(git("diff", "-U0", "--no-color", "-M", f"{s}^", s))
     prod = {p: c for p, c in ch.items() if p.startswith(("src/", "include/", "kernels/"))}
     if not prod:

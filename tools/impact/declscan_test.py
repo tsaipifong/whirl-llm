@@ -120,5 +120,27 @@ expect("comment text is not parsed (block DevBuf)", names(CMT, 2) == {("Q", "a")
 NEST = "struct Outer {\n  struct Inner {\n    int deep;\n  };\n  Inner in;\n};\n"
 expect("nested struct member -> Inner::deep", names(NEST, 3) == {("Inner", "deep")}, names(NEST, 3))
 expect("member of a nested type -> Outer::in", names(NEST, 5) == {("Outer", "in")}, names(NEST, 5))
+# mt-p1 review A3: callback members (template arguments with a function type, decltype, operator==)
+CB = """struct S {
+    std::function<void(int)> on_done;
+    std::function<bool(const Job&)> filter = nullptr;
+    std::map<int, std::function<int(int)>> handlers;
+    std::unique_ptr<FILE, int (*)(FILE*)> fh{nullptr, &fclose};
+    decltype(&hipFree) free_fn = &hipFree;
+    bool operator==(const Key&) const = default;
+    std::function<void(std::uint64_t, int)> on_page;
+    decltype(sizeof(int)) width = 4;
+    void (*cb)(int) = nullptr;
+    auto step() -> int;
+};
+"""
+for ln, want in ((2, "on_done"), (3, "filter"), (4, "handlers"), (5, "fh"), (6, "free_fn"), (7, "operator=="), (8, "on_page"),
+                 (9, "width"), (10, "cb"), (11, "step")):
+    got = names(CB, ln)
+    expect(f"A3 callback / decltype member line {ln} -> S::{want}", got == {("S", want)}, got)
+d6 = declscan.declared(CB, 6)["decls"]
+expect("A3 decltype(&hipFree): hipFree is a type-side identifier, not the name", d6 and "hipFree" in d6[0]["types"], d6)
+d2 = declscan.declared(CB, 2)["decls"]
+expect("A3 std::function<void(int)> on_done is a member, not a function", d2 and d2[0]["what"] == "member", d2)
 print(f"declscan test: {ok}/{ok + bad} ok")
 sys.exit(1 if bad else 0)

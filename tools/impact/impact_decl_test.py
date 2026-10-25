@@ -115,12 +115,78 @@ try:
     expect("map defect reported for a declaration with no user", any("fresh_" in d for d in r["map_defects"]), r["map_defects"])
     expect("behaviour: member added = layout", "layout" in r["behaviour"], r["behaviour"])
 
-    # a declaration removed together with its last user (S7 kNoTag): no file-scope fallback, no defect
+    # mt-p1 review A2: an unused MEMBER removed changes sizeof / layout -> fail closed (file scope), as the 0.2.4 tool did
     REPO[("A", "src/model.h")] = HDR_ADD
     REPO[("B", "src/model.h")] = HDR_NEW
     r = run({"src/model.h": {"old_path": "src/model.h", "new": [], "old": [5]}})
-    expect("removed declaration with no user left: no file scope, no defect", "cli.decode" not in r["paths"] and not r["map_defects"],
+    expect("A2 removed unused member -> file scope + layout", "cli.decode" in r["paths"] and "layout" in r["behaviour"],
+           (sorted(r["paths"]), r["behaviour"]))
+    # A2: an unused enumerator removed in the middle shifts later values -> fail closed
+    EN_A = "#pragma once\nenum Kind {\n    kA,\n    kOld,\n    kB,\n};\n"
+    EN_B = "#pragma once\nenum Kind {\n    kA,\n    kB,\n};\n"
+    REPO.update({("A", "src/model.h"): EN_A, ("B", "src/model.h"): EN_B})
+    r = run({"src/model.h": {"old_path": "src/model.h", "new": [], "old": [4]}})
+    expect("A2 removed unused enumerator -> file scope", "cli.decode" in r["paths"], sorted(r["paths"]))
+    # the S7 rule stays for namespace-scope functions / variables (kNoTag): removed with its last user -> build only
+    NS_A = "#pragma once\nconstexpr int kNoTag = 0xff;\nint keep(int x);\n"
+    NS_B = "#pragma once\nint keep(int x);\n"
+    REPO.update({("A", "src/model.h"): NS_A, ("B", "src/model.h"): NS_B})
+    r = run({"src/model.h": {"old_path": "src/model.h", "new": [], "old": [2]}})
+    expect("removed namespace constant with no user left: no file scope, no defect", "cli.decode" not in r["paths"] and not r["map_defects"],
            (sorted(r["paths"]), r["map_defects"]))
+    # mt-p1 review A1: two members swapped inside one struct (kv_tier.h Header n_tok / nck): layout change, not a move
+    SW_A = "#pragma once\nstruct Model {\n    std::vector<DevBuf> allocations;\n    int other = 0;\n};\n"
+    SW_B = "#pragma once\nstruct Model {\n    int other = 0;\n    std::vector<DevBuf> allocations;\n};\n"
+    REPO.update({("A", "src/model.h"): SW_A, ("B", "src/model.h"): SW_B})
+    r = run({"src/model.h": {"old_path": "src/model.h", "new": [3, 4], "old": [3, 4]}})
+    t = tests_of(r)
+    expect("A1 member swap -> users of both members + file scope + layout", {"t_alloc", "t_readAlloc", "t_readOther"} <= t
+           and "cli.decode" in r["paths"] and "layout" in r["behaviour"], (t, sorted(r["paths"]), r["behaviour"]))
+    # A1: two enumerators swapped (numerics.h Item kvq4 / relaxacc, k_items is positional) -> fail closed
+    EQ_A = "#pragma once\nenum class Item {\n    kvq4,\n    relaxacc,\n    other,\n};\n"
+    EQ_B = "#pragma once\nenum class Item {\n    relaxacc,\n    kvq4,\n    other,\n};\n"
+    REPO.update({("A", "src/model.h"): EQ_A, ("B", "src/model.h"): EQ_B})
+    r = run({"src/model.h": {"old_path": "src/model.h", "new": [3, 4], "old": [3, 4]}})
+    expect("A1 enumerator swap -> file scope", "cli.decode" in r["paths"], sorted(r["paths"]))
+    # review C2 (R6): an enumerator inserted mid-enum shifts the later values -> fail closed; appended at the end -> not.
+    # The new enumerator has a user (otherwise the no-user fallback alone fails closed)
+    M["functions"]["src/model.cpp::useTurbo"] = {"file": "src/model.cpp", "name": "useTurbo", "lines": [1, 2], "paths": ["load"],
+                                                 "models": ["dense", "moe"], "tests": ["whirl-tests:t_useTurbo"]}
+    M["tests"]["whirl-tests:t_useTurbo"] = {"exe": "whirl-tests", "gpu": False}
+    REPO[("B", "src/model.cpp")] = CPP + "int useTurbo() {\n  return (int)Item::turbo;\n}\n"
+    EI_B = "#pragma once\nenum class Item {\n    kvq4,\n    turbo,\n    relaxacc,\n    other,\n};\n"
+    REPO.update({("A", "src/model.h"): EQ_A, ("B", "src/model.h"): EI_B})
+    r = run({"src/model.h": {"old_path": "src/model.h", "new": [4], "old": []}})
+    expect("C2 enumerator inserted mid-enum -> file scope", "cli.decode" in r["paths"], sorted(r["paths"]))
+    EE_B = "#pragma once\nenum class Item {\n    kvq4,\n    relaxacc,\n    other,\n    turbo,\n};\n"
+    REPO.update({("A", "src/model.h"): EQ_A, ("B", "src/model.h"): EE_B})
+    r = run({"src/model.h": {"old_path": "src/model.h", "new": [6], "old": []}})
+    expect("block: enumerator appended at the end -> only its users", "cli.decode" not in r["paths"] and "t_useTurbo" in tests_of(r),
+           (sorted(r["paths"]), tests_of(r)))
+    REPO[("B", "src/model.cpp")] = CPP
+    # review C2 (R7 / R8): a constant used as an array bound in a struct -> the struct's users; a macro used by another
+    # macro -> that macro's users
+    M["functions"]["src/model.cpp::copyRing"] = {"file": "src/model.cpp", "name": "copyRing", "lines": [1, 2], "paths": ["load"],
+                                                 "models": ["dense", "moe"], "tests": ["whirl-tests:t_copyRing"]}
+    M["functions"]["src/model.cpp::tile2"] = {"file": "src/model.cpp", "name": "tile2", "lines": [1, 2], "paths": ["load"],
+                                              "models": ["dense", "moe"], "tests": ["whirl-tests:t_tile2"]}
+    M["tests"]["whirl-tests:t_copyRing"] = {"exe": "whirl-tests", "gpu": False}
+    M["tests"]["whirl-tests:t_tile2"] = {"exe": "whirl-tests", "gpu": False}
+    CPP_C2 = CPP + "void copyRing(Ring& r, void* d) {\n  memcpy(d, &r, sizeof(Ring));\n}\nint tile2() {\n  return TILE2;\n}\n"
+    REPO.update({("A", "src/model.cpp"): CPP_C2, ("B", "src/model.cpp"): CPP_C2,
+                 ("A", "src/model.h"): "#pragma once\nconstexpr int kSlots = 8;\nstruct Ring {\n    float v[kSlots];\n};\n",
+                 ("B", "src/model.h"): "#pragma once\nconstexpr int kSlots = 16;\nstruct Ring {\n    float v[kSlots];\n};\n"})
+    r = run({"src/model.h": {"old_path": "src/model.h", "new": [2], "old": [2]}})
+    expect("C2 R7 constant used as a struct array bound -> users of the struct", "t_copyRing" in tests_of(r), tests_of(r))
+    REPO.update({("A", "src/model.h"): "#pragma once\n#define TILE 64\n#define TILE2 (TILE * 2)\n",
+                 ("B", "src/model.h"): "#pragma once\n#define TILE 32\n#define TILE2 (TILE * 2)\n"})
+    r = run({"src/model.h": {"old_path": "src/model.h", "new": [2], "old": [2]}})
+    expect("C2 R8 macro used through another macro -> its users", "t_tile2" in tests_of(r), tests_of(r))
+    REPO.update({("A", "src/model.cpp"): CPP, ("B", "src/model.cpp"): CPP})
+    # block: a diff-alignment edit (the same statement on both sides, order of the struct unchanged) stays a no-op
+    REPO.update({("A", "src/model.h"): SW_A, ("B", "src/model.h"): SW_A})
+    r = run({"src/model.h": {"old_path": "src/model.h", "new": [4], "old": [4]}})
+    expect("block: same statement, same order (diff alignment) -> nothing selected", not r["paths"], sorted(r["paths"]))
     # moved declaration (other.h -> model.h, identical statement): build only; changed while moving: selected
     REPO.update({("A", "src/other.h"): "#pragma once\nstruct Model {\n    int other = 0;\n};\n", ("B", "src/other.h"): "#pragma once\n"})
     REPO[("B", "src/model.h")] = HDR_NEW
@@ -196,6 +262,13 @@ try:
     r = run({"src/vision/vision.cpp": {"old_path": "src/vision/vision.cpp", "new": [2], "old": [2]}})
     expect("vision file -> golden_swift + golden_moe + visab check", {"golden_swift", "golden_moe"} <= set(r["release_gate_steps"])
            and any(c.startswith("visab") for c in r["outside_gate_checks"]), (r["release_gate_steps"], r["outside_gate_checks"]))
+    # review C1: numeric / dispatch / layout classes name golden -> they add golden_<model> (also with no path reached)
+    REPO.update({("A", "src/common/numerics.cpp"): "void q(){\n int a;\n}\n", ("B", "src/common/numerics.cpp"): "void q(){\n int b;\n}\n"})
+    M["functions"]["src/common/numerics.cpp::q"] = {"file": "src/common/numerics.cpp", "name": "q", "lines": [1, 3], "paths": [],
+                                                    "models": ["dense", "moe"], "tests": []}
+    r = run({"src/common/numerics.cpp": {"old_path": "src/common/numerics.cpp", "new": [2], "old": [2]}})
+    expect("C1 numeric class -> golden_swift + golden_moe", {"golden_swift", "golden_moe"} <= set(r["release_gate_steps"]),
+           r["release_gate_steps"])
     # a changed test source selects the release step that runs its executable (map defect found on 605281b..9844fde)
     M["executables"]["whirl-tier-tests"] = ["tests/server/tier_tests.cpp"]
     M["declared"]["release_steps"] = {"cpu_tier": "exe:whirl-tier-tests"}

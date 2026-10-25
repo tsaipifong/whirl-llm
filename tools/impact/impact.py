@@ -102,8 +102,11 @@ def parse_diff(diff):
     return files
 
 
-def analyze(changes, m, new_rev, old_rev):
-    """changes: parse_diff output. Returns the impact report dict."""
+def analyze(changes, m, new_rev, old_rev, legacy=()):
+    """changes: parse_diff output. Returns the impact report dict.
+    legacy (validation only, review A4): "ids" = the 0.2.4 rule for declaration lines (every identifier on the line selects
+    the functions naming it; removed declarations fall back), "moved" = no moved-declaration rule. validate.py runs both
+    to attribute every GPU step the P1 rules drop to the rule that dropped it."""
     F = m["functions"]
     by_name = defaultdict(list)
     for nid, d in F.items():
@@ -128,14 +131,15 @@ def analyze(changes, m, new_rev, old_rev):
     # once; the declaration statements of both sides (sigs) tell a moved declaration from a changed one
     FC = {p: file_changes(p, c, new_rev, old_rev) for p, c in changes.items()
           if p.endswith((".cpp", ".h", ".inc", ".in")) and not (p.startswith(("tests/", "tools/")))}
-    sigs = {"new": set(), "old": set()}
+    sigs = {"new": defaultdict(set), "old": defaultdict(set)}  # side -> statement signature -> files
     for fc in FC.values():
         for x in fc["decls"]:
             if x["sig"]:
-                sigs[x["side"]].add(x["sig"])
+                sigs[x["side"]][x["sig"]].add(x["file"])
     beh = defaultdict(set)      # behaviour class -> reasons (B1.3)
     decl_rows = []              # declared names per changed declaration line (B1.1)
     defects = []                # map defects (B1.4)
+    dropped_ids = {}            # review A4: identifier -> kind (type / param / init / qualifier / other) the new rule dropped
     test_steps = set()          # release steps of test executables whose sources changed
     for path, ch in sorted(changes.items()):
         rule = next((r for r in FILE_RULES if fnmatch.fnmatch(path, r[0])), None)
@@ -191,11 +195,34 @@ def analyze(changes, m, new_rev, old_rev):
         # measure-tools P1 (B1.1): a declaration selects the users of the DECLARED names, not of every identifier on
         # the line (type names such as DevBuf / EventH are type_changed information). A declaration that appears
         # unchanged on the other side of the diff (moved between headers, re-indented) selects nothing.
-        decls = [x for x in fc["decls"] if not (x["sig"] and x["sig"] in sigs["old" if x["side"] == "new" else "new"])]
+        # mt-p1 review A1: an identical statement on the other side is a MOVE only when it is in another file, or in
+        # the same file with the order of its class / enum unchanged (a diff-alignment edit); a reorder inside a struct
+        # or enum changes the layout / the enumerator values: its declarations stay, and the file fails closed
+        order_changed, shifted = scope_changes(fc, ch)
+        pair = {path, ch["old_path"]}
+
+        def is_moved(x):
+            fs = sigs["old" if x["side"] == "new" else "new"].get(x["sig"]) if x["sig"] else None
+            if not fs:
+                return False
+            if any(f not in pair for f in fs):
+                return True
+            return x["cls"] is None or x["cls"] not in order_changed
+        decls = [x for x in fc["decls"] if "moved" in legacy or not is_moved(x)]
         moved = len(fc["decls"]) - len(decls)
         member_names = {(x["cls"], x["name"]) for x in decls if x["cls"] and x["what"] in ("member", "function", "alias")}
         free_names = {x["name"] for x in decls if (x["cls"], x["name"]) not in member_names}
         outside_ids = free_names | {n for _, n in member_names}
+        # review A4: the identifiers the 0.2.4 rule took from these lines that the declared-name rule drops, by kind
+        declared_all = {x["name"] for x in fc["decls"]}
+        for side, ln, txt, whats in fc["legacy"]:
+            for x, c in id_categories(txt, declared_all, in_function="function" in whats).items():
+                if dropped_ids.get(x) != "other":
+                    dropped_ids[x] = c
+        if "ids" in legacy:
+            member_names = set()
+            free_names = {x for _, _, txt, _ in fc["legacy"] for x in re.findall(r"[A-Za-z_]\w*", txt) if len(x) > 2} - DECL_NOISE
+            outside_ids = set(free_names)
         for x in decls:
             decl_rows.append({"file": path, "side": x["side"], "line": x["line"], "name": (x["cls"] + "::" if x["cls"] else "") + x["name"],
                               "what": x["what"], "types": x["types"]})
@@ -211,6 +238,15 @@ def analyze(changes, m, new_rev, old_rev):
             defects.append(f"{path}:{ln} ({side}): declaration line the parser does not understand: {txt}")
         for side, nb in fc["unbalanced"]:
             fail_closed.append(f"{side}: braces / namespace lines changed without their block ({nb})")
+        if "braces" in legacy and fc.get("brace_lines"):
+            fail_closed.append("legacy: brace / namespace lines (0.2.4: no identifier -> file scope)")
+        for c in sorted(order_changed):
+            fail_closed.append(f"declaration order inside {c} changed (layout / enumerator values)")
+            beh["layout"].add(f"{c}: declaration order changed")
+        for c in sorted(shifted - order_changed):
+            fail_closed.append(f"enumerator values of {c} shift (enumerator added / removed before others)")
+        for c in sorted(shifted | {c for c in order_changed if c in fc.get("enums", set())}):
+            beh["numeric"].add(f"{c}: enumerator values / order changed")
         for name in sorted(touched):
             nid = f"{path}::{name}"
             cands = [nid] if nid in F else by_name.get(name, [])
@@ -227,7 +263,7 @@ def analyze(changes, m, new_rev, old_rev):
                 tests |= set(d["tests"])
                 tests |= dispatch_tests.get(d["name"], set())
             hits.append((path, f"function {name}"))
-        if outside and (decls or fail_closed):
+        if outside and (decls or fail_closed or ("ids" in legacy and free_names)):
             # declarations / tables: the functions (in this file and, for a header, in every includer) that use one of
             # the declared names; if none is found, every function of those files
             scope = [path] + (m["includers"].get(path, []) if path.endswith(".h") else [])
@@ -241,6 +277,12 @@ def analyze(changes, m, new_rev, old_rev):
                     continue
                 scans[f] = cxxscan.scan(src)
                 fsrc[f] = src
+            # mt-p1 review C2 (R7, R8): a changed constant / macro also changes the macros defined with it and the
+            # classes whose member declarations name it (array bound, default member value): their users too
+            via = indirect_names({x["name"] for x in decls if x["cls"] is None and x["what"] in ("variable", "macro")}, fsrc, scans)
+            if via:
+                notes.append(f"{path}: also the users of {', '.join(sorted(via)[:6])} (macros / classes defined with the changed names)")
+                free_names = free_names | via
             derived = derived_classes({c for c, _ in member_names}, fsrc.values())
             known_cls = {c for sc2 in scans.values() for c, _, _ in sc2.classes}
             for f, sc2 in scans.items():
@@ -254,8 +296,11 @@ def analyze(changes, m, new_rev, old_rev):
             outside_types = outside_types | {c for c, _ in member_names}
             # a declaration removed with all its users (old side only, no user left in the new tree): the changed users
             # are touched functions already; nothing else can use it (the build would fail), so no fallback (S7 kNoTag)
+            # mt-p1 review A2: only namespace-scope functions / variables / aliases / macros; a removed member or
+            # enumerator changes sizeof / layout / later enumerator values even with no user left: it stays live
             new_names = {(x["cls"], x["name"]) for x in decls if x["side"] == "new"}
-            live = [x for x in decls if x["side"] == "new" or (x["cls"], x["name"]) in new_names]
+            live = [x for x in decls if "ids" in legacy or x["side"] == "new" or (x["cls"], x["name"]) in new_names
+                    or x["cls"] is not None or x["what"] not in ("function", "variable", "alias", "macro")]
             if decls and not live and not users:
                 notes.append(f"{path}: removed declaration(s) {', '.join(sorted({x['name'] for x in decls})[:4])} with no user left: build only")
             if live and not users and outside_types:
@@ -321,6 +366,7 @@ def analyze(changes, m, new_rev, old_rev):
         rep["release_gate_steps"] = sorted(set(rep["release_gate_steps"]) | test_steps)
     behaviour_classes(changes, rep, beh, decl_rows, new_rev)
     rep["declarations"] = decl_rows
+    rep["dropped_ids"] = dropped_ids
     rep["map_defects"] = defects
     rep.update(module_gate(changes, rep=rep, m=m))
     return rep
@@ -334,11 +380,9 @@ def file_changes(path, ch, new_rev, old_rev):
     declared name, class, type names, statement), #include lines, preprocessor conditions, unparsed lines, behaviour
     hints from the declarations (layout / lifetime)."""
     out = {"touched": set(), "decls": [], "includes": [], "cond": [], "unparsed": [], "unbalanced": [], "code": False,
-           "outside": False, "types_at": set(), "behaviour": []}
+           "outside": False, "types_at": set(), "behaviour": [], "src": {}, "legacy": []}
     for rev, key in ((new_rev, "new"), (old_rev, "old")):
         lines = ch[key]
-        if not lines:
-            continue
         if rev:
             src = show(rev, path if key == "new" else ch["old_path"])
         elif key == "new" and os.path.exists(os.path.join(ROOT, path)):
@@ -346,6 +390,9 @@ def file_changes(path, ch, new_rev, old_rev):
         else:
             src = None
         if src is None:
+            continue
+        out["src"][key] = src  # both sides, also the side without changed lines (review A1: declaration order)
+        if not lines:
             continue
         sc = cxxscan.scan(src)
         clean = cxxscan.blank_code(src).split("\n")
@@ -368,6 +415,9 @@ def file_changes(path, ch, new_rev, old_rev):
                 continue  # comment / blank line: no code changed here
             out["code"] = True
             out["outside"] = True
+            out["legacy"].append((key, ln, txt, {x["what"] for x in d["decls"]}))
+            if k == "punct" and ("{" in txt or "}" in txt or re.search(r"\bnamespace\b", txt)):
+                out["brace_lines"] = out.get("brace_lines", 0) + 1
             if key == "new":
                 out["types_at"] |= set(cxxscan.classes_at(sc, ln)) - DECL_NOISE
             if k == "punct":
@@ -377,7 +427,7 @@ def file_changes(path, ch, new_rev, old_rev):
                 continue
             if k in ("decl", "enumerator", "macro"):
                 for x in d["decls"]:
-                    out["decls"].append(dict(x, side=key, line=ln))
+                    out["decls"].append(dict(x, side=key, line=ln, file=path if key == "new" else ch["old_path"]))
             elif k == "include":
                 out["includes"].append((key, ln, d["target"]))
             elif k in ("cond", "scope"):
@@ -402,6 +452,98 @@ def file_changes(path, ch, new_rev, old_rev):
         if x["name"].startswith("~"):
             out["behaviour"].append(("lifetime", f"{x['cls']}::{x['name']} declaration"))
     return out
+
+
+def id_categories(text, declared, in_function=False):
+    """review A4: the identifiers of a declaration line the 0.2.4 rule used (len > 2, not DECL_NOISE) minus the declared
+    names, each with its kind: init (after the top-level '='), qualifier (before '::'), param (inside top-level
+    parentheses: parameter names and types), type (template arguments, decltype, the rest of the declaration's type),
+    other (in a declarator position, i.e. followed by = ; { [ ( , : at top level, yet not declared: the parser may have
+    missed the declared name; never accepted without a manual check)"""
+    if in_function:  # a line of a function declaration (also a continuation line): parameters, their types, defaults
+        return {x: "param" for x in re.findall(r"[A-Za-z_]\w*", text) if len(x) > 2 and x not in DECL_NOISE and x not in declared}
+    if re.match(r"\s*(?:inline\s+)?namespace\b", text):
+        return {x: "qualifier" for x in re.findall(r"[A-Za-z_]\w*", text) if len(x) > 2 and x not in DECL_NOISE and x not in declared}
+    t = declscan._mask(text)
+    eq = declscan._top(t, "=")
+    cut = eq[0] if eq else len(text)
+    depth, d = [], 0
+    for c in text:
+        if c == "(":
+            d += 1
+        depth.append(d)
+        if c == ")":
+            d -= 1
+    rank = {"other": 4, "type": 3, "param": 2, "qualifier": 1, "init": 0}
+    out = {}
+    for mm in re.finditer(r"[A-Za-z_]\w*", text):
+        x = mm.group(0)
+        if len(x) <= 2 or x in DECL_NOISE or x in declared:
+            continue
+        p = mm.start()
+        rest = text[mm.end():].lstrip()
+        if p >= cut:
+            c = "init"
+        elif rest.startswith("::"):
+            c = "qualifier"
+        elif depth[p] > 0:
+            c = "param"
+        elif t[p] == " ":
+            c = "type"
+        elif rest[:1] in ("=", ";", "{", "[", ",", ":", "(", ""):
+            c = "other"
+        else:
+            c = "type"
+        if x not in out or rank[c] > rank[out[x]]:
+            out[x] = c
+    return out
+
+
+def indirect_names(names, fsrc, scans):
+    """macros whose body names one of names (transitively), and classes whose body (outside member function bodies)
+    names one of them (review C2: R8 TILE2 = TILE * 2, R7 float v[kSlots])"""
+    if not names:
+        return set()
+    macros = {}
+    for src in fsrc.values():
+        for mm in re.finditer(r"^[ \t]*#[ \t]*define[ \t]+(\w+)((?:[^\n]*\\\n)*[^\n]*)", src, re.M):
+            macros[mm.group(1)] = set(re.findall(r"[A-Za-z_]\w*", mm.group(2)))
+    got, todo = set(names), list(names)
+    while todo:
+        n = todo.pop()
+        for mname, ids in macros.items():
+            if n in ids and mname not in got:
+                got.add(mname)
+                todo.append(mname)
+    for f, sc in scans.items():
+        lines = fsrc[f].split("\n")
+        for cname, a, b in sc.classes:
+            body = set()
+            for ln in range(a, min(b, len(lines)) + 1):
+                if not cxxscan.func_at(sc, ln):
+                    body |= set(re.findall(r"[A-Za-z_]\w*", lines[ln - 1].split("//")[0]))
+            if body & got and cname not in got:
+                got.add(cname)
+    return got - set(names)
+
+
+def scope_changes(fc, ch):
+    """mt-p1 review A1 / C2: (classes / enums of the changed declarations whose declaration order differs between the
+    two sides, enums whose common enumerators sit at other positions: values shift)"""
+    order_changed, shifted = set(), set()
+    enums = {x["cls"] for x in fc["decls"] if x["what"] == "enumerator" and x["cls"]}
+    fc["enums"] = enums
+    a, b = fc["src"].get("old"), fc["src"].get("new")
+    if a is None or b is None:
+        return order_changed, shifted
+    for c in sorted({x["cls"] for x in fc["decls"] if x["cls"]}):
+        oa, ob = declscan.scope_order(a, c), declscan.scope_order(b, c)
+        sa, sb = set(oa), set(ob)
+        if [n for n in oa if n in sb] != [n for n in ob if n in sa]:
+            order_changed.add(c)
+        elif c in enums and any(oa.index(n) != ob.index(n) for n in sa & sb):
+            shifted.add(c)
+    return order_changed, shifted
 
 
 HANDLE_TYPES = re.compile(r"^(DevBuf|EventH|StreamH|PinnedBuf|unique_ptr|shared_ptr|\w*(Owner|Guard|Handle|Lock)\w*)$")
@@ -550,9 +692,10 @@ def behaviour_classes(changes, rep, beh, decl_rows, new_rev):
     checks = sorted({x for k in beh for x in BEHAVIOUR.get(k, {}).get("checks", [])})
     rep["outside_gate_checks"] = checks
     add = sorted({x for k in beh for x in BEHAVIOUR.get(k, {}).get("steps", [])})
-    if "vision" in beh:
+    if {"vision", "numeric", "dispatch", "layout"} & set(beh):
         # golden server has the vision rows (the only GPU vision correctness check in release_gate); validation hold-out
-        # f6e4236 (vision::imageKey) lost golden when type names stopped selecting it
+        # f6e4236 (vision::imageKey) lost golden when type names stopped selecting it. Review C1: numeric / dispatch /
+        # layout name golden (bitwise) as their measurement, so they add the golden steps too
         add = sorted(set(add) | {f"golden_{'swift' if md == 'dense' else 'moe'}" for md in rep.get("models") or ["dense", "moe"]})
     if add and (rep["paths"] or any(p.startswith(("src/", "include/", "kernels/")) for p in changes)):
         rep["release_gate_steps"] = sorted(set(rep["release_gate_steps"]) | set(add))

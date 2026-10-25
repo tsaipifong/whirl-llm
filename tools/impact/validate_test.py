@@ -50,18 +50,53 @@ try:
     expect("dispatch: a function that does not dispatch it does not (block)", "testGemv" not in r["kernel_tests"], r["kernel_tests"])
 finally:
     impact.show = real_show
-# measure-tools P1: narrowed commits vs the baseline tools are accepted only when the declared-name rule explains them
-# and no ground-truth step is lost
+# measure-tools P1 + review A4: a narrowed commit passes only when EVERY lost GPU step is shown unneeded by a named rule:
+# the step comes back with the legacy identifier rule (R-decl) and every identifier the new rule dropped is a type /
+# parameter / initializer reference / qualifier, or no identifier was dropped (R-member: member-access precision), or
+# the step comes back with the moved rule off (R-moved: identical statement in another file). Ground truth: never lose
+# a needed step.
 gt = {"aaaaaaa": {"golden_swift", "srv_cache_balance"}}
 nar = [("aaaaaaa", {"steps": ["srv_cache_balance"], "paths": []}),      # ground truth loses a needed step -> fail
-       ("bbbbbbb", {"steps": ["kt_full"], "paths": ["cli.decode"]}),     # declaration seen -> explained
-       ("ccccccc", {"steps": ["srv_fast"], "paths": []}),                # no declaration seen -> unexplained -> fail
-       ("aaaaaaa", {"steps": ["kt_full"], "paths": []})]                 # ground truth, lost step not needed -> explained
-w = {"aaaaaaa": {"decl": ["Model::x"]}, "bbbbbbb": {"decl": ["Model::allocations"]}, "ccccccc": {"decl": [], "moved": 0}}
-fails, lines, expl, gpu_expl = validate.classify_narrowed(nar, w, gt)
-expect("narrowed: ground truth losing a needed step fails (block)", fails.count("aaaaaaa") == 1, lines)
-expect("narrowed: no declaration change = unexplained (block)", "ccccccc" in fails, lines)
-expect("narrowed: declaration seen = explained (pass)", "bbbbbbb" in expl and gpu_expl == 2, (expl, gpu_expl))
+       ("bbbbbbb", {"steps": ["kt_full"], "paths": ["cli.decode"]}),     # legacy ids restore it, dropped = types -> pass
+       ("ccccccc", {"steps": ["srv_fast"], "paths": []}),                # no variant restores it -> unexplained -> fail
+       ("ddddddd", {"steps": ["srv_balance"], "paths": []}),             # restored, but a dropped id of kind 'other' -> fail
+       ("eeeeeee", {"steps": ["golden_moe"], "paths": []}),              # restored with the moved rule off -> pass
+       ("fffffff", {"steps": ["seq_swift_<mode>"], "paths": []}),        # restored, nothing dropped -> R-member -> pass
+       ("ggggggg", {"steps": ["cpu_tests"], "paths": ["load"]})]         # no GPU step lost -> pass (CPU / path only)
+attrib = {"aaaaaaa": {"ids": ["srv_cache_balance"], "moved": [], "dropped": {"DevBuf": "type"}},
+          "bbbbbbb": {"ids": ["kt_full"], "moved": [], "dropped": {"DevBuf": "type", "n": "param"}},
+          "ccccccc": {"ids": [], "moved": [], "dropped": {}},
+          "ddddddd": {"ids": ["srv_balance"], "moved": [], "dropped": {"kFoo": "other", "Bar": "type"}},
+          "eeeeeee": {"ids": [], "moved": ["golden_moe"], "dropped": {}},
+          "fffffff": {"ids": ["seq_swift_balance", "seq_swift_precise", "seq_swift_fast"], "moved": [], "dropped": {}},
+          "ggggggg": {"ids": [], "moved": [], "dropped": {}}}
+w = {k: {"decl": ["x"]} for k in attrib}
+fails, lines, expl, gpu_expl = validate.classify_narrowed(nar, w, gt, attrib)
+expect("narrowed: ground truth losing a needed step fails (block)", "aaaaaaa" in fails, lines)
+expect("narrowed: lost step no variant restores = unexplained (block)", "ccccccc" in fails, lines)
+expect("narrowed: a dropped identifier of kind 'other' is not a named rule (block)", "ddddddd" in fails, lines)
+expect("narrowed: R-decl with only type / parameter ids dropped (pass)", "bbbbbbb" in expl, lines)
+expect("narrowed: R-moved (pass)", "eeeeeee" in expl, lines)
+expect("narrowed: R-member, nothing dropped (pass)", "fffffff" in expl, lines)
+expect("narrowed: CPU-only loss needs no rule (pass)", "ggggggg" in expl and gpu_expl == 3, (expl, gpu_expl))
+fails2, lines2, _, _ = validate.classify_narrowed([("bbbbbbb", {"steps": ["kt_full"], "paths": []})], w, {}, None)
+expect("narrowed: no attribution available = fail (block)", fails2 == ["bbbbbbb"], lines2)
+# the identifier categories of a declaration line (what the new rule dropped and why)
+cats = validate.impact.id_categories("    std::vector<device::DevBuf> allocations = makeBufs(kNum);", ["allocations"])
+expect("categories: DevBuf type, device qualifier, makeBufs / kN initializer",
+       cats.get("DevBuf") == "type" and cats.get("device") == "qualifier" and cats.get("makeBufs") == "init" and cats.get("kNum") == "init", cats)
+cats = validate.impact.id_categories("    bool restoreIsShared(std::uint8_t ck_kind, std::uint32_t ck_pos);", ["restoreIsShared"])
+expect("categories: parameter names", cats.get("ck_kind") == "param" and cats.get("ck_pos") == "param", cats)
+cats = validate.impact.id_categories("        const std::wstring& path, const char* driver_advice);", ["messageMissingSymbol"], in_function=True)
+expect("categories: continuation line of a function declaration = parameters (7d8c0bf)", cats == {"wstring": "param", "path": "param",
+       "driver_advice": "param"}, cats)
+fk, lk, ek, _ = validate.classify_narrowed([("hhhhhhh", {"steps": ["golden_moe"], "paths": []})], {"hhhhhhh": {"decl": []}}, {},
+                                           {"hhhhhhh": {"ids": [], "moved": [], "both": [], "braces": ["golden_moe"], "dropped": {}}})
+expect("narrowed: R-block (a namespace block added whole, a4db20b) passes", ek == ["hhhhhhh"] and not fk, lk)
+cats = validate.impact.id_categories("namespace whirl::device::detail {", [])
+expect("categories: namespace names on a namespace line are qualifiers", cats == {"device": "qualifier", "detail": "qualifier"}, cats)
+cats = validate.impact.id_categories("    int fresh_count = 0;", [])
+expect("categories: an undeclared identifier in declarator position is 'other' (block)", cats.get("fresh_count") == "other", cats)
 # covered(): release steps with <mode>, golden, checks, P-size via the sizing class
 rep = {"release_gate_steps": ["seq_swift_<mode>", "golden_moe"], "outside_gate_checks": ["kvram719: tools/repro/kvram719_tier.ps1"],
        "behaviour": {"sizing": ["path startup"]}, "server_gate_suites": [], "golden": [], "extra": {}, "cpu_tests": {}, "kernel_tests": []}
