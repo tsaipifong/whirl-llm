@@ -99,12 +99,125 @@ inline bool relaxApplies(Source s, bool relax_on) { return relaxAppliesTo(s == S
 // pointing before the capture buffer (FR-DFL P2-2); every ingest also goes through planIngest now.
 inline constexpr std::uint32_t kMinCaptureRows = 16;
 
-// Settings from the environment (WHIRL_DFLASH_PMIN / _NMIN / _WARM / _CAPTURE_ROWS).
+// ---- Draft width (feat029-dflash2, DFLASH-2a T5): how many of the drafter's block - 1 drafts a cycle verifies.
+// fixed (default, the v0.2.0 behaviour): every draft the walk returns, up to the limit.
+// auto (WHIRL_DFLASH_WIDTH=auto): per cycle n* = argmax over n = 0 .. lim of E(n) / T(n), where E(n) = 1 + sum over
+// k < n of prod_{j <= k} alpha[j] (the per-position acceptance of this sequence's DFlash2 drafts) and T(n) the
+// measured DFlash2 cycle time with n drafts (drafter included for n >= 1; n = 0 = the drafter is skipped, a one-row
+// verify; the features are still ingested, so the drafter context stays unbroken). Prior art (progress\
+// feat029-dflash2.PRIOR_ART.md): ik_llama spec-tuner (arm 0 = target only, recovery probes), gufo
+// DFlashLengthController (full acceptance is censored: probe wider), hipfire block modulation.
+// Output: acceptance is exact for DFlash2 drafts in every mode (relaxAppliesTo), so the width changes only how
+// many rows are verified, never the tokens (the GPU proof is the per-width hash cell of the feat029 runner).
+enum class Width : std::uint8_t { fixed, automatic };
+
+struct WidthParams {
+    Width mode = Width::fixed;
+    std::uint32_t probe_every = 16;  // auto: every probe_every-th DFlash2-eligible cycle verifies the full limit
+    float row_rel = 0.025f;          // auto: prior relative cost of one more verify row (R9700 Q4_K_M: 0.84 / 33.7 ms)
+    std::uint32_t max_n = 0;         // both modes: at most this many drafts (WHIRL_DFLASH_NMAX, like llama.cpp
+                                     // --spec-draft-n-max; 0 = the drafter's block - 1); the per-width sweep of the runner
+};
+
+// Per sequence (CLI: the one sequence; server: per slot; reset per request).
+struct WidthState {
+    std::uint32_t since_probe = 0;  // eligible cycles since the last full-limit cycle
+    std::uint32_t climb = 0;        // > 0: the last cycle accepted all of its `climb - 1` drafts (censored): try wider
+    std::uint64_t skipped = 0, probes = 0, cycles = 0;  // statistics (drafter skipped / full-limit probes / decided)
+};
+
+struct WidthChoice {
+    std::uint32_t n = 0;  // drafts to verify (<= lim)
+    bool draft = false;   // run the drafter this cycle (false when n == 0)
+    bool probe = false;   // a full-limit probe (the alphas above a truncated width are refreshed)
+};
+
+// E(n) with the per-position acceptance alpha (missing positions count as 0).
+inline float expectedTokens(const float* alpha, std::uint32_t n_alpha, std::uint32_t n) {
+    float e = 1, p = 1;
+    for (std::uint32_t k = 0; k < n && k < n_alpha; ++k) {
+        p *= alpha[k];
+        e += p;
+    }
+    return e;
+}
+
+// measured(n) -> std::optional<float>: the measured cycle ms with n drafts, nullopt when not measured yet (only real
+// measurements: an unmeasured width is estimated here from the widest measured one with row_rel per row; for n = 0
+// the drafter's cost is not subtracted, so the estimate is conservative and the drafter is skipped only when even
+// that wins, until a real n = 0 cycle was timed).
+template <class Measured>
+WidthChoice chooseWidth(const WidthParams& wp, WidthState& st, const float* alpha, std::uint32_t n_alpha, std::uint32_t lim,
+                        Measured&& measured) {
+    WidthChoice c;
+    if (wp.max_n > 0) lim = std::min(lim, wp.max_n);
+    if (lim == 0) return c;
+    if (wp.mode == Width::fixed) {
+        c.n = lim;
+        c.draft = true;
+        return c;
+    }
+    st.cycles += 1;
+    st.since_probe += 1;
+    if (wp.probe_every > 0 && st.since_probe >= wp.probe_every) {
+        st.since_probe = 0;
+        st.probes += 1;
+        st.climb = 0;
+        c.n = lim;
+        c.draft = true;
+        c.probe = true;
+        return c;
+    }
+    // the widest measured width with drafts is the anchor of the estimates; none yet: draft the full limit
+    std::uint32_t anchor = 0;
+    float t_anchor = 0;
+    for (std::uint32_t n = lim; n >= 1; --n) {
+        if (auto t = measured(n); t && *t > 0) {
+            anchor = n;
+            t_anchor = *t;
+            break;
+        }
+    }
+    if (anchor == 0) {
+        st.climb = 0;
+        c.n = lim;
+        c.draft = true;
+        return c;
+    }
+    auto est = [&](std::uint32_t n) -> float {
+        if (auto t = measured(n); t && *t > 0) return *t;
+        const float f = 1.0f + wp.row_rel * (static_cast<float>(n) - static_cast<float>(anchor));
+        return t_anchor * std::max(0.25f, f);
+    };
+    std::uint32_t best = lim;
+    float best_s = -1;
+    for (std::uint32_t n = 0; n <= lim; ++n) {
+        const float s = expectedTokens(alpha, n_alpha, n) / est(n);
+        if (s > best_s) {  // ties keep the narrower width (fewer rows for the same tokens per ms)
+            best_s = s;
+            best = n;
+        }
+    }
+    // censored full acceptance (gufo): the run may be longer than the width verified, so go one wider
+    if (st.climb > 0) best = std::max(best, std::min(lim, st.climb));
+    c.n = best;
+    c.draft = best > 0;
+    if (!c.draft) st.skipped += 1;
+    return c;
+}
+
+// After the verify of a cycle that verified `drafted` DFlash2 drafts (of the width chosen) and accepted `acc`.
+inline void observeWidth(WidthState& st, std::uint32_t drafted, std::uint32_t acc, std::uint32_t lim) {
+    st.climb = (drafted > 0 && acc >= drafted && drafted < lim) ? drafted + 1 : 0;
+}
+
+// Settings from the environment (WHIRL_DFLASH_PMIN / _NMIN / _WARM / _CAPTURE_ROWS / _WIDTH / _PROBE / _NMAX).
 struct Params {
     float p_min = 0;                           // walk stops at a token with probability below p_min
     std::uint32_t n_min = 0;                   // fewer drafts than n_min: none
     std::uint32_t warm = 64;                   // server: rows after a restore before drafting again
     std::optional<std::uint32_t> capture_rows; // default: the drafter's window (2048 without one)
+    WidthParams width;                         // WHIRL_DFLASH_WIDTH=fixed|auto, WHIRL_DFLASH_PROBE=N (>= 2, 0 = never), WHIRL_DFLASH_NMAX=N
 };
 
 namespace detail {
@@ -159,6 +272,21 @@ Params parseParams(Env&& env, std::vector<std::string>& warnings) {
         std::uint32_t r = 0;
         if (detail::parseU32(*v, r) && r >= kMinCaptureRows) p.capture_rows = r;
         else warnings.push_back("WHIRL_DFLASH_CAPTURE_ROWS=" + *v + " ignored (a row count >= " + std::to_string(kMinCaptureRows) + ")");
+    }
+    if (auto v = env("DFLASH_WIDTH")) {
+        if (*v == "fixed") p.width.mode = Width::fixed;
+        else if (*v == "auto") p.width.mode = Width::automatic;
+        else warnings.push_back("WHIRL_DFLASH_WIDTH=" + *v + " ignored (fixed or auto)");
+    }
+    if (auto v = env("DFLASH_PROBE")) {
+        std::uint32_t r = 0;
+        if (detail::parseU32(*v, r) && r != 1) p.width.probe_every = r;
+        else warnings.push_back("WHIRL_DFLASH_PROBE=" + *v + " ignored (a cycle count >= 2, or 0 for never)");
+    }
+    if (auto v = env("DFLASH_NMAX")) {
+        std::uint32_t r = 0;
+        if (detail::parseU32(*v, r) && r >= 1 && r <= 64) p.width.max_n = r;
+        else warnings.push_back("WHIRL_DFLASH_NMAX=" + *v + " ignored (a draft count 1..64)");
     }
     return p;
 }

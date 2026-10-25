@@ -8,6 +8,7 @@
 #pragma once
 
 #include "backend.h"
+#include "whirl/dflash_policy.h"
 #include "cache/ckpt_store.h"
 #include "cache/page_pool.h"
 #include "cache/prefix_cache.h"
@@ -163,6 +164,8 @@ struct SlotData : SlotPrefix, SlotTier {
     qwen35::DraftAccept dfl_acc;
     float dfl_nd = 0;
     std::uint32_t dfl_cycles = 0;
+    whirl::dflash::WidthState dfl_w;  // the draft width controller (reset per request)
+    std::uint32_t dfl_wlim = 0;       // this cycle's width limit (0: the slot did not decide a DFlash2 width)
     std::array<std::uint32_t, max_small_batch + 1> batch{};
     std::size_t n_batch = 0;
     std::uint32_t last_log_n = 0;
@@ -247,6 +250,8 @@ struct EngineOptions {
     // a slot drafts with DFlash2 once its drafter context has an unbroken run of at least
     // min(pos, dfl_warm) rows ending at pos (after a restore whose features are gone)
     std::uint32_t dfl_warm = 64;
+    // DFlash2 draft width per cycle (WHIRL_DFLASH_WIDTH=fixed|auto, WHIRL_DFLASH_PROBE; feat029-dflash2)
+    whirl::dflash::WidthParams dfl_width;
     std::uint32_t n_draft = 3;
     float p_min = 0;
     std::uint32_t n_min = 0;
@@ -559,6 +564,7 @@ private:
                   stat_lit_drafts_ = 0,  // FR-SRV P2-5: DFlash2 / n-gram drafts verified (all slots)
                   stat_prefill_tok_ = 0, stat_seg_batches_ = 0, stat_seg_chunks_ = 0;
     std::uint64_t stat_dfl_cycles_ = 0, stat_dfl_drafted_ = 0, stat_dfl_accepted_ = 0, stat_dfl_cold_ = 0, stat_dfl_gap_ = 0;
+    std::uint64_t stat_dfl_skipped_ = 0, stat_dfl_probes_ = 0;  // WHIRL_DFLASH_WIDTH=auto: drafter skipped / full-width probes
     // WDDM-LOG: runtime video memory watch (setVramProbe)
     std::function<wddmwatch::Sample()> vram_probe_;
     std::function<std::optional<wddmwatch::Others>()> vram_others_;

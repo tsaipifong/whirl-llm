@@ -320,6 +320,8 @@ Engine::Stats Engine::stats() const {
     s.dfl_accepted = stat_dfl_accepted_;
     s.dfl_cold = stat_dfl_cold_;
     s.dfl_gap = stat_dfl_gap_;
+    s.dfl_skipped = stat_dfl_skipped_;
+    s.dfl_probes = stat_dfl_probes_;
     return s;
 }
 
@@ -1122,6 +1124,8 @@ bool Engine::startJob(Slot& sl, Job& job) {
     sl.dfl_acc = qwen35::DraftAccept{};
     sl.dfl_nd = static_cast<float>(m_.dflashMaxDrafts());
     sl.dfl_cycles = 0;
+    sl.dfl_w = whirl::dflash::WidthState{};
+    sl.dfl_wlim = 0;
     // relaxacc: a solo request starts from the same draft-policy state every time (the kept
     // tokens depend on the drafts), so its output depends only on prompt, seed and settings
     if ((opt_.timing_reset || opt_.relax.on) && (opt_.use_mtp || opt_.use_dflash)) {
@@ -1593,6 +1597,7 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
     const TimePoint td0 = Clock::now();
     std::size_t n_dfl = 0;
     std::uint32_t dfl_max_n = 0;
+    for (std::size_t k = 0; k < A; ++k) act[k]->dfl_wlim = 0;
     if (opt_.use_dflash && dfl_lim > 0) {
         for (std::size_t k = 0; k < A; ++k) {
             if (dsrc[k] != 0) continue;
@@ -1603,9 +1608,19 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
             }
             const std::uint32_t lim_k = room(sl, dfl_lim);
             if (lim_k == 0) continue;
+            // the draft width (fixed: lim_k; auto: the cost model over this slot's acceptance and the DFlash2 cycle
+            // times of A active slots; 0 = the drafter is skipped, the slot verifies its one row)
+            const std::uint64_t sk0 = sl.dfl_w.skipped, pr0 = sl.dfl_w.probes;
+            const whirl::dflash::WidthChoice wc = whirl::dflash::chooseWidth(
+                opt_.dfl_width, sl.dfl_w, sl.dfl_acc.alpha.data(), static_cast<std::uint32_t>(sl.dfl_acc.alpha.size()), lim_k,
+                [&](std::uint32_t n) -> std::optional<float> { return dtm.n[n] > 0 ? std::optional<float>(dtm.t[n]) : std::nullopt; });
+            stat_dfl_skipped_ += sl.dfl_w.skipped - sk0;
+            stat_dfl_probes_ += sl.dfl_w.probes - pr0;
+            sl.dfl_wlim = lim_k;
+            if (!wc.draft) continue;
             const std::vector<std::uint32_t> d = m_.dflashDraft(sl.id, sl.next, sl.pos, opt_.dfl_p_min, opt_.dfl_n_min);
             sl.dfl_nd = 0.8f * sl.dfl_nd + 0.2f * static_cast<float>(d.size());
-            const std::uint32_t n = std::min(lim_k, static_cast<std::uint32_t>(d.size()));
+            const std::uint32_t n = std::min(wc.n, static_cast<std::uint32_t>(d.size()));
             std::copy(d.begin(), d.begin() + n, ng_d[k].begin());
             ng_n[k] = n;
             dsrc[k] = 2;
@@ -1933,6 +1948,7 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
                 dpool_.update(nd_dev, acc);
             }
         } else if (dsrc[k] == 2) {
+            if (sl.dfl_wlim > 0) whirl::dflash::observeWidth(sl.dfl_w, nd_dev, acc, sl.dfl_wlim);
             sl.dfl_acc.update(nd_dev, acc);
             sl.dfl_cycles += 1;
             stat_dfl_cycles_ += 1;

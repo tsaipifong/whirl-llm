@@ -506,6 +506,8 @@ struct ChatOpts {
     // --draft dflash: DFlash2 walk cutoffs (WHIRL_DFLASH_PMIN / WHIRL_DFLASH_NMIN)
     float dfl_p_min = 0;
     u32 dfl_n_min = 0;
+    // --draft dflash: draft width per cycle (WHIRL_DFLASH_WIDTH=fixed|auto, WHIRL_DFLASH_PROBE; feat029-dflash2)
+    whirl::dflash::WidthParams dfl_width;
 };
 
 struct DecodeResult {
@@ -520,6 +522,7 @@ struct DecodeResult {
     double t_draft = 0, t_verify = 0;
     u32 n_draft = 0, n_min = 0;
     float p_min = 0;
+    whirl::dflash::WidthState dfl_width;  // --draft dflash, WHIRL_DFLASH_WIDTH=auto: drafter skips / probes
 };
 
 struct TpsTrace {
@@ -891,11 +894,19 @@ DecodeResult dflashDecode(q::Model& model, const Tok& tok, u32 first, u32 n_prom
                 is_ng = nd > 0;
             }
         }
+        u32 w_lim = 0;
         if (!is_ng && room > 0) {
-            const std::vector<u32> d = model.dflashDraft(0, next, p, opt.dfl_p_min, opt.dfl_n_min);
-            nd_ema = 0.8f * nd_ema + 0.2f * static_cast<float>(d.size());
-            nd = std::min({static_cast<u32>(d.size()), d_max, room});
-            std::copy(d.begin(), d.begin() + nd, dr.begin());
+            // the draft width (fixed: the limit; auto: the cost model, 0 = no drafter this cycle)
+            w_lim = std::min(d_max, room);
+            const whirl::dflash::WidthChoice wc = whirl::dflash::chooseWidth(
+                opt.dfl_width, res.dfl_width, dacc.alpha.data(), static_cast<u32>(dacc.alpha.size()), w_lim,
+                [&](u32 k) -> std::optional<float> { return timing.n[k] > 0 ? std::optional<float>(timing.t[k]) : std::nullopt; });
+            if (wc.draft) {
+                const std::vector<u32> d = model.dflashDraft(0, next, p, opt.dfl_p_min, opt.dfl_n_min);
+                nd_ema = 0.8f * nd_ema + 0.2f * static_cast<float>(d.size());
+                nd = std::min({static_cast<u32>(d.size()), wc.n});
+                std::copy(d.begin(), d.begin() + nd, dr.begin());
+            }
         }
         model.verifyEnqueueEx(next, nd, std::span<const u32>(dr.data(), nd), p);
         verify_tokens += nd + 1;
@@ -920,6 +931,7 @@ DecodeResult dflashDecode(q::Model& model, const Tok& tok, u32 first, u32 n_prom
             for (u32 kk = 0; kk < acc; ++kk) pos_hits[kk] += 1;
             if (nd > 0) dacc.update(nd, acc);
             timing.update(nd, static_cast<float>(c2 - c0));
+            if (w_lim > 0) whirl::dflash::observeWidth(res.dfl_width, nd, acc, w_lim);
         }
         // the verify ran nd + 1 rows: keep acc + 1 of them, and their features
         if (acc < nd) model.restoreSnapshot(acc + 1);
@@ -1215,6 +1227,7 @@ ChatOpts dflashOpts(const q::Model& model, ChatOpts base) {
     for (const std::string& w : warn) std::fprintf(stderr, "warning: %s\n", w.c_str());
     base.dfl_p_min = dp.p_min;
     base.dfl_n_min = dp.n_min;
+    base.dfl_width = dp.width;
     return base;
 }
 
@@ -1237,6 +1250,10 @@ void printSpecSummary(const DecodeResult& r, std::size_t n_prompt, double prefil
                     r.ng_cycles, r.cycles, r.ng_accepted, r.ng_drafted, r.ng_alpha[0], r.ng_alpha[1], r.ng_alpha[2]));
         out(fmt("  per cycle: host enqueue %.2f ms, wait %.2f ms, other %.2f ms; verified rows %.2f\n", r.t_draft / r.cycles, r.t_verify / r.cycles,
                 (r.decode_ms - r.t_draft - r.t_verify) / r.cycles, static_cast<double>(r.verify_tokens) / r.cycles));
+        if (!mtp && opt.dfl_width.mode == whirl::dflash::Width::automatic)
+            out(fmt("  DFlash2 width auto (probe every %u): %llu cycles decided, drafter skipped %llu, full-width probes %llu\n", opt.dfl_width.probe_every,
+                    static_cast<unsigned long long>(r.dfl_width.cycles), static_cast<unsigned long long>(r.dfl_width.skipped),
+                    static_cast<unsigned long long>(r.dfl_width.probes)));
     }
 }
 
@@ -1733,6 +1750,10 @@ int cmdBench(const Args& a) {
                     mode == "dflash" ? "DFlash2" : "DFlash2 + n-gram", r.tokens.size(), r.decode_ms, r.tokens.size() * 1000.0 / r.decode_ms,
                     r.cycles ? static_cast<double>(r.tokens.size()) / r.cycles : 0.0, r.accepted, r.drafted,
                     static_cast<unsigned long long>(fnv(r.tokens))));
+            if (dop.dfl_width.mode == whirl::dflash::Width::automatic)
+                out(fmt("    %-16s  width auto: %llu decided, drafter skipped %llu, full-width probes %llu\n", "",
+                        static_cast<unsigned long long>(r.dfl_width.cycles), static_cast<unsigned long long>(r.dfl_width.skipped),
+                        static_cast<unsigned long long>(r.dfl_width.probes)));
         } else {
             u32 drafts = 0;
             ChatOpts so = mtpOpts(model, opt, &drafts);

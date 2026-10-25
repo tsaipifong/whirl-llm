@@ -1269,6 +1269,7 @@ int serveMain(int argc, char** argv, const char* program) {
         eo.dfl_p_min = dfl_par.p_min;
         eo.dfl_n_min = dfl_par.n_min;
         eo.dfl_warm = dfl_par.warm;
+        eo.dfl_width = dfl_par.width;
         if (use_dflash && eo.relax.on) {  // whirl::dflash::relaxApplies: MTP drafts only
             // relaxacc relaxes MTP drafts only; DFlash2 and n-gram drafts keep exact acceptance, so
             // the fast mode's other items (4-bit KV, ...) stay and the decode equals greedy of them
