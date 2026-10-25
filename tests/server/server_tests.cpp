@@ -248,6 +248,9 @@ public:
         engine_.reset();
         tier_.reset();
         model_.reset();
+        // bug-tbrig-order: the order above left no event use on a destroyed stream (any TestServer test fails here
+        // otherwise; srv_exit_event_stream reads the count after shutdown())
+        CHECK_EQ(ops_.deadStreamEventUses(), 0u);
     }
     // arch024 S3: shutdown() with a callback before each step ("tier": the tier is destroyed next, "engine", "model",
     // "end"), so a test can watch what the destructors do
@@ -263,6 +266,7 @@ public:
         tier_.reset();
         at("model");
         model_.reset();
+        CHECK_EQ(ops_.deadStreamEventUses(), 0u);  // bug-tbrig-order, as in shutdown()
         at("end");
     }
     HttpResult post(const std::string& path, const std::string& body) {
@@ -5880,13 +5884,15 @@ struct TbRig {
     }
     std::uint64_t* dead_out = nullptr;  // bug-tbrig-order: ~TbRig stores deadStreamEventUses() here when set
     ~TbRig() {
-        tb->attach(nullptr);
-        ps->attachTier(nullptr);
-        tier.reset();
-        // the members' own order (reverse declaration) after the explicit tier reset
+        // bug-tbrig-order: the product's teardown order (bug-server-exit-av: server_main's TierIoStop, then ~Engine,
+        // then ~Tier; TestServer::shutdown): the tier IO thread stops and the tier stream drains (Tier::stopIo), the
+        // engine-side owners go next (~Spe / ~SlotTier query spill fences recorded on the tier stream), the tier and its
+        // stream last. Nothing is detached first (the product does not detach either).
+        tier->stopIo();
         tb.reset();
-        cs.reset();
         ps.reset();
+        cs.reset();
+        tier.reset();
         // bug-tbrig-order: no event use on a destroyed stream (NullBackend counts eventDone / eventSync of an event whose
         // stream is gone; HIP reads that stream through the event: bug-server-exit-av). A rig torn down in the wrong
         // order fails here, in whichever test used it.

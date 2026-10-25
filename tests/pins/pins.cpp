@@ -431,12 +431,17 @@ int enginePin(const Tokenizer& tok, const std::string& kv, bool with_tier, bool 
                     static_cast<unsigned long long>(ts.restores_ram), static_cast<unsigned long long>(ts.restore_bytes),
                     static_cast<unsigned long long>(ts.superseded), static_cast<unsigned long long>(ts.demoted),
                     tr->countRam());
-        engine->attachTier(nullptr);
-        ops.record(true, "~Tier");
-        tr.reset();
+        // bug-tbrig-order: the product's teardown order (bug-server-exit-av): the tier IO thread stops and the tier
+        // stream drains, then ~Engine (its spill fences are recorded on the tier stream), then ~Tier. Nothing is
+        // detached first (the product does not detach). The ~Engine and ~Tier sections swap places in the pin.
+        tr->stopIo();
     }
     ops.record(true, "~Engine");
     engine.reset();
+    if (tr) {
+        ops.record(true, "~Tier");
+        tr.reset();
+    }
     ops.record(true, "~MockModel");
     model.reset();
     ops.record(false, "end");
@@ -447,7 +452,10 @@ int enginePin(const Tokenizer& tok, const std::string& kv, bool with_tier, bool 
         if (l.rfind("M ", 0) == 0 || l.rfind("H ", 0) == 0) ++allocs;
     }
     for (const std::string& l : gov_lines) std::printf("%s\n", l.c_str());
-    const bool clean = null_ops.clean();
+    // bug-tbrig-order: no event use on a destroyed stream at teardown (printed only when it happens: the pin stays)
+    const std::uint64_t dead = null_ops.deadStreamEventUses();
+    if (dead != 0) std::printf("event uses on a destroyed stream at teardown: %llu\n", static_cast<unsigned long long>(dead));
+    const bool clean = null_ops.clean() && dead == 0;
     std::printf("kv %s: allocations %zu copies %zu errors %d backend %s\n", kv.c_str(), allocs, copies, bad, clean ? "clean" : "LEAK");
     return bad == 0 && clean && copies > 0 ? 0 : 1;
 }
