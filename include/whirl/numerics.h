@@ -67,6 +67,56 @@ inline constexpr std::uint32_t moe_fast_items = 0;
 // implemented items (the rest are "not yet implemented": skipped, the mode runs as balance)
 inline constexpr std::uint32_t implemented_items = balance_items | bit(Item::kvq4) | bit(Item::relaxacc);
 
+// ---- arch025-N2a (R-5): the per-variable overrides as Request fields (raw values, parsed in plan())
+//
+// Every WHIRL_* value that decides a numerics / execution flag of the Model is a Request field, holding the raw value
+// (std::nullopt = not set, "" = set to the empty string), exactly as config::EnvSnapshot (arch025-N1, plan C6) keeps
+// it. plan() parses each one with the rule its old call site had (file:line next to each field). Not wired yet: the
+// loader, loadOrTune, the CLI and the server still decide the Model's flags themselves and pass none of these (N2b
+// fills them and deletes the old code). numerics is in the core library, so it cannot see EnvSnapshot (whirl_model)
+// or cache::fingerprintEnvKept (whirl_cache); the tests (model_tests, cache_tests) hold the two name lists together.
+using Raw = std::optional<std::string>;
+
+// Load-time values (loader + loadOrTune; CLI and server alike: Model::load / loadOrTune run for both).
+struct EnvValues {
+    // src/model/tune.cpp:852-982 (loadOrTuneImpl)
+    Raw fp8, fp8_mask, g8t, gdn_wmma, act_fuse, gemmh, gemmhq, attn_kx, attn_kg, attn_dqf, attn_seg, gdn_ba, gdn_in2, q4_relaxed,
+        ffn_h16, gdn_strix, gdn_strix_min, kv, q8dec, relax, relax_k, relax_alpha, relax_eps, relax_delta, spec_sample;
+    // src/model/loader.cpp:550-553
+    Raw moe_fp8, moe_mxw, moe_wide, moe_rbf;
+    // numerics::noteSwitches (k_numerics_switches, same order): recorded as overrides only
+    std::array<Raw, 13> switches{};
+
+    struct Entry {
+        const char* name;  // without the WHIRL_ prefix
+        Raw EnvValues::* field;
+    };
+    static constexpr std::size_t n_fields = 29;
+    // every Raw field once (switches are k_numerics_switches); the reflection test checks the count against sizeof
+    static const std::array<Entry, n_fields>& names();
+    // by name, switches included (nullptr for an unknown name)
+    const Raw* find(std::string_view name) const;
+    Raw* find(std::string_view name);
+};
+
+// Which front end applies its after-load knobs, and with which parse rules. none: no front end (host-only tests,
+// --dump-only cells: the S0b-2 dumps are taken after loadOrTune, before these knobs).
+enum class Front : std::uint8_t { none, cli, server };
+
+// After-load knobs of the front ends: src/cli/main.cpp:1030-1048 (applyRuntimeEnv) and :1340 (GDN_V0, chat only);
+// src/server/server_main.cpp:1040-1120. A front end fills only the names it applies (the server sends none of the
+// CLI-only ones: DBG, GEMV_MAX, NO_GRAPH, GV_GROUP, GV_NMAX).
+struct RuntimeValues {
+    Raw float_gemv, dbg, gemv_max, no_graph, no_fuse, draft_window, draft_window_min, naive_attn, attn_wide, attn_dq4, dq4_dyn,
+        attn_ws4, moe_bn, gdn_seq, gv_group, gv_nmax, gdn_v0, wide_verify, head_chunk;
+    struct Entry {
+        const char* name;
+        Raw RuntimeValues::* field;
+    };
+    static constexpr std::size_t n_fields = 19;
+    static const std::array<Entry, n_fields>& names();
+};
+
 // The requested mode and items.
 struct Request {
     Mode mode = Mode::precise;
@@ -74,6 +124,14 @@ struct Request {
     bool custom = false;      // an explicit item list (--balance=fp8,kvq8)
     std::string source = "default";
     std::uint32_t moved = 0;  // items the mode would request but forModel moved to fast for this model
+    // arch025-N2a: per-variable overrides (empty: the mode's choice; plan() then decides exactly as before N2a)
+    EnvValues env;
+    // true: plan() also does loadOrTune's part on the items (per-item overrides, WHIRL_Q8DEC, the relaxacc parameter
+    // note, noteSwitches; tune.cpp:939-982). false (every caller until N2b): the items exactly as before N2a, and
+    // loadOrTune adds that part itself. Plan::flags are computed either way.
+    bool load_overrides = false;
+    Front front = Front::none;
+    RuntimeValues runtime;  // read only when front != none
     bool has(Item it) const { return (items & bit(it)) != 0; }
 };
 
@@ -111,6 +169,15 @@ struct Target {
     bool kv_explicit = false;  // WHIRL_KV set to a format (the KV items then do not choose)
     bool fast_kv_q8h = false;  // fast takes q8h for kvq4 on dense models (KvCaps::fast_q8h, gfx1151)
     bool gdn_strix = false;    // gdnwmma runs as the gfx1151 strix-llama.cpp chunked prefill (GDN-8S)
+    // ---- arch025-N2a: what Plan::flags needs besides the above (loadOrTune reads these from Model today).
+    // gdn_strix above is loadOrTune's own result (tune.cpp:905-914, passed in before N2a); plan() computes the same
+    // value into flags.gdn_strix from the fields below and uses (gdn_strix || flags.gdn_strix) for the item, so a
+    // caller that sets either gets the same item. N2b deletes the input field.
+    bool strix_profile = false;  // device::Profile::gdn_strix (gfx1151 row)
+    bool k_gdn_sx = false;       // gdn_sx_prep and gdn_sx_scan present
+    bool gdn_strix_shape = false;  // d_state 128, head V 128, n_k_heads > 0, n_v_heads % n_k_heads == 0, ratio <= 4
+    bool k_gemm8t = false;       // the whole fragment-tiled fp8 set (Model::useTiledFp8, forward.cpp:269-277)
+    bool k_gdn_v0 = false;       // gdn_step_norm_v0 present (WHIRL_GDN_V0)
 };
 
 // gdnwmma / h16 for a model without MXFP4 tensors (KG-1): dense models on the R9700 only
@@ -125,6 +192,92 @@ struct ItemState {
     std::string note;      // enabled: detail; skipped: reason
 };
 
+// ---- arch025-N2a: the concrete execution flags (the Model's numerics members, one field each)
+//
+// X(kind, name, default, dump key): kind B = bool, U = std::uint32_t, F = float; default = the Model member's
+// initializer (include/whirl/model.h; gv_group / gv_nmax: src/model/config.cpp:23-24); dump key = the "D exec:" key of
+// WHIRL_DUMP_EXEC (src/model/exec_dump.cpp), "" = not in the dump (gdn_v0 swaps a kernel: the launch log pins it).
+// Every flag is in bitsKey(): none is proven not to change the bits (use_graph replays the same launches, but that is
+// not pinned at level 5; the CLI and the server differ there, the tier fingerprint is the server's only).
+// Not here (decided elsewhere, listed in tests/unit numerics_flags_scope): the KV format and its bools (kv_q8, kv_rot,
+// kv_kf16, kv_q4, kv_mode, fd_splits: numerics::chooseKv / resolveFdSplits, N3), the tune results (gemv_r, gemv_w,
+// tune table, WHIRL_GEMV_R / _W / _WH: config.cpp applyGemvEnv), per-forward state (out_h16, mm_class, small_max,
+// head_phase, mtp_batch, mrope_on, rpos_rows) and sizes.
+#define WHIRL_NUMERICS_FLAGS(X)                                  \
+    X(B, use_graph, true, "use_graph")                           \
+    X(B, no_fuse, false, "no_fuse")                              \
+    X(U, dbg_flags, 0, "dbg_flags")                              \
+    X(B, naive_attn, false, "naive_attn")                        \
+    X(B, attn_wide, true, "attn_wide")                           \
+    X(B, attn_dq4, true, "attn_dq4")                             \
+    X(B, dq4_dyn, true, "dq4_dyn")                               \
+    X(B, attn_ws4, true, "attn_ws4")                             \
+    X(B, wide_verify, true, "wide_verify")                       \
+    X(B, moe_wide, false, "moe_wide")                            \
+    X(U, head_chunk, 248320, "head_chunk")                       \
+    X(B, float_gemv, false, "float_gemv")                        \
+    X(B, prec_dec, false, "prec_dec")                            \
+    X(U, gemv_max, 16, "gemv_max")                               \
+    X(B, fp8_prefill, true, "fp8_prefill")                       \
+    X(U, fp8_mask, 7, "fp8_mask")                                \
+    X(B, relax_on, false, "relax.on")                            \
+    X(U, relax_k, 4, "relax.k")                                  \
+    X(F, relax_alpha, 0.1f, "relax.alpha")                       \
+    X(F, relax_eps, 0.09f, "relax.eps")                          \
+    X(F, relax_delta, 0.3f, "relax.delta")                       \
+    X(B, gdn_chunked, true, "gdn_chunked")                       \
+    X(B, gdn_wmma, false, "gdn_wmma")                            \
+    X(B, gdn_strix, false, "gdn_strix")                          \
+    X(U, gdn_strix_min, 256, "gdn_strix_min")                    \
+    X(B, act_fuse, true, "act_fuse")                             \
+    X(B, attn_kx_on, true, "attn_kx_on")                         \
+    X(B, gdn_ba_on, true, "gdn_ba_on")                           \
+    X(B, gdn_in2_on, true, "gdn_in2_on")                         \
+    X(B, attn_dqf_on, true, "attn_dqf_on")                       \
+    X(U, attn_seg, 0, "attn_seg")                                \
+    X(B, attn_kg_on, true, "attn_kg_on")                         \
+    X(B, ffn_h16, false, "ffn_h16")                              \
+    X(B, h16_dq, false, "h16_dq")                                \
+    X(B, g8t, false, "g8t")                                      \
+    X(B, gemmh_on, true, "gemmh_on")                             \
+    X(B, gemmhq_on, false, "gemmhq_on")                          \
+    X(U, draft_window, 16384, "draft_window")                    \
+    X(U, draft_window_min, 65536, "draft_window_min")            \
+    X(U, moe_bn_force, 0, "moe_bn_force")                        \
+    X(B, moe_fp8, true, "moe_fp8")                               \
+    X(B, moe_mxw, true, "moe_mxw")                               \
+    X(B, moe_rbf, true, "moe_rbf")                               \
+    X(B, gv_group, true, "gv_group")                             \
+    X(U, gv_nmax, 0, "gv_nmax")                                  \
+    X(B, gdn_v0, false, "")
+
+struct Flags {
+#define WHIRL_NF_B bool
+#define WHIRL_NF_U std::uint32_t
+#define WHIRL_NF_F float
+#define WHIRL_NF_FIELD(k, n, d, key) WHIRL_NF_##k n = d;
+    WHIRL_NUMERICS_FLAGS(WHIRL_NF_FIELD)
+#undef WHIRL_NF_FIELD
+#undef WHIRL_NF_B
+#undef WHIRL_NF_U
+#undef WHIRL_NF_F
+    bool operator==(const Flags&) const = default;
+};
+
+enum class FlagKind : std::uint8_t { b, u, f };
+struct FlagInfo {
+    const char* name;
+    const char* dump_key;  // "" = not in WHIRL_DUMP_EXEC
+    FlagKind kind;
+    bool Flags::* b;
+    std::uint32_t Flags::* u;
+    float Flags::* f;
+};
+// every Flags field once, in declaration order (generated from WHIRL_NUMERICS_FLAGS)
+const std::vector<FlagInfo>& flagTable();
+// the field's value as bitsKey / the dump print it: bool 0/1, u32 decimal, float {:.9g} (exec_dump.cpp:53)
+std::string flagValue(const Flags& fl, const FlagInfo& fi);
+
 struct Plan {
     Mode mode = Mode::precise;
     std::string source = "default";  // where the mode came from: default (balance), command line, WHIRL_MODE
@@ -135,10 +288,21 @@ struct Plan {
     // into the f16 GEMM with f32 accumulation (precise). Set by the loader (setQ8dec).
     bool q8dec = true;
     bool q8dec_default = true;  // the mode's choice (q8decDefault) before WHIRL_Q8DEC
+    // arch025-N2a: the Model's execution flags this plan decides (not read by anyone yet: N2b)
+    Flags flags;
     bool on(Item it) const { return items[static_cast<std::size_t>(it)].enabled; }
+    // Everything here that decides the bits of the output, as "key=value;" in a fixed order: the mode, every item's
+    // enabled state, q8dec and every Flags field (flagTable order). Descriptions (notes, overrides, source) are not in
+    // it. Not used by the tier fingerprint yet (freeze, plan O6).
+    std::string bitsKey() const;
 };
 
-// Capability table: requested items -> enabled / skipped with the reason.
+// Capability table: requested items -> enabled / skipped with the reason. arch025-N2a: also every execution flag
+// (Plan::flags), from the Request's per-variable overrides (r.env, and r.runtime for r.front), with the rules of
+// loader.cpp:548-553 / :743, tune.cpp:850-982, cli main.cpp:1030-1048 / :1340 and server_main.cpp:1040-1120. With no
+// overrides set the items, notes and q8dec are exactly what plan() gave before N2a (loadOrTune applies its own
+// overrides afterwards until N2b). Throws std::invalid_argument / std::out_of_range where loadOrTune threw
+// (WHIRL_RELAX_K / _ALPHA / _EPS / _DELTA that std::stoul / std::stof reject, with relaxacc on).
 Plan plan(const Request& r, const Target& t);
 // Per-item override from the environment: `forced` = the effective value after the variable.
 // Records "WHIRL_X=v: item on (lossy, user-requested)" or "... item off" when it differs.

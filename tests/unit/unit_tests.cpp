@@ -4042,6 +4042,8 @@ void testProbeChild(const wchar_t* self) {
 }
 #endif
 
+void testNumericsPlan(int& pass, int& fail);  // tests/unit/numerics_plan_tests.cpp (arch025-N2a)
+
 int main(int argc, char** argv) {
 #if WHIRL_WITH_HIP && defined(_WIN32)
     if (argc >= 2) {  // helper modes for testProbeChild (the test runs this program as the child)
@@ -4072,6 +4074,7 @@ int main(int argc, char** argv) {
     testVramLimit();
     testCardDefaults();
     testNumerics();
+    testNumericsPlan(g_pass, g_fail);  // arch025-N2a (tests/unit/numerics_plan_tests.cpp)
     testKvChoice();
     testKernelFetchBounds();
     testValueScope();

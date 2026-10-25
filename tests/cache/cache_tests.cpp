@@ -6,6 +6,7 @@
 #include "cache/prefix_cache.h"
 #include "mock_tier.h"
 #include "tier/kv_tier.h"
+#include "whirl/numerics.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -661,8 +662,78 @@ static void testSupersede() {
     CHECK(tr.size() == 0);
 }
 
+// arch025-N2a: every WHIRL_* variable numerics::plan reads (Request::env, its A/B switches, Request::runtime) is kept by
+// the tier fingerprint (not on its skip list), and changes Plan::bitsKey() in at least one context (value x model x
+// mode x card x path) — so a bit-affecting variable can never be in the plan but invisible to bitsKey, or in bitsKey
+// but skipped by the fingerprint. Exceptions with their owner: FD_SPLITS (attention splits: resolveFdSplits, the KV
+// step N3; noteSwitches records it).
+static void testFingerprintCoversBitsKey() {
+    namespace nu = whirl::numerics;
+    auto tgt = [](bool moe, bool s8060) {
+        nu::Target t;
+        t.gfx1151 = s8060;
+        t.has_mxfp4 = true;
+        t.moe = moe;
+        t.moe_mxfp4 = moe;
+        t.k_gemm8 = t.k_gemm8_moe = t.k_gemm8t = t.k_gdn_wmma = !s8060;
+        t.k_kv_q8h = t.k_kv_q4 = t.mtp = t.k_spec_sample = t.k_gdn_v0 = true;
+        t.fast_kv_q8h = s8060;
+        t.strix_profile = t.k_gdn_sx = s8060;
+        t.gdn_strix_shape = true;
+        return t;
+    };
+    std::vector<std::string> names;
+    for (const auto& e : nu::EnvValues::names()) names.push_back(e.name);
+    for (std::size_t i = 0; nu::k_numerics_switches[i] != nullptr; ++i) names.push_back(nu::k_numerics_switches[i]);
+    for (const auto& e : nu::RuntimeValues::names()) names.push_back(e.name);
+    const std::vector<std::string> outside = {"FD_SPLITS"};
+    const char* values[] = {"0", "1", "", "2", "5", "f16", "q4", "512", "0x3", "0.5", "64", "4096"};
+    std::size_t n_checked = 0;
+    for (const std::string& n : names) {
+        CHECK(fingerprintEnvKept("WHIRL_" + n));
+        if (std::find(outside.begin(), outside.end(), n) != outside.end()) continue;
+        bool changes = false;
+        for (const bool moe : {false, true})
+            for (const bool s8060 : {false, true})
+                for (const char* mode : {"precise", "balance", "fast"})
+                    for (const char* v : values)
+                        for (int path = 0; path < 3 && !changes; ++path) {
+                            nu::Request r = nu::parseMode(mode, "t");
+                            r.load_overrides = true;
+                            if (path == 0) {
+                                nu::Raw* f = r.env.find(n);
+                                if (!f) continue;
+                                *f = std::string(v);
+                            } else {
+                                r.front = path == 1 ? nu::Front::cli : nu::Front::server;
+                                bool found = false;
+                                for (const auto& e : nu::RuntimeValues::names())
+                                    if (n == e.name) {
+                                        r.runtime.*e.field = std::string(v);
+                                        found = true;
+                                    }
+                                if (!found) continue;
+                            }
+                            nu::Request r0 = nu::parseMode(mode, "t");
+                            r0.load_overrides = true;
+                            r0.front = r.front;
+                            const nu::Target t = tgt(moe, s8060);
+                            try {
+                                changes = nu::plan(r, t).bitsKey() != nu::plan(r0, t).bitsKey();
+                            } catch (const std::exception&) {  // a value loadOrTune rejects (RELAX_K=f16): next
+                            }
+                        }
+        if (!changes) std::printf("FAIL WHIRL_%s never changes numerics::Plan::bitsKey()\n", n.c_str());
+        CHECK(changes);
+        ++n_checked;
+    }
+    CHECK(n_checked + outside.size() == names.size());
+    std::printf("  fingerprint covers bitsKey: %zu plan variables, %zu outside the plan\n", n_checked, outside.size());
+}
+
 int main() {
     whirl::test::clearWhirlEnv();  // FR-TEST P3-11
+    testFingerprintCoversBitsKey();
     testHelpers();
     testMatchSlot();
     testCkptSlotFor();

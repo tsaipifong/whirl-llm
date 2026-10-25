@@ -173,7 +173,7 @@ if(WHIRL_WITH_HIP)
   target_link_libraries(whirl-mem-hog PRIVATE whirl)
 endif()
 
-add_executable(whirl-tests tests/unit/unit_tests.cpp)
+add_executable(whirl-tests tests/unit/unit_tests.cpp tests/unit/numerics_plan_tests.cpp)
 target_link_libraries(whirl-tests PRIVATE whirl)
 # GPU runtime load-failure diagnosis (release front-end, issue #2), CPU-only
 target_sources(whirl-tests PRIVATE src/release/dll_deps.cpp)
