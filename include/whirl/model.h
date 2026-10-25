@@ -943,6 +943,7 @@ private:
     std::uint64_t pendPtr(const Seq& sq, std::size_t i, bool conv) const;
     void gdnChunked(std::size_t i, DevPtr conv_o, DevPtr alpha_b, DevPtr beta_b, DevPtr out, std::uint32_t n, float scale);
     void gdnScan(std::size_t i, DevPtr conv_o, DevPtr alpha_b, DevPtr beta_b, DevPtr out, std::uint32_t n, float scale);
+    void gdnLayer(std::size_t i, const GdnW& g, std::uint32_t n, bool gdn_in2);  // forward/gdn.cpp (arch025-F3)
     std::vector<Mat*> tuneMats(Layer& L);
     // vision helpers (forward.cpp)
     bool visAny() const;

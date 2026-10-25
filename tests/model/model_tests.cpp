@@ -1535,6 +1535,8 @@ void testDraftWindowRestore() {
 // shared helpers ti / I / D in src/model/forward_internal.h stay inside an anonymous namespace (internal linkage per
 // forward TU, as when they were file-local to forward.cpp); no public header includes the internal header.
 // arch025-F2: draftAttn / attnBlock / prefillAttn only in forward/attn.cpp, ffnBlock / moeBlock only in forward/ffn.cpp.
+// arch025-F3: gdnLayer / gdnSegsBatch / gdnSegsSingle / gdnChunked / gdnScan only in forward/gdn.cpp, and Model::run (still in
+// forward.cpp) calls gdnLayer exactly once (the extracted DeltaNet branch).
 void testForwardSplit() {
 #ifdef WHIRL_SOURCE_DIR
     const std::filesystem::path root(WHIRL_SOURCE_DIR);
@@ -1550,21 +1552,35 @@ void testForwardSplit() {
     // arch025-F2: the attention block in forward/attn.cpp, the FFN / MoE block in forward/ffn.cpp, each defined once.
     const std::string attn = readSource(root / "src/model/forward/attn.cpp");
     const std::string ffn = readSource(root / "src/model/forward/ffn.cpp");
-    check(!attn.empty() && !ffn.empty(), "forward split: forward/attn.cpp, forward/ffn.cpp readable");
-    const std::string others[] = {fwd, disp, attn, ffn};
+    const std::string gdn = readSource(root / "src/model/forward/gdn.cpp");
+    check(!attn.empty() && !ffn.empty() && !gdn.empty(), "forward split: forward/attn.cpp, forward/ffn.cpp, forward/gdn.cpp readable");
+    const std::string others[] = {fwd, disp, attn, ffn, gdn};
     struct Home {
         const char* fn;
         std::size_t at;  // index into others
     };
     for (const Home h : {Home{"void Model::draftAttn(", 2}, Home{"void Model::attnBlock(", 2}, Home{"void Model::prefillAttn(", 2},
-                         Home{"void Model::ffnBlock(", 3}, Home{"void Model::moeBlock(", 3}}) {
+                         Home{"void Model::ffnBlock(", 3}, Home{"void Model::moeBlock(", 3}, Home{"void Model::gdnLayer(", 4},
+                         Home{"GdnSegs Model::gdnSegsBatch(", 4}, Home{"GdnSegs Model::gdnSegsSingle(", 4}, Home{"void Model::gdnChunked(", 4},
+                         Home{"void Model::gdnScan(", 4}}) {
         bool once = true;
         for (std::size_t i = 0; i < std::size(others); ++i)
             once = once && ((others[i].find(h.fn) != std::string::npos) == (i == h.at));
-        check(once, std::string("forward split: ") + h.fn + (h.at == 2 ? " defined in forward/attn.cpp only" : " defined in forward/ffn.cpp only"));
+        static const char* const home[] = {"", "", " defined in forward/attn.cpp only", " defined in forward/ffn.cpp only",
+                                           " defined in forward/gdn.cpp only"};
+        check(once, std::string("forward split: ") + h.fn + home[h.at]);
     }
-    for (const std::string* s : {&attn, &ffn})
-        check(s->find("#include \"../forward_internal.h\"") != std::string::npos, "forward split: attn.cpp / ffn.cpp include forward_internal.h");
+    for (const std::string* s : {&attn, &ffn, &gdn})
+        check(s->find("#include \"../forward_internal.h\"") != std::string::npos,
+              "forward split: attn.cpp / ffn.cpp / gdn.cpp include forward_internal.h");
+    {
+        // arch025-F3: the DeltaNet branch of Model::run is the single gdnLayer call
+        const std::size_t r = fwd.find("void Model::run(u32 n) {");
+        const std::size_t c = fwd.find("gdnLayer(i, L.gdn, n, gdn_in2);");
+        check(r != std::string::npos && c != std::string::npos && c > r && fwd.find("gdnLayer(", c + 1) == std::string::npos &&
+                  fwd.find("const GdnW& g = L.gdn;", r) == std::string::npos,  // only inside Model::run (commitSeq keeps its own until F4)
+              "forward split: Model::run calls gdnLayer once (F3 extract-method)");
+    }
     const std::size_t anon = hdr.find("namespace {"), close = hdr.find("}  // namespace\n");
     bool inside = anon != std::string::npos && close != std::string::npos && anon < close;
     for (const char* h : {"constexpr std::size_t ti(", "inline i32 I(", "hip::Dim3 D("}) {
