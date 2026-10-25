@@ -63,8 +63,10 @@ param(
     [int]$Port = 8097,        # suite server: the port of the servers the gate starts
     [string]$Impact = "",     # check: run only the golden cases tools/impact/impact.py lists for a diff (A..B, or worktree)
     [switch]$KeepServerWork,  # suite server: keep each case's server work dir (server_*.log; *.wkv removed) also when it passes
-    [string[]]$ServerEnv = @()  # suite server: extra NAME=VALUE for its servers (--server-env; e.g. WHIRL_CKPT_HOST=1, arch024-S14 E7)
+    [string[]]$ServerEnv = @(),  # suite server: extra NAME=VALUE for its servers (--server-env; e.g. WHIRL_CKPT_HOST=1, arch024-S14 E7)
+    [switch]$NoLaunchLog      # check / record: no launch logs (default: <Out>\lt_golden_<arch>_<time>, imported at the end; P7)
 )
+. (Join-Path $PSScriptRoot "..\gates\launch_log.ps1")
 # arch024-S0b: with WHIRL_LAUNCH_LOG=DIR the server case's servers write their launch tables to DIR\srv_<model>_<mode>
 # (passed with --server-env: whirl-server-gate gives its servers no WHIRL_* variable of its own environment except
 # WHIRL_DEVICE / WHIRL_VRAM_LIMIT_MB / WHIRL_MODE, so before this only the CLI cases were recorded)
@@ -333,6 +335,17 @@ if ($Suites -contains "server") {
     Write-Host "golden: gate exe $GateExe sha256 $((Get-FileHash -Algorithm SHA256 $GateExe).Hash.ToLower())"
 }
 Write-Host "golden: reference set $Arch sha256 $($rs.hash) ($($rs.n) files; all files of $Arch`: $($rsAll.hash))"
+# measure-tools P7: launch logs by default (tools/gates/launch_log.ps1). An inherited WHIRL_LAUNCH_LOG (release_gate.ps1
+# sets one per GPU step and imports it itself) is used as it is; otherwise a new folder <Out>\lt_golden_<arch>_<time>
+# is recorded and imported at the end. -NoLaunchLog: no folder, an inherited one is cleared for this run.
+$llOwn = ""; $llPrev = $env:WHIRL_LAUNCH_LOG
+if ($NoLaunchLog) { Remove-Item Env:WHIRL_LAUNCH_LOG -ErrorAction SilentlyContinue }
+elseif (-not $env:WHIRL_LAUNCH_LOG) {
+    $llOwn = Resolve-LaunchLogDir "" (Join-Path $Out ("lt_golden_" + $Arch + "_" + (Get-Date -Format "yyyyMMdd-HHmmss"))) $false
+    New-Item -ItemType Directory -Force $llOwn | Out-Null
+    $env:WHIRL_LAUNCH_LOG = $llOwn
+}
+Write-Host "golden: launch log $(if ($env:WHIRL_LAUNCH_LOG) { $env:WHIRL_LAUNCH_LOG + $(if ($llOwn) { '' } else { ' (inherited)' }) } else { 'off (-NoLaunchLog)' })"
 try {
 foreach ($mk in $Models) {
     $mp = $modelPath[$mk]
@@ -484,6 +497,12 @@ foreach ($mk in $Models) {
 }
 } finally {
     foreach ($k in $savedEnv.Keys) { [Environment]::SetEnvironmentVariable($k, $savedEnv[$k]) }
+    [Environment]::SetEnvironmentVariable("WHIRL_LAUNCH_LOG", $llPrev)
+}
+# measure-tools P7: import this run's own launch-log folder (information only: the verdict below is unchanged)
+if ($llOwn) {
+    $llExe = Get-ExeSha @($Exe, $(if ($Suites -contains "server") { $ServerExe }))
+    Write-Host "golden: $(Invoke-LaunchLogImport $llOwn '' $llExe "golden $Action $Arch" (Get-GatePython))"
 }
 # record: the references and models.txt are written together, and only when no case failed (a partial
 # record would leave new references next to a stale model hash)

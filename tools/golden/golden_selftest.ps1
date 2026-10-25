@@ -26,6 +26,11 @@ $model = Join-Path $tmp "fake-model.gguf"
 [System.IO.File]::WriteAllBytes($model, [byte[]](1..200 | ForEach-Object { [byte]($_ % 256) }))
 $savedDense = $env:WHIRL_GOLDEN_DENSE
 $env:WHIRL_GOLDEN_DENSE = $model
+# measure-tools P7: golden.ps1 records launch logs by default and imports them; the self-test never imports into a real
+# results.db (WHIRL_LT_IMPORT=off, a fake importer in case 10); an inherited WHIRL_LAUNCH_LOG would redirect the logs
+$savedLti = $env:WHIRL_LT_IMPORT; $savedLl = $env:WHIRL_LAUNCH_LOG
+$env:WHIRL_LT_IMPORT = "off"; Remove-Item Env:WHIRL_LAUNCH_LOG -ErrorAction SilentlyContinue
+. (Join-Path $PSScriptRoot "..\gates\launch_log.ps1")
 $bad = 0
 
 # a passing KL gate report for the fake exe (tools/klgate/klgate.py --report format)
@@ -199,7 +204,42 @@ try {
     Expect "default suites: a missing mmproj fails swift/precise_server and record writes nothing" $r 2 {
         ($r.out -match "FAIL  swift/precise_server suite server needs the mmproj") -and
         -not (Test-Path (Join-Path $g9 "gfx1201\swift\precise_single.txt")) -and -not (Test-Path (Join-Path $g9 "models.txt")) }
+    # 10) launch logs by default (measure-tools P7): a check run records WHIRL_LAUNCH_LOG in a new folder under -Out and
+    #     imports it (fake importer); -NoLaunchLog records nothing; an inherited WHIRL_LAUNCH_LOG (release_gate) is used
+    #     as it is and not imported by golden.ps1
+    $outD = Join-Path $tmp "out"
+    $imp = Join-Path $tmp "fake_lt_import.py"
+    $impArgs = Join-Path $tmp "lt_args.json"
+    @("import json, sys", "json.dump(sys.argv[1:], open(r'$impArgs', 'w'))", "print('lt_import: 1 unit(s), 2 log(s), 2 row(s) written')") |
+        Set-Content -Encoding utf8 $imp
+    $g1x = Join-Path $tmp "g10"
+    $r = RunGate "record" $g1x @{}
+    Expect "launch-log cases: record a fresh reference (import off)" $r 0
+    $env:WHIRL_LT_IMPORT = $imp
+    $before = @(Get-ChildItem $outD -Directory -Filter "lt_golden_gfx1201_*" -ErrorAction SilentlyContinue).Name
+    $r = RunGate "check" $g1x @{}
+    $new = @(Get-ChildItem $outD -Directory -Filter "lt_golden_gfx1201_*" -ErrorAction SilentlyContinue | Where-Object { $_.Name -notin $before })
+    $ia = if (Test-Path $impArgs) { @(Get-Content $impArgs -Raw | ConvertFrom-Json) } else { @() }
+    Expect "launch logs by default: new folder under -Out with the runs' logs, imported at the end" $r 0 {
+        $new.Count -eq 1 -and @(Get-ChildItem $new[0].FullName -Filter "launch_*.txt").Count -ge 2 -and $ia.Count -ge 1 -and $ia[0] -eq $new[0].FullName -and
+        ($r.out -match "golden: launch log ") -and ($r.out -match "launch log import \(exit 0") }
+    Remove-Item $impArgs -ErrorAction SilentlyContinue
+    $before = @(Get-ChildItem $outD -Directory -Filter "lt_golden_gfx1201_*" -ErrorAction SilentlyContinue).Name
+    $o = & pwsh -NoProfile -File $gate check -Models dense -Modes precise -Suites "single,pair" -Exe $fake -GoldenRoot $g1x -Out $outD -NoLaunchLog 2>&1 | ForEach-Object { "$_" }
+    $r = @{ rc = $LASTEXITCODE; out = $o }
+    Expect "-NoLaunchLog: no folder, no import" $r 0 {
+        @(Get-ChildItem $outD -Directory -Filter "lt_golden_gfx1201_*" | Where-Object { $_.Name -notin $before }).Count -eq 0 -and -not (Test-Path $impArgs) -and
+        ($r.out -match "golden: launch log off") }
+    $inh = Join-Path $tmp "inherited_lt"
+    New-Item -ItemType Directory -Force $inh | Out-Null
+    $env:WHIRL_LAUNCH_LOG = $inh
+    $r = RunGate "check" $g1x @{}
+    Remove-Item Env:WHIRL_LAUNCH_LOG
+    Expect "inherited WHIRL_LAUNCH_LOG: logs land there, golden.ps1 does not import" $r 0 {
+        @(Get-ChildItem $inh -Filter "launch_*.txt").Count -ge 2 -and -not (Test-Path $impArgs) -and ($r.out -match "\(inherited\)") }
+    $env:WHIRL_LT_IMPORT = "off"
 } finally {
+    $env:WHIRL_LT_IMPORT = $savedLti; $env:WHIRL_LAUNCH_LOG = $savedLl
     $env:WHIRL_GOLDEN_DENSE = $savedDense
     Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
 }

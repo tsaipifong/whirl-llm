@@ -5,7 +5,7 @@
 # verdict to whoever read the logs.
 #
 #   pwsh tools/gates/release_gate.ps1 -Device r9700|8060s [-Build DIR] [-ExpectCommit SHA] [-Steps a,b,...]
-#                                     [-Work DIR] [-Tag NAME] [-InjectFail] [-List] [-LaunchLog DIR]
+#                                     [-Work DIR] [-Tag NAME] [-InjectFail] [-List] [-LaunchLog DIR | -NoLaunchLog]
 #                                     [-Module name[,name]] [-ModulesFile PATH] (-ImpactRange A..B|worktree | -NoMapSteps)
 #
 # -Module (arch024-S12): select the steps of one or more modules from tools/gates/modules.json (PLAN c-1);
@@ -62,6 +62,11 @@
 # -LaunchLog DIR: every GPU step runs with WHIRL_LAUNCH_LOG=DIR\<step>: each whirl process writes its kernel launch
 # table there (ARCH-1 K-0; tools/impact/launch_table.py builds and compares the tables); server-gate steps pass the
 # folder to their servers with --server-env (arch024-S0b).
+# measure-tools P7: ON BY DEFAULT. Without -LaunchLog the folder is <Work>\lt_<Tag>_<yyyyMMdd-HHmmss> (new per run);
+# -NoLaunchLog turns it off. The summary header names the folder; after the summary the folder is imported into the
+# records' results.db work_traces with lt_import.py (tools/gates/launch_log.ps1: WHIRL_LT_IMPORT, "off" to skip), with
+# the sha256 of whirl.exe / whirl-server.exe hashed before the first step; the result line goes to
+# <Work>\<Tag>_lt_import.txt. The import never changes the verdict or the exit code.
 param(
     [ValidateSet("r9700", "8060s")][string]$Device = "r9700",
     [string]$Build = "",
@@ -72,12 +77,14 @@ param(
     [switch]$InjectFail,
     [switch]$List,
     [string]$LaunchLog = "",
+    [switch]$NoLaunchLog,
     [string[]]$Module = @(),
     [string]$ModulesFile = "",
     [string]$ImpactRange = "",
     [switch]$NoMapSteps
 )
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "launch_log.ps1")
 $repo = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 if (-not $Build) { $Build = Join-Path $repo "build\Release" }
 if (-not $Tag) { $Tag = "gate_$Device" }
@@ -384,8 +391,10 @@ New-Item -ItemType Directory -Force $logDir | Out-Null
 Remove-Item (Join-Path $Work "PASS_$Tag"), (Join-Path $Work "FAIL_$Tag") -ErrorAction SilentlyContinue
 $whirlTime = (Get-Item $exe["whirl"]).LastWriteTime.ToString("s")
 $qnote = if ($hasQ) { "optional Q4_K_M steps on" } else { "optional Q4_K_M steps off (WHIRL_GATE_DENSE unset)" }
+$LaunchLog = Resolve-LaunchLogDir $LaunchLog (Join-Path $Work ("lt_" + $Tag + "_" + (Get-Date -Format "yyyyMMdd-HHmmss"))) $NoLaunchLog.IsPresent
+$ltSha = if ($LaunchLog) { Get-ExeSha @($exe["whirl"], $exe["whirl-server"]) } else { @{} }
 $mnote = if ($Module.Count -gt 0) { " module=$($Module -join ',') (dev-time module gate, not a release gate; steps $($sel.Count); map steps $(if ($NoMapSteps) { 'NOT added (-NoMapSteps)' } else { "from impact $ImpactRange" }))," } else { "" }
-$hdr = "release gate $Tag on $Device ($arch),$mnote models Swift + Ornith, $qnote`: tree $repo commit $head (dirty tracked files: $dirty), exe $Build (whirl.exe $whirlTime), $(Get-Date -Format s)"
+$hdr = "release gate $Tag on $Device ($arch),$mnote models Swift + Ornith, $qnote`: tree $repo commit $head (dirty tracked files: $dirty), exe $Build (whirl.exe $whirlTime), $(Get-Date -Format s), launch log $(if ($LaunchLog) { $LaunchLog } else { 'off (-NoLaunchLog)' })"
 Write-Host $hdr
 $golden = Join-Path $repo "tests\golden"
 if ($InjectFail) {
@@ -515,6 +524,12 @@ $verdict = if ($rows.Count -eq 0) { "FAIL (no step ran)" } elseif ($nf -gt 0) { 
 $summary = @($hdr) + @($rows | ForEach-Object { $_.line }) + @("release gate $Tag`: $verdict")
 [System.IO.File]::WriteAllLines((Join-Path $Work "${Tag}_summary.txt"), [string[]]$summary)
 Write-Host "release gate $Tag`: $verdict  (logs: $logDir)"
+# measure-tools P7: launch logs -> results.db work_traces (lt_import.py); information only, the verdict above stands
+if ($LaunchLog) {
+    $ltMsg = Invoke-LaunchLogImport $LaunchLog $logDir $ltSha "release_gate $Tag ($Device, commit $head)" $py
+    Write-Host "release gate: $ltMsg"
+    try { [System.IO.File]::WriteAllLines((Join-Path $Work "${Tag}_lt_import.txt"), [string[]]@($ltMsg)) } catch { Write-Host "release gate: could not write ${Tag}_lt_import.txt: $_" }
+}
 if ($rows.Count -gt 0 -and $nf -eq 0) { "PASS $(Get-Date -Format s) $head" | Set-Content (Join-Path $Work "PASS_$Tag"); exit 0 }
 "FAIL $(Get-Date -Format s) $head $verdict" | Set-Content (Join-Path $Work "FAIL_$Tag")
 exit 1

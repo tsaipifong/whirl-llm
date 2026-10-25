@@ -16,8 +16,31 @@
   "callers: \"rdeps\" = also run the modules of every src/include file that includes the module's files (transitive;",
   "an includer in no module = the full gate), or a list of module names (review A4). release_gate prints, and",
   "impact.py adds as -Steps, the steps the impact map selects beyond this table (PLAN c-2).",
-  "Every step name must exist in release_gate.ps1 -List or be in pending, else release_gate exits 2."
+  "Every step name must exist in release_gate.ps1 -List or be in pending, else release_gate exits 2.",
+  "standards (measure-tools P7, DESIGN A4; ADR-0003 decision 4): the pass standard of every release_gate step, NO numbers:",
+  "kinds = named comparisons; steps = [{match (fnmatch on the step name, first match wins), kinds, host_only}]. Read by",
+  "tools/impact/release_plan.py, which prints per step RUN / SKIP and why (impact selection, host-only step already",
+  "passed on the other GPU, verified on the identical exe). Every release_gate.ps1 -List step must match an entry",
+  "(tools/impact/release_plan_test.py checks the real list). Speed cells and component metrics get their kinds in P3."
  ],
+ "standards": {
+  "kinds": {
+   "exit_rule": {"compare": "rule", "desc": "exit code and the step's output rule in release_gate.ps1 (e.g. '(ALL PASS)', 'seqtest: ok'); a step that does not run fails"},
+   "golden_exact": {"compare": "exact", "desc": "golden.ps1 G lines identical to tests/golden/<arch> (reference-set sha256 printed), in-run cross-checks hold"},
+   "kernel_reference": {"compare": "tolerance", "desc": "whirl-kernel-test --require-all: every kernel output against the CPU reference within its family's existing tolerance"},
+   "server_log_scan": {"compare": "absent", "desc": "tools/gates/server_log_scan.ps1: no WDDM budget / spill / governor episode / owner check line in any server log of the step"},
+   "work_trace": {"compare": "exact", "desc": "kernel launch sequence and argument digests (WHIRL_LAUNCH_LOG, recorded by default since P7, results.db work_traces) identical to the work-equivalent exe's row; evidence for tools/impact/work_equal.py, not a gate verdict"}
+  },
+  "steps": [
+   {"match": "cpu_*", "kinds": ["exit_rule"], "host_only": true},
+   {"match": "kt_full", "kinds": ["kernel_reference", "work_trace"]},
+   {"match": "st_*", "kinds": ["exit_rule", "work_trace"]},
+   {"match": "golden_*", "kinds": ["golden_exact", "server_log_scan", "work_trace"]},
+   {"match": "seq_*", "kinds": ["exit_rule", "work_trace"]},
+   {"match": "dfl_*", "kinds": ["exit_rule"]},
+   {"match": "srv_*", "kinds": ["exit_rule", "server_log_scan", "work_trace"]}
+  ]
+ },
  "status": "dev-only: not for releases until owner sign-off O1/O2 (arch024 PLAN)",
  "modules": {
   "handles": {

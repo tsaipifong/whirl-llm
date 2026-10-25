@@ -4,6 +4,11 @@ rem Called as: golden MODEL --suite SUITE --MODE --device ARCH
 rem FAKEGOLD_FAIL_SUITE=SUITE: exit 3 for that suite; FAKEGOLD_NOSTEPS=1: header + info lines only.
 rem Suite ngram also prints an n-gram cycle line (ng_cycles=2) so the default-suite selftest case can pass.
 rem FAKEGOLD_DIR=DIR: print DIR\SUITE.txt instead (golden lines without the G model line; FIX-TEST-A).
+rem WHIRL_LAUNCH_LOG=DIR: writes DIR\launch_<suite><mode><random>.txt like whirl.exe's launch table (measure-tools P7
+rem selftest case; cmd seeds %RANDOM% from the clock, so two runs in one second would share a bare random name).
+if defined WHIRL_LAUNCH_LOG (
+  echo cmd fake_whirl %*> "%WHIRL_LAUNCH_LOG%\launch_%4%5%RANDOM%.txt"
+)
 if defined FAKEGOLD_DIR (
   type "%FAKEGOLD_DIR%\%4.txt"
   exit /b 0
