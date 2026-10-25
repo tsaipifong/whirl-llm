@@ -58,6 +58,12 @@
 # server gate (model Swift) balance + fast basic,mt_cache,
 # precise basic with --cli, precise mt_cache_precise (multi-turn cache == cold, bitwise), fast_stream dense + MoE, tier,sys,restore_conc,pool in balance and precise
 # (--kv auto: the formats the modes ship, not a pinned q8v).
+# arch025-Q6: srv_vis, vis_ab, pkg_smoke, kvram719, srv_env_e2 (the GPU checks that used to run outside the gate) and
+# cpu_step_selftest (their FAIL / PASS proofs); inputs WHIRL_GATE_MMPROJ (optional), WHIRL_GATE_IMAGES (srv_vis),
+# WHIRL_GATE_VIS_BASE (optional A/B build), WHIRL_GATE_PACKAGE (optional zip; default: packed from -Build).
+# A step that cannot run here (Q4_K_M without WHIRL_GATE_DENSE, dfl_* off the R9700, srv_env_e2 off the 8060S) is
+# listed with "(not in this gate: <why>)", left out of the default selection, and a setup error (exit 2) in -Steps.
+# -RuleCheck FILE: run step rules on planted outputs (see below; gate_steps_selftest.ps1).
 # -InjectFail: the golden steps compare against a copy of the references with one hash changed (a real
 # check that must turn the gate red; used to prove the gate fails).
 # -LaunchLog DIR: every GPU step runs with WHIRL_LAUNCH_LOG=DIR\<step>: each whirl process writes its kernel launch
@@ -76,7 +82,8 @@ param(
     [string[]]$Module = @(),
     [string]$ModulesFile = "",
     [string]$ImpactRange = "",
-    [switch]$NoMapSteps
+    [switch]$NoMapSteps,
+    [string]$RuleCheck = ""
 )
 $ErrorActionPreference = "Stop"
 $repo = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
@@ -113,12 +120,19 @@ foreach ($n in "whirl", "whirl-server", "whirl-server-gate", "whirl-kernel-test"
 # ---------------------------------------------------------------------------------------------------
 # step table: name, gpu, command (array: exe + args), rule (scriptblock over the output lines + exit code)
 $S = [System.Collections.Generic.List[object]]::new()
-function AddStep([string]$name, [bool]$gpu, [string[]]$cmd, [scriptblock]$rule, [hashtable]$envv = @{}) {
-    $S.Add([pscustomobject]@{ name = $name; gpu = $gpu; cmd = $cmd; rule = $rule; env = $envv })
+# na (arch025-Q6): why the step is not available on this machine / GPU (e.g. "needs WHIRL_GATE_DENSE", "8060s only").
+# Such a step is still listed (-List prints "(not in this gate: <na>)" after it), so every check has a name the impact
+# map and modules.json can refer to; it is left out of the default selection, and naming it in -Steps is a setup error.
+function AddStep([string]$name, [bool]$gpu, [string[]]$cmd, [scriptblock]$rule, [hashtable]$envv = @{}, [string]$na = "") {
+    $S.Add([pscustomobject]@{ name = $name; gpu = $gpu; cmd = $cmd; rule = $rule; env = $envv; na = $na })
 }
+function ListLine($s) { "{0,-22} {1}{2}" -f $s.name, $(if ($s.gpu) { "GPU" } else { "CPU" }), $(if ($s.na) { "  (not in this gate: $($s.na))" } else { "" }) }
 $exit0 = { param($o, $c) $c -eq 0 }
-# dense model keys: swift always, dense (Q4_K_M) only when WHIRL_GATE_DENSE is set
-$denseKeys = @("swift") + @(if ($hasQ) { "dense" })
+# dense model keys: swift and dense (Q4_K_M); the dense steps are available only when WHIRL_GATE_DENSE is set
+# (arch025-Q6: listed always, so they have names; before, they were absent from -List without the variable)
+$denseKeys = @("swift", "dense")
+$naQ = if ($hasQ) { "" } else { "needs WHIRL_GATE_DENSE (Q4_K_M, optional compatibility model)" }
+function NaOf([string]$m) { if ($m -eq "dense") { $naQ } else { "" } }
 $modelOf = @{ swift = $SW; dense = $Q; moe = $MX }
 $gmodels = (@("swift", "moe") + @(if ($hasQ) { "dense" })) -join ","
 $pwsh = (Get-Process -Id $PID).Path
@@ -155,6 +169,11 @@ AddStep "cpu_module_gate" $false @($pwsh, "-NoProfile", "-File", (Join-Path $rep
 # module mapping (python: WHIRL_GATE_PYTHON, else python on PATH; none found = the step fails)
 AddStep "cpu_modules_check" $false @($pwsh, "-NoProfile", "-Command", "& '$py' -I '$(Join-Path $repo "tools\gates\modules_check_test.py")'; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\impact\validate_test.py")'; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\impact\impact_steps_test.py")'; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\gates\modules_check.py")'; exit `$LASTEXITCODE") `
     { param($o, $c) $c -eq 0 -and ($o -match "^modules check test: ([1-9]\d*)/\1 ok") -and ($o -match "^validate test: ([1-9]\d*)/\1 ok") -and ($o -match "^impact steps test: ([1-9]\d*)/\1 ok") -and ($o -match "^modules check: ok") }
+# arch025-Q6: the FAIL / PASS proofs of srv_vis, vis_ab, pkg_smoke, kvram719, srv_env_e2 and of the dense / dfl
+# availability rule (tools/gates/gate_steps_selftest.ps1: planted outputs through each step's own rule via -RuleCheck,
+# and the -SelfTest of the scripts behind them). CPU, no exe, no model.
+AddStep "cpu_step_selftest" $false @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\gates\gate_steps_selftest.ps1"), "-Work", "@WORK@") `
+    { param($o, $c) $c -eq 0 -and ($o -match "(?m)^gate steps selftest: ([1-9]\d*)/\1 as expected") }
 # arch025-Q1 / Q3 (PLAN (e)): the C++ safety tools, CPU, each in its own build directory under the tree (build-asan,
 # build-analyze), with a time cap and a block / pass proof inside the step (tools/safety/safety_step.ps1):
 #   cpu_safety_selftest  block / pass unit tests of both verdicts + the two whitelists (seconds)
@@ -174,18 +193,18 @@ AddStep "kt_full" $true $ktArgs { param($o, $c) $c -eq 0 -and ($o -match "^PASS:
 foreach ($m in @($denseKeys) + @("moe")) {
     foreach ($mode in "precise", "balance", "fast") {
         $mp = $modelOf[$m]
-        AddStep "st_${m}_$mode" $true @($exe["whirl"], "selftest", $mp, "--$mode", "--device", $Device) { param($o, $c) $c -eq 0 -and ($o -match "^selftest: ok") }
+        AddStep "st_${m}_$mode" $true @($exe["whirl"], "selftest", $mp, "--$mode", "--device", $Device) { param($o, $c) $c -eq 0 -and ($o -match "^selftest: ok") } @{} (NaOf $m)
     }
 }
 foreach ($m in @($denseKeys) + @("moe")) {
     AddStep "golden_$m" $true @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\golden\golden.ps1"), "check", "-Arch", $arch, "-Models", $m, "-Exe", $exe["whirl"], "-GoldenRoot", "@GOLDEN@",
                          "-ServerExe", $exe["whirl-server"], "-GateExe", $exe["whirl-server-gate"], "-Port", "$($port + 4)") `
-        { param($o, $c) $c -eq 0 -and ($o -match "golden check $arch`: ok") } @{ WHIRL_GOLDEN_SWIFT = $SW; WHIRL_GOLDEN_DENSE = $Q; WHIRL_GOLDEN_MOE = $MX }
+        { param($o, $c) $c -eq 0 -and ($o -match "golden check $arch`: ok") } @{ WHIRL_GOLDEN_SWIFT = $SW; WHIRL_GOLDEN_DENSE = $Q; WHIRL_GOLDEN_MOE = $MX } (NaOf $m)
 }
 $seqSet = @(foreach ($m in $denseKeys) { foreach ($mode in "precise", "balance", "fast") { ,@($m, $mode) } }) + @(,@("moe", "precise")) + @(,@("moe", "balance"))
 foreach ($p in $seqSet) {
     $mp = $modelOf[$p[0]]
-    AddStep "seq_$($p[0])_$($p[1])" $true @($exe["whirl"], "seqtest", $mp, "--decode", "24", "--$($p[1])", "--device", $Device) { param($o, $c) $c -eq 0 -and ($o -match "^seqtest: ok") }
+    AddStep "seq_$($p[0])_$($p[1])" $true @($exe["whirl"], "seqtest", $mp, "--decode", "24", "--$($p[1])", "--device", $Device) { param($o, $c) $c -eq 0 -and ($o -match "^seqtest: ok") } @{} (NaOf $p[0])
 }
 $dflRule = {
     param($o, $c)
@@ -193,16 +212,17 @@ $dflRule = {
     $dr = @($o | ForEach-Object { if ($_ -match "drafts (\d+)/(\d+)") { [int]$Matches[1] } })
     $c -eq 0 -and $h.Count -eq 3 -and @($h | Select-Object -Unique).Count -eq 1 -and $dr.Count -ge 1 -and ($dr | Measure-Object -Minimum).Minimum -gt 0
 }
-if ($Device -eq "r9700" -and $hasQ) {
-    foreach ($mode in "precise", "balance", "fast") {
-        AddStep "dfl_$mode" $true @($exe["whirl"], "bench", $Q, "--$mode", "--draft", "dflash", "--draft-model", $DF, "--prefill", "512", "--decode", "160",
-                                "--modes", "plain,dflash,dflash-ngram", "--device", $Device) $dflRule
-    }
+# DFlash2 (target Q4_K_M): R9700 only, and only with WHIRL_GATE_DENSE + WHIRL_GATE_DFLASH (listed always, arch025-Q6)
+$naDfl = if ($Device -ne "r9700") { "r9700 only" } elseif (-not $hasQ) { "needs WHIRL_GATE_DENSE + WHIRL_GATE_DFLASH (Q4_K_M + DFlash2, optional compatibility)" } else { "" }
+foreach ($mode in "precise", "balance", "fast") {
+    AddStep "dfl_$mode" $true @($exe["whirl"], "bench", $Q, "--$mode", "--draft", "dflash", "--draft-model", $DF, "--prefill", "512", "--decode", "160",
+                            "--modes", "plain,dflash,dflash-ngram", "--device", $Device) $dflRule @{} $naDfl
 }
 $gateRule = { param($o, $c) $c -eq 0 -and ($o -match "== whirl-server-gate: [1-9]\d* passed, 0 failed \(ALL PASS\)") }
-function GateCmd([string]$model, [string]$suites, [string]$mode, [string[]]$extra) {
+# kv: the server gate's --kv (default auto); "" = no --kv (the suite's own pin, e.g. suite vis: q8v)
+function GateCmd([string]$model, [string]$suites, [string]$mode, [string[]]$extra, [string]$kv = "auto") {
     $a = @($exe["whirl-server-gate"], "--exe", $exe["whirl-server"], "--kind", "whirl", "--model", $model, "--suite", $suites,
-           "--port", "$port", "--work", "@WORK@", "--kv", "auto")
+           "--port", "$port", "--work", "@WORK@") + @(if ($kv) { "--kv"; $kv })
     if ($mode) { $a += @("--server-env", "WHIRL_MODE=$mode") }
     # explicit on every GPU: since 0.2.3 the default is the GPU with the most memory (the 8060S on the dev box)
     $a += @("--server-env", "WHIRL_DEVICE=$Device")
@@ -266,6 +286,61 @@ AddStep "srv_env_e1" $true (EnvCmd "E1") $envRule
 AddStep "srv_env_e3" $true (EnvCmd "E3") $envRule
 AddStep "srv_env_e4" $true (EnvCmd "E4") $envRule
 AddStep "srv_env_e7" $true @((EnvCmd "E7") + "-Golden") $envRule @{ WHIRL_GOLDEN_SWIFT = $SW; WHIRL_GOLDEN_MOE = $MX }
+
+# ---------------------------------------------------------------------------------------------------
+# arch025-Q6 (ARCH-1 8.7 condition 2, s15-blast GAP 1-3): the GPU checks that ran outside this gate, each with a step
+# name (so tools/impact and modules.json can select them) and a FAIL / PASS proof on CPU (cpu_step_selftest:
+# tools/gates/gate_steps_selftest.ps1 plants a failure for each and runs the clean case).
+#   srv_vis     server-gate suite vis (image input: base / ref / plain / main / restart servers), Swift + its mmproj
+#               (WHIRL_GATE_MMPROJ, else the mmproj-*.gguf next to WHIRL_GATE_SWIFT), images WHIRL_GATE_IMAGES (a folder
+#               with shapes.png, dialog.png, s1080.png); the suite's own KV pin (no --kv auto)
+#   vis_ab      the three CLI vision paths (vis-encode resident / stream, chat --image) give byte-identical embeddings
+#               and an answer; with WHIRL_GATE_VIS_BASE (a base build folder) also equal to that build (s11 visab)
+#   pkg_smoke   the release zip (tools/package_release.ps1 from -Build, or WHIRL_GATE_PACKAGE) unpacked into a clean
+#               folder, PATH = Windows folders only: with rocm_kpack.dll as shipped, and without it (refuses with a
+#               message naming it when the driver's runtime imports it, else runs)
+#   kvram719    tools/repro/kvram719_tier.ps1 (a RAM tier over the GPU-locked memory limit; arch024 PLAN P-719)
+#   srv_env_e2  env_matrix cell E2 (8060S: WHIRL_VRAM_LIMIT_MB x 3 + a fake 0.5 GB carve-out)
+# dense / dfl_<mode>: see the Q4_K_M steps above (listed always, available with WHIRL_GATE_DENSE / _DFLASH).
+$MMP = $env:WHIRL_GATE_MMPROJ
+if (-not $MMP -and $SW -and (Test-Path -LiteralPath $SW -ErrorAction SilentlyContinue)) {
+    $MMP = @(Get-ChildItem (Split-Path $SW -Parent) -Filter "mmproj-*.gguf" -File -ErrorAction SilentlyContinue | Sort-Object Name | ForEach-Object { $_.FullName })[0]
+}
+$IMG = $env:WHIRL_GATE_IMAGES
+$visImages = @("shapes.png", "dialog.png", "s1080.png")
+AddStep "srv_vis" $true (GateCmd $SW "vis" "balance" @("--mmproj", "$MMP", "--images", "$IMG") "") $gateRule
+$visBase = @(if ($env:WHIRL_GATE_VIS_BASE) { "-BaseBuild"; $env:WHIRL_GATE_VIS_BASE })
+AddStep "vis_ab" $true (@($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\gates\vis_ab.ps1"), "-Build", $Build, "-Model", $SW, "-Mmproj", "$MMP",
+                         "-Image", (Join-Path $repo "tests\golden\images\shapes.png"), "-Device", $Device, "-Work", "@WORK@") + $visBase) `
+    { param($o, $c) $c -eq 0 -and ($o -match "(?m)^vis ab: ok") }
+$pkgZip = @(if ($env:WHIRL_GATE_PACKAGE) { "-Zip"; $env:WHIRL_GATE_PACKAGE })
+AddStep "pkg_smoke" $true (@($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\gates\pkg_smoke.ps1"), "-Build", $Build, "-Model", $SW, "-Device", $Device,
+                            "-Port", "$($port + 21)", "-Work", "@WORK@") + $pkgZip) { param($o, $c) $c -eq 0 -and ($o -match "(?m)^pkg smoke: ok") }
+AddStep "kvram719" $true @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\repro\kvram719_tier.ps1"), "-Exe", $exe["whirl-server"], "-Model", $SW,
+                           "-Device", $Device, "-Port", "$($port + 20)", "-Work", "@WORK@") { param($o, $c) $c -eq 0 -and ($o -match "(?m)^kvram719: REPORT verdict=PASS") }
+# E2 must have run its cells (an "ok" with no E2_ cell is the R9700 n/a path, which this step does not take)
+AddStep "srv_env_e2" $true (EnvCmd "E2") { param($o, $c) $c -eq 0 -and ($o -match "(?m)^env matrix: (ok \(.*\bE2_\d+ PASS|SKIP)") } @{} $(if ($Device -ne "8060s") { "8060s only (E2 is the UMA carve-out)" } else { "" })
+
+# -RuleCheck FILE (arch025-Q6, used by gate_steps_selftest.ps1): JSON [{step, exit, lines[], want: true|false}]; every case
+# runs the step's own rule on the planted output; prints "rule check: N/M as expected" and exits 0 when all match, 1 not,
+# 2 setup (unknown step). No exe, model or GPU.
+if ($RuleCheck) {
+    $cases = @(Get-Content -Raw $RuleCheck | ConvertFrom-Json)
+    $okN = 0; $badN = 0
+    $tmpd = Join-Path ([System.IO.Path]::GetTempPath()) "whirl-rulecheck-$PID"
+    New-Item -ItemType Directory -Force $tmpd | Out-Null
+    foreach ($k in $cases) {
+        $st = @($S | Where-Object { $_.name -eq $k.step })
+        if ($st.Count -ne 1) { Write-Host "rule check: unknown step '$($k.step)'"; exit 2 }
+        $got = $false
+        try { $got = [bool](& $st[0].rule @([string[]]$k.lines) ([int]$k.exit) $tmpd (Join-Path $tmpd "log.txt")) } catch { $got = $false }
+        if ($got -eq [bool]$k.want) { $okN++; Write-Host "ok   $($k.step) $($k.name): $(if ($got) { 'PASS' } else { 'FAIL' })" }
+        else { $badN++; Write-Host "BAD  $($k.step) $($k.name): rule says $(if ($got) { 'PASS' } else { 'FAIL' }), want $(if ($k.want) { 'PASS' } else { 'FAIL' })" }
+    }
+    Remove-Item -Recurse -Force $tmpd -ErrorAction SilentlyContinue
+    Write-Host "rule check: $okN/$($okN + $badN) as expected"
+    if ($badN) { exit 1 }; exit 0
+}
 
 # ---------------------------------------------------------------------------------------------------
 # -Module: steps from tools/gates/modules.json (arch024-S12; dev-time fast feedback only, see the header)
@@ -373,16 +448,36 @@ if ($Module.Count -gt 0) {
 if ($List -and $Module.Count -gt 0) {
     foreach ($n in $Steps) { if (-not ($S | Where-Object { $_.name -eq $n })) { Write-Host "release gate: unknown step '$n' (-List shows them)"; exit 2 } }
     Write-Host "release gate -Module: tag $Tag"
-    $S | Where-Object { $Steps.Count -eq 0 -or $Steps -contains $_.name } | ForEach-Object { "{0,-22} {1}" -f $_.name, ($(if ($_.gpu) { "GPU" } else { "CPU" })) }; exit 0
+    $S | Where-Object { $Steps.Count -eq 0 -or $Steps -contains $_.name } | ForEach-Object { ListLine $_ }; exit 0
 }
-if ($List) { $S | ForEach-Object { "{0,-22} {1}" -f $_.name, ($(if ($_.gpu) { "GPU" } else { "CPU" })) }; exit 0 }
+if ($List) { $S | ForEach-Object { ListLine $_ }; exit 0 }
 
 # ---------------------------------------------------------------------------------------------------
 # selection and preflight (setup errors exit 2 before any step runs)
 foreach ($n in $Steps) { if (-not ($S | Where-Object { $_.name -eq $n })) { Write-Host "release gate: unknown step '$n' (-List shows them)"; exit 2 } }
-$sel = @($S | Where-Object { $Steps.Count -eq 0 -or $Steps -contains $_.name })
+# a step that is not available here (na: e.g. the Q4_K_M steps without WHIRL_GATE_DENSE) is not in the default
+# selection; naming it is a setup error (it would otherwise "pass" by not running)
+# (a -Module run drops them with a note instead: the impact map may name e.g. srv_env_e2 for both GPUs)
+if ($Module.Count -gt 0 -and $Steps.Count -gt 0) {
+    foreach ($nx in @($S | Where-Object { $_.na -and $Steps -contains $_.name })) { Write-Host "release gate -Module: step $($nx.name) not available here ($($nx.na)): not run" }
+    $naNames = @($S | Where-Object { $_.na } | ForEach-Object { $_.name })
+    $Steps = @($Steps | Where-Object { $naNames -notcontains $_ })
+    if ($Steps.Count -eq 0) { Write-Host "release gate -Module: 0 steps left after dropping the unavailable ones"; exit 2 }
+}
+$naSel = @($S | Where-Object { $_.na -and $Steps -contains $_.name })
+if ($naSel.Count) { $naSel | ForEach-Object { Write-Host "release gate: step $($_.name) is not available here: $($_.na)" }; exit 2 }
+$sel = @($S | Where-Object { ($Steps.Count -eq 0 -and -not $_.na) -or $Steps -contains $_.name })
 if ($sel.Count -eq 0) { Write-Host "release gate: 0 steps selected"; exit 2 }
 $setup = @()
+# arch025-Q6 inputs of the vision steps (only when they are selected)
+$selN = @($sel | ForEach-Object { $_.name })
+if (($selN -contains "srv_vis" -or $selN -contains "vis_ab") -and -not ($MMP -and (Test-Path -LiteralPath $MMP))) { $setup += "srv_vis / vis_ab: no mmproj (WHIRL_GATE_MMPROJ, else mmproj-*.gguf next to WHIRL_GATE_SWIFT): '$MMP'" }
+if ($selN -contains "srv_vis") {
+    if (-not $IMG) { $setup += "srv_vis: WHIRL_GATE_IMAGES not set (a folder with $($visImages -join ', '))" }
+    else { foreach ($f in $visImages) { if (-not (Test-Path -LiteralPath (Join-Path $IMG $f))) { $setup += "srv_vis: $IMG\$f not found" } } }
+}
+if ($selN -contains "vis_ab" -and $env:WHIRL_GATE_VIS_BASE -and -not (Test-Path (Join-Path $env:WHIRL_GATE_VIS_BASE "whirl.exe"))) { $setup += "vis_ab: WHIRL_GATE_VIS_BASE has no whirl.exe ($env:WHIRL_GATE_VIS_BASE)" }
+if ($selN -contains "pkg_smoke" -and $env:WHIRL_GATE_PACKAGE -and -not (Test-Path -LiteralPath $env:WHIRL_GATE_PACKAGE)) { $setup += "pkg_smoke: WHIRL_GATE_PACKAGE not found ($env:WHIRL_GATE_PACKAGE)" }
 foreach ($k in $exe.Keys) { if (-not (Test-Path $exe[$k])) { $setup += "missing $($exe[$k])" } }
 $need = @(@("WHIRL_GATE_SWIFT", $SW), @("WHIRL_GATE_MOE", $MX), @("WHIRL_GATE_TEXT_ROOT", $env:WHIRL_GATE_TEXT_ROOT))
 if ($hasQ) { $need += @(,@("WHIRL_GATE_DENSE", $Q)); if ($Device -eq "r9700") { $need += @(,@("WHIRL_GATE_DFLASH", $DF)) } }
