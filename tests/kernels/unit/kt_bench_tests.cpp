@@ -449,6 +449,82 @@ static void test_anchor_faster_becomes_reference() {
     check("anchor: name kept", b.anchorName() == "fake.anchor");
 }
 
+// --------------------------------------------------------------------------------------------- fix 2 (smoke 2)
+static void test_rewarm_after_cooldown() {
+    // after the cooldown sleep the anchor runs >= warmup_ms before it is read (an idled GPU clock reads slow), and the
+    // cell kernel is re-warmed before sampling goes on
+    FakeClock clk;
+    Bench b(quietCfg(), &clk);
+    std::vector<char> ev;  // 'a' anchor block, 'k' cell block, 'D' the drifting anchor reading
+    int checks = 0;
+    bool armed = false;
+    BlockFn afn = [&](int n, std::uint64_t) {
+        double us = 20.0;
+        if (armed) {
+            if (++checks == 2) {
+                us = 22.0;  // the 2nd check drifts once
+                ev.push_back('D');
+            } else {
+                ev.push_back('a');
+            }
+        }
+        clk.t += us * n / 1e6;
+        return us * n / 1000.0;
+    };
+    b.setAnchor(afn, "fake.anchor");
+    armed = true;
+    FakeKernel k{clk, [](int) { return 10.0; }};
+    BlockFn kf = k.fn();
+    const CellStats cs = b.run([&](int n, std::uint64_t r) {
+        ev.push_back('k');
+        return kf(n, r);
+    });
+    std::size_t d = 0;
+    while (d < ev.size() && ev[d] != 'D') ++d;
+    int anchor_after = 0, cell_after = 0;
+    std::size_t j = d + 1;
+    for (; j < ev.size() && ev[j] == 'a'; ++j) ++anchor_after;
+    for (; j < ev.size() && ev[j] == 'k'; ++j) ++cell_after;
+    // 100 ms of 20 us anchor launches in blocks of 16 (320 us): 313 blocks of warm-up + 1 read
+    check("cooldown: the anchor is re-warmed (>= 100 ms) after the sleep before it is read", anchor_after >= 314, std::to_string(anchor_after));
+    // cell: 100 ms of 10 us launches in blocks of 32 (320 us) = 313 warm-up blocks, then the samples
+    check("cooldown: the cell kernel is re-warmed (>= 100 ms) before sampling resumes", cell_after >= 313, std::to_string(cell_after));
+    check("cooldown: one cooldown (2 s), cell still ok", cs.cooldowns == 1 && cs.ok() && clk.sleeps.size() == 1,
+          std::to_string(cs.cooldowns) + " " + cs.stop_reason);
+}
+
+static void test_cache_state_anchor_switched_off() {
+    // the smoke-2 defect: the anchor reads 33 us right after itself (cache-hot) and 135 us after any cell block (cold).
+    // Sleeping never recovers it. The bench must bound the damage: noisy_streak_off (3) noisy cells -> anchor off.
+    FakeClock clk;
+    Bench b(quietCfg(), &clk);
+    bool last_was_anchor = false;
+    BlockFn afn = [&](int n, std::uint64_t) {
+        // a block of n launches: the first launch is cold when a cell ran before, the rest hot
+        const double us = (last_was_anchor ? 33.0 * n : 135.0 + 33.0 * (n - 1));
+        last_was_anchor = true;
+        clk.t += us / 1e6;
+        return us / 1000.0;
+    };
+    b.setAnchor(afn, "fake.cache_anchor");
+    int noisy = 0;
+    for (int cell = 0; cell < 6; ++cell) {
+        BlockFn kf = [&](int n, std::uint64_t) {
+            last_was_anchor = false;
+            clk.t += 10e-6 * n;
+            return 0.01 * n;
+        };
+        b.beforeCell();
+        const CellStats cs = b.run(kf);
+        noisy += cs.stop_reason == "noisy";
+    }
+    check("cache-state anchor: switched off after 3 noisy cells", b.anchorSwitchedOff() && !b.hasAnchor(), b.anchorError());
+    check("cache-state anchor: exactly 3 noisy cells, the later ones run without cooldowns", noisy == 3, std::to_string(noisy));
+    double slept = 0;
+    for (double x : clk.sleeps) slept += x;
+    check("cache-state anchor: total cooldown sleep bounded (<= 3 cells x 2 x 60 s)", slept <= 360.0 + 1e-9, num(slept));
+}
+
 // --------------------------------------------------------------------------------------------- A/B
 static void test_ab_order_and_ratio() {
     FakeClock clk;
@@ -680,6 +756,8 @@ int main(int argc, char** argv) {
         test_anchor_noisy();
         test_anchor_cooldown_cap();
         test_anchor_faster_becomes_reference();
+        test_rewarm_after_cooldown();
+        test_cache_state_anchor_switched_off();
         test_ab_order_and_ratio();
         test_ab_order_bias();
         test_burst();

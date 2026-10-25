@@ -48,7 +48,8 @@ struct BenchCfg {
     double drift_pct = 3.0;
     double cool_first_s = 2, cool_max_step_s = 32, cool_total_s = 60;
     int max_cooldowns = 2;       // more -> "noisy"
-    int max_invalid_pct = 5;     // invalid timer readings tolerated while sampling (dropped, counted); more -> "error"
+    int max_invalid_pct = 5;
+    int noisy_streak_off = 3;    // this many noisy cells in a row -> the anchor is switched off (no more cooldowns)     // invalid timer readings tolerated while sampling (dropped, counted); more -> "error"
     double burst_s = 8, burst_idle_s = 0;  // burst_idle_s 0 = off
 };
 
@@ -100,6 +101,7 @@ public:
     void setAnchor(BlockFn f, std::string name);
     const std::string& anchorName() const { return anchor_name_; }
     bool hasAnchor() const { return static_cast<bool>(anchor_); }
+    bool anchorSwitchedOff() const { return anchor_off_; }  // after cfg.noisy_streak_off noisy cells in a row
     const std::string& anchorError() const { return anchor_error_; }  // setAnchor failed: why
     double anchorRefUs() const { return anchor_ref_us_; }
 
@@ -122,6 +124,8 @@ private:
     bool anchorCheck(CellStats& cs, bool& noisy);
     double anchorTime();
     void account(double busy_s);
+    void warmFor(const BlockFn& f, int block, std::uint64_t& rot, double ms);  // re-warm after a sleep (clock ramp)
+    void cellEnd(const std::string& stop_reason);
 
     BenchCfg cfg_;
     Clock* clock_;
@@ -134,6 +138,8 @@ private:
     double busy_ = 0, last_cell_s_ = 0;
     int bursts_ = 0, overruns_ = 0;
     bool overrun_counted_ = false;
+    int noisy_streak_ = 0;
+    bool anchor_off_ = false;
 };
 
 // ---------------------------------------------------------------- event timing of one block (HIP-free protocol)

@@ -162,6 +162,7 @@ bool Bench::anchorCheck(CellStats& cs, bool& noisy) {
         const double s = std::min(step, cfg_.cool_total_s - slept);
         clock_->sleep(s);
         slept += s;
+        warmFor(anchor_, anchor_block_, anchor_rot_, cfg_.warmup_ms);
         a = anchorTime();
         note(a);
         if (a > 0 && a < anchor_ref_us_) anchor_ref_us_ = a;
@@ -171,6 +172,24 @@ bool Bench::anchorCheck(CellStats& cs, bool& noisy) {
     cs.cooldown_s += slept;
     cs.anchor_ref_us = anchor_ref_us_;
     return false;
+}
+
+void Bench::warmFor(const BlockFn& f, int block, std::uint64_t& rot, double ms) {
+    double done = 0;
+    for (int i = 0; i < 100000 && done < ms; ++i) {
+        std::string err;
+        const double us = sample(f, block, rot, err);
+        done += us > 0 ? us * block / 1000.0 : 0.05;  // an invalid reading still counts a little (bounded loop)
+    }
+}
+
+void Bench::cellEnd(const std::string& why) {
+    noisy_streak_ = why == "noisy" ? noisy_streak_ + 1 : 0;
+    if (anchor_ && cfg_.noisy_streak_off > 0 && noisy_streak_ >= cfg_.noisy_streak_off) {
+        anchor_ = nullptr;  // the anchor itself is not stable here: stop paying cooldowns for every cell
+        anchor_off_ = true;
+        anchor_error_ = std::to_string(noisy_streak_) + " noisy cells in a row: anchor switched off";
+    }
 }
 
 void Bench::beforeCell() {
@@ -201,6 +220,7 @@ CellStats Bench::run(const BlockFn& f) {
         cs.st = whirl::bench::summarize(cs.samples);
         cs.measure_s = clock_->now() - t0 - cs.cooldown_s;
         account(cs.measure_s);
+        cellEnd(why);
         return cs;
     };
     const Cal cal = warmCalibrate(f, rot);
@@ -218,12 +238,14 @@ CellStats Bench::run(const BlockFn& f) {
         if (!anchorCheck(cs, noisy)) {
             if (noisy) return finish("noisy");
             if (!cs.error.empty()) return finish("error");
+            warmFor(f, cs.block, rot, cfg_.warmup_ms);  // the cooldown idled the GPU: ramp the clock up again
         }
     }
-    auto drifted = [&]() {  // discard the samples since the last clean anchor
+    auto drifted = [&]() {  // discard the samples since the last clean anchor, re-warm after the cooldown
         cs.discarded += static_cast<int>(cs.samples.size() - clean);
         cs.samples.resize(clean);
         since_anchor = 0;
+        warmFor(f, cs.block, rot, cfg_.warmup_ms);
     };
     int attempts = 0;
     for (;;) {
@@ -297,6 +319,7 @@ AbStats Bench::runAB(const BlockFn& fa, const BlockFn& fb) {
         ab.ratio.measure_s = clock_->now() - t0 - ab.ratio.cooldown_s;
         ab.a.measure_s = ab.b.measure_s = ab.ratio.measure_s;
         account(ab.ratio.measure_s);
+        cellEnd(why);
         return ab;
     };
     const Cal ca = warmCalibrate(fa, ra);
@@ -322,6 +345,8 @@ AbStats Bench::runAB(const BlockFn& fa, const BlockFn& fb) {
     if (anchor_ && !anchorCheck(cs, noisy)) {
         if (noisy) return finish("noisy");
         if (!cs.error.empty()) return finish("error");
+        warmFor(fa, ca.block, ra, cfg_.warmup_ms);
+        warmFor(fb, cb.block, rb, cfg_.warmup_ms);
     }
     auto drifted = [&]() {
         cs.discarded += static_cast<int>(cs.samples.size() - clean);
@@ -330,6 +355,8 @@ AbStats Bench::runAB(const BlockFn& fa, const BlockFn& fb) {
         ab.b.samples.resize(clean);
         first_a.resize(clean);
         since_anchor = 0;
+        warmFor(fa, ca.block, ra, cfg_.warmup_ms);
+        warmFor(fb, cb.block, rb, cfg_.warmup_ms);
     };
     int attempts = 0;
     for (std::uint64_t pair = 0;; ++pair) {

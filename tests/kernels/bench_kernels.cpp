@@ -57,6 +57,7 @@ struct Env {
     std::uint64_t target = 0;
     std::string settings0;
     int rows_written = 0, rows_lost = 0;
+    bool anchor_off_noted = false;
 
     Env(Ctx& cc, const BenchOpts& oo) : c(cc), o(oo), bench(oo.cfg) {}
 
@@ -186,6 +187,10 @@ void runCell(Env& e, Cell& k) {
     if (!fb) {
         const CellStats cs = e.bench.run(ba);
         printCell(k.ci, cs);
+        if (e.bench.anchorSwitchedOff() && !e.anchor_off_noted) {
+            std::printf("   anchor: %s (later cells: no drift control)\n", e.bench.anchorError().c_str());
+            e.anchor_off_noted = true;
+        }
         if (!cs.ok()) {
             Result r;
             r.name = "bench timing " + k.kernel + " " + k.ci.cell + ": " + cs.error;
@@ -198,6 +203,7 @@ void runCell(Env& e, Cell& k) {
     }
     const BlockFn bb = hipBlock(c, [&k, fb](std::uint64_t r) { k.call(fb, r); });
     const AbStats ab = e.bench.runAB(ba, bb);
+    if (e.bench.anchorSwitchedOff()) std::printf("   anchor: %s\n", e.bench.anchorError().c_str());
     printCell(k.ci, ab.a, "A ");
     CellInfo cb = k.ci;
     cb.code_hash = e.o.code_hash_b;
@@ -279,7 +285,12 @@ DevCopies upload(const Env& e, const std::vector<std::uint8_t>& data) {
 }
 
 // ---------------------------------------------------------------- anchor: one GEMV of a real Swift matrix
-std::unique_ptr<Buf> g_anchor_w, g_anchor_xq, g_anchor_xd, g_anchor_y;
+// The anchor matrix is ROTATED like the cells (copies past the last-level cache): every anchor launch reads cold
+// weights whatever the cell before it did. The first version timed one 47 MB copy: its reference was taken cache-hot in
+// the R9700's 64 MB Infinity Cache (33 us = 1.4 TB/s) and every check inside a cell read it cold (~135 us), so every
+// cell took 2 cooldowns x 60 s and ended noisy (smoke 2, scratch\mt_p2\smoke_dense_r9700_20261025-1427.jsonl).
+std::vector<Buf> g_anchor_w;
+std::unique_ptr<Buf> g_anchor_xq, g_anchor_xd, g_anchor_y;
 
 void setAnchor(Env& e) {
     Ctx& c = e.c;
@@ -299,7 +310,9 @@ void setAnchor(Env& e) {
         std::printf("   anchor: no gemvq kernel for %s, running without an anchor\n", wk::typeSuffix(m.type));
         return;
     }
-    g_anchor_w = std::make_unique<Buf>(m.data);
+    const int ncopies = rotationCopies(m.data.size(), e.target, e.o.rot_cap);
+    g_anchor_w.clear();
+    for (int i = 0; i < ncopies; ++i) g_anchor_w.emplace_back(m.data);
     const std::vector<float> x = c.randn(static_cast<std::size_t>(m.ncols));
     Buf dx(x);
     g_anchor_xq = std::make_unique<Buf>(static_cast<std::size_t>(m.ncols));
@@ -310,16 +323,18 @@ void setAnchor(Env& e) {
     const int nrows = m.nrows, ncols = m.ncols;
     const std::uint64_t rb = m.row_bytes;
     e.bench.setAnchor(hipBlock(c,
-                               [&c, fq, nrows, ncols, rb](std::uint64_t) {
-                                   const wk::GvArgs g = wk::gvSingle(g_anchor_w->p(), g_anchor_y->p(), rb, nrows);
+                               [&c, fq, nrows, ncols, rb](std::uint64_t r) {
+                                   const DevPtr wp = g_anchor_w[static_cast<std::size_t>(r % g_anchor_w.size())].p();
+                                   const wk::GvArgs g = wk::gvSingle(wp, g_anchor_y->p(), rb, nrows);
                                    hip::launch(fq, {cdiv(nrows, 8), 1, 1}, {256, 1, 1}, 0, c.s, g, g_anchor_xq->p(), g_anchor_xd->p(), ncols, 0,
                                                DevPtr{0});
                                }),
                       name);
     if (e.bench.hasAnchor())
-        std::printf("   anchor %s: %.2f us per launch (reference)\n", name.c_str(), e.bench.anchorRefUs());
+        std::printf("   anchor %s: %.2f us per launch (reference, %d rotated copies)\n", name.c_str(), e.bench.anchorRefUs(), ncopies);
     else
         std::printf("   anchor %s failed: %s (running without an anchor)\n", name.c_str(), e.bench.anchorError().c_str());
+    name += ".rot" + std::to_string(ncopies);
     e.settings0 += ";anchor=" + name;
 }
 
@@ -989,7 +1004,7 @@ void runBench(Ctx& c, const BenchOpts& o) {
     std::printf("bench timer: %lld blocks, %lld retried, %lld invalid after the retry%s%s\n", static_cast<long long>(g_timer->blocks),
                 static_cast<long long>(g_timer->retries), static_cast<long long>(g_timer->invalid), g_timer->last_invalid.empty() ? "" : "; last: ",
                 g_timer->last_invalid.c_str());
-    g_anchor_w.reset();
+    g_anchor_w.clear();
     g_anchor_xq.reset();
     g_anchor_xd.reset();
     g_anchor_y.reset();
