@@ -103,9 +103,9 @@ struct EnvValues {
 // --dump-only cells: the S0b-2 dumps are taken after loadOrTune, before these knobs).
 enum class Front : std::uint8_t { none, cli, server };
 
-// After-load knobs of the front ends: src/cli/main.cpp:1030-1048 (applyRuntimeEnv) and :1340 (GDN_V0, chat only);
-// src/server/server_main.cpp:1040-1120. A front end fills only the names it applies (the server sends none of the
-// CLI-only ones: DBG, GEMV_MAX, NO_GRAPH, GV_GROUP, GV_NMAX).
+// After-load knobs of the front ends: qwen35::applyRuntimeEnv (src/model/config.cpp), the same function and rules for the
+// CLI and the server since feat026-o6 (2) (owner O6; before: src/cli/main.cpp:1030-1048 + :1340 GDN_V0 for chat only,
+// src/server/server_main.cpp:1040-1120 with other rules and without DBG, GEMV_MAX, NO_GRAPH, GV_GROUP, GV_NMAX).
 struct RuntimeValues {
     Raw float_gemv, dbg, gemv_max, no_graph, no_fuse, draft_window, draft_window_min, naive_attn, attn_wide, attn_dq4, dq4_dyn,
         attn_ws4, moe_bn, gdn_seq, gv_group, gv_nmax, gdn_v0, wide_verify, head_chunk;

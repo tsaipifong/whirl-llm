@@ -9,6 +9,7 @@
 #pragma once
 
 #include <array>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -52,6 +53,16 @@ public:
     // envFlag semantics: not set -> def, else value != "0" (so "" and "auto" are on).
     static bool flag(const Value& v, bool def = false) { return v ? *v != "0" : def; }
 };
+
+// feat026-o6 (3), owner O6 (arch025.PLAN.md 0): research-only switches removed in 0.2.6, without the WHIRL_ prefix:
+// HEAD_GEMVX (the output head on the wide gemvx GEMV), PREC_GEMVH (0: precise rows skip gemvh), PREC_GS (a forced
+// precise gemms slot). Never in the user docs; their defaults are the product path, so removing them changes no
+// default output. A set one is ignored with a warning (not refused: a script that still sets one keeps working).
+// The SSD fingerprint skips them too (src/cache/fingerprint.cpp), since they no longer change anything.
+const std::vector<const char*>& removedSwitches();
+// One warning per removed switch that `get` reports set (default: the process environment, envGet).
+std::vector<std::string> removedSwitchWarnings(const std::function<std::optional<std::string>(std::string_view)>& get);
+std::vector<std::string> removedSwitchWarnings();
 
 // The snapshot of the load that made `m` (LoadOptions::env, kept by Model::load). A Model that did not come from
 // Model::load (host-only tests) has none: then the environment is read now, at the call, as the sites did before N1.

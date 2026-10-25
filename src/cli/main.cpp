@@ -1027,24 +1027,11 @@ bool loadDraftModelEnv(q::Model& m, const Args& a) {
     return true;
 }
 
+// feat026-o6 (2), owner O6: the runtime switches with the rules the server uses too (qwen35::applyRuntimeEnv)
 void applyRuntimeEnv(q::Model& m) {
-    if (envGet("FLOAT_GEMV")) m.float_gemv = true;
-    q::applyGemvEnv(m);
-    if (auto v = envU32("DBG")) m.dbg_flags = *v;
-    if (auto v = envU32("GEMV_MAX")) m.gemv_max = std::clamp<u32>(*v, 1, q::max_small_batch);
-    if (envGet("NO_GRAPH")) m.use_graph = false;
-    if (envGet("NO_FUSE")) m.no_fuse = true;
-    if (auto v = envU32("DRAFT_WINDOW")) m.draft_window = *v;
-    if (auto v = envU32("DRAFT_WINDOW_MIN")) m.draft_window_min = *v;
-    if (envGet("NAIVE_ATTN")) m.naive_attn = true;
-    if (auto v = envGet("ATTN_WIDE"); v && *v == "0") m.attn_wide = false;
-    if (auto v = envGet("ATTN_DQ4"); v && *v == "0") m.attn_dq4 = false;
-    if (auto v = envGet("DQ4_DYN"); v && *v == "0") m.dq4_dyn = false;
-    if (auto v = envGet("ATTN_WS4"); v && *v == "0") m.attn_ws4 = false;
-    if (auto v = envU32("MOE_BN")) m.moe_bn_force = *v;
-    if (envGet("GDN_SEQ")) m.gdn_chunked = false;
-    if (auto v = envGet("GV_GROUP")) q::gv_group = *v != "0";
-    if (auto v = envU32("GV_NMAX")) q::gv_nmax = *v;
+    std::vector<std::string> warn;
+    q::applyRuntimeEnv(m, [](const char* n) { return envGet(n); }, &warn);
+    for (const std::string& w : warn) std::fprintf(stderr, "warning: %s\n", w.c_str());
 }
 
 struct Loaded {
@@ -1337,9 +1324,7 @@ int cmdChat(const Args& a) {
         q::loadOrTune(model, path, log);
         out(log);
     }
-    if (envGet("GDN_V0")) {
-        if (auto fv0 = model.module.getFunctionOpt("gdn_step_norm_v0")) model.k.gdn_step_norm = fv0;
-    }
+    // (WHIRL_GDN_V0: applyRuntimeEnv below, every command; feat026-o6 (2))
     // MTP block as Q4_K from Q6_K or Q8_0 (drafts only; default, WHIRL_MTP_Q4=0 keeps the file's types)
     if (envFlag("MTP_Q4", true)) model.requantMtpQ4();
     loadLog(model, L.stats);

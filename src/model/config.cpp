@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <stdexcept>
 #include <string>
 
 namespace whirl {
@@ -303,6 +304,49 @@ void applyGemvEnv(Model& m) {
     if (const auto& v = env->gemv_r) parseGemvR(m, *v);
     if (const auto& v = env->gemv_w) parseGemvW(m, *v);
     if (const auto& v = env->gemv_wh) parseGemvWHead(m, *v);
+}
+
+// feat026-o6 (2): see model.h. The number rule is the server's (FR-SRV P3-10: a bad value is a warning, never a
+// startup failure); the CLI took a numeric prefix ("12abc" -> 12) and ignored the rest silently before 0.2.6.
+void applyRuntimeEnv(Model& m, const EnvGetter& get, std::vector<std::string>* warnings) {
+    auto num = [&](const char* name) -> std::optional<std::uint32_t> {
+        const auto v = get(name);
+        if (!v) return std::nullopt;
+        try {
+            std::size_t used = 0;
+            const unsigned long x = std::stoul(*v, &used);
+            if (used == v->size() && x <= 0xffffffffull) return static_cast<std::uint32_t>(x);
+        } catch (const std::exception&) {
+        }
+        if (warnings) warnings->push_back(std::string("WHIRL_") + name + "=" + *v + " is not a number; ignored");
+        return std::nullopt;
+    };
+    auto off0 = [&](const char* name) {
+        const auto v = get(name);
+        return v && *v == "0";
+    };
+    if (get("FLOAT_GEMV")) m.float_gemv = true;
+    applyGemvEnv(m);
+    if (auto v = num("DBG")) m.dbg_flags = *v;
+    if (auto v = num("GEMV_MAX")) m.gemv_max = std::clamp<std::uint32_t>(*v, 1, max_small_batch);
+    if (get("NO_GRAPH")) m.use_graph = false;
+    if (get("NO_FUSE")) m.no_fuse = true;
+    if (auto v = num("DRAFT_WINDOW")) m.draft_window = *v;
+    if (auto v = num("DRAFT_WINDOW_MIN")) m.draft_window_min = *v;
+    if (get("NAIVE_ATTN")) m.naive_attn = true;
+    if (off0("ATTN_WIDE")) m.attn_wide = false;
+    if (off0("ATTN_DQ4")) m.attn_dq4 = false;
+    if (off0("DQ4_DYN")) m.dq4_dyn = false;
+    if (off0("ATTN_WS4")) m.attn_ws4 = false;
+    if (off0("WIDE_VERIFY")) m.wide_verify = false;
+    if (auto v = num("MOE_BN")) m.moe_bn_force = *v;
+    if (get("GDN_SEQ")) m.gdn_chunked = false;
+    if (auto v = get("GV_GROUP")) gv_group = *v != "0";
+    if (auto v = num("GV_NMAX")) gv_nmax = *v;
+    if (auto v = num("HEAD_CHUNK")) m.head_chunk = std::max<std::uint32_t>(32, *v / 32 * 32);
+    if (get("GDN_V0")) {
+        if (hip::Function fv0 = m.module.getFunctionOpt("gdn_step_norm_v0")) m.k.gdn_step_norm = fv0;
+    }
 }
 
 MtpDefaults mtpDefaults(bool moe, hip::Arch arch) {

@@ -8,7 +8,7 @@
 // 2. bitsKey reflection: the flag table is complete (layout size), every field and item is in the key, notes are not.
 // 3. Scope: every WHIRL_DUMP_EXEC key is a plan flag, the Request / plan itself, or listed with the module that
 //    decides it (KV: N3; tune results and per-forward state: need the GPU dump, N2b compares them with S0b-2).
-// 4. Front ends: the CLI and server knob rules (cli main.cpp:1030-1048, server_main.cpp:1040-1120), table cells.
+// 4. Front ends: the runtime switch rules (qwen35::applyRuntimeEnv, one set for CLI and server since feat026-o6), table cells.
 // The "every bit-affecting env changes bitsKey and is kept by the tier fingerprint" test is in tests/cache (it needs
 // cache::fingerprintEnvKept); the EnvSnapshot name cross-check is in tests/model.
 
@@ -342,7 +342,7 @@ void testFlagScope() {
     std::printf("  numerics flag scope: %zu dump keys, %zu plan flags, %zu need the GPU dump (N2b)\n", n, flag_keys.size(), n_gpu);
 }
 
-// ---- front ends (table cells from the code: cli main.cpp:1030-1048 / :1340, server_main.cpp:1040-1120)
+// ---- front ends (table cells from the code: qwen35::applyRuntimeEnv, src/model/config.cpp; feat026-o6 (2))
 void testFrontEnds() {
     const nu::Target t = target(k_cards[0], "swift", false);
     auto run = [&](nu::Front fr, std::vector<std::pair<const char*, const char*>> vals) {
@@ -374,34 +374,44 @@ void testFrontEnds() {
         t2.k_gdn_v0 = false;
         NCHECK(!nu::plan(r, t2).flags.gdn_v0, "gdn_v0 without kernel");
     }
-    // CLI: stoul prefix parse, a rejected value leaves the default; GEMV_MAX clamped to 1..16
-    NCHECK(run(F::cli, {{"DBG", "12abc"}}).dbg_flags == 12, "cli DBG prefix");
-    NCHECK(run(F::cli, {{"DBG", "x"}}).dbg_flags == 0, "cli DBG bad");
-    NCHECK(run(F::cli, {{"GEMV_MAX", "0"}}).gemv_max == 1 && run(F::cli, {{"GEMV_MAX", "99"}}).gemv_max == 16 &&
-               run(F::cli, {{"GEMV_MAX", "8"}}).gemv_max == 8,
-           "cli GEMV_MAX clamp");
-    NCHECK(!run(F::cli, {{"NO_GRAPH", "0"}}).use_graph, "cli NO_GRAPH presence");
-    NCHECK(run(F::cli, {{"DRAFT_WINDOW", "4096"}, {"DRAFT_WINDOW_MIN", "8192x"}}).draft_window == 4096 &&
-               run(F::cli, {{"DRAFT_WINDOW_MIN", "8192x"}}).draft_window_min == 8192,
-           "cli DRAFT_WINDOW");
-    NCHECK(run(F::cli, {{"MOE_BN", "64"}}).moe_bn_force == 64 && run(F::cli, {{"MOE_BN", "z"}}).moe_bn_force == 0, "cli MOE_BN");
-    NCHECK(!run(F::cli, {{"GV_GROUP", "0"}}).gv_group && run(F::cli, {{"GV_GROUP", ""}}).gv_group && run(F::cli, {{"GV_NMAX", "5"}}).gv_nmax == 5,
-           "cli GV");
-    // the CLI does not apply the server-only knobs
-    NCHECK(run(F::cli, {{"WIDE_VERIFY", "0"}, {"HEAD_CHUNK", "64"}}) == d, "cli ignores server knobs");
-    // server: graph never replayed; strict number parse; server-only knobs; CLI-only knobs ignored
-    NCHECK(!run(F::server, {}).use_graph, "server use_graph");
-    NCHECK(run(F::server, {{"DRAFT_WINDOW", "4096"}}).draft_window == 4096 && run(F::server, {{"DRAFT_WINDOW", "4096x"}}).draft_window == 16384,
-           "server strict DRAFT_WINDOW");
-    NCHECK(run(F::server, {{"MOE_BN", "64x"}}).moe_bn_force == 64 && run(F::server, {{"MOE_BN", "z"}}).moe_bn_force == 0, "server MOE_BN strtoul");
-    NCHECK(!run(F::server, {{"WIDE_VERIFY", "0"}}).wide_verify && run(F::server, {{"WIDE_VERIFY", "1"}}).wide_verify, "server WIDE_VERIFY");
-    NCHECK(run(F::server, {{"HEAD_CHUNK", "100"}}).head_chunk == 96 && run(F::server, {{"HEAD_CHUNK", "1"}}).head_chunk == 32 &&
-               run(F::server, {{"HEAD_CHUNK", "bad"}}).head_chunk == 248320,
-           "server HEAD_CHUNK");
+    // feat026-o6 (2), owner O6: one rule set for both front ends (qwen35::applyRuntimeEnv)
+    for (F fr : {F::cli, F::server}) {
+        const int fi = static_cast<int>(fr);
+        // numbers: the whole value (before 0.2.6 the CLI took a prefix, "12abc" -> 12); else not applied
+        NCHECK(run(fr, {{"DBG", "12"}}).dbg_flags == 12 && run(fr, {{"DBG", "12abc"}}).dbg_flags == 0 && run(fr, {{"DBG", "x"}}).dbg_flags == 0,
+               "DBG {}", fi);
+        NCHECK(run(fr, {{"GEMV_MAX", "0"}}).gemv_max == 1 && run(fr, {{"GEMV_MAX", "99"}}).gemv_max == 16 &&
+                   run(fr, {{"GEMV_MAX", "8"}}).gemv_max == 8,
+               "GEMV_MAX clamp {}", fi);
+        NCHECK(!run(fr, {{"NO_GRAPH", "0"}}).use_graph, "NO_GRAPH presence {}", fi);
+        NCHECK(run(fr, {{"DRAFT_WINDOW", "4096"}}).draft_window == 4096 && run(fr, {{"DRAFT_WINDOW", "4096x"}}).draft_window == 16384 &&
+                   run(fr, {{"DRAFT_WINDOW_MIN", "8192"}}).draft_window_min == 8192 &&
+                   run(fr, {{"DRAFT_WINDOW_MIN", "8192x"}}).draft_window_min == 65536,
+               "DRAFT_WINDOW {}", fi);
+        NCHECK(run(fr, {{"MOE_BN", "64"}}).moe_bn_force == 64 && run(fr, {{"MOE_BN", "64x"}}).moe_bn_force == 0 &&
+                   run(fr, {{"MOE_BN", "z"}}).moe_bn_force == 0,
+               "MOE_BN {}", fi);
+        NCHECK(!run(fr, {{"GV_GROUP", "0"}}).gv_group && run(fr, {{"GV_GROUP", ""}}).gv_group && run(fr, {{"GV_NMAX", "5"}}).gv_nmax == 5,
+               "GV {}", fi);
+        NCHECK(!run(fr, {{"WIDE_VERIFY", "0"}}).wide_verify && run(fr, {{"WIDE_VERIFY", "1"}}).wide_verify, "WIDE_VERIFY {}", fi);
+        NCHECK(run(fr, {{"HEAD_CHUNK", "100"}}).head_chunk == 96 && run(fr, {{"HEAD_CHUNK", "1"}}).head_chunk == 32 &&
+                   run(fr, {{"HEAD_CHUNK", "bad"}}).head_chunk == 248320,
+               "HEAD_CHUNK {}", fi);
+    }
+    // the server never replays the decode graph (not a switch); the CLI does unless WHIRL_NO_GRAPH
+    NCHECK(!run(F::server, {}).use_graph && run(F::cli, {}).use_graph, "use_graph");
+    // server == CLI for every runtime switch and value (use_graph aside)
     {
-        nu::Flags s = run(F::server, {{"DBG", "3"}, {"GEMV_MAX", "4"}, {"NO_GRAPH", "1"}, {"GV_GROUP", "0"}, {"GV_NMAX", "2"}});
-        nu::Flags e = run(F::server, {});
-        NCHECK(s == e, "server ignores CLI-only knobs");
+        const char* values[] = {"0", "1", "", "2", "8", "12abc", "64", "100", "4096", "x"};
+        std::size_t n = 0;
+        for (const auto& e : nu::RuntimeValues::names())
+            for (const char* v : values) {
+                nu::Flags c = run(F::cli, {{e.name, v}}), sv = run(F::server, {{e.name, v}});
+                c.use_graph = sv.use_graph = true;
+                NCHECK(c == sv, "server != cli for WHIRL_{}={}", e.name, v);
+                ++n;
+            }
+        std::printf("  front ends: server == cli for %zu switch values (%zu switches)\n", n, nu::RuntimeValues::names().size());
     }
 }
 

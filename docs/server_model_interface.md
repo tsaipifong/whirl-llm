@@ -67,7 +67,8 @@ mock-model test executable compiles that file directly).
    (`src/server/server_main.h`, library target `whirl_server_core` plus the
    files of the `whirl-server` target); `whirl-server.exe` is the server
    executable.
-3. `WHIRL_GEMV_R / WHIRL_GEMV_W / WHIRL_GEMV_WH` are CLI-only: their parsers are
-   not exposed by `model.h`, and the server ignores them with a warning.
+3. The runtime switches (`WHIRL_GEMV_R / _W / _WH`, `WHIRL_DBG`, `WHIRL_NO_FUSE`, ...) are applied by
+   `qwen35::applyRuntimeEnv` (`model.h`), the same function and rules for the CLI and the server since 0.2.6
+   (feat026-o6; before, the server ignored the GEMV overrides with a warning and had its own copy of the rest).
 4. The kernel `topk_rows` must stay in the code object (the server's sampler
    looks it up by name).

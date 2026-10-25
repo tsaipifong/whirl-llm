@@ -607,6 +607,11 @@ Alternatives kept for A/B tests and numerics comparisons. The lossy ones are the
 [numerics modes](#modes): their defaults follow the mode, and a value set here overrides it.
 "Bitwise-equal" alternatives give the same bits and differ only in speed.
 
+`whirl` (every command) and `whirl-server` apply these switches with the same rules (since 0.2.6; before, the server
+ignored `WHIRL_DBG`, `WHIRL_GEMV_MAX`, `WHIRL_NO_GRAPH`, `WHIRL_GV_GROUP`, `WHIRL_GV_NMAX` and `WHIRL_GEMV_R` / `_W` /
+`_WH`, and the CLI ignored `WHIRL_WIDE_VERIFY` and `WHIRL_HEAD_CHUNK`). A number switch whose value is not a whole number
+is ignored with a warning. The server never replays the decode graph, so `WHIRL_NO_GRAPH` changes nothing there.
+
 | Variable | Meaning |
 |---|---|
 | `WHIRL_Q8DEC=0\|1` | decode / verify activations: `1` int8 (item `q8dec`, default in balance / fast; in precise a lossy override), `0` f16 into the f16 GEMM (default in precise) |
@@ -631,6 +636,8 @@ Alternatives kept for A/B tests and numerics comparisons. The lossy ones are the
 | `WHIRL_NO_FUSE=1` | no fused decode kernels (reference path) |
 | `WHIRL_FLOAT_GEMV=1` | f32 GEMV instead of int8 (reference path) |
 | `WHIRL_NO_GRAPH=1` | no HIP graph for the plain decode step |
+| `WHIRL_WIDE_VERIFY=0` | MTP verify of at most 16 rows per sequence (default: up to 32 where the kernels exist) |
+| `WHIRL_HEAD_CHUNK=N` | rows of the output head per wide-verify pass (multiple of 32, at least 32) |
 | `WHIRL_GEMV_MAX=N` | most tokens per multi-token GEMV |
 | `WHIRL_GEMV_R=nt:r,...` | multi-token GEMV rows-per-block overrides |
 | `WHIRL_GEMV_W=nt:v,...` | multi-token GEMV kernel variant overrides |

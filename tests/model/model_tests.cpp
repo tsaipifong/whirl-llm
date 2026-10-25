@@ -12,6 +12,7 @@
 #include "whirl/kernels_abi.h"
 #include "whirl/kv_layout.h"
 #include "whirl/model.h"
+#include "whirl/model_bits.h"  // feat026-o6 (1)
 
 #include <algorithm>
 #include <array>
@@ -2093,6 +2094,8 @@ void testEnvSnapshot() {
 // Model's execDump. The loader's own assignments (loader.cpp:548-553, :743) do not run for a host-only Model; the test
 // makes them on the Model first, copied from loader.cpp (the S0b-2 GPU cells in tests/unit pin the real loader).
 // Also: every EnvSnapshot name is a plan field, or listed with the code that reads it (and why it is not a flag).
+#include "model_bits_tests.inc"  // feat026-o6 (1)
+
 namespace n2a {
 namespace nu = whirl::numerics;
 
@@ -2151,6 +2154,31 @@ std::map<std::string, std::string> dumpKv(const std::string& d) {
 
 }  // namespace n2a
 
+#include "runtime_env_tests.inc"  // feat026-o6 (2)
+
+// feat026-o6 (3), owner O6: the removed research switches are ignored with one warning each (printed in the loadOrTune
+// log by the CLI and the server); their code paths are gone (ops_tests testGemvWide / the gemm choice)
+void testRemovedSwitches() {
+    namespace cf = whirl::config;
+    const auto& r = cf::removedSwitches();
+    check(r.size() == 3 && std::string_view(r[0]) == "HEAD_GEMVX" && std::string_view(r[1]) == "PREC_GEMVH" &&
+              std::string_view(r[2]) == "PREC_GS",
+          "o6: removed switch list");
+    auto none = [](std::string_view) { return std::optional<std::string>(); };
+    check(cf::removedSwitchWarnings(none).empty(), "o6: no removed switch set");
+    auto one = [](std::string_view n) { return n == "PREC_GS" ? std::optional<std::string>("1") : std::nullopt; };
+    const auto w = cf::removedSwitchWarnings(one);
+    check(w.size() == 1 && w[0] == "WHIRL_PREC_GS=1 is ignored: this research switch was removed in WHIRL 0.2.6", "o6: warning text");
+    // the process environment (the default getter, as loadOrTune calls it)
+    _putenv_s("WHIRL_HEAD_GEMVX", "1");
+    _putenv_s("WHIRL_PREC_GEMVH", "0");
+    const auto wp = cf::removedSwitchWarnings();
+    _putenv_s("WHIRL_HEAD_GEMVX", "");
+    _putenv_s("WHIRL_PREC_GEMVH", "");
+    check(wp.size() == 2 && wp[0].rfind("WHIRL_HEAD_GEMVX=1 ", 0) == 0 && wp[1].rfind("WHIRL_PREC_GEMVH=0 ", 0) == 0, "o6: process env");
+    check(cf::removedSwitchWarnings().empty(), "o6: unset again");
+}
+
 void testPlanVsLoadOrTune() {
     namespace fs = std::filesystem;
     namespace nu = whirl::numerics;
@@ -2178,6 +2206,7 @@ void testPlanVsLoadOrTune() {
     for (const envtab::Case& c : envtab::cases())
         if (c.id.rfind("tune", 0) == 0) cs.push_back(c);
     std::size_t n_cases = 0, n_fields = 0, n_precise_refused = 0;
+    std::string o6_keys;  // feat026-o6 (1)
     for (const envtab::Case& c : cs) {
         ++n_cases;
         std::vector<std::pair<std::string, EnvSnapshot::Value>> vals;
@@ -2234,8 +2263,30 @@ void testPlanVsLoadOrTune() {
             check(p->items[i].enabled == m->num_plan.items[i].enabled && p->items[i].note == m->num_plan.items[i].note,
                   "n2a plan vs loadOrTune: " + c.id + ": item " + nu::itemName(static_cast<nu::Item>(i)));
         n_fields += 4 + nu::n_items;
+        // feat026-o6 (1): the tier key from the Model's members equals the plan's key, so wiring the plan (N2b) does not
+        // change the SSD fingerprint a second time
+        check(p->bitsKey() == q::tierBitsKey(*m, false), "o6: " + c.id + ": plan.bitsKey() != tierBitsKey(model)\n  plan  " +
+                                                             p->bitsKey() + "\n  model " + q::tierBitsKey(*m, false));
+        if (c.id.rfind("base ", 0) == 0) o6_keys += c.id + "\t" + q::tierBitsKey(*m, false) + "\n";
     }
     _putenv_s("LOCALAPPDATA", old_lad.c_str());
+    // feat026-o6 (1): the bits keys of the base cases are pinned (tests/model/bits_key.expected.txt, recorded with the
+    // change). A diff here changes every user's SSD cache key: bump tier::key_scheme with it, or undo the change.
+    // WHIRL_TEST_BITS_KEY_WRITE=<file> writes the actual keys instead of comparing.
+    {
+        char* w = nullptr;
+        std::size_t wl = 0;
+        if (_dupenv_s(&w, &wl, "WHIRL_TEST_BITS_KEY_WRITE") == 0 && w != nullptr) {
+            std::ofstream(w, std::ios::binary) << o6_keys;
+            std::printf("  o6: bits keys written to %s\n", w);
+            std::free(w);
+        } else {
+            std::free(w);
+            std::ifstream in(fs::path(WHIRL_SOURCE_DIR) / "tests" / "model" / "bits_key.expected.txt", std::ios::binary);
+            const std::string exp((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            check(!exp.empty() && exp == o6_keys, "o6: pinned bits keys (tests/model/bits_key.expected.txt)\n" + o6_keys);
+        }
+    }
     check(n_cases > 150, "n2a plan vs loadOrTune: case count " + std::to_string(n_cases));
     std::printf("  n2a plan vs loadOrTune: %zu cases (%zu refused for f16 decode), %zu fields compared\n", n_cases, n_precise_refused, n_fields);
 
@@ -2274,6 +2325,9 @@ int main() {
     testEnvTable();
     testEnvSnapshot();
     testPlanVsLoadOrTune();  // arch025-N2a
+    testRemovedSwitches();   // feat026-o6 (3)
+    testModelBitsKey();      // feat026-o6 (1)
+    testRuntimeEnvShared();  // feat026-o6 (2)
     testFloatGemvDispatch();
     testArchWhitelist();
     testLoadEstimate();

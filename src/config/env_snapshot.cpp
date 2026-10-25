@@ -34,6 +34,23 @@ bool envFlag(std::string_view name, bool def) {
 
 namespace whirl::config {
 
+const std::vector<const char*>& removedSwitches() {
+    static const std::vector<const char*> v = {"HEAD_GEMVX", "PREC_GEMVH", "PREC_GS"};
+    return v;
+}
+
+std::vector<std::string> removedSwitchWarnings(const std::function<std::optional<std::string>(std::string_view)>& get) {
+    std::vector<std::string> w;
+    for (const char* n : removedSwitches())
+        if (auto v = get(n))
+            w.push_back(std::string("WHIRL_") + n + "=" + *v + " is ignored: this research switch was removed in WHIRL 0.2.6");
+    return w;
+}
+
+std::vector<std::string> removedSwitchWarnings() {
+    return removedSwitchWarnings([](std::string_view n) { return envGet(n); });
+}
+
 namespace {
 using S = EnvSnapshot;
 constexpr std::array<S::Entry, S::n_names> k_names{{

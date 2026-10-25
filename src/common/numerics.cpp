@@ -300,25 +300,17 @@ void setNe0(bool& x, const Raw& v) {
 }
 // EnvSnapshot::flag / envFlag: not set -> def, else value != "0" (loader.cpp:550-553)
 bool flagOr(const Raw& v, bool def) { return v ? *v != "0" : def; }
-// cli main.cpp:345-353 envU32: std::stoul, any exception -> not set
-std::optional<std::uint32_t> cliU32(const Raw& v) {
+// feat026-o6 (2): the runtime switches' number rule (qwen35::applyRuntimeEnv, src/model/config.cpp; before 0.2.6 the
+// server's envU32, server_main.cpp:314-326): the whole value a number <= 0xffffffff, else not applied (a warning there)
+std::optional<std::uint32_t> runtimeU32(const Raw& v) {
     if (!v) return std::nullopt;
-    try {
-        return static_cast<std::uint32_t>(std::stoul(*v));
-    } catch (...) {
-    }
-    return std::nullopt;
-}
-// server_main.cpp:314-326 envU32: the whole value a number <= 0xffffffff, else def (the server logs a warning)
-std::uint32_t srvU32(const Raw& v, std::uint32_t def) {
-    if (!v) return def;
     try {
         std::size_t used = 0;
         const unsigned long x = std::stoul(*v, &used);
         if (used == v->size() && x <= 0xffffffffull) return static_cast<std::uint32_t>(x);
     } catch (const std::exception&) {
     }
-    return def;
+    return std::nullopt;
 }
 
 // loader.cpp:548-553 and :743, then tune.cpp:850-914 (before the numerics block)
@@ -430,51 +422,34 @@ void loadOverrides(Plan& p, const Request& r, const Target& t, bool items) {
     }
 }
 
-// The front end's after-load knobs (after loadOrTune in both)
+// The front end's after-load knobs (after loadOrTune in both). feat026-o6 (2), owner O6: one rule set for the CLI and the
+// server, the rules of qwen35::applyRuntimeEnv (src/model/config.cpp, called by both front ends; before 0.2.6 cli
+// main.cpp:1030-1048 / :1340 and server_main.cpp:1040-1120 differed). The one difference: the server never replays the
+// decode graph (use_graph off; not a switch).
 void runtimeFlags(const Request& r, const Target& t, Flags& F) {
+    if (r.front == Front::none) return;
     const RuntimeValues& v = r.runtime;
-    if (r.front == Front::cli) {
-        // cli main.cpp:1030-1048 (applyRuntimeEnv; applyGemvEnv at :1032 sets tune rows, not a flag)
-        if (v.float_gemv) F.float_gemv = true;
-        if (auto x = cliU32(v.dbg)) F.dbg_flags = *x;
-        if (auto x = cliU32(v.gemv_max)) F.gemv_max = std::clamp<std::uint32_t>(*x, 1, 16);  // q::max_small_batch
-        if (v.no_graph) F.use_graph = false;
-        if (v.no_fuse) F.no_fuse = true;
-        if (auto x = cliU32(v.draft_window)) F.draft_window = *x;
-        if (auto x = cliU32(v.draft_window_min)) F.draft_window_min = *x;
-        if (v.naive_attn) F.naive_attn = true;
-        if (v.attn_wide && *v.attn_wide == "0") F.attn_wide = false;
-        if (v.attn_dq4 && *v.attn_dq4 == "0") F.attn_dq4 = false;
-        if (v.dq4_dyn && *v.dq4_dyn == "0") F.dq4_dyn = false;
-        if (v.attn_ws4 && *v.attn_ws4 == "0") F.attn_ws4 = false;
-        if (auto x = cliU32(v.moe_bn)) F.moe_bn_force = *x;
-        if (v.gdn_seq) F.gdn_chunked = false;
-        if (v.gv_group) F.gv_group = *v.gv_group != "0";
-        if (auto x = cliU32(v.gv_nmax)) F.gv_nmax = *x;
-        // cli main.cpp:1340 (chat only: other CLI commands leave runtime.gdn_v0 unset)
-        if (v.gdn_v0 && t.k_gdn_v0) F.gdn_v0 = true;
-    } else if (r.front == Front::server) {
-        // server_main.cpp:1041-1045
-        if (v.no_fuse) F.no_fuse = true;
-        if (v.float_gemv) F.float_gemv = true;
-        if (v.naive_attn) F.naive_attn = true;
-        if (v.gdn_seq) F.gdn_chunked = false;
-        if (v.moe_bn) F.moe_bn_force = static_cast<std::uint32_t>(std::strtoul(v.moe_bn->c_str(), nullptr, 10));
-        // :1052-1053, :1056 (the server never replays the decode graph)
-        F.draft_window = srvU32(v.draft_window, F.draft_window);
-        F.draft_window_min = srvU32(v.draft_window_min, F.draft_window_min);
-        F.use_graph = false;
-        // :1089-1090
-        if (v.wide_verify && *v.wide_verify == "0") F.wide_verify = false;
-        if (v.head_chunk) F.head_chunk = std::max<std::uint32_t>(32, srvU32(v.head_chunk, F.head_chunk) / 32 * 32);
-        // :1112-1114
-        if (v.gdn_v0 && t.k_gdn_v0) F.gdn_v0 = true;
-        // :1117-1120 (!envOn(name, true): set and == "0")
-        if (v.attn_wide && *v.attn_wide == "0") F.attn_wide = false;
-        if (v.attn_dq4 && *v.attn_dq4 == "0") F.attn_dq4 = false;
-        if (v.dq4_dyn && *v.dq4_dyn == "0") F.dq4_dyn = false;
-        if (v.attn_ws4 && *v.attn_ws4 == "0") F.attn_ws4 = false;
-    }
+    auto off0 = [](const Raw& x) { return x && *x == "0"; };
+    if (v.float_gemv) F.float_gemv = true;
+    if (auto x = runtimeU32(v.dbg)) F.dbg_flags = *x;
+    if (auto x = runtimeU32(v.gemv_max)) F.gemv_max = std::clamp<std::uint32_t>(*x, 1, 16);  // q::max_small_batch
+    if (v.no_graph) F.use_graph = false;
+    if (v.no_fuse) F.no_fuse = true;
+    if (auto x = runtimeU32(v.draft_window)) F.draft_window = *x;
+    if (auto x = runtimeU32(v.draft_window_min)) F.draft_window_min = *x;
+    if (v.naive_attn) F.naive_attn = true;
+    if (off0(v.attn_wide)) F.attn_wide = false;
+    if (off0(v.attn_dq4)) F.attn_dq4 = false;
+    if (off0(v.dq4_dyn)) F.dq4_dyn = false;
+    if (off0(v.attn_ws4)) F.attn_ws4 = false;
+    if (off0(v.wide_verify)) F.wide_verify = false;
+    if (auto x = runtimeU32(v.moe_bn)) F.moe_bn_force = *x;
+    if (v.gdn_seq) F.gdn_chunked = false;
+    if (v.gv_group) F.gv_group = *v.gv_group != "0";
+    if (auto x = runtimeU32(v.gv_nmax)) F.gv_nmax = *x;
+    if (auto x = runtimeU32(v.head_chunk)) F.head_chunk = std::max<std::uint32_t>(32, *x / 32 * 32);
+    if (v.gdn_v0 && t.k_gdn_v0) F.gdn_v0 = true;
+    if (r.front == Front::server) F.use_graph = false;
 }
 
 }  // namespace

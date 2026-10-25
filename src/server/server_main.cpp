@@ -27,6 +27,7 @@
 #include "whirl/hip.h"
 #include "whirl/hip_runtime_loader.h"
 #include "whirl/model.h"
+#include "whirl/model_bits.h"
 #include "whirl/pool_budget.h"
 #include "whirl/startup_fit.h"
 #include "whirl/mem_governor.h"
@@ -399,7 +400,11 @@ std::uint64_t tierFingerprint(const qwen35::Model& m, const std::string& path, c
     id.ck_bytes = lay.ck_bytes;
     id.page_bytes = lay.page_bytes;
     id.max_batch = m.max_batch;
-    id.numerics = whirl::numerics::logLine(m.num_plan);
+    // feat026-o6 (1), owner O6: the plan's bits key (mode, items, q8dec, every execution flag as the Model holds it),
+    // not logLine(num_plan) (descriptions in it changed the key with their wording). gdn_v0: WHIRL_GDN_V0 swapped the
+    // DeltaNet decode step kernel (the Model keeps only the pointer).
+    const hip::Function gdn_v0_fn = m.module.getFunctionOpt("gdn_step_norm_v0");
+    id.numerics = qwen35::tierBitsKey(m, gdn_v0_fn != nullptr && m.k.gdn_step_norm == gdn_v0_fn);
     const hip::DeviceInfo dev = hip::describeDevice(hip::getDevice());
     id.gpu_arch = dev.gcn_arch;
     id.gpu_name = dev.name;
@@ -1037,23 +1042,19 @@ int serveMain(int argc, char** argv, const char* program) {
                  static_cast<double>(d0.free > d1.free ? d0.free - d1.free : 0) / (1024.0 * 1024.0 * 1024.0));
         }
 
-        // same knobs as the CLI
-        if (env("NO_FUSE")) model.no_fuse = true;
-        if (env("FLOAT_GEMV")) model.float_gemv = true;
-        if (env("NAIVE_ATTN")) model.naive_attn = true;
-        if (env("GDN_SEQ")) model.gdn_chunked = false;
-        if (auto v = env("MOE_BN")) model.moe_bn_force = static_cast<std::uint32_t>(std::strtoul(v->c_str(), nullptr, 10));
+        // feat026-o6 (2), owner O6: the runtime switches, the same function and rules as the CLI
+        {
+            std::vector<std::string> warn;
+            qwen35::applyRuntimeEnv(model, [](const char* n) { return envGet(n); }, &warn);
+            for (const std::string& w : warn) logW("{}", w);
+        }
         if (env("PREFILL_BATCH"))  // (same floor as above: never below vram::min_prefill_batch)
             model.max_batch = std::min(model.max_batch, vram::prefillBatchFloor(envU32("PREFILL_BATCH", model.max_batch)));
         // WHIRL_DRAFT_VOCAB: unset = embedded 64k subset (dense qwen35, 248320 vocab), 64k = embedded,
         // 48k / <file> = frequency subset file, N = the first N rows (old experiment), off = full head
         const qwen35::DraftVocabChoice draft_vocab = qwen35::draftVocabChoice(env("DRAFT_VOCAB"), qwen35::exeDirectory());
         if (draft_vocab.kind == qwen35::DraftVocabChoice::Kind::first_n) model.draft_vocab = draft_vocab.n;
-        model.draft_window = envU32("DRAFT_WINDOW", model.draft_window);
-        model.draft_window_min = envU32("DRAFT_WINDOW_MIN", model.draft_window_min);
-        if (env("GEMV_R") || env("GEMV_W") || env("GEMV_WH"))
-            logW("WHIRL_GEMV_R / WHIRL_GEMV_W / WHIRL_GEMV_WH are not supported by whirl-server (ignored)");
-        model.use_graph = false;
+        model.use_graph = false;  // the server never replays the decode graph (WHIRL_NO_GRAPH: off already)
         const bool use_mtp = model.mtp.has_value() && envOn("MTP", true);
         const qwen35::MtpDefaults def = qwen35::mtpDefaults(model.cfg.moe, model.arch);
         std::optional<std::uint32_t> drafts_env;
@@ -1086,8 +1087,6 @@ int serveMain(int argc, char** argv, const char* program) {
         }
         // an explicit draft count is used as is (fixed) unless WHIRL_MTP_ADAPT asks otherwise
         const bool auto_mode = adapt_env ? (*adapt_env == "auto") : (def.automatic && !drafts_user);
-        if (!envOn("WIDE_VERIFY", true)) model.wide_verify = false;
-        if (env("HEAD_CHUNK")) model.head_chunk = std::max<std::uint32_t>(32, envU32("HEAD_CHUNK", model.head_chunk) / 32 * 32);
         auto batch_drafts = defaultBatchDrafts(model.cfg.moe, model.wideCapable());
         batch_drafts[1] = drafts;
         const auto bd_env = env("MTP_BATCH_DRAFTS");
@@ -1109,15 +1108,8 @@ int serveMain(int argc, char** argv, const char* program) {
             }
             for (; k <= gdn_max_seg; ++k) batch_drafts[k] = batch_drafts[k - 1];
         }
-        if (env("GDN_V0")) {
-            if (hip::Function fv0 = model.module.getFunctionOpt("gdn_step_norm_v0")) model.k.gdn_step_norm = fv0;
-        }
         // MTP block as Q4_K from Q6_K or Q8_0 (drafts only; WHIRL_MTP_Q4=0 keeps the file's types)
         if (use_mtp && envOn("MTP_Q4", true)) model.requantMtpQ4();
-        if (!envOn("ATTN_WIDE", true)) model.attn_wide = false;
-        if (!envOn("ATTN_DQ4", true)) model.attn_dq4 = false;
-        if (!envOn("DQ4_DYN", true)) model.dq4_dyn = false;
-        if (!envOn("ATTN_WS4", true)) model.attn_ws4 = false;
         if (use_mtp && !env("MTP_FULLHEAD")) {
             const bool q4 = env("DRAFT_HEAD").value_or("") == "q4";
             model.buildDraftHeadEx(q4 ? qwen35::Model::DraftHeadKind::q4 : qwen35::Model::DraftHeadKind::d2);

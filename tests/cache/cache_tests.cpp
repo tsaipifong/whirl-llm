@@ -731,8 +731,15 @@ static void testFingerprintCoversBitsKey() {
     std::printf("  fingerprint covers bitsKey: %zu plan variables, %zu outside the plan\n", n_checked, outside.size());
 }
 
+// feat026-o6 (3): the research switches removed in 0.2.6 change nothing, so the fingerprint skips them
+static void testRemovedSwitchesSkipped() {
+    for (const char* k : {"WHIRL_HEAD_GEMVX", "WHIRL_PREC_GEMVH", "WHIRL_PREC_GS", "whirl_prec_gs"}) CHECK(!fingerprintEnvKept(k));
+    CHECK(fingerprintEnvKept("WHIRL_GEMV_MAX"));  // a live A/B switch stays in
+}
+
 int main() {
     whirl::test::clearWhirlEnv();  // FR-TEST P3-11
+    testRemovedSwitchesSkipped();  // feat026-o6 (3)
     testFingerprintCoversBitsKey();
     testHelpers();
     testMatchSlot();

@@ -988,6 +988,21 @@ void parseGemvW(Model& m, std::string_view list);
 void parseGemvWHead(Model& m, std::string_view list);
 void applyGemvEnv(Model& m);
 
+// feat026-o6 (2), owner O6 (ARCH-1 4.4): the after-load runtime switches, one function and one set of parse rules for the
+// CLI (every command) and the server. Before 0.2.6 the CLI had its own copy (cli main.cpp applyRuntimeEnv, WHIRL_GDN_V0
+// in chat only) and the server another one with other rules and other names (no WHIRL_DBG / GEMV_MAX / NO_GRAPH /
+// GV_GROUP / GV_NMAX / GEMV_R / GEMV_W / GEMV_WH; WIDE_VERIFY / HEAD_CHUNK server only). get(name) returns WHIRL_<name>
+// (the caller's environment read; tests pass a table). Rules:
+//   set (any value, "0" too): FLOAT_GEMV, NO_GRAPH, NO_FUSE, NAIVE_ATTN, GDN_SEQ, GDN_V0 (if the kernel exists)
+//   "0" turns off: ATTN_WIDE, ATTN_DQ4, DQ4_DYN, ATTN_WS4, WIDE_VERIFY;  GV_GROUP: on unless "0"
+//   numbers (the whole value, <= 0xffffffff; else not applied, with a warning in *warnings): DBG, GEMV_MAX (clamped to
+//   1..max_small_batch), DRAFT_WINDOW, DRAFT_WINDOW_MIN, MOE_BN, GV_NMAX, HEAD_CHUNK (multiple of 32, at least 32)
+//   WHIRL_GEMV_R / _W / _WH: applyGemvEnv (malformed lists throw std::invalid_argument)
+// Called after loadOrTune. The server then keeps use_graph off: it never replays the decode graph (not a switch).
+// numerics::plan (Front::cli / Front::server) has the same rules (src/common/numerics.cpp runtimeFlags).
+using EnvGetter = std::function<std::optional<std::string>(const char* name)>;
+void applyRuntimeEnv(Model& m, const EnvGetter& get, std::vector<std::string>* warnings);
+
 // ---------------------------------------------------------------------------
 // device selection
 

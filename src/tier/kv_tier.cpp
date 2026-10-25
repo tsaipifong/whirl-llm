@@ -375,6 +375,12 @@ void Tier::start(const Config& cfg_in, const Layout& lay_in, std::uint64_t finge
                            "or a smaller context chosen for the free VRAM) and cannot be used by this server; kept (a server with "
                            "that context uses them again), counted against the cap, evicted first, expired when unused",
                            static_cast<unsigned long long>(cleanup_.layout_files), static_cast<double>(cleanup_.layout_bytes) / 1073741824.0));
+            if (log_fn && cleanup_.prev_key_files > 0)
+                log_fn(fmt("kv tier: %llu SSD cache files (%.2f GiB) were written by WHIRL 0.2.5 or earlier, which computed the "
+                           "cache key another way (0.2.6 keys entries by the numerics bits key); this server cannot use them, "
+                           "so those prompts are processed and cached again once. Kept (that WHIRL version can still use them), "
+                           "counted against the cap, evicted first, expired when unused",
+                           static_cast<unsigned long long>(cleanup_.prev_key_files), static_cast<double>(cleanup_.prev_key_bytes) / 1073741824.0));
             if (log_fn && cleanup_.unreadable_files > 0)
                 log_fn(fmt("kv tier: %llu SSD cache files (%.2f GiB) could not be opened (in use by another program?); "
                            "kept and counted against the cap",
@@ -1571,7 +1577,7 @@ void Tier::makeHeader(const Entry* e, bool valid, std::uint8_t* buf) const {
     h.n_tok = e->n_tok;
     h.nck = e->nck;
     h.pages = e->pages;
-    h._r = 0;
+    h.key_scheme = key_scheme;
     h.tok_off = header_bytes;
     h.data_off = lay.dataOff();
     h.ck_stride = lay.ckStride();
@@ -2045,7 +2051,11 @@ void Tier::indexFile(const std::wstring& pw, std::uint64_t size, std::vector<Ind
             return true;
         };
         if (hd.version != file_version || hd.fingerprint != fingerprint_) {  // another model / build / format
-            keepUnused();
+            // feat026-o6: a file of this format whose key was computed the earlier way (0.2.5 and before): reported
+            if (keepUnused() && hd.version == file_version && hd.key_scheme < key_scheme) {
+                cleanup_.prev_key_files += 1;
+                cleanup_.prev_key_bytes += size;
+            }
             return;
         }
         // same fingerprint, but the per-entry checkpoint / page sizes differ or the counts are impossible:

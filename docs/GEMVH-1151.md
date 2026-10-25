@@ -1,5 +1,8 @@
 # GEMVH-1151: gfx1151 precise-decode kernel `gemvh` / `gemvh2` (8060S)
 
+(0.2.6, feat026-o6: the research switch `WHIRL_PREC_GEMVH` used below was removed; it is ignored with a warning. The
+precise rows always take gemvh / gemvh2 where the kernel exists, as the default here.)
+
 Branch `gemvh1151` (from kg3 2a20136), worktree `wt_gemvh1151`. Kernel: `kernels/gfx1151/gemv_h.hip` (draft integrated unchanged), include added to `whirl_kernels_gfx1151.hip`. The host (`Model::gemmF16`) already used `gemvh`/`gemvh2` when exported; `WHIRL_PREC_GEMVH=0` disables them. No kernel bug was found: the draft compiled and was bitwise on the first run. gfx1151-only build; R9700 not retested (the gfx1201 kernel set is untouched).
 
 ## 1. Bitwise (whirl-kernel-test --device 8060s --only gemvh, tests/kernels/test_gemvh.cpp)
