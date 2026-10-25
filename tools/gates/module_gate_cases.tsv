@@ -42,3 +42,7 @@ K2 pass: bf31527 (kv tier dedup race): the map's c-2 steps join the table	repo	-
 K2 block: impact maps the change to another module	repo	-Module protocol -ImpactRange bf31527^..bf31527	2	-	maps the change to tier_bridge
 K2 full: impact says full gate (7ec63b4 fingerprint.cpp in no module)	repo	-Module tier_bridge -ImpactRange 7ec63b4^..7ec63b4	0	*	impact.py says full gate
 K1: -Steps beyond the table get the both-GPU hint	repo	-Module protocol -NoMapSteps -Steps srv_balance	0	cpu_pins,cpu_server,golden_swift,srv_balance,srv_fs_swift,srv_fs_moe	steps added beyond the module table: run on both GPUs, one after the other: srv_balance
+T measure_tools: the three measure-tools unit tests; host bench pending until mt-p3 lands	repo	-Module measure_tools -NoMapSteps	0	cpu_bench_out,cpu_kt_bench,cpu_stage_bench	pending step cpu_host_bench
+plain -List has cpu_bench_out (mt-p0b)	repo	-List	0	-	^cpu_bench_out\s+CPU
+plain -List has cpu_kt_bench (mt-p0b)	repo	-List	0	-	^cpu_kt_bench\s+CPU
+plain -List has cpu_stage_bench (mt-p0b)	repo	-List	0	-	^cpu_stage_bench\s+CPU

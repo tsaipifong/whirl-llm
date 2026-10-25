@@ -108,6 +108,11 @@ $exe = @{}
 foreach ($n in "whirl", "whirl-server", "whirl-server-gate", "whirl-kernel-test", "whirl-tests", "whirl-model-tests", "whirl-cache-tests",
                "whirl-vision-tests", "whirl-tier-tests", "whirl-server-tests", "whirl-hiprt-tests", "whirl-device-tests", "whirl-ops-tests",
                "whirl-pins", "whirl-startup-replay") { $exe[$n] = Join-Path $Build "$n.exe" }
+# mt-p0b: the measure-tools CPU unit tests (P0 tests/bench/bench_out.h, P2 tests/kernels/kt_bench, P4 tests/bench/stage_bench)
+# and, when its source is in this tree (P3, branch mt-p3), whirl-host-bench --selftest. Registered by the tree, like
+# llama.cpp's conditional llama_test() (progress\mt-p0b.PRIOR_ART.md); once registered, a missing exe is a setup error.
+$hasHostBench = Test-Path (Join-Path $repo "tests\bench\host_bench.cpp")
+foreach ($n in @("whirl-bench-out-tests", "whirl-kt-bench-tests", "whirl-stage-bench-tests") + @(if ($hasHostBench) { "whirl-host-bench" })) { $exe[$n] = Join-Path $Build "$n.exe" }
 
 # ---------------------------------------------------------------------------------------------------
 # step table: name, gpu, command (array: exe + args), rule (scriptblock over the output lines + exit code)
@@ -149,11 +154,26 @@ AddStep "cpu_golden_selftest" $false @($pwsh, "-NoProfile", "-File", (Join-Path 
 AddStep "cpu_logscan_selftest" $false @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\gates\server_log_scan_selftest.ps1")) { param($o, $c) $c -eq 0 -and ($o -match "server log scan selftest: \d+/\d+ as expected") }
 AddStep "cpu_golden_xcheck" $false @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\golden\golden.ps1"), "xcheck", "-Arch", $arch, "-Models", $gmodels) { param($o, $c) $c -eq 0 -and ($o -match "file\(s\) ok") }
 # arch024-S12: the -Module step-selection table (tools/gates/module_gate_cases.tsv; CPU, runs this script with -List)
-AddStep "cpu_module_gate" $false @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\gates\module_gate_test.ps1"), "-Work", "@WORK@") { param($o, $c) $c -eq 0 -and ($o -match "^module gate test: ([1-9]\d*)/\1 cases ok") }
+AddStep "cpu_module_gate" $false @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\gates\module_gate_test.ps1"), "-Work", "@WORK@", "-Build", $Build, "-Swift", $SW) { param($o, $c) $c -eq 0 -and ($o -match "^module gate test: ([1-9]\d*)/\1 cases ok") }
 # review C7: modules.json against this tree and this gate, and the block / pass tests of that check and of impact.py's
 # module mapping (python: WHIRL_GATE_PYTHON, else python on PATH; none found = the step fails)
 AddStep "cpu_modules_check" $false @($pwsh, "-NoProfile", "-Command", "& '$py' -I '$(Join-Path $repo "tools\gates\modules_check_test.py")'; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\impact\validate_test.py")'; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\impact\impact_steps_test.py")'; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\gates\modules_check.py")'; exit `$LASTEXITCODE") `
     { param($o, $c) $c -eq 0 -and ($o -match "^modules check test: ([1-9]\d*)/\1 ok") -and ($o -match "^validate test: ([1-9]\d*)/\1 ok") -and ($o -match "^impact steps test: ([1-9]\d*)/\1 ok") -and ($o -match "^modules check: ok") }
+# mt-p0b: measure-tools unit tests (module measure_tools in modules.json). They write fixed-name files under
+# temp_directory_path(), so each runs with TMP / TEMP = this gate's test_tmp folder (two gates at once must not share
+# them, as with WHIRL_TEST_TMP below); set in the child pwsh only. Rules need a count > 0 and 0 failed.
+$benchTmp = Join-Path $Work "test_tmp"
+function TmpCmd([string]$x, [string[]]$a = @()) {
+    $q = @($a | ForEach-Object { "'" + ($_ -replace "'", "''") + "'" }) -join " "
+    return @($pwsh, "-NoProfile", "-Command", "`$env:TMP = '$benchTmp'; `$env:TEMP = '$benchTmp'; & '$x' $q; exit `$LASTEXITCODE")
+}
+AddStep "cpu_bench_out" $false (TmpCmd $exe["whirl-bench-out-tests"]) { param($o, $c) $c -eq 0 -and ($o -match "^whirl-bench-out-tests: 0 failed") -and @($o | Where-Object { $_ -match "^PASS " }).Count -gt 0 }
+AddStep "cpu_kt_bench" $false (TmpCmd $exe["whirl-kt-bench-tests"]) { param($o, $c) $c -eq 0 -and ($o -match "^whirl-kt-bench-tests: [1-9]\d* PASS, 0 failed") }
+AddStep "cpu_stage_bench" $false (TmpCmd $exe["whirl-stage-bench-tests"]) { param($o, $c) $c -eq 0 -and ($o -match "^[1-9]\d* passed, 0 failed") }
+# P3 host components over NullBackend + MockModel (never loads HIP); the Swift GGUF is only its tokenizer
+if ($hasHostBench) {
+    AddStep "cpu_host_bench" $false (TmpCmd $exe["whirl-host-bench"] @("--selftest", "--gguf", $SW)) { param($o, $c) $c -eq 0 -and ($o -match "^whirl-host-bench selftest: [1-9]\d* rows, 0 work mismatches, 0 failed") }
+}
 $ktArgs = @($exe["whirl-kernel-test"], "--device", $Device, "--require-all", "--mx", $SW, "--moemx", $MX) + @(if ($hasQ) { "--q4"; $Q })
 AddStep "kt_full" $true $ktArgs { param($o, $c) $c -eq 0 -and ($o -match "^PASS: 0 failing") -and ($o -match "--require-all: 0 required kernel") }
 foreach ($m in @($denseKeys) + @("moe")) {

@@ -88,6 +88,14 @@
    "steps": ["cpu_server", "cpu_logscan_selftest"], "callers": ["ckpt_store", "page_pool", "prefix_store", "tier_bridge", "engine_gov"],
    "manual": ["P-speed d5fc637 vs HEAD"]
   },
+  "measure_tools": {
+   "id": "T", "desc": "measure-tools test code (results JSONL writer, kernel bench timer, stage bench, host bench); no product code",
+   "paths": ["tests/bench/bench_out.h", "tests/bench/bench_out_tests.cpp", "tests/kernels/kt_bench.*", "tests/kernels/unit/kt_bench_tests.cpp",
+             "tests/bench/stage_bench*", "tests/bench/unit/stage_bench_tests.cpp", "tests/bench/host_bench.cpp"],
+   "steps": ["cpu_bench_out", "cpu_kt_bench", "cpu_stage_bench"],
+   "pending": [{"step": "cpu_host_bench", "lands_in": "mt-p3 merge (tests/bench/host_bench.cpp; release_gate registers the step when that file is in the tree)"}],
+   "manual": ["GPU side of the tools (whirl-kernel-test --bench, whirl-stage-bench, whirl-host-bench-hip --suite copy): their own runners (progress mt-p2 / mt-p3 / mt-p4 HANDOFF), not this gate"]
+  },
   "contract": {
    "id": "X", "desc": "cross-module contracts (ServerModel, device::Backend, kernels_abi, numerics): the full gate",
    "paths": ["src/server/backend.h", "src/device/backend.h", "src/device/backend_hip.cpp", "include/whirl/kernels_abi.h",

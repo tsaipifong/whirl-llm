@@ -5,7 +5,11 @@
 # Block cases use small modules files written here; pass cases use tools/gates/modules.json.
 #   pwsh tools/gates/module_gate_test.ps1 [-Work DIR] [-Gate PATH] [-Cases PATH]
 # Exit 0 = every case as expected ("module gate test: N/N cases ok"), 1 = a case differs, 2 = setup error.
-param([string]$Work = "", [string]$Gate = "", [string]$Cases = "")
+#   -Build DIR (mt-p0b): the build folder whose whirl-bench-out-tests / whirl-kt-bench-tests / whirl-stage-bench-tests run for
+#   real in the module measure_tools case (default <repo>\build\Release; missing = that case FAILS, never a silent skip).
+#   -HostBench EXE -Swift GGUF (optional): also run cpu_host_bench for real in a scratch copy of the tree that has
+#   tests/bench/host_bench.cpp (until mt-p3 is merged; afterwards the gate's own cpu_host_bench step covers it).
+param([string]$Work = "", [string]$Gate = "", [string]$Cases = "", [string]$Build = "", [string]$HostBench = "", [string]$Swift = "")
 $ErrorActionPreference = "Stop"
 if (-not $Gate) { $Gate = Join-Path $PSScriptRoot "release_gate.ps1" }
 if (-not $Cases) { $Cases = Join-Path $PSScriptRoot "module_gate_cases.tsv" }
@@ -68,7 +72,7 @@ $fb = Join-Path $Work "fakebuild"; New-Item -ItemType Directory -Force $fb | Out
 $who = Join-Path $env:SystemRoot "System32\whoami.exe"
 foreach ($n in "whirl", "whirl-server", "whirl-server-gate", "whirl-kernel-test", "whirl-tests", "whirl-model-tests", "whirl-cache-tests",
                "whirl-vision-tests", "whirl-tier-tests", "whirl-server-tests", "whirl-hiprt-tests", "whirl-device-tests", "whirl-ops-tests",
-               "whirl-pins", "whirl-startup-replay") {
+               "whirl-pins", "whirl-startup-replay", "whirl-bench-out-tests", "whirl-kt-bench-tests", "whirl-stage-bench-tests", "whirl-host-bench") {
     Copy-Item $who (Join-Path $fb "$n.exe") -Force
 }
 $dm = Join-Path $Work "dummy.gguf"; "x" | Set-Content $dm
@@ -107,6 +111,69 @@ if (Test-Path $pyref) {
     if ($c2 -eq 2 -and ($o2 | Where-Object { $_ -match "impact.py .* failed" })) { $ok++; Write-Host "ok   python: WHIRL_GATE_PYTHON set to a missing file -> exit 2" }
     else { $bad++; Write-Host "FAIL python: missing WHIRL_GATE_PYTHON: exit $c2" }
 } else { Write-Host "skip python default test: $pyref not on this machine" }
+
+# mt-p0b (1): the measure-tools steps run for real: module measure_tools with the real test exes passes (exit 0,
+# PASS_module_measure_tools_r9700, 3 PASS rows); with whoami fakes in their place every one of the 3 steps fails
+$rb = if ($Build) { $Build } else { Join-Path (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path "build\Release" }
+# the module's steps as the gate lists them (after the mt-p3 merge cpu_host_bench joins: its exe is then needed in -Build
+# and its tokenizer from -Swift, which the gate's cpu_module_gate step passes)
+$mts = @(Listed (RunGate @("-Module", "measure_tools", "-NoMapSteps", "-List")).out)
+$exeOf = @{ cpu_bench_out = "whirl-bench-out-tests"; cpu_kt_bench = "whirl-kt-bench-tests"; cpu_stage_bench = "whirl-stage-bench-tests"; cpu_host_bench = "whirl-host-bench" }
+$mt = @($mts | ForEach-Object { $exeOf[$_] } | Where-Object { $_ })
+if ($mts.Count -lt 3 -or $mt.Count -ne $mts.Count) { $bad++; Write-Host "FAIL measure_tools: module lists [$($mts -join ',')], exes known for [$($mt -join ',')]" }
+$miss = @($mt | Where-Object { -not (Test-Path (Join-Path $rb "$_.exe")) })
+$keep = @{}; foreach ($v in "WHIRL_GATE_SWIFT", "WHIRL_GATE_MOE", "WHIRL_GATE_TEXT_ROOT", "WHIRL_GATE_DENSE") { $keep[$v] = [Environment]::GetEnvironmentVariable($v) }
+$env:WHIRL_GATE_SWIFT = $dm; $env:WHIRL_GATE_MOE = $dm; $env:WHIRL_GATE_TEXT_ROOT = $Work; Remove-Item Env:WHIRL_GATE_DENSE -ErrorAction SilentlyContinue
+if ($Swift) { $env:WHIRL_GATE_SWIFT = $Swift } elseif ($mts -contains "cpu_host_bench") { $miss += "-Swift GGUF (cpu_host_bench tokenizer)" }
+try {
+    if ($miss.Count) { $bad++; Write-Host "FAIL measure_tools real run: $($miss -join ', ') not in $rb (build them, or pass -Build)" }
+    else {
+        $fb2 = Join-Path $Work "fakebuild2"; New-Item -ItemType Directory -Force $fb2 | Out-Null
+        Get-ChildItem $fb -File | Copy-Item -Destination $fb2 -Force
+        foreach ($n in $mt) { Copy-Item (Join-Path $rb "$n.exe") (Join-Path $fb2 "$n.exe") -Force }
+        $gw2 = Join-Path $Work "gw2"
+        $o = @(& $pwsh -NoProfile -File $Gate -Device r9700 -Build $fb2 -Work $gw2 -Module measure_tools -NoMapSteps 2>&1 | ForEach-Object { "$_" }); $code = $LASTEXITCODE
+        $sum = Join-Path $gw2 "module_measure_tools_r9700_summary.txt"
+        $pr = if (Test-Path $sum) { @(Get-Content $sum | Where-Object { $_ -match "^PASS\s+cpu_(bench_out|kt_bench|stage_bench|host_bench)\s" }).Count } else { 0 }
+        if ($code -eq 0 -and $pr -eq $mts.Count -and (Test-Path (Join-Path $gw2 "PASS_module_measure_tools_r9700"))) { $ok++; Write-Host "ok   measure_tools real run: $pr steps PASS with the exes of $rb" }
+        else { $bad++; Write-Host "FAIL measure_tools real run: exit $code, $pr PASS rows"; $o | Select-Object -Last 8 | ForEach-Object { Write-Host "       | $_" } }
+        $gw3 = Join-Path $Work "gw3"
+        $o = @(& $pwsh -NoProfile -File $Gate -Device r9700 -Build $fb -Work $gw3 -Module measure_tools -NoMapSteps 2>&1 | ForEach-Object { "$_" }); $code = $LASTEXITCODE
+        $sum = Join-Path $gw3 "module_measure_tools_r9700_summary.txt"
+        $fr = if (Test-Path $sum) { @(Get-Content $sum | Where-Object { $_ -match "^FAIL\s+cpu_(bench_out|kt_bench|stage_bench|host_bench)\s" }).Count } else { 0 }
+        if ($code -eq 1 -and $fr -eq $mts.Count) { $ok++; Write-Host "ok   measure_tools fake exes: exit 1, all $fr steps FAIL" }
+        else { $bad++; Write-Host "FAIL measure_tools fake exes: exit $code, $fr FAIL rows (want 1, $($mts.Count))" }
+    }
+    # mt-p0b (2): cpu_host_bench is registered by the tree: a scratch copy of the gate without / with
+    # tests/bench/host_bench.cpp lists it not / once (CPU), right after cpu_stage_bench
+    $fr0 = Join-Path $Work "fakerepo"; New-Item -ItemType Directory -Force (Join-Path $fr0 "tools\gates"), (Join-Path $fr0 "tests\bench") | Out-Null
+    $fg = Join-Path $fr0 "tools\gates\release_gate.ps1"; Copy-Item $Gate $fg -Force
+    Copy-Item (Join-Path $PSScriptRoot "server_log_scan.ps1") (Join-Path $fr0 "tools\gates\") -Force
+    $l0 = Listed (& $pwsh -NoProfile -File $fg -Device r9700 -List 2>&1 | ForEach-Object { "$_" })
+    "// placeholder for the registration test" | Set-Content (Join-Path $fr0 "tests\bench\host_bench.cpp")
+    $l1o = @(& $pwsh -NoProfile -File $fg -Device r9700 -List 2>&1 | ForEach-Object { "$_" })
+    $l1 = Listed $l1o
+    $i1 = [array]::IndexOf($l1, "cpu_host_bench"); $is = [array]::IndexOf($l1, "cpu_stage_bench")
+    if ($l0 -notcontains "cpu_host_bench" -and @($l1 | Where-Object { $_ -eq "cpu_host_bench" }).Count -eq 1 -and $i1 -eq $is + 1 -and
+        ($l1o | Where-Object { $_ -match "^cpu_host_bench\s+CPU\s*$" }) -and $l1.Count -eq $l0.Count + 1) { $ok++; Write-Host "ok   cpu_host_bench registered only when tests/bench/host_bench.cpp is in the tree" }
+    else { $bad++; Write-Host "FAIL cpu_host_bench registration: without the file $($l0 -contains 'cpu_host_bench'), with it at $i1 (cpu_stage_bench at $is), $($l0.Count) -> $($l1.Count) steps" }
+    # registered + exe missing = setup error (exit 2 naming whirl-host-bench.exe), never a skip
+    $fb4 = Join-Path $Work "fakebuild4"; New-Item -ItemType Directory -Force $fb4 | Out-Null
+    Get-ChildItem $fb -File | Where-Object { $_.Name -ne "whirl-host-bench.exe" } | Copy-Item -Destination $fb4 -Force
+    $o = @(& $pwsh -NoProfile -File $fg -Device r9700 -Build $fb4 -Work (Join-Path $Work "gw4") -Steps cpu_host_bench 2>&1 | ForEach-Object { "$_" }); $code = $LASTEXITCODE
+    if ($code -eq 2 -and ($o | Where-Object { $_ -match "missing .*whirl-host-bench\.exe" })) { $ok++; Write-Host "ok   cpu_host_bench registered, exe missing -> setup error exit 2" }
+    else { $bad++; Write-Host "FAIL cpu_host_bench missing exe: exit $code"; $o | Select-Object -Last 4 | ForEach-Object { Write-Host "       | $_" } }
+    if ($HostBench -and $Swift) {
+        $fb5 = Join-Path $Work "fakebuild5"; New-Item -ItemType Directory -Force $fb5 | Out-Null
+        Get-ChildItem $fb -File | Copy-Item -Destination $fb5 -Force
+        Copy-Item $HostBench (Join-Path $fb5 "whirl-host-bench.exe") -Force
+        $env:WHIRL_GATE_SWIFT = $Swift
+        $gw5 = Join-Path $Work "gw5"
+        $o = @(& $pwsh -NoProfile -File $fg -Device r9700 -Build $fb5 -Work $gw5 -Steps cpu_host_bench -Tag hb_real 2>&1 | ForEach-Object { "$_" }); $code = $LASTEXITCODE
+        if ($code -eq 0 -and ($o | Where-Object { $_ -match "^PASS\s+cpu_host_bench\s.*selftest: [1-9]\d* rows, 0 work mismatches, 0 failed" })) { $ok++; Write-Host "ok   cpu_host_bench real run ($HostBench): PASS" }
+        else { $bad++; Write-Host "FAIL cpu_host_bench real run: exit $code"; $o | Select-Object -Last 4 | ForEach-Object { Write-Host "       | $_" } }
+    } else { Write-Host "note cpu_host_bench real run not requested (-HostBench / -Swift); registration and setup cases ran" }
+} finally { foreach ($v in $keep.Keys) { [Environment]::SetEnvironmentVariable($v, $keep[$v]) } }
 
 Remove-Item -Recurse -Force $Work -ErrorAction SilentlyContinue
 Write-Host "module gate test: $ok/$($ok + $bad) cases ok"
