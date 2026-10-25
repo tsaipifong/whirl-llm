@@ -213,6 +213,7 @@ void testAttn(Ctx& c);
 void testAttnDq4(Ctx& c);  // "attndq4": attn_dq4 at 256 splits / contexts up to 256k / random draft windows
 void testGemvh(Ctx& c);   // "gemvh": bitwise sweep of precise-decode gemvh/gemvh2
 void benchGemvh(Ctx& c);  // "gemvhbench": timing only
+void benchPfmb(Ctx& c);   // "pfmb": feat026-prefetch load-path microbench (own code object, WHIRL_KT_PFMB_HSACO), on request
 void benchAttn(Ctx& c);  // "attnbench": timing only, run with --only attnbench
 void testAttnWs4(Ctx& c);   // "ws4": gfx1151 attn_ws4 bitwise == attn_wsplit1
 void benchAttnWs4(Ctx& c);  // "ws4bench": timing only, on request
