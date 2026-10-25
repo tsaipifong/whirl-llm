@@ -6,8 +6,10 @@
 //                      server.est_dgpu (server_main ~:801) / server.est_uma (~:911))
 //   WHIRL_DUMP_EXEC=1  after load + tune (qwen35::loadOrTune): the Model's numerics / execution flags, the plan and the
 //                      KV choice, one "D exec: key=value" line each, to stderr
-//   --dump-only        (whirl CLI commands and whirl-server) exit 0 right after load + tune, after the dumps; for the
-//                      S0b-2 dump matrix (one load per cell, no generation)
+//   --dump-only        (whirl chat / bench / seqtest / golden / serve and whirl-server) exit 0 right after load + tune,
+//                      after the dumps; for the S0b-2 dump matrix (one load per cell, no generation). The other whirl
+//                      commands (selftest, devices, dflash-check, vis-encode) never reach loadOrTune: they refuse the
+//                      flag (exit 2, dumpOnlyRefusal) instead of running without the dump-only exit
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 
@@ -33,6 +35,9 @@ const numerics::KvChoice& kv(std::string_view site, const numerics::Request& r, 
 // --dump-only (set by the CLI / server argument parsers)
 void setDumpOnly(bool on);
 bool dumpOnly();
+// the whirl CLI command takes --dump-only: "" when it does (it reaches loadOrTune), else the error text (one line,
+// no newline) for a command that would run without ever reaching the dump-only exit
+std::string dumpOnlyRefusal(std::string_view cmd);
 
 }  // namespace whirl::dump
 

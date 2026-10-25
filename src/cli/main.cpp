@@ -2638,10 +2638,11 @@ int wmain(int argc, wchar_t** wargv) {
     }
     // arch025-S0a: --dump-only = exit 0 right after load + tune (baseline dump matrix, whirl/dump.h); serve parses
     // it itself (serveMain), the other commands here
+    bool dump_only = false;
     if (cmd != "serve")
         for (std::size_t i = 2; i < argv.size();) {
             if (argv[i] == "--dump-only") {
-                whirl::dump::setDumpOnly(true);
+                dump_only = true;
                 argv.erase(argv.begin() + static_cast<std::ptrdiff_t>(i));
             } else {
                 ++i;
@@ -2652,6 +2653,15 @@ int wmain(int argc, wchar_t** wargv) {
     if (wants_help) {
         printHelp(cmd);
         return app::exit_ok;
+    }
+    // bug-cli-dumponly: a command that never reaches loadOrTune refuses --dump-only (before any GPU work) instead of
+    // running to the end without the dump-only exit
+    if (dump_only) {
+        if (const std::string why = whirl::dump::dumpOnlyRefusal(cmd); !why.empty()) {
+            std::fprintf(stderr, "whirl: error: %s\n  (run 'whirl %s --help' for the options)\n", why.c_str(), cmd.c_str());
+            return app::exit_usage;
+        }
+        whirl::dump::setDumpOnly(true);
     }
     // the GPU runtime of the driver must be loadable before any HIP call
     if (const int pf = app::gpuPreflight(); pf != app::exit_ok) return pf;
