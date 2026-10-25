@@ -19,8 +19,9 @@
 
 namespace whirl::dump {
 
-// WHIRL_<name> set, not empty and not "0"; read on every call (a dump is not on a hot path)
-bool envOn(const char* name);
+// WHIRL_<name> set, not empty and not "0"; read on every call through platform::env::get (a dump is not on a hot
+// path). Was envOn (arch025 PL1b renamed it: the env read is the platform layer's, this is a dump switch)
+bool switchOn(const char* name);
 
 // "D kv: site=<site> mode=<m> items=<hex> custom=<0|1> moe=<0|1> caps=q8h:<b>,q8v:<b>,q4:<b>,fast_q8h:<b>
 //  forced=<name|none> -> kv=<name> debug=<0|1> why=<why>"

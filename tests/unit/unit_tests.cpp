@@ -4144,6 +4144,52 @@ static void testPlatformEnv() {
 #endif
 }
 
+// arch025 PL1b: the reads moved to platform::env::get give the v0.2.4 result for the same environment. Reference =
+// the removed std::getenv code, copied here verbatim (uma_mem.h umaCheckOn, alloc_log.cpp / launch_log.cpp
+// serverProcess); each variable is restored to what the test process had.
+static void testPl1bEnvReads() {
+#ifdef _WIN32
+    namespace pe = whirl::platform::env;
+    namespace al = whirl::hip::alloclog;
+    namespace ll = whirl::hip::launchlog;
+    const char* names[] = {"WHIRL_UMA_CHECK", "WHIRL_ALLOC_LOG_RAW", "WHIRL_LAUNCH_LOG_RAW"};
+    std::optional<std::string> saved[3];
+    for (int i = 0; i < 3; ++i) saved[i] = pe::get(names[i]);
+    const bool al_was_on = al::g_on;
+    const ll::RawStats ll_before = ll::rawStats();
+    // nullptr = unset ("" deletes in-process, so "" itself cannot be set here: N1 HANDOFF)
+    const char* vals[] = {nullptr, "0", "1", "00", "0 ", " 0", "server", "Server", "server ", "x=y", "SERVER"};
+    int cells = 0;
+    for (const char* v : vals) {
+        for (const char* n : names) CHECK(pe::set(n, v ? v : "") == 0);
+        {
+            const char* g = std::getenv("WHIRL_UMA_CHECK");
+            const bool ref = !(g && g[0] == '0' && g[1] == 0);
+            CHECK_EQ(whirl::hip::umaCheckOn(), ref);
+        }
+        {
+            const char* g = std::getenv("WHIRL_ALLOC_LOG_RAW");
+            const bool ref = g != nullptr && std::strcmp(g, "server") == 0;
+            al::testEnable(true, true);
+            al::serverProcess();
+            CHECK_EQ(al::testText().find("# list on\n") != std::string::npos, ref);
+        }
+        {
+            const char* g = std::getenv("WHIRL_LAUNCH_LOG_RAW");
+            const bool ref = g != nullptr && std::strcmp(g, "server") == 0;
+            ll::testRaw(true, 3);
+            ll::serverProcess();
+            CHECK_EQ(ll::rawStats().on, ref);
+        }
+        ++cells;
+    }
+    CHECK_EQ(cells, 11);
+    for (int i = 0; i < 3; ++i) CHECK(pe::set(names[i], saved[i] ? saved[i]->c_str() : "") == 0);
+    al::testEnable(al_was_on, true);
+    ll::testRaw(ll_before.on, ll_before.max_lines);
+#endif
+}
+
 static void testPlatformConsoleTime() {
 #ifdef _WIN32
     namespace pc = whirl::platform::console;
@@ -4217,6 +4263,7 @@ int main(int argc, char** argv) {
     testAllocLog();
     testPlatformPaths();        // arch025 PL1
     testPlatformEnv();
+    testPl1bEnvReads();  // arch025 PL1b
     testPlatformConsoleTime();
     specsample_test::testSpecSample();
     testDflashPolicy();

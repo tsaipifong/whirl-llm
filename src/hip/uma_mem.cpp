@@ -7,6 +7,8 @@
 
 #include "whirl/uma_mem.h"
 
+#include "platform/env.h"
+
 #include "hip_api.h"
 
 #include <cstdlib>
@@ -63,7 +65,9 @@ UmaMem umaMemory(int device) {
     }
 #endif
     // test hook: a simulated carve-out size (GiB), e.g. WHIRL_FAKE_DEDICATED_GB=0.5
-    if (const char* v = std::getenv("WHIRL_FAKE_DEDICATED_GB"); v && *v) {
+    // arch025 PL1b: through platform::env::get, read on every call as before
+    if (const std::optional<std::string> e = platform::env::get("WHIRL_FAKE_DEDICATED_GB"); e && !e->empty()) {
+        const char* v = e->c_str();
         char* end = nullptr;
         const double gb = std::strtod(v, &end);
         if (end != v && gb >= 0) {
@@ -76,6 +80,12 @@ UmaMem umaMemory(int device) {
     g_last = r;
     g_have = true;
     return r;
+}
+
+bool umaCheckOn() {
+    // arch025 PL1b: moved out of uma_mem.h (was inline, std::getenv); read on every call as before
+    const std::optional<std::string> v = platform::env::get("WHIRL_UMA_CHECK");
+    return !(v && *v == "0");
 }
 
 const UmaMem* lastUmaMemory() {

@@ -1590,7 +1590,7 @@ void testModelReleaseOrder() {
 }
 
 // arch025-S0a: the baseline dumps. execDump: one "D exec: key=value" line per member, deterministic, covering the
-// numerics flags; kvLine: the chooseKv inputs and result on one line; envOn: unset / "" / "0" are off.
+// numerics flags; kvLine: the chooseKv inputs and result on one line; switchOn (was envOn): unset / "" / "0" are off.
 #define CHECK(x) check((x), "baseline dumps: " #x)
 void testBaselineDumps() {
     namespace nu = whirl::numerics;
@@ -1629,11 +1629,42 @@ void testBaselineDumps() {
     CHECK(lf.find(" moe=1 ") != std::string::npos && lf.find(" forced=f16 -> kv=f16 debug=1 ") != std::string::npos);
     CHECK(&whirl::dump::kv("x", r, false, caps, std::nullopt, c) == &c);  // passes the choice through
     _putenv_s("WHIRL_S0A_DUMP_T", "");
-    CHECK(!whirl::dump::envOn("S0A_DUMP_T"));
+    CHECK(!whirl::dump::switchOn("S0A_DUMP_T"));
     _putenv_s("WHIRL_S0A_DUMP_T", "0");
-    CHECK(!whirl::dump::envOn("S0A_DUMP_T"));
+    CHECK(!whirl::dump::switchOn("S0A_DUMP_T"));
     _putenv_s("WHIRL_S0A_DUMP_T", "1");
-    CHECK(whirl::dump::envOn("S0A_DUMP_T"));
+    CHECK(whirl::dump::switchOn("S0A_DUMP_T"));
+    // arch025 PL1b: switchOn (platform::env::get) == the removed envOn (_dupenv_s, copied verbatim) for each value,
+    // read on every call (a change between two calls is seen); gemvhWavesEnv == the removed std::atoi(std::getenv)
+    {
+        auto envOnRef = [](const char* name) {
+            const std::string key = std::string("WHIRL_") + name;
+            char* v = nullptr;
+            std::size_t n = 0;
+            if (_dupenv_s(&v, &n, key.c_str()) != 0 || v == nullptr) return false;
+            const std::string s(v);
+            std::free(v);
+            return !s.empty() && s != "0";
+        };
+        char* gw0 = nullptr;
+        std::size_t gwn = 0;
+        (void)_dupenv_s(&gw0, &gwn, "WHIRL_GEMVH_WAVES");
+        const std::string gw_saved = gw0 ? gw0 : "";
+        const bool gw_had = gw0 != nullptr;
+        std::free(gw0);
+        const char* vals[] = {nullptr, "0", "1", "00", "2", " 0", "0 ", "off", "8", "-3", "abc", "12x", " 7", "\xe4\xb8\xad"};
+        int cells = 0;
+        for (const char* v : vals) {
+            _putenv_s("WHIRL_S0A_DUMP_T", v ? v : "");
+            CHECK(whirl::dump::switchOn("S0A_DUMP_T") == envOnRef("S0A_DUMP_T"));
+            _putenv_s("WHIRL_GEMVH_WAVES", v ? v : "");
+            const char* e = std::getenv("WHIRL_GEMVH_WAVES");
+            CHECK(whirl::kernels::gemvhWavesEnv() == (e ? std::atoi(e) : 0));
+            ++cells;
+        }
+        CHECK(cells == 14);
+        _putenv_s("WHIRL_GEMVH_WAVES", gw_had ? gw_saved.c_str() : "");
+    }
     _putenv_s("WHIRL_S0A_DUMP_T", "");
     CHECK(!whirl::dump::dumpOnly());  // only the --dump-only argument sets it
 }

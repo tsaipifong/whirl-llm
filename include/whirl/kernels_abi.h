@@ -643,12 +643,12 @@ inline unsigned gemvhGridCap(unsigned nrows, unsigned cap) {
 // with fewer CUs gets proportionally fewer blocks. Read once per process (the gfx1151 path runs on one device).
 // WHIRL_GEMVH_WAVES=<n> overrides (tests).
 inline constexpr unsigned kGemvhWavesPerMp = 32;
+// std::atoi(WHIRL_GEMVH_WAVES), 0 when unset; read at the call through platform::env::get (src/kernels_host/
+// kernels_abi.cpp; arch025 PL1b: this header is also compiled for the GPU code objects, which cannot see src/platform)
+int gemvhWavesEnv();
 inline unsigned gemvhCap() {
     static const unsigned cap = [] {
-        if (const char* e = std::getenv("WHIRL_GEMVH_WAVES")) {
-            const int v = std::atoi(e);
-            if (v > 0) return static_cast<unsigned>(v);
-        }
+        if (const int v = gemvhWavesEnv(); v > 0) return static_cast<unsigned>(v);
         const int mps = hip::describeDevice(hip::getDevice()).compute_units;
         return mps > 0 ? kGemvhWavesPerMp * static_cast<unsigned>(mps) : 640u;
     }();

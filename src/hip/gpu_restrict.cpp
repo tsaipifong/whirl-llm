@@ -12,6 +12,8 @@
 
 #include "hip_api.h"
 
+#include "platform/env.h"
+
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -228,7 +230,7 @@ int chosenPosition(const std::vector<GpuRecord>& recs, std::string_view spec_arg
     if (g_r.active) return 0;  // identity proven in restrictToSelected
     std::string spec(spec_arg);
     if (spec.empty())
-        if (const char* v = std::getenv("WHIRL_DEVICE")) spec = v;
+        if (std::optional<std::string> v = platform::env::get("WHIRL_DEVICE")) spec = std::move(*v);
     return selectGpus(recs, spec)[0];
 }
 
@@ -236,16 +238,22 @@ const Restriction& restrictToSelected(std::string_view spec_arg) {
     std::call_once(g_once, [&] {
         g_r.done = true;
         std::string spec(spec_arg);
+        // arch025 PL1b: the reads go through platform::env::get, at the same points and in the same order (all before
+        // the HIP_VISIBLE_DEVICES write below)
         if (spec.empty())
-            if (const char* v = std::getenv("WHIRL_DEVICE")) spec = v;
+            if (std::optional<std::string> v = platform::env::get("WHIRL_DEVICE")) spec = std::move(*v);
         (void)parseDeviceList(spec);  // a malformed list is an error before any GPU work
-        const std::string var = userVisibilityVar([](const char* k) { return std::getenv(k); });
+        std::optional<std::string> held;  // keeps the value the getter's pointer points into (userVisibilityVar tests != nullptr)
+        const std::string var = userVisibilityVar([&held](const char* k) -> const char* {
+            held = platform::env::get(k);
+            return held ? held->c_str() : nullptr;
+        });
         if (!var.empty()) {
-            const char* v = std::getenv(var.c_str());
-            g_r.note = userVarNote(var, v ? v : "");
+            const std::optional<std::string> v = platform::env::get(var);
+            g_r.note = userVarNote(var, v.value_or(std::string()));
             return;
         }
-        if (const char* off = std::getenv("WHIRL_GPU_RESTRICT"); off && off[0] == '0') {
+        if (const std::optional<std::string> off = platform::env::get("WHIRL_GPU_RESTRICT"); off && !off->empty() && (*off)[0] == '0') {
             g_r.note = "GPU: WHIRL_GPU_RESTRICT=0: every GPU stays visible to the GPU runtime";
             return;
         }

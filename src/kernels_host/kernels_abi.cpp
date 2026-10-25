@@ -25,6 +25,11 @@ std::optional<std::string> getEnv(std::string_view name) {
 
 namespace whirl::kernels {
 
+int gemvhWavesEnv() {
+    const std::optional<std::string> e = getEnv("GEMVH_WAVES");
+    return e ? std::atoi(e->c_str()) : 0;
+}
+
 const char* typeSuffix(QType t) {
     switch (t) {
         case QType::f32: return "f32";

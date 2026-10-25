@@ -51,11 +51,9 @@ const UmaMem* lastUmaMemory();
 // dedicated, hipMalloc started to spill to Shared Usage at 62.32 GiB (0.16 GiB in use by others).
 inline constexpr std::uint64_t uma_reserve = 1536ull << 20;
 
-// WHIRL_UMA_CHECK=0: no refusal and no KV pool cap (load anyway; unsupported)
-inline bool umaCheckOn() {
-    const char* v = std::getenv("WHIRL_UMA_CHECK");
-    return !(v && v[0] == '0' && v[1] == 0);
-}
+// WHIRL_UMA_CHECK=0: no refusal and no KV pool cap (load anyway; unsupported). Read on every call (once per load /
+// sizing estimate); defined in src/hip/uma_mem.cpp (platform::env::get, arch025 PL1b)
+bool umaCheckOn();
 
 inline std::uint64_t umaUsable(std::uint64_t dedicated) { return dedicated > uma_reserve ? dedicated - uma_reserve : 0; }
 
