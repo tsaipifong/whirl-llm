@@ -972,6 +972,55 @@ void testGovernor() {
     }
 }
 
+// arch025-x1m2 (mutant g2-tick-budget0): a video memory sample that reads ok but with a zero WDDM budget (no budget
+// known) is no pressure signal: the governor does nothing (no line, no re-allocation) and requests run as usual
+void testGovernorZeroBudget() {
+    constexpr std::uint64_t MiB = 1ull << 20;
+    ServerSetup su = baseSetup();
+    su.mc.parallel = 2;
+    su.mc.pool_tokens = 131072;
+    su.mc.slot_ctx = 16384;
+    su.tier = true;
+    su.tier_ram_mb = 256;
+    su.vram_probe = [] {
+        whirl::wddmwatch::Sample x;
+        x.ok = true;
+        x.local_usage = 28000 * MiB;
+        x.local_budget = 0;
+        x.nonlocal_usage = 400 * MiB;
+        return x;
+    };
+    su.vram_cfg.idle_sample_s = 0.2;
+    su.vram_cfg.governor = true;
+    whirl::memgov::Config gc;
+    gc.page = qwen35::kv_page;
+    gc.pool_start = 131072;
+    gc.pool_min = 4096;
+    gc.ctx = 16384;
+    gc.recover_s = 0.4;
+    gc.hold_s = 0.6;
+    gc.settle_s = 0.5;
+    su.gov = gc;
+    su.gov_margin = [](std::uint64_t) { return 1024 * MiB; };
+    g_log.clear();
+    TestServer srv(su);
+    const auto p = makePrompt(700, 74);
+    const std::string ref = decode(srv.model().greedyReference(p, 8, true));
+    CHECK(completionText(srv.post("/v1/completions", completionBody(p, 8))) == ref);
+    std::this_thread::sleep_for(std::chrono::milliseconds(800));  // several idle samples
+    CHECK(completionText(srv.post("/v1/completions", completionBody(p, 8))) == ref);
+    // the governor's own lines (" W memory governor: " / " I memory governor: "); the WDDM watch's spill warning names them
+    const std::size_t gov_lines = g_log.count(" W memory governor:") + g_log.count(" I memory governor:");
+    CHECK_EQ(gov_lines, 0u);
+    if (gov_lines != 0) {
+        std::lock_guard<std::mutex> lk(g_log.mu);
+        for (const auto& l : g_log.lines)
+            if (l.find(" memory governor:") != std::string::npos) std::fprintf(stderr, "  (governor_zero_budget: %s)\n", l.c_str());
+    }
+    CHECK_EQ(srv.model().resizes(), 0u);
+    CHECK(srv.get("/health").body.find("\"governor\":{\"on\":true,\"reduced\":false,\"pool_tokens\":131072,") != std::string::npos);
+}
+
 // REVIEW-GOV-1 P2-2: a checkpoint-buffer restore that fails part way (allocation error) frees what it got, the slot stays
 // parked, the next sample tries again, and once it succeeds the device memory is exactly what it was before the episode
 // (no leaked buffers). nth = 2: the parked slot's second checkpoint fails; nth = 4: the second shared prefix checkpoint.
@@ -4428,6 +4477,21 @@ void testPagePool() {
         CHECK_EQ(r.pool->freeCount(), 0u);
         r.nb.trackPending(false);
     }
+    // ---- ensure at the per-sequence limit (arch025-x1m2, mutant p2-ensure-seqpages-ge): exactly seqPages() pages fit,
+    // one more does not (and takes nothing)
+    {
+        const std::uint32_t sp = PpRig(4).model->seqPages();
+        PpRig r(sp + 1);
+        ListEvictor ev(*r.pool);
+        std::vector<std::int32_t> a;
+        CHECK(sp > 0);
+        CHECK(r.pool->ensure(a, 0, static_cast<std::uint64_t>(sp) * kv_page, ev));
+        CHECK_EQ(a.size(), static_cast<std::size_t>(sp));
+        std::vector<std::int32_t> b;
+        CHECK(!r.pool->ensure(b, 1, static_cast<std::uint64_t>(sp + 1) * kv_page, ev));
+        CHECK(b.empty());
+        CHECK_EQ(r.pool->freeCount(), 1u);
+    }
     // ---- ensure: already enough (no change); more than one sequence may hold (false, nothing taken); failure keeps the
     // pages taken so far (WHIRL's partial grow; the caller throws KvPoolFull / waits) and loses none
     {
@@ -4503,6 +4567,43 @@ struct CkRig {
         return nb.clean();
     }
 };
+
+// arch025-x1m2 (mutant c4-align-off-by-one): CkptStore's 256-byte rounding of each part at exact multiples of 256 and
+// just above them. The mock's own parts (32 / 64 / 64 bytes) never hit a multiple; real conv / ssm / hidden sizes do.
+void testCkptAlign() {
+    NullBackend nb;
+    MockConfig mc;
+    mc.parallel = 2;
+    mc.pool_tokens = 4096;
+    mc.n_embd = 64;  // hidden row: 256 bytes, already aligned
+    MockModel model(nb, tok(), mc);
+    std::uint64_t n_gdn = 0;
+    for (auto p : model.ssmState())
+        if (p) ++n_gdn;
+    CHECK(n_gdn > 0);
+    const std::uint64_t v4 = static_cast<std::uint64_t>(model.cfg().n_vocab) * 4;
+    // {conv bytes, ssm bytes, conv rounded, ssm rounded}
+    const std::array<std::uint64_t, 4> cases[] = {{256, 512, 256, 512}, {257, 511, 512, 512}, {1, 256, 256, 256}};
+    for (const auto& k : cases) {
+        CkptStore cs(nb, model, CkptStore::Layout{k[0], k[1], false});
+        const std::uint64_t parts = n_gdn * (k[2] + k[3]);
+        CHECK_EQ(cs.bytes(false), parts + 256 + v4);
+        Ckpt c;
+        cs.init(c, false);
+        CHECK_EQ(c.dev.bytes(), parts + 256 + v4);
+        std::size_t first = 0;
+        while (first < c.ssm.size() && c.ssm[first] == 0) ++first;
+        CHECK(first < c.ssm.size());
+        if (first < c.ssm.size()) {
+            CHECK_EQ(c.conv[first], c.dev.get());
+            CHECK_EQ(c.ssm[first] - c.conv[first], k[2]);
+        }
+        CHECK_EQ(c.hid, c.dev.get() + parts);
+        CHECK_EQ(c.logits, c.hid + 256);
+        cs.release(c, {});
+        CHECK(!c.dev);
+    }
+}
 
 void testCkptStore() {
     // ---- host_ok branch and sizes (the formula of Engine::initCkpt / ckptVram before arch024 S3)
@@ -5760,6 +5861,24 @@ void testFrStopTokens() {
         CHECK_EQ(finishReason(r), std::string("stop"));
         CHECK_EQ(usageCompletion(r), want);
     }
+    // arch025-x1m2 (mutant r3-stop-count-gt): a stop string that ends exactly where a token's piece starts; a token
+    // generated in the same cycle that starts at the stop's end is after the stop (not counted). Several boundaries, so
+    // some of them fall inside one MTP cycle.
+    std::size_t n_cases = 0;
+    for (std::size_t k = 24; k < 120 && k < ref.size(); k += 7) {
+        const std::size_t end = decode(std::span<const std::uint32_t>(ref.data(), k)).size();
+        if (end < 6 || decode(std::span<const std::uint32_t>(ref.data(), k - 1)).size() >= end) continue;
+        const std::string stop = full.substr(end - 5, 5);
+        if (full.find(stop) + stop.size() != end) continue;  // first match elsewhere: not this boundary
+        std::string js;
+        appendJsonStr(js, stop);
+        auto r = srv.post("/v1/completions",
+                          std::format("{{\"prompt\":{},\"max_tokens\":300,\"temperature\":0,\"ignore_eos\":true,\"stop\":[{}]}}", idsJson(p), js));
+        CHECK_EQ(finishReason(r), std::string("stop"));
+        CHECK_EQ(usageCompletion(r), static_cast<std::uint64_t>(k));
+        ++n_cases;
+    }
+    CHECK(n_cases >= 4);
 }
 
 // P3-12: a follow-up with a few new tokens on a cached prefix is not held behind a long prefill
@@ -6058,6 +6177,22 @@ void testTierBridgeSpill() {
         CHECK_EQ(e2.tier_id, e.tier_id);
         r.nb.eventSync(e.spill_ev.get());
     }
+    // arch025-x1m2 (mutant b1-spillshared-min-le): a shared prefix of exactly the tier's min_tokens is spilled, one
+    // token fewer is not
+    for (const std::uint32_t n : {128u, 127u}) {
+        TbRig r({}, {}, 128);
+        Spe e;
+        r.cs->init(e.ck, false);
+        e.valid = true;
+        e.n = n;
+        e.kind = "system";
+        e.tokens = tbTokens(n, 3);
+        e.pages = {40};
+        r.tb->spillSpe(e);
+        CHECK((e.tier_id != 0) == (n == 128u));
+        CHECK_EQ(r.tier->stats.spills, static_cast<std::uint64_t>(n == 128u ? 1 : 0));
+        if (e.spill_ev) r.nb.eventSync(e.spill_ev.get());
+    }
 }
 
 // a chat prompt: system, first user message, then the tail (assistant turns) as filler tokens
@@ -6300,6 +6435,11 @@ void testTierDropK2() {
     k2AllOrders("C", {{'e', 1000, {900}}, {'s', 950, {950}}}, 3000, {3000}, "sx");
     // D (all covered by x directly): e (1000, @900), o (2000, @1500), x (3000, @1000 @2000 @3000) -> both go.
     k2AllOrders("D", {{'e', 1000, {900}}, {'o', 2000, {1500}}}, 3000, {1000, 2000, 3000}, "x");
+    // E (arch025-x1m2, mutant b2-contained-order: the pass must run longest first): e (1000, @900) ⊂ o (2000, @950 @1800)
+    // ⊂ p (2500, @1900 @2500) ⊂ x (3000, @2500 @3000). x covers p (@2500); only p holds a point in [1800,2000] for o, so
+    // once p goes o stays (demoted); o then covers e (@950 in [900,1000]) -> e goes. Shortest first, e would be judged
+    // while o was still marked for removal and kept as well (one extra entry in RAM).
+    k2AllOrders("E", {{'e', 1000, {900}}, {'o', 2000, {950, 1800}}, {'p', 2500, {1900, 2500}}}, 3000, {2500, 3000}, "ox");
 }
 
 // ---------------------------------------------------------------------------
@@ -6755,8 +6895,12 @@ void testOwnerCheck() {
         const std::uint64_t v0 = EngineThread::violations();
         std::optional<std::int32_t> a, b;
         bool threw = false;
+        std::ostringstream id;
+        id << std::this_thread::get_id();
+        std::size_t lines_after_first = 0;  // arch025-x1m2 (mutant t1-log-not-first): the FIRST violation logs
         try {
             a = r.pool->takeFree();
+            lines_after_first = g_log.count("E owner check: PagePool::takeFree called on thread " + id.str());
             b = r.pool->takeFree();
         } catch (...) {
             threw = true;
@@ -6766,8 +6910,7 @@ void testOwnerCheck() {
         CHECK(!threw);
         CHECK(a && b && *a != *b);  // both calls did their work, as before S10
         CHECK_EQ(EngineThread::violations(), v0 + 2);
-        std::ostringstream id;
-        id << std::this_thread::get_id();
+        CHECK_EQ(lines_after_first, 1u);
         CHECK_EQ(g_log.count("E owner check: PagePool::takeFree called on thread " + id.str()), 1u);
         CHECK_EQ(g_log.count("owner check:"), 1u);
     }
@@ -7660,6 +7803,8 @@ int main(int argc, char** argv) {
         {"governor", testGovernor},
         {"governor_restore", testGovernorRestore},
         {"ckpt_store", testCkptStore},
+        {"ckpt_align", testCkptAlign},
+        {"governor_zero_budget", testGovernorZeroBudget},
         {"ckpt_f1", testCkptF1},
         {"ckpt_restore_fail", testCkptRestoreFail},
         {"gov_park_spes", testGovParkSpes},
