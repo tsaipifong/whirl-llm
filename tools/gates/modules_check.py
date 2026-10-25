@@ -19,6 +19,7 @@ import fnmatch
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -27,6 +28,8 @@ import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.normpath(os.path.join(HERE, "..", ".."))
+
+STEP_PREFIXES = ("srv_", "golden_", "seq_", "st_", "kt_")
 
 
 def tree_files(root):
@@ -91,6 +94,15 @@ def check(mj, files, steps):
             for s in sts:
                 if s not in steps:
                     errs.append(f"{n}: when {f}: step {s} is not in release_gate.ps1")
+        # arch025-kvram719tag: a manual item must not carry a check that the gate has as a step this module does not run (it
+        # was "P-719: kvram719" free text while tools/repro/kvram719_tier.ps1 ran as no step): a word equal to a gate step
+        # name, or to one without its srv_ / golden_ / seq_ / st_ / kt_ prefix, that is not in this module's steps is an error.
+        for m in d.get("manual") or []:
+            for w in re.findall(r"[A-Za-z][A-Za-z0-9_]*", str(m)):
+                hit = sorted(x for x in steps if x not in st and (x == w or (len(w) >= 6 and any(x == p + w for p in STEP_PREFIXES))))
+                if hit:
+                    errs.append(f"{n}: manual item {m!r} names gate step {hit[0]}: put it in steps, not in free text")
+                    break
         c = d.get("callers")
         if c is not None and c != "rdeps" and not (isinstance(c, list) and all(x in mods and x != n for x in c)):
             errs.append(f"{n}: callers must be \"rdeps\" or a list of other module names, got {c!r}")
