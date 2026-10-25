@@ -136,6 +136,20 @@ regression check only, not GPU recall: what the old map missed, the new one may 
 named case hit, every rate >= 95 %, nothing narrowed; 1 otherwise. A changed host function that dispatches
 kernels (a host user of a `.hip` file) lists those kernels' tests (kernel-test functions, `kt_full`).
 
+A changed line outside any function (measure-tools P1, `tools/impact/declscan.py`) selects the users of the
+name it **declares** (a member `std::vector<DevBuf> allocations;` selects the functions that use
+`allocations`, not every function that names `DevBuf`); type names are reported as `declarations ... type`.
+A declaration that appears unchanged on the other side of the diff (moved between headers) selects nothing;
+`#include` lines mean "compile the file and its includers"; `#define` selects the macro's users; `#if` lines
+and a lone moved `}` fall back to the whole file. Each report also names **behaviour classes** (lifetime,
+layout, dispatch, numeric, schedule, io, sizing, pinned, device, protocol, vision, compat, version, build,
+doc) with the measurements they call for and the GPU checks outside `release_gate.ps1` (E2, kvram719, visab,
+dense / DFlash, E6, the version bump); classes only add steps (`srv_gpu_select`, `srv_env_*`), never remove
+one. Fallbacks that come from a gap of the map are printed as `DEFECT`. Since the declared-name rule narrows
+on purpose, `--baseline` accepts a narrowed commit only when the new tools saw a declaration change in it and
+it loses no step its ground truth needed (`--arch024`: the GPU checks each arch024 step ran; `RANGE_CASES`:
+the 0.2.4 range 605281b..9844fde).
+
 ### <a id="module-gate"></a>Module gate (dev-time only)
 
 `tools/gates/modules.json` maps each engine module (arch024 M1-M8, plus the cross-module contracts) to

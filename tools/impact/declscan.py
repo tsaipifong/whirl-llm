@@ -1,0 +1,366 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Declared-name parser for a changed line outside any function (measure-tools P1, DESIGN B1.1-1.2).
+
+impact.py used to take every identifier on such a line as "changed", type names included, so a member
+`std::vector<device::DevBuf> allocations;` selected every function that mentions DevBuf (605281b..9844fde: model.h
+147, engine_api.h 101, vision.h 43 users). This module returns the DECLARED entity instead:
+
+    declared(src, line) -> {"kind": ..., "decls": [{"name", "cls", "what", "types"}], "target": include target}
+
+kind: "decl" (declarators found), "enumerator", "include", "macro", "cond" (#if / #else / #endif ...: file scope),
+"pragma", "assert" (static_assert: compile time only), "scope" (using namespace: name lookup of the file), "punct"
+(braces, access specifiers, namespace openers), "unparsed" (code the parser does not understand: impact.py fails
+closed and reports it as a map defect).
+decls: name = the declared name (member, function, variable, alias, type, enumerator, macro); cls = the class /
+struct / union / enum the line is in (innermost), None at namespace scope; what = member | function | variable |
+type | alias | enumerator | macro; types = the other identifiers of the declaration (type_changed information,
+never selection). Text scanner (stdlib only), like cxxscan; it over-approximates where it is unsure.
+"""
+from __future__ import annotations
+
+import re
+
+import cxxscan
+
+NOISE = {"const", "constexpr", "consteval", "constinit", "static", "inline", "struct", "class", "enum", "union", "public",
+         "private", "protected", "virtual", "override", "final", "void", "bool", "int", "unsigned", "signed", "char",
+         "short", "long", "float", "double", "auto", "std", "size_t", "uint8_t", "uint16_t", "uint32_t", "uint64_t",
+         "int8_t", "int16_t", "int32_t", "int64_t", "string", "vector", "optional", "array", "map", "set", "pair",
+         "unique_ptr", "shared_ptr", "function", "atomic", "mutex", "string_view", "true", "false", "nullptr", "typename",
+         "template", "noexcept", "explicit", "operator", "mutable", "volatile", "extern", "friend", "default", "delete",
+         "static_cast", "reinterpret_cast", "const_cast", "dynamic_cast", "sizeof", "alignof", "decltype", "alignas",
+         "this", "return", "new", "using", "namespace", "typedef", "register", "thread_local", "chrono", "whirl"}
+_ident = re.compile(r"~?[A-Za-z_]\w*")
+_access = re.compile(r"^\s*(?:public|private|protected)\s*:(?!:)\s*")
+_cache: dict = {}
+
+
+def _prep(src: str):
+    """per source: blanked text (comments / strings, preprocessor lines too), line offsets, the brace frames open at
+    every line start, the matching brace of every '{', and the preprocessor directive each line belongs to"""
+    key = hash(src)
+    if key in _cache:
+        return _cache[key]
+    clean0, _ = cxxscan._blank(src)  # comments and strings blanked, '#' lines kept
+    raw_lines = src.split("\n")
+    c0_lines = clean0.split("\n")
+    pp = {}  # line -> (start line, directive text of the start line)
+    i = 0
+    while i < len(c0_lines):
+        if c0_lines[i].lstrip().startswith("#"):
+            start = i
+            while True:
+                pp[i + 1] = (start + 1, raw_lines[start])
+                if not raw_lines[i].rstrip().endswith("\\") or i + 1 >= len(c0_lines):
+                    break
+                i += 1
+        i += 1
+    clines = [(" " * len(l) if (n + 1) in pp else l) for n, l in enumerate(c0_lines)]
+    clean = "\n".join(clines)
+    starts = [0]
+    for l in clines:
+        starts.append(starts[-1] + len(l) + 1)
+    frames_at = {}  # line -> tuple of frames (kind, name, open pos, header)
+    match = {}
+    stack = []
+    seg = 0
+    line = 1
+    frames_at[1] = ()
+    for p, c in enumerate(clean):
+        if c == "\n":
+            line += 1
+            frames_at[line] = tuple(stack)
+        elif c == ";":
+            seg = p + 1
+        elif c == "{":
+            header = clean[seg:p]
+            stack.append((_classify(header, stack), _hname(header), p, header))
+            seg = p + 1
+        elif c == "}":
+            if stack:
+                match[stack[-1][2]] = p
+                stack.pop()
+            seg = p + 1
+    _cache.clear()  # one source at a time is enough (impact.py walks a file's lines together)
+    _cache[key] = (clean, clines, starts, frames_at, match, pp)
+    return _cache[key]
+
+
+def _classify(header: str, stack) -> str:
+    if any(f[0] in ("func", "init") for f in stack):
+        return "inner"
+    h = _strip_lead(header)
+    if re.match(r"^(?:inline\s+)?namespace\b", h) or re.match(r"^extern\b", h):
+        return "ns"
+    if re.match(r"^(?:typedef\s+)?enum\b", h):
+        return "enum"
+    if cxxscan._func_name(header):
+        return "func"
+    if re.search(r"\b(class|struct|union)\s+(?:alignas\([^)]*\)\s*)?[A-Za-z_]\w*[^(){};=]*$", cxxscan._untemplate(h)):
+        return "class"
+    return "init"
+
+
+def _hname(header: str):
+    h = cxxscan._untemplate(_strip_lead(header))
+    m = re.search(r"\b(?:class|struct|union|enum(?:\s+(?:class|struct))?)\s+(?:alignas\([^)]*\)\s*)?(?:[A-Z_][A-Z0-9_]+\s+)?([A-Za-z_]\w*)", h)
+    return m.group(1) if m else None
+
+
+def _strip_lead(s: str) -> str:
+    s = s.strip()
+    while True:
+        t = _access.sub("", s)
+        t = re.sub(r"^\[\[[^\]]*\]\]\s*", "", t)
+        if t == s:
+            return s
+        s = t.strip()
+
+
+def _top(s: str, chars: str):
+    """positions of chars in s outside (), [], {} and template <> (a '<' after an identifier opens a template)"""
+    out, d, a = [], 0, 0
+    for k, c in enumerate(s):
+        if c in "([{":
+            d += 1
+        elif c in ")]}":
+            d -= 1
+        elif c == "<" and k and (s[k - 1].isalnum() or s[k - 1] in "_ ") and d == 0 and not s[k + 1:k + 2] == "<":
+            a += 1
+        elif c == ">" and a and d == 0:
+            a -= 1
+        elif c in chars and d == 0 and a == 0:
+            out.append(k)
+    return out
+
+
+def _parse_stmt(stmt: str, cls, term: str):
+    """one declaration statement -> (kind, decls)"""
+    s = _strip_lead(stmt)
+    s = cxxscan._untemplate(s).strip() if s.startswith("template") else s
+    s = _strip_lead(s)
+    if not s:
+        return "punct", []
+    if re.match(r"^(?:inline\s+)?namespace\b", s) or re.fullmatch(r"extern\s*", s):
+        return "punct", []
+    if s.startswith("static_assert"):
+        return "assert", []
+    if re.match(r"^using\s+namespace\b", s):
+        return "scope", []
+    m = re.match(r"^using\s+([A-Za-z_]\w*)\s*(?:\[\[[^\]]*\]\]\s*)?=(.*)$", s, re.S)
+    if m:
+        return "decl", [_d(m.group(1), cls, "alias", m.group(2))]
+    m = re.match(r"^using\s+(?:typename\s+)?[\w:]*::(~?[A-Za-z_]\w*)\s*$", s)
+    if m:
+        return "decl", [_d(m.group(1), cls, "alias", "")]
+    s = re.sub(r"^friend\s+", "", s)
+    s = re.sub(r"^extern\s+", "", s)
+    if s.startswith("typedef"):
+        body = s[len("typedef"):]
+        fp = re.search(r"\(\s*[*&]\s*([A-Za-z_]\w*)\s*\)", body)
+        nm = fp.group(1) if fp else (re.findall(r"[A-Za-z_]\w*", re.sub(r"\[[^\]]*\]", "", body)) or [None])[-1]
+        return ("decl", [_d(nm, cls, "alias", body)]) if nm else ("unparsed", [])
+    m = re.match(r"^(?:typedef\s+)?(?:enum(?:\s+(?:class|struct))?|struct|class|union)\s+(?:alignas\([^)]*\)\s*)?"
+                 r"(?:[A-Z_][A-Z0-9_]+\s+)?([A-Za-z_]\w*)\s*(?::(?!:)(.*))?$", s, re.S)
+    if m and (term in "{;" or term == ""):
+        return "decl", [_d(m.group(1), None if term == "{" else cls, "type", m.group(2) or "")]
+    eq = _top(s, "=")
+    head = s[:eq[0]] if eq else s
+    par = _top(head, "(")
+    # a '(' at top level: function (or a function pointer / a constructor-style initializer)
+    first_paren = None
+    dd = 0
+    for k, c in enumerate(head):
+        if c == "(" and dd == 0:
+            first_paren = k
+            break
+        if c in "[{":
+            dd += 1
+        elif c in "]}":
+            dd -= 1
+    if first_paren is not None:
+        fp = re.match(r"\(\s*[*&]\s*(?:[A-Za-z_]\w*::\s*\*)?\s*([A-Za-z_]\w*)\s*\)", head[first_paren:])
+        if fp:
+            return "decl", [_d(fp.group(1), cls, "variable", head[:first_paren])]
+        pre = head[:first_paren].rstrip()
+        mo = re.search(r"(operator\s*(?:\(\)|[^\s(]+|\s+[\w:<>*& ]+?))\s*$", pre)
+        if mo:
+            return "decl", [_d("operator" + re.sub(r"\s+", "", mo.group(1)[len("operator"):]), cls, "function", pre[:mo.start()])]
+        mn = re.search(r"(~?[A-Za-z_]\w*)\s*(?:<[^<>]*>)?\s*$", pre)
+        if mn and mn.group(1) not in ("decltype", "alignas", "__declspec", "sizeof", "__attribute__"):
+            nm = mn.group(1)
+            if "::" in pre[:mn.start()].rstrip()[-2:] and cls is None:
+                q = re.search(r"([A-Za-z_]\w*)\s*::\s*$", pre[:mn.start()])
+                cl = q.group(1) if q else None
+            else:
+                cl = cls
+            return "decl", [_d(nm, cl, "function", pre[:mn.start()] + head[first_paren:])]
+        if not mn:
+            return "unparsed", []
+    # variables: cut the initializer, the bit-field width and array bounds; split the declarators
+    parts = []
+    last = 0
+    for k in _top(s, ","):
+        parts.append(s[last:k])
+        last = k + 1
+    parts.append(s[last:])
+    decls = []
+    typetxt = ""
+    for n, p in enumerate(parts):
+        e = _top(p, "=")
+        p = p[:e[0]] if e else p
+        bf = [k for k in _top(p, ":") if not (p[k - 1:k] == ":" or p[k + 1:k + 2] == ":")]
+        p = p[:bf[0]] if bf else p
+        p = re.sub(r"\[[^\]]*\]", " ", p)
+        p = re.sub(r"\{[^{}]*\}", " ", p)
+        ids = [x for x in re.findall(r"[A-Za-z_]\w*", p)]
+        if not ids:
+            continue
+        nm = ids[-1]
+        if n == 0:
+            typetxt = p[:p.rfind(nm)]
+        decls.append(_d(nm, cls, "member" if cls else "variable", typetxt))
+    if not decls:
+        return "unparsed", []
+    return "decl", decls
+
+
+def _d(name, cls, what, typetxt, sig=None):
+    txt = re.sub(r"[A-Za-z_]\w*\s*::", " ", typetxt or "")  # namespace / class qualifiers are not types
+    types = sorted({x for x in re.findall(r"[A-Za-z_]\w*", txt)} - NOISE - {name})
+    if what == "variable" and cls:
+        what = "member"
+    return {"name": name, "cls": cls, "what": what, "types": types, "sig": sig}
+
+
+def declared(src: str, line: int) -> dict:
+    clean, clines, starts, frames_at, match, pp = _prep(src)
+    if line in pp:
+        st, txt = pp[line]
+        t = txt.strip()
+        m = re.match(r"#\s*(\w+)\s*(.*)", t)
+        kw, rest = (m.group(1), m.group(2)) if m else ("", "")
+        if kw == "include":
+            tg = re.match(r'[<"]([^">]+)[">]', rest)
+            return {"kind": "include", "decls": [], "target": tg.group(1) if tg else rest}
+        if kw in ("define", "undef"):
+            nm = re.match(r"([A-Za-z_]\w*)", rest)
+            rl = src.split("\n")
+            k, full = st - 1, []
+            while k < len(rl):
+                full.append(rl[k].rstrip().rstrip("\\"))
+                if not rl[k].rstrip().endswith("\\"):
+                    break
+                k += 1
+            ds = [_d(nm.group(1), None, "macro", "", ("#", " ".join(" ".join(full).split())))] if nm else []
+            return {"kind": "macro", "decls": ds, "target": None}
+        if kw == "pragma":
+            return {"kind": "pragma", "decls": [], "target": None}
+        return {"kind": "cond", "decls": [], "target": None}
+    if line < 1 or line > len(clines):
+        return {"kind": "punct", "decls": [], "target": None}
+    frames = frames_at.get(line, ())
+    ls, le = starts[line - 1], starts[line - 1] + len(clines[line - 1])
+    if not clines[line - 1].strip():
+        return {"kind": "punct", "decls": [], "target": None}
+    # inside an initializer: the declaration is the statement that opened the outermost initializer block
+    for k, f in enumerate(frames):
+        if f[0] == "init":
+            outer_cls = next((g[1] for g in reversed(frames[:k]) if g[0] in ("class", "enum")), None)
+            kd, ds = _parse_stmt(f[3].rstrip().rstrip("="), outer_cls, "{")
+            return {"kind": kd if ds else "unparsed", "decls": ds, "target": None}
+    inner = frames[-1] if frames else None
+    if inner and inner[0] == "enum":
+        txt = clean[max(ls, inner[2] + 1):le]
+        cut = txt.find("}")
+        if cut >= 0:
+            txt = txt[:cut]
+        ds = []
+        for part in txt.split(","):
+            mm = re.match(r"\s*([A-Za-z_]\w*)", part)
+            if mm:
+                ds.append(_d(mm.group(1), inner[1], "enumerator", "", (inner[1], " ".join(clines[line - 1].split()))))
+        if ds:
+            return {"kind": "enumerator", "decls": ds, "target": None}
+        if not re.sub(r"[\s{}();,:]", "", txt):
+            return {"kind": "punct", "decls": [], "target": None}
+        return {"kind": "unparsed", "decls": [], "target": None}
+    # statements at class / namespace scope that overlap the line
+    lo = inner[2] + 1 if inner else 0
+    p = ls
+    while p > lo and clean[p - 1] not in ";{}":
+        p -= 1
+    decls, kinds = [], []
+    first = True
+    while p < len(clean) and (first or (p < le and clean[p:le].strip())):
+        first = False
+        q = p
+        d = 0
+        while q < len(clean):
+            c = clean[q]
+            if c in "([":
+                d += 1
+            elif c in ")]":
+                d -= 1
+            elif c in ";{}" and d <= 0:
+                break
+            q += 1
+        stmt = clean[p:q]
+        term = clean[q] if q < len(clean) else ""
+        cls = next((g[1] for g in reversed(frames) if g[0] in ("class", "enum")), None) if inner and inner[0] == "class" else None
+        if inner and inner[0] == "class":
+            cls = inner[1]
+        on_line = _strip_lead(clean[max(p, ls):min(q, le)])  # the part of the statement on this line (access spec dropped)
+        if (stmt.strip() and on_line) or (term == "{" and ls <= q < le):
+            kd, ds = _parse_stmt(stmt, cls, term)
+            for x in ds:  # the whole statement: an identical statement on the other side of the diff = moved, unchanged
+                x["sig"] = (cls, " ".join(stmt.split()) + term)
+            if term == "{" and kd == "decl" and ds and ds[0]["what"] == "type":
+                ds[0]["cls"] = None
+            kinds.append(kd)
+            decls += ds
+        if term == "{":
+            kd2 = _classify(stmt, list(frames))
+            if kd2 == "class":
+                frames = frames + ((kd2, _hname(stmt), q, stmt),)
+                inner = frames[-1]
+                p = q + 1
+                continue
+            if kd2 == "enum" and q < le:
+                end = match.get(q, len(clean))
+                for part in clean[q + 1:min(end, le)].split(","):
+                    mm = re.match(r"\s*([A-Za-z_]\w*)", part)
+                    if mm:
+                        decls.append(_d(mm.group(1), _hname(stmt), "enumerator", ""))
+                p = end + 1
+                continue
+            p = match.get(q, len(clean)) + 1
+            continue
+        if term == "}":
+            frames = frames[:-1] if frames else frames
+            inner = frames[-1] if frames else None
+        p = q + 1
+    if decls:
+        return {"kind": "decl", "decls": decls, "target": None}
+    for k in ("unparsed", "scope", "assert"):
+        if k in kinds:
+            return {"kind": k, "decls": [], "target": None}
+    return {"kind": "punct", "decls": [], "target": None}
+
+
+def brace_partners(src: str, line: int) -> list:
+    """1-based lines of the partner of every '{' / '}' on line (comments, strings, preprocessor lines ignored);
+    None for a brace with no partner. impact.py: a changed brace line whose partner line is unchanged means a
+    block moved its edge (scope of the unchanged lines between them changed): fail closed."""
+    clean, clines, starts, frames_at, match, pp = _prep(src)
+    if line < 1 or line > len(clines):
+        return []
+    rev = {v: k for k, v in match.items()}
+    out = []
+    import bisect
+    for p in range(starts[line - 1], starts[line - 1] + len(clines[line - 1])):
+        c = clean[p]
+        if c in "{}":
+            q = match.get(p) if c == "{" else rev.get(p)
+            out.append(None if q is None else bisect.bisect_right(starts, q))
+    return out

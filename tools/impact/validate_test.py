@@ -50,5 +50,25 @@ try:
     expect("dispatch: a function that does not dispatch it does not (block)", "testGemv" not in r["kernel_tests"], r["kernel_tests"])
 finally:
     impact.show = real_show
+# measure-tools P1: narrowed commits vs the baseline tools are accepted only when the declared-name rule explains them
+# and no ground-truth step is lost
+gt = {"aaaaaaa": {"golden_swift", "srv_cache_balance"}}
+nar = [("aaaaaaa", {"steps": ["srv_cache_balance"], "paths": []}),      # ground truth loses a needed step -> fail
+       ("bbbbbbb", {"steps": ["kt_full"], "paths": ["cli.decode"]}),     # declaration seen -> explained
+       ("ccccccc", {"steps": ["srv_fast"], "paths": []}),                # no declaration seen -> unexplained -> fail
+       ("aaaaaaa", {"steps": ["kt_full"], "paths": []})]                 # ground truth, lost step not needed -> explained
+w = {"aaaaaaa": {"decl": ["Model::x"]}, "bbbbbbb": {"decl": ["Model::allocations"]}, "ccccccc": {"decl": [], "moved": 0}}
+fails, lines, expl, gpu_expl = validate.classify_narrowed(nar, w, gt)
+expect("narrowed: ground truth losing a needed step fails (block)", fails.count("aaaaaaa") == 1, lines)
+expect("narrowed: no declaration change = unexplained (block)", "ccccccc" in fails, lines)
+expect("narrowed: declaration seen = explained (pass)", "bbbbbbb" in expl and gpu_expl == 2, (expl, gpu_expl))
+# covered(): release steps with <mode>, golden, checks, P-size via the sizing class
+rep = {"release_gate_steps": ["seq_swift_<mode>", "golden_moe"], "outside_gate_checks": ["kvram719: tools/repro/kvram719_tier.ps1"],
+       "behaviour": {"sizing": ["path startup"]}, "server_gate_suites": [], "golden": [], "extra": {}, "cpu_tests": {}, "kernel_tests": []}
+expect("covered: seq_swift_<mode> expands to seq_swift_balance", validate.covered(rep, "release:seq_swift_balance"))
+expect("covered: golden = either golden_<model>", validate.covered(rep, "golden"))
+expect("covered: named check", validate.covered(rep, "check:kvram719") and not validate.covered(rep, "check:E2"))
+expect("covered: P-size = sizing class", validate.covered(rep, "check:P-size"))
+expect("covered: missing step (block)", not validate.covered(rep, "release:srv_gpu_select"))
 print(f"validate test: {ok}/{ok + bad} ok")
 sys.exit(1 if bad else 0)

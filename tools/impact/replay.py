@@ -63,6 +63,9 @@ for s in git("log", "--format=%h", "--no-merges", f"--skip={a.skip}", f"-{a.n}",
         continue
     r = impact.analyze(prod, m, s, f"{s}^")
     res[s] = {"steps": sorted(r["release_gate_steps"]), "paths": sorted(r["paths"]),
-              "cpu": sorted(f"{e}:{x}" for e, v in r["cpu_tests"].items() for x in v), "kt": sorted(r["kernel_tests"])}
+              "cpu": sorted(f"{e}:{x}" for e, v in r["cpu_tests"].items() for x in v), "kt": sorted(r["kernel_tests"]),
+              # measure-tools P1: what the declared-name rule saw (absent in older tools): declared names, moved notes
+              "decl": sorted({d["name"] for d in r.get("declarations", [])}),
+              "moved": sum(1 for n in r["notes"] if "moved / re-indented" in n), "defects": r.get("map_defects", [])}
 json.dump(res, open(a.out, "w", encoding="utf-8"), indent=0)
 print(f"replay: {len(res)} commits, {round(time.time() - t0)} s ({a.tools})", file=sys.stderr)

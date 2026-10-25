@@ -30,6 +30,7 @@ from collections import defaultdict
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import cxxscan  # noqa: E402
+import declscan  # noqa: E402
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 
@@ -75,8 +76,13 @@ def git(*a, root=ROOT):
 
 
 def show(rev, path):
-    r = subprocess.run(["git", "-C", ROOT, "show", f"{rev}:{path}"], capture_output=True)
-    return r.stdout.decode("utf-8", "replace") if r.returncode == 0 else None
+    k = (ROOT, rev, path)
+    if k not in _show_cache:
+        if len(_show_cache) > 4000:
+            _show_cache.clear()
+        r = subprocess.run(["git", "-C", ROOT, "show", f"{rev}:{path}"], capture_output=True)
+        _show_cache[k] = r.stdout.decode("utf-8", "replace") if r.returncode == 0 else None
+    return _show_cache[k]
 
 
 def parse_diff(diff):
@@ -118,6 +124,19 @@ def analyze(changes, m, new_rev, old_rev):
     for h in m["hip"].values():
         for u in h["host_users"]:
             dispatch_tests[u] |= set(h["tests"])
+    # measure-tools P1: what each changed C++ file changes (functions, declarations, includes, conditions), parsed
+    # once; the declaration statements of both sides (sigs) tell a moved declaration from a changed one
+    FC = {p: file_changes(p, c, new_rev, old_rev) for p, c in changes.items()
+          if p.endswith((".cpp", ".h", ".inc", ".in")) and not (p.startswith(("tests/", "tools/")))}
+    sigs = {"new": set(), "old": set()}
+    for fc in FC.values():
+        for x in fc["decls"]:
+            if x["sig"]:
+                sigs[x["side"]].add(x["sig"])
+    beh = defaultdict(set)      # behaviour class -> reasons (B1.3)
+    decl_rows = []              # declared names per changed declaration line (B1.1)
+    defects = []                # map defects (B1.4)
+    test_steps = set()          # release steps of test executables whose sources changed
     for path, ch in sorted(changes.items()):
         rule = next((r for r in FILE_RULES if fnmatch.fnmatch(path, r[0])), None)
         if rule and not path.endswith((".cpp", ".h", ".hip")) or (rule and path.startswith(("tests/", "tools/"))):
@@ -130,6 +149,11 @@ def analyze(changes, m, new_rev, old_rev):
                 exe = [e for e, fl in m["executables"].items() if path in fl]
                 for e in exe:
                     reruns[f"{e} (test source changed)"].add(path)
+                    # measure-tools P1 (map defect found on 605281b..9844fde: tier_tests.cpp changed, cpu_tier not
+                    # selected): the release step that runs the changed test executable
+                    st = next((k for k, v in (m["declared"].get("release_steps") or {}).items() if v == f"exe:{e}"), None)
+                    if st:
+                        test_steps.add(st)
             continue
         if path.endswith(".hip"):
             h = m["hip"].get(path)
@@ -155,41 +179,38 @@ def analyze(changes, m, new_rev, old_rev):
             continue
         host_code = True
         archs |= {"gfx1201", "gfx1151"}
-        touched = set()
-        outside_ids = set()   # identifiers on changed lines outside any function (declarations, tables)
-        outside_types = set()  # the class / struct bodies those lines are in (fallback when no function uses the ids)
-        outside = False
-        code_changed = False
-        for rev, key in ((new_rev, "new"), (old_rev, "old")):
-            lines = ch[key]
-            if not lines:
-                continue
-            if rev:
-                src = show(rev, path if key == "new" else ch["old_path"])
-            elif key == "new" and os.path.exists(os.path.join(ROOT, path)):
-                src = open(os.path.join(ROOT, path), encoding="utf-8", errors="replace").read()
-            else:
-                src = None
-            if src is None:
-                continue
-            sc = cxxscan.scan(src)
-            clean = cxxscan.blank_code(src).split("\n")
-            for ln in lines:
-                txt = clean[ln - 1] if 0 < ln <= len(clean) else ""
-                if not txt.strip():
-                    continue  # comment / blank line: no code changed here
-                code_changed = True
-                f = cxxscan.func_at(sc, ln)
-                if f is None:
-                    outside = True
-                    outside_ids |= {x for x in re.findall(r"[A-Za-z_]\w*", txt) if len(x) > 2} - DECL_NOISE
-                    if key == "new":
-                        outside_types |= set(cxxscan.classes_at(sc, ln)) - DECL_NOISE
-                else:
-                    touched.add(f.name)
-        if not code_changed:
+        fc = FC[path]
+        touched = fc["touched"]
+        outside = fc["outside"]
+        outside_types = fc["types_at"]  # the class / struct bodies the changed lines are in (fallback when no function uses the names)
+        for t, why_b in fc["behaviour"]:
+            beh[t].add(why_b)
+        if not fc["code"]:
             hits.append((path, "comments / blank lines only: no product path"))
             continue
+        # measure-tools P1 (B1.1): a declaration selects the users of the DECLARED names, not of every identifier on
+        # the line (type names such as DevBuf / EventH are type_changed information). A declaration that appears
+        # unchanged on the other side of the diff (moved between headers, re-indented) selects nothing.
+        decls = [x for x in fc["decls"] if not (x["sig"] and x["sig"] in sigs["old" if x["side"] == "new" else "new"])]
+        moved = len(fc["decls"]) - len(decls)
+        member_names = {(x["cls"], x["name"]) for x in decls if x["cls"] and x["what"] in ("member", "function", "alias")}
+        free_names = {x["name"] for x in decls if (x["cls"], x["name"]) not in member_names}
+        outside_ids = free_names | {n for _, n in member_names}
+        for x in decls:
+            decl_rows.append({"file": path, "side": x["side"], "line": x["line"], "name": (x["cls"] + "::" if x["cls"] else "") + x["name"],
+                              "what": x["what"], "types": x["types"]})
+        if moved:
+            notes.append(f"{path}: {moved} declaration(s) unchanged on the other side of the diff (moved / re-indented): build only")
+        for side, ln, tg in fc["includes"]:
+            reruns[f"build: compile {path} and every file that includes it (#include changed)"].add(f"{path}:{ln} {tg}")
+        fail_closed = []
+        for side, ln, k in fc["cond"]:
+            fail_closed.append(f"{side}:{ln} {'preprocessor condition' if k == 'cond' else 'using namespace'}")
+        for side, ln, txt in fc["unparsed"]:
+            fail_closed.append(f"{side}:{ln} unparsed")
+            defects.append(f"{path}:{ln} ({side}): declaration line the parser does not understand: {txt}")
+        for side, nb in fc["unbalanced"]:
+            fail_closed.append(f"{side}: braces / namespace lines changed without their block ({nb})")
         for name in sorted(touched):
             nid = f"{path}::{name}"
             cands = [nid] if nid in F else by_name.get(name, [])
@@ -206,30 +227,45 @@ def analyze(changes, m, new_rev, old_rev):
                 tests |= set(d["tests"])
                 tests |= dispatch_tests.get(d["name"], set())
             hits.append((path, f"function {name}"))
-        if outside:
+        if outside and (decls or fail_closed):
             # declarations / tables: the functions (in this file and, for a header, in every includer) that use one of
-            # the changed identifiers; if none is found, every function of those files
+            # the declared names; if none is found, every function of those files
             scope = [path] + (m["includers"].get(path, []) if path.endswith(".h") else [])
             users = {}
             scans = {}
+            fsrc = {}
             for f in scope:
                 src = show(new_rev, f) if new_rev else (open(os.path.join(ROOT, f), encoding="utf-8", errors="replace").read()
                                                         if os.path.exists(os.path.join(ROOT, f)) else None)
                 if src is None:
                     continue
                 scans[f] = cxxscan.scan(src)
-                for fn in scans[f].funcs:
-                    if fn.idents & outside_ids:
-                        users[(f, fn.name)] = fn.idents & outside_ids
+                fsrc[f] = src
+            derived = derived_classes({c for c, _ in member_names}, fsrc.values())
+            known_cls = {c for sc2 in scans.values() for c, _, _ in sc2.classes}
+            for f, sc2 in scans.items():
+                for fn in sc2.funcs:
+                    u = decl_users(fn, member_names, free_names, derived, known_cls)
+                    if u:
+                        users[(f, fn.name)] = u
             # arch024-S12: a member added to a struct that no function reads yet (a test lands before its fix, e.g.
             # a4626b9 PinnedGpu::adapter_shared) changes every user of the struct: fall back to the enclosing types
             struct_fallback = False
-            if not users and outside_types:
+            outside_types = outside_types | {c for c, _ in member_names}
+            # a declaration removed with all its users (old side only, no user left in the new tree): the changed users
+            # are touched functions already; nothing else can use it (the build would fail), so no fallback (S7 kNoTag)
+            new_names = {(x["cls"], x["name"]) for x in decls if x["side"] == "new"}
+            live = [x for x in decls if x["side"] == "new" or (x["cls"], x["name"]) in new_names]
+            if decls and not live and not users:
+                notes.append(f"{path}: removed declaration(s) {', '.join(sorted({x['name'] for x in decls})[:4])} with no user left: build only")
+            if live and not users and outside_types:
                 struct_fallback = True
                 for f, sc2 in scans.items():
                     for fn in sc2.funcs:
-                        if fn.idents & outside_types:
-                            users[(f, fn.name)] = fn.idents & outside_types
+                        q = fn.name.split("::")
+                        own = {q[-2]} & outside_types if len(q) >= 2 else set()  # P1: member functions of the type too
+                        if fn.idents & outside_types or own:
+                            users[(f, fn.name)] = (fn.idents & outside_types) | own
                 if users:
                     notes.append(f"{path}: no function uses {', '.join(sorted(outside_ids)[:4])}: using the users of "
                                  f"{', '.join(sorted(outside_types))}")
@@ -250,14 +286,24 @@ def analyze(changes, m, new_rev, old_rev):
                     tests |= dispatch_tests.get(d["name"], set())
                 hits.append((path, f"declarations ({', '.join(sorted(outside_ids)[:6])}{'...' if len(outside_ids) > 6 else ''}): "
                                    f"{len(prod)} function(s) in {len({f for f, _ in prod})} file(s) use them"))
-            if not prod or struct_fallback:
-                # no function uses the changed identifiers: every path of the file and its includers (fail closed).
-                # The struct-user fallback above only ADDS tests / paths to this (review A1: a4626b9 lost 5 GPU steps
-                # when it replaced it)
+            if (live and (not prod or struct_fallback)) or fail_closed:
+                # no function uses the declared names (or a line the rule cannot place: preprocessor condition,
+                # unparsed declaration, braces without their block): every path of the file and its includers (fail
+                # closed). The struct-user fallback above only ADDS tests / paths to this (review A1: a4626b9 lost 5 GPU
+                # steps when it replaced it). measure-tools P1 (B1.4): reported as a map defect when it is a gap of the
+                # map (no user found / unparsed), as a note when the rule is conservative by design (#if, using namespace)
+                why_fc = "; ".join(fail_closed[:3]) if fail_closed else "no user function found"
                 for f in scope:
                     for p in m["files"].get(f, []):
-                        paths[p].add(f"{path} (file-scope change; no user function found)")
-                hits.append((path, f"file-scope change, no user function found: all paths of {len(scope)} file(s)"))
+                        paths[p].add(f"{path} (file-scope change; {why_fc})")
+                hits.append((path, f"file-scope change ({why_fc}): all paths of {len(scope)} file(s)"))
+                if live and (not prod or struct_fallback):
+                    defects.append(f"{path}: declared {', '.join(sorted(outside_ids)[:4])}{' ...' if len(outside_ids) > 4 else ''} "
+                                   f"has no user function in the map: file-scope fallback over {len(scope)} file(s)")
+        elif outside and not decls and not fail_closed and fc["includes"]:
+            hits.append((path, f"#include lines only ({len(fc['includes'])}): build only"))
+        elif outside and not decls and not fail_closed and moved:
+            hits.append((path, f"{moved} declaration(s) moved unchanged: build only"))
         if not touched and not outside:
             hits.append((path, "deleted / renamed file"))
             for p in m["files"].get(path, []):
@@ -271,8 +317,254 @@ def analyze(changes, m, new_rev, old_rev):
     if pins:
         rep["release_gate_steps"] = sorted(set(rep["release_gate_steps"]) | {"cpu_pins"})
         rep["notes"].append(f"cpu_pins: {', '.join(pins[:4])}{' ...' if len(pins) > 4 else ''} linked by whirl-pins / whirl-startup-replay")
+    if test_steps:
+        rep["release_gate_steps"] = sorted(set(rep["release_gate_steps"]) | test_steps)
+    behaviour_classes(changes, rep, beh, decl_rows, new_rev)
+    rep["declarations"] = decl_rows
+    rep["map_defects"] = defects
     rep.update(module_gate(changes, rep=rep, m=m))
     return rep
+
+
+_show_cache: dict = {}
+
+
+def file_changes(path, ch, new_rev, old_rev):
+    """measure-tools P1: one changed C++ file, both sides: touched functions, declarations outside functions (declscan:
+    declared name, class, type names, statement), #include lines, preprocessor conditions, unparsed lines, behaviour
+    hints from the declarations (layout / lifetime)."""
+    out = {"touched": set(), "decls": [], "includes": [], "cond": [], "unparsed": [], "unbalanced": [], "code": False,
+           "outside": False, "types_at": set(), "behaviour": []}
+    for rev, key in ((new_rev, "new"), (old_rev, "old")):
+        lines = ch[key]
+        if not lines:
+            continue
+        if rev:
+            src = show(rev, path if key == "new" else ch["old_path"])
+        elif key == "new" and os.path.exists(os.path.join(ROOT, path)):
+            src = open(os.path.join(ROOT, path), encoding="utf-8", errors="replace").read()
+        else:
+            src = None
+        if src is None:
+            continue
+        sc = cxxscan.scan(src)
+        clean = cxxscan.blank_code(src).split("\n")
+        raw = src.split("\n")
+        lone = []  # changed brace lines whose partner brace line is unchanged
+        lset = set(lines)
+        for ln in lines:
+            txt = clean[ln - 1] if 0 < ln <= len(clean) else ""
+            f = cxxscan.func_at(sc, ln)
+            d = declscan.declared(src, ln) if (f is None or not txt.strip()) else None
+            if d is not None and d["kind"] == "pragma":
+                continue
+            if f is not None:
+                if txt.strip() or (d and d["kind"] != "punct"):  # code, or a preprocessor line inside the function
+                    out["code"] = True
+                    out["touched"].add(f.name)
+                continue
+            k = d["kind"]
+            if k == "punct" and not txt.strip():
+                continue  # comment / blank line: no code changed here
+            out["code"] = True
+            out["outside"] = True
+            if key == "new":
+                out["types_at"] |= set(cxxscan.classes_at(sc, ln)) - DECL_NOISE
+            if k == "punct":
+                # a lone '}' / namespace '{' moves a block edge over unchanged lines (a type opener names its type)
+                if ("{" in txt or "}" in txt) and any(q is None or q not in lset for q in declscan.brace_partners(src, ln)):
+                    lone.append(ln)
+                continue
+            if k in ("decl", "enumerator", "macro"):
+                for x in d["decls"]:
+                    out["decls"].append(dict(x, side=key, line=ln))
+            elif k == "include":
+                out["includes"].append((key, ln, d["target"]))
+            elif k in ("cond", "scope"):
+                out["cond"].append((key, ln, k))
+            elif k == "unparsed":
+                out["unparsed"].append((key, ln, (raw[ln - 1] if ln <= len(raw) else "").strip()[:80]))
+        if lone:
+            out["unbalanced"].append((key, f"line(s) {', '.join(map(str, lone[:4]))}"))
+    # layout / lifetime hints: a member present on one side only, or whose declared type changed
+    sides = defaultdict(dict)
+    for x in out["decls"]:
+        if x["cls"] and x["what"] == "member":
+            sides[(x["cls"], x["name"])][x["side"]] = tuple(x["types"])
+    for (c, n), sd in sorted(sides.items()):
+        if len(sd) == 1:
+            out["behaviour"].append(("layout", f"{c}::{n} {'added' if 'new' in sd else 'removed'}"))
+        elif sd.get("new") != sd.get("old"):
+            tt = set(sd.get("new", ())) | set(sd.get("old", ()))
+            out["behaviour"].append(("lifetime" if any(HANDLE_TYPES.search(t) for t in tt) else "layout",
+                                     f"{c}::{n} type {'/'.join(sd.get('old', ())) or '-'} -> {'/'.join(sd.get('new', ())) or '-'}"))
+    for x in out["decls"]:
+        if x["name"].startswith("~"):
+            out["behaviour"].append(("lifetime", f"{x['cls']}::{x['name']} declaration"))
+    return out
+
+
+HANDLE_TYPES = re.compile(r"^(DevBuf|EventH|StreamH|PinnedBuf|unique_ptr|shared_ptr|\w*(Owner|Guard|Handle|Lock)\w*)$")
+
+
+def derived_classes(bases, sources):
+    """class -> the classes in sources that derive from it (directly or not; `struct X : public Y {`)"""
+    edges = defaultdict(set)
+    for t in sources:
+        for mm in re.finditer(r"\b(?:class|struct)\s+(\w+)\s*(?:final\s*)?:\s*([^{;()]+)\{", t):
+            for b in re.findall(r"(\w+)\s*(?:<[^<>]*>)?\s*(?:,|$)", mm.group(2).strip()):
+                edges[b].add(mm.group(1))
+    out = {}
+    for c in bases:
+        seen, todo = set(), [c]
+        while todo:
+            for y in edges.get(todo.pop(), ()):
+                if y not in seen:
+                    seen.add(y)
+                    todo.append(y)
+        out[c] = seen
+    return out
+
+
+def decl_users(fn, member_names, free_names, derived, known_cls):
+    """measure-tools P1 (B1.1): the declared names fn uses. A member C::n: accessed as .n / ->n, or named inside a member
+    function of C (or of a class derived from C), or C and n both named (C::n, designated initializers), or fn is the
+    definition C::n itself. A free name n: named in fn, or fn is its (namespace-scope) definition."""
+    got = set()
+    q = fn.name.split("::")
+    fcls = q[-2] if len(q) >= 2 else None
+    for c, n in member_names:
+        if n in fn.members or (fcls is not None and (fcls == c or fcls in derived.get(c, ())) and (n in fn.idents or fn.short == n)) \
+                or (c in fn.idents and n in fn.idents):
+            got.add(f"{c}::{n}")
+    for n in free_names:
+        if n in fn.idents or (fn.short == n and (fcls is None or fcls not in known_cls)):
+            got.add(n)
+    return got
+
+
+# ------------------------------------------------------------------------------------------------
+# measure-tools P1 (B1.3): behaviour classes. A FLOOR (hipfire ar/gate/routing.py): they add measurement kinds and
+# the GPU checks that live outside release_gate (arch024 blast GAP list: E2, kvram719, visab, dense/dfl, E6, version),
+# and the release steps srv_gpu_select / srv_env_* that no path selected before (s15-runner.HANDOFF.md:19). They never
+# remove a step.
+BEHAVIOUR = {
+    "lifetime": {"measure": ["leak / pending-free tests (NullBackend tracking: cpu_device, cpu_server)", "ASan build of the CPU tests",
+                             "A3 alloc churn (whirl-host-bench, P3)"],
+                 "speed": "none when the work traces are equal (B3 / ADR-0003)"},
+    "layout": {"measure": ["CPU tests of the users", "golden of the touched paths (bitwise)"]},
+    "dispatch": {"measure": ["A1 kernel cells of the touched kernels (whirl-kernel-test --bench, P2)", "golden", "KL for balance / fast",
+                             "A2 stage bench of the op (P4)"]},
+    "numeric": {"measure": ["A1 kernel cells", "golden (precise bitwise)", "KL for balance / fast"]},
+    "schedule": {"measure": ["A4 scheduler bench (whirl-host-bench --suite sched, P3)", "server gate suites",
+                             "server work trace (launch_table.py --server)"]},
+    "io": {"measure": ["A5 tier bandwidth (whirl-host-bench --suite tier)", "tier gate suites"],
+           "checks": ["kvram719: tools/repro/kvram719_tier.ps1 (each GPU, one after the other)"]},
+    "sizing": {"measure": ["startup decision table (cpu_pins: whirl-startup-replay)", "P-size: tools/gates/startup_lines.py over the gate's server logs"],
+               "checks": ["E2: tools/gates/env_matrix.ps1 -Cells E2 (8060S: WHIRL_VRAM_LIMIT_MB 49152 / 32768 / 24576 + fake 0.5 GB carve-out)",
+                          "kvram719: tools/repro/kvram719_tier.ps1 (each GPU, one after the other)"],
+               "steps": ["srv_env_e1", "srv_env_e3", "srv_env_e4", "srv_env_e7"]},
+    "pinned": {"measure": ["NullBackend pinned tracking (cpu_device)"], "steps": ["srv_gpu_select"],
+               "checks": ["kvram719: tools/repro/kvram719_tier.ps1 (each GPU, one after the other)"]},
+    "device": {"measure": ["whirl-device-tests"], "steps": ["srv_gpu_select"],
+               "checks": ["E6 hot-plug: progress/arch024-S14.E6_CHECKLIST.md (owner, manual)"]},
+    "protocol": {"measure": ["whirl-server-tests / HTTP suites", "cpu_pins token hash"]},
+    "vision": {"measure": ["cpu_vision", "golden server vision rows"],
+               "checks": ["visab: CLI vision A/B on both GPUs (embedding bitwise + answer; no script in the repo yet: "
+                          "scratch/s11/case_visab_*)"]},
+    "compat": {"measure": [], "checks": ["dense: tools/golden/golden.ps1 check -Models dense (Q4_K_M, WHIRL_GATE_DENSE)",
+                                         "dfl_<mode>: WHIRL_GATE_DFLASH (R9700, Q4_K_M DFlash)"]},
+    "version": {"measure": [], "checks": ["version: every exe sha changes; release_check b_r1_gates needs gate summaries on the "
+                                          "shipped exe (rebuild + the selected steps on it, or the ADR-0003 work-equivalence proof)"]},
+    "build": {"measure": ["full build both archs"]},
+    "doc": {"measure": []},
+}
+PATH_BEHAVIOUR = {"server.loop": "schedule", "server.prefill": "schedule", "server.decode": "schedule", "server.mtp": "schedule",
+                  "cache.prefix": "schedule", "server.sampling": "numeric", "cache.spill": "io", "cache.restore": "io",
+                  "cache.fingerprint": "io", "http": "protocol", "tokenizer": "protocol", "vision": "vision",
+                  "startup": "sizing", "load": "compat", "cli.dflash": "compat", "build": "build"}
+FILE_BEHAVIOUR = [  # (glob, class); paths as in the tree (git ls-files src include, 2026-10-25)
+    ("src/device/*", "device"), ("src/hip/*", "device"), ("include/whirl/device*.h", "device"), ("include/whirl/hip*.h", "device"),
+    ("src/model/device.cpp", "device"), ("src/server/server_main.cpp", "device"),
+    ("src/device/handles.h", "lifetime"),
+    ("src/common/startup_fit*", "sizing"), ("include/whirl/startup_fit.h", "sizing"), ("src/server/engine_gov*", "sizing"),
+    ("src/common/mem_governor*", "sizing"), ("include/whirl/mem_governor.h", "sizing"), ("include/whirl/kv_layout.h", "sizing"),
+    ("src/tier/ram_size.h", "sizing"), ("src/server/server_main.cpp", "sizing"),
+    ("src/tier/*", "io"), ("src/server/tier_bridge*", "io"), ("src/cache/tier_adapter*", "io"),
+    # arch024 PLAN P-719 (v2, A3): owners of pinned host memory -> srv_gpu_select + kvram719
+    ("src/tier/kv_tier*", "pinned"), ("src/server/tier_bridge*", "pinned"), ("src/cache/ckpt_store*", "pinned"),
+    ("src/server/engine_gov*", "pinned"), ("src/device/handles.h", "pinned"), ("src/hip/wddm_mem.cpp", "pinned"),
+    ("src/hip/device_mem.cpp", "pinned"), ("src/hip/uma_mem.cpp", "pinned"), ("src/server/server_main.cpp", "pinned"),
+    ("src/common/numerics*", "numeric"), ("include/whirl/numerics.h", "numeric"), ("src/model/tune*", "numeric"),
+    ("src/kernels_host/*", "dispatch"), ("src/ops/*", "dispatch"), ("src/vision/*", "vision"), ("include/whirl/vision.h", "vision"),
+    ("src/server/engine_vision.cpp", "vision"), ("src/server/vision_iface.h", "vision"),
+    ("src/server/protocol*", "protocol"), ("src/server/http*", "protocol"), ("src/server/stream*", "protocol"),
+    ("src/chat/*", "protocol"), ("src/tokenizer/*", "protocol"), ("src/server/engine*", "schedule"), ("src/cache/*", "schedule"),
+    ("kernels/*", "dispatch"), ("kernels/*", "numeric"), ("docs/*", "doc"), ("*.md", "doc"), ("cmake/*", "build"),
+]
+NAME_BEHAVIOUR = [  # (regex on a touched / user function name, class)
+    (re.compile(r"(?i)alloc|free|release|~|adopt|destroy|teardown"), "lifetime"),
+    (re.compile(r"(?i)fit|sizing|budget|vram|pinned|carve|kvBytes|reserve|StateMem|allocState"), "sizing"),
+    (re.compile(r"(?i)device|adapter|gpuPreflight|hipBackend|selectGpu|probe"), "device"),
+    (re.compile(r"(?i)pinned|hostMalloc|hostAlloc|hostRegister"), "pinned"),
+]
+
+
+def behaviour_classes(changes, rep, beh, decl_rows, new_rev):
+    """fills rep["behaviour"] {class: reasons}, rep["measure"] {class: kinds}, rep["outside_gate_checks"]; adds the
+    classes' release steps (srv_gpu_select, srv_env_*) to rep["release_gate_steps"]"""
+    for path in changes:
+        for g, c in FILE_BEHAVIOUR:
+            if fnmatch.fnmatch(path, g):
+                beh[c].add(f"file {path}")
+        if path.endswith(".hip"):
+            beh["dispatch"].add(f"kernel {path}")
+            beh["numeric"].add(f"kernel {path}")
+        if path.startswith("tests/"):
+            beh.setdefault("test", set()).add(path)
+    for p, why_l in rep["paths"].items():
+        c = PATH_BEHAVIOUR.get(p)
+        if c:
+            beh[c].add(f"path {p}")
+    for f, w in rep["touched"]:
+        if w.startswith("function "):
+            nm = w[len("function "):]
+            for rx, c in NAME_BEHAVIOUR:
+                if rx.search(nm.split("::")[-1]):
+                    beh[c].add(f"function {nm}")
+    for r in decl_rows:
+        if any(t in ("PinnedBuf",) for t in r["types"]):
+            beh["pinned"].add(f"declaration {r['name']} (PinnedBuf)")
+        for rx, c in NAME_BEHAVIOUR:
+            if rx.search(r["name"].split("::")[-1]):
+                beh[c].add(f"declaration {r['name']}")
+    ver = changes.get("CMakeLists.txt")
+    if ver:
+        src = (show(new_rev, "CMakeLists.txt") if new_rev else show_side("CMakeLists.txt"))
+        src = src.split("\n") if isinstance(src, str) else src
+        if src and any(re.search(r"\bproject\s*\(.*VERSION", src[i - 1]) for i in ver["new"] if 0 < i <= len(src)):
+            beh["version"].add("CMakeLists.txt project(... VERSION ...) changed")
+    beh = {k: v for k, v in beh.items() if v}
+    rep["behaviour"] = {k: sorted(v)[:8] for k, v in sorted(beh.items())}
+    rep["measure"] = {k: BEHAVIOUR.get(k, {}).get("measure", []) for k in sorted(beh)}
+    checks = sorted({x for k in beh for x in BEHAVIOUR.get(k, {}).get("checks", [])})
+    rep["outside_gate_checks"] = checks
+    add = sorted({x for k in beh for x in BEHAVIOUR.get(k, {}).get("steps", [])})
+    if "vision" in beh:
+        # golden server has the vision rows (the only GPU vision correctness check in release_gate); validation hold-out
+        # f6e4236 (vision::imageKey) lost golden when type names stopped selecting it
+        add = sorted(set(add) | {f"golden_{'swift' if md == 'dense' else 'moe'}" for md in rep.get("models") or ["dense", "moe"]})
+    if add and (rep["paths"] or any(p.startswith(("src/", "include/", "kernels/")) for p in changes)):
+        rep["release_gate_steps"] = sorted(set(rep["release_gate_steps"]) | set(add))
+
+
+def show_side(path):
+    """lines of a file in the worktree, or None"""
+    p = os.path.join(ROOT, path)
+    try:
+        return open(p, encoding="utf-8", errors="replace").read().split("\n")
+    except OSError:
+        return None
 
 
 # arch024-S11c (F-3, S11b P1 / P4: template changes caught only by the prompt token pin, which no step ran): the CPU pins
@@ -437,6 +729,10 @@ def build_report(m, paths, models, archs, tests, reruns, notes, hits):
         steps.add({"tests": "cpu_tests"}.get(short, f"cpu_{short}"))
     if kt:
         steps.add("kt_full")
+    if gsuites:
+        # measure-tools P1 (map defect found by the arch024 ground truth, B0: golden server listed, no golden step): the
+        # golden cases the report lists are run by the golden_<model> steps
+        steps |= {f"golden_{'swift' if md == 'dense' else 'moe'}" for md in models}
     for n in gpu_cli:
         if n.startswith("golden."):
             steps |= {f"golden_{'swift' if md == 'dense' else 'moe'}" for md in models}
@@ -511,6 +807,16 @@ def print_report(title, r, why=False):
         print(f"   also     {k}  ({', '.join(v[:3])})")
     if r["matrix_cells"]:
         print(f"   cells    {', '.join(r['matrix_cells'])}")
+    for k, v in (r.get("behaviour") or {}).items():
+        meas = (r.get("measure") or {}).get(k) or []
+        print(f"   class    {k}: {'; '.join(v[:3])}{' ...' if len(v) > 3 else ''}" + (f"  -> measure: {'; '.join(meas)}" if meas else ""))
+    for c in r.get("outside_gate_checks") or []:
+        print(f"   check    {c}  (GPU check outside release_gate)")
+    if r.get("declarations") and why:
+        for d in r["declarations"]:
+            print(f"   decl     {d['file']}:{d['line']} ({d['side']}) {d['name']} [{d['what']}]" + (f" type {'/'.join(d['types'])}" if d["types"] else ""))
+    for d in r.get("map_defects") or []:
+        print(f"   DEFECT   {d}")
     if r.get("module_gate"):
         for n, fl in r["modules"].items():
             print(f"   module   {n}: {', '.join(fl[:4])}{' ...' if len(fl) > 4 else ''}")

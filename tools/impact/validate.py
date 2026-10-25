@@ -18,8 +18,13 @@ part of the diff. Executable hit = it lists at least that test executable.
 The history hit rate counts CPU tests only (a test touched in the same commit). It says nothing about the GPU steps:
 those are reported separately (commits with / without a GPU release step) and checked against a baseline with
 --baseline (narrowed commits). Cases marked "lock" pin a fix the tools were tuned on (regression lock, not evidence).
-Exit (arch024-S12, review C7): 0 every named case hit, every history hit rate >= 95 %, no narrowed commit; 1 otherwise;
-2 setup error.
+measure-tools P1 additions: RANGE_CASES (a whole release diff: no path reached only through a type name, declarations
+of a header select at most N functions, every needed step and GPU check outside release_gate is selected; run with
+--cases), --arch024 (ground truth: the GPU checks each arch024 step's runner ran, fit / hold-out), and --baseline now
+accepts a narrowed commit only when the declared-name rule explains it (the new tools saw declared names or moved
+declarations in it) and it is not a ground-truth commit losing a GPU step.
+Exit (arch024-S12, review C7; P1): 0 every named / range case hit, every history hit rate >= 95 %, no unexplained or
+ground-truth narrowed commit, every arch024 needed check covered; 1 otherwise; 2 setup error.
 """
 from __future__ import annotations
 
@@ -32,6 +37,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+from collections import defaultdict
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import cxxscan  # noqa: E402
@@ -75,6 +81,76 @@ CASES = [
      "caught_by": "COLD-RESUME review: the gate passed on wrong behaviour",
      "expect": ["extra:cpu_gate_selftest", "extra:the changed suite on one GPU"]},
 ]
+
+
+# measure-tools P1: named RANGE cases (a whole release diff). "type_only": identifiers that are only type names on the
+# changed declaration lines; no path may be reached "uses <type>" through them (B1.1). "decl_max": the most functions
+# a header's declarations may select (before P1: model.h 147, engine_api.h 101, vision.h 43 users,
+# scratch/s15/impact_605281b_9844fde.txt). "expect": what the release really needed (S15 runner + s15-blast GAP list),
+# including the GPU checks outside release_gate.
+RANGE_CASES = [
+    {"name": "0.2.4 S15 range 605281b..9844fde (S15 over-selection from type names; s15-blast GAP list)",
+     "range": "605281b..9844fde", "map_at": "9844fde",
+     "type_only": ["DevBuf", "DevPtr", "EventH", "PinnedBuf", "StreamH", "Event", "Stream", "hip", "device"],
+     "decl_max": {"include/whirl/model.h": 20, "include/whirl/vision.h": 10, "src/server/engine_api.h": 60},
+     "expect": ["release:golden_swift", "release:golden_moe", "release:seq_swift_<mode>", "release:seq_moe_<mode>",
+                "release:srv_cache_balance", "release:srv_cache_precise", "release:srv_mt_precise", "release:srv_tier_verify",
+                "release:srv_gpu_select", "release:srv_env_e1", "release:srv_env_e3", "release:srv_env_e4", "release:srv_env_e7",
+                "check:E2", "check:kvram719", "check:visab", "check:dense", "check:E6"]},
+]
+
+# measure-tools P1: ground truth of the arch024 steps (0.2.4): the product commits of each step (subjects tagged
+# "(arch024-<step>" / B0-, B0b-; tools-only steps S0b, S1-deletions-only kept out) and the GPU checks its runner ran /
+# its PLAN row required (progress/arch024-<step>.HANDOFF.md, read 2026-10-25; S2 P-size and S3 E7 were explicitly NOT
+# run and are left out). golden = golden_swift or golden_moe; P-size = sizing class (startup_lines.py over the gate's
+# server logs); kvram719 / visab / E2 / E6 = the named check outside release_gate. fit = the steps the P1 rules were
+# designed on (S11 and the S15 range via the s15-blast GAP list); every other step is hold-out.
+ARCH024_STEPS = [
+    {"step": "B0", "fit": False, "commits": ["06a1540", "8e79cbc", "fd07e8a", "d754891", "b0acad1", "cf3f4f3"],
+     "needed": ["check:kvram719", "golden", "check:P-size"]},
+    {"step": "S0a", "fit": False, "commits": ["cc03dd3", "703c666"], "needed": ["golden", "check:P-size"]},
+    {"step": "S2", "fit": False, "commits": ["9fd84f3", "25accd6"], "needed": ["release:srv_mt_precise", "release:srv_mt_precise_moe"]},
+    {"step": "S3", "fit": False, "commits": ["ef40a1f"], "needed": ["golden", "release:srv_cache_balance", "release:srv_mt_precise",
+                                                                   "release:srv_mt_precise_moe", "release:srv_gpu_select",
+                                                                   "check:kvram719", "check:P-size"]},
+    {"step": "S4", "fit": False, "commits": ["920ae63"], "needed": ["golden", "release:srv_cache_balance", "release:srv_mt_precise",
+                                                                   "release:srv_mt_precise_moe", "check:P-size"]},
+    {"step": "S5a", "fit": False, "commits": ["dadae41"], "needed": ["golden", "release:srv_cache_precise", "release:srv_cache_balance",
+                                                                    "release:srv_precise_cli", "release:srv_mt_precise",
+                                                                    "release:srv_mt_precise_moe", "check:P-size"]},
+    {"step": "S6a", "fit": False, "commits": ["b5ed025"], "needed": ["golden", "release:srv_tier_verify", "release:srv_gpu_select",
+                                                                    "release:srv_cache_balance", "check:kvram719", "release:srv_mt_precise",
+                                                                    "release:srv_mt_precise_moe", "check:P-size"]},
+    {"step": "S6b", "fit": False, "commits": ["d96dc9d"], "needed": ["golden", "release:srv_tier_verify", "release:srv_cache_balance",
+                                                                    "release:srv_mt_precise", "release:srv_mt_precise_moe",
+                                                                    "release:srv_gpu_select", "check:kvram719", "check:P-size"]},
+    {"step": "S7", "fit": False, "commits": ["43205f5"], "needed": ["golden", "release:srv_tier_verify", "release:srv_mt_precise",
+                                                                   "release:srv_mt_precise_moe", "release:srv_cache_precise",
+                                                                   "release:srv_cache_balance", "check:P-size"]},
+    {"step": "S8", "fit": False, "commits": ["51de103"], "needed": ["golden", "release:srv_fs_swift", "release:srv_fs_moe", "check:P-size"]},
+    {"step": "S9", "fit": False, "commits": ["a214b6f"], "needed": ["golden", "release:srv_gpu_select", "release:srv_balance",
+                                                                   "check:kvram719", "release:srv_mt_precise", "check:P-size"]},
+    {"step": "S10", "fit": False, "commits": ["1b17eb9"], "needed": ["golden", "release:srv_tier_verify", "release:srv_mt_precise",
+                                                                    "release:srv_balance"]},
+    {"step": "S11", "fit": True, "commits": ["3bfaac7"], "needed": ["golden", "check:visab", "check:kvram719", "release:srv_mt_precise",
+                                                                   "release:srv_mt_precise_moe", "release:srv_gpu_select", "check:P-size"]},
+    {"step": "S11c", "fit": False, "commits": ["9cd2100", "6251d2f"], "needed": ["golden"]},
+]
+
+
+def covered(rep, item):
+    """a needed GPU check is covered by the report (release steps with <mode> expanded, GPU checks, behaviour classes)"""
+    kind, _, val = item.partition(":")
+    steps = set(rep["release_gate_steps"]) | impact.expand_steps(rep["release_gate_steps"])
+    if item == "golden":
+        return bool({"golden_swift", "golden_moe"} & steps)
+    if kind == "release":
+        return val in steps
+    if kind == "check":
+        if val == "P-size":
+            return "sizing" in (rep.get("behaviour") or {})
+        return any(c.startswith(val) for c in rep.get("outside_gate_checks") or [])
+    return flagged(rep, item)
 
 
 def git(*a):
@@ -182,13 +258,75 @@ def selectivity(rep, m):
             f"paths {len(rep['paths'])}/{len(m['declared']['paths'])}")
 
 
+def run_range_cases():
+    """measure-tools P1 named range cases: the type-name over-selection is gone, every needed step / check is selected"""
+    bad = []
+    for c in RANGE_CASES:
+        m, _ = map_at(c["map_at"])
+        x, y = c["range"].split("..")
+        base = git("merge-base", x, y).strip()
+        ch = product_only(impact.parse_diff(git("diff", "-U0", "--no-color", "-M", base, y)), keep_tests=True)
+        rep = impact.analyze(ch, m, y, base)
+        print(f"== {c['name']}")
+        print(f"   range {c['range']}; map built at {c['map_at']}")
+        tol = set(c["type_only"])
+        via_type = sorted({w for p, ws in rep["paths"].items() for w in ws
+                           if (mm := re.search(r"\(uses ([^)]*) of ", w)) and
+                           {s.split("::")[-1].strip() for s in mm.group(1).split(",")} <= tol})
+        print(f"   {'ok  ' if not via_type else 'FAIL'} no path reached only through a type name ({len(via_type)} reasons)"
+              + (f": {via_type[:3]}" if via_type else ""))
+        if via_type:
+            bad.append(f"range case {c['range']}: {len(via_type)} path reason(s) through type names")
+        for f, mx in c["decl_max"].items():
+            n = [int(mm.group(1)) for p, w in rep["touched"] if p == f and (mm := re.search(r"declarations \(.*\): (\d+) function", w))]
+            got = sum(n)
+            okk = got <= mx
+            print(f"   {'ok  ' if okk else 'FAIL'} {f}: declarations select {got} function(s) (limit {mx})")
+            if not okk:
+                bad.append(f"range case {c['range']}: {f} selects {got} > {mx}")
+        for e in c["expect"]:
+            hit = covered(rep, e)
+            print(f"   {'HIT ' if hit else 'MISS'} {e}")
+            if not hit:
+                bad.append(f"range case {c['range']}: MISS {e}")
+        print(f"   map defects: {len(rep['map_defects'])}" + "".join(f"\n     - {d}" for d in rep["map_defects"]))
+        print("   " + selectivity(rep, m))
+    return bad
+
+
+def run_arch024():
+    """measure-tools P1: the arch024 steps' needed GPU checks (ground truth) vs the map built at each commit"""
+    bad = []
+    tot = {True: [0, 0], False: [0, 0]}
+    for st in ARCH024_STEPS:
+        reps = []
+        for s in st["commits"]:
+            m, _ = map_at(s)
+            ch = product_only(impact.parse_diff(git("diff", "-U0", "--no-color", "-M", f"{s}^", s)))
+            reps.append(impact.analyze(ch, m, s, f"{s}^"))
+        rep = merge(reps)
+        miss = [e for e in st["needed"] if not covered(rep, e)]
+        tot[st["fit"]][0] += len(st["needed"]) - len(miss)
+        tot[st["fit"]][1] += len(st["needed"])
+        print(f"   {'fit     ' if st['fit'] else 'hold-out'} {st['step']:5} {len(st['needed']) - len(miss)}/{len(st['needed'])} needed GPU checks"
+              + (f"  MISS {', '.join(miss)}" if miss else "") + f"  (map defects {len(rep['map_defects'])})")
+        bad += [f"arch024 {st['step']}: MISS {e}" for e in miss]
+    for f in (True, False):
+        h, n = tot[f]
+        print(f"== arch024 {'fit' if f else 'hold-out'}: {h}/{n} needed GPU checks selected ({100 * h / n if n else 0:.1f}%)")
+    return bad
+
+
 def merge(reports):
     out = {"paths": {}, "release_gate_steps": [], "server_gate_suites": [], "golden": [], "extra": {}, "cpu_tests": {},
-           "kernel_tests": [], "not_in_release_gate": []}
+           "kernel_tests": [], "not_in_release_gate": [], "outside_gate_checks": [], "map_defects": [], "behaviour": {}}
     for r in reports:
         out["paths"].update(r["paths"])
-        for k in ("release_gate_steps", "server_gate_suites", "golden", "kernel_tests", "not_in_release_gate"):
-            out[k] = sorted(set(out[k]) | set(r[k]))
+        for k in ("release_gate_steps", "server_gate_suites", "golden", "kernel_tests", "not_in_release_gate",
+                  "outside_gate_checks", "map_defects"):
+            out[k] = sorted(set(out[k]) | set(r.get(k, [])))
+        for k, v in (r.get("behaviour") or {}).items():
+            out["behaviour"][k] = sorted(set(out["behaviour"].get(k, [])) | set(v))
         for k, v in r["extra"].items():
             out["extra"][k] = sorted(set(out["extra"].get(k, [])) | set(v))
         for k, v in r["cpu_tests"].items():
@@ -290,6 +428,49 @@ def run_history(n, rev, skip=0, at_commit=False):
     return tot, fhit, ehit, rate
 
 
+def ground_truth():
+    """ground-truth commit (7 chars) -> the release steps it needed (ARCH024_STEPS, named CASES; golden = both models)"""
+    gt = defaultdict(set)
+    for st in ARCH024_STEPS:
+        for c in st["commits"]:
+            for e in st["needed"]:
+                if e == "golden":
+                    gt[c[:7]] |= {"golden_swift", "golden_moe"}
+                elif e.startswith("release:"):
+                    gt[c[:7]].add(e.split(":", 1)[1])
+    for cs in CASES:
+        for c in cs["fix"]:
+            gt[c[:7]] |= {e.split(":", 1)[1] for e in cs["expect"] if e.startswith("release:")}
+    return gt
+
+
+def classify_narrowed(nar, w, gt=None):
+    """measure-tools P1: the declared-name rule narrows by design. A narrowed commit is accepted only when (1) the new
+    tools saw a declaration change in it (declared names / moved declarations: the only narrowing mechanism of P1) and
+    (2) it does not lose a step its ground truth needed (ARCH024_STEPS, named CASES). Returns (failing commits, report
+    lines, explained commits, explained commits that lose a GPU step)."""
+    gt = ground_truth() if gt is None else gt
+    fails, lines, expl, gpu_expl = [], [], [], 0
+    for s, lost in nar:
+        ls = impact.expand_steps(lost["steps"])
+        gpu_lost = sorted(x for x in ls if not x.startswith("cpu_"))
+        why = w[s].get("decl") or []
+        need_lost = sorted(set(ls) & gt.get(s[:7], set()))
+        if need_lost:
+            fails.append(s)
+            lines.append(f"   NARROWED-GT {s}: ground-truth commit loses needed steps {need_lost} (all lost {gpu_lost}, paths {lost['paths']})")
+        elif not why and not w[s].get("moved"):
+            fails.append(s)
+            lines.append(f"   NARROWED-UNEXPLAINED {s}: steps {lost['steps']} paths {lost['paths']} (no declaration change seen)")
+        else:
+            expl.append(s)
+            gpu_expl += bool(gpu_lost)
+            lines.append(f"   narrowed {s} (declared-name rule; declared {', '.join(why[:5])}{' ...' if len(why) > 5 else ''}"
+                         f"{'; moved ' + str(w[s].get('moved')) if w[s].get('moved') else ''}): GPU steps {gpu_lost or '-'} "
+                         f"paths {lost['paths'] or '-'}")
+    return fails, lines, expl, gpu_expl
+
+
 def run_baseline(base_rev, n, rev, skip):
     """replay.py with base_rev's tools/impact and with these tools on the same commits; list narrowed commits"""
     import json as _json
@@ -324,13 +505,16 @@ def run_baseline(base_rev, n, rev, skip):
             grew += 1
     print(f"== baseline: tools/impact of {base_rev} vs these tools on {len(b)} product commits of {rev} (skip {skip}): "
           f"release steps {nsteps['base']} -> {nsteps['new']}; {grew} commit(s) select more; {len(nar)} narrowed")
-    for s, lost in nar:
-        print(f"   NARROWED {s}: steps {lost['steps']} paths {lost['paths']}")
+    fails, lines, expl, gpu_expl = classify_narrowed(nar, w)
+    for ln in lines:
+        print(ln)
+    print(f"   narrowed: {len(expl)} explained by the declared-name rule ({gpu_expl} lose a GPU step), {len(fails)} failing "
+          f"(ground truth / unexplained)")
     for s in b:
         lc = sorted(set(b[s]["cpu"]) - set(w[s]["cpu"]))
         if lc and not any(s == x for x, _ in nar):
             print(f"   note     {s}: {len(lc)} CPU test(s) fewer, steps / paths unchanged: {lc[:4]}")
-    return len(nar)
+    return len(fails)
 
 
 
@@ -342,12 +526,16 @@ def main():
     ap.add_argument("--skip", type=int, default=0)
     ap.add_argument("--baseline")
     ap.add_argument("--map-at-commit", action="store_true", help="diagnostic: build the map at every replayed commit")
+    ap.add_argument("--arch024", action="store_true", help="measure-tools P1: needed GPU checks of the arch024 steps (fit / hold-out)")
     a = ap.parse_args()
     bad = []
-    if not a.history or a.cases:
+    if (not a.history and not a.arch024) or a.cases:
         for c, rep, rows in run_cases():
             bad += [f"named case {c['name']}: MISS {e}" for e, ok in rows if not ok]
-    if a.history or not a.cases:
+        bad += run_range_cases()
+    if a.arch024:
+        bad += run_arch024()
+    if a.history or not (a.cases or a.arch024):
         tot, fhit, ehit, rate = run_history(a.history or 150, a.rev, a.skip, a.map_at_commit)
         if not tot or rate < 95:
             bad.append(f"history: test hit rate {rate:.1f}% < 95% ({fhit}/{tot}, UNPAIRED counted as missed)")
@@ -356,7 +544,7 @@ def main():
         if nn is None:
             return 2
         if nn:
-            bad.append(f"baseline {a.baseline}: {nn} narrowed commit(s)")
+            bad.append(f"baseline {a.baseline}: {nn} narrowed commit(s) not explained by the declared-name rule or on ground truth")
     for b in bad:
         print(f"validate: FAIL {b}")
     print("validate: " + ("ok" if not bad else f"FAIL ({len(bad)})"))
