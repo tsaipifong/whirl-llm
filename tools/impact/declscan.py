@@ -364,6 +364,28 @@ def declared(src: str, line: int) -> dict:
             for g in re.finditer(r"(?:^|[{,(])\s*((?:\.\s*[A-Za-z_]\w*\s*(?:\[[^\]]*\]\s*)?)+)=(?!=)", clines[line - 1]):
                 for fld in re.findall(r"\.\s*([A-Za-z_]\w*)", g.group(1)):
                     ds.append(_d(fld, tcls or "?", "field", ""))
+            # mt-p1 pass 4 (REVIEW3 C-1, V6 / V7b): the designators in force on a continuation line (value on the
+            # line after `.x =`, or an element of `.x = {1, 1,\n 2, 2}`): in each enclosing initializer brace, the last
+            # top-level element before the line (or before the inner brace) when it starts with `.x =`
+            cur = ls
+            for g2 in reversed(frames[k:]):  # frames[k] is the outermost init; the braces inside it are "inner"
+                if g2[0] not in ("init", "inner"):
+                    break
+                seg = clean[g2[2] + 1:cur]
+                dd, last = 0, 0
+                for i, c in enumerate(seg):
+                    if c in "([{":
+                        dd += 1
+                    elif c in ")]}":
+                        dd -= 1
+                    elif c == "," and dd == 0:
+                        last = i + 1
+                mm2 = re.match(r"\s*((?:\.\s*[A-Za-z_]\w*\s*(?:\[[^\]]*\]\s*)?)+)=(?!=)", seg[last:])
+                if mm2:
+                    for fld in re.findall(r"\.\s*([A-Za-z_]\w*)", mm2.group(1)):
+                        if not any(x["name"] == fld and x["what"] == "field" for x in ds):
+                            ds.append(_d(fld, tcls or "?", "field", ""))
+                cur = g2[2]
             return {"kind": kd if ds else "unparsed", "decls": ds, "target": None}
     inner = frames[-1] if frames else None
     if inner and inner[0] == "enum":

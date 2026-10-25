@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import io
+import json
 import os
 import re
 import shutil
@@ -458,9 +459,13 @@ RULES = {
     "R-moved": "the statement, in its full scope (namespaces, enclosing class headers with specialisation arguments, #if "
                "branch), vanishes from the changed lines of one side and appears on the other with the same number of "
                "occurrences: in another file (moved between headers), or in the same file with the declaration order of "
-               "its class / enum, or at namespace scope of the file, unchanged (diff alignment); mt-p1 pass 3",
+               "its class / enum, or at namespace scope of the file, unchanged (diff alignment); mt-p1 pass 3; a move to "
+               "another file only when every includer of the old file also includes the new one (mt-p1 pass 4)",
     "R-block": "a namespace / brace block added or removed whole (both braces changed; a lone brace still fails closed): "
                "the 0.2.4 rule read the identifier-less brace lines as a file-scope change",
+    "R-init-noid": "FAILING, not a rule (mt-p1 pass 4, REVIEW3 act-on 2): the step comes back with the 0.2.4 identifier "
+                   "rule, nothing was dropped, and a changed declaration line has no identifier (a table row such as "
+                   "{64, 64, 256},): 0.2.4 reached it through its file-scope fallback; inspect by hand",
 }
 
 
@@ -483,7 +488,7 @@ def attribute(nar, rev, skip_cpu=True):
         lb = impact.expand_steps(impact.analyze(prod, m, s, f"{s}^", legacy=("ids", "moved"))["release_gate_steps"])
         lk = impact.expand_steps(impact.analyze(prod, m, s, f"{s}^", legacy=("braces",))["release_gate_steps"])
         out[s] = {"ids": sorted(li - base), "moved": sorted(lm - base), "both": sorted(lb - base), "braces": sorted(lk - base),
-                  "dropped": r.get("dropped_ids", {})}
+                  "dropped": r.get("dropped_ids", {}), "noid": r.get("noid_lines", [])}
     return out
 
 
@@ -526,7 +531,13 @@ def classify_narrowed(nar, w, gt=None, attrib=None):
                 if kinds.get("other"):
                     bad.append(f"{st} (dropped identifier(s) of kind other: {', '.join(sorted(kinds['other'])[:4])})")
                 else:
-                    per[st] = "R-decl" if dropped else "R-member"
+                    if not dropped and a.get("noid"):
+                        # mt-p1 pass 4 (REVIEW3 act-on 2, G3): nothing dropped, but a changed declaration line has no
+                        # identifier (a table row): 0.2.4 reached the step through its file-scope fallback, not a
+                        # same-named local, so this is no evidence of member-access precision
+                        bad.append(f"{st} (R-init-noid: identifier-less changed line(s) {', '.join(a['noid'][:3])})")
+                    else:
+                        per[st] = "R-decl" if dropped else "R-member"
             elif st in a.get("braces", []):
                 per[st] = "R-block"
             elif st in a.get("both", []) and not kinds.get("other"):
@@ -545,29 +556,48 @@ def classify_narrowed(nar, w, gt=None, attrib=None):
     return fails, lines, expl, gpu_expl
 
 
-def run_baseline(base_rev, n, rev, skip, exclude=()):
-    """replay.py with base_rev's tools/impact and with these tools on the same commits; list narrowed commits"""
+def run_baseline(base_rev, n, rev, skip, exclude=(), base_json=None, new_json=None):
+    """replay.py with base_rev's tools/impact and with these tools on the same commits; list narrowed commits.
+    The two replays run ONE AFTER THE OTHER (in parallel they hit WinError 1450 / 1455 on this host); base_json /
+    new_json reuse a finished replay.py --out file instead of replaying (as compare-llama-bench.py reads stored runs)."""
     import json as _json
-    tmp = tempfile.mkdtemp(prefix="validate_base_")
-    data = subprocess.run(["git", "-C", ROOT, "archive", "--format=tar", base_rev, "tools/impact"], capture_output=True)
-    if data.returncode != 0:
-        print(f"validate: git archive {base_rev} tools/impact failed")
-        return None
-    with tarfile.open(fileobj=io.BytesIO(data.stdout)) as t:
-        t.extractall(tmp, filter="data")
     here = os.path.dirname(os.path.abspath(__file__))
-    outs, procs = {}, []
-    for tag, tools in (("base", os.path.join(tmp, "tools", "impact")), ("new", here)):
-        outs[tag] = os.path.join(tmp, f"{tag}.json")
-        procs.append(subprocess.Popen([sys.executable, "-I", os.path.join(here, "replay.py"), "--tools", tools, "--root", ROOT,
-                                       "--rev", rev, "--n", str(n), "--skip", str(skip), "--out", outs[tag]]
-                                      + (["--exclude", ",".join(sorted(exclude))] if exclude else [])))
-    if any(p.wait() != 0 for p in procs):
-        print("validate: replay failed")
+    tmp = tempfile.mkdtemp(prefix="validate_base_")
+    try:
+        outs = {"base": base_json, "new": new_json}
+        for tag in ("base", "new"):
+            if outs[tag]:
+                continue
+            if tag == "base":
+                data = subprocess.run(["git", "-C", ROOT, "archive", "--format=tar", base_rev, "tools/impact"], capture_output=True)
+                if data.returncode != 0:
+                    print(f"validate: git archive {base_rev} tools/impact failed")
+                    return None
+                with tarfile.open(fileobj=io.BytesIO(data.stdout)) as t:
+                    t.extractall(tmp, filter="data")
+                tools = os.path.join(tmp, "tools", "impact")
+            else:
+                tools = here
+            outs[tag] = os.path.join(tmp, f"{tag}.json")
+            rc = subprocess.run([sys.executable, "-I", os.path.join(here, "replay.py"), "--tools", tools, "--root", ROOT,
+                                 "--rev", rev, "--n", str(n), "--skip", str(skip), "--out", outs[tag]]
+                                + (["--exclude", ",".join(sorted(exclude))] if exclude else [])).returncode
+            if rc != 0:
+                print(f"validate: replay failed ({tag}, rc={rc})")
+                return None
+        b = _json.load(open(outs["base"], encoding="utf-8"))
+        w = _json.load(open(outs["new"], encoding="utf-8"))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    if set(b) != set(w):
+        print(f"validate: base / new replays cover different commits ({len(b)} vs {len(w)}; "
+              f"only base {sorted(set(b) - set(w))[:4]}, only new {sorted(set(w) - set(b))[:4]})")
         return None
-    b = _json.load(open(outs["base"], encoding="utf-8"))
-    w = _json.load(open(outs["new"], encoding="utf-8"))
-    shutil.rmtree(tmp, ignore_errors=True)
+    return compare_baseline(b, w, base_rev, rev, skip)
+
+
+def compare_baseline(b, w, base_rev, rev, skip):
+    """the narrowed / grew comparison of two replay.py outputs (base tools b, these tools w); returns # failing"""
     nar, grew = [], 0
     nsteps = {"base": 0, "new": 0}
     for s in b:
@@ -592,6 +622,58 @@ def run_baseline(base_rev, n, rev, skip, exclude=()):
     return len(fails)
 
 
+FALLBACK_DEFECT = re.compile(r"^(\S+): declared .* has no user function in the map: file-scope fallback over \d+ file\(s\)$")
+
+
+def compare_passes(b, w, m=None):
+    """mt-p1 pass 4b: pass-to-pass check of two replay.py outputs (earlier pass b, this pass w; same tree, same commits).
+    Lists every commit for which this pass selects more and every one for which it selects LESS. A LESS passes only as
+    R-fallback-resolved: nothing but paths lost (no release step, CPU test or kernel test), the earlier pass reported a
+    file-scope fallback ("has no user function in the map", a map gap, not a conservative rule) for a file F that this
+    pass no longer reports (it found F's users), and every lost path is a path of F or of its includers (m = the map at
+    the replayed tree; without it the path check is skipped and said so). Hold-out 4fae76e / c3601d4 / 7078143: the
+    help-text macro WHIRL_HELP_MODES of src/cli/main.cpp; pass 4 (V5) finds commandHelp, on no path. Anything else that
+    selects less fails. Returns (failing commits, lines, explained commits)."""
+    fails, lines, expl, more = [], [], [], []
+    for s in sorted(b):
+        if s not in w:
+            fails.append(s)
+            lines.append(f"   LESS {s}: missing from this pass's replay -> failing")
+            continue
+        add = {k: sorted(set(w[s][k]) - set(b[s][k])) for k in ("steps", "paths", "cpu", "kt")}
+        sub = {k: sorted(set(b[s][k]) - set(w[s][k])) for k in ("steps", "paths", "cpu", "kt")}
+        if any(add.values()):
+            more.append(s)
+            lines.append(f"   more {s}: {json.dumps(add)}  decl {w[s].get('decl', [])[:8]}")
+        if not any(sub.values()):
+            continue
+        why = None
+        if not (sub["steps"] or sub["cpu"] or sub["kt"]):
+            gone = set(b[s].get("defects", [])) - set(w[s].get("defects", []))
+            now = {mm.group(1) for d in w[s].get("defects", []) for mm in [FALLBACK_DEFECT.match(d)] if mm}
+            res = sorted({mm.group(1) for d in gone for mm in [FALLBACK_DEFECT.match(d)] if mm} - now)
+            if res:
+                if m is None:
+                    why = f"R-fallback-resolved ({', '.join(res)}; path check skipped: no map)"
+                else:
+                    own = set()
+                    for f in res:
+                        for g in [f] + (m["includers"].get(f, []) if f.endswith((".h", ".inc")) else []):
+                            own |= set(m["files"].get(g, []))
+                    if set(sub["paths"]) <= own:
+                        why = f"R-fallback-resolved ({', '.join(res)}: users found, lost paths are its file-scope paths)"
+        if why:
+            expl.append(s)
+            lines.append(f"   LESS {s}: {json.dumps(sub)} -> {why}")
+        else:
+            fails.append(s)
+            lines.append(f"   LESS {s}: {json.dumps(sub)} -> failing (not a resolved file-scope fallback)")
+    st = (sum(len(b[s]["steps"]) for s in b), sum(len(w[s]["steps"]) for s in w))
+    lines.insert(0, f"== passes: {len(b)} product commits (earlier) / {len(w)} (this); release steps {st[0]} -> {st[1]}; "
+                    f"selects more on {len(more)}, LESS on {len(fails) + len(expl)} ({len(expl)} R-fallback-resolved, "
+                    f"{len(fails)} failing)")
+    return fails, lines, expl
+
 
 def main():
     ap = argparse.ArgumentParser()
@@ -603,15 +685,33 @@ def main():
     ap.add_argument("--map-at-commit", action="store_true", help="diagnostic: build the map at every replayed commit")
     ap.add_argument("--arch024", action="store_true", help="measure-tools P1: needed GPU checks of the arch024 steps (fit / hold-out)")
     ap.add_argument("--exclude-tuned", action="store_true", help="review A4: leave the TUNED commits out of the replay (hold-out)")
+    ap.add_argument("--base-json", help="--baseline: reuse this finished replay.py --out of the baseline tools")
+    ap.add_argument("--new-json", help="--baseline: reuse this finished replay.py --out of these tools")
+    ap.add_argument("--no-history", action="store_true", help="skip run_history (only --baseline / --cases / --arch024)")
+    ap.add_argument("--pass-json", nargs=2, metavar=("EARLIER", "THIS"),
+                    help="mt-p1 pass 4b: pass-to-pass check of two replay.py outputs on the same tree (--rev: map for the "
+                         "path check); every LESS must be R-fallback-resolved")
     a = ap.parse_args()
     bad = []
+    if a.pass_json:
+        b = json.load(open(a.pass_json[0], encoding="utf-8"))
+        w = json.load(open(a.pass_json[1], encoding="utf-8"))
+        fails, lines, _ = compare_passes(b, w, map_at(a.rev)[0])
+        for ln in lines:
+            print(ln)
+        if fails:
+            bad.append(f"passes: {len(fails)} commit(s) select less, not a resolved file-scope fallback: {', '.join(fails[:6])}")
+        for x in bad:
+            print(f"validate: FAIL {x}")
+        print("validate: " + ("ok" if not bad else f"FAIL ({len(bad)})"))
+        return 1 if bad else 0
     if (not a.history and not a.arch024) or a.cases:
         for c, rep, rows in run_cases():
             bad += [f"named case {c['name']}: MISS {e}" for e, ok in rows if not ok]
         bad += run_range_cases()
     if a.arch024:
         bad += run_arch024()
-    if a.history or not (a.cases or a.arch024):
+    if (a.history or not (a.cases or a.arch024)) and not a.no_history:
         ex = TUNED if a.exclude_tuned else ()
         if ex:
             print(f"   excluded (tuned on): {', '.join(sorted(ex))}")
@@ -619,7 +719,8 @@ def main():
         if not tot or rate < 95:
             bad.append(f"history: test hit rate {rate:.1f}% < 95% ({fhit}/{tot}, UNPAIRED counted as missed)")
     if a.baseline:
-        nn = run_baseline(a.baseline, a.history or 150, a.rev, a.skip, exclude=TUNED if a.exclude_tuned else ())
+        nn = run_baseline(a.baseline, a.history or 150, a.rev, a.skip, exclude=TUNED if a.exclude_tuned else (),
+                          base_json=a.base_json, new_json=a.new_json)
         if nn is None:
             return 2
         if nn:

@@ -154,5 +154,11 @@ DI = "struct P {\n    int a;\n    int b;\n};\nconstexpr P k_p = {\n    .a = 1, .
 got = {(x["cls"], x["name"], x["what"]) for x in declscan.declared(DI, 6)["decls"]}
 expect("pass3 designated initializer row -> fields P::a, P::b + the table", {("P", "a", "field"), ("P", "b", "field")} <= got
        and any(n == "k_p" for _, n, _ in got), got)
+# mt-p1 pass 4 (REVIEW3 C-1): the designator in force on a continuation line
+DC = ("struct P {\n    int a;\n    int r[4];\n    int b;\n};\nconstexpr P k_p = {\n    .a =\n        128,\n    .r = {1, 1,\n          2, 2},\n"
+      "    .b = 1,\n};\n")
+for ln, want, not_ in ((8, "a", "r"), (10, "r", "a"), (11, "b", "r")):
+    got = {x["name"] for x in declscan.declared(DC, ln)["decls"] if x["what"] == "field"}
+    expect(f"pass4 continuation line {ln} -> field {want} only", want in got and not_ not in got, got)
 print(f"declscan test: {ok}/{ok + bad} ok")
 sys.exit(1 if bad else 0)

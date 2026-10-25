@@ -81,6 +81,14 @@ expect("narrowed: R-member, nothing dropped (pass)", "fffffff" in expl, lines)
 expect("narrowed: CPU-only loss needs no rule (pass)", "ggggggg" in expl and gpu_expl == 3, (expl, gpu_expl))
 fails2, lines2, _, _ = validate.classify_narrowed([("bbbbbbb", {"steps": ["kt_full"], "paths": []})], w, {}, None)
 expect("narrowed: no attribution available = fail (block)", fails2 == ["bbbbbbb"], lines2)
+# mt-p1 pass 4 (REVIEW3 act-on 2, G3 kGemmsCfgs row): restored by the 0.2.4 identifier rule with nothing dropped, but
+# the changed line had no identifier (an initializer row): 0.2.4 reached it by its file-scope fallback, not by a
+# same-named local, so it is no evidence of member-access precision -> R-init-noid, failing
+fn, ln, en, _ = validate.classify_narrowed([("iiiiiii", {"steps": ["golden_moe", "srv_balance"], "paths": []})], {"iiiiiii": {"decl": []}}, {},
+                                           {"iiiiiii": {"ids": ["golden_moe", "srv_balance"], "moved": [], "both": [], "braces": [],
+                                                        "dropped": {}, "noid": ["include/whirl/kernels_abi.h:453"]}})
+expect("narrowed: identifier-less initializer row restored only by legacy ids = R-init-noid, failing (block)",
+       fn == ["iiiiiii"] and any("R-init-noid" in x for x in ln), ln)
 # the identifier categories of a declaration line (what the new rule dropped and why)
 cats = validate.impact.id_categories("    std::vector<device::DevBuf> allocations = makeBufs(kNum);", ["allocations"])
 expect("categories: DevBuf type, device qualifier, makeBufs / kN initializer",
@@ -105,5 +113,69 @@ expect("covered: golden = either golden_<model>", validate.covered(rep, "golden"
 expect("covered: named check", validate.covered(rep, "check:kvram719") and not validate.covered(rep, "check:E2"))
 expect("covered: P-size = sizing class", validate.covered(rep, "check:P-size"))
 expect("covered: missing step (block)", not validate.covered(rep, "release:srv_gpu_select"))
+# pass 4: run_baseline replays one at a time (never Popen: WinError 1450 / 1455) and reuses finished replay.py --out files
+import json as _json  # noqa: E402
+import tempfile as _tf  # noqa: E402
+_td = _tf.mkdtemp(prefix="vt_base_")
+_row = {"steps": ["golden_moe"], "paths": ["cli.decode"], "cpu": [], "kt": [], "decl": []}
+_bj, _nj = os.path.join(_td, "b.json"), os.path.join(_td, "n.json")
+_json.dump({"aaaaaaa": _row}, open(_bj, "w", encoding="utf-8"))
+_json.dump({"aaaaaaa": dict(_row, cpu=["whirl-tests:t"])}, open(_nj, "w", encoding="utf-8"))
+_calls = []
+
+
+def _no_popen(*x, **k):
+    raise AssertionError("Popen used")
+
+
+def _fake_run(cmd, *x, **k):
+    _calls.append(cmd)
+    out = cmd[cmd.index("--out") + 1]
+    _json.dump({"aaaaaaa": _row}, open(out, "w", encoding="utf-8"))
+    return type("R", (), {"returncode": 0, "stdout": b""})()
+
+
+_sv = (validate.subprocess.Popen, validate.subprocess.run, validate.attribute)
+validate.subprocess.Popen, validate.subprocess.run, validate.attribute = _no_popen, _fake_run, lambda nar, rev: {}
+try:
+    r1 = validate.run_baseline("0e35407", 5, "HEAD", 0, base_json=_bj, new_json=_nj)
+    expect("baseline: both jsons given = no replay, 0 failing", r1 == 0 and not _calls, (r1, _calls))
+    r2 = validate.run_baseline("0e35407", 5, "HEAD", 0, base_json=_bj)
+    expect("baseline: base json given = ONE replay (these tools), sequential", r2 == 0 and len(_calls) == 1
+           and _calls[0][_calls[0].index("--tools") + 1] == os.path.dirname(os.path.abspath(validate.__file__)), _calls)
+    _json.dump({"bbbbbbb": _row}, open(_nj, "w", encoding="utf-8"))
+    r3 = validate.run_baseline("0e35407", 5, "HEAD", 0, base_json=_bj, new_json=_nj)
+    expect("baseline: replays of different commits are refused (block)", r3 is None, r3)
+finally:
+    validate.subprocess.Popen, validate.subprocess.run, validate.attribute = _sv
+    validate.shutil.rmtree(_td, ignore_errors=True)
+# mt-p1 pass 4b: pass-to-pass LESS (hold 4fae76e / c3601d4 / 7078143): only paths lost, the earlier pass's file-scope
+# fallback of src/cli/main.cpp ("no user function") resolved -> R-fallback-resolved; any other LESS fails
+_fb = "src/cli/main.cpp: declared WHIRL_HELP_MODES has no user function in the map: file-scope fallback over 1 file(s)"
+_r = lambda steps=(), paths=(), cpu=(), defects=(): {"steps": list(steps), "paths": list(paths), "cpu": list(cpu), "kt": [],
+                                                    "decl": [], "defects": list(defects)}
+_mp = {"files": {"src/cli/main.cpp": ["cli.decode", "cli.mtp"], "src/a.h": ["load"]}, "includers": {"src/a.h": ["src/cli/main.cpp"]}}
+_b = {"aaaaaaa": _r(paths=["cli.decode", "cli.mtp", "load"], defects=[_fb]),
+      "bbbbbbb": _r(steps=["golden_swift"], paths=["cli.decode", "load"], defects=[_fb]),
+      "ccccccc": _r(paths=["cli.decode", "load"]),
+      "ddddddd": _r(paths=["cli.decode", "server.decode"], defects=[_fb]),
+      "eeeeeee": _r(paths=["load"], cpu=["whirl-tests:t1"]),
+      "fffffff": _r(paths=["load"])}
+_w = {"aaaaaaa": _r(paths=["load"]),
+      "bbbbbbb": _r(paths=["load"]),
+      "ccccccc": _r(paths=["load"]),
+      "ddddddd": _r(paths=[]),
+      "eeeeeee": _r(paths=["load"]),
+      "fffffff": _r(paths=["load", "startup"])}
+_f, _l, _e = validate.compare_passes(_b, _w, _mp)
+expect("passes: resolved file-scope fallback, only that file's paths lost = R-fallback-resolved (pass)", _e == ["aaaaaaa"], _l)
+expect("passes: a lost release step fails even with the fallback resolved (block)", "bbbbbbb" in _f, _l)
+expect("passes: paths lost with no resolved fallback fail (block)", "ccccccc" in _f, _l)
+expect("passes: a lost path outside the resolved file's paths fails (block)", "ddddddd" in _f, _l)
+expect("passes: a lost CPU test fails (block)", "eeeeeee" in _f, _l)
+expect("passes: more is listed, not failing", "fffffff" not in _f and any(x.startswith("   more fffffff") for x in _l), _l)
+_w2 = dict(_w, aaaaaaa=_r(paths=["load"], defects=[_fb]))
+_f2, _l2, _e2 = validate.compare_passes(_b, _w2, _mp)
+expect("passes: fallback still reported by this pass = not resolved (block)", "aaaaaaa" in _f2, _l2)
 print(f"validate test: {ok}/{ok + bad} ok")
 sys.exit(1 if bad else 0)

@@ -227,6 +227,80 @@ PROBES = {
                                                                       [("src/x.cpp", "readCtx"), ("src/x.cpp", "other")], [], ["readCtx", "other"]),
 }
 
+# mt-p1 pass 4 probes (scratch/mt_p1_rv3/probe_rv3.py): name: (old, new, functions, needed, block, includers)
+INC4 = {"src/a.h": ["src/b.h", "src/u.cpp", "src/v.cpp"], "src/b.h": ["src/v.cpp"]}
+FN4 = [("src/u.cpp", "useU"), ("src/v.cpp", "useV")]
+A1h = "#pragma once\nnamespace w {\nint score(long v);\nint score(int v);\n}  // namespace w\n"
+B1h = "#pragma once\nnamespace w {\nint score(long v);\n}  // namespace w\n"
+Ab1 = "#pragma once\n#include \"a.h\"\nnamespace w {\nint more();\n}  // namespace w\n"
+Bb1 = "#pragma once\n#include \"a.h\"\nnamespace w {\nint more();\nint score(int v);\n}  // namespace w\n"
+U1 = '#include "a.h"\nint useU() {\n  return w::score(3);\n}\n'
+V1 = '#include "b.h"\nint useV() {\n  return w::score(4);\n}\n'
+A2h = ("#pragma once\nnamespace w {\ntemplate <int A> struct Cfg {\n    static constexpr int kTile = 16;\n};\n"
+       "template <> struct Cfg<1151> {\n    static constexpr int kTile = 32;\n};\n}  // namespace w\n")
+B2h = "#pragma once\nnamespace w {\ntemplate <int A> struct Cfg {\n    static constexpr int kTile = 16;\n};\n}  // namespace w\n"
+Bb2 = ("#pragma once\n#include \"a.h\"\nnamespace w {\nint more();\ntemplate <> struct Cfg<1151> {\n    static constexpr int kTile = 32;\n};\n"
+       "}  // namespace w\n")
+U2 = '#include "a.h"\nint useU() {\n  return w::Cfg<1151>::kTile;\n}\n'
+V2 = '#include "b.h"\nint useV() {\n  return w::Cfg<1151>::kTile;\n}\n'
+A3h = "#pragma once\n#define WHIRL_SAFE_COPY 1\nint other();\n"
+B3h = "#pragma once\nint other();\n"
+Ab3 = "#pragma once\n#include \"a.h\"\nint more();\n"
+Bb3 = "#pragma once\n#include \"a.h\"\nint more();\n#define WHIRL_SAFE_COPY 1\n"
+U3c = ('#include "a.h"\nvoid useU(float* d, const float* s, int n) {\n#if WHIRL_SAFE_COPY\n  memmove(d, s, n * 4);\n'
+       '#else\n  memcpy(d, s, n * 4);\n#endif\n}\n')
+A6h = ("#pragma once\nstruct Profile {\n    int vision_attn_threads;\n    int other;\n};\n"
+       "inline constexpr Profile k_p{\n    .vision_attn_threads =\n        128,\n    .other = 1,\n};\n")
+U6 = '#include "a.h"\nint useU(const Profile& p) {\n  return p.vision_attn_threads;\n}\n'
+V6 = '#include "a.h"\nconst Profile& prof() {\n  return k_p;\n}\n'
+A7b = ("#pragma once\nstruct Profile {\n    int gemv_r[4];\n    int other;\n};\n"
+       "inline constexpr Profile k_p{\n    .gemv_r = {1, 1,\n               2, 2},\n    .other = 1,\n};\n")
+U7b = '#include "a.h"\nint useU(const Profile& p, int b) {\n  return p.gemv_r[b];\n}\n'
+A5h = "#pragma once\nconstexpr int kTile = 32;\nconstexpr int kRows = kTile * 2;\n"
+U5 = '#include "a.h"\nint useU() {\n  return kRows;\n}\n'
+V5 = '#include "a.h"\nint useV() {\n  return kTile;\n}\n'
+T4i = "static const int kMaxFold = 3;\nstatic const unsigned kTbl[] = {1, 2, 3};\n"
+T4c = '#include "t.inc"\nint lookup(int c) {\n  return c < kMaxFold ? kTbl[c] : 0;\n}\nint other() {\n  return 1;\n}\n'
+INC1 = {"src/a.h": ["src/u.cpp", "src/v.cpp"]}
+PROBES4 = {
+    "V1 overload moved a.h -> b.h, u.cpp sees only a.h (score(3) binds score(long))":
+        ({"src/a.h": A1h, "src/b.h": Ab1, "src/u.cpp": U1, "src/v.cpp": V1}, {"src/a.h": B1h, "src/b.h": Bb1, "src/u.cpp": U1, "src/v.cpp": V1},
+         FN4, ["useU"], [], INC4),
+    "V2 explicit specialisation moved a.h -> b.h, u.cpp silently uses the primary":
+        ({"src/a.h": A2h, "src/b.h": Ab1, "src/u.cpp": U2, "src/v.cpp": V2}, {"src/a.h": B2h, "src/b.h": Bb2, "src/u.cpp": U2, "src/v.cpp": V2},
+         FN4, ["useU"], [], INC4),
+    "V3c macro moved a.h -> b.h, u.cpp tests it with #if":
+        ({"src/a.h": A3h, "src/b.h": Ab3, "src/u.cpp": U3c, "src/v.cpp": V1}, {"src/a.h": B3h, "src/b.h": Bb3, "src/u.cpp": U3c, "src/v.cpp": V1},
+         FN4, ["useU"], [], INC4),
+    "V3 macro moved a.h -> b.h, u.cpp tests it with #ifdef (known gap P3)":
+        ({"src/a.h": A3h, "src/b.h": Ab3, "src/u.cpp": U3c.replace("#if WHIRL", "#ifdef WHIRL"), "src/v.cpp": V1},
+         {"src/a.h": B3h, "src/b.h": Bb3, "src/u.cpp": U3c.replace("#if WHIRL", "#ifdef WHIRL"), "src/v.cpp": V1}, FN4, ["useU"], [], INC4),
+    "V6 designator value on its own line (C-1)":
+        ({"src/a.h": A6h, "src/u.cpp": U6, "src/v.cpp": V6}, {"src/a.h": A6h.replace("128,", "256,"), "src/u.cpp": U6, "src/v.cpp": V6},
+         [("src/u.cpp", "useU"), ("src/v.cpp", "prof")], ["useU"], [], INC1),
+    "V7b designated array value continued on the next line (C-1)":
+        ({"src/a.h": A7b, "src/u.cpp": U7b, "src/v.cpp": V6}, {"src/a.h": A7b.replace("2, 2}", "2, 4}"), "src/u.cpp": U7b, "src/v.cpp": V6},
+         [("src/u.cpp", "useU"), ("src/v.cpp", "prof")], ["useU"], [], INC1),
+    "V5 namespace-scope kRows = kTile * 2: kTile changed -> kRows readers too (noted)":
+        ({"src/a.h": A5h, "src/u.cpp": U5, "src/v.cpp": V5}, {"src/a.h": A5h.replace("= 32", "= 64"), "src/u.cpp": U5, "src/v.cpp": V5},
+         FN4, ["useU", "useV"], [], INC1),
+    "V4b .inc constant, user in the including .cpp, no files[] row for the .inc (noted)":
+        ({"src/t.inc": T4i, "src/t.cpp": T4c}, {"src/t.inc": T4i.replace("= 3;", "= 4;"), "src/t.cpp": T4c},
+         [("src/t.cpp", "lookup"), ("src/t.cpp", "other")], ["lookup"], ["other"], {"src/t.inc": ["src/t.cpp"]}),
+}
+# G3: kGemmsCfgs row (identifier-less) -> default of KernelTable::gemms_geom -> precChoice reads k.gemms_geom through a
+# parameter; loadK names the class (pass 3 selected only these loaders)
+G3H = ("#pragma once\nstruct GemmCfg {\n    int bm, bn, threads;\n};\ninline constexpr std::array<GemmCfg, 3> kGemmsCfgs = {{\n"
+       "    {64, 32, 128}, {128, 32, 256},\n    {64, 128, 256},\n}};\nstruct KernelTable {\n    int gemms{};\n"
+       "    std::array<GemmCfg, kGemmsCfgs.size()> gemms_geom = kGemmsCfgs;\n};\n")
+G3C = ('#include "k.h"\nvoid loadK(KernelTable* t) {\n  KernelTable z;\n  *t = z;\n}\n'
+       'int precChoice(const KernelTable& k, int si) {\n  return k.gemms_geom[si].bn;\n}\nint other() {\n  return 1;\n}\n')
+G3 = ({"src/k.h": G3H, "src/m.cpp": G3C}, {"src/k.h": G3H.replace("{64, 128, 256}", "{64, 64, 256}"), "src/m.cpp": G3C},
+      [("src/m.cpp", "loadK"), ("src/m.cpp", "precChoice"), ("src/m.cpp", "other")], ["precChoice"], ["other"], {"src/k.h": ["src/m.cpp"]})
+# block: the same overload move where every includer of a.h also includes b.h: a real move, build only
+MV_IN = ({"src/a.h": A1h, "src/b.h": Ab1, "src/u.cpp": U1, "src/v.cpp": V1}, {"src/a.h": B1h, "src/b.h": Bb1, "src/u.cpp": U1, "src/v.cpp": V1},
+         FN4, [], [], {"src/a.h": ["src/b.h", "src/u.cpp", "src/v.cpp"], "src/b.h": ["src/u.cpp", "src/v.cpp"]})
+
 real = impact.show
 impact.show = fake_show
 impact.load_modules = lambda root=None: None
@@ -447,6 +521,40 @@ try:
     expect("pass3 K1 block: comment-only edit of the header -> no kernel work", "kt_full" not in r["release_gate_steps"], r["release_gate_steps"])
     r, _, _ = probe({"kernels/other.h": KH}, {"kernels/other.h": KH.replace(" + 1;", ";")}, [], [], {"kernels/other.h": ["src/a.cpp"]}, HIP)
     expect("pass3 K1 block: header with no .hip includer -> no kt_full", "kt_full" not in r["release_gate_steps"], r["release_gate_steps"])
+
+    # ---------------------------------------------------------------------------------------------------------------
+    # mt-p1 pass 4 (progress/mt-p1.REVIEW3.md act-on 1-3, C-1, noted V4b / V5): the reviewer's probes
+    # (scratch/mt_p1_rv3/probe_rv3.py, realmut_rv3.py G3) as tests; each fails on 14c576a
+    for nm, (a, b, fns, need, block, inc) in sorted(PROBES4.items()):
+        r, miss, sel = probe(a, b, fns, need, inc)
+        expect(f"pass4 {nm}: needed {need} selected", not miss, (miss, sel, r["notes"][:3]))
+        if block:
+            expect(f"pass4 {nm}: block, not selected {block}", not (set(block) & sel), sel)
+    # G3 (kernels_abi.h:453 kGemmsCfgs row = default of KernelTable::gemms_geom, the R9700 gemms launch geometry): the
+    # reader precChoice gets golden (its path lists golden server) and the changed row is reported as identifier-less
+    impact.PATH_GOLDEN["p_precChoice"] = ["server"]
+    r, miss, sel = probe(*G3[:4], G3[5])
+    expect("pass4 G3 table row -> member default -> .gemms_geom reader + golden_swift / golden_moe",
+           not miss and {"golden_swift", "golden_moe"} <= set(r["release_gate_steps"]), (miss, sel, r["release_gate_steps"]))
+    expect("pass4 G3 identifier-less row reported (noid_lines, for validate R-init-noid)", r.get("noid_lines"), r.get("noid_lines"))
+    del impact.PATH_GOLDEN["p_precChoice"]
+    r, _, sel = probe(*MV_IN[:4], MV_IN[5])
+    expect("pass4 block: overload moved a.h -> b.h with every includer of a.h including b.h -> still a move (build only)",
+           not sel, (sel, r["notes"][:3]))
+    # mt-p1 pass 4b (hold LESS 4fae76e / c3601d4 / 7078143, src/cli/main.cpp WHIRL_HELP_MODES): a macro used only inside
+    # namespace-scope help strings; the strings are read by commandHelp alone (wmain returns right after printHelp), so
+    # the users are commandHelp, not every function of the file. Pass 3 found no user function, reported a map defect
+    # and fell back to the file's paths (cmdChat = cli.decode / prefill / mtp / dflash): an over-selection, not ground truth
+    HELP = ('#define HELP_MODES                 \\\n    "  --precise | --balance\\n"  \\\n    "    numerics mode %s\\n"\n\n'
+            'const char* k_help_chat =\n    "usage: chat\\n"\n    HELP_MODES\n    "end\\n";\n'
+            'const char* k_help_bench =\n    "usage: bench\\n"\n    HELP_MODES;\n'
+            'const char* commandHelp(int c) {\n  if (c == 1) return k_help_chat;\n  if (c == 2) return k_help_bench;\n  return nullptr;\n}\n'
+            'int cmdChat(int n) {\n  return n + 1;\n}\n')
+    r, miss, sel = probe({"src/main.cpp": HELP % "(a)"}, {"src/main.cpp": HELP % "(b)"},
+                         [("src/main.cpp", "commandHelp"), ("src/main.cpp", "cmdChat")], ["commandHelp"], {})
+    expect("pass4b help-text macro -> namespace help strings -> commandHelp selected", not miss, (miss, sel, r["notes"][:3]))
+    expect("pass4b block: help-text macro -> not cmdChat (no file-scope fallback)", "cmdChat" not in sel, (sel, r["notes"][:3]))
+    expect("pass4b help-text macro: no map defect (the user is found)", not r["map_defects"], r["map_defects"])
 finally:
     impact.show = real
 print(f"impact decl test: {ok}/{ok + bad} ok")

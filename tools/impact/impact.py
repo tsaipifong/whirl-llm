@@ -143,6 +143,7 @@ def analyze(changes, m, new_rev, old_rev, legacy=()):
     decl_rows = []              # declared names per changed declaration line (B1.1)
     defects = []                # map defects (B1.4)
     dropped_ids = {}            # review A4: identifier -> kind (type / param / init / qualifier / other) the new rule dropped
+    noid_lines = []             # mt-p1 pass 4 (REVIEW3 act-on 2): changed declaration lines with no identifier (table rows)
     test_steps = set()          # release steps of test executables whose sources changed
     for path, ch in sorted(changes.items()):
         rule = next((r for r in FILE_RULES if fnmatch.fnmatch(path, r[0])), None)
@@ -230,8 +231,17 @@ def analyze(changes, m, new_rev, old_rev, legacy=()):
             occ = sigs["old" if x["side"] == "new" else "new"].get(x["sig"], set())
             if not occ or len(occ) != len(sigs[x["side"]].get(x["sig"], ())):
                 return False  # appears on one side only, or the number of occurrences changed: a real change
-            if any(f not in pair for f, _ in occ):
-                return True   # moved to / from another file, identical full scope and statement
+            others = {f for f, _ in occ if f not in pair}
+            if others:
+                # moved to / from another file, identical full scope and statement. mt-p1 pass 4 (REVIEW3 act-on 3,
+                # V1 overload / V2 explicit specialisation / V3c macro): a move only when every translation unit that
+                # saw it still does, i.e. every includer of the old file also includes the new one (or is it); else
+                # a change (0.2.4 behaviour). includers are transitive (map); ccache / depfiles key on the same closure
+                olds, news = ({x["file"]}, others) if x["side"] == "old" else (others, {x["file"]})
+                seen = set(news)
+                for f in news:
+                    seen |= set(m["includers"].get(f, []))
+                return all(set(m["includers"].get(f, [])) <= seen for f in olds)
             if x["cls"] is not None:
                 return x["cls"] not in order_changed
             if not ns_changed:
@@ -248,6 +258,8 @@ def analyze(changes, m, new_rev, old_rev, legacy=()):
             for x, c in id_categories(txt, declared_all, in_function="function" in whats).items():
                 if dropped_ids.get(x) != "other":
                     dropped_ids[x] = c
+            if whats and not [x for x in re.findall(r"[A-Za-z_]\w*", txt) if len(x) > 2 and x not in DECL_NOISE]:
+                noid_lines.append(f"{path}:{ln} ({side})")
         if "ids" in legacy:
             member_names = set()
             free_names = {x for _, _, txt, _ in fc["legacy"] for x in re.findall(r"[A-Za-z_]\w*", txt) if len(x) > 2} - DECL_NOISE
@@ -297,7 +309,8 @@ def analyze(changes, m, new_rev, old_rev, legacy=()):
         if outside and (decls or fail_closed or ("ids" in legacy and free_names)):
             # declarations / tables: the functions (in this file and, for a header, in every includer) that use one of
             # the declared names; if none is found, every function of those files
-            scope = [path] + (m["includers"].get(path, []) if path.endswith(".h") else [])
+            # mt-p1 pass 4 (REVIEW3 noted V4 / V4b): a .inc is included like a header (unicode_tables.inc)
+            scope = [path] + (m["includers"].get(path, []) if path.endswith((".h", ".inc")) else [])
             users = {}
             scans = {}
             fsrc = {}
@@ -310,10 +323,14 @@ def analyze(changes, m, new_rev, old_rev, legacy=()):
                 fsrc[f] = src
             # mt-p1 review C2 (R7, R8): a changed constant / macro also changes the macros defined with it and the
             # classes whose member declarations name it (array bound, default member value): their users too
-            via = indirect_names({x["name"] for x in decls if x["cls"] is None and x["what"] in ("variable", "macro")}, fsrc, scans)
+            via, via_mem = indirect_names({x["name"] for x in decls if x["cls"] is None and x["what"] in ("variable", "macro")}, fsrc, scans)
             if via:
-                notes.append(f"{path}: also the users of {', '.join(sorted(via)[:6])} (macros / classes defined with the changed names)")
+                notes.append(f"{path}: also the users of {', '.join(sorted(via)[:6])} (macros / variables / classes defined with the changed names)")
                 free_names = free_names | via
+            if via_mem and "ids" not in legacy:
+                notes.append(f"{path}: also the readers of {', '.join(sorted(f'{c}::{n}' for c, n in via_mem)[:6])} "
+                             f"(members declared with the changed names: default initializer / array bound)")
+                member_names = member_names | via_mem
             derived = derived_classes({c for c, _ in member_names}, fsrc.values())
             known_cls = {c for sc2 in scans.values() for c, _, _ in sc2.classes}
             for f, sc2 in scans.items():
@@ -321,6 +338,27 @@ def analyze(changes, m, new_rev, old_rev, legacy=()):
                     u = decl_users(fn, member_names, free_names, derived, known_cls)
                     if u:
                         users[(f, fn.name)] = u
+            # mt-p1 pass 4 (REVIEW3 V3 / V3c, known gap P3): a macro tested by #if / #ifdef / #ifndef / #elif is used by
+            # the function the directive is in; a directive at namespace scope fails closed. Removing such a macro
+            # still builds (undefined = 0 / the other branch), so it is not "removed with no user left". The default-
+            # value idiom / include guard (#ifndef X directly followed by #define X) is not a use.
+            pp_macros = {x["name"] for x in decls if x["what"] == "macro"} | {n for n in via if re.match(r"[A-Z_][A-Z0-9_]*$", n)}
+            for f, sc2 in (scans.items() if pp_macros else ()):
+                rl = fsrc[f].split("\n")
+                for i, line in enumerate(rl):
+                    mm = re.match(r"\s*#\s*(?:if|ifdef|ifndef|elif)\b(.*)", line)
+                    if not mm:
+                        continue
+                    hit = set(re.findall(r"[A-Za-z_]\w*", mm.group(1))) & pp_macros
+                    nxt = next((t for t in rl[i + 1:] if t.strip()), "")
+                    hit = {n for n in hit if not re.match(rf"\s*#\s*define\s+{n}\b", nxt)}
+                    if not hit:
+                        continue
+                    fn = cxxscan.func_at(sc2, i + 1)
+                    if fn is not None:
+                        users.setdefault((f, fn.name), set()).update(hit)
+                    else:
+                        fail_closed.append(f"{f}:{i + 1} namespace-scope #if on {', '.join(sorted(hit))}")
             # arch024-S12: a member added to a struct that no function reads yet (a test lands before its fix, e.g.
             # a4626b9 PinnedGpu::adapter_shared) changes every user of the struct: fall back to the enclosing types
             struct_fallback = False
@@ -398,6 +436,7 @@ def analyze(changes, m, new_rev, old_rev, legacy=()):
     behaviour_classes(changes, rep, beh, decl_rows, new_rev)
     rep["declarations"] = decl_rows
     rep["dropped_ids"] = dropped_ids
+    rep["noid_lines"] = noid_lines
     rep["map_defects"] = defects
     rep.update(module_gate(changes, rep=rep, m=m))
     return rep
@@ -533,29 +572,63 @@ def id_categories(text, declared, in_function=False):
 def indirect_names(names, fsrc, scans):
     """macros whose body names one of names (transitively), and classes whose body (outside member function bodies)
     names one of them (review C2: R8 TILE2 = TILE * 2, R7 float v[kSlots])"""
+    """mt-p1 pass 4: returns (names, members). members = (class, member) whose member declaration names one of them
+    (REVIEW3 act-on 1, G3: kGemmsCfgs is the default of KernelTable::gemms_geom; its readers k.gemms_geom are users;
+    also closes the reader half of known gap P7). Namespace-scope variables initialised from one of them count as
+    changed too (REVIEW3 noted V5: kRows = kTile * 2), transitively with the macros."""
     if not names:
-        return set()
+        return set(), set()
     macros = {}
     for src in fsrc.values():
         for mm in re.finditer(r"^[ \t]*#[ \t]*define[ \t]+(\w+)((?:[^\n]*\\\n)*[^\n]*)", src, re.M):
             macros[mm.group(1)] = set(re.findall(r"[A-Za-z_]\w*", mm.group(2)))
-    got, todo = set(names), list(names)
+    # namespace-scope lines (outside classes and functions) with their identifiers; declscan only on the lines that name
+    # a changed name (cost: a few lines per header, not every line of every includer)
+    nslines = []
+    for f, sc in scans.items():
+        lines = fsrc[f].split("\n")
+        skip = set()
+        for _, a, b in sc.classes:
+            skip |= set(range(a, b + 1))
+        for fn in sc.funcs:
+            skip |= set(range(fn.start, fn.end + 1))
+        for ln in range(1, len(lines) + 1):
+            if ln not in skip:
+                ids = set(re.findall(r"[A-Za-z_]\w*", lines[ln - 1].split("//")[0]))
+                if ids:
+                    nslines.append((f, ln, ids))
+    got, todo, done = set(names), list(names), set()
     while todo:
         n = todo.pop()
         for mname, ids in macros.items():
             if n in ids and mname not in got:
                 got.add(mname)
                 todo.append(mname)
+        for f, ln, ids in nslines:
+            if n in ids and (f, ln) not in done:
+                done.add((f, ln))
+                d = declscan.declared(fsrc[f], ln)
+                for x in d["decls"] if d["kind"] == "decl" else ():
+                    if x["cls"] is None and x["what"] == "variable" and x["name"] not in got and x["name"] != n:
+                        got.add(x["name"])
+                        todo.append(x["name"])
+    members = set()
+    vals = set(got)  # values only: a member whose TYPE is a class added below is not a reader of the value (Ctx::k)
     for f, sc in scans.items():
         lines = fsrc[f].split("\n")
         for cname, a, b in sc.classes:
             body = set()
             for ln in range(a, min(b, len(lines)) + 1):
                 if not cxxscan.func_at(sc, ln):
-                    body |= set(re.findall(r"[A-Za-z_]\w*", lines[ln - 1].split("//")[0]))
+                    ids = set(re.findall(r"[A-Za-z_]\w*", lines[ln - 1].split("//")[0]))
+                    body |= ids
+                    if ids & vals:
+                        for x in declscan.declared(fsrc[f], ln)["decls"]:
+                            if x["cls"] and x["what"] in ("member", "variable", "field"):
+                                members.add((x["cls"], x["name"]))
             if body & got and cname not in got:
                 got.add(cname)
-    return got - set(names)
+    return got - set(names), members
 
 
 def ns_order_changed(fc):
