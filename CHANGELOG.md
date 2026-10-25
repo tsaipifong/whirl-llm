@@ -3,6 +3,38 @@
 All notable changes to WHIRL are listed here. Versions follow `project(whirl VERSION ...)` in
 `CMakeLists.txt`.
 
+## 0.2.4 — 2026-10-25 (one bug fix and internal restructuring)
+
+No new feature (feature freeze until the modularization is done). This release is the second half of WHIRL's
+modularization (the engine) and fixes one bug in precise mode.
+
+### Fixed
+
+- **precise mode: multi-turn conversations restored from the RAM or SSD cache now reuse the whole earlier
+  conversation.** In v0.2.2 to v0.2.3, precise mode could reuse only part of it after a restore, so part of the prompt
+  was processed again (slower; the generated text was not affected). balance and fast were not affected.
+
+### Output and speed
+
+- Output: the golden references (Swift-1.5 27B MXFP4-A and Ornith-1.5-35B-A3B MXFP4; precise, balance and fast; single
+  prompts, prompt pairs, n-gram drafts and the server path: streaming, prefix cache, RAM and SSD restore, vision) pass on
+  the Radeon 8060S and the R9700 with the exes in this zip. One reference line per GPU and model changed: the cached
+  prompt tokens after a precise-mode SSD restore (the fix above); the generated text is the same.
+- Speed: the GPU kernels are the same as in 0.2.3. balance mode was measured on both GPUs for this release (table in
+  the release notes, against official llama.cpp ROCm and Vulkan); precise and fast were not re-measured.
+
+### Changed (internal)
+
+- Engine split into modules with their own tests: prefix store, KV page pool, checkpoint store, RAM/SSD tier bridge and
+  the memory governor moved out of the engine core; GPU and host resources are owned by RAII wrappers.
+- Release gates: validation follows the impact of a change (the steps that a change can affect), and released versions
+  are compared with their stored numbers instead of being measured again.
+
+### Tests and gates
+
+- Module gate with per-module tests and standards; an environment test matrix (GPU selection, HIP visibility, GPU memory
+  limits); the server start-up check of the pool size re-check is fixed.
+
 ## 0.2.3 — 2026-10-23 (internal restructuring and one bug fix; no change in output or speed)
 
 No new feature (feature freeze until the modularization is done). Apart from the one fix below, nothing changes for
