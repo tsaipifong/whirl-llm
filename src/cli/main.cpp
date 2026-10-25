@@ -18,6 +18,7 @@
 #include "whirl/hip.h"
 #include "whirl/gpu_select.h"
 #include "whirl/hip_runtime_loader.h"
+#include "whirl/leak_count.h"
 #include "whirl/model.h"
 #include "whirl/prefill_schedule.h"
 #include "whirl/tokenizer.h"
@@ -2541,6 +2542,18 @@ int cmdSelftest(const Args& a) {
     return ok ? 0 : 1;
 }
 
+// arch025-Q2 (include/whirl/leak_count.h): with WHIRL_LEAK_CHECK=1 a whole selftest / seqtest run is one unit: after it
+// returns (the Model, its buffers, streams and events destroyed) no hip allocation, stream or event it made may be alive.
+// A leak prints "LEAK_CHECK: <cmd>: ..." and turns the exit code into 1; a clean run prints "leak check: ok (1 units)".
+// Off: nothing printed, the exit code is the command's (no HIP call added either way).
+int leakChecked(const char* unit, int (*cmd)(const Args&), const Args& a) {
+    const hip::leakcount::Snapshot before = hip::leakcount::snapshot();
+    int rc = cmd(a);
+    if (hip::leakcount::check(unit, before)) rc = 1;
+    if (hip::leakcount::report() != 0) rc = 1;
+    return rc;
+}
+
 int cmdDevices() {
     const std::vector<whirl::gpusel::GpuRecord> devs = whirl::gpusel::enumerate();
     if (devs.empty()) {
@@ -2684,8 +2697,8 @@ int wmain(int argc, wchar_t** wargv) {
         if (cmd != "devices" && !a.pos.empty()) app::requireModelFile(a.pos[0]);
         if (cmd == "chat") return cmdChat(a);
         if (cmd == "bench") return cmdBench(a);
-        if (cmd == "selftest") return cmdSelftest(a);
-        if (cmd == "seqtest") return cmdSeqtest(a);
+        if (cmd == "selftest") return leakChecked("selftest", cmdSelftest, a);
+        if (cmd == "seqtest") return leakChecked("seqtest", cmdSeqtest, a);
         if (cmd == "golden") return cmdGolden(a);
         if (cmd == "dflash-check") return cmdDflashCheck(a);
         if (cmd == "devices") return cmdDevices();

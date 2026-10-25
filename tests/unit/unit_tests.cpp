@@ -23,6 +23,7 @@
 #include "whirl/value_scope.h"
 #include "whirl/kernels_abi.h"
 #include "hip/alloc_log.h"
+#include "whirl/leak_count.h"
 #include "hip/launch_log.h"
 #if WHIRL_TEST_DLL_DEPS
 #include "release/dll_deps.h"
@@ -1966,6 +1967,61 @@ void testAllocLog() {
     al::onDevFree(0x10000ull);
     CHECK(al::testText().find("# events 0 ") == 0);
     al::testEnable(was_on, true);
+}
+
+// arch025-Q2: the GPU-side leak count. A unit that frees what it made passes; a missing device free, a missing pinned
+// free, a stream or an event left alive each fail and are named; what was alive before the unit is not blamed on it;
+// a free of a block made before counting started is ignored; off counts nothing and never reports.
+void testLeakCount() {
+    namespace lc = whirl::hip::leakcount;
+    const bool was_on = lc::g_on;
+    lc::testEnable(true);
+    lc::onDevAlloc(0x5000, 4096);  // alive before the units (e.g. the kernel-test context)
+    const lc::Snapshot base = lc::snapshot();
+    CHECK_EQ(base.dev, 1);
+    CHECK_EQ(base.dev_bytes, 4096);
+    // clean unit
+    lc::onDevAlloc(0x10000, 1u << 20);
+    lc::onHostAlloc(0x20000, 8192);
+    lc::onStream(+1);
+    lc::onEvent(+1);
+    lc::onEvent(-1);
+    lc::onStream(-1);
+    lc::onHostFree(0x20000);
+    lc::onDevFree(0x10000);
+    CHECK(!lc::check("clean", base));
+    // injected missing device free
+    lc::onDevAlloc(0x30000, 768);
+    lc::onDevAlloc(0x40000, 256);
+    lc::onDevFree(0x40000);
+    const lc::Snapshot b1 = lc::snapshot();
+    CHECK(lc::leaked(base, b1) == "1 device allocation (768 bytes)");
+    CHECK(lc::check("missing_free", base));
+    lc::onDevFree(0x30000);
+    // pinned host, stream, event
+    const lc::Snapshot b2 = lc::snapshot();
+    lc::onHostAlloc(0x50000, 64);
+    lc::onStream(+1);
+    lc::onEvent(+1);
+    lc::onEvent(+1);
+    CHECK(lc::leaked(b2, lc::snapshot()) == "1 pinned host allocation (64 bytes), 1 stream, 2 events");
+    CHECK(lc::check("handles", b2));
+    lc::onHostFree(0x50000);
+    lc::onStream(-1);
+    lc::onEvent(-2);
+    // a free of an unknown block changes nothing
+    lc::onDevFree(0x777);
+    lc::onHostFree(0x888);
+    CHECK(lc::leaked(base, lc::snapshot()).empty());
+    CHECK(!lc::check("after", base));
+    CHECK_EQ(lc::report(), 2);  // missing_free + handles of 5 units
+    // off: nothing counted, check never fires, report silent
+    lc::testEnable(false);
+    const lc::Snapshot z = lc::snapshot();
+    lc::onDevFree(0x5000);
+    CHECK(!lc::check("off", z));
+    CHECK_EQ(lc::report(), 0);
+    lc::testEnable(was_on);
 }
 
 // OVH-C1: the MTP draft window (Model::attn_win) must be restored when the draft attention throws,
@@ -4080,6 +4136,7 @@ int main(int argc, char** argv) {
     testLaunchDigestZeroAndAdjacent();
     testLaunchRawCap();
     testAllocLog();
+    testLeakCount();
     specsample_test::testSpecSample();
     testDflashPolicy();
     testLocalMemTaken();

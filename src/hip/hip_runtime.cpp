@@ -7,6 +7,7 @@
 
 #include "whirl/hip.h"
 #include "whirl/vram_limit.h"
+#include "whirl/leak_count.h"
 
 #include "hip_api.h"
 #include "alloc_log.h"
@@ -158,6 +159,7 @@ DevPtr malloc(std::size_t bytes) {
         check(rt().hipMalloc(&p, n), "hipMalloc");
         if (launchlog::g_on) launchlog::onAlloc(reinterpret_cast<std::uintptr_t>(p), n);
         if (alloclog::g_on) alloclog::onDevAlloc(reinterpret_cast<std::uintptr_t>(p), n);  // arch025-S0a
+        if (leakcount::g_on) leakcount::onDevAlloc(reinterpret_cast<std::uintptr_t>(p), n);  // arch025-Q2
         return reinterpret_cast<std::uintptr_t>(p);
     }
     VramTrack& t = vramTrack();
@@ -184,6 +186,7 @@ DevPtr malloc(std::size_t bytes) {
     t.sizes[reinterpret_cast<std::uintptr_t>(p)] = n;
     if (launchlog::g_on) launchlog::onAlloc(reinterpret_cast<std::uintptr_t>(p), n);
     if (alloclog::g_on) alloclog::onDevAlloc(reinterpret_cast<std::uintptr_t>(p), n);
+    if (leakcount::g_on) leakcount::onDevAlloc(reinterpret_cast<std::uintptr_t>(p), n);
     return reinterpret_cast<std::uintptr_t>(p);
 }
 
@@ -191,6 +194,7 @@ void free(DevPtr p) {
     if (!p) return;
     if (launchlog::g_on) launchlog::onFree(p);
     if (alloclog::g_on) alloclog::onDevFree(p);
+    if (leakcount::g_on) leakcount::onDevFree(p);  // arch025-Q2
     (void)rt().hipFree(ptr(p));
     if (vram::limitBytes() == 0) return;
     VramTrack& t = vramTrack();
@@ -219,6 +223,7 @@ void* hostMalloc(std::size_t bytes) {
     const std::size_t n = std::max<std::size_t>(bytes, 1);
     check(rt().hipHostMalloc(&p, n, 0), "hipHostMalloc");
     if (alloclog::g_on) alloclog::onHostAlloc(reinterpret_cast<std::uintptr_t>(p), n);
+    if (leakcount::g_on) leakcount::onHostAlloc(reinterpret_cast<std::uintptr_t>(p), n);  // arch025-Q2
     PinnedTrack& t = pinnedTrack();
     std::lock_guard<std::mutex> lk(t.mu);
     t.sizes[reinterpret_cast<std::uintptr_t>(p)] = n;
@@ -229,6 +234,7 @@ void* hostMalloc(std::size_t bytes) {
 void hostFree(void* p) {
     if (!p) return;
     if (alloclog::g_on) alloclog::onHostFree(reinterpret_cast<std::uintptr_t>(p));
+    if (leakcount::g_on) leakcount::onHostFree(reinterpret_cast<std::uintptr_t>(p));  // arch025-Q2
     (void)rt().hipHostFree(p);
     PinnedTrack& t = pinnedTrack();
     std::lock_guard<std::mutex> lk(t.mu);
@@ -290,11 +296,14 @@ Stream streamCreate(bool non_blocking) {
         check(rt().hipStreamCreateWithFlags(&s, hipStreamNonBlocking), "hipStreamCreateWithFlags");
     else
         check(rt().hipStreamCreate(&s), "hipStreamCreate");
+    if (leakcount::g_on) leakcount::onStream(+1);  // arch025-Q2
     return s;
 }
 
 void streamDestroy(Stream s) {
-    if (s) (void)rt().hipStreamDestroy(strm(s));
+    if (!s) return;
+    if (leakcount::g_on) leakcount::onStream(-1);  // arch025-Q2
+    (void)rt().hipStreamDestroy(strm(s));
 }
 
 void streamSync(Stream s) { check(rt().hipStreamSynchronize(strm(s)), "hipStreamSynchronize"); }
@@ -307,11 +316,14 @@ Event eventCreate(bool timing) {
         check(rt().hipEventCreate(&e), "hipEventCreate");
     else
         check(rt().hipEventCreateWithFlags(&e, hipEventDisableTiming), "hipEventCreateWithFlags");
+    if (leakcount::g_on) leakcount::onEvent(+1);  // arch025-Q2
     return e;
 }
 
 void eventDestroy(Event e) {
-    if (e) (void)rt().hipEventDestroy(evt(e));
+    if (!e) return;
+    if (leakcount::g_on) leakcount::onEvent(-1);  // arch025-Q2
+    (void)rt().hipEventDestroy(evt(e));
 }
 
 void eventRecord(Event e, Stream s) { check(rt().hipEventRecord(evt(e), strm(s)), "hipEventRecord"); }

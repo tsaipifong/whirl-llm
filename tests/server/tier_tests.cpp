@@ -4167,6 +4167,37 @@ static bool want(const char* name) {
     return all || std::strcmp(only, name) == 0;
 }
 
+// arch025-Q2 (PLAN X-10, per-test clean()): main's tests share one NullBackend, so its destructor check (WHIRL_LEAKCHECK
+// builds) finds a leak only at exit and cannot name the test. Each test that takes the shared backend must hand it back
+// clean(): no device allocation, pinned host block, stream or event alive. Checked in every build (not only LEAKCHECK).
+static bool backendClean(const NullBackend& ops, const char* test) {
+    if (ops.clean()) return true;
+    std::printf("LEAK: %s left %zu allocations (%ld pinned host), %ld streams, %ld events on the shared NullBackend\n", test,
+                ops.liveAllocations(), ops.liveHost(), ops.liveStreams(), ops.liveEvents());
+    return false;
+}
+struct TestClean {
+    NullBackend& ops;
+    const char* name;
+    TestClean(NullBackend& o, const char* n) : ops(o), name(n) {}
+    TestClean(const TestClean&) = delete;
+    TestClean& operator=(const TestClean&) = delete;
+    ~TestClean() { CHECK(backendClean(ops, name)); }
+};
+// block / pass proof of backendClean (injected missing free on a private backend)
+static void testBackendCleanHelper() {
+    NullBackend nb;
+    const DevPtr p = nb.malloc(4096);
+    std::printf("  (the next LEAK line is expected: injected missing free)\n");
+    CHECK(!backendClean(nb, "injected_missing_free"));
+    nb.free(p);
+    CHECK(backendClean(nb, "injected_missing_free"));
+    const Stream st = nb.streamCreateNonBlocking();
+    CHECK(!nb.clean());
+    nb.streamDestroy(st);
+    CHECK(backendClean(nb, "stream"));
+}
+
 int main(int argc, char** argv) {
     whirl::test::clearWhirlEnv({L"WHIRL_TIER_ONLY", L"WHIRL_TIER_AMP"});  // FR-TEST P3-11
     std::setvbuf(stdout, nullptr, _IONBF, 0);
@@ -4174,6 +4205,10 @@ int main(int argc, char** argv) {
     const fs::path base = whirl::test::testTmpBase();
     fs::path dir = argc > 1 ? fs::path(argv[1]) : base / L"tier_test_tmp";
     NullBackend ops;
+    if (want("testBackendCleanHelper")) {
+        std::printf("-- %s\n", "testBackendCleanHelper");
+        testBackendCleanHelper();
+    }
     if (want("testHelpers")) {
         std::printf("-- %s\n", "testHelpers");
         testHelpers();
@@ -4188,59 +4223,73 @@ int main(int argc, char** argv) {
     }
     if (want("testLookup")) {
         std::printf("-- %s\n", "testLookup");
+        const TestClean tc_(ops, "testLookup");
         testLookup(ops);
     }
     if (want("testEvictLru")) {
         std::printf("-- %s\n", "testEvictLru");
+        const TestClean tc_(ops, "testEvictLru");
         testEvictLru(ops);
     }
     if (want("testTrimDropCk")) {
         std::printf("-- %s\n", "testTrimDropCk");
+        const TestClean tc_(ops, "testTrimDropCk");
         testTrimDropCk(ops);
     }
     if (want("testRestoreRam")) {
         std::printf("-- %s\n", "testRestoreRam");
+        const TestClean tc_(ops, "testRestoreRam");
         testRestoreRam(ops);
     }
     CHECK(ops.liveEvents() == 0 && ops.liveHost() == 0 && ops.liveStreams() == 0);
     if (want("testSsd")) {
         std::printf("-- %s\n", "testSsd");
+        const TestClean tc_(ops, "testSsd");
         testSsd(ops, dir);
     }
     if (want("testDedupRestart")) {
         std::printf("-- %s\n", "testDedupRestart");
+        const TestClean tc_(ops, "testDedupRestart");
         testDedupRestart(ops, dir);
     }
     if (want("testOwnerRewrite")) {
         std::printf("-- %s\n", "testOwnerRewrite");
+        const TestClean tc_(ops, "testOwnerRewrite");
         testOwnerRewrite(ops, dir);
     }
     if (want("testModesLock")) {
         std::printf("-- %s\n", "testModesLock");
+        const TestClean tc_(ops, "testModesLock");
         testModesLock(ops, dir);
     }
     if (want("testSsdTruncated")) {
         std::printf("-- %s\n", "testSsdTruncated");
+        const TestClean tc_(ops, "testSsdTruncated");
         testSsdTruncated(ops, dir);
     }
     if (want("testRestoreCopyThrows")) {
         std::printf("-- %s\n", "testRestoreCopyThrows");
+        const TestClean tc_(ops, "testRestoreCopyThrows");
         testRestoreCopyThrows(ops, dir);
     }
     if (want("testLockFailClosed")) {
         std::printf("-- %s\n", "testLockFailClosed");
+        const TestClean tc_(ops, "testLockFailClosed");
         testLockFailClosed(ops, dir);
     }
     if (want("testDedupCycle")) {
         std::printf("-- %s\n", "testDedupCycle");
+        const TestClean tc_(ops, "testDedupCycle");
         testDedupCycle(ops, dir);
     }
     if (want("testSupersedeTrim")) {
         std::printf("-- %s\n", "testSupersedeTrim");
+        const TestClean tc_(ops, "testSupersedeTrim");
         testSupersedeTrim(ops, dir);
     }
     if (want("testWorkflows")) {
         std::printf("-- %s\n", "testWorkflows");
+        const TestClean tc_(ops, "testWorkflows");
         testWorkflows(ops, dir);
     }
     if (want("testQuietDefaults")) {
@@ -4249,34 +4298,42 @@ int main(int argc, char** argv) {
     }
     if (want("testWriteDelay")) {
         std::printf("-- %s\n", "testWriteDelay");
+        const TestClean tc_(ops, "testWriteDelay");
         testWriteDelay(ops, dir);
     }
     if (want("testEvictionWrite")) {
         std::printf("-- %s\n", "testEvictionWrite");
+        const TestClean tc_(ops, "testEvictionWrite");
         testEvictionWrite(ops, dir);
     }
     if (want("testEvictionWriteSsdFull")) {
         std::printf("-- %s\n", "testEvictionWriteSsdFull");
+        const TestClean tc_(ops, "testEvictionWriteSsdFull");
         testEvictionWriteSsdFull(ops, dir);
     }
     if (want("testShutdownFlush")) {
         std::printf("-- %s\n", "testShutdownFlush");
+        const TestClean tc_(ops, "testShutdownFlush");
         testShutdownFlush(ops, dir);
     }
     if (want("testDedupFinishedUnreaped")) {
         std::printf("-- %s\n", "testDedupFinishedUnreaped");
+        const TestClean tc_(ops, "testDedupFinishedUnreaped");
         testDedupFinishedUnreaped(ops, dir);
     }
     if (want("testFlushDedup")) {
         std::printf("-- %s\n", "testFlushDedup");
+        const TestClean tc_(ops, "testFlushDedup");
         testFlushDedup(ops, dir);
     }
     if (want("testFlushOrder")) {
         std::printf("-- %s\n", "testFlushOrder");
+        const TestClean tc_(ops, "testFlushOrder");
         testFlushOrder(ops, dir);
     }
     if (want("testSeenOnce")) {
         std::printf("-- %s\n", "testSeenOnce");
+        const TestClean tc_(ops, "testSeenOnce");
         testSeenOnce(ops, dir);
     }
     if (want("testIdleFlushPolicy")) {
@@ -4285,6 +4342,7 @@ int main(int argc, char** argv) {
     }
     if (want("testIdleWriteTier")) {
         std::printf("-- %s\n", "testIdleWriteTier");
+        const TestClean tc_(ops, "testIdleWriteTier");
         testIdleWriteTier(ops, dir);
     }
     if (want("testClosePolicy")) {
@@ -4293,74 +4351,92 @@ int main(int argc, char** argv) {
     }
     if (want("testCloseReusedTier")) {
         std::printf("-- %s\n", "testCloseReusedTier");
+        const TestClean tc_(ops, "testCloseReusedTier");
         testCloseReusedTier(ops, dir);
     }
     if (want("testShutdownEvictReused")) {
         std::printf("-- %s\n", "testShutdownEvictReused");
+        const TestClean tc_(ops, "testShutdownEvictReused");
         testShutdownEvictReused(ops, dir);
     }
     if (want("testStartupCleanupCap")) {
         std::printf("-- %s\n", "testStartupCleanupCap");
+        const TestClean tc_(ops, "testStartupCleanupCap");
         testStartupCleanupCap(ops, dir);
     }
     if (want("testCapLruDedup")) {
         std::printf("-- %s\n", "testCapLruDedup");
+        const TestClean tc_(ops, "testCapLruDedup");
         testCapLruDedup(ops, dir);
     }
     if (want("testExpiry")) {
         std::printf("-- %s\n", "testExpiry");
+        const TestClean tc_(ops, "testExpiry");
         testExpiry(ops, dir);
     }
     if (want("testRamUsePersisted")) {
         std::printf("-- %s\n", "testRamUsePersisted");
+        const TestClean tc_(ops, "testRamUsePersisted");
         testRamUsePersisted(ops, dir);
     }
     if (want("testShutdownNoWrites")) {
         std::printf("-- %s\n", "testShutdownNoWrites");
+        const TestClean tc_(ops, "testShutdownNoWrites");
         testShutdownNoWrites(ops, dir);
     }
     if (want("testDeleteFails")) {
         std::printf("-- %s\n", "testDeleteFails");
+        const TestClean tc_(ops, "testDeleteFails");
         testDeleteFails(ops, dir);
     }
     if (want("testRestoreAsyncError")) {
         std::printf("-- %s\n", "testRestoreAsyncError");
+        const TestClean tc_(ops, "testRestoreAsyncError");
         testRestoreAsyncError(ops);
     }
     if (want("testIdleWakeRoomPending")) {
         std::printf("-- %s\n", "testIdleWakeRoomPending");
+        const TestClean tc_(ops, "testIdleWakeRoomPending");
         testIdleWakeRoomPending(ops, dir);
     }
     if (want("testTakeoverKeepsJobOrder")) {
         std::printf("-- %s\n", "testTakeoverKeepsJobOrder");
+        const TestClean tc_(ops, "testTakeoverKeepsJobOrder");
         testTakeoverKeepsJobOrder(ops, dir);
     }
     if (want("testDedupStartupCycleOwnerTrunc")) {
         std::printf("-- %s\n", "testDedupStartupCycleOwnerTrunc");
+        const TestClean tc_(ops, "testDedupStartupCycleOwnerTrunc");
         testDedupStartupCycleOwnerTrunc(ops, dir);
     }
     if (want("testWriteAmplification")) {
         std::printf("-- %s\n", "testWriteAmplification");
+        const TestClean tc_(ops, "testWriteAmplification");
         testWriteAmplification(ops, dir);
     }
     if (want("testDemote")) {
         std::printf("-- %s\n", "testDemote");
+        const TestClean tc_(ops, "testDemote");
         testDemote(ops, dir);
     }
     if (want("testTokCapRestart")) {
         std::printf("-- testTokCapRestart\n");
+        const TestClean tc_(ops, "testTokCapRestart");
         testTokCapRestart(ops, dir);
     }
     if (want("testCapTightRamEntries")) {
         std::printf("-- %s\n", "testCapTightRamEntries");
+        const TestClean tc_(ops, "testCapTightRamEntries");
         testCapTightRamEntries(ops, dir);
     }
     if (want("testCapOwnCopyDropped")) {
         std::printf("-- testCapOwnCopyDropped\n");
+        const TestClean tc_(ops, "testCapOwnCopyDropped");
         testCapOwnCopyDropped(ops, dir);
     }
     if (want("testPowerLoss")) {
         std::printf("-- %s\n", "testPowerLoss");
+        const TestClean tc_(ops, "testPowerLoss");
         testPowerLoss(ops, dir);
     }
     if (want("testF1SpillFence")) {

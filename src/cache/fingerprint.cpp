@@ -87,7 +87,9 @@ bool fingerprintEnvKept(std::string_view key) {
                                  // launch-log raw word dump (arch024 left these out; they print, change nothing)
                                  "WHIRL_LAUNCH_LOG_RAW", "WHIRL_LAUNCH_LOG_RAW_MAX",
                                  // safe025: leak-check report verbosity (test builds only)
-                                 "WHIRL_LEAKCHECK_QUIET"};
+                                 "WHIRL_LEAKCHECK_QUIET",
+                                 // arch025-Q2: GPU-side leak count (counts hip allocations / streams / events, no HIP call)
+                                 "WHIRL_LEAK_CHECK"};
     for (const char* x : skip)
         if (up == x) return false;
     return true;

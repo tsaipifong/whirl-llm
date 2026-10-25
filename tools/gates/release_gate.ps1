@@ -170,11 +170,16 @@ AddStep "cpu_safety_selftest" $false @($pwsh, "-NoProfile", "-File", $safetyPs, 
 AddStep "cpu_asan" $false @($pwsh, "-NoProfile", "-File", $safetyPs, "-Kind", "asan", "-Gguf", $SW, "-GgufMoe", $MX) { param($o, $c) $c -eq 0 -and ($o -match "(?m)^cpu asan: ok") } $safetyEnv
 AddStep "cpu_analyze" $false @($pwsh, "-NoProfile", "-File", $safetyPs, "-Kind", "analyze") { param($o, $c) $c -eq 0 -and ($o -match "(?m)^cpu analyze: ok") } $safetyEnv
 $ktArgs = @($exe["whirl-kernel-test"], "--device", $Device, "--require-all", "--mx", $SW, "--moemx", $MX) + @(if ($hasQ) { "--q4"; $Q })
-AddStep "kt_full" $true $ktArgs { param($o, $c) $c -eq 0 -and ($o -match "^PASS: 0 failing") -and ($o -match "--require-all: 0 required kernel") }
+# arch025-Q2 (X-13 (a) / O8): kt_full and st_* run with the GPU-side leak count (WHIRL_LEAK_CHECK=1, include/whirl/leak_count.h):
+# every kernel-test family / the whole selftest must free every hip allocation, stream and event it made. The rule also
+# needs the "leak check: ok" line, so a build or a shell that drops the variable cannot pass silently. The count adds
+# no HIP call (launch sequence unchanged).
+$leakEnv = @{ WHIRL_LEAK_CHECK = "1" }
+AddStep "kt_full" $true $ktArgs { param($o, $c) $c -eq 0 -and ($o -match "^PASS: 0 failing") -and ($o -match "--require-all: 0 required kernel") -and ($o -match "(?m)^leak check: ok \([1-9]\d* units\)") } $leakEnv
 foreach ($m in @($denseKeys) + @("moe")) {
     foreach ($mode in "precise", "balance", "fast") {
         $mp = $modelOf[$m]
-        AddStep "st_${m}_$mode" $true @($exe["whirl"], "selftest", $mp, "--$mode", "--device", $Device) { param($o, $c) $c -eq 0 -and ($o -match "^selftest: ok") }
+        AddStep "st_${m}_$mode" $true @($exe["whirl"], "selftest", $mp, "--$mode", "--device", $Device) { param($o, $c) $c -eq 0 -and ($o -match "^selftest: ok") -and ($o -match "(?m)^leak check: ok \(1 units\)") } $leakEnv
     }
 }
 foreach ($m in @($denseKeys) + @("moe")) {
