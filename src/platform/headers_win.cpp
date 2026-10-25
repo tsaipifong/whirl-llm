@@ -11,6 +11,7 @@
 #include "platform/env.h"
 #include "platform/fs.h"
 #include "platform/net.h"
+#include "platform/net_fake.h"
 #include "platform/paths.h"
 #include "platform/proc.h"
 #include "platform/sys.h"

@@ -4,11 +4,14 @@
 # Included from the top-level CMakeLists.txt before the core library. One header per concern
 # (src/platform/<concern>.h, platform-free) and one Windows implementation per concern (<concern>_win.cpp), chosen
 # here at link time; no virtual interface. whirl_platform is the bottom layer: it links no other WHIRL target.
-# PL0 is the skeleton only (headers_win.cpp: the compile-time "headers stay platform-free" check); PL1-PL4 add
-# env / paths / console / time, fs, net (ws2_32 moves here), proc / sys and their call sites. See docs/dev/platform.md.
+# PL0 is the skeleton (headers_win.cpp: the compile-time "headers stay platform-free" check); PL3 added net
+# (net_win.cpp + FakeNet, ws2_32); PL1 / PL2 / PL4 add env / paths / console / time, fs, proc / sys. See docs/dev/platform.md.
 
 add_library(whirl_platform STATIC
-  ${CMAKE_SOURCE_DIR}/src/platform/headers_win.cpp)
+  ${CMAKE_SOURCE_DIR}/src/platform/headers_win.cpp
+  ${CMAKE_SOURCE_DIR}/src/platform/net_win.cpp)
+# PL3: Winsock is linked here only (net_win.cpp is its one user; whirl_server_core / whirl_release no longer name it)
+target_link_libraries(whirl_platform PRIVATE ws2_32)
 # callers include "platform/<concern>.h"; never put src/platform itself on an include path (its time.h would shadow
 # the C library's <time.h>)
 target_include_directories(whirl_platform PUBLIC ${CMAKE_SOURCE_DIR}/src)

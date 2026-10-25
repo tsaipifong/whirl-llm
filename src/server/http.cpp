@@ -1,16 +1,15 @@
 // Reimplements the WHIRL Zig research prototype's server.zig (connThread, handleConn, buildJob,
-// acceptLoop); sockets written new on Winsock.
+// acceptLoop); sockets written new on Winsock (arch025 PL3: the Winsock calls are in src/platform/net_win.cpp).
 // SPDX-License-Identifier: Apache-2.0
 
 #include "http.h"
 
 #include "log.h"
 #include "whirl/common.h"
+#include "platform/net.h"
 #include "whirl/version.h"
 
-#include <winsock2.h>
-#include <ws2tcpip.h>
-
+#include <algorithm>
 #include <cctype>
 #include <chrono>
 #include <cstring>
@@ -20,14 +19,15 @@
 #include <format>
 #include <mutex>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <string_view>
-
-#pragma comment(lib, "ws2_32.lib")
 
 namespace whirl::server {
 
 namespace {
+
+namespace net = platform::net;
 
 constexpr std::size_t kReadBuf = 1 << 16;
 constexpr std::size_t kMaxBody = 64u << 20;
@@ -36,26 +36,21 @@ constexpr std::size_t kMaxPending = 64u << 20;
 
 using SteadyClock = std::chrono::steady_clock;
 
-void setTimeout(SOCKET s, int opt, std::uint32_t ms) {
-    const DWORD v = ms;
-    setsockopt(s, SOL_SOCKET, opt, reinterpret_cast<const char*>(&v), sizeof v);
-}
-
 // After shutdown(SD_SEND): read and discard what the client still sends (an
 // unread request body, the rest of an oversized header) until it closes, for at
 // most budget_ms / 1 MiB. Closing with unread received data makes Windows reset
 // the connection, and the client may then lose the response it was sent.
 // Also used before our own FIN, to let the client close first (connThread).
 // Returns true when the client closed (its FIN arrived).
-bool lingerDrain(SOCKET s, std::uint32_t budget_ms) {
+bool lingerDrain(net::Socket s, std::uint32_t budget_ms) {
     const auto end = SteadyClock::now() + std::chrono::milliseconds(budget_ms);
     char buf[4096];
     std::size_t total = 0;
     for (;;) {
         const auto left = std::chrono::ceil<std::chrono::milliseconds>(end - SteadyClock::now()).count();
         if (left <= 0 || total > (1u << 20)) return false;
-        setTimeout(s, SO_RCVTIMEO, static_cast<std::uint32_t>(left));
-        const int n = ::recv(s, buf, sizeof buf, 0);
+        net::setRecvTimeout(s, static_cast<std::uint32_t>(left));
+        const int n = net::recv(s, buf, sizeof buf, 0);
         if (n == 0) return true;
         if (n < 0) return false;
         total += static_cast<std::size_t>(n);
@@ -76,7 +71,7 @@ public:
     // framed_out (optional): set at destruction to whether a complete response the client can tell
     // the end of (Content-Length, or chunked and finished) was handed to the socket, so the client can
     // close first (HTTP-DROP)
-    SocketConn(SOCKET s, std::uint32_t send_timeout_ms, bool* framed_out = nullptr)
+    SocketConn(net::Socket s, std::uint32_t send_timeout_ms, bool* framed_out = nullptr)
         : s_(s), stall_ms_(send_timeout_ms), framed_out_(framed_out) {
         buf_.reserve(16384);
     }
@@ -140,13 +135,13 @@ public:
     bool flush() override {
         if (bad_) return false;
         while (off_ < buf_.size()) {
-            const int n = ::send(s_, buf_.data() + off_, static_cast<int>(std::min<std::size_t>(buf_.size() - off_, 1 << 20)), 0);
+            const int n = net::send(s_, buf_.data() + off_, static_cast<int>(std::min<std::size_t>(buf_.size() - off_, 1 << 20)));
             if (n > 0) {
                 off_ += static_cast<std::size_t>(n);
                 stalled_ = false;
                 continue;
             }
-            if (nonblocking_ && n == SOCKET_ERROR && WSAGetLastError() == WSAEWOULDBLOCK) {
+            if (nonblocking_ && n == net::kError && net::lastError() == net::kErrWouldBlock) {
                 const auto now = SteadyClock::now();
                 if (!stalled_) {
                     stalled_ = true;
@@ -169,8 +164,7 @@ public:
     }
     // Non-blocking while the engine writes; back to blocking for the final drain.
     void setNonBlocking(bool on) {
-        u_long v = on ? 1 : 0;
-        if (ioctlsocket(s_, FIONBIO, &v) == 0) nonblocking_ = on;
+        if (net::setNonBlocking(s_, on) == 0) nonblocking_ = on;
         stalled_ = false;
     }
     bool bad() const { return bad_; }
@@ -179,17 +173,13 @@ public:
     // connection thread waits for the job.
     bool alive() override {
         if (bad_) return false;
-        fd_set rs;
-        FD_ZERO(&rs);
-        FD_SET(s_, &rs);
-        timeval tv{0, 0};
-        const int n = ::select(0, &rs, nullptr, nullptr, &tv);
+        const int n = net::pollReadable(s_);
         if (n <= 0) return true;  // nothing to read (or select failed: assume alive)
         char c;
-        const int r = ::recv(s_, &c, 1, MSG_PEEK);
+        const int r = net::recv(s_, &c, 1, net::kPeek);
         if (r > 0) return true;
         if (r == 0) return false;
-        return WSAGetLastError() == WSAEWOULDBLOCK;
+        return net::lastError() == net::kErrWouldBlock;
     }
 
 private:
@@ -199,7 +189,7 @@ private:
         off_ = 0;
         return false;
     }
-    SOCKET s_;
+    net::Socket s_;
     std::uint32_t stall_ms_;
     std::string buf_;
     std::size_t off_ = 0;
@@ -220,7 +210,7 @@ private:
 // with a deadline set (the header phase), also no longer than the deadline.
 class Reader {
 public:
-    Reader(SOCKET s, std::uint32_t idle_ms) : s_(s), idle_ms_(idle_ms), cur_to_(idle_ms) { buf_.resize(kReadBuf); }
+    Reader(net::Socket s, std::uint32_t idle_ms) : s_(s), idle_ms_(idle_ms), cur_to_(idle_ms) { buf_.resize(kReadBuf); }
     enum class Res { ok, eof, too_long, timeout, error };
     void setDeadline(std::optional<SteadyClock::time_point> d) { deadline_ = d; }
     // the header deadline passed (answer 408); a read that was idle for
@@ -282,12 +272,12 @@ private:
             to = static_cast<std::uint32_t>(std::min<long long>(to, std::max<long long>(left, 1)));
         }
         if (to != cur_to_) {
-            setTimeout(s_, SO_RCVTIMEO, to);
+            net::setRecvTimeout(s_, to);
             cur_to_ = to;
         }
-        const int n = ::recv(s_, buf_.data() + end_, static_cast<int>(buf_.size() - end_), 0);
+        const int n = net::recv(s_, buf_.data() + end_, static_cast<int>(buf_.size() - end_), 0);
         if (n == 0) eof_ = true;
-        if (n == SOCKET_ERROR && WSAGetLastError() == WSAETIMEDOUT) {
+        if (n == net::kError && net::lastError() == net::kErrTimedOut) {
             timed_out_ = true;
             // cut short by the deadline (not idle): still answer 408 (best effort)
             if (deadline_ && to < idle_ms_) deadline_hit_ = true;
@@ -296,7 +286,7 @@ private:
         end_ += static_cast<std::size_t>(n);
         return true;
     }
-    SOCKET s_;
+    net::Socket s_;
     std::uint32_t idle_ms_, cur_to_;
     std::optional<SteadyClock::time_point> deadline_;
     std::string buf_;
@@ -604,7 +594,7 @@ struct ConnCtx {
     bool* framed = nullptr;         // out: the response had a Content-Length (SocketConn framed_out)
 };
 
-void handleConn(const ConnCtx& cx, SOCKET s) {
+void handleConn(const ConnCtx& cx, net::Socket s) {
     EngineApi& e = cx.e;
     const EngineFacts& f = cx.f;
     e.beginBuilding();
@@ -909,8 +899,7 @@ std::string corsHeaders(std::string_view origin, const std::vector<std::string>&
 
 void netInit() {
     std::call_once(g_net_once, [] {
-        WSADATA d;
-        if (WSAStartup(MAKEWORD(2, 2), &d) != 0) throw std::runtime_error("WSAStartup failed");
+        if (!net::startup()) throw std::runtime_error("WSAStartup failed");
     });
 }
 
@@ -920,54 +909,44 @@ HttpServer::~HttpServer() { stop(); }
 
 void HttpServer::start(const std::string& host, std::uint16_t port) {
     bound_ = host;
-    addrinfo hints{};
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-    hints.ai_flags = AI_PASSIVE | AI_NUMERICHOST;
-    addrinfo* res = nullptr;
     const std::string ps = std::to_string(port);
-    if (getaddrinfo(host.c_str(), ps.c_str(), &hints, &res) != 0 || !res)
-        throw std::runtime_error("invalid --host " + host);
-    SOCKET s = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-    if (s == INVALID_SOCKET) {
-        freeaddrinfo(res);
+    const net::Addr* res = net::resolve(host.c_str(), ps.c_str(), net::Lookup::passive_numeric);
+    if (!res) throw std::runtime_error("invalid --host " + host);
+    const net::Socket s = net::open(res);
+    if (s == net::kInvalid) {
+        net::freeAddr(res);
         throw std::runtime_error("socket() failed");
     }
     // exclusive: with SO_REUSEADDR a second server could bind the same port and
     // silently share (steal) its connections; restarting on a port whose old
     // connections are in TIME_WAIT still works
-    BOOL on = TRUE;
-    setsockopt(s, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, reinterpret_cast<const char*>(&on), sizeof on);
-    if (bind(s, res->ai_addr, static_cast<int>(res->ai_addrlen)) != 0 || listen(s, SOMAXCONN) != 0) {
-        const int err = WSAGetLastError();
-        freeaddrinfo(res);
-        closesocket(s);
+    net::setExclusiveAddrUse(s);
+    if (net::bind(s, res) != 0 || net::listen(s, net::kMaxBacklog) != 0) {
+        const int err = net::lastError();
+        net::freeAddr(res);
+        net::close(s);
         throw std::runtime_error(std::format("cannot listen on {}:{} (WSA error {})", host, port, err));
     }
-    freeaddrinfo(res);
-    sockaddr_storage ss{};
-    int sl = sizeof ss;
-    getsockname(s, reinterpret_cast<sockaddr*>(&ss), &sl);
-    port_ = ntohs(ss.ss_family == AF_INET6 ? reinterpret_cast<sockaddr_in6*>(&ss)->sin6_port
-                                           : reinterpret_cast<sockaddr_in*>(&ss)->sin_port);
-    listen_ = static_cast<std::uintptr_t>(s);
+    net::freeAddr(res);
+    net::localPort(s, &port_);
+    listen_ = s;
     accept_ = std::thread([this] { acceptLoop(); });
 }
 
 void HttpServer::stop() {
-    if (listen_ == ~std::uintptr_t(0)) return;
+    if (listen_ == net::kInvalid) return;
     stopping_ = true;
-    closesocket(static_cast<SOCKET>(listen_));
+    net::close(listen_);
     if (accept_.joinable()) accept_.join();
-    listen_ = ~std::uintptr_t(0);
+    listen_ = net::kInvalid;
     auto shutAll = [this](bool reading_only) {
         // shutdown (not closesocket) from this thread: the connection thread still
         // owns the handle and closes it; it leaves the sets before closing
         std::lock_guard<std::mutex> lk(conns_mu_);
         // (shutdown alone does not end a recv that is already waiting: cancel it)
-        for (std::uintptr_t c : reading_only ? reading_ : conns_) {
-            shutdown(static_cast<SOCKET>(c), SD_BOTH);
-            CancelIoEx(reinterpret_cast<HANDLE>(c), nullptr);
+        for (net::Socket c : reading_only ? reading_ : conns_) {
+            net::shutdown(c, net::Shut::both);
+            net::cancelIo(c);
         }
     };
     auto waitConns = [this](int ms) {
@@ -991,7 +970,7 @@ void HttpServer::stop() {
     }
 }
 
-void HttpServer::setReading(std::uintptr_t sock, bool on) {
+void HttpServer::setReading(platform::net::Socket sock, bool on) {
     std::lock_guard<std::mutex> lk(conns_mu_);
     if (on) reading_.insert(sock);
     else reading_.erase(sock);
@@ -999,50 +978,50 @@ void HttpServer::setReading(std::uintptr_t sock, bool on) {
 
 void HttpServer::acceptLoop() {
     for (;;) {
-        const SOCKET c = accept(static_cast<SOCKET>(listen_), nullptr, nullptr);
-        if (c == INVALID_SOCKET) {
+        const net::Socket c = net::accept(listen_);
+        if (c == net::kInvalid) {
             if (stopping_) return;
-            logE("accept failed: WSA error {}", WSAGetLastError());
+            logE("accept failed: WSA error {}", net::lastError());
             continue;
         }
-        setTimeout(c, SO_RCVTIMEO, o_.recv_timeout_ms);
-        setTimeout(c, SO_SNDTIMEO, o_.send_timeout_ms);
-        if (o_.sndbuf > 0) setsockopt(c, SOL_SOCKET, SO_SNDBUF, reinterpret_cast<const char*>(&o_.sndbuf), sizeof o_.sndbuf);
+        net::setRecvTimeout(c, o_.recv_timeout_ms);
+        net::setSendTimeout(c, o_.send_timeout_ms);
+        if (o_.sndbuf > 0) net::setSendBuf(c, o_.sndbuf);
         if (n_conn_.load() >= static_cast<int>(o_.max_conn)) {
             static std::atomic<std::uint64_t> n_rejected{0};
             if (n_rejected.fetch_add(1) % 100 == 0)
                 logW("connection limit ({} open connections) reached: answering 503", o_.max_conn);
-            setTimeout(c, SO_SNDTIMEO, 1000);
+            net::setSendTimeout(c, 1000);
             const std::string r = errorResponse(503, "too many open connections; retry later");
-            ::send(c, r.data(), static_cast<int>(r.size()), 0);
-            shutdown(c, SD_SEND);
+            net::send(c, r.data(), static_cast<int>(r.size()));
+            net::shutdown(c, net::Shut::send);
             lingerDrain(c, 50);
-            closesocket(c);
+            net::close(c);
             continue;
         }
         n_conn_.fetch_add(1);
         {
             std::lock_guard<std::mutex> lk(conns_mu_);
-            conns_.insert(static_cast<std::uintptr_t>(c));
-            reading_.insert(static_cast<std::uintptr_t>(c));
+            conns_.insert(c);
+            reading_.insert(c);
         }
         try {
-            std::thread([this, c] { connThread(static_cast<std::uintptr_t>(c)); }).detach();
+            std::thread([this, c] { connThread(c); }).detach();
         } catch (const std::exception& ex) {
             logE("cannot spawn connection thread: {}", ex.what());
             {
                 std::lock_guard<std::mutex> lk(conns_mu_);
-                conns_.erase(static_cast<std::uintptr_t>(c));
-                reading_.erase(static_cast<std::uintptr_t>(c));
+                conns_.erase(c);
+                reading_.erase(c);
             }
-            closesocket(c);
+            net::close(c);
             n_conn_.fetch_sub(1);
         }
     }
 }
 
-void HttpServer::connThread(std::uintptr_t sock) {
-    const SOCKET s = static_cast<SOCKET>(sock);
+void HttpServer::connThread(platform::net::Socket sock) {
+    const net::Socket s = sock;
     bool framed = false;
     try {
         const ConnCtx cx{e_, facts_, o_, bound_, [this, sock] { setReading(sock, false); }, &framed};
@@ -1068,9 +1047,9 @@ void HttpServer::connThread(std::uintptr_t sock) {
         conns_.erase(sock);
         reading_.erase(sock);
     }
-    shutdown(s, SD_SEND);
+    net::shutdown(s, net::Shut::send);
     if (!peer_closed) lingerDrain(s, 500);
-    closesocket(s);
+    net::close(s);
     n_conn_.fetch_sub(1);
 }
 

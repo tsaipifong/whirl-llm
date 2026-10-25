@@ -6,6 +6,8 @@
 #include "release/release.h"
 #include "release/dll_deps.h"
 
+#include "platform/net.h"
+
 #include "whirl/common.h"
 #include "whirl/gguf.h"
 #include "whirl/hip.h"
@@ -24,8 +26,6 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
-#include <winsock2.h>
-#include <ws2tcpip.h>
 
 namespace whirl::app {
 
@@ -146,34 +146,20 @@ void requireModelFile(const std::string& path, std::string_view what) {
 }
 
 void requirePortFree(const std::string& host, std::uint16_t port) {
+    namespace net = platform::net;
     if (port == 0) return;
-    WSADATA d;
-    if (WSAStartup(MAKEWORD(2, 2), &d) != 0) return;
-    addrinfo hints{};
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-    hints.ai_flags = AI_PASSIVE | AI_NUMERICHOST;
-    addrinfo* res = nullptr;
+    // arch025 PL3: the Winsock sequence of 0e35407 (WSAStartup ... WSACleanup) is net::probeListen
     const std::string ps = std::to_string(port);
-    if (getaddrinfo(host.c_str(), ps.c_str(), &hints, &res) != 0 || res == nullptr) {
-        WSACleanup();
+    const net::ProbeResult pr = net::probeListen(host.c_str(), ps.c_str());
+    if (pr.stage == net::ProbeResult::Stage::no_winsock) return;
+    if (pr.stage == net::ProbeResult::Stage::bad_host)
         throw UserError(exit_usage, std::format("invalid --host {} (give a numeric address such as 127.0.0.1 or 0.0.0.0)", host));
-    }
-    int err = 0;
-    SOCKET s = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-    if (s != INVALID_SOCKET) {
-        BOOL on = TRUE;
-        setsockopt(s, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, reinterpret_cast<const char*>(&on), sizeof on);
-        if (bind(s, res->ai_addr, static_cast<int>(res->ai_addrlen)) != 0 || listen(s, 1) != 0) err = WSAGetLastError();
-        closesocket(s);
-    }
-    freeaddrinfo(res);
-    WSACleanup();
-    if (err == WSAEADDRINUSE || err == WSAEACCES)
+    const int err = pr.err;
+    if (err == net::kErrAddrInUse || err == net::kErrAccess)
         throw UserError(exit_port, std::format("port {} on {} is already in use (another whirl-server or another program is listening there).\n"
                                                "  Stop that program, or start this one on another port: --port {}",
                                                port, host, port == 65535 ? 8081 : port + 1));
-    if (err == WSAEADDRNOTAVAIL)
+    if (err == net::kErrAddrNotAvail)
         throw UserError(exit_usage, std::format("--host {} is not an address of this computer (use 127.0.0.1 for local use, 0.0.0.0 for all networks)", host));
 }
 

@@ -4,6 +4,7 @@
 # The list may only shrink: the step that removes sites lowers or deletes its entry in the same commit (block mode:
 # STALE otherwise). "+ include: last" = the file's platform #include lines go with the last of its steps.
 # Per-step counts in the step column are the sites of 62b9e9c that step moves (they add up to the count).
+# PL3 (2026-10-25, arch025-pl3): src/server/http.cpp removed (30 -> 0), src/release/release.cpp 17 -> 6.
 # Regenerate counts only: pending_scan.py platform --write-pending (keeps this step column).
 src/cache/fingerprint.cpp	3	PL1 env (GetEnvironmentStringsW, FreeEnvironmentStringsW 2 + include 1)
 src/cli/main.cpp	3	PL1 console (_setmode, _fileno 2 + <io.h> 1)
@@ -11,8 +12,7 @@ src/common/util.cpp	14	PL2 fs (MappedFile, _wfopen 9) + PL4 args (MultiByteToWid
 src/model/device.cpp	3	PL4 proc (CreateMutexW, WaitForSingleObject 2 + include 1)
 src/model/loader.cpp	1	PL2 fs (_wfopen of the GGUF reader 1; found by the PL0 call rule, not in PLAN PL2)
 src/model/spec.cpp	2	PL4 proc (GetModuleFileNameW 1 + include 1; after M4)
-src/release/release.cpp	17	PL1 console (5) + PL3 net (port pre-check 9 + <winsock2.h> <ws2tcpip.h> 2) + <windows.h>: last
-src/server/http.cpp	30	PL3 net (28 + <winsock2.h> <ws2tcpip.h> 2)
+src/release/release.cpp	6	PL1 console (5) + <windows.h>: last (PL3 net moved the port pre-check, 11 sites, 2026-10-25)
 src/server/log.cpp	3	PL1 time (GetLocalTime 1) + PL2 fs (_wfopen 1) + include: last
 src/server/server_main.cpp	15	PL1 time + env (<timeapi.h>, timeBeginPeriod, timeEndPeriod, _putenv_s 4) + PL4 proc / sys (<psapi.h> + 9) + <windows.h>: last
 src/tier/kv_tier.cpp	51	PL2 fs (46 + <windows.h> <winioctl.h> 2) + PL4 proc (GetModuleFileNameW, GetCurrentProcessId x2 3)

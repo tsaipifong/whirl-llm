@@ -9,6 +9,8 @@
 #include "../test_env.h"
 #include "http_client.h"
 #include "mock_backend.h"
+#include "platform/net.h"
+#include "platform/net_fake.h"
 #include "server/draft_caps.h"
 #include "server/engine.h"
 #include "server/engine_thread.h"
@@ -1376,6 +1378,243 @@ void testHttpPortReuse() {
     CHECK_EQ(failed, 0);
     CHECK_EQ(slow, 0);
     CHECK_EQ(srv_tw, 0);
+}
+
+// ---- arch025 PL3: the socket layer (src/platform/net*) through FakeNet
+
+namespace netf = whirl::platform::net::fake;
+
+// The texts of the recorded calls of the given tags, in recording order ("-" = calls on no socket; WSAStartup
+// left out when skip_startup: the server's call_once may or may not run inside a test).
+std::vector<std::string> netSeq(const std::vector<netf::Call>& calls, std::initializer_list<const char*> tags,
+                                bool skip_startup = true) {
+    std::vector<std::string> out;
+    for (const auto& c : calls) {
+        bool want = false;
+        for (const char* t : tags) want = want || c.tag == t;
+        if (!want || (skip_startup && c.text.starts_with("WSAStartup"))) continue;
+        out.push_back(c.text);
+    }
+    return out;
+}
+
+// One recorded call against one expected entry: the same tokens (split at ( , ) =), where an expected token "*"
+// matches any token and "~N" any integer 1..N (a timeout that counts down).
+bool netCallMatches(const std::string& got, const std::string& want) {
+    auto toks = [](const std::string& s) {
+        std::vector<std::string> t(1);
+        for (char ch : s) {
+            if (ch == '(' || ch == ',' || ch == ')' || ch == '=') {
+                t.emplace_back(1, ch);
+                t.emplace_back();
+            } else {
+                t.back() += ch;
+            }
+        }
+        return t;
+    };
+    const auto g = toks(got), w = toks(want);
+    if (g.size() != w.size()) return false;
+    for (std::size_t i = 0; i < g.size(); ++i) {
+        if (w[i] == "*") continue;
+        if (w[i].size() > 1 && w[i][0] == '~') {
+            const long long lim = std::atoll(w[i].c_str() + 1);
+            char* e = nullptr;
+            const long long v = std::strtoll(g[i].c_str(), &e, 10);
+            if (g[i].empty() || *e != '\0' || v < 1 || v > lim) return false;
+            continue;
+        }
+        if (g[i] != w[i]) return false;
+    }
+    return true;
+}
+
+// The whole sequence: an expected entry ending in "+" matches one or more calls in a row.
+bool netSeqMatches(const std::vector<std::string>& got, const std::vector<std::string>& want, const char* what) {
+    std::size_t gi = 0;
+    bool ok = true;
+    for (std::size_t wi = 0; wi < want.size() && ok; ++wi) {
+        std::string w = want[wi];
+        const bool many = w.ends_with("+");
+        if (many) w.pop_back();
+        if (gi >= got.size() || !netCallMatches(got[gi], w)) {
+            ok = false;
+            break;
+        }
+        ++gi;
+        while (many && gi < got.size() && netCallMatches(got[gi], w)) ++gi;
+    }
+    ok = ok && gi == got.size();
+    if (!ok) {
+        std::fprintf(stderr, "  %s: call sequence differs from 0e35407\n    expected:", what);
+        for (const auto& w : want) std::fprintf(stderr, " [%s]", w.c_str());
+        std::fprintf(stderr, "\n    recorded:");
+        for (const auto& g : got) std::fprintf(stderr, " [%s]", g.c_str());
+        std::fprintf(stderr, "\n");
+    }
+    return ok;
+}
+
+// waits (at most ms) until a call with this tag and text was recorded
+bool netWaitFor(const char* tag, const char* text, int ms = 3000) {
+    for (int i = 0; i < ms / 10; ++i) {
+        for (const auto& c : netf::snapshot())
+            if (c.tag == tag && c.text == text) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return false;
+}
+
+// The setsockopt arguments of v0.2.4 0e35407, written out as numbers (Winsock: SOL_SOCKET 0xffff,
+// SO_EXCLUSIVEADDRUSE ~SO_REUSEADDR = -5, SO_RCVTIMEO 0x1006, SO_SNDTIMEO 0x1005, SO_SNDBUF 0x1001, SO_RCVBUF 0x1002;
+// BOOL / DWORD / int values, 4 bytes each), and the call sequences of the server, the release pre-check and the
+// connection they make, as 0e35407's http.cpp / release.cpp issue them.
+void testNetCallTable() {
+    namespace net = whirl::platform::net;
+    // 1. every socket option setter of the layer: level, name, length, value
+    {
+        netInit();  // Winsock started (the server's call_once), as before any server socket
+        netf::begin();
+        const net::Addr* a = net::resolve("127.0.0.1", "0", net::Lookup::passive_numeric);
+        CHECK(a != nullptr);
+        if (!a) {
+            netf::end();
+            return;
+        }
+        const net::Socket s = net::open(a);
+        CHECK(s != net::kInvalid);
+        CHECK_EQ(net::setExclusiveAddrUse(s), 0);
+        CHECK_EQ(net::setRecvTimeout(s, 300), 0);
+        CHECK_EQ(net::setSendTimeout(s, 1000), 0);
+        CHECK_EQ(net::setSendBuf(s, 4096), 0);
+        CHECK_EQ(net::setRecvBuf(s, 1024), 0);
+        CHECK_EQ(net::setNonBlocking(s, true), 0);
+        CHECK_EQ(net::setNonBlocking(s, false), 0);
+        net::close(s);
+        net::freeAddr(a);
+        const auto calls = netf::end();
+        CHECK(netSeqMatches(netSeq(calls, {"-", "L1"}),
+                            {"getaddrinfo(0,1,5)", "socket(*,1,*)", "setsockopt(65535,-5,4,1)", "setsockopt(65535,4102,4,300)",
+                             "setsockopt(65535,4101,4,1000)", "setsockopt(65535,4097,4,4096)", "setsockopt(65535,4098,4,1024)",
+                             "ioctlsocket(FIONBIO,1)", "ioctlsocket(FIONBIO,0)", "closesocket()", "freeaddrinfo()"},
+                            "option table"));
+    }
+    // 2. the HTTP server: start(), one GET answered with Content-Length, the client closes first (HTTP-DROP)
+    {
+        ServerSetup su = baseSetup();
+        su.http.recv_timeout_ms = 30000;
+        su.http.header_timeout_ms = 60000;
+        su.http.send_timeout_ms = 25000;
+        su.http.sndbuf = 65536;
+        su.http.close_wait_ms = 200;
+        netf::begin();
+        std::vector<netf::Call> calls;
+        {
+            TestServer srv(su);
+            CHECK_EQ(srv.get("/health").status, 200);
+            CHECK(netWaitFor("C1", "closesocket()"));
+            calls = netf::end();
+        }
+        CHECK(netSeqMatches(netSeq(calls, {"-", "L1"}),
+                            {"getaddrinfo(0,1,5)", "socket(*,1,*)", "setsockopt(65535,-5,4,1)", "bind()", "listen(2147483647)",
+                             "freeaddrinfo()", "getsockname()", "accept()=C1"},
+                            "server start + accept"));
+        CHECK(netSeqMatches(netSeq(calls, {"C1"}),
+                            {"setsockopt(65535,4102,4,30000)", "setsockopt(65535,4101,4,25000)", "setsockopt(65535,4097,4,65536)",
+                             "recv(65536,0)+", "send(*,0)", "setsockopt(65535,4102,4,~200)", "recv(4096,0)", "shutdown(1)",
+                             "closesocket()"},
+                            "server connection"));
+    }
+    // 3. the release front-end's port pre-check (0e35407 release.cpp:148-178): a free port, a port in use, a bad host
+    {
+        const std::uint16_t fp = test::freeLocalPort();
+        netf::begin();
+        const net::ProbeResult r = net::probeListen("127.0.0.1", std::to_string(fp).c_str());
+        const auto calls = netf::end();
+        CHECK(r.stage == net::ProbeResult::Stage::done);
+        CHECK_EQ(r.err, 0);
+        CHECK(netSeqMatches(netSeq(calls, {"-", "L1"}, false),
+                            {"WSAStartup(514)", "getaddrinfo(0,1,5)", "socket(*,1,*)", "setsockopt(65535,-5,4,1)", "bind()",
+                             "listen(1)", "closesocket()", "freeaddrinfo()", "WSACleanup()"},
+                            "pre-check, free port"));
+    }
+    {
+        TestServer srv(baseSetup());
+        netf::begin();
+        const net::ProbeResult r = net::probeListen("127.0.0.1", std::to_string(srv.port()).c_str());
+        const auto calls = netf::end();
+        CHECK(r.stage == net::ProbeResult::Stage::done);
+        CHECK(r.err == net::kErrAddrInUse || r.err == net::kErrAccess);
+        CHECK(netSeqMatches(netSeq(calls, {"-", "L1"}, false),
+                            {"WSAStartup(514)", "getaddrinfo(0,1,5)", "socket(*,1,*)", "setsockopt(65535,-5,4,1)", "bind()",
+                             "WSAGetLastError()=*", "closesocket()", "freeaddrinfo()", "WSACleanup()"},
+                            "pre-check, port in use"));
+    }
+    {
+        netf::begin();
+        const net::ProbeResult r = net::probeListen("not-a-host", "8080");
+        const auto calls = netf::end();
+        CHECK(r.stage == net::ProbeResult::Stage::bad_host);
+        CHECK(netSeqMatches(netSeq(calls, {"-", "L1"}, false), {"WSAStartup(514)", "getaddrinfo(0,1,5)", "WSACleanup()"},
+                            "pre-check, bad host"));
+    }
+}
+
+// FakeNet: a recv error on an accepted connection closes that connection (no response) and the server goes on.
+void testNetRecvError() {
+    namespace net = whirl::platform::net;
+    netf::begin();
+    {
+        ServerSetup su = baseSetup();
+        TestServer srv(su);
+        int i = 0;
+        for (const int err : {net::kErrConnReset, net::kErrTimedOut}) {
+            ++i;
+            netf::failRecv(1, err);
+            const auto s = test::rawConnect("127.0.0.1", srv.port());
+            CHECK(s != test::kNoSock);
+            // (not checked: the server may already have closed after the injected error)
+            test::rawSend(s, "GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n");
+            bool closed = false;
+            const double t0 = nowSeconds();
+            const std::string resp = test::rawRecvAll(s, 5, &closed);
+            const double dt = nowSeconds() - t0;
+            test::rawClose(s);
+            CHECK(closed);
+            CHECK(resp.empty());
+            CHECK(dt < 2.0);
+            CHECK_EQ(netf::injectedLeft(), 0);
+            const std::string tag = std::format("C{}", 2 * i - 1);
+            bool seen = false;
+            for (const auto& c : netf::snapshot()) seen = seen || (c.tag == tag && c.text == std::format("recv(65536,0)=fail({})", err));
+            CHECK(seen);
+            // the next request (connection 2i) is answered
+            const auto h = srv.get("/health");
+            CHECK_EQ(h.status, 200);
+            if (g_verbose) std::printf("  recv error %d: connection closed after %.2f s, next /health %d\n", err, dt, h.status);
+        }
+    }
+    netf::end();
+}
+
+// FakeNet: accept errors are logged and the accept loop goes on.
+void testNetAcceptError() {
+    namespace net = whirl::platform::net;
+    netf::begin();
+    {
+        TestServer srv(baseSetup());
+        g_log.clear();
+        // the accept thread waits in accept() already: the injection hits the calls after the next connection
+        netf::failAccept(3, net::kErrNoBufs);
+        CHECK_EQ(srv.get("/health").status, 200);
+        CHECK_EQ(srv.get("/health").status, 200);
+        CHECK_EQ(netf::injectedLeft(), 0);
+        CHECK_EQ(g_log.count("accept failed: WSA error 10055"), 3u);
+        int failed = 0;
+        for (const auto& c : netf::snapshot()) failed += c.tag == "L1" && c.text == "accept()=fail(10055)";
+        CHECK_EQ(failed, 3);
+    }
+    netf::end();
 }
 
 void testCors() {
@@ -7621,6 +7860,9 @@ int main(int argc, char** argv) {
         {"http_stuck_reader", testHttpStuckReader},
         {"http_port_reuse", testHttpPortReuse},
         {"http_stream10", testHttpStream10},
+        {"net_call_table", testNetCallTable},
+        {"net_recv_error", testNetRecvError},
+        {"net_accept_error", testNetAcceptError},
         {"cors", testCors},
         {"greedy_reference", testGreedyMatchesReference},
         {"stream", testStreamEqualsNonStream},
