@@ -4132,8 +4132,8 @@ void testPagePool() {
         const std::int32_t one[] = {1};
         r.pool->unref(one);
         CHECK_EQ(r.pool->refCount(1), 0u);
-        CHECK_EQ(*r.pool->takeFree(), 1);  // the page just freed comes back first
-        CHECK_EQ(*r.pool->takeFree(), 3);
+        CHECK_EQ(r.pool->takeFree(), std::optional<std::int32_t>(1));  // the page just freed comes back first
+        CHECK_EQ(r.pool->takeFree(), std::optional<std::int32_t>(3));
         CHECK_EQ(r.pool->freeCount(), 4u);
         CHECK_EQ(r.pool->reclaimable(), 4u);
         CHECK_EQ(PagePool::pagesFor(0), 0u);
@@ -4144,7 +4144,7 @@ void testPagePool() {
         r.pool->init(5, r.arrs);
         CHECK_EQ(r.pool->freeCount(), 5u);
         CHECK_EQ(r.refSum(), 0u);
-        CHECK_EQ(*r.pool->takeFree(), 0);
+        CHECK_EQ(r.pool->takeFree(), std::optional<std::int32_t>(0));
     }
     // ---- shared prefix: ref counts (vLLM test_prefill: two requests on one prefix -> ref_cnt 2)
     {
@@ -4337,19 +4337,19 @@ void testPagePool() {
         CHECK_EQ(*p, 2);         // v2 freed 1 then 2: LIFO
         CHECK(v2.empty() && !v1.empty());
         CHECK_EQ(r.pool->batches(), 1u);
-        CHECK_EQ(*r.pool->take(ev), 1);
+        CHECK_EQ(r.pool->take(ev), std::optional<std::int32_t>(1));
         CHECK_EQ(ev.calls, 1u);  // a free page: no evictor call
-        CHECK_EQ(*r.pool->take(ev), 0);
+        CHECK_EQ(r.pool->take(ev), std::optional<std::int32_t>(0));
         CHECK_EQ(ev.calls, 2u);  // v1 next
         // nothing left to evict: the pending quarantine with the model stream ordered after it
-        CHECK_EQ(*r.pool->take(ev), 3);
+        CHECK_EQ(r.pool->take(ev), std::optional<std::int32_t>(3));
         CHECK_EQ(ev.calls, 3u);
         CHECK_EQ(r.pool->stats().q_waits, 1u);
         // done quarantine: taken back before the evictor is asked
         std::vector<std::int32_t> back = {3};
         r.pool->quarantine(back);
         r.nb.completeAll();
-        CHECK_EQ(*r.pool->take(ev), 3);
+        CHECK_EQ(r.pool->take(ev), std::optional<std::int32_t>(3));
         CHECK_EQ(ev.calls, 3u);
         // all held, nothing to evict, no quarantine: nullopt, counts unchanged
         const std::size_t refs = r.refSum();
