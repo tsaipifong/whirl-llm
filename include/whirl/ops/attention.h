@@ -1,7 +1,8 @@
 // Attention kernel choice (ARCH-1 K-3): decode / verify split-K attention (attn_ws4 / ws4g, attn_wsplit1 / 2,
 // attn_dq4, attn_split + the combine) and prefill attention (attn_kg / kgf / kgs / kx / prefill_wmma / pwf / pws
 // with the K / V dequant copies), as pure functions of the problem, the flags, the kernel table and the device
-// profile. src/model/forward.cpp builds the problem and launches the plan (it alone knows the buffers).
+// profile, and the prep / core choice of the attention block around them (arch025-F6). src/model/forward/attn.cpp
+// builds the problem and launches the plan (it alone knows the buffers).
 // SPDX-License-Identifier: Apache-2.0
 //
 // Bit classes: every decode / verify choice gives each row the partials of a one-query attn_wsplit1 group (the
@@ -92,5 +93,22 @@ struct AttnPrefillPlan {
     std::vector<AttnStep> steps;
 };
 AttnPrefillPlan chooseAttnPrefill(const AttnPrefillProblem& p, const AttnPrefillFlags& f, const kernels::AttnKernels& k);
+
+// ---- the block around the attention (arch025-F6, moved from src/model/forward/attn.cpp Model::attnBlock)
+// q / k norm + RoPE + K / V store: one fused launch (attn_prep; attn_prep_m with multi-section RoPE positions for
+// image prompts) or the split rmsnorm x2 + rope_neox x2 + kv_store (f16 KV with WHIRL_NO_FUSE, or no attn_prep in
+// the code object, or head_dim > 512). q8 / q4 KV always take the fused prep: it holds the quantizer and the rotation.
+enum class AttnPrep : std::uint8_t { mrope, fused, split };
+const char* attnPrepName(AttnPrep p);
+AttnPrep chooseAttnPrep(bool mrope_on, std::uint32_t head_dim, bool kv_q8, bool no_fuse, const kernels::AttnKernels& k);
+// a segmented prefill's per-sequence prep: always the fused launch
+constexpr AttnPrep chooseAttnPrepSegmented(bool mrope_on) { return mrope_on ? AttnPrep::mrope : AttnPrep::fused; }
+// the attention itself over n query rows: decode / verify (chooseAttnDecode), the WMMA prefill (chooseAttnPrefill,
+// head_dim 256) or the naive attn_decode over a scores buffer (WHIRL_NAIVE_ATTN, other head sizes)
+enum class AttnCore : std::uint8_t { decode, prefill, naive };
+const char* attnCoreName(AttnCore c);
+constexpr AttnCore chooseAttnCore(std::uint32_t n, std::uint32_t small_max, std::uint32_t head_dim, bool naive_attn) {
+    return n <= small_max ? AttnCore::decode : head_dim == 256 && !naive_attn ? AttnCore::prefill : AttnCore::naive;
+}
 
 }  // namespace whirl::ops

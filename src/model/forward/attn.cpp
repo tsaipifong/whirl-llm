@@ -1,5 +1,7 @@
 // Model forward, attention block (arch025-F2, moved from src/model/forward.cpp): the MTP draft attention
 // (draftAttn, draft window OVH-C1), the gated full-attention sublayer attnBlock and the WMMA prefill attention.
+// The kernel choices are in src/ops/attention.cpp (chooseAttnPrep / chooseAttnCore, arch025-F6; chooseAttnDecode /
+// chooseAttnPrefill, K-3); here the problems are built and the plans launched.
 // SPDX-License-Identifier: Apache-2.0
 
 #include "../forward_internal.h"
@@ -36,7 +38,7 @@ void Model::attnBlock(const AttnW& a, const KvLayer& lkv, u32 n) {
             const u64 r0 = ps.r0;
             const DevPtr qf_s = qf + r0 * cfg.n_head * 2 * hd * 4;
             const DevPtr pos_s = pos_buf + r0 * 4;
-            if (mrope_on) {
+            if (ops::chooseAttnPrepSegmented(mrope_on) == ops::AttnPrep::mrope) {
                 const auto& sec = cfg.rope_sections;
                 hip::launch(k.attn_prep_m, D(cfg.n_head + cfg.n_head_kv, ps.n), D(256), 0, stream, qf_s, kv_k + r0 * cfg.n_head_kv * hd * 4,
                             kv_v + r0 * cfg.n_head_kv * hd * 4, a.q_norm, a.k_norm, kvs, pos_s, I(cfg.n_head), I(cfg.n_head_kv), I(hd),
@@ -54,7 +56,8 @@ void Model::attnBlock(const AttnW& a, const KvLayer& lkv, u32 n) {
         return;
     }
     // (q8 KV: always the fused prep - it holds the quantizer and the rotation)
-    if (mrope_on) {
+    const ops::AttnPrep prep = ops::chooseAttnPrep(mrope_on, hd, kv_q8, no_fuse, k);
+    if (prep == ops::AttnPrep::mrope) {
         // vision: image prompt / decode after one: multi-section RoPE positions
         const auto& sec = cfg.rope_sections;
         hip::launch(k.attn_prep_m, D(cfg.n_head + cfg.n_head_kv, n), D(256), 0, stream, qf, kv_k, kv_v, a.q_norm, a.k_norm, kva, pos_buf,
@@ -62,7 +65,7 @@ void Model::attnBlock(const AttnW& a, const KvLayer& lkv, u32 n) {
                     I(sec[0]), I(sec[1]), I(sec[2]));
         xq_src = 0;
         x16_src = 0;
-    } else if (k.attn_prep != nullptr && (!no_fuse || kv_q8) && hd <= 512) {
+    } else if (prep == ops::AttnPrep::fused) {
         // q/k norm + RoPE + K/V store in one launch (same arithmetic)
         hip::launch(k.attn_prep, D(cfg.n_head + cfg.n_head_kv, n), D(256), 0, stream, qf, kv_k, kv_v, a.q_norm, a.k_norm, kva, pos_buf,
                     I(cfg.n_head), I(cfg.n_head_kv), I(hd), I(cfg.n_rot), theta_scale, cfg.eps);
@@ -77,7 +80,8 @@ void Model::attnBlock(const AttnW& a, const KvLayer& lkv, u32 n) {
         hip::launch(k.kv_store, D(n), D(256), 0, stream, kv_k, kv_v, kva, pos_buf, I(row));
     }
     const float scale = 1.0f / std::sqrt(static_cast<float>(hd));
-    if (n <= small_max) {
+    const ops::AttnCore core = ops::chooseAttnCore(n, small_max, hd, naive_attn);
+    if (core == ops::AttnCore::decode) {
         // flash-decoding; grid.z = query (speculative verify), query t sees positions up to pos_buf[t]. The kernel,
         // its query groups, the split count and the combine come from ops::chooseAttnDecode (K-3).
         ops::AttnDecodeProblem ap;
@@ -123,7 +127,7 @@ void Model::attnBlock(const AttnW& a, const KvLayer& lkv, u32 n) {
         hip::launch(k.attn_combine, pl.combine_grid, pl.combine_block, 0, stream, part_ml, part_acc, qf, attn_out, I(cfg.n_head), I(hd), I(2 * hd),
                     I(pl.n_split));
     } else {
-        if (hd == 256 && !naive_attn) {
+        if (core == ops::AttnCore::prefill) {
             prefillAttn(qf, kva, attn_out, pos_buf, n, fwd_pos0, scale);
         } else {
             if (scores == 0) scores = alloc(static_cast<u64>(max_batch) * cfg.n_head * max_ctx * 4);

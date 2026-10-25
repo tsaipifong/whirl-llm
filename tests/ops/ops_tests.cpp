@@ -9,8 +9,10 @@
 #include "whirl/device_profile.h"
 #include "whirl/ops/act.h"
 #include "whirl/ops/attention.h"
+#include "whirl/ops/gdn.h"
 #include "whirl/ops/matmul.h"
 #include "whirl/ops/moe.h"
+#include "whirl/ops/mtp.h"
 
 #include <cstdio>
 #include <cstring>
@@ -771,6 +773,292 @@ void testActChoice() {
           !ops::wideAllowed(true, true, true, true) && ops::wideAllowed(true, false, false, true));
 }
 
+// ---- arch025-F6: the DeltaNet / attention-prep / MTP choice (src/ops/gdn.cpp, attention.cpp, mtp.cpp). Selection-table
+// snapshot: two device profiles x three modes on a Swift-shaped DeltaNet layer (48 v heads, 16 k heads, d_state 128,
+// conv 10240; MXFP4 qkv / gate / out with load-time row exponents, contiguous q8_0 [beta; alpha]). Each row is one
+// string; any changed choice changes the string and fails here (the F6 mutants prove it). The mode flags follow
+// tune.cpp: gdnwmma / h16 are balance items (ffn_h16, gdn_wmma), gdn_strix needs gdnwmma and Profile::gdn_strix.
+// Witnessed by the S0b-1 B golden launch logs (both cards, Swift and Ornith; scratch\a25_f6\lt_gdn.py):
+//   gfx1201 balance / fast: gdn_conv_l2n_h + gdn_conv_state_h (h16), gdn_wprep + gdn_wscan8, gated_norm_x8ht,
+//     decode gdn_abconv_q8_0, gdn_gates_ba (in2)
+//   gfx1201 / gfx1151 precise: gdn_conv_l2n (+ gdn_conv_par + l2norm per segment), gdn_chunk_prep / scan,
+//     gated_norm_x16, decode gdn_gates_ba + gdn_conv_l2 (precise [beta; alpha] GEMM)
+//   gfx1151 balance / fast: gdn_sx_prep / scan (>= 256 rows) and gdn_chunk_prep / scan (shorter runs), gdn_conv_l2n,
+//     gated_norm_x16, decode gdn_abconv_q8_0
+//   every card / mode: the fused attention prep (attn_prep / _q8h / _q4; never rope_neox / kv_store), the 2-bit draft
+//     head (gemv_d2_nt*) with draft_pick / draft_pick_rows
+kn::KernelTable gdnTable(bool gfx1201) {
+    kn::KernelTable k = actTable(gfx1201);
+    k.gdn_gates = tag("gdn_gates");
+    k.gdn_conv_l2 = tag("gdn_conv_l2");
+    k.gdn_step_norm = tag("gdn_step_norm");
+    k.gdn_conv_l2n = tag("gdn_conv_l2n");
+    k.gdn_conv_par = tag("gdn_conv_par");
+    k.gdn_conv_state = tag("gdn_conv_state");
+    k.gdn_conv_seq = tag("gdn_conv_seq");
+    k.gdn_seq_128 = tag("gdn_seq_128");
+    k.gdn_chunk_prep = tag("gdn_chunk_prep");
+    k.gdn_chunk_scan = tag("gdn_chunk_scan");
+    k.gdn_gated_norm = tag("gdn_gated_norm");
+    k.gdn_abconv[ti(GgmlType::q8_0)] = tag("gdn_abconv_q8_0");
+    k.gated_norm_x16 = tag("gated_norm_x16");
+    k.gated_norm_x8 = tag("gated_norm_x8");
+    k.gated_norm_x16h = tag("gated_norm_x16h");
+    // the f16 conv kernels exist on both: on gfx1151 the h16 choice is turned off by the profile (h16_from_candidates)
+    k.gdn_conv_l2n_h = tag("gdn_conv_l2n_h");
+    k.gdn_conv_state_h = tag("gdn_conv_state_h");
+    k.attn_prep = tag("attn_prep");
+    k.attn_prep_m = tag("attn_prep_m");
+    if (gfx1201) {
+        k.gdn_wprep = tag("gdn_wprep");
+        k.gdn_wscan8 = tag("gdn_wscan8");
+        k.gated_norm_x8t = tag("gated_norm_x8t");
+        k.gated_norm_x8h = tag("gated_norm_x8h");
+        k.gated_norm_x8ht = tag("gated_norm_x8ht");
+    } else {
+        k.gdn_sx_prep = tag("gdn_sx_prep");
+        k.gdn_sx_scan = tag("gdn_sx_scan");
+    }
+    return k;
+}
+
+std::string gdnRow(const whirl::device::Profile& prof, const ActMode& md) {
+    const bool r9 = prof.arch == whirl::hip::Arch::gfx1201;
+    const kn::KernelTable k = gdnTable(r9);
+    const bool balance = !md.prec_dec;  // balance / fast: the gdnwmma and h16 items
+    ops::MatmulFlags f;
+    f.prec_dec = md.prec_dec;
+    f.fp8_prefill = md.fp8_prefill && r9;
+    f.fp8_mask = 7;
+    f.gv_max = 16;
+    const bool g8t = md.g8t && r9;
+    const std::uint32_t G = static_cast<std::uint32_t>(kn::kGemmCfgs.size());
+    ops::H16Tune h;
+    h.from_candidates = prof.h16_from_candidates;
+    h.n_choices = 2 * G + static_cast<std::uint32_t>(kn::kGemmsCfgs.size());
+    const std::uint8_t tuned[3] = {static_cast<std::uint8_t>(G + 3), static_cast<std::uint8_t>(G + 1), static_cast<std::uint8_t>(G + 3)};
+    const ops::MatShape qkv = mat(GgmlType::mxfp4, 10240, 5120, false, true), gate = mat(GgmlType::mxfp4, 6144, 5120, false, true);
+    const ops::MatShape out = mat(GgmlType::mxfp4, 5120, 6144, false, true);
+    ops::MatShape beta = mat(GgmlType::q8_0, 48, 5120), alpha = mat(GgmlType::q8_0, 48, 5120);
+    beta.row_bytes = alpha.row_bytes = 5440;
+    ops::GdnShape s;
+    s.conv_ch = 10240;
+    s.n_v_heads = 48;
+    s.n_k_heads = 16;
+    ops::GdnBaProblem ba;
+    ba.ba_buf = ba.ba_contiguous = true;
+    ops::GdnH16Flags hf;
+    hf.ffn_h16 = balance;
+    auto h16At = [&](std::uint32_t n) {
+        ops::GdnH16Problem p;
+        p.qkv = qkv;
+        p.gate = gate;
+        p.out = out;
+        p.qkv_tune = tuned;
+        p.gate_tune = tuned;
+        p.n = n;
+        p.s = s;
+        p.fused = ops::fusedRows(n, 16, false, false);
+        return ops::chooseGdnH16(p, hf, f, h, k);
+    };
+    ops::GdnIn2Problem g2;
+    g2.qkv = qkv;
+    g2.gate = gate;
+    g2.beta = beta;
+    g2.alpha = alpha;
+    g2.n = 512;
+    g2.n_embd = 5120;
+    g2.fused = false;
+    g2.ba_buf = g2.ba_contiguous = true;
+    ops::GdnIn2Flags gf;
+    gf.g8t = g8t;
+    ops::GdnChunkFlags cf;
+    cf.gdn_wmma = balance;
+    cf.gdn_strix = balance && prof.gdn_strix;
+    ops::GdnChunkProblem cp;
+    cp.n_v_heads = 48;
+    cp.n_k_heads = 16;
+    cp.gc_m_bytes = cp.gc_w_bytes = cp.gc_u_bytes = 1ull << 30;
+    auto chunk = [&](std::uint32_t n) {
+        cp.n = n;
+        return std::string(ops::gdnChunkName(ops::chooseGdnChunk(cp, cf, k).kind));
+    };
+    auto conv = [&](bool seg, bool h16, std::uint32_t n) {
+        const ops::GdnConvPlan c = ops::chooseGdnConv(seg, h16, n, s, true, k);
+        return std::string(ops::gdnConvName(c.conv)) + (c.l2norm ? "+l2norm" : "") + (c.state_h ? "/h" : "");
+    };
+    auto norm = [&](bool h16, std::uint32_t n) {
+        const ops::GdnNormPlan p = ops::chooseGdnGatedNorm(out, n, s, h16, true, g8t, f, k);
+        return nameOf(p.f) + (p.fp8 ? "/fp8" : "");
+    };
+    auto dec = [&](std::uint32_t n) {
+        if (!ops::gdnFusable(ops::fusedRows(n, 16, false, false), beta, alpha, s, k)) return std::string("unfused");
+        const ops::GdnDecodePlan p = ops::chooseGdnDecode(beta.ty, n, 16, md.prec_dec, 0, ba, k);
+        return std::string(ops::gdnDecodeGatesName(p.gates)) + "/" + nameOf(p.f);
+    };
+    const bool h512 = h16At(512);
+    const bool kv8 = !md.prec_dec;  // balance: q8 KV, fast: q4 KV (both "kv_q8" in the prep rule); precise: f16 KV
+    ops::DraftHeadProblem dh;
+    dh.head_rows = 248320;
+    dh.draft_rows = 65536;
+    dh.d2 = dh.map = true;
+    const ops::DraftHeadPlan dp = ops::chooseDraftHead(dh);
+    std::string r = std::string(r9 ? "gfx1201 " : "gfx1151 ") + md.name + ":";
+    r += " pre.h16=" + std::to_string(h512);
+    r += " pre.gates=" + std::string(ops::gdnGatesName(ops::chooseGdnGates(ops::chooseGdnIn2(g2, gf, f, k), ba, k)));
+    r += " pre.conv=" + conv(false, h512, 512);
+    r += " seg.conv=" + conv(true, h512, 512);
+    r += " pre.scan=" + std::string(ops::chooseGdnScan(true, 512, s) == ops::GdnScan::chunked ? "chunked" : "seq");
+    r += " pre.chunk=" + chunk(512) + " short.chunk=" + chunk(128);
+    r += " pre.norm=" + norm(h512, 512);
+    r += " dec=" + dec(1) + " ver=" + dec(4);
+    r += " prep=" + std::string(ops::attnPrepName(ops::chooseAttnPrep(false, 256, kv8, false, k)));
+    r += " core.pre=" + std::string(ops::attnCoreName(ops::chooseAttnCore(512, 16, 256, false)));
+    r += " core.ver=" + std::string(ops::attnCoreName(ops::chooseAttnCore(4, 16, 256, false)));
+    r += " head=" + std::to_string(dp.nrows) + (dp.map ? "/map" : "");
+    return r;
+}
+
+void testGdnChoice() {
+    const ActMode modes[3] = {{"precise", true, false, false}, {"balance", false, true, true}, {"fast", false, true, true}};
+    const whirl::device::Profile* profs[2] = {&whirl::device::k_profile_gfx1201, &whirl::device::k_profile_gfx1151};
+    // SNAPSHOT (arch025-F6): change only with a launch-table reason, in the same commit as the rule change
+    const char* expect[6] = {
+        "gfx1201 precise: pre.h16=0 pre.gates=ba pre.conv=l2n seg.conv=seg_par+l2norm pre.scan=chunked pre.chunk=f32 "
+        "short.chunk=f32 pre.norm=gated_norm_x16 dec=precise_ba/null ver=precise_ba/null prep=fused core.pre=prefill "
+        "core.ver=decode head=65536/map",
+        "gfx1201 balance: pre.h16=1 pre.gates=in2 pre.conv=l2n_h/h seg.conv=seg_h16/h pre.scan=chunked pre.chunk=wmma "
+        "short.chunk=wmma pre.norm=gated_norm_x8ht/fp8 dec=abconv/gdn_abconv_q8_0 ver=abconv/gdn_abconv_q8_0 prep=fused "
+        "core.pre=prefill core.ver=decode head=65536/map",
+        "gfx1201 fast: pre.h16=1 pre.gates=in2 pre.conv=l2n_h/h seg.conv=seg_h16/h pre.scan=chunked pre.chunk=wmma "
+        "short.chunk=wmma pre.norm=gated_norm_x8ht/fp8 dec=abconv/gdn_abconv_q8_0 ver=abconv/gdn_abconv_q8_0 prep=fused "
+        "core.pre=prefill core.ver=decode head=65536/map",
+        "gfx1151 precise: pre.h16=0 pre.gates=ba pre.conv=l2n seg.conv=seg_par+l2norm pre.scan=chunked pre.chunk=f32 "
+        "short.chunk=f32 pre.norm=gated_norm_x16 dec=precise_ba/null ver=precise_ba/null prep=fused core.pre=prefill "
+        "core.ver=decode head=65536/map",
+        "gfx1151 balance: pre.h16=0 pre.gates=ba pre.conv=l2n seg.conv=seg_par+l2norm pre.scan=chunked pre.chunk=strix "
+        "short.chunk=f32 pre.norm=gated_norm_x16 dec=abconv/gdn_abconv_q8_0 ver=abconv/gdn_abconv_q8_0 prep=fused "
+        "core.pre=prefill core.ver=decode head=65536/map",
+        "gfx1151 fast: pre.h16=0 pre.gates=ba pre.conv=l2n seg.conv=seg_par+l2norm pre.scan=chunked pre.chunk=strix "
+        "short.chunk=f32 pre.norm=gated_norm_x16 dec=abconv/gdn_abconv_q8_0 ver=abconv/gdn_abconv_q8_0 prep=fused "
+        "core.pre=prefill core.ver=decode head=65536/map",
+    };
+    for (int pi = 0; pi < 2; ++pi)
+        for (int mi = 0; mi < 3; ++mi) {
+            const std::string got = gdnRow(*profs[pi], modes[mi]);
+            const bool ok = got == expect[pi * 3 + mi];
+            CHECK(ok);
+            if (!ok) std::printf("  gdn row %d.%d\n    got:    %s\n    expect: %s\n", pi, mi, got.c_str(), expect[pi * 3 + mi]);
+        }
+    const kn::KernelTable k = gdnTable(true);
+    ops::GdnShape s;
+    s.conv_ch = 10240;
+    s.n_v_heads = 48;
+    s.n_k_heads = 16;
+    // h16: never on fused rows, one row, or more than 64 v heads
+    {
+        ops::MatmulFlags f;
+        f.fp8_prefill = true;
+        f.gv_max = 16;
+        ops::H16Tune h;
+        ops::GdnH16Problem p;
+        p.qkv = p.gate = mat(GgmlType::mxfp4, 6144, 5120, false, true);
+        p.out = mat(GgmlType::mxfp4, 5120, 6144, false, true);
+        p.n = 512;
+        p.s = s;
+        ops::GdnH16Flags hf;
+        hf.ffn_h16 = true;
+        CHECK(ops::chooseGdnH16(p, hf, f, h, k));
+        p.fused = true;
+        CHECK(!ops::chooseGdnH16(p, hf, f, h, k));
+        p.fused = false;
+        p.s.n_v_heads = 96;
+        CHECK(!ops::chooseGdnH16(p, hf, f, h, k));
+        p.s = s;
+        hf.act_fuse = false;
+        CHECK(!ops::chooseGdnH16(p, hf, f, h, k));
+    }
+    // [beta; alpha]: one GEMM only with the buffer, contiguous rows, the kernel and WHIRL_GDN_BA
+    {
+        ops::GdnBaProblem ba;
+        ba.ba_buf = ba.ba_contiguous = true;
+        CHECK(ops::gdnBaGemm(ba, k));
+        ba.ba_contiguous = false;
+        CHECK(!ops::gdnBaGemm(ba, k) && ops::chooseGdnGates(false, ba, k) == ops::GdnGates::split);
+        CHECK(ops::chooseGdnGates(true, ba, k) == ops::GdnGates::in2);
+        ba.ba_contiguous = true;
+        ba.gdn_ba_on = false;
+        CHECK(!ops::gdnBaGemm(ba, k));
+        // decode: WHIRL_DBG&1 turns abconv off -> gdn_ab + conv; precise rows without the one GEMM -> two GEMMs
+        CHECK(ops::chooseGdnDecode(GgmlType::q8_0, 1, 16, false, 1, ba, k).gates == ops::GdnDecodeGates::ab);
+        CHECK(nameOf(ops::chooseGdnDecode(GgmlType::q8_0, 1, 16, false, 1, ba, k).f) == "gdn_ab_q8_0");
+        CHECK(ops::chooseGdnDecode(GgmlType::q8_0, 1, 16, true, 0, ba, k).gates == ops::GdnDecodeGates::precise_split);
+    }
+    // conv: one row / d_conv != 4 -> the sequential conv + l2norm; without act_fuse no fused l2norm
+    {
+        CHECK(ops::chooseGdnConv(false, false, 1, s, true, k).conv == ops::GdnConv::seq && ops::chooseGdnConv(false, false, 1, s, true, k).l2norm);
+        ops::GdnShape s3 = s;
+        s3.d_conv = 3;
+        CHECK(ops::chooseGdnConv(false, false, 512, s3, true, k).conv == ops::GdnConv::seq);
+        const ops::GdnConvPlan c = ops::chooseGdnConv(false, false, 512, s, false, k);
+        CHECK(c.conv == ops::GdnConv::par && c.l2norm && !c.state_h);
+        CHECK(!ops::gdnFusable(true, mat(GgmlType::q8_0, 48, 5120), mat(GgmlType::q8_0, 48, 5120), s3, k));
+    }
+    // scan / chunk: < 64 rows sequential; strix only when the scratch fits and n >= gdn_strix_min
+    {
+        CHECK(ops::chooseGdnScan(true, 63, s) == ops::GdnScan::seq && ops::chooseGdnScan(false, 512, s) == ops::GdnScan::seq);
+        const kn::KernelTable k8 = gdnTable(false);
+        ops::GdnChunkProblem cp;
+        cp.n = 512;
+        cp.n_v_heads = 48;
+        cp.n_k_heads = 16;
+        cp.gc_m_bytes = cp.gc_w_bytes = cp.gc_u_bytes = 1ull << 30;
+        ops::GdnChunkFlags cf;
+        cf.gdn_strix = true;
+        const ops::GdnChunkPlan pl = ops::chooseGdnChunk(cp, cf, k8);
+        CHECK(pl.kind == ops::GdnChunk::strix && pl.nch == 16 && pl.tp == 48ull * 16 * 32 * 32 * 2 && pl.qk == 16ull * 512 * 128 * 2);
+        cp.gc_w_bytes = 48ull * 512 * 128 * 2 - 1;  // Vh does not fit
+        CHECK(ops::chooseGdnChunk(cp, cf, k8).kind == ops::GdnChunk::f32);
+        cf.gdn_wmma = true;
+        CHECK(ops::chooseGdnChunk(cp, cf, k).kind == ops::GdnChunk::wmma);
+    }
+    // attention prep: f16 KV with WHIRL_NO_FUSE / head_dim > 512 / no attn_prep -> split; q8 KV keeps the fused prep
+    {
+        CHECK(ops::chooseAttnPrep(false, 256, false, true, k) == ops::AttnPrep::split);
+        CHECK(ops::chooseAttnPrep(false, 256, true, true, k) == ops::AttnPrep::fused);
+        CHECK(ops::chooseAttnPrep(false, 576, true, false, k) == ops::AttnPrep::split);
+        CHECK(ops::chooseAttnPrep(true, 576, false, true, k) == ops::AttnPrep::mrope);
+        kn::KernelTable k0 = k;
+        k0.attn_prep = nullptr;
+        CHECK(ops::chooseAttnPrep(false, 256, true, false, k0) == ops::AttnPrep::split);
+        CHECK(ops::chooseAttnPrepSegmented(false) == ops::AttnPrep::fused && ops::chooseAttnPrepSegmented(true) == ops::AttnPrep::mrope);
+        CHECK(ops::chooseAttnCore(16, 16, 256, false) == ops::AttnCore::decode && ops::chooseAttnCore(17, 16, 256, false) == ops::AttnCore::prefill);
+        CHECK(ops::chooseAttnCore(17, 16, 128, false) == ops::AttnCore::naive && ops::chooseAttnCore(512, 16, 256, true) == ops::AttnCore::naive);
+        CHECK(ops::chooseAttnCore(32, 32, 256, true) == ops::AttnCore::decode);
+    }
+    // MTP: draft head rows / map, the chained-draft gate, the batch limits
+    {
+        ops::DraftHeadProblem p;
+        p.head_rows = 248320;
+        p.draft_vocab = 32000;
+        CHECK(ops::chooseDraftHead(p).nrows == 32000 && !ops::chooseDraftHead(p).map);
+        p.draft_rows = 65536;  // no 2-bit head: the subset is not used
+        CHECK(ops::chooseDraftHead(p).nrows == 32000);
+        p.d2 = true;
+        CHECK(ops::chooseDraftHead(p).nrows == 65536 && !ops::chooseDraftHead(p).map);
+        p.map = true;
+        CHECK(ops::chooseDraftHead(p).map);
+        p.d2 = false;
+        p.draft_rows = 0;
+        p.draft_vocab = 300000;
+        CHECK(ops::chooseDraftHead(p).nrows == 248320 && !ops::chooseDraftHead(p).map);  // the map needs the 2-bit subset
+        CHECK(ops::draftGated(1, 0, true, 1, 0.1f) && !ops::draftGated(1, 0, true, 0, 0.1f) && !ops::draftGated(1, 1, true, 1, 0.1f) &&
+              !ops::draftGated(0, 0, true, 1, 0.1f) && !ops::draftGated(1, 0, false, 1, 0.1f) && !ops::draftGated(1, 0, true, 1, 0.0f));
+        CHECK(ops::verifySmallMax(16, 16, 32) == 16 && ops::verifySmallMax(17, 16, 32) == 32);
+        CHECK(ops::unfusedVerifyOk(1, 1) && !ops::unfusedVerifyOk(1, 2) && !ops::unfusedVerifyOk(2, 0));
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -785,6 +1073,7 @@ int main() {
     testOpsMoe();
     testOpTables();
     testActChoice();
+    testGdnChoice();
     std::printf("ops tests: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }

@@ -274,14 +274,16 @@ struct ConsumerShapes {
 };
 }  // namespace
 
-bool Model::h16Out(const Mat& w, u32 n, std::uint8_t cls) const {
+ops::H16Tune Model::h16Tune() const {
     ops::H16Tune h;
     h.from_candidates = device::profile(arch).h16_from_candidates;
     h.tune_mask = tune_mask;
     h.n_choices = n_choices;
     h.h16_dq = h16_dq;
-    return ops::chooseH16Out(matShape(w), w.tune, n, cls, matmulFlags(), h, k);
+    return h;
 }
+
+bool Model::h16Out(const Mat& w, u32 n, std::uint8_t cls) const { return ops::chooseH16Out(matShape(w), w.tune, n, cls, matmulFlags(), h16Tune(), k); }
 
 std::optional<ops::ActIn> Model::actCommon(std::span<const Mat> consumers, u32 n, std::uint8_t cls) const {
     if (consumers.size() > 4) throw ModelError("ActCommonConsumers");

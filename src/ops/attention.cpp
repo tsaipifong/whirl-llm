@@ -320,4 +320,30 @@ AttnPrefillPlan chooseAttnPrefill(const AttnPrefillProblem& p, const AttnPrefill
     return pl;
 }
 
+const char* attnPrepName(AttnPrep p) {
+    switch (p) {
+        case AttnPrep::mrope: return "mrope";
+        case AttnPrep::fused: return "fused";
+        case AttnPrep::split: return "split";
+    }
+    return "?";
+}
+
+AttnPrep chooseAttnPrep(bool mrope_on, std::uint32_t head_dim, bool kv_q8, bool no_fuse, const kernels::AttnKernels& k) {
+    // vision: image prompt / decode after one: multi-section RoPE positions
+    if (mrope_on) return AttnPrep::mrope;
+    // q/k norm + RoPE + K/V store in one launch (same arithmetic); q8 KV: always (it holds the quantizer and the rotation)
+    if (k.attn_prep != nullptr && (!no_fuse || kv_q8) && head_dim <= 512) return AttnPrep::fused;
+    return AttnPrep::split;
+}
+
+const char* attnCoreName(AttnCore c) {
+    switch (c) {
+        case AttnCore::decode: return "decode";
+        case AttnCore::prefill: return "prefill";
+        case AttnCore::naive: return "naive";
+    }
+    return "?";
+}
+
 }  // namespace whirl::ops

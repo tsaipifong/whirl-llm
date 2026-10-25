@@ -34,6 +34,7 @@
 #include "whirl/ops/attention.h"
 #include "whirl/ops/matmul.h"
 #include "whirl/ops/moe.h"
+#include "whirl/ops/mtp.h"
 #include "whirl/numerics.h"
 #include "whirl/relax_accept.h"
 #include "whirl/value_scope.h"
@@ -915,6 +916,8 @@ private:
     hip::Function x8(hip::Function f, hip::Function ft) const { return g8t ? ft : f; }
     void rmsnorm(DevPtr xin, DevPtr w, DevPtr out, std::uint32_t n, std::uint32_t count, std::uint32_t in_stride,
                  std::uint32_t out_stride);
+    ops::DraftHeadProblem draftHeadProblem(const Mat& head) const;  // forward/mtp_verify.cpp (ops::chooseDraftHead)
+    ops::H16Tune h16Tune() const;  // what the f16-output choice reads besides the matrix (h16Out, ops::chooseGdnH16)
     bool h16Out(const Mat& w, std::uint32_t n, std::uint8_t cls) const;
     std::optional<ops::ActIn> actCommon(std::span<const Mat> consumers, std::uint32_t n, std::uint8_t cls) const;
     void rmsnormIn(DevPtr xin, DevPtr w, DevPtr out, std::uint32_t n, std::span<const Mat> consumers, std::uint8_t cls);

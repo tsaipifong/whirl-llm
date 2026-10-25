@@ -1,7 +1,8 @@
 // Model forward, MTP drafting and speculative verify (arch025-F4, moved from src/model/forward.cpp): token
 // upload (setTokens / setTokensDev / ctlSlot), the MTP block (mtpForward / mtpEnqueue / mtpBatchStepEx), DFlash2
 // layer-input capture, the batched and single verify (verifyBatchEnqueue / verifyEnqueueEx / verify), the replay
-// commit (commitSeq) and snapshot restore, draft-head logits and argmax / cycle readback.
+// commit (commitSeq) and snapshot restore, draft-head logits and argmax / cycle readback. The draft-head and batch
+// choices are in src/ops/mtp.cpp (arch025-F6).
 // SPDX-License-Identifier: Apache-2.0
 
 #include "../forward_internal.h"
@@ -60,7 +61,7 @@ void Model::mtpEnqueue(DevPtr hidden, std::span<const u32> tokens, DevPtr dev_to
     xq_src = 0;
     x16_src = 0;
     // chained draft after a possible device-side cutoff: gate its big kernels
-    const bool gated = n_dev > 0 && tokens.empty() && slot.has_value() && *slot > 0 && draft_p_min > 0;
+    const bool gated = ops::draftGated(n_dev, tokens.size(), slot.has_value(), slot.value_or(0), draft_p_min);
     if (gated) gate = ctlSlot(ctl_stop);
     struct GateReset {
         DevPtr& g;
@@ -93,10 +94,10 @@ void Model::mtpEnqueue(DevPtr hidden, std::span<const u32> tokens, DevPtr dev_to
         rmsnorm(last, mw.head_norm, h, E, 1, E, E);
     // draft head over the vocabulary subset (draft_map) or the first draft_vocab rows only
     Mat head = draft_head ? *draft_head : output;
-    if (draft_rows > 0 && draft_d2) head.nrows = draft_rows;
-    else if (draft_vocab > 0 && draft_vocab < head.nrows) head.nrows = draft_vocab;
+    const ops::DraftHeadPlan dh = ops::chooseDraftHead(draftHeadProblem(head));
+    head.nrows = dh.nrows;
     draftHeadMatmul(head, 1);
-    const DevPtr map = draft_rows > 0 && draft_d2 && draft_map ? *draft_map : DevPtr{0};
+    const DevPtr map = dh.map ? *draft_map : DevPtr{0};
     hip::launch(k.draft_pick, D(1), D(1024), 0, stream, logits, I(head.nrows), ctlSlot(ctl_drafts), ctlSlot(ctl_probs), ctlSlot(ctl_nd),
                 I(draft_slot), I(draft_n_min), draft_p_min, map);
 }
@@ -144,9 +145,7 @@ u32 Model::verifyBatchEnqueue(std::span<const VSeg> segs) {
     // several sequences need the segment-aware fused DeltaNet kernels
     const bool unfused = !fusedDecode();
     if (unfused) {
-        if (segs.size() > 1) throw ModelError("BatchNeedsFusedDecode");
-        for (const VSeg& sg : segs)
-            if (sg.nd > 1) throw ModelError("BatchNeedsFusedDecode");
+        if (!ops::unfusedVerifyOk(segs.size(), segs[0].nd)) throw ModelError("BatchNeedsFusedDecode");
         selectSeq(segs[0].seq);
         snap_rows = segs[0].nd;
     }
@@ -208,7 +207,7 @@ u32 Model::verifyBatchEnqueue(std::span<const VSeg> segs) {
     keep_hidden = true;
     all_logits = true;
     bplan = &plan;
-    small_max = n > max_small_batch ? max_verify_rows : max_small_batch;
+    small_max = ops::verifySmallMax(n, max_small_batch, max_verify_rows);
     struct Reset {
         Model& m;
         ~Reset() {
@@ -263,7 +262,7 @@ void Model::mtpBatchStepEx(std::span<const MSeg> segs, u32 r, bool draft) {
     xq_src = 0;
     x16_src = 0;
     mtp_batch = true;
-    small_max = n > max_small_batch ? max_verify_rows : max_small_batch;
+    small_max = ops::verifySmallMax(n, max_small_batch, max_verify_rows);
     struct BatchReset {
         Model& m;
         ~BatchReset() {
@@ -315,10 +314,10 @@ void Model::mtpBatchStepEx(std::span<const MSeg> segs, u32 r, bool draft) {
     xq_n = ns;
     x16_src = 0;
     Mat head = draft_head ? *draft_head : output;
-    if (draft_rows > 0 && draft_d2) head.nrows = draft_rows;
-    else if (draft_vocab > 0 && draft_vocab < head.nrows) head.nrows = draft_vocab;
+    const ops::DraftHeadPlan dh = ops::chooseDraftHead(draftHeadProblem(head));
+    head.nrows = dh.nrows;
     draftHeadMatmul(head, ns);
-    const DevPtr map = draft_rows > 0 && draft_d2 && draft_map ? *draft_map : DevPtr{0};
+    const DevPtr map = dh.map ? *draft_map : DevPtr{0};
     hip::launch(k.draft_pick_rows, D(ns), D(1024), 0, stream, logits, I(head.nrows), out_tok, area, I(r), I(draft_n_min), draft_p_min,
                 map);
     if (draftSampleOk()) {
@@ -344,6 +343,17 @@ void Model::mtpBatchStepEx(std::span<const MSeg> segs, u32 r, bool draft) {
         if (any)
             hip::launch(k.draft_sample_rows, D(ns), D(1024), 0, stream, logits, I(head.nrows), out_tok, area, I(r), map, da, draft_qbuf);
     }
+}
+
+// the draft-head problem of `head` (the draft head, else the output head)
+ops::DraftHeadProblem Model::draftHeadProblem(const Mat& head) const {
+    ops::DraftHeadProblem p;
+    p.head_rows = head.nrows;
+    p.draft_rows = draft_rows;
+    p.draft_vocab = draft_vocab;
+    p.d2 = draft_d2.has_value();
+    p.map = draft_map.has_value();
+    return p;
 }
 
 void Model::readCtl(std::span<i32> dst) { hip::download(dst.data(), out_tok, dst.size() * 4); }

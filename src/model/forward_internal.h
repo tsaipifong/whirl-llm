@@ -9,8 +9,10 @@
 #include "whirl/model.h"
 
 #include "whirl/ops/attention.h"
+#include "whirl/ops/gdn.h"
 #include "whirl/ops/matmul.h"
 #include "whirl/ops/moe.h"
+#include "whirl/ops/mtp.h"
 
 #include <algorithm>
 #include <cmath>
