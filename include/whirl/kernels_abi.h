@@ -158,6 +158,9 @@
 //            moe_act_f16; 64-token tiles, 1-D grid (n_tile_slots * ceil(ff / 64))
 //  MXFP4 routed experts (optional, gfx1201 only; T = mxfp4 also has the generic four above):
 //   moe_gu_mxfp4w / moe_down_mxfp4w: same arguments as moe_gu_<T> / moe_down_<T>
+//   moe_gus_mxfp4w(W1, W2, SG, SU, rb, ff, nrows, xq, xd, ids, y1, y2, C, K, skip) / moe_downs_mxfp4w(W, SD, rb, E, xq,
+//            xd, ids, w, sg, x, F, K, skip) (optional, kernels/moe_shx.hip): moeshx (fast) - the shared expert
+//            (SG / SU / SD rows, weight sg[t]) as slot K of n x (K + 1) pairs; id < 0 = dropped slot (moeskip)
 //            (whole 32-value block per lane step)
 //   gemm8_moe / gemm8_moe32 / gemm8_moeh / gemm8_moe32h(W1, W2, rb, const u8* ref1,
 //            const u8* ref2, rows_e, const u8* X8, const float* sx, Y1, Y2, ncols,
@@ -568,6 +571,7 @@ struct MoeKernels {
     // MXFP4 routed experts (optional): whole-block decode experts, MXFP4 x fp8
     // grouped expert GEMM (token tile 64 / 32, f32 / f16 output), fp8 gather.
     F moe_gu_mxw{}, moe_down_mxw{};
+    F moe_gus_mxw{}, moe_downs_mxw{};  // optional: moeshx (fast), kernels/moe_shx.hip
     F gemm8_moe{}, gemm8_moe32{}, gemm8_moeh{}, gemm8_moe32h{}, moe_gather_fp8{};
     F gemm8r_moe{}, gemm8r_moe32{}, gemm8r_moeh{}, gemm8r_moe32h{};  // optional
     F gemmr_moegu{}, gemmr_moegu32{}, gemmr_moedn{}, gemmr_moedn32{};  // optional (MXFP4, f16 activations)

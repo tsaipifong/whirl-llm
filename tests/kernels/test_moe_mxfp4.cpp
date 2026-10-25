@@ -506,6 +506,7 @@ void testMoeMx(Ctx& c) {
         }
         moeGuChecks(c, mw.gate, mw.up, mw.down, R, K);
         gemmrChecks(c, mw.gate, mw.up, mw.down, R, K);
+        moeShxChecks(c, mw.gate, mw.up, mw.down, R, K);
     }
 }
 

@@ -28,6 +28,7 @@ constexpr std::array<ItemInfo, n_items> k_items = {{
     {"moeskip", "skip low-weight MoE experts"},
     {"a8", "int8 activations for K-quant prefill (W4A8)"},
     {"a4", "int4 activations for prefill (W4A4)"},
+    {"moeshx", "MoE decode: shared expert inside the routed int8 expert launches"},
 }};
 
 constexpr const char* k_q8dec = "q8dec (int8 activations in the decode / verify GEMV, as llama.cpp's q8_1)";
@@ -252,6 +253,13 @@ Plan plan(const Request& r_in, const Target& t) {
                 }
                 note = "drafts accepted when close to the target (greedy: top-k + p ratio; sampling: typical acceptance)";
                 break;
+            case Item::moeshx:
+                if (!t.moe) why = "dense model";
+                else if (!t.moe_mxfp4) why = "experts are not MXFP4";
+                else if (!t.k_moe_shx) why = t.gfx1151 ? "no moe_gus / moe_downs kernels on this GPU (gfx1151)" : "no moe_gus / moe_downs kernels in this code object";
+                else if (!t.moe_shx_shape) why = "shared expert not MXFP4 of the experts' shape";
+                else note = "shared expert as slot K of the int8 decode / verify expert launches (other f32 order)";
+                break;
             default:
                 why = "not yet implemented (balance behaviour)";
                 break;
@@ -328,7 +336,7 @@ std::string logLine(const Plan& p) {
         l += std::string(" - f16/f32 prefill activations, ") + (p.q8dec ? "" : "f16 decode / verify activations, ") + "f32 DeltaNet, f16 KV";
     else l += " - enabled: " + (en.empty() ? std::string("none") : en);
     if (p.mode != Mode::precise || !sk.empty()) l += "; skipped: " + (sk.empty() ? std::string("none") : sk);
-    if (p.mode == Mode::fast && !p.on(Item::kvq4) && !p.on(Item::relaxacc))
+    if (p.mode == Mode::fast && !p.on(Item::kvq4) && !p.on(Item::relaxacc) && !p.on(Item::moeshx))
         l += "; no fast item applies here: fast runs as balance";
     for (const std::string& o : p.overrides) l += "; " + o;
     l += std::string("; decode: ") + (p.q8dec ? k_q8dec : k_f16dec);

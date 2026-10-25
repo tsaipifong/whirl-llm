@@ -9,6 +9,7 @@
 #include "whirl/tokenizer.h"
 #include "whirl/unicode.h"
 #include "whirl/numerics.h"
+#include "whirl/moe_shx_ref.h"
 #include "whirl/spec_sample.h"
 #include "whirl/relax_accept.h"
 #include "whirl/dflash_policy.h"
@@ -37,6 +38,7 @@
 #include <cstdio>
 #include <cstring>
 #include <optional>
+#include <random>
 #include <regex>
 #include <stdexcept>
 #include <functional>
@@ -4008,6 +4010,163 @@ void testGpuSelect() {
 // handle (log file, listening socket), only the pipe and NUL, and (c) it must give up after 10 s, not 60 s.
 // The child is this test program itself (helper modes in main()).
 #if WHIRL_WITH_HIP && defined(_WIN32)
+// moeshx (fast, feat028-moefast97): the shared expert as slot K of the int8 MXFP4 decode experts.
+// (1) numerics plan: fast-only, needs MoE + MXFP4 experts + kernels + the shared-expert shape; WHIRL_MOESHX override.
+// (2) host numerics reference (kernels' f32 order, include/whirl/moe_shx_ref.h) vs a double-precision oracle:
+//     documented fast tolerance (q8_1-class activations): per output |y - oracle| <= kShxTol x scale, scale =
+//     |x0| + sum |terms|; the moeshx form vs the balance form (shared expert summed separately): only the f32
+//     order differs -> |fused - separate| <= 1e-5 x scale, and the fused error is no larger than the balance
+//     error (RMS, +1 %). moeskip ids (-1) are dropped. A mutant (shared weight ignored) must fail the tolerance.
+constexpr double kShxTol = 1e-2;
+whirl::moeshx_ref::Problem shxProblem(int E, int F, int K, int R, int n, unsigned seed, bool skips) {
+    namespace mr = whirl::moeshx_ref;
+    std::mt19937 rng(seed);
+    std::normal_distribution<float> nd(0.f, 1.f);
+    std::uniform_int_distribution<int> byte(0, 255), ex(119, 124);
+    mr::Problem p;
+    p.s = mr::Shapes{E, F, K, R};
+    p.n = n;
+    auto rows = [&](int nrows, int ncols) {
+        const std::uint64_t rb = mr::mxRowBytes(ncols);
+        std::vector<std::uint8_t> v(static_cast<std::size_t>(nrows) * rb);
+        for (int r = 0; r < nrows; ++r)
+            for (std::uint64_t sb = 0; sb < rb / 136; ++sb) {
+                std::uint8_t* b = v.data() + static_cast<std::size_t>(r) * rb + sb * 136;
+                for (int i = 0; i < 8; ++i) b[i] = static_cast<std::uint8_t>(ex(rng));
+                for (int i = 8; i < 136; ++i) b[i] = static_cast<std::uint8_t>(byte(rng));
+            }
+        return v;
+    };
+    p.gate = rows(R * F, E);
+    p.up = rows(R * F, E);
+    p.down = rows(R * E, F);
+    p.sg = rows(F, E);
+    p.su = rows(F, E);
+    p.sd = rows(E, F);
+    p.h.resize(static_cast<std::size_t>(n) * E);
+    for (float& v : p.h) v = nd(rng);
+    p.x0.resize(p.h.size());
+    for (float& v : p.x0) v = 0.1f * nd(rng);
+    p.ids.resize(static_cast<std::size_t>(n) * K);
+    p.w.resize(p.ids.size());
+    p.shw.resize(static_cast<std::size_t>(n));
+    std::uniform_real_distribution<float> uw(0.05f, 1.f), us(0.1f, 0.9f);
+    for (int t = 0; t < n; ++t) {
+        std::vector<int> perm(static_cast<std::size_t>(R));
+        for (int i = 0; i < R; ++i) perm[static_cast<std::size_t>(i)] = i;
+        std::shuffle(perm.begin(), perm.end(), rng);
+        float sum = 0;
+        for (int k = 0; k < K; ++k) {
+            p.ids[static_cast<std::size_t>(t) * K + k] = perm[static_cast<std::size_t>(k)];
+            sum += p.w[static_cast<std::size_t>(t) * K + k] = uw(rng);
+        }
+        for (int k = 0; k < K; ++k) p.w[static_cast<std::size_t>(t) * K + k] /= sum;
+        if (skips && K > 2) {  // moeskip: the last two slots dropped (id -1, weight 0), kept ones renormalized
+            p.ids[static_cast<std::size_t>(t) * K + K - 1] = -1;
+            p.ids[static_cast<std::size_t>(t) * K + K - 2] = -1;
+            float kept = 0;
+            for (int k = 0; k < K - 2; ++k) kept += p.w[static_cast<std::size_t>(t) * K + k];
+            for (int k = 0; k < K; ++k)
+                p.w[static_cast<std::size_t>(t) * K + k] = k < K - 2 ? p.w[static_cast<std::size_t>(t) * K + k] / kept : 0.f;
+        }
+        p.shw[static_cast<std::size_t>(t)] = us(rng);
+    }
+    return p;
+}
+struct ShxErr {
+    double max_rel = 0, rms = 0;  // max |y - ref| / scale, RMS of (y - ref) / scale
+};
+ShxErr shxErr(const std::vector<float>& y, const std::vector<double>& ref, const std::vector<double>& sc) {
+    ShxErr e;
+    for (std::size_t i = 0; i < y.size(); ++i) {
+        const double r = std::fabs(static_cast<double>(y[i]) - ref[i]) / sc[i];
+        e.max_rel = std::max(e.max_rel, r);
+        e.rms += r * r;
+    }
+    e.rms = std::sqrt(e.rms / static_cast<double>(y.size()));
+    return e;
+}
+void testMoeShx() {
+    namespace nu = whirl::numerics;
+    namespace mr = whirl::moeshx_ref;
+    using Item = nu::Item;
+    // (1) plan
+    nu::Target orn;
+    orn.k_gemm8 = orn.k_gemm8_moe = orn.k_gdn_wmma = orn.k_kv_q8v = orn.k_kv_q8h = true;
+    orn.has_mxfp4 = orn.moe = orn.moe_mxfp4 = true;
+    orn.k_moe_shx = orn.moe_shx_shape = true;
+    const nu::Request bal = nu::parseMode("balance", "t"), pre{}, fast = nu::parseMode("fast", "t");
+    CHECK((nu::fast_only_items & nu::bit(Item::moeshx)) != 0 && (nu::balance_items & nu::bit(Item::moeshx)) == 0);
+    CHECK((nu::implemented_items & nu::bit(Item::moeshx)) != 0 && std::string(nu::itemName(Item::moeshx)) == "moeshx");
+    CHECK(nu::itemFromName("moeshx") == Item::moeshx);
+    const nu::Plan pf = nu::plan(fast, orn);
+    CHECK(pf.on(Item::moeshx) && nu::logLine(pf).find("moeshx (shared expert as slot K") != std::string::npos);
+    CHECK(nu::logLine(pf).find("fast runs as balance") == std::string::npos);
+    CHECK(!nu::plan(bal, orn).on(Item::moeshx) && !nu::plan(pre, orn).on(Item::moeshx));
+    {
+        nu::Target dense = orn;
+        dense.moe = dense.moe_mxfp4 = false;
+        CHECK(!nu::plan(fast, dense).on(Item::moeshx) && nu::plan(fast, dense).items[static_cast<std::size_t>(Item::moeshx)].note == "dense model");
+        nu::Target q4m = orn;
+        q4m.moe_mxfp4 = false;
+        CHECK(!nu::plan(fast, q4m).on(Item::moeshx));
+        nu::Target s8 = orn;  // 8060S: no moe_gus / moe_downs kernels
+        s8.gfx1151 = true;
+        s8.k_moe_shx = false;
+        const nu::Plan p8 = nu::plan(fast, s8);
+        CHECK(!p8.on(Item::moeshx) && p8.items[static_cast<std::size_t>(Item::moeshx)].note.find("gfx1151") != std::string::npos);
+        nu::Target shape = orn;
+        shape.moe_shx_shape = false;
+        CHECK(!nu::plan(fast, shape).on(Item::moeshx) &&
+              nu::plan(fast, shape).items[static_cast<std::size_t>(Item::moeshx)].note.find("shape") != std::string::npos);
+        // explicit lists: fast without moeshx keeps it off, fast:moeshx alone turns it on; balance:moeshx is refused
+        // (a balance list takes balance items only; WHIRL_MOESHX=1 is the way to try it under balance)
+        CHECK(!nu::plan(nu::parseMode("fast:kvq4", "t"), orn).on(Item::moeshx));
+        CHECK(nu::plan(nu::parseMode("fast:moeshx", "t"), orn).on(Item::moeshx));
+        bool refused = false;
+        try {
+            (void)nu::parseMode("balance:moeshx", "t");
+        } catch (const std::invalid_argument&) {
+            refused = true;
+        }
+        CHECK(refused);
+        // WHIRL_MOESHX: 1 in balance = lossy user override; 0 in fast = off
+        nu::Plan pb = nu::plan(bal, orn);
+        nu::applyOverride(pb, Item::moeshx, "MOESHX", "1", true, true);
+        CHECK(pb.on(Item::moeshx) && pb.lossy_override && nu::modeLabel(pb) == "balance+overrides");
+        nu::Plan po = nu::plan(fast, orn);
+        nu::applyOverride(po, Item::moeshx, "MOESHX", "0", false, true);
+        CHECK(!po.on(Item::moeshx) && !po.lossy_override);
+        nu::Plan pn = nu::plan(bal, orn);  // not applicable: never turned on
+        nu::applyOverride(pn, Item::moeshx, "MOESHX", "1", true, false);
+        CHECK(!pn.on(Item::moeshx));
+    }
+    // (2) numerics: small shapes (E 256, F 256, K 4 of 8) and Ornith shapes (E 2048, F 512, K 8 of 16 here)
+    struct Case {
+        int E, F, K, R, n;
+        bool skips;
+    };
+    for (const Case cs : {Case{256, 256, 4, 8, 3, false}, Case{256, 256, 4, 8, 3, true}, Case{2048, 512, 8, 16, 2, false},
+                          Case{2048, 512, 8, 16, 1, true}}) {
+        const mr::Problem p = shxProblem(cs.E, cs.F, cs.K, cs.R, cs.n, 1234u + static_cast<unsigned>(cs.E + cs.K + cs.n + (cs.skips ? 7 : 0)), cs.skips);
+        std::vector<double> sc;
+        const std::vector<double> ref = mr::oracle(p, &sc);
+        const std::vector<float> fused = mr::q8Forward(p, false), sep = mr::q8Forward(p, true);
+        const ShxErr ef = shxErr(fused, ref, sc), es = shxErr(sep, ref, sc);
+        double fs = 0;
+        for (std::size_t i = 0; i < fused.size(); ++i) fs = std::max(fs, std::fabs(static_cast<double>(fused[i]) - sep[i]) / sc[i]);
+        std::printf("  moeshx E %d F %d K %d n %d%s: fused vs oracle max %.3e rms %.3e; balance form max %.3e rms %.3e; fused vs balance %.3e\n",
+                    cs.E, cs.F, cs.K, cs.n, cs.skips ? " (moeskip)" : "", ef.max_rel, ef.rms, es.max_rel, es.rms, fs);
+        CHECK(ef.max_rel <= kShxTol);
+        CHECK(fs <= 1e-5);
+        CHECK(ef.rms <= es.rms * 1.01 + 1e-7);
+        // mutant: the shared weight ignored -> outside the tolerance (the test can see a missing shared expert)
+        mr::Problem m = p;
+        for (float& v : m.shw) v = 0.f;
+        CHECK(shxErr(mr::q8Forward(m, false), ref, sc).max_rel > kShxTol);
+    }
+}
+
 void testProbeChild(const wchar_t* self) {
     using namespace whirl::gpusel;
     CHECK_EQ(k_probe_timeout_ms, 10000u);
@@ -4093,6 +4252,7 @@ int main(int argc, char** argv) {
     testMemGovernor();
     testMemGovernorGrowOvershoot();
     testGpuSelect();
+    testMoeShx();
 #if WHIRL_WITH_HIP && defined(_WIN32)
     {
         wchar_t self[1024];

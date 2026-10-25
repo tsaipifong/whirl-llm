@@ -227,6 +227,8 @@ void testMoeF(Ctx& c);  // "moef": precise MoE decode experts moe_gu_f_* / moe_d
 void gemmrChecks(Ctx& c, const HostMat& gate, const HostMat& up, const HostMat& down, int R, int K);
 // 8060S grouped expert GEMMs (test_moe_gu.cpp), called by testMoe / testMoeMx
 void moeGuChecks(Ctx& c, const HostMat& gate, const HostMat& up, const HostMat& down, int R, int K);
+// moeshx (fast, feat028): moe_gus_mxfp4w / moe_downs_mxfp4w (test_moe_shx.cpp, gfx1201), called by testMoeMx
+void moeShxChecks(Ctx& c, const HostMat& gate, const HostMat& up, const HostMat& down, int R, int K);
 void testMisc(Ctx& c);
 void testDflash(Ctx& c);
 

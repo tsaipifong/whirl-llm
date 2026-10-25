@@ -930,6 +930,17 @@ void loadOrTuneImpl(Model& m, const std::string& model_path, std::string& log) {
         t.kv_explicit = m.kv_mode != KvMode::automatic;
         t.fast_kv_q8h = t.gfx1151 && t.k_kv_q8h;
         t.gdn_strix = m.gdn_strix;
+        // moeshx (fast, feat028): kernels in the code object, and every MoE layer's shared expert fits slot K
+        t.k_moe_shx = m.k.moe_gus_mxw != nullptr && m.k.moe_downs_mxw != nullptr;
+        {
+            bool any = false, all = true;
+            for (const Layer& L : m.layers) {
+                if (!L.moe) continue;
+                any = true;
+                all = all && ops::moeShxShape(moeProblemOf(*L.moe, m.cfg), moeSharedOf(L.ffn_gate, L.ffn_up, L.ffn_down, L.moe->sh_gate));
+            }
+            t.moe_shx_shape = any && all;
+        }
         nu::Plan p = nu::plan(rq, t);
         if (fp8_env) nu::applyOverride(p, nu::Item::fp8, "FP8", *fp8_env, m.fp8_prefill, t.has_mxfp4 && t.k_gemm8);
         const bool moe_ok = t.moe && t.moe_mxfp4 && t.k_gemm8_moe;
@@ -974,6 +985,12 @@ void loadOrTuneImpl(Model& m, const std::string& model_path, std::string& log) {
         }
         if (const auto v = envGet("SPEC_SAMPLE"); v && !v->empty())
             nu::applyOverride(p, nu::Item::specsample, "SPEC_SAMPLE", *v, *v != "0", t.mtp && t.k_spec_sample);
+        // moeshx (fast, feat028): WHIRL_MOESHX=0|1 overrides (1 outside fast = lossy, user-requested); int8 decode only
+        {
+            const bool shx_ok = t.moe && t.moe_mxfp4 && t.k_moe_shx && t.moe_shx_shape;
+            if (const auto v = envGet("MOESHX"); v && !v->empty()) nu::applyOverride(p, nu::Item::moeshx, "MOESHX", *v, *v != "0", shx_ok);
+            m.moe_shx = p.on(nu::Item::moeshx) && !m.prec_dec;
+        }
         nu::noteSwitches(p, [](const char* n) { return envGet(n); });
         m.num_plan = p;
         log += "  " + nu::logLine(p) + "\n";

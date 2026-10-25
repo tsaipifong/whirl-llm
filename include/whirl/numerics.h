@@ -13,7 +13,8 @@
 //    the same items (fp8 + moefp8 back in MoE balance; MOE-BAL 2026-10-13 had made them fast-only).
 //  - fast: balance plus aggressive gated items (4-bit KV, relaxed speculative acceptance, ...).
 //    Implemented: kvq4 (4-bit KV where the code object has it: Radeon 8060S; elsewhere fast keeps
-//    f16 KV until there are q4 kernels) and relaxacc. The others are listed as skipped.
+//    f16 KV until there are q4 kernels), relaxacc and moeshx (MoE decode: shared expert folded into the
+//    routed int8 expert launches, R9700, feat028). The others are listed as skipped.
 // KV format: fixed per mode and model type (chooseKv), never switched by what fits: a format that
 // does not fit shrinks the context (when not given) or refuses. WHIRL_KV is a debug override.
 // Items not applicable to the device or model are listed as skipped, never an error.
@@ -50,6 +51,7 @@ enum class Item : std::uint8_t {
     moeskip,  // skip low-weight MoE experts
     a8,       // int8 activations for Q4_K / Q5_K / Q6_K prefill (W4A8)
     a4,       // W4A4 prefill
+    moeshx,   // MoE decode / verify: the shared expert as slot K of the int8 routed expert launches (feat028; R9700)
     n_items
 };
 inline constexpr std::size_t n_items = static_cast<std::size_t>(Item::n_items);
@@ -59,13 +61,13 @@ std::optional<Item> itemFromName(std::string_view s);
 inline constexpr std::uint32_t bit(Item it) { return 1u << static_cast<unsigned>(it); }
 inline constexpr std::uint32_t balance_items = bit(Item::fp8) | bit(Item::moefp8) | bit(Item::gdnwmma) | bit(Item::h16) | bit(Item::kvq8) | bit(Item::specsample);
 inline constexpr std::uint32_t fast_only_items =
-    bit(Item::kvq4) | bit(Item::relaxacc) | bit(Item::headq) | bit(Item::moeskip) | bit(Item::a8) | bit(Item::a4);
+    bit(Item::kvq4) | bit(Item::relaxacc) | bit(Item::headq) | bit(Item::moeskip) | bit(Item::a8) | bit(Item::a4) | bit(Item::moeshx);
 // MoE models: balance items that only the fast mode enables (an explicit item list still enables
 // them). Empty since MODES-MXFP4 (owner 2026-10-16): MoE balance has fp8 + moefp8 again
 // (MOE-BAL 2026-10-13 had moved them here). Kept as the per-model-type hook of forModel.
 inline constexpr std::uint32_t moe_fast_items = 0;
 // implemented items (the rest are "not yet implemented": skipped, the mode runs as balance)
-inline constexpr std::uint32_t implemented_items = balance_items | bit(Item::kvq4) | bit(Item::relaxacc);
+inline constexpr std::uint32_t implemented_items = balance_items | bit(Item::kvq4) | bit(Item::relaxacc) | bit(Item::moeshx);
 
 // The requested mode and items.
 struct Request {
@@ -111,6 +113,8 @@ struct Target {
     bool kv_explicit = false;  // WHIRL_KV set to a format (the KV items then do not choose)
     bool fast_kv_q8h = false;  // fast takes q8h for kvq4 on dense models (KvCaps::fast_q8h, gfx1151)
     bool gdn_strix = false;    // gdnwmma runs as the gfx1151 strix-llama.cpp chunked prefill (GDN-8S)
+    bool k_moe_shx = false;    // moe_gus_mxfp4w / moe_downs_mxfp4w present (moeshx; gfx1201 code object)
+    bool moe_shx_shape = false;  // the shared expert is MXFP4 of the experts' shapes with a shared gate (moeshx)
 };
 
 // gdnwmma / h16 for a model without MXFP4 tensors (KG-1): dense models on the R9700 only

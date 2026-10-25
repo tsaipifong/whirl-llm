@@ -240,6 +240,43 @@ struct MoeW {
     Mat gate, up, down;  // 3D expert tensors: expert e owns rows [e*rows_e, (e+1)*rows_e)
 };
 
+// The expert shapes of a MoE block for ops::chooseMoe (n = 0; the caller sets the rows and buffers)
+inline ops::MoeProblem moeProblemOf(const MoeW& mo, const Config& c) {
+    ops::MoeProblem mp;
+    mp.E = c.n_embd;
+    mp.K = c.n_expert_used;
+    mp.F = c.n_ff_exp;
+    mp.R = c.n_expert;
+    mp.gate_ty = mo.gate.ty;
+    mp.up_ty = mo.up.ty;
+    mp.down_ty = mo.down.ty;
+    mp.gate_rb = mo.gate.row_bytes;
+    mp.up_rb = mo.up.row_bytes;
+    mp.down_rb = mo.down.row_bytes;
+    mp.gate_ncols = mo.gate.ncols;
+    mp.down_ncols = mo.down.ncols;
+    mp.refs = mo.gate.ref != 0 && mo.up.ref != 0 && mo.down.ref != 0;
+    return mp;
+}
+// A block's shared expert (gate / up / down matrices + the shared gate vector) for ops::moeShxShape (moeshx)
+inline ops::MoeShared moeSharedOf(const Mat& sg, const Mat& su, const Mat& sd, DevPtr sh_gate) {
+    ops::MoeShared s;
+    s.gate_ty = sg.ty;
+    s.up_ty = su.ty;
+    s.down_ty = sd.ty;
+    s.gate_rows = sg.nrows;
+    s.gate_cols = sg.ncols;
+    s.up_rows = su.nrows;
+    s.up_cols = su.ncols;
+    s.down_rows = sd.nrows;
+    s.down_cols = sd.ncols;
+    s.gate_rb = sg.row_bytes;
+    s.up_rb = su.row_bytes;
+    s.down_rb = sd.row_bytes;
+    s.gate_vec = sh_gate != 0 && sg.ptr != 0 && su.ptr != 0 && sd.ptr != 0;
+    return s;
+}
+
 // The nextn (MTP) block.
 struct MtpW {
     AttnW attn;
@@ -741,6 +778,9 @@ public:
     // decode experts on the whole-block kernels (WHIRL_MOE_MXW=0 -> generic moe_gu / moe_down).
     DevPtr moe_sx = 0;
     bool moe_fp8 = true;
+    // moeshx (fast item, feat028): int8 decode / verify experts run the shared expert as slot K of the routed
+    // launches (moe_gus_mxfp4w / moe_downs_mxfp4w); off in precise / balance; WHIRL_MOESHX=0|1 overrides
+    bool moe_shx = false;
     bool moe_mxw = true;
     bool moe_rbf = true;  // MXFP4 x fp8 grouped GEMM: row-block-fast gemm8r_* when present (WHIRL_MOE_RBF=0 -> gemm8_moe*)
 

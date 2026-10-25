@@ -45,6 +45,7 @@
 #include "gemv_h.hip"              // precise decode / verify matmul (f16 activations)
 #include "moe_mxfp4.hip"           // MXFP4 routed experts (decode, fp8 grouped GEMM)
 #include "moe_f.hip"               // precise MoE decode experts (f32 activations)
+#include "moe_shx.hip"             // moeshx (fast): shared expert as slot K of the int8 MXFP4 decode experts
 #endif
 
 #if defined(__gfx1151__)

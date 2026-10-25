@@ -160,6 +160,7 @@ std::string execDump(const Model& m) {
     WD_U(moe_bn_force);
     WD_U(ff_scratch);
     WD_B(moe_fp8);
+    WD_B(moe_shx);
     WD_B(moe_mxw);
     WD_B(moe_rbf);
     WD_B(mrope_on);
