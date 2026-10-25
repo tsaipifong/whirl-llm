@@ -1458,11 +1458,34 @@ void testFloatGemvDispatch() {
     check(cover, "float dispatch: GEMV loop steps cover n tokens (8 / 4 / 1 by the instances present)");
 }
 
+#ifdef WHIRL_SOURCE_DIR
+// The Model forward sources as one string: src/model/forward.cpp, then src/model/forward/*.cpp in name order (arch025
+// R-7 moves forward.cpp into forward/ step by step; source checks read all of them). Empty when forward.cpp is missing.
+std::string readSource(const std::filesystem::path& p) {
+    std::ifstream in(p, std::ios::binary);
+    return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+}
+
+std::string forwardSources() {
+    const std::filesystem::path model = std::filesystem::path(WHIRL_SOURCE_DIR) / "src" / "model";
+    std::string all = readSource(model / "forward.cpp");
+    if (all.empty()) return all;
+    std::vector<std::filesystem::path> parts;
+    std::error_code ec;
+    for (const auto& e : std::filesystem::directory_iterator(model / "forward", ec))
+        if (e.path().extension() == ".cpp") parts.push_back(e.path());
+    std::sort(parts.begin(), parts.end());
+    for (const auto& p : parts) all += "\n" + readSource(p);
+    return all;
+}
+#endif
+
 // OVH-C1: the MTP draft window (Model::attn_win) is set only around the MTP draft attention and restored
 // when that attention throws. (a) Model::draftAttn, through the attnBlock test hook (throws before any
 // GPU work): the hook sees the draft window, and attn_win is back to its previous value after the throw.
-// (b) both MTP call sites in forward.cpp go through draftAttn and nothing else assigns attn_win (a call
-// site reverted to "attn_win = ...; attnBlock(); attn_win = 0;" fails here).
+// (b) both MTP call sites in the forward sources (src/model/forward.cpp + src/model/forward/*.cpp, arch025 R-7 split)
+// go through draftAttn and nothing else assigns attn_win (a call site reverted to
+// "attn_win = ...; attnBlock(); attn_win = 0;" fails here).
 void testDraftWindowRestore() {
     struct Seen {
         std::int32_t win = -1;
@@ -1492,8 +1515,7 @@ void testDraftWindowRestore() {
     }
     check(seen.calls == 2, "OVH-C1: test hook reached");
 #ifdef WHIRL_SOURCE_DIR
-    std::ifstream in(std::string(WHIRL_SOURCE_DIR) + "/src/model/forward.cpp", std::ios::binary);
-    const std::string fw((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    const std::string fw = forwardSources();
     check(!fw.empty(), "OVH-C1: src/model/forward.cpp readable");
     std::size_t sites = 0, raw_mtp_attn = 0, assigns = 0;
     for (std::size_t p = fw.find("draftAttn(mw.attn, n)"); p != std::string::npos; p = fw.find("draftAttn(mw.attn, n)", p + 1)) ++sites;
@@ -1503,6 +1525,36 @@ void testDraftWindowRestore() {
     check(sites == 2 && raw_mtp_attn == 0 && assigns == 0,
           std::format("OVH-C1: both MTP call sites use draftAttn ({} sites, {} raw MTP attnBlock calls, {} attn_win assignments)", sites,
                       raw_mtp_attn, assigns));
+#endif
+}
+
+// arch025-F1 (R-7, PLAN C8): the matmul dispatch lives in src/model/forward/dispatch.cpp and nowhere else, and the
+// shared helpers ti / I / D in src/model/forward_internal.h stay inside an anonymous namespace (internal linkage per
+// forward TU, as when they were file-local to forward.cpp); no public header includes the internal header.
+void testForwardSplit() {
+#ifdef WHIRL_SOURCE_DIR
+    const std::filesystem::path root(WHIRL_SOURCE_DIR);
+    const std::string disp = readSource(root / "src/model/forward/dispatch.cpp");
+    const std::string fwd = readSource(root / "src/model/forward.cpp");
+    const std::string hdr = readSource(root / "src/model/forward_internal.h");
+    check(!disp.empty() && !fwd.empty() && !hdr.empty(), "forward split: dispatch.cpp, forward.cpp, forward_internal.h readable");
+    for (const char* fn : {"void Model::mark(", "void Model::gemvLaunch(", "void Model::matmul(", "void Model::gemmF16(",
+                           "ops::GemmFlags Model::gemmFlags(", "bool Model::fused(", "void Model::step("}) {
+        check(disp.find(fn) != std::string::npos && fwd.find(fn) == std::string::npos,
+              std::string("forward split: ") + fn + " defined in forward/dispatch.cpp only");
+    }
+    const std::size_t anon = hdr.find("namespace {"), close = hdr.find("}  // namespace\n");
+    bool inside = anon != std::string::npos && close != std::string::npos && anon < close;
+    for (const char* h : {"constexpr std::size_t ti(", "inline i32 I(", "hip::Dim3 D("}) {
+        const std::size_t p = hdr.find(h);
+        inside = inside && p != std::string::npos && p > anon && p < close;
+    }
+    check(inside, "forward split: ti / I / D inside the anonymous namespace of forward_internal.h (C8)");
+    bool leaked = false;
+    std::error_code ec;
+    for (const auto& e : std::filesystem::recursive_directory_iterator(root / "include", ec))
+        if (e.is_regular_file() && readSource(e.path()).find("forward_internal.h") != std::string::npos) leaked = true;
+    check(!leaked, "forward split: no public header includes forward_internal.h");
 #endif
 }
 
@@ -1641,6 +1693,7 @@ int main() {
     testKvLayout();
     testModelReleaseOrder();
     testDraftWindowRestore();
+    testForwardSplit();
     testBaselineDumps();
     testFloatGemvDispatch();
     testArchWhitelist();

@@ -134,6 +134,18 @@
              "src/kernels_host/kernels_abi.cpp", "include/whirl/numerics.h", "src/common/numerics.cpp"],
    "full": true,
    "manual": ["full release_gate on both GPUs (ARCH-1 3.3)"]
+  },
+  "forward.dispatch": {
+   "id": "F1", "desc": "Model forward matmul dispatch (GEMV / GEMM launches, activation-input choice, fused-path predicates) and the forward sources' internal header",
+   "paths": ["src/model/forward/dispatch.cpp", "src/model/forward_internal.h"], "lands_on": "arch025-f1 (F1)",
+   "steps": ["cpu_model", "st_swift_precise", "st_swift_balance", "st_swift_fast", "st_moe_precise", "st_moe_balance", "st_moe_fast",
+             "golden_swift", "golden_moe", "seq_swift_precise", "seq_swift_balance", "seq_swift_fast", "seq_moe_precise", "seq_moe_balance"],
+   "gpus": {"st_swift_precise": 2, "st_swift_balance": 2, "st_swift_fast": 2, "st_moe_precise": 2, "st_moe_balance": 2, "st_moe_fast": 2,
+            "golden_swift": 2, "golden_moe": 2, "seq_swift_precise": 2, "seq_swift_balance": 2, "seq_swift_fast": 2, "seq_moe_precise": 2,
+            "seq_moe_balance": 2},
+   "manual": ["V-work: launch table under WHIRL_LAUNCH_LOG == S0b (tools/impact/work_equal.py), both GPUs",
+              "V-stage: whirl-stage-bench decode_step / verify / prefill_chunk, golden equal + GPU time in distribution, both GPUs (quiet window)",
+              "I5 host time (no cross-TU inlining without /GL): F8 server chat decode A/B after F7"]
   }
  }
 }
