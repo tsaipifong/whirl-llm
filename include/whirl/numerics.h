@@ -148,6 +148,10 @@ Plan plan(const Request& r, const Target& t);
 // Per-item override from the environment: `forced` = the effective value after the variable.
 // Records "WHIRL_X=v: item on (lossy, user-requested)" or "... item off" when it differs.
 void applyOverride(Plan& p, Item it, const char* var, const std::string& value, bool forced, bool applicable);
+// The same for an item the mode standard allows in fast only (feat027-i8qk-r1: i8qk, int8 attention): in fast it is
+// applyOverride; in precise / balance the switch is ignored (the item stays off) and a note "WHIRL_X=v: ignored ..."
+// is recorded when it asked for the item (not lossy: nothing changes).
+void applyFastOnlyOverride(Plan& p, Item it, const char* var, const std::string& value, bool forced, bool applicable);
 
 // The decode activation form actually used: q8 = int8 (default: q8dec_default). env = the
 // WHIRL_Q8DEC value ("" = unset); a value that changes the mode's default is recorded as an

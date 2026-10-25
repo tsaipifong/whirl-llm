@@ -80,6 +80,11 @@ itself. Cards under 20 GiB only get one server slot and VRAM headroom by default
 
 Items (pick a subset with `--balance=fp8,kvq8` or `--fast=...`; `WHIRL_MODE=balance:fp8,kvq8`):
 
+`--fast=all` is not the same as plain `--fast`: it requests every fast item, including the opt-in ones that a plain
+`--fast` leaves off until their accuracy run passes. On builds with the R9700 int8 attention item `i8qk`,
+`--fast=all` therefore also turns on `i8qk`; earlier builds had no opt-in items, so there `--fast=all` meant
+plain `--fast`. Use plain `--fast` for "the fast mode".
+
 | Item | Mode | What it is | R9700 (gfx1201) | Radeon 8060S (gfx1151) |
 |---|---|---|---|---|
 | `fp8` | balance | MXFP4 dense prefill GEMMs with fp8 (e4m3) activations, incl. the rounding of folded MXFP4 exponents | MXFP4 models | skipped (no fp8 WMMA) |

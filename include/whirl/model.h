@@ -609,6 +609,10 @@ public:
     // feat027-i8qk: int8 Q.K^T prefill attention on the q4 / q8 key-range path (gfx1201; lossy fast item i8qk, opt-in:
     // --fast=...,i8qk or WHIRL_ATTN_I8QK=1 until its task-accuracy run; = num_plan.on(i8qk))
     bool attn_i8qk = false;
+    // feat027-i8qk-r1: the i8 path only from this many keys and queries x keys (ops::kI8qkMinKeys / kI8qkMinWork;
+    // WHIRL_ATTN_I8QK_MIN / WHIRL_ATTN_I8QK_MIN_WORK)
+    std::uint32_t attn_i8qk_min_keys = ops::kI8qkMinKeys;
+    std::uint64_t attn_i8qk_min_work = ops::kI8qkMinWork;
     DevPtr dq_ptab = 0;
     std::uint32_t dq_rows = 0;  // rows ffn_g / ffn_u hold
     // FC-1c: attn_kgs softmax state (m, l per query row and head) between key ranges of a prefill

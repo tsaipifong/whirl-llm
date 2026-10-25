@@ -73,11 +73,19 @@ struct AttnPrefillProblem {
     std::uint32_t dq_rows = 0;    // rows the dequant scratch (ffn_g / ffn_u) holds
     bool dq_ptab = false, dq_st_ml = false;  // the scratch page table / softmax state buffers exist
 };
+// feat027-i8qk-r1: below these the int8 Q.K^T path costs more than it saves (per prefill call: i8k_mean ~0.5 ms [E]
+// fixed + i8k_quant ~4.8 ns per key vs a saving of 10-20 % [E] of ~0.27 ns per query x key of f16 attention on the
+// R9700; break-even ~4.8k keys at 4096 queries, x2 margin -> 8192 keys and 4096 x 8192 queries x keys; derivation
+// in progress\feat027-i8qk-r1.PRIOR_ART.md). Estimates: the GPU run (attnp bench 4k / 8k cells) tunes them.
+inline constexpr std::uint32_t kI8qkMinKeys = 8192;
+inline constexpr std::uint64_t kI8qkMinWork = 4096ull * 8192ull;
 struct AttnPrefillFlags {
     bool attn_kg_on = true, attn_kx_on = true, attn_dqf_on = true;
     std::uint32_t attn_seg = 0;
     // feat027-i8qk: int8 Q.K^T in the FC-1c key-range path (lossy fast item i8qk; Model::attn_i8qk = the plan's i8qk)
     bool attn_i8qk = false;
+    std::uint32_t i8qk_min_keys = kI8qkMinKeys;  // keys (pos0 + n) below which the f16 Q.K^T path stays
+    std::uint64_t i8qk_min_work = kI8qkMinWork;  // n x keys below which the f16 Q.K^T path stays
 };
 // one launch of the plan: what it reads (the cache, or the dequantized copy of keys [r0, r1)) and its geometry
 struct AttnStep {

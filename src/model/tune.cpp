@@ -976,11 +976,20 @@ void loadOrTuneImpl(Model& m, const std::string& model_path, std::string& log) {
         }
         if (const auto v = envGet("SPEC_SAMPLE"); v && !v->empty())
             nu::applyOverride(p, nu::Item::specsample, "SPEC_SAMPLE", *v, *v != "0", t.mtp && t.k_spec_sample);
-        // feat027-i8qk: int8 Q.K^T prefill attention (fast, opt-in: --fast=...,i8qk or WHIRL_ATTN_I8QK=1; in precise /
-        // balance the switch is a lossy user override, flagged as such)
+        // feat027-i8qk: int8 Q.K^T prefill attention (fast only, opt-in: --fast=...,i8qk, --fast=all or
+        // WHIRL_ATTN_I8QK=1). int8 attention is a fast-only technique by the mode standard, so precise / balance never
+        // run it: there WHIRL_ATTN_I8QK is ignored with a note in the numerics line (feat027-i8qk-r1).
         if (const auto v = envGet("ATTN_I8QK"); v && !v->empty())
-            nu::applyOverride(p, nu::Item::i8qk, "ATTN_I8QK", *v, *v != "0", t.k_attn_i8qk);
-        m.attn_i8qk = p.on(nu::Item::i8qk);
+            nu::applyFastOnlyOverride(p, nu::Item::i8qk, "ATTN_I8QK", *v, *v != "0", t.k_attn_i8qk);
+        m.attn_i8qk = p.mode == nu::Mode::fast && p.on(nu::Item::i8qk);
+        // minimum size (segment cost model, feat027-i8qk-r1.PRIOR_ART.md; GPU tunes it): keys / queries x keys
+        if (const auto v = envGet("ATTN_I8QK_MIN"); v && !v->empty())
+            m.attn_i8qk_min_keys = static_cast<std::uint32_t>(std::strtoul(v->c_str(), nullptr, 10));
+        if (const auto v = envGet("ATTN_I8QK_MIN_WORK"); v && !v->empty())
+            m.attn_i8qk_min_work = std::strtoull(v->c_str(), nullptr, 10);
+        if (m.attn_i8qk && (m.attn_i8qk_min_keys != ops::kI8qkMinKeys || m.attn_i8qk_min_work != ops::kI8qkMinWork))
+            p.items[static_cast<std::size_t>(nu::Item::i8qk)].note +=
+                std::format(" [min keys {}, min queries x keys {}]", m.attn_i8qk_min_keys, m.attn_i8qk_min_work);
         nu::noteSwitches(p, [](const char* n) { return envGet(n); });
         m.num_plan = p;
         log += "  " + nu::logLine(p) + "\n";

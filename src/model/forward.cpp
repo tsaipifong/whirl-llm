@@ -693,6 +693,8 @@ void Model::prefillAttn(DevPtr q, const KvArgs& kva, DevPtr out, DevPtr pos, u32
     pf.attn_dqf_on = attn_dqf_on;
     pf.attn_seg = attn_seg;
     pf.attn_i8qk = attn_i8qk;
+    pf.i8qk_min_keys = attn_i8qk_min_keys;
+    pf.i8qk_min_work = attn_i8qk_min_work;
     const ops::AttnPrefillPlan pl = ops::chooseAttnPrefill(pp, pf, k);
     const i32 H = I(cfg.n_head), HKV = I(cfg.n_head_kv), QS = I(2 * cfg.head_dim);
     for (const ops::AttnStep& s : pl.steps) {

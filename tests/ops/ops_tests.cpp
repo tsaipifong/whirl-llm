@@ -467,7 +467,8 @@ void testAttnPrefill() {
 }
 
 // feat027-i8qk: the int8 Q.K^T variant of the FC-1c key-range path. Off (the default, and every precise / balance
-// model: Model sets the flag in fast mode only) the plan is exactly the plan without the i8 kernels; on, each range's
+// model: Model sets the flag in fast mode only - tune.cpp numerics::applyFastOnlyOverride;
+// unit_tests.cpp numerics block feat027-i8qk-r1) the plan is exactly the plan without the i8 kernels; on, each range's
 // dq_rows_r is followed by i8k and walked by attn_kgsi, in ranges of i8Keys rows whose int8 layout fits ffn_g.
 void testAttnPrefillI8qk() {
     ops::AttnPrefillProblem p;
@@ -539,6 +540,30 @@ void testAttnPrefillI8qk() {
     CHECK(ndq == (rows + seg - 1) / seg && ni8 == ndq && nat >= ndq && last_r1 == rows);
     // the Swift R9700 scratch (prefill batch 4096: 139264 rows): ranges of 92160 keys, so 128k keys take 2 ranges
     CHECK(ops::i8Keys(139264, 4, 256) == 92160);
+    // feat027-i8qk-r1: minimum size - below kI8qkMinKeys keys or kI8qkMinWork queries x keys the plan is the f16 one
+    {
+        ops::AttnPrefillProblem s = p;
+        s.pos0 = 0;
+        s.n = 4096;  // 4096 keys < 8192
+        CHECK(same(ops::chooseAttnPrefill(s, f, ki), ops::chooseAttnPrefill(s, ops::AttnPrefillFlags{}, k)));
+        s.pos0 = ops::kI8qkMinKeys - 4096;  // exactly 8192 keys, 4096 x 8192 work: the i8 path
+        const auto at = ops::chooseAttnPrefill(s, f, ki);
+        CHECK(!at.steps.empty() && nameOf(at.steps.back().f) == "attn_kgsi2");
+        s.pos0 = ops::kI8qkMinKeys - 4096 - 1;  // one key short
+        CHECK(same(ops::chooseAttnPrefill(s, f, ki), ops::chooseAttnPrefill(s, ops::AttnPrefillFlags{}, k)));
+        s.n = 512;  // a short chunk on a long context: 512 x 60000 keys < 4096 x 8192
+        s.pos0 = 60000 - 512;
+        CHECK(same(ops::chooseAttnPrefill(s, f, ki), ops::chooseAttnPrefill(s, ops::AttnPrefillFlags{}, k)));
+        s.n = 1024;  // 1024 x 40000 keys >= 4096 x 8192
+        s.pos0 = 40000 - 1024;
+        CHECK(nameOf(ops::chooseAttnPrefill(s, f, ki).steps.back().f) == "attn_kgsi2");
+        ops::AttnPrefillFlags f0 = f;  // the thresholds at 0 (WHIRL_ATTN_I8QK_MIN=0 ..._WORK=0): any size
+        f0.i8qk_min_keys = 0;
+        f0.i8qk_min_work = 0;
+        s.n = 256;
+        s.pos0 = 0;
+        CHECK(nameOf(ops::chooseAttnPrefill(s, f0, ki).steps.back().f) == "attn_kgsi2");
+    }
 }
 
 // ---- MoE (K-4)

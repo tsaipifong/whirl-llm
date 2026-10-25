@@ -300,7 +300,10 @@ AttnPrefillPlan chooseAttnPrefill(const AttnPrefillProblem& p, const AttnPrefill
         // feat027-i8qk (fast mode only, lossy): the same range series with int8 Q.K^T - after each range's f16 copy,
         // i8k_mean + i8k_quant (smoothed per-key int8 K into the rest of ffn_g, ranges of i8Keys rows) and attn_kgsi
         // (rotated q / k only: per-key int8 of unrotated k with outlier channels loses ~4 bits, PRIOR_ART / research note)
-        const Function ksi = !f.attn_i8qk || !p.kv_rot ? nullptr : nps == 6 ? k.attn_kgsi6 : nps == 4 ? k.attn_kgsi4 : nps == 2 ? k.attn_kgsi2 : nullptr;
+        // (feat027-i8qk-r1: and only from i8qk_min_keys keys / i8qk_min_work queries x keys - the pre-pass is a fixed
+        // cost per call that short prompts do not earn back)
+        const bool i8_big = rows >= f.i8qk_min_keys && static_cast<u64>(n) * rows >= f.i8qk_min_work;
+        const Function ksi = !f.attn_i8qk || !p.kv_rot || !i8_big ? nullptr : nps == 6 ? k.attn_kgsi6 : nps == 4 ? k.attn_kgsi4 : nps == 2 ? k.attn_kgsi2 : nullptr;
         const u32 i8_seg = ksi != nullptr && k.i8k_mean != nullptr && k.i8k_quant != nullptr && row_el % 64 == 0 ? i8Keys(p.dq_rows, p.n_head_kv, p.head_dim) : 0;
         if (ks != nullptr && i8_seg != 0) ks = ksi;
         if (ks != nullptr) {

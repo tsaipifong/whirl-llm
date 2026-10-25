@@ -17,7 +17,8 @@
 //   * the per-query factor sq is folded into the exp2 constant (cexp * sq), so the epilogue is one cvt and
 //     one fma per score;
 //   * softmax, f16 P, f16 V (global_load_tr) and the P.V WMMA chain are attn_kg's (SEG variant).
-// Lossy (not bit-identical to attn_kgs): selected only in fast mode with WHIRL_ATTN_I8QK=1 (ops::chooseAttnPrefill).
+// Lossy (not bit-identical to attn_kgs): selected only in fast mode (--fast=...,i8qk / --fast=all / WHIRL_ATTN_I8QK=1;
+// tune.cpp ignores the switch in precise / balance) for >= kI8qkMinKeys keys and rotated q / k (ops::chooseAttnPrefill).
 // Same lane maps as the f16 16x16x16 WMMA (hipfire gemm_hfq4g256_residual_mmq.gfx12.hip:27-40): A / B lane l
 // holds row l % 16, k 8 * (l / 16) .. + 7 as 8 bytes; C lane l holds column l % 16, rows 8 * (l / 16) + v.
 

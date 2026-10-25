@@ -1025,6 +1025,47 @@ void testNumerics() {
         nu::setQ8dec(pd, false, "0");
         CHECK(!pd.q8dec && !pd.lossy_override && pd.overrides.size() == 1 && nu::logLine(pd).find("q8dec (MoE") == std::string::npos);
     }
+    // feat027-i8qk-r1: i8qk (int8 attention) is fast-only by the mode standard - precise and balance never run it,
+    // not by the mode, an item list or WHIRL_ATTN_I8QK (tune.cpp: applyFastOnlyOverride + mode == fast)
+    {
+        nu::Target ti = r97;
+        ti.has_mxfp4 = true;
+        ti.k_attn_i8qk = true;
+        const nu::Request rp = nu::parseMode("precise", "t"), rb = nu::parseMode("balance", "t"), rf = nu::parseMode("fast", "t"),
+                          ra = nu::parseMode("fast:all", "t");
+        // the mode alone
+        CHECK(!nu::plan(rp, ti).on(Item::i8qk) && !nu::plan(rb, ti).on(Item::i8qk) && !nu::plan(rf, ti).on(Item::i8qk));
+        CHECK(nu::plan(ra, ti).on(Item::i8qk));
+        // item lists: precise takes none, balance rejects fast items (incl. all)
+        bool thr_p = false, thr_b = false, thr_ba = false;
+        try { (void)nu::parseMode("precise:i8qk", "t"); } catch (const std::invalid_argument&) { thr_p = true; }
+        try { (void)nu::parseMode("balance:i8qk", "t"); } catch (const std::invalid_argument&) { thr_b = true; }
+        try { (void)nu::parseMode("balance:all", "t"); } catch (const std::invalid_argument&) { thr_ba = true; }
+        CHECK(thr_p && thr_b && thr_ba);
+        // WHIRL_ATTN_I8QK=1 in precise / balance: ignored, item off, label unchanged, note recorded
+        for (const nu::Request* r : {&rp, &rb}) {
+            nu::Plan pl = nu::plan(*r, ti);
+            const bool lossy0 = pl.lossy_override;
+            const std::string label0 = nu::modeLabel(pl);
+            nu::applyFastOnlyOverride(pl, Item::i8qk, "ATTN_I8QK", "1", true, true);
+            CHECK(!pl.on(Item::i8qk) && pl.lossy_override == lossy0 && nu::modeLabel(pl) == label0);
+            CHECK(pl.overrides.size() == 1 && pl.overrides[0].find("WHIRL_ATTN_I8QK=1: ignored (i8qk is a fast-only item") != std::string::npos);
+            CHECK(nu::logLine(pl).find("ignored (i8qk is a fast-only item") != std::string::npos);
+            nu::Plan p0 = nu::plan(*r, ti);  // =0: nothing to note
+            nu::applyFastOnlyOverride(p0, Item::i8qk, "ATTN_I8QK", "0", false, true);
+            CHECK(!p0.on(Item::i8qk) && p0.overrides.empty());
+        }
+        // fast: the switch works both ways (plain fast + =1 -> on; fast:all + =0 -> off); without kernels: off
+        nu::Plan pf = nu::plan(rf, ti);
+        nu::applyFastOnlyOverride(pf, Item::i8qk, "ATTN_I8QK", "1", true, true);
+        CHECK(pf.on(Item::i8qk) && pf.overrides.size() == 1 && pf.overrides[0].find("i8qk on") != std::string::npos);
+        nu::Plan pa = nu::plan(ra, ti);
+        nu::applyFastOnlyOverride(pa, Item::i8qk, "ATTN_I8QK", "0", false, true);
+        CHECK(!pa.on(Item::i8qk));
+        nu::Plan pn = nu::plan(rf, ti);
+        nu::applyFastOnlyOverride(pn, Item::i8qk, "ATTN_I8QK", "1", true, false);
+        CHECK(!pn.on(Item::i8qk));
+    }
     // per-item environment overrides
     {
         nu::Plan p = nu::plan(pre, swift);

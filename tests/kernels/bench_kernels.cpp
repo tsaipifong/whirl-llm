@@ -649,8 +649,8 @@ void benchAttnDecode(Env& e) {
 }
 
 // ---------------------------------------------------------------- attnp (prefill attention, feat027-i8qk)
-// One key range covering all L keys (the FC-1c series with a range >= L): the f16 copy (randn K / V, tiled from one
-// chunk), n = 4096 queries at positions L - n .. L - 1. attn_kgs6 = today's fast-path kernel; attn_kgsi6 = int8
+// One key range covering all L keys (L = 4k / 8k / 32k / 128k; the FC-1c series with a range >= L): the f16 copy
+// (randn K / V, tiled from one chunk), n = 4096 queries at positions L - n .. L - 1. attn_kgs6 = today's fast-path kernel; attn_kgsi6 = int8
 // Q.K^T, the call includes i8k_mean + i8k_quant of the copy (the per-range pre-pass the forward runs).
 // Output check: 2 queries x 2 heads vs exact double attention (attn_kgsi6 with a 5% bound of sum p |v|: lossy).
 void benchAttnPrefill(Env& e) {
@@ -662,7 +662,8 @@ void benchAttnPrefill(Env& e) {
         c.rep.skip("attnp", "bench attn_kgs6", "kernel not in this code object");
         return;
     }
-    const std::vector<int> lens = c.quick ? std::vector<int>{4096, 8192} : std::vector<int>{32768, 131072};
+    // 4k / 8k: the i8 path's fixed pre-pass vs its saving near ops::kI8qkMinKeys (feat027-i8qk-r1)
+    const std::vector<int> lens = c.quick ? std::vector<int>{4096, 8192} : std::vector<int>{4096, 8192, 32768, 131072};
     constexpr std::size_t kChunk = std::size_t{1} << 22;
     std::vector<std::uint16_t> ck(kChunk), cv(kChunk);
     {

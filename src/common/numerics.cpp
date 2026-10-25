@@ -317,6 +317,18 @@ void applyOverride(Plan& p, Item it, const char* var, const std::string& value, 
     }
 }
 
+void applyFastOnlyOverride(Plan& p, Item it, const char* var, const std::string& value, bool forced, bool applicable) {
+    if (p.mode == Mode::fast) {
+        applyOverride(p, it, var, value, forced, applicable);
+        return;
+    }
+    ItemState& s = p.items[static_cast<std::size_t>(it)];
+    s.enabled = false;
+    if (forced)
+        p.overrides.push_back(std::format("WHIRL_{}={}: ignored ({} is a fast-only item; {} never runs it)", var, value, itemName(it),
+                                          modeName(p.mode)));
+}
+
 std::string modeLabel(const Plan& p) {
     std::string l = modeName(p.mode);
     if (p.lossy_override) l += "+overrides";
