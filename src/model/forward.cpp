@@ -1,7 +1,7 @@
 // Model forward: matmul dispatch, attention / DeltaNet / FFN / MoE blocks,
 // prefill, decode, MTP drafting and speculative verify.
 // SPDX-License-Identifier: Apache-2.0
-// Reimplements the WHIRL Zig research prototype's model/qwen35.zig (Model: gemvLaunch .. readHidden).
+// Reimplements the WHIRL Zig research prototype's model/qwen35.zig (Model: gemvLaunch .. readLogits).
 
 #include "whirl/model.h"
 
@@ -1329,10 +1329,6 @@ void Model::mtpBatchStepEx(std::span<const MSeg> segs, u32 r, bool draft) {
     }
 }
 
-void Model::readDraftQ(std::span<i32> dst) {
-    if (draft_qbuf != 0) hip::download(dst.data(), draft_qbuf, dst.size() * 4);
-}
-
 void Model::readCtl(std::span<i32> dst) { hip::download(dst.data(), out_tok, dst.size() * 4); }
 
 // Draft-head logits for the n rows of h into logits: the 2-bit head when
@@ -1363,8 +1359,6 @@ void Model::argmaxRowsEnqueue(u32 n) {
     hip::launch(k.argmax_rows, D(n), D(1024), 0, stream, logits, I(cfg.n_vocab), ctlSlot(ctl_rows));
 }
 
-void Model::verifyEnqueue(u32 next, u32 n_draft, u32 pos0) { verifyEnqueueEx(next, n_draft, std::nullopt, pos0); }
-
 void Model::verifyEnqueueEx(u32 next, u32 n_draft, std::optional<std::span<const u32>> host_drafts, u32 pos0) {
     const u32 n = n_draft + 1;
     if (pos0 + n > max_ctx) throw ModelError("ContextTooLong");
@@ -1393,14 +1387,6 @@ void Model::verifyEnqueueEx(u32 next, u32 n_draft, std::optional<std::span<const
     }
     run(n);
     argmaxRowsEnqueue(n);
-}
-
-Model::Draft Model::readDraft(u32 r) {
-    i32 buf[ctl_words];
-    hip::download(buf, out_tok, sizeof buf);
-    float p;
-    std::memcpy(&p, &buf[ctl_probs + r], 4);
-    return {static_cast<u32>(buf[ctl_drafts + r]), p};
 }
 
 Model::Cycle Model::readCycle(std::span<u32> out, std::span<u32> drafts) {
@@ -1745,15 +1731,6 @@ void Model::prefillWithMtp(std::span<const u32> tokens) {
     }
 }
 
-void Model::prefillWithMtpFrom(std::span<const u32> tokens, u32 pos0, DevPtr prev_hidden) {
-    std::size_t off = 0;
-    while (off < tokens.size()) {
-        const std::size_t n = std::min<std::size_t>(tokens.size() - off, max_batch);
-        prefillMtpChunk(tokens, pos0, off, n, prev_hidden);
-        off += n;
-    }
-}
-
 // One chunk of an MTP prefill: tokens[off .. off + n] at positions pos0 + off
 // .., then the MTP rows pairing each of their trunk hiddens with the following
 // token. The row pairing a chunk's LAST hidden with the next token is not run
@@ -1898,7 +1875,6 @@ u32 Model::argmax() {
 }
 
 void Model::readLogits(std::span<float> dst) { hip::download(dst.data(), logits, dst.size() * 4); }
-void Model::readHidden(std::span<float> dst) { hip::download(dst.data(), x, dst.size() * 4); }
 
 // ---------------------------------------------------------------------------
 // vision: lent prefill scratch, multi-section RoPE rows and image embedding rows

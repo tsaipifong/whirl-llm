@@ -98,7 +98,6 @@ public:
     // (whirl/spec_sample.h layout). Not supported: drafts stay greedy (exact-match acceptance).
     virtual bool draftSampleOk() const { return false; }
     virtual void setDraftSample(std::uint32_t s, const spec::DraftSample& ds) { (void)s, (void)ds; }
-    virtual void readDraftQ(std::span<std::int32_t> dst) { (void)dst; }
     virtual void mtpEnqueue(DevPtr hidden, std::span<const std::uint32_t> tokens, std::uint32_t pos0) = 0;
 
     // ---- sampling: topk_rows over logits rows row0 .. row0 + rows - 1 into

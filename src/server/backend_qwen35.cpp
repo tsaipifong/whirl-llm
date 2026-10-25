@@ -112,7 +112,6 @@ public:
     void setDraftSample(std::uint32_t s, const spec::DraftSample& ds) override {
         if (s < m_.draft_samp.size()) m_.draft_samp[s] = ds;
     }
-    void readDraftQ(std::span<std::int32_t> dst) override { m_.readDraftQ(dst); }
     void mtpEnqueue(DevPtr hidden, std::span<const std::uint32_t> tokens, std::uint32_t pos0) override {
         m_.mtpEnqueue(hidden, tokens, 0, pos0, std::nullopt);
     }

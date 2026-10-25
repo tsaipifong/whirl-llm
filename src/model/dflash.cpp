@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // The math follows llama.cpp's src/models/dflash.cpp and z-lab/dflash (both MIT;
 // written from the formulas in whirl-cloud results/C-23.md and tools/dflash_ref,
-// no code copied). The speculative loops (`--draft dflash`) call it through DFlashDrafter
+// no code copied). The speculative loops (`--draft dflash`) call the Model::dflash* functions
 // (whirl chat / bench) and ServerModel (whirl-server).
 
 #include "whirl/model.h"
@@ -312,17 +312,5 @@ std::vector<u32> Model::dflashDraft(u32 slot, u32 anchor, u32 pos, float p_min, 
     for (i32 i = 0; i < o[0]; ++i) drafts.push_back(static_cast<u32>(o[1 + i]));
     return drafts;
 }
-
-DFlashDrafter::DFlashDrafter(Model& m, u32 slots) : m_(m) { m_.dflashSetup(slots, m_.cap_rows > 0 ? m_.cap_rows : 2048); }
-
-void DFlashDrafter::ingest(u32 slot, u32 row0, u32 n, u32 pos0) {
-    if (m_.cap_buf) m_.dflashIngest(slot, m_.cap_buf, m_.cap_rows, row0, n, pos0);
-}
-
-std::vector<u32> DFlashDrafter::draft(u32 slot, u32 anchor, u32 pos, float p_min, u32 n_min) {
-    return m_.dflashDraft(slot, anchor, pos, p_min, n_min);
-}
-
-void DFlashDrafter::trim(u32 slot, u32 keep) { m_.dflashTrim(slot, keep); }
 
 }  // namespace whirl::qwen35

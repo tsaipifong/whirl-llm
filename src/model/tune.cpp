@@ -1,8 +1,8 @@
-// Prefill GEMM autotune + tune cache, runtime switches, matmul microbenchmarks
+// Prefill GEMM autotune + tune cache, runtime switches
 // and the bitwise self-checks of the GEMV / GEMM / attention kernels.
 // SPDX-License-Identifier: Apache-2.0
 // Reimplements the WHIRL Zig research prototype's model/qwen35.zig (autotuneGemm, writeTune,
-// readTune, matmulsOnly, checkGemvq, checkGemvBitwise, checkPrefillInvariance,
+// readTune, checkGemvq, checkGemvBitwise, checkPrefillInvariance,
 // checkAttnGroups) and gguf_cli.zig (loadOrTune).
 
 #include "whirl/dump.h"
@@ -230,32 +230,6 @@ bool Model::readTune(std::string_view text, std::size_t n_buckets) {
                 m->tune[b] = it->second;
             }
     return true;
-}
-
-void Model::benchMat(const Mat& w, u32 n) {
-    const DevPtr xin = w.ncols == cfg.n_embd ? h : ffn_g;
-    matmul(w, xin, ffn_u, n, false);
-}
-
-std::uint64_t Model::matmulsOnly(u32 n) {
-    u64 bytes = 0;
-    for (const Layer& L : layers)
-        for (const Mat& w : layerMats(L).slice()) {
-            benchMat(w, n);
-            bytes += w.row_bytes * w.nrows;
-        }
-    return bytes;
-}
-
-std::uint64_t Model::matmulsOfType(GgmlType ty, u32 n) {
-    u64 bytes = 0;
-    for (const Layer& L : layers)
-        for (const Mat& w : layerMats(L).slice()) {
-            if (w.ty != ty) continue;
-            benchMat(w, n);
-            bytes += w.row_bytes * w.nrows;
-        }
-    return bytes;
 }
 
 // Per quant type: int8-activation GEMV vs f32 GEMV on one real matrix.

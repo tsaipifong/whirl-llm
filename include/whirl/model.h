@@ -674,7 +674,6 @@ public:
     std::vector<spec::DraftSample> draft_samp;
     DevPtr draft_qbuf = 0;
     bool draftSampleOk() const { return k.draft_sample_rows != nullptr && draft_qbuf != 0; }
-    void readDraftQ(std::span<std::int32_t> dst);
     std::optional<Mat> draft_head;
     std::optional<DevPtr> draft_d2;
     // draft-head vocabulary subset (setDraftVocab): rows of draft_d2 and their token ids on the device
@@ -795,7 +794,6 @@ public:
     void mapPages(std::uint32_t s, std::uint32_t first, std::span<const std::int32_t> phys);
     void setupSeqs(std::uint32_t n, std::uint32_t slot_ctx);
     void selectSeq(std::uint32_t s);
-    DevPtr seqCtl(std::uint32_t s, std::uint32_t word) const;
     void commitSeq(std::uint32_t s);
     void setPending(std::uint32_t s, std::uint32_t rows) { seqs[s].npend = rows; }
     void dropPending(std::uint32_t s) {
@@ -809,7 +807,6 @@ public:
     void forward(std::span<const std::uint32_t> tokens, std::uint32_t pos0);
     void prefill(std::span<const std::uint32_t> tokens, std::uint32_t pos0);
     void prefillWithMtp(std::span<const std::uint32_t> tokens);
-    void prefillWithMtpFrom(std::span<const std::uint32_t> tokens, std::uint32_t pos0, DevPtr prev_hidden);
     void prefillMtpChunk(std::span<const std::uint32_t> tokens, std::uint32_t pos0, std::size_t off, std::size_t n,
                          std::optional<DevPtr> prev_hidden);
     bool canSegment() const;
@@ -819,7 +816,6 @@ public:
     std::uint32_t beginDecode(std::uint32_t n_past);
     std::uint32_t argmax();
     void readLogits(std::span<float> dst);
-    void readHidden(std::span<float> dst);
 
     // ---- speculative decoding
     std::uint32_t mtpForward(DevPtr hidden, std::span<const std::uint32_t> tokens, std::uint32_t pos0, bool want_draft);
@@ -828,18 +824,11 @@ public:
     DevPtr ctlSlot(std::uint32_t word) const;
     DevPtr draftSlot(std::uint32_t r) const { return ctlSlot(ctl_drafts + r); }
     void verify(std::span<const std::uint32_t> tokens, std::uint32_t pos0, std::span<std::uint32_t> out);
-    void verifyEnqueue(std::uint32_t next, std::uint32_t n_draft, std::uint32_t pos0);
     void verifyEnqueueEx(std::uint32_t next, std::uint32_t n_draft, std::optional<std::span<const std::uint32_t>> host_drafts,
                          std::uint32_t pos0);
     std::uint32_t verifyBatchEnqueue(std::span<const VSeg> segs);
-    void mtpBatchStep(std::span<const MSeg> segs, std::uint32_t r) { mtpBatchStepEx(segs, r, true); }
     void mtpBatchStepEx(std::span<const MSeg> segs, std::uint32_t r, bool draft);
     void readCtl(std::span<std::int32_t> dst);
-    struct Draft {
-        std::uint32_t tok;
-        float p;
-    };
-    Draft readDraft(std::uint32_t r);
     struct Cycle {
         std::uint32_t nd = 0;  // drafts kept by the device-side p-min cutoff
         std::array<float, max_small_batch> probs{};
@@ -858,7 +847,6 @@ public:
     // MTP block Q6_K matrices as Q4_K (drafts only).
     void requantMtpQ4();
     enum class DraftHeadKind { q4, d2 };
-    void buildDraftHead() { buildDraftHeadEx(DraftHeadKind::d2); }
     void buildDraftHeadEx(DraftHeadKind kind);
     // Keep only these rows (ascending token ids, see draftVocabIds) of the 2-bit draft head;
     // drafts map back to token ids, the trunk and its output head are untouched. False (and no
@@ -873,8 +861,6 @@ public:
 
     // ---- self-checks and microbenchmarks (bench / selftest)
     MatList layerMats(const Layer& L) const;
-    std::uint64_t matmulsOnly(std::uint32_t n);
-    std::uint64_t matmulsOfType(GgmlType ty, std::uint32_t n);
     bool checkGemvq(std::string& log);
     bool checkGemvBitwise(std::string& log);
     bool checkPrefillInvariance(std::string& log);
@@ -948,7 +934,6 @@ private:
     std::uint64_t pendPtr(const Seq& sq, std::size_t i, bool conv) const;
     void gdnChunked(std::size_t i, DevPtr conv_o, DevPtr alpha_b, DevPtr beta_b, DevPtr out, std::uint32_t n, float scale);
     void gdnScan(std::size_t i, DevPtr conv_o, DevPtr alpha_b, DevPtr beta_b, DevPtr out, std::uint32_t n, float scale);
-    void benchMat(const Mat& w, std::uint32_t n);
     std::vector<Mat*> tuneMats(Layer& L);
     // vision helpers (forward.cpp)
     bool visAny() const;
@@ -1094,7 +1079,6 @@ public:
     void observe(const CycleFeat& x, float ms);
     float predict(const CycleFeat& x) const;
     std::uint32_t samples() const { return n_obs; }
-    const std::array<double, n_par>& params() const { return th; }
 
 private:
     static std::array<double, n_par> feat(const CycleFeat& x);
@@ -1150,22 +1134,6 @@ struct AllocResult {
 // or acceptances so close that u is already optimal.
 AllocResult allocDrafts(std::span<const AllocSlot> slots, const CycleCost& cost, AllocBudget budget, std::uint32_t uniform,
                         std::span<const std::uint32_t> prev, float x = 0.03f);
-
-class Model;
-// The DFlash2 drafter's interface for the speculative loop (`--draft dflash`): features come from
-// the target's hidden capture (Model::enableCapture), one draft block per call.
-class DFlashDrafter {
-public:
-    DFlashDrafter(Model& m, std::uint32_t slots);
-    // after a target forward: rows row0 .. row0 + n - 1 of its capture are positions pos0 ..
-    void ingest(std::uint32_t slot, std::uint32_t row0, std::uint32_t n, std::uint32_t pos0);
-    std::vector<std::uint32_t> draft(std::uint32_t slot, std::uint32_t anchor, std::uint32_t pos, float p_min = 0,
-                                     std::uint32_t n_min = 0);
-    void trim(std::uint32_t slot, std::uint32_t keep);
-
-private:
-    Model& m_;
-};
 
 class Ngram {
 public:

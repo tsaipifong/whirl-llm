@@ -963,8 +963,6 @@ void Model::selectSeq(u32 s) {
     ctl_off = s * ctl_words;
 }
 
-DevPtr Model::seqCtl(u32 s, u32 word) const { return out_tok + 4 * (static_cast<u64>(s) * ctl_words + word); }
-
 void Model::restoreSeqSnapshot(u32 s, u32 set) {
     const Seq& sq = seqs[s];
     for (u32 i = 0; i < cfg.n_layer; ++i) {
