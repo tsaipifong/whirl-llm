@@ -172,6 +172,10 @@ struct SlotData : SlotPrefix, SlotTier {
     // v0.2.2.2 memory governor: the checkpoint buffers were freed (VRAM back to Windows); the slot takes no new
     // request until they are restored
     bool parked = false;
+    // PRECISE-IDLE: the slot's last reply may be re-prefilled while the server is idle (set at the end of a request,
+    // cleared when the slot is used again, its cache dropped, or the re-prefill ends); pidle_t: when it was set
+    bool pidle_want = false;
+    TimePoint pidle_t{};
 
     std::uint64_t reqId() const { return job ? job->id : 0; }
 };
@@ -262,6 +266,14 @@ struct EngineOptions {
     // new prompt's chunk schedule and produced by prefill (never 'gen-end', whose history came from the decode /
     // verify kernels). Off (balance / fast): the longest checkpoint, as before. WHIRL_COLD_RESUME=0/1 overrides.
     bool cold_resume = false;
+    // PRECISE-IDLE (feat026-pidle; only with cold_resume): after a reply, while no request runs or waits, the slot's
+    // prompt + reply are prefilled again on the cold chunk schedule from a cold-exact checkpoint, one chunk per
+    // forward, and a 'prefix' checkpoint is kept at the start of the last chunk (server/precise_idle.h); a request
+    // that arrives stops it after the forward in flight. precise_idle_ms: idle time after the reply before it starts.
+    // WHIRL_PRECISE_IDLE=0/1, WHIRL_PRECISE_IDLE_MS override. The server turns it on (server_main); off here, so an
+    // engine built without asking for it (the CPU tests of everything else) behaves as before.
+    bool precise_idle = false;
+    std::uint32_t precise_idle_ms = 200;
     bool seg_prefill = true;
     bool timing_reset = true;
     bool ngram = true;
@@ -402,6 +414,15 @@ public:
     // statistics for tests (Stats: EngineApi)
     Stats stats() const;
     Stats statsShared() const override;
+    // PRECISE-IDLE counters (any thread): re-prefills started / finished (checkpoint kept) / stopped by a request
+    // (cancelled; a checkpoint at the last finished chunk is kept when one ran) / planned but nothing to do (skipped),
+    // rows prefilled by them
+    struct PidleStats {
+        std::uint64_t started = 0, done = 0, cancelled = 0, skipped = 0, rows = 0;
+    };
+    PidleStats pidleStats() const {
+        return {pidle_started_.load(), pidle_done_.load(), pidle_cancelled_.load(), pidle_skipped_.load(), pidle_rows_.load()};
+    }
 
 private:
     // checkpoints
@@ -465,6 +486,13 @@ private:
     void flushTierOnStop();
     void releaseSlot(Slot& sl);
     void failSlot(Slot& sl, const std::string& err);
+    // PRECISE-IDLE (engine_pidle.cpp): pidleMark at the end of a request; in runLoop's idle wait: pidleStep runs one
+    // chunk (true: it ran one), pidleDue is when a marked slot may start; pidleCancel when a request arrives
+    bool pidleOn() const;
+    void pidleMark(Slot& sl);
+    bool pidleStep();
+    std::optional<TimePoint> pidleDue() const;
+    void pidleCancel();
     // FR-SRV P2-2: queued / running requests whose client disconnected end (slot freed)
     void reapDisconnected();
     // FR-SRV P2-3: pool pages a prompt of n_tok tokens needs; pages free or evictable now minus
@@ -608,6 +636,18 @@ private:
     std::uint64_t stat_evictions_ = 0;
     // vision
     VisionConfig vis_cfg_;
+    // PRECISE-IDLE: the re-prefill in progress (main thread) and the counters (pidleStats)
+    struct PidleJob {
+        bool active = false;
+        std::uint32_t slot = 0;
+        std::uint32_t from = 0, to = 0, cur = 0;
+        std::size_t last_n = 0;               // rows of the last forward (its last hidden row: the MTP row at cur)
+        std::vector<std::uint32_t> toks;      // the slot's cached tokens when it started
+        std::uint32_t sys = 0;
+        std::vector<std::uint32_t> imgs;
+        TimePoint t0{};
+    } pidle_;
+    std::atomic<std::uint64_t> pidle_started_{0}, pidle_done_{0}, pidle_cancelled_{0}, pidle_skipped_{0}, pidle_rows_{0};
     std::vector<std::unique_ptr<EmbEntry>> emb_cache_;
     std::uint64_t emb_bytes_ = 0;
     std::uint64_t emb_seq_ = 0;

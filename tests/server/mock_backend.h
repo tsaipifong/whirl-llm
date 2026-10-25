@@ -55,6 +55,10 @@ struct MockConfig {
     // split off the cold chunk schedule rounds differently; the greedy reference never splits, so
     // any off-grid prefill split shows up as a changed output
     std::uint32_t sched_grid = 0;
+    // feat026-pidle: KV rows a verify (decode) writes are marked, and a prefill forward whose history below its
+    // start holds a marked row perturbs the recurrent state, like a GPU prefill over decode-produced history
+    // (gen-end reuse: numerically equivalent, not bitwise the cold prefill's). The decode itself is unchanged.
+    bool decode_mark = false;
     // DFlash2 drafter (--draft dflash): block size, capture rows, probability that a draft is wrong
     bool dflash = false;
     std::uint32_t dfl_block = 8;
@@ -160,6 +164,8 @@ public:
     // Hidden rows consumed with the wrong position (MTP bookkeeping).
     std::uint64_t hidMismatch() const { return hid_mismatch_.load(); }
     std::uint64_t rowsRun() const { return rows_run_; }
+    // decode_mark: prefill forwards that ran over verify-written history
+    std::uint64_t decPrefills() const { return dec_prefills_.load(); }
     // most rows of one prefill forward so far (like Model::forward, more than max_batch throws BatchTooLarge)
     std::uint32_t maxPrefillRows() const { return max_pf_rows_.load(); }
 
@@ -186,7 +192,8 @@ private:
     static std::uint64_t mix(std::uint64_t h, std::uint64_t a, std::uint64_t b);
     std::uint64_t readH(const Seq& s) const;
     void writeH(Seq& s, std::uint64_t h);
-    void writeKv(Seq& s, std::uint32_t pos, std::uint32_t tok, std::uint64_t h);
+    void writeKv(Seq& s, std::uint32_t pos, std::uint32_t tok, std::uint64_t h, bool dec = false);
+    bool decodedBelow(const Seq& s, std::uint32_t pos) const;
     // fold of KV rows [0, pos) of sequence s (validated)
     std::uint64_t kvPrefix(const Seq& s, std::uint32_t pos) const;
     static std::uint64_t kvRow(std::uint32_t tok, std::uint32_t pos, std::uint64_t h);
@@ -231,6 +238,7 @@ private:
     std::atomic<std::uint32_t> max_pf_rows_{0};
     mutable std::atomic<std::uint64_t> hid_mismatch_{0};
     std::uint64_t rows_run_ = 0;
+    std::atomic<std::uint64_t> dec_prefills_{0};
     std::vector<std::uint32_t> seg_logits_rows_;
     // replay off: snapshot sets (sequence, recurrent hash after that verify row)
     struct Snap {

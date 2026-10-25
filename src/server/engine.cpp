@@ -363,6 +363,9 @@ void Engine::dropCache(Slot& sl) {
     for (Ckpt& c : sl.ckpts) c.valid = false;
     sl.cache_tokens.clear();
     dflReset(sl, 0);
+    // PRECISE-IDLE: nothing left to re-prefill (a re-prefill of this slot in progress ends without a checkpoint)
+    sl.pidle_want = false;
+    if (pidle_.active && pidle_.slot == sl.id) pidle_.active = false;
 }
 
 // ---------------------------------------------------------------------------
@@ -923,6 +926,7 @@ bool Engine::startJob(Slot& sl, Job& job) {
     const auto& cfg = m_.cfg();
     sl.job = &job;
     sl.last_used = ps_.cache().touch();
+    sl.pidle_want = false;  // PRECISE-IDLE: the slot is in use again
     // (v0.2.2.2: ctxForNew = the context per request, lowered by the memory governor for new requests only)
     const std::uint32_t ctx_new = ctxForNew();
     if (N + nd_max + 2 >= ctx_new || static_cast<std::uint64_t>(N) + nd_max + 2 >= static_cast<std::uint64_t>(pool_.pages()) * kv_page) {
@@ -2167,6 +2171,8 @@ void Engine::finishJob(Slot& sl) {
     } catch (const std::exception& ex) {
         logW("slot {} | kv tier: spill failed: {} ({})", sl.id, ex.what(), ops_.lastErrorString());
     }
+    // PRECISE-IDLE: the reply may be re-prefilled once the server is idle (runLoop)
+    pidleMark(sl);
 }
 
 // ---------------------------------------------------------------------------
@@ -2555,6 +2561,15 @@ void Engine::runLoop() {
                     lk.lock();
                     if (!queue_.empty() || stop_) continue;
                 }
+                // PRECISE-IDLE hook: one chunk of the background re-prefill of the last reply (one forward; a request
+                // that arrives meanwhile ends this wait and pidleCancel below stops it)
+                bool pidle_ran = false;
+                if (pidleOn()) {
+                    lk.unlock();
+                    pidle_ran = pidleStep();
+                    lk.lock();
+                    if (!queue_.empty() || stop_) continue;
+                }
                 if (tb_.tier() != nullptr) {
                     const std::uint64_t seq = wake_seq_;
                     lk.unlock();
@@ -2570,11 +2585,14 @@ void Engine::runLoop() {
                         // tier work in flight: polled every 5 ms, but a request (or the
                         // tier IO thread) ends the wait at once (a sleep here delayed a
                         // request by up to one Windows timer tick, 10-16 ms)
-                        q_cond_.wait_for(lk, std::chrono::milliseconds(5),
-                                         [&] { return wake_seq_ != seq || !queue_.empty() || stop_ || !loop_calls_.empty(); });
+                        // (PRECISE-IDLE: no wait while its chunks run)
+                        if (!pidle_ran)
+                            q_cond_.wait_for(lk, std::chrono::milliseconds(5),
+                                             [&] { return wake_seq_ != seq || !queue_.empty() || stop_ || !loop_calls_.empty(); });
                         continue;
                     }
                 }
+                if (pidle_ran) continue;  // PRECISE-IDLE: the next chunk
                 // vision: while the encoder is loaded, wake every 100 ms for its idle timeout
                 // (a timed wait on the queue condition, not a sleep: a request that arrives
                 // meanwhile starts at once; the prototype slept 100 ms here)
@@ -2592,6 +2610,7 @@ void Engine::runLoop() {
                 if (tb_.tier() != nullptr) wake = tb_.tier()->nextWake();
                 if (const auto idle_due = tb_.idleDue(); idle_due && (!wake || *idle_due < *wake)) wake = idle_due;  // TIER-IDLE
                 if (vram_due && (!wake || *vram_due < *wake)) wake = *vram_due;  // WDDM-LOG idle sample
+                if (const auto pd = pidleDue(); pd && (!wake || *pd < *wake)) wake = pd;  // PRECISE-IDLE start
                 if (wake) {
                     // an SSD write is due at a known time, the periodic SSD expiry check, or the idle write: wake
                     // then (re-checked every minute)
@@ -2602,6 +2621,8 @@ void Engine::runLoop() {
                 }
             }
             // a request arrived: the idle period ends, an idle write stops starting new entries (TIER-IDLE)
+            // PRECISE-IDLE: a re-prefill in progress stops (before any slot is picked)
+            pidleCancel();
             tb_.idleActivity();
             if (tb_.tier() != nullptr) tb_.tier()->endIdleWrite();
             stat_t0_ = Clock::now();

@@ -14,6 +14,7 @@
 #include "server/engine_thread.h"
 #include "server/http.h"
 #include "server/log.h"
+#include "server/precise_idle.h"
 #include "server/prefix_store.h"
 #include "server/protocol.h"
 #include "server/tier_bridge.h"
@@ -1927,6 +1928,9 @@ void testTailCkRegression() {
         }
     }
 }
+
+// feat026-pidle: PRECISE-IDLE (testPidle*)
+#include "pidle_tests.inc"
 
 // --draft dflash: no MTP block, DFlash2 drafts (mock drafter: the true continuation from the
 // context row before the anchor, wrong with probability dfl_miss)
@@ -7700,6 +7704,12 @@ int main(int argc, char** argv) {
         {"prefill_sched", testPrefillSchedule},
         {"cli_sched_helpers", testCliSchedHelpers},
         {"tail_ck_regress", testTailCkRegression},
+        {"pidle_plan", testPidlePlan},
+        {"pidle_engine", testPidleEngine},
+        {"pidle_guard_bites", testPidleGuardBites},
+        {"pidle_balance_unchanged", testPidleBalanceUnchanged},
+        {"pidle_cancel", testPidleCancel},
+        {"pidle_only_when_safe", testPidleOnlyWhenSafe},
         {"concurrency", [] { testConcurrency(4, 12, true); }},
         {"concurrency16", [] { testConcurrency(16, 24, true); }},
         {"concurrency_nomtp", [] { testConcurrency(4, 8, false); }},

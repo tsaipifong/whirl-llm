@@ -33,6 +33,8 @@ constexpr std::uint64_t kH0 = 0x5EED5EED12345678ull;
 constexpr std::uint64_t kSaltC = 0x9E3779B97F4A7C15ull;
 constexpr std::uint64_t kSaltS = 0xC2B2AE3D27D4EB4Full;
 constexpr std::uint32_t kKRow = 24;  // u32 tok, u32 pos, u64 h, u64 salt
+// MockConfig::decode_mark: the salt of a KV row written by a verify (decode) carries this mark
+constexpr std::uint64_t kDecMark = 0xD0DEC0DE5A17ull;
 constexpr std::uint32_t kVRow = 8;   // u64 h ^ ~layer
 constexpr std::uint32_t kPage = qwen35::kv_page;
 
@@ -194,7 +196,7 @@ void MockModel::writeH(Seq& s, std::uint64_t h) {
     }
 }
 
-void MockModel::writeKv(Seq& s, std::uint32_t pos, std::uint32_t tok, std::uint64_t h) {
+void MockModel::writeKv(Seq& s, std::uint32_t pos, std::uint32_t tok, std::uint64_t h, bool dec) {
     const std::uint32_t pg = pos / kPage;
     if (pg >= s.ptab.size() || s.ptab[pg] < 0 || static_cast<std::uint32_t>(s.ptab[pg]) >= pool_pages_) {
         poison_ += 1;  // write to an unmapped page
@@ -207,7 +209,7 @@ void MockModel::writeKv(Seq& s, std::uint32_t pos, std::uint32_t tok, std::uint6
         std::memcpy(k, &tok, 4);
         std::memcpy(k + 4, &pos, 4);
         std::memcpy(k + 8, &h, 8);
-        const std::uint64_t salt = h ^ (a * kSaltC);
+        const std::uint64_t salt = h ^ (a * kSaltC) ^ (dec ? kDecMark : 0);
         std::memcpy(k + 16, &salt, 8);
         const std::uint64_t v = h ^ ~static_cast<std::uint64_t>(a);
         std::memcpy(at<std::uint8_t>(vc_[a]) + row * kVRow, &v, 8);
@@ -235,7 +237,9 @@ std::uint64_t MockModel::kvPrefix(const Seq& s, std::uint32_t pos) const {
             std::memcpy(&h, k + 8, 8);
             std::memcpy(&salt, k + 16, 8);
             std::memcpy(&v, at<const std::uint8_t>(vc_[a]) + row * kVRow, 8);
-            if (pp != p || salt != (h ^ (a * kSaltC)) || v != (h ^ ~static_cast<std::uint64_t>(a))) bad = true;
+            if (pp != p || (salt != (h ^ (a * kSaltC)) && salt != (h ^ (a * kSaltC) ^ kDecMark)) ||
+                v != (h ^ ~static_cast<std::uint64_t>(a)))
+                bad = true;
             if (a == 0) {
                 tok0 = t;
                 pos0 = pp;
@@ -251,6 +255,20 @@ std::uint64_t MockModel::kvPrefix(const Seq& s, std::uint32_t pos) const {
         kv ^= 0xBADC0FFEEull;
     }
     return kv;
+}
+
+bool MockModel::decodedBelow(const Seq& s, std::uint32_t pos) const {
+    for (std::uint32_t p = 0; p < pos; ++p) {
+        const std::uint32_t pg = p / kPage;
+        if (pg >= s.ptab.size() || s.ptab[pg] < 0 || static_cast<std::uint32_t>(s.ptab[pg]) >= pool_pages_) return false;
+        const std::uint64_t row = static_cast<std::uint64_t>(s.ptab[pg]) * kPage + p % kPage;
+        const std::uint8_t* k = at<const std::uint8_t>(kc_[0]) + row * kKRow;
+        std::uint64_t h, salt;
+        std::memcpy(&h, k + 8, 8);
+        std::memcpy(&salt, k + 16, 8);
+        if (salt == (h ^ kDecMark)) return true;  // attention array 0: a * kSaltC = 0
+    }
+    return false;
 }
 
 std::uint32_t MockModel::nextToken(std::uint64_t h, std::uint64_t kv) const {
@@ -327,6 +345,11 @@ void MockModel::prefillOne(std::uint32_t si, std::span<const std::uint32_t> toks
         if (readHidden(*prev_hidden).pos != pos0 - 1) hid_mismatch_ += 1;
     }
     if (mc_.sched_grid > 0 && pos0 % mc_.sched_grid != 0 && !toks.empty()) writeH(s, mix(readH(s), 0x7a11c0ffeeull, pos0));
+    // decode_mark: a prefill over history that a verify wrote is not the cold prefill's (gen-end reuse)
+    if (mc_.decode_mark && pos0 > 0 && !toks.empty() && decodedBelow(s, pos0)) {
+        writeH(s, mix(readH(s), 0xdec0dedull, pos0));
+        dec_prefills_ += 1;
+    }
     const State st = runRows(s, toks, pos0, r0, true);
     writeLogits(logits_row, st.h, st.kv);
     if (mtp && !toks.empty()) {
@@ -487,7 +510,7 @@ std::uint32_t MockModel::verifyBatchEnqueue(std::span<const server::VSeg> segs) 
         for (std::size_t i = 0; i < toks.size(); ++i) {
             const std::uint32_t p = sg.pos + static_cast<std::uint32_t>(i);
             st.h = stepH(st.h, toks[i], p);
-            writeKv(s, p, toks[i], st.h);
+            writeKv(s, p, toks[i], st.h, mc_.decode_mark);
             st.kv = mix(st.kv, kvRow(toks[i], p, st.h), p);
             st.pos = p;
             writeHidden(hn_ + (row + i) * E * 4, st);

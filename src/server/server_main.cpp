@@ -1329,6 +1329,9 @@ int serveMain(int argc, char** argv, const char* program) {
         eo.lcp_on = envOn("SYS_LCP", true);
         eo.n_ck = n_ck;
         eo.tail_ck = envOn("TAIL_CK", true);  // debug knob: WHIRL_TAIL_CK=0 turns the tail checkpoint off
+        // PRECISE-IDLE (feat026-pidle): background re-prefill of the last reply in --precise (WHIRL_PRECISE_IDLE=0: off)
+        eo.precise_idle = envOn("PRECISE_IDLE", true);
+        if (env("PRECISE_IDLE_MS")) eo.precise_idle_ms = envU32("PRECISE_IDLE_MS", 200);
         eo.n_spe = (n_ck == 0 || no_pc) ? 0 : n_spe_plan;
         eo.ckpt_host = envOn("CKPT_HOST", false);
         eo.prefill_exec = prefill_exec;
@@ -1744,6 +1747,10 @@ int serveMain(int argc, char** argv, const char* program) {
             logI("prefix cache: cold-exact resume (precise): a request resumes only at a checkpoint on its own chunk schedule "
                  "that prefill produced (never the end of a generated reply), so its output is bitwise the cold run's; a next "
                  "turn re-prefills from the previous prompt's last schedule point (WHIRL_COLD_RESUME=0: longest checkpoint)");
+        if (!no_pc && eo.cold_resume && eo.precise_idle && !eo.use_dflash)
+            logI("prefix cache: precise idle re-prefill on: {} ms after a reply, while no request runs, the reply is prefilled again "
+                 "on the cold schedule so the next turn resumes near its end (WHIRL_PRECISE_IDLE=0: off)",
+                 eo.precise_idle_ms);
         if (!no_pc) {
             if (!eo.tail_ck)
                 logW("prefix cache: tail checkpoint off (WHIRL_TAIL_CK=0, debug override): a second question about the same long "
