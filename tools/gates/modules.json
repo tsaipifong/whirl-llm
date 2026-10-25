@@ -193,6 +193,57 @@
               "V-srv: server golden + srv_mt + parallel-4 launch table == S0b B2 whitelist, both GPUs (gdnSegsBatch is the multi-sequence path)",
               "V-stage: whirl-stage-bench layer.gdn at n=1, verify and prefill_chunk, golden equal + GPU time in distribution, both GPUs (quiet window)",
               "I5 host time (no cross-TU inlining without /GL): F8 server chat decode A/B after F7"]
+  },
+  "forward.run": {
+   "id": "F4a", "desc": "Model forward drivers: Model::forward, the device-resident decode step (decodeStep / decodeStepLaunches / beginDecode), the layer loop Model::run (attention / DeltaNet / FFN per layer, head) and lendScratch (prefill scratch lent to the vision encoder); every decode, prefill, verify and server path runs Model::run",
+   "paths": ["src/model/forward/run.cpp"], "lands_on": "arch025-f4 (F4)",
+   "steps": ["cpu_model", "st_swift_precise", "st_swift_balance", "st_swift_fast", "st_moe_precise", "st_moe_balance", "st_moe_fast",
+             "golden_swift", "golden_moe", "seq_swift_precise", "seq_swift_balance", "seq_swift_fast", "seq_moe_precise", "seq_moe_balance",
+             "srv_mt_precise", "srv_mt_precise_moe", "srv_cache_balance"],
+   "gpus": {"st_swift_precise": 2, "st_swift_balance": 2, "st_swift_fast": 2, "st_moe_precise": 2, "st_moe_balance": 2, "st_moe_fast": 2,
+            "golden_swift": 2, "golden_moe": 2, "seq_swift_precise": 2, "seq_swift_balance": 2, "seq_swift_fast": 2, "seq_moe_precise": 2,
+            "seq_moe_balance": 2, "srv_mt_precise": 2, "srv_mt_precise_moe": 2, "srv_cache_balance": 1},
+   "manual": ["V-work: launch table under WHIRL_LAUNCH_LOG == S0b (tools/impact/work_equal.py), both GPUs",
+              "V-srv: server golden + srv_mt + parallel-4 launch table == S0b B2 whitelist, both GPUs",
+              "V-stage: whirl-stage-bench decode_step / verify / prefill_chunk, golden equal + GPU time in distribution, both GPUs (quiet window)",
+              "I5 host time (no cross-TU inlining without /GL): F8 server chat decode A/B after F7"]
+  },
+  "forward.mtp_verify": {
+   "id": "F4b", "desc": "Model forward MTP drafting and speculative verify: token upload (setTokens / setTokensDev / ctlSlot), the MTP block (mtpForward / mtpEnqueue / mtpBatchStepEx), DFlash2 layer-input capture, batched and single verify (verifyBatchEnqueue / verifyEnqueueEx / verify), the replay commit commitSeq, snapshot restore, draft-head logits and argmax / cycle readback",
+   "paths": ["src/model/forward/mtp_verify.cpp"], "lands_on": "arch025-f4 (F4)",
+   "steps": ["cpu_model", "st_swift_precise", "st_swift_balance", "st_swift_fast", "st_moe_precise", "st_moe_balance", "st_moe_fast",
+             "golden_swift", "golden_moe", "seq_swift_precise", "seq_swift_balance", "seq_swift_fast", "seq_moe_precise", "seq_moe_balance",
+             "srv_mt_precise", "srv_mt_precise_moe", "srv_cache_balance"],
+   "gpus": {"st_swift_precise": 2, "st_swift_balance": 2, "st_swift_fast": 2, "st_moe_precise": 2, "st_moe_balance": 2, "st_moe_fast": 2,
+            "golden_swift": 2, "golden_moe": 2, "seq_swift_precise": 2, "seq_swift_balance": 2, "seq_swift_fast": 2, "seq_moe_precise": 2,
+            "seq_moe_balance": 2, "srv_mt_precise": 2, "srv_mt_precise_moe": 2, "srv_cache_balance": 1},
+   "manual": ["V-work: launch table under WHIRL_LAUNCH_LOG == S0b (tools/impact/work_equal.py), both GPUs",
+              "V-srv: server golden + srv_mt + parallel-4 launch table == S0b B2 whitelist, both GPUs (verifyBatchEnqueue / mtpBatchStepEx / commitSeq are the multi-sequence path)",
+              "V-stage: whirl-stage-bench verify, golden equal + GPU time in distribution, both GPUs (quiet window)",
+              "I5 host time (no cross-TU inlining without /GL): F8 server chat decode A/B after F7 (server verify does not use graph replay)"]
+  },
+  "forward.prefill": {
+   "id": "F4c", "desc": "Model forward prefill drivers: prefill with MTP (prefillWithMtp / prefillMtpChunk, FIX-FS chunk boundary row), segmented multi-sequence prefill (canSegment / prefillSegs / segLogitsToFront), plain prefill, argmax and logits readback",
+   "paths": ["src/model/forward/prefill.cpp"], "lands_on": "arch025-f4 (F4)",
+   "steps": ["cpu_model", "st_swift_precise", "st_swift_balance", "st_swift_fast", "st_moe_precise", "st_moe_balance", "st_moe_fast",
+             "golden_swift", "golden_moe", "seq_swift_precise", "seq_swift_balance", "seq_swift_fast", "seq_moe_precise", "seq_moe_balance",
+             "srv_mt_precise", "srv_mt_precise_moe", "srv_cache_balance"],
+   "gpus": {"st_swift_precise": 2, "st_swift_balance": 2, "st_swift_fast": 2, "st_moe_precise": 2, "st_moe_balance": 2, "st_moe_fast": 2,
+            "golden_swift": 2, "golden_moe": 2, "seq_swift_precise": 2, "seq_swift_balance": 2, "seq_swift_fast": 2, "seq_moe_precise": 2,
+            "seq_moe_balance": 2, "srv_mt_precise": 2, "srv_mt_precise_moe": 2, "srv_cache_balance": 1},
+   "manual": ["V-work: launch table under WHIRL_LAUNCH_LOG == S0b (tools/impact/work_equal.py), both GPUs",
+              "V-srv: server golden + srv_mt + parallel-4 launch table == S0b B2 whitelist, both GPUs (prefillSegs is the multi-sequence prefill)",
+              "V-stage: whirl-stage-bench prefill_chunk, golden equal + GPU time in distribution, both GPUs (quiet window)"]
+  },
+  "forward.vision_rows": {
+   "id": "F4d", "desc": "Model forward vision rows: per-sequence image maps (visAny / visOf / visBegin / visEnsure / visRelease), multi-section RoPE row positions (visRow / visCommit / visRowsCur) and the image embedding rows copied into x (injectRows)",
+   "paths": ["src/model/forward/vision_rows.cpp"], "lands_on": "arch025-f4 (F4)",
+   "steps": ["cpu_model", "cpu_vision", "st_swift_precise", "golden_swift", "vis_ab", "srv_vis"],
+   "gpus": {"st_swift_precise": 2, "golden_swift": 2, "vis_ab": 1, "srv_vis": 1},
+   "pending": [{"step": "vis_ab", "lands_in": "arch025-Q6 (tools/gates/vis_ab.ps1)"},
+               {"step": "srv_vis", "lands_in": "arch025-Q6 (server-gate suite vis)"}],
+   "manual": ["visab one GPU: base exe vs new exe, vis-encode resident / stream and chat --image (WHIRL_VIS_DUMP) embeddings byte-identical, answer text identical",
+              "V-work: launch table under WHIRL_LAUNCH_LOG == S0b (text rows: visRowsCur / visCommit run on every forward)"]
   }
  }
 }

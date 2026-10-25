@@ -48,7 +48,7 @@ gfx1151（Radeon 8060S）：`gfx1151` 分支上為預覽版（結果正確、尚
 |---|---|---|
 | 模型 API | `include/whirl/model.h` | kernel 參數結構 / kernel 表使用 `kernels_abi.h` 的唯一定義 |
 | 權重載入 | `src/model/loader.cpp`、`config.cpp` | `general.architecture` 只收 `qwen35` / `qwen35moe`（其他 `UnsupportedArch`）、無 kernel 的 tensor 型別 `UnsupportedTensorType`、MXFP4 重排、Q4 MTP requant、draft head、KV pool（f16 / q8 / q8h / q8v、`WHIRL_KV`）、序列 / 頁表 / 快照 / replay |
-| forward | `src/model/forward.cpp` | prefill（分段、chunk、多請求 segmented）、decode（融合 kernel、grouped GEMV、HIP graph）、MTP draft / verify、MoE、vision 掛鉤 |
+| forward | `src/model/forward/*.cpp` | prefill（分段、chunk、多請求 segmented）、decode（融合 kernel、grouped GEMV、HIP graph）、MTP draft / verify、MoE、vision 掛鉤 |
 | autotune | `src/model/tune.cpp` | 11 個 batch bucket，快取 `%LOCALAPPDATA%\whirl\tune4-*.txt`；bitwise 自檢 |
 | 推測解碼策略 | `src/model/spec.cpp` | MTP 草稿數成本模型、n-gram co-drafting |
 | CLI | `src/cli/main.cpp` | `whirl chat` / `bench` / `selftest` / `seqtest` / `devices`；`WHIRL_*` 環境變數見 `docs/usage.md` |

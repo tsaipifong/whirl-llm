@@ -22,7 +22,10 @@ if(WHIRL_WITH_HIP)
     ${CMAKE_SOURCE_DIR}/src/model/config.cpp
     ${CMAKE_SOURCE_DIR}/src/model/kernels.cpp
     ${CMAKE_SOURCE_DIR}/src/model/loader.cpp
-    ${CMAKE_SOURCE_DIR}/src/model/forward.cpp
+    ${CMAKE_SOURCE_DIR}/src/model/forward/run.cpp
+    ${CMAKE_SOURCE_DIR}/src/model/forward/mtp_verify.cpp
+    ${CMAKE_SOURCE_DIR}/src/model/forward/prefill.cpp
+    ${CMAKE_SOURCE_DIR}/src/model/forward/vision_rows.cpp
     ${CMAKE_SOURCE_DIR}/src/model/forward/dispatch.cpp
     ${CMAKE_SOURCE_DIR}/src/model/forward/attn.cpp
     ${CMAKE_SOURCE_DIR}/src/model/forward/ffn.cpp
@@ -54,7 +57,7 @@ if(WHIRL_WITH_HIP)
   # host-only unit tests of the model library (no GPU work)
   add_executable(whirl-model-tests ${CMAKE_SOURCE_DIR}/tests/model/model_tests.cpp)
   target_link_libraries(whirl-model-tests PRIVATE whirl_model)
-  # OVH-C1 test reads src/model/forward.cpp and src/model/forward/*.cpp (both MTP call sites use Model::draftAttn)
+  # OVH-C1 test reads src/model/forward/*.cpp (both MTP call sites use Model::draftAttn; forward.cpp split by arch025-F1..F4)
   target_compile_definitions(whirl-model-tests PRIVATE WHIRL_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 
   # measure-tools P4: whirl-stage-bench (forward stages at a synthetic KV / state depth; test executable, GPU).

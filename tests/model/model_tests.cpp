@@ -1462,8 +1462,8 @@ void testFloatGemvDispatch() {
 }
 
 #ifdef WHIRL_SOURCE_DIR
-// The Model forward sources as one string: src/model/forward.cpp, then src/model/forward/*.cpp in name order (arch025
-// R-7 moves forward.cpp into forward/ step by step; source checks read all of them). Empty when forward.cpp is missing.
+// The Model forward sources as one string: src/model/forward/*.cpp in name order (arch025 R-7 split forward.cpp into
+// forward/ in steps F1..F4; source checks read all of them). Empty when forward/ holds no readable .cpp.
 std::string readSource(const std::filesystem::path& p) {
     std::ifstream in(p, std::ios::binary);
     return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
@@ -1471,14 +1471,18 @@ std::string readSource(const std::filesystem::path& p) {
 
 std::string forwardSources() {
     const std::filesystem::path model = std::filesystem::path(WHIRL_SOURCE_DIR) / "src" / "model";
-    std::string all = readSource(model / "forward.cpp");
-    if (all.empty()) return all;
     std::vector<std::filesystem::path> parts;
     std::error_code ec;
     for (const auto& e : std::filesystem::directory_iterator(model / "forward", ec))
         if (e.path().extension() == ".cpp") parts.push_back(e.path());
     std::sort(parts.begin(), parts.end());
-    for (const auto& p : parts) all += "\n" + readSource(p);
+    std::string all;
+    for (const auto& p : parts) {
+        const std::string s = readSource(p);
+        if (s.empty()) return {};
+        if (!all.empty()) all += "\n";
+        all += s;
+    }
     return all;
 }
 #endif
@@ -1486,7 +1490,7 @@ std::string forwardSources() {
 // OVH-C1: the MTP draft window (Model::attn_win) is set only around the MTP draft attention and restored
 // when that attention throws. (a) Model::draftAttn, through the attnBlock test hook (throws before any
 // GPU work): the hook sees the draft window, and attn_win is back to its previous value after the throw.
-// (b) both MTP call sites in the forward sources (src/model/forward.cpp + src/model/forward/*.cpp, arch025 R-7 split)
+// (b) both MTP call sites in the forward sources (src/model/forward/*.cpp, arch025 R-7 split)
 // go through draftAttn and nothing else assigns attn_win (a call site reverted to
 // "attn_win = ...; attnBlock(); attn_win = 0;" fails here).
 void testDraftWindowRestore() {
@@ -1519,7 +1523,7 @@ void testDraftWindowRestore() {
     check(seen.calls == 2, "OVH-C1: test hook reached");
 #ifdef WHIRL_SOURCE_DIR
     const std::string fw = forwardSources();
-    check(!fw.empty(), "OVH-C1: src/model/forward.cpp readable");
+    check(!fw.empty(), "OVH-C1: src/model/forward/*.cpp readable");
     std::size_t sites = 0, raw_mtp_attn = 0, assigns = 0;
     for (std::size_t p = fw.find("draftAttn(mw.attn, n)"); p != std::string::npos; p = fw.find("draftAttn(mw.attn, n)", p + 1)) ++sites;
     for (std::size_t p = fw.find("attnBlock(mw.attn"); p != std::string::npos; p = fw.find("attnBlock(mw.attn", p + 1)) ++raw_mtp_attn;
@@ -1535,51 +1539,76 @@ void testDraftWindowRestore() {
 // shared helpers ti / I / D in src/model/forward_internal.h stay inside an anonymous namespace (internal linkage per
 // forward TU, as when they were file-local to forward.cpp); no public header includes the internal header.
 // arch025-F2: draftAttn / attnBlock / prefillAttn only in forward/attn.cpp, ffnBlock / moeBlock only in forward/ffn.cpp.
-// arch025-F3: gdnLayer / gdnSegsBatch / gdnSegsSingle / gdnChunked / gdnScan only in forward/gdn.cpp, and Model::run (still in
-// forward.cpp) calls gdnLayer exactly once (the extracted DeltaNet branch).
+// arch025-F3: gdnLayer / gdnSegsBatch / gdnSegsSingle / gdnChunked / gdnScan only in forward/gdn.cpp, and Model::run
+// calls gdnLayer exactly once (the extracted DeltaNet branch).
+// arch025-F4: src/model/forward.cpp is gone; the drivers in forward/run.cpp, MTP / verify / commitSeq in
+// forward/mtp_verify.cpp, the prefill drivers in forward/prefill.cpp, the vision rows in forward/vision_rows.cpp.
+// Every forward function is defined in exactly one of the eight forward/*.cpp, its home below.
 void testForwardSplit() {
 #ifdef WHIRL_SOURCE_DIR
     const std::filesystem::path root(WHIRL_SOURCE_DIR);
-    const std::string disp = readSource(root / "src/model/forward/dispatch.cpp");
-    const std::string fwd = readSource(root / "src/model/forward.cpp");
-    const std::string hdr = readSource(root / "src/model/forward_internal.h");
-    check(!disp.empty() && !fwd.empty() && !hdr.empty(), "forward split: dispatch.cpp, forward.cpp, forward_internal.h readable");
-    for (const char* fn : {"void Model::mark(", "void Model::gemvLaunch(", "void Model::matmul(", "void Model::gemmF16(",
-                           "ops::GemmFlags Model::gemmFlags(", "bool Model::fused(", "void Model::step("}) {
-        check(disp.find(fn) != std::string::npos && fwd.find(fn) == std::string::npos,
-              std::string("forward split: ") + fn + " defined in forward/dispatch.cpp only");
+    check(!std::filesystem::exists(root / "src/model/forward.cpp"), "forward split: src/model/forward.cpp removed (F4)");
+    const char* const names[] = {"run", "mtp_verify", "prefill", "vision_rows", "dispatch", "attn", "ffn", "gdn"};
+    std::vector<std::string> src;
+    for (const char* n : names) {
+        src.push_back(readSource(root / "src/model/forward" / (std::string(n) + ".cpp")));
+        check(!src.back().empty(), std::string("forward split: forward/") + n + ".cpp readable");
+        check(src.back().find("#include \"../forward_internal.h\"") != std::string::npos,
+              std::string("forward split: forward/") + n + ".cpp includes forward_internal.h");
     }
-    // arch025-F2: the attention block in forward/attn.cpp, the FFN / MoE block in forward/ffn.cpp, each defined once.
-    const std::string attn = readSource(root / "src/model/forward/attn.cpp");
-    const std::string ffn = readSource(root / "src/model/forward/ffn.cpp");
-    const std::string gdn = readSource(root / "src/model/forward/gdn.cpp");
-    check(!attn.empty() && !ffn.empty() && !gdn.empty(), "forward split: forward/attn.cpp, forward/ffn.cpp, forward/gdn.cpp readable");
-    const std::string others[] = {fwd, disp, attn, ffn, gdn};
+    const std::string hdr = readSource(root / "src/model/forward_internal.h");
+    check(!hdr.empty(), "forward split: forward_internal.h readable");
     struct Home {
         const char* fn;
-        std::size_t at;  // index into others
+        std::size_t at;  // index into names
     };
-    for (const Home h : {Home{"void Model::draftAttn(", 2}, Home{"void Model::attnBlock(", 2}, Home{"void Model::prefillAttn(", 2},
-                         Home{"void Model::ffnBlock(", 3}, Home{"void Model::moeBlock(", 3}, Home{"void Model::gdnLayer(", 4},
-                         Home{"GdnSegs Model::gdnSegsBatch(", 4}, Home{"GdnSegs Model::gdnSegsSingle(", 4}, Home{"void Model::gdnChunked(", 4},
-                         Home{"void Model::gdnScan(", 4}}) {
+    const Home homes[] = {
+        // F4 run.cpp
+        {"void Model::forward(", 0}, {"void Model::decodeStep(", 0}, {"void Model::decodeStepLaunches(", 0},
+        {"u32 Model::beginDecode(", 0}, {"void Model::run(", 0}, {"std::size_t Model::lendScratch(", 0},
+        // F4 mtp_verify.cpp
+        {"void Model::setTokensDev(", 1}, {"DevPtr Model::ctlSlot(", 1}, {"void Model::setTokens(", 1},
+        {"u32 Model::mtpForward(", 1}, {"void Model::mtpEnqueue(", 1}, {"void Model::captureLayerInput(", 1},
+        {"void Model::commitSeq(", 1}, {"u32 Model::verifyBatchEnqueue(", 1}, {"void Model::mtpBatchStepEx(", 1},
+        {"void Model::readCtl(", 1}, {"void Model::draftHeadMatmul(", 1}, {"void Model::argmaxRows(", 1},
+        {"void Model::argmaxRowsEnqueue(", 1}, {"void Model::verifyEnqueueEx(", 1}, {"Model::Cycle Model::readCycle(", 1},
+        {"void Model::verify(", 1}, {"void Model::restoreSnapshot(", 1},
+        // F4 prefill.cpp
+        {"void Model::prefillWithMtp(", 2}, {"void Model::prefillMtpChunk(", 2}, {"bool Model::canSegment(", 2},
+        {"void Model::prefillSegs(", 2}, {"void Model::segLogitsToFront(", 2}, {"void Model::prefill(", 2},
+        {"u32 Model::argmax(", 2}, {"void Model::readLogits(", 2},
+        // F4 vision_rows.cpp
+        {"bool Model::visAny(", 3}, {"const VisMap* Model::visOf(", 3}, {"void Model::visBegin(", 3}, {"void Model::visEnsure(", 3},
+        {"void Model::visRelease(", 3}, {"void Model::visRow(", 3}, {"void Model::visCommit(", 3}, {"void Model::visRowsCur(", 3},
+        {"void Model::injectRows(", 3},
+        // F1 dispatch.cpp
+        {"void Model::mark(", 4}, {"void Model::gemvLaunch(", 4}, {"void Model::matmul(", 4}, {"void Model::gemmF16(", 4},
+        {"ops::GemmFlags Model::gemmFlags(", 4}, {"bool Model::fused(", 4}, {"void Model::step(", 4},
+        // F2 attn.cpp / ffn.cpp
+        {"void Model::draftAttn(", 5}, {"void Model::attnBlock(", 5}, {"void Model::prefillAttn(", 5},
+        {"void Model::ffnBlock(", 6}, {"void Model::moeBlock(", 6},
+        // F3 gdn.cpp
+        {"void Model::gdnLayer(", 7}, {"GdnSegs Model::gdnSegsBatch(", 7}, {"GdnSegs Model::gdnSegsSingle(", 7},
+        {"void Model::gdnChunked(", 7}, {"void Model::gdnScan(", 7},
+    };
+    for (const Home& h : homes) {
         bool once = true;
-        for (std::size_t i = 0; i < std::size(others); ++i)
-            once = once && ((others[i].find(h.fn) != std::string::npos) == (i == h.at));
-        static const char* const home[] = {"", "", " defined in forward/attn.cpp only", " defined in forward/ffn.cpp only",
-                                           " defined in forward/gdn.cpp only"};
-        check(once, std::string("forward split: ") + h.fn + home[h.at]);
+        for (std::size_t i = 0; i < src.size(); ++i) {
+            const std::size_t p = src[i].find(h.fn);
+            once = once && ((p != std::string::npos) == (i == h.at)) && (p == std::string::npos || src[i].find(h.fn, p + 1) == std::string::npos);
+        }
+        check(once, std::string("forward split: ") + h.fn + " defined in forward/" + names[h.at] + ".cpp only");
     }
-    for (const std::string* s : {&attn, &ffn, &gdn})
-        check(s->find("#include \"../forward_internal.h\"") != std::string::npos,
-              "forward split: attn.cpp / ffn.cpp / gdn.cpp include forward_internal.h");
     {
-        // arch025-F3: the DeltaNet branch of Model::run is the single gdnLayer call
-        const std::size_t r = fwd.find("void Model::run(u32 n) {");
-        const std::size_t c = fwd.find("gdnLayer(i, L.gdn, n, gdn_in2);");
-        check(r != std::string::npos && c != std::string::npos && c > r && fwd.find("gdnLayer(", c + 1) == std::string::npos &&
-                  fwd.find("const GdnW& g = L.gdn;", r) == std::string::npos,  // only inside Model::run (commitSeq keeps its own until F4)
+        // arch025-F3: the DeltaNet branch of Model::run is the single gdnLayer call; F4: run.cpp holds no other copy of
+        // the branch head (commitSeq's own `const GdnW& g = L.gdn;` moved to mtp_verify.cpp with it)
+        const std::string& run = src[0];
+        const std::size_t r = run.find("void Model::run(u32 n) {");
+        const std::size_t c = run.find("gdnLayer(i, L.gdn, n, gdn_in2);");
+        check(r != std::string::npos && c != std::string::npos && c > r && run.find("gdnLayer(") == c &&
+                  run.find("gdnLayer(", c + 1) == std::string::npos && run.find("const GdnW& g = L.gdn;") == std::string::npos,
               "forward split: Model::run calls gdnLayer once (F3 extract-method)");
+        check(src[1].find("const GdnW& g = L.gdn;") != std::string::npos, "forward split: commitSeq's DeltaNet state in mtp_verify.cpp (F4)");
     }
     const std::size_t anon = hdr.find("namespace {"), close = hdr.find("}  // namespace\n");
     bool inside = anon != std::string::npos && close != std::string::npos && anon < close;

@@ -79,7 +79,7 @@ see "gfx1151 (Radeon 8060S)" below).
 | src/model/config.cpp | reimplemented from the prototype (`model/qwen35.zig`: Config, GEMM / GEMV tables, tuneBucket; `gguf_cli.zig`: mtpDefaults) | `envGet` (`WHIRL_*` names) is new |
 | src/model/kernels.cpp | reimplemented from the prototype (`model/qwen35.zig`: `Kernels.load`) | |
 | src/model/loader.cpp | reimplemented from the prototype (`model/qwen35.zig`: `Model.load`, `Loader`, KV pool, sequences, snapshots, `requantMtpQ4`, `buildDraftHeadEx`, Profile) | the code-object override (`WHIRL_CODE_OBJECT`) is new |
-| src/model/forward.cpp | reimplemented from the prototype (`model/qwen35.zig`: matmul dispatch, blocks, prefill, decode, MTP, verify, segmented prefill) | |
+| src/model/forward/*.cpp (src/model/forward.cpp until arch025-F4) | reimplemented from the prototype (`model/qwen35.zig`: matmul dispatch, blocks, prefill, decode, MTP, verify, segmented prefill) | |
 | src/model/tune.cpp | reimplemented from the prototype (`model/qwen35.zig`: autotune, tune table, self-checks; `gguf_cli.zig`: `loadOrTune`) | cache directory `%LOCALAPPDATA%\whirl` |
 | src/model/device.cpp | reimplemented from the prototype (`gguf_cli.zig`: `pickDevice`, `lockGpu`, `matchDevice`) | |
 | src/model/spec.cpp | reimplemented from the prototype (`model/qwen35.zig`: Ngram, NgramPolicy, DraftAccept, DraftTiming, pickDrafts) | |
