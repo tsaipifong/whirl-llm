@@ -397,6 +397,8 @@ void loadMoe(MoeKernels& k, const Loader& L) {
         k.gemm_moegu[ti(t)] = L.opt("gemm_moegu_" + s);
     }
     k.moe_tiles = L.opt("moe_tiles");
+    k.moe_router_fused_i16 = L.opt("moe_router_fused_i16");
+    k.moe_router_fused_i24 = L.opt("moe_router_fused_i24");
     {
         // routed experts, MXFP4: generic entries + whole-block decode + fp8 grouped GEMM (all optional)
         const int i = ti(QType::mxfp4);

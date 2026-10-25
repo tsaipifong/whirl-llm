@@ -743,6 +743,10 @@ public:
     bool moe_fp8 = true;
     bool moe_mxw = true;
     bool moe_rbf = true;  // MXFP4 x fp8 grouped GEMM: row-block-fast gemm8r_* when present (WHIRL_MOE_RBF=0 -> gemm8_moe*)
+    // small-batch router: moe_router_fused_i* (logits + top-k in one launch, bit-identical) when
+    // WHIRL_MOE_RFUSE=1 (default off until the GPU A/B); moe_rcnt: its zeroed block counter
+    bool moe_rfuse = false;
+    DevPtr moe_rcnt = 0;
 
     // ---- vision (image prompts; see whirl/vismap.h). Text-only sequences never take
     // these paths (bitwise unchanged).

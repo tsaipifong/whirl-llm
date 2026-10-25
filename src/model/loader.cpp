@@ -383,6 +383,7 @@ u64 bufferBytes(const Config& cfg, u32 Bq, u64 ffs, u64 max_elems, u32 fd_splits
         n += B * Kx * 4 * 2;                              // moe_perm, moe_inv
         n += (B * Kx / 32 + cfg.n_expert + 1) * 16;       // moe_tiles
         n += 16;                                          // moe_ntiles
+        n += 256;                                         // moe_rcnt (allocation granule)
         n += (B * Kx / 64 + cfg.n_expert + 1) * 16;       // moe_tiles64
         n += 16;                                          // moe_ntiles64
         n += B * Kx * std::max(E, F) * 2;                 // moe_x16
@@ -538,6 +539,7 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
     m.moe_mxw = envFlag("MOE_MXW", true);
     m.moe_wide = envFlag("MOE_WIDE", false);  // MoE wide verify (balance / fast, opt-in), see wideCapable
     m.moe_rbf = envFlag("MOE_RBF", true);
+    m.moe_rfuse = envFlag("MOE_RFUSE", false);  // fused router (feat026-router), see Model::moe_rfuse
     m.layers.resize(cfg.n_layer);
     m.kcache.assign(cfg.n_layer, 0);
     m.vcache.assign(cfg.n_layer, 0);
@@ -736,6 +738,7 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
         m.moe_ids = m.allocZero(B * Kx * 4);
         m.moe_w = m.allocZero(B * Kx * f4);
         m.moe_sg = m.allocZero(B * f4);
+        m.moe_rcnt = m.allocZero(16);
         // verify batches up to max_verify_rows rows run on the decode experts (precise, and the
         // balance / fast wide verify)
         m.moe_g = m.alloc(max_verify_rows * Kx * F * f4);

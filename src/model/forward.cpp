@@ -822,7 +822,16 @@ void Model::moeBlock(DevPtr post_norm, const Mat& sg, const Mat& su, const Mat& 
     else
         rmsnorm(x, post_norm, h, E, n, E, E);
     // router logits (f32 activations for small batches, also in precise mode)
-    if (small) {
+    // fused router (WHIRL_MOE_RFUSE=1): logits + top-k + shared gate in one launch, bit-identical to
+    // moe_logits_f32 + moe_topk (kernels/moe_router.hip); one piece of <= max_small_batch rows only
+    hip::Function rfuse = nullptr;
+    if (moe_rfuse && small && n <= max_small_batch && R <= 256 && K <= 32 && E % 4 == 0 && moe_rcnt != 0)
+        rfuse = (E + 127) / 128 == 16 ? k.moe_router_fused_i16 : (E + 127) / 128 == 24 ? k.moe_router_fused_i24 : nullptr;
+    if (rfuse != nullptr) {
+        hip::launch(rfuse, pl.logits_grid, D(256), 0, stream, mo.router.ptr, h, moe_logits, I(R), I(E), I(n), gate,
+                    mo.sh_gate, moe_ids, moe_w, moe_sg, I(K), I(E), moe_rcnt);
+        mark(OpClass::matmul);
+    } else if (small) {
         // 16 tokens per launch (the kernel's tile); each token's logits are the same in any piece
         for (u32 t0 = 0; t0 < n; t0 += max_small_batch)
             hip::launch(k.moe_logits_f32, pl.logits_grid, D(256), 0, stream, mo.router.ptr, h + static_cast<u64>(t0) * E * 4,
@@ -831,8 +840,10 @@ void Model::moeBlock(DevPtr post_norm, const Mat& sg, const Mat& su, const Mat& 
     } else {
         matmul(mo.router, h, moe_logits, n, false);
     }
-    hip::launch(k.moe_topk, D(n), D(256), 0, stream, moe_logits, I(R), h, mo.sh_gate, moe_ids, moe_w, moe_sg, I(R), I(K), I(E));
-    mark(OpClass::misc);
+    if (rfuse == nullptr) {
+        hip::launch(k.moe_topk, D(n), D(256), 0, stream, moe_logits, I(R), h, mo.sh_gate, moe_ids, moe_w, moe_sg, I(R), I(K), I(E));
+        mark(OpClass::misc);
+    }
     if (moe_dump) {
         const std::size_t old = moe_dump->size();
         moe_dump->resize(old + static_cast<std::size_t>(n) * K);
