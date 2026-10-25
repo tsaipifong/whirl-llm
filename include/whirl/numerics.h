@@ -77,6 +77,9 @@ inline constexpr std::uint32_t implemented_items = balance_items | bit(Item::kvq
 // or cache::fingerprintEnvKept (whirl_cache); the tests (model_tests, cache_tests) hold the two name lists together.
 using Raw = std::optional<std::string>;
 
+// the number of k_numerics_switches (13 kernel-path switches + 10 added by feat026-o6-r1, review C5)
+inline constexpr std::size_t n_numerics_switches = 23;
+
 // Load-time values (loader + loadOrTune; CLI and server alike: Model::load / loadOrTune run for both).
 struct EnvValues {
     // src/model/tune.cpp:852-982 (loadOrTuneImpl)
@@ -85,7 +88,7 @@ struct EnvValues {
     // src/model/loader.cpp:550-553
     Raw moe_fp8, moe_mxw, moe_wide, moe_rbf;
     // numerics::noteSwitches (k_numerics_switches, same order): recorded as overrides only
-    std::array<Raw, 13> switches{};
+    std::array<Raw, n_numerics_switches> switches{};
 
     struct Entry {
         const char* name;  // without the WHIRL_ prefix
@@ -316,10 +319,17 @@ void setQ8dec(Plan& p, bool q8, const std::string& env);
 // An item the run cannot use after all (e.g. relaxacc with --draft dflash): skipped with `why`.
 void skipItem(Plan& p, Item it, const std::string& why);
 
-// WHIRL_* A/B switches that change which kernels run (WHIRL_FD_SPLITS, WHIRL_GEMV_MAX, ...):
-// each one set is recorded as an override ("+overrides" label), so the log and /props show that
-// the run's bits are not the mode's tested paths. get(name) reads WHIRL_<name>.
-extern const char* const k_numerics_switches[];
+// WHIRL_* A/B switches that change which kernels run (WHIRL_FD_SPLITS, WHIRL_GEMV_MAX, ...), and every runtime switch
+// the front ends apply (qwen35::applyRuntimeEnv; feat026-o6-r1, review C5). Each one set is recorded as an override
+// (log line, /props "overrides"); what it does to the label depends on its kind:
+//   lossy:   other kernel paths with no bitwise proof -> lossy_override ("MODE+overrides", precise too)
+//   bitwise: the same output bits by construction (named in the override text) -> the label stays the mode's
+//   drafts:  changes only the MTP drafts; the text does not depend on them (greedy verify, race-coupled sampling)
+//            except under relaxed acceptance (relaxacc on: lossy)
+// get(name) reads WHIRL_<name>.
+enum class SwitchKind : std::uint8_t { lossy, bitwise, drafts };
+extern const char* const k_numerics_switches[];  // n_numerics_switches names, then nullptr
+SwitchKind switchKind(std::string_view name);     // lossy for a name not in the list
 void noteSwitches(Plan& p, const std::function<std::optional<std::string>(const char*)>& get);
 
 // "numerics: balance - enabled: fp8 (...), ...; skipped: gdnwmma (...); always: q8dec (...)"

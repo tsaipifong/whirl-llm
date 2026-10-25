@@ -204,7 +204,7 @@ constexpr std::size_t layoutSize() {
 }
 // a member added to Flags outside WHIRL_NUMERICS_FLAGS (so missing from flagTable and bitsKey) changes the size
 static_assert(sizeof(nu::Flags) == layoutSize(), "Flags has a member outside WHIRL_NUMERICS_FLAGS");
-static_assert(sizeof(nu::EnvValues) == (nu::EnvValues::n_fields + 13) * sizeof(nu::Raw), "EnvValues field not in names()");
+static_assert(sizeof(nu::EnvValues) == (nu::EnvValues::n_fields + nu::n_numerics_switches) * sizeof(nu::Raw), "EnvValues field not in names()");
 static_assert(sizeof(nu::RuntimeValues) == nu::RuntimeValues::n_fields * sizeof(nu::Raw), "RuntimeValues field not in names()");
 
 void testBitsKeyReflection() {

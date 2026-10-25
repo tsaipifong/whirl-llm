@@ -2034,8 +2034,8 @@ void testEnvSnapshot() {
         check(got == want, std::string("env snapshot: ") + r.name + "='' (" + envtab::k_kind_names[r.kind] + ") as the pre-N1 site rule");
         empty_names.push_back(r.name);
     }
-    for (const char* sw : {"FD_SPLITS", "GEMV_MAX", "GV_NMAX", "GV_GROUP", "NO_FUSE", "FLOAT_GEMV", "GDN_SEQ", "NAIVE_ATTN", "DBG", "ATTN_WIDE",
-                           "ATTN_DQ4", "ATTN_WS4", "MOE_BN"}) {
+    for (std::size_t i = 0; i < whirl::numerics::n_numerics_switches; ++i) {  // feat026-o6-r1: every switch of the list
+        const char* sw = whirl::numerics::k_numerics_switches[i];
         check(run(sw, 0, "") == envtab::tuneOutput(0, model.string()), std::string("env snapshot: switch ") + sw + "='' = not set (numerics.cpp:292)");
         empty_names.push_back(sw);
     }
@@ -2058,8 +2058,8 @@ void testEnvSnapshot() {
         check(in_table || in_empty || in_load, std::string("env snapshot: name read by no test: ") + e.name);
     }
     // the reverse: the names the five files read are all fields (a get() of a missing name would throw at load)
-    for (const char* sw : {"FD_SPLITS", "GEMV_MAX", "GV_NMAX", "GV_GROUP", "NO_FUSE", "FLOAT_GEMV", "GDN_SEQ", "NAIVE_ATTN", "DBG", "ATTN_WIDE",
-                           "ATTN_DQ4", "ATTN_WS4", "MOE_BN"}) {
+    for (std::size_t i = 0; i < whirl::numerics::n_numerics_switches; ++i) {  // feat026-o6-r1: every switch of the list
+        const char* sw = whirl::numerics::k_numerics_switches[i];
         bool ok = true;
         try {
             (void)EnvSnapshot().get(sw);
@@ -2155,6 +2155,7 @@ std::map<std::string, std::string> dumpKv(const std::string& d) {
 }  // namespace n2a
 
 #include "runtime_env_tests.inc"  // feat026-o6 (2)
+#include "o6r1_tests.inc"          // feat026-o6-r1 (review C5 / C6)
 
 // feat026-o6 (3), owner O6: the removed research switches are ignored with one warning each (printed in the loadOrTune
 // log by the CLI and the server); their code paths are gone (ops_tests testGemvWide / the gemm choice)
@@ -2205,21 +2206,32 @@ void testPlanVsLoadOrTune() {
     for (int k = 0; k < 5; ++k) cs.push_back({std::string("base ") + envtab::k_kind_names[k], k, {}});
     for (const envtab::Case& c : envtab::cases())
         if (c.id.rfind("tune", 0) == 0) cs.push_back(c);
-    std::size_t n_cases = 0, n_fields = 0, n_precise_refused = 0;
+    // feat026-o6-r1 (review C5): the switches added to k_numerics_switches, balance and precise (the override record and
+    // its lossy flag, plan == loadOrTune), and the draft-only ones with relaxed acceptance on
+    for (const char* n : {"GEMV_R", "GEMV_W", "GEMV_WH", "HEAD_CHUNK", "DQ4_DYN", "GDN_V0", "NO_GRAPH", "WIDE_VERIFY", "DRAFT_WINDOW", "DRAFT_WINDOW_MIN"})
+        for (int k : {0, 4})
+            for (const char* v : {"0", "2:2", "4096"})
+                cs.push_back({std::string("o6r1 ") + envtab::k_kind_names[k] + " " + n + "=" + v, k, {{n, v}}});
+    for (const char* n : {"DRAFT_WINDOW", "DRAFT_WINDOW_MIN"}) cs.push_back({std::string("o6r1 d1201 RELAX=1 ") + n + "=4096", 0, {{"RELAX", "1"}, {n, "4096"}}});
+    std::size_t n_cases = 0, n_fields = 0, n_precise_refused = 0, n_bits = 0, n_other_throw = 0;
     std::string o6_keys;  // feat026-o6 (1)
     for (const envtab::Case& c : cs) {
         ++n_cases;
         std::vector<std::pair<std::string, EnvSnapshot::Value>> vals;
         for (const envtab::Var& v : c.vars) vals.emplace_back(v.name, EnvSnapshot::Value(v.value));
         const auto snap = std::make_shared<const EnvSnapshot>(EnvSnapshot::fromValues(vals));
-        auto m = envtab::makeModel(c.kind);
-        m->env_snap = snap;
-        // loader.cpp:548-553 and :743 (copied: Model::load does not run for a host-only Model)
-        m->moe_fp8 = EnvSnapshot::flag(snap->moe_fp8, m->num_req.has(nu::Item::moefp8));
-        m->moe_mxw = EnvSnapshot::flag(snap->moe_mxw, true);
-        m->moe_wide = EnvSnapshot::flag(snap->moe_wide, false);
-        m->moe_rbf = EnvSnapshot::flag(snap->moe_rbf, true);
-        m->fp8_prefill = m->num_req.has(nu::Item::fp8);
+        auto setup = [&] {
+            auto mm = envtab::makeModel(c.kind);
+            mm->env_snap = snap;
+            // loader.cpp:548-553 and :743 (copied: Model::load does not run for a host-only Model)
+            mm->moe_fp8 = EnvSnapshot::flag(snap->moe_fp8, mm->num_req.has(nu::Item::moefp8));
+            mm->moe_mxw = EnvSnapshot::flag(snap->moe_mxw, true);
+            mm->moe_wide = EnvSnapshot::flag(snap->moe_wide, false);
+            mm->moe_rbf = EnvSnapshot::flag(snap->moe_rbf, true);
+            mm->fp8_prefill = mm->num_req.has(nu::Item::fp8);
+            return mm;
+        };
+        auto m = setup();
         std::string log, err;
         try {
             q::loadOrTune(*m, model.string(), log);
@@ -2239,10 +2251,27 @@ void testPlanVsLoadOrTune() {
                 err.find("f16 decode activations") != std::string::npos) {
                 ++n_precise_refused;
                 check(p.has_value() && p->flags.prec_dec, "n2a plan vs loadOrTune: " + c.id + ": refused for f16 decode, plan prec_dec");
+                // feat026-o6-r1 (review A1): the refusal alone left every precise cell uncompared and the pre1201 key
+                // unpinned. Again with the one kernel the host-only Model lacks for precise decode (Model::precMissing:
+                // f32_to_f16, only compared against nullptr by loadOrTune, like the sx1151 fake handles), so the cell
+                // goes through every comparison below.
+                static int fake_f16 = 0;
+                m = setup();
+                m->k.f32_to_f16 = &fake_f16;
+                log.clear();
+                err.clear();
+                try {
+                    q::loadOrTune(*m, model.string(), log);
+                } catch (const std::exception& e) {
+                    err = e.what();
+                }
+                check(err.empty(), "o6r1: " + c.id + ": loadOrTune with f32_to_f16 present still threw: " + err);
+                if (!err.empty()) continue;
             } else {
                 check(!perr.empty(), "n2a plan vs loadOrTune: " + c.id + ": loadOrTune threw (" + err + "), plan did not");
+                ++n_other_throw;
+                continue;
             }
-            continue;
         }
         check(perr.empty(), "n2a plan vs loadOrTune: " + c.id + ": plan threw " + perr);
         if (!p) continue;
@@ -2267,11 +2296,29 @@ void testPlanVsLoadOrTune() {
         // change the SSD fingerprint a second time
         check(p->bitsKey() == q::tierBitsKey(*m, false), "o6: " + c.id + ": plan.bitsKey() != tierBitsKey(model)\n  plan  " +
                                                              p->bitsKey() + "\n  model " + q::tierBitsKey(*m, false));
+        ++n_bits;
         if (c.id.rfind("base ", 0) == 0) o6_keys += c.id + "\t" + q::tierBitsKey(*m, false) + "\n";
     }
     _putenv_s("LOCALAPPDATA", old_lad.c_str());
+    // feat026-o6-r1 (review A1): every cell that loadOrTune accepts (precise ones with the f32_to_f16 stand-in) is
+    // compared, and the pin holds all five base cells, the precise one with f16 decode
+    check(n_bits + n_other_throw == n_cases, std::format("o6r1: bitsKey compared in {} of {} cases ({} threw in plan and loadOrTune)",
+                                                         n_bits, n_cases, n_other_throw));
+    {
+        std::size_t rows = 0;
+        for (std::size_t q0 = 0; (q0 = o6_keys.find("base ", q0)) != std::string::npos; ++q0) ++rows;
+        check(rows == 5, std::format("o6r1: {} base rows in the bits key pin (want 5: d1201 mx1201 sx1151 moe1201 pre1201)", rows));
+        const std::size_t pre = o6_keys.find("base pre1201\t");
+        const std::string row = pre == std::string::npos ? std::string() : o6_keys.substr(pre, o6_keys.find('\n', pre) - pre);
+        check(row.find("\tmode=precise;") != std::string::npos && row.find(";q8dec=0;") != std::string::npos &&
+                  row.find(";prec_dec=1;") != std::string::npos,
+              "o6r1: pre1201 pin row is precise with f16 decode: " + row);
+    }
     // feat026-o6 (1): the bits keys of the base cases are pinned (tests/model/bits_key.expected.txt, recorded with the
-    // change). A diff here changes every user's SSD cache key: bump tier::key_scheme with it, or undo the change.
+    // change). A diff here changes every user's SSD cache key. The rule (feat026-o6-r1, review A2): the way the key is
+    // computed changed -> bump tier::key_scheme; a deliberate numerics change (e.g. ornkv: Ornith balance kvq8=1 in the
+    // moe1201 row) -> re-record the pin in that commit and say so in its message (no scheme bump: the exe identity
+    // already makes old files miss); anything else -> undo the change.
     // WHIRL_TEST_BITS_KEY_WRITE=<file> writes the actual keys instead of comparing.
     {
         char* w = nullptr;
@@ -2288,15 +2335,14 @@ void testPlanVsLoadOrTune() {
         }
     }
     check(n_cases > 150, "n2a plan vs loadOrTune: case count " + std::to_string(n_cases));
-    std::printf("  n2a plan vs loadOrTune: %zu cases (%zu refused for f16 decode), %zu fields compared\n", n_cases, n_precise_refused, n_fields);
+    std::printf("  n2a plan vs loadOrTune: %zu cases (%zu refused for f16 decode, then compared with f32_to_f16 present), %zu fields compared, "
+                "bitsKey compared in %zu\n",
+                n_cases, n_precise_refused, n_fields, n_bits);
 
     // every EnvSnapshot name: a plan field (load-time value or A/B switch), or read by code that decides no flag
     static const std::map<std::string, std::string> not_plan = {
         {"GEMV_BITWISE_FLOAT", "checkGemvBitwise (tune.cpp): the bitwise check's warn / fail mode, not a flag"},
         {"CODE_OBJECT", "loader.cpp: which code object loads (the fingerprint's kernel_set)"},
-        {"GEMV_R", "config.cpp applyGemvEnv: tune rows (needs the GPU dump)"},
-        {"GEMV_W", "config.cpp applyGemvEnv: tune rows (needs the GPU dump)"},
-        {"GEMV_WH", "config.cpp applyGemvEnv: tune rows (needs the GPU dump)"},
         {"GPU_SHARE", "device.cpp: GPU lock"},
         {"GPU_WAIT", "device.cpp: GPU lock"},
         {"DEVICE", "device.cpp: GPU selection"},
@@ -2328,6 +2374,8 @@ int main() {
     testRemovedSwitches();   // feat026-o6 (3)
     testModelBitsKey();      // feat026-o6 (1)
     testRuntimeEnvShared();  // feat026-o6 (2)
+    o6r1::testSwitchLabels();  // feat026-o6-r1 C5
+    o6r1::testGemvEnvWarns();  // feat026-o6-r1 C6
     testFloatGemvDispatch();
     testArchWhitelist();
     testLoadEstimate();

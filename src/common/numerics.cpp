@@ -225,7 +225,7 @@ const std::array<EnvValues::Entry, EnvValues::n_fields>& EnvValues::names() {
 const Raw* EnvValues::find(std::string_view name) const {
     for (const Entry& e : names())
         if (name == e.name) return &(this->*e.field);
-    for (std::size_t i = 0; k_numerics_switches[i] != nullptr; ++i)
+    for (std::size_t i = 0; i < n_numerics_switches; ++i)
         if (name == k_numerics_switches[i]) return &switches[i];
     return nullptr;
 }
@@ -558,15 +558,55 @@ void skipItem(Plan& p, Item it, const std::string& why) {
     s.note = why;
 }
 
-const char* const k_numerics_switches[] = {"FD_SPLITS", "GEMV_MAX",   "GV_NMAX",  "GV_GROUP", "NO_FUSE", "FLOAT_GEMV",
-                                           "GDN_SEQ",   "NAIVE_ATTN", "DBG",      "ATTN_WIDE", "ATTN_DQ4", "ATTN_WS4", "MOE_BN", nullptr};
+// feat026-o6-r1 (review C5): the list also holds every runtime switch applyRuntimeEnv applies (the server applies all of
+// them since feat026-o6 (2)) and the GEMV tune lists, each with its kind. Evidence for the bitwise ones:
+//   GEMV_R / GEMV_W / GEMV_WH: ops BitClass q8_row (every int8 GEMV variant == the one-token gemvq per row), the
+//     checkGemvBitwise gate; the parsers accept only the variants that exist (r 1/2/4, w < n_gemvw)
+//   HEAD_CHUNK: rows per head-split launch (forward.cpp), a multiple of 32 = whole 32-row blocks of the same kernel
+//   DQ4_DYN: attention.cpp FAST-8S-1 (same key partition: same partials, same combine order)
+//   GDN_V0: fused_decode.hip, gdn_step_norm == the per-row gdn_step_norm_v0 bit for bit
+//   NO_GRAPH: the same kernels launched one by one instead of replayed from the HIP graph
+// lossy (no bitwise proof): the 13 kernel-path switches as before, WIDE_VERIFY (verify row groups change the attention
+// grouping). drafts: DRAFT_WINDOW / DRAFT_WINDOW_MIN (draft attention only; trunk and verify see every position).
+const char* const k_numerics_switches[] = {"FD_SPLITS", "GEMV_MAX", "GV_NMAX",    "GV_GROUP",   "NO_FUSE",     "FLOAT_GEMV",
+                                           "GDN_SEQ",   "NAIVE_ATTN", "DBG",      "ATTN_WIDE",  "ATTN_DQ4",    "ATTN_WS4",
+                                           "MOE_BN",    "GEMV_R",   "GEMV_W",     "GEMV_WH",    "HEAD_CHUNK",  "DQ4_DYN",
+                                           "GDN_V0",    "NO_GRAPH", "WIDE_VERIFY", "DRAFT_WINDOW", "DRAFT_WINDOW_MIN", nullptr};
+static_assert(sizeof(k_numerics_switches) / sizeof(k_numerics_switches[0]) == n_numerics_switches + 1);
+namespace {
+constexpr SwitchKind SwL = SwitchKind::lossy, SwB = SwitchKind::bitwise, SwD = SwitchKind::drafts;
+constexpr SwitchKind k_switch_kinds[n_numerics_switches] = {SwL, SwL, SwL, SwL, SwL, SwL, SwL, SwL, SwL, SwL, SwL, SwL, SwL,
+                                                            SwB, SwB, SwB, SwB, SwB, SwB, SwB, SwL, SwD, SwD};
+}  // namespace
+
+SwitchKind switchKind(std::string_view name) {
+    for (std::size_t i = 0; i < n_numerics_switches; ++i)
+        if (name == k_numerics_switches[i]) return k_switch_kinds[i];
+    return SwitchKind::lossy;
+}
 
 void noteSwitches(Plan& p, const std::function<std::optional<std::string>(const char*)>& get) {
-    for (const char* const* n = k_numerics_switches; *n != nullptr; ++n) {
-        const auto v = get(*n);
+    for (std::size_t i = 0; i < n_numerics_switches; ++i) {
+        const char* n = k_numerics_switches[i];
+        const auto v = get(n);
         if (!v || v->empty()) continue;
-        p.overrides.push_back(std::format("WHIRL_{}={}: A/B switch (kernel paths differ from the tested defaults)", *n, *v));
-        p.lossy_override = true;
+        switch (k_switch_kinds[i]) {
+            case SwitchKind::bitwise:
+                p.overrides.push_back(std::format("WHIRL_{}={}: A/B switch, bitwise (same output bits as the default; label unchanged)", n, *v));
+                break;
+            case SwitchKind::drafts:
+                if (p.on(Item::relaxacc)) {
+                    p.overrides.push_back(std::format("WHIRL_{}={}: A/B switch, drafts only, lossy here (relaxed acceptance takes other drafts)", n, *v));
+                    p.lossy_override = true;
+                } else {
+                    p.overrides.push_back(std::format("WHIRL_{}={}: A/B switch, drafts only (the text does not depend on the drafts; label unchanged)", n, *v));
+                }
+                break;
+            case SwitchKind::lossy:
+                p.overrides.push_back(std::format("WHIRL_{}={}: A/B switch (kernel paths differ from the tested defaults)", n, *v));
+                p.lossy_override = true;
+                break;
+        }
     }
 }
 

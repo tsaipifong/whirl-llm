@@ -326,7 +326,28 @@ void applyRuntimeEnv(Model& m, const EnvGetter& get, std::vector<std::string>* w
         return v && *v == "0";
     };
     if (get("FLOAT_GEMV")) m.float_gemv = true;
-    applyGemvEnv(m);
+    {
+        // feat026-o6-r1 (review C6): a malformed WHIRL_GEMV_R / _W / _WH list is a warning, like the numbers below (the
+        // server must not refuse to start over an A/B switch); the list is parsed on the tables and put back whole on
+        // an error, so a bad list changes nothing, not even its first items. applyGemvEnv itself still throws.
+        const auto env = whirl::config::snapshotOf(m);  // the load's (arch025-N1), as applyGemvEnv reads it
+        auto list = [&](const char* name, const std::optional<std::string>& v, void (*parse)(Model&, std::string_view)) {
+            if (!v) return;
+            const GemvR r = m.gemv_r, wh = m.gemv_w_head;
+            const GemvW w = m.gemv_w;
+            try {
+                parse(m, *v);
+            } catch (const std::exception&) {
+                m.gemv_r = r;
+                m.gemv_w = w;
+                m.gemv_w_head = wh;
+                if (warnings) warnings->push_back(std::string("WHIRL_") + name + "=" + *v + " is not a valid nt:value list; ignored");
+            }
+        };
+        list("GEMV_R", env->gemv_r, &parseGemvR);
+        list("GEMV_W", env->gemv_w, &parseGemvW);
+        list("GEMV_WH", env->gemv_wh, &parseGemvWHead);
+    }
     if (auto v = num("DBG")) m.dbg_flags = *v;
     if (auto v = num("GEMV_MAX")) m.gemv_max = std::clamp<std::uint32_t>(*v, 1, max_small_batch);
     if (get("NO_GRAPH")) m.use_graph = false;

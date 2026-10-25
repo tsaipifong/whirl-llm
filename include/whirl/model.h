@@ -997,7 +997,8 @@ void applyGemvEnv(Model& m);
 //   "0" turns off: ATTN_WIDE, ATTN_DQ4, DQ4_DYN, ATTN_WS4, WIDE_VERIFY;  GV_GROUP: on unless "0"
 //   numbers (the whole value, <= 0xffffffff; else not applied, with a warning in *warnings): DBG, GEMV_MAX (clamped to
 //   1..max_small_batch), DRAFT_WINDOW, DRAFT_WINDOW_MIN, MOE_BN, GV_NMAX, HEAD_CHUNK (multiple of 32, at least 32)
-//   WHIRL_GEMV_R / _W / _WH: applyGemvEnv (malformed lists throw std::invalid_argument)
+//   WHIRL_GEMV_R / _W / _WH: applyGemvEnv's lists; a malformed list is not applied (not even in part), with a warning
+//   (feat026-o6-r1, review C6; applyGemvEnv itself throws std::invalid_argument)
 // Called after loadOrTune. The server then keeps use_graph off: it never replays the decode graph (not a switch).
 // numerics::plan (Front::cli / Front::server) has the same rules (src/common/numerics.cpp runtimeFlags).
 using EnvGetter = std::function<std::optional<std::string>(const char* name)>;
