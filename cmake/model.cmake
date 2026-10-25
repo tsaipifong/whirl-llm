@@ -50,4 +50,13 @@ if(WHIRL_WITH_HIP)
   target_link_libraries(whirl-model-tests PRIVATE whirl_model)
   # OVH-C1 test reads src/model/forward.cpp (both MTP call sites use Model::draftAttn)
   target_compile_definitions(whirl-model-tests PRIVATE WHIRL_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+
+  # measure-tools P4: whirl-stage-bench (forward stages at a synthetic KV / state depth; test executable, GPU).
+  # Its HIP-free part (stage_bench.cpp) is unit-tested by whirl-stage-bench-tests (cmake/server.cmake).
+  add_executable(whirl-stage-bench
+    ${CMAKE_SOURCE_DIR}/tests/bench/stage_bench_main.cpp
+    ${CMAKE_SOURCE_DIR}/tests/bench/stage_bench.cpp
+    ${CMAKE_SOURCE_DIR}/tests/kernels/kt_bench.cpp)
+  target_link_libraries(whirl-stage-bench PRIVATE whirl_model)
+  target_compile_definitions(whirl-stage-bench PRIVATE WHIRL_SB_VERSION="${PROJECT_VERSION}")
 endif()

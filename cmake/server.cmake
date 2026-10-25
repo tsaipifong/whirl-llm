@@ -112,6 +112,13 @@ add_executable(whirl-kt-bench-tests
   ${CMAKE_SOURCE_DIR}/tests/kernels/unit/kt_bench_tests.cpp
   ${CMAKE_SOURCE_DIR}/tests/kernels/kt_bench.cpp)
 
+# measure-tools P4: whirl-stage-bench's HIP-free part (options, stage table, KV tile plan, per-stage golden, validation
+# judge, JSONL rows, the restore / preload / hash driver) on the CPU. `--emit FILE` writes sample rows for db_record.py.
+add_executable(whirl-stage-bench-tests
+  ${CMAKE_SOURCE_DIR}/tests/bench/unit/stage_bench_tests.cpp
+  ${CMAKE_SOURCE_DIR}/tests/bench/stage_bench.cpp
+  ${CMAKE_SOURCE_DIR}/tests/kernels/kt_bench.cpp)
+
 # arch024 S0a: CPU pins (prompt tokens, engine memory / copy sequence), recorded on the B0 base (tests/pins)
 add_executable(whirl-pins
   ${CMAKE_SOURCE_DIR}/tests/pins/pins.cpp
