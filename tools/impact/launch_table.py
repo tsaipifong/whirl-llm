@@ -178,39 +178,62 @@ def load(p, include_all, server_seq=False, ignore=()):
     return apply_ignore(runs, ignore)
 
 
-def diff(a, b):
-    bad = 0
-    n_args = 0
+def compare(a, b):
+    """One entry per run key (sorted): status SAME / DIFF / ONLY_A / ONLY_B, the counts and hashes of both sides, whether
+    arguments were compared, and for DIFF the rows / "@" rows whose counts differ. diff() prints exactly this;
+    work_equal.py (measure-tools P5) uses it as data."""
+    res = []
     for key in sorted(set(a) | set(b)):
         if key not in a or key not in b:
-            print(f"ONLY {'B' if key not in a else 'A'}  {key}")
-            bad += 1
+            res.append({"key": key, "status": "ONLY_B" if key not in a else "ONLY_A"})
             continue
         ra, rb = a[key], b[key]
         same_rows = ra["rows"] == rb["rows"]
         same_seq = ra["seq"] == rb["seq"]
         has_args = ra.get("args") is not None and rb.get("args") is not None
         same_args = not has_args or (ra["args"] == rb["args"] and ra["aseq"] == rb["aseq"])
-        n_args += 1 if has_args else 0
+        e = {"key": key, "n_a": ra["n"], "n_b": rb["n"], "seq_a": ra["seq"], "seq_b": rb["seq"], "kinds": len(ra["rows"]),
+             "args_compared": has_args, "aseq_a": ra.get("aseq", ""), "aseq_b": rb.get("aseq", ""),
+             "argkinds": len(ra["args"]) if has_args else 0, "ignored": bool(ra.get("ignored") or rb.get("ignored"))}
         if same_rows and same_seq and same_args and ra["n"] == rb["n"]:
-            extra = f", arguments {len(ra['args'])} kinds" if has_args else ""
-            if ra.get("ignored") or rb.get("ignored"):
+            e["status"] = "SAME"
+        else:
+            e["status"] = "DIFF"
+            e["rows_diff"] = [(k, ra["rows"].get(k, 0), rb["rows"].get(k, 0)) for k in sorted(set(ra["rows"]) | set(rb["rows"]))
+                              if ra["rows"].get(k, 0) != rb["rows"].get(k, 0)]
+            e["args_diff"] = [] if not has_args else [
+                (k, ra["args"].get(k, 0), rb["args"].get(k, 0)) for k in sorted(set(ra["args"]) | set(rb["args"]))
+                if ra["args"].get(k, 0) != rb["args"].get(k, 0)]
+        res.append(e)
+    return res
+
+
+def diff(a, b):
+    bad = 0
+    n_args = 0
+    res = compare(a, b)
+    for e in res:
+        key = e["key"]
+        if e["status"] in ("ONLY_A", "ONLY_B"):
+            print(f"ONLY {e['status'][-1]}  {key}")
+            bad += 1
+            continue
+        has_args = e["args_compared"]
+        n_args += 1 if has_args else 0
+        if e["status"] == "SAME":
+            extra = f", arguments {e['argkinds']} kinds" if has_args else ""
+            if e["ignored"]:
                 extra += ", ignored rows left out, sequence not compared"
-            print(f"SAME  {key}  ({ra['n']} launches, {len(ra['rows'])} kinds{extra})")
+            print(f"SAME  {key}  ({e['n_a']} launches, {e['kinds']} kinds{extra})")
             continue
         bad += 1
-        extra = f", argseqhash {ra['aseq'] or '-'} vs {rb['aseq'] or '-'}" if has_args else ""
-        print(f"DIFF  {key}  launches {ra['n']} vs {rb['n']}, seqhash {ra['seq'] or '-'} vs {rb['seq'] or '-'}{extra}")
-        for k in sorted(set(ra["rows"]) | set(rb["rows"])):
-            ca, cb = ra["rows"].get(k, 0), rb["rows"].get(k, 0)
-            if ca != cb:
-                print(f"      {k}: {ca} vs {cb}")
-        if has_args:
-            for k in sorted(set(ra["args"]) | set(rb["args"])):
-                ca, cb = ra["args"].get(k, 0), rb["args"].get(k, 0)
-                if ca != cb:
-                    print(f"      @ {k}: {ca} vs {cb}")
-    print(f"launch tables: {len(set(a) | set(b)) - bad} same, {bad} different; arguments compared in {n_args}")
+        extra = f", argseqhash {e['aseq_a'] or '-'} vs {e['aseq_b'] or '-'}" if has_args else ""
+        print(f"DIFF  {key}  launches {e['n_a']} vs {e['n_b']}, seqhash {e['seq_a'] or '-'} vs {e['seq_b'] or '-'}{extra}")
+        for k, ca, cb in e["rows_diff"]:
+            print(f"      {k}: {ca} vs {cb}")
+        for k, ca, cb in e["args_diff"]:
+            print(f"      @ {k}: {ca} vs {cb}")
+    print(f"launch tables: {len(res) - bad} same, {bad} different; arguments compared in {n_args}")
     return 1 if bad else 0
 
 
