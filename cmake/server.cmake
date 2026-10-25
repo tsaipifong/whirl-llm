@@ -102,6 +102,10 @@ add_executable(whirl-page-bench
 target_include_directories(whirl-page-bench PRIVATE ${CMAKE_SOURCE_DIR}/tests/server)
 target_link_libraries(whirl-page-bench PRIVATE whirl_server_core whirl_device_null)
 
+# measure-tools P0: the shared JSONL writer of the measurement tools (tests/bench/bench_out.h, header-only), CPU-only
+# unit tests. `whirl-bench-out-tests --emit FILE` also writes a sample file for the records-side importer check.
+add_executable(whirl-bench-out-tests ${CMAKE_SOURCE_DIR}/tests/bench/bench_out_tests.cpp)
+
 # arch024 S0a: CPU pins (prompt tokens, engine memory / copy sequence), recorded on the B0 base (tests/pins)
 add_executable(whirl-pins
   ${CMAKE_SOURCE_DIR}/tests/pins/pins.cpp
