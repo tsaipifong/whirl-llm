@@ -708,6 +708,13 @@ void Engine::launchTopk(std::uint32_t row0, std::uint32_t rows, std::uint32_t k,
     m_.topkRows(row0, rows, k, inv_t, ids, vals, stats);
 }
 
+// Sampling candidates (temperature > 0, every mode, precise too): the k_small largest logits per row
+// by topk_rows. When logits tied at the k_small-th value overflow the places left, topk_rows keeps the
+// LOWEST ids among them (feat027-relaxdet; before, shared-atomic arrival order), the same tie rule as
+// filterCands' sort and the argmax: a sampled reply for a seed is now run-to-run deterministic in that
+// case too. Greedy rows (CLI golden, precise / balance greedy) never come here: they use the argmax;
+// only relaxacc (numerics item relaxacc, WHIRL_RELAX) calls topk_rows for greedy rows (launchTopk with
+// relax topk()); precise / balance do not enable it unless WHIRL_RELAX overrides the mode.
 void Engine::fetchCands(Sampler& s, std::uint32_t rows) {
     s.row_base = 0;
     launchTopk(0, rows, k_small, s.inv_t, samp_dev_.get(), max_rows, 0);

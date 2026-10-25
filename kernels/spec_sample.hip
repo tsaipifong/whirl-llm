@@ -11,6 +11,12 @@
 // The p-min cutoff of draft_pick_rows (argmax probability at temperature 1, a function of the row
 // only, never of the drawn token) is kept: a row whose chain stopped at or before r is skipped.
 // Rows with on = 0 keep the greedy draft.
+// Ties at the K-th logit (feat027-relaxdet-r1, as topk_rows): when more logits equal the K-th value
+// than places are left, the LOWEST row indices among them are kept, chosen by an index-ordered block
+// scan, so q (and the drawn draft) never depend on shared-atomic arrival order. The row index order is
+// the token id order: the draft-vocabulary map is strictly ascending (qwen35::draftVocabIds), so this
+// is the (logit desc, id asc) rule of whirl::spec::draftDist and the kernel test oracle. Without
+// overflowing ties (the usual case) every tied logit is kept and the atomic path runs as before.
 
 #define WHIRL_SPEC_QMAX 32
 #define WHIRL_SPEC_QWORDS 72
@@ -44,7 +50,8 @@ extern "C" __global__ void __launch_bounds__(1024)
     draft_sample_rows(const float *x, int n, int *ctl_all, RowIdx area, int r, const int *map, DSampArgs a, int *qbuf) {
     __shared__ unsigned hist[32][256];
     __shared__ float red[1024];
-    __shared__ unsigned s_prefix, s_remain, s_gt, s_eq;
+    __shared__ unsigned s_prefix, s_remain, s_gt, s_eq, s_eqn, s_taken;
+    __shared__ unsigned s_wcnt[32];
     __shared__ int s_id[WHIRL_SPEC_QMAX];
     __shared__ float s_lg[WHIRL_SPEC_QMAX];
     const int b = blockIdx.x;
@@ -111,6 +118,7 @@ extern "C" __global__ void __launch_bounds__(1024)
             }
             s_prefix = prefix | ((unsigned)bb << shift);
             s_remain = rem;
+            if (shift == 0) s_eqn = hist[0][bb];  // logits whose key equals the K-th key
         }
         mask |= 255u << shift;
         __syncthreads();
@@ -118,9 +126,11 @@ extern "C" __global__ void __launch_bounds__(1024)
     if (t == 0) {
         s_gt = 0;
         s_eq = 0;
+        s_taken = 0;
     }
     __syncthreads();
     const unsigned thr = s_prefix, need = s_remain, base = (unsigned)K - need;
+    const bool ordered = s_eqn > need;  // ties overflow the places left: lowest indices win
     for (int i = t; i < n; i += blockDim.x) {
         const float xv = x[i];
         const float v = xv == xv ? xv : -INFINITY;  // a NaN only fills a slot past the finite logits, with p = 0
@@ -131,7 +141,7 @@ extern "C" __global__ void __launch_bounds__(1024)
                 s_id[j] = i;
                 s_lg[j] = v;
             }
-        } else if (k == thr) {
+        } else if (k == thr && !ordered) {
             const unsigned j = atomicAdd(&s_eq, 1u);
             if (j < need) {
                 s_id[base + j] = i;
@@ -139,9 +149,38 @@ extern "C" __global__ void __launch_bounds__(1024)
             }
         }
     }
+    if (ordered) {
+        // index-ordered scan over blockDim-wide sweeps: a tied logit's place is the number of tied
+        // logits with a lower index (earlier sweeps + earlier waves + lower lanes); same code as topk_rows
+        const int lane = t % WARP, wv = t / WARP, nw = (int)blockDim.x / WARP;
+        for (int c0 = 0; c0 < n; c0 += blockDim.x) {
+            const int i = c0 + t;
+            const bool f = i < n && spec_key(x[i]) == thr;
+            const unsigned long long bal = __ballot(f);
+            if (lane == 0) s_wcnt[wv] = (unsigned)__popcll(bal);
+            __syncthreads();
+            unsigned j = s_taken;
+            for (int q = 0; q < wv; ++q) j += s_wcnt[q];
+            j += (unsigned)__popcll(bal & ((1ull << lane) - 1ull));
+            if (f && j < need) {
+                const float xv = x[i];
+                s_id[base + j] = i;
+                s_lg[base + j] = xv == xv ? xv : -INFINITY;
+            }
+            __syncthreads();
+            if (t == 0) {
+                unsigned s = 0;
+                for (int q = 0; q < nw; ++q) s += s_wcnt[q];
+                s_taken += s;
+            }
+            __syncthreads();
+            if (s_taken >= need) break;  // block-uniform (shared, after the barrier)
+        }
+    }
     __syncthreads();
     if (t != 0) return;
-    // tie order of equal keys depends on the atomics: ids are mapped first and sorted by (logit desc, id asc)
+    // the candidate SET is deterministic (ties above); the slot order is not: ids are mapped first and
+    // sorted by (logit desc, id asc)
     int id[WHIRL_SPEC_QMAX];
     float lg[WHIRL_SPEC_QMAX], p[WHIRL_SPEC_QMAX];
     for (int i = 0; i < K; ++i) {
