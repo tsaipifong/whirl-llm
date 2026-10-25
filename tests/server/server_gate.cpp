@@ -188,6 +188,146 @@ std::wstring quoteArg(const std::wstring& a) {
     return q + L"\"";
 }
 
+// Graceful stop of a console child (Server::stop; the --selftest console check drives it with ping.exe):
+// a Ctrl+C on the child's (hidden) console, which the WHIRL server handles by flushing its prefix-cache
+// tiers before it exits (the prototype exits at once on Ctrl+C).
+bool sendCtrlC(DWORD pid) {
+    bool ok = false;
+    const bool con_out = GetFileType(GetStdHandle(STD_OUTPUT_HANDLE)) == FILE_TYPE_CHAR;
+    std::fflush(stdout);
+    std::fflush(stderr);
+    FreeConsole();
+    if (AttachConsole(pid)) {
+        SetConsoleCtrlHandler(nullptr, TRUE);  // this process ignores the event it sends
+        ok = GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0) != 0;
+        Sleep(100);  // let the event be delivered before leaving the console
+        FreeConsole();
+    }
+    if (AttachConsole(ATTACH_PARENT_PROCESS) && con_out) {
+        FILE* f = nullptr;
+        freopen_s(&f, "CONOUT$", "w", stdout);
+        freopen_s(&f, "CONOUT$", "w", stderr);
+    }
+    // keep ignoring stray Ctrl+C deliveries for a moment, then restore the default
+    Sleep(200);
+    SetConsoleCtrlHandler(nullptr, FALSE);
+    return ok;
+}
+
+// bug-gatectrlc selftest helpers (CPU only, ping.exe as the child). The layout of a runner that wraps the gate in
+// `Start-Process pwsh -Command "& gate.exe ..." -RedirectStandardOutput F`:
+//   selftest  --(new hidden console, STARTF_USESTDHANDLES = file F)-->  --selftest-console-wrap (plays pwsh)
+//   wrap      --(same console, NO STARTF_USESTDHANDLES: inherits F as its std handles)-->  --selftest-console-child
+//   child     starts N ping.exe children the way Server starts a server and stops each with sendCtrlC, then prints
+//             the summary line, which must reach F.
+std::wstring selfExe() {
+    std::wstring p(32768, L'\0');
+    p.resize(GetModuleFileNameW(nullptr, p.data(), static_cast<DWORD>(p.size())));
+    return p;
+}
+
+int consoleChild(int n, const std::string& dir) {
+    std::wstring sys(MAX_PATH, L'\0');
+    sys.resize(GetSystemDirectoryW(sys.data(), MAX_PATH));
+    int stopped = 0;
+    for (int i = 0; i < n; ++i) {
+        SECURITY_ATTRIBUTES sa{sizeof sa, nullptr, TRUE};
+        HANDLE out = CreateFileW(widen(dir + "\\ping_" + std::to_string(i) + ".txt").c_str(), GENERIC_WRITE, FILE_SHARE_READ,
+                                 &sa, CREATE_ALWAYS, 0, nullptr);
+        STARTUPINFOW si{};
+        si.cb = sizeof si;
+        si.dwFlags = STARTF_USESTDHANDLES;
+        si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+        si.hStdOutput = out;
+        si.hStdError = out;
+        PROCESS_INFORMATION pi{};
+        std::wstring cmd = quoteArg(sys + L"\\ping.exe") + L" -n 60 127.0.0.1";
+        std::vector<wchar_t> cbuf(cmd.begin(), cmd.end());
+        cbuf.push_back(0);
+        const BOOL started = CreateProcessW(nullptr, cbuf.data(), nullptr, nullptr, TRUE,
+                                            CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
+        if (out != INVALID_HANDLE_VALUE) CloseHandle(out);
+        if (!started) {
+            std::printf("console child: cannot start ping.exe (error %lu)\n", GetLastError());
+            return 3;
+        }
+        CloseHandle(pi.hThread);
+        Sleep(1500);  // let ping.exe reach its main loop
+        const bool sent = sendCtrlC(pi.dwProcessId);
+        const bool exited = WaitForSingleObject(pi.hProcess, 10000) == WAIT_OBJECT_0;
+        if (!exited) TerminateProcess(pi.hProcess, 1);
+        WaitForSingleObject(pi.hProcess, 5000);
+        CloseHandle(pi.hProcess);
+        if (sent && exited) ++stopped;
+        std::printf("console child: stop %d: sent %d, exited %d\n", i, sent ? 1 : 0, exited ? 1 : 0);
+        std::fflush(stdout);
+    }
+    std::printf("== console child: %d of %d stops ok (summary)\n", stopped, n);
+    std::fflush(stdout);
+    return stopped == n ? 0 : 1;
+}
+
+int consoleWrap(int n, const std::string& dir) {
+    // like pwsh `& native.exe`: same console, std handles inherited from this process without STARTF_USESTDHANDLES
+    std::wstring cmd = quoteArg(selfExe()) + L" --selftest-console-child " + std::to_wstring(n) + L" " + quoteArg(widen(dir));
+    std::vector<wchar_t> cbuf(cmd.begin(), cmd.end());
+    cbuf.push_back(0);
+    STARTUPINFOW si{};
+    si.cb = sizeof si;
+    PROCESS_INFORMATION pi{};
+    if (!CreateProcessW(nullptr, cbuf.data(), nullptr, nullptr, TRUE, CREATE_UNICODE_ENVIRONMENT, nullptr, nullptr, &si, &pi))
+        return 4;
+    CloseHandle(pi.hThread);
+    if (WaitForSingleObject(pi.hProcess, 60000) != WAIT_OBJECT_0) TerminateProcess(pi.hProcess, 5);
+    WaitForSingleObject(pi.hProcess, 5000);
+    DWORD code = 0;
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hProcess);
+    return static_cast<int>(code);
+}
+
+// Runs the wrapper chain above with n stops; returns the text that reached F ("" if nothing) and the wrap exit code.
+std::pair<std::string, int> consoleStopRun(int n) {
+    const std::string dir = narrow((fs::temp_directory_path() / L"whirl-tests" /
+                                    (L"ctrlc_selftest_" + std::to_wstring(GetCurrentProcessId()) + L"_" + std::to_wstring(n)))
+                                       .wstring());
+    std::error_code ec;
+    fs::create_directories(widen(dir), ec);
+    const std::string fpath = dir + "\\wrap_out.txt";
+    SECURITY_ATTRIBUTES sa{sizeof sa, nullptr, TRUE};
+    HANDLE f = CreateFileW(widen(fpath).c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, CREATE_ALWAYS, 0, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return {"", -1};
+    std::wstring cmd = quoteArg(selfExe()) + L" --selftest-console-wrap " + std::to_wstring(n) + L" " + quoteArg(widen(dir));
+    std::vector<wchar_t> cbuf(cmd.begin(), cmd.end());
+    cbuf.push_back(0);
+    STARTUPINFOW si{};
+    si.cb = sizeof si;
+    si.dwFlags = STARTF_USESTDHANDLES;  // Start-Process -RedirectStandardOutput / -RedirectStandardError
+    si.hStdInput = nullptr;
+    si.hStdOutput = f;
+    si.hStdError = f;
+    PROCESS_INFORMATION pi{};
+    int code = -2;
+    if (CreateProcessW(nullptr, cbuf.data(), nullptr, nullptr, TRUE, CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW, nullptr,
+                       nullptr, &si, &pi)) {
+        CloseHandle(pi.hThread);
+        if (WaitForSingleObject(pi.hProcess, 90000) != WAIT_OBJECT_0) TerminateProcess(pi.hProcess, 6);
+        WaitForSingleObject(pi.hProcess, 5000);
+        DWORD c = 0;
+        GetExitCodeProcess(pi.hProcess, &c);
+        code = static_cast<int>(c);
+        CloseHandle(pi.hProcess);
+    }
+    CloseHandle(f);
+    std::string text;
+    try {
+        text = readFile(fpath);
+    } catch (const std::exception&) {
+    }
+    fs::remove_all(widen(dir), ec);
+    return {text, code};
+}
+
 class Server {
 public:
     Server(const std::string& tag, const std::vector<std::string>& args, const std::map<std::string, std::string>& env_extra,
@@ -278,36 +418,11 @@ public:
                             std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count()));
     }
     ~Server() { stop(); }
-    // Graceful stop first: a Ctrl+C on the server's (hidden) console, which the WHIRL
-    // server handles by flushing its prefix-cache tiers before it exits (the
-    // prototype exits at once on Ctrl+C); TerminateProcess if it has not exited after
-    // 30 s.
-    bool ctrlC(DWORD pid) {
-        bool ok = false;
-        const bool con_out = GetFileType(GetStdHandle(STD_OUTPUT_HANDLE)) == FILE_TYPE_CHAR;
-        std::fflush(stdout);
-        std::fflush(stderr);
-        FreeConsole();
-        if (AttachConsole(pid)) {
-            SetConsoleCtrlHandler(nullptr, TRUE);  // this process ignores the event it sends
-            ok = GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0) != 0;
-            Sleep(100);  // let the event be delivered before leaving the console
-            FreeConsole();
-        }
-        if (AttachConsole(ATTACH_PARENT_PROCESS) && con_out) {
-            FILE* f = nullptr;
-            freopen_s(&f, "CONOUT$", "w", stdout);
-            freopen_s(&f, "CONOUT$", "w", stderr);
-        }
-        // keep ignoring stray Ctrl+C deliveries for a moment, then restore the default
-        Sleep(200);
-        SetConsoleCtrlHandler(nullptr, FALSE);
-        return ok;
-    }
+    // Graceful stop first (sendCtrlC); TerminateProcess if it has not exited after 30 s.
     void stop() {
         if (!proc_) return;
         const auto t0 = std::chrono::steady_clock::now();
-        const bool sent = ctrlC(GetProcessId(proc_));
+        const bool sent = sendCtrlC(GetProcessId(proc_));
         if (!sent || WaitForSingleObject(proc_, 30000) != WAIT_OBJECT_0) {
             logLine(std::format("server {}: {}; terminating", tag_, sent ? "no exit 30 s after Ctrl+C" : "Ctrl+C could not be sent"));
             TerminateProcess(proc_, 1);
@@ -2632,6 +2747,21 @@ int selfTest() {
           std::format("{:016x}", fnv64(goldenDoc(1, 2400))));
     check("selftest: golden documents 2 and 3 (1500 words) unchanged",
           fnv64(goldenDoc(2, 1500)) == 0x2b9d4e7c2c35cb70ull && fnv64(goldenDoc(3, 1500)) == 0x2efb3273d0550c17ull);
+    // bug-gatectrlc (2026-10-26): a gate whose stdout is a file inherited WITHOUT STARTF_USESTDHANDLES (a runner's
+    // `Start-Process pwsh -Command "& gate.exe ..." -RedirectStandardOutput F`) lost every line after its 2nd server stop
+    // (the 1st stop's AttachConsole(ATTACH_PARENT_PROCESS) swaps STD_OUTPUT_HANDLE to the console, the 2nd stop then
+    // judged stdout a console and reopened it on CONOUT$). Two stops (suite basic: basic + basic_cold) under that wrapper:
+    // both stop lines and the summary must reach F.
+    for (const int n : {1, 2}) {
+        const auto [text, code] = consoleStopRun(n);
+        int stop_lines = 0;
+        for (std::size_t p = 0; (p = text.find(", exited 1", p)) != std::string::npos; ++p) ++stop_lines;
+        const std::string want = std::format("== console child: {} of {} stops ok (summary)", n, n);
+        check(std::format("selftest: {} Ctrl+C stop(s) under a pwsh-style file-redirect wrapper -> summary line reaches the file", n),
+              code == 0 && stop_lines == n && text.find(want) != std::string::npos,
+              std::format("wrap exit {}, {} stop line(s) in the file, file tail: {}", code, stop_lines,
+                          text.size() > 160 ? text.substr(text.size() - 160) : text));
+    }
     std::printf("== whirl-server-gate --selftest: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }
@@ -2645,6 +2775,9 @@ int wmain(int argc, wchar_t** wargv) {
     std::vector<std::string> a;
     for (int i = 1; i < argc; ++i) a.push_back(narrow(wargv[i]));
     if (a.size() == 1 && a[0] == "--selftest") return selfTest();
+    // internal processes of the --selftest console check (consoleStopRun)
+    if (a.size() == 3 && a[0] == "--selftest-console-wrap") return consoleWrap(std::stoi(a[1]), a[2]);
+    if (a.size() == 3 && a[0] == "--selftest-console-child") return consoleChild(std::stoi(a[1]), a[2]);
     for (std::size_t i = 0; i < a.size(); ++i) {
         auto val = [&]() -> std::string {
             if (i + 1 >= a.size()) throw std::runtime_error(a[i] + " needs a value");
