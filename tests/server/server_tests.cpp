@@ -6132,6 +6132,75 @@ void testTierBridgeFlush() {
 }
 
 // ---------------------------------------------------------------------------
+// mt-p3 / review s15 K2 probe (print + setup checks only; no product change, feature freeze): dropContained's
+// transitive drop. Three RAM entries of one history, e ⊂ o ⊂ x (x = the new entry): e (1000 tok, restore point @900),
+// o (2000 tok, points @950 and @2000), x (3000 tok, points @2000 and @3000). In one dropContained(x) pass o vouches
+// for e (o @950 lies in [deep_e 900, e.n_tok 1000]), so e is dropped; then o itself is dropped (x @2000 covers
+// deep_o 2000). A request that shares e's 1000 tokens and diverges at 1000 then has no restore point <= 1000 left
+// (x's points are past the divergence) -- unless o was examined before e (t->entries order). The probe runs both
+// orders and prints which entries stay and the deepest restore point left for that request.
+struct K2Result {
+    bool e_kept = false, o_kept = false, x_kept = false;
+    std::uint32_t best_le_1000 = 0;  // deepest restore point any remaining entry holds for the diverging request
+};
+
+K2Result k2Run(bool e_first) {
+    TbRig r;
+    const std::vector<std::uint32_t> xt = tbTokens(3000, 11);
+    auto mk = [&](std::uint32_t n, std::vector<std::uint32_t> pts) {
+        tier::Entry* en = r.tier->newEntry(static_cast<std::uint32_t>(pts.size()));
+        en->tokens.assign(xt.begin(), xt.begin() + n);
+        en->n_tok = n;
+        en->pages = static_cast<std::uint32_t>((n + qwen35::kv_page - 1) / qwen35::kv_page);
+        for (std::size_t j = 0; j < pts.size(); ++j) {
+            en->ck[j].pos = pts[j];
+            en->ck[j].valid = 1;
+            en->ck[j].kind = 1;  // prompt-end (not a shared prefix entry, not COLD-RESUME-filtered: balance config)
+            en->ck[j].seq = j + 1;
+        }
+        return en;
+    };
+    tier::Entry *e = nullptr, *o = nullptr;
+    if (e_first) {
+        e = mk(1000, {900});
+        o = mk(2000, {950, 2000});
+    } else {
+        o = mk(2000, {950, 2000});
+        e = mk(1000, {900});
+    }
+    tier::Entry* x = mk(3000, {2000, 3000});
+    const std::uint64_t eid = e->id, oid = o->id, xid = x->id;
+    CHECK(r.tier->entries.size() == 3u);
+    r.tb->dropContained(0, x);
+    K2Result k;
+    k.e_kept = r.tier->find(eid) != nullptr;
+    k.o_kept = r.tier->find(oid) != nullptr;
+    k.x_kept = r.tier->find(xid) != nullptr;
+    std::vector<std::uint32_t> q(xt.begin(), xt.begin() + 1000);
+    for (std::uint32_t i = 0; i < 500; ++i) q.push_back(90000 + i);  // diverges at 1000
+    for (const tier::Entry* en : r.tier->entries)
+        for (std::uint32_t j = 0; j < tier::max_ck; ++j) {
+            const tier::CkMeta& c = en->ck[j];
+            if (c.valid == 0 || c.pos > 1000 || c.pos > en->n_tok) continue;
+            if (std::equal(en->tokens.begin(), en->tokens.begin() + c.pos, q.begin())) k.best_le_1000 = std::max(k.best_le_1000, c.pos);
+        }
+    return k;
+}
+
+void testTierDropK2Probe() {
+    for (const bool e_first : {true, false}) {
+        const K2Result k = k2Run(e_first);
+        CHECK(k.x_kept);  // the new entry is never removed
+        std::fprintf(stderr,
+                     "  (tier_drop_k2_probe order %s: e %s, o %s, x %s; deepest restore point <= 1000 for a request diverging at "
+                     "1000: %u%s)\n",
+                     e_first ? "e,o,x" : "o,e,x", k.e_kept ? "kept" : "dropped", k.o_kept ? "kept" : "dropped",
+                     k.x_kept ? "kept" : "dropped", k.best_le_1000,
+                     k.best_le_1000 >= 900 ? "" : "  <- K2: e's restore range [900,1000] lost (transitive drop)");
+    }
+}
+
+// ---------------------------------------------------------------------------
 // arch024-S7: TierBridge restore half driven directly (TbRig: MockModel + NullBackend + a RAM-only tier::Tier).
 // The engine-level versions (restore_conc, restore_throws, tier_inplace) stay; these call TierBridge itself:
 // restoreMatch / startRestore / pumpRestore / restoreDone / restoreFailed / finishTail / cutTail / queuedReuse.
@@ -7502,6 +7571,7 @@ int main(int argc, char** argv) {
         {"tier_bridge_spill", testTierBridgeSpill},
         {"tier_bridge_supersede", testTierBridgeSupersede},
         {"tier_bridge_flush", testTierBridgeFlush},
+        {"tier_drop_k2_probe", testTierDropK2Probe},
         {"tier_bridge_restore", testTierBridgeRestore},
         {"prefix_store", testPrefixStore},
         {"cold_resume_engine", testColdResumeEngine},

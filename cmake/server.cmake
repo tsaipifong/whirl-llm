@@ -119,6 +119,25 @@ add_executable(whirl-stage-bench-tests
   ${CMAKE_SOURCE_DIR}/tests/bench/stage_bench.cpp
   ${CMAKE_SOURCE_DIR}/tests/kernels/kt_bench.cpp)
 
+# measure-tools P3: host components one at a time (tests/bench/host_bench.cpp). whirl-host-bench: --backend null
+# only (CPU, never loads HIP); whirl-host-bench-hip: the same source with the HIP backend for the copy suite.
+add_executable(whirl-host-bench
+  ${CMAKE_SOURCE_DIR}/tests/bench/host_bench.cpp
+  ${CMAKE_SOURCE_DIR}/tests/server/mock_backend.cpp
+  ${CMAKE_SOURCE_DIR}/tests/server/http_client.cpp
+  ${CMAKE_SOURCE_DIR}/src/model/spec.cpp)
+target_include_directories(whirl-host-bench PRIVATE ${CMAKE_SOURCE_DIR}/tests/server ${CMAKE_SOURCE_DIR}/tests/bench)
+target_link_libraries(whirl-host-bench PRIVATE whirl_server_core whirl_device_null)
+if(WHIRL_WITH_HIP)
+  add_executable(whirl-host-bench-hip
+    ${CMAKE_SOURCE_DIR}/tests/bench/host_bench.cpp
+    ${CMAKE_SOURCE_DIR}/tests/server/mock_backend.cpp
+    ${CMAKE_SOURCE_DIR}/tests/server/http_client.cpp)
+  target_include_directories(whirl-host-bench-hip PRIVATE ${CMAKE_SOURCE_DIR}/tests/server ${CMAKE_SOURCE_DIR}/tests/bench)
+  target_compile_definitions(whirl-host-bench-hip PRIVATE WHIRL_HOST_BENCH_HIP=1)
+  target_link_libraries(whirl-host-bench-hip PRIVATE whirl_server_core whirl_model whirl_device whirl_device_null)
+endif()
+
 # arch024 S0a: CPU pins (prompt tokens, engine memory / copy sequence), recorded on the B0 base (tests/pins)
 add_executable(whirl-pins
   ${CMAKE_SOURCE_DIR}/tests/pins/pins.cpp
