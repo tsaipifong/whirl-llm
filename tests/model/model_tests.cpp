@@ -1531,6 +1531,7 @@ void testDraftWindowRestore() {
 // arch025-F1 (R-7, PLAN C8): the matmul dispatch lives in src/model/forward/dispatch.cpp and nowhere else, and the
 // shared helpers ti / I / D in src/model/forward_internal.h stay inside an anonymous namespace (internal linkage per
 // forward TU, as when they were file-local to forward.cpp); no public header includes the internal header.
+// arch025-F2: draftAttn / attnBlock / prefillAttn only in forward/attn.cpp, ffnBlock / moeBlock only in forward/ffn.cpp.
 void testForwardSplit() {
 #ifdef WHIRL_SOURCE_DIR
     const std::filesystem::path root(WHIRL_SOURCE_DIR);
@@ -1543,6 +1544,24 @@ void testForwardSplit() {
         check(disp.find(fn) != std::string::npos && fwd.find(fn) == std::string::npos,
               std::string("forward split: ") + fn + " defined in forward/dispatch.cpp only");
     }
+    // arch025-F2: the attention block in forward/attn.cpp, the FFN / MoE block in forward/ffn.cpp, each defined once.
+    const std::string attn = readSource(root / "src/model/forward/attn.cpp");
+    const std::string ffn = readSource(root / "src/model/forward/ffn.cpp");
+    check(!attn.empty() && !ffn.empty(), "forward split: forward/attn.cpp, forward/ffn.cpp readable");
+    const std::string others[] = {fwd, disp, attn, ffn};
+    struct Home {
+        const char* fn;
+        std::size_t at;  // index into others
+    };
+    for (const Home h : {Home{"void Model::draftAttn(", 2}, Home{"void Model::attnBlock(", 2}, Home{"void Model::prefillAttn(", 2},
+                         Home{"void Model::ffnBlock(", 3}, Home{"void Model::moeBlock(", 3}}) {
+        bool once = true;
+        for (std::size_t i = 0; i < std::size(others); ++i)
+            once = once && ((others[i].find(h.fn) != std::string::npos) == (i == h.at));
+        check(once, std::string("forward split: ") + h.fn + (h.at == 2 ? " defined in forward/attn.cpp only" : " defined in forward/ffn.cpp only"));
+    }
+    for (const std::string* s : {&attn, &ffn})
+        check(s->find("#include \"../forward_internal.h\"") != std::string::npos, "forward split: attn.cpp / ffn.cpp include forward_internal.h");
     const std::size_t anon = hdr.find("namespace {"), close = hdr.find("}  // namespace\n");
     bool inside = anon != std::string::npos && close != std::string::npos && anon < close;
     for (const char* h : {"constexpr std::size_t ti(", "inline i32 I(", "hip::Dim3 D("}) {

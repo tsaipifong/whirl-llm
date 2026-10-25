@@ -146,6 +146,30 @@
    "manual": ["V-work: launch table under WHIRL_LAUNCH_LOG == S0b (tools/impact/work_equal.py), both GPUs",
               "V-stage: whirl-stage-bench decode_step / verify / prefill_chunk, golden equal + GPU time in distribution, both GPUs (quiet window)",
               "I5 host time (no cross-TU inlining without /GL): F8 server chat decode A/B after F7"]
+  },
+  "forward.attn": {
+   "id": "F2a", "desc": "Model forward attention block: MTP draft attention (draftAttn, OVH-C1 draft window), the gated full-attention sublayer attnBlock and the WMMA prefill attention (Swift and Ornith full-attention layers)",
+   "paths": ["src/model/forward/attn.cpp"], "lands_on": "arch025-f2 (F2)",
+   "steps": ["cpu_model", "st_swift_precise", "st_swift_balance", "st_swift_fast", "st_moe_precise", "st_moe_balance", "st_moe_fast",
+             "golden_swift", "golden_moe", "seq_swift_precise", "seq_swift_balance", "seq_swift_fast", "seq_moe_precise", "seq_moe_balance"],
+   "gpus": {"st_swift_precise": 2, "st_swift_balance": 2, "st_swift_fast": 2, "st_moe_precise": 2, "st_moe_balance": 2, "st_moe_fast": 2,
+            "golden_swift": 2, "golden_moe": 2, "seq_swift_precise": 2, "seq_swift_balance": 2, "seq_swift_fast": 2, "seq_moe_precise": 2,
+            "seq_moe_balance": 2},
+   "manual": ["V-work: launch table under WHIRL_LAUNCH_LOG == S0b (tools/impact/work_equal.py), both GPUs",
+              "V-stage: whirl-stage-bench layer.attn, golden equal + GPU time in distribution, both GPUs (quiet window)",
+              "I5 host time (no cross-TU inlining without /GL): F8 server chat decode A/B after F7"]
+  },
+  "forward.ffn": {
+   "id": "F2b", "desc": "Model forward FFN block: dense SwiGLU FFN (ffnBlock, Swift) and the MoE FFN (moeBlock: router, top-K experts, shared expert; Ornith, also called by tune.cpp)",
+   "paths": ["src/model/forward/ffn.cpp"], "lands_on": "arch025-f2 (F2)",
+   "steps": ["cpu_model", "st_swift_precise", "st_swift_balance", "st_swift_fast", "st_moe_precise", "st_moe_balance", "st_moe_fast",
+             "golden_swift", "golden_moe", "seq_swift_precise", "seq_swift_balance", "seq_swift_fast", "seq_moe_precise", "seq_moe_balance"],
+   "gpus": {"st_swift_precise": 2, "st_swift_balance": 2, "st_swift_fast": 2, "st_moe_precise": 2, "st_moe_balance": 2, "st_moe_fast": 2,
+            "golden_swift": 2, "golden_moe": 2, "seq_swift_precise": 2, "seq_swift_balance": 2, "seq_swift_fast": 2, "seq_moe_precise": 2,
+            "seq_moe_balance": 2},
+   "manual": ["V-work: launch table under WHIRL_LAUNCH_LOG == S0b (tools/impact/work_equal.py), both GPUs",
+              "V-stage: whirl-stage-bench layer.gdn (its FFN part; MoE layers only via layer.gdn on Ornith or a layers subset, layer.moe does not exist), both GPUs (quiet window)",
+              "I5 host time (no cross-TU inlining without /GL): F8 server chat decode A/B after F7"]
   }
  }
 }
