@@ -106,6 +106,12 @@ target_link_libraries(whirl-page-bench PRIVATE whirl_server_core whirl_device_nu
 # unit tests. `whirl-bench-out-tests --emit FILE` also writes a sample file for the records-side importer check.
 add_executable(whirl-bench-out-tests ${CMAKE_SOURCE_DIR}/tests/bench/bench_out_tests.cpp)
 
+# measure-tools P2: kt::Bench (the shared kernel timer of whirl-kernel-test --bench) has no HIP in it; its stop rule,
+# calibration, rotation, anchor / cooldown, ABBA, burst rule, sha256 and JSONL rows are unit-tested on the CPU.
+add_executable(whirl-kt-bench-tests
+  ${CMAKE_SOURCE_DIR}/tests/kernels/unit/kt_bench_tests.cpp
+  ${CMAKE_SOURCE_DIR}/tests/kernels/kt_bench.cpp)
+
 # arch024 S0a: CPU pins (prompt tokens, engine memory / copy sequence), recorded on the B0 base (tests/pins)
 add_executable(whirl-pins
   ${CMAKE_SOURCE_DIR}/tests/pins/pins.cpp

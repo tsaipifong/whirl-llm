@@ -34,4 +34,5 @@ if(WHIRL_WITH_HIP)
   add_executable(whirl-kernel-test ${WHIRL_KERNEL_TEST_SOURCES})
   target_include_directories(whirl-kernel-test PRIVATE ${CMAKE_SOURCE_DIR}/kernels)  # iq_tables.h (host copy of the grid)
   target_link_libraries(whirl-kernel-test PRIVATE whirl_kernels_host whirl)
+  target_compile_definitions(whirl-kernel-test PRIVATE WHIRL_KT_VERSION="${PROJECT_VERSION}")  # --bench rows: tool_ver
 endif()
