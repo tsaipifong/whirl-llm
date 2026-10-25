@@ -4,6 +4,9 @@ paired comparison of two configurations with McNemar and the recovery ratio vs p
 Run with the isolated interpreter:  python -I tools\\taskacc\\taskacc.py <command> ...
 
   build    --set core200|full --out DIR                 write DIR\\tasks_<set>.jsonl (+ .meta.json: sources, sha256, licenses)
+  build    --set long --gguf MODEL.gguf --out DIR [--lengths 32k,64k,96k,128k] [--contexts 6] [--n-code 4] [--n-kv 6]
+           long-context suite (longctx.py, feat027-longacc): repo-snapshot contexts, execution-graded coding needles
+           (two hops + deprecated-section decoy) and key/value needles with near-duplicate decoys
   validate --tasks FILE [--workers 4]                   reference solutions must pass, stub solutions must fail (grader check)
   run      --tasks FILE --url http://127.0.0.1:PORT --out RES.jsonl --label NAME
            [--samples 1] [--temperature 0|card|T] [--seed0 0] [--think off|on] [--effort low|medium|high]
@@ -13,7 +16,7 @@ Run with the isolated interpreter:  python -I tools\\taskacc\\taskacc.py <comman
   report   RES.jsonl                                    accuracy of one run, by language / source, status counts
   compare  A.jsonl B.jsonl [--json OUT] [--boot 10000]  paired: McNemar, recovery vs A, bootstrap CI, verdicts
   plan     --n 200 --acc 0.85                           planning: minimum drop McNemar can flag [estimate]
-  selftest                                              CPU selftests (test_taskacc.py)
+  selftest                                              CPU selftests (test_taskacc.py, test_longacc.py)
 """
 import argparse
 import concurrent.futures as cf
@@ -30,7 +33,7 @@ import sandbox as S         # noqa: E402
 import stats as T           # noqa: E402
 import tasks as K           # noqa: E402
 
-VERSION = "taskacc 1 (2026-10-26)"
+VERSION = "taskacc 1 + longacc 1 (2026-10-26)"
 
 
 def _out(*a):
@@ -38,11 +41,41 @@ def _out(*a):
 
 
 def _subsets(rec):
-    return ["all", "lang=" + rec.get("lang", "?"), "src=" + rec.get("source", "?")]
+    s = ["all", "lang=" + rec.get("lang", "?"), "src=" + rec.get("source", "?")]
+    if rec.get("ctx"):           # long-context suite
+        s += ["ctx=" + rec["ctx"], "ctx=" + rec["ctx"] + "/" + rec.get("source", "?")]
+    return s
+
+
+def _grade(t, content, timeout):
+    """Grade one reply: kv = exact retrieval (no code), everything else = extract + sandbox."""
+    if t["kind"] == "kv":
+        import longctx as LC  # noqa: PLC0415
+        return LC.grade_kv(t, content), None
+    code = X.extract(content, t["entry_point"])
+    return S.grade(t, code, timeout=timeout), code
 
 
 # ------------------------------------------------------------------ build / validate
 def cmd_build(a):
+    if a.set == "long":
+        import bpe as B  # noqa: PLC0415
+        import longctx as LC  # noqa: PLC0415
+        if not a.gguf:
+            _out("ERROR build --set long needs --gguf (the model whose tokenizer sizes the contexts)")
+            return 2
+        t0 = time.time()
+        tok = B.BPE.from_gguf(a.gguf)
+        tasks, meta = LC.build(tok, lengths=a.lengths.split(","), contexts=a.contexts, n_code=a.n_code, n_kv=a.n_kv,
+                               seed=a.seed)
+        meta["tokenizer_gguf"] = a.gguf
+        p, meta = LC.write(tasks, meta, a.out, name=a.name or "tasks_long")
+        _out(f"wrote {p}: {meta['n']} tasks {meta['by_kind']} {meta['by_lang']} in {time.time() - t0:.0f} s; "
+             f"taskset_sha256 {meta['taskset_sha256'][:16]}")
+        for c in meta["contexts"]:
+            _out(f"  {c['cluster']:10s} target {c['target']:6d} budget {c['prompt_budget']:6d} "
+                 f"context ~{c['context_tokens_est']:6d} tok [E]")
+        return 0
     tasks, meta = K.build(a.set)
     p = K.write(tasks, meta, a.out)
     _out(f"wrote {p}: {meta['n']} tasks {meta['by_lang']} {meta['by_source']}  taskset_sha256 {meta['taskset_sha256'][:16]}")
@@ -58,9 +91,22 @@ def cmd_validate(a):
         tasks = tasks[:a.limit]
     bad_ref, stub_pass = [], []
 
+    bad_decoy = []
+
     def one(t):
-        r = S.grade(t, t["canonical"] if t["kind"] == "mbpp" else t["canonical"], timeout=a.timeout)
-        s = S.grade(t, STUBS[t["kind"]].format(ep=t["entry_point"]), timeout=a.timeout)
+        if t["kind"] == "kv":       # longacc retrieval: answer passes; decoy, empty, answer + another value fail
+            import longctx as LC  # noqa: PLC0415
+            r = LC.grade_kv(t, t["answer"])
+            s = {"passed": any(LC.grade_kv(t, x)["passed"]
+                               for x in (t["decoy_answer"], "", "amber-cobalt-1234 " + t["answer"]))}
+            return t, r, s
+        r = S.grade(t, t["canonical"], timeout=a.timeout)
+        stub = "" if t["kind"] == "lc" else STUBS[t["kind"]].format(ep=t["entry_point"])  # lc: the module's own stub
+        s = S.grade(t, stub, timeout=a.timeout)
+        if t["kind"] == "lc":       # the deprecated (decoy) section implemented exactly must fail
+            d = S.grade(t, t["decoy"], timeout=a.timeout)
+            if d["passed"]:
+                bad_decoy.append(t["id"])
         return t, r, s
     t0 = time.time()
     with cf.ThreadPoolExecutor(a.workers) as ex:
@@ -69,14 +115,18 @@ def cmd_validate(a):
                 bad_ref.append((t["id"], r["status"], r["stderr"].strip().splitlines()[-1:] if r["stderr"] else ""))
             if s["passed"]:
                 stub_pass.append(t["id"])
-            if not r.get("jobbed") and os.name == "nt":
+            if not r.get("jobbed") and os.name == "nt" and t["kind"] != "kv":
                 _out(f"WARNING {t['id']}: process not in the job object")
     _out(f"validate {a.tasks}: {len(tasks)} tasks in {time.time() - t0:.1f} s; reference fails {len(bad_ref)}, stub passes {len(stub_pass)}")
     for x in bad_ref:
         _out("  REF FAIL", *x)
     for x in stub_pass:
         _out("  STUB PASS", x)
-    return 0 if not bad_ref and not stub_pass else 1
+    if any(t["kind"] == "lc" for t in tasks):
+        _out(f"  decoy (deprecated-section) implementations passing: {len(bad_decoy)}")
+    for x in bad_decoy:
+        _out("  DECOY PASS", x)
+    return 0 if not bad_ref and not stub_pass and not bad_decoy else 1
 
 
 # ------------------------------------------------------------------ run
@@ -98,6 +148,8 @@ def _load_rows(path):
 
 def cmd_run(a):
     tasks = K.load(a.tasks)
+    if a.ctx:   # long suite: only these length buckets (e.g. "32k,64k")
+        tasks = [t for t in tasks if t.get("ctx") in a.ctx.split(",")]
     if a.limit:
         tasks = tasks[:a.limit]
     cl = C.Client(a.url, timeout=a.request_timeout)
@@ -139,18 +191,23 @@ def cmd_run(a):
         t, seed = job
         if stop.is_set():
             return None
-        r = cl.chat(model, t["prompt"], temperature=temp, max_tokens=a.max_tokens,
+        mt = a.max_tokens if (a.force_max_tokens or not t.get("max_tokens")) else t["max_tokens"]
+        r = cl.chat(model, t["prompt"], temperature=temp, max_tokens=mt,
                     seed=seed if (temp == "card" or temp > 0) else None, think=(a.think == "on"), effort=a.effort)
         rec = {"task_id": t["id"], "seed": seed, "lang": t["lang"], "source": t["source"], "label": a.label,
                "finish": r["finish"], "usage": r["usage"], "seconds": r["seconds"], "content": r["content"],
                "reasoning_chars": len(r.get("reasoning") or "")}
+        if t.get("ctx"):   # long-context suite: bucket, cluster (shared context), depth, measured prompt tokens
+            u = r.get("usage") or {}
+            rec.update({"ctx": t["ctx"], "cluster": t.get("cluster"), "depth": t.get("depth"), "kind": t["kind"],
+                        "max_tokens": mt, "prompt_tokens": u.get("prompt_tokens"),
+                        "cached_tokens": (u.get("prompt_tokens_details") or {}).get("cached_tokens")})
         if not r["ok"]:
             rec.update({"invalid": True, "error": r["error"], "passed": False, "status": "request_error"})
         else:
-            code = X.extract(r["content"], t["entry_point"])
-            g = S.grade(t, code, timeout=a.timeout)
+            g, code = _grade(t, r["content"], a.timeout)
             rec.update({"passed": g["passed"], "status": g["status"], "grade_seconds": g["seconds"],
-                        "stderr_tail": g["stderr"][-400:], "code_found": code is not None})
+                        "stderr_tail": g["stderr"][-400:], "code_found": code is not None or t["kind"] == "kv"})
         with lock:
             fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
             fh.flush()
@@ -177,6 +234,18 @@ def cmd_run(a):
     complete = len({(r["task_id"], r.get("seed", 0)) for r in rows}) >= len(tasks) * a.samples
     _out(f"== {a.label}: {n_ok}/{len(rows)} passed ({100 * n_ok / max(1, len(rows)):.1f}%) "
          f"{'complete' if complete else 'INCOMPLETE'}; {(time.time() - t0) / 60:.1f} min")
+    if any(t.get("ctx") for t in tasks):   # long suite: per bucket accuracy, invalid rows (e.g. slot too small), cache use
+        _, allrows = _load_rows(a.out)
+        for b in sorted({t["ctx"] for t in tasks}, key=lambda x: int(x.rstrip("k"))):
+            rb = [r for r in allrows if r.get("ctx") == b]
+            ok = [r for r in rb if not r.get("invalid")]
+            pt = [r.get("prompt_tokens") or 0 for r in ok]
+            ct = [r.get("cached_tokens") or 0 for r in ok]
+            _out(f"   ctx {b:5s} pass {sum(r['passed'] for r in ok)}/{len(ok)}  invalid {len(rb) - len(ok)}  "
+                 f"prompt_tokens max {max(pt or [0])}  cached share {sum(ct) / max(1, sum(pt)):.2f}")
+            errs = sorted({str(r.get("error"))[:120] for r in rb if r.get("invalid")})
+            for e in errs[:3]:
+                _out(f"     invalid: {e}")
     return 0 if complete else 4
 
 
@@ -191,8 +260,7 @@ def cmd_regrade(a):
             if r.get("invalid") or r["task_id"] not in tasks:
                 return r
             t = tasks[r["task_id"]]
-            code = X.extract(r.get("content") or "", t["entry_point"])
-            g = S.grade(t, code, timeout=a.timeout)
+            g, code = _grade(t, r.get("content") or "", a.timeout)
             r = dict(r, passed=g["passed"], status=g["status"], stderr_tail=g["stderr"][-400:], code_found=code is not None)
             return r
         with cf.ThreadPoolExecutor(a.workers) as ex:
@@ -292,7 +360,7 @@ def cmd_plan(a):
 def cmd_selftest(a):
     import unittest
     here = os.path.dirname(os.path.abspath(__file__))
-    suite = unittest.defaultTestLoader.discover(here, pattern="test_taskacc.py", top_level_dir=here)
+    suite = unittest.defaultTestLoader.discover(here, pattern="test_*.py", top_level_dir=here)
     r = unittest.TextTestRunner(verbosity=2).run(suite)
     return 0 if r.wasSuccessful() else 1
 
@@ -305,6 +373,10 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sp = ap.add_subparsers(dest="cmd", required=True)
     p = sp.add_parser("build"); p.add_argument("--set", default="core200"); p.add_argument("--out", required=True)
+    p.add_argument("--gguf", default=None, help="long: model GGUF whose tokenizer sizes the contexts")
+    p.add_argument("--lengths", default="32k,64k,96k,128k"); p.add_argument("--contexts", type=int, default=6)
+    p.add_argument("--n-code", type=int, default=4); p.add_argument("--n-kv", type=int, default=6)
+    p.add_argument("--seed", type=int, default=20261026); p.add_argument("--name", default=None)
     p = sp.add_parser("validate"); p.add_argument("--tasks", required=True); p.add_argument("--workers", type=int, default=4)
     p.add_argument("--timeout", type=float, default=10.0); p.add_argument("--limit", type=int, default=0)
     p = sp.add_parser("run")
@@ -316,6 +388,9 @@ def main(argv=None):
     p.add_argument("--concurrency", type=int, default=4); p.add_argument("--timeout", type=float, default=10.0)
     p.add_argument("--request-timeout", type=float, default=900.0); p.add_argument("--limit", type=int, default=0)
     p.add_argument("--max-wall-min", type=float, default=0); p.add_argument("--extra", default="")
+    p.add_argument("--ctx", default="", help="long suite: only these buckets, e.g. 32k,64k")
+    p.add_argument("--force-max-tokens", action="store_true",
+                   help="use --max-tokens even for tasks that set their own max_tokens (long suite)")
     p = sp.add_parser("regrade"); p.add_argument("res"); p.add_argument("--tasks", required=True); p.add_argument("--out", required=True)
     p.add_argument("--workers", type=int, default=4); p.add_argument("--timeout", type=float, default=10.0)
     p = sp.add_parser("report"); p.add_argument("res")

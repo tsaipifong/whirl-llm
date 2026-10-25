@@ -195,6 +195,11 @@ def assemble(task, code):
             sol = task["prompt_code"].rstrip() + "\n" + body
         return sol, task["test"]
     test = "\n".join(task.get("test_imports") or []) + "\n" + task["test"]
+    if task["kind"] == "lc":   # feat027-longacc: the repository module is importable and in scope
+        import longctx  # noqa: PLC0415
+        fut = [l for l in code.splitlines() if l.strip().startswith("from __future__ import")]
+        body = "\n".join(l for l in code.splitlines() if not l.strip().startswith("from __future__ import"))
+        return "\n".join(fut) + ("\n" if fut else "") + longctx.lc_prelude(task) + body, test
     return code, test
 
 

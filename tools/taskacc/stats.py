@@ -2,7 +2,8 @@
 
 A = the reference configuration (normally precise), B = the candidate (balance, fast, an item on/off).
 Pairs are keyed by (task_id, seed); with several seeds per task the bootstrap resamples TASKS
-(cluster bootstrap), so correlated samples of one task are not counted as independent.
+(cluster bootstrap), so correlated samples of one task are not counted as independent. Records with a
+"cluster" field (long-context suite: the shared context) are resampled by that cluster instead.
 
   acc            pass@1 = mean(passed) over all samples (= the unbiased pass@1 estimator for n samples)
   recovery       acc_B / acc_A (Kurtic et al. 2024, Neural Magic model cards)
@@ -52,8 +53,8 @@ def pair(res_a, res_b):
 def bootstrap(pairs, n_boot=10000, seed=12345):
     """Cluster bootstrap over task ids. Returns dict of percentile CIs (2.5 / 97.5) for recovery and diff."""
     by_task = {}
-    for k, a, b, *_ in pairs:
-        t = by_task.setdefault(k[0], [0, 0, 0])
+    for k, a, b, ra, *_ in pairs:
+        t = by_task.setdefault(ra.get("cluster") or k[0], [0, 0, 0])   # longacc: tasks of one context together
         t[0] += a
         t[1] += b
         t[2] += 1
