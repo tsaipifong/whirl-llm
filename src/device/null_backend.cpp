@@ -5,6 +5,8 @@
 
 #include <algorithm>
 #include <iterator>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <malloc.h>
 #include <new>
@@ -12,7 +14,43 @@
 
 namespace whirl::device {
 
+#ifdef WHIRL_LEAKCHECK
+// safe025: leak check at the end of every NullBackend's life. Most tests build their own NullBackend, so the destructor
+// is the end of the test; the tier tests share a few (review C2c), there a leak is found but not tied to one test.
+// Anything still alive then was never freed through the backend (the VRAM / pinned-memory leak of the real backend).
+// The ledger prints once at process exit and turns a clean exit into code 97.
+namespace {
+std::atomic<long> g_leaks{0};
+std::atomic<long> g_backends{0};
+struct LeakReport {
+    ~LeakReport() {
+        if (std::getenv("WHIRL_LEAKCHECK_QUIET") == nullptr)
+            std::fprintf(stderr, "LEAKCHECK: %ld NullBackend instances checked, %ld leaked\n", g_backends.load(), g_leaks.load());
+        // _Exit skips the CRT's stream flush: flush first, or a test log redirected to a file (fully buffered) loses its
+        // tail - the failing test names and the 'N passed, M failed' summary (safe025 review A1).
+        if (g_leaks.load() != 0) {
+            std::fflush(nullptr);
+            std::_Exit(97);
+        }
+    }
+} g_report;
+}  // namespace
+
+NullBackend::~NullBackend() {
+    ++g_backends;
+    if (allow_leak_.load()) return;
+    const std::size_t a = liveAllocations();
+    const long h = live_host_.load(), s = live_streams_.load(), e = live_events_.load();
+    if (a != 0 || h != 0 || s != 0 || e != 0) {
+        ++g_leaks;
+        std::fprintf(stderr, "LEAKCHECK: NullBackend destroyed with %zu allocations (%ld pinned host), %ld streams, %ld events alive\n", a, h, s, e);
+    }
+}
+long NullBackend::leaksFound() { return g_leaks.load(); }
+#else
 NullBackend::~NullBackend() = default;
+long NullBackend::leaksFound() { return 0; }
+#endif
 
 bool NullBackend::isHost(DevPtr p) const {
     std::lock_guard<std::mutex> lk(mu_);
