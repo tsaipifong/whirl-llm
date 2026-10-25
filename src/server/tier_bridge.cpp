@@ -293,68 +293,99 @@ void TierBridge::spillSlot(std::uint32_t id, bool idle, SlotPrefix& sp, SlotTier
 // still reads, and entries with an SSD copy (other files may share its blocks; RAM pressure and expiry handle them).
 // The new entry inherits 'reused' (a multi-turn session stays worth an SSD write). fix-r21: an older entry whose
 // deepest restore point the new entry does not keep is not replaced but demoted (first eviction victim).
+// fix-k2 (review s15 K2): the entries are examined longest first (n_tok, then id: the same result for any
+// t->entries order), and every entry chosen for removal is checked again against the entries that finally stay --
+// an entry that vouched for a shorter one may itself be removed later in the pass (e ⊂ o ⊂ x: o holds e's point,
+// x covers o), and then e stays (demoted) instead of losing its restore range.
 void TierBridge::dropContained(std::uint32_t slot_id, tier::Entry* x) {
     tier::Tier* t = tier_;
     if (!t || !x || x->n_tok == 0) return;
     const bool cold = ps_.config().cold_resume;
+    std::vector<tier::Entry*> all(t->entries.begin(), t->entries.end());
+    std::sort(all.begin(), all.end(), [](const tier::Entry* a, const tier::Entry* b) {
+        return a->n_tok != b->n_tok ? a->n_tok > b->n_tok : a->id < b->id;
+    });
     std::vector<tier::Entry*> drop;
-    for (tier::Entry* e : t->entries) {
+    auto dropped = [&](const tier::Entry* o) { return std::find(drop.begin(), drop.end(), o) != drop.end(); };
+    // fix-r21 (review R2-1): a hybrid model resumes only at a stored checkpoint (the SSM / conv state; the KV
+    // pages alone are no restore point), unlike llama.cpp's pure-attention case where the KV truncates to any
+    // prefix. So e goes only when x keeps a restore point at least as deep as e's deepest one (and inside e's
+    // tokens, where both hold the same history); otherwise e stays, evicted first (x covers e's tokens).
+    // COLD-RESUME (precise, review R3-1) resumes only on the cold schedule: system / prefix checkpoints, or
+    // another kind that sits on the schedule of e's tokens (resumeOk; a prompt-end or gen-end inside a
+    // schedule chunk is never a restore point there)
+    auto restorePoint = [&](const tier::Entry* e, const tier::CkMeta& c) {
+        const std::span<const std::uint32_t> et(e->tokens.data(), e->n_tok);
+        return c.valid != 0 && c.pos <= e->n_tok && (!cold || c.kind >= 4 || ps_.resumeOk(et, c.pos, c.kind));
+    };
+    // e's deepest restore point; false when e holds none (nothing to keep)
+    auto deepest = [&](const tier::Entry* e, std::uint32_t& deep) {
+        bool any = false;
+        deep = 0;
+        for (std::uint32_t j = 0; j < tier::max_ck; ++j) {
+            const tier::CkMeta& c = e->ck[j];
+            if (!restorePoint(e, c)) continue;
+            deep = any ? std::max(deep, c.pos) : c.pos;
+            any = true;
+        }
+        return any;
+    };
+    // o holds a restore point of e's history at least as deep as 'deep' (for o == x the prefix test always holds)
+    auto holds = [&](const tier::Entry* o, const tier::Entry* e, std::uint32_t deep) {
+        for (std::uint32_t j = 0; j < tier::max_ck; ++j) {
+            const tier::CkMeta& c = o->ck[j];
+            if (c.pos >= deep && c.pos <= o->n_tok && o->tokens.size() >= c.pos && restorePoint(e, c) &&
+                std::equal(o->tokens.begin(), o->tokens.begin() + c.pos, e->tokens.begin()))
+                return true;
+        }
+        return false;
+    };
+    // x, or another entry kept beside it, holds e's deepest restore point (the cold prefill of a lost lineage keeps
+    // its LCP checkpoint with the old entry as a shared prefix entry, e.g. precise 'prefix' @2048). Review R4-2: o
+    // then inherits e's 'reused', so it reaches the SSD with x and the point survives a restart
+    auto covered = [&](tier::Entry* e) {
+        std::uint32_t deep = 0;
+        if (!deepest(e, deep) || holds(x, e, deep)) return true;
+        for (tier::Entry* o : all) {
+            if (o == e || o == x || o->n_tok == 0 || dropped(o) || !holds(o, e, deep)) continue;
+            o->reused = o->reused || e->reused;
+            return true;
+        }
+        return false;
+    };
+    auto keep = [&](tier::Entry* e) {
+        if (!e->demoted) {
+            std::uint32_t deep = 0;
+            deepest(e, deep);
+            t->demote(e);
+            logI("slot {} | kv tier: entry {:016x} ({} tok) is contained in the new entry ({} tok) but holds a deeper restore "
+                 "point ({}): kept, evicted first",
+                 slot_id, e->id, e->n_tok, x->n_tok, deep);
+        }
+        // x inherits 'reused' (the session stays worth an SSD write). Review R4-1 (lead decision): e keeps its
+        // own 'reused' -- no other entry holds its deepest restore point, so the close flush writes it too and
+        // that point survives a restart (2 SSD files for this session on this rare path)
+        x->reused = x->reused || e->reused;
+    };
+    for (tier::Entry* e : all) {
         if (e == x || e->n_tok == 0 || e->n_tok > x->n_tok || e->tokens.size() < e->n_tok) continue;
         if (e->nck == 1 && e->ck[0].valid != 0 && e->ck[0].kind >= 4 && e->ck[0].pos == e->n_tok) continue;  // shared prefix
         if (e->owner && *e->owner != slot_id) continue;
         if (e->ssd || !e->in_ram || e->pin != 0 || e->io_busy || e->ext_pin != 0 || e->loading || !t->gpuIdle(e)) continue;
         if (!std::equal(e->tokens.begin(), e->tokens.begin() + e->n_tok, x->tokens.begin())) continue;
-        // fix-r21 (review R2-1): a hybrid model resumes only at a stored checkpoint (the SSM / conv state; the KV
-        // pages alone are no restore point), unlike llama.cpp's pure-attention case where the KV truncates to any
-        // prefix. So e goes only when x keeps a restore point at least as deep as e's deepest one (and inside e's
-        // tokens, where both hold the same history); otherwise e stays, evicted first (x covers e's tokens).
-        // COLD-RESUME (precise, review R3-1) resumes only on the cold schedule: system / prefix checkpoints, or
-        // another kind that sits on the schedule of e's tokens (resumeOk; a prompt-end or gen-end inside a
-        // schedule chunk is never a restore point there)
-        const std::span<const std::uint32_t> et(e->tokens.data(), e->n_tok);
-        auto restorePoint = [&](const tier::CkMeta& c) {
-            return c.valid != 0 && c.pos <= e->n_tok && (!cold || c.kind >= 4 || ps_.resumeOk(et, c.pos, c.kind));
-        };
-        std::uint32_t deep = 0;
-        bool any = false;
-        for (std::uint32_t j = 0; j < tier::max_ck; ++j) {
-            const tier::CkMeta& c = e->ck[j];
-            if (!restorePoint(c)) continue;
-            deep = any ? std::max(deep, c.pos) : c.pos;
-            any = true;
-        }
-        bool covered = !any;
-        for (std::uint32_t j = 0; j < tier::max_ck && !covered; ++j) {
-            const tier::CkMeta& c = x->ck[j];
-            covered = c.pos >= deep && restorePoint(c);
-        }
-        // or another entry kept beside it holds that restore point of the same history (the cold prefill of a lost
-        // lineage keeps its LCP checkpoint with the old entry as a shared prefix entry, e.g. precise 'prefix' @2048).
-        // Review R4-2: o then inherits e's 'reused', so it reaches the SSD with x and the point survives a restart
-        for (tier::Entry* o : t->entries) {
-            if (covered) break;
-            if (o == e || o == x || o->n_tok == 0 || std::find(drop.begin(), drop.end(), o) != drop.end()) continue;
-            for (std::uint32_t j = 0; j < tier::max_ck && !covered; ++j) {
-                const tier::CkMeta& c = o->ck[j];
-                covered = c.pos >= deep && c.pos <= o->n_tok && o->tokens.size() >= c.pos && restorePoint(c) &&
-                          std::equal(o->tokens.begin(), o->tokens.begin() + c.pos, e->tokens.begin());
-            }
-            if (covered) o->reused = o->reused || e->reused;
-        }
-        if (!covered) {
-            if (!e->demoted) {
-                t->demote(e);
-                logI("slot {} | kv tier: entry {:016x} ({} tok) is contained in the new entry ({} tok) but holds a deeper restore "
-                     "point ({}): kept, evicted first",
-                     slot_id, e->id, e->n_tok, x->n_tok, deep);
-            }
-            // x inherits 'reused' (the session stays worth an SSD write). Review R4-1 (lead decision): e keeps its
-            // own 'reused' -- no other entry holds its deepest restore point, so the close flush writes it too and
-            // that point survives a restart (2 SSD files for this session on this rare path)
-            x->reused = x->reused || e->reused;
+        if (covered(e)) drop.push_back(e);
+        else keep(e);
+    }
+    // fix-k2: re-check against the final survivors. Taking an entry back only adds survivors, so an entry that
+    // passed stays covered: one pass in drop order (longest first) decides it
+    for (std::size_t i = 0; i < drop.size();) {
+        tier::Entry* e = drop[i];
+        if (covered(e)) {
+            ++i;
             continue;
         }
-        drop.push_back(e);
+        drop.erase(drop.begin() + static_cast<std::ptrdiff_t>(i));
+        keep(e);
     }
     for (tier::Entry* e : drop) {
         x->reused = x->reused || e->reused;

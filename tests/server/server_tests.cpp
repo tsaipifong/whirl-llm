@@ -6132,22 +6132,26 @@ void testTierBridgeFlush() {
 }
 
 // ---------------------------------------------------------------------------
-// mt-p3 / review s15 K2 probe (print + setup checks only; no product change, feature freeze): dropContained's
-// transitive drop. Three RAM entries of one history, e ⊂ o ⊂ x (x = the new entry): e (1000 tok, restore point @900),
-// o (2000 tok, points @950 and @2000), x (3000 tok, points @2000 and @3000). In one dropContained(x) pass o vouches
-// for e (o @950 lies in [deep_e 900, e.n_tok 1000]), so e is dropped; then o itself is dropped (x @2000 covers
-// deep_o 2000). A request that shares e's 1000 tokens and diverges at 1000 then has no restore point <= 1000 left
-// (x's points are past the divergence) -- unless o was examined before e (t->entries order). The probe runs both
-// orders and prints which entries stay and the deepest restore point left for that request.
-struct K2Result {
-    bool e_kept = false, o_kept = false, x_kept = false;
-    std::uint32_t best_le_1000 = 0;  // deepest restore point any remaining entry holds for the diverging request
+// fix-k2 (review s15 K2, mt-p3 probe): dropContained's transitive drop. RAM entries of one history, each a prefix of
+// x (the new entry), restore points of kind 1 (prompt-end; balance config, no COLD-RESUME filter). Bug: in one
+// dropContained(x) pass o vouched for e (o holds a point in [deep_e, e.n_tok]) and was then dropped itself (x covers
+// deep_o), so e's restore range was lost -- depending on the t->entries order. Invariant checked here for EVERY
+// permutation of the creation order (t->entries order): x stays; every original entry's deepest restore point range
+// [deep, n_tok] still holds a point in some remaining entry (no restore depth lost); the kept set is the expected
+// minimal one (by role, the same in every order: order-independent, no extra RAM).
+namespace {
+struct K2Spec {
+    char role;
+    std::uint32_t n;
+    std::vector<std::uint32_t> pts;
 };
 
-K2Result k2Run(bool e_first) {
+// runs dropContained on one creation order; returns the roles still present (sorted) and checks the invariant
+std::string k2Run(const std::vector<K2Spec>& specs, const std::vector<std::size_t>& order, std::uint32_t x_n,
+                  const std::vector<std::uint32_t>& x_pts, std::string& lost) {
     TbRig r;
-    const std::vector<std::uint32_t> xt = tbTokens(3000, 11);
-    auto mk = [&](std::uint32_t n, std::vector<std::uint32_t> pts) {
+    const std::vector<std::uint32_t> xt = tbTokens(x_n, 11);
+    auto mk = [&](std::uint32_t n, const std::vector<std::uint32_t>& pts) {
         tier::Entry* en = r.tier->newEntry(static_cast<std::uint32_t>(pts.size()));
         en->tokens.assign(xt.begin(), xt.begin() + n);
         en->n_tok = n;
@@ -6155,49 +6159,78 @@ K2Result k2Run(bool e_first) {
         for (std::size_t j = 0; j < pts.size(); ++j) {
             en->ck[j].pos = pts[j];
             en->ck[j].valid = 1;
-            en->ck[j].kind = 1;  // prompt-end (not a shared prefix entry, not COLD-RESUME-filtered: balance config)
-            en->ck[j].seq = j + 1;
+            en->ck[j].kind = 1;
+            en->ck[j].seq = static_cast<std::uint32_t>(j + 1);
         }
         return en;
     };
-    tier::Entry *e = nullptr, *o = nullptr;
-    if (e_first) {
-        e = mk(1000, {900});
-        o = mk(2000, {950, 2000});
-    } else {
-        o = mk(2000, {950, 2000});
-        e = mk(1000, {900});
-    }
-    tier::Entry* x = mk(3000, {2000, 3000});
-    const std::uint64_t eid = e->id, oid = o->id, xid = x->id;
-    CHECK(r.tier->entries.size() == 3u);
-    r.tb->dropContained(0, x);
-    K2Result k;
-    k.e_kept = r.tier->find(eid) != nullptr;
-    k.o_kept = r.tier->find(oid) != nullptr;
-    k.x_kept = r.tier->find(xid) != nullptr;
-    std::vector<std::uint32_t> q(xt.begin(), xt.begin() + 1000);
-    for (std::uint32_t i = 0; i < 500; ++i) q.push_back(90000 + i);  // diverges at 1000
-    for (const tier::Entry* en : r.tier->entries)
-        for (std::uint32_t j = 0; j < tier::max_ck; ++j) {
-            const tier::CkMeta& c = en->ck[j];
-            if (c.valid == 0 || c.pos > 1000 || c.pos > en->n_tok) continue;
-            if (std::equal(en->tokens.begin(), en->tokens.begin() + c.pos, q.begin())) k.best_le_1000 = std::max(k.best_le_1000, c.pos);
+    std::vector<std::pair<char, std::uint64_t>> ids;
+    tier::Entry* x = nullptr;
+    for (std::size_t i : order) {
+        if (i == specs.size()) {
+            x = mk(x_n, x_pts);
+            ids.push_back({'x', x->id});
+        } else {
+            ids.push_back({specs[i].role, mk(specs[i].n, specs[i].pts)->id});
         }
-    return k;
+    }
+    CHECK(r.tier->entries.size() == specs.size() + 1);
+    r.tb->dropContained(0, x);
+    std::string kept;
+    for (const auto& [role, id] : ids)
+        if (r.tier->find(id)) kept.push_back(role);
+    std::sort(kept.begin(), kept.end());
+    lost.clear();
+    for (const K2Spec& s : specs) {
+        const std::uint32_t deep = *std::max_element(s.pts.begin(), s.pts.end());
+        bool held = false;
+        for (const tier::Entry* en : r.tier->entries)
+            for (std::uint32_t j = 0; j < tier::max_ck && !held; ++j) {
+                const tier::CkMeta& c = en->ck[j];
+                held = c.valid != 0 && c.pos >= deep && c.pos <= s.n && c.pos <= en->n_tok;  // all entries share xt's prefix
+            }
+        if (!held) lost += std::string(1, s.role) + "[" + std::to_string(deep) + "," + std::to_string(s.n) + "] ";
+    }
+    return kept;
 }
 
-void testTierDropK2Probe() {
-    for (const bool e_first : {true, false}) {
-        const K2Result k = k2Run(e_first);
-        CHECK(k.x_kept);  // the new entry is never removed
-        std::fprintf(stderr,
-                     "  (tier_drop_k2_probe order %s: e %s, o %s, x %s; deepest restore point <= 1000 for a request diverging at "
-                     "1000: %u%s)\n",
-                     e_first ? "e,o,x" : "o,e,x", k.e_kept ? "kept" : "dropped", k.o_kept ? "kept" : "dropped",
-                     k.x_kept ? "kept" : "dropped", k.best_le_1000,
-                     k.best_le_1000 >= 900 ? "" : "  <- K2: e's restore range [900,1000] lost (transitive drop)");
-    }
+void k2AllOrders(const char* name, const std::vector<K2Spec>& specs, std::uint32_t x_n, const std::vector<std::uint32_t>& x_pts,
+                 const std::string& want_kept) {
+    std::vector<std::size_t> order(specs.size() + 1);
+    for (std::size_t i = 0; i < order.size(); ++i) order[i] = i;
+    std::size_t n_orders = 0, n_bad = 0;
+    do {
+        std::string lost;
+        const std::string kept = k2Run(specs, order, x_n, x_pts, lost);
+        ++n_orders;
+        const bool ok = kept == want_kept && lost.empty();
+        if (!ok) {
+            ++n_bad;
+            std::string os;
+            for (std::size_t i : order) os.push_back(i == specs.size() ? 'x' : specs[i].role);
+            std::fprintf(stderr, "  (tier_drop_k2 %s order %s: kept %s (want %s), restore range lost: %s)\n", name, os.c_str(),
+                         kept.c_str(), want_kept.c_str(), lost.empty() ? "none" : lost.c_str());
+        }
+        CHECK_EQ(kept, want_kept);
+        CHECK(lost.empty());
+    } while (std::next_permutation(order.begin(), order.end()));
+    std::fprintf(stderr, "  (tier_drop_k2 %s: %zu orders, %zu wrong)\n", name, n_orders, n_bad);
+}
+}  // namespace
+
+void testTierDropK2() {
+    // A (the review's case): e (1000, @900) ⊂ o (2000, @950 @2000) ⊂ x (3000, @2000 @3000). x covers o; only e (or o)
+    // holds a point in [900,1000]; keeping e (1000 tok) instead of o (2000) is the smaller set.
+    k2AllOrders("A", {{'e', 1000, {900}}, {'o', 2000, {950, 2000}}}, 3000, {2000, 3000}, "ex");
+    // B (chain of two vouchers): e (1000, @900), o (2000, @950 @1500), q (2500, @1800 @2500), x (3000, @3000).
+    // q is not covered (kept, demoted); q covers o (@1800 in [1500,2000]) -> o goes; then nothing remaining holds
+    // a point in [900,1000] but e itself -> e stays.
+    k2AllOrders("B", {{'e', 1000, {900}}, {'o', 2000, {950, 1500}}, {'q', 2500, {1800, 2500}}}, 3000, {3000}, "eqx");
+    // C (shorter voucher, no extra RAM): e (1000, @900), s (950, @950), x (3000, @3000). s is kept (nothing holds 950);
+    // s covers e (@950 in [900,1000]) -> e goes.
+    k2AllOrders("C", {{'e', 1000, {900}}, {'s', 950, {950}}}, 3000, {3000}, "sx");
+    // D (all covered by x directly): e (1000, @900), o (2000, @1500), x (3000, @1000 @2000 @3000) -> both go.
+    k2AllOrders("D", {{'e', 1000, {900}}, {'o', 2000, {1500}}}, 3000, {1000, 2000, 3000}, "x");
 }
 
 // ---------------------------------------------------------------------------
@@ -7571,7 +7604,7 @@ int main(int argc, char** argv) {
         {"tier_bridge_spill", testTierBridgeSpill},
         {"tier_bridge_supersede", testTierBridgeSupersede},
         {"tier_bridge_flush", testTierBridgeFlush},
-        {"tier_drop_k2_probe", testTierDropK2Probe},
+        {"tier_drop_k2", testTierDropK2},
         {"tier_bridge_restore", testTierBridgeRestore},
         {"prefix_store", testPrefixStore},
         {"cold_resume_engine", testColdResumeEngine},
