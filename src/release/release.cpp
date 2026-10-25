@@ -367,10 +367,13 @@ constexpr EnvDoc k_env[] = {
     {"Speculative decoding (output always equals plain greedy)", "NGRAM_MAX=N", "most n-gram drafts per cycle (default 15)", C | B | S},
     {"Speculative decoding (output always equals plain greedy)", "NGRAM_FORCE=1", "take every n-gram proposal", C | B | S},
     {"Speculative decoding (output always equals plain greedy)", "NGRAM_DEBUG=1", "log every decode cycle to stderr", C | B},
+    {"Speculative decoding (output always equals plain greedy)", "SPEC_ACC=0|1|2|3|4", "server: where a decode cycle reads its control words and decides greedy acceptance: 0 host (default), 1 pinned copy, 2 GPU kernel, 3 GPU kernel into mapped pinned memory, 4 check (GPU and host, must agree); a number only (a name such as gpu is refused with a warning and gives 0)", S},
 
     {"Server", "NO_PREFIX_CACHE=1", "disable the prefix cache", S},
     {"Server", "PREFIX_CACHE_VERIFY=1", "diagnostic: re-prefill after every cache hit and compare", S},
     {"Server", "COLD_RESUME=0|1", "resume only from checkpoints bitwise equal to a cold prefill (default: on in --precise, off otherwise)", S},
+    {"Server", "PRECISE_IDLE=0|1", "--precise: while the server is idle after a reply, prefill the conversation again on the cold chunk schedule so its next turn resumes near the reply end, bitwise equal to a cold prefill (default on; not after a prompt that opens a thinking block; only free KV pages are used)", S},
+    {"Server", "PRECISE_IDLE_MS=MS", "--precise: idle time after a reply before that re-prefill starts (default 200)", S},
     {"Server", "SERVE_CKPTS=N", "prefix checkpoints per slot (default 4 with one slot, 3 up to 4 slots, else 1; at most 8)", S},
     {"Server", "TAIL_CK=0", "debug: no tail checkpoint before the question of a long prompt (needs 3+ checkpoints per slot)", S},
     {"Server", "SYS_MIN=N", "system messages of at least N tokens get their own checkpoint (default 2048, 0 = off)", S},
