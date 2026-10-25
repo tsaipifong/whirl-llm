@@ -3,6 +3,7 @@
 // Reimplements the WHIRL Zig research prototype's model/qwen35.zig (Model.load, Loader, allocKvPool,
 // setupSeqs, snapshots, requantMtpQ4, buildDraftHeadEx).
 
+#include "whirl/dump.h"
 #include "whirl/model.h"
 #include "whirl/kv_layout.h"
 #include "device/backend.h"
@@ -468,8 +469,11 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
             // object has every KV kernel), not f16: a balance / fast load with an explicit --ctx was refused
             // although its q8 / q4 cache fits (REVIEW-022 F6)
             const KvMode kvm_est = opt.kv_mode == KvMode::automatic ? kvModeFromEnv().value_or(KvMode::automatic) : opt.kv_mode;
+            const numerics::KvCaps caps_est{true, true, true, true};
             const numerics::KvKind kv_est =
-                numerics::chooseKv(opt.numerics, cfg.moe, numerics::KvCaps{true, true, true, true}, kvKindOf(kvm_est)).kv;
+                dump::kv("loader.uma_est", opt.numerics, cfg.moe, caps_est, kvKindOf(kvm_est),
+                         numerics::chooseKv(opt.numerics, cfg.moe, caps_est, kvKindOf(kvm_est)))
+                    .kv;  // (WHIRL_DUMP_KV: one "D kv:" line, arch025-S0a)
             hip::UmaNeed n;
             n.weights = est.weights;
             n.fixed = est.weights + est.state +
@@ -512,7 +516,9 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
         // and never switched afterwards (no fallback to a lower-precision format when it does
         // not fit: the context shrinks or the load stops, below / in the server).
         const kernels::Caps caps = kernels::Caps::probe(m.module);
-        m.kv_choice = numerics::chooseKv(opt.numerics, cfg.moe, numerics::KvCaps{caps.kv_q8h, caps.kv_q8v, caps.kv_q4, device::profile(m.arch).numerics_8060s}, kvKindOf(kvm));
+        const numerics::KvCaps kv_caps{caps.kv_q8h, caps.kv_q8v, caps.kv_q4, device::profile(m.arch).numerics_8060s};
+        m.kv_choice = dump::kv("loader.load", opt.numerics, cfg.moe, kv_caps, kvKindOf(kvm),
+                               numerics::chooseKv(opt.numerics, cfg.moe, kv_caps, kvKindOf(kvm)));  // (WHIRL_DUMP_KV)
         const numerics::KvKind kv = m.kv_choice.kv;
         m.kv_q8 = kv != numerics::KvKind::f16;
         m.kv_rot = kv == numerics::KvKind::q8h || kv == numerics::KvKind::q4;

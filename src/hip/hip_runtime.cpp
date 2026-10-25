@@ -9,6 +9,7 @@
 #include "whirl/vram_limit.h"
 
 #include "hip_api.h"
+#include "alloc_log.h"
 #include "launch_log.h"
 
 #include <algorithm>
@@ -156,6 +157,7 @@ DevPtr malloc(std::size_t bytes) {
         void* p = nullptr;
         check(rt().hipMalloc(&p, n), "hipMalloc");
         if (launchlog::g_on) launchlog::onAlloc(reinterpret_cast<std::uintptr_t>(p), n);
+        if (alloclog::g_on) alloclog::onDevAlloc(reinterpret_cast<std::uintptr_t>(p), n);  // arch025-S0a
         return reinterpret_cast<std::uintptr_t>(p);
     }
     VramTrack& t = vramTrack();
@@ -181,12 +183,14 @@ DevPtr malloc(std::size_t bytes) {
     check(st, "hipMalloc");
     t.sizes[reinterpret_cast<std::uintptr_t>(p)] = n;
     if (launchlog::g_on) launchlog::onAlloc(reinterpret_cast<std::uintptr_t>(p), n);
+    if (alloclog::g_on) alloclog::onDevAlloc(reinterpret_cast<std::uintptr_t>(p), n);
     return reinterpret_cast<std::uintptr_t>(p);
 }
 
 void free(DevPtr p) {
     if (!p) return;
     if (launchlog::g_on) launchlog::onFree(p);
+    if (alloclog::g_on) alloclog::onDevFree(p);
     (void)rt().hipFree(ptr(p));
     if (vram::limitBytes() == 0) return;
     VramTrack& t = vramTrack();
@@ -214,6 +218,7 @@ void* hostMalloc(std::size_t bytes) {
     void* p = nullptr;
     const std::size_t n = std::max<std::size_t>(bytes, 1);
     check(rt().hipHostMalloc(&p, n, 0), "hipHostMalloc");
+    if (alloclog::g_on) alloclog::onHostAlloc(reinterpret_cast<std::uintptr_t>(p), n);
     PinnedTrack& t = pinnedTrack();
     std::lock_guard<std::mutex> lk(t.mu);
     t.sizes[reinterpret_cast<std::uintptr_t>(p)] = n;
@@ -223,6 +228,7 @@ void* hostMalloc(std::size_t bytes) {
 
 void hostFree(void* p) {
     if (!p) return;
+    if (alloclog::g_on) alloclog::onHostFree(reinterpret_cast<std::uintptr_t>(p));
     (void)rt().hipHostFree(p);
     PinnedTrack& t = pinnedTrack();
     std::lock_guard<std::mutex> lk(t.mu);

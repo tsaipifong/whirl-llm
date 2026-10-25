@@ -81,7 +81,9 @@ bool fingerprintEnvKept(std::string_view key) {
                                  "WHIRL_KV_TIER_MIN", "WHIRL_R9700_LOCK_HELD", "WHIRL_GPU_WAIT", "WHIRL_GPU_SHARE",
                                  "WHIRL_PROFILE", "WHIRL_TRACE_ND", "WHIRL_GATHER_MS", "WHIRL_EXE", "WHIRL_LOOP_LOG",
                                  "WHIRL_TIER_VERIFY", "WHIRL_TIER_MIN_GAIN", "WHIRL_DECODE_MIN_TPS",
-                                 "WHIRL_TIMER_PROBE", "WHIRL_PREFIX_CACHE_VERIFY", "WHIRL_LAUNCH_LOG"};
+                                 "WHIRL_TIMER_PROBE", "WHIRL_PREFIX_CACHE_VERIFY", "WHIRL_LAUNCH_LOG",
+                                 // arch025-S0a (I6): baseline dumps; they print, they change no kernel or KV format
+                                 "WHIRL_ALLOC_LOG", "WHIRL_ALLOC_LOG_RAW", "WHIRL_DUMP_EXEC", "WHIRL_DUMP_KV"};
     for (const char* x : skip)
         if (up == x) return false;
     return true;

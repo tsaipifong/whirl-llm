@@ -5,6 +5,7 @@
 // readTune, matmulsOnly, checkGemvq, checkGemvBitwise, checkPrefillInvariance,
 // checkAttnGroups) and gguf_cli.zig (loadOrTune).
 
+#include "whirl/dump.h"
 #include "whirl/model.h"
 
 #include "whirl/common.h"
@@ -825,7 +826,19 @@ bool tryRead(const std::string& path, std::string& out) {
 
 }  // namespace
 
+namespace {
+void loadOrTuneImpl(Model& m, const std::string& model_path, std::string& log);
+}  // namespace
+
+// arch025-S0a: the body is loadOrTuneImpl (unchanged; it returns early on a cached tune table); the baseline dumps
+// (WHIRL_DUMP_EXEC, --dump-only, whirl/dump.h) run after it, on every path that returns normally
 void loadOrTune(Model& m, const std::string& model_path, std::string& log) {
+    loadOrTuneImpl(m, model_path, log);
+    afterLoadTune(m);
+}
+
+namespace {
+void loadOrTuneImpl(Model& m, const std::string& model_path, std::string& log) {
     namespace nu = whirl::numerics;
     const bool has_mx = m.type_bytes[ti(GgmlType::mxfp4)] > 0;
     const nu::Request& rq = m.num_req;
@@ -1030,5 +1043,6 @@ void loadOrTune(Model& m, const std::string& model_path, std::string& log) {
         }
     }
 }
+}  // namespace
 
 }  // namespace whirl::qwen35

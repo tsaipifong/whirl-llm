@@ -107,6 +107,7 @@ add_library(whirl STATIC
   src/common/gpu_select.cpp
   src/common/mem_governor.cpp
   src/common/numerics.cpp
+  src/common/dump.cpp
   src/common/spec_sample.cpp
   src/gguf/gguf.cpp
   src/tokenizer/unicode.cpp
@@ -137,6 +138,7 @@ if(WHIRL_WITH_HIP)
 
   add_library(whirl_hip STATIC
     src/hip/hip_runtime.cpp
+    src/hip/alloc_log.cpp
     src/hip/launch_log.cpp
     src/hip/wddm_mem.cpp
     src/hip/device_mem.cpp

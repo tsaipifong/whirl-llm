@@ -22,6 +22,7 @@
 #include "whirl/mem_governor.h"
 #include "whirl/value_scope.h"
 #include "whirl/kernels_abi.h"
+#include "hip/alloc_log.h"
 #include "hip/launch_log.h"
 #if WHIRL_TEST_DLL_DEPS
 #include "release/dll_deps.h"
@@ -1900,6 +1901,71 @@ void testLaunchRawCap() {
     const bool want_on = rv != nullptr && std::string(rv) == "server";
     CHECK_EQ(ll::rawStats().on, want_on);
     ll::testRaw(before.on, before.max_lines);
+}
+
+// arch025-S0a: the allocation log records sizes, kinds and ordinals (no addresses): two runs whose allocations land
+// at different addresses give the same text; a size or order change gives a different seqhash; the list is capped;
+// whirl-server keeps only the summary unless WHIRL_ALLOC_LOG_RAW=server; off records nothing.
+void testAllocLog() {
+    namespace al = whirl::hip::alloclog;
+    const bool was_on = al::g_on;
+    auto run = [](std::uint64_t base, bool swap) {
+        al::testEnable(true, true);
+        al::onDevAlloc(base + 0x1000, 1u << 20);
+        al::onHostAlloc(base + 0x900000, 4096);
+        al::onDevAlloc(base + 0x200000, swap ? 512 : 256);
+        al::onDevFree(base + 0x1000);
+        al::onHostFree(base + 0x900000);
+        al::onDevFree(base + 0x777);  // never allocated
+        return al::testText();
+    };
+    const std::string a = run(0x7f0000000000ull, false);
+    const std::string b = run(0x100000000ull, false);  // other addresses, same sizes and order
+    CHECK(a == b);
+    CHECK(a.find("# events 6 seqhash ") == 0);
+    CHECK(a.find("0 dev 1048576 #0\n") != std::string::npos);
+    CHECK(a.find("1 host 4096 #0\n") != std::string::npos);
+    CHECK(a.find("2 dev 256 #1\n") != std::string::npos);
+    CHECK(a.find("3 free #0 1048576\n") != std::string::npos);
+    CHECK(a.find("4 hostfree #0 4096\n") != std::string::npos);
+    CHECK(a.find("5 free #? 0\n") != std::string::npos);
+    CHECK(a.find("# unknown frees 1\n") != std::string::npos);
+    CHECK(a.find("peak 1048832 bytes") != std::string::npos);
+    const std::string c = run(0x7f0000000000ull, true);  // one size differs
+    CHECK(c.substr(0, 40) != a.substr(0, 40));          // the seqhash line
+    // summary only (the server default): same seqhash, no event lines
+    al::testEnable(true, false);
+    al::onDevAlloc(0x7f0000001000ull, 1u << 20);
+    al::onHostAlloc(0x7f0000900000ull, 4096);
+    al::onDevAlloc(0x7f0000200000ull, 256);
+    al::onDevFree(0x7f0000001000ull);
+    al::onHostFree(0x7f0000900000ull);
+    al::onDevFree(0x7f0000000777ull);
+    const std::string d = al::testText();
+    CHECK(d.substr(0, d.find('\n')) == a.substr(0, a.find('\n')));
+    CHECK(d.find(" dev 1048576 #0") == std::string::npos);
+    CHECK(d.find("# list off\n") != std::string::npos);
+    // cap
+    al::testEnable(true, true, 2);
+    for (int i = 0; i < 5; ++i) al::onDevAlloc(0x10000ull * (i + 1), 64);
+    const std::string e = al::testText();
+    CHECK(e.find("# events 5 ") == 0);
+    CHECK(e.find("1 dev 64 #1\n") != std::string::npos);
+    CHECK(e.find("2 dev 64 #2\n") == std::string::npos);
+    CHECK(e.find("# lines dropped 3 (kept the first 2)\n") != std::string::npos);
+    // server process: list off unless WHIRL_ALLOC_LOG_RAW=server
+    al::testEnable(true, true);
+    al::serverProcess();
+    al::onDevAlloc(0x10000ull, 64);
+    const char* rv = std::getenv("WHIRL_ALLOC_LOG_RAW");
+    const bool want_list = rv != nullptr && std::string(rv) == "server";
+    CHECK_EQ(al::testText().find("0 dev 64 #0\n") != std::string::npos, want_list);
+    // off: nothing recorded
+    al::testEnable(false, true);
+    al::onDevAlloc(0x10000ull, 64);
+    al::onDevFree(0x10000ull);
+    CHECK(al::testText().find("# events 0 ") == 0);
+    al::testEnable(was_on, true);
 }
 
 // OVH-C1: the MTP draft window (Model::attn_win) must be restored when the draft attention throws,
@@ -4013,6 +4079,7 @@ int main(int argc, char** argv) {
     testLaunchDigestLayout();
     testLaunchDigestZeroAndAdjacent();
     testLaunchRawCap();
+    testAllocLog();
     specsample_test::testSpecSample();
     testDflashPolicy();
     testLocalMemTaken();

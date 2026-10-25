@@ -5,6 +5,7 @@
 
 #include "../test_env.h"
 #include "whirl/dflash_policy.h"
+#include "whirl/dump.h"
 #include "whirl/gguf.h"
 #include "whirl/kernels_abi.h"
 #include "whirl/kv_layout.h"
@@ -1585,11 +1586,62 @@ void testModelReleaseOrder() {
     check(b.log == want, "~Model release order: rpos, allocations in order, pinned embedding, stream (got " + got + ")");
 }
 
+// arch025-S0a: the baseline dumps. execDump: one "D exec: key=value" line per member, deterministic, covering the
+// numerics flags; kvLine: the chooseKv inputs and result on one line; envOn: unset / "" / "0" are off.
+#define CHECK(x) check((x), "baseline dumps: " #x)
+void testBaselineDumps() {
+    namespace nu = whirl::numerics;
+    q::Model m;
+    const std::string a = q::execDump(m);
+    CHECK(a == q::execDump(m));
+    std::size_t lines = 0;
+    for (std::size_t p = 0; p < a.size();) {
+        const std::size_t e = a.find('\n', p);
+        CHECK(e != std::string::npos);
+        CHECK(a.compare(p, 8, "D exec: ") == 0);
+        CHECK(a.find('=', p) < e);
+        ++lines;
+        p = e + 1;
+    }
+    CHECK(lines > 100);
+    for (const char* k : {"D exec: kv_q8=1\n", "D exec: kv_q4=0\n", "D exec: prec_dec=0\n", "D exec: fd_splits=64\n",
+                          "D exec: kv_mode=automatic\n", "D exec: gdn_strix_min=256\n", "D exec: relax.k=4\n", "D exec: arch=gfx1201\n",
+                          "D exec: moe_rbf=1\n", "D exec: num_req.mode=precise\n", "D exec: kv_choice.kv=f16\n"})
+        CHECK(a.find(k) != std::string::npos);
+    CHECK(a.find("D exec: num_plan=numerics: ") != std::string::npos);
+    CHECK(a.find("D exec: tune=") != std::string::npos);
+    m.kv_q4 = true;  // one flag changes one line
+    const std::string b = q::execDump(m);
+    CHECK(b != a);
+    CHECK(b.find("D exec: kv_q4=1\n") != std::string::npos);
+    const nu::Request r = nu::parseMode("balance", "test");
+    const nu::KvCaps caps{true, false, true, false};
+    const nu::KvChoice c = nu::chooseKv(r, false, caps, std::nullopt);
+    const std::string l = whirl::dump::kvLine("loader.load", r, false, caps, std::nullopt, c);
+    CHECK(l.rfind("D kv: site=loader.load mode=balance items=0x", 0) == 0);
+    CHECK(l.find(" moe=0 caps=q8h:1,q8v:0,q4:1,fast_q8h:0 forced=none -> kv=") != std::string::npos);
+    CHECK(l.find(std::string("-> kv=") + nu::kvKindName(c.kv) + " debug=0 why=" + c.why) != std::string::npos);
+    const nu::KvChoice cf = nu::chooseKv(r, true, caps, nu::KvKind::f16);
+    const std::string lf = whirl::dump::kvLine("server.est_uma", r, true, caps, nu::KvKind::f16, cf);
+    CHECK(lf.find(" moe=1 ") != std::string::npos && lf.find(" forced=f16 -> kv=f16 debug=1 ") != std::string::npos);
+    CHECK(&whirl::dump::kv("x", r, false, caps, std::nullopt, c) == &c);  // passes the choice through
+    _putenv_s("WHIRL_S0A_DUMP_T", "");
+    CHECK(!whirl::dump::envOn("S0A_DUMP_T"));
+    _putenv_s("WHIRL_S0A_DUMP_T", "0");
+    CHECK(!whirl::dump::envOn("S0A_DUMP_T"));
+    _putenv_s("WHIRL_S0A_DUMP_T", "1");
+    CHECK(whirl::dump::envOn("S0A_DUMP_T"));
+    _putenv_s("WHIRL_S0A_DUMP_T", "");
+    CHECK(!whirl::dump::dumpOnly());  // only the --dump-only argument sets it
+}
+#undef CHECK
+
 int main() {
     whirl::test::clearWhirlEnv();  // FR-TEST P3-11
     testKvLayout();
     testModelReleaseOrder();
     testDraftWindowRestore();
+    testBaselineDumps();
     testFloatGemvDispatch();
     testArchWhitelist();
     testLoadEstimate();

@@ -480,6 +480,52 @@ static void testFingerprint() {
     for (const auto& [k, v] : fingerprintEnv()) CHECK(fingerprintEnvKept(k));
 }
 
+// arch025-S0a (I6, REVIEW-ARCH025 A1): the baseline dumps are diagnostics; turning them on must not change the SSD
+// fingerprint of the process environment (else a t2.ssd / restart case run with a dump on would miss the entries
+// a run without it wrote). Control: an ordinary WHIRL_* variable does change it, so the env path is live.
+static void setEnv(const char* k, const char* v) {
+#ifdef _WIN32
+    _putenv_s(k, v != nullptr ? v : "");
+#else
+    if (v != nullptr) setenv(k, v, 1); else unsetenv(k);
+#endif
+}
+static void testFingerprintDumpEnv() {
+    FingerprintInputs in;
+    in.exe_id = 0x1234abcd;
+    in.model_base = "Swift-1.5-27B-MXFP4.gguf";
+    in.tensors = 851;
+    in.bytes = 16'000'000'000ull;
+    in.kv_name = "q8h";
+    in.use_mtp = true;
+    in.n_gdn = 48;
+    in.ck_bytes = 1 << 20;
+    in.page_bytes = 1 << 18;
+    in.max_batch = 4096;
+    in.numerics = "balance (items a,b)";
+    in.gpu_arch = "gfx1201";
+    in.gpu_name = "AMD Radeon AI PRO R9700";
+    in.kernel_set = "gfx1201 co 123";
+    const char* dumps[] = {"WHIRL_ALLOC_LOG", "WHIRL_ALLOC_LOG_RAW", "WHIRL_DUMP_EXEC", "WHIRL_DUMP_KV"};
+    for (const char* k : dumps) setEnv(k, nullptr);
+    in.env = fingerprintEnv();
+    const std::uint64_t off = tierFingerprint(in);
+    for (const char* k : dumps) CHECK(!fingerprintEnvKept(k));
+    setEnv("WHIRL_ALLOC_LOG", "C:\tmp\alloc");
+    setEnv("WHIRL_ALLOC_LOG_RAW", "server");
+    setEnv("WHIRL_DUMP_EXEC", "1");
+    setEnv("WHIRL_DUMP_KV", "1");
+    in.env = fingerprintEnv();
+    CHECK(tierFingerprint(in) == off);
+    setEnv("WHIRL_S0A_CONTROL", "1");  // not a skipped name: part of the key
+    in.env = fingerprintEnv();
+    CHECK(tierFingerprint(in) != off);
+    setEnv("WHIRL_S0A_CONTROL", nullptr);
+    for (const char* k : dumps) setEnv(k, nullptr);
+    in.env = fingerprintEnv();
+    CHECK(tierFingerprint(in) == off);
+}
+
 // CACHE-1: superseded-session rule (compact / compress yes; retry,
 // regenerate, edit-last, other system prompt, unknown system prompt no)
 static void testSupersede() {
@@ -605,6 +651,7 @@ int main() {
     testTier();
     testLcpTarget();
     testFingerprint();
+    testFingerprintDumpEnv();
     try {
         testServerFingerprintInputs();
     } catch (const std::exception& e) {  // e.g. a field the assembly no longer fills: report, do not abort
