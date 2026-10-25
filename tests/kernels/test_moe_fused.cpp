@@ -8,6 +8,11 @@
 // Ornith shapes and a small one), shared expert 512 / 64 rows and none (nsb = 0), plus a loose CPU reference
 // (weights decoded by ref::dequantRows, double accumulation) so a wrong pairing / layout cannot pass by being
 // wrong the same way in both chains.
+// feat026-moedec-r1 (review M1): the shared f16 activations are also memcmp-compared with the same chain on gemm_c0_mxfp4
+// (the prefill GEMM every gemvh kind equals, family gemvh): on gfx1201 that pins the fused S = 1 tile against both the
+// old S = 2 gemvh (C % 512 == 0) and S = 1 (C % 512 != 0: C = 768, 1280, 2304); on gfx1151 the fused paired tile against
+// the build's gemvh_mxfp4 kind (WHIRL_GH_KIND_MXFP4) and, through gemm_c0, against every kind. The case names say which
+// old tile / kind each comparison pins. gemvhf gets the same gemm_c0 cross-check.
 // SPDX-License-Identifier: Apache-2.0
 
 #include <algorithm>
@@ -33,6 +38,19 @@ Result inv(const std::string& name, std::size_t n, std::size_t bad, const std::s
 }
 
 double silu(double g) { return g / (1.0 + std::exp(-g)); }
+
+// which old gemvh tile a comparison pins (the fused kernel: gfx1201 S = 1, gfx1151 paired)
+std::string oldTile(Ctx& c, int ncols) {
+    if (c.mod.arch() == hip::Arch::gfx1151) return " [old gemvh: build kind WHIRL_GH_KIND_MXFP4, fused: paired]";
+    return ncols % 512 == 0 ? " [old gemvh S=2, fused S=1]" : " [old gemvh S=1, fused S=1]";
+}
+
+// y = gemm_c0_<T>(W, x16) (the reference every gemvh kind / stage count equals bit for bit, family gemvh)
+void gemmC0(Ctx& c, int ti, DevPtr w, std::uint64_t row_bytes, DevPtr x16, DevPtr y, int ncols, int nrows, int n) {
+    const auto& c0 = wk::kGemmCfgs[0];
+    hip::launch(c.k.gemmc[0][ti], hip::Dim3{cdiv(n, c0.bn), cdiv(nrows, c0.bm), 1}, {static_cast<unsigned>(c0.nth), 1, 1}, 0, c.s, w, row_bytes, x16, y,
+                ncols, nrows, n, 0);
+}
 
 void fuseCase(Ctx& c, int C, int F, int sff, int n) {
     const QType t = QType::mxfp4;
@@ -70,6 +88,16 @@ void fuseCase(Ctx& c, int C, int F, int sff, int n) {
         hip::launch(c.k.silu_mul, {cdiv(ns, 256), 1, 1}, {256, 1, 1}, 0, c.s, sgo.p(), suo.p(), static_cast<int>(ns));
         hip::launch(c.k.f32_to_f16, {cdiv(ns / 4, 256), 1, 1}, {256, 1, 1}, 0, c.s, sgo.p(), xs_ref.p(), static_cast<int>(ns));
     }
+    // the same chain on gemm_c0 (every gemvh kind / stage count == gemm_c0)
+    const bool have_c0 = sff > 0 && c.k.gemmc[0][ti];
+    Buf sgc(ns * 4), suc(ns * 4), xs_c0(ns * 2);
+    if (have_c0) {
+        xs_c0.fill(0xdd);
+        gemmC0(c, ti, dsg.p(), SG.row_bytes, x16.p(), sgc.p(), C, sff, n);
+        gemmC0(c, ti, dsu.p(), SU.row_bytes, x16.p(), suc.p(), C, sff, n);
+        hip::launch(c.k.silu_mul, {cdiv(ns, 256), 1, 1}, {256, 1, 1}, 0, c.s, sgc.p(), suc.p(), static_cast<int>(ns));
+        hip::launch(c.k.f32_to_f16, {cdiv(ns / 4, 256), 1, 1}, {256, 1, 1}, 0, c.s, sgc.p(), xs_c0.p(), static_cast<int>(ns));
+    }
     // the fused launch
     Buf act(na * 4), xs(ns * 2);
     act.fill(0xff);
@@ -89,8 +117,14 @@ void fuseCase(Ctx& c, int C, int F, int sff, int n) {
         s_ref = xs_ref.down<std::uint16_t>(ns);
         s_got = xs.down<std::uint16_t>(ns);
         std::size_t sb = 0;
-        for (std::size_t i = 0; i < ns; ++i) sb += s_ref[i] != s_got[i];
-        c.rep.add(inv("moe_gus_f shared f16 act == f32_to_f16 + gemvh x2 + silu_mul + f32_to_f16" + tag, ns, sb, ""));
+        for (std::size_t i = 0; i < ns; ++i) sb += std::memcmp(&s_ref[i], &s_got[i], 2) != 0;
+        c.rep.add(inv("moe_gus_f shared f16 act == f32_to_f16 + gemvh x2 + silu_mul + f32_to_f16" + tag + oldTile(c, C), ns, sb, ""));
+        if (have_c0) {
+            const std::vector<std::uint16_t> s_c0 = xs_c0.down<std::uint16_t>(ns);
+            std::size_t cb = 0;
+            for (std::size_t i = 0; i < ns; ++i) cb += std::memcmp(&s_c0[i], &s_got[i], 2) != 0;
+            c.rep.add(inv("moe_gus_f shared f16 act == f32_to_f16 + gemm_c0 x2 + silu_mul + f32_to_f16 (every gemvh kind / S)" + tag, ns, cb, ""));
+        }
     }
     // loose CPU reference (independent decode, double sums): the fused values are the SwiGLU of the right rows
     {
@@ -155,8 +189,8 @@ void gemvhfCases(Ctx& c) {
             for (const int nrows : {17, 512}) {
                 const HostMat m = randomMat(c, t, nrows, ncols);
                 Buf w(m.data);
-                std::size_t bad = 0, cnt = 0;
-                std::string first;
+                std::size_t bad = 0, cnt = 0, bad0 = 0, cnt0 = 0;
+                std::string first, first0;
                 for (const int n : {1, 5, 16, 17, 32}) {
                     const hip::Function hv = n <= 16 ? c.k.gemvh[ti] : c.k.gemvh2[ti];
                     const hip::Function hf = n <= 16 ? c.k.gemvhf[ti] : c.k.gemvhf2[ti];
@@ -176,10 +210,23 @@ void gemvhfCases(Ctx& c) {
                             ++bad;
                             if (first.empty()) first = "n " + std::to_string(n) + " acc " + std::to_string(acc);
                         }
+                        if (acc == 0 && c.k.gemmc[0][ti]) {  // gemm_c0 (acc 0: y overwritten): every gemvh kind / S
+                            Buf yc(y0);
+                            gemmC0(c, ti, w.p(), m.row_bytes, x16.p(), yc.p(), ncols, nrows, n);
+                            c.sync();
+                            const auto r0 = yc.down<float>(y0.size());
+                            ++cnt0;
+                            if (std::memcmp(r0.data(), b.data(), b.size() * 4) != 0) {
+                                ++bad0;
+                                if (first0.empty()) first0 = "n " + std::to_string(n);
+                            }
+                        }
                     }
                 }
                 ++ran;
-                c.rep.add(inv("gemvhf_" + sfx + " == f32_to_f16 + gemvh_" + sfx + " ncols=" + std::to_string(ncols) + " nrows=" + std::to_string(nrows), cnt, bad, first));
+                const std::string sh = " ncols=" + std::to_string(ncols) + " nrows=" + std::to_string(nrows);
+                c.rep.add(inv("gemvhf_" + sfx + " == f32_to_f16 + gemvh_" + sfx + sh + oldTile(c, ncols), cnt, bad, first));
+                if (cnt0 > 0) c.rep.add(inv("gemvhf_" + sfx + " == f32_to_f16 + gemm_c0_" + sfx + " (every gemvh kind / S)" + sh, cnt0, bad0, first0));
             }
         }
     }
@@ -203,9 +250,13 @@ void testMoeFused(Ctx& c) {
     const int ns_all[] = {1, 2, 3, 8, 15, 16, 17, 24, 31, 32};
     for (const int n : ns_all) fuseCase(c, 2048, 512, 512, n);
     for (const int n : {1, 9, 16, 32}) fuseCase(c, 768, 64, 64, n);
+    // r1 (review M1): C % 512 != 0 at the Ornith expert widths (old gfx1201 gemvh S = 1, more than one 256-k round)
+    for (const int n : {1, 16, 17, 32}) fuseCase(c, 1280, 512, 512, n);
     for (const int n : {1, 4, 20}) fuseCase(c, 2048, 512, 0, n);  // no shared expert
     if (!c.quick)
         for (const int n : {1, 5, 16, 18}) fuseCase(c, 256, 128, 128, n);
+    if (!c.quick)
+        for (const int n : {1, 32}) fuseCase(c, 2304, 512, 512, n);  // r1: C % 512 == 256 with 9 rounds
 }
 
 }  // namespace kt

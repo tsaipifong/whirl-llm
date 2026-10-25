@@ -155,8 +155,14 @@ void skipItem(Plan& p, Item it, const std::string& why);
 // WHIRL_* A/B switches that change which kernels run (WHIRL_FD_SPLITS, WHIRL_GEMV_MAX, ...):
 // each one set is recorded as an override ("+overrides" label), so the log and /props show that
 // the run's bits are not the mode's tested paths. get(name) reads WHIRL_<name>.
+// Bitwise A/B switches (k_bitwise_switches: WHIRL_MOE_FUSE, WHIRL_GEMVH_F32, feat026-moedec): other kernels, same bits.
+// Recorded as an override line only when the value turns the switch on (flagOn, the rule of whirl::envFlag), and
+// never set lossy_override: precise stays labelled "precise".
 extern const char* const k_numerics_switches[];
+extern const char* const k_bitwise_switches[];
 void noteSwitches(Plan& p, const std::function<std::optional<std::string>(const char*)>& get);
+// The one boolean rule of WHIRL_* flags (whirl::envFlag): a set variable is on unless it is "0" ("true", "1", "yes" on).
+bool flagOn(std::string_view v);
 
 // "numerics: balance - enabled: fp8 (...), ...; skipped: gdnwmma (...); always: q8dec (...)"
 std::string logLine(const Plan& p);

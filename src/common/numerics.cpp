@@ -285,7 +285,11 @@ void skipItem(Plan& p, Item it, const std::string& why) {
 
 const char* const k_numerics_switches[] = {"FD_SPLITS", "GEMV_MAX",   "GV_NMAX",  "GV_GROUP", "NO_FUSE", "FLOAT_GEMV",
                                            "GDN_SEQ",   "NAIVE_ATTN", "DBG",      "ATTN_WIDE", "ATTN_DQ4", "ATTN_WS4", "MOE_BN",
-                                           "MOE_FUSE", "GEMVH_F32", nullptr};  // feat026: bitwise A/B switches (precise MoE fusion, gemvhf)
+                                           nullptr};
+// feat026-moedec(-r1): bitwise by construction (precise MoE fusion, gemvhf); read with envFlag in the loader
+const char* const k_bitwise_switches[] = {"MOE_FUSE", "GEMVH_F32", nullptr};
+
+bool flagOn(std::string_view v) { return v != "0"; }
 
 void noteSwitches(Plan& p, const std::function<std::optional<std::string>(const char*)>& get) {
     for (const char* const* n = k_numerics_switches; *n != nullptr; ++n) {
@@ -293,6 +297,11 @@ void noteSwitches(Plan& p, const std::function<std::optional<std::string>(const 
         if (!v || v->empty()) continue;
         p.overrides.push_back(std::format("WHIRL_{}={}: A/B switch (kernel paths differ from the tested defaults)", *n, *v));
         p.lossy_override = true;
+    }
+    for (const char* const* n = k_bitwise_switches; *n != nullptr; ++n) {
+        const auto v = get(*n);
+        if (!v || !flagOn(*v)) continue;  // off (unset or "0") = the default path: nothing to record
+        p.overrides.push_back(std::format("WHIRL_{}={}: bitwise A/B switch on (other kernels, same bits)", *n, *v));
     }
 }
 

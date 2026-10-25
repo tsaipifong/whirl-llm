@@ -427,6 +427,8 @@ constexpr EnvDoc k_env[] = {
     {"Numerics / speed switches (A/B tests; defaults are the tested paths)", "GV_GROUP=0", "no grouped same-input GEMV launches", C | B},
     {"Numerics / speed switches (A/B tests; defaults are the tested paths)", "GV_NMAX=N", "largest group of same-input GEMVs", C | B},
     {"Numerics / speed switches (A/B tests; defaults are the tested paths)", "MOE_BN=32|64", "grouped expert GEMM token tile", C | B | S},
+    {"Numerics / speed switches (A/B tests; defaults are the tested paths)", "MOE_FUSE=1", "precise MoE decode: routed + shared expert gate/up + SwiGLU in one launch (bitwise-equal; default off)", C | B | S},
+    {"Numerics / speed switches (A/B tests; defaults are the tested paths)", "GEMVH_F32=1", "precise decode f16 GEMV reads the f32 input, no conversion launch (bitwise-equal; default off)", C | B | S},
     {"Numerics / speed switches (A/B tests; defaults are the tested paths)", "DBG=BITS", "1 no gdn_abconv merge, 2 scalar split attention, 4 one query per attention group", C | B},
 
     {"Diagnostics", "TOKENIZE_ONLY=1", "print the prompt token ids and stop", C},

@@ -742,6 +742,10 @@ public:
     DevPtr moe_sx = 0;
     bool moe_fp8 = true;
     bool moe_mxw = true;
+    // feat026-moedec (precise, bitwise A/B, default off): WHIRL_MOE_FUSE fused shared + routed gate/up (moeFusedPrecise),
+    // WHIRL_GEMVH_F32 gemvh reading the f32 input (Model::matmul); envFlag at load like moe_mxw
+    bool moe_fuse = false;
+    bool gemvh_f32 = false;
     bool moe_rbf = true;  // MXFP4 x fp8 grouped GEMM: row-block-fast gemm8r_* when present (WHIRL_MOE_RBF=0 -> gemm8_moe*)
 
     // ---- vision (image prompts; see whirl/vismap.h). Text-only sequences never take

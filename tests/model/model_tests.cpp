@@ -1636,12 +1636,68 @@ void testBaselineDumps() {
 }
 #undef CHECK
 
+// feat026-moedec-r1 (review M2): WHIRL_MOE_FUSE / WHIRL_GEMVH_F32 use the envFlag rule (set and not "0" = on, so
+// "true" is on and "0" is off), the label follows the effective value, and a bitwise switch never marks the plan lossy
+// (precise stays "precise"). Before r1: getenv + *v == '1' ("true" off) and noteSwitches set lossy_override for any value.
+#define CHECK(x) check((x), "moedec switches: " #x)
+void testMoedecSwitches() {
+    namespace nu = whirl::numerics;
+    struct Case {
+        const char* v;
+        bool on;
+    };
+    const Case cases[] = {{nullptr, false}, {"0", false}, {"1", true}, {"true", true}, {"yes", true}, {"2", true}};
+    for (const char* name : {"MOE_FUSE", "GEMVH_F32"}) {
+        const std::string key = std::string("WHIRL_") + name;
+        for (const Case& c : cases) {
+            _putenv_s(key.c_str(), c.v != nullptr ? c.v : "");  // "" removes the variable
+            CHECK(envFlag(name, false) == c.on);
+            if (c.v != nullptr) CHECK(nu::flagOn(c.v) == c.on);
+            nu::Plan p = nu::plan(nu::Request{}, nu::Target{});  // precise
+            CHECK(nu::modeLabel(p) == "precise");
+            nu::noteSwitches(p, [](const char* n) { return envGet(n); });
+            CHECK(!p.lossy_override);
+            CHECK(nu::modeLabel(p) == "precise");
+            CHECK(p.overrides.size() == (c.on ? 1u : 0u));
+            if (c.on) {
+                CHECK(p.overrides[0].find(key + "=" + c.v + ": bitwise A/B switch on") == 0);
+                CHECK(nu::logLine(p).find("precise+overrides") == std::string::npos);
+            }
+            nu::Plan pb = nu::plan(nu::parseMode("balance", "t"), nu::Target{});
+            nu::noteSwitches(pb, [](const char* n) { return envGet(n); });
+            CHECK(nu::modeLabel(pb) == "balance");
+        }
+        _putenv_s(key.c_str(), "");
+    }
+    // both on + a lossy-class switch: only the latter marks the plan
+    nu::Plan p = nu::plan(nu::Request{}, nu::Target{});
+    nu::noteSwitches(p, [](const char* n) -> std::optional<std::string> {
+        const std::string s(n);
+        if (s == "MOE_FUSE" || s == "GEMVH_F32") return std::string("1");
+        if (s == "GEMV_MAX") return std::string("8");
+        return std::nullopt;
+    });
+    CHECK(p.overrides.size() == 3 && p.lossy_override && nu::modeLabel(p) == "precise+overrides");
+    // no switch is in both lists
+    for (const char* const* a = nu::k_bitwise_switches; *a != nullptr; ++a)
+        for (const char* const* b = nu::k_numerics_switches; *b != nullptr; ++b) CHECK(std::string(*a) != *b);
+    // the exec dump carries the effective values (default off)
+    q::Model m;
+    const std::string d = q::execDump(m);
+    CHECK(d.find("D exec: moe_fuse=0\n") != std::string::npos && d.find("D exec: gemvh_f32=0\n") != std::string::npos);
+    m.moe_fuse = m.gemvh_f32 = true;
+    const std::string d1 = q::execDump(m);
+    CHECK(d1.find("D exec: moe_fuse=1\n") != std::string::npos && d1.find("D exec: gemvh_f32=1\n") != std::string::npos);
+}
+#undef CHECK
+
 int main() {
     whirl::test::clearWhirlEnv();  // FR-TEST P3-11
     testKvLayout();
     testModelReleaseOrder();
     testDraftWindowRestore();
     testBaselineDumps();
+    testMoedecSwitches();
     testFloatGemvDispatch();
     testArchWhitelist();
     testLoadEstimate();

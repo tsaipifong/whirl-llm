@@ -538,6 +538,8 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
     m.moe_mxw = envFlag("MOE_MXW", true);
     m.moe_wide = envFlag("MOE_WIDE", false);  // MoE wide verify (balance / fast, opt-in), see wideCapable
     m.moe_rbf = envFlag("MOE_RBF", true);
+    m.moe_fuse = envFlag("MOE_FUSE", false);    // feat026-moedec: bitwise A/B (numerics k_bitwise_switches)
+    m.gemvh_f32 = envFlag("GEMVH_F32", false);  // feat026-moedec: bitwise A/B
     m.layers.resize(cfg.n_layer);
     m.kcache.assign(cfg.n_layer, 0);
     m.vcache.assign(cfg.n_layer, 0);

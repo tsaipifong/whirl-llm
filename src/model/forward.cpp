@@ -196,13 +196,9 @@ void Model::matmul(const Mat& w, DevPtr xin, DevPtr y, u32 n, bool accumulate) {
         hip::launch(g8.f, g8.grid, g8.block, 0, stream, w.ptr, w.row_bytes, w.ref, x16, sx8, y, ncols, nrows, I(n), acc);
     } else {
         const u32 count = n * w.ncols;
-        // feat026-moedec (L1, precise only; WHIRL_GEMVH_F32=1, default off until the GPU A/B): a precise decode / verify
+        // feat026-moedec (L1, precise only; WHIRL_GEMVH_F32 -> Model::gemvh_f32, default off until the GPU A/B): a precise decode / verify
         // gemvh whose input is not in the x16 cache reads the f32 input itself (gemvhf: each element rounded to f16 in the
         // B load exactly as f32_to_f16 does) - the conversion launch goes away, the bits stay those of f32_to_f16 + gemvh
-        static const bool gemvh_f32 = [] {
-            const char* v = std::getenv("WHIRL_GEMVH_F32");
-            return v != nullptr && *v == '1';
-        }();
         if (gemvh_f32 && (x16_src != xin || x16_count != count || x16_fp8)) {
             const ops::GemmPlan p = ops::chooseGemmF16(matShape(w), n, w.tune[tuneBucket(n)], gemmFlags(), k);
             const hip::Function hf = p.kind != ops::GemmKind::gemvh ? nullptr : p.f == k.gemvh[t] ? k.gemvhf[t] : p.f == k.gemvh2[t] ? k.gemvhf2[t] : nullptr;
@@ -793,13 +789,9 @@ void Model::ffnBlock(DevPtr post_norm, const Mat& gate_w, const Mat& up, const M
 // instead of moe_gu_f, f32_to_f16, gemvh x2, silu_mul, f32_to_f16, gemvh, silu_mul, moe_down_f (8 launches -> 3, the
 // shared expert off the critical path). Bitwise the same: every block runs the replaced kernels' code (kernels/
 // moe_fused.hip). Taken only where the old chain would run exactly the replaced kernels (ops::chooseMoeFuse);
-// WHIRL_MOE_FUSE=1 enables it (default off until the GPU A/B, progress/tools/feat026_ab.ps1). false: not taken.
+// WHIRL_MOE_FUSE (envFlag at load, Model::moe_fuse) enables it (default off until the GPU A/B, progress/tools/feat026_ab.ps1). false: not taken.
 bool Model::moeFusedPrecise(const ops::MoePlan& pl, const Mat& sg, const Mat& su, const Mat& sd, const MoeW& mo, DevPtr ysh, u32 n) {
-    static const bool on = [] {
-        const char* v = std::getenv("WHIRL_MOE_FUSE");
-        return v != nullptr && *v == '1';
-    }();
-    if (!on) return false;
+    if (!moe_fuse) return false;
     ops::MoeFuseProblem fp;
     fp.n = n;
     fp.C = cfg.n_embd;

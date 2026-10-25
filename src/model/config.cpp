@@ -29,7 +29,7 @@ std::optional<std::string> envGet(std::string_view name) {
 bool envFlag(std::string_view name, bool def) {
     auto v = envGet(name);
     if (!v) return def;
-    return *v != "0";
+    return numerics::flagOn(*v);
 }
 
 }  // namespace whirl

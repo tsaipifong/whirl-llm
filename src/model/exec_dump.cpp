@@ -162,6 +162,8 @@ std::string execDump(const Model& m) {
     WD_B(moe_fp8);
     WD_B(moe_mxw);
     WD_B(moe_rbf);
+    WD_B(moe_fuse);
+    WD_B(gemvh_f32);
     WD_B(mrope_on);
     WD_B(rpos_rows);
 #undef WD_B
