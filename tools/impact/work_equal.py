@@ -26,7 +26,7 @@ make host equality a condition, so it is information for release_check (P7), whi
         [--repo R --a-commit C --b-commit C] [-o report.json]
     python tools/impact/work_equal.py scan EXE          # code objects + PE sections of one exe (JSON)
 
-A launch DIR may hold launch_<pid>.txt files directly or in step sub-folders (release_gate -LaunchLog layout
+A launch DIR may hold launch_<pid>.txt / launch_<pid>_<start>[_<n>].txt files directly or in step sub-folders (release_gate -LaunchLog layout
 <tag>\\<step>\\launch_*.txt); runs are keyed "<step>/<normalized command>".
 """
 from __future__ import annotations
@@ -509,7 +509,7 @@ def _log_files(folder):
     out = []
     for root, _dirs, files in os.walk(folder):
         for fn in files:
-            if fn.startswith("launch_") and fn.endswith(".txt") and not fn.endswith(".raw.txt") and fn[7:-4].isdigit():
+            if launch_table.is_launch_log(fn):  # bug:log-pid-names: launch_<pid>.txt or launch_<pid>_<start>[_<n>].txt
                 out.append(os.path.join(root, fn))
     return out
 
@@ -559,7 +559,7 @@ def load_side(src, include_all=False, server_seq=False, ignore=(), db=None, scop
             runs[k if rel == "." else f"{rel}/{k}"] = v
         for fn in os.listdir(d):
             p = os.path.join(d, fn)
-            if fn.startswith("launch_") and fn.endswith(".txt") and not fn.endswith(".raw.txt") and fn[7:-4].isdigit():
+            if launch_table.is_launch_log(fn):  # bug:log-pid-names: launch_<pid>.txt or launch_<pid>_<start>[_<n>].txt
                 cmd = launch_table.read_log(p)[0]
                 srv = launch_table.norm_cmd(cmd).startswith("whirl-server")
                 if srv and not (include_all or server_seq):

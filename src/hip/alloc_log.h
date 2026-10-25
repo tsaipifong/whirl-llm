@@ -1,5 +1,6 @@
 // Allocation log (arch025-S0a): the sequence of device / pinned-host allocations and releases of a process, by size
-// and kind (no addresses), written at exit when WHIRL_ALLOC_LOG names a folder (alloc_<pid>.txt). It pins the
+// and kind (no addresses), written at exit when WHIRL_ALLOC_LOG names a folder (alloc_<pid>_<start>[_<n>].txt, created exclusively, see log_name.h;
+// older builds: alloc_<pid>.txt). It pins the
 // invariant I2 of arch025.PLAN.md (the Model's device / pinned allocations keep their sizes and order) so a
 // refactoring step can show it allocates exactly what the baseline (S0b) allocated.
 // SPDX-License-Identifier: Apache-2.0
@@ -44,5 +45,7 @@ inline constexpr std::size_t kMaxLines = 200000;
 // the exit writer would write (without the "# cmd:" line)
 void testEnable(bool on, bool list, std::size_t max_lines = kMaxLines);
 std::string testText();
+// unit tests (bug:log-pid-names): write the log file to dir now, as the exit writer would
+void testWrite(const std::string& dir);
 
 }  // namespace whirl::hip::alloclog

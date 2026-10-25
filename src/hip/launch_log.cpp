@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "launch_log.h"
+#include "log_name.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -119,7 +120,9 @@ struct Recorder {
         else ++raw_dropped;
     }
 
-    void write() {
+    // bug:log-pid-names: <dir>\launch_<pid>_<start>[_<n>].txt, created exclusively (log_name.h); the RAW dump is
+    // <same stem>.raw.txt
+    void write(const std::string& dir) {
         std::string cmd;
 #ifdef _WIN32
         const wchar_t* w = GetCommandLineW();
@@ -128,12 +131,9 @@ struct Recorder {
             cmd.resize(static_cast<std::size_t>(len - 1));
             WideCharToMultiByte(CP_UTF8, 0, w, -1, cmd.data(), len, nullptr, nullptr);
         }
-        const unsigned long pid = GetCurrentProcessId();
-#else
-        const unsigned long pid = 0;
 #endif
-        const std::string path = folder() + "\\launch_" + std::to_string(pid) + ".txt";
-        std::FILE* f = std::fopen(path.c_str(), "wb");
+        std::string stem;
+        std::FILE* f = logname::openUnique(dir, "launch_", ".txt", &stem);
         if (f == nullptr) return;
         std::fprintf(f, "# whirl launch log v1\n# cmd: %s\n# launches %llu seqhash %016llx kinds %zu\n", cmd.c_str(),
                      static_cast<unsigned long long>(n), static_cast<unsigned long long>(seq), counts.size());
@@ -148,8 +148,7 @@ struct Recorder {
         }
         std::fclose(f);
         if (!raw_on) return;
-        const std::string rp = folder() + "\\launch_" + std::to_string(pid) + ".raw.txt";
-        std::FILE* g = std::fopen(rp.c_str(), "wb");
+        std::FILE* g = logname::openExclusive(dir, stem, ".raw.txt");
         if (g == nullptr) return;
         for (const std::string& l : raw_lines) std::fprintf(g, "%s\n", l.c_str());
         if (raw_dropped > 0)
@@ -175,7 +174,7 @@ void writeAtExit() {
     std::lock_guard<std::mutex> lk(r.mu);
     if (r.closed) return;
     r.closed = true;
-    r.write();
+    r.write(folder());
 }
 
 }  // namespace
@@ -241,6 +240,12 @@ void testRawPush(const char* line) {
     Recorder& r = rec();
     std::lock_guard<std::mutex> lk(r.mu);
     r.keepRaw(std::string(line));
+}
+
+void testWrite(const std::string& dir) {
+    Recorder& r = rec();
+    std::lock_guard<std::mutex> lk(r.mu);
+    r.write(dir);
 }
 
 void testClearAllocs() {
