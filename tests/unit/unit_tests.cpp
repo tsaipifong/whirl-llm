@@ -1254,6 +1254,255 @@ void testKernelFetchBounds() {
 // ---------------------------------------------------------------------------
 // DFlash2 host policy (whirl/dflash_policy.h): draft-source choice, environment, capture /
 // ring sizing, draft limit, the server slot's context range and ingest plan
+// feat029-dflash2: the DFlash2 draft-width controller (whirl/dflash_policy.h chooseWidth / observeWidth) against
+// independent references: E(n) from the accepted-run distribution, the argmax by brute force, and a host model of
+// the exact-acceptance decode loop showing that any width sequence emits the target's tokens (the losslessness
+// argument; the GPU runner proves the per-width bitwise verify on the real kernels).
+namespace dflash_width_ref {
+// E(n) = sum_j (j + 1) P(run = j), P(run = j) = prod_{i<j} a_i (1 - a_j) for j < n, P(run = n) = prod_{i<n} a_i
+double expectedRef(const std::vector<float>& a, std::uint32_t n) {
+    double e = 0, reach = 1;
+    for (std::uint32_t j = 0; j <= n; ++j) {
+        const double aj = j < a.size() ? a[j] : 0.0;
+        const double pj = j < n ? reach * (1.0 - aj) : reach;
+        e += (j + 1) * pj;
+        if (j < n) reach *= aj;
+    }
+    return e;
+}
+struct Lcg {
+    std::uint64_t s;
+    std::uint32_t next() {
+        s = s * 6364136223846793005ull + 1442695040888963407ull;
+        return static_cast<std::uint32_t>(s >> 33);
+    }
+    float unit() { return static_cast<float>(next() % 100000) / 100000.0f; }
+};
+std::vector<float> fromCumulative(const float* cum, int n) {
+    std::vector<float> a(15, 0.0f);
+    a[0] = cum[0];
+    for (int k = 1; k < n; ++k) a[k] = cum[k] / cum[k - 1];
+    return a;
+}
+}  // namespace dflash_width_ref
+
+void testDflashWidth() {
+    namespace d = whirl::dflash;
+    using dflash_width_ref::expectedRef;
+    dflash_width_ref::Lcg rng{12345};
+    // E(n) == the reference on random alphas (and missing positions count as 0)
+    for (int t = 0; t < 200; ++t) {
+        std::vector<float> a(15);
+        for (float& x : a) x = rng.unit();
+        for (std::uint32_t n = 0; n <= 15; ++n)
+            CHECK(std::fabs(d::expectedTokens(a.data(), 15, n) - expectedRef(a, n)) < 1e-4 * expectedRef(a, n));
+        CHECK(std::fabs(d::expectedTokens(a.data(), 3, 7) - d::expectedTokens(a.data(), 3, 3)) < 1e-6);
+    }
+    const std::vector<float> a75(15, 0.75f);
+    auto tlong = [](std::uint32_t n) { return std::optional<float>(46.0f + 5.0f * n + (n > 0 ? 15.0f : 0.0f)); };
+    // fixed: the limit, the drafter always runs, the state is untouched
+    {
+        d::WidthParams wp;
+        d::WidthState st;
+        const d::WidthChoice c = d::chooseWidth(wp, st, a75.data(), 15, 7, [](std::uint32_t) { return std::optional<float>(10.0f); });
+        CHECK(c.n == 7 && c.draft && !c.probe);
+        CHECK(st.cycles == 0 && st.skipped == 0 && st.probes == 0 && st.since_probe == 0);
+        CHECK(!d::chooseWidth(wp, st, a75.data(), 15, 0, [](std::uint32_t) { return std::optional<float>(); }).draft);
+    }
+    d::WidthParams au;
+    au.mode = d::Width::automatic;
+    au.probe_every = 0;  // no probes unless a case sets them
+    // auto, nothing measured yet: the full limit (explore)
+    {
+        d::WidthState st;
+        const d::WidthChoice c = d::chooseWidth(au, st, a75.data(), 15, 7, [](std::uint32_t) { return std::optional<float>(); });
+        CHECK(c.n == 7 && c.draft && !c.probe && st.cycles == 1);
+    }
+    // auto, every width measured: the argmax of E(n) / T(n) by brute force, random cases
+    for (int t = 0; t < 500; ++t) {
+        const std::uint32_t lim = 1 + rng.next() % 7;
+        std::vector<float> a(15);
+        for (float& x : a) x = rng.unit();
+        std::array<float, 16> tm{};
+        const float base = 20.0f + 30.0f * rng.unit(), drafter = 12.0f * rng.unit(), row = 3.0f * rng.unit();
+        for (std::uint32_t n = 0; n <= lim; ++n) tm[n] = base + (n > 0 ? drafter : 0.0f) + row * static_cast<float>(n);
+        std::uint32_t best = 0;
+        double best_s = -1;
+        for (std::uint32_t n = 0; n <= lim; ++n) {
+            const double s = expectedRef(a, n) / tm[n];
+            if (s > best_s * (1 + 1e-6)) {
+                best_s = s;
+                best = n;
+            }
+        }
+        d::WidthState st;
+        const d::WidthChoice c = d::chooseWidth(au, st, a.data(), 15, lim, [&](std::uint32_t n) { return std::optional<float>(tm[n]); });
+        const double sc = expectedRef(a, c.n) / tm[c.n];  // float vs double: either side of a near-tie
+        CHECK(c.n <= lim && sc >= best_s * (1 - 1e-5));
+        CHECK(c.draft == (c.n > 0));
+        CHECK(st.skipped == (c.n == 0 ? 1u : 0u));
+        if (sc < best_s * (1 - 1e-5)) std::printf("  width case %d: chose %u (%.5f) best %u (%.5f)\n", t, c.n, sc, best, best_s);
+    }
+    // the cases the cost model exists for (DFLASH-2a section 4)
+    {
+        // R9700 Q4_K_M short context: verify 27.8 + 0.84 n ms, drafter 9.3 ms; java-api cumulative acceptance -> the full block
+        const float cum[7] = {.91f, .76f, .70f, .60f, .54f, .51f, .47f};
+        const std::vector<float> a = dflash_width_ref::fromCumulative(cum, 7);
+        auto tshort = [](std::uint32_t n) { return std::optional<float>(27.8f + 0.84f * n + (n > 0 ? 9.3f : 0.0f)); };
+        d::WidthState st;
+        CHECK_EQ(d::chooseWidth(au, st, a.data(), 15, 7, tshort).n, 7u);
+        // read-zig acceptance at a long-context-like cost (5 ms per row, drafter 15 ms): section 4 says n = 3
+        const float cz[7] = {.59f, .37f, .25f, .13f, .07f, .05f, .03f};
+        const std::vector<float> z = dflash_width_ref::fromCumulative(cz, 7);
+        CHECK_EQ(d::chooseWidth(au, st, z.data(), 15, 7, tlong).n, 3u);
+        // almost nothing accepted and the one-row cycle is timed: skip the drafter
+        const std::vector<float> lo(15, 0.05f);
+        const d::WidthChoice c0 = d::chooseWidth(au, st, lo.data(), 15, 7, tlong);
+        CHECK(c0.n == 0 && !c0.draft && st.skipped == 1);
+    }
+    // only the full width timed: narrower widths are estimated with row_rel per row and n = 0 without subtracting the
+    // drafter (conservative): good acceptance keeps the block, near-zero acceptance still skips
+    {
+        auto only7 = [](std::uint32_t n) { return n == 7 ? std::optional<float>(40.0f) : std::nullopt; };
+        d::WidthState st;
+        CHECK_EQ(d::chooseWidth(au, st, a75.data(), 15, 7, only7).n, 7u);
+        const std::vector<float> lo(15, 0.02f);
+        CHECK_EQ(d::chooseWidth(au, st, lo.data(), 15, 7, only7).n, 0u);
+        // E(n >= 1) = 1.4 beats 1 / (1 - 7 row_rel) = 1.212: a drafted width
+        std::vector<float> mid(15, 0.0f);
+        mid[0] = 0.4f;
+        CHECK(d::chooseWidth(au, st, mid.data(), 15, 7, only7).n > 0);
+    }
+    // probes: every probe_every-th decided cycle verifies the full limit, whatever the cost model says
+    {
+        d::WidthParams pp = au;
+        pp.probe_every = 4;
+        const std::vector<float> lo(15, 0.01f);
+        d::WidthState st;
+        std::uint32_t probes = 0, skips = 0;
+        for (int c = 1; c <= 16; ++c) {
+            const d::WidthChoice w = d::chooseWidth(pp, st, lo.data(), 15, 7, tlong);
+            CHECK(w.probe == (c % 4 == 0));
+            if (w.probe) CHECK(w.n == 7 && w.draft);
+            else CHECK(w.n == 0);
+            probes += w.probe ? 1u : 0u;
+            skips += w.draft ? 0u : 1u;
+        }
+        CHECK(probes == 4 && st.probes == 4 && skips == 12 && st.skipped == 12 && st.cycles == 16);
+    }
+    // censored full acceptance: a truncated block accepted in full makes the next cycle one wider (gufo); a rejection resets it
+    {
+        const std::vector<float> z(15, 0.6f);
+        d::WidthState st;
+        const std::uint32_t n0 = d::chooseWidth(au, st, z.data(), 15, 7, tlong).n;
+        CHECK(n0 >= 1 && n0 < 6);
+        d::observeWidth(st, n0, n0, 7);
+        CHECK_EQ(d::chooseWidth(au, st, z.data(), 15, 7, tlong).n, n0 + 1);
+        d::observeWidth(st, n0 + 1, 0, 7);
+        CHECK_EQ(d::chooseWidth(au, st, z.data(), 15, 7, tlong).n, n0);
+        d::observeWidth(st, 7, 7, 7);  // the full limit accepted: nothing wider to try
+        CHECK_EQ(st.climb, 0u);
+        d::observeWidth(st, 0, 0, 7);
+        CHECK_EQ(st.climb, 0u);
+    }
+    // the acceptance rule against a reference: greedy exact verify of n drafts against the target's continuation
+    // accepts the longest matching prefix (= min(the full block's run, n)) and emits it plus the target's token, so
+    // every width sequence (fixed 7, fixed 1, none, random, the auto controller) emits exactly the target's tokens
+    {
+        std::vector<std::uint32_t> target(600);
+        for (auto& x : target) x = rng.next() % 50;
+        auto decode = [&](auto&& widthAt, double miss, std::uint64_t seed, std::uint64_t* acc_total) {
+            dflash_width_ref::Lcg r{seed};
+            std::vector<std::uint32_t> out{target[0]};
+            std::size_t p = 0;  // position of the last emitted token
+            std::uint64_t acc_sum = 0;
+            while (p + 1 < target.size()) {
+                const std::uint32_t room = static_cast<std::uint32_t>(std::min<std::size_t>(7, target.size() - 1 - p));
+                const std::uint32_t n = std::min(room, static_cast<std::uint32_t>(widthAt(room)));
+                // the drafter's block (always 7): the true continuation, each token wrong with probability miss
+                std::array<std::uint32_t, 7> blk{};
+                for (std::uint32_t k = 0; k < 7; ++k) {
+                    const std::size_t q = p + 1 + k;
+                    const std::uint32_t truth = q < target.size() ? target[q] : 0;
+                    blk[k] = r.unit() < miss ? (truth + 1) % 50 : truth;
+                }
+                // the target's verify of [last, drafts 0 .. n-1]: row j predicts position p + 1 + j
+                std::uint32_t acc = 0;
+                while (acc < n && blk[acc] == target[p + 1 + acc]) ++acc;
+                std::uint32_t full = 0;  // reference: the full block's run, truncated to n
+                while (full < 7 && p + 1 + full < target.size() && blk[full] == target[p + 1 + full]) ++full;
+                CHECK_EQ(acc, std::min(full, n));
+                for (std::uint32_t k = 0; k <= acc && p + 1 + k < target.size(); ++k) out.push_back(target[p + 1 + k]);
+                p += acc + 1;
+                acc_sum += acc;
+            }
+            if (acc_total) *acc_total = acc_sum;
+            return out;
+        };
+        for (double miss : {0.0, 0.2, 0.6}) {
+            std::uint64_t a7 = 0, a1 = 0;
+            const auto o7 = decode([](std::uint32_t r) { return r; }, miss, 9, &a7);
+            const auto o1 = decode([](std::uint32_t) { return 1u; }, miss, 9, &a1);
+            const auto o0 = decode([](std::uint32_t) { return 0u; }, miss, 9, nullptr);
+            dflash_width_ref::Lcg wr{77};
+            const auto orand = decode([&](std::uint32_t r) { return wr.next() % (r + 1); }, miss, 9, nullptr);
+            CHECK(o7 == target && o1 == target && o0 == target && orand == target);
+            if (miss == 0.0) CHECK(a7 > a1);  // wider blocks accept more when the drafter is right
+        }
+        for (double miss : {0.1, 0.7}) {
+            d::WidthParams pp = au;
+            pp.probe_every = 16;
+            d::WidthState st;
+            std::array<float, 15> alpha;
+            alpha.fill(0.75f);
+            const auto oa = decode([&](std::uint32_t r) { return r == 0 ? 0u : d::chooseWidth(pp, st, alpha.data(), 15, r, tlong).n; }, miss,
+                                   11, nullptr);
+            CHECK(oa == target);
+            CHECK(st.cycles > 0 && st.probes > 0);
+        }
+    }
+    // WHIRL_DFLASH_WIDTH / WHIRL_DFLASH_PROBE
+    {
+        auto envOf = [](std::map<std::string, std::string> m) {
+            return [m](const char* n) -> std::optional<std::string> {
+                auto it = m.find(n);
+                if (it == m.end()) return std::nullopt;
+                return it->second;
+            };
+        };
+        std::vector<std::string> w;
+        CHECK(d::parseParams(envOf({}), w).width.mode == d::Width::fixed && w.empty());
+        CHECK(d::parseParams(envOf({}), w).width.probe_every == 16);
+        CHECK(d::parseParams(envOf({{"DFLASH_WIDTH", "auto"}}), w).width.mode == d::Width::automatic && w.empty());
+        CHECK(d::parseParams(envOf({{"DFLASH_WIDTH", "fixed"}}), w).width.mode == d::Width::fixed && w.empty());
+        CHECK(d::parseParams(envOf({{"DFLASH_WIDTH", "Auto"}}), w).width.mode == d::Width::fixed && w.size() == 1);
+        w.clear();
+        CHECK(d::parseParams(envOf({{"DFLASH_PROBE", "32"}}), w).width.probe_every == 32 && w.empty());
+        CHECK(d::parseParams(envOf({{"DFLASH_PROBE", "0"}}), w).width.probe_every == 0 && w.empty());
+        CHECK(d::parseParams(envOf({{"DFLASH_PROBE", "1"}}), w).width.probe_every == 16 && w.size() == 1);
+        CHECK(d::parseParams(envOf({{"DFLASH_PROBE", "-3"}}), w).width.probe_every == 16 && w.size() == 2);
+        w.clear();
+        CHECK(d::parseParams(envOf({}), w).width.max_n == 0);
+        CHECK(d::parseParams(envOf({{"DFLASH_NMAX", "4"}}), w).width.max_n == 4 && w.empty());
+        CHECK(d::parseParams(envOf({{"DFLASH_NMAX", "0"}}), w).width.max_n == 0 && w.size() == 1);
+        CHECK(d::parseParams(envOf({{"DFLASH_NMAX", "65"}}), w).width.max_n == 0 && w.size() == 2);
+    }
+    // WHIRL_DFLASH_NMAX caps the width in both modes (the runner's per-width bitwise sweep)
+    {
+        for (std::uint32_t cap = 1; cap <= 8; ++cap) {
+            d::WidthParams fx;
+            fx.max_n = cap;
+            d::WidthState st;
+            const d::WidthChoice c = d::chooseWidth(fx, st, a75.data(), 15, 7, [](std::uint32_t) { return std::optional<float>(10.0f); });
+            CHECK(c.n == std::min(cap, 7u) && c.draft);
+            d::WidthParams ax = au;
+            ax.max_n = cap;
+            const d::WidthChoice ca = d::chooseWidth(ax, st, a75.data(), 15, 7, [](std::uint32_t) { return std::optional<float>(); });
+            CHECK(ca.n == std::min(cap, 7u));  // nothing measured: the (capped) limit
+        }
+    }
+}
+
 void testDflashPolicy() {
     namespace d = whirl::dflash;
     // --draft parsing
@@ -4082,6 +4331,7 @@ int main(int argc, char** argv) {
     testAllocLog();
     specsample_test::testSpecSample();
     testDflashPolicy();
+    testDflashWidth();
     testLocalMemTaken();
     testUmaCheck();
     testWddmWatch();

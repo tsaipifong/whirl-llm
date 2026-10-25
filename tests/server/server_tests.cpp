@@ -1984,6 +1984,54 @@ void testDFlashGreedy() {
     }
 }
 
+// feat029-dflash2: WHIRL_DFLASH_WIDTH=auto (the per-slot draft-width cost model, dflash_policy.h chooseWidth) only
+// changes how many DFlash2 drafts a slot verifies, so greedy outputs stay the greedy reference and a seeded sampled
+// request matches the fixed width; full-width probes run, every cycle with a decided width is counted
+void testDFlashWidthAuto() {
+    for (double miss : {0.1, 0.8}) {
+        ServerSetup fx = dflashSetup(false);
+        fx.mc.dfl_miss = miss;
+        ServerSetup su = fx;
+        su.eo.dfl_width.mode = whirl::dflash::Width::automatic;
+        su.eo.dfl_width.probe_every = 4;
+        TestServer a(su);
+        TestServer b(fx);
+        for (std::uint32_t n : {5u, 300u, 1500u}) {
+            const auto p = makePrompt(n, 90 + n);
+            const auto ref = a.model().greedyReference(p, 150, true);
+            auto ra = a.post("/v1/completions", completionBody(p, 150, n == 300));
+            auto rb = b.post("/v1/completions", completionBody(p, 150, n == 300));
+            CHECK_EQ(ra.status, 200);
+            CHECK_EQ(rb.status, 200);
+            const std::string ta = n == 300 ? streamText(ra, false) : completionText(ra);
+            const std::string tb = n == 300 ? streamText(rb, false) : completionText(rb);
+            CHECK_EQ(ta, decode(ref));
+            CHECK_EQ(ta, tb);
+        }
+        {
+            const auto p = makePrompt(400, 33);
+            const std::string body =
+                std::format("{{\"prompt\":{},\"max_tokens\":80,\"temperature\":0.8,\"seed\":7,\"ignore_eos\":true}}", idsJson(p));
+            auto ra = a.post("/v1/completions", body);
+            auto rb = b.post("/v1/completions", body);
+            CHECK_EQ(completionText(ra), completionText(rb));
+        }
+        const Engine::Stats sa = a.engine().stats(), sb = b.engine().stats();
+        CHECK(sa.dfl_cycles > 0);
+        CHECK(sa.dfl_probes > 0);       // every 4th decided cycle of a slot
+        CHECK_EQ(sb.dfl_probes, 0u);    // fixed: no controller
+        CHECK_EQ(sb.dfl_skipped, 0u);
+        CHECK_EQ(a.model().poison(), 0u);
+        CHECK_EQ(a.model().dflBad(), 0u);
+        CHECK_EQ(a.model().dflStale(), 0u);
+        if (g_verbose)
+            std::printf("  width auto miss %.1f: dfl cycles %llu drafted %llu accepted %llu skipped %llu probes %llu | fixed drafted %llu accepted %llu\n",
+                        miss, (unsigned long long)sa.dfl_cycles, (unsigned long long)sa.dfl_drafted, (unsigned long long)sa.dfl_accepted,
+                        (unsigned long long)sa.dfl_skipped, (unsigned long long)sa.dfl_probes, (unsigned long long)sb.dfl_drafted,
+                        (unsigned long long)sb.dfl_accepted);
+    }
+}
+
 // fast mode's relaxacc relaxes MTP drafts only: DFlash2 drafts keep exact acceptance even with the
 // item on in the engine (whirl-server also turns it off for --draft dflash), so the output is the
 // greedy reference whatever the drafter proposes
@@ -7705,6 +7753,7 @@ int main(int argc, char** argv) {
         {"concurrency_nomtp", [] { testConcurrency(4, 8, false); }},
         {"dflash_greedy", testDFlashGreedy},
         {"dflash_relax_exact", testDFlashRelaxExact},
+        {"dflash_width_auto", testDFlashWidthAuto},
         {"dflash_ngram", testDFlashNgram},
         {"dflash_rollback", testDFlashRollback},
         {"dflash_tier", testDFlashTier},
