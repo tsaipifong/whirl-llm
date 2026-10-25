@@ -193,6 +193,65 @@ class GateTests(unittest.TestCase):
         rc, out = run("check", t2.b, bl)
         self.assertEqual(rc, 0, out)
 
+    def test_analyze_off_tu_not_expected(self):  # arch025-Q3: kernel byte arrays get /analyze- (C1060 out of heap)
+        self.assertTrue(ac.analyze_on('cl.exe /c /analyze /analyze:external- /analyze:log:format:sarif /Fo"a.obj" a.cpp'))
+        self.assertFalse(ac.analyze_on('cl.exe /c /analyze /analyze:external- /analyze:log:format:sarif /analyze- /Fo"k.obj" k.cpp'))
+        self.assertFalse(ac.analyze_on('cl.exe /c /analyze:external- /Fo"b.obj" b.cpp'))
+
+    # arch025-Q3: the whitelist (file:line + reason per baseline key)
+    def whitelist(self, rows):
+        p = os.path.join(self.tmp, "wl.tsv")
+        with open(p, "w", encoding="utf-8") as f:
+            f.write("# header\n" + "".join("\t".join(r) + "\n" for r in rows))
+        return p
+
+    GOOD = [("include/whirl/json.h|C26495|whirl::json::Value::Value", "include/whirl/json.h:30", "member left uninitialized by design (test)"),
+            ("src/a.cpp|C6001|whirl::a", "src/a.cpp:10", "false positive: x is written on every path (test)"),
+            ("src/b.cpp|C6262|whirl::b::big", "src/b.cpp:200", "large stack frame, main thread only (test)")]
+
+    def test_reasons_complete_pass(self):
+        t = Tree(os.path.join(self.tmp, "t1"), TUS)
+        bl = self.baseline(t)
+        rc, out = run("reasons", bl, self.whitelist(self.GOOD), t.b)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("analyze reasons: ok", out)
+
+    def test_reasons_missing_key_fails(self):
+        t = Tree(os.path.join(self.tmp, "t1"), TUS)
+        bl = self.baseline(t)
+        rc, out = run("reasons", bl, self.whitelist(self.GOOD[:2]))
+        self.assertEqual(rc, 1, out)
+        self.assertIn("without a whitelist reason: src/b.cpp|C6262", out)
+
+    def test_reasons_stale_row_and_empty_reason_fail(self):
+        t = Tree(os.path.join(self.tmp, "t1"), TUS)
+        bl = self.baseline(t)
+        rows = self.GOOD[:2] + [("src/b.cpp|C6262|whirl::b::big", "src/b.cpp:200", "TODO"), ("src/c.cpp|C6001|c", "src/c.cpp:1", "gone from the baseline")]
+        rc, out = run("reasons", bl, self.whitelist(rows))
+        self.assertEqual(rc, 1, out)
+        self.assertIn("no reason for src/b.cpp|C6262", out)
+        self.assertIn("not in the baseline (stale): src/c.cpp|C6001|c", out)
+
+    def test_reasons_moved_line_and_wrong_file_fail(self):
+        t = Tree(os.path.join(self.tmp, "t1"), TUS)
+        bl = self.baseline(t)
+        t2 = Tree(os.path.join(self.tmp, "t2"), TUS, line_shift=3)  # the warnings moved 3 lines down
+        rc, out = run("reasons", bl, self.whitelist(self.GOOD), t2.b)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("src/a.cpp|C6001|whirl::a: whitelist says line 10, cl reports line(s) 13 now", out)
+        rows = [self.GOOD[0], ("src/a.cpp|C6001|whirl::a", "src/other.cpp:10", "points into another file (test)"), self.GOOD[2]]
+        rc, out = run("reasons", bl, self.whitelist(rows))
+        self.assertEqual(rc, 1, out)
+        self.assertIn("is not in the key's file src/a.cpp", out)
+
+    def test_reasons_incomplete_build_fails(self):
+        t = Tree(os.path.join(self.tmp, "t1"), TUS)
+        bl = self.baseline(t)
+        t2 = Tree(os.path.join(self.tmp, "t2"), TUS, rc=2)
+        rc, out = run("reasons", bl, self.whitelist(self.GOOD), t2.b)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("build dir incomplete", out)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

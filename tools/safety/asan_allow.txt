@@ -1,0 +1,5 @@
+# arch025-Q1 ASan false-positive whitelist (read by tools/safety/asan_check.py; release_gate step cpu_asan).
+# MSVC AddressSanitizer has no runtime suppression file, so a false positive can only be handled by not instrumenting the code:
+# __declspec(no_sanitize_address) (or a __SANITIZE_ADDRESS__ guard) at the site. Every such site in src/ include/ tests/ kernels/
+# tools/ must have one line here:   <file relative to the repo>:<line><TAB><reason: why the report is false, who checked, date>
+# A site not listed, or a line here that points at no such site, fails cpu_asan. Empty list = no code is excluded from ASan.

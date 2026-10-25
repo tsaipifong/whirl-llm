@@ -34,5 +34,12 @@ if(WHIRL_ANALYZE)
   # <obj>.nativecodeanalysis.sarif next to every object: ruleId + function, independent of the MSVC language pack and of
   # the tree path, which is what tools/safety/analyze_check.py keys on (safe025 review A2)
   add_compile_options(/analyze /analyze:external- /analyze:log:format:sarif /external:W0 /external:anglebrackets)
+  # arch025-Q3: the bin2c byte arrays of the HIP code objects (build/kernels/whirl_kernels_<arch>.cpp, whirl_vision_<arch>.cpp;
+  # 47-131 MB of generated initializers, no code) are not analyzed: cl /analyze ran out of heap on them (C1060, 2026-10-25
+  # build-analyze) once the CPU test targets link whirl_hip. The later /analyze- wins; analyze_check.py prepare skips such TUs.
+  foreach(_arch gfx1151 gfx1201)
+    set_source_files_properties("${CMAKE_BINARY_DIR}/kernels/whirl_kernels_${_arch}.cpp" "${CMAKE_BINARY_DIR}/kernels/whirl_vision_${_arch}.cpp"
+                                PROPERTIES COMPILE_OPTIONS "/analyze-")
+  endforeach()
   message(STATUS "WHIRL: MSVC /analyze build")
 endif()
