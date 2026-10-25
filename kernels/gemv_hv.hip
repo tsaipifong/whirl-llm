@@ -14,8 +14,9 @@
 // of D units. Per unit step: (1) the activations of the NEXT unit (XD = 1) or of this unit (XD = 0) are loaded,
 // (2) then the weights of unit u + D - 1, (3) unit u is multiplied. In issue order every wait of step 3 is for loads
 // issued before the newest weight unit, so D - 1 units of weights stay in flight during the WMMAs.
-// Optional PF: s_prefetch_data of superblock (u / 2) + PF for the 16 rows (a hint; the length encoding of the
-// instruction is not documented, PFLEN is passed through).
+// Optional PF: (4) after the WMMAs, fenced by sched_barrier(0), s_prefetch_data of superblock (u / 2) + PF for the
+// 16 rows (a hint; PFLEN is passed through as SDATA). Placed before the WMMAs it made LLVM drain the ring
+// (progress/feat026-gemvh-pf.PRIOR_ART.md).
 //
 // Bit-identity contract (precise): for every output (row, token) the A fragment is bit for bit dec_group_h<T>'s
 // (same helper calls: mx_lut4 + bytes8_to_h8 for MXFP4, the Q<QT_Q6_K>::dec8 float expression ds * v then
@@ -179,13 +180,6 @@ __device__ __forceinline__ void gvhd_impl(const uint8_t *__restrict__ W, uint64_
             else load_x(xb[0], u);
             // (2) weights of unit u + D - 1
             G::load(w[(s + D - 1) % D], rowp, min(u + D - 1, nu - 1), g0);
-#if defined(__gfx12__) || defined(__gfx1200__) || defined(__gfx1201__)
-            if (PF > 0 && (s & 1) == 0) {
-                const size_t poff = (size_t)min((u >> 1) + PF, nu / 2 - 1) * G::SBB;
-#pragma unroll
-                for (int r = 0; r < 16; ++r) __builtin_amdgcn_s_prefetch_data(prow[r] + poff, WHIRL_GVH_PFLEN);
-            }
-#endif
             __builtin_amdgcn_sched_barrier(0);
             // (3) the 8 WMMA steps of unit u, increasing k
             const R &cur = w[s % D];
@@ -196,6 +190,19 @@ __device__ __forceinline__ void gvhd_impl(const uint8_t *__restrict__ W, uint64_
 #pragma unroll
                 for (int j = 0; j < TN; ++j) acc[j] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(a, xb[xs][j][kq], acc[j]);
             }
+            // (4) PF hint after the use, fenced (feat026-gemvh-pf): between the loads and the WMMAs it made LLVM drain the
+            // ring (s_wait_loadcnt 0 inside the step, out_q3 gvhd6); after the use + sched_barrier(0) the waits are PF = 0's
+#if defined(__gfx12__) || defined(__gfx1200__) || defined(__gfx1201__)
+            if constexpr (PF > 0) {
+                __builtin_amdgcn_sched_barrier(0);
+                if ((s & 1) == 0) {
+                    const size_t poff = (size_t)min((u >> 1) + PF, nu / 2 - 1) * G::SBB;
+#pragma unroll
+                    for (int r = 0; r < 16; ++r) __builtin_amdgcn_s_prefetch_data(prow[r] + poff, WHIRL_GVH_PFLEN);
+                }
+                __builtin_amdgcn_sched_barrier(0);
+            }
+#endif
         };
         int u0 = 0;
         for (; u0 + UR <= nu; u0 += UR) {
