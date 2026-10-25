@@ -513,6 +513,7 @@ void loadMisc(MiscKernels& k, const Loader& L) {
         {&KernelTable::gated_norm_x16, "gated_norm_x16"},
         {&KernelTable::topk_rows, "topk_rows"},
         {&KernelTable::draft_sample_rows, "draft_sample_rows"},
+        {&KernelTable::spec_accept_rows, "spec_accept_rows"},  // feat026-acc (null: host accept)
     };
     for (const Named& n : optional) k.*(n.f) = L.opt(n.name);
     k.copy_rows_map = L.opt("copy_rows_map");

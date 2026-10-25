@@ -29,6 +29,7 @@
 #endif
 
 #include "../../kernels/gemm_small_addr.h"
+#include "../../kernels/spec_accept.h"
 
 #include <algorithm>
 #include <cmath>
@@ -39,6 +40,7 @@
 #include <optional>
 #include <regex>
 #include <stdexcept>
+#include <type_traits>
 #include <functional>
 #include <map>
 #include <new>
@@ -99,6 +101,171 @@ std::string J(std::string s) {
         if (c == '~') c = static_cast<char>(92);
     return s;
 }
+
+// feat026-acc: kernels/spec_accept.h (the device accept decision) against the host loop of
+// Engine::decodeCycle as it was at base 1a5a547 (greedy, no relaxacc), copied here in logic, on random
+// cycles: MTP / literal drafts, the p-min draft count, matching prefixes of every length, end-of-turn drafts,
+// ignore_eos, max_tokens budgets; plus the next-cycle rows against the host's slot update.
+namespace specacc_test {
+struct HostRef {
+    std::uint32_t nd_dev = 0, acc0 = 0, acc = 0, chosen = 0;
+};
+HostRef hostLoop(const std::int32_t* ctl, std::uint32_t nd_k, bool is_ng, const std::uint32_t* ng_d, bool ignore_eos,
+                 std::uint32_t im_end, std::uint32_t endoftext, std::uint32_t max_tokens, std::uint32_t n_gen) {
+    HostRef h;
+    const std::uint32_t nd_dev = is_ng ? nd_k : (nd_k > 0 ? std::min(nd_k, static_cast<std::uint32_t>(std::max(0, ctl[48]))) : 0);
+    std::uint32_t dr[16] = {};
+    for (std::uint32_t r = 0; r < nd_k; ++r) dr[r] = is_ng ? ng_d[r] : static_cast<std::uint32_t>(ctl[16 + r]);
+    std::uint32_t acc = 0;
+    while (acc < nd_dev && static_cast<std::uint32_t>(ctl[acc]) == dr[acc]) ++acc;
+    std::uint32_t chosen = static_cast<std::uint32_t>(ctl[acc]);
+    h.acc0 = acc;
+    if (!ignore_eos) {
+        for (std::uint32_t r = 0; r < acc; ++r) {
+            if (dr[r] == im_end || dr[r] == endoftext) {
+                chosen = dr[r];
+                acc = r;
+                break;
+            }
+        }
+    }
+    {
+        const std::uint32_t budget = max_tokens > n_gen ? max_tokens - n_gen : 0;
+        if (budget >= 1 && acc + 1 > budget) {
+            chosen = dr[budget - 1];
+            acc = budget - 1;
+        }
+    }
+    h.nd_dev = nd_dev;
+    h.acc = acc;
+    h.chosen = chosen;
+    return h;
+}
+
+void testSpecAccept() {
+    std::uint64_t st = 0x9e3779b97f4a7c15ull;
+    auto rnd = [&](std::uint32_t n) {
+        st ^= st << 13;
+        st ^= st >> 7;
+        st ^= st << 17;
+        return static_cast<std::uint32_t>(st % n);
+    };
+    const std::uint32_t V = 1000, IM_END = 998, EOT = 999;
+    std::uint64_t n_eos = 0, n_budget = 0, n_full = 0, tab_ok = 0, bad = 0;
+    const int iters = 20000;
+    for (int it = 0; it < iters; ++it) {
+        const int A = 1 + static_cast<int>(rnd(16));
+        std::vector<std::int32_t> ctl_all(16 * 64, 0);
+        SpecAccArgs a{};
+        a.n = A;
+        a.n_vocab = static_cast<int>(V - (it % 4 == 0 ? 10 : 0));  // some tokens past n_vocab: lookupId -> 0
+        a.stop0 = IM_END;
+        a.stop1 = (it % 5 == 0) ? 0xffffffffu : EOT;
+        std::vector<HostRef> want(A);
+        std::vector<int> ids(16);
+        for (int i = 0; i < 16; ++i) ids[i] = i;
+        for (int i = 15; i > 0; --i) std::swap(ids[i], ids[rnd(static_cast<std::uint32_t>(i) + 1)]);
+        int row = 0;
+        for (int k = 0; k < A; ++k) {
+            const int sq = ids[k];
+            std::int32_t* ctl = ctl_all.data() + sq * 64;
+            // the engine's row budget: one verify runs sum(nd + 1) <= vrows_ <= max_verify_rows (32) rows
+            // (engine.cpp vrows_; SpecNextTab / RowTab hold WHIRL_SA_MAX_ROWS rows). Leave one row for every
+            // sequence still to come. (chain-triage-1026a: nd = rnd(16) for up to 16 sequences ran up to 256
+            // rows, past the table, and failed tab_ok on the capped rows.)
+            const int nd_cap = std::min(WHIRL_SA_MAX_ND, WHIRL_SA_MAX_ROWS - row - (A - k));
+            const std::uint32_t nd = nd_cap > 0 ? rnd(static_cast<std::uint32_t>(nd_cap) + 1) : 0;
+            const bool lit = rnd(3) == 0;
+            const bool ign = rnd(4) == 0;
+            const std::uint32_t n_gen = rnd(50);
+            const std::uint32_t max_tok = rnd(3) == 0 ? n_gen + rnd(6) : n_gen + 100;
+            a.seq[k] = sq;
+            a.nd[k] = static_cast<int>(nd);
+            a.lit[k] = lit ? 1 : 0;
+            a.dev[k] = 1;
+            a.eos[k] = ign ? 0 : 1;
+            a.budget[k] = static_cast<int>(max_tok > n_gen ? max_tok - n_gen : 0);
+            a.pos[k] = static_cast<int>(rnd(100000));
+            a.row0[k] = row;
+            row += static_cast<int>(nd) + 1;
+            a.kvbase[k] = static_cast<int>(rnd(1u << 20));
+            ctl[48] = static_cast<std::int32_t>(rnd(17)) - 1;  // p-min kept count (may be stale / -1)
+            std::uint32_t d[16] = {};
+            const std::uint32_t match = rnd(nd + 2);
+            for (std::uint32_t r = 0; r < nd; ++r) {
+                d[r] = rnd(V);
+                if (rnd(8) == 0) d[r] = rnd(2) ? IM_END : EOT;
+            }
+            for (std::uint32_t r = 0; r < 16; ++r) ctl[r] = static_cast<std::int32_t>(rnd(V));
+            for (std::uint32_t r = 0; r < nd && r < match; ++r) ctl[r] = static_cast<std::int32_t>(d[r]);
+            std::uint32_t litd[16] = {};
+            for (std::uint32_t r = 0; r < nd; ++r) {
+                if (lit) {
+                    a.lit_d[k][r] = static_cast<int>(d[r]);
+                    litd[r] = d[r];
+                    ctl[16 + r] = static_cast<std::int32_t>(rnd(V));  // stale MTP drafts: must be ignored
+                } else {
+                    ctl[16 + r] = static_cast<std::int32_t>(d[r]);
+                }
+            }
+            want[k] = hostLoop(ctl, nd, lit, litd, ign, IM_END, a.stop1, max_tok, n_gen);
+        }
+        CHECK(row <= WHIRL_SA_MAX_ROWS);
+        SpecAccResult res[WHIRL_SA_MAX_SEG];
+        for (int k = 0; k < A; ++k) {
+            std::int32_t* ctl = ctl_all.data() + a.seq[k] * 64;
+            std::int32_t low[50];
+            std::memcpy(low, ctl, sizeof(low));
+            const SpecAccResult r = spec_accept_one(a, k, ctl);
+            const bool same = static_cast<std::uint32_t>(r.nd_dev) == want[k].nd_dev && static_cast<std::uint32_t>(r.acc0) == want[k].acc0 &&
+                              static_cast<std::uint32_t>(r.acc) == want[k].acc && static_cast<std::uint32_t>(r.chosen) == want[k].chosen &&
+                              (r.flags & WHIRL_SA_F_DEV) != 0;
+            if (!same && bad++ < 5)
+                std::printf("FAIL spec_accept it %d k %d: dev nd %d acc0 %d acc %d chosen %d vs host %u %u %u %u\n", it, k, r.nd_dev, r.acc0,
+                            r.acc, r.chosen, want[k].nd_dev, want[k].acc0, want[k].acc, want[k].chosen);
+            n_eos += (r.flags & WHIRL_SA_F_EOS) != 0;
+            n_budget += (r.flags & WHIRL_SA_F_BUDGET) != 0;
+            n_full += r.acc0 == r.nd_dev && r.nd_dev > 0;
+            spec_store(a, k, r, ctl);
+            const bool stored = ctl[WHIRL_SA_CTL_ACC] == r.acc && ctl[WHIRL_SA_CTL_ACC0] == r.acc0 && ctl[WHIRL_SA_CTL_CHOSEN] == r.chosen &&
+                                ctl[WHIRL_SA_CTL_NDDEV] == r.nd_dev && ctl[WHIRL_SA_CTL_FLAGS] == r.flags &&
+                                ctl[WHIRL_SA_CTL_NPOS] == a.pos[k] + r.acc + 1 && ctl[WHIRL_SA_CTL_NROW] == a.row0[k] + r.acc &&
+                                std::memcmp(low, ctl, sizeof(low)) == 0;  // words < 50 untouched
+            if (!stored) bad += 1;
+            res[k] = r;
+        }
+        // next-cycle rows vs the host's slot update (pend = dr[0..acc), chosen; pend_pos = pos + 1; next = chosen;
+        // pos += acc + 1) and the tables Model::mtpBatchStepEx / verifyBatchEnqueue build (lookupId, kv_base)
+        SpecNextTab t{};
+        spec_next_rows(a, ctl_all.data(), res, &t);
+        int n = 0;
+        bool ok = true;
+        auto look = [&](std::uint32_t tok) { return static_cast<std::int32_t>(tok < static_cast<std::uint32_t>(a.n_vocab) ? tok : 0); };
+        for (int k = 0; k < A; ++k) {
+            const std::int32_t* ctl = ctl_all.data() + a.seq[k] * 64;
+            const std::uint32_t acc = want[k].acc;
+            for (std::uint32_t j = 0; j <= acc; ++j, ++n) {
+                const std::uint32_t tok =
+                    j < acc ? (a.lit[k] ? static_cast<std::uint32_t>(a.lit_d[k][j]) : static_cast<std::uint32_t>(ctl[16 + j])) : want[k].chosen;
+                ok = ok && t.mtp_tok[n] == look(tok) && t.mtp_pos[n] == a.pos[k] + 1 + static_cast<int>(j) && t.mtp_base[n] == a.kvbase[k];
+            }
+            ok = ok && t.mtp_last[k] == n - 1 && t.ver_tok[k] == look(want[k].chosen) &&
+                 t.ver_pos[k] == a.pos[k] + static_cast<int>(acc) + 1 && t.ver_base[k] == a.kvbase[k];
+        }
+        ok = ok && t.n_mtp == n;
+        tab_ok += ok ? 1 : 0;
+    }
+    CHECK_EQ(bad, 0u);
+    CHECK_EQ(tab_ok, static_cast<std::uint64_t>(iters));
+    // the random cycles reached every branch
+    CHECK(n_eos > 100);
+    CHECK(n_budget > 100);
+    CHECK(n_full > 100);
+    // the kernel argument the launch copies: no padding, the expected size
+    static_assert(sizeof(SpecAccArgs) == (4 + 9 * 16 + 16 * 15) * 4);
+    static_assert(std::has_unique_object_representations_v<SpecAccArgs>);
+}
+}  // namespace specacc_test
 
 void testRelaxAccept() {
     using whirl::relax::Params;
@@ -4063,6 +4230,7 @@ int main(int argc, char** argv) {
     testDllDeps();
 #endif
     testRelaxAccept();
+    specacc_test::testSpecAccept();
     testJson();
     testUnicode();
     testGguf();

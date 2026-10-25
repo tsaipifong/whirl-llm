@@ -77,6 +77,8 @@ struct MockConfig {
     // with these row bytes, in kvArrays() order K, V, extra...: none = f16-shaped (K, V), two = q8h / q4-shaped (K, V,
     // K scales, V scales). The mock never reads them; the engine copies, spills and restores them like the real ones.
     std::vector<std::uint32_t> kv_extra_rows;
+    // feat026-acc: the mock has the device accept kernel (specAccept runs kernels/spec_accept.h on the host)
+    bool spec_acc_kernel = true;
 };
 
 class MockModel final : public server::ServerModel {
@@ -159,11 +161,18 @@ public:
     std::uint64_t poison() const { return poison_.load(); }
     // Hidden rows consumed with the wrong position (MTP bookkeeping).
     std::uint64_t hidMismatch() const { return hid_mismatch_.load(); }
+    // feat026-acc: the device accept kernel, run on the host with the same code (kernels/spec_accept.h)
+    bool specAcceptOk() const override { return mc_.spec_acc_kernel; }
+    void specAccept(const SpecAccArgs& a, std::int32_t* host) override;
+    void readSpecTab(SpecNextTab& t) override { t = spec_tab_; }
+    std::uint64_t specAccepts() const { return spec_accepts_.load(); }
     std::uint64_t rowsRun() const { return rows_run_; }
     // most rows of one prefill forward so far (like Model::forward, more than max_batch throws BatchTooLarge)
     std::uint32_t maxPrefillRows() const { return max_pf_rows_.load(); }
 
 private:
+    SpecNextTab spec_tab_{};
+    std::atomic<std::uint64_t> spec_accepts_{0};
     void prefillRows(std::size_t n);
     struct State {
         std::uint64_t h = 0;   // recurrent hash

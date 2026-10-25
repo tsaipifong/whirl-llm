@@ -38,6 +38,15 @@
 #include "whirl/value_scope.h"
 #include "whirl/spec_sample.h"
 #include "whirl/vismap.h"
+#include "../../kernels/spec_accept.h"  // feat026-acc: accept decision shared with the device kernel
+
+template <>
+struct whirl::hip::LaunchArgPtrWords<SpecAccArgs> : whirl::hip::LaunchArgNoPtrWords {};
+static_assert(WHIRL_SA_CTL_ROWS == whirl::kernels::kCtlRows && WHIRL_SA_CTL_DRAFTS == whirl::kernels::kCtlDrafts &&
+              WHIRL_SA_CTL_ND == whirl::kernels::kCtlNd && WHIRL_SA_CTL_WORDS == whirl::kernels::kCtlWords &&
+              WHIRL_SA_CTL_ACC > whirl::kernels::kCtlStop && WHIRL_SA_CTL_ACC0 < whirl::kernels::kCtlWords &&
+              WHIRL_SA_MAX_SEG == whirl::kernels::kGdnMaxSeg && WHIRL_SA_MAX_ND == whirl::kernels::kGdnMaxSnap &&
+              WHIRL_SA_MAX_ROWS == whirl::kernels::kMaxVerifyRows);
 
 #include <array>
 #include <cstdint>
@@ -835,6 +844,16 @@ public:
     void mtpBatchStep(std::span<const MSeg> segs, std::uint32_t r) { mtpBatchStepEx(segs, r, true); }
     void mtpBatchStepEx(std::span<const MSeg> segs, std::uint32_t r, bool draft);
     void readCtl(std::span<std::int32_t> dst);
+    // feat026-acc (kernels/spec_accept.h): after verifyBatchEnqueue, the accept decision of the verify's
+    // sequences on the device (result words 50 .. 56 of each control area), the next cycle's rows into
+    // spec_tab, and (host != 0: pinned host memory, readCtl layout) the verify's control areas copied there.
+    // a.kvbase is filled here. false: the kernel is missing (nothing enqueued).
+    bool specAcceptEnqueue(const SpecAccArgs& a, DevPtr host);
+    // control areas into pinned host memory: async copy on the work stream + stream sync (no staged copy)
+    void readCtlPinned(std::span<std::int32_t> dst);
+    // the SpecNextTab of the last specAcceptEnqueue (blocking; checks / tests)
+    void readSpecTab(SpecNextTab& t);
+    DevPtr spec_tab = 0;
     struct Draft {
         std::uint32_t tok;
         float p;

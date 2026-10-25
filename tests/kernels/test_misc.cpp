@@ -22,6 +22,10 @@
 
 #include "cpu_ref.h"
 #include "whirl/spec_sample.h"
+#include "spec_accept.h"  // feat026-acc (kernels/)
+
+template <>
+struct whirl::hip::LaunchArgPtrWords<SpecAccArgs> : whirl::hip::LaunchArgNoPtrWords {};
 
 namespace kt {
 
@@ -311,6 +315,73 @@ void testMisc(Ctx& c) {
             c.rep.add(cmpExact("set_rows ids", ids2.down<int>(5), std::vector<int>{600, 1000, 602, 1001, 604}));
             c.rep.add(cmpExact("set_rows pos / kvbase", pos2.down<int>(5), std::vector<int>{0, 10, 20, 30, 40}));
             c.rep.add(cmpExact("set_rows kvbase", kvb.down<int>(5), std::vector<int>{100, 101, 102, 103, 104}));
+        }
+        // feat026-acc spec_accept_rows: result words, the copy into the host-layout buffer and the next-cycle
+        // rows == kernels/spec_accept.h run on the CPU (exact), on 3 sequences (MTP full / partial accept, literal
+        // drafts with an end-of-turn cut, a host-decided sequence) at control areas 2, 0, 3 of 4
+        if (c.k.spec_accept_rows) {
+            std::vector<int> ctl(4 * 64, 0);
+            for (int i = 0; i < 4 * 64; ++i) ctl[i] = 7 + (i * 37) % 900;
+            SpecAccArgs a{};
+            a.n = 3;
+            a.n_vocab = 1000;
+            a.stop0 = 998;
+            a.stop1 = 999;
+            const int seqs[3] = {2, 0, 3};
+            for (int k = 0; k < 3; ++k) {
+                a.seq[k] = seqs[k];
+                a.dev[k] = k < 2 ? 1 : 0;
+                a.eos[k] = 1;
+                a.budget[k] = 100;
+                a.pos[k] = 1000 * (k + 1);
+                a.row0[k] = 5 * k;
+                a.kvbase[k] = 64 * k;
+            }
+            // seq 2: MTP, 4 drafts, p-min kept 3, rows match drafts 0..1
+            a.nd[0] = 4;
+            ctl[2 * 64 + 48] = 3;
+            for (int r = 0; r < 4; ++r) ctl[2 * 64 + 16 + r] = 100 + r;
+            ctl[2 * 64 + 0] = 100;
+            ctl[2 * 64 + 1] = 101;
+            // seq 0: literal drafts {5, 998, 6}, all match: cut at the end-of-turn draft
+            a.nd[1] = 3;
+            a.lit[1] = 1;
+            a.lit_d[1][0] = 5;
+            a.lit_d[1][1] = 998;
+            a.lit_d[1][2] = 6;
+            ctl[0] = 5;
+            ctl[1] = 998;
+            ctl[2] = 6;
+            a.nd[2] = 2;
+            std::vector<int> want = ctl;
+            SpecAccResult res[WHIRL_SA_MAX_SEG];
+            for (int k = 0; k < 3; ++k) {
+                int* cw = want.data() + a.seq[k] * 64;
+                SpecAccResult r{};
+                if (a.dev[k]) r = spec_accept_one(a, k, cw);
+                else r.chosen = cw[0];
+                spec_store(a, k, r, cw);
+                res[k] = r;
+            }
+            SpecNextTab wt{};
+            spec_next_rows(a, want.data(), res, &wt);
+            Buf dctl(ctl), dhost(std::vector<int>(4 * 64, -1)), dtab(sizeof(SpecNextTab));
+            hip::launch(c.k.spec_accept_rows, {1, 1, 1}, {64, 1, 1}, 0, c.s, dctl.p(), a, dhost.p(), dtab.p());
+            c.sync();
+            const auto got = dctl.down<int>(4 * 64);
+            const auto hst = dhost.down<int>(4 * 64);
+            std::vector<int> want_h(4 * 64, -1);
+            for (int k = 0; k < 3; ++k)
+                for (int w = 0; w < 64; ++w) want_h[a.seq[k] * 64 + w] = want[a.seq[k] * 64 + w];
+            c.rep.add(cmpExact("spec_accept_rows control words", got, want));
+            c.rep.add(cmpExact("spec_accept_rows host copy", hst, want_h));
+            const auto tb = dtab.down<int>(sizeof(SpecNextTab) / 4);
+            std::vector<int> wtv(sizeof(SpecNextTab) / 4);
+            std::memcpy(wtv.data(), &wt, sizeof(SpecNextTab));
+            c.rep.add(cmpExact("spec_accept_rows next-cycle rows", tb, wtv));
+            // the hand-checked values: seq 2 acc 2 chosen ctl[2], seq 0 cut to acc 1 chosen 998
+            c.rep.add(cmpExact("spec_accept_rows acc / chosen", std::vector<int>{res[0].acc, res[0].chosen, res[1].acc, res[1].chosen},
+                               std::vector<int>{2, want[2 * 64 + 2], 1, 998}));
         }
         // topk_rows: the K largest (unordered) and the softmax normalizer
         if (c.k.topk_rows) {

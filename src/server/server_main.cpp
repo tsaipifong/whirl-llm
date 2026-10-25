@@ -1296,6 +1296,8 @@ int serveMain(int argc, char** argv, const char* program) {
         if (auto v = env("NGRAM_SLOPE")) eo.ngram_slope = std::strtof(v->c_str(), nullptr);
         eo.ngram_max = envU32("NGRAM_MAX", 0);
         eo.ngram_force = envOn("NGRAM_FORCE", false);
+        // feat026-acc: 0 host (default), 1 pinned, 2 gpu, 3 gpu-zc, 4 check (EngineOptions::spec_acc)
+        eo.spec_acc = envU32("SPEC_ACC", 0);
         // WHIRL_SLOT_DRAFTS: 0 / unset uniform, 1 marginal-gain swaps, 2 cost-model allocation
         if (auto v = env("SLOT_DRAFTS")) eo.slot_drafts = *v == "2" ? 2u : (*v != "0" ? 1u : 0u);
         if (use_dflash) {

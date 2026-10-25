@@ -3610,6 +3610,93 @@ void testSampling() {
     CHECK_EQ(srv.model().poison(), 0u);
 }
 
+// feat026-acc (WHIRL_SPEC_ACC): every mode gives the greedy reference text; the device accept decision
+// (kernels/spec_accept.h, run by the mock on the host) agrees with the host loop on every slot cycle (accept
+// count before / after the EOS and max_tokens cuts, next token, drafts compared, next position and row), and the
+// device's next-cycle rows (MTP step-0 rows + verify row 0) equal the ones the host builds. Covers MTP drafts with
+// and without DeltaNet replay, n-gram drafts (literal), end-of-turn cuts, small max_tokens, 1 and 4 slots, and a
+// sampled request next to greedy ones (host decision; same text for its seed in every mode).
+void testSpecAccModes() {
+    struct Case {
+        const char* name;
+        bool replay;
+        std::uint32_t markov;
+        double eos_rate;
+        std::uint32_t parallel;
+    };
+    const Case cases[] = {{"mtp", true, 0, 0.0, 4}, {"no-replay", false, 0, 0.0, 4}, {"ngram", true, 40, 0.0, 4},
+                          {"eos", true, 0, 0.03, 4}, {"one-slot", true, 0, 0.02, 1}};
+    for (const Case& c : cases) {
+        std::string sampled_ref;
+        for (std::uint32_t mode : {0u, 1u, 2u, 3u, 4u}) {
+            ServerSetup su = baseSetup();
+            su.mc.replay = c.replay;
+            su.mc.markov = c.markov;
+            su.mc.eos_rate = c.eos_rate;
+            su.mc.parallel = c.parallel;
+            su.mc.pool_tokens = 131072;
+            su.eo.spec_acc = mode;
+            TestServer srv(su);
+            const std::uint32_t n_req = c.parallel == 1 ? 3 : 6;
+            std::vector<std::vector<std::uint32_t>> prompts;
+            std::vector<std::uint32_t> mt;
+            for (std::uint32_t i = 0; i < n_req; ++i) {
+                prompts.push_back(makePrompt(150 + 211 * i % 900, 300 + i));
+                mt.push_back(i % 3 == 2 ? 7 + i : 90);  // some requests end by max_tokens inside a draft run
+            }
+            std::vector<std::string> got(n_req);
+            std::vector<std::thread> th;
+            for (std::uint32_t i = 0; i < n_req; ++i)
+                th.emplace_back([&, i] {
+                    const bool stream = i % 2 == 1;
+                    const std::string body = std::format("{{\"prompt\":{},\"max_tokens\":{},\"temperature\":0,\"stream\":{}}}",
+                                                         idsJson(prompts[i]), mt[i], stream ? "true" : "false");
+                    auto r = srv.post("/v1/completions", body);
+                    got[i] = stream ? streamText(r, false) : completionText(r);
+                });
+            for (auto& t : th) t.join();
+            std::uint32_t ok = 0;
+            for (std::uint32_t i = 0; i < n_req; ++i)
+                if (got[i] == decode(srv.model().greedyReference(prompts[i], mt[i], false))) ++ok;
+            if (ok != n_req) std::printf("  spec_acc case %s mode %u: %u / %u replies equal the reference\n", c.name, mode, ok, n_req);
+            CHECK_EQ(ok, n_req);
+            // a sampled request (host decision in every mode): the same text for its seed
+            const std::string sb = std::format(
+                "{{\"prompt\":{},\"max_tokens\":40,\"temperature\":1.0,\"top_k\":8,\"seed\":9,\"ignore_eos\":true}}", idsJson(prompts[0]));
+            const std::string st = completionText(srv.post("/v1/completions", sb));
+            if (mode == 0) sampled_ref = st;
+            else CHECK_EQ(st, sampled_ref);
+            const Engine::Stats es = srv.engine().stats();
+            if (mode >= 2) CHECK(srv.model().specAccepts() > 0);
+            if (mode == 2 || mode == 3) CHECK(es.acc_dev > 0);
+            if (mode == 4) {
+                CHECK(es.acc_checked > 0);
+                CHECK(es.tab_checked > 0);
+                CHECK_EQ(es.acc_dev, 0u);
+            }
+            if (es.acc_mismatch != 0 || es.tab_mismatch != 0)
+                std::printf("  spec_acc case %s mode %u: acc mismatches %llu / %llu, row-table mismatches %llu / %llu\n", c.name, mode,
+                            static_cast<unsigned long long>(es.acc_mismatch), static_cast<unsigned long long>(es.acc_checked),
+                            static_cast<unsigned long long>(es.tab_mismatch), static_cast<unsigned long long>(es.tab_checked));
+            CHECK_EQ(es.acc_mismatch, 0u);
+            CHECK_EQ(es.tab_mismatch, 0u);
+            CHECK_EQ(srv.model().poison(), 0u);
+            CHECK_EQ(srv.model().hidMismatch(), 0u);
+        }
+    }
+    // without the kernel, a device mode falls back to the pinned read + host loop
+    {
+        ServerSetup su = baseSetup();
+        su.mc.spec_acc_kernel = false;
+        su.eo.spec_acc = 2;
+        TestServer srv(su);
+        const auto p = makePrompt(300, 411);
+        CHECK_EQ(completionText(srv.post("/v1/completions", completionBody(p, 60))), decode(srv.model().greedyReference(p, 60, true)));
+        CHECK_EQ(srv.model().specAccepts(), 0u);
+        CHECK_EQ(srv.engine().stats().acc_dev, 0u);
+    }
+}
+
 // stop strings and end-of-turn
 void testStopAndEos() {
     ServerSetup su = baseSetup();
@@ -7736,6 +7823,7 @@ int main(int argc, char** argv) {
         {"supersede_compress", testSupersedeCompressCuts},
         {"sampling", testSampling},
         {"stop_eos", testStopAndEos},
+        {"spec_acc_modes", testSpecAccModes},
         {"fr_tool_truncated", testFrToolTruncated},
         {"fr_nonstream_disconnect", testFrNonStreamDisconnect},
         {"fr_pool_prefill", testFrPoolPrefill},

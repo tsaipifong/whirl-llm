@@ -97,6 +97,9 @@ public:
         // context was not ready (no DFlash2 drafts), positions without features (forward rows
         // outside the capture, restores)
         std::uint64_t dfl_cycles = 0, dfl_drafted = 0, dfl_accepted = 0, dfl_cold = 0, dfl_gap = 0;
+        // feat026-acc: slot cycles decided on the device, compared with the host loop (WHIRL_SPEC_ACC=check) and
+        // disagreeing; next-cycle row tables compared / disagreeing
+        std::uint64_t acc_dev = 0, acc_checked = 0, acc_mismatch = 0, tab_checked = 0, tab_mismatch = 0;
     };
 
     virtual ~EngineApi() = default;

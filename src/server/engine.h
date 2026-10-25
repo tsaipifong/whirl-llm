@@ -269,6 +269,13 @@ struct EngineOptions {
     float ngram_slope = 0.015f;
     std::uint32_t ngram_max = 0;
     bool ngram_force = false;
+    // feat026-acc (WHIRL_SPEC_ACC): how a decode cycle reads the verify's control words and where the greedy
+    // accept decision is made. 0 host (pageable readCtl, host loop: as before), 1 pinned (async copy into pinned
+    // memory + stream sync), 2 gpu (spec_accept_rows decides greedy exact slots; pinned copy), 3 gpu-zc (the kernel
+    // writes the control words into mapped pinned memory: no copy), 4 check (gpu, and the host loop runs too and
+    // must agree: accept counts, next token, next-cycle rows; the host result is used). Output is the same in
+    // every mode (exact greedy acceptance; sampling / relaxacc slots always decide on the host).
+    std::uint32_t spec_acc = 0;
     // per-slot draft counts: 0 uniform, 1 marginal-gain swaps (splitDrafts), 2 cost model (allocDrafts)
     std::uint32_t slot_drafts = 0;
     bool trace_nd = false;
@@ -538,6 +545,12 @@ private:
     std::vector<std::uint8_t> in_cands_;
     std::vector<Cand> cands_scratch_;
     std::vector<std::int32_t> ctl_host_;
+    device::PinnedBuf ctl_pin_;  // feat026-acc: pinned control words (WHIRL_SPEC_ACC >= 1)
+    std::uint64_t stat_acc_dev_ = 0, stat_acc_checked_ = 0, stat_acc_mismatch_ = 0, stat_tab_checked_ = 0,
+                  stat_tab_mismatch_ = 0;
+    // feat026-acc seam: the verify's control words for the host after the cycle's enqueue (aa: device accept
+    // arguments, null = no device decision this cycle). Touches only this call of decodeCycle.
+    const std::int32_t* readCycleCtl(const SpecAccArgs* aa);
     bool spec_on_ = false;
     std::uint64_t conv_bytes_ = 0, ssm_bytes_ = 0;
     std::vector<Slot> slots_;

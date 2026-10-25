@@ -518,6 +518,34 @@ void MockModel::readCtl(std::span<std::int32_t> dst) {
 
 void MockModel::mtpEnqueue(server::DevPtr, std::span<const std::uint32_t>, std::uint32_t) {}
 
+// feat026-acc: what spec_accept_rows does on the device, with the same header code
+void MockModel::specAccept(const SpecAccArgs& a_in, std::int32_t* host) {
+    SpecAccArgs a = a_in;
+    if (a.n <= 0 || a.n > WHIRL_SA_MAX_SEG) throw std::runtime_error("BadBatch");
+    a.n_vocab = static_cast<int>(cfg_.n_vocab);
+    const std::size_t W = qwen35::ctl_words;
+    std::vector<std::int32_t> all(seqs_.size() * W);
+    for (std::size_t s = 0; s < seqs_.size(); ++s) std::memcpy(all.data() + s * W, seqs_[s].ctl.data(), W * 4);
+    SpecAccResult res[WHIRL_SA_MAX_SEG];
+    for (int k = 0; k < a.n; ++k) {
+        if (a.seq[k] < 0 || static_cast<std::size_t>(a.seq[k]) >= seqs_.size()) throw std::runtime_error("BadBatch");
+        a.kvbase[k] = 0;
+        std::int32_t* ctl = all.data() + static_cast<std::size_t>(a.seq[k]) * W;
+        SpecAccResult r{};
+        if (a.dev[k]) r = spec_accept_one(a, k, ctl);
+        else r.chosen = ctl[WHIRL_SA_CTL_ROWS];
+        spec_store(a, k, r, ctl);
+        res[k] = r;
+    }
+    spec_next_rows(a, all.data(), res, &spec_tab_);
+    for (int k = 0; k < a.n; ++k) {
+        const std::size_t s = static_cast<std::size_t>(a.seq[k]);
+        std::memcpy(seqs_[s].ctl.data(), all.data() + s * W, W * 4);
+        if (host != nullptr) std::memcpy(host + s * W, all.data() + s * W, W * 4);
+    }
+    spec_accepts_ += 1;
+}
+
 void MockModel::topkRows(std::uint32_t row0, std::uint32_t rows, std::uint32_t k, float inv_t, server::DevPtr ids,
                          server::DevPtr vals, server::DevPtr stats) {
     const std::uint32_t V = cfg_.n_vocab;
