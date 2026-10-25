@@ -77,6 +77,12 @@ struct MockConfig {
     // with these row bytes, in kvArrays() order K, V, extra...: none = f16-shaped (K, V), two = q8h / q4-shaped (K, V,
     // K scales, V scales). The mock never reads them; the engine copies, spills and restores them like the real ones.
     std::vector<std::uint32_t> kv_extra_rows;
+    // feat026-cascade: > 0 = the batched verify plans shared-prefix rows with ops::planCascade (min_keys = this) and
+    // reads each group row's prefix [0, P) through the group's first sequence's page table, the suffix through its
+    // own (like Model::cascadeDecode); a prefix page that is not really the same physical page counts in
+    // cascadeBad(). 0 = off (the plain path).
+    std::uint32_t cascade_min_keys = 0;
+    std::uint32_t cascade_max_rows = 32;
 };
 
 class MockModel final : public server::ServerModel {
@@ -160,6 +166,9 @@ public:
     // Hidden rows consumed with the wrong position (MTP bookkeeping).
     std::uint64_t hidMismatch() const { return hid_mismatch_.load(); }
     std::uint64_t rowsRun() const { return rows_run_; }
+    // feat026-cascade: verify rows that read their prefix through another sequence's pages / bad prefix pages
+    std::uint64_t cascadeRows() const { return cascade_rows_.load(); }
+    std::uint64_t cascadeBad() const { return cascade_bad_.load(); }
     // most rows of one prefill forward so far (like Model::forward, more than max_batch throws BatchTooLarge)
     std::uint32_t maxPrefillRows() const { return max_pf_rows_.load(); }
 
@@ -231,6 +240,7 @@ private:
     std::atomic<std::uint32_t> max_pf_rows_{0};
     mutable std::atomic<std::uint64_t> hid_mismatch_{0};
     std::uint64_t rows_run_ = 0;
+    std::atomic<std::uint64_t> cascade_rows_{0}, cascade_bad_{0};
     std::vector<std::uint32_t> seg_logits_rows_;
     // replay off: snapshot sets (sequence, recurrent hash after that verify row)
     struct Snap {

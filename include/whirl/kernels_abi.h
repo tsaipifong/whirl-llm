@@ -557,6 +557,10 @@ struct AttnKernels {
     // vision: attn_prep with multi-section RoPE positions (image prompts; KV-format
     // variant like attn_prep) and set_rpos(rpos, Rpos16 tab, n). Optional.
     F attn_prep_m{}, set_rpos{};
+    // feat026-cascade (kernels/attn_cascade.hip, both code objects; optional): attn_cascade_rows(int* dst,
+    // ops::CascadeRows tab, n) and attn_cascade_merge(part_ml, part_acc, cas_ml, cas_acc, rows, n_head, head_dim,
+    // n_split), grid (n_head, rows), 256 threads
+    F attn_cascade_rows{}, attn_cascade_merge{};
 };
 
 struct MoeKernels {

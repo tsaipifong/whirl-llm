@@ -315,6 +315,9 @@ void loadAttn(AttnKernels& k, const Loader& L, KvFormat kv) {
         {&KernelTable::attn_wsplit2, "attn_wsplit2"},
     };
     for (const Named& n : optional) k.*(n.f) = L.opt(n.name);
+    // feat026-cascade (format independent)
+    k.attn_cascade_rows = L.opt("attn_cascade_rows");
+    k.attn_cascade_merge = L.opt("attn_cascade_merge");
     // KV-format variants (same launch shapes as the f16 kernels).
     if (kv == KvFormat::q8v) {
         k.attn_decode = L.req("attn_decode_q8v");

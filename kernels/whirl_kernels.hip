@@ -28,6 +28,7 @@
 #include "fused_decode.hip"        // decode fusions (norm+quant, fused DeltaNet)
 #include "misc_rows_norm.hip"      // get_rows, norms, rope, elementwise
 #include "attn.hip"                // paged KV + decode / split / prefill attention
+#include "attn_cascade.hip"        // feat026: cascade (shared-prefix) attention rows + merge
 #include "gdn_prefill.hip"         // Gated DeltaNet per-token and chunked f32
 #include "gdn_prefill_wmma.hip"    // Gated DeltaNet chunked prefill on WMMA
 #include "prefill_fused.hip"       // prefill activation fusions

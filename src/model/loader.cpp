@@ -357,6 +357,8 @@ u64 bufferBytes(const Config& cfg, u32 Bq, u64 ffs, u64 max_elems, u32 fd_splits
     const u64 n_split = fd_splits;
     n += max_verify_rows * n_split * cfg.n_head * 2 * f4;  // part_ml
     n += max_verify_rows * n_split * cfg.n_head * cfg.head_dim * f4;  // part_acc
+    if (envFlag("CASCADE", false))  // feat026-cascade: cas_ml, cas_acc (the part_ml / part_acc shape), cas_rows
+        n += max_verify_rows * n_split * cfg.n_head * (2 + cfg.head_dim) * f4 + 3 * 32 * 4;
     n += B * cfg.n_head * 2 * f4;                         // dq_st_ml (q8 / q4 / KG-3 prefill attention softmax state)
     n += (static_cast<u64>(Model::kDqMaxKeys) / 256 + 1) * 4;  // dq_ptab (identity pages for up to kDqMaxKeys keys)
     n += max_elems * 2;                                   // w16
@@ -690,6 +692,19 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
     const u64 n_split = m.fd_splits;
     m.part_ml = m.alloc(max_verify_rows * n_split * cfg.n_head * 2 * f4);
     m.part_acc = m.alloc(max_verify_rows * n_split * cfg.n_head * cfg.head_dim * f4);
+    // feat026-cascade (WHIRL_CASCADE=1, WHIRL_CASCADE_MIN = shortest shared prefix in keys, default 2048)
+    m.cascade_cfg.on = envFlag("CASCADE", false);
+    if (m.cascade_cfg.on) {
+        if (auto v = envGet("CASCADE_MIN")) {
+            try {
+                m.cascade_cfg.min_keys = static_cast<u32>(std::max<unsigned long>(256, std::stoul(*v)));
+            } catch (const std::exception&) {
+            }
+        }
+        m.cas_ml = m.alloc(max_verify_rows * n_split * cfg.n_head * 2 * f4);
+        m.cas_acc = m.alloc(max_verify_rows * n_split * cfg.n_head * cfg.head_dim * f4);
+        m.cas_rows = m.allocZero(3 * 32 * 4);
+    }
     if (m.kv_q8 && !m.kv_kf16 && (m.kv_q4 ? m.k.kv_dq_rows_r != nullptr : m.k.kv_dq_rows != nullptr)) {
         // q8 / q8h / q4 prefill attention: f16 copies of a sequence's K / V in ffn_g / ffn_u (Model::prefillAttn)
         m.dq_rows = static_cast<u32>(std::min<u64>(B * ffs * f4 / (static_cast<u64>(cfg.n_head_kv) * cfg.head_dim * 2), 1u << 30)) / 256 * 256;
@@ -845,6 +860,7 @@ void Model::allocKvPool(u32 tokens) {
 
 void Model::freeKvPool() {
     if (pool_pages == 0) return;
+    host_ptab.clear();  // feat026-cascade: the pages are gone
     auto drop = [&](DevPtr& p) {
         if (p != 0) freeAlloc(p);
         p = 0;
@@ -874,6 +890,13 @@ void Model::mapPages(u32 s, u32 first, std::span<const i32> phys) {
     if (first + phys.size() > seq_pages) throw ModelError("ContextTooLong");
     const u64 off = (static_cast<u64>(seqs[s].kv_base) + first) * 4;
     hip::upload(ptab + off, phys.data(), phys.size() * 4);
+    if (cascade_cfg.on) {
+        // feat026-cascade: the host copy the shared-prefix planner reads (every page-table write comes here)
+        if (host_ptab.size() < seqs.size()) host_ptab.resize(seqs.size());
+        auto& hp = host_ptab[s];
+        if (hp.size() < first + phys.size()) hp.resize(first + phys.size(), -1);
+        std::copy(phys.begin(), phys.end(), hp.begin() + first);
+    }
 }
 
 KvArgs Model::kvArgs(const KvLayer& kv, DevPtr kvbase, u32 tab0) const {
