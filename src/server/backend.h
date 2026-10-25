@@ -153,6 +153,15 @@ public:
         (void)s, (void)anchor, (void)pos, (void)p_min, (void)n_min;
         return {};
     }
+    // feat029-dflashbatch: the draft blocks of several slots (distinct slots) in as few drafter forwards as
+    // the backend can (Model::dflashDraftBatch); result i = request i's drafts. Default: dflashDraft per
+    // request, in order (exactly the unbatched path).
+    virtual std::vector<std::vector<std::uint32_t>> dflashDraftBatch(std::span<const ::whirl::dflash::batch::Req> reqs) {
+        std::vector<std::vector<std::uint32_t>> d;
+        d.reserve(reqs.size());
+        for (const auto& r : reqs) d.push_back(dflashDraft(r.slot, r.anchor, r.pos, r.p_min, r.n_min));
+        return d;
+    }
     // forget slot s's context rows at positions >= keep
     virtual void dflashTrim(std::uint32_t s, std::uint32_t keep) { (void)s, (void)keep; }
     // rows of a slot's context ring (position p goes to row p % ring: an ingest overwrites the row of

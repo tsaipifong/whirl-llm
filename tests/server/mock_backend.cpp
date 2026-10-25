@@ -628,6 +628,29 @@ std::vector<std::uint32_t> MockModel::dflashDraft(std::uint32_t s, std::uint32_t
     return out;
 }
 
+// feat029-dflashbatch: one "forward" over several slots' blocks = each block as dflashDraft proposes it
+// (the mock drafter is per block), optionally perturbed (dfl_batch_perturb) like a batched forward that
+// rounds differently
+std::vector<std::vector<std::uint32_t>> MockModel::dflashDraftBatch(std::span<const ::whirl::dflash::batch::Req> reqs) {
+    dfl_batches_ += 1;
+    dfl_batch_blocks_ += reqs.size();
+    dfl_batch_max_ = std::max<std::uint64_t>(dfl_batch_max_, reqs.size());
+    if (!::whirl::dflash::batch::validSlots(reqs, static_cast<std::uint32_t>(seqs_.size()))) dfl_batch_bad_ += 1;
+    std::vector<std::vector<std::uint32_t>> out;
+    for (const auto& r : reqs) {
+        std::vector<std::uint32_t> d = dflashDraft(r.slot, r.anchor, r.pos, r.p_min, r.n_min);
+        if (mc_.dfl_batch_perturb > 0 && !d.empty() && mix(r.slot, r.pos, 0xBA) % mc_.dfl_batch_perturb == 0) {
+            const std::uint32_t alt = text_ids_[mix(r.slot, r.pos, 0xBB) % text_ids_.size()];
+            if (alt != d[0]) {
+                d[0] = alt;
+                dfl_batch_perturbed_ += 1;
+            }
+        }
+        out.push_back(std::move(d));
+    }
+    return out;
+}
+
 std::vector<std::uint32_t> MockModel::greedyReference(std::span<const std::uint32_t> prompt, std::uint32_t max_tokens,
                                                       bool ignore_eos) const {
     std::uint64_t h = kH0, kv = 0;

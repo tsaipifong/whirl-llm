@@ -27,6 +27,7 @@ if(WHIRL_WITH_HIP)
     ${CMAKE_SOURCE_DIR}/src/model/device.cpp
     ${CMAKE_SOURCE_DIR}/src/model/spec.cpp
     ${CMAKE_SOURCE_DIR}/src/model/dflash.cpp
+    ${CMAKE_SOURCE_DIR}/src/model/dflash_batch.cpp
     ${CMAKE_SOURCE_DIR}/src/model/draft_vocab_embed.cpp
     "${WHIRL_DRAFT_VOCAB_CC}")
   target_include_directories(whirl_model PUBLIC ${CMAKE_SOURCE_DIR}/include)

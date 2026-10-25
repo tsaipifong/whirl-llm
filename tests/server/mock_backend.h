@@ -68,6 +68,10 @@ struct MockConfig {
     // before pos counts in dflHoles() (the engine called the slot ready with rows the ring no longer has)
     std::uint32_t dfl_ring = 0;
     std::uint32_t dfl_need_ctx = 0;
+    // feat029-dflashbatch: a batched drafter forward rounds differently from the one-block forward, so its
+    // proposals may differ: dfl_batch_perturb > 0 replaces the first draft of every block in a batch whose
+    // mix(slot, pos) % dfl_batch_perturb == 0 by another text token (the verify must still keep outputs exact)
+    std::uint32_t dfl_batch_perturb = 0;
     // FR-SRV P2-5: false = the DeltaNet verify keeps snapshot sets instead of replaying kept rows
     // (gfx1151 / Radeon 8060S, WHIRL_GDN_REPLAY=0): the state after a verify holds every row, and
     // restoreSeqSnapshot(s, j) rolls it back to snapshot set j. Sets are allocated lazily by a verify
@@ -140,6 +144,7 @@ public:
     void dflashIngest(std::uint32_t s, std::uint32_t row0, std::uint32_t n, std::uint32_t pos0) override;
     std::vector<std::uint32_t> dflashDraft(std::uint32_t s, std::uint32_t anchor, std::uint32_t pos, float p_min,
                                            std::uint32_t n_min) override;
+    std::vector<std::vector<std::uint32_t>> dflashDraftBatch(std::span<const ::whirl::dflash::batch::Req> reqs) override;
     void dflashTrim(std::uint32_t s, std::uint32_t keep) override;
     std::uint32_t dflashRing() const override { return mc_.dfl_ring; }
     std::uint64_t dflHoles() const { return dfl_holes_; }
@@ -148,6 +153,13 @@ public:
     std::uint64_t dflBad() const { return dfl_bad_; }
     std::uint64_t dflStale() const { return dfl_stale_; }
     std::uint64_t dflBlocks() const { return dfl_blocks_; }
+    // feat029-dflashbatch: batched calls, blocks in them, the largest batch, calls with a repeated / bad slot,
+    // first drafts changed by dfl_batch_perturb
+    std::uint64_t dflBatches() const { return dfl_batches_; }
+    std::uint64_t dflBatchBlocks() const { return dfl_batch_blocks_; }
+    std::uint64_t dflBatchMax() const { return dfl_batch_max_; }
+    std::uint64_t dflBatchBadSlots() const { return dfl_batch_bad_; }
+    std::uint64_t dflBatchPerturbed() const { return dfl_batch_perturbed_; }
 
     // Reference: greedy continuation of `prompt` computed from scratch
     // (independent of the engine), stopping at <|im_end|> / <|endoftext|>
@@ -210,6 +222,7 @@ private:
     std::vector<CapRow> cap_;
     std::vector<std::map<std::uint32_t, State>> dfl_ctx_;
     std::uint64_t dfl_bad_ = 0, dfl_stale_ = 0, dfl_blocks_ = 0, dfl_holes_ = 0;
+    std::uint64_t dfl_batches_ = 0, dfl_batch_blocks_ = 0, dfl_batch_max_ = 0, dfl_batch_bad_ = 0, dfl_batch_perturbed_ = 0;
 
     device::Backend& ops_;
     const Tokenizer& tok_;

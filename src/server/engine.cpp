@@ -322,6 +322,8 @@ Engine::Stats Engine::stats() const {
     s.dfl_gap = stat_dfl_gap_;
     s.dfl_skipped = stat_dfl_skipped_;
     s.dfl_probes = stat_dfl_probes_;
+    s.dfl_batches = stat_dfl_batches_;
+    s.dfl_batch_blocks = stat_dfl_batch_blocks_;
     return s;
 }
 
@@ -1599,6 +1601,10 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
     std::uint32_t dfl_max_n = 0;
     for (std::size_t k = 0; k < A; ++k) act[k]->dfl_wlim = 0;
     if (opt_.use_dflash && dfl_lim > 0) {
+        // pass 1: which slots draft and how wide; pass 2: the drafter (batched or per slot); pass 3: the drafts
+        std::vector<std::size_t> dfl_k;
+        std::vector<std::uint32_t> dfl_w;
+        std::vector<::whirl::dflash::batch::Req> dfl_req;
         for (std::size_t k = 0; k < A; ++k) {
             if (dsrc[k] != 0) continue;
             Slot& sl = *act[k];
@@ -1618,9 +1624,26 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
             stat_dfl_probes_ += sl.dfl_w.probes - pr0;
             sl.dfl_wlim = lim_k;
             if (!wc.draft) continue;
-            const std::vector<std::uint32_t> d = m_.dflashDraft(sl.id, sl.next, sl.pos, opt_.dfl_p_min, opt_.dfl_n_min);
+            dfl_k.push_back(k);
+            dfl_w.push_back(wc.n);
+            dfl_req.push_back({sl.id, sl.next, sl.pos, opt_.dfl_p_min, opt_.dfl_n_min});
+        }
+        // feat029-dflashbatch: the blocks of every drafting slot in one drafter forward (WHIRL_DFLASH_BATCH=1;
+        // full blocks, each slot's width truncates its drafts) or one forward per slot (the old path)
+        std::vector<std::vector<std::uint32_t>> dd;
+        if (opt_.dfl_batch && dfl_req.size() > 1) {
+            dd = m_.dflashDraftBatch(dfl_req);
+            stat_dfl_batches_ += 1;
+            stat_dfl_batch_blocks_ += dfl_req.size();
+        } else {
+            for (const auto& q : dfl_req) dd.push_back(m_.dflashDraft(q.slot, q.anchor, q.pos, q.p_min, q.n_min));
+        }
+        for (std::size_t j = 0; j < dfl_k.size() && j < dd.size(); ++j) {
+            const std::size_t k = dfl_k[j];
+            Slot& sl = *act[k];
+            const std::vector<std::uint32_t>& d = dd[j];
             sl.dfl_nd = 0.8f * sl.dfl_nd + 0.2f * static_cast<float>(d.size());
-            const std::uint32_t n = std::min(wc.n, static_cast<std::uint32_t>(d.size()));
+            const std::uint32_t n = std::min({dfl_w[j], static_cast<std::uint32_t>(d.size()), static_cast<std::uint32_t>(ng_d[k].size())});
             std::copy(d.begin(), d.begin() + n, ng_d[k].begin());
             ng_n[k] = n;
             dsrc[k] = 2;

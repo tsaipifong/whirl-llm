@@ -28,6 +28,7 @@
 #include "device/handles.h"  // src/: RAII owners of the device / pinned buffers, events and streams (arch024 S11)
 #include "whirl/gguf.h"
 #include "whirl/device_profile.h"
+#include "whirl/dflash_batch.h"
 #include "whirl/hip.h"
 #include "whirl/kernels_abi.h"
 #include "whirl/ops/attention.h"
@@ -339,6 +340,14 @@ struct DFlashRun {
     DevPtr ing_g = 0, ing_k = 0, ing_v = 0, ing_pos = 0;
     DevPtr dbg = 0;  // when set: [n_layer][block][n_embd] hidden after each drafter layer (dflash-check)
     std::vector<DFlashSlotCtx> slots;
+};
+
+// feat029-dflashbatch: scratch of one drafter forward over up to `slots` stacked blocks
+// (Model::dflashDraftBatch, src/model/dflash_batch.cpp; layout in whirl/dflash_batch.h).
+struct DFlashBatchRun {
+    std::uint32_t slots = 0;
+    DevPtr ids = 0, pos = 0, x = 0, h = 0, h2 = 0, dyn = 0, q = 0, kb = 0, vb = 0, att = 0, o = 0, g = 0, u = 0, e = 0;
+    DevPtr ed = 0, logits = 0, cand = 0, unary = 0, gate = 0, lat = 0, out = 0;
 };
 
 struct LoadOptions {
@@ -731,6 +740,15 @@ public:
                                            std::uint32_t n_min = 0);
     // Forget context rows at positions >= keep (rejected drafts, rollback).
     void dflashTrim(std::uint32_t slot, std::uint32_t keep);
+    // feat029-dflashbatch (DFlash T3): one drafter forward over the blocks of several slots (llama.cpp
+    // draft-dflash style). dflashBatchSetup allocates the stacked scratch for up to max_slots blocks (after
+    // dflashSetup; < 2: none). dflashDraftBatch returns each request's drafts, as dflashDraft would propose
+    // them up to rounding (the stacked matmuls may pick other kernels than B rows; the verify is exact,
+    // so only acceptance can change); one request, or no batch scratch: dflashDraft per request.
+    std::unique_ptr<DFlashBatchRun> dfb;
+    void dflashBatchSetup(std::uint32_t max_slots);
+    std::uint64_t dflashBatchBytes(std::uint32_t max_slots) const;
+    std::vector<std::vector<std::uint32_t>> dflashDraftBatch(std::span<const ::whirl::dflash::batch::Req> reqs);
     std::uint32_t moe_bn_force = 0;
     std::vector<std::int32_t>* moe_dump = nullptr;
     std::uint32_t ff_scratch = 0;

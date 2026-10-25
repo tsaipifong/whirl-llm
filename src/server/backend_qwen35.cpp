@@ -145,6 +145,9 @@ public:
                                            std::uint32_t n_min) override {
         return m_.dflashDraft(s, anchor, pos, p_min, n_min);
     }
+    std::vector<std::vector<std::uint32_t>> dflashDraftBatch(std::span<const ::whirl::dflash::batch::Req> reqs) override {
+        return m_.dflashDraftBatch(reqs);
+    }
     void dflashTrim(std::uint32_t s, std::uint32_t keep) override { m_.dflashTrim(s, keep); }
     std::uint32_t dflashRing() const override { return m_.dfr ? m_.dfr->ring : 0; }
     void profileFlush(std::size_t slots) override {

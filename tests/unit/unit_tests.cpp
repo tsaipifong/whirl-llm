@@ -22,6 +22,7 @@
 #include "whirl/mem_governor.h"
 #include "whirl/value_scope.h"
 #include "whirl/kernels_abi.h"
+#include "whirl/dflash_batch.h"
 #include "hip/alloc_log.h"
 #include "hip/launch_log.h"
 #if WHIRL_TEST_DLL_DEPS
@@ -1499,6 +1500,210 @@ void testDflashWidth() {
             ax.max_n = cap;
             const d::WidthChoice ca = d::chooseWidth(ax, st, a75.data(), 15, 7, [](std::uint32_t) { return std::optional<float>(); });
             CHECK(ca.n == std::min(cap, 7u));  // nothing measured: the (capped) limit
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DFlash2 batched drafting plan (whirl/dflash_batch.h, feat029-dflashbatch): env switch, groups, distinct
+// slots, the stacked row / output layout against brute force, stacked tokens / positions, walk-output
+// decoding, scratch bytes; and a CPU toy drafter (row-wise op with per-row positions, block-causal conv,
+// attention over the slot's own ring with the position mask + its own block) run per request and stacked:
+// bit-identical, and ring rows of other slots or at / past the block position never change a result.
+namespace dflash_batch_test {
+namespace db = whirl::dflash::batch;
+struct Ring {
+    std::vector<std::int32_t> cpos;  // -1 empty
+    std::vector<float> val;
+};
+// toy forward over the stacked blocks of B rows (E features): x[row][e]
+void toy(std::span<const db::Req> rq, std::uint32_t B, std::uint32_t E, const std::vector<Ring>& rings, std::vector<float>& x) {
+    const std::uint32_t S = static_cast<std::uint32_t>(rq.size()), N = S * B;
+    const std::vector<std::int32_t> pos = db::positions(rq, B), tok = db::tokens(rq, B, 7);
+    x.assign(static_cast<std::size_t>(N) * E, 0.f);
+    for (std::uint32_t r = 0; r < N; ++r)  // embedding + row-wise op with the row's position
+        for (std::uint32_t e = 0; e < E; ++e)
+            x[static_cast<std::size_t>(r) * E + e] =
+                static_cast<float>(tok[r] % 13) * 0.25f + static_cast<float>(e) * 0.5f + static_cast<float>(pos[r]) * 0.01f;
+    std::vector<float> y(x.size());
+    for (std::uint32_t i = 0; i < S; ++i)  // block-causal conv (2 taps), never across blocks
+        for (std::uint32_t t = 0; t < B; ++t)
+            for (std::uint32_t e = 0; e < E; ++e) {
+                float acc = 0.7f * x[db::blockRow(i, t, B) * E + e];
+                if (t >= 1) acc += 0.3f * x[db::blockRow(i, t - 1, B) * E + e];
+                y[db::blockRow(i, t, B) * E + e] = acc;
+            }
+    x = y;
+    for (std::uint32_t i = 0; i < S; ++i) {  // attention: slot ring (cpos < block pos) + own block keys
+        const Ring& rg = rings[rq[i].slot];
+        for (std::uint32_t t = 0; t < B; ++t)
+            for (std::uint32_t e = 0; e < E; ++e) {
+                const float q = x[db::blockRow(i, t, B) * E + e];
+                float mx = -1e30f;
+                std::vector<float> sc, vv;
+                for (std::size_t j = 0; j < rg.cpos.size(); ++j)
+                    if (rg.cpos[j] >= 0 && rg.cpos[j] < static_cast<std::int32_t>(rq[i].pos)) {
+                        sc.push_back(q * rg.val[j]);
+                        vv.push_back(rg.val[j]);
+                    }
+                for (std::uint32_t u = 0; u < B; ++u) {
+                    const float kv = x[db::blockRow(i, u, B) * E + e];
+                    sc.push_back(q * kv);
+                    vv.push_back(kv);
+                }
+                for (float v : sc) mx = std::max(mx, v);
+                float den = 0, num = 0;
+                for (std::size_t j = 0; j < sc.size(); ++j) {
+                    const float w = std::exp(sc[j] - mx);
+                    den += w;
+                    num += w * vv[j];
+                }
+                y[db::blockRow(i, t, B) * E + e] = num / den;
+            }
+    }
+    x = y;
+}
+}  // namespace dflash_batch_test
+
+void testDflashBatch() {
+    namespace db = whirl::dflash::batch;
+    using dflash_batch_test::Ring;
+    CHECK(!db::parseEnabled(nullptr));
+    CHECK(!db::parseEnabled("0"));
+    CHECK(!db::parseEnabled("off"));
+    CHECK(!db::parseEnabled("auto"));
+    CHECK(db::parseEnabled("1"));
+    CHECK(db::parseEnabled("on"));
+    CHECK_EQ(db::groupCap(16, 4, 4096), 4u);
+    CHECK_EQ(db::groupCap(16, 4, 40), 2u);
+    CHECK_EQ(db::groupCap(16, 4, 8), 1u);
+    CHECK_EQ(db::groupCap(0, 4, 4096), 1u);
+    CHECK_EQ(db::groupCap(8, 1, 4096), 1u);
+    for (std::uint32_t n = 0; n < 10; ++n)
+        for (std::uint32_t cap = 0; cap <= 5; ++cap) {
+            const auto g = db::groups(n, cap);
+            const std::uint32_t c = cap == 0 ? 1 : cap;
+            CHECK_EQ(g.size(), static_cast<std::size_t>((n + c - 1) / c));
+            std::uint32_t next = 0;
+            for (const auto& x : g) {
+                CHECK_EQ(x.begin, next);
+                CHECK(x.count >= 1 && x.count <= c);
+                next += x.count;
+            }
+            CHECK_EQ(next, n);
+        }
+    {
+        const db::Req a[] = {{0, 1, 5}, {2, 1, 9}, {3, 1, 4}};
+        const db::Req dup[] = {{1, 1, 5}, {1, 2, 9}};
+        const db::Req big[] = {{0, 1, 5}, {4, 1, 9}};
+        CHECK(db::validSlots(a, 4));
+        CHECK(!db::validSlots(dup, 4));
+        CHECK(!db::validSlots(big, 4));
+    }
+    // layout: brute force (rows of each request disjoint and covering, gather never reads an anchor row)
+    for (std::uint32_t S = 1; S <= 5; ++S)
+        for (std::uint32_t B = 2; B <= 17; ++B) {
+            const std::uint32_t P = B - 1;
+            std::vector<int> brow(S * B, -1), drow(S * P, -1), ow(S * B, -1);
+            bool ok = true;
+            for (std::uint32_t i = 0; i < S; ++i) {
+                for (std::uint32_t t = 0; t < B; ++t) {
+                    const std::uint64_t r = db::blockRow(i, t, B);
+                    ok &= r < brow.size() && brow[r] < 0;
+                    if (r < brow.size()) brow[r] = static_cast<int>(i);
+                    const std::uint64_t w = db::outWord(i, B) + t;
+                    ok &= w < ow.size();
+                    if (w < ow.size()) ow[w] += 1;
+                }
+                for (std::uint32_t t = 0; t < P; ++t) {
+                    const std::uint64_t r = db::draftRow(i, t, B);
+                    ok &= r < drow.size() && drow[r] < 0;
+                    if (r < drow.size()) drow[r] = static_cast<int>(i);
+                    ok &= db::blockRow(i, t + 1, B) / B == i && db::blockRow(i, t + 1, B) % B != 0;
+                }
+            }
+            for (int v : brow) ok &= v >= 0;
+            for (int v : drow) ok &= v >= 0;
+            for (int v : ow) ok &= v == 0;
+            CHECK(ok);
+        }
+    {
+        const db::Req rq[] = {{3, 100, 50, 0.f, 0}, {1, 200, 7, 0.f, 0}};
+        const auto t = db::tokens(rq, 4, 9);
+        const auto p = db::positions(rq, 4);
+        CHECK((t == std::vector<std::int32_t>{100, 9, 9, 9, 200, 9, 9, 9}));
+        CHECK((p == std::vector<std::int32_t>{50, 51, 52, 53, 7, 8, 9, 10}));
+    }
+    {
+        // B = 4 -> 4 words per request: count + 3 drafts; counts outside [0, 3] are clamped
+        const std::vector<std::int32_t> out = {2, 11, 12, 99, -1, 5, 5, 5, 7, 21, 22, 23, 0, 0, 0, 0};
+        const auto d = db::decodeOut(out, 4, 4);
+        CHECK_EQ(d.size(), 4u);
+        CHECK((d[0] == std::vector<std::uint32_t>{11, 12}));
+        CHECK(d[1].empty());
+        CHECK((d[2] == std::vector<std::uint32_t>{21, 22, 23}));
+        CHECK(d[3].empty());
+        const auto short_out = db::decodeOut(std::span<const std::int32_t>(out.data(), 6), 3, 4);  // truncated buffer: no overread
+        CHECK((short_out[0] == std::vector<std::uint32_t>{11, 12}));
+        CHECK(short_out[1].empty() && short_out[2].empty());
+    }
+    {
+        db::MemInput in;
+        in.n_embd = 5120;
+        in.n_head = 32;
+        in.n_head_kv = 8;
+        in.head_dim = 128;
+        in.n_ff = 17408;
+        in.block = 16;
+        in.conv_k = 4;
+        in.conv_group = 1;
+        in.sel_topk = 8;
+        in.sel_rank = 64;
+        in.vocab = 248320;
+        CHECK_EQ(db::scratchBytes(in, 1), 0ull);
+        CHECK(db::scratchBytes(in, 2) > 0);
+        CHECK_EQ(db::scratchBytes(in, 4), 2 * db::scratchBytes(in, 2));
+    }
+    // toy drafter: stacked == per request, bitwise; other slots' rings and masked rows do not matter
+    {
+        const std::uint32_t B = 5, E = 3;
+        std::vector<Ring> rings(4);
+        for (std::uint32_t s = 0; s < 4; ++s) {
+            rings[s].cpos.assign(16, -1);
+            rings[s].val.assign(16, 0.f);
+            for (std::uint32_t j = 0; j < 12; ++j) {
+                rings[s].cpos[j] = static_cast<std::int32_t>(10 * s + j);
+                rings[s].val[j] = 0.1f * static_cast<float>(s + 1) + 0.01f * static_cast<float>(j);
+            }
+        }
+        const std::vector<db::Req> rq = {{2, 31, 25}, {0, 17, 8}, {3, 5, 36}, {1, 44, 15}};
+        for (std::uint32_t S = 1; S <= 4; ++S) {
+            const std::span<const db::Req> part(rq.data(), S);
+            std::vector<float> st;
+            dflash_batch_test::toy(part, B, E, rings, st);
+            bool same = true;
+            for (std::uint32_t i = 0; i < S; ++i) {
+                std::vector<float> one;
+                dflash_batch_test::toy(std::span<const db::Req>(&rq[i], 1), B, E, rings, one);
+                same &= std::memcmp(one.data(), st.data() + db::blockRow(i, 0, B) * E, one.size() * 4) == 0;
+            }
+            CHECK(same);
+            // poison: ring rows at / past each block's position and rings of slots not in the batch
+            std::vector<Ring> pr = rings;
+            for (std::uint32_t s = 0; s < 4; ++s) {
+                bool in_batch = false;
+                std::int32_t qp = 0;
+                for (const auto& q : part)
+                    if (q.slot == s) {
+                        in_batch = true;
+                        qp = static_cast<std::int32_t>(q.pos);
+                    }
+                for (std::size_t j = 0; j < pr[s].cpos.size(); ++j)
+                    if (!in_batch || pr[s].cpos[j] >= qp) pr[s].val[j] = 1e3f;
+            }
+            std::vector<float> st2;
+            dflash_batch_test::toy(part, B, E, pr, st2);
+            CHECK(std::memcmp(st.data(), st2.data(), st.size() * 4) == 0);
         }
     }
 }
@@ -4332,6 +4537,7 @@ int main(int argc, char** argv) {
     specsample_test::testSpecSample();
     testDflashPolicy();
     testDflashWidth();
+    testDflashBatch();
     testLocalMemTaken();
     testUmaCheck();
     testWddmWatch();

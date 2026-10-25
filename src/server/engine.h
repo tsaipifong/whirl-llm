@@ -252,6 +252,9 @@ struct EngineOptions {
     std::uint32_t dfl_warm = 64;
     // DFlash2 draft width per cycle (WHIRL_DFLASH_WIDTH=fixed|auto, WHIRL_DFLASH_PROBE; feat029-dflash2)
     whirl::dflash::WidthParams dfl_width;
+    // feat029-dflashbatch (WHIRL_DFLASH_BATCH=1): one drafter forward over all drafting slots of a cycle
+    // (ServerModel::dflashDraftBatch) instead of one per slot; outputs unchanged (exact verify)
+    bool dfl_batch = false;
     std::uint32_t n_draft = 3;
     float p_min = 0;
     std::uint32_t n_min = 0;
@@ -564,7 +567,8 @@ private:
                   stat_lit_drafts_ = 0,  // FR-SRV P2-5: DFlash2 / n-gram drafts verified (all slots)
                   stat_prefill_tok_ = 0, stat_seg_batches_ = 0, stat_seg_chunks_ = 0;
     std::uint64_t stat_dfl_cycles_ = 0, stat_dfl_drafted_ = 0, stat_dfl_accepted_ = 0, stat_dfl_cold_ = 0, stat_dfl_gap_ = 0;
-    std::uint64_t stat_dfl_skipped_ = 0, stat_dfl_probes_ = 0;  // WHIRL_DFLASH_WIDTH=auto: drafter skipped / full-width probes
+    std::uint64_t stat_dfl_skipped_ = 0, stat_dfl_probes_ = 0;
+    std::uint64_t stat_dfl_batches_ = 0, stat_dfl_batch_blocks_ = 0;  // WHIRL_DFLASH_BATCH=1: batched drafter calls / blocks in them  // WHIRL_DFLASH_WIDTH=auto: drafter skipped / full-width probes
     // WDDM-LOG: runtime video memory watch (setVramProbe)
     std::function<wddmwatch::Sample()> vram_probe_;
     std::function<std::optional<wddmwatch::Others>()> vram_others_;

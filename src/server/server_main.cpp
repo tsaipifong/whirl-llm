@@ -798,6 +798,24 @@ int serveMain(int argc, char** argv, const char* program) {
                 const whirl::dflash::Mem dm = dflashFitBytes(dc, qwen35::dflashWeightBytes(*dfile), cfg,
                                                              whirl::dflash::captureRows(dp, dc.window, lo.max_batch), opt.parallel, sets, st1);
                 fi.fixed += dm.total();
+                // feat029-dflashbatch: WHIRL_DFLASH_BATCH=1 adds the stacked scratch of one forward over opt.parallel blocks
+                if (const auto bv = env("DFLASH_BATCH"); whirl::dflash::batch::parseEnabled(bv ? bv->c_str() : nullptr)) {
+                    whirl::dflash::batch::MemInput bi;
+                    bi.n_embd = dc.n_embd;
+                    bi.n_head = dc.n_head;
+                    bi.n_head_kv = dc.n_head_kv;
+                    bi.head_dim = dc.head_dim;
+                    bi.n_ff = dc.n_ff;
+                    bi.block = dc.block;
+                    bi.conv_k = dc.conv_k;
+                    bi.conv_group = dc.conv_group;
+                    bi.sel_topk = dc.sel_topk;
+                    bi.sel_rank = dc.sel_rank;
+                    bi.vocab = cfg.n_vocab;
+                    const std::uint64_t bb = whirl::dflash::batch::scratchBytes(bi, opt.parallel);
+                    fi.fixed += bb;
+                    logI("VRAM estimate: DFlash2 batched drafting scratch {:.0f} MiB ({} slots)", bb / 1048576.0, opt.parallel);
+                }
                 logI("VRAM estimate: DFlash2 drafter {:.2f} GiB (weights {:.2f}, capture {:.0f} MiB, rings {:.0f} MiB, scratch {:.0f} MiB, "
                      "snapshot sets {:.0f} MiB); no MTP block",
                      dm.total() / 1073741824.0, dm.weights / 1073741824.0, dm.capture / 1048576.0, dm.rings / 1048576.0,
@@ -1017,6 +1035,8 @@ int serveMain(int argc, char** argv, const char* program) {
         }
         std::vector<std::string> dfl_warn;
         const whirl::dflash::Params dfl_par = whirl::dflash::parseParams([](const char* n) { return env(n); }, dfl_warn);
+        const auto dfl_batch_env = env("DFLASH_BATCH");
+        const bool dfl_batch = whirl::dflash::batch::parseEnabled(dfl_batch_env ? dfl_batch_env->c_str() : nullptr);
         if (use_dflash)
             for (const std::string& w : dfl_warn) logW("{}", w);
         if (use_dflash) {
@@ -1188,6 +1208,8 @@ int serveMain(int argc, char** argv, const char* program) {
             // from the VRAM left after them)
             const hip::MemInfo r0 = ops->memInfo();
             model.dflashSetup(opt.parallel, model.cap_rows);
+            // feat029-dflashbatch: WHIRL_DFLASH_BATCH=1: scratch for one drafter forward over all slots' blocks
+            if (dfl_batch) model.dflashBatchSetup(opt.parallel);
             const hip::MemInfo r1 = ops->memInfo();
             logI("DFlash2 speculative decoding: on, block {} (up to {} drafts per cycle), context ring {} rows x {} slots, VRAM +{:.0f} MiB; "
                  "p-min {:.2f}, n-min {}; n-gram drafts {}",
@@ -1195,6 +1217,9 @@ int serveMain(int argc, char** argv, const char* program) {
                  static_cast<double>(r0.free > r1.free ? r0.free - r1.free : 0) / (1024.0 * 1024.0),
                  static_cast<double>(dfl_par.p_min), dfl_par.n_min,
                  envOn("NGRAM", true) ? "on (chosen per cycle by the cost model)" : "off");
+            if (dfl_batch)
+                logI("DFlash2 batched drafting (WHIRL_DFLASH_BATCH=1): {}", model.dfb ? std::format("one drafter forward over up to {} slots' blocks, +{:.0f} MiB", model.dfb->slots, model.dflashBatchBytes(model.dfb->slots) / 1048576.0)
+                                                                                       : std::string("off (one slot, or the batch rows do not fit)"));
         }
         if (model.gdn_replay) {
             logI("DeltaNet verify: replay of kept rows ({:.1f} MiB per slot), no snapshot sets",
@@ -1270,6 +1295,7 @@ int serveMain(int argc, char** argv, const char* program) {
         eo.dfl_n_min = dfl_par.n_min;
         eo.dfl_warm = dfl_par.warm;
         eo.dfl_width = dfl_par.width;
+        eo.dfl_batch = use_dflash && model.dfb != nullptr;
         if (use_dflash && eo.relax.on) {  // whirl::dflash::relaxApplies: MTP drafts only
             // relaxacc relaxes MTP drafts only; DFlash2 and n-gram drafts keep exact acceptance, so
             // the fast mode's other items (4-bit KV, ...) stay and the decode equals greedy of them

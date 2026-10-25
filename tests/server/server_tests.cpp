@@ -2032,6 +2032,94 @@ void testDFlashWidthAuto() {
     }
 }
 
+// feat029-dflashbatch: WHIRL_DFLASH_BATCH=1 runs the drafter once over every drafting slot's block
+// (ServerModel::dflashDraftBatch). With 1..4 concurrent requests, fixed and auto width, relaxacc on (fast)
+// and batched proposals that differ from the one-block drafter (dfl_batch_perturb), every greedy output is
+// the greedy reference and equals the unbatched server's; seeded sampled requests equal plain decoding (no
+// drafter). The batches hold distinct slots, at most --parallel blocks, and actually happen with >= 2 users.
+void testDFlashBatch() {
+    struct Variant {
+        const char* name;
+        bool automatic, relax;
+        std::uint32_t perturb;
+    };
+    const Variant vars[] = {{"fixed", false, false, 0}, {"fixed perturb", false, false, 3}, {"auto perturb", true, false, 2},
+                            {"fixed relax perturb", false, true, 3}};
+    for (std::uint32_t users = 1; users <= 4; ++users) {
+        for (const Variant& v : vars) {
+            auto make = [&](bool batch) {
+                ServerSetup su = dflashSetup(false);
+                su.mc.parallel = 4;
+                su.mc.dfl_miss = 0.3;
+                su.mc.dfl_batch_perturb = batch ? v.perturb : 0;
+                su.eo.dfl_batch = batch;
+                su.eo.relax.on = v.relax;
+                if (v.automatic) {
+                    su.eo.dfl_width.mode = whirl::dflash::Width::automatic;
+                    su.eo.dfl_width.probe_every = 4;
+                }
+                return su;
+            };
+            TestServer a(make(true));
+            TestServer b(make(false));
+            ServerSetup su_plain = baseSetup(false);
+            su_plain.mc.parallel = 4;
+            su_plain.eo.ngram = false;
+            TestServer c(su_plain);
+            std::vector<std::vector<std::uint32_t>> prompts;
+            std::vector<std::string> bodies;
+            for (std::uint32_t i = 0; i < users; ++i) {
+                prompts.push_back(makePrompt(200 + 337 * i, 700 + 10 * users + i));
+                // the last user of 3 / 4 samples (seeded): its text must be plain decoding's
+                if (users >= 3 && i + 1 == users)
+                    bodies.push_back(std::format("{{\"prompt\":{},\"max_tokens\":120,\"temperature\":0.8,\"seed\":{},\"ignore_eos\":true}}",
+                                                 idsJson(prompts.back()), 11 + users));
+                else
+                    bodies.push_back(completionBody(prompts.back(), 240));
+            }
+            auto runAll = [&](TestServer& srv) {
+                std::vector<std::string> got(users);
+                std::vector<std::thread> th;
+                for (std::uint32_t i = 0; i < users; ++i)
+                    th.emplace_back([&, i] { got[i] = completionText(srv.post("/v1/completions", bodies[i])); });
+                for (auto& t : th) t.join();
+                return got;
+            };
+            const std::vector<std::string> ga = runAll(a), gb = runAll(b);
+            std::vector<std::string> gc;
+            if (users >= 3) gc = runAll(c);
+            for (std::uint32_t i = 0; i < users; ++i) {
+                CHECK_EQ(ga[i], gb[i]);
+                if (users >= 3 && i + 1 == users) CHECK_EQ(ga[i], gc[i]);
+                else CHECK_EQ(ga[i], decode(a.model().greedyReference(prompts[i], 240, true)));
+            }
+            const Engine::Stats sa = a.engine().stats(), sb = b.engine().stats();
+            CHECK(sa.dfl_cycles > 0);
+            CHECK_EQ(sb.dfl_batches, 0u);
+            CHECK_EQ(b.model().dflBatches(), 0u);
+            CHECK_EQ(sa.dfl_batches, a.model().dflBatches());
+            CHECK_EQ(sa.dfl_batch_blocks, a.model().dflBatchBlocks());
+            CHECK(a.model().dflBatchMax() <= users);
+            CHECK_EQ(a.model().dflBatchBadSlots(), 0u);
+            if (users == 1) CHECK_EQ(sa.dfl_batches, 0u);  // one block: the one-block path
+            if (users >= 2) CHECK(sa.dfl_batches > 0);
+            if (users >= 2 && v.perturb > 0 && !v.automatic) CHECK(a.model().dflBatchPerturbed() > 0);
+            for (TestServer* s : {&a, &b}) {
+                CHECK_EQ(s->model().poison(), 0u);
+                CHECK_EQ(s->model().dflBad(), 0u);
+                CHECK_EQ(s->model().dflStale(), 0u);
+            }
+            if (g_verbose)
+                std::printf("  batch users %u %-20s: batches %llu blocks %llu max %llu perturbed %llu | drafted %llu accepted %llu | unbatched "
+                            "drafted %llu accepted %llu blocks %llu\n",
+                            users, v.name, (unsigned long long)sa.dfl_batches, (unsigned long long)sa.dfl_batch_blocks,
+                            (unsigned long long)a.model().dflBatchMax(), (unsigned long long)a.model().dflBatchPerturbed(),
+                            (unsigned long long)sa.dfl_drafted, (unsigned long long)sa.dfl_accepted, (unsigned long long)sb.dfl_drafted,
+                            (unsigned long long)sb.dfl_accepted, (unsigned long long)b.model().dflBlocks());
+        }
+    }
+}
+
 // fast mode's relaxacc relaxes MTP drafts only: DFlash2 drafts keep exact acceptance even with the
 // item on in the engine (whirl-server also turns it off for --draft dflash), so the output is the
 // greedy reference whatever the drafter proposes
@@ -7754,6 +7842,7 @@ int main(int argc, char** argv) {
         {"dflash_greedy", testDFlashGreedy},
         {"dflash_relax_exact", testDFlashRelaxExact},
         {"dflash_width_auto", testDFlashWidthAuto},
+        {"dflash_batch", testDFlashBatch},
         {"dflash_ngram", testDFlashNgram},
         {"dflash_rollback", testDFlashRollback},
         {"dflash_tier", testDFlashTier},
