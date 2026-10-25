@@ -161,9 +161,11 @@ what fits:
 - **Dense, balance: q8h.** It passed the balance KL gate against f16 at 128k (KL-1), i.e. near lossless, and it
   halves the KV bytes, so one 128k request plus a second long one fit on a 32 GB card without
   reshuffling formats.
-- **MoE: f16** in precise and balance. Its single-prompt KL under q8 was far above its own path
-  noise (77× at p12k; 50× even with q8h), and Ornith with q8 missed the gate on Chinese 128k
-  (KL-1). (With 22 KiB/token the MoE f16 pool is already ~340k tokens.)
+- **MoE: f16** in precise and balance, for now. Its single-prompt KL under q8 was far above its own
+  path noise (77× at p12k; 50× even with q8h), and Ornith with q8 missed the KL gate on Chinese 128k
+  (KL-1). KL is only a regression guard, not the acceptance bar: the paired QA of the same
+  experiment showed no difference (333 vs 334 of 350 correct), and int8 KV for MoE is being
+  verified on task accuracy and speed. (With 22 KiB/token the MoE f16 pool is already ~340k tokens.)
 - **Does not fit:** when the chosen format cannot hold the context, the context (CLI) or the pool and
   per-request context (server) are lowered with a warning if they were not given, else the program
   stops with a message (exit code 5). There is no automatic fallback to a lower-precision format;

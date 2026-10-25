@@ -136,8 +136,8 @@ Decode 狀態存放在 GPU 上。Argmax kernel 把下一個 token id 與位置�
 
 兩種模式，依模型檔案選擇：
 
-- **精確模式（Q4_K_M 及其他 K/IQ 量化）。** 凡前一版逐位元相同之處，每項優化都必須維持輸出逐位元相同。有損的變更（例如 8-bit KV）必須通過相對於實測路徑雜訊的 KL 散度檢查、成對問答測試（350 題，McNemar 精確檢定）以及長上下文 needle 測試。
-- **速度模式（MXFP4）。** 接受 prefill 中的 fp8 activation（啟動值）；其影響會被量測並記錄（KL、成對 QA、perplexity），但不是阻擋性的關卡（gate）。
+- **precise（嚴格無損）。** 凡前一版逐位元相同之處，每項優化都必須維持輸出逐位元相同（兩張卡的 golden 輸出）。逐位元相同只對 precise 做保證，以及在每個模式下對行為不變的重構。
+- **balance（預設，近乎無損）與 fast。** 以任務準確度驗收，不以逐位元相同驗收。balance 可使用允許項目（R9700 的 fp8 GEMM、MoE fp8、int8 decode activation、f16 中間結果、int8 KV）；fast（4-bit 等級品質）在任務準確度回收至少達 precise 的 95% 時收下。相對於實測路徑雜訊的 KL 散度、top-1 一致率、成對問答測試（350 題，McNemar 精確檢定）與長上下文 needle 測試，每次變更都會量測並記錄，作為回歸守門。
 
 兩種模式下，以下不變式都由每次變更必跑的常設 gate 強制執行：
 
@@ -160,6 +160,6 @@ Decode 狀態存放在 GPU 上。Argmax kernel 把下一個 token id 與位置�
 | 分頁 KV、KV 格式、檢查點、分層快取 | [kv-and-caching.md](kv-and-caching.md) |
 | OpenAI server 行為與限制 | [server.md](server.md) |
 | 我們如何量測；目前數字 | [benchmarking.md](benchmarking.md) |
-| 精確模式 vs 速度模式、MXFP4 量化配方 | [quantization.md](quantization.md) |
+| 三種數值模式、MXFP4 量化配方 | [quantization.md](quantization.md) |
 | 影像輸入 | [vision.md](vision.md) |
 | 我們踩過的每個坑 | [pitfalls.md](pitfalls.md) |
