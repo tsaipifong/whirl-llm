@@ -7,13 +7,16 @@
 
 #include "whirl/model.h"
 #include "whirl/dflash_policy.h"
+#include "whirl/dflash_kernel_plan.h"
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <initializer_list>
 #include <map>
+#include <span>
 #include <stdexcept>
 #include <string>
 
@@ -35,6 +38,7 @@ struct DflProf {
     std::map<std::string, std::pair<double, unsigned>> t;
     std::chrono::steady_clock::time_point last;
     unsigned draws = 0, ingests = 0;
+    std::string kernels;  // attention / top-k kernels chosen at dflashSetup (feat029-dflashcost)
     DflProf() {
         const char* e = std::getenv("WHIRL_DFLASH_PROF");
         on = e && e[0] == '1';
@@ -43,8 +47,8 @@ struct DflProf {
         if (!on || (draws == 0 && ingests == 0)) return;
         double tot = 0;
         for (const auto& kv : t) tot += kv.second.first;
-        std::fprintf(stderr, "DFlash2 drafter profile: %u draft blocks, %u ingests, %.2f ms per draft + its ingest\n", draws, ingests,
-                     draws ? tot / draws : 0.0);
+        std::fprintf(stderr, "DFlash2 drafter profile: %u draft blocks, %u ingests, %.2f ms per draft + its ingest (%s)\n", draws, ingests,
+                     draws ? tot / draws : 0.0, kernels.c_str());
         for (const auto& kv : t)
             std::fprintf(stderr, "  %-22s %8.3f ms/draft  %5.1f %%  (%u calls)\n", kv.first.c_str(), draws ? kv.second.first / draws : 0.0,
                          tot > 0 ? 100.0 * kv.second.first / tot : 0.0, kv.second.second);
@@ -121,6 +125,30 @@ void Model::dflashSetup(u32 slots, u32 ingest_rows, bool debug) {
     r->ing_v = alloc(IR * kvw * 4);
     r->ing_pos = alloc(IR * 4);
     if (debug) r->dbg = allocZero(static_cast<u64>(c.n_layer) * B * E * 4);
+    // feat029-dflashcost: split attention (GQA-shared K / V, split over keys) and two-stage top-k when the
+    // code object has them (WHIRL_DFLASH_KERNELS=old keeps dflash_attn / dflash_attn_long / dflash_topk).
+    // The drafter only proposes tokens; the target verifies them exactly, so the output does not change.
+    {
+        namespace dk = ::whirl::dflash;
+        const bool old = dk::forceOldKernels(std::getenv("WHIRL_DFLASH_KERNELS"));
+        const u32 keys = r->ring + r->block;
+        const dk::AttnKernel ak = dk::chooseAttn(k.dflash_attn_part && k.dflash_attn_merge, old, c.n_head, c.n_head_kv, c.head_dim, keys,
+                                                 static_cast<u32>(kernels::kDFlashAttnKeys));
+        const dk::TopkKernel tk = dk::chooseTopk(k.dflash_topk_part && k.dflash_topk_merge, old, static_cast<u32>(K));
+        r->attn_kind = static_cast<std::uint8_t>(ak);
+        r->topk_kind = static_cast<std::uint8_t>(tk);
+        if (ak == dk::AttnKernel::split) {
+            r->attn_splits = dk::attnSplits(keys);
+            r->attn_part = alloc(dk::attnPartFloats(keys, r->block, c.n_head, c.head_dim) * 4);
+        }
+        if (tk == dk::TopkKernel::split) {
+            r->topk_slices = dk::topkSlices(static_cast<u32>(V));
+            const u64 ent = dk::topkPartEntries(static_cast<u32>(P), static_cast<u32>(V), static_cast<u32>(K));
+            r->topk_pid = alloc(ent * 4);
+            r->topk_pval = alloc(ent * 4);
+        }
+        g_prof.kernels = std::string("attention ") + dk::attnName(ak) + ", top-k " + dk::topkName(tk);
+    }
     r->slots.resize(slots);
     for (DFlashSlotCtx& s : r->slots) {
         for (u32 l = 0; l < c.n_layer; ++l) {
@@ -180,10 +208,9 @@ void Model::dflashIngest(u32 slot, DevPtr feats, u32 stride, u32 row0, u32 n, u3
             const DFlashLayerW& w = dflash->layers[l];
             xq_src = 0;
             x16_src = 0;
-            matmul(w.k, r.ing_g, r.ing_k, m, false);
-            xq_src = 0;
-            x16_src = 0;
-            matmul(w.v, r.ing_g, r.ing_v, m, false);
+            const Mat kv[2] = {w.k, w.v};
+            const DevPtr kvo[2] = {r.ing_k, r.ing_v};
+            matmulGroup(kv, r.ing_g, kvo, m);
             hip::launch(k.rmsnorm, D(m * c.n_head_kv), D(256), 0, stream, r.ing_k, w.k_norm, r.ing_k, I(c.head_dim), I(c.head_dim),
                         I(c.head_dim), c.eps);
             hip::launch(k.rope_neox, D(c.n_head_kv, m), D(64), 0, stream, r.ing_k, r.ing_pos, I(c.head_dim), I(kvw), I(c.head_dim),
@@ -232,6 +259,13 @@ std::vector<u32> Model::dflashDraft(u32 slot, u32 anchor, u32 pos, float p_min, 
         x16_src = 0;
         matmul(w, in, out, n, acc);
     };
+    // matrices on the same input (q / k / v, gate / up): the input is quantized once and, where the GEMV
+    // kernels allow, one grouped launch (matmulGroup; per-row arithmetic of the single launch)
+    auto mmGroup = [&](std::initializer_list<Mat> ws, DevPtr in, std::initializer_list<DevPtr> outs) {
+        xq_src = 0;
+        x16_src = 0;
+        matmulGroup(std::span<const Mat>(ws.begin(), ws.size()), in, std::span<const DevPtr>(outs.begin(), outs.size()), B);
+    };
     auto norm = [&](DevPtr in, DevPtr w, DevPtr out, u32 len, u32 count) {
         hip::launch(k.rmsnorm, D(count), D(256), 0, stream, in, w, out, I(len), I(len), I(len), c.eps);
     };
@@ -253,6 +287,7 @@ std::vector<u32> Model::dflashDraft(u32 slot, u32 anchor, u32 pos, float p_min, 
     g_prof.mark(stream, "d00 embed");
     // rings that fit dflash_attn keep it (unchanged); longer ones take the chunked dflash_attn_long
     const auto& attn = r.ring + B > static_cast<u32>(kernels::kDFlashAttnKeys) ? k.dflash_attn_long : k.dflash_attn;
+    const bool split_attn = r.attn_kind == static_cast<std::uint8_t>(::whirl::dflash::AttnKernel::split);
     for (u32 l = 0; l < c.n_layer; ++l) {
         const DFlashLayerW& w = dflash->layers[l];
         const u32 dsa = w.attn_conv_proj.nrows, dsf = w.ffn_conv_proj.nrows;
@@ -261,16 +296,21 @@ std::vector<u32> Model::dflashDraft(u32 slot, u32 anchor, u32 pos, float p_min, 
         mm(w.attn_conv_proj, r.h, r.dyn, B, false);
         conv(r.h, r.dyn, w.attn_conv_base, r.h2, dsa, 0);
         g_prof.mark(stream, "d1 attn norm+conv in");
-        mm(w.q, r.h2, r.q, B, false);
-        mm(w.k, r.h2, r.kb, B, false);
-        mm(w.v, r.h2, r.vb, B, false);
+        mmGroup({w.q, w.k, w.v}, r.h2, {r.q, r.kb, r.vb});
         norm(r.q, w.q_norm, r.q, hd, B * nh);
         norm(r.kb, w.k_norm, r.kb, hd, B * nkv);
         hip::launch(k.rope_neox, D(nh, B), D(64), 0, stream, r.q, r.pos, I(hd), I(qw), I(hd), theta_scale);
         hip::launch(k.rope_neox, D(nkv, B), D(64), 0, stream, r.kb, r.pos, I(hd), I(kvw), I(hd), theta_scale);
         g_prof.mark(stream, "d2 q/k/v proj+norm+rope");
-        hip::launch(attn, D(nh, B), D(hd), 0, stream, r.q, r.kb, r.vb, sc.kc[l], sc.vc[l], sc.cpos, I(r.ring), I(B), I(nh), I(nkv),
-                    I(hd), I(pos), I(c.window), 1.0f / std::sqrt(static_cast<float>(hd)), r.att);
+        if (split_attn) {
+            hip::launch(k.dflash_attn_part, D(nkv, B, r.attn_splits), D(::whirl::dflash::kAttnThreads), 0, stream, r.q, r.kb, r.vb, sc.kc[l],
+                        sc.vc[l], sc.cpos, I(r.ring), I(B), I(nh), I(nkv), I(hd), I(pos), I(c.window),
+                        1.0f / std::sqrt(static_cast<float>(hd)), r.attn_part);
+            hip::launch(k.dflash_attn_merge, D(nh, B), D(hd), 0, stream, r.attn_part, I(r.attn_splits), I(B), I(nh), I(hd), r.att);
+        } else {
+            hip::launch(attn, D(nh, B), D(hd), 0, stream, r.q, r.kb, r.vb, sc.kc[l], sc.vc[l], sc.cpos, I(r.ring), I(B), I(nh), I(nkv),
+                        I(hd), I(pos), I(c.window), 1.0f / std::sqrt(static_cast<float>(hd)), r.att);
+        }
         g_prof.mark(stream, "d3 attention kernel");
         mm(w.o, r.att, r.o, B, false);
         conv(r.o, r.dyn, w.attn_conv_base, r.h, dsa, 1);
@@ -281,8 +321,7 @@ std::vector<u32> Model::dflashDraft(u32 slot, u32 anchor, u32 pos, float p_min, 
         mm(w.ffn_conv_proj, r.h, r.dyn, B, false);
         conv(r.h, r.dyn, w.ffn_conv_base, r.h2, dsf, 0);
         g_prof.mark(stream, "d5 ffn norm+conv in");
-        mm(w.gate, r.h2, r.g, B, false);
-        mm(w.up, r.h2, r.u, B, false);
+        mmGroup({w.gate, w.up}, r.h2, {r.g, r.u});
         hip::launch(k.silu_mul, D((B * c.n_ff + 255) / 256), D(256), 0, stream, r.g, r.u, I(B * c.n_ff));
         mm(w.down, r.g, r.o, B, false);
         g_prof.mark(stream, "d6 ffn gate/up/down");
@@ -297,7 +336,13 @@ std::vector<u32> Model::dflashDraft(u32 slot, u32 anchor, u32 pos, float p_min, 
     g_prof.mark(stream, "d8 final norm");
     mm(output, e1, r.logits, P, false);
     g_prof.mark(stream, "d9 lm_head (target)");
-    hip::launch(k.dflash_topk, D(P), D(1024), 0, stream, r.logits, I(output.nrows), I(output.nrows), I(K), r.cand, r.unary);
+    if (r.topk_kind == static_cast<std::uint8_t>(::whirl::dflash::TopkKernel::split)) {
+        hip::launch(k.dflash_topk_part, D(P, r.topk_slices), D(256), 0, stream, r.logits, I(output.nrows), I(output.nrows), I(K),
+                    I(r.topk_slices), r.topk_pid, r.topk_pval);
+        hip::launch(k.dflash_topk_merge, D(P), D(256), 0, stream, r.topk_pid, r.topk_pval, I(r.topk_slices), I(K), r.cand, r.unary);
+    } else {
+        hip::launch(k.dflash_topk, D(P), D(1024), 0, stream, r.logits, I(output.nrows), I(output.nrows), I(K), r.cand, r.unary);
+    }
     g_prof.mark(stream, "da top-k");
     mm(dflash->sel_hidden, e1, r.gate, P, false);
     const int q8 = dflash->sel_prev.ty == GgmlType::q8_0 ? 1 : 0;

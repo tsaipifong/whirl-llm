@@ -6,6 +6,9 @@
 //   * dflash_walk: same tokens as the CPU walk on the same lattice (p-min / n-min)
 //   * dflash_attn: drafter attention over the context ring + block, vs CPU
 //   * dflash_attn_long: the same past kDFlashAttnKeys keys (chunked); == dflash_attn bitwise on one chunk
+//   * dflash_attn_part + dflash_attn_merge (feat029-dflashcost): split over keys, GQA-shared K / V; the same
+//     cases vs CPU (1e-4) and vs dflash_attn on the same inputs
+//   * dflash_topk_part + dflash_topk_merge: == dflash_topk bit for bit (ids and values)
 // SPDX-License-Identifier: Apache-2.0
 
 #include <algorithm>
@@ -17,6 +20,7 @@
 #include <vector>
 
 #include "kt.h"
+#include "whirl/dflash_kernel_plan.h"
 
 namespace kt {
 
@@ -128,6 +132,24 @@ void testDflash(Ctx& c) {
         c.rep.add(cmpExact("dflash_topk ids (key order, ties -> smaller index, NaN skipped)", got_i[0], ref_i));
         c.rep.add(cmpExact("dflash_topk values", dv.down<float>(ref_v.size()), ref_v));
         c.rep.add(cmpExact("dflash_topk repeatable (two runs)", got_i[1], got_i[0], Kind::invariant));
+        if (c.k.dflash_topk_part && c.k.dflash_topk_merge) {
+            // two-stage top-k: the slices' top-k lists merged; must equal dflash_topk bit for bit
+            const std::vector<float> old_v = dv.down<float>(ref_v.size());
+            const unsigned S = whirl::dflash::topkSlices(static_cast<unsigned>(n));
+            Buf pid(static_cast<std::size_t>(rows) * S * k * 4), pval(static_cast<std::size_t>(rows) * S * k * 4);
+            di.zero();
+            dv.zero();
+            hip::launch(c.k.dflash_topk_part, {static_cast<unsigned>(rows), S, 1}, {256, 1, 1}, 0, c.s, dx.p(), n, n, k, static_cast<int>(S),
+                        pid.p(), pval.p());
+            hip::launch(c.k.dflash_topk_merge, {static_cast<unsigned>(rows), 1, 1}, {256, 1, 1}, 0, c.s, pid.p(), pval.p(), static_cast<int>(S),
+                        k, di.p(), dv.p());
+            c.sync();
+            const std::vector<int> si = di.down<int>(ref_i.size());
+            const std::vector<float> sv = dv.down<float>(ref_v.size());
+            c.rep.add(cmpExact("dflash_topk_part + merge ids == CPU (slices of 8192, ties, NaN)", si, ref_i));
+            c.rep.add(cmpExact("dflash_topk_part + merge ids == dflash_topk bitwise", si, got_i[0], Kind::invariant));
+            c.rep.add(cmpExact("dflash_topk_part + merge values == dflash_topk bitwise", sv, old_v, Kind::invariant));
+        }
     }
     // ---- drafter attention: context ring (with empty rows, rows past the anchor and rows outside
     // the window) plus the block's own rows, GQA 32 / 8, head_dim 128. dflash_attn_long (C-52): on the
@@ -143,8 +165,20 @@ void testDflash(Ctx& c) {
         for (int i = 0; i < W; ++i) cpos[static_cast<std::size_t>(i)] = cposOf(i);
         Buf dq(q), dkb(kb), dvb(vb), dkc(kc), dvc(vc), dcp(cpos), dout(q.size() * 4);
         const float scale = 1.0f / std::sqrt(static_cast<float>(hd));
-        hip::launch(fn, {static_cast<unsigned>(nh), static_cast<unsigned>(B), 1}, {static_cast<unsigned>(hd), 1, 1}, 0, c.s, dq.p(),
-                    dkb.p(), dvb.p(), dkc.p(), dvc.p(), dcp.p(), W, B, nh, nkv, hd, qpos, window, scale, dout.p());
+        if (fn == nullptr) {
+            // nullptr: the split pair dflash_attn_part + dflash_attn_merge (feat029-dflashcost)
+            const unsigned S = whirl::dflash::attnSplits(static_cast<unsigned>(W + B));
+            Buf part(whirl::dflash::attnPartFloats(static_cast<unsigned>(W + B), static_cast<unsigned>(B), static_cast<unsigned>(nh),
+                                                   static_cast<unsigned>(hd)) *
+                     4);
+            hip::launch(c.k.dflash_attn_part, {static_cast<unsigned>(nkv), static_cast<unsigned>(B), S}, {whirl::dflash::kAttnThreads, 1, 1}, 0,
+                        c.s, dq.p(), dkb.p(), dvb.p(), dkc.p(), dvc.p(), dcp.p(), W, B, nh, nkv, hd, qpos, window, scale, part.p());
+            hip::launch(c.k.dflash_attn_merge, {static_cast<unsigned>(nh), static_cast<unsigned>(B), 1}, {static_cast<unsigned>(hd), 1, 1}, 0,
+                        c.s, part.p(), static_cast<int>(S), B, nh, hd, dout.p());
+        } else {
+            hip::launch(fn, {static_cast<unsigned>(nh), static_cast<unsigned>(B), 1}, {static_cast<unsigned>(hd), 1, 1}, 0, c.s, dq.p(),
+                        dkb.p(), dvb.p(), dkc.p(), dvc.p(), dcp.p(), W, B, nh, nkv, hd, qpos, window, scale, dout.p());
+        }
         c.sync();
         std::vector<double> ref(q.size()), sc(q.size());
         for (int t = 0; t < B; ++t)
@@ -209,6 +243,31 @@ void testDflash(Ctx& c) {
         // a first chunk without any visible key (all ring rows of chunk 0 empty), so only chunk 1 and the block count
         attnCase("dflash_attn_long vs CPU (ring 4096, first chunk all empty: skipped)", c.k.dflash_attn_long, 16, 4096, 0, 9000,
                  [](int i) { return i < whirl::kernels::kDFlashAttnKeys ? -1 : 4000 + i; }, nullptr);
+    }
+    if (c.k.dflash_attn_part && c.k.dflash_attn_merge) {
+        const hip::Function split = nullptr;
+        std::vector<float> a, b;
+        c.rng.seed(77);  // the inputs of the dflash_attn case
+        attnCase("dflash_attn_part + merge vs CPU (ring 256, empty / future / out-of-window rows, block 8, GQA 32/8: 2 splits)", split, 8,
+                 256, 200, 300, cpos256, &b);
+        if (c.k.dflash_attn) {
+            c.rng.seed(77);
+            attnCase("dflash_attn (reference for the split pair)", c.k.dflash_attn, 8, 256, 200, 300, cpos256, &a);
+            std::vector<double> ad(a.begin(), a.end()), one(a.size(), 1.0);
+            c.rep.add(cmpTol("dflash_attn_part + merge vs dflash_attn (same inputs, 1e-4 abs: f32 summation order only)", b, ad, one, 1e-4, 1e-6));
+        }
+        // the R9700 / 8060S drafter shape: full 2048-row ring + block 8 (9 splits, last one only the block)
+        attnCase("dflash_attn_part + merge vs CPU (ring 2048 full, window 2048, block 8: 9 splits)", split, 8, 2048, 2048, 5000,
+                 [](int i) { return 5000 - 2048 + i; }, nullptr);
+        // Ornith's drafter: ring 4096, window 4096, block 16 (17 splits) with empty / future / out-of-window rows
+        attnCase("dflash_attn_part + merge vs CPU (ring 4096, window 4096, block 16: 17 splits, mixed rows)", split, 16, 4096, 4096, 5000,
+                 [](int i) { return i % 29 == 5 ? -1 : (i < 4090 ? 950 + i : 5000 + i); }, nullptr);
+        // whole splits without a visible key (the first 2304 ring rows empty): skipped in the merge
+        attnCase("dflash_attn_part + merge vs CPU (ring 4096, first 9 splits all empty)", split, 16, 4096, 0, 9000,
+                 [](int i) { return i < whirl::kernels::kDFlashAttnKeys ? -1 : 4000 + i; }, nullptr);
+        // a cold drafter context: every ring row empty, only the block's own keys
+        attnCase("dflash_attn_part + merge vs CPU (ring 2048 all empty: block keys only)", split, 8, 2048, 2048, 10,
+                 [](int) { return -1; }, nullptr);
     }
     // ---- selector lattice (f32 and Q8_0 codebooks) and the walk
     {

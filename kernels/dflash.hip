@@ -256,3 +256,209 @@ extern "C" __global__ void __launch_bounds__(256)
     }
     if (tid < hd) out[((size_t)t * nh + h) * hd + tid] = o_run / l_run;
 }
+
+// ---- feat029-dflashcost (T4): split drafter attention and two-stage top-k (include/whirl/dflash_kernel_plan.h)
+
+// Drafter attention split over keys, GQA-shared K / V (adjacent-head sharing as in gufo + a split-K combine):
+// block (kv head g, token t, chunk s) computes, for the G = nh / nkv q heads of g, the scores of keys
+// s * DFA_CH .. + DFA_CH (one wave per key, lanes over the head dimension: coalesced K rows, each K row read
+// once for all G heads), the chunk max m, l = sum e^(score - m) and o = sum e^(score - m) v, and writes
+// part[s][t][h] = {m, l, o[hd]}; dflash_attn_merge combines the chunks. Same visibility rule as dflash_attn.
+// grid (nkv, B, ceil((W + B) / DFA_CH)), block 256 (8 waves); G <= DFA_MAXG, hd divides 256 (host checks).
+#define DFA_CH 256  // = whirl::dflash::kAttnChunk
+#define DFA_MAXG 8  // = whirl::dflash::kAttnMaxGroup
+extern "C" __global__ void __launch_bounds__(256)
+    dflash_attn_part(const float *q, const float *kb, const float *vb, const float *kc, const float *vc, const int *cpos, int W, int B,
+                     int nh, int nkv, int hd, int qpos, int window, float scale, float *part) {
+    __shared__ float qs[DFA_MAXG * 256];
+    __shared__ float sc[DFA_MAXG][DFA_CH];
+    __shared__ float vacc[DFA_MAXG * 256];
+    const int g = blockIdx.x, t = blockIdx.y, s = blockIdx.z, tid = threadIdx.x;
+    const int G = nh / nkv, lane = tid % WARP, wave = tid / WARP, nw = blockDim.x / WARP;
+    const int nk = W + B, k0 = s * DFA_CH, nc = min(nk - k0, DFA_CH);
+    const int my_pos = qpos + t;
+    for (int i = tid; i < G * hd; i += blockDim.x) qs[i] = q[((size_t)t * nh + (size_t)g * G) * hd + i];
+    __syncthreads();
+    for (int j = wave; j < nc; j += nw) {
+        const int k = k0 + j;
+        const float *kr;
+        bool vis;
+        if (k < W) {
+            const int p = cpos[k];
+            vis = p >= 0 && p < qpos && (window == 0 || my_pos - p < window);
+            kr = kc + ((size_t)k * nkv + g) * hd;
+        } else {
+            vis = true;
+            kr = kb + ((size_t)(k - W) * nkv + g) * hd;
+        }
+        float d[DFA_MAXG];
+#pragma unroll
+        for (int gg = 0; gg < DFA_MAXG; ++gg) d[gg] = 0.f;
+        if (vis) {  // uniform across the wave (one key per wave)
+            for (int i = lane; i < hd; i += WARP) {
+                const float kv = kr[i];
+#pragma unroll
+                for (int gg = 0; gg < DFA_MAXG; ++gg)
+                    if (gg < G) d[gg] += qs[gg * hd + i] * kv;
+            }
+        }
+#pragma unroll
+        for (int gg = 0; gg < DFA_MAXG; ++gg)
+            if (gg < G) {
+                const float x = warp_sum(d[gg]);
+                if (lane == 0) sc[gg][j] = vis ? x * scale : -INFINITY;
+            }
+    }
+    __syncthreads();
+    // wave gg: chunk max and sum of q head gg (G <= 8 waves)
+    if (wave < G) {
+        float m = -INFINITY;
+        for (int j = lane; j < nc; j += WARP) m = fmaxf(m, sc[wave][j]);
+        m = warp_max(m);
+        float l = 0.f;
+        for (int j = lane; j < nc; j += WARP) {
+            const float x = sc[wave][j];
+            const float e = (m == -INFINITY || x == -INFINITY) ? 0.f : __expf(x - m);
+            sc[wave][j] = e;
+            l += e;
+        }
+        l = warp_sum(l);
+        if (lane == 0) {
+            float *pr = part + (((size_t)s * B + t) * nh + (size_t)g * G + wave) * (hd + 2);
+            pr[0] = m;
+            pr[1] = l;
+        }
+    }
+    __syncthreads();
+    // V: thread = (dimension d, key lane kl of KL = 256 / hd); the G accumulators share each V read
+    const int KL = blockDim.x / hd, d = tid % hd, kl = tid / hd;
+    float acc[DFA_MAXG];
+#pragma unroll
+    for (int gg = 0; gg < DFA_MAXG; ++gg) acc[gg] = 0.f;
+    for (int j = kl; j < nc; j += KL) {
+        bool nz = false;
+#pragma unroll
+        for (int gg = 0; gg < DFA_MAXG; ++gg)
+            if (gg < G) nz = nz || sc[gg][j] != 0.f;
+        if (!nz) continue;
+        const int k = k0 + j;
+        const float *vr = k < W ? vc + ((size_t)k * nkv + g) * hd : vb + ((size_t)(k - W) * nkv + g) * hd;
+        const float v = vr[d];
+#pragma unroll
+        for (int gg = 0; gg < DFA_MAXG; ++gg)
+            if (gg < G) acc[gg] += sc[gg][j] * v;
+    }
+    if (kl > 0)
+        for (int gg = 0; gg < G; ++gg) vacc[(gg * KL + kl) * hd + d] = acc[gg];
+    __syncthreads();
+    if (kl == 0)
+        for (int gg = 0; gg < G; ++gg) {
+            float o = acc[gg];
+            for (int r = 1; r < KL; ++r) o += vacc[(gg * KL + r) * hd + d];
+            part[(((size_t)s * B + t) * nh + (size_t)g * G + gg) * (hd + 2) + 2 + d] = o;
+        }
+}
+
+// Combine of dflash_attn_part's S chunks: M = max m_s, out = sum o_s e^(m_s - M) / sum l_s e^(m_s - M);
+// chunks without a visible key (m = -inf) are skipped (the block's own keys are always visible).
+// grid (nh, B), block hd. out [B][nh][hd] as dflash_attn.
+extern "C" __global__ void __launch_bounds__(256) dflash_attn_merge(const float *part, int S, int B, int nh, int hd, float *out) {
+    const int h = blockIdx.x, t = blockIdx.y, d = threadIdx.x;
+    if (d >= hd) return;
+    const size_t stride = (size_t)B * nh * (hd + 2);
+    const float *p0 = part + ((size_t)t * nh + h) * (hd + 2);
+    float M = -INFINITY;
+    for (int s = 0; s < S; ++s) M = fmaxf(M, p0[s * stride]);
+    float l = 0.f, o = 0.f;
+    for (int s = 0; s < S; ++s) {
+        const float *p = p0 + s * stride;
+        const float m = p[0];
+        if (m == -INFINITY) continue;
+        const float w = __expf(m - M);
+        l += p[1] * w;
+        o += p[2 + d] * w;
+    }
+    out[((size_t)t * nh + h) * hd + d] = o / l;
+}
+
+// Arg-best of the wave under dflash_better (a strict total order: every lane ends with the same key).
+__device__ __forceinline__ void dflash_argbest_warp(float &v, int &i) {
+#pragma unroll
+    for (int o = WARP / 2; o > 0; o >>= 1) {
+        const float ov = __shfl_xor(v, o, WARP);
+        const int oi = __shfl_xor(i, o, WARP);
+        if (dflash_better(ov, oi, v, i)) {
+            v = ov;
+            i = oi;
+        }
+    }
+}
+
+// k rounds of dflash_topk over n keys (vals[j], ids ? ids[j] : base + j) with one block; round r takes the
+// best key below round r-1's ((-inf, INT_MAX) when none is left, as dflash_topk). wv / wi: [2][32] in LDS,
+// double-buffered per round (one barrier per round: a thread writes buffer b again only after the next
+// round's barrier, which every thread reaches after reading buffer b).
+__device__ void dflash_topk_rounds(const float *vals, const int *ids, int base, int n, int k, int *oi, float *ov, float (*wv)[32],
+                                   int (*wi)[32]) {
+    const int lane = threadIdx.x % WARP, wave = threadIdx.x / WARP, nw = blockDim.x / WARP;
+    float pv = INFINITY;
+    int pi = -1;
+    for (int r = 0; r < k; ++r) {
+        float best = -INFINITY;
+        int idx = 0x7fffffff;
+        for (int j = threadIdx.x; j < n; j += blockDim.x) {
+            const float v = vals[j];
+            const int i = ids ? ids[j] : base + j;
+            if (dflash_better(pv, pi, v, i) && dflash_better(v, i, best, idx)) {
+                best = v;
+                idx = i;
+            }
+        }
+        dflash_argbest_warp(best, idx);
+        const int b = r & 1;
+        if (lane == 0) {
+            wv[b][wave] = best;
+            wi[b][wave] = idx;
+        }
+        __syncthreads();
+        best = wv[b][0];
+        idx = wi[b][0];
+        for (int w = 1; w < nw; ++w)
+            if (dflash_better(wv[b][w], wi[b][w], best, idx)) {
+                best = wv[b][w];
+                idx = wi[b][w];
+            }
+        pv = best;
+        pi = idx;
+        if (threadIdx.x == 0) {
+            oi[r] = pi;
+            ov[r] = pv;
+        }
+    }
+}
+
+// Stage 1 of the two-stage top-k: block (row, slice s) keeps the top k (key order) of values
+// s * DFT_SLICE .. + DFT_SLICE of the row (read once into LDS). pid / pval [row][S][k].
+// grid (rows, S = ceil(n / DFT_SLICE)), block 256.
+#define DFT_SLICE 8192  // = whirl::dflash::kTopkSlice
+extern "C" __global__ void __launch_bounds__(256) dflash_topk_part(const float *x, int n, int ld, int k, int S, int *pid, float *pval) {
+    __shared__ float xs[DFT_SLICE];
+    __shared__ float wv[2][32];
+    __shared__ int wi[2][32];
+    const int row = blockIdx.x, s = blockIdx.y;
+    const int lo = s * DFT_SLICE, len = max(0, min(n - lo, DFT_SLICE));
+    const float *src = x + (size_t)row * ld + lo;
+    for (int j = threadIdx.x; j < len; j += blockDim.x) xs[j] = src[j];
+    __syncthreads();
+    const size_t o = ((size_t)row * S + s) * k;
+    dflash_topk_rounds(xs, nullptr, lo, len, k, pid + o, pval + o, wv, wi);
+}
+
+// Stage 2: the top k of each row's S * k stage-1 keys -> ids / vals [row][k], == dflash_topk bit for bit.
+// grid (rows), block 256.
+extern "C" __global__ void __launch_bounds__(256) dflash_topk_merge(const int *pid, const float *pval, int S, int k, int *ids, float *vals) {
+    __shared__ float wv[2][32];
+    __shared__ int wi[2][32];
+    const size_t o = (size_t)blockIdx.x * S * k;
+    dflash_topk_rounds(pval + o, pid + o, 0, S * k, k, ids + (size_t)blockIdx.x * k, vals + (size_t)blockIdx.x * k, wv, wi);
+}

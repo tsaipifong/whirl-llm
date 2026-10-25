@@ -18,6 +18,8 @@
 //     (the server engine calls it per slot; whirl chat's dflashDecode has no relaxed acceptance).
 #pragma once
 
+#include "whirl/dflash_kernel_plan.h"
+
 #include <algorithm>
 #include <cstdint>
 #include <optional>
@@ -201,6 +203,9 @@ inline Mem memory(const MemInput& in) {
     m.rings = static_cast<u64>(in.slots) * (static_cast<u64>(in.n_layer) * 2 * ring * kvw * 4 + ring * 4);
     m.scratch = B * 4 * (2 + 5 * E + ds + 2 * qw + 2 * kvw + 2ull * in.n_ff) + P * in.vocab * 4 + P * K * 8 + P * R * 4 + P * K * K * 4 +
                 (1 + P) * 4 + ir * (E + 2 * kvw + 1) * 4;
+    // split attention / two-stage top-k workspaces (feat029-dflashcost; counted even when the old kernels run)
+    m.scratch += attnPartFloats(static_cast<std::uint32_t>(ring + B), in.block, in.n_head, in.head_dim) * 4 +
+                 topkPartEntries(static_cast<std::uint32_t>(P), in.vocab, in.sel_topk) * 8;
     m.snapshots = static_cast<u64>(in.snap_sets) * in.snap_set_bytes;
     return m;
 }

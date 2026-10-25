@@ -522,6 +522,10 @@ void loadMisc(MiscKernels& k, const Loader& L) {
     k.dflash_walk = L.opt("dflash_walk");
     k.dflash_attn = L.opt("dflash_attn");
     k.dflash_attn_long = L.opt("dflash_attn_long");
+    k.dflash_attn_part = L.opt("dflash_attn_part");
+    k.dflash_attn_merge = L.opt("dflash_attn_merge");
+    k.dflash_topk_part = L.opt("dflash_topk_part");
+    k.dflash_topk_merge = L.opt("dflash_topk_merge");
     k.get_rows[ti(QType::mxfp4)] = L.opt("get_rows_mxfp4");
     static constexpr Named mx[] = {
         {&KernelTable::silu_mul_x8h, "silu_mul_x8h"},

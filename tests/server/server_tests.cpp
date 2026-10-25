@@ -5612,7 +5612,11 @@ void testDFlashFit() {
     CHECK_EQ(m.weights, w);
     CHECK_EQ(m.capture, 200 * MiB);                    // 5 target layers x 2048 rows x 5120 x f32
     CHECK_EQ(m.rings, 4 * (80 * MiB + 2048 * 4));      // per slot: 5 layers x K,V x 2048 rows x 8 x 128 x f32 + positions
-    CHECK_EQ(m.scratch, 67998688u);                    // dflashSetup's draft block + 2048 ingest rows
+    // dflashSetup's draft block + 2048 ingest rows (67998688) + the feat029-dflashcost workspaces of the split
+    // drafter kernels (whirl/dflash_kernel_plan.h): attention 9 splits x 8 rows x 32 heads x (2 + 128) x f32
+    // = 1198080, two-stage top-k 7 rows x 31 slices x 16 x (id + value) = 27776
+    CHECK_EQ(m.scratch, 67998688u + 1198080u + 27776u);
+    CHECK_EQ(m.scratch, 69224544u);
     CHECK_EQ(m.snapshots, 0u);
     CHECK(m.total() > 2 * GiB + 400 * MiB && m.total() < 2 * GiB + 500 * MiB);
     const whirl::dflash::Mem ms = dflashFitBytes(dc, w, t, 2048, 1, 15, 150 * MiB);  // replay-less: 15 sets

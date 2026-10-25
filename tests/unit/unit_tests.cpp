@@ -12,6 +12,7 @@
 #include "whirl/spec_sample.h"
 #include "whirl/relax_accept.h"
 #include "whirl/dflash_policy.h"
+#include "whirl/dflash_kernel_plan.h"
 #include "whirl/device_mem.h"
 #include "whirl/uma_mem.h"
 #include "whirl/vram_limit.h"
@@ -40,6 +41,7 @@
 #include <regex>
 #include <stdexcept>
 #include <functional>
+#include <limits>
 #include <map>
 #include <new>
 #include <string>
@@ -1249,6 +1251,175 @@ void testKernelFetchBounds() {
     CHECK(old_caught > 0);     // the check does see the pre-fix over-read (every type reads >= 16 B past)
     CHECK(s2_cases > 0);       // the S = 2 addressing was replayed
     CHECK(s2_old_caught > 0);  // and the check bites there too
+}
+
+// ---------------------------------------------------------------------------
+// DFlash2 drafter kernel plan (whirl/dflash_kernel_plan.h, feat029-dflashcost): the selector table, split
+// sizes / workspaces, and the host models of the split kernels: two-stage top-k == single-pass top-k bit for
+// bit (ties, NaN, -inf, short rows, many slices); split-over-keys attention within the drafter tolerance of
+// the direct softmax (empty chunks, a cold context, 4096-row rings).
+void testDflashKernelPlan() {
+    namespace d = whirl::dflash;
+    const unsigned maxk = static_cast<unsigned>(whirl::kernels::kDFlashAttnKeys);
+    // selector table: (have split, force old, nh, nkv, hd, keys) -> kernel
+    struct ACase {
+        bool have, old;
+        unsigned nh, nkv, hd, keys;
+        d::AttnKernel want;
+    };
+    const ACase ac[] = {
+        {true, false, 32, 8, 128, 2056, d::AttnKernel::split},    // Qwen3.8-27B DFlash2 drafter, ring full
+        {true, false, 32, 8, 128, 4112, d::AttnKernel::split},    // 4096 window, block 16: no chunk limit
+        {true, true, 32, 8, 128, 2056, d::AttnKernel::single},    // WHIRL_DFLASH_KERNELS=old
+        {true, true, 32, 8, 128, 4112, d::AttnKernel::chunked},   // old + long ring
+        {false, false, 32, 8, 128, 2056, d::AttnKernel::single},  // code object without the split kernels
+        {false, false, 32, 8, 128, 4112, d::AttnKernel::chunked},
+        {true, false, 64, 4, 128, 2056, d::AttnKernel::single},   // G = 16 > kAttnMaxGroup
+        {true, false, 32, 6, 128, 2056, d::AttnKernel::single},   // nh not a multiple of nkv
+        {true, false, 32, 8, 96, 2056, d::AttnKernel::single},    // hd does not divide the 256-thread block
+        {true, false, 32, 8, 512, 5000, d::AttnKernel::chunked},  // hd > 256
+        {true, false, 16, 16, 64, 2056, d::AttnKernel::split},    // no GQA (G = 1), hd 64
+        {true, false, 32, 8, 256, 2056, d::AttnKernel::split},    // hd 256 (one key lane)
+        {true, false, 32, 0, 128, 2056, d::AttnKernel::single},   // nkv 0: never the split path
+    };
+    for (const ACase& c : ac) CHECK(d::chooseAttn(c.have, c.old, c.nh, c.nkv, c.hd, c.keys, maxk) == c.want);
+    CHECK(d::chooseTopk(true, false, 16) == d::TopkKernel::split);
+    CHECK(d::chooseTopk(true, true, 16) == d::TopkKernel::single);
+    CHECK(d::chooseTopk(false, false, 16) == d::TopkKernel::single);
+    CHECK(d::chooseTopk(true, false, 65) == d::TopkKernel::single);
+    CHECK(d::chooseTopk(true, false, 0) == d::TopkKernel::single);
+    CHECK(d::forceOldKernels("old") && !d::forceOldKernels(nullptr) && !d::forceOldKernels("") && !d::forceOldKernels("OLD"));
+    CHECK_EQ(std::string(d::attnName(d::AttnKernel::split)), std::string("split"));
+    CHECK_EQ(std::string(d::topkName(d::TopkKernel::single)), std::string("single"));
+    // sizes: 2048 ring + block 8 -> 9 splits (the last only the block); 248320 vocabulary -> 31 slices of 8192
+    CHECK_EQ(d::attnSplits(2056), 9u);
+    CHECK_EQ(d::attnSplits(256), 1u);
+    CHECK_EQ(d::attnSplits(257), 2u);
+    CHECK_EQ(d::topkSlices(248320), 31u);
+    CHECK_EQ(d::topkSlices(8192), 1u);
+    CHECK_EQ(d::topkSlices(0), 1u);
+    CHECK_EQ(d::attnPartFloats(2056, 8, 32, 128), 9ull * 8 * 32 * 130);
+    CHECK_EQ(d::topkPartEntries(7, 248320, 16), 7ull * 31 * 16);
+    // the memory estimate counts the workspaces
+    {
+        d::MemInput in;
+        in.n_layer = 5, in.n_embd = 5120, in.n_head = 32, in.n_head_kv = 8, in.head_dim = 128, in.n_ff = 17408;
+        in.block = 8, in.window = 2048, in.conv_k = 2, in.conv_group = 16, in.sel_topk = 16, in.sel_rank = 256;
+        in.n_target_layers = 5, in.target_embd = 5120, in.vocab = 248320, in.capture_rows = 2048;
+        d::MemInput in0 = in;
+        const d::Mem m = d::memory(in);
+        CHECK(m.scratch >= 9ull * 8 * 32 * 130 * 4 + 7ull * 31 * 16 * 8);
+        in0.vocab = 0;
+        CHECK(d::memory(in0).scratch < m.scratch);
+    }
+    // deterministic pseudo-random numbers (xorshift64*), roughly N(0, 1) from the sum of 4 uniforms
+    std::uint64_t st = 0x9e3779b97f4a7c15ull;
+    auto uni = [&]() {
+        st ^= st >> 12;
+        st ^= st << 25;
+        st ^= st >> 27;
+        return static_cast<float>(static_cast<double>((st * 0x2545f4914f6cdd1dull) >> 40) * (1.0 / 16777216.0));
+    };
+    auto rnd = [&]() { return (uni() + uni() + uni() + uni() - 2.0f) * 1.7f; };
+    const float inf = std::numeric_limits<float>::infinity(), nan = std::numeric_limits<float>::quiet_NaN();
+    // ---- two-stage top-k == single pass, bitwise (ids and value bits)
+    auto topkSame = [&](const std::vector<float>& row, int k, unsigned slice) {
+        const int n = static_cast<int>(row.size());
+        std::vector<int> i1(static_cast<std::size_t>(k)), i2(static_cast<std::size_t>(k));
+        std::vector<float> v1(static_cast<std::size_t>(k)), v2(static_cast<std::size_t>(k));
+        d::topkSingle(row.data(), n, k, i1.data(), v1.data());
+        d::topkSplit(row.data(), n, k, i2.data(), v2.data(), slice);
+        return i1 == i2 && std::memcmp(v1.data(), v2.data(), v1.size() * 4) == 0;
+    };
+    {
+        std::vector<float> row(248320);
+        for (float& x : row) x = rnd();
+        for (int i : {248319, 7, 1000, 8191, 8192}) row[static_cast<std::size_t>(i)] = 10.f;  // 5-way tie across slices
+        CHECK(topkSame(row, 16, d::kTopkSlice));
+        // ties straddling rank 16 in many slices, a NaN, a -inf
+        for (int i = 0; i < 40; ++i) row[static_cast<std::size_t>(i) * 6007] = 8.f;
+        row[12345] = nan;
+        row[200000] = -inf;
+        CHECK(topkSame(row, 16, d::kTopkSlice));
+        CHECK(topkSame(row, 64, d::kTopkSlice));
+        CHECK(topkSame(row, 16, 64));  // 3880 slices of 64
+        CHECK(topkSame(row, 16, 17));  // slices barely above k
+        CHECK(topkSame(row, 16, 16));  // slices of exactly k
+        // the 16 ids are what a full sort gives (key order, NaN as -inf)
+        std::vector<int> idx(row.size());
+        for (std::size_t i = 0; i < idx.size(); ++i) idx[i] = static_cast<int>(i);
+        std::partial_sort(idx.begin(), idx.begin() + 16, idx.end(),
+                          [&](int a, int b) { return d::better(row[static_cast<std::size_t>(a)], a, row[static_cast<std::size_t>(b)], b); });
+        std::vector<int> got(16);
+        std::vector<float> gv(16);
+        d::topkSplit(row.data(), static_cast<int>(row.size()), 16, got.data(), gv.data());
+        CHECK(std::equal(got.begin(), got.end(), idx.begin()));
+    }
+    {
+        // rows shorter than k (sentinels (-inf, INT_MAX) after the real keys), all -inf, all NaN, all equal
+        const std::vector<float> shortrow = {1.f, 3.f, -inf, 3.f, nan};
+        CHECK(topkSame(shortrow, 16, d::kTopkSlice));
+        CHECK(topkSame(shortrow, 16, 2));
+        std::vector<int> si(16);
+        std::vector<float> sv(16);
+        d::topkSplit(shortrow.data(), 5, 16, si.data(), sv.data(), 2);
+        CHECK(si[0] == 1 && si[1] == 3 && si[2] == 0 && si[5] == std::numeric_limits<int>::max());
+        const std::vector<float> allinf(20000, -inf), allnan(20000, nan), alleq(20000, 0.5f);
+        CHECK(topkSame(allinf, 16, d::kTopkSlice));
+        CHECK(topkSame(allnan, 16, d::kTopkSlice));
+        CHECK(topkSame(alleq, 16, d::kTopkSlice));
+        d::topkSplit(alleq.data(), 20000, 16, si.data(), sv.data());
+        CHECK(si[0] == 0 && si[15] == 15);  // ties -> smaller index
+    }
+    // ---- split-over-keys attention vs the direct softmax and a double reference
+    auto attnCheck = [&](int nk, int hd, auto visible, double tol) {
+        std::vector<float> sc(static_cast<std::size_t>(nk)), v(static_cast<std::size_t>(nk) * static_cast<std::size_t>(hd));
+        for (int k = 0; k < nk; ++k) sc[static_cast<std::size_t>(k)] = visible(k) ? rnd() * 3.f : -inf;
+        for (float& x : v) x = rnd();
+        std::vector<float> a(static_cast<std::size_t>(hd)), b(static_cast<std::size_t>(hd));
+        d::attnDirect(sc, v, hd, a.data());
+        d::attnSplitModel(sc, v, hd, b.data());
+        double m = -INFINITY;
+        for (float x : sc) m = std::max(m, static_cast<double>(x));
+        double l = 0;
+        std::vector<double> o(static_cast<std::size_t>(hd), 0.0), sabs(static_cast<std::size_t>(hd), 0.0);
+        for (int k = 0; k < nk; ++k) {
+            if (sc[static_cast<std::size_t>(k)] == -inf) continue;
+            const double e = std::exp(static_cast<double>(sc[static_cast<std::size_t>(k)]) - m);
+            l += e;
+            for (int dd = 0; dd < hd; ++dd) {
+                const double vv = v[static_cast<std::size_t>(k) * static_cast<std::size_t>(hd) + static_cast<std::size_t>(dd)];
+                o[static_cast<std::size_t>(dd)] += e * vv;
+                sabs[static_cast<std::size_t>(dd)] += e * std::fabs(vv);
+            }
+        }
+        bool ok = true;
+        for (int dd = 0; dd < hd; ++dd) {
+            const double ref = o[static_cast<std::size_t>(dd)] / l, scale = sabs[static_cast<std::size_t>(dd)] / l;
+            ok = ok && std::fabs(b[static_cast<std::size_t>(dd)] - ref) <= tol * scale + 1e-6;
+            ok = ok && std::fabs(b[static_cast<std::size_t>(dd)] - a[static_cast<std::size_t>(dd)]) <= tol * scale + 1e-6;
+        }
+        return ok;
+    };
+    // ring full (2048 + 8 keys, 9 chunks); a 256-row ring; 4096 + 16 keys; empty first chunks;
+    // a cold context (block keys only); one key in total; hd 256
+    CHECK(attnCheck(2056, 128, [](int) { return true; }, 1e-4));
+    CHECK(attnCheck(264, 128, [](int k) { return k % 17 != 3; }, 1e-4));
+    CHECK(attnCheck(4112, 128, [](int k) { return k % 29 != 5; }, 1e-4));
+    CHECK(attnCheck(4112, 128, [](int k) { return k >= 2304; }, 1e-4));
+    CHECK(attnCheck(2056, 128, [](int k) { return k >= 2048; }, 1e-4));
+    CHECK(attnCheck(1, 64, [](int) { return true; }, 1e-4));
+    CHECK(attnCheck(2056, 256, [](int k) { return k % 3 == 0 || k >= 2048; }, 1e-4));
+    // one chunk: the split model is the direct softmax bit for bit (single part, merge weight e^0 = 1)
+    {
+        std::vector<float> sc(200), v(200 * 8);
+        for (float& x : sc) x = rnd();
+        for (float& x : v) x = rnd();
+        std::vector<float> a(8), b(8);
+        d::attnDirect(sc, v, 8, a.data());
+        d::attnSplitModel(sc, v, 8, b.data());
+        CHECK(std::memcmp(a.data(), b.data(), 32) == 0);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -4082,6 +4253,7 @@ int main(int argc, char** argv) {
     testAllocLog();
     specsample_test::testSpecSample();
     testDflashPolicy();
+    testDflashKernelPlan();
     testLocalMemTaken();
     testUmaCheck();
     testWddmWatch();

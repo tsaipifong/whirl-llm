@@ -139,6 +139,10 @@
 //   dflash_attn(q, kb, vb, kc, vc, const int* cpos, int W, int B, int nh, int nkv, int hd, int qpos, int window,
 //               float scale, out)                                    (grid (nh, B), block hd; W + B <= kDFlashAttnKeys)
 //   dflash_attn_long(same arguments)                                  (W + B > kDFlashAttnKeys: chunked, online softmax)
+//   dflash_attn_part(same arguments as dflash_attn, float* part)      (grid (nkv, B, splits), block 256; dflash_kernel_plan.h)
+//   dflash_attn_merge(part, int S, int B, int nh, int hd, out)        (grid (nh, B), block hd)
+//   dflash_topk_part(x, int n, int ld, int k, int S, int* pid, float* pval)   (grid (rows, S), block 256)
+//   dflash_topk_merge(pid, pval, int S, int k, int* ids, float* vals)         (grid rows, block 256; == dflash_topk)
 //  mixture of experts:
 //   moe_logits_f32(W, x, out, R, C, n, skip)
 //   moe_topk(logits, ld, h, shw, ids, w, sg, R, K, E)
@@ -594,6 +598,7 @@ struct MiscKernels {
     F requant_q6k_q4k{}, requant_q6k_d2{}, requant_q80_q4k{};
     F copy_rows_map{};  // optional
     F dflash_conv{}, dflash_topk{}, dflash_lattice{}, dflash_walk{}, dflash_attn{}, dflash_attn_long{};  // optional (DFlash2 drafter)
+    F dflash_attn_part{}, dflash_attn_merge{}, dflash_topk_part{}, dflash_topk_merge{};  // optional (cheaper drafter, feat029-dflashcost)
     F set_tokens{}, argmax_rows{}, argmax_prob{}, draft_pick{};
     F set_rows{}, rmsnorm_q8_rows{}, argmax_rows_to{}, draft_pick_rows{};
     F draft_sample_rows{};  // optional (null: specsample skipped)

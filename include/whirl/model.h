@@ -338,6 +338,10 @@ struct DFlashRun {
     DevPtr logits = 0, cand = 0, unary = 0, gate = 0, lat = 0, out = 0;
     DevPtr ing_g = 0, ing_k = 0, ing_v = 0, ing_pos = 0;
     DevPtr dbg = 0;  // when set: [n_layer][block][n_embd] hidden after each drafter layer (dflash-check)
+    // feat029-dflashcost (whirl/dflash_kernel_plan.h): kernels chosen at setup and their workspaces
+    std::uint8_t attn_kind = 0, topk_kind = 0;  // dflash::AttnKernel / dflash::TopkKernel
+    std::uint32_t attn_splits = 0, topk_slices = 0;
+    DevPtr attn_part = 0, topk_pid = 0, topk_pval = 0;
     std::vector<DFlashSlotCtx> slots;
 };
 
