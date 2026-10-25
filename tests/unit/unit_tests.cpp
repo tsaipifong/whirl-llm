@@ -12,6 +12,7 @@
 #include "whirl/spec_sample.h"
 #include "whirl/relax_accept.h"
 #include "whirl/dflash_policy.h"
+#include "whirl/draft_vocab_plan.h"
 #include "whirl/device_mem.h"
 #include "whirl/uma_mem.h"
 #include "whirl/vram_limit.h"
@@ -1249,6 +1250,80 @@ void testKernelFetchBounds() {
     CHECK(old_caught > 0);     // the check does see the pre-fix over-read (every type reads >= 16 B past)
     CHECK(s2_cases > 0);       // the S = 2 addressing was replayed
     CHECK(s2_old_caught > 0);  // and the check bites there too
+}
+
+// ---------------------------------------------------------------------------
+// Default MTP draft-head vocabulary per (arch, dense / MoE) (whirl/draft_vocab_plan.h, feat027-draft64k97):
+// selector table, byte / time / gain arithmetic, calibration cell, vocabulary and unknown-class guards
+void testDraftVocabPlan() {
+    namespace v = whirl::draft_vocab;
+    using A = whirl::hip::Arch;
+    constexpr std::uint32_t NV = 248320, E_ORNITH = 2048, E_SWIFT = 5120;
+    // row bytes: 2-bit codes (E/4) + f16 scale per 32 (E/16)
+    CHECK_EQ(v::d2RowBytes(E_ORNITH), std::uint64_t{640});
+    CHECK_EQ(v::d2RowBytes(E_SWIFT), std::uint64_t{1600});
+    // full Ornith head = 158.9 MB (PROF-8S: 159 MB per draft step); saved = (248320 - 65536) rows
+    CHECK_EQ(static_cast<std::uint64_t>(NV) * v::d2RowBytes(E_ORNITH), std::uint64_t{158924800});
+    CHECK_EQ(v::savedBytesPerDraft(NV, E_ORNITH), std::uint64_t{182784} * 640);
+    CHECK_EQ(v::savedBytesPerDraft(NV, E_SWIFT), std::uint64_t{182784} * 1600);
+    CHECK_EQ(v::savedBytesPerDraft(65536, E_SWIFT), std::uint64_t{0});
+    CHECK_EQ(v::savedBytesPerDraft(1000, E_SWIFT), std::uint64_t{0});
+    // the table: exactly one cell per (arch, moe), all four product classes present
+    for (A a : {A::gfx1201, A::gfx1151})
+        for (bool moe : {false, true}) {
+            int n = 0;
+            for (const v::Cell& c : v::k_cells) n += c.arch == a && c.moe == moe;
+            CHECK_EQ(n, 1);
+            CHECK(v::findCell(a, moe) != nullptr);
+        }
+    // expected decision table (product classes, 248320 vocabulary): the subset pays on every cell
+    struct Row {
+        A arch;
+        bool moe;
+        std::uint32_t embd;
+        bool use;
+        double gain_lo, gain_hi;  // estimated cycle gain range
+        v::Basis basis;
+    };
+    const Row rows[] = {
+        {A::gfx1151, true, E_ORNITH, true, 0.028, 0.032, v::Basis::measured},   // calibration cell: measured -3.0 %
+        {A::gfx1201, true, E_ORNITH, true, 0.028, 0.033, v::Basis::estimated},  // new: R9700 MoE
+        {A::gfx1201, false, E_SWIFT, true, 0.030, 0.034, v::Basis::measured},   // P-2 +2.2..+5.0 %
+        {A::gfx1151, false, E_SWIFT, true, 0.025, 0.030, v::Basis::estimated},
+    };
+    for (const Row& r : rows) {
+        const v::Plan p = v::plan(r.arch, r.moe, NV, r.embd);
+        CHECK(p.fits && p.cell != nullptr);
+        CHECK_EQ(p.use, r.use);
+        CHECK(p.gain >= r.gain_lo && p.gain <= r.gain_hi);
+        CHECK(p.cell->basis == r.basis);
+        CHECK(p.saved_mb > 100 && p.saved_ms > 0);
+    }
+    // calibration: the 8060S Ornith cell reproduces the measured chat cycle saving (-3.0 %) within 0.2 points
+    {
+        const v::Plan p = v::plan(A::gfx1151, true, NV, E_ORNITH);
+        CHECK(std::fabs(p.gain - 0.030) < 0.002);
+        CHECK(std::fabs(p.saved_ms - 0.5086) < 0.001);
+    }
+    // R9700 saves the same bytes in less time; Ornith R9700 saved time 0.195 ms per draft step
+    {
+        const v::Plan a = v::plan(A::gfx1201, true, NV, E_ORNITH), b = v::plan(A::gfx1151, true, NV, E_ORNITH);
+        CHECK(std::fabs(a.saved_mb - b.saved_mb) < 1e-9);
+        CHECK(a.saved_ms < b.saved_ms);
+        CHECK(std::fabs(a.saved_ms - 0.195) < 0.001);
+    }
+    // other vocabularies never get the embedded subset
+    for (A a : {A::gfx1201, A::gfx1151})
+        for (bool moe : {false, true}) {
+            const v::Plan p = v::plan(a, moe, 151936, E_SWIFT);
+            CHECK(!p.fits && !p.use);
+        }
+    // threshold: a tiny head (E = 64, ~2.3 MB saved) does not pass the 1 % bar
+    CHECK(!v::plan(A::gfx1201, true, NV, 64).use);
+    CHECK(!v::plan(A::gfx1201, false, NV, 0).use);
+    // compile-time evaluable (header-only selector)
+    static_assert(v::plan(whirl::hip::Arch::gfx1151, true, 248320, 2048).use);
+    static_assert(!v::plan(whirl::hip::Arch::gfx1201, false, 151936, 5120).use);
 }
 
 // ---------------------------------------------------------------------------
@@ -4081,6 +4156,7 @@ int main(int argc, char** argv) {
     testLaunchRawCap();
     testAllocLog();
     specsample_test::testSpecSample();
+    testDraftVocabPlan();
     testDflashPolicy();
     testLocalMemTaken();
     testUmaCheck();

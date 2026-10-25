@@ -28,6 +28,7 @@
 #include "device/handles.h"  // src/: RAII owners of the device / pinned buffers, events and streams (arch024 S11)
 #include "whirl/gguf.h"
 #include "whirl/device_profile.h"
+#include "whirl/draft_vocab_plan.h"
 #include "whirl/hip.h"
 #include "whirl/kernels_abi.h"
 #include "whirl/ops/attention.h"
@@ -1053,9 +1054,12 @@ struct DraftVocabChoice {
 };
 DraftVocabChoice draftVocabChoice(const std::optional<std::string>& env_value, const std::string& dir);
 // vocabulary size of the qwen35 tokenizer the embedded subset was built for
-inline constexpr std::uint32_t draft_vocab_embedded_n_vocab = 248320;
-// the default (embedded 64k) subset is used only for dense qwen35 models with that vocabulary
-inline bool draftVocabDefaultFits(bool moe, std::uint32_t n_vocab) { return !moe && n_vocab == draft_vocab_embedded_n_vocab; }
+inline constexpr std::uint32_t draft_vocab_embedded_n_vocab = draft_vocab::embedded_n_vocab;
+// the default (embedded 64k) subset: per (arch, dense / MoE) cost-model table, whirl/draft_vocab_plan.h
+// (feat027-draft64k97: dense and MoE on both the R9700 and the 8060S with the 248320-token vocabulary)
+inline bool draftVocabDefaultFits(bool moe, std::uint32_t n_vocab, std::uint32_t n_embd, hip::Arch arch) {
+    return draft_vocab::plan(arch, moe, n_vocab, n_embd).use;
+}
 // the embedded 64k subset (data/draft_vocab/subset_64k.bin, built by whirl-cloud tools/vocab_subset);
 // defined in draft_vocab_embed.cpp (whirl_model only)
 std::vector<std::uint32_t> embeddedDraftVocab64k();

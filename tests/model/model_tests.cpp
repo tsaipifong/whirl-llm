@@ -593,9 +593,15 @@ void testDraftVocab() {
     const q::DraftVocabChoice cn = q::draftVocabChoice(std::string("150000"), "D");
     check(c48.kind == DK::file && c48.file == d48 && cn.kind == DK::first_n && cn.n == 150000,
           "draft vocab: 48k = file next to the exe, N = first N rows");
-    check(q::draftVocabDefaultFits(false, 248320) && !q::draftVocabDefaultFits(true, 248320) &&
-              !q::draftVocabDefaultFits(false, 151936),
-          "draft vocab: default only for dense qwen35 with the 248320-token vocabulary");
+    {
+        using A = whirl::hip::Arch;
+        bool all = true;  // feat027-draft64k97: dense and MoE on both archs (whirl/draft_vocab_plan.h)
+        for (A a : {A::gfx1201, A::gfx1151})
+            for (bool moe : {false, true})
+                all = all && q::draftVocabDefaultFits(moe, 248320, moe ? 2048 : 5120, a) &&
+                      !q::draftVocabDefaultFits(moe, 151936, moe ? 2048 : 5120, a);
+        check(all, "draft vocab: default for dense and MoE qwen35 on gfx1201 / gfx1151 with the 248320-token vocabulary only");
+    }
     const std::vector<std::uint32_t> e64 = q::embeddedDraftVocab64k();
     bool asc = e64.size() == 65536;
     for (std::size_t i = 1; asc && i < e64.size(); ++i) asc = e64[i - 1] < e64[i];

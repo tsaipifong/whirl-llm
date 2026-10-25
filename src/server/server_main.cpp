@@ -325,18 +325,18 @@ std::uint32_t envU32(std::string_view name, std::uint32_t def) {
     return def;
 }
 
-// WHIRL_DRAFT_VOCAB (default: the embedded 64k subset on dense qwen35 models with the 248320-token
-// vocabulary): keep only that vocabulary subset of the 2-bit draft head (special and byte tokens are
+// WHIRL_DRAFT_VOCAB (default: the embedded 64k subset on qwen35 models with the 248320-token vocabulary,
+// per the (arch, dense / MoE) table of whirl/draft_vocab_plan.h): keep only that vocabulary subset of the 2-bit draft head (special and byte tokens are
 // always added); outputs are unchanged, only the acceptance can drop.
 void applyDraftVocab(qwen35::Model& model, const Tokenizer& tok, const qwen35::DraftVocabChoice& dv) {
     using K = qwen35::DraftVocabChoice::Kind;
     if (dv.kind != K::embedded_64k && dv.kind != K::file) return;
     if (dv.kind == K::embedded_64k) {
-        const bool fits = dv.by_default ? qwen35::draftVocabDefaultFits(model.cfg.moe, model.cfg.n_vocab)
+        const bool fits = dv.by_default ? qwen35::draftVocabDefaultFits(model.cfg.moe, model.cfg.n_vocab, model.cfg.n_embd, model.arch)
                                         : model.cfg.n_vocab == qwen35::draft_vocab_embedded_n_vocab;
         if (!fits) {
             if (dv.by_default)
-                logI("draft head: full vocabulary (the embedded 64k subset is for dense qwen35 models with a {}-token vocabulary)",
+                logI("draft head: full vocabulary (the embedded 64k subset is for qwen35 models with a {}-token vocabulary)",
                      qwen35::draft_vocab_embedded_n_vocab);
             else
                 logW("WHIRL_DRAFT_VOCAB=64k ignored: the embedded subset needs a {}-token vocabulary (model: {})",
@@ -1045,7 +1045,7 @@ int serveMain(int argc, char** argv, const char* program) {
         if (auto v = env("MOE_BN")) model.moe_bn_force = static_cast<std::uint32_t>(std::strtoul(v->c_str(), nullptr, 10));
         if (env("PREFILL_BATCH"))  // (same floor as above: never below vram::min_prefill_batch)
             model.max_batch = std::min(model.max_batch, vram::prefillBatchFloor(envU32("PREFILL_BATCH", model.max_batch)));
-        // WHIRL_DRAFT_VOCAB: unset = embedded 64k subset (dense qwen35, 248320 vocab), 64k = embedded,
+        // WHIRL_DRAFT_VOCAB: unset = embedded 64k subset (qwen35, 248320 vocab, whirl/draft_vocab_plan.h), 64k = embedded,
         // 48k / <file> = frequency subset file, N = the first N rows (old experiment), off = full head
         const qwen35::DraftVocabChoice draft_vocab = qwen35::draftVocabChoice(env("DRAFT_VOCAB"), qwen35::exeDirectory());
         if (draft_vocab.kind == qwen35::DraftVocabChoice::Kind::first_n) model.draft_vocab = draft_vocab.n;

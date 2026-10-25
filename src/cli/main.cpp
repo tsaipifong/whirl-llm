@@ -307,8 +307,8 @@ std::vector<u32> parseIds(const std::string& list) {
     return ids;
 }
 
-// WHIRL_DRAFT_VOCAB: unset = the embedded 64k subset on dense qwen35 models with the 248320-token
-// vocabulary; 64k = embedded; 48k / <file> = a frequency subset file; N = the first N draft-head rows
+// WHIRL_DRAFT_VOCAB: unset = the embedded 64k subset where the per-(arch, dense / MoE) table of
+// whirl/draft_vocab_plan.h expects it to pay (qwen35 models with the 248320-token vocabulary); 64k = embedded; 48k / <file> = a frequency subset file; N = the first N draft-head rows
 // (old experiment); off = full head. Special and byte tokens are always added.
 void applyDraftVocab(q::Model& model, const Tokenizer& tok) {
     using K = q::DraftVocabChoice::Kind;
@@ -319,7 +319,7 @@ void applyDraftVocab(q::Model& model, const Tokenizer& tok) {
     }
     if (dv.kind == K::full) return;
     if (dv.kind == K::embedded_64k) {
-        const bool fits = dv.by_default ? q::draftVocabDefaultFits(model.cfg.moe, model.cfg.n_vocab)
+        const bool fits = dv.by_default ? q::draftVocabDefaultFits(model.cfg.moe, model.cfg.n_vocab, model.cfg.n_embd, model.arch)
                                         : model.cfg.n_vocab == q::draft_vocab_embedded_n_vocab;
         if (!fits || (dv.by_default && !model.draft_d2)) {
             if (!dv.by_default) std::fprintf(stderr, "WHIRL_DRAFT_VOCAB=64k ignored: the embedded subset needs a 248320-token vocabulary\n");
