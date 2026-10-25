@@ -156,6 +156,111 @@ void testGemvh(Ctx& c) {
     }
 }
 
+// gemvhv (feat026-gemvh, on request: --only gemvhv): the gfx1201 gemvh candidates of a development code object
+// (WHIRL_KT_GEMVH_HSACO = a kernels build with -DWHIRL_GVH_DEV=1; exports gvhd<id>_<type>, any n <= 32) against
+// gemm_c0 bit for bit over the same sweep as "gemvh" (ncols x nrows x n x accumulate) plus the 27B shapes
+// 17408 x 5120 / 5120 x 17408 / 4099 x 17408 / 248320 x 5120 (q6_k LM head) at grid rows / 16 and at small grids
+// (the candidates loop over row tiles, so 1/2, 1/3 and one block must give the same bits).
+// WHIRL_KT_GVH_IDS=1,4 limits the ids (default 1..8).
+void testGemvhv(Ctx& c) {
+    c.rep.family = "gemvhv";
+    const char* hs = std::getenv("WHIRL_KT_GEMVH_HSACO");
+    if (!hs || !*hs) {
+        c.rep.skip("gemvhv", "gemvh candidates", "WHIRL_KT_GEMVH_HSACO not set");
+        return;
+    }
+    std::vector<char> img;
+    if (std::FILE* fp = std::fopen(hs, "rb")) {
+        std::fseek(fp, 0, SEEK_END);
+        img.resize(static_cast<std::size_t>(std::ftell(fp)));
+        std::fseek(fp, 0, SEEK_SET);
+        if (std::fread(img.data(), 1, img.size(), fp) != img.size()) img.clear();
+        std::fclose(fp);
+    }
+    if (img.empty()) {
+        Result r;
+        r.name = std::string("gemvhv: cannot read ") + hs;
+        r.pass = false;
+        c.rep.add(r);
+        return;
+    }
+    hip::Module xm = hip::Module::loadData(img.data(), c.mod.arch());
+    std::vector<int> ids = {1, 2, 3, 4, 5, 6, 7, 8};
+    if (const char* e = std::getenv("WHIRL_KT_GVH_IDS")) {
+        ids.clear();
+        for (const char* q = e; *q;) {
+            ids.push_back(std::atoi(q));
+            while (*q && *q != ',') ++q;
+            if (*q == ',') ++q;
+        }
+    }
+    const std::vector<int> ncolsL = c.quick ? std::vector<int>{512, 768} : std::vector<int>{256, 512, 768, 1280, 5120};
+    const std::vector<int> nrowsL = c.quick ? std::vector<int>{7, 37, 100} : std::vector<int>{1, 7, 16, 17, 37, 100, 1003, 4099};
+    const int ns[] = {1, 2, 5, 16, 17, 32};
+    for (QType t : {QType::mxfp4, QType::q6_k}) {
+        const int ti = static_cast<int>(t);
+        std::vector<std::pair<int, hip::Function>> fs;
+        for (int id : ids)
+            if (const hip::Function f = xm.getFunctionOpt((std::string("gvhd") + std::to_string(id) + "_" + wk::typeSuffix(t)).c_str())) fs.push_back({id, f});
+        if (fs.empty()) {
+            c.rep.skip("gemvhv", std::string("gvhd*_") + wk::typeSuffix(t), "not in the candidate code object");
+            continue;
+        }
+        std::vector<std::size_t> checked(fs.size(), 0), bad(fs.size(), 0);
+        std::vector<std::string> first_bad(fs.size());
+        auto sweep = [&](int ncols, int nrows, const std::vector<int>& nlist, bool grids) {
+            const HostMat m = randomMat(c, t, nrows, ncols);
+            Buf w(m.data);
+            Buf x16 = makeX16(c, 32, ncols);
+            const unsigned tiles = static_cast<unsigned>(cdiv(nrows, 16));
+            for (int nt : nlist)
+                for (int acc = 0; acc < 2; ++acc) {
+                    const std::vector<float> init = c.randn(static_cast<std::size_t>(nt) * nrows, 3.0f);
+                    auto run = [&](hip::Function f, hip::Dim3 grid, int nth) {
+                        Buf y(init);
+                        hip::launch(f, grid, {static_cast<unsigned>(nth), 1, 1}, 0, c.s, w.p(), m.row_bytes, x16.p(), y.p(), ncols, nrows, nt, acc);
+                        c.sync();
+                        return y.down<float>(static_cast<std::size_t>(nt) * nrows);
+                    };
+                    const auto& c0 = wk::kGemmCfgs[0];
+                    const std::vector<float> ref = run(c.k.gemmc[0][ti], hip::Dim3{cdiv(nt, c0.bn), cdiv(nrows, c0.bm), 1}, c0.nth);
+                    std::vector<unsigned> gl = {tiles};
+                    if (grids) gl = {tiles, std::max(1u, tiles / 2), std::max(1u, tiles / 3), 1u};
+                    for (std::size_t i = 0; i < fs.size(); ++i)
+                        for (unsigned g : gl) {
+                            const std::vector<float> y = run(fs[i].second, hip::Dim3{g, 1, 1}, 32);
+                            ++checked[i];
+                            if (std::memcmp(y.data(), ref.data(), ref.size() * 4) != 0) {
+                                ++bad[i];
+                                if (first_bad[i].empty())
+                                    first_bad[i] = "ncols " + std::to_string(ncols) + " nrows " + std::to_string(nrows) + " n " + std::to_string(nt) + " acc " +
+                                                   std::to_string(acc) + " grid " + std::to_string(g);
+                            }
+                        }
+                }
+        };
+        for (int ncols : ncolsL)
+            for (int nrows : nrowsL) sweep(ncols, nrows, std::vector<int>(std::begin(ns), std::end(ns)), nrows <= 100);
+        if (!c.quick) {
+            sweep(5120, 17408, {1, 5, 16, 17, 32}, true);
+            sweep(17408, 5120, {1, 5, 16, 17, 32}, true);
+            sweep(17408, 4099, {1, 16, 32}, true);
+            if (t == QType::q6_k) sweep(5120, 248320, {1, 4}, false);
+        }
+        for (std::size_t i = 0; i < fs.size(); ++i) {
+            Result r;
+            r.name = std::string("gvhd") + std::to_string(fs[i].first) + "_" + wk::typeSuffix(t) + " == gemm_c0, sweep + 27B shapes + small grids (" +
+                     std::to_string(checked[i]) + " runs)";
+            r.kind = Kind::invariant;
+            r.n = checked[i];
+            r.mismatches = bad[i];
+            r.pass = bad[i] == 0 && checked[i] > 0;
+            if (!first_bad[i].empty()) r.note = "first " + first_bad[i];
+            c.rep.add(r);
+        }
+    }
+}
+
 // WHIRL_KT_PEAK_GBS (default 238): the bandwidth the % column refers to.
 void benchGemvh(Ctx& c) {
     double peak = 238.0;

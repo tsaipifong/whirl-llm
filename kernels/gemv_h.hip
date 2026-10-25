@@ -98,6 +98,9 @@ __device__ __forceinline__ void gemvh_impl(const uint8_t *__restrict__ W, uint64
     }
 }
 
+// feat026-gemvh: candidate kernels and the per-type tune table (WHIRL_GVH_<TYPE>, default 0 = the kernel below)
+#include "gemv_hv.hip"
+
 #define GEMVH_TYPE(SUF, T)                                                                                                       \
     extern "C" __global__ void __launch_bounds__(32) gemvh_##SUF(const uint8_t *W, uint64_t row_bytes, const _Float16 *X, float *Y, \
                                                                    int ncols, int nrows, int n_tok, int accumulate) {           \
@@ -115,8 +118,12 @@ GEMVH_TYPE(q8_0, QT_Q8_0)
 GEMVH_TYPE(q3_k, QT_Q3_K)
 GEMVH_TYPE(q4_k, QT_Q4_K)
 GEMVH_TYPE(q5_k, QT_Q5_K)
+#if !WHIRL_GVH_Q6_K
 GEMVH_TYPE(q6_k, QT_Q6_K)
+#endif
 GEMVH_TYPE(iq4_nl, QT_IQ4_NL)
 GEMVH_TYPE(iq3_s, QT_IQ3_S)
 GEMVH_TYPE(iq4_xs, QT_IQ4_XS)
+#if !WHIRL_GVH_MXFP4
 GEMVH_TYPE(mxfp4, QT_MXFP4)
+#endif

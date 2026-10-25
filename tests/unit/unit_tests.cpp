@@ -29,6 +29,7 @@
 #endif
 
 #include "../../kernels/gemm_small_addr.h"
+#include "gemvh_map_check.h"
 
 #include <algorithm>
 #include <cmath>
@@ -1250,6 +1251,9 @@ void testKernelFetchBounds() {
     CHECK(s2_cases > 0);       // the S = 2 addressing was replayed
     CHECK(s2_old_caught > 0);  // and the check bites there too
 }
+
+// feat026-gemvh: the gfx1201 direct gemvh candidates read the bytes dec_group_h reads (kernels/gemv_hv_map.h)
+void testGemvhDirectMap() { CHECK(whirl_gvh_check::run(false) == 0); }
 
 // ---------------------------------------------------------------------------
 // DFlash2 host policy (whirl/dflash_policy.h): draft-source choice, environment, capture /
@@ -4074,6 +4078,7 @@ int main(int argc, char** argv) {
     testNumerics();
     testKvChoice();
     testKernelFetchBounds();
+    testGemvhDirectMap();
     testValueScope();
     testLaunchDigest();
     testLaunchDigestLayout();
