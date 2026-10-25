@@ -46,6 +46,15 @@ if(TARGET whirl-tier-tests)
 endif()
 
 # ---------------------------------------------------------------------------
+# token sampling and draft acceptance (src/sampling, arch025-E1a): host-only; the device side of a verify
+# row comes in through sampling::RowSource (the engine; the server tests use a host fake)
+add_library(whirl_sampling STATIC
+  ${CMAKE_SOURCE_DIR}/src/sampling/sampler.cpp
+  ${CMAKE_SOURCE_DIR}/src/sampling/acceptor.cpp)
+target_include_directories(whirl_sampling PUBLIC ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(whirl_sampling PUBLIC whirl)
+
+# ---------------------------------------------------------------------------
 # OpenAI-compatible server (src/server)
 
 # engine + HTTP front end; HIP-free (the GPU comes in through the ServerModel /
@@ -67,7 +76,7 @@ add_library(whirl_server_core STATIC
 target_include_directories(whirl_server_core PUBLIC ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/include)
 # whirl/version.h (configured by cmake/release.cmake) for GET /version and /props
 target_include_directories(whirl_server_core PRIVATE ${CMAKE_BINARY_DIR}/generated)
-target_link_libraries(whirl_server_core PUBLIC whirl whirl_cache whirl_tier_core ws2_32)
+target_link_libraries(whirl_server_core PUBLIC whirl whirl_cache whirl_tier_core whirl_sampling ws2_32)
 
 if(WHIRL_WITH_HIP)
   # whirl-server.exe: the production server (qwen35::Model on HIP)

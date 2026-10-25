@@ -128,6 +128,13 @@
    "steps": ["cpu_server", "cpu_logscan_selftest"], "callers": ["ckpt_store", "page_pool", "prefix_store", "tier_bridge", "engine_gov"],
    "manual": ["P-speed d5fc637 vs HEAD"]
   },
+  "sampling": {
+   "id": "E1a", "desc": "token sampling and draft acceptance (Sampler, filterCands, draws, Acceptor: greedy / specsample / relaxacc)",
+   "paths": ["src/sampling/*"], "lands_on": "arch025-e1a (E1a)", "callers": "rdeps",
+   "steps": ["cpu_server", "golden_swift", "golden_moe", "srv_balance", "srv_fast"],
+   "gpus": {"golden_swift": 2, "golden_moe": 2, "srv_balance": 2, "srv_fast": 2},
+   "manual": ["whirl-server-tests sampler / acceptor_* (fixed-RNG acceptance sequences vs the pre-move code)", "V-host sched"]
+  },
   "contract": {
    "id": "X", "desc": "cross-module contracts (ServerModel, device::Backend, kernels_abi, numerics): the full gate",
    "paths": ["src/server/backend.h", "src/device/backend.h", "src/device/backend_hip.cpp", "include/whirl/kernels_abi.h",
