@@ -290,6 +290,8 @@ void noteSwitches(Plan& p, const std::function<std::optional<std::string>(const 
     for (const char* const* n = k_numerics_switches; *n != nullptr; ++n) {
         const auto v = get(*n);
         if (!v || v->empty()) continue;
+        // feat026-cascade-r1 C3: WHIRL_CASCADE has no effect in precise (the loader ignores it): no override label
+        if (p.mode == Mode::precise && std::string_view(*n) == "CASCADE") continue;
         p.overrides.push_back(std::format("WHIRL_{}={}: A/B switch (kernel paths differ from the tested defaults)", *n, *v));
         p.lossy_override = true;
     }

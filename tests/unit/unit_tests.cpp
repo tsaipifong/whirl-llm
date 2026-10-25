@@ -889,6 +889,18 @@ void testNumerics() {
             });
             CHECK(ps.overrides.size() == 2 && nu::modeLabel(ps) == "balance+overrides");
             CHECK(nu::logLine(ps).find("WHIRL_GEMV_MAX=8") != std::string::npos && nu::logLine(ps).find("WHIRL_FD_SPLITS=128") != std::string::npos);
+            // feat026-cascade-r1 C3: WHIRL_CASCADE is ignored in precise (no buffers, no cascade), so no override label;
+            // in balance it is an A/B switch like the others
+            auto cas = [](const char* n) -> std::optional<std::string> {
+                if (std::string(n) == "CASCADE") return std::string("1");
+                return std::nullopt;
+            };
+            nu::Plan pc = nu::plan(nu::parseMode("precise", "t"), swift);
+            nu::noteSwitches(pc, cas);
+            CHECK(pc.overrides.empty() && !pc.lossy_override && nu::modeLabel(pc) == "precise");
+            nu::Plan bc = nu::plan(bal, swift);
+            nu::noteSwitches(bc, cas);
+            CHECK(bc.overrides.size() == 1 && nu::modeLabel(bc) == "balance+overrides");
         }
         nu::Request fk = nu::parseMode("fast:kvq8", "t");  // custom fast list without relaxacc / kvq4
         CHECK(nu::logLine(nu::plan(fk, swift)).find("fast runs as balance") != std::string::npos);

@@ -34,6 +34,8 @@ if(WHIRL_WITH_HIP)
   file(GLOB WHIRL_KERNEL_TEST_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/tests/kernels/*.cpp)
   add_executable(whirl-kernel-test ${WHIRL_KERNEL_TEST_SOURCES})
   target_include_directories(whirl-kernel-test PRIVATE ${CMAKE_SOURCE_DIR}/kernels)  # iq_tables.h (host copy of the grid)
-  target_link_libraries(whirl-kernel-test PRIVATE whirl_kernels_host whirl)
+  # whirl_ops: the cascade family runs the production kernel choice (ops::chooseAttnDecode / planCascade) through
+  # whirl/cascade_launch.h (feat026-cascade-r1)
+  target_link_libraries(whirl-kernel-test PRIVATE whirl_kernels_host whirl whirl_ops)
   target_compile_definitions(whirl-kernel-test PRIVATE WHIRL_KT_VERSION="${PROJECT_VERSION}")  # --bench rows: tool_ver
 endif()

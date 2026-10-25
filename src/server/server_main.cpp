@@ -929,7 +929,8 @@ int serveMain(int argc, char** argv, const char* program) {
             hip::UmaNeed need;
             need.weights = est.weights + (use_dflash && dfile ? qwen35::dflashWeightBytes(*dfile) : 0);
             const std::uint64_t bufs =
-                qwen35::bufferBytes(cfg, lo.max_batch, est.ffs, est.max_elems, qwen35::resolveFdSplits(kv_est == numerics::KvKind::q4));
+                qwen35::bufferBytes(cfg, lo.max_batch, est.ffs, est.max_elems, qwen35::resolveFdSplits(kv_est == numerics::KvKind::q4),
+                                    lo.numerics.mode == numerics::Mode::precise);
             // DeltaNet snapshot sets for MTP verify: one recurrent state per draft (8 dense, 1 MoE: the server log's
             // "N snapshot sets")
             const std::uint64_t snaps = std::max<std::uint32_t>(1, qwen35::mtpDefaults(cfg.moe, hip::Arch::gfx1151).drafts) * st1;

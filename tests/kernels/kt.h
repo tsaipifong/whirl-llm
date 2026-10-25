@@ -229,6 +229,7 @@ void gemmrChecks(Ctx& c, const HostMat& gate, const HostMat& up, const HostMat& 
 void moeGuChecks(Ctx& c, const HostMat& gate, const HostMat& up, const HostMat& down, int R, int K);
 void testMisc(Ctx& c);
 void testDflash(Ctx& c);
+void testCascade(Ctx& c);  // "cascade": feat026 shared-prefix decode attention vs the plain path (test_cascade.cpp)
 
 inline unsigned cdiv(std::uint64_t a, std::uint64_t b) { return static_cast<unsigned>((a + b - 1) / b); }
 

@@ -382,7 +382,9 @@ LoadEstimate estimateLoad(const gguf::File& f, const Config& cfg, bool embd_on_h
 std::uint64_t dflashWeightBytes(const gguf::File& draft);
 // Prefill / decode buffers of Model::load for prefill batch B.
 // fd_splits: attention split-K partials (resolveFdSplits: 64, 256 with q4 KV, WHIRL_FD_SPLITS).
-std::uint64_t bufferBytes(const Config& cfg, std::uint32_t B, std::uint64_t ffs, std::uint64_t max_elems, std::uint32_t fd_splits = 64);
+// precise: the load is in precise mode (WHIRL_CASCADE is ignored there: no cascade buffers, feat026-cascade-r1 C3)
+std::uint64_t bufferBytes(const Config& cfg, std::uint32_t B, std::uint64_t ffs, std::uint64_t max_elems, std::uint32_t fd_splits = 64,
+                          bool precise = false);
 // The attention split count Model::load uses for the KV format (and WHIRL_FD_SPLITS).
 std::uint32_t resolveFdSplits(bool kv_q4);
 // KV bytes per token (Model::kvBytesPerTokenFmt) from the config alone.
@@ -574,6 +576,9 @@ public:
     std::vector<std::vector<std::int32_t>> host_ptab;
     ops::CascadePlan cas_plan;   // the current batched verify's plan (empty outside it)
     std::uint64_t cas_steps = 0, cas_rows_n = 0;  // verifies that took a cascade / rows they covered (log)
+    // verifies whose rows share a prefix but whose sequences do not fit one prefix group of the real cap (gfx1201:
+    // 32 / grp columns; MTP rows of two sequences already exceed it, feat026-cascade-r1 C2), for the runner's log
+    std::uint64_t cas_nofit = 0;
     DevPtr x16 = 0, xq = 0, xd = 0;
     DevPtr xq_src = 0;
     std::uint32_t xq_n = 0;

@@ -333,7 +333,7 @@ u32 resolveFdSplits(bool kv_q4) {
     return splits;
 }
 
-u64 bufferBytes(const Config& cfg, u32 Bq, u64 ffs, u64 max_elems, u32 fd_splits) {
+u64 bufferBytes(const Config& cfg, u32 Bq, u64 ffs, u64 max_elems, u32 fd_splits, bool precise) {
     // mirrors the buffer allocations of Model::load below (keep in step)
     const u64 f4 = 4;
     const u64 B = Bq;
@@ -357,7 +357,8 @@ u64 bufferBytes(const Config& cfg, u32 Bq, u64 ffs, u64 max_elems, u32 fd_splits
     const u64 n_split = fd_splits;
     n += max_verify_rows * n_split * cfg.n_head * 2 * f4;  // part_ml
     n += max_verify_rows * n_split * cfg.n_head * cfg.head_dim * f4;  // part_acc
-    if (envFlag("CASCADE", false))  // feat026-cascade: cas_ml, cas_acc (the part_ml / part_acc shape), cas_rows
+    // feat026-cascade: cas_ml, cas_acc (the part_ml / part_acc shape), cas_rows; never in precise (C3)
+    if (envFlag("CASCADE", false) && !precise)
         n += max_verify_rows * n_split * cfg.n_head * (2 + cfg.head_dim) * f4 + 3 * 32 * 4;
     n += B * cfg.n_head * 2 * f4;                         // dq_st_ml (q8 / q4 / KG-3 prefill attention softmax state)
     n += (static_cast<u64>(Model::kDqMaxKeys) / 256 + 1) * 4;  // dq_ptab (identity pages for up to kDqMaxKeys keys)
@@ -479,7 +480,8 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
             hip::UmaNeed n;
             n.weights = est.weights;
             n.fixed = est.weights + est.state +
-                      bufferBytes(cfg, std::clamp<u32>(opt.max_batch, 1, max_batch_limit), est.ffs, est.max_elems, resolveFdSplits(true)) +
+                      bufferBytes(cfg, std::clamp<u32>(opt.max_batch, 1, max_batch_limit), est.ffs, est.max_elems, resolveFdSplits(true),
+                                  opt.numerics.mode == numerics::Mode::precise) +
                       (256ull << 20);
             n.kv_per_token = kv_est == numerics::KvKind::f16   ? est.kv_f16
                              : kv_est == numerics::KvKind::q8v ? est.kv_q8v
@@ -562,7 +564,7 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
     // (not on the UMA iGPU, gfx1151, unless a limit is set: its free VRAM does not bound what it can allocate)
     if (!device::profile(m.arch).uma_no_vram_fit_check || vram::limitBytes() != 0) {
         const LoadEstimate est = estimateLoad(f, cfg, opt.embd_on_host);
-        const u64 buf = bufferBytes(cfg, m.max_batch, est.ffs, est.max_elems, resolveFdSplits(m.kv_q4));
+        const u64 buf = bufferBytes(cfg, m.max_batch, est.ffs, est.max_elems, resolveFdSplits(m.kv_q4), m.num_req.mode == numerics::Mode::precise);
         const u64 need = est.weights + est.state + buf;
         const hip::MemInfo mi = hip::memInfo();
         if (need > mi.free) {
@@ -693,7 +695,9 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
     m.part_ml = m.alloc(max_verify_rows * n_split * cfg.n_head * 2 * f4);
     m.part_acc = m.alloc(max_verify_rows * n_split * cfg.n_head * cfg.head_dim * f4);
     // feat026-cascade (WHIRL_CASCADE=1, WHIRL_CASCADE_MIN = shortest shared prefix in keys, default 2048)
-    m.cascade_cfg.on = envFlag("CASCADE", false);
+    // precise ignores it (cascadeBegin never runs there): no buffers, no smaller KV pool, no label change (r1 C3)
+    m.cascade_cfg.on = envFlag("CASCADE", false) && m.num_req.mode != numerics::Mode::precise;
+    if (envFlag("CASCADE", false) && !m.cascade_cfg.on) m.load_note += "precise: WHIRL_CASCADE ignored (balance / fast only)\n";
     if (m.cascade_cfg.on) {
         if (auto v = envGet("CASCADE_MIN")) {
             try {
@@ -772,7 +776,8 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
     }
     // sizing self-check: the pre-load estimate (bufferBytes, the server's auto-shrink) must cover what was just
     // allocated; a shortfall means an allocation was added without updating the estimate
-    if (const u64 used = m.alloc_total - buffers_from, est = bufferBytes(cfg, m.max_batch, ffs, max_elems, m.fd_splits); used > est)
+    if (const u64 used = m.alloc_total - buffers_from, est = bufferBytes(cfg, m.max_batch, ffs, max_elems, m.fd_splits, m.num_req.mode == numerics::Mode::precise);
+        used > est)
         m.load_note += "warning: the VRAM estimate for the prefill buffers (" + std::to_string(est >> 20) + " MiB) is below what was allocated (" +
                        std::to_string(used >> 20) + " MiB); please report\n";
     // KV pool for max_ctx tokens, one sequence with an identity page table (the

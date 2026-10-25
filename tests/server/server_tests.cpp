@@ -2614,9 +2614,15 @@ void testCascadeSharedPrompt() {
             TestServer cold(su_nc);
             for (const auto& u : users) ref.push_back(content(cold.post("/v1/chat/completions", body(u)).body));
         }
-        for (const std::uint32_t ck : {0u, 256u}) {
+        // feat026-cascade-r1 C2: cap 32 (gfx1151 attn_ws4g) and the real gfx1201 caps 5 (27B, GQA 6) / 4 (Ornith, GQA 8)
+        struct V {
+            std::uint32_t ck, cap;
+        };
+        for (const V v : {V{0, 32}, V{256, 32}, V{256, 5}, V{256, 4}}) {
+            const std::uint32_t ck = v.ck;
             ServerSetup su = base;
             su.mc.cascade_min_keys = ck;
+            su.mc.cascade_max_rows = v.cap;
             TestServer srv(su);
             CHECK_EQ(content(srv.post("/v1/chat/completions", body(users[0])).body), ref[0]);  // makes the system checkpoint
             std::vector<std::string> got(users.size());
@@ -2626,11 +2632,15 @@ void testCascadeSharedPrompt() {
             for (auto& t : th) t.join();
             for (std::size_t i = 1; i < users.size(); ++i) CHECK_EQ(got[i], ref[i]);
             if (ck == 0) CHECK_EQ(srv.model().cascadeRows(), 0u);
-            if (ck > 0) CHECK(srv.model().cascadeRows() > 0);
+            // no MTP: one row per slot, so several slots fit any cap >= 2. With MTP and a gfx1201 cap the rows of two
+            // slots usually exceed it (documented limit, ops test testCascadeCapMtp): printed, not asserted (the
+            // mock's draft count adapts)
+            if (ck > 0 && (v.cap == 32 || !mtp)) CHECK(srv.model().cascadeRows() > 0);
             CHECK_EQ(srv.model().cascadeBad(), 0u);
             CHECK_EQ(srv.model().poison(), 0u);
             CHECK_EQ(srv.model().hidMismatch(), 0u);
-            std::printf("  cascade mtp=%d min=%u: cascade rows %llu\n", mtp ? 1 : 0, ck, static_cast<unsigned long long>(srv.model().cascadeRows()));
+            std::printf("  cascade mtp=%d min=%u cap=%u: cascade rows %llu\n", mtp ? 1 : 0, ck, v.cap,
+                        static_cast<unsigned long long>(srv.model().cascadeRows()));
         }
     }
 }

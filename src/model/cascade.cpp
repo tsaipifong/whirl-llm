@@ -5,6 +5,7 @@
 
 #include "whirl/model.h"
 
+#include "whirl/cascade_launch.h"  // the launches (shared with the kernel test family "cascade")
 #include "whirl/ops/attention.h"
 #include "whirl/ops/cascade.h"
 #include "whirl/ops/cascade_kernels.h"
@@ -15,10 +16,8 @@
 namespace whirl::qwen35 {
 
 namespace {
-using u64 = std::uint64_t;
 using u32 = std::uint32_t;
 using i32 = std::int32_t;
-inline i32 I(u64 v) { return static_cast<i32>(v); }
 }  // namespace
 
 void Model::cascadeBegin(u32 n) {
@@ -42,9 +41,22 @@ void Model::cascadeBegin(u32 n) {
     };
     const std::span<const i32> rp(row_pos.data(), n), rb(row_base.data(), n);
     ops::CascadePlan pl = ops::planCascade(rp, rb, pages, cascade_cfg, cap);
-    if (!pl.any()) return;
+    if (!pl.any()) {
+        // feat026-cascade-r1 C2: rows that share a prefix, but no two of their sequences fit one prefix group of the
+        // real cap (gfx1201 with MTP rows): counted and logged so a 0% gain is not read as "no shared prefix"
+        if (cap < ops::kCascadeMaxRows && ops::planCascade(rp, rb, pages, cascade_cfg, ops::kCascadeMaxRows).any()) {
+            cas_nofit += 1;
+            if ((cas_nofit & (cas_nofit - 1)) == 0)
+                std::fprintf(stderr, "whirl cascade: nofit %llu: rows share a prefix but exceed the prefix group cap %u (n %u)\n",
+                             static_cast<unsigned long long>(cas_nofit), cap, n);
+        }
+        return;
+    }
     const ops::CascadeRows tab = ops::cascadeRows(pl, rp, rb);
-    hip::launch(k.attn_cascade_rows, hip::Dim3{32, 1, 1}, hip::Dim3{32, 1, 1}, 0, stream, cas_rows, tab, I(n));
+    cascade::Bufs rb_;
+    rb_.cas_rows = cas_rows;
+    rb_.stream = stream;
+    cascade::launchRows(k, tab, n, rb_);
     cas_plan = std::move(pl);
     cas_steps += 1;
     for (const ops::CascadeGroup& g : cas_plan.groups) cas_rows_n += g.count;
@@ -57,47 +69,19 @@ void Model::cascadeBegin(u32 n) {
 
 bool Model::cascadeDecode(const ops::AttnDecodeProblem& ap, const ops::AttnDecodeFlags& af, const KvArgs& kva, float scale,
                           ops::AttnDecodePlan& out) {
-    // the MTP draft window changes which keys a row sees (lossy draft-only path): keep the plain path there
-    if (!cas_plan.any() || kva.win != 0 || kva.kvbase == 0 || !ap.rows_known || ap.n > ops::kCascadeMaxRows) return false;
-    const u32 n = ap.n, hd = ap.head_dim;
-    // suffix rows: positions - P, page-table offsets + P / 256 (rows outside every group unchanged)
-    std::array<i32, ops::kCascadeMaxRows> spos{}, sbase{};
-    for (u32 r = 0; r < n; ++r) {
-        const i32 p = cas_plan.keys[r];
-        spos[r] = ap.row_pos[r] - p;
-        sbase[r] = ap.row_base[r] + p / static_cast<i32>(ops::kCascadePage);
-    }
-    ops::AttnDecodeProblem sp = ap;
-    sp.row_pos = std::span<const i32>(spos.data(), n);
-    sp.row_base = std::span<const i32>(sbase.data(), n);
-    const ops::AttnDecodePlan pl = ops::chooseAttnDecode(sp, af, k, k.caps, device::profile(arch));
-    ops::CascadePrefixProblem cp;
-    cp.head_dim = hd;
-    cp.n_head = ap.n_head;
-    cp.n_head_kv = ap.n_head_kv;
-    cp.kv_q4 = ap.kv_q4;
-    cp.n_split = pl.n_split;
-    const ops::CascadePrefixPlan pp = ops::chooseCascadePrefix(cas_plan, cp, k, k.caps);
-    if (pp.kind == ops::CascadePrefixKind::none || pp.f == nullptr) return false;
-    const DevPtr spos_d = cas_rows, sbase_d = cas_rows + 32 * 4, ppos_d = cas_rows + 64 * 4;
-    KvArgs kvs = kva;
-    kvs.kvbase = sbase_d;
-    // suffix pass: the normal kernel choice on the moved rows, into part_ml / part_acc
-    if (pl.kind == ops::AttnDecodeKind::split)
-        hip::launch(pl.f, pl.grid, pl.block, 0, stream, qf, kvs, part_ml, part_acc, I(ap.n_head), I(ap.n_head_kv), I(hd), I(2 * hd), spos_d, scale,
-                    i32(1), gate);
-    else
-        hip::launch(pl.f, pl.grid, pl.block, 0, stream, qf, kvs, part_ml, part_acc, I(ap.n_head), I(ap.n_head_kv), I(2 * hd), spos_d, scale, gate,
-                    pl.groups);
-    // prefix pass: one multi-row group per shared prefix (the rows' own page tables map the same pages there,
-    // so the group's first row's table serves all of them), every row at position P - 1, into cas_ml / cas_acc
-    hip::launch(pp.f, pp.grid, pp.block, 0, stream, qf, kva, cas_ml, cas_acc, I(ap.n_head), I(ap.n_head_kv), I(2 * hd), ppos_d, scale, gate,
-                pp.groups);
-    // merge: prefix partials folded into split 0 of the suffix partials (rows with ppos >= 0)
-    hip::launch(k.attn_cascade_merge, hip::Dim3{ap.n_head, n, 1}, hip::Dim3{256, 1, 1}, 0, stream, part_ml, part_acc, cas_ml, cas_acc, cas_rows,
-                I(ap.n_head), I(hd), I(pl.n_split));
-    out = pl;
-    return true;
+    // a gated MTP draft (gate set by mtpEnqueue) never takes the cascade: the merge kernel has no skip argument
+    // (cas_plan is empty there anyway: it lives only inside verifyBatchEnqueue)
+    if (!cas_plan.any() || gate != 0) return false;
+    cascade::Bufs b;
+    b.qf = qf;
+    b.part_ml = part_ml;
+    b.part_acc = part_acc;
+    b.cas_ml = cas_ml;
+    b.cas_acc = cas_acc;
+    b.cas_rows = cas_rows;
+    b.gate = gate;
+    b.stream = stream;
+    return cascade::launchDecode(cas_plan, ap, af, k, k.caps, device::profile(arch), kva, scale, b, out);
 }
 
 }  // namespace whirl::qwen35

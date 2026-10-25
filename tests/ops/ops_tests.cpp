@@ -735,6 +735,70 @@ void testCascadePrefixChoice() {
     CHECK(ops::chooseCascadePrefix(ops::CascadePlan{}, p, k0, k0.caps).kind == ops::CascadePrefixKind::none);
 }
 
+// feat026-cascade-r1 C2: the planner with the REAL per-arch group cap (cascadeGroupCap of a gfx1201-like / gfx1151-like
+// table) for MTP verify rows. gfx1201: attn_wsplit2 holds 32 columns, so 27B (GQA 6) caps a prefix group at 5 rows and
+// Ornith (GQA 8) at 4. With MTP every sequence brings nd + 1 rows: two sequences of 4 rows (nd 3) never fit, the plan
+// is empty and the cascade does nothing (documented limit: the plain path already reads the prefix once per sequence
+// for all of its MTP rows, so grouping across sequences needs a wider prefix kernel). nd 1 (2 rows) still fits.
+// gfx1151 (attn_ws4g with column-group blocks, cap 32) groups MTP rows of 4 sequences.
+void testCascadeCapMtp() {
+    // S sequences x r rows (consecutive positions), all sharing pages 0..15 (4096 keys), then own pages
+    auto planFor = [](std::uint32_t S, std::uint32_t r, std::uint32_t cap) {
+        std::vector<std::int32_t> rp, rb;
+        std::vector<std::vector<std::int32_t>> tabs(S);
+        for (std::uint32_t s = 0; s < S; ++s) {
+            for (std::int32_t i = 0; i < 20; ++i) tabs[s].push_back(i < 16 ? i : 100 + static_cast<std::int32_t>(s) * 10 + i);
+            for (std::uint32_t j = 0; j < r; ++j) {
+                rp.push_back(4096 + 300 + static_cast<std::int32_t>(7 * s + j));
+                rb.push_back(static_cast<std::int32_t>(s) * 64);
+            }
+        }
+        const ops::CascadePages pages = [&tabs](std::int32_t b) -> std::span<const std::int32_t> {
+            const std::size_t s = static_cast<std::size_t>(b / 64);
+            return s < tabs.size() ? std::span<const std::int32_t>(tabs[s]) : std::span<const std::int32_t>{};
+        };
+        ops::CascadeConfig cc;
+        cc.on = true;
+        return ops::planCascade(rp, rb, pages, cc, cap);
+    };
+    ops::CascadePrefixProblem p27, p35;
+    p27.n_head = 24;
+    p27.n_head_kv = 4;
+    p35.n_head = 16;
+    p35.n_head_kv = 2;
+    const auto k01 = attnTable(false, false, false, false);  // gfx1201-like
+    const auto k51 = attnTable(true, true, true, false);     // gfx1151-like
+    const std::uint32_t c27 = ops::cascadeGroupCap(p27, k01, k01.caps), c35 = ops::cascadeGroupCap(p35, k01, k01.caps);
+    CHECK(c27 == 5 && c35 == 4);
+    CHECK(ops::cascadeGroupCap(p27, k51, k51.caps) == 32 && ops::cascadeGroupCap(p35, k51, k51.caps) == 32);
+    // gfx1201, MTP nd 3 (4 rows / sequence), 4 slots: no group fits -> empty plan; with the cap lifted the rows
+    // share the prefix (what Model::cascadeBegin counts as "nofit" and logs)
+    for (const std::uint32_t cap : {c27, c35}) {
+        CHECK(!planFor(4, 4, cap).any());
+        CHECK(!planFor(2, 4, cap).any());
+        CHECK(planFor(4, 4, ops::kCascadeMaxRows).any());
+    }
+    // nd 2 (3 rows): 27B 3 + 3 > 5, empty; nd 1 (2 rows): 27B two sequences per group (4 rows), Ornith two (4 rows)
+    CHECK(!planFor(4, 3, c27).any());
+    {
+        const ops::CascadePlan pl = planFor(4, 2, c27);
+        CHECK(pl.groups.size() == 2 && pl.groups[0].count == 4 && pl.groups[1].first == 4 && pl.groups[1].count == 4 && pl.groups[0].keys == 4096);
+        const ops::CascadePlan p8 = planFor(4, 2, c35);
+        CHECK(p8.groups.size() == 2 && p8.groups[0].count == 4);
+    }
+    // no MTP (1 row / sequence): 27B 4 slots in one group, Ornith 4 in one group (cap 4)
+    CHECK(planFor(4, 1, c27).groups.size() == 1 && planFor(4, 1, c27).groups[0].count == 4);
+    CHECK(planFor(5, 1, c35).groups.size() == 1 && planFor(5, 1, c35).groups[0].count == 4);  // the 5th row alone: no group
+    // gfx1151: MTP nd 3, 4 slots -> one group of 16 rows; chooseCascadePrefix takes it (attn_ws4g3, column-group blocks)
+    {
+        const ops::CascadePlan pl = planFor(4, 4, 32);
+        CHECK(pl.groups.size() == 1 && pl.groups[0].count == 16);
+        p27.n_split = 64;
+        const auto c = ops::chooseCascadePrefix(pl, p27, k51, k51.caps);
+        CHECK(c.kind == ops::CascadePrefixKind::ws4g && nameOf(c.f) == "attn_ws4g3" && c.grid.x == 4 * 2 && c.grid.y == 64);
+    }
+}
+
 // cascade (prefix splits merged into suffix split 0, then the combine) vs the plain split-K path vs an exact
 // double softmax: the same attention up to f32 rounding (not bitwise: balance / fast only)
 void testCascadeNumerics() {
@@ -832,6 +896,7 @@ int main() {
     testOpTables();
     testCascadePlan();
     testCascadePrefixChoice();
+    testCascadeCapMtp();
     testCascadeNumerics();
     std::printf("ops tests: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
