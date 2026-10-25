@@ -812,6 +812,13 @@ std::optional<Match> Tier::lookup(std::span<const std::uint32_t> toks, const std
 
 // ---- restore ----------------------------------------------------------------------
 
+bool Tier::tooBigForRam(const Entry* e) const {
+    // the beginRestore SSD-read path: ensureBlocksHeld(e, lb_end) on an SSD-only entry (no block in RAM)
+    if (e == nullptr || e->in_ram || e->prefetching) return false;
+    const std::size_t lb_end = static_cast<std::size_t>((e->extent(lay) + block_bytes - 1) / block_bytes);
+    return lb_end > n_blocks_;
+}
+
 Restore* Tier::beginRestore(Entry* e, std::span<const Span> spans, std::size_t n_main_spans) {
     auto r = std::make_unique<Restore>();
     // events first: nothing below may throw once an SSD read job is submitted

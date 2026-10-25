@@ -586,8 +586,21 @@ bool TierBridge::startRestore(std::uint64_t job_id, std::uint32_t id, std::span<
                 static_cast<std::uint8_t>(k));
         st.rs_tail[k] = true;
     }
+    // arch025-k2warn (bug:k2-8060s-p1): an SSD entry larger than the whole RAM tier (sized once at startup from
+    // the RAM available then) can never be read; say so instead of a silent cold prefill (llama.cpp:
+    // server-task.cpp SRV_WRN "... exceeds cache size limit ..., skipping"). Evaluated before beginRestore.
+    const bool too_big = t->tooBigForRam(x);
+    const std::uint64_t x_bytes = too_big ? x->extent(lay) : 0;
+    const std::uint32_t x_tok = x->n_tok;
     tier::Restore* r = t->beginRestore(x, spans_, n_main);
-    if (!r) return false;
+    if (!r) {
+        if (too_big)
+            logW("req {} | slot {} | kv tier: SSD entry of {} tok ({:.1f} MiB) is larger than the RAM tier ({:.1f} MiB) and "
+                 "cannot be read back; prefilling from scratch",
+                 job_id, id, x_tok, static_cast<double>(x_bytes) / 1048576.0,
+                 static_cast<double>(t->arenaBytes()) / 1048576.0);
+        return false;
+    }
     r->t0 = t0;
     st.restore = r;
     // item S: a shared prefix entry is never updated in place by a slot; a session entry restored at its own

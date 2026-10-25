@@ -2649,6 +2649,75 @@ void testTiers() {
     std::filesystem::remove_all(dir, ec);
 }
 
+// arch025-k2warn (bug:k2-8060s-p1): the restart server's RAM tier (sized once at startup from the RAM available
+// then; 512 MiB on the 8060S vs an 801 MiB entry) is smaller than the SSD entry: the restore cannot start
+// (Tier::ensureBlocks "missing > n_blocks_" -> beginRestore nullptr -> startRestore false -> cold prefill). The
+// fallback is right; it must be logged (one W line naming both sizes), not silent. Fails before the fix: no line.
+void testTierRestoreTooBig() {
+    const std::filesystem::path base = whirl::test::testTmpBase();
+    const std::string dir = narrow((base / L"server_test_ssd_toobig").wstring());
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    std::filesystem::create_directories(dir, ec);
+    ServerSetup su = baseSetup();
+    su.mc.parallel = 2;
+    su.mc.slot_ctx = 8192;
+    su.mc.pool_tokens = 4096;
+    su.tier = true;
+    su.ssd_dir = dir;
+    su.tier_min = 512;
+    su.eo.n_ck = 2;
+    const auto pa = makePrompt(3000, 511);
+    const auto pb = makePrompt(3200, 512);
+    const auto outa = [&] {
+        TestServer probe(baseSetup());
+        return probe.model().greedyReference(pa, 40, true);
+    }();
+    std::vector<std::uint32_t> pa2 = pa;
+    pa2.insert(pa2.end(), outa.begin(), outa.end());
+    pa2 = makePrompt(static_cast<std::uint32_t>(pa2.size() + 300), 513, pa2);
+    {
+        // as testTiers: A restored from RAM once (reused), then written to SSD
+        TestServer srv(su);
+        CHECK_EQ(completionText(srv.post("/v1/completions", completionBody(pa, 40))), decode(outa));
+        srv.post("/v1/completions", completionBody(pb, 40));
+        auto r3 = srv.post("/v1/completions", completionBody(pa2, 40));
+        CHECK_EQ(completionText(r3), decode(srv.model().greedyReference(pa2, 40, true)));
+        CHECK(srv.tierStats().restores_ram >= 1);
+        for (int i = 0; i < 400 && srv.ssdEntries() < 1; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        CHECK(srv.ssdEntries() >= 1);
+    }
+    // precondition: the largest SSD file is larger than the 2 MiB RAM tier of the restart
+    std::uintmax_t max_file = 0;
+    for (const auto& f : std::filesystem::directory_iterator(dir, ec))
+        if (f.is_regular_file()) max_file = std::max(max_file, f.file_size());
+    CHECK(max_file > (2ull << 20));
+    {
+        ServerSetup su2 = su;
+        su2.tier_ram_mb = 2;  // one 2 MiB arena block
+        TestServer srv(su2);
+        g_log.clear();
+        CHECK(srv.ssdEntries() >= 1);
+        auto r = srv.post("/v1/completions", completionBody(pa2, 40));
+        // the cold fallback: same output, nothing restored, nothing reused
+        CHECK_EQ(completionText(r), decode(srv.model().greedyReference(pa2, 40, true)));
+        CHECK_EQ(srv.tierStats().restores_ssd + srv.tierStats().restores_ram, 0u);
+        CHECK_EQ(cachedTokens(r), 0u);
+        // ... and it is said, once, at warning level, with both sizes (MiB) and the consequence
+        CHECK_EQ(g_log.count("| kv tier: SSD entry of "), 1u);
+        CHECK_EQ(g_log.count("MiB) is larger than the RAM tier (2.0 MiB) and cannot be read back; prefilling from scratch"), 1u);
+        CHECK([] {  // that line is a warning ("... W req N | slot N | kv tier: ...")
+            std::lock_guard<std::mutex> lk(g_log.mu);
+            for (const auto& l : g_log.lines)
+                if (l.find("| kv tier: SSD entry of ") != std::string::npos) return l.find(" W req ") != std::string::npos;
+            return false;
+        }());
+        CHECK_EQ(g_log.count("kv tier: restoring "), 0u);
+        CHECK_EQ(srv.model().poison(), 0u);
+    }
+    std::filesystem::remove_all(dir, ec);
+}
+
 
 // FR-CACHE revert-check (engine.cpp spillSlot's tier_pages clamp): in-place spill after a same-slot
 // regenerate (reuse < the entry's length), then eviction and a restore of the regenerated branch: the
@@ -7651,6 +7720,7 @@ int main(int argc, char** argv) {
         {"pool", testPoolPressure},
         {"sys_prompt", testSharedSystemPrompt},
         {"tiers", testTiers},
+        {"tier_restore_too_big", testTierRestoreTooBig},
         {"shutdown_evict_sys", testShutdownEvictSys},
         {"idle_write", testIdleWrite},
         {"close_reused", testCloseReused},
