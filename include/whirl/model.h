@@ -743,6 +743,12 @@ public:
     bool moe_fp8 = true;
     bool moe_mxw = true;
     bool moe_rbf = true;  // MXFP4 x fp8 grouped GEMM: row-block-fast gemm8r_* when present (WHIRL_MOE_RBF=0 -> gemm8_moe*)
+    // feat026-moep (opt-in, off by default until the 8060S A/B): WHIRL_MOEP_GU / WHIRL_MOEP_DN = variant names of
+    // kernels::kMoepGu / kMoepDn (-1 = off), WHIRL_MOEP_COMB = 0 moe_combine / 1 moe_combine4 / 2 fused into the down
+    // epilogue; moe_cnt: the fused combine's (token, row block) counters, zeroed at allocation, left zeroed by the kernel
+    int moep_gu = -1, moep_dn = -1;
+    std::uint32_t moep_comb = 0;
+    DevPtr moe_cnt = 0;
 
     // ---- vision (image prompts; see whirl/vismap.h). Text-only sequences never take
     // these paths (bitwise unchanged).

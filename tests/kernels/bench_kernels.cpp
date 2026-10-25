@@ -932,9 +932,384 @@ void benchGdn(Env& e) {
     runCell(e, k);
 }
 
+// ---------------------------------------------------------------- moep (MoE prefill expert GEMMs, gfx1151)
+// feat026-moep (KERNEL_TECHNIQUE_AUDIT gap #2), shapes from mt-p2-roof's moep cells (branch mt-p2,
+// tests\kernels\bench_kernels.cpp:1017-1188): Ornith layer-0 MXFP4 experts, n tokens x K routed experts, one prefill
+// chunk. Routings (the audit: never only uniform): --moe-routing FILE (int32 ids as WHIRL_DUMP_MOE writes them, n * K
+// entries from --moe-routing-off), zipf (p ~ 1 / rank, distinct per token), uniform (the mt-p2 control). Cells:
+//   control:  gemm_moegu_mxfp4 (tile 64), gemm_moe32r_mxfp4 (tile 32), moe_combine; CPU-checked on sampled slots
+//   variants: gemm_moepgu_<v>, gemm_moepdn_<v>, gemm_moepdc_<v> (down + fused combine), moe_combine4: bitwise == control
+//   balance (f16 intermediates) / fast candidates: gemm_moepdh_<v> (== f16(control) bits), gemm_moepda_<v> (atomic
+//   scatter; checked within f32 reassociation against the control combine)
+// flops = useful 2 x (2 F E) per routed pair (gate + up), 2 E F (down); padded rows not counted. combine bytes =
+// yd read + x read/write + ysh read (f32). Settings carry routing, tokens, tile and expert-load stats.
+std::vector<int> moepRouting(Ctx& c, const BenchOpts& o, int n, int K, int R, const std::string& kind, std::string* note) {
+    std::vector<int> ids(static_cast<std::size_t>(n) * K);
+    if (kind == "file") {
+        std::FILE* fp = std::fopen(o.moe_routing.c_str(), "rb");
+        if (!fp) return {};
+        std::fseek(fp, static_cast<long>(o.moe_routing_off) * 4, SEEK_SET);
+        const std::size_t got = std::fread(ids.data(), 4, ids.size(), fp);
+        std::fclose(fp);
+        if (got != ids.size()) return {};
+        for (const int e : ids)
+            if (e < 0 || e >= R) return {};
+        *note = "routing=file:" + std::filesystem::path(o.moe_routing).filename().string() + "@" + std::to_string(o.moe_routing_off);
+        return ids;
+    }
+    std::vector<double> wgt(static_cast<std::size_t>(R), 1.0);
+    if (kind == "zipf") {
+        std::vector<int> rank(static_cast<std::size_t>(R));
+        std::iota(rank.begin(), rank.end(), 0);
+        std::shuffle(rank.begin(), rank.end(), c.rng);
+        for (int e = 0; e < R; ++e) wgt[static_cast<std::size_t>(e)] = 1.0 / (rank[static_cast<std::size_t>(e)] + 1.0);
+    }
+    std::discrete_distribution<int> d(wgt.begin(), wgt.end());
+    for (int t = 0; t < n; ++t)
+        for (int k = 0; k < K; ++k) {
+            int e = d(c.rng);
+            auto dup = [&](int x) {
+                for (int j = 0; j < k; ++j)
+                    if (ids[static_cast<std::size_t>(t) * K + j] == x) return true;
+                return false;
+            };
+            while (dup(e)) e = d(c.rng);
+            ids[static_cast<std::size_t>(t) * K + k] = e;
+        }
+    *note = "routing=" + kind;
+    return ids;
+}
+
+void benchMoePrefill(Env& e) {
+    Ctx& c = e.c;
+    c.rep.family = "moep";
+    const int tm = static_cast<int>(QType::mxfp4);
+    if (!c.k.moe_tiles || !c.k.moe_route || !c.k.moe_gather_f16 || !c.k.gemm_moegu[tm] || !c.k.gemm_moe32r[tm]) {
+        c.rep.skip("moep", "bench gemm_moegu / gemm_moe32r", "kernel not in this code object");
+        return;  // gfx1201: the 8060S grouped expert GEMMs are absent by design (before loading ~0.4 GB of experts)
+    }
+    HostMat gate, up, down;
+    std::string label = "synthetic";
+    int R = 64, K = 8;
+    const whirl::gguf::File* f = c.open(c.models.moemx);
+    if (f && f->tensor("blk.0.ffn_gate_exps.weight")) {
+        label = "ornith";
+        gate = loadMat(*f, "blk.0.ffn_gate_exps.weight");
+        up = loadMat(*f, "blk.0.ffn_up_exps.weight");
+        down = loadMat(*f, "blk.0.ffn_down_exps.weight");
+        R = gate.nrows / down.ncols;
+        K = static_cast<int>(f->getUintOr("qwen35moe.expert_used_count", 8));
+    } else {
+        gate = randomMat(c, QType::mxfp4, R * 512, 2048);
+        up = randomMat(c, QType::mxfp4, R * 512, 2048);
+        down = randomMat(c, QType::mxfp4, R * 2048, 512);
+    }
+    if (gate.type != QType::mxfp4 || up.type != QType::mxfp4 || down.type != QType::mxfp4) {
+        c.rep.skip("moep", "bench gemm_moegu / gemm_moe32r", "experts not MXFP4");
+        return;
+    }
+    const int E = gate.ncols, F = down.ncols;
+    const int n = c.quick ? 256 : e.o.moep_n, pairs = n * K;
+    auto dg = std::make_shared<Buf>(gate.data), du = std::make_shared<Buf>(up.data), dd = std::make_shared<Buf>(down.data);
+    std::vector<std::string> kinds;
+    if (!e.o.moe_routing.empty()) kinds.push_back("file");
+    kinds.push_back("zipf");
+    kinds.push_back("uniform");
+    const std::uint64_t grb = gate.row_bytes, drb = down.row_bytes;
+    const std::string shape = "E" + std::to_string(E) + "_F" + std::to_string(F) + "_R" + std::to_string(R) + "_K" + std::to_string(K) + "_n" + std::to_string(n);
+    auto f16row = [](const HostMat& m, std::size_t r) {
+        std::vector<std::uint16_t> wh(static_cast<std::size_t>(m.ncols));
+        ref::dequantRowF16(m.type, m.data.data() + r * m.row_bytes, m.ncols, wh.data());
+        std::vector<double> w(wh.size());
+        for (std::size_t i = 0; i < wh.size(); ++i) w[i] = h2f(wh[i]);
+        return w;
+    };
+    for (const std::string& kind : kinds) {
+        std::string rnote;
+        const std::vector<int> ids = moepRouting(c, e.o, n, K, R, kind, &rnote);
+        if (ids.empty()) {
+            Result r;
+            r.family = "moep";
+            r.name = "--moe-routing " + e.o.moe_routing + ": cannot read " + std::to_string(pairs) + " ids in [0, R) at offset " +
+                     std::to_string(e.o.moe_routing_off);
+            r.pass = false;
+            c.rep.add(r);
+            continue;
+        }
+        // expert-load statistics of this routing (tokens per used expert)
+        std::vector<int> cnt(static_cast<std::size_t>(R), 0);
+        for (const int x : ids) ++cnt[static_cast<std::size_t>(x)];
+        int used = 0, mx = 0;
+        for (const int q : cnt) {
+            used += q > 0;
+            mx = std::max(mx, q);
+        }
+        char st[128];
+        std::snprintf(st, sizeof(st), ";experts_used=%d;tok_per_expert_mean=%.1f;tok_per_expert_max=%d", used, used ? double(pairs) / used : 0.0, mx);
+        const std::string settings = e.settings(gate.data.size() + up.data.size() + down.data.size(), 1) + ";" + rnote + ";tokens=" + std::to_string(n) + st +
+                                     ";rot=none_compute_bound";
+        const std::string rk = kind == "file" ? "real" : kind;
+        const std::vector<float> h = c.randn(static_cast<std::size_t>(n) * E);
+        const std::vector<float> wv = c.randu(static_cast<std::size_t>(pairs), 0.f, 0.3f), sgv = c.randu(static_cast<std::size_t>(n), 0.f, 1.f);
+        const std::vector<float> x0 = c.randn(static_cast<std::size_t>(n) * E), yshv = c.randn(static_cast<std::size_t>(n) * E);
+        auto dids = std::make_shared<Buf>(ids);
+        auto dw = std::make_shared<Buf>(wv), dsg = std::make_shared<Buf>(sgv), dysh = std::make_shared<Buf>(yshv), dh = std::make_shared<Buf>(h);
+        const int mt32 = (pairs + 31) / 32 + R, mt64 = (pairs + 63) / 64 + R;
+        auto perm = std::make_shared<Buf>(static_cast<std::size_t>(pairs) * 4), inv = std::make_shared<Buf>(static_cast<std::size_t>(pairs) * 4);
+        auto t32 = std::make_shared<Buf>(static_cast<std::size_t>(mt32) * 16), n32 = std::make_shared<Buf>(4);
+        auto t64 = std::make_shared<Buf>(static_cast<std::size_t>(mt64) * 16), n64 = std::make_shared<Buf>(4);
+        auto xg = std::make_shared<Buf>(static_cast<std::size_t>(pairs) * E * 2);
+        auto A = std::make_shared<Buf>(static_cast<std::size_t>(pairs) * F * 2);
+        auto Y = std::make_shared<Buf>(static_cast<std::size_t>(pairs) * E * 4);
+        auto X = std::make_shared<Buf>(static_cast<std::size_t>(n) * E * 4);
+        hip::launch(c.k.moe_route, {1, 1, 1}, {1024, 1, 1}, 0, c.s, dids->p(), pairs, R, 32, perm->p(), inv->p(), t32->p(), n32->p());
+        hip::launch(c.k.moe_tiles, {1, 1, 1}, {1024, 1, 1}, 0, c.s, dids->p(), pairs, R, 64, t64->p(), n64->p());
+        hip::launch(c.k.moe_gather_f16, {static_cast<unsigned>(pairs), 1, 1}, {256, 1, 1}, 0, c.s, dh->p(), perm->p(), xg->p(), E, K);
+        // control outputs (bitwise references of the variants)
+        hip::launch(c.k.gemm_moegu[tm], {static_cast<unsigned>(mt64) * cdiv(F, 64), 1, 1}, {256, 1, 1}, 0, c.s, dg->p(), du->p(), grb, F, xg->p(), A->p(), E,
+                    t64->p(), n64->p());
+        hip::launch(c.k.gemm_moe32r[tm], {static_cast<unsigned>(mt32) * cdiv(E, wk::kMoeBm), 1, 1}, {256, 1, 1}, 0, c.s, dd->p(), drb, E, A->p(), Y->p(), F,
+                    t32->p(), n32->p());
+        X->up(x0);
+        hip::launch(c.k.moe_combine, {cdiv(E, 256), static_cast<unsigned>(n), 1}, {256, 1, 1}, 0, c.s, X->p(), dysh->p(), dsg->p(), Y->p(), inv->p(), dw->p(), E,
+                    K);
+        c.sync();
+        const auto hperm = perm->down<int>(static_cast<std::size_t>(pairs));
+        const auto a16 = A->down<std::uint16_t>(static_cast<std::size_t>(pairs) * F);
+        std::vector<float> aref(a16.size());
+        for (std::size_t i = 0; i < a16.size(); ++i) aref[i] = h2f(a16[i]);
+        const auto yref = Y->down<float>(static_cast<std::size_t>(pairs) * E);
+        const auto xref = X->down<float>(static_cast<std::size_t>(n) * E);
+        std::vector<int> slots;
+        for (int j = 0; j < pairs; j += std::max(1, pairs / 6)) slots.push_back(j);
+        slots.push_back(pairs - 1);
+        auto exact = [](const std::string& what, const std::vector<float>& ref) {
+            return [what, ref](const std::vector<float>& got) { return cmpExact(what, got, ref, Kind::invariant); };
+        };
+        // --- control gate + up (CPU-checked as mt-p2)
+        auto cellGu = [&](const std::string& kname, hip::Function fn, int gr, int bn, bool control) {
+            const int mt = (pairs + bn - 1) / bn + R;
+            auto tv = std::make_shared<Buf>(static_cast<std::size_t>(mt) * 16), nv = std::make_shared<Buf>(4);
+            hip::launch(c.k.moe_tiles, {1, 1, 1}, {1024, 1, 1}, 0, c.s, dids->p(), pairs, R, bn, tv->p(), nv->p());
+            c.sync();
+            Cell k;
+            k.ci = e.info("moep", kname, label + ".gate_up." + rk + ".n" + std::to_string(n) + ".k" + std::to_string(K), shape);
+            k.ci.settings = settings + ";tile=" + std::to_string(bn) + ";gr=" + std::to_string(gr);
+            k.ci.flops = 2.0 * 2.0 * pairs * static_cast<double>(F) * E;
+            k.kernel = kname;
+            k.fa = fn;
+            const unsigned grid = static_cast<unsigned>(mt) * cdiv(F, static_cast<unsigned>(gr));
+            k.call = [&c, dg, du, xg, A, tv, nv, grb, F, E, grid](hip::Function fx, std::uint64_t) {
+                hip::launch(fx, {grid, 1, 1}, {256, 1, 1}, 0, c.s, dg->p(), du->p(), grb, F, xg->p(), A->p(), E, tv->p(), nv->p());
+            };
+            k.run = [&c, &k, A, pairs, F](hip::Function fx) {
+                A->fill(0xff);
+                k.call(fx, 0);
+                c.sync();
+                const auto v16 = A->down<std::uint16_t>(static_cast<std::size_t>(pairs) * F);
+                std::vector<float> o(v16.size());
+                for (std::size_t i = 0; i < v16.size(); ++i) o[i] = h2f(v16[i]);
+                return o;
+            };
+            if (control) {
+                k.verify = [&gate, &up, &ids, &h, hperm, slots, f16row, E, F, K](const std::vector<float>& got) {
+                    std::vector<float> g;
+                    std::vector<double> ro, rs;
+                    for (const int j : slots) {
+                        const int p = hperm[static_cast<std::size_t>(j)], t = p / K, ex = ids[static_cast<std::size_t>(p)];
+                        std::vector<double> xx(static_cast<std::size_t>(E));
+                        for (int i = 0; i < E; ++i) xx[static_cast<std::size_t>(i)] = h2f(f2h(h[static_cast<std::size_t>(t) * E + i]));
+                        for (int r = 0; r < F; r += 37) {
+                            const auto wg = f16row(gate, static_cast<std::size_t>(ex) * F + r), wu = f16row(up, static_cast<std::size_t>(ex) * F + r);
+                            double gv = 0, uv = 0, sg = 0, su = 0;
+                            for (int i = 0; i < E; ++i) {
+                                gv += wg[static_cast<std::size_t>(i)] * xx[static_cast<std::size_t>(i)];
+                                uv += wu[static_cast<std::size_t>(i)] * xx[static_cast<std::size_t>(i)];
+                                sg += std::fabs(wg[static_cast<std::size_t>(i)] * xx[static_cast<std::size_t>(i)]);
+                                su += std::fabs(wu[static_cast<std::size_t>(i)] * xx[static_cast<std::size_t>(i)]);
+                            }
+                            const double sil = gv / (1.0 + std::exp(-gv)), a = sil * uv;
+                            g.push_back(got[static_cast<std::size_t>(j) * F + r]);
+                            ro.push_back(a);
+                            rs.push_back(std::ldexp(std::fabs(a), -10) + 1e-4 * (std::fabs(sil) * su + 1.1 * std::fabs(uv) * sg));
+                        }
+                    }
+                    return cmpTol("gate / up / SwiGLU vs CPU (sampled routed slots, every 37th row)", g, ro, rs, 1.0, 1e-6);
+                };
+            } else {
+                k.verify = exact("== gemm_moegu_mxfp4 (bitwise)", aref);
+            }
+            runCell(e, k);
+        };
+        cellGu("gemm_moegu_mxfp4", c.k.gemm_moegu[tm], 64, 64, true);
+        for (int v = 0; v < wk::kMoepGuN; ++v)
+            if (c.k.moep_gu[v]) cellGu(std::string("gemm_moepgu_") + wk::kMoepGu[v].name + "_mxfp4", c.k.moep_gu[v], wk::kMoepGu[v].gr, wk::kMoepGu[v].bn, false);
+        // --- down: control (CPU-checked), variants bitwise, f16-yd balance twins == f16(control) bits
+        auto cellDn = [&](const std::string& kname, hip::Function fn, int bm, int bn, int mode) {  // mode 0 control, 1 bitwise, 2 f16 yd
+            const int mt = (pairs + bn - 1) / bn + R;
+            auto tv = std::make_shared<Buf>(static_cast<std::size_t>(mt) * 16), nv = std::make_shared<Buf>(4);
+            hip::launch(c.k.moe_tiles, {1, 1, 1}, {1024, 1, 1}, 0, c.s, dids->p(), pairs, R, bn, tv->p(), nv->p());
+            c.sync();
+            auto Yo = std::make_shared<Buf>(static_cast<std::size_t>(pairs) * E * 4);
+            Cell k;
+            k.ci = e.info("moep", kname, label + ".down." + rk + ".n" + std::to_string(n) + ".k" + std::to_string(K), shape);
+            k.ci.settings = settings + ";tile=" + std::to_string(bn) + ";bm=" + std::to_string(bm) + (mode == 2 ? ";yd=f16;mode=balance" : "");
+            k.ci.flops = 2.0 * pairs * static_cast<double>(E) * F;
+            k.kernel = kname;
+            k.fa = fn;
+            const unsigned grid = static_cast<unsigned>(mt) * cdiv(E, static_cast<unsigned>(bm));
+            k.call = [&c, dd, A, Yo, tv, nv, drb, E, F, grid](hip::Function fx, std::uint64_t) {
+                hip::launch(fx, {grid, 1, 1}, {256, 1, 1}, 0, c.s, dd->p(), drb, E, A->p(), Yo->p(), F, tv->p(), nv->p());
+            };
+            k.run = [&c, &k, Yo, pairs, E, mode](hip::Function fx) {
+                Yo->fill(0xff);
+                k.call(fx, 0);
+                c.sync();
+                if (mode != 2) return Yo->down<float>(static_cast<std::size_t>(pairs) * E);
+                const auto v16 = Yo->down<std::uint16_t>(static_cast<std::size_t>(pairs) * E);
+                std::vector<float> o(v16.size());
+                for (std::size_t i = 0; i < v16.size(); ++i) o[i] = h2f(v16[i]);
+                return o;
+            };
+            if (mode == 0) {
+                k.verify = [&down, &ids, hperm, slots, f16row, a16, E, F](const std::vector<float>& got) {
+                    std::vector<float> g;
+                    std::vector<double> ro, rs;
+                    for (const int j : slots) {
+                        const int ex = ids[static_cast<std::size_t>(hperm[static_cast<std::size_t>(j)])];
+                        for (int r = 0; r < E; r += 41) {
+                            const auto wd = f16row(down, static_cast<std::size_t>(ex) * E + r);
+                            double y = 0, s = 0;
+                            for (int i = 0; i < F; ++i) {
+                                const double pr = wd[static_cast<std::size_t>(i)] * h2f(a16[static_cast<std::size_t>(j) * F + i]);
+                                y += pr;
+                                s += std::fabs(pr);
+                            }
+                            g.push_back(got[static_cast<std::size_t>(j) * E + r]);
+                            ro.push_back(y);
+                            rs.push_back(s);
+                        }
+                    }
+                    return cmpTol("down vs CPU (sampled routed slots, every 41st row)", g, ro, rs, 1e-4, 1e-6);
+                };
+            } else if (mode == 1) {
+                k.verify = exact("== gemm_moe32r_mxfp4 (bitwise)", yref);
+            } else {
+                std::vector<float> r16(yref.size());
+                for (std::size_t i = 0; i < yref.size(); ++i) r16[i] = h2f(f2h(yref[i]));
+                k.verify = exact("== f16(gemm_moe32r_mxfp4) (bitwise)", r16);
+            }
+            runCell(e, k);
+        };
+        cellDn("gemm_moe32r_mxfp4", c.k.gemm_moe32r[tm], wk::kMoeBm, 32, 0);
+        for (int v = 0; v < wk::kMoepDnN; ++v) {
+            const wk::MoepDnVariant& vd = wk::kMoepDn[v];
+            if (c.k.moep_dn[v]) cellDn(std::string("gemm_moepdn_") + vd.name + "_mxfp4", c.k.moep_dn[v], vd.bm, vd.bn, 1);
+            if (c.k.moep_dh[v]) cellDn(std::string("gemm_moepdh_") + vd.name + "_mxfp4", c.k.moep_dh[v], vd.bm, vd.bn, 2);
+        }
+        // --- combine: control, combine4 (bitwise), fused down + combine (bitwise x), atomic scatter (fast candidate)
+        auto cellComb = [&](const std::string& kname, hip::Function fn, bool four) {
+            Cell k;
+            k.ci = e.info("moep", kname, label + ".combine." + rk + ".n" + std::to_string(n) + ".k" + std::to_string(K), shape);
+            k.ci.settings = settings;
+            k.ci.bytes = 4.0 * (static_cast<double>(pairs) * E + 3.0 * n * E);
+            k.kernel = kname;
+            k.fa = fn;
+            const hip::Dim3 grid = four ? hip::Dim3{cdiv(E, 1024), static_cast<unsigned>(n), 1} : hip::Dim3{cdiv(E, 256), static_cast<unsigned>(n), 1};
+            k.call = [&c, X, dysh, dsg, Y, inv, dw, E, K, grid](hip::Function fx, std::uint64_t) {
+                hip::launch(fx, grid, {256, 1, 1}, 0, c.s, X->p(), dysh->p(), dsg->p(), Y->p(), inv->p(), dw->p(), E, K);
+            };
+            k.run = [&c, &k, X, x0, n, E](hip::Function fx) {
+                X->up(x0);
+                k.call(fx, 0);
+                c.sync();
+                return X->down<float>(static_cast<std::size_t>(n) * E);
+            };
+            k.verify = exact("== moe_combine (bitwise)", xref);
+            runCell(e, k);
+        };
+        Y->up(yref);
+        cellComb("moe_combine", c.k.moe_combine, false);
+        if (c.k.moe_combine4 && E % 4 == 0) cellComb("moe_combine4", c.k.moe_combine4, true);
+        for (int v = 0; v < wk::kMoepDnN; ++v) {
+            const wk::MoepDnVariant& vd = wk::kMoepDn[v];
+            const int mt = (pairs + vd.bn - 1) / vd.bn + R, nrb = (E + vd.bm - 1) / vd.bm;
+            const unsigned grid = static_cast<unsigned>(mt) * cdiv(E, static_cast<unsigned>(vd.bm));
+            auto tv = std::make_shared<Buf>(static_cast<std::size_t>(mt) * 16), nv = std::make_shared<Buf>(4);
+            auto cn = std::make_shared<Buf>(static_cast<std::size_t>(n) * nrb * 4 + 16);
+            auto Yo = std::make_shared<Buf>(static_cast<std::size_t>(pairs) * E * 4);
+            hip::launch(c.k.moe_tiles, {1, 1, 1}, {1024, 1, 1}, 0, c.s, dids->p(), pairs, R, vd.bn, tv->p(), nv->p());
+            c.sync();
+            cn->zero();
+            if (c.k.moep_dc[v]) {
+                // one launch = down + combine: flops of the down GEMM (the combine bytes ride along)
+                Cell k;
+                const std::string kname = std::string("gemm_moepdc_") + vd.name + "_mxfp4";
+                k.ci = e.info("moep", kname, label + ".down_combine." + rk + ".n" + std::to_string(n) + ".k" + std::to_string(K), shape);
+                k.ci.settings = settings + ";tile=" + std::to_string(vd.bn) + ";bm=" + std::to_string(vd.bm) + ";fused_combine=1";
+                k.ci.flops = 2.0 * pairs * static_cast<double>(E) * F;
+                k.kernel = kname;
+                k.fa = c.k.moep_dc[v];
+                k.call = [&c, dd, A, Yo, tv, nv, perm, inv, dw, dsg, dysh, X, cn, drb, E, F, K, grid](hip::Function fx, std::uint64_t) {
+                    hip::launch(fx, {grid, 1, 1}, {256, 1, 1}, 0, c.s, dd->p(), drb, E, A->p(), Yo->p(), F, tv->p(), nv->p(), perm->p(), inv->p(), dw->p(),
+                                dsg->p(), dysh->p(), X->p(), cn->p(), K);
+                };
+                k.run = [&c, &k, X, x0, n, E](hip::Function fx) {
+                    X->up(x0);
+                    k.call(fx, 0);
+                    c.sync();
+                    return X->down<float>(static_cast<std::size_t>(n) * E);
+                };
+                k.verify = exact("x == gemm_moe32r + moe_combine (bitwise)", xref);
+                runCell(e, k);
+            }
+            if (c.k.moep_da[v] && c.k.moe_combine4) {
+                // fast candidate: moe_combine4 (K = 0: x += sg * ysh) + the atomic down, timed as one call
+                Cell k;
+                const std::string kname = std::string("gemm_moepda_") + vd.name + "_mxfp4";
+                k.ci = e.info("moep", kname, label + ".down_combine." + rk + ".n" + std::to_string(n) + ".k" + std::to_string(K), shape);
+                k.ci.settings = settings + ";tile=" + std::to_string(vd.bn) + ";bm=" + std::to_string(vd.bm) + ";atomic_scatter=1;mode=fast";
+                k.ci.flops = 2.0 * pairs * static_cast<double>(E) * F;
+                k.ci.launches_per_call = 2;
+                k.kernel = kname;
+                k.fa = c.k.moep_da[v];
+                const hip::Function c4 = c.k.moe_combine4;
+                k.call = [&c, dd, A, tv, nv, perm, inv, dw, dsg, dysh, X, Y, drb, E, F, K, n, grid, c4](hip::Function fx, std::uint64_t) {
+                    hip::launch(c4, {cdiv(E, 1024), static_cast<unsigned>(n), 1}, {256, 1, 1}, 0, c.s, X->p(), dysh->p(), dsg->p(), Y->p(), inv->p(), dw->p(), E, 0);
+                    hip::launch(fx, {grid, 1, 1}, {256, 1, 1}, 0, c.s, dd->p(), drb, E, A->p(), F, tv->p(), nv->p(), perm->p(), dw->p(), X->p(), K);
+                };
+                k.run = [&c, &k, X, x0, n, E](hip::Function fx) {
+                    X->up(x0);
+                    k.call(fx, 0);
+                    c.sync();
+                    return X->down<float>(static_cast<std::size_t>(n) * E);
+                };
+                std::vector<double> rd(xref.begin(), xref.end()), sc(xref.size());
+                for (int t = 0; t < n; ++t)
+                    for (int col = 0; col < E; ++col) {
+                        double s = std::fabs(static_cast<double>(x0[static_cast<std::size_t>(t) * E + col])) +
+                                   std::fabs(static_cast<double>(sgv[static_cast<std::size_t>(t)]) * yshv[static_cast<std::size_t>(t) * E + col]);
+                        sc[static_cast<std::size_t>(t) * E + col] = s;
+                    }
+                const auto hinv = inv->down<int>(static_cast<std::size_t>(pairs));
+                for (int t = 0; t < n; ++t)
+                    for (int col = 0; col < E; ++col)
+                        for (int kk = 0; kk < K; ++kk)
+                            sc[static_cast<std::size_t>(t) * E + col] +=
+                                std::fabs(static_cast<double>(wv[static_cast<std::size_t>(t) * K + kk]) *
+                                          yref[static_cast<std::size_t>(hinv[static_cast<std::size_t>(t) * K + kk]) * E + col]);
+                k.verify = [rd, sc](const std::vector<float>& got) {
+                    return cmpTol("x vs moe_combine within f32 reassociation (fast candidate)", got, rd, sc, 1e-6, 1e-7);
+                };
+                runCell(e, k);
+            }
+        }
+    }
+}
+
 }  // namespace
 
-const char* const kBenchFamilies[] = {"gemv", "gemvh", "gemm", "attn", "moe", "gdn"};
+const char* const kBenchFamilies[] = {"gemv", "gemvh", "gemm", "attn", "moe", "gdn", "moep"};
 
 bool benchFamilyKnown(const std::string& f) {
     for (const char* n : kBenchFamilies)
@@ -984,7 +1359,8 @@ void runBench(Ctx& c, const BenchOpts& o) {
         const char* name;
         void (*fn)(Env&);
     };
-    const F fams[] = {{"gemv", benchGemv}, {"gemvh", benchGemvh}, {"gemm", benchGemm}, {"attn", benchAttnDecode}, {"moe", benchMoe}, {"gdn", benchGdn}};
+    const F fams[] = {{"gemv", benchGemv}, {"gemvh", benchGemvh}, {"gemm", benchGemm}, {"attn", benchAttnDecode}, {"moe", benchMoe}, {"gdn", benchGdn},
+                      {"moep", benchMoePrefill}};
     for (const F& f : fams) {
         if (!o.families.count(f.name)) continue;
         std::printf("== bench %s\n", f.name);

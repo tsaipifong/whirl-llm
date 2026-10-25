@@ -10,4 +10,7 @@ add_library(whirl_ops STATIC ${CMAKE_SOURCE_DIR}/src/ops/matmul.cpp ${CMAKE_SOUR
 target_include_directories(whirl_ops PUBLIC ${CMAKE_SOURCE_DIR}/include)
 
 add_executable(whirl-ops-tests ${CMAKE_SOURCE_DIR}/tests/ops/ops_tests.cpp)
+# feat026-moep: CPU replay of the multi-fragment MoE prefill GEMM schedule (kernels/moep_map.h, kMoepGu / kMoepDn)
+add_executable(whirl-moep-sched-tests ${CMAKE_SOURCE_DIR}/tests/kernels/unit/moep_sched_tests.cpp)
+target_include_directories(whirl-moep-sched-tests PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(whirl-ops-tests PRIVATE whirl_ops)

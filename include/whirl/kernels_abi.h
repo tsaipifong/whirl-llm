@@ -175,6 +175,21 @@
 //            tiles, n_tiles): grouped down, = gemm_moe / gemm_moe32 values; grid
 //            n_tile_slots * ceil(E / 128)
 //   moe_gather_fp8(x, perm, u8* x8, float* sx, C, K): per-pos fp8 rows + scales
+//  feat026-moep, Radeon 8060S MoE prefill (optional, gfx1151 only, MXFP4; variants kMoepGu / kMoepDn):
+//   gemm_moepgu_<v>_mxfp4: gemm_moegu_<T> arguments; tiles from moe_tiles with bn = the variant's
+//            BNMAX; 1-D grid n_tile_slots(bn) * ceil(ff / GR); A == gemm_moegu's bits
+//   gemm_moepdn_<v>_mxfp4: gemm_moe32r_<T> arguments; tiles bn = BNMAX; 1-D grid
+//            n_tile_slots(bn) * ceil(rows_e / BM); Y == gemm_moe32 / gemm_moe32r bits
+//   gemm_moepdc_<v>_mxfp4(gemm_moepdn args..., perm, inv, w, sg, ysh, x, int* cnt, K): the same Y,
+//            plus moe_combine(x, ysh, sg, Y, inv, w, rows_e, K) done in the epilogue by the block that
+//            completes each (token, row block); cnt: n * ceil(rows_e / BM) ints, zero before, zero after
+//   moe_combine4: moe_combine arguments, grid (ceil(C / 1024), n), C % 4 == 0; same bits
+//   balance (item f16 intermediates) / fast candidates, never in precise (acceptance: task accuracy):
+//   gemm_moepdh_<v>_mxfp4(W, rb, rows_e, X, f16* Y, ncols, tiles, n_tiles): Y stored as f16
+//   gemm_moepdhc_<v>_mxfp4: gemm_moepdc arguments with f16* Y (fused combine reads f16)
+//   moe_combine4h(x, ysh, sg, const f16* yd, inv, w, C, K): moe_combine4 over f16 yd
+//   gemm_moepda_<v>_mxfp4(W, rb, rows_e, X, ncols, tiles, n_tiles, perm, w, x, K): x += w * y by f32
+//            atomics (no yd; order varies run to run); the shared expert added before by moe_combine4, K = 0
 
 #pragma once
 
@@ -216,6 +231,23 @@ inline constexpr bool gemmrMoeShapeOk(std::uint32_t E, std::uint32_t F) {
     return E > 0 && F > 0 && E % kGemmrMoeBk == 0 && F % kGemmrMoeBk == 0;
 }
 inline constexpr int kMoeBn32 = 32;                                        // gemm_moe32_* token tile
+// feat026-moep variants (kernels/gfx1151/moe_prefill_mt.hip MOEPGU_ENTRY / MOEPDN_ENTRY; keep in step).
+struct MoepGuVariant {
+    const char* name;
+    int gr, bn, bk;  // gate (= up) rows per block, max tokens per tile, k step
+};
+struct MoepDnVariant {
+    const char* name;
+    int bm, wm, bn, bk;  // rows per block, waves along rows, max tokens per tile, k step
+};
+inline constexpr MoepGuVariant kMoepGu[] = {{"g64n64k64", 64, 64, 64},  {"g64n128k64", 64, 128, 64}, {"g64n128k32", 64, 128, 32},
+                                            {"g32n128k64", 32, 128, 64}, {"g64n256k32", 64, 256, 32}, {"g128n128k32", 128, 128, 32}};
+inline constexpr MoepDnVariant kMoepDn[] = {{"m128w4n32k64", 128, 4, 32, 64},  {"m128w4n64k64", 128, 4, 64, 64},
+                                            {"m128w4n128k64", 128, 4, 128, 64}, {"m128w8n128k64", 128, 8, 128, 64},
+                                            {"m64w4n128k64", 64, 4, 128, 64},   {"m128w4n256k32", 128, 4, 256, 32}};
+inline constexpr int kMoepGuN = static_cast<int>(sizeof(kMoepGu) / sizeof(kMoepGu[0]));
+inline constexpr int kMoepDnN = static_cast<int>(sizeof(kMoepDn) / sizeof(kMoepDn[0]));
+inline constexpr int kMoepMinBm = 64;  // smallest BM of kMoepDn: sizes the fused-combine counter buffer
 inline constexpr int kNTypes = 40;           // table size: > every ggml type id used (mxfp4 = 39)
 
 // Layout of the small device control buffer (int32 slots) used by the
@@ -571,6 +603,14 @@ struct MoeKernels {
     F gemm8_moe{}, gemm8_moe32{}, gemm8_moeh{}, gemm8_moe32h{}, moe_gather_fp8{};
     F gemm8r_moe{}, gemm8r_moe32{}, gemm8r_moeh{}, gemm8r_moe32h{};  // optional
     F gemmr_moegu{}, gemmr_moegu32{}, gemmr_moedn{}, gemmr_moedn32{};  // optional (MXFP4, f16 activations)
+    // feat026-moep (optional, gfx1151, MXFP4): multi-fragment expert GEMMs per variant, fused-combine down twins,
+    // the vectorised combine
+    std::array<F, kMoepGuN> moep_gu{};
+    std::array<F, kMoepDnN> moep_dn{}, moep_dc{};
+    F moe_combine4{};
+    // balance / fast candidates (f16 expert outputs; atomic scatter)
+    std::array<F, kMoepDnN> moep_dh{}, moep_dhc{}, moep_da{};
+    F moe_combine4h{};
 };
 
 struct DeltaNetKernels {

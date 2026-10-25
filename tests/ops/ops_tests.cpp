@@ -570,6 +570,75 @@ void testOpsMoe() {
     p.n = 512;
     CHECK(ops::chooseMoe(p, bn64, k97, k97.silu_mul_x8h).bn == 64);
     CHECK(ops::moeTile(512, 8, 256) == 32 && ops::moeTile(4096, 8, 256) == 64);
+    // feat026-moep (opt-in): the multi-fragment expert GEMMs on the 8060S only when both variants are named and in the
+    // code object; the combine choice (moe_combine / moe_combine4 / fused into the down epilogue)
+    {
+        kn::KernelTable km = k8;
+        km.moep_gu[1] = tag("gemm_moepgu_g64n128k64_mxfp4");
+        km.moep_dn[2] = tag("gemm_moepdn_m128w4n128k64_mxfp4");
+        km.moep_dc[2] = tag("gemm_moepdc_m128w4n128k64_mxfp4");
+        km.moe_combine4 = tag("moe_combine4");
+        CHECK(std::string(kn::kMoepGu[1].name) == "g64n128k64" && std::string(kn::kMoepDn[2].name) == "m128w4n128k64");
+        ops::MoeProblem pm = p;
+        pm.n = 4096;
+        pm.cnt_buf = true;
+        ops::MoeFlags fm = bal;
+        // off (default): the fused_gu plan, moe_combine on (E / 256, n)
+        pl = ops::chooseMoe(pm, fm, km, km.silu_mul_x8h);
+        CHECK(pl.kind == ops::MoePrefillKind::fused_gu && !pl.comb4 && !pl.comb_fused && pl.comb_grid.x == 8 && pl.comb_grid.y == 4096);
+        fm.moep_gu = 1;
+        fm.moep_dn = 2;
+        pl = ops::chooseMoe(pm, fm, km, km.silu_mul_x8h);
+        CHECK(pl.kind == ops::MoePrefillKind::moep && pl.bits == ops::MoeBits::moe_f16_gemm && pl.bn == 128 && pl.gu_bn == 128);
+        CHECK(pl.max_tiles == 4096 * 8 / 128 + 256 && pl.max_tiles64 == 4096 * 8 / 128 + 256 && pl.gu_pgrid.x == pl.max_tiles64 * 8 &&
+              pl.dn_pgrid.x == pl.max_tiles * 16);
+        CHECK(nameOf(pl.fgu) == "gemm_moepgu_g64n128k64_mxfp4" && nameOf(pl.fdn) == "gemm_moepdn_m128w4n128k64_mxfp4" && !pl.comb_fused);
+        fm.moep_comb = 2;
+        pl = ops::chooseMoe(pm, fm, km, km.silu_mul_x8h);
+        CHECK(pl.comb_fused && !pl.comb4 && nameOf(pl.fdn) == "gemm_moepdc_m128w4n128k64_mxfp4");
+        fm.moep_comb = 1;
+        pl = ops::chooseMoe(pm, fm, km, km.silu_mul_x8h);
+        CHECK(!pl.comb_fused && pl.comb4 && pl.comb_grid.x == 2 && pl.comb_grid.y == 4096);
+        // not bit-identical: f16 expert outputs (balance item), atomic scatter (fast candidate); never in precise
+        km.moep_dh[2] = tag("gemm_moepdh_m128w4n128k64_mxfp4");
+        km.moep_dhc[2] = tag("gemm_moepdhc_m128w4n128k64_mxfp4");
+        km.moep_da[2] = tag("gemm_moepda_m128w4n128k64_mxfp4");
+        km.moe_combine4h = tag("moe_combine4h");
+        fm.moep_comb = 3;
+        pl = ops::chooseMoe(pm, fm, km, km.silu_mul_x8h);
+        CHECK(pl.ydh && pl.comb4 && !pl.comb_fused && pl.bits == ops::MoeBits::moe_lossy_gemm && nameOf(pl.fdn) == "gemm_moepdh_m128w4n128k64_mxfp4");
+        fm.moep_comb = 4;
+        pl = ops::chooseMoe(pm, fm, km, km.silu_mul_x8h);
+        CHECK(pl.ydh && pl.comb_fused && pl.bits == ops::MoeBits::moe_lossy_gemm && nameOf(pl.fdn) == "gemm_moepdhc_m128w4n128k64_mxfp4");
+        fm.moep_comb = 5;
+        pl = ops::chooseMoe(pm, fm, km, km.silu_mul_x8h);
+        CHECK(pl.comb_atomic && !pl.comb_fused && pl.comb_grid.x == 2 && nameOf(pl.fdn) == "gemm_moepda_m128w4n128k64_mxfp4");
+        ops::MoeFlags fp = pre;  // precise: the lossy combines are ignored -> bit-identical plain down + moe_combine
+        fp.moep_gu = 1;
+        fp.moep_dn = 2;
+        for (const unsigned cm : {3u, 4u, 5u}) {
+            fp.moep_comb = cm;
+            pl = ops::chooseMoe(pm, fp, km, km.silu_mul_x8h);
+            CHECK(pl.kind == ops::MoePrefillKind::moep && pl.bits == ops::MoeBits::moe_f16_gemm && !pl.ydh && !pl.comb_atomic && !pl.comb_fused &&
+                  nameOf(pl.fdn) == "gemm_moepdn_m128w4n128k64_mxfp4");
+        }
+        fp.moep_comb = 2;  // the bit-identical fused combine is allowed in precise
+        CHECK(ops::chooseMoe(pm, fp, km, km.silu_mul_x8h).comb_fused);
+        // no counter buffer: the fused combine falls back to the plain down twin + moe_combine
+        fm.moep_comb = 2;
+        pm.cnt_buf = false;
+        pl = ops::chooseMoe(pm, fm, km, km.silu_mul_x8h);
+        CHECK(pl.kind == ops::MoePrefillKind::moep && !pl.comb_fused && nameOf(pl.fdn) == "gemm_moepdn_m128w4n128k64_mxfp4");
+        // a variant not in the code object: off
+        fm.moep_gu = 0;
+        CHECK(ops::chooseMoe(pm, fm, km, km.silu_mul_x8h).kind == ops::MoePrefillKind::fused_gu);
+        // gfx1201 table (no moep kernels): unchanged fp8 plan
+        fm.moep_gu = 1;
+        CHECK(ops::chooseMoe(pm, fm, k97, k97.silu_mul_x8h).kind == ops::MoePrefillKind::fp8);
+        // non-MXFP4 down experts: off
+        pm.down_ty = GgmlType::q8_0;
+        CHECK(ops::chooseMoe(pm, fm, km, km.silu_mul_x8h).kind != ops::MoePrefillKind::moep);
+    }
 }
 
 // ---- per-op kernel tables (K-5): KernelTable is the union of the op tables; each choice reads only its own

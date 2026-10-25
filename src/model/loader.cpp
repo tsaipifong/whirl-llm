@@ -389,6 +389,7 @@ u64 bufferBytes(const Config& cfg, u32 Bq, u64 ffs, u64 max_elems, u32 fd_splits
         n += B * Kx * F * f4 * 2;                         // moe_yg, moe_yu
         n += B * Kx * E * f4;                             // moe_yd
         n += B * Kx * f4;                                 // moe_sx
+        n += B * ((E + kernels::kMoepMinBm - 1) / kernels::kMoepMinBm) * 4 + 16;  // moe_cnt (feat026-moep)
     }
     return n;
 }
@@ -538,6 +539,18 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
     m.moe_mxw = envFlag("MOE_MXW", true);
     m.moe_wide = envFlag("MOE_WIDE", false);  // MoE wide verify (balance / fast, opt-in), see wideCapable
     m.moe_rbf = envFlag("MOE_RBF", true);
+    // feat026-moep variants by name (unknown name -> off, with a note)
+    if (const auto v = envGet("MOEP_GU")) {
+        for (int i = 0; i < kernels::kMoepGuN; ++i)
+            if (*v == kernels::kMoepGu[i].name) m.moep_gu = i;
+        if (m.moep_gu < 0) std::fprintf(stderr, "whirl: WHIRL_MOEP_GU=%s: unknown variant (off)\n", v->c_str());
+    }
+    if (const auto v = envGet("MOEP_DN")) {
+        for (int i = 0; i < kernels::kMoepDnN; ++i)
+            if (*v == kernels::kMoepDn[i].name) m.moep_dn = i;
+        if (m.moep_dn < 0) std::fprintf(stderr, "whirl: WHIRL_MOEP_DN=%s: unknown variant (off)\n", v->c_str());
+    }
+    if (const auto v = envGet("MOEP_COMB")) m.moep_comb = static_cast<std::uint32_t>(std::strtoul(v->c_str(), nullptr, 10));
     m.layers.resize(cfg.n_layer);
     m.kcache.assign(cfg.n_layer, 0);
     m.vcache.assign(cfg.n_layer, 0);
@@ -754,6 +767,7 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
         m.moe_yu = m.alloc(B * Kx * F * f4);
         m.moe_yd = m.alloc(B * Kx * E * f4);
         m.moe_sx = m.alloc(B * Kx * f4);
+        m.moe_cnt = m.allocZero(B * ((E + kernels::kMoepMinBm - 1) / kernels::kMoepMinBm) * 4 + 16);
     }
     // sizing self-check: the pre-load estimate (bufferBytes, the server's auto-shrink) must cover what was just
     // allocated; a shortfall means an allocation was added without updating the estimate
