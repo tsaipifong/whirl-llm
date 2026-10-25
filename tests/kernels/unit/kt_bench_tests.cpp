@@ -625,9 +625,45 @@ static void test_sha256() {
 
 static void test_roof() {
     const Roof r = roofFor("gfx1201"), s = roofFor("gfx1151");
-    check("roof: R9700 640 GB/s, 130 TF/s practical f16", r.bw == 640e9 && r.f16_prac == 130e12);
-    check("roof: 8060S 256 GB/s, 22 TF/s practical f16 (KLIB-1)", s.bw == 256e9 && s.f16_prac == 22e12);
-    check("roof: unknown arch -> zeros", roofFor("gfx90a").bw == 0);
+    // mt-p2-roof: measured roofs with sources (the first version: 130 unsourced / 22 power-limited)
+    check("roof: R9700 640 GB/s spec, f16 WMMA 189, practical GEMM 130 (PEAK-1)", r.bw == 640e9 && r.f16 == 189e12 && r.f16_prac == 130e12);
+    check("roof: 8060S 256 GB/s spec, f16 WMMA 43.7, practical GEMM 34.8 (PROF-8S), never 22",
+          s.bw == 256e9 && s.f16 == 43.7e12 && s.f16_prac == 34.8e12 && s.f16_prac != 22e12);
+    check("roof: unknown arch -> zeros", roofFor("gfx90a").bw == 0 && roofTable("gfx90a").empty());
+    for (const char* a : {"gfx1201", "gfx1151"})
+        for (const RoofRef& x : roofTable(a)) {
+            const bool meas = x.kind == "measured";
+            check(std::string("roof table ") + a + " " + x.key + ": source, date, driver, status filled; measured -> to re-measure",
+                  !x.src.empty() && !x.date.empty() && !x.driver.empty() && !x.status.empty() &&
+                      (!meas || (x.status.find("to re-measure") != std::string::npos && x.driver.find("32.0.32015.7029") != std::string::npos)),
+                  x.src + " | " + x.status);
+        }
+    check("roof: fp8 work -> fp8 WMMA 387 on the R9700, none on the 8060S",
+          roofsFor("gfx1201", "fp8").primary.value == 387e12 && !roofsFor("gfx1151", "fp8").primary.ok());
+    check("roof: bw work -> spec primary, measured secondary", roofsFor("gfx1151", "bw").primary.key == "bw" &&
+                                                                  roofsFor("gfx1151", "bw").secondary.value == 238e9);
+    CellInfo w;
+    w.flops = 1;
+    check("roof: cellRoofWork flops -> f16, bytes -> bw, explicit fp8 wins", cellRoofWork(w) == "f16" && (w.roof_work = "fp8", cellRoofWork(w) == "fp8"));
+    CellInfo wb;
+    wb.bytes = 1;
+    check("roof: cellRoofWork bytes -> bw", cellRoofWork(wb) == "bw");
+    // an fp8 cell is judged against the fp8 roof, not f16
+    CellStats cs;
+    cs.samples = {1e6, 1e6, 1e6};
+    cs.st = whirl::bench::summarize(cs.samples);
+    cs.stop_reason = "rel<=1%";
+    CellInfo f8;
+    f8.family = "gemm8";
+    f8.kernel = "gemm8t_c0";
+    f8.gpu_arch = "gfx1201";
+    f8.flops = 2e14;  // 200 TOPS
+    f8.roof_work = "fp8";
+    const std::string j = whirl::bench::to_json(cellRow(f8, cs, "v"));
+    check("roof: fp8 cell pct_of_roof vs 387, roof fp8_wmma, roof2 fp8_sust",
+          j.find("\"roof\": \"fp8_wmma\"") != std::string::npos && j.find("\"roof2\": \"fp8_sust\"") != std::string::npos &&
+              j.find("\"pct_of_roof\": " + whirl::bench::json_number(100.0 * 2e14 / 387e12)) != std::string::npos,
+          j);
 }
 
 static std::string rowJson() {
@@ -652,6 +688,50 @@ static std::string rowJson() {
     ci.gpu_pci = "pci:196:0";
     ci.bytes = 47349760;  // 81.5 us -> 581 GB/s
     return whirl::bench::to_json(cellRow(ci, cs, "0.2.5-dev"));
+}
+
+// mt-p2-roof (audit internal_docs\KERNEL_TECHNIQUE_AUDIT.md sec. 1, sec. 6 #1): the 8060S GEMM roof was the power-limited
+// PEAK-1 22 TF/s and the R9700 130 TF/s had no source; every roof must print its source. Written from the audit
+// text, against the row JSON only (compiles on the unfixed code).
+static double jnum(const std::string& j, const std::string& key) {
+    const std::string k = "\"" + key + "\": ";
+    const std::size_t p = j.find(k);
+    return p == std::string::npos ? -1 : std::atof(j.c_str() + p + k.size());
+}
+static std::string flopRow(const std::string& arch, double flops, double med_us, const std::string& kernel = "gemmhq_mxfp4") {
+    CellStats cs;
+    cs.samples = {med_us, med_us, med_us};
+    cs.st = whirl::bench::summarize(cs.samples);
+    cs.stop_reason = "rel<=1%";
+    CellInfo ci;
+    ci.family = "gemm";
+    ci.kernel = kernel;
+    ci.cell = "swift.blk.0.ffn_gate.n2048";
+    ci.gpu_arch = arch;
+    ci.flops = flops;
+    return whirl::bench::to_json(cellRow(ci, cs, "v"));
+}
+static void test_roof_denominators() {
+    // 8060S: 20 TF/s (flops 2e13 in 1e6 us = 1 s)
+    const std::string s = flopRow("gfx1151", 2e13, 1e6);
+    const double ps = jnum(s, "pct_of_roof");
+    check("roof fix: 8060S f16 cell is not judged against the power-limited 22 TF/s (PEAK-1)", ps > 0 && std::fabs(ps - 100.0 * 20 / 22) > 1, num(ps));
+    check("roof fix: 8060S f16 primary roof = measured f16 WMMA 43.7 TF/s (FAST-0)", std::fabs(ps - 100.0 * 20 / 43.7) < 1e-6, num(ps));
+    check("roof fix: 8060S f16 second roof = GEMM 34.8 TF/s at RGP clock (PROF-8S)", std::fabs(jnum(s, "pct_of_roof2") - 100.0 * 20 / 34.8) < 1e-6, s);
+    const std::string r = flopRow("gfx1201", 1e14, 1e6);  // 100 TF/s
+    check("roof fix: R9700 f16 primary roof = measured f16 WMMA 189 TF/s (FAST-0)", std::fabs(jnum(r, "pct_of_roof") - 100.0 * 100 / 189) < 1e-6, r);
+    check("roof fix: R9700 130 TF/s kept only as the cited practical roof (PEAK-1 hipBLASLt)",
+          std::fabs(jnum(r, "pct_of_roof2") - 100.0 * 100 / 130) < 1e-6 && r.find("PEAK-1") != std::string::npos, r);
+    for (const std::string& j : {s, r, rowJson()}) {
+        check("roof fix: row names its roof source and status", j.find("\"roof_src\": \"") != std::string::npos &&
+                                                                 j.find("\"roof_status\": \"") != std::string::npos &&
+                                                                 j.find("\"roof_value\": ") != std::string::npos,
+              j);
+    }
+    check("roof fix: measured roofs from the old driver say 'to re-measure'", s.find("to re-measure") != std::string::npos, s);
+    const std::string b = rowJson();
+    check("roof fix: bandwidth cell also reports the measured bandwidth (8060S 238 GB/s)",
+          std::fabs(jnum(b, "pct_of_roof2") - 100.0 * (47349760.0 / 81.5e-6 / 1e9) / 238) < 1e-6, b);
 }
 
 static void test_rows() {
@@ -986,6 +1066,7 @@ int main(int argc, char** argv) {
         test_sha256();
         test_roof();
         test_rows();
+        test_roof_denominators();
         test_jsonl_file(emit);
     } catch (const std::exception& e) {
         check(std::string("exception: ") + e.what(), false);

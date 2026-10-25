@@ -185,7 +185,28 @@ int rotationCopies(std::uint64_t ws_bytes, std::uint64_t target_bytes, std::uint
 // DESIGN A1 rotation target: > 512 MB on the R9700 (64 MB IC), > 2 GB on the 8060S (32 MB MALL)
 std::uint64_t rotationTarget(const std::string& gcn_arch);
 
-// Hardware ceilings (tools\quick\sol.py HW, audit\KLIB-1.md): bandwidth peak / practical, f16 peak / practical.
+// Hardware ceilings with their sources (mt-p2-roof, progress\mt-p2-roof.PRIOR_ART.md). Every roof names where its value
+// comes from, when and on which driver it was measured, and whether it must be re-measured (all measured roofs are
+// from the driver before 32.0.32015.7029, installed 2026-10-26; no new numbers were made up). The first version used
+// the power-limited PEAK-1 22 TF/s for the 8060S and an unsourced 130 TF/s for the R9700 (audit KERNEL_TECHNIQUE_AUDIT
+// sec. 1, sec. 6 #1).
+struct RoofRef {
+    std::string key;    // bw (spec; same key as the first rows), bw_meas, f16_wmma, f16_gemm, fp8_wmma, fp8_sust
+    double value = 0;   // B/s or FLOP/s; 0 = none on this arch
+    std::string kind;   // spec / measured / external
+    std::string date, driver, src, status;
+    bool ok() const { return value > 0; }
+};
+// primary (pct_of_roof) and secondary (pct_of_roof2) roof of one kind of work:
+//   "bw"  bytes:            spec peak bandwidth / measured streaming bandwidth
+//   "f16" f16 WMMA FLOPs:   measured register-only f16 WMMA peak / measured practical f16 GEMM
+//   "fp8" fp8 WMMA FLOPs:   measured register-only fp8 WMMA peak / sustained prefill-clock fp8 (gfx1201 only)
+struct CellRoofs {
+    RoofRef primary, secondary;
+};
+CellRoofs roofsFor(const std::string& gcn_arch, const std::string& work);
+std::vector<RoofRef> roofTable(const std::string& gcn_arch);  // every roof of the arch (printed once per run)
+// Legacy view (values of roofsFor): bandwidth spec / measured, f16 WMMA peak / practical GEMM.
 struct Roof {
     double bw = 0, bw_prac = 0, f16 = 0, f16_prac = 0;
 };
@@ -194,19 +215,23 @@ Roof roofFor(const std::string& gcn_arch);
 std::string sha256Hex(const void* data, std::size_t n);
 
 // One JSONL row for a cell (metric kern.<family>.<kernel>, unit us, value = median). bytes / flops = work per launch
-// (0 = unknown); they add gbps / tflops and pct_of_roof (bandwidth for bytes, practical f16 for flops) as extra keys.
+// (0 = unknown); they add gbps / tflops, pct_of_roof + roof / roof_value / roof_src / roof_status (primary roof) and
+// pct_of_roof2 + roof2 / roof2_value / roof2_src / roof2_status (secondary) as extra keys. roof_work picks the roof
+// kind ("bw", "f16", "fp8"; empty: "bw" for bytes, "f16" for flops).
 struct CellInfo {
-    std::string family, kernel, cell, shape, settings, code_hash, gpu_arch, gpu_pci, started, variant;
+    std::string family, kernel, cell, shape, settings, code_hash, gpu_arch, gpu_pci, started, variant, roof_work;
     double bytes = 0, flops = 0;
     std::int64_t launches_per_call = 1;
 };
+// the roof kind of a cell: roof_work, else "bw" for bytes, "f16" for flops
+std::string cellRoofWork(const CellInfo& ci);
 whirl::bench::Row cellRow(const CellInfo& ci, const CellStats& cs, const std::string& tool_ver);
 // the paired ratio row of an A/B (metric kern.<family>.<kernel>.ab_ratio, unit ratio)
 whirl::bench::Row abRow(const CellInfo& ci, const AbStats& ab, const std::string& tool_ver, const std::string& code_hash_b);
 
 // ---------------------------------------------------------------- whirl-kernel-test --bench (bench_kernels.cpp)
 struct BenchOpts {
-    std::set<std::string> families;      // gemv gemvh gemm attn moe gdn
+    std::set<std::string> families;      // gemv gemvh gemm attn moe gdn attnp gemm8 moep
     std::string jsonl;                   // --jsonl FILE (appended)
     std::string ab_hsaco;                // --ab HSACO
     BenchCfg cfg;
@@ -217,7 +242,7 @@ struct BenchOpts {
     std::string state = "burst";         // declared power state (DESIGN (d))
     std::string tool_ver, code_hash, code_hash_b, gpu_arch, gpu_pci;
 };
-extern const char* const kBenchFamilies[6];
+extern const char* const kBenchFamilies[9];
 bool benchFamilyKnown(const std::string& f);
 struct Ctx;
 void runBench(Ctx& c, const BenchOpts& o);

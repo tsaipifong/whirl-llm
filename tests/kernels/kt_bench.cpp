@@ -525,11 +525,54 @@ std::uint64_t rotationTarget(const std::string& arch) {
     return 512ull << 20;
 }
 
-Roof roofFor(const std::string& arch) {
-    // tools\quick\sol.py HW (audit\KGAP-1.md, PEAK-1.md, KLIB-1.md): 8060S practical f16 22 TF/s (KLIB-1 §2)
-    if (arch.rfind("gfx1201", 0) == 0) return {640e9, 618e9, 189e12, 130e12};
-    if (arch.rfind("gfx1151", 0) == 0) return {256e9, 238e9, 59.4e12, 22e12};
+// Sources: progress\mt-p2-roof.PRIOR_ART.md (table "Local measured peaks"). Measured roofs keep the date and driver of
+// their measurement; "to re-measure" until a run on driver 32.0.32015.7029 (2026-10-26) replaces them.
+std::vector<RoofRef> roofTable(const std::string& arch) {
+    const std::string old_drv = "before 32.0.32015.7029 (exact version not recorded)";
+    const std::string remeasure = "to re-measure (driver 32.0.32015.7029 since 2026-10-26)";
+    if (arch.rfind("gfx1201", 0) == 0)
+        return {
+            {"bw", 640e9, "spec", "-", "-", "R9700 spec 640 GB/s (docs\\guide\\en\\kernels.md:26)", "spec"},
+            {"bw_meas", 615e9, "measured", "before 2026-10-26", old_drv,
+             "pure-read kernel 604-626 GB/s (midpoint), > 512 MB rotated (docs\\guide\\en\\kernels.md:26)", remeasure},
+            {"f16_wmma", 189e12, "measured", "2026-10-07", old_drv, "FAST-0 register-only f16 WMMA 189 TF/s (audit\\FAST-0_wmma.md:22-33)", remeasure},
+            {"f16_gemm", 130e12, "measured", "2026-10-08", old_drv,
+             "PEAK-1 hipBLASLt f16 GEMM 125-136 TF/s (audit\\PEAK-1.md:73-74; progress\\amd-unlock-research.PRIOR_ART.md:55)", remeasure},
+            {"fp8_wmma", 387e12, "measured", "2026-10-07", old_drv, "FAST-0 register-only fp8 WMMA 387 TOPS (audit\\FAST-0_wmma.md:30)", remeasure},
+            {"fp8_sust", 272.5e12, "external", "-", "-",
+             "fp8 WMMA ~260-285 TOPS sustained at the ~2.4 GHz prefill clock (midpoint; r9700-stack notes, docs\\guide\\en\\kernels.md:25)",
+             "external figure, not measured here"},
+        };
+    if (arch.rfind("gfx1151", 0) == 0)
+        return {
+            {"bw", 256e9, "spec", "-", "-", "8060S spec 256 GB/s LPDDR5X-8000 x 256 bit (audit\\PROF-8S.md:134)", "spec"},
+            {"bw_meas", 238e9, "measured", "before 2026-10-18", old_drv, "hipMalloc streaming 238 GB/s (audit\\PROF-8S.md:134, KGAP-1)", remeasure},
+            {"f16_wmma", 43.7e12, "measured", "2026-10-07", old_drv,
+             "FAST-0 register-only f16 WMMA 43.7 TF/s (audit\\FAST-0_wmma.md:22-33; before the 80 W setting of 2026-10-15)", remeasure},
+            {"f16_gemm", 34.8e12, "measured", "2026-10-18", old_drv,
+             "PROF-8S gemm_c2_f16 34.8 TF/s at RGP peak clock, 80 W (audit\\PROF-8S.md:92,136); replaces PEAK-1 22 TF/s (power-limited)", remeasure},
+            {"fp8_wmma", 0, "none", "-", "-", "no fp8 WMMA on gfx1151 (audit\\FAST-0_wmma.md)", "none"},
+            {"fp8_sust", 0, "none", "-", "-", "no fp8 WMMA on gfx1151", "none"},
+        };
     return {};
+}
+
+CellRoofs roofsFor(const std::string& arch, const std::string& work) {
+    const std::vector<RoofRef> t = roofTable(arch);
+    auto get = [&t](const char* key) {
+        for (const RoofRef& r : t)
+            if (r.key == key) return r;
+        return RoofRef{};
+    };
+    if (work == "bw") return {get("bw"), get("bw_meas")};
+    if (work == "f16") return {get("f16_wmma"), get("f16_gemm")};
+    if (work == "fp8") return {get("fp8_wmma"), get("fp8_sust")};
+    return {};
+}
+
+Roof roofFor(const std::string& arch) {
+    const CellRoofs b = roofsFor(arch, "bw"), f = roofsFor(arch, "f16");
+    return {b.primary.value, b.secondary.value, f.primary.value, f.secondary.value};
 }
 
 // ---------------------------------------------------------------- SHA-256 (FIPS 180-4)
@@ -600,6 +643,11 @@ std::string jarr(const std::vector<double>& v) {
 std::string withKv(std::string s, const std::string& kv) { return s.empty() ? kv : s + ";" + kv; }
 }  // namespace
 
+std::string cellRoofWork(const CellInfo& ci) {
+    if (!ci.roof_work.empty()) return ci.roof_work;
+    return ci.bytes > 0 ? "bw" : "f16";
+}
+
 whirl::bench::Row cellRow(const CellInfo& ci, const CellStats& cs, const std::string& tool_ver) {
     namespace wb = whirl::bench;
     wb::Row r;
@@ -639,24 +687,32 @@ whirl::bench::Row cellRow(const CellInfo& ci, const CellStats& cs, const std::st
     if (cs.cooldown_s > 0) r.extra.push_back({"cooldown_s", wb::json_number(cs.cooldown_s)});
     r.extra.push_back({"rel_iqr", wb::json_number(cs.rel())});
     if (!cs.error.empty()) r.extra.push_back({"error", wb::json_string(cs.error)});
-    const Roof roof = roofFor(ci.gpu_arch);
     if (cs.ok() && cs.st.median > 0) {
+        double rate = 0;  // B/s or FLOP/s
         if (ci.bytes > 0) {
             const double gbps = ci.bytes / cs.st.median / 1e3;
+            rate = gbps * 1e9;
             r.extra.push_back({"bytes", wb::json_number(ci.bytes)});
             r.extra.push_back({"gbps", wb::json_number(gbps)});
-            if (roof.bw > 0) {
-                r.extra.push_back({"pct_of_roof", wb::json_number(100.0 * gbps * 1e9 / roof.bw)});
-                r.extra.push_back({"roof", wb::json_string("bw")});
-            }
         } else if (ci.flops > 0) {
             const double tf = ci.flops / cs.st.median / 1e6;
+            rate = tf * 1e12;
             r.extra.push_back({"flops", wb::json_number(ci.flops)});
             r.extra.push_back({"tflops", wb::json_number(tf)});
-            if (roof.f16_prac > 0) {
-                r.extra.push_back({"pct_of_roof", wb::json_number(100.0 * tf * 1e12 / roof.f16_prac)});
-                r.extra.push_back({"roof", wb::json_string("f16_prac")});
-            }
+        }
+        if (rate > 0) {
+            const CellRoofs rf = roofsFor(ci.gpu_arch, cellRoofWork(ci));
+            auto put = [&r, rate](const RoofRef& x, const char* sfx) {
+                if (!x.ok()) return;
+                const std::string s = sfx;
+                r.extra.push_back({"pct_of_roof" + s, wb::json_number(100.0 * rate / x.value)});
+                r.extra.push_back({"roof" + s, wb::json_string(x.key)});
+                r.extra.push_back({"roof" + s + "_value", wb::json_number(x.value)});
+                r.extra.push_back({"roof" + s + "_src", wb::json_string(x.src + "; " + x.kind + " " + x.date + ", driver " + x.driver)});
+                r.extra.push_back({"roof" + s + "_status", wb::json_string(x.status)});
+            };
+            put(rf.primary, "");
+            put(rf.secondary, "2");
         }
     }
     r.extra.push_back({"samples", jarr(cs.samples)});
