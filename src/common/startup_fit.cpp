@@ -3,6 +3,8 @@
 
 #include "whirl/startup_fit.h"
 
+#include "whirl/json.h"
+
 #include <algorithm>
 #include <format>
 
@@ -176,10 +178,7 @@ std::string startupJson(const StartupInfo& s) {
                                 s.display_attached ? "true" : "false");
     for (std::size_t k = 0; k < s.adjusted.size(); ++k) {
         j += k ? ",\"" : "\"";
-        for (const char ch : s.adjusted[k]) {
-            if (ch == '"' || ch == '\\') j += '\\';
-            j += ch;
-        }
+        json::appendEscaped(j, s.adjusted[k]);  // bug-gatenul: control bytes as \u00XX too (RFC 8259 7)
         j += "\"";
     }
     return j + "]}";
