@@ -3,6 +3,7 @@
 #include "log.h"
 
 #include "whirl/common.h"
+#include "whirl/thread_annotations.h"
 
 #include <cstdio>
 #include <filesystem>
@@ -17,11 +18,11 @@ namespace whirl::server {
 
 namespace {
 
-std::mutex g_mutex;
-std::FILE* g_file = nullptr;
-bool g_console = true;
-Log::Hook g_hook = nullptr;
-void* g_hook_ctx = nullptr;
+whirl::Mutex g_mutex;
+std::FILE* g_file WH_GUARDED_BY(g_mutex) = nullptr;
+bool g_console WH_GUARDED_BY(g_mutex) = true;
+Log::Hook g_hook WH_GUARDED_BY(g_mutex) = nullptr;
+void* g_hook_ctx WH_GUARDED_BY(g_mutex) = nullptr;
 
 std::string stamp() {
 #ifdef _WIN32
@@ -44,24 +45,24 @@ void Log::open(const std::string& path) {
     }
     std::FILE* f = _wfopen(p.c_str(), L"ab");
     if (!f) throw std::runtime_error("cannot open log file " + path);
-    std::lock_guard<std::mutex> lk(g_mutex);
+    whirl::MutexLock lk(g_mutex);
     if (g_file) std::fclose(g_file);
     g_file = f;
 }
 
 void Log::close() {
-    std::lock_guard<std::mutex> lk(g_mutex);
+    whirl::MutexLock lk(g_mutex);
     if (g_file) std::fclose(g_file);
     g_file = nullptr;
 }
 
 void Log::setConsole(bool on) {
-    std::lock_guard<std::mutex> lk(g_mutex);
+    whirl::MutexLock lk(g_mutex);
     g_console = on;
 }
 
 void Log::setHook(Hook h, void* ctx) {
-    std::lock_guard<std::mutex> lk(g_mutex);
+    whirl::MutexLock lk(g_mutex);
     g_hook = h;
     g_hook_ctx = ctx;
 }
@@ -74,7 +75,7 @@ void Log::line(char level, std::string_view msg) {
     l += ' ';
     l += msg;
     l += '\n';
-    std::lock_guard<std::mutex> lk(g_mutex);
+    whirl::MutexLock lk(g_mutex);
     if (g_console) {
         std::fwrite(l.data(), 1, l.size(), stderr);
         std::fflush(stderr);

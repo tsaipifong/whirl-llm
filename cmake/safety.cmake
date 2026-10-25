@@ -43,3 +43,16 @@ if(WHIRL_ANALYZE)
   endforeach()
   message(STATUS "WHIRL: MSVC /analyze build")
 endif()
+
+# arch025-Q4: Clang thread-safety analysis (release_gate step cpu_tsa). Configure a separate build directory (build-tsa) with
+# clang-cl as the C++ compiler and WHIRL_WITH_HIP=OFF, and build whirl_server_core / whirl_tier_core
+# (tools/safety/tsa/run_tsa_build.bat). Only the thread-safety diagnostics are on, and they are errors; the annotations are in
+# include/whirl/thread_annotations.h (empty under MSVC, so the product build does not change).
+option(WHIRL_TSA "clang-cl -Wthread-safety -Werror=thread-safety analysis build (separate build directory)" OFF)
+if(WHIRL_TSA)
+  if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    message(FATAL_ERROR "WHIRL_TSA: needs clang-cl as CMAKE_CXX_COMPILER (found ${CMAKE_CXX_COMPILER_ID})")
+  endif()
+  add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:/clang:-Wno-everything;/clang:-Wthread-safety;/clang:-Werror=thread-safety>")
+  message(STATUS "WHIRL: clang thread-safety analysis build (-Wthread-safety -Werror=thread-safety)")
+endif()

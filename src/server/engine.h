@@ -29,6 +29,7 @@
 #include "whirl/mem_governor.h"
 #include "whirl/model.h"
 #include "whirl/prefill_schedule.h"
+#include "whirl/thread_annotations.h"
 #include "whirl/tokenizer.h"
 #include "whirl/wddm_watch.h"
 
@@ -477,7 +478,7 @@ private:
     std::string vramNote();
     // idle: one sample a minute so /health and the spill-over line stay current; returns the next due time
     std::optional<TimePoint> vramIdleTick();
-    void abortQueued(std::unique_lock<std::mutex>& lk);
+    void abortQueued(whirl::UniqueLock& lk) WH_REQUIRES(q_mutex_);
     // v0.2.2.2 memory governor
     void govTick(const wddmwatch::Sample& s);   // after each sample: decide (and log the decisions)
     void govApply();                            // at a safe point of runLoop (no forward in flight): act
@@ -542,17 +543,17 @@ private:
     std::uint64_t conv_bytes_ = 0, ssm_bytes_ = 0;
     std::vector<Slot> slots_;
     // queue
-    std::mutex q_mutex_;
+    whirl::Mutex q_mutex_;
     std::condition_variable q_cond_;
-    std::deque<Job*> queue_;
-    std::uint32_t n_active_ = 0;
+    std::deque<Job*> queue_ WH_GUARDED_BY(q_mutex_);
+    std::uint32_t n_active_ WH_GUARDED_BY(q_mutex_) = 0;
     std::atomic<std::uint32_t> n_building_{0};
     std::atomic<std::uint64_t> next_id_{1};
     IdGen ids_;         // response / tool-call ids and default sampling seeds (one stream)
     ResponseCtx rcx_;   // what each slot's StreamState reads (model id, tokenizer, ids_)
-    bool stop_ = false;
-    std::vector<std::function<void()>> loop_calls_;  // under q_mutex_: runOnLoop (tests)
-    void runLoopCalls(std::unique_lock<std::mutex>& lk);
+    bool stop_ WH_GUARDED_BY(q_mutex_) = false;
+    std::vector<std::function<void()>> loop_calls_ WH_GUARDED_BY(q_mutex_);  // runOnLoop (tests)
+    void runLoopCalls(whirl::UniqueLock& lk) WH_REQUIRES(q_mutex_);
     // batch statistics
     TimePoint stat_t0_{};
     std::uint64_t stat_tokens_ = 0, stat_cycles_ = 0, stat_rows_ = 0, stat_slots_ = 0, stat_drafts_ = 0,
@@ -567,9 +568,9 @@ private:
     double vram_idle_s_ = 60.0;
     std::uint64_t prefill_tok_cum_ = 0;  // all slots, since start (DecodeWatch: was another request prefilling)
     bool vram_warn_ = false;
-    std::mutex vram_mu_;  // vram_last_ / vram_spill_ for health() (HTTP threads)
-    wddmwatch::Sample vram_last_;
-    bool vram_spill_ = false;
+    whirl::Mutex vram_mu_;  // vram_last_ / vram_spill_ for health() (HTTP threads)
+    wddmwatch::Sample vram_last_ WH_GUARDED_BY(vram_mu_);
+    bool vram_spill_ WH_GUARDED_BY(vram_mu_) = false;
     std::vector<std::uint32_t> crlf_norm_;
     TimePoint vram_last_t_{};  // last probe sample
     // v0.2.2.2 memory governor (main thread; gov_json_ under vram_mu_)
@@ -589,12 +590,12 @@ private:
     std::uint32_t ctx_new_ = 0xffffffffu;  // context per request for new requests (governor); running requests keep ctx_
     std::string gov_warn_;        // the spill warning, logged after the governor's actions
     std::string gov_last_;
-    std::string gov_json_;
+    std::string gov_json_ WH_GUARDED_BY(vram_mu_);
     std::atomic<std::uint32_t> ctx_pub_{0};
     // host tiers (the tier itself: tb_.tier())
     std::vector<KvArr> kv_arrays_;
-    bool tier_wake_ = false;
-    std::uint64_t wake_seq_ = 0;  // under q_mutex_: bumped by a queued request, a finished build, the tier IO thread
+    bool tier_wake_ WH_GUARDED_BY(q_mutex_) = false;
+    std::uint64_t wake_seq_ WH_GUARDED_BY(q_mutex_) = 0;  // bumped by a queued request, a finished build, the tier IO thread
     PagePool pool_;  // KV pool pages (arch024 M3); here, where its quarantine was, so ~Engine destroys its events in
                      // the same order
     TimePoint last_tick_{};

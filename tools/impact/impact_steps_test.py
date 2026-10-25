@@ -85,6 +85,14 @@ case("Q3 pass: test source -> cpu_analyze", steps("tests/unit/unit_tests.cpp", l
 case("Q1/Q3 pass: safety tools -> all three", steps("tools/safety/run_asan.bat", 1), ["cpu_asan", "cpu_analyze", "cpu_safety_selftest"])
 case(f"Q3 block: {hip} -> no cpu_analyze / cpu_asan", steps(hip, 1), [], ["cpu_analyze", "cpu_asan"])
 case("Q3 block: docs -> no cpu_analyze", steps("docs/building.md", 1), [], ["cpu_analyze", "cpu_asan"])
+# arch025-Q4: threads class -> cpu_tsa
+case("Q4 pass: engine.cpp (compiled by the tsa build) -> cpu_tsa", steps("src/server/engine.cpp", fn_line("src/server/engine.cpp", "Engine::stop")),
+     ["cpu_tsa", "cpu_analyze"])
+case("Q4 pass: kv_tier.h -> cpu_tsa", steps("src/tier/kv_tier.h", 1), ["cpu_tsa"])
+case("Q4 pass: safety tools -> cpu_tsa", steps("tools/safety/tsa/tsa_check.py", 1), ["cpu_tsa", "cpu_safety_selftest"])
+case("Q4 block: unit test line without a lock token -> no cpu_tsa",
+     steps("tests/unit/unit_tests.cpp", line_where("tests/unit/unit_tests.cpp", False)), ["cpu_analyze"], ["cpu_tsa"])
+case("Q4 block: docs -> no cpu_tsa", steps("docs/building.md", 1), [], ["cpu_tsa"])
 ok = 0
 for name, good, bad, got in cases:
     ok += good

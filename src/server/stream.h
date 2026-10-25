@@ -7,6 +7,7 @@
 
 #include "engine_api.h"
 #include "protocol.h"
+#include "whirl/thread_annotations.h"
 #include "whirl/tokenizer.h"
 
 #include <cstdint>
@@ -31,8 +32,8 @@ public:
     std::uint64_t next();
 
 private:
-    std::mutex mu_;
-    std::mt19937_64 prng_;
+    whirl::Mutex mu_;
+    std::mt19937_64 prng_ WH_GUARDED_BY(mu_);
 };
 
 // What the response writer reads from the engine (all outlive every StreamState).

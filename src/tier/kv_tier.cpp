@@ -288,7 +288,7 @@ std::unique_ptr<Tier> Tier::create(device::Backend& ops, std::uint64_t ram_bytes
 
 Tier::~Tier() {
     {
-        std::lock_guard<std::mutex> lk(q_mutex_);
+        whirl::MutexLock lk(q_mutex_);
         stop_ = true;
     }
     q_cond_.notify_all();
@@ -1539,7 +1539,7 @@ bool Tier::ssdRoom(std::uint64_t need, Entry* keep, bool ram_copies) {
 
 void Tier::submit(Job* j) {
     {
-        std::lock_guard<std::mutex> lk(q_mutex_);
+        whirl::MutexLock lk(q_mutex_);
         try {
             (j->kind == JobKind::read ? q_reads_ : q_writes_).push_back(j);
         } catch (...) {
@@ -2263,8 +2263,8 @@ void Tier::ioThread() {
     while (true) {
         Job* j = nullptr;
         {
-            std::unique_lock<std::mutex> lk(q_mutex_);
-            q_cond_.wait(lk, [&] { return stop_ || !q_reads_.empty() || !q_writes_.empty(); });
+            whirl::UniqueLock lk(q_mutex_);
+            q_cond_.wait(lk, [&]() WH_REQUIRES(q_mutex_) { return stop_ || !q_reads_.empty() || !q_writes_.empty(); });
             if (stop_) return;
             std::size_t ri = 0;
             for (std::size_t i = 0; i < q_reads_.size(); ++i) {
@@ -2288,7 +2288,7 @@ void Tier::ioThread() {
 
 // A read job waiting while a write runs (served between the write's blocks).
 Job* Tier::pendingRead() {
-    std::lock_guard<std::mutex> lk(q_mutex_);
+    whirl::MutexLock lk(q_mutex_);
     if (q_reads_.empty()) return nullptr;
     Job* j = q_reads_.front();
     q_reads_.erase(q_reads_.begin());
@@ -2297,7 +2297,7 @@ Job* Tier::pendingRead() {
 
 // A restore's read waiting while a prefetch read runs.
 Job* Tier::pendingRestoreRead() {
-    std::lock_guard<std::mutex> lk(q_mutex_);
+    whirl::MutexLock lk(q_mutex_);
     for (std::size_t i = 0; i < q_reads_.size(); ++i) {
         if (!q_reads_[i]->prefetch.load(std::memory_order_acquire)) {
             Job* j = q_reads_[i];

@@ -6,6 +6,7 @@
 #   pwsh -NoProfile -File tools/safety/safety_step.ps1 -Kind asan     [-Gguf swift.gguf] [-GgufMoe moe.gguf] [-CapMin 60]
 #   pwsh -NoProfile -File tools/safety/safety_step.ps1 -Kind analyze  [-CapMin 70]
 #   pwsh -NoProfile -File tools/safety/safety_step.ps1 -Kind selftest
+#   pwsh -NoProfile -File tools/safety/safety_step.ps1 -Kind tsa      [-CapMin 15]
 #
 #  asan     tools/safety/run_asan.bat (ASan + leak-check build of the 10 CPU test exes and the fault driver; every suite, the CPU
 #           pins and the 8 fault modes), then tools/safety/asan_check.py check: every suite clean and passing, every fault mode
@@ -14,14 +15,17 @@
 #           tools/safety/analyze_check.py reasons (every baseline key has file:line + reason in analyze_whitelist.tsv, at the line cl
 #           reports now) and the injected-fault proof tools/safety/analyze_fault.bat must FAIL with its 3 planted warnings NEW.
 #           Verdict "cpu analyze: ok (...)".
-#  selftest the block / pass unit tests of both verdicts (test_asan_check.py, test_analyze_check.py) and the two whitelist checks
-#           without a build (seconds). Verdict "cpu safety selftest: ok".
+#  selftest the block / pass unit tests of the verdicts (test_asan_check.py, test_analyze_check.py, tsa/test_tsa_check.py) and the two
+#           whitelist checks without a build (seconds). Verdict "cpu safety selftest: ok".
+#  tsa      (arch025-Q4) tools/safety/tsa/run_tsa_build.bat: clang-cl -Wthread-safety -Werror=thread-safety build of whirl_server_core +
+#           whirl_tier_core in build-tsa, then the lock-removal proof (tsa_check.py mutate: each removed lock must FAIL the build);
+#           tsa_check.py verdict. Verdict "cpu tsa: ok (...)".
 # Time cap (the 2x rule; measured times in progress\arch025-Q135.HANDOFF.md): over -CapMin the step's own process tree is killed
 # and the step FAILS. Environment: WHIRL_PYTHON (python), WHIRL_KERNELS_FROM (HIP code objects for a new build dir, e.g. the gated
 # build\Release of this tree), WHIRL_QUIET_WAIT (a local script build_cfg.bat runs before compiling); release_gate sets them.
 # Exit 0 only with the ok verdict.
 param(
-    [Parameter(Mandatory)][ValidateSet("asan", "analyze", "selftest")][string]$Kind,
+    [Parameter(Mandatory)][ValidateSet("asan", "analyze", "selftest", "tsa")][string]$Kind,
     [string]$Gguf = "",
     [string]$GgufMoe = "",
     [int]$CapMin = 0
@@ -55,15 +59,16 @@ function Rc([string]$f) {
 
 if ($Kind -eq "selftest") {
     $bad = 0
-    foreach ($t in @(@("test_asan_check.py"), @("test_analyze_check.py"), @("asan_check.py", "sites", $repo),
-                     @("analyze_check.py", "reasons", (Join-Path $here "analyze_baseline.txt"), (Join-Path $here "analyze_whitelist.tsv")))) {
+    $tests = @(@("test_asan_check.py"), @("test_analyze_check.py"), @("tsa\test_tsa_check.py"), @("asan_check.py", "sites", $repo),
+               @("analyze_check.py", "reasons", (Join-Path $here "analyze_baseline.txt"), (Join-Path $here "analyze_whitelist.tsv")))
+    foreach ($t in $tests) {
         $o = @(& $py -I (Join-Path $here $t[0]) @($t | Select-Object -Skip 1) 2>&1 | ForEach-Object { "$_" })
         $c = $LASTEXITCODE
         $o | Select-Object -Last 3 | ForEach-Object { "   $_" }
         Write-Output "$($t -join ' ' -replace [regex]::Escape($repo), '<repo>'): exit $c"
         if ($c -ne 0) { $bad++ }
     }
-    Write-Output "cpu safety selftest: $(if ($bad -eq 0) { 'ok' } else { "FAIL ($bad of 4)" })"
+    Write-Output "cpu safety selftest: $(if ($bad -eq 0) { 'ok' } else { "FAIL ($bad of $($tests.Count))" })"
     exit $(if ($bad -eq 0) { 0 } else { 1 })
 }
 
@@ -80,6 +85,25 @@ if ($Kind -eq "asan") {
     $min = [math]::Round(((Get-Date) - $t0).TotalMinutes, 1)
     if ($ok -and $c -eq 0) { Write-Output "cpu asan: ok ($min min; $(($o[-1]) -replace '^asan check: ok ', ''))"; exit 0 }
     Write-Output "cpu asan: FAIL ($min min$(if (-not $ok) { '; time cap hit' }))"
+    exit 1
+}
+
+if ($Kind -eq "tsa") {
+    # cap = 2 x measured + 2 for a FRESH build-tsa (configure + 39 clang-cl steps + 7 mutant / control compiles): 2.3 min (arch025-Q4
+    # 2026-10-26 04:05-04:08, tsa_fresh.log); incremental 1.8 min
+    if ($CapMin -le 0) { $CapMin = 7 }
+    $B = Join-Path $repo "build-tsa"
+    $ok = RunCapped (Join-Path $here "tsa\run_tsa_build.bat") @($B) $CapMin "run_tsa_build.bat"
+    $o = @(& $py -I (Join-Path $here "tsa\tsa_check.py") verdict $B 2>&1 | ForEach-Object { "$_" })
+    $c = $LASTEXITCODE
+    $ml = Join-Path $B "logs\mutate.log"
+    if (Test-Path $ml) { Get-Content $ml | ForEach-Object { "   $_" } }
+    $bl = Join-Path $B "logs\build.log"
+    if (Test-Path $bl) { Get-Content $bl | Where-Object { $_ -match "Wthread-safety|FAILED:" } | Select-Object -First 20 | ForEach-Object { "   build: $_" } }
+    $o | ForEach-Object { "$_" }
+    $min = [math]::Round(((Get-Date) - $t0).TotalMinutes, 1)
+    if ($ok -and $c -eq 0) { Write-Output "cpu tsa: ok ($min min; $(($o[-1]) -replace '^tsa verdict: ok ', ''))"; exit 0 }
+    Write-Output "cpu tsa: FAIL ($min min$(if (-not $ok) { '; time cap hit' }); $(($o[-1]) -replace '^tsa verdict: ', ''))"
     exit 1
 }
 

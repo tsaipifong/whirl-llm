@@ -7,6 +7,7 @@
 #pragma once
 
 #include "engine_api.h"
+#include "whirl/thread_annotations.h"
 
 #include <atomic>
 #include <cstdint>
@@ -92,9 +93,9 @@ private:
     const EngineFacts facts_;
     HttpOptions o_;
     std::string bound_;  // the --host address (Host header allow-list)
-    std::mutex conns_mu_;
-    std::set<std::uintptr_t> conns_;    // open connection sockets
-    std::set<std::uintptr_t> reading_;  // ... of which still reading their request
+    whirl::Mutex conns_mu_;
+    std::set<std::uintptr_t> conns_ WH_GUARDED_BY(conns_mu_);    // open connection sockets
+    std::set<std::uintptr_t> reading_ WH_GUARDED_BY(conns_mu_);  // ... of which still reading their request
     std::uintptr_t listen_ = ~std::uintptr_t(0);
     std::uint16_t port_ = 0;
     std::thread accept_;

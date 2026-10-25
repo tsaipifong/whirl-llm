@@ -21,12 +21,12 @@ std::int64_t unixNow() { return static_cast<std::int64_t>(std::time(nullptr)); }
 }  // namespace
 
 std::string IdGen::id(std::string_view prefix, std::size_t n) {
-    std::lock_guard<std::mutex> lk(mu_);
+    whirl::MutexLock lk(mu_);
     return randomId(prefix, n, prngNext, &prng_);
 }
 
 std::uint64_t IdGen::next() {
-    std::lock_guard<std::mutex> lk(mu_);
+    whirl::MutexLock lk(mu_);
     return prng_();
 }
 

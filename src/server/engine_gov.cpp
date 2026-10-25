@@ -54,7 +54,7 @@ void Engine::setVramProbe(std::function<wddmwatch::Sample()> probe, bool warn, s
         if (ev && !startup_warned) logW("{}", ev->text);
     }
     {
-        std::lock_guard<std::mutex> lk(vram_mu_);
+        whirl::MutexLock lk(vram_mu_);
         vram_last_ = s;
         vram_spill_ = warn && vram_watch_.spilling();
     }
@@ -83,7 +83,7 @@ std::string Engine::vramNote() {
         }
     }
     {
-        std::lock_guard<std::mutex> lk(vram_mu_);
+        whirl::MutexLock lk(vram_mu_);
         vram_last_ = s;
         vram_spill_ = vram_warn_ && vram_watch_.spilling();
     }
@@ -118,7 +118,7 @@ void Engine::setGovernor(const memgov::Config& c, std::function<std::uint64_t(st
 }
 
 std::string Engine::governorJson() {
-    std::lock_guard<std::mutex> lk(vram_mu_);
+    whirl::MutexLock lk(vram_mu_);
     return gov_json_;
 }
 
@@ -140,7 +140,7 @@ void Engine::govPublish() {
     st.grows = gov_->grows();
     st.last_action = gov_last_;
     ctx_pub_.store(ctxForNew(), std::memory_order_relaxed);
-    std::lock_guard<std::mutex> lk(vram_mu_);
+    whirl::MutexLock lk(vram_mu_);
     gov_json_ = memgov::statusJson(st);
 }
 

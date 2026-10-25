@@ -205,7 +205,7 @@ void Engine::attachTier(tier::Tier* t) {
     ps_.attachTier(t);
     if (t) {
         t->setWake([this] {
-            std::lock_guard<std::mutex> lk(q_mutex_);
+            whirl::MutexLock lk(q_mutex_);
             tier_wake_ = true;
             ++wake_seq_;
             q_cond_.notify_all();
@@ -215,7 +215,7 @@ void Engine::attachTier(tier::Tier* t) {
 }
 
 void Engine::stop() {
-    std::lock_guard<std::mutex> lk(q_mutex_);
+    whirl::MutexLock lk(q_mutex_);
     stop_ = true;
     q_cond_.notify_all();
 }
@@ -228,7 +228,7 @@ void Engine::runOnLoop(std::function<void()> fn, std::chrono::milliseconds timeo
     auto state = std::make_shared<std::atomic<int>>(0);
     std::future<void> f = done->get_future();
     {
-        std::lock_guard<std::mutex> lk(q_mutex_);
+        whirl::MutexLock lk(q_mutex_);
         loop_calls_.push_back([fn = std::move(fn), done, state] {
             int queued = 0;
             if (!state->compare_exchange_strong(queued, 1)) return;  // cancelled: the caller is gone
@@ -251,7 +251,8 @@ void Engine::runOnLoop(std::function<void()> fn, std::chrono::milliseconds timeo
 }
 
 // called with lk held; runs the queued test calls without the lock
-void Engine::runLoopCalls(std::unique_lock<std::mutex>& lk) {
+// the body unlocks and relocks the caller's lock, which the analysis cannot follow (arch025-Q4); callers are checked
+void Engine::runLoopCalls(whirl::UniqueLock& lk) WH_NO_THREAD_SAFETY_ANALYSIS {
     if (loop_calls_.empty()) return;
     std::vector<std::function<void()>> calls;
     calls.swap(loop_calls_);
@@ -282,12 +283,12 @@ EngineFacts Engine::facts() const {
 Engine::Health Engine::health() {
     Health h;
     {
-        std::lock_guard<std::mutex> lk(q_mutex_);
+        whirl::MutexLock lk(q_mutex_);
         h.active = n_active_;
         h.queued = queue_.size();
         h.slots = slots_.size();
     }
-    std::lock_guard<std::mutex> lk(vram_mu_);
+    whirl::MutexLock lk(vram_mu_);
     h.vram_ok = vram_last_.ok;
     h.vram_spill = vram_spill_;
     h.vram_local = vram_last_.local_usage;
@@ -2282,7 +2283,7 @@ void Engine::releaseSlot(Slot& sl) {
     if (!job) return;
     visDone(sl, *job);
     {
-        std::lock_guard<std::mutex> lk(q_mutex_);
+        whirl::MutexLock lk(q_mutex_);
         job->done = true;
         n_active_ -= 1;
         q_cond_.notify_all();
@@ -2339,7 +2340,7 @@ void Engine::reapDisconnected() {
     last_reap_ = Clock::now();
     {
         // queued: dropped without a response (nobody reads it)
-        std::lock_guard<std::mutex> lk(q_mutex_);
+        whirl::MutexLock lk(q_mutex_);
         for (std::size_t i = 0; i < queue_.size();) {
             Job* job = queue_[i];
             if (job->w == nullptr || job->w->alive()) {
@@ -2414,7 +2415,7 @@ void Engine::logBatchStats(bool force) {
 }
 
 void Engine::submitAndWait(Job& job) {
-    std::unique_lock<std::mutex> lk(q_mutex_);
+    whirl::UniqueLock lk(q_mutex_);
     if (stop_) {
         // FR-SRV P3-1: shutting down (the loop may be flushing the tier, or gone): nobody would run
         // this job; answered here instead of waiting forever on a finished engine
@@ -2444,13 +2445,13 @@ void Engine::submitAndWait(Job& job) {
 void Engine::endBuilding() {
     // a connection that did not queue a request (bad request, probe): a burst
     // gather waiting for it ends now
-    std::lock_guard<std::mutex> lk(q_mutex_);
+    whirl::MutexLock lk(q_mutex_);
     n_building_.fetch_sub(1);
     ++wake_seq_;
     q_cond_.notify_all();
 }
 
-void Engine::abortQueued(std::unique_lock<std::mutex>& lk) {
+void Engine::abortQueued(whirl::UniqueLock& lk) {
     // shutting down: queued requests are answered 503
     for (Job* job : queue_) {
         const std::string r = errorResponse(503, "server is shutting down");
@@ -2510,7 +2511,7 @@ void Engine::runLoop() {
         std::uint32_t n_busy = 0;
         for (const Slot& sl : slots_)
             if (sl.phase != Phase::idle) ++n_busy;
-        std::unique_lock<std::mutex> lk(q_mutex_);
+        whirl::UniqueLock lk(q_mutex_);
         runLoopCalls(lk);
         if (stop_ && n_busy == 0) {
             abortQueued(lk);
@@ -2571,7 +2572,7 @@ void Engine::runLoop() {
                         // tier IO thread) ends the wait at once (a sleep here delayed a
                         // request by up to one Windows timer tick, 10-16 ms)
                         q_cond_.wait_for(lk, std::chrono::milliseconds(5),
-                                         [&] { return wake_seq_ != seq || !queue_.empty() || stop_ || !loop_calls_.empty(); });
+                                         [&]() WH_REQUIRES(q_mutex_) { return wake_seq_ != seq || !queue_.empty() || stop_ || !loop_calls_.empty(); });
                         continue;
                     }
                 }
@@ -2584,7 +2585,7 @@ void Engine::runLoop() {
                     lk.lock();
                     tier_wake_ = false;
                     if (queue_.empty() && !stop_)
-                        q_cond_.wait_for(lk, std::chrono::milliseconds(100), [&] { return !queue_.empty() || tier_wake_ || stop_ || !loop_calls_.empty(); });
+                        q_cond_.wait_for(lk, std::chrono::milliseconds(100), [&]() WH_REQUIRES(q_mutex_) { return !queue_.empty() || tier_wake_ || stop_ || !loop_calls_.empty(); });
                     continue;
                 }
                 tier_wake_ = false;
@@ -2596,9 +2597,9 @@ void Engine::runLoop() {
                     // an SSD write is due at a known time, the periodic SSD expiry check, or the idle write: wake
                     // then (re-checked every minute)
                     const auto due = std::min(*wake + std::chrono::milliseconds(2), std::chrono::steady_clock::now() + std::chrono::seconds(60));
-                    q_cond_.wait_until(lk, due, [&] { return !queue_.empty() || tier_wake_ || stop_ || !loop_calls_.empty(); });
+                    q_cond_.wait_until(lk, due, [&]() WH_REQUIRES(q_mutex_) { return !queue_.empty() || tier_wake_ || stop_ || !loop_calls_.empty(); });
                 } else {
-                    q_cond_.wait(lk, [&] { return !queue_.empty() || tier_wake_ || stop_ || !loop_calls_.empty(); });
+                    q_cond_.wait(lk, [&]() WH_REQUIRES(q_mutex_) { return !queue_.empty() || tier_wake_ || stop_ || !loop_calls_.empty(); });
                 }
             }
             // a request arrived: the idle period ends, an idle write stops starting new entries (TIER-IDLE)
@@ -2672,7 +2673,7 @@ void Engine::runLoop() {
             // item T3: admitted together with a request whose restore just
             // started on the same prefix: back to the queue, wait for it
             if (waitsForTier(*job)) {
-                std::lock_guard<std::mutex> g(q_mutex_);
+                whirl::MutexLock g(q_mutex_);
                 queue_.insert(queue_.begin() + static_cast<std::ptrdiff_t>(n_requeued), job);
                 ++n_requeued;
                 n_active_ -= 1;
@@ -2801,8 +2802,8 @@ void Engine::runLoop() {
             // burst gather / host-tier restore: poll again in 1 ms, sooner when a
             // request is queued, a connection finishes building one, or the tier
             // IO thread reports progress
-            std::unique_lock<std::mutex> lw(q_mutex_);
-            q_cond_.wait_for(lw, std::chrono::milliseconds(1), [&] { return wake_seq_ != wake_seq0; });
+            whirl::UniqueLock lw(q_mutex_);
+            q_cond_.wait_for(lw, std::chrono::milliseconds(1), [&]() WH_REQUIRES(q_mutex_) { return wake_seq_ != wake_seq0; });
         }
         if (opt_.loop_log && (!act.empty() || restoring || pf != nullptr)) {
             const TimePoint tl4 = Clock::now();

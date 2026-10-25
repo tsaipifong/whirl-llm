@@ -51,7 +51,7 @@
 #                           WHIRL_R9700_LOCK_HELD set, else whirl-server-gate's lock (which waits for any
 #                           whirl.exe, also one on the R9700) stalls each server step 10 min (REVIEW-ARCH-D1 P3-8)
 # Steps (-List prints them): CPU test binaries, gate / golden self-tests, golden xcheck, the C++ safety steps
-# (cpu_safety_selftest, cpu_asan, cpu_analyze: arch025-Q1 / Q3, own build dirs, ~tens of minutes of CPU); kernel test
+# (cpu_safety_selftest, cpu_asan, cpu_analyze, cpu_tsa: arch025-Q1 / Q3 / Q4, own build dirs, ~tens of minutes of CPU); kernel test
 # --require-all; selftest Swift + MoE x 3 modes; golden check Swift + MoE; seqtest Swift x 3 modes and MoE
 # precise + balance; with WHIRL_GATE_DENSE also the Q4_K_M selftest / golden / seqtest x 3 modes and bench
 # DFlash2 x 3 modes (hashes equal, drafts > 0; target Q4_K_M, Swift + DFlash2 not yet gated: inventory G10);
@@ -162,6 +162,9 @@ AddStep "cpu_modules_check" $false @($pwsh, "-NoProfile", "-Command", "& '$py' -
 #                (use-after-free, overflow, double free, 3 leaks) each caught by its checker, opt-out whitelist exact
 #   cpu_analyze  full MSVC /analyze rebuild; no warning beyond tools/safety/analyze_baseline.txt, every baseline key with file:line
 #                + reason (analyze_whitelist.tsv), the planted analyze_fault.cpp warnings NEW (must fail)
+#   cpu_tsa      (Q4) clang-cl -Wthread-safety -Werror=thread-safety build of whirl_server_core + whirl_tier_core (build-tsa,
+#                include/whirl/thread_annotations.h) clean, and each of the 7 lock removals of tools/safety/tsa/tsa_check.py must
+#                fail it (a few minutes; needs the HIP SDK clang-cl, no GPU)
 # They reuse the HIP code objects of -Build (same tree) for a new build directory. WHIRL_GATE_QUIET_WAIT: a local script that
 # waits while a GPU measurement holds the machine (passed on as WHIRL_QUIET_WAIT; build_cfg.bat runs it before compiling).
 $safetyEnv = @{ WHIRL_PYTHON = $py; WHIRL_KERNELS_FROM = $Build; WHIRL_QUIET_WAIT = $env:WHIRL_GATE_QUIET_WAIT }
@@ -169,6 +172,7 @@ $safetyPs = Join-Path $repo "tools\safety\safety_step.ps1"
 AddStep "cpu_safety_selftest" $false @($pwsh, "-NoProfile", "-File", $safetyPs, "-Kind", "selftest") { param($o, $c) $c -eq 0 -and ($o -match "(?m)^cpu safety selftest: ok") } $safetyEnv
 AddStep "cpu_asan" $false @($pwsh, "-NoProfile", "-File", $safetyPs, "-Kind", "asan", "-Gguf", $SW, "-GgufMoe", $MX) { param($o, $c) $c -eq 0 -and ($o -match "(?m)^cpu asan: ok") } $safetyEnv
 AddStep "cpu_analyze" $false @($pwsh, "-NoProfile", "-File", $safetyPs, "-Kind", "analyze") { param($o, $c) $c -eq 0 -and ($o -match "(?m)^cpu analyze: ok") } $safetyEnv
+AddStep "cpu_tsa" $false @($pwsh, "-NoProfile", "-File", $safetyPs, "-Kind", "tsa") { param($o, $c) $c -eq 0 -and ($o -match "(?m)^cpu tsa: ok") } $safetyEnv
 $ktArgs = @($exe["whirl-kernel-test"], "--device", $Device, "--require-all", "--mx", $SW, "--moemx", $MX) + @(if ($hasQ) { "--q4"; $Q })
 AddStep "kt_full" $true $ktArgs { param($o, $c) $c -eq 0 -and ($o -match "^PASS: 0 failing") -and ($o -match "--require-all: 0 required kernel") }
 foreach ($m in @($denseKeys) + @("moe")) {
