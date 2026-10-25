@@ -11,9 +11,13 @@
 namespace whirl {
 
 // (moved from src/model/config.cpp; arch025 PL1: the _dupenv_s read itself is platform::env::get)
+// bug-envpaths: UTF-8 of the wide value (platform::env::getUtf8), as LOCALAPPDATA since bug-lappdata. Several WHIRL_*
+// values are paths that the readers widen() (KV_SSD_DIR, DRAFT_MODEL, DRAFT_VOCAB, MMPROJ, CODE_OBJECT, the dump
+// files); the narrow read is the ANSI code page outside whirl.exe / whirl-server.exe (no UTF-8 manifest). Every other
+// value is ASCII, for which the bytes equal the narrow read's. PRIOR_ART progress\bug-envpaths.PRIOR_ART.md.
 std::optional<std::string> envGet(std::string_view name) {
     const std::string key = std::string("WHIRL_") + std::string(name);
-    return platform::env::get(key);
+    return platform::env::getUtf8(key);
 }
 
 bool envFlag(std::string_view name, bool def) {

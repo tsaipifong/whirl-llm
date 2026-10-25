@@ -15,6 +15,8 @@
 #include "whirl/hip.h"
 #include "whirl/vision.h"
 
+#include "platform/env.h"
+
 #include <algorithm>
 #include <cmath>
 #include <optional>
@@ -29,7 +31,9 @@ using namespace whirl;
 
 namespace {
 
-const char* envRaw(const char* name) { return std::getenv(name); }
+// bug-envpaths: UTF-8 of the wide value (platform::env::getUtf8; was std::getenv: the ANSI code page); both path
+// values go through readFile / writeFile (widen)
+std::optional<std::string> envRaw(const char* name) { return platform::env::getUtf8(name); }
 
 std::vector<std::uint8_t> readBytes(const std::string& path) {
     const std::string s = readFile(path);
@@ -91,8 +95,8 @@ int cliVisEncode(std::span<const std::string> args) {
     }
     std::printf("image %s: -> %ux%u (%ux%u = %u tokens, %u patches), preprocess %.1f ms\n", img.c_str(), p.rgb.w, p.rgb.h, p.nx, p.ny, p.nTokens(),
                 p.nTokens() * 4, (nowSeconds() - tp) * 1000.0);
-    if (const char* rp = envRaw("WHIRL_VIS_DUMP_RGB"))
-        writeFile(rp, std::string_view(reinterpret_cast<const char*>(p.rgb.px.data()), p.rgb.px.size()));
+    if (const std::optional<std::string> rp = envRaw("WHIRL_VIS_DUMP_RGB"))
+        writeFile(*rp, std::string_view(reinterpret_cast<const char*>(p.rgb.px.data()), p.rgb.px.size()));
     {
         std::string hx;
         char b[3];
@@ -106,7 +110,7 @@ int cliVisEncode(std::span<const std::string> args) {
     const device::StreamH stream_own = device::StreamH::adopt(device::hipBackend(), hip::streamCreate());  // blocking
     hip::Stream stream = stream_own.get();
     std::optional<vision::Prepared> pre;
-    if (const char* pp = envRaw("WHIRL_VIS_PRE")) pre = v->prepare(readBytes(pp));
+    if (const std::optional<std::string> pp = envRaw("WHIRL_VIS_PRE")) pre = v->prepare(readBytes(*pp));
     const std::uint64_t need = std::max(v->arenaBytes(p.nTokens()), pre ? v->arenaBytes(pre->nTokens()) : 0);
     device::DevBuf arena_own = device::DevBuf::alloc(device::hipBackend(), need);
     const hip::DevPtr arena = arena_own.get();
@@ -118,7 +122,7 @@ int cliVisEncode(std::span<const std::string> args) {
     }
     std::vector<float> out(static_cast<std::size_t>(p.nTokens()) * v->hp.proj_dim);
     double prof[8] = {};
-    const bool want_prof = envRaw("WHIRL_VIS_PROF") != nullptr;
+    const bool want_prof = envRaw("WHIRL_VIS_PROF").has_value();
     for (std::uint32_t r = 0; r < reps; ++r) {
         if (want_prof && r + 1 == reps) v->prof = prof;
         const vision::EncodeStats st = v->encode(p, lend, stream, out.data(), out.size());

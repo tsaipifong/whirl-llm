@@ -77,8 +77,14 @@ longer name it).
 
 PL1 (2026-10-26) filled the four small concerns. Each function wraps exactly the call it replaced; the logic stays
 with the caller.
-- `env::get(name)` is the one `_dupenv_s` read: `envGet` / `EnvSnapshot::capture` (src/config), the VRAM cap
-  (src/common/vram_limit.cpp), the kernel table switches (src/kernels_host/kernels_abi.cpp); LOCALAPPDATA moved to `env::getUtf8` (below).
+- `env::get(name)` is the one `_dupenv_s` read: the VRAM cap (src/common/vram_limit.cpp) and the kernel table
+  switches (src/kernels_host/kernels_abi.cpp), both ASCII numbers / names. LOCALAPPDATA moved to `env::getUtf8` (below);
+  bug-envpaths (2026-10-26) moved `envGet` / `EnvSnapshot::capture` (src/config: every WHIRL_* of the model layer and
+  whirl-server, among them the paths KV_SSD_DIR, DRAFT_MODEL, DRAFT_VOCAB, MMPROJ, CODE_OBJECT and the dump files),
+  WHIRL_ALLOC_LOG / WHIRL_LAUNCH_LOG (src/hip, now opened with `_wfopen`) and the vis-encode files (src/vision/vis_cli.cpp)
+  to `env::getUtf8` too, and made the draft-vocabulary paths (src/model/spec.cpp) UTF-8. Rule: an environment value that
+  becomes a path is read with `env::getUtf8` and opened through `widen()`; ASCII values keep their bytes
+  (child-process test `testEnvPathsChild`).
   `env::set` is the one `_putenv_s` of the product (GPU_RESOURCE_CACHE_SIZE, server_main.cpp). `env::block()`
   returns the raw `GetEnvironmentStringsW` entries in the OS order; the SSD fingerprint (src/cache/fingerprint.cpp)
   still converts (`narrow`), filters and sorts them itself, so the fingerprint is unchanged.

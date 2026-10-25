@@ -3,9 +3,12 @@
 
 #include "launch_log.h"
 
+#include "platform/env.h"
+
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <map>
 #include <mutex>
 #include <string>
@@ -24,10 +27,8 @@ namespace whirl::hip::launchlog {
 
 namespace {
 
-std::string folder() {
-    const char* v = std::getenv("WHIRL_LAUNCH_LOG");
-    return v != nullptr ? std::string(v) : std::string();
-}
+// bug-envpaths: UTF-8 of the wide value (was std::getenv: the ANSI code page), opened with _wfopen below
+std::string folder() { return platform::env::getUtf8("WHIRL_LAUNCH_LOG").value_or(std::string()); }
 
 struct Key {
     std::string name;
@@ -133,7 +134,7 @@ struct Recorder {
         const unsigned long pid = 0;
 #endif
         const std::string path = folder() + "\\launch_" + std::to_string(pid) + ".txt";
-        std::FILE* f = std::fopen(path.c_str(), "wb");
+        std::FILE* f = _wfopen(std::filesystem::path(std::u8string(path.begin(), path.end())).c_str(), L"wb");  // bug-envpaths
         if (f == nullptr) return;
         std::fprintf(f, "# whirl launch log v1\n# cmd: %s\n# launches %llu seqhash %016llx kinds %zu\n", cmd.c_str(),
                      static_cast<unsigned long long>(n), static_cast<unsigned long long>(seq), counts.size());
@@ -149,7 +150,7 @@ struct Recorder {
         std::fclose(f);
         if (!raw_on) return;
         const std::string rp = folder() + "\\launch_" + std::to_string(pid) + ".raw.txt";
-        std::FILE* g = std::fopen(rp.c_str(), "wb");
+        std::FILE* g = _wfopen(std::filesystem::path(std::u8string(rp.begin(), rp.end())).c_str(), L"wb");  // bug-envpaths
         if (g == nullptr) return;
         for (const std::string& l : raw_lines) std::fprintf(g, "%s\n", l.c_str());
         if (raw_dropped > 0)

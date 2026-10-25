@@ -3,10 +3,13 @@
 
 #include "alloc_log.h"
 
+#include "platform/env.h"
+
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <mutex>
 #include <unordered_map>
 #include <vector>
@@ -21,10 +24,8 @@ namespace whirl::hip::alloclog {
 
 namespace {
 
-std::string folder() {
-    const char* v = std::getenv("WHIRL_ALLOC_LOG");
-    return v != nullptr ? std::string(v) : std::string();
-}
+// bug-envpaths: UTF-8 of the wide value (was std::getenv: the ANSI code page), opened with _wfopen below
+std::string folder() { return platform::env::getUtf8("WHIRL_ALLOC_LOG").value_or(std::string()); }
 
 constexpr std::uint64_t kFnvBasis = 1469598103934665603ull;
 constexpr std::uint64_t kFnvPrime = 1099511628211ull;
@@ -162,7 +163,7 @@ struct Recorder {
         const unsigned long pid = 0;
 #endif
         const std::string path = folder() + "\\alloc_" + std::to_string(pid) + ".txt";
-        std::FILE* f = std::fopen(path.c_str(), "wb");
+        std::FILE* f = _wfopen(std::filesystem::path(std::u8string(path.begin(), path.end())).c_str(), L"wb");  // bug-envpaths
         if (f == nullptr) return;
         const std::string body = text();
         std::fprintf(f, "# whirl alloc log v1\n# cmd: %s\n", cmd.c_str());
