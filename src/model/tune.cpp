@@ -930,6 +930,8 @@ void loadOrTuneImpl(Model& m, const std::string& model_path, std::string& log) {
         t.kv_explicit = m.kv_mode != KvMode::automatic;
         t.fast_kv_q8h = t.gfx1151 && t.k_kv_q8h;
         t.gdn_strix = m.gdn_strix;
+        t.k_attn_i8qk = m.k.i8k_mean != nullptr && m.k.i8k_quant != nullptr &&
+                        (m.k.attn_kgsi6 != nullptr || m.k.attn_kgsi4 != nullptr || m.k.attn_kgsi2 != nullptr);
         nu::Plan p = nu::plan(rq, t);
         if (fp8_env) nu::applyOverride(p, nu::Item::fp8, "FP8", *fp8_env, m.fp8_prefill, t.has_mxfp4 && t.k_gemm8);
         const bool moe_ok = t.moe && t.moe_mxfp4 && t.k_gemm8_moe;
@@ -974,6 +976,11 @@ void loadOrTuneImpl(Model& m, const std::string& model_path, std::string& log) {
         }
         if (const auto v = envGet("SPEC_SAMPLE"); v && !v->empty())
             nu::applyOverride(p, nu::Item::specsample, "SPEC_SAMPLE", *v, *v != "0", t.mtp && t.k_spec_sample);
+        // feat027-i8qk: int8 Q.K^T prefill attention (fast, opt-in: --fast=...,i8qk or WHIRL_ATTN_I8QK=1; in precise /
+        // balance the switch is a lossy user override, flagged as such)
+        if (const auto v = envGet("ATTN_I8QK"); v && !v->empty())
+            nu::applyOverride(p, nu::Item::i8qk, "ATTN_I8QK", *v, *v != "0", t.k_attn_i8qk);
+        m.attn_i8qk = p.on(nu::Item::i8qk);
         nu::noteSwitches(p, [](const char* n) { return envGet(n); });
         m.num_plan = p;
         log += "  " + nu::logLine(p) + "\n";

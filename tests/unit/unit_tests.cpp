@@ -770,7 +770,10 @@ void testNumerics() {
         const nu::Request r = nu::parseMode("balance", "t");
         CHECK(r.items == nu::balance_items && !r.custom && r.has(Item::fp8) && r.has(Item::kvq8) && !r.has(Item::kvq4));
         const nu::Request f = nu::parseMode("fast", "t");
-        CHECK(f.items == (nu::balance_items | nu::fast_only_items));
+        CHECK(f.items == (nu::balance_items | (nu::fast_only_items & ~nu::fast_optin_items)) && !f.has(Item::i8qk));
+        // feat027-i8qk: opt-in fast item (explicit list or all); never in balance
+        CHECK(nu::parseMode("fast:kvq4,i8qk", "t").has(Item::i8qk) && nu::parseMode("fast:all", "t").has(Item::i8qk));
+        CHECK(!nu::parseMode("balance", "t").has(Item::i8qk));
         const nu::Request c = nu::parseMode("balance:fp8, kvq8", "t");
         CHECK(c.custom && c.items == (nu::bit(Item::fp8) | nu::bit(Item::kvq8)));
         const nu::Request c2 = nu::parseMode("fast:kvq4", "t");

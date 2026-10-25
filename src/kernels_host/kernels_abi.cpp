@@ -362,6 +362,12 @@ void loadAttn(AttnKernels& k, const Loader& L, KvFormat kv) {
             k.attn_kgs6 = L.opt("attn_kgs6");
             k.attn_kgs4 = L.opt("attn_kgs4");
             k.attn_kgs2 = L.opt("attn_kgs2");
+            // feat027-i8qk: int8 Q.K^T key-range attention (gfx1201 code object only)
+            k.i8k_mean = L.opt("i8k_mean");
+            k.i8k_quant = L.opt("i8k_quant");
+            k.attn_kgsi6 = L.opt("attn_kgsi6");
+            k.attn_kgsi4 = L.opt("attn_kgsi4");
+            k.attn_kgsi2 = L.opt("attn_kgsi2");
         }
         // gfx1151 (KG-3): the f16 attn_prefill_wmma (on dequantized rows) and its key-range variant
         k.attn_pws = L.opt("attn_prefill_wmma_s");

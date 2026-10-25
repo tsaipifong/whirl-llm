@@ -69,16 +69,19 @@ struct AttnPrefillProblem {
     std::uint32_t head_dim = 256, n_head = 0, n_head_kv = 0;
     float scale = 1.0f;
     bool kv_q8 = false;           // q8 / q8h / q8v / q4 (int8 or 4-bit) KV (not f16)
+    bool kv_rot = false;          // q and k Hadamard-rotated (q8h, q4): feat027-i8qk runs only then (outlier channels)
     std::uint32_t dq_rows = 0;    // rows the dequant scratch (ffn_g / ffn_u) holds
     bool dq_ptab = false, dq_st_ml = false;  // the scratch page table / softmax state buffers exist
 };
 struct AttnPrefillFlags {
     bool attn_kg_on = true, attn_kx_on = true, attn_dqf_on = true;
     std::uint32_t attn_seg = 0;
+    // feat027-i8qk: int8 Q.K^T in the FC-1c key-range path (lossy fast item i8qk; Model::attn_i8qk = the plan's i8qk)
+    bool attn_i8qk = false;
 };
 // one launch of the plan: what it reads (the cache, or the dequantized copy of keys [r0, r1)) and its geometry
 struct AttnStep {
-    enum class Op : std::uint8_t { dq_rows, dq_rows_r, attn };
+    enum class Op : std::uint8_t { dq_rows, dq_rows_r, attn, i8k };  // i8k: i8k_mean + i8k_quant of the copy (f = i8k_mean, f2 = i8k_quant)
     Op op = Op::attn;
     Function f = nullptr;
     Dim3 grid{}, block{256, 1, 1};
@@ -87,10 +90,41 @@ struct AttnStep {
     std::uint32_t r0 = 0, r1 = 0, nrows = 0;  // dq_rows: rows (nrows); dq_rows_r / ranged: the key range
     std::uint32_t head0 = 0;     // attn: first head of this launch's head range
     std::uint32_t row_el = 0;    // dq_rows / dq_rows_r: elements per row (n_head_kv * head_dim)
+    // feat027-i8qk: i8k (nrows rows of the copy) / attn with i8 = true (attn_kgsi: + kq, ksc, kss, mu). kss = keys per
+    // range of the series: the copy's int8 K sits in ffn_g after kss f16 rows, then ksc [n_kv][kss + 32], then mu
+    Function f2 = nullptr;
+    bool i8 = false;
+    std::uint32_t kss = 0;
+    Dim3 grid2{};
 };
 struct AttnPrefillPlan {
     std::vector<AttnStep> steps;
 };
 AttnPrefillPlan chooseAttnPrefill(const AttnPrefillProblem& p, const AttnPrefillFlags& f, const kernels::AttnKernels& k);
+
+// feat027-i8qk: where the int8 K of a key range lives in ffn_g (byte offsets) for kss keys per range: after the
+// f16 K copy (kss rows), the int8 rows (kss x row_el bytes, the pool row layout), the per-key scales
+// ([n_kv][kss + 32] f32, 32 rows of padding the kernel's aligned 8-scale loads may touch past the last key), mu
+// ([n_kv][head_dim] f32). i8Keys: the largest multiple of 256 whose layout fits dq_rows f16 rows (0: none).
+struct I8kLayout {
+    std::uint64_t kq = 0, ksc = 0, mu = 0, end = 0;
+    std::uint32_t ksc_stride = 0;  // the kernels' kss argument
+};
+inline I8kLayout i8kLayout(std::uint32_t kss, std::uint32_t n_kv, std::uint32_t head_dim) {
+    const std::uint64_t row_el = static_cast<std::uint64_t>(n_kv) * head_dim;
+    I8kLayout l;
+    l.ksc_stride = kss + 32;
+    l.kq = static_cast<std::uint64_t>(kss) * row_el * 2;
+    l.ksc = l.kq + static_cast<std::uint64_t>(kss) * row_el;
+    l.mu = l.ksc + static_cast<std::uint64_t>(n_kv) * l.ksc_stride * 4;
+    l.end = l.mu + row_el * 4;
+    return l;
+}
+inline std::uint32_t i8Keys(std::uint32_t dq_rows, std::uint32_t n_kv, std::uint32_t head_dim) {
+    const std::uint64_t cap = static_cast<std::uint64_t>(dq_rows) * n_kv * head_dim * 2;
+    for (std::uint32_t kss = dq_rows / 256 * 256; kss >= 256; kss -= 256)
+        if (i8kLayout(kss, n_kv, head_dim).end <= cap) return kss;
+    return 0;
+}
 
 }  // namespace whirl::ops

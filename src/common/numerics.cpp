@@ -28,6 +28,7 @@ constexpr std::array<ItemInfo, n_items> k_items = {{
     {"moeskip", "skip low-weight MoE experts"},
     {"a8", "int8 activations for K-quant prefill (W4A8)"},
     {"a4", "int4 activations for prefill (W4A4)"},
+    {"i8qk", "int8 Q.K^T prefill attention (R9700; opt-in)"},
 }};
 
 constexpr const char* k_q8dec = "q8dec (int8 activations in the decode / verify GEMV, as llama.cpp's q8_1)";
@@ -126,7 +127,7 @@ Request parseMode(std::string_view spec, std::string source) {
         return r;
     }
     if (trim(items).empty()) {
-        r.items = r.mode == Mode::balance ? balance_items : (balance_items | fast_only_items);
+        r.items = r.mode == Mode::balance ? balance_items : (balance_items | (fast_only_items & ~fast_optin_items));
     } else {
         r.items = parseItems(items);
         r.custom = true;
@@ -251,6 +252,11 @@ Plan plan(const Request& r_in, const Target& t) {
                     break;
                 }
                 note = "drafts accepted when close to the target (greedy: top-k + p ratio; sampling: typical acceptance)";
+                break;
+            case Item::i8qk:
+                if (!t.k_attn_i8qk)
+                    why = t.gfx1151 ? "no gain on this GPU (int8 WMMA runs at the f16 rate on gfx1151)" : "no int8 Q.K^T kernels in this code object";
+                else note = "int8 Q.K^T (smoothed per-key int8 K, per-query int8 Q) on the q4 / q8 KV key-range prefill path";
                 break;
             default:
                 why = "not yet implemented (balance behaviour)";

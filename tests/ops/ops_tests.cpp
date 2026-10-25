@@ -466,6 +466,81 @@ void testAttnPrefill() {
     CHECK(pl.steps.size() == 2 && pl.steps[1].head0 == 12 && pl.steps[0].grid.y == 12);
 }
 
+// feat027-i8qk: the int8 Q.K^T variant of the FC-1c key-range path. Off (the default, and every precise / balance
+// model: Model sets the flag in fast mode only) the plan is exactly the plan without the i8 kernels; on, each range's
+// dq_rows_r is followed by i8k and walked by attn_kgsi, in ranges of i8Keys rows whose int8 layout fits ffn_g.
+void testAttnPrefillI8qk() {
+    ops::AttnPrefillProblem p;
+    p.n = 4096;
+    p.pos0 = 20000;
+    p.head_dim = 256;
+    p.n_head = 24;
+    p.n_head_kv = 4;
+    p.scale = 1.0f / 16.0f;
+    p.kv_q8 = true;  // q4 KV (the fast path): no kv_dq_rows in the table
+    p.kv_rot = true;
+    p.dq_rows = 8192;
+    p.dq_ptab = true;
+    p.dq_st_ml = true;
+    kn::KernelTable k = attnTable(false, false, false, true);
+    k.kv_dq_rows = nullptr;
+    k.attn_kgs2 = tag("attn_kgs2");
+    kn::KernelTable ki = k;
+    ki.i8k_mean = tag("i8k_mean");
+    ki.i8k_quant = tag("i8k_quant");
+    ki.attn_kgsi2 = tag("attn_kgsi2");
+    auto same = [](const ops::AttnPrefillPlan& a, const ops::AttnPrefillPlan& b) {
+        if (a.steps.size() != b.steps.size()) return false;
+        for (std::size_t i = 0; i < a.steps.size(); ++i) {
+            const auto &x = a.steps[i], &y = b.steps[i];
+            if (x.op != y.op || x.f != y.f || x.grid.x != y.grid.x || x.grid.y != y.grid.y || x.block.x != y.block.x || x.from_copy != y.from_copy ||
+                x.ranged != y.ranged || x.r0 != y.r0 || x.r1 != y.r1 || x.nrows != y.nrows || x.head0 != y.head0 || x.i8 != y.i8)
+                return false;
+        }
+        return true;
+    };
+    ops::AttnPrefillFlags f;
+    const auto base = ops::chooseAttnPrefill(p, f, k);
+    CHECK(!base.steps.empty() && nameOf(base.steps.back().f) == "attn_kgs2");
+    // flag off: the i8 kernels in the table change nothing
+    CHECK(same(ops::chooseAttnPrefill(p, f, ki), base));
+    // flag on without the i8 kernels (gfx1151 code object): the same plan
+    f.attn_i8qk = true;
+    CHECK(same(ops::chooseAttnPrefill(p, f, k), base));
+    // flag on, kernels present, but unrotated q / k (plain q8 KV): the same plan
+    p.kv_rot = false;
+    CHECK(same(ops::chooseAttnPrefill(p, f, ki), base));
+    p.kv_rot = true;
+    // flag on with them: dq_rows_r, i8k, attn_kgsi2 per range of i8Keys rows
+    const auto pl = ops::chooseAttnPrefill(p, f, ki);
+    const std::uint32_t seg = ops::i8Keys(p.dq_rows, p.n_head_kv, p.head_dim);
+    CHECK(seg > 0 && seg % 256 == 0 && seg < p.dq_rows);
+    CHECK(ops::i8kLayout(seg, p.n_head_kv, p.head_dim).end <= static_cast<std::uint64_t>(p.dq_rows) * p.n_head_kv * p.head_dim * 2);
+    CHECK(ops::i8kLayout(seg + 256, p.n_head_kv, p.head_dim).end > static_cast<std::uint64_t>(p.dq_rows) * p.n_head_kv * p.head_dim * 2);
+    std::size_t ndq = 0, ni8 = 0, nat = 0;
+    std::uint32_t last_r1 = 0;
+    for (std::size_t i = 0; i < pl.steps.size(); ++i) {
+        const auto& s = pl.steps[i];
+        if (s.op == ops::AttnStep::Op::dq_rows_r) {
+            ++ndq;
+            CHECK(i + 1 < pl.steps.size() && pl.steps[i + 1].op == ops::AttnStep::Op::i8k && pl.steps[i + 1].r0 == s.r0 && pl.steps[i + 1].nrows == s.nrows);
+        }
+        if (s.op == ops::AttnStep::Op::i8k) {
+            ++ni8;
+            CHECK(nameOf(s.f) == "i8k_mean" && nameOf(s.f2) == "i8k_quant" && s.kss == seg && s.grid.x == 1024 / 64 && s.grid2.x == (s.nrows * 4 + 7) / 8);
+        }
+        if (s.op == ops::AttnStep::Op::attn) {
+            ++nat;
+            CHECK(nameOf(s.f) == "attn_kgsi2" && s.i8 && s.ranged && s.from_copy && s.kss == seg && s.r1 - s.r0 <= seg);
+            last_r1 = s.r1;
+        }
+    }
+    const std::uint32_t rows = p.pos0 + p.n;
+    CHECK(ndq == (rows + seg - 1) / seg && ni8 == ndq && nat >= ndq && last_r1 == rows);
+    // the Swift R9700 scratch (prefill batch 4096: 139264 rows): ranges of 92160 keys, so 128k keys take 2 ranges
+    CHECK(ops::i8Keys(139264, 4, 256) == 92160);
+}
+
 // ---- MoE (K-4)
 kn::KernelTable moeTable(bool g1151) {
     kn::KernelTable k;
@@ -616,6 +691,7 @@ int main() {
     testOpsGemm();
     testAttnDecode();
     testAttnPrefill();
+    testAttnPrefillI8qk();
     testOpsMoe();
     testOpTables();
     std::printf("ops tests: %d passed, %d failed\n", g_pass, g_fail);

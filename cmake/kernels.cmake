@@ -36,3 +36,7 @@ if(WHIRL_WITH_HIP)
   target_link_libraries(whirl-kernel-test PRIVATE whirl_kernels_host whirl)
   target_compile_definitions(whirl-kernel-test PRIVATE WHIRL_KT_VERSION="${PROJECT_VERSION}")  # --bench rows: tool_ver
 endif()
+
+# feat027-i8qk: CPU error bounds of the int8 Q.K^T attention numerics (no GPU; tests/kernels/i8qk_ref.h)
+add_executable(whirl-i8qk-ref-tests ${CMAKE_SOURCE_DIR}/tests/kernels/unit/i8qk_ref_tests.cpp)
+target_include_directories(whirl-i8qk-ref-tests PRIVATE ${CMAKE_SOURCE_DIR}/tests/kernels)

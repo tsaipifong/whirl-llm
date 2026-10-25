@@ -122,6 +122,7 @@ std::string execDump(const Model& m) {
     WD_U(x16_bytes);
     WD_B(attn_dqf_on);
     WD_U(attn_seg);
+    WD_B(attn_i8qk);
     WD_U(dq_rows);
     WD_B(attn_kg_on);
     WD_B(ffn_h16);
