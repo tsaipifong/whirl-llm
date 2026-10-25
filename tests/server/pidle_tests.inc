@@ -10,18 +10,32 @@ namespace pidle_test {
 using whirl::server::pidle::Plan;
 using whirl::server::pidle::Sched;
 
-ServerSetup preciseSetup(bool precise, bool idle, std::uint32_t idle_ms = 0) {
+// n_ck: checkpoints per slot. 4 = whirl-server's default with --parallel 1 (server_main n_ckpt_default); 3 = the
+// smallest set that keeps the tail checkpoint (cache::ckpt_keep_prefix_min). feat026-pidle-r1 (review A1): with 3 the
+// idle checkpoint pushes prompt-end out of the set by itself, which hid a missing invalidation; the tests run both.
+ServerSetup preciseSetup(bool precise, bool idle, std::uint32_t idle_ms = 0, std::uint32_t n_ck = 4) {
     ServerSetup su = baseSetup();
     su.mc.parallel = 1;
     su.mc.slot_ctx = 32768;
     su.mc.pool_tokens = 65536;
     su.mc.sched_grid = 1024;
     su.mc.decode_mark = precise;  // balance resumes from gen-end by design (numerically equivalent, not bitwise)
-    su.eo.n_ck = 3;               // room for the tail checkpoint (cache::ckpt_keep_prefix_min)
+    su.eo.n_ck = n_ck;
     su.eo.cold_resume = precise;
     su.eo.precise_idle = idle;
     su.eo.precise_idle_ms = idle_ms;
     return su;
+}
+
+std::vector<Engine::SlotViewForTest> slotsView(TestServer& srv) {
+    std::vector<Engine::SlotViewForTest> v;
+    srv.onEngine([&] { v = srv.engine().slotsForTest(); });
+    return v;
+}
+
+std::vector<std::uint32_t> encChat(const std::string& s) {
+    const auto ids = tok().encode(s, true);
+    return std::vector<std::uint32_t>(ids.begin(), ids.end());
 }
 
 bool waitUntil(const std::function<bool()>& f, int ms) {
@@ -149,15 +163,25 @@ void testPidlePlan() {
 // prefill forward of the server read decode-written history.
 void testPidleEngine() {
     using namespace pidle_test;
+    for (const std::uint32_t nck : {4u, 3u})
     for (const bool idle : {true, false}) {
         g_log.clear();
-        TestServer srv(preciseSetup(true, idle));
-        ServerSetup su_nc = preciseSetup(true, false);
+        TestServer srv(preciseSetup(true, idle, 0, nck));
+        ServerSetup su_nc = preciseSetup(true, false, 0, nck);
         su_nc.eo.no_prefix_cache = true;
         TestServer cold(su_nc);
         const Turns t = makeTurns(srv, 3000, 2000, 350, 41);
-        if (idle) CHECK(waitUntil([&] { return srv.engine().pidleStats().done >= 1; }, 20000));
-        else std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        if (idle) {
+            CHECK(waitUntil([&] { return srv.engine().pidleStats().done >= 1; }, 20000));
+            // feat026-pidle-r1 (review C2): the slot's cached tokens are the rows its KV holds bitwise (0 .. 4096,
+            // the idle checkpoint), as after any other rewrite (startJob: cache_tokens cut to the reuse point)
+            const auto v = slotsView(srv);
+            CHECK_EQ(v[0].tokens, 4096u);
+            CHECK_EQ(v[0].max_ck, 4096u);
+            CHECK(v[0].pages * qwen35::kv_page >= 4096u);
+        } else {
+            std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        }
         auto r2 = srv.post("/v1/completions", completionBody(t.p2, 40));
         auto r2c = cold.post("/v1/completions", completionBody(t.p2, 40));
         CHECK_EQ(r2.status, 200);
@@ -272,12 +296,141 @@ void testPidleOnlyWhenSafe() {
     CHECK_EQ(cachedTokens(r), coldTail(t.p1.size()));  // 2048, not 4096
     CHECK_EQ(srv.model().decPrefills(), 0u);
     CHECK_EQ(srv.model().poison(), 0u);
-    // a regenerate of turn 1 in a fresh server after the idle work
-    TestServer srv2(preciseSetup(true, true));
-    const Turns t2 = makeTurns(srv2, 3000, 2000, 350, 49);
-    CHECK(waitUntil([&] { return srv2.engine().pidleStats().done >= 1; }, 20000));
-    auto rr = srv2.post("/v1/completions", completionBody(t2.p1, 2000));
-    CHECK_EQ(completionText(rr), decode(t2.out1));
-    CHECK_EQ(cachedTokens(rr), coldTail(t2.p1.size()));
-    CHECK_EQ(srv2.model().decPrefills(), 0u);
+    // a regenerate of turn 1 in a fresh server after the idle work. feat026-pidle-r1 (review A1): with 4 checkpoints
+    // (whirl-server's --parallel 1 default) the idle checkpoint @4096 goes into a free place, so prompt-end @3000 would
+    // still be in the set: only the invalidation keeps the regenerate from resuming there over rows [2048, 3000) that
+    // the idle prefill rewrote with its own chunk shape (on the GPU not the bits turn 1's cold prefill left)
+    for (const std::uint32_t nck : {4u, 3u}) {
+        TestServer srv2(preciseSetup(true, true, 0, nck));
+        const Turns t2 = makeTurns(srv2, 3000, 2000, 350, 49);
+        CHECK(waitUntil([&] { return srv2.engine().pidleStats().done >= 1; }, 20000));
+        auto rr = srv2.post("/v1/completions", completionBody(t2.p1, 2000));
+        CHECK_EQ(completionText(rr), decode(t2.out1));
+        CHECK_EQ(cachedTokens(rr), coldTail(t2.p1.size()));
+        CHECK_EQ(srv2.model().decPrefills(), 0u);
+        if (g_verbose) std::printf("  pidle regenerate n_ck %u: cached %llu\n", nck, (unsigned long long)cachedTokens(rr));
+    }
+}
+
+// feat026-pidle-r1 (review A2): the copy on write of the re-prefill finds no page (every page of the pool is the
+// slot's and shared, no other slot to evict). The idle job must not throw out of runLoop (KvPoolFull ended the server
+// as "fatal"): it is skipped before any checkpoint is invalidated, and the next turn resumes at turn 1's tail.
+void testPidleNoPageNoThrow() {
+    using namespace pidle_test;
+    g_log.clear();
+    ServerSetup su = preciseSetup(true, true, 300);
+    su.mc.pool_tokens = 5120;  // 20 pages: turn 1 (3000 + 1900 tokens) fills the pool
+    TestServer srv(su);
+    const Turns t = makeTurns(srv, 3000, 1900, 60, 53);
+    srv.onEngine([&] { srv.engine().holdPagesForTest(true); });  // the slot's pages count as shared: cow needed
+    CHECK(waitUntil([&] {
+        const auto st = srv.engine().pidleStats();
+        return st.skipped + st.started >= 1;
+    }, 5000));
+    srv.onEngine([&] { srv.engine().holdPagesForTest(false); });
+    const auto st = srv.engine().pidleStats();
+    CHECK_EQ(st.started, 0u);
+    CHECK_EQ(st.skipped, 1u);
+    CHECK_EQ(g_log.count("precise idle: skipped: needs "), 1u);
+    CHECK_EQ(srv.get("/health").status, 200);
+    auto r2 = srv.post("/v1/completions", completionBody(t.p2, 40));
+    CHECK_EQ(r2.status, 200);
+    CHECK_EQ(completionText(r2), decode(srv.model().greedyReference(t.p2, 40, true)));
+    CHECK_EQ(cachedTokens(r2), coldTail(t.p1.size()));  // turn 1's checkpoints were left as they were
+    CHECK_EQ(srv.model().poison(), 0u);
+}
+
+// feat026-pidle-r1 (review C3): --parallel 2, conversation A idle in one slot, B's reply just ended in the other, and
+// the pool too full for B's re-prefill. The speculative background job must never evict A's cache (it would, through
+// the slot evictor of cowPages / ensurePages): B's re-prefill is skipped, A's and B's next turns resume at their tails.
+void testPidleNoEvict() {
+    using namespace pidle_test;
+    g_log.clear();
+    ServerSetup su = preciseSetup(true, true, 300);
+    su.mc.parallel = 2;
+    su.mc.pool_tokens = 9216;  // 36 pages: A (3032 tokens, 12 pages) + B (4900 tokens, 20 pages) + 4 free
+    TestServer srv(su);
+    const auto pa = makePrompt(3000, 61);
+    auto ra = srv.post("/v1/completions", completionBody(pa, 32));
+    const auto outa = srv.model().greedyReference(pa, 32, true);
+    CHECK_EQ(completionText(ra), decode(outa));
+    const Turns tb = makeTurns(srv, 3000, 1900, 60, 63);
+    srv.onEngine([&] { srv.engine().holdPagesForTest(true); });  // B's rewrite needs copy on write: 9 pages, 4 free
+    CHECK(waitUntil([&] {
+        const auto st = srv.engine().pidleStats();
+        return st.skipped >= 2 || st.started >= 1;  // A: nothing to do (3032 tokens); B: no free pages
+    }, 5000));
+    srv.onEngine([&] { srv.engine().holdPagesForTest(false); });
+    const auto st = srv.engine().pidleStats();
+    CHECK_EQ(st.started, 0u);
+    CHECK_EQ(g_log.count("kv pool full: evicting idle slot"), 0u);
+    CHECK_EQ(srv.engine().stats().evictions, 0u);
+    std::vector<std::uint32_t> ha = pa;
+    ha.insert(ha.end(), outa.begin(), outa.end());
+    const auto pa2 = makePrompt(static_cast<std::uint32_t>(ha.size() + 200), 62, ha);
+    auto ra2 = srv.post("/v1/completions", completionBody(pa2, 24));
+    CHECK_EQ(completionText(ra2), decode(srv.model().greedyReference(pa2, 24, true)));
+    CHECK_EQ(cachedTokens(ra2), coldTail(pa.size()));
+    auto rb2 = srv.post("/v1/completions", completionBody(tb.p2, 24));
+    CHECK_EQ(completionText(rb2), decode(srv.model().greedyReference(tb.p2, 24, true)));
+    CHECK_EQ(cachedTokens(rb2), coldTail(tb.p1.size()));
+    CHECK_EQ(srv.model().poison(), 0u);
+}
+
+// feat026-pidle-r1 (review A3): a reply to a prompt that opens a thinking block ("<think>\n" at its end). The chat
+// template drops the reasoning from the history, so the next prompt does not hold the reply tokens and an idle
+// checkpoint in them is never used; the re-prefill would only cost GPU time and invalidate think-open / gen-end (a
+// regenerate would prefill again from the tail). It is skipped, and the regenerate resumes at think-open (N - 1).
+// The reference is a cold server (no prefix cache): the cold run of a think-open prompt splits at N - 1, which the
+// mock's sched_grid guard marks (off the 1024 grid), so the never-splitting greedyReference is not the cold text here.
+void testPidleThinkSkipped() {
+    using namespace pidle_test;
+    g_log.clear();
+    TestServer srv(preciseSetup(true, true));
+    ServerSetup su_nc = preciseSetup(true, false);
+    su_nc.eo.no_prefix_cache = true;
+    TestServer cold(su_nc);
+    std::vector<std::uint32_t> p1 = makePrompt(2990, 65);
+    const auto gen = encChat("<|im_start|>assistant\n<think>\n");
+    p1.insert(p1.end(), gen.begin(), gen.end());
+    CHECK_EQ(ChatTokens(tok()).thinkOpenSplit(p1), p1.size() - 1);
+    auto r1 = srv.post("/v1/completions", completionBody(p1, 2000));
+    const std::string t_cold = completionText(cold.post("/v1/completions", completionBody(p1, 2000)));
+    CHECK_EQ(completionText(r1), t_cold);
+    CHECK(waitUntil([&] {
+        const auto st = srv.engine().pidleStats();
+        return st.skipped + st.started >= 1;
+    }, 5000));
+    const auto st = srv.engine().pidleStats();
+    CHECK_EQ(st.started, 0u);
+    CHECK_EQ(st.skipped, 1u);
+    CHECK_EQ(g_log.count("precise idle: skipped: the prompt opens a thinking block"), 1u);
+    auto rr = srv.post("/v1/completions", completionBody(p1, 2000));
+    CHECK_EQ(completionText(rr), t_cold);
+    CHECK_EQ(cachedTokens(rr), p1.size() - 1);  // think-open of turn 1, not the tail
+    CHECK_EQ(srv.model().decPrefills(), 0u);
+    CHECK_EQ(srv.model().poison(), 0u);
+}
+
+// feat026-pidle-r1, diagnostic found while writing the test above: a --precise thinking turn whose prompt resumes from
+// an earlier 'prefix' checkpoint (the tail of a previous prompt) and ends with "<think>\n" must equal the cold run,
+// whose last chunk is split at the think-open point (N - 1). Idle off (not about PRECISE-IDLE: the COLD-RESUME path).
+void testPidleThinkResumeCold() {
+    using namespace pidle_test;
+    TestServer srv(preciseSetup(true, false));
+    ServerSetup su_nc = preciseSetup(true, false);
+    su_nc.eo.no_prefix_cache = true;
+    TestServer cold(su_nc);
+    const auto pa = makePrompt(3000, 67);
+    auto ra = srv.post("/v1/completions", completionBody(pa, 16));
+    CHECK_EQ(ra.status, 200);
+    std::vector<std::uint32_t> p2 = makePrompt(3200, 68, pa);
+    const auto gen = encChat("<|im_start|>assistant\n<think>\n");
+    p2.insert(p2.end(), gen.begin(), gen.end());
+    auto r2 = srv.post("/v1/completions", completionBody(p2, 64));
+    const std::string t_cold = completionText(cold.post("/v1/completions", completionBody(p2, 64)));
+    if (g_verbose) std::printf("  think resume: cached %llu of %zu, text == cold: %d\n", (unsigned long long)cachedTokens(r2), p2.size(),
+                               completionText(r2) == t_cold ? 1 : 0);
+    CHECK(cachedTokens(r2) > 0);
+    CHECK_EQ(completionText(r2), t_cold);
 }

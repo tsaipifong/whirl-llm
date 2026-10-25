@@ -423,6 +423,16 @@ public:
     PidleStats pidleStats() const {
         return {pidle_started_.load(), pidle_done_.load(), pidle_cancelled_.load(), pidle_skipped_.load(), pidle_rows_.load()};
     }
+    // Tests only (feat026-pidle-r1; call on the engine thread, runOnLoop; not used by the product): hold one more
+    // reference on every page the slots own now (they then count as shared, as under a shared prefix checkpoint, so
+    // a rewrite of them needs copy on write and frees nothing) / drop those references; and per slot its cached
+    // token count, page count and the highest valid checkpoint position.
+    void holdPagesForTest(bool hold);
+    struct SlotViewForTest {
+        std::size_t tokens = 0, pages = 0;
+        std::uint32_t max_ck = 0;
+    };
+    std::vector<SlotViewForTest> slotsForTest() const;
 
 private:
     // checkpoints
@@ -493,6 +503,10 @@ private:
     bool pidleStep();
     std::optional<TimePoint> pidleDue() const;
     void pidleCancel();
+    // feat026-pidle-r1: pidleStep's body (pidleStep keeps every exception inside); end the job at the last finished
+    // chunk (pidleCancel: a request arrived)
+    bool pidleRun();
+    void pidleStop(const char* why);
     // FR-SRV P2-2: queued / running requests whose client disconnected end (slot freed)
     void reapDisconnected();
     // FR-SRV P2-3: pool pages a prompt of n_tok tokens needs; pages free or evictable now minus
@@ -648,6 +662,7 @@ private:
         TimePoint t0{};
     } pidle_;
     std::atomic<std::uint64_t> pidle_started_{0}, pidle_done_{0}, pidle_cancelled_{0}, pidle_skipped_{0}, pidle_rows_{0};
+    std::vector<std::int32_t> test_held_;  // holdPagesForTest
     std::vector<std::unique_ptr<EmbEntry>> emb_cache_;
     std::uint64_t emb_bytes_ = 0;
     std::uint64_t emb_seq_ = 0;

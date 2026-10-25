@@ -2836,4 +2836,35 @@ void Engine::runLoop() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// tests only (feat026-pidle-r1)
+
+void Engine::holdPagesForTest(bool hold) {
+    owner_.check("Engine::holdPagesForTest");
+    if (!hold) {
+        pool_.unref(test_held_);
+        test_held_.clear();
+        return;
+    }
+    for (const Slot& sl : slots_)
+        for (std::int32_t p : sl.pages) {
+            pool_.ref(p);
+            test_held_.push_back(p);
+        }
+}
+
+std::vector<Engine::SlotViewForTest> Engine::slotsForTest() const {
+    owner_.check("Engine::slotsForTest");
+    std::vector<SlotViewForTest> v;
+    for (const Slot& sl : slots_) {
+        SlotViewForTest s;
+        s.tokens = sl.cache_tokens.size();
+        s.pages = sl.pages.size();
+        for (const Ckpt& c : sl.ckpts)
+            if (c.valid) s.max_ck = std::max(s.max_ck, c.pos);
+        v.push_back(s);
+    }
+    return v;
+}
+
 }  // namespace whirl::server
