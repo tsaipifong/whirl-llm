@@ -352,61 +352,198 @@ void testMisc(Ctx& c) {
             c.rep.add(rk);
             c.rep.add(cmpTolRel("topk_rows softmax normalizer vs CPU", gsum, rsum, 1e-4, 1e-9));
         }
-        // topk_rows ties at the K-th value (feat027-relaxdet): more tied logits than free places must
-        // give the LOWEST ids among the ties (the argmax rule), the same set on every launch. Before the
-        // fix the shared-atomic arrival order chose them, so relaxacc's rank test (whirl/relax_accept.h,
-        // ties: lower id first) could keep a draft on one run and reject it on the next.
+        // topk_rows ties at the K-th value (feat027-relaxdet, extended in feat027-relaxdet-r1): more tied
+        // logits than free places must give the LOWEST ids among the ties (the argmax rule), the same set
+        // on every launch. Before the fix the shared-atomic arrival order chose them, so relaxacc's rank
+        // test (whirl/relax_accept.h, ties: lower id first) could keep a draft on one run and reject it on
+        // the next, and the server's sampling candidates (k_small = 256) could differ run to run.
+        // Rows: 0-2 one free place (K 4/4/40); 3 K 40 with 10 free places, ties spread over sweeps and
+        // waves in reverse lane order; 4 K 256 with 56 free places, one tie per sweep at a moving lane
+        // (the places span ~50 sweeps) plus several waves of one sweep; 5 K 256 all-equal row (every
+        // logit tied); 6 K 256 with 6 free places across the sweep-0/1 boundary (wave 31 -> wave 0).
+        // Oracle: (value desc, index asc), first K. A row that does not overflow (ties at the K-th value
+        // <= free places) counts as a failure, so the test cannot silently stop testing the tie path.
         if (c.k.topk_rows) {
-            const int tn = n, tr = 3;
+            const int tn = n, tr = 7;
             std::vector<float> xt(static_cast<std::size_t>(tr) * tn);
             for (std::size_t i = 0; i < xt.size(); ++i) xt[i] = -10.0f - static_cast<float>(i % 977) * 1e-3f;
-            const int Ks[tr] = {4, 4, 40};
+            const int Ks[tr] = {4, 4, 40, 40, 256, 256, 256};
+            const int n_top[tr] = {3, 3, 39, 30, 200, 0, 250};
             std::vector<std::vector<int>> want(tr);
+            std::size_t bad = 0, launches = 0;
             for (int r = 0; r < tr; ++r) {
                 float* xr = xt.data() + static_cast<std::size_t>(r) * tn;
                 const int K = Ks[r];
-                std::vector<int> top;  // K - 1 distinct values above the tie, spread over the row
-                for (int j = 0; j < K - 1; ++j) {
+                std::vector<int> ties;
+                if (r <= 2) {
+                    // the lowest tie sits in the last wave of the first sweep (thread 1023), the others in
+                    // waves 0..15 of later sweeps, so arrival order differs from index order
+                    ties.push_back(1023 + r);
+                    for (int it = 1; it < tn / 1024; it += 3)
+                        for (int t = 0; t < 512; t += 37) ties.push_back(it * 1024 + t);
+                } else if (r == 3) {
+                    for (int j = 0; j < 40; ++j) ties.push_back((1 + 5 * j) * 1024 + (1023 - 25 * j));  // high lanes first
+                } else if (r == 4) {
+                    for (int it = 0; it < tn / 1024; ++it) ties.push_back(it * 1024 + (it * 389 + 517) % 1024);
+                    for (int t = 32; t < 1024; t += 96) ties.push_back(3 * 1024 + t);  // several waves of one sweep
+                } else if (r == 5) {
+                    for (int i = 0; i < tn; ++i) xr[i] = 0.5f;
+                } else {
+                    for (int at = 1020; at <= 1030; ++at) ties.push_back(at);
+                    ties.push_back(5000);
+                }
+                for (int at : ties) xr[at] = 1.0f;
+                for (int j = 0; j < n_top[r]; ++j) {  // distinct values above the tie, spread over the row
                     const int at = static_cast<int>((static_cast<long long>(j) * 7919 + 131 * (r + 1)) % tn);
                     xr[at] = 5.0f + static_cast<float>(j) * 0.25f;
-                    top.push_back(at);
                 }
-                // ties: the lowest one sits in the last wave of the first sweep (thread 1023), the others
-                // in waves 0..15 of later sweeps, so arrival order differs from index order
-                std::vector<int> ties = {1023 + r};
-                for (int it = 1; it < tn / 1024; it += 3)
-                    for (int t = 0; t < 512; t += 37) ties.push_back(it * 1024 + t);
-                for (int at : ties)
-                    if (std::find(top.begin(), top.end(), at) == top.end()) xr[at] = 1.0f;
-                std::vector<int> tsorted;
-                for (int at : ties)
-                    if (std::find(top.begin(), top.end(), at) == top.end()) tsorted.push_back(at);
-                std::sort(tsorted.begin(), tsorted.end());
-                want[static_cast<std::size_t>(r)] = top;
-                want[static_cast<std::size_t>(r)].push_back(tsorted[0]);  // K - (K - 1) = 1 free place
+                std::vector<int> idx(static_cast<std::size_t>(tn));
+                std::iota(idx.begin(), idx.end(), 0);
+                std::partial_sort(idx.begin(), idx.begin() + K, idx.end(), [&](int a, int bb) { return xr[a] != xr[bb] ? xr[a] > xr[bb] : a < bb; });
+                const float kth = xr[idx[static_cast<std::size_t>(K) - 1]];
+                int above = 0, tied = 0;
+                for (int i = 0; i < tn; ++i) {
+                    above += xr[i] > kth;
+                    tied += xr[i] == kth;
+                }
+                if (tied <= K - above) {
+                    std::fprintf(stderr, "topk_rows tie row %d: no overflow (tied %d, free %d)\n", r, tied, K - above);
+                    ++bad;
+                }
+                want[static_cast<std::size_t>(r)].assign(idx.begin(), idx.begin() + K);
                 std::sort(want[static_cast<std::size_t>(r)].begin(), want[static_cast<std::size_t>(r)].end());
             }
             Buf dxt(xt);
-            std::size_t bad = 0, launches = 0;
             for (int rep = 0; rep < 20; ++rep) {
                 for (int r = 0; r < tr; ++r) {
                     const int K = Ks[r];
+                    const float* xr = xt.data() + static_cast<std::size_t>(r) * tn;
                     Buf tid(static_cast<std::size_t>(K) * 4), tval(static_cast<std::size_t>(K) * 4), st(8);
                     hip::launch(c.k.topk_rows, {1, 1, 1}, {1024, 1, 1}, 0, c.s, dxt.p() + static_cast<std::uint64_t>(r) * tn * 4, tn, K,
                                 1.0f, tid.p(), tval.p(), st.p());
                     c.sync();
-                    std::vector<int> got = tid.down<int>(static_cast<std::size_t>(K));
+                    const std::vector<int> gi = tid.down<int>(static_cast<std::size_t>(K));
+                    const std::vector<float> gv = tval.down<float>(static_cast<std::size_t>(K));
+                    for (int j = 0; j < K; ++j) {  // every slot's value is its id's logit
+                        const int id = gi[static_cast<std::size_t>(j)];
+                        bad += id < 0 || id >= tn || gv[static_cast<std::size_t>(j)] != xr[id];
+                    }
+                    std::vector<int> got = gi;
                     std::sort(got.begin(), got.end());
                     bad += got != want[static_cast<std::size_t>(r)];
                     ++launches;
                 }
             }
             Result rt;
-            rt.name = "topk_rows ties at the K-th value: lowest ids, same set every launch";
+            rt.name = "topk_rows ties at the K-th value: lowest ids, same set every launch (K 4..256, 1..256 free places)";
             rt.n = launches;
             rt.mismatches = bad;
             rt.pass = bad == 0;
             c.rep.add(rt);
+        }
+        // draft_sample_rows ties at the K-th draft logit (feat027-relaxdet-r1): q's support must be the
+        // LOWEST tied ids (the draftDist / oracle rule), the same q and the same drawn draft on every
+        // launch, with and without the (strictly ascending, qwen35::draftVocabIds) draft-vocabulary map.
+        // Before the fix the shared-atomic arrival order chose the tied ids. Rows: 0 top_k 5 with 2 free
+        // places, ties spread over sweeps in reverse lane order; 1 top_k 0 (K 32) all-equal row; 2 top_k
+        // 20 with 7 free places, mapped ids (map[i] = 3 i + 1), ties across the sweep-0/1 boundary.
+        if (c.k.draft_sample_rows) {
+            namespace sp = whirl::spec;
+            const int tr = 3, r = 1;
+            const int tn_of[tr] = {n, n, 65536};
+            const int tks[tr] = {5, 0, 20};
+            const int n_top[tr] = {3, 0, 13};
+            const float its[tr] = {1.f / 0.7f, 1.f, 1.f / 0.6f};
+            const std::uint64_t keys[tr] = {sp::raceBase(31337, 12), sp::raceBase(5, 0), sp::raceBase(271828ull, 999)};
+            std::vector<int> mp(static_cast<std::size_t>(tn_of[2]));
+            for (std::size_t i = 0; i < mp.size(); ++i) mp[i] = 3 * static_cast<int>(i) + 1;
+            Buf dmap(mp);
+            std::size_t bad = 0, launches = 0;
+            std::vector<float> gp;
+            std::vector<double> rp;
+            for (int b = 0; b < tr; ++b) {
+                const int tn = tn_of[b];
+                std::vector<float> xs(static_cast<std::size_t>(tn));
+                for (int i = 0; i < tn; ++i) xs[static_cast<std::size_t>(i)] = -10.0f - static_cast<float>(i % 977) * 1e-3f;
+                std::vector<int> ties;
+                if (b == 0) {
+                    for (int j = 0; j < 30; ++j) ties.push_back((2 + 7 * j) * 1024 + (1023 - 33 * j));
+                } else if (b == 1) {
+                    for (int i = 0; i < tn; ++i) xs[static_cast<std::size_t>(i)] = 0.25f;
+                } else {
+                    for (int at = 1018; at <= 1029; ++at) ties.push_back(at);
+                }
+                for (int at : ties) xs[static_cast<std::size_t>(at)] = 1.0f;
+                for (int j = 0; j < n_top[b]; ++j) {
+                    const int at = static_cast<int>((static_cast<long long>(j) * 7919 + 977) % tn);
+                    xs[static_cast<std::size_t>(at)] = 3.0f + static_cast<float>(j) * 0.125f;
+                }
+                const int K = static_cast<int>(sp::draftCands(static_cast<std::uint32_t>(tks[b])));
+                std::vector<int> idx(static_cast<std::size_t>(tn));
+                std::iota(idx.begin(), idx.end(), 0);
+                std::partial_sort(idx.begin(), idx.begin() + K, idx.end(), [&](int a, int bb) { return xs[a] != xs[bb] ? xs[a] > xs[bb] : a < bb; });
+                const float kth = xs[static_cast<std::size_t>(idx[static_cast<std::size_t>(K) - 1])];
+                int above = 0, tied = 0;
+                for (float v : xs) {
+                    above += v > kth;
+                    tied += v == kth;
+                }
+                if (tied <= K - above) {
+                    std::fprintf(stderr, "draft_sample_rows tie row %d: no overflow (tied %d, free %d)\n", b, tied, K - above);
+                    ++bad;
+                }
+                const float m = xs[static_cast<std::size_t>(idx[0])];
+                double s = 0;
+                for (float v : xs) s += std::exp((static_cast<double>(v) - m) * its[b]);
+                std::vector<std::uint32_t> ci(static_cast<std::size_t>(K));
+                std::vector<float> cl(static_cast<std::size_t>(K));
+                for (int k = 0; k < K; ++k) {
+                    const int at = idx[static_cast<std::size_t>(k)];
+                    ci[static_cast<std::size_t>(k)] = static_cast<std::uint32_t>(b == 2 ? mp[static_cast<std::size_t>(at)] : at);
+                    cl[static_cast<std::size_t>(k)] = xs[static_cast<std::size_t>(at)];
+                }
+                const sp::QDist want = sp::draftDist(ci, cl, m, static_cast<float>(s), its[b], static_cast<std::uint32_t>(tks[b]), 1.f, 0.f);
+                const std::uint32_t want_draw = sp::sampleRace(want, keys[b]);
+                Buf dxs(xs);
+                for (int rep = 0; rep < 20; ++rep) {
+                    Buf ctl(64 * 4), qb(sp::q_words * 4);
+                    ctl.zero();
+                    wk::RowIdx area;
+                    wk::DSampArgs da;
+                    area.v[0] = 0;
+                    da.on[0] = 1;
+                    da.top_k[0] = tks[b];
+                    da.qoff[0] = 0;
+                    da.inv_t[0] = its[b];
+                    da.top_p[0] = 1.f;
+                    da.min_p[0] = 0.f;
+                    da.key_lo[0] = static_cast<std::uint32_t>(keys[b]);
+                    da.key_hi[0] = static_cast<std::uint32_t>(keys[b] >> 32);
+                    hip::launch(c.k.draft_sample_rows, {1, 1, 1}, {1024, 1, 1}, 0, c.s, dxs.p(), tn, ctl.p(), area, r,
+                                b == 2 ? dmap.p() : DevPtr{0}, da, qb.p());
+                    c.sync();
+                    const auto hc = ctl.down<int>(64);
+                    const auto hq = qb.down<std::int32_t>(sp::q_words);
+                    const sp::QDist got = sp::qFromWords(hq.data());
+                    bad += got.n != want.n;
+                    for (std::uint32_t i = 0; i < std::min(got.n, want.n); ++i) {
+                        bad += got.id[i] != want.id[i];
+                        if (rep == 0) {
+                            gp.push_back(got.p[i]);
+                            rp.push_back(want.p[i]);
+                        }
+                    }
+                    bad += static_cast<std::uint32_t>(hc[16 + r]) != want_draw;
+                    ++launches;
+                }
+            }
+            Result rq;
+            rq.name = "draft_sample_rows ties at the K-th draft logit: lowest (mapped) ids, same q / draft every launch";
+            rq.n = launches;
+            rq.mismatches = bad;
+            rq.pass = bad == 0;
+            c.rep.add(rq);
+            c.rep.add(cmpTolRel("draft_sample_rows tie rows: q probabilities vs CPU", gp, rp, 1e-4, 1e-7));
         }
         // draft_sample_rows: draft distribution q (ids exact, probabilities vs whirl::spec::draftDist)
         // and the drawn token = the race draw from the written q (whirl::spec::sampleRace)
