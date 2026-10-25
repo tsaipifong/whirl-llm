@@ -506,7 +506,8 @@ static void testFingerprintDumpEnv() {
     in.gpu_arch = "gfx1201";
     in.gpu_name = "AMD Radeon AI PRO R9700";
     in.kernel_set = "gfx1201 co 123";
-    const char* dumps[] = {"WHIRL_ALLOC_LOG", "WHIRL_ALLOC_LOG_RAW", "WHIRL_DUMP_EXEC", "WHIRL_DUMP_KV"};
+    const char* dumps[] = {"WHIRL_ALLOC_LOG",    "WHIRL_ALLOC_LOG_RAW",  "WHIRL_DUMP_EXEC",
+                           "WHIRL_DUMP_KV",      "WHIRL_LAUNCH_LOG_RAW", "WHIRL_LAUNCH_LOG_RAW_MAX"};
     for (const char* k : dumps) setEnv(k, nullptr);
     in.env = fingerprintEnv();
     const std::uint64_t off = tierFingerprint(in);
@@ -515,6 +516,8 @@ static void testFingerprintDumpEnv() {
     setEnv("WHIRL_ALLOC_LOG_RAW", "server");
     setEnv("WHIRL_DUMP_EXEC", "1");
     setEnv("WHIRL_DUMP_KV", "1");
+    setEnv("WHIRL_LAUNCH_LOG_RAW", "1");
+    setEnv("WHIRL_LAUNCH_LOG_RAW_MAX", "1000");
     in.env = fingerprintEnv();
     CHECK(tierFingerprint(in) == off);
     setEnv("WHIRL_S0A_CONTROL", "1");  // not a skipped name: part of the key
