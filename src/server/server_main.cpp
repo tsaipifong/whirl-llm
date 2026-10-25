@@ -1307,6 +1307,7 @@ int serveMain(int argc, char** argv, const char* program) {
                 logI("WHIRL_DRAFT_VOCAB / WHIRL_DRAFT_WINDOW not used with --draft dflash (MTP draft head only)");
         }
         eo.trace_nd = env("TRACE_ND").has_value();
+        eo.trace_relax = env("RELAX_TRACE").has_value();
         eo.loop_log = env("LOOP_LOG").has_value();
         eo.tier_verify = env("TIER_VERIFY").has_value();
         eo.tier_min_gain = envU32("TIER_MIN_GAIN", 512);

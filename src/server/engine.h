@@ -272,6 +272,10 @@ struct EngineOptions {
     // per-slot draft counts: 0 uniform, 1 marginal-gain swaps (splitDrafts), 2 cost model (allocDrafts)
     std::uint32_t slot_drafts = 0;
     bool trace_nd = false;
+    // WHIRL_RELAX_TRACE=1 (feat027-relaxdet): one log line per greedy relaxacc cycle with the drafts, the
+    // verify argmaxes and, for every draft the relaxed rule judged, the top-K ids / logits and the row max
+    // as hex floats, so two runs can be diffed to the first cycle whose inputs differ. Prints only.
+    bool trace_relax = false;
     bool loop_log = false;
     bool tier_verify = false;
     std::uint32_t tier_min_gain = 512;

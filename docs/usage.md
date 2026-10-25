@@ -659,6 +659,7 @@ Alternatives kept for A/B tests and numerics comparisons. The lossy ones are the
 | `WHIRL_DUMP_FROM=N` | first prompt position written by `WHIRL_DUMP_LOGITS` |
 | `WHIRL_DUMP_MOE=FILE` | selected experts of every prefill MoE block (i32) |
 | `WHIRL_TRACE_ND=1` | log the draft count of every decode cycle |
+| `WHIRL_RELAX_TRACE=1` | log the inputs of the relaxed acceptance (`relaxacc`) of every greedy decode cycle: drafts, verify argmaxes, and the top-K logits and row max (hex floats) of each draft the relaxed rule judged; for diffing two runs |
 | `WHIRL_LOOP_LOG=1` | log per-loop phase timing (server) |
 | `WHIRL_TIER_VERIFY=1` | byte-verify every host-tier spill / restore (server) |
 | `WHIRL_TAIL_CK=0` | *(debug)* no [tail checkpoint](#prefix-cache) near the end of long prompts (logged as an override); a second question about the same document then re-prefills it |

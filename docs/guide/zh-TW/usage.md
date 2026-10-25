@@ -517,6 +517,7 @@ PowerShell 中先用 `$env:WHIRL_MODE = "precise"` 設定再啟動程式。**一
 | `WHIRL_DUMP_FROM=N` | `WHIRL_DUMP_LOGITS` 寫出的第一個提示位置 |
 | `WHIRL_DUMP_MOE=FILE` | 每個 prefill MoE 區塊選到的專家（i32） |
 | `WHIRL_TRACE_ND=1` | 記錄每個 decode 回合的草稿數 |
+| `WHIRL_RELAX_TRACE=1` | 記錄每個 greedy decode 回合寬鬆接受（`relaxacc`）的輸入：draft、驗證列 argmax，以及每個交給寬鬆規則判斷的 draft 的前 K 名 logit 與列最大值（十六進位浮點），用來比對兩次執行 |
 | `WHIRL_LOOP_LOG=1` | 記錄每圈各階段的時間（伺服器） |
 | `WHIRL_TIER_VERIFY=1` | 每次 host 層寫出 / 還原都逐位元組驗證（伺服器） |
 | `WHIRL_TAIL_CK=0` | *（除錯）* 長提示詞結尾附近不保留[尾端檢查點](#prefix-cache)（日誌標示為覆寫）；同一份文件的第二個問題會重新 prefill 整份文件 |

@@ -51,7 +51,10 @@ struct Params {
 };
 
 // Greedy rule on a row's top-K candidates (ids / logits, any order, K >= p.topk()); m = the
-// row's max logit. The argmax itself always passes (alpha <= 1).
+// row's max logit. The argmax itself always passes (alpha <= 1). The verdict equals the verdict on
+// the full row only if, at a tie at the K-th logit, the candidates are the LOWEST tied ids: topk_rows
+// guarantees that (feat027-relaxdet; before, shared-atomic arrival order picked them, so a draft
+// past rank K could be kept on one run and rejected on the next).
 inline bool acceptGreedy(const Params& p, std::span<const std::int32_t> ids, std::span<const float> logits, float m,
                          std::uint32_t draft) {
     const std::size_t n = ids.size() < logits.size() ? ids.size() : logits.size();

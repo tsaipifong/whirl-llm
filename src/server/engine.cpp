@@ -1867,6 +1867,7 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
         sl.drafted += nd_dev;
         std::uint32_t acc = 0;
         std::uint32_t chosen;
+        std::string rtrace;  // WHIRL_RELAX_TRACE: the relaxed rule's inputs of this slot's cycle
         if (sl.greedy) {
             while (acc < nd_dev) {
                 if (static_cast<std::uint32_t>(ctl[qwen35::ctl_rows + acc]) == dr[acc]) {
@@ -1880,6 +1881,13 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
                 const auto* rids = reinterpret_cast<const std::int32_t*>(relax_host_.data()) + gr * rk;
                 const auto* rvals = reinterpret_cast<const float*>(relax_host_.data() + static_cast<std::size_t>(max_rows) * rk * 4) + gr * rk;
                 const auto* rst = reinterpret_cast<const float*>(relax_host_.data() + static_cast<std::size_t>(max_rows) * rk * 8);
+                if (opt_.trace_relax) {
+                    rtrace += std::format(" | row {} draft {} max {:a} top", acc, dr[acc], rst[2 * gr]);
+                    std::vector<std::pair<std::int32_t, float>> tk;
+                    for (std::uint32_t j = 0; j < rk; ++j) tk.emplace_back(rids[j], rvals[j]);
+                    std::sort(tk.begin(), tk.end());  // ids ascending: the slot order of the kernel is unspecified
+                    for (const auto& [id, v] : tk) rtrace += std::format(" {}:{:a}", id, v);
+                }
                 if (!relax::acceptGreedy(opt_.relax, std::span<const std::int32_t>(rids, rk), std::span<const float>(rvals, rk),
                                          rst[2 * gr], dr[acc]) ||
                     relaxRepeats(sl, dr, acc))
@@ -1890,6 +1898,13 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
                 sl.relaxed += 1;
             }
             chosen = static_cast<std::uint32_t>(ctl[qwen35::ctl_rows + acc]);
+            if (opt_.trace_relax && relaxes(k)) {
+                std::string ds, as;
+                for (std::uint32_t r = 0; r < nd_dev; ++r) ds += std::format("{}{}", r ? "," : "", dr[r]);
+                for (std::uint32_t r = 0; r <= nd_dev; ++r) as += std::format("{}{}", r ? "," : "", ctl[qwen35::ctl_rows + r]);
+                logI("relaxtrace | req {} | slot {} | n_gen {} | pos {} | nd {}/{} | drafts [{}] | argmax [{}] | acc {} | chosen {}{}",
+                     sl.reqId(), sl.id, sl.n_gen, sl.pos, nd_dev, nd_k, ds, as, acc, chosen, rtrace);
+            }
         } else {
             // The target token at every output index is the sampler's draw keyed by (seed, output
             // index); a draft is accepted iff it is that token. With specsample the sampler is the race
