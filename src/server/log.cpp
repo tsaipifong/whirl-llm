@@ -3,6 +3,7 @@
 #include "log.h"
 
 #include "whirl/common.h"
+#include "platform/fs.h"
 
 #include <cstdio>
 #include <filesystem>
@@ -42,7 +43,7 @@ void Log::open(const std::string& path) {
         std::error_code ec;
         std::filesystem::create_directories(p.parent_path(), ec);
     }
-    std::FILE* f = _wfopen(p.c_str(), L"ab");
+    std::FILE* f = platform::fs::openStdio(p.c_str(), L"ab");
     if (!f) throw std::runtime_error("cannot open log file " + path);
     std::lock_guard<std::mutex> lk(g_mutex);
     if (g_file) std::fclose(g_file);

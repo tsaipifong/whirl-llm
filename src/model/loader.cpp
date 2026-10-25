@@ -11,6 +11,7 @@
 #include "whirl/uma_mem.h"
 
 #include "whirl/common.h"
+#include "platform/fs.h"
 
 #include <algorithm>
 #include <format>
@@ -36,7 +37,7 @@ inline i32 I(u64 v) { return static_cast<i32>(v); }
 class Reader {
 public:
     explicit Reader(const std::string& path) {
-        f_ = _wfopen(widen(path).c_str(), L"rb");
+        f_ = platform::fs::openStdio(widen(path).c_str(), L"rb");
         if (!f_) throw ModelError("OpenFailed", path);
         setvbuf(f_, nullptr, _IONBF, 0);
     }

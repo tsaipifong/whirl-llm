@@ -145,7 +145,17 @@
    "steps": ["cpu_server", "cpu_logscan_selftest"], "callers": ["ckpt_store", "page_pool", "prefix_store", "tier_bridge", "engine_gov"],
    "manual": ["P-speed d5fc637 vs HEAD"]
   },
-  "contract": {
+  "platform_fs": {
+   "id": "PL2", "desc": "platform layer, files (platform::fs + FakeFs: MappedFile, GGUF reader, server log, SSD tier files)",
+   "paths": ["src/platform/fs.h", "src/platform/fs_fake.h", "src/platform/fs_win.cpp"], "lands_on": "arch025-pl2 (PL2)",
+   "steps": ["cpu_tests", "cpu_model", "cpu_tier", "cpu_server", "golden_swift", "golden_moe", "srv_tier_verify",
+             "srv_cache_balance", "srv_fs_swift"],
+   "gpus": {"golden_swift": 1, "golden_moe": 1, "srv_tier_verify": 2, "srv_cache_balance": 1, "srv_fs_swift": 1},
+   "manual": ["flag table: whirl-tier-tests testFsOpenTable + whirl-tests testFsMappedOpen (CreateFileW access / share / disposition / flags == 0e35407)",
+              "SSD speed: T1 host-bench suite ssd A/B (write / read MB/s, QD1 / QD4) both GPUs, after T1 is merged",
+              "tools/gates/platform_check.ps1 -Mode block"]
+  },
+ "contract": {
    "id": "X", "desc": "cross-module contracts (ServerModel, device::Backend, kernels_abi, numerics): the full gate",
    "paths": ["src/server/backend.h", "src/device/backend.h", "src/device/backend_hip.cpp", "include/whirl/kernels_abi.h",
              "src/kernels_host/kernels_abi.cpp", "include/whirl/numerics.h", "src/common/numerics.cpp"],

@@ -14,6 +14,8 @@
 #include "tier/evict_policy.h"
 #include "tier/idle_flush.h"
 #include "cache/prefix_cache.h"
+#include "platform/fs.h"
+#include "platform/fs_fake.h"
 
 #include <malloc.h>
 #ifndef NOMINMAX
@@ -4157,6 +4159,314 @@ static void testTierDtorSpillPending() {
     CHECK(nb.clean());
 }
 
+// ---- arch025 PL2: platform::fs (FakeFs) -------------------------------------------------------------
+
+namespace pfs = whirl::platform::fs;
+
+// One recorded CreateFileW, as the four DWORDs of the call.
+struct OpenRow {
+    const char* role;
+    std::uint32_t access, share, disposition, flags;
+};
+
+// v0.2.4 0e35407 (refs/heads/arch024), src/tier/kv_tier.cpp: every CreateFileW of the SSD tier. Literal Win32
+// values on purpose (not the pfs:: names): a constant changed in fs.h must fail here too.
+//   FILE_FLAG_NO_BUFFERING 0x20000000, FILE_FLAG_OVERLAPPED 0x40000000, FILE_FLAG_DELETE_ON_CLOSE 0x04000000,
+//   FILE_ATTRIBUTE_NORMAL 0x80, GENERIC_READ 0x80000000, GENERIC_WRITE 0x40000000, FILE_WRITE_ATTRIBUTES 0x100;
+//   0e35407 has no FILE_FLAG_WRITE_THROUGH (0x80000000) anywhere.
+static const OpenRow kOpenTable0e35407[] = {
+    {"dir lock (Tier::start)", 0xC0000000u, 0x0u, 4u, 0x04000080u},
+    {"spill write (runJob write)", 0xC0000000u, 0x1u, 4u, 0x20000000u},
+    {"startup index (indexFile)", 0x80000000u, 0x1u, 3u, 0x0u},
+    {"mtime stamp (stampFile)", 0x00000100u, 0x7u, 3u, 0x0u},
+    {"restore read (runJob read)", 0x80000000u, 0x3u, 3u, 0x60000000u},
+};
+
+static const OpenRow* matchRow(const pfs::fake::Open& o) {
+    for (const OpenRow& r : kOpenTable0e35407)
+        if (o.access == r.access && o.share == r.share && o.disposition == r.disposition && o.flags == r.flags) return &r;
+    return nullptr;
+}
+
+// The SSD tier's CreateFileW calls keep 0e35407's access / share / disposition / flags (A5: a lost
+// FILE_FLAG_NO_BUFFERING halves SSD write speed and changes no output, so only this table sees it).
+// Runs every open of the tier: lock, spill write, restart (lock, index), SSD restore (stamp, read).
+static void testFsOpenTable(NullBackend& ops, const fs::path& dir) {
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    SsdEnv env{dir};
+    const std::uint64_t fp = hashStr(0xcbf29ce484222325ull, "model-fs-table");
+    const std::uint32_t nck = 2, pages = 7;
+    DevSlot src(ops, nck, pages);
+    src.fill(901);
+    const auto toks = makeTokens(1700, 901);
+    std::uint64_t id = 0;
+    pfs::fake::begin();
+    {
+        auto t = Tier::create(ops, 32ull << 20, 5, 0);
+        t->start(env.cfg(1ull << 30), kLay, fp);
+        Entry* e = spill(*t, src, toks);
+        CHECK(e != nullptr);
+        if (e) {
+            id = e->id;
+            CHECK(tickIdle(*t));
+            CHECK(e->ssd.has_value());
+        }
+    }
+    {
+        auto t = Tier::create(ops, 32ull << 20, 6, 0);
+        t->start(env.cfg(1ull << 30), kLay, fp);
+        Entry* e = t->find(id);
+        CHECK(e != nullptr && !e->in_ram && e->ssd.has_value());
+        if (e) {
+            DevSlot dst(ops, nck, pages);
+            std::size_t nm = 0;
+            const auto sp = dst.spans(e, 1, &nm);
+            Restore* r = t->beginRestore(e, sp, nm);
+            CHECK(r != nullptr && r->from_ssd);
+            if (r) {
+                CHECK(runRestore(*t, r));
+                t->endRestore(r);
+                CHECK(dst.ckEq(src, 0) && dst.ckEq(src, 1) && dst.kvEq(src));
+            }
+        }
+        tickIdle(*t);
+    }
+    const auto opens = pfs::fake::end();
+    bool seen[std::size(kOpenTable0e35407)] = {};
+    std::size_t unknown = 0;
+    for (const auto& o : opens) {
+        const OpenRow* r = matchRow(o);
+        const wchar_t* name = o.path.c_str() + (o.path.rfind(L'\\') + 1);
+        std::printf("  open %-28s access %08x share %x disp %u flags %08x %s  %ls\n", r ? r->role : "NOT IN 0e35407 TABLE",
+                    o.access, o.share, o.disposition, o.flags, o.ok ? "ok" : "failed", name);
+        if (r == nullptr) {
+            unknown += 1;
+            continue;
+        }
+        seen[r - kOpenTable0e35407] = true;
+        CHECK(o.ok);
+        CHECK((o.flags & 0x80000000u) == 0);  // never FILE_FLAG_WRITE_THROUGH (not in 0e35407)
+        // the role follows from the path: the lock file vs the cache files
+        const bool lock = o.path.size() >= 10 && o.path.compare(o.path.size() - 10, 10, L"whirl.lock") == 0;
+        CHECK(lock == (r == &kOpenTable0e35407[0]));
+    }
+    CHECK(unknown == 0);
+    for (std::size_t i = 0; i < std::size(kOpenTable0e35407); ++i) {
+        if (!seen[i]) std::printf("FAIL: no open of role '%s'\n", kOpenTable0e35407[i].role);
+        CHECK(seen[i]);
+    }
+    // off: nothing more is recorded
+    CHECK(pfs::fake::snapshot().empty());
+    fs::remove_all(dir, ec);
+}
+
+// FakeFs write failure: the failed write's SSD copy is dropped (no file left, nothing counted against the cap),
+// the entry stays in RAM, and the tier writes it again once the drive works; nothing crashes.
+static void testFsWriteFail(NullBackend& ops, const fs::path& dir) {
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    SsdEnv env{dir};
+    const std::uint64_t fp = hashStr(0xcbf29ce484222325ull, "model-fs-wfail");
+    const std::uint32_t nck = 2, pages = 7;
+    const std::uint64_t fb = fileBytesOf(nck, pages);
+    DevSlot src(ops, nck, pages);
+    src.fill(911);
+    const auto toks = makeTokens(1700, 911);
+    // (a) one injected failure (the first write of the file, its invalid header): one failed job, then a clean write
+    {
+        std::vector<std::string> logs;
+        std::mutex mu;
+        pfs::fake::begin();
+        pfs::fake::failWrite(1);
+        auto t = Tier::create(ops, 32ull << 20, 5, 0);
+        t->log_fn = [&](std::string_view s) {
+            std::lock_guard<std::mutex> lk(mu);
+            logs.emplace_back(s);
+        };
+        t->start(env.cfg(1ull << 30), kLay, fp);
+        Entry* e = spill(*t, src, toks);
+        CHECK(e != nullptr);
+        if (e) {
+            CHECK(tickIdle(*t));
+            CHECK(pfs::fake::injectedLeft() == 0);
+            std::size_t n_fail = 0, n_ok = 0, i_fail = 0, i_ok = 0;
+            for (std::size_t i = 0; i < logs.size(); ++i) {
+                if (logs[i].find("SSD write failed") != std::string::npos) n_fail += 1, i_fail = i;
+                if (logs[i].find("written to SSD") != std::string::npos) n_ok += 1, i_ok = i;
+            }
+            CHECK(n_fail == 1 && n_ok == 1 && i_fail < i_ok);
+            CHECK(t->stats.ssd_writes == 1);  // only the good write counts
+            CHECK(e->ssd.has_value() && e->in_ram && !e->hasDirty());
+            CHECK(t->ssd_bytes == fb && countFiles(dir) == 1);
+            const auto bytes = readFile(entryFile(dir, fp, e->id));
+            CHECK(bytes.size() == fb);
+            if (bytes.size() == fb) {
+                Header h;
+                std::memcpy(&h, bytes.data(), sizeof h);
+                CHECK(std::memcmp(h.magic, "WHKVTIER", 8) == 0 && h.valid == 1 && h.id == e->id);
+            }
+        }
+        pfs::fake::end();
+    }
+    // (b) the drive keeps failing: every write fails, no file is ever left behind, the entry stays usable in RAM
+    fs::remove_all(dir, ec);
+    {
+        std::atomic<int> n_fail{0};
+        pfs::fake::begin();
+        pfs::fake::failWrite(1 << 30);
+        {
+            auto t = Tier::create(ops, 32ull << 20, 7, 0);
+            t->log_fn = [&](std::string_view s) {
+                if (s.find("SSD write failed") != std::string_view::npos) n_fail += 1;
+            };
+            t->start(env.cfg(1ull << 30), kLay, fp);
+            Entry* e = spill(*t, src, toks);
+            CHECK(e != nullptr);
+            if (e) {
+                const std::uint64_t id = e->id;
+                for (int i = 0; i < 60; ++i) {
+                    t->tick();
+                    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                }
+                CHECK(n_fail.load() >= 1);
+                CHECK(t->stats.ssd_writes == 0);
+                Entry* x = t->find(id);
+                CHECK(x == e && x->in_ram);
+                // the RAM copy is intact (the arena still equals the source)
+                std::size_t nm = 0;
+                CHECK(t->verifySpans(e, src.spans(e, 1, &nm)).bad == 0);
+            }
+        }  // ~Tier with injection still on: queued writes fail too
+        pfs::fake::end();
+        CHECK(countFiles(dir) == 0);
+        auto t = Tier::create(ops, 32ull << 20, 8, 0);
+        t->start(env.cfg(1ull << 30), kLay, fp);
+        CHECK(t->ssdEntries() == 0 && t->ssd_bytes == 0);
+    }
+    fs::remove_all(dir, ec);
+}
+
+// FakeFs short read during an SSD restore (QD-4 overlapped reads): the restore reports failure (r->failed: the
+// caller prefills cold) and, as in 0e35407 (endRestore: "the read failed: the file is unusable" -> removeEntry), the
+// entry is dropped; nothing crashes. Each case starts from a fresh copy of the file; the control restore of the same
+// file without the fault is byte-identical and verifyPieces finds it clean.
+static void testFsShortRead(NullBackend& ops, const fs::path& dir) {
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    SsdEnv env{dir};
+    const std::uint64_t fp = hashStr(0xcbf29ce484222325ull, "model-fs-short");
+    const std::uint32_t nck = 2, pages = 7;
+    DevSlot src(ops, nck, pages);
+    src.fill(921);
+    const auto toks = makeTokens(1700, 921);
+    std::uint64_t id = 0;
+    {
+        auto t = Tier::create(ops, 32ull << 20, 5, 0);
+        t->start(env.cfg(1ull << 30), kLay, fp);
+        Entry* e = spill(*t, src, toks);
+        CHECK(e != nullptr);
+        if (!e) return;
+        id = e->id;
+        CHECK(tickIdle(*t));
+        CHECK(e->ssd.has_value());
+    }
+    const fs::path f = entryFile(dir, fp, id);
+    const fs::path keep = dir / L"short_read_copy.bin";
+    fs::copy_file(f, keep, fs::copy_options::overwrite_existing, ec);
+    CHECK(!ec);
+    const auto fresh = [&] {
+        fs::remove(f, ec);
+        fs::copy_file(keep, f, fs::copy_options::overwrite_existing, ec);
+    };
+    for (const std::uint32_t got : {0u, static_cast<std::uint32_t>(sector), static_cast<std::uint32_t>(block_bytes / 2)}) {
+        fresh();
+        auto t = Tier::create(ops, 32ull << 20, 6, 0);
+        t->start(env.cfg(1ull << 30), kLay, fp);
+        Entry* e = t->find(id);
+        CHECK(e != nullptr && t->ssdEntries() == 1 && !e->in_ram);
+        if (!e) continue;
+        pfs::fake::begin();  // after the index: the injection hits the restore's first block read
+        pfs::fake::shortRead(1, got);
+        DevSlot dst(ops, nck, pages);
+        std::size_t nm = 0;
+        const auto sp = dst.spans(e, 1, &nm);
+        Restore* r = t->beginRestore(e, sp, nm);
+        CHECK(r != nullptr && r->from_ssd && r->job != nullptr);
+        if (r) {
+            CHECK(!runRestore(*t, r));
+            CHECK(r->failed);
+            t->endRestore(r);
+        }
+        CHECK(pfs::fake::injectedLeft() == 0);
+        pfs::fake::end();
+        CHECK(tickIdle(*t));
+        CHECK(t->find(id) == nullptr && t->ssdEntries() == 0);  // dropped (0e35407: the file is unusable)
+    }
+    // control: the same file, no fault
+    fresh();
+    {
+        auto t = Tier::create(ops, 32ull << 20, 7, 0);
+        t->start(env.cfg(1ull << 30), kLay, fp);
+        Entry* e = t->find(id);
+        CHECK(e != nullptr && t->ssdEntries() == 1);
+        if (e) {
+            DevSlot dst(ops, nck, pages);
+            std::size_t nm = 0;
+            const auto sp = dst.spans(e, 1, &nm);
+            Restore* r = t->beginRestore(e, sp, nm);
+            CHECK(r != nullptr && r->from_ssd);
+            if (r) {
+                CHECK(runRestore(*t, r));
+                const auto v = t->verifyPieces(r->pieces);
+                CHECK(v.bad == 0 && v.bytes == r->bytes);
+                t->endRestore(r);
+                CHECK(dst.ckEq(src, 0) && dst.ckEq(src, 1) && dst.kvEq(src));
+            }
+        }
+        tickIdle(*t);
+    }
+    fs::remove_all(dir, ec);
+}
+
+// ARCH-1 §8.9 survivor tier-verify-blind ("verifyPieces never reports an error"): the restore check must count a
+// piece whose device bytes differ from the host bytes, and verifySpans an arena block that differs from the device.
+static void testFsVerifyNotBlind(NullBackend& ops) {
+    auto t = Tier::create(ops, 64ull << 20, 4, 0);
+    t->start(Config{}, kLay, 1);
+    DevSlot src(ops, 2, 5);
+    src.fill(931);
+    Entry* e = spill(*t, src, makeTokens(1200, 931));
+    CHECK(e != nullptr);
+    if (!e) return;
+    {
+        std::size_t nm = 0;
+        const auto sp = src.spans(e, 1, &nm);
+        CHECK(t->verifySpans(e, sp).bad == 0);
+        // one byte of the source differs from the arena now
+        auto* b = reinterpret_cast<std::uint8_t*>(src.kv) + 12345;
+        *b ^= 0x5a;
+        const auto v = t->verifySpans(e, sp);
+        CHECK(v.bad == 1 && v.bytes > 0);
+        *b ^= 0x5a;
+    }
+    DevSlot dst(ops, 2, 5);
+    std::size_t nm = 0;
+    const auto sp = dst.spans(e, 1, &nm);
+    Restore* r = t->beginRestore(e, sp, nm);
+    CHECK(r != nullptr);
+    if (!r) return;
+    CHECK(runRestore(*t, r));
+    CHECK(t->verifyPieces(r->pieces).bad == 0);
+    // a restored piece that differs on the device: exactly that piece is bad
+    auto* d = reinterpret_cast<std::uint8_t*>(r->pieces[0].dev);
+    d[7] ^= 0x01;
+    const auto v = t->verifyPieces(r->pieces);
+    CHECK(v.bad == 1 && v.bytes == r->bytes);
+    d[7] ^= 0x01;
+    t->endRestore(r);
+}
+
 // WHIRL_TIER_ONLY=<test name>: run only that test (regression proofs). A name that matches no test is
 // a usage error (exit 2; FIX-TEST-A, FR-TEST P3-3: a typo used to run 1 check in main and pass).
 static int g_only_matched = 0;
@@ -4378,6 +4688,22 @@ int main(int argc, char** argv) {
     if (want("testTierDtorSpillPending")) {
         std::printf("-- %s\n", "testTierDtorSpillPending");
         testTierDtorSpillPending();
+    }
+    if (want("testFsOpenTable")) {
+        std::printf("-- %s\n", "testFsOpenTable");
+        testFsOpenTable(ops, dir);
+    }
+    if (want("testFsWriteFail")) {
+        std::printf("-- %s\n", "testFsWriteFail");
+        testFsWriteFail(ops, dir);
+    }
+    if (want("testFsShortRead")) {
+        std::printf("-- %s\n", "testFsShortRead");
+        testFsShortRead(ops, dir);
+    }
+    if (want("testFsVerifyNotBlind")) {
+        std::printf("-- %s\n", "testFsVerifyNotBlind");
+        testFsVerifyNotBlind(ops);
     }
     std::printf("tier tests: %d passed, %d failed\n", g_pass, g_fail);
     if (const char* only = std::getenv("WHIRL_TIER_ONLY"); only && *only && g_only_matched == 0) {

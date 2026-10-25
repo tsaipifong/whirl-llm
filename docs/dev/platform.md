@@ -5,8 +5,9 @@ the console, clocks, the process itself. WHIRL runs on Windows only; the platfor
 Winsock and CRT-platform call lives, so the rest of the code sees plain C++ and the tests can inject IO and socket
 errors. Decision record: ADR-0004 Decision 5 (link-time per-concern headers, no virtual interface).
 
-State (0.2.5, arch025 PL0): **skeleton only**. The headers, the CMake target and the check exist; no call site has
-moved yet. PL1-PL4 move the calls (table below), PL5 makes the check blocking in `release_gate.ps1`.
+State (0.2.5): PL0 made the skeleton (headers, CMake target, check). **PL2 (fs) has moved its calls**
+(`fs.h` / `fs_win.cpp` / `fs_fake.h`, section below); PL1, PL3, PL4 move the rest (table below), PL5 makes the check
+blocking in `release_gate.ps1`.
 
 ## Shape
 
@@ -49,13 +50,40 @@ Not part of this layer (whitelisted by the check): `src/hip/` (the HIP runtime's
 code, ADR-0004 #5), `src/release/dll_deps.cpp` (the DLL dependency diagnosis), and the vendored
 `src/vision/stb_image.h`.
 
+## fs (PL2)
+
+`platform/fs.h` has one function per Win32 / CRT file call (`open` = CreateFileW, `writeAt` / `readAt` = WriteFile /
+ReadFile with an offset-only OVERLAPPED, `readAsync` / `overlappedResult` / `createEvent` / `prepare` for the SSD
+restore's QD-4 overlapped reads, `flush`, `remove`, `setSparse`, `seek` / `setEndOfFile`, file times, attributes,
+`forEachMatch` = FindFirstFileW / FindNextFileW / FindClose, the read-only mapping of `MappedFile`, `openStdio` =
+_wfopen, `utf8ToWideStrict`). A file handle is `fs::Handle` (the bits of a HANDLE as `void*`). The CreateFileW
+arguments stay at the call sites as named constants (`kGenericRead`, `kShareRead`, `kOpenAlways`, `kNoBuffering`,
+`kOverlapped`, `kDeleteOnClose`, ...) whose values `fs_win.cpp` static_asserts against `<windows.h>`.
+
+Callers: `src/common/util.cpp` (MappedFile, readFile / writeFile), `src/model/loader.cpp` (GGUF reader),
+`src/server/log.cpp` (log file), `src/tier/kv_tier.cpp` (the SSD tier). Left for PL4: util.cpp's widen / narrow
+(args) and kv_tier.cpp's GetCurrentProcessId / GetModuleFileNameW (proc).
+
+**FakeFs** (`platform/fs_fake.h`, implemented inside `fs_win.cpp`, the PL3 FakeNet pattern): off unless a test calls
+`fake::begin()`; then it records every `fs::open` (path, access, share, disposition, flags, ok) and injects
+`failWrite(n)` (the next n `writeAt` return false and write nothing) and `shortRead(n, bytes)` (the next n `readAt` /
+`readAsync` ask Windows for at most `bytes`, a sector multiple so unbuffered handles stay legal). Off, each of those
+calls costs one relaxed atomic load more.
+
+The flag pin (arch025 risk R7 / A5: a lost `FILE_FLAG_NO_BUFFERING` halves SSD write speed and changes no output):
+`whirl-tier-tests` `testFsOpenTable` runs every SSD-tier open (directory lock, spill write, restart index, mtime stamp,
+restore read) and compares each recorded open with the v0.2.4 0e35407 table written in literal Win32 values (no
+`FILE_FLAG_WRITE_THROUGH` anywhere in 0e35407); `whirl-tests` `testFsMappedOpen` does the same for `MappedFile`.
+`testFsWriteFail`, `testFsShortRead` and `testFsVerifyNotBlind` cover the injected faults and the restore check.
+
 ## CMake
 
 `cmake/platform.cmake` defines `whirl_platform` (STATIC). It is the bottom layer: it links no other WHIRL target.
 The core library links it (`target_link_libraries(whirl PUBLIC whirl_platform)` in `CMakeLists.txt`), so every
-executable can reach it and PL1-PL4 only add sources to `cmake/platform.cmake`. Winsock (`ws2_32`) and `winmm`
-move to `whirl_platform` with PL3 / PL1. Until PL1 the library holds only `headers_win.cpp`, which nothing
-references, so no executable contains code from it.
+executable can reach it and PL1-PL4 only add sources to `cmake/platform.cmake`. `whirl_tier_core` (kv_tier.cpp, built without
+`whirl`) links `whirl_platform` itself (`cmake/tier.cmake`, PL2). Winsock (`ws2_32`) and `winmm`
+move to `whirl_platform` with PL3 / PL1. The library holds `headers_win.cpp` (referenced by nothing, dropped by the
+linker) and, since PL2, `fs_win.cpp`.
 
 ## The check
 

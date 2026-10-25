@@ -10,6 +10,7 @@
 #include "platform/console.h"
 #include "platform/env.h"
 #include "platform/fs.h"
+#include "platform/fs_fake.h"
 #include "platform/net.h"
 #include "platform/paths.h"
 #include "platform/proc.h"

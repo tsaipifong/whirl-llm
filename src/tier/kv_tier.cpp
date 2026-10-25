@@ -1,12 +1,14 @@
 // Host tiers for the server's prefix cache (VRAM -> pinned RAM -> SSD).
 // SPDX-License-Identifier: Apache-2.0
 //
-// See kv_tier.h for the design. Windows only for the SSD tier (unbuffered
-// positional file I/O through <windows.h>).
+// See kv_tier.h for the design. The SSD tier's files (unbuffered positional I/O, the overlapped restore read) go
+// through platform::fs (arch025 PL2); <windows.h> stays for the PL4 process calls (GetCurrentProcessId,
+// GetModuleFileNameW).
 
 #include "kv_tier.h"
 #include "evict_policy.h"
 #include "idle_flush.h"
+#include "platform/fs.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -15,7 +17,6 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
-#include <winioctl.h>
 
 #include <algorithm>
 #include <cstdio>
@@ -26,6 +27,8 @@
 #include <utility>
 
 namespace whirl::tier {
+
+namespace pfs = whirl::platform::fs;
 
 std::atomic<WriteSim*> g_write_sim{nullptr};
 
@@ -46,10 +49,8 @@ ScopeExit(F) -> ScopeExit<F>;
 // UTF-8 -> UTF-16 (throws on invalid UTF-8, like utf8ToUtf16LeAllocZ).
 std::wstring utf8ToWide(std::string_view s) {
     if (s.empty()) return {};
-    const int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s.data(), static_cast<int>(s.size()), nullptr, 0);
-    if (n <= 0) throw TierError("kv tier: invalid UTF-8 path");
-    std::wstring w(static_cast<std::size_t>(n), L'\0');
-    MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s.data(), static_cast<int>(s.size()), w.data(), n);
+    std::wstring w;
+    if (!pfs::utf8ToWideStrict(s, &w)) throw TierError("kv tier: invalid UTF-8 path");
     return w;
 }
 
@@ -85,26 +86,18 @@ AlignedBuf alignedAlloc(std::size_t n) {
     return AlignedBuf(static_cast<std::uint8_t*>(::operator new[](n, std::align_val_t{4096})));
 }
 
-OVERLAPPED ovAt(std::uint64_t off) {
-    OVERLAPPED ov{};
-    ov.Offset = static_cast<DWORD>(off);
-    ov.OffsetHigh = static_cast<DWORD>(off >> 32);
-    return ov;
-}
-
 bool simDead() {
     const WriteSim* s = g_write_sim.load(std::memory_order_acquire);
     return s != nullptr && s->dead();
 }
 
-bool writeAt(HANDLE fh, const std::uint8_t* buf, std::uint64_t len, std::uint64_t off) {
+bool writeAt(pfs::Handle fh, const std::uint8_t* buf, std::uint64_t len, std::uint64_t off) {
     if (WriteSim* s = g_write_sim.load(std::memory_order_acquire)) return s->write(fh, buf, len, off);
     std::uint64_t done = 0;
     while (done < len) {
-        const DWORD n = static_cast<DWORD>(std::min<std::uint64_t>(len - done, 64ull << 20));
-        OVERLAPPED ov = ovAt(off + done);
-        DWORD w = 0;
-        if (WriteFile(fh, buf + done, n, &w, &ov) == 0 || w == 0) return false;
+        const std::uint32_t n = static_cast<std::uint32_t>(std::min<std::uint64_t>(len - done, 64ull << 20));
+        std::uint32_t w = 0;
+        if (!pfs::writeAt(fh, buf + done, n, off + done, &w) || w == 0) return false;
         done += w;
     }
     return true;
@@ -114,32 +107,31 @@ bool writeAt(HANDLE fh, const std::uint8_t* buf, std::uint64_t len, std::uint64_
 // FILE_FLAG_NO_BUFFERING only bypasses the Windows cache; the drive's own volatile cache may still
 // reorder or drop writes at a power loss. FlushFileBuffers (NTFS metadata + the device's FLUSH CACHE)
 // is what orders them.
-bool flushFile(HANDLE fh) {
+bool flushFile(pfs::Handle fh) {
     if (WriteSim* s = g_write_sim.load(std::memory_order_acquire)) return s->flush(fh);
-    return FlushFileBuffers(fh) != 0;
+    return pfs::flush(fh);
 }
 
 // Delete a cache file. false: it is still there (locked by another program, access denied); the caller
 // keeps counting its bytes against the cap (a file that stays on disk must not leave the accounting).
 bool removeFile(const std::wstring& p) {
     if (simDead()) return false;
-    if (DeleteFileW(p.c_str()) != 0) return true;
-    const DWORD err = GetLastError();
-    return err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND;
+    if (pfs::remove(p.c_str())) return true;
+    const int err = pfs::lastError();
+    return err == pfs::kErrFileNotFound || err == pfs::kErrPathNotFound;
 }
 
-std::int64_t fileTimeUnix(const FILETIME& ft) {
-    const std::uint64_t t100 = (static_cast<std::uint64_t>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
+// FILETIME (100 ns ticks since 1601) -> unix seconds
+std::int64_t fileTimeUnix(std::uint64_t t100) {
     return static_cast<std::int64_t>(t100 / 10000000ull) - 11644473600ll;
 }
 
-bool readAt(HANDLE fh, std::uint8_t* buf, std::uint64_t len, std::uint64_t off) {
+bool readAt(pfs::Handle fh, std::uint8_t* buf, std::uint64_t len, std::uint64_t off) {
     std::uint64_t done = 0;
     while (done < len) {
-        const DWORD n = static_cast<DWORD>(std::min<std::uint64_t>(len - done, 64ull << 20));
-        OVERLAPPED ov = ovAt(off + done);
-        DWORD r = 0;
-        if (ReadFile(fh, buf + done, n, &r, &ov) == 0 || r == 0) return false;
+        const std::uint32_t n = static_cast<std::uint32_t>(std::min<std::uint64_t>(len - done, 64ull << 20));
+        std::uint32_t r = 0;
+        if (!pfs::readAt(fh, buf + done, n, off + done, &r) || r == 0) return false;
         done += r;
     }
     return true;
@@ -293,7 +285,7 @@ Tier::~Tier() {
     }
     q_cond_.notify_all();
     if (io_thread_.joinable()) io_thread_.join();
-    if (dir_lock_ != nullptr) CloseHandle(static_cast<HANDLE>(dir_lock_));
+    if (dir_lock_ != nullptr) pfs::close(dir_lock_);
     dir_lock_ = nullptr;
     // every job still known (finished or queued); restores must have ended
     std::vector<Job*> all = jobs_;
@@ -335,10 +327,10 @@ void Tier::start(const Config& cfg_in, const Layout& lay_in, std::uint64_t finge
         // one server per directory: a second one (same fingerprint) would take
         // the first one's files for its own and evict them under it
         const std::wstring lp = dw + L"\\whirl.lock";
-        HANDLE lh = CreateFileW(lp.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_ALWAYS,
-                                FILE_ATTRIBUTE_NORMAL | FILE_FLAG_DELETE_ON_CLOSE, nullptr);
-        if (lh == INVALID_HANDLE_VALUE) {
-            if (GetLastError() == ERROR_SHARING_VIOLATION) {
+        pfs::Handle lh = pfs::open(lp.c_str(), pfs::kGenericRead | pfs::kGenericWrite, pfs::kShareNone, pfs::kOpenAlways,
+                                   pfs::kAttrNormal | pfs::kDeleteOnClose);
+        if (!pfs::valid(lh)) {
+            if (pfs::lastError() == pfs::kErrSharingViolation) {
                 dir_busy_ = true;
                 if (log_fn) log_fn("kv tier: the SSD directory is in use by another WHIRL server; SSD tier off for this one");
                 return;
@@ -347,12 +339,12 @@ void Tier::start(const Config& cfg_in, const Layout& lay_in, std::uint64_t finge
             // could share the directory and evict this one's files, so the SSD tier stays off
             // (the RAM tier is unaffected)
             if (log_fn)
-                log_fn(fmt("kv tier: cannot lock the SSD directory (Windows error %lu); SSD tier off", static_cast<unsigned long>(GetLastError())));
+                log_fn(fmt("kv tier: cannot lock the SSD directory (Windows error %lu); SSD tier off", static_cast<unsigned long>(pfs::lastError())));
             return;
         } else {
             const std::string pid = std::to_string(GetCurrentProcessId());
-            DWORD w = 0;
-            WriteFile(lh, pid.data(), static_cast<DWORD>(pid.size()), &w, nullptr);
+            std::uint32_t w = 0;
+            pfs::write(lh, pid.data(), static_cast<std::uint32_t>(pid.size()), &w);
             dir_lock_ = lh;
         }
         ssd_dir_w_ = std::move(dw);
@@ -441,18 +433,15 @@ void Tier::stampFile(std::uint64_t id, std::int64_t unix_s) {
     if (!ssd_dir_w_) return;
     try {
         const std::wstring p = filePath(id);
-        HANDLE h = CreateFileW(p.c_str(), FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
-                               OPEN_EXISTING, 0, nullptr);
-        if (h == INVALID_HANDLE_VALUE) return;
+        pfs::Handle h = pfs::open(p.c_str(), pfs::kWriteAttributes, pfs::kShareRead | pfs::kShareWrite | pfs::kShareDelete,
+                                  pfs::kOpenExisting, 0);
+        if (!pfs::valid(h)) return;
         if (simDead()) {
-            CloseHandle(h);
+            pfs::close(h);
             return;
         }
-        ULARGE_INTEGER u;
-        u.QuadPart = (static_cast<std::uint64_t>(unix_s) + 11644473600ull) * 10000000ull;
-        FILETIME ft{u.LowPart, u.HighPart};
-        SetFileTime(h, nullptr, nullptr, &ft);
-        CloseHandle(h);
+        pfs::setLastWriteTime(h, (static_cast<std::uint64_t>(unix_s) + 11644473600ull) * 10000000ull);
+        pfs::close(h);
     } catch (...) {
     }
     // best effort: not retried (a file that cannot be opened now is not hammered on every tick)
@@ -1977,8 +1966,8 @@ void Tier::indexFile(const std::wstring& pw, std::uint64_t size, std::vector<Ind
     std::uint64_t alloc_sz = size;  // bytes on disk (sparse files: without the holes)
     std::int64_t mtime = 0;
     {
-        WIN32_FILE_ATTRIBUTE_DATA fa;
-        if (GetFileAttributesExW(pw.c_str(), GetFileExInfoStandard, &fa) != 0) mtime = fileTimeUnix(fa.ftLastWriteTime);
+        pfs::Attributes fa;
+        if (pfs::attributes(pw.c_str(), &fa)) mtime = fileTimeUnix(fa.last_write);
     }
     ScopeExit del_guard{[&] {
         if (!del) return;
@@ -1992,12 +1981,11 @@ void Tier::indexFile(const std::wstring& pw, std::uint64_t size, std::vector<Ind
         keepForeign(pw, alloc_sz);
     }};
     {
-        DWORD hi = 0;
-        const DWORD lo = GetCompressedFileSizeW(pw.c_str(), &hi);
-        if (lo != INVALID_FILE_SIZE || GetLastError() == NO_ERROR) alloc_sz = std::min(size, (static_cast<std::uint64_t>(hi) << 32) | lo);
+        std::uint64_t on_disk = 0;
+        if (pfs::allocatedSize(pw.c_str(), &on_disk)) alloc_sz = std::min(size, on_disk);
     }
-    HANDLE fh = CreateFileW(pw.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
-    if (fh == INVALID_HANDLE_VALUE) {
+    pfs::Handle fh = pfs::open(pw.c_str(), pfs::kGenericRead, pfs::kShareRead, pfs::kOpenExisting, 0);
+    if (!pfs::valid(fh)) {
         // cannot be read now (another program holds it): counted against the cap and evicted first, aged
         // by its last-write time (not "never used": that expired it at once, and the delete of a locked
         // file fails anyway)
@@ -2007,12 +1995,12 @@ void Tier::indexFile(const std::wstring& pw, std::uint64_t size, std::vector<Ind
         cleanup_.unreadable_bytes += alloc_sz;
         return;
     }
-    ScopeExit close_guard{[&] { CloseHandle(fh); }};
+    ScopeExit close_guard{[&] { pfs::close(fh); }};
     {
-        FILETIME ft;
-        if (GetFileTime(fh, nullptr, nullptr, &ft)) mtime = fileTimeUnix(ft);
-        LARGE_INTEGER fs_sz;
-        if (GetFileSizeEx(fh, &fs_sz) != 0 && fs_sz.QuadPart >= 0) logical_size = static_cast<std::uint64_t>(fs_sz.QuadPart);
+        std::uint64_t ft = 0;
+        if (pfs::lastWriteTime(fh, &ft)) mtime = fileTimeUnix(ft);
+        std::int64_t fs_sz = 0;
+        if (pfs::size(fh, &fs_sz) && fs_sz >= 0) logical_size = static_cast<std::uint64_t>(fs_sz);
     }
     try {
         alignas(16) std::uint8_t hdr_buf[header_bytes];
@@ -2134,17 +2122,14 @@ void Tier::indexFile(const std::wstring& pw, std::uint64_t size, std::vector<Ind
 void Tier::index() {
     const std::wstring& dir = *ssd_dir_w_;
     const std::wstring pat = dir + L"\\*.wkv";
-    WIN32_FIND_DATAW fd;
-    HANDLE h = FindFirstFileW(pat.c_str(), &fd);
-    if (h == INVALID_HANDLE_VALUE) return;
-    ScopeExit close_guard{[&] { FindClose(h); }};
     std::vector<IndexItem> order;
-    while (true) {
-        const std::wstring full = dir + L"\\" + fd.cFileName;
-        const std::uint64_t size = (static_cast<std::uint64_t>(fd.nFileSizeHigh) << 32) | fd.nFileSizeLow;
+    bool any = false;
+    pfs::forEachMatch(pat, [&](const wchar_t* name, std::uint64_t size) {
+        any = true;
+        const std::wstring full = dir + L"\\" + name;
         indexFile(full, size, order);
-        if (FindNextFileW(h, &fd) == 0) break;
-    }
+    });
+    if (!any) return;  // FindFirstFileW found nothing (or failed): as 0e35407, nothing after the listing runs
     validateRefs();
     order.erase(std::remove_if(order.begin(), order.end(), [&](const IndexItem& o) { return !contains(o.e); }), order.end());
     // LRU order of the indexed entries = their last write time
@@ -2318,12 +2303,12 @@ void Tier::runJob(Job* j) {
             }
         }
         if (j->paths.empty()) j->paths.push_back(j->path);
-        std::vector<HANDLE> fhs;
+        std::vector<pfs::Handle> fhs;
         bool open_ok = true;
         for (const std::wstring& pth : j->paths) {
-            HANDLE h = CreateFileW(pth.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
-                                   FILE_FLAG_NO_BUFFERING | FILE_FLAG_OVERLAPPED, nullptr);
-            if (h == INVALID_HANDLE_VALUE) {
+            pfs::Handle h = pfs::open(pth.c_str(), pfs::kGenericRead, pfs::kShareRead | pfs::kShareWrite, pfs::kOpenExisting,
+                                      pfs::kNoBuffering | pfs::kOverlapped);
+            if (!pfs::valid(h)) {
                 open_ok = false;
                 break;
             }
@@ -2332,16 +2317,16 @@ void Tier::runJob(Job* j) {
         auto fhOf = [&](std::size_t i) { return fhs[i < j->src.size() ? j->src[i] : 0]; };
         auto lbOf = [&](std::size_t i) { return i < j->src_lb.size() ? j->src_lb[i] : j->lbs[i]; };
         if (!open_ok) {
-            for (HANDLE h : fhs) CloseHandle(h);
+            for (pfs::Handle h : fhs) pfs::close(h);
             j->failed.store(true, std::memory_order_release);
         } else {
             // read_qd reads in flight, completed (and reported) in order
-            OVERLAPPED ov[read_qd] = {};
-            HANDLE evs[read_qd] = {};
+            pfs::Overlapped ov[read_qd] = {};
+            pfs::Handle evs[read_qd] = {};
             bool eof[read_qd] = {};
             bool ok = true;
             for (auto& h : evs) {
-                h = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+                h = pfs::createEvent();
                 if (h == nullptr) ok = false;
             }
             const std::size_t n_lbs = j->lbs.size();
@@ -2351,15 +2336,14 @@ void Tier::runJob(Job* j) {
                 while (issued < n_lbs && issued - done < read_qd) {
                     const std::size_t k = issued % read_qd;
                     const std::uint64_t off = j->data_off + static_cast<std::uint64_t>(lbOf(issued)) * block_bytes;
-                    ov[k] = ovAt(off);
-                    ov[k].hEvent = evs[k];
+                    pfs::prepare(ov[k], off, evs[k]);
                     eof[k] = false;
-                    ResetEvent(evs[k]);
-                    if (ReadFile(fhOf(issued), reinterpret_cast<void*>(j->ptrs[issued]), static_cast<DWORD>(block_bytes), nullptr, &ov[k]) == 0) {
-                        const DWORD err = GetLastError();
-                        if (err == ERROR_HANDLE_EOF) {
+                    pfs::resetEvent(evs[k]);
+                    if (!pfs::readAsync(fhOf(issued), reinterpret_cast<void*>(j->ptrs[issued]), static_cast<std::uint32_t>(block_bytes), ov[k])) {
+                        const int err = pfs::lastError();
+                        if (err == pfs::kErrHandleEof) {
                             eof[k] = true;  // past the end of the file
-                        } else if (err != ERROR_IO_PENDING) {
+                        } else if (err != pfs::kErrIoPending) {
                             ok = false;
                             break;
                         }
@@ -2368,9 +2352,9 @@ void Tier::runJob(Job* j) {
                 }
                 if (!ok) break;
                 const std::size_t k = done % read_qd;
-                DWORD r = 0;  // bytes delivered (0 past the end of the file)
+                std::uint32_t r = 0;  // bytes delivered (0 past the end of the file)
                 if (!eof[k]) {
-                    if (GetOverlappedResult(fhOf(done), &ov[k], &r, TRUE) == 0 && GetLastError() != ERROR_HANDLE_EOF) {
+                    if (!pfs::overlappedResult(fhOf(done), ov[k], &r, true) && pfs::lastError() != pfs::kErrHandleEof) {
                         ok = false;
                         done += 1;
                         break;
@@ -2393,32 +2377,31 @@ void Tier::runJob(Job* j) {
             for (; done < issued; ++done) {
                 const std::size_t k = done % read_qd;
                 if (eof[k]) continue;
-                DWORD r = 0;
-                GetOverlappedResult(fhOf(done), &ov[k], &r, TRUE);
+                std::uint32_t r = 0;
+                pfs::overlappedResult(fhOf(done), ov[k], &r, true);
             }
             if (!ok) j->failed.store(true, std::memory_order_release);
-            for (HANDLE h : evs)
-                if (h != nullptr) CloseHandle(h);
-            for (HANDLE h : fhs) CloseHandle(h);
+            for (pfs::Handle h : evs)
+                if (h != nullptr) pfs::close(h);
+            for (pfs::Handle h : fhs) pfs::close(h);
         }
         j->finished.store(true, std::memory_order_release);
         break;
     }
     case JobKind::write: {
         // sparse: blocks stored in another file (dedup) are holes here
-        HANDLE fh = CreateFileW(j->path.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ, nullptr, OPEN_ALWAYS,
-                                FILE_FLAG_NO_BUFFERING, nullptr);
-        bool ok = fh != INVALID_HANDLE_VALUE;
+        pfs::Handle fh = pfs::open(j->path.c_str(), pfs::kGenericRead | pfs::kGenericWrite, pfs::kShareRead, pfs::kOpenAlways,
+                                   pfs::kNoBuffering);
+        bool ok = pfs::valid(fh);
         // crash safety (FIX-HDR0): the valid header (hdr1) goes out only after a barrier that puts
         // everything else on the media. An existing file still holds a valid header for its old
         // contents, so it is first invalidated (hdr0) behind a barrier of its own: otherwise the
         // drive may land new payload before hdr0 and a power loss leaves the old valid header over
         // half-new bytes. A new file needs no extra barrier: until hdr1 lands its header reads as
         // hdr0 or zeros (no magic), both rejected at startup.
-        const bool existed = ok && GetLastError() == ERROR_ALREADY_EXISTS;
+        const bool existed = ok && pfs::lastError() == pfs::kErrAlreadyExists;
         if (ok) {
-            DWORD br = 0;
-            DeviceIoControl(fh, FSCTL_SET_SPARSE, nullptr, 0, nullptr, 0, &br, nullptr);
+            pfs::setSparse(fh);
             ok = writeAt(fh, j->hdr0.get(), header_bytes, 0);
             if (ok && existed) ok = flushFile(fh);
             ok = ok && writeAt(fh, j->toks.get(), j->toks_len, j->tok_off);
@@ -2460,16 +2443,13 @@ void Tier::runJob(Job* j) {
             ok = ok && writeAt(fh, j->hdr1.get(), header_bytes, 0);
             j->written += header_bytes;
             if (ok) {
-                LARGE_INTEGER dist;
-                dist.QuadPart = static_cast<LONGLONG>(j->file_bytes);
-                LARGE_INTEGER np;
-                if (!simDead() && SetFilePointerEx(fh, dist, &np, FILE_BEGIN) != 0) SetEndOfFile(fh);
+                if (!simDead() && pfs::seek(fh, j->file_bytes)) pfs::setEndOfFile(fh);
                 ok = flushFile(fh);
             }
-            CloseHandle(fh);
+            pfs::close(fh);
         }
         if (!ok) {
-            if (!simDead()) DeleteFileW(j->path.c_str());
+            if (!simDead()) pfs::remove(j->path.c_str());
             j->failed.store(true, std::memory_order_release);
         }
         j->finished.store(true, std::memory_order_release);
@@ -2489,7 +2469,7 @@ void declarePinned(const char* local_app_data, std::uint64_t bytes) {
         std::filesystem::create_directories(dir, ec);
         if (ec) return;
         const std::filesystem::path path = dir / (std::to_wstring(GetCurrentProcessId()) + L".txt");
-        FILE* f = _wfopen(path.c_str(), L"wb");
+        FILE* f = pfs::openStdio(path.c_str(), L"wb");
         if (f == nullptr) return;
         const std::string line = fmt("pinned_mib %llu\n", static_cast<unsigned long long>(bytes >> 20));
         std::fwrite(line.data(), 1, line.size(), f);
@@ -2512,11 +2492,10 @@ std::uint64_t exeIdentity() {
     const DWORD n = GetModuleFileNameW(nullptr, buf, 1024 - 1);
     if (n == 0) return 0;
     buf[n] = 0;
-    WIN32_FILE_ATTRIBUTE_DATA info;
-    if (GetFileAttributesExW(buf, GetFileExInfoStandard, &info) == 0) return 0;
-    const std::uint64_t size = (static_cast<std::uint64_t>(info.nFileSizeHigh) << 32) | info.nFileSizeLow;
-    const std::uint64_t wt =
-        (static_cast<std::uint64_t>(info.ftLastWriteTime.dwHighDateTime) << 32) | info.ftLastWriteTime.dwLowDateTime;
+    pfs::Attributes info;
+    if (!pfs::attributes(buf, &info)) return 0;
+    const std::uint64_t size = info.size;
+    const std::uint64_t wt = info.last_write;
     return size * 0x9e3779b97f4a7c15ull ^ wt;
 }
 
