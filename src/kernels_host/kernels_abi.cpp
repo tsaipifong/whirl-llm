@@ -114,6 +114,9 @@ std::string gemvqMrName(QType t, int nt, int r, bool grouped) {
 std::string gemvwName(QType t, int nt, int v, bool grouped) {
     return std::string(grouped ? "g" : "") + "gemvw_nt" + std::to_string(nt) + "v" + std::to_string(v) + "_" + sfx(t);
 }
+std::string gemvkName(int nt, int v, bool grouped) {
+    return std::string(grouped ? "g" : "") + "gemvk_nt" + std::to_string(nt) + "v" + std::to_string(v) + "_mxfp4";
+}
 std::string gemmcName(QType t, int cfg) { return "gemm_c" + std::to_string(cfg) + "_" + sfx(t); }
 std::string gemmsName(QType t, int cfg, bool f16_out) {
     return std::string(f16_out ? "gemmsh_c" : "gemms_c") + std::to_string(cfg) + "_" + sfx(t);
@@ -230,6 +233,7 @@ void loadMatmul(MatmulKernels& k, const Loader& L) {
     {
         const QType t = QType::mxfp4;
         const int i = ti(t);
+        const bool gk = L.opt("gemvk_abi_mxfp4") != nullptr;
         k.gemv1[i] = L.opt("gemv_mxfp4_1");
         k.gemm[i] = L.opt("gemm3_mxfp4");
         k.dequant_f16[i] = L.opt("dequant_f16_mxfp4");
@@ -247,6 +251,12 @@ void loadMatmul(MatmulKernels& k, const Loader& L) {
             for (int v = 1; v < kNGemvw; ++v) {
                 k.gemvw[v][nt - 2][i] = L.opt(gemvwName(t, nt, v, false));
                 k.gemvw_g[v][nt - 2][i] = L.opt(gemvwName(t, nt, v, true));
+            }
+            // feat026-ggemv: gfx1151 K-balanced gemvk (optional; used only when WHIRL_GEMV_K selects it;
+            // looked up only in a code object with the marker, 2..8 tokens)
+            for (int v = 1; v < kNGemvk && gk && nt <= kGemvkMaxNt; ++v) {
+                k.gemvk[v][nt - 2] = L.opt(gemvkName(nt, v, false));
+                k.gemvk_g[v][nt - 2] = L.opt(gemvkName(nt, v, true));
             }
         }
         for (int ci = 0; ci < static_cast<int>(kGemm8Cfgs.size()); ++ci) {
@@ -568,6 +578,11 @@ Function MatmulKernels::gemvqMr(QType t, int nt, int r, bool grouped) const {
     checkNt(nt);
     if (r != 2 && r != 4) throw std::out_of_range("kernels: multi-row R must be 2 or 4");
     return (grouped ? gemvq_mr_g : gemvq_mr)[r / 2 - 1][nt - 2][ti(t)];
+}
+Function MatmulKernels::gemvK(int nt, int v, bool grouped) const {
+    checkNt(nt);
+    if (v < 1 || v >= kNGemvk) throw std::out_of_range("kernels: gemvk variant must be 1..9");
+    return (grouped ? gemvk_g : gemvk)[static_cast<std::size_t>(v)][static_cast<std::size_t>(nt - 2)];
 }
 Function MatmulKernels::gemvW(QType t, int nt, int v, bool grouped) const {
     checkNt(nt);

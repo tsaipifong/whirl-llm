@@ -314,7 +314,14 @@ void parseGemvWHead(Model& m, std::string_view list) {
     });
 }
 
+void parseGemvK(Model& m, std::string_view list) {
+    parseNtList(list, ops::kGemvkAuto, [&](std::uint32_t nt, std::uint32_t v) {
+        if (v < kernels::kNGemvk || v == ops::kGemvkAuto) m.gemv_k[nt] = static_cast<std::uint8_t>(v);
+    });
+}
+
 void applyGemvEnv(Model& m) {
+    if (auto v = envGet("GEMV_K")) parseGemvK(m, *v);
     if (auto v = envGet("GEMV_R")) parseGemvR(m, *v);
     if (auto v = envGet("GEMV_W")) parseGemvW(m, *v);
     if (auto v = envGet("GEMV_WH")) parseGemvWHead(m, *v);

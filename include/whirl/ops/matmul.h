@@ -77,7 +77,15 @@ struct GemvTune {
     const std::array<GemvR, kernels::kNTypes>* gemv_w = nullptr;    // gemvw variant per type and n (0: none)
     const GemvR* gemv_w_head = nullptr;                             // gemvw variant for the q6_k head per n
     std::uint32_t gv_nmax_override = 0;                             // WHIRL_GV_NMAX (0: per type, 13 mxfp4 / 11)
+    // feat026-ggemv (WHIRL_GEMV_K): gfx1151 MXFP4 gemvk variant per n; 0 = off (default, the gemvq_mr / gemvw
+    // path), 1..9 = that variant, kGemvkAuto = chosen per call from ncols and rows (gemvkAuto). nullptr = off.
+    const GemvR* gemv_k = nullptr;
 };
+inline constexpr std::uint8_t kGemvkAuto = 15;
+// gemvk variant for one launch of K = ncols over total_rows rows: the K-wave count KW (8, 4, 2) with no idle
+// superblock slot that still gives each wave >= 4 superblocks (else the one with the most), widened back towards 8
+// while the launch would have < 80 blocks (2 per CU on the 8060S); the PF = 0 variant of that KW (v6 / v2 / v4).
+std::uint8_t gemvkAuto(std::uint32_t ncols, std::uint32_t total_rows);
 struct GemvPlan {
     Function f = nullptr;
     bool grouped = false;          // one launch over all matrices (GvArgs); else one launch per matrix

@@ -219,6 +219,70 @@ void testGemvTile() {
     CHECK(p.bits == ops::BitClass::q8_row);
 }
 
+// feat026-ggemv: the opt-in gemvk selector (WHIRL_GEMV_K) and its auto rule; off by default
+void testGemvK() {
+    ops::GemvR r{};
+    r.fill(1);
+    for (int n = 2; n <= 16; ++n) r[n] = 2;  // the gfx1151 profile row
+    std::array<ops::GemvR, kn::kNTypes> w{};
+    ops::GemvR wh{}, gk{};
+    kn::KernelTable k = fakeTable(true, true, false, false);
+    const std::string mx = std::to_string(static_cast<int>(GgmlType::mxfp4)), q4 = std::to_string(static_cast<int>(GgmlType::q4_k));
+    for (int nt = 2; nt <= kn::kGemvkMaxNt; ++nt)
+        for (int v = 1; v < kn::kNGemvk; ++v) {
+            k.gemvk[v][nt - 2] = tag("gemvk_nt" + std::to_string(nt) + "v" + std::to_string(v));
+            k.gemvk_g[v][nt - 2] = tag("ggemvk_nt" + std::to_string(nt) + "v" + std::to_string(v));
+        }
+    const ops::MatShape s3[3] = {mat(GgmlType::mxfp4, 6144, 5120), mat(GgmlType::mxfp4, 1024, 5120), mat(GgmlType::mxfp4, 1024, 5120)};
+    // default (gemv_k all 0, or no table): the old multi-row entry
+    const ops::GemvTune t_null{&r, &w, &wh, 0};
+    auto p = ops::chooseGemvTile(s3, 3, 4, k, t_null);
+    CHECK(nameOf(p.f) == "ggemvq_nt4r2_" + mx && p.rows_per_block == 16);
+    const ops::GemvTune tn{&r, &w, &wh, 0, &gk};
+    p = ops::chooseGemvTile(s3, 3, 4, k, tn);
+    CHECK(nameOf(p.f) == "ggemvq_nt4r2_" + mx && p.rows_per_block == 16 && p.grid[0].x == 384 + 64 + 64);
+    // forced v2 (KW 4, 32 rows): twin for a group, plain for one matrix, grids by 32 rows
+    gk[4] = 2;
+    p = ops::chooseGemvTile(s3, 3, 4, k, tn);
+    CHECK(nameOf(p.f) == "ggemvk_nt4v2" && p.grouped && p.rows_per_block == 32 && p.grid[0].x == 192 + 32 + 32);
+    p = ops::chooseGemvTile(s3, 1, 4, k, tn);
+    CHECK(nameOf(p.f) == "gemvk_nt4v2" && !p.grouped && p.grid[0].x == 192);
+    // v4 / v9 (KW 2): 64 rows per block; v6 (KW 8): 16
+    gk[4] = 4;
+    p = ops::chooseGemvTile(s3, 3, 4, k, tn);
+    CHECK(nameOf(p.f) == "ggemvk_nt4v4" && p.rows_per_block == 64 && p.grid[0].x == 96 + 16 + 16);
+    gk[4] = 6;
+    p = ops::chooseGemvTile(s3, 3, 4, k, tn);
+    CHECK(nameOf(p.f) == "ggemvk_nt4v6" && p.rows_per_block == 16);
+    // other types, other n and n > 8 (no entry) keep the old path
+    const ops::MatShape a = mat(GgmlType::q4_k, 6144, 5120);
+    p = ops::chooseGemvTile(&a, 1, 4, k, tn);
+    CHECK(nameOf(p.f) == "gemvq_nt4r2_" + q4);
+    p = ops::chooseGemvTile(s3, 1, 3, k, tn);
+    CHECK(nameOf(p.f) == "gemvq_nt3r2_" + mx);
+    gk[12] = 2;
+    p = ops::chooseGemvTile(s3, 1, 12, k, tn);
+    CHECK(nameOf(p.f) == "gemvq_nt12r2_" + mx);
+    // a code object without gemvk: the old path
+    const kn::KernelTable k0 = fakeTable(true, true, false, false);
+    gk[4] = 2;
+    p = ops::chooseGemvTile(s3, 3, 4, k0, tn);
+    CHECK(nameOf(p.f) == "ggemvq_nt4r2_" + mx && p.rows_per_block == 16);
+    // auto: Swift K = 5120 (20 superblocks) -> KW 4 (v2); Ornith 2048 (8) -> KW 2 (v4); 6144 (24) -> KW 4;
+    // 17408 (68) -> KW 4; 16384 (64) -> KW 8 (v6); 512 (2) -> KW 2; few rows widen KW back
+    CHECK(ops::gemvkAuto(5120, 8192) == 2);
+    CHECK(ops::gemvkAuto(2048, 8192) == 4);
+    CHECK(ops::gemvkAuto(6144, 5120) == 2);
+    CHECK(ops::gemvkAuto(17408, 5120) == 2);
+    CHECK(ops::gemvkAuto(16384, 5120) == 6);
+    CHECK(ops::gemvkAuto(512, 8192) == 4);
+    CHECK(ops::gemvkAuto(2048, 1024) == 6);  // 1024 rows: 64-row blocks -> 16, 32 -> 32, 16 -> 64 (< 80, stop at KW 8)
+    CHECK(ops::gemvkAuto(5120, 2048) == 6);  // KW 4 -> 2048 / 32 = 64 blocks < 80 -> KW 8 (128 blocks)
+    gk[4] = ops::kGemvkAuto;
+    p = ops::chooseGemvTile(s3, 3, 4, k, tn);  // 8192 rows, K 5120 -> v2
+    CHECK(nameOf(p.f) == "ggemvk_nt4v2" && p.rows_per_block == 32);
+}
+
 void testGemvWide() {
     const kn::KernelTable kx = fakeTable(true, true, true, false), k = fakeTable(true, true, false, false);
     const auto q4 = mat(GgmlType::q4_k, 4096, 5120), head = mat(GgmlType::q6_k, 248320, 5120, true), hq4 = mat(GgmlType::q4_k, 248320, 5120, true);
@@ -612,6 +676,7 @@ int main() {
     testPreciseRule();
     testMatmulPath();
     testGemvTile();
+    testGemvK();
     testGemvWide();
     testOpsGemm();
     testAttnDecode();

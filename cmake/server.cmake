@@ -112,6 +112,10 @@ add_executable(whirl-kt-bench-tests
   ${CMAKE_SOURCE_DIR}/tests/kernels/unit/kt_bench_tests.cpp
   ${CMAKE_SOURCE_DIR}/tests/kernels/kt_bench.cpp)
 
+# feat026-ggemv: the float-order contract of the gfx1151 gemvk kernels (wave / group walk, header extraction, token
+# slots) emulated on the CPU against gemv1s / gemvw (bitwise) and a double dot; no HIP.
+add_executable(whirl-gemvk-order-tests ${CMAKE_SOURCE_DIR}/tests/kernels/unit/gemvk_order_tests.cpp)
+
 # measure-tools P4: whirl-stage-bench's HIP-free part (options, stage table, KV tile plan, per-stage golden, validation
 # judge, JSONL rows, the restore / preload / hash driver) on the CPU. `--emit FILE` writes sample rows for db_record.py.
 add_executable(whirl-stage-bench-tests

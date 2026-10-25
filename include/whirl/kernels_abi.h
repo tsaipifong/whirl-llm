@@ -463,6 +463,13 @@ inline constexpr std::array<GemmCfg, 5> kGemm8tCfgs = {{
 // gemvw_nt<N>v<V>_<T>: rows per block per variant (v0 = not a gemvw kernel).
 inline constexpr int kNGemvw = 9;
 inline constexpr std::array<int, kNGemvw> kGemvwRows = {0, 16, 32, 16, 32, 16, 16, 32, 32};
+// gemvk_nt<N>v<V>_mxfp4 / ggemvk_*: gfx1151 K-balanced MXFP4 multi-token GEMV (feat026-ggemv, opt-in WHIRL_GEMV_K;
+// kernels/gfx1151/gemv_gk.hip). KW waves split K, 8 / KW 16-row tiles per block; bitwise == gemvq 1-token.
+inline constexpr int kNGemvk = 10;
+inline constexpr std::array<int, kNGemvk> kGemvkKW = {0, 8, 4, 4, 2, 2, 8, 8, 4, 2};
+inline constexpr std::array<int, kNGemvk> kGemvkPF = {0, 1, 0, 1, 0, 1, 0, 2, 2, 2};
+inline constexpr int gemvkRows(int v) { return v > 0 && v < kNGemvk ? 16 * (8 / kGemvkKW[static_cast<std::size_t>(v)]) : 0; }
+inline constexpr int kGemvkMaxNt = 8;  // entries exist for 2..8 tokens
 
 // ---------------------------------------------------------------------------
 // Kernel table
@@ -514,6 +521,8 @@ struct MatmulKernels {
     Nt gemvq_nt{}, gemvq_nt_g{};
     std::array<Nt, 2> gemvq_mr{}, gemvq_mr_g{};      // [R/2 - 1][nt - 2][type], R = 2, 4
     std::array<Nt, kNGemvw> gemvw{}, gemvw_g{};      // [v][nt - 2][type], v = 1..8
+    // gfx1151 gemvk (MXFP4 only): [v][nt - 2], v = 1..9; all null unless the code object has them
+    std::array<std::array<F, kMaxSmallBatch - 1>, kNGemvk> gemvk{}, gemvk_g{};
     std::array<PerType<F>, kGemmCfgs.size()> gemmc{};
     std::array<PerType<F>, kGemmsCfgs.size()> gemms{}, gemmsh{};
     // Block geometry of the gemms slots: kGemmsCfgs, or the code object's own table
@@ -535,6 +544,7 @@ struct MatmulKernels {
     F gemvqNt(QType t, int nt, bool grouped = false) const;
     F gemvqMr(QType t, int nt, int r, bool grouped = false) const;  // r = 2 or 4
     F gemvW(QType t, int nt, int v, bool grouped = false) const;    // v = 1..8
+    F gemvK(int nt, int v, bool grouped = false) const;             // MXFP4 gemvk, v = 1..9
 };
 
 struct AttnKernels {
@@ -624,6 +634,7 @@ struct KernelTable : MatmulKernels, AttnKernels, MoeKernels, DeltaNetKernels, Mi
 std::string gemvqNtName(QType t, int nt, bool grouped);
 std::string gemvqMrName(QType t, int nt, int r, bool grouped);
 std::string gemvwName(QType t, int nt, int v, bool grouped);
+std::string gemvkName(int nt, int v, bool grouped);  // "[g]gemvk_nt<nt>v<v>_mxfp4"
 std::string gemmcName(QType t, int cfg);
 std::string gemmsName(QType t, int cfg, bool f16_out);
 

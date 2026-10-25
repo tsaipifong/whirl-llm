@@ -1053,6 +1053,11 @@ int serveMain(int argc, char** argv, const char* program) {
         model.draft_window_min = envU32("DRAFT_WINDOW_MIN", model.draft_window_min);
         if (env("GEMV_R") || env("GEMV_W") || env("GEMV_WH"))
             logW("WHIRL_GEMV_R / WHIRL_GEMV_W / WHIRL_GEMV_WH are not supported by whirl-server (ignored)");
+        // feat026-ggemv A/B switch (bitwise-equal kernels; unset = the default path)
+        if (auto v = env("GEMV_K")) {
+            qwen35::parseGemvK(model, *v);
+            logI("WHIRL_GEMV_K={}: gfx1151 MXFP4 gemvk verify GEMV selected where the code object has it (A/B)", *v);
+        }
         model.use_graph = false;
         const bool use_mtp = model.mtp.has_value() && envOn("MTP", true);
         const qwen35::MtpDefaults def = qwen35::mtpDefaults(model.cfg.moe, model.arch);

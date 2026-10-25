@@ -559,6 +559,7 @@ public:
     GemvR gemv_r = defaultGemvR();
     GemvW gemv_w = defaultGemvW();
     GemvR gemv_w_head = defaultGemvWHead();
+    GemvR gemv_k{};  // feat026-ggemv: gfx1151 MXFP4 gemvk variant per n (0 = off, the default; WHIRL_GEMV_K)
 
     // ---- activations
     DevPtr x = 0, h = 0, qf = 0, kv_k = 0, kv_v = 0, attn_out = 0, qkv = 0, conv_out = 0, z = 0, beta = 0, alpha = 0, ba_buf = 0,
@@ -977,6 +978,9 @@ void loadOrTune(Model& m, const std::string& model_path, std::string& log);
 void parseGemvR(Model& m, std::string_view list);
 void parseGemvW(Model& m, std::string_view list);
 void parseGemvWHead(Model& m, std::string_view list);
+// WHIRL_GEMV_K=nt:v,... (feat026-ggemv, A/B only): gfx1151 MXFP4 gemvk variant v = 1..9 per token count, 15 = auto
+// by K (ops::gemvkAuto), 0 = off; "nt" alone means auto. Bitwise == the default path (checkGemvBitwise).
+void parseGemvK(Model& m, std::string_view list);
 void applyGemvEnv(Model& m);
 
 // ---------------------------------------------------------------------------
