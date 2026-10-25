@@ -60,6 +60,15 @@
             "budget": "round_us_per_cycle <= 1 % of the fastest stored decode ms per token (results_query 'decode R9700')"}
  },
  "modules": {
+  "env_snapshot": {
+   "id": "N1", "desc": "model-layer WHIRL_* environment read once per load (config::EnvSnapshot, LoadOptions::env)",
+   "paths": ["src/config/env_snapshot.h", "src/config/env_snapshot.cpp", "tests/model/env_table.expected.txt"],
+   "steps": ["cpu_model", "st_swift_precise", "st_swift_balance", "st_swift_fast", "st_moe_precise", "st_moe_balance", "st_moe_fast",
+             "golden_swift", "golden_moe"],
+   "gpus": {"st_swift_precise": 2, "st_swift_balance": 2, "st_swift_fast": 2, "st_moe_precise": 2, "st_moe_balance": 2, "st_moe_fast": 2,
+            "golden_swift": 2, "golden_moe": 2},
+   "manual": ["S0b-2 env / cli dump cells on both cards vs the base exe (scratch/a25_n1_gpu/n1gpu.ps1, arch025-N1 HANDOFF)"]
+  },
   "handles": {
    "id": "M1", "desc": "RAII device handles (DevBuf / PinnedBuf / EventH / StreamH)",
    "paths": ["src/device/handles.h"], "callers": "rdeps",

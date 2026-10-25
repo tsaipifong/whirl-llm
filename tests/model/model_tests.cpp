@@ -4,6 +4,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "../test_env.h"
+#include "config/env_snapshot.h"
+#include "whirl/device_profile.h"
 #include "whirl/dflash_policy.h"
 #include "whirl/dump.h"
 #include "whirl/gguf.h"
@@ -19,6 +21,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <map>
+#include <memory>
 #include <fstream>
 #include <functional>
 #include <format>
@@ -1707,6 +1710,453 @@ void testBaselineDumps() {
 }
 #undef CHECK
 
+// arch025-N1: environment -> Model field table (black box over the process environment, so the same test runs on the
+// code before and after the EnvSnapshot change). Each case sets WHIRL_<name> variables, runs loadOrTune on a host-only
+// Model (no layers, null kernels, an empty cached tune table in a private LOCALAPPDATA, so nothing reaches the GPU),
+// applyGemvEnv, kvModeFromEnv or resolveFdSplits, and records what changed against the same call with no variable set:
+// the execDump lines (every scalar Model member, the numerics plan, the tune table), the loadOrTune log lines and an
+// exception. The expected table tests/model/env_table.expected.txt was written by the code BEFORE N1 (eeb79c2):
+// WHIRL_TEST_ENV_TABLE_WRITE=<file> writes the actual table instead of comparing.
+namespace envtab {
+namespace fs = std::filesystem;
+
+struct Var {
+    const char* name;   // without WHIRL_
+    const char* value;  // nullptr = not set
+};
+struct Case {
+    std::string id;
+    int kind;  // model variant, see makeModel
+    std::vector<Var> vars;
+};
+
+// _putenv_s(k, "") removes the variable (the CRT copy _dupenv_s reads), so "set to empty" cannot be made in-process;
+// the empty-string rows are tested on EnvSnapshot values (testEnvSnapshot)
+void setEnv(const char* name, const char* value) {
+    const std::string k = std::string("WHIRL_") + name;
+    _putenv_s(k.c_str(), value != nullptr ? value : "");
+}
+
+// 0 d1201: gfx1201 dense, no MXFP4, balance   1 mx1201: gfx1201 MXFP4 dense, balance   2 sx1151: gfx1151 dense with
+// the strix DeltaNet kernels present (fake handles), balance   3 moe1201: gfx1201 MoE MXFP4, balance
+// 4 pre1201: gfx1201 dense, precise
+const char* const k_kind_names[] = {"d1201", "mx1201", "sx1151", "moe1201", "pre1201"};
+
+std::unique_ptr<q::Model> makeModel(int kind) {
+    namespace nu = whirl::numerics;
+    auto m = std::make_unique<q::Model>();
+    const bool moe = kind == 3;
+    m->cfg.moe = moe;
+    if (kind == 1 || kind == 3) m->type_bytes[static_cast<std::size_t>(gguf::GgmlType::mxfp4)] = 1;
+    if (kind == 2) {
+        static int fake = 0;
+        m->arch = hip::Arch::gfx1151;
+        m->k.gdn_sx_prep = &fake;  // only compared against nullptr by loadOrTune
+        m->k.gdn_sx_scan = &fake;
+        m->cfg.d_state = 128;
+        m->cfg.n_k_heads = 1;
+        m->cfg.n_v_heads = 1;
+        m->cfg.d_inner = 128;
+    }
+    m->num_req = nu::forModel(nu::parseMode(kind == 4 ? "precise" : "balance", "test"), moe);
+    return m;
+}
+
+std::vector<std::string> splitLines(const std::string& s) {
+    std::vector<std::string> v;
+    for (std::size_t p = 0; p < s.size();) {
+        std::size_t e = s.find('\n', p);
+        if (e == std::string::npos) e = s.size();
+        v.push_back(s.substr(p, e - p));
+        p = e + 1;
+    }
+    return v;
+}
+
+// Everything a loadOrTune call leaves behind, one line each.
+// snap: the values as LoadOptions::env would give them (Model::env_snap); null = the process environment
+std::string tuneOutput(int kind, const std::string& model_path, std::shared_ptr<const whirl::config::EnvSnapshot> snap = nullptr) {
+    auto m = makeModel(kind);
+    m->env_snap = std::move(snap);
+    std::string log, err;
+    try {
+        q::loadOrTune(*m, model_path, log);
+    } catch (const std::exception& e) {
+        err = e.what();
+    }
+    std::string out = q::execDump(*m);
+    for (const std::string& l : splitLines(log))
+        if (l.find("prefill GEMM tune: cached (") == std::string::npos) out += "log: " + l + "\n";
+    if (!err.empty()) out += "throw: " + err + "\n";
+    return out;
+}
+
+std::string gemvOutput(std::shared_ptr<const whirl::config::EnvSnapshot> snap = nullptr) {
+    auto m = makeModel(0);
+    m->env_snap = std::move(snap);
+    std::string err;
+    try {
+        q::applyGemvEnv(*m);
+    } catch (const std::exception& e) {
+        err = e.what();
+    }
+    std::string out = q::execDump(*m);
+    if (!err.empty()) out += "throw: " + err + "\n";
+    return out;
+}
+
+std::string kvOutput() {
+    try {
+        const auto k = q::kvModeFromEnv();
+        return k ? "kvModeFromEnv=" + std::to_string(static_cast<int>(*k)) + "\n" : "kvModeFromEnv=nullopt\n";
+    } catch (const std::exception& e) {
+        return std::string("throw: ") + e.what() + "\n";
+    }
+}
+
+std::string fdOutput() {
+    return "resolveFdSplits(q4)=" + std::to_string(q::resolveFdSplits(true)) + " resolveFdSplits(f16)=" + std::to_string(q::resolveFdSplits(false)) +
+           "\n";
+}
+
+// lines of `got` not in `base` (+) and of `base` not in `got` (-), in order
+std::string diff(const std::string& base, const std::string& got) {
+    const std::vector<std::string> b = splitLines(base), g = splitLines(got);
+    std::string d;
+    for (const std::string& l : g)
+        if (std::find(b.begin(), b.end(), l) == b.end()) d += "+" + l + "\n";
+    for (const std::string& l : b)
+        if (std::find(g.begin(), g.end(), l) == g.end()) d += "-" + l + "\n";
+    return d.empty() ? "(no change)\n" : d;
+}
+
+std::vector<Case> cases() {
+    std::vector<Case> cs;
+    auto add = [&](const std::string& what, int kind, std::vector<Var> vars) {
+        std::string id = what + " " + k_kind_names[kind];
+        for (const Var& v : vars) id += std::string(" ") + v.name + "=" + v.value;
+        cs.push_back({id, kind, std::move(vars)});
+    };
+    auto each = [&](const char* name, std::initializer_list<const char*> vals, std::initializer_list<int> kinds) {
+        for (int k : kinds)
+            for (const char* v : vals) add("tune", k, {{name, v}});
+    };
+    // tune.cpp loadOrTune: on / off switches (`*v != "0"`) and the numeric ones
+    for (const char* n : {"ACT_FUSE", "GEMMH", "GEMMHQ", "ATTN_KX", "ATTN_KG", "ATTN_DQF", "GDN_BA", "GDN_IN2"}) each(n, {"0", "1", "auto"}, {0});
+    each("ATTN_SEG", {"0", "1", "auto", "1000", "256", "300x"}, {0});
+    // numerics A/B switches (nu::noteSwitches over k_numerics_switches)
+    for (const char* n : {"FD_SPLITS", "GEMV_MAX", "GV_NMAX", "GV_GROUP", "NO_FUSE", "FLOAT_GEMV", "GDN_SEQ", "NAIVE_ATTN", "DBG", "ATTN_WIDE",
+                          "ATTN_DQ4", "ATTN_WS4", "MOE_BN"})
+        each(n, {"0", "1", "auto"}, {0});
+    for (const char* n : {"GDN_WMMA", "FFN_H16", "Q4_RELAXED"}) each(n, {"0", "1", "auto"}, {0, 1, 2});
+    each("GDN_STRIX", {"0", "1", "auto"}, {0, 2});
+    each("GDN_STRIX_MIN", {"0", "1", "auto", "100", "500"}, {2});
+    each("FP8", {"0", "1", "auto"}, {0, 1, 3});
+    each("FP8_MASK", {"0", "1", "auto", "5", "0x3", "zz"}, {1});
+    each("G8T", {"0", "1"}, {1});
+    each("MOE_FP8", {"0", "1", "auto"}, {3});
+    add("tune", 3, {{"FP8", "0"}, {"MOE_FP8", "1"}});
+    add("tune", 3, {{"FP8", "1"}, {"MOE_FP8", "0"}});
+    add("tune", 1, {{"Q4_RELAXED", "1"}, {"GDN_WMMA", "0"}});
+    add("tune", 1, {{"Q4_RELAXED", "1"}, {"FFN_H16", "0"}});
+    each("KV", {"0", "1", "auto", "f16", "q8", "q4", "q8h"}, {0, 3});
+    each("Q8DEC", {"0", "1", "auto"}, {0, 4});
+    each("RELAX", {"0", "1", "auto"}, {0});
+    each("SPEC_SAMPLE", {"0", "1", "auto"}, {0});
+    for (const char* n : {"RELAX_K", "RELAX_ALPHA", "RELAX_EPS", "RELAX_DELTA"}) {
+        const char* v = n == std::string("RELAX_K") ? "6" : n == std::string("RELAX_ALPHA") ? "0.5" : n == std::string("RELAX_EPS") ? "0.25" : "0.75";
+        add("tune", 0, {{n, v}});
+        add("tune", 0, {{"RELAX", "1"}, {n, v}});
+        add("tune", 0, {{"RELAX", "1"}, {n, "0"}});
+    }
+    add("tune", 0, {{"RELAX", "1"}, {"RELAX_K", "abc"}});
+    // config.cpp applyGemvEnv
+    for (const char* n : {"GEMV_R", "GEMV_W", "GEMV_WH"})
+        for (const char* v : {"0", "1", "auto", "2", "1:4", "3:2,7:1", "5:9"}) add("gemv", 0, {{n, v}});
+    // loader.cpp kvModeFromEnv / resolveFdSplits
+    for (const char* v : {"0", "1", "auto", "f16", "q8", "q8h", "q8v", "q4", "Q8"}) add("kv", 0, {{"KV", v}});
+    for (const char* v : {"0", "1", "auto", "64", "128", "192", "256", "100", "320", "128x"}) add("fd", 0, {{"FD_SPLITS", v}});
+    return cs;
+}
+
+std::string table(const std::string& model_path) {
+    std::string base_tune[5];
+    for (int k = 0; k < 5; ++k) base_tune[k] = tuneOutput(k, model_path);
+    const std::string base_gemv = gemvOutput(), base_kv = kvOutput(), base_fd = fdOutput();
+    std::string t = "# arch025-N1 env table (tests/model/model_tests.cpp envtab). Base rows: the output with no WHIRL_* set.\n";
+    for (int k = 0; k < 5; ++k) {
+        t += std::string("== base tune ") + k_kind_names[k] + "\n";
+        for (const std::string& l : splitLines(base_tune[k]))
+            if (l.rfind("log: ", 0) == 0 || l.rfind("throw: ", 0) == 0 || l.rfind("D exec: num_plan=", 0) == 0) t += l + "\n";
+    }
+    t += "== base kv\n" + base_kv + "== base fd\n" + base_fd;
+    for (const Case& c : cases()) {
+        for (const Var& v : c.vars) setEnv(v.name, v.value);
+        std::string got, base;
+        if (c.id.rfind("tune", 0) == 0) {
+            got = tuneOutput(c.kind, model_path);
+            base = base_tune[c.kind];
+        } else if (c.id.rfind("gemv", 0) == 0) {
+            got = gemvOutput();
+            base = base_gemv;
+        } else if (c.id.rfind("kv", 0) == 0) {
+            got = kvOutput();
+            base = base_kv;
+        } else {
+            got = fdOutput();
+            base = base_fd;
+        }
+        for (const Var& v : c.vars) setEnv(v.name, nullptr);
+        t += "== " + c.id + "\n" + diff(base, got);
+    }
+    return t;
+}
+
+// The names the table sets (the reflection test checks every EnvSnapshot name against the tables).
+std::vector<std::string> namesCovered() {
+    std::vector<std::string> n;
+    for (const Case& c : cases())
+        for (const Var& v : c.vars)
+            if (std::find(n.begin(), n.end(), v.name) == n.end()) n.push_back(v.name);
+    return n;
+}
+
+}  // namespace envtab
+
+void testEnvTable() {
+    namespace fs = std::filesystem;
+    const fs::path dir = whirl::test::testTmpBase() / L"envtab";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir / L"whirl", ec);
+    const fs::path model = dir / L"m.gguf";
+    {
+        std::ofstream(model, std::ios::binary) << "not a gguf: only its name and size go into the tune cache file name";
+    }
+    const std::string fsz = std::to_string(fs::file_size(model));
+    for (hip::Arch a : {hip::Arch::gfx1201, hip::Arch::gfx1151}) {
+        const fs::path c = dir / L"whirl" / ("tune4-m.gguf-" + fsz + whirl::device::profile(a).tune_cache_suffix + ".txt");
+        std::ofstream(c, std::ios::binary) << "";  // an empty table: readTune accepts it for a Model without layers
+        check(fs::exists(c), "env table: cached tune table written (else loadOrTune would tune on the GPU)");
+    }
+    char* old = nullptr;
+    std::size_t old_len = 0;
+    _dupenv_s(&old, &old_len, "LOCALAPPDATA");
+    const std::string old_lad = old != nullptr ? old : "";
+    std::free(old);
+    _putenv_s("LOCALAPPDATA", dir.string().c_str());
+    const std::string got = envtab::table(model.string());
+    _putenv_s("LOCALAPPDATA", old_lad.c_str());
+    char* w = nullptr;
+    std::size_t wl = 0;
+    if (_dupenv_s(&w, &wl, "WHIRL_TEST_ENV_TABLE_WRITE") == 0 && w != nullptr) {
+        std::ofstream(w, std::ios::binary) << got;
+        std::printf("env table: written to %s (%zu bytes)\n", w, got.size());
+        std::free(w);
+        return;
+    }
+    const fs::path exp_path = fs::path(WHIRL_SOURCE_DIR) / "tests" / "model" / "env_table.expected.txt";
+    std::ifstream in(exp_path, std::ios::binary);
+    const std::string exp((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    check(!exp.empty(), "env table: tests/model/env_table.expected.txt present");
+    if (got == exp) {
+        check(true, "env table: every case equals the pre-N1 table");
+        return;
+    }
+    const std::vector<std::string> g = envtab::splitLines(got), e = envtab::splitLines(exp);
+    std::size_t i = 0;
+    while (i < g.size() && i < e.size() && g[i] == e[i]) ++i;
+    std::string ctx;
+    for (std::size_t j = i; j-- > 0;)
+        if (g[j].rfind("== ", 0) == 0) {
+            ctx = g[j];
+            break;
+        }
+    check(false, "env table: differs from the pre-N1 table at line " + std::to_string(i + 1) + " (" + ctx + "): got '" +
+                     (i < g.size() ? g[i] : "<end>") + "' expected '" + (i < e.size() ? e[i] : "<end>") + "'");
+}
+
+// arch025-N1: EnvSnapshot itself. (1) name -> field for every name, through capture() (the process environment) and
+// fromValues(), in the states "not set", "", "0", "auto" and a normal value (plan C6: the raw value, unparsed);
+// (2) flag() = envFlag; (3) unknown names are refused; (4) every black-box case gives the same output when the values
+// come from an injected snapshot (LoadOptions::env -> Model::env_snap) as from the process environment; (5) the empty
+// string, which the process-env table cannot set in-process, against the rule the pre-N1 code gives at each site
+// (file:line of eeb79c2); (6) reflection: every name of EnvSnapshot::names() is set by at least one test here.
+void testEnvSnapshot() {
+    namespace fs = std::filesystem;
+    using whirl::config::EnvSnapshot;
+    using V = EnvSnapshot::Value;
+    const auto& names = EnvSnapshot::names();
+    // (1) and (6): unique names, unique fields
+    for (std::size_t i = 0; i < names.size(); ++i)
+        for (std::size_t j = i + 1; j < names.size(); ++j) {
+            check(std::string(names[i].name) != names[j].name, std::string("env snapshot: duplicate name ") + names[i].name);
+            check(names[i].field != names[j].field, std::string("env snapshot: two names, one field: ") + names[i].name);
+        }
+    for (const char* state : {"", "0", "auto", "17", "q8h"}) {
+        for (const auto& e : names) {
+            const std::string k = std::string("WHIRL_") + e.name;
+            _putenv_s(k.c_str(), state);  // "" removes it (CRT): the capture must then say "not set"
+            const EnvSnapshot c = EnvSnapshot::capture();
+            const V want = *state ? V(state) : V();
+            check(c.*e.field == want, std::string("env snapshot: capture ") + k + "='" + state + "' -> its field");
+            check(c.get(e.name) == want, std::string("env snapshot: get(") + e.name + ") = its field");
+            for (const auto& o : names)
+                if (o.field != e.field) check(!(c.*o.field), std::string("env snapshot: capture ") + k + " leaves " + o.name + " unset");
+            _putenv_s(k.c_str(), "");
+            const EnvSnapshot f = EnvSnapshot::fromValues({{e.name, V(state)}});  // here "" is a set, empty value
+            check(f.*e.field == V(state), std::string("env snapshot: fromValues ") + e.name + "='" + state + "' -> its field");
+            check(f.get(e.name).has_value() && *f.get(e.name) == state, std::string("env snapshot: raw value kept: ") + e.name);
+        }
+    }
+    {
+        const EnvSnapshot none = EnvSnapshot::capture();  // test_env cleared WHIRL_*
+        for (const auto& e : names) check(!(none.*e.field), std::string("env snapshot: not set -> nullopt: ") + e.name);
+        bool threw = false;
+        try {
+            (void)none.get("NOT_A_NAME");
+        } catch (const std::logic_error&) {
+            threw = true;
+        }
+        check(threw, "env snapshot: get of a name without a field throws logic_error");
+        threw = false;
+        try {
+            (void)EnvSnapshot::fromValues({{"NOT_A_NAME", V("1")}});
+        } catch (const std::invalid_argument&) {
+            threw = true;
+        }
+        check(threw, "env snapshot: fromValues of a name without a field throws invalid_argument");
+    }
+    // (2) flag() == envFlag (config.cpp:29-33 of eeb79c2): not set -> def, else != "0"
+    for (bool def : {false, true}) {
+        check(EnvSnapshot::flag(V(), def) == def, "env snapshot: flag(not set) = default");
+        check(EnvSnapshot::flag(V(""), def), "env snapshot: flag('') = on (envFlag: != \"0\")");
+        check(!EnvSnapshot::flag(V("0"), def), "env snapshot: flag('0') = off");
+        check(EnvSnapshot::flag(V("1"), def) && EnvSnapshot::flag(V("auto"), def) && EnvSnapshot::flag(V("00"), def), "env snapshot: flag('1'/'auto'/'00') = on");
+        for (const char* v : {"0", "1", "auto", "00"}) {
+            _putenv_s("WHIRL_N1_FLAG_T", v);
+            check(whirl::envFlag("N1_FLAG_T", def) == EnvSnapshot::flag(V(v), def), std::string("env snapshot: flag == envFlag for ") + v);
+        }
+        _putenv_s("WHIRL_N1_FLAG_T", "");
+        check(whirl::envFlag("N1_FLAG_T", def) == def, "env snapshot: envFlag(not set) = default");
+    }
+    // (4) injected snapshot == process environment, every black-box case
+    const fs::path dir = whirl::test::testTmpBase() / L"envtab";  // made by testEnvTable
+    const fs::path model = dir / L"m.gguf";
+    char* old = nullptr;
+    std::size_t old_len = 0;
+    _dupenv_s(&old, &old_len, "LOCALAPPDATA");
+    const std::string old_lad = old != nullptr ? old : "";
+    std::free(old);
+    _putenv_s("LOCALAPPDATA", dir.string().c_str());
+    std::size_t same = 0, n_cases = 0;
+    for (const envtab::Case& c : envtab::cases()) {
+        if (c.id.rfind("tune", 0) != 0 && c.id.rfind("gemv", 0) != 0) continue;
+        std::vector<std::pair<std::string, V>> vals;
+        for (const envtab::Var& v : c.vars) vals.push_back({v.name, V(v.value)});
+        const auto snap = std::make_shared<const EnvSnapshot>(EnvSnapshot::fromValues(vals));
+        for (const envtab::Var& v : c.vars) envtab::setEnv(v.name, v.value);
+        const bool tune = c.id.rfind("tune", 0) == 0;
+        const std::string a = tune ? envtab::tuneOutput(c.kind, model.string()) : envtab::gemvOutput();
+        for (const envtab::Var& v : c.vars) envtab::setEnv(v.name, nullptr);
+        const std::string b = tune ? envtab::tuneOutput(c.kind, model.string(), snap) : envtab::gemvOutput(snap);
+        ++n_cases;
+        if (a == b) ++same;
+        else check(false, "env snapshot: injected snapshot != process environment: " + c.id);
+    }
+    check(n_cases > 150 && same == n_cases, "env snapshot: " + std::to_string(same) + "/" + std::to_string(n_cases) + " cases equal injected vs process env");
+    // (5) the empty string (only reachable through inheritance from the parent process): the rule of each pre-N1 site
+    //   Unset:  `v && !v->empty()` sites (tune.cpp:944 KV, :950-951 Q8DEC, :963 RELAX, :968-971 RELAX_*, :975 SPEC_SAMPLE,
+    //           numerics.cpp:292 the A/B switches), strtoul("") == 0 (:878 ATTN_SEG -> 0 = the default; loader.cpp:331
+    //           FD_SPLITS out of range), parseNtList("") applies nothing (config.cpp:283-293 GEMV_*)
+    //   As(x):  `*v != "0"` sites behave as "1" (:872-880, :864 G8T, :902 GDN_STRIX); :906 GDN_STRIX_MIN max(32, 0) as "0";
+    //           :851-855 FP8_MASK stoul("") throws -> 7 as "zz"
+    //   Text(x): as "1" except the override note quotes the value ("FP8=" for "FP8=1"): FP8, GDN_WMMA, FFN_H16,
+    //           Q4_RELAXED, MOE_FP8 (applyOverride, numerics.cpp:298-311)
+    enum class Rule { unset, as, text };
+    struct E {
+        const char* name;
+        int kind;
+        Rule rule;
+        const char* as;
+    };
+    const E rules[] = {
+        {"KV", 0, Rule::unset, nullptr},          {"Q8DEC", 0, Rule::unset, nullptr},       {"RELAX", 0, Rule::unset, nullptr},
+        {"RELAX_K", 0, Rule::unset, nullptr},     {"RELAX_ALPHA", 0, Rule::unset, nullptr}, {"RELAX_EPS", 0, Rule::unset, nullptr},
+        {"RELAX_DELTA", 0, Rule::unset, nullptr}, {"SPEC_SAMPLE", 0, Rule::unset, nullptr}, {"ATTN_SEG", 0, Rule::unset, nullptr},
+        {"ACT_FUSE", 0, Rule::as, "1"},           {"GEMMH", 0, Rule::as, "1"},              {"GEMMHQ", 0, Rule::as, "1"},
+        {"ATTN_KX", 0, Rule::as, "1"},            {"ATTN_KG", 0, Rule::as, "1"},            {"ATTN_DQF", 0, Rule::as, "1"},
+        {"GDN_BA", 0, Rule::as, "1"},             {"GDN_IN2", 0, Rule::as, "1"},            {"G8T", 1, Rule::as, "1"},
+        {"GDN_STRIX", 2, Rule::as, "1"},          {"GDN_STRIX_MIN", 2, Rule::as, "0"},      {"FP8_MASK", 1, Rule::as, "zz"},
+        {"FP8", 1, Rule::text, "1"},              {"FP8", 3, Rule::text, "1"},              {"GDN_WMMA", 1, Rule::text, "1"},
+        {"FFN_H16", 0, Rule::text, "1"},          {"Q4_RELAXED", 2, Rule::text, "1"},       {"MOE_FP8", 3, Rule::text, "1"},
+    };
+    std::vector<std::string> empty_names;
+    auto run = [&](const char* name, int kind, const char* value) {
+        const auto snap = std::make_shared<const EnvSnapshot>(EnvSnapshot::fromValues({{name, V(value)}}));
+        return envtab::tuneOutput(kind, model.string(), snap);
+    };
+    for (const E& r : rules) {
+        const std::string got = run(r.name, r.kind, "");
+        std::string want = r.rule == Rule::unset ? envtab::tuneOutput(r.kind, model.string()) : run(r.name, r.kind, r.as);
+        if (r.rule == Rule::text)
+            for (std::size_t p = 0; (p = want.find(std::string(r.name) + "=1", p)) != std::string::npos;) want.erase(p + std::strlen(r.name) + 1, 1);
+        check(got == want, std::string("env snapshot: ") + r.name + "='' (" + envtab::k_kind_names[r.kind] + ") as the pre-N1 site rule");
+        empty_names.push_back(r.name);
+    }
+    for (const char* sw : {"FD_SPLITS", "GEMV_MAX", "GV_NMAX", "GV_GROUP", "NO_FUSE", "FLOAT_GEMV", "GDN_SEQ", "NAIVE_ATTN", "DBG", "ATTN_WIDE",
+                           "ATTN_DQ4", "ATTN_WS4", "MOE_BN"}) {
+        check(run(sw, 0, "") == envtab::tuneOutput(0, model.string()), std::string("env snapshot: switch ") + sw + "='' = not set (numerics.cpp:292)");
+        empty_names.push_back(sw);
+    }
+    for (const char* g : {"GEMV_R", "GEMV_W", "GEMV_WH"}) {
+        const auto snap = std::make_shared<const EnvSnapshot>(EnvSnapshot::fromValues({{g, V("")}}));
+        check(envtab::gemvOutput(snap) == envtab::gemvOutput(), std::string("env snapshot: ") + g + "='' applies nothing (config.cpp:283-293)");
+        empty_names.push_back(g);
+    }
+    _putenv_s("LOCALAPPDATA", old_lad.c_str());
+    // (6) reflection: every snapshot name is set by the process-env table, by (5), or (the sites that only run in a
+    // GPU load / at static initialisation) named here with the test that covers its value: flag() above for the
+    // envFlag sites (loader.cpp MOE_*), capture / fromValues above for the raw value of the others
+    const std::vector<std::string> covered = envtab::namesCovered();
+    const char* const load_only[] = {"GEMV_BITWISE_FLOAT", "CODE_OBJECT", "MOE_MXW", "MOE_WIDE", "MOE_RBF", "GPU_SHARE", "GPU_WAIT", "DEVICE", "DFLASH_PROF"};
+    for (const auto& e : names) {
+        const bool in_table = std::find(covered.begin(), covered.end(), e.name) != covered.end();
+        const bool in_empty = std::find(empty_names.begin(), empty_names.end(), e.name) != empty_names.end();
+        bool in_load = false;
+        for (const char* n : load_only) in_load = in_load || std::string(n) == e.name;
+        check(in_table || in_empty || in_load, std::string("env snapshot: name read by no test: ") + e.name);
+    }
+    // the reverse: the names the five files read are all fields (a get() of a missing name would throw at load)
+    for (const char* sw : {"FD_SPLITS", "GEMV_MAX", "GV_NMAX", "GV_GROUP", "NO_FUSE", "FLOAT_GEMV", "GDN_SEQ", "NAIVE_ATTN", "DBG", "ATTN_WIDE",
+                           "ATTN_DQ4", "ATTN_WS4", "MOE_BN"}) {
+        bool ok = true;
+        try {
+            (void)EnvSnapshot().get(sw);
+        } catch (...) {
+            ok = false;
+        }
+        check(ok, std::string("env snapshot: numerics switch has a field: ") + sw);
+    }
+    // the five files read the environment only through the snapshot (env_read_check counts the rest of the tree)
+    for (const char* f : {"src/model/tune.cpp", "src/model/loader.cpp", "src/model/config.cpp", "src/model/device.cpp", "src/model/dflash.cpp"}) {
+        std::ifstream in(fs::path(WHIRL_SOURCE_DIR) / f, std::ios::binary);
+        const std::string src((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        check(!src.empty(), std::string("env snapshot: read ") + f);
+        static const std::regex rd(R"(\b(?:getenv|_dupenv_s|_wgetenv|envGet|envFlag)\s*\()");
+        std::size_t n = 0;
+        for (auto it = std::sregex_iterator(src.begin(), src.end(), rd); it != std::sregex_iterator(); ++it) {
+            const std::size_t at = static_cast<std::size_t>(it->position());
+            const std::size_t ls = src.rfind('\n', at) + 1;
+            const std::string line = src.substr(ls, src.find('\n', at) - ls);
+            if (line.find("localAppData") != std::string::npos || line.find("\"LOCALAPPDATA\"") != std::string::npos) continue;  // PL1
+            if (line.find("//") != std::string::npos && line.find("//") < at - ls) continue;
+            ++n;
+        }
+        check(n == 0, std::string("env snapshot: no direct env read left in ") + f + " (" + std::to_string(n) + ")");
+    }
+}
+
 int main() {
     whirl::test::clearWhirlEnv();  // FR-TEST P3-11
     testKvLayout();
@@ -1714,6 +2164,8 @@ int main() {
     testDraftWindowRestore();
     testForwardSplit();
     testBaselineDumps();
+    testEnvTable();
+    testEnvSnapshot();
     testFloatGemvDispatch();
     testArchWhitelist();
     testLoadEstimate();

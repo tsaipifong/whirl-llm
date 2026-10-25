@@ -3,6 +3,7 @@
 // Reimplements the WHIRL Zig research prototype's model/qwen35.zig (Model.load, Loader, allocKvPool,
 // setupSeqs, snapshots, requantMtpQ4, buildDraftHeadEx).
 
+#include "config/env_snapshot.h"
 #include "whirl/dump.h"
 #include "whirl/model.h"
 #include "whirl/kv_layout.h"
@@ -312,8 +313,10 @@ std::string readWhole(const std::string& path) { return readFile(path); }
 
 }  // namespace
 
-std::optional<KvMode> kvModeFromEnv() {
-    const auto v = envGet("KV");
+namespace {
+// arch025-N1: the reads of kvModeFromEnv / resolveFdSplits on a snapshot (Model::load passes the load's)
+std::optional<KvMode> kvModeOf(const whirl::config::EnvSnapshot& env) {
+    const auto& v = env.kv;
     if (!v) return std::nullopt;
     if (*v == "auto") return KvMode::automatic;
     if (*v == "f16") return KvMode::f16;
@@ -324,14 +327,20 @@ std::optional<KvMode> kvModeFromEnv() {
     throw std::invalid_argument("WHIRL_KV must be auto, f16, q8, q8h, q8v or q4 (got '" + *v + "')");
 }
 
-u32 resolveFdSplits(bool kv_q4) {
+u32 fdSplitsOf(bool kv_q4, const whirl::config::EnvSnapshot& env) {
     u32 splits = kv_q4 ? 256 : 64;
-    if (const auto v = envGet("FD_SPLITS")) {
+    if (const auto& v = env.fd_splits) {
         const unsigned long s = std::strtoul(v->c_str(), nullptr, 10);
         if (s >= 64 && s <= 256 && s % 64 == 0) splits = static_cast<u32>(s);
     }
     return splits;
 }
+
+}  // namespace
+
+std::optional<KvMode> kvModeFromEnv() { return kvModeOf(whirl::config::EnvSnapshot::capture()); }
+
+u32 resolveFdSplits(bool kv_q4) { return fdSplitsOf(kv_q4, whirl::config::EnvSnapshot::capture()); }
 
 u64 bufferBytes(const Config& cfg, u32 Bq, u64 ffs, u64 max_elems, u32 fd_splits) {
     // mirrors the buffer allocations of Model::load below (keep in step)
@@ -454,6 +463,10 @@ u64 dflashWeightBytes(const gguf::File& draft) {
 std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadStats& stats, const LoadOptions& opt) {
     auto mp = std::make_unique<Model>();
     Model& m = *mp;
+    // arch025-N1: this load's WHIRL_* environment, the caller's (LoadOptions::env) or read here, before the first
+    // read below; kept on the Model for loadOrTune / applyGemvEnv / the selftest checks
+    m.env_snap = opt.env ? opt.env : std::make_shared<const whirl::config::EnvSnapshot>(whirl::config::EnvSnapshot::capture());
+    const whirl::config::EnvSnapshot& env = *m.env_snap;
     m.cfg = Config::fromGguf(f);
     const Config& cfg = m.cfg;
     // every tensor's type and shape against cfg, before any GPU allocation
@@ -468,7 +481,7 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
             // the KV format this load will choose below (numerics::chooseKv, same inputs; the 8060S code
             // object has every KV kernel), not f16: a balance / fast load with an explicit --ctx was refused
             // although its q8 / q4 cache fits (REVIEW-022 F6)
-            const KvMode kvm_est = opt.kv_mode == KvMode::automatic ? kvModeFromEnv().value_or(KvMode::automatic) : opt.kv_mode;
+            const KvMode kvm_est = opt.kv_mode == KvMode::automatic ? kvModeOf(env).value_or(KvMode::automatic) : opt.kv_mode;
             const numerics::KvCaps caps_est{true, true, true, true};
             const numerics::KvKind kv_est =
                 dump::kv("loader.uma_est", opt.numerics, cfg.moe, caps_est, kvKindOf(kvm_est),
@@ -477,7 +490,7 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
             hip::UmaNeed n;
             n.weights = est.weights;
             n.fixed = est.weights + est.state +
-                      bufferBytes(cfg, std::clamp<u32>(opt.max_batch, 1, max_batch_limit), est.ffs, est.max_elems, resolveFdSplits(true)) +
+                      bufferBytes(cfg, std::clamp<u32>(opt.max_batch, 1, max_batch_limit), est.ffs, est.max_elems, fdSplitsOf(true, env)) +
                       (256ull << 20);
             n.kv_per_token = kv_est == numerics::KvKind::f16   ? est.kv_f16
                              : kv_est == numerics::KvKind::q8v ? est.kv_q8v
@@ -491,7 +504,7 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
     }
     std::string co_path = opt.code_object;
     if (co_path.empty()) {
-        if (auto v = envGet("CODE_OBJECT")) co_path = *v;
+        if (const auto& v = env.code_object) co_path = *v;
     }
     if (!co_path.empty()) {
         // development override: an external code object built from the kernel sources
@@ -508,7 +521,7 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
     m.max_ctx = max_ctx_req;
     m.max_batch = std::clamp<u32>(opt.max_batch, 1, max_batch_limit);
     KvMode kvm = opt.kv_mode;
-    if (kvm == KvMode::automatic) kvm = kvModeFromEnv().value_or(KvMode::automatic);
+    if (kvm == KvMode::automatic) kvm = kvModeOf(env).value_or(KvMode::automatic);
     m.kv_mode = kvm;
     {
         // KV format: fixed per mode x model type (numerics::chooseKv, shared by CLI and server;
@@ -534,10 +547,10 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
     // per-model-type request (numerics::forModel; MoE balance = dense balance items since MODES-MXFP4)
     m.num_req = numerics::forModel(opt.numerics, cfg.moe);
     // MoE expert fp8: balance / fast item moefp8 (WHIRL_MOE_FP8 overrides the mode)
-    m.moe_fp8 = envFlag("MOE_FP8", m.num_req.has(numerics::Item::moefp8));
-    m.moe_mxw = envFlag("MOE_MXW", true);
-    m.moe_wide = envFlag("MOE_WIDE", false);  // MoE wide verify (balance / fast, opt-in), see wideCapable
-    m.moe_rbf = envFlag("MOE_RBF", true);
+    m.moe_fp8 = whirl::config::EnvSnapshot::flag(env.moe_fp8, m.num_req.has(numerics::Item::moefp8));
+    m.moe_mxw = whirl::config::EnvSnapshot::flag(env.moe_mxw, true);
+    m.moe_wide = whirl::config::EnvSnapshot::flag(env.moe_wide, false);  // MoE wide verify (balance / fast, opt-in), see wideCapable
+    m.moe_rbf = whirl::config::EnvSnapshot::flag(env.moe_rbf, true);
     m.layers.resize(cfg.n_layer);
     m.kcache.assign(cfg.n_layer, 0);
     m.vcache.assign(cfg.n_layer, 0);
@@ -560,7 +573,7 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
     // (not on the UMA iGPU, gfx1151, unless a limit is set: its free VRAM does not bound what it can allocate)
     if (!device::profile(m.arch).uma_no_vram_fit_check || vram::limitBytes() != 0) {
         const LoadEstimate est = estimateLoad(f, cfg, opt.embd_on_host);
-        const u64 buf = bufferBytes(cfg, m.max_batch, est.ffs, est.max_elems, resolveFdSplits(m.kv_q4));
+        const u64 buf = bufferBytes(cfg, m.max_batch, est.ffs, est.max_elems, fdSplitsOf(m.kv_q4, env));
         const u64 need = est.weights + est.state + buf;
         const hip::MemInfo mi = hip::memInfo();
         if (need > mi.free) {
@@ -686,7 +699,7 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
     m.host_ids.assign(static_cast<std::size_t>(2 * B), 0);
     m.pos_buf = m.alloc(B * 4);
     m.out_tok = m.allocZero(ctl_words * 4);
-    m.fd_splits = resolveFdSplits(m.kv_q4);
+    m.fd_splits = fdSplitsOf(m.kv_q4, env);
     const u64 n_split = m.fd_splits;
     m.part_ml = m.alloc(max_verify_rows * n_split * cfg.n_head * 2 * f4);
     m.part_acc = m.alloc(max_verify_rows * n_split * cfg.n_head * cfg.head_dim * f4);
