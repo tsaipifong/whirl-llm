@@ -1,0 +1,24 @@
+# safe025 /analyze baseline: count<TAB>file|ruleId|function (from SARIF; no paths, lines or message text). Regenerate: tools/safety/run_analyze.bat, then analyze_check.py update <build_dir> <this file>
+1	src/common/pool_budget.cpp|C6326|whirl::poolbudget::defaultMargin
+1	src/common/util.cpp|C6262|whirl::readFile
+1	src/hip/uma_mem.cpp|C6240|whirl::hip::umaMemory
+1	src/hip/wddm_mem.cpp|C6240|whirl::hip::gpuPinnedNow
+1	src/hip/wddm_mem.cpp|C6240|whirl::hip::wddmMemInfo
+1	src/model/spec.cpp|C28020|whirl::qwen35::SlotAccept::observe
+1	src/server/engine.cpp|C28020|whirl::server::CycleProf::print
+1	src/vision/stb_image.h|C6262|stbi__gif_load
+1	src/vision/stb_image.h|C6262|stbi__load_gif_main
+1	src/vision/vis_cli.cpp|C6246|whirl::vision::cliVisEncode
+1	tests/server/http_client.cpp|C6031|whirl::test::freeLocalPort::<lambda_1>::()
+1	tests/server/http_client.cpp|C6031|whirl::test::httpRequestFrom::<lambda_1>::()
+1	tests/server/http_client.cpp|C6031|whirl::test::rawConnect::<lambda_1>::()
+1	tests/server/http_client.cpp|C6262|whirl::test::httpRequestFrom
+1	tests/server/http_client.cpp|C6262|whirl::test::rawRecvAll
+1	tests/server/server_tests.cpp|C6262|`anonymous-namespace'::testCkptF1
+1	tests/server/server_tests.cpp|C6262|testAllocStateMeasured
+1	tests/server/server_tests.cpp|C6262|testHttpFakeEngine
+1	tests/server/tier_tests.cpp|C6387|PowerLossSim::write
+1	tests/unit/unit_tests.cpp|C6246|testMemGovernor
+1	tests/unit/unit_tests.cpp|C6262|`anonymous-namespace'::testNumerics
+1	tests/unit/unit_tests.cpp|C6385|specsample_test::runOpen
+1	tools/bin2c/bin2c.cpp|C6262|main

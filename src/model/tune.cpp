@@ -5,6 +5,7 @@
 // readTune, matmulsOnly, checkGemvq, checkGemvBitwise, checkPrefillInvariance,
 // checkAttnGroups) and gguf_cli.zig (loadOrTune).
 
+#include "config/env_snapshot.h"
 #include "whirl/dump.h"
 #include "whirl/model.h"
 
@@ -391,8 +392,9 @@ bool Model::checkGemvBitwise(std::string& log) {
                     }
                 }
             }
-            const char* fw = std::getenv("WHIRL_GEMV_BITWISE_FLOAT");
-            const bool warn_only = flt && fw != nullptr && std::strcmp(fw, "warn") == 0;
+            const auto env = whirl::config::snapshotOf(*this);  // the load's (arch025-N1)
+            const auto& fw = env->gemv_bitwise_float;
+            const bool warn_only = flt && fw && *fw == "warn";
             if (bad > 0 && !warn_only) all_ok = false;
             log += fmt("    %-7s %ux%u: multi-token / multi-row GEMV bitwise == 1-token: %s\n", tyName(w.ty).c_str(), w.nrows, w.ncols,
                        bad == 0 ? "ok" : (warn_only ? "FAIL (known bug C-13, warn only)" : "FAIL"));
@@ -842,12 +844,15 @@ void loadOrTuneImpl(Model& m, const std::string& model_path, std::string& log) {
     namespace nu = whirl::numerics;
     const bool has_mx = m.type_bytes[ti(GgmlType::mxfp4)] > 0;
     const nu::Request& rq = m.num_req;
+    // arch025-N1: every WHIRL_* read below comes from the load's snapshot (LoadOptions::env / Model::load)
+    const auto env_p = whirl::config::snapshotOf(m);
+    const whirl::config::EnvSnapshot& env = *env_p;
     // MXFP4 prefill with fp8 activations: a balance item (m.fp8_prefill from the mode at load);
     // WHIRL_FP8=0|1 overrides. WHIRL_FP8=0 also turns the MoE expert fp8 path off (as before).
-    const auto fp8_env = envGet("FP8");
+    const auto& fp8_env = env.fp8;
     if (fp8_env) m.fp8_prefill = *fp8_env != "0";
     if (fp8_env && *fp8_env == "0") m.moe_fp8 = false;
-    if (auto v = envGet("FP8_MASK")) {
+    if (const auto& v = env.fp8_mask) {
         try {
             m.fp8_mask = static_cast<std::uint8_t>(std::stoul(*v, nullptr, 0));
         } catch (...) {
@@ -860,34 +865,34 @@ void loadOrTuneImpl(Model& m, const std::string& model_path, std::string& log) {
         else
             log += "  MXFP4 prefill: f16 activations\n";
         // fragment-tiled fp8 GEMM (bitwise == gemm8), default on; WHIRL_G8T=0 keeps gemm8
-        const bool g8t_on = envFlag("G8T", true);
+        const bool g8t_on = whirl::config::EnvSnapshot::flag(env.g8t, true);
         if (g8t_on && m.fp8_prefill && m.k.gemm8[0] != nullptr && m.useTiledFp8()) log += "  fp8 prefill GEMM: fragment-tiled (gemm8t)\n";
     }
     // f16-WMMA chunked DeltaNet prefill and f16 GEMM outputs: balance items for MXFP4 models
     // and (KG-1) dense non-MXFP4 models on the R9700 (= nu::denseQuantRelaxed)
     const bool dense_q = !has_mx && !m.cfg.moe && !device::profile(m.arch).numerics_8060s;
     m.gdn_wmma = (has_mx || dense_q) && rq.has(nu::Item::gdnwmma);
-    const auto wmma_env = envGet("GDN_WMMA");
+    const auto& wmma_env = env.gdn_wmma;
     if (wmma_env) m.gdn_wmma = *wmma_env != "0";
-    if (auto v = envGet("ACT_FUSE")) m.act_fuse = *v != "0";
-    if (auto v = envGet("GEMMH")) m.gemmh_on = *v != "0";
-    if (auto v = envGet("GEMMHQ")) m.gemmhq_on = *v != "0";
-    if (auto v = envGet("ATTN_KX")) m.attn_kx_on = *v != "0";
-    if (auto v = envGet("ATTN_KG")) m.attn_kg_on = *v != "0";
-    if (auto v = envGet("ATTN_DQF")) m.attn_dqf_on = *v != "0";
-    if (auto v = envGet("ATTN_SEG")) m.attn_seg = static_cast<std::uint32_t>(std::strtoul(v->c_str(), nullptr, 10)) / 256 * 256;
-    if (auto v = envGet("GDN_BA")) m.gdn_ba_on = *v != "0";
-    if (auto v = envGet("GDN_IN2")) m.gdn_in2_on = *v != "0";
+    if (const auto& v = env.act_fuse) m.act_fuse = *v != "0";
+    if (const auto& v = env.gemmh) m.gemmh_on = *v != "0";
+    if (const auto& v = env.gemmhq) m.gemmhq_on = *v != "0";
+    if (const auto& v = env.attn_kx) m.attn_kx_on = *v != "0";
+    if (const auto& v = env.attn_kg) m.attn_kg_on = *v != "0";
+    if (const auto& v = env.attn_dqf) m.attn_dqf_on = *v != "0";
+    if (const auto& v = env.attn_seg) m.attn_seg = static_cast<std::uint32_t>(std::strtoul(v->c_str(), nullptr, 10)) / 256 * 256;
+    if (const auto& v = env.gdn_ba) m.gdn_ba_on = *v != "0";
+    if (const auto& v = env.gdn_in2) m.gdn_in2_on = *v != "0";
     // f16 FFN / DeltaNet GEMM outputs: a balance item (WHIRL_FFN_H16 overrides)
     m.ffn_h16 = (has_mx || dense_q) && rq.has(nu::Item::h16);
     // WHIRL_Q4_RELAXED=1: every non-bitwise prefill speedup for non-MXFP4 models too
-    const auto relaxed_env = envGet("Q4_RELAXED");
+    const auto& relaxed_env = env.q4_relaxed;
     const bool relaxed = relaxed_env && *relaxed_env != "0";
     if (relaxed) {
         m.gdn_wmma = true;
         m.ffn_h16 = true;
     }
-    const auto h16_env = envGet("FFN_H16");
+    const auto& h16_env = env.ffn_h16;
     if (h16_env) m.ffn_h16 = *h16_env != "0";
     m.h16_dq = m.ffn_h16 && dense_q;
     if (m.gdn_wmma && m.gdn_chunked && m.k.gdn_wprep != nullptr) log += "  DeltaNet prefill: f16 WMMA chunks\n";
@@ -898,12 +903,12 @@ void loadOrTuneImpl(Model& m, const std::string& model_path, std::string& log) {
     // condition gdn_wmma has on the R9700) and only exists where gdn_wmma's kernels do not (gfx1151).
     // WHIRL_GDN_STRIX_MIN sets the row threshold (default 256, strix's GGML_GDN_CHUNK_MIN).
     m.gdn_strix = false;
-    const auto sx_env = envGet("GDN_STRIX");
+    const auto& sx_env = env.gdn_strix;
     if ((!sx_env || *sx_env != "0") && device::profile(m.arch).gdn_strix && m.k.gdn_sx_prep != nullptr &&
         m.k.gdn_sx_scan != nullptr && m.gdn_chunked && (has_mx || !m.cfg.moe) && rq.has(nu::Item::gdnwmma) && m.cfg.d_state == 128 &&
         m.cfg.headV() == 128 && m.cfg.n_k_heads > 0 && m.cfg.n_v_heads % m.cfg.n_k_heads == 0 && m.cfg.n_v_heads / m.cfg.n_k_heads <= 4) {
         m.gdn_strix = true;
-        if (auto v = envGet("GDN_STRIX_MIN"))
+        if (const auto& v = env.gdn_strix_min)
             m.gdn_strix_min = static_cast<std::uint32_t>(std::max<unsigned long>(32, std::strtoul(v->c_str(), nullptr, 10)));
         log += fmt("  DeltaNet prefill: f16 WMMA chunks (strix-llama.cpp, runs >= %u rows; WHIRL_GDN_STRIX=0 turns it off)\n", m.gdn_strix_min);
     }
@@ -933,7 +938,7 @@ void loadOrTuneImpl(Model& m, const std::string& model_path, std::string& log) {
         nu::Plan p = nu::plan(rq, t);
         if (fp8_env) nu::applyOverride(p, nu::Item::fp8, "FP8", *fp8_env, m.fp8_prefill, t.has_mxfp4 && t.k_gemm8);
         const bool moe_ok = t.moe && t.moe_mxfp4 && t.k_gemm8_moe;
-        if (const auto v = envGet("MOE_FP8"); v && !(fp8_env && *fp8_env == "0"))
+        if (const auto& v = env.moe_fp8; v && !(fp8_env && *fp8_env == "0"))
             nu::applyOverride(p, nu::Item::moefp8, "MOE_FP8", *v, m.moe_fp8, moe_ok);
         else if (fp8_env && *fp8_env == "0")
             nu::applyOverride(p, nu::Item::moefp8, "FP8", *fp8_env, m.moe_fp8, moe_ok);
@@ -941,13 +946,13 @@ void loadOrTuneImpl(Model& m, const std::string& model_path, std::string& log) {
         else if (wmma_env) nu::applyOverride(p, nu::Item::gdnwmma, "GDN_WMMA", *wmma_env, m.gdn_wmma, t.k_gdn_wmma && m.gdn_chunked);
         if (h16_env) nu::applyOverride(p, nu::Item::h16, "FFN_H16", *h16_env, m.ffn_h16, true);
         else if (relaxed) nu::applyOverride(p, nu::Item::h16, "Q4_RELAXED", *relaxed_env, m.ffn_h16, true);
-        if (const auto v = envGet("KV"); v && !v->empty() && *v != "auto")
+        if (const auto& v = env.kv; v && !v->empty() && *v != "auto")
             nu::applyOverride(p, *v == "q4" ? nu::Item::kvq4 : nu::Item::kvq8, "KV", *v, *v != "f16", !t.moe || *v != "f16");
         // decode / verify activations (P-8): precise -> f16 activations on the f16 GEMM (f32
         // accumulation), balance / fast -> int8 (q8_1 class) on dense and MoE models (MOE-BAL-3)
         // (nu::q8decDefault, in the plan). WHIRL_Q8DEC=0|1 overrides.
         m.prec_dec = !p.q8dec_default;
-        const auto q8dec_env = envGet("Q8DEC");
+        const auto& q8dec_env = env.q8dec;
         if (q8dec_env && !q8dec_env->empty()) m.prec_dec = *q8dec_env == "0";
         nu::setQ8dec(p, !m.prec_dec, q8dec_env ? *q8dec_env : std::string());
         if (m.prec_dec) {
@@ -960,21 +965,21 @@ void loadOrTuneImpl(Model& m, const std::string& model_path, std::string& log) {
                                      (rq.mode == nu::Mode::precise ? "--balance" : "WHIRL_Q8DEC unset") +
                                      " (int8 decode / verify activations, as llama.cpp's q8_1)");
         }
-        if (const auto v = envGet("RELAX"); v && !v->empty())
+        if (const auto& v = env.relax; v && !v->empty())
             nu::applyOverride(p, nu::Item::relaxacc, "RELAX", *v, *v != "0", true);
         m.relax = whirl::relax::Params{};
         if (p.on(nu::Item::relaxacc)) {
             m.relax.on = true;
-            if (const auto v = envGet("RELAX_K"); v && !v->empty()) m.relax.k = static_cast<std::uint32_t>(std::stoul(*v));
-            if (const auto v = envGet("RELAX_ALPHA"); v && !v->empty()) m.relax.alpha = std::stof(*v);
-            if (const auto v = envGet("RELAX_EPS"); v && !v->empty()) m.relax.eps = std::stof(*v);
-            if (const auto v = envGet("RELAX_DELTA"); v && !v->empty()) m.relax.delta = std::stof(*v);
+            if (const auto& v = env.relax_k; v && !v->empty()) m.relax.k = static_cast<std::uint32_t>(std::stoul(*v));
+            if (const auto& v = env.relax_alpha; v && !v->empty()) m.relax.alpha = std::stof(*v);
+            if (const auto& v = env.relax_eps; v && !v->empty()) m.relax.eps = std::stof(*v);
+            if (const auto& v = env.relax_delta; v && !v->empty()) m.relax.delta = std::stof(*v);
             p.items[static_cast<std::size_t>(nu::Item::relaxacc)].note +=
                 std::format(" [k {}, alpha {:.2f}, eps {:.2f}, delta {:.2f}]", m.relax.topk(), m.relax.alpha, m.relax.eps, m.relax.delta);
         }
-        if (const auto v = envGet("SPEC_SAMPLE"); v && !v->empty())
+        if (const auto& v = env.spec_sample; v && !v->empty())
             nu::applyOverride(p, nu::Item::specsample, "SPEC_SAMPLE", *v, *v != "0", t.mtp && t.k_spec_sample);
-        nu::noteSwitches(p, [](const char* n) { return envGet(n); });
+        nu::noteSwitches(p, [&env](const char* n) { return env.get(n); });
         m.num_plan = p;
         log += "  " + nu::logLine(p) + "\n";
         if (!m.load_note.empty()) log += "  " + m.load_note;

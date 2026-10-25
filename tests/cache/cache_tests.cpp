@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <format>
 #include <numeric>
 #include <stdexcept>
@@ -475,6 +476,22 @@ static void testFingerprint() {
     // restore the entries a normal server wrote (the tier p1 gate does exactly that)
     CHECK(!fingerprintEnvKept("WHIRL_PREFIX_CACHE_VERIFY"));
     CHECK(!fingerprintEnvKept("WHIRL_LAUNCH_LOG"));  // ARCH-1 K-0 launch table (diagnostic)
+    CHECK(!fingerprintEnvKept("WHIRL_LEAKCHECK_QUIET"));  // safe025 leak-check report switch (test builds only; rule I6)
+#ifdef _WIN32
+    {
+        // I6: the switch on and off gives the same fingerprint environment and the same fingerprint
+        const auto off = fingerprintEnv();
+        _putenv_s("WHIRL_LEAKCHECK_QUIET", "1");
+        const auto on = fingerprintEnv();
+        _putenv_s("WHIRL_LEAKCHECK_QUIET", "");
+        CHECK(on == off);
+        auto q = p;
+        q.env = off;
+        const auto fp_off = tierFingerprint(q);
+        q.env = on;
+        CHECK(tierFingerprint(q) == fp_off);
+    }
+#endif
     CHECK(!fingerprintEnvKept("WHIRLX"));
     // the process environment is already filtered
     for (const auto& [k, v] : fingerprintEnv()) CHECK(fingerprintEnvKept(k));

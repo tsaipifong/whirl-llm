@@ -28,6 +28,8 @@ if(MSVC)
   add_compile_definitions(_CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
 endif()
 
+include(cmake/safety.cmake)  # safe025: sanitizer / leak check / static analysis options (default OFF)
+
 # ---------------------------------------------------------------------------
 # HIP SDK
 
@@ -210,6 +212,7 @@ endif()
 
 include(cmake/ops.cmake)  # kernel choice per op (ARCH-1 K-1..K-5)
 include(cmake/server.cmake OPTIONAL)
+include(cmake/safety_targets.cmake)  # safe025: test-only fault driver (default OFF)
 include(cmake/model.cmake OPTIONAL)
 include(cmake/vision.cmake OPTIONAL)  # Phase 3 (vision)
 include(cmake/release.cmake OPTIONAL)  # release front-end: version, resources, icon, error messages

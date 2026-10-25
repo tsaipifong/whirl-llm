@@ -3,7 +3,9 @@
 
 A stored speed cell may be carried over from build A to build B only when, for the same GPU:
   1. code objects: every AMDGPU code object embedded in each exe (whirl.exe, whirl-server.exe, ...) is byte-identical
-     (per object: sha256 of the whole object and of each ELF section),
+     (per object: sha256 of the whole object and of each ELF section); an object that differs only in the per-TU
+     __hip_cuid_<hex> symbol clang derives from the source path, and in that symbol's exact consequences, counts as
+     equal: code_objects "identical-except-cuid" (cuid_equivalent; a cuid of another length too unless --strict-cuid-length),
   2. launch sequence: the launch tables of the deterministic CLI runs (golden single / pair / ngram, seqtest, selftest;
      server runs only with --server and the ignore list) are identical: launch count, sequence hash, kernel/geometry rows
      and, when both logs carry them, the argument digests and argument-sequence hash (tools/impact/launch_table.py),
@@ -104,6 +106,220 @@ def amdgpu_objects(d):
             pass
         k = d.find(b"\x7fELF", k + 1)
     return res
+
+
+# ---------------------------------------------------------------- __hip_cuid (arch025-weq)
+# clang emits one external i8 global "__hip_cuid_<hex>" per HIP TU (CodeGenModule::Release); with the default
+# -fuse-cuid=hash the hex is utohexstr(MD5(input path + driver args).low()), so two worktrees always differ there, and
+# utohexstr drops leading zeros (15 hex digits about once in 16 TUs). Consequences inside one code object: the name in
+# .dynstr / .strtab, the .dynsym order (lld sorts .dynsym by .gnu.hash bucket), .gnu.hash / .hash contents, relocation
+# symbol indices; with a length change also .dynstr / .strtab sh_size, DT_STRSZ and later st_name offsets.
+# cuid_equivalent() accepts exactly those consequences and nothing else (rule: s15-blast §2 / PLAN I1, arch025:S0b-runners).
+CUID_NAME = re.compile(rb"__hip_cuid_[0-9a-f]{1,16}")
+CUID_STR = {".dynstr", ".strtab"}
+CUID_SYM = {".dynsym", ".symtab"}
+CUID_HASH = {".hash", ".gnu.hash"}
+CUID_SECTIONS = CUID_STR | CUID_SYM | CUID_HASH | {".dynamic", ".rela.dyn"}
+DT_STRSZ = 10
+
+
+def _elf_sections(x):
+    """[(name, (sh_name, type, flags, addr, offset, size, link, info, align, entsize))] of one ELF64 object"""
+    shoff = struct.unpack_from("<Q", x, 0x28)[0]
+    shentsize, shnum, shstrndx = struct.unpack_from("<HHH", x, 0x3A)
+    if shentsize != 64 or shstrndx >= shnum:
+        raise ValueError("section header table")
+    hs = [struct.unpack_from("<IIQQQQIIQQ", x, shoff + i * 64) for i in range(shnum)]
+    so = hs[shstrndx][4]
+    return [(x[so + h[0]:x.index(b"\0", so + h[0])].decode("ascii", "replace"), h) for h in hs]
+
+
+def _gnu_hash(n):
+    h = 5381
+    for c in n:
+        h = (h * 33 + c) & 0xFFFFFFFF
+    return h
+
+
+def _sysv_hash(n):
+    h = 0
+    for c in n:
+        h = ((h << 4) + c) & 0xFFFFFFFF
+        g = h & 0xF0000000
+        if g:
+            h ^= g >> 24
+        h &= ~g & 0xFFFFFFFF
+    return h
+
+
+def _hash_ok(x, kind, off, size, names):
+    """Is this .hash / .gnu.hash section exactly the table of its own .dynsym (names[i] = name of index i)? Strict, so
+    the table is fully determined by the symbol names: .hash every bucket chain holds exactly the symbols of that bucket,
+    each once (only the order inside a chain is free); .gnu.hash the bloom words are exactly the bits of the hashed
+    symbols, .dynsym from symoffset on is sorted by bucket, each bucket starts at its first symbol (0 when empty) and the
+    chain words are (hash & ~1) | end-of-bucket. The section has no bytes beyond the table."""
+    b = x[off:off + size]
+    if kind == ".hash":
+        nb, nc = struct.unpack_from("<II", b, 0)
+        if nc != len(names) or 8 + 4 * (nb + nc) != len(b) or not nb:
+            return False
+        bk = struct.unpack_from(f"<{nb}I", b, 8)
+        ch = struct.unpack_from(f"<{nc}I", b, 8 + 4 * nb)
+        want = {}
+        for i in range(1, nc):
+            want.setdefault(_sysv_hash(names[i]) % nb, set()).add(i)
+        for q in range(nb):
+            seen, j = [], bk[q]
+            while j:
+                if j >= nc or j in seen:
+                    return False
+                seen.append(j); j = ch[j]
+            if set(seen) != want.get(q, set()) or len(seen) != len(want.get(q, ())):
+                return False
+        return ch[0] == 0
+    nb, symoff, bsz, shift = struct.unpack_from("<IIII", b, 0)
+    n = len(names)
+    if not nb or not bsz or not 1 <= symoff <= n or 16 + 8 * bsz + 4 * nb + 4 * (n - symoff) != len(b):
+        return False
+    bloom = struct.unpack_from(f"<{bsz}Q", b, 16)
+    bk = struct.unpack_from(f"<{nb}I", b, 16 + 8 * bsz)
+    ch = struct.unpack_from(f"<{n - symoff}I", b, 16 + 8 * bsz + 4 * nb)
+    hs = [_gnu_hash(names[i]) for i in range(symoff, n)]
+    wb = [0] * bsz
+    for h in hs:
+        wb[(h // 64) % bsz] |= (1 << (h % 64)) | (1 << ((h >> shift) % 64))
+    if tuple(wb) != bloom:
+        return False
+    qs = [h % nb for h in hs]
+    if qs != sorted(qs):
+        return False
+    first = {}
+    for k, q in enumerate(qs):
+        first.setdefault(q, symoff + k)
+    if any(bk[q] != first.get(q, 0) for q in range(nb)):
+        return False
+    return all(ch[k] == (hs[k] & ~1) | (1 if k == len(qs) - 1 or qs[k + 1] != qs[k] else 0) for k in range(len(qs)))
+
+
+def cuid_equivalent(xa, xb, allow_length=True):
+    """Are two AMDGPU code objects identical except for the __hip_cuid_<hex> symbol of their TU and its consequences?
+    -> (ok, detail). Required: same size, ELF and program headers and every byte outside the symbol sections identical,
+    every other section (.text, .rodata, .note, .shstrtab, ...) byte-identical with the same header; the string tables
+    identical string by string except whole strings __hip_cuid_<1-16 hex> that map one-to-one; .symtab entry by entry
+    and .dynsym as a set equal after that renaming; .rela.dyn equal by symbol name; .dynamic equal except DT_STRSZ;
+    .hash / .gnu.hash each valid for its own .dynsym. A cuid of another length (sh_size / DT_STRSZ / st_name shifts)
+    passes only with allow_length (default: different)."""
+    try:
+        if len(xa) != len(xb):
+            return False, "object size differs"
+        sa, sb = _elf_sections(xa), _elf_sections(xb)
+        if [n for n, _ in sa] != [n for n, _ in sb]:
+            return False, "section names / order differ"
+        phoff, phnum = struct.unpack_from("<Q", xa, 0x20)[0], struct.unpack_from("<H", xa, 0x38)[0]
+        if xa[:64] != xb[:64] or xa[phoff:phoff + 56 * phnum] != xb[phoff:phoff + 56 * phnum]:
+            return False, "ELF or program header differs"
+        if len({n for n, _ in sa}) != len(sa):
+            return False, "duplicate section names"
+        shoff = struct.unpack_from("<Q", xa, 0x28)[0]
+        cov = [(0, 64), (phoff, 56 * phnum), (shoff, 64 * len(sa))]
+        diff_secs = []
+        for (n, ha), (_, hb) in zip(sa, sb):
+            if ha[1] != 8:  # SHT_NOBITS occupies no bytes
+                cov.append((ha[4], max(ha[5], hb[5])))
+            same_hdr = ha == hb
+            same_body = ha[1] == 8 or xa[ha[4]:ha[4] + ha[5]] == xb[hb[4]:hb[4] + hb[5]]
+            if same_hdr and same_body:
+                continue
+            if n not in CUID_SECTIONS:
+                return False, f"section {n or '(null)'} differs"
+            if ha[:5] + ha[6:] != hb[:5] + hb[6:] or (ha[5] != hb[5] and n not in CUID_STR):
+                return False, f"section header of {n} differs"
+            diff_secs.append(n)
+        pos = 0  # the bytes no header or section covers (alignment padding) must be identical too
+        for o, n in sorted(cov) + [(len(xa), 0)]:
+            if o > pos and xa[pos:o] != xb[pos:o]:
+                return False, "bytes outside the sections differ"
+            pos = max(pos, o + n)
+        if not diff_secs:
+            return True, "identical"
+        hdr = {n: (ha, hb) for (n, ha), (_, hb) in zip(sa, sb)}
+        # string tables: string by string; the only differing strings are whole cuid names, mapped one-to-one
+        cmap, delta = {}, {}
+        for n in CUID_STR & set(hdr):
+            ha, hb = hdr[n]
+            la = xa[ha[4]:ha[4] + ha[5]].split(b"\0")
+            lb = xb[hb[4]:hb[4] + hb[5]].split(b"\0")
+            if len(la) != len(lb):
+                return False, f"{n}: string count differs"
+            for p, q in zip(la, lb):
+                if p == q:
+                    continue
+                if not (CUID_NAME.fullmatch(p) and CUID_NAME.fullmatch(q)):
+                    return False, f"{n}: non-cuid string differs ({p[:40]!r} vs {q[:40]!r})"
+                if cmap.setdefault(p, q) != q:
+                    return False, f"{n}: cuid {p!r} maps to two names"
+                if len(p) != len(q) and not allow_length:
+                    return False, f"cuid length differs ({p.decode()} {len(p)} vs {q.decode()} {len(q)} bytes)"
+            delta[n] = hb[5] - ha[5]
+            if delta[n] != sum(len(q) - len(p) for p, q in zip(la, lb)):
+                return False, f"{n}: size change not explained by the cuid"
+        if len(set(cmap.values())) != len(cmap):
+            return False, "two cuids map to one name"
+        if not cmap:
+            return False, "symbol sections differ but no cuid string differs"
+        ren = lambda s: cmap.get(s, s)
+        idx = {i: n for i, (n, _) in enumerate(sa)}
+
+        def syms(x, h, sec):
+            st = sec[h[6]][1]
+            if st[1] != 3 or h[9] != 24:
+                raise ValueError("symbol table link / entsize")
+            out = []
+            for k in range(h[5] // 24):
+                nm, info, oth, shn, val, sz = struct.unpack_from("<IBBHQQ", x, h[4] + 24 * k)
+                out.append((x[st[4] + nm:x.index(b"\0", st[4] + nm)], info, oth, shn, val, sz))
+            return out
+        dyn_names = {}
+        for n in CUID_SYM & set(hdr):
+            ha, hb = hdr[n]
+            ya = [(ren(e[0]),) + e[1:] for e in syms(xa, ha, sa)]
+            yb = syms(xb, hb, sb)
+            if (ya != yb) if n == ".symtab" else (ya[:1] != yb[:1] or sorted(ya) != sorted(yb)):
+                return False, f"{n}: symbols differ beyond the cuid"
+            if n == ".dynsym":
+                dyn_names = {"a": [e[0] for e in syms(xa, ha, sa)], "b": [e[0] for e in yb]}
+        for n in CUID_HASH & set(hdr):
+            if n in diff_secs:
+                if not dyn_names:
+                    return False, f"{n} differs without a .dynsym"
+                ha, hb = hdr[n]
+                if idx.get(ha[6]) != ".dynsym":
+                    return False, f"{n}: not linked to .dynsym"
+                if not (_hash_ok(xa, n, ha[4], ha[5], dyn_names["a"]) and _hash_ok(xb, n, hb[4], hb[5], dyn_names["b"])):
+                    return False, f"{n}: does not index its .dynsym"
+        if ".rela.dyn" in diff_secs:
+            ha, hb = hdr[".rela.dyn"]
+            if ha[9] != 24 or idx.get(ha[6]) != ".dynsym" or not dyn_names:
+                return False, ".rela.dyn: entsize / link"
+            ra = [struct.unpack_from("<QQq", xa, ha[4] + 24 * k) for k in range(ha[5] // 24)]
+            rb = [struct.unpack_from("<QQq", xb, hb[4] + 24 * k) for k in range(hb[5] // 24)]
+            na, nb_ = dyn_names["a"], dyn_names["b"]
+            if any(len(na) <= i >> 32 for _, i, _ in ra) or any(len(nb_) <= i >> 32 for _, i, _ in rb):
+                return False, ".rela.dyn: symbol index out of range"
+            if [(o, i & 0xFFFFFFFF, ren(na[i >> 32]), ad) for o, i, ad in ra] != [(o, i & 0xFFFFFFFF, nb_[i >> 32], ad) for o, i, ad in rb]:
+                return False, ".rela.dyn: relocations differ beyond the cuid symbol index"
+        if delta.get(".dynstr") and ".dynamic" not in diff_secs:
+            return False, ".dynstr size changed but DT_STRSZ did not"
+        if ".dynamic" in diff_secs:
+            ha, hb = hdr[".dynamic"]
+            da_ = [struct.unpack_from("<qQ", xa, ha[4] + 16 * k) for k in range(ha[5] // 16)]
+            db_ = [struct.unpack_from("<qQ", xb, hb[4] + 16 * k) for k in range(hb[5] // 16)]
+            for p, q in zip(da_, db_):
+                if p != q and not (p[0] == q[0] == DT_STRSZ and q[1] - p[1] == delta.get(".dynstr", 0)):
+                    return False, f".dynamic: tag {p[0]} differs"
+        return True, "cuid " + ", ".join(f"{p.decode()}->{q.decode()}" for p, q in sorted(cmap.items()))
+    except (struct.error, ValueError, IndexError) as e:
+        return False, f"unparsable ({type(e).__name__}: {e})"
 
 
 def pe_layout(d):
@@ -210,8 +426,9 @@ def _section_diff(xa, xb, code, stamp):
     return nd, ns, sa, sb, ""
 
 
-def compare_exe(a_path, b_path, data=None):
-    """Code objects and host code of one exe pair."""
+def compare_exe(a_path, b_path, data=None, allow_cuid_length=True):
+    """Code objects and host code of one exe pair. code_objects.result: identical / identical-except-cuid (every differing
+    object passes cuid_equivalent: work-equivalent for ADR-0003) / different / missing."""
     da = open(a_path, "rb").read()
     db_ = open(b_path, "rb").read()
     oa, ob = amdgpu_objects(da), amdgpu_objects(db_)
@@ -227,10 +444,17 @@ def compare_exe(a_path, b_path, data=None):
                      "same": x["sha256"] == y["sha256"], "sha_a": x["sha256"], "sha_b": y["sha256"], "size_a": x["size"],
                      "size_b": y["size"], "sections": len(x["sections"]), "differing_sections": dif,
                      "header_only": x["sha256"] != y["sha256"] and not dif})
+        if objs[-1]["same"] is False and set(dif) <= CUID_SECTIONS:
+            okc, why = cuid_equivalent(da[x["offset"]:x["offset"] + x["size"]], db_[y["offset"]:y["offset"] + y["size"]], allow_cuid_length)
+            objs[-1].update(cuid_only=okc and why != "identical", cuid=why)  # sha differs: "identical" would be a parser gap
     if not oa and not ob:
         co = "missing"  # nothing to compare: never "identical" by default
+    elif len(oa) == len(ob) and all(o["same"] for o in objs):
+        co = "identical"
+    elif len(oa) == len(ob) and all(o["same"] or o.get("cuid_only") for o in objs):
+        co = "identical-except-cuid"
     else:
-        co = "identical" if len(oa) == len(ob) and all(o["same"] for o in objs) else "different"
+        co = "different"
     # host: PE sections with the code-object byte ranges and the build-stamp fields left out of the byte count
     host = {"result": "identical" if da == db_ else None, "sections": [], "stamp_bytes": 0, "unexplained_bytes": 0,
             "strings_only_a": [], "strings_only_b": [], "text_same": None}
@@ -276,7 +500,8 @@ def compare_exe(a_path, b_path, data=None):
     host["text_same"] = True if da == db_ else (bool(txt) and txt[0]["same"]) if txt else None
     return {"name": os.path.basename(b_path).lower(), "a": {"path": os.path.abspath(a_path), "sha256": sha(da), "size": len(da)},
             "b": {"path": os.path.abspath(b_path), "sha256": sha(db_), "size": len(db_)},
-            "code_objects": {"result": co, "n_a": len(oa), "n_b": len(ob), "objects": objs}, "host": host}
+            "code_objects": {"result": co, "n_a": len(oa), "n_b": len(ob), "objects": objs, "allow_cuid_length": allow_cuid_length},
+            "host": host}
 
 
 # ---------------------------------------------------------------- launch tables
@@ -521,8 +746,9 @@ def _evidence(paths):
 
 
 def report(a_exes, b_exes, launch=None, golden_a=None, golden_b=None, golden_out=(None, None), server=False, ignore=(),
-           db=None, allow_unbound=False, git=None, extra_launch=()):
-    """a_exes / b_exes: exe paths, paired by base name. launch: (a_src, b_src) or None; extra_launch: more pairs."""
+           db=None, allow_unbound=False, git=None, extra_launch=(), allow_cuid_length=True):
+    """a_exes / b_exes: exe paths, paired by base name. launch: (a_src, b_src) or None; extra_launch: more pairs.
+    checks.code_objects: identical / identical-except-cuid (both count as equal for the verdict) / different / missing."""
     pa = {os.path.basename(p).lower(): p for p in a_exes}
     pb = {os.path.basename(p).lower(): p for p in b_exes}
     reasons, exes = [], []
@@ -532,16 +758,18 @@ def report(a_exes, b_exes, launch=None, golden_a=None, golden_b=None, golden_out
             reasons.append(f"code objects: {n} " + (f"file not found: {gone}" if gone else f"only on side {'A' if n in pa else 'B'}"))
             exes.append({"name": n, "code_objects": {"result": "missing"}, "host": {"result": "missing"}})
             continue
-        exes.append(compare_exe(pa[n], pb[n]))
+        exes.append(compare_exe(pa[n], pb[n], allow_cuid_length=allow_cuid_length))
     sha_a = {e["name"]: e["a"]["sha256"] for e in exes if "a" in e}
     sha_b = {e["name"]: e["b"]["sha256"] for e in exes if "b" in e}
     cos = [e["code_objects"]["result"] for e in exes]
-    co = "missing" if not exes or "missing" in cos and "different" not in cos else "different" if "different" in cos else "identical"
+    co = ("missing" if not exes or "missing" in cos and "different" not in cos else "different" if "different" in cos else
+          "identical-except-cuid" if "identical-except-cuid" in cos else "identical")
     for e in exes:
         if e["code_objects"]["result"] == "different":
-            bad = [o for o in e["code_objects"]["objects"] if not o["same"]]
+            bad = [o for o in e["code_objects"]["objects"] if not o["same"] and not o.get("cuid_only")]
             reasons.append(f"code objects: {e['name']} {len(bad)} object(s) differ (n {e['code_objects']['n_a']} vs {e['code_objects']['n_b']}): "
-                           + ", ".join(f"#{o['index']} {o['target']} {o.get('differing_sections') or o.get('only') or 'header'}" for o in bad[:4]))
+                           + ", ".join(f"#{o['index']} {o['target']} {o.get('differing_sections') or o.get('only') or 'header'}"
+                                       + (f" (not cuid-only: {o['cuid']})" if o.get("cuid") else "") for o in bad[:4]))
         elif e["code_objects"]["result"] == "missing" and "a" in e:
             reasons.append(f"code objects: {e['name']} has no embedded AMDGPU code object")
     pairs = ([launch] if launch else []) + list(extra_launch)
@@ -559,7 +787,7 @@ def report(a_exes, b_exes, launch=None, golden_a=None, golden_b=None, golden_out
     hosts = [e["host"]["result"] for e in exes]
     checks["host_code"] = ("missing" if not hosts or "missing" in hosts else "differs" if "differs" in hosts else
                            "stamp_only" if "stamp_only" in hosts else "identical")
-    req = [checks["code_objects"], checks["launch_sequence"], checks["golden"]]
+    req = [checks["code_objects"], checks["launch_sequence"], checks["golden"]]  # identical-except-cuid passes (arch025-weq)
     verdict = "NOT_EQUIVALENT" if "different" in req else "INCOMPLETE" if "missing" in req else "EQUIVALENT"
     ev = []
     for x in ls:
@@ -567,7 +795,9 @@ def report(a_exes, b_exes, launch=None, golden_a=None, golden_b=None, golden_out
             ev += [p for p, _e, _m in logs]
     evidence = _evidence(list(golden_a or []) + list(golden_b or []) + ev)
     rep = {"format": FORMAT, "tool": "tools/impact/work_equal.py", "created": time.strftime("%Y-%m-%dT%H:%M:%S"),
-           "rule": "ADR-0003 decision 3: code objects + launch sequence + golden bitwise identical (host code: information)",
+           "rule": "ADR-0003 decision 3: code objects + launch sequence + golden bitwise identical (host code: information); "
+                   "code objects that differ only in the per-TU __hip_cuid_<hex> symbol count as identical (identical-except-cuid"
+                   + (", cuid length changes allowed" if allow_cuid_length else "") + ")",
            "verdict": verdict, "exit": {"EQUIVALENT": 0, "NOT_EQUIVALENT": 1, "INCOMPLETE": 2}[verdict], "checks": checks,
            "reasons": reasons, "a": {"exes": sha_a}, "b": {"exes": sha_b}, "exes": exes, "launch": ls, "golden": gl,
            "evidence": evidence}
@@ -584,7 +814,7 @@ def summary_lines(rep):
             yield f"  {e['name']}: only on one side"; continue
         co, h = e["code_objects"], e["host"]
         yield (f"  {e['name']}: A {e['a']['sha256'][:16]} B {e['b']['sha256'][:16]}; code objects {co['result']} "
-               f"({co['n_a']}/{co['n_b']}: {', '.join(o['target'] + ('=' if o['same'] else '!=') for o in co['objects'])}); "
+               f"({co['n_a']}/{co['n_b']}: {', '.join(o['target'] + ('=' if o['same'] else '=~cuid' if o.get('cuid_only') else '!=') for o in co['objects'])}); "
                f"host {h['result']} (.text {'same' if h['text_same'] else 'differs' if h['text_same'] is False else '?'}, "
                f"unexplained bytes {h['unexplained_bytes']}, stamp bytes {h['stamp_bytes']})")
         if h.get("strings_only_a") or h.get("strings_only_b"):
@@ -624,6 +854,12 @@ def main(argv=None):
     c.add_argument("--repo")
     c.add_argument("--a-commit")
     c.add_argument("--b-commit")
+    # main session 2026-10-25: on by default. clang prints the cuid with utohexstr, which drops leading zeros, so about
+    # 1 TU in 16 gets a 15-digit cuid and cross-worktree pairs differ in length at random (real pair: obj #2, 27 vs 26 B);
+    # the length-aware check still requires sh_size, DT_STRSZ and every st_name shift to equal the length difference.
+    c.add_argument("--strict-cuid-length", dest="allow_cuid_length", action="store_false",
+                   help="treat a __hip_cuid_<hex> of another length as a difference (default: accepted)")
+    c.add_argument("--allow-cuid-length", dest="allow_cuid_length", action="store_true", help=argparse.SUPPRESS)
     c.add_argument("-o")
     s = sub.add_parser("scan")
     s.add_argument("exe")
@@ -643,7 +879,7 @@ def main(argv=None):
     pairs = list(zip(a.a_launch, a.b_launch))
     git = (a.repo, a.a_commit, a.b_commit) if a.repo and a.a_commit and a.b_commit else None
     rep = report(a.a_exe, a.b_exe, pairs[0] if pairs else None, a.a_golden, a.b_golden, (a.a_golden_out, a.b_golden_out),
-                 a.server, ign, a.db, a.allow_unbound_launch, git, pairs[1:])
+                 a.server, ign, a.db, a.allow_unbound_launch, git, pairs[1:], a.allow_cuid_length)
     for line in summary_lines(rep):
         print(line)
     if a.o:

@@ -1292,6 +1292,74 @@ void suitePool() {
 // ---------------------------------------------------------------------------
 // suite tier: host tiers restore exactly (RAM after eviction, SSD after restart)
 
+// arch025-k2warn (bug:k2-8060s-p1): a restart server sizes its RAM tier once at startup from the RAM available then
+// ("adjusted: WHIRL_KV_RAM_MB 8192 -> X MiB (...)"). When X is smaller than an SSD entry, that entry cannot be read
+// back (the server logs "kv tier: SSD entry of N tok (E MiB) is larger than the RAM tier (R MiB) ...") and the
+// request is a cold prefill: the restart checks then fail for a reason in the host's free RAM, not in WHIRL.
+// Returns "" (conclusive) or the reason. max_entry_mib: the largest SSD cache file before the restart (MiB, rounded
+// up; a file that borrows blocks of another one is smaller than its entry, which the refused-restore line covers).
+std::string tierRamInconclusive(const std::vector<std::string>& lines, std::uint64_t max_entry_mib) {
+    static const std::regex adj(R"(adjusted: (?:WHIRL_KV_RAM_MB|--kv-ram-mb) \d+ -> (\d+) MiB)");
+    static const std::regex refused(R"(kv tier: SSD entry of \d+ tok \(([0-9.]+) MiB\) is larger than the RAM tier \(([0-9.]+) MiB\))");
+    std::size_t n_ref = 0;
+    std::string first_ref;
+    std::optional<std::uint64_t> tier_mib;
+    for (const auto& l : lines) {
+        std::smatch m;
+        if (std::regex_search(l, m, refused)) {
+            if (n_ref == 0) first_ref = std::format("entry {} MiB > RAM tier {} MiB", m[1].str(), m[2].str());
+            ++n_ref;
+        } else if (!tier_mib && std::regex_search(l, m, adj)) {
+            tier_mib = std::stoull(m[1].str());
+        }
+    }
+    if (n_ref > 0) return std::format("{} SSD restore(s) refused by the restart server ({})", n_ref, first_ref);
+    if (tier_mib && *tier_mib < max_entry_mib)
+        return std::format("the restart server's RAM tier was lowered at startup to {} MiB (adjusted: line), smaller than "
+                           "the largest SSD entry ({} MiB)",
+                           *tier_mib, max_entry_mib);
+    return "";
+}
+
+// One check of a restart run, held until the run is judged.
+struct PendCheck {
+    std::string name;
+    bool ok;
+    std::string detail;
+};
+
+// arch025-k2warn: runs `attempt` (it starts the restart server, fills `checks`, copies the server's log into `lines`);
+// all checks pass -> they are counted as they are; a check failed and tierRamInconclusive gives a reason ->
+// INCONCLUSIVE and one re-run; a second INCONCLUSIVE counts the failed checks as FAIL with the reason.
+void restartChecksRamRetry(const std::string& what, std::uint64_t max_entry_mib,
+                           const std::function<void(int, std::vector<PendCheck>&, std::vector<std::string>&)>& attempt) {
+    for (int a = 0; a < 2; ++a) {
+        std::vector<PendCheck> checks;
+        std::vector<std::string> lines;
+        attempt(a, checks, lines);
+        const bool all_ok = std::all_of(checks.begin(), checks.end(), [](const PendCheck& c) { return c.ok; });
+        const std::string why = all_ok ? std::string() : tierRamInconclusive(lines, max_entry_mib);
+        if (!why.empty() && a == 0) {
+            std::printf("  [INCONCLUSIVE] %s: %s; re-running once\n", what.c_str(), why.c_str());
+            std::fflush(stdout);
+            continue;
+        }
+        for (const auto& c : checks)
+            check(c.name, c.ok,
+                  why.empty() || c.ok ? c.detail : std::format("{}; INCONCLUSIVE twice, counted as FAIL: {}", c.detail, why));
+        return;
+    }
+}
+
+std::uint64_t maxFileMiB(const std::string& dir) {
+    std::uint64_t mx = 0;
+    std::error_code ec;
+    if (fs::exists(widen(dir), ec))
+        for (const auto& e : fs::directory_iterator(widen(dir), ec))
+            if (e.is_regular_file(ec)) mx = std::max<std::uint64_t>(mx, e.file_size(ec));
+    return (mx + (1ull << 20) - 1) >> 20;
+}
+
 void tierMode(const std::string& mode) {
     const bool p1 = mode == "p1";
     const std::vector<std::string> args = p1 ? std::vector<std::string>{"--parallel", "1"} : std::vector<std::string>{"--parallel", "4"};
@@ -1373,24 +1441,30 @@ void tierMode(const std::string& mode) {
     check(std::format("tier {}: entries on SSD after the restart (one per session)", mode), files >= S.size(),
           std::format("{} files, {} sessions", files, S.size()));
     std::map<std::string, ChatResult> after;
-    {
-        ServerLease s("tier_" + mode + "_restart", args, {{"WHIRL_KV_SSD_DIR", ssd}}, false);
+    // arch025-k2warn: a restart server whose RAM tier came out smaller than the largest SSD entry (low free RAM at
+    // its start) is INCONCLUSIVE and runs once more (restartChecksRamRetry), not a FAIL
+    const std::uint64_t max_entry_mib = maxFileMiB(ssd);
+    restartChecksRamRetry(std::format("tier {}: restart", mode), max_entry_mib,
+                          [&](int a, std::vector<PendCheck>& ck, std::vector<std::string>& lines) {
+        ServerLease s("tier_" + mode + "_restart" + (a > 0 ? "_rerun" : ""), args, {{"WHIRL_KV_SSD_DIR", ssd}}, false);
         for (const auto& ss : S) {
             auto b = chat(t2msg(ss, t1[ss.name]), greedy(96) + thinkKw(ss.think));
             after[ss.name] = b;
             const auto& rb = ref[ss.name].second;
-            check(std::format("tier {}: {} turn 2 after restart (SSD restore) == never-evicted", mode, ss.name),
-                  sameContent(b, rb) && b.reasoning == rb.reasoning,
-                  std::format("cached {} (ref {}), prompt {}", b.cached, rb.cached, b.prompt));
+            ck.push_back({std::format("tier {}: {} turn 2 after restart (SSD restore) == never-evicted", mode, ss.name),
+                          sameContent(b, rb) && b.reasoning == rb.reasoning,
+                          std::format("cached {} (ref {}), prompt {}", b.cached, rb.cached, b.prompt)});
             // CLOSE-COV: the content check alone passes on a cold prefill too; the restored prefix must cover at
             // least what the never-evicted run reused (its turn 1), which only the session's SSD entry can give
-            check(std::format("tier {}: {} turn 2 after restart restored from SSD (cached >= never-evicted)", mode, ss.name),
-                  b.cached > 0 && b.cached >= rb.cached, std::format("cached {} (ref {}), prompt {}", b.cached, rb.cached, b.prompt));
+            ck.push_back({std::format("tier {}: {} turn 2 after restart restored from SSD (cached >= never-evicted)", mode, ss.name),
+                          b.cached > 0 && b.cached >= rb.cached,
+                          std::format("cached {} (ref {}), prompt {}", b.cached, rb.cached, b.prompt)});
         }
         const std::size_t n_ssd = s->logCount(R"(kv tier: restored \d+ tok from SSD)");
-        check(std::format("tier {}: SSD restores logged (one per session)", mode), n_ssd >= S.size(),
-              std::format("{} SSD restores, {} sessions", n_ssd, S.size()));
-    }
+        ck.push_back({std::format("tier {}: SSD restores logged (one per session)", mode), n_ssd >= S.size(),
+                      std::format("{} SSD restores, {} sessions", n_ssd, S.size())});
+        lines = s->logLines();
+    });
     std::map<std::string, ChatResult> fresh;
     if (p1) {
         // CACHEBAL: the SSD-restored state against a from-scratch prefill of the same prompt, compared by the
@@ -1399,23 +1473,27 @@ void tierMode(const std::string& mode) {
         // == no prefix cache" in the form that holds by design: the restored history is a gen-end reuse, its KV
         // and DeltaNet state came from the decode / verify kernels, so it is numerically equivalent to a cold
         // prefill, not bit-identical (kv-and-caching.md section 5).
-        ServerLease s("tier_p1_verify", args, {{"WHIRL_KV_SSD_DIR", ssd}, {"WHIRL_PREFIX_CACHE_VERIFY", "1"}}, false);
+        restartChecksRamRetry("tier p1: verify run", max_entry_mib, [&](int a, std::vector<PendCheck>& ck, std::vector<std::string>& lines) {
+        ServerLease s(std::string("tier_p1_verify") + (a > 0 ? "_rerun" : ""), args,
+                      {{"WHIRL_KV_SSD_DIR", ssd}, {"WHIRL_PREFIX_CACHE_VERIFY", "1"}}, false);
         for (const auto& ss : S) fresh[ss.name] = chat(t2msg(ss, t1[ss.name]), greedy(96) + thinkKw(ss.think));
         std::vector<CacheVerify> v;
         for (const auto& l : s->logLines())
             if (auto c = parseCacheVerify(l)) v.push_back(*c);
         const std::size_t n_ssd = s->logCount(R"(kv tier: restored \d+ tok from SSD)");
-        check("tier p1: verify run: every session restored from SSD, one verify line each", n_ssd >= S.size() && v.size() == S.size(),
-              std::format("{} SSD restores, {} verify lines, {} sessions", n_ssd, v.size(), S.size()));
+        ck.push_back({"tier p1: verify run: every session restored from SSD, one verify line each", n_ssd >= S.size() && v.size() == S.size(),
+                      std::format("{} SSD restores, {} verify lines, {} sessions", n_ssd, v.size(), S.size())});
         // precise (COLD-RESUME): bitwise, max abs diff 0; balance / fast: numerically equivalent (KL bound, same top-1)
         const bool precise_v = serversPrecise();
         for (std::size_t i = 0; i < S.size() && i < v.size(); ++i)
-            check(precise_v ? std::format("tier p1: {} turn 2 SSD-restored state == from-scratch prefill, bitwise (precise)", S[i].name)
-                            : std::format("tier p1: {} turn 2 SSD-restored state == from-scratch prefill (KL <= {:.0e}, same top-1)",
-                                          S[i].name, kCacheVerifyMaxKl),
-                  precise_v ? cacheVerifyBitwise(v[i]) : cacheVerifyOk(v[i]),
-                  std::format("max abs diff {:.4f}, KL {:.2e}, top1 {}, differing logits {}", v[i].maxd, v[i].kl,
-                              v[i].top1_same ? "same" : "DIFFERENT", v[i].ndiff));
+            ck.push_back({precise_v ? std::format("tier p1: {} turn 2 SSD-restored state == from-scratch prefill, bitwise (precise)", S[i].name)
+                                    : std::format("tier p1: {} turn 2 SSD-restored state == from-scratch prefill (KL <= {:.0e}, same top-1)",
+                                                  S[i].name, kCacheVerifyMaxKl),
+                          precise_v ? cacheVerifyBitwise(v[i]) : cacheVerifyOk(v[i]),
+                          std::format("max abs diff {:.4f}, KL {:.2e}, top1 {}, differing logits {}", v[i].maxd, v[i].kl,
+                                      v[i].top1_same ? "same" : "DIFFERENT", v[i].ndiff)});
+        lines = s->logLines();
+        });
     }
     fs::remove_all(widen(ssd), ec);
     if (p1) {
@@ -2494,6 +2572,58 @@ int selfTest() {
         check("selftest: mt_cache_precise verify, top-1 different -> not ok", !mtPreciseVerifyOk({flip}, 1, vd), vd);
         check("selftest: mt_cache_precise verify, a hit without a verify line -> not ok", !mtPreciseVerifyOk({exact}, 2, vd), vd);
         check("selftest: mt_cache_precise verify, no hits at all -> not ok (tests nothing)", !mtPreciseVerifyOk({}, 0, vd), vd);
+    }
+    {
+        // arch025-k2warn: restart RAM tier vs the largest SSD entry (the 8060S p1 case: 8192 -> 512 MiB, entry 801 MiB)
+        const std::string adj512 = "2026-10-25 16:47:40.100 W adjusted: WHIRL_KV_RAM_MB 8192 -> 512 MiB (the RAM tier is pinned "
+                                   "host memory; more than half of the 1954 MiB of RAM available now would make the system page, "
+                                   "so it is lowered to half)";
+        const std::string adj6144 = "2026-10-25 16:48:22.100 W adjusted: WHIRL_KV_RAM_MB 8192 -> 6144 MiB (the RAM tier is pinned "
+                                    "host memory; ...)";
+        const std::string refused = "2026-10-25 16:47:50.000 W req 3 | slot 0 | kv tier: SSD entry of 5615 tok (801.1 MiB) is "
+                                    "larger than the RAM tier (512.0 MiB) and cannot be read back; prefilling from scratch";
+        const std::string other = "2026-10-25 16:47:50.000 I req 3 | slot 0 | kv tier: restored 5615 tok from SSD in 120.0 ms (6.70 GB/s)";
+        check("selftest: tier restart, adjusted 512 MiB < entry 802 MiB -> INCONCLUSIVE",
+              tierRamInconclusive({adj512, other}, 802).find("lowered at startup to 512 MiB") != std::string::npos,
+              tierRamInconclusive({adj512, other}, 802));
+        check("selftest: tier restart, adjusted 6144 MiB >= entry 802 MiB -> conclusive", tierRamInconclusive({adj6144, other}, 802).empty());
+        check("selftest: tier restart, no adjusted line, no refused line -> conclusive", tierRamInconclusive({other}, 802).empty());
+        check("selftest: tier restart, refused-restore W line -> INCONCLUSIVE (with both sizes)",
+              tierRamInconclusive({refused}, 0).find("1 SSD restore(s) refused by the restart server (entry 801.1 MiB > RAM tier 512.0 MiB)") !=
+                  std::string::npos,
+              tierRamInconclusive({refused}, 0));
+        int runs = 0, inc_fail = 0;
+        const int f0 = g_fail, p0 = g_pass;
+        // retry: first attempt fails with a small tier, the second passes -> PASS counted once, no FAIL
+        restartChecksRamRetry("selftest retry", 802, [&](int a, std::vector<PendCheck>& ck, std::vector<std::string>& l) {
+            ++runs;
+            ck.push_back({"selftest: (retry probe)", a > 0, ""});
+            l = {a == 0 ? adj512 : adj6144};
+        });
+        const bool retry_ok = runs == 2 && g_fail == f0 && g_pass == p0 + 1;
+        // twice INCONCLUSIVE -> counted as FAIL (then taken back: this is the selftest)
+        runs = 0;
+        restartChecksRamRetry("selftest retry twice", 802, [&](int, std::vector<PendCheck>& ck, std::vector<std::string>& l) {
+            ++runs;
+            ck.push_back({"selftest: (twice-inconclusive probe, expected FAIL line)", false, ""});
+            l = {adj512};
+        });
+        inc_fail = g_fail - f0;
+        const bool twice_ok = runs == 2 && inc_fail == 1;
+        // a plain failure with enough RAM: no re-run, FAIL
+        runs = 0;
+        restartChecksRamRetry("selftest no retry", 802, [&](int, std::vector<PendCheck>& ck, std::vector<std::string>& l) {
+            ++runs;
+            ck.push_back({"selftest: (real-failure probe, expected FAIL line)", false, ""});
+            l = {adj6144};
+        });
+        const bool plain_ok = runs == 1 && g_fail - f0 == 2;
+        g_fail = f0;
+        g_pass = p0;
+        while (g_failed.size() > 0 && g_failed.back().find("probe, expected FAIL line") != std::string::npos) g_failed.pop_back();
+        check("selftest: tier restart retry: INCONCLUSIVE then PASS -> 2 runs, PASS", retry_ok);
+        check("selftest: tier restart retry: INCONCLUSIVE twice -> FAIL with the reason", twice_ok);
+        check("selftest: tier restart retry: a failure with enough RAM -> no re-run, FAIL", plain_ok);
     }
     // suite golden: its prompts must never change silently (the expected hashes come from an independent Python
     // replica of goldenDoc / fnv64, ARCH-1 2026-10-20); a change here invalidates every srv.* golden reference

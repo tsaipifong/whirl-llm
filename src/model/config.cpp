@@ -3,6 +3,7 @@
 // Reimplements the WHIRL Zig research prototype's model/qwen35.zig (Config, tables, tuneBucket).
 
 #include "whirl/model.h"
+#include "config/env_snapshot.h"
 
 #include <algorithm>
 #include <array>
@@ -13,24 +14,7 @@
 
 namespace whirl {
 
-std::optional<std::string> envGet(std::string_view name) {
-    const std::string key = std::string("WHIRL_") + std::string(name);
-    // _dupenv_s keeps MSVC quiet about getenv
-    char* buf = nullptr;
-    std::size_t len = 0;
-    if (_dupenv_s(&buf, &len, key.c_str()) == 0 && buf != nullptr) {
-        std::string v(buf);
-        std::free(buf);
-        return v;
-    }
-    return std::nullopt;
-}
-
-bool envFlag(std::string_view name, bool def) {
-    auto v = envGet(name);
-    if (!v) return def;
-    return *v != "0";
-}
+// envGet / envFlag: src/config/env_snapshot.cpp (arch025-N1)
 
 }  // namespace whirl
 
@@ -315,9 +299,10 @@ void parseGemvWHead(Model& m, std::string_view list) {
 }
 
 void applyGemvEnv(Model& m) {
-    if (auto v = envGet("GEMV_R")) parseGemvR(m, *v);
-    if (auto v = envGet("GEMV_W")) parseGemvW(m, *v);
-    if (auto v = envGet("GEMV_WH")) parseGemvWHead(m, *v);
+    const auto env = whirl::config::snapshotOf(m);  // the load's (arch025-N1)
+    if (const auto& v = env->gemv_r) parseGemvR(m, *v);
+    if (const auto& v = env->gemv_w) parseGemvW(m, *v);
+    if (const auto& v = env->gemv_wh) parseGemvWHead(m, *v);
 }
 
 MtpDefaults mtpDefaults(bool moe, hip::Arch arch) {

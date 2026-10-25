@@ -52,6 +52,10 @@
 #include <unordered_map>
 #include <vector>
 
+namespace whirl::config {
+class EnvSnapshot;  // src/config/env_snapshot.h (arch025-N1)
+}  // namespace whirl::config
+
 namespace whirl {
 
 // Environment variable lookup: WHIRL_<name>.
@@ -360,6 +364,9 @@ struct LoadOptions {
     // Ignored when the code object lacks the DFlash2 kernels (Model::mtp_skipped stays false):
     // the caller then falls back to the MTP drafts.
     bool no_mtp = false;
+    // The load's WHIRL_* environment (arch025-N1, src/config/env_snapshot.h). Null: Model::load reads one at its
+    // start. Model::load keeps it (Model::env_snap) for loadOrTune, applyGemvEnv and the selftest checks.
+    std::shared_ptr<const whirl::config::EnvSnapshot> env;
 };
 
 // VRAM Model::load will take, estimated from the GGUF header before any
@@ -581,6 +588,8 @@ public:
     whirl::numerics::Plan num_plan;
     whirl::relax::Params relax;  // numerics item relaxacc (fast): relaxed draft acceptance
     std::string load_note;
+    // the load's environment (LoadOptions::env; null for a Model that did not come from Model::load)
+    std::shared_ptr<const whirl::config::EnvSnapshot> env_snap;
     // the KV format and why (fixed at load: numerics::chooseKv)
     whirl::numerics::KvChoice kv_choice;
     DevPtr w16 = 0;
