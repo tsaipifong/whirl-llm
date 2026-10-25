@@ -515,7 +515,11 @@ int serveMain(int argc, char** argv, const char* program) {
         else if (auto v7 = argValue(args, i, "--log-file")) opt.log_file = *v7;
         else if (auto v8 = argValue(args, i, "--alias")) opt.alias = *v8;
         else if (auto v9 = argValue(args, i, "--kv-ram-mb")) opt.kv_ram_mb = parseNum<std::uint64_t>(*v9, "--kv-ram-mb");
-        else if (auto v10 = argValue(args, i, "--kv-ssd-dir")) opt.kv_ssd_dir = *v10;
+        else if (auto v10 = argValue(args, i, "--kv-ssd-dir")) {
+            // bug-emptyrootpaths: "" + "\\whirl.lock" was the drive root (as llama.cpp --slot-save-path: refused)
+            if (v10->empty()) die("--kv-ssd-dir is empty (give a folder; to turn the SSD tier off use --kv-ssd-gb 0 or --kv-ssd-mode off)");
+            opt.kv_ssd_dir = *v10;
+        }
         else if (auto v11 = argValue(args, i, "--kv-ssd-gb")) opt.kv_ssd_gb = parseNum<std::uint64_t>(*v11, "--kv-ssd-gb");
         else if (auto vd = argValue(args, i, "--kv-ssd-delay")) opt.kv_ssd_delay = parseNum<std::uint64_t>(*vd, "--kv-ssd-delay");
         else if (auto vm = argValue(args, i, "--kv-ssd-mode")) {
@@ -560,6 +564,11 @@ int serveMain(int argc, char** argv, const char* program) {
         die(ex.what());
     }
     if (opt.parallel < 1 || opt.parallel > gdn_max_seg) die("--parallel must be 1..16");
+    // bug-emptyrootpaths: WHIRL_KV_SSD_DIR = --kv-ssd-dir (docs/usage.md), so an empty value is refused the same way,
+    // before the model load (read again at the tier setup below; --kv-ssd-dir wins there as before)
+    if (!opt.kv_ssd_dir)
+        if (auto v = env("KV_SSD_DIR"); v && v->empty())
+            die("WHIRL_KV_SSD_DIR is empty (give a folder or remove the variable; to turn the SSD tier off use --kv-ssd-gb 0 or --kv-ssd-mode off)");
     // the model file and the port are checked before the (long) model load
     try {
         app::requireModelFile(opt.path);
@@ -570,6 +579,7 @@ int serveMain(int argc, char** argv, const char* program) {
     }
 
     // arch025 PL1: LOCALAPPDATA (the CRT narrow value, as std::getenv) and the default paths are platform::paths
+    // (bug-emptyrootpaths: set but empty is nullopt = unset: log in the working folder, no default SSD folder)
     const std::optional<std::string> lad_v = platform::paths::localAppData();
     const char* lad = lad_v ? lad_v->c_str() : nullptr;
     const std::string log_path = opt.log_file ? *opt.log_file : platform::paths::serverLogPath(lad_v);
