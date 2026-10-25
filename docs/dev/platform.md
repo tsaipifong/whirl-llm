@@ -78,12 +78,17 @@ longer name it).
 PL1 (2026-10-26) filled the four small concerns. Each function wraps exactly the call it replaced; the logic stays
 with the caller.
 - `env::get(name)` is the one `_dupenv_s` read: `envGet` / `EnvSnapshot::capture` (src/config), the VRAM cap
-  (src/common/vram_limit.cpp), the kernel table switches (src/kernels_host/kernels_abi.cpp) and LOCALAPPDATA.
+  (src/common/vram_limit.cpp), the kernel table switches (src/kernels_host/kernels_abi.cpp); LOCALAPPDATA moved to `env::getUtf8` (below).
   `env::set` is the one `_putenv_s` of the product (GPU_RESOURCE_CACHE_SIZE, server_main.cpp). `env::block()`
   returns the raw `GetEnvironmentStringsW` entries in the OS order; the SSD fingerprint (src/cache/fingerprint.cpp)
   still converts (`narrow`), filters and sorts them itself, so the fingerprint is unchanged.
-- `paths::localAppData()` reads the narrow LOCALAPPDATA (not `SHGetKnownFolderPath`, not `_wgetenv`: v0.2.4 did
-  not, and a changed tune or kvcache path would re-tune / miss the SSD tier). The path builders (`whirlDir`,
+- `paths::localAppData()` reads LOCALAPPDATA from the CRT's wide table and converts it to UTF-8
+  (`env::getUtf8`, `_wdupenv_s`; bug-lappdata 2026-10-26, as llama.cpp's `common_get_path_from_env` with `_wgetenv`).
+  PL1 kept the narrow read, which is the ANSI code page: every caller hands the text to `widen()` (UTF-8), so a
+  non-ASCII user folder was mangled in any program without the UTF-8 activeCodePage manifest (whirl.exe and
+  whirl-server.exe have it, so on Windows 10 1903+ their paths do not change). ASCII values give the same bytes as
+  before (child-process test `testLocalAppDataChild`). Still not `SHGetKnownFolderPath`: tests and users point
+  LOCALAPPDATA elsewhere. The path builders (`whirlDir`,
   `serverLogPath`, `kvCacheDir`, `tuneCachePath`, `tuneReadPaths4`, `tuneReadPathsOld`) are pure string functions,
   pinned by `testPlatformPaths` with the literal v0.2.4 strings. `declarePinned` (kv_tier.cpp) still builds its own
   `pinned` folder from the pointer it is given.

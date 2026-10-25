@@ -4272,6 +4272,14 @@ static void testPlatformEnv() {
     CHECK(pe::set("WHIRL_PL1U_X", "v=1") == 0);
     CHECK(pe::get("WHIRL_PL1U_X") == std::optional<std::string>("v=1"));
     CHECK(pe::get("whirl_pl1u_x") == std::optional<std::string>("v=1"));  // names are case-insensitive on Windows
+    // bug-lappdata: getUtf8 is get for ASCII values (set, any case, unset below) and the UTF-8 of the wide value else
+    CHECK(pe::getUtf8("WHIRL_PL1U_X") == std::optional<std::string>("v=1"));
+    CHECK(pe::getUtf8("whirl_pl1u_x") == std::optional<std::string>("v=1"));
+    CHECK(!pe::getUtf8("WHIRL_PL1U_NONE"));
+    CHECK(_wputenv_s(L"WHIRL_PL1U_W", L"a蔡é\U0001F600") == 0);
+    CHECK(pe::getUtf8("WHIRL_PL1U_W") == std::optional<std::string>("a\xe8\x94\xa1\xc3\xa9\xf0\x9f\x98\x80"));
+    CHECK(_wputenv_s(L"WHIRL_PL1U_W", L"") == 0);
+    CHECK(!pe::getUtf8("WHIRL_PL1U_W"));
     // block(): the same entries in the same order as the v0.2.4 GetEnvironmentStringsW loop
     std::vector<std::wstring> ref;
     if (wchar_t* blk = GetEnvironmentStringsW()) {
