@@ -18,6 +18,7 @@ if(WHIRL_WITH_HIP)
     VERBATIM)
 
   add_library(whirl_model STATIC
+    ${CMAKE_SOURCE_DIR}/src/config/env_snapshot.cpp
     ${CMAKE_SOURCE_DIR}/src/model/config.cpp
     ${CMAKE_SOURCE_DIR}/src/model/kernels.cpp
     ${CMAKE_SOURCE_DIR}/src/model/loader.cpp

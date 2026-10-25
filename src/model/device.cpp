@@ -6,6 +6,7 @@
 
 #include "whirl/model.h"
 #include "whirl/gpu_select.h"
+#include "config/env_snapshot.h"
 
 #include <cstdio>
 #include <string>
@@ -23,14 +24,14 @@ namespace {
 // restriction every WHIRL process sees its GPU as index 0), held until the process exits. A second WHIRL
 // process on the same GPU waits (reporting every 30 s, up to WHIRL_GPU_WAIT seconds, default 1800).
 // WHIRL_GPU_SHARE=1 skips it.
-void lockGpu(const gpusel::GpuRecord& g) {
-    if (auto v = envGet("GPU_SHARE"); v && !v->empty() && (*v)[0] != '0') return;
+void lockGpu(const gpusel::GpuRecord& g, const whirl::config::EnvSnapshot& env) {
+    if (const auto& v = env.gpu_share; v && !v->empty() && (*v)[0] != '0') return;
     const std::string n = gpusel::lockName(g);
     const std::wstring name(n.begin(), n.end());
     HANDLE h = CreateMutexW(nullptr, FALSE, name.c_str());
     if (!h) return;
     unsigned limit_s = 1800;
-    if (auto v = envGet("GPU_WAIT")) {
+    if (const auto& v = env.gpu_wait) {
         try {
             limit_s = static_cast<unsigned>(std::stoul(*v));
         } catch (...) {
@@ -58,17 +59,20 @@ const gpusel::Restriction& restrictDevice(std::string_view spec) {
 }
 
 int pickDevice(std::string_view spec_arg) {
+    // arch025-N1: read once per call (before any load: there is no LoadOptions yet); gpusel writes only
+    // HIP_VISIBLE_DEVICES, never a WHIRL_* name, so the values are the ones the reads below saw before
+    const whirl::config::EnvSnapshot env = whirl::config::EnvSnapshot::capture();
     std::vector<gpusel::GpuRecord> recs = gpusel::enumerate();
     if (recs.empty()) throw ModelError("NoTargetGpu", "the AMD graphics driver reports no GPU");
     int pos = 0;
     try {
         pos = gpusel::chosenPosition(recs, spec_arg);  // 0 when restricted, else --device / WHIRL_DEVICE / default
     } catch (const gpusel::SelectError& e) {
-        const bool none = spec_arg.empty() && !envGet("DEVICE");
+        const bool none = spec_arg.empty() && !env.device;
         if (none) throw ModelError("NoTargetGpu", e.what());
         throw ModelError("DeviceChoice", e.what());
     }
-    lockGpu(recs[pos]);
+    lockGpu(recs[pos], env);
     return recs[pos].index;
 }
 

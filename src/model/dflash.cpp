@@ -7,6 +7,7 @@
 
 #include "whirl/model.h"
 #include "whirl/dflash_policy.h"
+#include "config/env_snapshot.h"
 
 #include <algorithm>
 #include <chrono>
@@ -36,8 +37,9 @@ struct DflProf {
     std::chrono::steady_clock::time_point last;
     unsigned draws = 0, ingests = 0;
     DflProf() {
-        const char* e = std::getenv("WHIRL_DFLASH_PROF");
-        on = e && e[0] == '1';
+        // arch025-N1: read at construction (g_prof: static initialisation), as before
+        const whirl::config::EnvSnapshot env = whirl::config::EnvSnapshot::capture();
+        on = env.dflash_prof && !env.dflash_prof->empty() && env.dflash_prof->front() == '1';
     }
     ~DflProf() {
         if (!on || (draws == 0 && ingests == 0)) return;
