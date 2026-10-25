@@ -460,12 +460,15 @@ RULES = {
                "branch), vanishes from the changed lines of one side and appears on the other with the same number of "
                "occurrences: in another file (moved between headers), or in the same file with the declaration order of "
                "its class / enum, or at namespace scope of the file, unchanged (diff alignment); mt-p1 pass 3; a move to "
-               "another file only when every includer of the old file also includes the new one (mt-p1 pass 4)",
+               "another file only when every translation unit that saw it still sees it (mt-p1 pass 4; pass 5: the old "
+               "file itself counts when it is a .cpp, each side from its own tree's #include lines) and, for macros / "
+               "free-function overloads / explicit specialisations, no translation unit newly sees it (pass 5)",
     "R-block": "a namespace / brace block added or removed whole (both braces changed; a lone brace still fails closed): "
                "the 0.2.4 rule read the identifier-less brace lines as a file-scope change",
-    "R-init-noid": "FAILING, not a rule (mt-p1 pass 4, REVIEW3 act-on 2): the step comes back with the 0.2.4 identifier "
-                   "rule, nothing was dropped, and a changed declaration line has no identifier (a table row such as "
-                   "{64, 64, 256},): 0.2.4 reached it through its file-scope fallback; inspect by hand",
+    "R-init-noid": "FAILING, not a rule (mt-p1 pass 4, REVIEW3 act-on 2; per step since pass 5): the step comes back with "
+                   "the 0.2.4 identifier rule (or ids+moved) and a changed declaration line has no identifier (a table "
+                   "row such as {64, 64, 256},), and it does NOT come back when those rows are taken out of the diff: "
+                   "0.2.4 reached it through its file-scope fallback over the row; inspect by hand",
 }
 
 
@@ -489,6 +492,16 @@ def attribute(nar, rev, skip_cpu=True):
         lk = impact.expand_steps(impact.analyze(prod, m, s, f"{s}^", legacy=("braces",))["release_gate_steps"])
         out[s] = {"ids": sorted(li - base), "moved": sorted(lm - base), "both": sorted(lb - base), "braces": sorted(lk - base),
                   "dropped": r.get("dropped_ids", {}), "noid": r.get("noid_lines", [])}
+        # mt-p1 pass 5 (review4 A3): per step, not per commit: the same legacy runs with the identifier-less lines taken
+        # out of the diff; a step that comes back only WITH them came back through those rows (0.2.4's file-scope
+        # fallback), whatever else the commit dropped
+        if r.get("noid_at"):
+            cut = {p_: {**c, "new": list(c["new"]), "old": list(c["old"])} for p_, c in prod.items()}
+            for p_, side, ln in r["noid_at"]:
+                if p_ in cut and ln in cut[p_][side]:
+                    cut[p_][side].remove(ln)
+            out[s]["ids_wo_noid"] = sorted(impact.expand_steps(impact.analyze(cut, m, s, f"{s}^", legacy=("ids",))["release_gate_steps"]) - base)
+            out[s]["both_wo_noid"] = sorted(impact.expand_steps(impact.analyze(cut, m, s, f"{s}^", legacy=("ids", "moved"))["release_gate_steps"]) - base)
     return out
 
 
@@ -530,18 +543,21 @@ def classify_narrowed(nar, w, gt=None, attrib=None):
             elif st in a.get("ids", []):
                 if kinds.get("other"):
                     bad.append(f"{st} (dropped identifier(s) of kind other: {', '.join(sorted(kinds['other'])[:4])})")
+                elif a.get("noid") and st not in a.get("ids_wo_noid", []):
+                    # mt-p1 pass 4 (REVIEW3 act-on 2, G3) / pass 5 (review4 A3, V-1): a changed declaration line has no
+                    # identifier (a table row) and the step does not come back without it: 0.2.4 reached the step
+                    # through its file-scope fallback over that row, so neither a dropped identifier elsewhere in the
+                    # commit nor member-access precision explains it
+                    bad.append(f"{st} (R-init-noid: identifier-less changed line(s) {', '.join(a['noid'][:3])})")
                 else:
-                    if not dropped and a.get("noid"):
-                        # mt-p1 pass 4 (REVIEW3 act-on 2, G3): nothing dropped, but a changed declaration line has no
-                        # identifier (a table row): 0.2.4 reached the step through its file-scope fallback, not a
-                        # same-named local, so this is no evidence of member-access precision
-                        bad.append(f"{st} (R-init-noid: identifier-less changed line(s) {', '.join(a['noid'][:3])})")
-                    else:
-                        per[st] = "R-decl" if dropped else "R-member"
+                    per[st] = "R-decl" if dropped else "R-member"
             elif st in a.get("braces", []):
                 per[st] = "R-block"
             elif st in a.get("both", []) and not kinds.get("other"):
-                per[st] = "R-decl+R-moved"
+                if a.get("noid") and st not in a.get("both_wo_noid", []):
+                    bad.append(f"{st} (R-init-noid on ids+moved: identifier-less changed line(s) {', '.join(a['noid'][:3])})")
+                else:
+                    per[st] = "R-decl+R-moved"
             else:
                 bad.append(f"{st} (no legacy variant brings it back)")
         ev = "; ".join(f"{k}: {', '.join(sorted(v)[:5])}{' ...' if len(v) > 5 else ''}" for k, v in sorted(kinds.items())) or "none"
@@ -630,8 +646,9 @@ def compare_passes(b, w, m=None):
     Lists every commit for which this pass selects more and every one for which it selects LESS. A LESS passes only as
     R-fallback-resolved: nothing but paths lost (no release step, CPU test or kernel test), the earlier pass reported a
     file-scope fallback ("has no user function in the map", a map gap, not a conservative rule) for a file F that this
-    pass no longer reports (it found F's users), and every lost path is a path of F or of its includers (m = the map at
-    the replayed tree; without it the path check is skipped and said so). Hold-out 4fae76e / c3601d4 / 7078143: the
+    pass no longer reports, this pass's replay names the users it found for F ("users", pass 5), every lost path is a
+    path of F or of its includers and none is a path of another changed file of the commit ("files", pass 5; m = the
+    map at the replayed tree; without a map, or without those fields, the LESS fails). Hold-out 4fae76e / c3601d4 / 7078143: the
     help-text macro WHIRL_HELP_MODES of src/cli/main.cpp; pass 4 (V5) finds commandHelp, on no path. Anything else that
     selects less fails. Returns (failing commits, lines, explained commits)."""
     fails, lines, expl, more = [], [], [], []
@@ -647,27 +664,46 @@ def compare_passes(b, w, m=None):
             lines.append(f"   more {s}: {json.dumps(add)}  decl {w[s].get('decl', [])[:8]}")
         if not any(sub.values()):
             continue
-        why = None
+        why, why_not = None, None
         if not (sub["steps"] or sub["cpu"] or sub["kt"]):
             gone = set(b[s].get("defects", [])) - set(w[s].get("defects", []))
             now = {mm.group(1) for d in w[s].get("defects", []) for mm in [FALLBACK_DEFECT.match(d)] if mm}
             res = sorted({mm.group(1) for d in gone for mm in [FALLBACK_DEFECT.match(d)] if mm} - now)
-            if res:
-                if m is None:
-                    why = f"R-fallback-resolved ({', '.join(res)}; path check skipped: no map)"
+            # mt-p1 pass 5 (review4 C1, V-2 / V-3 / V-4): evidence, not just a vanished defect text: this pass's replay
+            # names the users it found for F ("users"), no map = no path check = failing, and no lost path may be a
+            # path of another changed file of the commit ("files"): F's includers own almost every path of a common
+            # header (common.h + includers: 18 of 19), so "a path of F or its includers" alone never fires
+            users = w[s].get("users")
+            files = w[s].get("files")
+            if res and m is None:
+                why_not = "no map: the lost-path check cannot run"
+            elif res and (users is None or files is None):
+                why_not = "this pass's replay has no users / files fields (older tools)"
+            elif res and not all(users.get(f) for f in res):
+                why_not = f"no users of {', '.join(f for f in res if not users.get(f))} found by this pass"
+            elif res:
+                own = set()
+                for f in res:
+                    for g in [f] + (m["includers"].get(f, []) if f.endswith((".h", ".inc")) else []):
+                        own |= set(m["files"].get(g, []))
+                others = set()
+                for g in files:
+                    if g not in res:
+                        others |= set(m["files"].get(g, []))
+                lost = set(sub["paths"])
+                if not lost <= own:
+                    why_not = f"lost path(s) {sorted(lost - own)} outside {', '.join(res)} and its includers"
+                elif lost & others:
+                    why_not = f"lost path(s) {sorted(lost & others)} also owned by another changed file of the commit"
                 else:
-                    own = set()
-                    for f in res:
-                        for g in [f] + (m["includers"].get(f, []) if f.endswith((".h", ".inc")) else []):
-                            own |= set(m["files"].get(g, []))
-                    if set(sub["paths"]) <= own:
-                        why = f"R-fallback-resolved ({', '.join(res)}: users found, lost paths are its file-scope paths)"
+                    why = (f"R-fallback-resolved ({', '.join(res)}: users {', '.join(sorted(u for f in res for u in users[f])[:3])}; "
+                           f"lost paths are its file-scope paths, owned by no other changed file)")
         if why:
             expl.append(s)
             lines.append(f"   LESS {s}: {json.dumps(sub)} -> {why}")
         else:
             fails.append(s)
-            lines.append(f"   LESS {s}: {json.dumps(sub)} -> failing (not a resolved file-scope fallback)")
+            lines.append(f"   LESS {s}: {json.dumps(sub)} -> failing ({why_not or 'not a resolved file-scope fallback'})")
     st = (sum(len(b[s]["steps"]) for s in b), sum(len(w[s]["steps"]) for s in w))
     lines.insert(0, f"== passes: {len(b)} product commits (earlier) / {len(w)} (this); release steps {st[0]} -> {st[1]}; "
                     f"selects more on {len(more)}, LESS on {len(fails) + len(expl)} ({len(expl)} R-fallback-resolved, "

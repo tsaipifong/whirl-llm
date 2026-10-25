@@ -161,10 +161,12 @@ _b = {"aaaaaaa": _r(paths=["cli.decode", "cli.mtp", "load"], defects=[_fb]),
       "ddddddd": _r(paths=["cli.decode", "server.decode"], defects=[_fb]),
       "eeeeeee": _r(paths=["load"], cpu=["whirl-tests:t1"]),
       "fffffff": _r(paths=["load"])}
-_w = {"aaaaaaa": _r(paths=["load"]),
-      "bbbbbbb": _r(paths=["load"]),
+# (pass 5: this pass's replay row carries the users it found for F and the changed files: the evidence)
+_w = {"aaaaaaa": dict(_r(paths=["load"]), users={"src/cli/main.cpp": ["src/cli/main.cpp::commandHelp"]},
+                  files=["src/cli/main.cpp", "src/a.h"]),
+      "bbbbbbb": dict(_r(paths=["load"]), users={"src/cli/main.cpp": ["src/cli/main.cpp::commandHelp"]}, files=["src/cli/main.cpp"]),
       "ccccccc": _r(paths=["load"]),
-      "ddddddd": _r(paths=[]),
+      "ddddddd": dict(_r(paths=[]), users={"src/cli/main.cpp": ["src/cli/main.cpp::commandHelp"]}, files=["src/cli/main.cpp"]),
       "eeeeeee": _r(paths=["load"]),
       "fffffff": _r(paths=["load", "startup"])}
 _f, _l, _e = validate.compare_passes(_b, _w, _mp)
@@ -174,8 +176,51 @@ expect("passes: paths lost with no resolved fallback fail (block)", "ccccccc" in
 expect("passes: a lost path outside the resolved file's paths fails (block)", "ddddddd" in _f, _l)
 expect("passes: a lost CPU test fails (block)", "eeeeeee" in _f, _l)
 expect("passes: more is listed, not failing", "fffffff" not in _f and any(x.startswith("   more fffffff") for x in _l), _l)
-_w2 = dict(_w, aaaaaaa=_r(paths=["load"], defects=[_fb]))
+_w2 = dict(_w, aaaaaaa=dict(_r(paths=["load"], defects=[_fb]), users={"src/cli/main.cpp": ["src/cli/main.cpp::commandHelp"]},
+                           files=["src/cli/main.cpp", "src/a.h"]))
+# (pass 5: the users / files evidence is present on bbbbbbb, ddddddd and _w2, so each block tests only its own reason)
 _f2, _l2, _e2 = validate.compare_passes(_b, _w2, _mp)
 expect("passes: fallback still reported by this pass = not resolved (block)", "aaaaaaa" in _f2, _l2)
+# mt-p1 pass 5 (review4 A3, probes V-1 / V-1b in scratch/mt_p1_review4/probe_validate.py): R-init-noid is judged per
+# step: a step restored by the legacy identifier rule (or ids+moved) is R-decl / R-member only when it is ALSO restored
+# with the identifier-less lines taken out of the diff (attribute(): "ids_wo_noid" / "both_wo_noid"); a dropped
+# identifier elsewhere in the commit is no evidence for the table row
+_n5 = ["include/whirl/kernels_abi.h:453 (new)"]
+_nar5 = [("iiiiiii", {"steps": ["golden_moe", "srv_balance"], "paths": []}), ("jjjjjjj", {"steps": ["golden_moe"], "paths": []}),
+         ("kkkkkkk", {"steps": ["golden_moe"], "paths": []}), ("lllllll", {"steps": ["golden_moe"], "paths": []})]
+_att5 = {"iiiiiii": {"ids": ["golden_moe", "srv_balance"], "moved": [], "both": [], "braces": [], "dropped": {"DevBuf": "type"}, "noid": _n5},
+         "jjjjjjj": {"ids": [], "moved": [], "both": ["golden_moe"], "braces": [], "dropped": {}, "noid": _n5},
+         "kkkkkkk": {"ids": ["golden_moe"], "moved": [], "both": [], "braces": [], "dropped": {"DevBuf": "type"}, "noid": _n5,
+                     "ids_wo_noid": ["golden_moe"], "both_wo_noid": []},
+         "lllllll": {"ids": [], "moved": [], "both": ["golden_moe"], "braces": [], "dropped": {}, "noid": _n5,
+                     "ids_wo_noid": [], "both_wo_noid": ["golden_moe"]}}
+fn5, ln5, en5, _ = validate.classify_narrowed(_nar5, {k: {"decl": []} for k in _att5}, {}, _att5)
+expect("pass5 V-1 noid row + an unrelated dropped type id: step back only with the row = R-init-noid, failing (block)",
+       "iiiiiii" in fn5 and any("iiiiiii" in x and "R-init-noid" in x for x in ln5), ln5)
+expect("pass5 V-1b noid row, step back only by ids+moved = R-init-noid, failing (block)",
+       "jjjjjjj" in fn5 and any("jjjjjjj" in x and "R-init-noid" in x for x in ln5), ln5)
+expect("pass5 noid row present but the step comes back without it = R-decl (pass)", "kkkkkkk" in en5, ln5)
+expect("pass5 noid row present, ids+moved restores it without the row = R-decl+R-moved (pass)", "lllllll" in en5, ln5)
+# mt-p1 pass 5 (review4 C1, probes V-2 / V-3 / V-4): R-fallback-resolved needs the users this pass found for F (replay
+# field "users") and no lost path that another changed file of the commit owns ("files"); no map = failing
+_fbh = "src/c.h: declared X has no user function in the map: file-scope fallback over 3 file(s)"
+_mp5 = {"files": {"src/c.h": [], "src/u.cpp": ["load", "cli.decode"], "src/e.cpp": ["server.decode"]},
+        "includers": {"src/c.h": ["src/u.cpp", "src/e.cpp"]}}
+_b5 = {"mmmmmmm": _r(paths=["cli.decode", "load", "server.decode"], defects=[_fbh]),
+       "nnnnnnn": _r(paths=["cli.decode", "server.decode"], defects=[_fbh]),
+       "ooooooo": _r(paths=["cli.decode", "server.decode"], defects=[_fbh])}
+_w5 = {"mmmmmmm": dict(_r(paths=["load"]), users={"src/c.h": ["src/u.cpp::useU"]}, files=["src/c.h"]),
+       "nnnnnnn": dict(_r(paths=[]), users={"src/c.h": ["src/u.cpp::useU"]}, files=["src/c.h", "src/e.cpp"]),
+       "ooooooo": dict(_r(paths=[]), users={}, files=["src/c.h"])}
+_f5, _l5, _e5 = validate.compare_passes(_b5, _w5, _mp5)
+expect("pass5 header fallback resolved, users found, includer paths lost, no other changed file = R-fallback-resolved (pass)",
+       "mmmmmmm" in _e5, _l5)
+expect("pass5 V-2 lost path owned by another changed file of the commit (e.cpp) fails (block)", "nnnnnnn" in _f5, _l5)
+expect("pass5 V-4 fallback gone but this pass found no users of F fails (block)", "ooooooo" in _f5, _l5)
+_f6, _l6, _e6 = validate.compare_passes({"ppppppp": _r(paths=["server.decode"], defects=[_fbh])},
+                                        {"ppppppp": dict(_r(paths=[]), users={"src/c.h": ["src/u.cpp::useU"]}, files=["src/c.h"])})
+expect("pass5 V-3 no map: the path check cannot run = failing (block)", "ppppppp" in _f6, _l6)
+_f7, _l7, _e7 = validate.compare_passes({"qqqqqqq": _r(paths=["cli.decode"], defects=[_fbh])}, {"qqqqqqq": _r(paths=[])}, _mp5)
+expect("pass5 replay without users / files fields (older tools) = failing (block)", "qqqqqqq" in _f7, _l7)
 print(f"validate test: {ok}/{ok + bad} ok")
 sys.exit(1 if bad else 0)

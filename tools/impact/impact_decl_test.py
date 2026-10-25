@@ -182,7 +182,8 @@ MV_A = ("#ifndef X_H\n#define X_H\nnamespace whirl {\nstruct Opt {\n    int ctx 
         "#ifndef Y_H\n#define Y_H\nnamespace whirl {\nint other();\n}\n#endif\n")
 MV_B = ("#ifndef X_H\n#define X_H\nnamespace whirl {\nint keep();\n}\n#endif\n",
         "#ifndef Y_H\n#define Y_H\nnamespace whirl {\nint other();\nstruct Opt {\n    int ctx = 8;\n};\n}\n#endif\n")
-CPPMV = '#include "x.h"\nint readCtx(whirl::Opt& o) {\n  return o.ctx;\n}\nint other() {\n  return 1;\n}\n'
+# (pass 5: x.cpp includes y.h in the source too, as the map says - the closure now comes from the #include lines)
+CPPMV = '#include "x.h"\n#include "y.h"\nint readCtx(whirl::Opt& o) {\n  return o.ctx;\n}\nint other() {\n  return 1;\n}\n'
 
 
 def swap(t, a, b):
@@ -298,11 +299,121 @@ G3C = ('#include "k.h"\nvoid loadK(KernelTable* t) {\n  KernelTable z;\n  *t = z
 G3 = ({"src/k.h": G3H, "src/m.cpp": G3C}, {"src/k.h": G3H.replace("{64, 128, 256}", "{64, 64, 256}"), "src/m.cpp": G3C},
       [("src/m.cpp", "loadK"), ("src/m.cpp", "precChoice"), ("src/m.cpp", "other")], ["precChoice"], ["other"], {"src/k.h": ["src/m.cpp"]})
 # block: the same overload move where every includer of a.h also includes b.h: a real move, build only
-MV_IN = ({"src/a.h": A1h, "src/b.h": Ab1, "src/u.cpp": U1, "src/v.cpp": V1}, {"src/a.h": B1h, "src/b.h": Bb1, "src/u.cpp": U1, "src/v.cpp": V1},
+# (pass 5: u.cpp includes b.h in the source too, as the map says; the closure now comes from the #include lines)
+MV_IN = ({"src/a.h": A1h, "src/b.h": Ab1, "src/u.cpp": U1.replace('"a.h"', '"b.h"'), "src/v.cpp": V1}, {"src/a.h": B1h, "src/b.h": Bb1, "src/u.cpp": U1.replace('"a.h"', '"b.h"'), "src/v.cpp": V1},
          FN4, [], [], {"src/a.h": ["src/b.h", "src/u.cpp", "src/v.cpp"], "src/b.h": ["src/u.cpp", "src/v.cpp"]})
+
+# mt-p1 pass 5 (review4 A1 / A2, progress/mt-p1-pass4.PRIOR_ART.md "Review 4" / "Pass 5"; probes
+# scratch/mt_p1_review4/probe_r4_cases.py, probe_r4b_cases.py): the translation units that see a moved statement are
+# taken from each revision's own #include lines (impact.tree_includes, patched here to read the fake repo), and must be
+# equal in both trees for macros / free-function overloads / explicit specialisations (gain direction too)
+FNV5 = [("src/u.cpp", "useU"), ("src/v.cpp", "useV")]
+V5_ = '#include "b.h"\nint useV() {\n  return 0;\n}\n'
+U51ma = '#define WHIRL_SAFE_COPY 1\nint useU() {\n#ifdef WHIRL_SAFE_COPY\n  return 1;\n#else\n  return 2;\n#endif\n}\n'
+U51mb = 'int useU() {\n#ifdef WHIRL_SAFE_COPY\n  return 1;\n#else\n  return 2;\n#endif\n}\n'
+B51a = "#pragma once\nnamespace w {\nint more();\n}\n"
+B51mb = "#pragma once\nnamespace w {\nint more();\n}\n#define WHIRL_SAFE_COPY 1\n"
+A52a = "#pragma once\n#define WHIRL_SAFE_COPY 1\nint other();\n"
+A52b = "#pragma once\nint other();\n"
+C52a = "#pragma once\nint more();\n"
+C52b = "#pragma once\nint more();\n#define WHIRL_SAFE_COPY 1\n"
+U52 = '#include "c.h"\nint useU() {\n#ifdef WHIRL_SAFE_COPY\n  return 1;\n#else\n  return 2;\n#endif\n}\n'
+V52 = '#include "c.h"\nint useV() {\n#ifdef WHIRL_SAFE_COPY\n  return 1;\n#else\n  return 2;\n#endif\n}\n'
+A52oa = "#pragma once\nnamespace w {\nint score(int v);\n}\n"
+A52ob = "#pragma once\nnamespace w {\n}\n"
+C52oa = "#pragma once\nnamespace w {\nint score(long v);\n}\n"
+C52ob = "#pragma once\nnamespace w {\nint score(long v);\nint score(int v);\n}\n"
+U52o = '#include "c.h"\nint useU() {\n  return w::score(3);\n}\n'
+V52o = '#include "c.h"\nint useV() {\n  return w::score(4);\n}\n'
+# explicit specialisation gained by v.cpp (new probe, same shape as R4-2o)
+A52sa = "#pragma once\n#include \"p.h\"\nnamespace w {\ntemplate <> struct Cfg<1151> {\n    static constexpr int kTile = 32;\n};\n}\n"
+A52sb = "#pragma once\n#include \"p.h\"\nnamespace w {\n}\n"
+C52sa = "#pragma once\n#include \"p.h\"\nint more();\n"
+C52sb = ("#pragma once\n#include \"p.h\"\nint more();\nnamespace w {\ntemplate <> struct Cfg<1151> {\n"
+         "    static constexpr int kTile = 32;\n};\n}\n")
+P52s = "#pragma once\nnamespace w {\ntemplate <int A> struct Cfg {\n    static constexpr int kTile = 16;\n};\n}\n"
+U52s = '#include "c.h"\nint useU() {\n  return w::Cfg<1151>::kTile;\n}\n'
+V52s = '#include "c.h"\nint useV() {\n  return w::Cfg<1151>::kTile;\n}\n'
+# plain type moved into a header with MORE includers: still a move (the 6 real cross-file move commits)
+A52ta = "#pragma once\nstruct Ring {\n    int head;\n    int tail;\n};\n"
+A52tb = "#pragma once\n"
+C52tb = "#pragma once\nint more();\nstruct Ring {\n    int head;\n    int tail;\n};\n"
+U52t = '#include "a.h"\n#include "c.h"\nint useU(Ring& r) {\n  return r.head;\n}\n'
+V52t = '#include "c.h"\nint useV(Ring& r) {\n  return r.tail;\n}\n'
+# R4-18 header split, a.h deleted; R4-19 include switched in the same commit (old-tree includers)
+A518 = "#pragma once\nnamespace w {\nint score(int v);\nint score(long v);\n}\n"
+B518a = "#pragma once\nint more();\n"
+B518b = "#pragma once\nint more();\nnamespace w {\nint score(long v);\n}\n"
+C518a = "#pragma once\nint more2();\n"
+C518b = "#pragma once\nint more2();\nnamespace w {\nint score(int v);\n}\n"
+U518a = '#include "a.h"\nint useU() {\n  return w::score(3);\n}\n'
+U518b = '#include "b.h"\nint useU() {\n  return w::score(3);\n}\n'
+V518 = '#include "c.h"\nint useV() {\n  return w::score(4);\n}\n'
+A519a = "#pragma once\nnamespace w {\nint score(int v);\nint score(long v);\n}\n"
+A519b = "#pragma once\nnamespace w {\nint score(long v);\n}\n"
+B519 = "#pragma once\nnamespace w {\nint score(long v);\n}\n"
+C519a = "#pragma once\n#include \"a.h\"\nint more2();\n"
+C519b = "#pragma once\n#include \"a.h\"\nint more2();\nnamespace w {\nint score(int v);\n}\n"
+V519 = '#include "c.h"\nint useV() {\n  return w::score(4);\n}\n'
+# name: (old, new, functions, needed, block, includers of the NEW tree's map)
+PROBES5 = {
+    "R4-1m macro moved u.cpp -> b.h (u.cpp does not include b.h; the old file is a TU)":
+        ({"src/u.cpp": U51ma, "src/b.h": B51a, "src/v.cpp": V5_}, {"src/u.cpp": U51mb, "src/b.h": B51mb, "src/v.cpp": V5_},
+         FNV5, ["useU"], [], {"src/b.h": ["src/v.cpp"]}),
+    "R4-2 macro moved a.h -> c.h with more includers (v.cpp gains it)":
+        ({"src/a.h": A52a, "src/c.h": C52a, "src/u.cpp": U52, "src/v.cpp": V52}, {"src/a.h": A52b, "src/c.h": C52b, "src/u.cpp": U52, "src/v.cpp": V52},
+         FNV5, ["useV"], [], {"src/a.h": ["src/u.cpp"], "src/c.h": ["src/u.cpp", "src/v.cpp"]}),
+    "R4-2o overload score(int) moved a.h -> c.h with more includers (v.cpp score(4) rebinds)":
+        ({"src/a.h": A52oa, "src/c.h": C52oa, "src/u.cpp": U52o, "src/v.cpp": V52o}, {"src/a.h": A52ob, "src/c.h": C52ob, "src/u.cpp": U52o, "src/v.cpp": V52o},
+         FNV5, ["useV"], [], {"src/a.h": ["src/u.cpp"], "src/c.h": ["src/u.cpp", "src/v.cpp"]}),
+    "R4-2s explicit specialisation moved a.h -> c.h with more includers (v.cpp leaves the primary)":
+        ({"src/a.h": A52sa, "src/c.h": C52sa, "src/p.h": P52s, "src/u.cpp": U52s, "src/v.cpp": V52s},
+         {"src/a.h": A52sb, "src/c.h": C52sb, "src/p.h": P52s, "src/u.cpp": U52s, "src/v.cpp": V52s},
+         FNV5, ["useV"], [], {"src/p.h": ["src/a.h", "src/c.h", "src/u.cpp", "src/v.cpp"], "src/c.h": ["src/u.cpp", "src/v.cpp"]}),
+    "R4-18 header split, a.h deleted, u.cpp now includes b.h only (old-tree includers of a.h)":
+        ({"src/a.h": A518, "src/b.h": B518a, "src/c.h": C518a, "src/u.cpp": U518a, "src/v.cpp": V518},
+         {"src/b.h": B518b, "src/c.h": C518b, "src/u.cpp": U518b, "src/v.cpp": V518},
+         FNV5, ["useU"], [], {"src/b.h": ["src/u.cpp"], "src/c.h": ["src/v.cpp"]}),
+    "R4-19 score(int) a.h -> c.h while u.cpp switches #include a.h -> b.h (old-tree includers of a.h)":
+        ({"src/a.h": A519a, "src/b.h": B519, "src/c.h": C519a, "src/u.cpp": U518a, "src/v.cpp": V519},
+         {"src/a.h": A519b, "src/b.h": B519, "src/c.h": C519b, "src/u.cpp": U518b, "src/v.cpp": V519},
+         FNV5, ["useU"], [], {"src/a.h": ["src/c.h", "src/v.cpp"], "src/b.h": ["src/u.cpp"], "src/c.h": ["src/v.cpp"]}),
+}
+# blocks: still moves (build only, no function selected)
+MOVES5 = {
+    "plain type moved a.h -> c.h with more includers (types: loss direction only)":
+        ({"src/a.h": A52ta, "src/c.h": C52a, "src/u.cpp": U52t, "src/v.cpp": V52t},
+         {"src/a.h": A52tb, "src/c.h": C52tb, "src/u.cpp": U52t, "src/v.cpp": V52t},
+         FNV5, {"src/a.h": ["src/u.cpp"], "src/c.h": ["src/u.cpp", "src/v.cpp"]}),
+    "macro moved a.h -> c.h, both seen by exactly u.cpp and v.cpp":
+        ({"src/a.h": A52a, "src/c.h": C52a, "src/u.cpp": '#include "a.h"\n' + U52, "src/v.cpp": '#include "a.h"\n' + V52},
+         {"src/a.h": A52b, "src/c.h": C52b, "src/u.cpp": '#include "a.h"\n' + U52, "src/v.cpp": '#include "a.h"\n' + V52},
+         FNV5, {"src/a.h": ["src/u.cpp", "src/v.cpp"], "src/c.h": ["src/u.cpp", "src/v.cpp"]}),
+}
+# review4 R4-9 / R4-17: a changed / removed #define line names its macro: not an identifier-less table row
+A59 = "#pragma once\n#define WHIRL_SAFE_COPY 1\nint other();\n"
+U59 = '#include "a.h"\nint useU() {\n#if defined(WHIRL_FAST) || \\\n    defined(WHIRL_SAFE_COPY)\n  return 1;\n#else\n  return 2;\n#endif\n}\n'
+A517 = "#pragma once\n#define WHIRL_ROWS 4\n"
+U517 = '#include "a.h"\nstatic const int kLocal[] = {WHIRL_ROWS, 1};\nint useU() {\n  return kLocal[0];\n}\n'
+V5n = '#include "a.h"\nint useV() {\n  return 0;\n}\n'
+NOID5 = {
+    "R4-9 macro removed (#define line)": ({"src/a.h": A59, "src/u.cpp": U59, "src/v.cpp": V5n},
+                                         {"src/a.h": "#pragma once\nint other();\n", "src/u.cpp": U59, "src/v.cpp": V5n}),
+    "R4-17 macro value changed (#define line)": ({"src/a.h": A517, "src/u.cpp": U517, "src/v.cpp": V5n},
+                                                {"src/a.h": A517.replace("4", "8"), "src/u.cpp": U517, "src/v.cpp": V5n}),
+}
+
+
+def fake_tree_includes(rev):
+    """impact.tree_includes on the fake repo: path -> #include targets of that revision"""
+    import re as _re
+    return {p: _re.findall(r'^\s*#\s*include\s*[<"]([^">]+)[">]', t, _re.M) for (r_, p), t in REPO.items() if r_ == rev}
+
 
 real = impact.show
 impact.show = fake_show
+real_tree = getattr(impact, "tree_includes", None)
+impact.tree_includes = fake_tree_includes
 impact.load_modules = lambda root=None: None
 try:
     # B1.1 declared name: the member's users, not the users of its type
@@ -555,7 +666,30 @@ try:
     expect("pass4b help-text macro -> namespace help strings -> commandHelp selected", not miss, (miss, sel, r["notes"][:3]))
     expect("pass4b block: help-text macro -> not cmdChat (no file-scope fallback)", "cmdChat" not in sel, (sel, r["notes"][:3]))
     expect("pass4b help-text macro: no map defect (the user is found)", not r["map_defects"], r["map_defects"])
+    # ---------------------------------------------------------------------------------------------------------------
+    # mt-p1 pass 5 (review4 A1 / A2 / A3 noid): each probe fails on a63f7ee
+    for nm, (a, b, fns, need, block, inc) in sorted(PROBES5.items()):
+        r, miss, sel = probe(a, b, fns, need, inc)
+        expect(f"pass5 {nm}: needed {need} selected", not miss, (miss, sel, r["notes"][:3]))
+    for nm, (a, b, fns, inc) in sorted(MOVES5.items()):
+        r, miss, sel = probe(a, b, fns, [], inc)
+        expect(f"pass5 block: {nm} -> still a move (build only)", not sel and any("moved / re-indented" in n for n in r["notes"]),
+               (sel, r["notes"][:3]))
+    # pass 3 occurrence count, with the TU closure satisfied (x.cpp and y.cpp include z.h as well), so the count check
+    # alone must make it a change (the pass-3 fixture is now also caught by the closure)
+    A5c = {"src/x.h": HA18a, "src/y.h": HA18a.replace("#pragma once", "#pragma once\n// y"), "src/z.h": "#pragma once\n",
+           "src/x.cpp": '#include "z.h"\n' + CPP18, "src/y.cpp": '#include "y.h"\n#include "z.h"\nint yy() {\n  return 2;\n}\n'}
+    B5c = dict(A5c, **{"src/x.h": "#pragma once\n", "src/y.h": "#pragma once\n// y\n", "src/z.h": HA18a})
+    r, miss, sel = probe(A5c, B5c, [("src/x.cpp", "rows1151"), ("src/x.cpp", "other"), ("src/y.cpp", "yy")], ["rows1151"],
+                         {"src/x.h": ["src/x.cpp"], "src/y.h": ["src/y.cpp"], "src/z.h": ["src/x.cpp", "src/y.cpp"]})
+    expect("pass5 count 2 -> 1 with the TU closure satisfied: not a move", not miss, (miss, sel, r["notes"][:3]))
+    for nm, (a, b) in sorted(NOID5.items()):
+        r, miss, sel = probe(a, b, FNV5, ["useU"], {"src/a.h": ["src/u.cpp", "src/v.cpp"]})
+        expect(f"pass5 {nm}: useU selected", not miss, (miss, sel))
+        expect(f"pass5 block: {nm} -> no identifier-less line reported", not r.get("noid_lines"), r.get("noid_lines"))
 finally:
     impact.show = real
+    if real_tree is not None:
+        impact.tree_includes = real_tree
 print(f"impact decl test: {ok}/{ok + bad} ok")
 sys.exit(1 if bad else 0)

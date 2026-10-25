@@ -143,7 +143,12 @@ A declaration that appears unchanged in another file on the other side of the di
 selects nothing. "Unchanged" means the same statement in the same full scope (namespace path, enclosing class
 headers with template specialisation arguments, the `#if` branch; include guards ignored), vanishing from one
 side and appearing on the other the same number of times, so swapping values between `#if` branches,
-specialisations, nested classes or headers is a change. A reorder inside one struct / enum, a reorder at
+specialisations, nested classes or headers is a change. A move to another file is a move only when every
+translation unit that saw the statement still sees it (the old file itself when it is a `.cpp`; each side from its
+own revision's `#include` lines, so a deleted / split header or an `#include` switched in the same commit counts),
+and, for macros, namespace-scope function overloads / operators and explicit specialisations, no translation unit
+newly sees it (the ccache direct-mode false-hit direction); a plain type newly visible is still a move. The users of a
+changed header are searched in its includers of both trees. A reorder inside one struct / enum, a reorder at
 namespace scope of one file (two-phase lookup, initialisation order), an enumerator inserted or removed before
 others, and a removed member or enumerator fall back to the whole file. A designated-initializer row
 `.field = v` selects the readers of `field` as well as the users of the table. A header included by a `.hip`
@@ -157,14 +162,15 @@ dense / DFlash, E6, the version bump); classes only add steps (`srv_gpu_select`,
 one. Fallbacks that come from a gap of the map are printed as `DEFECT`. Since the declared-name rule narrows
 on purpose, `--baseline` accepts a narrowed commit only when every GPU step it loses comes back with the
 0.2.4 identifier rule (or with the moved rule off) and every identifier the new rule dropped is a type,
-parameter, initializer reference or qualifier (`impact.analyze(..., legacy=...)`, validate.py `RULES`), and it
+parameter, initializer reference or qualifier (`impact.analyze(..., legacy=...)`, validate.py `RULES`; a step that
+comes back only with an identifier-less row such as `{64, 64, 256},` in the diff is `R-init-noid`, failing), and it
 loses no step its ground truth needed; `--exclude-tuned` leaves the commits the rules were tuned on out (`--arch024`: the GPU checks each arch024 step ran; `RANGE_CASES`:
 the 0.2.4 range 605281b..9844fde).
 
-Known gaps of the static rule (not selected by impact.py; review mt-p1 rereview P3, P5, P7, P11): a macro whose only
-consumer is an `#ifdef` / `#if defined` (removing it changes code without any identifier use); `#pragma pack` around a
+Known gaps of the static rule (not selected by impact.py; review mt-p1 rereview P5, P7, P11): `#pragma pack` around a
 struct (layout changes, no declaration line changes); a default member initializer whose effect reaches only code that
-default-constructs the struct without naming the member (only the member's readers are selected); a self-registering
+default-constructs the struct without naming the member (only the member's readers are selected);
+a self-registering
 namespace-scope global removed with no user by name (`static Registrar r(...)`: build only). For these shapes run the
 full gate or name the users by hand.
 

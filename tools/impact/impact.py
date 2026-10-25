@@ -85,6 +85,80 @@ def show(rev, path):
     return _show_cache[k]
 
 
+INC_DIRS = ("src", "include", "kernels", "tests", "tools")   # = impact_build.SCAN_DIRS
+INC_EXT = (".cpp", ".h", ".hip", ".inc", ".in")             # = impact_build.SRC_EXT
+TU_EXT = (".cpp", ".hip")                                   # translation units (compiled on their own)
+_INC_RE = re.compile(r'^\s*#\s*include\s*[<"]([^">]+)[">]', re.M)
+
+
+def tree_includes(rev):
+    """mt-p1 pass 5 (review4 A2): path -> #include targets of every scanned source file at REV (one git ls-tree + one git
+    grep), or None when REV cannot be read (worktree side, not a git revision)"""
+    if not rev:
+        return None
+    r1 = subprocess.run(["git", "-C", ROOT, "ls-tree", "-r", "--name-only", rev, "--", *INC_DIRS], capture_output=True,
+                        text=True, encoding="utf-8", errors="replace")
+    if r1.returncode != 0:
+        return None
+    out = {f: [] for f in r1.stdout.splitlines() if f.endswith(INC_EXT)}
+    r2 = subprocess.run(["git", "-C", ROOT, "grep", "-I", "-E", r"^[[:space:]]*#[[:space:]]*include", rev, "--", *INC_DIRS],
+                        capture_output=True, text=True, encoding="utf-8", errors="replace")
+    pre = f"{rev}:"
+    for l in r2.stdout.splitlines():
+        if not l.startswith(pre):
+            continue
+        f, _, txt = l[len(pre):].partition(":")
+        if f in out:
+            out[f] += _INC_RE.findall(txt)
+    return out
+
+
+def tree_tus(rev, m):
+    """mt-p1 pass 5 (review4 A1 / A2): file -> the translation units that see it at REV (the file itself when it is one,
+    and every TU that includes it directly or not), from REV's own #include lines with impact_build's resolution
+    (dirname, include/, src/, kernels/), as a depfile is per compile; the map's includers when REV cannot be read"""
+    inc = tree_includes(rev)
+    if inc is None:
+        res = ((lambda f: {g for g in [f] + list(m["includers"].get(f, [])) if g.endswith(TU_EXT)}), "map",
+               (lambda f: set(m["includers"].get(f, []))))
+    else:
+        inc_by = defaultdict(set)
+        for f, targets in inc.items():
+            for t in targets:
+                for cand in (os.path.normpath(os.path.join(os.path.dirname(f), t)).replace("\\", "/"), "include/" + t, "src/" + t,
+                             "kernels/" + t):
+                    if cand in inc:
+                        inc_by[cand].add(f)
+                        break
+        memo = {}
+
+        def includers(f):
+            if f not in memo:
+                seen, dq = {f}, [f]
+                while dq:
+                    x = dq.pop()
+                    for y in inc_by.get(x, ()):
+                        if y not in seen:
+                            seen.add(y)
+                            dq.append(y)
+                memo[f] = seen - {f}
+            return memo[f]
+        res = (lambda f: {g for g in includers(f) | {f} if g.endswith(TU_EXT)}), "tree", includers
+    return res  # (file -> TUs that see it, "tree" | "map", file -> every file that includes it)
+
+
+def gains_meaning(x):
+    """mt-p1 pass 5 (review4 A1): kinds whose mere visibility changes what a translation unit compiles (ccache direct
+    mode's documented false hit: a header that newly becomes visible): macros (#ifdef / expansion), namespace-scope
+    function overloads / operators (overload resolution), explicit specialisations (template <> ...). Types are not:
+    a type newly visible to a TU that did not name it changes nothing it compiles (the 6 real cross-file move commits)"""
+    if x["what"] == "macro":
+        return True
+    if x["cls"] is None and x["what"] == "function":
+        return True
+    return bool(x.get("sig")) and "template<>" in re.sub(r"\s+", "", str(x["sig"]))
+
+
 def parse_diff(diff):
     """unified diff (-U0) -> {path: {"new": [lines], "old": [lines], "old_path": p, "status": ...}}"""
     files = {}
@@ -144,7 +218,15 @@ def analyze(changes, m, new_rev, old_rev, legacy=()):
     defects = []                # map defects (B1.4)
     dropped_ids = {}            # review A4: identifier -> kind (type / param / init / qualifier / other) the new rule dropped
     noid_lines = []             # mt-p1 pass 4 (REVIEW3 act-on 2): changed declaration lines with no identifier (table rows)
+    noid_at = []                # the same as (path, side, line): validate.attribute re-runs without them (pass 5, A3)
     test_steps = set()          # release steps of test executables whose sources changed
+    side_tus = {}               # mt-p1 pass 5: "old" / "new" -> (file -> translation units that see it, source)
+    users_by_file = {}          # mt-p1 pass 5 (review4 C1): changed file -> the user functions its declarations selected
+
+    def tus_at(side):
+        if side not in side_tus:
+            side_tus[side] = tree_tus(new_rev if side == "new" else old_rev, m)
+        return side_tus[side]
     for path, ch in sorted(changes.items()):
         rule = next((r for r in FILE_RULES if fnmatch.fnmatch(path, r[0])), None)
         if rule and not path.endswith((".cpp", ".h", ".hip")) or (rule and path.startswith(("tests/", "tools/"))):
@@ -237,11 +319,18 @@ def analyze(changes, m, new_rev, old_rev, legacy=()):
                 # V1 overload / V2 explicit specialisation / V3c macro): a move only when every translation unit that
                 # saw it still does, i.e. every includer of the old file also includes the new one (or is it); else
                 # a change (0.2.4 behaviour). includers are transitive (map); ccache / depfiles key on the same closure
+                # mt-p1 pass 5 (review4 A1 / A2): compared as translation units (the old file itself when it is a .cpp:
+                # includers(u.cpp) = [] made the check vacuous, R4-1m), each side from its own tree's #include lines (a
+                # header split / deleted header / include switched in the same commit, R4-18 / R4-19), and for the kinds
+                # whose visibility changes meaning (macro, overload, explicit specialisation) also no TU may newly see it
+                # (R4-2 / R4-2o: ccache direct mode's false hit is that direction)
                 olds, news = ({x["file"]}, others) if x["side"] == "old" else (others, {x["file"]})
-                seen = set(news)
-                for f in news:
-                    seen |= set(m["includers"].get(f, []))
-                return all(set(m["includers"].get(f, [])) <= seen for f in olds)
+                tus_old, tus_new = tus_at("old")[0], tus_at("new")[0]
+                saw = set().union(*(tus_old(f) for f in olds))
+                sees = set().union(*(tus_new(f) for f in news))
+                if not saw <= sees:
+                    return False
+                return not (gains_meaning(x) and not sees <= saw)
             if x["cls"] is not None:
                 return x["cls"] not in order_changed
             if not ns_changed:
@@ -258,8 +347,11 @@ def analyze(changes, m, new_rev, old_rev, legacy=()):
             for x, c in id_categories(txt, declared_all, in_function="function" in whats).items():
                 if dropped_ids.get(x) != "other":
                     dropped_ids[x] = c
-            if whats and not [x for x in re.findall(r"[A-Za-z_]\w*", txt) if len(x) > 2 and x not in DECL_NOISE]:
+            # mt-p1 pass 5 (review4 R4-9 / R4-17): a #define line (blanked by blank_code) declares its macro name: not
+            # an identifier-less row
+            if whats and "macro" not in whats and not [x for x in re.findall(r"[A-Za-z_]\w*", txt) if len(x) > 2 and x not in DECL_NOISE]:
                 noid_lines.append(f"{path}:{ln} ({side})")
+                noid_at.append((path, side, ln))
         if "ids" in legacy:
             member_names = set()
             free_names = {x for _, _, txt, _ in fc["legacy"] for x in re.findall(r"[A-Za-z_]\w*", txt) if len(x) > 2} - DECL_NOISE
@@ -311,6 +403,10 @@ def analyze(changes, m, new_rev, old_rev, legacy=()):
             # the declared names; if none is found, every function of those files
             # mt-p1 pass 4 (REVIEW3 noted V4 / V4b): a .inc is included like a header (unicode_tables.inc)
             scope = [path] + (m["includers"].get(path, []) if path.endswith((".h", ".inc")) else [])
+            # mt-p1 pass 5 (review4 A2, R4-18 / R4-19): also the files that included it in the OLD tree (an includer
+            # that switched its #include, or the includers of a deleted / split header, still compile the old users)
+            if ch["old_path"].endswith((".h", ".inc")):
+                scope += sorted(set(tus_at("old")[2](ch["old_path"])) - set(scope))
             users = {}
             scans = {}
             fsrc = {}
@@ -391,6 +487,7 @@ def analyze(changes, m, new_rev, old_rev, legacy=()):
                     if f in srcs and f"{exe}:{n}" in m["tests"]:
                         tests.add(f"{exe}:{n}")
             if prod:
+                users_by_file[path] = sorted(f"{f}::{n}" for f, n in prod)
                 for f, n in sorted(prod):
                     d = F[f"{f}::{n}"]
                     for p in d["paths"]:
@@ -437,6 +534,8 @@ def analyze(changes, m, new_rev, old_rev, legacy=()):
     rep["declarations"] = decl_rows
     rep["dropped_ids"] = dropped_ids
     rep["noid_lines"] = noid_lines
+    rep["noid_at"] = noid_at
+    rep["decl_users"] = users_by_file
     rep["map_defects"] = defects
     rep.update(module_gate(changes, rep=rep, m=m))
     return rep

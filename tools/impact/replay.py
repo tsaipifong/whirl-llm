@@ -69,6 +69,9 @@ for s in git("log", "--format=%h", "--no-merges", f"--skip={a.skip}", f"-{a.n}",
               "cpu": sorted(f"{e}:{x}" for e, v in r["cpu_tests"].items() for x in v), "kt": sorted(r["kernel_tests"]),
               # measure-tools P1: what the declared-name rule saw (absent in older tools): declared names, moved notes
               "decl": sorted({d["name"] for d in r.get("declarations", [])}),
-              "moved": sum(1 for n in r["notes"] if "moved / re-indented" in n), "defects": r.get("map_defects", [])}
+              "moved": sum(1 for n in r["notes"] if "moved / re-indented" in n), "defects": r.get("map_defects", []),
+              # mt-p1 pass 5 (review4 C1): the evidence validate --pass-json needs for R-fallback-resolved (users found per
+              # changed file; the changed product files) - absent with older tools, which then cannot pass that rule
+              "users": r.get("decl_users", {}), "files": sorted(prod)}
 json.dump(res, open(a.out, "w", encoding="utf-8"), indent=0)
 print(f"replay: {len(res)} commits, {round(time.time() - t0)} s ({a.tools})", file=sys.stderr)
