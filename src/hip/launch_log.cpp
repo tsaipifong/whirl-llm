@@ -31,7 +31,10 @@ std::string folder() { return platform::env::get("WHIRL_LAUNCH_LOG").value_or(st
 
 }  // namespace
 
+// bug-launchlogroot: no folder, no file (llama.cpp common_log_set_file opens nothing without a path): "" + "\launch_"
+// would be the root of the current drive
 std::string exitPath(const std::string& dir, unsigned long pid, bool raw) {
+    if (dir.empty()) return std::string();
     return dir + "\\launch_" + std::to_string(pid) + (raw ? ".raw.txt" : ".txt");
 }
 
@@ -144,6 +147,7 @@ struct Recorder {
         const unsigned long pid = 0;
 #endif
         const std::string path = exitPathNow(pid, false);
+        if (path.empty()) return;  // the folder was cleared after the static initializer saw it: write nothing
         std::FILE* f = std::fopen(path.c_str(), "wb");
         if (f == nullptr) return;
         std::fprintf(f, "# whirl launch log v1\n# cmd: %s\n# launches %llu seqhash %016llx kinds %zu\n", cmd.c_str(),
@@ -160,6 +164,7 @@ struct Recorder {
         std::fclose(f);
         if (!raw_on) return;
         const std::string rp = exitPathNow(pid, true);
+        if (rp.empty()) return;
         std::FILE* g = std::fopen(rp.c_str(), "wb");
         if (g == nullptr) return;
         for (const std::string& l : raw_lines) std::fprintf(g, "%s\n", l.c_str());

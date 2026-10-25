@@ -45,7 +45,8 @@ inline constexpr std::size_t kMaxLines = 200000;
 void testEnable(bool on, bool list, std::size_t max_lines = kMaxLines);
 std::string testText();
 
-// bug-launchlogroot: the file the exit writer opens, <folder>\alloc_<pid>.txt. exitPathNow reads WHIRL_ALLOC_LOG at
+// bug-launchlogroot: the file the exit writer opens, <folder>\alloc_<pid>.txt; "" when the folder is empty, and then
+// nothing is written (it used to be "\alloc_<pid>.txt", the current drive's root). exitPathNow reads WHIRL_ALLOC_LOG at
 // the call, as the exit writer does.
 std::string exitPath(const std::string& dir, unsigned long pid);
 std::string exitPathNow(unsigned long pid);

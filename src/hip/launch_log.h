@@ -64,7 +64,8 @@ RawStats rawStats();
 void testRaw(bool on, std::size_t max_lines);
 void testRawPush(const char* line);
 
-// bug-launchlogroot: the file the exit writer opens, <folder>\launch_<pid>.txt (raw: launch_<pid>.raw.txt).
+// bug-launchlogroot: the file the exit writer opens, <folder>\launch_<pid>.txt (raw: launch_<pid>.raw.txt); "" when
+// the folder is empty, and then nothing is written (it used to be "\launch_<pid>.txt", the current drive's root).
 // exitPathNow reads WHIRL_LAUNCH_LOG at the call, as the exit writer does (the unit tests clear WHIRL_* in main).
 std::string exitPath(const std::string& dir, unsigned long pid, bool raw);
 std::string exitPathNow(unsigned long pid, bool raw);

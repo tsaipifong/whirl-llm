@@ -28,7 +28,9 @@ std::string folder() { return platform::env::get("WHIRL_ALLOC_LOG").value_or(std
 
 }  // namespace
 
+// bug-launchlogroot: no folder, no file ("" + "\alloc_" would be the root of the current drive)
 std::string exitPath(const std::string& dir, unsigned long pid) {
+    if (dir.empty()) return std::string();
     return dir + "\\alloc_" + std::to_string(pid) + ".txt";
 }
 
@@ -172,6 +174,7 @@ struct Recorder {
         const unsigned long pid = 0;
 #endif
         const std::string path = exitPathNow(pid);
+        if (path.empty()) return;  // the folder was cleared after the static initializer saw it: write nothing
         std::FILE* f = std::fopen(path.c_str(), "wb");
         if (f == nullptr) return;
         const std::string body = text();
