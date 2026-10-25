@@ -10,7 +10,8 @@
 //         block_bytes (kv_tier.h:73) in flight, one manual-reset event each, completed in issue order.
 // Variants beyond the product: buffered (flags 0), unbuffered_wt (NO_BUFFERING|WRITE_THROUGH, Microsoft's documented
 // durable pattern; kv_tier does NOT use WRITE_THROUGH), write at QD4 (the IO thread writes QD1), read at QD1.
-// PL2 (platform::fs::PosFile) will own these calls; then this layer should call it instead of mirroring it.
+// arch025-PL2-T1: Win32Fs calls these through src/platform/fs (PL2), the layer kv_tier.cpp itself calls, with the
+// same CreateFileW integers as before (pinned by the ssd open table in host_bench ssdSelfChecks).
 //
 // Fs implementations: Win32Fs (real files) and FakeFs (in memory; counts every call, records open flags, tracks the
 // in-flight depth, stores bytes) for the CPU selftest.
@@ -26,6 +27,8 @@
 #ifndef IOCTL_STORAGE_QUERY_PROPERTY
 #include <winioctl.h>
 #endif
+
+#include "platform/fs.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -108,50 +111,62 @@ public:
     }
 };
 
-// ------------------------------------------------------------------ Win32 (real files)
+// ------------------------------------------------------------------ Win32 (real files, through platform::fs)
+// arch025-PL2-T1: every call goes through src/platform/fs (fs_win.cpp), the layer kv_tier.cpp calls since PL2, with
+// the arguments the pre-PL2 Win32Fs passed to Win32 directly (T1 07c9e89 / 0ced8bf):
+//   write open  CreateFileW(GENERIC_READ|GENERIC_WRITE, FILE_SHARE_READ, OPEN_ALWAYS, openFlags(m, qd)) -> fs::open
+//   read open   CreateFileW(GENERIC_READ, FILE_SHARE_READ|FILE_SHARE_WRITE, OPEN_EXISTING, openFlags(m, qd)) -> fs::open
+//   FSCTL_SET_SPARSE -> fs::setSparse; QD1 WriteFile / ReadFile with an offset-only OVERLAPPED -> fs::writeAt / readAt;
+//   QD4 read: CreateEventW(manual, unsignaled) / ResetEvent / ReadFile(nullptr count, &ov) / GetOverlappedResult(wait)
+//   -> fs::createEvent / prepare / resetEvent / readAsync / overlappedResult; FlushFileBuffers -> fs::flush;
+//   DeleteFileW -> fs::remove; CloseHandle -> fs::close; GetFileAttributesW (exists) -> fs::attributes.
+// Not in platform::fs (kv_tier never does it): the overlapped WRITE of the qd>1 write variants. It stays a direct
+// WriteFile on the fs handle with the fs::Overlapped storage prepared by fs::prepare (non-product cells only).
+// The table test (host_bench ssdSelfChecks, "ssd open table") records every fs::open through fs::fake and compares
+// the integers with the pre-PL2 table.
+namespace pfs = whirl::platform::fs;
+
 class Win32File final : public File {
 public:
-    Win32File(Fs& fs, HANDLE h, int qd) : fs_(fs), h_(h), qd_(qd), ov_(static_cast<std::size_t>(qd)), got_(static_cast<std::size_t>(qd)),
-                                          res_(static_cast<std::size_t>(qd)), ev_(static_cast<std::size_t>(qd), nullptr) {
+    Win32File(Fs& fs, pfs::Handle h, int qd) : fs_(fs), h_(h), qd_(qd), ov_(static_cast<std::size_t>(qd)), got_(static_cast<std::size_t>(qd)),
+                                               res_(static_cast<std::size_t>(qd)), ev_(static_cast<std::size_t>(qd), nullptr) {
         if (qd_ > 1)
-            for (auto& e : ev_) e = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+            for (auto& e : ev_) e = pfs::createEvent();
     }
     ~Win32File() override {
-        for (HANDLE e : ev_)
-            if (e != nullptr) CloseHandle(e);
-        CloseHandle(h_);
+        for (pfs::Handle e : ev_)
+            if (e != nullptr) pfs::close(e);
+        pfs::close(h_);
         std::lock_guard<std::mutex> lk(fs_.mu);
         fs_.c.closes += 1;
     }
     bool ok() const {
-        for (HANDLE e : ev_)
+        for (pfs::Handle e : ev_)
             if (qd_ > 1 && e == nullptr) return false;
         return true;
     }
     bool submit(int slot, bool write, void* buf, std::uint32_t len, std::uint64_t off) override {
         fs_.onSubmit(write, len, off);
-        OVERLAPPED& ov = ov_[static_cast<std::size_t>(slot)];
-        ov = OVERLAPPED{};
-        ov.Offset = static_cast<DWORD>(off);
-        ov.OffsetHigh = static_cast<DWORD>(off >> 32);
+        const std::size_t k = static_cast<std::size_t>(slot);
         if (qd_ <= 1) {
             // synchronous handle: kv_tier writeAt / readAt (the call returns when the I/O is done)
-            DWORD n = 0;
-            const BOOL r = write ? WriteFile(h_, buf, len, &n, &ov) : ReadFile(h_, buf, len, &n, &ov);
-            got_[static_cast<std::size_t>(slot)] = n;
-            res_[static_cast<std::size_t>(slot)] = r != 0 || GetLastError() == ERROR_HANDLE_EOF;
+            std::uint32_t n = 0;
+            const bool r = write ? pfs::writeAt(h_, buf, len, off, &n) : pfs::readAt(h_, buf, len, off, &n);
+            got_[k] = n;
+            res_[k] = r || pfs::lastError() == pfs::kErrHandleEof;
             return true;
         }
-        ov.hEvent = ev_[static_cast<std::size_t>(slot)];
-        ResetEvent(ov.hEvent);
-        const BOOL r = write ? WriteFile(h_, buf, len, nullptr, &ov) : ReadFile(h_, buf, len, nullptr, &ov);
-        res_[static_cast<std::size_t>(slot)] = true;
-        if (r == 0) {
-            const DWORD err = GetLastError();
-            if (err != ERROR_IO_PENDING) {
+        pfs::prepare(ov_[k], off, ev_[k]);  // zeroed, offset, hEvent (the pre-PL2 order: then ResetEvent, then I/O)
+        pfs::resetEvent(ev_[k]);
+        const bool r = write ? (WriteFile(static_cast<HANDLE>(h_), buf, len, nullptr, reinterpret_cast<OVERLAPPED*>(ov_[k].raw)) != 0)
+                             : pfs::readAsync(h_, buf, len, ov_[k]);
+        res_[k] = true;
+        if (!r) {
+            const int err = pfs::lastError();
+            if (err != pfs::kErrIoPending) {
                 fs_.onDone();
                 fs_.onError();
-                res_[static_cast<std::size_t>(slot)] = false;
+                res_[k] = false;
                 return false;
             }
         }
@@ -163,8 +178,8 @@ public:
         if (qd_ <= 1) {
             *got = got_[k];
         } else {
-            DWORD n = 0;
-            if (GetOverlappedResult(h_, &ov_[k], &n, TRUE) == 0 && GetLastError() != ERROR_HANDLE_EOF) ok = false;
+            std::uint32_t n = 0;
+            if (!pfs::overlappedResult(h_, ov_[k], &n, true) && pfs::lastError() != pfs::kErrHandleEof) ok = false;
             *got = n;
         }
         fs_.onDone();
@@ -176,38 +191,44 @@ public:
             std::lock_guard<std::mutex> lk(fs_.mu);
             fs_.c.flushes += 1;
         }
-        return FlushFileBuffers(h_) != 0;
+        return pfs::flush(h_);
     }
 
 private:
     Fs& fs_;
-    HANDLE h_;
+    pfs::Handle h_;
     int qd_;
-    std::vector<OVERLAPPED> ov_;
-    std::vector<DWORD> got_;
+    std::vector<pfs::Overlapped> ov_;
+    std::vector<std::uint32_t> got_;
     std::vector<bool> res_;
-    std::vector<HANDLE> ev_;
+    std::vector<pfs::Handle> ev_;
 };
+
+// CreateFileW arguments of the two opens (the pre-PL2 Win32Fs / kv_tier.cpp values; fs_win.cpp static_asserts the
+// constants against <windows.h>)
+constexpr std::uint32_t kWriteAccess = pfs::kGenericRead | pfs::kGenericWrite;
+constexpr std::uint32_t kWriteShare = pfs::kShareRead;
+constexpr std::uint32_t kWriteDisp = pfs::kOpenAlways;
+constexpr std::uint32_t kReadAccess = pfs::kGenericRead;
+constexpr std::uint32_t kReadShare = pfs::kShareRead | pfs::kShareWrite;
+constexpr std::uint32_t kReadDisp = pfs::kOpenExisting;
 
 class Win32Fs final : public Fs {
 public:
     std::unique_ptr<File> open(const std::wstring& path, bool write, Mode m, int qd) override {
         const DWORD fl = openFlags(m, qd);
-        HANDLE h = write ? CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ, nullptr, OPEN_ALWAYS, fl, nullptr)
-                         : CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, fl, nullptr);
+        pfs::Handle h = write ? pfs::open(path.c_str(), kWriteAccess, kWriteShare, kWriteDisp, fl)
+                              : pfs::open(path.c_str(), kReadAccess, kReadShare, kReadDisp, fl);
         {
             std::lock_guard<std::mutex> lk(mu);
             c.last_flags = fl;
-            if (h == INVALID_HANDLE_VALUE) {
+            if (!pfs::valid(h)) {
                 c.errors += 1;
                 return nullptr;
             }
             c.opens += 1;
         }
-        if (write) {
-            DWORD br = 0;  // kv_tier.cpp:2414 (sparse: dedup holes)
-            DeviceIoControl(h, FSCTL_SET_SPARSE, nullptr, 0, nullptr, 0, &br, nullptr);
-        }
+        if (write) pfs::setSparse(h);  // kv_tier.cpp:2414 (sparse: dedup holes); result ignored as before
         auto f = std::make_unique<Win32File>(*this, h, qd);
         if (!f->ok()) return nullptr;
         return f;
@@ -217,11 +238,14 @@ public:
             std::lock_guard<std::mutex> lk(mu);
             c.removes += 1;
         }
-        if (DeleteFileW(path.c_str()) != 0) return true;
-        const DWORD e = GetLastError();
-        return e == ERROR_FILE_NOT_FOUND || e == ERROR_PATH_NOT_FOUND;
+        if (pfs::remove(path.c_str())) return true;
+        const int e = pfs::lastError();
+        return e == pfs::kErrFileNotFound || e == pfs::kErrPathNotFound;
     }
-    bool exists(const std::wstring& path) override { return GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES; }
+    bool exists(const std::wstring& path) override {
+        pfs::Attributes a;
+        return pfs::attributes(path.c_str(), &a);
+    }
     const char* name() const override { return "win32"; }
 };
 

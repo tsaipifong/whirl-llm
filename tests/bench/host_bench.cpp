@@ -24,7 +24,8 @@
 //             unbuffered_wt, QD1 / QD4, real files in --ssd-dir (refused on D: / E: / a drive root; deleted after every
 //             cell). --backend hip = pinned host buffers (the tier arena's memory), null = aligned heap. --selftest runs
 //             it over FakeFs (in memory: exact I/O counts, in-flight depth, offsets, read-back) and, with --ssd-dir, a
-//             4-block real round trip of every variant.
+//             4-block real round trip of every variant and the ssd open table (every Win32Fs open, recorded by
+//             platform::fs::fake, against the pre-PL2 CreateFileW integers). Real files go through src/platform/fs (PL2).
 // The GGUF is read for its tokenizer only (MockModel needs one); default WHIRL_TEST_GGUF. Suites prefix / handles /
 // copy need none.
 //
@@ -46,6 +47,7 @@
 
 #include "bench_out.h"
 #include "ssd_io.h"
+#include "platform/fs_fake.h"  // the ssd open table (arch025-PL2-T1)
 #include "http_client.h"
 #include "mock_backend.h"
 
@@ -1303,6 +1305,66 @@ void ssdSelfChecks(ssd::FakeFs& fake, const std::wstring& real_dir, device::Back
         EXPECT(!w32.exists(p));
         EXPECT(w32.c.opens == w32.c.closes);
         std::printf("ssd selftest: real round trip in %s: %d/%d ok, file removed: %s\n", narrow(real_dir).c_str(), ok, n, w32.exists(p) ? "NO" : "yes");
+
+        // ssd open table (arch025-PL2-T1): every open of Win32Fs goes through platform::fs; fs::fake records the
+        // CreateFileW arguments. The expected rows are LITERAL integers of the pre-PL2 Win32Fs (T1 07c9e89, which
+        // called CreateFileW itself): write GENERIC_READ|GENERIC_WRITE (0xC0000000), FILE_SHARE_READ (1), OPEN_ALWAYS
+        // (4); read GENERIC_READ (0x80000000), FILE_SHARE_READ|FILE_SHARE_WRITE (3), OPEN_EXISTING (3); flags per
+        // (mode, qd) as printed in the T1 baseline (scratch\a25_t1\summary_t1gpu_*.txt "flags").
+        struct Row {
+            sd::Mode m;
+            int qd;
+            bool write;
+            std::uint32_t access, share, disp, flags;
+        };
+        const Row table[] = {
+            {sd::Mode::unbuffered, 1, true, 0xC0000000u, 1, 4, 0x20000000u},     // product write (kv_tier)
+            {sd::Mode::unbuffered, 1, false, 0x80000000u, 3, 3, 0x20000000u},
+            {sd::Mode::unbuffered, 4, true, 0xC0000000u, 1, 4, 0x60000000u},
+            {sd::Mode::unbuffered, 4, false, 0x80000000u, 3, 3, 0x60000000u},    // product read (kv_tier)
+            {sd::Mode::unbuffered_wt, 1, true, 0xC0000000u, 1, 4, 0xA0000000u},
+            {sd::Mode::unbuffered_wt, 1, false, 0x80000000u, 3, 3, 0xA0000000u},
+            {sd::Mode::unbuffered_wt, 4, true, 0xC0000000u, 1, 4, 0xE0000000u},
+            {sd::Mode::unbuffered_wt, 4, false, 0x80000000u, 3, 3, 0xE0000000u},
+            {sd::Mode::buffered, 1, true, 0xC0000000u, 1, 4, 0x00000000u},
+            {sd::Mode::buffered, 1, false, 0x80000000u, 3, 3, 0x00000000u},
+            {sd::Mode::buffered, 4, true, 0xC0000000u, 1, 4, 0x40000000u},
+            {sd::Mode::buffered, 4, false, 0x80000000u, 3, 3, 0x40000000u},
+        };
+        const std::wstring tp = real_dir + L"\\t1ssd_table_" + std::to_wstring(GetCurrentProcessId()) + L".wkv";
+        int match = 0, rows = 0, sparse_ok = 0, writes = 0;
+        whirl::platform::fs::fake::begin();
+        for (const Row& r : table) {
+            ++rows;
+            if (r.write) w32.remove(tp);
+            auto f = w32.open(tp, r.write, r.m, r.qd);
+            if (r.write) {
+                ++writes;
+                const DWORD at = GetFileAttributesW(tp.c_str());  // FSCTL_SET_SPARSE reached the file
+                if (f && at != INVALID_FILE_ATTRIBUTES && (at & FILE_ATTRIBUTE_SPARSE_FILE) != 0) ++sparse_ok;
+            }
+        }
+        const std::vector<whirl::platform::fs::fake::Open> rec = whirl::platform::fs::fake::end();
+        w32.remove(tp);
+        for (std::size_t i = 0; i < std::size(table); ++i) {
+            const Row& r = table[i];
+            const bool have = i < rec.size();
+            const bool same = have && rec[i].ok && rec[i].path == tp && rec[i].access == r.access && rec[i].share == r.share &&
+                              rec[i].disposition == r.disp && rec[i].flags == r.flags;
+            if (same) ++match;
+            std::printf("ssd open table: %-5s %-13s qd %d  want access 0x%08X share %u disp %u flags 0x%08X  got %s%s\n",
+                        r.write ? "write" : "read", sd::modeName(r.m), r.qd, r.access, r.share, r.disp, r.flags,
+                        have ? "" : "(no open recorded)", same ? "  SAME" : "  DIFFERENT");
+            if (have && !same)
+                std::printf("ssd open table:   got access 0x%08X share %u disp %u flags 0x%08X ok %d\n", rec[i].access, rec[i].share,
+                            rec[i].disposition, rec[i].flags, rec[i].ok ? 1 : 0);
+        }
+        EXPECT(rec.size() == std::size(table));  // no extra opens (one CreateFileW per Win32Fs::open)
+        EXPECT(match == rows);
+        EXPECT(sparse_ok == writes);
+        EXPECT(!w32.exists(tp));
+        std::printf("ssd open table: %d/%d opens identical to the pre-PL2 Win32Fs, %zu recorded, sparse %d/%d\n", match, rows, rec.size(),
+                    sparse_ok, writes);
     }
 }
 

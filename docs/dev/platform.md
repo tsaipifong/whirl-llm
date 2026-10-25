@@ -76,6 +76,12 @@ restore read) and compares each recorded open with the v0.2.4 0e35407 table writ
 `FILE_FLAG_WRITE_THROUGH` anywhere in 0e35407); `whirl-tests` `testFsMappedOpen` does the same for `MappedFile`.
 `testFsWriteFail`, `testFsShortRead` and `testFsVerifyNotBlind` cover the injected faults and the restore check.
 
+The SSD speed tool uses the same layer: `tests/bench/ssd_io.h` (`whirl-host-bench --suite ssd`, arch025 T1)
+opens, writes, reads, flushes and deletes its files through `platform::fs` with the CreateFileW integers its pre-PL2
+version passed to Win32 directly; `--selftest --suite ssd --ssd-dir DIR` prints the "ssd open table" (12 opens,
+recorded by FakeFs, compared with literal values) and fails on any difference. Only its non-product QD4 *write*
+variant calls WriteFile on the fs handle itself (kv_tier never writes overlapped, so `fs.h` has no such call).
+
 ## CMake
 
 `cmake/platform.cmake` defines `whirl_platform` (STATIC). It is the bottom layer: it links no other WHIRL target.
