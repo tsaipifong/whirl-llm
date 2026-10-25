@@ -354,6 +354,12 @@ public:
 
     // Start restoring entry e (nullptr: cannot). Poll with pumpRestore.
     Restore* beginRestore(Entry* e, std::span<const Span> spans, std::size_t n_main_spans);
+    // arch025-k2warn (bug:k2-8060s-p1): true when beginRestore can never read e because the SSD-only entry's
+    // extent needs more arena blocks than the whole RAM tier has (the ensureBlocks "missing > n_blocks_" case).
+    // Diagnostics only (the caller logs it); it changes nothing.
+    bool tooBigForRam(const Entry* e) const;
+    // The RAM tier's arena (all blocks), bytes.
+    std::uint64_t arenaBytes() const { return static_cast<std::uint64_t>(n_blocks_) * block_bytes; }
     // Start reading SSD-only entry e into RAM ahead of its restore.
     bool prefetch(Entry* e);
     // Enqueue the pieces whose blocks are in RAM; true once the request's
