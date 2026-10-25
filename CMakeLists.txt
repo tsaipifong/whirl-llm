@@ -116,6 +116,9 @@ add_library(whirl STATIC
   src/chat/chat_template.cpp
 )
 target_include_directories(whirl PUBLIC ${CMAKE_SOURCE_DIR}/include)
+# platform layer (arch025 PL0): linked now so PL1-PL4 only add sources to cmake/platform.cmake
+include(cmake/platform.cmake)
+target_link_libraries(whirl PUBLIC whirl_platform)
 
 if(WHIRL_WITH_HIP)
   # the arch list is baked into the generated table of embedded code objects

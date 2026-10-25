@@ -5,9 +5,11 @@ steps remove. Report mode now; a later step switches a check to block mode (PL5 
 in forward / engine, M6 arch).
 
 Rules (sources under src/ and include/; comments and string literals are not code):
-  platform  a Windows / CRT-platform header (#include <windows.h>, <winsock2.h>, <shlobj.h>, <io.h>, ...) outside
-            the platform layer: allowed in src/platform/, src/hip/ (the HIP runtime's own DXGI / PDH / LoadLibrary
-            code, ADR-0004 #5) and src/release/dll_deps.cpp.
+  platform  a Windows / CRT-platform header (#include <windows.h>, <winsock2.h>, <shlobj.h>, <io.h>, ...) or (PL0) a
+            Win32 / Winsock / CRT-platform call (PLATFORM_CALL) outside the platform layer: allowed in the
+            implementation files of src/platform/ (*_win.cpp), src/hip/ (the HIP runtime's own DXGI / PDH /
+            LoadLibrary code, ADR-0004 #5), src/release/dll_deps.cpp and the vendored src/vision/stb_image.h; the
+            headers src/platform/*.h are checked too (they must stay platform-free, ADR-0004 #5).
   include   whirl_server_core (cmake/server.cmake) reaches include/whirl/model.h through its sources or the repo
             headers they include (transitively); one site per (core source, header chain). M3 makes it block.
   env       a process-environment read (getenv / _dupenv_s / _wgetenv / GetEnvironmentVariable / GetEnvironmentStrings
@@ -42,13 +44,50 @@ PLATFORM_HDR = re.compile(
     r"pdhmsg|dxgi[0-9_]*|d3dkmthk|tlhelp32|winternl|processthreadsapi|synchapi|sysinfoapi|fileapi|handleapi|"
     r"io|direct|conio|wincrypt|bcrypt|iphlpapi|mmsystem|timeapi|winioctl|ntstatus|dbghelp|objbase|combaseapi)\.h>",
     re.I)
+# arch025-PL0: Win32 / CRT-platform calls, so a pending file that already includes <windows.h> cannot grow a new OS
+# call unnoticed (S0a matched include lines only). Code text only (comments / strings stripped). Three parts:
+#  1. any CamelCase identifier ending in the Win32 Unicode suffix W / ExW / ExA called as a function (CreateFileW,
+#     GetFileAttributesExW, ...): no WHIRL function is named like that (0 false hits on 62b9e9c);
+#  2. a fixed list of Win32 / Winsock / CRT-platform names without that suffix (extend it when PL1-PL4 meet one);
+#  3. the BSD socket names that are also ordinary words (socket, bind, listen, accept, recv, send, select, shutdown,
+#     connect) only when written with the global qualifier (::recv); unqualified ones are covered by the
+#     <winsock2.h> include of the file (a std::bind / a lambda named accept is not an OS call).
+# A member call (x.send(), p->ReadFile()) or a qualified one (std::bind, Foo::Sleep) is not counted.
+PLATFORM_NAMES = (
+    "CloseHandle|ReadFile|WriteFile|ReadFileEx|WriteFileEx|FlushFileBuffers|SetEndOfFile|SetFilePointerEx|GetFileSizeEx|"
+    "GetFileTime|SetFileTime|GetFileType|LockFileEx|UnlockFileEx|GetOverlappedResult|CancelIoEx|DeviceIoControl|"
+    "MapViewOfFile|UnmapViewOfFile|FindClose|GetLastError|SetLastError|WaitForSingleObject|WaitForMultipleObjects|"
+    "SetEvent|ResetEvent|ReleaseMutex|ReleaseSemaphore|Sleep|SleepEx|SwitchToThread|GetCurrentProcess|"
+    "GetCurrentProcessId|GetCurrentThread|GetCurrentThreadId|OpenProcess|TerminateProcess|ExitProcess|"
+    "GetExitCodeProcess|DuplicateHandle|SetPriorityClass|SetThreadPriority|CreateThread|GetStdHandle|GetConsoleMode|"
+    "SetConsoleMode|GetConsoleOutputCP|SetConsoleOutputCP|GetConsoleCP|SetConsoleCP|SetConsoleCtrlHandler|"
+    "GlobalMemoryStatusEx|GetSystemInfo|GetNativeSystemInfo|K32GetProcessMemoryInfo|GetProcessMemoryInfo|"
+    "QueryPerformanceCounter|QueryPerformanceFrequency|GetTickCount|GetTickCount64|GetLocalTime|GetSystemTime|"
+    "GetSystemTimeAsFileTime|timeBeginPeriod|timeEndPeriod|timeGetTime|MultiByteToWideChar|WideCharToMultiByte|"
+    "VirtualAlloc|VirtualFree|VirtualLock|VirtualUnlock|VirtualQuery|HeapAlloc|HeapFree|LocalFree|GlobalFree|"
+    "LoadLibrary|GetProcAddress|FreeLibrary|CoTaskMemFree|InitializeCriticalSection|EnterCriticalSection|"
+    "LeaveCriticalSection|DeleteCriticalSection|CreateIoCompletionPort|GetQueuedCompletionStatus|"
+    "PostQueuedCompletionStatus|MAKEWORD|"
+    "WSA[A-Z]\\w*|closesocket|setsockopt|getsockopt|ioctlsocket|getaddrinfo|freeaddrinfo|GetAddrInfoW|FreeAddrInfoW|"
+    "inet_pton|inet_ntop|getpeername|getsockname|"
+    "_setmode|_fileno|_isatty|_get_osfhandle|_open_osfhandle|_wfopen|_wfopen_s|_wopen|_wstat|_wstat64|_wstati64|"
+    "_waccess|_wmkdir|_wrmdir|_wremove|_wrename|_wunlink|_wputenv|_putenv|_putenv_s|_commit|_chsize_s|_locking|"
+    "_getpid|_beginthreadex")
+PLATFORM_CALL = re.compile(
+    r"(?<![\w.>:])(?:"
+    r"[A-Z][a-z]+(?:[A-Z][a-z0-9]*)*[a-z0-9](?:W|ExW|ExA)"
+    r"|(?:" + PLATFORM_NAMES + r")"
+    r"|::(?:socket|bind|listen|accept|recv|send|select|shutdown|connect)"
+    r")\s*\(")
+PLATFORM_HEADER_EXTS = {".h", ".hpp", ".inl", ".cuh"}
 ENV_READ = re.compile(
     r"\b(?:getenv|_wgetenv|_dupenv_s|_wdupenv_s|GetEnvironmentVariable[AW]?|GetEnvironmentStrings[AW]?|envGet|envFlag|"
     r"envOn)\s*\(|(?<![\w.:>])env\s*\(\s*\"")
 ARCH = re.compile(r"\bArch::gfx\d+\b")
 
 RULES = {
-    "platform": {"allowed": ["src/platform/", "src/hip/", "src/release/dll_deps.cpp"], "what": "platform header"},
+    "platform": {"allowed": ["src/platform/", "src/hip/", "src/release/dll_deps.cpp", "src/vision/stb_image.h"],
+                 "what": "platform header / OS call"},
     "include": {"allowed": [], "what": "server core reaches model.h"},
     "env": {"allowed": ["src/platform/", "src/config/env_snapshot."], "what": "env read"},
     "arch": {"allowed": ["src/hip/", "include/whirl/hip.h", "include/whirl/device_profile.h", "src/model/device.cpp"],
@@ -120,16 +159,22 @@ def line_hits(root: str, rule: str) -> dict[str, list[tuple[int, str]]]:
     """path -> [(line, text)] for the regex rules."""
     hits: dict[str, list[tuple[int, str]]] = {}
     for r in sources(root):
-        if allowed(rule, r):
+        # the platform layer's own headers are not exempt: they must not include a platform header or call the OS
+        platform_hdr = (rule == "platform" and r.startswith("src/platform/")
+                        and os.path.splitext(r)[1].lower() in PLATFORM_HEADER_EXTS)
+        if allowed(rule, r) and not platform_hdr:
             continue
         text = read(root, r)
         raw = text.split("\n")
         if rule == "platform":
             # include lines are matched on the raw text (strip_code keeps <...> but blanks "..." headers; the
-            # platform headers are all <...>), comment-only lines are skipped via the stripped text
+            # platform headers are all <...>), comment-only lines are skipped via the stripped text; OS calls are
+            # matched on the stripped text (one site per call)
             code = strip_code(text).split("\n")
             for i, l in enumerate(raw):
                 if PLATFORM_HDR.match(l) and code[i].strip():
+                    hits.setdefault(r, []).append((i + 1, l.strip()))
+                for _ in PLATFORM_CALL.finditer(code[i]):
                     hits.setdefault(r, []).append((i + 1, l.strip()))
             continue
         pat = ENV_READ if rule == "env" else ARCH
@@ -330,6 +375,31 @@ def selftest() -> int:
          f"src/a.cpp{T}2{T}PL1\n", "block", 1)
     case("fewer than pending: STALE", "platform", {"src/a.cpp": "#include <windows.h>\n"}, f"src/a.cpp{T}2{T}PL1\n", "block", 1)
     case("malformed pending is a usage error", "platform", {"src/a.cpp": "\n"}, "src/a.cpp two PL1\n", "block", 2)
+    # platform, PL0: OS calls and the platform layer's own headers
+    case("new OS call without a platform include blocked", "platform",
+         {"src/model/x.cpp": "void f() { auto h = CreateFileW(p, 0, 0, nullptr, 3, 0, nullptr); }\n"}, None, "block", 1)
+    case("same in report mode exits 0", "platform",
+         {"src/model/x.cpp": "void f() { CreateFileW(p, 0, 0, nullptr, 3, 0, nullptr); }\n"}, None, "report", 0)
+    case("one more OS call in a pending file: GROWN", "platform",
+         {"src/a.cpp": "#include <windows.h>\nvoid f() { CloseHandle(h); }\nvoid g() { ReadFile(h, b, n, &r, nullptr); }\n"},
+         f"src/a.cpp{T}2{T}PL2\n", "block", 1)
+    case("pending counts include + calls exactly", "platform",
+         {"src/a.cpp": "#include <winsock2.h>\nint f() { WSAStartup(MAKEWORD(2, 2), &d); return ::recv(s, b, 1, 0); }\n"},
+         f"src/a.cpp{T}4{T}PL3\n", "block", 0)
+    case("not OS calls: member, qualified, std::bind, a lambda named accept, comment, string", "platform",
+         {"src/a.cpp": "x.send(b); p->ReadFile(); Foo::Sleep(1); auto g = std::bind(f, 1); if (accept(c)) {}\n"
+                       "// CreateFileW(p)\nconst char* s = \"GetLastError()\"; recv(s, b, 1, 0);\n"}, None, "block", 0)
+    case("OS calls in src/platform/*_win.cpp pass", "platform",
+         {"src/platform/fs_win.cpp": "#include <windows.h>\nvoid* o(const wchar_t* p) { return CreateFileW(p, 0, 0, nullptr, 3, 0, nullptr); }\n"},
+         None, "block", 0)
+    case("a src/platform header including windows.h blocked", "platform",
+         {"src/platform/fs.h": "#pragma once\n#include <windows.h>\n"}, None, "block", 1)
+    case("pass: skeleton shape (platform-free header, *_win.cpp, caller through the header)", "platform",
+         {"src/platform/fs.h": "#pragma once\nnamespace whirl::platform::fs { bool exists(const char* p); }\n",
+          "src/platform/fs_win.cpp": "#include \"platform/fs.h\"\n#include <windows.h>\n"
+                                     "bool whirl::platform::fs::exists(const char*) { return GetFileAttributesW(L\"x\") != 0; }\n",
+          "src/tier/t.cpp": "#include \"platform/fs.h\"\nbool e() { return whirl::platform::fs::exists(\"x\"); }\n"},
+         None, "block", 0)
     # env
     case("env reads blocked", "env", {"src/model/f.cpp": 'int a = envFlag("X", true);\nauto b = std::getenv("WHIRL_Y");\n'}, None, "block", 1)
     case("env helper with a string argument counts", "env", {"src/server/s.cpp": 'const auto kv = env("KV");\n'}, None, "block", 1)
@@ -364,6 +434,43 @@ def selftest() -> int:
     return 0
 
 
+def tree_test(root: str, rule: str = "platform") -> int:
+    """arch025-PL0: block / pass on a copy of the real tree with the real pending list. Pass: the copy as is.
+    Block: (1) a new file outside src/platform with one OS call, (2) one more OS call in a pending file."""
+    pending = os.path.join(GATES, f"{rule}_pending.txt")
+    base = tempfile.mkdtemp(prefix="whirl_pending_tree_")
+    fails = 0
+    try:
+        for d in ("src", "include"):
+            shutil.copytree(os.path.join(root, d), os.path.join(base, d))
+
+        def one(name, want):
+            nonlocal fails
+            lines: list[str] = []
+            rc = run(rule, base, pending, "block", out=lines.append)
+            ok = rc == want
+            fails += 0 if ok else 1
+            print(f"  {'ok  ' if ok else 'FAIL'} [{rule}/tree] {name}: rc {rc} (want {want}) | {lines[-1] if lines else ''}")
+
+        one("the tree with its pending list passes", 0)
+        probe = os.path.join(base, "src", "model", "pl0_probe.cpp")
+        with open(probe, "w", encoding="utf-8") as f:
+            f.write("unsigned long long now() { return GetTickCount64(); }\n")
+        one("a new OS call in a new file outside src/platform (not pending) is blocked", 1)
+        os.remove(probe)
+        http = os.path.join(base, "src", "server", "http.cpp")
+        with open(http, "a", encoding="utf-8") as f:
+            f.write("\nstatic void pl0Probe(void* h) { CloseHandle(h); }\n")
+        one("one more OS call in a pending file (src/server/http.cpp) is blocked", 1)
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+    if fails:
+        print(f"pending_scan tree test: FAIL ({fails} of 3)")
+        return 1
+    print("pending_scan tree test: ok (3 cases)")
+    return 0
+
+
 def main(argv: list[str], rule_default: str | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("rule", nargs="?", default=rule_default)
@@ -372,9 +479,12 @@ def main(argv: list[str], rule_default: str | None = None) -> int:
     ap.add_argument("--mode", choices=["report", "block"], default="report")
     ap.add_argument("--write-pending", action="store_true")
     ap.add_argument("--selftest", action="store_true")
+    ap.add_argument("--tree-test", action="store_true", help="block / pass on a copy of --root (platform rule)")
     a = ap.parse_args(argv)
     if a.selftest:
         return selftest()
+    if a.tree_test:
+        return tree_test(a.root, a.rule or "platform")
     if not a.rule:
         print("check: FAIL (usage: name a rule: " + ", ".join(RULES) + ")")
         return 2
