@@ -12,8 +12,10 @@
 #   wddm   v0.2.2.1 (issues #5 / #6) / v0.2.2.2 (REVIEW-GOV-1 P2-3): the server went over the WDDM budget, GPU memory
 #          spilled, or the memory governor acted (gate runs have no other program taking VRAM). The warning lines
 #          themselves, not the "vram watch:" line that describes the rule.
-# -Step: srv_* -> wddm,owner; golden_* -> owner (golden.ps1 scans each server case itself); other steps: no scan (exit 0,
-#        "not a server step").
+#   exit   bug-server-exit-av: "E server exit: code 0x...", appended to the server's log by whirl-server-gate when the
+#          server exited with a non-zero code after Ctrl+C (0xC0000005: the teardown access violation in amdhip64_7.dll).
+# -Step: srv_* -> wddm,owner,exit; golden_* -> owner,exit (golden.ps1 scans each server case itself); other steps: no scan
+#        (exit 0, "not a server step").
 # Output: "server log scan: PASS|FAIL ..." (one line), then one "  <file>:<line>: <text>" line per match.
 # Exit: 0 pass (or not a server step); 1 a line matched; 2 no server log found (or the folder is missing); 3 usage.
 param(
@@ -26,13 +28,14 @@ $ErrorActionPreference = "Stop"
 $sets = [ordered]@{
     # the log line itself (src/server/log.cpp "yyyy-mm-dd HH:MM:SS.mmm L message"), not request text quoted in another line
     owner = "^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d{3} E owner check: "
+    exit  = "^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d{3} E server exit: "
     wddm  = "over the WDDM budget|GPU memory spill(:| continues| is over)|memory governor: .* free under the Windows video memory|memory governor: KV pool re-allocated"
 }
 $Patterns = @($Patterns | ForEach-Object { $_ -split "," } | Where-Object { $_ })
 if ($Step) {
     if ($Patterns.Count -gt 0) { Write-Host "server log scan: -Step and -Patterns together"; exit 3 }
-    if ($Step -like "srv_*") { $Patterns = @("wddm", "owner") }
-    elseif ($Step -like "golden_*") { $Patterns = @("owner") }
+    if ($Step -like "srv_*") { $Patterns = @("wddm", "owner", "exit") }
+    elseif ($Step -like "golden_*") { $Patterns = @("owner", "exit") }
     else { Write-Host "server log scan: PASS $Step is not a server step (no scan)"; exit 0 }
 }
 if ($Patterns.Count -eq 0) { $Patterns = @("owner") }

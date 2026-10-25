@@ -389,7 +389,7 @@ foreach ($mk in $Models) {
                 # arch024-S10 (PLAN M8): the case's server logs must hold no owner check violation ("E owner check:", a
                 # call into the engine state from another thread), and a case with no server log fails (the check must
                 # not pass vacuously). tools/gates/server_log_scan.ps1, owner set only: the WDDM lines stay release_gate's.
-                $scan = @(& (Join-Path $root "tools\gates\server_log_scan.ps1") -Dir $gw -Patterns owner *>&1 | ForEach-Object { "$_" })
+                $scan = @(& (Join-Path $root "tools\gates\server_log_scan.ps1") -Dir $gw -Patterns owner,exit *>&1 | ForEach-Object { "$_" })
                 $scanRc = $LASTEXITCODE
                 Write-Host "      $name $($scan[0])"
                 if ($scanRc -ne 0) {

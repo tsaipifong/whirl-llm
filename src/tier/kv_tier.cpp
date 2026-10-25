@@ -286,13 +286,25 @@ std::unique_ptr<Tier> Tier::create(device::Backend& ops, std::uint64_t ram_bytes
     return t;
 }
 
-Tier::~Tier() {
+void Tier::stopIo() {
     {
         std::lock_guard<std::mutex> lk(q_mutex_);
         stop_ = true;
     }
     q_cond_.notify_all();
     if (io_thread_.joinable()) io_thread_.join();
+    // the owner destroys the engine next: no tier-stream copy may still read (a spill) or write (a restore) its
+    // buffers then (llama.cpp ~llama_context: synchronize() before freeing). ~Tier waits again (nothing left then).
+    if (stream_) {
+        try {
+            ops_.streamSync(stream_.get());
+        } catch (...) {
+        }
+    }
+}
+
+Tier::~Tier() {
+    stopIo();
     if (dir_lock_ != nullptr) CloseHandle(static_cast<HANDLE>(dir_lock_));
     dir_lock_ = nullptr;
     // every job still known (finished or queued); restores must have ended

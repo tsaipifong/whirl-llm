@@ -241,11 +241,12 @@ public:
         if (loop_.joinable()) loop_.join();
         http_->stop();
         http_.reset();
-        engine_->attachTier(nullptr);
-        // FR-CACHE P3-5: the tier first (its destructor joins the IO thread, whose wake callback calls into
-        // the engine), then the engine -- the product's order (server_main declares the tier after the engine)
-        tier_.reset();
+        // bug-server-exit-av: the product's order (server_main declares the tiers before the engine and stops the
+        // tier IO thread first, TierIoStop): the IO thread stops (FR-CACHE P3-5: its wake callback calls into the
+        // engine), then the engine goes (its spill fences are recorded on the tier stream), then the tier
+        if (tier_) tier_->stopIo();
         engine_.reset();
+        tier_.reset();
         model_.reset();
     }
     // arch024 S3: shutdown() with a callback before each step ("tier": the tier is destroyed next, "engine", "model",
@@ -255,11 +256,11 @@ public:
         if (loop_.joinable()) loop_.join();
         http_->stop();
         http_.reset();
-        engine_->attachTier(nullptr);
-        at("tier");
-        tier_.reset();
+        if (tier_) tier_->stopIo();  // shutdown()'s order (bug-server-exit-av)
         at("engine");
         engine_.reset();
+        at("tier");
+        tier_.reset();
         at("model");
         model_.reset();
         at("end");
@@ -5245,13 +5246,15 @@ void testCkptEngineTeardown() {
             viol_after = srv.ops().pendingFreeViolations();
         }
     });
-    CHECK_EQ(viol_after, viol_engine);  // ~Engine freed nothing past a fence
+    // bug-server-exit-av order: "engine" (~Engine runs next), "tier" (~Tier next), "model"
+    CHECK_EQ(viol_tier, viol_engine);  // ~Engine freed nothing past a fence
+    CHECK_EQ(viol_after, viol_tier);   // ~Tier freed nothing past a fence
     for (const auto& v : srv.ops().violations())
         std::printf("  ckpt_engine_teardown: violation: stream %llu work %llu release #%llu %s\n", static_cast<unsigned long long>(v.stream),
                     static_cast<unsigned long long>(v.seq), static_cast<unsigned long long>(v.order), v.host ? "hostFree" : "free");
     // the number of syncs in ~Engine varies run to run (1 or 2: how many slots' spills were still unsynced); print only
     // whether one ran
-    std::printf("  ckpt_engine_teardown: violations before ~Tier %zu, before ~Engine %zu, after %zu; %s\n", viol_tier, viol_engine,
+    std::printf("  ckpt_engine_teardown: violations before ~Engine %zu, before ~Tier %zu, after %zu; %s\n", viol_engine, viol_tier,
                 viol_after,
                 syncs_after > syncs_engine ? "a spill was pending at ~Engine: the Slot / Spe wait ran"
                                            : "no spill pending at ~Engine");
