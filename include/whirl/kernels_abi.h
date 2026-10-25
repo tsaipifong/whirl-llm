@@ -554,6 +554,10 @@ struct AttnKernels {
     // KG-3 (gfx1151): q8 / q8h / q4 prefill on dequantized rows: the f16 attn_prefill_wmma and its
     // key-range variant attn_prefill_wmma_s (softmax state carried; null when not in the code object)
     F attn_pwf{}, attn_pws{};
+    // feat026-attn8s (gfx1151, opt-in WHIRL_ATTN_PF2=<cfg>): attn_pf2_<cfg>[_s] replace the f16 attn_prefill_wmma /
+    // attn_pwf / attn_pws (same arguments and bits); launch geometry per kernel: queries per block, threads
+    std::uint32_t pw_q = 128, pw_thr = 256;  // attn_prefill_wmma
+    std::uint32_t pf_q = 128, pf_thr = 256;  // attn_pwf / attn_pws
     // vision: attn_prep with multi-section RoPE positions (image prompts; KV-format
     // variant like attn_prep) and set_rpos(rpos, Rpos16 tab, n). Optional.
     F attn_prep_m{}, set_rpos{};

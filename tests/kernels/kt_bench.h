@@ -193,7 +193,7 @@ whirl::bench::Row abRow(const CellInfo& ci, const AbStats& ab, const std::string
 
 // ---------------------------------------------------------------- whirl-kernel-test --bench (bench_kernels.cpp)
 struct BenchOpts {
-    std::set<std::string> families;      // gemv gemvh gemm attn moe gdn
+    std::set<std::string> families;      // gemv gemvh gemm attn moe gdn attnpf
     std::string jsonl;                   // --jsonl FILE (appended)
     std::string ab_hsaco;                // --ab HSACO
     BenchCfg cfg;
@@ -204,7 +204,7 @@ struct BenchOpts {
     std::string state = "burst";         // declared power state (DESIGN (d))
     std::string tool_ver, code_hash, code_hash_b, gpu_arch, gpu_pci;
 };
-extern const char* const kBenchFamilies[6];
+extern const char* const kBenchFamilies[7];
 bool benchFamilyKnown(const std::string& f);
 struct Ctx;
 void runBench(Ctx& c, const BenchOpts& o);

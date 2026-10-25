@@ -268,11 +268,11 @@ AttnPrefillPlan chooseAttnPrefill(const AttnPrefillProblem& p, const AttnPrefill
             const u32 r1 = std::min(rows, r0 + seg), nr = r1 - r0;
             dqRange(r0, nr);
             if (r0 == 0 && r1 == rows) {  // all keys in one range: the plain f16 kernel
-                for (u32 q = 0; q < parts; ++q) attn(k.attn_pwf, D((n + 127) / 128, hp), D(256), q * hp, true, false, r0, r1);
+                for (u32 q = 0; q < parts; ++q) attn(k.attn_pwf, D((n + k.pf_q - 1) / k.pf_q, hp), D(k.pf_thr), q * hp, true, false, r0, r1);
                 break;
             }
             const u32 sp = headParts(nr), shp = n_head / sp;
-            for (u32 q = 0; q < sp; ++q) attn(k.attn_pws, D((n + 127) / 128, shp), D(256), q * shp, true, true, r0, r1);
+            for (u32 q = 0; q < sp; ++q) attn(k.attn_pws, D((n + k.pf_q - 1) / k.pf_q, shp), D(k.pf_thr), q * shp, true, true, r0, r1);
         }
         return pl;
     }
@@ -281,7 +281,7 @@ AttnPrefillPlan chooseAttnPrefill(const AttnPrefillProblem& p, const AttnPrefill
         for (u32 r0 = 0; r0 < rows; r0 += f.attn_seg) {
             const u32 r1 = std::min(rows, r0 + f.attn_seg), nr = r1 - r0;
             const u32 sp = headParts(nr), shp = n_head / sp;
-            for (u32 q = 0; q < sp; ++q) attn(k.attn_pws, D((n + 127) / 128, shp), D(256), q * shp, false, true, r0, r1);
+            for (u32 q = 0; q < sp; ++q) attn(k.attn_pws, D((n + k.pf_q - 1) / k.pf_q, shp), D(k.pf_thr), q * shp, false, true, r0, r1);
         }
         return pl;
     }
@@ -315,7 +315,8 @@ AttnPrefillPlan chooseAttnPrefill(const AttnPrefillProblem& p, const AttnPrefill
         if (kg != nullptr)
             attn(kg, D((n + 15) / 16, hp / np), D(64 * np), q * hp, false, false, 0, 0);
         else
-            attn(kx ? k.attn_kx : k.attn_prefill_wmma, D((n + 127) / 128, hp), D(kx ? 512 : 256), q * hp, false, false, 0, 0);
+            attn(kx ? k.attn_kx : k.attn_prefill_wmma, D(kx ? (n + 127) / 128 : (n + k.pw_q - 1) / k.pw_q, hp), D(kx ? 512 : k.pw_thr), q * hp, false, false, 0,
+                 0);
     }
     return pl;
 }

@@ -359,6 +359,9 @@ def main():
     ap.add_argument("--as", dest="as_", action="append", default=[], metavar="MODE=ARG",
                     help="negative test: run MODE with the CLI argument ARG (e.g. balance=--balance=fp8,moefp8,gdnwmma,h16,specsample), "
                          "judged by MODE's limits; the report never passes (pass false), so it cannot feed golden record")
+    ap.add_argument("--mode-env", dest="mode_env", action="append", default=[], metavar="MODE=VAR=VALUE",
+                    help="candidate test: set environment VAR=VALUE (a WHIRL_* A/B switch, e.g. WHIRL_ATTN_PF2=q8pz) for MODE's runs "
+                         "only (the precise reference keeps the defaults); judged by MODE's limits; the report never passes")
     ap.add_argument("--truncate", action="store_true",
                     help="prefill each prompt only up to the longest length (quick checks; same window numbers)")
     ap.add_argument("--noise-dense", action="store_true",
@@ -401,6 +404,14 @@ def main():
             print(f"klgate: bad --as {x} (MODE must be in --modes, ARG a CLI flag)")
             return 2
         mode_args[md] = arg
+    mode_env = {}
+    for x in a.mode_env:
+        md, _, kv = x.partition("=")
+        var, _, val = kv.partition("=")
+        if md not in modes or not var:
+            print(f"klgate: bad --mode-env {x} (MODE=VAR=VALUE, MODE in --modes)")
+            return 2
+        mode_env.setdefault(md, {})[var] = val
     lengths = sorted(int(x) for x in a.lengths.split(","))
     corpus = load_corpus(a.corpus)
     only = set(x for x in a.only.split(",") if x)
@@ -408,7 +419,7 @@ def main():
     work = os.path.abspath(a.work or os.path.join(os.path.dirname(exe), "klgate_work"))
     os.makedirs(work, exist_ok=True)
     rep = {"exe": exe, "exe_sha256": sha256(exe), "device": a.device or "default", "limits": LIMITS, "moe_limits": MOE_LIMITS,
-           "rows": ROWS, "positions": POSITIONS, "offsets": list(offsets), "mode_args": mode_args, "lengths": lengths, "modes": modes, "models": {k: os.path.basename(v) for k, v in models.items()},
+           "rows": ROWS, "positions": POSITIONS, "offsets": list(offsets), "mode_args": mode_args, "mode_env": mode_env, "lengths": lengths, "modes": modes, "models": {k: os.path.basename(v) for k, v in models.items()},
            "corpus": {k: sha256(v) for k, v in corpus.items()}, "started": time.strftime("%Y-%m-%d %H:%M:%S"), "cases": [],
            "judge": "length-average", "noise": [], "numerics": {}, "errors": []}
     log(f"klgate: exe {exe} sha256 {rep['exe_sha256'][:16]} device {rep['device']} rows {ROWS} positions {POSITIONS} (offsets {list(offsets)})")
@@ -469,6 +480,8 @@ def main():
                 logf = os.path.join(work, tag + ".log")
                 # the MoE noise floor: precise with the sequential f32 DeltaNet prefill
                 extra = {"WHIRL_GDN_SEQ": "1"} if md == "noise" else None
+                if md in mode_env:
+                    extra = dict(extra or {}, **mode_env[md])
                 rc, wall = run_dump(exe, mpath, ppath, "precise" if md == "noise" else md, ends, n, dump, logf, wrap, a.device, extra, mode_args.get(md))
                 log(f"  run {tag}: exit {rc}, {wall:.0f} s")
                 if rc != 0 or not os.path.isfile(dump):
@@ -538,11 +551,12 @@ def main():
     nfail = len(rep["cases"]) - npass
     rc = 2 if rep["errors"] or not rep["cases"] else (1 if nfail else 0)
     rep["finished"] = time.strftime("%Y-%m-%d %H:%M:%S")
-    rep["pass"] = rc == 0 and not mode_args  # a negative test (--as) never passes
+    rep["pass"] = rc == 0 and not mode_args and not mode_env  # a negative test (--as) / candidate (--mode-env) never passes
     rep["summary"] = f"{npass} passed, {nfail} failed, {len(rep['errors'])} errors"
     for e in rep["errors"]:
         log("ERROR " + e)
-    log(f"klgate: {rep['summary']} -> {'PASS' if rc == 0 else 'FAIL'} (exit {rc})" + (f"  [negative test, modes run as {mode_args}]" if mode_args else ""))
+    log(f"klgate: {rep['summary']} -> {'PASS' if rc == 0 else 'FAIL'} (exit {rc})" + (f"  [negative test, modes run as {mode_args}]" if mode_args else "")
+        + (f"  [candidate env {mode_env}]" if mode_env else ""))
     if a.report:
         with open(a.report, "w", encoding="utf-8") as f:
             json.dump(rep, f, indent=1)

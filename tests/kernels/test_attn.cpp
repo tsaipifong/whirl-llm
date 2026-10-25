@@ -737,6 +737,47 @@ void testAttn(Ctx& c) {
                 c.rep.add(cmpExact("attn_prefill_wmma" + fs + " head-split launches == one" + tag,
                                    out.down<float>(ref1.size()), ref1, Kind::invariant));
             }
+            // feat026-attn8s (gfx1151, f16 KV): the ours-v2 candidates attn_pf2_<cfg> == attn_prefill_wmma bitwise
+            // (one launch and two head-range launches), attn_pf2_<cfg>_s over key ranges of 256 (softmax state carried)
+            // == attn_prefill_wmma; the lossy lazy-max entries (*z) only vs the CPU (tolerance)
+            if (fs.empty()) {
+                const std::vector<std::string> cfgs = {"q8p", "q4p", "q8", "q4", "q8s", "q8pw8", "q4pw8", "q8pk", "q8pw8k", "q8pz", "q8pw8z"};
+                const int rows_all = L;
+                for (const std::string& cfg : cfgs) {
+                    const auto f2 = c.fnOpt("attn_pf2_" + cfg), f2s = c.fnOpt("attn_pf2_" + cfg + "_s");
+                    if (!f2) continue;
+                    const bool q4c = cfg[1] == '4', lossy = cfg.back() == 'z';
+                    const unsigned fq = q4c ? 64u : 128u, th = q4c ? 256u : 512u;
+                    for (const int split : {1, 2}) {
+                        const int hp = kHeads / split;
+                        Buf ob(static_cast<std::size_t>(n) * kHeads * kHd * 4);
+                        ob.fill(0x7f);
+                        for (int h0 = 0; h0 < kHeads; h0 += hp)
+                            hip::launch(f2, {static_cast<unsigned>(cdiv(n, static_cast<int>(fq))), static_cast<unsigned>(hp), 1}, {th, 1, 1}, 0, c.s,
+                                        dqp.p(), pool.args(), ob.p(), kHeads, kKv, kQStride, pos.p(), n, kScale, h0);
+                        c.sync();
+                        const auto got = ob.down<float>(ref1.size());
+                        if (lossy)
+                            c.rep.add(cmpTol("attn_pf2_" + cfg + " (lossy lazy max) vs CPU" + std::string(split > 1 ? " (2 head-range launches)" : "") + tag,
+                                             pickRows(got, rows), ro, rs, 1e-2, 1e-4));
+                        else
+                            c.rep.add(cmpExact("attn_pf2_" + cfg + " == attn_prefill_wmma" + std::string(split > 1 ? " (2 head-range launches)" : "") + tag,
+                                               got, ref1, Kind::invariant));
+                    }
+                    if (f2s && !lossy) {
+                        Buf ob(static_cast<std::size_t>(n) * kHeads * kHd * 4), st(static_cast<std::size_t>(n) * kHeads * 2 * 4);
+                        ob.fill(0x7f);
+                        for (int r0 = 0; r0 < rows_all; r0 += 256) {
+                            const int r1 = std::min(rows_all, r0 + 256);
+                            hip::launch(f2s, {static_cast<unsigned>(cdiv(n, static_cast<int>(fq))), static_cast<unsigned>(kHeads), 1}, {th, 1, 1}, 0, c.s,
+                                        dqp.p(), pool.args(), ob.p(), kHeads, kKv, kQStride, pos.p(), n, kScale, 0, r0, r1, st.p());
+                        }
+                        c.sync();
+                        c.rep.add(cmpExact("attn_pf2_" + cfg + "_s key ranges of 256 == attn_prefill_wmma" + tag, ob.down<float>(ref1.size()), ref1,
+                                           Kind::invariant));
+                    }
+                }
+            }
         }
     }
 

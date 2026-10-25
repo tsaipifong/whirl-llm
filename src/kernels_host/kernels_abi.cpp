@@ -366,6 +366,27 @@ void loadAttn(AttnKernels& k, const Loader& L, KvFormat kv) {
         // gfx1151 (KG-3): the f16 attn_prefill_wmma (on dequantized rows) and its key-range variant
         k.attn_pws = L.opt("attn_prefill_wmma_s");
         if (k.attn_pws != nullptr) k.attn_pwf = L.opt("attn_prefill_wmma");
+        // feat026-attn8s (gfx1151): WHIRL_ATTN_PF2=<cfg> selects the ours-v2 prefill attention attn_pf2_<cfg>[_s]
+        // (bit-identical candidates; cfg q4* = 64 queries / 256 threads, q8* = 128 / 512). Unset or missing: old kernel.
+        // Entries with a 'z' (lazy max) are lossy: balance / fast A/B only (klgate --mode-env), never precise.
+        if (const auto cfg = getEnv("ATTN_PF2"); cfg && cfg->size() >= 2 && *cfg != "0") {
+            const Function f = L.opt("attn_pf2_" + *cfg), fs = L.opt("attn_pf2_" + *cfg + "_s");
+            if (f != nullptr && fs != nullptr) {
+                const bool q4 = (*cfg)[1] == '4';
+                const std::uint32_t pq = q4 ? 64u : 128u, pt = q4 ? 256u : 512u;
+                if (k.attn_pws != nullptr) {
+                    k.attn_pwf = f;
+                    k.attn_pws = fs;
+                    k.pf_q = pq;
+                    k.pf_thr = pt;
+                }
+                if (kv == KvFormat::f16) {
+                    k.attn_prefill_wmma = f;
+                    k.pw_q = pq;
+                    k.pw_thr = pt;
+                }
+            }
+        }
     }
     // vision: multi-section RoPE attention prep (same KV-format choice as attn_prep)
     k.attn_prep_m = L.opt(kv == KvFormat::q8v ? "attn_prep_m_q8v" : kv == KvFormat::q8h ? "attn_prep_m_q8h" : kv == KvFormat::q8 ? "attn_prep_m_q8" : kv == KvFormat::q4 ? "attn_prep_m_q4" : "attn_prep_m");

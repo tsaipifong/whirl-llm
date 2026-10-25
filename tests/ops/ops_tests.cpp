@@ -453,6 +453,16 @@ void testAttnPrefill() {
         ranged += s.op == ops::AttnStep::Op::attn && s.ranged && nameOf(s.f) == "attn_pws";
     }
     CHECK(dq == 3 && ranged == 3 && pl.steps.back().r1 == 20512);
+    // feat026-attn8s (WHIRL_ATTN_PF2): the attn_pwf / attn_pws launches take the selected kernel's geometry
+    k.pf_q = 64;
+    k.pf_thr = 512;
+    pl = ops::chooseAttnPrefill(p, f, k);
+    std::size_t geo = 0;
+    for (const auto& s : pl.steps)
+        geo += s.op == ops::AttnStep::Op::attn && s.block.x == 512 && s.grid.x == (p.n + 63) / 64;
+    CHECK(geo == 3);
+    k.pf_q = 128;
+    k.pf_thr = 256;
     // a long prefill splits the heads (Windows TDR budget): 4096 x 128k query-key pairs per launch
     p.kv_q8 = false;
     p.pos0 = 0;
