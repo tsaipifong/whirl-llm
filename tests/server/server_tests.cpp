@@ -5258,6 +5258,31 @@ void testCkptEngineTeardown() {
     srv.ops().completeAll();
 }
 
+// bug-server-exit-av: whirl-server died after "server stopped" with an access violation in amdhip64_7.dll (+0x8f725 on
+// 10.0.3679.0: ihipEventQuery -> checkEventCaptureRestrictions reads event->captureStream_ without an isValid check).
+// The slot / shared-prefix spill fences are recorded on the tier's stream; the server destroyed the tier (and its stream)
+// before the engine, whose ~Slot / ~Spe then query those fences: a use of a destroyed stream through an event. The
+// NullBackend counts such uses (deadStreamEventUses); the shutdown order of the product (TestServer::shutdown mirrors
+// server_main) must leave it at 0. Failed (count > 0) with the tier-first order.
+void testShutdownEventStream() {
+    ServerSetup su = baseSetup(false);
+    su.mc.parallel = 2;
+    su.tier = true;
+    su.tier_min = 512;
+    TestServer srv(su);
+    const auto p1 = makePrompt(1500, 311), p2 = makePrompt(1500, 312);
+    CHECK_EQ(completionText(srv.post("/v1/completions", completionBody(p1, 8))), decode(srv.model().greedyReference(p1, 8, true)));
+    CHECK_EQ(completionText(srv.post("/v1/completions", completionBody(p2, 8))), decode(srv.model().greedyReference(p2, 8, true)));
+    const tier::Stats st = srv.tierStats();
+    CHECK(st.spills >= 1);  // the fences under test exist only after a spill
+    CHECK_EQ(srv.ops().deadStreamEventUses(), 0u);  // nothing destroyed a stream while serving
+    srv.shutdown();
+    const std::uint64_t dead = srv.ops().deadStreamEventUses();
+    std::printf("  srv_exit_event_stream: spills %llu, event uses on a destroyed stream at shutdown %llu\n",
+                static_cast<unsigned long long>(st.spills), static_cast<unsigned long long>(dead));
+    CHECK_EQ(dead, 0u);
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -7666,6 +7691,7 @@ int main(int argc, char** argv) {
         {"backend_others_pinned", testBackendOthersPinned},
         {"env_matrix", testEnvMatrix},
         {"ckpt_engine_teardown", testCkptEngineTeardown},
+        {"srv_exit_event_stream", testShutdownEventStream},
         {"tier_io_thread_calls", testTierIoThreadCalls},
         {"alloc_state_measured", testAllocStateMeasured},
         {"test_tmp_base", testTestTmpBase},
