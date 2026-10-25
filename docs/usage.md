@@ -648,7 +648,7 @@ Alternatives kept for A/B tests and numerics comparisons. The lossy ones are the
 | Variable | Meaning |
 |---|---|
 | `WHIRL_KV=f16\|q8\|q8h\|q8v\|q4` | *(debug)* force a KV cache format instead of the mode's ([numerics modes](#modes)); `auto` or unset = the mode decides. A forced format skips the fit check (the pool is sized from what is free) and in precise mode a quantized value is logged as a user-requested lossy override. A format the GPU has no kernels for is refused. See [kv-and-caching.md](guide/en/kv-and-caching.md#formats) |
-| `WHIRL_DQ4_DYN=0` | Radeon 8060S, q4 KV (fast, MoE): launch the fixed attention split grid instead of only the splits that hold keys (default on; output is the same either way) |
+| `WHIRL_DQ4_DYN=0` | q4 KV (fast; Radeon 8060S and R9700): launch the fixed attention split grid instead of only the splits that hold keys (default on; output is the same either way) |
 | `WHIRL_FD_SPLITS=64\|128\|192\|256` | *(debug)* split count of the decode / verify attention (default 64, q4 KV 256). Another value changes the attention's partial sums, so output bits differ from the default |
 | `WHIRL_FD_SPLITS`, `WHIRL_GEMV_MAX`, `WHIRL_GV_NMAX`, `WHIRL_GV_GROUP`, `WHIRL_NO_FUSE`, `WHIRL_FLOAT_GEMV`, `WHIRL_GDN_SEQ`, `WHIRL_NAIVE_ATTN`, `WHIRL_DBG`, `WHIRL_ATTN_WIDE`, `WHIRL_ATTN_DQ4`, `WHIRL_ATTN_WS4`, `WHIRL_MOE_BN` | A/B switches that pick other kernel paths. Any of them set is logged at start-up as an override and the mode label becomes `MODE+overrides` (also in `GET /props`): the run is not the mode's tested path, and e.g. `WHIRL_GEMV_MAX=8` in balance makes 9–16-row verifies take another GEMM than 1-token decode, so MTP is no longer equal to plain decode |
 | `WHIRL_TOKENIZE_ONLY=1` | print the prompt token ids and stop |

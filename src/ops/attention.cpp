@@ -81,11 +81,13 @@ AttnDecodePlan chooseAttnDecode(const AttnDecodeProblem& p, const AttnDecodeFlag
     const bool ws4_path = f.attn_ws4 && k.attn_ws4 != nullptr && k.attn_ws4g[0] != nullptr && k.attn_ws4g[1] != nullptr && k.attn_ws4g[2] != nullptr &&
                           k.attn_wsplit1 != nullptr && !p.kv_q4 && hd == ws4::kD && grp_q <= 16 && (f.dbg_flags & 2) == 0;
     u32 n_split = ws4_path ? std::min<u32>(ws4::kNs, (p.max_ctx + fd_chunk - 1) / fd_chunk) : std::min(f.fd_splits, (p.max_ctx + fd_chunk - 1) / fd_chunk);
-    // FAST-8S-1 (gfx1151, q4 KV through attn_dq4): the smallest split count whose key partition (dq_per) is the
+    // FAST-8S-1 (q4 KV through attn_dq4): the smallest split count whose key partition (dq_per) is the
     // same as fd_splits' for every row: same partials, same combine order, so bitwise the same output. The
-    // profile row says where this was measured and output-checked (the 8060S); the R9700 keeps the fixed grid.
-    // (the same conditions as the wsplit branch below, REVIEW-022 F10)
-    if (prof.attn_dq4_dynamic_splits && !ws4_path && p.kv_q4 && f.attn_dq4 && f.dq4_dyn && k.attn_dq4 != nullptr && caps.attn_group1 && grp_q <= 8 &&
+    // profile row turns it on per family: gfx1151 (FAST-8S-1), gfx1201 (feat027-dq4r9700: kernels/attn.hip has the
+    // same dq_per / DQ_MAXS / draft-window split rule, its block reorder is a bijection of the grid).
+    // (the same conditions as the wsplit branch below, REVIEW-022 F10; the dq4 row rule there makes every row
+    // its own group on both families, so caps.attn_group1 is not a condition)
+    if (prof.attn_dq4_dynamic_splits && !ws4_path && p.kv_q4 && f.attn_dq4 && f.dq4_dyn && k.attn_dq4 != nullptr && grp_q <= 8 &&
         p.rows_known && k.attn_wsplit1 != nullptr && hd == 256 && (f.dbg_flags & 2) == 0)
         n_split = dq4Splits(p.row_pos.first(n), p.win, n_split);
     pl.n_split = n_split;

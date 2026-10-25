@@ -64,7 +64,7 @@ inline constexpr Profile k_profile_gfx1201{
     .gemvh_grid_by_rows = false,
     .h16_from_candidates = false,
     .gemms_tie_larger_bm = false,
-    .attn_dq4_dynamic_splits = false,
+    .attn_dq4_dynamic_splits = true,  // feat027-dq4r9700 (FAST-8S-1 item 1 ported; bitwise vs the fixed grid)
     .tune_fast = false,
     .tune_cache_suffix = "",
     .tune_time_hint = "2 minutes (a few seconds for MXFP4 models)",

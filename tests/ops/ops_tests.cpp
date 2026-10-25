@@ -10,6 +10,7 @@
 #include "whirl/ops/matmul.h"
 #include "whirl/ops/moe.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <deque>
@@ -378,17 +379,36 @@ void testAttnDecode() {
     f.attn_wide = true;
     pl = ops::chooseAttnDecode(p, f, k97, k97.caps, p97);
     CHECK(nameOf(pl.f) == "attn_wsplit2" && pl.grid.z == 1 && pl.groups.count[0] == 4);
-    // q4 KV with attn_dq4: one query per group on attn_dq4, 256 threads; the R9700 keeps the fixed grid
+    // q4 KV with attn_dq4: one query per group on attn_dq4, 256 threads; the R9700 (no attn_group1) takes the
+    // dynamic split count too (feat027-dq4r9700: same partition as the fixed 256 grid, so the same bits)
     p.kv_q4 = true;
     f.fd_splits = 256;
     pl = ops::chooseAttnDecode(p, f, k97, k97.caps, p97);
-    CHECK(nameOf(pl.f) == "attn_dq4" && pl.kind == ops::AttnDecodeKind::dq4 && pl.grid.z == 4 && pl.block.x == 256 && pl.n_split == 256);
+    CHECK(nameOf(pl.f) == "attn_dq4" && pl.kind == ops::AttnDecodeKind::dq4 && pl.grid.z == 4 && pl.block.x == 256);
+    CHECK(pl.n_split == 8 && pl.grid.y == 8 && pl.n_split == ops::dq4Splits(std::span<const std::int32_t>(pos, 4), 0, 256));
+    // WHIRL_DQ4_DYN=0: the fixed grid
+    {
+        ops::AttnDecodeFlags f0 = f;
+        f0.dq4_dyn = false;
+        CHECK(ops::chooseAttnDecode(p, f0, k97, k97.caps, p97).n_split == 256);
+    }
     // the 8060S (attn_group1 set): the dynamic split count for short rows (same partition), FAST-8S-1
     const kn::KernelTable k8 = attnTable(true, true, true, false);
     pl = ops::chooseAttnDecode(p, f, k8, k8.caps, p8s);
     CHECK(nameOf(pl.f) == "attn_dq4" && pl.n_split < 256 && pl.n_split == ops::dq4Splits(std::span<const std::int32_t>(pos, 4), 0, 256));
-    // ... a profile row decides it, not the kernel set: the same kernels under the gfx1201 row keep the fixed grid
-    CHECK(ops::chooseAttnDecode(p, f, k8, k8.caps, p97).n_split == 256);
+    // ... a profile row decides it, not the kernel set: a row with attn_dq4_dynamic_splits off keeps the fixed grid
+    {
+        whirl::device::Profile off = p97;
+        off.attn_dq4_dynamic_splits = false;
+        CHECK(ops::chooseAttnDecode(p, f, k8, k8.caps, off).n_split == 256);
+        CHECK(ops::chooseAttnDecode(p, f, k97, k97.caps, off).n_split == 256);
+    }
+    // host-planned rows only: device-position decode (the captured decode graph, rows_known false) keeps the grid
+    {
+        ops::AttnDecodeProblem pd = p;
+        pd.rows_known = false;
+        CHECK(ops::chooseAttnDecode(pd, f, k97, k97.caps, p97).n_split == 256);
+    }
     // f16 KV on the 8060S (an f16-KV kernel table has no attn_dq4): attn_ws4g for a multi-row verify group (64 splits)
     const kn::KernelTable k8f = attnTable(true, true, false, false);
     p.kv_q4 = false;
@@ -409,6 +429,177 @@ void testAttnDecode() {
     pl = ops::chooseAttnDecode(p, f, k8f, k8f.caps, p8s);
     CHECK(nameOf(pl.f) == "attn_split" && pl.kind == ops::AttnDecodeKind::split && pl.grid.z == 4 && pl.block.x == 256);
     CHECK(ops::awPer(1, 64) == 64 && ops::awPer(4096, 64) == 64 && ops::awPer(4097, 64) == 128);
+}
+
+// feat027-dq4r9700: host model of attn_dq4's split ranges, written from kernels/attn.hip (gfx1201) and
+// kernels/gfx1151/attn.hip (the same code: dq_per, DQ_NW 8, DQ_MAXS 128, the MTP draft-window branch), not from
+// ops::dq4Part. A dynamic grid of s splits is bitwise the fixed grid of `full` splits when every split i < s has
+// the same [b0, b1) under both grids (same partial) and every split i >= s of the full grid is empty (b0 >= n_pos:
+// it writes m = -inf, which attn_combine / attn_combine_q8 skip, and fmaxf(M, -inf) == M): the combine then sees
+// the same partials in the same order.
+struct KRange {
+    std::int32_t b0, b1;
+};
+std::int32_t kDqPer(std::int32_t n_keys, std::int32_t n_split) {
+    const std::int32_t ns = std::min<std::int32_t>(n_split, 128);
+    return std::max<std::int32_t>(8 * 32, (n_keys + ns * 64 - 1) / (ns * 64) * 64);
+}
+KRange kRange(std::int32_t n_pos, std::int32_t split, std::int32_t n_split, std::int32_t win) {
+    std::int32_t per = kDqPer(n_pos, n_split);
+    std::int32_t b0 = split * per, b1 = std::min(n_pos, b0 + per);
+    if (win != 0 && n_split > 1) {
+        const std::int32_t w = (win & 0xffff) * 64, min_pos = (win >> 16) * 1024;
+        const std::int32_t w0 = std::max<std::int32_t>(256, (n_pos - w) & ~63);
+        if (n_pos >= min_pos && w0 > 256) {
+            if (split == 0) {
+                b0 = 0;
+                b1 = 256;
+            } else {
+                per = kDqPer(n_pos - w0, n_split - 1);
+                b0 = w0 + (split - 1) * per;
+                b1 = std::min(n_pos, b0 + per);
+            }
+        }
+    }
+    return {b0, b1};
+}
+// the dynamic grid s gives row n_pos the fixed grid's partials and combine sequence
+bool samePartials(std::int32_t n_pos, std::uint32_t s, std::uint32_t full, std::int32_t win) {
+    if (s > full) return false;
+    for (std::uint32_t i = 0; i < full; ++i) {
+        const KRange b = kRange(n_pos, static_cast<std::int32_t>(i), static_cast<std::int32_t>(full), win);
+        if (i < s) {
+            const KRange a = kRange(n_pos, static_cast<std::int32_t>(i), static_cast<std::int32_t>(s), win);
+            const bool ea = a.b0 >= n_pos, eb = b.b0 >= n_pos;
+            if (ea != eb) return false;
+            if (!ea && (a.b0 != b.b0 || a.b1 != b.b1)) return false;
+        } else if (b.b0 < n_pos) {
+            return false;  // a keyed split the dynamic grid does not launch
+        }
+    }
+    return true;
+}
+std::int32_t winArg(std::uint32_t w, std::uint32_t min_ctx) {  // qwen35::draftWindowArg
+    if (w == 0) return 0;
+    const std::uint32_t lo = std::min<std::uint32_t>((w + 63) / 64, 0xffffu), hi = std::min<std::uint32_t>(min_ctx / 1024, 0x7fffu);
+    return static_cast<std::int32_t>(lo | hi << 16);
+}
+
+void testDq4Partition() {
+    // windows: off, the default (16384 keys from 64k), a short one from 0, one from 16k
+    const std::int32_t wins[4] = {0, winArg(16384, 65536), winArg(4096, 0), winArg(1024, 16384)};
+    // every n_pos 1 .. 256k for the q4 default grid (256) and a non-power-of-two WHIRL_FD_SPLITS (100); step 7 for
+    // the smaller grids (max_ctx / 64 caps the grid at short contexts)
+    const std::uint32_t fulls[6] = {256, 100, 128, 64, 32, 16};
+    long long rows = 0, bad = 0, smaller = 0, notmin = 0;
+    for (const std::uint32_t full : fulls) {
+        const std::int32_t step = (full == 256 || full == 100) ? 1 : 7;
+        for (const std::int32_t win : wins) {
+            for (std::int32_t n_pos = 1; n_pos <= 262144; n_pos += step) {
+                const std::int32_t pos = n_pos - 1;
+                const std::uint32_t s = ops::dq4Splits(std::span<const std::int32_t>(&pos, 1), win, full);
+                rows += 1;
+                if (!samePartials(n_pos, s, full, win)) bad += 1;
+                if (s < full) smaller += 1;
+                // minimal: every smaller candidate (8, 16, ... < s) changes some partial (kernel model), so the
+                // choice is the cheapest bitwise grid (a mutant that keeps the full grid or a larger count fails)
+                for (std::uint32_t c = 8; c < s; c *= 2)
+                    if (samePartials(n_pos, c, full, win)) {
+                        notmin += 1;
+                        break;
+                    }
+            }
+        }
+    }
+    CHECK(bad == 0);
+    CHECK(smaller > 0);
+    CHECK(notmin == 0);
+    // Why dq4Splits' third test (keyed splits a[2] <= s) never decides (REVIEW feat027 mutcheck: the mutant that
+    // drops it survived): when the window branch and per match, per = dq_per(n, min(s, 128)) >= ceil(n / s) (dq_per
+    // rounds n / (ns * 64) up, times 64), so ceil(n / per) <= s; in the window branch per = dq_per(n - w0, s - 1)
+    // gives 1 + ceil((n - w0) / per) <= s. The kernel model below shows it for every n_pos 1 .. 256k, s = 8 .. 128
+    // and the four windows: a matching per with more keyed splits than s never occurs. The check stays in
+    // dq4Splits as a guard; mutations.json carries killable mutants instead (per / branch unchecked, always full).
+    long long redundant_hits = 0;
+    for (const std::int32_t win : wins)
+        for (std::int32_t n_pos = 1; n_pos <= 262144; ++n_pos)
+            for (std::uint32_t c = 8; c <= 128; c *= 2) {
+                // same branch and per under grid c and grid 256 <=> splits 0 and 1 have the same ranges (split 1
+                // starts at per, or at w0 with length per in the window branch; split 1 empty: one keyed split)
+                const KRange a0 = kRange(n_pos, 0, static_cast<std::int32_t>(c), win), b0 = kRange(n_pos, 0, 256, win);
+                const KRange a1 = kRange(n_pos, 1, static_cast<std::int32_t>(c), win), b1 = kRange(n_pos, 1, 256, win);
+                if (a0.b0 != b0.b0 || a0.b1 != b0.b1 || a1.b0 != b1.b0 || a1.b1 != b1.b1) continue;
+                // keyed splits of grid 256 beyond c
+                if (kRange(n_pos, static_cast<std::int32_t>(c), 256, win).b0 < n_pos) redundant_hits += 1;
+            }
+    CHECK(redundant_hits == 0);
+    // verify / MTP row sets: k consecutive rows of one sequence (k = 2, 9, 16) and two sequences far apart; every
+    // row of the set must keep its partials under the set's one split count
+    long long sets = 0, sbad = 0;
+    for (const std::int32_t win : wins) {
+        for (std::int32_t p0 = 0; p0 < 262144; p0 += 61) {
+            std::int32_t rp[16];
+            for (std::int32_t k = 2; k <= 16; k += 7) {
+                for (std::int32_t r = 0; r < k; ++r) rp[r] = std::min(p0 + r, 262143);
+                const std::uint32_t s = ops::dq4Splits(std::span<const std::int32_t>(rp, static_cast<std::size_t>(k)), win, 256);
+                sets += 1;
+                for (std::int32_t r = 0; r < k; ++r)
+                    if (!samePartials(rp[r] + 1, s, 256, win)) sbad += 1;
+            }
+            const std::int32_t two[2] = {p0, (p0 * 7 + 4099) % 262144};
+            const std::uint32_t s2 = ops::dq4Splits(std::span<const std::int32_t>(two, 2), win, 256);
+            sets += 1;
+            for (const std::int32_t q : two)
+                if (!samePartials(q + 1, s2, 256, win)) sbad += 1;
+        }
+    }
+    CHECK(sbad == 0);
+    // n_pos 3000: grid 8 has per 384 (the 256 grid: 256), so its partials differ; grid 16 has per 256 = the 256 grid's
+    CHECK(!samePartials(3000, 8, 256, 0) && samePartials(3000, 16, 256, 0));
+    {
+        const std::int32_t pos = 2999;
+        CHECK(ops::dq4Splits(std::span<const std::int32_t>(&pos, 1), 0, 256) == 16);
+    }
+    // launch-table snapshot (gfx1201 / gfx1151 profile rows, q4 KV, fd_splits 256, one decode / verify row at
+    // n_pos keys): the attn_dq4 grid.y and the combine's n_split. Computed by an independent Python model
+    // (progress/feat027-dq4r9700.HANDOFF.md); window off and the default window give the same column.
+    struct Snap {
+        std::int32_t n_pos;
+        std::uint32_t s;
+    };
+    const Snap snap[] = {{1, 8},       {256, 8},     {257, 8},     {2048, 8},    {2049, 16},    {4096, 16},    {4097, 32},     {8192, 32},    {8193, 64},
+                         {16384, 64},  {16385, 128}, {32768, 128}, {65536, 128}, {65537, 128}, {131072, 128}, {131073, 128}, {262144, 128}};
+    ops::AttnDecodeProblem p;
+    p.n = 1;
+    p.head_dim = 256;
+    p.n_head = 24;
+    p.n_head_kv = 4;
+    p.max_ctx = 262144;
+    p.kv_q4 = true;
+    p.rows_known = true;
+    const std::int32_t base[1] = {0};
+    p.row_base = base;
+    ops::AttnDecodeFlags f;
+    f.fd_splits = 256;
+    const kn::KernelTable k97 = attnTable(false, false, true, true);
+    const kn::KernelTable k8 = attnTable(true, true, true, false);
+    long long snap_bad = 0;
+    for (const Snap& e : snap) {
+        const std::int32_t pos[1] = {e.n_pos - 1};
+        p.row_pos = pos;
+        for (const std::int32_t win : {wins[0], wins[1]}) {
+            p.win = win;
+            const auto a = ops::chooseAttnDecode(p, f, k97, k97.caps, whirl::device::k_profile_gfx1201);
+            const auto b = ops::chooseAttnDecode(p, f, k8, k8.caps, whirl::device::k_profile_gfx1151);
+            if (nameOf(a.f) != "attn_dq4" || a.n_split != e.s || a.grid.y != e.s || nameOf(b.f) != "attn_dq4" || b.n_split != e.s) {
+                std::printf("  snapshot n_pos %d win %d: gfx1201 %u, gfx1151 %u, want %u\n", e.n_pos, win, a.n_split, b.n_split, e.s);
+                snap_bad += 1;
+            }
+        }
+    }
+    CHECK(snap_bad == 0);
+    std::printf("  dq4 partition: %lld rows (%lld on a smaller grid), %lld row sets, mismatches %lld / %lld, not minimal %lld, keyed > s %lld\n",
+                rows, smaller, sets, bad, sbad, notmin, redundant_hits);
 }
 
 void testAttnPrefill() {
@@ -615,6 +806,7 @@ int main() {
     testGemvWide();
     testOpsGemm();
     testAttnDecode();
+    testDq4Partition();
     testAttnPrefill();
     testOpsMoe();
     testOpTables();

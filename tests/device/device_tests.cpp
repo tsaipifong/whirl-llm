@@ -174,7 +174,7 @@ void testProfiles() {
     CHECK(a.arch == Arch::gfx1201 && b.arch == Arch::gfx1151);
     // R9700 (gfx1201): discrete, the reference behaviour
     CHECK(!a.uma_no_vram_fit_check && !a.gemvh_grid_by_rows && !a.h16_from_candidates && !a.gemms_tie_larger_bm);
-    CHECK(!a.attn_dq4_dynamic_splits && !a.tune_fast && !a.gdn_strix && !a.numerics_8060s && !a.mtp_costly_verify_rows);
+    CHECK(a.attn_dq4_dynamic_splits && !a.tune_fast && !a.gdn_strix && !a.numerics_8060s && !a.mtp_costly_verify_rows);
     CHECK(std::string_view(a.tune_cache_suffix).empty());
     CHECK(std::string_view(a.tune_time_hint) == "2 minutes (a few seconds for MXFP4 models)");
     CHECK(a.prefill_exec_moe == 2048 && !a.prefill_fill_batch && a.vision_attn_threads == 128);

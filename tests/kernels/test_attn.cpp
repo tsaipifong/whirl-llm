@@ -400,6 +400,51 @@ void dq4Long(Ctx& c) {
             }
         }
     }
+    // feat027-dq4r9700 (FAST-8S-1 item 1 on every family): the dynamic split count ops::dq4Splits picks for the two
+    // verify rows {ctx - 1, ctx - 2} under the q4 grid of 256 (values pinned by whirl-ops-tests testDq4Partition):
+    // splits 0 .. s-1 bitwise the grid-256 partials, the combined output (attn_combine) bitwise the grid-256 one;
+    // also with the default MTP draft window (16384 keys from 64k) past its threshold
+    struct Dyn {
+        int ctx, s, win;
+    };
+    std::vector<Dyn> dyn = {{2, 8, 0}, {2000, 8, 0}, {2049, 16, 0}, {4097, 32, 0}, {8193, 64, 0}, {16385, 128, 0}, {70000, 128, winArg(16384, 65536)}};
+    if (c.quick) dyn = {{2000, 8, 0}, {4097, 32, 0}, {70000, 128, winArg(16384, 65536)}};
+    for (const Dyn& d : dyn) {
+        const std::vector<int> pos = {d.ctx - 1, d.ctx - 2};
+        const std::string tag = " (ctx " + std::to_string(d.ctx) + ", grid.y " + std::to_string(d.s) + " vs 256" + (d.win ? ", draft window" : "") +
+                                ") [kv q4 dyn]";
+        const Out full = run(pos, 256, d.win), part = run(pos, d.s, d.win);
+        std::size_t bad = 0, nb = 0, bad_empty = 0, nempty = 0;
+        for (int t = 0; t < nq; ++t)
+            for (int sp = 0; sp < 256; ++sp)
+                for (int hh = 0; hh < kHeads; ++hh) {
+                    const std::size_t i256 = (static_cast<std::size_t>(t) * 256 + sp) * kHeads + hh;
+                    if (sp >= d.s) {
+                        bad_empty += !(full.ml[i256 * 2] == -INFINITY && full.ml[i256 * 2 + 1] == 0.f);
+                        ++nempty;
+                        continue;
+                    }
+                    const std::size_t is = (static_cast<std::size_t>(t) * d.s + sp) * kHeads + hh;
+                    const bool keyed = full.ml[i256 * 2] != -INFINITY;
+                    bad += std::memcmp(&full.ml[i256 * 2], &part.ml[is * 2], 8) != 0;
+                    if (keyed) bad += std::memcmp(&full.acc[i256 * kHd], &part.acc[is * kHd], kHd * 4) != 0;
+                    nb += keyed ? 2 : 1;
+                }
+        Result r1;
+        r1.name = "attn_dq4 grid.y 256: splits past the dynamic count write (-inf, 0)" + tag;
+        r1.n = nempty;
+        r1.mismatches = bad_empty;
+        r1.pass = bad_empty == 0;
+        c.rep.add(r1);
+        Result r2;
+        r2.name = "attn_dq4 dynamic grid == grid.y 256 for its splits (ml, acc bits)" + tag;
+        r2.kind = Kind::invariant;
+        r2.n = nb;
+        r2.mismatches = bad;
+        r2.pass = bad == 0;
+        c.rep.add(r2);
+        c.rep.add(cmpExact("attn_dq4 dynamic grid combined == grid.y 256 combined" + tag, part.o, full.o, Kind::invariant));
+    }
 }
 
 }  // namespace

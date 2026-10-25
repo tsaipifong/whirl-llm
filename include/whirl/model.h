@@ -530,7 +530,7 @@ public:
     // q4 KV decode / verify attention through attn_dq4 when the code object has it (fast mode on
     // the 8060S; WHIRL_ATTN_DQ4=0: attn_wsplit1_q4 as before)
     bool attn_dq4 = true;
-    // gfx1151 attn_dq4: launch only as many splits as the rows' key partition uses (same bits as the
+    // attn_dq4 (gfx1151, gfx1201): launch only as many splits as the rows' key partition uses (same bits as the
     // fixed fd_splits grid, cheaper combine; FAST-8S-1; WHIRL_DQ4_DYN=0: the fixed grid)
     bool dq4_dyn = true;
     // gfx1151 f16 / int8 KV decode and verify attention through attn_ws4 (single-row groups) and
