@@ -317,8 +317,214 @@ with tempfile.TemporaryDirectory() as td:
     p3 = subprocess.run([sys.executable, "-I", os.path.join(HERE, "work_equal.py"), "compare", "--a-exe", A], capture_output=True, text=True)
     expect("CLI compare: usage error -> exit 3", p3.returncode == 3, p3.stdout + p3.stderr)
 
+# ---------------- __hip_cuid (arch025-weq): code objects of two worktrees differ only in the per-TU cuid symbol
+CUID1, CUID2 = b"__hip_cuid_9b8e5fda6ccb5c45", b"__hip_cuid_952180f848eb64a9"
+CUID_SHORT = b"__hip_cuid_9ea48a15715ed90"  # 15 hex digits: utohexstr drops a leading zero (real object #2, arch025 vs a25_int)
+
+
+def _gnuh(n):
+    h = 5381
+    for c in n:
+        h = (h * 33 + c) & 0xFFFFFFFF
+    return h
+
+
+def _sysvh(n):
+    h = 0
+    for c in n:
+        h = ((h << 4) + c) & 0xFFFFFFFF
+        g = h & 0xF0000000
+        if g:
+            h ^= g >> 24
+        h &= ~g & 0xFFFFFFFF
+    return h
+
+
+def mk_cuid_elf(cuid=CUID1, text=b"\x11\x22\x33\x44" * 8, rodata=b"const table 0123", names=(b"kernel_a", b"kernel_b.kd", b"var_x"),
+                cuid_value=0x40, addend=8, mutate=None):
+    """an AMDGPU-like ELF64 code object with .text .rodata .dynsym .gnu.hash .hash .dynstr .rela.dyn .dynamic .symtab
+    .strtab .shstrtab as lld lays it out: .dynsym sorted by .gnu.hash bucket (so the cuid moves the other symbols),
+    string tables in symbol order, fixed section capacities (a shorter cuid leaves the layout unchanged, as in the real
+    object). mutate(name, bytearray) may change one section's bytes afterwards."""
+    syms = [(names[0], 0x12, 1, 0x100, 0x40), (names[1], 0x11, 1, 0x200, 0x40), (cuid, 0x11, 2, cuid_value, 1), (names[2], 0x11, 2, 0x10, 4)]
+    nb = 4  # with 4 buckets the three cuids land at three different .dynsym indices
+    dyn = sorted(syms, key=lambda s: (_gnuh(s[0]) % nb, s[0]))  # bucket order; symoffset 1
+    dynstr = bytearray(b"\0"); stoff = {}
+    for s in syms:  # lld adds names before sorting .dynsym by bucket: .dynstr keeps symbol order
+        stoff[s[0]] = len(dynstr); dynstr += s[0] + b"\0"
+    dynsym = bytearray(24)
+    for s in dyn:
+        dynsym += struct.pack("<IBBHQQ", stoff[s[0]], s[1], 0, s[2], s[3], s[4])
+    n = len(dyn) + 1
+    bloom, buckets, chains = 0, [0] * nb, []
+    for i, s in enumerate(dyn, 1):
+        h = _gnuh(s[0])
+        bloom |= (1 << (h % 64)) | (1 << ((h >> 6) % 64))
+        b = h % nb
+        if not buckets[b]:
+            buckets[b] = i
+        last = i == n - 1 or _gnuh(dyn[i][0]) % nb != b
+        chains.append((h & ~1) | (1 if last else 0))
+    gnu = struct.pack("<IIII", nb, 1, 1, 6) + struct.pack("<Q", bloom) + struct.pack(f"<{nb}I", *buckets) + struct.pack(f"<{len(chains)}I", *chains)
+    sb, sc = [0] * nb, [0] * n
+    for i, s in enumerate(dyn, 1):
+        b = _sysvh(s[0]) % nb
+        sc[i] = sb[b]; sb[b] = i
+    sysv = struct.pack("<II", nb, n) + struct.pack(f"<{nb}I", *sb) + struct.pack(f"<{n}I", *sc)
+    vi = 1 + [s[0] for s in dyn].index(names[2])
+    rela = struct.pack("<QQq", 0x1000, (vi << 32) | 1, addend)
+    strtab = bytearray(b"\0"); toff = {}
+    for s in syms:
+        toff[s[0]] = len(strtab); strtab += s[0] + b"\0"
+    symtab = bytearray(24)
+    for s in syms:
+        symtab += struct.pack("<IBBHQQ", toff[s[0]], s[1], 0, s[2], s[3], s[4])
+    dynamic = struct.pack("<qQ", 10, len(dynstr)) + struct.pack("<qQ", 6, 0x800) + struct.pack("<qQ", 0, 0)
+    shnames = [b"", b".text", b".rodata", b".dynsym", b".gnu.hash", b".hash", b".dynstr", b".rela.dyn", b".dynamic", b".symtab", b".strtab", b".shstrtab"]
+    shstr = bytearray(b"\0"); shoffs = []
+    for s in shnames:
+        shoffs.append(len(shstr) - 1 if not s else len(shstr))
+        if s:
+            shstr += s + b"\0"
+    shoffs[0] = 0
+    content = {b".text": bytearray(text), b".rodata": bytearray(rodata), b".dynsym": dynsym, b".gnu.hash": bytearray(gnu), b".hash": bytearray(sysv),
+               b".dynstr": dynstr, b".rela.dyn": bytearray(rela), b".dynamic": bytearray(dynamic), b".symtab": symtab, b".strtab": strtab, b".shstrtab": shstr}
+    if mutate:
+        for k, v in content.items():
+            mutate(k.decode(), v)
+    typ = {b".text": 1, b".rodata": 1, b".dynsym": 11, b".gnu.hash": 0x6FFFFFF6, b".hash": 5, b".dynstr": 3, b".rela.dyn": 4, b".dynamic": 6,
+           b".symtab": 2, b".strtab": 3, b".shstrtab": 3}
+    link = {b".dynsym": 6, b".gnu.hash": 3, b".hash": 3, b".rela.dyn": 3, b".dynamic": 6, b".symtab": 10}
+    ent = {b".dynsym": 24, b".symtab": 24, b".rela.dyn": 24, b".dynamic": 16}
+    body = bytearray(64 + 56)  # ELF header + one program header
+    hdrs = [(0, 0, 0, 0, 0, 0, 0, 0, 0, 0)]
+    for i, s in enumerate(shnames[1:], 1):
+        while len(body) % 64:
+            body += b"\0"
+        off = len(body); c = content[s]
+        body += c + (b"\0" * (256 - len(c)) if s in (b".dynstr", b".strtab") else b"")  # fixed capacity: a shorter cuid keeps the layout
+        hdrs.append((shoffs[i], typ[s], 2, 0, off, len(c), link.get(s, 0), 1 if s == b".symtab" else 0, 1, ent.get(s, 0)))
+    while len(body) % 64:
+        body += b"\0"
+    shoff = len(body)
+    for h in hdrs:
+        body += struct.pack("<IIQQQQIIQQ", *h)
+    body[0:4] = b"\x7fELF"
+    body[4], body[5], body[6], body[7], body[8] = 2, 1, 1, 64, 4
+    struct.pack_into("<HHI", body, 16, 3, 224, 1)
+    struct.pack_into("<Q", body, 0x20, 64)
+    struct.pack_into("<Q", body, 0x28, shoff)
+    struct.pack_into("<I", body, 0x30, 0x4E)
+    struct.pack_into("<HHHHHH", body, 0x34, 64, 56, 1, 64, len(hdrs), len(hdrs) - 1)
+    struct.pack_into("<IIQQQQQQ", body, 64, 1, 5, 0, 0, 0, 0x800, 0x800, 0x1000)
+    return bytes(body)
+
+
+def _flip(sec, i=0):
+    def m(name, b):
+        if name == sec:
+            b[i] ^= 1
+    return m
+
+
+def _rename(old, new):
+    def m(name, b):
+        if name in (".dynstr", ".strtab"):
+            k = bytes(b).find(old)
+            b[k:k + len(new)] = new
+    return m
+
+
+def _co(a, b, **kw):
+    try:
+        return we.compare_exe(a, b, **kw)["code_objects"]
+    except TypeError as e:  # the pre-fix tool has no allow_cuid_length
+        return {"result": f"TypeError {e}", "objects": []}
+
+
+with tempfile.TemporaryDirectory() as td:
+    J = lambda *p: os.path.join(td, *p)
+    for d in ("a", "b", "m"):
+        os.makedirs(J(d))
+    E2 = mk_elf(mach=0x4A, text=b"\x05" * 40)
+    ea, eb = mk_cuid_elf(CUID1), mk_cuid_elf(CUID2)
+    expect("cuid fixture: same object size for both cuids (fixed layout)", len(ea) == len(eb) == len(mk_cuid_elf(CUID_SHORT)))
+    A = mk_pe(J("a", "whirl.exe"), elfs=(ea, E2), ts=1, guid=b"A" * 16)
+    B = mk_pe(J("b", "whirl.exe"), elfs=(eb, E2), ts=2, guid=b"B" * 16)
+    sha_a, sha_b = we.file_sha(A), we.file_sha(B)
+    r = _co(A, B)
+    expect("cuid only: fixture really moves .dynsym / hash tables (not only the string bytes)",
+           set(r["objects"][0].get("differing_sections") or []) >= {".dynstr", ".strtab", ".dynsym", ".gnu.hash", ".hash"}, r["objects"][:1])
+    expect("cuid only: code objects identical-except-cuid", r["result"] == "identical-except-cuid", r)
+    expect("cuid only: object 0 marked cuid_only, object 1 plain same", r["objects"][0].get("cuid_only") is True and r["objects"][1]["same"], r["objects"])
+    # the launch / golden evidence of both sides identical and bound: the verdict depends on the code objects alone
+    t_after = os.stat(B).st_mtime_ns + 10**9
+    for side, exe in (("la", A), ("lb", B)):
+        ll(J(side, "golden_swift"), 1, f'"{exe}" golden m.gguf --suite single --precise --device gfx1201', 5, "c0c0", ROWS, "c1c1", ARGS, mtime=t_after)
+    ga = golden(J("ga.txt"), A, sha_a, {"swift/precise_single": "OK"})
+    gb = golden(J("gb.txt"), B, sha_b, {"swift/precise_single": "OK"})
+    rep = we.report([A], [B], launch=(J("la"), J("lb")), golden_a=[ga], golden_b=[gb])
+    expect("cuid only + launch + golden identical: verdict EQUIVALENT (fails on the pre-fix tool: NOT_EQUIVALENT)",
+           rep["verdict"] == "EQUIVALENT" and rep["exit"] == 0 and rep["checks"]["code_objects"] == "identical-except-cuid", (rep["verdict"], rep["checks"], rep["reasons"]))
+    outj = J("cuid.json")
+    p = subprocess.run([sys.executable, "-I", os.path.join(HERE, "work_equal.py"), "compare", "--a-exe", A, "--b-exe", B, "--a-launch", J("la"),
+                        "--b-launch", J("lb"), "--a-golden", ga, "--b-golden", gb, "-o", outj], capture_output=True, text=True)
+    js = json.load(open(outj, encoding="utf-8")) if os.path.isfile(outj) else {}
+    expect("cuid only CLI: exit 0, JSON verdict EQUIVALENT, format unchanged (release_check P7 reads verdict / exit / format)",
+           p.returncode == 0 and js.get("verdict") == "EQUIVALENT" and js.get("exit") == 0 and js.get("format") == "whirl-work-equal/1"
+           and js.get("checks", {}).get("code_objects") == "identical-except-cuid", p.stdout + p.stderr)
+
+    # every other difference still fails (each mutant: B side changed once more)
+    def mutant(tag, **kw):  # named whirl.exe: report() pairs exes by base name
+        os.makedirs(J("m", tag), exist_ok=True)
+        return mk_pe(J("m", tag, "whirl.exe"), elfs=(mk_cuid_elf(**kw), E2), ts=2, guid=b"B" * 16)
+    cases = [
+        ("1 byte of .text", dict(cuid=CUID2, mutate=_flip(".text", 5))),
+        ("1 byte of .rodata", dict(cuid=CUID2, mutate=_flip(".rodata", 3))),
+        ("a renamed non-cuid symbol (same length, kernel_b.kd -> kernel_c.kd)", dict(cuid=CUID2, names=(b"kernel_a", b"kernel_c.kd", b"var_x"))),
+        ("1 char of a non-cuid .dynstr name (S0b mutant)", dict(cuid=CUID2, mutate=lambda n, b: n == ".dynstr" and _rename(b"kernel_a", b"kernel_q")(n, b))),
+        ("a cuid of a different length (15 hex digits) with --strict-cuid-length", dict(cuid=CUID_SHORT)),
+        ("cuid-like name that is not lower-case hex", dict(cuid=b"__hip_cuid_952180F848EB64A9")),
+        ("cuid symbol value changed", dict(cuid=CUID2, cuid_value=0x48)),
+        ("relocation addend changed", dict(cuid=CUID2, addend=16)),
+        ("a .gnu.hash bloom word cleared", dict(cuid=CUID2, mutate=lambda n, b: n == ".gnu.hash" and b.__setitem__(slice(16, 24), bytes(8)))),
+        ("a .hash bucket changed", dict(cuid=CUID2, mutate=_flip(".hash", 8))),
+        ("DT_STRSZ changed", dict(cuid=CUID2, mutate=_flip(".dynamic", 1))),
+        ("a .symtab size field changed", dict(cuid=CUID2, mutate=_flip(".symtab", 24 + 16))),
+    ]
+    for tag, kw in cases:
+        M = mutant(tag.split()[1] + str(len(tag)), **kw)
+        # the length case is "different" only in strict mode (default accepts length changes since 2026-10-25)
+        r = _co(A, M, allow_cuid_length=False) if "strict-cuid-length" in tag else _co(A, M)
+        expect(f"cuid + {tag}: code objects different", r["result"] == "different", (r["result"], [o.get("cuid") for o in r["objects"]]))
+        if tag.startswith("1 byte of .text"):
+            rep = we.report([A], [M], launch=(J("la"), J("lb")), golden_a=[ga], golden_b=[gb])
+            expect("cuid + 1 byte of .text: verdict NOT_EQUIVALENT", rep["verdict"] == "NOT_EQUIVALENT", rep["checks"])
+        if tag.startswith("a cuid of a different"):
+            expect("cuid length: reason names the length", "length" in str(r["objects"][0].get("cuid")), r["objects"][0])
+            r2 = _co(A, M, allow_cuid_length=True)
+            expect("cuid length with allow_cuid_length: identical-except-cuid (sh_size / DT_STRSZ / st_name shifts explained)",
+                   r2["result"] == "identical-except-cuid", (r2["result"], [o.get("cuid") for o in r2["objects"]]))
+            r3 = _co(A, mutant("lenrodata", cuid=CUID_SHORT, mutate=_flip(".rodata", 0)), allow_cuid_length=True)
+            expect("cuid length allowed + 1 byte of .rodata: still different", r3["result"] == "different", r3["result"])
+    r = _co(A, mutant("same", cuid=CUID1))
+    expect("same cuid, same bytes: plain identical", r["result"] == "identical", r["result"])
+
 # ---------------- stored evidence on the owner's machine (skipped elsewhere): the two manual proofs this tool replaces
 RW = r"C:\ClaudeWorkspace\whirl-work"
+ra_, rb_ = os.path.join(RW, r"wt_arch025\build\Release\whirl.exe"), os.path.join(RW, r"wt_a25_int\build\Release\whirl.exe")
+if os.path.isfile(ra_) and os.path.isfile(rb_):  # read only; arch025:S0b-runners pair (two worktrees, same sources for the kernels)
+    r = _co(ra_, rb_)
+    cu = [o.get("cuid_only") for o in r["objects"]]
+    if r.get("n_a") == 4 and cu == [True, True, False, True]:
+        expect("real arch025 vs a25_int whirl.exe: objects 0/1/3 cuid-only, object 2 differs only by a 26- vs 27-byte cuid (default: different)",
+               r["result"] == "different" and "length" in str(r["objects"][2].get("cuid")), r["objects"][2])
+        r2 = _co(ra_, rb_, allow_cuid_length=True)
+        expect("real arch025 vs a25_int whirl.exe with allow_cuid_length: identical-except-cuid", r2["result"] == "identical-except-cuid", r2["result"])
+    else:
+        print(f"skip real arch025 pair (objects not as recorded on 2026-10-25, rebuilt or pre-fix tool: {r.get('result')} {cu})")
+else:
+    print("skip real arch025 pair (not on this machine)")
 s15, shipped = os.path.join(RW, r"scratch\s16\exe_9844fde\whirl.exe"), os.path.join(RW, r"release024\pkg\whirl-0.2.4-windows-x64\whirl.exe")
 if os.path.isfile(s15) and os.path.isfile(shipped):
     r = we.compare_exe(s15, shipped)
