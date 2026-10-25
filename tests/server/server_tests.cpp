@@ -5878,10 +5878,21 @@ struct TbRig {
         ps->attachTier(tier.get());
         tier->start(c, lay, 7);
     }
+    std::uint64_t* dead_out = nullptr;  // bug-tbrig-order: ~TbRig stores deadStreamEventUses() here when set
     ~TbRig() {
         tb->attach(nullptr);
         ps->attachTier(nullptr);
         tier.reset();
+        // the members' own order (reverse declaration) after the explicit tier reset
+        tb.reset();
+        cs.reset();
+        ps.reset();
+        // bug-tbrig-order: no event use on a destroyed stream (NullBackend counts eventDone / eventSync of an event whose
+        // stream is gone; HIP reads that stream through the event: bug-server-exit-av). A rig torn down in the wrong
+        // order fails here, in whichever test used it.
+        const std::uint64_t dead = nb.deadStreamEventUses();
+        if (dead_out) *dead_out = dead;
+        CHECK_EQ(dead, 0u);
     }
     // a slot holding toks with n checkpoints (seq order given), pages first_page.. (enough for the tokens)
     struct S {
@@ -6086,6 +6097,33 @@ void testTierBridgeSpill() {
         CHECK_EQ(e2.tier_id, e.tier_id);
         r.nb.eventSync(e.spill_ev.get());
     }
+}
+
+// bug-tbrig-order: the rig's PrefixStore owns a spilled shared prefix entry (as the Engine's spes_ do), so ~Spe queries
+// its spill fence, recorded on the tier stream, during the rig's teardown. The product's order (bug-server-exit-av:
+// stop the tier IO, destroy the engine-side owners, then the tier) leaves NullBackend::deadStreamEventUses() at 0;
+// ~TbRig checks it. Failed with the old tier-first ~TbRig.
+void testTierBridgeTeardownOrder() {
+    std::uint64_t dead = ~0ull;
+    {
+        TbRig r;
+        r.dead_out = &dead;
+        Spe e;
+        r.cs->init(e.ck, false);
+        e.valid = true;
+        e.n = 128;
+        e.kind = "system";
+        e.tokens = tbTokens(128, 5);
+        e.pages = {40, 41};
+        r.tb->spillSpe(e);
+        CHECK(e.tier_id != 0);
+        CHECK(static_cast<bool>(e.spill_ev));  // the fence under test
+        r.ps->spes().push_back(std::move(e));
+        CHECK_EQ(r.ps->spes().size(), static_cast<std::size_t>(1));
+        CHECK_EQ(r.nb.deadStreamEventUses(), 0u);  // nothing destroyed a stream yet
+    }
+    std::printf("  tb_teardown_order: event uses on a destroyed stream at rig teardown %llu\n", static_cast<unsigned long long>(dead));
+    CHECK_EQ(dead, 0u);
 }
 
 // a chat prompt: system, first user message, then the tail (assistant turns) as filler tokens
@@ -7700,6 +7738,7 @@ int main(int argc, char** argv) {
         {"test_tmp_base", testTestTmpBase},
         {"page_pool", testPagePool},
         {"tier_bridge_spill", testTierBridgeSpill},
+        {"tb_teardown_order", testTierBridgeTeardownOrder},
         {"tier_bridge_supersede", testTierBridgeSupersede},
         {"tier_bridge_flush", testTierBridgeFlush},
         {"tier_drop_k2", testTierDropK2},
