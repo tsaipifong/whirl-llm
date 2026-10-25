@@ -1,8 +1,9 @@
 # arch025-Q3 /analyze false-positive / accepted-warning whitelist: one row per key of tools/safety/analyze_baseline.txt.
-# Columns: key (file|ruleId|function, as in the baseline) <TAB> file:line (where cl reports it; checked against the SARIF of every
-# cpu_analyze run) <TAB> reason (why it is not fixed in 0.2.5: false positive, or a style warning with no defect; a real defect goes
+# Columns: key (file|ruleId|function, as in the baseline) <TAB> file:line (where cl reported it; a HINT only: a moved line prints
+# "INFO line drift", never FAIL, arch025-Q3) <TAB> reason (why it is not fixed in 0.2.5: false positive, or a style warning with no defect; a real defect goes
 # to a bug-fix line instead, PLAN Q). Read by tools/safety/analyze_check.py reasons. Triaged by arch025-Q135, 2026-10-25.
-# A baseline key without a row, a row whose key is not in the baseline, an empty reason or a line cl no longer reports: FAIL.
+# FAIL: a baseline key without a row, a row whose key is not in the baseline, an empty reason; with the build, a key cl reports
+# that has no row (new key / other function) or more often than its baseline count.
 src/common/pool_budget.cpp|C6326|whirl::poolbudget::defaultMargin	src/common/pool_budget.cpp:47	constant compared with a constant: moe_extra_mb is a constexpr tuning value; the "> 0" test keeps the code correct if the constant is ever set to 0. No defect.
 src/common/util.cpp|C6262|whirl::readFile	src/common/util.cpp:85	64 KiB read buffer on the stack (> /analyze 16 KiB stack threshold); leaf function, not recursive, called on threads with the 1 MiB default stack. No defect.
 src/hip/uma_mem.cpp|C6240|whirl::hip::umaMemory	src/hip/uma_mem.cpp:52	sizeof(AdapterLuid) == sizeof(prop.luid) is a deliberate compile-time size guard before memcmp; the constant term is intended. No defect.
@@ -18,9 +19,9 @@ tests/server/http_client.cpp|C6031|whirl::test::httpRequestFrom::<lambda_1>::()	
 tests/server/http_client.cpp|C6031|whirl::test::rawConnect::<lambda_1>::()	tests/server/http_client.cpp:333	test helper: WSAStartup return ignored (same as freeLocalPort). Test code only.
 tests/server/http_client.cpp|C6262|whirl::test::httpRequestFrom	tests/server/http_client.cpp:159	test helper with a large receive buffer on the stack; test threads only. Test code only.
 tests/server/http_client.cpp|C6262|whirl::test::rawRecvAll	tests/server/http_client.cpp:365	test helper with a large receive buffer on the stack; test threads only. Test code only.
-tests/server/server_tests.cpp|C6262|`anonymous-namespace'::testCkptF1	tests/server/server_tests.cpp:4531	large test function frame (many locals); runs on the main thread (1 MiB stack). Test code only.
-tests/server/server_tests.cpp|C6262|testAllocStateMeasured	tests/server/server_tests.cpp:7009	large test function frame; main thread. Test code only.
-tests/server/server_tests.cpp|C6262|testHttpFakeEngine	tests/server/server_tests.cpp:6845	large test function frame; main thread. Test code only.
+tests/server/server_tests.cpp|C6262|`anonymous-namespace'::testCkptF1	tests/server/server_tests.cpp:4600	large test function frame (many locals); runs on the main thread (1 MiB stack). Test code only.
+tests/server/server_tests.cpp|C6262|testAllocStateMeasured	tests/server/server_tests.cpp:7078	large test function frame; main thread. Test code only.
+tests/server/server_tests.cpp|C6262|testHttpFakeEngine	tests/server/server_tests.cpp:6914	large test function frame; main thread. Test code only.
 tests/server/tier_tests.cpp|C6387|PowerLossSim::write	tests/server/tier_tests.cpp:3541	test double: _aligned_malloc result not checked before memcpy; an allocation failure would crash the test, which is a visible test failure. Test code only.
 tests/unit/unit_tests.cpp|C6246|testMemGovernor	tests/unit/unit_tests.cpp:2825	style: a nested-scope Governor g shadows the outer g in one test; each block uses its own. Test code only.
 tests/unit/unit_tests.cpp|C6262|`anonymous-namespace'::testNumerics	tests/unit/unit_tests.cpp:751	large test function frame; main thread. Test code only.

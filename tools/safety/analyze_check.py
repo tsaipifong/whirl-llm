@@ -10,8 +10,12 @@
   analyze_check.py reasons <baseline.txt> <whitelist.tsv> [<build_dir>]
                                                       arch025-Q3: every baseline key has one whitelist row "key<TAB>file:line<TAB>reason"
                                                       (reason >= 10 chars, file:line in the key's file), no row for a key outside the
-                                                      baseline; with <build_dir> (a complete run) the line must be one cl reports for
-                                                      that key now (a moved warning prints its new line)
+                                                      baseline; with <build_dir> (a complete run) no whitelisted key may occur more
+                                                      often than its baseline count; the row's line is only a hint: a moved warning
+                                                      prints "INFO line drift" with its new line and does not fail
+  analyze_check.py faultproof <out_dir>               arch025-Q3: verdict of tools/safety/analyze_fault.bat (real cl, 3 cases): the
+                                                      baseline-only TU PASSES, 3 planted keys FAIL as NEW, a 2nd warning of a
+                                                      baselined key FAILS as NEW x1
 
 Input is the SARIF 2.1.0 file cl writes next to each object with /analyze:log:format:sarif (<obj>.nativecodeanalysis.sarif), not the
 console text: the console text follows the installed MSVC language pack (e.g. zh-TW in code page 950; VSLANG=1033 does nothing
@@ -237,23 +241,106 @@ def reasons(baseline, whitelist, build_dir=None):
     for k in sorted(rows):
         if k not in base:
             probs.append(f"whitelist row for a key not in the baseline (stale): {k}")
-    checked = 0
+    # arch025-Q3 (coordinator 2026-10-26): the verdict keys on file|rule|function and the count, never on the line. Unrelated code
+    # above a warning moves its line (server_tests.cpp 4531/6845/7009 -> 4600/6914/7078 on arch025-next with no new warning), and a
+    # gate that fails on that breaks on every merge. The whitelist line is a hint for the reader: drift is printed as INFO.
+    checked, drift = 0, []
     if build_dir:
         cp, sarifs = completeness(build_dir)
         if cp:
             probs += [f"build dir incomplete: {p}" for p in cp]
         else:
             lines = {}
-            keys(build_dir, sarifs, lines)
+            cur = keys(build_dir, sarifs, lines)
+            for k in sorted(cur):
+                if k not in rows:
+                    probs.append(f"{k}: cl reports it {cur[k]} time(s) and the whitelist has no reason for it (new key, e.g. the "
+                                 "warning is now in another function)")
             for k, (ln, _) in sorted(rows.items()):
+                if k not in base:
+                    continue  # already reported as a stale row
+                n = cur.get(k, 0)
+                if n > base[k]:
+                    probs.append(f"{k}: cl reports it {n} time(s), the baseline accepts {base[k]} (a new occurrence has no reason)")
                 now = sorted(x for x in lines.get(k, set()) if x is not None)
-                if k in base and ln is not None and now and ln not in now:
-                    probs.append(f"{k}: whitelist says line {ln}, cl reports line(s) {', '.join(map(str, now))} now")
+                if ln is not None and now and ln not in now:
+                    drift.append(f"{k}: whitelist line {ln}, cl reports line(s) {', '.join(map(str, now))} now (hint only; "
+                                 "refresh the row's line when convenient)")
                 checked += 1
     for p in probs:
         print("FAIL", p)
+    for d in drift:
+        print("INFO line drift:", d)
     print(f"analyze reasons: {'ok' if not probs else 'FAIL'} ({len(rows)} row(s), {len(base)} baseline key(s)"
-          + (f", {checked} line(s) checked against the SARIF of {build_dir}" if build_dir else ", lines not checked (no build dir)") + ")")
+          + (f", {checked} key(s) checked against the SARIF of {build_dir}, {len(drift)} line drift(s) (info)" if build_dir
+             else ", not checked against a build (no build dir)") + ")")
+    return 1 if probs else 0
+
+
+FAULT_FILE = "tests/safety/analyze_fault.cpp"
+FAULT_ACCEPTED = FAULT_FILE + "|C6001|acceptedOld"   # the one key of tests/safety/analyze_fault_baseline.txt
+FAULT_NEW_MIN = 3                                       # usesUninitialized, derefsNull, overrun
+
+
+def faultproof(out_dir):
+    """arch025-Q3: verdict of tools/safety/analyze_fault.bat (real cl /analyze, three cases). Both directions must hold:
+    clean   (only the baselined warning)            -> gate rc=0, "analyze gate: PASS", the accepted key present, nothing NEW
+    new     (+3 planted defects, 3 new keys)        -> gate rc=1, >= 3 "NEW x1: tests/safety/analyze_fault.cpp|..." lines, the
+                                                       accepted key not among them
+    samekey (2nd C6001 in the baselined function)   -> gate rc=1, exactly "NEW x1: <accepted key>" (review C3: same key, count 2 > 1)
+    A case whose compile failed (DONE rc != 0) or whose gate did not run is a FAIL of the proof, never a pass."""
+    probs = []
+    res = {}
+    for case in ("clean", "new", "samekey"):
+        d = os.path.join(out_dir, case)
+        log = os.path.join(d, "gate.log")
+        rcs = {}
+        for name in ("DONE", "GATE"):
+            try:
+                with open(os.path.join(d, name), encoding="utf-8", errors="replace") as f:
+                    m = re.search(r"rc=(-?\d+)", f.read())
+                rcs[name] = int(m.group(1)) if m else None
+            except OSError:
+                rcs[name] = None
+        try:
+            with open(log, encoding="utf-8", errors="replace") as f:
+                text = f.read()
+        except OSError:
+            text = ""
+        if rcs["DONE"] != 0:
+            probs.append(f"{case}: compile DONE rc={rcs['DONE']} (see {case}\\analyze_fault.log)")
+        if not text:
+            probs.append(f"{case}: gate.log missing or empty")
+        new = re.findall(r"(?m)^NEW x(\d+): (\S+)$", text)
+        cur = {}
+        try:
+            cp, sarifs = completeness(d)
+            if not cp:
+                cur = keys(d, sarifs)
+        except (OSError, ValueError) as e:
+            probs.append(f"{case}: SARIF unreadable: {e}")
+        res[case] = (rcs["GATE"], new, cur, text)
+    rc, new, cur, text = res["clean"]
+    if rc != 0 or "analyze gate: PASS" not in text or new:
+        probs.append(f"clean: the baseline-only TU must PASS (GATE rc={rc}, NEW {len(new)})")
+    if cur.get(FAULT_ACCEPTED, 0) != 1:
+        probs.append(f"clean: the accepted warning {FAULT_ACCEPTED} must be reported once by cl, got {cur.get(FAULT_ACCEPTED, 0)} "
+                     "(otherwise the PASS proves nothing)")
+    rc, new, cur, text = res["new"]
+    planted = [k for n, k in new if k.startswith(FAULT_FILE + "|") and k != FAULT_ACCEPTED]
+    if rc != 1 or "analyze gate: FAIL" not in text or len(planted) < FAULT_NEW_MIN:
+        probs.append(f"new: the planted warnings must FAIL as NEW (GATE rc={rc}, planted NEW {len(planted)} < {FAULT_NEW_MIN}?)")
+    if any(k == FAULT_ACCEPTED for _, k in new):
+        probs.append("new: the accepted key was reported NEW although its count did not grow")
+    rc, new, cur, text = res["samekey"]
+    if rc != 1 or "analyze gate: FAIL" not in text or new != [("1", FAULT_ACCEPTED)]:
+        probs.append(f"samekey: a 2nd warning of a baselined key must FAIL as 'NEW x1: {FAULT_ACCEPTED}' only "
+                     f"(GATE rc={rc}, NEW {new}, cl count {cur.get(FAULT_ACCEPTED, 0)})")
+    for p in probs:
+        print("FAIL", p)
+    n_new = len([k for n, k in res["new"][1] if k.startswith(FAULT_FILE + "|")])
+    print(f"analyze fault proof: {'ok' if not probs else 'FAIL'} (clean GATE rc={res['clean'][0]}; new GATE rc={res['new'][0]}, "
+          f"{n_new} NEW; samekey GATE rc={res['samekey'][0]}, NEW {['x' + n + ' ' + k for n, k in res['samekey'][1]]})")
     return 1 if probs else 0
 
 
@@ -262,6 +349,8 @@ def main(argv):
         print(__doc__)
         return 2
     cmd, bdir = argv[1], argv[2]
+    if cmd == "faultproof":
+        return faultproof(bdir)
     if cmd == "reasons":
         if len(argv) < 4:
             print(__doc__)

@@ -1,0 +1,3 @@
+# arch025-Q3: baseline of the /analyze fault proof (tools/safety/analyze_fault.bat), NOT of the product. One accepted key: the
+# deliberate C6001 in acceptedOld() of tests/safety/analyze_fault.cpp. count<TAB>file|ruleId|function, as analyze_check.py update writes.
+1	tests/safety/analyze_fault.cpp|C6001|acceptedOld

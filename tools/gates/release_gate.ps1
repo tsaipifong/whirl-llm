@@ -157,11 +157,12 @@ AddStep "cpu_modules_check" $false @($pwsh, "-NoProfile", "-Command", "& '$py' -
     { param($o, $c) $c -eq 0 -and ($o -match "^modules check test: ([1-9]\d*)/\1 ok") -and ($o -match "^validate test: ([1-9]\d*)/\1 ok") -and ($o -match "^impact steps test: ([1-9]\d*)/\1 ok") -and ($o -match "^modules check: ok") }
 # arch025-Q1 / Q3 (PLAN (e)): the C++ safety tools, CPU, each in its own build directory under the tree (build-asan,
 # build-analyze), with a time cap and a block / pass proof inside the step (tools/safety/safety_step.ps1):
-#   cpu_safety_selftest  block / pass unit tests of both verdicts + the two whitelists (seconds)
+#   cpu_safety_selftest  block / pass unit tests of both verdicts + the two whitelists + the real-cl /analyze baseline proof
+#                (analyze_fault.bat: baseline-only TU PASS, new keys FAIL, 2nd warning of a baselined key FAIL; seconds)
 #   cpu_asan     ASan + leak-check build of the 10 CPU test exes; every suite and the CPU pins clean, the 8 injected faults
 #                (use-after-free, overflow, double free, 3 leaks) each caught by its checker, opt-out whitelist exact
 #   cpu_analyze  full MSVC /analyze rebuild; no warning beyond tools/safety/analyze_baseline.txt, every baseline key with file:line
-#                + reason (analyze_whitelist.tsv), the planted analyze_fault.cpp warnings NEW (must fail)
+#                + reason (analyze_whitelist.tsv), the analyze_fault.bat proof (clean PASS, planted NEW, same key NEW x1)
 # They reuse the HIP code objects of -Build (same tree) for a new build directory. WHIRL_GATE_QUIET_WAIT: a local script that
 # waits while a GPU measurement holds the machine (passed on as WHIRL_QUIET_WAIT; build_cfg.bat runs it before compiling).
 $safetyEnv = @{ WHIRL_PYTHON = $py; WHIRL_KERNELS_FROM = $Build; WHIRL_QUIET_WAIT = $env:WHIRL_GATE_QUIET_WAIT }
