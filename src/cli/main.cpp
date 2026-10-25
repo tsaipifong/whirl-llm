@@ -852,7 +852,10 @@ DecodeResult dflashDecode(q::Model& model, const Tok& tok, u32 first, u32 n_prom
     const u32 d_max = std::min(max_d, std::max<u32>(model.snap_sets, 1));
     ng_max = std::min(ng_max, std::max<u32>(model.snap_sets, 1));
     q::DraftAccept dacc;
-    q::DraftTiming timing;  // DFlash2 cycle times (drafting included) by draft count
+    q::DraftTiming timing;  // DFlash2 cycle times (drafting included) by draft count (the n-gram cost comparison)
+    // WHIRL_DFLASH_WIDTH=auto: the verify part (cycle minus drafter) by drafts verified + the drafter's own time
+    whirl::dflash::VerifyCost wvc;
+    whirl::dflash::DrafterCost wdc;
     float nd_ema = static_cast<float>(d_max);
     std::array<u32, q::max_drafts> pos_tries{}, pos_hits{};
     q::NgramPolicy ngp;
@@ -894,19 +897,17 @@ DecodeResult dflashDecode(q::Model& model, const Tok& tok, u32 first, u32 n_prom
                 is_ng = nd > 0;
             }
         }
-        u32 w_lim = 0;
+        whirl::dflash::CycleDraft cd;
         if (!is_ng && room > 0) {
-            // the draft width (fixed: the limit; auto: the cost model, 0 = no drafter this cycle)
-            w_lim = std::min(d_max, room);
-            const whirl::dflash::WidthChoice wc = whirl::dflash::chooseWidth(
-                opt.dfl_width, res.dfl_width, dacc.alpha.data(), static_cast<u32>(dacc.alpha.size()), w_lim,
-                [&](u32 k) -> std::optional<float> { return timing.n[k] > 0 ? std::optional<float>(timing.t[k]) : std::nullopt; });
-            if (wc.draft) {
-                const std::vector<u32> d = model.dflashDraft(0, next, p, opt.dfl_p_min, opt.dfl_n_min);
-                nd_ema = 0.8f * nd_ema + 0.2f * static_cast<float>(d.size());
-                nd = std::min({static_cast<u32>(d.size()), wc.n});
-                std::copy(d.begin(), d.begin() + nd, dr.begin());
-            }
+            // the draft width (fixed: the limit; auto: the cost model, 0 = no drafter this cycle); the same
+            // draftCycle / afterCycle that tests/unit testDflashCycle replays with a mock drafter and clock
+            cd = whirl::dflash::draftCycle(
+                opt.dfl_width, res.dfl_width, dacc.alpha.data(), static_cast<u32>(dacc.alpha.size()), std::min(d_max, room),
+                [&](u32 k) { return whirl::dflash::widthMeasured(wvc, wdc, k); },
+                [&] { return model.dflashDraft(0, next, p, opt.dfl_p_min, opt.dfl_n_min); }, [] { return nowMs(); }, dr.data(),
+                static_cast<u32>(dr.size()));
+            if (cd.drafter_ran) nd_ema = 0.8f * nd_ema + 0.2f * static_cast<float>(cd.walked);
+            nd = cd.n;
         }
         model.verifyEnqueueEx(next, nd, std::span<const u32>(dr.data(), nd), p);
         verify_tokens += nd + 1;
@@ -931,7 +932,7 @@ DecodeResult dflashDecode(q::Model& model, const Tok& tok, u32 first, u32 n_prom
             for (u32 kk = 0; kk < acc; ++kk) pos_hits[kk] += 1;
             if (nd > 0) dacc.update(nd, acc);
             timing.update(nd, static_cast<float>(c2 - c0));
-            if (w_lim > 0) whirl::dflash::observeWidth(res.dfl_width, nd, acc, w_lim);
+            whirl::dflash::afterCycle(res.dfl_width, wvc, wdc, cd, acc, static_cast<float>(c2 - c0));
         }
         // the verify ran nd + 1 rows: keep acc + 1 of them, and their features
         if (acc < nd) model.restoreSnapshot(acc + 1);
@@ -1250,10 +1251,10 @@ void printSpecSummary(const DecodeResult& r, std::size_t n_prompt, double prefil
                     r.ng_cycles, r.cycles, r.ng_accepted, r.ng_drafted, r.ng_alpha[0], r.ng_alpha[1], r.ng_alpha[2]));
         out(fmt("  per cycle: host enqueue %.2f ms, wait %.2f ms, other %.2f ms; verified rows %.2f\n", r.t_draft / r.cycles, r.t_verify / r.cycles,
                 (r.decode_ms - r.t_draft - r.t_verify) / r.cycles, static_cast<double>(r.verify_tokens) / r.cycles));
-        if (!mtp && opt.dfl_width.mode == whirl::dflash::Width::automatic)
-            out(fmt("  DFlash2 width auto (probe every %u): %llu cycles decided, drafter skipped %llu, full-width probes %llu\n", opt.dfl_width.probe_every,
+        if (!mtp && opt.dfl_width.mode != whirl::dflash::Width::fixed)
+            out(fmt("  DFlash2 width auto (probe every %u): %llu cycles decided, drafter skipped %llu, full-width probes %llu, drafter ran with no draft %llu\n", opt.dfl_width.probe_every,
                     static_cast<unsigned long long>(r.dfl_width.cycles), static_cast<unsigned long long>(r.dfl_width.skipped),
-                    static_cast<unsigned long long>(r.dfl_width.probes)));
+                    static_cast<unsigned long long>(r.dfl_width.probes), static_cast<unsigned long long>(r.dfl_width.empty)));
     }
 }
 
@@ -1750,10 +1751,10 @@ int cmdBench(const Args& a) {
                     mode == "dflash" ? "DFlash2" : "DFlash2 + n-gram", r.tokens.size(), r.decode_ms, r.tokens.size() * 1000.0 / r.decode_ms,
                     r.cycles ? static_cast<double>(r.tokens.size()) / r.cycles : 0.0, r.accepted, r.drafted,
                     static_cast<unsigned long long>(fnv(r.tokens))));
-            if (dop.dfl_width.mode == whirl::dflash::Width::automatic)
-                out(fmt("    %-16s  width auto: %llu decided, drafter skipped %llu, full-width probes %llu\n", "",
+            if (dop.dfl_width.mode != whirl::dflash::Width::fixed)
+                out(fmt("    %-16s  width auto: %llu decided, drafter skipped %llu, full-width probes %llu, empty %llu\n", "",
                         static_cast<unsigned long long>(r.dfl_width.cycles), static_cast<unsigned long long>(r.dfl_width.skipped),
-                        static_cast<unsigned long long>(r.dfl_width.probes)));
+                        static_cast<unsigned long long>(r.dfl_width.probes), static_cast<unsigned long long>(r.dfl_width.empty)));
         } else {
             u32 drafts = 0;
             ChatOpts so = mtpOpts(model, opt, &drafts);

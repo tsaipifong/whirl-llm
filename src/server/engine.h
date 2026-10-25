@@ -166,6 +166,8 @@ struct SlotData : SlotPrefix, SlotTier {
     std::uint32_t dfl_cycles = 0;
     whirl::dflash::WidthState dfl_w;  // the draft width controller (reset per request)
     std::uint32_t dfl_wlim = 0;       // this cycle's width limit (0: the slot did not decide a DFlash2 width)
+    whirl::dflash::DrafterCost dfl_dcost;  // auto width: this slot's own drafter call ms (reset per request; review C1)
+    float dfl_dms = -1;                    // this cycle's drafter ms (-1: the drafter did not run for this slot)
     std::array<std::uint32_t, max_small_batch + 1> batch{};
     std::size_t n_batch = 0;
     std::uint32_t last_log_n = 0;
@@ -252,6 +254,9 @@ struct EngineOptions {
     std::uint32_t dfl_warm = 64;
     // DFlash2 draft width per cycle (WHIRL_DFLASH_WIDTH=fixed|auto, WHIRL_DFLASH_PROBE; feat029-dflash2)
     whirl::dflash::WidthParams dfl_width;
+    // tests only (feat029-dflash2-r1, review A3): replaces the auto width's measured cycle ms per (slot id, drafts), so a
+    // mock run picks the same widths every time (e.g. forces width 0 for some slots); empty = the measured costs
+    std::function<std::optional<float>(std::uint32_t slot, std::uint32_t n)> dfl_cost_override;
     std::uint32_t n_draft = 3;
     float p_min = 0;
     std::uint32_t n_min = 0;
@@ -523,6 +528,9 @@ private:
     qwen35::DraftAccept dpool_{};
     // DFlash2 cycle times by decoding slots (drafting included), keyed by the largest draft count
     std::array<qwen35::DraftTiming, gdn_max_seg + 1> dtiming_{};
+    // WHIRL_DFLASH_WIDTH=auto: the verify part of DFlash2 cycles (cycle minus every slot's drafter) by decoding slots,
+    // keyed by the slot's own draft count; T(n) of a slot = this + its own Slot::dfl_dcost (review C1 / C2)
+    std::array<whirl::dflash::VerifyCost, gdn_max_seg + 1> dvcost_{};
     std::unique_ptr<CycleProf> prof_;
     std::uint32_t n_cycles_ = 0;
     // most rows of one batched verify (ServerModel::verifyRows: 16, or 32 with the wide GEMV path)
@@ -565,6 +573,7 @@ private:
                   stat_prefill_tok_ = 0, stat_seg_batches_ = 0, stat_seg_chunks_ = 0;
     std::uint64_t stat_dfl_cycles_ = 0, stat_dfl_drafted_ = 0, stat_dfl_accepted_ = 0, stat_dfl_cold_ = 0, stat_dfl_gap_ = 0;
     std::uint64_t stat_dfl_skipped_ = 0, stat_dfl_probes_ = 0;  // WHIRL_DFLASH_WIDTH=auto: drafter skipped / full-width probes
+    std::uint64_t stat_dfl_empty_ = 0;  // a width >= 1 was chosen but the drafter returned no draft (not a skip)
     // WDDM-LOG: runtime video memory watch (setVramProbe)
     std::function<wddmwatch::Sample()> vram_probe_;
     std::function<std::optional<wddmwatch::Others>()> vram_others_;

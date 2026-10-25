@@ -99,6 +99,8 @@ public:
         std::uint64_t dfl_cycles = 0, dfl_drafted = 0, dfl_accepted = 0, dfl_cold = 0, dfl_gap = 0;
         // DFlash2 width auto (WHIRL_DFLASH_WIDTH=auto): cycles whose cost model skipped the drafter; full-width probes
         std::uint64_t dfl_skipped = 0, dfl_probes = 0;
+        // ... cycles whose drafter ran (a width >= 1 chosen) but returned no draft (feat029-dflash2-r1)
+        std::uint64_t dfl_empty = 0;
     };
 
     virtual ~EngineApi() = default;

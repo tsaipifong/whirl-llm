@@ -19,6 +19,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -107,9 +108,16 @@ inline constexpr std::uint32_t kMinCaptureRows = 16;
 // verify; the features are still ingested, so the drafter context stays unbroken). Prior art (progress\
 // feat029-dflash2.PRIOR_ART.md): ik_llama spec-tuner (arm 0 = target only, recovery probes), gufo
 // DFlashLengthController (full acceptance is censored: probe wider), hipfire block modulation.
-// Output: acceptance is exact for DFlash2 drafts in every mode (relaxAppliesTo), so the width changes only how
-// many rows are verified, never the tokens (the GPU proof is the per-width hash cell of the feat029 runner).
-enum class Width : std::uint8_t { fixed, automatic };
+// Output (a design property, NOT yet a measured fact): acceptance is exact for DFlash2 drafts in every mode
+// (relaxAppliesTo), so the width is meant to change only how many rows are verified, never the tokens. That holds
+// only if the verify logits of every row are independent of the number of rows verified (1 .. 7, and the 1-row
+// verify of a skipped cycle). GPU evidence so far: FIX-DFL, 8 / 16 rows, Q4_K_M, R9700 only. Swift MXFP4, the
+// 8060S, widths 0 .. 7 and the three modes are UNPROVEN until the per-width BITWISE cells of
+// progress/tools/feat029_dflash2_gpu.ps1 pass (WHIRL_DFLASH_NMAX 1..7 + auto + forced width 0, both cards one
+// after the other, precise golden not re-recorded). Until then: auto stays opt-in and no doc calls it lossless.
+// zero (WHIRL_DFLASH_WIDTH=0, a diagnostic / test setting, feat029-dflash2-r1): every decided cycle skips the drafter
+// (width 0, a one-row verify; the features are still ingested), so the skip path runs on every cycle, deterministically
+enum class Width : std::uint8_t { fixed, automatic, zero };
 
 struct WidthParams {
     Width mode = Width::fixed;
@@ -124,6 +132,8 @@ struct WidthState {
     std::uint32_t since_probe = 0;  // eligible cycles since the last full-limit cycle
     std::uint32_t climb = 0;        // > 0: the last cycle accepted all of its `climb - 1` drafts (censored): try wider
     std::uint64_t skipped = 0, probes = 0, cycles = 0;  // statistics (drafter skipped / full-limit probes / decided)
+    std::uint64_t empty = 0;  // the drafter ran (a width >= 1 was chosen) but none of its drafts were verified (walk
+                              // cut by p_min / n_min): counted apart from `skipped` (review C2)
 };
 
 struct WidthChoice {
@@ -152,6 +162,11 @@ WidthChoice chooseWidth(const WidthParams& wp, WidthState& st, const float* alph
     WidthChoice c;
     if (wp.max_n > 0) lim = std::min(lim, wp.max_n);
     if (lim == 0) return c;
+    if (wp.mode == Width::zero) {
+        st.cycles += 1;
+        st.skipped += 1;
+        return c;
+    }
     if (wp.mode == Width::fixed) {
         c.n = lim;
         c.draft = true;
@@ -211,13 +226,81 @@ inline void observeWidth(WidthState& st, std::uint32_t drafted, std::uint32_t ac
     st.climb = (drafted > 0 && acc >= drafted && drafted < lim) ? drafted + 1 : 0;
 }
 
+// ---- Measured costs of the auto width (feat029-dflash2-r1, review C1 / C2; prior art progress\feat029-dflash2-r1.
+// PRIOR_ART.md: SmartSpec models the verify as a cost shared by the batch and the draft as each request's own cost;
+// ik_llama's spec-tuner takes the step time from its caller). T(n) of one sequence = the verify part of the cycle
+// (the cycle without ANY drafter time) when this sequence verified n drafts + this sequence's own drafter call when
+// n >= 1. So with several server slots one slot's skip saves only its own drafter, and a cycle whose drafter ran
+// but yielded no draft puts its drafter time in the drafter average, not in the n = 0 verify time.
+struct VerifyCost {
+    static constexpr std::uint32_t kMax = 64;
+    std::array<float, kMax + 1> t{};
+    std::array<std::uint32_t, kMax + 1> n{};
+    void observe(std::uint32_t drafts, float ms) {
+        if (drafts > kMax || !(ms >= 0)) return;
+        t[drafts] = n[drafts] == 0 ? ms : 0.8f * t[drafts] + 0.2f * ms;
+        n[drafts] += 1;
+    }
+};
+struct DrafterCost {
+    float ms = 0;
+    std::uint32_t n = 0;
+    void observe(float d_ms) {
+        if (!(d_ms >= 0)) return;
+        ms = n == 0 ? d_ms : 0.8f * ms + 0.2f * d_ms;
+        n += 1;
+    }
+};
+// chooseWidth's measured(n): nullopt until both parts were measured (n = 0 needs only the verify part).
+inline std::optional<float> widthMeasured(const VerifyCost& v, const DrafterCost& d, std::uint32_t n) {
+    if (n > VerifyCost::kMax || v.n[n] == 0) return std::nullopt;
+    if (n == 0) return v.t[0];
+    if (d.n == 0) return std::nullopt;
+    return v.t[n] + d.ms;
+}
+
+// One sequence's DFlash2 draft step of a cycle, shared by whirl chat / bench (src/cli/main.cpp dflashDecode) and the
+// CPU replay test (tests/unit testDflashCycle). measured(n) -> optional ms (widthMeasured, or a test's own costs);
+// drafter() -> the drafter's drafts (std::vector<std::uint32_t>); now() -> ms (the caller's clock, injectable).
+struct CycleDraft {
+    std::uint32_t n = 0;         // drafts copied to out (to verify)
+    std::uint32_t lim = 0;       // the width limit decided (0: no decision this cycle, e.g. no room)
+    bool drafter_ran = false;
+    float drafter_ms = 0;
+    std::uint32_t walked = 0;    // drafts the drafter returned (before the width cut)
+};
+template <class Measured, class Drafter, class Now>
+CycleDraft draftCycle(const WidthParams& wp, WidthState& st, const float* alpha, std::uint32_t n_alpha, std::uint32_t lim,
+                      Measured&& measured, Drafter&& drafter, Now&& now, std::uint32_t* out, std::uint32_t out_cap) {
+    CycleDraft c;
+    if (lim == 0) return c;
+    c.lim = lim;
+    const WidthChoice wc = chooseWidth(wp, st, alpha, n_alpha, lim, measured);
+    if (!wc.draft) return c;
+    const double t0 = now();
+    const auto d = drafter();
+    c.drafter_ms = static_cast<float>(now() - t0);
+    c.drafter_ran = true;
+    c.walked = static_cast<std::uint32_t>(d.size());
+    c.n = std::min({wc.n, c.walked, out_cap});
+    std::copy(d.begin(), d.begin() + c.n, out);
+    if (c.n == 0) st.empty += 1;
+    return c;
+}
+// After the verify of that cycle: acc of c.n drafts accepted, the cycle took cycle_ms (drafter included).
+inline void afterCycle(WidthState& st, VerifyCost& vc, DrafterCost& dc, const CycleDraft& c, std::uint32_t acc, float cycle_ms) {
+    if (c.lim > 0) observeWidth(st, c.n, acc, c.lim);
+    if (c.drafter_ran) dc.observe(c.drafter_ms);
+    vc.observe(c.n, std::max(0.0f, cycle_ms - c.drafter_ms));
+}
+
 // Settings from the environment (WHIRL_DFLASH_PMIN / _NMIN / _WARM / _CAPTURE_ROWS / _WIDTH / _PROBE / _NMAX).
 struct Params {
     float p_min = 0;                           // walk stops at a token with probability below p_min
     std::uint32_t n_min = 0;                   // fewer drafts than n_min: none
     std::uint32_t warm = 64;                   // server: rows after a restore before drafting again
     std::optional<std::uint32_t> capture_rows; // default: the drafter's window (2048 without one)
-    WidthParams width;                         // WHIRL_DFLASH_WIDTH=fixed|auto, WHIRL_DFLASH_PROBE=N (>= 2, 0 = never), WHIRL_DFLASH_NMAX=N
+    WidthParams width;                         // WHIRL_DFLASH_WIDTH=fixed|auto|0, WHIRL_DFLASH_PROBE=N (>= 2, 0 = never), WHIRL_DFLASH_NMAX=N
 };
 
 namespace detail {
@@ -276,7 +359,8 @@ Params parseParams(Env&& env, std::vector<std::string>& warnings) {
     if (auto v = env("DFLASH_WIDTH")) {
         if (*v == "fixed") p.width.mode = Width::fixed;
         else if (*v == "auto") p.width.mode = Width::automatic;
-        else warnings.push_back("WHIRL_DFLASH_WIDTH=" + *v + " ignored (fixed or auto)");
+        else if (*v == "0") p.width.mode = Width::zero;
+        else warnings.push_back("WHIRL_DFLASH_WIDTH=" + *v + " ignored (fixed, auto or 0)");
     }
     if (auto v = env("DFLASH_PROBE")) {
         std::uint32_t r = 0;

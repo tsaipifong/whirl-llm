@@ -322,6 +322,7 @@ Engine::Stats Engine::stats() const {
     s.dfl_gap = stat_dfl_gap_;
     s.dfl_skipped = stat_dfl_skipped_;
     s.dfl_probes = stat_dfl_probes_;
+    s.dfl_empty = stat_dfl_empty_;
     return s;
 }
 
@@ -1126,6 +1127,7 @@ bool Engine::startJob(Slot& sl, Job& job) {
     sl.dfl_cycles = 0;
     sl.dfl_w = whirl::dflash::WidthState{};
     sl.dfl_wlim = 0;
+    sl.dfl_dcost = whirl::dflash::DrafterCost{};
     // relaxacc: a solo request starts from the same draft-policy state every time (the kept
     // tokens depend on the drafts), so its output depends only on prompt, seed and settings
     if ((opt_.timing_reset || opt_.relax.on) && (opt_.use_mtp || opt_.use_dflash)) {
@@ -1137,6 +1139,7 @@ bool Engine::startJob(Slot& sl, Job& job) {
             ccost_primed_.fill(false);
             dpool_ = qwen35::DraftAccept{};
             for (auto& t : dtiming_) t = qwen35::DraftTiming{};
+            for (auto& v : dvcost_) v = whirl::dflash::VerifyCost{};
             prev_nd_ = 0;
             policy_cycles_ = 0;
         }
@@ -1597,7 +1600,11 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
     const TimePoint td0 = Clock::now();
     std::size_t n_dfl = 0;
     std::uint32_t dfl_max_n = 0;
-    for (std::size_t k = 0; k < A; ++k) act[k]->dfl_wlim = 0;
+    for (std::size_t k = 0; k < A; ++k) {
+        act[k]->dfl_wlim = 0;
+        act[k]->dfl_dms = -1;
+    }
+    const whirl::dflash::VerifyCost& dvc = dvcost_[std::min<std::size_t>(A, gdn_max_seg)];
     if (opt_.use_dflash && dfl_lim > 0) {
         for (std::size_t k = 0; k < A; ++k) {
             if (dsrc[k] != 0) continue;
@@ -1610,17 +1617,27 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
             if (lim_k == 0) continue;
             // the draft width (fixed: lim_k; auto: the cost model over this slot's acceptance and the DFlash2 cycle
             // times of A active slots; 0 = the drafter is skipped, the slot verifies its one row)
+            // T(n) = the shared verify part with n drafts of this slot + this slot's own drafter (review C1)
             const std::uint64_t sk0 = sl.dfl_w.skipped, pr0 = sl.dfl_w.probes;
             const whirl::dflash::WidthChoice wc = whirl::dflash::chooseWidth(
                 opt_.dfl_width, sl.dfl_w, sl.dfl_acc.alpha.data(), static_cast<std::uint32_t>(sl.dfl_acc.alpha.size()), lim_k,
-                [&](std::uint32_t n) -> std::optional<float> { return dtm.n[n] > 0 ? std::optional<float>(dtm.t[n]) : std::nullopt; });
+                [&](std::uint32_t n) -> std::optional<float> {
+                    if (opt_.dfl_cost_override) return opt_.dfl_cost_override(sl.id, n);
+                    return whirl::dflash::widthMeasured(dvc, sl.dfl_dcost, n);
+                });
             stat_dfl_skipped_ += sl.dfl_w.skipped - sk0;
             stat_dfl_probes_ += sl.dfl_w.probes - pr0;
             sl.dfl_wlim = lim_k;
             if (!wc.draft) continue;
+            const TimePoint tdd = Clock::now();
             const std::vector<std::uint32_t> d = m_.dflashDraft(sl.id, sl.next, sl.pos, opt_.dfl_p_min, opt_.dfl_n_min);
+            sl.dfl_dms = static_cast<float>(msSince(tdd));
             sl.dfl_nd = 0.8f * sl.dfl_nd + 0.2f * static_cast<float>(d.size());
             const std::uint32_t n = std::min(wc.n, static_cast<std::uint32_t>(d.size()));
+            if (n == 0) {
+                sl.dfl_w.empty += 1;
+                stat_dfl_empty_ += 1;
+            }
             std::copy(d.begin(), d.begin() + n, ng_d[k].begin());
             ng_n[k] = n;
             dsrc[k] = 2;
@@ -1846,6 +1863,19 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
     if (opt_.use_dflash && n_ng == 0) {
         // DFlash2 cycle times (drafting included; 0 drafts: a plain verify)
         dtiming_[std::min<std::size_t>(A, gdn_max_seg)].update(dfl_max_n, static_cast<float>(msSince(td0)));
+        // auto width (review C1 / C2): the cycle without any slot's drafter, keyed by each deciding slot's own draft
+        // count, and each drafting slot's own drafter time (also when it returned no draft: not in the n = 0 bucket)
+        float drafter_ms = 0;
+        for (std::size_t k = 0; k < A; ++k)
+            if (act[k]->dfl_dms >= 0) drafter_ms += act[k]->dfl_dms;
+        const float verify_ms = std::max(0.0f, static_cast<float>(msSince(td0)) - drafter_ms);
+        whirl::dflash::VerifyCost& vcw = dvcost_[std::min<std::size_t>(A, gdn_max_seg)];
+        for (std::size_t k = 0; k < A; ++k) {
+            Slot& sl = *act[k];
+            if (sl.dfl_wlim == 0) continue;
+            vcw.observe(dsrc[k] == 2 ? ng_n[k] : 0u, verify_ms);
+            if (sl.dfl_dms >= 0) sl.dfl_dcost.observe(sl.dfl_dms);
+        }
     }
     if (p) {
         if (p->events) m_.profileFlush(pa);

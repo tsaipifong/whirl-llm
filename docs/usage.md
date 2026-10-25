@@ -288,6 +288,16 @@ Drafter: download `Qwen3.8-27B-DFlash2-Q8_0.gguf` from the Hugging Face reposito
 an MXFP4 `fc.weight` is refused. A drafter whose tensors do not match its own metadata, or a file
 that cannot be opened, is refused with a warning and the MTP drafts are used.
 
+Draft width (experimental, opt-in): by default every DFlash2 cycle verifies all the drafts the drafter
+returns (up to 7). `WHIRL_DFLASH_WIDTH=auto` instead picks the width per cycle from the measured acceptance
+and cycle times, and skips the drafter when one plain verify row is expected to be faster; every 16th
+cycle verifies the full width to re-measure (`WHIRL_DFLASH_PROBE`). `WHIRL_DFLASH_NMAX=N` caps the width
+in both modes. Since acceptance stays exact, a different width is designed to change only the speed, not
+the text. That design is not yet proven on the GPUs for every width (only 8 and 16 verify rows were
+checked bit for bit, on Qwen3.8-27B Q4_K_M on the R9700), so `auto` stays off by default. The width
+sequence follows wall-clock timings, so the draft statistics (drafted / accepted / skipped) of `auto`
+differ from run to run; compare its speed over several paired runs.
+
 Memory note: with the defaults the server pins about a quarter of the host RAM for the RAM tier
 (8–32 GiB, at most half of the RAM free at startup; 16 GiB on a 64 GB PC; plus about 0.9 GiB when `--mmproj` is given) and may use up to 64 GiB on the SSD. Use `--kv-ram-mb` /
 `--kv-ssd-gb` to shrink or disable the tiers on machines with less memory or disk space.
@@ -546,6 +556,9 @@ The output always equals plain greedy decoding (with sampling: the same distribu
 | `WHIRL_DFLASH_NMIN=N` | `--draft dflash`: fewer than N drafts in a block = no drafts that cycle (default 0) *(debug)* |
 | `WHIRL_DFLASH_WARM=N` | server, `--draft dflash`: rows a slot's drafter context needs after a restore / reset before it drafts again (default 64) *(debug)* |
 | `WHIRL_DFLASH_CAPTURE_ROWS=N` | `--draft dflash`: target-feature capture rows per forward, at least 16 (default: the drafter's window, 2048; at most the prefill batch). Smaller values save VRAM but leave gaps in the drafter context after long prefills *(debug)* |
+| `WHIRL_DFLASH_WIDTH=fixed\|auto\|0` | `--draft dflash`: draft width per cycle. `fixed` (default): every draft the drafter returns, up to the limit. `auto`: per cycle the width with the most expected accepted tokens per measured ms; 0 skips the drafter for that cycle (one verify row; the drafter context is still fed). `0`: never run the drafter (every cycle one verify row; a test of the skip path, slower) *(experimental: see [DFlash2](#dflash))* |
+| `WHIRL_DFLASH_PROBE=N` | `WHIRL_DFLASH_WIDTH=auto`: every Nth cycle verifies the full width to re-measure the acceptance (default 16; 0 = never; 1 is refused) *(experimental)* |
+| `WHIRL_DFLASH_NMAX=N` | `--draft dflash`: at most N DFlash2 drafts per cycle, 1..64, in every width mode (default: the drafter's block - 1, 7 for the official 27B drafter; values above the block or the verify limit of 15 have no further effect) *(experimental)* |
 | `WHIRL_NGRAM_MIN=N` | minimum matched suffix for an n-gram draft (default 3) |
 | `WHIRL_NGRAM_SLOPE=X` | prior cost of one more n-gram verify row, relative to a 1-draft cycle, until n-gram cycles are timed (default 0.015; Radeon 8060S 0.12) |
 | `WHIRL_NGRAM_MAX=N` | most n-gram drafts per cycle (default 15) |
