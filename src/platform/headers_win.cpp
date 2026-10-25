@@ -10,9 +10,11 @@
 #include "platform/console.h"
 #include "platform/env.h"
 #include "platform/fs.h"
+#include "platform/http_client.h"
 #include "platform/net.h"
 #include "platform/paths.h"
 #include "platform/proc.h"
+#include "platform/shell.h"
 #include "platform/sys.h"
 #include "platform/time.h"
 

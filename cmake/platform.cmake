@@ -8,7 +8,12 @@
 # env / paths / console / time, fs, net (ws2_32 moves here), proc / sys and their call sites. See docs/dev/platform.md.
 
 add_library(whirl_platform STATIC
-  ${CMAKE_SOURCE_DIR}/src/platform/headers_win.cpp)
+  ${CMAKE_SOURCE_DIR}/src/platform/headers_win.cpp
+  # feat026 launcher (whirl.exe without arguments): console facts / input, child processes, the tray; the chat
+  # window's HTTP client. Only src/launcher calls them, so the linker adds them to whirl.exe alone.
+  ${CMAKE_SOURCE_DIR}/src/platform/shell_win.cpp
+  ${CMAKE_SOURCE_DIR}/src/platform/http_client_win.cpp)
+target_link_libraries(whirl_platform PUBLIC winhttp shell32 ole32 user32)
 # callers include "platform/<concern>.h"; never put src/platform itself on an include path (its time.h would shadow
 # the C library's <time.h>)
 target_include_directories(whirl_platform PUBLIC ${CMAKE_SOURCE_DIR}/src)

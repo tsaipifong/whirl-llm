@@ -216,3 +216,4 @@ include(cmake/safety_targets.cmake)  # safe025: test-only fault driver (default 
 include(cmake/model.cmake OPTIONAL)
 include(cmake/vision.cmake OPTIONAL)  # Phase 3 (vision)
 include(cmake/release.cmake OPTIONAL)  # release front-end: version, resources, icon, error messages
+include(cmake/launcher.cmake)  # feat026: Windows launcher of whirl.exe (double-click setup, tray); after model / release

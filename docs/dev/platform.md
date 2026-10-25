@@ -20,6 +20,8 @@ moved yet. PL1-PL4 move the calls (table below), PL5 makes the check blocking in
 | `src/platform/net.h` | `whirl::platform::net` | the HTTP server's Winsock calls, the release front-end's port pre-check | PL3 (with FakeNet) |
 | `src/platform/proc.h` | `whirl::platform::proc` | executable path, the per-GPU named mutex, Ctrl+C / shutdown events, process id / working set | PL4 |
 | `src/platform/sys.h` | `whirl::platform::sys` | physical RAM; the wmain UTF-16 -> UTF-8 conversion ("args") | PL4 |
+| `src/platform/shell.h` | `whirl::platform::shell` | the Windows launcher only (feat026, 0.2.6): console facts (process count, console stdin / stdout), UTF-16 console input, the server child and its Ctrl+Break, the tray icon, message box, ShellExecute | feat026 (new code, not a move) |
+| `src/platform/http_client.h` | `whirl::platform::http_client` | the launcher's chat window: WinHTTP GET / streamed POST to the local server | feat026 (new code) |
 
 Each header lists, in a comment, the exact calls and files its step moves. The full per-file list with counts is
 `tools/gates/platform_pending.txt`.
@@ -55,7 +57,8 @@ code, ADR-0004 #5), `src/release/dll_deps.cpp` (the DLL dependency diagnosis), a
 The core library links it (`target_link_libraries(whirl PUBLIC whirl_platform)` in `CMakeLists.txt`), so every
 executable can reach it and PL1-PL4 only add sources to `cmake/platform.cmake`. Winsock (`ws2_32`) and `winmm`
 move to `whirl_platform` with PL3 / PL1. Until PL1 the library holds only `headers_win.cpp`, which nothing
-references, so no executable contains code from it.
+references, so no executable contains code from it. feat026 adds `shell_win.cpp` and `http_client_win.cpp` (and
+`winhttp`, `shell32`, `ole32`, `user32`); only whirl.exe's launcher references them (docs/dev/launcher.md).
 
 ## The check
 

@@ -31,6 +31,11 @@
 #include "whirl/vision.h"
 #endif
 #include "release/release.h"
+#if WHIRL_HAVE_LAUNCHER
+#include "launcher/launcher.h"
+#include "launcher/launcher_main.h"
+#include "platform/shell.h"
+#endif
 
 #include <fcntl.h>
 #include <io.h>
@@ -2614,6 +2619,29 @@ int wmain(int argc, wchar_t** wargv) {
     // s8-719 root fix: the GPU list helper (a child of this program, see gpu_select.h); never interactive
     if (argv.size() == 2 && argv[1] == whirl::gpusel::k_probe_arg) return whirl::gpusel::probeMain();
     if (argv.size() >= 2 && argv[1] == "--list-devices") argv[1] = "devices";  // llama.cpp's name for it
+#if WHIRL_HAVE_LAUNCHER
+    // feat026 Windows launcher (docs/dev/launcher.md). Only these three cases are new; every other command line takes
+    // the unchanged path below. No arguments starts the launcher only when whirl.exe got a console of its own
+    // (double-click, Start menu, shortcut) with stdin and stdout on it; from a command prompt, a script, a pipe or
+    // without a console it prints the usage as before (launcher::decideStart).
+    {
+        namespace lsh = whirl::platform::shell;
+        const std::string no_launcher = lsh::envUtf8("WHIRL_NO_LAUNCHER");
+        const whirl::launcher::StartFacts facts{argv.size() - 1, lsh::stdinIsConsole(), lsh::stdoutIsConsole(), lsh::consoleProcessCount(),
+                                                whirl::launcher::noLauncherEnv(no_launcher.empty() ? nullptr : no_launcher.c_str())};
+        if (argv.size() == 3 && argv[1] == whirl::launcher::k_chat_arg) return whirl::launcher::chatMain(argv[2]);
+        if (argv.size() == 2 && argv[1] == whirl::launcher::k_setup_arg) {
+            if (!whirl::launcher::setupAllowed(facts)) {
+                std::fputs("whirl: --setup asks questions in a console window; it cannot run with redirected input or output.\n"
+                           "  Scripts start the server with: whirl serve MODEL.gguf [options]\n",
+                           stderr);
+                return app::exit_usage;
+            }
+            return whirl::launcher::launcherMain(true);
+        }
+        if (argv.size() < 2 && whirl::launcher::decideStart(facts) == whirl::launcher::Start::launcher) return whirl::launcher::launcherMain(false);
+    }
+#endif
     if (argv.size() < 2) {
         std::fputs(k_help_main, stderr);
         return app::exit_usage;
