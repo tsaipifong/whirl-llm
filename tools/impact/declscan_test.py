@@ -142,5 +142,17 @@ d6 = declscan.declared(CB, 6)["decls"]
 expect("A3 decltype(&hipFree): hipFree is a type-side identifier, not the name", d6 and "hipFree" in d6[0]["types"], d6)
 d2 = declscan.declared(CB, 2)["decls"]
 expect("A3 std::function<void(int)> on_done is a member, not a function", d2 and d2[0]["what"] == "member", d2)
+# mt-p1 pass 3 (rereview act-on 1): the signature carries the full scope and the #if branch; include guards are left out
+G = "#ifndef X_H\n#define X_H\nnamespace a {\n#if defined(G1)\nconstexpr int k = 1;\n#else\nconstexpr int k = 1;\n#endif\n}\n#endif\n"
+s5, s7 = declscan.declared(G, 5)["decls"][0]["sig"], declscan.declared(G, 7)["decls"][0]["sig"]
+expect("pass3 #if / #else branches give different signatures", s5 != s7, (s5, s7))
+expect("pass3 include guard is not in the #if stack", s5[1] == (("#if defined(G1)", "#if"),), s5)
+expect("pass3 namespace in the scope", s5[0] == ("ns:namespace a",), s5)
+SP = "template <> struct Cfg<1151> {\n    static constexpr int kTile = 32;\n};\ntemplate <> struct Cfg<1201> {\n    static constexpr int kTile = 32;\n};\n"
+expect("pass3 specialisation arguments in the scope", declscan.declared(SP, 2)["decls"][0]["sig"] != declscan.declared(SP, 5)["decls"][0]["sig"])
+DI = "struct P {\n    int a;\n    int b;\n};\nconstexpr P k_p = {\n    .a = 1, .b = 2,\n};\n"
+got = {(x["cls"], x["name"], x["what"]) for x in declscan.declared(DI, 6)["decls"]}
+expect("pass3 designated initializer row -> fields P::a, P::b + the table", {("P", "a", "field"), ("P", "b", "field")} <= got
+       and any(n == "k_p" for _, n, _ in got), got)
 print(f"declscan test: {ok}/{ok + bad} ok")
 sys.exit(1 if bad else 0)

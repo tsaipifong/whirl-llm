@@ -140,8 +140,15 @@ A changed line outside any function (measure-tools P1, `tools/impact/declscan.py
 name it **declares** (a member `std::vector<DevBuf> allocations;` selects the functions that use
 `allocations`, not every function that names `DevBuf`); type names are reported as `declarations ... type`.
 A declaration that appears unchanged in another file on the other side of the diff (moved between headers)
-selects nothing; a reorder inside one struct / enum, an enumerator inserted or removed before others, and a
-removed member or enumerator fall back to the whole file;
+selects nothing. "Unchanged" means the same statement in the same full scope (namespace path, enclosing class
+headers with template specialisation arguments, the `#if` branch; include guards ignored), vanishing from one
+side and appearing on the other the same number of times, so swapping values between `#if` branches,
+specialisations, nested classes or headers is a change. A reorder inside one struct / enum, a reorder at
+namespace scope of one file (two-phase lookup, initialisation order), an enumerator inserted or removed before
+others, and a removed member or enumerator fall back to the whole file. A designated-initializer row
+`.field = v` selects the readers of `field` as well as the users of the table. A header included by a `.hip`
+file selects the kernel paths and kernel tests of every including `.hip` (`kt_full`) and the P-719 checks
+(`srv_gpu_select`, kvram719; class `kernel_header`);
 `#include` lines mean "compile the file and its includers"; `#define` selects the macro's users; `#if` lines
 and a lone moved `}` fall back to the whole file. Each report also names **behaviour classes** (lifetime,
 layout, dispatch, numeric, schedule, io, sizing, pinned, device, protocol, vision, compat, version, build,
@@ -153,6 +160,13 @@ on purpose, `--baseline` accepts a narrowed commit only when every GPU step it l
 parameter, initializer reference or qualifier (`impact.analyze(..., legacy=...)`, validate.py `RULES`), and it
 loses no step its ground truth needed; `--exclude-tuned` leaves the commits the rules were tuned on out (`--arch024`: the GPU checks each arch024 step ran; `RANGE_CASES`:
 the 0.2.4 range 605281b..9844fde).
+
+Known gaps of the static rule (not selected by impact.py; review mt-p1 rereview P3, P5, P7, P11): a macro whose only
+consumer is an `#ifdef` / `#if defined` (removing it changes code without any identifier use); `#pragma pack` around a
+struct (layout changes, no declaration line changes); a default member initializer whose effect reaches only code that
+default-constructs the struct without naming the member (only the member's readers are selected); a self-registering
+namespace-scope global removed with no user by name (`static Registrar r(...)`: build only). For these shapes run the
+full gate or name the users by hand.
 
 ### <a id="module-gate"></a>Module gate (dev-time only)
 

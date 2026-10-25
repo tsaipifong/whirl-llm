@@ -84,6 +84,149 @@ def tests_of(r):
     return {t for v in r["cpu_tests"].values() for t in v}
 
 
+def git_lines(a, b):
+    """changed line numbers (old, new) exactly as `git diff --no-index -U0` reports them"""
+    import re
+    import shutil
+    import subprocess
+    import tempfile
+    d = tempfile.mkdtemp()
+    try:
+        fa, fb = os.path.join(d, "a"), os.path.join(d, "b")
+        with open(fa, "w", newline="\n") as f:
+            f.write(a)
+        with open(fb, "w", newline="\n") as f:
+            f.write(b)
+        out = subprocess.run(["git", "diff", "--no-index", "-U0", fa, fb], capture_output=True, text=True).stdout
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+    o, n = [], []
+    for mm in re.finditer(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", out, re.M):
+        os_, oc, ns, nc = int(mm.group(1)), int(mm.group(2) or 1), int(mm.group(3)), int(mm.group(4) or 1)
+        o += list(range(os_, os_ + oc))
+        n += list(range(ns, ns + nc))
+    return o, n
+
+
+def pmap(funcs, includers, hip=None):
+    """map for the probes (as scratch/mt_p1_rr/probe_rr.py): every function its own path p_<name> and test t_<name>"""
+    F = {}
+    for f, n in funcs:
+        short = n.split("::")[-1]
+        F[f"{f}::{n}"] = {"file": f, "name": n, "lines": [1, 2], "paths": [f"p_{short}"], "models": ["dense", "moe"],
+                          "tests": [f"whirl-tests:t_{short}"]}
+    tests = {t: {"exe": "whirl-tests", "gpu": False} for d in F.values() for t in d["tests"]}
+    files = {}
+    for d in F.values():
+        files.setdefault(d["file"], set()).update(d["paths"])
+    hip = hip or {}
+    paths = sorted({p for d in F.values() for p in d["paths"]} | {p for h in hip.values() for p in h["paths"]})
+    return {"functions": F, "hip": hip, "files": {k: sorted(v) for k, v in files.items()}, "includers": includers,
+            "executables": {"whirl-tests": sorted(files)}, "tests": tests, "release_srv_steps": {},
+            "declared": {"paths": {p: {"metric": None} for p in paths}, "gate_suites": {}, "metric_cells": {"None": []},
+                         "gpus": {"gfx1201": "r97", "gfx1151": "s8"}, "models": {"dense": "swift", "moe": "ornith"},
+                         "modes": ["precise", "balance", "fast"]}}
+
+
+def probe(A, B, funcs, need, includers=None, hip=None):
+    """A, B: {path: text} old / new; returns (report, needed functions not selected, selected function names)"""
+    REPO.clear()
+    for p, t in A.items():
+        REPO[("A", p)] = t
+    for p, t in B.items():
+        REPO[("B", p)] = t
+    mp = pmap(funcs, includers if includers is not None else {"src/x.h": ["src/x.cpp"], "src/y.h": ["src/x.cpp"], "src/z.h": ["src/x.cpp"]}, hip)
+    changes = {}
+    for p in sorted(set(A) | set(B)):
+        o, n = git_lines(A.get(p, ""), B.get(p, ""))
+        if o or n:
+            changes[p] = {"old_path": p, "new": n, "old": o}
+    r = impact.analyze(changes, mp, "B", "A")
+    sel = {p[2:] for p in r["paths"] if p.startswith("p_")}
+    return r, sorted(set(need) - sel), sel
+
+
+CPP13 = '#include "x.h"\nint tileRows(int n) {\n  return n / kTile;\n}\nint other() {\n  return 1;\n}\n'
+HA13b = ("#pragma once\n#if defined(WHIRL_GFX1151)\nconstexpr int kTile = 32;\nconstexpr int kRows = 4;\n#else\n"
+         "constexpr int kTile = 64;\nconstexpr int kRows = 4;\n#endif\n")
+HA14b = ("#pragma once\nstruct Blk {\n    int n;\n#ifdef WHIRL_TRACE\n    int pad[8];\n    int t;\n#else\n    int pad[2];\n    int t;\n#endif\n};\n")
+CPP14 = '#include "x.h"\nvoid sendBlk(Blk& b) {\n  hipMemcpy(dst, &b, sizeof(Blk));\n}\nint getN(Blk& b) {\n  return b.n;\n}\n'
+HA15 = "#pragma once\nnamespace gfx1151 {\nconstexpr int kWaves = 4;\n}\nnamespace gfx1201 {\n}\n"
+HB15 = "#pragma once\nnamespace gfx1151 {\n}\nnamespace gfx1201 {\nconstexpr int kWaves = 4;\n}\n"
+CPP15 = ('#include "x.h"\nint waves1151() {\n  return gfx1151::kWaves;\n}\nint waves1201() {\n  using namespace gfx1201;\n  return kWaves;\n}\n')
+HA16 = ("#pragma once\ntemplate <int A> struct Cfg;\ntemplate <> struct Cfg<1151> {\n    static constexpr int kTile = 32;\n    int pad;\n};\n"
+        "template <> struct Cfg<1201> {\n    static constexpr int kTile = 64;\n    int pad;\n};\n")
+CPP16 = '#include "x.h"\nint rows1201(int n) {\n  return n / Cfg<1201>::kTile;\n}\nint other() {\n  return 1;\n}\n'
+HA17 = ("#pragma once\nstruct Engine {\n    struct Config {\n        int threads = 4;\n        int q = 1;\n    };\n};\n"
+        "struct Server {\n    struct Config {\n        int threads = 8;\n        int q = 1;\n    };\n};\n")
+CPP17 = '#include "x.h"\nint engThreads(Engine::Config& c) {\n  return c.threads;\n}\nint other() {\n  return 1;\n}\n'
+HA18a = "#pragma once\nnamespace g1151 {\nconstexpr int kTile = 32;\n}\n"
+HA18b = "#pragma once\nnamespace g1201 {\nconstexpr int kTile = 64;\n}\n"
+CPP18 = '#include "x.h"\nint rows1151(int n) {\n  return n / g1151::kTile;\n}\nint other() {\n  return 1;\n}\n'
+HA2 = "#pragma once\nvoid emit(long v);\ntemplate <class T> void put(T v) {\n  emit(v);\n}\nvoid emit(int v);\n"
+HB2 = "#pragma once\nvoid emit(long v);\nvoid emit(int v);\ntemplate <class T> void put(T v) {\n  emit(v);\n}\n"
+CPP2P = '#include "x.h"\nvoid writeTok(int t) {\n  put(t);\n}\nvoid emit(long v) {\n  sinkL(v);\n}\nvoid emit(int v) {\n  sinkI(v);\n}\n'
+CPP1A = ('#include "x.h"\nextern std::string g_base;\nstd::string g_base = makeBase();\nstd::string g_path = g_base + "/kv";\n'
+         'std::string kvDir() {\n  return g_path;\n}\nstd::string baseDir() {\n  return g_base;\n}\n')
+CPP1B = ('#include "x.h"\nextern std::string g_base;\nstd::string g_path = g_base + "/kv";\nstd::string g_base = makeBase();\n'
+         'std::string kvDir() {\n  return g_path;\n}\nstd::string baseDir() {\n  return g_base;\n}\n')
+# D2 (device_profile.h shape): a designated-initializer row of a per-arch table; vision reads the field through profile()
+PROF = ("#pragma once\nstruct Profile {\n    unsigned gemm_tile;\n    unsigned vision_attn_threads;\n};\n"
+        "inline constexpr Profile k_profile_gfx1151 = {\n    .gemm_tile = 32,\n    .vision_attn_threads = %s,\n};\n"
+        "inline constexpr Profile k_profile_gfx1201 = {\n    .gemm_tile = 64,\n    .vision_attn_threads = %s,\n};\n")
+CPPD2 = ('#include "x.h"\nconst Profile& profile(int a) {\n  return a == 1151 ? k_profile_gfx1151 : k_profile_gfx1201;\n}\n'
+         'void Vision::init(int arch) {\n  attn_threads_ = profile(arch).vision_attn_threads;\n}\n'
+         'int gemmTile(int arch) {\n  return profile(arch).gemm_tile;\n}\n')
+# a struct moved unchanged between two headers of the same namespace (include guards differ): still a move
+MV_A = ("#ifndef X_H\n#define X_H\nnamespace whirl {\nstruct Opt {\n    int ctx = 8;\n};\nint keep();\n}\n#endif\n",
+        "#ifndef Y_H\n#define Y_H\nnamespace whirl {\nint other();\n}\n#endif\n")
+MV_B = ("#ifndef X_H\n#define X_H\nnamespace whirl {\nint keep();\n}\n#endif\n",
+        "#ifndef Y_H\n#define Y_H\nnamespace whirl {\nint other();\nstruct Opt {\n    int ctx = 8;\n};\n}\n#endif\n")
+CPPMV = '#include "x.h"\nint readCtx(whirl::Opt& o) {\n  return o.ctx;\n}\nint other() {\n  return 1;\n}\n'
+
+
+def swap(t, a, b):
+    return t.replace(a, "\x00").replace(b, a).replace("\x00", b)
+
+
+# name: (old files, new files, map functions, needed (selected), block (must NOT be selected))
+PROBES = {
+    "P13b #if/#else kTile values swapped": ({"src/x.h": HA13b, "src/x.cpp": CPP13},
+                                            {"src/x.h": swap(HA13b, "kTile = 32", "kTile = 64"), "src/x.cpp": CPP13},
+                                            [("src/x.cpp", "tileRows"), ("src/x.cpp", "other")], ["tileRows"], []),
+    "P14b #ifdef/#else padding swapped in a struct": ({"src/x.h": HA14b, "src/x.cpp": CPP14},
+                                                      {"src/x.h": swap(HA14b, "pad[8]", "pad[2]"), "src/x.cpp": CPP14},
+                                                      [("src/x.cpp", "sendBlk"), ("src/x.cpp", "getN")], ["sendBlk"], []),
+    "P15 constant moved to another namespace in one header": ({"src/x.h": HA15, "src/x.cpp": CPP15}, {"src/x.h": HB15, "src/x.cpp": CPP15},
+                                                              [("src/x.cpp", "waves1151"), ("src/x.cpp", "waves1201")], ["waves1201"], []),
+    "P16 Cfg<1151>/Cfg<1201> kTile swapped": ({"src/x.h": HA16, "src/x.cpp": CPP16},
+                                              {"src/x.h": swap(HA16, "kTile = 32", "kTile = 64"), "src/x.cpp": CPP16},
+                                              [("src/x.cpp", "rows1201"), ("src/x.cpp", "other")], ["rows1201"], []),
+    "P17 Engine::Config/Server::Config defaults swapped": ({"src/x.h": HA17, "src/x.cpp": CPP17},
+                                                           {"src/x.h": swap(HA17, "threads = 4", "threads = 8"), "src/x.cpp": CPP17},
+                                                           [("src/x.cpp", "engThreads"), ("src/x.cpp", "other")], ["engThreads"], []),
+    "P18 two headers changed in place to swapped values": ({"src/x.h": HA18a, "src/y.h": HA18b, "src/x.cpp": CPP18},
+                                                           {"src/x.h": HA18a.replace("32", "64"), "src/y.h": HA18b.replace("64", "32"),
+                                                            "src/x.cpp": CPP18},
+                                                           [("src/x.cpp", "rows1151"), ("src/x.cpp", "other")], ["rows1151"], []),
+    "P2 overload moved before the template that calls it": ({"src/x.h": HA2, "src/x.cpp": CPP2P}, {"src/x.h": HB2, "src/x.cpp": CPP2P},
+                                                            [("src/x.cpp", "writeTok"), ("src/x.cpp", "emit")], ["writeTok"], []),
+    "P1 namespace-scope globals swapped in one .cpp": ({"src/x.h": "#pragma once\n", "src/x.cpp": CPP1A},
+                                                       {"src/x.h": "#pragma once\n", "src/x.cpp": CPP1B},
+                                                       [("src/x.cpp", "kvDir"), ("src/x.cpp", "baseDir")], ["kvDir"], []),
+    "D2 designated initializer .vision_attn_threads swapped": ({"src/x.h": PROF % ("128", "256"), "src/x.cpp": CPPD2},
+                                                               {"src/x.h": PROF % ("256", "128"), "src/x.cpp": CPPD2},
+                                                               [("src/x.cpp", "profile"), ("src/x.cpp", "Vision::init"),
+                                                                ("src/x.cpp", "gemmTile")], ["profile", "init"], ["gemmTile"]),
+    "count: a statement removed from two headers, added to one (occurrences 2 -> 1): not a move":
+        ({"src/x.h": HA18a, "src/y.h": HA18a.replace("#pragma once", "#pragma once\n// y"), "src/z.h": "#pragma once\n", "src/x.cpp": CPP18},
+         {"src/x.h": "#pragma once\n", "src/y.h": "#pragma once\n// y\n", "src/z.h": HA18a, "src/x.cpp": CPP18},
+         [("src/x.cpp", "rows1151"), ("src/x.cpp", "other")], ["rows1151"], []),
+    "block: struct moved unchanged between headers (guards differ)": ({"src/x.h": MV_A[0], "src/y.h": MV_A[1], "src/x.cpp": CPPMV},
+                                                                      {"src/x.h": MV_B[0], "src/y.h": MV_B[1], "src/x.cpp": CPPMV},
+                                                                      [("src/x.cpp", "readCtx"), ("src/x.cpp", "other")], [], ["readCtx", "other"]),
+}
+
 real = impact.show
 impact.show = fake_show
 impact.load_modules = lambda root=None: None
@@ -278,6 +421,32 @@ try:
     r = run({"docs/x.md": {"old_path": "docs/x.md", "new": [1], "old": [1]}})
     expect("block: docs only -> no GPU check, no step", not r["outside_gate_checks"] and not r["release_gate_steps"],
            (r["outside_gate_checks"], r["release_gate_steps"]))
+
+    # ---------------------------------------------------------------------------------------------------------------
+    # mt-p1 pass 3 (progress/mt-p1.REREVIEW.md act-on 1-3, C-a): the reviewer's probes (scratch/mt_p1_rr/probe_rr.py),
+    # changed lines from `git diff --no-index -U0` (difflib aligns swaps differently and hid act-on 1)
+    for nm, (a, b, fns, need, block) in sorted(PROBES.items()):
+        r, miss, sel = probe(a, b, fns, need)
+        expect(f"pass3 {nm}: needed {need} selected", not miss, (miss, sel, r["notes"][:3]))
+        if block:
+            expect(f"pass3 {nm}: block, not selected {block}", not (set(block) & sel), sel)
+    # review C-a, promoted (K1, hipError 719 header): a header included by a .hip selects the includers' kernel work
+    HIP = {"kernels/gemm_small.hip": {"arch": ["gfx1201"], "models": ["dense", "moe"], "paths": ["p_prefill"], "host_users": ["gemmSmall"],
+                                      "tests": ["whirl-kernel-test:testGemmSmall"], "fields": []}}
+    KH = "#pragma once\n__device__ inline int gemms_stage_chunks(int sb) { return (sb + 15) / 16 + 1; }\n"
+    inc = {"kernels/gemm_small_addr.h": ["kernels/gemm_small.hip", "tests/unit/unit_tests.cpp"]}
+    r, _, _ = probe({"kernels/gemm_small_addr.h": KH}, {"kernels/gemm_small_addr.h": KH.replace(" + 1;", ";")}, [], [], inc, HIP)
+    expect("pass3 K1 .hip-included header -> includer kernel tests + kt_full + path", "testGemmSmall" in r["kernel_tests"]
+           and "kt_full" in r["release_gate_steps"] and "p_prefill" in r["paths"], (r["kernel_tests"], r["release_gate_steps"], sorted(r["paths"])))
+    expect("pass3 K1 -> P-719 checks (srv_gpu_select + kvram719)", "srv_gpu_select" in r["release_gate_steps"]
+           and any(c.startswith("kvram719") for c in r["outside_gate_checks"]), (r["release_gate_steps"], r["outside_gate_checks"]))
+    expect("pass3 K1 kernel_header class + golden", "kernel_header" in r["behaviour"] and "golden_swift" in r["release_gate_steps"],
+           (r["behaviour"], r["release_gate_steps"]))
+    r, _, _ = probe({"kernels/gemm_small_addr.h": KH}, {"kernels/gemm_small_addr.h": KH.replace("#pragma once\n", "#pragma once\n// note\n")},
+                    [], [], inc, HIP)
+    expect("pass3 K1 block: comment-only edit of the header -> no kernel work", "kt_full" not in r["release_gate_steps"], r["release_gate_steps"])
+    r, _, _ = probe({"kernels/other.h": KH}, {"kernels/other.h": KH.replace(" + 1;", ";")}, [], [], {"kernels/other.h": ["src/a.cpp"]}, HIP)
+    expect("pass3 K1 block: header with no .hip includer -> no kt_full", "kt_full" not in r["release_gate_steps"], r["release_gate_steps"])
 finally:
     impact.show = real
 print(f"impact decl test: {ok}/{ok + bad} ok")

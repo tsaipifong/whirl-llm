@@ -131,11 +131,14 @@ def analyze(changes, m, new_rev, old_rev, legacy=()):
     # once; the declaration statements of both sides (sigs) tell a moved declaration from a changed one
     FC = {p: file_changes(p, c, new_rev, old_rev) for p, c in changes.items()
           if p.endswith((".cpp", ".h", ".inc", ".in")) and not (p.startswith(("tests/", "tools/")))}
-    sigs = {"new": defaultdict(set), "old": defaultdict(set)}  # side -> statement signature -> files
+    # mt-p1 pass 3 (rereview act-on 1): side -> full-scope signature -> {(file, statement)} over the changed lines. A
+    # statement is moved / unchanged only when its signature vanishes from the changed lines of one side and appears on
+    # the other with the same number of occurrences (an in-place value swap changes the signatures: P13b-P18)
+    sigs = {"new": defaultdict(set), "old": defaultdict(set)}
     for fc in FC.values():
         for x in fc["decls"]:
             if x["sig"]:
-                sigs[x["side"]][x["sig"]].add(x["file"])
+                sigs[x["side"]][x["sig"]].add((x["file"], x.get("at", ("line", x["line"]))))
     beh = defaultdict(set)      # behaviour class -> reasons (B1.3)
     decl_rows = []              # declared names per changed declaration line (B1.1)
     defects = []                # map defects (B1.4)
@@ -192,6 +195,24 @@ def analyze(changes, m, new_rev, old_rev, legacy=()):
         if not fc["code"]:
             hits.append((path, "comments / blank lines only: no product path"))
             continue
+        # mt-p1 pass 3 (rereview C-a, promoted by the main session; hipError 719 header kernels/gemm_small_addr.h): a
+        # header included by a .hip kernel file changes those kernels; their map entries (paths, kernel tests, models)
+        # are selected as for a change of the .hip itself (llama.cpp CI: any .cuh -> the whole CUDA backend job), and the
+        # kernel_header class adds the P-719 checks (srv_gpu_select + kvram719)
+        hip_inc = sorted(f for f in m["includers"].get(path, []) if f.endswith(".hip"))
+        for hf in hip_inc:
+            h = m["hip"].get(hf)
+            beh["kernel_header"].add(f"{path} included by {hf}")
+            if not h:
+                notes.append(f"{path}: included by {hf}, which is not in the map: both GPUs, path load")
+                paths["load"].add(f"{path} (included by kernel file {hf})")
+                continue
+            models |= set(h["models"])
+            for p in h["paths"]:
+                paths[p].add(f"{path} (included by kernel file {hf})")
+            tests |= set(h["tests"])
+        if hip_inc:
+            hits.append((path, f"header of kernel file(s) {', '.join(hip_inc[:4])}{'...' if len(hip_inc) > 4 else ''}"))
         # measure-tools P1 (B1.1): a declaration selects the users of the DECLARED names, not of every identifier on
         # the line (type names such as DevBuf / EventH are type_changed information). A declaration that appears
         # unchanged on the other side of the diff (moved between headers, re-indented) selects nothing.
@@ -201,16 +222,24 @@ def analyze(changes, m, new_rev, old_rev, legacy=()):
         order_changed, shifted = scope_changes(fc, ch)
         pair = {path, ch["old_path"]}
 
+        ns_changed = []  # pass 3 (act-on 2): namespace-scope order of this file changed (computed on demand)
+
         def is_moved(x):
-            fs = sigs["old" if x["side"] == "new" else "new"].get(x["sig"]) if x["sig"] else None
-            if not fs:
+            if not x["sig"]:
                 return False
-            if any(f not in pair for f in fs):
-                return True
-            return x["cls"] is None or x["cls"] not in order_changed
+            occ = sigs["old" if x["side"] == "new" else "new"].get(x["sig"], set())
+            if not occ or len(occ) != len(sigs[x["side"]].get(x["sig"], ())):
+                return False  # appears on one side only, or the number of occurrences changed: a real change
+            if any(f not in pair for f, _ in occ):
+                return True   # moved to / from another file, identical full scope and statement
+            if x["cls"] is not None:
+                return x["cls"] not in order_changed
+            if not ns_changed:
+                ns_changed.append(ns_order_changed(fc))
+            return not ns_changed[0]
         decls = [x for x in fc["decls"] if "moved" in legacy or not is_moved(x)]
         moved = len(fc["decls"]) - len(decls)
-        member_names = {(x["cls"], x["name"]) for x in decls if x["cls"] and x["what"] in ("member", "function", "alias")}
+        member_names = {(x["cls"], x["name"]) for x in decls if x["cls"] and x["what"] in ("member", "function", "alias", "field")}
         free_names = {x["name"] for x in decls if (x["cls"], x["name"]) not in member_names}
         outside_ids = free_names | {n for _, n in member_names}
         # review A4: the identifiers the 0.2.4 rule took from these lines that the declared-name rule drops, by kind
@@ -240,6 +269,8 @@ def analyze(changes, m, new_rev, old_rev, legacy=()):
             fail_closed.append(f"{side}: braces / namespace lines changed without their block ({nb})")
         if "braces" in legacy and fc.get("brace_lines"):
             fail_closed.append("legacy: brace / namespace lines (0.2.4: no identifier -> file scope)")
+        if ns_changed and ns_changed[0] and "moved" not in legacy:
+            fail_closed.append("namespace-scope declaration order changed (name lookup at template definitions, initialisation order)")
         for c in sorted(order_changed):
             fail_closed.append(f"declaration order inside {c} changed (layout / enumerator values)")
             beh["layout"].add(f"{c}: declaration order changed")
@@ -527,6 +558,17 @@ def indirect_names(names, fsrc, scans):
     return got - set(names)
 
 
+def ns_order_changed(fc):
+    """mt-p1 pass 3 (rereview act-on 2): True when the namespace-scope declarations / function definitions common to
+    both sides of this file appear in another order (declscan.ns_sequence)"""
+    a, b = fc["src"].get("old"), fc["src"].get("new")
+    if a is None or b is None:
+        return False
+    sa, sb = declscan.ns_sequence(a), declscan.ns_sequence(b)
+    common = set(sa) & set(sb)
+    return [e for e in sa if e in common] != [e for e in sb if e in common]
+
+
 def scope_changes(fc, ch):
     """mt-p1 review A1 / C2: (classes / enums of the changed declarations whose declaration order differs between the
     two sides, enums whose common enumerators sit at other positions: values shift)"""
@@ -619,6 +661,10 @@ BEHAVIOUR = {
     "version": {"measure": [], "checks": ["version: every exe sha changes; release_check b_r1_gates needs gate summaries on the "
                                           "shipped exe (rebuild + the selected steps on it, or the ADR-0003 work-equivalence proof)"]},
     "build": {"measure": ["full build both archs"]},
+    # mt-p1 pass 3: a header included by .hip kernel files (kernels/gemm_small_addr.h = the hipError 719 over-read fix)
+    "kernel_header": {"measure": ["kernel tests of the including .hip files (whirl-kernel-test, kt_full)", "golden (bitwise)"],
+                      "steps": ["srv_gpu_select"],
+                      "checks": ["kvram719: tools/repro/kvram719_tier.ps1 (each GPU, one after the other)"]},
     "doc": {"measure": []},
 }
 PATH_BEHAVIOUR = {"server.loop": "schedule", "server.prefill": "schedule", "server.decode": "schedule", "server.mtp": "schedule",
@@ -692,7 +738,7 @@ def behaviour_classes(changes, rep, beh, decl_rows, new_rev):
     checks = sorted({x for k in beh for x in BEHAVIOUR.get(k, {}).get("checks", [])})
     rep["outside_gate_checks"] = checks
     add = sorted({x for k in beh for x in BEHAVIOUR.get(k, {}).get("steps", [])})
-    if {"vision", "numeric", "dispatch", "layout"} & set(beh):
+    if {"vision", "numeric", "dispatch", "layout", "kernel_header"} & set(beh):
         # golden server has the vision rows (the only GPU vision correctness check in release_gate); validation hold-out
         # f6e4236 (vision::imageKey) lost golden when type names stopped selecting it. Review C1: numeric / dispatch /
         # layout name golden (bitwise) as their measurement, so they add the golden steps too

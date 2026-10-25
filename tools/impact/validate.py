@@ -455,7 +455,10 @@ RULES = {
               "declaration), initializer references (read, not changed), qualifiers",
     "R-member": "no identifier was dropped: the 0.2.4 rule matched functions that only name a same-named local / other "
                 "member; the P1 rule requires .n / ->n, a member function of the class, or the class named with n",
-    "R-moved": "the statement is identical in another file on the other side of the diff (moved between headers)",
+    "R-moved": "the statement, in its full scope (namespaces, enclosing class headers with specialisation arguments, #if "
+               "branch), vanishes from the changed lines of one side and appears on the other with the same number of "
+               "occurrences: in another file (moved between headers), or in the same file with the declaration order of "
+               "its class / enum, or at namespace scope of the file, unchanged (diff alignment); mt-p1 pass 3",
     "R-block": "a namespace / brace block added or removed whole (both braces changed; a lone brace still fails closed): "
                "the 0.2.4 rule read the identifier-less brace lines as a file-scope change",
 }

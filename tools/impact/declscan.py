@@ -18,6 +18,7 @@ never selection). Text scanner (stdlib only), like cxxscan; it over-approximates
 """
 from __future__ import annotations
 
+import bisect
 import re
 
 import cxxscan
@@ -85,6 +86,56 @@ def _prep(src: str):
         _cache.pop(next(iter(_cache)))
     _cache[key] = (clean, clines, starts, frames_at, match, pp)
     return _cache[key]
+
+
+_cond_cache: dict = {}
+
+
+def cond_stack(src: str) -> dict:
+    """mt-p1 pass 3 (rereview act-on 1, P13b / P14b): line -> the enclosing preprocessor conditions, outermost first,
+    as ('#if X', '#else') pairs (the branch the line is in). An include guard (#ifndef X / #define X as the first
+    directive pair at the top level) is left out, so a declaration moved between two guarded headers keeps its
+    signature. Directive lines get the stack in force before them."""
+    key = hash(src)
+    if key in _cond_cache:
+        return _cond_cache[key]
+    raw = src.split("\n")
+    clean0 = cxxscan._blank(src)[0].split("\n")
+    out, stack = {}, []
+    i = 0
+    while i < len(raw):
+        out[i + 1] = tuple(e for e in stack if e is not None)
+        t = clean0[i].strip() if i < len(clean0) else ""
+        start = i
+        while raw[i].rstrip().endswith("\\") and i + 1 < len(raw):  # continuation lines of a directive
+            i += 1
+            out[i + 1] = out[start + 1]
+        mm = re.match(r"#\s*(\w+)\s*(.*)", t)
+        if mm:
+            kw, rest = mm.group(1), " ".join(mm.group(2).split())
+            if kw in ("if", "ifdef", "ifndef"):
+                guard = None
+                if kw == "ifndef" and not stack:
+                    nxt = next((clean0[k].strip() for k in range(i + 1, len(clean0)) if clean0[k].strip()), "")
+                    gm = re.match(r"#\s*define\s+(\w+)\s*$", nxt)
+                    guard = gm is not None and gm.group(1) == rest
+                stack.append(None if guard else (f"#{kw} {rest}", "#if"))
+            elif kw in ("elif", "else", "elifdef", "elifndef") and stack:
+                if stack[-1] is not None:
+                    stack[-1] = (stack[-1][0], f"#{kw} {rest}".strip())
+            elif kw == "endif" and stack:
+                stack.pop()
+        i += 1
+    if len(_cond_cache) >= 8:
+        _cond_cache.pop(next(iter(_cond_cache)))
+    _cond_cache[key] = out
+    return out
+
+
+def _scope_key(frames) -> tuple:
+    """mt-p1 pass 3 (act-on 1, P15-P17): the full scope of a statement: every enclosing namespace / class / enum header,
+    normalised (template specialisation arguments, base classes and outer classes included)"""
+    return tuple(f"{f[0]}:{' '.join(_strip_lead(f[3]).split())}" for f in frames if f[0] in ("ns", "class", "enum"))
 
 
 def _classify(header: str, stack) -> str:
@@ -291,7 +342,7 @@ def declared(src: str, line: int) -> dict:
                 if not rl[k].rstrip().endswith("\\"):
                     break
                 k += 1
-            ds = [_d(nm.group(1), None, "macro", "", ("#", " ".join(" ".join(full).split())))] if nm else []
+            ds = [_d(nm.group(1), None, "macro", "", ("#", cond_stack(src).get(st, ()), " ".join(" ".join(full).split())))] if nm else []
             return {"kind": "macro", "decls": ds, "target": None}
         if kw == "pragma":
             return {"kind": "pragma", "decls": [], "target": None}
@@ -307,6 +358,12 @@ def declared(src: str, line: int) -> dict:
         if f[0] == "init":
             outer_cls = next((g[1] for g in reversed(frames[:k]) if g[0] in ("class", "enum")), None)
             kd, ds = _parse_stmt(f[3].rstrip().rstrip("="), outer_cls, "{")
+            # mt-p1 pass 3 (rereview act-on 3, device_profile.h D2): a designated initializer `.field = v` on the line
+            # also declares a change of that field: its readers (.field / ->field) are users, not only the table's
+            tcls = next((t for x in ds for t in x["types"]), None) if ds else None
+            for g in re.finditer(r"(?:^|[{,(])\s*((?:\.\s*[A-Za-z_]\w*\s*(?:\[[^\]]*\]\s*)?)+)=(?!=)", clines[line - 1]):
+                for fld in re.findall(r"\.\s*([A-Za-z_]\w*)", g.group(1)):
+                    ds.append(_d(fld, tcls or "?", "field", ""))
             return {"kind": kd if ds else "unparsed", "decls": ds, "target": None}
     inner = frames[-1] if frames else None
     if inner and inner[0] == "enum":
@@ -318,7 +375,8 @@ def declared(src: str, line: int) -> dict:
         for part in txt.split(","):
             mm = re.match(r"\s*([A-Za-z_]\w*)", part)
             if mm:
-                ds.append(_d(mm.group(1), inner[1], "enumerator", "", (inner[1], " ".join(clines[line - 1].split()))))
+                ds.append(_d(mm.group(1), inner[1], "enumerator", "", (_scope_key(frames), cond_stack(src).get(line, ()),
+                                                                       " ".join(clines[line - 1].split()))))
         if ds:
             return {"kind": "enumerator", "decls": ds, "target": None}
         if not re.sub(r"[\s{}();,:]", "", txt):
@@ -352,8 +410,13 @@ def declared(src: str, line: int) -> dict:
         on_line = _strip_lead(clean[max(p, ls):min(q, le)])  # the part of the statement on this line (access spec dropped)
         if (stmt.strip() and on_line) or (term == "{" and ls <= q < le):
             kd, ds = _parse_stmt(stmt, cls, term)
-            for x in ds:  # the whole statement: an identical statement on the other side of the diff = moved, unchanged
-                x["sig"] = (cls, " ".join(stmt.split()) + term)
+            # the whole statement in its full scope (mt-p1 pass 3, rereview act-on 1: namespaces, enclosing class
+            # headers with their specialisation arguments, the #if branch): an identical signature on the other side of
+            # the diff = moved / unchanged. "at" = the statement's offset (one statement over several changed lines)
+            sline = bisect.bisect_right(starts, p + len(clean[p:q]) - len(clean[p:q].lstrip()))
+            for x in ds:
+                x["sig"] = (_scope_key(frames), cond_stack(src).get(sline, ()), " ".join(stmt.split()) + term)
+                x["at"] = p
             if term == "{" and kd == "decl" and ds and ds[0]["what"] == "type":
                 ds[0]["cls"] = None
             kinds.append(kd)
@@ -403,19 +466,30 @@ def scope_order(src: str, cls: str) -> list:
     return out
 
 
-def scope_order(src: str, cls: str) -> list:
-    """mt-p1 review A1: the declared names of the class / struct / enum `cls` in declaration order (members, member
-    functions, enumerators; nested types and inline function bodies left out)"""
+def ns_sequence(src: str) -> list:
+    """mt-p1 pass 3 (rereview act-on 2, P1 / P2): the namespace-scope entities of a file in source order: every
+    declaration statement outside classes and functions (its full signature) and every function definition
+    (('fn', qualified name)). Order at namespace scope changes meaning (two-phase lookup at a template's definition,
+    same-TU dynamic initialisation order), so a same-file "move" is accepted only when this order is unchanged."""
     clean, clines, starts, frames_at, match, pp = _prep(src)
-    out, seen = [], set()
-    for ln in range(1, len(clines) + 1):
-        fr = frames_at.get(ln, ())
-        if not fr or fr[-1][0] not in ("class", "enum") or fr[-1][1] != cls or ln in pp or not clines[ln - 1].strip():
+    sc = cxxscan.scan(src)
+    fstart = {f.start: f for f in sc.funcs}
+    out, seen_at = [], set()
+    ln = 1
+    while ln <= len(clines):
+        f = fstart.get(ln)
+        if f is not None:
+            out.append(("fn", f.name))
+            ln = max(ln, f.end) + 1
             continue
-        for x in declared(src, ln)["decls"]:
-            if x["cls"] == cls and x["name"] not in seen:
-                seen.add(x["name"])
-                out.append(x["name"])
+        fr = frames_at.get(ln, ())
+        if clines[ln - 1].strip() and ln not in pp and not any(g[0] in ("class", "enum", "init", "func", "inner") for g in fr):
+            for x in declared(src, ln)["decls"]:
+                k = (x.get("at"), x["name"])
+                if x.get("sig") and k not in seen_at and x["cls"] is None:
+                    seen_at.add(k)
+                    out.append(x["sig"])
+        ln += 1
     return out
 
 
