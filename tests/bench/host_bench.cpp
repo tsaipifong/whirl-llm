@@ -19,6 +19,12 @@
 //             latency, 128k prefix reuse request, stream on / off
 //   copy      A5 copy bandwidth h2d / d2h / d2d by size (64 KiB..64 MiB) and queue depth 1 / 4. On --backend null it is
 //             host memmove (a control); on --backend hip (whirl-host-bench-hip only, --device required) the GPU copies.
+//   ssd       A5 SSD tier file layer (arch025-T1, tests/bench/ssd_io.h mirrors kv_tier.cpp's CreateFileW flags / positional
+//             I/O / read_qd loop): write and read MB/s + us per 2 MiB block, buffered / unbuffered (kv_tier's flags) /
+//             unbuffered_wt, QD1 / QD4, real files in --ssd-dir (refused on D: / E: / a drive root; deleted after every
+//             cell). --backend hip = pinned host buffers (the tier arena's memory), null = aligned heap. --selftest runs
+//             it over FakeFs (in memory: exact I/O counts, in-flight depth, offsets, read-back) and, with --ssd-dir, a
+//             4-block real round trip of every variant.
 // The GGUF is read for its tokenizer only (MockModel needs one); default WHIRL_TEST_GGUF. Suites prefix / handles /
 // copy need none.
 //
@@ -34,10 +40,12 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <winioctl.h>  // before the #undef of near / far: its DEFINE_GUID lines expand FAR -> far
 #undef near
 #undef far
 
 #include "bench_out.h"
+#include "ssd_io.h"
 #include "http_client.h"
 #include "mock_backend.h"
 
@@ -76,6 +84,7 @@
 #include <mutex>
 #include <optional>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -83,6 +92,7 @@
 using namespace whirl;
 using namespace whirl::server;
 namespace wb = whirl::bench;
+namespace ssd = whirl::bench::ssd;
 
 namespace {
 
@@ -1030,20 +1040,288 @@ void suiteCopy(const Opts& o, BenchOut& out, device::Backend& be) {
     cb.streamDestroy(s);
 }
 
+// ------------------------------------------------------------------ A5 SSD tier file layer (arch025-T1)
+// See ssd_io.h for the kv_tier calls it mirrors. One op = one pass over the whole file (blocks x 2 MiB) at the cell's
+// queue depth; a write op ends with one FlushFileBuffers (kv_tier's per-entry barrier, its time in detail).
+// Buffers: --backend hip -> pinned host memory (device::PinnedBuf, what the tier arena is); null -> 4096-aligned heap.
+// Work row: pages = 2 MiB blocks per op, syncs = FlushFileBuffers per op (exact); I/O counts in detail.
+struct SsdCfg {
+    std::wstring dir;          // real files below it (Win32Fs); unused by FakeFs except for names
+    std::uint64_t file_mib = 128;
+    std::uint64_t fake_blocks = 8;
+};
+
+struct HostBlocks {
+    std::vector<device::PinnedBuf> pinned;
+    std::vector<std::unique_ptr<std::uint8_t[], void (*)(std::uint8_t*)>> heap;
+    std::vector<void*> ptr;
+    static void heapFree(std::uint8_t* p) { ::operator delete[](p, std::align_val_t{4096}); }
+    HostBlocks(device::Backend* be, int n, std::uint64_t bytes) {
+        for (int i = 0; i < n; ++i) {
+            if (be) {
+                pinned.push_back(device::PinnedBuf::alloc(*be, bytes));
+                ptr.push_back(pinned.back().get());
+            } else {
+                heap.emplace_back(static_cast<std::uint8_t*>(::operator new[](static_cast<std::size_t>(bytes), std::align_val_t{4096})), &heapFree);
+                ptr.push_back(heap.back().get());
+            }
+            if (ptr.back() == nullptr || reinterpret_cast<std::uintptr_t>(ptr.back()) % 4096 != 0)
+                throw std::runtime_error("ssd suite: host block not 4096-aligned (unbuffered I/O needs sector alignment)");
+        }
+    }
+};
+
+void fillPattern(void* p, std::uint64_t bytes, std::uint64_t seed) {
+    auto* q = static_cast<std::uint64_t*>(p);
+    std::uint64_t x = seed * 0x9E3779B97F4A7C15ull + 1;
+    for (std::uint64_t i = 0; i < bytes / 8; ++i) {  // xorshift64*: incompressible
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        q[i] = x * 0x2545F4914F6CDD1Dull;
+    }
+}
+
+std::string hex32(DWORD v) {
+    char b[16];
+    std::snprintf(b, sizeof b, "0x%08lx", static_cast<unsigned long>(v));
+    return b;
+}
+
+std::string narrow(const std::wstring& w) {
+    std::string s;
+    for (wchar_t ch : w) s += ch < 0x80 ? static_cast<char>(ch) : '?';
+    return s;
+}
+
+void suiteSsd(const Opts& o0, BenchOut& out, ssd::Fs& fs, device::Backend* be, const SsdCfg& cfg) {
+    namespace sd = whirl::bench::ssd;
+    const bool fake = std::strcmp(fs.name(), "fake") == 0;
+    const std::uint32_t blk = static_cast<std::uint32_t>(whirl::tier::block_bytes);  // kv_tier.h:73 (2 MiB)
+    const int qd_prod = static_cast<int>(whirl::tier::read_qd);                     // kv_tier.h:77 (4)
+    static_assert(whirl::tier::block_bytes % 4096 == 0, "unbuffered I/O needs sector-multiple blocks");
+    const std::uint64_t blocks = fake ? cfg.fake_blocks : std::max<std::uint64_t>(1, (cfg.file_mib << 20) / blk);
+    const std::uint64_t file_bytes = blocks * blk;
+    // sampling: an op is 10-150 ms of real I/O; fewer samples than the host-logic cells so a run writes ~10 GB, not 40
+    Opts o = o0;
+    if (!o.quick) {
+        o.min_n = 9;
+        o.max_n = 13;
+        o.time_cap_s = 1.0;
+    }
+    std::string model;
+    if (!fake) {
+        model = sd::driveModel(cfg.dir[0]);
+        ULARGE_INTEGER freeb{};
+        if (GetDiskFreeSpaceExW(cfg.dir.c_str(), &freeb, nullptr, nullptr) == 0 || freeb.QuadPart < 2 * file_bytes + (4ull << 30))
+            throw std::runtime_error("ssd suite: not enough free space in --ssd-dir (needs 2 x file + 4 GiB)");
+    }
+    const std::string saved_extra = out.settings_extra;
+    out.settings_extra += std::string(";fs=") + fs.name() + ";drive=" + (fake ? std::string("fake") : std::string(1, static_cast<char>(towupper(cfg.dir[0])))) +
+                          ";file_mib=" + std::to_string(file_bytes >> 20) + ";block=" + std::to_string(blk);
+    const std::wstring tag = std::to_wstring(GetCurrentProcessId());
+    const std::wstring pw = cfg.dir + L"\\t1ssd_" + tag + L"_w.wkv";
+    const std::wstring pr = cfg.dir + L"\\t1ssd_" + tag + L"_r.wkv";
+    HostBlocks wb_(be, 4, blk), rb_(be, 4, blk);
+    for (int i = 0; i < 4; ++i) fillPattern(wb_.ptr[static_cast<std::size_t>(i)], blk, 101 + static_cast<std::uint64_t>(i));
+    std::printf("ssd: fs %s dir %s file %llu MiB (%llu x %u B blocks) drive \"%s\" buffers %s\n", fs.name(), narrow(cfg.dir).c_str(),
+                static_cast<unsigned long long>(file_bytes >> 20), static_cast<unsigned long long>(blocks), blk, model.c_str(),
+                be ? "pinned (backend)" : "aligned heap");
+    const std::int64_t bytes_w0 = fs.c.bytes_w;
+    struct Cleanup {
+        ssd::Fs& fs;
+        std::wstring a, b;
+        ~Cleanup() {
+            fs.remove(a);
+            fs.remove(b);
+        }
+    } cleanup{fs, pw, pr};
+
+    auto cell = [&](bool write, sd::Mode m, int qd, const std::wstring& path, const std::vector<void*>& bufs) {
+        std::unique_ptr<sd::File> f = fs.open(path, write, m, qd);
+        if (!f) throw std::runtime_error("ssd suite: cannot open " + narrow(path) + " (" + sd::modeName(m) + ")");
+        const DWORD flags = fs.c.last_flags;
+        EXPECT(flags == sd::openFlags(m, qd));
+        // probe op: the exact work row
+        fs.resetMax();
+        const sd::Counters c0 = fs.c;
+        double fl_ns = 0;
+        if (!write)
+            for (void* p : bufs) std::memset(p, 0, blk);
+        if (!sd::runPass(*f, write, bufs, blocks, blk, qd, &fl_ns)) throw std::runtime_error(std::string("ssd suite: I/O failed in the probe op (") + sd::modeName(m) + ")");
+        const sd::Counters c1 = fs.c;
+        const std::int64_t n_io = write ? c1.writes - c0.writes : c1.reads - c0.reads;
+        const std::int64_t n_b = write ? c1.bytes_w - c0.bytes_w : c1.bytes_r - c0.bytes_r;
+        const std::int64_t n_fl = c1.flushes - c0.flushes;
+        const std::uint64_t want_off = blocks * (blocks - 1) / 2 * (blk / 4096) + blocks;  // sum of (off / 4096 + 1)
+        EXPECT(n_io == static_cast<std::int64_t>(blocks));
+        EXPECT(n_b == static_cast<std::int64_t>(file_bytes));
+        EXPECT(n_fl == (write ? 1 : 0));
+        EXPECT(c1.off_sum - c0.off_sum == want_off);
+        EXPECT(c1.max_inflight == std::min<std::int64_t>(qd, static_cast<std::int64_t>(blocks)));
+        EXPECT(c1.errors == c0.errors);
+        EXPECT(c1.inflight == 0);
+        if (!write) {
+            // read-back check: slot k ends holding block (last index with i % qd == k), written from wbuf[i % 4]
+            for (int k = 0; k < qd && static_cast<std::uint64_t>(k) < blocks; ++k) {
+                std::uint64_t last = blocks - 1;
+                while (last % static_cast<std::uint64_t>(qd) != static_cast<std::uint64_t>(k)) --last;
+                const bool same = std::memcmp(bufs[static_cast<std::size_t>(k)], wb_.ptr[static_cast<std::size_t>(last % 4)], blk) == 0;
+                EXPECT(same);
+                if (!same) std::printf("SELFTEST ssd read-back mismatch %s qd %d slot %d\n", sd::modeName(m), qd, k);
+            }
+        }
+        wb::Work w;
+        w.pages = static_cast<std::int64_t>(blocks);
+        w.syncs = n_fl;
+        std::vector<double> fls;
+        const Sampled sm = sampleOps(o, 1, nullptr, [&](std::int64_t k) {
+            for (std::int64_t i = 0; i < k; ++i) {
+                double x = 0;
+                if (!sd::runPass(*f, write, bufs, blocks, blk, qd, &x)) throw std::runtime_error("ssd suite: I/O failed while sampling");
+                if (write) fls.push_back(x);
+            }
+        }, nullptr);
+        f.reset();
+        std::sort(fls.begin(), fls.end());
+        const double fl_med_us = fls.empty() ? 0.0 : wb::quantile_sorted(fls, 0.5) / 1000.0;
+        const bool product = write ? (qd == 1 && flags == sd::kKvTierWriteFlags) : (qd == qd_prod && flags == sd::kKvTierReadFlags);
+        const char* op = write ? "write" : "read";
+        const std::string cl = std::string("mode=") + sd::modeName(m) + ";qd=" + std::to_string(qd);
+        std::vector<std::pair<std::string, std::string>> ex = {
+            {"product_path", product ? "1" : "0"},
+            {"open_flags", wb::json_string(hex32(flags))},
+            {"cache", wb::json_string(write ? (m == sd::Mode::buffered ? "write-back+flush" : "none") : (m == sd::Mode::buffered ? "warm" : "none"))},
+            {"file_bytes", wb::json_number(static_cast<std::int64_t>(file_bytes))},
+            {"io_ops", wb::json_number(n_io)},
+            {"io_bytes", wb::json_number(n_b)},
+            {"max_inflight", wb::json_number(c1.max_inflight)},
+            {"flush_us_median", wb::json_number(fl_med_us)},
+            {"drive_model", wb::json_string(model)},
+            {"state", wb::json_string("burst")},
+            {"work_note", wb::json_string("pages=2MiB blocks per op; syncs=FlushFileBuffers per op")},
+        };
+        // MB/s (10^6 B/s) from ns per op; the slow end of the time is the low end of the bandwidth
+        Sampled g = sm;
+        auto toM = [&](double ns) { return ns > 0 ? static_cast<double>(file_bytes) / ns * 1000.0 : 0.0; };
+        g.ns.median = toM(sm.ns.median);
+        g.ns.p10 = toM(sm.ns.p90);
+        g.ns.p90 = toM(sm.ns.p10);
+        g.ns.mad = sm.ns.median > 0 ? g.ns.median * sm.ns.mad / sm.ns.median : 0;
+        emit(out, "A5", std::string("tier.ssd.") + op + "_mbps", cl, g, w, ex, "MB/s");
+        // us per 2 MiB block (= the inverse throughput; at qd 4 it is not the latency of one I/O)
+        emit(out, "A5", std::string("tier.ssd.") + op + "_us_per_block", cl, sm, w, ex, "us", 1.0 / (1000.0 * static_cast<double>(blocks)));
+    };
+
+    // writes: product path first (unbuffered QD1), then the other variants; the file is rewritten in place
+    for (const sd::Mode m : {sd::Mode::unbuffered, sd::Mode::unbuffered_wt, sd::Mode::buffered}) {
+        for (const int qd : {1, qd_prod}) {
+            fs.remove(pw);
+            cell(true, m, qd, pw, wb_.ptr);
+        }
+    }
+    fs.remove(pw);
+    EXPECT(!fs.exists(pw));
+    // reads: one file written with 4 distinct blocks round robin (unbuffered QD4, untimed), then unbuffered first
+    // (from the SSD) and buffered last (from the file cache: cache=warm, a control, not SSD speed)
+    {
+        std::unique_ptr<sd::File> f = fs.open(pr, true, sd::Mode::unbuffered, 4);
+        if (!f || !sd::runPass(*f, true, wb_.ptr, blocks, blk, 4, nullptr)) throw std::runtime_error("ssd suite: cannot write the read file");
+    }
+    for (const sd::Mode m : {sd::Mode::unbuffered, sd::Mode::buffered})
+        for (const int qd : {1, qd_prod}) cell(false, m, qd, pr, rb_.ptr);
+    fs.remove(pr);
+    EXPECT(!fs.exists(pr));
+    std::printf("ssd: %.2f GB written in this suite run; files removed\n", static_cast<double>(fs.c.bytes_w - bytes_w0) / 1e9);
+    out.settings_extra = saved_extra;
+}
+
+// selftest-only checks of the ssd layer that are not cells: the directory rule, flags, the Fake contract
+void ssdSelfChecks(ssd::FakeFs& fake, const std::wstring& real_dir, device::Backend* be) {
+    namespace sd = whirl::bench::ssd;
+    static_assert(sd::kKvTierWriteFlags == FILE_FLAG_NO_BUFFERING);
+    static_assert(sd::kKvTierReadFlags == (FILE_FLAG_NO_BUFFERING | FILE_FLAG_OVERLAPPED));
+    static_assert(sd::openFlags(sd::Mode::unbuffered, 1) == sd::kKvTierWriteFlags);
+    static_assert(sd::openFlags(sd::Mode::unbuffered, static_cast<int>(whirl::tier::read_qd)) == sd::kKvTierReadFlags);
+    static_assert(sd::openFlags(sd::Mode::unbuffered_wt, 1) == (FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH));
+    static_assert(sd::openFlags(sd::Mode::buffered, 1) == 0);
+    static_assert(sd::openFlags(sd::Mode::buffered, 4) == FILE_FLAG_OVERLAPPED);
+    static_assert(whirl::tier::block_bytes == (2ull << 20));
+    static_assert(whirl::tier::read_qd == 4);
+    EXPECT(!sd::dirRefusal(L"D:\\scratch\\x").empty());
+    EXPECT(!sd::dirRefusal(L"e:/x").empty());
+    EXPECT(!sd::dirRefusal(L"C:\\").empty());
+    EXPECT(!sd::dirRefusal(L"C:").empty());
+    EXPECT(!sd::dirRefusal(L"scratch\\x").empty());
+    EXPECT(!sd::dirRefusal(L"C:\\a\\..\\b").empty());
+    EXPECT(sd::dirRefusal(L"C:\\ClaudeWorkspace\\whirl-work\\scratch\\arch025\\ssd").empty());
+    EXPECT(fake.contract_violations == 0);
+    EXPECT(fake.files.empty());  // every file removed
+    EXPECT(fake.c.inflight == 0);
+    EXPECT(fake.c.opens == fake.c.closes);
+    {  // the Fake catches a misaligned unbuffered I/O and an I/O left in flight at a barrier
+        sd::FakeFs f2;
+        std::vector<std::uint8_t> raw(8192 + 4096);
+        auto file = f2.open(L"x", true, sd::Mode::unbuffered, 4);
+        file->submit(0, true, raw.data() + 1, 4096, 0);
+        file->flush();
+        std::uint32_t got = 0;
+        file->wait(0, &got);
+        EXPECT(f2.contract_violations == 2);
+    }
+    if (!real_dir.empty()) {
+        // tiny real round trip of every (mode, qd) through Win32Fs: 4 blocks, read back, compare, remove
+        sd::Win32Fs w32;
+        const std::uint32_t blk = static_cast<std::uint32_t>(whirl::tier::block_bytes);
+        HostBlocks wb_(be, 4, blk), rb_(be, 4, blk);
+        for (int i = 0; i < 4; ++i) fillPattern(wb_.ptr[static_cast<std::size_t>(i)], blk, 7 + static_cast<std::uint64_t>(i));
+        const std::wstring p = real_dir + L"\\t1ssd_selftest_" + std::to_wstring(GetCurrentProcessId()) + L".wkv";
+        int ok = 0, n = 0;
+        for (const sd::Mode m : {sd::Mode::unbuffered, sd::Mode::unbuffered_wt, sd::Mode::buffered})
+            for (const int qd : {1, 4}) {
+                ++n;
+                w32.remove(p);
+                bool good = false;
+                {
+                    auto f = w32.open(p, true, m, 4);  // 4 distinct blocks
+                    good = f && sd::runPass(*f, true, wb_.ptr, 4, blk, 4, nullptr);
+                }
+                if (good) {
+                    auto f = w32.open(p, false, m, qd);
+                    for (void* q : rb_.ptr) std::memset(q, 0, blk);
+                    good = f && sd::runPass(*f, false, rb_.ptr, 4, blk, qd, nullptr);
+                    for (int k = 0; good && k < qd; ++k) {
+                        const int last = qd == 1 ? 3 : k;
+                        good = std::memcmp(rb_.ptr[static_cast<std::size_t>(k)], wb_.ptr[static_cast<std::size_t>(last)], blk) == 0;
+                    }
+                }
+                if (good) ++ok;
+                else std::printf("SELFTEST FAIL ssd real round trip %s qd %d\n", sd::modeName(m), qd);
+            }
+        w32.remove(p);
+        EXPECT(ok == n);
+        EXPECT(!w32.exists(p));
+        EXPECT(w32.c.opens == w32.c.closes);
+        std::printf("ssd selftest: real round trip in %s: %d/%d ok, file removed: %s\n", narrow(real_dir).c_str(), ok, n, w32.exists(p) ? "NO" : "yes");
+    }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
 #ifdef WHIRL_HOST_BENCH_HIP
     if (argc == 2 && std::strcmp(argv[1], gpusel::k_probe_arg) == 0) return gpusel::probeMain();
 #endif
-    std::string suites, backend = "null", device_spec, gguf_path, jsonl_path;
+    std::string suites, backend = "null", device_spec, gguf_path, jsonl_path, ssd_dir_u8;
+    SsdCfg scfg;
     Opts o;
     bool selftest = false;
     auto usage = [] {
         std::fprintf(stderr,
-                     "usage: whirl-host-bench --suite pagepool,prefix,ckpt,handles,tier,sched,copy|all [--backend null|hip]\n"
+                     "usage: whirl-host-bench --suite pagepool,prefix,ckpt,handles,tier,sched,copy,ssd|all [--backend null|hip]\n"
                      "                        [--device SPEC] [--gguf TOKENIZER.gguf] [--jsonl FILE] [--quick] [--time-cap S]\n"
-                     "       whirl-host-bench --selftest [--gguf TOKENIZER.gguf]\n");
+                     "                        [--ssd-dir DIR] [--ssd-mib N]   (ssd: real files in DIR, never D: / E: / a root)\n"
+                     "       whirl-host-bench --selftest [--suite S[,S...]] [--gguf TOKENIZER.gguf] [--ssd-dir DIR]\n");
         return 2;
     };
     for (int i = 1; i < argc; ++i) {
@@ -1054,15 +1332,18 @@ int main(int argc, char** argv) {
         else if (a == "--gguf" && i + 1 < argc) gguf_path = argv[++i];
         else if (a == "--jsonl" && i + 1 < argc) jsonl_path = argv[++i];
         else if (a == "--time-cap" && i + 1 < argc) o.time_cap_s = std::atof(argv[++i]);
+        else if (a == "--ssd-dir" && i + 1 < argc) ssd_dir_u8 = argv[++i];
+        else if (a == "--ssd-mib" && i + 1 < argc) scfg.file_mib = std::strtoull(argv[++i], nullptr, 10);
         else if (a == "--quick") o.quick = true;
         else if (a == "--selftest") selftest = true;
         else return usage();
     }
     if (selftest) {
-        suites = "all";
+        if (suites.empty()) suites = "all";
         o.quick = true;
     }
-    if (suites == "all") suites = "pagepool,prefix,ckpt,handles,tier,sched,copy";
+    // ssd joins "all" only for the selftest (FakeFs) or with --ssd-dir (real files)
+    if (suites == "all") suites = std::string("pagepool,prefix,ckpt,handles,tier,sched,copy") + (selftest || !ssd_dir_u8.empty() ? ",ssd" : "");
     std::set<std::string> want;
     for (std::size_t p = 0; p <= suites.size();) {
         std::size_t e = suites.find(',', p);
@@ -1070,13 +1351,39 @@ int main(int argc, char** argv) {
         if (e > p) want.insert(suites.substr(p, e - p));
         p = e + 1;
     }
-    const std::set<std::string> known = {"pagepool", "prefix", "ckpt", "handles", "tier", "sched", "copy"};
+    const std::set<std::string> known = {"pagepool", "prefix", "ckpt", "handles", "tier", "sched", "copy", "ssd"};
     for (const auto& s : want)
         if (!known.count(s)) {
             std::fprintf(stderr, "whirl-host-bench: unknown suite \"%s\"\n", s.c_str());
             return usage();
         }
     if (want.empty() || (backend != "null" && backend != "hip")) return usage();
+    if (!ssd_dir_u8.empty()) {
+        const int n = MultiByteToWideChar(CP_UTF8, 0, ssd_dir_u8.c_str(), -1, nullptr, 0);
+        std::wstring w(static_cast<std::size_t>(n > 0 ? n : 1), L'\0');
+        if (n > 0) MultiByteToWideChar(CP_UTF8, 0, ssd_dir_u8.c_str(), -1, w.data(), n);
+        w.resize(wcslen(w.c_str()));
+        while (!w.empty() && (w.back() == L'\\' || w.back() == L'/')) w.pop_back();
+        const std::string why = ssd::dirRefusal(w);
+        if (!why.empty()) {
+            std::fprintf(stderr, "whirl-host-bench: --ssd-dir %s refused: %s\n", ssd_dir_u8.c_str(), why.c_str());
+            return 2;
+        }
+        CreateDirectoryW(w.c_str(), nullptr);
+        if (GetFileAttributesW(w.c_str()) == INVALID_FILE_ATTRIBUTES) {
+            std::fprintf(stderr, "whirl-host-bench: --ssd-dir %s does not exist and cannot be created\n", ssd_dir_u8.c_str());
+            return 2;
+        }
+        scfg.dir = w;
+    }
+    if (want.count("ssd") && !selftest && scfg.dir.empty()) {
+        std::fprintf(stderr, "whirl-host-bench: suite ssd needs --ssd-dir (real files; e.g. scratch\\arch025\\ssd)\n");
+        return 2;
+    }
+    if (scfg.file_mib < 8 || scfg.file_mib > 4096) {
+        std::fprintf(stderr, "whirl-host-bench: --ssd-mib must be 8..4096\n");
+        return 2;
+    }
     BenchOut out;
     out.backend = backend;
     {
@@ -1096,8 +1403,8 @@ int main(int argc, char** argv) {
             return 2;
         }
         for (const auto& s : want)
-            if (s != "copy") {
-                std::fprintf(stderr, "whirl-host-bench: --backend hip runs the copy suite only (got \"%s\")\n", s.c_str());
+            if (s != "copy" && s != "ssd") {
+                std::fprintf(stderr, "whirl-host-bench: --backend hip runs the copy and ssd suites only (got \"%s\")\n", s.c_str());
                 return 2;
             }
         const gpusel::Restriction& gr = qwen35::restrictDevice(device_spec);
@@ -1139,6 +1446,7 @@ int main(int argc, char** argv) {
     if (selftest) out.seen = &seen;
     std::printf("whirl-host-bench %s: backend %s, suites %s%s\n", kToolVer, backend.c_str(), suites.c_str(), o.quick ? " (quick)" : "");
     const int passes = selftest ? 2 : 1;
+    ssd::FakeFs fakefs;
     try {
         for (int pass = 0; pass < passes; ++pass) {
             if (backend == "null") {
@@ -1154,9 +1462,20 @@ int main(int argc, char** argv) {
                     EXPECT(nb.clean());
                 }
             } else {
-                suiteCopy(o, out, *hipb);
+                if (want.count("copy")) suiteCopy(o, out, *hipb);
+            }
+            if (want.count("ssd")) {
+                if (selftest) {
+                    SsdCfg fc = scfg;
+                    fc.dir = L"F:\\fake";  // names only: FakeFs never touches a disk
+                    suiteSsd(o, out, fakefs, hipb.get(), fc);
+                } else {
+                    ssd::Win32Fs w32;
+                    suiteSsd(o, out, w32, hipb.get(), scfg);
+                }
             }
         }
+        if (selftest && want.count("ssd")) ssdSelfChecks(fakefs, scfg.dir, hipb.get());
     } catch (const std::exception& ex) {
         std::fprintf(stderr, "whirl-host-bench: exception %s\n", ex.what());
         return 1;
