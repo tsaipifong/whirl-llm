@@ -14,9 +14,11 @@
 #include "http.h"
 #include "log.h"
 #include "device/backend.h"
+#include "hip/alloc_log.h"
 #include "hip/launch_log.h"
 #include "tier/kv_tier.h"
 #include "tier/ram_size.h"
+#include "whirl/dump.h"
 #include "whirl/common.h"
 #include "whirl/device_mem.h"
 #include "whirl/dflash_policy.h"
@@ -420,8 +422,16 @@ int serveMain(int argc, char** argv, const char* program) {
     g_program = program;
     // launch log (WHIRL_LAUNCH_LOG): no per-launch RAW dump in a server unless WHIRL_LAUNCH_LOG_RAW=server (C-2)
     hip::launchlog::serverProcess();
+    hip::alloclog::serverProcess();  // arch025-S0a: the allocation event list off unless WHIRL_ALLOC_LOG_RAW=server
     std::vector<std::string> args;
-    for (int k = 1; k < argc; ++k) args.push_back(argv[k]);
+    for (int k = 1; k < argc; ++k) {
+        // arch025-S0a: --dump-only = exit 0 right after load + tune (baseline dump matrix, whirl/dump.h)
+        if (std::string_view(argv[k]) == "--dump-only") {
+            dump::setDumpOnly(true);
+            continue;
+        }
+        args.push_back(argv[k]);
+    }
     for (const std::string& a : args) {
         // help / version first: they need neither a model nor a GPU
         if (a == "-h" || a == "--help" || a == "/?") {
@@ -797,10 +807,12 @@ int serveMain(int argc, char** argv, const char* program) {
             // the mode's KV format (numerics::chooseKv; the code object is not loaded yet: only dGPUs
             // reach here, and the R9700 code object has q4 KV kernels since FC-1c)
             const auto kv_env = env("KV");
+            const numerics::KvCaps caps_est{true, true, true};
+            const std::optional<numerics::KvKind> kv_forced =
+                kv_env && *kv_env != "auto" ? numerics::kvKindFromName(*kv_env) : std::nullopt;
             const numerics::KvKind kv_est =
-                numerics::chooseKv(nreq, cfg.moe, numerics::KvCaps{true, true, true},
-                                   kv_env && *kv_env != "auto" ? numerics::kvKindFromName(*kv_env) : std::nullopt)
-                    .kv;
+                dump::kv("server.est_dgpu", nreq, cfg.moe, caps_est, kv_forced, numerics::chooseKv(nreq, cfg.moe, caps_est, kv_forced))
+                    .kv;  // (WHIRL_DUMP_KV: one "D kv:" line, arch025-S0a)
             // (q4 KV uses 256 attention splits: more split-K partial buffers)
             const std::uint32_t fd_splits_est = qwen35::resolveFdSplits(kv_est == numerics::KvKind::q4);
             const std::uint64_t b2 = qwen35::bufferBytes(cfg, 2048, est.ffs, est.max_elems, fd_splits_est);
@@ -907,10 +919,12 @@ int serveMain(int argc, char** argv, const char* program) {
                                                    static_cast<std::uint64_t>(qwen35::max_small_batch) * cfg.n_v_heads *
                                                        (cfg.d_state + cfg.headV() + 2) * 4);
             const auto kv_env = env("KV");
+            const numerics::KvCaps caps_est{true, true, true, true};
+            const std::optional<numerics::KvKind> kv_forced =
+                kv_env && *kv_env != "auto" ? numerics::kvKindFromName(*kv_env) : std::nullopt;
             const numerics::KvKind kv_est =
-                numerics::chooseKv(nreq, cfg.moe, numerics::KvCaps{true, true, true, true},
-                                   kv_env && *kv_env != "auto" ? numerics::kvKindFromName(*kv_env) : std::nullopt)
-                    .kv;
+                dump::kv("server.est_uma", nreq, cfg.moe, caps_est, kv_forced, numerics::chooseKv(nreq, cfg.moe, caps_est, kv_forced))
+                    .kv;  // (WHIRL_DUMP_KV)
             const std::uint64_t ck = st1 + static_cast<std::uint64_t>(cfg.n_embd) * 4 + static_cast<std::uint64_t>(cfg.n_vocab) * 4;
             hip::UmaNeed need;
             need.weights = est.weights + (use_dflash && dfile ? qwen35::dflashWeightBytes(*dfile) : 0);

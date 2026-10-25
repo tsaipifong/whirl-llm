@@ -11,6 +11,7 @@
 // the decode loops (pipelined plain decode, MTP speculative decode with the
 // n-gram co-drafter) follow the WHIRL Zig research prototype (gguf_cli.zig).
 
+#include "whirl/dump.h"
 #include "whirl/common.h"
 #include "whirl/dflash_policy.h"
 #include "whirl/gguf.h"
@@ -2635,6 +2636,17 @@ int wmain(int argc, wchar_t** wargv) {
         std::fprintf(stderr, "whirl: unknown command '%s'\n\n%s", cmd.c_str(), k_help_main);
         return app::exit_usage;
     }
+    // arch025-S0a: --dump-only = exit 0 right after load + tune (baseline dump matrix, whirl/dump.h); serve parses
+    // it itself (serveMain), the other commands here
+    if (cmd != "serve")
+        for (std::size_t i = 2; i < argv.size();) {
+            if (argv[i] == "--dump-only") {
+                whirl::dump::setDumpOnly(true);
+                argv.erase(argv.begin() + static_cast<std::ptrdiff_t>(i));
+            } else {
+                ++i;
+            }
+        }
     bool wants_help = false;
     for (std::size_t i = 2; i < argv.size(); ++i) wants_help = wants_help || isHelpFlag(argv[i]);
     if (wants_help) {

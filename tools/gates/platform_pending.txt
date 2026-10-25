@@ -1,0 +1,13 @@
+# arch025-S0a platform check (tools/gates/pending_scan.py platform): Windows / platform headers outside src/platform, src/hip, src/release/dll_deps.cpp.
+# path<TAB>count<TAB>step that removes the sites. The list may only shrink: the step that removes sites lowers or
+# deletes its entry in the same commit (block mode: STALE otherwise). Regenerate counts: pending_scan.py <rule> --write-pending.
+src/cache/fingerprint.cpp	1	PL1-PL4 (PL0 finalizes the owners)
+src/cli/main.cpp	1	PL1-PL4 (PL0 finalizes the owners)
+src/common/util.cpp	1	PL1-PL4 (PL0 finalizes the owners)
+src/model/device.cpp	1	PL1-PL4 (PL0 finalizes the owners)
+src/model/spec.cpp	1	PL1-PL4 (PL0 finalizes the owners)
+src/release/release.cpp	3	PL1-PL4 (PL0 finalizes the owners)
+src/server/http.cpp	2	PL1-PL4 (PL0 finalizes the owners)
+src/server/log.cpp	1	PL1-PL4 (PL0 finalizes the owners)
+src/server/server_main.cpp	3	PL1-PL4 (PL0 finalizes the owners)
+src/tier/kv_tier.cpp	2	PL1-PL4 (PL0 finalizes the owners)

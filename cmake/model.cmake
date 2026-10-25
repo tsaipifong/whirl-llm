@@ -23,6 +23,7 @@ if(WHIRL_WITH_HIP)
     ${CMAKE_SOURCE_DIR}/src/model/loader.cpp
     ${CMAKE_SOURCE_DIR}/src/model/forward.cpp
     ${CMAKE_SOURCE_DIR}/src/model/tune.cpp
+    ${CMAKE_SOURCE_DIR}/src/model/exec_dump.cpp
     ${CMAKE_SOURCE_DIR}/src/model/device.cpp
     ${CMAKE_SOURCE_DIR}/src/model/spec.cpp
     ${CMAKE_SOURCE_DIR}/src/model/dflash.cpp
