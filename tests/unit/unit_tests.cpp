@@ -4027,7 +4027,27 @@ void testProbeChild(const wchar_t* self) {
     ChildRun hi = runChild(exe, q + L"--child-has-handle " + std::to_wstring(reinterpret_cast<std::uintptr_t>(ev)), 10000);
     CHECK(hi.started && hi.exit_code == 0);
     CHECK(hi.out.rfind("0", 0) == 0);  // "0" = not inherited
+    if (hi.out.rfind("0", 0) != 0) std::printf("  (b) child said '%s' for handle %llu\n", hi.out.c_str(), (unsigned long long)reinterpret_cast<std::uintptr_t>(ev));
     CloseHandle(ev);
+    // (b2) bug-probechild-flaky 2026-10-26: none of 256 inheritable parent events may reach the child. Handle values are
+    // small and reused per process, so the child can hold an unrelated live object at the parent's value: the check must
+    // be exact, not "this value is a live signaled handle here" (that flaked 1 in ~4 runs in N2a and Q2).
+    {
+        std::vector<HANDLE> evs;
+        std::wstring args;
+        for (int i = 0; i < 256; ++i) {
+            HANDLE e = CreateEventW(&sa, TRUE, TRUE, nullptr);
+            if (!e) break;
+            evs.push_back(e);
+            args += L" " + std::to_wstring(reinterpret_cast<std::uintptr_t>(e));
+        }
+        CHECK_EQ(evs.size(), size_t{256});
+        ChildRun many = runChild(exe, q + L"--child-has-handle" + args, 10000);
+        CHECK(many.started && many.exit_code == 0);
+        CHECK(many.out == "0");
+        if (many.out != "0") std::printf("  (b2) child said %s of %zu parent events are inherited\n", many.out.c_str(), evs.size());
+        for (HANDLE e : evs) CloseHandle(e);
+    }
     // (c) a child that hangs is killed after the bound
     const ULONGLONG t0 = GetTickCount64();
     ChildRun hang = runChild(exe, q + L"--child-sleep-ms 30000", 1000);
@@ -4047,15 +4067,32 @@ int main(int argc, char** argv) {
     if (argc >= 2) {  // helper modes for testProbeChild (the test runs this program as the child)
         const std::string m = argv[1];
         if (m == "--child-error-mode") { std::printf("%u", GetErrorMode()); return 0; }
-        if (m == "--child-has-handle" && argc == 3) {
-            HANDLE h = reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(std::stoull(argv[2])));
-            DWORD f = 0;
-            const bool live = GetHandleInformation(h, &f) && WaitForSingleObject(h, 0) == WAIT_OBJECT_0;
-            std::printf("%d", live ? 1 : 0);
+        if (m == "--child-has-handle" && argc >= 3) {  // prints how many of the given handle values look inherited
+            int live = 0;
+            for (int i = 2; i < argc; ++i) {
+                HANDLE h = reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(std::stoull(argv[i])));
+                DWORD f = 0;
+                live += GetHandleInformation(h, &f) && WaitForSingleObject(h, 0) == WAIT_OBJECT_0;
+            }
+            std::printf("%d", live);
             return 0;
         }
         if (m == "--child-sleep-ms" && argc == 3) { Sleep(static_cast<DWORD>(std::stoul(argv[2]))); return 0; }
         if (m == "--child-echo") { std::printf("echo-ok"); return 0; }
+        if (m == "--probe-child-loop" && argc == 3) {  // stress: only testProbeChild, N times (bug-probechild-flaky)
+            wchar_t self[1024];
+            const DWORD n = GetModuleFileNameW(nullptr, self, 1024);
+            if (n == 0 || n >= 1024) return 2;
+            const int reps = std::stoi(argv[2]);
+            int bad_iters = 0;
+            for (int i = 0; i < reps; ++i) {
+                const int before = g_fail;
+                testProbeChild(self);
+                if (g_fail != before) std::printf("iteration %d failed\n", i), ++bad_iters;
+            }
+            std::printf("probe-child loop: %d iterations, %d failed iterations, %d passed, %d failed checks\n", reps, bad_iters, g_pass, g_fail);
+            return g_fail ? 1 : 0;
+        }
     }
 #endif
     whirl::test::clearWhirlEnv();  // FR-TEST P3-11
