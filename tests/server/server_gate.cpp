@@ -35,6 +35,7 @@
 #include "whirl/numerics.h"
 
 #include <windows.h>
+#include <io.h>
 #include <tlhelp32.h>
 
 #include <algorithm>
@@ -191,9 +192,48 @@ std::wstring quoteArg(const std::wstring& a) {
 // Graceful stop of a console child (Server::stop; the --selftest console check drives it with ping.exe):
 // a Ctrl+C on the child's (hidden) console, which the WHIRL server handles by flushing its prefix-cache
 // tiers before it exits (the prototype exits at once on Ctrl+C).
+//
+// bug-gatectrlc (2026-10-26): leaving and re-joining consoles must not move this process's own output. Microsoft
+// GetStdHandle "Attach/detach behavior": AttachConsole replaces the std handles by console handles unless the process
+// was created with STARTF_USESTDHANDLES. pwsh `& gate.exe` under Start-Process -RedirectStandardOutput hands the gate
+// the file WITHOUT that flag, so after the 1st stop STD_OUTPUT_HANDLE was the console; the old code judged "stdout is
+// a console" from GetStdHandle at every stop, so the 2nd stop reopened stdout on CONOUT$ (a hidden window) and every
+// later line (stop line, summary) was lost while the gate still exited 0. Now: the std handles are probed ONCE at
+// startup (wmain -> captureStdHandles, from the CRT handles; GetConsoleMode, since GetFileType also says "char" for
+// NUL), only a stream that really was a console is reopened on CONOUT$, and the other std handles are put back with
+// SetStdHandle after every re-attach (CRT fd and Win32 std handle kept in sync, as llama.cpp server-common.cpp does).
+struct StartStd {
+    HANDLE h[3] = {nullptr, nullptr, nullptr};
+    bool console[3] = {false, false, false};
+    bool captured = false;
+} g_std;
+constexpr DWORD kStdIds[3] = {STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE};
+
+bool isConsoleHandle(HANDLE h) {
+    DWORD mode = 0;
+    return h != nullptr && h != INVALID_HANDLE_VALUE && GetConsoleMode(h, &mode) != 0;
+}
+
+void captureStdHandles() {
+    FILE* const fs3[3] = {stdin, stdout, stderr};
+    for (int i = 0; i < 3; ++i) {
+        const int fd = _fileno(fs3[i]);
+        HANDLE h = fd >= 0 ? reinterpret_cast<HANDLE>(_get_osfhandle(fd)) : INVALID_HANDLE_VALUE;
+        if (h == INVALID_HANDLE_VALUE || h == reinterpret_cast<HANDLE>(-2)) h = GetStdHandle(kStdIds[i]);  // -2: no handle
+        g_std.h[i] = h;
+        g_std.console[i] = isConsoleHandle(h);
+    }
+    g_std.captured = true;
+}
+
+void restoreStdHandles() {
+    for (int i = 0; i < 3; ++i)
+        if (!g_std.console[i] && g_std.h[i] != nullptr && g_std.h[i] != INVALID_HANDLE_VALUE) SetStdHandle(kStdIds[i], g_std.h[i]);
+}
+
 bool sendCtrlC(DWORD pid) {
     bool ok = false;
-    const bool con_out = GetFileType(GetStdHandle(STD_OUTPUT_HANDLE)) == FILE_TYPE_CHAR;
+    if (!g_std.captured) captureStdHandles();  // wmain probes at startup; this only covers a caller that did not
     std::fflush(stdout);
     std::fflush(stderr);
     FreeConsole();
@@ -203,11 +243,13 @@ bool sendCtrlC(DWORD pid) {
         Sleep(100);  // let the event be delivered before leaving the console
         FreeConsole();
     }
-    if (AttachConsole(ATTACH_PARENT_PROCESS) && con_out) {
+    if (AttachConsole(ATTACH_PARENT_PROCESS)) {
+        // the old console handles died with FreeConsole: reopen only the streams that were a console at startup
         FILE* f = nullptr;
-        freopen_s(&f, "CONOUT$", "w", stdout);
-        freopen_s(&f, "CONOUT$", "w", stderr);
+        if (g_std.console[1]) freopen_s(&f, "CONOUT$", "w", stdout);
+        if (g_std.console[2]) freopen_s(&f, "CONOUT$", "w", stderr);
     }
+    restoreStdHandles();  // files / pipes stay where they were (Windows swapped them for console handles on attach)
     // keep ignoring stray Ctrl+C deliveries for a moment, then restore the default
     Sleep(200);
     SetConsoleCtrlHandler(nullptr, FALSE);
@@ -2769,6 +2811,8 @@ int selfTest() {
 }  // namespace
 
 int wmain(int argc, wchar_t** wargv) {
+    // bug-gatectrlc: probe the std handles before any console change (sendCtrlC restores the non-console ones)
+    captureStdHandles();
     // the servers we start inherit the "ignore Ctrl+C" attribute: clear one inherited
     // from our own parent so that the Ctrl+C stop reaches them
     SetConsoleCtrlHandler(nullptr, FALSE);
