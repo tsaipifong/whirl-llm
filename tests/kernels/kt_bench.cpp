@@ -67,8 +67,9 @@ double Bench::sample(const BlockFn& f, int block, std::uint64_t& rot, std::strin
     return 1000.0 * ms / block;
 }
 
-// calibrate (block doubles until >= min_block_us), warm up with that block (>= warmup_ms GPU time, calibration
-// included), then re-check the block on the warm clock (a cold clock makes the kernel slower: the block may be short)
+// calibrate (block doubles until >= min_block_us; an invalid reading of a short block also doubles it: too short to
+// time), warm up with that block (>= warmup_ms GPU time, calibration included), then re-check the block on the warm
+// clock (a cold clock makes the kernel slower: the block may be short)
 Bench::Cal Bench::warmCalibrate(const BlockFn& f, std::uint64_t& rot) {
     Cal c;
     double warm = 0;
@@ -76,22 +77,36 @@ Bench::Cal Bench::warmCalibrate(const BlockFn& f, std::uint64_t& rot) {
     double us = 0;
     for (;;) {
         us = sample(f, block, rot, c.error);
-        if (us <= 0) return c;
+        if (us <= 0) {
+            if (block >= cfg_.max_block) return c;  // still nothing timed at the largest block
+            block = std::min(block * 2, cfg_.max_block);
+            continue;
+        }
         warm += us * block / 1000.0;
         if (us * block >= cfg_.min_block_us || block >= cfg_.max_block) break;
         block = std::min(block * 2, cfg_.max_block);
     }
+    int bad = 0;
     while (warm < cfg_.warmup_ms) {
-        us = sample(f, block, rot, c.error);
-        if (us <= 0) return c;
+        const double u = sample(f, block, rot, c.error);
+        if (u <= 0) {
+            if (++bad > 20) return c;
+            continue;
+        }
+        us = u;
         warm += us * block / 1000.0;
     }
     while (us * block < cfg_.min_block_us && block < cfg_.max_block) {
         block = std::min(block * 2, cfg_.max_block);
-        us = sample(f, block, rot, c.error);
-        if (us <= 0) return c;
+        const double u = sample(f, block, rot, c.error);
+        if (u <= 0) {
+            if (++bad > 20) return c;
+            continue;
+        }
+        us = u;
         warm += us * block / 1000.0;
     }
+    c.error.clear();
     c.block = block;
     last_warm_ms_ = warm;
     return c;
@@ -210,12 +225,23 @@ CellStats Bench::run(const BlockFn& f) {
         cs.samples.resize(clean);
         since_anchor = 0;
     };
+    int attempts = 0;
     for (;;) {
         std::string err;
         const double us = sample(f, cs.block, rot, err);
-        if (us <= 0) {
-            cs.error = err;
-            return finish("error");
+        ++attempts;
+        if (us <= 0) {  // dropped; too many -> error
+            ++cs.invalid;
+            if (cs.invalid > std::max(3, attempts * cfg_.max_invalid_pct / 100)) {
+                cs.error = err + " (" + std::to_string(cs.invalid) + " of " + std::to_string(attempts) + " readings invalid)";
+                return finish("error");
+            }
+            if (clock_->now() - t0 - cs.cooldown_s < cfg_.max_cell_s) continue;
+            if (cs.samples.empty()) {
+                cs.error = err;
+                return finish("error");
+            }
+            return finish("time");
         }
         cs.samples.push_back(us);
         ++since_anchor;
@@ -305,6 +331,7 @@ AbStats Bench::runAB(const BlockFn& fa, const BlockFn& fb) {
         first_a.resize(clean);
         since_anchor = 0;
     };
+    int attempts = 0;
     for (std::uint64_t pair = 0;; ++pair) {
         const bool a_first = pair % 2 == 0;
         std::string err;
@@ -316,9 +343,15 @@ AbStats Bench::runAB(const BlockFn& fa, const BlockFn& fb) {
             sb = sample(fb, cb.block, rb, err);
             if (sb > 0) sa = sample(fa, ca.block, ra, err);
         }
-        if (sa <= 0 || sb <= 0) {
-            cs.error = err;
-            return finish("error");
+        ++attempts;
+        if (sa <= 0 || sb <= 0) {  // the pair is dropped; too many -> error
+            ++cs.invalid;
+            if (cs.invalid > std::max(3, attempts * cfg_.max_invalid_pct / 100)) {
+                cs.error = err + " (" + std::to_string(cs.invalid) + " of " + std::to_string(attempts) + " pairs invalid)";
+                return finish("error");
+            }
+            --pair;  // keep the A-first / B-first alternation of the kept pairs
+            continue;
         }
         ab.a.samples.push_back(sa);
         ab.b.samples.push_back(sb);
@@ -357,6 +390,43 @@ AbStats Bench::runAB(const BlockFn& fa, const BlockFn& fb) {
         }
         return finish(std::string(why) == "rel" ? relLabel(cfg_.rel_target) : why);
     }
+}
+
+BlockFn eventBlock(EventApi api, void* stream, StreamCall call, Clock* clock, std::shared_ptr<TimerStats> stats) {
+    Clock* clk = clock ? clock : &realClock();
+    if (!stats) stats = std::make_shared<TimerStats>();
+    return [api = std::move(api), stream, call = std::move(call), clk, stats](int n, std::uint64_t rot0) -> double {
+        auto once = [&](double& host_ms) {
+            void* e0 = api.create();
+            void* e1 = api.create();
+            const double h0 = clk->now();
+            api.record(e0, stream);
+            for (int j = 0; j < n; ++j) call(rot0 + static_cast<std::uint64_t>(j), stream);
+            api.record(e1, stream);
+            api.sync(e1);
+            api.stream_sync(stream);
+            const double ms = api.elapsed_ms(e0, e1);
+            host_ms = (clk->now() - h0) * 1000.0;
+            api.destroy(e0);
+            api.destroy(e1);
+            return ms;
+        };
+        auto valid = [](double ms, double host_ms) { return std::isfinite(ms) && ms > 0 && ms <= host_ms + 0.5; };
+        ++stats->blocks;
+        double host = 0;
+        double ms = once(host);
+        if (valid(ms, host)) return ms;
+        ++stats->retries;
+        char b[96];
+        std::snprintf(b, sizeof(b), "event ms %.6g vs host %.6g ms", ms, host);
+        stats->last_invalid = b;
+        ms = once(host);  // same launches again (rotation indices repeat once; the reading is what matters)
+        if (valid(ms, host)) return ms;
+        ++stats->invalid;
+        std::snprintf(b, sizeof(b), "event ms %.6g vs host %.6g ms (after a retry)", ms, host);
+        stats->last_invalid = b;
+        return ms > 0 && std::isfinite(ms) ? -ms : (std::isfinite(ms) ? ms - 1e-9 : ms);  // invalid: never > 0
+    };
 }
 
 int rotationCopies(std::uint64_t ws, std::uint64_t target, std::uint64_t cap, int max_copies) {
@@ -482,6 +552,7 @@ whirl::bench::Row cellRow(const CellInfo& ci, const CellStats& cs, const std::st
     r.ended = wb::iso_now();
     r.extra.push_back({"block", wb::json_number(static_cast<std::int64_t>(cs.block))});
     r.extra.push_back({"discarded", wb::json_number(static_cast<std::int64_t>(cs.discarded))});
+    r.extra.push_back({"invalid", wb::json_number(static_cast<std::int64_t>(cs.invalid))});
     if (cs.cooldown_s > 0) r.extra.push_back({"cooldown_s", wb::json_number(cs.cooldown_s)});
     r.extra.push_back({"rel_iqr", wb::json_number(cs.rel())});
     if (!cs.error.empty()) r.extra.push_back({"error", wb::json_string(cs.error)});

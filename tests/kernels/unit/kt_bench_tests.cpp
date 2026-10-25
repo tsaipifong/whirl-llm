@@ -12,6 +12,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -70,6 +71,7 @@ struct FakeKernel {
 static BenchCfg quietCfg() {
     BenchCfg c;
     c.burst_idle_s = 0;
+    c.min_block_us = 200;  // the rule tests below use 200 us blocks; the default (1000) is checked separately
     return c;
 }
 
@@ -155,17 +157,178 @@ static void test_error() {
     check("error: zero-duration block -> stop_reason error, no samples, not ok()", cs.stop_reason == "error" && cs.st.n == 0 && !cs.ok(),
           cs.stop_reason);
     check("error: reason names the zero duration", cs.error.find("zero") != std::string::npos, cs.error);
-    check("error: stops at the first bad block (1 call)", calls == 1, std::to_string(calls));
+    // an invalid reading during calibration doubles the block (too short to time); error only at max_block (1..65536)
+    check("error: an always-zero timer fails after the block reached max_block (17 sizes)", calls == 17, std::to_string(calls));
     BlockFn nan = [&](int, std::uint64_t) { return std::nan(""); };
     check("error: NaN block -> error", b.run(nan).stop_reason == "error");
     // an error during sampling (after calibration) also stops
     int n2 = 0;
     BlockFn late = [&](int n, std::uint64_t) {
         clk.t += 1e-3;
-        return ++n2 > 40 ? -1.0 : 0.01 * n;
+        return ++n2 > 320 ? -1.0 : 0.01 * n;  // invalid from the 3rd timed sample on (317 calibration + warm-up calls)
     };
     const CellStats cs2 = b.run(late);
-    check("error: a failed block during sampling -> error, samples discarded", cs2.stop_reason == "error" && cs2.st.n == 0, cs2.stop_reason);
+    check("error: a timer that stays invalid during sampling -> error, samples discarded", cs2.stop_reason == "error" && cs2.st.n == 0,
+          cs2.stop_reason + " " + cs2.error);
+    check("error: the error names the invalid count", cs2.error.find("readings invalid") != std::string::npos, cs2.error);
+}
+
+// --------------------------------------------------------------------------------------------- event timer (fix 1)
+// Fake GPU runtime: a stream is an id; launches add their duration to the stream's GPU clock; an event recorded on a
+// stream takes that stream's clock at its position. `zero_below_us`: an interval shorter than this reads 0 (what the
+// R9700 smoke showed for short blocks); `stale_reuse`: a re-recorded event keeps its first timestamp (a reused pair
+// then reads zero / negative intervals).
+struct FakeRt {
+    FakeClock& clk;
+    double zero_below_us = 0;
+    bool stale_reuse = false;
+    std::map<void*, double> gpu;        // stream -> GPU clock (us)
+    struct Ev {
+        double t = -1;
+        void* stream = nullptr;
+        int records = 0;
+        bool synced = false;
+    };
+    std::map<void*, Ev> ev;
+    std::vector<std::string> log;
+    int next = 1, live = 0, created = 0;
+    EventApi api() {
+        EventApi a;
+        a.create = [this] {
+            void* e = reinterpret_cast<void*>(static_cast<std::uintptr_t>(next++));
+            ev[e] = {};
+            ++live;
+            ++created;
+            log.push_back("create");
+            return e;
+        };
+        a.destroy = [this](void* e) {
+            ev.erase(e);
+            --live;
+            log.push_back("destroy");
+        };
+        a.record = [this](void* e, void* s) {
+            Ev& x = ev[e];
+            if (!(stale_reuse && x.records > 0)) x.t = gpu[s];
+            x.stream = s;
+            ++x.records;
+            x.synced = false;
+            log.push_back("record");
+        };
+        a.sync = [this](void* e) {
+            ev[e].synced = true;
+            log.push_back("sync");
+        };
+        a.stream_sync = [this](void*) { log.push_back("stream_sync"); };
+        a.elapsed_ms = [this](void* e0, void* e1) {
+            log.push_back(ev[e1].synced ? "elapsed" : "elapsed-unsynced");
+            const double us = ev[e1].t - ev[e0].t;
+            return us < zero_below_us ? 0.0 : us / 1000.0;
+        };
+        return a;
+    }
+    // one launch of `us` on stream s (also advances the host clock: the host waits for it at the sync)
+    void launch(void* s, double us) {
+        gpu[s] += us;
+        clk.t += us / 1e6;
+    }
+};
+
+static void test_event_protocol() {
+    FakeClock clk;
+    FakeRt rt{clk};
+    void* const s = reinterpret_cast<void*>(0x5);
+    int wrong_stream = 0;
+    auto st = std::make_shared<TimerStats>();
+    BlockFn f = eventBlock(rt.api(), s,
+                           [&](std::uint64_t, void* stream) {
+                               if (stream != s) ++wrong_stream;
+                               rt.launch(stream, 10.0);
+                           },
+                           &clk, st);
+    const double ms = f(4, 0);
+    check("timer: 4 launches of 10 us -> 0.04 ms", std::fabs(ms - 0.04) < 1e-12, num(ms));
+    std::string seq;
+    for (const auto& x : rt.log) seq += x + " ";
+    check("timer: protocol create create record record sync stream_sync elapsed destroy destroy",
+          seq == "create create record record sync stream_sync elapsed destroy destroy ", seq);
+    check("timer: every call gets the stream the events are recorded on", wrong_stream == 0);
+    check("timer: no event leaks", rt.live == 0, std::to_string(rt.live));
+    f(4, 4);
+    check("timer: a fresh event pair per block (4 created after two blocks)", rt.created == 4, std::to_string(rt.created));
+    check("timer: valid readings are not retried", st->blocks == 2 && st->retries == 0 && st->invalid == 0);
+}
+
+static void test_event_reuse_would_fail() {
+    // the first version's pattern: one pair re-recorded for every block, on a runtime that keeps stale timestamps
+    FakeClock clk;
+    FakeRt rt{clk};
+    rt.stale_reuse = true;
+    void* const s = reinterpret_cast<void*>(0x5);
+    EventApi a = rt.api();
+    void* e0 = a.create();
+    void* e1 = a.create();
+    auto reused = [&](int n) {
+        a.record(e0, s);
+        for (int j = 0; j < n; ++j) rt.launch(s, 10.0);
+        a.record(e1, s);
+        a.sync(e1);
+        return a.elapsed_ms(e0, e1);
+    };
+    reused(1);
+    const double second = reused(2);
+    check("timer (model of the smoke defect): a re-recorded pair reads a stale interval", std::fabs(second - 0.01) < 1e-12, num(second));
+    // eventBlock on the same runtime: fresh events -> correct
+    BlockFn f = eventBlock(rt.api(), s, [&](std::uint64_t, void* stream) { rt.launch(stream, 10.0); }, &clk);
+    check("timer: fresh events per block read the right interval on that runtime", std::fabs(f(2, 0) - 0.02) < 1e-12);
+}
+
+static void test_event_invalid_short_blocks() {
+    // short intervals read 0 (< 300 us): the bench must still calibrate to a valid block and time correctly
+    FakeClock clk;
+    FakeRt rt{clk};
+    rt.zero_below_us = 300;
+    void* const s = reinterpret_cast<void*>(0x7);
+    auto st = std::make_shared<TimerStats>();
+    BlockFn f = eventBlock(rt.api(), s, [&](std::uint64_t, void* stream) { rt.launch(stream, 10.0); }, &clk, st);
+    BenchCfg c = quietCfg();
+    c.min_block_us = 200;  // even with a 200 us target the zero readings below 300 us must not end the cell
+    Bench b(c, &clk);
+    const CellStats cs = b.run(f);
+    check("timer: zero readings of short blocks -> calibration doubles past them, cell ok", cs.ok() && cs.stop_reason == "rel<=1%",
+          cs.stop_reason + " " + cs.error);
+    check("timer: calibrated block 32 (320 us, the first valid size)", cs.block == 32, std::to_string(cs.block));
+    check("timer: median 10 us per launch", cs.st.median == 10.0, num(cs.st.median));
+    check("timer: the zero readings were retried and counted", st->retries > 0 && st->invalid > 0 && !st->last_invalid.empty(),
+          std::to_string(st->retries) + " " + st->last_invalid);
+    BenchCfg d;
+    check("timer: default min_block_us is 1000", d.min_block_us == 1000.0);
+}
+
+static void test_event_longer_than_host() {
+    // a reading longer than the host interval around it is impossible -> invalid (retried, then rejected)
+    FakeClock clk;
+    FakeRt rt{clk};
+    void* const s = reinterpret_cast<void*>(0x9);
+    auto st = std::make_shared<TimerStats>();
+    BlockFn f = eventBlock(rt.api(), s, [&](std::uint64_t, void* stream) { rt.gpu[stream] += 5000.0; /* host clock not advanced */ }, &clk, st);
+    const double ms = f(1, 0);
+    check("timer: GPU interval > host wall + 0.5 ms -> invalid (<= 0), counted", ms <= 0 && st->invalid == 1 && st->retries == 1,
+          num(ms) + " " + st->last_invalid);
+}
+
+static void test_occasional_invalid_dropped() {
+    // one invalid reading in 50 during sampling is dropped and counted, the cell still succeeds
+    FakeClock clk;
+    Bench b(quietCfg(), &clk);
+    int calls = 0;
+    BlockFn f = [&](int n, std::uint64_t) {
+        ++calls;
+        clk.t += 10e-6 * n;
+        return calls == 320 ? 0.0 : 0.01 * n;  // call 320 = 3rd timed sample (6 calibration + 311 warm-up calls before)
+    };
+    const CellStats cs = b.run(f);
+    check("sampling: an occasional invalid reading is dropped (invalid 1), cell ok", cs.ok() && cs.invalid == 1, std::to_string(cs.invalid) + " " + cs.stop_reason);
 }
 
 // --------------------------------------------------------------------------------------------- rotation
@@ -507,6 +670,11 @@ int main(int argc, char** argv) {
         test_n_stop();
         test_rel_after_settle();
         test_error();
+        test_event_protocol();
+        test_event_reuse_would_fail();
+        test_event_invalid_short_blocks();
+        test_event_longer_than_host();
+        test_occasional_invalid_dropped();
         test_rotation();
         test_anchor_drift_once();
         test_anchor_noisy();

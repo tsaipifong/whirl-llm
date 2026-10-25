@@ -88,27 +88,31 @@ struct Env {
     }
 };
 
-// Times a block of calls between two hipEvents on the test stream (whirl::hip throws on any HIP error).
-struct EvPair {
-    hip::Event e0 = hip::eventCreate(true), e1 = hip::eventCreate(true);
-    EvPair() = default;
-    EvPair(const EvPair&) = delete;
-    EvPair& operator=(const EvPair&) = delete;
-    ~EvPair() {
-        hip::eventDestroy(e0);
-        hip::eventDestroy(e1);
-    }
-};
+// Times a block of calls between two hipEvents on the test stream through kt::eventBlock (fresh event pair per block,
+// both on c.s, sync, host-wall sanity check, one retry; whirl::hip throws on any HIP error). The first version reused
+// one event pair for every block and accepted short blocks: the R9700 smoke (2026-10-25 14:15) read zero / negative
+// intervals for most cells (scratch\mt_p2\smoke_dense_r9700_20261025-1415.log).
+std::shared_ptr<TimerStats> g_timer = std::make_shared<TimerStats>();
+
+EventApi hipEvents() {
+    EventApi a;
+    a.create = [] { return static_cast<void*>(hip::eventCreate(true)); };
+    a.destroy = [](void* e) { hip::eventDestroy(static_cast<hip::Event>(e)); };
+    a.record = [](void* e, void* s) { hip::eventRecord(static_cast<hip::Event>(e), static_cast<hip::Stream>(s)); };
+    a.sync = [](void* e) { hip::eventSync(static_cast<hip::Event>(e)); };
+    a.stream_sync = [](void* s) { hip::streamSync(static_cast<hip::Stream>(s)); };
+    a.elapsed_ms = [](void* e0, void* e1) { return static_cast<double>(hip::eventElapsedMs(static_cast<hip::Event>(e0), static_cast<hip::Event>(e1))); };
+    return a;
+}
 
 BlockFn hipBlock(Ctx& c, std::function<void(std::uint64_t rot)> call) {
-    auto ev = std::make_shared<EvPair>();
-    return [&c, ev, call = std::move(call)](int n, std::uint64_t rot0) -> double {
-        hip::eventRecord(ev->e0, c.s);
-        for (int j = 0; j < n; ++j) call(rot0 + static_cast<std::uint64_t>(j));
-        hip::eventRecord(ev->e1, c.s);
-        hip::eventSync(ev->e1);
-        return static_cast<double>(hip::eventElapsedMs(ev->e0, ev->e1));
-    };
+    void* const s = static_cast<void*>(c.s);
+    return eventBlock(hipEvents(), s,
+                      [s, call = std::move(call)](std::uint64_t rot, void* stream) {
+                          if (stream != s) throw std::runtime_error("bench: timer stream != launch stream");
+                          call(rot);  // every cell launches on c.s
+                      },
+                      nullptr, g_timer);
 }
 
 std::string shapeStr(int nrows, int ncols) { return std::to_string(nrows) + "x" + std::to_string(ncols); }
@@ -127,7 +131,8 @@ void printCell(const CellInfo& ci, const CellStats& cs, const char* side = "") {
     std::printf("   %-5s %-22s %-34s %s%10.2f us  p10 %.2f p90 %.2f  n %3lld blk %4d %-8s%s%s\n", ci.family.c_str(), ci.kernel.c_str(),
                 ci.cell.c_str(), side, med, cs.st.p10, cs.st.p90, static_cast<long long>(cs.st.n), cs.block, cs.stop_reason.c_str(), b,
                 cs.cooldowns ? (" cooldowns " + std::to_string(cs.cooldowns)).c_str() : "");
-    if (!cs.error.empty()) std::printf("         error: %s\n", cs.error.c_str());
+    if (!cs.error.empty()) std::printf("         error: %s; last invalid reading: %s\n", cs.error.c_str(), g_timer->last_invalid.c_str());
+    if (cs.invalid) std::printf("         %d invalid timer reading(s) dropped\n", cs.invalid);
     std::fflush(stdout);
 }
 
@@ -981,6 +986,9 @@ void runBench(Ctx& c, const BenchOpts& o) {
     }
     std::printf("bench: %d rows written%s, %d burst idles, %d groups past %g s\n", e.rows_written,
                 o.jsonl.empty() ? " (no --jsonl: console only)" : (" to " + o.jsonl).c_str(), e.bench.bursts(), e.bench.overruns(), o.cfg.burst_s);
+    std::printf("bench timer: %lld blocks, %lld retried, %lld invalid after the retry%s%s\n", static_cast<long long>(g_timer->blocks),
+                static_cast<long long>(g_timer->retries), static_cast<long long>(g_timer->invalid), g_timer->last_invalid.empty() ? "" : "; last: ",
+                g_timer->last_invalid.c_str());
     g_anchor_w.reset();
     g_anchor_xq.reset();
     g_anchor_xd.reset();

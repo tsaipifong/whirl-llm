@@ -26,6 +26,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <set>
 #include <string>
 #include <vector>
@@ -36,7 +37,9 @@ namespace kt {
 
 struct BenchCfg {
     double warmup_ms = 100;      // untimed warm-up, GPU time
-    double min_block_us = 200;   // calibrated block >= this
+    // calibrated block >= this. 1000, not torch's 200: the R9700 smoke (2026-10-25 14:15) returned zero / negative
+    // hipEvent intervals for blocks of tens to ~200 us of work, while every block >= ~870 us was valid
+    double min_block_us = 1000;
     int max_block = 1 << 16;
     int min_samples = 10, max_samples = 2000;
     double rel_target = 0.01;    // IQR / median
@@ -45,6 +48,7 @@ struct BenchCfg {
     double drift_pct = 3.0;
     double cool_first_s = 2, cool_max_step_s = 32, cool_total_s = 60;
     int max_cooldowns = 2;       // more -> "noisy"
+    int max_invalid_pct = 5;     // invalid timer readings tolerated while sampling (dropped, counted); more -> "error"
     double burst_s = 8, burst_idle_s = 0;  // burst_idle_s 0 = off
 };
 
@@ -68,6 +72,7 @@ struct CellStats {
     std::string error;            // stop_reason "error": why
     int block = 0;                // launches per sample
     int discarded = 0;            // samples dropped after an anchor drift
+    int invalid = 0;              // timer readings rejected (zero / negative / longer than the host wall time) and dropped
     int cooldowns = 0;
     double cooldown_s = 0;        // slept
     double measure_s = 0;         // wall time of warm-up + calibration + samples (no cooldowns)
@@ -130,6 +135,27 @@ private:
     int bursts_ = 0, overruns_ = 0;
     bool overrun_counted_ = false;
 };
+
+// ---------------------------------------------------------------- event timing of one block (HIP-free protocol)
+// The GPU timer behind a BlockFn, written against an abstract event API so its protocol is unit-tested on the CPU:
+//   per block a FRESH event pair (never re-recorded events), e0 and e1 recorded on the same stream the calls launch on
+//   (the stream is passed to every call), e1 synchronized and then the stream, elapsed(e0, e1) read, both destroyed.
+// A reading is valid when 0 < ms <= host wall time of the block + 0.5 ms (a GPU interval cannot be longer than the host
+// interval that encloses its submission and completion); an invalid reading is retried once with new events.
+struct EventApi {
+    std::function<void*()> create;
+    std::function<void(void*)> destroy;
+    std::function<void(void* ev, void* stream)> record;
+    std::function<void(void* ev)> sync;
+    std::function<void(void* stream)> stream_sync;
+    std::function<double(void* e0, void* e1)> elapsed_ms;
+};
+struct TimerStats {
+    std::int64_t blocks = 0, retries = 0, invalid = 0;  // invalid = still invalid after the retry
+    std::string last_invalid;                            // the last rejected reading, for the error text
+};
+using StreamCall = std::function<void(std::uint64_t rot, void* stream)>;
+BlockFn eventBlock(EventApi api, void* stream, StreamCall call, Clock* clock = nullptr, std::shared_ptr<TimerStats> stats = nullptr);
 
 // IQR / median of a sample set (0 for < 2 samples or median 0)
 double relIqr(std::vector<double> v);
