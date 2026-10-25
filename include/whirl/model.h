@@ -741,6 +741,10 @@ public:
     // decode experts on the whole-block kernels (WHIRL_MOE_MXW=0 -> generic moe_gu / moe_down).
     DevPtr moe_sx = 0;
     bool moe_fp8 = true;
+    // moeskip (fast item, feat027): routed slots with renormalized weight < moe_skip_thr are dropped (top
+    // moe_skip_min always kept; kept weights renormalized). 0 = off (precise, balance, fast without the item)
+    float moe_skip_thr = 0.f;
+    int moe_skip_min = 1;
     bool moe_mxw = true;
     bool moe_rbf = true;  // MXFP4 x fp8 grouped GEMM: row-block-fast gemm8r_* when present (WHIRL_MOE_RBF=0 -> gemm8_moe*)
 

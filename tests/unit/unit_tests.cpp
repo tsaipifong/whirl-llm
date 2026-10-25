@@ -9,6 +9,7 @@
 #include "whirl/tokenizer.h"
 #include "whirl/unicode.h"
 #include "whirl/numerics.h"
+#include "whirl/moe_skip.h"
 #include "whirl/spec_sample.h"
 #include "whirl/relax_accept.h"
 #include "whirl/dflash_policy.h"
@@ -1079,6 +1080,231 @@ void testNumerics() {
 }
 
 // KV format (BAL-Q8): one fixed format per mode x model type, never by what fits
+// feat027 moeskip: mode plan (fast only, precise / balance untouched), the selection / renormalization
+// rule, the prefill grouping with dropped pairs and the combine (host references in whirl/moe_skip.h).
+void testMoeSkip() {
+    namespace nu = whirl::numerics;
+    namespace ms = whirl::moeskip;
+    using nu::Item;
+    nu::Target ornith;
+    ornith.k_gemm8 = ornith.k_gemm8_moe = ornith.k_gdn_wmma = ornith.k_kv_q8v = ornith.k_kv_q8h = true;
+    ornith.has_mxfp4 = ornith.moe = ornith.moe_mxfp4 = true;
+    ornith.k_moe_skip = true;
+    nu::Target swift = ornith;
+    swift.moe = swift.moe_mxfp4 = false;
+    const nu::Request pre{}, bal = nu::parseMode("balance", "t"), fast = nu::parseMode("fast", "t");
+    // precise and balance never enable it and carry no threshold
+    {
+        const nu::Plan pp = nu::plan(pre, ornith), pb = nu::plan(bal, ornith);
+        CHECK(!pp.on(Item::moeskip) && pp.moe_skip_thr == 0.f && !pp.items[static_cast<std::size_t>(Item::moeskip)].requested);
+        CHECK(!pb.on(Item::moeskip) && pb.moe_skip_thr == 0.f && !pb.items[static_cast<std::size_t>(Item::moeskip)].requested);
+        CHECK((nu::balance_items & nu::bit(Item::moeskip)) == 0 && (nu::fast_only_items & nu::bit(Item::moeskip)) != 0);
+        CHECK((nu::implemented_items & nu::bit(Item::moeskip)) != 0);
+        bool threw = false;
+        try {
+            (void)nu::parseMode("balance:moeskip", "t");
+        } catch (const std::invalid_argument&) {
+            threw = true;
+        }
+        CHECK(threw);
+        nu::Plan pb2 = pb;  // no environment: unchanged
+        nu::setMoeSkip(pb2, "", "", true);
+        CHECK(!pb2.on(Item::moeskip) && pb2.overrides.empty() && nu::modeLabel(pb2) == "balance");
+        nu::Plan pp2 = pp;  // user-requested in precise: lossy override
+        nu::setMoeSkip(pp2, "0.1", "", true);
+        CHECK(pp2.on(Item::moeskip) && std::fabs(pp2.moe_skip_thr - 0.1f) < 1e-7f && nu::modeLabel(pp2) == "precise+overrides");
+        nu::Plan pp3 = pp;  // not applicable: nothing
+        nu::setMoeSkip(pp3, "0.1", "", false);
+        CHECK(!pp3.on(Item::moeskip) && nu::modeLabel(pp3) == "precise");
+    }
+    // fast: on for MoE with the kernel, default threshold / min-keep as plan values
+    {
+        const nu::Plan pf = nu::plan(fast, ornith);
+        CHECK(pf.on(Item::moeskip) && pf.moe_skip_thr == ms::k_default_thr && pf.moe_skip_min == ms::k_default_min_keep);
+        CHECK(nu::logLine(pf).find("moeskip (renormalized weight < 0.050 dropped, top 1 kept") != std::string::npos);
+        CHECK(nu::logLine(pf).find("fast runs as balance") == std::string::npos);
+        CHECK(nu::propsJson(pf, "f16").find("\"moeskip\"") != std::string::npos);
+        nu::Target nok = ornith;
+        nok.k_moe_skip = false;
+        const nu::Plan pn = nu::plan(fast, nok);
+        CHECK(!pn.on(Item::moeskip) && pn.moe_skip_thr == 0.f &&
+              pn.items[static_cast<std::size_t>(Item::moeskip)].note.find("no moe_topk_skip kernel") != std::string::npos);
+        const nu::Plan pd = nu::plan(fast, swift);
+        CHECK(!pd.on(Item::moeskip) && pd.items[static_cast<std::size_t>(Item::moeskip)].note == "dense model");
+        const nu::Plan pc = nu::plan(nu::parseMode("fast:kvq4", "t"), ornith);  // custom list without it
+        CHECK(!pc.on(Item::moeskip) && pc.moe_skip_thr == 0.f);
+        CHECK(nu::plan(nu::parseMode("fast:moeskip", "t"), ornith).on(Item::moeskip));
+        nu::Target s8 = ornith;  // Radeon 8060S: same rule (no fp8 there)
+        s8.gfx1151 = true;
+        s8.k_gemm8 = s8.k_gemm8_moe = false;
+        CHECK(nu::plan(fast, s8).on(Item::moeskip));
+        // environment
+        nu::Plan a = pf;
+        nu::setMoeSkip(a, "0.08", "2", true);
+        CHECK(a.on(Item::moeskip) && std::fabs(a.moe_skip_thr - 0.08f) < 1e-7f && a.moe_skip_min == 2 && a.overrides.size() == 1);
+        CHECK(nu::modeLabel(a) == "fast");  // the mode's own item, retuned: not a lossy override of another mode
+        nu::Plan b = pf;
+        nu::setMoeSkip(b, "0", "", true);
+        CHECK(!b.on(Item::moeskip) && b.moe_skip_thr == 0.f && b.items[static_cast<std::size_t>(Item::moeskip)].note == "off by WHIRL_MOESKIP_THR=0");
+        int bad = 0;
+        for (const char* v : {"abc", "1.5", "-0.1", "1", "0.1x", "nan"}) {
+            nu::Plan c = pf;
+            try {
+                nu::setMoeSkip(c, v, "", true);
+            } catch (const std::invalid_argument&) {
+                ++bad;
+            }
+        }
+        CHECK(bad == 6);
+        bad = 0;
+        for (const char* v : {"0", "65", "1.5", "x"}) {
+            nu::Plan c = pf;
+            try {
+                nu::setMoeSkip(c, "", v, true);
+            } catch (const std::invalid_argument&) {
+                ++bad;
+            }
+        }
+        CHECK(bad == 4);
+    }
+    // selection rule
+    {
+        std::uint32_t seed = 12345u;
+        auto rnd = [&seed] {
+            seed = seed * 1664525u + 1013904223u;
+            return static_cast<float>((seed >> 8) & 0xFFFF) / 65536.0f;
+        };
+        const int K = 8;
+        int total = 0, dropped = 0;
+        bool ok_off = true, ok_prefix = true, ok_sum = true, ok_ratio = true, ok_thr = true, ok_min = true;
+        for (int it = 0; it < 2000; ++it) {
+            float v[K];
+            v[0] = 4.f * rnd();
+            for (int k = 1; k < K; ++k) v[k] = v[k - 1] - 1.5f * rnd();  // sorted descending (moe_topk order)
+            float w0[K], w[K];
+            ms::selectRow(v, K, ms::Params{}, w0);  // off: moe_topk's weights
+            {
+                double s = 0;
+                for (int k = 0; k < K; ++k) s += std::exp(static_cast<double>(v[k]) - v[0]);
+                for (int k = 0; k < K; ++k)
+                    if (std::fabs(w0[k] - std::exp(static_cast<double>(v[k]) - v[0]) / s) > 1e-6) ok_off = false;
+            }
+            const ms::Params p{0.06f, 1 + it % 3};
+            const int keep = ms::selectRow(v, K, p, w);
+            total += K;
+            dropped += K - keep;
+            double s = 0;
+            for (int k = 0; k < K; ++k) {
+                if (k < keep && w[k] <= 0.f) ok_prefix = false;
+                if (k >= keep && w[k] != 0.f) ok_prefix = false;
+                s += w[k];
+            }
+            if (std::fabs(s - 1.0) > 1e-5) ok_sum = false;
+            for (int k = 1; k < keep; ++k)
+                if (std::fabs(w[k] / w[0] - w0[k] / w0[0]) > 1e-4 * (w0[k] / w0[0]) + 1e-7) ok_ratio = false;
+            if (keep < K && w0[keep] >= p.thr) ok_thr = false;  // the first dropped slot was below thr
+            for (int k = p.min_keep; k < keep; ++k)
+                if (w0[k] < p.thr) ok_thr = false;  // every kept slot past min_keep was at or above thr
+            if (keep < p.min_keep) ok_min = false;
+        }
+        CHECK(ok_off && ok_prefix && ok_sum && ok_ratio && ok_thr && ok_min);
+        CHECK(dropped > 0 && dropped < total);  // the test distribution exercises both sides
+        // a high threshold keeps exactly min_keep; thr 0 keeps all
+        float v[K] = {1.f, 0.9f, 0.8f, 0.7f, 0.6f, 0.5f, 0.4f, 0.3f}, w[K];
+        CHECK(ms::selectRow(v, K, ms::Params{0.99f, 1}, w) == 1 && w[0] == 1.f && w[1] == 0.f);
+        CHECK(ms::selectRow(v, K, ms::Params{0.99f, 3}, w) == 3);
+        CHECK(ms::selectRow(v, K, ms::Params{0.f, 1}, w) == K);
+        CHECK(ms::selectRow(v, K, ms::Params{0.5f, 0}, w) == 1);  // min_keep clamped to 1
+        const int ids_a[8] = {5, 9, 2, 7, -1, -1, -1, -1}, ids_b[8] = {5, 9, 2, 7, 1, 3, 4, 6}, ids_c[8] = {5, -1, -1, -1, -1, -1, -1, -1};
+        CHECK(ms::keptPrefix(ids_a, 8) == 4 && ms::keptPrefix(ids_b, 8) == 8 && ms::keptPrefix(ids_c, 8) == 1);
+    }
+    // prefill grouping + combine with dropped pairs
+    {
+        const int R = 16, K = 4, n = 37, C = 5, bn = 8;
+        std::uint32_t seed = 777u;
+        auto nxt = [&seed] {
+            seed = seed * 1664525u + 1013904223u;
+            return seed >> 8;
+        };
+        std::vector<int> ids(static_cast<std::size_t>(n) * K), ids_full;
+        std::vector<float> w(ids.size());
+        for (int t = 0; t < n; ++t) {
+            std::vector<int> pick;
+            while (static_cast<int>(pick.size()) < K) {
+                const int e = static_cast<int>(nxt() % R);
+                if (std::find(pick.begin(), pick.end(), e) == pick.end()) pick.push_back(e);
+            }
+            const int keep = 1 + static_cast<int>(nxt() % K);
+            float s = 0;
+            for (int k = 0; k < K; ++k) {
+                ids[static_cast<std::size_t>(t) * K + k] = k < keep ? pick[static_cast<std::size_t>(k)] : -1;
+                w[static_cast<std::size_t>(t) * K + k] = k < keep ? 1.f + static_cast<float>(nxt() % 100) / 100.f : 0.f;
+                s += w[static_cast<std::size_t>(t) * K + k];
+            }
+            for (int k = 0; k < K; ++k) w[static_cast<std::size_t>(t) * K + k] /= s;
+        }
+        // full routing (no drops) is the plain moe_route grouping
+        ids_full = ids;
+        for (int& e : ids_full)
+            if (e < 0) e = 0;
+        const ms::Route rf = ms::route(ids_full, R, bn);
+        bool full_ok = rf.n_kept == n * K;
+        for (int p = 0; p < n * K; ++p)
+            if (rf.inv[static_cast<std::size_t>(p)] < 0 || rf.perm[static_cast<std::size_t>(rf.inv[static_cast<std::size_t>(p)])] != p) full_ok = false;
+        CHECK(full_ok);
+        const ms::Route r = ms::route(ids, R, bn);
+        int kept = 0;
+        for (int e : ids) kept += e >= 0;
+        CHECK(r.n_kept == kept);
+        bool ok = true;
+        std::vector<int> covered(static_cast<std::size_t>(n) * K, 0);
+        for (const auto& tl : r.tiles) {
+            if (tl.count < 1 || tl.count > bn || tl.first < 0 || tl.first + tl.count > r.n_kept) ok = false;
+            for (int q = tl.first; q < tl.first + tl.count && q < r.n_kept; ++q) {
+                const int p = r.perm[static_cast<std::size_t>(q)];
+                if (p < 0 || ids[static_cast<std::size_t>(p)] != tl.expert) ok = false;
+                ++covered[static_cast<std::size_t>(q)];
+            }
+        }
+        for (int q = 0; q < n * K; ++q) {
+            const int p = r.perm[static_cast<std::size_t>(q)];
+            if (p < 0 || p >= n * K) ok = false;  // every position holds a valid pair (the gathers read it)
+            if (q < r.n_kept && covered[static_cast<std::size_t>(q)] != 1) ok = false;
+            if (q >= r.n_kept && (covered[static_cast<std::size_t>(q)] != 0 || ids[static_cast<std::size_t>(p)] >= 0)) ok = false;
+        }
+        for (int p = 0; p < n * K; ++p) {
+            const int q = r.inv[static_cast<std::size_t>(p)];
+            if (ids[static_cast<std::size_t>(p)] < 0 ? q != -1 : (q < 0 || q >= r.n_kept || r.perm[static_cast<std::size_t>(q)] != p)) ok = false;
+        }
+        CHECK(ok);
+        // combine (moe_combine order: k ascending, dropped skipped) == the direct sum over kept experts
+        std::vector<float> yexp(static_cast<std::size_t>(R) * n * C);  // expert e's output for token t
+        for (float& y : yexp) y = static_cast<float>(static_cast<int>(nxt() % 2001) - 1000) / 250.f;
+        auto yOf = [&](int e, int t, int c) { return yexp[(static_cast<std::size_t>(e) * n + t) * C + c]; };
+        std::vector<float> yd(static_cast<std::size_t>(n) * K * C, std::nanf(""));  // tail positions: garbage (NaN)
+        for (int q = 0; q < r.n_kept; ++q) {
+            const int p = r.perm[static_cast<std::size_t>(q)];
+            for (int c = 0; c < C; ++c) yd[static_cast<std::size_t>(q) * C + c] = yOf(ids[static_cast<std::size_t>(p)], p / K, c);
+        }
+        bool cmb = true;
+        for (int t = 0; t < n; ++t)
+            for (int c = 0; c < C; ++c) {
+                float acc = 0.f, ref = 0.f;
+                for (int k = 0; k < K; ++k) {
+                    const int q = r.inv[static_cast<std::size_t>(t) * K + k];
+                    if (q < 0) continue;
+                    acc += w[static_cast<std::size_t>(t) * K + k] * yd[static_cast<std::size_t>(q) * C + c];
+                }
+                for (int k = 0; k < K; ++k) {
+                    const int e = ids[static_cast<std::size_t>(t) * K + k];
+                    if (e >= 0) ref += w[static_cast<std::size_t>(t) * K + k] * yOf(e, t, c);
+                }
+                if (!(acc == ref)) cmb = false;  // bitwise: same order, NaN tail never read
+            }
+        CHECK(cmb);
+    }
+}
+
 void testKvChoice() {
     namespace nu = whirl::numerics;
     using K = nu::KvKind;
@@ -4072,6 +4298,7 @@ int main(int argc, char** argv) {
     testVramLimit();
     testCardDefaults();
     testNumerics();
+    testMoeSkip();
     testKvChoice();
     testKernelFetchBounds();
     testValueScope();

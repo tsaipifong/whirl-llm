@@ -24,6 +24,7 @@
 #include <random>
 #include <set>
 #include <sstream>
+#include <stdexcept>
 #include <tuple>
 
 namespace whirl::qwen35 {
@@ -486,16 +487,19 @@ bool Model::checkPreciseDecode(std::string& log) {
     // "== prefill GEMM rows" and MoE prefill-path comparisons below measure the fp8 / h16
     // paths instead of the precise ones.
     const bool saved_fp8 = fp8_prefill, saved_moe_fp8 = moe_fp8, saved_out_h16 = out_h16;
+    const float saved_moe_skip = moe_skip_thr;  // moeskip (fast): the precise paths drop no expert
     const auto restore = [&] {
         prec_dec = saved_prec;
         small_max = saved_small;
         fp8_prefill = saved_fp8;
         moe_fp8 = saved_moe_fp8;
         out_h16 = saved_out_h16;
+        moe_skip_thr = saved_moe_skip;
     };
     fp8_prefill = false;
     moe_fp8 = false;
     out_h16 = false;
+    moe_skip_thr = 0.f;
     prec_dec = true;
     const u32 NP = 40;  // > every gvMax(): the prefill GEMM
     const std::vector<float> xs = randomNormal(static_cast<std::size_t>(NP) * ff_scratch, 13);
@@ -930,6 +934,7 @@ void loadOrTuneImpl(Model& m, const std::string& model_path, std::string& log) {
         t.kv_explicit = m.kv_mode != KvMode::automatic;
         t.fast_kv_q8h = t.gfx1151 && t.k_kv_q8h;
         t.gdn_strix = m.gdn_strix;
+        t.k_moe_skip = m.k.moe_topk_skip != nullptr;
         nu::Plan p = nu::plan(rq, t);
         if (fp8_env) nu::applyOverride(p, nu::Item::fp8, "FP8", *fp8_env, m.fp8_prefill, t.has_mxfp4 && t.k_gemm8);
         const bool moe_ok = t.moe && t.moe_mxfp4 && t.k_gemm8_moe;
@@ -974,6 +979,18 @@ void loadOrTuneImpl(Model& m, const std::string& model_path, std::string& log) {
         }
         if (const auto v = envGet("SPEC_SAMPLE"); v && !v->empty())
             nu::applyOverride(p, nu::Item::specsample, "SPEC_SAMPLE", *v, *v != "0", t.mtp && t.k_spec_sample);
+        // moeskip (fast, feat027): threshold / min-keep are plan values; WHIRL_MOESKIP_THR / _MIN override
+        {
+            const auto thr_env = envGet("MOESKIP_THR");
+            const auto min_env = envGet("MOESKIP_MIN");
+            try {
+                nu::setMoeSkip(p, thr_env ? *thr_env : std::string(), min_env ? *min_env : std::string(), t.moe && t.k_moe_skip);
+            } catch (const std::invalid_argument& e) {
+                throw ModelError("BadEnvironment", e.what());
+            }
+            m.moe_skip_thr = p.on(nu::Item::moeskip) ? p.moe_skip_thr : 0.f;
+            m.moe_skip_min = p.moe_skip_min;
+        }
         nu::noteSwitches(p, [](const char* n) { return envGet(n); });
         m.num_plan = p;
         log += "  " + nu::logLine(p) + "\n";

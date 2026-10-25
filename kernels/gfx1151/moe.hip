@@ -10,6 +10,8 @@
 // Expert tensors are 3D GGUF tensors: expert e owns rows [e * rows_e, (e+1) * rows_e).
 // ---------------------------------------------------------------------------
 
+#include "../moe_skip.hip"  // moeskip: moe_topk_skip, moe_kept (fast only; id -1 = dropped slot)
+
 // GDN beta/alpha projections for other quant types (see gdn_ab_q8_0).
 #define GDN_AB_ENTRY(SUF, T)                                                                              \
     extern "C" __global__ void __launch_bounds__(256)                                                     \
@@ -237,6 +239,7 @@ __device__ void moe_gu_impl(const uint8_t *__restrict__ W1, const uint8_t *__res
     if (row >= nrows) return;
     const int p = blockIdx.y;
     const int t = p / K, e = ids[p];
+    if (e < 0) return;  // moeskip: dropped slot
     const bool second = row >= ff;
     const int r = second ? row - ff : row;
     const uint8_t *wr = (second ? W2 : W1) + ((size_t)e * ff + r) * row_bytes;
@@ -267,12 +270,13 @@ __device__ void moe_down_impl(const uint8_t *__restrict__ W, uint64_t row_bytes,
     const int row = blockIdx.x * (blockDim.x / WARP) + threadIdx.x / WARP;
     if (row >= E) return;
     const int t = blockIdx.y;
+    const int kt = moe_kept(ids, t, K);  // moeskip: kept prefix (K without it)
     float acc = 0.f;
     if constexpr (MOE_WIDE && (T == QT_Q4_K || T == QT_Q5_K || T == QT_Q6_K)) {
         // wide units of all K experts spread over the lanes
         constexpr int per_sb = T == QT_Q6_K ? 8 : 4;
         const int nu = F / 256 * per_sb;
-        for (int u = lane; u < K * nu; u += WARP) {
+        for (int u = lane; u < kt * nu; u += WARP) {
             const int k = u / nu, uu = u - k * nu;
             const int p = t * K + k;
             const uint8_t *wr = W + ((size_t)ids[p] * E + row) * row_bytes;
@@ -283,7 +287,7 @@ __device__ void moe_down_impl(const uint8_t *__restrict__ W, uint64_t row_bytes,
         }
     } else {
         const int nu = F / QD<T>::sb * QD<T>::per_sb;
-        for (int u = lane; u < K * nu; u += WARP) {
+        for (int u = lane; u < kt * nu; u += WARP) {
             const int k = u / nu, uu = u - k * nu;
             const int p = t * K + k;
             const uint8_t *wr = W + ((size_t)ids[p] * E + row) * row_bytes;
@@ -307,12 +311,15 @@ extern "C" __global__ void __launch_bounds__(1024)
     moe_route(const int *__restrict__ ids, int n_pairs, int R, int bn, int *__restrict__ perm, int *__restrict__ inv,
               int4 *__restrict__ tiles, int *__restrict__ n_tiles) {
     __shared__ int cnt[1024], off[1024], fill[1024];
+    __shared__ int n_kept, tail;
     for (int r = threadIdx.x; r < R; r += blockDim.x) {
         cnt[r] = 0;
         fill[r] = 0;
     }
+    if (threadIdx.x == 0) tail = 0;
     __syncthreads();
-    for (int p = threadIdx.x; p < n_pairs; p += blockDim.x) atomicAdd(&cnt[ids[p]], 1);
+    for (int p = threadIdx.x; p < n_pairs; p += blockDim.x)
+        if (ids[p] >= 0) atomicAdd(&cnt[ids[p]], 1);  // moeskip: id -1 pairs are in no tile
     __syncthreads();
     if (threadIdx.x == 0) {
         int o = 0, nt = 0;
@@ -322,10 +329,18 @@ extern "C" __global__ void __launch_bounds__(1024)
             o += cnt[r];
         }
         *n_tiles = nt;
+        n_kept = o;
     }
     __syncthreads();
     for (int p = threadIdx.x; p < n_pairs; p += blockDim.x) {
         const int e = ids[p];
+        if (e < 0) {
+            // moeskip: a dropped pair is parked after the kept positions (perm stays a valid pair
+            // for the gathers), inv = -1 so moe_combine skips it
+            perm[n_kept + atomicAdd(&tail, 1)] = p;
+            inv[p] = -1;
+            continue;
+        }
         const int pos = off[e] + atomicAdd(&fill[e], 1);
         perm[pos] = p;
         inv[p] = pos;
@@ -364,7 +379,11 @@ extern "C" __global__ void moe_combine(float *__restrict__ x, const float *__res
     const int c = blockIdx.x * blockDim.x + threadIdx.x;
     if (c >= C) return;
     float acc = 0.f;
-    for (int k = 0; k < K; ++k) acc += w[(size_t)t * K + k] * yd[(size_t)inv[(size_t)t * K + k] * C + c];
+    for (int k = 0; k < K; ++k) {
+        const int q = inv[(size_t)t * K + k];
+        if (q < 0) continue;  // moeskip: dropped slot
+        acc += w[(size_t)t * K + k] * yd[(size_t)q * C + c];
+    }
     if (ysh != nullptr) acc += sg[t] * ysh[(size_t)t * C + c];
     x[(size_t)t * C + c] += acc;
 }
@@ -485,7 +504,8 @@ extern "C" __global__ void __launch_bounds__(1024)
     __shared__ int cnt[1024];
     for (int r = threadIdx.x; r < R; r += blockDim.x) cnt[r] = 0;
     __syncthreads();
-    for (int p = threadIdx.x; p < n_pairs; p += blockDim.x) atomicAdd(&cnt[ids[p]], 1);
+    for (int p = threadIdx.x; p < n_pairs; p += blockDim.x)
+        if (ids[p] >= 0) atomicAdd(&cnt[ids[p]], 1);  // moeskip: id -1 pairs are in no tile
     __syncthreads();
     if (threadIdx.x == 0) {
         int o = 0, nt = 0;

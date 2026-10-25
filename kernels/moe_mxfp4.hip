@@ -43,6 +43,7 @@ extern "C" __global__ void __launch_bounds__(256)
     if (row >= nrows) return;
     const int p = blockIdx.y;
     const int t = p / K, e = ids[p];
+    if (e < 0) return;  // moeskip: dropped slot
     const bool second = row >= ff;
     const int r = second ? row - ff : row;
     const uint8_t *wr = (second ? W2 : W1) + ((size_t)e * ff + r) * row_bytes;
@@ -65,8 +66,9 @@ extern "C" __global__ void __launch_bounds__(256)
     if (row >= E) return;
     const int t = blockIdx.y;
     const int nb = F / 32;
+    const int kt = moe_kept(ids, t, K);  // moeskip: kept prefix (K without it)
     float acc = 0.f;
-    for (int u = lane; u < K * nb; u += WARP) {
+    for (int u = lane; u < kt * nb; u += WARP) {
         const int k = u / nb, b = u - k * nb;
         const int p = t * K + k;
         const uint8_t *wr = W + ((size_t)ids[p] * E + row) * row_bytes;

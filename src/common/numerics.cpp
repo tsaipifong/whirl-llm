@@ -3,6 +3,8 @@
 
 #include "whirl/numerics.h"
 
+#include "whirl/moe_skip.h"
+
 #include <algorithm>
 #include <format>
 #include <stdexcept>
@@ -252,6 +254,10 @@ Plan plan(const Request& r_in, const Target& t) {
                 }
                 note = "drafts accepted when close to the target (greedy: top-k + p ratio; sampling: typical acceptance)";
                 break;
+            case Item::moeskip:
+                if (!t.moe) why = "dense model";
+                else if (!t.k_moe_skip) why = "no moe_topk_skip kernel in this code object";
+                break;
             default:
                 why = "not yet implemented (balance behaviour)";
                 break;
@@ -260,6 +266,12 @@ Plan plan(const Request& r_in, const Target& t) {
             why = "MoE: fast only (--fast turns it on)";
         s.enabled = s.moved ? false : why.empty();
         s.note = s.enabled ? note : why;
+    }
+    if (p.on(Item::moeskip)) {
+        p.moe_skip_thr = moeskip::k_default_thr;
+        p.moe_skip_min = moeskip::k_default_min_keep;
+        p.items[static_cast<std::size_t>(Item::moeskip)].note =
+            std::format("renormalized weight < {:.3f} dropped, top {} kept, kept weights renormalized", p.moe_skip_thr, p.moe_skip_min);
     }
     return p;
 }
@@ -274,6 +286,55 @@ void setQ8dec(Plan& p, bool q8, const std::string& env) {
     } else {
         p.overrides.push_back(std::format("WHIRL_Q8DEC={}: q8dec off (f16 decode activations)", env));
     }
+}
+
+void setMoeSkip(Plan& p, const std::string& thr_env, const std::string& min_env, bool applicable) {
+    ItemState& s = p.items[static_cast<std::size_t>(Item::moeskip)];
+    auto num = [](const std::string& v, const char* var) {
+        std::size_t used = 0;
+        double d = 0;
+        try {
+            d = std::stod(v, &used);
+        } catch (const std::exception&) {
+            used = 0;
+        }
+        if (used != v.size() || d != d) throw std::invalid_argument(std::format("WHIRL_{}={}: not a number", var, v));
+        return d;
+    };
+    bool changed = false;
+    if (!thr_env.empty()) {
+        const double thr = num(thr_env, "MOESKIP_THR");
+        if (thr < 0 || thr >= 1) throw std::invalid_argument(std::format("WHIRL_MOESKIP_THR={}: must be in [0, 1)", thr_env));
+        if (thr == 0) {
+            if (s.enabled) {
+                s.enabled = false;
+                s.note = "off by WHIRL_MOESKIP_THR=0";
+                p.overrides.push_back("WHIRL_MOESKIP_THR=0: moeskip off");
+            }
+            p.moe_skip_thr = 0.f;
+            return;
+        }
+        if (!s.enabled) {
+            if (!applicable) return;  // dense model / no kernel: nothing to drop
+            s.enabled = true;
+            p.moe_skip_min = moeskip::k_default_min_keep;
+        }
+        p.moe_skip_thr = static_cast<float>(thr);
+        changed = true;
+    }
+    if (!min_env.empty() && s.enabled) {
+        const double mk = num(min_env, "MOESKIP_MIN");
+        if (mk < 1 || mk > 64 || mk != static_cast<double>(static_cast<int>(mk)))
+            throw std::invalid_argument(std::format("WHIRL_MOESKIP_MIN={}: must be an integer in [1, 64]", min_env));
+        p.moe_skip_min = static_cast<int>(mk);
+        changed = true;
+    }
+    if (!changed) return;
+    s.note = std::format("renormalized weight < {:.3f} dropped, top {} kept, kept weights renormalized; WHIRL_MOESKIP_THR / _MIN, user-requested",
+                         p.moe_skip_thr, p.moe_skip_min);
+    p.overrides.push_back(std::format("WHIRL_MOESKIP_THR={} WHIRL_MOESKIP_MIN={}: moeskip {:.3f} / top {} (lossy, user-requested)",
+                                      thr_env.empty() ? "-" : thr_env, min_env.empty() ? "-" : min_env, p.moe_skip_thr, p.moe_skip_min));
+    if (p.mode != Mode::fast || !s.requested) p.lossy_override = true;
 }
 
 void skipItem(Plan& p, Item it, const std::string& why) {
@@ -328,7 +389,7 @@ std::string logLine(const Plan& p) {
         l += std::string(" - f16/f32 prefill activations, ") + (p.q8dec ? "" : "f16 decode / verify activations, ") + "f32 DeltaNet, f16 KV";
     else l += " - enabled: " + (en.empty() ? std::string("none") : en);
     if (p.mode != Mode::precise || !sk.empty()) l += "; skipped: " + (sk.empty() ? std::string("none") : sk);
-    if (p.mode == Mode::fast && !p.on(Item::kvq4) && !p.on(Item::relaxacc))
+    if (p.mode == Mode::fast && !p.on(Item::kvq4) && !p.on(Item::relaxacc) && !p.on(Item::moeskip))
         l += "; no fast item applies here: fast runs as balance";
     for (const std::string& o : p.overrides) l += "; " + o;
     l += std::string("; decode: ") + (p.q8dec ? k_q8dec : k_f16dec);

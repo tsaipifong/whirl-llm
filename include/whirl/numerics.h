@@ -13,7 +13,8 @@
 //    the same items (fp8 + moefp8 back in MoE balance; MOE-BAL 2026-10-13 had made them fast-only).
 //  - fast: balance plus aggressive gated items (4-bit KV, relaxed speculative acceptance, ...).
 //    Implemented: kvq4 (4-bit KV where the code object has it: Radeon 8060S; elsewhere fast keeps
-//    f16 KV until there are q4 kernels) and relaxacc. The others are listed as skipped.
+//    f16 KV until there are q4 kernels), relaxacc and moeskip (MoE: drop routed slots whose renormalized
+//    weight is below Plan::moe_skip_thr, feat027). The others are listed as skipped.
 // KV format: fixed per mode and model type (chooseKv), never switched by what fits: a format that
 // does not fit shrinks the context (when not given) or refuses. WHIRL_KV is a debug override.
 // Items not applicable to the device or model are listed as skipped, never an error.
@@ -43,11 +44,11 @@ enum class Item : std::uint8_t {
     kvq8,     // dense models: q8h KV (int8 K and V + f16 scale / 32, Hadamard-rotated q / k)
     specsample,  // temperature > 0: MTP drafts drawn from the draft distribution, accepted with min(1, p/q)
                  // (same output distribution as plain sampling, not the same tokens for a seed)
-    // fast items (kvq4 and relaxacc implemented, the rest not yet)
+    // fast items (kvq4, relaxacc and moeskip implemented, the rest not yet)
     kvq4,     // 4-bit KV (gfx1151: q4 = int4 + f16 scale / 32, Hadamard-rotated q/k; dense and MoE)
     relaxacc, // relaxed / typical speculative acceptance (whirl/relax_accept.h; changes greedy output)
     headq,    // low-bit output head in the main decode
-    moeskip,  // skip low-weight MoE experts
+    moeskip,  // skip low-weight MoE experts (renormalized top-K weight < Plan::moe_skip_thr; kept weights renormalized)
     a8,       // int8 activations for Q4_K / Q5_K / Q6_K prefill (W4A8)
     a4,       // W4A4 prefill
     n_items
@@ -65,7 +66,7 @@ inline constexpr std::uint32_t fast_only_items =
 // (MOE-BAL 2026-10-13 had moved them here). Kept as the per-model-type hook of forModel.
 inline constexpr std::uint32_t moe_fast_items = 0;
 // implemented items (the rest are "not yet implemented": skipped, the mode runs as balance)
-inline constexpr std::uint32_t implemented_items = balance_items | bit(Item::kvq4) | bit(Item::relaxacc);
+inline constexpr std::uint32_t implemented_items = balance_items | bit(Item::kvq4) | bit(Item::relaxacc) | bit(Item::moeskip);
 
 // The requested mode and items.
 struct Request {
@@ -111,6 +112,7 @@ struct Target {
     bool kv_explicit = false;  // WHIRL_KV set to a format (the KV items then do not choose)
     bool fast_kv_q8h = false;  // fast takes q8h for kvq4 on dense models (KvCaps::fast_q8h, gfx1151)
     bool gdn_strix = false;    // gdnwmma runs as the gfx1151 strix-llama.cpp chunked prefill (GDN-8S)
+    bool k_moe_skip = false;   // moe_topk_skip kernel present (moeskip)
 };
 
 // gdnwmma / h16 for a model without MXFP4 tensors (KG-1): dense models on the R9700 only
@@ -135,6 +137,10 @@ struct Plan {
     // into the f16 GEMM with f32 accumulation (precise). Set by the loader (setQ8dec).
     bool q8dec = true;
     bool q8dec_default = true;  // the mode's choice (q8decDefault) before WHIRL_Q8DEC
+    // moeskip values (mode-plan values; 0 = off). plan() sets the mode's defaults when the item is on
+    // (whirl/moe_skip.h k_default_*); setMoeSkip applies WHIRL_MOESKIP_THR / WHIRL_MOESKIP_MIN.
+    float moe_skip_thr = 0.f;
+    int moe_skip_min = 1;
     bool on(Item it) const { return items[static_cast<std::size_t>(it)].enabled; }
 };
 
@@ -148,6 +154,13 @@ void applyOverride(Plan& p, Item it, const char* var, const std::string& value, 
 // WHIRL_Q8DEC value ("" = unset); a value that changes the mode's default is recorded as an
 // override (int8 in precise: lossy, user-requested).
 void setQ8dec(Plan& p, bool q8, const std::string& env);
+
+// moeskip threshold / min-keep from the environment ("" = unset). thr_env on an enabled item replaces the
+// mode's threshold (recorded as an override; "0" turns the item off). thr_env > 0 where the item is not on
+// (precise, balance, a fast list without it) turns it on as a lossy user-requested override when `applicable`
+// (MoE model with the kernel). Throws std::invalid_argument for a malformed or out-of-range value
+// (thr in [0, 1), min an integer in [1, 64]).
+void setMoeSkip(Plan& p, const std::string& thr_env, const std::string& min_env, bool applicable);
 
 // An item the run cannot use after all (e.g. relaxacc with --draft dflash): skipped with `why`.
 void skipItem(Plan& p, Item it, const std::string& why);

@@ -831,7 +831,12 @@ void Model::moeBlock(DevPtr post_norm, const Mat& sg, const Mat& su, const Mat& 
     } else {
         matmul(mo.router, h, moe_logits, n, false);
     }
-    hip::launch(k.moe_topk, D(n), D(256), 0, stream, moe_logits, I(R), h, mo.sh_gate, moe_ids, moe_w, moe_sg, I(R), I(K), I(E));
+    if (moe_skip_thr > 0.f && k.moe_topk_skip != nullptr)
+        // moeskip (fast only): dropped slots get id -1 / weight 0, every expert kernel below skips them
+        hip::launch(k.moe_topk_skip, D(n), D(256), 0, stream, moe_logits, I(R), h, mo.sh_gate, moe_ids, moe_w, moe_sg, I(R), I(K), I(E),
+                    moe_skip_thr, I(moe_skip_min));
+    else
+        hip::launch(k.moe_topk, D(n), D(256), 0, stream, moe_logits, I(R), h, mo.sh_gate, moe_ids, moe_w, moe_sg, I(R), I(K), I(E));
     mark(OpClass::misc);
     if (moe_dump) {
         const std::size_t old = moe_dump->size();

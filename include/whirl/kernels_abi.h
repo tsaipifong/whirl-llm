@@ -142,6 +142,10 @@
 //  mixture of experts:
 //   moe_logits_f32(W, x, out, R, C, n, skip)
 //   moe_topk(logits, ld, h, shw, ids, w, sg, R, K, E)
+//   moe_topk_skip(logits, ld, h, shw, ids, w, sg, R, K, E, float thr, int min_keep) (optional, both code
+//            objects): moeskip (fast) - slots k >= min_keep with renormalized weight < thr get id -1 /
+//            weight 0, kept weights renormalized; id -1 = no work in moe_gu_* / moe_down_* (kept prefix),
+//            no tile in moe_route / moe_tiles (parked after the kept positions, inv -1), skipped by moe_combine
 //   moe_route(ids, n_pairs, R, bn, perm, inv, Int4* tiles, n_tiles)
 //   moe_gather_f16(x, perm, f16* xg, C, K); moe_act_f16(g, u, f16* a, n)
 //   moe_combine(x, ysh, sg, yd, inv, w, C, K)
@@ -565,6 +569,7 @@ struct MoeKernels {
     PerType<F> moe_gu_f{}, moe_down_f{};
     PerType<F> moe_gu{}, moe_down{}, gemm_moe{}, gemm_moe32{}, gemm_moe32r{}, gemm_moegu{};
     F moe_logits_f32{}, moe_topk{}, moe_route{}, moe_gather_f16{}, moe_act_f16{}, moe_combine{}, moe_tiles{};
+    F moe_topk_skip{};  // optional: moeskip (fast) routing, kernels/moe_skip.hip
     // MXFP4 routed experts (optional): whole-block decode experts, MXFP4 x fp8
     // grouped expert GEMM (token tile 64 / 32, f32 / f16 output), fp8 gather.
     F moe_gu_mxw{}, moe_down_mxw{};
