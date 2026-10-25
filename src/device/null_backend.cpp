@@ -2,6 +2,7 @@
 // Host-memory device backend (see null_backend.h). Written for WHIRL.
 
 #include "device/null_backend.h"
+#include "platform/env.h"
 
 #include <algorithm>
 #include <iterator>
@@ -24,7 +25,7 @@ std::atomic<long> g_leaks{0};
 std::atomic<long> g_backends{0};
 struct LeakReport {
     ~LeakReport() {
-        if (std::getenv("WHIRL_LEAKCHECK_QUIET") == nullptr)
+        if (!platform::env::isSet("WHIRL_LEAKCHECK_QUIET"))
             std::fprintf(stderr, "LEAKCHECK: %ld NullBackend instances checked, %ld leaked\n", g_backends.load(), g_leaks.load());
         // _Exit skips the CRT's stream flush: flush first, or a test log redirected to a file (fully buffered) loses its
         // tail - the failing test names and the 'N passed, M failed' summary (safe025 review A1).

@@ -17,4 +17,8 @@ namespace whirl::platform::env {
 //     (src/server/server_main.cpp)
 // Reads in src/cli/main.cpp and src/server/server_main.cpp stay counted by env_read_check (C1a / C2), not here.
 
+// True when the variable exists in the process environment (even when empty). First PL1 step: used by the test-only
+// NullBackend leak ledger (WHIRL_LEAKCHECK_QUIET, bug-nullbackendenv).
+bool isSet(const char* name);
+
 }  // namespace whirl::platform::env

@@ -8,7 +8,8 @@
 # env / paths / console / time, fs, net (ws2_32 moves here), proc / sys and their call sites. See docs/dev/platform.md.
 
 add_library(whirl_platform STATIC
-  ${CMAKE_SOURCE_DIR}/src/platform/headers_win.cpp)
+  ${CMAKE_SOURCE_DIR}/src/platform/headers_win.cpp
+  ${CMAKE_SOURCE_DIR}/src/platform/env_win.cpp)
 # callers include "platform/<concern>.h"; never put src/platform itself on an include path (its time.h would shadow
 # the C library's <time.h>)
 target_include_directories(whirl_platform PUBLIC ${CMAKE_SOURCE_DIR}/src)
