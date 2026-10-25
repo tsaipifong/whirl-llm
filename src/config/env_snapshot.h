@@ -9,6 +9,7 @@
 #pragma once
 
 #include <array>
+#include <cstdlib>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -31,12 +32,14 @@ public:
     Value fd_splits, gemv_max, gv_nmax, gv_group, no_fuse, float_gemv, gdn_seq, naive_attn, dbg, attn_wide, attn_dq4, attn_ws4, moe_bn;
     // src/model/loader.cpp (kv, fd_splits above), src/model/config.cpp, src/model/device.cpp, src/model/dflash.cpp
     Value code_object, moe_mxw, moe_wide, moe_rbf, gemv_r, gemv_w, gemv_wh, gpu_share, gpu_wait, device, dflash_prof;
+    // src/model/forward/dispatch.cpp (arch025-F7, through forwardEnv below): gemvLaunch, gemmFlags
+    Value head_gemvx, prec_gemvh, prec_gs;
 
     struct Entry {
         const char* name;  // without the WHIRL_ prefix
         Value EnvSnapshot::* field;
     };
-    static constexpr std::size_t n_names = 51;
+    static constexpr std::size_t n_names = 54;
     // every field, once; the reflection test checks the count against sizeof(EnvSnapshot)
     static const std::array<Entry, n_names>& names();
 
@@ -52,6 +55,30 @@ public:
     // envFlag semantics: not set -> def, else value != "0" (so "" and "auto" are on).
     static bool flag(const Value& v, bool def = false) { return v ? *v != "0" : def; }
 };
+
+// arch025-F7: the forward's three research switches, parsed once per load (Model::load -> Model::head_gemvx /
+// prec_gemvh / prec_gs) with the rules of the pre-F7 sites, verbatim:
+//   HEAD_GEMVX: envFlag("HEAD_GEMVX", false), read at every wide gemvLaunch (forward.cpp:56, I3 (i)): not set -> off,
+//               else value != "0" ("" and "auto" on)
+//   PREC_GEMVH: static, first gemmFlags call (forward.cpp:245-248, I3 (ii)): v == nullptr || *v != '0' (the FIRST
+//               character: "00" and "0x" are off, "" is on)
+//   PREC_GS:    static, first gemmFlags call (forward.cpp:249-252): v != nullptr && *v != 0 ? atoi(v) : -1 ("" -> -1,
+//               "abc" -> 0)
+// Behaviour change (plan I3): a process that changes WHIRL_HEAD_GEMVX after the load no longer sees the new value at
+// the next call; nothing in src/ or tests/ does (model tests: testForwardEnv grep). feat026-o6 removes the three
+// switches for 0.2.6 (warn and ignore): on that merge these fields, ForwardEnv and the Model members go away.
+struct ForwardEnv {
+    bool head_gemvx = false;
+    bool prec_gemvh = true;
+    int prec_gs = -1;
+};
+inline ForwardEnv forwardEnv(const EnvSnapshot& env) {
+    ForwardEnv f;
+    f.head_gemvx = EnvSnapshot::flag(env.head_gemvx, false);
+    f.prec_gemvh = !env.prec_gemvh || env.prec_gemvh->c_str()[0] != '0';
+    f.prec_gs = env.prec_gs && env.prec_gs->c_str()[0] != 0 ? std::atoi(env.prec_gs->c_str()) : -1;
+    return f;
+}
 
 // The snapshot of the load that made `m` (LoadOptions::env, kept by Model::load). A Model that did not come from
 // Model::load (host-only tests) has none: then the environment is read now, at the call, as the sites did before N1.

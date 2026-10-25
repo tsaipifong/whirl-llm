@@ -166,8 +166,8 @@ std::string execDump(const Model& m) {
     WD_B(rpos_rows);
 #undef WD_B
 #undef WD_U
-    add("gv_group", b(gv_group));
-    add("gv_nmax", u(gv_nmax));
+    add("gv_group", b(m.gv_group));
+    add("gv_nmax", u(m.gv_nmax));
     const std::string tune = m.writeTune();
     add("tune", std::format("{:016x} ({} bytes)", fnv(tune), tune.size()));
     return s;

@@ -2164,7 +2164,8 @@ void testEnvSnapshot() {
     // GPU load / at static initialisation) named here with the test that covers its value: flag() above for the
     // envFlag sites (loader.cpp MOE_*), capture / fromValues above for the raw value of the others
     const std::vector<std::string> covered = envtab::namesCovered();
-    const char* const load_only[] = {"GEMV_BITWISE_FLOAT", "CODE_OBJECT", "MOE_MXW", "MOE_WIDE", "MOE_RBF", "GPU_SHARE", "GPU_WAIT", "DEVICE", "DFLASH_PROF"};
+    const char* const load_only[] = {"GEMV_BITWISE_FLOAT", "CODE_OBJECT", "MOE_MXW", "MOE_WIDE", "MOE_RBF", "GPU_SHARE", "GPU_WAIT", "DEVICE", "DFLASH_PROF",
+                                     "HEAD_GEMVX", "PREC_GEMVH", "PREC_GS"};  // the last three: Model::load -> forwardEnv (testForwardEnv)
     for (const auto& e : names) {
         const bool in_table = std::find(covered.begin(), covered.end(), e.name) != covered.end();
         const bool in_empty = std::find(empty_names.begin(), empty_names.end(), e.name) != empty_names.end();
@@ -2202,6 +2203,130 @@ void testEnvSnapshot() {
     }
 }
 
+// arch025-F7: the forward's research switches (HEAD_GEMVX, PREC_GEMVH, PREC_GS) and the GV pair are Model members
+// read once per load. (1) config::forwardEnv against the pre-F7 site expressions copied verbatim (forward.cpp:56,
+// :245-252 at arch025-base; F7-oracle), on snapshot values (the empty string included) and through the process
+// environment + capture(); (2) a host-only Model's defaults = "not set" and the old globals' initial values;
+// (3) grep: nothing in src/ or tests/ writes one of the three names in-process (so "read once" cannot differ from
+// "read at every call / first call" for any caller here), and product code writes only non-WHIRL_ names;
+// (4) the forward files read no environment (env_read_check blocks them too).
+namespace f7 {
+// F7-oracle: the old reads, verbatim except the getenv argument
+bool oldHeadGemvx(const char* v) {  // envFlag("HEAD_GEMVX", false)
+    std::optional<std::string> o = v ? std::optional<std::string>(v) : std::nullopt;
+    if (!o) return false;
+    return *o != "0";
+}
+bool oldPrecGemvh(const char* v) { return v == nullptr || *v != '0'; }
+int oldPrecGs(const char* v) { return v != nullptr && *v != 0 ? std::atoi(v) : -1; }
+}  // namespace f7
+
+void testForwardEnv() {
+    namespace fs = std::filesystem;
+    using whirl::config::EnvSnapshot;
+    using V = EnvSnapshot::Value;
+    const char* const vals[] = {nullptr, "", "0", "1", "00", "0x", "01", "auto", "7", "-3", "abc", " 5", "3x", "+2", "0 ", "x0", "255"};
+    std::size_t n = 0;
+    for (const char* hv : vals)
+        for (const char* gv : vals)
+            for (const char* sv : vals) {
+                std::vector<std::pair<std::string, V>> in;
+                if (hv) in.push_back({"HEAD_GEMVX", V(hv)});
+                if (gv) in.push_back({"PREC_GEMVH", V(gv)});
+                if (sv) in.push_back({"PREC_GS", V(sv)});
+                const auto fe = whirl::config::forwardEnv(EnvSnapshot::fromValues(in));
+                const bool ok = fe.head_gemvx == f7::oldHeadGemvx(hv) && fe.prec_gemvh == f7::oldPrecGemvh(gv) && fe.prec_gs == f7::oldPrecGs(sv);
+                check(ok, std::format("forward env: snapshot HEAD_GEMVX={} PREC_GEMVH={} PREC_GS={} = the pre-F7 reads", hv ? hv : "(unset)",
+                                      gv ? gv : "(unset)", sv ? sv : "(unset)"));
+                ++n;
+            }
+    check(n == 17 * 17 * 17, "forward env: snapshot table size");
+    // through the process environment (non-empty values; "" removes the variable): capture -> forwardEnv == getenv -> old
+    for (const char* v : vals) {
+        if (v != nullptr && *v == 0) continue;
+        for (const char* name : {"WHIRL_HEAD_GEMVX", "WHIRL_PREC_GEMVH", "WHIRL_PREC_GS"}) _putenv_s(name, v ? v : "");
+        const auto fe = whirl::config::forwardEnv(EnvSnapshot::capture());
+        const char* h = std::getenv("WHIRL_HEAD_GEMVX");
+        const char* g = std::getenv("WHIRL_PREC_GEMVH");
+        const char* s = std::getenv("WHIRL_PREC_GS");
+        check(fe.head_gemvx == f7::oldHeadGemvx(h) && fe.prec_gemvh == f7::oldPrecGemvh(g) && fe.prec_gs == f7::oldPrecGs(s),
+              std::format("forward env: process env all three = '{}' -> capture = the pre-F7 reads", v ? v : "(unset)"));
+        for (const char* name : {"WHIRL_HEAD_GEMVX", "WHIRL_PREC_GEMVH", "WHIRL_PREC_GS"}) _putenv_s(name, "");
+    }
+    // (2) defaults
+    {
+        q::Model m;
+        const auto fe = whirl::config::forwardEnv(EnvSnapshot());
+        check(m.head_gemvx == fe.head_gemvx && m.prec_gemvh == fe.prec_gemvh && m.prec_gs == fe.prec_gs,
+              "forward env: a Model's defaults = forwardEnv of an empty snapshot");
+        check(!m.head_gemvx && m.prec_gemvh && m.prec_gs == -1, "forward env: defaults = not set (off, on, -1)");
+        check(m.gv_group && m.gv_nmax == 0, "forward env: gv_group / gv_nmax defaults = the old globals' initial values (config.cpp:23-24)");
+        q::Model m2;
+        m.gv_group = false;
+        m.gv_nmax = 5;
+        check(m2.gv_group && m2.gv_nmax == 0, "forward env: gv_group / gv_nmax are per Model (no process-wide state)");
+    }
+    // (3) grep: in-process writes of the three names, and product writes of any WHIRL_ name
+    {
+        static const std::regex wr(R"(\b(?:_putenv_s|_putenv|_wputenv_s|_wputenv|SetEnvironmentVariable[AW]?|setenv)\s*\()");
+        static const std::regex names3(R"(HEAD_GEMVX|PREC_GEMVH|PREC_GS)");
+        std::size_t files = 0, writes = 0, named = 0, product_whirl = 0;
+        std::vector<std::string> named_where;
+        for (const char* top : {"src", "tests", "include"}) {
+            for (const auto& de : fs::recursive_directory_iterator(fs::path(WHIRL_SOURCE_DIR) / top)) {
+                if (!de.is_regular_file()) continue;
+                const std::string ext = de.path().extension().string();
+                if (ext != ".cpp" && ext != ".h" && ext != ".hpp" && ext != ".hip") continue;
+                std::ifstream in(de.path(), std::ios::binary);
+                const std::string src((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+                ++files;
+                const std::string rel = fs::relative(de.path(), fs::path(WHIRL_SOURCE_DIR)).generic_string();
+                std::size_t ls = 0, ln = 0;
+                while (ls < src.size()) {
+                    std::size_t le = src.find('\n', ls);
+                    if (le == std::string::npos) le = src.size();
+                    const std::string line = src.substr(ls, le - ls);
+                    ++ln;
+                    ls = le + 1;
+                    std::smatch mw;
+                    if (!std::regex_search(line, mw, wr)) continue;
+                    const std::size_t cpos = line.find("//");
+                    if (cpos != std::string::npos && cpos < static_cast<std::size_t>(mw.position())) continue;  // a comment
+                    ++writes;
+                    // this test's own writes carry the three names on purpose (set, read back, removed in the same loop)
+                    const bool own = rel == "tests/model/model_tests.cpp" && line.find("for (const char* name : {\"WHIRL_HEAD_GEMVX\"") != std::string::npos;
+                    if (std::regex_search(line, names3) && !own) {
+                        ++named;
+                        named_where.push_back(rel + ":" + std::to_string(ln));
+                    }
+                    if (rel.rfind("src/", 0) == 0 && line.find("WHIRL_") != std::string::npos) ++product_whirl;
+                }
+            }
+        }
+        check(files > 100, std::format("forward env: grep scanned the tree ({} files)", files));
+        check(writes > 0, std::format("forward env: grep sees in-process env writes ({})", writes));
+        std::string where;
+        for (const auto& w : named_where) where += " " + w;
+        check(named == 0, std::format("forward env: no in-process write of HEAD_GEMVX / PREC_GEMVH / PREC_GS ({}:{})", named, where));
+        check(product_whirl == 0, std::format("forward env: product code writes no WHIRL_ variable in-process ({})", product_whirl));
+    }
+    // (4) the forward files: no direct environment read
+    for (const auto& de : fs::directory_iterator(fs::path(WHIRL_SOURCE_DIR) / "src/model/forward")) {
+        std::ifstream in(de.path(), std::ios::binary);
+        const std::string src((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        static const std::regex rd(R"(\b(?:getenv|_dupenv_s|_wgetenv|envGet|envFlag)\s*\()");
+        std::size_t k = 0;
+        for (auto it = std::sregex_iterator(src.begin(), src.end(), rd); it != std::sregex_iterator(); ++it) {
+            const std::size_t at = static_cast<std::size_t>(it->position());
+            const std::size_t ls = src.rfind('\n', at) + 1;
+            const std::string line = src.substr(ls, src.find('\n', at) - ls);
+            if (line.find("//") != std::string::npos && line.find("//") < at - ls) continue;
+            ++k;
+        }
+        check(k == 0, std::format("forward env: no env read in {} ({})", de.path().filename().string(), k));
+    }
+}
+
 int main() {
     whirl::test::clearWhirlEnv();  // FR-TEST P3-11
     testKvLayout();
@@ -2211,6 +2336,7 @@ int main() {
     testBaselineDumps();
     testEnvTable();
     testEnvSnapshot();
+    testForwardEnv();
     testFloatGemvDispatch();
     testArchWhitelist();
     testLoadEstimate();

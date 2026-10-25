@@ -1043,8 +1043,8 @@ void applyRuntimeEnv(q::Model& m) {
     if (auto v = envGet("ATTN_WS4"); v && *v == "0") m.attn_ws4 = false;
     if (auto v = envU32("MOE_BN")) m.moe_bn_force = *v;
     if (envGet("GDN_SEQ")) m.gdn_chunked = false;
-    if (auto v = envGet("GV_GROUP")) q::gv_group = *v != "0";
-    if (auto v = envU32("GV_NMAX")) q::gv_nmax = *v;
+    if (auto v = envGet("GV_GROUP")) m.gv_group = *v != "0";
+    if (auto v = envU32("GV_NMAX")) m.gv_nmax = *v;
 }
 
 struct Loaded {

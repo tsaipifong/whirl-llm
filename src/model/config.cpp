@@ -20,9 +20,6 @@ namespace whirl {
 
 namespace whirl::qwen35 {
 
-bool gv_group = true;
-std::uint32_t gv_nmax = 0;
-
 static_assert(n_choices == 2 * 24 + 8);
 
 std::size_t tuneBucket(std::uint32_t n) {

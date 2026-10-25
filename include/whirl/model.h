@@ -396,11 +396,6 @@ std::uint32_t resolveFdSplits(bool kv_q4);
 // KV bytes per token (Model::kvBytesPerTokenFmt) from the config alone.
 std::uint64_t kvBytesPerTokenCfg(const Config& cfg, bool has_mtp, bool q8, bool kf16, bool q4 = false);
 
-// Grouped same-input GEMV launches (WHIRL_GV_GROUP=0: off) and the largest
-// token count that takes the grouped multi-token twins (WHIRL_GV_NMAX).
-extern bool gv_group;
-extern std::uint32_t gv_nmax;
-
 // ---------------------------------------------------------------------------
 // kernels (table from whirl/kernels_abi.h)
 
@@ -556,6 +551,17 @@ public:
     // output-head rows per range in a wide verify (two 16-token passes per range; WHIRL_HEAD_CHUNK)
     std::uint32_t head_chunk = 248320;
     bool float_gemv = false;
+    // Grouped same-input GEMV launches (WHIRL_GV_GROUP=0: off) and the largest token count that takes the grouped
+    // multi-token twins (WHIRL_GV_NMAX, 0: per type). Set by the CLI's applyRuntimeEnv after the load; the server
+    // keeps the defaults. (arch025-F7: were the process-wide qwen35::gv_group / gv_nmax, same initial values.)
+    bool gv_group = true;
+    std::uint32_t gv_nmax = 0;
+    // research switches WHIRL_HEAD_GEMVX / PREC_GEMVH / PREC_GS (arch025-F7: config::forwardEnv of the load's
+    // snapshot, set by Model::load; the defaults = not set). head_gemvx: the output head may take gemvx in a wide
+    // verify; prec_gemvh false: precise rows skip gemvh; prec_gs >= 0: forced precise gemms slot.
+    bool head_gemvx = false;
+    bool prec_gemvh = true;
+    int prec_gs = -1;
     // precise decode (numerics precise mode, P-8): no int8 activations anywhere in decode /
     // verify / small batches. Every matmul of n <= gvMax() rows takes the f16-activation
     // WMMA GEMM (f32 accumulation; the same kernels and per-element bits as the prefill GEMM,

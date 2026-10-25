@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 """pending_scan.py - the four structure checks of arch025 (S0a), each with a pending list of the sites other 0.2.5
-steps remove. Report mode now; a later step switches a check to block mode (PL5 platform, M3 include, F7 env reads
-in forward / engine, M6 arch).
+steps remove. Report mode now; a later step switches a check to block mode (PL5 platform, M3 include, M6 arch).
+A rule's "blocked" scopes fail in every mode and take no pending entry (arch025-F7: env reads in forward / engine / ops).
 
 Rules (sources under src/ and include/; comments and string literals are not code):
   platform  a Windows / CRT-platform header (#include <windows.h>, <winsock2.h>, <shlobj.h>, <io.h>, ...) or (PL0) a
@@ -89,7 +89,12 @@ RULES = {
     "platform": {"allowed": ["src/platform/", "src/hip/", "src/release/dll_deps.cpp", "src/vision/stb_image.h"],
                  "what": "platform header / OS call"},
     "include": {"allowed": [], "what": "server core reaches model.h"},
-    "env": {"allowed": ["src/platform/", "src/config/env_snapshot."], "what": "env read"},
+    # blocked (arch025-F7, plan X-1): no env read and no pending entry, in report mode too (exit 1). The forward and the
+    # server engine read the load's EnvSnapshot / their Model members only; src/ops (the forward's choices since
+    # F5 / F6) is pure.
+    "env": {"allowed": ["src/platform/", "src/config/env_snapshot."], "what": "env read",
+            "blocked": ["src/model/forward/", "src/model/forward_internal.h", "src/model/forward.cpp", "src/server/engine",
+                        "src/server/backend_qwen35.cpp", "src/ops/", "include/whirl/ops/"]},
     "arch": {"allowed": ["src/hip/", "include/whirl/hip.h", "include/whirl/device_profile.h", "src/model/device.cpp"],
              "what": "Arch:: branch"},
 }
@@ -282,7 +287,21 @@ def run(rule: str, root: str, pending: str, mode: str, out=print) -> int:
         return 2
     hits = include_hits(root) if rule == "include" else line_hits(root, rule)
     new = grown = stale = 0
+    blocked_pre = RULES[rule].get("blocked", [])
+    is_blocked = lambda p: any(p.startswith(b) for b in blocked_pre)
+    blocked = 0
     for path in sorted(set(hits) | set(entries)):
+        if is_blocked(path):
+            h = hits.get(path, [])
+            if path in entries:
+                blocked += 1
+                out(f"  BLOCKED pending line {entries[path][2]}: {path} is in a blocked scope (no pending entry allowed)")
+            if h:
+                blocked += 1
+                out(f"  BLOCKED {RULES[rule]['what']} {path}: {len(h)} site(s) in a blocked scope (any mode)")
+                for ln, t in h:
+                    out(f"    {path}:{ln}: {t}")
+            continue
         h = hits.get(path, [])
         if path in entries:
             cnt, step, n = entries[path]
@@ -303,7 +322,12 @@ def run(rule: str, root: str, pending: str, mode: str, out=print) -> int:
                 out(f"    {path}:{ln}: {t}")
     total = sum(len(v) for v in hits.values())
     summary = f"{total} site(s) in {len(hits)} file(s), {len(entries)} pending entr(y/ies); {new} new, {grown} grown, {stale} stale"
+    if blocked_pre:
+        summary += f", {blocked} blocked"
     bad = new + grown + stale
+    if blocked:
+        out(f"{rule} check: FAIL ({summary})")
+        return 1
     if mode == "block":
         if bad:
             out(f"{rule} check: FAIL ({summary})")
@@ -408,6 +432,20 @@ def selftest() -> int:
     case("env pending counts exactly", "env", {"src/cli/main.cpp": 'envGet("A"); envGet("B");\nstd::getenv("C");\n'},
          f"src/cli/main.cpp{T}3{T}C2\n", "block", 0)
     case("env snapshot file allowed", "env", {"src/config/env_snapshot.cpp": 'std::getenv("A");\n'}, None, "block", 0)
+    # arch025-F7: forward / engine / ops blocked in any mode, even with a pending entry
+    case("F7: forward env read blocked in report mode", "env", {"src/model/forward/dispatch.cpp": 'bool a = envFlag("HEAD_GEMVX", false);\n'},
+         None, "report", 1)
+    case("F7: forward pending entry does not allow it", "env", {"src/model/forward/gdn.cpp": 'auto v = std::getenv("WHIRL_X");\n'},
+         f"src/model/forward/gdn.cpp{T}1{T}F7\n", "block", 1)
+    case("F7: a pending entry for a blocked path is itself a FAIL", "env", {"src/model/forward/gdn.cpp": "int x;\n"},
+         f"src/model/forward/gdn.cpp{T}0{T}F7\n", "report", 1)
+    case("F7: engine_thread env read blocked", "env", {"src/server/engine_thread.cpp": 'auto v = envGet("KV");\n'}, None, "report", 1)
+    case("F7: forward_internal.h env read blocked", "env", {"src/model/forward_internal.h": 'inline bool f() { return envFlag("A"); }\n'},
+         None, "report", 1)
+    case("F7: ops env read blocked", "env", {"include/whirl/ops/gdn.h": 'const char* v = getenv("WHIRL_A");\n', "src/ops/gdn.cpp": "int x;\n"}, None, "report", 1)
+    case("F7: forward comment / string / snapshot field are not reads", "env",
+         {"src/model/forward/dispatch.cpp": '// envFlag("HEAD_GEMVX")\nconst char* s = "getenv(";\nbool h = head_gemvx;\n'}, None, "block", 0)
+    case("F7: the rest of the tree stays report mode", "env", {"src/server/server_main.cpp": 'envGet("A");\n'}, None, "report", 0)
     # arch
     case("Arch:: branch blocked", "arch", {"src/model/config.cpp": "if (a == hip::Arch::gfx1151) {}\n"}, None, "block", 1)
     case("device layer allowed", "arch", {"include/whirl/device_profile.h": "Arch::gfx1151\n", "src/hip/h.cpp": "Arch::gfx1201\n"}, None, "block", 0)
@@ -444,15 +482,37 @@ def tree_test(root: str, rule: str = "platform") -> int:
         for d in ("src", "include"):
             shutil.copytree(os.path.join(root, d), os.path.join(base, d))
 
-        def one(name, want):
+        def one(name, want, mode="block"):
             nonlocal fails
             lines: list[str] = []
-            rc = run(rule, base, pending, "block", out=lines.append)
+            rc = run(rule, base, pending, mode, out=lines.append)
             ok = rc == want
             fails += 0 if ok else 1
-            print(f"  {'ok  ' if ok else 'FAIL'} [{rule}/tree] {name}: rc {rc} (want {want}) | {lines[-1] if lines else ''}")
+            print(f"  {'ok  ' if ok else 'FAIL'} [{rule}/tree/{mode}] {name}: rc {rc} (want {want}) | {lines[-1] if lines else ''}")
 
         one("the tree with its pending list passes", 0)
+        if rule == "env":
+            # arch025-F7: forward / engine blocked in both modes; the copy as is passes in both
+            one("the tree passes in report mode", 0, "report")
+            n = 2
+            for rel, line in (("src/model/forward/dispatch.cpp", '\nstatic bool f7Probe() { return envFlag("HEAD_GEMVX", false); }\n'),
+                              ("src/server/engine.cpp", '\nstatic const char* f7Probe() { return std::getenv("WHIRL_KV"); }\n')):
+                f = os.path.join(base, *rel.split("/"))
+                orig = open(f, "rb").read()
+                with open(f, "a", encoding="utf-8") as h:
+                    h.write(line)
+                one(f"an env read added to {rel} is blocked", 1)
+                one(f"an env read added to {rel} is blocked in report mode", 1, "report")
+                n += 2
+                with open(f, "wb") as h:
+                    h.write(orig)
+            one("restored tree passes", 0)
+            n += 1
+            if fails:
+                print(f"pending_scan tree test: FAIL ({fails} of {n})")
+                return 1
+            print(f"pending_scan tree test: ok ({n} cases)")
+            return 0
         probe = os.path.join(base, "src", "model", "pl0_probe.cpp")
         with open(probe, "w", encoding="utf-8") as f:
             f.write("unsigned long long now() { return GetTickCount64(); }\n")
