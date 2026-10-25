@@ -123,18 +123,33 @@ void Bench::setAnchor(BlockFn f, std::string name) {
         return;
     }
     anchor_block_ = c.block;
-    std::string err;
-    anchor_ref_us_ = sample(anchor_, anchor_block_, anchor_rot_, err);
+    anchor_ref_us_ = anchorTime(std::max(1, cfg_.anchor_ref_reps));
     if (anchor_ref_us_ <= 0) {
         anchor_ = nullptr;
-        anchor_error_ = err;
+        anchor_error_ = "no valid anchor reading for the reference";
     }
     account(clock_->now() - t0);
 }
 
-double Bench::anchorTime() {
-    std::string err;
-    return sample(anchor_, anchor_block_, anchor_rot_, err);
+double Bench::anchorTime(int reps) {
+    std::vector<double> v;
+    reps = std::max(1, reps);
+    for (int i = 0; i < 2 * reps && static_cast<int>(v.size()) < reps; ++i) {  // invalid readings retried, bounded
+        std::string err;
+        const double us = sample(anchor_, anchor_block_, anchor_rot_, err);
+        if (us > 0) v.push_back(us);
+    }
+    return v.empty() ? -1.0 : median(v);
+}
+
+void Bench::emptyReason(CellStats& cs, const std::string& why, double budget_s, double t0) const {
+    char b[320];
+    std::snprintf(b, sizeof(b),
+                  "no samples kept (stop %s): timed %d, discarded %d after anchor drift, invalid %d timer readings, cooldowns %d "
+                  "(%.1f s slept), budget used %.3f of %.3f s",
+                  why.c_str(), cs.timed, cs.discarded, cs.invalid, cs.cooldowns, cs.cooldown_s,
+                  clock_->now() - t0 - cs.cooldown_s - cs.rewarm_s, budget_s);
+    cs.error = cs.error.empty() ? std::string(b) : cs.error + "; " + b;
 }
 
 // one anchor reading; on drift: cooldown (sleeps excluded from the cell's measuring time) and false
@@ -144,32 +159,50 @@ bool Bench::anchorCheck(CellStats& cs, bool& noisy) {
         cs.anchor_min_us = cs.anchor_min_us == 0 ? us : std::min(cs.anchor_min_us, us);
         cs.anchor_max_us = std::max(cs.anchor_max_us, us);
     };
-    double a = anchorTime();
+    double a = anchorTime(cfg_.anchor_reps);
     note(a);
     if (a <= 0) {
         cs.error = "anchor: zero-duration block";
         return false;
     }
-    if (a < anchor_ref_us_) anchor_ref_us_ = a;  // cooler than any reading so far: the new reference
+    // clearly cooler than the reference (by > cool_eps_pct): the new reference. Not on every lower reading: the running
+    // minimum of noisy readings walks down the noise tail until noise alone looks like drift (smoke 3)
+    const double faster = 1.0 - cfg_.cool_eps_pct / 100.0;
+    auto drift = [&](double x) { return (x / anchor_ref_us_ - 1.0) * 100.0; };
+    if (a < anchor_ref_us_ * faster) {
+        // anchor_confirm: a second reading must agree (a noise tail never moves the reference); the slower of the two
+        double a2 = cfg_.anchor_confirm ? anchorTime(cfg_.anchor_reps) : a;
+        note(a2);
+        if (a2 > 0 && a2 < anchor_ref_us_ * faster) anchor_ref_us_ = std::max(a, a2);
+    }
     cs.anchor_ref_us = anchor_ref_us_;
-    if ((a / anchor_ref_us_ - 1.0) * 100.0 <= cfg_.drift_pct) return true;
+    if (drift(a) <= cfg_.drift_pct) return true;
+    if (cfg_.anchor_confirm) {  // real drift (clock / thermal) persists; one slow median of noise does not
+        const double a2 = anchorTime(cfg_.anchor_reps);
+        note(a2);
+        ++cs.anchor_unconfirmed;
+        if (a2 > 0 && drift(a2) <= cfg_.drift_pct) return true;
+        --cs.anchor_unconfirmed;
+    }
     if (++cs.cooldowns > cfg_.max_cooldowns) {
         noisy = true;
         return false;
     }
+    const double c0 = clock_->now();
     double slept = 0, step = cfg_.cool_first_s;
     while (slept < cfg_.cool_total_s - 1e-12) {
         const double s = std::min(step, cfg_.cool_total_s - slept);
         clock_->sleep(s);
         slept += s;
         warmFor(anchor_, anchor_block_, anchor_rot_, cfg_.warmup_ms);
-        a = anchorTime();
+        a = anchorTime(cfg_.anchor_reps);
         note(a);
-        if (a > 0 && a < anchor_ref_us_) anchor_ref_us_ = a;
-        if (a > 0 && (a / anchor_ref_us_ - 1.0) * 100.0 <= cfg_.drift_pct) break;
+        if (a > 0 && a < anchor_ref_us_ * faster) anchor_ref_us_ = a;
+        if (a > 0 && drift(a) <= cfg_.cool_eps_pct) break;  // hysteresis: cool again
         step = std::min(step * 2, cfg_.cool_max_step_s);
     }
     cs.cooldown_s += slept;
+    cs.rewarm_s += clock_->now() - c0 - slept;  // anchor re-warm + re-checks: outside the cell's budget
     cs.anchor_ref_us = anchor_ref_us_;
     return false;
 }
@@ -217,6 +250,10 @@ CellStats Bench::run(const BlockFn& f) {
     auto finish = [&](const std::string& why) {
         cs.stop_reason = why;
         if (why == "error") cs.samples.clear();
+        if (cs.samples.empty()) {  // never a silent n = 0 (smoke 3): error with the counts
+            emptyReason(cs, why, cfg_.max_cell_s, t0);
+            cs.stop_reason = "error";
+        }
         cs.st = whirl::bench::summarize(cs.samples);
         cs.measure_s = clock_->now() - t0 - cs.cooldown_s;
         account(cs.measure_s);
@@ -238,14 +275,18 @@ CellStats Bench::run(const BlockFn& f) {
         if (!anchorCheck(cs, noisy)) {
             if (noisy) return finish("noisy");
             if (!cs.error.empty()) return finish("error");
+            const double w0 = clock_->now();
             warmFor(f, cs.block, rot, cfg_.warmup_ms);  // the cooldown idled the GPU: ramp the clock up again
+            cs.rewarm_s += clock_->now() - w0;
         }
     }
     auto drifted = [&]() {  // discard the samples since the last clean anchor, re-warm after the cooldown
         cs.discarded += static_cast<int>(cs.samples.size() - clean);
         cs.samples.resize(clean);
         since_anchor = 0;
+        const double w0 = clock_->now();
         warmFor(f, cs.block, rot, cfg_.warmup_ms);
+        cs.rewarm_s += clock_->now() - w0;
     };
     int attempts = 0;
     for (;;) {
@@ -258,7 +299,7 @@ CellStats Bench::run(const BlockFn& f) {
                 cs.error = err + " (" + std::to_string(cs.invalid) + " of " + std::to_string(attempts) + " readings invalid)";
                 return finish("error");
             }
-            if (clock_->now() - t0 - cs.cooldown_s < cfg_.max_cell_s) continue;
+            if (clock_->now() - t0 - cs.cooldown_s - cs.rewarm_s < cfg_.max_cell_s) continue;
             if (cs.samples.empty()) {
                 cs.error = err;
                 return finish("error");
@@ -266,6 +307,7 @@ CellStats Bench::run(const BlockFn& f) {
             return finish("time");
         }
         cs.samples.push_back(us);
+        ++cs.timed;
         ++since_anchor;
         if (anchor_ && since_anchor >= cfg_.anchor_every) {
             if (anchorCheck(cs, noisy)) {
@@ -279,7 +321,7 @@ CellStats Bench::run(const BlockFn& f) {
             }
         }
         const int n = static_cast<int>(cs.samples.size());
-        const double elapsed = clock_->now() - t0 - cs.cooldown_s;
+        const double elapsed = clock_->now() - t0 - cs.cooldown_s - cs.rewarm_s;  // measuring budget
         const char* why = nullptr;
         if (n >= cfg_.min_samples && relIqr(cs.samples) <= cfg_.rel_target) why = "rel";
         else if (n >= cfg_.max_samples) why = "n";
@@ -292,7 +334,9 @@ CellStats Bench::run(const BlockFn& f) {
                 if (noisy) return finish("noisy");
                 if (!cs.error.empty()) return finish("error");
                 drifted();
-                if (std::string(why) == "time") return finish("time");
+                // the window was discarded: stop on time only with kept samples, else sample on after the recovered
+                // cooldown (bounded: max_cooldowns more drifts end the cell noisy). Smoke 3: this returned n = 0.
+                if (std::string(why) == "time" && !cs.samples.empty()) return finish("time");
                 continue;
             }
         }
@@ -308,6 +352,11 @@ AbStats Bench::runAB(const BlockFn& fa, const BlockFn& fb) {
     auto finish = [&](const std::string& why) {
         ab.ratio.stop_reason = ab.a.stop_reason = ab.b.stop_reason = why;
         if (why == "error") ab.ratio.samples.clear(), ab.a.samples.clear(), ab.b.samples.clear(), first_a.clear();
+        if (ab.ratio.samples.empty()) {
+            emptyReason(ab.ratio, why, 2 * cfg_.max_cell_s, t0);
+            ab.ratio.stop_reason = ab.a.stop_reason = ab.b.stop_reason = "error";
+            ab.a.samples.clear(), ab.b.samples.clear(), first_a.clear();
+        }
         ab.a.st = whirl::bench::summarize(ab.a.samples);
         ab.b.st = whirl::bench::summarize(ab.b.samples);
         ab.ratio.st = whirl::bench::summarize(ab.ratio.samples);
@@ -345,8 +394,10 @@ AbStats Bench::runAB(const BlockFn& fa, const BlockFn& fb) {
     if (anchor_ && !anchorCheck(cs, noisy)) {
         if (noisy) return finish("noisy");
         if (!cs.error.empty()) return finish("error");
+        const double w0 = clock_->now();
         warmFor(fa, ca.block, ra, cfg_.warmup_ms);
         warmFor(fb, cb.block, rb, cfg_.warmup_ms);
+        cs.rewarm_s += clock_->now() - w0;
     }
     auto drifted = [&]() {
         cs.discarded += static_cast<int>(cs.samples.size() - clean);
@@ -355,8 +406,10 @@ AbStats Bench::runAB(const BlockFn& fa, const BlockFn& fb) {
         ab.b.samples.resize(clean);
         first_a.resize(clean);
         since_anchor = 0;
+        const double w0 = clock_->now();
         warmFor(fa, ca.block, ra, cfg_.warmup_ms);
         warmFor(fb, cb.block, rb, cfg_.warmup_ms);
+        cs.rewarm_s += clock_->now() - w0;
     };
     int attempts = 0;
     for (std::uint64_t pair = 0;; ++pair) {
@@ -383,6 +436,7 @@ AbStats Bench::runAB(const BlockFn& fa, const BlockFn& fb) {
         ab.a.samples.push_back(sa);
         ab.b.samples.push_back(sb);
         cs.samples.push_back(sb / sa);
+        ++cs.timed;
         first_a.push_back(a_first ? 1 : 0);
         ++since_anchor;
         if (anchor_ && since_anchor >= cfg_.anchor_every) {
@@ -398,7 +452,7 @@ AbStats Bench::runAB(const BlockFn& fa, const BlockFn& fb) {
         }
         const int n = static_cast<int>(cs.samples.size());
         if (n % 2 != 0) continue;  // both orders equally often (abjudge rule: even rounds)
-        const double elapsed = clock_->now() - t0 - cs.cooldown_s;
+        const double elapsed = clock_->now() - t0 - cs.cooldown_s - cs.rewarm_s;
         const char* why = nullptr;
         if (n >= cfg_.min_samples && relIqr(cs.samples) <= cfg_.rel_target) why = "rel";
         else if (n >= cfg_.max_samples) why = "n";
@@ -411,7 +465,9 @@ AbStats Bench::runAB(const BlockFn& fa, const BlockFn& fb) {
                 if (noisy) return finish("noisy");
                 if (!cs.error.empty()) return finish("error");
                 drifted();
-                if (std::string(why) == "time") return finish("time");
+                // the window was discarded: stop on time only with kept samples, else sample on after the recovered
+                // cooldown (bounded: max_cooldowns more drifts end the cell noisy). Smoke 3: this returned n = 0.
+                if (std::string(why) == "time" && !cs.samples.empty()) return finish("time");
                 continue;
             }
         }

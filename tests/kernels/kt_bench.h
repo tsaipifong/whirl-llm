@@ -11,11 +11,13 @@
 //      (torch blocked_autorange; one launch per event pair would time launch overhead);
 //   3. samples: one sample = one block / launches (us per launch). Stop when n >= min_samples and IQR / median
 //      <= rel_target ("rel<=1%"), or after max_cell_s of measuring ("time"), or at max_samples ("n");
-//   4. anchor (optional): every anchor_every samples a fixed anchor block is re-timed; slower than the coolest anchor
-//      seen by > drift_pct -> cooldown (sleep cool_first_s, doubling to cool_max_step_s, <= cool_total_s, until the
-//      anchor is back) and the samples since the last clean anchor are discarded; more than max_cooldowns cooldowns
-//      in one cell -> stop_reason "noisy" (the row is written but never used as a baseline). A faster anchor becomes
-//      the new reference (llama.cpp tools/tuning: what was measured before it ran on a hotter machine);
+//   4. anchor (optional): every anchor_every samples the anchor is re-read (median of anchor_reps blocks); slower than
+//      the reference by > drift_pct, confirmed by a second reading -> cooldown (sleep cool_first_s, doubling to
+//      cool_max_step_s, <= cool_total_s, until the anchor is within cool_eps_pct; re-warm time is outside the cell's
+//      budget) and the samples since the last clean anchor are discarded; more than max_cooldowns cooldowns in one cell
+//      -> stop_reason "noisy" (the row is written but never used as a baseline). A confirmed reading faster by
+//      > cool_eps_pct becomes the new reference (llama.cpp tools/tuning). A cell never ends with 0 samples silently:
+//      it is "error" with the counts (fix 3, smoke 3);
 //   5. rotation: the BlockFn gets the index of the first launch; launch i uses input copy i % copies, so the rotated
 //      working set exceeds the GPU's last-level cache (rotationCopies);
 //   6. A/B (runAB): A and B alternate per sample pair in ABBA order (pairs AB, BA, AB, BA: launches A B B A A B B A); the judged number is the
@@ -44,12 +46,18 @@ struct BenchCfg {
     int min_samples = 10, max_samples = 2000;
     double rel_target = 0.01;    // IQR / median
     double max_cell_s = 3.0;     // measuring wall time per cell (cooldown sleeps excluded)
-    int anchor_every = 4;        // samples (A/B: pairs) between anchor re-timings
-    double drift_pct = 3.0;
+    // anchor (fix 3, llama.cpp tools/tuning bench.h): one anchor reading = the MEDIAN of anchor_reps blocks, the
+    // reference = the median of anchor_ref_reps blocks at setup; hysteresis: slower than the reference by > drift_pct
+    // starts a cooldown, back within cool_eps_pct ends it. Smoke 3 (R9700) read single anchor blocks at 78-89 us
+    // (+-7 %): a 3 % gate on single readings against their running minimum fired on noise in every cell.
+    int anchor_every = 16;       // samples (A/B: pairs) between anchor re-timings
+    int anchor_reps = 5, anchor_ref_reps = 9;
+    bool anchor_confirm = true;  // a drift (or a faster reference) needs a second reading that agrees
+    double drift_pct = 10.0, cool_eps_pct = 3.0;
     double cool_first_s = 2, cool_max_step_s = 32, cool_total_s = 60;
     int max_cooldowns = 2;       // more -> "noisy"
-    int max_invalid_pct = 5;
-    int noisy_streak_off = 3;    // this many noisy cells in a row -> the anchor is switched off (no more cooldowns)     // invalid timer readings tolerated while sampling (dropped, counted); more -> "error"
+    int max_invalid_pct = 5;     // invalid timer readings tolerated while sampling (dropped, counted); more -> "error"
+    int noisy_streak_off = 3;    // this many noisy cells in a row -> the anchor is switched off (no more cooldowns)
     double burst_s = 8, burst_idle_s = 0;  // burst_idle_s 0 = off
 };
 
@@ -74,8 +82,11 @@ struct CellStats {
     int block = 0;                // launches per sample
     int discarded = 0;            // samples dropped after an anchor drift
     int invalid = 0;              // timer readings rejected (zero / negative / longer than the host wall time) and dropped
+    int timed = 0;                // valid samples taken (kept + discarded)
+    int anchor_unconfirmed = 0;   // slow anchor readings the confirming reading did not repeat (noise, no cooldown)
     int cooldowns = 0;
     double cooldown_s = 0;        // slept
+    double rewarm_s = 0;          // anchor re-checks + re-warm after cooldowns: not part of the max_cell_s budget
     double measure_s = 0;         // wall time of warm-up + calibration + samples (no cooldowns)
     double warm_ms = 0;           // GPU time of the untimed warm-up
     double anchor_ref_us = 0, anchor_min_us = 0, anchor_max_us = 0;  // per launch; 0 = no anchor
@@ -122,7 +133,9 @@ private:
     double sample(const BlockFn& f, int block, std::uint64_t& rot, std::string& err);  // us per launch, <= 0 error
     // anchor check: false = drifted (a cooldown was taken; caller discards); sets noisy when over the limit
     bool anchorCheck(CellStats& cs, bool& noisy);
-    double anchorTime();
+    double anchorTime(int reps);  // median of reps valid anchor blocks (us per launch), <= 0 none valid
+    // a cell that ends with no kept sample becomes "error" with the counts (why it is empty)
+    void emptyReason(CellStats& cs, const std::string& why, double budget_s, double t0) const;
     void account(double busy_s);
     void warmFor(const BlockFn& f, int block, std::uint64_t& rot, double ms);  // re-warm after a sleep (clock ramp)
     void cellEnd(const std::string& stop_reason);

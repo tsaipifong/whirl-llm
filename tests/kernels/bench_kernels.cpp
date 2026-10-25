@@ -134,6 +134,9 @@ void printCell(const CellInfo& ci, const CellStats& cs, const char* side = "") {
                 cs.cooldowns ? (" cooldowns " + std::to_string(cs.cooldowns)).c_str() : "");
     if (!cs.error.empty()) std::printf("         error: %s; last invalid reading: %s\n", cs.error.c_str(), g_timer->last_invalid.c_str());
     if (cs.invalid) std::printf("         %d invalid timer reading(s) dropped\n", cs.invalid);
+    if (cs.discarded || cs.anchor_unconfirmed || cs.rewarm_s > 0)
+        std::printf("         anchor: %d samples discarded after drift, %d slow readings not confirmed, %.2f s re-warm, %.1f s slept\n",
+                    cs.discarded, cs.anchor_unconfirmed, cs.rewarm_s, cs.cooldown_s);
     std::fflush(stdout);
 }
 
@@ -330,12 +333,17 @@ void setAnchor(Env& e) {
                                                DevPtr{0});
                                }),
                       name);
+    const BenchCfg& bc = e.bench.cfg();
+    char rule[128];
+    std::snprintf(rule, sizeof(rule), "med%d_ref%d_drift%g_eps%g_every%d%s", bc.anchor_reps, bc.anchor_ref_reps, bc.drift_pct,
+                  bc.cool_eps_pct, bc.anchor_every, bc.anchor_confirm ? "_confirm" : "");
     if (e.bench.hasAnchor())
-        std::printf("   anchor %s: %.2f us per launch (reference, %d rotated copies)\n", name.c_str(), e.bench.anchorRefUs(), ncopies);
+        std::printf("   anchor %s: %.2f us per launch (reference = median of %d blocks, %d rotated copies; rule %s)\n", name.c_str(),
+                    e.bench.anchorRefUs(), bc.anchor_ref_reps, ncopies, rule);
     else
         std::printf("   anchor %s failed: %s (running without an anchor)\n", name.c_str(), e.bench.anchorError().c_str());
     name += ".rot" + std::to_string(ncopies);
-    e.settings0 += ";anchor=" + name;
+    e.settings0 += ";anchor=" + name + ";anchor_rule=" + rule;
 }
 
 // ---------------------------------------------------------------- gemv

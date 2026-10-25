@@ -9,6 +9,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -72,6 +73,14 @@ static BenchCfg quietCfg() {
     BenchCfg c;
     c.burst_idle_s = 0;
     c.min_block_us = 200;  // the rule tests below use 200 us blocks; the default (1000) is checked separately
+    // the anchor rule tests script single readings: one block per reading, a 3 % gate both ways, a check every 4
+    // samples (the shipped defaults, median of 5 / 9 blocks, 10 % / 3 %, every 16, are tested by test_smoke3_*)
+    c.anchor_reps = 1;
+    c.anchor_ref_reps = 1;
+    c.anchor_every = 4;
+    c.drift_pct = 3.0;
+    c.cool_eps_pct = 3.0;
+    c.anchor_confirm = false;
     return c;
 }
 
@@ -735,6 +744,213 @@ static void test_jsonl_file(const std::string& emit) {
     if (emit.empty()) fs::remove(p, ec);
 }
 
+// --------------------------------------------------------------------------------------------- fix 3 (smoke 3)
+// Smoke 3 (R9700 17:52, exe 278e526f): cells ended "nan us n 0 blk 16 time cooldowns 2" with 0 mismatches and 0 invalid
+// timer readings. The stored rows show anchor block readings of 78-89 us per launch (+-7 %) around a reference of
+// 80.14 us; a 3 % gate on single readings against the running minimum fires on that noise alone.
+struct Lcg {
+    std::uint64_t s;
+    double uni() {  // [0, 1)
+        s = s * 6364136223846793005ull + 1442695040888963407ull;
+        return static_cast<double>(s >> 11) / 9007199254740992.0;
+    }
+};
+
+struct Smoke3Out {
+    int empty = 0, cool = 0, unconf = 0, kept = 0;
+    double slept = 0;
+    std::string why;
+};
+// the smoke-3 model: anchor 78-89 us per launch per block (uniform, independent), 8 gemv cells of 30..79 us +-3 %
+static Smoke3Out smoke3Model(std::uint64_t seed) {
+    Smoke3Out o;
+    FakeClock clk;
+    BenchCfg c;
+    c.burst_idle_s = 0;
+    c.max_cell_s = 0.3;
+    Bench b(c, &clk);
+    Lcg ra{seed};
+    BlockFn afn = [&](int n, std::uint64_t) {
+        const double us = 78.0 + 11.0 * ra.uni();
+        clk.t += us * n / 1e6 + 20e-6;
+        return us * n / 1000.0;
+    };
+    b.setAnchor(afn, "fake.smoke3_anchor");
+    Lcg rk{seed * 31 + 7};
+    for (int cell = 0; cell < 8; ++cell) {
+        const double base = 30.0 + 7.0 * cell;
+        BlockFn kf = [&, base](int n, std::uint64_t) {
+            const double us = base * (0.97 + 0.06 * rk.uni());
+            clk.t += us * n / 1e6 + 20e-6;
+            return us * n / 1000.0;
+        };
+        b.beforeCell();
+        const CellStats cs = b.run(kf);
+        o.empty += cs.st.n == 0;
+        o.cool += cs.cooldowns;
+        o.unconf += cs.anchor_unconfirmed;
+        o.kept += static_cast<int>(cs.st.n);
+        if (!cs.ok() && o.why.empty()) o.why = "cell " + std::to_string(cell) + ": " + cs.stop_reason + " " + cs.error;
+    }
+    for (double x : clk.sleeps) o.slept += x;
+    return o;
+}
+
+static void test_smoke3_seeds() {
+    int empty = 0, cool = 0, unconf = 0, bad_seeds = 0;
+    double slept = 0;
+    for (std::uint64_t seed = 1; seed <= 40; ++seed) {
+        const Smoke3Out o = smoke3Model(seed);
+        empty += o.empty;
+        cool += o.cool;
+        unconf += o.unconf;
+        slept += o.slept;
+        bad_seeds += o.cool > 0;
+    }
+    std::printf("      smoke3 model, 40 seeds x 8 cells: %d empty, %d cooldowns (%d seeds), %.0f s slept, %d unconfirmed slow medians\n",
+                empty, cool, bad_seeds, slept, unconf);
+    check("smoke3 x 40 seeds: no empty cell", empty == 0, std::to_string(empty));
+    check("smoke3 x 40 seeds: noise cooldowns rare (<= 2 of 320 cells)", cool <= 2, std::to_string(cool));
+}
+
+static void test_smoke3_noisy_anchor() {
+    FakeClock clk;
+    BenchCfg c;  // the shipped defaults, as the smoke ran them: --bench-max-s 0.3 --burst-idle 0
+    c.burst_idle_s = 0;
+    c.max_cell_s = 0.3;
+    Bench b(c, &clk);
+    Lcg ra{12345};
+    BlockFn afn = [&](int n, std::uint64_t) {  // Swift blk.0.ffn_down rotated: 78..89 us per launch per block
+        const double us = 78.0 + 11.0 * ra.uni();
+        clk.t += us * n / 1e6 + 20e-6;
+        return us * n / 1000.0;
+    };
+    b.setAnchor(afn, "fake.smoke3_anchor");
+    Lcg rk{777};
+    int empty = 0, total_cool = 0, unconf = 0, nkept = 0;
+    std::string why;
+    for (int cell = 0; cell < 8; ++cell) {  // the smoke's gemv cells: 30..80 us per launch, +-3 % block jitter
+        const double base = 30.0 + 7.0 * cell;
+        BlockFn kf = [&, base](int n, std::uint64_t) {
+            const double us = base * (0.97 + 0.06 * rk.uni());
+            clk.t += us * n / 1e6 + 20e-6;
+            return us * n / 1000.0;
+        };
+        b.beforeCell();
+        const CellStats cs = b.run(kf);
+        empty += cs.st.n == 0;
+        total_cool += cs.cooldowns;
+        unconf += cs.anchor_unconfirmed;
+        nkept += static_cast<int>(cs.st.n);
+        if (!cs.ok() && why.empty()) why = "cell " + std::to_string(cell) + ": " + cs.stop_reason + " n=" + std::to_string(cs.st.n) + " " + cs.error;
+    }
+    double slept = 0;
+    for (double x : clk.sleeps) slept += x;
+    check("smoke3: a +-7 % noisy anchor never ends a cell with n = 0 (8 cells)", empty == 0, std::to_string(empty) + " empty; " + why);
+    check("smoke3: anchor noise alone triggers no cooldown (8 cells)", total_cool == 0, std::to_string(total_cool) + " cooldowns");
+    check("smoke3: no cooldown sleep on noise (was 2 x up to 60 s per cell)", slept == 0.0, num(slept));
+    std::printf("      smoke3 model: %d samples kept in 8 cells, %d slow anchor medians not confirmed (no cooldown)\n", nkept, unconf);
+}
+
+static void test_real_drift_still_cools() {
+    // the confirm rule must not hide a real slowdown: the anchor goes +20 % for good (two readings agree) -> cooldown
+    FakeClock clk;
+    BenchCfg c;
+    c.burst_idle_s = 0;
+    c.max_cell_s = 0.3;
+    Bench b(c, &clk);
+    bool hot = false;
+    double hot_until = 0;
+    BlockFn afn = [&](int n, std::uint64_t) {
+        const double us = hot && clk.t < hot_until ? 96.0 : 80.0;
+        clk.t += us * n / 1e6 + 20e-6;
+        return us * n / 1000.0;
+    };
+    b.setAnchor(afn, "fake.anchor");
+    hot = true;
+    hot_until = clk.t + 0.15;  // throttled for 150 ms of wall time (covers the cell-start check), then back
+    FakeKernel k{clk, [](int i) { return i % 2 ? 41.0 : 40.0; }};
+    const CellStats cs = b.run(k.fn());
+    check("real drift: a persistent +20 % anchor still takes a cooldown and the cell recovers",
+          cs.cooldowns == 1 && cs.ok() && clk.sleeps.size() == 1 && clk.sleeps[0] == 2.0,
+          std::to_string(cs.cooldowns) + " " + cs.stop_reason + " sleeps " + std::to_string(clk.sleeps.size()));
+    check("real drift: reference unchanged (80 us)", std::fabs(b.anchorRefUs() - 80.0) < 1e-9, num(b.anchorRefUs()));
+}
+
+static void test_time_stop_drift_never_empty() {
+    // the n = 0 path: the time budget is reached, the closing anchor check drifts, the window is discarded and the cell
+    // returned "time" with nothing in it. After a recovered cooldown sampling must go on.
+    FakeClock clk;
+    BenchCfg c = quietCfg();
+    c.max_cell_s = 0.05;  // reached during the 100 ms warm-up: the first sample hits the time stop
+    Bench b(c, &clk);
+    int checks = 0;
+    bool armed = false;
+    BlockFn afn = [&](int n, std::uint64_t) {
+        double us = 20.0;
+        if (armed) {
+            ++checks;
+            if (checks == 2) us = 25.0;  // check 1 = cell start (clean), check 2 = the closing check (+25 %)
+        }
+        clk.t += us * n / 1e6;
+        return us * n / 1000.0;
+    };
+    b.setAnchor(afn, "fake.anchor");
+    armed = true;  // later calls (re-warm after the sleep, re-checks) read 20 us: the cooldown recovers
+    FakeKernel k{clk, [](int) { return 10.0; }};
+    const CellStats cs = b.run(k.fn());
+    check("time stop + drift: the cell is not empty (sampling resumes after the recovered cooldown)", cs.st.n >= 1 && cs.ok(),
+          cs.stop_reason + " n=" + std::to_string(cs.st.n) + " cooldowns " + std::to_string(cs.cooldowns) + " " + cs.error);
+    check("time stop + drift: exactly one cooldown, the discarded sample counted", cs.cooldowns == 1 && cs.discarded >= 1,
+          std::to_string(cs.cooldowns) + " " + std::to_string(cs.discarded));
+}
+
+static void test_rewarm_not_in_budget() {
+    // one recovered cooldown at the cell start: the anchor + cell re-warm (2 x 100 ms) must not eat the 0.3 s budget
+    FakeClock clk;
+    BenchCfg c = quietCfg();
+    c.max_cell_s = 0.3;
+    Bench b(c, &clk);
+    int checks = 0;
+    bool armed = false;
+    BlockFn afn = [&](int n, std::uint64_t) {
+        double us = 20.0;
+        if (armed && ++checks == 1) us = 25.0;  // the cell-start check drifts once
+        clk.t += us * n / 1e6;
+        return us * n / 1000.0;
+    };
+    b.setAnchor(afn, "fake.anchor");
+    armed = true;
+    FakeKernel k{clk, [](int i) { return i % 2 ? 10.5 : 10.0; }};  // never rel<=1 %: stops on time
+    const CellStats cs = b.run(k.fn());
+    // 0.3 s - 0.1 s warm-up = ~0.2 s of 320 us samples (+ anchor checks): hundreds of samples, not 1
+    check("budget: re-warm after a cooldown is not measuring time (>= 100 samples in 0.3 s)", cs.st.n >= 100 && cs.cooldowns == 1,
+          cs.stop_reason + " n=" + std::to_string(cs.st.n) + " cooldowns " + std::to_string(cs.cooldowns));
+}
+
+static void test_empty_cell_reason() {
+    // whatever ends a cell with no samples, the row is not written and the error says why, with counts
+    FakeClock clk;
+    BenchCfg c = quietCfg();
+    c.max_cooldowns = 0;  // the first drift ends the cell noisy before any sample
+    Bench b(c, &clk);
+    bool armed = false;
+    BlockFn afn = [&](int n, std::uint64_t) {
+        const double us = armed ? 30.0 : 20.0;
+        clk.t += us * n / 1e6;
+        return us * n / 1000.0;
+    };
+    b.setAnchor(afn, "fake.anchor");
+    armed = true;
+    FakeKernel k{clk, [](int) { return 10.0; }};
+    const CellStats cs = b.run(k.fn());
+    check("empty cell: not ok() and stop_reason error", !cs.ok() && cs.stop_reason == "error", cs.stop_reason);
+    check("empty cell: the error names the cause and the counts",
+          cs.error.find("no samples kept") != std::string::npos && cs.error.find("noisy") != std::string::npos &&
+              cs.error.find("cooldowns 1") != std::string::npos && cs.error.find("invalid 0") != std::string::npos,
+          cs.error);
+}
+
 int main(int argc, char** argv) {
     std::string emit;
     for (int i = 1; i < argc; ++i)
@@ -758,6 +974,12 @@ int main(int argc, char** argv) {
         test_anchor_faster_becomes_reference();
         test_rewarm_after_cooldown();
         test_cache_state_anchor_switched_off();
+        test_smoke3_noisy_anchor();
+        test_smoke3_seeds();
+        test_real_drift_still_cools();
+        test_time_stop_drift_never_empty();
+        test_rewarm_not_in_budget();
+        test_empty_cell_reason();
         test_ab_order_and_ratio();
         test_ab_order_bias();
         test_burst();
