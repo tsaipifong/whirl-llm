@@ -28,7 +28,7 @@ constexpr std::array<ItemInfo, n_items> k_items = {{
     {"moeskip", "skip low-weight MoE experts"},
     {"a8", "int8 activations for K-quant prefill (W4A8)"},
     {"a4", "int4 activations for prefill (W4A4)"},
-    {"moeshx", "MoE decode: shared expert inside the routed int8 expert launches"},
+    {"moeshx", "MoE decode: shared expert inside the routed int8 expert launches (R9700; opt-in)"},
 }};
 
 constexpr const char* k_q8dec = "q8dec (int8 activations in the decode / verify GEMV, as llama.cpp's q8_1)";
@@ -127,7 +127,7 @@ Request parseMode(std::string_view spec, std::string source) {
         return r;
     }
     if (trim(items).empty()) {
-        r.items = r.mode == Mode::balance ? balance_items : (balance_items | fast_only_items);
+        r.items = r.mode == Mode::balance ? balance_items : (balance_items | (fast_only_items & ~fast_optin_items));
     } else {
         r.items = parseItems(items);
         r.custom = true;
@@ -317,6 +317,15 @@ void applyOverride(Plan& p, Item it, const char* var, const std::string& value, 
         s.note = std::format("off by WHIRL_{}={}", var, value);
         p.overrides.push_back(std::format("WHIRL_{}={}: {} off", var, value, itemName(it)));
     }
+}
+
+std::string applyFastOnlyOverride(Plan& p, Item it, const char* var, const std::string& value, bool forced, bool applicable) {
+    if (p.mode == Mode::fast) {
+        applyOverride(p, it, var, value, forced, applicable);
+        return {};
+    }
+    if (!forced) return {};
+    return std::format("WHIRL_{}={} ignored: {} is a fast-only item ({} never takes it)", var, value, itemName(it), modeName(p.mode));
 }
 
 std::string modeLabel(const Plan& p) {

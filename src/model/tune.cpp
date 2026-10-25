@@ -985,11 +985,14 @@ void loadOrTuneImpl(Model& m, const std::string& model_path, std::string& log) {
         }
         if (const auto v = envGet("SPEC_SAMPLE"); v && !v->empty())
             nu::applyOverride(p, nu::Item::specsample, "SPEC_SAMPLE", *v, *v != "0", t.mtp && t.k_spec_sample);
-        // moeshx (fast, feat028): WHIRL_MOESHX=0|1 overrides (1 outside fast = lossy, user-requested); int8 decode only
+        // moeshx (fast opt-in, feat028 / r1): WHIRL_MOESHX=0|1 overrides in fast only; precise and balance ignore it (load
+        // note), so neither mode can reach the moe_q8_shx class; int8 decode only
         {
             const bool shx_ok = t.moe && t.moe_mxfp4 && t.k_moe_shx && t.moe_shx_shape;
-            if (const auto v = envGet("MOESHX"); v && !v->empty()) nu::applyOverride(p, nu::Item::moeshx, "MOESHX", *v, *v != "0", shx_ok);
-            m.moe_shx = p.on(nu::Item::moeshx) && !m.prec_dec;
+            if (const auto v = envGet("MOESHX"); v && !v->empty())
+                if (const std::string ign = nu::applyFastOnlyOverride(p, nu::Item::moeshx, "MOESHX", *v, *v != "0", shx_ok); !ign.empty())
+                    log += "  " + ign + "\n";
+            m.moe_shx = p.mode == nu::Mode::fast && p.on(nu::Item::moeshx) && !m.prec_dec;
         }
         nu::noteSwitches(p, [](const char* n) { return envGet(n); });
         m.num_plan = p;

@@ -38,7 +38,7 @@ struct MoeProblem {
     // moeshx: the shared expert's gate / up / down are MXFP4 of the experts' shapes and row bytes (gate / up
     // [F][E], down [E][F]) and the shared gate vector exists (its weight sg[t])
     bool shx_ok = false;
-    std::uint32_t buf_slots = 0;          // pairs the decode expert buffers hold (max_verify_rows x K; 0 = n x K only)
+    std::uint32_t buf_slots = 0;          // pairs the decode expert buffers hold (max_verify_rows x (K + 1); 0 = n x K only)
 };
 struct MoeFlags {
     bool prec_dec = false;

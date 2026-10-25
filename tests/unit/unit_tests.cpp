@@ -772,7 +772,7 @@ void testNumerics() {
         const nu::Request r = nu::parseMode("balance", "t");
         CHECK(r.items == nu::balance_items && !r.custom && r.has(Item::fp8) && r.has(Item::kvq8) && !r.has(Item::kvq4));
         const nu::Request f = nu::parseMode("fast", "t");
-        CHECK(f.items == (nu::balance_items | nu::fast_only_items));
+        CHECK(f.items == (nu::balance_items | (nu::fast_only_items & ~nu::fast_optin_items)) && !f.has(Item::moeshx));
         const nu::Request c = nu::parseMode("balance:fp8, kvq8", "t");
         CHECK(c.custom && c.items == (nu::bit(Item::fp8) | nu::bit(Item::kvq8)));
         const nu::Request c2 = nu::parseMode("fast:kvq4", "t");
@@ -4005,13 +4005,10 @@ void testGpuSelect() {
     }
 }
 
-// s8-719 review C1 (written from the finding, 2026-10-23): the GPU probe is a hidden helper process, so
-// (a) a crash in it must never show a Windows error dialog, (b) the parent must not hand it every inheritable
-// handle (log file, listening socket), only the pipe and NUL, and (c) it must give up after 10 s, not 60 s.
-// The child is this test program itself (helper modes in main()).
-#if WHIRL_WITH_HIP && defined(_WIN32)
 // moeshx (fast, feat028-moefast97): the shared expert as slot K of the int8 MXFP4 decode experts.
-// (1) numerics plan: fast-only, needs MoE + MXFP4 experts + kernels + the shared-expert shape; WHIRL_MOESHX override.
+// (1) numerics plan: fast-only and opt-in (r1: a plain --fast does not request it; an explicit list, "all" or
+//     WHIRL_MOESHX=1 in fast does), needs MoE + MXFP4 experts + kernels + the shared-expert shape; WHIRL_MOESHX is
+//     ignored in precise / balance (applyFastOnlyOverride, load note).
 // (2) host numerics reference (kernels' f32 order, include/whirl/moe_shx_ref.h) vs a double-precision oracle:
 //     documented fast tolerance (q8_1-class activations): per output |y - oracle| <= kShxTol x scale, scale =
 //     |x0| + sum |terms|; the moeshx form vs the balance form (shared expert summed separately): only the f32
@@ -4099,28 +4096,37 @@ void testMoeShx() {
     CHECK((nu::fast_only_items & nu::bit(Item::moeshx)) != 0 && (nu::balance_items & nu::bit(Item::moeshx)) == 0);
     CHECK((nu::implemented_items & nu::bit(Item::moeshx)) != 0 && std::string(nu::itemName(Item::moeshx)) == "moeshx");
     CHECK(nu::itemFromName("moeshx") == Item::moeshx);
-    const nu::Plan pf = nu::plan(fast, orn);
+    // r1: opt-in (fast_optin_items) - plain fast does not request it, the other fast items still come with it
+    CHECK((nu::fast_optin_items & nu::bit(Item::moeshx)) != 0 && (nu::fast_optin_items & ~nu::fast_only_items) == 0);
+    CHECK(!fast.has(Item::moeshx) && fast.has(Item::kvq4) && fast.has(Item::relaxacc));
+    {
+        const nu::Plan p0 = nu::plan(fast, orn);
+        CHECK(!p0.on(Item::moeshx) && nu::logLine(p0).find("moeshx") == std::string::npos);
+        CHECK(nu::plan(nu::parseMode("fast:all", "t"), orn).on(Item::moeshx));
+    }
+    const nu::Plan pf = nu::plan(nu::parseMode("fast:kvq4,relaxacc,moeshx", "t"), orn);
     CHECK(pf.on(Item::moeshx) && nu::logLine(pf).find("moeshx (shared expert as slot K") != std::string::npos);
     CHECK(nu::logLine(pf).find("fast runs as balance") == std::string::npos);
     CHECK(!nu::plan(bal, orn).on(Item::moeshx) && !nu::plan(pre, orn).on(Item::moeshx));
     {
+        const nu::Request fshx = nu::parseMode("fast:moeshx", "t");  // r1: opt-in, so the skip reasons need it requested
         nu::Target dense = orn;
         dense.moe = dense.moe_mxfp4 = false;
-        CHECK(!nu::plan(fast, dense).on(Item::moeshx) && nu::plan(fast, dense).items[static_cast<std::size_t>(Item::moeshx)].note == "dense model");
+        CHECK(!nu::plan(fshx, dense).on(Item::moeshx) && nu::plan(fshx, dense).items[static_cast<std::size_t>(Item::moeshx)].note == "dense model");
         nu::Target q4m = orn;
         q4m.moe_mxfp4 = false;
-        CHECK(!nu::plan(fast, q4m).on(Item::moeshx));
+        CHECK(!nu::plan(fshx, q4m).on(Item::moeshx));
         nu::Target s8 = orn;  // 8060S: no moe_gus / moe_downs kernels
         s8.gfx1151 = true;
         s8.k_moe_shx = false;
-        const nu::Plan p8 = nu::plan(fast, s8);
+        const nu::Plan p8 = nu::plan(fshx, s8);
         CHECK(!p8.on(Item::moeshx) && p8.items[static_cast<std::size_t>(Item::moeshx)].note.find("gfx1151") != std::string::npos);
         nu::Target shape = orn;
         shape.moe_shx_shape = false;
-        CHECK(!nu::plan(fast, shape).on(Item::moeshx) &&
-              nu::plan(fast, shape).items[static_cast<std::size_t>(Item::moeshx)].note.find("shape") != std::string::npos);
+        CHECK(!nu::plan(fshx, shape).on(Item::moeshx) &&
+              nu::plan(fshx, shape).items[static_cast<std::size_t>(Item::moeshx)].note.find("shape") != std::string::npos);
         // explicit lists: fast without moeshx keeps it off, fast:moeshx alone turns it on; balance:moeshx is refused
-        // (a balance list takes balance items only; WHIRL_MOESHX=1 is the way to try it under balance)
+        // (a balance list takes balance items only; r1: WHIRL_MOESHX=1 is ignored under balance too)
         CHECK(!nu::plan(nu::parseMode("fast:kvq4", "t"), orn).on(Item::moeshx));
         CHECK(nu::plan(nu::parseMode("fast:moeshx", "t"), orn).on(Item::moeshx));
         bool refused = false;
@@ -4130,16 +4136,25 @@ void testMoeShx() {
             refused = true;
         }
         CHECK(refused);
-        // WHIRL_MOESHX: 1 in balance = lossy user override; 0 in fast = off
-        nu::Plan pb = nu::plan(bal, orn);
-        nu::applyOverride(pb, Item::moeshx, "MOESHX", "1", true, true);
-        CHECK(pb.on(Item::moeshx) && pb.lossy_override && nu::modeLabel(pb) == "balance+overrides");
-        nu::Plan po = nu::plan(fast, orn);
-        nu::applyOverride(po, Item::moeshx, "MOESHX", "0", false, true);
+        // WHIRL_MOESHX (r1, applyFastOnlyOverride): ignored in balance and precise (plan unchanged, a note for the log);
+        // in fast 1 = on (plain fast: opt-in, so a user override), 0 = off
+        for (const nu::Request* rq : {&bal, &pre}) {
+            nu::Plan pb = nu::plan(*rq, orn);
+            const std::string before = nu::logLine(pb);
+            const std::string ign = nu::applyFastOnlyOverride(pb, Item::moeshx, "MOESHX", "1", true, true);
+            CHECK(!pb.on(Item::moeshx) && !pb.lossy_override && pb.overrides.empty() && nu::logLine(pb) == before);
+            CHECK(ign.rfind("WHIRL_MOESHX=1 ignored: moeshx is a fast-only item (", 0) == 0 &&
+                  ign.find(rq == &bal ? "balance" : "precise") != std::string::npos);
+            CHECK(nu::applyFastOnlyOverride(pb, Item::moeshx, "MOESHX", "0", false, true).empty() && !pb.on(Item::moeshx));
+        }
+        nu::Plan p1 = nu::plan(fast, orn);
+        CHECK(nu::applyFastOnlyOverride(p1, Item::moeshx, "MOESHX", "1", true, true).empty());
+        CHECK(p1.on(Item::moeshx) && nu::modeLabel(p1) == "fast+overrides" && nu::logLine(p1).find("MOESHX=1, user-requested") != std::string::npos);
+        nu::Plan po = nu::plan(nu::parseMode("fast:kvq4,relaxacc,moeshx", "t"), orn);
+        CHECK(nu::applyFastOnlyOverride(po, Item::moeshx, "MOESHX", "0", false, true).empty());
         CHECK(!po.on(Item::moeshx) && !po.lossy_override);
-        nu::Plan pn = nu::plan(bal, orn);  // not applicable: never turned on
-        nu::applyOverride(pn, Item::moeshx, "MOESHX", "1", true, false);
-        CHECK(!pn.on(Item::moeshx));
+        nu::Plan pn = nu::plan(fast, orn);  // not applicable: never turned on
+        CHECK(nu::applyFastOnlyOverride(pn, Item::moeshx, "MOESHX", "1", true, false).empty() && !pn.on(Item::moeshx));
     }
     // (2) numerics: small shapes (E 256, F 256, K 4 of 8) and Ornith shapes (E 2048, F 512, K 8 of 16 here)
     struct Case {
@@ -4167,6 +4182,11 @@ void testMoeShx() {
     }
 }
 
+// s8-719 review C1 (written from the finding, 2026-10-23): the GPU probe is a hidden helper process, so
+// (a) a crash in it must never show a Windows error dialog, (b) the parent must not hand it every inheritable
+// handle (log file, listening socket), only the pipe and NUL, and (c) it must give up after 10 s, not 60 s.
+// The child is this test program itself (helper modes in main()).
+#if WHIRL_WITH_HIP && defined(_WIN32)
 void testProbeChild(const wchar_t* self) {
     using namespace whirl::gpusel;
     CHECK_EQ(k_probe_timeout_ms, 10000u);

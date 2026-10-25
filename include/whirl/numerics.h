@@ -13,8 +13,9 @@
 //    the same items (fp8 + moefp8 back in MoE balance; MOE-BAL 2026-10-13 had made them fast-only).
 //  - fast: balance plus aggressive gated items (4-bit KV, relaxed speculative acceptance, ...).
 //    Implemented: kvq4 (4-bit KV where the code object has it: Radeon 8060S; elsewhere fast keeps
-//    f16 KV until there are q4 kernels), relaxacc and moeshx (MoE decode: shared expert folded into the
-//    routed int8 expert launches, R9700, feat028). The others are listed as skipped.
+//    f16 KV until there are q4 kernels) and relaxacc; opt-in (fast_optin_items, an explicit list or WHIRL_ switch):
+//    moeshx (MoE decode: shared expert folded into the routed int8 expert launches, R9700, feat028). The others are
+//    listed as skipped.
 // KV format: fixed per mode and model type (chooseKv), never switched by what fits: a format that
 // does not fit shrinks the context (when not given) or refuses. WHIRL_KV is a debug override.
 // Items not applicable to the device or model are listed as skipped, never an error.
@@ -62,6 +63,10 @@ inline constexpr std::uint32_t bit(Item it) { return 1u << static_cast<unsigned>
 inline constexpr std::uint32_t balance_items = bit(Item::fp8) | bit(Item::moefp8) | bit(Item::gdnwmma) | bit(Item::h16) | bit(Item::kvq8) | bit(Item::specsample);
 inline constexpr std::uint32_t fast_only_items =
     bit(Item::kvq4) | bit(Item::relaxacc) | bit(Item::headq) | bit(Item::moeskip) | bit(Item::a8) | bit(Item::a4) | bit(Item::moeshx);
+// fast items a plain --fast does not request (only an explicit list, "all" or their WHIRL_ switch): implemented, waiting for
+// their GPU kernel tests / task-accuracy acceptance run (feat028-moefast97-r1: moeshx; feat027-i8qk adds i8qk with the same
+// constant - on merge it is the union of both bits)
+inline constexpr std::uint32_t fast_optin_items = bit(Item::moeshx);
 // MoE models: balance items that only the fast mode enables (an explicit item list still enables
 // them). Empty since MODES-MXFP4 (owner 2026-10-16): MoE balance has fp8 + moefp8 again
 // (MOE-BAL 2026-10-13 had moved them here). Kept as the per-model-type hook of forModel.
@@ -147,6 +152,9 @@ Plan plan(const Request& r, const Target& t);
 // Per-item override from the environment: `forced` = the effective value after the variable.
 // Records "WHIRL_X=v: item on (lossy, user-requested)" or "... item off" when it differs.
 void applyOverride(Plan& p, Item it, const char* var, const std::string& value, bool forced, bool applicable);
+// The WHIRL_ switch of a fast-only item (moeshx): applyOverride in fast; in precise / balance the switch is ignored
+// (the plan is unchanged) and the returned note says so for the load log ("" when applied or when it asks for off).
+std::string applyFastOnlyOverride(Plan& p, Item it, const char* var, const std::string& value, bool forced, bool applicable);
 
 // The decode activation form actually used: q8 = int8 (default: q8dec_default). env = the
 // WHIRL_Q8DEC value ("" = unset); a value that changes the mode's default is recorded as an

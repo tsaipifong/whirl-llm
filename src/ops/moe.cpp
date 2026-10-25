@@ -45,8 +45,9 @@ bool fp8Gu(const MoeProblem& p, const MoeFlags& f, const kernels::MoeKernels& k,
 }
 // moeshx (fast, feat028): the shared expert as slot K of the int8 MXFP4 decode experts - the int8 decode path with
 // the whole-block MXFP4 kernels and gate + up in one launch, the shared expert compatible, both kernels present,
-// and the n x (K + 1) pairs inside the decode buffers (sized for max_verify_rows x K pairs; wider verify batches
-// keep the separate shared chain)
+// and the n x (K + 1) pairs inside the decode buffers (sized for max_verify_rows x (K + 1) pairs since r1, so every
+// decode / verify width takes it - no batch-width dependence, as llama.cpp's batch-size independent fusion check;
+// the bound stays as an overflow guard)
 bool shxOk(const MoeProblem& p, const MoeFlags& f, const kernels::MoeKernels& k, const MoePlan& pl) {
     return f.moe_shx && pl.small_q8 && !pl.gu_split && f.moe_mxw && p.shx_ok && p.gate_ty == GgmlType::mxfp4 && p.up_ty == GgmlType::mxfp4 &&
            p.down_ty == GgmlType::mxfp4 && p.gate_rb == p.up_rb && k.moe_gus_mxw != nullptr && k.moe_downs_mxw != nullptr &&

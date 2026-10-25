@@ -587,7 +587,7 @@ void testOpsMoeShx() {
     p.gate_ncols = 2048;
     p.down_ncols = 512;
     p.refs = p.sx_buf = p.tiles64_buf = true;
-    p.buf_slots = 32 * 8;  // max_verify_rows x K
+    p.buf_slots = 32 * 9;  // max_verify_rows x (K + 1) (r1: the loader sizes the decode buffers for the shared slot)
     ops::MoeShared sh;
     sh.gate_ty = sh.up_ty = sh.down_ty = GgmlType::mxfp4;
     sh.gate_rows = sh.up_rows = 512;
@@ -642,21 +642,30 @@ void testOpsMoeShx() {
     pl = ops::chooseMoe(p, pre, k97, k97.silu_mul_x8h);
     CHECK(!pl.shx && pl.bits == ops::MoeBits::moe_f32_row && nameOf(pl.gu) == "moe_gu_f_mxfp4");
     // MTP verify rows: n = 2 and 16 take it (above 16, balance / fast verify rows go to the prefill GEMM unless
-    // small_max is raised; then 28 x 9 = 252 <= 256 pairs still fit the buffers, 29 x 9 = 261 do not)
+    // small_max is raised)
     for (const std::uint32_t n : {2u, 16u}) {
         p.n = n;
         pl = ops::chooseMoe(p, fast, k97, k97.silu_mul_x8h);
         CHECK(pl.shx && pl.gu_grid.y == n * 9 && pl.down_grid.y == n);
     }
-    // 29..32 rows only reach the decode experts through precise's max_verify_rows rule (balance / fast: the
-    // prefill GEMM above 16); with small_max raised (wide verify) they keep the separate shared chain
+    // r1: wide verify (small_max raised to max_verify_rows): every width 1..32 takes moeshx (buffers hold 32 x 9 pairs),
+    // so a token's MoE class does not depend on the verify width (before r1, 29..32 rows fell back to the shared chain)
     ops::MoeFlags wide = fast;
     wide.small_max = 32;
-    p.n = 29;
-    pl = ops::chooseMoe(p, wide, k97, k97.silu_mul_x8h);
-    CHECK(pl.small_q8 && !pl.shx && nameOf(pl.gu) == "moe_gu_mxw" && pl.gu_grid.y == 29 * 8);
-    p.n = 28;
-    CHECK(ops::chooseMoe(p, wide, k97, k97.silu_mul_x8h).shx);
+    for (std::uint32_t n = 1; n <= 32; ++n) {
+        p.n = n;
+        pl = ops::chooseMoe(p, wide, k97, k97.silu_mul_x8h);
+        CHECK(pl.small_q8 && pl.shx && pl.bits == ops::MoeBits::moe_q8_shx && pl.gu_grid.y == n * 9 && pl.down_grid.y == n);
+    }
+    // the overflow guard still holds: buffers of the old size (32 x K pairs) refuse 29 rows
+    {
+        ops::MoeProblem q = p;
+        q.buf_slots = 32 * 8;
+        q.n = 29;
+        CHECK(!ops::chooseMoe(q, wide, k97, k97.silu_mul_x8h).shx);
+        q.n = 28;
+        CHECK(ops::chooseMoe(q, wide, k97, k97.silu_mul_x8h).shx);
+    }
     // no kernels (gfx1151 table), generic MXFP4 kernels (WHIRL_MOE_MXW=0), shape not ok, mixed gate / up types
     p.n = 1;
     CHECK(!ops::chooseMoe(p, fast, k8, k8.silu_mul_x8h).shx);

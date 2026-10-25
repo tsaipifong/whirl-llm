@@ -376,9 +376,9 @@ u64 bufferBytes(const Config& cfg, u32 Bq, u64 ffs, u64 max_elems, u32 fd_splits
         const u64 E = cfg.n_embd;
         n += B * cfg.n_expert * f4;                       // moe_logits
         n += B * Kx * 4 + B * Kx * f4 + B * f4;           // moe_ids, moe_w, moe_sg
-        n += max_verify_rows * Kx * F * f4 * 2;           // moe_g, moe_u
-        n += max_verify_rows * Kx * F + 256;              // moe_xq
-        n += (max_verify_rows * Kx * F / 32 + 8) * 4;     // moe_xd
+        n += max_verify_rows * (Kx + 1) * F * f4 * 2;     // moe_g, moe_u (+1: moeshx slot K)
+        n += max_verify_rows * (Kx + 1) * F + 256;        // moe_xq
+        n += (max_verify_rows * (Kx + 1) * F / 32 + 8) * 4;  // moe_xd
         n += B * E * f4;                                  // moe_ysh
         n += B * Kx * 4 * 2;                              // moe_perm, moe_inv
         n += (B * Kx / 32 + cfg.n_expert + 1) * 16;       // moe_tiles
@@ -737,11 +737,12 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
         m.moe_w = m.allocZero(B * Kx * f4);
         m.moe_sg = m.allocZero(B * f4);
         // verify batches up to max_verify_rows rows run on the decode experts (precise, and the
-        // balance / fast wide verify)
-        m.moe_g = m.alloc(max_verify_rows * Kx * F * f4);
-        m.moe_u = m.alloc(max_verify_rows * Kx * F * f4);
-        m.moe_xq = m.alloc(max_verify_rows * Kx * F + 256);
-        m.moe_xd = m.alloc((max_verify_rows * Kx * F / 32 + 8) * 4);
+        // balance / fast wide verify); K + 1 slots per row so moeshx (shared expert = slot K) takes every
+        // width up to max_verify_rows (feat028-moefast97-r1; one extra slot: Ornith 32 x 512 -> +146 KiB in total)
+        m.moe_g = m.alloc(max_verify_rows * (Kx + 1) * F * f4);
+        m.moe_u = m.alloc(max_verify_rows * (Kx + 1) * F * f4);
+        m.moe_xq = m.alloc(max_verify_rows * (Kx + 1) * F + 256);
+        m.moe_xd = m.alloc((max_verify_rows * (Kx + 1) * F / 32 + 8) * 4);
         m.moe_ysh = m.allocZero(B * E * f4);
         m.moe_perm = m.alloc(B * Kx * 4);
         m.moe_inv = m.alloc(B * Kx * 4);

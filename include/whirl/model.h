@@ -779,7 +779,8 @@ public:
     DevPtr moe_sx = 0;
     bool moe_fp8 = true;
     // moeshx (fast item, feat028): int8 decode / verify experts run the shared expert as slot K of the routed
-    // launches (moe_gus_mxfp4w / moe_downs_mxfp4w); off in precise / balance; WHIRL_MOESHX=0|1 overrides
+    // launches (moe_gus_mxfp4w / moe_downs_mxfp4w); fast opt-in (--fast=...,moeshx / WHIRL_MOESHX=1, r1); precise and
+    // balance never set it (WHIRL_MOESHX is ignored there, with a load note)
     bool moe_shx = false;
     bool moe_mxw = true;
     bool moe_rbf = true;  // MXFP4 x fp8 grouped GEMM: row-block-fast gemm8r_* when present (WHIRL_MOE_RBF=0 -> gemm8_moe*)

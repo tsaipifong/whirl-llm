@@ -803,9 +803,9 @@ void Model::moeBlock(DevPtr post_norm, const Mat& sg, const Mat& su, const Mat& 
     mp.refs = mo.gate.ref != 0 && mo.up.ref != 0 && mo.down.ref != 0;
     mp.sx_buf = moe_sx != 0;
     mp.tiles64_buf = moe_tiles64 != 0;
-    // moeshx (fast): the decode expert buffers (moe_g / moe_u / moe_xq / moe_xd) hold max_verify_rows x K pairs
+    // moeshx (fast): the decode expert buffers (moe_g / moe_u / moe_xq / moe_xd) hold max_verify_rows x (K + 1) pairs
     mp.shx_ok = moe_shx && ops::moeShxShape(mp, moeSharedOf(sg, su, sd, mo.sh_gate));
-    mp.buf_slots = max_verify_rows * K;
+    mp.buf_slots = max_verify_rows * (K + 1);
     ops::MoeFlags mf;
     mf.prec_dec = prec_dec;
     mf.small_max = small_max;
