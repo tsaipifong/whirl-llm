@@ -284,6 +284,166 @@ void testGemvhv8(Ctx& c) {
     }
 }
 
+// gemvhv9 (feat026-gemvh8s2, on request: --only gemvhv9): the gfx1151 gemvh2_mxfp4 / gemvh_q6_k / gemvh_q4_k candidates
+// of the development code object (WHIRL_KT_GEMVH8_HSACO, built with -DWHIRL_GVH8_DEV=1: gvh92d<id>_mxfp4 (n <= 32),
+// gvh9d<id>_q6_k, gvh9d<id>_q4_k (n <= 16)) bit for bit against the SHIPPED kernel of the main code object (gemvh2_mxfp4,
+// gemvh_q6_k, gemvh_q4_k; same grid) and against gemm_c0: ncols sweep (every ring tail incl. fewer units than the ring
+// depth) x nrows (partial tiles) x n x accumulate 0/1 at grid tiles, 1/2, 1/3 and one block, plus the Swift shapes
+// (LM head rows > 640 tiles, MTP layer / dense shapes) at kernels::gemvhGrid and caps 100 / 7.
+// WHIRL_KT_GVH9_ONLY=q6_k,q4_k,mxfp4 limits the kernels, WHIRL_KT_GVH9_IDS=1,4 the ids. One invariant per candidate.
+void testGemvhv9(Ctx& c) {
+    c.rep.family = "gemvhv9";
+    const char* hs = std::getenv("WHIRL_KT_GEMVH8_HSACO");
+    if (!hs || !*hs) {
+        c.rep.skip("gemvhv9", "gfx1151 gemvh2_mxfp4 / gemvh_q6_k / gemvh_q4_k candidates", "WHIRL_KT_GEMVH8_HSACO not set");
+        return;
+    }
+    if (c.mod.arch() != hip::Arch::gfx1151) {
+        c.rep.skip("gemvhv9", "gfx1151 gemvh candidates", "needs the gfx1151 code object");
+        return;
+    }
+    std::vector<char> img;
+    if (std::FILE* fp = std::fopen(hs, "rb")) {
+        std::fseek(fp, 0, SEEK_END);
+        img.resize(static_cast<std::size_t>(std::ftell(fp)));
+        std::fseek(fp, 0, SEEK_SET);
+        if (std::fread(img.data(), 1, img.size(), fp) != img.size()) img.clear();
+        std::fclose(fp);
+    }
+    if (img.empty()) {
+        Result r;
+        r.name = std::string("gemvhv9: cannot read ") + hs;
+        r.pass = false;
+        c.rep.add(r);
+        return;
+    }
+    hip::Module xm = hip::Module::loadData(img.data(), c.mod.arch());
+    auto csv = [](const char* e, std::vector<std::string> def) {
+        if (!e || !*e) return def;
+        std::vector<std::string> out;
+        const std::string v = e;
+        for (std::size_t a = 0; a <= v.size();) {
+            std::size_t b = v.find(',', a);
+            if (b == std::string::npos) b = v.size();
+            if (b > a) out.push_back(v.substr(a, b - a));
+            a = b + 1;
+        }
+        return out;
+    };
+    const std::vector<std::string> only = csv(std::getenv("WHIRL_KT_GVH9_ONLY"), {"mxfp4", "q6_k", "q4_k"});
+    const std::vector<std::string> idss = csv(std::getenv("WHIRL_KT_GVH9_IDS"), {"1", "2", "3", "4", "5", "6", "7", "8"});
+    struct KSpec {
+        QType t;
+        bool tn2;  // shipped kernel = gemvh2 (n <= 32) instead of gemvh (n <= 16)
+        const char* prefix;
+        std::vector<int> ncols;
+        std::vector<int> ns;
+        std::vector<std::pair<int, int>> shapes;  // nrows, ncols
+    };
+    const std::vector<KSpec> specs = {
+        {QType::mxfp4, true, "gvh92d", {256, 512, 768, 1280, 5120}, {1, 5, 16, 17, 20, 32},
+         {{17408, 5120}, {5120, 17408}, {10240, 5120}, {6144, 5120}, {4099, 17408}}},
+        {QType::q6_k, false, "gvh9d", {256, 512, 768, 1024, 1280, 1536, 5120}, {1, 2, 4, 5, 16}, {{32771, 5120}, {17408, 5120}, {5120, 17408}}},
+        {QType::q4_k, false, "gvh9d", {256, 512, 768, 1024, 1280, 1536, 5120}, {1, 2, 4, 5, 16},
+         {{17408, 5120}, {5120, 17408}, {10240, 5120}, {6144, 5120}, {4099, 17408}}},
+    };
+    for (const KSpec& sp : specs) {
+        const std::string suf = wk::typeSuffix(sp.t);
+        bool want = false;
+        for (const std::string& o : only) want = want || o == suf;
+        if (!want) continue;
+        const int ti = static_cast<int>(sp.t);
+        const hip::Function ship_f = sp.tn2 ? c.k.gemvh2[ti] : c.k.gemvh[ti];
+        const std::string ship_name = std::string(sp.tn2 ? "gemvh2_" : "gemvh_") + suf;
+        if (!ship_f) {
+            c.rep.skip("gemvhv9", ship_name, "not in the main code object");
+            continue;
+        }
+        std::vector<std::pair<int, hip::Function>> fs;
+        for (const std::string& is : idss) {
+            const int id = std::atoi(is.c_str());
+            if (const hip::Function f = xm.getFunctionOpt((std::string(sp.prefix) + std::to_string(id) + "_" + suf).c_str())) fs.push_back({id, f});
+        }
+        if (fs.empty()) {
+            c.rep.skip("gemvhv9", std::string(sp.prefix) + "*_" + suf, "not in the candidate code object");
+            continue;
+        }
+        std::vector<std::size_t> checked(fs.size(), 0), bad_ship(fs.size(), 0), bad_c0(fs.size(), 0);
+        std::vector<std::string> first_bad(fs.size());
+        std::size_t ship_vs_c0_bad = 0, ship_runs = 0;
+        auto sweep = [&](int ncols, int nrows, const std::vector<int>& nlist, const std::vector<std::pair<std::string, unsigned>>& grids) {
+            const HostMat m = randomMat(c, sp.t, nrows, ncols);
+            Buf w(m.data);
+            Buf x16 = makeX16(c, 32, ncols);
+            for (int nt : nlist)
+                for (int acc = 0; acc < 2; ++acc) {
+                    const std::vector<float> init = c.randn(static_cast<std::size_t>(nt) * nrows, 3.0f);
+                    auto run = [&](hip::Function f, hip::Dim3 grid, int nth) {
+                        Buf y(init);
+                        hip::launch(f, grid, {static_cast<unsigned>(nth), 1, 1}, 0, c.s, w.p(), m.row_bytes, x16.p(), y.p(), ncols, nrows, nt, acc);
+                        c.sync();
+                        return y.down<float>(static_cast<std::size_t>(nt) * nrows);
+                    };
+                    const auto& c0 = wk::kGemmCfgs[0];
+                    const std::vector<float> ref = run(c.k.gemmc[0][ti], hip::Dim3{cdiv(nt, c0.bn), cdiv(nrows, c0.bm), 1}, c0.nth);
+                    for (const auto& gl : grids) {
+                        const unsigned g = gl.second;
+                        const std::vector<float> ship = run(ship_f, hip::Dim3{g, 1, 1}, 32);
+                        ++ship_runs;
+                        if (std::memcmp(ship.data(), ref.data(), ref.size() * 4) != 0) ++ship_vs_c0_bad;
+                        for (std::size_t i = 0; i < fs.size(); ++i) {
+                            const std::vector<float> y = run(fs[i].second, hip::Dim3{g, 1, 1}, 32);
+                            ++checked[i];
+                            const bool bs = std::memcmp(y.data(), ship.data(), ship.size() * 4) != 0;
+                            const bool bc = std::memcmp(y.data(), ref.data(), ref.size() * 4) != 0;
+                            bad_ship[i] += bs ? 1 : 0;
+                            bad_c0[i] += bc ? 1 : 0;
+                            if ((bs || bc) && first_bad[i].empty())
+                                first_bad[i] = "ncols " + std::to_string(ncols) + " nrows " + std::to_string(nrows) + " n " + std::to_string(nt) + " acc " +
+                                               std::to_string(acc) + " " + gl.first + " (" + std::to_string(g) + ")";
+                        }
+                    }
+                }
+        };
+        const std::vector<int> ncolsL = c.quick ? std::vector<int>{256, 768} : sp.ncols;
+        const std::vector<int> nrowsL = c.quick ? std::vector<int>{7, 37} : std::vector<int>{1, 7, 16, 17, 37, 100, 1003};
+        for (int ncols : ncolsL)
+            for (int nrows : nrowsL) {
+                const unsigned tiles = static_cast<unsigned>(cdiv(nrows, 16));
+                sweep(ncols, nrows, sp.ns,
+                      {{"grid tiles", tiles}, {"grid 1/2", std::max(1u, tiles / 2)}, {"grid 1/3", std::max(1u, tiles / 3)}, {"grid 1", 1u}});
+            }
+        if (!c.quick) {
+            const std::vector<int> nprod = sp.tn2 ? std::vector<int>{17, 32} : std::vector<int>{1, 4, 16};
+            for (const auto& ps : sp.shapes) {
+                const unsigned nr = static_cast<unsigned>(ps.first);
+                sweep(ps.second, ps.first, nprod,
+                      {{"grid gemvhGrid", wk::gemvhGrid(nr)}, {"grid cap 100", wk::gemvhGridCap(nr, 100)}, {"grid cap 7", wk::gemvhGridCap(nr, 7)}});
+            }
+        }
+        {
+            Result r;
+            r.name = "gemvhv9: shipped " + ship_name + " == gemm_c0 on the same sweep (" + std::to_string(ship_runs) + " runs; the reference is sound)";
+            r.kind = Kind::invariant;
+            r.n = ship_runs;
+            r.mismatches = ship_vs_c0_bad;
+            r.pass = ship_vs_c0_bad == 0 && ship_runs > 0;
+            c.rep.add(r);
+        }
+        for (std::size_t i = 0; i < fs.size(); ++i) {
+            Result r;
+            r.name = std::string(sp.prefix) + std::to_string(fs[i].first) + "_" + suf + " == shipped " + ship_name + " and gemm_c0, sweep + Swift shapes + grids (" +
+                     std::to_string(checked[i]) + " runs; vs gemm_c0 " + std::to_string(bad_c0[i]) + " bad)";
+            r.kind = Kind::invariant;
+            r.n = checked[i];
+            r.mismatches = bad_ship[i] + bad_c0[i];
+            r.pass = bad_ship[i] == 0 && bad_c0[i] == 0 && checked[i] > 0;
+            if (!first_bad[i].empty()) r.note = "first " + first_bad[i];
+            c.rep.add(r);
+        }
+    }
+}
+
 // WHIRL_KT_PEAK_GBS (default 238): the bandwidth the % column refers to.
 void benchGemvh(Ctx& c) {
     double peak = 238.0;

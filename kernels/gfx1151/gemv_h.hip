@@ -588,10 +588,22 @@ __device__ __forceinline__ void gemvh_dual_impl(const uint8_t *__restrict__ W, u
 
 // feat026-gemvh8s: gemvh_mxfp4 candidates and the tune table (WHIRL_GVH8_MXFP4, default 0 = the kernel below)
 #include "gemv_hv8.hip"
+// feat026-gemvh8s2: gemvh2_mxfp4 / gemvh_q6_k / gemvh_q4_k candidates and tune tables (default 0 = the kernels below)
+#include "gemv_hv9.hip"
 
 #define GH_ENTRY(KIND, SUF, T)                                                                                                                      extern "C" __global__ void __launch_bounds__(32) gemvh_##SUF(const uint8_t *W, uint64_t row_bytes, const _Float16 *X, float *Y, int ncols,                                                                   int nrows, int n_tok, int accumulate) {                                               gemvh_##KIND##_impl<T, 1>(W, row_bytes, X, Y, ncols, nrows, n_tok, accumulate);                                                            }                                                                                                                                              extern "C" __global__ void __launch_bounds__(32) gemvh2_##SUF(const uint8_t *W, uint64_t row_bytes, const _Float16 *X, float *Y, int ncols,                                                                   int nrows, int n_tok, int accumulate) {                                              gemvh_##KIND##_impl<T, 2>(W, row_bytes, X, Y, ncols, nrows, n_tok, accumulate);                                                            }
+// single entries (feat026-gemvh8s2: one entry of a type can be replaced by a tune-table candidate)
+#define GH_ENTRY1(KIND, SUF, T) extern "C" __global__ void __launch_bounds__(32) gemvh_##SUF(const uint8_t *W, uint64_t row_bytes, const _Float16 *X, float *Y, int ncols, int nrows, int n_tok, int accumulate) { gemvh_##KIND##_impl<T, 1>(W, row_bytes, X, Y, ncols, nrows, n_tok, accumulate); }
+#define GH_ENTRY2(KIND, SUF, T) extern "C" __global__ void __launch_bounds__(32) gemvh2_##SUF(const uint8_t *W, uint64_t row_bytes, const _Float16 *X, float *Y, int ncols, int nrows, int n_tok, int accumulate) { gemvh_##KIND##_impl<T, 2>(W, row_bytes, X, Y, ncols, nrows, n_tok, accumulate); }
+#define GH_ENTRY1_X(KIND, SUF, T) GH_ENTRY1(KIND, SUF, T)
+#define GH_ENTRY2_X(KIND, SUF, T) GH_ENTRY2(KIND, SUF, T)
 GH_ENTRY(direct, q8_0, QT_Q8_0)
+#if !WHIRL_GVH8_Q4_K
 GH_ENTRY(direct, q4_k, QT_Q4_K)
+#else
+GVH9_ENTRY_X(gemvh_q4_k, 2, WHIRL_GVH8_Q4_K)
+GH_ENTRY2(direct, q4_k, QT_Q4_K)
+#endif
 GH_ENTRY(direct, q5_k, QT_Q5_K)
 #define GH_ENTRY_X(KIND, SUF, T) GH_ENTRY(KIND, SUF, T)
 // per-type kind (timing builds override, e.g. -DWHIRL_GH_KIND_PAIRED=dual or -DWHIRL_GH_KIND_Q6_K=direct)
@@ -617,16 +629,24 @@ GH_ENTRY(direct, q5_k, QT_Q5_K)
 #ifndef WHIRL_GH_KIND_Q3_K
 #define WHIRL_GH_KIND_Q3_K dual
 #endif
+#if !WHIRL_GVH8_Q6_K
 GH_ENTRY_X(WHIRL_GH_KIND_Q6_K, q6_k, QT_Q6_K)
+#else
+GVH9_ENTRY_X(gemvh_q6_k, 1, WHIRL_GVH8_Q6_K)
+GH_ENTRY2_X(WHIRL_GH_KIND_Q6_K, q6_k, QT_Q6_K)
+#endif
 GH_ENTRY_X(WHIRL_GH_KIND_IQ4_XS, iq4_xs, QT_IQ4_XS)
-#if !WHIRL_GVH8_MXFP4
+#if !WHIRL_GVH8_MXFP4 && !WHIRL_GVH82_MXFP4
 GH_ENTRY_X(WHIRL_GH_KIND_MXFP4, mxfp4, QT_MXFP4)
 #else
-// gemvh_mxfp4 comes from gemv_hv8.hip; gemvh2_mxfp4 stays the shipped kernel
-extern "C" __global__ void __launch_bounds__(32) gemvh2_mxfp4(const uint8_t *W, uint64_t row_bytes, const _Float16 *X, float *Y, int ncols,
-                                                              int nrows, int n_tok, int accumulate) {
-    gemvh_paired_impl<QT_MXFP4, 2>(W, row_bytes, X, Y, ncols, nrows, n_tok, accumulate);
-}
+#if !WHIRL_GVH8_MXFP4
+GH_ENTRY1_X(WHIRL_GH_KIND_MXFP4, mxfp4, QT_MXFP4)
+#endif  // (else gemvh_mxfp4 comes from gemv_hv8.hip)
+#if !WHIRL_GVH82_MXFP4
+GH_ENTRY2_X(WHIRL_GH_KIND_MXFP4, mxfp4, QT_MXFP4)
+#else
+GVH9_ENTRY_X(gemvh2_mxfp4, 0, WHIRL_GVH82_MXFP4)
+#endif
 #endif
 GH_ENTRY_X(WHIRL_GH_KIND_IQ4_NL, iq4_nl, QT_IQ4_NL)
 GH_ENTRY_X(WHIRL_GH_KIND_Q3_K, q3_k, QT_Q3_K)

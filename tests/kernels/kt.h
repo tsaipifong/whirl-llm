@@ -214,6 +214,7 @@ void testAttnDq4(Ctx& c);  // "attndq4": attn_dq4 at 256 splits / contexts up to
 void testGemvh(Ctx& c);   // "gemvh": bitwise sweep of precise-decode gemvh/gemvh2
 void benchGemvh(Ctx& c);  // "gemvhbench": timing only
 void testGemvhv8(Ctx& c);  // "gemvhv8": bitwise sweep of gfx1151 gemvh_mxfp4 candidates from WHIRL_KT_GEMVH8_HSACO (on request)
+void testGemvhv9(Ctx& c);  // "gemvhv9": bitwise sweep of gfx1151 gemvh2_mxfp4 / gemvh_q6_k / gemvh_q4_k candidates (on request)
 void benchAttn(Ctx& c);  // "attnbench": timing only, run with --only attnbench
 void testAttnWs4(Ctx& c);   // "ws4": gfx1151 attn_ws4 bitwise == attn_wsplit1
 void benchAttnWs4(Ctx& c);  // "ws4bench": timing only, on request

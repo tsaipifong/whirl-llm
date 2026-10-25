@@ -42,7 +42,7 @@ std::string envOr(const char* name) {
 
 int usage() {
     std::printf(
-        "usage: whirl-kernel-test [--device SPEC] [--only quant,gemv,gemm,attn,attndq4,gdn,moe,moemx,moef,misc,dflash,gemvh,gemvhv8,ws4,ws4g,vision] [--quick] [-v]\n"
+        "usage: whirl-kernel-test [--device SPEC] [--only quant,gemv,gemm,attn,attndq4,gdn,moe,moemx,moef,misc,dflash,gemvh,gemvhv8,gemvhv9,ws4,ws4g,vision] [--quick] [-v]\n"
         "                         [--q4 GGUF] [--mx GGUF] [--moe GGUF] [--moemx GGUF]\n"
         "  --require-all  a kernel missing from the code object fails unless the arch lacks it by design\n"
         "  --bench gemv,gemvh,gemm,attn,moe,gdn [--jsonl FILE] [--ab HSACO] [--burst-idle S] [--bench-max-s S]\n"
@@ -118,7 +118,7 @@ int main(int argc, char** argv) {
         }
     }
     const char* fam_names[] = {"quant", "gemv", "gemm", "attn", "attndq4", "gdn", "moe", "moemx", "moef", "misc", "attnbench",
-                               "gemvh", "gemvhbench", "gemvhv8", "dflash", "ws4", "ws4bench", "ws4g", "ws4gbench", "vision"};  // = fams below
+                               "gemvh", "gemvhbench", "gemvhv8", "gemvhv9", "dflash", "ws4", "ws4bench", "ws4g", "ws4gbench", "vision"};  // = fams below
     const bool bench = !bo.families.empty();
     if (!bench && (!bo.jsonl.empty() || !bo.ab_hsaco.empty())) {
         std::printf("whirl-kernel-test: --jsonl / --ab need --bench\n");
@@ -228,7 +228,7 @@ int main(int argc, char** argv) {
     const Fam fams[] = {{"quant", kt::testQuant}, {"gemv", kt::testGemv}, {"gemm", kt::testGemm},
                         {"attn", kt::testAttn},   {"attndq4", kt::testAttnDq4},   {"gdn", kt::testGdn},   {"moe", kt::testMoe},
                         {"moemx", kt::testMoeMx}, {"moef", kt::testMoeF}, {"misc", kt::testMisc},   {"attnbench", kt::benchAttn},
-                        {"gemvh", kt::testGemvh}, {"gemvhbench", kt::benchGemvh}, {"gemvhv8", kt::testGemvhv8}, {"dflash", kt::testDflash},
+                        {"gemvh", kt::testGemvh}, {"gemvhbench", kt::benchGemvh}, {"gemvhv8", kt::testGemvhv8}, {"gemvhv9", kt::testGemvhv9}, {"dflash", kt::testDflash},
                         {"ws4", kt::testAttnWs4}, {"ws4bench", kt::benchAttnWs4},
                         {"ws4g", kt::testAttnWs4g}, {"ws4gbench", kt::benchAttnWs4g},
                         {"vision", kt::testVision}};
@@ -248,7 +248,7 @@ int main(int argc, char** argv) {
     for (const Fam& f : fams) {
         if (bench) break;
         if (!only.empty() && !only.count(f.name)) continue;
-        if (only.empty() && (std::string(f.name) == "attnbench" || std::string(f.name) == "gemvhbench" || std::string(f.name) == "gemvhv8" || std::string(f.name) == "ws4bench" || std::string(f.name) == "ws4gbench")) continue;  // timing only, on request
+        if (only.empty() && (std::string(f.name) == "attnbench" || std::string(f.name) == "gemvhbench" || std::string(f.name) == "gemvhv8" || std::string(f.name) == "gemvhv9" || std::string(f.name) == "ws4bench" || std::string(f.name) == "ws4gbench")) continue;  // timing only, on request
         const auto t0 = std::chrono::steady_clock::now();
         std::printf("== %s\n", f.name);
         std::fflush(stdout);
