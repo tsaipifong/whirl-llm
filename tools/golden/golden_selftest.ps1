@@ -10,7 +10,11 @@
 #   - in-run cross-checks (FIX-TEST-A, FR-TEST P2-7): the real gfx1201 dense references pass xcheck; a run
 #     whose seg prefill lh differs from solo, or whose MTP stream is not an extension of the plain stream,
 #     is an error (exit 2) and record writes nothing; xcheck on such a reference tree exits 2
-#   - record without a KL gate report, with one for another exe, or with a failing one: exit 2, nothing written
+#   - KL guard (arch025-klguard; KL is a regression guard, not a veto): a report that is not usable evidence (another
+#     exe, 1 position, run errors) is refused before any run (exit 2, nothing written); a precise-only record needs no
+#     report; a balance KL miss is a WARN line with the numbers and the items, recorded, evidence JSON written, exit 0;
+#     a balance change without -TaskAccuracy gets a "TODO task-accuracy:" line, without a report "TODO kl-guard:";
+#     a byte-identical re-record needs no report; a precise golden mismatch in check is still exit 1
 #   - suite server (ARCH-1, fake_gate.cmd): record + check, a changed hash (exit 1), a failing in-run check or a
 #     run without "(ALL PASS)" (exit 2); exe / reference-set hashes printed; refhash follows the reference bytes
 #   - suite server log scan (arch024-S10, tools/gates/server_log_scan.ps1 owner set): a PASS line per case; an
@@ -29,21 +33,31 @@ $env:WHIRL_GOLDEN_DENSE = $model
 $bad = 0
 
 # a passing KL gate report for the fake exe (tools/klgate/klgate.py --report format)
-function KlRep([string]$name, [bool]$pass, [string]$sha, [int]$positions = 3) {
+# -Miss: one dense balance case beyond its guard line (KL 0.0061 > 0.005, top-1 96.80% < 97%), with the numerics line
+# of that run (the items); -Errors: a report whose runs failed (not usable evidence)
+function KlRep([string]$name, [bool]$pass, [string]$sha, [int]$positions = 3, [switch]$Miss, [switch]$Errors) {
     $p = Join-Path $tmp $name
+    $cases = @(
+        @{ model = "dense"; prompt = "code"; mode = "balance"; length = 8192; rule = "dense-length"; kl_mean = $(if ($Miss) { 0.0061 } else { 0.0011 })
+           kl_limit = 0.005; top1 = $(if ($Miss) { 0.968 } else { 0.985 }); top1_limit = 0.97; zero_rows = 0; pass = -not $Miss },
+        @{ model = "dense"; prompt = "code"; mode = "fast"; length = 8192; rule = "dense-length"; kl_mean = 0.012; kl_limit = 0.03
+           top1 = 0.95; top1_limit = 0.93; zero_rows = 0; pass = $true })
     @{ exe_sha256 = $sha; device = "default"; pass = $pass; summary = "selftest"; modes = @("balance", "fast"); positions = $positions
-       lengths = @(8192, 32768, 98304, 131072); models = @{ dense = "fake-model.gguf" } } | ConvertTo-Json -Depth 4 | Set-Content $p
+       lengths = @(8192, 32768, 98304, 131072); models = @{ dense = "fake-model.gguf" }; cases = $cases; mode_args = @{}
+       errors = @(if ($Errors) { "dense_code_balance: exit 3 (log x.log)" })
+       numerics = @{ dense_code_balance = "numerics: balance - enabled: fp8, h16, kvq8 (q8h KV (int8 + f16 scale / 32, Hadamard-rotated q/k)), specsample (temperature > 0: race sampler); skipped: moefp8 (dense model); decode: q8dec (int8 activations in the decode / verify GEMV, as llama.cpp's q8_1)" }
+    } | ConvertTo-Json -Depth 6 | Set-Content $p
     return $p
 }
 $fakeSha = (Get-FileHash -Algorithm SHA256 $fake).Hash.ToLower()
 $klGood = KlRep "kl_good.json" $true $fakeSha
-function RunGate([string]$action, [string]$root, [hashtable]$fakeEnv, [string]$kl = $klGood) {
+function RunGate([string]$action, [string]$root, [hashtable]$fakeEnv, [string]$kl = $klGood, [string]$modes = "precise", [string[]]$more = @()) {
     foreach ($k in @("FAKEGOLD_FAIL_SUITE", "FAKEGOLD_NOSTEPS", "FAKEGOLD_DIR")) { [Environment]::SetEnvironmentVariable($k, $null) }
     foreach ($k in $fakeEnv.Keys) { [Environment]::SetEnvironmentVariable($k, $fakeEnv[$k]) }
     $env:WHIRL_GOLDEN_DENSE = $model
     $klArg = if ($kl) { @("-KlReport", $kl) } else { @() }
-    $out = & pwsh -NoProfile -File $gate $action -Models dense -Modes precise -Suites "single,pair" -Exe $fake `
-        -GoldenRoot $root -Out (Join-Path $tmp "out") @klArg 2>&1 | ForEach-Object { "$_" }
+    $out = & pwsh -NoProfile -File $gate $action -Models dense -Modes $modes -Suites "single,pair" -Exe $fake `
+        -GoldenRoot $root -Out (Join-Path $tmp "out") @klArg @more 2>&1 | ForEach-Object { "$_" }
     $rc = $LASTEXITCODE
     foreach ($k in @("FAKEGOLD_FAIL_SUITE", "FAKEGOLD_NOSTEPS", "FAKEGOLD_DIR")) { [Environment]::SetEnvironmentVariable($k, $null) }
     return @{ rc = $rc; out = $out }
@@ -113,15 +127,68 @@ try {
     Copy-Item $pf (Join-Path $g3 "gfx1201\dense\precise_pair.txt") -Force
     $r = @{ out = @(& pwsh -NoProfile -File $gate xcheck -Arch gfx1201 -Models dense -Modes precise -Suites pair -GoldenRoot $g3 2>&1 | ForEach-Object { "$_" }); rc = $LASTEXITCODE }
     Expect "xcheck of a reference with seg0 lh != solo0 lh" $r 2
-    # 6) record without a passing KL gate report for this exe: refused, nothing written
-    $cases = @(@("no report", ""), @("report of another exe", (KlRep "kl_other.json" $true ("0" * 64))),
-               @("failing report", (KlRep "kl_fail.json" $false $fakeSha)),
-               @("single-position report", (KlRep "kl_pos1.json" $true $fakeSha 1)))
+    # 6) KL guard (arch025-klguard): KL is a regression guard, not a veto; a report that is not usable evidence is
+    #    a setup error (exit 2, nothing written); precise stays the strict bitwise golden
+    $cases = @(@("a report of another exe", (KlRep "kl_other.json" $true ("0" * 64))),
+               @("a single-position report", (KlRep "kl_pos1.json" $true $fakeSha 1)),
+               @("a report whose runs failed", (KlRep "kl_err.json" $false $fakeSha -Errors)))
     foreach ($c in $cases) {
-        $g3 = Join-Path $tmp ("g3_" + ($c[0] -replace " ", "_"))
-        $r = RunGate "record" $g3 @{} $c[1]
-        Expect "record with $($c[0]) is refused and writes nothing" $r 2 { -not (Test-Path (Join-Path $g3 "gfx1201\dense\precise_single.txt")) }
+        $g6 = Join-Path $tmp ("g6_" + ($c[0] -replace " ", "_"))
+        $r = RunGate "record" $g6 @{} $c[1] "precise,balance"
+        Expect "record with $($c[0]) is refused before any run and writes nothing" $r 2 {
+            -not (Test-Path (Join-Path $g6 "gfx1201\dense\balance_single.txt")) -and ($r.out -match "golden: record refused: kl guard: ERROR") }
     }
+    # 6a) precise-only record without a KL report: precise is bitwise, the guard is not needed
+    $g6a = Join-Path $tmp "g6a"
+    $r = RunGate "record" $g6a @{} ""
+    Expect "precise-only record without a KL report: written, KL guard NOT NEEDED" $r 0 {
+        (Test-Path (Join-Path $g6a "gfx1201\dense\precise_single.txt")) -and ($r.out -match "^kl guard: NOT NEEDED") -and -not ($r.out -match "^TODO ") }
+    # 6b) a KL miss in balance: WARN with the numbers and the items, recorded, evidence written, exit 0, and the
+    #     missing task-accuracy reference is a named TODO line
+    $g6b = Join-Path $tmp "g6b"
+    $ev6b = Join-Path $tmp "ev6b.json"
+    $r = RunGate "record" $g6b @{} (KlRep "kl_miss.json" $false $fakeSha -Miss) "precise,balance" @("-KlEvidence", $ev6b)
+    $evj = if (Test-Path $ev6b) { Get-Content $ev6b -Raw | ConvertFrom-Json } else { $null }
+    Expect "balance KL miss: WARN line with numbers and items, references written, evidence recorded, exit 0" $r 0 {
+        (Test-Path (Join-Path $g6b "gfx1201\dense\balance_single.txt")) -and
+        ($r.out -match "^WARN kl guard: dense code balance length 8192 \(dense-length\): KL 0\.00610 vs guard line 0\.00500; top1 96\.80% vs guard line 97\.00% \| mode balance, items fp8, h16, kvq8, specsample, q8dec \(allowed balance items: fp8, h16, kvq8, specsample, q8dec\)") -and
+        ($r.out -match "^kl guard: WARN \(golden record gfx1201\): 1 of 1 case\(s\) beyond the guard line") -and
+        ($r.out -match "^golden update note: gfx1201 balance: 2 reference\(s\); kl guard: WARN") -and
+        $evj -and $evj.verdict -eq "WARN" -and @($evj.misses).Count -eq 1 -and $evj.misses[0].kl_mean -eq 0.0061 }
+    Expect "balance KL miss without -TaskAccuracy: a named TODO task-accuracy line" $r 0 {
+        ($r.out -match "^TODO task-accuracy: balance changed \(golden record gfx1201\)") -and @($evj.todo).Count -eq 1 }
+    # 6c) the same with a task-accuracy reference: no TODO, the reference and its hash are in the evidence
+    $g6c = Join-Path $tmp "g6c"
+    $ta = Join-Path $tmp "taskacc.json"; '{"verdict":"selftest"}' | Set-Content $ta
+    $ev6c = Join-Path $tmp "ev6c.json"
+    $r = RunGate "record" $g6c @{} (Join-Path $tmp "kl_miss.json") "balance" @("-KlEvidence", $ev6c, "-TaskAccuracy", $ta)
+    $evj = if (Test-Path $ev6c) { Get-Content $ev6c -Raw | ConvertFrom-Json } else { $null }
+    Expect "balance KL miss with -TaskAccuracy: WARN, no TODO, reference in the evidence" $r 0 {
+        ($r.out -match "^WARN kl guard: dense code balance") -and -not ($r.out -match "^TODO ") -and $evj -and "$($evj.task_accuracy.sha256)" -match "^[0-9a-f]{64}$" }
+    # 6d) a balance change without any KL report: recorded, TODO kl-guard + TODO task-accuracy, exit 0
+    $g6d = Join-Path $tmp "g6d"
+    $r = RunGate "record" $g6d @{} "" "balance"
+    Expect "balance change without a KL report: written, TODO kl-guard and TODO task-accuracy, NOT RUN" $r 0 {
+        (Test-Path (Join-Path $g6d "gfx1201\dense\balance_single.txt")) -and ($r.out -match "^TODO kl-guard: balance changed") -and
+        ($r.out -match "^TODO task-accuracy: balance changed") -and ($r.out -match "^kl guard: NOT RUN") }
+    # 6e) re-record of unchanged balance references (a bitwise refactor): no KL report needed, no TODO
+    $r = RunGate "record" $g6d @{} "" "balance"
+    Expect "re-record of byte-identical balance references: KL guard NOT NEEDED, no TODO" $r 0 {
+        ($r.out -match "every reference is byte-identical") -and ($r.out -match "^kl guard: NOT NEEDED") -and -not ($r.out -match "^TODO ") }
+    # 6f) a balance case within its guard line: PASS (the TODO for the task-accuracy reference still applies)
+    $g6f = Join-Path $tmp "g6f"
+    $r = RunGate "record" $g6f @{} $klGood "balance"
+    Expect "balance within the guard line: kl guard PASS" $r 0 { ($r.out -match "^kl guard: PASS \(golden record gfx1201\): 1 case") -and ($r.out -match "^TODO task-accuracy: balance") }
+    # 6g) precise golden mismatch: still a blocking DIFF (exit 1); a balance mismatch in check also stays exit 1 (the
+    #     bitwise pin of refactors) and says how to record an intended change
+    $f = Join-Path $g6a "gfx1201\dense\precise_single.txt"
+    $l = @(Get-Content $f); $l = @($l | ForEach-Object { $_ -replace "lh=aa", "lh=ab" }); [System.IO.File]::WriteAllLines($f, [string[]]$l)
+    $r = RunGate "check" $g6a @{} ""
+    Expect "precise golden mismatch is still a blocking DIFF (exit 1)" $r 1 { $r.out -match "DIFF  dense/precise_single" }
+    $f = Join-Path $g6d "gfx1201\dense\balance_single.txt"
+    $l = @(Get-Content $f); $l = @($l | ForEach-Object { $_ -replace "lh=aa", "lh=ab" }); [System.IO.File]::WriteAllLines($f, [string[]]$l)
+    $r = RunGate "check" $g6d @{} "" "balance"
+    Expect "balance golden mismatch in check: exit 1 with the record hint" $r 1 { $r.out -match "an intended balance output change: record new references with the KL guard report" }
     # 7) suite server (ARCH-1) through a fake whirl-server-gate: record / check, a hash change, a failing in-run check,
     #    a gate run without its ALL PASS line; the exe and reference-set hashes are printed; refhash follows the files
     $fakeGate = Join-Path $PSScriptRoot "fake_gate.cmd"

@@ -49,8 +49,9 @@
 #     admits int8 decode activations (q8dec: the q8_1 scheme llama.cpp itself uses for decode, the
 #     same numeric level as llama.cpp); the KL limits are unchanged (audit/MOE-BAL-3.md).
 # Exit 0 only when every case ran and passed; 1 = a limit failed; 2 = a run / input error or 0 cases.
-# The JSON report (--report) holds the exe's SHA-256: tools/golden/golden.ps1 record requires a
-# passing report for the same exe before it writes fast / balance references.
+# The JSON report (--report) holds the exe's SHA-256. golden.ps1 record and the release gate step kl_guard
+# read it through tools/klgate/kl_guard.ps1 as a regression guard (arch025-klguard): a case beyond its limit
+# is a WARN with its numbers and items plus a task-accuracy TODO, never a veto; exit 1 here only means that.
 #
 # Corpus: --corpus DIR with the files listed in corpus.sha256 next to this script (fixed texts; a
 # changed file is an error, so numbers stay comparable across releases). Defaults: code = C++/HIP

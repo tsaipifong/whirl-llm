@@ -7,6 +7,11 @@
 #   pwsh tools/gates/release_gate.ps1 -Device r9700|8060s [-Build DIR] [-ExpectCommit SHA] [-Steps a,b,...]
 #                                     [-Work DIR] [-Tag NAME] [-InjectFail] [-List] [-LaunchLog DIR]
 #                                     [-Module name[,name]] [-ModulesFile PATH] (-ImpactRange A..B|worktree | -NoMapSteps)
+#                                     [-KlReport klgate_report.json] [-TaskAccuracy FILE|exp_id]
+#
+# -KlReport / -TaskAccuracy (arch025-klguard): inputs of step kl_guard, the KL regression guard (not a veto; see the
+# step's comment). Its "WARN kl guard:" / "TODO task-accuracy:" / "TODO kl-guard:" lines are printed under the step's
+# row and written into the summary before the verdict line. Self-test: tools/gates/kl_guard_selftest.ps1 (CPU).
 #
 # -Module (arch024-S12): select the steps of one or more modules from tools/gates/modules.json (PLAN c-1);
 # -Steps given as well adds those steps (e.g. a module's `when` steps that impact.py prints). DEV-TIME FAST
@@ -76,7 +81,9 @@ param(
     [string[]]$Module = @(),
     [string]$ModulesFile = "",
     [string]$ImpactRange = "",
-    [switch]$NoMapSteps
+    [switch]$NoMapSteps,
+    [string]$KlReport = "",      # step kl_guard: the tools/klgate/klgate.py --report of this exe on this GPU (regression guard)
+    [string]$TaskAccuracy = ""   # step kl_guard: the task-accuracy result reference (file or KB exp_id) of this build's balance / fast
 )
 $ErrorActionPreference = "Stop"
 $repo = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
@@ -147,6 +154,7 @@ AddStep "cpu_device_once" $false @($pwsh, "-NoProfile", "-File", (Join-Path $rep
 AddStep "cpu_probe_dispatch" $false @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\repro\probe_dispatch_check.ps1"), "-Build", $Build) { param($o, $c) $c -eq 0 -and ($o -match "(?m)^probe_dispatch_check: PASS") }
 AddStep "cpu_server_only_typo" $false @($exe["whirl-server-tests"], "--gguf", $SW, "--only", "no_such_test") { param($o, $c) $c -eq 2 }
 AddStep "cpu_golden_selftest" $false @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\golden\golden_selftest.ps1")) { param($o, $c) $c -eq 0 -and ($o -match "all cases as expected") }
+AddStep "cpu_kl_guard_selftest" $false @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\gates\kl_guard_selftest.ps1")) { param($o, $c) $c -eq 0 -and ($o -match "^kl guard selftest: ([1-9]\d*)/\1 as expected") }
 AddStep "cpu_logscan_selftest" $false @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\gates\server_log_scan_selftest.ps1")) { param($o, $c) $c -eq 0 -and ($o -match "server log scan selftest: \d+/\d+ as expected") }
 AddStep "cpu_golden_xcheck" $false @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\golden\golden.ps1"), "xcheck", "-Arch", $arch, "-Models", $gmodels) { param($o, $c) $c -eq 0 -and ($o -match "file\(s\) ok") }
 # arch024-S12: the -Module step-selection table (tools/gates/module_gate_cases.tsv; CPU, runs this script with -List)
@@ -266,6 +274,20 @@ AddStep "srv_env_e1" $true (EnvCmd "E1") $envRule
 AddStep "srv_env_e3" $true (EnvCmd "E3") $envRule
 AddStep "srv_env_e4" $true (EnvCmd "E4") $envRule
 AddStep "srv_env_e7" $true @((EnvCmd "E7") + "-Golden") $envRule @{ WHIRL_GOLDEN_SWIFT = $SW; WHIRL_GOLDEN_MOE = $MX }
+# arch025-klguard (owner mode standard 2026-10-26): the KL gate is a REGRESSION GUARD, not a veto. kl_guard (CPU) judges
+# -KlReport (klgate.py --report of this whirl.exe on this GPU) with tools/klgate/kl_guard.ps1: a balance / fast case beyond
+# its guard line is a "WARN kl guard:" line with the numbers and the mode's items, no report is "TODO kl-guard:", no
+# -TaskAccuracy is "TODO task-accuracy:"; all of them PASS the step (the WARN / TODO lines are copied into the summary,
+# before the verdict) and the evidence JSON stays in the step's log folder. A report that is not usable evidence (another
+# exe / GPU, run errors, < 3 positions, a length / model missing, a negative --as test) fails the step (exit 2). precise is
+# judged by the golden / seqtest / mt_cache_precise steps (bitwise), never here.
+$klArgs = @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\klgate\kl_guard.ps1"), "-Exe", $exe["whirl"], "-Arch", $arch,
+            "-Modes", "balance,fast", "-Context", "release gate $Device", "-Evidence", (Join-Path (Join-Path $Work $Tag) "kl_guard_evidence.json"))
+$klM = @(@($SW, $MX) | Where-Object { $_ } | ForEach-Object { Split-Path -Leaf $_ })
+if ($klM.Count) { $klArgs += @("-Models", ($klM -join ",")) }
+if ($KlReport) { $klArgs += @("-Report", $KlReport) }
+if ($TaskAccuracy) { $klArgs += @("-TaskAccuracy", $TaskAccuracy) }
+AddStep "kl_guard" $false $klArgs { param($o, $c) $c -eq 0 -and ($o -match "^kl guard: (PASS|WARN|NOT RUN) ") }
 
 # ---------------------------------------------------------------------------------------------------
 # -Module: steps from tools/gates/modules.json (arch024-S12; dev-time fast feedback only, see the header)
@@ -433,6 +455,7 @@ New-Item -ItemType Directory -Force $testTmp | Out-Null
 $env:WHIRL_TEST_TMP = $testTmp
 $lock = $env:WHIRL_GATE_LOCK_SCRIPT
 $rows = @()
+$notes = @()
 try {
     foreach ($s in $sel) {
         $t0 = Get-Date
@@ -519,6 +542,12 @@ try {
         $row = "{0,-4} {1,-22} exit {2,3}  {3,5} s  {4}{5}" -f ($(if ($ok) { "PASS" } else { "FAIL" })), $s.name, $c, $sec, "$last".Trim(), $wddmNote
         Write-Host $row
         $rows += [pscustomobject]@{ ok = $ok; line = $row }
+        # arch025-klguard: the regression-guard warnings and the open TODOs (task accuracy, a guard not run) are printed
+        # and kept in the summary (before the verdict line; release_check reads only the PASS / FAIL rows and the verdict)
+        foreach ($wl in @($out | Where-Object { $_ -match "^(WARN kl guard|TODO task-accuracy|TODO kl-guard):" })) {
+            Write-Host "     $wl"
+            $notes += "$($s.name): $wl"
+        }
     }
 } finally {
     Remove-Item Env:WHIRL_TEST_TMP -ErrorAction SilentlyContinue
@@ -527,7 +556,7 @@ try {
 }
 $nf = @($rows | Where-Object { -not $_.ok }).Count
 $verdict = if ($rows.Count -eq 0) { "FAIL (no step ran)" } elseif ($nf -gt 0) { "FAIL ($nf of $($rows.Count) steps failed)" } else { "PASS ($($rows.Count) steps)" }
-$summary = @($hdr) + @($rows | ForEach-Object { $_.line }) + @("release gate $Tag`: $verdict")
+$summary = @($hdr) + @($rows | ForEach-Object { $_.line }) + @($notes) + @("release gate $Tag`: $verdict")
 [System.IO.File]::WriteAllLines((Join-Path $Work "${Tag}_summary.txt"), [string[]]$summary)
 Write-Host "release gate $Tag`: $verdict  (logs: $logDir)"
 if ($rows.Count -gt 0 -and $nf -eq 0) { "PASS $(Get-Date -Format s) $head" | Set-Content (Join-Path $Work "PASS_$Tag"); exit 0 }
