@@ -6,13 +6,25 @@
 #include "cache/prefix_cache.h"
 #include "mock_tier.h"
 #include "tier/kv_tier.h"
+#include "whirl/common.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
+#include <cwchar>
 #include <format>
 #include <numeric>
 #include <stdexcept>
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>  // arch025 PL1: the reference copy of the base GetEnvironmentStringsW loop
+#endif
 
 using namespace whirl::cache;
 using whirl::cache::test::MockTier;
@@ -661,6 +673,80 @@ static void testSupersede() {
     CHECK(tr.size() == 0);
 }
 
+// arch025 PL1 (high risk of the plan: a changed environment enumeration makes every SSD entry miss). Pins:
+//  (1) fingerprintEnv() == a verbatim copy of the v0.2.4 / arch025-base loop (GetEnvironmentStringsW, narrow, the
+//      '=' search from 1, fingerprintEnvKept), same pairs in the same order, on the live environment and with a fixed
+//      set added (value with '=', non-ASCII value, lower-case name, a skipped name);
+//  (2) the fixed set, filtered from fingerprintEnv(), gives exactly the literal pairs below;
+//  (3) tierFingerprint of fixed inputs + that set == 0xe30c1ff63c026f60, computed independently by
+//      scratch\a25_pl1\fp_expected.py (FNV-1a re-implementation; tierFingerprint itself is unchanged by PL1).
+// arch025-S0a recorded no fingerprint value for arch025-base, so (1) is the base pin: the reference IS the base code.
+#ifdef _WIN32
+static std::vector<std::pair<std::string, std::string>> baseFingerprintEnv() {
+    std::vector<std::pair<std::string, std::string>> kv;
+    if (wchar_t* blk = GetEnvironmentStringsW()) {
+        for (const wchar_t* p = blk; *p; p += wcslen(p) + 1) {
+            const std::string s = whirl::narrow(p);
+            const std::size_t eq = s.find('=', 1);
+            if (eq == std::string::npos) continue;
+            std::string k = s.substr(0, eq);
+            if (fingerprintEnvKept(k)) kv.emplace_back(k, s.substr(eq + 1));
+        }
+        FreeEnvironmentStringsW(blk);
+    }
+    return kv;
+}
+#endif
+
+static void testFingerprintPlatformEnv() {
+#ifdef _WIN32
+    CHECK(fingerprintEnv() == baseFingerprintEnv());  // the environment the test runs in
+    _putenv_s("WHIRL_PL1T_B", "2");
+    _putenv_s("WHIRL_PL1T_A", "1");
+    _putenv_s("whirl_pl1t_lower", "x");
+    _putenv_s("WHIRL_PL1T_EQ", "a=b");
+    _wputenv_s(L"WHIRL_PL1T_U", L"\u00e9\u4e2d");
+    _putenv_s("WHIRL_KV_SSD_DIR", "D:\\pl1");  // skipped name
+    const auto got = fingerprintEnv();
+    CHECK(got == baseFingerprintEnv());
+    std::vector<std::pair<std::string, std::string>> mine;
+    for (const auto& p : got) {
+        std::string up = p.first;
+        for (char& c : up) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        if (up.rfind("WHIRL_PL1T_", 0) == 0 || up == "WHIRL_KV_SSD_DIR") mine.push_back(p);
+    }
+    std::vector<std::pair<std::string, std::string>> want = {
+        {"WHIRL_PL1T_A", "1"}, {"WHIRL_PL1T_B", "2"}, {"WHIRL_PL1T_EQ", "a=b"}, {"WHIRL_PL1T_U", "\xc3\xa9\xe4\xb8\xad"},
+        {"whirl_pl1t_lower", "x"}};
+    auto sorted = mine;
+    std::sort(sorted.begin(), sorted.end());
+    CHECK(sorted == want);
+    FingerprintInputs in;
+    in.exe_id = 0x1234abcd;
+    in.model_base = "Swift-1.5-27B-MXFP4.gguf";
+    in.tensors = 851;
+    in.bytes = 16'000'000'000ull;
+    in.kv_name = "q8h";
+    in.use_mtp = true;
+    in.n_gdn = 48;
+    in.ck_bytes = 1 << 20;
+    in.page_bytes = 1 << 18;
+    in.max_batch = 4096;
+    in.numerics = "balance (items a,b)";
+    in.gpu_arch = "gfx1201";
+    in.gpu_name = "AMD Radeon AI PRO R9700";
+    in.kernel_set = "gfx1201 co 123";
+    in.env = mine;
+    const std::uint64_t fp = tierFingerprint(in);
+    if (fp != 0xe30c1ff63c026f60ull) std::printf("  PL1 fingerprint 0x%016llx (expected 0xe30c1ff63c026f60)\n",
+                                                 static_cast<unsigned long long>(fp));
+    CHECK(fp == 0xe30c1ff63c026f60ull);
+    for (const char* k : {"WHIRL_PL1T_B", "WHIRL_PL1T_A", "whirl_pl1t_lower", "WHIRL_PL1T_EQ", "WHIRL_PL1T_U", "WHIRL_KV_SSD_DIR"})
+        _putenv_s(k, "");
+    CHECK(fingerprintEnv() == baseFingerprintEnv());
+#endif
+}
+
 int main() {
     whirl::test::clearWhirlEnv();  // FR-TEST P3-11
     testHelpers();
@@ -672,6 +758,7 @@ int main() {
     testLcpTarget();
     testFingerprint();
     testFingerprintDumpEnv();
+    testFingerprintPlatformEnv();  // arch025 PL1
     try {
         testServerFingerprintInputs();
     } catch (const std::exception& e) {  // e.g. a field the assembly no longer fills: report, do not abort

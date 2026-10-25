@@ -73,6 +73,29 @@ longer name it).
   tracked accepted socket, fail with that Winsock error, without calling Winsock. The tests `net_accept_error` and
   `net_recv_error` use them: the connection closes, and the server goes on.
 
+## env / paths / console / time (PL1)
+
+PL1 (2026-10-26) filled the four small concerns. Each function wraps exactly the call it replaced; the logic stays
+with the caller.
+- `env::get(name)` is the one `_dupenv_s` read: `envGet` / `EnvSnapshot::capture` (src/config), the VRAM cap
+  (src/common/vram_limit.cpp), the kernel table switches (src/kernels_host/kernels_abi.cpp) and LOCALAPPDATA.
+  `env::set` is the one `_putenv_s` of the product (GPU_RESOURCE_CACHE_SIZE, server_main.cpp). `env::block()`
+  returns the raw `GetEnvironmentStringsW` entries in the OS order; the SSD fingerprint (src/cache/fingerprint.cpp)
+  still converts (`narrow`), filters and sorts them itself, so the fingerprint is unchanged.
+- `paths::localAppData()` reads the narrow LOCALAPPDATA (not `SHGetKnownFolderPath`, not `_wgetenv`: v0.2.4 did
+  not, and a changed tune or kvcache path would re-tune / miss the SSD tier). The path builders (`whirlDir`,
+  `serverLogPath`, `kvCacheDir`, `tuneCachePath`, `tuneReadPaths4`, `tuneReadPathsOld`) are pure string functions,
+  pinned by `testPlatformPaths` with the literal v0.2.4 strings. `declarePinned` (kv_tier.cpp) still builds its own
+  `pinned` folder from the pointer it is given.
+- `console::isConsole` / `outputCodePage` / `setOutputCodePage` / `setStdoutBinary`; the saved code page and the
+  atexit restore stay in `initConsole` (src/release/release.cpp, which no longer includes `<windows.h>`; the two
+  LoadLibrary error codes are `dlldeps::k_error_mod_not_found` / `k_error_proc_not_found`).
+- `time::beginPeriod1ms` / `endPeriod1ms` (winmm is linked by `whirl_platform`), `time::localTime` for log lines.
+
+Pins: `testFingerprintPlatformEnv` (cache tests: `fingerprintEnv()` equals a verbatim copy of the base loop, and a
+fixed environment set hashes to a constant computed outside C++), `testPlatformPaths`, `testPlatformEnv`,
+`testPlatformConsoleTime` (unit tests). Mutations of each are in `scratch\a25_pl1\pl1_extra.ps1`.
+
 ## The check
 
 `tools/gates/platform_check.ps1` (rule `platform` of `tools/gates/pending_scan.py`) scans `src/` and `include/`

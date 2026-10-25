@@ -24,6 +24,10 @@
 #include "whirl/kernels_abi.h"
 #include "hip/alloc_log.h"
 #include "hip/launch_log.h"
+#include "platform/console.h"
+#include "platform/env.h"
+#include "platform/paths.h"
+#include "platform/time.h"
 #if WHIRL_TEST_DLL_DEPS
 #include "release/dll_deps.h"
 #endif
@@ -36,6 +40,7 @@
 #include <format>
 #include <cstdio>
 #include <cstring>
+#include <cwchar>
 #include <optional>
 #include <regex>
 #include <stdexcept>
@@ -4042,6 +4047,136 @@ void testProbeChild(const wchar_t* self) {
 }
 #endif
 
+// arch025 PL1: platform::paths table (every path string as the v0.2.4 expressions built it, literal expected values),
+// platform::env (get / set / block against the v0.2.4 calls), platform::console / platform::time (same values as the
+// Win32 calls they wrap). A change of a separator, a folder name, an order or a read makes a row FAIL.
+static void testPlatformPaths() {
+    namespace pp = whirl::platform::paths;
+    struct Row {
+        const char* base;
+        const char* whirl_dir;
+        const char* log;
+        const char* kvcache;
+    };
+    const Row rows[] = {
+        {"C:\\Users\\u\\AppData\\Local", "C:\\Users\\u\\AppData\\Local\\whirl", "C:\\Users\\u\\AppData\\Local\\whirl\\server.log",
+         "C:\\Users\\u\\AppData\\Local\\whirl\\kvcache"},
+        {"", "\\whirl", "\\whirl\\server.log", "\\whirl\\kvcache"},              // set but empty: no fallback (as before)
+        {"D:\\x\\", "D:\\x\\\\whirl", "D:\\x\\\\whirl\\server.log", "D:\\x\\\\whirl\\kvcache"},  // no normalising
+        {"C:\\Users\\\xe8\x94\xa1\\AppData\\Local", "C:\\Users\\\xe8\x94\xa1\\AppData\\Local\\whirl",
+         "C:\\Users\\\xe8\x94\xa1\\AppData\\Local\\whirl\\server.log", "C:\\Users\\\xe8\x94\xa1\\AppData\\Local\\whirl\\kvcache"},
+    };
+    for (const Row& r : rows) {
+        CHECK(pp::whirlDir(r.base) == r.whirl_dir);
+        CHECK(pp::serverLogPath(std::optional<std::string>(r.base)) == r.log);
+        CHECK(pp::kvCacheDir(r.base) == r.kvcache);
+    }
+    CHECK(pp::serverLogPath(std::nullopt) == "whirl-server.log");  // LOCALAPPDATA unset: the working folder
+    // tune cache (src/model/tune.cpp): the file written, then the read order (tune4 in whirl, whirl-r9700; then the
+    // tune3- / tune- tables of the research prototype)
+    const std::string b = "C:\\Users\\u\\AppData\\Local";
+    const std::string stem = "Swift-1.5-27B-MXFP4.gguf-16000000000-gfx1151r2.txt";
+    CHECK(pp::tuneCachePath(b, stem) == "C:\\Users\\u\\AppData\\Local\\whirl\\tune4-Swift-1.5-27B-MXFP4.gguf-16000000000-gfx1151r2.txt");
+    const std::vector<std::string> r4 = {
+        "C:\\Users\\u\\AppData\\Local\\whirl\\tune4-Swift-1.5-27B-MXFP4.gguf-16000000000-gfx1151r2.txt",
+        "C:\\Users\\u\\AppData\\Local\\whirl-r9700\\tune4-Swift-1.5-27B-MXFP4.gguf-16000000000-gfx1151r2.txt"};
+    CHECK(pp::tuneReadPaths4(b, stem) == r4);
+    const std::vector<std::string> rold = {
+        "C:\\Users\\u\\AppData\\Local\\whirl\\tune3-Swift-1.5-27B-MXFP4.gguf-16000000000-gfx1151r2.txt",
+        "C:\\Users\\u\\AppData\\Local\\whirl-r9700\\tune3-Swift-1.5-27B-MXFP4.gguf-16000000000-gfx1151r2.txt",
+        "C:\\Users\\u\\AppData\\Local\\whirl\\tune-Swift-1.5-27B-MXFP4.gguf-16000000000-gfx1151r2.txt",
+        "C:\\Users\\u\\AppData\\Local\\whirl-r9700\\tune-Swift-1.5-27B-MXFP4.gguf-16000000000-gfx1151r2.txt"};
+    CHECK(pp::tuneReadPathsOld(b, stem) == rold);
+    CHECK(pp::tuneCachePath("", "m.txt") == "\\whirl\\tune4-m.txt");
+#ifdef _WIN32
+    // localAppData() == both v0.2.4 reads (tune.cpp _dupenv_s, server_main.cpp std::getenv), set and unset
+    auto oldDupenv = []() -> std::string {
+        char* buf = nullptr;
+        std::size_t len = 0;
+        if (_dupenv_s(&buf, &len, "LOCALAPPDATA") == 0 && buf != nullptr) {
+            std::string v(buf);
+            std::free(buf);
+            return v;
+        }
+        return {};
+    };
+    std::optional<std::string> saved;
+    if (const char* v = std::getenv("LOCALAPPDATA")) saved = v;
+    for (const char* val : {"C:\\pl1\\lad", "D:\\x y\\Local", static_cast<const char*>(nullptr)}) {
+        _putenv_s("LOCALAPPDATA", val != nullptr ? val : "");  // "" deletes the variable (MS docs)
+        const std::optional<std::string> got = pp::localAppData();
+        const char* old_srv = std::getenv("LOCALAPPDATA");
+        CHECK(got.has_value() == (old_srv != nullptr));
+        CHECK(got.value_or(std::string()) == oldDupenv());
+        if (val != nullptr) CHECK(got && *got == val);
+        else CHECK(!got);
+        // the server's default log path: v0.2.4 expression on the getenv pointer vs paths::serverLogPath
+        const std::string old_log = old_srv ? std::string(old_srv) + "\\whirl\\server.log" : std::string("whirl-server.log");
+        CHECK(pp::serverLogPath(got) == old_log);
+    }
+    _putenv_s("LOCALAPPDATA", saved ? saved->c_str() : "");
+    CHECK(pp::localAppData() == saved);
+#endif
+}
+
+static void testPlatformEnv() {
+    namespace pe = whirl::platform::env;
+#ifdef _WIN32
+    CHECK(!pe::get("WHIRL_PL1U_X"));
+    CHECK(pe::set("WHIRL_PL1U_X", "v=1") == 0);
+    CHECK(pe::get("WHIRL_PL1U_X") == std::optional<std::string>("v=1"));
+    CHECK(pe::get("whirl_pl1u_x") == std::optional<std::string>("v=1"));  // names are case-insensitive on Windows
+    // block(): the same entries in the same order as the v0.2.4 GetEnvironmentStringsW loop
+    std::vector<std::wstring> ref;
+    if (wchar_t* blk = GetEnvironmentStringsW()) {
+        for (const wchar_t* p = blk; *p; p += wcslen(p) + 1) ref.emplace_back(p);
+        FreeEnvironmentStringsW(blk);
+    }
+    const std::vector<std::wstring> got = pe::block();
+    CHECK(!got.empty());
+    CHECK(got == ref);
+    CHECK(std::find(got.begin(), got.end(), std::wstring(L"WHIRL_PL1U_X=v=1")) != got.end());
+    CHECK(pe::set("WHIRL_PL1U_X", "") == 0);  // "" deletes
+    CHECK(!pe::get("WHIRL_PL1U_X"));
+    const std::vector<std::wstring> after = pe::block();
+    CHECK(std::find(after.begin(), after.end(), std::wstring(L"WHIRL_PL1U_X=v=1")) == after.end());
+    CHECK(after.size() + 1 == got.size());
+#endif
+}
+
+static void testPlatformConsoleTime() {
+#ifdef _WIN32
+    namespace pc = whirl::platform::console;
+    namespace pt = whirl::platform::time;
+    CHECK(pc::kCodePageUtf8 == CP_UTF8);
+    CHECK(pc::outputCodePage() == GetConsoleOutputCP());
+    auto oldIsConsole = [](DWORD std_handle) {
+        HANDLE h = GetStdHandle(std_handle);
+        DWORD mode = 0;
+        return h != nullptr && h != INVALID_HANDLE_VALUE && GetConsoleMode(h, &mode) != 0;
+    };
+    CHECK(pc::isConsole(pc::Stream::out) == oldIsConsole(STD_OUTPUT_HANDLE));
+    CHECK(pc::isConsole(pc::Stream::err) == oldIsConsole(STD_ERROR_HANDLE));
+    // local time: the same fields as GetLocalTime (retry once across a second boundary)
+    bool same = false;
+    for (int k = 0; k < 2 && !same; ++k) {
+        SYSTEMTIME a;
+        GetLocalTime(&a);
+        const pt::LocalTime t = pt::localTime();
+        SYSTEMTIME b;
+        GetLocalTime(&b);
+        same = a.wSecond == b.wSecond && t.year == a.wYear && t.month == a.wMonth && t.day == a.wDay && t.hour == a.wHour &&
+               t.minute == a.wMinute && t.second == a.wSecond && t.milliseconds >= a.wMilliseconds &&
+               t.milliseconds <= b.wMilliseconds;
+    }
+    CHECK(same);
+    // timer resolution: begin succeeds (per process since Windows 10 2004) and is paired with end
+    const bool on = pt::beginPeriod1ms();
+    CHECK(on);
+    if (on) pt::endPeriod1ms();
+#endif
+}
+
 int main(int argc, char** argv) {
 #if WHIRL_WITH_HIP && defined(_WIN32)
     if (argc >= 2) {  // helper modes for testProbeChild (the test runs this program as the child)
@@ -4080,6 +4215,9 @@ int main(int argc, char** argv) {
     testLaunchDigestZeroAndAdjacent();
     testLaunchRawCap();
     testAllocLog();
+    testPlatformPaths();        // arch025 PL1
+    testPlatformEnv();
+    testPlatformConsoleTime();
     specsample_test::testSpecSample();
     testDflashPolicy();
     testLocalMemTaken();

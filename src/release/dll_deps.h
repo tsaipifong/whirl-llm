@@ -13,6 +13,11 @@
 
 namespace whirl::app::dlldeps {
 
+// LoadLibrary error codes the front-end tells apart (ERROR_MOD_NOT_FOUND / ERROR_PROC_NOT_FOUND; static_assert in
+// dll_deps.cpp), so src/release/release.cpp needs no <windows.h> (arch025 PL1).
+inline constexpr unsigned long k_error_mod_not_found = 126;
+inline constexpr unsigned long k_error_proc_not_found = 127;
+
 // DLL names imported by the PE32+ image at `path` (import directory, then the
 // delay-import directory), as written in the file. Empty when the file cannot
 // be read or is not a PE32+ image.

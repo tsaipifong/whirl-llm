@@ -2,19 +2,15 @@
 
 #include "cache/fingerprint.h"
 
+#include "platform/env.h"
 #include "tier/kv_tier.h"
 #include "whirl/common.h"
 
 #include <algorithm>
 #include <cctype>
-#include <cwchar>
 #include <filesystem>
 #include <format>
 #include <stdexcept>
-
-#ifdef _WIN32
-#include <windows.h>
-#endif
 
 namespace whirl::cache {
 
@@ -95,18 +91,14 @@ bool fingerprintEnvKept(std::string_view key) {
 
 std::vector<std::pair<std::string, std::string>> fingerprintEnv() {
     std::vector<std::pair<std::string, std::string>> kv;
-#ifdef _WIN32
-    if (wchar_t* blk = GetEnvironmentStringsW()) {
-        for (const wchar_t* p = blk; *p; p += wcslen(p) + 1) {
-            const std::string s = narrow(p);
-            const std::size_t eq = s.find('=', 1);
-            if (eq == std::string::npos) continue;
-            std::string k = s.substr(0, eq);
-            if (fingerprintEnvKept(k)) kv.emplace_back(k, s.substr(eq + 1));
-        }
-        FreeEnvironmentStringsW(blk);
+    // arch025 PL1: the block read (GetEnvironmentStringsW, OS order) is platform::env::block(); filter and order here
+    for (const std::wstring& w : platform::env::block()) {
+        const std::string s = narrow(w);
+        const std::size_t eq = s.find('=', 1);
+        if (eq == std::string::npos) continue;
+        std::string k = s.substr(0, eq);
+        if (fingerprintEnvKept(k)) kv.emplace_back(k, s.substr(eq + 1));
     }
-#endif
     return kv;
 }
 

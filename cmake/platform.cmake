@@ -12,6 +12,14 @@ add_library(whirl_platform STATIC
   ${CMAKE_SOURCE_DIR}/src/platform/net_win.cpp)
 # PL3: Winsock is linked here only (net_win.cpp is its one user; whirl_server_core / whirl_release no longer name it)
 target_link_libraries(whirl_platform PRIVATE ws2_32)
+# PL1: env / paths / console / time (added as a separate target_sources so PL2 / PL4 add theirs without touching
+# these lines); winmm for timeBeginPeriod (was #pragma comment(lib) in src/server/server_main.cpp)
+target_sources(whirl_platform PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/platform/env_win.cpp
+  ${CMAKE_SOURCE_DIR}/src/platform/paths_win.cpp
+  ${CMAKE_SOURCE_DIR}/src/platform/console_win.cpp
+  ${CMAKE_SOURCE_DIR}/src/platform/time_win.cpp)
+target_link_libraries(whirl_platform PRIVATE winmm)
 # callers include "platform/<concern>.h"; never put src/platform itself on an include path (its time.h would shadow
 # the C library's <time.h>)
 target_include_directories(whirl_platform PUBLIC ${CMAKE_SOURCE_DIR}/src)

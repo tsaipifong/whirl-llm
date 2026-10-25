@@ -6,6 +6,8 @@
 
 #include "whirl/kernels_abi.h"
 
+#include "platform/env.h"
+
 #include <algorithm>
 #include <cstring>
 #include <optional>
@@ -13,19 +15,11 @@
 #include <string_view>
 #include <vector>
 
-#include <cstdlib>
-
 namespace {
+// arch025 PL1: the _dupenv_s read is platform::env::get
 std::optional<std::string> getEnv(std::string_view name) {
     const std::string key = std::string("WHIRL_") + std::string(name);
-    char* buf = nullptr;
-    std::size_t len = 0;
-    if (_dupenv_s(&buf, &len, key.c_str()) == 0 && buf != nullptr) {
-        std::string v(buf);
-        std::free(buf);
-        return v;
-    }
-    return std::nullopt;
+    return whirl::platform::env::get(key);
 }
 }
 

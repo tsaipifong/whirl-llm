@@ -6,15 +6,24 @@
 // Windows implementation is env_win.cpp, chosen by cmake/platform.cmake. No virtual interface.
 #pragma once
 
+#include <optional>
+#include <string>
+#include <vector>
+
 namespace whirl::platform::env {
 
-// PL1 moves here (call order and returned strings unchanged; fingerprint string bitwise identical):
-//   - the full environment block read of the SSD fingerprint: GetEnvironmentStringsW / FreeEnvironmentStringsW
-//     (src/cache/fingerprint.cpp)
-//   - the single-variable reads with _dupenv_s (src/model/config.cpp, src/common/vram_limit.cpp,
-//     src/kernels_host/kernels_abi.cpp)
-//   - the one environment write: _putenv_s("GPU_RESOURCE_CACHE_SIZE", ...) before the HIP runtime loads
-//     (src/server/server_main.cpp)
-// Reads in src/cli/main.cpp and src/server/server_main.cpp stay counted by env_read_check (C1a / C2), not here.
+// One variable of the CRT's narrow environment (_dupenv_s: the ANSI code page, read at the call). nullopt when unset.
+// The single raw read behind envGet / EnvSnapshot::capture (src/config), the VRAM cap, the kernel table switches and
+// LOCALAPPDATA (paths::localAppData). Moved unchanged from the four _dupenv_s copies of v0.2.4.
+std::optional<std::string> get(const std::string& name);
+
+// _putenv_s(name, value): the CRT's and the process environment. Returns its errno_t (0 = ok); callers that ignored
+// it before keep ignoring it. The one product write: GPU_RESOURCE_CACHE_SIZE before the HIP runtime starts.
+int set(const char* name, const char* value);
+
+// The process environment block (GetEnvironmentStringsW), one entry per string ("NAME=value", also the hidden
+// "=C:=C:\..." entries), in the order the OS returns it; UTF-16, unconverted. Empty when the call fails.
+// The SSD-cache fingerprint (src/cache/fingerprint.cpp) filters and converts it.
+std::vector<std::wstring> block();
 
 }  // namespace whirl::platform::env
