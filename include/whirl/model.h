@@ -26,6 +26,7 @@
 #pragma once
 
 #include "device/handles.h"  // src/: RAII owners of the device / pinned buffers, events and streams (arch024 S11)
+#include "model/qwen35/weights.h"  // src/: Mat, Layer, ..., qwen35::Weights (arch025-M1)
 #include "whirl/gguf.h"
 #include "whirl/device_profile.h"
 #include "whirl/hip.h"
@@ -70,9 +71,6 @@ bool envFlag(std::string_view name, bool def = false);
 
 namespace whirl::qwen35 {
 
-using hip::DevPtr;
-using gguf::GgmlType;
-
 class ModelError : public std::runtime_error {
 public:
     ModelError(std::string code, const std::string& detail = {})
@@ -86,7 +84,7 @@ private:
 // ---------------------------------------------------------------------------
 // constants (shared with the kernels; see kernels_abi.h)
 
-constexpr std::uint32_t n_types = 40;  // > every GgmlType used (mxfp4 = 39)
+// n_types (> every GgmlType used): src/model/qwen35/weights.h
 constexpr std::uint32_t max_batch_default = 4096;
 // Largest prefill batch a model can be loaded with (WHIRL_PREFILL_BATCH).
 constexpr std::uint32_t max_batch_limit = 16384;
@@ -113,8 +111,7 @@ constexpr std::uint32_t ctl_nd = 48;      // drafts kept this cycle (device p-mi
 constexpr std::uint32_t ctl_stop = 49;    // draft chain stopped
 constexpr std::uint32_t ctl_words = 64;
 
-// Prefill GEMM autotune buckets.
-constexpr std::uint32_t n_tune = 11;
+// Prefill GEMM autotune buckets (n_tune: src/model/qwen35/weights.h).
 constexpr std::uint32_t tune_small_max = 1024;
 constexpr std::array<std::uint32_t, n_tune> tune_sizes = {512, 4096, 128, 32, 48, 64, 96, 192, 256, 384, 1024};
 std::size_t tuneBucket(std::uint32_t n);
@@ -200,79 +197,7 @@ struct Config {
     bool gdnShapeSupported() const { return d_conv == 4 && d_state == 128 && headV() >= 32 && headV() % 32 == 0; }
 };
 
-struct Mat {
-    DevPtr ptr = 0;
-    // Prefill GEMM choice per batch bucket (tuneBucket): [0, 24) fused dequant
-    // with gemm_cfgs[c]; [24, 48) dequantize to f16 first, then f16 GEMM with
-    // gemm_cfgs[c - 24]; [48, 56) small-batch GEMM gemms_cfgs[c - 48].
-    std::array<std::uint8_t, n_tune> tune = {};
-    GgmlType ty = GgmlType::f32;
-    // MXFP4 only: per-row reference exponent (u8) for the fp8 prefill GEMM.
-    DevPtr ref = 0;
-    std::uint32_t ncols = 0;
-    std::uint32_t nrows = 0;
-    std::uint64_t row_bytes = 0;
-};
-
-// True when b's rows directly follow a's in one allocation (same type and row
-// layout), so [a; b] can be read as one (a.nrows + b.nrows)-row matrix.
-inline bool rowsContiguous(const Mat& a, const Mat& b) {
-    return a.ptr != 0 && a.ty == b.ty && a.ncols == b.ncols && a.row_bytes == b.row_bytes && a.ref == 0 && b.ref == 0 &&
-           b.ptr == a.ptr + static_cast<std::uint64_t>(a.nrows) * a.row_bytes;
-}
-
-// [a; b] as one matrix (a's tune); only valid when rowsContiguous(a, b).
-inline Mat concatRows(const Mat& a, const Mat& b) {
-    Mat r = a;
-    r.nrows = a.nrows + b.nrows;
-    return r;
-}
-
-struct AttnW {
-    Mat q, k, v, o;
-    DevPtr q_norm = 0, k_norm = 0;
-};
-
-struct GdnW {
-    Mat qkv, gate, beta, alpha, out;
-    DevPtr conv = 0, dt = 0, a = 0, norm = 0;
-};
-
-// Routed experts of a qwen35moe FFN (the shared expert is the layer's
-// ffn_gate / ffn_up / ffn_down).
-struct MoeW {
-    Mat router;          // [n_expert][n_embd] f32
-    DevPtr sh_gate = 0;  // shared-expert gate vector [n_embd] f32 (0 = none)
-    Mat gate, up, down;  // 3D expert tensors: expert e owns rows [e*rows_e, (e+1)*rows_e)
-};
-
-// The nextn (MTP) block.
-struct MtpW {
-    AttnW attn;
-    DevPtr attn_norm = 0, post_norm = 0;
-    Mat ffn_gate, ffn_up, ffn_down;
-    Mat eh_proj;
-    DevPtr enorm = 0, hnorm = 0, head_norm = 0;
-    std::optional<MoeW> moe;
-};
-
-enum class LayerKind { attn, gdn };
-
-struct Layer {
-    DevPtr attn_norm = 0, post_norm = 0;
-    Mat ffn_gate, ffn_up, ffn_down;
-    LayerKind kind = LayerKind::gdn;
-    AttnW attn;  // kind == attn
-    GdnW gdn;    // kind == gdn
-    std::optional<MoeW> moe;
-};
-
-struct MatList {
-    std::array<Mat, 8> items{};
-    std::size_t len = 0;
-    std::span<const Mat> slice() const { return {items.data(), len}; }
-    void add(const Mat& m) { items[len++] = m; }
-};
+// Mat, AttnW, GdnW, MoeW, MtpW, Layer, MatList, rowsContiguous, concatRows: src/model/qwen35/weights.h (arch025-M1)
 
 // ---------------------------------------------------------------------------
 // load-time options (set before Model::load)
@@ -485,7 +410,9 @@ struct BatchPlan {
 // ---------------------------------------------------------------------------
 // the model
 
-class Model {
+// Model derives from Weights (tok_embd, embd_host, output, output_norm, layers, mtp, type_bytes, mx_fold_lossy;
+// src/model/qwen35/weights.h, bound by WeightLoader in Model::load / loadDrafter, arch025-M1).
+class Model : public Weights {
 public:
     Model() = default;
     Model(const Model&) = delete;
@@ -505,14 +432,8 @@ public:
     std::vector<std::int32_t> host_ids;
     Kernels k;
     hip::Module module;
-    Mat tok_embd;
-    device::PinnedBuf embd_host;  // token_embd in pinned host memory (embd_on_host), else empty
-    Mat output;
-    DevPtr output_norm = 0;
-    std::vector<Layer> layers;
     std::vector<device::DevBuf> allocations;  // owners of alloc(); bytes() is each one's size
     std::uint64_t alloc_total = 0;  // bytes live through alloc() (sizing self-check in load; freeAlloc subtracts)
-    std::array<std::uint64_t, n_types> type_bytes{};
     Profile* prof = nullptr;
     hip::Stream stream = nullptr;  // the work stream (owned by stream_own; every kernel call reads this value)
     device::StreamH stream_own;
@@ -550,7 +471,6 @@ public:
     bool x16_fp8 = false;
     DevPtr sx8 = 0;
     std::uint8_t mm_class = 1;
-    std::uint64_t mx_fold_lossy = 0;
     // numerics mode: the request (LoadOptions), the resolved plan (loadOrTune), load-time notes
     // (precise KV shrink) for the caller's log
     whirl::numerics::Request num_req;
@@ -629,7 +549,6 @@ public:
     std::span<const PRows> psegs;
     DevPtr mtp_in = 0;
     bool mtp_batch = false;
-    std::optional<MtpW> mtp;
     DevPtr mtp_kc = 0, mtp_vc = 0, mtp_ks = 0, mtp_vs = 0;
     DevPtr hn = 0, mtp_cat = 0, mtp_h = 0, mtp_ids = 0;
     bool keep_hidden = false;
@@ -912,7 +831,6 @@ private:
     void visRowsCur(std::uint32_t n, std::uint32_t pos0);
     void injectRows();
 
-    friend struct Loader;
 };
 
 // ---------------------------------------------------------------------------

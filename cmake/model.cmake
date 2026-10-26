@@ -22,6 +22,7 @@ if(WHIRL_WITH_HIP)
     ${CMAKE_SOURCE_DIR}/src/model/config.cpp
     ${CMAKE_SOURCE_DIR}/src/model/kernels.cpp
     ${CMAKE_SOURCE_DIR}/src/model/loader.cpp
+    ${CMAKE_SOURCE_DIR}/src/model/qwen35/weights.cpp
     ${CMAKE_SOURCE_DIR}/src/model/forward/run.cpp
     ${CMAKE_SOURCE_DIR}/src/model/forward/mtp_verify.cpp
     ${CMAKE_SOURCE_DIR}/src/model/forward/prefill.cpp
@@ -56,7 +57,8 @@ if(WHIRL_WITH_HIP)
 
   # host-only unit tests of the model library (no GPU work)
   add_executable(whirl-model-tests ${CMAKE_SOURCE_DIR}/tests/model/model_tests.cpp)
-  target_link_libraries(whirl-model-tests PRIVATE whirl_model)
+  # arch025-M1: whirl_device_null (NullBackend: host memory behind WeightLoader in testWeightBinding)
+  target_link_libraries(whirl-model-tests PRIVATE whirl_model whirl_device_null)
   # OVH-C1 test reads src/model/forward/*.cpp (both MTP call sites use Model::draftAttn; forward.cpp split by arch025-F1..F4)
   target_compile_definitions(whirl-model-tests PRIVATE WHIRL_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 

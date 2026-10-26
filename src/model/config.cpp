@@ -324,7 +324,7 @@ MtpDefaults mtpDefaults(bool moe, hip::Arch arch) {
 namespace {
 
 // FIX-DFL (FR-DFL P2-1): the drafter forward (src/model/dflash.cpp) sizes its scratch, rings and kernel
-// launches from the metadata (DFlashConfig), while Loader::mat / vec upload whatever shape the file has
+// launches from the metadata (DFlashConfig), while WeightLoader::mat / vec upload whatever shape the file has
 // and matmul writes w.nrows outputs per row. Any tensor that disagrees with the metadata would write past
 // a scratch buffer or make a kernel read past a weight. So every tensor must have exactly the shape the
 // metadata gives (like Config::validateTensors for the target), matrices a known type whose rows cut into
@@ -367,7 +367,7 @@ void validateDFlashTensors(const DFlashConfig& c, const gguf::File& f) {
     // fc (shape checked by validate): the ingest splits it into n_target_layers column blocks of E values
     // (Model::dflashIngest: ptr + j * row_bytes / nl, ncols E), so each block must start on a whole quant
     // block; MXFP4 is refused: it is repacked per 256 values with one reference exponent per full row
-    // (Loader::uploadMx), which a column block does not have (FR-DFL P3-7; no MXFP4 drafter exists to test)
+    // (WeightLoader::uploadMx), which a column block does not have (FR-DFL P3-7; no MXFP4 drafter exists to test)
     if (const gguf::TensorInfo* fc = f.tensor("fc.weight")) {
         if (fc->type == GgmlType::mxfp4) bad("fc.weight is MXFP4 (the drafter splits fc into column blocks; use Q8_0 / f16 / f32)");
         const gguf::TypeTraits* tt = gguf::typeTraits(fc->type);

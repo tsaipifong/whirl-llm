@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""exec_dump_check.py (arch025-S0a): every scalar data member of qwen35::Model (include/whirl/model.h) is either
+"""exec_dump_check.py (arch025-S0a): every scalar data member of qwen35::Model (include/whirl/model.h; since arch025-M1
+also of its base qwen35::Weights, src/model/qwen35/weights.h) is either
 printed by WHIRL_DUMP_EXEC (src/model/exec_dump.cpp reads it as m.<name>) or named here as per-call state. A member
 added to Model without either fails, so the S0b-2 dump cannot silently miss a new numerics flag.
 
@@ -23,9 +24,22 @@ SCALAR = (r"(?:bool|float|double|int|unsigned|std::u?int(?:8|16|32|64)_t|u32|std
 DECL = re.compile(r"^    (?:static\s+constexpr\s+)?" + SCALAR + r"\s+(.+?);")
 
 
-def members(model_h: str) -> list[str]:
-    s = model_h[model_h.index("class Model {"):]
-    body = s[:s.index("\n};")]
+CLASS_MODEL = re.compile(r"^class Model\b[^{;]*\{", re.M)
+STRUCT_WEIGHTS = re.compile(r"^struct Weights \{", re.M)
+
+
+def body_of(text: str, head: re.Pattern) -> str:
+    m = head.search(text)
+    if not m:
+        raise ValueError(f"no {head.pattern!r}")
+    s = text[m.start():]
+    return s[:s.index("\n};")]
+
+
+def members(model_h: str, weights_h: str = "") -> list[str]:
+    body = body_of(model_h, CLASS_MODEL)
+    if weights_h:  # arch025-M1: class Model : public Weights (src/model/qwen35/weights.h)
+        body += "\n" + body_of(weights_h, STRUCT_WEIGHTS)
     out = []
     for line in body.split("\n"):
         line = line.split("//")[0]
@@ -39,8 +53,8 @@ def members(model_h: str) -> list[str]:
     return out
 
 
-def check(model_h: str, dump_cpp: str, out=print) -> int:
-    ms = members(model_h)
+def check(model_h: str, dump_cpp: str, out=print, weights_h: str = "") -> int:
+    ms = members(model_h, weights_h)
     if len(ms) < 50:
         out(f"exec dump check: FAIL (usage: only {len(ms)} members parsed from model.h)")
         return 2
@@ -62,10 +76,11 @@ def check(model_h: str, dump_cpp: str, out=print) -> int:
 def selftest(root: str) -> int:
     h = open(os.path.join(root, "include", "whirl", "model.h"), encoding="utf-8").read()
     d = open(os.path.join(root, "src", "model", "exec_dump.cpp"), encoding="utf-8").read()
+    w = weights_text(root)
     fails = 0
     # the injection point: the first scalar member line of class Model (arch025-N3-r1: the fixed anchor
     # "bool use_graph = true;" left Model in arch025-N2b, so both injection cases checked the unchanged tree)
-    body_at = h.index("class Model {")
+    body_at = CLASS_MODEL.search(h).start()
     anchor = next((ln + "\n" for ln in h[body_at:].split("\n") if DECL.match(ln.split("//")[0])), None)
     if anchor is None:
         print("exec dump check selftest: FAIL (no scalar member line in class Model to inject after)")
@@ -78,12 +93,16 @@ def selftest(root: str) -> int:
         ("a new multi-name member fails", h[:at] + "    std::uint32_t s0a_a = 0, s0a_b = 0;\n" + h[at:], d, 1),
         ("a flag dropped from the dump fails", h, d.replace(drop, "", 1), 1),
     ]
+    if w:  # arch025-M1: the members of the base Weights count too
+        wat = STRUCT_WEIGHTS.search(w).end() + 1
+        cases.append(("a new Weights member fails", h, d, 1, w[:wat] + "    std::uint64_t m1_new_count = 0;\n" + w[wat:]))
+        cases.append(("type_bytes dropped from the dump fails", h, d.replace("m.type_bytes", "m.tb_gone"), 1, w))
     if drop not in d:
         print(f"exec dump check selftest: FAIL (exec_dump.cpp has no {drop.strip()!r} line to drop)")
         return 1
-    for name, hh, dd, want in cases:
+    for name, hh, dd, want, *ww in cases:
         lines: list[str] = []
-        rc = check(hh, dd, out=lines.append)
+        rc = check(hh, dd, out=lines.append, weights_h=ww[0] if ww else w)
         ok = rc == want
         fails += 0 if ok else 1
         print(f"  {'ok  ' if ok else 'FAIL'} {name}: rc {rc} (want {want}) | {lines[-1]}")
@@ -92,6 +111,11 @@ def selftest(root: str) -> int:
         return 1
     print(f"exec dump check selftest: ok ({len(cases)} cases)")
     return 0
+
+
+def weights_text(root: str) -> str:
+    p = os.path.join(root, "src", "model", "qwen35", "weights.h")
+    return open(p, encoding="utf-8").read() if os.path.exists(p) else ""
 
 
 def main(argv: list[str]) -> int:
@@ -107,7 +131,7 @@ def main(argv: list[str]) -> int:
     except OSError as e:
         print(f"exec dump check: FAIL (usage: {e})")
         return 2
-    return check(h, d)
+    return check(h, d, weights_h=weights_text(a.root))
 
 
 if __name__ == "__main__":

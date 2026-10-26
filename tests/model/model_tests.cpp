@@ -12,6 +12,8 @@
 #include "whirl/kernels_abi.h"
 #include "whirl/kv_layout.h"
 #include "whirl/model.h"
+#include "device/null_backend.h"
+#include "model/qwen35/weight_loader.h"
 
 #include <algorithm>
 #include <array>
@@ -2584,9 +2586,301 @@ void testPlanVsLoadOrTune() {
     }
 }
 
+// arch025-M1: qwen35::WeightLoader (src/model/qwen35/weights.cpp) on the CPU. Host memory stands behind the device
+// pointers (NullBackend DevBufs, upload = memcpy), each tensor of a TinyModel file gets its own byte pattern, so the
+// binding table checks name -> field by content, the Mat fields against the tensor, the allocation sizes in upload
+// order (matPair = one allocation, MXFP4 = data then its row refs) and the counters; the error table checks the
+// messages verbatim (the texts of loader.cpp's Loader before arch025-M1).
+struct WeightRun {
+    whirl::device::NullBackend nb;  // destroyed last: owns every buffer below
+    std::vector<whirl::device::DevBuf> bufs;
+    std::vector<std::uint64_t> sizes;  // device allocations in order
+    q::Weights w;
+    q::LoadStats stats;
+    std::string err;                // what() of the ModelError, "" when the binding passed
+    std::vector<std::uint8_t> img;  // the file image (patterned)
+    std::unique_ptr<gguf::File> f;
+};
+
+struct WeightCase {
+    bool moe = false, embd_on_host = false, mtp = true, from_memory = false;
+    std::map<std::string, std::uint32_t> types;
+    std::vector<std::string> erase;
+    std::map<std::string, std::vector<std::uint64_t>> shapes;  // tensor ne overrides
+    std::function<void(q::Config&)> cfg_edit;
+    std::function<void(q::Kernels&)> k_edit;
+};
+
+// per-tensor bytes without a short period (a chunked read of the wrong offset must show; splitmix64 of name hash + index)
+std::uint8_t wpat(std::string_view name, std::uint64_t i) {
+    std::uint64_t h = 1469598103934665603ull;
+    for (char c : name) h = (h ^ static_cast<std::uint8_t>(c)) * 1099511628211ull;
+    std::uint64_t x = h + i * 0x9E3779B97F4A7C15ull;
+    x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ull;
+    x = (x ^ (x >> 27)) * 0x94D049BB133111EBull;
+    return static_cast<std::uint8_t>(x ^ (x >> 31));
+}
+
+std::unique_ptr<WeightRun> runWeights(const WeightCase& wc) {
+    static int fake = 0;
+    auto r = std::make_unique<WeightRun>();
+    TinyModel tm(wc.moe);
+    for (const auto& [n, t] : wc.types) tm.types[n] = t;
+    for (const std::string& n : wc.erase) tm.tensors.erase(n);
+    for (const auto& [n, ne] : wc.shapes) tm.tensors[n] = ne;
+    r->img = tm.build();
+    {
+        const gguf::File f0 = gguf::File::parse(r->img);
+        for (const gguf::TensorInfo& t : f0.tensors()) {
+            const std::uint64_t at = f0.absOffset(t);
+            for (std::uint64_t i = 0; i < t.nbytes(); ++i) r->img[static_cast<std::size_t>(at + i)] = wpat(t.name, i);
+        }
+    }
+    static int file_no = 0;
+    const std::filesystem::path p = std::filesystem::temp_directory_path() / std::format("whirl_m1_weights_{}.gguf", file_no++);
+    {
+        std::ofstream o(p, std::ios::binary);
+        o.write(reinterpret_cast<const char*>(r->img.data()), static_cast<std::streamsize>(r->img.size()));
+    }
+    r->f = std::make_unique<gguf::File>(wc.from_memory ? gguf::File::parse(r->img) : gguf::File::open(p.string()));
+    // the config of the unchanged model (Model::load has validated it by now): the loader's own checks are under test
+    const std::vector<std::uint8_t> img0 = TinyModel(wc.moe).build();
+    q::Config cfg = q::Config::fromGguf(gguf::File::parse(img0));
+    if (wc.cfg_edit) wc.cfg_edit(cfg);
+    q::Kernels k{};
+    for (const gguf::GgmlType t : {gguf::GgmlType::f32, gguf::GgmlType::mxfp4}) {
+        k.gemv1[static_cast<std::size_t>(t)] = &fake;
+        k.moe_gu[static_cast<std::size_t>(t)] = &fake;
+    }
+    if (wc.k_edit) wc.k_edit(k);
+    std::vector<std::uint8_t> staging(4096);  // small: the chunked reads (uploadTo, uploadMx rows) run several times
+    WeightRun& R = *r;
+    q::WeightLoader::Device dev{[&R](std::uint64_t n) {
+                                    R.bufs.push_back(whirl::device::DevBuf::alloc(R.nb, n));
+                                    R.sizes.push_back(n);
+                                    return R.bufs.back().get();
+                                },
+                                [](q::DevPtr d, const void* s, std::size_t n) { std::memcpy(reinterpret_cast<void*>(d), s, n); }, &R.nb};
+    try {
+        q::WeightLoader ld(*r->f, cfg, k, r->w, r->stats, dev, staging.data(), staging.size());
+        r->w.layers.resize(cfg.n_layer);
+        ld.embeddings(wc.embd_on_host);
+        for (std::uint32_t il = 0; il < cfg.n_layer; ++il) ld.layer(il);
+        if (wc.mtp) r->w.mtp = ld.mtpBlock();
+    } catch (const q::ModelError& e) {
+        r->err = e.what();
+    }
+    r->f.reset();
+    std::error_code ec;
+    std::filesystem::remove(p, ec);
+    return r;
+}
+
+void testWeightBinding() {
+    using GT = gguf::GgmlType;
+    const auto bytesOf = [](const WeightRun& r, const std::string& name) {
+        const gguf::File f = gguf::File::parse(r.img);
+        const gguf::TensorInfo* t = f.tensor(name);
+        const std::uint64_t at = f.absOffset(*t);
+        return std::vector<std::uint8_t>(r.img.begin() + static_cast<std::ptrdiff_t>(at), r.img.begin() + static_cast<std::ptrdiff_t>(at + t->nbytes()));
+    };
+    const auto at = [](q::DevPtr p, std::uint64_t n) {
+        const auto* b = reinterpret_cast<const std::uint8_t*>(p);
+        return std::vector<std::uint8_t>(b, b + n);
+    };
+    for (const bool moe : {false, true}) {
+        for (const bool host : {false, true}) {
+            WeightCase wc;
+            wc.moe = moe;
+            wc.embd_on_host = host;
+            if (!moe) wc.types["blk.0.ffn_gate.weight"] = static_cast<std::uint32_t>(GT::mxfp4);  // one MXFP4 matrix (repack + row refs)
+            // ssm_alpha with one row more than ssm_beta: a pair bound the wrong way round shows in nrows (matPair allows it)
+            if (!host) wc.shapes["blk.0.ssm_alpha.weight"] = {256, 3};
+            const std::unique_ptr<WeightRun> rp = runWeights(wc);
+            const WeightRun& r = *rp;
+            const std::string tag = std::format("weights ({}, embd {}): ", moe ? "moe" : "dense", host ? "host" : "device");
+            check(r.err.empty(), tag + "binds (" + r.err + ")");
+            if (!r.err.empty()) continue;
+            const gguf::File f = gguf::File::parse(r.img);
+            // the binding table: field <- tensor, in Model::load's upload order (pairs: one allocation)
+            struct Row {
+                std::string field;
+                std::string name;
+                const q::Mat* m;     // matrix field (else d)
+                const q::DevPtr* d;  // vector field
+                bool alloc;          // starts a device allocation
+            };
+            std::vector<Row> rows;
+            const auto M = [&](std::string field, std::string name, const q::Mat& m, bool alloc = true) {
+                rows.push_back({std::move(field), std::move(name), &m, nullptr, alloc});
+            };
+            const auto V = [&](std::string field, std::string name, const q::DevPtr& d) {
+                rows.push_back({std::move(field), std::move(name), nullptr, &d, true});
+            };
+            const auto bn = [](std::uint32_t l, const char* s) { return q::WeightLoader::bn(l, s); };
+            M("tok_embd", "token_embd.weight", r.w.tok_embd, !host);
+            M("output", "output.weight", r.w.output);
+            V("output_norm", "output_norm.weight", r.w.output_norm);
+            const auto ffn = [&](const std::string& pre, std::uint32_t l, const q::Mat& g, const q::Mat& u, const q::Mat& d,
+                                 const std::optional<q::MoeW>& mo) {
+                const std::string sfx = moe ? "_shexp.weight" : ".weight";
+                M(pre + "ffn_gate", bn(l, ("ffn_gate" + sfx).c_str()), g);
+                M(pre + "ffn_up", bn(l, ("ffn_up" + sfx).c_str()), u);
+                M(pre + "ffn_down", bn(l, ("ffn_down" + sfx).c_str()), d);
+                if (moe) {
+                    check(mo.has_value(), tag + pre + "moe bound");
+                    if (!mo) return;
+                    V(pre + "moe.router", bn(l, "ffn_gate_inp.weight"), mo->router.ptr);
+                    V(pre + "moe.sh_gate", bn(l, "ffn_gate_inp_shexp.weight"), mo->sh_gate);
+                    M(pre + "moe.gate", bn(l, "ffn_gate_exps.weight"), mo->gate);
+                    M(pre + "moe.up", bn(l, "ffn_up_exps.weight"), mo->up);
+                    M(pre + "moe.down", bn(l, "ffn_down_exps.weight"), mo->down);
+                }
+            };
+            const auto attn = [&](const std::string& pre, std::uint32_t l, const q::AttnW& a) {
+                M(pre + "attn.q", bn(l, "attn_q.weight"), a.q);
+                M(pre + "attn.k", bn(l, "attn_k.weight"), a.k);
+                M(pre + "attn.v", bn(l, "attn_v.weight"), a.v);
+                M(pre + "attn.o", bn(l, "attn_output.weight"), a.o);
+                V(pre + "attn.q_norm", bn(l, "attn_q_norm.weight"), a.q_norm);
+                V(pre + "attn.k_norm", bn(l, "attn_k_norm.weight"), a.k_norm);
+            };
+            check(r.w.layers.size() == 2, tag + "two trunk layers");
+            for (std::uint32_t l = 0; l < r.w.layers.size(); ++l) {
+                const q::Layer& L = r.w.layers[l];
+                const std::string pre = std::format("layers[{}].", l);
+                V(pre + "attn_norm", bn(l, "attn_norm.weight"), L.attn_norm);
+                V(pre + "post_norm", bn(l, "post_attention_norm.weight"), L.post_norm);
+                ffn(pre, l, L.ffn_gate, L.ffn_up, L.ffn_down, L.moe);
+                check(L.kind == (l == 1 ? q::LayerKind::attn : q::LayerKind::gdn), tag + pre + "kind");
+                if (l == 1) {
+                    attn(pre, l, L.attn);
+                } else {
+                    M(pre + "gdn.qkv", bn(l, "attn_qkv.weight"), L.gdn.qkv);
+                    M(pre + "gdn.gate", bn(l, "attn_gate.weight"), L.gdn.gate);
+                    M(pre + "gdn.beta", bn(l, "ssm_beta.weight"), L.gdn.beta);
+                    M(pre + "gdn.alpha", bn(l, "ssm_alpha.weight"), L.gdn.alpha, false);  // after beta in one allocation
+                    M(pre + "gdn.out", bn(l, "ssm_out.weight"), L.gdn.out);
+                    V(pre + "gdn.conv", bn(l, "ssm_conv1d.weight"), L.gdn.conv);
+                    V(pre + "gdn.dt", bn(l, "ssm_dt.bias"), L.gdn.dt);
+                    V(pre + "gdn.a", bn(l, "ssm_a"), L.gdn.a);
+                    V(pre + "gdn.norm", bn(l, "ssm_norm.weight"), L.gdn.norm);
+                    check(q::rowsContiguous(L.gdn.beta, L.gdn.alpha), tag + "beta / alpha contiguous");
+                }
+            }
+            check(r.stats.gdn_ba_contig == 1, tag + "gdn_ba_contig 1");
+            check(r.w.mtp.has_value(), tag + "MTP block bound");
+            if (r.w.mtp) {
+                const q::MtpW& t = *r.w.mtp;
+                attn("mtp.", 2, t.attn);
+                V("mtp.attn_norm", bn(2, "attn_norm.weight"), t.attn_norm);
+                V("mtp.post_norm", bn(2, "post_attention_norm.weight"), t.post_norm);
+                ffn("mtp.", 2, t.ffn_gate, t.ffn_up, t.ffn_down, t.moe);
+                M("mtp.eh_proj", bn(2, "nextn.eh_proj.weight"), t.eh_proj);
+                V("mtp.enorm", bn(2, "nextn.enorm.weight"), t.enorm);
+                V("mtp.hnorm", bn(2, "nextn.hnorm.weight"), t.hnorm);
+                V("mtp.head_norm", bn(2, "nextn.shared_head_norm.weight"), t.head_norm);
+            }
+            // every field holds its tensor (MXFP4: the repacked rows), with the tensor's type and shape
+            std::vector<std::uint64_t> want_sizes;
+            std::uint64_t want_bytes = 0, want_lossy = 0;
+            std::array<std::uint64_t, q::n_types> want_tb{};
+            for (std::size_t i = 0; i < rows.size(); ++i) {
+                const Row& w = rows[i];
+                const gguf::TensorInfo* t = f.tensor(w.name);
+                check(t != nullptr, tag + w.field + ": tensor " + w.name);
+                if (!t) continue;
+                std::vector<std::uint8_t> want = bytesOf(r, w.name);
+                const q::DevPtr p = w.m ? w.m->ptr : *w.d;
+                if (t->type == GT::mxfp4) {
+                    const std::uint64_t rb = t->rowBytes();
+                    std::vector<std::uint8_t> tmp(static_cast<std::size_t>(rb)), refs;
+                    for (std::uint64_t ri = 0; ri < t->rows(); ++ri) {
+                        std::uint8_t* row = want.data() + ri * rb;
+                        refs.push_back(whirl::kernels::repackMxfp4Row(row, row, static_cast<int>(t->ne[0]), &want_lossy, tmp.data()));
+                    }
+                    check(w.m && w.m->ref != 0 && at(w.m->ref, refs.size()) == refs, tag + w.field + ": MXFP4 row refs");
+                    want_sizes.push_back(t->nbytes());
+                    want_sizes.push_back(t->rows());
+                } else if (w.alloc && !(host && w.field == "tok_embd")) {
+                    // a pair's first matrix: one allocation of both (the next row is the pair's second)
+                    const bool pair = i + 1 < rows.size() && !rows[i + 1].alloc;
+                    want_sizes.push_back(t->nbytes() + (pair ? f.tensor(rows[i + 1].name)->nbytes() : 0));
+                }
+                check(p != 0 && at(p, t->nbytes()) == want, tag + w.field + " <- " + w.name + ": bytes");
+                if (w.m) {
+                    check(w.m->ty == t->type && w.m->ncols == t->ne[0] && w.m->nrows == t->rows() && w.m->row_bytes == t->rowBytes(),
+                          tag + w.field + ": type and shape");
+                }
+                want_bytes += t->nbytes();
+                if (!(host && w.field == "tok_embd")) want_tb[static_cast<std::size_t>(t->type)] += t->nbytes();
+            }
+            check(r.sizes == want_sizes,
+                  tag + std::format("allocation sizes in upload order ({} allocations, want {})", r.sizes.size(), want_sizes.size()));
+            check(r.stats.bytes == want_bytes && r.stats.tensors == rows.size(), tag + "LoadStats bytes / tensors");
+            check(r.w.type_bytes == want_tb, tag + "type_bytes");
+            check(r.w.mx_fold_lossy == want_lossy, tag + "mx_fold_lossy");
+            check(host ? (r.w.embd_host.bytes() == f.tensor("token_embd.weight")->nbytes() &&
+                          r.w.tok_embd.ptr == reinterpret_cast<std::uintptr_t>(r.w.embd_host.get()))
+                       : !r.w.embd_host,
+                  tag + "token_embd in pinned host memory only with embd_on_host");
+            if (moe) {
+                const q::MoeW& mo = *r.w.layers[0].moe;
+                check(mo.router.ty == GT::f32 && mo.router.ncols == 256 && mo.router.nrows == 4 && mo.router.row_bytes == 1024,
+                      tag + "router Mat");
+            }
+        }
+    }
+    {
+        // tied output head, no shared head norm: embd_on_host needs an output head (token_embd stays on the device)
+        WeightCase wc;
+        wc.embd_on_host = true;
+        wc.erase = {"output.weight", "blk.2.nextn.shared_head_norm.weight"};
+        const std::unique_ptr<WeightRun> r = runWeights(wc);
+        check(r->err.empty(), "weights (tied): binds (" + r->err + ")");
+        check(!r->w.embd_host && r->w.tok_embd.ptr != 0 && r->w.output.ptr == r->w.tok_embd.ptr && r->w.output.nrows == r->w.tok_embd.nrows,
+              "weights (tied): output = token_embd on the device");
+        check(r->w.mtp && r->w.mtp->head_norm == r->w.output_norm, "weights (tied): MTP head_norm = output_norm without nextn.shared_head_norm");
+        WeightCase wn;
+        wn.mtp = false;
+        const std::unique_ptr<WeightRun> n = runWeights(wn);
+        check(n->err.empty() && !n->w.mtp, "weights (no MTP): no block bound");
+    }
+    // the error table (ModelError::what(), verbatim)
+    struct Err {
+        const char* what;
+        WeightCase wc;
+        std::string want;
+    };
+    const auto T = [](GT t) { return static_cast<std::uint32_t>(t); };
+    std::vector<Err> errs;
+    errs.push_back({"missing trunk vector", {.erase = {"blk.0.attn_norm.weight"}}, "MissingTensor: blk.0.attn_norm.weight"});
+    errs.push_back({"missing token_embd", {.erase = {"token_embd.weight"}}, "MissingTensor: token_embd.weight"});
+    errs.push_back({"missing MTP vector", {.erase = {"blk.2.nextn.enorm.weight"}}, "MissingTensor: blk.2.nextn.enorm.weight"});
+    errs.push_back({"vector not f32", {.types = {{"output_norm.weight", T(GT::q8_0)}}},
+                    "UnsupportedTensorType: output_norm.weight: expected f32, got q8_0"});
+    errs.push_back({"matrix without a kernel", {.types = {{"blk.1.attn_q.weight", T(GT::q4_k)}}},
+                    "UnsupportedTensorType: blk.1.attn_q.weight: no kernel for type q4_K"});
+    errs.push_back({"MXFP4 row not a multiple of 256", {.types = {{"blk.1.attn_output.weight", T(GT::mxfp4)}}},
+                    "UnsupportedTensorType: blk.1.attn_output.weight: MXFP4 row not a multiple of 256"});
+    errs.push_back({"missing router", {.moe = true, .erase = {"blk.0.ffn_gate_inp.weight"}}, "MissingTensor: blk.0.ffn_gate_inp.weight"});
+    errs.push_back({"router not f32", {.moe = true, .types = {{"blk.0.ffn_gate_inp.weight", T(GT::f16)}}},
+                    "UnsupportedTensorType: blk.0.ffn_gate_inp.weight"});
+    errs.push_back({"router shape", {.moe = true, .cfg_edit = [](q::Config& c) { c.n_expert = 8; }}, "UnsupportedTensorType: blk.0.ffn_gate_inp.weight"});
+    errs.push_back({"experts without a MoE kernel", {.moe = true, .k_edit = [](q::Kernels& k) { k.moe_gu[0] = nullptr; }},
+                    "UnsupportedTensorType: blk.0 ffn_gate_exps: no MoE kernel for type f32"});
+    errs.push_back({"MoE shape", {.moe = true, .cfg_edit = [](q::Config& c) { c.n_expert_used = 65; }}, "UnsupportedMoeShape: blk.0"});
+    errs.push_back({"file not openable", {.from_memory = true}, "OpenFailed"});
+    for (const Err& e : errs) {
+        const std::unique_ptr<WeightRun> r = runWeights(e.wc);
+        check(r->err == e.want, std::format("weights error table: {}: got '{}', want '{}'", e.what, r->err, e.want));
+    }
+}
+
 int main() {
     whirl::test::clearWhirlEnv();  // FR-TEST P3-11
     testKvLayout();
+    testWeightBinding();  // arch025-M1
     testKvName();
     testKvPerToken();
     testModelReleaseOrder();

@@ -244,6 +244,18 @@
                {"step": "srv_vis", "lands_in": "arch025-Q6 (server-gate suite vis)"}],
    "manual": ["visab one GPU: base exe vs new exe, vis-encode resident / stream and chat --image (WHIRL_VIS_DUMP) embeddings byte-identical, answer text identical",
               "V-work: launch table under WHIRL_LAUNCH_LOG == S0b (text rows: visRowsCur / visCommit run on every forward)"]
+  },
+  "model.weights": {
+   "id": "M1", "desc": "qwen35 weights (R-8a): qwen35::Weights (tok_embd, embd_host, output, output_norm, layers, mtp, type_bytes, mx_fold_lossy; Model's base) and the weight types (Mat, Layer, ...); WeightLoader + Reader: file reads, MXFP4 repack, name -> field binding, type / kernel / shape checks for Model::load and Model::loadDrafter (device side injected: Model::alloc ledger, hip::upload)",
+   "paths": ["src/model/qwen35/weights.h", "src/model/qwen35/weights.cpp", "src/model/qwen35/weight_loader.h"], "lands_on": "arch025-m1 (M1)",
+   "steps": ["cpu_model", "st_swift_precise", "st_swift_balance", "st_swift_fast", "st_moe_precise", "st_moe_balance", "st_moe_fast", "golden_swift", "golden_moe"],
+   "gpus": {"st_swift_precise": 2, "st_swift_balance": 2, "st_swift_fast": 2, "st_moe_precise": 2, "st_moe_balance": 2, "st_moe_fast": 2,
+            "golden_swift": 2, "golden_moe": 2},
+   "manual": ["S0b-2 alloc sequence (WHIRL_ALLOC_LOG seqhash and event list, cli cells) == the base exe, both GPUs: the weights' allocation order and sizes, the DeltaNet state between them, ~Model's free order (invariant I2)",
+              "V-size: startup_lines.py check on the server logs (sizing lines unchanged)",
+              "Q4_K_M dense golden single on the R9700 (s15-blast GAP3: the Q6_K / Q4_K weight types and matPair contiguity)",
+              "DFlash2 drafter loads once (WHIRL_DRAFT_MODEL, --draft dflash: Model::loadDrafter through WeightLoader::dflash)",
+              "kvram719_tier both GPUs (allocation budget, hipError 719 history)"]
   }
  }
 }
