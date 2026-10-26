@@ -224,6 +224,7 @@ void testMoe(Ctx& c);
 void testMoeMx(Ctx& c);
 void testMoeF(Ctx& c);  // "moef": precise MoE decode experts moe_gu_f_* / moe_down_f_*
 void testMoeSkip(Ctx& c);  // "moeskip": moe_topk_skip + id -1 handling of the decode / prefill MoE kernels (feat027, fast)
+void testMoeFx(Ctx& c);  // "moefx" (on request): moe_gu_f_* / moe_down_f_* == the WHIRL_KT_MOEF_HSACO object, bitwise (feat027-moeskip-r2)
 // gfx1201 precise MoE prefill gemmr_moe* == gemm_moe + moe_act_f16 (test_moe_gu.cpp), called by testMoeMx
 void gemmrChecks(Ctx& c, const HostMat& gate, const HostMat& up, const HostMat& down, int R, int K);
 // 8060S grouped expert GEMMs (test_moe_gu.cpp), called by testMoe / testMoeMx
