@@ -360,6 +360,9 @@ void loadAttn(AttnKernels& k, const Loader& L, KvFormat kv) {
         k.attn_kgw6 = L.opt("attn_kgw6");
         k.attn_kgw4 = L.opt("attn_kgw4");
         k.attn_kgw2 = L.opt("attn_kgw2");
+        k.attn_kgk6 = L.opt("attn_kgk6");
+        k.attn_kgk4 = L.opt("attn_kgk4");
+        k.attn_kgk2 = L.opt("attn_kgk2");
         if (kv == KvFormat::q8 || kv == KvFormat::q8h || kv == KvFormat::q4) {
             if (kv != KvFormat::q4) k.kv_dq_rows = L.opt("kv_dq_rows");
             k.kv_dq_rows_r = L.opt(kv == KvFormat::q4 ? "kv_dq_rows_r_q4" : "kv_dq_rows_r");

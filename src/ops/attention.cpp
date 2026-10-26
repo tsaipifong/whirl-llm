@@ -191,11 +191,13 @@ AttnDecodePlan chooseAttnDecode(const AttnDecodeProblem& p, const AttnDecodeFlag
 // f16 / q8 / q8h / q8v KV: attn_kg (NP query heads of one KV head per block; bit-identical to attn_kx) when NP
 // divides the GQA group, the head ranges stay whole groups of NP and the softmax scale is a power of two.
 // feat026-attnkg97: the f16 attn_kg (NP heads per block) or its selected variant with the same grid / block:
-// 1 attn_kgv (bit-identical, every mode), 2 attn_kgw (balance / fast only: never under precise)
+// 1 attn_kgv (bit-identical, every mode), 2 attn_kgw (balance / fast only: never under precise),
+// 3 attn_kgk (feat026-attnkg97k: shared K and V per head pair; bit-identical, every mode)
 static Function kgVariant(const AttnPrefillFlags& f, const kernels::AttnKernels& k, u32 np, Function shipped) {
     Function v = nullptr;
     if (f.attn_kg_var == 1) v = np == 6 ? k.attn_kgv6 : np == 4 ? k.attn_kgv4 : k.attn_kgv2;
     if (f.attn_kg_var == 2 && !f.prec) v = np == 6 ? k.attn_kgw6 : np == 4 ? k.attn_kgw4 : k.attn_kgw2;
+    if (f.attn_kg_var == 3) v = np == 6 ? k.attn_kgk6 : np == 4 ? k.attn_kgk4 : k.attn_kgk2;
     return v != nullptr ? v : shipped;
 }
 
