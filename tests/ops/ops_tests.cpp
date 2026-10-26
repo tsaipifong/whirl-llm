@@ -458,6 +458,30 @@ void testAttnPrefill() {
     p.dq_st_ml = true;
     pl = ops::chooseAttnPrefill(p, f, k);
     CHECK(!pl.steps.empty());
+    // feat026-attnkg97-r1: the Q8P path (kv_dq_rows once, then the f16 kernel from the dequantized copy) takes the
+    // same variants: var 1 (bit-identical) in every mode, var 2 (attn_kgw) only outside precise
+    k.attn_kgf2 = tag("attn_kgf2");
+    k.attn_kgv2 = tag("attn_kgv2");
+    k.attn_kgw2 = tag("attn_kgw2");
+    auto q8p = [&](std::uint32_t var, bool prec) {
+        f.attn_kg_var = var;
+        f.prec = prec;
+        return ops::chooseAttnPrefill(p, f, k);
+    };
+    pl = q8p(0, false);
+    CHECK(pl.steps.size() == 2 && pl.steps[0].op == ops::AttnStep::Op::dq_rows && nameOf(pl.steps[1].f) == "attn_kgf2");
+    pl = q8p(1, true);
+    CHECK(pl.steps.size() == 2 && pl.steps[0].op == ops::AttnStep::Op::dq_rows && nameOf(pl.steps[1].f) == "attn_kgv2");
+    pl = q8p(2, false);
+    CHECK(pl.steps.size() == 2 && pl.steps[0].op == ops::AttnStep::Op::dq_rows && nameOf(pl.steps[1].f) == "attn_kgw2");
+    pl = q8p(2, true);  // precise: var 2 refused on the Q8P path -> the shipped f16 kernel, never attn_kgw
+    CHECK(pl.steps.size() == 2 && pl.steps[0].op == ops::AttnStep::Op::dq_rows && nameOf(pl.steps[1].f) == "attn_kgf2");
+    for (const auto& s : pl.steps) CHECK(nameOf(s.f) != "attn_kgw2");
+    f.attn_kg_var = 0;
+    f.prec = false;
+    k.attn_kgf2 = nullptr;
+    k.attn_kgv2 = nullptr;
+    k.attn_kgw2 = nullptr;
     // a non-power-of-two scale: no attn_kg; attn_kx (512 threads)
     p.kv_q8 = false;
     p.scale = 0.1f;
