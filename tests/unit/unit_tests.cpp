@@ -1253,8 +1253,10 @@ void testKernelFetchBounds() {
 }
 
 // ---------------------------------------------------------------------------
-// Default MTP draft-head vocabulary per (arch, dense / MoE) (whirl/draft_vocab_plan.h, feat027-draft64k97):
-// selector table, byte / time / gain arithmetic, calibration cell, vocabulary and unknown-class guards
+// Default MTP draft-head vocabulary per (arch, dense / MoE) (whirl/draft_vocab_plan.h, feat027-draft64k97-r1):
+// byte / time / gain arithmetic, the decision table, the fit (consistency only), the model checked on measured
+// cells NOT used for the fit (P-2 zh text / en code / 48k subset, FAST-8S-1 qa lengths), the decision rule on
+// synthetic cells (estimated -> off, measured loss -> off, acceptance loss -> off), vocabulary guards
 void testDraftVocabPlan() {
     namespace v = whirl::draft_vocab;
     using A = whirl::hip::Arch;
@@ -1268,7 +1270,11 @@ void testDraftVocabPlan() {
     CHECK_EQ(v::savedBytesPerDraft(NV, E_SWIFT), std::uint64_t{182784} * 1600);
     CHECK_EQ(v::savedBytesPerDraft(65536, E_SWIFT), std::uint64_t{0});
     CHECK_EQ(v::savedBytesPerDraft(1000, E_SWIFT), std::uint64_t{0});
-    // the table: exactly one cell per (arch, moe), all four product classes present
+    // net = (1 - a) / (1 - g) - 1
+    CHECK(std::fabs(v::netGain(0.03, 0.0) - (1.0 / 0.97 - 1.0)) < 1e-12);
+    CHECK(v::netGain(0.03, 0.05) < 0);
+    CHECK(std::fabs(v::netGain(0.0, 0.0)) < 1e-12);
+    // the table: exactly one cell per (arch, moe), one class per moe
     for (A a : {A::gfx1201, A::gfx1151})
         for (bool moe : {false, true}) {
             int n = 0;
@@ -1276,53 +1282,140 @@ void testDraftVocabPlan() {
             CHECK_EQ(n, 1);
             CHECK(v::findCell(a, moe) != nullptr);
         }
-    // expected decision table (product classes, 248320 vocabulary): the subset pays on every cell
+    CHECK(v::findClass(false) != nullptr && v::findClass(true) != nullptr && !v::findClass(false)->moe && v::findClass(true)->moe);
+
+    // decision table (product classes, 248320 vocabulary)
     struct Row {
         A arch;
         bool moe;
         std::uint32_t embd;
-        bool use;
-        double gain_lo, gain_hi;  // estimated cycle gain range
         v::Basis basis;
+        v::Why why;
+        bool use;
+        double net_lo, net_hi;  // model primary-workload tok/s gain
     };
     const Row rows[] = {
-        {A::gfx1151, true, E_ORNITH, true, 0.028, 0.032, v::Basis::measured},   // calibration cell: measured -3.0 %
-        {A::gfx1201, true, E_ORNITH, true, 0.028, 0.033, v::Basis::estimated},  // new: R9700 MoE
-        {A::gfx1201, false, E_SWIFT, true, 0.030, 0.034, v::Basis::measured},   // P-2 +2.2..+5.0 %
-        {A::gfx1151, false, E_SWIFT, true, 0.025, 0.030, v::Basis::estimated},
+        {A::gfx1151, true, E_ORNITH, v::Basis::measured, v::Why::use_measured, true, 0.020, 0.030},     // FAST-8S-1
+        {A::gfx1201, true, E_ORNITH, v::Basis::estimated, v::Why::not_measured, false, 0.020, 0.030},  // off until A/B
+        {A::gfx1201, false, E_SWIFT, v::Basis::measured, v::Why::use_measured, true, 0.050, 0.058},     // P-2
+        {A::gfx1151, false, E_SWIFT, v::Basis::shipped, v::Why::use_shipped, true, 0.042, 0.050},       // DEF-1
     };
     for (const Row& r : rows) {
         const v::Plan p = v::plan(r.arch, r.moe, NV, r.embd);
         CHECK(p.fits && p.cell != nullptr);
-        CHECK_EQ(p.use, r.use);
-        CHECK(p.gain >= r.gain_lo && p.gain <= r.gain_hi);
         CHECK(p.cell->basis == r.basis);
+        CHECK(p.why == r.why);
+        CHECK_EQ(p.use, r.use);
+        CHECK(p.net >= r.net_lo && p.net <= r.net_hi);
+        CHECK(p.net_worst <= p.net);
         CHECK(p.saved_mb > 100 && p.saved_ms > 0);
     }
-    // calibration: the 8060S Ornith cell reproduces the measured chat cycle saving (-3.0 %) within 0.2 points
-    {
-        const v::Plan p = v::plan(A::gfx1151, true, NV, E_ORNITH);
-        CHECK(std::fabs(p.gain - 0.030) < 0.002);
-        CHECK(std::fabs(p.saved_ms - 0.5086) < 0.001);
-    }
-    // R9700 saves the same bytes in less time; Ornith R9700 saved time 0.195 ms per draft step
+    // the R9700 saves the same bytes in less time; Ornith R9700 0.195 ms per draft step
     {
         const v::Plan a = v::plan(A::gfx1201, true, NV, E_ORNITH), b = v::plan(A::gfx1151, true, NV, E_ORNITH);
         CHECK(std::fabs(a.saved_mb - b.saved_mb) < 1e-9);
         CHECK(a.saved_ms < b.saved_ms);
         CHECK(std::fabs(a.saved_ms - 0.195) < 0.001);
+        CHECK(std::fabs(b.saved_ms - 0.5086) < 0.001);
     }
-    // other vocabularies never get the embedded subset
+
+    // fit (consistency only, not validation): the class constants are what the fit cells give
+    const double s64_swift_r97 = static_cast<double>(v::savedBytesPerDraft(NV, E_SWIFT)) / 600e9;
+    const double s64_orn_8s = static_cast<double>(v::savedBytesPerDraft(NV, E_ORNITH)) / 230e9;
+    struct Pair {  // full head (off) vs subset: tok/s and tok/cycle
+        double off_tps, off_tpc, sub_tps, sub_tpc;
+    };
+    auto cycleOf = [](const Pair& q) { return 1.0 - (q.sub_tpc / q.off_tpc) / (q.sub_tps / q.off_tps); };
+    {
+        // P-2 zh code 64k vs off, 2k / 32k / 128k (R9700 Swift, progress\P-2.log:4-6)
+        const Pair fit[] = {{98.46, 3.41, 103.40, 3.41}, {85.34, 3.37, 88.28, 3.37}, {54.51, 3.08, 56.39, 3.08}};
+        double dsum = 0;
+        for (const Pair& q : fit) dsum += cycleOf(q) / (s64_swift_r97 * q.off_tps);
+        CHECK(std::fabs(dsum / 3 - v::findClass(false)->d) < 0.002);
+        // FAST-8S-1 precise chat: cycle -3.0 % at 92.9 tok/s
+        CHECK(std::fabs(0.030 / (s64_orn_8s * 92.9) - v::findClass(true)->d) < 0.003);
+    }
+
+    // validation on measured cells NOT used for the fit: P-2 zh text, en code (64k) and every 48k cell (R9700 Swift,
+    // progress\P-2.log:4-8). Predicted tok/s gain netGain(cycleGain(d, s, R_off), a_cell) vs the measured one, where
+    // a_cell is that cell's measured tok/cycle loss: checks the cycle model and the composition, within the class err.
+    // 48k = 49,152 rows (assumed; 48,000 rows would change s by 0.6 %, far inside the tolerance).
+    {
+        const v::ModelClass& m = *v::findClass(false);
+        const double s48 = static_cast<double>(v::savedBytesPerDraft(NV, E_SWIFT, 49152)) / 600e9;
+        struct Held {
+            Pair q;
+            bool is48;
+        };
+        const Held held[] = {
+            {{98.46, 3.41, 102.36, 3.32}, true},  {{85.34, 3.37, 85.19, 3.24}, true},  {{54.51, 3.08, 55.27, 3.01}, true},   // zh code 48k
+            {{102.41, 3.46, 104.63, 3.32}, false}, {{102.41, 3.46, 101.05, 3.24}, true},                                    // en 2k
+            {{89.75, 3.71, 91.77, 3.51}, false},  {{89.75, 3.71, 87.25, 3.32}, true},                                     // en 32k
+            {{60.70, 3.51, 59.96, 3.32}, false},  {{60.70, 3.51, 59.39, 3.24}, true},                                     // en 128k
+            {{90.81, 3.10, 96.79, 3.16}, false},  {{90.81, 3.10, 97.31, 3.16}, true},                                     // zh text 2k
+            {{67.13, 2.78, 70.03, 2.78}, false},  {{67.13, 2.78, 70.36, 2.78}, true},                                     // zh text 32k
+            {{52.61, 2.94, 55.11, 2.98}, false},  {{52.61, 2.94, 54.18, 2.91}, true},                                     // zh text 128k
+        };
+        int n = 0;
+        double worst = 0;
+        for (const Held& h : held) {
+            const double a = 1.0 - h.q.sub_tpc / h.q.off_tpc;
+            const double pred = v::netGain(v::cycleGain(m.d, h.is48 ? s48 : s64_swift_r97, h.q.off_tps), a);
+            const double meas = h.q.sub_tps / h.q.off_tps - 1.0;
+            worst = std::max(worst, std::fabs(pred - meas));
+            ++n;
+        }
+        CHECK_EQ(n, 15);
+        CHECK(worst <= m.err);
+        CHECK(worst > 0.02);  // the err constant is the real held-out error, not a loose placeholder
+        // the measured worst workload (en code -5.4 % tok/cycle) is the class a_worst
+        CHECK(std::fabs(m.a_worst - (1.0 - 3.32 / 3.51)) < 0.001);
+    }
+    {
+        // FAST-8S-1 item 2 precise qa 2k / 8k / 32k / 128k (not the chat fit cell): cycle -2.2 / -2.2 / -2.1 / -1.6 %
+        // at R = 88.4 / 84.3 / 75.1 / 51.6 tok/s; only the cycle is comparable (each qa run used another prompt)
+        const v::ModelClass& m = *v::findClass(true);
+        const double R[] = {88.4, 84.3, 75.1, 51.6}, cyc[] = {0.022, 0.022, 0.021, 0.016};
+        for (int i = 0; i < 4; ++i) CHECK(std::fabs(v::cycleGain(m.d, s64_orn_8s, R[i]) - cyc[i]) <= m.err);
+    }
+
+    // the rule decides both ways (synthetic cells / classes)
+    {
+        const v::ModelClass dense = *v::findClass(false);
+        const v::Cell base = *v::findCell(A::gfx1201, false);  // measured, +3.4 % primary
+        v::Cell est = base;
+        est.basis = v::Basis::estimated;
+        CHECK(!v::evaluate(est, dense, NV, E_SWIFT).use);  // a big model gain does not enable an unmeasured cell
+        CHECK(v::evaluate(est, dense, NV, E_SWIFT).net > 0.04);
+        v::Cell low = base;
+        low.meas_primary = 0.005;
+        CHECK(v::evaluate(low, dense, NV, E_SWIFT).why == v::Why::measured_low);
+        v::Cell lossy = base;
+        lossy.meas_worst = -0.03;
+        CHECK(v::evaluate(lossy, dense, NV, E_SWIFT).why == v::Why::measured_loss);
+        // acceptance loss larger than the cycle gain: the model turns a shipped cell off
+        v::ModelClass bad = dense;
+        bad.a_primary = 0.06;
+        v::Cell shipped = *v::findCell(A::gfx1151, false);
+        CHECK(v::evaluate(shipped, dense, NV, E_SWIFT).use);
+        CHECK(v::evaluate(shipped, bad, NV, E_SWIFT).net < 0);
+        CHECK(v::evaluate(shipped, bad, NV, E_SWIFT).why == v::Why::model_low);
+        // FR-Spec-size loss (-3 % acceptance) on the shipped 8060S cell: lower bound below the bar -> off
+        bad.a_primary = 0.03;
+        CHECK(!v::evaluate(shipped, bad, NV, E_SWIFT).use);
+        // a small head on a measured cell: the model scales the cell down, off
+        CHECK(v::evaluate(base, dense, NV, 64).why == v::Why::model_low);
+    }
+    // other vocabularies never get the embedded subset; zero width / no class -> off
     for (A a : {A::gfx1201, A::gfx1151})
         for (bool moe : {false, true}) {
             const v::Plan p = v::plan(a, moe, 151936, E_SWIFT);
-            CHECK(!p.fits && !p.use);
+            CHECK(!p.fits && !p.use && p.why == v::Why::no_fit);
         }
-    // threshold: a tiny head (E = 64, ~2.3 MB saved) does not pass the 1 % bar
-    CHECK(!v::plan(A::gfx1201, true, NV, 64).use);
     CHECK(!v::plan(A::gfx1201, false, NV, 0).use);
     // compile-time evaluable (header-only selector)
     static_assert(v::plan(whirl::hip::Arch::gfx1151, true, 248320, 2048).use);
+    static_assert(!v::plan(whirl::hip::Arch::gfx1201, true, 248320, 2048).use);
     static_assert(!v::plan(whirl::hip::Arch::gfx1201, false, 151936, 5120).use);
 }
 

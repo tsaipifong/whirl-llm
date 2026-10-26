@@ -1056,7 +1056,7 @@ DraftVocabChoice draftVocabChoice(const std::optional<std::string>& env_value, c
 // vocabulary size of the qwen35 tokenizer the embedded subset was built for
 inline constexpr std::uint32_t draft_vocab_embedded_n_vocab = draft_vocab::embedded_n_vocab;
 // the default (embedded 64k) subset: per (arch, dense / MoE) cost-model table, whirl/draft_vocab_plan.h
-// (feat027-draft64k97: dense and MoE on both the R9700 and the 8060S with the 248320-token vocabulary)
+// (feat027-draft64k97-r1: dense on the R9700 and the 8060S, MoE on the 8060S; R9700 MoE off until measured)
 inline bool draftVocabDefaultFits(bool moe, std::uint32_t n_vocab, std::uint32_t n_embd, hip::Arch arch) {
     return draft_vocab::plan(arch, moe, n_vocab, n_embd).use;
 }

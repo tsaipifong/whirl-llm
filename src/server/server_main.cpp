@@ -327,7 +327,8 @@ std::uint32_t envU32(std::string_view name, std::uint32_t def) {
 
 // WHIRL_DRAFT_VOCAB (default: the embedded 64k subset on qwen35 models with the 248320-token vocabulary,
 // per the (arch, dense / MoE) table of whirl/draft_vocab_plan.h): keep only that vocabulary subset of the 2-bit draft head (special and byte tokens are
-// always added); outputs are unchanged, only the acceptance can drop.
+// always added); outputs are unchanged where acceptance is exact (precise, balance, fast with WHIRL_RELAX=0), only the
+// acceptance can drop; with relaxacc the fast text can differ.
 void applyDraftVocab(qwen35::Model& model, const Tokenizer& tok, const qwen35::DraftVocabChoice& dv) {
     using K = qwen35::DraftVocabChoice::Kind;
     if (dv.kind != K::embedded_64k && dv.kind != K::file) return;

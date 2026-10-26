@@ -595,12 +595,14 @@ void testDraftVocab() {
           "draft vocab: 48k = file next to the exe, N = first N rows");
     {
         using A = whirl::hip::Arch;
-        bool all = true;  // feat027-draft64k97: dense and MoE on both archs (whirl/draft_vocab_plan.h)
+        bool all = true;  // feat027-draft64k97-r1 (whirl/draft_vocab_plan.h): measured / shipped cells on, R9700 MoE off until measured
         for (A a : {A::gfx1201, A::gfx1151})
-            for (bool moe : {false, true})
-                all = all && q::draftVocabDefaultFits(moe, 248320, moe ? 2048 : 5120, a) &&
+            for (bool moe : {false, true}) {
+                const bool want = !(moe && a == A::gfx1201);
+                all = all && q::draftVocabDefaultFits(moe, 248320, moe ? 2048 : 5120, a) == want &&
                       !q::draftVocabDefaultFits(moe, 151936, moe ? 2048 : 5120, a);
-        check(all, "draft vocab: default for dense and MoE qwen35 on gfx1201 / gfx1151 with the 248320-token vocabulary only");
+            }
+        check(all, "draft vocab: default for dense qwen35 on gfx1201 / gfx1151 and MoE on gfx1151 (248320-token vocabulary only)");
     }
     const std::vector<std::uint32_t> e64 = q::embeddedDraftVocab64k();
     bool asc = e64.size() == 65536;
