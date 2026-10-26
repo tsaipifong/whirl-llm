@@ -651,6 +651,20 @@ std::vector<std::vector<std::uint32_t>> MockModel::dflashDraftBatch(std::span<co
     return out;
 }
 
+// feat029-dflashingest: one stacked ingest over several slots = each slot's dflashIngest (the mock rows are exact
+// states); applied in reverse order, since a batched pass has no order between slots (a dependence on the order
+// would show up as wrong context rows / drafts)
+void MockModel::dflashIngestBatch(std::span<const ::whirl::dflash::batch::IngestReq> reqs) {
+    dfl_ing_batches_ += 1;
+    dfl_ing_slots_ += reqs.size();
+    dfl_ing_max_ = std::max<std::uint64_t>(dfl_ing_max_, reqs.size());
+    if (!::whirl::dflash::batch::validIngest(reqs, static_cast<std::uint32_t>(seqs_.size()))) dfl_ing_bad_ += 1;
+    for (auto it = reqs.rbegin(); it != reqs.rend(); ++it) {
+        dfl_ing_rows_ += it->n;
+        dflashIngest(it->slot, it->cap_row, it->n, it->pos);
+    }
+}
+
 std::vector<std::uint32_t> MockModel::greedyReference(std::span<const std::uint32_t> prompt, std::uint32_t max_tokens,
                                                       bool ignore_eos) const {
     std::uint64_t h = kH0, kv = 0;

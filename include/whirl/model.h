@@ -348,6 +348,9 @@ struct DFlashBatchRun {
     std::uint32_t slots = 0;
     DevPtr ids = 0, pos = 0, x = 0, h = 0, h2 = 0, dyn = 0, q = 0, kb = 0, vb = 0, att = 0, o = 0, g = 0, u = 0, e = 0;
     DevPtr ed = 0, logits = 0, cand = 0, unary = 0, gate = 0, lat = 0, out = 0;
+    // feat029-dflashingest: batched ingest scratch for ing_rows stacked rows (Model::dflashIngestBatch)
+    std::uint32_t ing_rows = 0;
+    DevPtr ing_f = 0, ing_g = 0, ing_k = 0, ing_v = 0, ing_pos = 0;
 };
 
 struct LoadOptions {
@@ -749,6 +752,11 @@ public:
     void dflashBatchSetup(std::uint32_t max_slots);
     std::uint64_t dflashBatchBytes(std::uint32_t max_slots) const;
     std::vector<std::vector<std::uint32_t>> dflashDraftBatch(std::span<const ::whirl::dflash::batch::Req> reqs);
+    // feat029-dflashingest: the context ingests of several slots (distinct slots; feats / stride as dflashIngest) with the
+    // row-wise stages once over the stacked rows and per-slot ring writes; one request, no batch scratch or a request
+    // larger than the scratch: dflashIngest per request (the old path). Ring contents equal dflashIngest's up to
+    // rounding (the stacked matmuls may pick other kernels), so only proposals can change.
+    void dflashIngestBatch(DevPtr feats, std::uint32_t stride, std::span<const ::whirl::dflash::batch::IngestReq> reqs);
     std::uint32_t moe_bn_force = 0;
     std::vector<std::int32_t>* moe_dump = nullptr;
     std::uint32_t ff_scratch = 0;

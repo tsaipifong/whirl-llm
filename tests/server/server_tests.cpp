@@ -2042,9 +2042,10 @@ void testDFlashBatch() {
         const char* name;
         bool automatic, relax;
         std::uint32_t perturb;
+        bool ingest = true;  // feat029-dflashingest: false = WHIRL_DFLASH_BATCH_INGEST=0 (batched drafts, per-slot ingest)
     };
     const Variant vars[] = {{"fixed", false, false, 0}, {"fixed perturb", false, false, 3}, {"auto perturb", true, false, 2},
-                            {"fixed relax perturb", false, true, 3}};
+                            {"fixed relax perturb", false, true, 3}, {"fixed perturb slot-ingest", false, false, 3, false}};
     for (std::uint32_t users = 1; users <= 4; ++users) {
         for (const Variant& v : vars) {
             auto make = [&](bool batch) {
@@ -2053,6 +2054,7 @@ void testDFlashBatch() {
                 su.mc.dfl_miss = 0.3;
                 su.mc.dfl_batch_perturb = batch ? v.perturb : 0;
                 su.eo.dfl_batch = batch;
+                su.eo.dfl_batch_ingest = v.ingest;
                 su.eo.relax.on = v.relax;
                 if (v.automatic) {
                     su.eo.dfl_width.mode = whirl::dflash::Width::automatic;
@@ -2104,16 +2106,28 @@ void testDFlashBatch() {
             if (users == 1) CHECK_EQ(sa.dfl_batches, 0u);  // one block: the one-block path
             if (users >= 2) CHECK(sa.dfl_batches > 0);
             if (users >= 2 && v.perturb > 0 && !v.automatic) CHECK(a.model().dflBatchPerturbed() > 0);
+            // feat029-dflashingest (same switch): the kept rows' ingests of a cycle go in one batched call (distinct
+            // slots, applied in reverse order by the mock); the unbatched server never batches; one user never does
+            CHECK_EQ(sb.dfl_ing_batches, 0u);
+            CHECK_EQ(b.model().dflIngBatches(), 0u);
+            CHECK_EQ(sa.dfl_ing_batches, a.model().dflIngBatches());
+            CHECK_EQ(sa.dfl_ing_slots, a.model().dflIngSlots());
+            CHECK(a.model().dflIngMax() <= users);
+            CHECK_EQ(a.model().dflIngBad(), 0u);
+            if (users == 1) CHECK_EQ(sa.dfl_ing_batches, 0u);
+            if (users >= 2 && v.ingest) CHECK(sa.dfl_ing_batches > 0 && a.model().dflIngRows() >= 2 * sa.dfl_ing_batches);
+            if (!v.ingest) CHECK_EQ(sa.dfl_ing_batches, 0u);
             for (TestServer* s : {&a, &b}) {
                 CHECK_EQ(s->model().poison(), 0u);
                 CHECK_EQ(s->model().dflBad(), 0u);
                 CHECK_EQ(s->model().dflStale(), 0u);
             }
             if (g_verbose)
-                std::printf("  batch users %u %-20s: batches %llu blocks %llu max %llu perturbed %llu | drafted %llu accepted %llu | unbatched "
-                            "drafted %llu accepted %llu blocks %llu\n",
+                std::printf("  batch users %u %-20s: batches %llu blocks %llu max %llu perturbed %llu | ingest batches %llu slots %llu rows %llu | "
+                            "drafted %llu accepted %llu | unbatched drafted %llu accepted %llu blocks %llu\n",
                             users, v.name, (unsigned long long)sa.dfl_batches, (unsigned long long)sa.dfl_batch_blocks,
                             (unsigned long long)a.model().dflBatchMax(), (unsigned long long)a.model().dflBatchPerturbed(),
+                            (unsigned long long)sa.dfl_ing_batches, (unsigned long long)sa.dfl_ing_slots, (unsigned long long)a.model().dflIngRows(),
                             (unsigned long long)sa.dfl_drafted, (unsigned long long)sa.dfl_accepted, (unsigned long long)sb.dfl_drafted,
                             (unsigned long long)sb.dfl_accepted, (unsigned long long)b.model().dflBlocks());
         }

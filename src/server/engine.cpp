@@ -324,6 +324,8 @@ Engine::Stats Engine::stats() const {
     s.dfl_probes = stat_dfl_probes_;
     s.dfl_batches = stat_dfl_batches_;
     s.dfl_batch_blocks = stat_dfl_batch_blocks_;
+    s.dfl_ing_batches = stat_dfl_ing_batches_;
+    s.dfl_ing_slots = stat_dfl_ing_slots_;
     return s;
 }
 
@@ -391,12 +393,17 @@ void Engine::dflReset(Slot& sl, std::uint32_t at) {
 
 // Rows r0 .. r0 + n - 1 of the latest forward / verify of run_rows rows are positions pos0 .. of
 // slot sl: ingest those whose features were captured.
-void Engine::dflIngest(Slot& sl, std::uint32_t run_rows, std::uint32_t r0, std::uint32_t n, std::uint32_t pos0) {
+// defer != nullptr (feat029-dflashingest): plan only and queue the ingest for one batched pass after the accept loop.
+void Engine::dflIngest(Slot& sl, std::uint32_t run_rows, std::uint32_t r0, std::uint32_t n, std::uint32_t pos0,
+                       std::vector<::whirl::dflash::batch::IngestReq>* defer) {
     if (!opt_.use_dflash || n == 0) return;
     ::whirl::dflash::Range rg{sl.dfl_lo, sl.dfl_hi};
     const ::whirl::dflash::Ingest g = ::whirl::dflash::planIngest(rg, m_.captureN(), run_rows, r0, n, pos0);
     stat_dfl_gap_ += g.gap;
-    if (g.any) m_.dflashIngest(sl.id, g.cap_row, g.n, g.pos);
+    if (g.any) {
+        if (defer) defer->push_back({sl.id, g.cap_row, g.n, g.pos});
+        else m_.dflashIngest(sl.id, g.cap_row, g.n, g.pos);
+    }
     sl.dfl_lo = rg.lo;
     sl.dfl_hi = rg.hi;
 }
@@ -1888,6 +1895,7 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
     stat_drafts_ += nd;
     for (std::size_t k = 0; k < A; ++k) stat_lit_drafts_ += ng_n[k];
 
+    std::vector<::whirl::dflash::batch::IngestReq> dfl_ing;  // feat029-dflashingest: WHIRL_DFLASH_BATCH=1 queues the kept rows' ingests
     for (std::size_t k = 0; k < A; ++k) {
         Slot& sl = *act[k];
         const std::int32_t* ctl = ctl_host_.data() + static_cast<std::size_t>(sl.id) * qwen35::ctl_words;
@@ -2001,7 +2009,7 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
         if (m_.gdnReplay()) m_.setPending(sl.id, acc + 1);
         else if (acc < nd_k) m_.restoreSeqSnapshot(sl.id, snap_of[k] + acc);
         // DFlash2 context: the kept rows' features (whatever drafted them; rejected rows never enter)
-        dflIngest(sl, rows, row0, acc + 1, sl.pos);
+        dflIngest(sl, rows, row0, acc + 1, sl.pos, opt_.dfl_batch && opt_.dfl_batch_ingest ? &dfl_ing : nullptr);
         // trunk now holds next, dr[0..acc) at pos .. pos + acc
         sl.cache_tokens.push_back(sl.next);
         sl.cache_tokens.insert(sl.cache_tokens.end(), dr.begin(), dr.begin() + acc);
@@ -2043,6 +2051,14 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
                 else logI("req {} | slot {} | {}", sl.reqId(), sl.id, ev->text);
             }
         }
+    }
+    // feat029-dflashingest: the queued ingests of this cycle (the capture still holds this verify's rows)
+    if (dfl_ing.size() > 1) {
+        m_.dflashIngestBatch(dfl_ing);
+        stat_dfl_ing_batches_ += 1;
+        stat_dfl_ing_slots_ += dfl_ing.size();
+    } else {
+        for (const auto& q : dfl_ing) m_.dflashIngest(q.slot, q.cap_row, q.n, q.pos);
     }
     if (p) {
         std::uint64_t tk = 0;

@@ -255,6 +255,9 @@ struct EngineOptions {
     // feat029-dflashbatch (WHIRL_DFLASH_BATCH=1): one drafter forward over all drafting slots of a cycle
     // (ServerModel::dflashDraftBatch) instead of one per slot; outputs unchanged (exact verify)
     bool dfl_batch = false;
+    // feat029-dflashingest: with dfl_batch, the kept rows' ingests of a cycle in one stacked pass
+    // (ServerModel::dflashIngestBatch); WHIRL_DFLASH_BATCH_INGEST=0 keeps them per slot
+    bool dfl_batch_ingest = true;
     std::uint32_t n_draft = 3;
     float p_min = 0;
     std::uint32_t n_min = 0;
@@ -459,7 +462,8 @@ private:
     // DFlash2 drafter context of a slot
     std::uint32_t draftRoom() const;
     void dflReset(Slot& sl, std::uint32_t at);
-    void dflIngest(Slot& sl, std::uint32_t run_rows, std::uint32_t r0, std::uint32_t n, std::uint32_t pos0);
+    void dflIngest(Slot& sl, std::uint32_t run_rows, std::uint32_t r0, std::uint32_t n, std::uint32_t pos0,
+                   std::vector<::whirl::dflash::batch::IngestReq>* defer = nullptr);
     bool dflReady(const Slot& sl) const;
     void finishJob(Slot& sl);
     // host tiers (the spill half, the span lists and the idle / shutdown flush: tb_)
@@ -568,6 +572,7 @@ private:
                   stat_prefill_tok_ = 0, stat_seg_batches_ = 0, stat_seg_chunks_ = 0;
     std::uint64_t stat_dfl_cycles_ = 0, stat_dfl_drafted_ = 0, stat_dfl_accepted_ = 0, stat_dfl_cold_ = 0, stat_dfl_gap_ = 0;
     std::uint64_t stat_dfl_skipped_ = 0, stat_dfl_probes_ = 0;
+    std::uint64_t stat_dfl_ing_batches_ = 0, stat_dfl_ing_slots_ = 0;  // feat029-dflashingest: batched ingests / slots in them
     std::uint64_t stat_dfl_batches_ = 0, stat_dfl_batch_blocks_ = 0;  // WHIRL_DFLASH_BATCH=1: batched drafter calls / blocks in them  // WHIRL_DFLASH_WIDTH=auto: drafter skipped / full-width probes
     // WDDM-LOG: runtime video memory watch (setVramProbe)
     std::function<wddmwatch::Sample()> vram_probe_;

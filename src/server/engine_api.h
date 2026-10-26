@@ -101,6 +101,8 @@ public:
         std::uint64_t dfl_skipped = 0, dfl_probes = 0;
         // DFlash2 batched drafting (WHIRL_DFLASH_BATCH=1): cycles whose drafter ran once over several slots, blocks in them
         std::uint64_t dfl_batches = 0, dfl_batch_blocks = 0;
+        // feat029-dflashingest (same switch): cycles whose verified-row ingest ran once over several slots, slots in them
+        std::uint64_t dfl_ing_batches = 0, dfl_ing_slots = 0;
     };
 
     virtual ~EngineApi() = default;

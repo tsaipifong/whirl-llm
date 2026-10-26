@@ -1296,6 +1296,7 @@ int serveMain(int argc, char** argv, const char* program) {
         eo.dfl_warm = dfl_par.warm;
         eo.dfl_width = dfl_par.width;
         eo.dfl_batch = use_dflash && model.dfb != nullptr;
+        eo.dfl_batch_ingest = whirl::dflash::batch::parseIngestEnabled(env("DFLASH_BATCH_INGEST") ? env("DFLASH_BATCH_INGEST")->c_str() : nullptr);
         if (use_dflash && eo.relax.on) {  // whirl::dflash::relaxApplies: MTP drafts only
             // relaxacc relaxes MTP drafts only; DFlash2 and n-gram drafts keep exact acceptance, so
             // the fast mode's other items (4-bit KV, ...) stay and the decode equals greedy of them

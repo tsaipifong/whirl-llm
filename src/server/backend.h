@@ -162,6 +162,11 @@ public:
         for (const auto& r : reqs) d.push_back(dflashDraft(r.slot, r.anchor, r.pos, r.p_min, r.n_min));
         return d;
     }
+    // feat029-dflashingest: the context ingests of several slots (distinct slots; each as dflashIngest) in as few
+    // drafter passes as the backend can (Model::dflashIngestBatch). Default: dflashIngest per request, in order.
+    virtual void dflashIngestBatch(std::span<const ::whirl::dflash::batch::IngestReq> reqs) {
+        for (const auto& r : reqs) dflashIngest(r.slot, r.cap_row, r.n, r.pos);
+    }
     // forget slot s's context rows at positions >= keep
     virtual void dflashTrim(std::uint32_t s, std::uint32_t keep) { (void)s, (void)keep; }
     // rows of a slot's context ring (position p goes to row p % ring: an ingest overwrites the row of

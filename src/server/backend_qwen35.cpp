@@ -148,6 +148,9 @@ public:
     std::vector<std::vector<std::uint32_t>> dflashDraftBatch(std::span<const ::whirl::dflash::batch::Req> reqs) override {
         return m_.dflashDraftBatch(reqs);
     }
+    void dflashIngestBatch(std::span<const ::whirl::dflash::batch::IngestReq> reqs) override {
+        if (m_.cap_buf) m_.dflashIngestBatch(m_.cap_buf, m_.cap_rows, reqs);
+    }
     void dflashTrim(std::uint32_t s, std::uint32_t keep) override { m_.dflashTrim(s, keep); }
     std::uint32_t dflashRing() const override { return m_.dfr ? m_.dfr->ring : 0; }
     void profileFlush(std::size_t slots) override {

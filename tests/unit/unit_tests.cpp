@@ -1563,6 +1563,57 @@ void toy(std::span<const db::Req> rq, std::uint32_t B, std::uint32_t E, const st
     }
     x = y;
 }
+// feat029-dflashingest: CPU toy of Model::dflashIngestBatch. feats is layer-major ([L][stride][E], row r of target
+// layer j at (j * stride + r) * E); per stacked row: fc = sum over j of w_j * feature (column blocks, accumulated in
+// j order like the matmul with accumulate), rmsnorm, k = rope-like op of the row's position, v = another row op;
+// then each request's rows go to its own ring at position % ring. Stacked over several requests or one request at
+// a time: the ring contents must be the same bits.
+struct KvRing {
+    std::vector<std::int32_t> cpos;
+    std::vector<float> k, v;  // [ring][E]
+};
+void toyIngest(std::span<const db::IngestReq> rq, const std::vector<float>& feats, std::uint32_t stride, std::uint32_t L, std::uint32_t E,
+               std::vector<KvRing>& rings) {
+    const std::vector<std::uint64_t> off = db::ingestOffsets(rq);
+    const std::uint64_t N = off.back();
+    const std::vector<std::int32_t> pos = db::ingestPositions(rq);
+    std::vector<float> f(L * N * E), g(N * E, 0.f), k(N * E), v(N * E);
+    for (std::uint32_t j = 0; j < L; ++j)  // gather
+        for (std::size_t i = 0; i < rq.size(); ++i)
+            std::memcpy(f.data() + (j * N + off[i]) * E, feats.data() + (static_cast<std::uint64_t>(j) * stride + rq[i].cap_row) * E,
+                        static_cast<std::size_t>(rq[i].n) * E * 4);
+    for (std::uint32_t j = 0; j < L; ++j)  // fc column blocks
+        for (std::uint64_t r = 0; r < N; ++r)
+            for (std::uint32_t e = 0; e < E; ++e) g[r * E + e] += (0.3f + 0.1f * static_cast<float>(j)) * f[(j * N + r) * E + e];
+    for (std::uint64_t r = 0; r < N; ++r) {  // rmsnorm, k / v
+        float ss = 0;
+        for (std::uint32_t e = 0; e < E; ++e) ss += g[r * E + e] * g[r * E + e];
+        const float sc = 1.0f / std::sqrt(ss / static_cast<float>(E) + 1e-6f);
+        for (std::uint32_t e = 0; e < E; ++e) {
+            const float x = g[r * E + e] * sc;
+            k[r * E + e] = x * std::cos(0.01f * static_cast<float>(pos[r]) * static_cast<float>(e + 1));
+            v[r * E + e] = 0.5f * x + 0.25f;
+        }
+    }
+    for (std::size_t i = 0; i < rq.size(); ++i) {  // per slot ring writes
+        KvRing& rg = rings[rq[i].slot];
+        const std::uint32_t ring = static_cast<std::uint32_t>(rg.cpos.size());
+        for (std::uint32_t t = 0; t < rq[i].n; ++t) {
+            const std::uint32_t p = rq[i].pos + t, row = p % ring;
+            std::memcpy(rg.k.data() + static_cast<std::size_t>(row) * E, k.data() + (off[i] + t) * E, E * 4);
+            std::memcpy(rg.v.data() + static_cast<std::size_t>(row) * E, v.data() + (off[i] + t) * E, E * 4);
+            rg.cpos[row] = static_cast<std::int32_t>(p);
+        }
+    }
+}
+bool sameRings(const std::vector<KvRing>& a, const std::vector<KvRing>& b) {
+    if (a.size() != b.size()) return false;
+    for (std::size_t s = 0; s < a.size(); ++s)
+        if (a[s].cpos != b[s].cpos || std::memcmp(a[s].k.data(), b[s].k.data(), a[s].k.size() * 4) != 0 ||
+            std::memcmp(a[s].v.data(), b[s].v.data(), a[s].v.size() * 4) != 0)
+            return false;
+    return true;
+}
 }  // namespace dflash_batch_test
 
 void testDflashBatch() {
@@ -1574,6 +1625,10 @@ void testDflashBatch() {
     CHECK(!db::parseEnabled("auto"));
     CHECK(db::parseEnabled("1"));
     CHECK(db::parseEnabled("on"));
+    CHECK(db::parseIngestEnabled(nullptr));
+    CHECK(db::parseIngestEnabled("1"));
+    CHECK(!db::parseIngestEnabled("0"));
+    CHECK(!db::parseIngestEnabled("off"));
     CHECK_EQ(db::groupCap(16, 4, 4096), 4u);
     CHECK_EQ(db::groupCap(16, 4, 40), 2u);
     CHECK_EQ(db::groupCap(16, 4, 8), 1u);
@@ -1704,6 +1759,101 @@ void testDflashBatch() {
             std::vector<float> st2;
             dflash_batch_test::toy(part, B, E, pr, st2);
             CHECK(std::memcmp(st.data(), st2.data(), st.size() * 4) == 0);
+        }
+    }
+    // feat029-dflashingest: batched ingest plan (offsets, positions, distinct slots, groups vs brute force, caps, bytes)
+    {
+        const db::IngestReq rq[] = {{2, 3, 2, 40}, {0, 9, 3, 7}, {3, 0, 1, 100}};
+        CHECK((db::ingestOffsets(rq) == std::vector<std::uint64_t>{0, 2, 5, 6}));
+        CHECK((db::ingestPositions(rq) == std::vector<std::int32_t>{40, 41, 7, 8, 9, 100}));
+        CHECK(db::validIngest(rq, 4));
+        CHECK(!db::validIngest(rq, 3));
+        const db::IngestReq dup[] = {{1, 0, 2, 5}, {1, 2, 1, 7}};
+        const db::IngestReq empty[] = {{1, 0, 0, 5}, {2, 2, 1, 7}};
+        CHECK(!db::validIngest(dup, 4));
+        CHECK(!db::validIngest(empty, 4));
+        CHECK_EQ(db::ingestCap(16, 4, 4096), 64u);
+        CHECK_EQ(db::ingestCap(16, 4, 40), 40u);
+        CHECK_EQ(db::ingestCap(16, 0, 4096), 0u);
+    }
+    for (std::uint32_t cap = 1; cap <= 7; ++cap)
+        for (std::uint32_t seed = 0; seed < 60; ++seed) {
+            std::vector<db::IngestReq> rq;
+            const std::uint32_t n = 1 + seed % 6;
+            for (std::uint32_t i = 0; i < n; ++i) rq.push_back({i, 0, 1 + (seed * 7 + i * 3) % 9, 0});
+            const auto g = db::ingestGroups(rq, cap);
+            std::uint32_t next = 0;
+            bool ok = true;
+            for (const auto& x : g) {
+                ok &= x.begin == next && x.count >= 1;
+                std::uint64_t rows = 0;
+                for (std::uint32_t i = x.begin; i < x.begin + x.count; ++i) rows += rq[i].n;
+                if (x.single) ok &= x.count == 1;
+                else ok &= x.count >= 2 && rows <= cap;
+                if (x.count == 1 && rq[x.begin].n > cap) ok &= x.single;
+                next += x.count;
+            }
+            ok &= next == n;
+            // greedy: a group closes only when the next request does not fit
+            for (std::size_t q = 0; q + 1 < g.size(); ++q) {
+                if (g[q].single || g[q + 1].single) continue;
+                std::uint64_t rows = 0;
+                for (std::uint32_t i = g[q].begin; i < g[q].begin + g[q].count; ++i) rows += rq[i].n;
+                ok &= rows + rq[g[q + 1].begin].n > cap;
+            }
+            CHECK(ok);
+        }
+    {
+        db::MemInput in;
+        in.n_embd = 5120;
+        in.n_head_kv = 8;
+        in.head_dim = 128;
+        CHECK_EQ(db::ingestScratchBytes(in, 5, 0), 0ull);
+        CHECK_EQ(db::ingestScratchBytes(in, 5, 64), 64ull * 4 * (5 * 5120 + 5120 + 2 * 1024 + 1));
+    }
+    // toy ingest: stacked == one request at a time, bitwise; rings of slots not in the batch and ring rows the
+    // requests do not write stay untouched (including a request that wraps the ring)
+    {
+        using dflash_batch_test::KvRing;
+        const std::uint32_t L = 3, E = 4, stride = 40, ring = 16, S = 5;
+        std::vector<float> feats(static_cast<std::size_t>(L) * stride * E);
+        for (std::size_t i = 0; i < feats.size(); ++i) feats[i] = 0.01f * static_cast<float>((i * 37) % 101) - 0.4f;
+        std::vector<KvRing> base(S);
+        for (std::uint32_t s = 0; s < S; ++s) {
+            base[s].cpos.assign(ring, -1);
+            base[s].k.assign(ring * E, 7.0f + static_cast<float>(s));
+            base[s].v.assign(ring * E, -3.0f - static_cast<float>(s));
+            for (std::uint32_t j = 0; j < 6; ++j) base[s].cpos[j] = static_cast<std::int32_t>(j);
+        }
+        // slot 4 never ingests (foreign); slot 1 wraps the ring (positions 14 .. 18)
+        const std::vector<db::IngestReq> rq = {{2, 0, 3, 6}, {1, 5, 5, 14}, {0, 12, 1, 9}, {3, 20, 4, 30}};
+        for (std::uint32_t n = 1; n <= rq.size(); ++n) {
+            const std::span<const db::IngestReq> part(rq.data(), n);
+            std::vector<KvRing> st = base, one = base;
+            dflash_batch_test::toyIngest(part, feats, stride, L, E, st);
+            for (const auto& q : part) dflash_batch_test::toyIngest(std::span<const db::IngestReq>(&q, 1), feats, stride, L, E, one);
+            CHECK(dflash_batch_test::sameRings(st, one));
+            // reversed request order: the same rings (no order between slots)
+            std::vector<db::IngestReq> rev(part.begin(), part.end());
+            std::reverse(rev.begin(), rev.end());
+            std::vector<KvRing> sr = base;
+            dflash_batch_test::toyIngest(rev, feats, stride, L, E, sr);
+            CHECK(dflash_batch_test::sameRings(st, sr));
+            bool untouched = true;
+            for (std::uint32_t s = 0; s < S; ++s) {
+                std::vector<bool> written(ring, false);
+                for (const auto& q : part)
+                    if (q.slot == s)
+                        for (std::uint32_t t = 0; t < q.n; ++t) written[(q.pos + t) % ring] = true;
+                for (std::uint32_t row = 0; row < ring; ++row) {
+                    if (written[row]) continue;
+                    untouched &= st[s].cpos[row] == base[s].cpos[row];
+                    untouched &= std::memcmp(st[s].k.data() + row * E, base[s].k.data() + row * E, E * 4) == 0;
+                    untouched &= std::memcmp(st[s].v.data() + row * E, base[s].v.data() + row * E, E * 4) == 0;
+                }
+            }
+            CHECK(untouched);
+            CHECK(dflash_batch_test::sameRings(std::vector<KvRing>(st.begin() + 4, st.end()), std::vector<KvRing>(base.begin() + 4, base.end())));
         }
     }
 }

@@ -10,9 +10,13 @@
 // (DFlashRun::attn_kind: dflash_attn_part + dflash_attn_merge on this block's q / kb / vb / att offsets,
 // one launch pair per block; DFlashRun::topk_kind: the split top-k needs its workspace sized for S * P rows,
 // or keep dflash_topk here). Both only change proposals, never the verified output.
+//
+// feat029-dflashingest: Model::dflashIngestBatch (end of file) is dflashIngest (src/model/dflash.cpp) over the
+// stacked rows of several slots; same kernels and matmuls, only the row count changes. dflash.cpp is untouched.
 
 #include "whirl/model.h"
 #include "whirl/dflash_batch.h"
+#include "whirl/dflash_policy.h"
 
 #include <algorithm>
 #include <cmath>
@@ -50,7 +54,13 @@ inline i32 I(u64 v) { return static_cast<i32>(v); }
 
 u64 Model::dflashBatchBytes(u32 max_slots) const {
     if (!dflash) return 0;
-    return ::whirl::dflash::batch::scratchBytes(batchMem(*dflash, static_cast<u32>(output.nrows)), max_slots);
+    namespace db = ::whirl::dflash::batch;
+    const db::MemInput in = batchMem(*dflash, static_cast<u32>(output.nrows));
+    const u64 draft = db::scratchBytes(in, max_slots);
+    if (draft == 0) return 0;
+    // feat029-dflashingest: plus the batched ingest scratch (one verify block per slot)
+    const u32 cap = db::groupCap(dflash->cfg.block, max_slots, max_batch);
+    return draft + db::ingestScratchBytes(in, static_cast<u32>(dflash->cfg.target_layers.size()), db::ingestCap(dflash->cfg.block, cap, max_batch));
 }
 
 void Model::dflashBatchSetup(u32 max_slots) {
@@ -85,6 +95,15 @@ void Model::dflashBatchSetup(u32 max_slots) {
     r->gate = alloc(NP * R * 4);
     r->lat = alloc(NP * K * K * 4);
     r->out = alloc(S * B * 4);
+    // feat029-dflashingest: stacked ingest rows (one verify block per slot, at most max_batch)
+    const u64 nl = c.target_layers.size();
+    r->ing_rows = ::whirl::dflash::batch::ingestCap(static_cast<u32>(B), cap, max_batch);
+    const u64 IR = r->ing_rows;
+    r->ing_f = alloc(nl * IR * E * 4);
+    r->ing_g = alloc(IR * E * 4);
+    r->ing_k = alloc(IR * kvw * 4);
+    r->ing_v = alloc(IR * kvw * 4);
+    r->ing_pos = alloc(IR * 4);
     dfb = std::move(r);
 }
 
@@ -187,6 +206,87 @@ std::vector<std::vector<u32>> Model::dflashDraftBatch(std::span<const ::whirl::d
         for (u32 i = 0; i < S; ++i) res[gr.begin + i] = std::move(d[i]);
     }
     return res;
+}
+
+void Model::dflashIngestBatch(DevPtr feats, u32 stride, std::span<const ::whirl::dflash::batch::IngestReq> reqs) {
+    namespace db = ::whirl::dflash::batch;
+    if (!dfr || reqs.empty()) return;
+    DFlashRun& r = *dfr;
+    auto one = [&](const db::IngestReq& q) { dflashIngest(q.slot, feats, stride, q.cap_row, q.n, q.pos); };
+    // one request, no batch scratch, a repeated slot: the one-slot path (bit-identical to the unbatched engine)
+    if (reqs.size() == 1 || !dfb || dfb->ing_rows == 0 || !db::validIngest(reqs, static_cast<u32>(r.slots.size()))) {
+        for (const db::IngestReq& q : reqs) one(q);
+        return;
+    }
+    const DFlashConfig& c = dflash->cfg;
+    DFlashBatchRun& b = *dfb;
+    const u64 E = c.n_embd, kvw = static_cast<u64>(c.n_head_kv) * c.head_dim;
+    const u32 nl = static_cast<u32>(c.target_layers.size());
+    const float theta_scale = std::pow(c.rope_base, -2.0f / static_cast<float>(c.head_dim));
+    const u64 col_bytes = dflash->fc.row_bytes / nl;
+    // a request longer than the ring keeps only its last ring rows (dflashIngest): such a request is "single"
+    const u32 cap = std::min(b.ing_rows, r.ring);
+    std::vector<u32> touched;
+    for (const db::IngestGroup& gr : db::ingestGroups(reqs, cap)) {
+        const std::span<const db::IngestReq> rq = reqs.subspan(gr.begin, gr.count);
+        if (gr.single) {
+            for (const db::IngestReq& q : rq) one(q);
+            continue;
+        }
+        const std::vector<u64> off = db::ingestOffsets(rq);
+        const u32 N = static_cast<u32>(off.back());
+        const std::vector<i32> ph = db::ingestPositions(rq);
+        // the previous group's kernels still read ing_pos / ing_f
+        hip::streamSync(stream);
+        hip::upload(b.ing_pos, ph.data(), ph.size() * 4);
+        // gather: target layer j of request i -> ing_f rows j * N + off[i] .. (feature row r of layer j at feats + (j * stride + r) * E)
+        for (u32 j = 0; j < nl; ++j)
+            for (std::size_t i = 0; i < rq.size(); ++i)
+                hip::copyAsync(b.ing_f + (static_cast<u64>(j) * N + off[i]) * E * 4, feats + (static_cast<u64>(j) * stride + rq[i].cap_row) * E * 4,
+                               static_cast<std::size_t>(rq[i].n) * E * 4, stream);
+        // g = rmsnorm(fc . concat(features)) * enc_norm over the N stacked rows
+        for (u32 j = 0; j < nl; ++j) {
+            Mat fj = dflash->fc;
+            fj.ptr += j * col_bytes;
+            fj.ncols = c.n_embd;
+            xq_src = 0;
+            x16_src = 0;
+            matmul(fj, b.ing_f + static_cast<u64>(j) * N * E * 4, b.ing_g, N, j > 0);
+        }
+        hip::launch(k.rmsnorm, D(N), D(256), 0, stream, b.ing_g, dflash->enc_norm, b.ing_g, I(E), I(E), I(E), c.eps);
+        for (u32 l = 0; l < c.n_layer; ++l) {
+            const DFlashLayerW& w = dflash->layers[l];
+            xq_src = 0;
+            x16_src = 0;
+            matmul(w.k, b.ing_g, b.ing_k, N, false);
+            xq_src = 0;
+            x16_src = 0;
+            matmul(w.v, b.ing_g, b.ing_v, N, false);
+            hip::launch(k.rmsnorm, D(N * c.n_head_kv), D(256), 0, stream, b.ing_k, w.k_norm, b.ing_k, I(c.head_dim), I(c.head_dim),
+                        I(c.head_dim), c.eps);
+            hip::launch(k.rope_neox, D(c.n_head_kv, N), D(64), 0, stream, b.ing_k, b.ing_pos, I(c.head_dim), I(kvw), I(c.head_dim), theta_scale);
+            // per slot: its rows go to its own ring at position % ring (at most two contiguous pieces)
+            for (std::size_t i = 0; i < rq.size(); ++i) {
+                DFlashSlotCtx& sc = r.slots[rq[i].slot];
+                const DevPtr ks = b.ing_k + off[i] * kvw * 4, vs = b.ing_v + off[i] * kvw * 4;
+                const ::whirl::dflash::RingPieces rp = ::whirl::dflash::ringPieces(rq[i].pos, rq[i].n, r.ring);
+                hip::copyAsync(sc.kc[l] + rp.start * kvw * 4, ks, rp.first * kvw * 4, stream);
+                hip::copyAsync(sc.vc[l] + rp.start * kvw * 4, vs, rp.first * kvw * 4, stream);
+                if (rp.second > 0) {
+                    hip::copyAsync(sc.kc[l], ks + rp.first * kvw * 4, rp.second * kvw * 4, stream);
+                    hip::copyAsync(sc.vc[l], vs + rp.first * kvw * 4, rp.second * kvw * 4, stream);
+                }
+            }
+        }
+        for (const db::IngestReq& q : rq) {
+            DFlashSlotCtx& sc = r.slots[q.slot];
+            for (u32 t = 0; t < q.n; ++t) sc.cpos_h[(q.pos + t) % r.ring] = static_cast<i32>(q.pos + t);
+            touched.push_back(q.slot);
+        }
+    }
+    if (touched.empty()) return;
+    hip::streamSync(stream);
+    for (const u32 s : touched) hip::upload(r.slots[s].cpos, r.slots[s].cpos_h.data(), r.slots[s].cpos_h.size() * 4);
 }
 
 }  // namespace whirl::qwen35

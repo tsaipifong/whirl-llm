@@ -145,6 +145,7 @@ public:
     std::vector<std::uint32_t> dflashDraft(std::uint32_t s, std::uint32_t anchor, std::uint32_t pos, float p_min,
                                            std::uint32_t n_min) override;
     std::vector<std::vector<std::uint32_t>> dflashDraftBatch(std::span<const ::whirl::dflash::batch::Req> reqs) override;
+    void dflashIngestBatch(std::span<const ::whirl::dflash::batch::IngestReq> reqs) override;
     void dflashTrim(std::uint32_t s, std::uint32_t keep) override;
     std::uint32_t dflashRing() const override { return mc_.dfl_ring; }
     std::uint64_t dflHoles() const { return dfl_holes_; }
@@ -160,6 +161,13 @@ public:
     std::uint64_t dflBatchMax() const { return dfl_batch_max_; }
     std::uint64_t dflBatchBadSlots() const { return dfl_batch_bad_; }
     std::uint64_t dflBatchPerturbed() const { return dfl_batch_perturbed_; }
+    // feat029-dflashingest: batched ingest calls, slots / rows in them, the largest batch, calls with a repeated /
+    // bad slot or an empty request
+    std::uint64_t dflIngBatches() const { return dfl_ing_batches_; }
+    std::uint64_t dflIngSlots() const { return dfl_ing_slots_; }
+    std::uint64_t dflIngRows() const { return dfl_ing_rows_; }
+    std::uint64_t dflIngMax() const { return dfl_ing_max_; }
+    std::uint64_t dflIngBad() const { return dfl_ing_bad_; }
 
     // Reference: greedy continuation of `prompt` computed from scratch
     // (independent of the engine), stopping at <|im_end|> / <|endoftext|>
@@ -223,6 +231,7 @@ private:
     std::vector<std::map<std::uint32_t, State>> dfl_ctx_;
     std::uint64_t dfl_bad_ = 0, dfl_stale_ = 0, dfl_blocks_ = 0, dfl_holes_ = 0;
     std::uint64_t dfl_batches_ = 0, dfl_batch_blocks_ = 0, dfl_batch_max_ = 0, dfl_batch_bad_ = 0, dfl_batch_perturbed_ = 0;
+    std::uint64_t dfl_ing_batches_ = 0, dfl_ing_slots_ = 0, dfl_ing_rows_ = 0, dfl_ing_max_ = 0, dfl_ing_bad_ = 0;
 
     device::Backend& ops_;
     const Tokenizer& tok_;

@@ -546,7 +546,7 @@ The output always equals plain greedy decoding (with sampling: the same distribu
 | `WHIRL_DFLASH_NMIN=N` | `--draft dflash`: fewer than N drafts in a block = no drafts that cycle (default 0) *(debug)* |
 | `WHIRL_DFLASH_WARM=N` | server, `--draft dflash`: rows a slot's drafter context needs after a restore / reset before it drafts again (default 64) *(debug)* |
 | `WHIRL_DFLASH_CAPTURE_ROWS=N` | `--draft dflash`: target-feature capture rows per forward, at least 16 (default: the drafter's window, 2048; at most the prefill batch). Smaller values save VRAM but leave gaps in the drafter context after long prefills *(debug)* |
-| `WHIRL_DFLASH_BATCH=1` | server, `--draft dflash`: one drafter forward over the draft blocks of every slot that drafts in a cycle instead of one forward per slot (default 0; outputs unchanged, verification stays exact; extra VRAM for the stacked scratch is logged at startup) *(experimental)* |
+| `WHIRL_DFLASH_BATCH=1` | server, `--draft dflash`: one drafter forward over the draft blocks of every slot that drafts in a cycle instead of one forward per slot (default 0; outputs unchanged, verification stays exact; extra VRAM for the stacked scratch is logged at startup) *(experimental)*; the verified rows' drafter-context ingests of the cycle then also go in one stacked pass (`WHIRL_DFLASH_BATCH_INGEST=0` keeps them per slot) |
 | `WHIRL_NGRAM_MIN=N` | minimum matched suffix for an n-gram draft (default 3) |
 | `WHIRL_NGRAM_SLOPE=X` | prior cost of one more n-gram verify row, relative to a 1-draft cycle, until n-gram cycles are timed (default 0.015; Radeon 8060S 0.12) |
 | `WHIRL_NGRAM_MAX=N` | most n-gram drafts per cycle (default 15) |

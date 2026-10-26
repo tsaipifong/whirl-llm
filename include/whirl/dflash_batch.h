@@ -125,4 +125,94 @@ inline u64 scratchBytes(const MemInput& in, u32 slots) {
            drows * R * 4 + drows * K * K * 4 + S * B * 4;
 }
 
+// ---- feat029-dflashingest: batched context ingest (the verified rows' target features of several slots)
+// Model::dflashIngestBatch stacks every request's rows: request i owns stacked rows off[i] .. off[i] + n_i - 1
+// (off = ingestOffsets). Row-wise stages (fc over the target-layer column blocks, enc_norm, each layer's k / v
+// matmul, k_norm, RoPE with the per-row positions) run once over the stacked rows; the ring writes
+// (position % ring) and the cpos mirror stay per slot. llama.cpp draft-dflash process() ingests per sequence;
+// vLLM's EAGLE proposer feeds the flattened multi-request hidden states in one drafter pass
+// (progress\feat029-dflashingest.PRIOR_ART.md).
+// WHIRL_DFLASH_BATCH_INGEST (only with WHIRL_DFLASH_BATCH=1): "0" / "off" / "false" keeps the per-slot ingest while the
+// drafter forward is batched (the GPU runner's A/B arm for the ingest alone); anything else = batched (default).
+inline bool parseIngestEnabled(const char* v) {
+    if (!v) return true;
+    const std::string_view s(v);
+    return !(s == "0" || s == "off" || s == "false");
+}
+
+struct IngestReq {
+    u32 slot = 0;     // drafter context slot
+    u32 cap_row = 0;  // first row in the capture buffer (whirl::dflash::planIngest's cap_row)
+    u32 n = 0;        // rows
+    u32 pos = 0;      // position of cap_row
+};
+
+// Prefix sums of the row counts: size reqs.size() + 1, off[i] = first stacked row of request i, back() = total.
+inline std::vector<u64> ingestOffsets(std::span<const IngestReq> reqs) {
+    std::vector<u64> off(reqs.size() + 1, 0);
+    for (std::size_t i = 0; i < reqs.size(); ++i) off[i + 1] = off[i] + reqs[i].n;
+    return off;
+}
+
+// Stacked positions: pos_i .. pos_i + n_i - 1 per request.
+inline std::vector<i32> ingestPositions(std::span<const IngestReq> reqs) {
+    std::vector<i32> p;
+    for (const IngestReq& r : reqs)
+        for (u32 t = 0; t < r.n; ++t) p.push_back(static_cast<i32>(r.pos + t));
+    return p;
+}
+
+// Batchable: distinct slots < n_slots and no empty request (two ingests of one slot in one batch would race on
+// its ring rows; the engine ingests each slot once per cycle).
+inline bool validIngest(std::span<const IngestReq> reqs, u32 n_slots) {
+    std::vector<bool> seen(n_slots, false);
+    for (const IngestReq& r : reqs) {
+        if (r.n == 0 || r.slot >= n_slots || seen[r.slot]) return false;
+        seen[r.slot] = true;
+    }
+    return true;
+}
+
+// Consecutive groups of requests whose rows fit cap_rows stacked rows; a request with more rows than cap_rows is a
+// group of its own with single = true (it goes through the one-slot dflashIngest, which splits it).
+struct IngestGroup {
+    u32 begin = 0, count = 0;
+    bool single = false;
+};
+inline std::vector<IngestGroup> ingestGroups(std::span<const IngestReq> reqs, u32 cap_rows) {
+    std::vector<IngestGroup> g;
+    u64 rows = 0;
+    for (u32 i = 0; i < static_cast<u32>(reqs.size()); ++i) {
+        const u32 n = reqs[i].n;
+        if (n > cap_rows) {
+            g.push_back({i, 1, true});
+            rows = 0;
+            continue;
+        }
+        if (g.empty() || g.back().single || rows + n > cap_rows) {
+            g.push_back({i, 0, false});
+            rows = 0;
+        }
+        g.back().count += 1;
+        rows += n;
+    }
+    for (IngestGroup& x : g)
+        if (x.count == 1) x.single = true;  // one request: the one-slot path (bit-identical to the unbatched engine)
+    return g;
+}
+
+// Stacked ingest rows the batch scratch holds: one verify block per slot, at most the matmul row capacity.
+inline u32 ingestCap(u32 block, u32 slots, u32 max_rows) {
+    const u64 want = static_cast<u64>(block) * slots;
+    return static_cast<u32>(std::min<u64>(want, max_rows));
+}
+
+// Scratch of the batched ingest for `rows` stacked rows: gathered features [n_target_layers][rows][n_embd],
+// fc output, k / v [rows][n_head_kv * head_dim], positions.
+inline u64 ingestScratchBytes(const MemInput& in, u32 n_target_layers, u32 rows) {
+    if (rows == 0) return 0;
+    const u64 E = in.n_embd, kvw = static_cast<u64>(in.n_head_kv) * in.head_dim;
+    return static_cast<u64>(rows) * 4 * (static_cast<u64>(n_target_layers) * E + E + 2 * kvw + 1);
+}
+
 }  // namespace whirl::dflash::batch
