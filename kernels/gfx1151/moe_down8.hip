@@ -44,12 +44,26 @@
 // id -1; the lane -> unit map and order are those of feat027's moe_down_impl loop over kt * nu. Without -1 kt == K
 // (unchanged values). The nu % 32 != 0 fallback is the shipped body, skip-aware once feat027 is merged. The LX stage
 // still copies all K rows of token t (in bounds; dropped rows are never consumed).
+// Test-only id -1 address check (feat026-skipsafe-r2, review skipsafe-gemvports C1; needs WHIRL_MD8_DEV=1):
+//   WHIRL_MD8_NEGCHK=1: the expert id of every weight-row address of md8_impl goes through MD8_EID; an id < 0
+//     increments the device global md8_negid_hits (kt reads it) and is replaced by 0, so even a defective candidate
+//     never loads outside the tensor. A value check cannot see a load that is masked out; this counter can.
+//   WHIRL_MD8_NEGCHK=2: the same plus a planted fault (the positive control): steps past the kept prefix are clamped
+//     to step K m - 1 (slot K - 1, an id -1 slot). kt must count hits for every candidate.
+//   Without it MD8_EID(e) is (e) and the clamp is ns - 1: the dev / tune-id / default objects are unchanged.
+//   The nu % 32 != 0 fallback (the shipped body) is not instrumented.
 
 #ifndef WHIRL_MD8_MXFP4
 #define WHIRL_MD8_MXFP4 0
 #endif
 #ifndef WHIRL_MD8_DEV
 #define WHIRL_MD8_DEV 0
+#endif
+#ifndef WHIRL_MD8_NEGCHK
+#define WHIRL_MD8_NEGCHK 0
+#endif
+#if WHIRL_MD8_NEGCHK && !WHIRL_MD8_DEV
+#error "WHIRL_MD8_NEGCHK is a test instrumentation of the WHIRL_MD8_DEV object only"
 #endif
 
 #if WHIRL_MD8_MXFP4 || WHIRL_MD8_DEV
@@ -98,6 +112,30 @@ __device__ __forceinline__ int md8_kept(const int *__restrict__ ids, int t, int 
     return kt;
 }
 
+#if WHIRL_MD8_NEGCHK
+// id -1 address check (test-only): counts weight addresses formed from a negative id, then uses expert 0 instead
+extern "C" __device__ unsigned int md8_negid_hits = 0;
+extern "C" __global__ void md8_negchk_v1() {}
+#if WHIRL_MD8_NEGCHK >= 2
+extern "C" __global__ void md8_negchk_fault_v1() {}  // kt: this object carries the planted fault
+#endif
+__device__ __forceinline__ int md8_eid(int e) {
+    if (e < 0) {
+        atomicAdd(&md8_negid_hits, 1u);
+        return 0;
+    }
+    return e;
+}
+#define MD8_EID(e) md8_eid(e)
+#else
+#define MD8_EID(e) (e)
+#endif
+#if WHIRL_MD8_NEGCHK >= 2
+#define MD8_CLAMP_STEP(ns, K, m) ((K) * (m) - 1)  // planted fault (positive control): a dropped slot's step
+#else
+#define MD8_CLAMP_STEP(ns, K, m) ((ns) - 1)
+#endif
+
 template <int KB, bool DB, bool EP, bool LX, bool NG = false>
 __device__ void md8_impl(const uint8_t *__restrict__ W, uint64_t row_bytes, int E, const int8_t *__restrict__ xq,
                          const float *__restrict__ xd, const int *__restrict__ ids, const float *__restrict__ w,
@@ -142,11 +180,11 @@ __device__ void md8_impl(const uint8_t *__restrict__ W, uint64_t row_bytes, int 
     float acc = 0.f;
     // step i of this lane: expert slot k = i / m, unit uu = lane + 32 (i % m)  (== shipped u = lane + 32 i)
     auto load = [&](Md8Ld &o, float &wp, int i) {
-        const int ic = i < ns ? i : ns - 1;  // clamped: loads stay in bounds, consumed only if i < ns
+        const int ic = i < ns ? i : MD8_CLAMP_STEP(ns, K, m);  // clamped: loads stay in bounds, consumed only if i < ns
         const int k = ic / m, j = ic - k * m;
         const int p = t * K + k;
         wp = w[p];
-        const uint8_t *wr = W + ((size_t)ids[p] * E + row) * row_bytes;
+        const uint8_t *wr = W + ((size_t)MD8_EID(ids[p]) * E + row) * row_bytes;
         if (LX && use_lx) md8_load<true>(o, wr, lane + WARP * j, nullptr, nullptr, sx, sd, k * F);
         else md8_load<false>(o, wr, lane + WARP * j, xq + (size_t)p * F, xd + (size_t)p * (F / 32), nullptr, nullptr, 0);
     };
