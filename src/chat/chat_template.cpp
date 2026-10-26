@@ -221,7 +221,10 @@ std::string renderChat(TemplateKind kind, const json::Array& msgs, const json::A
             w += merged;
         }
         w += "<|im_end|>\n";
-    } else if (!merged.empty()) {
+    } else if (!merged.empty() || (kind == TemplateKind::b && num_sys > 0)) {
+        // bug-emptysystem: the product Ornith MXFP4 template (b) emits the system turn whenever messages[0] is a
+        // system message, even when its trimmed content is empty (as the Qwen3 / Qwen3.5 templates do); a (`if
+        // content`) and b_pyargs (`if merged_system`) emit none
         w += "<|im_start|>system\n";
         if (!instr.empty()) {
             w += instr;

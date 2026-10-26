@@ -98,12 +98,13 @@ engine from the external checkout and renders the GGUF templates with
 
 | Variant (template) | identical prompt | both raise | documented divergence | mismatch |
 |---|---|---|---|---|
-| a (Swift-1.5-Qwen3.8-27B-MXFP4) | 35 | 2 | 9 | 0 |
-| b (Ornith-1.5-35B-A3B-MXFP4) | 28 | 2 | 16 | 0 |
-| b-pyargs (ornith-ai Ornith-1.5-35B-Q4_K_M) | 41 | 1 | 4 | 0 |
+| a (Swift-1.5-Qwen3.8-27B-MXFP4) | 39 | 2 | 10 | 0 |
+| b (Ornith-1.5-35B-A3B-MXFP4) | 34 | 2 | 15 | 0 |
+| b-pyargs (ornith-ai Ornith-1.5-35B-Q4_K_M) | 46 | 1 | 4 | 0 |
 
 Re-run 2026-10-26 (bug-toolargbool) with the oracle built from llama.cpp
-529ac893e, 46 cases. It replaces the v0.1.0 table (37 / 39 identical),
+529ac893e, 46 cases; bug-emptysystem (same day) added five empty system /
+developer cases, 51 cases. It replaces the v0.1.0 table (37 / 39 identical),
 which was measured against older GGUF templates; the original Ornith-1.5
 GGUF is now variant `b-pyargs`.
 The variant is detected from each GGUF's template: `a` mentions
@@ -122,6 +123,14 @@ nested at the top level: `tool_call_scalar_args`), flat tool calls,
 empty / null / whitespace arguments, consecutive tool responses, tool
 message first or last, assistant prefill, Unicode content with U+3000.
 
+An empty / whitespace / null leading system message is not a divergence
+(bug-emptysystem): every variant follows its own template. `b` renders an
+empty system turn (`<|im_start|>system\n<|im_end|>\n`, as the Qwen3 /
+Qwen3.5 templates do), `a` and `b-pyargs` render none, and with tools the
+empty text adds nothing (cases `empty_system`, `null_system`,
+`empty_string_system`, `empty_system_parts`, `empty_system_tools`,
+`empty_system_no_think`).
+
 Documented divergences (deliberate):
 
 | Case | Variant | WHIRL | Template / oracle |
@@ -131,11 +140,11 @@ Documented divergences (deliberate):
 | `tool_call_args_empty_string` | a, b | no parameters | raises (the items filter on a string) |
 | `mid_system_message` | a | renders a system turn | raises |
 | `mid_system_message` | b | skips it (as the original Ornith-1.5 template) | raises |
-| `two_systems`, `three_systems` | a, b | merges the leading system / developer messages | raises (developer role, or a second system message) |
+| `two_systems`, `three_systems` | a, b | merges the leading system / developer messages (a: all, b: the first two) | raises (developer role, or a second system message) |
+| `empty_developer` | a, b | treats developer as system (llama.cpp maps developer to system too); b then renders the empty system turn | raises (developer role) |
 | `effort_high`, `effort_invalid` | a | `high` -> xhigh; unknown value -> default effort + warning | raises |
 | `tool_call_missing_name` | a, b, b-pyargs | rejects the request | renders `<function=>` (Python Jinja would raise) |
 | `unknown_role` | b, b-pyargs | rejects the request | silently skips the message |
-| `empty_system`, `null_system` | b | no system turn | empty system turn |
 | `multi_turn_reasoning`, `assistant_think_in_content`, `assistant_two_think_blocks`, `assistant_close_think_only`, `preserve_thinking_false`, `tool_call_roundtrip`, `unicode_mix` | b | keeps the `<think>` block of every earlier assistant turn (llama.cpp default preserve_reasoning=true; prefix cache reuse) | keeps it only after the last user query unless preserve_thinking=true |
 | `image_part` | a, b, b-pyargs | rejects (images unsupported; `allow_media` renders the placeholder) | vision placeholder |
 | `float_values` | a, b, b-pyargs | Python `json.dumps` floats (`2.0`, `0.7`) | llama.cpp `tojson` prints `2` |
