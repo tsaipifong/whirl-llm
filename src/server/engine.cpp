@@ -714,71 +714,6 @@ void Engine::fetchCands(Sampler& s, std::uint32_t rows) {
     ops_.download(samp_host_.data(), samp_dev_.get(), sampBytes());
 }
 
-bool filterCands(Sampler& s, std::size_t count, bool complete) {
-    std::vector<Cand>& cv = *s.cands;
-    Cand* c = cv.data();
-    std::sort(c, c + count, [](const Cand& x, const Cand& y) {
-        if (x.logit != y.logit) return x.logit > y.logit;
-        return x.id < y.id;
-    });
-    if (complete) {
-        // exact host normalizer for the full row
-        float mx = -std::numeric_limits<float>::infinity();
-        for (std::size_t i = 0; i < count; ++i) mx = std::max(mx, c[i].logit);
-        double z = 0;
-        for (std::size_t i = 0; i < count; ++i) z += std::exp(static_cast<double>(c[i].logit - mx) * s.inv_t);
-        s.m = mx;
-        s.sum = static_cast<float>(z);
-    }
-    for (std::size_t i = 0; i < count; ++i)
-        c[i].p = std::exp(static_cast<double>(c[i].logit - s.m) * s.inv_t) / static_cast<double>(s.sum);
-    std::size_t n = count;
-    bool closed = complete;
-    if (s.top_k > 0) {
-        if (s.top_k <= count) {
-            n = s.top_k;
-            closed = true;
-        } else if (!complete) {
-            return false;
-        }
-    }
-    if (s.top_p < 1.0) {
-        double z = 1.0;
-        if (closed) {
-            z = 0;
-            for (std::size_t i = 0; i < n; ++i) z += c[i].p;
-        }
-        double cum = 0;
-        bool found = false;
-        for (std::size_t j = 0; j < n; ++j) {
-            cum += c[j].p / z;
-            if (cum >= s.top_p) {
-                n = j + 1;
-                found = true;
-                break;
-            }
-        }
-        if (found) closed = true;
-        else if (!closed) return false;
-    }
-    if (s.min_p > 0) {
-        const double thr = s.min_p * c[0].p;
-        std::size_t j = 0;
-        while (j < n && c[j].p >= thr) ++j;
-        if (j == n && !closed) return false;
-        n = std::max<std::size_t>(j, 1);
-        closed = true;
-    }
-    if (closed) {
-        double z = 0;
-        for (std::size_t i = 0; i < n; ++i) z += c[i].p;
-        for (std::size_t i = 0; i < n; ++i) c[i].p /= z;
-    }
-    s.n = n;
-    s.closed = closed;
-    return true;
-}
-
 void Engine::prepareRow(Sampler& s, std::uint32_t r) {
     const std::uint32_t gr = s.row_base + r;
     s.row = gr;
@@ -819,73 +754,23 @@ void Engine::loadFullRow(std::uint32_t gr) {
     ops_.download(row_host_.data(), logitsRow(gr), static_cast<std::uint64_t>(V) * 4);
 }
 
-// specsample target draw (whirl/spec_sample.h): race over the candidates; an open distribution
-// first takes the tail with probability 1 - S (S = candidate mass) and walks it by inverse CDF.
-std::uint32_t Engine::sampleRace(Sampler& s) {
-    const std::vector<Cand>& c = *s.cands;
-    if (!s.closed) {
-        double S = 0;
-        for (std::size_t i = 0; i < s.n; ++i) S += c[i].p;
-        if (!(s.uniform() < S)) {
-            s.race = false;  // the inverse-CDF walk with the same u falls past the candidates
-            const std::uint32_t t = sampleRow(s, std::nullopt, 0);
-            s.race = true;
-            return t;
-        }
-    }
-    const std::uint64_t base = spec::raceBase(s.seed, s.pos_idx);
-    std::uint32_t best = c[0].id;
-    double bk = std::numeric_limits<double>::infinity();
-    for (std::size_t i = 0; i < s.n; ++i) {
-        if (!(c[i].p > 0)) continue;
-        const double k = spec::raceE(base, c[i].id) / c[i].p;
-        if (k < bk) {
-            bk = k;
-            best = c[i].id;
-        }
-    }
-    return best;
+// sampling::RowSource over the verify rows (the draws in src/sampling read the device through it)
+void Engine::SampleRows::prepareRow(Sampler& s, std::uint32_t r) { e.prepareRow(s, r); }
+
+const float* Engine::SampleRows::loadFullRow(std::uint32_t gr) {
+    e.loadFullRow(gr);
+    return e.row_host_.data();
 }
 
-double Engine::probOf(Sampler& s, std::uint32_t t) {
-    const std::vector<Cand>& c = *s.cands;
-    for (std::size_t i = 0; i < s.n; ++i)
-        if (c[i].id == t) return c[i].p;
-    if (s.closed) return 0;
+float Engine::SampleRows::logitAt(std::uint32_t gr, std::uint32_t t) {
     float l = 0;
-    ops_.download(&l, logitsRow(s.row) + static_cast<std::uint64_t>(t) * 4, 4);
-    return std::exp(static_cast<double>(l - s.m) * s.inv_t) / static_cast<double>(s.sum);
+    e.ops_.download(&l, e.logitsRow(gr) + static_cast<std::uint64_t>(t) * 4, 4);
+    return l;
 }
 
-std::uint32_t Engine::sampleRow(Sampler& s, std::optional<std::uint32_t> ex, double p_ex) {
-    if (s.race && !ex) return sampleRace(s);
-    const double u = s.uniform();
-    const double target = u * (1.0 - p_ex);
-    double cum = 0;
-    std::optional<std::uint32_t> last;
-    const std::vector<Cand>& c = *s.cands;
-    for (std::size_t i = 0; i < s.n; ++i) {
-        if (ex && c[i].id == *ex) continue;
-        cum += c[i].p;
-        last = c[i].id;
-        if (cum > target) return c[i].id;
-    }
-    if (s.closed) return last ? *last : c[0].id;
-    // open distribution and the draw fell in the tail: walk the rest of the vocab
-    s.full_used += 1;
-    loadFullRow(s.row);
-    const std::uint32_t V = m_.cfg().n_vocab;
-    std::fill(in_cands_.begin(), in_cands_.begin() + V, std::uint8_t{0});
-    for (std::size_t i = 0; i < s.n; ++i) in_cands_[c[i].id] = 1;
-    for (std::uint32_t j = 0; j < V; ++j) {
-        if (in_cands_[j]) continue;
-        if (ex && j == *ex) continue;
-        cum += std::exp(static_cast<double>(row_host_[j] - s.m) * s.inv_t) / static_cast<double>(s.sum);
-        last = j;
-        if (cum > target) return j;
-    }
-    return last ? *last : c[0].id;
-}
+std::uint32_t Engine::SampleRows::nVocab() const { return e.m_.cfg().n_vocab; }
+
+std::uint8_t* Engine::SampleRows::inCands() { return e.in_cands_.data(); }
 
 // ---------------------------------------------------------------------------
 // request lifecycle
@@ -1325,7 +1210,7 @@ void Engine::finishPrefill(Slot& sl) {
         fetchCands(sl.sm, 1);
         prepareRow(sl.sm, 0);
         sl.sm.pos_idx = 0;
-        first = sampleRow(sl.sm, std::nullopt, 0);
+        first = sampling::sampleRow(samp_rows_, sl.sm, std::nullopt, 0);
     }
     if (opt_.verify_cache && sl.reuse > 0) {
         // diagnostic: compare the cached-prefix logits with a from-scratch prefill
@@ -1388,7 +1273,7 @@ void Engine::finishPrefill(Slot& sl) {
         } else {
             fetchCands(sl.sm, 1);
             prepareRow(sl.sm, 0);
-            first = sampleRow(sl.sm, std::nullopt, 0);
+            first = sampling::sampleRow(samp_rows_, sl.sm, std::nullopt, 0);
         }
     }
     sl.prompt_ms = msSince(sl.tp0);
@@ -1761,6 +1646,7 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
     if (p) m_.profileStop();
     bool any_sampling = false, any_relax = false;
     const std::uint32_t rk = opt_.relax.topk();
+    const sampling::Acceptor acceptor(opt_.relax);
     for (std::size_t k = 0; k < A; ++k) {
         Slot& sl = *act[k];
         if (sl.greedy) {
@@ -1865,64 +1751,16 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
         if (dsrc[k] == 1) sl.ng_cycles += 1;
         sl.cycles += 1;
         sl.drafted += nd_dev;
-        std::uint32_t acc = 0;
-        std::uint32_t chosen;
-        if (sl.greedy) {
-            while (acc < nd_dev) {
-                if (static_cast<std::uint32_t>(ctl[qwen35::ctl_rows + acc]) == dr[acc]) {
-                    ++acc;
-                    continue;
-                }
-                // n-gram drafts are copies of the history: relaxing them feeds repetition loops
-                if (!relaxes(k)) break;
-                // relaxacc: verify row acc (conditioned on drafts 0..acc-1) keeps a near-argmax draft
-                const std::size_t gr = row0 + acc;
-                const auto* rids = reinterpret_cast<const std::int32_t*>(relax_host_.data()) + gr * rk;
-                const auto* rvals = reinterpret_cast<const float*>(relax_host_.data() + static_cast<std::size_t>(max_rows) * rk * 4) + gr * rk;
-                const auto* rst = reinterpret_cast<const float*>(relax_host_.data() + static_cast<std::size_t>(max_rows) * rk * 8);
-                if (!relax::acceptGreedy(opt_.relax, std::span<const std::int32_t>(rids, rk), std::span<const float>(rvals, rk),
-                                         rst[2 * gr], dr[acc]) ||
-                    relaxRepeats(sl, dr, acc))
-                    break;
-                for (std::uint32_t j = 0; j < rk; ++j)
-                    if (static_cast<std::uint32_t>(rids[j]) == dr[acc]) sl.relax_gap += static_cast<double>(rst[2 * gr] - rvals[j]);
-                ++acc;
-                sl.relaxed += 1;
-            }
-            chosen = static_cast<std::uint32_t>(ctl[qwen35::ctl_rows + acc]);
-        } else {
-            // The target token at every output index is the sampler's draw keyed by (seed, output
-            // index); a draft is accepted iff it is that token. With specsample the sampler is the race
-            // and MTP draft r was drawn on the device from the draft distribution q by the same race
-            // (whirl/spec_sample.h); otherwise inverse CDF and the draft argmax. Either way the reply
-            // is a function of (target logits, seed) only: drafts change speed, never text.
-            const bool typ = relaxes(k);
-            sl.sm.row_base = row0;
-            for (;;) {
-                prepareRow(sl.sm, acc);
-                sl.sm.pos_idx = sl.n_gen + acc;
-                if (typ && acc < nd_dev) {
-                    // relaxacc typical acceptance on the filtered sampling distribution of row acc
-                    const double pd = probOf(sl.sm, dr[acc]);
-                    double h = 0;
-                    const std::vector<Cand>& cv = *sl.sm.cands;
-                    for (std::size_t i = 0; i < sl.sm.n; ++i)
-                        if (cv[i].p > 0) h -= cv[i].p * std::log(cv[i].p);
-                    if (relax::acceptTypical(opt_.relax, pd, h) && !relaxRepeats(sl, dr, acc)) {
-                        ++acc;
-                        sl.relaxed += 1;
-                        continue;
-                    }
-                }
-                const std::uint32_t t = sampleRow(sl.sm, std::nullopt, 0);
-                if (acc < nd_dev && t == dr[acc]) {
-                    ++acc;
-                    continue;
-                }
-                chosen = t;
-                break;
-            }
-        }
+        // draft acceptance (src/sampling/acceptor.h): greedy / relaxacc greedy, or the sampler's draw at every
+        // output index (inverse CDF / specsample race / relaxacc typical)
+        const sampling::Drafts drafts{std::span<const std::uint32_t>(dr.data(), dr.size()), nd_dev, row0};
+        const sampling::RepeatGuard repeats = [&](std::uint32_t a) { return relaxRepeats(sl, dr, a); };
+        const sampling::Accepted ac =
+            sl.greedy ? acceptor.greedy(ctl + qwen35::ctl_rows, drafts, relaxes(k), sampling::RelaxRows{relax_host_.data(), max_rows, rk},
+                                        repeats, sl.relaxed, sl.relax_gap)
+                      : acceptor.sample(samp_rows_, sl.sm, drafts, relaxes(k), sl.n_gen, repeats, sl.relaxed);
+        std::uint32_t acc = ac.acc;
+        std::uint32_t chosen = ac.chosen;
         sl.accepted += acc;
         if (dsrc[k] == 0 && opt_.use_mtp) {
             // n-gram cycles stay out of the MTP acceptance models

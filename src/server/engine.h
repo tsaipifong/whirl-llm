@@ -17,6 +17,8 @@
 #include "prefix_store.h"
 #include "tier_bridge.h"
 #include "protocol.h"
+#include "sampling/acceptor.h"
+#include "sampling/sampler.h"
 #include "device/backend.h"
 #include "device/handles.h"
 #include "stream.h"
@@ -72,44 +74,9 @@ using sched::prefillExecFor;
 using sched::prefill_exec_default;
 using sched::prefillExecDefault;
 
-struct Cand {
-    std::uint32_t id;
-    float logit;
-    double p;
-};
-
-struct Sampler {
-    double temp = 0;
-    float inv_t = 1;
-    std::uint32_t top_k = 0;
-    double top_p = 1;
-    double min_p = 0;
-    std::uint64_t seed = 0;
-    std::uint64_t pos_idx = 0;
-    std::vector<Cand>* cands = nullptr;
-    std::size_t n = 0;
-    bool closed = false;
-    float m = 0;
-    float sum = 1;
-    std::uint32_t row = 0;
-    std::uint32_t row_base = 0;
-    std::uint32_t full_used = 0;
-    std::uint32_t big_used = 0;
-    bool race = false;  // specsample: race draw coupled to the MTP drafts (whirl/spec_sample.h)
-
-    // Uniform in [0, 1) keyed by (seed, output token index).
-    double uniform() const {
-        std::uint64_t z = seed + (pos_idx + 1) * 0x9E3779B97F4A7C15ull;
-        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
-        z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
-        z ^= z >> 31;
-        return static_cast<double>(z >> 11) * (1.0 / 9007199254740992.0);
-    }
-};
-
-// Candidates [0, count) -> sorted, probabilities, top-k / top-p / min-p.
-// false when the kept set may extend past the candidates.
-bool filterCands(Sampler& s, std::size_t count, bool complete);
+// sampling (arch025-E1a): the sampler and its candidates live in src/sampling
+using sampling::Cand;
+using sampling::Sampler;
 
 enum class Phase { idle, prefill, decode, restore };
 
@@ -429,11 +396,8 @@ private:
                     std::uint32_t dst_rows, std::uint32_t out0);
     static std::size_t sampBytes();
     void fetchCands(Sampler& s, std::uint32_t rows);
-    double probOf(Sampler& s, std::uint32_t t);  // relaxacc typical acceptance
     void prepareRow(Sampler& s, std::uint32_t r);
     void loadFullRow(std::uint32_t gr);
-    std::uint32_t sampleRow(Sampler& s, std::optional<std::uint32_t> ex, double p_ex);
-    std::uint32_t sampleRace(Sampler& s);
     DevPtr logitsRow(std::uint32_t r) const;
     // request lifecycle
     bool emit(Slot& sl, std::uint32_t t);
@@ -539,6 +503,17 @@ private:
     std::vector<float> row_host_;
     std::vector<std::uint8_t> in_cands_;
     std::vector<Cand> cands_scratch_;
+    // sampling::RowSource over this engine's verify rows (the draws and the Acceptor read the device through it)
+    struct SampleRows final : sampling::RowSource {
+        Engine& e;
+        explicit SampleRows(Engine& en) : e(en) {}
+        void prepareRow(Sampler& s, std::uint32_t r) override;
+        const float* loadFullRow(std::uint32_t gr) override;
+        float logitAt(std::uint32_t gr, std::uint32_t t) override;
+        std::uint32_t nVocab() const override;
+        std::uint8_t* inCands() override;
+    };
+    SampleRows samp_rows_{*this};
     std::vector<std::int32_t> ctl_host_;
     bool spec_on_ = false;
     std::uint64_t conv_bytes_ = 0, ssm_bytes_ = 0;
