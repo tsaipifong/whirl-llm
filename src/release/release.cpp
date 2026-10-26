@@ -367,6 +367,7 @@ constexpr EnvDoc k_env[] = {
     {"Speculative decoding (output always equals plain greedy)", "NGRAM_MAX=N", "most n-gram drafts per cycle (default 15)", C | B | S},
     {"Speculative decoding (output always equals plain greedy)", "NGRAM_FORCE=1", "take every n-gram proposal", C | B | S},
     {"Speculative decoding (output always equals plain greedy)", "NGRAM_DEBUG=1", "log every decode cycle to stderr", C | B},
+    {"Speculative decoding (output always equals plain greedy)", "SPEC_ACC=host|pinned|gpu|gpu-zc|check", "server A/B, same reply with every value: where a draft cycle's accept decision is made. host (= 0, default) host loop after a pageable read; pinned (1) the same with a pinned read; gpu (2) a GPU kernel decides the greedy slots; gpu-zc (3) gpu, written straight into pinned host memory (zero copy, not yet GPU-verified); check (4) GPU and host both decide, every cycle compared, host result used", S},
 
     {"Server", "NO_PREFIX_CACHE=1", "disable the prefix cache", S},
     {"Server", "PREFIX_CACHE_VERIFY=1", "diagnostic: re-prefill after every cache hit and compare", S},

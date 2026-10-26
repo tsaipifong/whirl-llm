@@ -358,6 +358,36 @@ ops::DraftHeadProblem Model::draftHeadProblem(const Mat& head) const {
 
 void Model::readCtl(std::span<i32> dst) { hip::download(dst.data(), out_tok, dst.size() * 4); }
 
+// feat026-acc: accept decision on the device (see the header and kernels/spec_accept.hip)
+bool Model::specAcceptEnqueue(const SpecAccArgs& a, DevPtr host) {
+    if (k.spec_accept_rows == nullptr) return false;
+    if (a.n <= 0 || a.n > WHIRL_SA_MAX_SEG) throw ModelError("BadBatch");
+    SpecAccArgs b = a;
+    for (int kk = 0; kk < b.n; ++kk) {
+        if (b.seq[kk] < 0 || static_cast<std::size_t>(b.seq[kk]) >= seqs.size() || b.nd[kk] < 0 || b.nd[kk] > WHIRL_SA_MAX_ND)
+            throw ModelError("BadBatch");
+        b.kvbase[kk] = static_cast<i32>(seqs[b.seq[kk]].kv_base);
+    }
+    b.n_vocab = static_cast<i32>(cfg.n_vocab);
+    if (spec_tab == 0) spec_tab = allocZero(sizeof(SpecNextTab));
+    hip::launch(k.spec_accept_rows, D(1), D(64), 0, stream, out_tok, b, host, spec_tab);
+    return true;
+}
+
+void Model::readCtlPinned(std::span<i32> dst) {
+    hip::downloadAsync(dst.data(), out_tok, dst.size() * 4, stream);
+    hip::streamSync(stream);
+}
+
+void Model::readSpecTab(SpecNextTab& t) {
+    if (spec_tab == 0) {
+        t = SpecNextTab{};
+        return;
+    }
+    hip::streamSync(stream);
+    hip::download(&t, spec_tab, sizeof(SpecNextTab));
+}
+
 // Draft-head logits for the n rows of h into logits: the 2-bit head when
 // built, else the Q4_K / full head.
 void Model::draftHeadMatmul(const Mat& head, u32 n) {

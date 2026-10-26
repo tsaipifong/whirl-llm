@@ -142,6 +142,25 @@ Engine::Engine(ServerModel& model, device::Backend& ops, const Tokenizer& tok, c
     tb_.setOwner(&owner_);
 }
 
+// feat026-acc-r1: WHIRL_SPEC_ACC names (engine.h)
+namespace {
+constexpr const char* k_spec_acc_names[] = {"host", "pinned", "gpu", "gpu-zc", "check"};
+}  // namespace
+
+const char* specAccName(std::uint32_t mode) { return mode < std::size(k_spec_acc_names) ? k_spec_acc_names[mode] : "?"; }
+
+std::optional<std::uint32_t> parseSpecAcc(std::string_view v) {
+    while (!v.empty() && (v.front() == ' ' || v.front() == '\t')) v.remove_prefix(1);
+    while (!v.empty() && (v.back() == ' ' || v.back() == '\t')) v.remove_suffix(1);
+    if (v.size() == 1 && v[0] >= '0' && v[0] <= '4') return static_cast<std::uint32_t>(v[0] - '0');
+    std::string s(v);
+    for (char& c : s) c = (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c;
+    if (s == "gpu_zc" || s == "zc") return 3u;
+    for (std::uint32_t m = 0; m < std::size(k_spec_acc_names); ++m)
+        if (s == k_spec_acc_names[m]) return m;
+    return std::nullopt;
+}
+
 Engine::~Engine() {
     // the checkpoint buffers (Ckpt), events (slots, shared checkpoints, quarantine) and sampling buffers release
     // themselves when the members are destroyed; Slot / Spe wait for their spill / ready fences first (F1)
@@ -180,6 +199,18 @@ void Engine::allocState() {
     in_cands_.assign(V, 0);
     cands_scratch_.resize(std::max<std::size_t>(V, k_big));
     ctl_host_.assign(static_cast<std::size_t>(opt_.parallel) * qwen35::ctl_words, 0);
+    if (opt_.spec_acc > 4) opt_.spec_acc = 0;
+    if (opt_.spec_acc >= 1) {
+        // feat026-acc: pinned control words; the device accept needs the kernel (else pinned copy + host loop)
+        const std::uint64_t cb = static_cast<std::uint64_t>(opt_.parallel) * qwen35::ctl_words * 4;
+        ctl_pin_ = device::PinnedBuf::alloc(ops_, cb);
+        std::memset(ctl_pin_.get(), 0, cb);
+        if (opt_.spec_acc >= 2 && !m_.specAcceptOk()) {
+            logW("WHIRL_SPEC_ACC={}: no spec_accept_rows kernel; pinned read + host accept", opt_.spec_acc);
+            opt_.spec_acc = 1;
+        }
+        logI("decode: WHIRL_SPEC_ACC={} ({})", opt_.spec_acc, specAccName(opt_.spec_acc));
+    }
     if (opt_.relax.on) {
         const std::uint64_t rb = static_cast<std::uint64_t>(max_rows) * opt_.relax.topk() * 8 + max_rows * 8;
         relax_dev_ = device::DevBuf::alloc(ops_, rb);
@@ -320,6 +351,12 @@ Engine::Stats Engine::stats() const {
     s.dfl_accepted = stat_dfl_accepted_;
     s.dfl_cold = stat_dfl_cold_;
     s.dfl_gap = stat_dfl_gap_;
+    s.acc_dev = stat_acc_dev_;
+    s.acc_checked = stat_acc_checked_;
+    s.acc_mismatch = stat_acc_mismatch_;
+    s.acc_fallback = stat_acc_fallback_;
+    s.tab_checked = stat_tab_checked_;
+    s.tab_mismatch = stat_tab_mismatch_;
     return s;
 }
 
@@ -1773,8 +1810,30 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
         any_sampling = true;
         launchTopk(row_of[k], nd_of[k] + 1, k_small, sl.sm.inv_t, samp_dev_.get(), max_rows, row_of[k]);
     }
+    // feat026-acc: the device accept decision (greedy exact slots; the others are copied only)
+    const bool acc_dev = opt_.spec_acc >= 2;
+    const bool acc_check = opt_.spec_acc == 4;
+    SpecAccArgs aa{};
+    if (acc_dev) {
+        aa.n = static_cast<int>(A);
+        aa.stop0 = ct_.im_end;
+        aa.stop1 = ct_.endoftext;
+        for (std::size_t k = 0; k < A; ++k) {
+            const Slot& sl = *act[k];
+            aa.seq[k] = static_cast<int>(sl.id);
+            aa.nd[k] = static_cast<int>(nd_of[k]);
+            aa.lit[k] = ng_n[k] > 0 ? 1 : 0;
+            aa.dev[k] = sl.greedy && !relaxes(k) ? 1 : 0;
+            aa.eos[k] = sl.ignore_eos ? 0 : 1;
+            const std::uint32_t budget = sl.max_tokens > sl.n_gen ? sl.max_tokens - sl.n_gen : 0;
+            aa.budget[k] = static_cast<int>(std::min<std::uint32_t>(budget, 1u << 30));
+            aa.pos[k] = static_cast<int>(sl.pos);
+            aa.row0[k] = static_cast<int>(row_of[k]);
+            for (std::uint32_t r = 0; r < ng_n[k] && r < WHIRL_SA_MAX_ND; ++r) aa.lit_d[k][r] = static_cast<int>(ng_d[k][r]);
+        }
+    }
     const TimePoint t_enq = Clock::now();
-    m_.readCtl(std::span<std::int32_t>(ctl_host_.data(), slots_.size() * qwen35::ctl_words));
+    const std::int32_t* ctl_all = readCycleCtl(acc_dev ? &aa : nullptr);
     if (p) {
         p->t_ready = Clock::now();
         p->enq_ms[pa] += std::chrono::duration<double, std::milli>(t_enq - tc0).count();
@@ -1852,7 +1911,10 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
 
     for (std::size_t k = 0; k < A; ++k) {
         Slot& sl = *act[k];
-        const std::int32_t* ctl = ctl_host_.data() + static_cast<std::size_t>(sl.id) * qwen35::ctl_words;
+        const std::int32_t* ctl = ctl_all + static_cast<std::size_t>(sl.id) * qwen35::ctl_words;
+        // feat026-acc: decided on the device (the host loop runs only for WHIRL_SPEC_ACC=check, to compare)
+        const bool dev_k = acc_dev && aa.dev[k] != 0;
+        bool dev_use = dev_k && !acc_check;
         const std::uint32_t row0 = row_of[k];
         const std::uint32_t nd_k = nd_of[k];
         const bool is_ng = ng_n[k] > 0;  // literal drafts (n-gram or DFlash2)
@@ -1865,9 +1927,24 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
         if (dsrc[k] == 1) sl.ng_cycles += 1;
         sl.cycles += 1;
         sl.drafted += nd_dev;
+        if (dev_use) {
+            // a device result outside the cycle's bounds (never expected: a broken copy) falls back to the host loop
+            const std::int32_t a0 = ctl[WHIRL_SA_CTL_ACC0], a1 = ctl[WHIRL_SA_CTL_ACC];
+            if (a0 < 0 || static_cast<std::uint32_t>(a0) > nd_dev || a1 < 0 || a1 > a0 ||
+                static_cast<std::uint32_t>(ctl[WHIRL_SA_CTL_NDDEV]) != nd_dev) {
+                if (stat_acc_fallback_ == 0)
+                    logW("spec-acc fallback | slot {} | device result out of range (acc {}/{}, nd {}); host decides", sl.id, a0, a1, nd_dev);
+                stat_acc_fallback_ += 1;
+                dev_use = false;
+            }
+        }
         std::uint32_t acc = 0;
         std::uint32_t chosen;
-        if (sl.greedy) {
+        if (dev_use) {
+            acc = static_cast<std::uint32_t>(ctl[WHIRL_SA_CTL_ACC0]);
+            chosen = static_cast<std::uint32_t>(ctl[qwen35::ctl_rows + acc]);
+            stat_acc_dev_ += 1;
+        } else if (sl.greedy) {
             while (acc < nd_dev) {
                 if (static_cast<std::uint32_t>(ctl[qwen35::ctl_rows + acc]) == dr[acc]) {
                     ++acc;
@@ -1939,9 +2016,13 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
             stat_dfl_drafted_ += nd_dev;
             stat_dfl_accepted_ += acc;
         }
+        const std::uint32_t acc_pre = acc;
         // an accepted end-of-turn draft ends the reply: the trunk keeps only the
         // rows before it and the stop token becomes `chosen`
-        if (!sl.ignore_eos) {
+        if (dev_use) {
+            acc = static_cast<std::uint32_t>(ctl[WHIRL_SA_CTL_ACC]);
+            chosen = static_cast<std::uint32_t>(ctl[WHIRL_SA_CTL_CHOSEN]);
+        } else if (!sl.ignore_eos) {
             for (std::uint32_t r = 0; r < acc; ++r) {
                 if (dr[r] == ct_.im_end || dr[r] == ct_.endoftext) {
                     chosen = dr[r];
@@ -1951,11 +2032,27 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
             }
         }
         // same for max_tokens: the last emitted token is not fed to the trunk
-        {
+        if (!dev_use) {
             const std::uint32_t budget = sl.max_tokens > sl.n_gen ? sl.max_tokens - sl.n_gen : 0;
             if (budget >= 1 && acc + 1 > budget) {
                 chosen = dr[budget - 1];
                 acc = budget - 1;
+            }
+        }
+        if (acc_check && dev_k) {
+            stat_acc_checked_ += 1;
+            const bool same = static_cast<std::uint32_t>(ctl[WHIRL_SA_CTL_ACC0]) == acc_pre &&
+                              static_cast<std::uint32_t>(ctl[WHIRL_SA_CTL_ACC]) == acc &&
+                              static_cast<std::uint32_t>(ctl[WHIRL_SA_CTL_CHOSEN]) == chosen &&
+                              static_cast<std::uint32_t>(ctl[WHIRL_SA_CTL_NDDEV]) == nd_dev &&
+                              static_cast<std::uint32_t>(ctl[WHIRL_SA_CTL_NPOS]) == sl.pos + acc + 1 &&
+                              static_cast<std::uint32_t>(ctl[WHIRL_SA_CTL_NROW]) == row0 + acc;
+            if (!same) {
+                if (stat_acc_mismatch_ == 0)
+                    logW("spec-acc check | slot {} | device acc {}/{} chosen {} nd {} vs host acc {}/{} chosen {} nd {}", sl.id,
+                         ctl[WHIRL_SA_CTL_ACC0], ctl[WHIRL_SA_CTL_ACC], ctl[WHIRL_SA_CTL_CHOSEN], ctl[WHIRL_SA_CTL_NDDEV], acc_pre,
+                         acc, chosen, nd_dev);
+                stat_acc_mismatch_ += 1;
             }
         }
         // the verify ran nd + 1 rows of this slot: keep acc + 1 of them
@@ -2005,6 +2102,33 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
             }
         }
     }
+    if (acc_check) {
+        // feat026-acc: the device's next-cycle rows against the host's (every slot decided on the device)
+        bool all = true;
+        for (std::size_t k = 0; k < A; ++k) all = all && aa.dev[k] != 0;
+        if (all) {
+            SpecNextTab t{};
+            m_.readSpecTab(t);
+            const std::uint32_t V = cfg.n_vocab;
+            auto look = [&](std::uint32_t tok) { return static_cast<std::int32_t>(tok < V ? tok : 0); };
+            bool same = true;
+            int n = 0;
+            for (std::size_t k = 0; k < A; ++k) {
+                const Slot& sl = *act[k];
+                for (std::uint32_t j = 0; j < sl.n_pend; ++j, ++n)
+                    same = same && n < WHIRL_SA_MAX_ROWS && t.mtp_tok[n] == look(sl.pend[j]) &&
+                           t.mtp_pos[n] == static_cast<std::int32_t>(sl.pend_pos + j);
+                same = same && t.mtp_last[k] == n - 1 && t.ver_tok[k] == look(sl.next) &&
+                       t.ver_pos[k] == static_cast<std::int32_t>(sl.pos);
+            }
+            same = same && t.n_mtp == n;
+            stat_tab_checked_ += 1;
+            if (!same) {
+                if (stat_tab_mismatch_ == 0) logW("spec-acc check | cycle {} | device next-cycle rows differ from the host's", n_cycles_);
+                stat_tab_mismatch_ += 1;
+            }
+        }
+    }
     if (p) {
         std::uint64_t tk = 0;
         for (Slot* sl : act) tk += sl->last_acc + 1;
@@ -2024,6 +2148,24 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
         if (any_done) p->last_end.reset();
         else p->last_end = Clock::now();
     }
+}
+
+const std::int32_t* Engine::readCycleCtl(const SpecAccArgs* aa) {
+    const std::size_t words = slots_.size() * qwen35::ctl_words;
+    if (opt_.spec_acc == 0 || !ctl_pin_) {
+        m_.readCtl(std::span<std::int32_t>(ctl_host_.data(), words));
+        return ctl_host_.data();
+    }
+    auto* pin = static_cast<std::int32_t*>(ctl_pin_.get());
+    if (aa != nullptr && opt_.spec_acc == 3) {
+        // zero copy: the kernel writes the verify's control words into the mapped pinned buffer
+        m_.specAccept(*aa, pin);
+        m_.syncStream();
+        return pin;
+    }
+    if (aa != nullptr) m_.specAccept(*aa, nullptr);
+    m_.readCtlPinned(std::span<std::int32_t>(pin, words));
+    return pin;
 }
 
 void Engine::splitDrafts(std::span<Slot* const> act, std::uint32_t nd, std::uint32_t rows, std::span<std::uint32_t> nd_m) {
@@ -2148,6 +2290,12 @@ void Engine::finishJob(Slot& sl) {
              sl.cycles > 0 ? static_cast<double>(sl.accepted + sl.cycles) / sl.cycles : 0.0, sl.cycles);
         if (opt_.ngram) logI("req {} | slot {} | n-gram drafts in {} of {} cycles", job.id, sl.id, sl.ng_cycles, sl.cycles);
     }
+    // feat026-acc-r1 (review C5): engine totals since start, the two failure kinds apart
+    if (opt_.spec_acc >= 2)
+        logI("req {} | slot {} | spec-acc stats | {}: decided on the device {}, out of range (host decided) {}; check: "
+             "compared {}, disagree {}; next-cycle rows: compared {}, disagree {}",
+             job.id, sl.id, specAccName(opt_.spec_acc), stat_acc_dev_, stat_acc_fallback_, stat_acc_checked_, stat_acc_mismatch_,
+             stat_tab_checked_, stat_tab_mismatch_);
     // (whatever the draft source: with DFlash2 drafts it must stay 0, FR-DFL P2-3)
     if (opt_.relax.on && (opt_.use_mtp || opt_.use_dflash))
         logI("req {} | slot {} | relaxacc: {} of {} accepted drafts kept by the relaxed rule (greedy: mean ln p_max/p_kept {:.3f})",

@@ -123,6 +123,7 @@
 //   draft_pick_rows(x, n, int* ctl_all, RowIdx area, int r, int n_min, float p_min, const int* map)
 //            map (null: identity) = token id of each draft-head row (vocabulary subset)
 //   draft_sample_rows(x, n, int* ctl_all, RowIdx area, int r, const int* map, DSampArgs a, int* qbuf)
+//   spec_accept_rows(int* ctl_all, SpecAccArgs a, int* host, SpecNextTab* tab)   (kernels/spec_accept.h; feat026-acc)
 //            (optional) after draft_pick_rows: rows with a.on draw draft r from the filtered draft
 //            distribution q and write q to qbuf + a.qoff (whirl/spec_sample.h layout)
 //   set_tokens(ids, pos, dev_src, Tok16 toks, n, n_host, pos0)
@@ -598,6 +599,7 @@ struct MiscKernels {
     F set_tokens{}, argmax_rows{}, argmax_prob{}, draft_pick{};
     F set_rows{}, rmsnorm_q8_rows{}, argmax_rows_to{}, draft_pick_rows{};
     F draft_sample_rows{};  // optional (null: specsample skipped)
+    F spec_accept_rows{};   // optional (feat026-acc; null: the host makes the accept decision)
     F silu_mul_x8h{}, gated_norm_x8h{};
     F silu_mul_x16h{}, gated_norm_x16h{};
     F rmsnorm_x8h16{}, rmsnorm_x8h16t{};

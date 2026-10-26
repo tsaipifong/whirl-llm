@@ -52,5 +52,6 @@
 #endif
 
 #include "spec_sample.hip"           // speculative sampling of MTP drafts (both kernel sets)
+#include "spec_accept.hip"           // feat026-acc: accept decision + next rows on the GPU (both kernel sets)
 #include "dflash.hip"                // DFlash2 drafter: dynamic conv, top-k, selector lattice / walk, attention
                                      // (both kernel sets: plain f32 code, h2f from either common.hip)

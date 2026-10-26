@@ -93,6 +93,17 @@ public:
     virtual void mtpBatchStepEx(std::span<const MSeg> segs, std::uint32_t r, bool draft) = 0;
     virtual std::uint32_t verifyBatchEnqueue(std::span<const VSeg> segs) = 0;
     virtual void readCtl(std::span<std::int32_t> dst) = 0;
+    // ---- feat026-acc (WHIRL_SPEC_ACC; kernels/spec_accept.h). readCtlPinned: dst is pinned host memory (an async
+    // copy + stream sync instead of the staged pageable copy). specAccept: the accept decision of the verify just
+    // enqueued, on the device, into the result words of each control area (and the next cycle's rows); host != null
+    // (pinned, readCtl layout): the verify's control areas are written there too, visible after syncStream().
+    // Defaults: no device accept (the engine keeps the host path).
+    virtual void readCtlPinned(std::span<std::int32_t> dst) { readCtl(dst); }
+    virtual bool specAcceptOk() const { return false; }
+    virtual void specAccept(const SpecAccArgs& a, std::int32_t* host) { (void)a, (void)host; }
+    virtual void syncStream() {}
+    // the next cycle's rows of the last specAccept (blocking; WHIRL_SPEC_ACC=check and tests)
+    virtual void readSpecTab(SpecNextTab& t) { t = SpecNextTab{}; }
     // speculative sampling of MTP drafts (numerics item specsample): per sequence, set before the
     // draft steps of a cycle; q per (sequence, draft step) read back after the verify
     // (whirl/spec_sample.h layout). Not supported: drafts stay greedy (exact-match acceptance).
