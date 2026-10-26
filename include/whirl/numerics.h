@@ -282,6 +282,9 @@ struct Plan {
     std::string source = "default";  // where the mode came from: default (balance), command line, WHIRL_MODE
     std::array<ItemState, n_items> items{};
     std::vector<std::string> overrides;  // per-item environment variables that changed the mode's choice
+    // bug-fastonly: WHIRL_* values for fast-only items this mode refused (applyFastOnlyOverride: the plan is untouched);
+    // the loader writes each to the load log. Descriptions only: not in logLine, bitsKey or the exec dump.
+    std::vector<std::string> ignored;
     bool lossy_override = false;         // an override made precise lossy
     // decode / verify / small-batch matmul activations: int8 (q8_1 class; balance, fast) or f16
     // into the f16 GEMM with f32 accumulation (precise). Set by the loader (setQ8dec).
@@ -310,6 +313,13 @@ void applyFront(Plan& p, Front f, const RuntimeValues& v, bool k_gdn_v0);
 // Per-item override from the environment: `forced` = the effective value after the variable.
 // Records "WHIRL_X=v: item on (lossy, user-requested)" or "... item off" when it differs.
 void applyOverride(Plan& p, Item it, const char* var, const std::string& value, bool forced, bool applicable);
+// The WHIRL_ switch of a fast-only item (moeshx): applyOverride in fast; in precise / balance the switch is ignored
+// (the plan is unchanged) and the returned note says so for the load log ("" when applied or when it asks for off).
+std::string applyFastOnlyOverride(Plan& p, Item it, const char* var, const std::string& value, bool forced, bool applicable);
+// bug-fastonly (audit F-A / F-B): WHIRL_RELAX and WHIRL_KV=q4 use it too (loadOverrides keeps the notes in
+// Plan::ignored, the loader logs them); fastOnlyIgnoredNote = the same note for chooseKv's forced 4-bit format.
+// By the mode standard (owner 2026-10-26) precise and balance never take a fast-only item, not even from the environment.
+std::string fastOnlyIgnoredNote(Mode m, Item it, const char* var, const std::string& value);
 
 // The decode activation form actually used: q8 = int8 (default: q8dec_default). env = the
 // WHIRL_Q8DEC value ("" = unset); a value that changes the mode's default is recorded as an
@@ -355,7 +365,8 @@ struct KvChoice {
     bool debug = false;  // WHIRL_KV chose it (debug override: no fit check, sizing as before)
     std::string why;     // "balance, dense model: q8h"
 };
-// The request's KV format: WHIRL_KV (forced) wins; else kvq4 -> q4 (where the kernels exist,
+// The request's KV format: WHIRL_KV (forced) wins, except a 4-bit format (q4, fast-only) outside fast (bug-fastonly):
+// that is ignored (the mode's own choice below, debug = false) and the why starts with fastOnlyIgnoredNote; else kvq4 -> q4 (where the kernels exist,
 // else f16: R9700 has no q4 KV kernels yet, and int8 is no stand-in), dense and MoE, except a dense
 // model where caps.fast_q8h (gfx1151) -> q8h; else kvq8 on
 // a dense model -> q8h (q8 where the code object has no q8h kernels);

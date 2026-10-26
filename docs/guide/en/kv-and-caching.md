@@ -170,7 +170,8 @@ what fits:
   before BAL-Q8 the dense model fell through f16 → q8v → q8h, and cards under 20 GiB preferred q8v.
 - `WHIRL_KV=f16|q8|q8h|q8v|q4` is a **debug override** ([usage 7.7](../../usage.md#env-debug)): it
   replaces the mode's choice, skips the fit check and prints a warning if the pool ends up below the
-  floor.
+  floor. `q4` is fast-only: precise and balance ignore `WHIRL_KV=q4` (a note in the load log) and keep
+  their own format.
 
 ## <a id="floor"></a>4. The 128k + 64k floor rule
 

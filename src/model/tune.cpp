@@ -907,6 +907,8 @@ void loadOrTuneImpl(Model& m, const std::string& model_path, std::string& log) {
     if (f.prec_dec) refusePrecise();
     m.num_plan = p;
     log += "  " + nu::logLine(p) + "\n";
+    // bug-fastonly: WHIRL_RELAX / WHIRL_KV=q4 refused by precise / balance (fast-only items; the plan is untouched)
+    for (const std::string& ign : p.ignored) log += "  " + ign + "\n";
     if (!m.load_note.empty()) log += "  " + m.load_note;
 
     std::string cache_path;

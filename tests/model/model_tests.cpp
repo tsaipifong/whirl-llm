@@ -1797,7 +1797,9 @@ void testBaselineDumps() {
 // applyGemvEnv, kvRequestFromEnv (was kvModeFromEnv) or resolveFdSplits, and records what changed against the same call with no variable set:
 // the execDump lines (every scalar Model member, the numerics plan, the tune table), the loadOrTune log lines and an
 // exception. The expected table tests/model/env_table.expected.txt was written by the code BEFORE N1 (eeb79c2):
-// WHIRL_TEST_ENV_TABLE_WRITE=<file> writes the actual table instead of comparing.
+// WHIRL_TEST_ENV_TABLE_WRITE=<file> writes the actual table instead of comparing. bug-fastonly re-pinned only the
+// WHIRL_RELAX (!= 0) and WHIRL_KV=q4 rows (precise / balance refuse the fast-only items: the plan stays, a load-log
+// note; checked by scratch/bug_fastonly/envtab_check.py); every other row is still the pre-N1 table.
 namespace envtab {
 namespace fs = std::filesystem;
 

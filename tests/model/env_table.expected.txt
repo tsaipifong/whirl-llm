@@ -651,13 +651,7 @@ resolveFdSplits(q4)=256 resolveFdSplits(f16)=64
 == tune d1201 KV=q8
 (no change)
 == tune d1201 KV=q4
-+D exec: num_plan=numerics: balance+overrides - enabled: h16, kvq8 (q8 KV (int8 + f16 scale / 32)), kvq4 (KV=q4, user-requested); skipped: fp8 (no fp8 GEMM kernels on this GPU), moefp8 (dense model), gdnwmma (no WMMA DeltaNet kernels on this GPU), specsample (no MTP head); WHIRL_KV=q4: kvq4 on (lossy, user-requested); decode: q8dec (int8 activations in the decode / verify GEMV, as llama.cpp's q8_1)
-+D exec: num_plan.lossy_override=1
-+D exec: num_plan.override[0]=WHIRL_KV=q4: kvq4 on (lossy, user-requested)
-+log:   numerics: balance+overrides - enabled: h16, kvq8 (q8 KV (int8 + f16 scale / 32)), kvq4 (KV=q4, user-requested); skipped: fp8 (no fp8 GEMM kernels on this GPU), moefp8 (dense model), gdnwmma (no WMMA DeltaNet kernels on this GPU), specsample (no MTP head); WHIRL_KV=q4: kvq4 on (lossy, user-requested); decode: q8dec (int8 activations in the decode / verify GEMV, as llama.cpp's q8_1)
--D exec: num_plan=numerics: balance - enabled: h16, kvq8 (q8 KV (int8 + f16 scale / 32)); skipped: fp8 (no fp8 GEMM kernels on this GPU), moefp8 (dense model), gdnwmma (no WMMA DeltaNet kernels on this GPU), specsample (no MTP head); decode: q8dec (int8 activations in the decode / verify GEMV, as llama.cpp's q8_1)
--D exec: num_plan.lossy_override=0
--log:   numerics: balance - enabled: h16, kvq8 (q8 KV (int8 + f16 scale / 32)); skipped: fp8 (no fp8 GEMM kernels on this GPU), moefp8 (dense model), gdnwmma (no WMMA DeltaNet kernels on this GPU), specsample (no MTP head); decode: q8dec (int8 activations in the decode / verify GEMV, as llama.cpp's q8_1)
++log:   WHIRL_KV=q4 ignored: kvq4 is a fast-only item (balance never takes it)
 == tune d1201 KV=q8h
 (no change)
 == tune moe1201 KV=0
@@ -683,13 +677,7 @@ resolveFdSplits(q4)=256 resolveFdSplits(f16)=64
 -D exec: num_plan=numerics: balance - enabled: h16; skipped: fp8 (no fp8 GEMM kernels on this GPU), moefp8 (experts are not MXFP4), gdnwmma (no WMMA DeltaNet kernels on this GPU), kvq8 (MoE models keep f16 KV), specsample (no MTP head); decode: q8dec (int8 activations in the decode / verify GEMV, as llama.cpp's q8_1)
 -log:   numerics: balance - enabled: h16; skipped: fp8 (no fp8 GEMM kernels on this GPU), moefp8 (experts are not MXFP4), gdnwmma (no WMMA DeltaNet kernels on this GPU), kvq8 (MoE models keep f16 KV), specsample (no MTP head); decode: q8dec (int8 activations in the decode / verify GEMV, as llama.cpp's q8_1)
 == tune moe1201 KV=q4
-+D exec: num_plan=numerics: balance+overrides - enabled: h16, kvq4 (KV=q4, user-requested); skipped: fp8 (no fp8 GEMM kernels on this GPU), moefp8 (experts are not MXFP4), gdnwmma (no WMMA DeltaNet kernels on this GPU), kvq8 (MoE models keep f16 KV), specsample (no MTP head); WHIRL_KV=q4: kvq4 on (lossy, user-requested); decode: q8dec (int8 activations in the decode / verify GEMV, as llama.cpp's q8_1)
-+D exec: num_plan.lossy_override=1
-+D exec: num_plan.override[0]=WHIRL_KV=q4: kvq4 on (lossy, user-requested)
-+log:   numerics: balance+overrides - enabled: h16, kvq4 (KV=q4, user-requested); skipped: fp8 (no fp8 GEMM kernels on this GPU), moefp8 (experts are not MXFP4), gdnwmma (no WMMA DeltaNet kernels on this GPU), kvq8 (MoE models keep f16 KV), specsample (no MTP head); WHIRL_KV=q4: kvq4 on (lossy, user-requested); decode: q8dec (int8 activations in the decode / verify GEMV, as llama.cpp's q8_1)
--D exec: num_plan=numerics: balance - enabled: h16; skipped: fp8 (no fp8 GEMM kernels on this GPU), moefp8 (experts are not MXFP4), gdnwmma (no WMMA DeltaNet kernels on this GPU), kvq8 (MoE models keep f16 KV), specsample (no MTP head); decode: q8dec (int8 activations in the decode / verify GEMV, as llama.cpp's q8_1)
--D exec: num_plan.lossy_override=0
--log:   numerics: balance - enabled: h16; skipped: fp8 (no fp8 GEMM kernels on this GPU), moefp8 (experts are not MXFP4), gdnwmma (no WMMA DeltaNet kernels on this GPU), kvq8 (MoE models keep f16 KV), specsample (no MTP head); decode: q8dec (int8 activations in the decode / verify GEMV, as llama.cpp's q8_1)
++log:   WHIRL_KV=q4 ignored: kvq4 is a fast-only item (balance never takes it)
 == tune moe1201 KV=q8h
 +D exec: num_plan=numerics: balance - enabled: h16, kvq8 (KV=q8h, user-requested); skipped: fp8 (no fp8 GEMM kernels on this GPU), moefp8 (experts are not MXFP4), gdnwmma (no WMMA DeltaNet kernels on this GPU), specsample (no MTP head); WHIRL_KV=q8h: kvq8 on (lossy, user-requested); decode: q8dec (int8 activations in the decode / verify GEMV, as llama.cpp's q8_1)
 +D exec: num_plan.override[0]=WHIRL_KV=q8h: kvq8 on (lossy, user-requested)
@@ -736,25 +724,9 @@ resolveFdSplits(q4)=256 resolveFdSplits(f16)=64
 == tune d1201 RELAX=0
 (no change)
 == tune d1201 RELAX=1
-+D exec: num_plan=numerics: balance+overrides - enabled: h16, kvq8 (q8 KV (int8 + f16 scale / 32)), relaxacc (RELAX=1, user-requested [k 4, alpha 0.10, eps 0.09, delta 0.30]); skipped: fp8 (no fp8 GEMM kernels on this GPU), moefp8 (dense model), gdnwmma (no WMMA DeltaNet kernels on this GPU), specsample (no MTP head); WHIRL_RELAX=1: relaxacc on (lossy, user-requested); decode: q8dec (int8 activations in the decode / verify GEMV, as llama.cpp's q8_1)
-+D exec: num_plan.lossy_override=1
-+D exec: num_plan.override[0]=WHIRL_RELAX=1: relaxacc on (lossy, user-requested)
-+D exec: relax.on=1
-+log:   numerics: balance+overrides - enabled: h16, kvq8 (q8 KV (int8 + f16 scale / 32)), relaxacc (RELAX=1, user-requested [k 4, alpha 0.10, eps 0.09, delta 0.30]); skipped: fp8 (no fp8 GEMM kernels on this GPU), moefp8 (dense model), gdnwmma (no WMMA DeltaNet kernels on this GPU), specsample (no MTP head); WHIRL_RELAX=1: relaxacc on (lossy, user-requested); decode: q8dec (int8 activations in the decode / verify GEMV, as llama.cpp's q8_1)
--D exec: num_plan=numerics: balance - enabled: h16, kvq8 (q8 KV (int8 + f16 scale / 32)); skipped: fp8 (no fp8 GEMM kernels on this GPU), moefp8 (dense model), gdnwmma (no WMMA DeltaNet kernels on this GPU), specsample (no MTP head); decode: q8dec (int8 activations in the decode / verify GEMV, as llama.cpp's q8_1)
--D exec: num_plan.lossy_override=0
--D exec: relax.on=0
--log:   numerics: balance - enabled: h16, kvq8 (q8 KV (int8 + f16 scale / 32)); skipped: fp8 (no fp8 GEMM kernels on this GPU), moefp8 (dense model), gdnwmma (no WMMA DeltaNet kernels on this GPU), specsample (no MTP head); decode: q8dec (int8 activations in the decode / verify GEMV, as llama.cpp's q8_1)
++log:   WHIRL_RELAX=1 ignored: relaxacc is a fast-only item (balance never takes it)
 == tune d1201 RELAX=auto
-+D exec: num_plan=numerics: balance+overrides - enabled: h16, kvq8 (q8 KV (int8 + f16 scale / 32)), relaxacc (RELAX=auto, user-requested [k 4, alpha 0.10, eps 0.09, delta 0.30]); skipped: fp8 (no fp8 GEMM kernels on this GPU), moefp8 (dense model), gdnwmma (no WMMA DeltaNet kernels on this GPU), specsample (no MTP head); WHIRL_RELAX=auto: relaxacc on (lossy, user-requested); decode: q8dec (int8 activations in the decode / verify GEMV, as llama.cpp's q8_1)
-+D exec: num_plan.lossy_override=1
-+D exec: num_plan.override[0]=WHIRL_RELAX=auto: relaxacc on (lossy, user-requested)
-+D exec: relax.on=1
-+log:   numerics: balance+overrides - enabled: h16, kvq8 (q8 KV (int8 + f16 scale / 32)), relaxacc (RELAX=auto, user-requested [k 4, alpha 0.10, eps 0.09, delta 0.30]); skipped: fp8 (no fp8 GEMM kernels on this GPU), moefp8 (dense model), gdnwmma (no WMMA DeltaNet kernels on this GPU), specsample (no MTP head); WHIRL_RELAX=auto: relaxacc on (lossy, user-requested); decode: q8dec (int8 activations in the decode / verify GEMV, as llama.cpp's q8_1)
--D exec: num_plan=numerics: balance - enabled: h16, kvq8 (q8 KV (int8 + f16 scale / 32)); skipped: fp8 (no fp8 GEMM kernels on this GPU), moefp8 (dense model), gdnwmma (no WMMA DeltaNet kernels on this GPU), specsample (no MTP head); decode: q8dec (int8 activations in the decode / verify GEMV, as llama.cpp's q8_1)
--D exec: num_plan.lossy_override=0
--D exec: relax.on=0
--log:   numerics: balance - enabled: h16, kvq8 (q8 KV (int8 + f16 scale / 32)); skipped: fp8 (no fp8 GEMM kernels on this GPU), moefp8 (dense model), gdnwmma (no WMMA DeltaNet kernels on this GPU), specsample (no MTP head); decode: q8dec (int8 activations in the decode / verify GEMV, as llama.cpp's q8_1)
++log:   WHIRL_RELAX=auto ignored: relaxacc is a fast-only item (balance never takes it)
 == tune d1201 SPEC_SAMPLE=0
 (no change)
 == tune d1201 SPEC_SAMPLE=1
@@ -764,114 +736,29 @@ resolveFdSplits(q4)=256 resolveFdSplits(f16)=64
 == tune d1201 RELAX_K=6
 (no change)
 == tune d1201 RELAX=1 RELAX_K=6
-+D exec: num_plan=numerics: balance+overrides - enabled: h16, kvq8 (q8 KV (int8 + f16 scale / 32)), relaxacc (RELAX=1, user-requested [k 6, alpha 0.10, eps 0.09, delta 0.30]); skipped: fp8 (no fp8 GEMM kernels on this GPU), moefp8 (dense model), gdnwmma (no WMMA DeltaNet kernels on this GPU), specsample (no MTP head); WHIRL_RELAX=1: relaxacc on (lossy, user-requested); decode: q8dec (int8 activations in the decode / verify GEMV, as llama.cpp's q8_1)
-+D exec: num_plan.lossy_override=1
-+D exec: num_plan.override[0]=WHIRL_RELAX=1: relaxacc on (lossy, user-requested)
-+D exec: relax.on=1
-+D exec: relax.k=6
-+log:   numerics: balance+overrides - enabled: h16, kvq8 (q8 KV (int8 + f16 scale / 32)), relaxacc (RELAX=1, user-requested [k 6, alpha 0.10, eps 0.09, delta 0.30]); skipped: fp8 (no fp8 GEMM kernels on this GPU), moefp8 (dense model), gdnwmma (no WMMA DeltaNet kernels on this GPU), specsample (no MTP head); WHIRL_RELAX=1: relaxacc on (lossy, user-requested); decode: q8dec (int8 activations in the decode / verify GEMV, as llama.cpp's q8_1)
--D exec: num_plan=numerics: balance - enabled: h16, kvq8 (q8 KV (int8 + f16 scale / 32)); skipped: fp8 (no fp8 GEMM kernels on this GPU), moefp8 (dense model), gdnwmma (no WMMA DeltaNet kernels on this GPU), specsample (no MTP head); decode: q8dec (int8 activations in the decode / verify GEMV, as llama.cpp's q8_1)
--D exec: num_plan.lossy_override=0
--D exec: relax.on=0
--D exec: relax.k=4
--log:   numerics: balance - enabled: h16, kvq8 (q8 KV (int8 + f16 scale / 32)); skipped: fp8 (no fp8 GEMM kernels on this GPU), moefp8 (dense model), gdnwmma (no WMMA DeltaNet kernels on this GPU), specsample (no MTP head); decode: q8dec (int8 activations in the decode / verify GEMV, as llama.cpp's q8_1)
++log:   WHIRL_RELAX=1 ignored: relaxacc is a fast-only item (balance never takes it)
 == tune d1201 RELAX=1 RELAX_K=0
-+D exec: num_plan=numerics: balance+overrides - enabled: h16, kvq8 (q8 KV (int8 + f16 scale / 32)), relaxacc (RELAX=1, user-requested [k 1, alpha 0.10, eps 0.09, delta 0.30]); skipped: fp8 (no fp8 GEMM kernels on this GPU), moefp8 (dense model), gdnwmma (no WMMA DeltaNet kernels on this GPU), specsample (no MTP head); WHIRL_RELAX=1: relaxacc on (lossy, user-requested); decode: q8dec (int8 activations in the decode / verify GEMV, as llama.cpp's q8_1)
-+D exec: num_plan.lossy_override=1
-+D exec: num_plan.override[0]=WHIRL_RELAX=1: relaxacc on (lossy, user-requested)
-+D exec: relax.on=1
-+D exec: relax.k=0
-+log:   numerics: balance+overrides - enabled: h16, kvq8 (q8 KV (int8 + f16 scale / 32)), relaxacc (RELAX=1, user-requested [k 1, alpha 0.10, eps 0.09, delta 0.30]); skipped: fp8 (no fp8 GEMM kernels on this GPU), moefp8 (dense model), gdnwmma (no WMMA DeltaNet kernels on this GPU), specsample (no MTP head); WHIRL_RELAX=1: relaxacc on (lossy, user-requested); decode: q8dec (int8 activations in the decode / verify GEMV, as llama.cpp's q8_1)
--D exec: num_plan=numerics: balance - enabled: h16, kvq8 (q8 KV (int8 + f16 scale / 32)); skipped: fp8 (no fp8 GEMM kernels on this GPU), moefp8 (dense model), gdnwmma (no WMMA DeltaNet kernels on this GPU), specsample (no MTP head); decode: q8dec (int8 activations in the decode / verify GEMV, as llama.cpp's q8_1)
--D exec: num_plan.lossy_override=0
--D exec: relax.on=0
--D exec: relax.k=4
--log:   numerics: balance - enabled: h16, kvq8 (q8 KV (int8 + f16 scale / 32)); skipped: fp8 (no fp8 GEMM kernels on this GPU), moefp8 (dense model), gdnwmma (no WMMA DeltaNet kernels on this GPU), specsample (no MTP head); decode: q8dec (int8 activations in the decode / verify GEMV, as llama.cpp's q8_1)
++log:   WHIRL_RELAX=1 ignored: relaxacc is a fast-only item (balance never takes it)
 == tune d1201 RELAX_ALPHA=0.5
 (no change)
 == tune d1201 RELAX=1 RELAX_ALPHA=0.5
-+D exec: num_plan=numerics: balance+overrides - enabled: h16, kvq8 (q8 KV (int8 + f16 scale / 32)), relaxacc (RELAX=1, user-requested [k 4, alpha 0.50, eps 0.09, delta 0.30]); skipped: fp8 (no fp8 GEMM kernels on this GPU), moefp8 (dense model), gdnwmma (no WMMA DeltaNet kernels on this GPU), specsample (no MTP head); WHIRL_RELAX=1: relaxacc on (lossy, user-requested); decode: q8dec (int8 activations in the decode / verify GEMV, as llama.cpp's q8_1)
-+D exec: num_plan.lossy_override=1
-+D exec: num_plan.override[0]=WHIRL_RELAX=1: relaxacc on (lossy, user-requested)
-+D exec: relax.on=1
-+D exec: relax.alpha=0.5
-+log:   numerics: balance+overrides - enabled: h16, kvq8 (q8 KV (int8 + f16 scale / 32)), relaxacc (RELAX=1, user-requested [k 4, alpha 0.50, eps 0.09, delta 0.30]); skipped: fp8 (no fp8 GEMM kernels on this GPU), moefp8 (dense model), gdnwmma (no WMMA DeltaNet kernels on this GPU), specsample (no MTP head); WHIRL_RELAX=1: relaxacc on (lossy, user-requested); decode: q8dec (int8 activations in the decode / verify GEMV, as llama.cpp's q8_1)
--D exec: num_plan=numerics: balance - enabled: h16, kvq8 (q8 KV (int8 + f16 scale / 32)); skipped: fp8 (no fp8 GEMM kernels on this GPU), moefp8 (dense model), gdnwmma (no WMMA DeltaNet kernels on this GPU), specsample (no MTP head); decode: q8dec (int8 activations in the decode / verify GEMV, as llama.cpp's q8_1)
--D exec: num_plan.lossy_override=0
--D exec: relax.on=0
--D exec: relax.alpha=0.100000001
--log:   numerics: balance - enabled: h16, kvq8 (q8 KV (int8 + f16 scale / 32)); skipped: fp8 (no fp8 GEMM kernels on this GPU), moefp8 (dense model), gdnwmma (no WMMA DeltaNet kernels on this GPU), specsample (no MTP head); decode: q8dec (int8 activations in the decode / verify GEMV, as llama.cpp's q8_1)
++log:   WHIRL_RELAX=1 ignored: relaxacc is a fast-only item (balance never takes it)
 == tune d1201 RELAX=1 RELAX_ALPHA=0
-+D exec: num_plan=numerics: balance+overrides - enabled: h16, kvq8 (q8 KV (int8 + f16 scale / 32)), relaxacc (RELAX=1, user-requested [k 4, alpha 0.00, eps 0.09, delta 0.30]); skipped: fp8 (no fp8 GEMM kernels on this GPU), moefp8 (dense model), gdnwmma (no WMMA DeltaNet kernels on this GPU), specsample (no MTP head); WHIRL_RELAX=1: relaxacc on (lossy, user-requested); decode: q8dec (int8 activations in the decode / verify GEMV, as llama.cpp's q8_1)
-+D exec: num_plan.lossy_override=1
-+D exec: num_plan.override[0]=WHIRL_RELAX=1: relaxacc on (lossy, user-requested)
-+D exec: relax.on=1
-+D exec: relax.alpha=0
-+log:   numerics: balance+overrides - enabled: h16, kvq8 (q8 KV (int8 + f16 scale / 32)), relaxacc (RELAX=1, user-requested [k 4, alpha 0.00, eps 0.09, delta 0.30]); skipped: fp8 (no fp8 GEMM kernels on this GPU), moefp8 (dense model), gdnwmma (no WMMA DeltaNet kernels on this GPU), specsample (no MTP head); WHIRL_RELAX=1: relaxacc on (lossy, user-requested); decode: q8dec (int8 activations in the decode / verify GEMV, as llama.cpp's q8_1)
--D exec: num_plan=numerics: balance - enabled: h16, kvq8 (q8 KV (int8 + f16 scale / 32)); skipped: fp8 (no fp8 GEMM kernels on this GPU), moefp8 (dense model), gdnwmma (no WMMA DeltaNet kernels on this GPU), specsample (no MTP head); decode: q8dec (int8 activations in the decode / verify GEMV, as llama.cpp's q8_1)
--D exec: num_plan.lossy_override=0
--D exec: relax.on=0
--D exec: relax.alpha=0.100000001
--log:   numerics: balance - enabled: h16, kvq8 (q8 KV (int8 + f16 scale / 32)); skipped: fp8 (no fp8 GEMM kernels on this GPU), moefp8 (dense model), gdnwmma (no WMMA DeltaNet kernels on this GPU), specsample (no MTP head); decode: q8dec (int8 activations in the decode / verify GEMV, as llama.cpp's q8_1)
++log:   WHIRL_RELAX=1 ignored: relaxacc is a fast-only item (balance never takes it)
 == tune d1201 RELAX_EPS=0.25
 (no change)
 == tune d1201 RELAX=1 RELAX_EPS=0.25
-+D exec: num_plan=numerics: balance+overrides - enabled: h16, kvq8 (q8 KV (int8 + f16 scale / 32)), relaxacc (RELAX=1, user-requested [k 4, alpha 0.10, eps 0.25, delta 0.30]); skipped: fp8 (no fp8 GEMM kernels on this GPU), moefp8 (dense model), gdnwmma (no WMMA DeltaNet kernels on this GPU), specsample (no MTP head); WHIRL_RELAX=1: relaxacc on (lossy, user-requested); decode: q8dec (int8 activations in the decode / verify GEMV, as llama.cpp's q8_1)
-+D exec: num_plan.lossy_override=1
-+D exec: num_plan.override[0]=WHIRL_RELAX=1: relaxacc on (lossy, user-requested)
-+D exec: relax.on=1
-+D exec: relax.eps=0.25
-+log:   numerics: balance+overrides - enabled: h16, kvq8 (q8 KV (int8 + f16 scale / 32)), relaxacc (RELAX=1, user-requested [k 4, alpha 0.10, eps 0.25, delta 0.30]); skipped: fp8 (no fp8 GEMM kernels on this GPU), moefp8 (dense model), gdnwmma (no WMMA DeltaNet kernels on this GPU), specsample (no MTP head); WHIRL_RELAX=1: relaxacc on (lossy, user-requested); decode: q8dec (int8 activations in the decode / verify GEMV, as llama.cpp's q8_1)
--D exec: num_plan=numerics: balance - enabled: h16, kvq8 (q8 KV (int8 + f16 scale / 32)); skipped: fp8 (no fp8 GEMM kernels on this GPU), moefp8 (dense model), gdnwmma (no WMMA DeltaNet kernels on this GPU), specsample (no MTP head); decode: q8dec (int8 activations in the decode / verify GEMV, as llama.cpp's q8_1)
--D exec: num_plan.lossy_override=0
--D exec: relax.on=0
--D exec: relax.eps=0.0900000036
--log:   numerics: balance - enabled: h16, kvq8 (q8 KV (int8 + f16 scale / 32)); skipped: fp8 (no fp8 GEMM kernels on this GPU), moefp8 (dense model), gdnwmma (no WMMA DeltaNet kernels on this GPU), specsample (no MTP head); decode: q8dec (int8 activations in the decode / verify GEMV, as llama.cpp's q8_1)
++log:   WHIRL_RELAX=1 ignored: relaxacc is a fast-only item (balance never takes it)
 == tune d1201 RELAX=1 RELAX_EPS=0
-+D exec: num_plan=numerics: balance+overrides - enabled: h16, kvq8 (q8 KV (int8 + f16 scale / 32)), relaxacc (RELAX=1, user-requested [k 4, alpha 0.10, eps 0.00, delta 0.30]); skipped: fp8 (no fp8 GEMM kernels on this GPU), moefp8 (dense model), gdnwmma (no WMMA DeltaNet kernels on this GPU), specsample (no MTP head); WHIRL_RELAX=1: relaxacc on (lossy, user-requested); decode: q8dec (int8 activations in the decode / verify GEMV, as llama.cpp's q8_1)
-+D exec: num_plan.lossy_override=1
-+D exec: num_plan.override[0]=WHIRL_RELAX=1: relaxacc on (lossy, user-requested)
-+D exec: relax.on=1
-+D exec: relax.eps=0
-+log:   numerics: balance+overrides - enabled: h16, kvq8 (q8 KV (int8 + f16 scale / 32)), relaxacc (RELAX=1, user-requested [k 4, alpha 0.10, eps 0.00, delta 0.30]); skipped: fp8 (no fp8 GEMM kernels on this GPU), moefp8 (dense model), gdnwmma (no WMMA DeltaNet kernels on this GPU), specsample (no MTP head); WHIRL_RELAX=1: relaxacc on (lossy, user-requested); decode: q8dec (int8 activations in the decode / verify GEMV, as llama.cpp's q8_1)
--D exec: num_plan=numerics: balance - enabled: h16, kvq8 (q8 KV (int8 + f16 scale / 32)); skipped: fp8 (no fp8 GEMM kernels on this GPU), moefp8 (dense model), gdnwmma (no WMMA DeltaNet kernels on this GPU), specsample (no MTP head); decode: q8dec (int8 activations in the decode / verify GEMV, as llama.cpp's q8_1)
--D exec: num_plan.lossy_override=0
--D exec: relax.on=0
--D exec: relax.eps=0.0900000036
--log:   numerics: balance - enabled: h16, kvq8 (q8 KV (int8 + f16 scale / 32)); skipped: fp8 (no fp8 GEMM kernels on this GPU), moefp8 (dense model), gdnwmma (no WMMA DeltaNet kernels on this GPU), specsample (no MTP head); decode: q8dec (int8 activations in the decode / verify GEMV, as llama.cpp's q8_1)
++log:   WHIRL_RELAX=1 ignored: relaxacc is a fast-only item (balance never takes it)
 == tune d1201 RELAX_DELTA=0.75
 (no change)
 == tune d1201 RELAX=1 RELAX_DELTA=0.75
-+D exec: num_plan=numerics: balance+overrides - enabled: h16, kvq8 (q8 KV (int8 + f16 scale / 32)), relaxacc (RELAX=1, user-requested [k 4, alpha 0.10, eps 0.09, delta 0.75]); skipped: fp8 (no fp8 GEMM kernels on this GPU), moefp8 (dense model), gdnwmma (no WMMA DeltaNet kernels on this GPU), specsample (no MTP head); WHIRL_RELAX=1: relaxacc on (lossy, user-requested); decode: q8dec (int8 activations in the decode / verify GEMV, as llama.cpp's q8_1)
-+D exec: num_plan.lossy_override=1
-+D exec: num_plan.override[0]=WHIRL_RELAX=1: relaxacc on (lossy, user-requested)
-+D exec: relax.on=1
-+D exec: relax.delta=0.75
-+log:   numerics: balance+overrides - enabled: h16, kvq8 (q8 KV (int8 + f16 scale / 32)), relaxacc (RELAX=1, user-requested [k 4, alpha 0.10, eps 0.09, delta 0.75]); skipped: fp8 (no fp8 GEMM kernels on this GPU), moefp8 (dense model), gdnwmma (no WMMA DeltaNet kernels on this GPU), specsample (no MTP head); WHIRL_RELAX=1: relaxacc on (lossy, user-requested); decode: q8dec (int8 activations in the decode / verify GEMV, as llama.cpp's q8_1)
--D exec: num_plan=numerics: balance - enabled: h16, kvq8 (q8 KV (int8 + f16 scale / 32)); skipped: fp8 (no fp8 GEMM kernels on this GPU), moefp8 (dense model), gdnwmma (no WMMA DeltaNet kernels on this GPU), specsample (no MTP head); decode: q8dec (int8 activations in the decode / verify GEMV, as llama.cpp's q8_1)
--D exec: num_plan.lossy_override=0
--D exec: relax.on=0
--D exec: relax.delta=0.300000012
--log:   numerics: balance - enabled: h16, kvq8 (q8 KV (int8 + f16 scale / 32)); skipped: fp8 (no fp8 GEMM kernels on this GPU), moefp8 (dense model), gdnwmma (no WMMA DeltaNet kernels on this GPU), specsample (no MTP head); decode: q8dec (int8 activations in the decode / verify GEMV, as llama.cpp's q8_1)
++log:   WHIRL_RELAX=1 ignored: relaxacc is a fast-only item (balance never takes it)
 == tune d1201 RELAX=1 RELAX_DELTA=0
-+D exec: num_plan=numerics: balance+overrides - enabled: h16, kvq8 (q8 KV (int8 + f16 scale / 32)), relaxacc (RELAX=1, user-requested [k 4, alpha 0.10, eps 0.09, delta 0.00]); skipped: fp8 (no fp8 GEMM kernels on this GPU), moefp8 (dense model), gdnwmma (no WMMA DeltaNet kernels on this GPU), specsample (no MTP head); WHIRL_RELAX=1: relaxacc on (lossy, user-requested); decode: q8dec (int8 activations in the decode / verify GEMV, as llama.cpp's q8_1)
-+D exec: num_plan.lossy_override=1
-+D exec: num_plan.override[0]=WHIRL_RELAX=1: relaxacc on (lossy, user-requested)
-+D exec: relax.on=1
-+D exec: relax.delta=0
-+log:   numerics: balance+overrides - enabled: h16, kvq8 (q8 KV (int8 + f16 scale / 32)), relaxacc (RELAX=1, user-requested [k 4, alpha 0.10, eps 0.09, delta 0.00]); skipped: fp8 (no fp8 GEMM kernels on this GPU), moefp8 (dense model), gdnwmma (no WMMA DeltaNet kernels on this GPU), specsample (no MTP head); WHIRL_RELAX=1: relaxacc on (lossy, user-requested); decode: q8dec (int8 activations in the decode / verify GEMV, as llama.cpp's q8_1)
--D exec: num_plan=numerics: balance - enabled: h16, kvq8 (q8 KV (int8 + f16 scale / 32)); skipped: fp8 (no fp8 GEMM kernels on this GPU), moefp8 (dense model), gdnwmma (no WMMA DeltaNet kernels on this GPU), specsample (no MTP head); decode: q8dec (int8 activations in the decode / verify GEMV, as llama.cpp's q8_1)
--D exec: num_plan.lossy_override=0
--D exec: relax.on=0
--D exec: relax.delta=0.300000012
--log:   numerics: balance - enabled: h16, kvq8 (q8 KV (int8 + f16 scale / 32)); skipped: fp8 (no fp8 GEMM kernels on this GPU), moefp8 (dense model), gdnwmma (no WMMA DeltaNet kernels on this GPU), specsample (no MTP head); decode: q8dec (int8 activations in the decode / verify GEMV, as llama.cpp's q8_1)
++log:   WHIRL_RELAX=1 ignored: relaxacc is a fast-only item (balance never takes it)
 == tune d1201 RELAX=1 RELAX_K=abc
-+D exec: num_plan=numerics: precise - f16/f32 prefill activations, f32 DeltaNet, f16 KV; decode: q8dec (int8 activations in the decode / verify GEMV, as llama.cpp's q8_1)
-+D exec: relax.on=1
-+throw: invalid stoul argument
--D exec: num_plan=numerics: balance - enabled: h16, kvq8 (q8 KV (int8 + f16 scale / 32)); skipped: fp8 (no fp8 GEMM kernels on this GPU), moefp8 (dense model), gdnwmma (no WMMA DeltaNet kernels on this GPU), specsample (no MTP head); decode: q8dec (int8 activations in the decode / verify GEMV, as llama.cpp's q8_1)
--D exec: relax.on=0
--log:   numerics: balance - enabled: h16, kvq8 (q8 KV (int8 + f16 scale / 32)); skipped: fp8 (no fp8 GEMM kernels on this GPU), moefp8 (dense model), gdnwmma (no WMMA DeltaNet kernels on this GPU), specsample (no MTP head); decode: q8dec (int8 activations in the decode / verify GEMV, as llama.cpp's q8_1)
++log:   WHIRL_RELAX=1 ignored: relaxacc is a fast-only item (balance never takes it)
 == gemv d1201 GEMV_R=0
 (no change)
 == gemv d1201 GEMV_R=1

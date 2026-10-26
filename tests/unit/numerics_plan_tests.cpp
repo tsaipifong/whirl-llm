@@ -113,51 +113,86 @@ std::map<std::string, std::string> splitKv(std::string_view s) {
 const std::set<std::string> k_not_plan_env = {"GEMV_BITWISE_FLOAT"};
 
 void testPlanTable() {
-    std::size_t n_cells = 0, n_fields = 0;
+    std::size_t n_cells = 0, n_fields = 0, n_repin = 0;
+    // the value of one S0b-2 dump key in a plan ("" + known = false: not decided by the plan)
+    auto keyOf = [](const nu::Plan& p, const std::string& k, bool& known) {
+        known = true;
+        if (k == "num_plan") return nu::logLine(p);
+        if (k == "num_plan.q8dec") return std::string(p.q8dec ? "1" : "0");
+        if (k == "num_plan.q8dec_default") return std::string(p.q8dec_default ? "1" : "0");
+        if (k == "num_plan.lossy_override") return std::string(p.lossy_override ? "1" : "0");
+        if (k.rfind("num_plan.override[", 0) == 0) {
+            const std::size_t i = std::stoul(k.substr(18));
+            return i < p.overrides.size() ? p.overrides[i] : std::string("<none>");
+        }
+        for (const nu::FlagInfo& fi : nu::flagTable())
+            if (k == fi.dump_key) return nu::flagValue(p.flags, fi);
+        known = false;
+        return std::string();
+    };
     for (const S0b2Cell& c : k_s0b2_cells) {
         ++n_cells;
+        // bug-fastonly (audit F-A, finding M2): the 10 env_RELAX* cells (balance, 5 per card) pin the old behaviour,
+        // WHIRL_RELAX=1 -> relaxacc on in balance. RE-PIN AFTER THIS BUGFIX (expected change; a new S0b-2 GPU dump, then
+        // regenerate numerics_plan_s0b2.inc). Until then these cells check the fix instead: the plan equals the same cell
+        // without the RELAX* values (a fast-only refusal leaves the plan untouched), the refusal note is in Plan::ignored,
+        // and the dump differs from it only in the relaxacc keys. Not part of the 0.2.5 work-equivalence claim.
+        const bool repin = std::string_view(c.cell).rfind("env_RELAX", 0) == 0 && std::string_view(c.mode) != "fast";
         nu::Request r = nu::parseMode(c.mode, "command line");
         r.load_overrides = true;
+        nu::Request r0 = r;  // repin: without RELAX*
         bool kv_explicit = false;
         for (const auto& [n, v] : splitEnv(c.env)) {
             if (k_not_plan_env.count(n)) continue;
             nu::Raw* f = r.env.find(n);
             NCHECK(f != nullptr, "{} {}: env {} has no Request field", c.card, c.cell, n);
             if (f) *f = v;
+            if (nu::Raw* f0 = r0.env.find(n); f0 && n.rfind("RELAX", 0) != 0) *f0 = v;
             // loader.cpp:524 kvModeOf: a format name -> explicit (Target::kv_explicit, tune.cpp:935)
             if (n == "KV" && v != "auto") kv_explicit = true;
         }
-        const nu::Plan p = nu::plan(r, target(card(c.card), c.model, kv_explicit));
+        const nu::Target tc = target(card(c.card), c.model, kv_explicit);
+        const nu::Plan p = nu::plan(r, tc);
         const auto want = splitKv(c.kv);
         std::size_t n_over = 0;
+        if (repin) {
+            ++n_repin;
+            const nu::Plan p0 = nu::plan(r0, tc);
+            static const std::set<std::string> k_relax_keys = {"num_plan", "num_plan.lossy_override", "num_plan.override[0]", "relax.on",
+                                                               "relax.k", "relax.alpha", "relax.eps", "relax.delta"};
+            for (const auto& [k, v] : want) {
+                ++n_fields;
+                bool known = false, known0 = false;
+                const std::string got = keyOf(p, k, known), got0 = keyOf(p0, k, known0);
+                NCHECK(known, "{} {}: key {} not decided by the plan", c.card, c.cell, k);
+                NCHECK(got == got0, "{} {} (re-pin): {} = '{}', without RELAX* '{}'", c.card, c.cell, k, got, got0);
+                NCHECK(got == v || k_relax_keys.count(k) == 1, "{} {} (re-pin): {} = '{}' differs from the dump '{}' outside the relaxacc keys",
+                       c.card, c.cell, k, got, v);
+            }
+            NCHECK(p.overrides == p0.overrides && p.bitsKey() == p0.bitsKey(), "{} {} (re-pin): plan != plan without RELAX*", c.card, c.cell);
+            NCHECK(p.ignored.size() == 1 && p.ignored[0].rfind("WHIRL_RELAX=1 ignored: relaxacc is a fast-only item (" + std::string(c.mode) +
+                                                                   " never takes it)",
+                                                               0) == 0,
+                   "{} {} (re-pin): refusal note '{}'", c.card, c.cell, p.ignored.empty() ? std::string("<none>") : p.ignored[0]);
+            for (const nu::FlagInfo& fi : nu::flagTable())
+                if (*fi.dump_key) NCHECK(want.count(fi.dump_key) == 1, "{} {}: dump has no {}", c.card, c.cell, fi.dump_key);
+            continue;
+        }
         for (const auto& [k, v] : want) {
             ++n_fields;
-            std::string got;
-            bool known = true;
-            if (k == "num_plan") got = nu::logLine(p);
-            else if (k == "num_plan.q8dec") got = p.q8dec ? "1" : "0";
-            else if (k == "num_plan.q8dec_default") got = p.q8dec_default ? "1" : "0";
-            else if (k == "num_plan.lossy_override") got = p.lossy_override ? "1" : "0";
-            else if (k.rfind("num_plan.override[", 0) == 0) {
-                const std::size_t i = std::stoul(k.substr(18));
-                got = i < p.overrides.size() ? p.overrides[i] : "<none>";
-                ++n_over;
-            } else {
-                known = false;
-                for (const nu::FlagInfo& fi : nu::flagTable())
-                    if (k == fi.dump_key) {
-                        got = nu::flagValue(p.flags, fi);
-                        known = true;
-                    }
-            }
+            bool known = false;
+            const std::string got = keyOf(p, k, known);
+            if (k.rfind("num_plan.override[", 0) == 0) ++n_over;
             NCHECK(known, "{} {}: key {} not decided by the plan", c.card, c.cell, k);
             NCHECK(got == v, "{} {}: {} = '{}', S0b-2 dump '{}'", c.card, c.cell, k, got, v);
         }
         NCHECK(p.overrides.size() == n_over, "{} {}: {} overrides, dump {}", c.card, c.cell, p.overrides.size(), n_over);
+        NCHECK(p.ignored.empty(), "{} {}: unexpected refusal note '{}'", c.card, c.cell, p.ignored.empty() ? std::string() : p.ignored[0]);
         // every flag with a dump key is in every cell (nothing compared by omission)
         for (const nu::FlagInfo& fi : nu::flagTable())
             if (*fi.dump_key) NCHECK(want.count(fi.dump_key) == 1, "{} {}: dump has no {}", c.card, c.cell, fi.dump_key);
     }
+    NCHECK(n_repin == 10, "bug-fastonly re-pin cells {} (expected the 10 env_RELAX* balance cells)", n_repin);
     NCHECK(n_cells == 68, "cells {}", n_cells);
     std::printf("  numerics plan table: %zu S0b-2 cells, %zu fields compared\n", n_cells, n_fields);
 }
@@ -380,10 +415,15 @@ void testFrontEnds() {
     const nu::Flags d = nu::plan(nu::parseMode("balance", "t"), t).flags;
     // none: runtime values ignored
     NCHECK(run(F::none, {{"NO_FUSE", "1"}, {"GDN_SEQ", "1"}}) == d, "front none");
-    // presence knobs: any value, "0" included
+    // on / off knobs (bug-fastonly, audit F-D; was "presence: any value, 0 included"): on for any value but "0" / "";
+    // GDN_V0 is still a presence knob (not in the F-D list; "0" turns it on)
     for (F fr : {F::cli, F::server}) {
         const nu::Flags a = run(fr, {{"NO_FUSE", "0"}, {"FLOAT_GEMV", "0"}, {"NAIVE_ATTN", "0"}, {"GDN_SEQ", "0"}, {"GDN_V0", "0"}});
-        NCHECK(a.no_fuse && a.float_gemv && a.naive_attn && !a.gdn_chunked && a.gdn_v0, "presence {}", static_cast<int>(fr));
+        NCHECK(!a.no_fuse && !a.float_gemv && !a.naive_attn && a.gdn_chunked && a.gdn_v0, "=0 is off {}", static_cast<int>(fr));
+        const nu::Flags a1 = run(fr, {{"NO_FUSE", "1"}, {"FLOAT_GEMV", "yes"}, {"NAIVE_ATTN", "1"}, {"GDN_SEQ", "1"}});
+        NCHECK(a1.no_fuse && a1.float_gemv && a1.naive_attn && !a1.gdn_chunked, "=1 is on {}", static_cast<int>(fr));
+        const nu::Flags a0 = run(fr, {{"NO_FUSE", ""}, {"FLOAT_GEMV", ""}, {"NAIVE_ATTN", ""}, {"GDN_SEQ", ""}});
+        NCHECK(!a0.no_fuse && !a0.float_gemv && !a0.naive_attn && a0.gdn_chunked, "='' is off {}", static_cast<int>(fr));
         // "== 0" knobs: only "0" turns them off
         const nu::Flags b = run(fr, {{"ATTN_WIDE", "0"}, {"ATTN_DQ4", "1"}, {"DQ4_DYN", ""}, {"ATTN_WS4", "0"}});
         NCHECK(!b.attn_wide && b.attn_dq4 && b.dq4_dyn && !b.attn_ws4, "==0 {}", static_cast<int>(fr));
@@ -403,7 +443,8 @@ void testFrontEnds() {
     NCHECK(run(F::cli, {{"GEMV_MAX", "0"}}).gemv_max == 1 && run(F::cli, {{"GEMV_MAX", "99"}}).gemv_max == 16 &&
                run(F::cli, {{"GEMV_MAX", "8"}}).gemv_max == 8,
            "cli GEMV_MAX clamp");
-    NCHECK(!run(F::cli, {{"NO_GRAPH", "0"}}).use_graph, "cli NO_GRAPH presence");
+    NCHECK(run(F::cli, {{"NO_GRAPH", "0"}}).use_graph && run(F::cli, {{"NO_GRAPH", ""}}).use_graph && !run(F::cli, {{"NO_GRAPH", "1"}}).use_graph,
+           "cli NO_GRAPH (bug-fastonly: =0 / '' off, was presence)");
     NCHECK(run(F::cli, {{"DRAFT_WINDOW", "4096"}, {"DRAFT_WINDOW_MIN", "8192x"}}).draft_window == 4096 &&
                run(F::cli, {{"DRAFT_WINDOW_MIN", "8192x"}}).draft_window_min == 8192,
            "cli DRAFT_WINDOW");
@@ -620,6 +661,54 @@ void testFastOnlyOverrides() {
         NCHECK(k_class.count(nu::k_numerics_switches[i]) == 0, "FO-4: switch WHIRL_{} is also an item override", nu::k_numerics_switches[i]);
 }
 
+// bug-fastonly: the refusal's text and log path (Plan::ignored, chooseKv why), and fast unchanged (WHIRL_RELAX / WHIRL_KV=q4 still
+// apply there as before: applyOverride, chooseKv's forced format)
+void testFastOnlyRefusal() {
+    auto planOf = [](const char* mode, const nu::Target& t, std::vector<std::pair<const char*, const char*>> vals) {
+        nu::Request r = nu::parseMode(mode, "t");
+        r.load_overrides = true;
+        for (const auto& [n, v] : vals) *r.env.find(n) = std::string(v);
+        return nu::plan(r, t);
+    };
+    const CardFake& r9 = card("r9700");
+    for (const char* model : {"swift", "moe"}) {
+        const bool moe = std::string_view(model) == "moe";
+        const nu::Target t = target(r9, model, false), tk = target(r9, model, true);
+        for (const char* mode : {"precise", "balance"}) {
+            const nu::Plan base = planOf(mode, t, {});
+            const nu::Plan pr = planOf(mode, t, {{"RELAX", "1"}, {"RELAX_K", "x"}});  // the parameters are not parsed either
+            NCHECK(pr.bitsKey() == base.bitsKey() && pr.overrides == base.overrides && nu::logLine(pr) == nu::logLine(base),
+                   "refusal {} {}: RELAX=1 changed the plan", model, mode);
+            NCHECK(pr.ignored == std::vector<std::string>{std::format("WHIRL_RELAX=1 ignored: relaxacc is a fast-only item ({} never takes it)", mode)},
+                   "refusal {} {}: RELAX note", model, mode);
+            NCHECK(planOf(mode, t, {{"RELAX", "0"}}).ignored.empty(), "refusal {} {}: RELAX=0 is no request", model, mode);
+            const nu::Plan base_k = planOf(mode, tk, {});
+            const nu::Plan pk = planOf(mode, tk, {{"KV", "q4"}});
+            NCHECK(pk.bitsKey() == base_k.bitsKey() && pk.overrides == base_k.overrides, "refusal {} {}: KV=q4 changed the plan", model, mode);
+            NCHECK(pk.ignored == std::vector<std::string>{std::format("WHIRL_KV=q4 ignored: kvq4 is a fast-only item ({} never takes it)", mode)},
+                   "refusal {} {}: KV note", model, mode);
+            // chooseKv: forced q4 -> the mode's own choice, not a debug override; other forced formats unchanged (F-E: not in scope)
+            const nu::KvCaps caps{true, true, true, false};
+            const nu::Request rq = nu::forModel(nu::parseMode(mode, "t"), moe);
+            const nu::KvChoice own = nu::chooseKv(rq, moe, caps, std::nullopt), f4 = nu::chooseKv(rq, moe, caps, whirl::KvFormat::q4);
+            NCHECK(f4.kv == own.kv && !f4.debug && f4.why == std::format("WHIRL_KV=q4 ignored: kvq4 is a fast-only item ({} never takes it); {}", mode, own.why),
+                   "refusal {} {}: chooseKv(q4) {} / {}", model, mode, whirl::kvFormatName(f4.kv), f4.why);
+            for (const whirl::KvFormat k : {whirl::KvFormat::f16, whirl::KvFormat::q8, whirl::KvFormat::q8h, whirl::KvFormat::q8v}) {
+                const nu::KvChoice f = nu::chooseKv(rq, moe, caps, k);
+                NCHECK(f.kv == k && f.debug, "refusal {} {}: forced {} still a debug override", model, mode, whirl::kvFormatName(k));
+            }
+        }
+        // fast: unchanged
+        const nu::Plan fr = planOf("fast", t, {{"RELAX", "1"}, {"RELAX_K", "6"}});
+        NCHECK(fr.on(nu::Item::relaxacc) && fr.flags.relax_on && fr.flags.relax_k == 6 && fr.ignored.empty(), "fast {}: RELAX=1 applies", model);
+        NCHECK(!planOf("fast", t, {{"RELAX", "0"}}).flags.relax_on, "fast {}: RELAX=0 turns it off", model);
+        const nu::Plan fk = planOf("fast", tk, {{"KV", "q4"}});
+        NCHECK(fk.ignored.empty(), "fast {}: KV=q4 no refusal", model);
+        const nu::KvChoice ff = nu::chooseKv(nu::forModel(nu::parseMode("fast", "t"), moe), moe, nu::KvCaps{true, true, true, false}, whirl::KvFormat::q4);
+        NCHECK(ff.kv == whirl::KvFormat::q4 && ff.debug, "fast {}: chooseKv(forced q4) = q4 debug override", model);
+    }
+}
+
 }  // namespace
 
 void testNumericsPlan(int& pass, int& fail) {
@@ -632,6 +721,7 @@ void testNumericsPlan(int& pass, int& fail) {
     testN2bR1();  // arch025-n2b-r1
     testSwitchZeroIsOff();  // audit-fastonly-overrides FO-5 (fails before the fix)
     testFastOnlyOverrides();  // audit-fastonly-overrides FO-1..4 (FO-1 / FO-2 / FO-3 fail before the fix)
+    testFastOnlyRefusal();  // bug-fastonly: refusal notes, fast unchanged
     pass += g_p;
     fail += g_f;
 }
