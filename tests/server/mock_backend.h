@@ -134,8 +134,15 @@ public:
     void readCtl(std::span<std::int32_t> dst) override;
     // feat026-hostgap: the model-side waits of a decode cycle (readCtl / readCtlPinned / syncStream each wait for
     // the device in production); with NullBackend::blockingCalls() the per-cycle sync count of the server tests
-    void syncStream() override { host_waits_ += 1; }
+    void syncStream() override {
+        host_waits_ += 1;
+        reached();
+    }
     std::uint64_t hostWaits() const { return host_waits_.load(); }
+    // feat026-hostgap-r1: the control words as the device holds them now, copied into dst on stream() (no wait; with
+    // NullBackend::deferHostCopies they land when the host waits for the stream)
+    bool readCtlAsync(std::span<std::int32_t> dst) override;
+    std::uint64_t ctlAsyncReads() const { return ctl_async_.load(); }
     void mtpEnqueue(server::DevPtr hidden, std::span<const std::uint32_t> tokens, std::uint32_t pos0) override;
     void topkRows(std::uint32_t row0, std::uint32_t rows, std::uint32_t k, float inv_t, server::DevPtr ids,
                   server::DevPtr vals, server::DevPtr stats) override;
@@ -177,7 +184,12 @@ public:
 private:
     SpecNextTab spec_tab_{};
     std::atomic<std::uint64_t> spec_accepts_{0};
-    std::atomic<std::uint64_t> host_waits_{0};
+    std::atomic<std::uint64_t> host_waits_{0}, ctl_async_{0};
+    server::DevPtr ctl_dev_ = 0;  // device copy of the control areas (readCtlAsync's source)
+    // a model wait for its stream (readCtl's blocking copy, syncStream): deferred readbacks on stream() land
+    void reached() {
+        if (auto* nb = dynamic_cast<device::NullBackend*>(&ops_)) nb->deviceReached(stream_);
+    }
     void prefillRows(std::size_t n);
     struct State {
         std::uint64_t h = 0;   // recurrent hash

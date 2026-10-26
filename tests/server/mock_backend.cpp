@@ -130,6 +130,7 @@ MockModel::~MockModel() {
     for (auto p : xc_) ops_.free(p);
     ops_.free(logits_);
     ops_.free(hn_);
+    if (ctl_dev_ != 0) ops_.free(ctl_dev_);  // only readCtlAsync allocates it (a free(0) would show in the pins)
     ops_.streamDestroy(stream_);
 }
 
@@ -513,8 +514,21 @@ std::uint32_t MockModel::verifyBatchEnqueue(std::span<const server::VSeg> segs) 
 
 void MockModel::readCtl(std::span<std::int32_t> dst) {
     host_waits_ += 1;
+    reached();  // production: a blocking copy after the stream's work (deferred readbacks before it land)
     for (std::size_t s = 0; s < seqs_.size() && (s + 1) * qwen35::ctl_words <= dst.size(); ++s)
         std::memcpy(dst.data() + s * qwen35::ctl_words, seqs_[s].ctl.data(), qwen35::ctl_words * 4);
+}
+
+bool MockModel::readCtlAsync(std::span<std::int32_t> dst) {
+    const std::size_t W = qwen35::ctl_words;
+    const std::size_t n = std::min(seqs_.size(), dst.size() / W);
+    if (n == 0) return true;
+    if (ctl_dev_ == 0) ctl_dev_ = ops_.malloc(seqs_.size() * W * 4);
+    auto* dev = reinterpret_cast<std::int32_t*>(ctl_dev_);
+    for (std::size_t s = 0; s < n; ++s) std::memcpy(dev + s * W, seqs_[s].ctl.data(), W * 4);
+    ops_.copyAsync(static_cast<server::DevPtr>(reinterpret_cast<std::uintptr_t>(dst.data())), ctl_dev_, n * W * 4, stream_);
+    ctl_async_ += 1;
+    return true;
 }
 
 void MockModel::mtpEnqueue(server::DevPtr, std::span<const std::uint32_t>, std::uint32_t) {}

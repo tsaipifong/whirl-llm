@@ -7828,6 +7828,7 @@ int main(int argc, char** argv) {
         {"spec_acc_modes", testSpecAccModes},
         {"cycle_sync_modes", testCycleSyncModes},
         {"cycle_sync_per_cycle", testCycleSyncPerCycle},
+        {"cycle_sync_defer_model", testCycleSyncDeferModel},
         {"fr_tool_truncated", testFrToolTruncated},
         {"fr_nonstream_disconnect", testFrNonStreamDisconnect},
         {"fr_pool_prefill", testFrPoolPrefill},

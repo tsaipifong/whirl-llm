@@ -145,6 +145,21 @@ public:
     };
     std::size_t pendingFreeViolations() const;
     std::vector<Violation> violations() const;
+
+    // ---- deferred completion (feat026-hostgap-r1), off by default: with deferHostCopies(true) a copyAsync into
+    // pinned host memory (a readback) does not land at once. Its source bytes are taken at the call (the mock's
+    // device work before it is already done) and written to the destination only when the host knows the stream got
+    // there: streamSync(s), eventSync / a done event query of an event recorded on s after the copy, or
+    // deviceReached(s) (a model call that waits for its stream in production, e.g. the blocking control-word read).
+    // An event query of an event with copies still in flight answers "not done" once, then lands them and answers
+    // "done" (so a poll loop really loops). Reading the destination before such a wait reads stale data: a missing
+    // or misordered wait changes the server's output in the tests. Turning it on or off lands nothing and clears the
+    // queue (call it while no copy is in flight).
+    void deferHostCopies(bool on);
+    bool deferring() const { return defer_.load(); }
+    void deviceReached(Stream s);                       // not counted as a blocking call
+    std::uint64_t deferredInFlight() const;             // copies not landed yet
+    std::uint64_t deferredLanded() const { return defer_landed_.load(); }
     // ---- threads of the Backend calls
     enum class Call {
         copy_async, download, stream_create, stream_destroy, stream_sync, stream_wait_event, event_create,
@@ -218,6 +233,24 @@ private:
     std::vector<Violation> violations_;
     std::uint64_t releases_ = 0;
     std::vector<std::pair<Call, std::thread::id>> threads_;
+    // deferred completion (under mu_)
+    struct Deferred {
+        std::uint64_t stream = 0, seq = 0;  // stream id, its deferred-copy number
+        std::uintptr_t dst = 0;
+        std::vector<unsigned char> data;
+    };
+    struct DeferMark {
+        std::uint64_t stream = 0, seq = 0;
+        bool polled = false;  // a query already answered "not done"
+    };
+    std::atomic<bool> defer_{false};
+    std::atomic<std::uint64_t> defer_landed_{0};
+    std::vector<Deferred> deferred_;
+    std::map<std::uint64_t, std::uint64_t> defer_seq_;  // stream id -> deferred copies issued
+    std::map<void*, DeferMark> defer_ev_;
+    void landLocked(std::uint64_t stream, std::uint64_t upto);
+    bool deferInFlightLocked(Event e) const;  // the event has deferred copies before it that have not landed
+    bool deferDoneLocked(Event e);            // the query answer of deferred completion (lands when done)
     std::mutex gate_m_;
     std::condition_variable gate_cv_;
     bool gate_open_ = true;

@@ -69,7 +69,18 @@ void NullBackend::copyAsync(DevPtr dst, DevPtr src, std::uint64_t bytes, Stream 
         fail_host_copy_ = 0;
         throw std::runtime_error("injected copyAsync failure (pinned host source)");
     }
-    std::memmove(reinterpret_cast<void*>(dst), reinterpret_cast<const void*>(src), static_cast<std::size_t>(bytes));
+    if (defer_.load() && isHost(dst)) {
+        // a readback: the bytes the device holds now, written when the host learns the stream got here
+        Deferred d;
+        d.dst = static_cast<std::uintptr_t>(dst);
+        d.data.assign(reinterpret_cast<const unsigned char*>(src), reinterpret_cast<const unsigned char*>(src) + bytes);
+        std::lock_guard<std::mutex> lk(mu_);
+        d.stream = idOf(s);
+        d.seq = ++defer_seq_[d.stream];
+        deferred_.push_back(std::move(d));
+    } else {
+        std::memmove(reinterpret_cast<void*>(dst), reinterpret_cast<const void*>(src), static_cast<std::size_t>(bytes));
+    }
     copied_ += bytes;
     if (track_.load()) {
         std::lock_guard<std::mutex> lk(mu_);
@@ -107,6 +118,10 @@ void NullBackend::streamDestroy(Stream s) {
 void NullBackend::streamSync(Stream s) {
     noteThread(Call::stream_sync);
     blocking_calls_ += 1;
+    if (defer_.load()) {
+        std::lock_guard<std::mutex> lk(mu_);
+        landLocked(idOf(s), UINT64_MAX);
+    }
     if (!track_.load()) return;
     std::lock_guard<std::mutex> lk(mu_);
     sync_calls_ += 1;
@@ -128,6 +143,11 @@ void NullBackend::streamWaitEvent(Stream s, Event e) {
 
 void NullBackend::eventRecord(Event e, Stream s) {
     noteThread(Call::event_record);
+    if (defer_.load()) {
+        std::lock_guard<std::mutex> lk(mu_);
+        const std::uint64_t id = idOf(s);
+        defer_ev_[e] = DeferMark{id, defer_seq_[id], false};
+    }
     if (!track_.load()) return;
     std::lock_guard<std::mutex> lk(mu_);
     const StreamState& st = streams_[idOf(s)];
@@ -136,6 +156,10 @@ void NullBackend::eventRecord(Event e, Stream s) {
 
 bool NullBackend::eventDone(Event e) {
     noteThread(Call::event_done);
+    if (defer_.load()) {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (!deferDoneLocked(e)) return false;
+    }
     if (!track_.load()) return true;
     std::lock_guard<std::mutex> lk(mu_);
     return doneLocked(e);
@@ -159,9 +183,10 @@ Event NullBackend::eventCreate() {
 
 void NullBackend::eventDestroy(Event e) {
     noteThread(Call::event_destroy);
-    if (track_.load()) {
+    {
         std::lock_guard<std::mutex> lk(mu_);
-        events_.erase(e);
+        if (track_.load()) events_.erase(e);
+        defer_ev_.erase(e);
     }
     live_events_ -= 1;
     delete static_cast<int*>(e);
@@ -170,6 +195,10 @@ void NullBackend::eventDestroy(Event e) {
 bool NullBackend::eventDoneChecked(Event e) {
     noteThread(Call::event_done_checked);
     if (event_error_.load()) throw std::runtime_error("injected asynchronous device error");
+    if (defer_.load()) {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (!deferDoneLocked(e)) return false;
+    }
     if (!track_.load()) return true;
     std::lock_guard<std::mutex> lk(mu_);
     return doneLocked(e);
@@ -181,6 +210,10 @@ void NullBackend::eventSync(Event e) {
     {
         std::unique_lock<std::mutex> lk(gate_m_);
         gate_cv_.wait(lk, [&] { return gate_open_; });
+    }
+    if (defer_.load()) {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (const auto it = defer_ev_.find(e); it != defer_ev_.end()) landLocked(it->second.stream, it->second.seq);
     }
     if (!track_.load()) return;
     std::lock_guard<std::mutex> lk(mu_);
@@ -317,6 +350,10 @@ void NullBackend::hostFree(void* p) {
     {
         std::lock_guard<std::mutex> lk(mu_);
         if (track_.load()) checkRelease(reinterpret_cast<std::uintptr_t>(p), true);
+        if (const auto it = host_.find(reinterpret_cast<std::uintptr_t>(p)); it != host_.end() && !deferred_.empty()) {
+            const std::uintptr_t a = it->first, b = it->first + it->second;
+            std::erase_if(deferred_, [&](const Deferred& d) { return d.dst >= a && d.dst < b; });
+        }
         live_.erase(p);
         host_.erase(reinterpret_cast<std::uintptr_t>(p));
     }
@@ -370,6 +407,60 @@ void NullBackend::recordCopies(bool on) {
 std::vector<NullBackend::Copy> NullBackend::copies() const {
     std::lock_guard<std::mutex> lk(mu_);
     return log_;
+}
+
+void NullBackend::deferHostCopies(bool on) {
+    std::lock_guard<std::mutex> lk(mu_);
+    defer_ = on;
+    deferred_.clear();
+    defer_seq_.clear();
+    defer_ev_.clear();
+    defer_landed_ = 0;
+}
+
+void NullBackend::deviceReached(Stream s) {
+    if (!defer_.load()) return;
+    std::lock_guard<std::mutex> lk(mu_);
+    landLocked(idOf(s), UINT64_MAX);
+}
+
+std::uint64_t NullBackend::deferredInFlight() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return deferred_.size();
+}
+
+void NullBackend::landLocked(std::uint64_t stream, std::uint64_t upto) {
+    // in issue order (a later copy to the same bytes wins, as on the stream)
+    auto keep = deferred_.begin();
+    for (auto it = deferred_.begin(); it != deferred_.end(); ++it) {
+        if (it->stream == stream && it->seq <= upto) {
+            std::memcpy(reinterpret_cast<void*>(it->dst), it->data.data(), it->data.size());
+            defer_landed_ += 1;
+        } else {
+            if (keep != it) *keep = std::move(*it);
+            ++keep;
+        }
+    }
+    deferred_.erase(keep, deferred_.end());
+}
+
+bool NullBackend::deferInFlightLocked(Event e) const {
+    const auto it = defer_ev_.find(e);
+    if (it == defer_ev_.end()) return false;
+    for (const Deferred& d : deferred_)
+        if (d.stream == it->second.stream && d.seq <= it->second.seq) return true;
+    return false;
+}
+
+bool NullBackend::deferDoneLocked(Event e) {
+    if (!deferInFlightLocked(e)) return true;
+    DeferMark& m = defer_ev_[e];
+    if (!m.polled) {
+        m.polled = true;  // the first query of this record: still running
+        return false;
+    }
+    landLocked(m.stream, m.seq);
+    return true;
 }
 
 }  // namespace whirl::device

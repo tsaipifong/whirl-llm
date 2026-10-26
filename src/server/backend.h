@@ -99,6 +99,12 @@ public:
     // (pinned, readCtl layout): the verify's control areas are written there too, visible after syncStream().
     // Defaults: no device accept (the engine keeps the host path).
     virtual void readCtlPinned(std::span<std::int32_t> dst) { readCtl(dst); }
+    // feat026-hostgap-r1 (WHIRL_CYCLE_SYNC spin): enqueue the readCtl copy into pinned dst on stream() and return
+    // without waiting (the caller waits on an event recorded after it); false: not supported, nothing enqueued
+    virtual bool readCtlAsync(std::span<std::int32_t> dst) {
+        (void)dst;
+        return false;
+    }
     virtual bool specAcceptOk() const { return false; }
     virtual void specAccept(const SpecAccArgs& a, std::int32_t* host) { (void)a, (void)host; }
     virtual void syncStream() {}
