@@ -315,6 +315,27 @@ void testOpsGemm() {
     CHECK(nameOf(ops::chooseGemm8(4096, 512, true, false, k).f) == "gemm8h_c0");
     CHECK(nameOf(ops::chooseGemm8(4096, 40, true, true, k).f) == "gemm8t_c4");  // no gemm8th: the plain tiled one
     CHECK(ops::gemm8Cfg(64) == 3 && ops::gemm8Cfg(65) == 1 && ops::gemm8Cfg(257) == 0 && ops::gemm8tCfg(48) == 4 && ops::gemm8tCfg(193) == 0);
+    // feat026-gemm8tpp: WHIRL_GEMM8T_V picks gemm8tp_v<v> only where gemm8t_c0 would run, with both outputs present and
+    // (v4) an even number of 64-k slabs; default 0 and any other config keep the shipped kernel
+    CHECK(nameOf(ops::chooseGemm8(4096, 512, false, true, k, 2, 5120).f) == "gemm8t_c0");  // variant absent: shipped
+    for (int v = 1; v < kn::kNGemm8tp; ++v) {
+        k.gemm8tp[v] = tag("gemm8tp_v" + std::to_string(v));
+        k.gemm8tph[v] = tag("gemm8tph_v" + std::to_string(v));
+    }
+    k.gemm8th[0] = tag("gemm8th_c0");
+    CHECK(nameOf(ops::chooseGemm8(4096, 512, false, true, k).f) == "gemm8t_c0");
+    CHECK(nameOf(ops::chooseGemm8(4096, 512, false, true, k, 0, 5120).f) == "gemm8t_c0");
+    CHECK(nameOf(ops::chooseGemm8(4096, 512, false, true, k, 2, 5120).f) == "gemm8tp_v2");
+    CHECK(nameOf(ops::chooseGemm8(4096, 512, true, true, k, 5, 5120).f) == "gemm8tph_v5");
+    CHECK(nameOf(ops::chooseGemm8(4096, 100, false, true, k, 2, 5120).f) == "gemm8t_c1");   // not the 128x256 config
+    CHECK(nameOf(ops::chooseGemm8(4096, 512, false, false, k, 2, 5120).f) == "gemm8_c0");   // gemm8 set: no variant
+    CHECK(nameOf(ops::chooseGemm8(4096, 512, false, true, k, 4, 5120).f) == "gemm8tp_v4");  // 80 slabs
+    CHECK(nameOf(ops::chooseGemm8(4096, 512, false, true, k, 4, 5184).f) == "gemm8t_c0");   // 81 slabs: v4 cannot
+    CHECK(nameOf(ops::chooseGemm8(4096, 512, false, true, k, 7, 5120).f) == "gemm8t_c0");   // out of range
+    const ops::Gemm8Plan gv = ops::chooseGemm8(4096, 600, false, true, k, 3, 5120);
+    CHECK(gv.grid.x == 3 && gv.grid.y == 32 && gv.block.x == 256 && gv.bits == ops::BitClass::fp8_gemm);  // c0 geometry
+    k.gemm8th[0] = nullptr;
+    for (int v = 1; v < kn::kNGemm8tp; ++v) k.gemm8tp[v] = k.gemm8tph[v] = nullptr;
 }
 
 // ---- attention (K-3)

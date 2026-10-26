@@ -119,6 +119,7 @@ std::string execDump(const Model& m) {
     WD_FB(h16_dq);
     WD_B(out_h16);
     WD_FB(g8t);
+    if (m.g8t_v != 0) add("g8t_v", std::to_string(m.g8t_v));  // only when WHIRL_GEMM8T_V picked a variant (default dump unchanged)
     WD_FB(gemmh_on);
     WD_FB(gemmhq_on);
     // arch025-N3: the four former KV bools, now properties of m.kv_fmt (same keys and values)

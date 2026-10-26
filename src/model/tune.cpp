@@ -897,7 +897,20 @@ void loadOrTuneImpl(Model& m, const std::string& model_path, std::string& log) {
         else
             log += "  MXFP4 prefill: f16 activations\n";
         // fragment-tiled fp8 GEMM (bitwise == gemm8), default on; WHIRL_G8T=0 keeps gemm8
-        if (f.g8t) log += "  fp8 prefill GEMM: fragment-tiled (gemm8t)\n";
+        if (f.g8t) {
+            log += "  fp8 prefill GEMM: fragment-tiled (gemm8t)\n";
+            // feat026-gemm8tpp: opt-in schedule variant of gemm8t_c0 (bitwise the same output); WHIRL_GEMM8T_V from the
+            // load's snapshot (arch025-port-gemv: was envGet), under the plan's g8t (was g8t_on && fp8_prefill && gemm8 && useTiledFp8)
+            if (const auto& v = env.gemm8t_v) {
+                const int iv = std::atoi(v->c_str());
+                if (iv > 0 && iv < kernels::kNGemm8tp && m.k.gemm8tp[iv] != nullptr && m.k.gemm8tph[iv] != nullptr) {
+                    m.g8t_v = iv;
+                    log += fmt("  fp8 prefill GEMM: gemm8tp_v%d for the 128x256 tile (WHIRL_GEMM8T_V)\n", iv);
+                } else if (iv != 0) {
+                    log += fmt("  WHIRL_GEMM8T_V=%s ignored (no such gemm8tp variant)\n", v->c_str());
+                }
+            }
+        }
     }
     if (f.gdn_wmma && f.gdn_chunked && m.k.gdn_wprep != nullptr) log += "  DeltaNet prefill: f16 WMMA chunks\n";
     if (f.gdn_strix)

@@ -461,6 +461,9 @@ inline constexpr std::array<GemmCfg, 5> kGemm8Cfgs = {{
 inline constexpr std::array<GemmCfg, 5> kGemm8tCfgs = {{
     {128, 256, 256}, {128, 128, 256}, {128, 64, 256}, {128, 32, 256}, {128, 48, 256},
 }};
+// gemm8tp_v<v> / gemm8tph_v<v>, v = 1..kNGemm8tp - 1: schedule variants of gemm8t_c0 (its geometry, bitwise its
+// output; feat026-gemm8tpp, opt-in WHIRL_GEMM8T_V). v4 needs an even number of 64-k slabs (ops::gemm8tpOk).
+inline constexpr int kNGemm8tp = 7;
 // gemvw_nt<N>v<V>_<T>: rows per block per variant (v0 = not a gemvw kernel).
 inline constexpr int kNGemvw = 9;
 inline constexpr std::array<int, kNGemvw> kGemvwRows = {0, 16, 32, 16, 32, 16, 16, 32, 32};
@@ -527,6 +530,7 @@ struct MatmulKernels {
     std::array<F, kMaxSmallBatch> gemv_d2{};       // [nt - 1]
     std::array<F, kGemm8Cfgs.size()> gemm8{}, gemm8h{};
     std::array<F, kGemm8tCfgs.size()> gemm8t{}, gemm8th{};
+    std::array<F, kNGemm8tp> gemm8tp{}, gemm8tph{};  // [v], v = 1..6 (index 0 unused)
     std::array<F, kGemmCfgs.size()> gemmch{};
     F gemmh_f16{}, gemmhh_f16{};
     // activation converters of the GEMV / GEMM inputs

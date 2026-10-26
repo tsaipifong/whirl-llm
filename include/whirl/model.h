@@ -597,6 +597,9 @@ public:
     DevPtr dq_st_ml = 0;
     static constexpr std::uint32_t kDqMaxKeys = ops::kDqMaxKeys;  // dq_ptab covers keys [0, kDqMaxKeys)
     bool out_h16 = false;
+    // WHIRL_GEMM8T_V: gemm8t_c0 schedule variant (0 = gemm8t_c0; feat026-gemm8tpp). A bit-neutral kernel selector like the
+    // gemv_r / gemv_w tune rows, so not a numerics::Flags field (arch025-port-gemv); set in loadOrTune when nf().g8t.
+    int g8t_v = 0;
 
     // ---- per-layer state
     std::vector<DevPtr> kcache, vcache, kscale, vscale;

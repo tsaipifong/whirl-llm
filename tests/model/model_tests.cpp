@@ -2245,7 +2245,9 @@ void testEnvSnapshot() {
     // envFlag sites (loader.cpp MOE_*), capture / fromValues above for the raw value of the others
     const std::vector<std::string> covered = envtab::namesCovered();
     const char* const load_only[] = {"GEMV_BITWISE_FLOAT", "CODE_OBJECT", "MOE_MXW", "MOE_WIDE", "MOE_RBF", "GPU_SHARE", "GPU_WAIT", "DEVICE", "DFLASH_PROF",
-                                     "HEAD_GEMVX", "PREC_GEMVH", "PREC_GS"};  // the last three: Model::load -> forwardEnv (testForwardEnv)
+                                     "HEAD_GEMVX", "PREC_GEMVH", "PREC_GS",
+                                     "GEMM8T_V"};  // HEAD_GEMVX..PREC_GS: Model::load -> forwardEnv (testForwardEnv); GEMM8T_V: read only
+                                                   // under the plan's g8t (gemm8t kernels, a GPU load; capture / fromValues above)
     for (const auto& e : names) {
         const bool in_table = std::find(covered.begin(), covered.end(), e.name) != covered.end();
         const bool in_empty = std::find(empty_names.begin(), empty_names.end(), e.name) != empty_names.end();
@@ -2562,6 +2564,7 @@ void testPlanVsLoadOrTune() {
         {"GEMV_R", "config.cpp applyGemvEnv: tune rows (needs the GPU dump)"},
         {"GEMV_W", "config.cpp applyGemvEnv: tune rows (needs the GPU dump)"},
         {"GEMV_WH", "config.cpp applyGemvEnv: tune rows (needs the GPU dump)"},
+        {"GEMM8T_V", "tune.cpp loadOrTune: gemm8t_c0 schedule variant, bit-neutral (feat026-gemm8tpp; needs the fp8 kernels)"},
         {"GPU_SHARE", "device.cpp: GPU lock"},
         {"GPU_WAIT", "device.cpp: GPU lock"},
         {"DEVICE", "device.cpp: GPU selection"},

@@ -41,6 +41,7 @@
 #include "sample_cand.hip"         // sampling candidates
 #include "gemm_fp8.hip"            // MXFP4 x fp8 GEMM
 #include "gemm_fp8t.hip"           // fragment-tiled fp8 / f16 GEMM
+#include "gemm_fp8tp.hip"          // gemm8t_c0 schedule variants (opt-in, feat026-gemm8tpp)
 #include "gemm_small.hip"          // small-batch prefill GEMM
 #include "gemv_h.hip"              // precise decode / verify matmul (f16 activations)
 #include "moe_mxfp4.hip"           // MXFP4 routed experts (decode, fp8 grouped GEMM)
