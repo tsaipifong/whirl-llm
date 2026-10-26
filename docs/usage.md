@@ -623,7 +623,7 @@ Alternatives kept for A/B tests and numerics comparisons. The lossy ones are the
 | `WHIRL_GEMMHQ=1` | f16-output GEMM for the attention projections too |
 | `WHIRL_ATTN_KX=0` | prefill attention without the K-exchange kernel (bitwise-equal) |
 | `WHIRL_ATTN_KG=0` | prefill attention without the GQA-grouped kernel (bitwise-equal) |
-| `WHIRL_ATTN_KGVAR=0\|1\|2` | Radeon AI PRO R9700 (gfx1201), f16 / Q8P prefill attention: 0 = shipped `attn_kg` (default), 1 = `attn_kgv` (head pair shares the V fragments; bitwise-equal), 2 = `attn_kgw` (var 1 + split softmax row sum; **not** bitwise: balance / fast only, precise never takes it). Logged as an override, mode label `MODE+overrides` |
+| `WHIRL_ATTN_KGVAR=0\|1\|2\|3` | Radeon AI PRO R9700 (gfx1201), f16 / Q8P prefill attention: 0 = shipped `attn_kg` (default), 1 = `attn_kgv` (head pair shares the V fragments; designed bit-identical, GPU verification pending), 2 = `attn_kgw` (var 1 + split softmax row sum; **not** bitwise: balance / fast only, precise never takes it), 3 = `attn_kgk` (head pair shares the K fragments too; designed bit-identical, GPU verification pending). Logged as an override, mode label `MODE+overrides` |
 | `WHIRL_ATTN_DQF=0` | q8 / q8h (and q4) KV prefill attention on the quantized cache (`attn_kg_q8`; Radeon 8060S `attn_prefill_wmma_q8` / `_q4`) instead of an f16 copy of the sequence's keys + the f16 kernel (bitwise-equal) |
 | `WHIRL_ATTN_SEG=N` | Radeon 8060S: prefill attention in key ranges of N keys (multiple of 256) with the softmax state carried (`attn_prefill_wmma_s`), also for f16 KV (bitwise-equal; a test knob, no speed gain end to end) |
 | `WHIRL_GDN_SEQ=1` | sequential DeltaNet prefill instead of the chunked scan |
