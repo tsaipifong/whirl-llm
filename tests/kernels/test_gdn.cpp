@@ -12,6 +12,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include <algorithm>
+#include <cstdlib>
+#include <cstring>
+#include <string>
+#include <utility>
 
 #include "cpu_ref.h"
 
@@ -78,6 +82,47 @@ void deltaRef(const std::vector<float>& qkv, const std::vector<float>& g, const 
 }
 
 std::vector<double> toD(const std::vector<float>& v) { return std::vector<double>(v.begin(), v.end()); }
+
+// feat026-gdn-tests-r1 (progress/gdn-kernels.review.md consider 6): the cross-object hooks claim "same bits", so they
+// compare raw bytes (memcmp: -0 != +0, a NaN equals the same NaN bits); std::vector<float>::operator== is IEEE ==
+// (-0 == +0 passes, NaN != NaN false-fails). Same rule as kt::cmpExactBits and the gemm hooks.
+template <class T>
+bool sameBits(const std::vector<T>& a, const std::vector<T>& b) {
+    return a.size() == b.size() && (a.empty() || std::memcmp(a.data(), b.data(), a.size() * sizeof(T)) == 0);
+}
+template <class T>
+bool sameBits(const std::vector<std::vector<T>>& a, const std::vector<std::vector<T>>& b) {
+    if (a.size() != b.size()) return false;
+    for (std::size_t i = 0; i < a.size(); ++i)
+        if (!sameBits(a[i], b[i])) return false;
+    return true;
+}
+template <class A, class B>
+bool sameBits(const std::pair<A, B>& a, const std::pair<A, B>& b) {
+    return sameBits(a.first, b.first) && sameBits(a.second, b.second);
+}
+
+// feat026-gdn-tests-r1 (review act-on 2): kernel `kernel` of the WHIRL_KT_BD_HSACO candidate object. Env unset ->
+// nullptr and no row (the hook is not requested). Env set but the object cannot be read, or the kernel is absent from
+// it (wrong path / arch / renamed kernel), or the shipped kernel it is compared with is absent -> a FAILING row named
+// `row` (the same name the hook's own row has, so runners can count rows) and nullptr. Never a silent skip. A
+// candidate object of the wrong arch already throws in hipModuleLoadData (non-zero exit).
+[[maybe_unused]] hip::Function bdFn(Ctx& c, const char* kernel, const std::string& row, bool shipped_present = true) {
+    const char* path = std::getenv("WHIRL_KT_BD_HSACO");
+    if (path == nullptr || *path == 0) return nullptr;
+    const hip::Function f = xFn(c, "WHIRL_KT_BD_HSACO", kernel);
+    if (f != nullptr && shipped_present) return f;
+    Result r;
+    r.name = row;
+    r.kind = Kind::invariant;
+    r.n = 0;
+    r.pass = false;
+    r.note = f == nullptr ? std::string("WHIRL_KT_BD_HSACO is set but ") + kernel + " is not loadable from " + path +
+                                " (unreadable path, other object or kernel absent)"
+                          : "the shipped object lacks " + std::string(kernel) + " (or the mode this case needs)";
+    c.rep.add(r);
+    return nullptr;
+}
 
 Result tolRms(const std::string& name, const std::vector<float>& got, const std::vector<double>& ref, double rtol) {
     const std::vector<double> sc(ref.size(), rmsOf(ref));
@@ -326,10 +371,11 @@ void testGdn(Ctx& c) {
             c.rep.add(tolRms("gdn_wscan8 final state vs CPU", dst.down<float>(st.size()), st, 2e-2));
             // feat026-barrierdrain2: WHIRL_KT_BD_HSACO = a WHIRL_BARDRAIN candidate object: its gdn_wscan8 (and
             // gdn_wscan4, grid y = 2x, 128 threads) on the same gdn_wprep output == this object's same kernel, bitwise
-            // (out + state), 3 repeats each; absent -> no result
+            // (out + state), 3 repeats each; env unset -> no row; set but not runnable -> a FAIL row (bdFn)
             for (const char* nm : {"gdn_wscan8", "gdn_wscan4"}) {
-                const hip::Function xs = xFn(c, "WHIRL_KT_BD_HSACO", nm), fs = c.fnOpt(nm);
-                if (!xs || !fs) continue;
+                const std::string row = std::string(nm) + " candidate object == shipped (out + state, 3 runs)";
+                const hip::Function fs = c.fnOpt(nm), xs = bdFn(c, nm, row, fs != nullptr);
+                if (!xs) continue;
                 const bool w4 = nm[9] == '4';
                 auto runW = [&](hip::Function f) {
                     Buf xst(state0), xout(out.size() * 4);
@@ -341,9 +387,9 @@ void testGdn(Ctx& c) {
                 const auto ref = runW(fs);
                 {
                     std::size_t xbad = 0;
-                    for (int rep = 0; rep < 3; ++rep) xbad += runW(xs) != ref;
+                    for (int rep = 0; rep < 3; ++rep) xbad += !sameBits(runW(xs), ref);
                     Result r;
-                    r.name = std::string(nm) + " candidate object == shipped (out + state, 3 runs)";
+                    r.name = row;
                     r.kind = Kind::invariant;
                     r.n = 3;
                     r.mismatches = xbad;
