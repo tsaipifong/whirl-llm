@@ -1351,12 +1351,81 @@ std::uint32_t Engine::pickDrafts(std::span<Slot* const> act) {
     return nd;
 }
 
+// arch025-E2: decodeCycle's phases. Cycle holds the values one decode cycle passes from one phase to the next
+// (they were decodeCycle's locals; value-initialized per cycle, never kept across cycles).
+struct Engine::Cycle {
+    std::uint64_t E = 0;
+    TimePoint t_cycle0{};
+    std::vector<Slot*> act;  // the slots with context room
+    std::size_t A = 0;
+    std::uint32_t Au = 0;
+    // n-gram drafts per slot (history = cache_tokens + next) when they promise
+    // more tokens per ms than MTP / DFlash2 drafts. Literal drafts (n-gram, DFlash2) go to the
+    // verify from the host: ng_n / ng_d, with dsrc telling which drafter made them.
+    std::array<std::uint32_t, gdn_max_seg> ng_n{}, ng_ml{};
+    std::array<std::array<std::uint32_t, qwen35::max_ng_drafts>, gdn_max_seg> ng_d{};
+    std::array<std::uint8_t, gdn_max_seg> dsrc{};  // 0 MTP / none, 1 n-gram, 2 DFlash2
+    std::size_t n_ng = 0;
+    std::uint32_t snap_cap = 0, lit_cap = 0;
+    std::uint32_t dfl_lim = 0;  // DFlash2: drafts per slot within the shared verify rows / snapshot sets
+    TimePoint td0{};
+    std::size_t n_dfl = 0;
+    std::uint32_t dfl_max_n = 0;
+    std::vector<Slot*> act_mtp;  // the MTP slots
+    std::size_t n_mtp = 0;
+    std::uint32_t nd = 0;
+    std::array<std::uint32_t, gdn_max_seg> nd_m{};  // per-slot counts (MTP slots, in act_mtp order)
+    std::uint32_t nd_max = 0;  // MTP steps = the largest
+    TimePoint tc0{};
+    std::size_t pa = 0;
+    CycleProf* p = nullptr;
+    std::array<MSeg, gdn_max_seg> msegs{};
+    std::array<VSeg, gdn_max_seg> vsegs{};
+    std::array<std::uint32_t, gdn_max_seg> row_of{}, snap_of{}, nd_of{};
+    std::array<std::size_t, qwen35::max_drafts + 1> n_step{};
+    std::uint32_t rows = 0;  // the verify's rows
+    std::uint32_t rk = 0;
+};
+
+// relaxacc (fast) applies to MTP drafts only: one rule for every site below (FR-DFL P2-3)
+bool Engine::relaxes(const Cycle& cy, std::size_t k) const {
+    return whirl::dflash::relaxAppliesTo(static_cast<whirl::dflash::DraftKind>(cy.dsrc[k]), opt_.relax.on);
+}
+
+// the verify writes KV rows pos .. pos + drafts: stay inside the pages mapped
+// for the slot and the context
+std::uint32_t Engine::verifyRoom(const Slot& sl, std::uint32_t lim) const {
+    const std::uint64_t mapped = static_cast<std::uint64_t>(sl.pages.size()) * kv_page;
+    const std::uint64_t a1 = mapped > static_cast<std::uint64_t>(sl.pos) + 1 ? mapped - (sl.pos + 1ull) : 0;
+    const std::uint64_t a2 = ctx_ > sl.pos + 2ull ? ctx_ - (sl.pos + 2ull) : 0;
+    return static_cast<std::uint32_t>(std::min({static_cast<std::uint64_t>(lim), a1, a2}));
+}
+
 void Engine::decodeCycle(std::span<Slot* const> act_in) {
+    Cycle cy;
     const auto& cfg = m_.cfg();
-    const std::uint64_t E = cfg.n_embd;
-    const TimePoint t_cycle0 = Clock::now();
+    cy.E = cfg.n_embd;
+    cy.t_cycle0 = Clock::now();
+    dropOutOfRoom(cy, act_in);
+    cy.A = cy.act.size();
+    if (cy.A == 0) return;
+    draftLimits(cy);
+    ngramDrafts(cy);
+    dflashDrafts(cy);
+    mtpDrafts(cy);
+    layoutBatch(cy);
+    draftSampling(cy);
+    enqueueVerify(cy);
+    sampleRows(cy);
+    trainCycle(cy);
+    cycleStats(cy);
+    const sampling::Acceptor acceptor(opt_.relax);
+    for (std::size_t k = 0; k < cy.A; ++k) acceptSlot(cy, k, acceptor);
+    finishCycle(cy);
+}
+
+void Engine::dropOutOfRoom(Cycle& cy, std::span<Slot* const> act_in) {
     // slots out of context room end here
-    std::vector<Slot*> act;
     const std::uint32_t nd_room = draftRoom();
     for (Slot* sl : act_in) {
         const bool room_ok = sl->pos + nd_room + 1 < ctx_ && ensurePages(*sl, sl->pos + nd_room + 2);
@@ -1373,221 +1442,207 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
             finishJob(*sl);
             continue;
         }
-        act.push_back(sl);
+        cy.act.push_back(sl);
     }
-    const std::size_t A = act.size();
-    if (A == 0) return;
-    // n-gram drafts per slot (history = cache_tokens + next) when they promise
-    // more tokens per ms than MTP / DFlash2 drafts. Literal drafts (n-gram, DFlash2) go to the
-    // verify from the host: ng_n / ng_d, with dsrc telling which drafter made them.
-    std::array<std::uint32_t, gdn_max_seg> ng_n{}, ng_ml{};
-    std::array<std::array<std::uint32_t, qwen35::max_ng_drafts>, gdn_max_seg> ng_d{};
-    std::array<std::uint8_t, gdn_max_seg> dsrc{};  // 0 MTP / none, 1 n-gram, 2 DFlash2
-    // relaxacc (fast) applies to MTP drafts only: one rule for every site below (FR-DFL P2-3)
-    auto relaxes = [&](std::size_t k) {
-        return whirl::dflash::relaxAppliesTo(static_cast<whirl::dflash::DraftKind>(dsrc[k]), opt_.relax.on);
-    };
-    std::size_t n_ng = 0;
+}
+
+void Engine::draftLimits(Cycle& cy) {
     // replay keeps no snapshot sets: the verify row budget is the only shared limit
-    const std::uint32_t snap_cap = m_.gdnReplay() ? vrows_ : std::min(qwen35::gdn_max_snap, m_.snapSets());
+    cy.snap_cap = m_.gdnReplay() ? vrows_ : std::min(qwen35::gdn_max_snap, m_.snapSets());
     // literal drafts (n-gram, DFlash2) per slot: the snapshot budget they had before CONC-8S
-    const std::uint32_t lit_cap = (m_.gdnReplay() || opt_.ng_snap_sets == 0) ? snap_cap : std::min(snap_cap, opt_.ng_snap_sets);
-    const std::uint32_t Au = static_cast<std::uint32_t>(A);
-    // the verify writes KV rows pos .. pos + drafts: stay inside the pages mapped
-    // for the slot and the context
-    auto room = [&](const Slot& sl, std::uint32_t lim) {
-        const std::uint64_t mapped = static_cast<std::uint64_t>(sl.pages.size()) * kv_page;
-        const std::uint64_t a1 = mapped > static_cast<std::uint64_t>(sl.pos) + 1 ? mapped - (sl.pos + 1ull) : 0;
-        const std::uint64_t a2 = ctx_ > sl.pos + 2ull ? ctx_ - (sl.pos + 2ull) : 0;
-        return static_cast<std::uint32_t>(std::min({static_cast<std::uint64_t>(lim), a1, a2}));
-    };
-    // DFlash2: drafts per slot within the shared verify rows / snapshot sets
-    std::uint32_t dfl_lim = 0;
+    cy.lit_cap = (m_.gdnReplay() || opt_.ng_snap_sets == 0) ? cy.snap_cap : std::min(cy.snap_cap, opt_.ng_snap_sets);
+    cy.Au = static_cast<std::uint32_t>(cy.A);
     if (opt_.use_dflash) {
-        dfl_lim = ::whirl::dflash::draftLimit(m_.dflashMaxDrafts() + 1, qwen35::max_ng_drafts, lit_cap, vrows_, Au, m_.fusedDecode());
+        cy.dfl_lim = ::whirl::dflash::draftLimit(m_.dflashMaxDrafts() + 1, qwen35::max_ng_drafts, cy.lit_cap, vrows_, cy.Au, m_.fusedDecode());
     }
-    const qwen35::DraftTiming& dtm = dtiming_[std::min<std::size_t>(A, gdn_max_seg)];
+}
+
+void Engine::ngramDrafts(Cycle& cy) {
+    const qwen35::DraftTiming& dtm = dtiming_[std::min<std::size_t>(cy.A, gdn_max_seg)];
     if (opt_.ngram && (opt_.use_mtp || opt_.use_dflash)) {
-        std::uint32_t lim = std::min({qwen35::max_ng_drafts, lit_cap / Au, vrows_ / Au > 0 ? vrows_ / Au - 1 : 0u});
+        std::uint32_t lim = std::min({qwen35::max_ng_drafts, cy.lit_cap / cy.Au, vrows_ / cy.Au > 0 ? vrows_ / cy.Au - 1 : 0u});
         if (opt_.ngram_max > 0) lim = std::min(lim, opt_.ngram_max);
         if (!m_.fusedDecode()) lim = std::min(lim, 1u);
-        const qwen35::DraftTiming& tm = opt_.use_dflash ? dtm : timing_[std::min<std::size_t>(A, gdn_max_seg)];
-        const std::uint32_t nd0 = std::max(1u, std::min(prev_nd_ > 0 ? prev_nd_ : 3u, draftCap(Au)));
-        for (std::size_t k = 0; k < A; ++k) {
+        const qwen35::DraftTiming& tm = opt_.use_dflash ? dtm : timing_[std::min<std::size_t>(cy.A, gdn_max_seg)];
+        const std::uint32_t nd0 = std::max(1u, std::min(prev_nd_ > 0 ? prev_nd_ : 3u, draftCap(cy.Au)));
+        for (std::size_t k = 0; k < cy.A; ++k) {
             if (lim == 0) break;
-            Slot& sl = *act[k];
+            Slot& sl = *cy.act[k];
             sl.cache_tokens.push_back(sl.next);
             struct Pop {
                 std::vector<std::uint32_t>& v;
                 ~Pop() { v.pop_back(); }
             } pop{sl.cache_tokens};
-            const std::uint32_t lim_k = room(sl, lim);
+            const std::uint32_t lim_k = verifyRoom(sl, lim);
             if (lim_k == 0) continue;
-            const auto mt = sl.ng.propose(sl.cache_tokens, opt_.ngram_min, std::span<std::uint32_t>(ng_d[k].data(), lim_k));
+            const auto mt = sl.ng.propose(sl.cache_tokens, opt_.ngram_min, std::span<std::uint32_t>(cy.ng_d[k].data(), lim_k));
             if (mt.n == 0) continue;
             // the alternative's tokens per ms: MTP with nd0 drafts, or DFlash2 with its usual draft
             // count (a slot whose drafter context is not ready verifies one row)
             float alt_score = 0;
             if (opt_.use_dflash) {
-                const std::uint32_t dn = dflReady(sl) ? room(sl, std::min(dfl_lim, static_cast<std::uint32_t>(std::lround(sl.dfl_nd)))) : 0;
+                const std::uint32_t dn = dflReady(sl) ? verifyRoom(sl, std::min(cy.dfl_lim, static_cast<std::uint32_t>(std::lround(sl.dfl_nd)))) : 0;
                 if (auto t = dtm.estimate(dn)) alt_score = sl.dfl_acc.expected(dn) / *t;
-            } else if (opt_.slot_drafts == 2 && A >= 2) {
+            } else if (opt_.slot_drafts == 2 && cy.A >= 2) {
                 // against this slot's own last MTP allocation and its effective acceptance (one slot: as before)
                 const std::uint32_t d = sl.d_prev > 0 ? sl.d_prev : nd0;
                 if (auto t = tm.estimate(d)) alt_score = sl.sacc.effective(dpool_).expected(d) / *t;
             } else if (auto t = tm.estimate(nd0)) {
                 alt_score = sl.dacc.expected(nd0) / *t;
             }
-            ng_ml[k] = mt.mlen;
-            ng_n[k] = opt_.ngram_force ? static_cast<std::uint32_t>(mt.n) : sl.ng.choose(mt.n, mt.mlen, alt_score, tm);
-            if (ng_n[k] > 0) {
-                n_ng += 1;
-                dsrc[k] = 1;
+            cy.ng_ml[k] = mt.mlen;
+            cy.ng_n[k] = opt_.ngram_force ? static_cast<std::uint32_t>(mt.n) : sl.ng.choose(mt.n, mt.mlen, alt_score, tm);
+            if (cy.ng_n[k] > 0) {
+                cy.n_ng += 1;
+                cy.dsrc[k] = 1;
             }
         }
     }
+}
+
+void Engine::dflashDrafts(Cycle& cy) {
     // DFlash2 drafts for the slots without n-gram drafts (their time counts in the DFlash2 cycle time)
-    const TimePoint td0 = Clock::now();
-    std::size_t n_dfl = 0;
-    std::uint32_t dfl_max_n = 0;
-    if (opt_.use_dflash && dfl_lim > 0) {
-        for (std::size_t k = 0; k < A; ++k) {
-            if (dsrc[k] != 0) continue;
-            Slot& sl = *act[k];
+    cy.td0 = Clock::now();
+    if (opt_.use_dflash && cy.dfl_lim > 0) {
+        for (std::size_t k = 0; k < cy.A; ++k) {
+            if (cy.dsrc[k] != 0) continue;
+            Slot& sl = *cy.act[k];
             if (!dflReady(sl)) {
                 stat_dfl_cold_ += 1;
                 continue;
             }
-            const std::uint32_t lim_k = room(sl, dfl_lim);
+            const std::uint32_t lim_k = verifyRoom(sl, cy.dfl_lim);
             if (lim_k == 0) continue;
             const std::vector<std::uint32_t> d = m_.dflashDraft(sl.id, sl.next, sl.pos, opt_.dfl_p_min, opt_.dfl_n_min);
             sl.dfl_nd = 0.8f * sl.dfl_nd + 0.2f * static_cast<float>(d.size());
             const std::uint32_t n = std::min(lim_k, static_cast<std::uint32_t>(d.size()));
-            std::copy(d.begin(), d.begin() + n, ng_d[k].begin());
-            ng_n[k] = n;
-            dsrc[k] = 2;
-            n_dfl += 1;
-            dfl_max_n = std::max(dfl_max_n, n);
+            std::copy(d.begin(), d.begin() + n, cy.ng_d[k].begin());
+            cy.ng_n[k] = n;
+            cy.dsrc[k] = 2;
+            cy.n_dfl += 1;
+            cy.dfl_max_n = std::max(cy.dfl_max_n, n);
         }
     }
+}
+
+void Engine::mtpDrafts(Cycle& cy) {
     // MTP drafts for the other slots
-    std::vector<Slot*> act_mtp;
-    for (std::size_t k = 0; k < A; ++k)
-        if (ng_n[k] == 0) act_mtp.push_back(act[k]);
-    const std::size_t n_mtp = act_mtp.size();
-    std::uint32_t nd = n_mtp > 0 ? pickDrafts(act_mtp) : 0;
+    for (std::size_t k = 0; k < cy.A; ++k)
+        if (cy.ng_n[k] == 0) cy.act_mtp.push_back(cy.act[k]);
+    cy.n_mtp = cy.act_mtp.size();
+    cy.nd = cy.n_mtp > 0 ? pickDrafts(cy.act_mtp) : 0;
     {
         // keep the verify within vrows_ rows (and the snapshot sets without replay)
         std::uint32_t ng_tot = 0;
-        for (std::size_t k = 0; k < A; ++k) ng_tot += ng_n[k];
-        while (nd > 0 && (static_cast<std::uint32_t>(A) + ng_tot + static_cast<std::uint32_t>(n_mtp) * nd > vrows_ ||
-                          ng_tot + static_cast<std::uint32_t>(n_mtp) * nd > snap_cap))
-            nd -= 1;
+        for (std::size_t k = 0; k < cy.A; ++k) ng_tot += cy.ng_n[k];
+        while (cy.nd > 0 && (static_cast<std::uint32_t>(cy.A) + ng_tot + static_cast<std::uint32_t>(cy.n_mtp) * cy.nd > vrows_ ||
+                          ng_tot + static_cast<std::uint32_t>(cy.n_mtp) * cy.nd > cy.snap_cap))
+            cy.nd -= 1;
     }
-    // per-slot counts (MTP slots, in act_mtp order), MTP steps = the largest
-    std::array<std::uint32_t, gdn_max_seg> nd_m{};
-    std::uint32_t nd_max = nd;
-    if (n_mtp > 0) {
+    cy.nd_max = cy.nd;
+    if (cy.n_mtp > 0) {
         std::uint32_t ng_tot = 0;
-        for (std::size_t k = 0; k < A; ++k) ng_tot += ng_n[k];
-        const std::uint32_t used = static_cast<std::uint32_t>(A) + ng_tot;
+        for (std::size_t k = 0; k < cy.A; ++k) ng_tot += cy.ng_n[k];
+        const std::uint32_t used = static_cast<std::uint32_t>(cy.A) + ng_tot;
         const std::uint32_t rows_free = vrows_ > used ? vrows_ - used : 0;
-        const std::uint32_t snap_free = snap_cap > ng_tot ? snap_cap - ng_tot : 0;
-        if (opt_.slot_drafts == 2 && nd > 0) {
-            const std::size_t ia = std::min<std::size_t>(A, gdn_max_seg);
+        const std::uint32_t snap_free = cy.snap_cap > ng_tot ? cy.snap_cap - ng_tot : 0;
+        if (opt_.slot_drafts == 2 && cy.nd > 0) {
+            const std::size_t ia = std::min<std::size_t>(cy.A, gdn_max_seg);
             qwen35::CycleCost& cc = ccost_[ia];
             if (!ccost_primed_[ia] && cc.samples() == 0) {
                 float ctx_k = 0;
-                for (Slot* s : act) ctx_k += static_cast<float>(s->pos) / 1024.0f;
-                cc.prior(timing_[ia], static_cast<std::uint32_t>(A), ctx_k / static_cast<float>(A));
+                for (Slot* s : cy.act) ctx_k += static_cast<float>(s->pos) / 1024.0f;
+                cc.prior(timing_[ia], static_cast<std::uint32_t>(cy.A), ctx_k / static_cast<float>(cy.A));
                 ccost_primed_[ia] = true;
             }
             std::vector<qwen35::DraftAccept> eff;
-            eff.reserve(A);
-            std::vector<DraftPlanSlot> ps(A);
-            for (std::size_t k = 0; k < A; ++k) {
-                Slot& s = *act[k];
+            eff.reserve(cy.A);
+            std::vector<DraftPlanSlot> ps(cy.A);
+            for (std::size_t k = 0; k < cy.A; ++k) {
+                Slot& s = *cy.act[k];
                 ps[k].pos = s.pos;
                 ps[k].d_prev = s.d_prev;
-                if (ng_n[k] > 0) {
-                    ps[k].ng_rows = ng_n[k] + 1;
-                    ps[k].ng_e = s.ng.acc[qwen35::NgramPolicy::bucket(ng_ml[k])].expected(ng_n[k]);
+                if (cy.ng_n[k] > 0) {
+                    ps[k].ng_rows = cy.ng_n[k] + 1;
+                    ps[k].ng_e = s.ng.acc[qwen35::NgramPolicy::bucket(cy.ng_ml[k])].expected(cy.ng_n[k]);
                 } else {
                     eff.push_back(s.sacc.effective(dpool_));
                     ps[k].acc = &eff.back();
                 }
             }
             const std::uint32_t cap = !m_.fusedDecode() ? 1u : std::min({opt_.n_draft, qwen35::max_drafts, max_small_batch - 1});
-            const std::vector<std::uint32_t> d = planSlotDrafts(ps, cc, nd, cap, vrows_, snap_free);
-            for (std::size_t i = 0; i < n_mtp; ++i) nd_m[i] = d[i];
+            const std::vector<std::uint32_t> d = planSlotDrafts(ps, cc, cy.nd, cap, vrows_, snap_free);
+            for (std::size_t i = 0; i < cy.n_mtp; ++i) cy.nd_m[i] = d[i];
         } else {
-            splitDrafts(act_mtp, nd, std::min(rows_free, snap_free), std::span<std::uint32_t>(nd_m.data(), n_mtp));
+            splitDrafts(cy.act_mtp, cy.nd, std::min(rows_free, snap_free), std::span<std::uint32_t>(cy.nd_m.data(), cy.n_mtp));
         }
-        for (std::size_t i = 0; i < n_mtp; ++i) act_mtp[i]->d_prev = nd_m[i];
-        nd_max = 0;
-        for (std::size_t i = 0; i < n_mtp; ++i) nd_max = std::max(nd_max, nd_m[i]);
+        for (std::size_t i = 0; i < cy.n_mtp; ++i) cy.act_mtp[i]->d_prev = cy.nd_m[i];
+        cy.nd_max = 0;
+        for (std::size_t i = 0; i < cy.n_mtp; ++i) cy.nd_max = std::max(cy.nd_max, cy.nd_m[i]);
     }
-    const TimePoint tc0 = Clock::now();
-    const std::size_t pa = std::min<std::size_t>(A, gdn_max_seg);
-    CycleProf* p = prof_.get();
-    if (p && p->events) m_.profileStart(0, pa);
-    std::array<MSeg, gdn_max_seg> msegs{};
-    std::array<VSeg, gdn_max_seg> vsegs{};
-    std::array<std::uint32_t, gdn_max_seg> row_of{}, snap_of{}, nd_of{};
+}
+
+void Engine::layoutBatch(Cycle& cy) {
+    cy.tc0 = Clock::now();
+    cy.pa = std::min<std::size_t>(cy.A, gdn_max_seg);
+    cy.p = prof_.get();
+    if (cy.p && cy.p->events) m_.profileStart(0, cy.pa);
     // MTP steps r >= 1 run on the MTP slots with more than r drafts: MTP slots
     // sorted by draft count (descending) at the front of the batch
-    std::array<std::size_t, qwen35::max_drafts + 1> n_step{};
     {
         std::array<std::size_t, gdn_max_seg> ord{};
-        for (std::size_t i = 0; i < n_mtp; ++i) ord[i] = i;
-        for (std::size_t i = 1; i < n_mtp; ++i) {
+        for (std::size_t i = 0; i < cy.n_mtp; ++i) ord[i] = i;
+        for (std::size_t i = 1; i < cy.n_mtp; ++i) {
             std::size_t j = i;
-            while (j > 0 && nd_m[ord[j - 1]] < nd_m[ord[j]]) {
+            while (j > 0 && cy.nd_m[ord[j - 1]] < cy.nd_m[ord[j]]) {
                 std::swap(ord[j - 1], ord[j]);
                 --j;
             }
         }
-        for (std::size_t q = 0; q < n_mtp; ++q) {
-            Slot& s = *act_mtp[ord[q]];
-            msegs[q] = MSeg{s.id, std::span<const std::uint32_t>(s.pend.data(), s.n_pend), s.pend_pos, s.pos};
+        for (std::size_t q = 0; q < cy.n_mtp; ++q) {
+            Slot& s = *cy.act_mtp[ord[q]];
+            cy.msegs[q] = MSeg{s.id, std::span<const std::uint32_t>(s.pend.data(), s.n_pend), s.pend_pos, s.pos};
         }
         for (std::size_t r = 0; r <= qwen35::max_drafts; ++r) {
             std::size_t c = 0;
-            for (std::size_t i = 0; i < n_mtp; ++i)
-                if (nd_m[i] > r) ++c;
-            n_step[r] = c;
+            for (std::size_t i = 0; i < cy.n_mtp; ++i)
+                if (cy.nd_m[i] > r) ++c;
+            cy.n_step[r] = c;
         }
     }
     {
         // n-gram slots after the MTP slots in the MTP batch (their pend rows only)
-        std::size_t ig = n_mtp, im = 0;
+        std::size_t ig = cy.n_mtp, im = 0;
         std::uint32_t row = 0, snap = 0;
-        for (std::size_t k = 0; k < A; ++k) {
-            Slot& sl = *act[k];
+        for (std::size_t k = 0; k < cy.A; ++k) {
+            Slot& sl = *cy.act[k];
             const MSeg ms{sl.id, std::span<const std::uint32_t>(sl.pend.data(), sl.n_pend), sl.pend_pos, sl.pos};
-            if (ng_n[k] == 0) {
-                nd_of[k] = nd_m[im];
+            if (cy.ng_n[k] == 0) {
+                cy.nd_of[k] = cy.nd_m[im];
                 ++im;
             } else {
-                msegs[ig] = ms;
+                cy.msegs[ig] = ms;
                 ++ig;
-                nd_of[k] = ng_n[k];
+                cy.nd_of[k] = cy.ng_n[k];
             }
-            vsegs[k] = VSeg{sl.id, sl.next, nd_of[k], sl.pos,
-                            ng_n[k] > 0 ? std::span<const std::uint32_t>(ng_d[k].data(), ng_n[k])
+            cy.vsegs[k] = VSeg{sl.id, sl.next, cy.nd_of[k], sl.pos,
+                            cy.ng_n[k] > 0 ? std::span<const std::uint32_t>(cy.ng_d[k].data(), cy.ng_n[k])
                                         : std::span<const std::uint32_t>()};
-            row_of[k] = row;
-            snap_of[k] = snap;
-            row += nd_of[k] + 1;
-            snap += nd_of[k];
+            cy.row_of[k] = row;
+            cy.snap_of[k] = snap;
+            row += cy.nd_of[k] + 1;
+            snap += cy.nd_of[k];
         }
     }
-    if (spec_on_ && nd_max > 0) {
+}
+
+void Engine::draftSampling(Cycle& cy) {
+    if (spec_on_ && cy.nd_max > 0) {
         // specsample: MTP slots of sampling requests draw their drafts from q by the target's race
-        for (std::size_t k = 0; k < A; ++k) {
-            const Slot& sl = *act[k];
+        for (std::size_t k = 0; k < cy.A; ++k) {
+            const Slot& sl = *cy.act[k];
             spec::DraftSample ds;
-            ds.on = !sl.greedy && ng_n[k] == 0;
+            ds.on = !sl.greedy && cy.ng_n[k] == 0;
             if (ds.on) {
                 ds.top_k = sl.sm.top_k;
                 ds.inv_t = sl.sm.inv_t;
@@ -1599,240 +1654,254 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
             m_.setDraftSample(sl.id, ds);
         }
     }
-    if (nd_max > 0) {
-        m_.setDraftCutoff(opt_.p_min, std::min(opt_.n_min, nd_max));
+}
+
+void Engine::enqueueVerify(Cycle& cy) {
+    if (cy.nd_max > 0) {
+        m_.setDraftCutoff(opt_.p_min, std::min(opt_.n_min, cy.nd_max));
         struct Reset {
             ServerModel& m;
             ~Reset() { m.setDraftCutoff(0, 0); }
         } reset{m_};
-        m_.mtpBatchStepEx(std::span<const MSeg>(msegs.data(), A), 0, true);
-        for (std::uint32_t r = 1; r < nd_max; ++r)
-            m_.mtpBatchStepEx(std::span<const MSeg>(msegs.data(), n_step[r]), r, true);
+        m_.mtpBatchStepEx(std::span<const MSeg>(cy.msegs.data(), cy.A), 0, true);
+        for (std::uint32_t r = 1; r < cy.nd_max; ++r)
+            m_.mtpBatchStepEx(std::span<const MSeg>(cy.msegs.data(), cy.n_step[r]), r, true);
     } else if (opt_.use_mtp) {
         // no MTP drafts this cycle: still feed the pend rows to the MTP block so
         // its KV cache stays complete for later drafting cycles
-        m_.mtpBatchStepEx(std::span<const MSeg>(msegs.data(), A), 0, false);
+        m_.mtpBatchStepEx(std::span<const MSeg>(cy.msegs.data(), cy.A), 0, false);
     }
-    if (p && p->events) m_.profileStart(1, pa);
-    const std::uint32_t rows = m_.verifyBatchEnqueue(std::span<const VSeg>(vsegs.data(), A));
-    if (p) m_.profileStop();
+    if (cy.p && cy.p->events) m_.profileStart(1, cy.pa);
+    cy.rows = m_.verifyBatchEnqueue(std::span<const VSeg>(cy.vsegs.data(), cy.A));
+    if (cy.p) m_.profileStop();
+}
+
+void Engine::sampleRows(Cycle& cy) {
     bool any_sampling = false, any_relax = false;
-    const std::uint32_t rk = opt_.relax.topk();
-    const sampling::Acceptor acceptor(opt_.relax);
-    for (std::size_t k = 0; k < A; ++k) {
-        Slot& sl = *act[k];
+    cy.rk = opt_.relax.topk();
+    for (std::size_t k = 0; k < cy.A; ++k) {
+        Slot& sl = *cy.act[k];
         if (sl.greedy) {
-            if (relaxes(k) && nd_of[k] > 0) {
+            if (relaxes(cy, k) && cy.nd_of[k] > 0) {
                 any_relax = true;
-                launchTopk(row_of[k], nd_of[k], rk, 1.0f, relax_dev_.get(), max_rows, row_of[k]);
+                launchTopk(cy.row_of[k], cy.nd_of[k], cy.rk, 1.0f, relax_dev_.get(), max_rows, cy.row_of[k]);
             }
             continue;
         }
         any_sampling = true;
-        launchTopk(row_of[k], nd_of[k] + 1, k_small, sl.sm.inv_t, samp_dev_.get(), max_rows, row_of[k]);
+        launchTopk(cy.row_of[k], cy.nd_of[k] + 1, k_small, sl.sm.inv_t, samp_dev_.get(), max_rows, cy.row_of[k]);
     }
     const TimePoint t_enq = Clock::now();
     m_.readCtl(std::span<std::int32_t>(ctl_host_.data(), slots_.size() * qwen35::ctl_words));
-    if (p) {
-        p->t_ready = Clock::now();
-        p->enq_ms[pa] += std::chrono::duration<double, std::milli>(t_enq - tc0).count();
+    if (cy.p) {
+        cy.p->t_ready = Clock::now();
+        cy.p->enq_ms[cy.pa] += std::chrono::duration<double, std::milli>(t_enq - cy.tc0).count();
     }
     if (any_sampling) ops_.download(samp_host_.data(), samp_dev_.get(), sampBytes());
     if (any_relax) ops_.download(relax_host_.data(), relax_dev_.get(), relax_host_.size());
+}
+
+void Engine::trainCycle(Cycle& cy) {
     // relaxacc: the kept tokens depend on which drafts were proposed, so the draft-count policy
     // must not see wall-clock times (run-to-run jitter would change the output). It sees a
     // deterministic cycle cost instead: a base per slot, + ngram_slope per extra verify row (the
     // per-device verify-row slope, 0.12 on the 8060S), + 3% per sequential MTP draft step.
     const auto synthMs = [&](std::uint32_t steps) {
         float rows = 0;
-        for (std::size_t k = 0; k < A; ++k) rows += static_cast<float>(nd_of[k] + 1);
-        const float a = static_cast<float>(A);
+        for (std::size_t k = 0; k < cy.A; ++k) rows += static_cast<float>(cy.nd_of[k] + 1);
+        const float a = static_cast<float>(cy.A);
         return 100.0f * (a + opt_.ngram_slope * (rows - a) + 0.03f * static_cast<float>(steps));
     };
-    const float cycle_ms = opt_.relax.on ? synthMs(n_ng == A ? 0 : nd_max) : static_cast<float>(msSince(tc0));
+    const float cycle_ms = opt_.relax.on ? synthMs(cy.n_ng == cy.A ? 0 : cy.nd_max) : static_cast<float>(msSince(cy.tc0));
     if (opt_.slot_drafts == 2 && opt_.use_mtp) {
         // every cycle (uniform, per-slot, with n-gram slots) trains the cost model of A slots;
         // a per-slot cycle reaches timing_ as the time the uniform split would have taken
-        qwen35::CycleCost& cc = ccost_[std::min<std::size_t>(A, gdn_max_seg)];
+        qwen35::CycleCost& cc = ccost_[std::min<std::size_t>(cy.A, gdn_max_seg)];
         qwen35::CycleFeat x, xu;
-        bool uni = n_ng == 0;
-        for (std::size_t k = 0; k < A; ++k) {
-            const float ctx_k = static_cast<float>(act[k]->pos) / 1024.0f;
-            x.rows += static_cast<float>(nd_of[k] + 1);
-            x.row_ctx += static_cast<float>(nd_of[k] + 1) * ctx_k;
-            xu.rows += static_cast<float>(nd + 1);
-            xu.row_ctx += static_cast<float>(nd + 1) * ctx_k;
-            uni = uni && nd_of[k] == nd;
+        bool uni = cy.n_ng == 0;
+        for (std::size_t k = 0; k < cy.A; ++k) {
+            const float ctx_k = static_cast<float>(cy.act[k]->pos) / 1024.0f;
+            x.rows += static_cast<float>(cy.nd_of[k] + 1);
+            x.row_ctx += static_cast<float>(cy.nd_of[k] + 1) * ctx_k;
+            xu.rows += static_cast<float>(cy.nd + 1);
+            xu.row_ctx += static_cast<float>(cy.nd + 1) * ctx_k;
+            uni = uni && cy.nd_of[k] == cy.nd;
         }
-        x.steps = static_cast<float>(nd_max);
-        xu.steps = static_cast<float>(nd);
-        if (nd > 0 && n_ng == 0) {
-            if (uni) timing_[std::min<std::size_t>(A, gdn_max_seg)].update(nd, cycle_ms);
+        x.steps = static_cast<float>(cy.nd_max);
+        xu.steps = static_cast<float>(cy.nd);
+        if (cy.nd > 0 && cy.n_ng == 0) {
+            if (uni) timing_[std::min<std::size_t>(cy.A, gdn_max_seg)].update(cy.nd, cycle_ms);
             else if (cc.samples() >= 16)
-                timing_[std::min<std::size_t>(A, gdn_max_seg)].update(nd, cycle_ms * cc.predict(xu) / cc.predict(x));
+                timing_[std::min<std::size_t>(cy.A, gdn_max_seg)].update(cy.nd, cycle_ms * cc.predict(xu) / cc.predict(x));
         }
         cc.observe(x, cycle_ms);
-    } else if (nd > 0 && n_ng == 0) {
+    } else if (cy.nd > 0 && cy.n_ng == 0) {
         // swaps keep the rows of the common count (an extra step at most)
         std::uint32_t tot = 0;
-        for (std::size_t i = 0; i < n_mtp; ++i) tot += nd_m[i];
-        if (tot == nd * static_cast<std::uint32_t>(n_mtp))
-            timing_[std::min<std::size_t>(A, gdn_max_seg)].update(nd, cycle_ms);
+        for (std::size_t i = 0; i < cy.n_mtp; ++i) tot += cy.nd_m[i];
+        if (tot == cy.nd * static_cast<std::uint32_t>(cy.n_mtp))
+            timing_[std::min<std::size_t>(cy.A, gdn_max_seg)].update(cy.nd, cycle_ms);
     }
-    if (n_ng == A) {
+    if (cy.n_ng == cy.A) {
         // n-gram cycle times (every slot drafted from its history): per slot
         std::uint32_t ng_max_n = 0;
-        for (std::size_t k = 0; k < A; ++k) ng_max_n = std::max(ng_max_n, ng_n[k]);
-        const float ms = opt_.relax.on ? cycle_ms : static_cast<float>(msSince(tc0));
-        for (Slot* sl : act) sl->ng.timing.update(ng_max_n, ms);
+        for (std::size_t k = 0; k < cy.A; ++k) ng_max_n = std::max(ng_max_n, cy.ng_n[k]);
+        const float ms = opt_.relax.on ? cycle_ms : static_cast<float>(msSince(cy.tc0));
+        for (Slot* sl : cy.act) sl->ng.timing.update(ng_max_n, ms);
     }
-    if (opt_.use_dflash && n_ng == 0) {
+    if (opt_.use_dflash && cy.n_ng == 0) {
         // DFlash2 cycle times (drafting included; 0 drafts: a plain verify)
-        dtiming_[std::min<std::size_t>(A, gdn_max_seg)].update(dfl_max_n, static_cast<float>(msSince(td0)));
+        dtiming_[std::min<std::size_t>(cy.A, gdn_max_seg)].update(cy.dfl_max_n, static_cast<float>(msSince(cy.td0)));
     }
-    if (p) {
-        if (p->events) m_.profileFlush(pa);
-        p->cycles[pa] += 1;
-        p->rows[pa] += rows;
-        p->drafts[pa] += rows - A;
-        p->wall_ms[pa] += msSince(t_cycle0);
-        p->host_ms[pa] += msSince(t_cycle0) - msSince(tc0);
-        if (p->last_end) p->gap_ms[pa] += std::chrono::duration<double, std::milli>(t_cycle0 - *p->last_end).count();
+}
+
+void Engine::cycleStats(Cycle& cy) {
+    if (cy.p) {
+        if (cy.p->events) m_.profileFlush(cy.pa);
+        cy.p->cycles[cy.pa] += 1;
+        cy.p->rows[cy.pa] += cy.rows;
+        cy.p->drafts[cy.pa] += cy.rows - cy.A;
+        cy.p->wall_ms[cy.pa] += msSince(cy.t_cycle0);
+        cy.p->host_ms[cy.pa] += msSince(cy.t_cycle0) - msSince(cy.tc0);
+        if (cy.p->last_end) cy.p->gap_ms[cy.pa] += std::chrono::duration<double, std::milli>(cy.t_cycle0 - *cy.p->last_end).count();
     }
-    if (opt_.trace_nd) logI("trace | cycle {} | slots {} | nd {} | n-gram {} | dflash {} | {:.2f} ms", n_cycles_, A, nd, n_ng, n_dfl, msSince(tc0));
+    if (opt_.trace_nd) logI("trace | cycle {} | slots {} | nd {} | n-gram {} | dflash {} | {:.2f} ms", n_cycles_, cy.A, cy.nd, cy.n_ng, cy.n_dfl, msSince(cy.tc0));
     n_cycles_ += 1;
     policy_cycles_ += 1;
     stat_cycles_ += 1;
-    stat_rows_ += rows;
-    stat_slots_ += A;
-    stat_drafts_ += nd;
-    for (std::size_t k = 0; k < A; ++k) stat_lit_drafts_ += ng_n[k];
+    stat_rows_ += cy.rows;
+    stat_slots_ += cy.A;
+    stat_drafts_ += cy.nd;
+    for (std::size_t k = 0; k < cy.A; ++k) stat_lit_drafts_ += cy.ng_n[k];
+}
 
-    for (std::size_t k = 0; k < A; ++k) {
-        Slot& sl = *act[k];
-        const std::int32_t* ctl = ctl_host_.data() + static_cast<std::size_t>(sl.id) * qwen35::ctl_words;
-        const std::uint32_t row0 = row_of[k];
-        const std::uint32_t nd_k = nd_of[k];
-        const bool is_ng = ng_n[k] > 0;  // literal drafts (n-gram or DFlash2)
-        // MTP: drafts (and the device p-min cutoff) from the control area; n-gram: literal
-        const std::uint32_t nd_dev =
-            is_ng ? nd_k : (nd_k > 0 ? std::min(nd_k, static_cast<std::uint32_t>(std::max(0, ctl[qwen35::ctl_nd]))) : 0);
-        std::array<std::uint32_t, qwen35::max_ng_drafts> dr{};
-        for (std::uint32_t r = 0; r < nd_k; ++r)
-            dr[r] = is_ng ? ng_d[k][r] : static_cast<std::uint32_t>(ctl[qwen35::ctl_drafts + r]);
-        if (dsrc[k] == 1) sl.ng_cycles += 1;
-        sl.cycles += 1;
-        sl.drafted += nd_dev;
-        // draft acceptance (src/sampling/acceptor.h): greedy / relaxacc greedy, or the sampler's draw at every
-        // output index (inverse CDF / specsample race / relaxacc typical)
-        const sampling::Drafts drafts{std::span<const std::uint32_t>(dr.data(), dr.size()), nd_dev, row0};
-        const sampling::RepeatGuard repeats = [&](std::uint32_t a) { return relaxRepeats(sl, dr, a); };
-        const sampling::Accepted ac =
-            sl.greedy ? acceptor.greedy(ctl + qwen35::ctl_rows, drafts, relaxes(k), sampling::RelaxRows{relax_host_.data(), max_rows, rk},
-                                        repeats, sl.relaxed, sl.relax_gap)
-                      : acceptor.sample(samp_rows_, sl.sm, drafts, relaxes(k), sl.n_gen, repeats, sl.relaxed);
-        std::uint32_t acc = ac.acc;
-        std::uint32_t chosen = ac.chosen;
-        sl.accepted += acc;
-        if (dsrc[k] == 0 && opt_.use_mtp) {
-            // n-gram cycles stay out of the MTP acceptance models
-            sl.acc_ema = 0.7f * sl.acc_ema + 0.3f * static_cast<float>(acc);
-            sl.dacc.update(nd_dev, acc);
-            if (opt_.slot_drafts == 2 && nd_dev > 0) {
-                sl.sacc.observe(nd_dev, acc);
-                dpool_.update(nd_dev, acc);
-            }
-        } else if (dsrc[k] == 2) {
-            sl.dfl_acc.update(nd_dev, acc);
-            sl.dfl_cycles += 1;
-            stat_dfl_cycles_ += 1;
-            stat_dfl_drafted_ += nd_dev;
-            stat_dfl_accepted_ += acc;
+void Engine::acceptSlot(Cycle& cy, std::size_t k, const sampling::Acceptor& acceptor) {
+    Slot& sl = *cy.act[k];
+    const std::int32_t* ctl = ctl_host_.data() + static_cast<std::size_t>(sl.id) * qwen35::ctl_words;
+    const std::uint32_t row0 = cy.row_of[k];
+    const std::uint32_t nd_k = cy.nd_of[k];
+    const bool is_ng = cy.ng_n[k] > 0;  // literal drafts (n-gram or DFlash2)
+    // MTP: drafts (and the device p-min cutoff) from the control area; n-gram: literal
+    const std::uint32_t nd_dev =
+        is_ng ? nd_k : (nd_k > 0 ? std::min(nd_k, static_cast<std::uint32_t>(std::max(0, ctl[qwen35::ctl_nd]))) : 0);
+    std::array<std::uint32_t, qwen35::max_ng_drafts> dr{};
+    for (std::uint32_t r = 0; r < nd_k; ++r)
+        dr[r] = is_ng ? cy.ng_d[k][r] : static_cast<std::uint32_t>(ctl[qwen35::ctl_drafts + r]);
+    if (cy.dsrc[k] == 1) sl.ng_cycles += 1;
+    sl.cycles += 1;
+    sl.drafted += nd_dev;
+    // draft acceptance (src/sampling/acceptor.h): greedy / relaxacc greedy, or the sampler's draw at every
+    // output index (inverse CDF / specsample race / relaxacc typical)
+    const sampling::Drafts drafts{std::span<const std::uint32_t>(dr.data(), dr.size()), nd_dev, row0};
+    const sampling::RepeatGuard repeats = [&](std::uint32_t a) { return relaxRepeats(sl, dr, a); };
+    const sampling::Accepted ac =
+        sl.greedy ? acceptor.greedy(ctl + qwen35::ctl_rows, drafts, relaxes(cy, k), sampling::RelaxRows{relax_host_.data(), max_rows, cy.rk},
+                                    repeats, sl.relaxed, sl.relax_gap)
+                  : acceptor.sample(samp_rows_, sl.sm, drafts, relaxes(cy, k), sl.n_gen, repeats, sl.relaxed);
+    std::uint32_t acc = ac.acc;
+    std::uint32_t chosen = ac.chosen;
+    sl.accepted += acc;
+    if (cy.dsrc[k] == 0 && opt_.use_mtp) {
+        // n-gram cycles stay out of the MTP acceptance models
+        sl.acc_ema = 0.7f * sl.acc_ema + 0.3f * static_cast<float>(acc);
+        sl.dacc.update(nd_dev, acc);
+        if (opt_.slot_drafts == 2 && nd_dev > 0) {
+            sl.sacc.observe(nd_dev, acc);
+            dpool_.update(nd_dev, acc);
         }
-        // an accepted end-of-turn draft ends the reply: the trunk keeps only the
-        // rows before it and the stop token becomes `chosen`
-        if (!sl.ignore_eos) {
-            for (std::uint32_t r = 0; r < acc; ++r) {
-                if (dr[r] == ct_.im_end || dr[r] == ct_.endoftext) {
-                    chosen = dr[r];
-                    acc = r;
-                    break;
-                }
-            }
-        }
-        // same for max_tokens: the last emitted token is not fed to the trunk
-        {
-            const std::uint32_t budget = sl.max_tokens > sl.n_gen ? sl.max_tokens - sl.n_gen : 0;
-            if (budget >= 1 && acc + 1 > budget) {
-                chosen = dr[budget - 1];
-                acc = budget - 1;
-            }
-        }
-        // the verify ran nd + 1 rows of this slot: keep acc + 1 of them
-        if (m_.gdnReplay()) m_.setPending(sl.id, acc + 1);
-        else if (acc < nd_k) m_.restoreSeqSnapshot(sl.id, snap_of[k] + acc);
-        // DFlash2 context: the kept rows' features (whatever drafted them; rejected rows never enter)
-        dflIngest(sl, rows, row0, acc + 1, sl.pos);
-        // trunk now holds next, dr[0..acc) at pos .. pos + acc
-        sl.cache_tokens.push_back(sl.next);
-        sl.cache_tokens.insert(sl.cache_tokens.end(), dr.begin(), dr.begin() + acc);
-        const std::uint32_t n_before = sl.n_gen;
-        for (std::uint32_t r = 0; r < acc; ++r)
-            if (!sl.done) sl.done = emit(sl, dr[r]);
-        if (!sl.done) sl.done = emit(sl, chosen);
-        stat_tokens_ += sl.n_gen - n_before;
-        if (opt_.use_mtp)
-            ops_.copyAsync(m_.seqHid(sl.id), m_.hn() + static_cast<std::uint64_t>(row0) * E * 4, (acc + 1) * E * 4,
-                           m_.stream());
-        for (std::uint32_t r = 0; r < acc; ++r) sl.pend[r] = dr[r];
-        sl.pend[acc] = chosen;
-        sl.n_pend = acc + 1;
-        sl.pend_pos = sl.pos + 1;
-        sl.next = chosen;
-        sl.pos += acc + 1;
-        sl.last_acc = acc;
-        sl.last_row = row0 + acc;
-        sl.logits_ok = true;
-        flushOut(sl);
-        if (sl.n_gen >= sl.last_log_n + 100 || msSince(sl.last_log_t) >= 5000) {
-            const double el = msSince(sl.td0);
-            if (opt_.use_mtp || opt_.use_dflash) {
-                logI("req {} | slot {} | gen: n_gen {}, tg {:.2f} t/s, draft acceptance {:.1f}% ({:.2f} tok/cycle)",
-                     sl.reqId(), sl.id, sl.n_gen, static_cast<double>(sl.n_gen) * 1000.0 / el,
-                     sl.drafted > 0 ? 100.0 * sl.accepted / sl.drafted : 0.0,
-                     static_cast<double>(sl.accepted + sl.cycles) / sl.cycles);
-            } else {
-                logI("req {} | slot {} | gen: n_gen {}, tg {:.2f} t/s", sl.reqId(), sl.id, sl.n_gen,
-                     static_cast<double>(sl.n_gen) * 1000.0 / el);
-            }
-            sl.last_log_n = sl.n_gen;
-            sl.last_log_t = Clock::now();
-            // WDDM-LOG: a sharp drop against the request's early speed; the spill is named as the likely
-            // cause only while one is seen (vram_watch_ state from the last status-line sample)
-            if (const auto ev = sl.dec_watch.report(sl.n_gen, el, sl.cycles, vram_warn_ && vram_watch_.spilling(), prefill_tok_cum_)) {
-                if (ev->warn) logW("req {} | slot {} | {}", sl.reqId(), sl.id, ev->text);
-                else logI("req {} | slot {} | {}", sl.reqId(), sl.id, ev->text);
+    } else if (cy.dsrc[k] == 2) {
+        sl.dfl_acc.update(nd_dev, acc);
+        sl.dfl_cycles += 1;
+        stat_dfl_cycles_ += 1;
+        stat_dfl_drafted_ += nd_dev;
+        stat_dfl_accepted_ += acc;
+    }
+    // an accepted end-of-turn draft ends the reply: the trunk keeps only the
+    // rows before it and the stop token becomes `chosen`
+    if (!sl.ignore_eos) {
+        for (std::uint32_t r = 0; r < acc; ++r) {
+            if (dr[r] == ct_.im_end || dr[r] == ct_.endoftext) {
+                chosen = dr[r];
+                acc = r;
+                break;
             }
         }
     }
-    if (p) {
+    // same for max_tokens: the last emitted token is not fed to the trunk
+    {
+        const std::uint32_t budget = sl.max_tokens > sl.n_gen ? sl.max_tokens - sl.n_gen : 0;
+        if (budget >= 1 && acc + 1 > budget) {
+            chosen = dr[budget - 1];
+            acc = budget - 1;
+        }
+    }
+    // the verify ran nd + 1 rows of this slot: keep acc + 1 of them
+    if (m_.gdnReplay()) m_.setPending(sl.id, acc + 1);
+    else if (acc < nd_k) m_.restoreSeqSnapshot(sl.id, cy.snap_of[k] + acc);
+    // DFlash2 context: the kept rows' features (whatever drafted them; rejected rows never enter)
+    dflIngest(sl, cy.rows, row0, acc + 1, sl.pos);
+    // trunk now holds next, dr[0..acc) at pos .. pos + acc
+    sl.cache_tokens.push_back(sl.next);
+    sl.cache_tokens.insert(sl.cache_tokens.end(), dr.begin(), dr.begin() + acc);
+    const std::uint32_t n_before = sl.n_gen;
+    for (std::uint32_t r = 0; r < acc; ++r)
+        if (!sl.done) sl.done = emit(sl, dr[r]);
+    if (!sl.done) sl.done = emit(sl, chosen);
+    stat_tokens_ += sl.n_gen - n_before;
+    if (opt_.use_mtp)
+        ops_.copyAsync(m_.seqHid(sl.id), m_.hn() + static_cast<std::uint64_t>(row0) * cy.E * 4, (acc + 1) * cy.E * 4,
+                       m_.stream());
+    for (std::uint32_t r = 0; r < acc; ++r) sl.pend[r] = dr[r];
+    sl.pend[acc] = chosen;
+    sl.n_pend = acc + 1;
+    sl.pend_pos = sl.pos + 1;
+    sl.next = chosen;
+    sl.pos += acc + 1;
+    sl.last_acc = acc;
+    sl.last_row = row0 + acc;
+    sl.logits_ok = true;
+    flushOut(sl);
+    if (sl.n_gen >= sl.last_log_n + 100 || msSince(sl.last_log_t) >= 5000) {
+        const double el = msSince(sl.td0);
+        if (opt_.use_mtp || opt_.use_dflash) {
+            logI("req {} | slot {} | gen: n_gen {}, tg {:.2f} t/s, draft acceptance {:.1f}% ({:.2f} tok/cycle)",
+                 sl.reqId(), sl.id, sl.n_gen, static_cast<double>(sl.n_gen) * 1000.0 / el,
+                 sl.drafted > 0 ? 100.0 * sl.accepted / sl.drafted : 0.0,
+                 static_cast<double>(sl.accepted + sl.cycles) / sl.cycles);
+        } else {
+            logI("req {} | slot {} | gen: n_gen {}, tg {:.2f} t/s", sl.reqId(), sl.id, sl.n_gen,
+                 static_cast<double>(sl.n_gen) * 1000.0 / el);
+        }
+        sl.last_log_n = sl.n_gen;
+        sl.last_log_t = Clock::now();
+        // WDDM-LOG: a sharp drop against the request's early speed; the spill is named as the likely
+        // cause only while one is seen (vram_watch_ state from the last status-line sample)
+        if (const auto ev = sl.dec_watch.report(sl.n_gen, el, sl.cycles, vram_warn_ && vram_watch_.spilling(), prefill_tok_cum_)) {
+            if (ev->warn) logW("req {} | slot {} | {}", sl.reqId(), sl.id, ev->text);
+            else logI("req {} | slot {} | {}", sl.reqId(), sl.id, ev->text);
+        }
+    }
+}
+
+void Engine::finishCycle(Cycle& cy) {
+    if (cy.p) {
         std::uint64_t tk = 0;
-        for (Slot* sl : act) tk += sl->last_acc + 1;
-        p->tokens[pa] += tk;
+        for (Slot* sl : cy.act) tk += sl->last_acc + 1;
+        cy.p->tokens[cy.pa] += tk;
     }
     // finish after every slot of the cycle is processed (their logits rows are
     // still intact for the gen-end checkpoints)
     bool any_done = false;
-    for (Slot* sl : act) {
+    for (Slot* sl : cy.act) {
         if (sl->done || sl->st.gone) {
             any_done = true;
             finishJob(*sl);
         }
     }
-    if (p) {
-        if (p->t_ready) p->post_ms[pa] += msSince(*p->t_ready);
-        if (any_done) p->last_end.reset();
-        else p->last_end = Clock::now();
+    if (cy.p) {
+        if (cy.p->t_ready) cy.p->post_ms[cy.pa] += msSince(*cy.p->t_ready);
+        if (any_done) cy.p->last_end.reset();
+        else cy.p->last_end = Clock::now();
     }
 }
 
@@ -2283,139 +2352,9 @@ void Engine::runLoop() {
         }
         // shutting down: no new requests are admitted while the running ones finish
         if (stop_ && !queue_.empty()) abortQueued(lk);
-        if (n_busy == 0 && queue_.empty()) {
-            if (was_busy) {
-                lk.unlock();
-                logBatchStats(true);
-                if (prof_) prof_->print(m_);
-                was_busy = false;
-                lk.lock();
-            }
-            // idle: tier background work is polled; otherwise sleep until a
-            // request arrives or the tier IO thread wakes us
-            bool logged = false;
-            while (queue_.empty()) {
-                if (!loop_calls_.empty()) {
-                    runLoopCalls(lk);
-                    continue;
-                }
-                if (stop_) {
-                    abortQueued(lk);
-                    lk.unlock();
-                    flushTierOnStop();
-                    lk.lock();
-                    runLoopCalls(lk);
-                    return;
-                }
-                // WDDM-LOG: /health "vram" and the spill-over line stay current while idle (one sample a minute)
-                std::optional<TimePoint> vram_due;
-                if (vram_probe_) {
-                    lk.unlock();
-                    vram_due = vramIdleTick();
-                    govApply();
-                    lk.lock();
-                    if (!queue_.empty() || stop_) continue;
-                }
-                if (tb_.tier() != nullptr) {
-                    const std::uint64_t seq = wake_seq_;
-                    lk.unlock();
-                    tb_.idlePoll(n_building_.load() > 0);
-                    const bool busy = tierTick();
-                    if (busy) logged = false;
-                    if (!busy && !logged) {
-                        tb_.logStats(pool_.stats().cow_pages, pool_.stats().q_waits);
-                        logged = true;
-                    }
-                    lk.lock();
-                    if (busy) {
-                        // tier work in flight: polled every 5 ms, but a request (or the
-                        // tier IO thread) ends the wait at once (a sleep here delayed a
-                        // request by up to one Windows timer tick, 10-16 ms)
-                        q_cond_.wait_for(lk, std::chrono::milliseconds(5),
-                                         [&] { return wake_seq_ != seq || !queue_.empty() || stop_ || !loop_calls_.empty(); });
-                        continue;
-                    }
-                }
-                // vision: while the encoder is loaded, wake every 100 ms for its idle timeout
-                // (a timed wait on the queue condition, not a sleep: a request that arrives
-                // meanwhile starts at once; the prototype slept 100 ms here)
-                if (visWakeNeeded()) {
-                    lk.unlock();
-                    visIdle();
-                    lk.lock();
-                    tier_wake_ = false;
-                    if (queue_.empty() && !stop_)
-                        q_cond_.wait_for(lk, std::chrono::milliseconds(100), [&] { return !queue_.empty() || tier_wake_ || stop_ || !loop_calls_.empty(); });
-                    continue;
-                }
-                tier_wake_ = false;
-                std::optional<std::chrono::steady_clock::time_point> wake;
-                if (tb_.tier() != nullptr) wake = tb_.tier()->nextWake();
-                if (const auto idle_due = tb_.idleDue(); idle_due && (!wake || *idle_due < *wake)) wake = idle_due;  // TIER-IDLE
-                if (vram_due && (!wake || *vram_due < *wake)) wake = *vram_due;  // WDDM-LOG idle sample
-                if (wake) {
-                    // an SSD write is due at a known time, the periodic SSD expiry check, or the idle write: wake
-                    // then (re-checked every minute)
-                    const auto due = std::min(*wake + std::chrono::milliseconds(2), std::chrono::steady_clock::now() + std::chrono::seconds(60));
-                    q_cond_.wait_until(lk, due, [&] { return !queue_.empty() || tier_wake_ || stop_ || !loop_calls_.empty(); });
-                } else {
-                    q_cond_.wait(lk, [&] { return !queue_.empty() || tier_wake_ || stop_ || !loop_calls_.empty(); });
-                }
-            }
-            // a request arrived: the idle period ends, an idle write stops starting new entries (TIER-IDLE)
-            tb_.idleActivity();
-            if (tb_.tier() != nullptr) tb_.tier()->endIdleWrite();
-            stat_t0_ = Clock::now();
-            // v0.2.2.2: the governor sees the budget before the first request after an idle period (one probe sample,
-            // ~0.3 ms) when the last sample is older than 5 s, so a pool that must shrink does so before the request runs
-            if (gov_ && vram_probe_ && msSince(vram_last_t_) > 5000.0) {
-                lk.unlock();
-                (void)vramNote();
-                govApply();
-                lk.lock();
-            }
-        }
+        if (n_busy == 0 && queue_.empty() && idleWait(lk, was_busy)) return;
         const std::uint64_t wake_seq0 = wake_seq_;  // a later arrival ends this iteration's wait (below)
-        std::vector<Job*> admit;
-        std::size_t qi = 0;
-        std::optional<std::size_t> pool_avail;  // FR-SRV P2-3 (computed when a request is about to start)
-        // v0.2.2.2 memory governor: parked slots take no request; while a smaller pool waits for the running requests,
-        // none is admitted (they queue)
-        std::size_t admit_cap = slots_.size();
-        if (gov_) {
-            std::size_t n_parked = 0;
-            for (const Slot& sl : slots_) n_parked += sl.parked ? 1 : 0;
-            admit_cap = gov_hold_ && n_busy > 0 ? n_busy : slots_.size() - n_parked;
-        }
-        while (qi < queue_.size() && n_busy + admit.size() < admit_cap) {
-            // item S: a new session whose system message another request is
-            // prefilling right now waits for that checkpoint
-            if (waitsForSys(*queue_[qi]) || waitsForTier(*queue_[qi])) {
-                ++qi;
-                continue;
-            }
-            // FR-SRV P2-3: a prompt the KV pool cannot hold next to the running requests waits in the
-            // queue (in order: later requests wait behind it) instead of failing mid-prefill. Alone it
-            // always starts (startJob rejects a prompt larger than the whole pool).
-            {
-                if (!pool_avail) pool_avail = poolAvailable();
-                Job& qj = *queue_[qi];
-                const std::size_t need = pagesFor(qj.tokens.size());
-                if (n_busy + admit.size() > 0 && need <= pool_.pages() && need > *pool_avail) {
-                    if (!qj.pool_wait_logged) {
-                        qj.pool_wait_logged = true;
-                        logI("req {} | queued: the KV pool cannot hold this prompt next to the running requests ({} pages needed, "
-                             "{} free or evictable); it starts when they finish",
-                             qj.id, need, *pool_avail);
-                    }
-                    break;
-                }
-                *pool_avail -= std::min(*pool_avail, need);
-            }
-            admit.push_back(queue_[qi]);
-            queue_.erase(queue_.begin() + static_cast<std::ptrdiff_t>(qi));
-            n_active_ += 1;
-        }
+        std::vector<Job*> admit = admitQueued(n_busy);
         // item T4: requests left in the queue (all slots busy, or waiting)
         std::vector<Job*> pf_jobs;
         if (tb_.tier() != nullptr) {
@@ -2428,36 +2367,7 @@ void Engine::runLoop() {
         lk.unlock();
         was_busy = true;
         for (Job* qj : pf_jobs) prefetchFor(*qj);
-        std::size_t n_requeued = 0;
-        for (Job* job : admit) {
-            // item T3: admitted together with a request whose restore just
-            // started on the same prefix: back to the queue, wait for it
-            if (waitsForTier(*job)) {
-                std::lock_guard<std::mutex> g(q_mutex_);
-                queue_.insert(queue_.begin() + static_cast<std::ptrdiff_t>(n_requeued), job);
-                ++n_requeued;
-                n_active_ -= 1;
-                continue;
-            }
-            Slot& sl = *ps_.pickSlot(std::span<Slot>(slots_), job->tokens,
-                                            [](const Slot& o) { return o.phase == Phase::idle && !o.parked; });
-            const double wait_ms = msSince(job->t_arrive);
-            if (wait_ms > 50) logI("req {} | slot {} | starting after {:.0f} ms in queue", job->id, sl.id, wait_ms);
-            else logI("req {} | slot {} | assigned", job->id, sl.id);
-            if (tryRestore(sl, *job)) continue;
-            sl.phase = Phase::prefill;  // reserve before the next pick
-            bool ok = true;
-            try {
-                ok = startJob(sl, *job);
-            } catch (const std::exception& ex) {
-                failSlot(sl, ex.what());
-                ok = true;
-            }
-            if (!ok) {
-                sl.job = job;
-                releaseSlot(sl);
-            }
-        }
+        startAdmitted(admit);
         const TimePoint tl1 = Clock::now();
         // ---- host-tier restores in progress / tier housekeeping (<= every 2 ms)
         if (tb_.tier() != nullptr) {
@@ -2477,61 +2387,9 @@ void Engine::runLoop() {
             if (!pf || sl.job->id < pf->job->id) pf = &sl;
         }
         bool idle_wait = false;
-        // decode floor: the slots it protects this iteration
-        const std::vector<DecodeFloor::SlotTok> dec_toks = floorProtected();
-        if (floor_.on() && dec_toks.empty()) floor_.idle();
-        auto floorNow = [&] { return std::chrono::duration<double, std::milli>(Clock::now() - floor_epoch_).count(); };
         std::size_t pf_rows = 0;
         bool floor_pf = false;
-        if (pf) {
-            // a burst in flight: hold the first chunk briefly so the other
-            // requests join its segmented forward
-            const bool gather = opt_.seg_prefill && pf->pf_off == 0 && opt_.gather_ms > 0 && n_building_.load() > 0 &&
-                                msSince(pf->tp0) < opt_.gather_ms;
-            if (gather) {
-                idle_wait = true;
-            } else if (!dec_toks.empty() && !floor_.prefillAllowed(floorNow(), dec_toks)) {
-                // decoding slots are below the floor in this period: a decode cycle alone
-                ++stat_floor_waits_;
-            } else {
-                std::size_t budget = static_cast<std::size_t>(-1);
-                if (!dec_toks.empty()) {
-                    floor_.startPeriod(floorNow(), dec_toks);
-                    const DecodeFloor::Plan pl = floor_.plan(chunkLen(*pf), m_.maxBatch());
-                    budget = pl.rows;
-                    floor_pf = true;
-                    ++stat_floor_periods_;
-                    if (msSince(floor_log_t_) >= 10000) {
-                        floor_log_t_ = Clock::now();
-                        if (pl.cycles > 0)
-                            logI("decode floor | {:.0f} tok/s per decoding slot ({} decoding): prefill forward <= {} rows, ~{} decode "
-                                 "cycles between forwards{} (cycle {:.1f} ms, prefill {:.0f} rows/s)",
-                                 floor_.minTps(), dec_toks.size(), pl.rows, pl.cycles,
-                                 pl.reachable ? "" : " (floor out of reach: prefill keeps 20% of the time)", floor_.cycleMs(),
-                                 floor_.rowsPerMs() * 1000.0);
-                        else
-                            logI("decode floor | {:.0f} tok/s per decoding slot ({} decoding): prefill forward <= {} rows "
-                                 "(not measured yet)",
-                                 floor_.minTps(), dec_toks.size(), pl.rows);
-                    }
-                }
-                pf_rows = prefillGroup(*pf, budget);
-                if (prof_) prof_->last_end.reset();
-                // FR-SRV P3-12: chunks of <= max_small_batch rows cannot join a segmented forward;
-                // they ran only once their request was the oldest, so a short follow-up (a few new
-                // tokens on a cached prefix) waited for a whole 128k prefill. They run now, alone
-                // (the same forward they would get later: outputs unchanged).
-                for (Slot& o : slots_) {
-                    if (&o == pf || o.phase != Phase::prefill || o.job == nullptr) continue;
-                    if (chunkLen(o) > max_small_batch) continue;
-                    try {
-                        prefillStep(o);
-                    } catch (const std::exception& ex) {
-                        failSlot(o, ex.what());
-                    }
-                }
-            }
-        }
+        runPrefill(pf, idle_wait, pf_rows, floor_pf);
         // ---- one decode cycle over every decoding slot
         std::vector<Slot*> act;
         for (Slot& sl : slots_)
@@ -2546,18 +2404,7 @@ void Engine::runLoop() {
                 for (Slot* sl : act)
                     if (sl->phase == Phase::decode) failSlot(*sl, ex.what());
             }
-            if (floor_.on()) {
-                // measurements: the cycle synchronizes the stream, so [tl2, now] covers
-                // this iteration's prefill forward too
-                const TimePoint te = Clock::now();
-                const double it_ms = std::chrono::duration<double, std::milli>(te - tl2).count();
-                const double cyc_ms = std::chrono::duration<double, std::milli>(te - tl3).count();
-                std::vector<DecodeFloor::SlotTok> now_dec;
-                for (const Slot& sl : slots_)
-                    if (sl.phase == Phase::decode) now_dec.push_back({sl.id, sl.reqId(), sl.n_gen});
-                floor_.noteCycle(cyc_ms, pf_rows > 0, now_dec);
-                if (floor_pf && pf_rows > 0) floor_.notePrefill(pf_rows, it_ms - std::min(floor_.cycleMs(), 0.5 * it_ms));
-            }
+            if (floor_.on()) noteFloor(tl2, tl3, pf_rows, floor_pf);
         } else if (idle_wait || (restoring && pf == nullptr)) {
             // burst gather / host-tier restore: poll again in 1 ms, sooner when a
             // request is queued, a connection finishes building one, or the tier
@@ -2574,6 +2421,250 @@ void Engine::runLoop() {
         logBatchStats(false);
         visIdle();
     }
+}
+
+// arch025-E2: runLoop's phases (extracted verbatim; same call order, same lock state at every call)
+// idle: no request running or queued. Called with lk held; true = the engine stops (runLoop returns).
+bool Engine::idleWait(std::unique_lock<std::mutex>& lk, bool& was_busy) {
+    if (was_busy) {
+        lk.unlock();
+        logBatchStats(true);
+        if (prof_) prof_->print(m_);
+        was_busy = false;
+        lk.lock();
+    }
+    // idle: tier background work is polled; otherwise sleep until a
+    // request arrives or the tier IO thread wakes us
+    bool logged = false;
+    while (queue_.empty()) {
+        if (!loop_calls_.empty()) {
+            runLoopCalls(lk);
+            continue;
+        }
+        if (stop_) {
+            abortQueued(lk);
+            lk.unlock();
+            flushTierOnStop();
+            lk.lock();
+            runLoopCalls(lk);
+            return true;
+        }
+        // WDDM-LOG: /health "vram" and the spill-over line stay current while idle (one sample a minute)
+        std::optional<TimePoint> vram_due;
+        if (vram_probe_) {
+            lk.unlock();
+            vram_due = vramIdleTick();
+            govApply();
+            lk.lock();
+            if (!queue_.empty() || stop_) continue;
+        }
+        if (tb_.tier() != nullptr) {
+            const std::uint64_t seq = wake_seq_;
+            lk.unlock();
+            tb_.idlePoll(n_building_.load() > 0);
+            const bool busy = tierTick();
+            if (busy) logged = false;
+            if (!busy && !logged) {
+                tb_.logStats(pool_.stats().cow_pages, pool_.stats().q_waits);
+                logged = true;
+            }
+            lk.lock();
+            if (busy) {
+                // tier work in flight: polled every 5 ms, but a request (or the
+                // tier IO thread) ends the wait at once (a sleep here delayed a
+                // request by up to one Windows timer tick, 10-16 ms)
+                q_cond_.wait_for(lk, std::chrono::milliseconds(5),
+                                 [&] { return wake_seq_ != seq || !queue_.empty() || stop_ || !loop_calls_.empty(); });
+                continue;
+            }
+        }
+        // vision: while the encoder is loaded, wake every 100 ms for its idle timeout
+        // (a timed wait on the queue condition, not a sleep: a request that arrives
+        // meanwhile starts at once; the prototype slept 100 ms here)
+        if (visWakeNeeded()) {
+            lk.unlock();
+            visIdle();
+            lk.lock();
+            tier_wake_ = false;
+            if (queue_.empty() && !stop_)
+                q_cond_.wait_for(lk, std::chrono::milliseconds(100), [&] { return !queue_.empty() || tier_wake_ || stop_ || !loop_calls_.empty(); });
+            continue;
+        }
+        tier_wake_ = false;
+        std::optional<std::chrono::steady_clock::time_point> wake;
+        if (tb_.tier() != nullptr) wake = tb_.tier()->nextWake();
+        if (const auto idle_due = tb_.idleDue(); idle_due && (!wake || *idle_due < *wake)) wake = idle_due;  // TIER-IDLE
+        if (vram_due && (!wake || *vram_due < *wake)) wake = *vram_due;  // WDDM-LOG idle sample
+        if (wake) {
+            // an SSD write is due at a known time, the periodic SSD expiry check, or the idle write: wake
+            // then (re-checked every minute)
+            const auto due = std::min(*wake + std::chrono::milliseconds(2), std::chrono::steady_clock::now() + std::chrono::seconds(60));
+            q_cond_.wait_until(lk, due, [&] { return !queue_.empty() || tier_wake_ || stop_ || !loop_calls_.empty(); });
+        } else {
+            q_cond_.wait(lk, [&] { return !queue_.empty() || tier_wake_ || stop_ || !loop_calls_.empty(); });
+        }
+    }
+    // a request arrived: the idle period ends, an idle write stops starting new entries (TIER-IDLE)
+    tb_.idleActivity();
+    if (tb_.tier() != nullptr) tb_.tier()->endIdleWrite();
+    stat_t0_ = Clock::now();
+    // v0.2.2.2: the governor sees the budget before the first request after an idle period (one probe sample,
+    // ~0.3 ms) when the last sample is older than 5 s, so a pool that must shrink does so before the request runs
+    if (gov_ && vram_probe_ && msSince(vram_last_t_) > 5000.0) {
+        lk.unlock();
+        (void)vramNote();
+        govApply();
+        lk.lock();
+    }
+    return false;
+}
+
+// the queued requests that start this iteration (q_mutex_ held by the caller)
+std::vector<Job*> Engine::admitQueued(std::uint32_t n_busy) {
+    std::vector<Job*> admit;
+    std::size_t qi = 0;
+    std::optional<std::size_t> pool_avail;  // FR-SRV P2-3 (computed when a request is about to start)
+    // v0.2.2.2 memory governor: parked slots take no request; while a smaller pool waits for the running requests,
+    // none is admitted (they queue)
+    std::size_t admit_cap = slots_.size();
+    if (gov_) {
+        std::size_t n_parked = 0;
+        for (const Slot& sl : slots_) n_parked += sl.parked ? 1 : 0;
+        admit_cap = gov_hold_ && n_busy > 0 ? n_busy : slots_.size() - n_parked;
+    }
+    while (qi < queue_.size() && n_busy + admit.size() < admit_cap) {
+        // item S: a new session whose system message another request is
+        // prefilling right now waits for that checkpoint
+        if (waitsForSys(*queue_[qi]) || waitsForTier(*queue_[qi])) {
+            ++qi;
+            continue;
+        }
+        // FR-SRV P2-3: a prompt the KV pool cannot hold next to the running requests waits in the
+        // queue (in order: later requests wait behind it) instead of failing mid-prefill. Alone it
+        // always starts (startJob rejects a prompt larger than the whole pool).
+        {
+            if (!pool_avail) pool_avail = poolAvailable();
+            Job& qj = *queue_[qi];
+            const std::size_t need = pagesFor(qj.tokens.size());
+            if (n_busy + admit.size() > 0 && need <= pool_.pages() && need > *pool_avail) {
+                if (!qj.pool_wait_logged) {
+                    qj.pool_wait_logged = true;
+                    logI("req {} | queued: the KV pool cannot hold this prompt next to the running requests ({} pages needed, "
+                         "{} free or evictable); it starts when they finish",
+                         qj.id, need, *pool_avail);
+                }
+                break;
+            }
+            *pool_avail -= std::min(*pool_avail, need);
+        }
+        admit.push_back(queue_[qi]);
+        queue_.erase(queue_.begin() + static_cast<std::ptrdiff_t>(qi));
+        n_active_ += 1;
+    }
+    return admit;
+}
+
+void Engine::startAdmitted(const std::vector<Job*>& admit) {
+    std::size_t n_requeued = 0;
+    for (Job* job : admit) {
+        // item T3: admitted together with a request whose restore just
+        // started on the same prefix: back to the queue, wait for it
+        if (waitsForTier(*job)) {
+            std::lock_guard<std::mutex> g(q_mutex_);
+            queue_.insert(queue_.begin() + static_cast<std::ptrdiff_t>(n_requeued), job);
+            ++n_requeued;
+            n_active_ -= 1;
+            continue;
+        }
+        Slot& sl = *ps_.pickSlot(std::span<Slot>(slots_), job->tokens,
+                                        [](const Slot& o) { return o.phase == Phase::idle && !o.parked; });
+        const double wait_ms = msSince(job->t_arrive);
+        if (wait_ms > 50) logI("req {} | slot {} | starting after {:.0f} ms in queue", job->id, sl.id, wait_ms);
+        else logI("req {} | slot {} | assigned", job->id, sl.id);
+        if (tryRestore(sl, *job)) continue;
+        sl.phase = Phase::prefill;  // reserve before the next pick
+        bool ok = true;
+        try {
+            ok = startJob(sl, *job);
+        } catch (const std::exception& ex) {
+            failSlot(sl, ex.what());
+            ok = true;
+        }
+        if (!ok) {
+            sl.job = job;
+            releaseSlot(sl);
+        }
+    }
+}
+
+// one prefill chunk (oldest request first), with the decode floor's budget
+void Engine::runPrefill(Slot* pf, bool& idle_wait, std::size_t& pf_rows, bool& floor_pf) {
+    // decode floor: the slots it protects this iteration
+    const std::vector<DecodeFloor::SlotTok> dec_toks = floorProtected();
+    if (floor_.on() && dec_toks.empty()) floor_.idle();
+    auto floorNow = [&] { return std::chrono::duration<double, std::milli>(Clock::now() - floor_epoch_).count(); };
+    if (pf) {
+        // a burst in flight: hold the first chunk briefly so the other
+        // requests join its segmented forward
+        const bool gather = opt_.seg_prefill && pf->pf_off == 0 && opt_.gather_ms > 0 && n_building_.load() > 0 &&
+                            msSince(pf->tp0) < opt_.gather_ms;
+        if (gather) {
+            idle_wait = true;
+        } else if (!dec_toks.empty() && !floor_.prefillAllowed(floorNow(), dec_toks)) {
+            // decoding slots are below the floor in this period: a decode cycle alone
+            ++stat_floor_waits_;
+        } else {
+            std::size_t budget = static_cast<std::size_t>(-1);
+            if (!dec_toks.empty()) {
+                floor_.startPeriod(floorNow(), dec_toks);
+                const DecodeFloor::Plan pl = floor_.plan(chunkLen(*pf), m_.maxBatch());
+                budget = pl.rows;
+                floor_pf = true;
+                ++stat_floor_periods_;
+                if (msSince(floor_log_t_) >= 10000) {
+                    floor_log_t_ = Clock::now();
+                    if (pl.cycles > 0)
+                        logI("decode floor | {:.0f} tok/s per decoding slot ({} decoding): prefill forward <= {} rows, ~{} decode "
+                             "cycles between forwards{} (cycle {:.1f} ms, prefill {:.0f} rows/s)",
+                             floor_.minTps(), dec_toks.size(), pl.rows, pl.cycles,
+                             pl.reachable ? "" : " (floor out of reach: prefill keeps 20% of the time)", floor_.cycleMs(),
+                             floor_.rowsPerMs() * 1000.0);
+                    else
+                        logI("decode floor | {:.0f} tok/s per decoding slot ({} decoding): prefill forward <= {} rows "
+                             "(not measured yet)",
+                             floor_.minTps(), dec_toks.size(), pl.rows);
+                }
+            }
+            pf_rows = prefillGroup(*pf, budget);
+            if (prof_) prof_->last_end.reset();
+            // FR-SRV P3-12: chunks of <= max_small_batch rows cannot join a segmented forward;
+            // they ran only once their request was the oldest, so a short follow-up (a few new
+            // tokens on a cached prefix) waited for a whole 128k prefill. They run now, alone
+            // (the same forward they would get later: outputs unchanged).
+            for (Slot& o : slots_) {
+                if (&o == pf || o.phase != Phase::prefill || o.job == nullptr) continue;
+                if (chunkLen(o) > max_small_batch) continue;
+                try {
+                    prefillStep(o);
+                } catch (const std::exception& ex) {
+                    failSlot(o, ex.what());
+                }
+            }
+        }
+    }
+}
+
+void Engine::noteFloor(TimePoint tl2, TimePoint tl3, std::size_t pf_rows, bool floor_pf) {
+    // measurements: the cycle synchronizes the stream, so [tl2, now] covers
+    // this iteration's prefill forward too
+    const TimePoint te = Clock::now();
+    const double it_ms = std::chrono::duration<double, std::milli>(te - tl2).count();
+    const double cyc_ms = std::chrono::duration<double, std::milli>(te - tl3).count();
+    std::vector<DecodeFloor::SlotTok> now_dec;
+    for (const Slot& sl : slots_)
+        if (sl.phase == Phase::decode) now_dec.push_back({sl.id, sl.reqId(), sl.n_gen});
+    floor_.noteCycle(cyc_ms, pf_rows > 0, now_dec);
+    if (floor_pf && pf_rows > 0) floor_.notePrefill(pf_rows, it_ms - std::min(floor_.cycleMs(), 0.5 * it_ms));
 }
 
 }  // namespace whirl::server

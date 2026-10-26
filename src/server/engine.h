@@ -398,6 +398,30 @@ private:
     std::uint32_t pickDrafts(std::span<Slot* const> act);
     bool relaxRepeats(const Slot& sl, std::span<const std::uint32_t> dr, std::uint32_t acc) const;
     void decodeCycle(std::span<Slot* const> act_in);
+    // decodeCycle's phases in call order (arch025-E2: extracted verbatim). Cycle = the values one cycle passes from
+    // phase to phase (engine.cpp). sampleRows holds the cycle's one host sync (readCtl).
+    struct Cycle;
+    bool relaxes(const Cycle& cy, std::size_t k) const;
+    std::uint32_t verifyRoom(const Slot& sl, std::uint32_t lim) const;
+    void dropOutOfRoom(Cycle& cy, std::span<Slot* const> act_in);
+    void draftLimits(Cycle& cy);
+    void ngramDrafts(Cycle& cy);
+    void dflashDrafts(Cycle& cy);
+    void mtpDrafts(Cycle& cy);
+    void layoutBatch(Cycle& cy);
+    void draftSampling(Cycle& cy);
+    void enqueueVerify(Cycle& cy);
+    void sampleRows(Cycle& cy);
+    void trainCycle(Cycle& cy);
+    void cycleStats(Cycle& cy);
+    void acceptSlot(Cycle& cy, std::size_t k, const sampling::Acceptor& acceptor);
+    void finishCycle(Cycle& cy);
+    // runLoop's phases in call order (arch025-E2: extracted verbatim)
+    bool idleWait(std::unique_lock<std::mutex>& lk, bool& was_busy);
+    std::vector<Job*> admitQueued(std::uint32_t n_busy);
+    void startAdmitted(const std::vector<Job*>& admit);
+    void runPrefill(Slot* pf, bool& idle_wait, std::size_t& pf_rows, bool& floor_pf);
+    void noteFloor(TimePoint tl2, TimePoint tl3, std::size_t pf_rows, bool floor_pf);
     void splitDrafts(std::span<Slot* const> act, std::uint32_t nd, std::uint32_t rows, std::span<std::uint32_t> nd_m);
     std::uint32_t draftCap(std::uint32_t A);
     // DFlash2 drafter context of a slot
