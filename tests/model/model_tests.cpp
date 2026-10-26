@@ -2245,7 +2245,8 @@ void testEnvSnapshot() {
     // envFlag sites (loader.cpp MOE_*), capture / fromValues above for the raw value of the others
     const std::vector<std::string> covered = envtab::namesCovered();
     const char* const load_only[] = {"GEMV_BITWISE_FLOAT", "CODE_OBJECT", "MOE_MXW", "MOE_WIDE", "MOE_RBF", "GPU_SHARE", "GPU_WAIT", "DEVICE", "DFLASH_PROF",
-                                     "HEAD_GEMVX", "PREC_GEMVH", "PREC_GS"};  // the last three: Model::load -> forwardEnv (testForwardEnv)
+                                     "HEAD_GEMVX", "PREC_GEMVH", "PREC_GS",  // these three: Model::load -> forwardEnv (testForwardEnv)
+                                     "SPEC_ACC"};  // feat026-acc: read by server_main (parseSpecAcc, server tests)
     for (const auto& e : names) {
         const bool in_table = std::find(covered.begin(), covered.end(), e.name) != covered.end();
         const bool in_empty = std::find(empty_names.begin(), empty_names.end(), e.name) != empty_names.end();
@@ -2569,6 +2570,7 @@ void testPlanVsLoadOrTune() {
         {"HEAD_GEMVX", "F7 forwardEnv -> Model member (removed by feat026-o6)"},
         {"PREC_GEMVH", "F7 forwardEnv -> Model member (removed by feat026-o6)"},
         {"PREC_GS", "F7 forwardEnv -> Model member (removed by feat026-o6)"},
+        {"SPEC_ACC", "feat026-acc server_main -> EngineOptions::spec_acc (where the accept is decided, same reply)"},
     };
     for (const auto& e : EnvSnapshot::names()) {
         nu::EnvValues v;
