@@ -77,7 +77,8 @@ struct AttnPrefillFlags {
     std::uint32_t attn_seg = 0;
     // f16 attn_kg variant (feat026-attnkg97): 0 the shipped attn_kg, 1 attn_kgv (head-pair shared V,
     // bit-identical: every mode), 2 attn_kgw (attn_kgv + split softmax row sum: NOT bit-identical,
-    // balance / fast only - refused when prec is set, then attn_kg). Falls back to attn_kg when the
+    // balance / fast only - refused when prec is set, then attn_kg), 3 attn_kgk (feat026-attnkg97k:
+    // attn_kgv + head-pair shared K, bit-identical: every mode). Falls back to attn_kg when the
     // variant is not in the code object.
     std::uint32_t attn_kg_var = 0;
     bool prec = false;  // numerics MODE precise (Model::prefillAttnFlags; not prec_dec): only bit-identical variants

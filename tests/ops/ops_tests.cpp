@@ -445,7 +445,19 @@ void testAttnPrefill() {
     f.attn_kg_var = 1;  // the bit-identical variant stays allowed under precise
     pl = ops::chooseAttnPrefill(p, f, k);
     CHECK(pl.steps.size() == 1 && nameOf(pl.steps[0].f) == "attn_kgv2");
+    // feat026-attnkg97k: var 3 (attn_kgk, shared K and V, bit-identical): missing -> attn_kg; present -> taken
+    // under precise too, same grid / block
+    f.attn_kg_var = 3;
+    pl = ops::chooseAttnPrefill(p, f, k);
+    CHECK(pl.steps.size() == 1 && nameOf(pl.steps[0].f) == "attn_kg2");
+    k.attn_kgk2 = tag("attn_kgk2");
+    pl = ops::chooseAttnPrefill(p, f, k);
+    CHECK(pl.steps.size() == 1 && nameOf(pl.steps[0].f) == "attn_kgk2" && pl.steps[0].grid.x == 32 && pl.steps[0].grid.y == 12 &&
+          pl.steps[0].block.x == 128 && !pl.steps[0].from_copy);
     f.prec = false;
+    pl = ops::chooseAttnPrefill(p, f, k);
+    CHECK(pl.steps.size() == 1 && nameOf(pl.steps[0].f) == "attn_kgk2");
+    k.attn_kgk2 = nullptr;
     f.attn_kg_var = 0;
     pl = ops::chooseAttnPrefill(p, f, k);
     CHECK(pl.steps.size() == 1 && nameOf(pl.steps[0].f) == "attn_kg2");

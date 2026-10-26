@@ -710,7 +710,8 @@ void testAttn(Ctx& c) {
                 const auto ref = rb.down<float>(static_cast<std::size_t>(n) * kHeads * kHd);
                 const int grp = kHeads / nkv;
                 for (const auto& [name, np] : {std::pair{"attn_kg6", 6}, std::pair{"attn_kg4", 4}, std::pair{"attn_kg2", 2},
-                                                       std::pair{"attn_kgv6", 6}, std::pair{"attn_kgv4", 4}, std::pair{"attn_kgv2", 2}}) {
+                                                       std::pair{"attn_kgv6", 6}, std::pair{"attn_kgv4", 4}, std::pair{"attn_kgv2", 2},
+                                                       std::pair{"attn_kgk6", 6}, std::pair{"attn_kgk4", 4}, std::pair{"attn_kgk2", 2}}) {  // kgk: feat026-attnkg97k
                     if (grp % np != 0) continue;
                     auto fk = c.fnOpt(name + fs);
                     if (!fk) continue;
@@ -1139,7 +1140,8 @@ void testAttn(Ctx& c) {
                         f.v = v16.p();
                         f.ptab = did.p();
                         for (const auto& [name, np] : {std::pair{"attn_kg6", 6}, std::pair{"attn_kg4", 4}, std::pair{"attn_kg2", 2},
-                                                       std::pair{"attn_kgv6", 6}, std::pair{"attn_kgv4", 4}, std::pair{"attn_kgv2", 2}}) {
+                                                       std::pair{"attn_kgv6", 6}, std::pair{"attn_kgv4", 4}, std::pair{"attn_kgv2", 2},
+                                                       std::pair{"attn_kgk6", 6}, std::pair{"attn_kgk4", 4}, std::pair{"attn_kgk2", 2}}) {  // kgk: feat026-attnkg97k
                             const auto fk = c.fnOpt(name);
                             if (!fk || grp % np != 0) continue;
                             for (const int split : {1, 2}) {
