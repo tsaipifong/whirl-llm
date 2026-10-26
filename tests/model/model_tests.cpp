@@ -1733,6 +1733,18 @@ void testBaselineDumps() {
         CHECK(a.find(k) != std::string::npos);
     CHECK(a.find("D exec: num_plan=numerics: ") != std::string::npos);
     CHECK(a.find("D exec: tune=") != std::string::npos);
+    // arch025-execdump-f7: the three F7 forward switches are in the dump (defaults: off, on, -1)
+    for (const char* k : {"D exec: head_gemvx=0\n", "D exec: prec_gemvh=1\n", "D exec: prec_gs=-1\n"}) CHECK(a.find(k) != std::string::npos);
+    {
+        q::Model m2;
+        m2.head_gemvx = true;
+        m2.prec_gemvh = false;
+        m2.prec_gs = 2;
+        const std::string d = q::execDump(m2);
+        CHECK(d.find("D exec: head_gemvx=1\n") != std::string::npos);
+        CHECK(d.find("D exec: prec_gemvh=0\n") != std::string::npos);
+        CHECK(d.find("D exec: prec_gs=2\n") != std::string::npos);
+    }
     m.kv_fmt = whirl::KvFormat::q8h;  // one property changes one line (q8 -> q8h: the rotation)
     const std::string b = q::execDump(m);
     CHECK(b != a);
