@@ -448,7 +448,8 @@ void MockModel::mtpBatchStepEx(std::span<const server::MSeg> segs, std::uint32_t
             if (!draft) continue;
         }
         const std::uint32_t truth = nextToken(s.chain.h, s.chain.kv);
-        const std::uint32_t d = corruptDraft(truth, mix(s.chain.h, r, s.chain_pos));
+        std::uint32_t d = corruptDraft(truth, mix(s.chain.h, r, s.chain_pos));
+        if (mc_.mtp_miss_runner_up && d != truth) d = runnerUp(s.chain.h, s.chain.kv);
         s.ctl[qwen35::ctl_drafts + r] = static_cast<std::int32_t>(d);
         s.ctl[qwen35::ctl_nd] = static_cast<std::int32_t>(r + 1);
         const std::uint32_t p = s.chain_pos + 1;

@@ -43,6 +43,9 @@ struct MockConfig {
     std::uint32_t max_batch = 4096;
     bool mtp = true;
     double draft_miss = 0.3;       // probability that a draft is wrong
+    // arch025-mutgap2: a wrong MTP draft is the target row's runner-up (logit 8.65 vs 10: inside relaxacc's top-k / alpha 0.1
+    // window, like dfl_miss_runner_up) instead of a random text token
+    bool mtp_miss_runner_up = false;
     double eos_rate = 0.0;         // per-token probability that <|im_end|> is the argmax
     // simulated device time (busy wait; 0 = none): per prefill row, per verify cycle
     double prefill_us_per_row = 0;

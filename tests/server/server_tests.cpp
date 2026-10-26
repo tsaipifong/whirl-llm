@@ -2275,6 +2275,67 @@ void testDFlashRelaxExact() {
     }
 }
 
+// arch025-mutgap2 (mutant e2-accept-rk): relaxacc must really relax MTP drafts in the engine. A wrong MTP draft is the
+// row's runner-up (p / p_max 0.26, rank 1: inside top-4 / alpha 0.1), so the relaxed rule keeps it and the text leaves
+// the greedy reference; with relaxacc off the same drafts are rejected and the text is the reference. The rows the
+// acceptor reads are the cycle's top-k rows (stride k = Engine::Cycle::rk): reading them with stride 0 keeps nothing.
+void testRelaxMtpRunnerUp() {
+    const auto p = makePrompt(300, 931);
+    constexpr std::uint32_t G = 200;
+    for (bool relax : {false, true}) {
+        ServerSetup su = baseSetup();
+        su.mc.mtp_miss_runner_up = true;
+        su.mc.draft_miss = 0.4;
+        su.eo.ngram = false;
+        su.eo.relax.on = relax;
+        TestServer srv(su);
+        g_log.clear();
+        const auto ref = srv.model().greedyReference(p, G, true);
+        auto r = srv.post("/v1/completions", completionBody(p, G));
+        CHECK_EQ(r.status, 200);
+        for (int i = 0; i < 500 && g_log.count("MTP: drafted") < 1; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        if (!relax) {
+            CHECK_EQ(completionText(r), decode(ref));
+            CHECK_EQ(g_log.count("relaxacc: "), 0u);
+        } else {
+            for (int i = 0; i < 500 && g_log.count("relaxacc: ") < 1; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            CHECK_EQ(g_log.count("relaxacc: "), 1u);
+            CHECK_EQ(g_log.count("relaxacc: 0 of"), 0u);  // some drafts were kept by the relaxed rule (not the exact one)
+            // a kept runner-up is not the argmax: the text is no longer the greedy reference
+            CHECK(completionText(r) != decode(ref));
+        }
+        CHECK_EQ(srv.model().poison(), 0u);
+    }
+}
+
+// arch025-mutgap2 (mutant e2-verify-rows): a verify of more rows than the DFlash2 capture holds. The capture keeps the
+// last dfl_cap_rows rows of the verify batch; with two slots decoding a full block each (2 x 8 rows) against a capture of
+// 12 rows, the first slot's kept rows lie before the capture (a gap, counted, the run restarts), the second slot's rows are
+// ingested from the capture row that holds them. Rows are located from the verify's row count (run_rows - captured): with
+// a wrong count the ingest takes another slot's rows (dflBad) and no gap is seen.
+void testDFlashShortCapture() {
+    ServerSetup su = dflashSetup(false);
+    su.mc.dfl_cap_rows = 12;
+    su.mc.dfl_miss = 0.0;
+    su.mc.cycle_us = 3000;
+    su.eo.dfl_warm = 1;
+    TestServer srv(su);
+    std::vector<std::vector<std::uint32_t>> ps;
+    for (std::uint32_t i = 0; i < 2; ++i) ps.push_back(makePrompt(6, 940 + i));  // prefill fits the capture
+    std::vector<std::string> got(2);
+    std::vector<std::thread> th;
+    for (std::size_t i = 0; i < ps.size(); ++i)
+        th.emplace_back([&, i] { got[i] = completionText(srv.post("/v1/completions", completionBody(ps[i], 200))); });
+    for (auto& t : th) t.join();
+    for (std::size_t i = 0; i < ps.size(); ++i) CHECK_EQ(got[i], decode(srv.model().greedyReference(ps[i], 200, true)));
+    const Engine::Stats st = srv.engine().stats();
+    CHECK(st.dfl_drafted > 0);
+    CHECK(st.dfl_gap > 0);  // 16 verify rows against a 12-row capture: the rows before it are a gap
+    CHECK_EQ(srv.model().dflBad(), 0u);
+    CHECK_EQ(srv.model().dflStale(), 0u);
+    CHECK_EQ(srv.model().poison(), 0u);
+}
+
 // n-gram and DFlash2 drafts in the same requests (a repetitive toy model: the output cycles, so
 // n-gram matches appear and the cost model switches between the two); several slots at once
 void testDFlashNgram() {
@@ -2846,6 +2907,43 @@ void testDecodeFloor() {
                     rev_off.main_end_ms, rev_off.last_other_end_ms, rev.main_end_ms, rev.last_other_end_ms);
     CHECK(g_log.count("decode floor | 150 tok/s per decoding slot (1 decoding)") >= 1);
     CHECK(rev.last_other_end_ms > rev_off.last_other_end_ms + 100);
+}
+
+// arch025-mutgap2 (mutant e2-floor-flag): the floor measures its prefill rate. A prefill forward that ran under the floor's
+// row budget (runPrefill marks it) is timed by noteFloor (rows/s, with the decode cycle estimate); the floor's line, printed
+// at most every 10 s, then shows the measured rate ("prefill N rows/s") and the decode cycles to hold between forwards.
+// Without the mark nothing is ever measured and every line says "not measured yet". The main request decodes one token per
+// cycle (all drafts wrong, 200 tok/s at 5 ms) for 2600 tokens (> 12 s), two long prompts prefill next to it (2 x 12288 rows
+// at 500 us/row ~ 12 s); the second line comes ~10 s after the first.
+void testDecodeFloorMeasured() {
+    ServerSetup su = baseSetup();
+    su.mc.parallel = 4;
+    su.mc.slot_ctx = 16384;
+    su.mc.pool_tokens = 65536;
+    su.mc.prefill_us_per_row = 500;
+    su.mc.cycle_us = 5000;
+    su.mc.draft_miss = 1.0;  // every draft wrong: one token per cycle
+    su.eo.ngram = false;
+    su.eo.decode_min_tps = 150;
+    TestServer srv(su);
+    const auto pm = makePrompt(300, 960);
+    std::vector<std::vector<std::uint32_t>> po;
+    for (std::uint32_t i = 0; i < 2; ++i) po.push_back(makePrompt(12288, 970 + i));
+    g_log.clear();
+    std::string got_main;
+    std::thread tm([&] { got_main = streamText(srv.post("/v1/completions", completionBody(pm, 2600, true)), false); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(60));  // main is decoding
+    std::vector<std::string> got(2);
+    std::vector<std::thread> th;
+    for (std::uint32_t i = 0; i < 2; ++i)
+        th.emplace_back([&, i] { got[i] = completionText(srv.post("/v1/completions", completionBody(po[i], 4))); });
+    for (auto& t : th) t.join();
+    tm.join();
+    CHECK_EQ(got_main, decode(srv.model().greedyReference(pm, 2600, true)));
+    for (std::uint32_t i = 0; i < 2; ++i) CHECK_EQ(got[i], decode(srv.model().greedyReference(po[i], 4, true)));
+    CHECK(g_log.count("decode floor | 150 tok/s per decoding slot (1 decoding)") >= 2);  // the first, and one 10 s later
+    CHECK(g_log.count(" rows/s)") >= 1);                                                  // a measured prefill rate
+    CHECK_EQ(srv.model().poison(), 0u);
 }
 
 // small KV pool: idle slots are evicted (LRU) and requests still match
@@ -3958,6 +4056,89 @@ void testRestoreConcurrent() {
     CHECK(st.restores_ram >= 1);
     CHECK_EQ(srv.model().poison(), 0u);
     CHECK_EQ(srv.model().hidMismatch(), 0u);
+}
+
+// arch025-mutgap2 (mutant e2-requeue-active): item T3. Three requests on the same evicted prefix reach the engine in ONE
+// loop iteration (the loop is held while they queue up): the first starts the restore, the other two are admitted with
+// it, find a restore of their prefix in progress and go back to the queue (startAdmitted). A request that goes back is
+// not active: /health "active" counts only running requests, so once everything is answered it is 0 again (a requeue that
+// kept the admit's count would leave the server "busy" for ever: here 2 too many).
+void testRestoreRequeueActive() {
+    ServerSetup su = baseSetup();
+    su.mc.parallel = 4;
+    su.mc.slot_ctx = 8192;
+    su.mc.pool_tokens = 16384;
+    su.tier = true;
+    su.tier_min = 512;
+    TestServer srv(su);
+    const auto base = makePrompt(3000, 601);
+    srv.post("/v1/completions", completionBody(base, 8));
+    for (std::uint32_t i = 0; i < 4; ++i) srv.post("/v1/completions", completionBody(makePrompt(3500, 610 + i), 8));  // base evicted from VRAM
+    auto b = base;
+    {
+        const auto o = srv.model().greedyReference(base, 8, true);
+        b.insert(b.end(), o.begin(), o.end());
+    }
+    std::vector<std::vector<std::uint32_t>> ps;
+    for (std::uint32_t i = 0; i < 3; ++i) ps.push_back(makePrompt(3000 + 8 + 200, 620 + i, b));
+    g_log.clear();
+    // hold the engine loop (a call on the loop thread) until the three requests are queued
+    std::atomic<bool> entered{false}, release{false};
+    std::thread holder([&] {
+        srv.onEngine([&] {
+            entered = true;
+            for (int i = 0; i < 5000 && !release.load(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        });
+    });
+    for (int i = 0; i < 2000 && !entered.load(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    CHECK(entered.load());
+    std::vector<std::string> got(3);
+    std::vector<std::thread> th;
+    for (std::uint32_t i = 0; i < 3; ++i)
+        th.emplace_back([&, i] { got[i] = completionText(srv.post("/v1/completions", completionBody(ps[i], 16))); });
+    for (int i = 0; i < 2000 && srv.engine().health().queued < 3; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    CHECK_EQ(srv.engine().health().queued, static_cast<std::size_t>(3));
+    release = true;
+    holder.join();
+    for (auto& t : th) t.join();
+    for (std::uint32_t i = 0; i < 3; ++i) CHECK_EQ(got[i], decode(srv.model().greedyReference(ps[i], 16, true)));
+    CHECK(g_log.count("waiting for the restore") >= 1);  // the two followers went back to the queue
+    CHECK(srv.tierStats().restores_ram >= 1);
+    for (int i = 0; i < 500 && (srv.engine().health().active != 0 || srv.engine().health().queued != 0); ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    CHECK_EQ(srv.engine().health().active, 0u);
+    CHECK_EQ(srv.engine().health().queued, static_cast<std::size_t>(0));
+    CHECK_EQ(srv.model().poison(), 0u);
+}
+
+// arch025-mutgap2 (mutant e2-idle-stop): the idle engine is stopped (Ctrl+C while nothing runs). idleWait flushes the
+// tier once and ends runLoop; a loop that went on one more iteration would flush (and print the tier line) a second time.
+void testIdleStopFlushOnce() {
+    ServerSetup su = baseSetup();
+    su.mc.parallel = 2;
+    su.mc.slot_ctx = 8192;
+    su.mc.pool_tokens = 16384;
+    su.tier = true;
+    su.tier_min = 512;
+    TestServer srv(su);
+    const auto p = makePrompt(3000, 951);
+    g_log.clear();
+    auto r = srv.post("/v1/completions", completionBody(p, 8));
+    CHECK_EQ(completionText(r), decode(srv.model().greedyReference(p, 8, true)));
+    for (int i = 0; i < 500 && (srv.engine().health().active != 0 || srv.engine().health().queued != 0); ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    CHECK_EQ(srv.engine().health().active, 0u);
+    // the idle engine polls the tier and prints its line once when the tier work is done; wait until that settled
+    std::size_t n0 = g_log.count("kv tier | RAM");
+    for (int i = 0, stable = 0; i < 100 && stable < 10; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        const std::size_t n = g_log.count("kv tier | RAM");
+        stable = n == n0 ? stable + 1 : 0;
+        n0 = n;
+    }
+    CHECK(n0 >= 1);
+    srv.stopEngine();  // the engine sits in idleWait: stop() ends it there
+    CHECK_EQ(g_log.count("kv tier | RAM"), n0 + 1);  // exactly one flush, one tier line
 }
 
 // sampling: seeded requests reproduce (alone and under load), seeds differ
@@ -6943,6 +7124,7 @@ void testTierBridgeRestore() {
         r.nb.eventSync(dst->st.spill_ev.get());
         CHECK_EQ(r.tier->verifySpans(x, r.tb->spans()).bad, static_cast<std::uint64_t>(0));
 
+        g_log.clear();  // (the verify lines of the two restores below are counted)
         // (6) concurrent: two slots restore the same entry; the second starts while the first's tail is still open
         auto a = r.slot({}, {0, 0}, {0, 0}, 0);
         auto b = r.slot({}, {0, 0}, {0, 0}, 0);
@@ -6976,6 +7158,11 @@ void testTierBridgeRestore() {
             CHECK(a->sp.cache_tokens == b->sp.cache_tokens);
             CHECK_EQ(x->pin, 0u);
             CHECK_EQ(r.tier->stats.restores_ram, static_cast<std::uint64_t>(3));
+            // arch025-mutgap2 (mutants tier-verify-restore-skipped, tier-verify-tail-throws): EVERY restore is verified (the 2nd and 3rd
+            // restore of the entry too), none reports a difference or an error
+            CHECK_EQ(g_log.count("kv tier verify: restore of " + std::to_string(mt2->e->n_tok) + " tok byte-identical"), static_cast<std::size_t>(2));
+            CHECK_EQ(g_log.count("kv tier verify: restore tail: "), static_cast<std::size_t>(0));  // tail: error / differ
+            CHECK_EQ(g_log.count("tok: error (") + g_log.count("pieces differ from the entry"), static_cast<std::size_t>(0));
         }
 
         // (7) a restore copy throws (F1 path): the restore fails cleanly (fence, drop_cache, end), the entry is not
@@ -8176,6 +8363,8 @@ int main(int argc, char** argv) {
         {"concurrency_nomtp", [] { testConcurrency(4, 8, false); }},
         {"dflash_greedy", testDFlashGreedy},
         {"dflash_relax_exact", testDFlashRelaxExact},
+        {"relax_mtp_runner_up", testRelaxMtpRunnerUp},  // arch025-mutgap2
+        {"dflash_short_capture", testDFlashShortCapture},
         {"dflash_ngram", testDFlashNgram},
         {"dflash_rollback", testDFlashRollback},
         {"dflash_tier", testDFlashTier},
@@ -8191,6 +8380,7 @@ int main(int argc, char** argv) {
         {"concurrency16_slot2", [] { testConcurrency(16, 24, true, 0, 2); }},
         {"decode_floor_math", testDecodeFloorMath},
         {"decode_floor", testDecodeFloor},
+        {"decode_floor_measured", testDecodeFloorMeasured},
         {"pool", testPoolPressure},
         {"sys_prompt", testSharedSystemPrompt},
         {"tiers", testTiers},
@@ -8199,6 +8389,8 @@ int main(int argc, char** argv) {
         {"idle_write", testIdleWrite},
         {"close_reused", testCloseReused},
         {"restore_conc", testRestoreConcurrent},
+        {"restore_requeue_active", testRestoreRequeueActive},
+        {"idle_stop_flush_once", testIdleStopFlushOnce},
         {"restore_throws", testRestoreThrows},
         {"tier_inplace", testTierInPlaceRegen},
         {"tier_precise_cont", testTierPreciseContinuation},
