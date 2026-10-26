@@ -7,6 +7,7 @@
 #include "engine.h"
 
 #include "log.h"
+#include "whirl/common.h"  // writeFile (was reached through model.h)
 
 #include <algorithm>
 

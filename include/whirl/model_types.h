@@ -1,0 +1,304 @@
+// The qwen35 model types the server core sees (arch025-M3, R-8c): the shared constants, the model configuration,
+// the batched-step segments and the MTP / n-gram draft policy types, without the Model class (include/whirl/model.h,
+// which includes this header). whirl_server_core (cmake/server.cmake) includes this instead of model.h
+// (tools/gates/pending_scan.py rule include, blocking since M3), like llama.h's opaque `struct llama_context;`.
+// SPDX-License-Identifier: Apache-2.0
+//
+// The declarations were moved verbatim from model.h; the draft policy part moves on to src/spec/policy.* in M4.
+
+#pragma once
+
+#include "whirl/hip.h"
+
+#include <algorithm>
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <optional>
+#include <span>
+#include <unordered_map>
+#include <vector>
+
+namespace whirl::gguf {
+class File;
+}  // namespace whirl::gguf
+
+namespace whirl::qwen35 {
+
+using hip::DevPtr;
+
+class Model;  // include/whirl/model.h
+
+// ---------------------------------------------------------------------------
+// constants (shared with the kernels; model.h checks them against kernels_abi.h)
+
+constexpr std::uint32_t max_batch_default = 4096;
+// Largest prefill batch a model can be loaded with (WHIRL_PREFILL_BATCH).
+constexpr std::uint32_t max_batch_limit = 16384;
+// Largest batch served by the multi-token int8 GEMV / small-batch kernels.
+constexpr std::uint32_t max_small_batch = 16;
+// Most rows of one batched verify / MTP step over several sequences (dense models with the
+// wide GEMV kernels; each sequence still has at most max_small_batch rows).
+constexpr std::uint32_t max_verify_rows = 32;
+// Most MTP drafts per verify cycle.
+constexpr std::uint32_t max_drafts = 10;
+// Recurrent-state segments / snapshots per segment in the fused DeltaNet kernels.
+constexpr std::uint32_t gdn_max_seg = 16;
+constexpr std::uint32_t gdn_max_snap = 15;
+// Paged KV cache page size (tokens).
+constexpr std::uint32_t kv_page = 256;
+// Most n-gram drafts per cycle.
+constexpr std::uint32_t max_ng_drafts = gdn_max_snap;
+
+// Control buffer layout (out_tok, i32 words per sequence).
+constexpr std::uint32_t ctl_rows = 0;     // [0, 16): per-row argmax of a verify
+constexpr std::uint32_t ctl_drafts = 16;  // [16, 32): draft tokens
+constexpr std::uint32_t ctl_probs = 32;   // [32, 48): draft probabilities (f32)
+constexpr std::uint32_t ctl_nd = 48;      // drafts kept this cycle (device p-min cutoff)
+constexpr std::uint32_t ctl_stop = 49;    // draft chain stopped
+constexpr std::uint32_t ctl_words = 64;
+
+// ---------------------------------------------------------------------------
+// configuration
+
+struct Config {
+    std::uint32_t n_layer = 0;
+    std::uint32_t n_embd = 0;
+    std::uint32_t n_ff = 0;  // MoE: the shared expert's width
+    std::uint32_t n_head = 0;
+    std::uint32_t n_head_kv = 0;
+    std::uint32_t head_dim = 0;
+    std::uint32_t n_rot = 0;
+    float rope_base = 0;
+    float eps = 0;
+    std::uint32_t interval = 4;
+    std::uint32_t d_conv = 0;
+    std::uint32_t d_state = 0;
+    std::uint32_t n_k_heads = 0;
+    std::uint32_t n_v_heads = 0;
+    std::uint32_t d_inner = 0;
+    std::uint32_t n_vocab = 0;
+    std::uint32_t n_nextn = 0;  // MTP blocks after the trunk layers
+    bool moe = false;
+    std::uint32_t n_expert = 0;
+    std::uint32_t n_expert_used = 0;
+    std::uint32_t n_ff_exp = 0;
+    // vision: multi-section RoPE sections (rope.dimension_sections; image prompts only)
+    std::array<std::uint32_t, 4> rope_sections = {0, 0, 0, 0};
+
+    // Throws ModelError("UnsupportedArch") unless general.architecture is
+    // qwen35 or qwen35moe, and ModelError("UnsupportedConfig") when the
+    // hyper-parameters are zero, inconsistent or outside what the kernels
+    // handle (e.g. nextn_predict_layers >= block_count, head_dim > 256).
+    static Config fromGguf(const gguf::File& f);
+    // Checks the type (known, non-empty) and ne[] of every tensor Model::load
+    // reads against this config, before any GPU work: ModelError("MissingTensor"),
+    // ("UnsupportedTensorType") or ("UnsupportedTensorShape"). Host-only.
+    void validateTensors(const gguf::File& f) const;
+    const char* archName() const { return moe ? "qwen35moe" : "qwen35"; }
+    bool isAttn(std::uint32_t il) const { return (il + 1) % interval == 0; }
+    std::uint32_t convCh() const { return 2 * n_k_heads * d_state + d_inner; }
+    std::uint32_t headV() const { return d_inner / n_v_heads; }
+    // The DeltaNet (GDN) kernels are written for a 4-tap conv, a 128-wide key/state dimension and
+    // value columns in groups of 32 (conv state rows, gdn_seq_128's compile-time DK, grid.y =
+    // headV / 32). Anything else would read / write past the state buffers or skip columns.
+    bool gdnShapeSupported() const { return d_conv == 4 && d_state == 128 && headV() >= 32 && headV() % 32 == 0; }
+};
+
+// ---------------------------------------------------------------------------
+// batched steps
+
+// Batched verify segment: sequence `seq` runs [next, drafts 0 .. nd) at pos ..
+struct VSeg {
+    std::uint32_t seq = 0, next = 0, nd = 0, pos = 0;
+    std::span<const std::uint32_t> drafts = {};  // empty: drafts from the control area (MTP)
+};
+// One sequence's prefill chunk in a segmented prefill.
+struct PSeg {
+    std::uint32_t seq = 0;
+    std::span<const std::uint32_t> tokens;
+    std::uint32_t pos0 = 0;
+    std::size_t off = 0;
+    std::size_t n = 0;
+    std::optional<DevPtr> prev_hidden;
+};
+struct PRows {
+    std::uint32_t seq = 0, r0 = 0, n = 0, pos0 = 0;
+};
+// Batched MTP step segment.
+struct MSeg {
+    std::uint32_t seq = 0;
+    std::span<const std::uint32_t> pend = {};
+    std::uint32_t pend_pos = 0;
+    std::uint32_t pos = 0;
+};
+
+struct BatchPlan {
+    std::span<const VSeg> segs;
+    std::array<std::uint32_t, gdn_max_seg> snap_base{};
+};
+
+// ---------------------------------------------------------------------------
+// MTP draft-count control and n-gram (prompt-lookup) drafting (the rest of it, mtpDefaults and the draft-head
+// vocabulary subset: model.h)
+
+struct DraftAccept {
+    std::array<float, max_ng_drafts> alpha;
+    explicit DraftAccept(float a = 0.75f) { alpha.fill(a); }
+    void update(std::uint32_t nd_dev, std::uint32_t acc) { updateRate(nd_dev, acc, 0.1f); }
+    void updateRate(std::uint32_t nd_dev, std::uint32_t acc, float r);
+    float expected(std::uint32_t nd) const;
+};
+
+struct DraftTiming {
+    std::array<float, max_ng_drafts + 1> t{};
+    std::array<std::uint32_t, max_ng_drafts + 1> n{};
+    float prior_slope = 0.12f;
+    bool skip_first = false;
+    std::array<bool, max_ng_drafts + 1> seen{};
+    void update(std::uint32_t nd, float ms);
+    std::optional<float> estimate(std::uint32_t nd) const;
+};
+
+// Draft count in [1, max] maximizing sum(E) / T (see the prototype notes).
+std::uint32_t pickDrafts(std::span<const DraftAccept* const> accepts, const DraftTiming& timing, std::uint32_t max,
+                         std::uint32_t cycle, std::uint32_t prev);
+
+// ---- per-slot draft allocation (T4-1): pure model code, not wired into the engine yet
+
+// One verify cycle as the cost model sees it.
+struct CycleFeat {
+    float rows = 0;    // R: verify rows of all sequences
+    float steps = 0;   // S: sequential MTP draft steps (the longest MTP draft)
+    float row_ctx = 0; // sum over sequences of rows_i * context_i, in k tokens
+};
+
+// Cycle time for one number of decoding slots: T ~ a + b R + c S + e [R > 16] + f sum(rows_i ctx_i),
+// fitted by recursive least squares with forgetting factor 0.98.
+class CycleCost {
+public:
+    static constexpr std::uint32_t n_par = 5;
+    static constexpr double forget = 0.98;
+    CycleCost() { reset(); }
+    void reset();
+    // seed from the uniform-allocation timing of `slots` decoding slots (DraftTiming points or its prior)
+    void prior(const DraftTiming& tm, std::uint32_t slots, float ctx_k = 0);
+    void observe(const CycleFeat& x, float ms);
+    float predict(const CycleFeat& x) const;
+    std::uint32_t samples() const { return n_obs; }
+
+private:
+    static std::array<double, n_par> feat(const CycleFeat& x);
+    void rls(const std::array<double, n_par>& z, double y);
+    std::array<double, n_par> th{};
+    std::array<std::array<double, n_par>, n_par> P{};
+    std::uint32_t n_obs = 0;
+};
+
+// Per-slot acceptance with the T4-1 additions on top of DraftAccept: faster start (r = 0.2 for 16
+// cycles), unobserved positions drift towards the last observed rate x 0.95 (rate 0.02; a fully
+// accepted chain is censored, not a ceiling, so it drifts without the 0.95), observation counts
+// for shrinkage towards a global pool.
+struct SlotAccept {
+    static constexpr std::uint32_t n_cap = 32;
+    static constexpr float pool_weight = 4.0f;
+    static constexpr float drift_rate = 0.02f;
+    static constexpr float drift_decay = 0.95f;
+    DraftAccept a;
+    std::array<std::uint32_t, max_ng_drafts> n{};
+    std::uint32_t cycles = 0;
+    explicit SlotAccept(float a0 = 0.75f) : a(a0) {}
+    void observe(std::uint32_t nd_dev, std::uint32_t acc);
+    // alpha_eff[k] = (n_k alpha_k + 4 alpha_pool[k]) / (n_k + 4)
+    DraftAccept effective(const DraftAccept& pool) const;
+};
+
+struct AllocSlot {
+    const DraftAccept* acc = nullptr; // MTP slot: acceptance (alpha_eff); unused for n-gram slots
+    std::uint32_t cap = 1;            // max drafts of this slot
+    float ctx_k = 0;                  // context length, k tokens
+    std::uint32_t ng_rows = 0;        // > 0: n-gram slot with this many verify rows (fixed)
+    float ng_e = 0;                   // n-gram slot: expected tokens of its fixed draft
+};
+
+struct AllocBudget {
+    std::uint32_t rows = 16;           // verify rows available in total
+    std::uint32_t snaps = 0xffffffffu; // snapshot sets free for drafts (0xffffffff: replay, no limit)
+};
+
+struct AllocResult {
+    std::vector<std::uint32_t> d;     // drafts per slot (0 for n-gram slots)
+    float score = 0;                  // sum(E) / T (tokens per ms)
+    std::uint32_t rounds = 0;         // local-search rounds used
+    bool uniform = true;              // true: the uniform allocation u was returned
+};
+
+// Per-slot draft counts maximizing sum(E_i) / T, starting from the uniform count `uniform`
+// (capped per slot): local search over +1 / -1 / swap moves, at most 16 rounds, subject to
+// sum(d) <= min(rows free, snapshots free), 1 <= d_i <= cap_i and each slot keeping at least
+// (1 - x) of its uniform-allocation throughput. Keeps `prev` when it scores >= 0.98 of the best,
+// and returns u unless the best beats it by more than 1%, with < 2 MTP slots, < 16 cost samples,
+// or acceptances so close that u is already optimal.
+AllocResult allocDrafts(std::span<const AllocSlot> slots, const CycleCost& cost, AllocBudget budget, std::uint32_t uniform,
+                        std::span<const std::uint32_t> prev, float x = 0.03f);
+
+class Ngram {
+public:
+    static constexpr std::uint32_t none = 0xffffffffu;
+    static constexpr std::size_t long_len = 12;
+    static constexpr std::uint32_t max_cands = 16;
+    static constexpr std::uint32_t max_match = 256;
+    struct Match {
+        std::size_t n = 0;
+        std::uint32_t mlen = 0;
+    };
+    // token id -> the same text with CR LF as LF (empty: none)
+    std::vector<std::uint32_t> norm;
+
+    void reset();
+    Match lookup(std::span<const std::uint32_t> toks, std::uint32_t min_match, std::span<std::uint32_t> out);
+
+private:
+    std::uint32_t nt(std::uint32_t t) const { return t < norm.size() ? norm[t] : t; }
+    std::unordered_map<std::uint64_t, std::uint32_t> map_s, map_l;
+    std::vector<std::uint32_t> prev_s, prev_l, ntoks;
+    std::size_t indexed = 2;
+    std::size_t cur_q = 0, cur_n = 0;
+    std::size_t gen_from = 0;
+    bool gen_cr = false;
+};
+
+class NgramPolicy {
+public:
+    Ngram ng;
+    // prior cost of one more verify row relative to a 1-draft MTP cycle, used until the n-gram
+    // cycles are timed (per device: MtpDefaults::ngram_slope; set it before reset())
+    float verify_slope = 0.015f;
+    std::array<DraftAccept, 3> acc = priorAcc();
+    DraftTiming timing = priorTiming(verify_slope);
+    static constexpr float acc_rate = 0.2f;
+
+    static std::uint32_t bucket(std::uint32_t mlen) { return mlen >= 24 ? 2 : (mlen >= 8 ? 1 : 0); }
+    void reset();
+    void observe(std::span<const std::uint32_t> toks);
+    Ngram::Match propose(std::span<const std::uint32_t> toks, std::uint32_t min_match, std::span<std::uint32_t> out);
+    std::uint32_t choose(std::size_t n, std::uint32_t mlen, float mtp_score, const DraftTiming& mtp_timing) const;
+
+private:
+    struct Pending {
+        std::size_t at = 0;
+        std::uint32_t n = 0, b = 0;
+        std::array<std::uint32_t, max_ng_drafts> toks{};
+    };
+    static std::array<DraftAccept, 3> priorAcc() { return {DraftAccept(0.35f), DraftAccept(0.7f), DraftAccept(0.85f)}; }
+    static DraftTiming priorTiming(float slope) {
+        DraftTiming t;
+        t.prior_slope = slope;
+        t.skip_first = true;
+        return t;
+    }
+    std::array<Pending, 16> pend{};
+    std::uint32_t n_pend = 0;
+};
+
+}  // namespace whirl::qwen35

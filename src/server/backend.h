@@ -2,15 +2,18 @@
 // engine (scheduling, prefix cache, shared prefix checkpoints, host tiers,
 // sampling) can run against a host-memory mock in tests. The production
 // implementation (backend_qwen35.cpp) forwards to whirl::qwen35::Model
-// (include/whirl/model.h, owned by the model area); the semantics of every
+// (include/whirl/model.h, owned by the model area; this header and the server core see only
+// whirl/model_types.h, arch025-M3); the semantics of every
 // call are those of the Model member of the same name.
 // SPDX-License-Identifier: Apache-2.0
 
 #pragma once
 
 #include "device/backend.h"
+#include "model/qwen35/kv.h"  // qwen35::KvArray (arch025-M2)
 #include "vision_iface.h"
-#include "whirl/model.h"
+#include "whirl/spec_sample.h"  // spec::DraftSample (was reached through model.h)
+#include "whirl/model_types.h"  // not whirl/model.h: the server core sees the model types only (arch025-M3)
 
 #include <array>
 #include <cstdint>

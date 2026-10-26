@@ -3,7 +3,7 @@
 #include "server/tier_bridge.h"
 
 #include "server/log.h"
-#include "whirl/model.h"
+#include "whirl/model_types.h"
 
 #include <algorithm>
 #include <array>

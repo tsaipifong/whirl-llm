@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """exec_dump_check.py (arch025-S0a): every scalar data member of qwen35::Model (include/whirl/model.h; since arch025-M1
 also of its base qwen35::Weights, src/model/qwen35/weights.h; since arch025-M2 of its bases qwen35::KvPool and
-qwen35::SeqTable, src/model/qwen35/kv.h) is either
+qwen35::SeqTable, src/model/qwen35/kv.h; since arch025-M3 of its private bases qwen35::Scratch and qwen35::TuneTable,
+src/model/qwen35/scratch.h / tune_table.h, read as m.scratch().<name> / m.tuneTable().<name>) is either
 printed by WHIRL_DUMP_EXEC (src/model/exec_dump.cpp reads it as m.<name>) or named here as per-call state. A member
 added to Model without either fails, so the S0b-2 dump cannot silently miss a new numerics flag.
 
@@ -34,6 +35,8 @@ CLASS_MODEL = re.compile(r"^class Model\b[^{;]*\{", re.M)
 STRUCT_WEIGHTS = re.compile(r"^struct Weights \{", re.M)
 CLASS_KVPOOL = re.compile(r"^class KvPool \{", re.M)
 STRUCT_SEQTABLE = re.compile(r"^struct SeqTable \{", re.M)
+STRUCT_SCRATCH = re.compile(r"^struct Scratch \{", re.M)  # arch025-M3
+STRUCT_TUNE = re.compile(r"^struct TuneTable \{", re.M)  # arch025-M3
 
 
 def body_of(text: str, head: re.Pattern) -> str:
@@ -49,7 +52,8 @@ def members(model_h: str, weights_h: str = "") -> list[str]:
     if weights_h:  # arch025-M1: class Model : public Weights (src/model/qwen35/weights.h)
         body += "\n" + body_of(weights_h, STRUCT_WEIGHTS)
         # arch025-M2: ... public KvPool, public SeqTable (src/model/qwen35/kv.h, appended by weights_text)
-        for head in (CLASS_KVPOOL, STRUCT_SEQTABLE):
+        # arch025-M3: ... private Scratch, private TuneTable (scratch.h / tune_table.h)
+        for head in (CLASS_KVPOOL, STRUCT_SEQTABLE, STRUCT_SCRATCH, STRUCT_TUNE):
             if head.search(weights_h):
                 body += "\n" + body_of(weights_h, head)
     out = []
@@ -74,7 +78,7 @@ def check(model_h: str, dump_cpp: str, out=print, weights_h: str = "") -> int:
     if len(ms) < 50:
         out(f"exec dump check: FAIL (usage: only {len(ms)} members parsed from model.h)")
         return 2
-    used = set(re.findall(r"\bm\.([a-z_][a-z0-9_]*)", dump_cpp)) | set(re.findall(r"WD_[BU]\(([a-z_][a-z0-9_]*)\)", dump_cpp))
+    used = set(re.findall(r"\bm\.(?:scratch\(\)\.|tuneTable\(\)\.)?([a-z_][a-z0-9_]*)", dump_cpp)) | set(re.findall(r"WD_(?:[BU]|SU|TB)\(([a-z_][a-z0-9_]*)\)", dump_cpp))
     missing = [n for n in ms if n not in used and n not in PER_CALL and n not in BY_DESIGN]
     for n in missing:
         out(f"  NOT DUMPED Model::{n}: print it in src/model/exec_dump.cpp or list it in PER_CALL here (per-call state)")
@@ -126,6 +130,14 @@ def selftest(root: str) -> int:
         sat = STRUCT_SEQTABLE.search(w).end() + 1
         cases.append(("a new SeqTable member fails", h, d, 1, w[:sat] + "    bool m2_seq_flag = false;\n" + w[sat:]))
         cases.append(("kv_fmt dropped from the dump fails", h, d.replace("m.kv_fmt", "m.kvf_gone"), 1, w))
+    if w and STRUCT_SCRATCH.search(w) and STRUCT_TUNE.search(w):  # arch025-M3: the private bases count too
+        cat = STRUCT_SCRATCH.search(w).end() + 1
+        cases.append(("a new Scratch scalar fails", h, d, 1, w[:cat] + "    std::uint32_t m3_new_rows = 0;\n" + w[cat:]))
+        cases.append(("dq_rows dropped from the dump fails", h, d.replace("WD_SU(dq_rows);", ""), 1, w))
+        tat = STRUCT_TUNE.search(w).end() + 1
+        cases.append(("a new TuneTable member fails", h, d, 1, w[:tat] + "    bool m3_tune_flag = false;\n" + w[tat:]))
+        cases.append(("tune_cold dropped from the dump fails", h, d.replace("WD_TB(tune_cold);", ""), 1, w))
+        cases.append(("tune_mask dropped from the dump fails", h, d.replace("m.tuneTable().tune_mask", "m.tuneTable().tm_gone"), 1, w))
     if drop not in d:
         print(f"exec dump check selftest: FAIL (exec_dump.cpp has no {drop.strip()!r} line to drop)")
         return 1
@@ -143,9 +155,9 @@ def selftest(root: str) -> int:
 
 
 def weights_text(root: str) -> str:
-    # the bases' headers: weights.h (arch025-M1), kv.h (arch025-M2)
+    # the bases' headers: weights.h (arch025-M1), kv.h (arch025-M2), scratch.h / tune_table.h (arch025-M3)
     out = ""
-    for f in ("weights.h", "kv.h"):
+    for f in ("weights.h", "kv.h", "scratch.h", "tune_table.h"):
         p = os.path.join(root, "src", "model", "qwen35", f)
         if os.path.exists(p):
             out += open(p, encoding="utf-8").read() + "\n"

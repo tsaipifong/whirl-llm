@@ -29,8 +29,10 @@
 #include <format>
 #include <iterator>
 #include <regex>
+#include <set>
 #include <span>
 #include <stdexcept>
+#include <tuple>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -3127,11 +3129,177 @@ void testSeqTableMapPages() {
     check(ups.size() == 2 && ups[1].dst == 0x40000 + 5 * 4, "seq table: the last pages of a sequence");
 }
 
+// ---- arch025-M3: Scratch / TuneTable private bases, the tune cache text, Model::LayerSubset
+
+// Matrices of a layer in tuneMats order, written here from the definition (not by calling Model::tuneMats)
+std::vector<q::Mat*> m3MatsOf(q::Layer& L) {
+    std::vector<q::Mat*> v;
+    if (L.kind == q::LayerKind::attn) v = {&L.attn.q, &L.attn.k, &L.attn.v, &L.attn.o};
+    else v = {&L.gdn.qkv, &L.gdn.gate, &L.gdn.beta, &L.gdn.alpha, &L.gdn.out};
+    v.push_back(&L.ffn_gate);
+    v.push_back(&L.ffn_up);
+    v.push_back(&L.ffn_down);
+    return v;
+}
+
+// layers with a few shared shapes (the text has one line per distinct (bucket, type, rows, cols))
+void m3Layers(q::Model& m, std::uint32_t seed, bool with_tune) {
+    m.layers.assign(5, q::Layer{});
+    std::uint32_t s = seed;
+    auto rnd = [&s] { s = s * 1664525u + 1013904223u; return s >> 8; };
+    const gguf::GgmlType tys[] = {gguf::GgmlType::q4_k, gguf::GgmlType::q6_k, gguf::GgmlType::mxfp4, gguf::GgmlType::f16};
+    for (std::size_t il = 0; il < m.layers.size(); ++il) {
+        q::Layer& L = m.layers[il];
+        L.kind = (il + 1) % 4 == 0 ? q::LayerKind::attn : q::LayerKind::gdn;
+        for (q::Mat* w : m3MatsOf(L)) {
+            w->ty = tys[rnd() % 4];
+            w->nrows = 256 * (1 + rnd() % 3);
+            w->ncols = 512 * (1 + rnd() % 2);
+        }
+    }
+    // a choice per (shape, bucket), as autotune writes them (matrices of one shape share their choices)
+    if (with_tune)
+        for (q::Layer& L : m.layers)
+            for (q::Mat* w : m3MatsOf(L))
+                for (std::size_t bb = 0; bb < q::n_tune; ++bb)
+                    w->tune[bb] = static_cast<std::uint8_t>((seed * 131u + static_cast<std::uint32_t>(w->ty) * 31u + w->nrows * 7u + w->ncols + bb * 17u) % q::n_choices);
+}
+
+std::string m3ExpectedText(q::Model& m) {
+    std::string out;
+    std::set<std::tuple<std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t>> seen;
+    for (q::Layer& L : m.layers)
+        for (q::Mat* w : m3MatsOf(L))
+            for (std::uint32_t b = 0; b < q::n_tune; ++b)
+                if (seen.insert({b, static_cast<std::uint32_t>(w->ty), w->nrows, w->ncols}).second)
+                    out += std::format("{} {} {} {} {}\n", b, static_cast<std::uint32_t>(w->ty), w->nrows, w->ncols, w->tune[b]);
+    return out;
+}
+
+std::vector<std::array<std::uint8_t, q::n_tune>> m3Tunes(q::Model& m) {
+    std::vector<std::array<std::uint8_t, q::n_tune>> v;
+    for (q::Layer& L : m.layers)
+        for (q::Mat* w : m3MatsOf(L)) v.push_back(w->tune);
+    return v;
+}
+
+void testTuneTable() {
+    // the private bases: no conversion outside the model, read-only scratch view, named tune table
+    static_assert(!std::is_convertible_v<q::Model*, q::Scratch*>, "Scratch is a private base of Model");
+    static_assert(!std::is_convertible_v<q::Model*, q::TuneTable*>, "TuneTable is a private base of Model");
+    static_assert(std::is_same_v<decltype(std::declval<const q::Model&>().scratch()), const q::Scratch&>);
+    static_assert(std::is_same_v<decltype(std::declval<q::Model&>().tuneTable()), q::TuneTable&>);
+    {
+        q::Model m;
+        const q::TuneTable& t = m.tuneTable();
+        check(t.tune_mask == ~0ull && !t.tune_cold, "tune table: defaults tune_mask ~0, tune_cold false");
+        check(t.gemv_r == q::defaultGemvR() && t.gemv_w == q::defaultGemvW() && t.gemv_w_head == q::defaultGemvWHead(),
+              "tune table: GEMV tables start at the defaults");
+        const q::Scratch& s = m.scratch();
+        check(s.x == 0 && s.logits == 0 && s.mm_class == 1 && s.ff_scratch == 0 && s.dq_rows == 0, "scratch: initial values");
+    }
+    for (std::uint32_t seed = 1; seed <= 40; ++seed) {
+        q::Model a;
+        m3Layers(a, seed, true);
+        const std::string text = a.writeTune();
+        check(text == m3ExpectedText(a), std::format("tune text: writeTune == the definition (seed {})", seed));
+        std::vector<q::Mat*> mats;
+        for (q::Layer& L : a.layers)
+            for (q::Mat* w : m3MatsOf(L)) mats.push_back(w);
+        check(q::tuneText(mats) == text, "tune text: tuneText over the layers' matrices == writeTune");
+        // round trip into the same shapes
+        q::Model b;
+        m3Layers(b, seed, false);
+        check(b.readTune(text, q::n_tune) && m3Tunes(b) == m3Tunes(a), "tune text: readTune(writeTune) restores every choice");
+        // buckets [0, 2) only (the old tune cache)
+        q::Model c;
+        m3Layers(c, seed, false);
+        bool ok2 = c.readTune(text, 2);
+        bool only2 = true;
+        auto ta = m3Tunes(a), tc = m3Tunes(c);
+        for (std::size_t i = 0; i < ta.size(); ++i)
+            for (std::size_t bb = 0; bb < q::n_tune; ++bb) only2 = only2 && tc[i][bb] == (bb < 2 ? ta[i][bb] : 0);
+        check(ok2 && only2, "tune text: n_buckets 2 applies buckets 0 and 1 only");
+        // CRLF line ends and blank lines read the same
+        std::string crlf;
+        for (char ch : text) crlf += ch == '\n' ? std::string("\r\n\r\n") : std::string(1, ch);
+        q::Model d;
+        m3Layers(d, seed, false);
+        check(d.readTune(crlf, q::n_tune) && m3Tunes(d) == ta, "tune text: CRLF and blank lines");
+        // malformed: nothing applied
+        for (const std::string bad : {text + "1 2 3\n", text + std::format("0 2 256 512 {}\n", q::n_choices)}) {
+            q::Model e;
+            m3Layers(e, seed, false);
+            const auto before = m3Tunes(e);
+            check(!e.readTune(bad, q::n_tune) && m3Tunes(e) == before, "tune text: malformed line / choice >= n_choices -> false, nothing applied");
+        }
+        // stale cache: one shape missing -> false; the matrices before its first use (in order) took their choices
+        {
+            const std::size_t nl = text.find('\n', text.size() / 2);
+            const std::size_t l0 = text.rfind('\n', nl - 1) + 1;
+            const std::string line = text.substr(l0, nl - l0);
+            std::uint32_t lb, lt, lr, lc, lv;
+            std::sscanf(line.c_str(), "%u %u %u %u %u", &lb, &lt, &lr, &lc, &lv);
+            const std::string stale = text.substr(0, l0) + text.substr(nl + 1);
+            q::Model f;
+            m3Layers(f, seed, false);
+            const bool r = f.readTune(stale, q::n_tune);
+            // expectation: walk the matrices in order; each takes buckets until (lb, lt, lr, lc) is asked for
+            bool stop = false, same = true;
+            std::vector<q::Mat*> fm;
+            for (q::Layer& L : f.layers)
+                for (q::Mat* w : m3MatsOf(L)) fm.push_back(w);
+            for (std::size_t i = 0; i < mats.size(); ++i)
+                for (std::uint32_t bb = 0; bb < q::n_tune; ++bb) {
+                    const bool missing = bb == lb && static_cast<std::uint32_t>(mats[i]->ty) == lt && mats[i]->nrows == lr && mats[i]->ncols == lc;
+                    if (missing) stop = true;
+                    const std::uint8_t want = stop ? 0 : mats[i]->tune[bb];
+                    same = same && fm[i]->tune[bb] == want;
+                }
+            check(!r && same, std::format("tune text: missing shape {} -> false, earlier matrices applied in order", line));
+        }
+    }
+}
+
+void testLayerSubset() {
+    q::Model m;
+    m.cfg.n_layer = 5;
+    m.layers.assign(5, q::Layer{});
+    for (std::size_t i = 0; i < 5; ++i) m.layers[i].attn_norm = 0x1000 + i;
+    m.kcache = {0x10, 0x11, 0x12, 0x13, 0x14};
+    m.vcache = {0x20, 0x21, 0x22, 0x23, 0x24};
+    m.kscale = {0x30, 0x31, 0x32, 0x33, 0x34};
+    m.vscale = {0x40, 0x41, 0x42, 0x43, 0x44};
+    m.state_tables.emplace_back(std::vector<q::DevPtr>{0x50, 0x51, 0x52, 0x53, 0x54});
+    m.conv_state = std::span<q::DevPtr>(m.state_tables.back());
+    m.state_tables.emplace_back(std::vector<q::DevPtr>{0x60, 0x61, 0x62, 0x63, 0x64});
+    m.ssm_state = std::span<q::DevPtr>(m.state_tables.back());
+    const auto k0 = m.kcache, v0 = m.vcache, ks0 = m.kscale, vs0 = m.vscale;
+    const q::DevPtr* conv_p = m.conv_state.data();
+    const q::DevPtr* ssm_p = m.ssm_state.data();
+    {
+        q::Model::LayerSubset ls(m, {3, 0});
+        check(m.layers.size() == 2 && m.layers[0].attn_norm == 0x1003 && m.layers[1].attn_norm == 0x1000, "layer subset: the selected layers in sel order");
+        check(m.kcache == std::vector<q::DevPtr>{0x13, 0x10, 0, 0, 0} && m.vcache == std::vector<q::DevPtr>{0x23, 0x20, 0, 0, 0} &&
+                  m.kscale == std::vector<q::DevPtr>{0x33, 0x30, 0, 0, 0} && m.vscale == std::vector<q::DevPtr>{0x43, 0x40, 0, 0, 0},
+              "layer subset: KV arrays permuted, the rest 0, n_layer long");
+        check(m.conv_state.size() == 5 && m.conv_state[0] == 0x53 && m.conv_state[1] == 0x50 && m.conv_state[2] == 0 &&
+                  m.ssm_state[0] == 0x63 && m.ssm_state[1] == 0x60 && m.ssm_state[4] == 0 && m.conv_state.data() != conv_p,
+              "layer subset: state views permuted (own storage)");
+        check(m.decode_graph == nullptr, "layer subset: no decode graph");
+    }
+    check(m.layers.size() == 5 && m.layers[3].attn_norm == 0x1003 && m.kcache == k0 && m.vcache == v0 && m.kscale == ks0 && m.vscale == vs0 &&
+              m.conv_state.data() == conv_p && m.ssm_state.data() == ssm_p && m.conv_state[3] == 0x53,
+          "layer subset: everything put back by the destructor");
+}
+
 int main() {
     whirl::test::clearWhirlEnv();  // FR-TEST P3-11
     testKvLayout();
     testKvPool();  // arch025-M2
     testSeqTableMapPages();  // arch025-M2
+    testTuneTable();  // arch025-M3
+    testLayerSubset();  // arch025-M3
     testWeightBinding();  // arch025-M1
     testKvName();
     testKvPerToken();

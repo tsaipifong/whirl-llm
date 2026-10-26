@@ -552,7 +552,7 @@ DecodeResult plainDecode(q::Model& model, const Tok& tok, u32 first, std::size_t
     auto enq = [&](std::size_t kk) {
         model.decodeStep();
         const std::size_t slot = kk % ring_n;
-        hip::downloadAsync(&ring[slot], model.out_tok, 4, model.stream);
+        hip::downloadAsync(&ring[slot], model.scratch().out_tok, 4, model.stream);
         hip::eventRecord(events[slot].get(), model.stream);
     };
     Timer timer;
@@ -696,13 +696,13 @@ DecodeResult specDecode(q::Model& model, const Tok& tok, u32 first, u32 n_prompt
         if (ng_n > 0) {
             nd_host = static_cast<u32>(ng_n);
             // MTP KV rows only; the verify takes the drafts from the host
-            model.mtpEnqueue(model.mtp_h, std::span<const u32>(pend.data(), n_pend), 0, pend_pos, std::nullopt);
+            model.mtpEnqueue(model.scratch().mtp_h, std::span<const u32>(pend.data(), n_pend), 0, pend_pos, std::nullopt);
         } else {
             // drafts chain through their device slots into the verify ids
-            model.mtpEnqueue(model.mtp_h, std::span<const u32>(pend.data(), n_pend), 0, pend_pos, 0u);
+            model.mtpEnqueue(model.scratch().mtp_h, std::span<const u32>(pend.data(), n_pend), 0, pend_pos, 0u);
             for (u32 dri = 1; dri < nd_host; ++dri) {
                 // chained drafts: the MTP's own head-normed output stands in for the main hidden
-                model.mtpEnqueue(model.h, {}, model.draftSlot(dri - 1), p + dri, dri);
+                model.mtpEnqueue(model.scratch().h, {}, model.draftSlot(dri - 1), p + dri, dri);
             }
         }
         if (ng_n > 0)
@@ -714,7 +714,7 @@ DecodeResult specDecode(q::Model& model, const Tok& tok, u32 first, u32 n_prompt
         if (rx.on && nd_host > 0 && ng_n == 0) {
             const hip::DevPtr ids = rx_dev, vals = rx_dev + static_cast<u64>(q::max_small_batch) * rk * 4,
                          stats = rx_dev + static_cast<u64>(q::max_small_batch) * rk * 8;
-            hip::launch(rx_topk, hip::Dim3{nd_host, 1, 1}, hip::Dim3{1024, 1, 1}, 0, model.stream, model.logits,
+            hip::launch(rx_topk, hip::Dim3{nd_host, 1, 1}, hip::Dim3{1024, 1, 1}, 0, model.stream, model.scratch().logits,
                         static_cast<std::int32_t>(model.cfg.n_vocab), static_cast<std::int32_t>(rk), 1.0f, ids, vals, stats);
             hip::downloadAsync(rx_host.data(), rx_dev, rx_host.size(), model.stream);
         }
@@ -787,7 +787,7 @@ DecodeResult specDecode(q::Model& model, const Tok& tok, u32 first, u32 n_prompt
             if (!done) done = emit(t);
             if (opt.ngram) hist.push_back(t);
         }
-        hip::copyAsync(model.mtp_h, model.hn, (acc + 1) * E * 4, model.stream);
+        hip::copyAsync(model.scratch().mtp_h, model.scratch().hn, (acc + 1) * E * 4, model.stream);
         for (u32 r = 0; r < acc; ++r) pend[r] = dr[r];
         pend[acc] = outv[acc];
         n_pend = acc + 1;
@@ -1091,8 +1091,8 @@ Loaded loadModel(const Args& a, const gguf::File& f, u32 max_ctx, bool ctx_expli
     lo.kv_req = q::kvRequestFromEnv();
     L.model = q::Model::load(f, max_ctx, L.stats, lo);
     q::Model& m = *L.model;
-    if (envGet("TUNE_COLD")) m.tune_cold = true;
-    if (auto v = envGet("TUNE_MASK")) m.tune_mask = std::stoull(*v, nullptr, 0);
+    if (envGet("TUNE_COLD")) m.tuneTable().tune_cold = true;
+    if (auto v = envGet("TUNE_MASK")) m.tuneTable().tune_mask = std::stoull(*v, nullptr, 0);
     return L;
 }
 
@@ -1448,7 +1448,7 @@ int cmdChat(const Args& a) {
             if (use_dflash) model.dflashIngest(0, model.cap_buf, model.cap_rows, 0, model.cap_n, static_cast<u32>(off + n - model.cap_n));
             if (dumping) {
                 const std::size_t V = model.cfg.n_vocab;
-                hip::download(row_f32.data(), model.logits, n * V * 4);
+                hip::download(row_f32.data(), model.scratch().logits, n * V * 4);
                 for (std::size_t i = 0; i < n * V; ++i) {
                     // f32 -> f16 bits, round to nearest even (halfs of logits are normal-range)
                     std::uint32_t u;
@@ -1754,7 +1754,7 @@ u64 fnvF32(std::span<const float> v);
 // logits hash of row r of the last forward
 u64 rowHash(q::Model& m, u32 r) {
     std::vector<float> lg(m.cfg.n_vocab);
-    hip::download(lg.data(), m.logits + static_cast<u64>(r) * m.cfg.n_vocab * 4, lg.size() * 4);
+    hip::download(lg.data(), m.scratch().logits + static_cast<u64>(r) * m.cfg.n_vocab * 4, lg.size() * 4);
     return fnvF32(lg);
 }
 
@@ -2220,7 +2220,7 @@ int goldenSingle(const Args& a, const gguf::File& f, const Tok& tok, u32 n_dec, 
         std::vector<u32> gen{t};
         for (u32 i = 1; i <= nd; ++i) {
             m.decodeStep();
-            hip::downloadAsync(tk, m.out_tok, 4, m.stream);
+            hip::downloadAsync(tk, m.scratch().out_tok, 4, m.stream);
             hip::sync();
             t = static_cast<u32>(*tk);
             gout(fmt("%s.step%02u next=%u ", name, i, t) + gr.line(m));
@@ -2511,8 +2511,8 @@ int cmdSelftest(const Args& a) {
     selectDevice(a, nullptr);
     Loaded L = loadModel(a, f, 4096);
     q::Model& m = *L.model;
-    hip::memset(m.h, 0, 4ull * m.max_batch * m.cfg.n_embd);
-    hip::memset(m.ffn_g, 0, 4ull * m.max_batch * m.ff_scratch);
+    hip::memset(m.scratch().h, 0, 4ull * m.max_batch * m.cfg.n_embd);
+    hip::memset(m.scratch().ffn_g, 0, 4ull * m.max_batch * m.scratch().ff_scratch);
     bool ok = true;
     std::string log;
     // the precise checks force the precise items themselves (fp8 / MoE fp8 / h16 off), whatever

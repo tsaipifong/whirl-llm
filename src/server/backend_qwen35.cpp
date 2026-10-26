@@ -5,6 +5,7 @@
 #include "vision_iface.h"
 
 #include "whirl/hip.h"
+#include "whirl/model.h"  // the qwen35::Model this backend forwards to (backend.h sees model_types.h only, arch025-M3)
 
 namespace whirl::server {
 
@@ -18,9 +19,9 @@ public:
     device::Stream stream() const override { return m_.stream; }
     bool hasMtp() const override { return m_.mtp.has_value(); }
 
-    DevPtr logits() const override { return m_.logits; }
-    DevPtr hn() const override { return m_.hn; }
-    DevPtr mtpH() const override { return m_.mtp_h; }
+    DevPtr logits() const override { return m_.scratch().logits; }
+    DevPtr hn() const override { return m_.scratch().hn; }
+    DevPtr mtpH() const override { return m_.scratch().mtp_h; }
     DevPtr seqHid(std::uint32_t s) const override { return m_.seqs[s].hid; }
     std::span<const DevPtr> convState() const override { return {m_.conv_state.data(), m_.conv_state.size()}; }
     std::span<const DevPtr> ssmState() const override { return {m_.ssm_state.data(), m_.ssm_state.size()}; }
@@ -101,7 +102,7 @@ public:
     void topkRows(std::uint32_t row0, std::uint32_t rows, std::uint32_t k, float inv_t, DevPtr ids, DevPtr vals,
                   DevPtr stats) override {
         const std::uint32_t V = m_.cfg.n_vocab;
-        const DevPtr x = m_.logits + static_cast<std::uint64_t>(row0) * V * 4;
+        const DevPtr x = m_.scratch().logits + static_cast<std::uint64_t>(row0) * V * 4;
         hip::launch(topk_, hip::Dim3{rows, 1, 1}, hip::Dim3{1024, 1, 1}, 0, m_.stream, x, static_cast<std::int32_t>(V),
                     static_cast<std::int32_t>(k), inv_t, ids, vals, stats);
     }

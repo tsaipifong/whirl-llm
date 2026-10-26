@@ -41,6 +41,9 @@ std::string execDump(const Model& m) {
     auto f = [](float v) { return std::format("{:.9g}", v); };
 #define WD_B(x) add(#x, b(m.x))
 #define WD_U(x) add(#x, u(m.x))
+// arch025-M3: Scratch / TuneTable are private bases of Model (read through scratch() / tuneTable()); same keys
+#define WD_SU(x) add(#x, u(m.scratch().x))
+#define WD_TB(x) add(#x, b(m.tuneTable().x))
 // arch025-N2b: the execution flags are the plan's (Model::nf()); same keys and values
 #define WD_FB(x) add(#x, b(m.nf().x))
 #define WD_FU(x) add(#x, u(m.nf().x))
@@ -57,8 +60,8 @@ std::string execDump(const Model& m) {
     WD_FB(no_fuse);
     WD_U(small_max);
     WD_FU(dbg_flags);
-    add("tune_mask", std::format("{:#x}", m.tune_mask));
-    WD_B(tune_cold);
+    add("tune_mask", std::format("{:#x}", m.tuneTable().tune_mask));
+    WD_TB(tune_cold);
     WD_FB(naive_attn);
     WD_FB(attn_wide);
     WD_FB(attn_dq4);
@@ -70,16 +73,16 @@ std::string execDump(const Model& m) {
     WD_FB(float_gemv);
     WD_FB(prec_dec);
     WD_FU(gemv_max);
-    add("gemv_r", hexRow(m.gemv_r));
-    for (std::size_t t = 0; t < m.gemv_w.size(); ++t) {
+    add("gemv_r", hexRow(m.tuneTable().gemv_r));
+    for (std::size_t t = 0; t < m.tuneTable().gemv_w.size(); ++t) {
         bool any = false;
-        for (std::uint8_t v : m.gemv_w[t]) any = any || v != 0;
-        if (any) add(std::format("gemv_w[{}]", t), hexRow(m.gemv_w[t]));
+        for (std::uint8_t v : m.tuneTable().gemv_w[t]) any = any || v != 0;
+        if (any) add(std::format("gemv_w[{}]", t), hexRow(m.tuneTable().gemv_w[t]));
     }
-    add("gemv_w_head", hexRow(m.gemv_w_head));
+    add("gemv_w_head", hexRow(m.tuneTable().gemv_w_head));
     WD_FB(fp8_prefill);
     WD_FU(fp8_mask);
-    WD_U(mm_class);
+    WD_SU(mm_class);
     WD_U(mx_fold_lossy);
     add("num_req.mode", numerics::modeName(m.num_req.mode));
     add("num_req.items", std::format("{:#x}", m.num_req.items));
@@ -99,9 +102,9 @@ std::string execDump(const Model& m) {
     add("kv_choice.kv", kvFormatName(m.kv_choice.kv));
     add("kv_choice.debug", b(m.kv_choice.debug));
     add("kv_choice.why", m.kv_choice.why);
-    WD_U(gc_w_bytes);
-    WD_U(gc_u_bytes);
-    WD_U(gc_m_bytes);
+    WD_SU(gc_w_bytes);
+    WD_SU(gc_u_bytes);
+    WD_SU(gc_m_bytes);
     WD_FB(gdn_chunked);
     WD_FB(gdn_wmma);
     WD_FB(gdn_strix);
@@ -110,10 +113,10 @@ std::string execDump(const Model& m) {
     WD_FB(attn_kx_on);
     WD_FB(gdn_ba_on);
     WD_FB(gdn_in2_on);
-    WD_U(x16_bytes);
+    WD_SU(x16_bytes);
     WD_FB(attn_dqf_on);
     WD_FU(attn_seg);
-    WD_U(dq_rows);
+    WD_SU(dq_rows);
     WD_FB(attn_kg_on);
     WD_FB(ffn_h16);
     WD_FB(h16_dq);
@@ -154,7 +157,7 @@ std::string execDump(const Model& m) {
     add("dflash", b(m.dflash != nullptr));
     WD_B(mtp_skipped);
     WD_FU(moe_bn_force);
-    WD_U(ff_scratch);
+    WD_SU(ff_scratch);
     WD_FB(moe_fp8);
     WD_FB(moe_mxw);
     WD_FB(moe_rbf);

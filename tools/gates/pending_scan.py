@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 """pending_scan.py - the four structure checks of arch025 (S0a), each with a pending list of the sites other 0.2.5
-steps remove. Report mode now; a later step switches a check to block mode (PL5 platform, M3 include, M6 arch).
+steps remove. Report mode now; a later step switches a check to block mode (PL5 platform, M6 arch; include blocks since M3).
 A rule's "blocked" scopes fail in every mode and take no pending entry (arch025-F7: env reads in forward / engine / ops).
 
 Rules (sources under src/ and include/; comments and string literals are not code):
@@ -11,7 +11,7 @@ Rules (sources under src/ and include/; comments and string literals are not cod
             LoadLibrary code, ADR-0004 #5), src/release/dll_deps.cpp and the vendored src/vision/stb_image.h; the
             headers src/platform/*.h are checked too (they must stay platform-free, ADR-0004 #5).
   include   whirl_server_core (cmake/server.cmake) reaches include/whirl/model.h through its sources or the repo
-            headers they include (transitively); one site per (core source, header chain). M3 makes it block.
+            headers they include (transitively); one site per (core source, header chain). Blocking since M3 (any mode).
   env       a process-environment read (getenv / _dupenv_s / _wgetenv / GetEnvironmentVariable / GetEnvironmentStrings
             / envGet / envFlag / envOn / env("...") / dump::envOn); allowed in src/platform/ and src/config/env_snapshot.*.
             The pending counts of src/cli/main.cpp and src/server/server_main.cpp stay at 0.2.5's end (PLAN Noted).
@@ -88,7 +88,9 @@ ARCH = re.compile(r"\bArch::gfx\d+\b")
 RULES = {
     "platform": {"allowed": ["src/platform/", "src/hip/", "src/release/dll_deps.cpp", "src/vision/stb_image.h"],
                  "what": "platform header / OS call"},
-    "include": {"allowed": [], "what": "server core reaches model.h"},
+    # blocked since arch025-M3 (R-8c): the server core sees whirl/model_types.h only; no core source may reach model.h
+    # and the pending list is gone (exit 1 in report mode too)
+    "include": {"allowed": [], "what": "server core reaches model.h", "blocked": ["src/", "include/"]},
     # blocked (arch025-F7, plan X-1): no env read and no pending entry, in report mode too (exit 1). The forward and the
     # server engine read the load's EnvSnapshot / their Model members only; src/ops (the forward's choices since
     # F5 / F6) is pure.
@@ -455,15 +457,17 @@ def selftest() -> int:
                 "src/server/engine.h": '#include "whirl/model.h"\n', "src/server/http.cpp": '#include "whirl/common.h"\n',
                 "include/whirl/model.h": "#pragma once\n", "include/whirl/common.h": "#pragma once\n"}
     case("server core reaching model.h through a header blocked", "include", inc_tree, None, "block", 1)
-    case("pending covers it", "include", inc_tree, f"src/server/engine.cpp{T}1{T}M3\n", "block", 0)
+    case("since M3 a pending entry does not cover it", "include", inc_tree, f"src/server/engine.cpp{T}1{T}M3\n", "block", 1)
+    case("since M3 report mode fails too", "include", inc_tree, None, "report", 1)
     clean = dict(inc_tree)
     clean["src/server/engine.h"] = '#include "whirl/model_types.h"\n'
     clean["include/whirl/model_types.h"] = "#pragma once\n"
     case("after M3: pending entry STALE", "include", clean, f"src/server/engine.cpp{T}1{T}M3\n", "block", 1)
     case("after M3: clean", "include", clean, None, "block", 0)
-    other = dict(inc_tree)
+    other = dict(clean)
     other["src/server/backend_qwen35.cpp"] = '#include "whirl/model.h"\n'  # not a core source
-    case("a non-core source may include model.h", "include", other, f"src/server/engine.cpp{T}1{T}M3\n", "block", 0)
+    case("a non-core source may include model.h", "include", other, None, "block", 0)
+    case("a non-core source may include model.h (report)", "include", other, None, "report", 0)
     shutil.rmtree(base, ignore_errors=True)
     if fails:
         print(f"pending_scan selftest: FAIL ({fails} of {cases})")

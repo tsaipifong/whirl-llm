@@ -278,20 +278,20 @@ void parseNtList(std::string_view list, std::uint32_t def, Fn apply) {
 
 void parseGemvR(Model& m, std::string_view list) {
     parseNtList(list, 1, [&](std::uint32_t nt, std::uint32_t r) {
-        if (r == 1 || r == 2 || r == 4) m.gemv_r[nt] = static_cast<std::uint8_t>(r);
+        if (r == 1 || r == 2 || r == 4) m.tuneTable().gemv_r[nt] = static_cast<std::uint8_t>(r);
     });
 }
 
 void parseGemvW(Model& m, std::string_view list) {
     parseNtList(list, 0, [&](std::uint32_t nt, std::uint32_t v) {
         if (v < n_gemvw)
-            for (auto& row : m.gemv_w) row[nt] = static_cast<std::uint8_t>(v);
+            for (auto& row : m.tuneTable().gemv_w) row[nt] = static_cast<std::uint8_t>(v);
     });
 }
 
 void parseGemvWHead(Model& m, std::string_view list) {
     parseNtList(list, 0, [&](std::uint32_t nt, std::uint32_t v) {
-        if (v < n_gemvw) m.gemv_w_head[nt] = static_cast<std::uint8_t>(v);
+        if (v < n_gemvw) m.tuneTable().gemv_w_head[nt] = static_cast<std::uint8_t>(v);
     });
 }
 

@@ -27,8 +27,9 @@
 #include "whirl/chat.h"
 #include "whirl/json.h"
 #include "whirl/mem_governor.h"
-#include "whirl/model.h"
+#include "whirl/model_types.h"
 #include "whirl/prefill_schedule.h"
+#include "whirl/relax_accept.h"  // relax::Params (was reached through model.h)
 #include "whirl/tokenizer.h"
 #include "whirl/wddm_watch.h"
 

@@ -4,7 +4,7 @@
 // Written for WHIRL. Test executable: no product code is changed. It drives the public Model API (load, forward,
 // verify, decodeStep) and the public members the server already uses (KV pool arrays, GDN state views, layers):
 //   - synthetic depth: real prefill of the prefix, then d2d tiling of the KV rows (stage_bench.h);
-//   - the layers / layer.* / head stages run Model::run with a SUBSET of the layer list (LayerSubset below): the
+//   - the layers / layer.* / head stages run Model::run with a SUBSET of the layer list (Model::LayerSubset): the
 //     per-layer arrays (kcache / vcache / kscale / vscale / conv_state / ssm_state) are permuted to match and put
 //     back afterwards (RAII). Everything else of the forward is unchanged.
 // Usage: see stage::usage() (whirl-stage-bench --help).
@@ -149,45 +149,9 @@ struct StateSnap {
     }
 };
 
-// Model::run over a subset of the trunk layers (test-only, public members; put back by the destructor)
-class LayerSubset {
-public:
-    LayerSubset(q::Model& m, const std::vector<u32>& sel) : m_(m) {
-        layers0_ = m.layers;
-        kc0_ = m.kcache, vc0_ = m.vcache, ks0_ = m.kscale, vs0_ = m.vscale;
-        conv0_ = m.conv_state, ssm0_ = m.ssm_state;
-        const std::size_t L = m.cfg.n_layer;
-        std::vector<q::Layer> nl;
-        std::vector<hip::DevPtr> kc(L, 0), vc(L, 0), ks(L, 0), vs(L, 0);
-        conv_.assign(L, 0);
-        ssm_.assign(L, 0);
-        for (std::size_t j = 0; j < sel.size(); ++j) {
-            const u32 s = sel[j];
-            nl.push_back(layers0_.at(s));
-            kc[j] = kc0_[s], vc[j] = vc0_[s], ks[j] = ks0_[s], vs[j] = vs0_[s];
-            conv_[j] = conv0_[s], ssm_[j] = ssm0_[s];
-        }
-        m.layers = std::move(nl);
-        m.kcache = kc, m.vcache = vc, m.kscale = ks, m.vscale = vs;
-        m.conv_state = std::span<hip::DevPtr>(conv_);
-        m.ssm_state = std::span<hip::DevPtr>(ssm_);
-        m.decode_graph.reset();
-    }
-    ~LayerSubset() {
-        m_.layers = std::move(layers0_);
-        m_.kcache = kc0_, m_.vcache = vc0_, m_.kscale = ks0_, m_.vscale = vs0_;
-        m_.conv_state = conv0_, m_.ssm_state = ssm0_;
-        m_.decode_graph.reset();
-    }
-    LayerSubset(const LayerSubset&) = delete;
-    LayerSubset& operator=(const LayerSubset&) = delete;
-
-private:
-    q::Model& m_;
-    std::vector<q::Layer> layers0_;
-    std::vector<hip::DevPtr> kc0_, vc0_, ks0_, vs0_, conv_, ssm_;
-    std::span<hip::DevPtr> conv0_, ssm0_;
-};
+// Model::run over a subset of the trunk layers: the model's own seam (Model::LayerSubset, src/model/qwen35/
+// layer_subset.cpp; arch025-M3 C7: stage-bench no longer writes Model's members)
+using LayerSubset = q::Model::LayerSubset;
 
 struct Env {
     stage::Opts o;
@@ -206,8 +170,8 @@ struct Env {
 std::string outHash(q::Model& m, u32 rows, bool all_logits) {
     const u64 nl = static_cast<u64>(m.cfg.n_vocab) * (all_logits ? rows : 1);
     std::vector<float> buf(nl + static_cast<u64>(rows) * m.cfg.n_embd);
-    hip::download(buf.data(), m.logits, nl * 4);
-    hip::download(buf.data() + nl, m.x, static_cast<u64>(rows) * m.cfg.n_embd * 4);
+    hip::download(buf.data(), m.scratch().logits, nl * 4);
+    hip::download(buf.data() + nl, m.scratch().x, static_cast<u64>(rows) * m.cfg.n_embd * 4);
     return kt::sha256Hex(buf.data(), buf.size() * 4);
 }
 
@@ -234,8 +198,8 @@ std::function<void()> stageRestore(Env& E, const StateSnap& snap, u32 D) {
         snap.restore(m);
         if (dec) {
             hip::streamSync(m.stream);
-            hip::upload(m.ids, &tok, 4);
-            hip::upload(m.pos_buf, &pos, 4);
+            hip::upload(m.scratch().ids, &tok, 4);
+            hip::upload(m.scratch().pos_buf, &pos, 4);
         }
     };
 }

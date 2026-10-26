@@ -271,6 +271,29 @@
               "srv_cache_balance on the R9700 and srv_tier_verify on both GPUs (kvArrays = the tier page layout; page_row == per_tok keeps the RAM tier on)",
               "V-host pagepool: whirl-host-bench host.pagepool.* within their run-to-run range (mapPages / page table path)",
               "kvram719_tier both GPUs (pool allocation and resizePool, hipError 719 history)"]
+  },
+  "model.scratch": {
+   "id": "M3", "desc": "qwen35 activation buffers (R-8c): qwen35::Scratch (x .. moe_sx and their sizes / caches), a private base of Model read outside the model through Model::scratch() (read-only); Model::allocScratch (Model::load's buffer allocation block, verbatim, same order) and bufferBytes (its pre-load estimate) in scratch.cpp; Model::LayerSubset (the stage-bench seam, C7); include/whirl/model_types.h (what the server core sees; include_check blocks)",
+   "paths": ["src/model/qwen35/scratch.h", "src/model/qwen35/scratch.cpp", "src/model/qwen35/layer_subset.cpp", "include/whirl/model_types.h"], "lands_on": "arch025-m3 (M3)",
+   "steps": ["cpu_model", "cpu_server", "st_swift_precise", "st_swift_balance", "st_swift_fast", "st_moe_precise", "st_moe_balance", "st_moe_fast",
+             "seq_swift_precise", "seq_swift_balance", "seq_swift_fast", "seq_moe_precise", "seq_moe_balance",
+             "golden_swift", "golden_moe", "srv_mt_precise", "srv_mt_precise_moe"],
+   "gpus": {"st_swift_precise": 2, "st_swift_balance": 2, "st_swift_fast": 2, "st_moe_precise": 2, "st_moe_balance": 2, "st_moe_fast": 2,
+            "seq_swift_precise": 2, "seq_swift_balance": 2, "seq_swift_fast": 2, "seq_moe_precise": 2, "seq_moe_balance": 2,
+            "golden_swift": 2, "golden_moe": 2, "srv_mt_precise": 2, "srv_mt_precise_moe": 2},
+   "manual": ["S0b-2 alloc sequence (WHIRL_ALLOC_LOG seqhash and event list, cli and env cells) == the M2 exe, both GPUs: the scratch buffers' order and sizes (invariant I2); D exec identical (fd_splits, x16_bytes, dq_rows, gc_*_bytes, ff_scratch, mm_class)",
+              "V-size: startup_lines.py check on the server logs (bufferBytes moved verbatim)",
+              "V-stage once: whirl-stage-bench rows of the layers / layer.* / head stages (Model::LayerSubset) == the M2 exe's on the same card"]
+  },
+  "model.tune": {
+   "id": "M3", "desc": "qwen35 tune table (R-8c): qwen35::TuneTable (tune_mask, tune_cold, gemv_r, gemv_w, gemv_w_head; GemvR / GemvW and the defaults), a private base of Model reached through Model::tuneTable(); the tune cache text as pure functions tuneText / applyTuneText (Model::writeTune / readTune over every layer's tuneMats)",
+   "paths": ["src/model/qwen35/tune_table.h", "src/model/qwen35/tune_table.cpp"], "lands_on": "arch025-m3 (M3)",
+   "steps": ["cpu_model", "st_swift_precise", "st_swift_balance", "st_swift_fast", "st_moe_precise", "st_moe_balance", "st_moe_fast",
+             "golden_swift", "golden_moe"],
+   "gpus": {"st_swift_precise": 2, "st_swift_balance": 2, "st_swift_fast": 2, "st_moe_precise": 2, "st_moe_balance": 2, "st_moe_fast": 2,
+            "golden_swift": 2, "golden_moe": 2},
+   "manual": ["S0b-2 dump: D exec tune_mask / tune_cold / gemv_r / gemv_w / gemv_w_head and the tune table hash (writeTune) == the M2 exe, both GPUs",
+              "the tune cache file written by the M3 exe is byte-identical to the M2 exe's (same model, same card; WHIRL_TUNE_COLD unset)"]
   }
  }
 }
