@@ -36,6 +36,13 @@
 // A non-zero id renames the shipped entry to <name>_shipped (whirl_kernels.hip, around its include) and defines
 // the production entry here. WHIRL_MD97_DEV=1 exports every id as md97dn<id>_mxfp4w / md97df<id>_mxfp4 /
 // md97gu<id>_mxfp4w (kernel-test family moedown97, bench --ab) and leaves the shipped entries as they are.
+// Test-only id -1 address check (feat026-skipsafe-r2, review skipsafe-gemvports C1; needs WHIRL_MD97_DEV=1):
+//   WHIRL_MD97_NEGCHK=1: every expert id a weight-row address is formed from goes through MD97_EID; an id < 0
+//     increments the device global md97_negid_hits (kt reads it) and is replaced by 0, so even a defective candidate
+//     never loads outside the tensor. A value check cannot see a load that is masked out; this counter can.
+//   WHIRL_MD97_NEGCHK=2: the same plus a planted fault (the positive control): DN / DF clamp dropped steps to slot
+//     K - 1 (an id -1 slot), GU does not return on e < 0. kt must count hits for every candidate.
+//   Without it MD97_EID(e) is (e) and the clamp is kt - 1: the dev / tune-id / default objects are unchanged.
 
 #ifndef WHIRL_MD97_DN
 #define WHIRL_MD97_DN 0
@@ -49,6 +56,12 @@
 #ifndef WHIRL_MD97_DEV
 #define WHIRL_MD97_DEV 0
 #endif
+#ifndef WHIRL_MD97_NEGCHK
+#define WHIRL_MD97_NEGCHK 0
+#endif
+#if WHIRL_MD97_NEGCHK && !WHIRL_MD97_DEV
+#error "WHIRL_MD97_NEGCHK is a test instrumentation of the WHIRL_MD97_DEV object only"
+#endif
 
 #if WHIRL_MD97_DN || WHIRL_MD97_DF || WHIRL_MD97_GU || WHIRL_MD97_DEV
 
@@ -58,6 +71,30 @@ __device__ __forceinline__ int md97_kept(const int *__restrict__ ids, int t, int
     while (kt > 1 && ids[(size_t)t * K + kt - 1] < 0) --kt;
     return kt;
 }
+
+#if WHIRL_MD97_NEGCHK
+// id -1 address check (test-only): counts weight addresses formed from a negative id, then uses expert 0 instead
+extern "C" __device__ unsigned int md97_negid_hits = 0;
+extern "C" __global__ void md97_negchk_v1() {}
+#if WHIRL_MD97_NEGCHK >= 2
+extern "C" __global__ void md97_negchk_fault_v1() {}  // kt: this object carries the planted fault
+#endif
+__device__ __forceinline__ int md97_eid(int e) {
+    if (e < 0) {
+        atomicAdd(&md97_negid_hits, 1u);
+        return 0;
+    }
+    return e;
+}
+#define MD97_EID(e) md97_eid(e)
+#else
+#define MD97_EID(e) (e)
+#endif
+#if WHIRL_MD97_NEGCHK >= 2
+#define MD97_CLAMP_SLOT(kt, K) ((K) - 1)  // planted fault (positive control): a dropped slot
+#else
+#define MD97_CLAMP_SLOT(kt, K) ((kt) - 1)
+#endif
 
 // mxw_dot on loaded operands (same dp4 chain, same order)
 __device__ __forceinline__ int md97_dot(const uint4 q, const int4 xl, const int4 xh) {
@@ -161,7 +198,7 @@ __device__ void md97_down_impl(const U &un, const uint8_t *__restrict__ W, uint6
 #pragma unroll
             for (int s = 0; s < KB; ++s) {
                 ok[s] = k < kt;  // == (lane + u0 + 32 s < nu)
-                pk[s] = t * K + (ok[s] ? k : kt - 1);  // clamped to a kept slot: in bounds, consumed only if ok
+                pk[s] = t * K + (ok[s] ? k : MD97_CLAMP_SLOT(kt, K));  // clamped to a kept slot: in bounds, consumed only if ok
                 bb[s] = b;
                 b += db;
                 k += dk;
@@ -174,7 +211,7 @@ __device__ void md97_down_impl(const U &un, const uint8_t *__restrict__ W, uint6
             float wp[KB];
 #pragma unroll
             for (int s = 0; s < KB; ++s) {
-                e[s] = ids[pk[s]];
+                e[s] = MD97_EID(ids[pk[s]]);
                 wp[s] = w[pk[s]];
             }
             typename U::Ld o[KB];
@@ -213,10 +250,12 @@ __device__ void md97_gu_impl(const uint8_t *__restrict__ W1, const uint8_t *__re
     if (row >= nrows) return;
     const int p = blockIdx.y;
     const int t = p / K, e = ids[p];
+#if WHIRL_MD97_NEGCHK < 2
     if (e < 0) return;  // moeskip: dropped slot (as feat027 moe_gu_mxfp4w)
+#endif
     const bool second = row >= ff;
     const int r = second ? row - ff : row;
-    const uint8_t *wr = (second ? W2 : W1) + ((size_t)e * ff + r) * row_bytes;
+    const uint8_t *wr = (second ? W2 : W1) + ((size_t)MD97_EID(e) * ff + r) * row_bytes;
     const int8_t *xt = xq + (size_t)t * C;
     const float *dt = xd + (size_t)t * (C / 32);
     const int nbk = C / 32;
