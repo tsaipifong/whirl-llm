@@ -620,6 +620,7 @@ public:
     bool h16_dq = false;
     bool out_h16 = false;
     bool g8t = false;
+    int g8t_v = 0;  // WHIRL_GEMM8T_V: gemm8t_c0 schedule variant (0 = gemm8t_c0; feat026-gemm8tpp)
     bool gemmh_on = true;
     bool gemmhq_on = false;
 

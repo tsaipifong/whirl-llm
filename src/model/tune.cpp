@@ -861,7 +861,19 @@ void loadOrTuneImpl(Model& m, const std::string& model_path, std::string& log) {
             log += "  MXFP4 prefill: f16 activations\n";
         // fragment-tiled fp8 GEMM (bitwise == gemm8), default on; WHIRL_G8T=0 keeps gemm8
         const bool g8t_on = envFlag("G8T", true);
-        if (g8t_on && m.fp8_prefill && m.k.gemm8[0] != nullptr && m.useTiledFp8()) log += "  fp8 prefill GEMM: fragment-tiled (gemm8t)\n";
+        if (g8t_on && m.fp8_prefill && m.k.gemm8[0] != nullptr && m.useTiledFp8()) {
+            log += "  fp8 prefill GEMM: fragment-tiled (gemm8t)\n";
+            // feat026-gemm8tpp: opt-in schedule variant of gemm8t_c0 (bitwise the same output)
+            if (const auto v = envGet("GEMM8T_V")) {
+                const int iv = std::atoi(v->c_str());
+                if (iv > 0 && iv < kernels::kNGemm8tp && m.k.gemm8tp[iv] != nullptr && m.k.gemm8tph[iv] != nullptr) {
+                    m.g8t_v = iv;
+                    log += fmt("  fp8 prefill GEMM: gemm8tp_v%d for the 128x256 tile (WHIRL_GEMM8T_V)\n", iv);
+                } else if (iv != 0) {
+                    log += fmt("  WHIRL_GEMM8T_V=%s ignored (no such gemm8tp variant)\n", v->c_str());
+                }
+            }
+        }
     }
     // f16-WMMA chunked DeltaNet prefill and f16 GEMM outputs: balance items for MXFP4 models
     // and (KG-1) dense non-MXFP4 models on the R9700 (= nu::denseQuantRelaxed)

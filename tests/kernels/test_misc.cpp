@@ -915,8 +915,18 @@ void testMisc(Ctx& c) {
                     if (fb.empty()) fb = "gemm8t_c" + std::to_string(ci);
                 }
             }
+            // feat026-gemm8tpp: schedule variants of gemm8t_c0 (its geometry), f32 output == gemm8_c0
+            for (int v = 1; v < wk::kNGemm8tp; ++v) {
+                if (!c.k.gemm8tp[v]) continue;
+                if (v == 4 && ncols % 128 != 0) continue;  // ops::gemm8tpOk
+                ++nv;
+                if (run(c.k.gemm8tp[v], wk::kGemm8tCfgs[0], x8t.p(), 4).down<float>(y0.size()) != y0) {
+                    ++bad;
+                    if (fb.empty()) fb = "gemm8tp_v" + std::to_string(v);
+                }
+            }
             Result r;
-            r.name = "gemm8_c* / gemm8t_c* == gemm8_c0 (" + std::to_string(nv) + " variants)";
+            r.name = "gemm8_c* / gemm8t_c* / gemm8tp_v* == gemm8_c0 (" + std::to_string(nv) + " variants)";
             r.kind = Kind::invariant;
             r.n = nv;
             r.mismatches = bad;
@@ -935,6 +945,54 @@ void testMisc(Ctx& c) {
                     for (std::size_t i = 0; i < yh.size(); ++i) yf[i] = h2f(yh[i]);
                     c.rep.add(cmpTolRel(std::string(tl ? "gemm8th_c" : "gemm8h_c") + std::to_string(ci) + " (f16 out) vs f32 result", yf, yd,
                                         1.0 / 2048, 1e-7));
+                }
+            }
+            // feat026-gemm8tpp: gemm8tph_v* == gemm8th_c0 (f16 output) and, over several token blocks with a partial
+            // last one and accumulate = 1, gemm8tp_v* == gemm8t_c0 bitwise
+            if (c.k.gemm8t[0] && c.k.gemm8th[0]) {
+                std::size_t nh = 0, badh = 0;
+                std::string fbh;
+                const auto yh0 = run(c.k.gemm8th[0], wk::kGemm8tCfgs[0], x8t.p(), 2).down<std::uint16_t>(y0.size());
+                for (int v = 1; v < wk::kNGemm8tp; ++v) {
+                    if (!c.k.gemm8tph[v] || (v == 4 && ncols % 128 != 0)) continue;
+                    ++nh;
+                    if (run(c.k.gemm8tph[v], wk::kGemm8tCfgs[0], x8t.p(), 2).down<std::uint16_t>(yh0.size()) != yh0) {
+                        ++badh;
+                        if (fbh.empty()) fbh = "gemm8tph_v" + std::to_string(v);
+                    }
+                }
+                const int n2 = 600;  // 3 token blocks of 256, the last partial
+                const std::vector<float> x2 = c.randn(static_cast<std::size_t>(n2) * ncols);
+                const std::vector<float> yinit = c.randn(static_cast<std::size_t>(n2) * nrows);
+                Buf dx2(x2), sx2(static_cast<std::size_t>(n2) * 4), x8t2(static_cast<std::size_t>(n2 + 16) * ncols);
+                x8t2.zero();
+                hip::launch(c.k.qact_fp8t, {static_cast<unsigned>(n2), 1, 1}, {256, 1, 1}, 0, c.s, dx2.p(), x8t2.p(), sx2.p(), ncols);
+                auto run2 = [&](hip::Function f) {
+                    Buf y(yinit);
+                    const auto& cf = wk::kGemm8tCfgs[0];
+                    hip::launch(f, {cdiv(n2, cf.bn), cdiv(nrows, cf.bm), 1}, {static_cast<unsigned>(cf.nth), 1, 1}, 0, c.s, w.p(), m.row_bytes,
+                                wref.p(), x8t2.p(), sx2.p(), y.p(), ncols, nrows, n2, 1);
+                    c.sync();
+                    return y.down<float>(yinit.size());
+                };
+                const auto ya = run2(c.k.gemm8t[0]);
+                for (int v = 1; v < wk::kNGemm8tp; ++v) {
+                    if (!c.k.gemm8tp[v] || (v == 4 && ncols % 128 != 0)) continue;
+                    ++nh;
+                    if (run2(c.k.gemm8tp[v]) != ya) {
+                        ++badh;
+                        if (fbh.empty()) fbh = "gemm8tp_v" + std::to_string(v) + " (n 600, accumulate)";
+                    }
+                }
+                if (nh > 0) {
+                    Result rh;
+                    rh.name = "gemm8tph_v* == gemm8th_c0, gemm8tp_v* == gemm8t_c0 at n 600 + accumulate (" + std::to_string(nh) + " runs)";
+                    rh.kind = Kind::invariant;
+                    rh.n = nh;
+                    rh.mismatches = badh;
+                    rh.pass = badh == 0;
+                    if (!fbh.empty()) rh.note = "first " + fbh;
+                    c.rep.add(rh);
                 }
             }
         } else {

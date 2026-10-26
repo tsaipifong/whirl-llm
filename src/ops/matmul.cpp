@@ -115,11 +115,19 @@ Dim3 headSplitGrid(std::uint32_t chunk_rows) { return D((chunk_rows + 31) / 32);
 std::size_t gemm8Cfg(std::uint32_t n) { return n <= 64 ? 3 : n <= 256 ? 1 : 0; }
 std::size_t gemm8tCfg(std::uint32_t n) { return n <= 32 ? 3 : n <= 48 ? 4 : n <= 64 ? 2 : n <= 192 ? 1 : 0; }
 
-Gemm8Plan chooseGemm8(std::uint32_t nrows, std::uint32_t n, bool out_h16, bool g8t, const kernels::MatmulKernels& k) {
+bool gemm8tpOk(int v, std::uint32_t ncols, const kernels::MatmulKernels& k) {
+    if (v <= 0 || v >= kernels::kNGemm8tp || k.gemm8tp[v] == nullptr || k.gemm8tph[v] == nullptr) return false;
+    if (v == 4) return ncols % 128 == 0 && ncols >= 128;
+    return true;
+}
+
+Gemm8Plan chooseGemm8(std::uint32_t nrows, std::uint32_t n, bool out_h16, bool g8t, const kernels::MatmulKernels& k, int g8t_v,
+                      std::uint32_t ncols) {
     const std::size_t ci = g8t ? gemm8tCfg(n) : gemm8Cfg(n);
     const kernels::GemmCfg c = g8t ? kernels::kGemm8tCfgs[ci] : kernels::kGemm8Cfgs[ci];
     Gemm8Plan p;
     p.f = g8t ? ((out_h16 && k.gemm8th[ci] != nullptr) ? k.gemm8th[ci] : k.gemm8t[ci]) : ((out_h16 && k.gemm8h[ci] != nullptr) ? k.gemm8h[ci] : k.gemm8[ci]);
+    if (g8t && ci == 0 && gemm8tpOk(g8t_v, ncols, k)) p.f = out_h16 ? k.gemm8tph[g8t_v] : k.gemm8tp[g8t_v];
     p.grid = Dim3{static_cast<unsigned>((n + c.bn - 1) / c.bn), static_cast<unsigned>((nrows + c.bm - 1) / c.bm), 1};
     p.block = D(c.nth);
     return p;

@@ -192,7 +192,7 @@ void Model::matmul(const Mat& w, DevPtr xin, DevPtr y, u32 n, bool accumulate) {
             x16_count = count;
             x16_fp8 = true;
         }
-        const ops::Gemm8Plan g8 = ops::chooseGemm8(w.nrows, n, out_h16, g8t, k);
+        const ops::Gemm8Plan g8 = ops::chooseGemm8(w.nrows, n, out_h16, g8t, k, g8t_v, w.ncols);
         hip::launch(g8.f, g8.grid, g8.block, 0, stream, w.ptr, w.row_bytes, w.ref, x16, sx8, y, ncols, nrows, I(n), acc);
     } else {
         const u32 count = n * w.ncols;

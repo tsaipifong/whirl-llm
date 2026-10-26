@@ -128,6 +128,7 @@ std::string execDump(const Model& m) {
     WD_B(h16_dq);
     WD_B(out_h16);
     WD_B(g8t);
+    if (m.g8t_v != 0) add("g8t_v", std::to_string(m.g8t_v));  // only when WHIRL_GEMM8T_V picked a variant (default dump unchanged)
     WD_B(gemmh_on);
     WD_B(gemmhq_on);
     WD_B(kv_q8);

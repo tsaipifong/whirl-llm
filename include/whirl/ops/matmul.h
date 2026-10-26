@@ -141,8 +141,12 @@ struct Gemm8Plan {
     Dim3 grid{}, block{256, 1, 1};
     BitClass bits = BitClass::fp8_gemm;
 };
-// g8t: the fragment-tiled fp8 set (Model::useTiledFp8)
-Gemm8Plan chooseGemm8(std::uint32_t nrows, std::uint32_t n, bool out_h16, bool g8t, const kernels::MatmulKernels& k);
+// g8t: the fragment-tiled fp8 set (Model::useTiledFp8). g8t_v > 0 (WHIRL_GEMM8T_V): where gemm8t_c0 would run, run
+// its schedule variant gemm8tp_v<g8t_v> instead (same geometry, bitwise the same output) when gemm8tpOk.
+Gemm8Plan chooseGemm8(std::uint32_t nrows, std::uint32_t n, bool out_h16, bool g8t, const kernels::MatmulKernels& k,
+                      int g8t_v = 0, std::uint32_t ncols = 0);
+// whether variant v exists (both outputs) and takes K = ncols (v4: an even number >= 2 of 64-k slabs)
+bool gemm8tpOk(int v, std::uint32_t ncols, const kernels::MatmulKernels& k);
 std::size_t gemm8Cfg(std::uint32_t n);
 std::size_t gemm8tCfg(std::uint32_t n);
 

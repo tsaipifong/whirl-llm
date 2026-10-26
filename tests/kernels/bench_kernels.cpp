@@ -11,6 +11,7 @@
 //   gemv  gemvq_<T> (int8 activations, n = 1)                 Swift dense weights  bytes = weight bytes
 //   gemvh gemvh_<T> (precise f16 activations, n = 1 / 4)      Swift dense weights  bytes = weight bytes
 //   gemm  gemmhq_<T>, gemm_c0_<T> (f16 activations, n = 2048) Swift dense weights  flops = 2 n rows cols
+//   gemm8t gemm8t_c0, gemm8tp_v1..v6 (MXFP4 x fp8, n = 2048 / 8192) Swift + Ornith dense weights  flops = 2 n rows cols
 //   attn  attn_wsplit1 + attn_combine (f16 KV, 24 / 4 heads, hd 256, one decode query at L = 2k / 32k / 128k)
 //   moe   moe_gu_mxfp4[w], moe_down_mxfp4[w] (Ornith MXFP4 experts, n = 1, K routed experts per launch)
 //   gdn   gdn_step_norm (one decode row, 48 v heads x 128 x 128 state)
@@ -519,6 +520,114 @@ void benchGemm(Env& e) {
     }
 }
 
+// ---------------------------------------------------------------- gemm8t (balance / fast prefill, R9700)
+// feat026-gemm8tpp: gemm8t_c0 (the shipped 128x256 fragment-tiled MXFP4 x fp8 GEMM) and its schedule variants
+// gemm8tp_v1..v6 on the real Swift / Ornith prefill matrices, n = 2048 / 8192 tokens (512 with --quick). Output check:
+// gemm8t_c0 vs the CPU (exact MXFP4 weights, the GPU's fp8 activations, 8 tokens x 64 rows); every variant bitwise
+// == gemm8t_c0 on the first and last 16 tokens x all rows. flops = 2 n rows cols.
+void benchGemm8t(Env& e) {
+    Ctx& c = e.c;
+    c.rep.family = "gemm8t";
+    if (!c.k.gemm8t[0] || !c.k.qact_fp8t || !c.k.qact_fp8) {
+        c.rep.skip("gemm8t", "bench gemm8t", "gemm8t_c0 / qact_fp8t not in this code object (R9700 only)");
+        return;
+    }
+    std::vector<Weights> sets;
+    sets.push_back(denseWeights(c, {"blk.0.attn_qkv.weight", "blk.0.attn_gate.weight", "blk.0.ssm_out.weight", "blk.0.ffn_gate.weight",
+                                    "blk.0.ffn_down.weight", "blk.3.attn_q.weight", "blk.3.attn_output.weight"}));
+    if (const whirl::gguf::File* f = c.open(c.models.moemx)) {
+        Weights w;
+        w.label = "ornith";
+        for (const char* n : {"blk.0.attn_qkv.weight", "blk.0.ssm_out.weight", "blk.3.attn_q.weight", "blk.3.attn_output.weight",
+                              "blk.0.ffn_gate_shexp.weight", "blk.0.ffn_down_shexp.weight"})
+            if (f->tensor(n)) w.mats.push_back({n, loadMat(*f, n)});
+        if (!w.mats.empty()) sets.push_back(std::move(w));
+    }
+    const std::vector<int> ns = c.quick ? std::vector<int>{512} : std::vector<int>{2048, 8192};
+    for (const Weights& w : sets) {
+        for (const auto& [tn, m] : w.mats) {
+            if (m.type != QType::mxfp4 || m.ref.empty() || m.ncols % 64 != 0) continue;
+            const int ncols = m.ncols, nrows = m.nrows;
+            const DevCopies wc = upload(e, m.data);
+            Buf wref(m.ref);
+            const std::uint64_t rb = m.row_bytes;
+            for (const int n : ns) {
+                const std::vector<float> x = c.randn(static_cast<std::size_t>(n) * ncols);
+                Buf dx(x), x8(static_cast<std::size_t>(n) * ncols), x8t(static_cast<std::size_t>(n + 16) * ncols), sx(static_cast<std::size_t>(n) * 4);
+                x8t.zero();
+                hip::launch(c.k.qact_fp8, {static_cast<unsigned>(n), 1, 1}, {256, 1, 1}, 0, c.s, dx.p(), x8.p(), sx.p(), ncols);
+                hip::launch(c.k.qact_fp8t, {static_cast<unsigned>(n), 1, 1}, {256, 1, 1}, 0, c.s, dx.p(), x8t.p(), sx.p(), ncols);
+                c.sync();
+                Buf y(static_cast<std::size_t>(n) * nrows * 4);
+                const auto& g = wk::kGemm8tCfgs[0];
+                std::vector<float> sample0;  // gemm8t_c0's sample (filled by its cell, compared by the variants)
+                struct K {
+                    std::string name;
+                    hip::Function f;
+                };
+                std::vector<K> ks{{"gemm8t_c0", c.k.gemm8t[0]}};
+                for (int v = 1; v < wk::kNGemm8tp; ++v)
+                    if (c.k.gemm8tp[v] && (v != 4 || ncols % 128 == 0)) ks.push_back({"gemm8tp_v" + std::to_string(v), c.k.gemm8tp[v]});
+                for (const K& kk : ks) {
+                    Cell k;
+                    k.ci = e.info("gemm8t", kk.name, w.label + "." + shortName(tn) + ".n" + std::to_string(n), shapeStr(nrows, ncols));
+                    k.ci.settings = e.settings(static_cast<std::uint64_t>(wc.n()) * m.data.size(), wc.n());
+                    k.ci.flops = 2.0 * n * nrows * ncols;
+                    k.kernel = kk.name;
+                    k.fa = kk.f;
+                    k.call = [&c, &wc, &wref, &x8t, &sx, &y, g, rb, ncols, nrows, n](hip::Function f, std::uint64_t r) {
+                        hip::launch(f, {cdiv(n, g.bn), cdiv(nrows, g.bm), 1}, {static_cast<unsigned>(g.nth), 1, 1}, 0, c.s, wc.at(r), rb, wref.p(),
+                                    x8t.p(), sx.p(), y.p(), ncols, nrows, n, 0);
+                    };
+                    k.run = [&c, &k, &y, n, nrows](hip::Function f) {
+                        y.fill(0xff);
+                        k.call(f, 0);
+                        c.sync();
+                        const std::size_t blk = static_cast<std::size_t>(16) * nrows;
+                        std::vector<float> got = y.down<float>(blk);
+                        got.resize(2 * blk);
+                        hip::download(got.data() + blk, y.p() + static_cast<DevPtr>((static_cast<std::size_t>(n) * nrows - blk) * 4), blk * 4);
+                        return got;
+                    };
+                    const bool base = kk.name == "gemm8t_c0";
+                    k.verify = [&m, &x8, &sx, &sample0, base, ncols, nrows](const std::vector<float>& got) {
+                        if (!base) {
+                            Result r;
+                            r.kind = Kind::invariant;
+                            r.n = got.size();
+                            std::size_t bad = 0;
+                            if (got.size() != sample0.size()) bad = got.size();
+                            else
+                                for (std::size_t i = 0; i < got.size(); ++i)
+                                    if (std::memcmp(&got[i], &sample0[i], 4) != 0) ++bad;
+                            r.mismatches = bad;
+                            r.pass = bad == 0 && !sample0.empty();
+                            r.name = "bitwise == gemm8t_c0 (first / last 16 tokens x all rows)";
+                            return r;
+                        }
+                        sample0 = got;
+                        const int cr = std::min(nrows, 64), ct = 8;
+                        const auto hq = x8.down<std::uint8_t>(static_cast<std::size_t>(ct) * ncols);
+                        const auto hs = sx.down<float>(static_cast<std::size_t>(ct));
+                        std::vector<float> xf(static_cast<std::size_t>(ct) * ncols);
+                        for (int t = 0; t < ct; ++t)
+                            for (int q = 0; q < ncols; ++q)
+                                xf[static_cast<std::size_t>(t) * ncols + q] = ref::e4m3ToF(hq[static_cast<std::size_t>(t) * ncols + q]) * hs[static_cast<std::size_t>(t)];
+                        const std::vector<float> wf = ref::dequantRows(m, 0, cr);
+                        std::vector<double> ry, rs;
+                        ref::gemvF64(wf, cr, ncols, xf.data(), ct, ncols, ry, rs);
+                        std::vector<float> sub;
+                        for (int t = 0; t < ct; ++t)
+                            sub.insert(sub.end(), got.begin() + static_cast<std::ptrdiff_t>(t) * nrows, got.begin() + static_cast<std::ptrdiff_t>(t) * nrows + cr);
+                        return cmpTol("vs CPU (" + std::to_string(cr) + " rows x " + std::to_string(ct) + " tokens)", sub, ry, rs, 1e-4, 1e-6);
+                    };
+                    runCell(e, k);
+                }
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------- attn (decode, f16 KV)
 void benchAttnDecode(Env& e) {
     Ctx& c = e.c;
@@ -934,7 +1043,7 @@ void benchGdn(Env& e) {
 
 }  // namespace
 
-const char* const kBenchFamilies[] = {"gemv", "gemvh", "gemm", "attn", "moe", "gdn"};
+const char* const kBenchFamilies[] = {"gemv", "gemvh", "gemm", "gemm8t", "attn", "moe", "gdn"};
 
 bool benchFamilyKnown(const std::string& f) {
     for (const char* n : kBenchFamilies)
@@ -984,7 +1093,7 @@ void runBench(Ctx& c, const BenchOpts& o) {
         const char* name;
         void (*fn)(Env&);
     };
-    const F fams[] = {{"gemv", benchGemv}, {"gemvh", benchGemvh}, {"gemm", benchGemm}, {"attn", benchAttnDecode}, {"moe", benchMoe}, {"gdn", benchGdn}};
+    const F fams[] = {{"gemv", benchGemv}, {"gemvh", benchGemvh}, {"gemm", benchGemm}, {"gemm8t", benchGemm8t}, {"attn", benchAttnDecode}, {"moe", benchMoe}, {"gdn", benchGdn}};
     for (const F& f : fams) {
         if (!o.families.count(f.name)) continue;
         std::printf("== bench %s\n", f.name);

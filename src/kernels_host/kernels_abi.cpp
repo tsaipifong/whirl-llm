@@ -257,6 +257,10 @@ void loadMatmul(MatmulKernels& k, const Loader& L) {
             k.gemm8t[ci] = L.opt("gemm8t_c" + std::to_string(ci));
             k.gemm8th[ci] = L.opt("gemm8th_c" + std::to_string(ci));
         }
+        for (int v = 1; v < kNGemm8tp; ++v) {
+            k.gemm8tp[v] = L.opt("gemm8tp_v" + std::to_string(v));
+            k.gemm8tph[v] = L.opt("gemm8tph_v" + std::to_string(v));
+        }
         for (int ci = 0; ci < static_cast<int>(kGemmCfgs.size()); ++ci)
             k.gemmch[ci] = L.opt("gemm_ch" + std::to_string(ci) + "_f16");
         static constexpr Named mx[] = {
