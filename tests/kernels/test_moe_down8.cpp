@@ -20,6 +20,16 @@
 // moeskip merged (main object exports moe_topk_skip) the shipped body also runs the -1 problem directly and must equal
 // it, and the F 768 (shipped fallback) -1 case runs. Marker: a candidate object (and a tune-id main object) must export
 // md8_skipsafe_v1, else it FAILS and its kernels do not run the -1 cases.
+// feat026-skipsafe-r2 (review skipsafe-gemvports C1 / C2):
+//   * fixed NG-full-batch-then-dropped-tail cases (independent of the RNG): every token K - 1 = 7 kept at F 1024
+//     (m 2, ns 14: KB 8 one full batch + 6, KB 4 three full + 2) and at F 1536 (m 3, ns 21: KB 8 two full + 5).
+//   * id -1 address check: a value check cannot see a load from an id -1 row whose value is masked out (a step
+//     clamped into a dropped slot with the i < ns guard intact). A candidate object built with -DWHIRL_MD8_DEV=1
+//     -DWHIRL_MD8_NEGCHK=1 exports md8_negchk_v1 and the counter md8_negid_hits (every md8_impl weight address formed
+//     from an id < 0 counts and uses expert 0 instead, so nothing is read out of the tensor); per id the counter must
+//     stay 0 (and id -1 runs must exist). NEGCHK=2 (exports md8_negchk_fault_v1) plants that fault (positive control):
+//     every id must count hits; its value results go only into the note (they stay equal: the blind spot this check
+//     closes). Without an instrumented object the check is a skip line.
 // SPDX-License-Identifier: Apache-2.0
 
 #include <algorithm>
@@ -72,7 +82,9 @@ void testMoeDown8(Ctx& c) {
         c.rep.add(r);
     }
     std::vector<std::pair<int, hip::Function>> fs;
-    hip::Module xm;  // owns the candidate functions for the whole test
+    hip::Module xm;          // owns the candidate functions for the whole test
+    DevPtr negp = 0;         // md8_negid_hits of an instrumented candidate object (review C1)
+    bool neg_fault = false;  // the object carries the planted fault (NEGCHK=2)
     if (hs) {
         std::vector<char> img;
         if (std::FILE* fp = std::fopen(hs, "rb")) {
@@ -100,6 +112,13 @@ void testMoeDown8(Ctx& c) {
             r.pass = false;
             c.rep.add(r);
         }
+        if (xm.getFunctionOpt("md8_negchk_v1")) {
+            negp = xm.getGlobal("md8_negid_hits");
+            neg_fault = xm.getFunctionOpt("md8_negchk_fault_v1") != nullptr;
+        } else {
+            c.rep.skip("moedown8", "id -1 address check",
+                       "candidate object not instrumented (build it with -DWHIRL_MD8_DEV=1 -DWHIRL_MD8_NEGCHK=1; runner step kt_negchk)");
+        }
         std::vector<int> idl = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
         if (const char* e = std::getenv("WHIRL_KT_MD8_IDS")) {
             idl.clear();
@@ -120,6 +139,8 @@ void testMoeDown8(Ctx& c) {
     std::string twin_first;
     std::vector<std::size_t> checked(fs.size(), 0), bad(fs.size(), 0);
     std::vector<std::string> first_bad(fs.size());
+    std::vector<std::size_t> neg_runs(fs.size(), 0), neg_hits(fs.size(), 0);  // id -1 address check
+    std::vector<std::string> first_neg(fs.size());
     std::size_t ship_runs = 0, ship_changed = 0, direct_runs = 0, direct_bad = 0;
     std::string direct_first;
     const hip::Function ship_fn = twin ? twin : c.k.moe_down[ti];  // the shipped body
@@ -159,6 +180,9 @@ void testMoeDown8(Ctx& c) {
         {2048, 512, 3, 8, {5}, true, false, "K 3, id -1 tails", 1},
         {2000, 512, 8, 32, {3}, true, false, "E 2000, id -1 tails", 1},
         {2048, 768, 8, 12, {2}, true, false, "F 768, id -1 tails (shipped fallback; moeskip merged only)", 1},
+        // review skipsafe-gemvports C2: NG full batch(es) followed by a dropped tail, fixed (kt 7 for every token)
+        {2048, 1024, 8, 16, {2}, true, false, "F 1024, every token K-1 kept (ns 14: full KB-8 batch + dropped tail)", 2},
+        {2048, 1536, 8, 12, {2}, true, false, "F 1536, every token K-1 kept (ns 21: 2 full KB-8 batches + dropped tail)", 2},
     };
     if (c.quick) {
         const Case d = cases[11];  // keep the first id -1 case
@@ -291,7 +315,18 @@ void testMoeDown8(Ctx& c) {
                 }
             }
             for (std::size_t i = 0; i < fs.size() && (!cs.drop || cand_safe); ++i) {
+                if (negp) {
+                    const std::uint32_t z = 0;
+                    hip::upload(negp, &z, 4);
+                }
                 const std::vector<float> y = run(fs[i].second);
+                if (negp) {
+                    std::uint32_t h = 0;
+                    hip::download(&h, negp, 4);
+                    if (cs.drop) ++neg_runs[i];
+                    neg_hits[i] += h;
+                    if (h && first_neg[i].empty()) first_neg[i] = std::string(cs.what) + " n " + std::to_string(n) + ": " + std::to_string(h) + " id -1 addresses";
+                }
                 ++checked[i];
                 if (std::memcmp(y.data(), ship.data(), ship.size() * 4) != 0) {
                     ++bad[i];
@@ -337,10 +372,35 @@ void testMoeDown8(Ctx& c) {
         if (!twin_first.empty()) r.note = "first " + twin_first;
         c.rep.add(r);
     }
-    for (std::size_t i = 0; i < fs.size(); ++i) {
+    for (std::size_t i = 0; i < fs.size() && negp; ++i) {  // id -1 address check (instrumented object)
+        Result r;
+        const std::string nm = std::string("md8d") + std::to_string(fs[i].first) + "_mxfp4";
+        r.kind = Kind::invariant;
+        r.n = neg_runs[i];
+        if (!neg_fault) {
+            r.name = nm + ": no weight address formed from an id -1 (instrumented object; " + std::to_string(neg_runs[i]) + " id -1 runs)";
+            r.mismatches = neg_hits[i];
+            r.pass = neg_hits[i] == 0 && neg_runs[i] > 0;
+            if (!first_neg[i].empty()) r.note = "first " + first_neg[i];
+        } else if (fs[i].first == 1) {  // KB 1 without DB never clamps a step: the planted fault cannot exist (sched_check kt_reach)
+            r.name = nm + ": planted fault (NEGCHK=2) unreachable for KB 1 (no clamped step), no hit expected (" + std::to_string(neg_runs[i]) +
+                     " id -1 runs)";
+            r.mismatches = neg_hits[i];
+            r.pass = neg_hits[i] == 0 && neg_runs[i] > 0;
+            r.note = "value mismatches " + std::to_string(bad[i]) + " of " + std::to_string(checked[i]) + " runs";
+        } else {
+            r.name = nm + ": planted fault (NEGCHK=2) seen by the id -1 address check (" + std::to_string(neg_runs[i]) + " id -1 runs)";
+            r.mismatches = neg_hits[i] > 0 ? 0 : 1;
+            r.pass = neg_hits[i] > 0 && neg_runs[i] > 0;
+            r.note = "hits " + std::to_string(neg_hits[i]) + "; value mismatches " + std::to_string(bad[i]) + " of " + std::to_string(checked[i]) +
+                     " runs (informational: 0 = the value checks cannot see this fault)";
+        }
+        c.rep.add(r);
+    }
+    for (std::size_t i = 0; i < fs.size() && !neg_fault; ++i) {
         Result r;
         r.name = std::string("md8d") + std::to_string(fs[i].first) + "_mxfp4 == shipped moe_down_mxfp4, bitwise (" + std::to_string(checked[i]) +
-                 " runs: Ornith n 1..16, F 1024/1536/768, K 1/3/6, K 6 x F 1024, E 2000, no shared, skip, id -1 tails)";
+                 " runs: Ornith n 1..16, F 1024/1536/768, K 1/3/6, K 6 x F 1024, E 2000, no shared, skip, id -1 tails, NG full + dropped tail)";
         r.kind = Kind::invariant;
         r.n = checked[i];
         r.mismatches = bad[i];
