@@ -156,6 +156,8 @@ void skipItem(Plan& p, Item it, const std::string& why);
 // each one set is recorded as an override ("+overrides" label), so the log and /props show that
 // the run's bits are not the mode's tested paths. get(name) reads WHIRL_<name>.
 extern const char* const k_numerics_switches[];
+// feat026-cwspill-r1: WHIRL_ATTN_PFNS=1 (attn_prefill_wmma_ns) is designed bit-identical but unproven on the GPU: refused in precise
+inline bool attnPfnsApplies(Mode m) { return m != Mode::precise; }
 void noteSwitches(Plan& p, const std::function<std::optional<std::string>(const char*)>& get);
 
 // "numerics: balance - enabled: fp8 (...), ...; skipped: gdnwmma (...); always: q8dec (...)"

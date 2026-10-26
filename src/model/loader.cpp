@@ -711,6 +711,8 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
         if (auto v = envGet("CASCADE_WIDE"); v && *v == "r0" && m.k.attn_cascade_wide_r0 != nullptr) {
             m.k.attn_cascade_wide = m.k.attn_cascade_wide_r0;
             m.load_note += "cascade: wide prefix kernel r0 (WHIRL_CASCADE_WIDE=r0)\n";
+        } else if (auto v2 = envGet("CASCADE_WIDE"); v2 && *v2 == "r0") {
+            m.load_note += "cascade: WHIRL_CASCADE_WIDE=r0 ignored (no attn_cascade_wide_r0 in this code object)\n";
         }
         m.cas_ml =m.alloc(max_verify_rows * n_split * cfg.n_head * 2 * f4);
         m.cas_acc = m.alloc(max_verify_rows * n_split * cfg.n_head * cfg.head_dim * f4);
@@ -805,7 +807,7 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
             if (cf.shrunk) {
                 max_ctx_req = cf.ctx;
                 m.max_ctx = cf.ctx;
-                m.load_note = "warning: " + cf.msg + "\n";
+                m.load_note += "warning: " + cf.msg + "\n";
             }
         }
         m.allocKvPool(max_ctx_req);

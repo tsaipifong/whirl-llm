@@ -875,8 +875,12 @@ void loadOrTuneImpl(Model& m, const std::string& model_path, std::string& log) {
     if (auto v = envGet("ATTN_KX")) m.attn_kx_on = *v != "0";
     // feat026-cascade-wide-spill tune candidate pfns: the no-spill attn_prefill_wmma (same bits; off by default)
     if (auto v = envGet("ATTN_PFNS"); v && *v == "1" && m.k.attn_prefill_wmma_ns != nullptr) {
-        m.k.attn_prefill_wmma = m.k.attn_prefill_wmma_ns;
-        log += "  attn_prefill_wmma: no-spill candidate attn_prefill_wmma_ns (WHIRL_ATTN_PFNS=1)\n";
+        if (nu::attnPfnsApplies(rq.mode)) {
+            m.k.attn_prefill_wmma = m.k.attn_prefill_wmma_ns;
+            log += "  attn_prefill_wmma: no-spill candidate attn_prefill_wmma_ns (WHIRL_ATTN_PFNS=1)\n";
+        } else {
+            log += "  precise: WHIRL_ATTN_PFNS=1 ignored (attn_prefill_wmma_ns is not yet verified bit-identical on the GPU; balance / fast only)\n";
+        }
     }
     if (auto v = envGet("ATTN_KG")) m.attn_kg_on = *v != "0";
     if (auto v = envGet("ATTN_DQF")) m.attn_dqf_on = *v != "0";
