@@ -193,6 +193,16 @@ def check(mj, files, steps):
     mods = mj.get("modules") or {}
     if not mods:
         errs.append("no modules")
+    # arch025-Q1 / Q3: the safety impact rules name gate steps and lifetime modules that must exist
+    for cls, d in (mj.get("safety") or {}).items():
+        if cls.startswith("_") or not isinstance(d, dict):
+            continue
+        for s in d.get("steps") or []:
+            if s not in steps:
+                errs.append(f"safety {cls}: step {s} is not in release_gate.ps1")
+        for n in d.get("modules") or []:
+            if n not in mods:
+                errs.append(f"safety {cls}: module {n} is not in modules")
     owner = {}
     for n, d in mods.items():
         if not d.get("id"):

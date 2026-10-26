@@ -1,0 +1,26 @@
+# arch025-Q3 /analyze false-positive / accepted-warning whitelist: one row per key of tools/safety/analyze_baseline.txt.
+# Columns: key (file|ruleId|function, as in the baseline) <TAB> file:line (where cl reports it; checked against the SARIF of every
+# cpu_analyze run) <TAB> reason (why it is not fixed in 0.2.5: false positive, or a style warning with no defect; a real defect goes
+# to a bug-fix line instead, PLAN Q). Read by tools/safety/analyze_check.py reasons. Triaged by arch025-Q135, 2026-10-25.
+# A baseline key without a row, a row whose key is not in the baseline, an empty reason or a line cl no longer reports: FAIL.
+src/common/pool_budget.cpp|C6326|whirl::poolbudget::defaultMargin	src/common/pool_budget.cpp:47	constant compared with a constant: moe_extra_mb is a constexpr tuning value; the "> 0" test keeps the code correct if the constant is ever set to 0. No defect.
+src/common/util.cpp|C6262|whirl::readFile	src/common/util.cpp:86	64 KiB read buffer on the stack (> /analyze 16 KiB stack threshold); leaf function, not recursive, called on threads with the 1 MiB default stack. No defect.
+src/hip/uma_mem.cpp|C6240|whirl::hip::umaMemory	src/hip/uma_mem.cpp:54	sizeof(AdapterLuid) == sizeof(prop.luid) is a deliberate compile-time size guard before memcmp; the constant term is intended. No defect.
+src/hip/wddm_mem.cpp|C6240|whirl::hip::gpuPinnedNow	src/hip/wddm_mem.cpp:169	same deliberate sizeof(LUID) guard as umaMemory before memcmp. No defect.
+src/hip/wddm_mem.cpp|C6240|whirl::hip::wddmMemInfo	src/hip/wddm_mem.cpp:48	same deliberate sizeof(LUID) guard as umaMemory before memcmp. No defect.
+src/platform/console_win.cpp|C6031|whirl::platform::console::setStdoutBinary	src/platform/console_win.cpp:33	accepted, behaviour kept: the _setmode(_fileno(stdout), _O_BINARY) return value is ignored exactly as v0.2.4 src/cli/main.cpp did (the CLI is not an analyzed target); arch025 PL1 moved the call into whirl_platform, which the CPU test targets compile, so cl sees it now. Binary stdout stays best effort (a failure leaves text mode, as before). Recorded at the arch025-int3 merge.
+src/spec/policy.cpp|C28020|whirl::qwen35::SlotAccept::observe	src/spec/policy.cpp:303	false positive: alpha[last] with last = reached - 1; nd_dev == 0 returns early and reached = min(acc + 1, nd_dev) >= 1, nd_dev <= max_ng_drafts, so last is in range; the analyzer does not follow the early return.
+src/server/engine.cpp|C28020|whirl::server::CycleProf::print	src/server/engine.cpp:64	false positive: enq_ms[a] / post_ms[a] inside for (a = 1; a < n; ++a) over std::array<.., n>; index always < n.
+src/vision/stb_image.h|C6262|stbi__gif_load	src/vision/stb_image.h:7048	third-party stb_image (public domain / MIT, vendored unchanged); large stack frame in the GIF decoder, not reached by WHIRL (PNG / JPEG images only). Not modified to keep the vendored file identical.
+src/vision/stb_image.h|C6262|stbi__load_gif_main	src/vision/stb_image.h:6963	third-party stb_image vendored unchanged; GIF path, large stack frame only. Same reason as stbi__gif_load.
+src/vision/vis_cli.cpp|C6246|whirl::vision::cliVisEncode	src/vision/vis_cli.cpp:125	style: loop variable r shadows an outer r (line 68) in a CLI benchmark helper; each use refers to the intended variable. No defect.
+tests/server/http_client.cpp|C6262|whirl::test::httpRequestFrom	tests/server/http_client.cpp:141	test helper with a large receive buffer on the stack; test threads only. Test code only.
+tests/server/http_client.cpp|C6262|whirl::test::rawRecvAll	tests/server/http_client.cpp:320	test helper with a large receive buffer on the stack; test threads only. Test code only.
+tests/server/server_tests.cpp|C6262|`anonymous-namespace'::testCkptF1	tests/server/server_tests.cpp:5392	large test function frame (many locals); runs on the main thread (1 MiB stack). Test code only.
+tests/server/server_tests.cpp|C6262|testAllocStateMeasured	tests/server/server_tests.cpp:7972	large test function frame; main thread. Test code only.
+tests/server/server_tests.cpp|C6262|testHttpFakeEngine	tests/server/server_tests.cpp:7808	large test function frame; main thread. Test code only.
+tests/server/tier_tests.cpp|C6387|PowerLossSim::write	tests/server/tier_tests.cpp:3543	test double: _aligned_malloc result not checked before memcpy; an allocation failure would crash the test, which is a visible test failure. Test code only.
+tests/unit/unit_tests.cpp|C6246|testMemGovernor	tests/unit/unit_tests.cpp:2943	style: a nested-scope Governor g shadows the outer g in one test; each block uses its own. Test code only.
+tests/unit/unit_tests.cpp|C6262|`anonymous-namespace'::testNumerics	tests/unit/unit_tests.cpp:760	large test function frame; main thread. Test code only.
+tests/unit/unit_tests.cpp|C6385|specsample_test::runOpen	tests/unit/unit_tests.cpp:1658	false positive for the inputs used: pt is the whole-vocab distribution (pt.n = vocab size >= nc >= 3), so pt.id[pt.n - 1] is in range; the analyzer assumes n may be 0. Test code only.
+tools/bin2c/bin2c.cpp|C6262|main	tools/bin2c/bin2c.cpp:12	build tool: large copy buffer on the stack of main. Build-time helper, not shipped.

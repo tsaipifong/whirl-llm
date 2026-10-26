@@ -30,6 +30,8 @@
 #include "platform/env.h"
 #include "platform/paths.h"
 #include "platform/time.h"
+#include "platform/fs.h"
+#include "platform/fs_fake.h"
 #if WHIRL_TEST_DLL_DEPS
 #include "release/dll_deps.h"
 #endif
@@ -4336,6 +4338,46 @@ static void testPlatformConsoleTime() {
 #endif
 }
 
+// arch025 PL2: MappedFile's CreateFileW keeps the access / share / disposition / flags of v0.2.4 0e35407
+// (util.cpp:31: GENERIC_READ, FILE_SHARE_READ, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL), recorded by FakeFs.
+void testFsMappedOpen() {
+    namespace pfs = whirl::platform::fs;
+    const std::filesystem::path dir = whirl::test::testTmpBase() / L"unit_fs_mapped";
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    const std::string path = whirl::narrow((dir / L"m.bin").wstring());
+    const std::string empty = whirl::narrow((dir / L"empty.bin").wstring());
+    whirl::writeFile(path, "0123456789");
+    whirl::writeFile(empty, "");
+    pfs::fake::begin();
+    {
+        whirl::MappedFile m(path);
+        CHECK(m.size() == 10 && std::memcmp(m.data(), "0123456789", 10) == 0);
+        whirl::MappedFile e(empty);
+        CHECK(e.size() == 0);
+    }
+    bool threw = false;
+    try {
+        whirl::MappedFile x(whirl::narrow((dir / L"missing.bin").wstring()));
+    } catch (const std::runtime_error&) {
+        threw = true;
+    }
+    CHECK(threw);
+    const auto opens = pfs::fake::end();
+    CHECK_EQ(opens.size(), static_cast<std::size_t>(3));
+    for (const auto& o : opens) {
+        CHECK_EQ(o.access, 0x80000000u);    // GENERIC_READ
+        CHECK_EQ(o.share, 0x1u);            // FILE_SHARE_READ
+        CHECK_EQ(o.disposition, 3u);        // OPEN_EXISTING
+        CHECK_EQ(o.flags, 0x80u);           // FILE_ATTRIBUTE_NORMAL (no NO_BUFFERING / OVERLAPPED / WRITE_THROUGH)
+    }
+    if (opens.size() == 3) CHECK(opens[0].ok && opens[1].ok && !opens[2].ok);
+    // off again: nothing recorded
+    { whirl::MappedFile m(path); }
+    CHECK(pfs::fake::snapshot().empty());
+    std::filesystem::remove_all(dir, ec);
+}
+
 int main(int argc, char** argv) {
 #if WHIRL_WITH_HIP && defined(_WIN32)
     if (argc >= 2) {  // helper modes for testProbeChild (the test runs this program as the child)
@@ -4393,6 +4435,7 @@ int main(int argc, char** argv) {
     testMemGovernor();
     testMemGovernorGrowOvershoot();
     testGpuSelect();
+    testFsMappedOpen();
 #if WHIRL_WITH_HIP && defined(_WIN32)
     {
         wchar_t self[1024];

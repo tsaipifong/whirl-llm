@@ -61,6 +61,30 @@ case("F-4 pass: spec::raceE -> srv_balance + srv_fast",
 case("F-4 note: spec::sampleRace (test reference) -> cpu_tests + kt_full only",
      steps("src/common/spec_sample.cpp", fn_line("src/common/spec_sample.cpp", "sampleRace")), ["cpu_tests", "kt_full"],
      ["srv_balance", "srv_fast"])
+# arch025-Q1 / Q3 (PLAN (e)): C / C++ change -> cpu_analyze; lifetime-class change -> cpu_asan (tools/gates/modules.json "safety")
+safety, smods = impact.load_safety()
+tok = impact.re.compile(safety["lifetime"]["tokens"])
+ROOT = impact.ROOT
+
+
+def line_where(path, want_token):
+    """first non-blank, non-comment line of a file that does (or does not) match the lifetime tokens"""
+    for i, l in enumerate(open(os.path.join(ROOT, path), encoding="utf-8", errors="replace").read().splitlines(), 1):
+        if l.strip() and not l.strip().startswith(("//", "#")) and bool(tok.search(l)) == want_token:
+            return i
+    raise SystemExit(f"impact steps test: SETUP no {'token' if want_token else 'plain'} line in {path}")
+
+
+case("Q1 pass: page_pool (lifetime module) -> cpu_asan + cpu_analyze",
+     steps("src/cache/page_pool.cpp", fn_line("src/cache/page_pool.cpp", "PagePool::takeFree")), ["cpu_asan", "cpu_analyze", "cpu_safety_selftest"])
+case("Q1 pass: protocol.cpp line with a lifetime token -> cpu_asan",
+     steps("src/server/protocol.cpp", line_where("src/server/protocol.cpp", True)), ["cpu_asan", "cpu_analyze"])
+case("Q1 block: protocol.cpp line without a lifetime token -> cpu_analyze only",
+     steps("src/server/protocol.cpp", line_where("src/server/protocol.cpp", False)), ["cpu_analyze"], ["cpu_asan"])
+case("Q3 pass: test source -> cpu_analyze", steps("tests/unit/unit_tests.cpp", line_where("tests/unit/unit_tests.cpp", False)), ["cpu_analyze"])
+case("Q1/Q3 pass: safety tools -> all three", steps("tools/safety/run_asan.bat", 1), ["cpu_asan", "cpu_analyze", "cpu_safety_selftest"])
+case(f"Q3 block: {hip} -> no cpu_analyze / cpu_asan", steps(hip, 1), [], ["cpu_analyze", "cpu_asan"])
+case("Q3 block: docs -> no cpu_analyze", steps("docs/building.md", 1), [], ["cpu_analyze", "cpu_asan"])
 ok = 0
 for name, good, bad, got in cases:
     ok += good

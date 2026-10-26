@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "whirl/common.h"
+#include "platform/fs.h"
 
 #include <windows.h>
 
@@ -28,24 +29,24 @@ std::string narrow(std::wstring_view wide) {
 }
 
 MappedFile::MappedFile(const std::string& path) : path_(path) {
-    HANDLE f = CreateFileW(widen(path).c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
-                           FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (f == INVALID_HANDLE_VALUE) throw std::runtime_error("cannot open " + path);
+    namespace pfs = platform::fs;
+    pfs::Handle f = pfs::open(widen(path).c_str(), pfs::kGenericRead, pfs::kShareRead, pfs::kOpenExisting, pfs::kAttrNormal);
+    if (!pfs::valid(f)) throw std::runtime_error("cannot open " + path);
     file_ = f;
-    LARGE_INTEGER sz{};
-    if (!GetFileSizeEx(f, &sz)) {
+    std::int64_t sz = 0;
+    if (!pfs::size(f, &sz)) {
         close();
         throw std::runtime_error("cannot stat " + path);
     }
-    size_ = static_cast<std::size_t>(sz.QuadPart);
+    size_ = static_cast<std::size_t>(sz);
     if (size_ == 0) return;
-    HANDLE m = CreateFileMappingW(f, nullptr, PAGE_READONLY, 0, 0, nullptr);
+    pfs::Handle m = pfs::mapReadOnly(f);
     if (!m) {
         close();
         throw std::runtime_error("cannot map " + path);
     }
     mapping_ = m;
-    data_ = static_cast<const std::uint8_t*>(MapViewOfFile(m, FILE_MAP_READ, 0, 0, 0));
+    data_ = static_cast<const std::uint8_t*>(platform::fs::mapView(m));
     if (!data_) {
         close();
         throw std::runtime_error("cannot map view of " + path);
@@ -74,16 +75,16 @@ MappedFile& MappedFile::operator=(MappedFile&& o) noexcept {
 MappedFile::~MappedFile() { close(); }
 
 void MappedFile::close() {
-    if (data_) UnmapViewOfFile(data_);
-    if (mapping_) CloseHandle(static_cast<HANDLE>(mapping_));
-    if (file_) CloseHandle(static_cast<HANDLE>(file_));
+    if (data_) platform::fs::unmapView(data_);
+    if (mapping_) platform::fs::close(mapping_);
+    if (file_) platform::fs::close(file_);
     data_ = nullptr;
     mapping_ = file_ = nullptr;
     size_ = 0;
 }
 
 std::string readFile(const std::string& path) {
-    std::FILE* f = _wfopen(widen(path).c_str(), L"rb");
+    std::FILE* f = platform::fs::openStdio(widen(path).c_str(), L"rb");
     if (!f) throw std::runtime_error("cannot open " + path);
     std::string data;
     char buf[1 << 16];
@@ -94,7 +95,7 @@ std::string readFile(const std::string& path) {
 }
 
 void writeFile(const std::string& path, std::string_view data) {
-    std::FILE* f = _wfopen(widen(path).c_str(), L"wb");
+    std::FILE* f = platform::fs::openStdio(widen(path).c_str(), L"wb");
     if (!f) throw std::runtime_error("cannot write " + path);
     std::fwrite(data.data(), 1, data.size(), f);
     std::fclose(f);

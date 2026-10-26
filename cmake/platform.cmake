@@ -20,6 +20,9 @@ target_sources(whirl_platform PRIVATE
   ${CMAKE_SOURCE_DIR}/src/platform/console_win.cpp
   ${CMAKE_SOURCE_DIR}/src/platform/time_win.cpp)
 target_link_libraries(whirl_platform PRIVATE winmm)
+# PL2: fs (MappedFile, the GGUF reader, the server log, the SSD tier files; FakeFs in fs_fake.h)
+target_sources(whirl_platform PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/platform/fs_win.cpp)
 # callers include "platform/<concern>.h"; never put src/platform itself on an include path (its time.h would shadow
 # the C library's <time.h>)
 target_include_directories(whirl_platform PUBLIC ${CMAKE_SOURCE_DIR}/src)

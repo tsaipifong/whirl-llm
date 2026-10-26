@@ -3409,7 +3409,8 @@ void testTuneTable() {
     static_assert(std::is_same_v<decltype(std::declval<const q::Model&>().scratch()), const q::Scratch&>);
     static_assert(std::is_same_v<decltype(std::declval<q::Model&>().tuneTable()), q::TuneTable&>);
     {
-        q::Model m;
+        const auto m_heap = std::make_unique<q::Model>();  // heap: 7 Models in one frame overflow the 1 MiB stack under ASan (arch025-int3)
+        q::Model& m = *m_heap;
         const q::TuneTable& t = m.tuneTable();
         check(t.tune_mask == ~0ull && !t.tune_cold, "tune table: defaults tune_mask ~0, tune_cold false");
         check(t.gemv_r == q::defaultGemvR() && t.gemv_w == q::defaultGemvW() && t.gemv_w_head == q::defaultGemvWHead(),
@@ -3418,7 +3419,8 @@ void testTuneTable() {
         check(s.x == 0 && s.logits == 0 && s.mm_class == 1 && s.ff_scratch == 0 && s.dq_rows == 0, "scratch: initial values");
     }
     for (std::uint32_t seed = 1; seed <= 40; ++seed) {
-        q::Model a;
+        const auto a_heap = std::make_unique<q::Model>();  // heap: 7 Models in one frame overflow the 1 MiB stack under ASan (arch025-int3)
+        q::Model& a = *a_heap;
         m3Layers(a, seed, true);
         const std::string text = a.writeTune();
         check(text == m3ExpectedText(a), std::format("tune text: writeTune == the definition (seed {})", seed));
@@ -3427,11 +3429,13 @@ void testTuneTable() {
             for (q::Mat* w : m3MatsOf(L)) mats.push_back(w);
         check(q::tuneText(mats) == text, "tune text: tuneText over the layers' matrices == writeTune");
         // round trip into the same shapes
-        q::Model b;
+        const auto b_heap = std::make_unique<q::Model>();  // heap: 7 Models in one frame overflow the 1 MiB stack under ASan (arch025-int3)
+        q::Model& b = *b_heap;
         m3Layers(b, seed, false);
         check(b.readTune(text, q::n_tune) && m3Tunes(b) == m3Tunes(a), "tune text: readTune(writeTune) restores every choice");
         // buckets [0, 2) only (the old tune cache)
-        q::Model c;
+        const auto c_heap = std::make_unique<q::Model>();  // heap: 7 Models in one frame overflow the 1 MiB stack under ASan (arch025-int3)
+        q::Model& c = *c_heap;
         m3Layers(c, seed, false);
         bool ok2 = c.readTune(text, 2);
         bool only2 = true;
@@ -3442,12 +3446,14 @@ void testTuneTable() {
         // CRLF line ends and blank lines read the same
         std::string crlf;
         for (char ch : text) crlf += ch == '\n' ? std::string("\r\n\r\n") : std::string(1, ch);
-        q::Model d;
+        const auto d_heap = std::make_unique<q::Model>();  // heap: 7 Models in one frame overflow the 1 MiB stack under ASan (arch025-int3)
+        q::Model& d = *d_heap;
         m3Layers(d, seed, false);
         check(d.readTune(crlf, q::n_tune) && m3Tunes(d) == ta, "tune text: CRLF and blank lines");
         // malformed: nothing applied
         for (const std::string bad : {text + "1 2 3\n", text + std::format("0 2 256 512 {}\n", q::n_choices)}) {
-            q::Model e;
+            const auto e_heap = std::make_unique<q::Model>();  // heap: 7 Models in one frame overflow the 1 MiB stack under ASan (arch025-int3)
+            q::Model& e = *e_heap;
             m3Layers(e, seed, false);
             const auto before = m3Tunes(e);
             check(!e.readTune(bad, q::n_tune) && m3Tunes(e) == before, "tune text: malformed line / choice >= n_choices -> false, nothing applied");
@@ -3460,7 +3466,8 @@ void testTuneTable() {
             std::uint32_t lb, lt, lr, lc, lv;
             std::sscanf(line.c_str(), "%u %u %u %u %u", &lb, &lt, &lr, &lc, &lv);
             const std::string stale = text.substr(0, l0) + text.substr(nl + 1);
-            q::Model f;
+            const auto f_heap = std::make_unique<q::Model>();  // heap: 7 Models in one frame overflow the 1 MiB stack under ASan (arch025-int3)
+            q::Model& f = *f_heap;
             m3Layers(f, seed, false);
             const bool r = f.readTune(stale, q::n_tune);
             // expectation: walk the matrices in order; each takes buckets until (lb, lt, lr, lc) is asked for

@@ -6,6 +6,7 @@
 
 #include "model/qwen35/weight_loader.h"
 
+#include "platform/fs.h"
 #include "whirl/common.h"
 
 #include <algorithm>
@@ -26,7 +27,7 @@ constexpr std::size_t ti(GgmlType t) { return static_cast<std::size_t>(t); }
 }  // namespace
 
 Reader::Reader(const std::string& path) {
-    f_ = _wfopen(widen(path).c_str(), L"rb");
+    f_ = platform::fs::openStdio(widen(path).c_str(), L"rb");  // arch025 PL2 (re-pointed from src/model/loader.cpp at the int3 merge)
     if (!f_) throw ModelError("OpenFailed", path);
     setvbuf(f_, nullptr, _IONBF, 0);
 }

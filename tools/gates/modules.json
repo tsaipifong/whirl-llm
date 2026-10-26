@@ -19,6 +19,23 @@
   "Every step name must exist in release_gate.ps1 -List or be in pending, else release_gate exits 2."
  ],
  "status": "dev-only: not for releases until owner sign-off O1/O2 (arch024 PLAN)",
+ "safety": {
+  "_doc": [
+   "arch025-Q1 / Q3 impact selection of the C++ safety steps (arch025 PLAN (e)); read by tools/impact/impact.py, checked by",
+   "tools/gates/modules_check.py (every step must be in release_gate.ps1). cpu_analyze: every C / C++ change under the cxx globs.",
+   "cpu_asan: a lifetime-class change = a C / C++ file of a lifetime module or under the lifetime globs, or a changed line (new",
+   "or old side) that matches lifetime.tokens (allocation, release, RAII, ownership, views into owned storage). Fail closed: a",
+   "file whose text cannot be read counts as lifetime. own: the safety tools themselves (any file type) -> all three steps.",
+   "cpu_safety_selftest goes with either. Locks / threads -> cpu_tsa (Q4, not landed)."
+  ],
+  "cxx": {"globs": ["src/*", "include/*", "tests/*", "tools/*"], "ext": [".cpp", ".h", ".hpp", ".inc", ".c", ".cc"],
+          "steps": ["cpu_analyze", "cpu_safety_selftest"]},
+  "lifetime": {"modules": ["handles", "ckpt_store", "page_pool", "prefix_store", "tier_bridge", "engine_gov", "threads"],
+               "globs": ["src/device/*", "src/cache/*", "src/tier/*", "tests/safety/*"],
+               "tokens": "\\bnew\\b|\\bdelete\\b|malloc|calloc|realloc|\\bfree\\s*\\(|_aligned_|unique_ptr|shared_ptr|weak_ptr|make_unique|make_shared|~\\w+\\s*\\(|\\.reset\\s*\\(|\\.release\\s*\\(|std::move|\\bswap\\b|std::optional|string_view|std::span|\\.data\\s*\\(|c_str\\s*\\(|emplace|push_back|resize\\s*\\(|reserve\\s*\\(|erase\\s*\\(|clear\\s*\\(|memcpy|memmove|memset|alloca|\\[\\s*\\w+\\s*[-+]",
+               "steps": ["cpu_asan", "cpu_safety_selftest"]},
+  "own": {"globs": ["tools/safety/*", "cmake/safety*.cmake", "tests/safety/*"], "steps": ["cpu_safety_selftest", "cpu_asan", "cpu_analyze"]}
+ },
  "standards": {
   "_doc": [
    "measure-tools P3 PROPOSAL (mt-p3, 2026-10-25; not enforced: the judge is P6, the release integration P7). Per module:",
@@ -271,6 +288,16 @@
    "steps": ["cpu_server", "golden_swift", "golden_moe", "srv_balance", "srv_fast"],
    "gpus": {"golden_swift": 2, "golden_moe": 2, "srv_balance": 2, "srv_fast": 2},
    "manual": ["whirl-server-tests sampler / acceptor_* (fixed-RNG acceptance sequences vs the pre-move code)", "V-host sched"]
+  },
+  "platform.fs": {
+   "id": "PL2", "desc": "platform layer, files (platform::fs + FakeFs: MappedFile, GGUF reader, server log, SSD tier files)",
+   "paths": ["src/platform/fs.h", "src/platform/fs_fake.h", "src/platform/fs_win.cpp"], "lands_on": "arch025-pl2 (PL2)",
+   "steps": ["cpu_tests", "cpu_model", "cpu_tier", "cpu_server", "golden_swift", "golden_moe", "srv_tier_verify",
+             "srv_cache_balance", "srv_fs_swift"],
+   "gpus": {"golden_swift": 1, "golden_moe": 1, "srv_tier_verify": 2, "srv_cache_balance": 1, "srv_fs_swift": 1},
+   "manual": ["flag table: whirl-tier-tests testFsOpenTable + whirl-tests testFsMappedOpen (CreateFileW access / share / disposition / flags == 0e35407)",
+              "SSD speed: T1 host-bench suite ssd A/B (write / read MB/s, QD1 / QD4) both GPUs, after T1 is merged",
+              "tools/gates/platform_check.ps1 -Mode block"]
   },
   "contract": {
    "id": "X", "desc": "cross-module contracts (ServerModel, device::Backend, kernels_abi, numerics): the full gate",
