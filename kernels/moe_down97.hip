@@ -22,6 +22,12 @@
 //   NG : a wave-uniform full batch (every step valid for every lane) is consumed without the per-step guards;
 //        with the guards the compiler sinks loads into the guarded blocks (dev ISA: drains per step again).
 //   EP : the epilogue loads x[t][row], ysh[t][row], sg[t] issued at kernel start (lane 0); x_old + v == x += v.
+// moeskip contract (feat027-moeskip, fast only; feat026-moe-skipsafe): a token's slot ids are a kept prefix, then -1
+// (dropped, weight 0). Down candidates (DN and DF) loop over the kept prefix only, kt = md97_kept (the loop of
+// feat027's moe_kept: K when no id is -1), with steps past it clamped to slot kt - 1, so no load ever uses an id -1;
+// the lane -> unit map and order are those of the feat027 shipped loop over kt * nb. Without -1 (precise, balance,
+// fast without the item) kt == K and the values are those of the pre-moeskip shipped loop. GU candidates return on
+// e < 0 (block-uniform), as feat027's moe_gu_mxfp4w. Holds before and after feat027 is merged (no use of moe_skip.hip).
 // Tune ids (0 = shipped, the default; the default build is unchanged - no code is emitted from this file):
 //   WHIRL_MD97_DN (moe_down_mxfp4w)  1 IT KB1   2 IT KB2   3 IT KB4   4 IT KB8   5 IT KB4 EP   6 IT KB2 EP
 //                                    7 KB2 NG   8 KB4 NG   9 KB4 EP NG   10 KB8 NG
@@ -45,6 +51,13 @@
 #endif
 
 #if WHIRL_MD97_DN || WHIRL_MD97_DF || WHIRL_MD97_GU || WHIRL_MD97_DEV
+
+// kept slots of token t (moeskip: kept prefix, then -1); == feat027 moe_kept, K without moeskip
+__device__ __forceinline__ int md97_kept(const int *__restrict__ ids, int t, int K) {
+    int kt = K;
+    while (kt > 1 && ids[(size_t)t * K + kt - 1] < 0) --kt;
+    return kt;
+}
 
 // mxw_dot on loaded operands (same dp4 chain, same order)
 __device__ __forceinline__ int md97_dot(const uint4 q, const int4 xl, const int4 xh) {
@@ -136,7 +149,8 @@ __device__ void md97_down_impl(const U &un, const uint8_t *__restrict__ W, uint6
         }
     }
     const int nb = F / 32;
-    const int nu = K * nb;
+    const int kt = md97_kept(ids, t, K);  // moeskip: kept prefix (K without it)
+    const int nu = kt * nb;
     float acc = 0.f;
     if (nu > 0) {
         const int dk = WARP / nb, db = WARP - dk * nb;  // wave-uniform
@@ -146,8 +160,8 @@ __device__ void md97_down_impl(const U &un, const uint8_t *__restrict__ W, uint6
             bool ok[KB];
 #pragma unroll
             for (int s = 0; s < KB; ++s) {
-                ok[s] = k < K;  // == (lane + u0 + 32 s < nu)
-                pk[s] = t * K + (ok[s] ? k : K - 1);  // clamped: in bounds, consumed only if ok
+                ok[s] = k < kt;  // == (lane + u0 + 32 s < nu)
+                pk[s] = t * K + (ok[s] ? k : kt - 1);  // clamped to a kept slot: in bounds, consumed only if ok
                 bb[s] = b;
                 b += db;
                 k += dk;
@@ -199,6 +213,7 @@ __device__ void md97_gu_impl(const uint8_t *__restrict__ W1, const uint8_t *__re
     if (row >= nrows) return;
     const int p = blockIdx.y;
     const int t = p / K, e = ids[p];
+    if (e < 0) return;  // moeskip: dropped slot (as feat027 moe_gu_mxfp4w)
     const bool second = row >= ff;
     const int r = second ? row - ff : row;
     const uint8_t *wr = (second ? W2 : W1) + ((size_t)e * ff + r) * row_bytes;
@@ -283,6 +298,10 @@ __device__ void md97_gu_impl(const uint8_t *__restrict__ W1, const uint8_t *__re
 #define MD97_GU_ID4 MD97_GU_BODY(4, true)
 #define MD97_CAT2(a, b) a##b
 #define MD97_CAT(a, b) MD97_CAT2(a, b)
+
+// skip-safety marker (feat026-moe-skipsafe): every object with md97 code has id -1 handling; kt family moedown97
+// refuses the id -1 cases for an object without it (built before this change)
+extern "C" __global__ void md97_skipsafe_v1() {}
 
 #if WHIRL_MD97_DEV
 MD97_DN_SIG(md97dn1_mxfp4w) MD97_DN_ID1
