@@ -1,7 +1,8 @@
 # arch025-S0a arch check (tools/gates/pending_scan.py arch): host Arch::gfx<N> branches outside the device layer.
 # path<TAB>count<TAB>step that removes the sites. The list may only shrink: the step that removes sites lowers or
 # deletes its entry in the same commit (block mode: STALE otherwise). Regenerate counts: pending_scan.py <rule> --write-pending.
-include/whirl/model.h	2	M6
+include/whirl/model.h	1	M6
 src/model/config.cpp	1	M6
 src/server/server_main.cpp	1	M6
 src/vision/kernel_image.cpp	2	M6
+src/spec/policy.h	1	M6 (mtpDefaults default argument, moved from model.h by M4)

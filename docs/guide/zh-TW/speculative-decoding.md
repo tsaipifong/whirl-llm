@@ -2,7 +2,7 @@
 
 # 推測解碼：MTP 與 n-gram 共同草擬
 
-> **狀態。** 已實作於 `src/model/spec.cpp`（草稿策略）與 `src/model/forward.cpp`（草擬 / 驗證 forward）。
+> **狀態。** 已實作於 `src/spec/policy.cpp`（草稿策略）與 `src/model/forward.cpp`（草擬 / 驗證 forward）。
 > 環境變數列在[使用參考](usage.md#env)。
 
 **對誰有幫助：** 任何在受記憶體頻寬限制的 GPU 上實作推測解碼的人，特別是帶有遞迴狀態（DeltaNet、Mamba 式層）的混合模型，這類模型的快取無法單純截斷；以及任何需要推測輸出與一般 greedy 輸出*完全相同*、而不只是「等價」的人。

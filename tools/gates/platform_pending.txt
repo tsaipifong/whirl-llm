@@ -10,7 +10,7 @@ src/cli/main.cpp	3	PL1 console (_setmode, _fileno 2 + <io.h> 1)
 src/common/util.cpp	14	PL2 fs (MappedFile, _wfopen 9) + PL4 args (MultiByteToWideChar / WideCharToMultiByte 4) + include: last
 src/model/device.cpp	3	PL4 proc (CreateMutexW, WaitForSingleObject 2 + include 1)
 src/model/loader.cpp	1	PL2 fs (_wfopen of the GGUF reader 1; found by the PL0 call rule, not in PLAN PL2)
-src/model/spec.cpp	2	PL4 proc (GetModuleFileNameW 1 + include 1; after M4)
+src/spec/policy.cpp	2	PL4 proc (GetModuleFileNameW 1 + include 1; moved from src/model/spec.cpp by M4)
 src/release/release.cpp	17	PL1 console (5) + PL3 net (port pre-check 9 + <winsock2.h> <ws2tcpip.h> 2) + <windows.h>: last
 src/server/http.cpp	30	PL3 net (28 + <winsock2.h> <ws2tcpip.h> 2)
 src/server/log.cpp	3	PL1 time (GetLocalTime 1) + PL2 fs (_wfopen 1) + include: last

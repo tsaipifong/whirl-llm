@@ -2,7 +2,7 @@
 
 # Speculative decoding: MTP and n-gram co-drafting
 
-> **Status.** Implemented in `src/model/spec.cpp` (draft policy) and `src/model/forward.cpp`
+> **Status.** Implemented in `src/spec/policy.cpp` (draft policy) and `src/model/forward.cpp`
 > (draft / verify passes). The environment variables are listed in [usage.md](../../usage.md#env).
 
 **Who this helps:** anyone implementing speculative decoding on a bandwidth-bound GPU, in

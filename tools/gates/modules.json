@@ -294,6 +294,16 @@
             "golden_swift": 2, "golden_moe": 2},
    "manual": ["S0b-2 dump: D exec tune_mask / tune_cold / gemv_r / gemv_w / gemv_w_head and the tune table hash (writeTune) == the M2 exe, both GPUs",
               "the tune cache file written by the M3 exe is byte-identical to the M2 exe's (same model, same card; WHIRL_TUNE_COLD unset)"]
+  },
+  "spec.policy": {
+   "id": "M4", "desc": "speculative-decoding policy (src/spec, host-only library whirl_spec, linked by the server core and the model library): MtpDefaults / mtpDefaults (per-device MTP defaults), the draft-head vocabulary choice (draftVocabFile / draftVocabChoice / readDraftVocab / draftVocabIds / exeDirectory / draftVocabDefaultFits), DraftAccept / DraftTiming / pickDrafts, the T4-1 per-slot draft allocation (CycleCost / SlotAccept / allocDrafts) and prompt-lookup drafting (Ngram / NgramPolicy)",
+   "paths": ["src/spec/policy.h", "src/spec/policy.cpp", "cmake/spec.cmake"], "lands_on": "arch025-m4 (M4)",
+   "steps": ["cpu_model", "cpu_server", "cpu_pins", "golden_swift", "golden_moe", "srv_mt_precise", "srv_mt_precise_moe"],
+   "gpus": {"golden_swift": 2, "golden_moe": 2, "srv_mt_precise": 2, "srv_mt_precise_moe": 2},
+   "callers": "rdeps",
+   "manual": ["V-move: tools/impact/fn_equiv.py old vs new file (every moved function byte-equal ignoring whitespace) + the moved declarations verbatim (scratch/a25_m4/move_check.py)",
+              "V-srv: server golden + srv_mt_precise / _moe (MTP auto draft counts, n-gram co-drafting) == the parent exe; mtpDefaults differs per device (8060S: verify-row slope 0.12, dense auto 8), so a policy change needs both GPUs",
+              "V-host sched: whirl-host-bench --backend null --suite sched work rows exact vs the parent exe (MockModel; the engine's draft path)"]
   }
  }
 }

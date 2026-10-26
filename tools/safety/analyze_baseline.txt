@@ -4,7 +4,7 @@
 1	src/hip/uma_mem.cpp|C6240|whirl::hip::umaMemory
 1	src/hip/wddm_mem.cpp|C6240|whirl::hip::gpuPinnedNow
 1	src/hip/wddm_mem.cpp|C6240|whirl::hip::wddmMemInfo
-1	src/model/spec.cpp|C28020|whirl::qwen35::SlotAccept::observe
+1	src/spec/policy.cpp|C28020|whirl::qwen35::SlotAccept::observe
 1	src/server/engine.cpp|C28020|whirl::server::CycleProf::print
 1	src/vision/stb_image.h|C6262|stbi__gif_load
 1	src/vision/stb_image.h|C6262|stbi__load_gif_main

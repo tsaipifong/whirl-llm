@@ -3359,6 +3359,39 @@ void testLayerSubset() {
           "layer subset: everything put back by the destructor");
 }
 
+// arch025-M4: the per-device MTP defaults (mtpDefaults, src/spec/policy.cpp; moved from src/model/config.cpp) for both
+// device profiles x dense / MoE, every field, and exeDirectory (the folder of this executable). Expected values are
+// written from the definition (R9700 = reference prior; 8060S: verify rows cost more -> n-gram slope 0.12 for dense).
+void testMtpDefaults() {
+    struct Row {
+        whirl::hip::Arch arch;
+        bool moe;
+        std::uint32_t drafts;
+        bool automatic;
+        float slope;
+    };
+    const Row rows[] = {
+        {whirl::hip::Arch::gfx1201, false, 8, true, 0.015f},
+        {whirl::hip::Arch::gfx1201, true, 1, false, 0.015f},
+        {whirl::hip::Arch::gfx1151, false, 8, true, 0.12f},
+        {whirl::hip::Arch::gfx1151, true, 1, false, 0.015f},
+    };
+    for (const Row& r : rows) {
+        const q::MtpDefaults d = q::mtpDefaults(r.moe, r.arch);
+        const std::string at = std::string(r.arch == whirl::hip::Arch::gfx1151 ? "gfx1151" : "gfx1201") + (r.moe ? " moe" : " dense");
+        check(d.drafts == r.drafts, "mtpDefaults drafts: " + at);
+        check(d.p_min == 0.0f, "mtpDefaults p_min: " + at);
+        check(d.adapt == 0, "mtpDefaults adapt: " + at);
+        check(d.automatic == r.automatic, "mtpDefaults automatic: " + at);
+        check(d.ngram_min == 3, "mtpDefaults ngram_min: " + at);
+        check(d.ngram_slope == r.slope, "mtpDefaults ngram_slope: " + at);
+    }
+    check(q::mtpDefaults(false).ngram_slope == 0.015f && q::mtpDefaults(false).drafts == 8, "mtpDefaults: the default arch is gfx1201");
+    const std::string dir = q::exeDirectory();
+    check(!dir.empty() && std::filesystem::exists(std::filesystem::path(dir) / "whirl-model-tests.exe"),
+          "exeDirectory: the folder of the running executable (" + dir + ")");
+}
+
 int main() {
     whirl::test::clearWhirlEnv();  // FR-TEST P3-11
     testKvLayout();
@@ -3396,6 +3429,7 @@ int main() {
     testCycleCost();
     testSlotAccept();
     testAllocDrafts();
+    testMtpDefaults();
     testMxfp4Repack();
     std::printf("model tests: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

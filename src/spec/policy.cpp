@@ -1,10 +1,12 @@
-// MTP draft-count cost model and prompt-lookup (n-gram) drafting.
+// MTP draft-count cost model and prompt-lookup (n-gram) drafting (src/model/spec.cpp until arch025-M4).
 // SPDX-License-Identifier: Apache-2.0
 // Reimplements the WHIRL Zig research prototype's model/qwen35.zig (Ngram, NgramPolicy,
 // DraftAccept, DraftTiming, pickDrafts); CycleCost, SlotAccept and allocDrafts are the
 // per-slot draft allocation of T4-1 (not wired into the engine yet).
 
-#include "whirl/model.h"
+#include "spec/policy.h"
+#include "whirl/device_profile.h"  // device::profile (mtpDefaults)
+#include "whirl/vismap.h"  // image_id_base (Ngram::lookup)
 
 #include <algorithm>
 #include <cmath>
@@ -611,6 +613,27 @@ u32 NgramPolicy::choose(std::size_t n, u32 mlen, float mtp_score, const DraftTim
         }
     }
     return best_k;
+}
+
+// ---- per-device MTP defaults (moved verbatim from src/model/config.cpp, arch025-M4)
+
+MtpDefaults mtpDefaults(bool moe, hip::Arch arch) {
+    if (device::profile(arch).mtp_costly_verify_rows) {
+        // Radeon 8060S (UMA, measured there): the draft counts, the draft-vocabulary default and
+        // the n-gram minimum match measured the same as on the R9700 (within noise), but a verify
+        // row costs far more: ~+11 ms per extra row on a ~95 ms 1-draft cycle at 9k context
+        // (slope ~0.12, vs 0.015 on the R9700). With the R9700 prior the first n-gram proposal
+        // of a request took 8 drafts and lost the cycle (agent tool-output replay: -6%).
+        // qwen35moe (Ornith): 0.12 gave +1.6% on that replay but -2.2% on a file edit that
+        // n-gram drafts best: it keeps the R9700 prior (and one MTP draft per cycle, also
+        // fastest there: 2 fixed / 3 auto were 1-12% slower).
+        if (moe) return {1, 0.0f, 0, false, 3, 0.015f};
+        return {8, 0.0f, 0, true, 3, 0.12f};
+    }
+    // dense qwen35 (Qwen3.8-27B): chained drafts stay good out to 10 -> cost-model
+    // auto, max 8. qwen35moe (Ornith-35B-A3B): one draft per cycle is fastest.
+    if (moe) return {1, 0.0f, 0, false};
+    return {8, 0.0f, 0, true};
 }
 
 }  // namespace whirl::qwen35

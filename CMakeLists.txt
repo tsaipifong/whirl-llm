@@ -211,6 +211,7 @@ endif()
 # area fragments: each source area has its own cmake/<area>.cmake
 
 include(cmake/ops.cmake)  # kernel choice per op (ARCH-1 K-1..K-5)
+include(cmake/spec.cmake)  # speculative-decoding policy (src/spec, arch025-M4), host-only; before server / model
 include(cmake/server.cmake OPTIONAL)
 include(cmake/safety_targets.cmake)  # safe025: test-only fault driver (default OFF)
 include(cmake/model.cmake OPTIONAL)

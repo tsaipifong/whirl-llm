@@ -67,7 +67,8 @@ add_library(whirl_server_core STATIC
 target_include_directories(whirl_server_core PUBLIC ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/include)
 # whirl/version.h (configured by cmake/release.cmake) for GET /version and /props
 target_include_directories(whirl_server_core PRIVATE ${CMAKE_BINARY_DIR}/generated)
-target_link_libraries(whirl_server_core PUBLIC whirl whirl_cache whirl_tier_core ws2_32)
+# whirl_spec: the MTP / n-gram draft policy the engine runs (src/spec, arch025-M4)
+target_link_libraries(whirl_server_core PUBLIC whirl whirl_spec whirl_cache whirl_tier_core ws2_32)
 
 if(WHIRL_WITH_HIP)
   # whirl-server.exe: the production server (qwen35::Model on HIP)
@@ -82,12 +83,11 @@ if(WHIRL_WITH_HIP)
 endif()
 
 # server tests: unit tests + end-to-end over HTTP against the mock model
-# (the MTP / n-gram policy code of the model library is host-only: spec.cpp)
+# (the MTP / n-gram policy comes with whirl_server_core: whirl_spec, cmake/spec.cmake, arch025-M4)
 add_executable(whirl-server-tests
   ${CMAKE_SOURCE_DIR}/tests/server/server_tests.cpp
   ${CMAKE_SOURCE_DIR}/tests/server/mock_backend.cpp
-  ${CMAKE_SOURCE_DIR}/tests/server/http_client.cpp
-  ${CMAKE_SOURCE_DIR}/src/model/spec.cpp)
+  ${CMAKE_SOURCE_DIR}/tests/server/http_client.cpp)
 target_include_directories(whirl-server-tests PRIVATE ${CMAKE_SOURCE_DIR}/tests/server)
 target_link_libraries(whirl-server-tests PRIVATE whirl_server_core whirl_device_null)
 # FR-DFL P3-4: source-order checks on server_main.cpp (not linked into the test binary)
@@ -97,8 +97,7 @@ target_compile_definitions(whirl-server-tests PRIVATE WHIRL_SOURCE_DIR="${CMAKE_
 add_executable(whirl-page-bench
   ${CMAKE_SOURCE_DIR}/tests/bench/page_bench.cpp
   ${CMAKE_SOURCE_DIR}/tests/server/mock_backend.cpp
-  ${CMAKE_SOURCE_DIR}/tests/server/http_client.cpp
-  ${CMAKE_SOURCE_DIR}/src/model/spec.cpp)
+  ${CMAKE_SOURCE_DIR}/tests/server/http_client.cpp)
 target_include_directories(whirl-page-bench PRIVATE ${CMAKE_SOURCE_DIR}/tests/server)
 target_link_libraries(whirl-page-bench PRIVATE whirl_server_core whirl_device_null)
 
@@ -124,8 +123,7 @@ add_executable(whirl-stage-bench-tests
 add_executable(whirl-host-bench
   ${CMAKE_SOURCE_DIR}/tests/bench/host_bench.cpp
   ${CMAKE_SOURCE_DIR}/tests/server/mock_backend.cpp
-  ${CMAKE_SOURCE_DIR}/tests/server/http_client.cpp
-  ${CMAKE_SOURCE_DIR}/src/model/spec.cpp)
+  ${CMAKE_SOURCE_DIR}/tests/server/http_client.cpp)
 target_include_directories(whirl-host-bench PRIVATE ${CMAKE_SOURCE_DIR}/tests/server ${CMAKE_SOURCE_DIR}/tests/bench)
 target_link_libraries(whirl-host-bench PRIVATE whirl_server_core whirl_device_null)
 if(WHIRL_WITH_HIP)
@@ -142,8 +140,7 @@ endif()
 add_executable(whirl-pins
   ${CMAKE_SOURCE_DIR}/tests/pins/pins.cpp
   ${CMAKE_SOURCE_DIR}/tests/server/mock_backend.cpp
-  ${CMAKE_SOURCE_DIR}/tests/server/http_client.cpp
-  ${CMAKE_SOURCE_DIR}/src/model/spec.cpp)
+  ${CMAKE_SOURCE_DIR}/tests/server/http_client.cpp)
 target_include_directories(whirl-pins PRIVATE ${CMAKE_SOURCE_DIR}/tests/server)
 target_link_libraries(whirl-pins PRIVATE whirl_server_core whirl_device_null)
 # arch024 S0a (PLAN v3 N3): startup sizing replay from a "startup inputs:" line (pure functions only)

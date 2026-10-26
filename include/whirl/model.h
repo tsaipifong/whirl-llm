@@ -30,6 +30,7 @@
 #include "model/qwen35/kv.h"  // src/: qwen35::KvPool, SeqTable, Seq, kvArrays (arch025-M2)
 #include "model/qwen35/scratch.h"  // src/: qwen35::Scratch (arch025-M3)
 #include "model/qwen35/tune_table.h"  // src/: qwen35::TuneTable, GemvR / GemvW (arch025-M3)
+#include "spec/policy.h"  // src/: the MTP / n-gram draft policy, mtpDefaults, the draft vocabulary choice (arch025-M4)
 #include "whirl/gguf.h"
 #include "whirl/model_types.h"
 #include "whirl/device_profile.h"
@@ -89,8 +90,9 @@ private:
 // constants (shared with the kernels; see kernels_abi.h)
 
 // n_types (> every GgmlType used): src/model/qwen35/weights.h
-// max_batch_default .. ctl_words, Config, VSeg / PSeg / PRows / MSeg / BatchPlan, DraftAccept, DraftTiming,
-// pickDrafts .. NgramPolicy: whirl/model_types.h (arch025-M3; the server core includes only that header)
+// max_batch_default .. ctl_words, Config, VSeg / PSeg / PRows / MSeg / BatchPlan: whirl/model_types.h (arch025-M3;
+// the server core includes only that header); DraftAccept, DraftTiming, pickDrafts .. NgramPolicy: src/spec/policy.h
+// (arch025-M4)
 
 // Prefill GEMM autotune buckets (n_tune: src/model/qwen35/weights.h).
 constexpr std::uint32_t tune_small_max = 1024;
@@ -755,47 +757,10 @@ namespace whirl::qwen35 {
 const gpusel::Restriction& restrictDevice(std::string_view spec);
 
 // ---------------------------------------------------------------------------
-// MTP draft-count control and n-gram (prompt-lookup) drafting
+// MTP draft-count control and n-gram (prompt-lookup) drafting: src/spec/policy.h (arch025-M4: MtpDefaults,
+// mtpDefaults, the draft-head vocabulary choice, DraftAccept .. NgramPolicy). The two parts that need the model
+// library stay here:
 
-struct MtpDefaults {
-    std::uint32_t drafts;
-    float p_min;
-    std::uint32_t adapt;
-    bool automatic;
-    std::uint32_t ngram_min = 3;  // n-gram drafting: shortest history suffix match (WHIRL_NGRAM_MIN)
-    float ngram_slope = 0.015f;   // NgramPolicy::verify_slope (WHIRL_NGRAM_SLOPE)
-};
-// Per-device defaults: gfx1201 (R9700) is the reference; gfx1151 (Radeon 8060S, UMA,
-// bandwidth-bound decode) has its own values measured on that device.
-MtpDefaults mtpDefaults(bool moe, hip::Arch arch = hip::Arch::gfx1201);
-
-// ---- draft-head vocabulary subset (T5-1b): WHIRL_DRAFT_VOCAB = 48k | 64k | <file> | off | N
-// File for a WHIRL_DRAFT_VOCAB value: "48k" / "64k" / ... -> <dir>/subset_48k.bin, anything else
-// that is not "off" or a plain number (the old first-N-rows experiment) is a path; else nullopt.
-std::optional<std::string> draftVocabFile(std::string_view spec, const std::string& dir);
-// uint32 little-endian token ids (throws on a missing file or a size that is not a multiple of 4)
-std::vector<std::uint32_t> readDraftVocab(const std::string& path);
-// Checks a subset (strictly ascending, every id < n_rows; throws otherwise) and adds the missing
-// `required` ids (special and byte tokens), counting them in *added.
-std::vector<std::uint32_t> draftVocabIds(std::span<const std::uint32_t> ids, std::uint32_t n_rows,
-                                         std::span<const std::uint32_t> required, std::uint32_t* added = nullptr);
-// directory of the running executable ("" if unknown)
-std::string exeDirectory();
-// What WHIRL_DRAFT_VOCAB selects. Unset = the embedded 64k subset by default (only applied to a
-// model draftVocabDefaultFits accepts); "64k" = the embedded subset explicitly; "off" / "0" / "" =
-// the full vocabulary; N = the first N rows (old experiment); "48k" etc. = <dir>/draft_vocab/
-// subset_48k.bin; anything else = a file path.
-struct DraftVocabChoice {
-    enum class Kind { full, first_n, embedded_64k, file } kind = Kind::full;
-    std::uint32_t n = 0;
-    std::string file;
-    bool by_default = false;  // WHIRL_DRAFT_VOCAB unset
-};
-DraftVocabChoice draftVocabChoice(const std::optional<std::string>& env_value, const std::string& dir);
-// vocabulary size of the qwen35 tokenizer the embedded subset was built for
-inline constexpr std::uint32_t draft_vocab_embedded_n_vocab = 248320;
-// the default (embedded 64k) subset is used only for dense qwen35 models with that vocabulary
-inline bool draftVocabDefaultFits(bool moe, std::uint32_t n_vocab) { return !moe && n_vocab == draft_vocab_embedded_n_vocab; }
 // the embedded 64k subset (data/draft_vocab/subset_64k.bin, built by whirl-cloud tools/vocab_subset);
 // defined in draft_vocab_embed.cpp (whirl_model only)
 std::vector<std::uint32_t> embeddedDraftVocab64k();

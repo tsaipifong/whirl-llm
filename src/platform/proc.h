@@ -9,7 +9,7 @@
 namespace whirl::platform::proc {
 
 // PL4 moves here (exeIdentity string and mutex names bitwise identical, pinned by tests):
-//   - the executable's path: GetModuleFileNameW (src/model/spec.cpp exeDirectory, src/tier/kv_tier.cpp exeIdentity)
+//   - the executable's path: GetModuleFileNameW (src/spec/policy.cpp exeDirectory, src/tier/kv_tier.cpp exeIdentity)
 //   - the per-GPU named mutex of GPU_WAIT: CreateMutexW / WaitForSingleObject (src/model/device.cpp)
 //   - Ctrl+C / shutdown: SetConsoleCtrlHandler, CreateEventW / SetEvent / WaitForSingleObject, Sleep
 //     (src/server/server_main.cpp)

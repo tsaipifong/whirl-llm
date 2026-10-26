@@ -1,4 +1,4 @@
-# WHIRL model: weight loader, qwen35 forward, MTP / n-gram drafting,
+# WHIRL model: weight loader, qwen35 forward, MTP drafting (the draft policy: cmake/spec.cmake),
 # autotune, and the `whirl` CLI (chat / bench / selftest).
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -38,13 +38,13 @@ if(WHIRL_WITH_HIP)
     ${CMAKE_SOURCE_DIR}/src/model/tune.cpp
     ${CMAKE_SOURCE_DIR}/src/model/exec_dump.cpp
     ${CMAKE_SOURCE_DIR}/src/model/device.cpp
-    ${CMAKE_SOURCE_DIR}/src/model/spec.cpp
     ${CMAKE_SOURCE_DIR}/src/model/dflash.cpp
     ${CMAKE_SOURCE_DIR}/src/model/draft_vocab_embed.cpp
     "${WHIRL_DRAFT_VOCAB_CC}")
   target_include_directories(whirl_model PUBLIC ${CMAKE_SOURCE_DIR}/include)
   # whirl_device: device::hipBackend() and the src/device RAII handles that own the model buffers (arch024 S11)
-  target_link_libraries(whirl_model PUBLIC whirl_kernels_host whirl whirl_ops whirl_device)
+  # whirl_spec: the MTP / n-gram draft policy and mtpDefaults (src/spec, arch025-M4; was src/model/spec.cpp)
+  target_link_libraries(whirl_model PUBLIC whirl_kernels_host whirl whirl_ops whirl_device whirl_spec)
 
   # the CLI executable is whirl.exe (target name differs from the core library)
   add_executable(whirl-cli ${CMAKE_SOURCE_DIR}/src/cli/main.cpp)

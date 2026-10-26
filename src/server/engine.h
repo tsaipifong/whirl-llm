@@ -22,6 +22,7 @@
 #include "stream.h"
 #include "tier/idle_flush.h"
 #include "tier/kv_tier.h"
+#include "spec/policy.h"  // DraftAccept, SlotAccept, NgramPolicy, DraftTiming, CycleCost (arch025-M4)
 #include "tokens.h"
 #include "vision_iface.h"
 #include "whirl/chat.h"

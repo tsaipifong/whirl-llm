@@ -56,7 +56,7 @@ Per request / cycle (through `ServerModel`):
 | kernel `topk_rows` (`module.getFunction`) | sampling candidates: `(x, n, K, inv_t, ids, vals, stats)`, stats = {max, Σ exp((x - max) * inv_t)} |
 
 Host-only policy code from the model library used as is: `DraftAccept`,
-`DraftTiming`, `pickDrafts`, `Ngram`, `NgramPolicy` (`src/model/spec.cpp`; the
+`DraftTiming`, `pickDrafts`, `Ngram`, `NgramPolicy` (`src/spec/policy.cpp`; the
 mock-model test executable compiles that file directly).
 
 ## Stability rules and notes

@@ -82,7 +82,7 @@ see "gfx1151 (Radeon 8060S)" below).
 | src/model/forward/*.cpp (src/model/forward.cpp until arch025-F4) | reimplemented from the prototype (`model/qwen35.zig`: matmul dispatch, blocks, prefill, decode, MTP, verify, segmented prefill) | |
 | src/model/tune.cpp | reimplemented from the prototype (`model/qwen35.zig`: autotune, tune table, self-checks; `gguf_cli.zig`: `loadOrTune`) | cache directory `%LOCALAPPDATA%\whirl` |
 | src/model/device.cpp | reimplemented from the prototype (`gguf_cli.zig`: `pickDevice`, `lockGpu`, `matchDevice`) | |
-| src/model/spec.cpp | reimplemented from the prototype (`model/qwen35.zig`: Ngram, NgramPolicy, DraftAccept, DraftTiming, pickDrafts) | |
+| src/spec/policy.cpp (src/model/spec.cpp until arch025-M4) | reimplemented from the prototype (`model/qwen35.zig`: Ngram, NgramPolicy, DraftAccept, DraftTiming, pickDrafts) | |
 | src/model/draft_vocab_embed.cpp | new | |
 | data/draft_vocab/subset_64k.bin | new (generated: 65,536 token ids ranked by frequency over permissively licensed code / docs and Wikipedia samples, by whirl-cloud `tools/vocab_subset/build.py`; no corpus text, only ids) | |
 | src/cli/main.cpp | new; decode loops reimplemented from the prototype (`gguf_cli.zig`: `run` decode section, `specDecode`) | command-line parsing, chat wrapper, tokenizer helpers (`thinkOpenSplit`, `crlfToLf`) and `bench` / `selftest` written new from the documented behaviour |
