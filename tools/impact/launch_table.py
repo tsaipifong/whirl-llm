@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Kernel launch tables (ARCH-1 K-0): what WHIRL launches, kernel name + grid + block + shared memory.
 
-A process run with WHIRL_LAUNCH_LOG=<folder> writes <folder>/launch_<pid>.txt at exit (src/hip/launch_log.cpp):
+A process run with WHIRL_LAUNCH_LOG=<folder> writes <folder>/launch_<pid>_<start>[_<n>].txt at exit (src/hip/launch_log.cpp,
+log_name.h; builds before bug:log-pid-names wrote launch_<pid>.txt, and a reused PID overwrote it; both are read):
 its command line, the launch count, a hash of the whole launch sequence, and one line per distinct
 (kernel, grid, block, shared bytes) with its count. This tool turns a folder of those into a table keyed by the
 normalized command line, and compares two tables: the kernel-abstraction steps K-1..K-5 must reproduce the K-0
@@ -35,6 +36,15 @@ import argparse
 import os
 import re
 import sys
+
+# bug:log-pid-names: a launch table file name, old (launch_<pid>.txt) or new (launch_<pid>_<start>[_<n>].txt,
+# <start> = process creation time UTC YYYYMMDDTHHMMSSmmm, _<n> only when that name existed; src/hip/log_name.h)
+LOG_NAME_RE = re.compile(r"^launch_(\d+)(?:_(\d{8}T\d{9}))?(?:_(\d+))?\.txt$")
+
+
+def is_launch_log(fn):
+    """True for a launch table file name (old or new pattern), False for .raw.txt dumps and anything else"""
+    return LOG_NAME_RE.match(fn) is not None
 
 
 def norm_cmd(cmd: str) -> str:
@@ -237,8 +247,8 @@ def diff(a, b):
     return 1 if bad else 0
 
 
-def _log(folder, pid, cmd, launches, seq, rows, aseq=None, args=None):
-    with open(os.path.join(folder, f"launch_{pid}.txt"), "w", encoding="utf-8", newline="\n") as f:
+def _log(folder, pid, cmd, launches, seq, rows, aseq=None, args=None, name=None):
+    with open(os.path.join(folder, name or f"launch_{pid}.txt"), "w", encoding="utf-8", newline="\n") as f:
         f.write(f"# whirl launch log v1\n# cmd: {cmd}\n# launches {launches} seqhash {seq} kinds {len(rows)}\n")
         if aseq is not None:
             f.write(f"# argseqhash {aseq} argkinds {len(args)}\n")
@@ -283,6 +293,20 @@ def selftest():
             os.utime(os.path.join(d, f"launch_{other}.txt"), ns=(2 * 10**18, 2 * 10**18))
             return d
         rep_a = mk_rep("rep_a", 5, 7)
+        # bug:log-pid-names: one PID, old name + new names (a reused PID, and an exclusive-create _2): every file is a run
+        def mk_pid(name, files):
+            d = os.path.join(td, name)
+            os.makedirs(d)
+            for i, (fn, n) in enumerate(files):
+                _log(d, 7, cli, n, f"{n:04x}", {"k_a 1x1x1 64x1x1 0": n}, name=fn)
+                os.utime(os.path.join(d, fn), ns=((i + 1) * 10**18, (i + 1) * 10**18))
+            return d
+        pid_new = mk_pid("pid_new", [("launch_7_20261025T134651112.txt", 5), ("launch_7_20261025T134808592.txt", 6),
+                                       ("launch_7_20261025T134808592_2.txt", 8)])
+        pid_mix = mk_pid("pid_mix", [("launch_7.txt", 5), ("launch_7_20261025T134808592.txt", 6), ("launch_7_20261025T134808592_2.txt", 8)])
+        pid_one = mk_pid("pid_one", [("launch_7_20261025T134651112.txt", 5), ("launch_7_20261025T134808592.txt", 6)])
+        names_ok = [is_launch_log(f) for f in ("launch_7.txt", "launch_7_20261025T134651112.txt", "launch_7_20261025T134651112_2.txt")]
+        names_no = [is_launch_log(f) for f in ("launch_7.raw.txt", "launch_7_20261025T134651112.raw.txt", "launch_x.txt", "alloc_7.txt")]
         rep_b = mk_rep("rep_b", 9, 7)
         q = lambda *x: x
         cases = [
@@ -295,9 +319,16 @@ def selftest():
             ("--server --ignore k_tick: an argument change of another kernel still blocks", q(a, arg),
              {"server_seq": True, "ignore": [r"^k_tick "]}, 1),
             ("--server: a repeated command is paired by exit order, not by PID", q(rep_a, rep_b), {"server_seq": True}, 0),
+            ("one PID: old + new file names all read (3 runs == 3 runs)", q(pid_new, pid_mix), {}, 0),
+            ("one PID: a lost third run blocks", q(pid_new, pid_one), {}, 1),
         ]
+        if names_ok != [True] * 3 or names_no != [False] * 4:
+            print(f"FAIL is_launch_log: {names_ok} {names_no}")
+            cases.append(("is_launch_log", (None, None), {}, -1))
         bad = 0
         for name, (x, y), kw, want in cases:
+            if x is None:
+                continue
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
                 got = diff(load(x, kw.get("include_all", False), kw.get("server_seq", False), kw.get("ignore", ())),
@@ -305,6 +336,7 @@ def selftest():
             ok = got == want
             bad += 0 if ok else 1
             print(f"{'ok  ' if ok else 'FAIL'} {name}: rc {got} (want {want})")
+    bad += sum(1 for c in cases if c[1][0] is None)
     print(f"launch_table selftest: {len(cases) - bad}/{len(cases)} as expected")
     return 0 if bad == 0 else 1
 

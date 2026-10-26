@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "alloc_log.h"
+#include "log_name.h"
 
 #include "platform/env.h"
 
@@ -148,7 +149,8 @@ struct Recorder {
         return s;
     }
 
-    void write() {
+    // bug:log-pid-names: <dir>\alloc_<pid>_<start>[_<n>].txt, created exclusively (log_name.h)
+    void write(const std::string& dir) {
         std::string cmd;
 #ifdef _WIN32
         const wchar_t* w = GetCommandLineW();
@@ -157,12 +159,8 @@ struct Recorder {
             cmd.resize(static_cast<std::size_t>(len - 1));
             WideCharToMultiByte(CP_UTF8, 0, w, -1, cmd.data(), len, nullptr, nullptr);
         }
-        const unsigned long pid = GetCurrentProcessId();
-#else
-        const unsigned long pid = 0;
 #endif
-        const std::string path = folder() + "\\alloc_" + std::to_string(pid) + ".txt";
-        std::FILE* f = std::fopen(path.c_str(), "wb");
+        std::FILE* f = logname::openUnique(dir, "alloc_", ".txt", nullptr);
         if (f == nullptr) return;
         const std::string body = text();
         std::fprintf(f, "# whirl alloc log v1\n# cmd: %s\n", cmd.c_str());
@@ -182,7 +180,7 @@ void writeAtExit() {
     std::lock_guard<std::mutex> lk(r.mu);
     if (r.closed) return;
     r.closed = true;
-    r.write();
+    r.write(folder());
 }
 
 }  // namespace
@@ -243,6 +241,12 @@ std::string testText() {
     Recorder& r = rec();
     std::lock_guard<std::mutex> lk(r.mu);
     return r.text();
+}
+
+void testWrite(const std::string& dir) {
+    Recorder& r = rec();
+    std::lock_guard<std::mutex> lk(r.mu);
+    r.write(dir);
 }
 
 }  // namespace whirl::hip::alloclog

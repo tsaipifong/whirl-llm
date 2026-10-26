@@ -15,7 +15,9 @@
 // ("# argseqhash", "@ ..."); a table without them (older builds) compares on kernels and geometry only.
 // REVIEW-ARCH4 P3-6: the recorder is never destroyed; it is written once at exit (atexit / at_quick_exit) under its
 // lock, and launches after that are ignored.
-// Debug aid (arch6e): WHIRL_LAUNCH_LOG_RAW set as well writes launch_<pid>.raw.txt next to the table, one line per
+// File name (bug:log-pid-names): <folder>\launch_<pid>_<start>[_<n>].txt, created exclusively, see log_name.h (older
+// builds: launch_<pid>.txt, overwritten when Windows reused the PID).
+// Debug aid (arch6e): WHIRL_LAUNCH_LOG_RAW set as well writes <table stem>.raw.txt next to the table, one line per
 // launch (index, kernel, geometry, digest, then per argument "|size" and each 8-byte word as in:ordinal:offset /
 // below:ordinal:distance / v:value with "=raw value" after a normalised pointer, tail bytes as t:hex), so two runs can
 // be diffed launch by launch. arch024-S0a: capped, and off in whirl-server unless WHIRL_LAUNCH_LOG_RAW=server (below).
@@ -24,6 +26,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 
 #include "whirl/hip.h"
 
@@ -62,5 +65,7 @@ RawStats rawStats();
 // unit tests: set the RAW state (whether or not the log is on) and push one line through the cap
 void testRaw(bool on, std::size_t max_lines);
 void testRawPush(const char* line);
+// unit tests (bug:log-pid-names): write the table (and the RAW dump if on) to dir now, as the exit writer would
+void testWrite(const std::string& dir);
 
 }  // namespace whirl::hip::launchlog
