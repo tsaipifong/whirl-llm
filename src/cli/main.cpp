@@ -1088,7 +1088,7 @@ Loaded loadModel(const Args& a, const gguf::File& f, u32 max_ctx, bool ctx_expli
     lo.min_ctx = min_ctx;
     lo.no_mtp = no_mtp;
     if (auto v = envU32("PREFILL_BATCH")) lo.max_batch = std::max(q::max_batch_default, std::min(q::max_batch_limit, *v));
-    lo.kv_mode = q::kvModeFromEnv().value_or(q::KvMode::automatic);
+    lo.kv_req = q::kvRequestFromEnv();
     L.model = q::Model::load(f, max_ctx, L.stats, lo);
     q::Model& m = *L.model;
     if (envGet("TUNE_COLD")) m.tune_cold = true;
@@ -1779,7 +1779,7 @@ int cmdSeqtest(const Args& a) {
     const std::vector<u32> pa = tok.encode(chatWrap(std::string("Write a C function that reverses a singly linked list, and explain it.") + k_bench_text, false));
     const std::vector<u32> pb = tok.encode(chatWrap("請用繁體中文說明 TCP 三向交握的過程，並用 Python 寫一個簡單的 socket 伺服器。", false));
     q::LoadOptions lo;
-    lo.kv_mode = q::kvModeFromEnv().value_or(q::KvMode::automatic);
+    lo.kv_req = q::kvRequestFromEnv();
     lo.numerics = modeRequest(a);
     q::LoadStats stats;
     auto mp = q::Model::load(f, 0, stats, lo);
@@ -2274,7 +2274,7 @@ int goldenPair(const Args& a, const gguf::File& f, const Tok& tok, u32 n_dec) {
     const std::vector<u32> pa = tok.encode(chatWrap(std::string(k_golden_pair_a) + k_bench_text, false));
     const std::vector<u32> pb = tok.encode(chatWrap(k_golden_pair_b, false));
     q::LoadOptions lo;
-    lo.kv_mode = q::kvModeFromEnv().value_or(q::KvMode::automatic);
+    lo.kv_req = q::kvRequestFromEnv();
     lo.numerics = modeRequest(a);
     q::LoadStats stats;
     auto mp = q::Model::load(f, 0, stats, lo);

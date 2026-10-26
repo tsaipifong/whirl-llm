@@ -44,7 +44,7 @@ public:
     std::vector<KvArr> kvArrays() const override {
         std::vector<KvArr> out;
         const std::uint64_t elems = static_cast<std::uint64_t>(m_.cfg.n_head_kv) * m_.cfg.head_dim;
-        const kv::LayerRows L = kv::layerRows(elems, m_.kv_q8, m_.kv_kf16, m_.kv_q4);
+        const kv::LayerRows L = kv::layerRows(elems, m_.kv_fmt);
         const auto layer = [&](DevPtr k, DevPtr v, DevPtr ks, DevPtr vs) {
             for (std::size_t j = 0; j < L.n; ++j) {
                 const kv::Part p = L.a[j].part;

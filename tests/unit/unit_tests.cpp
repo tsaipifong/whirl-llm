@@ -22,6 +22,8 @@
 #include "whirl/mem_governor.h"
 #include "whirl/value_scope.h"
 #include "whirl/kernels_abi.h"
+#include "whirl/device_profile.h"
+#include "whirl/kv_format.h"
 #include "hip/alloc_log.h"
 #include "hip/launch_log.h"
 #if WHIRL_TEST_DLL_DEPS
@@ -952,9 +954,9 @@ void testNumerics() {
         CHECK(pf.on(Item::fp8) && pf.on(Item::moefp8) && pf.on(Item::gdnwmma) && pf.on(Item::h16) && pf.on(Item::kvq4));
         CHECK(!nu::plan(cust, ornith).on(Item::fp8) && !nu::plan(cust, ornith).on(Item::moefp8));
         // KV: MoE balance f16, MoE fast q4 (where the kernels exist), dense balance q8h
-        CHECK(nu::chooseKv(rb, true, nu::KvCaps{true, true, true}, std::nullopt).kv == nu::KvKind::f16);
-        CHECK(nu::chooseKv(nu::forModel(fast, true), true, nu::KvCaps{true, true, true}, std::nullopt).kv == nu::KvKind::q4);
-        CHECK(nu::chooseKv(nu::forModel(bal, false), false, nu::KvCaps{true, true, true}, std::nullopt).kv == nu::KvKind::q8h);
+        CHECK(nu::chooseKv(rb, true, nu::KvCaps{true, true, true}, std::nullopt).kv == whirl::KvFormat::f16);
+        CHECK(nu::chooseKv(nu::forModel(fast, true), true, nu::KvCaps{true, true, true}, std::nullopt).kv == whirl::KvFormat::q4);
+        CHECK(nu::chooseKv(nu::forModel(bal, false), false, nu::KvCaps{true, true, true}, std::nullopt).kv == whirl::KvFormat::q8h);
         // a user override turning fp8 off in MoE balance is a (non-lossy) override; turning it on adds nothing
         nu::Plan po = nu::plan(bal, ornith);
         nu::applyOverride(po, Item::fp8, "FP8", "0", false, true);
@@ -1078,10 +1080,79 @@ void testNumerics() {
     }
 }
 
+// arch025-N3 pin (PLAN N3, R15): the pre-load VRAM estimates choose the KV format with numerics::kvCapsEstimate (no
+// code object loaded yet: Model::load's UMA check and the server's UMA estimate with integrated = true, the server's
+// dGPU estimate with false); Model::load then chooses with the real caps of the code object (KvCaps{caps.kv_q8h,
+// caps.kv_q8v, caps.kv_q4, profile.numerics_8060s}, loader.cpp). Both must agree in every DeviceProfile x mode x model
+// x WHIRL_KV cell, or the estimate sizes a different KV than the load allocates. The code-object caps per GPU are the
+// S0b-2 "D kv: site=loader.load" lines (scratch/arch025/s0b/s0b2: r9700 caps=q8h:1,q8v:1,q4:1,fast_q8h:0; 8060s
+// caps=q8h:1,q8v:1,q4:1,fast_q8h:1). A disagreeing cell is an existing bug candidate (bug-fix line), not a refactor.
+void testKvEstimateCaps() {
+    namespace nu = whirl::numerics;
+    using whirl::KvFormat;
+    struct Gpu {
+        const whirl::device::Profile& prof;
+        bool integrated;  // which estimate reaches it (server_main.cpp: info.integrated; loader: umaMemory().integrated)
+        nu::KvCaps code;  // the code object's KV kernels (Caps::probe), measured: S0b-2 dumps
+    };
+    const Gpu gpus[] = {
+        {whirl::device::k_profile_gfx1201, false, nu::KvCaps{true, true, true, false}},
+        {whirl::device::k_profile_gfx1151, true, nu::KvCaps{true, true, true, false}},
+    };
+    // (parseMode refuses "precise:<items>" and fast-only items in a balance list)
+    const char* modes[] = {"precise", "balance", "fast", "balance:fp8", "balance:kvq8", "fast:kvq8", "fast:kvq4",
+                           "fast:fp8", "balance:fp8,moefp8,gdnwmma,h16,specsample"};
+    const std::optional<KvFormat> forced[] = {std::nullopt, KvFormat::f16, KvFormat::q8, KvFormat::q8h, KvFormat::q8v, KvFormat::q4};
+    int cells = 0, differ = 0;
+    for (const Gpu& g : gpus) {
+        nu::KvCaps real = g.code;
+        real.fast_q8h = g.prof.numerics_8060s;  // loader.cpp: device::profile(m.arch).numerics_8060s
+        const nu::KvCaps est = nu::kvCapsEstimate(g.integrated);
+        for (const char* ms : modes)
+            for (bool moe : {false, true})
+                for (const auto& f : forced) {
+                    const nu::Request r = nu::parseMode(ms, "t");
+                    const nu::KvChoice a = nu::chooseKv(r, moe, est, f), b = nu::chooseKv(r, moe, real, f);
+                    ++cells;
+                    if (a.kv != b.kv || a.debug != b.debug || a.why != b.why) {
+                        ++differ;
+                        std::fprintf(stderr, "  kv estimate != load: %s %s moe=%d forced=%s: est %s, load %s\n",
+                                     g.integrated ? "uma" : "dgpu", ms, moe ? 1 : 0, f ? whirl::kvFormatName(*f) : "none",
+                                     whirl::kvFormatName(a.kv), whirl::kvFormatName(b.kv));
+                    }
+                }
+    }
+    CHECK(cells == 2 * 9 * 2 * 6);
+    CHECK(differ == 0);
+    // the estimate caps themselves (the literals they replaced at loader.cpp:492, server_main.cpp:810 / :922)
+    CHECK(nu::kvCapsEstimate(false).q8h && nu::kvCapsEstimate(false).q8v && nu::kvCapsEstimate(false).q4 && !nu::kvCapsEstimate(false).fast_q8h);
+    CHECK(nu::kvCapsEstimate(true).q8h && nu::kvCapsEstimate(true).q8v && nu::kvCapsEstimate(true).q4 && nu::kvCapsEstimate(true).fast_q8h);
+    // the KvFormat names and properties (the former Model bools: loader.cpp:543-546 before N3)
+    for (const KvFormat k : {KvFormat::f16, KvFormat::q8, KvFormat::q8h, KvFormat::q8v, KvFormat::q4}) {
+        CHECK(whirl::kvFormatFromName(whirl::kvFormatName(k)) == k);
+        CHECK(whirl::kvQuant(k) == (k != KvFormat::f16));
+        CHECK(whirl::kvRotated(k) == (k == KvFormat::q8h || k == KvFormat::q4));
+        CHECK(whirl::kvKf16(k) == (k == KvFormat::q8v));
+        CHECK(whirl::kvIs4bit(k) == (k == KvFormat::q4));
+        // kernels::Caps::supports == the UnsupportedKvFormat rule of loader.cpp before N3
+        for (int m = 0; m < 8; ++m) {
+            whirl::kernels::Caps c;
+            c.kv_q8h = (m & 1) != 0;
+            c.kv_q8v = (m & 2) != 0;
+            c.kv_q4 = (m & 4) != 0;
+            const bool q8 = k != KvFormat::f16, rot = k == KvFormat::q8h || k == KvFormat::q4, kf16 = k == KvFormat::q8v, q4 = k == KvFormat::q4;
+            const bool refused = (kf16 && !c.kv_q8v) || (q4 && !c.kv_q4) || (rot && !q4 && !c.kv_q8h);
+            (void)q8;
+            CHECK(c.supports(k) == !refused);
+        }
+    }
+    static_assert(static_cast<int>(KvFormat::f16) == 0 && static_cast<int>(KvFormat::q4) == 4);  // env table kvModeFromEnv numbering
+}
+
 // KV format (BAL-Q8): one fixed format per mode x model type, never by what fits
 void testKvChoice() {
     namespace nu = whirl::numerics;
-    using K = nu::KvKind;
+    using K = whirl::KvFormat;
     const nu::Request pre = nu::parseMode("precise", "t"), bal = nu::parseMode("balance", "t"), fast = nu::parseMode("fast", "t");
     const nu::KvCaps noq4{true, true, false};   // a code object without q4 (gfx1201 before FAST-1c)
     const nu::KvCaps r9700{true, true, true};   // gfx1201: q8h / q8v / q4 (FAST-1c)
@@ -1135,7 +1206,7 @@ void testKvChoice() {
     // WHIRL_KV: debug override, any mode
     const nu::KvChoice o = nu::chooseKv(pre, false, r9700, K::q8v);
     CHECK(o.kv == K::q8v && o.debug && o.why.find("WHIRL_KV=q8v") != std::string::npos);
-    CHECK(nu::kvKindFromName("q8h") == K::q8h && !nu::kvKindFromName("auto") && !nu::kvKindFromName("q5"));
+    CHECK(whirl::kvFormatFromName("q8h") == K::q8h && !whirl::kvFormatFromName("auto") && !whirl::kvFormatFromName("q5"));
 
     // does not fit: the chosen format only, shrink (implicit) or refuse (explicit); 32 GB vs 16 GB (simulated)
     const std::uint64_t GiB = 1ull << 30;
@@ -4077,6 +4148,7 @@ int main(int argc, char** argv) {
     testNumerics();
     testNumericsPlan(g_pass, g_fail);  // arch025-N2a (tests/unit/numerics_plan_tests.cpp)
     testKvChoice();
+    testKvEstimateCaps();
     testKernelFetchBounds();
     testValueScope();
     testLaunchDigest();

@@ -186,6 +186,7 @@
 #include <string_view>
 
 #include "whirl/hip.h"
+#include "whirl/kv_format.h"
 
 namespace whirl::kernels {
 
@@ -467,7 +468,7 @@ inline constexpr std::array<int, kNGemvw> kGemvwRows = {0, 16, 32, 16, 32, 16, 1
 // ---------------------------------------------------------------------------
 // Kernel table
 
-enum class KvFormat { f16, q8, q8h, q8v, q4 };
+// (the KV format is whirl::KvFormat, whirl/kv_format.h: one enum from the request to this table, arch025-N3)
 
 // What a loaded code object can do. The host picks its paths from these flags
 // (and from null KernelTable entries), never from the GPU architecture name.

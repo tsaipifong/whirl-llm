@@ -665,7 +665,7 @@ bool Model::checkAttnGroups(std::string& log, u32 p0, u32 n, bool wide) {
     const u32 hd = cfg.head_dim;
     if (k.attn_wsplit1 == nullptr || hd != 256) return true;
     if (wide && k.attn_wsplit2 == nullptr) return true;
-    if (kv_kf16 || kv_q4) return true;  // probe: q8 or f16 only
+    if (kvKf16(kv_fmt) || kvIs4bit(kv_fmt)) return true;  // probe: q8 or f16 only
     std::size_t li_attn = 0;
     for (std::size_t i = 0; i < layers.size(); ++i)
         if (layers[i].kind == LayerKind::attn) {
@@ -699,7 +699,7 @@ bool Model::checkAttnGroups(std::string& log, u32 p0, u32 n, bool wide) {
         }
         return static_cast<std::uint16_t>(sign | (static_cast<std::uint32_t>(e) << 10) | hm);
     };
-    if (kv_q8) {
+    if (kvQuant(kv_fmt)) {
         std::uniform_int_distribution<int> qd(-127, 127);
         std::uniform_real_distribution<float> sd(0.0f, 1.0f);
         std::vector<std::int8_t> q8(kvn);
@@ -824,7 +824,7 @@ whirl::numerics::Target numericsTarget(const Model& m) {
     t.mtp = m.mtp.has_value();
     t.k_spec_sample = m.k.draft_sample_rows != nullptr;
     t.k_kv_q4 = m.k.caps.kv_q4;
-    t.kv_explicit = m.kv_mode != KvMode::automatic;
+    t.kv_explicit = m.kv_req.has_value();
     t.fast_kv_q8h = t.gfx1151 && t.k_kv_q8h;
     // GDN-8S (tune.cpp:905-909 before N2b): the gfx1151 strix-llama.cpp chunked prefill's device, kernels and shape
     t.strix_profile = prof.gdn_strix;

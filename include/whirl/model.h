@@ -277,17 +277,14 @@ struct MatList {
 // ---------------------------------------------------------------------------
 // load-time options (set before Model::load)
 
-// KV formats: f16; q8 = int8 + f16 scale per 32 values (K and V); q8h = q8
-// with Hadamard-rotated q / k; q8v = K f16, V q8. q4 = 4-bit K and V (+ f16 scale per
-// 32 values) with Hadamard-rotated q / k (gfx1151). automatic: the numerics mode decides
-// (numerics::chooseKv: precise f16; balance q8h on dense models, f16 on MoE; fast q4,
-// q8h on dense models on the Radeon 8060S); any other value is a debug override (WHIRL_KV).
-enum class KvMode { automatic, f16, q8, q8h, q8v, q4 };
+// KV formats: whirl::KvFormat (whirl/kv_format.h). A request is std::optional<KvFormat>: nullopt (WHIRL_KV unset or
+// "auto") = the numerics mode decides (numerics::chooseKv: precise f16; balance q8h on dense models, f16 on MoE;
+// fast q4, q8h on dense models on the Radeon 8060S); a format is a debug override (WHIRL_KV).
 
-// WHIRL_KV=auto|f16|q8|q8h|q8v|q4 (nullopt when unset; throws std::invalid_argument
-// for another value). Model::load applies it when LoadOptions::kv_mode is
-// automatic, like the prototype's process-wide KV setting.
-std::optional<KvMode> kvModeFromEnv();
+// WHIRL_KV=auto|f16|q8|q8h|q8v|q4 (nullopt when unset or auto; throws std::invalid_argument
+// for another value). Model::load applies it when LoadOptions::kv_req is
+// nullopt, like the prototype's process-wide KV setting.
+std::optional<KvFormat> kvRequestFromEnv();
 
 // ---- DFlash2 block-diffusion drafter (arch "dflash"; z-lab DFlash2, llama.cpp names):
 // loaded next to the target (WHIRL_DRAFT_MODEL), drafts with `--draft dflash`.
@@ -352,7 +349,7 @@ struct LoadOptions {
     std::uint32_t max_batch = max_batch_default;
     // Keep token_embd in pinned host memory instead of VRAM.
     bool embd_on_host = false;
-    KvMode kv_mode = KvMode::automatic;
+    std::optional<KvFormat> kv_req;  // nullopt: WHIRL_KV, else the numerics mode decides
     // Numerics mode (whirl/numerics.h): precise / balance (default) / fast and the lossy items.
     // Precise: no fp8 / MoE fp8 / f16-WMMA DeltaNet / h16, f16 KV (WHIRL_KV still honoured).
     whirl::numerics::Request numerics;
@@ -392,16 +389,16 @@ std::uint64_t dflashWeightBytes(const gguf::File& draft);
 // fd_splits: attention split-K partials (resolveFdSplits: 64, 256 with q4 KV, WHIRL_FD_SPLITS).
 std::uint64_t bufferBytes(const Config& cfg, std::uint32_t B, std::uint64_t ffs, std::uint64_t max_elems, std::uint32_t fd_splits = 64);
 // The attention split count Model::load uses for the KV format (and WHIRL_FD_SPLITS).
-std::uint32_t resolveFdSplits(bool kv_q4);
+std::uint32_t resolveFdSplits(KvFormat kv);
 // KV bytes per token (Model::kvBytesPerTokenFmt) from the config alone.
-std::uint64_t kvBytesPerTokenCfg(const Config& cfg, bool has_mtp, bool q8, bool kf16, bool q4 = false);
+std::uint64_t kvBytesPerTokenCfg(const Config& cfg, bool has_mtp, KvFormat kv);
 
 // ---------------------------------------------------------------------------
 // kernels (table from whirl/kernels_abi.h)
 
 using Kernels = kernels::KernelTable;
-// q8: q8 KV kernels; rot: Hadamard-rotated q/k (q8h); kf16: q8v; q4: q4 (implies q8 + rot).
-Kernels loadKernels(const hip::Module& m, bool q8, bool rot, bool kf16, bool q4 = false);
+// the attention variants of the KV format (KernelTable::load)
+Kernels loadKernels(const hip::Module& m, KvFormat kv);
 // ---------------------------------------------------------------------------
 // profiling (WHIRL_PROFILE=1)
 
@@ -598,15 +595,14 @@ public:
 
     // ---- per-layer state
     std::vector<DevPtr> kcache, vcache, kscale, vscale;
-    bool kv_q8 = true;
-    bool kv_rot = false;
-    bool kv_kf16 = false;
-    bool kv_q4 = false;  // 4-bit K and V (kv_q8 and kv_rot are set too: scales and rotation as q8h)
+    // the KV format Model::load chose (kv_choice.kv; arch025-N3: was four bools kv_q8 / kv_rot / kv_kf16 / kv_q4,
+    // now kvQuant / kvRotated / kvKf16 / kvIs4bit of it). q8 before a load (the former bools' initializers).
+    KvFormat kv_fmt = KvFormat::q8;
     // flash-decoding split cap (part_ml / part_acc are sized for it): 64; q4 KV 256 (long-context
     // decode is latency bound at 64 splits, so the smaller K / V reads only pay off with more
     // blocks in flight). WHIRL_FD_SPLITS=N (64..256, multiple of 64) overrides.
     std::uint32_t fd_splits = 64;
-    KvMode kv_mode = KvMode::automatic;
+    std::optional<KvFormat> kv_req;  // the load's request (LoadOptions::kv_req, else WHIRL_KV; nullopt: the mode chose)
     std::uint32_t pool_pages = 0;
     std::uint32_t seq_pages = 0;
     DevPtr ptab = 0;
@@ -744,8 +740,8 @@ public:
     // ---- sizes
     std::uint64_t convBytes() const;
     std::uint64_t ssmBytes() const;
-    std::uint64_t kvBytesPerTokenFmt(bool q8, bool kf16, bool q4 = false) const;
-    std::uint64_t kvBytesPerToken() const { return kvBytesPerTokenFmt(kv_q8, kv_kf16, kv_q4); }
+    std::uint64_t kvBytesPerTokenFmt(KvFormat kv) const;
+    std::uint64_t kvBytesPerToken() const { return kvBytesPerTokenFmt(kv_fmt); }
     std::uint32_t kvLayers() const;
     const char* kvName() const;
     std::uint64_t pendLayerBytes() const;

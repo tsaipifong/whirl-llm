@@ -31,18 +31,6 @@ std::uint64_t fnv(std::string_view s) {
     return h;
 }
 
-const char* kvModeName(KvMode k) {
-    switch (k) {
-        case KvMode::f16: return "f16";
-        case KvMode::q8: return "q8";
-        case KvMode::q8h: return "q8h";
-        case KvMode::q8v: return "q8v";
-        case KvMode::q4: return "q4";
-        case KvMode::automatic: break;
-    }
-    return "automatic";
-}
-
 }  // namespace
 
 std::string execDump(const Model& m) {
@@ -108,7 +96,7 @@ std::string execDump(const Model& m) {
     add("relax.alpha", f(m.relax().alpha));
     add("relax.eps", f(m.relax().eps));
     add("relax.delta", f(m.relax().delta));
-    add("kv_choice.kv", numerics::kvKindName(m.kv_choice.kv));
+    add("kv_choice.kv", kvFormatName(m.kv_choice.kv));
     add("kv_choice.debug", b(m.kv_choice.debug));
     add("kv_choice.why", m.kv_choice.why);
     WD_U(gc_w_bytes);
@@ -133,12 +121,13 @@ std::string execDump(const Model& m) {
     WD_FB(g8t);
     WD_FB(gemmh_on);
     WD_FB(gemmhq_on);
-    WD_B(kv_q8);
-    WD_B(kv_rot);
-    WD_B(kv_kf16);
-    WD_B(kv_q4);
+    // arch025-N3: the four former KV bools, now properties of m.kv_fmt (same keys and values)
+    add("kv_q8", b(kvQuant(m.kv_fmt)));
+    add("kv_rot", b(kvRotated(m.kv_fmt)));
+    add("kv_kf16", b(kvKf16(m.kv_fmt)));
+    add("kv_q4", b(kvIs4bit(m.kv_fmt)));
     WD_U(fd_splits);
-    add("kv_mode", kvModeName(m.kv_mode));
+    add("kv_mode", m.kv_req ? kvFormatName(*m.kv_req) : "automatic");
     WD_U(pool_pages);
     WD_U(seq_pages);
     WD_U(snap_sets);

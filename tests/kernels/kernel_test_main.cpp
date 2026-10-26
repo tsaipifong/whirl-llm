@@ -209,7 +209,7 @@ int main(int argc, char** argv) {
             bo.tool_ver = std::string(WHIRL_KT_VERSION) + "+ktbench1";
             std::printf("bench: code object sha256 %s, %s %s\n", bo.code_hash.c_str(), bo.gpu_arch.c_str(), bo.gpu_pci.c_str());
         }
-        c.k = whirl::kernels::KernelTable::load(c.mod, whirl::kernels::KvFormat::f16);
+        c.k = whirl::kernels::KernelTable::load(c.mod, whirl::KvFormat::f16);
         // gfx1151 stores packed int8 scale words; the CPU references follow the code object
         kt::ref::setXdSum(c.k.caps.xd_sum);
         const auto& cp = c.k.caps;

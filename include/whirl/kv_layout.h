@@ -14,6 +14,8 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "whirl/kv_format.h"
+
 namespace whirl::kv {
 
 // One pool array of a KV layer.
@@ -35,11 +37,12 @@ struct LayerRows {
     }
 };
 
-// elems = n_head_kv * head_dim. Formats (Model flags): f16 (!q8), q8 / q8h (q8), q8v (q8 && kf16: K f16, V int8),
-// q4 (q8 && q4: 4-bit K / V). int8 / 4-bit rows carry one f16 scale per 32 values in their own array.
-inline LayerRows layerRows(std::uint64_t elems, bool q8, bool kf16, bool q4) {
+// elems = n_head_kv * head_dim. Formats: f16, q8 / q8h (int8 K and V), q8v (K f16, V int8), q4 (4-bit K / V).
+// int8 / 4-bit rows carry one f16 scale per 32 values in their own array.
+inline LayerRows layerRows(std::uint64_t elems, KvFormat fmt) {
     LayerRows r;
-    const bool kq8 = q8 && !kf16;
+    const bool q8 = kvQuant(fmt), q4 = kvIs4bit(fmt);
+    const bool kq8 = q8 && !kvKf16(fmt);
     const std::uint64_t rk = q4 ? elems / 2 : elems * (kq8 ? 1 : 2);
     const std::uint64_t rv = q4 ? elems / 2 : elems * (q8 ? 1 : 2);
     const std::uint64_t rs = elems / 32 * 2;
@@ -51,11 +54,12 @@ inline LayerRows layerRows(std::uint64_t elems, bool q8, bool kf16, bool q4) {
 }
 
 // KV bytes per token of one layer as the model sizes the pool (the formula of Model::kvBytesPerTokenFmt; q4 is
-// counted with its scales, as the q4 format always has q8 set).
-inline std::uint64_t layerBytes(std::uint64_t elems, bool q8, bool kf16, bool q4) {
-    if (q4) return 2 * (elems / 2 + elems / 32 * 2);
+// counted with its scales).
+inline std::uint64_t layerBytes(std::uint64_t elems, KvFormat fmt) {
+    if (kvIs4bit(fmt)) return 2 * (elems / 2 + elems / 32 * 2);
+    const bool q8 = kvQuant(fmt);
     const std::uint64_t q = elems + elems / 32 * 2;
-    return (q8 && !kf16 ? q : elems * 2) + (q8 ? q : elems * 2);
+    return (q8 && !kvKf16(fmt) ? q : elems * 2) + (q8 ? q : elems * 2);
 }
 
 }  // namespace whirl::kv

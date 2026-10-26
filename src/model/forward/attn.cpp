@@ -56,7 +56,7 @@ void Model::attnBlock(const AttnW& a, const KvLayer& lkv, u32 n) {
         return;
     }
     // (q8 KV: always the fused prep - it holds the quantizer and the rotation)
-    const ops::AttnPrep prep = ops::chooseAttnPrep(mrope_on, hd, kv_q8, nf().no_fuse, k);
+    const ops::AttnPrep prep = ops::chooseAttnPrep(mrope_on, hd, kvQuant(kv_fmt), nf().no_fuse, k);
     if (prep == ops::AttnPrep::mrope) {
         // vision: image prompt / decode after one: multi-section RoPE positions
         const auto& sec = cfg.rope_sections;
@@ -90,7 +90,7 @@ void Model::attnBlock(const AttnW& a, const KvLayer& lkv, u32 n) {
         ap.n_head = cfg.n_head;
         ap.n_head_kv = cfg.n_head_kv;
         ap.max_ctx = max_ctx;
-        ap.kv_q4 = kv_q4;
+        ap.kv_q4 = kvIs4bit(kv_fmt);
         ap.rows_known = row_n == n;
         if (ap.rows_known) {
             ap.row_pos = std::span<const i32>(row_pos.data(), n);
@@ -152,7 +152,7 @@ void Model::prefillAttn(DevPtr q, const KvArgs& kva, DevPtr out, DevPtr pos, u32
     pp.n_head = cfg.n_head;
     pp.n_head_kv = cfg.n_head_kv;
     pp.scale = scale;
-    pp.kv_q8 = kv_q8;
+    pp.kv_q8 = kvQuant(kv_fmt);
     pp.dq_rows = dq_rows;
     pp.dq_ptab = dq_ptab != 0;
     pp.dq_st_ml = dq_st_ml != 0;

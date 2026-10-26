@@ -29,6 +29,8 @@
 #include <string_view>
 #include <vector>
 
+#include "whirl/kv_format.h"
+
 namespace whirl::numerics {
 
 enum class Mode : std::uint8_t { precise, balance, fast };
@@ -332,10 +334,7 @@ std::string modeLabel(const Plan& p);
 
 // ---- KV format (BAL-Q8): one fixed format per mode x model type, CLI and server alike
 
-enum class KvKind : std::uint8_t { f16, q8, q8h, q8v, q4 };
-const char* kvKindName(KvKind k);
-// "f16" | "q8" | "q8h" | "q8v" | "q4" (nullopt for anything else, including "auto")
-std::optional<KvKind> kvKindFromName(std::string_view s);
+// (the format is whirl::KvFormat, whirl/kv_format.h; names kvFormatName / kvFormatFromName, arch025-N3)
 // KV kernels in the code object (f16 and q8 are always there)
 struct KvCaps {
     bool q8h = false;
@@ -345,8 +344,14 @@ struct KvCaps {
     // attention is faster than q4's at 32k-128k and the error 4-10x smaller, FAST-8S; the R9700 keeps q4)
     bool fast_q8h = false;
 };
+// The KV caps the pre-load VRAM estimates assume, before any code object is loaded (Model::load's UMA check,
+// the server's dGPU and UMA estimates; arch025-N3: were the literals {true, true, true(, true)} at each site):
+// every KV kernel (both shipped code objects have q8h / q8v / q4 since FAST-1c / FC-1c) and fast_q8h on an
+// integrated GPU (the Radeon 8060S, device::Profile::numerics_8060s). whirl-tests testKvEstimateCaps checks the
+// choice made with these equals the choice Model::load makes with each GPU's real caps.
+constexpr KvCaps kvCapsEstimate(bool integrated) { return KvCaps{true, true, true, integrated}; }
 struct KvChoice {
-    KvKind kv = KvKind::f16;
+    KvFormat kv = KvFormat::f16;
     bool debug = false;  // WHIRL_KV chose it (debug override: no fit check, sizing as before)
     std::string why;     // "balance, dense model: q8h"
 };
@@ -355,7 +360,7 @@ struct KvChoice {
 // model where caps.fast_q8h (gfx1151) -> q8h; else kvq8 on
 // a dense model -> q8h (q8 where the code object has no q8h kernels);
 // else f16 (precise, MoE in balance). Independent of free memory and card size.
-KvChoice chooseKv(const Request& r, bool moe, const KvCaps& caps, std::optional<KvKind> forced);
+KvChoice chooseKv(const Request& r, bool moe, const KvCaps& caps, std::optional<KvFormat> forced);
 
 // Wording of the "does not fit" messages for the chosen format
 struct KvFitLabel {
@@ -363,7 +368,7 @@ struct KvFitLabel {
     std::string fmt = "f16";
     std::string alt = "--balance allows int8 KV";  // a lower-precision alternative the user may choose ("" = none)
 };
-KvFitLabel kvFitLabel(const Request& r, bool moe, KvKind kv);
+KvFitLabel kvFitLabel(const Request& r, bool moe, KvFormat kv);
 
 // ---- KV fit (every mode: the chosen format only, never a lower-precision one)
 

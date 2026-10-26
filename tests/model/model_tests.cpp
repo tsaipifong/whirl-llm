@@ -1350,7 +1350,7 @@ void testLoadEstimate() {
         // KV per token: 1 attention layer + MTP; f16 K and V, q8v = f16 K + int8 V, q8h = int8 K and V
         const std::uint64_t e = static_cast<std::uint64_t>(cfg.n_head_kv) * cfg.head_dim, q8 = e + e / 32 * 2;
         check(ev.kv_f16 == 2 * (4 * e) && ev.kv_q8v == 2 * (2 * e + q8) && ev.kv_q8h == 2 * (2 * q8), ("estimate: KV bytes per token" + tag).c_str());
-        check(q::kvBytesPerTokenCfg(cfg, false, false, false) == 4 * e, ("kvBytesPerTokenCfg without MTP" + tag).c_str());
+        check(q::kvBytesPerTokenCfg(cfg, false, whirl::KvFormat::f16) == 4 * e, ("kvBytesPerTokenCfg without MTP" + tag).c_str());
         {
             // FR-DFL P3-1: --draft dflash skips the MTP block: no nextn weights, no MTP KV layer
             const q::LoadEstimate en = q::estimateLoad(f, cfg, false, true);
@@ -1372,7 +1372,7 @@ void testLoadEstimate() {
             const std::uint64_t d = q::bufferBytes(cfg, 1024, ev.ffs, ev.max_elems, 256) - q::bufferBytes(cfg, 1024, ev.ffs, ev.max_elems, 64);
             const std::uint64_t want = static_cast<std::uint64_t>(q::max_verify_rows) * (256 - 64) * cfg.n_head * (2 + cfg.head_dim) * 4;
             check(d == want, ("bufferBytes: q4 KV attention splits counted" + tag).c_str());
-            check(q::resolveFdSplits(true) >= 64 && q::resolveFdSplits(false) >= 64 && q::resolveFdSplits(true) % 64 == 0,
+            check(q::resolveFdSplits(whirl::KvFormat::q4) >= 64 && q::resolveFdSplits(whirl::KvFormat::f16) >= 64 && q::resolveFdSplits(whirl::KvFormat::q4) % 64 == 0,
                   ("resolveFdSplits multiples of 64" + tag).c_str());
             // the default parameter is the f16 / q8 KV split count
             check(q::bufferBytes(cfg, 1024, ev.ffs, ev.max_elems) == q::bufferBytes(cfg, 1024, ev.ffs, ev.max_elems, 64),
@@ -1631,25 +1631,29 @@ void testForwardSplit() {
 void testKvLayout() {
     using whirl::kv::Part;
     const std::uint64_t e = 4ull * 256;  // Swift-1.5 27B: n_head_kv 4 x head_dim 256
+    using F = whirl::KvFormat;
     struct Fmt {
         const char* name;
-        bool q8, kf16, q4;
+        F fmt;
         std::vector<std::pair<Part, std::uint64_t>> want;
     };
+    // (arch025-N3: q8 added; the same rows as q8h, the rotation is not a layout property)
     const std::vector<Fmt> fmts = {
-        {"f16", false, false, false, {{Part::k, 2 * e}, {Part::v, 2 * e}}},
-        {"q8h", true, false, false, {{Part::k, e}, {Part::v, e}, {Part::k_scale, e / 16}, {Part::v_scale, e / 16}}},
-        {"q8v", true, true, false, {{Part::k, 2 * e}, {Part::v, e}, {Part::v_scale, e / 16}}},
-        {"q4", true, false, true, {{Part::k, e / 2}, {Part::v, e / 2}, {Part::k_scale, e / 16}, {Part::v_scale, e / 16}}},
+        {"f16", F::f16, {{Part::k, 2 * e}, {Part::v, 2 * e}}},
+        {"q8", F::q8, {{Part::k, e}, {Part::v, e}, {Part::k_scale, e / 16}, {Part::v_scale, e / 16}}},
+        {"q8h", F::q8h, {{Part::k, e}, {Part::v, e}, {Part::k_scale, e / 16}, {Part::v_scale, e / 16}}},
+        {"q8v", F::q8v, {{Part::k, 2 * e}, {Part::v, e}, {Part::v_scale, e / 16}}},
+        {"q4", F::q4, {{Part::k, e / 2}, {Part::v, e / 2}, {Part::k_scale, e / 16}, {Part::v_scale, e / 16}}},
     };
     for (const Fmt& f : fmts) {
-        const whirl::kv::LayerRows L = whirl::kv::layerRows(e, f.q8, f.kf16, f.q4);
+        check(std::string(whirl::kvFormatName(f.fmt)) == f.name, std::format("kv layout {}: name", f.name));
+        const whirl::kv::LayerRows L = whirl::kv::layerRows(e, f.fmt);
         bool same = L.n == f.want.size();
         for (std::size_t i = 0; same && i < L.n; ++i) same = L.a[i].part == f.want[i].first && L.a[i].bytes == f.want[i].second;
         check(same, std::format("kv layout {}: arrays and row bytes in page order", f.name));
-        check(L.total() == whirl::kv::layerBytes(e, f.q8, f.kf16, f.q4),
+        check(L.total() == whirl::kv::layerBytes(e, f.fmt),
               std::format("kv layout {}: page row {} == model KV bytes per token per layer {}", f.name, L.total(),
-                          whirl::kv::layerBytes(e, f.q8, f.kf16, f.q4)));
+                          whirl::kv::layerBytes(e, f.fmt)));
     }
 }
 
@@ -1729,19 +1733,39 @@ void testBaselineDumps() {
         CHECK(a.find(k) != std::string::npos);
     CHECK(a.find("D exec: num_plan=numerics: ") != std::string::npos);
     CHECK(a.find("D exec: tune=") != std::string::npos);
-    m.kv_q4 = true;  // one flag changes one line
+    m.kv_fmt = whirl::KvFormat::q8h;  // one property changes one line (q8 -> q8h: the rotation)
     const std::string b = q::execDump(m);
     CHECK(b != a);
-    CHECK(b.find("D exec: kv_q4=1\n") != std::string::npos);
+    CHECK(b.find("D exec: kv_rot=1\n") != std::string::npos);
+    {
+        std::size_t diff_lines = 0;
+        for (std::size_t p = 0, r = 0; p < a.size() && r < b.size();) {
+            const std::size_t e = a.find('\n', p), f = b.find('\n', r);
+            diff_lines += a.compare(p, e - p, b, r, f - r) != 0 ? 1 : 0;
+            p = e + 1;
+            r = f + 1;
+        }
+        CHECK(diff_lines == 1);
+    }
+    // the four KV keys are the properties of the format (arch025-N3: were four Model bools)
+    for (const whirl::KvFormat f : {whirl::KvFormat::f16, whirl::KvFormat::q8, whirl::KvFormat::q8h, whirl::KvFormat::q8v, whirl::KvFormat::q4}) {
+        m.kv_fmt = f;
+        const std::string d = q::execDump(m);
+        const bool q8 = f != whirl::KvFormat::f16, rot = f == whirl::KvFormat::q8h || f == whirl::KvFormat::q4;
+        CHECK(d.find(std::format("D exec: kv_q8={}\nD exec: kv_rot={}\nD exec: kv_kf16={}\nD exec: kv_q4={}\n", q8 ? 1 : 0, rot ? 1 : 0,
+                                 f == whirl::KvFormat::q8v ? 1 : 0, f == whirl::KvFormat::q4 ? 1 : 0)) != std::string::npos);
+    }
+    m.kv_req = whirl::KvFormat::q8v;
+    CHECK(q::execDump(m).find("D exec: kv_mode=q8v\n") != std::string::npos);
     const nu::Request r = nu::parseMode("balance", "test");
     const nu::KvCaps caps{true, false, true, false};
     const nu::KvChoice c = nu::chooseKv(r, false, caps, std::nullopt);
     const std::string l = whirl::dump::kvLine("loader.load", r, false, caps, std::nullopt, c);
     CHECK(l.rfind("D kv: site=loader.load mode=balance items=0x", 0) == 0);
     CHECK(l.find(" moe=0 caps=q8h:1,q8v:0,q4:1,fast_q8h:0 forced=none -> kv=") != std::string::npos);
-    CHECK(l.find(std::string("-> kv=") + nu::kvKindName(c.kv) + " debug=0 why=" + c.why) != std::string::npos);
-    const nu::KvChoice cf = nu::chooseKv(r, true, caps, nu::KvKind::f16);
-    const std::string lf = whirl::dump::kvLine("server.est_uma", r, true, caps, nu::KvKind::f16, cf);
+    CHECK(l.find(std::string("-> kv=") + whirl::kvFormatName(c.kv) + " debug=0 why=" + c.why) != std::string::npos);
+    const nu::KvChoice cf = nu::chooseKv(r, true, caps, whirl::KvFormat::f16);
+    const std::string lf = whirl::dump::kvLine("server.est_uma", r, true, caps, whirl::KvFormat::f16, cf);
     CHECK(lf.find(" moe=1 ") != std::string::npos && lf.find(" forced=f16 -> kv=f16 debug=1 ") != std::string::npos);
     CHECK(&whirl::dump::kv("x", r, false, caps, std::nullopt, c) == &c);  // passes the choice through
     _putenv_s("WHIRL_S0A_DUMP_T", "");
@@ -1758,7 +1782,7 @@ void testBaselineDumps() {
 // arch025-N1: environment -> Model field table (black box over the process environment, so the same test runs on the
 // code before and after the EnvSnapshot change). Each case sets WHIRL_<name> variables, runs loadOrTune on a host-only
 // Model (no layers, null kernels, an empty cached tune table in a private LOCALAPPDATA, so nothing reaches the GPU),
-// applyGemvEnv, kvModeFromEnv or resolveFdSplits, and records what changed against the same call with no variable set:
+// applyGemvEnv, kvRequestFromEnv (was kvModeFromEnv) or resolveFdSplits, and records what changed against the same call with no variable set:
 // the execDump lines (every scalar Model member, the numerics plan, the tune table), the loadOrTune log lines and an
 // exception. The expected table tests/model/env_table.expected.txt was written by the code BEFORE N1 (eeb79c2):
 // WHIRL_TEST_ENV_TABLE_WRITE=<file> writes the actual table instead of comparing.
@@ -1852,15 +1876,20 @@ std::string gemvOutput(std::shared_ptr<const whirl::config::EnvSnapshot> snap = 
 
 std::string kvOutput() {
     try {
-        const auto k = q::kvModeFromEnv();
-        return k ? "kvModeFromEnv=" + std::to_string(static_cast<int>(*k)) + "\n" : "kvModeFromEnv=nullopt\n";
+        // arch025-N3: printed in the pre-N3 KvMode numbering (automatic 0, f16 1 .. q4 5) so the pinned table stays
+        // byte-identical; since N3 "auto" and unset are the same request (nullopt), told apart here by the variable
+        const auto k = q::kvRequestFromEnv();
+        const auto raw = whirl::config::EnvSnapshot::capture().kv;
+        if (k) return "kvModeFromEnv=" + std::to_string(1 + static_cast<int>(*k)) + "\n";
+        return raw && *raw == "auto" ? "kvModeFromEnv=0\n" : "kvModeFromEnv=nullopt\n";
     } catch (const std::exception& e) {
         return std::string("throw: ") + e.what() + "\n";
     }
 }
 
 std::string fdOutput() {
-    return "resolveFdSplits(q4)=" + std::to_string(q::resolveFdSplits(true)) + " resolveFdSplits(f16)=" + std::to_string(q::resolveFdSplits(false)) +
+    return "resolveFdSplits(q4)=" + std::to_string(q::resolveFdSplits(whirl::KvFormat::q4)) +
+           " resolveFdSplits(f16)=" + std::to_string(q::resolveFdSplits(whirl::KvFormat::f16)) +
            "\n";
 }
 
@@ -1918,7 +1947,7 @@ std::vector<Case> cases() {
     // config.cpp applyGemvEnv
     for (const char* n : {"GEMV_R", "GEMV_W", "GEMV_WH"})
         for (const char* v : {"0", "1", "auto", "2", "1:4", "3:2,7:1", "5:9"}) add("gemv", 0, {{n, v}});
-    // loader.cpp kvModeFromEnv / resolveFdSplits
+    // loader.cpp kvRequestFromEnv / resolveFdSplits
     for (const char* v : {"0", "1", "auto", "f16", "q8", "q8h", "q8v", "q4", "Q8"}) add("kv", 0, {{"KV", v}});
     for (const char* v : {"0", "1", "auto", "64", "128", "192", "256", "100", "320", "128x"}) add("fd", 0, {{"FD_SPLITS", v}});
     return cs;
@@ -2359,7 +2388,7 @@ nu::Target targetOf(const q::Model& m) {
     t.mtp = m.mtp.has_value();
     t.k_spec_sample = m.k.draft_sample_rows != nullptr;
     t.k_kv_q4 = m.k.caps.kv_q4;
-    t.kv_explicit = m.kv_mode != q::KvMode::automatic;
+    t.kv_explicit = m.kv_req.has_value();
     t.fast_kv_q8h = t.gfx1151 && t.k_kv_q8h;
     t.strix_profile = whirl::device::profile(m.arch).gdn_strix;
     t.k_gdn_sx = m.k.gdn_sx_prep != nullptr && m.k.gdn_sx_scan != nullptr;

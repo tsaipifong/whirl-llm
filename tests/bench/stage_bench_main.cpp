@@ -69,13 +69,7 @@ double timeOnce(q::Model& m, const std::function<void()>& call) {
     return (ms > 0 && ms <= host + 0.5) ? ms : -1.0;
 }
 
-const char* kvShort(const q::Model& m) {
-    if (!m.kv_q8) return "f16";
-    if (m.kv_q4) return "q4";
-    if (m.kv_kf16) return "q8v";
-    if (m.kv_rot) return "q8h";
-    return "q8";
-}
+const char* kvShort(const q::Model& m) { return whirl::kvFormatName(m.kv_fmt); }
 
 std::string readFile(const std::string& p) {
     std::ifstream f(std::filesystem::path(reinterpret_cast<const char8_t*>(p.c_str())), std::ios::binary);
@@ -92,7 +86,7 @@ struct KvArr {
 };
 std::vector<KvArr> kvArrays(const q::Model& m, std::size_t i) {
     const u64 elems = static_cast<u64>(m.cfg.n_head_kv) * m.cfg.head_dim;
-    const whirl::kv::LayerRows lr = whirl::kv::layerRows(elems, m.kv_q8, m.kv_kf16, m.kv_q4);
+    const whirl::kv::LayerRows lr = whirl::kv::layerRows(elems, m.kv_fmt);
     std::vector<KvArr> v;
     for (std::size_t j = 0; j < lr.n; ++j) {
         hip::DevPtr p = 0;
@@ -413,7 +407,7 @@ int run(stage::Opts o) {
     q::LoadOptions lo;
     lo.numerics = whirl::numerics::resolve(o.mode, std::nullopt);
     lo.ctx_explicit = true;
-    lo.kv_mode = q::kvModeFromEnv().value_or(q::KvMode::automatic);
+    lo.kv_req = q::kvRequestFromEnv();
     // rows are known after load (the chunk depends on max_batch); reserve the largest a stage can use
     const u32 max_rows = std::max<u32>(o.rows, static_cast<u32>(q::max_batch_default));
     const u32 ctx = o.depth + max_rows + 16;

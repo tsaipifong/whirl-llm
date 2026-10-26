@@ -296,39 +296,22 @@ void Model::ensureSnapshots(u32 n) {
 
 namespace {
 
-// LoadOptions / WHIRL_KV -> the forced format for numerics::chooseKv (automatic: the mode decides)
-std::optional<numerics::KvKind> kvKindOf(KvMode m) {
-    switch (m) {
-        case KvMode::f16: return numerics::KvKind::f16;
-        case KvMode::q8: return numerics::KvKind::q8;
-        case KvMode::q8h: return numerics::KvKind::q8h;
-        case KvMode::q8v: return numerics::KvKind::q8v;
-        case KvMode::q4: return numerics::KvKind::q4;
-        case KvMode::automatic: break;
-    }
-    return std::nullopt;
-}
-
 std::string readWhole(const std::string& path) { return readFile(path); }
 
 }  // namespace
 
 namespace {
-// arch025-N1: the reads of kvModeFromEnv / resolveFdSplits on a snapshot (Model::load passes the load's)
-std::optional<KvMode> kvModeOf(const whirl::config::EnvSnapshot& env) {
+// arch025-N1: the reads of kvRequestFromEnv / resolveFdSplits on a snapshot (Model::load passes the load's)
+// WHIRL_KV: nullopt when unset or "auto" (the mode decides), else the forced format
+std::optional<KvFormat> kvRequestOf(const whirl::config::EnvSnapshot& env) {
     const auto& v = env.kv;
-    if (!v) return std::nullopt;
-    if (*v == "auto") return KvMode::automatic;
-    if (*v == "f16") return KvMode::f16;
-    if (*v == "q8") return KvMode::q8;
-    if (*v == "q8h") return KvMode::q8h;
-    if (*v == "q8v") return KvMode::q8v;
-    if (*v == "q4") return KvMode::q4;
+    if (!v || *v == "auto") return std::nullopt;
+    if (const std::optional<KvFormat> k = kvFormatFromName(*v)) return k;
     throw std::invalid_argument("WHIRL_KV must be auto, f16, q8, q8h, q8v or q4 (got '" + *v + "')");
 }
 
-u32 fdSplitsOf(bool kv_q4, const whirl::config::EnvSnapshot& env) {
-    u32 splits = kv_q4 ? 256 : 64;
+u32 fdSplitsOf(KvFormat kv, const whirl::config::EnvSnapshot& env) {
+    u32 splits = kvIs4bit(kv) ? 256 : 64;
     if (const auto& v = env.fd_splits) {
         const unsigned long s = std::strtoul(v->c_str(), nullptr, 10);
         if (s >= 64 && s <= 256 && s % 64 == 0) splits = static_cast<u32>(s);
@@ -338,9 +321,9 @@ u32 fdSplitsOf(bool kv_q4, const whirl::config::EnvSnapshot& env) {
 
 }  // namespace
 
-std::optional<KvMode> kvModeFromEnv() { return kvModeOf(whirl::config::EnvSnapshot::capture()); }
+std::optional<KvFormat> kvRequestFromEnv() { return kvRequestOf(whirl::config::EnvSnapshot::capture()); }
 
-u32 resolveFdSplits(bool kv_q4) { return fdSplitsOf(kv_q4, whirl::config::EnvSnapshot::capture()); }
+u32 resolveFdSplits(KvFormat kv) { return fdSplitsOf(kv, whirl::config::EnvSnapshot::capture()); }
 
 u64 bufferBytes(const Config& cfg, u32 Bq, u64 ffs, u64 max_elems, u32 fd_splits) {
     // mirrors the buffer allocations of Model::load below (keep in step)
@@ -402,12 +385,12 @@ u64 bufferBytes(const Config& cfg, u32 Bq, u64 ffs, u64 max_elems, u32 fd_splits
     return n;
 }
 
-u64 kvBytesPerTokenCfg(const Config& cfg, bool has_mtp, bool q8, bool kf16, bool q4) {
+u64 kvBytesPerTokenCfg(const Config& cfg, bool has_mtp, KvFormat kv) {
     u64 layers = has_mtp ? 1 : 0;
     for (u32 i = 0; i < cfg.n_layer; ++i)
         if (cfg.isAttn(i)) layers += 1;
     const u64 e = static_cast<u64>(cfg.n_head_kv) * cfg.head_dim;
-    return layers * kv::layerBytes(e, q8, kf16, q4);  // whirl/kv_layout.h (arch024-S11c F-6)
+    return layers * kv::layerBytes(e, kv);  // whirl/kv_layout.h (arch024-S11c F-6)
 }
 
 LoadEstimate estimateLoad(const gguf::File& f, const Config& cfg, bool embd_on_host, bool no_mtp) {
@@ -447,10 +430,10 @@ LoadEstimate estimateLoad(const gguf::File& f, const Config& cfg, bool embd_on_h
     for (u32 il = 0; il < cfg.n_layer; ++il)
         if (!cfg.isAttn(il))
             r.state += static_cast<u64>(cfg.d_conv - 1) * cfg.convCh() * 4 + static_cast<u64>(cfg.n_v_heads) * cfg.d_state * cfg.headV() * 4;
-    r.kv_f16 = kvBytesPerTokenCfg(cfg, r.has_mtp, false, false);
-    r.kv_q8v = kvBytesPerTokenCfg(cfg, r.has_mtp, true, true);
-    r.kv_q8h = kvBytesPerTokenCfg(cfg, r.has_mtp, true, false);
-    r.kv_q4 = kvBytesPerTokenCfg(cfg, r.has_mtp, true, false, true);
+    r.kv_f16 = kvBytesPerTokenCfg(cfg, r.has_mtp, KvFormat::f16);
+    r.kv_q8v = kvBytesPerTokenCfg(cfg, r.has_mtp, KvFormat::q8v);
+    r.kv_q8h = kvBytesPerTokenCfg(cfg, r.has_mtp, KvFormat::q8h);
+    r.kv_q4 = kvBytesPerTokenCfg(cfg, r.has_mtp, KvFormat::q4);
     return r;
 }
 
@@ -488,21 +471,21 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
             // the KV format this load will choose below (numerics::chooseKv, same inputs; the 8060S code
             // object has every KV kernel), not f16: a balance / fast load with an explicit --ctx was refused
             // although its q8 / q4 cache fits (REVIEW-022 F6)
-            const KvMode kvm_est = opt.kv_mode == KvMode::automatic ? kvModeOf(env).value_or(KvMode::automatic) : opt.kv_mode;
-            const numerics::KvCaps caps_est{true, true, true, true};
-            const numerics::KvKind kv_est =
-                dump::kv("loader.uma_est", opt.numerics, cfg.moe, caps_est, kvKindOf(kvm_est),
-                         numerics::chooseKv(opt.numerics, cfg.moe, caps_est, kvKindOf(kvm_est)))
+            const std::optional<KvFormat> kvm_est = opt.kv_req ? opt.kv_req : kvRequestOf(env);
+            const numerics::KvCaps caps_est = numerics::kvCapsEstimate(true);
+            const KvFormat kv_est =
+                dump::kv("loader.uma_est", opt.numerics, cfg.moe, caps_est, kvm_est,
+                         numerics::chooseKv(opt.numerics, cfg.moe, caps_est, kvm_est))
                     .kv;  // (WHIRL_DUMP_KV: one "D kv:" line, arch025-S0a)
             hip::UmaNeed n;
             n.weights = est.weights;
             n.fixed = est.weights + est.state +
-                      bufferBytes(cfg, std::clamp<u32>(opt.max_batch, 1, max_batch_limit), est.ffs, est.max_elems, fdSplitsOf(true, env)) +
+                      bufferBytes(cfg, std::clamp<u32>(opt.max_batch, 1, max_batch_limit), est.ffs, est.max_elems, fdSplitsOf(KvFormat::q4, env)) +
                       (256ull << 20);
-            n.kv_per_token = kv_est == numerics::KvKind::f16   ? est.kv_f16
-                             : kv_est == numerics::KvKind::q8v ? est.kv_q8v
-                             : kv_est == numerics::KvKind::q4  ? est.kv_q4
-                                                               : est.kv_q8h;
+            n.kv_per_token = kv_est == KvFormat::f16   ? est.kv_f16
+                             : kv_est == KvFormat::q8v ? est.kv_q8v
+                             : kv_est == KvFormat::q4  ? est.kv_q4
+                                                       : est.kv_q8h;
             n.min_tokens = std::max<u32>(max_ctx_req, 4096);
             n.want_tokens = n.min_tokens;
             if (const std::string why = hip::umaRefusal(u, n, hip::describeDevice(hip::getDevice()).name); !why.empty())
@@ -527,9 +510,8 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
     m.stream = m.stream_own.get();
     m.max_ctx = max_ctx_req;
     m.max_batch = std::clamp<u32>(opt.max_batch, 1, max_batch_limit);
-    KvMode kvm = opt.kv_mode;
-    if (kvm == KvMode::automatic) kvm = kvModeOf(env).value_or(KvMode::automatic);
-    m.kv_mode = kvm;
+    const std::optional<KvFormat> kvm = opt.kv_req ? opt.kv_req : kvRequestOf(env);
+    m.kv_req = kvm;
     {
         // KV format: fixed per mode x model type (numerics::chooseKv, shared by CLI and server;
         // WHIRL_KV is a debug override). Decided once, here, before the kernel table is loaded,
@@ -537,19 +519,15 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
         // not fit: the context shrinks or the load stops, below / in the server).
         const kernels::Caps caps = kernels::Caps::probe(m.module);
         const numerics::KvCaps kv_caps{caps.kv_q8h, caps.kv_q8v, caps.kv_q4, device::profile(m.arch).numerics_8060s};
-        m.kv_choice = dump::kv("loader.load", opt.numerics, cfg.moe, kv_caps, kvKindOf(kvm),
-                               numerics::chooseKv(opt.numerics, cfg.moe, kv_caps, kvKindOf(kvm)));  // (WHIRL_DUMP_KV)
-        const numerics::KvKind kv = m.kv_choice.kv;
-        m.kv_q8 = kv != numerics::KvKind::f16;
-        m.kv_rot = kv == numerics::KvKind::q8h || kv == numerics::KvKind::q4;
-        m.kv_kf16 = kv == numerics::KvKind::q8v;
-        m.kv_q4 = kv == numerics::KvKind::q4;
+        m.kv_choice = dump::kv("loader.load", opt.numerics, cfg.moe, kv_caps, kvm,
+                               numerics::chooseKv(opt.numerics, cfg.moe, kv_caps, kvm));  // (WHIRL_DUMP_KV)
+        m.kv_fmt = m.kv_choice.kv;
         // an explicit KV format the code object has no kernels for (gfx1201: q4)
-        if ((m.kv_kf16 && !caps.kv_q8v) || (m.kv_q4 && !caps.kv_q4) || (m.kv_rot && !m.kv_q4 && !caps.kv_q8h))
-            throw ModelError("UnsupportedKvFormat", std::string(m.kv_kf16 ? "q8v" : m.kv_q4 ? "q4" : "q8h") +
+        if (!caps.supports(m.kv_fmt))
+            throw ModelError("UnsupportedKvFormat", std::string(kvFormatName(m.kv_fmt)) +
                                                         " KV needs kernels this GPU does not have; use WHIRL_KV=f16, q8 or auto");
     }
-    m.k = loadKernels(m.module, m.kv_q8, m.kv_rot, m.kv_kf16, m.kv_q4);
+    m.k = loadKernels(m.module, m.kv_fmt);
     // MXFP4 routed experts: process-level switches (as WHIRL_KV), read by CLI and server alike
     // per-model-type request (numerics::forModel; MoE balance = dense balance items since MODES-MXFP4)
     m.num_req = numerics::forModel(opt.numerics, cfg.moe);
@@ -577,7 +555,7 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
     // (not on the UMA iGPU, gfx1151, unless a limit is set: its free VRAM does not bound what it can allocate)
     if (!device::profile(m.arch).uma_no_vram_fit_check || vram::limitBytes() != 0) {
         const LoadEstimate est = estimateLoad(f, cfg, opt.embd_on_host);
-        const u64 buf = bufferBytes(cfg, m.max_batch, est.ffs, est.max_elems, fdSplitsOf(m.kv_q4, env));
+        const u64 buf = bufferBytes(cfg, m.max_batch, est.ffs, est.max_elems, fdSplitsOf(m.kv_fmt, env));
         const u64 need = est.weights + est.state + buf;
         const hip::MemInfo mi = hip::memInfo();
         if (need > mi.free) {
@@ -703,11 +681,11 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
     m.host_ids.assign(static_cast<std::size_t>(2 * B), 0);
     m.pos_buf = m.alloc(B * 4);
     m.out_tok = m.allocZero(ctl_words * 4);
-    m.fd_splits = fdSplitsOf(m.kv_q4, env);
+    m.fd_splits = fdSplitsOf(m.kv_fmt, env);
     const u64 n_split = m.fd_splits;
     m.part_ml = m.alloc(max_verify_rows * n_split * cfg.n_head * 2 * f4);
     m.part_acc = m.alloc(max_verify_rows * n_split * cfg.n_head * cfg.head_dim * f4);
-    if (m.kv_q8 && !m.kv_kf16 && (m.kv_q4 ? m.k.kv_dq_rows_r != nullptr : m.k.kv_dq_rows != nullptr)) {
+    if (kvQuant(m.kv_fmt) && !kvKf16(m.kv_fmt) && (kvIs4bit(m.kv_fmt) ? m.k.kv_dq_rows_r != nullptr : m.k.kv_dq_rows != nullptr)) {
         // q8 / q8h / q4 prefill attention: f16 copies of a sequence's K / V in ffn_g / ffn_u (Model::prefillAttn)
         m.dq_rows = static_cast<u32>(std::min<u64>(B * ffs * f4 / (static_cast<u64>(cfg.n_head_kv) * cfg.head_dim * 2), 1u << 30)) / 256 * 256;
         if (m.k.kv_dq_rows_r != nullptr) m.dq_st_ml = m.alloc(B * cfg.n_head * 2 * f4);
@@ -804,16 +782,19 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
     return mp;
 }
 
-u64 Model::kvBytesPerTokenFmt(bool q8, bool kf16, bool q4) const {
+u64 Model::kvBytesPerTokenFmt(KvFormat fmt) const {
     const u64 e = static_cast<u64>(cfg.n_head_kv) * cfg.head_dim;
-    return kvLayers() * kv::layerBytes(e, q8, kf16, q4);  // whirl/kv_layout.h (arch024-S11c F-6)
+    return kvLayers() * kv::layerBytes(e, fmt);  // whirl/kv_layout.h (arch024-S11c F-6)
 }
 
 const char* Model::kvName() const {
-    if (!kv_q8) return "f16";
-    if (kv_q4) return "q4 (4-bit + f16 scale / 32, Hadamard-rotated q/k)";
-    if (kv_kf16) return "q8v (K f16, V int8 + f16 scale / 32)";
-    if (kv_rot) return "q8h (int8 + f16 scale / 32, Hadamard-rotated q/k)";
+    switch (kv_fmt) {
+        case KvFormat::f16: return "f16";
+        case KvFormat::q4: return "q4 (4-bit + f16 scale / 32, Hadamard-rotated q/k)";
+        case KvFormat::q8v: return "q8v (K f16, V int8 + f16 scale / 32)";
+        case KvFormat::q8h: return "q8h (int8 + f16 scale / 32, Hadamard-rotated q/k)";
+        case KvFormat::q8: break;
+    }
     return "q8 (int8 + f16 scale / 32)";
 }
 
@@ -830,24 +811,25 @@ void Model::allocKvPool(u32 tokens) {
     const u32 pages = (tokens + kv_page - 1) / kv_page;
     const u64 rows = static_cast<u64>(pages) * kv_page;
     const u64 elems = static_cast<u64>(cfg.n_head_kv) * cfg.head_dim;
-    const bool kq8 = kv_q8 && !kv_kf16;  // K format (q8v: f16)
+    const bool q8 = kvQuant(kv_fmt), q4 = kvIs4bit(kv_fmt);
+    const bool kq8 = q8 && !kvKf16(kv_fmt);  // K format (q8v: f16)
     // element bytes x2 (q4: one byte per two values)
-    const u64 ebk = kv_q4 ? 1 : kq8 ? 2 : 4;
-    const u64 ebv = kv_q4 ? 1 : kv_q8 ? 2 : 4;
+    const u64 ebk = q4 ? 1 : kq8 ? 2 : 4;
+    const u64 ebv = q4 ? 1 : q8 ? 2 : 4;
     // MTP KV first: the draft head reads it every step, so if the process ever ends up over
     // its WDDM budget it should not be the last (most likely demoted) allocation
     if (mtp) {
         mtp_kc = allocZero(rows * elems * ebk / 2);
         mtp_vc = allocZero(rows * elems * ebv / 2);
         if (kq8) mtp_ks = allocZero(rows * elems / 32 * 2);
-        if (kv_q8) mtp_vs = allocZero(rows * elems / 32 * 2);
+        if (q8) mtp_vs = allocZero(rows * elems / 32 * 2);
     }
     for (u32 i = 0; i < cfg.n_layer; ++i) {
         if (!cfg.isAttn(i)) continue;
         kcache[i] = allocZero(rows * elems * ebk / 2);
         vcache[i] = allocZero(rows * elems * ebv / 2);
         if (kq8) kscale[i] = allocZero(rows * elems / 32 * 2);
-        if (kv_q8) vscale[i] = allocZero(rows * elems / 32 * 2);
+        if (q8) vscale[i] = allocZero(rows * elems / 32 * 2);
     }
     pool_pages = pages;
     if (seqs.empty()) {

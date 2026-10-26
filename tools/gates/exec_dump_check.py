@@ -18,7 +18,7 @@ import sys
 # per-call state a forward sets and resets (the same after every load); keep in sync with exec_dump.cpp's comment
 PER_CALL = {"row_n", "fwd_pos0", "xq_n", "x16_count", "x16_fp8", "cur_seq", "kv_off", "ctl_off", "cap_rows", "cap_n",
             "n_inj", "attn_win", "rdelta"}
-SCALAR = (r"(?:bool|float|double|int|unsigned|std::u?int(?:8|16|32|64)_t|u32|std::size_t|KvMode|hip::Arch|"
+SCALAR = (r"(?:bool|float|double|int|unsigned|std::u?int(?:8|16|32|64)_t|u32|std::size_t|KvFormat|std::optional<KvFormat>|hip::Arch|"
           r"GemvR|GemvW|whirl::relax::Params|whirl::numerics::(?:Request|Plan|KvChoice)|std::array<std::uint64_t,\s*n_types>)")
 DECL = re.compile(r"^    (?:static\s+constexpr\s+)?" + SCALAR + r"\s+(.+?);")
 
@@ -67,7 +67,7 @@ def selftest(root: str) -> int:
         ("the tree passes", h, d, 0),
         ("a new bool member fails", h.replace("    bool use_graph = true;\n", "    bool use_graph = true;\n    bool s0a_new_flag = false;\n", 1), d, 1),
         ("a new multi-name member fails", h.replace("    bool use_graph = true;\n", "    std::uint32_t s0a_a = 0, s0a_b = 0;\n    bool use_graph = true;\n", 1), d, 1),
-        ("a flag dropped from the dump fails", h, d.replace("    WD_B(kv_q4);\n", "", 1), 1),
+        ("a flag dropped from the dump fails", h, d.replace("    WD_U(fd_splits);\n", "", 1), 1),
     ]
     for name, hh, dd, want in cases:
         lines: list[str] = []

@@ -807,14 +807,13 @@ int serveMain(int argc, char** argv, const char* program) {
             // the mode's KV format (numerics::chooseKv; the code object is not loaded yet: only dGPUs
             // reach here, and the R9700 code object has q4 KV kernels since FC-1c)
             const auto kv_env = env("KV");
-            const numerics::KvCaps caps_est{true, true, true};
-            const std::optional<numerics::KvKind> kv_forced =
-                kv_env && *kv_env != "auto" ? numerics::kvKindFromName(*kv_env) : std::nullopt;
-            const numerics::KvKind kv_est =
+            const numerics::KvCaps caps_est = numerics::kvCapsEstimate(false);
+            const std::optional<KvFormat> kv_forced = kv_env && *kv_env != "auto" ? kvFormatFromName(*kv_env) : std::nullopt;
+            const KvFormat kv_est =
                 dump::kv("server.est_dgpu", nreq, cfg.moe, caps_est, kv_forced, numerics::chooseKv(nreq, cfg.moe, caps_est, kv_forced))
                     .kv;  // (WHIRL_DUMP_KV: one "D kv:" line, arch025-S0a)
             // (q4 KV uses 256 attention splits: more split-K partial buffers)
-            const std::uint32_t fd_splits_est = qwen35::resolveFdSplits(kv_est == numerics::KvKind::q4);
+            const std::uint32_t fd_splits_est = qwen35::resolveFdSplits(kv_est);
             const std::uint64_t b2 = qwen35::bufferBytes(cfg, 2048, est.ffs, est.max_elems, fd_splits_est);
             const std::uint64_t b4 = qwen35::bufferBytes(cfg, 4096, est.ffs, est.max_elems, fd_splits_est);
             fi.buf_per_row = (b4 - b2) / 2048;
@@ -822,9 +821,9 @@ int serveMain(int argc, char** argv, const char* program) {
             // (WHIRL_CKPT_HOST=1: checkpoints in pinned host memory, no VRAM)
             fi.ckpt_bytes = envOn("CKPT_HOST", false) ? 0 : st1 + static_cast<std::uint64_t>(cfg.n_embd) * 4 + static_cast<std::uint64_t>(cfg.n_vocab) * 4;
             fi.parallel = opt.parallel;
-            fi.kv_per_token = kv_est == numerics::KvKind::f16   ? est.kv_f16
-                              : kv_est == numerics::KvKind::q8v ? est.kv_q8v
-                              : kv_est == numerics::KvKind::q4  ? est.kv_q4
+            fi.kv_per_token = kv_est == KvFormat::f16   ? est.kv_f16
+                              : kv_est == KvFormat::q8v ? est.kv_q8v
+                              : kv_est == KvFormat::q4  ? est.kv_q4
                                                                 : est.kv_q8h;
             fi.pool_min_tokens = pool_req ? *pool_req : std::min<std::uint32_t>(slot_ctx, vram_tight_pool);
             fi.batch = lo.max_batch;
@@ -919,17 +918,16 @@ int serveMain(int argc, char** argv, const char* program) {
                                                    static_cast<std::uint64_t>(qwen35::max_small_batch) * cfg.n_v_heads *
                                                        (cfg.d_state + cfg.headV() + 2) * 4);
             const auto kv_env = env("KV");
-            const numerics::KvCaps caps_est{true, true, true, true};
-            const std::optional<numerics::KvKind> kv_forced =
-                kv_env && *kv_env != "auto" ? numerics::kvKindFromName(*kv_env) : std::nullopt;
-            const numerics::KvKind kv_est =
+            const numerics::KvCaps caps_est = numerics::kvCapsEstimate(true);
+            const std::optional<KvFormat> kv_forced = kv_env && *kv_env != "auto" ? kvFormatFromName(*kv_env) : std::nullopt;
+            const KvFormat kv_est =
                 dump::kv("server.est_uma", nreq, cfg.moe, caps_est, kv_forced, numerics::chooseKv(nreq, cfg.moe, caps_est, kv_forced))
                     .kv;  // (WHIRL_DUMP_KV)
             const std::uint64_t ck = st1 + static_cast<std::uint64_t>(cfg.n_embd) * 4 + static_cast<std::uint64_t>(cfg.n_vocab) * 4;
             hip::UmaNeed need;
             need.weights = est.weights + (use_dflash && dfile ? qwen35::dflashWeightBytes(*dfile) : 0);
             const std::uint64_t bufs =
-                qwen35::bufferBytes(cfg, lo.max_batch, est.ffs, est.max_elems, qwen35::resolveFdSplits(kv_est == numerics::KvKind::q4));
+                qwen35::bufferBytes(cfg, lo.max_batch, est.ffs, est.max_elems, qwen35::resolveFdSplits(kv_est));
             // DeltaNet snapshot sets for MTP verify: one recurrent state per draft (8 dense, 1 MoE: the server log's
             // "N snapshot sets")
             const std::uint64_t snaps = std::max<std::uint32_t>(1, qwen35::mtpDefaults(cfg.moe, hip::Arch::gfx1151).drafts) * st1;
@@ -937,9 +935,9 @@ int serveMain(int argc, char** argv, const char* program) {
             const std::uint64_t ck_b = (opt.parallel * n_ck + n_spe_plan) * ck;
             need.fixed = need.weights + est.state + bufs + slots_b + ck_b + (est.has_mtp ? 65536ull * cfg.n_embd * 5 / 16 : 0) + (256ull << 20);
             need.fixed += need.fixed / 12;  // +8%: measured fast-mode Swift fixed part 3.9% above the itemized sum
-            need.kv_per_token = kv_est == numerics::KvKind::f16   ? est.kv_f16
-                                : kv_est == numerics::KvKind::q8v ? est.kv_q8v
-                                : kv_est == numerics::KvKind::q4  ? est.kv_q4
+            need.kv_per_token = kv_est == KvFormat::f16   ? est.kv_f16
+                                : kv_est == KvFormat::q8v ? est.kv_q8v
+                                : kv_est == KvFormat::q4  ? est.kv_q4
                                                                   : est.kv_q8h;
             need.min_tokens = opt.ctx ? *opt.ctx : slot_ctx;
             need.want_tokens = pool_req ? *pool_req : slot_ctx;
@@ -1351,7 +1349,7 @@ int serveMain(int argc, char** argv, const char* program) {
             const std::uint64_t ck_stride = alignUp(n_gdn * (conv_bytes + ssm_bytes) + static_cast<std::uint64_t>(cfg.n_embd) * 4 +
                                                         static_cast<std::uint64_t>(V) * 4,
                                                     tier::block_bytes);
-            const std::uint64_t full = static_cast<std::uint64_t>(slot_ctx) * model.kvBytesPerTokenFmt(false, false) + n_ck * ck_stride;
+            const std::uint64_t full = static_cast<std::uint64_t>(slot_ctx) * model.kvBytesPerTokenFmt(KvFormat::f16) + n_ck * ck_stride;
             entry_mb = alignUp(full, 1ull << 30) >> 20;
             return std::max(tier::ram_auto_min_mb, entry_mb);
         }();
@@ -1734,7 +1732,7 @@ int serveMain(int argc, char** argv, const char* program) {
                 logW("kv pool {} tokens < {} (one {}-token request + a second one reaching {}): concurrent long requests wait in "
                      "the queue, or end early while generating (finish_reason length, finish_cause kv_pool_exhausted){}",
                      pool_now, floor, slot_ctx_eff, opt.parallel > 1 ? std::min(floor_second_ctx, slot_ctx_eff) : 0,
-                     model.kv_choice.kv == numerics::KvKind::f16 && !cfg.moe && nreq.mode == numerics::Mode::precise
+                     model.kv_choice.kv == KvFormat::f16 && !cfg.moe && nreq.mode == numerics::Mode::precise
                          ? "; --balance allows int8 KV (a longer pool)"
                          : "");
         }
@@ -1809,7 +1807,7 @@ int serveMain(int argc, char** argv, const char* program) {
         const bool gov_on = wddm0.ok && !is_uma && !reserve_explicit && envOn("GOVERNOR", true);
         vram_cfg.governor = gov_on;
         bool startup_spill = false;
-        engine.setNumerics(numerics::propsJson(model.num_plan, model.kv_q8 ? (model.kv_q4 ? "q4" : model.kv_kf16 ? "q8v" : model.kv_rot ? "q8h" : "q8") : "f16"));
+        engine.setNumerics(numerics::propsJson(model.num_plan, kvFormatName(model.kv_fmt)));
         engine.initPool();
         {
             // after everything sized at startup is allocated: any growth of the non-local segment

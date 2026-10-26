@@ -678,72 +678,52 @@ std::string propsJson(const Plan& p, std::string_view kv) {
     return b;
 }
 
-const char* kvKindName(KvKind k) {
-    switch (k) {
-        case KvKind::f16: return "f16";
-        case KvKind::q8: return "q8";
-        case KvKind::q8h: return "q8h";
-        case KvKind::q8v: return "q8v";
-        case KvKind::q4: return "q4";
-    }
-    return "f16";
-}
-
-std::optional<KvKind> kvKindFromName(std::string_view s) {
-    if (s == "f16") return KvKind::f16;
-    if (s == "q8") return KvKind::q8;
-    if (s == "q8h") return KvKind::q8h;
-    if (s == "q8v") return KvKind::q8v;
-    if (s == "q4") return KvKind::q4;
-    return std::nullopt;
-}
-
-KvChoice chooseKv(const Request& r, bool moe, const KvCaps& caps, std::optional<KvKind> forced) {
+KvChoice chooseKv(const Request& r, bool moe, const KvCaps& caps, std::optional<KvFormat> forced) {
     KvChoice c;
     const char* model = moe ? "MoE model" : "dense model";
     if (forced) {
         c.kv = *forced;
         c.debug = true;
-        c.why = std::format("WHIRL_KV={} (debug override)", kvKindName(*forced));
+        c.why = std::format("WHIRL_KV={} (debug override)", kvFormatName(*forced));
         return c;
     }
     // int8 with rotation where the code object has it, else plain int8 (every code object has q8)
-    const KvKind q8 = caps.q8h ? KvKind::q8h : KvKind::q8;
+    const KvFormat q8 = caps.q8h ? KvFormat::q8h : KvFormat::q8;
     if (r.has(Item::kvq4)) {
         if (caps.fast_q8h && caps.q8h && !moe) {
             // RC6 (FAST-8S, 3-run means on the Radeon 8060S): q8h decodes +7/+19/+14% faster than q4 at
             // 32k/64k/128k, prefill within noise, KL error 4-10x smaller
-            c.kv = KvKind::q8h;
+            c.kv = KvFormat::q8h;
             c.why = std::format("{}, {}: q8h (Radeon 8060S: faster decode than q4)", modeName(r.mode), model);
             return c;
         }
         if (caps.q4) {
-            c.kv = KvKind::q4;
+            c.kv = KvFormat::q4;
             c.why = std::format("{}, {}: q4", modeName(r.mode), model);
         } else {
             // no q4 KV kernels in this code object (gfx1201 before FAST-1c): f16, the KV
             // fast had there before (no int8 stand-in for q4)
-            c.kv = KvKind::f16;
+            c.kv = KvFormat::f16;
             c.why = std::format("{}, {}: f16 (no q4 KV kernels on this GPU yet)", modeName(r.mode), model);
         }
         return c;
     }
     if (r.has(Item::kvq8) && !moe) {
         c.kv = q8;
-        c.why = std::format("{}, {}: {}", modeName(r.mode), model, kvKindName(q8));
+        c.why = std::format("{}, {}: {}", modeName(r.mode), model, kvFormatName(q8));
         return c;
     }
-    c.kv = KvKind::f16;
+    c.kv = KvFormat::f16;
     c.why = std::format("{}, {}: f16", modeName(r.mode), model);
     return c;
 }
 
-KvFitLabel kvFitLabel(const Request& r, bool moe, KvKind kv) {
+KvFitLabel kvFitLabel(const Request& r, bool moe, KvFormat kv) {
     KvFitLabel l;
     l.mode = modeName(r.mode);
-    l.fmt = kvKindName(kv);
+    l.fmt = kvFormatName(kv);
     // a lower-precision mode only helps where it changes the format (precise, dense: balance is q8h)
-    l.alt = r.mode == Mode::precise && !moe && kv == KvKind::f16 ? "--balance allows int8 KV" : "";
+    l.alt = r.mode == Mode::precise && !moe && kv == KvFormat::f16 ? "--balance allows int8 KV" : "";
     return l;
 }
 

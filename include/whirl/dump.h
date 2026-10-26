@@ -25,10 +25,10 @@ bool envOn(const char* name);
 // "D kv: site=<site> mode=<m> items=<hex> custom=<0|1> moe=<0|1> caps=q8h:<b>,q8v:<b>,q4:<b>,fast_q8h:<b>
 //  forced=<name|none> -> kv=<name> debug=<0|1> why=<why>"
 std::string kvLine(std::string_view site, const numerics::Request& r, bool moe, const numerics::KvCaps& caps,
-                   std::optional<numerics::KvKind> forced, const numerics::KvChoice& c);
+                   std::optional<KvFormat> forced, const numerics::KvChoice& c);
 // prints kvLine to stderr when WHIRL_DUMP_KV is on; returns c (so a call site can wrap its chooseKv call)
 const numerics::KvChoice& kv(std::string_view site, const numerics::Request& r, bool moe, const numerics::KvCaps& caps,
-                             std::optional<numerics::KvKind> forced, const numerics::KvChoice& c);
+                             std::optional<KvFormat> forced, const numerics::KvChoice& c);
 
 // --dump-only (set by the CLI / server argument parsers)
 void setDumpOnly(bool on);
