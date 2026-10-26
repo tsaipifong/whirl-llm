@@ -84,8 +84,8 @@ struct EnvValues {
     // src/model/tune.cpp:852-982 (loadOrTuneImpl)
     Raw fp8, fp8_mask, g8t, gdn_wmma, act_fuse, gemmh, gemmhq, attn_kx, attn_kg, attn_dqf, attn_seg, gdn_ba, gdn_in2, q4_relaxed,
         ffn_h16, gdn_strix, gdn_strix_min, kv, q8dec, relax, relax_k, relax_alpha, relax_eps, relax_delta, spec_sample;
-    // src/model/loader.cpp:550-553
-    Raw moe_fp8, moe_mxw, moe_wide, moe_rbf;
+    // src/model/loader.cpp:550-553; feat026-moep: moep_gu / moep_dn / moep_comb (WHIRL_MOEP_GU / _DN / _COMB)
+    Raw moe_fp8, moe_mxw, moe_wide, moe_rbf, moep_gu, moep_dn, moep_comb;
     // numerics::noteSwitches (k_numerics_switches, same order): recorded as overrides only
     std::array<Raw, 13> switches{};
 
@@ -93,7 +93,7 @@ struct EnvValues {
         const char* name;  // without the WHIRL_ prefix
         Raw EnvValues::* field;
     };
-    static constexpr std::size_t n_fields = 29;
+    static constexpr std::size_t n_fields = 32;
     // every Raw field once (switches are k_numerics_switches); the reflection test checks the count against sizeof
     static const std::array<Entry, n_fields>& names();
     // by name, switches included (nullptr for an unknown name)
@@ -202,6 +202,8 @@ struct ItemState {
 // kv_kf16, kv_q4, kv_mode, fd_splits: numerics::chooseKv / resolveFdSplits, N3), the tune results (gemv_r, gemv_w,
 // tune table, WHIRL_GEMV_R / _W / _WH: config.cpp applyGemvEnv), per-forward state (out_h16, mm_class, small_max,
 // head_phase, mtp_batch, mrope_on, rpos_rows) and sizes.
+// feat026-moep: moep_gu / moep_dn = the kernels::kMoepGu / kMoepDn variant index + 1 (0 = off; WHIRL_MOEP_GU / _DN name a
+// variant, an unknown name is off), moep_comb = WHIRL_MOEP_COMB (std::strtoul). Not in the S0b-2 dump (recorded before them).
 #define WHIRL_NUMERICS_FLAGS(X)                                  \
     X(B, use_graph, true, "use_graph")                           \
     X(B, no_fuse, false, "no_fuse")                              \
@@ -246,6 +248,9 @@ struct ItemState {
     X(B, moe_fp8, true, "moe_fp8")                               \
     X(B, moe_mxw, true, "moe_mxw")                               \
     X(B, moe_rbf, true, "moe_rbf")                               \
+    X(U, moep_gu, 0, "")                                         \
+    X(U, moep_dn, 0, "")                                         \
+    X(U, moep_comb, 0, "")                                       \
     X(B, gv_group, true, "gv_group")                             \
     X(U, gv_nmax, 0, "gv_nmax")                                  \
     X(B, gdn_v0, false, "")

@@ -444,6 +444,14 @@ void testLoadRules() {
     NCHECK(fl({{"MOE_WIDE", ""}}).flags.moe_wide && !fl({{"MOE_MXW", "0"}}).flags.moe_mxw && !fl({{"MOE_RBF", "0"}}).flags.moe_rbf,
            "loader flags: envFlag (\"\" is on)");
     NCHECK(!fl({{"G8T", "0"}}).flags.g8t && fl({}).flags.g8t, "G8T");
+    // feat026-moep (was loader.cpp envGet): variant names -> index + 1, unknown / unset -> 0 (off), MOEP_COMB strtoul
+    NCHECK(fl({}).flags.moep_gu == 0 && fl({}).flags.moep_dn == 0 && fl({}).flags.moep_comb == 0 &&
+               fl({{"MOEP_GU", "g64n64k64"}}).flags.moep_gu == 1 && fl({{"MOEP_GU", "g128n128k32"}}).flags.moep_gu == 6 &&
+               fl({{"MOEP_GU", "nope"}}).flags.moep_gu == 0 && fl({{"MOEP_GU", ""}}).flags.moep_gu == 0 &&
+               fl({{"MOEP_DN", "m128w4n32k64"}}).flags.moep_dn == 1 && fl({{"MOEP_DN", "m128w4n256k32"}}).flags.moep_dn == 6 &&
+               fl({{"MOEP_COMB", "2"}}).flags.moep_comb == 2 && fl({{"MOEP_COMB", "x"}}).flags.moep_comb == 0 &&
+               fl({{"MOEP_COMB", "5z"}}).flags.moep_comb == 5,
+           "MOEP_GU / _DN / _COMB: the loader's parse rules");
     NCHECK(!fl({}, "precise").flags.g8t, "g8t needs fp8_prefill");
     // Q8DEC: "" keeps the mode's choice; "1" in precise = int8 decode (lossy override)
     NCHECK(!fl({{"Q8DEC", ""}}).flags.prec_dec && fl({{"Q8DEC", "0"}}).flags.prec_dec, "Q8DEC");

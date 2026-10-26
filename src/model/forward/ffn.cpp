@@ -88,6 +88,7 @@ void Model::moeBlock(DevPtr post_norm, const Mat& sg, const Mat& su, const Mat& 
     mp.refs = mo.gate.ref != 0 && mo.up.ref != 0 && mo.down.ref != 0;
     mp.sx_buf = moe_sx != 0;
     mp.tiles64_buf = moe_tiles64 != 0;
+    mp.cnt_buf = moe_cnt != 0;
     ops::MoeFlags mf;
     mf.prec_dec = nf().prec_dec;
     mf.small_max = small_max;
@@ -97,6 +98,10 @@ void Model::moeBlock(DevPtr post_norm, const Mat& sg, const Mat& su, const Mat& 
     mf.moe_rbf = nf().moe_rbf;
     mf.moe_fp8 = nf().moe_fp8;
     mf.moe_bn_force = nf().moe_bn_force;
+    // feat026-moep: the plan keeps variant index + 1 (0 = off); MoeFlags -1 = off
+    mf.moep_gu = static_cast<int>(nf().moep_gu) - 1;
+    mf.moep_dn = static_cast<int>(nf().moep_dn) - 1;
+    mf.moep_comb = nf().moep_comb;
     const ops::MoePlan pl = ops::chooseMoe(mp, mf, k, k.silu_mul_x8h);
     const bool small = pl.small;
     // precise decode: f32-activation experts (moe_gu_f / moe_down_f) and the shared expert on
@@ -221,6 +226,18 @@ void Model::moeBlock(DevPtr post_norm, const Mat& sg, const Mat& su, const Mat& 
                     moe_ntiles64);
         hip::launch(pl.fdn, pl.dn_pgrid, D(256), 0, stream, mo.down.ptr, mo.down.row_bytes, I(E), moe_yg, moe_yd, I(F), moe_tiles, moe_ntiles);
         mark(OpClass::matmul);
+    } else if (pl.kind == ops::MoePrefillKind::moep) {
+        // feat026-moep (Radeon 8060S, opt-in): gate + up + SwiGLU and down with several 16-token fragments of one
+        // expert per block (tile lists bn = the variants'; the same perm positions); every value as the fused_gu
+        // path. With the fused combine the down launch follows the shared expert (it reads ysh), below.
+        hip::launch(k.moe_tiles, D(1), D(1024), 0, stream, moe_ids, I(pairs), I(R), I(pl.gu_bn), moe_tiles64, moe_ntiles64);
+        hip::launch(k.moe_gather_f16, D(pairs), D(256), 0, stream, h, moe_perm, moe_x16, I(E), I(K));
+        mark(OpClass::misc);
+        hip::launch(pl.fgu, pl.gu_pgrid, D(256), 0, stream, mo.gate.ptr, mo.up.ptr, mo.gate.row_bytes, I(F), moe_x16, moe_yg, I(E), moe_tiles64,
+                    moe_ntiles64);
+        if (!pl.comb_fused && !pl.comb_atomic)
+            hip::launch(pl.fdn, pl.dn_pgrid, D(256), 0, stream, mo.down.ptr, mo.down.row_bytes, I(E), moe_yg, moe_yd, I(F), moe_tiles, moe_ntiles);
+        mark(OpClass::matmul);
     } else if (pl.kind == ops::MoePrefillKind::gemmr) {
         // MXFP4 experts, f16 activations (precise): gate + up + SwiGLU in one grouped GEMM
         // into the f32 gate buffer as f16 (X is still being read), then down; row block
@@ -247,7 +264,22 @@ void Model::moeBlock(DevPtr post_norm, const Mat& sg, const Mat& su, const Mat& 
         elementwise(k.silu_mul, ffn_g, ffn_u, n * cfg.n_ff);
         matmul(sd, ffn_g, ysh, n, false);
     }
-    hip::launch(k.moe_combine, D((E + 255) / 256, n), D(256), 0, stream, x, ysh, moe_sg, moe_yd, moe_inv, moe_w, I(E), I(K));
+    if (pl.comb_fused) {
+        // feat026-moep: down + combine in one launch (moe_combine's values, or the f16-yd balance twin; counters left zeroed)
+        hip::launch(pl.fdn, pl.dn_pgrid, D(256), 0, stream, mo.down.ptr, mo.down.row_bytes, I(E), moe_yg, moe_yd, I(F), moe_tiles, moe_ntiles,
+                    moe_perm, moe_inv, moe_w, moe_sg, ysh, x, moe_cnt, I(K));
+        mark(OpClass::matmul);
+    } else if (pl.comb_atomic) {
+        // feat026-moep fast candidate: x += sg * ysh first (moe_combine4, K = 0), then the down GEMM adds w * y by atomics
+        if (ysh != 0)
+            hip::launch(k.moe_combine4, pl.comb_grid, D(256), 0, stream, x, ysh, moe_sg, moe_yd, moe_inv, moe_w, I(E), I(0));
+        hip::launch(pl.fdn, pl.dn_pgrid, D(256), 0, stream, mo.down.ptr, mo.down.row_bytes, I(E), moe_yg, I(F), moe_tiles, moe_ntiles, moe_perm,
+                    moe_w, x, I(K));
+        mark(OpClass::matmul);
+    } else {
+        hip::launch(pl.ydh ? k.moe_combine4h : pl.comb4 ? k.moe_combine4 : k.moe_combine, pl.comb_grid, D(256), 0, stream, x, ysh, moe_sg, moe_yd, moe_inv, moe_w, I(E),
+                    I(K));
+    }
     xq_src = 0;
     x16_src = 0;
     mark(OpClass::misc);

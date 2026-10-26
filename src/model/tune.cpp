@@ -906,6 +906,9 @@ void loadOrTuneImpl(Model& m, const std::string& model_path, std::string& log) {
     m.num_plan.flags = f;
     if (f.prec_dec) refusePrecise();
     m.num_plan = p;
+    // feat026-moep (was loader.cpp at the load): a WHIRL_MOEP_GU / _DN name that is no variant is off, with a note
+    if (env.moep_gu && f.moep_gu == 0) std::fprintf(stderr, "whirl: WHIRL_MOEP_GU=%s: unknown variant (off)\n", env.moep_gu->c_str());
+    if (env.moep_dn && f.moep_dn == 0) std::fprintf(stderr, "whirl: WHIRL_MOEP_DN=%s: unknown variant (off)\n", env.moep_dn->c_str());
     log += "  " + nu::logLine(p) + "\n";
     if (!m.load_note.empty()) log += "  " + m.load_note;
 

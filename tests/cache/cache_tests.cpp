@@ -687,7 +687,8 @@ static void testFingerprintCoversBitsKey() {
     for (std::size_t i = 0; nu::k_numerics_switches[i] != nullptr; ++i) names.push_back(nu::k_numerics_switches[i]);
     for (const auto& e : nu::RuntimeValues::names()) names.push_back(e.name);
     const std::vector<std::string> outside = {"FD_SPLITS"};
-    const char* values[] = {"0", "1", "", "2", "5", "f16", "q4", "512", "0x3", "0.5", "64", "4096"};
+    // feat026-moep: WHIRL_MOEP_GU / _DN take variant names (kernels::kMoepGu / kMoepDn)
+    const char* values[] = {"0", "1", "", "2", "5", "f16", "q4", "512", "0x3", "0.5", "64", "4096", "g64n64k64", "m128w4n32k64"};
     std::size_t n_checked = 0;
     for (const std::string& n : names) {
         CHECK(fingerprintEnvKept("WHIRL_" + n));

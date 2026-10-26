@@ -381,6 +381,7 @@ u64 bufferBytes(const Config& cfg, u32 Bq, u64 ffs, u64 max_elems, u32 fd_splits
         n += B * Kx * F * f4 * 2;                         // moe_yg, moe_yu
         n += B * Kx * E * f4;                             // moe_yd
         n += B * Kx * f4;                                 // moe_sx
+        n += B * ((E + kernels::kMoepMinBm - 1) / kernels::kMoepMinBm) * 4 + 16;  // moe_cnt (feat026-moep)
     }
     return n;
 }
@@ -526,7 +527,8 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
     // per-model-type request (numerics::forModel; MoE balance = dense balance items since MODES-MXFP4)
     m.num_req = numerics::forModel(opt.numerics, cfg.moe);
     // (arch025-N2b: moe_fp8 / moe_mxw / moe_wide / moe_rbf are numerics::plan's, in loadOrTune: WHIRL_MOE_FP8 / _MXW /
-    // _WIDE / _RBF from this load's snapshot; nothing reads them before loadOrTune)
+    // _WIDE / _RBF from this load's snapshot; nothing reads them before loadOrTune; feat026-moep: moep_gu / moep_dn /
+    // moep_comb, WHIRL_MOEP_GU / _DN / _COMB, the same way; the unknown-variant note is printed by loadOrTune)
     m.layers.resize(cfg.n_layer);
     m.kcache.assign(cfg.n_layer, 0);
     m.vcache.assign(cfg.n_layer, 0);
@@ -743,6 +745,7 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
         m.moe_yu = m.alloc(B * Kx * F * f4);
         m.moe_yd = m.alloc(B * Kx * E * f4);
         m.moe_sx = m.alloc(B * Kx * f4);
+        m.moe_cnt = m.allocZero(B * ((E + kernels::kMoepMinBm - 1) / kernels::kMoepMinBm) * 4 + 16);
     }
     // sizing self-check: the pre-load estimate (bufferBytes, the server's auto-shrink) must cover what was just
     // allocated; a shortfall means an allocation was added without updating the estimate

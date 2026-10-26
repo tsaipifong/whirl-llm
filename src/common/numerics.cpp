@@ -4,6 +4,7 @@
 #include "whirl/numerics.h"
 
 #include "whirl/dump.h"
+#include "whirl/kernels_abi.h"  // feat026-moep: kMoepGu / kMoepDn variant names
 
 #include <algorithm>
 #include <cstdlib>
@@ -220,6 +221,9 @@ const std::array<EnvValues::Entry, EnvValues::n_fields>& EnvValues::names() {
         {"MOE_MXW", &S::moe_mxw},
         {"MOE_WIDE", &S::moe_wide},
         {"MOE_RBF", &S::moe_rbf},
+        {"MOEP_GU", &S::moep_gu},
+        {"MOEP_DN", &S::moep_dn},
+        {"MOEP_COMB", &S::moep_comb},
     }};
     return t;
 }
@@ -332,6 +336,14 @@ void loadFlags(const Request& r, const Target& t, Flags& F) {
     F.moe_mxw = flagOr(e.moe_mxw, true);
     F.moe_wide = flagOr(e.moe_wide, false);
     F.moe_rbf = flagOr(e.moe_rbf, true);
+    // feat026-moep (was loader.cpp, envGet): variants by name (index + 1; unknown -> 0 = off), the combine by strtoul
+    if (e.moep_gu)
+        for (int i = 0; i < kernels::kMoepGuN; ++i)
+            if (*e.moep_gu == kernels::kMoepGu[i].name) F.moep_gu = static_cast<std::uint32_t>(i) + 1;
+    if (e.moep_dn)
+        for (int i = 0; i < kernels::kMoepDnN; ++i)
+            if (*e.moep_dn == kernels::kMoepDn[i].name) F.moep_dn = static_cast<std::uint32_t>(i) + 1;
+    if (e.moep_comb) F.moep_comb = static_cast<std::uint32_t>(std::strtoul(e.moep_comb->c_str(), nullptr, 10));
     // tune.cpp:852-861
     if (e.fp8) F.fp8_prefill = *e.fp8 != "0";
     if (e.fp8 && *e.fp8 == "0") F.moe_fp8 = false;

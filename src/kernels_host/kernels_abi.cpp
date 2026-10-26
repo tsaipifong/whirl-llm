@@ -422,6 +422,17 @@ void loadMoe(MoeKernels& k, const Loader& L) {
         k.gemmr_moedn32 = L.opt("gemmr_moedn32_mxfp4");
         k.moe_gather_fp8 = L.opt("moe_gather_fp8");
     }
+    // feat026-moep (gfx1151 code object only; all optional)
+    for (int v = 0; v < kMoepGuN; ++v) k.moep_gu[v] = L.opt(std::string("gemm_moepgu_") + kMoepGu[v].name + "_mxfp4");
+    for (int v = 0; v < kMoepDnN; ++v) {
+        k.moep_dn[v] = L.opt(std::string("gemm_moepdn_") + kMoepDn[v].name + "_mxfp4");
+        k.moep_dc[v] = L.opt(std::string("gemm_moepdc_") + kMoepDn[v].name + "_mxfp4");
+        k.moep_dh[v] = L.opt(std::string("gemm_moepdh_") + kMoepDn[v].name + "_mxfp4");
+        k.moep_dhc[v] = L.opt(std::string("gemm_moepdhc_") + kMoepDn[v].name + "_mxfp4");
+        k.moep_da[v] = L.opt(std::string("gemm_moepda_") + kMoepDn[v].name + "_mxfp4");
+    }
+    k.moe_combine4 = L.opt("moe_combine4");
+    k.moe_combine4h = L.opt("moe_combine4h");
     for (QType t : {QType::q4_k, QType::q5_k, QType::q6_k, QType::q8_0, QType::iq4_xs, QType::iq4_nl, QType::q3_k, QType::iq3_s,
                     QType::mxfp4}) {
         k.moe_gu_f[ti(t)] = L.opt(std::string("moe_gu_f_") + sfx(t));

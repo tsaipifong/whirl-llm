@@ -193,18 +193,23 @@ whirl::bench::Row abRow(const CellInfo& ci, const AbStats& ab, const std::string
 
 // ---------------------------------------------------------------- whirl-kernel-test --bench (bench_kernels.cpp)
 struct BenchOpts {
-    std::set<std::string> families;      // gemv gemvh gemm attn moe gdn
+    std::set<std::string> families;      // gemv gemvh gemm attn moe gdn moep
     std::string jsonl;                   // --jsonl FILE (appended)
     std::string ab_hsaco;                // --ab HSACO
     BenchCfg cfg;
     std::uint64_t rot_target = 0;        // --rot-mb (0: rotationTarget(arch))
     std::uint64_t rot_cap = 4ull << 30;  // --rot-cap-mb: device memory per rotated set
     int moe_layers = 2;                  // --moe-layers: real expert layers rotated (with 64 routing sets)
+    // moep (feat026-moep): tokens per prefill chunk (--moep-n), captured routing (--moe-routing FILE: int32 ids as
+    // WHIRL_DUMP_MOE writes them; --moe-routing-off: first id used)
+    int moep_n = 2048;
+    std::string moe_routing;
+    long long moe_routing_off = 0;
     bool no_anchor = false;              // --no-anchor
     std::string state = "burst";         // declared power state (DESIGN (d))
     std::string tool_ver, code_hash, code_hash_b, gpu_arch, gpu_pci;
 };
-extern const char* const kBenchFamilies[6];
+extern const char* const kBenchFamilies[7];
 bool benchFamilyKnown(const std::string& f);
 struct Ctx;
 void runBench(Ctx& c, const BenchOpts& o);
