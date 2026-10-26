@@ -12,8 +12,11 @@
 // plus a liveness check per reference.
 // feat026-moe-skipsafe (review moedown97-kcand-r1 A1 / A2):
 //   * moeskip id -1 tails (feat027: a token's ids are a kept prefix, then -1 with weight 0): per-token random kept
-//     count, every token K - 1, every token 1 kept; Ornith (KB batch tails, last step, NG full batches at kt >= 4 for
-//     KB 4 / kt >= 2 for KB 2), F 256 (a kept boundary inside a lane step), F 1024 (NG at kt >= 4), K 3 / 6, E 2000.
+//     count, every token K - 1, every token 1 kept; Ornith (nb 16: one KB batch covers 2 KB slots, so KB batch tails,
+//     last step, NG full batches at kt >= 8 for KB 4 / kt >= 4 for KB 2), F 256 (a kept boundary inside a lane step),
+//     F 1024 (NG at kt >= KB), K 3 / 6, E 2000. Fixed NG-full-batch-then-dropped-tail cases (review
+//     skipsafe-gemvports C2, independent of the RNG): every token K - 1 = 7 kept at F 1024 (224 units: KB 2 3 full
+//     batches + 32, KB 4 one full 128 batch + 96) and at F 1536 (336 units: KB 8 one full 256 batch + 80).
 //     Dropped slots carry NaN activation scales (int8) / NaN activations (f32), so reading one is never 0 * finite.
 //     Reference: the SHIPPED kernel on the compacted problem (per token K' = kt, the kept slots only): the same
 //     lane -> unit map and order as feat027's loop over kt * nb, valid before feat027 (whose pre-moeskip shipped
@@ -30,6 +33,19 @@
 //     the fused down + combine with the same bits, so this is the gemm_c0 counterpart here.
 //   * skip-safety marker: a candidate object (and a tune-id main object) must export md97_skipsafe_v1 (built from
 //     this branch); an object without it FAILS and its kernels do not run the -1 cases (they would read out of bounds).
+//   * id -1 address check (feat026-skipsafe-r2, review skipsafe-gemvports C1): a value check cannot see a load from
+//     an id -1 row whose value is masked out (e.g. a step clamped to slot K - 1 with ok = k < kt). A candidate object
+//     built with -DWHIRL_MD97_DEV=1 -DWHIRL_MD97_NEGCHK=1 exports md97_negchk_v1 and the counter md97_negid_hits
+//     (every weight address formed from an id < 0 counts and uses expert 0 instead, so nothing is read out of the
+//     tensor); per candidate the counter must stay 0 over all runs (and the id -1 runs must exist). NEGCHK=2 (exports
+//     md97_negchk_fault_v1) plants that fault (positive control): then every candidate must count hits, and its value
+//     results go only into the note (DN / DF values stay equal: the blind spot this check closes). Without an
+//     instrumented object the check is a skip line.
+//   * DF direct id -1 run (review C3): feat027-moeskip-r1 (27bfb54) patches moe_down_f_mxfp4, b8a041a does not, and
+//     moe_topk_skip exists in both, so it cannot tell them apart. The direct DF check runs when the main object
+//     exports moe_f_skipsafe_v1 (proposed marker for moe_f.hip on feat027-moeskip-r1, see the merge note) or when
+//     WHIRL_KT_MD97_DF_DIRECT=1 (merged-state assumption; never with a b8a041a-only object: it would read before the
+//     weight tensor).
 // SPDX-License-Identifier: Apache-2.0
 
 #include <algorithm>
@@ -53,6 +69,8 @@ struct Cand {
     hip::Function f;
     std::size_t checked = 0, bad = 0;
     std::string first_bad;
+    std::size_t neg_runs = 0, neg_hits = 0;  // id -1 address check (instrumented object)
+    std::string first_neg;
 };
 
 // Counter of one bitwise invariant (twin, direct-vs-compacted).
@@ -146,6 +164,28 @@ void report(Ctx& c, const std::vector<Cand>& cs, const std::string& shipped, con
     }
 }
 
+// id -1 address check per candidate (instrumented object): normal = no hit; planted fault = hits for every candidate
+void reportNeg(Ctx& c, const std::vector<Cand>& cs, bool fault) {
+    for (const Cand& cd : cs) {
+        Result r;
+        r.kind = Kind::invariant;
+        r.n = cd.neg_runs;
+        if (!fault) {
+            r.name = cd.name + ": no weight address formed from an id -1 (instrumented object; " + std::to_string(cd.neg_runs) + " id -1 runs)";
+            r.mismatches = cd.neg_hits;
+            r.pass = cd.neg_hits == 0 && cd.neg_runs > 0;
+            if (!cd.first_neg.empty()) r.note = "first " + cd.first_neg;
+        } else {
+            r.name = cd.name + ": planted fault (NEGCHK=2) seen by the id -1 address check (" + std::to_string(cd.neg_runs) + " id -1 runs)";
+            r.mismatches = cd.neg_hits > 0 ? 0 : 1;
+            r.pass = cd.neg_hits > 0 && cd.neg_runs > 0;
+            r.note = "hits " + std::to_string(cd.neg_hits) + "; value mismatches " + std::to_string(cd.bad) + " of " + std::to_string(cd.checked) +
+                     " runs (informational: 0 for DN / DF = the value checks cannot see this fault)";
+        }
+        c.rep.add(r);
+    }
+}
+
 void reportInv(Ctx& c, const std::string& name, const Inv& v) {
     Result r;
     r.name = name + " (" + std::to_string(v.runs) + " runs)";
@@ -205,6 +245,9 @@ void testMoeDown97(Ctx& c) {
                         twin_gu = c.fnOpt("moe_gu_mxfp4w_shipped");
     const bool any_twin = twin_dn || twin_df || twin_gu;
     const bool skipaware = static_cast<bool>(c.fnOpt("moe_topk_skip"));  // feat027-moeskip merged: shipped kernels take id -1
+    // feat027-moeskip-r1 (27bfb54) also patches moe_down_f_mxfp4; moe_topk_skip cannot tell it from b8a041a (review C3)
+    const char* dfd = std::getenv("WHIRL_KT_MD97_DF_DIRECT");
+    const bool df_skipaware = skipaware && (static_cast<bool>(c.fnOpt("moe_f_skipsafe_v1")) || (dfd && std::strcmp(dfd, "1") == 0));
     if ((!hs || !*hs) && !any_twin) {
         c.rep.skip("moedown97", "gfx1201 MXFP4 decode expert candidates", "WHIRL_KT_MD97_HSACO not set (main object is the shipped build)");
         return;
@@ -217,6 +260,8 @@ void testMoeDown97(Ctx& c) {
     std::vector<Cand> dn, df, gu;
     hip::Module xm;  // owns the candidate functions for the whole test
     bool cand_safe = true;
+    DevPtr negp = 0;         // md97_negid_hits of an instrumented candidate object (review C1)
+    bool neg_fault = false;  // the object carries the planted fault (NEGCHK=2)
     if (hs && *hs) {
         std::vector<char> img;
         if (std::FILE* fp = std::fopen(hs, "rb")) {
@@ -236,6 +281,13 @@ void testMoeDown97(Ctx& c) {
             fail(c, std::string("moedown97: candidate object ") + hs +
                         " has no md97_skipsafe_v1 (built before feat026-moe-skipsafe); rebuild with -DWHIRL_MD97_DEV=1 from this branch; "
                         "its candidates do not run the id -1 cases");
+        if (xm.getFunctionOpt("md97_negchk_v1")) {
+            negp = xm.getGlobal("md97_negid_hits");
+            neg_fault = static_cast<bool>(xm.getFunctionOpt("md97_negchk_fault_v1"));
+        } else {
+            c.rep.skip("moedown97", "id -1 address check",
+                       "candidate object not instrumented (build it with -DWHIRL_MD97_DEV=1 -DWHIRL_MD97_NEGCHK=1; runner step kt_negchk)");
+        }
         // candidate list: dn1..dn10, df1..df6, gu1..gu4 (WHIRL_KT_MD97_IDS=dn3,df2,gu1 limits it; a listed id must exist)
         std::vector<std::string> want;
         const char* e = std::getenv("WHIRL_KT_MD97_IDS");
@@ -321,11 +373,30 @@ void testMoeDown97(Ctx& c) {
         {2048, 512, 3, 8, {5}, true, false, "K 3, id -1 tails", 1},
         {2048, 512, 6, 16, {4}, true, false, "K 6, id -1 tails", 1},
         {2000, 512, 8, 32, {3}, true, false, "E 2000, id -1 tails", 1},
+        // review C2: NG full batch(es) followed by a dropped tail, fixed (kt 7 for every token)
+        {2048, 1024, 8, 16, {2}, true, false, "F 1024, every token K-1 kept (NG full batches + dropped tail)", 2},
+        {2048, 1536, 8, 12, {2}, true, false, "F 1536, every token K-1 kept (KB 8 full batch + dropped tail)", 2},
     };
     if (c.quick) dcases.resize(5);  // incl. the first id -1 case
     std::size_t runs_q = 0, dead_q = 0, runs_f = 0, dead_f = 0;
     Inv twin_q, twin_f, direct_q;
+    Inv direct_f;
     CpuAcc cpu_q, cpu_f;
+    // id -1 address check around one candidate run (no-op without an instrumented object)
+    auto negBegin = [&] {
+        if (!negp) return;
+        const std::uint32_t z = 0;
+        hip::upload(negp, &z, 4);
+    };
+    auto negEnd = [&](Cand& cd, bool drop, const char* what, int n) {
+        if (!negp) return;
+        std::uint32_t h = 0;
+        hip::download(&h, negp, 4);
+        if (drop) ++cd.neg_runs;
+        if (h == 0) return;
+        cd.neg_hits += h;
+        if (cd.first_neg.empty()) cd.first_neg = std::string(what) + " n " + std::to_string(n) + ": " + std::to_string(h) + " id -1 addresses";
+    };
     for (const DCase& cs : dcases) {
         const int E = cs.E, F = cs.F, K = cs.K, R = cs.R, nb = F / 32;
         const HostMat down = randomMat(c, QType::mxfp4, R * E, F);
@@ -431,25 +502,38 @@ void testMoeDown97(Ctx& c) {
                 if (cs.drop && skipaware) check(direct_q, runq(ship_dn), ship, cs.what, n, "direct", "compacted");
                 if (twin_dn && (!cs.drop || main_safe)) check(twin_q, runq(c.k.moe_down_mxw), ship, cs.what, n, "moe_down_mxfp4w", "_shipped");
                 if (!cs.drop || cand_safe)
-                    for (Cand& cd : dn) compare(cd, runq(cd.f), ship, cs.what, n);
+                    for (Cand& cd : dn) {
+                        negBegin();
+                        const std::vector<float> y = runq(cd.f);
+                        negEnd(cd, cs.drop != 0, cs.what, n);
+                        compare(cd, y, ship, cs.what, n);
+                    }
                 cpu(cpu_q, ship, true);
             }
             if (do_df && !cs.skip) {
                 const std::vector<float> ship = cs.drop ? compact(ship_df, false) : runf(ship_df);
                 ++runs_f;
                 if (sameBits(ship, x0)) ++dead_f;
-                // no direct id -1 run of the shipped moe_down_f_mxfp4: feat027 does not patch it (precise drops no expert)
+                // direct id -1 run of the shipped moe_down_f_mxfp4 only when it is the feat027-moeskip-r1 one (27bfb54 patches
+                // it, b8a041a does not; see df_skipaware). Precise / balance never produce -1 (r1 ignores the override there).
+                if (cs.drop && df_skipaware) check(direct_f, runf(ship_df), ship, cs.what, n, "direct", "compacted");
                 if (twin_df && (!cs.drop || main_safe)) check(twin_f, runf(c.k.moe_down_f[ti]), ship, cs.what, n, "moe_down_f_mxfp4", "_shipped");
                 if (!cs.drop || cand_safe)
-                    for (Cand& cd : df) compare(cd, runf(cd.f), ship, cs.what, n);
+                    for (Cand& cd : df) {
+                        negBegin();
+                        const std::vector<float> y = runf(cd.f);
+                        negEnd(cd, cs.drop != 0, cs.what, n);
+                        compare(cd, y, ship, cs.what, n);
+                    }
                 cpu(cpu_f, ship, false);
             }
         }
     }
-    const char* dsweep = "Ornith n 1..16, F 256/768/1024/1536/2560, K 1/3/6, E 2000, no shared, skip, id -1 tails";
+    const char* dsweep = "Ornith n 1..16, F 256/768/1024/1536/2560, K 1/3/6, E 2000, no shared, skip, id -1 tails, NG full + dropped tail";
     if (do_dn) {
         live(c, "moe_down_mxfp4w", runs_q, dead_q);
-        report(c, dn, "moe_down_mxfp4w", dsweep);
+        if (!neg_fault) report(c, dn, "moe_down_mxfp4w", dsweep);
+        if (negp) reportNeg(c, dn, neg_fault);
         reportCpu(c, "moedown97: reference moe_down_mxfp4w" + std::string(twin_dn ? "_shipped" : "") + " vs CPU (independent; kept slots, tol 1e-4)",
                   cpu_q, 1e-4, 1e-6);
         if (twin_dn) reportInv(c, "moedown97: moe_down_mxfp4w (tune-id build) == moe_down_mxfp4w_shipped, bitwise (id -1 cases vs the compacted _shipped)", twin_q);
@@ -457,10 +541,16 @@ void testMoeDown97(Ctx& c) {
     }
     if (do_df) {
         live(c, "moe_down_f_mxfp4", runs_f, dead_f);
-        report(c, df, "moe_down_f_mxfp4", dsweep);
+        if (!neg_fault) report(c, df, "moe_down_f_mxfp4", dsweep);
+        if (negp) reportNeg(c, df, neg_fault);
         reportCpu(c, "moedown97: reference moe_down_f_mxfp4" + std::string(twin_df ? "_shipped" : "") + " vs CPU (independent; kept slots, tol 1e-5)",
                   cpu_f, 1e-5, 1e-7);
         if (twin_df) reportInv(c, "moedown97: moe_down_f_mxfp4 (tune-id build) == moe_down_f_mxfp4_shipped, bitwise (id -1 cases vs the compacted _shipped)", twin_f);
+        if (df_skipaware)
+            reportInv(c, "moedown97: shipped moe_down_f_mxfp4 on id -1 tails == the compacted problem (moeskip-r1 merged)", direct_f);
+        else if (skipaware)
+            c.rep.skip("moedown97", "direct id -1 moe_down_f_mxfp4",
+                       "moeskip present but no moe_f_skipsafe_v1 (b8a041a does not patch moe_f.hip); WHIRL_KT_MD97_DF_DIRECT=1 once r1 is merged");
     }
 
     // ---------------- gate / up (moe_gu_mxfp4w)
@@ -530,7 +620,12 @@ void testMoeDown97(Ctx& c) {
                 if (cs.drop && skipaware) check(direct_g, run(ship_gu, ids), ship, cs.what, n, "direct", "reference");
                 if (twin_gu && (!cs.drop || main_safe)) check(twin_g, run(c.k.moe_gu_mxw, ids), ship, cs.what, n, "moe_gu_mxfp4w", "_shipped");
                 if (!cs.drop || cand_safe)
-                    for (Cand& cd : gu) compare(cd, run(cd.f, ids), ship, cs.what, n);
+                    for (Cand& cd : gu) {
+                        negBegin();
+                        const std::vector<float> y = run(cd.f, ids);
+                        negEnd(cd, cs.drop != 0, cs.what, n);
+                        compare(cd, y, ship, cs.what, n);
+                    }
                 if (!cs.skip) {  // independent CPU reference on a row subset of the kept slots
                     const std::vector<std::int8_t> xqh = xq.down<std::int8_t>(nh);
                     const std::vector<float> xdh = xd.down<float>(nh / 32);
@@ -557,7 +652,8 @@ void testMoeDown97(Ctx& c) {
             }
         }
         live(c, "moe_gu_mxfp4w", runs, dead);
-        report(c, gu, "moe_gu_mxfp4w", "Ornith n 1..16, C 768/2304/4096, ff 100, skip, id -1 tails");
+        if (!neg_fault) report(c, gu, "moe_gu_mxfp4w", "Ornith n 1..16, C 768/2304/4096, ff 100, skip, id -1 tails");
+        if (negp) reportNeg(c, gu, neg_fault);
         reportCpu(c, "moedown97: reference moe_gu_mxfp4w" + std::string(twin_gu ? "_shipped" : "") + " vs CPU (independent; kept slots, tol 1e-4)", cpu_g,
                   1e-4, 1e-6);
         if (twin_gu) reportInv(c, "moedown97: moe_gu_mxfp4w (tune-id build) == moe_gu_mxfp4w_shipped, bitwise (id -1 cases vs the masked _shipped)", twin_g);
