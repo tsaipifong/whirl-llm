@@ -427,6 +427,7 @@ constexpr EnvDoc k_env[] = {
     {"Numerics / speed switches (A/B tests; defaults are the tested paths)", "GV_GROUP=0", "no grouped same-input GEMV launches", C | B},
     {"Numerics / speed switches (A/B tests; defaults are the tested paths)", "GV_NMAX=N", "largest group of same-input GEMVs", C | B},
     {"Numerics / speed switches (A/B tests; defaults are the tested paths)", "MOE_BN=32|64", "grouped expert GEMM token tile", C | B | S},
+    {"Numerics / speed switches (A/B tests; defaults are the tested paths)", "ATTN_KGVAR=0|1|2", "gfx1201 f16 prefill attention variant: 0 shipped attn_kg, 1 attn_kgv (bitwise-equal), 2 attn_kgw (not bitwise; never taken in precise)", TUNED},
     {"Numerics / speed switches (A/B tests; defaults are the tested paths)", "DBG=BITS", "1 no gdn_abconv merge, 2 scalar split attention, 4 one query per attention group", C | B},
 
     {"Diagnostics", "TOKENIZE_ONLY=1", "print the prompt token ids and stop", C},

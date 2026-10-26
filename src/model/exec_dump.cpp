@@ -124,6 +124,7 @@ std::string execDump(const Model& m) {
     WD_U(attn_seg);
     WD_U(dq_rows);
     WD_B(attn_kg_on);
+    WD_U(attn_kg_var);
     WD_B(ffn_h16);
     WD_B(h16_dq);
     WD_B(out_h16);

@@ -485,6 +485,7 @@ PowerShell 中先用 `$env:WHIRL_MODE = "precise"` 設定再啟動程式。**一
 | `WHIRL_GEMMHQ=1` | attention 投影也用 f16 輸出的 GEMM |
 | `WHIRL_ATTN_KX=0` | prefill attention 不用 K-exchange kernel（位元相同） |
 | `WHIRL_ATTN_KG=0` | prefill attention 不用依 GQA 分組的 kernel（位元相同） |
+| `WHIRL_ATTN_KGVAR=0\|1\|2` | Radeon AI PRO R9700（gfx1201）f16 / Q8P prefill attention：0 = 原本的 `attn_kg`（預設）、1 = `attn_kgv`（一對 head 共用 V fragment，位元相同）、2 = `attn_kgw`（在 1 上再拆 softmax 的 row sum，**不**逐位元，只給 balance / fast，precise 一律不採用）。會記為 override，模式標籤變 `MODE+overrides` |
 | `WHIRL_ATTN_DQF=0` | q8 / q8h（與 q4）KV 的 prefill attention 直接讀量化快取（`attn_kg_q8`；Radeon 8060S 為 `attn_prefill_wmma_q8` / `_q4`），不先把序列的 key 轉成 f16 副本再跑 f16 kernel（位元相同） |
 | `WHIRL_ATTN_SEG=N` | Radeon 8060S：prefill attention 依每 N 個 key（256 的倍數）分段，段間帶 softmax 狀態（`attn_prefill_wmma_s`），f16 KV 也適用（位元相同；測試用旋鈕，端到端沒有加速） |
 | `WHIRL_GDN_SEQ=1` | DeltaNet prefill 改用逐步計算，不用分塊掃描 |

@@ -80,7 +80,7 @@ struct AttnPrefillFlags {
     // balance / fast only - refused when prec is set, then attn_kg). Falls back to attn_kg when the
     // variant is not in the code object.
     std::uint32_t attn_kg_var = 0;
-    bool prec = false;  // numerics precise mode (Model::prec_dec): only bit-identical variants
+    bool prec = false;  // numerics MODE precise (Model::prefillAttnFlags; not prec_dec): only bit-identical variants
 };
 // one launch of the plan: what it reads (the cache, or the dequantized copy of keys [r0, r1)) and its geometry
 struct AttnStep {

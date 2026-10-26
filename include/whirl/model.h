@@ -613,6 +613,7 @@ public:
     DevPtr dq_st_ml = 0;
     static constexpr std::uint32_t kDqMaxKeys = ops::kDqMaxKeys;  // dq_ptab covers keys [0, kDqMaxKeys)
     bool attn_kg_on = true;  // GQA-grouped prefill attention (f16 / q8 / q8h / q8v KV; WHIRL_ATTN_KG=0 off)
+    ops::AttnPrefillFlags prefillAttnFlags() const;  // selector flags; prec = numerics mode precise (not prec_dec)
     std::uint32_t attn_kg_var = 0;  // f16 attn_kg variant: 0 shipped, 1 attn_kgv (bit-identical), 2 attn_kgw (not precise); WHIRL_ATTN_KGVAR
     bool ffn_h16 = false;
     // KG-1: f16 outputs from quantized weights whatever the tuned choice (a fused quantized

@@ -674,6 +674,19 @@ void Model::attnBlock(const AttnW& a, const KvLayer& lkv, u32 n) {
 // WMMA prefill attention of n queries at positions pos0 .. (keys 0 .. pos0 + n - 1): the launches (head ranges,
 // key ranges, K / V dequant copies into ffn_g / ffn_u) come from ops::chooseAttnPrefill (K-3); here the KV
 // arguments are built (the cache, or the copy whose row r0 is row 0 of the range).
+// The prefill attention selector flags. `prec` is the numerics MODE (precise), not prec_dec: --precise with
+// WHIRL_Q8DEC=1 has prec_dec false, and attn_kgw (WHIRL_ATTN_KGVAR=2, not bit-identical) must still be refused.
+ops::AttnPrefillFlags Model::prefillAttnFlags() const {
+    ops::AttnPrefillFlags pf;
+    pf.attn_kg_on = attn_kg_on;
+    pf.attn_kg_var = attn_kg_var;
+    pf.prec = num_plan.mode == numerics::Mode::precise;
+    pf.attn_kx_on = attn_kx_on;
+    pf.attn_dqf_on = attn_dqf_on;
+    pf.attn_seg = attn_seg;
+    return pf;
+}
+
 void Model::prefillAttn(DevPtr q, const KvArgs& kva, DevPtr out, DevPtr pos, u32 n, u32 pos0, float scale) {
     ops::AttnPrefillProblem pp;
     pp.n = n;
@@ -686,13 +699,7 @@ void Model::prefillAttn(DevPtr q, const KvArgs& kva, DevPtr out, DevPtr pos, u32
     pp.dq_rows = dq_rows;
     pp.dq_ptab = dq_ptab != 0;
     pp.dq_st_ml = dq_st_ml != 0;
-    ops::AttnPrefillFlags pf;
-    pf.attn_kg_on = attn_kg_on;
-    pf.attn_kg_var = attn_kg_var;
-    pf.prec = prec_dec;
-    pf.attn_kx_on = attn_kx_on;
-    pf.attn_dqf_on = attn_dqf_on;
-    pf.attn_seg = attn_seg;
+    const ops::AttnPrefillFlags pf = prefillAttnFlags();
     const ops::AttnPrefillPlan pl = ops::chooseAttnPrefill(pp, pf, k);
     const i32 H = I(cfg.n_head), HKV = I(cfg.n_head_kv), QS = I(2 * cfg.head_dim);
     for (const ops::AttnStep& s : pl.steps) {
