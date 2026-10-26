@@ -19,8 +19,9 @@ All notable changes to WHIRL are listed here. Versions follow `project(whirl VER
   number silently), and so is a `WHIRL_GEMV_R` / `_W` / `_WH` list that does not parse (start-up goes on). Every
   runtime switch that is set is now listed as an override at start-up and in `GET /props`; the mode label shows
   `+overrides` only for the ones that can change output bits (`WHIRL_WIDE_VERIFY`, and `WHIRL_DRAFT_WINDOW` / `_MIN`
-  under relaxed acceptance), not for the bitwise-equal ones (`WHIRL_GEMV_R` / `_W` / `_WH`, `WHIRL_HEAD_CHUNK`,
-  `WHIRL_DQ4_DYN`, `WHIRL_GDN_V0`, `WHIRL_NO_GRAPH`). With none of these variables set nothing changes.
+  under relaxed acceptance), not for the ones classified bitwise (`WHIRL_GEMV_R` / `_W` / `_WH`, `WHIRL_HEAD_CHUNK`,
+  `WHIRL_DQ4_DYN`, `WHIRL_GDN_V0`, `WHIRL_NO_GRAPH`). That classification comes from reading the code and is pending
+  the GPU check G-r1 (bit-identical output with each switch set); until it passes, it is not a verified fact. With none of these variables set nothing changes.
 
 ### Removed
 
