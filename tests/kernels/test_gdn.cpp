@@ -12,6 +12,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include <algorithm>
+#include <cstdlib>
+#include <cstring>
+#include <string>
+#include <utility>
 
 #include "cpu_ref.h"
 
@@ -78,6 +82,47 @@ void deltaRef(const std::vector<float>& qkv, const std::vector<float>& g, const 
 }
 
 std::vector<double> toD(const std::vector<float>& v) { return std::vector<double>(v.begin(), v.end()); }
+
+// feat026-gdn-tests-r1 (progress/gdn-kernels.review.md consider 6): the cross-object hooks claim "same bits", so they
+// compare raw bytes (memcmp: -0 != +0, a NaN equals the same NaN bits); std::vector<float>::operator== is IEEE ==
+// (-0 == +0 passes, NaN != NaN false-fails). Same rule as kt::cmpExactBits and the gemm hooks.
+template <class T>
+bool sameBits(const std::vector<T>& a, const std::vector<T>& b) {
+    return a.size() == b.size() && (a.empty() || std::memcmp(a.data(), b.data(), a.size() * sizeof(T)) == 0);
+}
+template <class T>
+bool sameBits(const std::vector<std::vector<T>>& a, const std::vector<std::vector<T>>& b) {
+    if (a.size() != b.size()) return false;
+    for (std::size_t i = 0; i < a.size(); ++i)
+        if (!sameBits(a[i], b[i])) return false;
+    return true;
+}
+template <class A, class B>
+bool sameBits(const std::pair<A, B>& a, const std::pair<A, B>& b) {
+    return sameBits(a.first, b.first) && sameBits(a.second, b.second);
+}
+
+// feat026-gdn-tests-r1 (review act-on 2): kernel `kernel` of the WHIRL_KT_BD_HSACO candidate object. Env unset ->
+// nullptr and no row (the hook is not requested). Env set but the object cannot be read, or the kernel is absent from
+// it (wrong path / arch / renamed kernel), or the shipped kernel it is compared with is absent -> a FAILING row named
+// `row` (the same name the hook's own row has, so runners can count rows) and nullptr. Never a silent skip. A
+// candidate object of the wrong arch already throws in hipModuleLoadData (non-zero exit).
+[[maybe_unused]] hip::Function bdFn(Ctx& c, const char* kernel, const std::string& row, bool shipped_present = true) {
+    const char* path = std::getenv("WHIRL_KT_BD_HSACO");
+    if (path == nullptr || *path == 0) return nullptr;
+    const hip::Function f = xFn(c, "WHIRL_KT_BD_HSACO", kernel);
+    if (f != nullptr && shipped_present) return f;
+    Result r;
+    r.name = row;
+    r.kind = Kind::invariant;
+    r.n = 0;
+    r.pass = false;
+    r.note = f == nullptr ? std::string("WHIRL_KT_BD_HSACO is set but ") + kernel + " is not loadable from " + path +
+                                " (unreadable path, other object or kernel absent)"
+                          : "the shipped object lacks " + std::string(kernel) + " (or the mode this case needs)";
+    c.rep.add(r);
+    return nullptr;
+}
 
 Result tolRms(const std::string& name, const std::vector<float>& got, const std::vector<double>& ref, double rtol) {
     const std::vector<double> sc(ref.size(), rmsOf(ref));
@@ -351,15 +396,16 @@ void testGdn(Ctx& c) {
                 }
             }
             // feat026-barrierdrain: WHIRL_KT_BD_HSACO = a WHIRL_BARDRAIN candidate object: its gdn_sx_scan on the
-            // same prep output == this object's, bitwise (3 repeats); absent -> no result
-            if (const hip::Function xs = xFn(c, "WHIRL_KT_BD_HSACO", "gdn_sx_scan")) {
+            // same prep output == this object's, bitwise (3 repeats); env unset -> no row; set but not runnable -> a
+            // FAIL row (bdFn)
+            if (const hip::Function xs = bdFn(c, "gdn_sx_scan", "gdn_sx_scan candidate object == shipped (out + state, 3 runs)")) {
                 std::size_t xbad = 0;
                 for (int rep = 0; rep < 3; ++rep) {
                     Buf dst(state0), dout(out.size() * 4);
                     hip::launch(xs, {kNv, 1, 1}, {256, 1, 1}, 0, c.s, Qh.p(), Kh.p(), Vh.p(), dst.p(), dout.p(), dst.p(), T.p(), P.p(),
                                 Gb.p(), kNv, kNk, n, n32, kScale, DevPtr{0}, DevPtr{0}, DevPtr{0}, DevPtr{0}, 0.0f, false);
                     c.sync();
-                    xbad += dout.down<float>(out.size()) != o1 || dst.down<float>(st.size()) != s1;
+                    xbad += !sameBits(dout.down<float>(out.size()), o1) || !sameBits(dst.down<float>(st.size()), s1);
                 }
                 Result r;
                 r.name = "gdn_sx_scan candidate object == shipped (out + state, 3 runs)";
@@ -539,8 +585,9 @@ void testGdn(Ctx& c) {
             c.rep.add(r);
         }
         // feat026-barrierdrain: WHIRL_KT_BD_HSACO = a WHIRL_BARDRAIN candidate object: its gdn_step_norm on the
-        // segment == this object's (out, xq, xd, state, every snapshot), bitwise, 3 repeats; absent -> no result
-        if (const hip::Function xs = xFn(c, "WHIRL_KT_BD_HSACO", "gdn_step_norm")) {
+        // segment == this object's (out, xq, xd, state, every snapshot), bitwise, 3 repeats; env unset -> no row; set
+        // but not runnable -> a FAIL row (bdFn)
+        if (const hip::Function xs = bdFn(c, "gdn_step_norm", "gdn_step_norm candidate object == shipped (out, xq, xd, state, snapshots; 3 runs)")) {
             std::size_t xbad = 0;
             for (int rep = 0; rep < 3; ++rep) {
                 Buf st_x(state0), y_x(no * 4), q_x(no), d_x(no / 32 * 4);
@@ -554,11 +601,12 @@ void testGdn(Ctx& c) {
                 }
                 step(xs, sx, 1, y_x.p(), q_x.p(), d_x.p());
                 c.sync();
-                bool same = y_x.down<float>(no) == ya && q_x.down<std::int8_t>(no) == q_a.down<std::int8_t>(no) &&
-                            d_x.down<float>(no / 32) == d_a.down<float>(no / 32) &&
-                            st_x.down<float>(state0.size()) == st_a.down<float>(state0.size());
+                bool same = sameBits(y_x.down<float>(no), ya) && sameBits(q_x.down<std::int8_t>(no), q_a.down<std::int8_t>(no)) &&
+                            sameBits(d_x.down<float>(no / 32), d_a.down<float>(no / 32)) &&
+                            sameBits(st_x.down<float>(state0.size()), st_a.down<float>(state0.size()));
                 for (int t = 0; t < n; ++t)
-                    same = same && xsnap[static_cast<std::size_t>(t)].down<float>(state0.size()) == ssnap[static_cast<std::size_t>(t)].down<float>(state0.size());
+                    same = same && sameBits(xsnap[static_cast<std::size_t>(t)].down<float>(state0.size()),
+                                            ssnap[static_cast<std::size_t>(t)].down<float>(state0.size()));
                 xbad += !same;
             }
             Result r;
