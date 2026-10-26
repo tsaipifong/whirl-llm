@@ -824,6 +824,156 @@ try:
            not miss, (miss, sel, r["notes"][:3]))
     expect("pass6c block: member default from a named constant -> no file scope (other not selected)",
            "other" not in sel and not r.get("noid_lines"), (sel, r.get("noid_lines"), r["notes"][:3]))
+    # mt-p1 pass 7 (review6 A-1, rows.txt: 3fa73e5 attention.h:32 `std::uint32_t n = 1;`, 709d575 hip.h:136
+    # `bool ok = false;`, 54c4c6c `std::uint32_t lo = 0, hi = 0;`, ac7d33c `std::vector<float> lg;`): a row that spells
+    # its declared name, however short, is that declarator: its readers are selected by the declared-name rule, it is
+    # not an identifier-less row (no noid_lines, no file scope). Each fails on e8e495a (scratch/mt_p1_p7/before_*.txt)
+    for nm, old_, new_, rd in (("bool ok = false -> true", "    bool ok = false;\n", "    bool ok = true;\n", "ok"),
+                               ("std::uint32_t n = 1 -> 2", "    std::uint32_t n = 1;\n", "    std::uint32_t n = 2;\n", "n"),
+                               ("lo = 0, hi = 0 -> hi = 1", "    std::uint32_t lo = 0, hi = 0;\n", "    std::uint32_t lo = 0, hi = 1;\n", "hi"),
+                               ("member lg added (no initializer)", "", "    std::vector<float> lg;\n", "lg")):
+        SH7 = "#pragma once\nstruct St {\n    int keep_me = 0;\n%s};\n"
+        SC7 = ('#include "s.h"\nint readIt(const St& s) {\n  return int(s.%s);\n}\nint other() {\n  return 1;\n}\n' % rd)
+        r, miss, sel = probe({"src/s.h": SH7 % old_, "src/m.cpp": SC7}, {"src/s.h": SH7 % new_, "src/m.cpp": SC7},
+                             [("src/m.cpp", "readIt"), ("src/m.cpp", "other")], ["readIt"], {"src/s.h": ["src/m.cpp"]})
+        expect(f"pass7 short member {nm}: reader of St::{rd} selected", not miss, (miss, sel, r["notes"][:3]))
+        expect(f"pass7 block: short member {nm} -> not an identifier-less row, no file scope (other not selected)",
+               "other" not in sel and not r.get("noid_lines") and r.get("noid_named"),
+               (sel, r.get("noid_lines"), r.get("noid_named")))
+    # the data rows of a table stay identifier-less and fail closed (de40446 / b13854f / k_env shapes), even when the
+    # table's declared name is short: a row that does not spell it is not the declarator
+    T7 = "#pragma once\nstatic const int kt[] = {\n    1, 2,\n    %s,\n};\nint other();\n"
+    T7C = '#include "t.h"\nint readKt() {\n  return kt[3];\n}\nint other() {\n  return 1;\n}\n'
+    r, miss, sel = probe({"src/t.h": T7 % "3, 4", "src/m.cpp": T7C}, {"src/t.h": T7 % "3, 5", "src/m.cpp": T7C},
+                         [("src/m.cpp", "readKt"), ("src/m.cpp", "other")], ["readKt", "other"], {"src/t.h": ["src/m.cpp"]})
+    expect("pass7 data row of the short-named table kt (3, 4 -> 3, 5) -> reader + file scope (fails closed)",
+           not miss and r.get("noid_lines") and not r.get("noid_named"), (miss, sel, r.get("noid_lines"), r.get("noid_named")))
+    # only the names declared ON the row count: a data row spelling a short name declared on another line (n) is still
+    # an identifier-less row of kt
+    T7n = "#pragma once\nconstexpr int n = 4;\nstatic const int kt[] = {\n    1, 2,\n    n, %s,\n};\nint other();\n"
+    r, miss, sel = probe({"src/t.h": T7n % "4", "src/m.cpp": T7C}, {"src/t.h": T7n % "5", "src/m.cpp": T7C},
+                         [("src/m.cpp", "readKt"), ("src/m.cpp", "other")], ["readKt", "other"], {"src/t.h": ["src/m.cpp"]})
+    expect("pass7 data row `n, 4` -> `n, 5` of kt (n declared on another line) -> still identifier-less, file scope",
+           not miss and r.get("noid_lines") and not r.get("noid_named"), (miss, sel, r.get("noid_lines"), r.get("noid_named")))
+    # mt-p1 pass 8 (mut_p7 MISSED "declared names of the whole file, not of the row"): above, n's own line is unchanged,
+    # so n is not among the change's declarations and the mutant cannot tell. Here the same commit also changes n's
+    # declaration (n = 4 -> 5): n is now a declaration of the change, but on line 2, not on the data row (line 5), so
+    # the row must stay identifier-less (noid_lines, not noid_named) and fail closed to the file scope (other selected)
+    r, miss, sel = probe({"src/t.h": T7n % "4", "src/m.cpp": T7C},
+                         {"src/t.h": (T7n % "5").replace("n = 4;", "n = 5;"), "src/m.cpp": T7C},
+                         [("src/m.cpp", "readKt"), ("src/m.cpp", "other")], ["readKt", "other"], {"src/t.h": ["src/m.cpp"]})
+    row5 = [x for x in (r.get("noid_lines") or []) if x.startswith("src/t.h:5 ")]
+    named5 = [x for x in (r.get("noid_named") or []) if x.startswith("src/t.h:5 ")]
+    expect("pass8 data row `n, 4` -> `n, 5` with n's declaration changed too (n declared on line 2, not on the row) "
+           "-> row still identifier-less + file scope", not miss and row5 and not named5,
+           (miss, sel, r.get("noid_lines"), r.get("noid_named")))
+    # a closing line of the statement (`};` / `}();`, 8158dc3 device_profile.h:76 / :95, 703c666 launch_log.cpp:115):
+    # no value of its own; it stays an identifier-less row for validate (C-3, noid_lines / noid_at) but does not fail
+    # closed: a new table added with designated rows selects its readers only
+    # mt-p1 pass 9 (review p7p8 F1): the designated rows use a long field name (block_n): a short `.bn = 64,` is a
+    # data row that fails closed (designators are not declarators, see the pass9 tests below); with `.bn` this test
+    # passed only because the designator was wrongly taken as the declarator of bn
+    P7 = ("#pragma once\nstruct Pf {\n    int block_n;\n};\ninline constexpr Pf k_pa = {\n    .block_n = 32,\n};\n%sint other();\n")
+    P7N = "inline constexpr Pf k_pb = {\n    .block_n = 64,\n};\n"
+    P7C = '#include "p.h"\nint readPb() {\n  return k_pb.block_n;\n}\nint other() {\n  return 1;\n}\n'
+    r, miss, sel = probe({"src/p.h": P7 % "", "src/m.cpp": P7C}, {"src/p.h": P7 % P7N, "src/m.cpp": P7C},
+                         [("src/m.cpp", "readPb"), ("src/m.cpp", "other")], ["readPb"], {"src/p.h": ["src/m.cpp"]})
+    expect("pass7 table k_pb added (designated row + closing `};`) -> reader selected", not miss, (miss, sel, r["notes"][:3]))
+    expect("pass7 block: closing `};` -> noid_close (validate C-3 keeps it), no file scope (other not selected)",
+           "other" not in sel and r.get("noid_close") and r.get("noid_lines") and not
+           any("identifier-less initializer row" in w for v in r["paths"].values() for w in v),
+           (sel, r.get("noid_close"), r.get("noid_lines")))
+    # mt-p1 pass 9 (review p7p8 F1, probe P1): a designated data row with a SHORT field name in an existing table
+    # (`.bn = 32,` -> `.bn = 48,` of k_pa; pick() returns a reference to the table, viaPick reads it through pick):
+    # the designator names a member of Pf, it does not declare bn ([dcl.init.aggr]), so the row is an identifier-less
+    # data row: noid_lines (not noid_named) and the 0.2.4 file scope (viaPick + other selected). Fails on the pass 7/8
+    # tree (scratch/mt_p1_p9/before_p9.txt): only readPa selected, viaPick missed
+    P9F = ("#pragma once\nstruct Pf {\n    int bn;\n    int bm;\n};\ninline constexpr Pf k_pa = {\n    .bn = %s,\n"
+           "    .bm = 4,\n};\ninline const Pf& pick() { return k_pa; }\n")
+    P9FC = ('#include "p.h"\nint readPa() {\n  return k_pa.bm;\n}\nint viaPick() {\n  return pick().bm * 2;\n}\n'
+            'int other() {\n  return 1;\n}\n')
+    r, miss, sel = probe({"src/p.h": P9F % "32", "src/m.cpp": P9FC}, {"src/p.h": P9F % "48", "src/m.cpp": P9FC},
+                         [("src/m.cpp", "readPa"), ("src/m.cpp", "viaPick"), ("src/m.cpp", "other")],
+                         ["readPa", "viaPick", "other"], {"src/p.h": ["src/m.cpp"]})
+    expect("pass9 F1 designated short row `.bn = 32` -> 48 of k_pa -> data row, file scope (viaPick via pick() selected)",
+           not miss and r.get("noid_lines") and not r.get("noid_named"), (miss, sel, r.get("noid_lines"), r.get("noid_named")))
+    # control: a row that declares a short variable and also has a designator of the same spelling
+    # (`Pf bn = {.bn = 1};` declares the variable bn) stays the declarator (noid_named), its reader is selected
+    P9G = "#pragma once\nstruct Pf {\n    int bn;\n};\ninline constexpr Pf bn = {.bn = %s};\n"
+    P9GC = '#include "p.h"\nint readBn() {\n  return bn.bn;\n}\nint other() {\n  return 1;\n}\n'
+    r, miss, sel = probe({"src/p.h": P9G % "1", "src/m.cpp": P9GC}, {"src/p.h": P9G % "2", "src/m.cpp": P9GC},
+                         [("src/m.cpp", "readBn"), ("src/m.cpp", "other")], ["readBn"], {"src/p.h": ["src/m.cpp"]})
+    expect("pass9 F1 control `Pf bn = {.bn = 1}` -> 2: the variable bn is declared on the row -> noid_named, reader selected",
+           not miss and r.get("noid_named") and not r.get("noid_lines"), (miss, sel, r.get("noid_lines"), r.get("noid_named")))
+    # mt-p1 pass 9 (review p7p8 F2, probes P2 / P2L / P3 / P6 / P6L / P7): a value inside the braces of a single-line
+    # brace initializer / lambda changed; the statement text up to `{` is identical on both sides, so the old signature
+    # called it moved / re-indented and nothing was selected. The signature now includes the brace contents: the
+    # declared name's readers are selected. Each fails on the pass 7/8 tree (scratch/mt_p1_p9/before_p9.txt)
+    INC9 = {"src/p.h": ["src/m.cpp"]}
+    for nm, hdr, old_, new_, rdr in (
+            ("single-line kTable[] = {1, 2, 3} -> 4", "static const int kTable[] = {1, 2, %s};\n", "3", "4", "kTable[2]"),
+            ("single-line short kt[] = {1, 2, 3} -> 4", "static const int kt[] = {1, 2, %s};\n", "3", "4", "kt[2]"),
+            ("first line of a multi-line table kt[] = {1, 2, -> 9", "static const int kt[] = {1, %s,\n    3, 4};\n", "2", "9", "kt[1]"),
+            ("lambda body twice: arg * 2 -> 3", "inline auto twice = [](int arg) { return arg * %s; };\n", "2", "3", "twice(2)"),
+            ("short lambda f: a * 2 -> 3", "inline auto f = [](int a) { return a * %s; };\n", "2", "3", "f(2)"),
+            ("brace-init Pr p{1} -> {2}", "struct Pr { int v; };\ninline Pr p{%s};\n", "1", "2", "p.v"),
+            ('string table file_magic[8] = {"WHIRL01"} -> 02', 'inline const char file_magic[8] = {"WHIRL0%s"};\n', "1", "2", "file_magic[0]")):
+        H9 = "#pragma once\n" + hdr
+        C9 = '#include "p.h"\nint readIt() {\n  return int(%s);\n}\nint other() {\n  return 1;\n}\n' % rdr
+        r, miss, sel = probe({"src/p.h": H9 % old_, "src/m.cpp": C9}, {"src/p.h": H9 % new_, "src/m.cpp": C9},
+                             [("src/m.cpp", "readIt"), ("src/m.cpp", "other")], ["readIt"], INC9)
+        expect(f"pass9 F2 {nm} -> not a move, reader selected",
+               not miss and not any("moved / re-indented" in n for n in r["notes"]), (miss, sel, r["notes"][:3]))
+    # controls: identical brace contents re-spaced, or moved to another header that every includer also sees, are
+    # still a move (build only, readIt not selected); moved AND a value changed is not
+    C9 = '#include "p.h"\nint readIt() {\n  return kTable[2];\n}\nint other() {\n  return 1;\n}\n'
+    H9a = "#pragma once\nstatic const int kTable[] = {1, 2, 3};\nint keep();\n"
+    r, miss, sel = probe({"src/p.h": H9a, "src/m.cpp": C9}, {"src/p.h": H9a.replace("{1, 2, 3}", "{1,  2,   3}"), "src/m.cpp": C9},
+                         [("src/m.cpp", "readIt"), ("src/m.cpp", "other")], [], INC9)
+    expect("pass9 F2 control: single-line table with re-spaced brace contents -> still a move (nothing selected)",
+           not sel and any("moved / re-indented" in n for n in r["notes"]), (sel, r["notes"][:3]))
+    Q9a = ('#pragma once\n#include "q.h"\nstatic const int kTable[] = {1, 2, 3};\n', "#pragma once\nint keep();\n")
+    Q9b = ('#pragma once\n#include "q.h"\n', "#pragma once\nint keep();\nstatic const int kTable[] = {1, 2, 3};\n")
+    INCQ = {"src/p.h": ["src/m.cpp"], "src/q.h": ["src/p.h", "src/m.cpp"]}
+    r, miss, sel = probe({"src/p.h": Q9a[0], "src/q.h": Q9a[1], "src/m.cpp": C9}, {"src/p.h": Q9b[0], "src/q.h": Q9b[1], "src/m.cpp": C9},
+                         [("src/m.cpp", "readIt"), ("src/m.cpp", "other")], [], INCQ)
+    expect("pass9 F2 control: single-line table moved p.h -> q.h (q.h included by p.h), same contents -> still a move",
+           "readIt" not in sel and any("moved / re-indented" in n for n in r["notes"]), (sel, r["notes"][:3]))
+    r, miss, sel = probe({"src/p.h": Q9a[0], "src/q.h": Q9a[1], "src/m.cpp": C9},
+                         {"src/p.h": Q9b[0], "src/q.h": Q9b[1].replace("2, 3}", "2, 4}"), "src/m.cpp": C9},
+                         [("src/m.cpp", "readIt"), ("src/m.cpp", "other")], ["readIt"], INCQ)
+    expect("pass9 F2 moved p.h -> q.h AND a value changed (3 -> 4) -> not a move, reader selected", not miss, (miss, sel, r["notes"][:3]))
+    # mt-p1 pass 7 (review6 A-2, probe R6-1m): an enumerator of an UNSCOPED enum is declared in the enclosing scope; a TU
+    # that newly sees it and spells the ENUMERATOR's name (not the type name) changes meaning (v.cpp's unqualified
+    # kTile now finds w::kTile = 32 instead of ::kTile = 16): not a move. enum class needs Mode::, so it stays a move
+    B7 = "#pragma once\nconstexpr int kTile = 16;\n"
+    A7b = "#pragma once\nnamespace w {\n}\n"
+    C7a = "#pragma once\nnamespace w {\nint more();\n}\n"
+    U7 = '#include "a.h"\n#include "c.h"\nnamespace w {\nint useU() {\n  return kTile;\n}\n}\n'
+    V7 = '#include "b.h"\n#include "c.h"\nnamespace w {\nint useV() {\n  return kTile;\n}\n}\n'
+    A7m = "#pragma once\nnamespace w {\nenum Mode {\n    kTile = 32,\n};\n}\n"
+    C7m = "#pragma once\nnamespace w {\nint more();\nenum Mode {\n    kTile = 32,\n};\n}\n"
+    INC7 = {"src/b.h": ["src/v.cpp"], "src/a.h": ["src/u.cpp"], "src/c.h": ["src/u.cpp", "src/v.cpp"]}
+    for nm, rep in (("enum Mode", "enum Mode"), ("enum Mode : int (release.h:17 shape)", "enum Mode : int")):
+        r, miss, sel = probe({"src/b.h": B7, "src/a.h": A7m.replace("enum Mode", rep), "src/c.h": C7a, "src/u.cpp": U7, "src/v.cpp": V7},
+                             {"src/b.h": B7, "src/a.h": A7b, "src/c.h": C7m.replace("enum Mode", rep), "src/u.cpp": U7, "src/v.cpp": V7},
+                             FNW6, ["useV"], INC7)
+        expect(f"pass7 R6-1m multi-line unscoped {nm} a.h -> c.h, v.cpp spells only kTile -> useV selected",
+               not miss, (miss, sel, r["notes"][:3]))
+    for nm, rep in (("enum class Mode", "enum class Mode"), ("enum struct Mode", "enum struct Mode")):
+        r, miss, sel = probe({"src/b.h": B7, "src/a.h": A7m.replace("enum Mode", rep), "src/c.h": C7a, "src/u.cpp": U7, "src/v.cpp": V7},
+                             {"src/b.h": B7, "src/a.h": A7b, "src/c.h": C7m.replace("enum Mode", rep), "src/u.cpp": U7, "src/v.cpp": V7},
+                             FNW6, [], INC7)
+        expect(f"pass7 block: R6-1s multi-line {nm} moved, v.cpp never names Mode -> still a move",
+               not sel and any("moved / re-indented" in n for n in r["notes"] if n.startswith("src/c.h")), (sel, r["notes"][:4]))
+    for sc, want in (((("ns:namespace w", "enum:enum Mode"), (), "kT = 1,"), True),
+                     ((("enum:enum Exit : int",), (), "kOk = 0,"), True),
+                     ((("enum:typedef enum",), (), "kA = 1,"), True),
+                     ((("class:struct S", "enum:enum"), (), "kB = 2,"), True),
+                     ((("ns:namespace w", "enum:enum class Mode"), (), "kT = 1,"), False),
+                     ((("enum:enum struct Mode : unsigned",), (), "kT = 1,"), False)):
+        expect(f"pass7 unscoped_enum({sc[0][-1]}) == {want}",
+               impact.unscoped_enum({"name": "k", "cls": "E", "what": "enumerator", "sig": sc}) == want)
 finally:
     impact.show = real
     if real_tree is not None:

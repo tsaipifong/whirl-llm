@@ -292,5 +292,25 @@ fn6b, ln6b, en6b, _ = validate.classify_narrowed(_nar6b, {k: {"decl": []} for k 
 expect("pass6b c80b27a shape: verified declaration continuation = R-decl (pass), named in the report",
        "ccccc6b" in en6b and any("ccccc6b" in x and "R-decl" in x and "continuation" in x for x in ln6b), ln6b)
 expect("pass6b block: unverified continuation stays identifier-less -> R-init-noid, failing", "ddddd6b" in fn6b, ln6b)
+# mt-p1 pass 8: a finished-replay input that is missing (pass 7: rp7_p7_hold.json after its replay TIMEOUT) -> INCOMPLETE,
+# exit 2, the missing path named; never a traceback, never "ok"
+import contextlib as _cl  # noqa: E402
+import io as _io  # noqa: E402
+_tmpd = _tf.mkdtemp(prefix="vt_p8_")
+_have = os.path.join(_tmpd, "have.json")
+open(_have, "w", encoding="utf-8").write("{}")
+_gone = os.path.join(_tmpd, "gone.json")
+for _nm, _argv in (("--pass-json THIS missing", ["--pass-json", _have, _gone]),
+                   ("--pass-json EARLIER missing", ["--pass-json", _gone, _have]),
+                   ("--baseline --new-json missing", ["--no-history", "--baseline", "0e35407", "--base-json", _have, "--new-json", _gone])):
+    _buf = _io.StringIO()
+    with _cl.redirect_stdout(_buf):
+        try:
+            _rc = validate.main(_argv)
+        except Exception as _e:  # noqa: BLE001
+            _rc = repr(_e)
+    expect(f"pass8 {_nm} -> validate INCOMPLETE, exit 2, path named",
+           _rc == 2 and "validate: INCOMPLETE" in _buf.getvalue() and _gone in _buf.getvalue(), (_rc, _buf.getvalue()[-300:]))
+validate.shutil.rmtree(_tmpd, ignore_errors=True)
 print(f"validate test: {ok}/{ok + bad} ok")
 sys.exit(1 if bad else 0)

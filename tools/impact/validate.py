@@ -471,7 +471,9 @@ RULES = {
                    "0.2.4 reached it through its file-scope fallback over the row; inspect by hand. Pass 6b: impact "
                    "now fails closed to the file scope on an identifier-less initializer row itself, and an identifier-"
                    "less continuation line of a function / alias / type declaration (re-checked by cont_ok) is not "
-                   "such a row: it belongs to that declaration (R-decl)",
+                   "such a row: it belongs to that declaration (R-decl). Pass 7: a row that spells a name it declares "
+                   "(any length: bool ok = false;) is not such a row; a closing line (}, };, }();) stays one here but "
+                   "does not fail closed in impact",
 }
 
 
@@ -779,7 +781,7 @@ def compare_passes(b, w, m=None):
     return fails, lines, expl
 
 
-def main():
+def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--cases", action="store_true")
     ap.add_argument("--history", type=int, default=0)
@@ -795,8 +797,14 @@ def main():
     ap.add_argument("--pass-json", nargs=2, metavar=("EARLIER", "THIS"),
                     help="mt-p1 pass 4b: pass-to-pass check of two replay.py outputs on the same tree (--rev: map for the "
                          "path check); every LESS must be R-fallback-resolved")
-    a = ap.parse_args()
+    a = ap.parse_args(argv)
     bad = []
+    # mt-p1 pass 8: a finished-replay input that does not exist (its replay timed out, pass 7 rp7_p7_hold) is not a
+    # comparison result: say INCOMPLETE and which file, exit 2 (as run_baseline's replay failure), never a traceback
+    missing = [p for p in (list(a.pass_json or []) + [a.base_json, a.new_json]) if p and not os.path.isfile(p)]
+    if missing:
+        print(f"validate: INCOMPLETE (input missing: {', '.join(missing)})")
+        return 2
     if a.pass_json:
         b = json.load(open(a.pass_json[0], encoding="utf-8"))
         w = json.load(open(a.pass_json[1], encoding="utf-8"))
@@ -804,7 +812,7 @@ def main():
         for ln in lines:
             print(ln)
         if fails:
-            bad.append(f"passes: {len(fails)} commit(s) select less, not a resolved file-scope fallback: {', '.join(fails[:6])}")
+            bad.append(f"passes: {len(fails)} commit(s) select less, not a resolved file-scope fallback: {', '.join(fails)}")
         for x in bad:
             print(f"validate: FAIL {x}")
         print("validate: " + ("ok" if not bad else f"FAIL ({len(bad)})"))

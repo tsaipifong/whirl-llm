@@ -179,6 +179,16 @@ def gains_meaning(x):
     return bool(x.get("sig")) and "template<>" in re.sub(r"\s+", "", str(x["sig"]))
 
 
+def unscoped_enum(x):
+    """mt-p1 pass 7 (review6 A-2): the enumerator x belongs to an unscoped enumeration (`enum E`, `enum E : int`,
+    nameless `enum`, `typedef enum`), not to `enum class` / `enum struct`: read from the innermost enum frame of its
+    full scope (declscan sig[0]); no enum frame found -> unscoped (fail closed: its name is searched too)"""
+    sig = x.get("sig")
+    scope = sig[0] if isinstance(sig, (tuple, list)) and sig and isinstance(sig[0], (tuple, list)) else ()
+    fr = [str(f) for f in scope if str(f).startswith("enum:")]
+    return not (fr and re.match(r"enum:(?:typedef\s+)?enum\s+(?:class|struct)\b", fr[-1]))
+
+
 def parse_diff(diff):
     """unified diff (-U0) -> {path: {"new": [lines], "old": [lines], "old_path": p, "status": ...}}"""
     files = {}
@@ -257,6 +267,8 @@ def analyze(changes, m, new_rev, old_rev, legacy=()):
     noid_lines = []             # mt-p1 pass 4 (REVIEW3 act-on 2): changed declaration lines with no identifier (table rows)
     noid_at = []                # the same as (path, side, line): validate.attribute re-runs without them (pass 5, A3)
     decl_cont = []              # pass 6b: identifier-less continuation lines of a function / alias / type declaration
+    noid_named = []             # pass 7: rows with no identifier > 2 chars that spell their declared name (not noid)
+    noid_close = []             # pass 7: identifier-less closing lines (`};`): noid for validate, no file-scope fallback
     test_steps = set()          # release steps of test executables whose sources changed
     side_tus = {}               # mt-p1 pass 5: "old" / "new" -> (file -> translation units that see it, source)
     users_by_file = {}          # mt-p1 pass 5 (review4 C1): changed file -> the user functions its declarations selected
@@ -288,6 +300,10 @@ def analyze(changes, m, new_rev, old_rev, legacy=()):
             names = set(str(x["cls"]).split("::"))
         else:
             names = {str(x["name"]).split("::")[-1]}
+        if x["what"] == "enumerator" and unscoped_enum(x):
+            # mt-p1 pass 7 (review6 A-2 / R6-1m): an unscoped enumerator is declared in the ENCLOSING scope
+            # (cppreference "Enumeration declaration"): a TU reaches it by its own name, not through the type name
+            names.add(str(x["name"]).split("::")[-1])
         mt = re.search(r"\b(?:struct|class|union)\s+(\w+)\s*<", str(x.get("sig") or ""))
         if mt:
             names.add(mt.group(1))
@@ -441,6 +457,17 @@ def analyze(changes, m, new_rev, old_rev, legacy=()):
             # mt-p1 pass 5 (review4 R4-9 / R4-17): a #define line (blanked by blank_code) declares its macro name: not
             # an identifier-less row
             if whats and "macro" not in whats and not [x for x in re.findall(r"[A-Za-z_]\w*", txt) if len(x) > 2 and x not in DECL_NOISE]:
+                # mt-p1 pass 7 (review6 A-1): a row that spells a name it declares (any length: `bool ok = false;`,
+                # `std::uint32_t n = 1;`, `std::vector<float> lg;`) is that declarator, not an identifier-less row:
+                # the declared-name rule selects its users (as validate.cont_ok checks the spelling)
+                # mt-p1 pass 9 (review p7p8 F1): a designator `.bn = 32,` names a member of the table's type (C++20
+                # [dcl.init.aggr]: it "shall name a direct non-static data member"), it does not declare one: the row
+                # is a data row of the table and fails closed below, it is not the declarator of bn
+                here = {str(x["name"]).split("::")[-1] for x in fc["decls"]
+                        if x["side"] == side and x["line"] == ln and x["what"] != "field"}
+                if any(re.search(rf"\b{re.escape(n)}\b", txt) for n in here if re.fullmatch(r"[A-Za-z_]\w*", n)):
+                    noid_named.append(f"{path}:{ln} ({side})")
+                    continue
                 # mt-p1 pass 6b: the row is a continuation line of a multi-line statement; declscan gives the
                 # statement's declared name(s) (as clang's Decl source range covers the whole statement).
                 # - only function / alias / type declarations (a wrapped parameter list, c80b27a vision.h:133): the
@@ -455,7 +482,12 @@ def analyze(changes, m, new_rev, old_rev, legacy=()):
                 else:
                     noid_lines.append(f"{path}:{ln} ({side})")
                     noid_at.append((path, side, ln))
-                    if any(x["side"] == side and x["line"] == ln and x["what"] in ("variable", "member", "field") for x in decls):
+                    # mt-p1 pass 7 (review6 A-1): a closing line of the statement (`}` / `};` / `}();`) carries no
+                    # value: it stays an identifier-less row for validate (C-3) but does not fail closed to the file
+                    # scope (the statement's declared names select its readers)
+                    if re.fullmatch(r"\s*\}\s*(?:\(\s*\))?\s*;?\s*", txt):
+                        noid_close.append(f"{path}:{ln} ({side})")
+                    elif any(x["side"] == side and x["line"] == ln and x["what"] in ("variable", "member", "field") for x in decls):
                         noid_data.append(f"{side}:{ln} identifier-less initializer row of "
                                          f"{', '.join(sorted({x['name'] for x in decls if x['side'] == side and x['line'] == ln}))}")
         if "ids" in legacy:
@@ -643,6 +675,8 @@ def analyze(changes, m, new_rev, old_rev, legacy=()):
     rep["noid_lines"] = noid_lines
     rep["noid_at"] = noid_at
     rep["decl_cont"] = decl_cont
+    rep["noid_named"] = noid_named
+    rep["noid_close"] = noid_close
     rep["decl_users"] = users_by_file
     rep["paths_by_file"] = {f: sorted(v) for f, v in sorted(owned.items())}
     rep["map_defects"] = defects

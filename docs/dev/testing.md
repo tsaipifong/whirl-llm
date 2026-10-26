@@ -133,7 +133,9 @@ select fewer release steps or paths. `--skip N` reports on older commits the too
 (hold-out). A touched test that no executable of the map registers counts as missed (UNPAIRED), so a test
 executable missing from the map cannot shrink the denominator. "Not narrower than the old tools" is a
 regression check only, not GPU recall: what the old map missed, the new one may miss too. Exit 0 = every
-named case hit, every rate >= 95 %, nothing narrowed; 1 otherwise. A changed host function that dispatches
+named case hit, every rate >= 95 %, nothing narrowed; 1 otherwise; 2 = no result (a replay failed, or a
+finished-replay file given with `--base-json` / `--new-json` / `--pass-json` does not exist: `validate: INCOMPLETE`
+names it). A changed host function that dispatches
 kernels (a host user of a `.hip` file) lists those kernels' tests (kernel-test functions, `kt_full`).
 
 A changed line outside any function (measure-tools P1, `tools/impact/declscan.py`) selects the users of the
@@ -143,13 +145,16 @@ A declaration that appears unchanged in another file on the other side of the di
 selects nothing. "Unchanged" means the same statement in the same full scope (namespace path, enclosing class
 headers with template specialisation arguments, the `#if` branch; include guards ignored), vanishing from one
 side and appearing on the other the same number of times, so swapping values between `#if` branches,
-specialisations, nested classes or headers is a change. A move to another file is a move only when every
+specialisations, nested classes or headers is a change; a statement that opens braces (`kTable[] = {1, 2, 3};`,
+a lambda, `Pr p{1};`, a function body) includes the brace contents, so a value changed inside them is a change
+(only whitespace is ignored). A move to another file is a move only when every
 translation unit that saw the statement still sees it (the old file itself when it is a `.cpp`; each side from its
 own revision's `#include` lines, so a deleted / split header or an `#include` switched in the same commit counts),
 and, for macros, namespace-scope function overloads / operators and explicit specialisations, no translation unit
 newly sees it (the ccache direct-mode false-hit direction). Any other kind (type, partial specialisation,
 using-declaration, namespace constant) newly seen by a translation unit is a change when that unit, or a file it
-reads, spells the declared name (for a member: its class) outside comments and strings; a unit added by the same
+reads, spells the declared name (for a member: its class; for an enumerator of an unscoped `enum`, which is declared
+in the enclosing scope, also the enumerator's own name) outside comments and strings; a unit added by the same
 commit, or one that never names it, keeps it a move. The users of a
 changed header are searched in its includers of both trees. A reorder inside one struct / enum, a reorder at
 namespace scope of one file (two-phase lookup, initialisation order), an enumerator inserted or removed before
@@ -168,7 +173,11 @@ on purpose, `--baseline` accepts a narrowed commit only when every GPU step it l
 parameter, initializer reference or qualifier (`impact.analyze(..., legacy=...)`, validate.py `RULES`; a step that
 comes back only with an identifier-less row such as `{64, 64, 256},` in the diff, or that such rows bring back on
 their own, is `R-init-noid`, failing; impact.py itself selects the readers of the table such a row belongs to and,
-as 0.2.4 did, every path of the file, because the row's value leaves the readers as data; an identifier-less
+as 0.2.4 did, every path of the file, because the row's value leaves the readers as data; a row that spells a
+name it declares, however short (`bool ok = false;`), is that declarator, not such a row (a designator
+`.bn = 32,` names a member, it declares nothing: such a row is a data row), and a closing line of
+the statement (`}`, `};`, `}();`) has no value of its own: it stays such a row for validate.py but does not fall
+back to the whole file; an identifier-less
 continuation line of a wrapped function / alias / type declaration belongs to that declaration, selects its users
 and counts as `R-decl` once validate.py has re-checked it on the source), and it
 loses no step its ground truth needed; `--exclude-tuned` leaves the commits the rules were tuned on out (`--arch024`: the GPU checks each arch024 step ran; `RANGE_CASES`:

@@ -19,6 +19,7 @@ never selection). Text scanner (stdlib only), like cxxscan; it over-approximates
 from __future__ import annotations
 
 import bisect
+import hashlib
 import re
 
 import cxxscan
@@ -436,8 +437,18 @@ def declared(src: str, line: int) -> dict:
             # headers with their specialisation arguments, the #if branch): an identical signature on the other side of
             # the diff = moved / unchanged. "at" = the statement's offset (one statement over several changed lines)
             sline = bisect.bisect_right(starts, p + len(clean[p:q]) - len(clean[p:q].lstrip()))
+            # mt-p1 pass 9 (review p7p8 F2): a statement that opens a brace initializer / lambda / function body
+            # (`kTable[] = {1, 2, 3};`, `auto f = [](int a) { ... };`, `Pr p{1};`, the first line of a multi-line
+            # table) carries its value inside the braces: the signature includes the brace contents (raw text, so
+            # string literals count; whitespace normalised so a re-indent is still a move; a comment edit inside is
+            # a change, the safe direction). Class / namespace / enum bodies are scanned line by line instead
+            body = ""
+            if term == "{" and _classify(stmt, list(frames)) in ("init", "func"):
+                end = match.get(q)
+                raw = src[q:end + 1] if end is not None else src[q:]
+                body = "#" + hashlib.sha1(" ".join(raw.split()).encode("utf-8", "surrogatepass")).hexdigest()[:16]
             for x in ds:
-                x["sig"] = (_scope_key(frames), cond_stack(src).get(sline, ()), " ".join(stmt.split()) + term)
+                x["sig"] = (_scope_key(frames), cond_stack(src).get(sline, ()), " ".join(stmt.split()) + term + body)
                 x["at"] = p
             if term == "{" and kd == "decl" and ds and ds[0]["what"] == "type":
                 ds[0]["cls"] = None
