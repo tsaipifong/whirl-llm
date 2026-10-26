@@ -73,6 +73,8 @@ struct MockConfig {
     // restoreSeqSnapshot(s, j) rolls it back to snapshot set j. Sets are allocated lazily by a verify
     // that needs them (like Model::verifyBatchEnqueue) or up front by ensureSnapshots.
     bool replay = true;
+    // arch025-mutgap: false = no fused decode (the engine limits the MTP draft count to 1, like a model without the fused kernels)
+    bool fused = true;
     // arch024-S0a (KvArr copy pin, PLAN M3 / A1 / C8): extra pool arrays per attention layer (and MTP) after K and V,
     // with these row bytes, in kvArrays() order K, V, extra...: none = f16-shaped (K, V), two = q8h / q4-shaped (K, V,
     // K scales, V scales). The mock never reads them; the engine copies, spills and restores them like the real ones.
@@ -102,7 +104,7 @@ public:
     std::uint32_t snapSets() const override { return mc_.replay ? 0 : snap_sets_; }
     void ensureSnapshots(std::uint32_t n) override;
     bool gdnReplay() const override { return mc_.replay; }
-    bool fusedDecode() const override { return true; }
+    bool fusedDecode() const override { return mc_.fused; }
     bool canSegment() const override { return true; }
     std::vector<server::KvArr> kvArrays() const override;
     // v0.2.2.2 memory governor: new pool arrays (the old rows are gone: a stale page table or a restore into the old
@@ -162,6 +164,8 @@ public:
     std::uint64_t rowsRun() const { return rows_run_; }
     // most rows of one prefill forward so far (like Model::forward, more than max_batch throws BatchTooLarge)
     std::uint32_t maxPrefillRows() const { return max_pf_rows_.load(); }
+    // arch025-mutgap: most draft rows of one verify segment so far (the per-slot draft count the engine asked for)
+    std::uint32_t maxSegDrafts() const { return max_seg_nd_.load(); }
 
 private:
     void prefillRows(std::size_t n);
@@ -229,6 +233,7 @@ private:
     mutable std::atomic<std::uint64_t> poison_{0};
     std::atomic<std::uint32_t> resizes_{0};
     std::atomic<std::uint32_t> max_pf_rows_{0};
+    std::atomic<std::uint32_t> max_seg_nd_{0};
     mutable std::atomic<std::uint64_t> hid_mismatch_{0};
     std::uint64_t rows_run_ = 0;
     std::vector<std::uint32_t> seg_logits_rows_;

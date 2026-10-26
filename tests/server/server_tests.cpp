@@ -2533,6 +2533,11 @@ void testSlotDraftSplit() {
         {{0.95f, 0.6f, 0.2f}, 2, 6, 3, {3, 2, 1}},  // the cap binds the receiver
         {{0.95f, 0.6f, 0.2f}, 2, 12, 8, {8, 3, 1}},
         {{0.3f, 0.3f}, 2, 16, 8, {2, 2}},         // spare rows but every next draft is below the 0.35 bar
+        // arch025-mutgap: the 0.35 bar of a spare row, from both sides (next marginal a^2 for nd 1; split_sim.py)
+        {{0.55f, 0.55f}, 1, 16, 8, {1, 1}},       // 0.3025 < 0.35: no spare row
+        {{0.59f, 0.59f}, 1, 16, 8, {1, 1}},       // 0.3481 < 0.35: still none
+        {{0.6f, 0.6f}, 1, 16, 8, {2, 2}},         // 0.36 > 0.35: both grow into the spare rows
+        {{0.6f, 0.3f}, 1, 16, 8, {2, 1}},         // only the slot whose next draft clears the bar
     };
     for (const Case& c : cases) {
         std::vector<qwen35::DraftAccept> acc;
@@ -2573,6 +2578,73 @@ void testSlotDraftCap() {
     CHECK_EQ(slotDraftCap(3, 3, true, false, 16, 64), 0u);  // 16 x 1 > 15
     CHECK_EQ(slotDraftCap(10, 10, true, true, 1, 11), 10u); // the most drafts: 11 verify rows
     CHECK_EQ(slotDraftCap(10, 10, true, true, 1, 10), 9u);
+}
+
+// arch025-mutgap: the engine's use of the draft cap (Engine::draftCap / pickDrafts / splitDrafts), observed through the
+// mock's largest verify segment (maxSegDrafts) and the "trace | cycle .. | slots A | nd N" lines.
+// (fused decode, replay) -> fixed MTP draft count with n_draft 4 and batch_drafts[1] 8: (yes, no) 4 (A * nd <= 15 holds);
+// (no, yes) 1 (no fused decode: one draft); (yes, yes) 4. The swapped arguments of draftCap, or a pickDrafts without the
+// shared clamp, give 1 / 4 / 4 or 4 / 4 / 4 instead.
+void testSlotDraftEngineCaps() {
+    const auto traceMax = [](const char* key) {
+        std::uint32_t mx = 0;
+        std::lock_guard<std::mutex> lk(g_log.mu);
+        for (const auto& l : g_log.lines) {
+            if (l.find("trace | cycle") == std::string::npos) continue;
+            const std::size_t a = l.find(key);
+            if (a != std::string::npos) mx = std::max(mx, static_cast<std::uint32_t>(std::strtoul(l.c_str() + a + std::strlen(key), nullptr, 10)));
+        }
+        return mx;
+    };
+    struct C {
+        bool fused, replay;
+        std::uint32_t want;
+    };
+    for (const C c : {C{true, false, 4}, C{false, true, 1}, C{true, true, 4}}) {
+        ServerSetup su = baseSetup(true);
+        su.mc.parallel = 1;
+        su.mc.fused = c.fused;
+        su.mc.replay = c.replay;
+        su.eo.mtp_auto = false;
+        su.eo.ngram = false;
+        su.eo.trace_nd = true;
+        TestServer srv(su);
+        g_log.clear();
+        // without replay the engine drafts only into snapshot sets that exist (snap_cap = min(15, snapSets()), engine.cpp:1392); the
+        // server allocates them at start-up (server_main), the mock lazily: allocate them here, else this case has 0 drafts
+        if (!c.replay) srv.model().ensureSnapshots(qwen35::gdn_max_snap);
+        const auto p = makePrompt(300, 77);
+        auto r = srv.post("/v1/completions", completionBody(p, 96));
+        CHECK_EQ(completionText(r), decode(srv.model().greedyReference(p, 96, true)));
+        CHECK_EQ(traceMax("| nd "), c.want);
+        CHECK_EQ(srv.model().maxSegDrafts(), c.want);
+        CHECK_EQ(srv.model().poison(), 0u);
+    }
+    // WHIRL_SLOT_DRAFTS=1 (marginal-gain swaps), two slots with perfect drafts, --draft-max 2: spare verify rows are
+    // plentiful, but no slot may be given more than n_draft drafts
+    {
+        ServerSetup su = baseSetup(true);
+        su.mc.parallel = 2;
+        su.mc.draft_miss = 0.0;
+        su.eo.n_draft = 2;
+        su.eo.slot_drafts = 1;
+        su.eo.mtp_auto = true;
+        su.eo.ngram = false;
+        su.eo.trace_nd = true;
+        TestServer srv(su);
+        g_log.clear();
+        std::vector<std::vector<std::uint32_t>> prompts = {makePrompt(300, 91), makePrompt(300, 92)};
+        std::vector<std::string> got(2);
+        std::vector<std::thread> th;
+        for (std::size_t i = 0; i < 2; ++i)
+            th.emplace_back([&, i] { got[i] = completionText(srv.post("/v1/completions", completionBody(prompts[i], 200))); });
+        for (auto& t : th) t.join();
+        for (std::size_t i = 0; i < 2; ++i) CHECK_EQ(got[i], decode(srv.model().greedyReference(prompts[i], 200, true)));
+        CHECK_EQ(traceMax("| slots "), 2u);  // the two slots really decoded together (else the split never ran)
+        CHECK(srv.model().maxSegDrafts() >= 1);
+        CHECK(srv.model().maxSegDrafts() <= 2);
+        CHECK_EQ(srv.model().poison(), 0u);
+    }
 }
 
 // WHIRL_SLOT_DRAFTS=2 with one decoding slot: the same draft count every cycle as without it
@@ -8112,6 +8184,7 @@ int main(int argc, char** argv) {
         {"slot_draft_plan", testSlotDraftPlan},
         {"slot_draft_split", testSlotDraftSplit},
         {"slot_draft_cap", testSlotDraftCap},
+        {"slot_draft_engine_caps", testSlotDraftEngineCaps},  // arch025-mutgap
         {"slot_drafts_one_slot", testSlotDraftsOneSlot},
         {"concurrency_slot2", [] { testConcurrency(4, 12, true, 0, 2); }},
         {"concurrency_slot2_c2", [] { testConcurrency(2, 8, true, 0, 2); }},

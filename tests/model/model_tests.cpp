@@ -544,6 +544,24 @@ void testDraftModel() {
         check(std::fabs(*far.estimate(15) - 20.0f) < 1e-6f, "DraftTiming measured point exact");
         for (std::uint32_t nd = 0; nd <= q::max_ng_drafts; ++nd) check(*far.estimate(nd) > 0, "DraftTiming estimate positive for every draft count");
     }
+    {
+        // mutgap: the measured time is an EMA with weight 0.2 on the new sample (t = 0.8 t + 0.2 ms; the first sample is taken as is)
+        q::DraftTiming e;
+        e.update(3, 10.0f);
+        check(*e.estimate(3) == 10.0f, "DraftTiming: the first sample is taken as is");
+        e.update(3, 20.0f);
+        check(std::fabs(*e.estimate(3) - (0.8f * 10.0f + 0.2f * 20.0f)) < 1e-5f, "DraftTiming: EMA, second sample (12.0)");
+        e.update(3, 30.0f);
+        check(std::fabs(*e.estimate(3) - (0.8f * 12.0f + 0.2f * 30.0f)) < 1e-5f, "DraftTiming: EMA, third sample (15.6)");
+        // skip_first: the first sample of every draft count is dropped, the next one starts the average
+        q::DraftTiming sk;
+        sk.skip_first = true;
+        sk.update(2, 99.0f);
+        check(!sk.estimate(2).has_value(), "DraftTiming skip_first: first sample dropped");
+        sk.update(2, 10.0f);
+        sk.update(2, 20.0f);
+        check(std::fabs(*sk.estimate(2) - 12.0f) < 1e-5f, "DraftTiming skip_first: EMA starts at the second sample");
+    }
     tm.update(6, 14.0f);
     const float e4 = *tm.estimate(4);
     check(e4 > 11.5f && e4 < 12.5f, "DraftTiming linear fit");
@@ -551,6 +569,69 @@ void testDraftModel() {
     const q::DraftAccept* accs[1] = {&hi};
     const std::uint32_t nd = q::pickDrafts(accs, tm, 8, 0, 0);
     check(nd >= 4, "pickDrafts prefers long chains at high acceptance");
+}
+
+// mutgap: NgramPolicy. observe() scores the pending proposal into the bucket of its matched length with
+// DraftAccept::updateRate(n, accepted, 0.2); choose() prices a draft count with the MTP 1-draft cycle time x
+// (1 + verify_slope (k - 1)) until the n-gram cycles are timed, and returns the k with the best E(k) / t(k) (0: use the MTP head).
+void testNgramPolicy() {
+    {
+        q::NgramPolicy p;
+        p.reset();
+        const std::vector<std::uint32_t> h = {1, 2, 3, 4, 5, 6, 7, 8, 1, 2, 3};  // the suffix 1 2 3 occurred at 0..2
+        std::array<std::uint32_t, 4> out{};
+        const q::Ngram::Match m = p.propose(h, 3, out);
+        check(m.n == 4 && m.mlen == 3 && out[0] == 4 && out[1] == 5 && out[2] == 6 && out[3] == 7, "NgramPolicy::propose: continuation after the earlier occurrence");
+        // outcome: 4 5 accepted, the third draft (6) missed -> bucket 0 (matched length 3 < 8): alpha 0.35 -> 0.8 * 0.35 + 0.2
+        // for positions 0, 1; position 2 (the miss) 0.8 * 0.35; position 3 was not reached
+        std::vector<std::uint32_t> h2 = h;
+        h2.insert(h2.end(), {4, 5, 9});
+        p.observe(h2);
+        check(std::fabs(p.acc[0].alpha[0] - 0.48f) < 1e-6f && std::fabs(p.acc[0].alpha[1] - 0.48f) < 1e-6f &&
+                  std::fabs(p.acc[0].alpha[2] - 0.28f) < 1e-6f && p.acc[0].alpha[3] == 0.35f,
+              "NgramPolicy::observe: the outcome updates the bucket of the matched length (rate 0.2)");
+        check(p.acc[1].alpha[0] == 0.7f && p.acc[2].alpha[0] == 0.85f, "NgramPolicy::observe: other buckets untouched");
+        p.observe(h2);  // scored once only
+        check(std::fabs(p.acc[0].alpha[0] - 0.48f) < 1e-6f, "NgramPolicy::observe: a proposal is scored once");
+    }
+    // choose(): independent reference from the definition
+    const auto ref = [](float a, float slope, std::uint32_t n, float mtp_score) {
+        float e = 1, pr = 1, best = mtp_score;
+        std::uint32_t best_k = 0;
+        for (std::uint32_t k = 1; k <= n; ++k) {
+            pr *= a;
+            e += pr;
+            const float s = e / (100.0f * (1 + slope * static_cast<float>(k - 1)));
+            if (s > best) {
+                best = s;
+                best_k = k;
+            }
+        }
+        return best_k;
+    };
+    q::DraftTiming mtp;
+    mtp.update(1, 100.0f);  // a 1-draft MTP cycle of 100 ms
+    struct C {
+        std::uint32_t mlen;  // bucket 0 / 1 / 2 -> prior alpha 0.35 / 0.7 / 0.85
+        float a, slope;
+        std::uint32_t want;  // E(k) / (100 (1 + slope (k - 1))) maximised over k = 1..4 (python)
+    };
+    const C cs[] = {{3, 0.35f, 0.12f, 1}, {10, 0.7f, 0.12f, 3}, {30, 0.85f, 0.12f, 4}, {3, 0.35f, 0.015f, 3}, {10, 0.7f, 0.4f, 1}};
+    for (const C& c : cs) {
+        q::NgramPolicy p;
+        p.verify_slope = c.slope;
+        p.reset();
+        const std::uint32_t got = p.choose(4, c.mlen, 0.0f, mtp);
+        check(got == c.want && ref(c.a, c.slope, 4, 0.0f) == c.want, "NgramPolicy::choose: draft count from the MTP-priced extra verify rows");
+    }
+    {
+        q::NgramPolicy p;
+        p.verify_slope = 0.12f;
+        p.reset();
+        check(p.choose(4, 10, 1.0f, mtp) == 0, "NgramPolicy::choose: a better MTP score keeps the MTP head");
+        const q::DraftTiming none;
+        check(p.choose(4, 10, 0.0f, none) == 0, "NgramPolicy::choose: no timing at all -> 0");
+    }
 }
 
 void testDraftVocab() {
@@ -1105,6 +1186,24 @@ void testSlotAccept() {
                f.a.alpha[k] >= a0 * std::pow(0.95f, static_cast<float>(k)) - 0.03f && std::fabs(f.a.alpha[k] - mid[k]) < 0.02f;
     }
     check(conv, "SlotAccept: unobserved positions settle in [alpha0 * 0.95^k, alpha0]");
+    // mutgap: exact drift after ONE observation. alpha0 = 0.5 -> 0.4 (miss, r = 0.2); the chain broke at position 0, so
+    // position k >= 1 drifts (rate 0.02) towards 0.4 * 0.95^k: alpha_k = 0.5 + 0.02 * (0.4 * 0.95^k - 0.5)
+    {
+        q::SlotAccept d(0.5f);
+        d.observe(1, 0);
+        bool ok = std::fabs(d.a.alpha[0] - 0.4f) < 1e-6f;
+        for (std::uint32_t k = 1; k < q::max_ng_drafts; ++k) {
+            const double want = 0.5 + 0.02 * (0.4 * std::pow(0.95, static_cast<double>(k)) - 0.5);
+            ok = ok && std::fabs(d.a.alpha[k] - want) < 1e-6;
+        }
+        check(ok, "SlotAccept: a broken chain drifts the unobserved positions towards last x 0.95^k (exact)");
+        // a fully accepted chain is censored: the target stays at the last observed rate (no 0.95 per position)
+        q::SlotAccept g(0.5f);
+        g.observe(2, 2);
+        bool okf = std::fabs(g.a.alpha[0] - 0.6f) < 1e-6f && std::fabs(g.a.alpha[1] - 0.6f) < 1e-6f;
+        for (std::uint32_t k = 2; k < q::max_ng_drafts; ++k) okf = okf && std::fabs(g.a.alpha[k] - (0.5f + 0.02f * (0.6f - 0.5f))) < 1e-6f;
+        check(okf, "SlotAccept: a full chain drifts the unobserved positions to the last rate undecayed (exact)");
+    }
     // whole chains accepted: censored, positions beyond are not pulled down
     q::SlotAccept c(0.5f);
     for (int i = 0; i < 500; ++i) c.observe(2, 2);
@@ -1207,6 +1306,28 @@ void testAllocDrafts() {
     const Score sp = scoreOf(slots, c, prev);
     check(sp.total >= 0.98f * r.score ? h.d == prev : h.d == r.d, "allocDrafts: keeps prev within 2% of the best");
     check(q::allocDrafts(slots, c, {32, 0xffffffffu}, U, r.d).d == r.d, "allocDrafts: stable on its own result");
+
+    // mutgap: the per-slot cap binds. The unconstrained search gives the high-acceptance slots 3 drafts (r.d = 3 3 2 2 at U = 3), more than the cap 2 used below
+    // (checked, so the caps below are not vacuous); with cap 2 no slot may exceed its cap.
+    check(r.d[0] > 2 && r.d[1] > 2, "allocDrafts: (setup) the uncapped optimum gives the high slots > 2 drafts");
+    {
+        std::vector<q::AllocSlot> capped = slots;
+        for (q::AllocSlot& sl : capped) sl.cap = 2;
+        const q::AllocResult rc = q::allocDrafts(capped, c, {32, 0xffffffffu}, U, {});
+        bool within = true;
+        for (std::size_t i = 0; i < 4; ++i) within = within && rc.d[i] >= 1 && rc.d[i] <= 2;
+        check(within, "allocDrafts: no slot exceeds its cap (2)");
+        // per-slot caps: slot 0 limited to 2, the others to 8
+        std::vector<q::AllocSlot> mixcap = slots;
+        mixcap[0].cap = 2;
+        const q::AllocResult rm = q::allocDrafts(mixcap, c, {32, 0xffffffffu}, U, {});
+        check(rm.d[0] <= 2 && rm.d[0] >= 1, "allocDrafts: a per-slot cap of 2 holds");
+        // a previous allocation that breaks the new cap is never kept (r.d comes from cap 8)
+        const q::AllocResult rp = q::allocDrafts(capped, c, {32, 0xffffffffu}, U, r.d);
+        bool within2 = true;
+        for (std::size_t i = 0; i < 4; ++i) within2 = within2 && rp.d[i] <= 2;
+        check(within2 && rp.d != r.d, "allocDrafts: prev above the cap is dropped");
+    }
 
     // an n-gram slot keeps its fixed rows and gets no MTP drafts
     std::vector<q::AllocSlot> mix = slots;
@@ -3555,6 +3676,7 @@ int main() {
     testDFlashDraftFile();
     testCycleCost();
     testSlotAccept();
+    testNgramPolicy();
     testAllocDrafts();
     testMtpDefaults();
     testMxfp4Repack();

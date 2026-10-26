@@ -473,6 +473,7 @@ std::uint32_t MockModel::verifyBatchEnqueue(std::span<const server::VSeg> segs) 
     std::uint32_t snap = 0;
     for (const server::VSeg& sg : segs) {
         Seq& s = seqs_[sg.seq];
+        for (std::uint32_t cur = max_seg_nd_.load(); sg.nd > cur && !max_seg_nd_.compare_exchange_weak(cur, sg.nd);) {}
         commitSeq(sg.seq);  // the kept rows of the previous verify reach the state
         std::vector<std::uint32_t> toks{sg.next};
         for (std::uint32_t r = 0; r < sg.nd; ++r)
