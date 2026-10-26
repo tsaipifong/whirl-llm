@@ -80,8 +80,8 @@ static std::pair<int, int> tuneKernelKey(const Model& m, const Mat& w, u32 cj, u
     const u32 nc = static_cast<u32>(gemm_cfgs.size());
     if (cj >= 2 * nc) return {2, static_cast<int>(cj - 2 * nc)};
     const bool deq = cj >= nc && w.ty != GgmlType::f16;
-    const bool hok = m.gemmh_on && n >= gemmh_min && w.ncols % 32 == 0;
-    if (deq && hok && m.gemmhq_on && m.k.gemmhq[ti(w.ty)] != nullptr) return {3, 0};
+    const bool hok = m.nf().gemmh_on && n >= gemmh_min && w.ncols % 32 == 0;
+    if (deq && hok && m.nf().gemmhq_on && m.k.gemmhq[ti(w.ty)] != nullptr) return {3, 0};
     if (hok && m.k.gemmh_f16 != nullptr && (deq || (w.ty == GgmlType::f16 && w.row_bytes == static_cast<u64>(w.ncols) * 2)))
         return {deq ? 4 : 5, 0};
     return {deq ? 1 : 0, static_cast<int>(cj % nc)};
@@ -94,10 +94,10 @@ void Model::autotuneGemm(std::size_t bucket, u32 reps, std::string* log) {
     std::map<std::tuple<u32, u32, u32>, std::uint8_t> chosen;
     Profile* saved_prof = prof;
     prof = nullptr;
-    const bool saved_fp8 = fp8_prefill;
-    fp8_prefill = false;
-    const bool saved_prec = prec_dec;  // (tune sizes are >= 32 > gvMax(); kept off regardless)
-    prec_dec = false;
+    const bool saved_fp8 = nf().fp8_prefill;
+    num_plan.flags.fp8_prefill = false;
+    const bool saved_prec = nf().prec_dec;  // (tune sizes are >= 32 > gvMax(); kept off regardless)
+    num_plan.flags.prec_dec = false;
     double total_best = 0, total_default = 0;
     // Radeon 8060S: the candidate list is long (24 fused + 24 dequant + 8 small-batch GEMMs)
     // and the GPU is slow, so the first tune of a 27B model took ~8.5 min. There each kernel
@@ -177,8 +177,8 @@ void Model::autotuneGemm(std::size_t bucket, u32 reps, std::string* log) {
     for (Layer& L : layers)
         for (Mat* mp : tuneMats(L)) mp->tune[bucket] = chosen.at(std::make_tuple(static_cast<u32>(mp->ty), mp->nrows, mp->ncols));
     prof = saved_prof;
-    fp8_prefill = saved_fp8;
-    prec_dec = saved_prec;
+    num_plan.flags.fp8_prefill = saved_fp8;
+    num_plan.flags.prec_dec = saved_prec;
     if (log) *log += fmt("    distinct shapes %zu: sum of best %.1f ms vs cfg0 %.1f ms\n", chosen.size(), total_best, total_default);
 }
 
@@ -239,8 +239,8 @@ bool Model::checkGemvq(std::string& log) {
         bool& p;
         bool s;
         ~PrecOff() { p = s; }
-    } prec_off{prec_dec, prec_dec};
-    prec_dec = false;  // the int8 kernels (balance / fast), whatever the mode
+    } prec_off{num_plan.flags.prec_dec, num_plan.flags.prec_dec};
+    num_plan.flags.prec_dec = false;  // the int8 kernels (balance / fast), whatever the mode
     const std::vector<float> xs = randomNormal(ff_scratch, 42);
     bool done[n_types] = {};
     bool ok_all = true;
@@ -251,12 +251,12 @@ bool Model::checkGemvq(std::string& log) {
             done[t] = true;
             hip::upload(ffn_g, xs.data(), w.ncols * 4ull);
             std::vector<float> a(w.nrows), b(w.nrows);
-            float_gemv = true;
+            num_plan.flags.float_gemv = true;
             xq_src = 0;
             x16_src = 0;
             matmul(w, ffn_g, ffn_u, 1, false);
             hip::download(a.data(), ffn_u, a.size() * 4);
-            float_gemv = false;
+            num_plan.flags.float_gemv = false;
             xq_src = 0;
             x16_src = 0;
             matmul(w, ffn_g, ffn_u, 1, false);
@@ -281,8 +281,8 @@ bool Model::checkGemvBitwise(std::string& log) {
         bool& p;
         bool s;
         ~PrecOff() { p = s; }
-    } prec_off{prec_dec, prec_dec};
-    prec_dec = false;  // the int8 kernels (balance / fast), whatever the mode
+    } prec_off{num_plan.flags.prec_dec, num_plan.flags.prec_dec};
+    num_plan.flags.prec_dec = false;  // the int8 kernels (balance / fast), whatever the mode
     const std::size_t cols_max = ff_scratch;
     const std::vector<float> xs = randomNormal(max_verify_rows * cols_max, 7);
     bool done[n_types] = {};
@@ -431,11 +431,11 @@ bool Model::checkPrefillInvariance(std::string& log) {
         if (!L.moe) continue;
         const u32 E = cfg.n_embd;
         std::vector<float> a(static_cast<std::size_t>(n) * E), b(a.size());
-        const u32 saved = moe_bn_force;
+        const u32 saved = nf().moe_bn_force;
         const u32 bns[3] = {32, 64, 32};
         for (int pass = 0; pass < 3; ++pass) {
             const u32 rows = pass == 2 ? 40 : n;
-            moe_bn_force = bns[pass];
+            num_plan.flags.moe_bn_force = bns[pass];
             hip::upload(x, xs.data(), static_cast<std::size_t>(rows) * E * 4);
             moeBlock(L.post_norm, L.ffn_gate, L.ffn_up, L.ffn_down, *L.moe, rows);
             hip::download((pass == 0 ? a : b).data(), x, static_cast<std::size_t>(rows) * E * 4);
@@ -444,7 +444,7 @@ bool Model::checkPrefillInvariance(std::string& log) {
             if (!same) all_ok = false;
             log += fmt("    MoE tile 32 vs %s: %s\n", pass == 1 ? "64 (200 rows)" : "32 (first 40 rows alone)", same ? "same ok" : "DIFFERENT");
         }
-        moe_bn_force = saved;
+        num_plan.flags.moe_bn_force = saved;
         break;
     }
     return all_ok;
@@ -455,24 +455,24 @@ bool Model::checkPrefillInvariance(std::string& log) {
 // same row inside a 40-row prefill GEMM; MoE: a token's block output alone == inside a
 // batch of 16 == inside the 40-row prefill path. Random inputs.
 bool Model::checkPreciseDecode(std::string& log) {
-    const bool saved_prec = prec_dec;
+    const bool saved_prec = nf().prec_dec;
     const u32 saved_small = small_max;
     // The model may be loaded in balance / fast (selftest's default mode is balance since
     // 0.2.0): turn every lossy prefill item off, as a --precise load has them, or the
     // "== prefill GEMM rows" and MoE prefill-path comparisons below measure the fp8 / h16
     // paths instead of the precise ones.
-    const bool saved_fp8 = fp8_prefill, saved_moe_fp8 = moe_fp8, saved_out_h16 = out_h16;
+    const bool saved_fp8 = nf().fp8_prefill, saved_moe_fp8 = nf().moe_fp8, saved_out_h16 = out_h16;
     const auto restore = [&] {
-        prec_dec = saved_prec;
+        num_plan.flags.prec_dec = saved_prec;
         small_max = saved_small;
-        fp8_prefill = saved_fp8;
-        moe_fp8 = saved_moe_fp8;
+        num_plan.flags.fp8_prefill = saved_fp8;
+        num_plan.flags.moe_fp8 = saved_moe_fp8;
         out_h16 = saved_out_h16;
     };
-    fp8_prefill = false;
-    moe_fp8 = false;
+    num_plan.flags.fp8_prefill = false;
+    num_plan.flags.moe_fp8 = false;
     out_h16 = false;
-    prec_dec = true;
+    num_plan.flags.prec_dec = true;
     const u32 NP = 40;  // > every gvMax(): the prefill GEMM
     const std::vector<float> xs = randomNormal(static_cast<std::size_t>(NP) * ff_scratch, 13);
     bool done[n_types] = {};
@@ -532,9 +532,9 @@ bool Model::checkPreciseDecode(std::string& log) {
             double num = 0, den = 0;
             {
                 std::vector<float> ref(nr);
-                const bool fg = float_gemv, pd = prec_dec;
-                float_gemv = true;
-                prec_dec = false;
+                const bool fg = nf().float_gemv, pd = nf().prec_dec;
+                num_plan.flags.float_gemv = true;
+                num_plan.flags.prec_dec = false;
                 x16_src = 0;
                 xq_src = 0;
                 if (k.gemv1[t] != nullptr) {
@@ -546,8 +546,8 @@ bool Model::checkPreciseDecode(std::string& log) {
                         den += static_cast<double>(ref[i]) * ref[i];
                     }
                 }
-                float_gemv = fg;
-                prec_dec = pd;
+                num_plan.flags.float_gemv = fg;
+                num_plan.flags.prec_dec = pd;
             }
             const double rel = den > 0 ? std::sqrt(num / den) : 0.0;
             const bool ok = bad == 0 && pre_ok && rel < 0.01;
@@ -597,9 +597,9 @@ bool Model::checkPreciseDecode(std::string& log) {
         {
             // balance / fast (int8 decode experts): a 17..32-row wide verify batch (small_max
             // raised as in verifyBatch) must give every row the bits of its 1-token decode
-            prec_dec = false;
-            fp8_prefill = saved_fp8;  // the loaded balance / fast items
-            moe_fp8 = saved_moe_fp8;
+            num_plan.flags.prec_dec = false;
+            num_plan.flags.fp8_prefill = saved_fp8;  // the loaded balance / fast items
+            num_plan.flags.moe_fp8 = saved_moe_fp8;
             small_max = max_small_batch;
             for (u32 tk = 0; tk < 32; ++tk) {
                 hip::upload(x, xm.data() + static_cast<std::size_t>(tk) * E, E * 4ull);
@@ -618,9 +618,9 @@ bool Model::checkPreciseDecode(std::string& log) {
                 rb += fmt(" n=%u %s", rows, same ? "same" : "DIFFERENT");
             }
             small_max = max_small_batch;
-            prec_dec = true;
-            fp8_prefill = false;
-            moe_fp8 = false;
+            num_plan.flags.prec_dec = true;
+            num_plan.flags.fp8_prefill = false;
+            num_plan.flags.moe_fp8 = false;
             if (!okb) all_ok = false;
             log += fmt("    balance MoE block (int8 decode experts), a token alone vs in a verify batch:%s %s\n", rb.c_str(), okb ? "ok" : "FAIL");
         }
@@ -802,6 +802,48 @@ bool tryRead(const std::string& path, std::string& out) {
 
 }  // namespace
 
+// arch025-N2b: what numerics::plan needs from the Model (tune.cpp:917-937 before N2b, plus the N2a fields)
+whirl::numerics::Target numericsTarget(const Model& m) {
+    namespace nu = whirl::numerics;
+    nu::Target t;
+    const device::Profile& prof = device::profile(m.arch);
+    t.gfx1151 = prof.numerics_8060s;
+    t.has_mxfp4 = m.type_bytes[ti(GgmlType::mxfp4)] > 0;
+    t.moe = m.cfg.moe;
+    for (const Layer& L : m.layers)
+        if (L.moe) {
+            t.moe_mxfp4 = L.moe->gate.ty == GgmlType::mxfp4 && L.moe->up.ty == GgmlType::mxfp4 && L.moe->down.ty == GgmlType::mxfp4;
+            break;
+        }
+    t.k_gemm8 = m.k.gemm8[0] != nullptr;
+    t.k_gemm8_moe = m.k.gemm8_moe != nullptr && m.k.gemm8_moe32 != nullptr && m.k.gemm8_moeh != nullptr && m.k.gemm8_moe32h != nullptr &&
+                    m.k.moe_gather_fp8 != nullptr;
+    t.k_gdn_wmma = m.k.gdn_wprep != nullptr;
+    t.k_kv_q8v = m.k.caps.kv_q8v;
+    t.k_kv_q8h = m.k.caps.kv_q8h;
+    t.mtp = m.mtp.has_value();
+    t.k_spec_sample = m.k.draft_sample_rows != nullptr;
+    t.k_kv_q4 = m.k.caps.kv_q4;
+    t.kv_explicit = m.kv_mode != KvMode::automatic;
+    t.fast_kv_q8h = t.gfx1151 && t.k_kv_q8h;
+    // GDN-8S (tune.cpp:905-909 before N2b): the gfx1151 strix-llama.cpp chunked prefill's device, kernels and shape
+    t.strix_profile = prof.gdn_strix;
+    t.k_gdn_sx = m.k.gdn_sx_prep != nullptr && m.k.gdn_sx_scan != nullptr;
+    t.gdn_strix_shape = m.cfg.d_state == 128 && m.cfg.headV() == 128 && m.cfg.n_k_heads > 0 && m.cfg.n_v_heads % m.cfg.n_k_heads == 0 &&
+                        m.cfg.n_v_heads / m.cfg.n_k_heads <= 4;
+    t.k_gemm8t = m.hasTiledFp8();
+    return t;
+}
+
+whirl::numerics::Request numericsRequest(const Model& m, const whirl::config::EnvSnapshot& env) {
+    namespace nu = whirl::numerics;
+    nu::Request r = m.num_req;
+    r.load_overrides = true;  // plan() also applies the per-item overrides, WHIRL_Q8DEC and the switch notes
+    for (const auto& e : nu::EnvValues::names()) r.env.*e.field = env.get(e.name);
+    for (std::size_t i = 0; nu::k_numerics_switches[i] != nullptr; ++i) r.env.switches[i] = env.get(nu::k_numerics_switches[i]);
+    return r;
+}
+
 namespace {
 void loadOrTuneImpl(Model& m, const std::string& model_path, std::string& log);
 }  // namespace
@@ -821,143 +863,51 @@ void loadOrTuneImpl(Model& m, const std::string& model_path, std::string& log) {
     // arch025-N1: every WHIRL_* read below comes from the load's snapshot (LoadOptions::env / Model::load)
     const auto env_p = whirl::config::snapshotOf(m);
     const whirl::config::EnvSnapshot& env = *env_p;
-    // MXFP4 prefill with fp8 activations: a balance item (m.fp8_prefill from the mode at load);
-    // WHIRL_FP8=0|1 overrides. WHIRL_FP8=0 also turns the MoE expert fp8 path off (as before).
-    const auto& fp8_env = env.fp8;
-    if (fp8_env) m.fp8_prefill = *fp8_env != "0";
-    if (fp8_env && *fp8_env == "0") m.moe_fp8 = false;
-    if (const auto& v = env.fp8_mask) {
-        try {
-            m.fp8_mask = static_cast<std::uint8_t>(std::stoul(*v, nullptr, 0));
-        } catch (...) {
-            m.fp8_mask = 7;
-        }
+    // arch025-N2b (R-5): numerics::plan decides the mode's items and every execution flag (Plan::flags) from the
+    // request, the load's WHIRL_* values and what this GPU / model has (the decisions that were here and in the loader
+    // moved there in arch025-N2a, rule by rule). The Model reads them as nf() = num_plan.flags.
+    const nu::Target t = numericsTarget(m);
+    // PreciseKernels: f16 decode activations need kernels this code object may not have (the mode never falls back)
+    const auto refusePrecise = [&m, &rq] {
+        const std::string miss = m.precMissing();
+        if (!miss.empty())
+            throw ModelError("PreciseKernels",
+                             std::string(rq.mode == nu::Mode::precise ? "precise mode" : "f16 decode activations (WHIRL_Q8DEC=0)") +
+                                 ": this GPU's kernels have no " + miss + ", and the mode never falls back to int8 decode activations. Use " +
+                                 (rq.mode == nu::Mode::precise ? "--balance" : "WHIRL_Q8DEC unset") +
+                                 " (int8 decode / verify activations, as llama.cpp's q8_1)");
+    };
+    nu::Plan p;
+    try {
+        p = nu::plan(numericsRequest(m, env), t);
+    } catch (...) {
+        // plan() throws only for a relaxacc parameter std::stoul / std::stof rejects (WHIRL_RELAX_K / _ALPHA / _EPS /
+        // _DELTA); before arch025-N2b the f16-decode refusal came first, so check it with those values left out
+        nu::Request r0 = numericsRequest(m, env);
+        r0.env.relax_k = r0.env.relax_alpha = r0.env.relax_eps = r0.env.relax_delta = std::nullopt;
+        const nu::Plan p0 = nu::plan(r0, t);
+        m.num_plan.flags = p0.flags;
+        if (p0.flags.prec_dec) refusePrecise();
+        throw;
     }
+    const nu::Flags& f = p.flags;
     if (has_mx) {
-        if (m.fp8_prefill && m.k.gemm8[0] != nullptr)
+        if (f.fp8_prefill && m.k.gemm8[0] != nullptr)
             log += fmt("  MXFP4 prefill: fp8 activations (%llu folded blocks rounded)\n", static_cast<unsigned long long>(m.mx_fold_lossy));
         else
             log += "  MXFP4 prefill: f16 activations\n";
         // fragment-tiled fp8 GEMM (bitwise == gemm8), default on; WHIRL_G8T=0 keeps gemm8
-        const bool g8t_on = whirl::config::EnvSnapshot::flag(env.g8t, true);
-        if (g8t_on && m.fp8_prefill && m.k.gemm8[0] != nullptr && m.useTiledFp8()) log += "  fp8 prefill GEMM: fragment-tiled (gemm8t)\n";
+        if (f.g8t) log += "  fp8 prefill GEMM: fragment-tiled (gemm8t)\n";
     }
-    // f16-WMMA chunked DeltaNet prefill and f16 GEMM outputs: balance items for MXFP4 models
-    // and (KG-1) dense non-MXFP4 models on the R9700 (= nu::denseQuantRelaxed)
-    const bool dense_q = !has_mx && !m.cfg.moe && !device::profile(m.arch).numerics_8060s;
-    m.gdn_wmma = (has_mx || dense_q) && rq.has(nu::Item::gdnwmma);
-    const auto& wmma_env = env.gdn_wmma;
-    if (wmma_env) m.gdn_wmma = *wmma_env != "0";
-    if (const auto& v = env.act_fuse) m.act_fuse = *v != "0";
-    if (const auto& v = env.gemmh) m.gemmh_on = *v != "0";
-    if (const auto& v = env.gemmhq) m.gemmhq_on = *v != "0";
-    if (const auto& v = env.attn_kx) m.attn_kx_on = *v != "0";
-    if (const auto& v = env.attn_kg) m.attn_kg_on = *v != "0";
-    if (const auto& v = env.attn_dqf) m.attn_dqf_on = *v != "0";
-    if (const auto& v = env.attn_seg) m.attn_seg = static_cast<std::uint32_t>(std::strtoul(v->c_str(), nullptr, 10)) / 256 * 256;
-    if (const auto& v = env.gdn_ba) m.gdn_ba_on = *v != "0";
-    if (const auto& v = env.gdn_in2) m.gdn_in2_on = *v != "0";
-    // f16 FFN / DeltaNet GEMM outputs: a balance item (WHIRL_FFN_H16 overrides)
-    m.ffn_h16 = (has_mx || dense_q) && rq.has(nu::Item::h16);
-    // WHIRL_Q4_RELAXED=1: every non-bitwise prefill speedup for non-MXFP4 models too
-    const auto& relaxed_env = env.q4_relaxed;
-    const bool relaxed = relaxed_env && *relaxed_env != "0";
-    if (relaxed) {
-        m.gdn_wmma = true;
-        m.ffn_h16 = true;
-    }
-    const auto& h16_env = env.ffn_h16;
-    if (h16_env) m.ffn_h16 = *h16_env != "0";
-    m.h16_dq = m.ffn_h16 && dense_q;
-    if (m.gdn_wmma && m.gdn_chunked && m.k.gdn_wprep != nullptr) log += "  DeltaNet prefill: f16 WMMA chunks\n";
-    // GDN-8S: the gfx1151 f16-WMMA chunked prefill (strix-llama.cpp, MIT). RC6: default on for dense models (full
-    // KL gate on the 8060S, dense balance / fast); MOE-GDN8S: default on for MoE (MXFP4) models too (full MoE KL
-    // gate on the 8060S, code + zh, balance / fast). WHIRL_GDN_STRIX=0 turns it off. It follows the
-    // gdn_wmma mode policy (numerics item gdnwmma: balance / fast, never precise; dense or MXFP4 models, the
-    // condition gdn_wmma has on the R9700) and only exists where gdn_wmma's kernels do not (gfx1151).
-    // WHIRL_GDN_STRIX_MIN sets the row threshold (default 256, strix's GGML_GDN_CHUNK_MIN).
-    m.gdn_strix = false;
-    const auto& sx_env = env.gdn_strix;
-    if ((!sx_env || *sx_env != "0") && device::profile(m.arch).gdn_strix && m.k.gdn_sx_prep != nullptr &&
-        m.k.gdn_sx_scan != nullptr && m.gdn_chunked && (has_mx || !m.cfg.moe) && rq.has(nu::Item::gdnwmma) && m.cfg.d_state == 128 &&
-        m.cfg.headV() == 128 && m.cfg.n_k_heads > 0 && m.cfg.n_v_heads % m.cfg.n_k_heads == 0 && m.cfg.n_v_heads / m.cfg.n_k_heads <= 4) {
-        m.gdn_strix = true;
-        if (const auto& v = env.gdn_strix_min)
-            m.gdn_strix_min = static_cast<std::uint32_t>(std::max<unsigned long>(32, std::strtoul(v->c_str(), nullptr, 10)));
-        log += fmt("  DeltaNet prefill: f16 WMMA chunks (strix-llama.cpp, runs >= %u rows; WHIRL_GDN_STRIX=0 turns it off)\n", m.gdn_strix_min);
-    }
-    {
-        // numerics mode: capability table, per-item environment overrides, one log line
-        nu::Target t;
-        t.gfx1151 = device::profile(m.arch).numerics_8060s;
-        t.has_mxfp4 = has_mx;
-        t.moe = m.cfg.moe;
-        for (const Layer& L : m.layers)
-            if (L.moe) {
-                t.moe_mxfp4 = L.moe->gate.ty == GgmlType::mxfp4 && L.moe->up.ty == GgmlType::mxfp4 && L.moe->down.ty == GgmlType::mxfp4;
-                break;
-            }
-        t.k_gemm8 = m.k.gemm8[0] != nullptr;
-        t.k_gemm8_moe = m.k.gemm8_moe != nullptr && m.k.gemm8_moe32 != nullptr && m.k.gemm8_moeh != nullptr && m.k.gemm8_moe32h != nullptr &&
-                        m.k.moe_gather_fp8 != nullptr;
-        t.k_gdn_wmma = m.k.gdn_wprep != nullptr;
-        t.k_kv_q8v = m.k.caps.kv_q8v;
-        t.k_kv_q8h = m.k.caps.kv_q8h;
-        t.mtp = m.mtp.has_value();
-        t.k_spec_sample = m.k.draft_sample_rows != nullptr;
-        t.k_kv_q4 = m.k.caps.kv_q4;
-        t.kv_explicit = m.kv_mode != KvMode::automatic;
-        t.fast_kv_q8h = t.gfx1151 && t.k_kv_q8h;
-        t.gdn_strix = m.gdn_strix;
-        nu::Plan p = nu::plan(rq, t);
-        if (fp8_env) nu::applyOverride(p, nu::Item::fp8, "FP8", *fp8_env, m.fp8_prefill, t.has_mxfp4 && t.k_gemm8);
-        const bool moe_ok = t.moe && t.moe_mxfp4 && t.k_gemm8_moe;
-        if (const auto& v = env.moe_fp8; v && !(fp8_env && *fp8_env == "0"))
-            nu::applyOverride(p, nu::Item::moefp8, "MOE_FP8", *v, m.moe_fp8, moe_ok);
-        else if (fp8_env && *fp8_env == "0")
-            nu::applyOverride(p, nu::Item::moefp8, "FP8", *fp8_env, m.moe_fp8, moe_ok);
-        if (relaxed) nu::applyOverride(p, nu::Item::gdnwmma, "Q4_RELAXED", *relaxed_env, m.gdn_wmma, t.k_gdn_wmma && m.gdn_chunked);
-        else if (wmma_env) nu::applyOverride(p, nu::Item::gdnwmma, "GDN_WMMA", *wmma_env, m.gdn_wmma, t.k_gdn_wmma && m.gdn_chunked);
-        if (h16_env) nu::applyOverride(p, nu::Item::h16, "FFN_H16", *h16_env, m.ffn_h16, true);
-        else if (relaxed) nu::applyOverride(p, nu::Item::h16, "Q4_RELAXED", *relaxed_env, m.ffn_h16, true);
-        if (const auto& v = env.kv; v && !v->empty() && *v != "auto")
-            nu::applyOverride(p, *v == "q4" ? nu::Item::kvq4 : nu::Item::kvq8, "KV", *v, *v != "f16", !t.moe || *v != "f16");
-        // decode / verify activations (P-8): precise -> f16 activations on the f16 GEMM (f32
-        // accumulation), balance / fast -> int8 (q8_1 class) on dense and MoE models (MOE-BAL-3)
-        // (nu::q8decDefault, in the plan). WHIRL_Q8DEC=0|1 overrides.
-        m.prec_dec = !p.q8dec_default;
-        const auto& q8dec_env = env.q8dec;
-        if (q8dec_env && !q8dec_env->empty()) m.prec_dec = *q8dec_env == "0";
-        nu::setQ8dec(p, !m.prec_dec, q8dec_env ? *q8dec_env : std::string());
-        if (m.prec_dec) {
-            const std::string miss = m.precMissing();
-            if (!miss.empty())
-                throw ModelError("PreciseKernels",
-                                 std::string(rq.mode == nu::Mode::precise ? "precise mode" : "f16 decode activations (WHIRL_Q8DEC=0)") +
-                                     ": this GPU's kernels have no " + miss +
-                                     ", and the mode never falls back to int8 decode activations. Use " +
-                                     (rq.mode == nu::Mode::precise ? "--balance" : "WHIRL_Q8DEC unset") +
-                                     " (int8 decode / verify activations, as llama.cpp's q8_1)");
-        }
-        if (const auto& v = env.relax; v && !v->empty())
-            nu::applyOverride(p, nu::Item::relaxacc, "RELAX", *v, *v != "0", true);
-        m.relax = whirl::relax::Params{};
-        if (p.on(nu::Item::relaxacc)) {
-            m.relax.on = true;
-            if (const auto& v = env.relax_k; v && !v->empty()) m.relax.k = static_cast<std::uint32_t>(std::stoul(*v));
-            if (const auto& v = env.relax_alpha; v && !v->empty()) m.relax.alpha = std::stof(*v);
-            if (const auto& v = env.relax_eps; v && !v->empty()) m.relax.eps = std::stof(*v);
-            if (const auto& v = env.relax_delta; v && !v->empty()) m.relax.delta = std::stof(*v);
-            p.items[static_cast<std::size_t>(nu::Item::relaxacc)].note +=
-                std::format(" [k {}, alpha {:.2f}, eps {:.2f}, delta {:.2f}]", m.relax.topk(), m.relax.alpha, m.relax.eps, m.relax.delta);
-        }
-        if (const auto& v = env.spec_sample; v && !v->empty())
-            nu::applyOverride(p, nu::Item::specsample, "SPEC_SAMPLE", *v, *v != "0", t.mtp && t.k_spec_sample);
-        nu::noteSwitches(p, [&env](const char* n) { return env.get(n); });
-        m.num_plan = p;
-        log += "  " + nu::logLine(p) + "\n";
-        if (!m.load_note.empty()) log += "  " + m.load_note;
-    }
+    if (f.gdn_wmma && f.gdn_chunked && m.k.gdn_wprep != nullptr) log += "  DeltaNet prefill: f16 WMMA chunks\n";
+    if (f.gdn_strix)
+        log += fmt("  DeltaNet prefill: f16 WMMA chunks (strix-llama.cpp, runs >= %u rows; WHIRL_GDN_STRIX=0 turns it off)\n", f.gdn_strix_min);
+    // (the flags first: a refused load leaves them as before arch025-N2b, the plan's notes unset)
+    m.num_plan.flags = f;
+    if (f.prec_dec) refusePrecise();
+    m.num_plan = p;
+    log += "  " + nu::logLine(p) + "\n";
+    if (!m.load_note.empty()) log += "  " + m.load_note;
 
     std::string cache_path;
     std::vector<std::string> read_paths4, read_paths_old;

@@ -1126,9 +1126,10 @@ void testKvChoice() {
         // GDN-8S default: gdnwmma reported enabled when the strix prefill runs
         nu::Target tg;
         tg.gfx1151 = true;
-        tg.gdn_strix = true;
-        CHECK(nu::plan(bal, tg).on(nu::Item::gdnwmma));
-        tg.gdn_strix = false;
+        // (arch025-N2b: plan decides the strix prefill itself from the device row, kernels and shape; was Target::gdn_strix)
+        tg.strix_profile = tg.k_gdn_sx = tg.gdn_strix_shape = true;
+        CHECK(nu::plan(bal, tg).on(nu::Item::gdnwmma) && nu::plan(bal, tg).flags.gdn_strix);
+        tg.strix_profile = false;
         CHECK(!nu::plan(bal, tg).on(nu::Item::gdnwmma));
     }
     // WHIRL_KV: debug override, any mode

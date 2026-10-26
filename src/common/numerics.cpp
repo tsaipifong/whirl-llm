@@ -340,7 +340,7 @@ void loadFlags(const Request& r, const Target& t, Flags& F) {
             F.fp8_mask = 7;
         }
     }
-    // tune.cpp:862-870: g8t is set by Model::useTiledFp8 (forward.cpp:269-277), called only under this condition
+    // tune.cpp:862-870: g8t was set by Model::useTiledFp8 under this condition (arch025-N2b: decided here; Model::hasTiledFp8 = t.k_gemm8t)
     if (t.has_mxfp4 && flagOr(e.g8t, true) && F.fp8_prefill && t.k_gemm8 && t.k_gemm8t) F.g8t = true;
     // tune.cpp:873-897
     const bool dense_q = !t.has_mxfp4 && !t.moe && !t.gfx1151;
@@ -431,9 +431,8 @@ void loadOverrides(Plan& p, const Request& r, const Target& t, bool items) {
 }
 
 // The front end's after-load knobs (after loadOrTune in both)
-void runtimeFlags(const Request& r, const Target& t, Flags& F) {
-    const RuntimeValues& v = r.runtime;
-    if (r.front == Front::cli) {
+void runtimeFlags(Front front, const RuntimeValues& v, bool k_gdn_v0, Flags& F) {
+    if (front == Front::cli) {
         // cli main.cpp:1030-1048 (applyRuntimeEnv; applyGemvEnv at :1032 sets tune rows, not a flag)
         if (v.float_gemv) F.float_gemv = true;
         if (auto x = cliU32(v.dbg)) F.dbg_flags = *x;
@@ -452,8 +451,8 @@ void runtimeFlags(const Request& r, const Target& t, Flags& F) {
         if (v.gv_group) F.gv_group = *v.gv_group != "0";
         if (auto x = cliU32(v.gv_nmax)) F.gv_nmax = *x;
         // cli main.cpp:1340 (chat only: other CLI commands leave runtime.gdn_v0 unset)
-        if (v.gdn_v0 && t.k_gdn_v0) F.gdn_v0 = true;
-    } else if (r.front == Front::server) {
+        if (v.gdn_v0 && k_gdn_v0) F.gdn_v0 = true;
+    } else if (front == Front::server) {
         // server_main.cpp:1041-1045
         if (v.no_fuse) F.no_fuse = true;
         if (v.float_gemv) F.float_gemv = true;
@@ -468,7 +467,7 @@ void runtimeFlags(const Request& r, const Target& t, Flags& F) {
         if (v.wide_verify && *v.wide_verify == "0") F.wide_verify = false;
         if (v.head_chunk) F.head_chunk = std::max<std::uint32_t>(32, srvU32(v.head_chunk, F.head_chunk) / 32 * 32);
         // :1112-1114
-        if (v.gdn_v0 && t.k_gdn_v0) F.gdn_v0 = true;
+        if (v.gdn_v0 && k_gdn_v0) F.gdn_v0 = true;
         // :1117-1120 (!envOn(name, true): set and == "0")
         if (v.attn_wide && *v.attn_wide == "0") F.attn_wide = false;
         if (v.attn_dq4 && *v.attn_dq4 == "0") F.attn_dq4 = false;
@@ -487,7 +486,7 @@ Plan plan(const Request& r_in, const Target& t) {
     p.q8dec = q8decDefault(r, t.moe);  // the loader confirms (setQ8dec: WHIRL_Q8DEC, kernels)
     p.q8dec_default = p.q8dec;
     loadFlags(r, t, p.flags);
-    const bool strix = t.gdn_strix || p.flags.gdn_strix;
+    const bool strix = p.flags.gdn_strix;
     for (std::size_t i = 0; i < n_items; ++i) {
         const Item it = static_cast<Item>(i);
         ItemState& s = p.items[i];
@@ -560,9 +559,11 @@ Plan plan(const Request& r_in, const Target& t) {
         s.note = s.enabled ? note : why;
     }
     loadOverrides(p, r, t, r.load_overrides);
-    runtimeFlags(r, t, p.flags);
+    runtimeFlags(r.front, r.runtime, t.k_gdn_v0, p.flags);
     return p;
 }
+
+void applyFront(Plan& p, Front f, const RuntimeValues& v, bool k_gdn_v0) { runtimeFlags(f, v, k_gdn_v0, p.flags); }
 
 void setQ8dec(Plan& p, bool q8, const std::string& env) {
     p.q8dec = q8;

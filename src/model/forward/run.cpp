@@ -22,7 +22,7 @@ void Model::forward(std::span<const u32> tokens, u32 pos0) {
 // its position pos_buf[0] (both written by the previous argmax), so the launch
 // sequence is identical every step and never waits on the host.
 void Model::decodeStep() {
-    if (!use_graph || prof != nullptr) return decodeStepLaunches();
+    if (!nf().use_graph || prof != nullptr) return decodeStepLaunches();
     if (!decode_graph) {
         hip::Graph::beginCapture(stream);
         try {

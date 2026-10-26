@@ -553,11 +553,8 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
     // MXFP4 routed experts: process-level switches (as WHIRL_KV), read by CLI and server alike
     // per-model-type request (numerics::forModel; MoE balance = dense balance items since MODES-MXFP4)
     m.num_req = numerics::forModel(opt.numerics, cfg.moe);
-    // MoE expert fp8: balance / fast item moefp8 (WHIRL_MOE_FP8 overrides the mode)
-    m.moe_fp8 = whirl::config::EnvSnapshot::flag(env.moe_fp8, m.num_req.has(numerics::Item::moefp8));
-    m.moe_mxw = whirl::config::EnvSnapshot::flag(env.moe_mxw, true);
-    m.moe_wide = whirl::config::EnvSnapshot::flag(env.moe_wide, false);  // MoE wide verify (balance / fast, opt-in), see wideCapable
-    m.moe_rbf = whirl::config::EnvSnapshot::flag(env.moe_rbf, true);
+    // (arch025-N2b: moe_fp8 / moe_mxw / moe_wide / moe_rbf are numerics::plan's, in loadOrTune: WHIRL_MOE_FP8 / _MXW /
+    // _WIDE / _RBF from this load's snapshot; nothing reads them before loadOrTune)
     m.layers.resize(cfg.n_layer);
     m.kcache.assign(cfg.n_layer, 0);
     m.vcache.assign(cfg.n_layer, 0);
@@ -747,7 +744,7 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
     // GDN prefill x16b (fp8 rows + f16 rows from one norm) must fit in x16 for any batch > 16
     if (B > 16 && m.x16bOff() + B * cfg.n_embd * 2 > m.x16_bytes) throw ModelError("X16bOverflow");
     m.sx8 = m.alloc(B * 4);
-    m.fp8_prefill = m.num_req.has(numerics::Item::fp8);  // balance / fast item (WHIRL_FP8 overrides in loadOrTune)
+    // (arch025-N2b: fp8_prefill is numerics::plan's, in loadOrTune: the item fp8, WHIRL_FP8 overrides)
     if (cfg.moe) {
         const u64 Kx = cfg.n_expert_used;
         const u64 F = cfg.n_ff_exp;

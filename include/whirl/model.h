@@ -515,62 +515,23 @@ public:
     hip::Stream stream = nullptr;  // the work stream (owned by stream_own; every kernel call reads this value)
     device::StreamH stream_own;
     std::unique_ptr<hip::Graph> decode_graph;
-    bool use_graph = true;
     bool head_phase = false;
-    bool no_fuse = false;
     std::uint32_t row_n = 0;
     std::array<std::int32_t, max_verify_rows> row_pos{};
     std::array<std::int32_t, max_verify_rows> row_base{};
     // most rows the GEMV / decode-fusion paths take in the current forward: max_small_batch,
     // raised to max_verify_rows inside a wide batched verify / MTP step (see wideOk())
     std::uint32_t small_max = max_small_batch;
-    std::uint32_t dbg_flags = 0;
     std::uint64_t tune_mask = ~0ull;
     bool tune_cold = false;
-    bool naive_attn = false;
-    // verify attention: groups of up to 32 columns (attn_wsplit2) when that lets a
-    // sequence's rows share one K/V pass (WHIRL_ATTN_WIDE=0: <= 16 columns as before)
-    bool attn_wide = true;
-    // q4 KV decode / verify attention through attn_dq4 when the code object has it (fast mode on
-    // the 8060S; WHIRL_ATTN_DQ4=0: attn_wsplit1_q4 as before)
-    bool attn_dq4 = true;
-    // gfx1151 attn_dq4: launch only as many splits as the rows' key partition uses (same bits as the
-    // fixed fd_splits grid, cheaper combine; FAST-8S-1; WHIRL_DQ4_DYN=0: the fixed grid)
-    bool dq4_dyn = true;
-    // gfx1151 f16 / int8 KV decode and verify attention through attn_ws4 (single-row groups) and
-    // attn_ws4g (multi-row verify groups, one KV read per split for up to 8 rows) when the code
-    // object has them; same partial bits as attn_wsplit1 one-query groups (DES-ATTN-8S T2 / T3).
-    // WHIRL_ATTN_WS4=0: the old attn_wsplit1 one-query groups (debug fallback, logged as override)
-    bool attn_ws4 = true;
-    // batched verify of more than 16 rows (WHIRL_WIDE_VERIFY=0: at most 16 as before)
-    bool wide_verify = true;
-    // wide verify on MoE models (balance / fast; WHIRL_MOE_WIDE=1): 17..32-row verify batches take
-    // the int8 decode experts, like a 1-token decode. Off by default: each extra row reads its own
-    // experts, and Ornith C=4 measured 1.7-2.4% slower with it (KG-2)
-    bool moe_wide = false;
-    // output-head rows per range in a wide verify (two 16-token passes per range; WHIRL_HEAD_CHUNK)
-    std::uint32_t head_chunk = 248320;
-    bool float_gemv = false;
-    // Grouped same-input GEMV launches (WHIRL_GV_GROUP=0: off) and the largest token count that takes the grouped
-    // multi-token twins (WHIRL_GV_NMAX, 0: per type). Set by the CLI's applyRuntimeEnv after the load; the server
-    // keeps the defaults. (arch025-F7: were the process-wide qwen35::gv_group / gv_nmax, same initial values.)
-    bool gv_group = true;
-    std::uint32_t gv_nmax = 0;
     // research switches WHIRL_HEAD_GEMVX / PREC_GEMVH / PREC_GS (arch025-F7: config::forwardEnv of the load's
     // snapshot, set by Model::load; the defaults = not set). head_gemvx: the output head may take gemvx in a wide
     // verify; prec_gemvh false: precise rows skip gemvh; prec_gs >= 0: forced precise gemms slot.
     bool head_gemvx = false;
     bool prec_gemvh = true;
     int prec_gs = -1;
-    // precise decode (numerics precise mode, P-8): no int8 activations anywhere in decode /
-    // verify / small batches. Every matmul of n <= gvMax() rows takes the f16-activation
-    // WMMA GEMM (f32 accumulation; the same kernels and per-element bits as the prefill GEMM,
-    // so a row's result does not depend on n, the batch's other rows or the tuned config),
-    // MoE experts the grouped f16 GEMM. WHIRL_Q8DEC=1 / =0 overrides.
-    bool prec_dec = false;
     // precise decode: the kernels every weight type of this model needs; "" = all present
     std::string precMissing() const;
-    std::uint32_t gemv_max = max_small_batch;
     GemvR gemv_r = defaultGemvR();
     GemvW gemv_w = defaultGemvW();
     GemvR gemv_w_head = defaultGemvWHead();
@@ -586,15 +547,37 @@ public:
     std::uint32_t x16_count = 0;
     bool x16_fp8 = false;
     DevPtr sx8 = 0;
-    bool fp8_prefill = true;
-    std::uint8_t fp8_mask = 7;
     std::uint8_t mm_class = 1;
     std::uint64_t mx_fold_lossy = 0;
     // numerics mode: the request (LoadOptions), the resolved plan (loadOrTune), load-time notes
     // (precise KV shrink) for the caller's log
     whirl::numerics::Request num_req;
     whirl::numerics::Plan num_plan;
-    whirl::relax::Params relax;  // numerics item relaxacc (fast): relaxed draft acceptance
+    // arch025-N2b (R-5): the execution flags are the plan's (numerics::Flags, include/whirl/numerics.h; decided by
+    // numerics::plan in loadOrTune, the front end's after-load knobs by numerics::applyFront). Read them through nf().
+    // The only other writers are the tune / selftest probes in tune.cpp (save, run a kernel, restore). Notes moved here
+    // from the old members:
+    //   attn_wide: verify attention: groups of up to 32 columns (attn_wsplit2) when that lets a sequence's rows share one K/V pass (WHIRL_ATTN_WIDE=0: <= 16 columns as before)
+    //   attn_dq4: q4 KV decode / verify attention through attn_dq4 when the code object has it (fast mode on the 8060S; WHIRL_ATTN_DQ4=0: attn_wsplit1_q4 as before)
+    //   dq4_dyn: gfx1151 attn_dq4: launch only as many splits as the rows' key partition uses (same bits as the fixed fd_splits grid, cheaper combine; FAST-8S-1; WHIRL_DQ4_DYN=0: the fixed grid)
+    //   attn_ws4: gfx1151 f16 / int8 KV decode and verify attention through attn_ws4 (single-row groups) and attn_ws4g (multi-row verify groups, one KV read per split for up to 8 rows) when the code object has them; same partial bits as attn_wsplit1 one-query groups (DES-ATTN-8S T2 / T3). WHIRL_ATTN_WS4=0: the old attn_wsplit1 one-query groups (debug fallback, logged as override)
+    //   wide_verify: batched verify of more than 16 rows (WHIRL_WIDE_VERIFY=0: at most 16 as before)
+    //   moe_wide: wide verify on MoE models (balance / fast; WHIRL_MOE_WIDE=1): 17..32-row verify batches take the int8 decode experts, like a 1-token decode. Off by default: each extra row reads its own experts, and Ornith C=4 measured 1.7-2.4% slower with it (KG-2)
+    //   head_chunk: output-head rows per range in a wide verify (two 16-token passes per range; WHIRL_HEAD_CHUNK)
+    //   gv_group: Grouped same-input GEMV launches (WHIRL_GV_GROUP=0: off) and the largest token count that takes the grouped multi-token twins (WHIRL_GV_NMAX, 0: per type). Set by the CLI's applyRuntimeEnv after the load; the server keeps the defaults. (arch025-F7: were the process-wide qwen35::gv_group / gv_nmax, same initial values.)
+    //   prec_dec: precise decode (numerics precise mode, P-8): no int8 activations anywhere in decode / verify / small batches. Every matmul of n <= gvMax() rows takes the f16-activation WMMA GEMM (f32 accumulation; the same kernels and per-element bits as the prefill GEMM, so a row's result does not depend on n, the batch's other rows or the tuned config), MoE experts the grouped f16 GEMM. WHIRL_Q8DEC=1 / =0 overrides.
+    //   gdn_strix: GDN-8S (gfx1151, default on for dense and MXFP4 MoE models since rc6 / rc7; WHIRL_GDN_STRIX=0 turns it off): strix-llama.cpp's f16-WMMA chunked prefill (gdn_sx_prep / gdn_sx_scan) for runs of >= gdn_strix_min rows; same precision class and mode policy as gdn_wmma
+    //   gdn_ba_on: n>16 GDN prefill: one [beta; alpha] GEMM + gdn_gates_ba (WHIRL_GDN_BA=0 off)
+    //   gdn_in2_on: n>16 GDN prefill: one norm -> fp8 (qkv / gate) + f16 x16b ([beta; alpha]) (WHIRL_GDN_IN2=0 off)
+    //   attn_dqf_on: q8 / q8h KV prefill attention: dequantize the sequence's keys into f16 rows in ffn_g / ffn_u, then the f16 attn_kg (bit-identical to attn_kg_q8; WHIRL_ATTN_DQF=0 off); dq_ptab: identity page table
+    //   attn_seg: KG-3 (gfx1151): keys per range of the prefill attention key-range series (attn_prefill_wmma_s; 0 = one range when the keys fit the f16 scratch). WHIRL_ATTN_SEG (multiple of 256); f16 KV also walks its cache in ranges when set. Bit-identical either way.
+    //   attn_kg_on: GQA-grouped prefill attention (f16 / q8 / q8h / q8v KV; WHIRL_ATTN_KG=0 off)
+    //   h16_dq: KG-1: f16 outputs from quantized weights whatever the tuned choice (a fused quantized gemm_cN choice runs as dequant + gemm_chN, bitwise the same as gemm_cN), so whether a GEMM writes f16 never depends on autotune timings (dense non-MXFP4 models, R9700)
+    //   draft_window: WHIRL_DRAFT_WINDOW / _MIN: MTP draft attention over the first 256 + the last W positions once the context reaches draft_window_min (W = 0: off); the trunk and verify always see everything
+    //   moe_rbf: MXFP4 x fp8 grouped GEMM: row-block-fast gemm8r_* when present (WHIRL_MOE_RBF=0 -> gemm8_moe*)
+    const whirl::numerics::Flags& nf() const { return num_plan.flags; }
+    // numerics item relaxacc (fast): relaxed draft acceptance (from nf().relax_*)
+    whirl::relax::Params relax() const { return {nf().relax_on, nf().relax_k, nf().relax_alpha, nf().relax_eps, nf().relax_delta}; }
     std::string load_note;
     // the load's environment (LoadOptions::env; null for a Model that did not come from Model::load)
     std::shared_ptr<const whirl::config::EnvSnapshot> env_snap;
@@ -604,41 +587,14 @@ public:
     DevPtr gc_w = 0, gc_u = 0, gc_m = 0, gc_g = 0;
     std::uint64_t gc_w_bytes = 0, gc_u_bytes = 0, gc_m_bytes = 0;  // (GDN-8S scratch bound checks)
     std::uint32_t fwd_pos0 = 0;
-    bool gdn_chunked = true;
-    bool gdn_wmma = false;
-    // GDN-8S (gfx1151, default on for dense and MXFP4 MoE models since rc6 / rc7; WHIRL_GDN_STRIX=0 turns it
-    // off): strix-llama.cpp's f16-WMMA chunked prefill (gdn_sx_prep / gdn_sx_scan) for runs of >= gdn_strix_min
-    // rows; same precision class and mode policy as gdn_wmma
-    bool gdn_strix = false;
-    std::uint32_t gdn_strix_min = 256;
-    bool act_fuse = true;
-    bool attn_kx_on = true;
-    bool gdn_ba_on = true;   // n>16 GDN prefill: one [beta; alpha] GEMM + gdn_gates_ba (WHIRL_GDN_BA=0 off)
-    bool gdn_in2_on = true;  // n>16 GDN prefill: one norm -> fp8 (qkv / gate) + f16 x16b ([beta; alpha]) (WHIRL_GDN_IN2=0 off)
     std::uint64_t x16_bytes = 0;  // x16 allocation size (x16b sub-buffer bound check)
-    // q8 / q8h KV prefill attention: dequantize the sequence's keys into f16 rows in ffn_g / ffn_u, then
-    // the f16 attn_kg (bit-identical to attn_kg_q8; WHIRL_ATTN_DQF=0 off); dq_ptab: identity page table
-    bool attn_dqf_on = true;
-    // KG-3 (gfx1151): keys per range of the prefill attention key-range series (attn_prefill_wmma_s;
-    // 0 = one range when the keys fit the f16 scratch). WHIRL_ATTN_SEG (multiple of 256); f16 KV
-    // also walks its cache in ranges when set. Bit-identical either way.
-    std::uint32_t attn_seg = 0;
     DevPtr dq_ptab = 0;
     std::uint32_t dq_rows = 0;  // rows ffn_g / ffn_u hold
     // FC-1c: attn_kgs softmax state (m, l per query row and head) between key ranges of a prefill
     // longer than dq_rows (and for q4: every prefill dequantizes its keys into ffn_g / ffn_u)
     DevPtr dq_st_ml = 0;
     static constexpr std::uint32_t kDqMaxKeys = ops::kDqMaxKeys;  // dq_ptab covers keys [0, kDqMaxKeys)
-    bool attn_kg_on = true;  // GQA-grouped prefill attention (f16 / q8 / q8h / q8v KV; WHIRL_ATTN_KG=0 off)
-    bool ffn_h16 = false;
-    // KG-1: f16 outputs from quantized weights whatever the tuned choice (a fused quantized
-    // gemm_cN choice runs as dequant + gemm_chN, bitwise the same as gemm_cN), so whether a
-    // GEMM writes f16 never depends on autotune timings (dense non-MXFP4 models, R9700)
-    bool h16_dq = false;
     bool out_h16 = false;
-    bool g8t = false;
-    bool gemmh_on = true;
-    bool gemmhq_on = false;
 
     // ---- per-layer state
     std::vector<DevPtr> kcache, vcache, kscale, vscale;
@@ -679,10 +635,6 @@ public:
     bool all_logits = false;
     std::uint32_t snap_rows = 0;
     std::uint32_t draft_vocab = 0;  // WHIRL_DRAFT_VOCAB=N: the first N rows only (old experiment)
-    // WHIRL_DRAFT_WINDOW / _MIN: MTP draft attention over the first 256 + the last W positions once
-    // the context reaches draft_window_min (W = 0: off); the trunk and verify always see everything
-    std::uint32_t draft_window = 16384;
-    std::uint32_t draft_window_min = 65536;
     float draft_p_min = 0;
     std::uint32_t draft_n_min = 0;
     // speculative sampling of MTP drafts (numerics item specsample, server): per sequence; a
@@ -747,7 +699,6 @@ public:
                                            std::uint32_t n_min = 0);
     // Forget context rows at positions >= keep (rejected drafts, rollback).
     void dflashTrim(std::uint32_t slot, std::uint32_t keep);
-    std::uint32_t moe_bn_force = 0;
     std::vector<std::int32_t>* moe_dump = nullptr;
     std::uint32_t ff_scratch = 0;
     DevPtr moe_logits = 0, moe_ids = 0, moe_w = 0, moe_sg = 0, moe_g = 0, moe_u = 0, moe_xq = 0, moe_xd = 0, moe_ysh = 0,
@@ -756,9 +707,6 @@ public:
     // prefill experts on the MXFP4 x fp8 grouped GEMM (WHIRL_MOE_FP8=0 -> f16 gemm_moe);
     // decode experts on the whole-block kernels (WHIRL_MOE_MXW=0 -> generic moe_gu / moe_down).
     DevPtr moe_sx = 0;
-    bool moe_fp8 = true;
-    bool moe_mxw = true;
-    bool moe_rbf = true;  // MXFP4 x fp8 grouped GEMM: row-block-fast gemm8r_* when present (WHIRL_MOE_RBF=0 -> gemm8_moe*)
 
     // ---- vision (image prompts; see whirl/vismap.h). Text-only sequences never take
     // these paths (bitwise unchanged).
@@ -874,7 +822,7 @@ public:
     void autotuneGemm(std::size_t bucket, std::uint32_t reps, std::string* log);
     std::string writeTune() const;
     bool readTune(std::string_view text, std::size_t n_buckets);
-    bool useTiledFp8();
+    bool hasTiledFp8() const;  // the whole fragment-tiled fp8 set (numerics::Target::k_gemm8t)
 
     // ---- self-checks and microbenchmarks (bench / selftest)
     MatList layerMats(const Layer& L) const;
@@ -919,7 +867,7 @@ private:
     KvLayer mtpKv() const { return {mtp_kc, mtp_vc, mtp_ks, mtp_vs}; }
     KvArgs kvArgs(const KvLayer& kv, DevPtr kvbase, std::uint32_t tab0) const;
     void mark(OpClass cls);
-    hip::Function x8(hip::Function f, hip::Function ft) const { return g8t ? ft : f; }
+    hip::Function x8(hip::Function f, hip::Function ft) const { return nf().g8t ? ft : f; }
     void rmsnorm(DevPtr xin, DevPtr w, DevPtr out, std::uint32_t n, std::uint32_t count, std::uint32_t in_stride,
                  std::uint32_t out_stride);
     ops::DraftHeadProblem draftHeadProblem(const Mat& head) const;  // forward/mtp_verify.cpp (ops::chooseDraftHead)
@@ -929,7 +877,7 @@ private:
     void rmsnormIn(DevPtr xin, DevPtr w, DevPtr out, std::uint32_t n, std::span<const Mat> consumers, std::uint8_t cls);
     bool fused(std::uint32_t n) const;
     // most tokens of the int8 GEMV path in the current forward
-    std::uint32_t gvMax() const { return small_max > max_small_batch ? small_max : gemv_max; }
+    std::uint32_t gvMax() const { return small_max > max_small_batch ? small_max : nf().gemv_max; }
     void gemvKernels(std::span<const Mat> ws, std::span<const DevPtr> ys, std::uint32_t n, std::int32_t acc, DevPtr xqp, DevPtr xdp);
     void rmsnormQ8(DevPtr xin, DevPtr w, DevPtr out, std::uint32_t n);
     void elementwise(hip::Function f, DevPtr a, DevPtr b, std::uint32_t n);
@@ -971,6 +919,10 @@ private:
 // reads %LOCALAPPDATA%\whirl\tune4-<file>-<size>[-gfx1151].txt, else autotunes and
 // writes it. `log` receives the human-readable lines.
 void loadOrTune(Model& m, const std::string& model_path, std::string& log);
+// arch025-N2b: numerics::plan's inputs from a loaded Model (tune.cpp; k_gdn_v0 stays false: a front end that applies
+// WHIRL_GDN_V0 looks the kernel up itself, as before)
+whirl::numerics::Target numericsTarget(const Model& m);
+whirl::numerics::Request numericsRequest(const Model& m, const whirl::config::EnvSnapshot& env);
 
 // Multi-token GEMV selection overrides (A/B testing), as "nt:value,..." lists:
 // rows per wave (r = 1, 2, 4), WMMA variant for every type (0..8), and the

@@ -168,11 +168,8 @@ struct Target {
     bool k_kv_q4 = false;      // q4 KV kernels present (gfx1151)
     bool kv_explicit = false;  // WHIRL_KV set to a format (the KV items then do not choose)
     bool fast_kv_q8h = false;  // fast takes q8h for kvq4 on dense models (KvCaps::fast_q8h, gfx1151)
-    bool gdn_strix = false;    // gdnwmma runs as the gfx1151 strix-llama.cpp chunked prefill (GDN-8S)
-    // ---- arch025-N2a: what Plan::flags needs besides the above (loadOrTune reads these from Model today).
-    // gdn_strix above is loadOrTune's own result (tune.cpp:905-914, passed in before N2a); plan() computes the same
-    // value into flags.gdn_strix from the fields below and uses (gdn_strix || flags.gdn_strix) for the item, so a
-    // caller that sets either gets the same item. N2b deletes the input field.
+    // ---- arch025-N2a: what Plan::flags needs besides the above. arch025-N2b: the gdn_strix input is gone; plan()
+    // decides flags.gdn_strix from the fields below (gdnwmma runs as the gfx1151 strix-llama.cpp chunked prefill, GDN-8S).
     bool strix_profile = false;  // device::Profile::gdn_strix (gfx1151 row)
     bool k_gdn_sx = false;       // gdn_sx_prep and gdn_sx_scan present
     bool gdn_strix_shape = false;  // d_state 128, head V 128, n_k_heads > 0, n_v_heads % n_k_heads == 0, ratio <= 4
@@ -288,7 +285,7 @@ struct Plan {
     // into the f16 GEMM with f32 accumulation (precise). Set by the loader (setQ8dec).
     bool q8dec = true;
     bool q8dec_default = true;  // the mode's choice (q8decDefault) before WHIRL_Q8DEC
-    // arch025-N2a: the Model's execution flags this plan decides (not read by anyone yet: N2b)
+    // arch025-N2a: the Model's execution flags this plan decides; arch025-N2b: the Model reads them (Model::nf())
     Flags flags;
     bool on(Item it) const { return items[static_cast<std::size_t>(it)].enabled; }
     // Everything here that decides the bits of the output, as "key=value;" in a fixed order: the mode, every item's
@@ -304,6 +301,10 @@ struct Plan {
 // overrides afterwards until N2b). Throws std::invalid_argument / std::out_of_range where loadOrTune threw
 // (WHIRL_RELAX_K / _ALPHA / _EPS / _DELTA that std::stoul / std::stof reject, with relaxacc on).
 Plan plan(const Request& r, const Target& t);
+// arch025-N2b: the front end's after-load knobs (the CLI's applyRuntimeEnv, the server's knob block) on a plan made with
+// Front::none: the same rules plan() applies for r.front / r.runtime (plan(r) with a front == plan(r without) then this).
+// k_gdn_v0 = Target::k_gdn_v0. Front::none: no change.
+void applyFront(Plan& p, Front f, const RuntimeValues& v, bool k_gdn_v0);
 // Per-item override from the environment: `forced` = the effective value after the variable.
 // Records "WHIRL_X=v: item on (lossy, user-requested)" or "... item off" when it differs.
 void applyOverride(Plan& p, Item it, const char* var, const std::string& value, bool forced, bool applicable);

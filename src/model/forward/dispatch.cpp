@@ -46,7 +46,7 @@ void Model::gemvLaunch(std::span<const Mat> ws, DevPtr xin, std::span<const DevP
     if (wide == ops::GemvWide::head_split) {
         // output head: per range of rows, tokens [0, 16) then [n - 16, n) (rows of the overlap are
         // computed twice, to the same bits); the second pass finds the range's weights in cache
-        const u32 V = w.nrows, chunk = head_chunk;
+        const u32 V = w.nrows, chunk = nf().head_chunk;
         for (u32 r0 = 0; r0 < V; r0 += chunk) {
             const u32 cr = std::min(chunk, V - r0);
             for (const u32 t0 : {0u, n - max_small_batch}) {
@@ -70,7 +70,7 @@ void Model::gemvLaunch(std::span<const Mat> ws, DevPtr xin, std::span<const DevP
 void Model::gemvKernels(std::span<const Mat> ws, std::span<const DevPtr> ys, u32 n, i32 acc, DevPtr xqp, DevPtr xdp) {
     ops::MatShape sh[3];
     for (std::size_t si = 0; si < ws.size(); ++si) sh[si] = matShape(ws[si]);
-    const ops::GemvTune tn{&gemv_r, &gemv_w, &gemv_w_head, gv_nmax};
+    const ops::GemvTune tn{&gemv_r, &gemv_w, &gemv_w_head, nf().gv_nmax};
     const ops::GemvPlan p = ops::chooseGemvTile(sh, ws.size(), n, k, tn);
     const i32 ncols = I(ws[0].ncols);
     if (p.grouped) {
@@ -98,7 +98,7 @@ void Model::gemvKernels(std::span<const Mat> ws, std::span<const DevPtr> ys, u32
 // Matmuls (no accumulate) of ws on the same input into ys. On the int8 GEMV
 // path the matrices of one type run as one grouped launch (bitwise the same).
 void Model::matmulGroup(std::span<const Mat> ws, DevPtr xin, std::span<const DevPtr> ys, u32 n) {
-    const bool ok = gv_group && k.gv_grp && n <= gvMax() && !float_gemv && ops::preciseAllows(ops::BitClass::q8_row, prec_dec, n, gvMax());
+    const bool ok = nf().gv_group && k.gv_grp && n <= gvMax() && !nf().float_gemv && ops::preciseAllows(ops::BitClass::q8_row, nf().prec_dec, n, gvMax());
     bool done[3] = {false, false, false};
     for (std::size_t i = 0; i < ws.size(); ++i) {
         if (done[i]) continue;
@@ -172,7 +172,7 @@ void Model::matmul(const Mat& w, DevPtr xin, DevPtr y, u32 n, bool accumulate) {
             x16_count = count;
             x16_fp8 = true;
         }
-        const ops::Gemm8Plan g8 = ops::chooseGemm8(w.nrows, n, out_h16, g8t, k);
+        const ops::Gemm8Plan g8 = ops::chooseGemm8(w.nrows, n, out_h16, nf().g8t, k);
         hip::launch(g8.f, g8.grid, g8.block, 0, stream, w.ptr, w.row_bytes, w.ref, x16, sx8, y, ncols, nrows, I(n), acc);
     } else {
         const u32 count = n * w.ncols;
@@ -224,11 +224,11 @@ void Model::gemmF16(const Mat& w, DevPtr x16in, DevPtr y, u32 n, i32 acc) {
 // were function-local statics read at the first call).
 ops::GemmFlags Model::gemmFlags() const {
     ops::GemmFlags f;
-    f.prec_dec = prec_dec;
+    f.prec_dec = nf().prec_dec;
     f.out_h16 = out_h16;
-    f.h16_dq = h16_dq;
-    f.gemmh_on = gemmh_on;
-    f.gemmhq_on = gemmhq_on;
+    f.h16_dq = nf().h16_dq;
+    f.gemmh_on = nf().gemmh_on;
+    f.gemmhq_on = nf().gemmhq_on;
     f.prec_gemvh = prec_gemvh;
     f.prec_gs = prec_gs;
     f.gemvh_cap = device::profile(arch).gemvh_grid_by_rows ? kernels::gemvhCap() : 0;
@@ -239,13 +239,13 @@ ops::GemmFlags Model::gemmFlags() const {
 
 // Every fp8 activation producer writes the fragment-tiled layout and the fp8
 // GEMMs run gemm8t (only when the whole kernel set is present).
-bool Model::useTiledFp8() {
+// arch025-N2b: a pure predicate (numerics::Target::k_gemm8t); numerics::plan sets Flags::g8t (was set here)
+bool Model::hasTiledFp8() const {
     for (std::size_t ci = 0; ci < gemm8t_cfgs.size(); ++ci)
         if (k.gemm8t[ci] == nullptr || k.gemm8th[ci] == nullptr) return false;
     if (k.qact_fp8t == nullptr || k.rmsnorm_x8t == nullptr || k.silu_mul_x8t == nullptr || k.silu_mul_x8ht == nullptr ||
         k.gated_norm_x8t == nullptr || k.gated_norm_x8ht == nullptr)
         return false;
-    g8t = true;
     return true;
 }
 
@@ -273,7 +273,7 @@ ops::H16Tune Model::h16Tune() const {
     h.from_candidates = device::profile(arch).h16_from_candidates;
     h.tune_mask = tune_mask;
     h.n_choices = n_choices;
-    h.h16_dq = h16_dq;
+    h.h16_dq = nf().h16_dq;
     return h;
 }
 
@@ -283,7 +283,7 @@ std::optional<ops::ActIn> Model::actCommon(std::span<const Mat> consumers, u32 n
     if (consumers.size() > 4) throw ModelError("ActCommonConsumers");
     ConsumerShapes cs;
     for (const Mat& w : consumers) cs.s[cs.n++] = matShape(w);
-    return ops::chooseActCommon(cs.span(), n, cls, act_fuse, matmulFlags(), k);
+    return ops::chooseActCommon(cs.span(), n, cls, nf().act_fuse, matmulFlags(), k);
 }
 
 // Prefill rmsnorm of x (n rows of n_embd) for the matmuls `consumers`: when
@@ -295,7 +295,7 @@ void Model::rmsnormIn(DevPtr xin, DevPtr w, DevPtr out, u32 n, std::span<const M
     if (consumers.size() > 4) throw ModelError("RmsnormInConsumers");
     ConsumerShapes cs;
     for (const Mat& m : consumers) cs.s[cs.n++] = matShape(m);
-    const ops::RmsnormInPlan p = ops::chooseRmsnormIn(E, cs.span(), n, cls, act_fuse, g8t, matmulFlags(), k);
+    const ops::RmsnormInPlan p = ops::chooseRmsnormIn(E, cs.span(), n, cls, nf().act_fuse, nf().g8t, matmulFlags(), k);
     if (p.f != nullptr) {
         hip::launch(p.f, D(n), D(256), 0, stream, xin, w, x16, sx8, I(E), cfg.eps);
         xq_src = 0;
@@ -322,10 +322,10 @@ bool Model::gdnIn2(const GdnW& g, u32 n) const {
     p.ba_buf = ba_buf != 0;
     p.ba_contiguous = rowsContiguous(g.beta, g.alpha);
     ops::GdnIn2Flags f;
-    f.gdn_in2_on = gdn_in2_on;
-    f.gdn_ba_on = gdn_ba_on;
-    f.act_fuse = act_fuse;
-    f.g8t = g8t;
+    f.gdn_in2_on = nf().gdn_in2_on;
+    f.gdn_ba_on = nf().gdn_ba_on;
+    f.act_fuse = nf().act_fuse;
+    f.g8t = nf().g8t;
     return ops::chooseGdnIn2(p, f, matmulFlags(), k);
 }
 
@@ -344,10 +344,10 @@ ops::MatShape Model::matShape(const Mat& w) const {
 
 ops::MatmulFlags Model::matmulFlags() const {
     ops::MatmulFlags f;
-    f.prec_dec = prec_dec;
-    f.float_gemv = float_gemv;
-    f.fp8_prefill = fp8_prefill;
-    f.fp8_mask = fp8_mask;
+    f.prec_dec = nf().prec_dec;
+    f.float_gemv = nf().float_gemv;
+    f.fp8_prefill = nf().fp8_prefill;
+    f.fp8_mask = nf().fp8_mask;
     f.mm_class = mm_class;
     f.gv_max = gvMax();
     return f;
@@ -395,7 +395,7 @@ std::string Model::precMissing() const {
 }
 
 // Decode fusions apply to small batches on the int8 GEMV path (ops::fusedRows).
-bool Model::fused(u32 n) const { return ops::fusedRows(n, small_max, float_gemv, no_fuse); }
+bool Model::fused(u32 n) const { return ops::fusedRows(n, small_max, nf().float_gemv, nf().no_fuse); }
 
 bool Model::fusedDecode() const {
     if (!fused(max_small_batch)) return false;
@@ -410,7 +410,7 @@ bool Model::fusedDecode() const {
 // MoE: balance / fast with WHIRL_MOE_WIDE=1 only (17..32 rows on the int8 decode experts, see
 // moeBlock); precise MoE keeps 16-row verifies (ops::wideAllowed)
 bool Model::wideCapable() const {
-    return ops::wideAllowed(wide_verify, cfg.moe, moe_wide, prec_dec) && fusedDecode() && ops::wideKernels(k);
+    return ops::wideAllowed(nf().wide_verify, cfg.moe, nf().moe_wide, nf().prec_dec) && fusedDecode() && ops::wideKernels(k);
 }
 
 bool Model::wideOk() const { return wideCapable() && gdn_replay; }

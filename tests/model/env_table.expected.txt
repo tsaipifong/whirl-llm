@@ -612,7 +612,8 @@ resolveFdSplits(q4)=256 resolveFdSplits(f16)=64
 == tune mx1201 G8T=1
 (no change)
 == tune moe1201 MOE_FP8=0
-(no change)
++D exec: moe_fp8=0
+-D exec: moe_fp8=1
 == tune moe1201 MOE_FP8=1
 (no change)
 == tune moe1201 MOE_FP8=auto
@@ -623,7 +624,8 @@ resolveFdSplits(q4)=256 resolveFdSplits(f16)=64
 -D exec: fp8_prefill=1
 -D exec: moe_fp8=1
 == tune moe1201 FP8=1 MOE_FP8=0
-(no change)
++D exec: moe_fp8=0
+-D exec: moe_fp8=1
 == tune mx1201 Q4_RELAXED=1 GDN_WMMA=0
 (no change)
 == tune mx1201 Q4_RELAXED=1 FFN_H16=0

@@ -647,7 +647,7 @@ DecodeResult specDecode(q::Model& model, const Tok& tok, u32 first, u32 n_prompt
         return generated.size() >= opt.max_tokens;
     };
     // relaxacc (fast mode): top-K of the verify rows for the relaxed greedy rule (whirl/relax_accept.h)
-    const whirl::relax::Params& rx = model.relax;
+    const whirl::relax::Params rx = model.relax();
     const u32 rk = rx.topk();
     hip::Function rx_topk = nullptr;
     device::DevBuf rx_own;
@@ -1027,24 +1027,20 @@ bool loadDraftModelEnv(q::Model& m, const Args& a) {
     return true;
 }
 
-void applyRuntimeEnv(q::Model& m) {
-    if (envGet("FLOAT_GEMV")) m.float_gemv = true;
+// arch025-N2b (R-5): the CLI's after-load knobs are numerics::applyFront(Front::cli) on the model's plan (the rules
+// that were here, main.cpp:1030-1048 and the chat's WHIRL_GDN_V0 at :1340, moved there in arch025-N2a). gdn_v0: the
+// chat only (the other commands never applied it); its kernel is looked up only when WHIRL_GDN_V0 is set, as before.
+// applyGemvEnv sets tune rows (not a flag) and stays here.
+void applyRuntimeEnv(q::Model& m, bool gdn_v0 = false) {
+    namespace nu = whirl::numerics;
+    nu::RuntimeValues rv;
+    for (const auto& e : nu::RuntimeValues::names()) rv.*e.field = envGet(e.name);
+    if (!gdn_v0) rv.gdn_v0.reset();
+    hip::Function fv0 = nullptr;
+    if (rv.gdn_v0) fv0 = m.module.getFunctionOpt("gdn_step_norm_v0");
     q::applyGemvEnv(m);
-    if (auto v = envU32("DBG")) m.dbg_flags = *v;
-    if (auto v = envU32("GEMV_MAX")) m.gemv_max = std::clamp<u32>(*v, 1, q::max_small_batch);
-    if (envGet("NO_GRAPH")) m.use_graph = false;
-    if (envGet("NO_FUSE")) m.no_fuse = true;
-    if (auto v = envU32("DRAFT_WINDOW")) m.draft_window = *v;
-    if (auto v = envU32("DRAFT_WINDOW_MIN")) m.draft_window_min = *v;
-    if (envGet("NAIVE_ATTN")) m.naive_attn = true;
-    if (auto v = envGet("ATTN_WIDE"); v && *v == "0") m.attn_wide = false;
-    if (auto v = envGet("ATTN_DQ4"); v && *v == "0") m.attn_dq4 = false;
-    if (auto v = envGet("DQ4_DYN"); v && *v == "0") m.dq4_dyn = false;
-    if (auto v = envGet("ATTN_WS4"); v && *v == "0") m.attn_ws4 = false;
-    if (auto v = envU32("MOE_BN")) m.moe_bn_force = *v;
-    if (envGet("GDN_SEQ")) m.gdn_chunked = false;
-    if (auto v = envGet("GV_GROUP")) m.gv_group = *v != "0";
-    if (auto v = envU32("GV_NMAX")) m.gv_nmax = *v;
+    nu::applyFront(m.num_plan, nu::Front::cli, rv, fv0 != nullptr);
+    if (m.nf().gdn_v0) m.k.gdn_step_norm = fv0;
 }
 
 struct Loaded {
@@ -1337,9 +1333,7 @@ int cmdChat(const Args& a) {
         q::loadOrTune(model, path, log);
         out(log);
     }
-    if (envGet("GDN_V0")) {
-        if (auto fv0 = model.module.getFunctionOpt("gdn_step_norm_v0")) model.k.gdn_step_norm = fv0;
-    }
+    // (WHIRL_GDN_V0: applyRuntimeEnv(model, true) below, arch025-N2b)
     // MTP block as Q4_K from Q6_K or Q8_0 (drafts only; default, WHIRL_MTP_Q4=0 keeps the file's types)
     if (envFlag("MTP_Q4", true)) model.requantMtpQ4();
     loadLog(model, L.stats);
@@ -1376,7 +1370,7 @@ int cmdChat(const Args& a) {
     q::Profile prof;
     const bool profiling = envGet("PROFILE").has_value();
     if (profiling) model.prof = &prof;
-    applyRuntimeEnv(model);
+    applyRuntimeEnv(model, true);
     if (use_dflash) use_dflash = loadDraftModelEnv(model, a);
 
     // MTP speculative decode is exact greedy: on whenever the checkpoint has a nextn

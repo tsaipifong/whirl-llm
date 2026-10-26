@@ -12,7 +12,7 @@ namespace whirl::qwen35 {
 // pos_buf, adding into x.
 void Model::draftAttn(const AttnW& a, u32 n) {
     // restored on every exit, also when attnBlock throws (OVH-C1)
-    ValueScope<std::int32_t> draft_win(attn_win, draftWindowArg(draft_window, draft_window_min));
+    ValueScope<std::int32_t> draft_win(attn_win, draftWindowArg(nf().draft_window, nf().draft_window_min));
     attnBlock(a, mtpKv(), n);
 }
 
@@ -56,7 +56,7 @@ void Model::attnBlock(const AttnW& a, const KvLayer& lkv, u32 n) {
         return;
     }
     // (q8 KV: always the fused prep - it holds the quantizer and the rotation)
-    const ops::AttnPrep prep = ops::chooseAttnPrep(mrope_on, hd, kv_q8, no_fuse, k);
+    const ops::AttnPrep prep = ops::chooseAttnPrep(mrope_on, hd, kv_q8, nf().no_fuse, k);
     if (prep == ops::AttnPrep::mrope) {
         // vision: image prompt / decode after one: multi-section RoPE positions
         const auto& sec = cfg.rope_sections;
@@ -80,7 +80,7 @@ void Model::attnBlock(const AttnW& a, const KvLayer& lkv, u32 n) {
         hip::launch(k.kv_store, D(n), D(256), 0, stream, kv_k, kv_v, kva, pos_buf, I(row));
     }
     const float scale = 1.0f / std::sqrt(static_cast<float>(hd));
-    const ops::AttnCore core = ops::chooseAttnCore(n, small_max, hd, naive_attn);
+    const ops::AttnCore core = ops::chooseAttnCore(n, small_max, hd, nf().naive_attn);
     if (core == ops::AttnCore::decode) {
         // flash-decoding; grid.z = query (speculative verify), query t sees positions up to pos_buf[t]. The kernel,
         // its query groups, the split count and the combine come from ops::chooseAttnDecode (K-3).
@@ -99,13 +99,13 @@ void Model::attnBlock(const AttnW& a, const KvLayer& lkv, u32 n) {
         ap.win = kva.win;
         ap.o_on_gemv = fused(n) && k.gemvq[ti(a.o.ty)] != nullptr && n <= gvMax();
         ops::AttnDecodeFlags af;
-        af.attn_ws4 = attn_ws4;
-        af.attn_dq4 = attn_dq4;
-        af.dq4_dyn = dq4_dyn;
-        af.attn_wide = attn_wide;
+        af.attn_ws4 = nf().attn_ws4;
+        af.attn_dq4 = nf().attn_dq4;
+        af.dq4_dyn = nf().dq4_dyn;
+        af.attn_wide = nf().attn_wide;
         af.fd_splits = fd_splits;
-        af.dbg_flags = dbg_flags;
-        af.prec_dec = prec_dec;
+        af.dbg_flags = nf().dbg_flags;
+        af.prec_dec = nf().prec_dec;
         const ops::AttnDecodePlan pl = ops::chooseAttnDecode(ap, af, k, k.caps, device::profile(arch));
         if (pl.kind == ops::AttnDecodeKind::split)
             hip::launch(pl.f, pl.grid, pl.block, 0, stream, qf, kva, part_ml, part_acc, I(cfg.n_head), I(cfg.n_head_kv), I(hd), I(2 * hd), pos_buf,
@@ -157,10 +157,10 @@ void Model::prefillAttn(DevPtr q, const KvArgs& kva, DevPtr out, DevPtr pos, u32
     pp.dq_ptab = dq_ptab != 0;
     pp.dq_st_ml = dq_st_ml != 0;
     ops::AttnPrefillFlags pf;
-    pf.attn_kg_on = attn_kg_on;
-    pf.attn_kx_on = attn_kx_on;
-    pf.attn_dqf_on = attn_dqf_on;
-    pf.attn_seg = attn_seg;
+    pf.attn_kg_on = nf().attn_kg_on;
+    pf.attn_kx_on = nf().attn_kx_on;
+    pf.attn_dqf_on = nf().attn_dqf_on;
+    pf.attn_seg = nf().attn_seg;
     const ops::AttnPrefillPlan pl = ops::chooseAttnPrefill(pp, pf, k);
     const i32 H = I(cfg.n_head), HKV = I(cfg.n_head_kv), QS = I(2 * cfg.head_dim);
     for (const ops::AttnStep& s : pl.steps) {

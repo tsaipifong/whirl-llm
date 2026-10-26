@@ -22,7 +22,7 @@ void Model::ffnBlock(DevPtr post_norm, const Mat& gate_w, const Mat& up, const M
     if (!fused(n) && cfg.n_ff % 4 == 0 && cfg.n_ff <= 1024 * 24) down_in = actCommon(std::span<const Mat>(&down, 1), n, 4);
     // f16 gate / up outputs straight into silu -> fp8 (MXFP4 speed mode)
     const ops::ActIn gu_in = actCommon(gu, n, 2).value_or(ops::ActIn::gemv);
-    const bool h16 = ffn_h16 && down_in.has_value() && cfg.n_ff % 8 == 0 && h16Out(gate_w, n, 2) && h16Out(up, n, 2) &&
+    const bool h16 = nf().ffn_h16 && down_in.has_value() && cfg.n_ff % 8 == 0 && h16Out(gate_w, n, 2) && h16Out(up, n, 2) &&
                      ((gu_in == ops::ActIn::fp8 && *down_in == ops::ActIn::fp8 && k.silu_mul_x8h != nullptr) ||
                       (gu_in == ops::ActIn::f16 && *down_in == ops::ActIn::f16 && k.silu_mul_x16h != nullptr));
     out_h16 = h16;
@@ -37,7 +37,7 @@ void Model::ffnBlock(DevPtr post_norm, const Mat& gate_w, const Mat& up, const M
         silu_x = *down_in == ops::ActIn::fp8 ? x8(k.silu_mul_x8h, k.silu_mul_x8ht) : k.silu_mul_x16h;
     else if (down_in)
         silu_x = *down_in == ops::ActIn::fp8 ? x8(k.silu_mul_x8, k.silu_mul_x8t) : k.silu_mul_x16;
-    if (fused(n) && ops::preciseAllows(ops::BitClass::q8_row, prec_dec, n, small_max)) {  // fused(n): n <= small_max
+    if (fused(n) && ops::preciseAllows(ops::BitClass::q8_row, nf().prec_dec, n, small_max)) {  // fused(n): n <= small_max
         hip::launch(k.silu_mul_q8, D(n * cfg.n_ff / 256), D(256), 0, stream, ffn_g, ffn_u, xq, xd, I(n * cfg.n_ff));
         xq_src = ffn_g;
         xq_n = n;
@@ -89,14 +89,14 @@ void Model::moeBlock(DevPtr post_norm, const Mat& sg, const Mat& su, const Mat& 
     mp.sx_buf = moe_sx != 0;
     mp.tiles64_buf = moe_tiles64 != 0;
     ops::MoeFlags mf;
-    mf.prec_dec = prec_dec;
+    mf.prec_dec = nf().prec_dec;
     mf.small_max = small_max;
     mf.max_verify_rows = max_verify_rows;
     mf.max_small_batch = max_small_batch;
-    mf.moe_mxw = moe_mxw;
-    mf.moe_rbf = moe_rbf;
-    mf.moe_fp8 = moe_fp8;
-    mf.moe_bn_force = moe_bn_force;
+    mf.moe_mxw = nf().moe_mxw;
+    mf.moe_rbf = nf().moe_rbf;
+    mf.moe_fp8 = nf().moe_fp8;
+    mf.moe_bn_force = nf().moe_bn_force;
     const ops::MoePlan pl = ops::chooseMoe(mp, mf, k, k.silu_mul_x8h);
     const bool small = pl.small;
     // precise decode: f32-activation experts (moe_gu_f / moe_down_f) and the shared expert on
@@ -126,7 +126,7 @@ void Model::moeBlock(DevPtr post_norm, const Mat& sg, const Mat& su, const Mat& 
         hip::download(moe_dump->data() + old, moe_ids, static_cast<std::size_t>(n) * K * 4);
     }
     const DevPtr ysh = mo.sh_gate != 0 ? moe_ysh : 0;
-    if (small && prec_dec) {
+    if (small && nf().prec_dec) {
         // precise decode experts: f32 h (no int8 / f16 rounding), f32 accumulation, every
         // pair on its own waves (a token's result does not depend on the batch)
         if (!pl.gu_split) {

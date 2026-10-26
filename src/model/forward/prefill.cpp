@@ -50,7 +50,7 @@ void Model::prefillMtpChunk(std::span<const u32> tokens, u32 pos0, std::size_t o
 }
 
 bool Model::canSegment() const {
-    return seqs.size() > 1 && k.attn_prep != nullptr && !no_fuse && !naive_attn && cfg.head_dim == 256 && cfg.d_conv == 4;
+    return seqs.size() > 1 && k.attn_prep != nullptr && !nf().no_fuse && !nf().naive_attn && cfg.head_dim == 256 && cfg.d_conv == 4;
 }
 
 // Several sequences' prefill chunks as one forward (each chunk longer than

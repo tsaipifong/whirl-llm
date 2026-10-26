@@ -67,9 +67,9 @@ void Model::gdnChunked(std::size_t i, DevPtr conv_o, DevPtr alpha_b, DevPtr beta
     cp.gc_w_bytes = gc_w_bytes;
     cp.gc_u_bytes = gc_u_bytes;
     ops::GdnChunkFlags cf;
-    cf.gdn_strix = gdn_strix;
-    cf.gdn_strix_min = gdn_strix_min;
-    cf.gdn_wmma = gdn_wmma;
+    cf.gdn_strix = nf().gdn_strix;
+    cf.gdn_strix_min = nf().gdn_strix_min;
+    cf.gdn_wmma = nf().gdn_wmma;
     const ops::GdnChunkPlan pl = ops::chooseGdnChunk(cp, cf, k);
     if (pl.kind == ops::GdnChunk::strix) {
         // GDN-8S: strix-llama.cpp chunks (CL = 32) on the existing scratch: T' | P in gc_m, Vh in gc_w,
@@ -97,7 +97,7 @@ void Model::gdnChunked(std::size_t i, DevPtr conv_o, DevPtr alpha_b, DevPtr beta
 
 void Model::gdnScan(std::size_t i, DevPtr conv_o, DevPtr alpha_b, DevPtr beta_b, DevPtr out, u32 n, float scale) {
     const u32 ch = cfg.convCh();
-    if (ops::chooseGdnScan(gdn_chunked, n, gdnShapeOf(cfg)) == ops::GdnScan::chunked) {
+    if (ops::chooseGdnScan(nf().gdn_chunked, n, gdnShapeOf(cfg)) == ops::GdnScan::chunked) {
         gdnChunked(i, conv_o, alpha_b, beta_b, out, n, scale);
     } else {
         hip::launch(k.gdn_seq_128, D(cfg.n_v_heads, cfg.headV() / 32), D(128), 0, stream, conv_o, alpha_b, beta_b, ssm_state[i], out, I(n),
@@ -111,7 +111,7 @@ void Model::gdnLayer(std::size_t i, const GdnW& g, u32 n, bool gdn_in2) {
     const u32 ch = cfg.convCh();
     const ops::GdnShape gs = gdnShapeOf(cfg);
     ops::GdnBaProblem bap;
-    bap.gdn_ba_on = gdn_ba_on;
+    bap.gdn_ba_on = nf().gdn_ba_on;
     bap.ba_buf = ba_buf != 0;
     bap.ba_contiguous = rowsContiguous(g.beta, g.alpha);
     // MXFP4 speed mode: the qkv / z GEMMs write f16 for the conv and the gated norm
@@ -125,8 +125,8 @@ void Model::gdnLayer(std::size_t i, const GdnW& g, u32 n, bool gdn_in2) {
     hp.s = gs;
     hp.fused = fused(n);
     ops::GdnH16Flags hf;
-    hf.ffn_h16 = ffn_h16;
-    hf.act_fuse = act_fuse;
+    hf.ffn_h16 = nf().ffn_h16;
+    hf.act_fuse = nf().act_fuse;
     const bool gdn_h16 = ops::chooseGdnH16(hp, hf, matmulFlags(), h16Tune(), k);
     out_h16 = gdn_h16;
     {
@@ -139,7 +139,7 @@ void Model::gdnLayer(std::size_t i, const GdnW& g, u32 n, bool gdn_in2) {
         const u32 nh = cfg.n_v_heads;
         const u32 n_seg = bplan ? static_cast<u32>(bplan->segs.size()) : 1;
         const GdnSegs segs_c = bplan ? gdnSegsBatch(*bplan, i, true) : gdnSegsSingle(i, true, n);
-        const ops::GdnDecodePlan dp = ops::chooseGdnDecode(g.beta.ty, n, small_max, prec_dec, dbg_flags, bap, k);
+        const ops::GdnDecodePlan dp = ops::chooseGdnDecode(g.beta.ty, n, small_max, nf().prec_dec, nf().dbg_flags, bap, k);
         if (dp.gates == ops::GdnDecodeGates::precise_ba || dp.gates == ops::GdnDecodeGates::precise_split) {
             // precise decode: [beta; alpha] on the f16 GEMM from h (f32, written by
             // rmsnormQ8), the gates, then the same conv step as below
@@ -196,7 +196,7 @@ void Model::gdnLayer(std::size_t i, const GdnW& g, u32 n, bool gdn_in2) {
             matmul(g.alpha, h, alpha, n, false);
             hip::launch(k.gdn_gates, D((nh + 63) / 64), D(64), 0, stream, beta, alpha, g.dt, g.a, I(nh), I(cfg.n_v_heads));
         }
-        const ops::GdnConvPlan cv = ops::chooseGdnConv(!psegs.empty(), gdn_h16, n, gs, act_fuse, k);
+        const ops::GdnConvPlan cv = ops::chooseGdnConv(!psegs.empty(), gdn_h16, n, gs, nf().act_fuse, k);
         if (cv.conv == ops::GdnConv::seg_h16) {
             // the solo f16 conv kernels per segment (segmented == solo bitwise)
             for (const PRows& ps : psegs) {
@@ -245,7 +245,7 @@ void Model::gdnLayer(std::size_t i, const GdnW& g, u32 n, bool gdn_in2) {
                         beta + static_cast<u64>(ps.r0) * cfg.n_v_heads * 4,
                         gdn_out + static_cast<u64>(ps.r0) * cfg.n_v_heads * cfg.headV() * 4, ps.n, scale);
             }
-        } else if (ops::chooseGdnScan(gdn_chunked, n, gs) == ops::GdnScan::chunked) {
+        } else if (ops::chooseGdnScan(nf().gdn_chunked, n, gs) == ops::GdnScan::chunked) {
             gdnChunked(i, conv_out, alpha, beta, gdn_out, n, scale);
         } else {
             hip::launch(k.gdn_seq_128, D(cfg.n_v_heads, cfg.headV() / 32), D(128), 0, stream, conv_out, alpha, beta, ssm_state[i], gdn_out,
@@ -254,7 +254,7 @@ void Model::gdnLayer(std::size_t i, const GdnW& g, u32 n, bool gdn_in2) {
         }
         mark(OpClass::gdn_rec);
         // gated norm straight into the out-proj GEMM input when possible
-        const ops::GdnNormPlan gn = ops::chooseGdnGatedNorm(matShape(g.out), n, gs, gdn_h16, act_fuse, g8t, matmulFlags(), k);
+        const ops::GdnNormPlan gn = ops::chooseGdnGatedNorm(matShape(g.out), n, gs, gdn_h16, nf().act_fuse, nf().g8t, matmulFlags(), k);
         if (gn.f != nullptr) {
             hip::launch(gn.f, D(n), D(256), 0, stream, gdn_out, z, g.norm, x16, sx8, I(cfg.n_v_heads), cfg.eps);
             xq_src = 0;

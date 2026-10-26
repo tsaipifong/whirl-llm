@@ -162,25 +162,48 @@ void testPlanTable() {
     std::printf("  numerics plan table: %zu S0b-2 cells, %zu fields compared\n", n_cells, n_fields);
 }
 
-// Before N2b every caller passes no overrides (load_overrides false) and its own Target::gdn_strix (loadOrTune's
-// result): the items, notes and q8dec must be what they were, and the new Target fields must not change them.
-void testUnwiredCallerUnchanged() {
+// arch025-N2b: the front ends call numerics::applyFront on the plan loadOrTune made (Front::none), after the load.
+// It must give exactly what plan() gives with the same front and runtime values in the Request (the N2a table cells
+// above use that form), for every card x model x mode and front, over runtime values drawn from each knob's parse
+// classes (unset, "", "0", "1", numbers, prefix numbers, junk). gdn_v0 with and without the kernel.
+void testApplyFrontEqualsPlan() {
+    static const char* const vals[] = {nullptr, "", "0", "1", "2", "7", "16", "32", "100", "4096", "65536", "8192x", "99", "abc", "-1", "4294967296"};
+    constexpr std::size_t n_vals = sizeof(vals) / sizeof(vals[0]);
+    std::uint64_t rng = 0x9e3779b97f4a7c15ull;
+    auto next = [&rng] {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        return rng;
+    };
+    std::size_t n = 0;
     for (const CardFake& c : k_cards)
         for (const char* model : {"swift", "moe"})
-            for (const char* mode : {"precise", "balance", "fast"}) {
-                const nu::Request r = nu::parseMode(mode, "command line");
-                const nu::Target tn = target(c, model, false);
-                const nu::Plan pn = nu::plan(r, tn);
-                nu::Target to = tn;  // as loadOrTune fills it today: no N2a fields, gdn_strix = its own result
-                to.strix_profile = to.k_gdn_sx = to.gdn_strix_shape = to.k_gemm8t = to.k_gdn_v0 = false;
-                to.gdn_strix = pn.flags.gdn_strix;
-                const nu::Plan po = nu::plan(r, to);
-                NCHECK(nu::logLine(po) == nu::logLine(pn), "{} {} {}", c.name, model, mode);
-                NCHECK(po.overrides.empty() && !po.lossy_override && po.q8dec == pn.q8dec, "{} {} {}", c.name, model, mode);
-                // relaxacc note: loadOrTune appends the parameters itself until N2b (no double suffix)
-                NCHECK(po.items[static_cast<std::size_t>(nu::Item::relaxacc)].note.find("[k ") == std::string::npos, "{} {} {}",
-                       c.name, model, mode);
-            }
+            for (const char* mode : {"precise", "balance", "fast"})
+                for (nu::Front fr : {nu::Front::none, nu::Front::cli, nu::Front::server})
+                    for (int k_v0 = 0; k_v0 < 2; ++k_v0)
+                        for (int it = 0; it < 400; ++it) {
+                            nu::Request r = nu::parseMode(mode, "command line");
+                            nu::Target t = target(c, model, false);
+                            t.k_gdn_v0 = k_v0 != 0;
+                            nu::RuntimeValues rv;
+                            for (const auto& e : nu::RuntimeValues::names()) {
+                                const char* v = vals[(it == 0) ? 0 : next() % n_vals];
+                                if (v != nullptr) rv.*e.field = std::string(v);
+                            }
+                            const nu::Plan base = nu::plan(r, t);
+                            nu::Plan wired = base;
+                            nu::applyFront(wired, fr, rv, t.k_gdn_v0);
+                            r.front = fr;
+                            r.runtime = rv;
+                            const nu::Plan ref = nu::plan(r, t);
+                            NCHECK(wired.flags == ref.flags, "applyFront {} {} {} front {} v0 {} #{}", c.name, model, mode, static_cast<int>(fr),
+                                   k_v0, it);
+                            NCHECK(wired.bitsKey() == ref.bitsKey() && nu::logLine(wired) == nu::logLine(ref), "applyFront key {} {} {} #{}",
+                                   c.name, model, mode, it);
+                            ++n;
+                        }
+    std::printf("  numerics applyFront == plan(front): %zu cases\n", n);
 }
 
 // ---- bitsKey reflection
@@ -474,7 +497,7 @@ void testLoadRules() {
 
 void testNumericsPlan(int& pass, int& fail) {
     testPlanTable();
-    testUnwiredCallerUnchanged();
+    testApplyFrontEqualsPlan();  // arch025-N2b (replaces testUnwiredCallerUnchanged: no caller passes Target::gdn_strix now)
     testBitsKeyReflection();
     testFlagScope();
     testFrontEnds();

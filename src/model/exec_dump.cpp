@@ -53,6 +53,9 @@ std::string execDump(const Model& m) {
     auto f = [](float v) { return std::format("{:.9g}", v); };
 #define WD_B(x) add(#x, b(m.x))
 #define WD_U(x) add(#x, u(m.x))
+// arch025-N2b: the execution flags are the plan's (Model::nf()); same keys and values
+#define WD_FB(x) add(#x, b(m.nf().x))
+#define WD_FU(x) add(#x, u(m.nf().x))
     WD_U(max_ctx);
     WD_U(max_batch);
     add("arch", hip::archName(m.arch));
@@ -61,24 +64,24 @@ std::string execDump(const Model& m) {
     for (std::size_t t = 0; t < m.type_bytes.size(); ++t)
         if (m.type_bytes[t] != 0) add(std::format("type_bytes[{}]", t), u(m.type_bytes[t]));
     add("decode_graph", b(m.decode_graph != nullptr));
-    WD_B(use_graph);
+    WD_FB(use_graph);
     WD_B(head_phase);
-    WD_B(no_fuse);
+    WD_FB(no_fuse);
     WD_U(small_max);
-    WD_U(dbg_flags);
+    WD_FU(dbg_flags);
     add("tune_mask", std::format("{:#x}", m.tune_mask));
     WD_B(tune_cold);
-    WD_B(naive_attn);
-    WD_B(attn_wide);
-    WD_B(attn_dq4);
-    WD_B(dq4_dyn);
-    WD_B(attn_ws4);
-    WD_B(wide_verify);
-    WD_B(moe_wide);
-    WD_U(head_chunk);
-    WD_B(float_gemv);
-    WD_B(prec_dec);
-    WD_U(gemv_max);
+    WD_FB(naive_attn);
+    WD_FB(attn_wide);
+    WD_FB(attn_dq4);
+    WD_FB(dq4_dyn);
+    WD_FB(attn_ws4);
+    WD_FB(wide_verify);
+    WD_FB(moe_wide);
+    WD_FU(head_chunk);
+    WD_FB(float_gemv);
+    WD_FB(prec_dec);
+    WD_FU(gemv_max);
     add("gemv_r", hexRow(m.gemv_r));
     for (std::size_t t = 0; t < m.gemv_w.size(); ++t) {
         bool any = false;
@@ -86,8 +89,8 @@ std::string execDump(const Model& m) {
         if (any) add(std::format("gemv_w[{}]", t), hexRow(m.gemv_w[t]));
     }
     add("gemv_w_head", hexRow(m.gemv_w_head));
-    WD_B(fp8_prefill);
-    WD_U(fp8_mask);
+    WD_FB(fp8_prefill);
+    WD_FU(fp8_mask);
     WD_U(mm_class);
     WD_U(mx_fold_lossy);
     add("num_req.mode", numerics::modeName(m.num_req.mode));
@@ -100,36 +103,36 @@ std::string execDump(const Model& m) {
     add("num_plan.q8dec_default", b(m.num_plan.q8dec_default));
     add("num_plan.lossy_override", b(m.num_plan.lossy_override));
     for (std::size_t i = 0; i < m.num_plan.overrides.size(); ++i) add(std::format("num_plan.override[{}]", i), m.num_plan.overrides[i]);
-    add("relax.on", b(m.relax.on));
-    add("relax.k", u(m.relax.k));
-    add("relax.alpha", f(m.relax.alpha));
-    add("relax.eps", f(m.relax.eps));
-    add("relax.delta", f(m.relax.delta));
+    add("relax.on", b(m.relax().on));
+    add("relax.k", u(m.relax().k));
+    add("relax.alpha", f(m.relax().alpha));
+    add("relax.eps", f(m.relax().eps));
+    add("relax.delta", f(m.relax().delta));
     add("kv_choice.kv", numerics::kvKindName(m.kv_choice.kv));
     add("kv_choice.debug", b(m.kv_choice.debug));
     add("kv_choice.why", m.kv_choice.why);
     WD_U(gc_w_bytes);
     WD_U(gc_u_bytes);
     WD_U(gc_m_bytes);
-    WD_B(gdn_chunked);
-    WD_B(gdn_wmma);
-    WD_B(gdn_strix);
-    WD_U(gdn_strix_min);
-    WD_B(act_fuse);
-    WD_B(attn_kx_on);
-    WD_B(gdn_ba_on);
-    WD_B(gdn_in2_on);
+    WD_FB(gdn_chunked);
+    WD_FB(gdn_wmma);
+    WD_FB(gdn_strix);
+    WD_FU(gdn_strix_min);
+    WD_FB(act_fuse);
+    WD_FB(attn_kx_on);
+    WD_FB(gdn_ba_on);
+    WD_FB(gdn_in2_on);
     WD_U(x16_bytes);
-    WD_B(attn_dqf_on);
-    WD_U(attn_seg);
+    WD_FB(attn_dqf_on);
+    WD_FU(attn_seg);
     WD_U(dq_rows);
-    WD_B(attn_kg_on);
-    WD_B(ffn_h16);
-    WD_B(h16_dq);
+    WD_FB(attn_kg_on);
+    WD_FB(ffn_h16);
+    WD_FB(h16_dq);
     WD_B(out_h16);
-    WD_B(g8t);
-    WD_B(gemmh_on);
-    WD_B(gemmhq_on);
+    WD_FB(g8t);
+    WD_FB(gemmh_on);
+    WD_FB(gemmhq_on);
     WD_B(kv_q8);
     WD_B(kv_rot);
     WD_B(kv_kf16);
@@ -147,8 +150,8 @@ std::string execDump(const Model& m) {
     WD_B(all_logits);
     WD_U(snap_rows);
     WD_U(draft_vocab);
-    WD_U(draft_window);
-    WD_U(draft_window_min);
+    WD_FU(draft_window);
+    WD_FU(draft_window_min);
     add("draft_p_min", f(m.draft_p_min));
     WD_U(draft_n_min);
     add("draft_head", b(m.draft_head.has_value()));
@@ -157,17 +160,19 @@ std::string execDump(const Model& m) {
     add("draft_map", b(m.draft_map.has_value()));
     add("dflash", b(m.dflash != nullptr));
     WD_B(mtp_skipped);
-    WD_U(moe_bn_force);
+    WD_FU(moe_bn_force);
     WD_U(ff_scratch);
-    WD_B(moe_fp8);
-    WD_B(moe_mxw);
-    WD_B(moe_rbf);
+    WD_FB(moe_fp8);
+    WD_FB(moe_mxw);
+    WD_FB(moe_rbf);
     WD_B(mrope_on);
     WD_B(rpos_rows);
 #undef WD_B
 #undef WD_U
-    add("gv_group", b(m.gv_group));
-    add("gv_nmax", u(m.gv_nmax));
+#undef WD_FB
+#undef WD_FU
+    add("gv_group", b(m.nf().gv_group));
+    add("gv_nmax", u(m.nf().gv_nmax));
     const std::string tune = m.writeTune();
     add("tune", std::format("{:016x} ({} bytes)", fnv(tune), tune.size()));
     return s;
