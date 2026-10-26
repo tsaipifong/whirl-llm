@@ -121,6 +121,16 @@ bool gemm8tpOk(int v, std::uint32_t ncols, const kernels::MatmulKernels& k) {
     return true;
 }
 
+std::optional<int> parseGemm8tV(std::string_view s) {
+    if (s.empty() || s.size() > 4) return std::nullopt;
+    int v = 0;
+    for (const char ch : s) {
+        if (ch < '0' || ch > '9') return std::nullopt;
+        v = v * 10 + (ch - '0');
+    }
+    return v;
+}
+
 Gemm8Plan chooseGemm8(std::uint32_t nrows, std::uint32_t n, bool out_h16, bool g8t, const kernels::MatmulKernels& k, int g8t_v,
                       std::uint32_t ncols) {
     const std::size_t ci = g8t ? gemm8tCfg(n) : gemm8Cfg(n);

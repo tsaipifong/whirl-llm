@@ -406,6 +406,7 @@ constexpr EnvDoc k_env[] = {
     {"Numerics / speed switches (A/B tests; defaults are the tested paths)", "FP8=0|1", "MXFP4 prefill with fp8 activations (default: on in balance / fast; 0 also turns MOE_FP8 off)", TUNED},
     {"Numerics / speed switches (A/B tests; defaults are the tested paths)", "FP8_MASK=BITS", "matmul classes that use fp8 activations (default 7)", TUNED},
     {"Numerics / speed switches (A/B tests; defaults are the tested paths)", "G8T=0", "row-major fp8 GEMM instead of the fragment-tiled one (same bits)", TUNED},
+    {"Numerics / speed switches (A/B tests; defaults are the tested paths)", "GEMM8T_V=1..6", "R9700 fp8 prefill GEMM schedule variant gemm8tp_v<N> (designed bitwise-equal to gemm8t_c0; plain integer, else ignored with a warning)", TUNED},
     {"Numerics / speed switches (A/B tests; defaults are the tested paths)", "GDN_WMMA=0|1", "f16-WMMA DeltaNet prefill chunks (default: on for MXFP4 in balance / fast)", TUNED},
     {"Numerics / speed switches (A/B tests; defaults are the tested paths)", "FFN_H16=0|1", "f16 GEMM outputs into the elementwise ops (default: on for MXFP4 in balance / fast)", TUNED},
     {"Numerics / speed switches (A/B tests; defaults are the tested paths)", "Q4_RELAXED=1", "the MXFP4 balance-mode prefill switches (WMMA DeltaNet, h16) for other models too", TUNED},

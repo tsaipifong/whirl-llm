@@ -20,6 +20,8 @@
 
 #include <array>
 #include <cstdint>
+#include <optional>
+#include <string_view>
 
 namespace whirl::ops {
 
@@ -147,6 +149,9 @@ Gemm8Plan chooseGemm8(std::uint32_t nrows, std::uint32_t n, bool out_h16, bool g
                       int g8t_v = 0, std::uint32_t ncols = 0);
 // whether variant v exists (both outputs) and takes K = ncols (v4: an even number >= 2 of 64-k slabs)
 bool gemm8tpOk(int v, std::uint32_t ncols, const kernels::MatmulKernels& k);
+// strict parse of WHIRL_GEMM8T_V: only plain decimal digits (no sign, blanks or suffix such as "2x"), value <= 9999;
+// anything else (including the empty string) -> nullopt, and the caller ignores the setting with a warning
+std::optional<int> parseGemm8tV(std::string_view s);
 std::size_t gemm8Cfg(std::uint32_t n);
 std::size_t gemm8tCfg(std::uint32_t n);
 

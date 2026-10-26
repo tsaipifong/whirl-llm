@@ -500,6 +500,7 @@ PowerShell 中先用 `$env:WHIRL_MODE = "precise"` 設定再啟動程式。**一
 | `WHIRL_GV_GROUP=0` | 不合併同輸入的 GEMV launch |
 | `WHIRL_GV_NMAX=N` | 同輸入 GEMV 一組的最大數量 |
 | `WHIRL_MOE_BN=32\|64` | 分組專家 GEMM 的 token tile |
+| `WHIRL_GEMM8T_V=1..6` | R9700 fp8 prefill GEMM（balance / fast、MXFP4 模型）：`gemm8t_c0`（128x256 tile）的排程變體 `gemm8tp_v<N>`，只在 `gemm8t_c0` 會執行時（批次超過 192 token）生效。設計上與 `gemm8t_c0` 逐位元相同（kernel 測試驗證；尚未在 GPU 上端到端實測），只有速度不同。`0` 或不設 = `gemm8t_c0`。必須是純整數，其他寫法（`2x`、`-1`、空字串）會被忽略並在啟動 log 警告。視為 A/B 開關（模式標籤變成 `MODE+overrides`） |
 | `WHIRL_DBG=BITS` | 1 = 不合併 gdn_abconv、2 = 純量 split attention、4 = 每個 attention 群組一個 query |
 | `WHIRL_ATTN_WIDE=0` | 驗證 attention 每群最多 16 欄（`attn_wsplit1`），不用最多 32 欄的 `attn_wsplit2` |
 | `WHIRL_ATTN_DQ4=0` | q4 KV：decode / 驗證 attention 改回 `attn_wsplit1_q4`（較慢，0.2.0 之前），不用 `attn_dq4` |
