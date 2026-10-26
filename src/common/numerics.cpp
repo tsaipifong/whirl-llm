@@ -4,6 +4,7 @@
 #include "whirl/numerics.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <format>
 #include <stdexcept>
 
@@ -183,6 +184,301 @@ bool q8decDefault(const Request& r, [[maybe_unused]] bool moe) {
     return r.mode != Mode::precise;  // MOE-BAL-3: the same for dense and MoE models
 }
 
+// ---- arch025-N2a: per-variable overrides and the execution flags
+
+const std::array<EnvValues::Entry, EnvValues::n_fields>& EnvValues::names() {
+    using S = EnvValues;
+    static const std::array<Entry, n_fields> t = {{
+        {"FP8", &S::fp8},
+        {"FP8_MASK", &S::fp8_mask},
+        {"G8T", &S::g8t},
+        {"GDN_WMMA", &S::gdn_wmma},
+        {"ACT_FUSE", &S::act_fuse},
+        {"GEMMH", &S::gemmh},
+        {"GEMMHQ", &S::gemmhq},
+        {"ATTN_KX", &S::attn_kx},
+        {"ATTN_KG", &S::attn_kg},
+        {"ATTN_DQF", &S::attn_dqf},
+        {"ATTN_SEG", &S::attn_seg},
+        {"GDN_BA", &S::gdn_ba},
+        {"GDN_IN2", &S::gdn_in2},
+        {"Q4_RELAXED", &S::q4_relaxed},
+        {"FFN_H16", &S::ffn_h16},
+        {"GDN_STRIX", &S::gdn_strix},
+        {"GDN_STRIX_MIN", &S::gdn_strix_min},
+        {"KV", &S::kv},
+        {"Q8DEC", &S::q8dec},
+        {"RELAX", &S::relax},
+        {"RELAX_K", &S::relax_k},
+        {"RELAX_ALPHA", &S::relax_alpha},
+        {"RELAX_EPS", &S::relax_eps},
+        {"RELAX_DELTA", &S::relax_delta},
+        {"SPEC_SAMPLE", &S::spec_sample},
+        {"MOE_FP8", &S::moe_fp8},
+        {"MOE_MXW", &S::moe_mxw},
+        {"MOE_WIDE", &S::moe_wide},
+        {"MOE_RBF", &S::moe_rbf},
+    }};
+    return t;
+}
+
+const Raw* EnvValues::find(std::string_view name) const {
+    for (const Entry& e : names())
+        if (name == e.name) return &(this->*e.field);
+    for (std::size_t i = 0; k_numerics_switches[i] != nullptr; ++i)
+        if (name == k_numerics_switches[i]) return &switches[i];
+    return nullptr;
+}
+
+Raw* EnvValues::find(std::string_view name) { return const_cast<Raw*>(static_cast<const EnvValues*>(this)->find(name)); }
+
+const std::array<RuntimeValues::Entry, RuntimeValues::n_fields>& RuntimeValues::names() {
+    using S = RuntimeValues;
+    static const std::array<Entry, n_fields> t = {{
+        {"FLOAT_GEMV", &S::float_gemv},
+        {"DBG", &S::dbg},
+        {"GEMV_MAX", &S::gemv_max},
+        {"NO_GRAPH", &S::no_graph},
+        {"NO_FUSE", &S::no_fuse},
+        {"DRAFT_WINDOW", &S::draft_window},
+        {"DRAFT_WINDOW_MIN", &S::draft_window_min},
+        {"NAIVE_ATTN", &S::naive_attn},
+        {"ATTN_WIDE", &S::attn_wide},
+        {"ATTN_DQ4", &S::attn_dq4},
+        {"DQ4_DYN", &S::dq4_dyn},
+        {"ATTN_WS4", &S::attn_ws4},
+        {"MOE_BN", &S::moe_bn},
+        {"GDN_SEQ", &S::gdn_seq},
+        {"GV_GROUP", &S::gv_group},
+        {"GV_NMAX", &S::gv_nmax},
+        {"GDN_V0", &S::gdn_v0},
+        {"WIDE_VERIFY", &S::wide_verify},
+        {"HEAD_CHUNK", &S::head_chunk},
+    }};
+    return t;
+}
+
+const std::vector<FlagInfo>& flagTable() {
+    static const std::vector<FlagInfo> t = [] {
+        std::vector<FlagInfo> v;
+#define WHIRL_NF_INFO_B(n, key) v.push_back({#n, key, FlagKind::b, &Flags::n, nullptr, nullptr});
+#define WHIRL_NF_INFO_U(n, key) v.push_back({#n, key, FlagKind::u, nullptr, &Flags::n, nullptr});
+#define WHIRL_NF_INFO_F(n, key) v.push_back({#n, key, FlagKind::f, nullptr, nullptr, &Flags::n});
+#define WHIRL_NF_INFO(k, n, d, key) WHIRL_NF_INFO_##k(n, key)
+        WHIRL_NUMERICS_FLAGS(WHIRL_NF_INFO)
+#undef WHIRL_NF_INFO
+#undef WHIRL_NF_INFO_B
+#undef WHIRL_NF_INFO_U
+#undef WHIRL_NF_INFO_F
+        return v;
+    }();
+    return t;
+}
+
+std::string flagValue(const Flags& fl, const FlagInfo& fi) {
+    switch (fi.kind) {
+        case FlagKind::b: return fl.*fi.b ? "1" : "0";
+        case FlagKind::u: return std::to_string(fl.*fi.u);
+        case FlagKind::f: return std::format("{:.9g}", fl.*fi.f);
+    }
+    return {};
+}
+
+std::string Plan::bitsKey() const {
+    std::string k = std::format("mode={};", modeName(mode));
+    for (const ItemState& s : items) k += std::format("{}={};", itemName(s.item), s.enabled ? 1 : 0);
+    k += std::format("q8dec={};", q8dec ? 1 : 0);
+    for (const FlagInfo& fi : flagTable()) k += std::format("{}={};", fi.name, flagValue(flags, fi));
+    return k;
+}
+
+namespace {
+
+// "if (v) x = *v != "0"" (tune.cpp:853, :876-885, :896)
+void setNe0(bool& x, const Raw& v) {
+    if (v) x = *v != "0";
+}
+// EnvSnapshot::flag / envFlag: not set -> def, else value != "0" (loader.cpp:550-553)
+bool flagOr(const Raw& v, bool def) { return v ? *v != "0" : def; }
+// cli main.cpp:345-353 envU32: std::stoul, any exception -> not set
+std::optional<std::uint32_t> cliU32(const Raw& v) {
+    if (!v) return std::nullopt;
+    try {
+        return static_cast<std::uint32_t>(std::stoul(*v));
+    } catch (...) {
+    }
+    return std::nullopt;
+}
+// server_main.cpp:314-326 envU32: the whole value a number <= 0xffffffff, else def (the server logs a warning)
+std::uint32_t srvU32(const Raw& v, std::uint32_t def) {
+    if (!v) return def;
+    try {
+        std::size_t used = 0;
+        const unsigned long x = std::stoul(*v, &used);
+        if (used == v->size() && x <= 0xffffffffull) return static_cast<std::uint32_t>(x);
+    } catch (const std::exception&) {
+    }
+    return def;
+}
+
+// loader.cpp:548-553 and :743, then tune.cpp:850-914 (before the numerics block)
+void loadFlags(const Request& r, const Target& t, Flags& F) {
+    const EnvValues& e = r.env;
+    // loader.cpp:743 (fp8_prefill) and :550-553
+    F.fp8_prefill = r.has(Item::fp8);
+    F.moe_fp8 = flagOr(e.moe_fp8, r.has(Item::moefp8));
+    F.moe_mxw = flagOr(e.moe_mxw, true);
+    F.moe_wide = flagOr(e.moe_wide, false);
+    F.moe_rbf = flagOr(e.moe_rbf, true);
+    // tune.cpp:852-861
+    if (e.fp8) F.fp8_prefill = *e.fp8 != "0";
+    if (e.fp8 && *e.fp8 == "0") F.moe_fp8 = false;
+    if (e.fp8_mask) {
+        try {
+            F.fp8_mask = static_cast<std::uint8_t>(std::stoul(*e.fp8_mask, nullptr, 0));
+        } catch (...) {
+            F.fp8_mask = 7;
+        }
+    }
+    // tune.cpp:862-870: g8t is set by Model::useTiledFp8 (forward.cpp:269-277), called only under this condition
+    if (t.has_mxfp4 && flagOr(e.g8t, true) && F.fp8_prefill && t.k_gemm8 && t.k_gemm8t) F.g8t = true;
+    // tune.cpp:873-897
+    const bool dense_q = !t.has_mxfp4 && !t.moe && !t.gfx1151;
+    F.gdn_wmma = (t.has_mxfp4 || dense_q) && r.has(Item::gdnwmma);
+    setNe0(F.gdn_wmma, e.gdn_wmma);
+    setNe0(F.act_fuse, e.act_fuse);
+    setNe0(F.gemmh_on, e.gemmh);
+    setNe0(F.gemmhq_on, e.gemmhq);
+    setNe0(F.attn_kx_on, e.attn_kx);
+    setNe0(F.attn_kg_on, e.attn_kg);
+    setNe0(F.attn_dqf_on, e.attn_dqf);
+    if (e.attn_seg) F.attn_seg = static_cast<std::uint32_t>(std::strtoul(e.attn_seg->c_str(), nullptr, 10)) / 256 * 256;
+    setNe0(F.gdn_ba_on, e.gdn_ba);
+    setNe0(F.gdn_in2_on, e.gdn_in2);
+    F.ffn_h16 = (t.has_mxfp4 || dense_q) && r.has(Item::h16);
+    if (e.q4_relaxed && *e.q4_relaxed != "0") {
+        F.gdn_wmma = true;
+        F.ffn_h16 = true;
+    }
+    setNe0(F.ffn_h16, e.ffn_h16);
+    F.h16_dq = F.ffn_h16 && dense_q;
+    // tune.cpp:905-914 (m.gdn_chunked is true at tune time: WHIRL_GDN_SEQ is a front-end knob applied after loadOrTune)
+    F.gdn_strix = false;
+    if ((!e.gdn_strix || *e.gdn_strix != "0") && t.strix_profile && t.k_gdn_sx && F.gdn_chunked && (t.has_mxfp4 || !t.moe) &&
+        r.has(Item::gdnwmma) && t.gdn_strix_shape) {
+        F.gdn_strix = true;
+        if (e.gdn_strix_min)
+            F.gdn_strix_min = static_cast<std::uint32_t>(std::max<unsigned long>(32, std::strtoul(e.gdn_strix_min->c_str(), nullptr, 10)));
+    }
+}
+
+// tune.cpp:939-982 on the item table (the per-item overrides, WHIRL_Q8DEC, relaxacc, noteSwitches) and the flags
+// decided there (prec_dec, relax_*). The PreciseKernels refusal (tune.cpp:958-967) stays with the caller: it needs
+// the kernel table (Model::precMissing); plan reports prec_dec.
+void loadOverrides(Plan& p, const Request& r, const Target& t, bool items) {
+    const EnvValues& e = r.env;
+    Flags& F = p.flags;
+    const Raw& fp8_env = e.fp8;
+    if (items) {
+        if (fp8_env) applyOverride(p, Item::fp8, "FP8", *fp8_env, F.fp8_prefill, t.has_mxfp4 && t.k_gemm8);
+        const bool moe_ok = t.moe && t.moe_mxfp4 && t.k_gemm8_moe;
+        if (const Raw& v = e.moe_fp8; v && !(fp8_env && *fp8_env == "0"))
+            applyOverride(p, Item::moefp8, "MOE_FP8", *v, F.moe_fp8, moe_ok);
+        else if (fp8_env && *fp8_env == "0")
+            applyOverride(p, Item::moefp8, "FP8", *fp8_env, F.moe_fp8, moe_ok);
+        const bool relaxed = e.q4_relaxed && *e.q4_relaxed != "0";
+        if (relaxed) applyOverride(p, Item::gdnwmma, "Q4_RELAXED", *e.q4_relaxed, F.gdn_wmma, t.k_gdn_wmma && F.gdn_chunked);
+        else if (e.gdn_wmma) applyOverride(p, Item::gdnwmma, "GDN_WMMA", *e.gdn_wmma, F.gdn_wmma, t.k_gdn_wmma && F.gdn_chunked);
+        if (e.ffn_h16) applyOverride(p, Item::h16, "FFN_H16", *e.ffn_h16, F.ffn_h16, true);
+        else if (relaxed) applyOverride(p, Item::h16, "Q4_RELAXED", *e.q4_relaxed, F.ffn_h16, true);
+        if (const Raw& v = e.kv; v && !v->empty() && *v != "auto")
+            applyOverride(p, *v == "q4" ? Item::kvq4 : Item::kvq8, "KV", *v, *v != "f16", !t.moe || *v != "f16");
+    }
+    // tune.cpp:954-957
+    F.prec_dec = !p.q8dec_default;
+    if (e.q8dec && !e.q8dec->empty()) F.prec_dec = *e.q8dec == "0";
+    if (items) setQ8dec(p, !F.prec_dec, e.q8dec ? *e.q8dec : std::string());
+    // tune.cpp:968-979
+    if (items)
+        if (const Raw& v = e.relax; v && !v->empty()) applyOverride(p, Item::relaxacc, "RELAX", *v, *v != "0", true);
+    const Flags dflt{};
+    F.relax_on = dflt.relax_on;
+    F.relax_k = dflt.relax_k;
+    F.relax_alpha = dflt.relax_alpha;
+    F.relax_eps = dflt.relax_eps;
+    F.relax_delta = dflt.relax_delta;
+    // (items == false: the item table is the mode's; relaxacc there is what loadOrTune sees when no WHIRL_RELAX is set)
+    if (p.on(Item::relaxacc)) {
+        F.relax_on = true;
+        if (const Raw& v = e.relax_k; v && !v->empty()) F.relax_k = static_cast<std::uint32_t>(std::stoul(*v));
+        if (const Raw& v = e.relax_alpha; v && !v->empty()) F.relax_alpha = std::stof(*v);
+        if (const Raw& v = e.relax_eps; v && !v->empty()) F.relax_eps = std::stof(*v);
+        if (const Raw& v = e.relax_delta; v && !v->empty()) F.relax_delta = std::stof(*v);
+        if (items) {
+            const std::uint32_t k = F.relax_k < 1 ? 1 : (F.relax_k > 16 ? 16 : F.relax_k);  // relax::Params::topk
+            p.items[static_cast<std::size_t>(Item::relaxacc)].note +=
+                std::format(" [k {}, alpha {:.2f}, eps {:.2f}, delta {:.2f}]", k, F.relax_alpha, F.relax_eps, F.relax_delta);
+        }
+    }
+    if (items) {
+        if (const Raw& v = e.spec_sample; v && !v->empty())
+            applyOverride(p, Item::specsample, "SPEC_SAMPLE", *v, *v != "0", t.mtp && t.k_spec_sample);
+        noteSwitches(p, [&e](const char* n) -> std::optional<std::string> {
+            const Raw* v = e.find(n);
+            return v ? *v : std::nullopt;
+        });
+    }
+}
+
+// The front end's after-load knobs (after loadOrTune in both)
+void runtimeFlags(const Request& r, const Target& t, Flags& F) {
+    const RuntimeValues& v = r.runtime;
+    if (r.front == Front::cli) {
+        // cli main.cpp:1030-1048 (applyRuntimeEnv; applyGemvEnv at :1032 sets tune rows, not a flag)
+        if (v.float_gemv) F.float_gemv = true;
+        if (auto x = cliU32(v.dbg)) F.dbg_flags = *x;
+        if (auto x = cliU32(v.gemv_max)) F.gemv_max = std::clamp<std::uint32_t>(*x, 1, 16);  // q::max_small_batch
+        if (v.no_graph) F.use_graph = false;
+        if (v.no_fuse) F.no_fuse = true;
+        if (auto x = cliU32(v.draft_window)) F.draft_window = *x;
+        if (auto x = cliU32(v.draft_window_min)) F.draft_window_min = *x;
+        if (v.naive_attn) F.naive_attn = true;
+        if (v.attn_wide && *v.attn_wide == "0") F.attn_wide = false;
+        if (v.attn_dq4 && *v.attn_dq4 == "0") F.attn_dq4 = false;
+        if (v.dq4_dyn && *v.dq4_dyn == "0") F.dq4_dyn = false;
+        if (v.attn_ws4 && *v.attn_ws4 == "0") F.attn_ws4 = false;
+        if (auto x = cliU32(v.moe_bn)) F.moe_bn_force = *x;
+        if (v.gdn_seq) F.gdn_chunked = false;
+        if (v.gv_group) F.gv_group = *v.gv_group != "0";
+        if (auto x = cliU32(v.gv_nmax)) F.gv_nmax = *x;
+        // cli main.cpp:1340 (chat only: other CLI commands leave runtime.gdn_v0 unset)
+        if (v.gdn_v0 && t.k_gdn_v0) F.gdn_v0 = true;
+    } else if (r.front == Front::server) {
+        // server_main.cpp:1041-1045
+        if (v.no_fuse) F.no_fuse = true;
+        if (v.float_gemv) F.float_gemv = true;
+        if (v.naive_attn) F.naive_attn = true;
+        if (v.gdn_seq) F.gdn_chunked = false;
+        if (v.moe_bn) F.moe_bn_force = static_cast<std::uint32_t>(std::strtoul(v.moe_bn->c_str(), nullptr, 10));
+        // :1052-1053, :1056 (the server never replays the decode graph)
+        F.draft_window = srvU32(v.draft_window, F.draft_window);
+        F.draft_window_min = srvU32(v.draft_window_min, F.draft_window_min);
+        F.use_graph = false;
+        // :1089-1090
+        if (v.wide_verify && *v.wide_verify == "0") F.wide_verify = false;
+        if (v.head_chunk) F.head_chunk = std::max<std::uint32_t>(32, srvU32(v.head_chunk, F.head_chunk) / 32 * 32);
+        // :1112-1114
+        if (v.gdn_v0 && t.k_gdn_v0) F.gdn_v0 = true;
+        // :1117-1120 (!envOn(name, true): set and == "0")
+        if (v.attn_wide && *v.attn_wide == "0") F.attn_wide = false;
+        if (v.attn_dq4 && *v.attn_dq4 == "0") F.attn_dq4 = false;
+        if (v.dq4_dyn && *v.dq4_dyn == "0") F.dq4_dyn = false;
+        if (v.attn_ws4 && *v.attn_ws4 == "0") F.attn_ws4 = false;
+    }
+}
+
+}  // namespace
+
 Plan plan(const Request& r_in, const Target& t) {
     const Request r = forModel(r_in, t.moe);
     Plan p;
@@ -190,6 +486,8 @@ Plan plan(const Request& r_in, const Target& t) {
     p.source = r.source;
     p.q8dec = q8decDefault(r, t.moe);  // the loader confirms (setQ8dec: WHIRL_Q8DEC, kernels)
     p.q8dec_default = p.q8dec;
+    loadFlags(r, t, p.flags);
+    const bool strix = t.gdn_strix || p.flags.gdn_strix;
     for (std::size_t i = 0; i < n_items; ++i) {
         const Item it = static_cast<Item>(i);
         ItemState& s = p.items[i];
@@ -210,7 +508,7 @@ Plan plan(const Request& r_in, const Target& t) {
                 else if (!t.k_gemm8_moe) why = t.gfx1151 ? "no fp8 WMMA on this GPU (gfx1151)" : "no fp8 expert GEMM kernels on this GPU";
                 break;
             case Item::gdnwmma:
-                if (t.gdn_strix) {
+                if (strix) {
                     note = "strix-llama.cpp chunks on this GPU";
                     break;
                 }
@@ -261,6 +559,8 @@ Plan plan(const Request& r_in, const Target& t) {
         s.enabled = s.moved ? false : why.empty();
         s.note = s.enabled ? note : why;
     }
+    loadOverrides(p, r, t, r.load_overrides);
+    runtimeFlags(r, t, p.flags);
     return p;
 }
 

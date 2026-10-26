@@ -1438,9 +1438,9 @@ void testFloatGemvDispatch() {
         all = true;
         for (std::uint32_t n = 2; n <= 32; ++n) all = all && path(w, n) == MP::float_gemv;
         check(all, "float dispatch: wide verify n = 2..32 with gemv_4 / _8 -> GEMV loop" + tag);
-        m.prec_dec = true;  // precise decode: every small batch on the f16 GEMM (unchanged by RC-R1)
+        m.num_plan.flags.prec_dec = true;  // precise decode: every small batch on the f16 GEMM (unchanged by RC-R1)
         check(path(w, 1) == MP::gemm_f16 && path(w, 20) == MP::gemm_f16, "float dispatch: precise decode -> f16 GEMM" + tag);
-        m.prec_dec = false;
+        m.num_plan.flags.prec_dec = false;
         m.k.gemvq[t] = &fake_kernel;  // a type with the int8 GEMV keeps it
         check(path(w, 20) == MP::gemvq, "float dispatch: int8 GEMV present -> gemvq" + tag);
     }
@@ -1499,8 +1499,8 @@ void testDraftWindowRestore() {
         int calls = 0;
     } seen;
     q::Model m;
-    m.draft_window = 16384;
-    m.draft_window_min = 65536;
+    m.num_plan.flags.draft_window = 16384;
+    m.num_plan.flags.draft_window_min = 65536;
     m.attn_test_ctx = &seen;
     m.attn_test_hook = [](void* ctx, std::int32_t win) {
         auto* s = static_cast<Seen*>(ctx);
@@ -2260,11 +2260,11 @@ void testForwardEnv() {
         check(m.head_gemvx == fe.head_gemvx && m.prec_gemvh == fe.prec_gemvh && m.prec_gs == fe.prec_gs,
               "forward env: a Model's defaults = forwardEnv of an empty snapshot");
         check(!m.head_gemvx && m.prec_gemvh && m.prec_gs == -1, "forward env: defaults = not set (off, on, -1)");
-        check(m.gv_group && m.gv_nmax == 0, "forward env: gv_group / gv_nmax defaults = the old globals' initial values (config.cpp:23-24)");
+        check(m.nf().gv_group && m.nf().gv_nmax == 0, "forward env: gv_group / gv_nmax defaults = the old globals' initial values (config.cpp:23-24)");
         q::Model m2;
-        m.gv_group = false;
-        m.gv_nmax = 5;
-        check(m2.gv_group && m2.gv_nmax == 0, "forward env: gv_group / gv_nmax are per Model (no process-wide state)");
+        m.num_plan.flags.gv_group = false;
+        m.num_plan.flags.gv_nmax = 5;
+        check(m2.nf().gv_group && m2.nf().gv_nmax == 0, "forward env: gv_group / gv_nmax are per Model (no process-wide state)");
     }
     // (3) grep: in-process writes of the three names, and product writes of any WHIRL_ name
     {
@@ -2327,6 +2327,183 @@ void testForwardEnv() {
     }
 }
 
+// arch025-N2a: numerics::plan decides the flags exactly as loadOrTune does, on CPU. For every "tune" case of the N1 env
+// table (5 host-only model variants, 190+ WHIRL_* cases) and the 5 bases: loadOrTune on a host-only Model with the
+// case's EnvSnapshot, and numerics::plan with the same values as Request fields (load_overrides) and the Model's
+// Target; every Plan flag with a dump key, the log line, q8dec, lossy_override and the overrides must equal the
+// Model's execDump. The loader's own assignments (loader.cpp:548-553, :743) do not run for a host-only Model; the test
+// makes them on the Model first, copied from loader.cpp (the S0b-2 GPU cells in tests/unit pin the real loader).
+// Also: every EnvSnapshot name is a plan field, or listed with the code that reads it (and why it is not a flag).
+namespace n2a {
+namespace nu = whirl::numerics;
+
+nu::Target targetOf(const q::Model& m) {
+    // tune.cpp:917-937, plus the N2a fields (tune.cpp:905-909 strix condition, forward.cpp:269-277 useTiledFp8)
+    nu::Target t;
+    const bool has_mx = m.type_bytes[static_cast<std::size_t>(gguf::GgmlType::mxfp4)] > 0;
+    t.gfx1151 = whirl::device::profile(m.arch).numerics_8060s;
+    t.has_mxfp4 = has_mx;
+    t.moe = m.cfg.moe;
+    for (const q::Layer& L : m.layers)
+        if (L.moe) {
+            t.moe_mxfp4 = L.moe->gate.ty == gguf::GgmlType::mxfp4 && L.moe->up.ty == gguf::GgmlType::mxfp4 &&
+                          L.moe->down.ty == gguf::GgmlType::mxfp4;
+            break;
+        }
+    t.k_gemm8 = m.k.gemm8[0] != nullptr;
+    t.k_gemm8_moe = m.k.gemm8_moe != nullptr && m.k.gemm8_moe32 != nullptr && m.k.gemm8_moeh != nullptr && m.k.gemm8_moe32h != nullptr &&
+                    m.k.moe_gather_fp8 != nullptr;
+    t.k_gdn_wmma = m.k.gdn_wprep != nullptr;
+    t.k_kv_q8v = m.k.caps.kv_q8v;
+    t.k_kv_q8h = m.k.caps.kv_q8h;
+    t.mtp = m.mtp.has_value();
+    t.k_spec_sample = m.k.draft_sample_rows != nullptr;
+    t.k_kv_q4 = m.k.caps.kv_q4;
+    t.kv_explicit = m.kv_mode != q::KvMode::automatic;
+    t.fast_kv_q8h = t.gfx1151 && t.k_kv_q8h;
+    t.strix_profile = whirl::device::profile(m.arch).gdn_strix;
+    t.k_gdn_sx = m.k.gdn_sx_prep != nullptr && m.k.gdn_sx_scan != nullptr;
+    t.gdn_strix_shape = m.cfg.d_state == 128 && m.cfg.headV() == 128 && m.cfg.n_k_heads > 0 && m.cfg.n_v_heads % m.cfg.n_k_heads == 0 &&
+                        m.cfg.n_v_heads / m.cfg.n_k_heads <= 4;
+    bool tiled = true;
+    for (std::size_t ci = 0; ci < m.k.gemm8t.size(); ++ci) tiled = tiled && m.k.gemm8t[ci] != nullptr && m.k.gemm8th[ci] != nullptr;
+    t.k_gemm8t = tiled && m.k.qact_fp8t != nullptr && m.k.rmsnorm_x8t != nullptr && m.k.silu_mul_x8t != nullptr &&
+                 m.k.silu_mul_x8ht != nullptr && m.k.gated_norm_x8t != nullptr && m.k.gated_norm_x8ht != nullptr;
+    return t;
+}
+
+nu::Request requestOf(const q::Model& m, const whirl::config::EnvSnapshot& env) {
+    nu::Request r = m.num_req;
+    r.load_overrides = true;
+    for (const auto& e : nu::EnvValues::names()) r.env.*e.field = env.get(e.name);
+    for (std::size_t i = 0; nu::k_numerics_switches[i] != nullptr; ++i) r.env.switches[i] = env.get(nu::k_numerics_switches[i]);
+    return r;
+}
+
+std::map<std::string, std::string> dumpKv(const std::string& d) {
+    std::map<std::string, std::string> o;
+    for (const std::string& l : envtab::splitLines(d))
+        if (l.rfind("D exec: ", 0) == 0) {
+            const std::size_t eq = l.find('=');
+            o[l.substr(8, eq - 8)] = l.substr(eq + 1);
+        }
+    return o;
+}
+
+}  // namespace n2a
+
+void testPlanVsLoadOrTune() {
+    namespace fs = std::filesystem;
+    namespace nu = whirl::numerics;
+    using whirl::config::EnvSnapshot;
+    const fs::path dir = whirl::test::testTmpBase() / L"n2a_plan";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir / L"whirl", ec);
+    const fs::path model = dir / L"m.gguf";
+    {
+        std::ofstream(model, std::ios::binary) << "not a gguf: only its name and size go into the tune cache file name";
+    }
+    const std::string fsz = std::to_string(fs::file_size(model));
+    for (hip::Arch a : {hip::Arch::gfx1201, hip::Arch::gfx1151})
+        std::ofstream(dir / L"whirl" / ("tune4-m.gguf-" + fsz + whirl::device::profile(a).tune_cache_suffix + ".txt"), std::ios::binary) << "";
+    char* old = nullptr;
+    std::size_t old_len = 0;
+    _dupenv_s(&old, &old_len, "LOCALAPPDATA");
+    const std::string old_lad = old != nullptr ? old : "";
+    std::free(old);
+    _putenv_s("LOCALAPPDATA", dir.string().c_str());
+
+    std::vector<envtab::Case> cs;
+    for (int k = 0; k < 5; ++k) cs.push_back({std::string("base ") + envtab::k_kind_names[k], k, {}});
+    for (const envtab::Case& c : envtab::cases())
+        if (c.id.rfind("tune", 0) == 0) cs.push_back(c);
+    std::size_t n_cases = 0, n_fields = 0, n_precise_refused = 0;
+    for (const envtab::Case& c : cs) {
+        ++n_cases;
+        std::vector<std::pair<std::string, EnvSnapshot::Value>> vals;
+        for (const envtab::Var& v : c.vars) vals.emplace_back(v.name, EnvSnapshot::Value(v.value));
+        const auto snap = std::make_shared<const EnvSnapshot>(EnvSnapshot::fromValues(vals));
+        auto m = envtab::makeModel(c.kind);
+        m->env_snap = snap;
+        // (arch025-N2b: the loader's flag lines, copied here for N2a, are numerics::plan inside loadOrTune now)
+        std::string log, err;
+        try {
+            q::loadOrTune(*m, model.string(), log);
+        } catch (const std::exception& e) {
+            err = e.what();
+        }
+        std::optional<nu::Plan> p;
+        std::string perr;
+        try {
+            p = nu::plan(n2a::requestOf(*m, *snap), n2a::targetOf(*m));
+        } catch (const std::exception& e) {
+            perr = e.what();
+        }
+        if (!err.empty()) {
+            // PreciseKernels: the caller's refusal (plan reports prec_dec; the host-only Model has no kernels)
+            if (err.find("PreciseKernels") != std::string::npos || err.find("precise mode") != std::string::npos ||
+                err.find("f16 decode activations") != std::string::npos) {
+                ++n_precise_refused;
+                check(p.has_value() && p->flags.prec_dec, "n2a plan vs loadOrTune: " + c.id + ": refused for f16 decode, plan prec_dec");
+            } else {
+                check(!perr.empty(), "n2a plan vs loadOrTune: " + c.id + ": loadOrTune threw (" + err + "), plan did not");
+            }
+            continue;
+        }
+        check(perr.empty(), "n2a plan vs loadOrTune: " + c.id + ": plan threw " + perr);
+        if (!p) continue;
+        const auto d = n2a::dumpKv(q::execDump(*m));
+        for (const nu::FlagInfo& fi : nu::flagTable()) {
+            if (!*fi.dump_key) continue;
+            ++n_fields;
+            const auto it = d.find(fi.dump_key);
+            check(it != d.end() && it->second == nu::flagValue(p->flags, fi),
+                  "n2a plan vs loadOrTune: " + c.id + ": " + fi.dump_key + " plan " + nu::flagValue(p->flags, fi) + " model " +
+                      (it == d.end() ? std::string("<none>") : it->second));
+        }
+        check(nu::logLine(*p) == nu::logLine(m->num_plan),
+              "n2a plan vs loadOrTune: " + c.id + ": log line\n  plan  " + nu::logLine(*p) + "\n  model " + nu::logLine(m->num_plan));
+        check(p->overrides == m->num_plan.overrides && p->q8dec == m->num_plan.q8dec && p->lossy_override == m->num_plan.lossy_override,
+              "n2a plan vs loadOrTune: " + c.id + ": overrides / q8dec / lossy");
+        for (std::size_t i = 0; i < nu::n_items; ++i)
+            check(p->items[i].enabled == m->num_plan.items[i].enabled && p->items[i].note == m->num_plan.items[i].note,
+                  "n2a plan vs loadOrTune: " + c.id + ": item " + nu::itemName(static_cast<nu::Item>(i)));
+        n_fields += 4 + nu::n_items;
+    }
+    _putenv_s("LOCALAPPDATA", old_lad.c_str());
+    check(n_cases > 150, "n2a plan vs loadOrTune: case count " + std::to_string(n_cases));
+    std::printf("  n2a plan vs loadOrTune: %zu cases (%zu refused for f16 decode), %zu fields compared\n", n_cases, n_precise_refused, n_fields);
+
+    // every EnvSnapshot name: a plan field (load-time value or A/B switch), or read by code that decides no flag
+    static const std::map<std::string, std::string> not_plan = {
+        {"GEMV_BITWISE_FLOAT", "checkGemvBitwise (tune.cpp): the bitwise check's warn / fail mode, not a flag"},
+        {"CODE_OBJECT", "loader.cpp: which code object loads (the fingerprint's kernel_set)"},
+        {"GEMV_R", "config.cpp applyGemvEnv: tune rows (needs the GPU dump)"},
+        {"GEMV_W", "config.cpp applyGemvEnv: tune rows (needs the GPU dump)"},
+        {"GEMV_WH", "config.cpp applyGemvEnv: tune rows (needs the GPU dump)"},
+        {"GPU_SHARE", "device.cpp: GPU lock"},
+        {"GPU_WAIT", "device.cpp: GPU lock"},
+        {"DEVICE", "device.cpp: GPU selection"},
+        {"DFLASH_PROF", "dflash.cpp: profiling print"},
+        {"HEAD_GEMVX", "F7 forwardEnv -> Model member (removed by feat026-o6)"},
+        {"PREC_GEMVH", "F7 forwardEnv -> Model member (removed by feat026-o6)"},
+        {"PREC_GS", "F7 forwardEnv -> Model member (removed by feat026-o6)"},
+    };
+    for (const auto& e : EnvSnapshot::names()) {
+        nu::EnvValues v;
+        const bool in_plan = v.find(e.name) != nullptr;
+        check(in_plan != (not_plan.count(e.name) == 1),
+              std::string("n2a: EnvSnapshot name ") + e.name + (in_plan ? " is a plan field and listed as not one" : " is neither a plan field nor listed"));
+    }
+    // and every plan load-time field comes from the snapshot (N2b fills Request::env from it)
+    for (const auto& e : nu::EnvValues::names()) {
+        bool found = false;
+        for (const auto& s : EnvSnapshot::names()) found = found || std::string_view(s.name) == e.name;
+        check(found, std::string("n2a: plan field ") + e.name + " has no EnvSnapshot field");
+    }
+}
+
 int main() {
     whirl::test::clearWhirlEnv();  // FR-TEST P3-11
     testKvLayout();
@@ -2337,6 +2514,7 @@ int main() {
     testEnvTable();
     testEnvSnapshot();
     testForwardEnv();
+    testPlanVsLoadOrTune();  // arch025-N2a
     testFloatGemvDispatch();
     testArchWhitelist();
     testLoadEstimate();
