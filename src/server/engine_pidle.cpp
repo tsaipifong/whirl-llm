@@ -74,7 +74,9 @@ void Engine::pidleMark(Slot& sl) {
     if (!sl.pidle_want) return;
     // feat026-pidle-r2: preserve_thinking=false (variant a): the next prompt re-renders the earlier turns without
     // their think blocks (thinking on or off), so it diverges before this reply
-    if (sl.pidle_hist_dropped) {
+    // (feat026-pidle-r3: not for a reply that ends in a tool call: that assistant message is after the last real user
+    // query, so the template keeps its think block and the next prompt holds the reply as generated)
+    if (sl.pidle_hist_dropped && !sl.pidle_tool_end) {
         sl.pidle_want = false;
         pidle_skipped_ += 1;
         logI("slot {} | precise idle: skipped: preserve_thinking=false (the next prompt drops the think blocks)", sl.id);
@@ -225,7 +227,14 @@ bool Engine::pidleRun() {
         // must not cost the slot its prompt-end / think-open / gen-end); the chunks then find their pages there
         {
             NoEvict ne;
+            const std::size_t pages_before = sl.pages.size();  // after the copy on write
             if (!pool_.ensure(sl.pages, sl.id, pl.to, ne)) {
+                // feat026-pidle-r3: ensure leaves the pages it did take in sl.pages; a skipped job gives them back
+                // (they hold no rows: the slot would keep pages for nothing, shortened to the cache it has)
+                if (sl.pages.size() > pages_before) {
+                    pool_.unref(std::span<const std::int32_t>(sl.pages).subspan(pages_before));
+                    sl.pages.resize(pages_before);
+                }
                 drop.armed = false;
                 pidle_skipped_ += 1;
                 if (cow) {
