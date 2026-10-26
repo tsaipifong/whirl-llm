@@ -79,6 +79,12 @@
 //            n_kv, q_stride, pos, n_tok, scale, int h0)
 //   attn_kg6 / attn_kg4 / attn_kg2[_q8|_q8v] (f16 / q8 / q8h / q8v KV; same arguments; grid
 //            (ceil(n_tok / 16), heads / NP), block 64 * NP, NP | n_head / n_kv)
+//   attn_kgv6 / 4 / 2 (attn_kg arguments and grid; f16 K / V; gfx1201): attn_kg with the P.V of each head
+//            pair sharing its V fragments (bit-identical to attn_kg; WHIRL_ATTN_KGVAR=1, feat026-attnkg97)
+//   attn_kgw6 / 4 / 2 (same): attn_kgv with the softmax split by key half (row sum in two halves: NOT
+//            bit-identical; balance / fast only, WHIRL_ATTN_KGVAR=2)
+//   attn_kgk6 / 4 / 2 (same): attn_kgv with the K fragments shared too (per head pair 2 S^T waves holding
+//            both heads' Q + 2 softmax / P.V waves; bit-identical to attn_kg; WHIRL_ATTN_KGVAR=3, feat026-attnkg97k)
 //   kv_dq_rows(KvArgs, f16* k16, f16* v16, n_rows, row_el) (q8 / q8h: keys [0, n_rows) of one
 //            sequence (tab0) dequantized into contiguous f16 rows; grid ceil(n_rows * row_el / 2048), block 256)
 //   kv_dq_rows_r[_q4](KvArgs, f16* k16, f16* v16, r0, n_rows, row_el): keys [r0, r0 + n_rows) into
@@ -547,6 +553,9 @@ struct AttnKernels {
     F attn_ws4{};  // gfx1151 4-wave pipelined attn_wsplit1 (same arguments / bits, one query per group): decode rows (WHIRL_ATTN_WS4=0: old path)
     F attn_ws4g[3]{};  // gfx1151 multi-row verify, CG 1..3 tiles (attn_ws4g{1,2,3}[_q8]; 256 threads, grid.x = n_kv x column groups)
     F attn_kg6{}, attn_kg4{}, attn_kg2{};  // f16 / q8 / q8h / q8v KV (null if not built)
+    F attn_kgv6{}, attn_kgv4{}, attn_kgv2{};  // f16 attn_kg candidate (head-pair shared V; null if not built)
+    F attn_kgw6{}, attn_kgw4{}, attn_kgw2{};  // attn_kgv + split softmax (balance / fast only; null if not built)
+    F attn_kgk6{}, attn_kgk4{}, attn_kgk2{};  // attn_kgv + head-pair shared K (bit-identical; null if not built)
     // q8 / q8h KV prefill (Q8P): kv_dq_rows + the f16 attn_kg variants (null otherwise)
     F kv_dq_rows{}, attn_kgf6{}, attn_kgf4{}, attn_kgf2{};
     // FC-1c: key-range variants (prefills past the f16 scratch, q4 prefill): kv_dq_rows_r (q8 / q8h)

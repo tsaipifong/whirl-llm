@@ -1770,6 +1770,7 @@ void testBaselineDumps() {
                           "D exec: kv_mode=automatic\n", "D exec: gdn_strix_min=256\n", "D exec: relax.k=4\n", "D exec: arch=gfx1201\n",
                           "D exec: moe_rbf=1\n", "D exec: num_req.mode=precise\n", "D exec: kv_choice.kv=f16\n"})
         CHECK(a.find(k) != std::string::npos);
+    CHECK(a.find("D exec: attn_kg_var=0\n") != std::string::npos);  // feat026-attnkg97-r1: the variant is in the dump
     CHECK(a.find("D exec: num_plan=numerics: ") != std::string::npos);
     CHECK(a.find("D exec: tune=") != std::string::npos);
     // arch025-execdump-f7: the three F7 forward switches are in the dump (defaults: off, on, -1)
@@ -1783,6 +1784,31 @@ void testBaselineDumps() {
         CHECK(d.find("D exec: head_gemvx=1\n") != std::string::npos);
         CHECK(d.find("D exec: prec_gemvh=0\n") != std::string::npos);
         CHECK(d.find("D exec: prec_gs=2\n") != std::string::npos);
+    }
+    {   // feat026-attnkg97-r1: WHIRL_ATTN_KGVAR is part of the exec dump (work_equal tells var 0 from var 2)
+        const std::string v0 = q::execDump(m);
+        m.num_plan.flags.attn_kg_var = 2;
+        const std::string v2 = q::execDump(m);
+        CHECK(v2 != v0 && v2.find("D exec: attn_kg_var=2\n") != std::string::npos);
+        m.num_plan.flags.attn_kg_var = 0;
+    }
+    {   // the var 2 guard asks the numerics MODE, not prec_dec: precise + WHIRL_Q8DEC=1 (prec_dec false) still refuses attn_kgw
+        // (arch025-port-attn S5: both read the Plan, num_plan.mode and num_plan.flags)
+        const nu::Mode saved_mode = m.num_plan.mode;
+        const bool saved_prec = m.num_plan.flags.prec_dec;
+        m.num_plan.flags.attn_kg_var = 2;
+        m.num_plan.mode = nu::Mode::precise;
+        m.num_plan.flags.prec_dec = false;
+        CHECK(m.prefillAttnFlags().prec && m.prefillAttnFlags().attn_kg_var == 2);
+        m.num_plan.flags.prec_dec = true;
+        CHECK(m.prefillAttnFlags().prec);
+        m.num_plan.mode = nu::Mode::balance;
+        CHECK(!m.prefillAttnFlags().prec);
+        m.num_plan.mode = nu::Mode::fast;
+        CHECK(!m.prefillAttnFlags().prec);
+        m.num_plan.mode = saved_mode;
+        m.num_plan.flags.prec_dec = saved_prec;
+        m.num_plan.flags.attn_kg_var = 0;
     }
     m.kv_fmt = whirl::KvFormat::q8h;  // one property changes one line (q8 -> q8h: the rotation)
     const std::string b = q::execDump(m);
@@ -2230,7 +2256,7 @@ void testEnvSnapshot() {
         empty_names.push_back(r.name);
     }
     for (const char* sw : {"FD_SPLITS", "GEMV_MAX", "GV_NMAX", "GV_GROUP", "NO_FUSE", "FLOAT_GEMV", "GDN_SEQ", "NAIVE_ATTN", "DBG", "ATTN_WIDE",
-                           "ATTN_DQ4", "ATTN_WS4", "MOE_BN"}) {
+                           "ATTN_DQ4", "ATTN_WS4", "ATTN_KGVAR", "MOE_BN"}) {
         check(run(sw, 0, "") == envtab::tuneOutput(0, model.string()), std::string("env snapshot: switch ") + sw + "='' = not set (numerics.cpp:292)");
         empty_names.push_back(sw);
     }
@@ -2255,7 +2281,7 @@ void testEnvSnapshot() {
     }
     // the reverse: the names the five files read are all fields (a get() of a missing name would throw at load)
     for (const char* sw : {"FD_SPLITS", "GEMV_MAX", "GV_NMAX", "GV_GROUP", "NO_FUSE", "FLOAT_GEMV", "GDN_SEQ", "NAIVE_ATTN", "DBG", "ATTN_WIDE",
-                           "ATTN_DQ4", "ATTN_WS4", "MOE_BN"}) {
+                           "ATTN_DQ4", "ATTN_WS4", "ATTN_KGVAR", "MOE_BN"}) {
         bool ok = true;
         try {
             (void)EnvSnapshot().get(sw);

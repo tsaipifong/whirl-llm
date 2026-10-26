@@ -190,6 +190,17 @@ AttnDecodePlan chooseAttnDecode(const AttnDecodeProblem& p, const AttnDecodeFlag
 // one launch does at most ~4096 x 128k query-key pairs x all heads. Same results as one launch.
 // f16 / q8 / q8h / q8v KV: attn_kg (NP query heads of one KV head per block; bit-identical to attn_kx) when NP
 // divides the GQA group, the head ranges stay whole groups of NP and the softmax scale is a power of two.
+// feat026-attnkg97: the f16 attn_kg (NP heads per block) or its selected variant with the same grid / block:
+// 1 attn_kgv (bit-identical, every mode), 2 attn_kgw (balance / fast only: never under precise),
+// 3 attn_kgk (feat026-attnkg97k: shared K and V per head pair; bit-identical, every mode)
+static Function kgVariant(const AttnPrefillFlags& f, const kernels::AttnKernels& k, u32 np, Function shipped) {
+    Function v = nullptr;
+    if (f.attn_kg_var == 1) v = np == 6 ? k.attn_kgv6 : np == 4 ? k.attn_kgv4 : k.attn_kgv2;
+    if (f.attn_kg_var == 2 && !f.prec) v = np == 6 ? k.attn_kgw6 : np == 4 ? k.attn_kgw4 : k.attn_kgw2;
+    if (f.attn_kg_var == 3) v = np == 6 ? k.attn_kgk6 : np == 4 ? k.attn_kgk4 : k.attn_kgk2;
+    return v != nullptr ? v : shipped;
+}
+
 AttnPrefillPlan chooseAttnPrefill(const AttnPrefillProblem& p, const AttnPrefillFlags& f, const kernels::AttnKernels& k) {
     AttnPrefillPlan pl;
     auto& st = pl.steps;
@@ -235,7 +246,8 @@ AttnPrefillPlan chooseAttnPrefill(const AttnPrefillProblem& p, const AttnPrefill
     // then the f16 attn_kg: the same f16 K / V values as attn_kg_q8 converts in its waves (bit-identical)
     const u32 rows = p.pos0 + n, row_el = p.n_head_kv * p.head_dim;
     if (kg != nullptr && f.attn_dqf_on && k.kv_dq_rows != nullptr && p.dq_ptab && rows <= p.dq_rows) {
-        const Function kf = np == 6 ? k.attn_kgf6 : np == 4 ? k.attn_kgf4 : k.attn_kgf2;
+        Function kf = np == 6 ? k.attn_kgf6 : np == 4 ? k.attn_kgf4 : k.attn_kgf2;
+        if (kf != nullptr) kf = kgVariant(f, k, np, kf);
         if (kf != nullptr) {
             AttnStep dq;
             dq.op = AttnStep::Op::dq_rows;
@@ -311,6 +323,8 @@ AttnPrefillPlan chooseAttnPrefill(const AttnPrefillProblem& p, const AttnPrefill
             return pl;
         }
     }
+    // f16 KV: the attn_kg candidate (same bits) when selected
+    if (kg != nullptr && !p.kv_q8) kg = kgVariant(f, k, np, kg);
     for (u32 q = 0; q < parts; ++q) {
         if (kg != nullptr)
             attn(kg, D((n + 15) / 16, hp / np), D(64 * np), q * hp, false, false, 0, 0);

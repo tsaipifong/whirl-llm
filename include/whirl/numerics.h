@@ -87,7 +87,7 @@ struct EnvValues {
     // src/model/loader.cpp:550-553
     Raw moe_fp8, moe_mxw, moe_wide, moe_rbf;
     // numerics::noteSwitches (k_numerics_switches, same order): recorded as overrides only
-    std::array<Raw, 13> switches{};
+    std::array<Raw, 14> switches{};
 
     struct Entry {
         const char* name;  // without the WHIRL_ prefix
@@ -235,6 +235,7 @@ struct ItemState {
     X(B, attn_dqf_on, true, "attn_dqf_on")                       \
     X(U, attn_seg, 0, "attn_seg")                                \
     X(B, attn_kg_on, true, "attn_kg_on")                         \
+    X(U, attn_kg_var, 0, "")                                     \
     X(B, ffn_h16, false, "ffn_h16")                              \
     X(B, h16_dq, false, "h16_dq")                                \
     X(B, g8t, false, "g8t")                                      \

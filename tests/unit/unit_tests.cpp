@@ -891,6 +891,17 @@ void testNumerics() {
             });
             CHECK(ps.overrides.size() == 2 && nu::modeLabel(ps) == "balance+overrides");
             CHECK(nu::logLine(ps).find("WHIRL_GEMV_MAX=8") != std::string::npos && nu::logLine(ps).find("WHIRL_FD_SPLITS=128") != std::string::npos);
+            // feat026-attnkg97-r1: WHIRL_ATTN_KGVAR (var 2 = a non-bitwise kernel) is an A/B switch too
+            bool kgvar_listed = false;
+            for (const char* const* n = nu::k_numerics_switches; *n != nullptr; ++n) kgvar_listed = kgvar_listed || std::string(*n) == "ATTN_KGVAR";
+            CHECK(kgvar_listed);
+            nu::Plan pk = nu::plan(bal, swift);
+            nu::noteSwitches(pk, [](const char* n) -> std::optional<std::string> {
+                if (std::string(n) == "ATTN_KGVAR") return std::string("2");
+                return std::nullopt;
+            });
+            CHECK(pk.overrides.size() == 1 && nu::modeLabel(pk) == "balance+overrides");
+            CHECK(nu::logLine(pk).find("WHIRL_ATTN_KGVAR=2") != std::string::npos);
         }
         nu::Request fk = nu::parseMode("fast:kvq8", "t");  // custom fast list without relaxacc / kvq4
         CHECK(nu::logLine(nu::plan(fk, swift)).find("fast runs as balance") != std::string::npos);

@@ -355,6 +355,10 @@ void loadFlags(const Request& r, const Target& t, Flags& F) {
     setNe0(F.attn_kg_on, e.attn_kg);
     setNe0(F.attn_dqf_on, e.attn_dqf);
     if (e.attn_seg) F.attn_seg = static_cast<std::uint32_t>(std::strtoul(e.attn_seg->c_str(), nullptr, 10)) / 256 * 256;
+    // feat026-attnkg97 (was tune.cpp `if (auto v = envGet("ATTN_KGVAR")) m.attn_kg_var = strtoul`): the f16 attn_kg variant;
+    // WHIRL_ATTN_KGVAR is also an A/B switch (k_numerics_switches: noteSwitches records the override)
+    if (const Raw* v = e.find("ATTN_KGVAR"); v != nullptr && *v)
+        F.attn_kg_var = static_cast<std::uint32_t>(std::strtoul((*v)->c_str(), nullptr, 10));
     setNe0(F.gdn_ba_on, e.gdn_ba);
     setNe0(F.gdn_in2_on, e.gdn_in2);
     F.ffn_h16 = (t.has_mxfp4 || dense_q) && r.has(Item::h16);
@@ -587,7 +591,7 @@ void skipItem(Plan& p, Item it, const std::string& why) {
 }
 
 const char* const k_numerics_switches[] = {"FD_SPLITS", "GEMV_MAX",   "GV_NMAX",  "GV_GROUP", "NO_FUSE", "FLOAT_GEMV",
-                                           "GDN_SEQ",   "NAIVE_ATTN", "DBG",      "ATTN_WIDE", "ATTN_DQ4", "ATTN_WS4", "MOE_BN", nullptr};
+                                           "GDN_SEQ",   "NAIVE_ATTN", "DBG",      "ATTN_WIDE", "ATTN_DQ4", "ATTN_WS4", "ATTN_KGVAR", "MOE_BN", nullptr};
 
 void noteSwitches(Plan& p, const std::function<std::optional<std::string>(const char*)>& get) {
     for (const char* const* n = k_numerics_switches; *n != nullptr; ++n) {

@@ -227,7 +227,7 @@ constexpr std::size_t layoutSize() {
 }
 // a member added to Flags outside WHIRL_NUMERICS_FLAGS (so missing from flagTable and bitsKey) changes the size
 static_assert(sizeof(nu::Flags) == layoutSize(), "Flags has a member outside WHIRL_NUMERICS_FLAGS");
-static_assert(sizeof(nu::EnvValues) == (nu::EnvValues::n_fields + 13) * sizeof(nu::Raw), "EnvValues field not in names()");
+static_assert(sizeof(nu::EnvValues) == (nu::EnvValues::n_fields + 14) * sizeof(nu::Raw), "EnvValues field not in names()");
 static_assert(sizeof(nu::RuntimeValues) == nu::RuntimeValues::n_fields * sizeof(nu::Raw), "RuntimeValues field not in names()");
 
 void testBitsKeyReflection() {
@@ -441,6 +441,12 @@ void testLoadRules() {
                fl({{"FP8_MASK", "300"}}).flags.fp8_mask == 44,
            "FP8_MASK stoul base 0, catch -> 7, uint8 cast");
     NCHECK(fl({{"ATTN_SEG", "1000"}}).flags.attn_seg == 768 && fl({{"ATTN_SEG", "x"}}).flags.attn_seg == 0, "ATTN_SEG /256*256");
+    // feat026-attnkg97 (arch025-port-attn): WHIRL_ATTN_KGVAR = strtoul (tune.cpp rule of the source), in every mode (the precise
+    // refusal of var 2 is the selector's, Model::prefillAttnFlags().prec), and an A/B switch (override)
+    NCHECK(fl({{"ATTN_KGVAR", "2"}}).flags.attn_kg_var == 2 && fl({{"ATTN_KGVAR", "x"}}).flags.attn_kg_var == 0 &&
+               fl({{"ATTN_KGVAR", ""}}).flags.attn_kg_var == 0 && fl({}).flags.attn_kg_var == 0 &&
+               fl({{"ATTN_KGVAR", "3"}}, "precise").flags.attn_kg_var == 3 && fl({{"ATTN_KGVAR", "2"}}).overrides.size() == fl({}).overrides.size() + 1,
+           "ATTN_KGVAR strtoul + switch");
     NCHECK(fl({{"MOE_WIDE", ""}}).flags.moe_wide && !fl({{"MOE_MXW", "0"}}).flags.moe_mxw && !fl({{"MOE_RBF", "0"}}).flags.moe_rbf,
            "loader flags: envFlag (\"\" is on)");
     NCHECK(!fl({{"G8T", "0"}}).flags.g8t && fl({}).flags.g8t, "G8T");

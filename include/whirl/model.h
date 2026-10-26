@@ -596,6 +596,9 @@ public:
     // longer than dq_rows (and for q4: every prefill dequantizes its keys into ffn_g / ffn_u)
     DevPtr dq_st_ml = 0;
     static constexpr std::uint32_t kDqMaxKeys = ops::kDqMaxKeys;  // dq_ptab covers keys [0, kDqMaxKeys)
+    // selector flags; prec = numerics mode precise (num_plan.mode, not prec_dec); attn_kg_var = nf().attn_kg_var: f16 attn_kg variant
+    // 0 shipped, 1 attn_kgv (bit-identical), 2 attn_kgw (not precise), 3 attn_kgk (bit-identical); WHIRL_ATTN_KGVAR
+    ops::AttnPrefillFlags prefillAttnFlags() const;
     bool out_h16 = false;
 
     // ---- per-layer state

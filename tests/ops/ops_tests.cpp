@@ -429,6 +429,44 @@ void testAttnPrefill() {
     auto pl = ops::chooseAttnPrefill(p, f, k);
     CHECK(pl.steps.size() == 1 && nameOf(pl.steps[0].f) == "attn_kg2" && !pl.steps[0].from_copy && pl.steps[0].grid.x == 32 && pl.steps[0].grid.y == 12 &&
           pl.steps[0].block.x == 128);
+    // feat026-attnkg97: attn_kg_var 1 picks the f16 candidate attn_kgv (same grid / block); without it
+    // in the code object, and with attn_kg_var 0 (the default), the shipped attn_kg
+    f.attn_kg_var = 1;
+    pl = ops::chooseAttnPrefill(p, f, k);
+    CHECK(pl.steps.size() == 1 && nameOf(pl.steps[0].f) == "attn_kg2");
+    k.attn_kgv2 = tag("attn_kgv2");
+    pl = ops::chooseAttnPrefill(p, f, k);
+    CHECK(pl.steps.size() == 1 && nameOf(pl.steps[0].f) == "attn_kgv2" && pl.steps[0].grid.x == 32 && pl.steps[0].grid.y == 12 &&
+          pl.steps[0].block.x == 128 && !pl.steps[0].from_copy);
+    // var 2 (attn_kgw, not bit-identical): taken in balance / fast, refused under precise (-> attn_kg)
+    k.attn_kgw2 = tag("attn_kgw2");
+    f.attn_kg_var = 2;
+    pl = ops::chooseAttnPrefill(p, f, k);
+    CHECK(pl.steps.size() == 1 && nameOf(pl.steps[0].f) == "attn_kgw2" && pl.steps[0].block.x == 128);
+    f.prec = true;
+    pl = ops::chooseAttnPrefill(p, f, k);
+    CHECK(pl.steps.size() == 1 && nameOf(pl.steps[0].f) == "attn_kg2");
+    f.attn_kg_var = 1;  // the bit-identical variant stays allowed under precise
+    pl = ops::chooseAttnPrefill(p, f, k);
+    CHECK(pl.steps.size() == 1 && nameOf(pl.steps[0].f) == "attn_kgv2");
+    // feat026-attnkg97k: var 3 (attn_kgk, shared K and V, bit-identical): missing -> attn_kg; present -> taken
+    // under precise too, same grid / block
+    f.attn_kg_var = 3;
+    pl = ops::chooseAttnPrefill(p, f, k);
+    CHECK(pl.steps.size() == 1 && nameOf(pl.steps[0].f) == "attn_kg2");
+    k.attn_kgk2 = tag("attn_kgk2");
+    pl = ops::chooseAttnPrefill(p, f, k);
+    CHECK(pl.steps.size() == 1 && nameOf(pl.steps[0].f) == "attn_kgk2" && pl.steps[0].grid.x == 32 && pl.steps[0].grid.y == 12 &&
+          pl.steps[0].block.x == 128 && !pl.steps[0].from_copy);
+    f.prec = false;
+    pl = ops::chooseAttnPrefill(p, f, k);
+    CHECK(pl.steps.size() == 1 && nameOf(pl.steps[0].f) == "attn_kgk2");
+    k.attn_kgk2 = nullptr;
+    f.attn_kg_var = 0;
+    pl = ops::chooseAttnPrefill(p, f, k);
+    CHECK(pl.steps.size() == 1 && nameOf(pl.steps[0].f) == "attn_kg2");
+    k.attn_kgv2 = nullptr;
+    k.attn_kgw2 = nullptr;
     // q8 KV with the dequant scratch: kv_dq_rows once, then attn_kgf (only kgf4 exists here -> kg2's kgf2 is null -> falls through)
     p.kv_q8 = true;
     p.dq_rows = 8192;
@@ -436,6 +474,30 @@ void testAttnPrefill() {
     p.dq_st_ml = true;
     pl = ops::chooseAttnPrefill(p, f, k);
     CHECK(!pl.steps.empty());
+    // feat026-attnkg97-r1: the Q8P path (kv_dq_rows once, then the f16 kernel from the dequantized copy) takes the
+    // same variants: var 1 (bit-identical) in every mode, var 2 (attn_kgw) only outside precise
+    k.attn_kgf2 = tag("attn_kgf2");
+    k.attn_kgv2 = tag("attn_kgv2");
+    k.attn_kgw2 = tag("attn_kgw2");
+    auto q8p = [&](std::uint32_t var, bool prec) {
+        f.attn_kg_var = var;
+        f.prec = prec;
+        return ops::chooseAttnPrefill(p, f, k);
+    };
+    pl = q8p(0, false);
+    CHECK(pl.steps.size() == 2 && pl.steps[0].op == ops::AttnStep::Op::dq_rows && nameOf(pl.steps[1].f) == "attn_kgf2");
+    pl = q8p(1, true);
+    CHECK(pl.steps.size() == 2 && pl.steps[0].op == ops::AttnStep::Op::dq_rows && nameOf(pl.steps[1].f) == "attn_kgv2");
+    pl = q8p(2, false);
+    CHECK(pl.steps.size() == 2 && pl.steps[0].op == ops::AttnStep::Op::dq_rows && nameOf(pl.steps[1].f) == "attn_kgw2");
+    pl = q8p(2, true);  // precise: var 2 refused on the Q8P path -> the shipped f16 kernel, never attn_kgw
+    CHECK(pl.steps.size() == 2 && pl.steps[0].op == ops::AttnStep::Op::dq_rows && nameOf(pl.steps[1].f) == "attn_kgf2");
+    for (const auto& s : pl.steps) CHECK(nameOf(s.f) != "attn_kgw2");
+    f.attn_kg_var = 0;
+    f.prec = false;
+    k.attn_kgf2 = nullptr;
+    k.attn_kgv2 = nullptr;
+    k.attn_kgw2 = nullptr;
     // a non-power-of-two scale: no attn_kg; attn_kx (512 threads)
     p.kv_q8 = false;
     p.scale = 0.1f;

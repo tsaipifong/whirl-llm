@@ -76,6 +76,7 @@ constexpr std::array<S::Entry, S::n_names> k_names{{
     {"ATTN_WIDE", &S::attn_wide},
     {"ATTN_DQ4", &S::attn_dq4},
     {"ATTN_WS4", &S::attn_ws4},
+    {"ATTN_KGVAR", &S::attn_kgvar},
     {"MOE_BN", &S::moe_bn},
     {"CODE_OBJECT", &S::code_object},
     {"MOE_MXW", &S::moe_mxw},
