@@ -6,6 +6,7 @@
 # the CPU test executables no longer compile the policy source themselves. Included from the top-level CMakeLists.txt
 # before server.cmake and model.cmake.
 
-add_library(whirl_spec STATIC ${CMAKE_SOURCE_DIR}/src/spec/policy.cpp)
+# src/spec/slot_drafts.cpp (arch025-E1b): the per-slot draft allocation the server engine runs each decode cycle.
+add_library(whirl_spec STATIC ${CMAKE_SOURCE_DIR}/src/spec/policy.cpp ${CMAKE_SOURCE_DIR}/src/spec/slot_drafts.cpp)
 target_include_directories(whirl_spec PUBLIC ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(whirl_spec PUBLIC whirl)

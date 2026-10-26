@@ -2517,6 +2517,64 @@ void testSlotDraftPlan() {
     CHECK(dm.size() == 2 && dm[0] + dm[1] + 2 + 6 <= 16 && dm[0] >= 1 && dm[1] >= 1);
 }
 
+// WHIRL_SLOT_DRAFTS=1 marginal-gain swaps (splitDraftsByGain = the body of Engine::splitDrafts, src/spec/slot_drafts.cpp
+// since arch025-E1b): exact allocations, derived independently by scratch\a25_e1b\split_sim.py (a Python port of the
+// 5e3d082 loop with float32 rounding). nd_m starts at nd for every slot, as Engine::splitDrafts fills it.
+void testSlotDraftSplit() {
+    struct Case {
+        std::vector<float> a;
+        std::uint32_t nd, rows, cap;
+        std::vector<std::uint32_t> want;
+    };
+    const std::vector<Case> cases = {
+        {{0.92f, 0.3f}, 3, 6, 8, {6, 0}},         // no spare row: drafts move from the low- to the high-acceptance slot
+        {{0.92f, 0.3f}, 3, 16, 8, {8, 3}},        // spare rows: the high slot grows to the cap
+        {{0.75f, 0.75f}, 3, 6, 8, {3, 3}},        // equal acceptance: a swap never pays (concave E), stays uniform
+        {{0.95f, 0.6f, 0.2f}, 2, 6, 3, {3, 2, 1}},  // the cap binds the receiver
+        {{0.95f, 0.6f, 0.2f}, 2, 12, 8, {8, 3, 1}},
+        {{0.3f, 0.3f}, 2, 16, 8, {2, 2}},         // spare rows but every next draft is below the 0.35 bar
+    };
+    for (const Case& c : cases) {
+        std::vector<qwen35::DraftAccept> acc;
+        for (float a : c.a) acc.emplace_back(a);
+        std::vector<const qwen35::DraftAccept*> ap;
+        for (const auto& x : acc) ap.push_back(&x);
+        std::vector<std::uint32_t> nd_m(acc.size(), c.nd);
+        splitDraftsByGain(ap, c.nd, c.rows, c.cap, nd_m);
+        CHECK(nd_m == c.want);
+        if (nd_m != c.want) {
+            std::fprintf(stderr, "  slot_draft_split: a0 %.2f nd %u rows %u cap %u ->", c.a[0], c.nd, c.rows, c.cap);
+            for (auto x : nd_m) std::fprintf(stderr, " %u", x);
+            std::fprintf(stderr, "\n");
+        }
+        std::uint32_t used = 0;
+        for (auto x : nd_m) {
+            used += x;
+            CHECK(x <= c.cap);
+        }
+        CHECK(used <= std::max(c.rows, c.nd * static_cast<std::uint32_t>(acc.size())));  // rows only grow into spare rows
+    }
+}
+
+// the draft cap for A decoding slots (slotDraftCap = the body of Engine::draftCap; pickDrafts' first lines since
+// arch025-E1b): batch_drafts capped by n_draft, 1 without the fused decode, lowered until A * (nd + 1) verify rows fit
+// and, without DeltaNet replay, A * nd <= gdn_max_snap (15)
+void testSlotDraftCap() {
+    CHECK_EQ(slotDraftCap(5, 3, true, true, 1, 16), 3u);    // n_draft caps the batch setting
+    CHECK_EQ(slotDraftCap(2, 3, true, true, 1, 16), 2u);    // the batch setting caps n_draft
+    CHECK_EQ(slotDraftCap(5, 3, false, true, 1, 16), 1u);   // no fused decode: one draft
+    CHECK_EQ(slotDraftCap(0, 3, true, true, 4, 64), 0u);    // batch setting 0: no drafts
+    CHECK_EQ(slotDraftCap(3, 3, true, true, 4, 16), 3u);    // 4 x 4 rows == 16
+    CHECK_EQ(slotDraftCap(3, 3, true, true, 4, 15), 2u);    // 4 x 4 > 15 -> 4 x 3
+    CHECK_EQ(slotDraftCap(3, 3, true, true, 16, 16), 0u);   // 16 x 2 > 16
+    CHECK_EQ(slotDraftCap(3, 3, true, false, 4, 64), 3u);   // no replay: 4 x 3 = 12 snapshot sets <= 15
+    CHECK_EQ(slotDraftCap(3, 3, true, false, 6, 64), 2u);   // 6 x 3 = 18 > 15 -> 6 x 2 = 12
+    CHECK_EQ(slotDraftCap(3, 3, true, true, 6, 64), 3u);    // the same with replay: no snapshot limit
+    CHECK_EQ(slotDraftCap(3, 3, true, false, 16, 64), 0u);  // 16 x 1 > 15
+    CHECK_EQ(slotDraftCap(10, 10, true, true, 1, 11), 10u); // the most drafts: 11 verify rows
+    CHECK_EQ(slotDraftCap(10, 10, true, true, 1, 10), 9u);
+}
+
 // WHIRL_SLOT_DRAFTS=2 with one decoding slot: the same draft count every cycle as without it
 // (fixed draft count, no n-gram: the automatic choices depend on measured wall-clock times)
 void testSlotDraftsOneSlot() {
@@ -8052,6 +8110,8 @@ int main(int argc, char** argv) {
         {"concurrency_floor", [] { testConcurrency(4, 12, true, 20); }},
         {"prefill_batch_floor", testPrefillBatchFloor},
         {"slot_draft_plan", testSlotDraftPlan},
+        {"slot_draft_split", testSlotDraftSplit},
+        {"slot_draft_cap", testSlotDraftCap},
         {"slot_drafts_one_slot", testSlotDraftsOneSlot},
         {"concurrency_slot2", [] { testConcurrency(4, 12, true, 0, 2); }},
         {"concurrency_slot2_c2", [] { testConcurrency(2, 8, true, 0, 2); }},

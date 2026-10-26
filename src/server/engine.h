@@ -25,6 +25,7 @@
 #include "tier/idle_flush.h"
 #include "tier/kv_tier.h"
 #include "spec/policy.h"  // DraftAccept, SlotAccept, NgramPolicy, DraftTiming, CycleCost (arch025-M4)
+#include "spec/slot_drafts.h"  // DraftPlanSlot, planSlotDrafts, splitDraftsByGain, slotDraftCap (arch025-E1b)
 #include "tokens.h"
 #include "vision_iface.h"
 #include "whirl/chat.h"
@@ -178,21 +179,6 @@ private:
 std::uint64_t parkSlotCkpts(CkptStore& cs, Slot& sl);
 
 struct CycleProf;
-
-// One decoding slot as the per-slot draft planner (WHIRL_SLOT_DRAFTS=2) sees it.
-struct DraftPlanSlot {
-    const qwen35::DraftAccept* acc = nullptr;  // MTP slot: effective acceptance; unused for n-gram slots
-    std::uint32_t pos = 0;                     // context length
-    std::uint32_t ng_rows = 0;                 // > 0: n-gram slot with this many verify rows
-    float ng_e = 0;                            // n-gram slot: expected tokens
-    std::uint32_t d_prev = 0;                  // MTP drafts in its last MTP cycle (0: none)
-};
-
-// MTP draft counts of the MTP slots (in order, n-gram slots skipped) from qwen35::allocDrafts:
-// `uniform` drafts each unless the cost model finds a better split within `rows` verify rows and
-// `snaps` snapshot sets; every MTP slot gets 1..cap. Pure (no engine state), for tests.
-std::vector<std::uint32_t> planSlotDrafts(std::span<const DraftPlanSlot> slots, const qwen35::CycleCost& cost,
-                                          std::uint32_t uniform, std::uint32_t cap, std::uint32_t rows, std::uint32_t snaps);
 
 struct EngineOptions {
     std::string model_name;
