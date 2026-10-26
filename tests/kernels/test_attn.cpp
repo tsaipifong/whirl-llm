@@ -306,7 +306,26 @@ void dq4Long(Ctx& c) {
     struct Out {
         std::vector<float> ml, acc, o;
     };
-    auto run = [&](const std::vector<int>& pos, int ns, int win) {
+    // WHIRL_KT_AD8S_HSACO (feat026-attndec8s): the candidate object's attn_dq4 must give this build's bits
+    // (ml, acc of every split and the combined output) in every case below
+    std::vector<char> cand_img;
+    hip::Module cand_mod;
+    hip::Function fcand{};
+    if (const char* e = std::getenv("WHIRL_KT_AD8S_HSACO")) {
+        if (std::FILE* fp = std::fopen(e, "rb")) {
+            std::fseek(fp, 0, SEEK_END);
+            cand_img.resize(static_cast<std::size_t>(std::ftell(fp)));
+            std::fseek(fp, 0, SEEK_SET);
+            if (std::fread(cand_img.data(), 1, cand_img.size(), fp) != cand_img.size()) cand_img.clear();
+            std::fclose(fp);
+        }
+        if (!cand_img.empty()) {
+            cand_mod = hip::Module::loadData(cand_img.data(), c.mod.arch());
+            fcand = cand_mod.getFunctionOpt("attn_dq4");
+            std::printf("   candidate attn_dq4 from %s%s\n", e, fcand ? "" : " (not in it)");
+        }
+    }
+    auto run = [&](const std::vector<int>& pos, int ns, int win, hip::Function fk = hip::Function{}) {
         Buf dp(pos), ml(static_cast<std::size_t>(nq) * ns * kHeads * 2 * 4), acc(static_cast<std::size_t>(nq) * ns * kHeads * kHd * 4),
             out(static_cast<std::size_t>(nq) * kHeads * kHd * 4);
         ml.fill(0x7f);  // garbage: every split must write its ml
@@ -318,8 +337,8 @@ void dq4Long(Ctx& c) {
         }
         wk::KvArgs a = kv;
         a.win = win;
-        hip::launch(fd, {kKv, static_cast<unsigned>(ns), static_cast<unsigned>(nq)}, {256, 1, 1}, 0, c.s, dq.p(), a, ml.p(), acc.p(), kHeads, kKv,
-                    kQStride, dp.p(), kScale, DevPtr{0}, g);
+        hip::launch(fk ? fk : fd, {kKv, static_cast<unsigned>(ns), static_cast<unsigned>(nq)}, {256, 1, 1}, 0, c.s, dq.p(), a, ml.p(), acc.p(), kHeads,
+                    kKv, kQStride, dp.p(), kScale, DevPtr{0}, g);
         hip::launch(c.k.attn_combine, {kHeads, static_cast<unsigned>(nq), 1}, {256, 1, 1}, 0, c.s, ml.p(), acc.p(), dq.p(), out.p(), kHeads, kHd,
                     kQStride, ns);
         c.sync();
@@ -339,6 +358,12 @@ void dq4Long(Ctx& c) {
         const std::vector<int> pos = {cs.ctx - 1, cs.ctx - 2};  // two verify rows (one query per group)
         const std::string tag = " (ctx " + std::to_string(cs.ctx) + ", grid.y " + std::to_string(cs.ns) + ") [kv q4 long]";
         const Out o = run(pos, cs.ns, 0);
+        if (fcand) {
+            const Out oc = run(pos, cs.ns, 0, fcand);
+            c.rep.add(cmpExact("cand attn_dq4 ml == attn_dq4" + tag, oc.ml, o.ml, Kind::exact));
+            c.rep.add(cmpExact("cand attn_dq4 acc == attn_dq4" + tag, oc.acc, o.acc, Kind::exact));
+            c.rep.add(cmpExact("cand attn_dq4 + combine == attn_dq4 + combine" + tag, oc.o, o.o, Kind::exact));
+        }
         std::vector<double> ro, rs;
         ref(pos, 0, ro, rs);
         c.rep.add(cmpTol("attn_dq4 + combine vs CPU" + tag, o.o, ro, rs, 1e-2, 1e-4));
@@ -393,6 +418,11 @@ void dq4Long(Ctx& c) {
                 if (!same || w0 <= 256) continue;  // rows' window starts differ, or no window: draw again
                 ++done;
                 const Out ow = run(pos, cs.ns, winArg(w, 0));
+                if (fcand) {
+                    const Out owc = run(pos, cs.ns, winArg(w, 0), fcand);
+                    c.rep.add(cmpExact("cand attn_dq4 draft window W " + std::to_string(w) + " (ml, acc, out) == attn_dq4" + tag, owc.acc, ow.acc, Kind::exact));
+                    c.rep.add(cmpExact("cand attn_dq4 draft window W " + std::to_string(w) + " ml == attn_dq4" + tag, owc.ml, ow.ml, Kind::exact));
+                }
                 std::vector<double> rwo, rws;
                 ref(pos, w0, rwo, rws);
                 c.rep.add(cmpTol("attn_dq4 draft window W " + std::to_string(w) + " (keys from " + std::to_string(w0) + ") vs CPU" + tag, ow.o, rwo, rws,

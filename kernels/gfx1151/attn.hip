@@ -849,6 +849,16 @@ extern "C" __global__ void __launch_bounds__(128)
 #define DQ_NW 8
 #define DQ_C 8
 #define DQ_MAXS 128
+// feat026-attndec8s tune id (bit mask; 0 = the shipped kernels, bit-identical outputs for every id):
+//   1 attn_ws4* inline-asm LDS barriers   2 attn_ws4g* inline-asm LDS barriers   (attn_ws4.hip ws4_bar)
+//   4 attn_ws4_q8 / _q4 page-table lookahead   8 attn_ws4g*_q8 page-table lookahead (f16 entries: no, they spilled)
+//  16 attn_dq4 page-table lookahead (the next tile's kv_delta read after this tile's K / V loads)
+#ifndef WHIRL_ATTNDEC8S
+#define WHIRL_ATTNDEC8S 0
+#endif
+#define AD8S_WS4_TU ((WHIRL_ATTNDEC8S & 1) | (((WHIRL_ATTNDEC8S >> 2) & 1) << 1))
+#define AD8S_WS4G_TU (((WHIRL_ATTNDEC8S >> 1) & 1) | (((WHIRL_ATTNDEC8S >> 3) & 1) << 1))
+#define AD8S_DQ4_DLA ((WHIRL_ATTNDEC8S >> 4) & 1)
 __device__ __forceinline__ int dq_per(int n_keys, int n_split) {
     const int ns = min(n_split, DQ_MAXS);
     return max(DQ_NW * 32, (n_keys + ns * 64 - 1) / (ns * 64) * 64);
@@ -960,8 +970,14 @@ extern "C" __global__ void __launch_bounds__(256)
     }
     const uint32_t M4 = 0x0f0f0f0fu;
     const int gl = lane >> 2;  // the 32-group of this lane's P.V dims
+    int dl_next = 0;  // AD8S_DQ4_DLA: the page-table entry of this wave's next tile (clamped address)
+    if constexpr (AD8S_DQ4_DLA != 0) dl_next = kv_delta(kv, tb, min(b0 + wid * 32, b1 - 1));
     for (int k0 = b0 + wid * 32; k0 < b1; k0 += DQ_NW * 32) {
-        const int dl = kv_delta(kv, tb, k0);  // 32-key tiles never straddle a page
+        int dl;  // 32-key tiles never straddle a page
+        if constexpr (AD8S_DQ4_DLA != 0)
+            dl = dl_next;
+        else
+            dl = kv_delta(kv, tb, k0);
         const int key = k0 + lane;
         const bool valid = key < b1;
         const size_t r = (size_t)(min(key, b1 - 1) + dl) * n_kv + g;
@@ -977,6 +993,7 @@ extern "C" __global__ void __launch_bounds__(256)
             const size_t rv = (size_t)(min(k0 + j, b1 - 1) + dl) * n_kv + g;
             vw[j] = *(const uint32_t *)((const uint8_t *)kv.v + rv * (AW_D / 2) + 4 * lane);
         }
+        if constexpr (AD8S_DQ4_DLA != 0) dl_next = kv_delta(kv, tb, min(k0 + DQ_NW * 32, b1 - 1));
         // scores (lane = key). zo: an opaque 0 so the q reads stay in the loop (hoisted, the
         // 512 q words and their scales would spill)
         int zo;

@@ -290,6 +290,25 @@ static void ws4Pass(Ctx& c) {
             have_base = true;
         }
     }
+    // WHIRL_KT_AD8S_HSACO (feat026-attndec8s): a candidate code object (-DWHIRL_ATTNDEC8S=<id>); its attn_ws4*
+    // must give the bits of this build's attn_wsplit1* (== this build's attn_ws4*, checked in the same pass)
+    std::vector<char> cand_img;
+    hip::Module cand_mod;
+    bool have_cand = false;
+    if (const char* e = std::getenv("WHIRL_KT_AD8S_HSACO")) {
+        if (std::FILE* fp = std::fopen(e, "rb")) {
+            std::fseek(fp, 0, SEEK_END);
+            cand_img.resize(static_cast<std::size_t>(std::ftell(fp)));
+            std::fseek(fp, 0, SEEK_SET);
+            if (std::fread(cand_img.data(), 1, cand_img.size(), fp) != cand_img.size()) cand_img.clear();
+            std::fclose(fp);
+        }
+        if (!cand_img.empty()) {
+            cand_mod = hip::Module::loadData(cand_img.data(), c.mod.arch());
+            have_cand = true;
+            std::printf("   candidate attn_ws4* from %s\n", e);
+        }
+    }
     for (F f : {F::f16, F::q8, F::q4}) {
         const std::string tag = std::string(" [kv ") + fname(f) + "]" + grpTag();
         const auto fold = c.fnOpt(std::string("attn_wsplit1") + fsuf(f));
@@ -307,6 +326,12 @@ static void ws4Pass(Ctx& c) {
         if (have_base)
             if (auto fb = base_mod.getFunctionOpt((std::string("attn_wsplit1") + fsuf(f)).c_str()))
                 news.push_back({std::string("base attn_wsplit1") + fsuf(f), fb});
+        std::vector<std::pair<std::string, hip::Function>> cands;  // also through the draft-window / repeat checks
+        if (have_cand)
+            if (auto fc = cand_mod.getFunctionOpt((std::string("attn_ws4") + fsuf(f)).c_str())) {
+                news.push_back({std::string("cand attn_ws4") + fsuf(f), fc});
+                cands.push_back(news.back());
+            }
         // contexts in batches of 8 rows (one per group), alternating the two sequences' page tables
         for (std::size_t i = 0; i < ctxs.size(); i += 8) {
             std::vector<int> pos, tbs;
@@ -330,6 +355,10 @@ static void ws4Pass(Ctx& c) {
                 const Partials ref = run(c, fold, p, dq, pos, tbs, kNs, win);
                 const Partials got = run(c, fn0, p, dq, pos, tbs, kNs, win);
                 compare(c, nm0 + " == attn_wsplit1" + fsuf(f) + " (draft window arg " + std::to_string(win) + ")" + tag, got, kNs, ref, kNs, 4);
+                for (const auto& [cn, cf] : cands) {
+                    const Partials gc = run(c, cf, p, dq, pos, tbs, kNs, win);
+                    compare(c, cn + " == attn_wsplit1" + fsuf(f) + " (draft window arg " + std::to_string(win) + ")" + tag, gc, kNs, ref, kNs, 4);
+                }
             }
         }
         // split rule independent of the grid (gridDim.y 16 vs 64, contexts <= 1024)
