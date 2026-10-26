@@ -4,6 +4,7 @@
 #include "cache/page_pool.h"
 
 #include <stdexcept>
+#include <unordered_map>
 
 namespace whirl::server {
 
@@ -149,6 +150,16 @@ bool PagePool::ensure(std::vector<std::int32_t>& pages, std::uint32_t seq, std::
 std::size_t PagePool::reclaimable() const {
     std::size_t n = free_.size();
     for (const QBatch& q : quarantine_) n += q.pages.size();
+    return n;
+}
+
+std::size_t PagePool::freeable() const {
+    std::size_t n = free_.size();
+    std::unordered_map<std::int32_t, std::uint32_t> held;  // page -> quarantine entries holding it
+    for (const QBatch& q : quarantine_)
+        for (std::int32_t p : q.pages) held[p] += 1;
+    for (const auto& [p, c] : held)
+        if (c >= ref_[static_cast<std::size_t>(p)]) ++n;
     return n;
 }
 

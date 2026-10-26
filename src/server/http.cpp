@@ -524,6 +524,9 @@ void buildJob(const EngineFacts& f, Job& job, std::string_view path, std::string
             if (!srcs.empty()) job.vis = buildVis(vc, srcs, job.tokens, web);
         }
         job.think = req.options.think;
+        // (variant b keeps every think block whatever the flag says: chat_template.cpp renderChat)
+        job.think_history_dropped = f.tmpl == chat::TemplateKind::a && req.options.preserve_thinking.has_value() &&
+                                    !*req.options.preserve_thinking;
         job.tools_on = !req.tools.empty();
         const std::size_t n_tools = req.tools.size();
         job.tools = std::move(req.tools);

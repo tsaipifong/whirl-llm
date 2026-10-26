@@ -95,6 +95,9 @@ public:
     static std::size_t pagesFor(std::uint64_t n_tok) { return static_cast<std::size_t>((n_tok + qwen35::kv_page - 1) / qwen35::kv_page); }
     // free pages plus quarantined ones
     std::size_t reclaimable() const;
+    // feat026-pidle-r2 (review r1-batch-b): free pages plus the quarantined ones whose every holder is the
+    // quarantine (a quarantined page another slot or a shared checkpoint still holds never becomes free)
+    std::size_t freeable() const;
     // pages of the list with no other holder
     std::size_t soleOwned(std::span<const std::int32_t> pages) const;
 

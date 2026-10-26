@@ -927,6 +927,7 @@ bool Engine::startJob(Slot& sl, Job& job) {
     sl.job = &job;
     sl.last_used = ps_.cache().touch();
     sl.pidle_want = false;  // PRECISE-IDLE: the slot is in use again
+    sl.pidle_hist_dropped = false;
     // (v0.2.2.2: ctxForNew = the context per request, lowered by the memory governor for new requests only)
     const std::uint32_t ctx_new = ctxForNew();
     if (N + nd_max + 2 >= ctx_new || static_cast<std::uint64_t>(N) + nd_max + 2 >= static_cast<std::uint64_t>(pool_.pages()) * kv_page) {
@@ -1406,6 +1407,7 @@ void Engine::finishPrefill(Slot& sl) {
     sl.out = Out{};
     sl.out.chat = job.kind == JobKind::chat;
     sl.out.think_open = job.kind == JobKind::chat && job.think;
+    sl.pidle_hist_dropped = job.kind == JobKind::chat && job.think_history_dropped;
     sl.out.tools_on = job.tools_on;
     sl.out.stops = job.params.stop;
     sl.st = StreamState{};
@@ -2859,6 +2861,7 @@ std::vector<Engine::SlotViewForTest> Engine::slotsForTest() const {
     for (const Slot& sl : slots_) {
         SlotViewForTest s;
         s.tokens = sl.cache_tokens.size();
+        s.ids = sl.cache_tokens;
         s.pages = sl.pages.size();
         for (const Ckpt& c : sl.ckpts)
             if (c.valid) s.max_ck = std::max(s.max_ck, c.pos);

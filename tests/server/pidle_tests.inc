@@ -434,3 +434,242 @@ void testPidleThinkResumeCold() {
     CHECK(cachedTokens(r2) > 0);
     CHECK_EQ(completionText(r2), t_cold);
 }
+
+// ---------------------------------------------------------------------------
+// feat026-pidle-r2: thinking replies (research/pidle/2026-10-26-think-template-reuse.md). With thinking on the next
+// prompt holds the reply only when the client sends the reasoning back (reasoning_content); the prompt's history
+// tells: an earlier assistant turn with a non-empty think block -> re-prefill; empty blocks only / first turn -> skip;
+// a variant-a request with preserve_thinking=false -> skip (the template strips the earlier blocks).
+
+namespace pidle_test {
+
+// "<|im_start|>assistant\n<think>\n" + reasoning + "\n</think>\n\n" + content + "<|im_end|>\n<|im_start|>user\n"
+// as the templates render an earlier assistant turn (reasoning "" = the empty block "<think>\n\n</think>\n\n")
+std::vector<std::uint32_t> pastTurn(const std::string& reasoning, const std::string& content) {
+    return encChat("<|im_end|>\n<|im_start|>assistant\n<think>\n" + reasoning + "\n</think>\n\n" + content +
+                   "<|im_end|>\n<|im_start|>user\n");
+}
+
+// a thinking-mode completion prompt of about n tokens: 1000 tokens of turn 1, the earlier assistant turn, filler,
+// the generation prompt "<|im_end|>\n<|im_start|>assistant\n<think>\n"
+std::vector<std::uint32_t> thinkPrompt(std::uint32_t n, std::uint64_t seed, const std::vector<std::uint32_t>& past) {
+    std::vector<std::uint32_t> p = makePrompt(1000, seed);
+    p.insert(p.end(), past.begin(), past.end());
+    p = makePrompt(n, seed + 1, p);
+    const auto gen = encChat("<|im_end|>\n<|im_start|>assistant\n<think>\n");
+    p.insert(p.end(), gen.begin(), gen.end());
+    return p;
+}
+
+std::string chatChoices(const HttpResult& r) {
+    const std::size_t a = r.body.find("\"choices\""), b = r.body.find("\"usage\"");
+    return a == std::string::npos || b == std::string::npos || b < a ? std::string("<none>") : r.body.substr(a, b - a);
+}
+
+std::uint64_t promptTokens(const HttpResult& r) {
+    const json::Value v = parseBody(r);
+    const json::Value* u = v.get("usage");
+    const json::Value* p = u ? u->get("prompt_tokens") : nullptr;
+    return p && p->kind() == json::Value::Kind::integer ? static_cast<std::uint64_t>(p->asInt()) : 0;
+}
+
+}  // namespace pidle_test
+
+// ChatTokens::reasoningInHistory on rendered text (the real vocabulary: "\n\n", "</think>", "assistant" are one token)
+void testPidleReasoningInHistory() {
+    using namespace pidle_test;
+    const ChatTokens ct(tok());
+    CHECK(ct.think_end != ChatTokens::none && ct.nl2 != ChatTokens::none && ct.assistant != ChatTokens::none);
+    const std::string head = "<|im_start|>system\nYou are helpful.<|im_end|>\n<|im_start|>user\nhi";
+    const std::string gen = "<|im_end|>\n<|im_start|>assistant\n<think>\n";
+    const std::string past_r =
+        "<|im_end|>\n<|im_start|>assistant\n<think>\nI weigh the options.\n</think>\n\nDone.<|im_end|>\n<|im_start|>user\nnext";
+    const std::string past_e = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\nDone.<|im_end|>\n<|im_start|>user\nnext";
+    // first turn: only the generation prompt's own block
+    CHECK(!ct.reasoningInHistory(encChat(head + gen)));
+    // the client sent the reasoning back
+    CHECK(ct.reasoningInHistory(encChat(head + past_r + gen)));
+    // the client dropped it: empty blocks only (one or two earlier turns)
+    CHECK(!ct.reasoningInHistory(encChat(head + past_e + gen)));
+    CHECK(!ct.reasoningInHistory(encChat(head + past_e + past_e + gen)));
+    // any earlier turn with reasoning counts
+    CHECK(ct.reasoningInHistory(encChat(head + past_e + past_r + gen)));
+    // not a thinking-mode prompt: false whatever the history holds
+    CHECK(!ct.reasoningInHistory(encChat(head + past_r + "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n")));
+    // a past turn rendered without any block (preserve_thinking=false) is no reasoning
+    CHECK(!ct.reasoningInHistory(encChat(head + "<|im_end|>\n<|im_start|>assistant\nDone.<|im_end|>\n<|im_start|>user\nnext" + gen)));
+}
+
+// Thinking on, the client sends the reasoning back: turn 1's history carries a non-empty think block, so its reply
+// is re-prefilled while idle and turn 2 (= turn 1 + the reply as generated + new tokens: the FULL-prefix case)
+// resumes at the idle checkpoint 4096 instead of an earlier point of turn 1; its text equals a cold server.
+void testPidleThinkRoundTrip() {
+    using namespace pidle_test;
+    g_log.clear();
+    TestServer srv(preciseSetup(true, true));
+    TestServer ref(preciseSetup(true, false));  // the same server without the idle job: the reply tokens
+    ServerSetup su_nc = preciseSetup(true, false);
+    su_nc.eo.no_prefix_cache = true;
+    TestServer cold(su_nc);
+    const std::vector<std::uint32_t> p1 = thinkPrompt(2990, 71, pastTurn("I weigh the options.", "Done."));
+    CHECK(ChatTokens(tok()).reasoningInHistory(p1));
+    auto r1 = srv.post("/v1/completions", completionBody(p1, 2000));
+    auto r1r = ref.post("/v1/completions", completionBody(p1, 2000));
+    CHECK_EQ(completionText(r1), completionText(r1r));
+    CHECK_EQ(completionText(r1), completionText(cold.post("/v1/completions", completionBody(p1, 2000))));
+    CHECK(waitUntil([&] { return srv.engine().pidleStats().done >= 1; }, 20000));
+    CHECK_EQ(g_log.count("precise idle: thinking reply kept: the history carries reasoning"), 1u);
+    CHECK_EQ(g_log.count("precise idle: skipped"), 0u);
+    const std::vector<std::uint32_t> held = slotsView(ref)[0].ids;  // turn 1 + reply (the rows the KV holds)
+    CHECK(held.size() > p1.size() + 1000 && std::equal(p1.begin(), p1.end(), held.begin()));
+    const auto v = slotsView(srv);
+    CHECK_EQ(v[0].max_ck, 4096u);
+    const std::vector<std::uint32_t> p2 = makePrompt(static_cast<std::uint32_t>(held.size() + 350), 72, held);
+    auto r2 = srv.post("/v1/completions", completionBody(p2, 40));
+    auto r2r = ref.post("/v1/completions", completionBody(p2, 40));
+    const std::string t_cold = completionText(cold.post("/v1/completions", completionBody(p2, 40)));
+    CHECK_EQ(completionText(r2), t_cold);
+    CHECK_EQ(completionText(r2r), t_cold);
+    CHECK_EQ(cachedTokens(r2), 4096u);           // the idle checkpoint
+    CHECK(cachedTokens(r2r) < cachedTokens(r2));  // without it: an earlier point of turn 1
+    if (g_verbose)
+        std::printf("  think round trip: p1 %zu, held %zu, turn 2 cached %llu (without idle %llu)\n", p1.size(), held.size(),
+                    (unsigned long long)cachedTokens(r2), (unsigned long long)cachedTokens(r2r));
+    CHECK_EQ(srv.model().decPrefills(), 0u);
+    CHECK_EQ(srv.model().poison(), 0u);
+    CHECK_EQ(srv.model().hidMismatch(), 0u);
+}
+
+// Thinking on, the client drops the reasoning: the history has only empty think blocks, so the reply is not
+// re-prefilled; turn 2 (= turn 1's prompt up to "<think>", the reply re-rendered as "\n\n</think>\n\n" + content, new
+// tokens) resumes where the same server without PRECISE-IDLE resumes (at most turn 1's think-open point N - 1), and
+// equals a cold server.
+void testPidleThinkDropped() {
+    using namespace pidle_test;
+    g_log.clear();
+    TestServer srv(preciseSetup(true, true));
+    ServerSetup su_nc = preciseSetup(true, false);
+    su_nc.eo.no_prefix_cache = true;
+    TestServer cold(su_nc);
+    const std::vector<std::uint32_t> p1 = thinkPrompt(2990, 73, pastTurn("", "Done."));
+    CHECK(!ChatTokens(tok()).reasoningInHistory(p1));
+    auto r1 = srv.post("/v1/completions", completionBody(p1, 2000));
+    CHECK_EQ(completionText(r1), completionText(cold.post("/v1/completions", completionBody(p1, 2000))));
+    CHECK(waitUntil([&] {
+        const auto st = srv.engine().pidleStats();
+        return st.skipped + st.started >= 1;
+    }, 5000));
+    const auto st = srv.engine().pidleStats();
+    CHECK_EQ(st.started, 0u);
+    CHECK_EQ(st.skipped, 1u);
+    CHECK_EQ(g_log.count("precise idle: skipped: the prompt opens a thinking block and its history carries no reasoning"), 1u);
+    std::vector<std::uint32_t> p2(p1.begin(), p1.end() - 1);
+    const auto re = encChat("\n\n</think>\n\nThe answer.<|im_end|>\n<|im_start|>user\n");
+    p2.insert(p2.end(), re.begin(), re.end());
+    p2 = makePrompt(static_cast<std::uint32_t>(p2.size() + 300), 74, p2);
+    // the same two turns on the same server without the idle job: the reuse must be the same (nothing was rewritten)
+    TestServer ref(preciseSetup(true, false));
+    CHECK_EQ(ref.post("/v1/completions", completionBody(p1, 2000)).status, 200);
+    auto r2 = srv.post("/v1/completions", completionBody(p2, 40));
+    auto r2r = ref.post("/v1/completions", completionBody(p2, 40));
+    const std::string t_cold = completionText(cold.post("/v1/completions", completionBody(p2, 40)));
+    CHECK_EQ(completionText(r2), t_cold);
+    CHECK_EQ(completionText(r2r), t_cold);
+    CHECK_EQ(cachedTokens(r2), cachedTokens(r2r));
+    CHECK(cachedTokens(r2) > 0 && cachedTokens(r2) <= p1.size() - 1);  // at most turn 1's think-open point
+    if (g_verbose)
+        std::printf("  think dropped: p1 %zu, turn 2 cached %llu (without idle %llu)\n", p1.size(),
+                    (unsigned long long)cachedTokens(r2), (unsigned long long)cachedTokens(r2r));
+    CHECK_EQ(srv.model().decPrefills(), 0u);
+    CHECK_EQ(srv.model().poison(), 0u);
+}
+
+// The chat path: preserve_thinking=false on variant a (Swift) strips the earlier think blocks, so every reply is
+// skipped (thinking on or off); variant b (Ornith) ignores the flag and keeps the blocks (the reasoning sent back:
+// kept); preserve_thinking=true with reasoning_content: kept; no reasoning_content: skipped. A skipped request,
+// repeated, resumes at its think-open point (prompt_tokens - 1) / at most its prompt-end (thinking off).
+void testPidlePreserveThinking() {
+    using namespace pidle_test;
+    std::string long1;
+    for (int i = 0; i < 2600; ++i) long1 += std::format("w{} ", i % 97);
+    struct Case {
+        chat::TemplateKind kind;
+        bool think;
+        const char* preserve;  // chat_template_kwargs preserve_thinking ("" = not given)
+        bool rc;               // the earlier assistant turn carries reasoning_content
+        bool kept;
+        const char* log;
+    };
+    const Case cases[] = {
+        {chat::TemplateKind::a, true, "false", true, false, "precise idle: skipped: preserve_thinking=false"},
+        {chat::TemplateKind::a, false, "false", true, false, "precise idle: skipped: preserve_thinking=false"},
+        {chat::TemplateKind::b, true, "false", true, true, "precise idle: thinking reply kept"},
+        {chat::TemplateKind::a, true, "true", true, true, "precise idle: thinking reply kept"},
+        {chat::TemplateKind::a, true, "", false, false, "its history carries no reasoning"},
+    };
+    for (const Case& c : cases) {
+        g_log.clear();
+        ServerSetup su = preciseSetup(true, true);
+        su.eo.tmpl = c.kind;
+        TestServer srv(su);
+        ServerSetup su_nc = preciseSetup(true, false);
+        su_nc.eo.tmpl = c.kind;
+        su_nc.eo.no_prefix_cache = true;
+        TestServer cold(su_nc);
+        std::string kw = std::format("\"enable_thinking\":{}", c.think ? "true" : "false");
+        if (*c.preserve) kw += std::format(",\"preserve_thinking\":{}", c.preserve);
+        const std::string rc = c.rc ? R"(,"reasoning_content":"I weigh the options.")" : "";
+        const std::string body = std::format(
+            R"({{"messages":[{{"role":"user","content":"{}"}},{{"role":"assistant","content":"Done."{}}},)"
+            R"({{"role":"user","content":"next"}}],"max_tokens":1500,"temperature":0,"ignore_eos":true,)"
+            R"("chat_template_kwargs":{{{}}}}})",
+            long1, rc, kw);
+        auto r1 = srv.post("/v1/chat/completions", body);
+        CHECK_EQ(r1.status, 200);
+        CHECK_EQ(chatChoices(r1), chatChoices(cold.post("/v1/chat/completions", body)));
+        const std::uint64_t np = promptTokens(r1);
+        CHECK(np > 2600);
+        CHECK(waitUntil([&] {
+            const auto st = srv.engine().pidleStats();
+            return st.skipped >= 1 || st.done >= 1;
+        }, 20000));
+        const auto st = srv.engine().pidleStats();
+        CHECK_EQ(g_log.count(c.log), 1u);
+        CHECK_EQ(st.done, c.kept ? 1u : 0u);
+        CHECK_EQ(st.skipped, c.kept ? 0u : 1u);
+        auto rr = srv.post("/v1/chat/completions", body);
+        CHECK_EQ(chatChoices(rr), chatChoices(r1));
+        if (!c.kept && c.think) CHECK_EQ(cachedTokens(rr), np - 1);  // turn 1's think-open checkpoint
+        if (!c.kept && !c.think) CHECK(cachedTokens(rr) >= coldTail(np) && cachedTokens(rr) <= np);
+        if (g_verbose)
+            std::printf("  preserve kind %c think %d preserve '%s' rc %d: prompt %llu, done %llu skipped %llu, repeat cached %llu\n",
+                        c.kind == chat::TemplateKind::a ? 'a' : 'b', c.think ? 1 : 0, c.preserve, c.rc ? 1 : 0,
+                        (unsigned long long)np, (unsigned long long)st.done, (unsigned long long)st.skipped,
+                        (unsigned long long)cachedTokens(rr));
+        CHECK_EQ(srv.model().decPrefills(), 0u);
+        CHECK_EQ(srv.model().poison(), 0u);
+    }
+}
+
+// feat026-pidle-r2 (review r1-batch-b): a throw while the idle job is being set up (after its checkpoints were
+// invalidated, before it is active; here: the checkpoint load) drops the slot's cache, so the slot never claims rows
+// its KV does not hold; the server goes on and the next turn equals the greedy reference (= a cold run).
+void testPidleLoadThrow() {
+    using namespace pidle_test;
+    g_log.clear();
+    TestServer srv(preciseSetup(true, true));
+    srv.onEngine([&] { srv.engine().failPidleLoadForTest(); });
+    const Turns t = makeTurns(srv, 3000, 2000, 350, 81);
+    CHECK(waitUntil([&] { return g_log.count("precise idle: stopped: test: checkpoint load failed") >= 1; }, 20000));
+    const auto v = slotsView(srv);
+    CHECK_EQ(v[0].tokens, 0u);  // the cache went (not 4999 tokens over checkpoints invalidated above 2048)
+    CHECK_EQ(v[0].max_ck, 0u);
+    const auto st = srv.engine().pidleStats();
+    CHECK_EQ(st.done, 0u);
+    auto r2 = srv.post("/v1/completions", completionBody(t.p2, 40));
+    CHECK_EQ(r2.status, 200);
+    CHECK_EQ(completionText(r2), decode(srv.model().greedyReference(t.p2, 40, true)));
+    if (g_verbose) std::printf("  load throw: turn 2 cached %llu\n", (unsigned long long)cachedTokens(r2));
+    CHECK_EQ(srv.model().decPrefills(), 0u);
+    CHECK_EQ(srv.model().poison(), 0u);
+}

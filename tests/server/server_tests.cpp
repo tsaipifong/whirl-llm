@@ -4508,6 +4508,39 @@ struct CkRig {
     }
 };
 
+// feat026-pidle-r2 (review r1-batch-b): PagePool::freeable counts a quarantined page only when every holder of it is a
+// quarantine entry (a page another slot or a shared checkpoint keeps never becomes free); reclaimable over-counts it.
+void testPagePoolFreeable() {
+    PpRig r(8);
+    r.pool->setQuarantineStream(r.ts);
+    ListEvictor ev(*r.pool);  // no victims: never evicts
+    std::vector<std::int32_t> a;
+    CHECK(r.pool->ensure(a, 0, 4 * kv_page, ev));
+    CHECK_EQ(a.size(), 4u);
+    r.pool->ref(a[0]);  // two of them have another holder too
+    r.pool->ref(a[1]);
+    r.pool->quarantine(a);  // the slot's holds go to the quarantine
+    CHECK_EQ(r.pool->freeCount(), 4u);
+    CHECK_EQ(r.pool->reclaimable(), 8u);
+    CHECK_EQ(r.pool->freeable(), 6u);
+    r.pool->reclaim(false);
+    CHECK_EQ(r.pool->freeCount(), 6u);  // what freeable said
+    CHECK_EQ(r.pool->freeable(), 6u);
+    r.pool->unref(std::vector<std::int32_t>{a[0], a[1]});
+    CHECK_EQ(r.pool->freeCount(), 8u);
+    // one page in two quarantine batches (two holds, both the quarantine's): counted once, and it does come back
+    std::vector<std::int32_t> b;
+    CHECK(r.pool->ensure(b, 1, kv_page, ev));
+    r.pool->ref(b[0]);
+    r.pool->quarantine(b);
+    r.pool->quarantine(b);
+    CHECK_EQ(r.pool->reclaimable(), 9u);
+    CHECK_EQ(r.pool->freeable(), 8u);
+    r.pool->reclaim(false);
+    CHECK_EQ(r.pool->freeCount(), 8u);
+    CHECK_EQ(r.refSum(), 0u);
+}
+
 void testCkptStore() {
     // ---- host_ok branch and sizes (the formula of Engine::initCkpt / ckptVram before arch024 S3)
     for (const bool ckpt_host : {false, true}) {
@@ -7674,6 +7707,7 @@ int main(int argc, char** argv) {
         {"alloc_state_measured", testAllocStateMeasured},
         {"test_tmp_base", testTestTmpBase},
         {"page_pool", testPagePool},
+        {"page_pool_freeable", testPagePoolFreeable},
         {"tier_bridge_spill", testTierBridgeSpill},
         {"tier_bridge_supersede", testTierBridgeSupersede},
         {"tier_bridge_flush", testTierBridgeFlush},
@@ -7714,6 +7748,11 @@ int main(int argc, char** argv) {
         {"pidle_no_evict", testPidleNoEvict},
         {"pidle_think_skipped", testPidleThinkSkipped},
         {"pidle_think_resume_cold", testPidleThinkResumeCold},
+        {"pidle_reasoning_in_history", testPidleReasoningInHistory},
+        {"pidle_think_round_trip", testPidleThinkRoundTrip},
+        {"pidle_think_dropped", testPidleThinkDropped},
+        {"pidle_preserve_thinking", testPidlePreserveThinking},
+        {"pidle_load_throw", testPidleLoadThrow},
         {"concurrency", [] { testConcurrency(4, 12, true); }},
         {"concurrency16", [] { testConcurrency(16, 24, true); }},
         {"concurrency_nomtp", [] { testConcurrency(4, 8, false); }},

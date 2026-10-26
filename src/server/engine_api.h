@@ -46,6 +46,9 @@ struct Job {
     std::vector<std::uint32_t> tokens;
     Params params;
     bool think = false;
+    // feat026-pidle-r2: the template leaves the think blocks of earlier turns out of the history (variant a with
+    // chat_template_kwargs preserve_thinking=false): the next prompt will not hold this reply (PRECISE-IDLE skips)
+    bool think_history_dropped = false;
     json::Array tools;
     bool tools_on = false;
     TimePoint t_arrive{};

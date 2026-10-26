@@ -21,6 +21,7 @@ ChatTokens::ChatTokens(const Tokenizer& tok) {
     im_end = idOf(tok, "<|im_end|>");
     endoftext = idOf(tok, "<|endoftext|>");
     think = idOf(tok, "<think>");
+    think_end = idOf(tok, "</think>");
     // "\n" and "system" as single tokens (byte-level text of "\n" is U+010A)
     {
         const auto ids = tok.encode("\n", false);
@@ -30,6 +31,14 @@ ChatTokens::ChatTokens(const Tokenizer& tok) {
         const auto ids = tok.encode("system", false);
         if (ids.size() == 1) system = static_cast<std::uint32_t>(ids[0]);
     }
+    {
+        const auto ids = tok.encode("\n\n", false);
+        if (ids.size() == 1) nl2 = static_cast<std::uint32_t>(ids[0]);
+    }
+    {
+        const auto ids = tok.encode("assistant", false);
+        if (ids.size() == 1) assistant = static_cast<std::uint32_t>(ids[0]);
+    }
 }
 
 std::size_t ChatTokens::thinkOpenSplit(std::span<const std::uint32_t> toks) const {
@@ -37,6 +46,19 @@ std::size_t ChatTokens::thinkOpenSplit(std::span<const std::uint32_t> toks) cons
     if (n < 2 || think == none || nl == none) return 0;
     if (toks[n - 2] == think && toks[n - 1] == nl) return n - 1;
     return 0;
+}
+
+bool ChatTokens::reasoningInHistory(std::span<const std::uint32_t> toks) const {
+    if (thinkOpenSplit(toks) == 0) return false;
+    if (im_start == none || assistant == none || think_end == none || nl2 == none) return false;
+    const std::size_t gen = toks.size() - 2;  // the generation prompt's "<think>"
+    for (std::size_t i = 0; i + 3 < gen; ++i) {
+        if (toks[i] != im_start || toks[i + 1] != assistant || toks[i + 2] != nl || toks[i + 3] != think) continue;
+        const std::size_t j = i + 3;
+        const bool empty = j + 2 < toks.size() && toks[j + 1] == nl2 && toks[j + 2] == think_end;
+        if (!empty) return true;
+    }
+    return false;
 }
 
 std::size_t ChatTokens::sysBoundary(std::span<const std::uint32_t> toks) const {

@@ -21,12 +21,21 @@ public:
 
     static constexpr std::uint32_t none = 0xffffffffu;
     std::uint32_t im_start = none, im_end = none, endoftext = none, think = none, nl = none, system = none;
+    // feat026-pidle-r2: "</think>", "\n\n" and "assistant" as single tokens (none when the vocabulary splits them)
+    std::uint32_t think_end = none, nl2 = none, assistant = none;
 
     // A thinking-mode generation prompt ends with "<think>" "\n": the prefill
     // stops before that last "\n" (the next turn re-renders the assistant
     // turn as "<think>" "\n\n" ... , so the common prefix ends after
     // "<think>"). Returns that position (N - 1), else 0.
     std::size_t thinkOpenSplit(std::span<const std::uint32_t> toks) const;
+
+    // feat026-pidle-r2: a thinking-mode prompt whose history shows that the client sends the reasoning back: an
+    // earlier assistant turn ("<|im_start|>" "assistant" "\n" "<think>", before the generation prompt's own
+    // "<think>" at N - 2) whose block is not empty (the empty rendering is "<think>" "\n\n" "</think>"). Then the
+    // next prompt will hold this reply as generated (research/pidle/2026-10-26-think-template-reuse.md: FULL prefix).
+    // false when the prompt does not end with "<think>" "\n", or any token id is missing.
+    bool reasoningInHistory(std::span<const std::uint32_t> toks) const;
 
     // Prompt starting with "<|im_start|>" "system": the position after the
     // first "<|im_end|>" and the "\n" that follows it. 0 = none.

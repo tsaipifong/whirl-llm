@@ -176,6 +176,8 @@ struct SlotData : SlotPrefix, SlotTier {
     // cleared when the slot is used again, its cache dropped, or the re-prefill ends); pidle_t: when it was set
     bool pidle_want = false;
     TimePoint pidle_t{};
+    // feat026-pidle-r2: the last request's Job::think_history_dropped (set when its reply starts)
+    bool pidle_hist_dropped = false;
 
     std::uint64_t reqId() const { return job ? job->id : 0; }
 };
@@ -428,9 +430,12 @@ public:
     // a rewrite of them needs copy on write and frees nothing) / drop those references; and per slot its cached
     // token count, page count and the highest valid checkpoint position.
     void holdPagesForTest(bool hold);
+    // feat026-pidle-r2 (review r1-batch-b): the next idle job start throws where it loads its checkpoint
+    void failPidleLoadForTest() { test_pidle_load_fail_ = true; }
     struct SlotViewForTest {
         std::size_t tokens = 0, pages = 0;
         std::uint32_t max_ck = 0;
+        std::vector<std::uint32_t> ids;  // feat026-pidle-r2: the cached tokens themselves
     };
     std::vector<SlotViewForTest> slotsForTest() const;
 
@@ -663,6 +668,7 @@ private:
     } pidle_;
     std::atomic<std::uint64_t> pidle_started_{0}, pidle_done_{0}, pidle_cancelled_{0}, pidle_skipped_{0}, pidle_rows_{0};
     std::vector<std::int32_t> test_held_;  // holdPagesForTest
+    bool test_pidle_load_fail_ = false;      // failPidleLoadForTest
     std::vector<std::unique_ptr<EmbEntry>> emb_cache_;
     std::uint64_t emb_bytes_ = 0;
     std::uint64_t emb_seq_ = 0;
