@@ -43,8 +43,23 @@
 #include "gemm_fp8t.hip"           // fragment-tiled fp8 / f16 GEMM
 #include "gemm_small.hip"          // small-batch prefill GEMM
 #include "gemv_h.hip"              // precise decode / verify matmul (f16 activations)
+// feat026-moedown97 tune ids (default 0: nothing renamed, moe_down97.hip emits no code): a non-zero id renames the
+// shipped entry to <name>_shipped and moe_down97.hip defines the production entry with that candidate.
+#if defined(WHIRL_MD97_DN) && WHIRL_MD97_DN
+#define moe_down_mxfp4w moe_down_mxfp4w_shipped
+#endif
+#if defined(WHIRL_MD97_GU) && WHIRL_MD97_GU
+#define moe_gu_mxfp4w moe_gu_mxfp4w_shipped
+#endif
 #include "moe_mxfp4.hip"           // MXFP4 routed experts (decode, fp8 grouped GEMM)
+#undef moe_down_mxfp4w
+#undef moe_gu_mxfp4w
+#if defined(WHIRL_MD97_DF) && WHIRL_MD97_DF
+#define moe_down_f_mxfp4 moe_down_f_mxfp4_shipped
+#endif
 #include "moe_f.hip"               // precise MoE decode experts (f32 activations)
+#undef moe_down_f_mxfp4
+#include "moe_down97.hip"          // MXFP4 decode expert load-schedule candidates (empty unless a tune id is set)
 #endif
 
 #if defined(__gfx1151__)
