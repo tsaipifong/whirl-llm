@@ -156,11 +156,14 @@ void applyOverride(Plan& p, Item it, const char* var, const std::string& value, 
 void setQ8dec(Plan& p, bool q8, const std::string& env);
 
 // moeskip threshold / min-keep from the environment ("" = unset). thr_env on an enabled item replaces the
-// mode's threshold (recorded as an override; "0" turns the item off). thr_env > 0 where the item is not on
-// (precise, balance, a fast list without it) turns it on as a lossy user-requested override when `applicable`
-// (MoE model with the kernel). Throws std::invalid_argument for a malformed or out-of-range value
+// mode's threshold (recorded as an override; "0" turns the item off). In fast, thr_env > 0 where the item is
+// not on (a fast list without it) turns it on as a lossy user-requested override when `applicable` (MoE model
+// with the kernel). moeskip is a fast-only item (mode standard), so in precise / balance both variables are
+// ignored - the plan is unchanged - and the returned note says so for the load log (feat027-moeskip-r1, the
+// applyFastOnlyOverride semantics of feat027-i8qk-r2 / feat028-moefast97-r1); "" when applied, unset, or
+// asking for off. Throws std::invalid_argument for a malformed or out-of-range value in any mode
 // (thr in [0, 1), min an integer in [1, 64]).
-void setMoeSkip(Plan& p, const std::string& thr_env, const std::string& min_env, bool applicable);
+std::string setMoeSkip(Plan& p, const std::string& thr_env, const std::string& min_env, bool applicable);
 
 // An item the run cannot use after all (e.g. relaxacc with --draft dflash): skipped with `why`.
 void skipItem(Plan& p, Item it, const std::string& why);

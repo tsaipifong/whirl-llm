@@ -979,16 +979,21 @@ void loadOrTuneImpl(Model& m, const std::string& model_path, std::string& log) {
         }
         if (const auto v = envGet("SPEC_SAMPLE"); v && !v->empty())
             nu::applyOverride(p, nu::Item::specsample, "SPEC_SAMPLE", *v, *v != "0", t.mtp && t.k_spec_sample);
-        // moeskip (fast, feat027): threshold / min-keep are plan values; WHIRL_MOESKIP_THR / _MIN override
+        // moeskip (fast, feat027): threshold / min-keep are plan values; WHIRL_MOESKIP_THR / _MIN override in fast.
+        // moeskip is a fast-only item by the mode standard: in precise / balance the variables are ignored (plan
+        // unchanged) with a note in the load log (feat027-moeskip-r1; applyFastOnlyOverride semantics). Without
+        // it, precise + WHIRL_MOESKIP_THR launched moe_topk_skip and slot id -1 reached moe_gu_f_* / moe_down_f_*.
         {
             const auto thr_env = envGet("MOESKIP_THR");
             const auto min_env = envGet("MOESKIP_MIN");
+            std::string ign;
             try {
-                nu::setMoeSkip(p, thr_env ? *thr_env : std::string(), min_env ? *min_env : std::string(), t.moe && t.k_moe_skip);
+                ign = nu::setMoeSkip(p, thr_env ? *thr_env : std::string(), min_env ? *min_env : std::string(), t.moe && t.k_moe_skip);
             } catch (const std::invalid_argument& e) {
                 throw ModelError("BadEnvironment", e.what());
             }
-            m.moe_skip_thr = p.on(nu::Item::moeskip) ? p.moe_skip_thr : 0.f;
+            if (!ign.empty()) log += "  " + ign + "\n";
+            m.moe_skip_thr = p.mode == nu::Mode::fast && p.on(nu::Item::moeskip) ? p.moe_skip_thr : 0.f;
             m.moe_skip_min = p.moe_skip_min;
         }
         nu::noteSwitches(p, [](const char* n) { return envGet(n); });

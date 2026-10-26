@@ -1123,6 +1123,31 @@ void testMoeSkip() {
                 CHECK(q.moe_skip_min == base->moe_skip_min);
             }
         }
+        {
+            // the load-log note (feat027-moeskip-r1): said when the switch asks for the item, "" for off / unset
+            nu::Plan q = pp;
+            CHECK(nu::setMoeSkip(q, "0.1", "", true) == "WHIRL_MOESKIP_THR=0.1 ignored: moeskip is a fast-only item (precise never takes it)");
+            q = pb;
+            CHECK(nu::setMoeSkip(q, "0.1", "2", true) ==
+                  "WHIRL_MOESKIP_THR=0.1 WHIRL_MOESKIP_MIN=2 ignored: moeskip is a fast-only item (balance never takes it)");
+            q = pb;
+            CHECK(nu::setMoeSkip(q, "", "3", true) == "WHIRL_MOESKIP_MIN=3 ignored: moeskip is a fast-only item (balance never takes it)");
+            q = pp;
+            CHECK(nu::setMoeSkip(q, "0", "", true).empty() && nu::setMoeSkip(q, "", "", true).empty());
+            // malformed values are still errors outside fast
+            int bad_pb = 0;
+            for (const auto& [thr, mn] : {std::pair<const char*, const char*>{"abc", ""}, {"1", ""}, {"", "0"}, {"0.1", "x"}}) {
+                q = pb;
+                try {
+                    (void)nu::setMoeSkip(q, thr, mn, true);
+                } catch (const std::invalid_argument&) {
+                    ++bad_pb;
+                }
+            }
+            CHECK(bad_pb == 4);
+            nu::Plan f2 = nu::plan(fast, ornith);  // fast: applied, no note
+            CHECK(nu::setMoeSkip(f2, "0.08", "", true).empty() && f2.on(Item::moeskip));
+        }
         nu::Plan pp3 = pp;  // not applicable: nothing
         nu::setMoeSkip(pp3, "0.1", "", false);
         CHECK(!pp3.on(Item::moeskip) && nu::modeLabel(pp3) == "precise");

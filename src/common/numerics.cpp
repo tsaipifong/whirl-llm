@@ -288,7 +288,7 @@ void setQ8dec(Plan& p, bool q8, const std::string& env) {
     }
 }
 
-void setMoeSkip(Plan& p, const std::string& thr_env, const std::string& min_env, bool applicable) {
+std::string setMoeSkip(Plan& p, const std::string& thr_env, const std::string& min_env, bool applicable) {
     ItemState& s = p.items[static_cast<std::size_t>(Item::moeskip)];
     auto num = [](const std::string& v, const char* var) {
         std::size_t used = 0;
@@ -301,10 +301,27 @@ void setMoeSkip(Plan& p, const std::string& thr_env, const std::string& min_env,
         if (used != v.size() || d != d) throw std::invalid_argument(std::format("WHIRL_{}={}: not a number", var, v));
         return d;
     };
+    // values are checked in every mode (a malformed value is an error wherever it is set)
+    const double thr = thr_env.empty() ? -1.0 : num(thr_env, "MOESKIP_THR");
+    if (!thr_env.empty() && (thr < 0 || thr >= 1))
+        throw std::invalid_argument(std::format("WHIRL_MOESKIP_THR={}: must be in [0, 1)", thr_env));
+    if (!min_env.empty()) {
+        const double mk = num(min_env, "MOESKIP_MIN");
+        if (mk < 1 || mk > 64 || mk != static_cast<double>(static_cast<int>(mk)))
+            throw std::invalid_argument(std::format("WHIRL_MOESKIP_MIN={}: must be an integer in [1, 64]", min_env));
+    }
+    // feat027-moeskip-r1: fast-only item (applyFastOnlyOverride semantics). precise / balance never take it: the
+    // plan stays as it is (no threshold, so moe_topk_skip is never launched and no expert id is -1 there).
+    if (p.mode != Mode::fast) {
+        if (thr > 0)
+            return std::format("WHIRL_MOESKIP_THR={}{} ignored: moeskip is a fast-only item ({} never takes it)", thr_env,
+                               min_env.empty() ? "" : " WHIRL_MOESKIP_MIN=" + min_env, modeName(p.mode));
+        if (thr < 0 && !min_env.empty())
+            return std::format("WHIRL_MOESKIP_MIN={} ignored: moeskip is a fast-only item ({} never takes it)", min_env, modeName(p.mode));
+        return {};
+    }
     bool changed = false;
     if (!thr_env.empty()) {
-        const double thr = num(thr_env, "MOESKIP_THR");
-        if (thr < 0 || thr >= 1) throw std::invalid_argument(std::format("WHIRL_MOESKIP_THR={}: must be in [0, 1)", thr_env));
         if (thr == 0) {
             if (s.enabled) {
                 s.enabled = false;
@@ -312,10 +329,10 @@ void setMoeSkip(Plan& p, const std::string& thr_env, const std::string& min_env,
                 p.overrides.push_back("WHIRL_MOESKIP_THR=0: moeskip off");
             }
             p.moe_skip_thr = 0.f;
-            return;
+            return {};
         }
         if (!s.enabled) {
-            if (!applicable) return;  // dense model / no kernel: nothing to drop
+            if (!applicable) return {};  // dense model / no kernel: nothing to drop
             s.enabled = true;
             p.moe_skip_min = moeskip::k_default_min_keep;
         }
@@ -323,18 +340,16 @@ void setMoeSkip(Plan& p, const std::string& thr_env, const std::string& min_env,
         changed = true;
     }
     if (!min_env.empty() && s.enabled) {
-        const double mk = num(min_env, "MOESKIP_MIN");
-        if (mk < 1 || mk > 64 || mk != static_cast<double>(static_cast<int>(mk)))
-            throw std::invalid_argument(std::format("WHIRL_MOESKIP_MIN={}: must be an integer in [1, 64]", min_env));
-        p.moe_skip_min = static_cast<int>(mk);
+        p.moe_skip_min = static_cast<int>(num(min_env, "MOESKIP_MIN"));  // range checked above
         changed = true;
     }
-    if (!changed) return;
+    if (!changed) return {};
     s.note = std::format("renormalized weight < {:.3f} dropped, top {} kept, kept weights renormalized; WHIRL_MOESKIP_THR / _MIN, user-requested",
                          p.moe_skip_thr, p.moe_skip_min);
     p.overrides.push_back(std::format("WHIRL_MOESKIP_THR={} WHIRL_MOESKIP_MIN={}: moeskip {:.3f} / top {} (lossy, user-requested)",
                                       thr_env.empty() ? "-" : thr_env, min_env.empty() ? "-" : min_env, p.moe_skip_thr, p.moe_skip_min));
-    if (p.mode != Mode::fast || !s.requested) p.lossy_override = true;
+    if (!s.requested) p.lossy_override = true;  // fast without moeskip in its list: lossy user override
+    return {};
 }
 
 void skipItem(Plan& p, Item it, const std::string& why) {

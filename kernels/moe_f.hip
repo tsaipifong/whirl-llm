@@ -7,6 +7,11 @@
 // (token, expert slot) result is computed by its own waves with a fixed reduction order (lane
 // partials over the 8-value groups g = lane, lane + 32, ... as gemv_<T>_1, then warp_sum),
 // so it does not depend on how many tokens are in the batch or on the other tokens.
+//
+// moeskip id -1 (feat027-moeskip-r1): precise / balance never produce it (the plan refuses WHIRL_MOESKIP_THR
+// there), but the kernels honour the contract of moe.hip / moe_mxfp4.hip anyway: gate+up returns on id < 0,
+// down loops over the kept prefix moe_kept() (moe_skip.hip, included by moe.hip before this file). Without
+// -1, moe_kept == K and every loop is the shipped one in the same order (bit-identical values).
 
 // gate + up: pair p = blockIdx.y = t * K + k runs expert ids[p] on h[t] (f32, C values).
 // Rows [0, ff) from W1 into y1, [ff, nrows) from W2 into y2 (nrows = 2 ff when both share a type).
@@ -19,6 +24,7 @@ __device__ void moe_gu_f_impl(const uint8_t *__restrict__ W1, const uint8_t *__r
     if (row >= nrows) return;
     const int p = blockIdx.y;
     const int t = p / K, e = ids[p];
+    if (e < 0) return;  // moeskip id -1 (dropped slot): never form its weight address (feat027-moeskip-r1)
     const bool second = row >= ff;
     const int r = second ? row - ff : row;
     const uint8_t *wr = (second ? W2 : W1) + ((size_t)e * ff + r) * row_bytes;
@@ -45,8 +51,9 @@ __device__ void moe_down_f_impl(const uint8_t *__restrict__ W, uint64_t row_byte
     const int row = blockIdx.x * (blockDim.x / WARP) + threadIdx.x / WARP;
     if (row >= E) return;
     const int t = blockIdx.y;
+    const int kt = moe_kept(ids, t, K);  // moeskip: kept prefix (K without -1; feat027-moeskip-r1)
     float acc = 0.f;
-    for (int k = 0; k < K; ++k) {
+    for (int k = 0; k < kt; ++k) {
         const int p = t * K + k;
         const uint8_t *wr = W + ((size_t)ids[p] * E + row) * row_bytes;
         const float *a = act + (size_t)p * F;
@@ -134,6 +141,7 @@ extern "C" __global__ void __launch_bounds__(256) moe_gu_f_mxfp4(const uint8_t *
     if (row >= nrows) return;
     const int p = blockIdx.y;
     const int t = p / K, e = ids[p];
+    if (e < 0) return;  // moeskip id -1 (dropped slot): never form its weight address (feat027-moeskip-r1)
     const bool second = row >= ff;
     const int r = second ? row - ff : row;
     const uint8_t *wr = (second ? W2 : W1) + ((size_t)e * ff + r) * row_bytes;
@@ -152,8 +160,9 @@ extern "C" __global__ void __launch_bounds__(256) moe_down_f_mxfp4(const uint8_t
     if (row >= E) return;
     const int t = blockIdx.y;
     const int nb = F / 32;
+    const int kt = moe_kept(ids, t, K);  // moeskip: kept prefix (K without -1; feat027-moeskip-r1)
     float acc = 0.f;
-    for (int u = lane; u < K * nb; u += WARP) {
+    for (int u = lane; u < kt * nb; u += WARP) {
         const int k = u / nb, b = u - k * nb;
         const int p = t * K + k;
         acc += w[p] * mxf_blk(W + ((size_t)ids[p] * E + row) * row_bytes, b, act + (size_t)p * F);
