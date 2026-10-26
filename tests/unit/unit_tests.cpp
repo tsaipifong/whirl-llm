@@ -548,6 +548,29 @@ void testChat() {
         CHECK(throws([&] { (void)chat::renderChat(chat::TemplateKind::a, r1.messages, no_tools, bad_opt); }));
     }
     CHECK(throws([&] { render(chat::TemplateKind::b, R"({"messages":[{"role":"robot","content":"q"}]})"); }));
+    // bug-toolargbool: tool-call argument values. The product GGUFs (Swift-1.5 MXFP4 = a, Ornith-1.5-35B-A3B MXFP4 = b)
+    // render every non-string argument with `args_value | tojson | safe`, so bool / null are JSON (true / false /
+    // null), also at the top level, and nested values are json.dumps. Same case as tests/corpus/template_cases.json
+    // tool_call_scalar_args.
+    {
+        const char* req =
+            R"({"messages":[{"role":"user","content":"edit the file"},{"role":"assistant","content":"","tool_calls":[)"
+            R"({"type":"function","function":{"name":"edit","arguments":{"path":"a.py","replace_all":true,"dry_run":false,)"
+            R"("encoding":null,"count":3,"ratio":1.5,"opts":{"force":true,"backup":null,"lines":[false,2,"x"]},)"
+            R"("flags":[true,null]}}}]},{"role":"tool","content":"ok"}]})";
+        const std::string want =
+            "<function=edit>\n<parameter=path>\na.py\n</parameter>\n<parameter=replace_all>\ntrue\n</parameter>\n"
+            "<parameter=dry_run>\nfalse\n</parameter>\n<parameter=encoding>\nnull\n</parameter>\n"
+            "<parameter=count>\n3\n</parameter>\n<parameter=ratio>\n1.5\n</parameter>\n"
+            "<parameter=opts>\n{\"force\": true, \"backup\": null, \"lines\": [false, 2, \"x\"]}\n</parameter>\n"
+            "<parameter=flags>\n[true, null]\n</parameter>\n</function>";
+        for (chat::TemplateKind k : {chat::TemplateKind::a, chat::TemplateKind::b}) {
+            const std::string p = render(k, req);
+            const bool ok = p.find(want) != std::string::npos;
+            if (!ok) std::printf("  tool_call_scalar_args kind %s rendered:\n%s\n", chat::templateName(k), p.c_str());
+            CHECK(ok);
+        }
+    }
     CHECK(chat::detectTemplate("{% if reasoning_effort %}") == chat::TemplateKind::a);
     CHECK(chat::detectTemplate("{% if x %}") == chat::TemplateKind::b);
 }

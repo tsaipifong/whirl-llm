@@ -58,6 +58,10 @@
       {"role": "tool", "tool_call_id": "c2", "content": "  sunny \n"},
       {"role": "assistant", "content": "Taipei is hot, Tokyo is sunny."},
       {"role": "user", "content": "Thanks"}]}},
+  {"name": "tool_call_scalar_args", "request": {"messages": [
+      {"role": "user", "content": "edit the file"},
+      {"role": "assistant", "content": "", "tool_calls": [{"type": "function", "function": {"name": "edit", "arguments": {"path": "a.py", "replace_all": true, "dry_run": false, "encoding": null, "count": 3, "ratio": 1.5, "opts": {"force": true, "backup": null, "lines": [false, 2, "x"]}, "flags": [true, null]}}}]},
+      {"role": "tool", "content": "ok"}]}},
   {"name": "tool_call_empty_content", "request": {"messages": [
       {"role": "user", "content": "run it"},
       {"role": "assistant", "content": "", "tool_calls": [{"type": "function", "function": {"name": "run", "arguments": {"cmd": "ls -la\n"}}}]},
