@@ -217,12 +217,14 @@ constexpr std::size_t layoutSize() {
 #define WHIRL_NF_SZ_B add(sizeof(bool), alignof(bool));
 #define WHIRL_NF_SZ_U add(sizeof(std::uint32_t), alignof(std::uint32_t));
 #define WHIRL_NF_SZ_F add(sizeof(float), alignof(float));
+#define WHIRL_NF_SZ_W add(sizeof(std::uint64_t), alignof(std::uint64_t));
 #define WHIRL_NF_SZ(k, n, d, key) WHIRL_NF_SZ_##k
     WHIRL_NUMERICS_FLAGS(WHIRL_NF_SZ)
 #undef WHIRL_NF_SZ
 #undef WHIRL_NF_SZ_B
 #undef WHIRL_NF_SZ_U
 #undef WHIRL_NF_SZ_F
+#undef WHIRL_NF_SZ_W
     return (off + al - 1) / al * al;
 }
 // a member added to Flags outside WHIRL_NUMERICS_FLAGS (so missing from flagTable and bitsKey) changes the size
@@ -246,6 +248,7 @@ void testBitsKeyReflection() {
             case nu::FlagKind::b: p.flags.*fi.b = !(p.flags.*fi.b); break;
             case nu::FlagKind::u: p.flags.*fi.u += 1; break;
             case nu::FlagKind::f: p.flags.*fi.f += 0.25f; break;
+            case nu::FlagKind::w: p.flags.*fi.w += 1; break;
         }
         NCHECK(!(p.flags == base.flags), "{}: operator== misses it", fi.name);
         const std::string k = p.bitsKey();
@@ -441,6 +444,34 @@ void testLoadRules() {
                fl({{"FP8_MASK", "300"}}).flags.fp8_mask == 44,
            "FP8_MASK stoul base 0, catch -> 7, uint8 cast");
     NCHECK(fl({{"ATTN_SEG", "1000"}}).flags.attn_seg == 768 && fl({{"ATTN_SEG", "x"}}).flags.attn_seg == 0, "ATTN_SEG /256*256");
+    {   // feat027-i8qk (arch025-port-attn): the tune.cpp rules of the source, now in plan(): WHIRL_ATTN_I8QK (fast only,
+        // applyFastOnlyOverride; the precise / balance note goes to Plan::load_notes), strict _MIN / _MIN_WORK parse
+        nu::Target ti = t;
+        ti.k_attn_i8qk = true;
+        NCHECK(fl({{"ATTN_I8QK", "1"}}, "fast", &ti).flags.attn_i8qk && fl({{"ATTN_I8QK", "1"}}, "fast", &ti).on(nu::Item::i8qk), "i8qk fast =1");
+        NCHECK(!fl({}, "fast", &ti).flags.attn_i8qk && fl({}, "fast:all", &ti).flags.attn_i8qk && !fl({{"ATTN_I8QK", "0"}}, "fast:all", &ti).flags.attn_i8qk,
+               "i8qk opt-in");
+        NCHECK(!fl({{"ATTN_I8QK", "1"}}, "fast").flags.attn_i8qk, "i8qk needs the kernels");
+        for (const char* md : {"precise", "balance"}) {
+            const nu::Plan pl = fl({{"ATTN_I8QK", "1"}}, md, &ti);
+            NCHECK(!pl.flags.attn_i8qk && pl.load_notes.size() == 1 &&
+                       pl.load_notes[0] == std::string("WHIRL_ATTN_I8QK=1 ignored: i8qk is a fast-only item (") + md + " never takes it)" &&
+                       nu::logLine(pl) == nu::logLine(fl({}, md, &ti)),
+                   "i8qk ignored in {}", md);
+        }
+        NCHECK(fl({{"ATTN_I8QK_MIN", "4096"}}).flags.i8qk_min_keys == 4096 && fl({{"ATTN_I8QK_MIN", "8k"}}).flags.i8qk_min_keys == 8192 &&
+                   fl({{"ATTN_I8QK_MIN", "8k"}}).load_notes.size() == 1 &&
+                   fl({{"ATTN_I8QK_MIN", "8k"}}).load_notes[0] ==
+                       "warning: WHIRL_ATTN_I8QK_MIN=8k ignored (not a whole number of keys <= 4294967295); keeps 8192",
+               "ATTN_I8QK_MIN strict");
+        NCHECK(fl({{"ATTN_I8QK_MIN_WORK", "18446744073709551615"}}).flags.i8qk_min_work == ~0ull &&
+                   fl({{"ATTN_I8QK_MIN_WORK", "-1"}}).flags.i8qk_min_work == 4096ull * 8192ull &&
+                   fl({{"ATTN_I8QK_MIN_WORK", "-1"}}).load_notes.size() == 1,
+               "ATTN_I8QK_MIN_WORK strict");
+        const nu::Plan pn = fl({{"ATTN_I8QK", "1"}, {"ATTN_I8QK_MIN", "4096"}}, "fast", &ti);
+        NCHECK(pn.items[static_cast<std::size_t>(nu::Item::i8qk)].note.find(" [min keys 4096, min queries x keys 33554432]") != std::string::npos,
+               "i8qk min note");
+    }
     NCHECK(fl({{"MOE_WIDE", ""}}).flags.moe_wide && !fl({{"MOE_MXW", "0"}}).flags.moe_mxw && !fl({{"MOE_RBF", "0"}}).flags.moe_rbf,
            "loader flags: envFlag (\"\" is on)");
     NCHECK(!fl({{"G8T", "0"}}).flags.g8t && fl({}).flags.g8t, "G8T");

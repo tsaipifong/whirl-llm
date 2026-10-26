@@ -144,6 +144,9 @@ void Model::attnBlock(const AttnW& a, const KvLayer& lkv, u32 n) {
 // WMMA prefill attention of n queries at positions pos0 .. (keys 0 .. pos0 + n - 1): the launches (head ranges,
 // key ranges, K / V dequant copies into ffn_g / ffn_u) come from ops::chooseAttnPrefill (K-3); here the KV
 // arguments are built (the cache, or the copy whose row r0 is row 0 of the range).
+// feat027-i8qk (arch025-port-attn): the plan flags' defaults are the selector's constants
+static_assert(numerics::Flags{}.i8qk_min_keys == ops::kI8qkMinKeys && numerics::Flags{}.i8qk_min_work == ops::kI8qkMinWork);
+
 void Model::prefillAttn(DevPtr q, const KvArgs& kva, DevPtr out, DevPtr pos, u32 n, u32 pos0, float scale) {
     ops::AttnPrefillProblem pp;
     pp.n = n;
@@ -153,6 +156,7 @@ void Model::prefillAttn(DevPtr q, const KvArgs& kva, DevPtr out, DevPtr pos, u32
     pp.n_head_kv = cfg.n_head_kv;
     pp.scale = scale;
     pp.kv_q8 = kvQuant(kv_fmt);
+    pp.kv_rot = kvRotated(kv_fmt);
     pp.dq_rows = dq_rows;
     pp.dq_ptab = dq_ptab != 0;
     pp.dq_st_ml = dq_st_ml != 0;
@@ -161,6 +165,9 @@ void Model::prefillAttn(DevPtr q, const KvArgs& kva, DevPtr out, DevPtr pos, u32
     pf.attn_kx_on = nf().attn_kx_on;
     pf.attn_dqf_on = nf().attn_dqf_on;
     pf.attn_seg = nf().attn_seg;
+    pf.attn_i8qk = nf().attn_i8qk;
+    pf.i8qk_min_keys = nf().i8qk_min_keys;
+    pf.i8qk_min_work = nf().i8qk_min_work;
     const ops::AttnPrefillPlan pl = ops::chooseAttnPrefill(pp, pf, k);
     const i32 H = I(cfg.n_head), HKV = I(cfg.n_head_kv), QS = I(2 * cfg.head_dim);
     for (const ops::AttnStep& s : pl.steps) {
@@ -171,6 +178,13 @@ void Model::prefillAttn(DevPtr q, const KvArgs& kva, DevPtr out, DevPtr pos, u32
             case ops::AttnStep::Op::dq_rows_r:
                 hip::launch(s.f, s.grid, s.block, 0, stream, kva, ffn_g, ffn_u, I(s.r0), I(s.nrows), I(s.row_el));
                 break;
+            case ops::AttnStep::Op::i8k: {  // feat027-i8qk: smoothed per-key int8 K of the range's f16 copy (ffn_g)
+                const ops::I8kLayout il = ops::i8kLayout(s.kss, cfg.n_head_kv, cfg.head_dim);
+                hip::launch(s.f, s.grid, s.block, 0, stream, ffn_g, ffn_g + il.mu, I(s.nrows), I(s.row_el));
+                hip::launch(s.f2, s.grid2, s.block, 0, stream, ffn_g, ffn_g + il.mu, ffn_g + il.kq, ffn_g + il.ksc, I(s.nrows), I(cfg.n_head_kv),
+                            I(il.ksc_stride));
+                break;
+            }
             case ops::AttnStep::Op::attn: {
                 KvArgs kv = kva;
                 if (s.from_copy) {
@@ -180,7 +194,13 @@ void Model::prefillAttn(DevPtr q, const KvArgs& kva, DevPtr out, DevPtr pos, u32
                     kv.v = ffn_u - static_cast<u64>(s.r0) * row_el * 2;
                     kv.ptab = dq_ptab;
                 }
-                if (s.ranged)
+                if (s.i8) {  // attn_kgsi: int8 K of the copy (key r0 = row 0) + its scales and mu
+                    const ops::I8kLayout il = ops::i8kLayout(s.kss, cfg.n_head_kv, cfg.head_dim);
+                    const u64 row_el = static_cast<u64>(cfg.n_head_kv) * cfg.head_dim;
+                    hip::launch(s.f, s.grid, s.block, 0, stream, q, kv, out, H, HKV, QS, pos, I(n), scale, I(s.head0), I(s.r0), I(s.r1), dq_st_ml,
+                                ffn_g + il.kq - static_cast<u64>(s.r0) * row_el, ffn_g + il.ksc - static_cast<u64>(s.r0) * 4, I(il.ksc_stride),
+                                ffn_g + il.mu);
+                } else if (s.ranged)
                     hip::launch(s.f, s.grid, s.block, 0, stream, q, kv, out, H, HKV, QS, pos, I(n), scale, I(s.head0), I(s.r0), I(s.r1), dq_st_ml);
                 else
                     hip::launch(s.f, s.grid, s.block, 0, stream, q, kv, out, H, HKV, QS, pos, I(n), scale, I(s.head0));

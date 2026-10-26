@@ -4,12 +4,15 @@
 
 #pragma once
 
+#include <charconv>
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <vector>
 
 namespace whirl {
@@ -61,6 +64,17 @@ inline std::size_t utf8LenFromLead(std::uint8_t c) {
 
 // True if s is well-formed UTF-8 (no overlongs, surrogates or > U+10FFFF).
 bool isValidUtf8(std::string_view s);
+
+// Strict decimal parse of an unsigned setting (environment variables): digits only, the whole string, value <= max
+// (std::from_chars: no whitespace, sign or trailing text; overflow -> result_out_of_range). nullopt for anything else
+// ("", "8k", " 8", "+8", "-1", "1e4", > max), so a typo never turns into 0 or a truncated value (feat027-i8qk-r2).
+inline std::optional<std::uint64_t> parseUnsigned(std::string_view s, std::uint64_t max) {
+    if (s.empty()) return std::nullopt;
+    std::uint64_t v = 0;
+    const auto [ptr, ec] = std::from_chars(s.data(), s.data() + s.size(), v);
+    if (ec != std::errc{} || ptr != s.data() + s.size() || v > max) return std::nullopt;
+    return v;
+}
 
 // Monotonic clock in seconds.
 double nowSeconds();

@@ -12,6 +12,9 @@
 //   gemvh gemvh_<T> (precise f16 activations, n = 1 / 4)      Swift dense weights  bytes = weight bytes
 //   gemm  gemmhq_<T>, gemm_c0_<T> (f16 activations, n = 2048) Swift dense weights  flops = 2 n rows cols
 //   attn  attn_wsplit1 + attn_combine (f16 KV, 24 / 4 heads, hd 256, one decode query at L = 2k / 32k / 128k)
+//   attnp prefill attention on the fast path's f16 key copy (24 / 4 heads, hd 256, 4096 queries at the end of
+//         L = 32k / 128k): attn_kgs6 (f16 Q.K^T) and attn_kgsi6 (feat027-i8qk int8 Q.K^T, with its i8k_mean +
+//         i8k_quant pre-pass in the call); flops = 4 x visible query-key pairs x hd
 //   moe   moe_gu_mxfp4[w], moe_down_mxfp4[w] (Ornith MXFP4 experts, n = 1, K routed experts per launch)
 //   gdn   gdn_step_norm (one decode row, 48 v heads x 128 x 128 state)
 // Weights: --mx (Swift-1.5 27B MXFP4-A) for gemv / gemvh / gemm / anchor, --moemx (Ornith-1.5-35B-A3B MXFP4) for moe;
@@ -645,6 +648,136 @@ void benchAttnDecode(Env& e) {
     }
 }
 
+// ---------------------------------------------------------------- attnp (prefill attention, feat027-i8qk)
+// One key range covering all L keys (L = 4k / 8k / 32k / 128k; the FC-1c series with a range >= L): the f16 copy
+// (randn K / V, tiled from one chunk), n = 4096 queries at positions L - n .. L - 1. attn_kgs6 = today's fast-path kernel; attn_kgsi6 = int8
+// Q.K^T, the call includes i8k_mean + i8k_quant of the copy (the per-range pre-pass the forward runs).
+// Output check: 2 queries x 2 heads vs exact double attention (attn_kgsi6 with a 5% bound of sum p |v|: lossy).
+void benchAttnPrefillI8(Env& e) {  // (S3: feat026-attn8s has its own benchAttnPrefill, family attnpf)
+    Ctx& c = e.c;
+    c.rep.family = "attnp";
+    using namespace at;
+    const hip::Function f16k = c.fnOpt("attn_kgs6"), fi = c.fnOpt("attn_kgsi6"), fm = c.fnOpt("i8k_mean"), fqk = c.fnOpt("i8k_quant");
+    if (!f16k) {
+        c.rep.skip("attnp", "bench attn_kgs6", "kernel not in this code object");
+        return;
+    }
+    // 4k / 8k: the i8 path's fixed pre-pass vs its saving near ops::kI8qkMinKeys (feat027-i8qk-r1)
+    const std::vector<int> lens = c.quick ? std::vector<int>{4096, 8192} : std::vector<int>{4096, 8192, 32768, 131072};
+    constexpr std::size_t kChunk = std::size_t{1} << 22;
+    std::vector<std::uint16_t> ck(kChunk), cv(kChunk);
+    {
+        const auto a = c.randn(kChunk), b = c.randn(kChunk);
+        for (std::size_t i = 0; i < kChunk; ++i) {
+            ck[i] = f2h(a[i]);
+            cv[i] = f2h(b[i]);
+        }
+    }
+    for (const int L : lens) {
+        const int n = std::min(4096, L);
+        const std::size_t el = static_cast<std::size_t>(L) * row;
+        auto pk = std::make_shared<Buf>(el * 2), pv = std::make_shared<Buf>(el * 2);
+        for (std::size_t off = 0; off < el; off += kChunk) {
+            const std::size_t nn = std::min(kChunk, el - off);
+            hip::upload(pk->p() + off * 2, ck.data(), nn * 2);
+            hip::upload(pv->p() + off * 2, cv.data(), nn * 2);
+        }
+        hip::sync();
+        const int kss = L + 32;
+        auto kq = std::make_shared<Buf>(el), ksc = std::make_shared<Buf>(static_cast<std::size_t>(nkv) * kss * 4),
+             mu = std::make_shared<Buf>(static_cast<std::size_t>(row) * 4);
+        ksc->fill(0);
+        std::vector<float> q = c.randn(static_cast<std::size_t>(n) * heads * qstride);
+        for (int i = 0; i < n; ++i)
+            for (int h = 0; h < heads; ++h)
+                for (int d = 0; d < hd; ++d) q[(static_cast<std::size_t>(i) * heads + h) * qstride + hd + d] = 30.0f;  // gate sigmoid(30) = 1.0f
+        auto dq = std::make_shared<Buf>(q);
+        auto dpos = std::make_shared<Buf>(std::vector<int>{L - n});
+        std::vector<int> idt(static_cast<std::size_t>(L / wk::kKvPage + 2));
+        std::iota(idt.begin(), idt.end(), 0);
+        auto did = std::make_shared<Buf>(idt);
+        auto st = std::make_shared<Buf>(static_cast<std::size_t>(n) * heads * 2 * 4);
+        auto out = std::make_shared<Buf>(static_cast<std::size_t>(n) * heads * hd * 4);
+        const double pairs = static_cast<double>(n) * (L - n) + static_cast<double>(n) * (n + 1) / 2;
+        auto verify = [&ck, &cv, &q, L, n](const std::vector<float>& got, double rtol, const std::string& what) {
+            std::vector<float> g;
+            std::vector<double> ro, rs;
+            for (const int i : {0, n - 1})
+                for (const int h : {0, 13}) {
+                    const int kvh = h / (heads / nkv), nk = L - n + i + 1;
+                    const float* qv = q.data() + (static_cast<std::size_t>(i) * heads + h) * qstride;
+                    std::vector<double> sc(static_cast<std::size_t>(nk));
+                    double mx = -INFINITY;
+                    for (int p = 0; p < nk; ++p) {
+                        double d = 0;
+                        for (int x = 0; x < hd; ++x) d += static_cast<double>(qv[x]) * h2f(ck[((static_cast<std::size_t>(p) * nkv + kvh) * hd + x) % kChunk]);
+                        sc[static_cast<std::size_t>(p)] = d * scale;
+                        mx = std::max(mx, sc[static_cast<std::size_t>(p)]);
+                    }
+                    double l = 0;
+                    for (auto& x : sc) {
+                        x = std::exp(x - mx);
+                        l += x;
+                    }
+                    std::vector<double> o(hd, 0.0), a(hd, 0.0);
+                    for (int p = 0; p < nk; ++p)
+                        for (int d = 0; d < hd; ++d) {
+                            const double vv = h2f(cv[((static_cast<std::size_t>(p) * nkv + kvh) * hd + d) % kChunk]);
+                            o[static_cast<std::size_t>(d)] += sc[static_cast<std::size_t>(p)] * vv;
+                            a[static_cast<std::size_t>(d)] += sc[static_cast<std::size_t>(p)] * std::fabs(vv);
+                        }
+                    for (int d = 0; d < hd; ++d) {
+                        g.push_back(got[(static_cast<std::size_t>(i) * heads + h) * hd + d]);
+                        ro.push_back(o[static_cast<std::size_t>(d)] / l);
+                        rs.push_back(a[static_cast<std::size_t>(d)] / l);
+                    }
+                }
+            return cmpTol(what + " vs CPU (queries 0, n-1 x heads 0, 13)", g, ro, rs, rtol, 1e-4);
+        };
+        const DevPtr kp = pk->p(), vp = pv->p();
+        for (const bool i8 : {false, true}) {
+            if (i8 && (!fi || !fm || !fqk)) {
+                c.rep.skip("attnp", "bench attn_kgsi6", "gfx1201 only (feat027-i8qk): not built for this GPU");
+                continue;
+            }
+            Cell k;
+            const std::string kn = i8 ? "attn_kgsi6" : "attn_kgs6";
+            k.ci = e.info("attnp", kn, "swift.q4path.L" + std::to_string(L), "heads24_kv4_hd256_n" + std::to_string(n) + "_L" + std::to_string(L));
+            k.ci.settings = e.settings(el * 2 * 2, 1) + ";kv=f16copy;kv_values=randn;range=all";
+            k.ci.flops = 4.0 * pairs * hd;
+            k.ci.bytes = static_cast<double>(el) * 2 * 2;
+            k.ci.launches_per_call = i8 ? 3 : 1;
+            k.kernel = kn;
+            k.fa = i8 ? fi : f16k;
+            k.call = [&c, pk, pv, kq, ksc, mu, dq, dpos, did, st, out, kp, vp, fm, fqk, L, n, kss, i8](hip::Function f, std::uint64_t) {
+                wk::KvArgs a{};
+                a.k = kp;
+                a.v = vp;
+                a.ptab = did->p();
+                const int h0 = 0, kb0 = 0, kb1 = L, rows = L, nkv_ = nkv, row_ = row, heads_ = heads, qs_ = qstride, n_ = n, kss_ = kss;
+                const float sc_ = scale;
+                const DevPtr qp = dq->p(), op = out->p(), pp = dpos->p(), sp = st->p(), mp = mu->p(), kqp = kq->p(), ksp = ksc->p(), kp_ = kp;
+                if (!i8) {
+                    hip::launch(f, {cdiv(n, 16), heads / 6, 1}, {384, 1, 1}, 0, c.s, qp, a, op, heads_, nkv_, qs_, pp, n_, sc_, h0, kb0, kb1, sp);
+                    return;
+                }
+                hip::launch(fm, {static_cast<unsigned>(row / 64), 1, 1}, {256, 1, 1}, 0, c.s, kp_, mp, rows, row_);
+                hip::launch(fqk, {cdiv(static_cast<std::uint64_t>(L) * nkv, 8), 1, 1}, {256, 1, 1}, 0, c.s, kp_, mp, kqp, ksp, rows, nkv_, kss_);
+                hip::launch(f, {cdiv(n, 16), heads / 6, 1}, {384, 1, 1}, 0, c.s, qp, a, op, heads_, nkv_, qs_, pp, n_, sc_, h0, kb0, kb1, sp, kqp, ksp, kss_,
+                            mp);
+            };
+            k.run = [&c, &k, out, n](hip::Function f) {
+                out->fill(0xff);
+                k.call(f, 0);
+                c.sync();
+                return out->down<float>(static_cast<std::size_t>(n) * heads * hd);
+            };
+            k.verify = [verify, i8, kn](const std::vector<float>& got) { return verify(got, i8 ? 5e-2 : 1e-2, kn); };
+            runCell(e, k);
+        }
+    }
+}
+
 // ---------------------------------------------------------------- moe (decode, Ornith MXFP4 experts)
 void benchMoe(Env& e) {
     Ctx& c = e.c;
@@ -934,7 +1067,7 @@ void benchGdn(Env& e) {
 
 }  // namespace
 
-const char* const kBenchFamilies[] = {"gemv", "gemvh", "gemm", "attn", "moe", "gdn"};
+const char* const kBenchFamilies[] = {"gemv", "gemvh", "gemm", "attn", "attnp", "moe", "gdn"};
 
 bool benchFamilyKnown(const std::string& f) {
     for (const char* n : kBenchFamilies)
@@ -984,7 +1117,7 @@ void runBench(Ctx& c, const BenchOpts& o) {
         const char* name;
         void (*fn)(Env&);
     };
-    const F fams[] = {{"gemv", benchGemv}, {"gemvh", benchGemvh}, {"gemm", benchGemm}, {"attn", benchAttnDecode}, {"moe", benchMoe}, {"gdn", benchGdn}};
+    const F fams[] = {{"gemv", benchGemv}, {"gemvh", benchGemvh}, {"gemm", benchGemm}, {"attn", benchAttnDecode}, {"attnp", benchAttnPrefillI8}, {"moe", benchMoe}, {"gdn", benchGdn}};
     for (const F& f : fams) {
         if (!o.families.count(f.name)) continue;
         std::printf("== bench %s\n", f.name);

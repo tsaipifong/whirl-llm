@@ -4,10 +4,12 @@
 #include "whirl/numerics.h"
 
 #include "whirl/dump.h"
+#include "whirl/common.h"  // parseUnsigned (feat027-i8qk-r2)
 
 #include <algorithm>
 #include <cstdlib>
 #include <format>
+#include <limits>
 #include <stdexcept>
 
 namespace whirl::numerics {
@@ -31,6 +33,7 @@ constexpr std::array<ItemInfo, n_items> k_items = {{
     {"moeskip", "skip low-weight MoE experts"},
     {"a8", "int8 activations for K-quant prefill (W4A8)"},
     {"a4", "int4 activations for prefill (W4A4)"},
+    {"i8qk", "int8 Q.K^T prefill attention (R9700; opt-in)"},
 }};
 
 constexpr const char* k_q8dec = "q8dec (int8 activations in the decode / verify GEMV, as llama.cpp's q8_1)";
@@ -129,7 +132,7 @@ Request parseMode(std::string_view spec, std::string source) {
         return r;
     }
     if (trim(items).empty()) {
-        r.items = r.mode == Mode::balance ? balance_items : (balance_items | fast_only_items);
+        r.items = r.mode == Mode::balance ? balance_items : (balance_items | (fast_only_items & ~fast_optin_items));
     } else {
         r.items = parseItems(items);
         r.custom = true;
@@ -216,6 +219,9 @@ const std::array<EnvValues::Entry, EnvValues::n_fields>& EnvValues::names() {
         {"RELAX_EPS", &S::relax_eps},
         {"RELAX_DELTA", &S::relax_delta},
         {"SPEC_SAMPLE", &S::spec_sample},
+        {"ATTN_I8QK", &S::attn_i8qk},
+        {"ATTN_I8QK_MIN", &S::attn_i8qk_min},
+        {"ATTN_I8QK_MIN_WORK", &S::attn_i8qk_min_work},
         {"MOE_FP8", &S::moe_fp8},
         {"MOE_MXW", &S::moe_mxw},
         {"MOE_WIDE", &S::moe_wide},
@@ -263,15 +269,17 @@ const std::array<RuntimeValues::Entry, RuntimeValues::n_fields>& RuntimeValues::
 const std::vector<FlagInfo>& flagTable() {
     static const std::vector<FlagInfo> t = [] {
         std::vector<FlagInfo> v;
-#define WHIRL_NF_INFO_B(n, key) v.push_back({#n, key, FlagKind::b, &Flags::n, nullptr, nullptr});
-#define WHIRL_NF_INFO_U(n, key) v.push_back({#n, key, FlagKind::u, nullptr, &Flags::n, nullptr});
-#define WHIRL_NF_INFO_F(n, key) v.push_back({#n, key, FlagKind::f, nullptr, nullptr, &Flags::n});
+#define WHIRL_NF_INFO_B(n, key) v.push_back({#n, key, FlagKind::b, &Flags::n, nullptr, nullptr, nullptr});
+#define WHIRL_NF_INFO_U(n, key) v.push_back({#n, key, FlagKind::u, nullptr, &Flags::n, nullptr, nullptr});
+#define WHIRL_NF_INFO_F(n, key) v.push_back({#n, key, FlagKind::f, nullptr, nullptr, &Flags::n, nullptr});
+#define WHIRL_NF_INFO_W(n, key) v.push_back({#n, key, FlagKind::w, nullptr, nullptr, nullptr, &Flags::n});
 #define WHIRL_NF_INFO(k, n, d, key) WHIRL_NF_INFO_##k(n, key)
         WHIRL_NUMERICS_FLAGS(WHIRL_NF_INFO)
 #undef WHIRL_NF_INFO
 #undef WHIRL_NF_INFO_B
 #undef WHIRL_NF_INFO_U
 #undef WHIRL_NF_INFO_F
+#undef WHIRL_NF_INFO_W
         return v;
     }();
     return t;
@@ -282,6 +290,7 @@ std::string flagValue(const Flags& fl, const FlagInfo& fi) {
         case FlagKind::b: return fl.*fi.b ? "1" : "0";
         case FlagKind::u: return std::to_string(fl.*fi.u);
         case FlagKind::f: return std::format("{:.9g}", fl.*fi.f);
+        case FlagKind::w: return std::to_string(fl.*fi.w);
     }
     return {};
 }
@@ -425,6 +434,37 @@ void loadOverrides(Plan& p, const Request& r, const Target& t, bool items) {
     if (items) {
         if (const Raw& v = e.spec_sample; v && !v->empty())
             applyOverride(p, Item::specsample, "SPEC_SAMPLE", *v, *v != "0", t.mtp && t.k_spec_sample);
+        // feat027-i8qk: int8 Q.K^T prefill attention (fast only, opt-in: --fast=...,i8qk, --fast=all or
+        // WHIRL_ATTN_I8QK=1). int8 attention is a fast-only technique by the mode standard, so precise / balance never
+        // run it: there WHIRL_ATTN_I8QK is ignored (plan and numerics line unchanged) with a note in the load log
+        // (applyFastOnlyOverride, the same semantics as moeshx; feat027-i8qk-r2).
+        if (const Raw& v = e.attn_i8qk; v && !v->empty())
+            if (const std::string ign = applyFastOnlyOverride(p, Item::i8qk, "ATTN_I8QK", *v, *v != "0", t.k_attn_i8qk); !ign.empty())
+                p.load_notes.push_back(ign);
+    }
+    // feat027-i8qk (was tune.cpp, after the item overrides: Model::attn_i8qk / attn_i8qk_min_keys / attn_i8qk_min_work)
+    F.attn_i8qk = p.mode == Mode::fast && p.on(Item::i8qk);
+    // minimum size (segment cost model, feat027-i8qk-r1.PRIOR_ART.md; GPU tunes it): keys / queries x keys.
+    // Strict parse (feat027-i8qk-r2): a value that is not a plain number in range keeps the default with a warning
+    // (strtoul would read "8k" as 8 and "abc" as 0, i.e. int8 at any length).
+    if (const Raw& v = e.attn_i8qk_min; v && !v->empty()) {
+        if (const auto n = parseUnsigned(*v, std::numeric_limits<std::uint32_t>::max()))
+            F.i8qk_min_keys = static_cast<std::uint32_t>(*n);
+        else
+            p.load_notes.push_back(std::format("warning: WHIRL_ATTN_I8QK_MIN={} ignored (not a whole number of keys <= {}); keeps {}", *v,
+                                               std::numeric_limits<std::uint32_t>::max(), F.i8qk_min_keys));
+    }
+    if (const Raw& v = e.attn_i8qk_min_work; v && !v->empty()) {
+        if (const auto n = parseUnsigned(*v, std::numeric_limits<std::uint64_t>::max()))
+            F.i8qk_min_work = *n;
+        else
+            p.load_notes.push_back(std::format("warning: WHIRL_ATTN_I8QK_MIN_WORK={} ignored (not a whole number of queries x keys); keeps {}",
+                                               *v, F.i8qk_min_work));
+    }
+    if (items) {
+        if (F.attn_i8qk && (F.i8qk_min_keys != Flags{}.i8qk_min_keys || F.i8qk_min_work != Flags{}.i8qk_min_work))
+            p.items[static_cast<std::size_t>(Item::i8qk)].note +=
+                std::format(" [min keys {}, min queries x keys {}]", F.i8qk_min_keys, F.i8qk_min_work);
         noteSwitches(p, [&e](const char* n) -> std::optional<std::string> {
             const Raw* v = e.find(n);
             return v ? *v : std::nullopt;
@@ -551,6 +591,11 @@ Plan plan(const Request& r_in, const Target& t) {
                 }
                 note = "drafts accepted when close to the target (greedy: top-k + p ratio; sampling: typical acceptance)";
                 break;
+            case Item::i8qk:
+                if (!t.k_attn_i8qk)
+                    why = t.gfx1151 ? "no gain on this GPU (int8 WMMA runs at the f16 rate on gfx1151)" : "no int8 Q.K^T kernels in this code object";
+                else note = "int8 Q.K^T (smoothed per-key int8 K, per-query int8 Q) on the q4 / q8 KV key-range prefill path";
+                break;
             default:
                 why = "not yet implemented (balance behaviour)";
                 break;
@@ -614,6 +659,15 @@ void applyOverride(Plan& p, Item it, const char* var, const std::string& value, 
     }
 }
 
+std::string applyFastOnlyOverride(Plan& p, Item it, const char* var, const std::string& value, bool forced, bool applicable) {
+    if (p.mode == Mode::fast) {
+        applyOverride(p, it, var, value, forced, applicable);
+        return {};
+    }
+    if (!forced) return {};
+    return std::format("WHIRL_{}={} ignored: {} is a fast-only item ({} never takes it)", var, value, itemName(it), modeName(p.mode));
+}
+
 std::string modeLabel(const Plan& p) {
     std::string l = modeName(p.mode);
     if (p.lossy_override) l += "+overrides";
@@ -631,7 +685,7 @@ std::string logLine(const Plan& p) {
         l += std::string(" - f16/f32 prefill activations, ") + (p.q8dec ? "" : "f16 decode / verify activations, ") + "f32 DeltaNet, f16 KV";
     else l += " - enabled: " + (en.empty() ? std::string("none") : en);
     if (p.mode != Mode::precise || !sk.empty()) l += "; skipped: " + (sk.empty() ? std::string("none") : sk);
-    if (p.mode == Mode::fast && !p.on(Item::kvq4) && !p.on(Item::relaxacc))
+    if (p.mode == Mode::fast && !p.on(Item::kvq4) && !p.on(Item::relaxacc) && !p.on(Item::i8qk))
         l += "; no fast item applies here: fast runs as balance";
     for (const std::string& o : p.overrides) l += "; " + o;
     l += std::string("; decode: ") + (p.q8dec ? k_q8dec : k_f16dec);

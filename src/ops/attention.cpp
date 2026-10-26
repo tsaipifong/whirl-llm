@@ -290,23 +290,50 @@ AttnPrefillPlan chooseAttnPrefill(const AttnPrefillProblem& p, const AttnPrefill
     if (f.attn_dqf_on && k.kv_dq_rows_r != nullptr && p.dq_ptab && p.dq_st_ml && p.dq_rows >= 4096 && rows <= kDqMaxKeys && p.head_dim == 256 && pow2 &&
         f.attn_kg_on) {
         Function ks = nullptr;
-        u32 nps = 0;
+        u32 nps = 0;  // (feat027-i8qk below may swap ks for its int8 Q.K^T variant)
         for (const auto& [fn, c] : {std::pair{k.attn_kgs6, 6u}, std::pair{k.attn_kgs4, 4u}, std::pair{k.attn_kgs2, 2u}})
             if (fn != nullptr && grp % c == 0 && n_head % (c * 2) == 0) {
                 ks = fn;
                 nps = c;
                 break;
             }
+        // feat027-i8qk (fast mode only, lossy): the same range series with int8 Q.K^T - after each range's f16 copy,
+        // i8k_mean + i8k_quant (smoothed per-key int8 K into the rest of ffn_g, ranges of i8Keys rows) and attn_kgsi
+        // (rotated q / k only: per-key int8 of unrotated k with outlier channels loses ~4 bits, PRIOR_ART / research note)
+        // (feat027-i8qk-r1: and only from i8qk_min_keys keys / i8qk_min_work queries x keys - the pre-pass is a fixed
+        // cost per call that short prompts do not earn back)
+        const bool i8_big = rows >= f.i8qk_min_keys && static_cast<u64>(n) * rows >= f.i8qk_min_work;
+        const Function ksi = !f.attn_i8qk || !p.kv_rot || !i8_big ? nullptr : nps == 6 ? k.attn_kgsi6 : nps == 4 ? k.attn_kgsi4 : nps == 2 ? k.attn_kgsi2 : nullptr;
+        const u32 i8_seg = ksi != nullptr && k.i8k_mean != nullptr && k.i8k_quant != nullptr && row_el % 64 == 0 ? i8Keys(p.dq_rows, p.n_head_kv, p.head_dim) : 0;
+        if (ks != nullptr && i8_seg != 0) ks = ksi;
         if (ks != nullptr) {
-            const u32 seg = p.dq_rows / 256 * 256;
+            const u32 seg = i8_seg != 0 ? i8_seg : p.dq_rows / 256 * 256;
             for (u32 r0 = 0; r0 < rows; r0 += seg) {
                 const u32 r1 = std::min(rows, r0 + seg), nr = r1 - r0;
                 dqRange(r0, nr);
+                if (i8_seg != 0) {
+                    AttnStep iq;
+                    iq.op = AttnStep::Op::i8k;
+                    iq.f = k.i8k_mean;
+                    iq.f2 = k.i8k_quant;
+                    iq.grid = D(row_el / 64);
+                    iq.grid2 = D((static_cast<u64>(nr) * p.n_head_kv + 7) / 8);
+                    iq.r0 = r0;
+                    iq.nrows = nr;
+                    iq.row_el = row_el;
+                    iq.kss = i8_seg;
+                    iq.i8 = true;
+                    st.push_back(iq);
+                }
                 u32 sp = headParts(nr);
                 while (sp > 1 && (n_head / sp) % nps != 0) sp += 1;
                 if (n_head % sp != 0 || (n_head / sp) % nps != 0) sp = 1;
                 const u32 shp = n_head / sp;
-                for (u32 q = 0; q < sp; ++q) attn(ks, D((n + 15) / 16, shp / nps), D(64 * nps), q * shp, true, true, r0, r1);
+                for (u32 q = 0; q < sp; ++q) {
+                    attn(ks, D((n + 15) / 16, shp / nps), D(64 * nps), q * shp, true, true, r0, r1);
+                    st.back().i8 = i8_seg != 0;
+                    st.back().kss = i8_seg;
+                }
             }
             return pl;
         }

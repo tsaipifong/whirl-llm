@@ -680,6 +680,7 @@ static void testFingerprintCoversBitsKey() {
         t.fast_kv_q8h = s8060;
         t.strix_profile = t.k_gdn_sx = s8060;
         t.gdn_strix_shape = true;
+        t.k_attn_i8qk = !s8060;  // feat027-i8qk: WHIRL_ATTN_I8QK changes bitsKey in fast on the R9700
         return t;
     };
     std::vector<std::string> names;

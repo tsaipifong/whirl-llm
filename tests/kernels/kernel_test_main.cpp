@@ -7,10 +7,10 @@
 // Exit: 0 pass, 1 a failing check (or, with --require-all, a kernel missing that the arch requires),
 // 2 usage error: unknown --only family, a given model path that does not exist, 0 checks run, or
 // --require-all on an arch without a required-kernel list (FIX-TEST-A, FR-TEST P3-3 / P3-4).
-// families: quant gemv gemm attn attndq4 gdn moe moemx moef misc gemvh dflash ws4 ws4g vision
+// families: quant gemv gemm attn attndq4 gdn moe moemx moef misc gemvh dflash ws4 ws4g vision i8qk
 //
 // Timing (measure-tools P2, tests/kernels/kt_bench.h + bench_kernels.cpp): --bench FAMILY[,FAMILY] runs the timing cells
-// of gemv gemvh gemm attn moe gdn instead of the test families (each cell checks its output vs the CPU first);
+// of gemv gemvh gemm attn attnp moe gdn instead of the test families (each cell checks its output vs the CPU first);
 // --jsonl FILE appends one row per cell (db_record.py jsonl); --ab HSACO times the same kernels of a candidate code
 // object against the built-in ones (ABBA, paired ratio). Tuning: --burst-idle S (idle before a cell that would end
 // a burst group past 8 s; runner: 60), --bench-max-s S (per cell, default 3), --rot-mb N (rotation target; default
@@ -88,7 +88,7 @@ int main(int argc, char** argv) {
                 std::string f;
                 while (std::getline(ss, f, ',')) {
                     if (!kt::benchFamilyKnown(f)) {
-                        std::printf("whirl-kernel-test: --bench: no timing family named \"%s\" (gemv gemvh gemm attn moe gdn)\n", f.c_str());
+                        std::printf("whirl-kernel-test: --bench: no timing family named \"%s\" (gemv gemvh gemm attn attnp moe gdn)\n", f.c_str());
                         return usage();
                     }
                     bo.families.insert(f);
@@ -118,7 +118,7 @@ int main(int argc, char** argv) {
         }
     }
     const char* fam_names[] = {"quant", "gemv", "gemm", "attn", "attndq4", "gdn", "moe", "moemx", "moef", "misc", "attnbench",
-                               "gemvh", "gemvhbench", "dflash", "ws4", "ws4bench", "ws4g", "ws4gbench", "vision"};  // = fams below
+                               "gemvh", "gemvhbench", "dflash", "ws4", "ws4bench", "ws4g", "ws4gbench", "vision", "i8qk"};  // = fams below
     const bool bench = !bo.families.empty();
     if (!bench && (!bo.jsonl.empty() || !bo.ab_hsaco.empty())) {
         std::printf("whirl-kernel-test: --jsonl / --ab need --bench\n");
@@ -231,7 +231,7 @@ int main(int argc, char** argv) {
                         {"gemvh", kt::testGemvh}, {"gemvhbench", kt::benchGemvh}, {"dflash", kt::testDflash},
                         {"ws4", kt::testAttnWs4}, {"ws4bench", kt::benchAttnWs4},
                         {"ws4g", kt::testAttnWs4g}, {"ws4gbench", kt::benchAttnWs4g},
-                        {"vision", kt::testVision}};
+                        {"vision", kt::testVision}, {"i8qk", kt::testAttnI8qk}};
     if (bench) {
         const auto t0 = std::chrono::steady_clock::now();
         try {

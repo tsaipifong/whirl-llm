@@ -88,6 +88,9 @@
 //   attn_kgs6 / 4 / 2 (attn_kg arguments, int kb0, int kb1, float* st_ml): f16 attn_kg over keys
 //            [kb0, kb1); m / l in st_ml[query][head][2] and the unnormalized output in out carry the
 //            softmax state between ranges (bit-identical to one attn_kg over all keys; gfx1201)
+//   i8k_mean(f16* k16, f32* mu, n_rows, row_el) (grid row_el / 64, block 256), i8k_quant(f16* k16, f32* mu,
+//            int8* kq, f32* ksc, n_rows, n_kv, kss) (grid ceil(n_rows * n_kv / 8), block 256), attn_kgsi6 / 4 / 2
+//            (attn_kgs arguments, int8* kq, f32* ksc, int kss, f32* mu): feat027-i8qk int8 Q.K^T (lossy, fast mode)
 //   kv_store[_q8|_q8v](k, v, KvArgs, pos, int row)
 //  Gated DeltaNet:
 //   gdn_conv_seq(xin, state, w, out, ch, n_tok); gdn_gates(b, a, dt_bias, A,
@@ -552,6 +555,9 @@ struct AttnKernels {
     // FC-1c: key-range variants (prefills past the f16 scratch, q4 prefill): kv_dq_rows_r (q8 / q8h)
     // or kv_dq_rows_r_q4 (q4) + attn_kgs* (f16 attn_kg over a key range, softmax state carried)
     F kv_dq_rows_r{}, attn_kgs6{}, attn_kgs4{}, attn_kgs2{};
+    // feat027-i8qk (gfx1201, fast mode only): int8 Q.K^T over the f16 K copy: i8k_mean + i8k_quant (smoothed
+    // per-key int8 K) and attn_kgsi* (attn_kgs with an iu8 WMMA S^T; null when not in the code object)
+    F i8k_mean{}, i8k_quant{}, attn_kgsi6{}, attn_kgsi4{}, attn_kgsi2{};
     // KG-3 (gfx1151): q8 / q8h / q4 prefill on dequantized rows: the f16 attn_prefill_wmma and its
     // key-range variant attn_prefill_wmma_s (softmax state carried; null when not in the code object)
     F attn_pwf{}, attn_pws{};

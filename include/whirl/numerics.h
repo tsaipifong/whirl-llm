@@ -52,6 +52,7 @@ enum class Item : std::uint8_t {
     moeskip,  // skip low-weight MoE experts
     a8,       // int8 activations for Q4_K / Q5_K / Q6_K prefill (W4A8)
     a4,       // W4A4 prefill
+    i8qk,     // feat027-i8qk: int8 Q.K^T prefill attention (gfx1201; smoothed per-key int8 K, per-query int8 Q; opt-in)
     n_items
 };
 inline constexpr std::size_t n_items = static_cast<std::size_t>(Item::n_items);
@@ -61,13 +62,16 @@ std::optional<Item> itemFromName(std::string_view s);
 inline constexpr std::uint32_t bit(Item it) { return 1u << static_cast<unsigned>(it); }
 inline constexpr std::uint32_t balance_items = bit(Item::fp8) | bit(Item::moefp8) | bit(Item::gdnwmma) | bit(Item::h16) | bit(Item::kvq8) | bit(Item::specsample);
 inline constexpr std::uint32_t fast_only_items =
-    bit(Item::kvq4) | bit(Item::relaxacc) | bit(Item::headq) | bit(Item::moeskip) | bit(Item::a8) | bit(Item::a4);
+    bit(Item::kvq4) | bit(Item::relaxacc) | bit(Item::headq) | bit(Item::moeskip) | bit(Item::a8) | bit(Item::a4) | bit(Item::i8qk);
+// fast items a plain --fast does not request (only an explicit list, "all" or their WHIRL_ switch): implemented, waiting for
+// their task-accuracy acceptance run (feat027-i8qk: i8qk)
+inline constexpr std::uint32_t fast_optin_items = bit(Item::i8qk);
 // MoE models: balance items that only the fast mode enables (an explicit item list still enables
 // them). Empty since MODES-MXFP4 (owner 2026-10-16): MoE balance has fp8 + moefp8 again
 // (MOE-BAL 2026-10-13 had moved them here). Kept as the per-model-type hook of forModel.
 inline constexpr std::uint32_t moe_fast_items = 0;
 // implemented items (the rest are "not yet implemented": skipped, the mode runs as balance)
-inline constexpr std::uint32_t implemented_items = balance_items | bit(Item::kvq4) | bit(Item::relaxacc);
+inline constexpr std::uint32_t implemented_items = balance_items | bit(Item::kvq4) | bit(Item::relaxacc) | bit(Item::i8qk);
 
 // ---- arch025-N2a (R-5): the per-variable overrides as Request fields (raw values, parsed in plan())
 //
@@ -84,6 +88,8 @@ struct EnvValues {
     // src/model/tune.cpp:852-982 (loadOrTuneImpl)
     Raw fp8, fp8_mask, g8t, gdn_wmma, act_fuse, gemmh, gemmhq, attn_kx, attn_kg, attn_dqf, attn_seg, gdn_ba, gdn_in2, q4_relaxed,
         ffn_h16, gdn_strix, gdn_strix_min, kv, q8dec, relax, relax_k, relax_alpha, relax_eps, relax_delta, spec_sample;
+    // feat027-i8qk (src/model/tune.cpp of the source branch, after SPEC_SAMPLE)
+    Raw attn_i8qk, attn_i8qk_min, attn_i8qk_min_work;
     // src/model/loader.cpp:550-553
     Raw moe_fp8, moe_mxw, moe_wide, moe_rbf;
     // numerics::noteSwitches (k_numerics_switches, same order): recorded as overrides only
@@ -93,7 +99,7 @@ struct EnvValues {
         const char* name;  // without the WHIRL_ prefix
         Raw EnvValues::* field;
     };
-    static constexpr std::size_t n_fields = 29;
+    static constexpr std::size_t n_fields = 32;
     // every Raw field once (switches are k_numerics_switches); the reflection test checks the count against sizeof
     static const std::array<Entry, n_fields>& names();
     // by name, switches included (nullptr for an unknown name)
@@ -177,6 +183,7 @@ struct Target {
     bool gdn_strix_shape = false;  // d_state 128, head V 128, n_k_heads > 0, n_v_heads % n_k_heads == 0, ratio <= 4
     bool k_gemm8t = false;       // the whole fragment-tiled fp8 set (Model::useTiledFp8, forward.cpp:269-277)
     bool k_gdn_v0 = false;       // gdn_step_norm_v0 present (WHIRL_GDN_V0)
+    bool k_attn_i8qk = false;  // int8 Q.K^T prefill attention kernels present (i8k_mean / i8k_quant / attn_kgsi*; gfx1201)
 };
 
 // gdnwmma / h16 for a model without MXFP4 tensors (KG-1): dense models on the R9700 only
@@ -248,22 +255,27 @@ struct ItemState {
     X(B, moe_rbf, true, "moe_rbf")                               \
     X(B, gv_group, true, "gv_group")                             \
     X(U, gv_nmax, 0, "gv_nmax")                                  \
-    X(B, gdn_v0, false, "")
+    X(B, gdn_v0, false, "")                                       \
+    X(B, attn_i8qk, false, "")                                    \
+    X(U, i8qk_min_keys, 8192, "")                                 \
+    X(W, i8qk_min_work, 4096ull * 8192ull, "")
 
 struct Flags {
 #define WHIRL_NF_B bool
 #define WHIRL_NF_U std::uint32_t
+#define WHIRL_NF_W std::uint64_t
 #define WHIRL_NF_F float
 #define WHIRL_NF_FIELD(k, n, d, key) WHIRL_NF_##k n = d;
     WHIRL_NUMERICS_FLAGS(WHIRL_NF_FIELD)
 #undef WHIRL_NF_FIELD
 #undef WHIRL_NF_B
 #undef WHIRL_NF_U
+#undef WHIRL_NF_W
 #undef WHIRL_NF_F
     bool operator==(const Flags&) const = default;
 };
 
-enum class FlagKind : std::uint8_t { b, u, f };
+enum class FlagKind : std::uint8_t { b, u, f, w };  // w: std::uint64_t (feat027-i8qk i8qk_min_work)
 struct FlagInfo {
     const char* name;
     const char* dump_key;  // "" = not in WHIRL_DUMP_EXEC
@@ -271,6 +283,7 @@ struct FlagInfo {
     bool Flags::* b;
     std::uint32_t Flags::* u;
     float Flags::* f;
+    std::uint64_t Flags::* w;
 };
 // every Flags field once, in declaration order (generated from WHIRL_NUMERICS_FLAGS)
 const std::vector<FlagInfo>& flagTable();
@@ -289,6 +302,9 @@ struct Plan {
     bool q8dec_default = true;  // the mode's choice (q8decDefault) before WHIRL_Q8DEC
     // arch025-N2a: the Model's execution flags this plan decides; arch025-N2b: the Model reads them (Model::nf())
     Flags flags;
+    // feat027-i8qk (arch025-port-attn): lines loadOrTune writes to the load log before the numerics line (an ignored
+    // fast-only switch, a rejected WHIRL_ATTN_I8QK_MIN / _MIN_WORK); descriptions, not in bitsKey
+    std::vector<std::string> load_notes;
     bool on(Item it) const { return items[static_cast<std::size_t>(it)].enabled; }
     // Everything here that decides the bits of the output, as "key=value;" in a fixed order: the mode, every item's
     // enabled state, q8dec and every Flags field (flagTable order). Descriptions (notes, overrides, source) are not in
@@ -310,6 +326,9 @@ void applyFront(Plan& p, Front f, const RuntimeValues& v, bool k_gdn_v0);
 // Per-item override from the environment: `forced` = the effective value after the variable.
 // Records "WHIRL_X=v: item on (lossy, user-requested)" or "... item off" when it differs.
 void applyOverride(Plan& p, Item it, const char* var, const std::string& value, bool forced, bool applicable);
+// The WHIRL_ switch of a fast-only item (moeshx): applyOverride in fast; in precise / balance the switch is ignored
+// (the plan is unchanged) and the returned note says so for the load log ("" when applied or when it asks for off).
+std::string applyFastOnlyOverride(Plan& p, Item it, const char* var, const std::string& value, bool forced, bool applicable);
 
 // The decode activation form actually used: q8 = int8 (default: q8dec_default). env = the
 // WHIRL_Q8DEC value ("" = unset); a value that changes the mode's default is recorded as an

@@ -2209,6 +2209,7 @@ void testEnvSnapshot() {
         {"KV", 0, Rule::unset, nullptr},          {"Q8DEC", 0, Rule::unset, nullptr},       {"RELAX", 0, Rule::unset, nullptr},
         {"RELAX_K", 0, Rule::unset, nullptr},     {"RELAX_ALPHA", 0, Rule::unset, nullptr}, {"RELAX_EPS", 0, Rule::unset, nullptr},
         {"RELAX_DELTA", 0, Rule::unset, nullptr}, {"SPEC_SAMPLE", 0, Rule::unset, nullptr}, {"ATTN_SEG", 0, Rule::unset, nullptr},
+        {"ATTN_I8QK", 0, Rule::unset, nullptr},  {"ATTN_I8QK_MIN", 0, Rule::unset, nullptr}, {"ATTN_I8QK_MIN_WORK", 0, Rule::unset, nullptr},
         {"ACT_FUSE", 0, Rule::as, "1"},           {"GEMMH", 0, Rule::as, "1"},              {"GEMMHQ", 0, Rule::as, "1"},
         {"ATTN_KX", 0, Rule::as, "1"},            {"ATTN_KG", 0, Rule::as, "1"},            {"ATTN_DQF", 0, Rule::as, "1"},
         {"GDN_BA", 0, Rule::as, "1"},             {"GDN_IN2", 0, Rule::as, "1"},            {"G8T", 1, Rule::as, "1"},

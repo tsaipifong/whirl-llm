@@ -832,6 +832,8 @@ whirl::numerics::Target numericsTarget(const Model& m) {
     t.gdn_strix_shape = m.cfg.d_state == 128 && m.cfg.headV() == 128 && m.cfg.n_k_heads > 0 && m.cfg.n_v_heads % m.cfg.n_k_heads == 0 &&
                         m.cfg.n_v_heads / m.cfg.n_k_heads <= 4;
     t.k_gemm8t = m.hasTiledFp8();
+    t.k_attn_i8qk = m.k.i8k_mean != nullptr && m.k.i8k_quant != nullptr &&
+                    (m.k.attn_kgsi6 != nullptr || m.k.attn_kgsi4 != nullptr || m.k.attn_kgsi2 != nullptr);
     return t;
 }
 
@@ -906,6 +908,7 @@ void loadOrTuneImpl(Model& m, const std::string& model_path, std::string& log) {
     m.num_plan.flags = f;
     if (f.prec_dec) refusePrecise();
     m.num_plan = p;
+    for (const std::string& n : p.load_notes) log += "  " + n + "\n";  // feat027-i8qk (plan notes for the load log)
     log += "  " + nu::logLine(p) + "\n";
     if (!m.load_note.empty()) log += "  " + m.load_note;
 
