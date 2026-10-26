@@ -1343,6 +1343,20 @@ void testLoadEstimate() {
         check(eh.embd_on_host && eh.weights == all - emb && emb > 0, ("estimate: host embedding not counted" + tag).c_str());
         check(ev.has_mtp, ("estimate: nextn layer seen" + tag).c_str());
         check(ev.max_elems == max_elems && ev.ffs == ffs, ("estimate: scratch sizes from the layer matrices" + tag).c_str());
+        {
+            // feat026-cascade re-review R1: the cas_* budget (WHIRL_CASCADE=1) is counted in balance / fast only; precise
+            // (Model::load allocates no cas_* there) budgets exactly what it does without WHIRL_CASCADE
+            // (arch025-port-attn: the decision is cascadeOnOf on the load's snapshot; bufferBytes takes it)
+            namespace cnu = whirl::numerics;
+            using CSnap = whirl::config::EnvSnapshot;
+            const CSnap s_on = CSnap::fromValues({{"CASCADE", std::string("1")}}), s_zero = CSnap::fromValues({{"CASCADE", std::string("0")}});
+            const auto bb = [&](const CSnap& s, cnu::Mode md) { return q::bufferBytes(cfg, 2048, ev.ffs, ev.max_elems, 64, q::cascadeOnOf(s, md)); };
+            const std::uint64_t off_b = bb(CSnap(), cnu::Mode::balance), off_p = bb(CSnap(), cnu::Mode::precise);
+            const std::uint64_t on_b = bb(s_on, cnu::Mode::balance), on_p = bb(s_on, cnu::Mode::precise), on_f = bb(s_on, cnu::Mode::fast);
+            const std::uint64_t cas = static_cast<std::uint64_t>(q::max_verify_rows) * 64 * cfg.n_head * (2 + cfg.head_dim) * 4 + 3 * 32 * 4;
+            check(off_b == off_p && on_p == off_p && on_b == off_b + cas && on_f == on_b && bb(s_zero, cnu::Mode::balance) == off_b,
+                  ("estimate: WHIRL_CASCADE=1 budget (cas_*) only outside precise" + tag).c_str());
+        }
         // one DeltaNet layer (layer 0): conv + ssm state
         const std::uint64_t st = static_cast<std::uint64_t>(cfg.d_conv - 1) * cfg.convCh() * 4 +
                                  static_cast<std::uint64_t>(cfg.n_v_heads) * cfg.d_state * cfg.headV() * 4;
@@ -2230,7 +2244,7 @@ void testEnvSnapshot() {
         empty_names.push_back(r.name);
     }
     for (const char* sw : {"FD_SPLITS", "GEMV_MAX", "GV_NMAX", "GV_GROUP", "NO_FUSE", "FLOAT_GEMV", "GDN_SEQ", "NAIVE_ATTN", "DBG", "ATTN_WIDE",
-                           "ATTN_DQ4", "ATTN_WS4", "MOE_BN"}) {
+                           "ATTN_DQ4", "ATTN_WS4", "MOE_BN", "CASCADE", "ATTN_PFNS"}) {
         check(run(sw, 0, "") == envtab::tuneOutput(0, model.string()), std::string("env snapshot: switch ") + sw + "='' = not set (numerics.cpp:292)");
         empty_names.push_back(sw);
     }
@@ -2245,7 +2259,8 @@ void testEnvSnapshot() {
     // envFlag sites (loader.cpp MOE_*), capture / fromValues above for the raw value of the others
     const std::vector<std::string> covered = envtab::namesCovered();
     const char* const load_only[] = {"GEMV_BITWISE_FLOAT", "CODE_OBJECT", "MOE_MXW", "MOE_WIDE", "MOE_RBF", "GPU_SHARE", "GPU_WAIT", "DEVICE", "DFLASH_PROF",
-                                     "HEAD_GEMVX", "PREC_GEMVH", "PREC_GS"};  // the last three: Model::load -> forwardEnv (testForwardEnv)
+                                     "HEAD_GEMVX", "PREC_GEMVH", "PREC_GS",  // these three: Model::load -> forwardEnv (testForwardEnv)
+                                     "CASCADE_MIN", "CASCADE_WIDE"};  // feat026-cascade: Model::load, only with WHIRL_CASCADE=1 on a GPU
     for (const auto& e : names) {
         const bool in_table = std::find(covered.begin(), covered.end(), e.name) != covered.end();
         const bool in_empty = std::find(empty_names.begin(), empty_names.end(), e.name) != empty_names.end();
@@ -2255,7 +2270,7 @@ void testEnvSnapshot() {
     }
     // the reverse: the names the five files read are all fields (a get() of a missing name would throw at load)
     for (const char* sw : {"FD_SPLITS", "GEMV_MAX", "GV_NMAX", "GV_GROUP", "NO_FUSE", "FLOAT_GEMV", "GDN_SEQ", "NAIVE_ATTN", "DBG", "ATTN_WIDE",
-                           "ATTN_DQ4", "ATTN_WS4", "MOE_BN"}) {
+                           "ATTN_DQ4", "ATTN_WS4", "MOE_BN", "CASCADE", "ATTN_PFNS"}) {
         bool ok = true;
         try {
             (void)EnvSnapshot().get(sw);
@@ -2569,6 +2584,8 @@ void testPlanVsLoadOrTune() {
         {"HEAD_GEMVX", "F7 forwardEnv -> Model member (removed by feat026-o6)"},
         {"PREC_GEMVH", "F7 forwardEnv -> Model member (removed by feat026-o6)"},
         {"PREC_GS", "F7 forwardEnv -> Model member (removed by feat026-o6)"},
+        {"CASCADE_MIN", "loader.cpp: cascade prefix-length threshold (cascade_cfg, sizing; the on/off decision is the plan's cascade_on)"},
+        {"CASCADE_WIDE", "loader.cpp: wide prefix kernel choice r0 (cascade_cfg; A/B of the same bits)"},
     };
     for (const auto& e : EnvSnapshot::names()) {
         nu::EnvValues v;

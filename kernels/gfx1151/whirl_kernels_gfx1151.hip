@@ -24,6 +24,7 @@
 #include "misc_rows_norm.hip"      // norms, rope, elementwise
 #include "attn.hip"                // paged KV + decode / split / prefill attention
 #include "attn_ws4.hip"            // 4-wave pipelined split-K decode attention (attn_ws4)
+#include "../attn_cascade.hip"     // feat026: cascade (shared-prefix) attention rows + merge (shared with gfx1201)
 #include "gdn.hip"                 // Gated DeltaNet, kv_store, argmax
 #include "gdn_strix.hip"           // chunked DeltaNet prefill on f16 WMMA (strix-llama.cpp, MIT; GDN-8S opt-in)
 #include "misc_probe_requant.hip"  // WMMA probes, Q6_K / Q8_0 -> Q4_K requant

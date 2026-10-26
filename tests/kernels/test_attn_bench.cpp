@@ -202,6 +202,8 @@ static void benchPrefill1151(Ctx& c) {
     const bool lp = std::getenv("WHIRL_KT_BENCH_LP") != nullptr;  // launch per 4096 x 32k pairs (instead of 4096 x 128k)
     const auto fpw = c.fnOpt("attn_prefill_wmma"), fq8 = c.fnOpt("attn_prefill_wmma_q8"), fq4 = c.fnOpt("attn_prefill_wmma_q4"),
                fps = c.fnOpt("attn_prefill_wmma_s"), fdr = c.fnOpt("kv_dq_rows_r"), fdr4 = c.fnOpt("kv_dq_rows_r_q4");
+    // feat026-cascade-wide-spill: the gfx1201 no-spill candidates (WHIRL_ATTN_PFNS=1), timed and checked bitwise
+    const auto fns = c.fnOpt("attn_prefill_wmma_ns"), fns8 = c.fnOpt("attn_prefill_wmma_ns_q8"), fns4 = c.fnOpt("attn_prefill_wmma_ns_q4");
     auto parts = [&](long long keys) {
         const long long budget = 4096ll * (lp ? 32768ll : 131072ll);
         int p = static_cast<int>(std::min<long long>(heads, (static_cast<long long>(n) * keys + budget - 1) / budget));
@@ -293,10 +295,15 @@ static void benchPrefill1151(Ctx& c) {
             {"attn_prefill_wmma (f16)", 0, [&] { direct(fpw, af); }, static_cast<bool>(fpw)},
             {"f16s: f16 cache ranges + _s", 0, [&] { dqSeg(hip::Function{}); }, static_cast<bool>(fps)},
             {"attn_prefill_wmma (f16) again", 0, [&] { direct(fpw, af); }, static_cast<bool>(fpw)},
+            {"attn_prefill_wmma_ns (f16)", 0, [&] { direct(fns, af); }, static_cast<bool>(fns)},
+            {"attn_prefill_wmma (f16) third", 0, [&] { direct(fpw, af); }, fpw && fns},
             {"attn_prefill_wmma_q8", 1, [&] { direct(fq8, a8); }, static_cast<bool>(fq8)},
+            {"attn_prefill_wmma_ns_q8", 1, [&] { direct(fns8, a8); }, static_cast<bool>(fns8)},
+            {"attn_prefill_wmma_q8 again", 1, [&] { direct(fq8, a8); }, fq8 && fns8},
             {"dq: kv_dq_rows_r + f16", 1, [&] { dqAll(fdr); }, fdr && fpw},
             {"dqs: ranges + _s", 1, [&] { dqSeg(fdr); }, fdr && fps},
             {"attn_prefill_wmma_q4", 2, [&] { direct(fq4, a8); }, static_cast<bool>(fq4)},
+            {"attn_prefill_wmma_ns_q4", 2, [&] { direct(fns4, a8); }, static_cast<bool>(fns4)},
             {"dq4: kv_dq_rows_r_q4 + f16", 2, [&] { dqAll(fdr4); }, fdr4 && fpw},
             {"dqs4: ranges + _s", 2, [&] { dqSeg(fdr4); }, fdr4 && fps},
         };
@@ -336,7 +343,8 @@ static void benchPrefill1151(Ctx& c) {
 void benchAttn(Ctx& c) {
     c.rep.family = "attnbench";
     if (std::getenv("WHIRL_KT_BENCH_PREFILL")) {
-        if (!c.fnOpt("attn_kg6") && c.fnOpt("attn_prefill_wmma_q8")) {
+        // WHIRL_KT_BENCH_PFDIRECT=1 (feat026-cascade-wide-spill): this direct attn_prefill_wmma timing on gfx1201 too
+        if ((!c.fnOpt("attn_kg6") || std::getenv("WHIRL_KT_BENCH_PFDIRECT")) && c.fnOpt("attn_prefill_wmma_q8")) {
             benchPrefill1151(c);
             return;
         }

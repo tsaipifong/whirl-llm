@@ -7,7 +7,7 @@
 
 add_library(whirl_ops STATIC ${CMAKE_SOURCE_DIR}/src/ops/matmul.cpp ${CMAKE_SOURCE_DIR}/src/ops/attention.cpp
             ${CMAKE_SOURCE_DIR}/src/ops/moe.cpp ${CMAKE_SOURCE_DIR}/src/ops/act.cpp ${CMAKE_SOURCE_DIR}/src/ops/gdn.cpp
-            ${CMAKE_SOURCE_DIR}/src/ops/mtp.cpp)
+            ${CMAKE_SOURCE_DIR}/src/ops/mtp.cpp ${CMAKE_SOURCE_DIR}/src/ops/cascade.cpp)
 target_include_directories(whirl_ops PUBLIC ${CMAKE_SOURCE_DIR}/include)
 
 add_executable(whirl-ops-tests ${CMAKE_SOURCE_DIR}/tests/ops/ops_tests.cpp)

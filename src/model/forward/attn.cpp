@@ -106,13 +106,17 @@ void Model::attnBlock(const AttnW& a, const KvLayer& lkv, u32 n) {
         af.fd_splits = fd_splits;
         af.dbg_flags = nf().dbg_flags;
         af.prec_dec = nf().prec_dec;
-        const ops::AttnDecodePlan pl = ops::chooseAttnDecode(ap, af, k, k.caps, device::profile(arch));
-        if (pl.kind == ops::AttnDecodeKind::split)
-            hip::launch(pl.f, pl.grid, pl.block, 0, stream, qf, kva, part_ml, part_acc, I(cfg.n_head), I(cfg.n_head_kv), I(hd), I(2 * hd), pos_buf,
-                        scale, i32(1), gate);
-        else
-            hip::launch(pl.f, pl.grid, pl.block, 0, stream, qf, kva, part_ml, part_acc, I(cfg.n_head), I(cfg.n_head_kv), I(2 * hd), pos_buf, scale,
-                        gate, pl.groups);
+        ops::AttnDecodePlan pl;
+        // feat026-cascade: rows sharing prefix pages (plan made by cascadeBegin; empty unless WHIRL_CASCADE=1)
+        if (!(cas_plan.any() && cascadeDecode(ap, af, kva, scale, pl))) {
+            pl = ops::chooseAttnDecode(ap, af, k, k.caps, device::profile(arch));
+            if (pl.kind == ops::AttnDecodeKind::split)
+                hip::launch(pl.f, pl.grid, pl.block, 0, stream, qf, kva, part_ml, part_acc, I(cfg.n_head), I(cfg.n_head_kv), I(hd), I(2 * hd),
+                            pos_buf, scale, i32(1), gate);
+            else
+                hip::launch(pl.f, pl.grid, pl.block, 0, stream, qf, kva, part_ml, part_acc, I(cfg.n_head), I(cfg.n_head_kv), I(2 * hd), pos_buf,
+                            scale, gate, pl.groups);
+        }
         if (pl.combine_q8) {
             // the o-projection's int8 input comes out of the combine
             hip::launch(k.attn_combine_q8, pl.combine_grid, pl.combine_block, 0, stream, part_ml, part_acc, qf, attn_out, I(cfg.n_head), I(hd),

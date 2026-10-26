@@ -215,8 +215,10 @@ u32 Model::verifyBatchEnqueue(std::span<const VSeg> segs) {
             m.all_logits = false;
             m.bplan = nullptr;
             m.small_max = max_small_batch;
+            m.cas_plan = ops::CascadePlan{};
         }
     } reset_flags{*this};
+    cascadeBegin(n);  // feat026-cascade (no-op unless WHIRL_CASCADE=1)
     xq_src = 0;
     x16_src = 0;
     run(n);

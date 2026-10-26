@@ -413,6 +413,7 @@ constexpr EnvDoc k_env[] = {
     {"Numerics / speed switches (A/B tests; defaults are the tested paths)", "GEMMH=0", "no f16-output prefill GEMM (bitwise-equal alternative)", TUNED},
     {"Numerics / speed switches (A/B tests; defaults are the tested paths)", "GEMMHQ=1", "f16-output GEMM for the attention projections too", TUNED},
     {"Numerics / speed switches (A/B tests; defaults are the tested paths)", "ATTN_KX=0", "prefill attention without the K-exchange kernel (bitwise-equal)", TUNED},
+    {"Numerics / speed switches (A/B tests; defaults are the tested paths)", "ATTN_PFNS=1", "R9700 prefill attention: the no-spill attn_prefill_wmma candidate (designed bit-identical, not yet verified on the GPU; refused in precise; off by default)", TUNED},
     {"Numerics / speed switches (A/B tests; defaults are the tested paths)", "ATTN_KG=0", "prefill attention without the GQA-grouped kernel (bitwise-equal)", TUNED},
     {"Numerics / speed switches (A/B tests; defaults are the tested paths)", "GDN_SEQ=1", "sequential DeltaNet prefill instead of the chunked scan", C | B | S},
     {"Numerics / speed switches (A/B tests; defaults are the tested paths)", "GDN_V0=1", "per-row DeltaNet decode step kernel (same values)", C | S},
@@ -427,6 +428,10 @@ constexpr EnvDoc k_env[] = {
     {"Numerics / speed switches (A/B tests; defaults are the tested paths)", "GV_GROUP=0", "no grouped same-input GEMV launches", C | B},
     {"Numerics / speed switches (A/B tests; defaults are the tested paths)", "GV_NMAX=N", "largest group of same-input GEMVs", C | B},
     {"Numerics / speed switches (A/B tests; defaults are the tested paths)", "MOE_BN=32|64", "grouped expert GEMM token tile", C | B | S},
+    {"Numerics / speed switches (A/B tests; defaults are the tested paths)", "CASCADE=1", "shared-prefix (cascade) decode attention for slots sharing prompt pages (balance / fast; experimental, off)", S},
+    {"Numerics / speed switches (A/B tests; defaults are the tested paths)", "CASCADE_MIN=N", "shortest shared prefix in keys for CASCADE (default 2048)", S},
+    {"Numerics / speed switches (A/B tests; defaults are the tested paths)", "CASCADE_WIDE=0", "CASCADE on the R9700 without the 128-column prefix kernel (groups of <= 32 columns)", S},
+    {"Numerics / speed switches (A/B tests; defaults are the tested paths)", "CASCADE_WIDE=r0", "CASCADE on the R9700 with the first 128-column prefix kernel build (register spills; same bits)", S},
     {"Numerics / speed switches (A/B tests; defaults are the tested paths)", "DBG=BITS", "1 no gdn_abconv merge, 2 scalar split attention, 4 one query per attention group", C | B},
 
     {"Diagnostics", "TOKENIZE_ONLY=1", "print the prompt token ids and stop", C},

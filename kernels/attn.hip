@@ -1158,8 +1158,13 @@ extern "C" __global__ void __launch_bounds__(256)
 #define FA_Q 128
 #define FA_K 32
 #define FA_D 256
+typedef _Float16 half4 __attribute__((ext_vector_type(4)));
 
-template <int MODE, int Q8>
+// NS (feat026-cascade-wide-spill, tune candidate attn_prefill_wmma_ns[_q8|_q8v|_q4], WHIRL_ATTN_PFNS=1, off by
+// default): V^T staged in two passes of 4 keys (16 staging VGPRs instead of 32, 8-byte stores) and o[dt] pinned
+// after its two WMMAs (dt-outer order kept): 0 spills instead of 35-40. Same values in Vt, same WMMA operands,
+// same per-dt accumulation order -> the same bits as NS = 0 (kernel test family attn checks it).
+template <int MODE, int Q8, int NS = 0>
 // h0: first head of this launch (grid.y = heads h0 ..): a long prefill chunk at a
 // deep position is split into several launches over head ranges, each short
 // enough for the Windows GPU watchdog (TDR, 2 s); results are unchanged.
@@ -1221,23 +1226,47 @@ __device__ __forceinline__ void attn_prefill_impl(const float *q, const KvArgs &
                 const int tv = threadIdx.x - 128;              // 128 threads
                 const int kb = tv / (FA_D / 8);                 // key group (8 keys): 0..FA_K/8-1
                 const int d8 = (tv % (FA_D / 8)) * 8;           // dim group
-                half8 rows[8];
+                if constexpr (NS) {
 #pragma unroll
-                for (int r = 0; r < 8; ++r) {
-                    const int key = k0 + kb * 8 + r;
-                    if (key < n_keys) {
-                        rows[r] = kv_ld8<kv_vf(Q8)>(kv.v, kv.vs, ((size_t)(key + dl) * n_kv + kvh) * FA_D + d8);
-                    } else {
+                    for (int hh = 0; hh < 2; ++hh) {
+                        half8 rows[4];
 #pragma unroll
-                        for (int q = 0; q < 8; ++q) rows[r][q] = (_Float16)0.f;
+                        for (int r = 0; r < 4; ++r) {
+                            const int key = k0 + kb * 8 + hh * 4 + r;
+                            if (key < n_keys) {
+                                rows[r] = kv_ld8<kv_vf(Q8)>(kv.v, kv.vs, ((size_t)(key + dl) * n_kv + kvh) * FA_D + d8);
+                            } else {
+#pragma unroll
+                                for (int q = 0; q < 8; ++q) rows[r][q] = (_Float16)0.f;
+                            }
+                        }
+#pragma unroll
+                        for (int c = 0; c < 8; ++c) {
+                            half4 col;
+#pragma unroll
+                            for (int r = 0; r < 4; ++r) col[r] = rows[r][c];
+                            *(half4 *)&Vt[d8 + c][kb * 8 + hh * 4] = col;
+                        }
                     }
-                }
+                } else {
+                    half8 rows[8];
 #pragma unroll
-                for (int c = 0; c < 8; ++c) {
-                    half8 col;
+                    for (int r = 0; r < 8; ++r) {
+                        const int key = k0 + kb * 8 + r;
+                        if (key < n_keys) {
+                            rows[r] = kv_ld8<kv_vf(Q8)>(kv.v, kv.vs, ((size_t)(key + dl) * n_kv + kvh) * FA_D + d8);
+                        } else {
 #pragma unroll
-                    for (int r = 0; r < 8; ++r) col[r] = rows[r][c];
-                    *(half8 *)&Vt[d8 + c][kb * 8] = col;
+                            for (int q = 0; q < 8; ++q) rows[r][q] = (_Float16)0.f;
+                        }
+                    }
+#pragma unroll
+                    for (int c = 0; c < 8; ++c) {
+                        half8 col;
+#pragma unroll
+                        for (int r = 0; r < 8; ++r) col[r] = rows[r][c];
+                        *(half8 *)&Vt[d8 + c][kb * 8] = col;
+                    }
                 }
             }
         }
@@ -1296,6 +1325,9 @@ __device__ __forceinline__ void attn_prefill_impl(const float *q, const KvArgs &
             for (int kt = 0; kt < FA_K / 16; ++kt) {
                 const half8 a = *(const half8 *)&Vt[dt * 16 + lane % 16][kt * 16 + 8 * (lane / 16)];
                 if (MODE != 3) o[dt] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(a, pt[kt], o[dt]);
+                // NS: pin after the dt's last WMMA (one dt's V^T fragments in flight)
+                if constexpr (NS)
+                    if (kt == FA_K / 16 - 1) asm volatile("" : "+v"(o[dt]));
             }
     }
     if (my_q >= n_tok) return;
@@ -1310,17 +1342,22 @@ __device__ __forceinline__ void attn_prefill_impl(const float *q, const KvArgs &
             orow[d] = o[dt][v] * inv / (1.f + __expf(-gate[d]));
         }
 }
-#define FA_ENTRY(NAME, MODE, Q8)                                                                    \
+#define FA_ENTRY(NAME, MODE, Q8, NS)                                                                \
     extern "C" __global__ void __launch_bounds__(256)                                               \
         NAME(const float *q, KvArgs kv, float *out, int n_head, int n_kv,                           \
              int q_stride, const int *pos, int n_tok, float scale, int h0) {                        \
-        attn_prefill_impl<MODE, Q8>(q, kv, out, n_head, n_kv, q_stride, pos, n_tok, scale, h0);     \
+        attn_prefill_impl<MODE, Q8, NS>(q, kv, out, n_head, n_kv, q_stride, pos, n_tok, scale, h0); \
     }
-FA_ENTRY(attn_prefill_wmma, 0, false)
-FA_ENTRY(attn_prefill_wmma_q8, 0, true)
-FA_ENTRY(attn_prefill_wmma_q8v, 0, 2)
-FA_ENTRY(attn_prefill_wmma_q4, 0, 3)
-FA_ENTRY(fa_probe_noload, 1, false)
-FA_ENTRY(fa_probe_norescale, 2, false)
-FA_ENTRY(fa_probe_nopv, 3, false)
+FA_ENTRY(attn_prefill_wmma, 0, false, 0)
+FA_ENTRY(attn_prefill_wmma_q8, 0, true, 0)
+FA_ENTRY(attn_prefill_wmma_q8v, 0, 2, 0)
+FA_ENTRY(attn_prefill_wmma_q4, 0, 3, 0)
+FA_ENTRY(fa_probe_noload, 1, false, 0)
+FA_ENTRY(fa_probe_norescale, 2, false, 0)
+FA_ENTRY(fa_probe_nopv, 3, false, 0)
+// feat026-cascade-wide-spill tune candidate (WHIRL_ATTN_PFNS=1; precise-safe: bitwise attn_prefill_wmma)
+FA_ENTRY(attn_prefill_wmma_ns, 0, false, 1)
+FA_ENTRY(attn_prefill_wmma_ns_q8, 0, true, 1)
+FA_ENTRY(attn_prefill_wmma_ns_q8v, 0, 2, 1)
+FA_ENTRY(attn_prefill_wmma_ns_q4, 0, 3, 1)
 

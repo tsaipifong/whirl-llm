@@ -17,6 +17,7 @@ file(GLOB WHIRL_KERNEL_GFX1151_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/ker
 set(WHIRL_KERNEL_SOURCES_gfx1201 ${WHIRL_KERNEL_SOURCES} ${WHIRL_KERNEL_FAMILY_SOURCES})
 set(WHIRL_KERNEL_SOURCES_gfx1151 ${WHIRL_KERNEL_SOURCES} ${CMAKE_SOURCE_DIR}/kernels/iq_tables.h ${CMAKE_SOURCE_DIR}/kernels/moe_f.hip
     ${CMAKE_SOURCE_DIR}/kernels/spec_sample.hip ${CMAKE_SOURCE_DIR}/kernels/dflash.hip ${CMAKE_SOURCE_DIR}/kernels/whirl_kernels.hip
+    ${CMAKE_SOURCE_DIR}/kernels/attn_cascade.hip
     ${WHIRL_KERNEL_GFX1151_SOURCES})
 list(APPEND WHIRL_KERNEL_SOURCES ${WHIRL_KERNEL_FAMILY_SOURCES} ${WHIRL_KERNEL_GFX1151_SOURCES})
 
@@ -33,6 +34,8 @@ if(WHIRL_WITH_HIP)
   file(GLOB WHIRL_KERNEL_TEST_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/tests/kernels/*.cpp)
   add_executable(whirl-kernel-test ${WHIRL_KERNEL_TEST_SOURCES})
   target_include_directories(whirl-kernel-test PRIVATE ${CMAKE_SOURCE_DIR}/kernels)  # iq_tables.h (host copy of the grid)
-  target_link_libraries(whirl-kernel-test PRIVATE whirl_kernels_host whirl)
+  # whirl_ops: the cascade family runs the production kernel choice (ops::chooseAttnDecode / planCascade) through
+  # whirl/cascade_launch.h (feat026-cascade-r1)
+  target_link_libraries(whirl-kernel-test PRIVATE whirl_kernels_host whirl whirl_ops)
   target_compile_definitions(whirl-kernel-test PRIVATE WHIRL_KT_VERSION="${PROJECT_VERSION}")  # --bench rows: tool_ver
 endif()

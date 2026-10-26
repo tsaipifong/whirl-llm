@@ -315,6 +315,9 @@ void loadAttn(AttnKernels& k, const Loader& L, KvFormat kv) {
         {&KernelTable::attn_wsplit2, "attn_wsplit2"},
     };
     for (const Named& n : optional) k.*(n.f) = L.opt(n.name);
+    // feat026-cascade (format independent)
+    k.attn_cascade_rows = L.opt("attn_cascade_rows");
+    k.attn_cascade_merge = L.opt("attn_cascade_merge");
     // KV-format variants (same launch shapes as the f16 kernels).
     if (kv == KvFormat::q8v) {
         k.attn_decode = L.req("attn_decode_q8v");
@@ -343,6 +346,11 @@ void loadAttn(AttnKernels& k, const Loader& L, KvFormat kv) {
         k.attn_wsplit2 = L.opt("attn_wsplit2_q8");
     }
     const char* kvs = kv == KvFormat::q8v ? "_q8v" : kv == KvFormat::q4 ? "_q4" : kv == KvFormat::f16 ? "" : "_q8";
+    // feat026-cascade-wide: gfx1201 wide-group cascade prefix kernel (no q4 variant; q8h shares the q8 layout)
+    if (kv != KvFormat::q4) k.attn_cascade_wide = L.opt(std::string("attn_cascade_wide") + kvs);
+    if (kv != KvFormat::q4) k.attn_cascade_wide_r0 = L.opt(std::string("attn_cascade_wide_r0") + kvs);
+    // feat026-cascade-wide-spill: no-spill attn_prefill_wmma candidate (q8h uses the q8 kernel, as attn_prefill_wmma)
+    k.attn_prefill_wmma_ns = L.opt(std::string("attn_prefill_wmma_ns") + kvs);
     k.attn_kx = L.opt(std::string("attn_kx") + kvs);
     k.attn_ws4 = L.opt(std::string("attn_ws4") + kvs);  // gfx1151 only (no q8v variant)
     if (kv == KvFormat::f16 || kv == KvFormat::q8 || kv == KvFormat::q8h)  // gfx1151 only (f16 / int8 K/V)

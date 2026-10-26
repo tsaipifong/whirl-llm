@@ -543,6 +543,10 @@ struct AttnKernels {
     F rope_neox{};
     F attn_decode{}, kv_store{}, attn_split{}, attn_combine{}, attn_prep{}, attn_combine_q8{};
     F attn_wsplit1{}, attn_wsplit2{}, attn_prefill_wmma{}, attn_kx{};
+    // feat026-cascade-wide-spill tune candidate (gfx1201, all KV formats; null on gfx1151): attn_prefill_wmma_ns[_q8|_q8v|_q4],
+    // the attn_prefill_wmma arguments and bits without its 35-40 register spills; WHIRL_ATTN_PFNS=1 puts it in
+    // attn_prefill_wmma (off by default until measured: a pinned P V order was 5% slower at 120k in item D)
+    F attn_prefill_wmma_ns{};
     F attn_dq4{};  // q4 KV decode / verify (gfx1151 / gfx1201; null if not built): attn_wsplit1 arguments, 256 threads
     F attn_ws4{};  // gfx1151 4-wave pipelined attn_wsplit1 (same arguments / bits, one query per group): decode rows (WHIRL_ATTN_WS4=0: old path)
     F attn_ws4g[3]{};  // gfx1151 multi-row verify, CG 1..3 tiles (attn_ws4g{1,2,3}[_q8]; 256 threads, grid.x = n_kv x column groups)
@@ -558,6 +562,17 @@ struct AttnKernels {
     // vision: attn_prep with multi-section RoPE positions (image prompts; KV-format
     // variant like attn_prep) and set_rpos(rpos, Rpos16 tab, n). Optional.
     F attn_prep_m{}, set_rpos{};
+    // feat026-cascade (kernels/attn_cascade.hip, both code objects; optional): attn_cascade_rows(int* dst,
+    // ops::CascadeRows tab, n) and attn_cascade_merge(part_ml, part_acc, cas_ml, cas_acc, rows, n_head, head_dim,
+    // n_split), grid (n_head, rows), 256 threads
+    F attn_cascade_rows{}, attn_cascade_merge{};
+    // feat026-cascade-wide (kernels/attn_cascade_wide.hip, gfx1201 only; f16 / q8 / q8h / q8v KV, null for q4 and on
+    // gfx1151, and with WHIRL_CASCADE_WIDE=0): the cascade prefix pass for groups of up to 128 columns (8 waves x 16),
+    // attn_wsplit1 arguments, grid (n_kv, n_split, groups), 256 threads
+    F attn_cascade_wide{};
+    // feat026-cascade-wide-spill: attn_cascade_wide is the no-spill build (240-242 VGPRs, 0 scratch); the first build
+    // (256 VGPRs, 70-76 spilled) stays as attn_cascade_wide_r0[_q8|_q8v] (same bits) for A/B: WHIRL_CASCADE_WIDE=r0
+    F attn_cascade_wide_r0{};
 };
 
 struct MoeKernels {

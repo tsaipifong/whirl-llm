@@ -810,8 +810,10 @@ int serveMain(int argc, char** argv, const char* program) {
             const KvFormat kv_est = numerics::kvEstimate(numerics::KvEstSite::server_dgpu, nreq, cfg.moe, numerics::kvEstimateRequest(env("KV")));
             // (q4 KV uses 256 attention splits: more split-K partial buffers)
             const std::uint32_t fd_splits_est = qwen35::resolveFdSplits(kv_est);
-            const std::uint64_t b2 = qwen35::bufferBytes(cfg, 2048, est.ffs, est.max_elems, fd_splits_est);
-            const std::uint64_t b4 = qwen35::bufferBytes(cfg, 4096, est.ffs, est.max_elems, fd_splits_est);
+            // (precise: no cas_* budget, as Model::load allocates none there; feat026-cascade re-review R1)
+            const bool cas_est = qwen35::cascadeOnFromEnv(nreq.mode);
+            const std::uint64_t b2 = qwen35::bufferBytes(cfg, 2048, est.ffs, est.max_elems, fd_splits_est, cas_est);
+            const std::uint64_t b4 = qwen35::bufferBytes(cfg, 4096, est.ffs, est.max_elems, fd_splits_est, cas_est);
             fi.buf_per_row = (b4 - b2) / 2048;
             fi.buf_fixed = b2 - fi.buf_per_row * 2048;
             // (WHIRL_CKPT_HOST=1: checkpoints in pinned host memory, no VRAM)
@@ -916,7 +918,8 @@ int serveMain(int argc, char** argv, const char* program) {
             hip::UmaNeed need;
             need.weights = est.weights + (use_dflash && dfile ? qwen35::dflashWeightBytes(*dfile) : 0);
             const std::uint64_t bufs =
-                qwen35::bufferBytes(cfg, lo.max_batch, est.ffs, est.max_elems, qwen35::resolveFdSplits(kv_est));
+                qwen35::bufferBytes(cfg, lo.max_batch, est.ffs, est.max_elems, qwen35::resolveFdSplits(kv_est),
+                                    qwen35::cascadeOnFromEnv(lo.numerics.mode));
             // DeltaNet snapshot sets for MTP verify: one recurrent state per draft (8 dense, 1 MoE: the server log's
             // "N snapshot sets")
             const std::uint64_t snaps = std::max<std::uint32_t>(1, qwen35::mtpDefaults(cfg.moe, hip::Arch::gfx1151).drafts) * st1;

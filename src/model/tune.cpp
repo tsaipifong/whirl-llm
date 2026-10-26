@@ -899,6 +899,15 @@ void loadOrTuneImpl(Model& m, const std::string& model_path, std::string& log) {
         // fragment-tiled fp8 GEMM (bitwise == gemm8), default on; WHIRL_G8T=0 keeps gemm8
         if (f.g8t) log += "  fp8 prefill GEMM: fragment-tiled (gemm8t)\n";
     }
+    // feat026-cascade-wide-spill tune candidate pfns: the no-spill attn_prefill_wmma (same bits; off by default)
+    if (const auto& v = env.attn_pfns; v && *v == "1" && m.k.attn_prefill_wmma_ns != nullptr) {
+        if (nu::attnPfnsApplies(rq.mode)) {
+            m.k.attn_prefill_wmma = m.k.attn_prefill_wmma_ns;
+            log += "  attn_prefill_wmma: no-spill candidate attn_prefill_wmma_ns (WHIRL_ATTN_PFNS=1)\n";
+        } else {
+            log += "  precise: WHIRL_ATTN_PFNS=1 ignored (attn_prefill_wmma_ns is not yet verified bit-identical on the GPU; balance / fast only)\n";
+        }
+    }
     if (f.gdn_wmma && f.gdn_chunked && m.k.gdn_wprep != nullptr) log += "  DeltaNet prefill: f16 WMMA chunks\n";
     if (f.gdn_strix)
         log += fmt("  DeltaNet prefill: f16 WMMA chunks (strix-llama.cpp, runs >= %u rows; WHIRL_GDN_STRIX=0 turns it off)\n", f.gdn_strix_min);

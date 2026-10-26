@@ -2578,6 +2578,73 @@ void testSharedSystemPrompt() {
     CHECK_EQ(srv.model().hidMismatch(), 0u);
 }
 
+// feat026-cascade: sessions sharing one long system prompt decode together; with the mock's cascade on, verify rows
+// read their shared prefix through the group's first sequence's page table (ops::planCascade on the engine's real
+// page tables). Off: the plain path (no cascade rows) and the cold reference texts; on: the same texts, cascade rows
+// taken, every prefix page really shared (cascadeBad 0), no poisoned KV / state. With and without MTP rows.
+void testCascadeSharedPrompt() {
+    std::string sys = "You are a careful assistant. ";
+    for (int i = 0; i < 160; ++i) sys += std::format("Rule {}: answer precisely and cite the step number. ", i);
+    auto body = [&](const std::string& user) {
+        std::string b = R"({"messages":[{"role":"system","content":)";
+        appendJsonStr(b, sys);
+        b += R"(},{"role":"user","content":)";
+        appendJsonStr(b, user);
+        b += R"(}],"max_tokens":64,"temperature":0,"ignore_eos":true,"chat_template_kwargs":{"enable_thinking":false}})";
+        return b;
+    };
+    auto content = [](const std::string& b) {
+        try {
+            const json::Value v = json::parse(b);
+            return v.get("choices")->asArray()[0].get("message")->get("content")->asString();
+        } catch (const std::exception&) {
+            return std::string("<bad>");
+        }
+    };
+    const std::vector<std::string> users = {"What is 2+2?", "Name a prime number.", "Say hello.", "Count to three.", "Describe the sky."};
+    for (const bool mtp : {true, false}) {
+        ServerSetup base = baseSetup(mtp);
+        base.eo.sys_min = 512;
+        base.mc.pool_tokens = 131072;
+        base.mc.cycle_us = 300;  // decode cycles long enough for the sessions to overlap
+        std::vector<std::string> ref;
+        {
+            ServerSetup su_nc = base;
+            su_nc.eo.no_prefix_cache = true;
+            TestServer cold(su_nc);
+            for (const auto& u : users) ref.push_back(content(cold.post("/v1/chat/completions", body(u)).body));
+        }
+        // feat026-cascade-r1 C2: cap 32 (gfx1151 attn_ws4g) and the real gfx1201 caps 5 (27B, GQA 6) / 4 (Ornith, GQA 8)
+        struct V {
+            std::uint32_t ck, cap;
+        };
+        for (const V v : {V{0, 32}, V{256, 32}, V{256, 5}, V{256, 4}}) {
+            const std::uint32_t ck = v.ck;
+            ServerSetup su = base;
+            su.mc.cascade_min_keys = ck;
+            su.mc.cascade_max_rows = v.cap;
+            TestServer srv(su);
+            CHECK_EQ(content(srv.post("/v1/chat/completions", body(users[0])).body), ref[0]);  // makes the system checkpoint
+            std::vector<std::string> got(users.size());
+            std::vector<std::thread> th;
+            for (std::size_t i = 1; i < users.size(); ++i)
+                th.emplace_back([&, i] { got[i] = content(srv.post("/v1/chat/completions", body(users[i])).body); });
+            for (auto& t : th) t.join();
+            for (std::size_t i = 1; i < users.size(); ++i) CHECK_EQ(got[i], ref[i]);
+            if (ck == 0) CHECK_EQ(srv.model().cascadeRows(), 0u);
+            // no MTP: one row per slot, so several slots fit any cap >= 2. With MTP and a gfx1201 cap the rows of two
+            // slots usually exceed it (documented limit, ops test testCascadeCapMtp): printed, not asserted (the
+            // mock's draft count adapts)
+            if (ck > 0 && (v.cap == 32 || !mtp)) CHECK(srv.model().cascadeRows() > 0);
+            CHECK_EQ(srv.model().cascadeBad(), 0u);
+            CHECK_EQ(srv.model().poison(), 0u);
+            CHECK_EQ(srv.model().hidMismatch(), 0u);
+            std::printf("  cascade mtp=%d min=%u cap=%u: cascade rows %llu\n", mtp ? 1 : 0, ck, v.cap,
+                        static_cast<unsigned long long>(srv.model().cascadeRows()));
+        }
+    }
+}
+
 // host tiers: an evicted session is restored from RAM, then (new engine on
 // the same SSD directory) from SSD; outputs equal the cold result
 void testTiers() {
@@ -7719,6 +7786,7 @@ int main(int argc, char** argv) {
         {"decode_floor", testDecodeFloor},
         {"pool", testPoolPressure},
         {"sys_prompt", testSharedSystemPrompt},
+        {"cascade_sys", testCascadeSharedPrompt},
         {"tiers", testTiers},
         {"tier_restore_too_big", testTierRestoreTooBig},
         {"shutdown_evict_sys", testShutdownEvictSys},

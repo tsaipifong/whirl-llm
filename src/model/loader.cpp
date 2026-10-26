@@ -325,7 +325,13 @@ std::optional<KvFormat> kvRequestFromEnv() { return kvRequestOf(whirl::config::E
 
 u32 resolveFdSplits(KvFormat kv) { return fdSplitsOf(kv, whirl::config::EnvSnapshot::capture()); }
 
-u64 bufferBytes(const Config& cfg, u32 Bq, u64 ffs, u64 max_elems, u32 fd_splits) {
+bool cascadeOnOf(const whirl::config::EnvSnapshot& env, numerics::Mode mode) {
+    return numerics::cascadeOn(env.cascade, mode);
+}
+
+bool cascadeOnFromEnv(numerics::Mode mode) { return cascadeOnOf(whirl::config::EnvSnapshot::capture(), mode); }
+
+u64 bufferBytes(const Config& cfg, u32 Bq, u64 ffs, u64 max_elems, u32 fd_splits, bool cascade) {
     // mirrors the buffer allocations of Model::load below (keep in step)
     const u64 f4 = 4;
     const u64 B = Bq;
@@ -349,6 +355,9 @@ u64 bufferBytes(const Config& cfg, u32 Bq, u64 ffs, u64 max_elems, u32 fd_splits
     const u64 n_split = fd_splits;
     n += max_verify_rows * n_split * cfg.n_head * 2 * f4;  // part_ml
     n += max_verify_rows * n_split * cfg.n_head * cfg.head_dim * f4;  // part_acc
+    // feat026-cascade: cas_ml, cas_acc (the part_ml / part_acc shape), cas_rows; never in precise (C3)
+    if (cascade)
+        n += max_verify_rows * n_split * cfg.n_head * (2 + cfg.head_dim) * f4 + 3 * 32 * 4;
     n += B * cfg.n_head * 2 * f4;                         // dq_st_ml (q8 / q4 / KG-3 prefill attention softmax state)
     n += (static_cast<u64>(Model::kDqMaxKeys) / 256 + 1) * 4;  // dq_ptab (identity pages for up to kDqMaxKeys keys)
     n += max_elems * 2;                                   // w16
@@ -477,7 +486,8 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
             hip::UmaNeed n;
             n.weights = est.weights;
             n.fixed = est.weights + est.state +
-                      bufferBytes(cfg, std::clamp<u32>(opt.max_batch, 1, max_batch_limit), est.ffs, est.max_elems, fdSplitsOf(KvFormat::q4, env)) +
+                      bufferBytes(cfg, std::clamp<u32>(opt.max_batch, 1, max_batch_limit), est.ffs, est.max_elems, fdSplitsOf(KvFormat::q4, env),
+                                  cascadeOnOf(env, opt.numerics.mode)) +
                       (256ull << 20);
             n.kv_per_token = est.kvPerToken(kv_est);
             n.min_tokens = std::max<u32>(max_ctx_req, 4096);
@@ -549,7 +559,7 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
     // (not on the UMA iGPU, gfx1151, unless a limit is set: its free VRAM does not bound what it can allocate)
     if (!device::profile(m.arch).uma_no_vram_fit_check || vram::limitBytes() != 0) {
         const LoadEstimate est = estimateLoad(f, cfg, opt.embd_on_host);
-        const u64 buf = bufferBytes(cfg, m.max_batch, est.ffs, est.max_elems, fdSplitsOf(m.kv_fmt, env));
+        const u64 buf = bufferBytes(cfg, m.max_batch, est.ffs, est.max_elems, fdSplitsOf(m.kv_fmt, env), cascadeOnOf(env, m.num_req.mode));
         const u64 need = est.weights + est.state + buf;
         const hip::MemInfo mi = hip::memInfo();
         if (need > mi.free) {
@@ -679,6 +689,30 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
     const u64 n_split = m.fd_splits;
     m.part_ml = m.alloc(max_verify_rows * n_split * cfg.n_head * 2 * f4);
     m.part_acc = m.alloc(max_verify_rows * n_split * cfg.n_head * cfg.head_dim * f4);
+    // feat026-cascade (WHIRL_CASCADE=1, WHIRL_CASCADE_MIN = shortest shared prefix in keys, default 2048)
+    // precise ignores it (cascadeBegin never runs there): no buffers, no smaller KV pool, no label change (r1 C3)
+    m.cascade_cfg.on = cascadeOnOf(env, m.num_req.mode);
+    if (whirl::config::EnvSnapshot::flag(env.cascade, false) && !m.cascade_cfg.on) m.load_note += "precise: WHIRL_CASCADE ignored (balance / fast only)\n";
+    if (m.cascade_cfg.on) {
+        if (const auto& v = env.cascade_min) {
+            try {
+                m.cascade_cfg.min_keys = static_cast<u32>(std::max<unsigned long>(256, std::stoul(*v)));
+            } catch (const std::exception&) {
+            }
+        }
+        // feat026-cascade-wide: WHIRL_CASCADE_WIDE=0 = the r1 prefix kernels only (gfx1201 cap 32 / grp rows);
+        // feat026-cascade-wide-spill: WHIRL_CASCADE_WIDE=r0 = the first wide build (register spills, same bits)
+        if (const auto& v = env.cascade_wide; v && *v == "0") m.k.attn_cascade_wide = nullptr;
+        if (const auto& v = env.cascade_wide; v && *v == "r0" && m.k.attn_cascade_wide_r0 != nullptr) {
+            m.k.attn_cascade_wide = m.k.attn_cascade_wide_r0;
+            m.load_note += "cascade: wide prefix kernel r0 (WHIRL_CASCADE_WIDE=r0)\n";
+        } else if (const auto& v2 = env.cascade_wide; v2 && *v2 == "r0") {
+            m.load_note += "cascade: WHIRL_CASCADE_WIDE=r0 ignored (no attn_cascade_wide_r0 in this code object)\n";
+        }
+        m.cas_ml =m.alloc(max_verify_rows * n_split * cfg.n_head * 2 * f4);
+        m.cas_acc = m.alloc(max_verify_rows * n_split * cfg.n_head * cfg.head_dim * f4);
+        m.cas_rows = m.allocZero(3 * 32 * 4);
+    }
     if (kvQuant(m.kv_fmt) && !kvKf16(m.kv_fmt) && (kvIs4bit(m.kv_fmt) ? m.k.kv_dq_rows_r != nullptr : m.k.kv_dq_rows != nullptr)) {
         // q8 / q8h / q4 prefill attention: f16 copies of a sequence's K / V in ffn_g / ffn_u (Model::prefillAttn)
         m.dq_rows = static_cast<u32>(std::min<u64>(B * ffs * f4 / (static_cast<u64>(cfg.n_head_kv) * cfg.head_dim * 2), 1u << 30)) / 256 * 256;
@@ -746,7 +780,8 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
     }
     // sizing self-check: the pre-load estimate (bufferBytes, the server's auto-shrink) must cover what was just
     // allocated; a shortfall means an allocation was added without updating the estimate
-    if (const u64 used = m.alloc_total - buffers_from, est = bufferBytes(cfg, m.max_batch, ffs, max_elems, m.fd_splits); used > est)
+    if (const u64 used = m.alloc_total - buffers_from, est = bufferBytes(cfg, m.max_batch, ffs, max_elems, m.fd_splits, cascadeOnOf(env, m.num_req.mode));
+        used > est)
         m.load_note += "warning: the VRAM estimate for the prefill buffers (" + std::to_string(est >> 20) + " MiB) is below what was allocated (" +
                        std::to_string(used >> 20) + " MiB); please report\n";
     // KV pool for max_ctx tokens, one sequence with an identity page table (the
@@ -767,7 +802,7 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
             if (cf.shrunk) {
                 max_ctx_req = cf.ctx;
                 m.max_ctx = cf.ctx;
-                m.load_note = "warning: " + cf.msg + "\n";
+                m.load_note += "warning: " + cf.msg + "\n";
             }
         }
         m.allocKvPool(max_ctx_req);
@@ -838,6 +873,7 @@ void Model::allocKvPool(u32 tokens) {
 
 void Model::freeKvPool() {
     if (pool_pages == 0) return;
+    host_ptab.clear();  // feat026-cascade: the pages are gone
     auto drop = [&](DevPtr& p) {
         if (p != 0) freeAlloc(p);
         p = 0;
@@ -867,6 +903,13 @@ void Model::mapPages(u32 s, u32 first, std::span<const i32> phys) {
     if (first + phys.size() > seq_pages) throw ModelError("ContextTooLong");
     const u64 off = (static_cast<u64>(seqs[s].kv_base) + first) * 4;
     hip::upload(ptab + off, phys.data(), phys.size() * 4);
+    if (cascade_cfg.on) {
+        // feat026-cascade: the host copy the shared-prefix planner reads (every page-table write comes here)
+        if (host_ptab.size() < seqs.size()) host_ptab.resize(seqs.size());
+        auto& hp = host_ptab[s];
+        if (hp.size() < first + phys.size()) hp.resize(first + phys.size(), -1);
+        std::copy(phys.begin(), phys.end(), hp.begin() + first);
+    }
 }
 
 KvArgs Model::kvArgs(const KvLayer& kv, DevPtr kvbase, u32 tab0) const {

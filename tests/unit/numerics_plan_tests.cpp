@@ -227,7 +227,7 @@ constexpr std::size_t layoutSize() {
 }
 // a member added to Flags outside WHIRL_NUMERICS_FLAGS (so missing from flagTable and bitsKey) changes the size
 static_assert(sizeof(nu::Flags) == layoutSize(), "Flags has a member outside WHIRL_NUMERICS_FLAGS");
-static_assert(sizeof(nu::EnvValues) == (nu::EnvValues::n_fields + 13) * sizeof(nu::Raw), "EnvValues field not in names()");
+static_assert(sizeof(nu::EnvValues) == (nu::EnvValues::n_fields + 15) * sizeof(nu::Raw), "EnvValues field not in names()");
 static_assert(sizeof(nu::RuntimeValues) == nu::RuntimeValues::n_fields * sizeof(nu::Raw), "RuntimeValues field not in names()");
 
 void testBitsKeyReflection() {
@@ -441,6 +441,13 @@ void testLoadRules() {
                fl({{"FP8_MASK", "300"}}).flags.fp8_mask == 44,
            "FP8_MASK stoul base 0, catch -> 7, uint8 cast");
     NCHECK(fl({{"ATTN_SEG", "1000"}}).flags.attn_seg == 768 && fl({{"ATTN_SEG", "x"}}).flags.attn_seg == 0, "ATTN_SEG /256*256");
+    // feat026-cascade (arch025-port-attn): the loader's rule (envFlag, never precise) and tune.cpp's ATTN_PFNS=1 (never precise)
+    NCHECK(fl({{"CASCADE", "1"}}).flags.cascade_on && fl({{"CASCADE", ""}}).flags.cascade_on && fl({{"CASCADE", "1"}}, "fast").flags.cascade_on &&
+               !fl({{"CASCADE", "0"}}).flags.cascade_on && !fl({}).flags.cascade_on && !fl({{"CASCADE", "1"}}, "precise").flags.cascade_on,
+           "CASCADE");
+    NCHECK(fl({{"ATTN_PFNS", "1"}}).flags.attn_pfns && !fl({{"ATTN_PFNS", "2"}}).flags.attn_pfns && !fl({{"ATTN_PFNS", ""}}).flags.attn_pfns &&
+               !fl({{"ATTN_PFNS", "1"}}, "precise").flags.attn_pfns && !fl({}).flags.attn_pfns,
+           "ATTN_PFNS");
     NCHECK(fl({{"MOE_WIDE", ""}}).flags.moe_wide && !fl({{"MOE_MXW", "0"}}).flags.moe_mxw && !fl({{"MOE_RBF", "0"}}).flags.moe_rbf,
            "loader flags: envFlag (\"\" is on)");
     NCHECK(!fl({{"G8T", "0"}}).flags.g8t && fl({}).flags.g8t, "G8T");

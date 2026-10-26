@@ -2,6 +2,8 @@
 
 #include "mock_backend.h"
 
+#include "whirl/ops/cascade.h"
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -470,6 +472,30 @@ std::uint32_t MockModel::verifyBatchEnqueue(std::span<const server::VSeg> segs) 
         ensureSnapshots(need);
         for (Snap& x : snaps_) x = Snap{};
     }
+    // feat026-cascade: the batch's shared-prefix plan (rows as Model::verifyBatchEnqueue lays them out; base = sequence)
+    ops::CascadePlan cplan;
+    std::vector<std::uint32_t> row_seq;
+    if (mc_.cascade_min_keys > 0) {
+        std::vector<std::int32_t> rp, rb;
+        for (const server::VSeg& sg : segs)
+            for (std::uint32_t r = 0; r <= sg.nd; ++r) {
+                rp.push_back(static_cast<std::int32_t>(sg.pos + r));
+                rb.push_back(static_cast<std::int32_t>(sg.seq));
+                row_seq.push_back(sg.seq);
+            }
+        ops::CascadeConfig cc;
+        cc.on = true;
+        cc.min_keys = mc_.cascade_min_keys;
+        const ops::CascadePages pages = [this](std::int32_t b) -> std::span<const std::int32_t> {
+            return b >= 0 && static_cast<std::size_t>(b) < seqs_.size() ? std::span<const std::int32_t>(seqs_[b].ptab) : std::span<const std::int32_t>{};
+        };
+        if (rp.size() <= ops::kCascadeMaxRows) cplan = ops::planCascade(rp, rb, pages, cc, mc_.cascade_max_rows);
+    }
+    auto leaderOf = [&](std::uint32_t row) -> std::uint32_t {
+        for (const ops::CascadeGroup& g : cplan.groups)
+            if (row >= g.first && row < g.first + g.count) return row_seq[g.first];
+        return ~0u;
+    };
     std::uint32_t snap = 0;
     for (const server::VSeg& sg : segs) {
         Seq& s = seqs_[sg.seq];
@@ -480,7 +506,23 @@ std::uint32_t MockModel::verifyBatchEnqueue(std::span<const server::VSeg> segs) 
                                               : static_cast<std::uint32_t>(s.ctl[qwen35::ctl_drafts + r]));
         if (row + toks.size() > qwen35::max_small_batch) throw std::runtime_error("BatchTooLarge");
         if (sg.pos + toks.size() > mc_.slot_ctx) throw std::runtime_error("ContextTooLong");
-        const State st0{readH(s), kvPrefix(s, sg.pos), sg.pos};
+        std::uint64_t kv0 = 0;
+        const std::int32_t ck = cplan.any() && row < ops::kCascadeMaxRows ? cplan.keys[row] : 0;
+        if (ck > 0) {
+            // prefix [0, P) through the group's first sequence's page table, the rest through this one's
+            const Seq& lead = seqs_[leaderOf(row)];
+            Seq comp;
+            comp.ptab = s.ptab;
+            for (std::size_t i = 0; i < static_cast<std::size_t>(ck) / ops::kCascadePage; ++i) {
+                if (i >= lead.ptab.size() || i >= comp.ptab.size() || lead.ptab[i] != s.ptab[i]) cascade_bad_ += 1;
+                if (i < lead.ptab.size() && i < comp.ptab.size()) comp.ptab[i] = lead.ptab[i];
+            }
+            kv0 = kvPrefix(comp, sg.pos);
+            cascade_rows_ += sg.nd + 1;
+        } else {
+            kv0 = kvPrefix(s, sg.pos);
+        }
+        const State st0{readH(s), kv0, sg.pos};
         State st = st0;
         const std::uint64_t E = cfg_.n_embd;
         s.pend.clear();

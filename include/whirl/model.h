@@ -32,6 +32,7 @@
 #include "whirl/kernels_abi.h"
 #include "whirl/ops/act.h"
 #include "whirl/ops/attention.h"
+#include "whirl/ops/cascade.h"
 #include "whirl/ops/matmul.h"
 #include "whirl/ops/moe.h"
 #include "whirl/ops/mtp.h"
@@ -392,7 +393,13 @@ LoadEstimate estimateLoad(const gguf::File& f, const Config& cfg, bool embd_on_h
 std::uint64_t dflashWeightBytes(const gguf::File& draft);
 // Prefill / decode buffers of Model::load for prefill batch B.
 // fd_splits: attention split-K partials (resolveFdSplits: 64, 256 with q4 KV, WHIRL_FD_SPLITS).
-std::uint64_t bufferBytes(const Config& cfg, std::uint32_t B, std::uint64_t ffs, std::uint64_t max_elems, std::uint32_t fd_splits = 64);
+// cascade: Model::load allocates the cascade buffers (cas_ml / cas_acc / cas_rows; cascadeOnOf below)
+std::uint64_t bufferBytes(const Config& cfg, std::uint32_t B, std::uint64_t ffs, std::uint64_t max_elems, std::uint32_t fd_splits = 64,
+                          bool cascade = false);
+// feat026-cascade: WHIRL_CASCADE=1 and not precise (WHIRL_CASCADE is ignored there: no cascade buffers, feat026-cascade-r1 C3).
+// cascadeOnOf reads the given snapshot (Model::load: the load's), cascadeOnFromEnv a fresh one (the server's estimate).
+bool cascadeOnOf(const whirl::config::EnvSnapshot& env, numerics::Mode mode);
+bool cascadeOnFromEnv(numerics::Mode mode);
 // The attention split count Model::load uses for the KV format (and WHIRL_FD_SPLITS).
 std::uint32_t resolveFdSplits(KvFormat kv);
 // KV bytes per token (Model::kvBytesPerTokenFmt) from the config alone.
@@ -542,6 +549,18 @@ public:
     DevPtr x = 0, h = 0, qf = 0, kv_k = 0, kv_v = 0, attn_out = 0, qkv = 0, conv_out = 0, z = 0, beta = 0, alpha = 0, ba_buf = 0,
            gdn_out = 0, ffn_g = 0, ffn_u = 0, logits = 0, scores = 0, ids = 0, pos_buf = 0, out_tok = 0;
     DevPtr part_ml = 0, part_acc = 0;
+    // feat026-cascade (src/model/cascade.cpp; whirl/ops/cascade.h): shared-prefix decode / verify attention, off by
+    // default (WHIRL_CASCADE=1; never in precise). cas_ml / cas_acc: the prefix pass's partials (part_ml / part_acc
+    // shape, allocated at load only when on); cas_rows: attn_cascade_rows output (3 x 32 ints); host_ptab: each
+    // sequence's page table as mapPages wrote it (-1 = never written), for finding pages several rows share.
+    ops::CascadeConfig cascade_cfg;
+    DevPtr cas_ml = 0, cas_acc = 0, cas_rows = 0;
+    std::vector<std::vector<std::int32_t>> host_ptab;
+    ops::CascadePlan cas_plan;   // the current batched verify's plan (empty outside it)
+    std::uint64_t cas_steps = 0, cas_rows_n = 0;  // verifies that took a cascade / rows they covered (log)
+    // verifies whose rows share a prefix but whose sequences do not fit one prefix group of the real cap (gfx1201:
+    // 32 / grp columns; MTP rows of two sequences already exceed it, feat026-cascade-r1 C2), for the runner's log
+    std::uint64_t cas_nofit = 0;
     DevPtr x16 = 0, xq = 0, xd = 0;
     DevPtr xq_src = 0;
     std::uint32_t xq_n = 0;
@@ -884,6 +903,12 @@ private:
     void elementwise(hip::Function f, DevPtr a, DevPtr b, std::uint32_t n);
     void decodeStepLaunches();
     void attnBlock(const AttnW& a, const KvLayer& lkv, std::uint32_t n);
+    // feat026-cascade hooks: cascadeBegin plans the batched verify's rows (row_pos / row_base, host_ptab) and
+    // uploads their suffix / prefix rows; cascadeDecode runs the suffix + prefix + merge passes of one attention
+    // layer and returns the combine's plan (false: not applicable, nothing launched)
+    void cascadeBegin(std::uint32_t n);
+    bool cascadeDecode(const ops::AttnDecodeProblem& ap, const ops::AttnDecodeFlags& af, const KvArgs& kva, float scale,
+                       ops::AttnDecodePlan& out);
     void prefillAttn(DevPtr q, const KvArgs& kva, DevPtr out, DevPtr pos, std::uint32_t n, std::uint32_t pos0, float scale);
     void ffnBlock(DevPtr post_norm, const Mat& gate_w, const Mat& up, const Mat& down, std::uint32_t n);
     void moeBlock(DevPtr post_norm, const Mat& sg, const Mat& su, const Mat& sd, const MoeW& mo, std::uint32_t n);

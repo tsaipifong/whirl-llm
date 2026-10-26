@@ -355,6 +355,10 @@ void loadFlags(const Request& r, const Target& t, Flags& F) {
     setNe0(F.attn_kg_on, e.attn_kg);
     setNe0(F.attn_dqf_on, e.attn_dqf);
     if (e.attn_seg) F.attn_seg = static_cast<std::uint32_t>(std::strtoul(e.attn_seg->c_str(), nullptr, 10)) / 256 * 256;
+    // feat026-cascade (arch025-port-attn): what the loader (cascadeOnOf -> cascadeOn, cascade_cfg.on) and loadOrTune
+    // (WHIRL_ATTN_PFNS=1 -> attn_prefill_wmma_ns) decide from the same values, recorded here so bitsKey sees them
+    F.cascade_on = cascadeOn(*e.find("CASCADE"), r.mode);
+    if (const Raw* v = e.find("ATTN_PFNS"); v != nullptr && *v && **v == "1") F.attn_pfns = attnPfnsApplies(r.mode);
     setNe0(F.gdn_ba_on, e.gdn_ba);
     setNe0(F.gdn_in2_on, e.gdn_in2);
     F.ffn_h16 = (t.has_mxfp4 || dense_q) && r.has(Item::h16);
@@ -587,12 +591,16 @@ void skipItem(Plan& p, Item it, const std::string& why) {
 }
 
 const char* const k_numerics_switches[] = {"FD_SPLITS", "GEMV_MAX",   "GV_NMAX",  "GV_GROUP", "NO_FUSE", "FLOAT_GEMV",
-                                           "GDN_SEQ",   "NAIVE_ATTN", "DBG",      "ATTN_WIDE", "ATTN_DQ4", "ATTN_WS4", "MOE_BN", nullptr};
+                                           "GDN_SEQ",   "NAIVE_ATTN", "DBG",      "ATTN_WIDE", "ATTN_DQ4", "ATTN_WS4", "MOE_BN", "CASCADE", "ATTN_PFNS", nullptr};
 
 void noteSwitches(Plan& p, const std::function<std::optional<std::string>(const char*)>& get) {
     for (const char* const* n = k_numerics_switches; *n != nullptr; ++n) {
         const auto v = get(*n);
         if (!v || v->empty()) continue;
+        // feat026-cascade-r1 C3: WHIRL_CASCADE has no effect in precise (the loader ignores it): no override label
+        if (p.mode == Mode::precise && std::string_view(*n) == "CASCADE") continue;
+        // feat026-cwspill-r1: tune.cpp refuses WHIRL_ATTN_PFNS in precise (nothing changed): no override label either
+        if (p.mode == Mode::precise && std::string_view(*n) == "ATTN_PFNS") continue;
         p.overrides.push_back(std::format("WHIRL_{}={}: A/B switch (kernel paths differ from the tested defaults)", *n, *v));
         p.lossy_override = true;
     }

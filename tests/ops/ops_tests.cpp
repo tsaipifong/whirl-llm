@@ -9,12 +9,18 @@
 #include "whirl/device_profile.h"
 #include "whirl/ops/act.h"
 #include "whirl/ops/attention.h"
+#include "whirl/ops/cascade.h"
+#include "whirl/ops/cascade_kernels.h"
 #include "whirl/ops/gdn.h"
 #include "whirl/ops/matmul.h"
 #include "whirl/ops/moe.h"
 #include "whirl/ops/mtp.h"
 
+#include <cmath>
 #include <cstdio>
+#include <map>
+#include <random>
+#include <vector>
 #include <cstring>
 #include <deque>
 #include <string>
@@ -1061,6 +1067,340 @@ void testGdnChoice() {
 
 }  // namespace
 
+// ---- feat026-cascade: shared-prefix planner, prefix kernel choice, merge numerics
+void testCascadePlan() {
+    // page tables by base: A, B, C share pages 10..17 (8 pages = 2048 keys), D shares only 3 of them
+    std::map<std::int32_t, std::vector<std::int32_t>> pt;
+    auto mk = [](std::int32_t priv0, std::int32_t shared_n) {
+        std::vector<std::int32_t> v;
+        for (std::int32_t i = 0; i < 16; ++i) v.push_back(i < shared_n ? 10 + i : priv0 + i);
+        return v;
+    };
+    pt[0] = mk(100, 8);
+    pt[64] = mk(200, 8);
+    pt[128] = mk(300, 8);
+    pt[192] = mk(400, 3);
+    const ops::CascadePages pages = [&](std::int32_t b) -> std::span<const std::int32_t> {
+        auto it = pt.find(b);
+        return it == pt.end() ? std::span<const std::int32_t>{} : std::span<const std::int32_t>(it->second);
+    };
+    ops::CascadeConfig cc;
+    cc.on = true;
+    cc.min_keys = 2048;
+    {
+        const std::vector<std::int32_t> pos = {3000, 2500, 2100, 4000}, base = {0, 64, 128, 192};
+        const auto pl = ops::planCascade(pos, base, pages, cc, 32);
+        CHECK(pl.groups.size() == 1 && pl.groups[0].first == 0 && pl.groups[0].count == 3 && pl.groups[0].keys == 2048);
+        CHECK(pl.keys[0] == 2048 && pl.keys[1] == 2048 && pl.keys[2] == 2048 && pl.keys[3] == 0);
+        const auto t = ops::cascadeRows(pl, pos, base);
+        CHECK(t.spos[0] == 3000 - 2048 && t.sbase[0] == 0 + 8 && t.ppos[0] == 2047);
+        CHECK(t.spos[2] == 2100 - 2048 && t.sbase[2] == 128 + 8 && t.ppos[2] == 2047);
+        CHECK(t.spos[3] == 4000 && t.sbase[3] == 192 && t.ppos[3] == -1);
+        ops::CascadeConfig off = cc;
+        off.on = false;
+        CHECK(!ops::planCascade(pos, base, pages, off, 32).any());
+        CHECK(!ops::planCascade(pos, base, pages, cc, 1).any());  // no multi-row kernel
+        ops::CascadeConfig big = cc;
+        big.min_keys = 2049;  // 9 pages: not shared that far
+        CHECK(!ops::planCascade(pos, base, pages, big, 32).any());
+    }
+    {
+        // a row whose own position caps the prefix below min_keys breaks the run (it keeps >= 1 suffix key)
+        pt[320] = mk(500, 8);
+        const std::vector<std::int32_t> pos = {3000, 2500, 2000, 2600}, base = {0, 64, 128, 320};
+        const auto pl = ops::planCascade(pos, base, pages, cc, 32);
+        CHECK(pl.groups.size() == 1 && pl.groups[0].first == 0 && pl.groups[0].count == 2);
+        CHECK(pl.keys[2] == 0 && pl.keys[3] == 0);  // C alone, then the 4th: a run of one sequence
+    }
+    {
+        // a position exactly on a page boundary: P = pos (keys [0, pos) prefix, the row's own key in the suffix)
+        const std::vector<std::int32_t> pos = {2048, 2048}, base = {0, 64};
+        const auto pl = ops::planCascade(pos, base, pages, cc, 32);
+        CHECK(pl.any() && pl.groups[0].keys == 2048);
+        CHECK(ops::cascadeRows(pl, pos, base).spos[0] == 0);
+    }
+    {
+        // MTP verify rows: 3 rows per sequence, the group takes whole sequences and must fit max_rows
+        const std::vector<std::int32_t> pos = {3000, 3001, 3002, 2500, 2501, 2502}, base = {0, 0, 0, 64, 64, 64};
+        const auto pl = ops::planCascade(pos, base, pages, cc, 32);
+        CHECK(pl.groups.size() == 1 && pl.groups[0].count == 6 && pl.keys[5] == 2048);
+        CHECK(!ops::planCascade(pos, base, pages, cc, 5).any());
+    }
+    {
+        // unmapped page 0 (-1): nothing shared
+        pt[0][0] = -1;
+        const std::vector<std::int32_t> pos = {3000, 2500}, base = {0, 64};
+        CHECK(!ops::planCascade(pos, base, pages, cc, 32).any());
+        pt[0][0] = 10;
+    }
+    {
+        // two groups in one batch (two system prompts)
+        pt[448] = mk(600, 0);
+        pt[512] = mk(700, 0);
+        for (std::int32_t i = 0; i < 12; ++i) pt[448][i] = pt[512][i] = 900 + i;
+        const std::vector<std::int32_t> pos = {3000, 2500, 3300, 3400}, base = {0, 64, 448, 512};
+        const auto pl = ops::planCascade(pos, base, pages, cc, 32);
+        CHECK(pl.groups.size() == 2 && pl.groups[0].keys == 2048 && pl.groups[1].first == 2 && pl.groups[1].keys == 12 * 256);
+    }
+}
+
+void testCascadePrefixChoice() {
+    ops::CascadePlan pl;
+    auto grp = [&](std::uint32_t first, std::uint32_t count) {
+        pl = ops::CascadePlan{};
+        pl.groups.push_back(ops::CascadeGroup{first, count, 2048});
+    };
+    ops::CascadePrefixProblem p;
+    p.n_head = 24;
+    p.n_head_kv = 4;
+    p.n_split = 64;
+    {
+        const auto k = attnTable(false, false, false, false);  // gfx1201-like
+        CHECK(ops::cascadeGroupCap(p, k, k.caps) == 5);
+        grp(0, 4);
+        auto c = ops::chooseCascadePrefix(pl, p, k, k.caps);
+        CHECK(c.kind == ops::CascadePrefixKind::wsplit2 && nameOf(c.f) == "attn_wsplit2" && c.grid.x == 4 && c.grid.y == 64 && c.grid.z == 1 &&
+              c.block.x == 128 && c.groups.first[0] == 0 && c.groups.count[0] == 4);
+        grp(2, 2);
+        c = ops::chooseCascadePrefix(pl, p, k, k.caps);
+        CHECK(c.kind == ops::CascadePrefixKind::wsplit1 && nameOf(c.f) == "attn_wsplit1" && c.groups.first[0] == 2);
+        grp(0, 6);  // past the cap
+        CHECK(ops::chooseCascadePrefix(pl, p, k, k.caps).kind == ops::CascadePrefixKind::none);
+        ops::CascadePrefixProblem p8 = p;
+        p8.head_dim = 128;
+        CHECK(ops::cascadeGroupCap(p8, k, k.caps) == 0);
+    }
+    {
+        const auto k = attnTable(true, true, true, false);  // gfx1151-like
+        CHECK(ops::cascadeGroupCap(p, k, k.caps) == 32);
+        grp(0, 4);
+        auto c = ops::chooseCascadePrefix(pl, p, k, k.caps);
+        CHECK(c.kind == ops::CascadePrefixKind::ws4g && nameOf(c.f) == "attn_ws4g2" && c.grid.x == 4 && c.block.x == 256);
+        grp(0, 10);  // CG 3, 8 rows per block: two column groups
+        c = ops::chooseCascadePrefix(pl, p, k, k.caps);
+        CHECK(c.kind == ops::CascadePrefixKind::ws4g && nameOf(c.f) == "attn_ws4g3" && c.grid.x == 8);
+        ops::CascadePrefixProblem q4 = p;
+        q4.kv_q4 = true;
+        CHECK(ops::cascadeGroupCap(q4, k, k.caps) == 0);
+        const auto k1 = attnTable(false, true, false, false);  // attn_group1 without attn_ws4g: no cascade
+        CHECK(ops::cascadeGroupCap(p, k1, k1.caps) == 0);
+    }
+    const auto k0 = attnTable(false, false, false, false);
+    CHECK(ops::chooseCascadePrefix(ops::CascadePlan{}, p, k0, k0.caps).kind == ops::CascadePrefixKind::none);
+}
+
+// feat026-cascade-r1 C2: the planner with the REAL per-arch group cap (cascadeGroupCap of a gfx1201-like / gfx1151-like
+// table) for MTP verify rows. gfx1201: attn_wsplit2 holds 32 columns, so 27B (GQA 6) caps a prefix group at 5 rows and
+// Ornith (GQA 8) at 4. With MTP every sequence brings nd + 1 rows: two sequences of 4 rows (nd 3) never fit, the plan
+// is empty and the cascade does nothing (documented limit: the plain path already reads the prefix once per sequence
+// for all of its MTP rows, so grouping across sequences needs a wider prefix kernel). nd 1 (2 rows) still fits.
+// gfx1151 (attn_ws4g with column-group blocks, cap 32) groups MTP rows of 4 sequences.
+void testCascadeCapMtp() {
+    // S sequences x r rows (consecutive positions), all sharing pages 0..15 (4096 keys), then own pages
+    auto planFor = [](std::uint32_t S, std::uint32_t r, std::uint32_t cap) {
+        std::vector<std::int32_t> rp, rb;
+        std::vector<std::vector<std::int32_t>> tabs(S);
+        for (std::uint32_t s = 0; s < S; ++s) {
+            for (std::int32_t i = 0; i < 20; ++i) tabs[s].push_back(i < 16 ? i : 100 + static_cast<std::int32_t>(s) * 10 + i);
+            for (std::uint32_t j = 0; j < r; ++j) {
+                rp.push_back(4096 + 300 + static_cast<std::int32_t>(7 * s + j));
+                rb.push_back(static_cast<std::int32_t>(s) * 64);
+            }
+        }
+        const ops::CascadePages pages = [&tabs](std::int32_t b) -> std::span<const std::int32_t> {
+            const std::size_t s = static_cast<std::size_t>(b / 64);
+            return s < tabs.size() ? std::span<const std::int32_t>(tabs[s]) : std::span<const std::int32_t>{};
+        };
+        ops::CascadeConfig cc;
+        cc.on = true;
+        return ops::planCascade(rp, rb, pages, cc, cap);
+    };
+    ops::CascadePrefixProblem p27, p35;
+    p27.n_head = 24;
+    p27.n_head_kv = 4;
+    p35.n_head = 16;
+    p35.n_head_kv = 2;
+    const auto k01 = attnTable(false, false, false, false);  // gfx1201-like
+    const auto k51 = attnTable(true, true, true, false);     // gfx1151-like
+    const std::uint32_t c27 = ops::cascadeGroupCap(p27, k01, k01.caps), c35 = ops::cascadeGroupCap(p35, k01, k01.caps);
+    CHECK(c27 == 5 && c35 == 4);
+    CHECK(ops::cascadeGroupCap(p27, k51, k51.caps) == 32 && ops::cascadeGroupCap(p35, k51, k51.caps) == 32);
+    // gfx1201, MTP nd 3 (4 rows / sequence), 4 slots: no group fits -> empty plan; with the cap lifted the rows
+    // share the prefix (what Model::cascadeBegin counts as "nofit" and logs)
+    for (const std::uint32_t cap : {c27, c35}) {
+        CHECK(!planFor(4, 4, cap).any());
+        CHECK(!planFor(2, 4, cap).any());
+        CHECK(planFor(4, 4, ops::kCascadeMaxRows).any());
+    }
+    // nd 2 (3 rows): 27B 3 + 3 > 5, empty; nd 1 (2 rows): 27B two sequences per group (4 rows), Ornith two (4 rows)
+    CHECK(!planFor(4, 3, c27).any());
+    {
+        const ops::CascadePlan pl = planFor(4, 2, c27);
+        CHECK(pl.groups.size() == 2 && pl.groups[0].count == 4 && pl.groups[1].first == 4 && pl.groups[1].count == 4 && pl.groups[0].keys == 4096);
+        const ops::CascadePlan p8 = planFor(4, 2, c35);
+        CHECK(p8.groups.size() == 2 && p8.groups[0].count == 4);
+    }
+    // no MTP (1 row / sequence): 27B 4 slots in one group, Ornith 4 in one group (cap 4)
+    CHECK(planFor(4, 1, c27).groups.size() == 1 && planFor(4, 1, c27).groups[0].count == 4);
+    CHECK(planFor(5, 1, c35).groups.size() == 1 && planFor(5, 1, c35).groups[0].count == 4);  // the 5th row alone: no group
+    // gfx1151: MTP nd 3, 4 slots -> one group of 16 rows; chooseCascadePrefix takes it (attn_ws4g3, column-group blocks)
+    {
+        const ops::CascadePlan pl = planFor(4, 4, 32);
+        CHECK(pl.groups.size() == 1 && pl.groups[0].count == 16);
+        p27.n_split = 64;
+        const auto c = ops::chooseCascadePrefix(pl, p27, k51, k51.caps);
+        CHECK(c.kind == ops::CascadePrefixKind::ws4g && nameOf(c.f) == "attn_ws4g3" && c.grid.x == 4 * 2 && c.grid.y == 64);
+    }
+    // feat026-cascade-wide: gfx1201 with attn_cascade_wide (128 columns): cap 128 / grp (27B 21, Ornith 16), so the
+    // MTP nd 3 rows of 4 slots form ONE prefix group (the shared prefix is read once instead of once per sequence)
+    {
+        auto k01w = k01;
+        k01w.attn_cascade_wide = tag("attn_cascade_wide");
+        const std::uint32_t w27 = ops::cascadeGroupCap(p27, k01w, k01w.caps), w35 = ops::cascadeGroupCap(p35, k01w, k01w.caps);
+        CHECK(w27 == 21 && w35 == 16);
+        p27.n_split = 64;
+        p35.n_split = 32;
+        for (const std::uint32_t nd : {1u, 2u, 3u}) {
+            const ops::CascadePlan pl = planFor(4, nd + 1, w27);
+            CHECK(pl.groups.size() == 1 && pl.groups[0].count == 4 * (nd + 1) && pl.groups[0].keys == 4096);
+            const auto c = ops::chooseCascadePrefix(pl, p27, k01w, k01w.caps);
+            // nd 1: 8 rows x 6 = 48 columns, past attn_wsplit2's 32: the wide kernel as well
+            CHECK(c.kind == ops::CascadePrefixKind::wide && nameOf(c.f) == "attn_cascade_wide" && c.grid.x == 4 && c.grid.y == 64 &&
+                  c.grid.z == 1 && c.block.x == 256 && c.groups.first[0] == 0 && c.groups.count[0] == static_cast<std::int32_t>(4 * (nd + 1)));
+        }
+        {
+            const ops::CascadePlan pl = planFor(4, 4, w35);  // Ornith: 16 rows x 8 = 128 columns, exactly one block
+            CHECK(pl.groups.size() == 1 && pl.groups[0].count == 16);
+            const auto c = ops::chooseCascadePrefix(pl, p35, k01w, k01w.caps);
+            CHECK(c.kind == ops::CascadePrefixKind::wide && c.grid.x == 2 && c.grid.y == 32 && c.block.x == 256);
+        }
+        // 6 slots x 4 rows (24 > 21): five sequences in one group, the sixth alone (no group)
+        {
+            const ops::CascadePlan pl = planFor(6, 4, w27);
+            CHECK(pl.groups.size() == 1 && pl.groups[0].count == 20);
+        }
+        // groups that fit the measured decode kernels keep them: <= 16 columns attn_wsplit1, <= 32 attn_wsplit2
+        {
+            ops::CascadePlan pl;
+            pl.groups.push_back(ops::CascadeGroup{0, 2, 2048});
+            CHECK(ops::chooseCascadePrefix(pl, p27, k01w, k01w.caps).kind == ops::CascadePrefixKind::wsplit1);
+            pl.groups[0].count = 5;
+            CHECK(ops::chooseCascadePrefix(pl, p27, k01w, k01w.caps).kind == ops::CascadePrefixKind::wsplit2);
+            pl.groups[0].count = 6;
+            CHECK(ops::chooseCascadePrefix(pl, p27, k01w, k01w.caps).kind == ops::CascadePrefixKind::wide);
+            pl.groups[0].count = 21;
+            CHECK(ops::chooseCascadePrefix(pl, p27, k01w, k01w.caps).kind == ops::CascadePrefixKind::wide);
+            pl.groups[0].count = 22;  // past the cap
+            CHECK(ops::chooseCascadePrefix(pl, p27, k01w, k01w.caps).kind == ops::CascadePrefixKind::none);
+            // two groups of different widths: one launch, the kernel of the widest
+            pl.groups[0].count = 4;
+            pl.groups.push_back(ops::CascadeGroup{4, 8, 2048});
+            const auto c = ops::chooseCascadePrefix(pl, p27, k01w, k01w.caps);
+            CHECK(c.kind == ops::CascadePrefixKind::wide && c.grid.z == 2 && c.groups.first[1] == 4 && c.groups.count[1] == 8);
+        }
+        // no attn_wsplit2 (a code object without it): 17..32 columns go to the wide kernel, not attn_wsplit1
+        {
+            auto kn2 = k01w;
+            kn2.attn_wsplit2 = nullptr;
+            ops::CascadePlan pl;
+            pl.groups.push_back(ops::CascadeGroup{0, 3, 2048});
+            CHECK(ops::chooseCascadePrefix(pl, p27, kn2, kn2.caps).kind == ops::CascadePrefixKind::wide);
+        }
+        // gfx1151 never loads it; a table with it set still takes attn_ws4g (caps.attn_group1 decides first)
+        {
+            auto k51w = k51;
+            k51w.attn_cascade_wide = tag("attn_cascade_wide");
+            CHECK(ops::cascadeGroupCap(p27, k51w, k51w.caps) == 32);
+            const auto c = ops::chooseCascadePrefix(planFor(4, 4, 32), p27, k51w, k51w.caps);
+            CHECK(c.kind == ops::CascadePrefixKind::ws4g);
+        }
+    }
+}
+
+// cascade (prefix splits merged into suffix split 0, then the combine) vs the plain split-K path vs an exact
+// double softmax: the same attention up to f32 rounding (not bitwise: balance / fast only)
+void testCascadeNumerics() {
+    const std::size_t hd = 32;
+    const std::int32_t nk = 1200;
+    std::mt19937 rng(7);
+    std::normal_distribution<float> nd(0.f, 1.f);
+    std::vector<std::vector<float>> K(nk, std::vector<float>(hd)), V(nk, std::vector<float>(hd));
+    for (auto& r : K)
+        for (float& x : r) x = nd(rng) * 1.5f;
+    for (auto& r : V)
+        for (float& x : r) x = nd(rng);
+    const std::function<std::span<const float>(std::int32_t)> key = [&](std::int32_t p) { return std::span<const float>(K[p]); };
+    const std::function<std::span<const float>(std::int32_t)> val = [&](std::int32_t p) { return std::span<const float>(V[p]); };
+    const float scale = 1.f / std::sqrt(static_cast<float>(hd));
+    auto splits = [&](std::span<const float> q, std::int32_t k0, std::int32_t n_keys, std::int32_t pos, std::uint32_t ns) {
+        // attn_wsplit split rule on keys [k0, k0 + n_keys): per = ceil(n / (ns 64)) 64
+        std::vector<ops::AttnPartial> v;
+        const std::int32_t per = ops::awPer(n_keys, ns);
+        for (std::uint32_t s = 0; s < ns; ++s) {
+            const std::int32_t b0 = static_cast<std::int32_t>(s) * per, b1 = std::min(n_keys, b0 + per);
+            if (b0 >= n_keys) {
+                v.push_back(ops::AttnPartial{});
+                v.back().acc.assign(hd, 12345.f);  // never written by the kernels: must be ignored
+                continue;
+            }
+            v.push_back(ops::cascadePartialRef(q, key, val, k0 + b0, k0 + b1, pos, scale));
+        }
+        return v;
+    };
+    float worst_cas = 0.f, worst_flat = 0.f, worst_diff = 0.f;
+    for (const std::int32_t pos : {512, 700, 1023, 1199}) {
+        for (const std::int32_t P : {256, 512}) {
+            if (P > pos) continue;
+            std::vector<float> q(hd);
+            for (float& x : q) x = nd(rng);
+            // plain
+            const auto flat = splits(q, 0, pos + 1, pos, 8);
+            const auto of = ops::cascadeCombineRef(flat, hd);
+            // cascade: suffix keys [P, pos], prefix keys [0, P) (position P - 1: all visible), merge, combine
+            auto suf = splits(q, P, pos + 1 - P, pos, 8);
+            const auto pre = splits(q, 0, P, P - 1, 8);
+            ops::cascadeMergeRef(suf[0], pre);
+            const auto oc = ops::cascadeCombineRef(suf, hd);
+            // exact
+            std::vector<double> w(pos + 1);
+            double mx = -1e300, sum = 0;
+            for (std::int32_t p = 0; p <= pos; ++p) {
+                double sc = 0;
+                for (std::size_t d = 0; d < hd; ++d) sc += static_cast<double>(q[d]) * K[p][d];
+                w[p] = sc * scale;
+                mx = std::max(mx, w[p]);
+            }
+            for (double& x : w) sum += (x = std::exp(x - mx));
+            for (std::size_t d = 0; d < hd; ++d) {
+                double e = 0;
+                for (std::int32_t p = 0; p <= pos; ++p) e += w[p] * V[p][d];
+                e /= sum;
+                worst_cas = std::max(worst_cas, static_cast<float>(std::fabs(oc[d] - e)));
+                worst_flat = std::max(worst_flat, static_cast<float>(std::fabs(of[d] - e)));
+                worst_diff = std::max(worst_diff, std::fabs(oc[d] - of[d]));
+            }
+        }
+    }
+    std::printf("  cascade numerics: max |cascade - exact| %.3g, |plain - exact| %.3g, |cascade - plain| %.3g\n", worst_cas, worst_flat, worst_diff);
+    CHECK(worst_cas < 1e-5f);
+    CHECK(worst_diff < 1e-5f);
+    CHECK(std::isfinite(worst_cas) && std::isfinite(worst_diff));
+    // an all-empty prefix leaves the suffix partial as it was; an empty suffix split 0 takes the prefix alone
+    ops::AttnPartial a;
+    a.m = 1.f;
+    a.l = 2.f;
+    a.acc = {3.f, 4.f};
+    std::vector<ops::AttnPartial> none(2);
+    for (auto& x : none) x.acc = {99.f, 99.f};
+    ops::cascadeMergeRef(a, none);
+    CHECK(a.m == 1.f && a.l == 2.f && a.acc[0] == 3.f && a.acc[1] == 4.f);
+    ops::AttnPartial e;
+    e.acc = {std::nanf(""), std::nanf("")};  // unwritten acc of an empty split
+    std::vector<ops::AttnPartial> one(1, a);
+    ops::cascadeMergeRef(e, one);
+    CHECK(e.m == 1.f && e.l == 2.f && e.acc[0] == 3.f && e.acc[1] == 4.f);
+}
+
 int main() {
     testBitClasses();
     testPreciseRule();
@@ -1074,6 +1414,10 @@ int main() {
     testOpTables();
     testActChoice();
     testGdnChoice();
+    testCascadePlan();
+    testCascadePrefixChoice();
+    testCascadeCapMtp();
+    testCascadeNumerics();
     std::printf("ops tests: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }

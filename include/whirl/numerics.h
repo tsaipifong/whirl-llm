@@ -87,7 +87,7 @@ struct EnvValues {
     // src/model/loader.cpp:550-553
     Raw moe_fp8, moe_mxw, moe_wide, moe_rbf;
     // numerics::noteSwitches (k_numerics_switches, same order): recorded as overrides only
-    std::array<Raw, 13> switches{};
+    std::array<Raw, 15> switches{};
 
     struct Entry {
         const char* name;  // without the WHIRL_ prefix
@@ -248,7 +248,9 @@ struct ItemState {
     X(B, moe_rbf, true, "moe_rbf")                               \
     X(B, gv_group, true, "gv_group")                             \
     X(U, gv_nmax, 0, "gv_nmax")                                  \
-    X(B, gdn_v0, false, "")
+    X(B, gdn_v0, false, "")                                       \
+    X(B, cascade_on, false, "")                                   \
+    X(B, attn_pfns, false, "")
 
 struct Flags {
 #define WHIRL_NF_B bool
@@ -323,6 +325,11 @@ void skipItem(Plan& p, Item it, const std::string& why);
 // each one set is recorded as an override ("+overrides" label), so the log and /props show that
 // the run's bits are not the mode's tested paths. get(name) reads WHIRL_<name>.
 extern const char* const k_numerics_switches[];
+// feat026-cwspill-r1: WHIRL_ATTN_PFNS=1 (attn_prefill_wmma_ns) is designed bit-identical but unproven on the GPU: refused in precise
+inline bool attnPfnsApplies(Mode m) { return m != Mode::precise; }
+// feat026-cascade: WHIRL_CASCADE set and not "0" (envFlag rule: "" is on), never in precise (r1 C3). The one rule of the
+// loader (qwen35::cascadeOnOf on the load's snapshot: buffers, Model::cascade_cfg) and of Flags::cascade_on (bitsKey).
+inline bool cascadeOn(const Raw& v, Mode m) { return v && *v != "0" && m != Mode::precise; }
 void noteSwitches(Plan& p, const std::function<std::optional<std::string>(const char*)>& get);
 
 // "numerics: balance - enabled: fp8 (...), ...; skipped: gdnwmma (...); always: q8dec (...)"

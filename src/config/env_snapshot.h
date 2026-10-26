@@ -29,9 +29,12 @@ public:
         ffn_h16, gdn_strix, gdn_strix_min, moe_fp8, kv, q8dec, relax, relax_k, relax_alpha, relax_eps, relax_delta, spec_sample,
         gemv_bitwise_float;
     // numerics::noteSwitches (k_numerics_switches, src/common/numerics.cpp), read by loadOrTune through get()
-    Value fd_splits, gemv_max, gv_nmax, gv_group, no_fuse, float_gemv, gdn_seq, naive_attn, dbg, attn_wide, attn_dq4, attn_ws4, moe_bn;
+    Value fd_splits, gemv_max, gv_nmax, gv_group, no_fuse, float_gemv, gdn_seq, naive_attn, dbg, attn_wide, attn_dq4, attn_ws4, moe_bn,
+        cascade, attn_pfns;  // feat026-cascade / -cwspill-r1 (ATTN_PFNS also read by loadOrTune)
     // src/model/loader.cpp (kv, fd_splits above), src/model/config.cpp, src/model/device.cpp, src/model/dflash.cpp
     Value code_object, moe_mxw, moe_wide, moe_rbf, gemv_r, gemv_w, gemv_wh, gpu_share, gpu_wait, device, dflash_prof;
+    // src/model/loader.cpp (feat026-cascade: CASCADE above, CASCADE_MIN, CASCADE_WIDE)
+    Value cascade_min, cascade_wide;
     // src/model/forward/dispatch.cpp (arch025-F7, through forwardEnv below): gemvLaunch, gemmFlags
     Value head_gemvx, prec_gemvh, prec_gs;
 
@@ -39,7 +42,7 @@ public:
         const char* name;  // without the WHIRL_ prefix
         Value EnvSnapshot::* field;
     };
-    static constexpr std::size_t n_names = 54;
+    static constexpr std::size_t n_names = 58;
     // every field, once; the reflection test checks the count against sizeof(EnvSnapshot)
     static const std::array<Entry, n_names>& names();
 

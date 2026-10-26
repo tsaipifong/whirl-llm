@@ -30,6 +30,7 @@ if(WHIRL_WITH_HIP)
     ${CMAKE_SOURCE_DIR}/src/model/forward/attn.cpp
     ${CMAKE_SOURCE_DIR}/src/model/forward/ffn.cpp
     ${CMAKE_SOURCE_DIR}/src/model/forward/gdn.cpp
+    ${CMAKE_SOURCE_DIR}/src/model/cascade.cpp
     ${CMAKE_SOURCE_DIR}/src/model/tune.cpp
     ${CMAKE_SOURCE_DIR}/src/model/exec_dump.cpp
     ${CMAKE_SOURCE_DIR}/src/model/device.cpp

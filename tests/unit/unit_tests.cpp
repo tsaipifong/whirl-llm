@@ -891,6 +891,31 @@ void testNumerics() {
             });
             CHECK(ps.overrides.size() == 2 && nu::modeLabel(ps) == "balance+overrides");
             CHECK(nu::logLine(ps).find("WHIRL_GEMV_MAX=8") != std::string::npos && nu::logLine(ps).find("WHIRL_FD_SPLITS=128") != std::string::npos);
+            // feat026-cascade-r1 C3: WHIRL_CASCADE is ignored in precise (no buffers, no cascade), so no override label;
+            // in balance it is an A/B switch like the others
+            auto cas = [](const char* n) -> std::optional<std::string> {
+                if (std::string(n) == "CASCADE") return std::string("1");
+                return std::nullopt;
+            };
+            nu::Plan pc = nu::plan(nu::parseMode("precise", "t"), swift);
+            nu::noteSwitches(pc, cas);
+            CHECK(pc.overrides.empty() && !pc.lossy_override && nu::modeLabel(pc) == "precise");
+            nu::Plan bc = nu::plan(bal, swift);
+            nu::noteSwitches(bc, cas);
+            CHECK(bc.overrides.size() == 1 && nu::modeLabel(bc) == "balance+overrides");
+            // feat026-cwspill-r1: WHIRL_ATTN_PFNS=1 (attn_prefill_wmma_ns, bitwise equality not yet proven on the GPU) is refused in
+            // precise (tune.cpp keeps attn_prefill_wmma; no override label because nothing changed); in balance / fast it is an A/B switch
+            auto pfns = [](const char* n) -> std::optional<std::string> {
+                if (std::string(n) == "ATTN_PFNS") return std::string("1");
+                return std::nullopt;
+            };
+            nu::Plan pp = nu::plan(nu::parseMode("precise", "t"), swift);
+            nu::noteSwitches(pp, pfns);
+            CHECK(pp.overrides.empty() && !pp.lossy_override && nu::modeLabel(pp) == "precise");
+            CHECK(!nu::attnPfnsApplies(nu::Mode::precise) && nu::attnPfnsApplies(nu::Mode::balance) && nu::attnPfnsApplies(nu::Mode::fast));
+            nu::Plan bp = nu::plan(bal, swift);
+            nu::noteSwitches(bp, pfns);
+            CHECK(bp.overrides.size() == 1 && nu::modeLabel(bp) == "balance+overrides");
         }
         nu::Request fk = nu::parseMode("fast:kvq8", "t");  // custom fast list without relaxacc / kvq4
         CHECK(nu::logLine(nu::plan(fk, swift)).find("fast runs as balance") != std::string::npos);
