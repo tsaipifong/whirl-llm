@@ -13,6 +13,7 @@
 //   gemm  gemmhq_<T>, gemm_c0_<T> (f16 activations, n = 2048) Swift dense weights  flops = 2 n rows cols
 //   attn  attn_wsplit1 + attn_combine (f16 KV, 24 / 4 heads, hd 256, one decode query at L = 2k / 32k / 128k)
 //   moe   moe_gu_mxfp4[w], moe_down_mxfp4[w] (Ornith MXFP4 experts, n = 1, K routed experts per launch)
+//   router moe_router_fused_i* vs moe_logits_f32 + moe_topk (Ornith f32 router, n = 1 / 2 / 4, ABBA in one code object)
 //   gdn   gdn_step_norm (one decode row, 48 v heads x 128 x 128 state)
 // Weights: --mx (Swift-1.5 27B MXFP4-A) for gemv / gemvh / gemm / anchor, --moemx (Ornith-1.5-35B-A3B MXFP4) for moe;
 // without a model the cells use synthetic MXFP4 blocks of the same shapes (cell names start with "synthetic.").
@@ -833,6 +834,156 @@ void benchMoe(Env& e) {
     }
 }
 
+// ---------------------------------------------------------------- router (decode, Ornith f32 router; feat026-router)
+// Cells router.<label>.n<N>: A = moe_logits_f32 + moe_topk (the production pair, two launches), B = moe_router_fused_i*
+// (one launch) from the SAME code object, timed in ABBA pairs (Bench::runAB). Both outputs are checked first: B bitwise
+// == A (logits, ids, weights, shared gate) and A's ids == the CPU stable top-k of its logits. bytes = R * E * 4 (router
+// weights; x / logits are cache-resident). The router matrices rotate over layers and copies past the last-level cache.
+void benchRouter(Env& e) {
+    Ctx& c = e.c;
+    c.rep.family = "router";
+    int R = 256, E = 2048, K = 8;
+    std::string label = "synthetic";
+    std::vector<std::vector<float>> Ws;
+    std::vector<float> shw;
+    const whirl::gguf::File* f = c.open(c.models.moemx);
+    const int nl = 64;  // every router of the model (Ornith: 40 x 2 MiB), like one decode cycle
+    if (f && f->tensor("blk.0.ffn_gate_inp.weight") && f->tensor("blk.0.ffn_gate_inp.weight")->type == whirl::gguf::GgmlType::f32) {
+        label = "ornith";
+        for (int l = 0; l < nl; ++l) {
+            const std::string n = "blk." + std::to_string(l) + ".ffn_gate_inp.weight";
+            if (!f->tensor(n)) break;
+            HostMat m = loadMat(*f, n);
+            E = m.ncols;
+            R = m.nrows;
+            std::vector<float> w(m.data.size() / 4);
+            std::memcpy(w.data(), m.data.data(), m.data.size());
+            Ws.push_back(std::move(w));
+        }
+        HostMat s = loadMat(*f, "blk.0.ffn_gate_inp_shexp.weight");
+        shw.resize(s.data.size() / 4);
+        std::memcpy(shw.data(), s.data.data(), s.data.size());
+        K = static_cast<int>(f->getUintOr("qwen35moe.expert_used_count", 8));
+    } else {
+        for (int l = 0; l < 8; ++l) Ws.push_back(c.randn(static_cast<std::size_t>(R) * E, 0.05f));
+        shw = c.randn(static_cast<std::size_t>(E), 0.05f);
+    }
+    const int it = (E + 127) / 128;
+    const hip::Function ff = it == 16 ? c.k.moe_router_fused_i16 : it == 24 ? c.k.moe_router_fused_i24 : nullptr;
+    const std::string fname = it == 16 ? "moe_router_fused_i16" : "moe_router_fused_i24";
+    if (!ff || R > 256 || K > 32 || E % 4 != 0) {
+        c.rep.skip("router", "bench " + fname, "kernel not in this code object (or shape outside its limits)");
+        return;
+    }
+    // device copies: layers x rotation copies
+    std::uint64_t wbytes = 0;
+    std::vector<std::vector<std::uint8_t>> raw;
+    for (const auto& w : Ws) {
+        std::vector<std::uint8_t> b(w.size() * 4);
+        std::memcpy(b.data(), w.data(), b.size());
+        raw.push_back(std::move(b));
+        wbytes += raw.back().size();
+    }
+    // the whole layer set is one working set: copies of it past the last-level cache (not copies per layer)
+    const int nlay = static_cast<int>(raw.size()), ncp = rotationCopies(wbytes, e.target, e.o.rot_cap);
+    std::vector<std::vector<Buf>> dW(static_cast<std::size_t>(nlay));
+    for (int l = 0; l < nlay; ++l)
+        for (int i = 0; i < ncp; ++i) dW[static_cast<std::size_t>(l)].emplace_back(raw[static_cast<std::size_t>(l)]);
+    auto wat = [&dW, nlay, ncp](std::uint64_t r) {
+        return dW[static_cast<std::size_t>(r % static_cast<std::uint64_t>(nlay))][static_cast<std::size_t>((r / static_cast<std::uint64_t>(nlay)) % static_cast<std::uint64_t>(ncp))].p();
+    };
+    auto dshw = std::make_shared<Buf>(shw);
+    auto cnt = std::make_shared<Buf>(static_cast<std::size_t>(16));
+    cnt->zero();
+    const std::string settings = e.settings(wbytes * static_cast<std::uint64_t>(ncp), nlay * ncp) + ";router=f32;shared_gate=1";
+    for (const int n : {1, 2, 4}) {
+        const std::vector<float> h = c.randn(static_cast<std::size_t>(n) * E);
+        auto dh = std::make_shared<Buf>(h);
+        const std::size_t nk = static_cast<std::size_t>(n) * K;
+        auto la = std::make_shared<Buf>(static_cast<std::size_t>(n) * R * 4), lb = std::make_shared<Buf>(static_cast<std::size_t>(n) * R * 4);
+        auto ia = std::make_shared<Buf>(nk * 4), wa = std::make_shared<Buf>(nk * 4), sa = std::make_shared<Buf>(static_cast<std::size_t>(n) * 4);
+        auto ib = std::make_shared<Buf>(nk * 4), wb2 = std::make_shared<Buf>(nk * 4), sb = std::make_shared<Buf>(static_cast<std::size_t>(n) * 4);
+        auto callA = [&c, wat, dh, dshw, la, ia, wa, sa, R, E, K, n](std::uint64_t r) {
+            hip::launch(c.k.moe_logits_f32, {cdiv(R, 8), 1, 1}, {256, 1, 1}, 0, c.s, wat(r), dh->p(), la->p(), R, E, n, DevPtr{0});
+            hip::launch(c.k.moe_topk, {static_cast<unsigned>(n), 1, 1}, {256, 1, 1}, 0, c.s, la->p(), R, dh->p(), dshw->p(), ia->p(), wa->p(), sa->p(), R, K, E);
+        };
+        auto callB = [&c, ff, wat, dh, dshw, lb, ib, wb2, sb, cnt, R, E, K, n](std::uint64_t r) {
+            hip::launch(ff, {cdiv(R, 8), 1, 1}, {256, 1, 1}, 0, c.s, wat(r), dh->p(), lb->p(), R, E, n, DevPtr{0}, dshw->p(), ib->p(), wb2->p(), sb->p(), K, E,
+                        cnt->p());
+        };
+        // output check (layer 0, copy 0)
+        callA(0);
+        callB(0);
+        c.sync();
+        const std::string cell = label + ".n" + std::to_string(n) + ".k" + std::to_string(K);
+        const auto gla = la->down<float>(static_cast<std::size_t>(n) * R), glb = lb->down<float>(gla.size());
+        const auto gia = ia->down<int>(nk), gib = ib->down<int>(nk);
+        const auto gwa = wa->down<float>(nk), gwb = wb2->down<float>(nk);
+        const auto gsa = sa->down<float>(static_cast<std::size_t>(n)), gsb = sb->down<float>(static_cast<std::size_t>(n));
+        const bool bit = std::memcmp(gla.data(), glb.data(), gla.size() * 4) == 0 && gia == gib && std::memcmp(gwa.data(), gwb.data(), nk * 4) == 0 &&
+                         std::memcmp(gsa.data(), gsb.data(), static_cast<std::size_t>(n) * 4) == 0;
+        Result rb;
+        rb.kind = Kind::invariant;
+        rb.pass = bit;
+        rb.n = gla.size() + 2 * nk + static_cast<std::size_t>(n);
+        rb.name = "bench router " + cell + ": fused bitwise == moe_logits_f32 + moe_topk";
+        c.rep.add(rb);
+        std::vector<int> rid;
+        for (int t = 0; t < n; ++t) {
+            std::vector<int> idx(static_cast<std::size_t>(R));
+            std::iota(idx.begin(), idx.end(), 0);
+            const float* l = gla.data() + static_cast<std::size_t>(t) * R;
+            std::stable_sort(idx.begin(), idx.end(), [&](int a, int b) { return l[a] > l[b]; });
+            rid.insert(rid.end(), idx.begin(), idx.begin() + K);
+        }
+        Result rc = cmpExact("ids == CPU stable top-k", gia, rid);
+        rc.name = "bench router " + cell + ": " + rc.name;
+        const bool ok = rc.pass && bit;
+        c.rep.add(rc);
+        if (!ok) {
+            std::printf("   router %s: output check FAILED, no timing row\n", cell.c_str());
+            continue;
+        }
+        CellInfo ci = e.info("router", fname, cell, "R" + std::to_string(R) + "_E" + std::to_string(E) + "_K" + std::to_string(K) + "_n" + std::to_string(n));
+        ci.settings = settings + ";ab=abba;A=moe_logits_f32+moe_topk;B=" + fname;
+        ci.bytes = static_cast<double>(R) * E * 4.0;
+        e.bench.beforeCell();
+        ci.started = wb::iso_now();
+        const AbStats ab = e.bench.runAB(hipBlock(c, callA), hipBlock(c, callB));
+        CellInfo ca = ci, cb = ci;
+        ca.kernel = "moe_logits_f32+moe_topk";
+        ca.variant = "A";
+        cb.variant = "B";
+        printCell(ca, ab.a, "A ");
+        printCell(cb, ab.b, "B ");
+        std::printf("         B/A %.4f (p10 %.4f p90 %.4f, %d pairs ABBA, order AB %.4f BA %.4f, %s) B bitwise == A\n", ab.ratio.st.median, ab.ratio.st.p10,
+                    ab.ratio.st.p90, ab.pairs, ab.order_ab, ab.order_ba, ab.ratio.stop_reason.c_str());
+        if (!ab.ratio.ok()) {
+            Result r;
+            r.name = "bench router timing " + cell + ": " + ab.ratio.error;
+            r.pass = false;
+            c.rep.add(r);
+            continue;
+        }
+        CellStats sa2 = ab.a, sb2 = ab.b;
+        for (CellStats* s : {&sa2, &sb2}) {
+            s->anchor_ref_us = ab.ratio.anchor_ref_us;
+            s->anchor_min_us = ab.ratio.anchor_min_us;
+            s->anchor_max_us = ab.ratio.anchor_max_us;
+            s->anchor_name = ab.ratio.anchor_name;
+            s->cooldowns = ab.ratio.cooldowns;
+            s->stop_reason = ab.ratio.stop_reason;
+        }
+        e.write(cellRow(ca, sa2, e.o.tool_ver));
+        wb::Row rrb = cellRow(cb, sb2, e.o.tool_ver);
+        rrb.extra.push_back({"b_bitwise", "true"});
+        e.write(rrb);
+        wb::Row rr = abRow(ci, ab, e.o.tool_ver, e.o.code_hash);
+        rr.extra.push_back({"b_bitwise", "true"});
+        e.write(rr);
+    }
+}
+
 // ---------------------------------------------------------------- gdn (decode step + gated norm)
 void benchGdn(Env& e) {
     Ctx& c = e.c;
@@ -934,7 +1085,7 @@ void benchGdn(Env& e) {
 
 }  // namespace
 
-const char* const kBenchFamilies[] = {"gemv", "gemvh", "gemm", "attn", "moe", "gdn"};
+const char* const kBenchFamilies[] = {"gemv", "gemvh", "gemm", "attn", "moe", "router", "gdn"};
 
 bool benchFamilyKnown(const std::string& f) {
     for (const char* n : kBenchFamilies)
@@ -984,7 +1135,7 @@ void runBench(Ctx& c, const BenchOpts& o) {
         const char* name;
         void (*fn)(Env&);
     };
-    const F fams[] = {{"gemv", benchGemv}, {"gemvh", benchGemvh}, {"gemm", benchGemm}, {"attn", benchAttnDecode}, {"moe", benchMoe}, {"gdn", benchGdn}};
+    const F fams[] = {{"gemv", benchGemv}, {"gemvh", benchGemvh}, {"gemm", benchGemm}, {"attn", benchAttnDecode}, {"moe", benchMoe}, {"router", benchRouter}, {"gdn", benchGdn}};
     for (const F& f : fams) {
         if (!o.families.count(f.name)) continue;
         std::printf("== bench %s\n", f.name);

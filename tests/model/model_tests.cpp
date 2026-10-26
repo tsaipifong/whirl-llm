@@ -2244,7 +2244,7 @@ void testEnvSnapshot() {
     // GPU load / at static initialisation) named here with the test that covers its value: flag() above for the
     // envFlag sites (loader.cpp MOE_*), capture / fromValues above for the raw value of the others
     const std::vector<std::string> covered = envtab::namesCovered();
-    const char* const load_only[] = {"GEMV_BITWISE_FLOAT", "CODE_OBJECT", "MOE_MXW", "MOE_WIDE", "MOE_RBF", "GPU_SHARE", "GPU_WAIT", "DEVICE", "DFLASH_PROF",
+    const char* const load_only[] = {"GEMV_BITWISE_FLOAT", "CODE_OBJECT", "MOE_MXW", "MOE_WIDE", "MOE_RBF", "MOE_RFUSE", "GPU_SHARE", "GPU_WAIT", "DEVICE", "DFLASH_PROF",
                                      "HEAD_GEMVX", "PREC_GEMVH", "PREC_GS"};  // the last three: Model::load -> forwardEnv (testForwardEnv)
     for (const auto& e : names) {
         const bool in_table = std::find(covered.begin(), covered.end(), e.name) != covered.end();

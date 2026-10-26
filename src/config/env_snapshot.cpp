@@ -81,6 +81,7 @@ constexpr std::array<S::Entry, S::n_names> k_names{{
     {"MOE_MXW", &S::moe_mxw},
     {"MOE_WIDE", &S::moe_wide},
     {"MOE_RBF", &S::moe_rbf},
+    {"MOE_RFUSE", &S::moe_rfuse},
     {"GEMV_R", &S::gemv_r},
     {"GEMV_W", &S::gemv_w},
     {"GEMV_WH", &S::gemv_wh},

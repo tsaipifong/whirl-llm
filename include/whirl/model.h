@@ -708,6 +708,9 @@ public:
     // prefill experts on the MXFP4 x fp8 grouped GEMM (WHIRL_MOE_FP8=0 -> f16 gemm_moe);
     // decode experts on the whole-block kernels (WHIRL_MOE_MXW=0 -> generic moe_gu / moe_down).
     DevPtr moe_sx = 0;
+    // feat026-router: the fused router's zeroed block counter (moe_router_fused_i*, reset by the kernel); the switch is
+    // the plan's nf().moe_rfuse (WHIRL_MOE_RFUSE=1, default off until the GPU A/B)
+    DevPtr moe_rcnt = 0;
 
     // ---- vision (image prompts; see whirl/vismap.h). Text-only sequences never take
     // these paths (bitwise unchanged).

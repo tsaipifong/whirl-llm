@@ -10,7 +10,7 @@
 // families: quant gemv gemm attn attndq4 gdn moe moemx moef misc gemvh dflash ws4 ws4g vision
 //
 // Timing (measure-tools P2, tests/kernels/kt_bench.h + bench_kernels.cpp): --bench FAMILY[,FAMILY] runs the timing cells
-// of gemv gemvh gemm attn moe gdn instead of the test families (each cell checks its output vs the CPU first);
+// of gemv gemvh gemm attn moe router gdn instead of the test families (each cell checks its output vs the CPU first);
 // --jsonl FILE appends one row per cell (db_record.py jsonl); --ab HSACO times the same kernels of a candidate code
 // object against the built-in ones (ABBA, paired ratio). Tuning: --burst-idle S (idle before a cell that would end
 // a burst group past 8 s; runner: 60), --bench-max-s S (per cell, default 3), --rot-mb N (rotation target; default
@@ -42,7 +42,7 @@ std::string envOr(const char* name) {
 
 int usage() {
     std::printf(
-        "usage: whirl-kernel-test [--device SPEC] [--only quant,gemv,gemm,attn,attndq4,gdn,moe,moemx,moef,misc,dflash,gemvh,ws4,ws4g,vision] [--quick] [-v]\n"
+        "usage: whirl-kernel-test [--device SPEC] [--only quant,gemv,gemm,attn,attndq4,gdn,moe,moemx,moef,router,misc,dflash,gemvh,ws4,ws4g,vision] [--quick] [-v]\n"
         "                         [--q4 GGUF] [--mx GGUF] [--moe GGUF] [--moemx GGUF]\n"
         "  --require-all  a kernel missing from the code object fails unless the arch lacks it by design\n"
         "  --bench gemv,gemvh,gemm,attn,moe,gdn [--jsonl FILE] [--ab HSACO] [--burst-idle S] [--bench-max-s S]\n"
@@ -88,7 +88,7 @@ int main(int argc, char** argv) {
                 std::string f;
                 while (std::getline(ss, f, ',')) {
                     if (!kt::benchFamilyKnown(f)) {
-                        std::printf("whirl-kernel-test: --bench: no timing family named \"%s\" (gemv gemvh gemm attn moe gdn)\n", f.c_str());
+                        std::printf("whirl-kernel-test: --bench: no timing family named \"%s\" (gemv gemvh gemm attn moe router gdn)\n", f.c_str());
                         return usage();
                     }
                     bo.families.insert(f);
@@ -227,7 +227,7 @@ int main(int argc, char** argv) {
     };
     const Fam fams[] = {{"quant", kt::testQuant}, {"gemv", kt::testGemv}, {"gemm", kt::testGemm},
                         {"attn", kt::testAttn},   {"attndq4", kt::testAttnDq4},   {"gdn", kt::testGdn},   {"moe", kt::testMoe},
-                        {"moemx", kt::testMoeMx}, {"moef", kt::testMoeF}, {"misc", kt::testMisc},   {"attnbench", kt::benchAttn},
+                        {"moemx", kt::testMoeMx}, {"moef", kt::testMoeF}, {"router", kt::testMoeRouter}, {"misc", kt::testMisc},   {"attnbench", kt::benchAttn},
                         {"gemvh", kt::testGemvh}, {"gemvhbench", kt::benchGemvh}, {"dflash", kt::testDflash},
                         {"ws4", kt::testAttnWs4}, {"ws4bench", kt::benchAttnWs4},
                         {"ws4g", kt::testAttnWs4g}, {"ws4gbench", kt::benchAttnWs4g},

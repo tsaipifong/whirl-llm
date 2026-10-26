@@ -227,7 +227,7 @@ constexpr std::size_t layoutSize() {
 }
 // a member added to Flags outside WHIRL_NUMERICS_FLAGS (so missing from flagTable and bitsKey) changes the size
 static_assert(sizeof(nu::Flags) == layoutSize(), "Flags has a member outside WHIRL_NUMERICS_FLAGS");
-static_assert(sizeof(nu::EnvValues) == (nu::EnvValues::n_fields + 13) * sizeof(nu::Raw), "EnvValues field not in names()");
+static_assert(sizeof(nu::EnvValues) == (nu::EnvValues::n_fields + 14) * sizeof(nu::Raw), "EnvValues field not in names()");
 static_assert(sizeof(nu::RuntimeValues) == nu::RuntimeValues::n_fields * sizeof(nu::Raw), "RuntimeValues field not in names()");
 
 void testBitsKeyReflection() {
@@ -443,6 +443,10 @@ void testLoadRules() {
     NCHECK(fl({{"ATTN_SEG", "1000"}}).flags.attn_seg == 768 && fl({{"ATTN_SEG", "x"}}).flags.attn_seg == 0, "ATTN_SEG /256*256");
     NCHECK(fl({{"MOE_WIDE", ""}}).flags.moe_wide && !fl({{"MOE_MXW", "0"}}).flags.moe_mxw && !fl({{"MOE_RBF", "0"}}).flags.moe_rbf,
            "loader flags: envFlag (\"\" is on)");
+    // feat026-router: WHIRL_MOE_RFUSE (was loader.cpp envFlag("MOE_RFUSE", false)); also an A/B switch note
+    NCHECK(!fl({}).flags.moe_rfuse && fl({{"MOE_RFUSE", "1"}}).flags.moe_rfuse && fl({{"MOE_RFUSE", ""}}).flags.moe_rfuse &&
+               !fl({{"MOE_RFUSE", "0"}}).flags.moe_rfuse && fl({{"MOE_RFUSE", "1"}}, "precise").lossy_override,
+           "MOE_RFUSE: envFlag rule, default off, noted as an A/B switch");
     NCHECK(!fl({{"G8T", "0"}}).flags.g8t && fl({}).flags.g8t, "G8T");
     NCHECK(!fl({}, "precise").flags.g8t, "g8t needs fp8_prefill");
     // Q8DEC: "" keeps the mode's choice; "1" in precise = int8 decode (lossy override)

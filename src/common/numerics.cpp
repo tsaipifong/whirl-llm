@@ -220,6 +220,7 @@ const std::array<EnvValues::Entry, EnvValues::n_fields>& EnvValues::names() {
         {"MOE_MXW", &S::moe_mxw},
         {"MOE_WIDE", &S::moe_wide},
         {"MOE_RBF", &S::moe_rbf},
+        {"MOE_RFUSE", &S::moe_rfuse},
     }};
     return t;
 }
@@ -332,6 +333,8 @@ void loadFlags(const Request& r, const Target& t, Flags& F) {
     F.moe_mxw = flagOr(e.moe_mxw, true);
     F.moe_wide = flagOr(e.moe_wide, false);
     F.moe_rbf = flagOr(e.moe_rbf, true);
+    // feat026-router (was loader.cpp envFlag("MOE_RFUSE", false)): fused router, bit-identical, default off
+    F.moe_rfuse = flagOr(e.moe_rfuse, false);
     // tune.cpp:852-861
     if (e.fp8) F.fp8_prefill = *e.fp8 != "0";
     if (e.fp8 && *e.fp8 == "0") F.moe_fp8 = false;
@@ -587,7 +590,8 @@ void skipItem(Plan& p, Item it, const std::string& why) {
 }
 
 const char* const k_numerics_switches[] = {"FD_SPLITS", "GEMV_MAX",   "GV_NMAX",  "GV_GROUP", "NO_FUSE", "FLOAT_GEMV",
-                                           "GDN_SEQ",   "NAIVE_ATTN", "DBG",      "ATTN_WIDE", "ATTN_DQ4", "ATTN_WS4", "MOE_BN", nullptr};
+                                           "GDN_SEQ",   "NAIVE_ATTN", "DBG",      "ATTN_WIDE", "ATTN_DQ4", "ATTN_WS4", "MOE_BN",
+                                           "MOE_RFUSE", nullptr};
 
 void noteSwitches(Plan& p, const std::function<std::optional<std::string>(const char*)>& get) {
     for (const char* const* n = k_numerics_switches; *n != nullptr; ++n) {
