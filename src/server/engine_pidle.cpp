@@ -11,6 +11,15 @@
 // does throws out of runLoop (a failure ends the job, at worst dropping this slot's own cache), and it is not started
 // for a reply to a thinking-block prompt (the template drops the reasoning from the history: the checkpoint would
 // never be used, while prompt-end / think-open / gen-end of the slot would be lost).
+//
+// feat026-pidle-r2 (research/pidle/2026-10-26-think-template-reuse.md): the reply is a token prefix of the next prompt
+// with thinking off (both templates), and with thinking on only when the client sends the reasoning back
+// (reasoning_content); a client that drops it makes the next prompt diverge one token before the end of this prompt.
+// So a thinking reply is re-prefilled when this prompt's history shows reasoning sent back (an earlier assistant turn
+// with a non-empty think block: ChatTokens::reasoningInHistory), and skipped otherwise (first turn, empty blocks
+// only). A variant-a request with preserve_thinking=false is always skipped (the template strips the blocks of
+// earlier turns, so the next prompt diverges before the reply). A wrong guess costs only idle GPU time: the next
+// turn resumes from a checkpoint only where its tokens match (output bitwise either way).
 // SPDX-License-Identifier: Apache-2.0
 //
 // Written for WHIRL. Prior art: progress/feat026-pidle.PRIOR_ART.md, progress/feat026-pidle-r1.PRIOR_ART.md.
@@ -23,6 +32,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <stdexcept>
 
 namespace whirl::server {
 
@@ -33,6 +43,22 @@ namespace {
 struct NoEvict final : PagePool::Evictor {
     bool evictOne() override { return false; }
 };
+
+// feat026-pidle-r2 (review r1-batch-b): runs f when the scope is left by a throw / an early exit while armed
+template <class F>
+struct OnAbort {
+    F f;
+    bool armed = true;
+    ~OnAbort() {
+        if (!armed) return;
+        try {
+            f();
+        } catch (...) {
+        }
+    }
+};
+template <class F>
+OnAbort(F) -> OnAbort<F>;
 
 }  // namespace
 
@@ -46,14 +72,31 @@ void Engine::pidleMark(Slot& sl) {
     sl.pidle_want = pidleOn() && !sl.ckpts.empty() && !sl.cache_tokens.empty();
     sl.pidle_t = Clock::now();
     if (!sl.pidle_want) return;
-    // a thinking-block prompt ("<think>\n" at its end): Qwen3.x chat templates render earlier assistant turns without
-    // their reasoning, so the next prompt does not continue these tokens past the prompt and a checkpoint in the
-    // reply is never used (a predicted re-rendering would be needed: follow-up)
-    const std::size_t np = std::min<std::size_t>(sl.n_prompt, sl.cache_tokens.size());
-    if (ct_.thinkOpenSplit(std::span<const std::uint32_t>(sl.cache_tokens).first(np)) > 0) {
+    // feat026-pidle-r2: preserve_thinking=false (variant a): the next prompt re-renders the earlier turns without
+    // their think blocks (thinking on or off), so it diverges before this reply
+    if (sl.pidle_hist_dropped) {
         sl.pidle_want = false;
         pidle_skipped_ += 1;
-        logI("slot {} | precise idle: skipped: the prompt opens a thinking block (the next prompt will not hold this reply)",
+        logI("slot {} | precise idle: skipped: preserve_thinking=false (the next prompt drops the think blocks)", sl.id);
+        return;
+    }
+    // a thinking-block prompt ("<think>\n" at its end): the next prompt holds this reply only if the client sends the
+    // reasoning back, which this prompt's history tells (feat026-pidle-r2). Without it (first turn, or the earlier
+    // replies came back as empty blocks) the next prompt re-renders the reply as "<think>" "\n\n" "</think>" ... and
+    // diverges at N - 1. (A predicted re-rendering "P[:-1] + \n\n</think>\n\n + content" could be checkpointed
+    // instead: follow-up.)
+    const std::size_t np = std::min<std::size_t>(sl.n_prompt, sl.cache_tokens.size());
+    const std::span<const std::uint32_t> prompt = std::span<const std::uint32_t>(sl.cache_tokens).first(np);
+    if (ct_.thinkOpenSplit(prompt) > 0) {
+        if (ct_.reasoningInHistory(prompt)) {
+            logI("slot {} | precise idle: thinking reply kept: the history carries reasoning (the client sends it back)",
+                 sl.id);
+            return;
+        }
+        sl.pidle_want = false;
+        pidle_skipped_ += 1;
+        logI("slot {} | precise idle: skipped: the prompt opens a thinking block and its history carries no reasoning "
+             "(the next prompt will not hold this reply)",
              sl.id);
     }
 }
@@ -141,7 +184,8 @@ bool Engine::pidleRun() {
         const std::size_t keep = (pl.from - 1) / kv_page;  // pl.from > 0 (plan)
         const std::size_t want = PagePool::pagesFor(pl.to);
         const std::size_t have = sl.pages.size();
-        std::size_t need = 0, avail = pool_.reclaimable();
+        // (review r1-batch-b: freeable, not reclaimable: a quarantined page another holder keeps never comes back)
+        std::size_t need = 0, avail = pool_.freeable();
         if (cow && keep < have) {
             need = std::max<std::size_t>(1, want > keep ? want - keep : 0);
             // the copy's page is taken before the old pages go; after it, the old pages only this slot held are free
@@ -154,13 +198,18 @@ bool Engine::pidleRun() {
             pidle_skipped_ += 1;
             logI("slot {} | precise idle: skipped: needs {} free KV pages, {} free (another conversation's cache is never "
                  "evicted for it)",
-                 sl.id, need, pool_.reclaimable());
+                 sl.id, need, pool_.freeable());
             return false;
         }
+        // review r1-batch-b: from the copy on write on the slot's rows and checkpoints change; a throw before the job
+        // is set up (pidle_.active) drops the slot's cache, so cache_tokens / checkpoints never describe rows the KV
+        // no longer holds (pidleStep's catch only cleans up an active job)
+        OnAbort drop{[this, &sl] { dropCache(sl); }};
         if (cow) {
             NoEvict ne;
             switch (pool_.cow(sl.pages, sl.id, pl.from, spill, ne)) {
             case PagePool::Cow::no_page:  // (the check above makes this unexpected) nothing changed yet: skip
+                drop.armed = false;
                 pidle_skipped_ += 1;
                 logI("slot {} | precise idle: skipped: no free KV page for the copy on write", sl.id);
                 return false;
@@ -169,6 +218,25 @@ bool Engine::pidleRun() {
                 break;
             case PagePool::Cow::unchanged:
                 break;
+            }
+        }
+        // every page up to `to` before any checkpoint is invalidated (review r1-batch-b: a page count that was too high
+        // must not cost the slot its prompt-end / think-open / gen-end); the chunks then find their pages there
+        {
+            NoEvict ne;
+            if (!pool_.ensure(sl.pages, sl.id, pl.to, ne)) {
+                drop.armed = false;
+                pidle_skipped_ += 1;
+                if (cow) {
+                    // the copy on write released the pages after row from: the rows above it are gone
+                    for (Ckpt& c : sl.ckpts)
+                        if (c.valid && c.pos > pl.from) c.valid = false;
+                    sl.tier_pages = std::min(sl.tier_pages, pl.from / kv_page);
+                    if (sl.cache_tokens.size() > pl.from) sl.cache_tokens.resize(pl.from);
+                }
+                logI("slot {} | precise idle: skipped: no free KV page for rows up to {} ({} free)", sl.id, pl.to,
+                     pool_.freeCount());
+                return false;
             }
         }
         // KV rows from `from` on are rewritten (or, after the copy on write, gone): every checkpoint above it
@@ -181,6 +249,10 @@ bool Engine::pidleRun() {
         sl.tier_pages = std::min(sl.tier_pages, pl.from / kv_page);
         const Ckpt& c0 = sl.ckpts[static_cast<std::size_t>(pl.ck)];
         m_.selectSeq(sl.id);
+        if (test_pidle_load_fail_) {
+            test_pidle_load_fail_ = false;
+            throw std::runtime_error("test: checkpoint load failed");
+        }
         ck_.load(c0);
         sl.ck_hid = c0.hid;
         pidle_.active = true;
@@ -193,6 +265,7 @@ bool Engine::pidleRun() {
         pidle_.sys = sys;
         pidle_.imgs = std::move(imgs);
         pidle_.t0 = now;
+        drop.armed = false;  // the job owns the clean-up from here (pidleStep / pidleStop)
         // review C2: the cached tokens are the rows the KV holds for them (startJob's rule, llama.cpp keep_first):
         // [0, from) now, [0, cur) as the chunks run (set at the end / when stopped)
         sl.cache_tokens.resize(pl.from);
