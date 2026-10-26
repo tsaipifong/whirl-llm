@@ -702,7 +702,9 @@ int serveMain(int argc, char** argv, const char* program) {
         const chat::TemplateKind tmpl = chat::detectTemplate(tmpl_text);
         logI("chat template: GGUF tokenizer.chat_template ({} B) -> built-in Qwen3.x renderer variant '{}' ({})", tmpl_text.size(),
              chat::templateName(tmpl),
-             tmpl == chat::TemplateKind::a ? "reasoning effort, merged system, preserve_thinking" : "system + tools, <think> in history");
+             tmpl == chat::TemplateKind::a ? "reasoning effort, merged system, preserve_thinking"
+             : tmpl == chat::TemplateKind::b ? "system + tools, <think> in history"
+                                             : "system + tools, <think> in history, scalar tool arguments as True / False / None");
 
         qwen35::LoadStats stats;
         qwen35::LoadOptions lo;

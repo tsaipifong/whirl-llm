@@ -570,7 +570,31 @@ void testChat() {
             if (!ok) std::printf("  tool_call_scalar_args kind %s rendered:\n%s\n", chat::templateName(k), p.c_str());
             CHECK(ok);
         }
+        // b_pyargs (original ornith-ai Ornith-1.5 Q4_K_M / 9B, Qwen3-Coder, Qwen3.5 templates): scalars via
+        // `args_value | string` (Python str), containers via tojson
+        const std::string want_py =
+            "<function=edit>\n<parameter=path>\na.py\n</parameter>\n<parameter=replace_all>\nTrue\n</parameter>\n"
+            "<parameter=dry_run>\nFalse\n</parameter>\n<parameter=encoding>\nNone\n</parameter>\n"
+            "<parameter=count>\n3\n</parameter>\n<parameter=ratio>\n1.5\n</parameter>\n"
+            "<parameter=opts>\n{\"force\": true, \"backup\": null, \"lines\": [false, 2, \"x\"]}\n</parameter>\n"
+            "<parameter=flags>\n[true, null]\n</parameter>\n</function>";
+        const std::string p = render(chat::TemplateKind::b_pyargs, req);
+        const bool ok = p.find(want_py) != std::string::npos;
+        if (!ok) std::printf("  tool_call_scalar_args kind b-pyargs rendered:\n%s\n", p.c_str());
+        CHECK(ok);
+        // apart from the argument values b and b_pyargs render the same prompt
+        const char* req2 = R"({"messages":[{"role":"system","content":"S"},{"role":"user","content":"q"},)"
+                           R"({"role":"assistant","content":"<think>r</think>a","tool_calls":[{"function":{"name":"t",)"
+                           R"("arguments":{"k":"v","n":2}}}]},{"role":"tool","content":"x"},{"role":"user","content":"q2"}]})";
+        CHECK_EQ(render(chat::TemplateKind::b, req2), render(chat::TemplateKind::b_pyargs, req2));
     }
+    // the two Ornith-1.5 argument lines as they appear in the GGUFs
+    CHECK(chat::detectTemplate("{%- set args_value = args_value | string if args_value is string else args_value | "
+                               "tojson | safe %}") == chat::TemplateKind::b);
+    CHECK(chat::detectTemplate("{%- set args_value = args_value | tojson | safe if args_value is mapping or (args_value "
+                               "is sequence and args_value is not string) else args_value | string %}") ==
+          chat::TemplateKind::b_pyargs);
+    CHECK(std::string(chat::templateName(chat::TemplateKind::b_pyargs)) == "b-pyargs");
     CHECK(chat::detectTemplate("{% if reasoning_effort %}") == chat::TemplateKind::a);
     CHECK(chat::detectTemplate("{% if x %}") == chat::TemplateKind::b);
 }

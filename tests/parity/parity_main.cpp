@@ -8,7 +8,7 @@
 //   whirl-parity gguf      --whirl-tool T --ref-dir DIR MODEL.gguf...
 //   whirl-parity tokenizer --whirl-tool T --llama-tokenize L --model M.gguf [--model ...]
 //                          --work DIR [--jobs 4] [--modes special,nospecial] [--report F] CORPUS...
-//   whirl-parity template  --whirl-tool T --oracle O --work DIR --model-a A.gguf --model-b B.gguf
+//   whirl-parity template  --whirl-tool T --oracle O --work DIR --model-a A.gguf --model-b B.gguf [--model-b ...]
 //                          [--cases tests/corpus/template_cases.json] [--show]
 //   whirl-parity make-corpus [--out tests/corpus/synthetic]
 //
@@ -16,6 +16,7 @@
 
 #include "support.h"
 
+#include "whirl/chat.h"
 #include "whirl/common.h"
 #include "whirl/gguf.h"
 #include "whirl/json.h"
@@ -450,12 +451,21 @@ int cmdTemplate(const Args& a) {
     }
 
     std::size_t failed = 0;
-    for (auto [kind, model] : {std::pair<std::string, std::string>{"a", a.req("--model-a")},
-                               std::pair<std::string, std::string>{"b", a.req("--model-b")}}) {
-        const std::string tmpl = joinPath(work, "template_" + kind + ".jinja");
+    // bug-toolargbool: the variant is detected from each GGUF's own template (as the server does), so one b model
+    // may be the product Ornith MXFP4 (`b`) and another an original Ornith-1.5 GGUF (`b-pyargs`); expect_diverge
+    // entries name the detected variant. --model-b may be given more than once.
+    std::vector<std::string> models{a.req("--model-a")};
+    for (const std::string& m : a.all("--model-b")) models.push_back(m);
+    if (models.size() < 2) throw std::runtime_error("missing --model-b");
+    for (const std::string& model : models) {
+        std::string kind;
+        std::string tmpl;
         {
             const gguf::File f = gguf::File::open(model);
-            writeFile(tmpl, f.getString("tokenizer.chat_template"));
+            const std::string text(f.getString("tokenizer.chat_template"));
+            kind = chat::templateName(chat::detectTemplate(text));
+            tmpl = joinPath(work, "template_" + kind + "_" + basename(model) + ".jinja");
+            writeFile(tmpl, text);
         }
         const auto ours = runJsonLines({tool, "template-test", "--kind", kind, "--cases", cases_path});
         const auto ref = runJsonLines({oracle, tmpl, cases_path});
@@ -509,7 +519,7 @@ const char* kUsage =
     "  whirl-parity gguf      --whirl-tool T --ref-dir DIR MODEL.gguf...\n"
     "  whirl-parity tokenizer --whirl-tool T --llama-tokenize L --model M.gguf [--model ...] --work DIR\n"
     "                         [--jobs 4] [--modes special,nospecial] [--report F] CORPUS...\n"
-    "  whirl-parity template  --whirl-tool T --oracle O --work DIR --model-a A.gguf --model-b B.gguf\n"
+    "  whirl-parity template  --whirl-tool T --oracle O --work DIR --model-a A.gguf --model-b B.gguf [--model-b ...]\n"
     "                         [--cases CASES.json] [--show]\n"
     "  whirl-parity make-corpus [--out DIR]\n";
 

@@ -4,12 +4,41 @@
 //
 // Variant `a`: Qwen3.8 / unsloth template (reasoning effort, merged leading
 // system messages, preserve_thinking). Variant `b`: Ornith / Qwen3.6-style
-// template. Deliberate differences from the Jinja templates:
+// template (the product GGUF Ornith-1.5-35B-A3B-MXFP4). Variant `b_pyargs`:
+// the same renderer for templates that write scalar tool-call arguments with
+// `args_value | string` (Qwen3-Coder, Qwen3.5, the original ornith-ai
+// Ornith-1.5 Q4_K_M / 9B GGUFs): bool / null arguments become Python `True` /
+// `False` / `None`. In `a` and `b` every non-string argument is
+// `args_value | tojson` (`true` / `false` / `null`; Python json.dumps
+// spacing); containers are tojson in all three.
+// Deliberate differences from the Jinja templates (each one is an
+// `expect_diverge` case in tests/corpus/template_cases.json, checked by
+// `whirl-parity template` against the GGUFs; table in docs/phase1_parity.md):
 //   - a system/developer message after the leading ones: `a` renders it as a
-//     system turn (the template raises), `b` skips it (as the template does);
+//     system turn (the template raises), `b` / `b_pyargs` skip it (as the
+//     original Ornith-1.5 template does; the Ornith MXFP4 template raises);
 //   - tool_call.function.arguments given as a JSON string is parsed into an
-//     object (template `a` raises);
+//     object, an empty / whitespace string means no arguments (the product
+//     templates raise or drop them);
 //   - an unknown role is an error for both variants (template `b` skips it).
+//   - more lenient than the product templates (they raise, WHIRL renders):
+//     the developer role and several leading system messages (merged with one
+//     newline; `b` merges the first two), reasoning_effort aliases such as
+//     "high" (-> xhigh) and unknown values (default effort + warning);
+//     a tool call without a name is rejected (the templates render
+//     `<function=>`);
+//   - `b`: an empty or null leading system message renders no system turn
+//     (the Ornith MXFP4 template renders an empty one; the original Ornith-1.5
+//     template renders none);
+//   - `b` / `b_pyargs` keep the <think> block (reasoning_content or the
+//     <think> in content) of EVERY earlier assistant turn and ignore a
+//     client's preserve_thinking, like llama.cpp's default
+//     preserve_reasoning=true; the product Ornith MXFP4 template keeps it only
+//     after the last user query unless preserve_thinking=true. Kept on purpose:
+//     the history renders the same bytes the model generated, so the prefix
+//     cache / COLD-RESUME is reused across turns (research:think-template-reuse,
+//     research\pidle\2026-10-26-think-template-reuse.md). The original
+//     ornith-ai Ornith-1.5 template also always keeps it.
 // String trimming uses the ASCII whitespace set " \t\n\v\f\r" like
 // llama.cpp's Jinja engine (Python's str.strip would also remove Unicode
 // spaces such as U+3000).
@@ -26,9 +55,10 @@
 
 namespace whirl::chat {
 
-enum class TemplateKind { a, b };
+enum class TemplateKind { a, b, b_pyargs };
 
-// `a` if the template text mentions reasoning_effort, otherwise `b`.
+// `a` if the template text mentions reasoning_effort; otherwise `b_pyargs` if
+// it contains `args_value is mapping` (scalar arguments via `| string`), else `b`.
 TemplateKind detectTemplate(std::string_view chat_template);
 const char* templateName(TemplateKind k);
 

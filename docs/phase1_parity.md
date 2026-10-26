@@ -98,8 +98,18 @@ engine from the external checkout and renders the GGUF templates with
 
 | Variant (template) | identical prompt | both raise | documented divergence | mismatch |
 |---|---|---|---|---|
-| a (Qwen3.8-27B) | 37 | 4 | 4 | 0 |
-| b (Ornith-1.5-35B) | 39 | 1 | 5 | 0 |
+| a (Swift-1.5-Qwen3.8-27B-MXFP4) | 35 | 2 | 9 | 0 |
+| b (Ornith-1.5-35B-A3B-MXFP4) | 28 | 2 | 16 | 0 |
+| b-pyargs (ornith-ai Ornith-1.5-35B-Q4_K_M) | 41 | 1 | 4 | 0 |
+
+Re-run 2026-10-26 (bug-toolargbool) with the oracle built from llama.cpp
+529ac893e, 46 cases. It replaces the v0.1.0 table (37 / 39 identical),
+which was measured against older GGUF templates; the original Ornith-1.5
+GGUF is now variant `b-pyargs`.
+The variant is detected from each GGUF's template: `a` mentions
+reasoning_effort; `b-pyargs` writes scalar tool-call arguments with
+`args_value | string` (`True` / `False` / `None`); `b` writes every
+non-string argument with `tojson` (`true` / `false` / `null`).
 
 Covered: single/multiple leading system and developer messages, empty and
 null system content, content part lists, reasoning_content, `<think>` blocks
@@ -107,21 +117,28 @@ inside assistant content (variant b), preserve_thinking true/false with the
 last-query rule, multi-step tool turns, enable_thinking off (top level and
 kwargs), every reasoning effort including invalid ones, tools with nested
 schemas / quotes / backslashes / control characters / emoji, tool_choice
-none, tool calls with object arguments of every JSON type, flat tool calls,
+none, tool calls with object arguments of every JSON type (bool / null /
+nested at the top level: `tool_call_scalar_args`), flat tool calls,
 empty / null / whitespace arguments, consecutive tool responses, tool
 message first or last, assistant prefill, Unicode content with U+3000.
 
-Documented divergences (deliberate, inherited from the prototype):
+Documented divergences (deliberate):
 
 | Case | Variant | WHIRL | Template / oracle |
 |---|---|---|---|
-| `tool_call_args_json_string` | a | parses the JSON string into parameters | raises |
-| `tool_call_args_json_string` | b | parses the JSON string into parameters | renders the call without parameters |
+| `tool_call_args_json_string` | a, b | parses the JSON string into parameters | raises |
+| `tool_call_args_json_string` | b-pyargs | parses the JSON string into parameters | renders the call without parameters |
+| `tool_call_args_empty_string` | a, b | no parameters | raises (the items filter on a string) |
 | `mid_system_message` | a | renders a system turn | raises |
-| `unknown_role` | b | rejects the request | silently skips the message |
-| `tool_call_missing_name` | b | rejects the request | renders `<function=>` (Python Jinja would raise) |
-| `image_part` | a, b | rejects (images unsupported; `allow_media` renders the placeholder) | vision placeholder |
-| `float_values` | a, b | Python `json.dumps` floats (`2.0`, `0.7`) | llama.cpp `tojson` prints `2` |
+| `mid_system_message` | b | skips it (as the original Ornith-1.5 template) | raises |
+| `two_systems`, `three_systems` | a, b | merges the leading system / developer messages | raises (developer role, or a second system message) |
+| `effort_high`, `effort_invalid` | a | `high` -> xhigh; unknown value -> default effort + warning | raises |
+| `tool_call_missing_name` | a, b, b-pyargs | rejects the request | renders `<function=>` (Python Jinja would raise) |
+| `unknown_role` | b, b-pyargs | rejects the request | silently skips the message |
+| `empty_system`, `null_system` | b | no system turn | empty system turn |
+| `multi_turn_reasoning`, `assistant_think_in_content`, `assistant_two_think_blocks`, `assistant_close_think_only`, `preserve_thinking_false`, `tool_call_roundtrip`, `unicode_mix` | b | keeps the `<think>` block of every earlier assistant turn (llama.cpp default preserve_reasoning=true; prefix cache reuse) | keeps it only after the last user query unless preserve_thinking=true |
+| `image_part` | a, b, b-pyargs | rejects (images unsupported; `allow_media` renders the placeholder) | vision placeholder |
+| `float_values` | a, b, b-pyargs | Python `json.dumps` floats (`2.0`, `0.7`) | llama.cpp `tojson` prints `2` |
 
 ### Known differences from the Hugging Face (Python Jinja2) rendering
 

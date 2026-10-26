@@ -5,7 +5,7 @@
 //   whirl-tool gguf-info MODEL.gguf [--tensors] [--dump]
 //   whirl-tool tokenize MODEL.gguf (--text T | --file F | --batch LIST --out-dir D) [--no-parse-special] [--time]
 //   whirl-tool detokenize MODEL.gguf --ids "1,2,3" [--no-special]
-//   whirl-tool template-test (MODEL.gguf | --kind a|b) (--request REQ.json | --cases CASES.json) [--out F]
+//   whirl-tool template-test (MODEL.gguf | --kind a|b|b-pyargs) (--request REQ.json | --cases CASES.json) [--out F]
 
 #include "whirl/chat.h"
 #include "whirl/common.h"
@@ -38,7 +38,7 @@ const char* k_usage =
     "  whirl-tool tokenize MODEL.gguf (--text T | --file F | --batch LIST --out-dir D)\n"
     "                      [--no-parse-special] [--time]\n"
     "  whirl-tool detokenize MODEL.gguf --ids \"1,2,3\" [--no-special]\n"
-    "  whirl-tool template-test (MODEL.gguf | --kind a|b) (--request REQ.json | --cases CASES.json) [--out F]\n";
+    "  whirl-tool template-test (MODEL.gguf | --kind a|b|b-pyargs) (--request REQ.json | --cases CASES.json) [--out F]\n";
 
 struct Args {
     std::vector<std::string> pos;
@@ -339,8 +339,10 @@ int cmdTemplateTest(const Args& a) {
             kind = chat::TemplateKind::a;
         else if (*k == "b")
             kind = chat::TemplateKind::b;
+        else if (*k == "b-pyargs")
+            kind = chat::TemplateKind::b_pyargs;
         else
-            throw std::runtime_error("--kind must be a or b");
+            throw std::runtime_error("--kind must be a, b or b-pyargs");
     } else if (!a.pos.empty()) {
         const gguf::File f = gguf::File::open(a.pos[0]);
         kind = chat::detectTemplate(f.getStringOr("tokenizer.chat_template", ""));
