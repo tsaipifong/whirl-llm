@@ -201,6 +201,22 @@ void Engine::allocState() {
              "acceptance eps {:.2f} delta {:.2f} - output differs from exact speculative decoding",
              opt_.relax.topk(), opt_.relax.alpha, opt_.relax.eps, opt_.relax.delta);
     }
+    opt_.cycle_sync &= 3u;
+    if (opt_.cycle_sync != 0) {
+        // feat026-hostgap: pinned staging for the folded readbacks, one event for the cycle-end wait
+        if (opt_.cycle_sync & 1u) {
+            samp_pin_ = device::PinnedBuf::alloc(ops_, samp_bytes);
+            std::memset(samp_pin_.get(), 0, samp_bytes);
+            if (opt_.relax.on) {
+                relax_pin_ = device::PinnedBuf::alloc(ops_, relax_host_.size());
+                std::memset(relax_pin_.get(), 0, relax_host_.size());
+            }
+        }
+        cyc_ev_ = device::EventH::create(ops_);
+        logI("decode: WHIRL_CYCLE_SYNC={} (fold readbacks into one wait {}, spin wait {}{})", opt_.cycle_sync,
+             (opt_.cycle_sync & 1u) ? "on" : "off", (opt_.cycle_sync & 2u) ? "on" : "off",
+             (opt_.cycle_sync & 2u) && opt_.spec_acc >= 2 ? " - not with WHIRL_SPEC_ACC >= 2, the runtime wait stays" : "");
+    }
     spec_on_ = opt_.spec_sample && opt_.use_mtp && m_.draftSampleOk() && !opt_.relax.on;
     if (opt_.spec_sample && opt_.use_mtp)
         logI("sampling: speculative sampling of MTP drafts (specsample) {}", spec_on_ ? "on for temperature > 0 (race-coupled drafts; the text for a seed does not depend on drafts)" : opt_.relax.on ? "off (relaxacc typical acceptance instead)" : "unavailable (no draft_sample_rows kernel): exact-match acceptance");
@@ -338,6 +354,9 @@ Engine::Stats Engine::stats() const {
     s.acc_mismatch = stat_acc_mismatch_;
     s.tab_checked = stat_tab_checked_;
     s.tab_mismatch = stat_tab_mismatch_;
+    s.cyc_spin = stat_cyc_spin_;
+    s.cyc_folded = stat_cyc_folded_;
+    s.decode_cycles = stat_cyc_total_;
     return s;
 }
 
@@ -1814,13 +1833,16 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
         }
     }
     const TimePoint t_enq = Clock::now();
+    // feat026-hostgap: folded readbacks + spin wait (WHIRL_CYCLE_SYNC; 0 = the two downloads below, as before)
+    const std::uint32_t folded = cycleWaitBegin(any_sampling, any_relax);
     const std::int32_t* ctl_all = readCycleCtl(acc_dev ? &aa : nullptr);
     if (p) {
         p->t_ready = Clock::now();
         p->enq_ms[pa] += std::chrono::duration<double, std::milli>(t_enq - tc0).count();
     }
-    if (any_sampling) ops_.download(samp_host_.data(), samp_dev_.get(), sampBytes());
-    if (any_relax) ops_.download(relax_host_.data(), relax_dev_.get(), relax_host_.size());
+    cycleWaitEnd(folded);
+    if (any_sampling && !(folded & 1u)) ops_.download(samp_host_.data(), samp_dev_.get(), sampBytes());
+    if (any_relax && !(folded & 2u)) ops_.download(relax_host_.data(), relax_dev_.get(), relax_host_.size());
     // relaxacc: the kept tokens depend on which drafts were proposed, so the draft-count policy
     // must not see wall-clock times (run-to-run jitter would change the output). It sees a
     // deterministic cycle cost instead: a base per slot, + ngram_slope per extra verify row (the
@@ -1885,6 +1907,7 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
     n_cycles_ += 1;
     policy_cycles_ += 1;
     stat_cycles_ += 1;
+    stat_cyc_total_ += 1;
     stat_rows_ += rows;
     stat_slots_ += A;
     stat_drafts_ += nd;
@@ -2146,6 +2169,50 @@ const std::int32_t* Engine::readCycleCtl(const SpecAccArgs* aa) {
     if (aa != nullptr) m_.specAccept(*aa, nullptr);
     m_.readCtlPinned(std::span<std::int32_t>(pin, words));
     return pin;
+}
+
+// feat026-hostgap (WHIRL_CYCLE_SYNC). Called after the cycle's last enqueue and before readCycleCtl. Returns
+// the folded readbacks: bit 0 sampling candidates (samp_dev_), bit 1 relaxacc top-k (relax_dev_).
+std::uint32_t Engine::cycleWaitBegin(bool any_sampling, bool any_relax) {
+    if (opt_.cycle_sync == 0 || !cyc_ev_) return 0;
+    std::uint32_t folded = 0;
+    if (opt_.cycle_sync & 1u) {
+        // the copies run after the topk launches on the same stream; the control-word read waits for them
+        // (mode 0: hipMemcpy on the legacy stream, which the blocking model stream joins; modes 1-3: stream sync)
+        if (any_sampling && samp_pin_) {
+            ops_.copyAsync(samp_pin_.addr(), samp_dev_.get(), sampBytes(), m_.stream());
+            folded |= 1u;
+        }
+        if (any_relax && relax_pin_) {
+            ops_.copyAsync(relax_pin_.addr(), relax_dev_.get(), relax_host_.size(), m_.stream());
+            folded |= 2u;
+        }
+    }
+    const bool spin = (opt_.cycle_sync & 2u) != 0 && opt_.spec_acc < 2;
+    if (folded == 0 && !spin) return 0;
+    ops_.eventRecord(cyc_ev_.get(), m_.stream());
+    if (spin) {
+        // poll instead of the runtime's wait (llama.cpp: cudaDeviceScheduleSpin on its iGPU; hipfire HIPFIRE_HIP_WAIT);
+        // a query error throws (eventDoneChecked), so a failed cycle is not read as complete
+        for (std::uint32_t i = 1; !ops_.eventDoneChecked(cyc_ev_.get()); ++i)
+            if ((i & 255u) == 0) std::this_thread::yield();
+        stat_cyc_spin_ += 1;
+    }
+    return folded | 4u;  // bit 2: the event is recorded
+}
+
+void Engine::cycleWaitEnd(std::uint32_t folded) {
+    if ((folded & 3u) == 0) return;
+    // complete after readCycleCtl in every WHIRL_SPEC_ACC mode; the query only guards that assumption
+    if (!ops_.eventDoneChecked(cyc_ev_.get())) ops_.eventSync(cyc_ev_.get());
+    if (folded & 1u) {
+        std::memcpy(samp_host_.data(), samp_pin_.get(), samp_host_.size());
+        stat_cyc_folded_ += 1;
+    }
+    if (folded & 2u) {
+        std::memcpy(relax_host_.data(), relax_pin_.get(), relax_host_.size());
+        stat_cyc_folded_ += 1;
+    }
 }
 
 void Engine::splitDrafts(std::span<Slot* const> act, std::uint32_t nd, std::uint32_t rows, std::span<std::uint32_t> nd_m) {

@@ -88,6 +88,7 @@ void NullBackend::copyAsync(DevPtr dst, DevPtr src, std::uint64_t bytes, Stream 
 
 void NullBackend::download(void* dst, DevPtr src, std::uint64_t bytes) {
     noteThread(Call::download);
+    blocking_calls_ += 1;
     std::memcpy(dst, reinterpret_cast<const void*>(src), static_cast<std::size_t>(bytes));
 }
 
@@ -105,6 +106,7 @@ void NullBackend::streamDestroy(Stream s) {
 
 void NullBackend::streamSync(Stream s) {
     noteThread(Call::stream_sync);
+    blocking_calls_ += 1;
     if (!track_.load()) return;
     std::lock_guard<std::mutex> lk(mu_);
     sync_calls_ += 1;
@@ -175,6 +177,7 @@ bool NullBackend::eventDoneChecked(Event e) {
 
 void NullBackend::eventSync(Event e) {
     noteThread(Call::event_sync);
+    blocking_calls_ += 1;
     {
         std::unique_lock<std::mutex> lk(gate_m_);
         gate_cv_.wait(lk, [&] { return gate_open_; });

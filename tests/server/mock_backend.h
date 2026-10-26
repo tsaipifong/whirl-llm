@@ -132,6 +132,10 @@ public:
     void mtpBatchStepEx(std::span<const server::MSeg> segs, std::uint32_t r, bool draft) override;
     std::uint32_t verifyBatchEnqueue(std::span<const server::VSeg> segs) override;
     void readCtl(std::span<std::int32_t> dst) override;
+    // feat026-hostgap: the model-side waits of a decode cycle (readCtl / readCtlPinned / syncStream each wait for
+    // the device in production); with NullBackend::blockingCalls() the per-cycle sync count of the server tests
+    void syncStream() override { host_waits_ += 1; }
+    std::uint64_t hostWaits() const { return host_waits_.load(); }
     void mtpEnqueue(server::DevPtr hidden, std::span<const std::uint32_t> tokens, std::uint32_t pos0) override;
     void topkRows(std::uint32_t row0, std::uint32_t rows, std::uint32_t k, float inv_t, server::DevPtr ids,
                   server::DevPtr vals, server::DevPtr stats) override;
@@ -173,6 +177,7 @@ public:
 private:
     SpecNextTab spec_tab_{};
     std::atomic<std::uint64_t> spec_accepts_{0};
+    std::atomic<std::uint64_t> host_waits_{0};
     void prefillRows(std::size_t n);
     struct State {
         std::uint64_t h = 0;   // recurrent hash

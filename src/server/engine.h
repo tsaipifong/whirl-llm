@@ -276,6 +276,13 @@ struct EngineOptions {
     // must agree: accept counts, next token, next-cycle rows; the host result is used). Output is the same in
     // every mode (exact greedy acceptance; sampling / relaxacc slots always decide on the host).
     std::uint32_t spec_acc = 0;
+    // feat026-hostgap (WHIRL_CYCLE_SYNC, bit mask; 0 = as before): how a decode cycle waits for its GPU work.
+    // bit 0 fold: the cycle's extra readbacks (sampling candidates, relaxacc top-k) are async copies into pinned
+    // staging enqueued before the control-word read, so the cycle has ONE blocking wait instead of up to three.
+    // bit 1 spin: the host polls an event recorded after the cycle's last enqueue (no runtime blocking wait)
+    // before the control-word read (WHIRL_SPEC_ACC < 2 only; the device accept enqueues its kernel inside
+    // readCycleCtl). Host scheduling only: the tokens are the same in every mode.
+    std::uint32_t cycle_sync = 0;
     // per-slot draft counts: 0 uniform, 1 marginal-gain swaps (splitDrafts), 2 cost model (allocDrafts)
     std::uint32_t slot_drafts = 0;
     bool trace_nd = false;
@@ -546,6 +553,14 @@ private:
     std::vector<Cand> cands_scratch_;
     std::vector<std::int32_t> ctl_host_;
     device::PinnedBuf ctl_pin_;  // feat026-acc: pinned control words (WHIRL_SPEC_ACC >= 1)
+    // feat026-hostgap (WHIRL_CYCLE_SYNC): pinned staging of the folded readbacks, the cycle-end event
+    device::PinnedBuf samp_pin_, relax_pin_;
+    device::EventH cyc_ev_;
+    std::uint64_t stat_cyc_spin_ = 0, stat_cyc_folded_ = 0, stat_cyc_total_ = 0;  // stat_cycles_ resets per status line
+    // enqueue the folded readbacks (bit 0) and wait for the cycle's GPU work (bit 1); returns the copies to finish
+    std::uint32_t cycleWaitBegin(bool any_sampling, bool any_relax);
+    // after the control-word read: the folded copies are complete, copy them into samp_host_ / relax_host_
+    void cycleWaitEnd(std::uint32_t folded);
     std::uint64_t stat_acc_dev_ = 0, stat_acc_checked_ = 0, stat_acc_mismatch_ = 0, stat_tab_checked_ = 0,
                   stat_tab_mismatch_ = 0;
     // feat026-acc seam: the verify's control words for the host after the cycle's enqueue (aa: device accept

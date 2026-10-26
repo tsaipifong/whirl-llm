@@ -135,6 +135,9 @@ public:
     void complete(Event e);  // the work before e finished (a test moves time forward)
     void completeAll();      // all work on every stream finished
     std::uint64_t syncCalls() const { return sync_calls_.load(); }  // eventSync + streamSync while tracking
+    // feat026-hostgap: every call where the host would wait for the device (download, streamSync, eventSync),
+    // tracking or not: the per-decode-cycle sync count of the server tests
+    std::uint64_t blockingCalls() const { return blocking_calls_.load(); }
     struct Violation {
         std::uint64_t stream = 0, seq = 0;  // the pending work: stream id (0: null stream), its work number
         std::uint64_t order = 0;            // release call number (1 = first free / hostFree while tracking)
@@ -182,6 +185,7 @@ private:
     std::map<std::uintptr_t, std::uint64_t> host_;  // pinned host blocks (start -> bytes)
     std::atomic<long> live_host_{0}, live_streams_{0}, live_events_{0};
     std::atomic<std::uint64_t> copy_calls_{0}, copied_{0}, fail_call_{0};
+    std::atomic<std::uint64_t> blocking_calls_{0};
     std::atomic<std::uint64_t> fail_host_copy_{0}, host_copies_{0};
     std::atomic<std::uint64_t> fail_malloc_{0}, mallocs_{0};
     std::map<std::uintptr_t, std::uint64_t> dev_;  // device allocations (start -> bytes)
