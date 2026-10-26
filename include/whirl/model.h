@@ -928,7 +928,7 @@ void parseGemvWHead(Model& m, std::string_view list);
 void applyGemvEnv(Model& m);
 
 // feat026-o6 (2), owner O6 (ARCH-1 4.4; redone on arch025-N2b by feat026-o6-p25): the after-load runtime switches, ONE
-// function for the CLI (every command) and the server. get(name) returns WHIRL_<name> (the caller's environment read;
+// function for the CLI (chat, bench, golden; not seqtest / dflash-check) and the server. get(name) returns WHIRL_<name> (the caller's environment read;
 // tests pass a table). It fills numerics::RuntimeValues from get and applies them with numerics::applyFront(front) to
 // m.num_plan (the rules: src/common/numerics.cpp runtimeFlags; the server's one difference, no graph replay, is a rule
 // there), swaps in gdn_step_norm_v0 when WHIRL_GDN_V0 is set and the kernel exists, and applies the WHIRL_GEMV_R / _W /

@@ -107,7 +107,7 @@ struct EnvValues {
 enum class Front : std::uint8_t { none, cli, server };
 
 // After-load knobs of the front ends: qwen35::applyRuntimeEnv (src/model/config.cpp), the same function and rules for the
-// CLI (every command) and the server since feat026-o6 (2) (owner O6; redone on N2b by feat026-o6-p25). Before 0.2.6:
+// CLI (chat, bench, golden; not seqtest / dflash-check) and the server since feat026-o6 (2) (owner O6; redone on N2b by feat026-o6-p25). Before 0.2.6:
 // cli main.cpp applyRuntimeEnv (WHIRL_GDN_V0 in chat only) and the server's knob block with other rules, without DBG,
 // GEMV_MAX, NO_GRAPH, GV_GROUP, GV_NMAX. The rules: src/common/numerics.cpp runtimeFlags.
 struct RuntimeValues {

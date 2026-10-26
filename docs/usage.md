@@ -607,7 +607,7 @@ Alternatives kept for A/B tests and numerics comparisons. The lossy ones are the
 [numerics modes](#modes): their defaults follow the mode, and a value set here overrides it.
 "Bitwise-equal" alternatives give the same bits and differ only in speed.
 
-`whirl` (every command) and `whirl-server` apply these switches with the same rules (since 0.2.6; before, the server
+`whirl` (`chat`, `bench` and `golden`; `seqtest` and `dflash-check` apply none of them) and `whirl-server` apply these switches with the same rules (since 0.2.6; before, the server
 ignored `WHIRL_DBG`, `WHIRL_GEMV_MAX`, `WHIRL_NO_GRAPH`, `WHIRL_GV_GROUP`, `WHIRL_GV_NMAX` and `WHIRL_GEMV_R` / `_W` /
 `_WH`, and the CLI ignored `WHIRL_WIDE_VERIFY` and `WHIRL_HEAD_CHUNK`). A number switch whose value is not a whole number,
 or a `WHIRL_GEMV_R` / `_W` / `_WH` list that does not parse, is ignored with a warning (start-up goes on). The server never
@@ -617,7 +617,7 @@ Every switch of this section that is set is logged at start-up as an override (a
 mode label becomes `MODE+overrides` only for a switch that can change output bits. `WHIRL_GEMV_R` / `_W` / `_WH`,
 `WHIRL_HEAD_CHUNK`, `WHIRL_DQ4_DYN`, `WHIRL_GDN_V0` and `WHIRL_NO_GRAPH` give the same bits as the default (logged as
 "bitwise", label unchanged, precise stays precise); `WHIRL_DRAFT_WINDOW` / `_MIN` change only the MTP drafts, which the
-text does not depend on, except under relaxed acceptance (fast `relaxacc`), where they count as lossy;
+text is not expected to depend on (verified for precise; balance pending the GPU check G-r1), except under relaxed acceptance (fast `relaxacc`), where they count as lossy;
 `WHIRL_WIDE_VERIFY` counts as lossy.
 
 | Variable | Meaning |
