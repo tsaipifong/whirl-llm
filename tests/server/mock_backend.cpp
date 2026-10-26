@@ -538,6 +538,15 @@ void MockModel::specAccept(const SpecAccArgs& a_in, std::int32_t* host) {
         res[k] = r;
     }
     spec_next_rows(a, all.data(), res, &spec_tab_);
+    if (mc_.spec_acc_corrupt > 0 && (spec_accepts_.load() + 1) % mc_.spec_acc_corrupt == 0) {
+        for (int k = 0; k < a.n; ++k) {
+            if (!a.dev[k]) continue;
+            std::int32_t* ctl = all.data() + static_cast<std::size_t>(a.seq[k]) * W;
+            ctl[WHIRL_SA_CTL_ACC0] = ctl[WHIRL_SA_CTL_NDDEV] + 5;
+            spec_corrupted_ += 1;
+            break;
+        }
+    }
     for (int k = 0; k < a.n; ++k) {
         const std::size_t s = static_cast<std::size_t>(a.seq[k]);
         std::memcpy(seqs_[s].ctl.data(), all.data() + s * W, W * 4);

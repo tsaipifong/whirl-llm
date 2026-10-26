@@ -3697,6 +3697,8 @@ void testSpecAccModes() {
     }
 }
 
+#include "spec_acc_r1_tests.inc"  // feat026-acc-r1
+
 // stop strings and end-of-turn
 void testStopAndEos() {
     ServerSetup su = baseSetup();
@@ -7824,6 +7826,8 @@ int main(int argc, char** argv) {
         {"sampling", testSampling},
         {"stop_eos", testStopAndEos},
         {"spec_acc_modes", testSpecAccModes},
+        {"spec_acc_r1_counters", testSpecAccR1Counters},
+        {"spec_acc_r1_env", testSpecAccR1Env},
         {"fr_tool_truncated", testFrToolTruncated},
         {"fr_nonstream_disconnect", testFrNonStreamDisconnect},
         {"fr_pool_prefill", testFrPoolPrefill},

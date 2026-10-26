@@ -79,6 +79,9 @@ struct MockConfig {
     std::vector<std::uint32_t> kv_extra_rows;
     // feat026-acc: the mock has the device accept kernel (specAccept runs kernels/spec_accept.h on the host)
     bool spec_acc_kernel = true;
+    // feat026-acc-r1: every Nth specAccept (0 = never) writes an out-of-range accept count (nd + 5) for its first
+    // device-decided sequence, like a broken device result: modes 2/3 must fall back to the host, mode 4 must report it
+    std::uint32_t spec_acc_corrupt = 0;
 };
 
 class MockModel final : public server::ServerModel {
@@ -166,6 +169,7 @@ public:
     void specAccept(const SpecAccArgs& a, std::int32_t* host) override;
     void readSpecTab(SpecNextTab& t) override { t = spec_tab_; }
     std::uint64_t specAccepts() const { return spec_accepts_.load(); }
+    std::uint64_t specCorrupted() const { return spec_corrupted_.load(); }  // feat026-acc-r1 (MockConfig::spec_acc_corrupt)
     std::uint64_t rowsRun() const { return rows_run_; }
     // most rows of one prefill forward so far (like Model::forward, more than max_batch throws BatchTooLarge)
     std::uint32_t maxPrefillRows() const { return max_pf_rows_.load(); }
@@ -173,6 +177,7 @@ public:
 private:
     SpecNextTab spec_tab_{};
     std::atomic<std::uint64_t> spec_accepts_{0};
+    std::atomic<std::uint64_t> spec_corrupted_{0};
     void prefillRows(std::size_t n);
     struct State {
         std::uint64_t h = 0;   // recurrent hash
