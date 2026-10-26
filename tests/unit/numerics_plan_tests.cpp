@@ -493,6 +493,33 @@ void testLoadRules() {
     }
 }
 
+// ---- arch025-n2b-r1: unit cells for the two N2b mutants only the oracle killed (tools/impact mutants n2b-q8dec-empty,
+// n2b-g8t-kernels). Decision inputs taken from the oracle's mismatch lines.
+void testN2bR1() {
+    const nu::Target t = target(k_cards[0], "swift", false);
+    // n2b-q8dec-empty: WHIRL_Q8DEC= (empty) must not decide prec_dec (tune.cpp:955). Needs a mode whose default is f16 decode
+    // (precise: prec_dec true); in balance prec_dec is false either way (oracle: "front 2: prec_dec: old 1 new 0", precise cell).
+    for (bool items : {false, true}) {
+        nu::Request r = nu::parseMode("precise", "t");
+        r.load_overrides = items;
+        *r.env.find("Q8DEC") = std::string();
+        const nu::Plan p = nu::plan(r, t);
+        NCHECK(p.flags.prec_dec, "Q8DEC='' keeps precise f16 decode (items {})", items);
+        NCHECK(!p.lossy_override, "Q8DEC='' is no lossy override (items {})", items);
+    }
+    // n2b-g8t-kernels: g8t needs the whole fragment-tiled set (Model::useTiledFp8): fp8 GEMMs present, tiled GEMM absent -> off
+    // (oracle: "refused g8t: old 0 new 1"). The default card has both, so g8t is on.
+    NCHECK(nu::plan(nu::parseMode("balance", "t"), t).flags.g8t, "g8t on with k_gemm8 + k_gemm8t");
+    for (bool items : {false, true}) {
+        nu::Target t2 = t;
+        t2.k_gemm8 = true;
+        t2.k_gemm8t = false;
+        nu::Request r = nu::parseMode("balance", "t");
+        r.load_overrides = items;
+        NCHECK(!nu::plan(r, t2).flags.g8t, "g8t needs k_gemm8t (items {})", items);
+    }
+}
+
 }  // namespace
 
 void testNumericsPlan(int& pass, int& fail) {
@@ -502,6 +529,7 @@ void testNumericsPlan(int& pass, int& fail) {
     testFlagScope();
     testFrontEnds();
     testLoadRules();
+    testN2bR1();  // arch025-n2b-r1
     pass += g_p;
     fail += g_f;
 }
