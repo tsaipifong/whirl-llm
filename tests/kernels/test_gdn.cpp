@@ -8,10 +8,14 @@
 //     == the rows run one launch at a time, snapshots == the per-row states,
 //     replay of kept rows == running them, two segments in one launch ==
 //     separate launches, gdn_step_norm == gdn_step_norm_v0 (all bitwise), and
-//     vs CPU (tolerance).
+//     vs CPU (tolerance);
+//   * gdnn (on request): feat026-gdnnorm candidates of a dev code object == the shipped gdn_step_norm (bitwise).
 // SPDX-License-Identifier: Apache-2.0
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 
 #include "cpu_ref.h"
 
@@ -599,6 +603,173 @@ void testGdn(Ctx& c) {
             r.pass = same;
             c.rep.add(r);
         }
+    }
+}
+
+// gdnn (feat026-gdnnorm, on request: --only gdnn): the gdn_step_norm candidates of a development code object
+// (WHIRL_KT_GDNN_HSACO = a kernels build of the SAME arch with -DWHIRL_GDNN_DEV=1; exports gdnn<id>_step_norm) bit for
+// bit against the SHIPPED gdn_step_norm of the main code object: out, xq, xd, final states and every snapshot, over
+// n = 0, 1 (bench / plain decode), 2, 4 + snapshots (MTP verify), 5, 9 + snapshots, 17, 20 + 15 snapshots (chunk tails
+// of MR 4 / 8 / 16), two and three segments in one launch, and (code objects with replay) record rows into pend, then
+// replay kept rows + new rows (pend buffer compared too). WHIRL_KT_GDNN_IDS=1,4 limits the ids (default 1..12).
+// One invariant per id.
+void testGdnn(Ctx& c) {
+    c.rep.family = "gdnn";
+    const char* hs = std::getenv("WHIRL_KT_GDNN_HSACO");
+    if (!hs || !*hs) {
+        c.rep.skip("gdnn", "gdn_step_norm candidates", "WHIRL_KT_GDNN_HSACO not set");
+        return;
+    }
+    std::vector<char> img;
+    if (std::FILE* fp = std::fopen(hs, "rb")) {
+        std::fseek(fp, 0, SEEK_END);
+        img.resize(static_cast<std::size_t>(std::ftell(fp)));
+        std::fseek(fp, 0, SEEK_SET);
+        if (std::fread(img.data(), 1, img.size(), fp) != img.size()) img.clear();
+        std::fclose(fp);
+    }
+    if (img.empty()) {
+        Result r;
+        r.name = std::string("gdnn: cannot read ") + hs;
+        r.pass = false;
+        c.rep.add(r);
+        return;
+    }
+    hip::Module xm = hip::Module::loadData(img.data(), c.mod.arch());
+    std::vector<int> ids;
+    for (int i = 1; i <= 12; ++i) ids.push_back(i);
+    if (const char* e = std::getenv("WHIRL_KT_GDNN_IDS")) {
+        ids.clear();
+        for (const char* q = e; *q;) {
+            ids.push_back(std::atoi(q));
+            while (*q && *q != ',') ++q;
+            if (*q == ',') ++q;
+        }
+    }
+    std::vector<std::pair<int, hip::Function>> fs;
+    for (int id : ids)
+        if (const hip::Function f = xm.getFunctionOpt((std::string("gdnn") + std::to_string(id) + "_step_norm").c_str())) fs.push_back({id, f});
+    if (fs.empty()) {
+        c.rep.skip("gdnn", "gdnn*_step_norm", "not in the candidate code object");
+        return;
+    }
+    const int nmax = 20;
+    const std::vector<float> qkv = makeQkv(c, nmax);
+    const std::vector<float> g = c.randu(static_cast<std::size_t>(nmax) * kNv, -1.5f, -0.01f);
+    const std::vector<float> beta = c.randu(static_cast<std::size_t>(nmax) * kNv, 0.05f, 0.95f);
+    const std::vector<float> z = c.randn(static_cast<std::size_t>(nmax) * kDInner);
+    const std::vector<float> wn = c.randu(kDv, 0.5f, 1.5f);
+    const std::vector<float> state0 = c.randn(static_cast<std::size_t>(kNv) * kDk * kDv, 0.3f);
+    Buf dq(qkv), dg(g), db(beta), dz(z), dwn(wn);
+    const std::size_t ns = state0.size(), no = static_cast<std::size_t>(nmax) * kDInner;
+    const int PW = kDk + kDv + 2;
+    const std::size_t npw = static_cast<std::size_t>(16) * kNv * PW;
+    struct Seg {
+        int row0, nrows, nsnap;
+    };
+    struct Out {
+        std::vector<float> y, d, pend;
+        std::vector<std::int8_t> q;
+        std::vector<std::vector<float>> st, snaps;
+    };
+    // rec > 0: replay mode on segment 0 (record `rec` rows into pend, then npend kept rows + the segment's rows)
+    auto run = [&](hip::Function f, const std::vector<Seg>& sg, int rec, int npend) {
+        Out o;
+        Buf y(no * 4), q(no), d(no / 32 * 4), pend(npw * 4);
+        y.fill(0xff);
+        q.fill(0x7f);
+        d.fill(0xff);
+        pend.fill(0xff);
+        std::vector<Buf> sts, snaps;
+        sts.reserve(sg.size());
+        snaps.reserve(64);
+        wk::GdnSegs s;
+        for (std::size_t i = 0; i < sg.size(); ++i) {
+            sts.emplace_back(state0);
+            s.s[i].state = sts.back().p();
+            s.s[i].row0 = sg[i].row0;
+            s.s[i].nrows = sg[i].nrows;
+            for (int t = 0; t < sg[i].nsnap; ++t) {
+                snaps.emplace_back(ns * 4);
+                snaps.back().fill(0xff);
+                s.s[i].snap[t] = snaps.back().p();
+            }
+        }
+        auto launch = [&](unsigned nseg) {
+            hip::launch(f, {kNv, nseg, 1}, {512, 1, 1}, 0, c.s, dq.p(), dg.p(), db.p(), dz.p(), dwn.p(), y.p(), q.p(), d.p(), kNk, kScale,
+                        kEps, kNv, kCh, s);
+        };
+        if (rec > 0) {
+            s.s[0].pend = pend.p();
+            const int keep_n = s.s[0].nrows;
+            s.s[0].nrows = rec;
+            s.s[0].npend = 0;
+            launch(1);
+            s.s[0].nrows = keep_n;
+            s.s[0].npend = npend;
+            launch(1);
+        } else {
+            launch(static_cast<unsigned>(sg.size()));
+        }
+        c.sync();
+        o.y = y.down<float>(no);
+        o.q = q.down<std::int8_t>(no);
+        o.d = d.down<float>(no / 32);
+        o.pend = pend.down<float>(npw);
+        for (auto& b : sts) o.st.push_back(b.down<float>(ns));
+        for (auto& b : snaps) o.snaps.push_back(b.down<float>(ns));
+        return o;
+    };
+    auto eq = [](const std::vector<float>& x, const std::vector<float>& y) {
+        return x.size() == y.size() && std::memcmp(x.data(), y.data(), x.size() * 4) == 0;
+    };
+    auto same = [&](const Out& a, const Out& b) {
+        if (!eq(a.y, b.y) || !eq(a.d, b.d) || !eq(a.pend, b.pend) || a.q != b.q || a.st.size() != b.st.size() ||
+            a.snaps.size() != b.snaps.size())
+            return false;
+        for (std::size_t i = 0; i < a.st.size(); ++i)
+            if (!eq(a.st[i], b.st[i])) return false;
+        for (std::size_t i = 0; i < a.snaps.size(); ++i)
+            if (!eq(a.snaps[i], b.snaps[i])) return false;
+        return true;
+    };
+    std::vector<std::size_t> runs(fs.size(), 0), bad(fs.size(), 0);
+    std::vector<std::string> first(fs.size());
+    auto check = [&](const std::string& name, const std::vector<Seg>& sg, int rec, int npend) {
+        const Out ref = run(c.k.gdn_step_norm, sg, rec, npend);
+        for (std::size_t i = 0; i < fs.size(); ++i) {
+            const Out o = run(fs[i].second, sg, rec, npend);
+            ++runs[i];
+            if (!same(o, ref)) {
+                ++bad[i];
+                if (first[i].empty()) first[i] = name;
+            }
+        }
+    };
+    check("n0", {{0, 0, 0}}, 0, 0);
+    check("n1", {{0, 1, 0}}, 0, 0);
+    check("n2", {{0, 2, 0}}, 0, 0);
+    check("n4+snap", {{0, 4, 4}}, 0, 0);
+    check("n5", {{0, 5, 0}}, 0, 0);
+    check("n9+snap", {{0, 9, 9}}, 0, 0);
+    check("n17", {{0, 17, 0}}, 0, 0);
+    check("n20+snap15", {{0, 20, 15}}, 0, 0);
+    check("2seg 3+5", {{0, 3, 3}, {3, 5, 0}}, 0, 0);
+    check("3seg 1+4+2", {{0, 1, 1}, {1, 4, 4}, {5, 2, 0}}, 0, 0);
+    if (c.k.caps.gdn_replay) {
+        check("replay rec6 keep4 + 3 new", {{0, 3, 0}}, 6, 4);
+        check("replay rec12 keep10 + 0 new", {{0, 0, 0}}, 12, 10);
+        check("replay rec16 keep16 + 4 new", {{0, 4, 0}}, 16, 16);
+    }
+    for (std::size_t i = 0; i < fs.size(); ++i) {
+        Result r;
+        r.name = "gdnn" + std::to_string(fs[i].first) + "_step_norm == shipped gdn_step_norm (out, xq, xd, state, snapshots, pend)";
+        r.kind = Kind::invariant;
+        r.n = runs[i];
+        r.mismatches = bad[i];
+        r.pass = bad[i] == 0;
+        if (!first[i].empty()) r.note = "first mismatch: " + first[i];
+        c.rep.add(r);
     }
 }
 

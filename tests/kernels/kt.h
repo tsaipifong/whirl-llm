@@ -219,6 +219,7 @@ void benchAttnWs4(Ctx& c);  // "ws4bench": timing only, on request
 void testAttnWs4g(Ctx& c);   // "ws4g": gfx1151 attn_ws4g multi-row verify bitwise == single-row
 void benchAttnWs4g(Ctx& c);  // "ws4gbench": timing only, on request
 void testGdn(Ctx& c);
+void testGdnn(Ctx& c);  // "gdnn": bitwise sweep of gdn_step_norm candidates of a dev code object (on request)
 void testVision(Ctx& c);  // "vision": encoder kernels (own code object) vs CPU
 void testMoe(Ctx& c);
 void testMoeMx(Ctx& c);

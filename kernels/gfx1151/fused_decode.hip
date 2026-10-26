@@ -166,6 +166,10 @@ extern "C" __global__ void __launch_bounds__(128)
 // Block = one v head of one segment (grid.y), 512 threads = 128 columns j x
 // 4 key-dim quarters. Thread (j, qi) keeps S[i][j] for i in [32 qi, 32 qi + 32)
 // in registers.
+#ifndef WHIRL_GDNN
+#define WHIRL_GDNN 0
+#endif
+#if !WHIRL_GDNN  // feat026-gdnnorm: a tune id replaces this entry (kernels/gdn_step_t.hip)
 extern "C" __global__ void __launch_bounds__(512)
     gdn_step_norm(const float *qkv, const float *g, const float *beta, const float *z, const float *wn, float *out,
                   int8_t *xq, float *xd, int n_k_heads, float scale, float eps, int n_v_heads, int qkv_stride,
@@ -236,6 +240,11 @@ extern "C" __global__ void __launch_bounds__(512)
 #pragma unroll
     for (int e = 0; e < PER; ++e) Sg[(size_t)(qi * PER + e) * DV + j] = S[e];
 }
+#endif  // !WHIRL_GDNN
+
+// feat026-gdnnorm: the gfx1201 item E schedule ported to gfx1151 (bit-identical) + tune table (WHIRL_GDNN, default 0 = the
+// kernel above)
+#include "../gdn_step_t.hip"
 
 // Dequantize rows `ids[t]` of W into out[t][ncols] (embedding lookup).
 template <int T>

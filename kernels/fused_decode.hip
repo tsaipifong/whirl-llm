@@ -299,6 +299,10 @@ extern "C" __global__ void __launch_bounds__(512)
 // wave per row, with the block_sum / wave_q8 arithmetic of the per-row
 // version (same values, bit for bit). gdn_step_norm_v0 = the per-row version.
 #define GDN_MR 16
+#ifndef WHIRL_GDNN
+#define WHIRL_GDNN 0
+#endif
+#if !WHIRL_GDNN  // feat026-gdnnorm: a tune id replaces this entry (kernels/gdn_step_t.hip)
 extern "C" __global__ void __launch_bounds__(512)
     gdn_step_norm(const float *qkv, const float *g, const float *beta, const float *z, const float *wn, float *out,
                   int8_t *xq, float *xd, int n_k_heads, float scale, float eps, int n_v_heads, int qkv_stride,
@@ -453,4 +457,7 @@ extern "C" __global__ void __launch_bounds__(512)
         for (int e = 0; e < PER; ++e) Sg[(size_t)(qi * PER + e) * DV + j] = S[e];
     }
 }
+#endif  // !WHIRL_GDNN
 
+// feat026-gdnnorm: bit-identical gdn_step_norm candidates + tune table (WHIRL_GDNN, default 0 = the kernel above)
+#include "gdn_step_t.hip"
