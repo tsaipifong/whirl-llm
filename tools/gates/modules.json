@@ -256,6 +256,21 @@
               "Q4_K_M dense golden single on the R9700 (s15-blast GAP3: the Q6_K / Q4_K weight types and matPair contiguity)",
               "DFlash2 drafter loads once (WHIRL_DRAFT_MODEL, --draft dflash: Model::loadDrafter through WeightLoader::dflash)",
               "kvram719_tier both GPUs (allocation budget, hipError 719 history)"]
+  },
+  "model.kv": {
+   "id": "M2", "desc": "qwen35 KV pool and sequence table (R-8b): qwen35::KvPool (kcache / vcache / kscale / vscale, mtp_kc..vs, pool_pages, the KV format: fixFormat once, kv_fmt read-only; allocate / releaseArrays through the Model's allocation ledger), qwen35::SeqTable (seqs, seq_pages, ptab, state_tables, cur_seq, kv_off; mapPages), Seq, kvArrays (the tier page layout, pure; server::KvArr = qwen35::KvArray); Model's KV / sequence functions (allocKvPool, freeKvPool, setupSeqs, selectSeq, ...) in kv.cpp",
+   "paths": ["src/model/qwen35/kv.h", "src/model/qwen35/kv.cpp"], "lands_on": "arch025-m2 (M2)",
+   "steps": ["cpu_model", "cpu_server", "cpu_tier", "st_swift_precise", "st_swift_balance", "st_swift_fast", "st_moe_precise", "st_moe_balance", "st_moe_fast",
+             "seq_swift_precise", "seq_swift_balance", "seq_swift_fast", "seq_moe_precise", "seq_moe_balance",
+             "golden_swift", "golden_moe", "srv_mt_precise", "srv_mt_precise_moe", "srv_tier_verify", "srv_cache_balance"],
+   "gpus": {"st_swift_precise": 2, "st_swift_balance": 2, "st_swift_fast": 2, "st_moe_precise": 2, "st_moe_balance": 2, "st_moe_fast": 2,
+            "seq_swift_precise": 2, "seq_swift_balance": 2, "seq_swift_fast": 2, "seq_moe_precise": 2, "seq_moe_balance": 2,
+            "golden_swift": 2, "golden_moe": 2, "srv_mt_precise": 2, "srv_mt_precise_moe": 2, "srv_tier_verify": 2, "srv_cache_balance": 1},
+   "manual": ["S0b-2 alloc sequence (WHIRL_ALLOC_LOG seqhash and event list, cli and env cells) == the base exe, both GPUs: the KV arrays' order and sizes (MTP first), the single-sequence page table, ~Model's free order (invariant I2); D exec / D kv identical (kv_fmt fixed by Model::load)",
+              "V-size: startup_lines.py check on the server logs (KV pool sizing lines unchanged)",
+              "srv_cache_balance on the R9700 and srv_tier_verify on both GPUs (kvArrays = the tier page layout; page_row == per_tok keeps the RAM tier on)",
+              "V-host pagepool: whirl-host-bench host.pagepool.* within their run-to-run range (mapPages / page table path)",
+              "kvram719_tier both GPUs (pool allocation and resizePool, hipError 719 history)"]
   }
  }
 }

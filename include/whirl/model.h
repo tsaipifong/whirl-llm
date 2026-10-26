@@ -27,6 +27,7 @@
 
 #include "device/handles.h"  // src/: RAII owners of the device / pinned buffers, events and streams (arch024 S11)
 #include "model/qwen35/weights.h"  // src/: Mat, Layer, ..., qwen35::Weights (arch025-M1)
+#include "model/qwen35/kv.h"  // src/: qwen35::KvPool, SeqTable, Seq, kvArrays (arch025-M2)
 #include "whirl/gguf.h"
 #include "whirl/device_profile.h"
 #include "whirl/hip.h"
@@ -364,18 +365,7 @@ struct LoadStats {
 // ---------------------------------------------------------------------------
 // sequences and batched steps
 
-// One sequence (a server slot): recurrent state, KV page-table offset, MTP
-// hidden rows and replay buffer.
-struct Seq {
-    // per-layer state pointers (0 for attention layers); views into tables
-    // owned by the Model, shared with Model::conv_state / ssm_state while selected
-    std::span<DevPtr> conv;
-    std::span<DevPtr> ssm;
-    DevPtr hid = 0;               // normed trunk hidden rows feeding the next MTP step
-    std::uint32_t kv_base = 0;    // offset of this sequence's page table
-    DevPtr pend = 0;              // DeltaNet replay inputs (gdn_replay)
-    std::uint32_t npend = 0;
-};
+// (Seq, one sequence / server slot: src/model/qwen35/kv.h since arch025-M2)
 
 // Batched verify segment: sequence `seq` runs [next, drafts 0 .. nd) at pos ..
 struct VSeg {
@@ -412,7 +402,7 @@ struct BatchPlan {
 
 // Model derives from Weights (tok_embd, embd_host, output, output_norm, layers, mtp, type_bytes, mx_fold_lossy;
 // src/model/qwen35/weights.h, bound by WeightLoader in Model::load / loadDrafter, arch025-M1).
-class Model : public Weights {
+class Model : public Weights, public KvPool, public SeqTable {
 public:
     Model() = default;
     Model(const Model&) = delete;
@@ -519,37 +509,28 @@ public:
     bool out_h16 = false;
 
     // ---- per-layer state
-    std::vector<DevPtr> kcache, vcache, kscale, vscale;
-    // the KV format Model::load chose (kv_choice.kv; arch025-N3: was four bools kv_q8 / kv_rot / kv_kf16 / kv_q4,
-    // now kvQuant / kvRotated / kvKf16 / kvIs4bit of it). q8 before a load (the former bools' initializers).
-    KvFormat kv_fmt = KvFormat::q8;
+    // (arch025-M2: kcache / vcache / kscale / vscale, mtp_kc / _vc / _ks / _vs, pool_pages and the KV format kv_fmt
+    // (kv_choice.kv, fixed by Model::load through KvPool::fixFormat; read-only) are KvPool's, src/model/qwen35/kv.h)
     // flash-decoding split cap (part_ml / part_acc are sized for it): 64; q4 KV 256 (long-context
     // decode is latency bound at 64 splits, so the smaller K / V reads only pay off with more
     // blocks in flight). WHIRL_FD_SPLITS=N (64..256, multiple of 64) overrides.
     std::uint32_t fd_splits = 64;
     std::optional<KvFormat> kv_req;  // the load's request (LoadOptions::kv_req, else WHIRL_KV; nullopt: the mode chose)
-    std::uint32_t pool_pages = 0;
-    std::uint32_t seq_pages = 0;
-    DevPtr ptab = 0;
+    // (arch025-M2: seq_pages, ptab, state_tables, seqs, cur_seq, kv_off are SeqTable's, src/model/qwen35/kv.h)
     // per-layer recurrent state of the current sequence (views; swapping an
     // entry, e.g. restoreSnapshot, updates the selected Seq too)
     std::span<DevPtr> conv_state, ssm_state;
-    std::deque<std::vector<DevPtr>> state_tables;  // backing storage of the views
     std::array<std::vector<DevPtr>, gdn_max_snap> snap_conv, snap_ssm;
     std::uint32_t snap_sets = 0;
     DevPtr gate = 0;
-    std::vector<Seq> seqs;
     bool gdn_replay = false;
     std::vector<std::uint32_t> gdn_ord;
-    std::uint32_t cur_seq = 0;
-    std::uint32_t kv_off = 0;
     std::uint32_t ctl_off = 0;
     DevPtr kvbase_buf = 0;
     const BatchPlan* bplan = nullptr;
     std::span<const PRows> psegs;
     DevPtr mtp_in = 0;
     bool mtp_batch = false;
-    DevPtr mtp_kc = 0, mtp_vc = 0, mtp_ks = 0, mtp_vs = 0;
     DevPtr hn = 0, mtp_cat = 0, mtp_h = 0, mtp_ids = 0;
     bool keep_hidden = false;
     bool all_logits = false;

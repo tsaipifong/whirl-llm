@@ -32,6 +32,8 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 using namespace whirl;
@@ -1675,7 +1677,7 @@ void testKvName() {
     std::vector<std::string> got;
     for (const auto& [fmt, name] : want) {
         q::Model m;
-        m.kv_fmt = fmt;
+        m.fixFormat(fmt);  // (arch025-M2: the format is KvPool's, fixed once)
         got.emplace_back(m.kvName());
         check(got.back() == name, std::format("kv name {}: '{}' == '{}'", whirl::kvFormatName(fmt), got.back(), name));
     }
@@ -1786,7 +1788,7 @@ void testBaselineDumps() {
         CHECK(d.find("D exec: prec_gemvh=0\n") != std::string::npos);
         CHECK(d.find("D exec: prec_gs=2\n") != std::string::npos);
     }
-    m.kv_fmt = whirl::KvFormat::q8h;  // one property changes one line (q8 -> q8h: the rotation)
+    m.fixFormat(whirl::KvFormat::q8h);  // one property changes one line (q8 -> q8h: the rotation)
     const std::string b = q::execDump(m);
     CHECK(b != a);
     CHECK(b.find("D exec: kv_rot=1\n") != std::string::npos);
@@ -1802,8 +1804,9 @@ void testBaselineDumps() {
     }
     // the four KV keys are the properties of the format (arch025-N3: were four Model bools)
     for (const whirl::KvFormat f : {whirl::KvFormat::f16, whirl::KvFormat::q8, whirl::KvFormat::q8h, whirl::KvFormat::q8v, whirl::KvFormat::q4}) {
-        m.kv_fmt = f;
-        const std::string d = q::execDump(m);
+        q::Model mf;  // (arch025-M2: a fresh Model per format, the format is fixed once)
+        mf.fixFormat(f);
+        const std::string d = q::execDump(mf);
         const bool q8 = f != whirl::KvFormat::f16, rot = f == whirl::KvFormat::q8h || f == whirl::KvFormat::q4;
         CHECK(d.find(std::format("D exec: kv_q8={}\nD exec: kv_rot={}\nD exec: kv_kf16={}\nD exec: kv_q4={}\n", q8 ? 1 : 0, rot ? 1 : 0,
                                  f == whirl::KvFormat::q8v ? 1 : 0, f == whirl::KvFormat::q4 ? 1 : 0)) != std::string::npos);
@@ -2877,9 +2880,258 @@ void testWeightBinding() {
     }
 }
 
+
+// arch025-M2 (R-8b): qwen35::KvPool / SeqTable / kvArrays (src/model/qwen35/kv.h) on the host. A fake device side
+// (alloc_zero hands out distinct addresses and logs the size, free logs the address) stands for the Model's ledger.
+// 1) the KV format is fixed once and read-only (compile time: kv_fmt is not assignable; run time: a second fixFormat,
+//    or one after allocate, throws KvFormatFixed); unfixed = q8 (the former initializer);
+// 2) allocate: every array size and the order (MTP layer first, then each attention layer; K, V, K scales, V scales)
+//    against a table written from the format definitions (not from kv_layout.h), for each format x MTP x layer layout;
+//    KvPoolAllocated on a second allocate; pool_pages = whole pages;
+// 3) releaseArrays frees in the same order and zeroes every pointer;
+// 4) kvArrays (the server's tier page layout; arch024 F-6 / mutant Q2): one entry per array in page order, each base
+//    the address allocated for that layer and part, each row the table's bytes, the row sum == kvBytesPerToken;
+// 5) SeqTable::mapPages: offset (kv_base + first) * 4 into ptab, ContextTooLong past seq_pages, nothing for no pages.
+namespace kvt {
+struct FakeDev {
+    std::vector<std::uint64_t> sizes;
+    std::vector<q::DevPtr> addrs, freed;
+    long fail_at = -1;  // this allocation (0-based) throws
+    q::KvPool::Device dev() {
+        return {[this](std::uint64_t n) {
+                    if (static_cast<long>(sizes.size()) == fail_at) throw std::runtime_error("kv test: out of memory");
+                    sizes.push_back(n);
+                    addrs.push_back(0x100000ull * (addrs.size() + 1));
+                    return addrs.back();
+                },
+                [this](q::DevPtr p) { freed.push_back(p); }};
+    }
+};
+// bytes per token row of each part per format (whirl/kv_format.h definitions; 0 = no such array). e = n_head_kv * head_dim
+std::array<std::uint64_t, 4> rowsOf(whirl::KvFormat f, std::uint64_t e) {
+    using F = whirl::KvFormat;
+    switch (f) {
+        case F::f16: return {2 * e, 2 * e, 0, 0};
+        case F::q8: return {e, e, e / 16, e / 16};
+        case F::q8h: return {e, e, e / 16, e / 16};
+        case F::q8v: return {2 * e, e, 0, e / 16};
+        case F::q4: return {e / 2, e / 2, e / 16, e / 16};
+    }
+    return {};
+}
+}  // namespace kvt
+
+void testKvPool() {
+    using F = whirl::KvFormat;
+    // 1) the format
+    static_assert(!std::is_assignable_v<decltype((std::declval<q::Model&>().kv_fmt)), F>, "kv_fmt must be read-only");
+    static_assert(!std::is_copy_assignable_v<q::KvPool> && !std::is_copy_constructible_v<q::KvPool>);
+    {
+        q::Model m;
+        check(m.kv_fmt == F::q8, "kv pool: an unfixed Model reads q8 (the former initializer)");
+        m.fixFormat(F::q4);
+        check(m.kv_fmt == F::q4, "kv pool: fixFormat sets the format");
+        std::string code;
+        try {
+            m.fixFormat(F::f16);
+        } catch (const q::ModelError& e) {
+            code = e.code();
+        }
+        check(code == "KvFormatFixed" && m.kv_fmt == F::q4, "kv pool: a second fixFormat throws KvFormatFixed, format unchanged (got '" + code + "')");
+    }
+    const F fmts[] = {F::f16, F::q8, F::q8h, F::q8v, F::q4};
+    struct Shape {
+        std::uint32_t n_layer, interval, n_head_kv, head_dim;
+    };
+    const Shape shapes[] = {{8, 4, 4, 256}, {10, 4, 2, 256}, {6, 3, 8, 128}, {1, 1, 1, 64}};
+    for (const Shape& sh : shapes)
+        for (const F f : fmts)
+            for (const bool has_mtp : {false, true})
+                for (const std::uint32_t tokens : {1u, 256u, 257u, 4096u}) {
+                    const std::string tag = std::format("kv pool {} L{}/{} kv{}x{} mtp{} tok{}", whirl::kvFormatName(f), sh.n_layer, sh.interval,
+                                                        sh.n_head_kv, sh.head_dim, has_mtp ? 1 : 0, tokens);
+                    q::Model m;
+                    m.cfg.n_layer = sh.n_layer;
+                    m.cfg.interval = sh.interval;
+                    m.cfg.n_head_kv = sh.n_head_kv;
+                    m.cfg.head_dim = sh.head_dim;
+                    if (has_mtp) m.mtp.emplace();
+                    m.kcache.assign(sh.n_layer, 0);
+                    m.vcache.assign(sh.n_layer, 0);
+                    m.kscale.assign(sh.n_layer, 0);
+                    m.vscale.assign(sh.n_layer, 0);
+                    m.fixFormat(f);
+                    kvt::FakeDev d;
+                    const std::uint32_t pages = m.allocate(m.cfg, has_mtp, tokens, d.dev());
+                    const std::uint32_t want_pages = (tokens + q::kv_page - 1) / q::kv_page;
+                    check(pages == want_pages && m.pool_pages == want_pages, tag + ": pages");
+                    // 2) sizes and order
+                    const std::uint64_t e = static_cast<std::uint64_t>(sh.n_head_kv) * sh.head_dim, rows = static_cast<std::uint64_t>(want_pages) * q::kv_page;
+                    const std::array<std::uint64_t, 4> rb = kvt::rowsOf(f, e);
+                    std::vector<std::uint64_t> want_sizes;
+                    std::vector<std::pair<int, int>> owner;  // (layer or -1 = MTP, part)
+                    auto layerWant = [&](int li) {
+                        for (int p = 0; p < 4; ++p)
+                            if (rb[p] != 0) {
+                                want_sizes.push_back(rows * rb[p]);
+                                owner.push_back({li, p});
+                            }
+                    };
+                    if (has_mtp) layerWant(-1);
+                    std::uint64_t per_tok = has_mtp ? rb[0] + rb[1] + rb[2] + rb[3] : 0;
+                    for (std::uint32_t i = 0; i < sh.n_layer; ++i)
+                        if ((i + 1) % sh.interval == 0) {
+                            layerWant(static_cast<int>(i));
+                            per_tok += rb[0] + rb[1] + rb[2] + rb[3];
+                        }
+                    check(d.sizes == want_sizes, tag + ": allocation sizes in order (MTP first; K, V, K scales, V scales)");
+                    auto ptrOf = [&](int li, int p) -> q::DevPtr {
+                        if (li < 0) return p == 0 ? m.mtp_kc : p == 1 ? m.mtp_vc : p == 2 ? m.mtp_ks : m.mtp_vs;
+                        const std::size_t i = static_cast<std::size_t>(li);
+                        return p == 0 ? m.kcache[i] : p == 1 ? m.vcache[i] : p == 2 ? m.kscale[i] : m.vscale[i];
+                    };
+                    bool bound = d.addrs.size() == owner.size();
+                    for (std::size_t j = 0; bound && j < owner.size(); ++j) bound = ptrOf(owner[j].first, owner[j].second) == d.addrs[j];
+                    check(bound, tag + ": each array holds its own allocation");
+                    std::size_t nonzero = 0;
+                    for (std::uint32_t i = 0; i < sh.n_layer; ++i)
+                        nonzero += (m.kcache[i] != 0) + (m.vcache[i] != 0) + (m.kscale[i] != 0) + (m.vscale[i] != 0);
+                    nonzero += (m.mtp_kc != 0) + (m.mtp_vc != 0) + (m.mtp_ks != 0) + (m.mtp_vs != 0);
+                    check(nonzero == owner.size(), tag + ": no other array set");
+                    // 4) kvArrays: page order, bases, rows, sum == the model's KV bytes per token
+                    const std::vector<q::KvArray> ka = q::kvArrays(m, m.cfg, has_mtp);
+                    std::vector<std::pair<int, int>> ka_owner;
+                    for (std::uint32_t i = 0; i < sh.n_layer; ++i)
+                        if ((i + 1) % sh.interval == 0)
+                            for (int p = 0; p < 4; ++p)
+                                if (rb[p] != 0) ka_owner.push_back({static_cast<int>(i), p});
+                    if (has_mtp)
+                        for (int p = 0; p < 4; ++p)
+                            if (rb[p] != 0) ka_owner.push_back({-1, p});
+                    bool kok = ka.size() == ka_owner.size();
+                    std::uint64_t ka_sum = 0;
+                    for (std::size_t j = 0; kok && j < ka.size(); ++j) {
+                        kok = ka[j].base == ptrOf(ka_owner[j].first, ka_owner[j].second) && ka[j].row == rb[static_cast<std::size_t>(ka_owner[j].second)];
+                        ka_sum += ka[j].row;
+                    }
+                    check(kok, tag + ": kvArrays = attention layers then MTP, K, V, K scales, V scales, rows per format");
+                    check(ka_sum == per_tok && ka_sum == m.kvBytesPerToken(),
+                          std::format("{}: kvArrays page row {} == table {} == kvBytesPerToken {}", tag, ka_sum, per_tok, m.kvBytesPerToken()));
+                    // the format is fixed once the pool is allocated; a second allocate is refused
+                    std::string c1, c2;
+                    try {
+                        m.allocate(m.cfg, has_mtp, tokens, d.dev());
+                    } catch (const q::ModelError& x) {
+                        c1 = x.code();
+                    }
+                    check(c1 == "KvPoolAllocated" && d.sizes.size() == want_sizes.size(), tag + ": second allocate -> KvPoolAllocated, nothing allocated");
+                    // 3) release order = allocation order, pointers zeroed; pool_pages stays (Model::freeKvPool's)
+                    m.releaseArrays(m.cfg, d.dev());
+                    check(d.freed == d.addrs, tag + ": releaseArrays frees in allocation order");
+                    std::size_t left = 0;
+                    for (std::uint32_t i = 0; i < sh.n_layer; ++i)
+                        left += (m.kcache[i] != 0) + (m.vcache[i] != 0) + (m.kscale[i] != 0) + (m.vscale[i] != 0);
+                    left += (m.mtp_kc != 0) + (m.mtp_vc != 0) + (m.mtp_ks != 0) + (m.mtp_vs != 0);
+                    check(left == 0 && m.pool_pages == want_pages, tag + ": pointers zeroed, pool_pages left to the caller");
+                    m.releaseArrays(m.cfg, d.dev());
+                    check(d.freed.size() == d.addrs.size(), tag + ": a second release frees nothing");
+                    m.pool_pages = 0;
+                    try {
+                        m.fixFormat(F::f16);
+                    } catch (const q::ModelError& x) {
+                        c2 = x.code();
+                    }
+                    check(c2 == "KvFormatFixed" && m.kv_fmt == f, tag + ": the format stays fixed after allocate");
+                }
+    // an unfixed pool allocates as q8 (old default) and is fixed by it
+    {
+        q::Model m;
+        m.cfg.n_layer = 4;
+        m.cfg.interval = 4;
+        m.cfg.n_head_kv = 4;
+        m.cfg.head_dim = 256;
+        m.kcache.assign(4, 0);
+        m.vcache.assign(4, 0);
+        m.kscale.assign(4, 0);
+        m.vscale.assign(4, 0);
+        kvt::FakeDev d;
+        m.allocate(m.cfg, false, 256, d.dev());
+        check(d.sizes == std::vector<std::uint64_t>{256 * 1024, 256 * 1024, 256 * 64, 256 * 64}, "kv pool: unfixed allocates q8");
+        bool threw = false;
+        m.pool_pages = 0;
+        try {
+            m.fixFormat(F::q4);
+        } catch (const q::ModelError&) {
+            threw = true;
+        }
+        check(threw, "kv pool: allocate fixes the format");
+    }
+    // an allocation that throws part way: pool_pages stays 0, the arrays allocated so far are set (the server's
+    // resizePool then sets pool_pages = 1 and frees them)
+    for (long fail = 0; fail < 4; ++fail) {
+        q::Model m;
+        m.cfg.n_layer = 4;
+        m.cfg.interval = 2;
+        m.cfg.n_head_kv = 4;
+        m.cfg.head_dim = 256;
+        m.kcache.assign(4, 0);
+        m.vcache.assign(4, 0);
+        m.kscale.assign(4, 0);
+        m.vscale.assign(4, 0);
+        m.fixFormat(F::q8);
+        kvt::FakeDev d;
+        d.fail_at = 2 + fail;
+        bool threw = false;
+        try {
+            m.allocate(m.cfg, false, 512, d.dev());
+        } catch (const std::runtime_error&) {
+            threw = true;
+        }
+        check(threw && m.pool_pages == 0 && d.addrs.size() == static_cast<std::size_t>(2 + fail),
+              std::format("kv pool: allocation {} throws -> pool_pages 0, {} arrays kept for the caller to free", 2 + fail, 2 + fail));
+        m.releaseArrays(m.cfg, d.dev());
+        check(d.freed == d.addrs, "kv pool: the partial pool is released in order");
+    }
+}
+
+void testSeqTableMapPages() {
+    q::SeqTable t;
+    t.seq_pages = 8;
+    t.ptab = 0x40000;
+    t.seqs.resize(3);
+    t.seqs[0].kv_base = 0;
+    t.seqs[1].kv_base = 8;
+    t.seqs[2].kv_base = 16;
+    struct Up {
+        q::DevPtr dst;
+        std::vector<std::int32_t> v;
+    };
+    std::vector<Up> ups;
+    const auto up = [&](q::DevPtr dst, const void* src, std::size_t n) {
+        const auto* p = static_cast<const std::int32_t*>(src);
+        ups.push_back({dst, std::vector<std::int32_t>(p, p + n / 4)});
+    };
+    const std::int32_t ph[] = {5, 9, 2};
+    t.mapPages(2, 3, ph, up);
+    check(ups.size() == 1 && ups[0].dst == 0x40000 + (16 + 3) * 4 && ups[0].v == std::vector<std::int32_t>{5, 9, 2}, "seq table: mapPages offset (kv_base + first) * 4");
+    t.mapPages(1, 7, std::span<const std::int32_t>(ph, 0), up);
+    check(ups.size() == 1, "seq table: no pages, no upload");
+    std::string code;
+    try {
+        t.mapPages(1, 6, ph, up);
+    } catch (const q::ModelError& e) {
+        code = e.code();
+    }
+    check(code == "ContextTooLong" && ups.size() == 1, "seq table: past seq_pages -> ContextTooLong, nothing written");
+    t.mapPages(0, 5, ph, up);
+    check(ups.size() == 2 && ups[1].dst == 0x40000 + 5 * 4, "seq table: the last pages of a sequence");
+}
+
 int main() {
     whirl::test::clearWhirlEnv();  // FR-TEST P3-11
     testKvLayout();
+    testKvPool();  // arch025-M2
+    testSeqTableMapPages();  // arch025-M2
     testWeightBinding();  // arch025-M1
     testKvName();
     testKvPerToken();

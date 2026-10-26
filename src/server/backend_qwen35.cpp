@@ -5,7 +5,6 @@
 #include "vision_iface.h"
 
 #include "whirl/hip.h"
-#include "whirl/kv_layout.h"
 
 namespace whirl::server {
 
@@ -38,26 +37,9 @@ public:
     bool fusedDecode() const override { return m_.fusedDecode(); }
     bool canSegment() const override { return m_.canSegment(); }
 
-    // KV pool arrays of every attention layer then the MTP layer, in the
-    // order of a tier entry's page layout: K, V, K scales (q8 / q8h), V scales (q8*); rows from whirl/kv_layout.h
-    // (the same definition as Model::kvBytesPerToken, arch024-S11c F-6).
-    std::vector<KvArr> kvArrays() const override {
-        std::vector<KvArr> out;
-        const std::uint64_t elems = static_cast<std::uint64_t>(m_.cfg.n_head_kv) * m_.cfg.head_dim;
-        const kv::LayerRows L = kv::layerRows(elems, m_.kv_fmt);
-        const auto layer = [&](DevPtr k, DevPtr v, DevPtr ks, DevPtr vs) {
-            for (std::size_t j = 0; j < L.n; ++j) {
-                const kv::Part p = L.a[j].part;
-                out.push_back({p == kv::Part::k ? k : p == kv::Part::v ? v : p == kv::Part::k_scale ? ks : vs, L.a[j].bytes});
-            }
-        };
-        for (std::uint32_t i = 0; i < m_.cfg.n_layer; ++i) {
-            if (!m_.cfg.isAttn(i)) continue;
-            layer(m_.kcache[i], m_.vcache[i], m_.kscale[i], m_.vscale[i]);
-        }
-        if (m_.mtp) layer(m_.mtp_kc, m_.mtp_vc, m_.mtp_ks, m_.mtp_vs);
-        return out;
-    }
+    // KV pool arrays of every attention layer then the MTP layer, in the order of a tier entry's page layout
+    // (qwen35::kvArrays, src/model/qwen35/kv.h: pure, tested on the CPU against whirl/kv_layout.h; arch025-M2)
+    std::vector<KvArr> kvArrays() const override { return qwen35::kvArrays(m_, m_.cfg, m_.mtp.has_value()); }
 
     bool resizePool(std::uint32_t tokens) override {
         const std::uint32_t old = m_.pool_pages * qwen35::kv_page;

@@ -29,11 +29,8 @@ using qwen35::VSeg;
 
 // One KV pool array (every attention layer, then the MTP layer): base
 // address and bytes per token row. Page p of the array is at
-// base + p * kv_page * row.
-struct KvArr {
-    DevPtr base = 0;
-    std::uint64_t row = 0;
-};
+// base + p * kv_page * row. (arch025-M2: the model's qwen35::KvArray, src/model/qwen35/kv.h)
+using KvArr = qwen35::KvArray;
 
 class ServerModel {
 public:

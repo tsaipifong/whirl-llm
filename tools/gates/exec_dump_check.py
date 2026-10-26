@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 """exec_dump_check.py (arch025-S0a): every scalar data member of qwen35::Model (include/whirl/model.h; since arch025-M1
-also of its base qwen35::Weights, src/model/qwen35/weights.h) is either
+also of its base qwen35::Weights, src/model/qwen35/weights.h; since arch025-M2 of its bases qwen35::KvPool and
+qwen35::SeqTable, src/model/qwen35/kv.h) is either
 printed by WHIRL_DUMP_EXEC (src/model/exec_dump.cpp reads it as m.<name>) or named here as per-call state. A member
 added to Model without either fails, so the S0b-2 dump cannot silently miss a new numerics flag.
 
@@ -22,10 +23,17 @@ PER_CALL = {"row_n", "fwd_pos0", "xq_n", "x16_count", "x16_fp8", "cur_seq", "kv_
 SCALAR = (r"(?:bool|float|double|int|unsigned|std::u?int(?:8|16|32|64)_t|u32|std::size_t|KvFormat|std::optional<KvFormat>|hip::Arch|"
           r"GemvR|GemvW|whirl::relax::Params|whirl::numerics::(?:Request|Plan|KvChoice)|std::array<std::uint64_t,\s*n_types>)")
 DECL = re.compile(r"^    (?:static\s+constexpr\s+)?" + SCALAR + r"\s+(.+?);")
+# arch025-M2: KvPool's read-only format, `const KvFormat& kv_fmt = fmt_;` (dumped as kv_q8 / kv_rot / kv_kf16 / kv_q4)
+REF = re.compile(r"^    const KvFormat&\s+([a-z_][a-z0-9_]*)\s*=")
+# arch025-M2: private storage behind a dumped public name (not dumped itself, by design)
+BY_DESIGN = {"fmt_": "KvPool's storage of kv_fmt (dumped through m.kv_fmt)",
+             "fixed_": "KvPool::fixFormat's once-guard (true after every Model::load)"}
 
 
 CLASS_MODEL = re.compile(r"^class Model\b[^{;]*\{", re.M)
 STRUCT_WEIGHTS = re.compile(r"^struct Weights \{", re.M)
+CLASS_KVPOOL = re.compile(r"^class KvPool \{", re.M)
+STRUCT_SEQTABLE = re.compile(r"^struct SeqTable \{", re.M)
 
 
 def body_of(text: str, head: re.Pattern) -> str:
@@ -40,9 +48,17 @@ def members(model_h: str, weights_h: str = "") -> list[str]:
     body = body_of(model_h, CLASS_MODEL)
     if weights_h:  # arch025-M1: class Model : public Weights (src/model/qwen35/weights.h)
         body += "\n" + body_of(weights_h, STRUCT_WEIGHTS)
+        # arch025-M2: ... public KvPool, public SeqTable (src/model/qwen35/kv.h, appended by weights_text)
+        for head in (CLASS_KVPOOL, STRUCT_SEQTABLE):
+            if head.search(weights_h):
+                body += "\n" + body_of(weights_h, head)
     out = []
     for line in body.split("\n"):
         line = line.split("//")[0]
+        r = REF.match(line)
+        if r:
+            out.append(r.group(1))
+            continue
         m = DECL.match(line)
         if not m or "(" in m.group(1) or "static constexpr" in line:
             continue
@@ -59,17 +75,23 @@ def check(model_h: str, dump_cpp: str, out=print, weights_h: str = "") -> int:
         out(f"exec dump check: FAIL (usage: only {len(ms)} members parsed from model.h)")
         return 2
     used = set(re.findall(r"\bm\.([a-z_][a-z0-9_]*)", dump_cpp)) | set(re.findall(r"WD_[BU]\(([a-z_][a-z0-9_]*)\)", dump_cpp))
-    missing = [n for n in ms if n not in used and n not in PER_CALL]
+    missing = [n for n in ms if n not in used and n not in PER_CALL and n not in BY_DESIGN]
     for n in missing:
         out(f"  NOT DUMPED Model::{n}: print it in src/model/exec_dump.cpp or list it in PER_CALL here (per-call state)")
     stale = sorted(n for n in PER_CALL if n not in ms)
     for n in stale:
         out(f"  STALE PER_CALL {n}: not a Model member any more")
+    stale_bd = sorted(n for n in BY_DESIGN if n not in ms) if weights_h and CLASS_KVPOOL.search(weights_h) else []
+    for n in stale_bd:
+        out(f"  STALE BY_DESIGN {n}: not a KvPool member any more")
+    stale += stale_bd
     if missing or stale:
         out(f"exec dump check: FAIL ({len(missing)} not dumped, {len(stale)} stale, {len(ms)} scalar members)")
         return 1
-    out(f"exec dump check: ok ({len(ms)} scalar members: {len(ms) - len([n for n in ms if n in PER_CALL])} dumped, "
-        f"{len([n for n in ms if n in PER_CALL])} per-call)")
+    n_pc = len([n for n in ms if n in PER_CALL])
+    n_bd = len([n for n in ms if n in BY_DESIGN])
+    out(f"exec dump check: ok ({len(ms)} scalar members: {len(ms) - n_pc - n_bd} dumped, {n_pc} per-call"
+        + (f", {n_bd} by design)" if n_bd else ")"))
     return 0
 
 
@@ -97,6 +119,13 @@ def selftest(root: str) -> int:
         wat = STRUCT_WEIGHTS.search(w).end() + 1
         cases.append(("a new Weights member fails", h, d, 1, w[:wat] + "    std::uint64_t m1_new_count = 0;\n" + w[wat:]))
         cases.append(("type_bytes dropped from the dump fails", h, d.replace("m.type_bytes", "m.tb_gone"), 1, w))
+    if w and CLASS_KVPOOL.search(w):  # arch025-M2: the members of the bases KvPool / SeqTable count too
+        kat = w.index("    std::uint32_t pool_pages = 0;\n")
+        cases.append(("a new KvPool member fails", h, d, 1, w[:kat] + "    std::uint32_t m2_new_pages = 0;\n" + w[kat:]))
+        cases.append(("pool_pages dropped from the dump fails", h, d.replace("WD_U(pool_pages);", ""), 1, w))
+        sat = STRUCT_SEQTABLE.search(w).end() + 1
+        cases.append(("a new SeqTable member fails", h, d, 1, w[:sat] + "    bool m2_seq_flag = false;\n" + w[sat:]))
+        cases.append(("kv_fmt dropped from the dump fails", h, d.replace("m.kv_fmt", "m.kvf_gone"), 1, w))
     if drop not in d:
         print(f"exec dump check selftest: FAIL (exec_dump.cpp has no {drop.strip()!r} line to drop)")
         return 1
@@ -114,8 +143,13 @@ def selftest(root: str) -> int:
 
 
 def weights_text(root: str) -> str:
-    p = os.path.join(root, "src", "model", "qwen35", "weights.h")
-    return open(p, encoding="utf-8").read() if os.path.exists(p) else ""
+    # the bases' headers: weights.h (arch025-M1), kv.h (arch025-M2)
+    out = ""
+    for f in ("weights.h", "kv.h"):
+        p = os.path.join(root, "src", "model", "qwen35", f)
+        if os.path.exists(p):
+            out += open(p, encoding="utf-8").read() + "\n"
+    return out
 
 
 def main(argv: list[str]) -> int:

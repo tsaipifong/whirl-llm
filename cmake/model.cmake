@@ -23,6 +23,7 @@ if(WHIRL_WITH_HIP)
     ${CMAKE_SOURCE_DIR}/src/model/kernels.cpp
     ${CMAKE_SOURCE_DIR}/src/model/loader.cpp
     ${CMAKE_SOURCE_DIR}/src/model/qwen35/weights.cpp
+    ${CMAKE_SOURCE_DIR}/src/model/qwen35/kv.cpp
     ${CMAKE_SOURCE_DIR}/src/model/forward/run.cpp
     ${CMAKE_SOURCE_DIR}/src/model/forward/mtp_verify.cpp
     ${CMAKE_SOURCE_DIR}/src/model/forward/prefill.cpp
