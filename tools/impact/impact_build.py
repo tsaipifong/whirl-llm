@@ -63,7 +63,7 @@ PATHS = {
     "server.mtp":        {"roots": ["Engine::pickDrafts", "Engine::splitDrafts", "planSlotDrafts", "Engine::draftCap"], "metric": "tg",
                           "desc": "server MTP / n-gram draft allocation and acceptance"},
     # arch025-E1a: the draws and the Acceptor live in src/sampling (free functions / Acceptor); prepareRow stays on Engine
-    "server.sampling":   {"roots": ["sampleRow", "filterCands", "Engine::prepareRow", "probOf", "sampleRace", "Acceptor::greedy",
+    "server.sampling":   {"roots": ["sampleRow", "filterCands", "Engine::prepareRow", "probOf", "sampling::sampleRace", "Acceptor::greedy",
                                     "Acceptor::sample"],
                           "metric": "tg", "desc": "sampling and speculative sampling"},
     "server.loop":       {"roots": ["Engine::runLoop", "Engine::submitAndWait"], "metric": None, "depth": 0,
@@ -325,6 +325,11 @@ def build(root):
             q2 = "::".join(fn.name.split("::")[-2:])
             if q2 != fn.name:
                 by_qual[q2].append(nid)
+            # namespace-qualified names (toolfix): a root `sampling::sampleRace` names one function even when
+            # spec::sampleRace exists. Used for root resolution ONLY: call edges stay name-based (over-select is the safe side)
+            if fn.ns:
+                for q3 in {f"{fn.ns.split('::')[-1]}::{fn.name}", f"{fn.ns}::{fn.name}"}:
+                    by_qual[q3].append(nid)
     # class bases (class X : public Y) and the identifiers each file can see (itself + its local includes)
     bases = defaultdict(set)
     classes = set()

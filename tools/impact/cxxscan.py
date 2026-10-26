@@ -39,6 +39,7 @@ class Func:
     calls: set = field(default_factory=set)
     members: set = field(default_factory=set)
     idents: set = field(default_factory=set)
+    ns: str = ""       # enclosing namespace chain, e.g. "whirl::sampling" (used only to resolve qualified PATHS roots)
 
 
 @dataclass
@@ -230,7 +231,8 @@ def scan(raw: str) -> FileScan:
                     hl = cur_line - header[len(header.rstrip()):].count("\n") - hs.count("\n")
                     stack.append(("func", fname, i, max(1, hl)))
                 elif re.match(r"^(?:inline\s+)?namespace\b", hs) or re.match(r'^extern\s+"?C?', hs) or hs.startswith("extern"):
-                    stack.append(("ns", None, i, cur_line))
+                    nm = re.match(r"^(?:inline\s+)?namespace\s+([A-Za-z_][\w:\s]*?)\s*$", hs)
+                    stack.append(("ns", _ws.sub("", nm.group(1)) if nm else "", i, cur_line))
                 elif re.search(r"\b(class|struct|union)\s+(?:alignas\([^)]*\)\s*)?([A-Za-z_]\w*)[^(){};]*$", _untemplate(hs)):
                     # arch024-S12 (review N5): `template <class T> struct Foo {` names Foo, not T
                     m = re.search(r"\b(class|struct|union)\s+(?:alignas\([^)]*\)\s*)?([A-Za-z_]\w*)[^(){};]*$", _untemplate(hs))
@@ -247,7 +249,8 @@ def scan(raw: str) -> FileScan:
                     cls = [s[1] for s in stack if s[0] == "class"]
                     q = "::".join(cls + [name]) if cls and "::" not in name else name
                     body = clean[spos:i]
-                    f = Func(name=q, short=name.split("::")[-1], start=sline, end=cur_line)
+                    f = Func(name=q, short=name.split("::")[-1], start=sline, end=cur_line,
+                             ns="::".join(s[1] for s in stack if s[0] == "ns" and s[1]))
                     # local callables (lambdas, std::function variables) are not calls to other functions
                     local = {x for t in _local_callable.findall(body) for x in t if x}
                     for m in _ident_call.finditer(body):
