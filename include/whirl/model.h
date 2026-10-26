@@ -360,7 +360,8 @@ public:
     whirl::numerics::Request num_req;
     whirl::numerics::Plan num_plan;
     // arch025-N2b (R-5): the execution flags are the plan's (numerics::Flags, include/whirl/numerics.h; decided by
-    // numerics::plan in loadOrTune, the front end's after-load knobs by numerics::applyFront). Read them through nf().
+    // numerics::plan in loadOrTune, the front end's after-load knobs by numerics::applyFront; the five load-time ones also
+    // by applyLoadFlags in Model::load, arch025-N2b-r2). Read them through nf().
     // The only other writers are the tune / selftest probes in tune.cpp (save, run a kernel, restore). Notes moved here
     // from the old members:
     //   attn_wide: verify attention: groups of up to 32 columns (attn_wsplit2) when that lets a sequence's rows share one K/V pass (WHIRL_ATTN_WIDE=0: <= 16 columns as before)
@@ -722,6 +723,10 @@ void loadOrTune(Model& m, const std::string& model_path, std::string& log);
 // WHIRL_GDN_V0 looks the kernel up itself, as before)
 whirl::numerics::Target numericsTarget(const Model& m);
 whirl::numerics::Request numericsRequest(const Model& m, const whirl::config::EnvSnapshot& env);
+// arch025-N2b-r2: the load-time flags (numerics::loaderFlags: fp8_prefill, moe_fp8, moe_mxw, moe_wide, moe_rbf) from
+// m.num_req and the load's snapshot into m.num_plan.flags. Model::load calls it on every load, so the commands that
+// never call loadOrTune (selftest, dflash-check) run with them; loadOrTune's plan then sets every flag again.
+void applyLoadFlags(Model& m);
 
 // Multi-token GEMV selection overrides (A/B testing), as "nt:value,..." lists:
 // rows per wave (r = 1, 2, 4), WMMA variant for every type (0..8), and the

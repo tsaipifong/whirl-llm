@@ -160,7 +160,7 @@ void Model::allocScratch(u32 fd_splits_) {
     // GDN prefill x16b (fp8 rows + f16 rows from one norm) must fit in x16 for any batch > 16
     if (B > 16 && m.x16bOff() + B * cfg.n_embd * 2 > m.x16_bytes) throw ModelError("X16bOverflow");
     m.sx8 = m.alloc(B * 4);
-    // (arch025-N2b: fp8_prefill is numerics::plan's, in loadOrTune: the item fp8, WHIRL_FP8 overrides)
+    // (fp8_prefill: applyLoadFlags in Model::load, arch025-N2b-r2; WHIRL_FP8 overrides in loadOrTune)
     if (cfg.moe) {
         const u64 Kx = cfg.n_expert_used;
         const u64 F = cfg.n_ff_exp;

@@ -326,12 +326,8 @@ std::uint32_t srvU32(const Raw& v, std::uint32_t def) {
 // loader.cpp:548-553 and :743, then tune.cpp:850-914 (before the numerics block)
 void loadFlags(const Request& r, const Target& t, Flags& F) {
     const EnvValues& e = r.env;
-    // loader.cpp:743 (fp8_prefill) and :550-553
-    F.fp8_prefill = r.has(Item::fp8);
-    F.moe_fp8 = flagOr(e.moe_fp8, r.has(Item::moefp8));
-    F.moe_mxw = flagOr(e.moe_mxw, true);
-    F.moe_wide = flagOr(e.moe_wide, false);
-    F.moe_rbf = flagOr(e.moe_rbf, true);
+    // loader.cpp:743 (fp8_prefill) and :550-553 (arch025-N2b-r2: numerics::loaderFlags, which Model::load also applies)
+    numerics::loaderFlags(r, F);
     // tune.cpp:852-861
     if (e.fp8) F.fp8_prefill = *e.fp8 != "0";
     if (e.fp8 && *e.fp8 == "0") F.moe_fp8 = false;
@@ -479,6 +475,16 @@ void runtimeFlags(Front front, const RuntimeValues& v, bool k_gdn_v0, Flags& F) 
 }
 
 }  // namespace
+
+// loader.cpp:537-540 and :730 before arch025-N2b (envFlag = flagOr)
+void loaderFlags(const Request& r, Flags& F) {
+    const EnvValues& e = r.env;
+    F.fp8_prefill = r.has(Item::fp8);
+    F.moe_fp8 = flagOr(e.moe_fp8, r.has(Item::moefp8));
+    F.moe_mxw = flagOr(e.moe_mxw, true);
+    F.moe_wide = flagOr(e.moe_wide, false);
+    F.moe_rbf = flagOr(e.moe_rbf, true);
+}
 
 Plan plan(const Request& r_in, const Target& t) {
     const Request r = forModel(r_in, t.moe);
