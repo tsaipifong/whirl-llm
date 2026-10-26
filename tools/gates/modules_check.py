@@ -10,6 +10,13 @@ FAIL (exit 1): status not marked dev-only; a module without id / steps (and not 
 gate nor pending; a pending step that is in the gate (stale); a when-step not in the gate; a module with paths of which
 none is in the tree and no lands_on; a file of the tree claimed by two modules. Tolerated (printed): a module whose files
 are not in the tree but that has lands_on, a module with no paths yet. Exit 0 = "modules check: ok".
+Standards (arch025-Q7, check_standards): FAIL when a module has no standards.modules entry (exact name or a glob such as
+platform.*), an entry has no refactor proof, names an undeclared kind / class or a metric key that is not host.* /
+stage.* / tier.* / kern.*, has no metrics and no metrics_none reason, misses a mt-p3 metric of the same module, a kind
+has no compare / bitwise, a class required by name (refactor / precise / balance / fast) is missing, balance or fast
+allow bitwise, a class that allows bitwise is neither refactor nor precise-only, a no-bitwise class lists a bitwise
+kind (three-mode standard: bit-identity only for precise and behaviour-preserving refactors), refactor lists no bitwise
+kind, a class's required kind is missing, or a Q7 field holds a numeric threshold (numbers stay in the measuring tools).
 modules.json is dev-time fast feedback only until the owner signs off O1 / O2 (arch024 PLAN).
 """
 from __future__ import annotations
@@ -19,6 +26,7 @@ import fnmatch
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -54,6 +62,128 @@ def gate_steps():
         raise SystemExit(f"modules check: release_gate.ps1 -List failed (exit {r.returncode}, {len(steps)} steps)")
     # 8060s-only / r9700-only steps: none differ today except dfl_* (needs WHIRL_GATE_DENSE); modules do not use them
     return set(steps)
+
+
+MODES = {"precise", "balance", "fast"}
+NAMED_CLASSES = ("refactor", "precise", "balance", "fast")
+METRIC_RE = re.compile(r"^(host|stage|tier|kern)\.[a-z0-9_]+(\.[a-z0-9_]+)*$")
+NUMBER_RES = (re.compile(r"\d\s*%"), re.compile(r"[<>]=?\s*\d"),
+              re.compile(r"\b\d+(\.\d+)?\s*(ms|us|ns|tok/s|GB/s|GB|MB|KiB|MiB|GiB|x)\b"))
+
+
+def _strings(v):
+    if isinstance(v, str):
+        yield v
+    elif isinstance(v, dict):
+        for k, x in v.items():
+            yield str(k)
+            yield from _strings(x)
+    elif isinstance(v, list):
+        for x in v:
+            yield from _strings(x)
+
+
+def _is_glob(k):
+    return any(c in k for c in "*?[")
+
+
+def standard_of(mods_std, name):
+    """standards.modules entry of a module: the exact name first, then the first glob key that matches"""
+    if name in mods_std:
+        return name, mods_std[name]
+    for k, v in mods_std.items():
+        if _is_glob(k) and fnmatch.fnmatch(name, k):
+            return k, v
+    return None, None
+
+
+def check_standards(mj, mods):
+    """arch025-Q7: every module has a standard (metric keys; per behaviour class the measurement kinds); no numbers"""
+    errs, notes = [], []
+    std = mj.get("standards") or {}
+    kinds, classes, mstd = std.get("kinds") or {}, std.get("classes") or {}, std.get("modules") or {}
+    if not kinds or not classes or not mstd:
+        return ["standards: needs kinds, classes and modules (arch025-Q7)"], notes
+    for k, d in kinds.items():
+        if not isinstance(d, dict) or not d.get("compare") or not isinstance(d.get("bitwise"), bool):
+            errs.append(f"standards kind {k}: needs compare and bitwise (true / false)")
+    bitwise = {k for k, d in kinds.items() if isinstance(d, dict) and d.get("bitwise") is True}
+    for c in NAMED_CLASSES:
+        if c not in classes:
+            errs.append(f"standards: class {c} missing")
+    for c, d in classes.items():
+        modes = set(d.get("modes") or [])
+        if not modes or not modes <= MODES:
+            errs.append(f"standards class {c}: modes must be a non-empty subset of {sorted(MODES)}")
+        ab = d.get("allow_bitwise")
+        if not isinstance(ab, bool):
+            errs.append(f"standards class {c}: allow_bitwise must be true / false")
+        if c in ("balance", "fast") and ab is not False:
+            errs.append(f"standards class {c}: allow_bitwise must be false (three-mode standard: {c} is judged by task accuracy)")
+        if ab is True and c != "refactor" and modes != {"precise"}:
+            errs.append(f"standards class {c}: only refactor or a precise-only class may be proved bitwise")
+        for r in d.get("requires") or []:
+            if r not in kinds:
+                errs.append(f"standards class {c}: requires unknown kind {r}")
+    for name in mods:
+        key, e = standard_of(mstd, name)
+        if e is None:
+            errs.append(f"{name}: no standards entry (standards.modules.{name} or a glob): metric keys + refactor proof kinds")
+            continue
+        if key != name:
+            notes.append(f"{name}: standard from standards.modules.{key}")
+        p3 = std.get(name)
+        if isinstance(p3, dict) and key == name and isinstance(e, dict):
+            have = set(e.get("metrics") or [])
+            for m in p3.get("metrics") or []:
+                m0 = str(m).split(" (")[0].strip()
+                if m0 not in have:
+                    errs.append(f"{name}: mt-p3 metric {m0} (standards.{name}) missing from standards.modules.{name}.metrics")
+    for key, e in mstd.items():
+        if not isinstance(e, dict):
+            errs.append(f"standards.modules.{key}: must be an object")
+            continue
+        if key not in mods and not (_is_glob(key) and any(fnmatch.fnmatch(n, key) for n in mods)):
+            notes.append(f"standards.modules.{key}: declared before its module (no module of that name yet)")
+        ms = e.get("metrics")
+        if not isinstance(ms, list):
+            errs.append(f"standards.modules.{key}: metrics must be a list")
+            ms = []
+        for m in ms:
+            if not isinstance(m, str) or not METRIC_RE.match(m):
+                errs.append(f"standards.modules.{key}: metric {m!r} is not a host.* / stage.* / tier.* / kern.* key")
+        if not ms and not e.get("metrics_none"):
+            errs.append(f"standards.modules.{key}: no metrics and no metrics_none reason")
+        proof = e.get("proof") or {}
+        if "refactor" not in proof:
+            errs.append(f"standards.modules.{key}: no refactor proof (0.2.5 modules are behaviour-preserving moves)")
+        for c, ks in proof.items():
+            if c not in classes:
+                errs.append(f"standards.modules.{key}: unknown class {c}")
+                continue
+            ks = list(ks or [])
+            if not ks:
+                errs.append(f"standards.modules.{key}: class {c} lists no kinds")
+            for k in ks:
+                if k not in kinds:
+                    errs.append(f"standards.modules.{key}: class {c}: unknown kind {k}")
+            if classes[c].get("allow_bitwise") is not True:
+                bad = [k for k in ks if k in bitwise]
+                if bad:
+                    errs.append(f"standards.modules.{key}: class {c} lists bitwise kind(s) {bad}: {c} is never judged bitwise (three-mode standard)")
+            if classes[c].get("requires_bitwise") and ks and not any(k in bitwise for k in ks):
+                errs.append(f"standards.modules.{key}: class {c} lists no bitwise kind (a behaviour-preserving change is proved bit-identical)")
+            for r in classes[c].get("requires") or []:
+                if r not in ks:
+                    errs.append(f"standards.modules.{key}: class {c} must list kind {r}")
+    for part in ("kinds", "classes", "modules", "_doc_q7"):
+        for t in _strings(std.get(part)):
+            for rx in NUMBER_RES:
+                mt = rx.search(t)
+                if mt:
+                    errs.append(f"standards.{part}: numeric threshold {mt.group(0)!r} in {t[:60]!r} (numbers stay in the measuring tools / results.db)")
+                    break
+    return errs, notes
 
 
 def check(mj, files, steps):
@@ -99,6 +229,10 @@ def check(mj, files, steps):
             notes.append(f"{n} ({d.get('id')}): no paths yet (lands on {d.get('lands_on')})")
         else:
             notes.append(f"{n} ({d.get('id')}): {len(present)} file(s): {', '.join(present[:4])}{' ...' if len(present) > 4 else ''}")
+    if mods:
+        e2, n2 = check_standards(mj, mods)
+        errs += e2
+        notes += n2
     return errs, notes
 
 

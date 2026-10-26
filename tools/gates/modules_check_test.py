@@ -23,13 +23,40 @@ BASE = {"status": "dev-only: test", "modules": {
           "when": {"include/whirl/prefill_schedule.h": ["seq_swift_precise"]}},
     "later": {"id": "MB", "paths": ["src/server/later.*"], "lands_on": "branch-x", "steps": ["cpu_server"],
               "pending": [{"step": "cpu_future", "lands_in": "S99"}]},
-    "x": {"id": "X", "paths": ["src/device/backend.h"], "lands_on": "n/a", "full": True}}}
+    "x": {"id": "X", "paths": ["src/device/backend.h"], "lands_on": "n/a", "full": True}},
+    # arch025-Q7: standards (kinds / classes / per-module metric keys + proof kinds; no numbers)
+    "standards": {
+        "a": {"metrics": ["host.ckpt.save"], "rel": "mt-p3 entry (numbers allowed outside the Q7 parts)"},
+        "kinds": {"exit_rule": {"compare": "rule", "bitwise": False}, "golden_exact": {"compare": "exact", "bitwise": True},
+                  "work_trace": {"compare": "exact", "bitwise": True}, "stage_time": {"compare": "distribution", "bitwise": False},
+                  "task_accuracy": {"compare": "task_accuracy", "bitwise": False}, "kl_guard": {"compare": "diagnostic", "bitwise": False}},
+        "classes": {"refactor": {"modes": ["precise", "balance", "fast"], "allow_bitwise": True, "requires_bitwise": True},
+                    "precise": {"modes": ["precise"], "allow_bitwise": True, "requires": ["golden_exact"]},
+                    "balance": {"modes": ["balance"], "allow_bitwise": False, "requires": ["task_accuracy"]},
+                    "fast": {"modes": ["fast"], "allow_bitwise": False, "requires": ["task_accuracy"]}},
+        "modules": {
+            "a": {"metrics": ["host.ckpt.save", "stage.layer.attn"],
+                  "proof": {"refactor": ["exit_rule", "golden_exact", "work_trace", "stage_time"],
+                            "precise": ["golden_exact", "stage_time"],
+                            "balance": ["task_accuracy", "kl_guard", "stage_time"],
+                            "fast": ["task_accuracy", "kl_guard", "stage_time"]}},
+            "later": {"metrics": [], "metrics_none": "no bench key", "proof": {"refactor": ["exit_rule", "golden_exact"]}},
+            "x": {"metrics": ["stage.decode_step"], "proof": {"refactor": ["golden_exact", "work_trace"]}},
+            "plat.*": {"metrics": [], "metrics_none": "family default", "proof": {"refactor": ["exit_rule", "golden_exact"]}}}}}
 
 
 def mut(f):
     d = copy.deepcopy(BASE)
     f(d["modules"])
     return d
+
+
+def smut(f):
+    """mutate the standards section (arch025-Q7 cases)"""
+    d = copy.deepcopy(BASE)
+    f(d["standards"], d["modules"])
+    return d
+
 
 
 CASES = [  # name, modules json, expect ok, substring of an error (block cases)
@@ -44,6 +71,30 @@ CASES = [  # name, modules json, expect ok, substring of an error (block cases)
     ("block: no id", mut(lambda m: m["a"].pop("id")), False, "no id"),
     ("pass: callers rdeps / list", mut(lambda m: (m["a"].update(callers="rdeps"), m["later"].update(callers=["a"]))), True, None),
     ("block: callers names an unknown module", mut(lambda m: m["a"].update(callers=["nope"])), False, "callers must be"),
+    # arch025-Q7 standards: block + pass
+    ("pass: complete standards (refactor / precise / balance / fast, glob entry declared early)", BASE, True, None),
+    ("block: no standards section", dict(BASE, standards={}), False, "needs kinds, classes and modules"),
+    ("block: module without a standards entry", smut(lambda s, m: s["modules"].pop("later")), False, "later: no standards entry"),
+    ("block: new module without a standards entry", smut(lambda s, m: m.update(n={"id": "MN", "paths": [], "steps": ["cpu_server"]})), False, "n: no standards entry"),
+    ("pass: glob entry covers a module (platform.* style)", smut(lambda s, m: m.update({"plat.fs": {"id": "PL2", "paths": [], "steps": ["cpu_server"]}})), True, None),
+    ("block: entry without a refactor proof", smut(lambda s, m: s["modules"]["later"]["proof"].pop("refactor")), False, "no refactor proof"),
+    ("block: unknown kind", smut(lambda s, m: s["modules"]["a"]["proof"]["refactor"].append("vibes")), False, "unknown kind vibes"),
+    ("block: unknown class", smut(lambda s, m: s["modules"]["a"]["proof"].update(turbo=["exit_rule"])), False, "unknown class turbo"),
+    ("block: balance proved bitwise (golden_exact)", smut(lambda s, m: s["modules"]["a"]["proof"]["balance"].append("golden_exact")), False, "class balance lists bitwise"),
+    ("block: fast proved by launch-table equality", smut(lambda s, m: s["modules"]["a"]["proof"]["fast"].append("work_trace")), False, "class fast lists bitwise"),
+    ("block: balance class allows bitwise", smut(lambda s, m: s["classes"]["balance"].update(allow_bitwise=True)), False, "balance: allow_bitwise must be false"),
+    ("block: a non-precise class allows bitwise", smut(lambda s, m: s["classes"].update(speedy={"modes": ["balance"], "allow_bitwise": True})), False, "only refactor or a precise-only"),
+    ("block: class fast missing", smut(lambda s, m: (s["classes"].pop("fast"), s["modules"]["a"]["proof"].pop("fast"))), False, "class fast missing"),
+    ("block: refactor without a bitwise kind", smut(lambda s, m: s["modules"]["later"]["proof"].update(refactor=["exit_rule"])), False, "lists no bitwise kind"),
+    ("block: balance without task_accuracy", smut(lambda s, m: s["modules"]["a"]["proof"].update(balance=["kl_guard", "stage_time"])), False, "must list kind task_accuracy"),
+    ("block: precise without golden_exact", smut(lambda s, m: s["modules"]["a"]["proof"].update(precise=["stage_time"])), False, "must list kind golden_exact"),
+    ("block: numeric threshold in a Q7 field", smut(lambda s, m: s["modules"]["a"].update(note="time within 5% of base")), False, "numeric threshold"),
+    ("block: numeric bound in a kind", smut(lambda s, m: s["kinds"]["stage_time"].update(desc="median <= 3 MAD")), False, "numeric threshold"),
+    ("block: bad metric key", smut(lambda s, m: s["modules"]["a"]["metrics"].append("decode tok/s")), False, "is not a host.*"),
+    ("block: no metrics and no reason", smut(lambda s, m: s["modules"]["later"].pop("metrics_none")), False, "no metrics and no metrics_none"),
+    ("block: mt-p3 metric missing from the module standard", smut(lambda s, m: s["modules"]["a"].update(metrics=["stage.layer.attn"])), False, "mt-p3 metric host.ckpt.save"),
+    ("block: kind without bitwise flag", smut(lambda s, m: s["kinds"]["stage_time"].pop("bitwise")), False, "kind stage_time: needs compare and bitwise"),
+    ("block: class with an unknown mode", smut(lambda s, m: s["classes"]["fast"].update(modes=["turbo"])), False, "modes must be"),
 ]
 
 
