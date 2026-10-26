@@ -602,4 +602,143 @@ void testGdn(Ctx& c) {
     }
 }
 
+// gdnv (feat026-gdnvgpr, on request: --only gdnv): the register-diet gdn_step_norm variants of a development code
+// object (WHIRL_KT_GDNV_HSACO = a kernels build of the SAME arch with -DWHIRL_GDNV_DEV=1; exports gdnv<id>_step_norm,
+// gfx1151 only) bit for bit against the SHIPPED gdn_step_norm of the main code object: out, xq, xd, final states and
+// every snapshot, for every n = 0..20 rows in one segment (n <= 15: a snapshot per row; n > 15: the first 15 rows),
+// n = 0..20 without snapshots, and two / three segments in one launch. WHIRL_KT_GDNV_IDS=3,5 limits the ids
+// (default 1..6). One invariant per id.
+void testGdnv(Ctx& c) {
+    c.rep.family = "gdnv";
+    const char* hs = std::getenv("WHIRL_KT_GDNV_HSACO");
+    if (!hs || !*hs) {
+        c.rep.skip("gdnv", "gdn_step_norm register-diet variants", "WHIRL_KT_GDNV_HSACO not set");
+        return;
+    }
+    std::vector<char> img;
+    if (std::FILE* fp = std::fopen(hs, "rb")) {
+        std::fseek(fp, 0, SEEK_END);
+        img.resize(static_cast<std::size_t>(std::ftell(fp)));
+        std::fseek(fp, 0, SEEK_SET);
+        if (std::fread(img.data(), 1, img.size(), fp) != img.size()) img.clear();
+        std::fclose(fp);
+    }
+    if (img.empty()) {
+        Result r;
+        r.name = std::string("gdnv: cannot read ") + hs;
+        r.pass = false;
+        c.rep.add(r);
+        return;
+    }
+    hip::Module xm = hip::Module::loadData(img.data(), c.mod.arch());
+    std::vector<int> ids;
+    for (int i = 1; i <= 6; ++i) ids.push_back(i);
+    if (const char* e = std::getenv("WHIRL_KT_GDNV_IDS")) {
+        ids.clear();
+        for (const char* q = e; *q;) {
+            ids.push_back(std::atoi(q));
+            while (*q && *q != ',') ++q;
+            if (*q == ',') ++q;
+        }
+    }
+    std::vector<std::pair<int, hip::Function>> fs;
+    for (int id : ids)
+        if (const hip::Function f = xm.getFunctionOpt((std::string("gdnv") + std::to_string(id) + "_step_norm").c_str())) fs.push_back({id, f});
+    if (fs.empty()) {
+        c.rep.skip("gdnv", "gdnv*_step_norm", "not in the candidate code object");
+        return;
+    }
+    const int nmax = 20;
+    const std::vector<float> qkv = makeQkv(c, nmax);
+    const std::vector<float> g = c.randu(static_cast<std::size_t>(nmax) * kNv, -1.5f, -0.01f);
+    const std::vector<float> beta = c.randu(static_cast<std::size_t>(nmax) * kNv, 0.05f, 0.95f);
+    const std::vector<float> z = c.randn(static_cast<std::size_t>(nmax) * kDInner);
+    const std::vector<float> wn = c.randu(kDv, 0.5f, 1.5f);
+    const std::vector<float> state0 = c.randn(static_cast<std::size_t>(kNv) * kDk * kDv, 0.3f);
+    Buf dq(qkv), dg(g), db(beta), dz(z), dwn(wn);
+    const std::size_t ns = state0.size(), no = static_cast<std::size_t>(nmax) * kDInner;
+    struct Seg {
+        int row0, nrows, nsnap;
+    };
+    struct Out {
+        std::vector<float> y, d;
+        std::vector<std::int8_t> q;
+        std::vector<std::vector<float>> st, snaps;
+    };
+    auto run = [&](hip::Function f, const std::vector<Seg>& sg) {
+        Out o;
+        Buf y(no * 4), q(no), d(no / 32 * 4);
+        y.fill(0xff);
+        q.fill(0x7f);
+        d.fill(0xff);
+        std::vector<Buf> sts, snaps;
+        sts.reserve(sg.size());
+        snaps.reserve(64);
+        wk::GdnSegs s;
+        for (std::size_t i = 0; i < sg.size(); ++i) {
+            sts.emplace_back(state0);
+            s.s[i].state = sts.back().p();
+            s.s[i].row0 = sg[i].row0;
+            s.s[i].nrows = sg[i].nrows;
+            for (int t = 0; t < sg[i].nsnap; ++t) {
+                snaps.emplace_back(ns * 4);
+                snaps.back().fill(0xff);
+                s.s[i].snap[t] = snaps.back().p();
+            }
+        }
+        hip::launch(f, {kNv, static_cast<unsigned>(sg.size()), 1}, {512, 1, 1}, 0, c.s, dq.p(), dg.p(), db.p(), dz.p(), dwn.p(), y.p(), q.p(),
+                    d.p(), kNk, kScale, kEps, kNv, kCh, s);
+        c.sync();
+        o.y = y.down<float>(no);
+        o.q = q.down<std::int8_t>(no);
+        o.d = d.down<float>(no / 32);
+        for (auto& b : sts) o.st.push_back(b.down<float>(ns));
+        for (auto& b : snaps) o.snaps.push_back(b.down<float>(ns));
+        return o;
+    };
+    auto eq = [](const std::vector<float>& x, const std::vector<float>& y) {
+        return x.size() == y.size() && std::memcmp(x.data(), y.data(), x.size() * 4) == 0;
+    };
+    auto same = [&](const Out& a, const Out& b) {
+        if (!eq(a.y, b.y) || !eq(a.d, b.d) || a.q != b.q || a.st.size() != b.st.size() || a.snaps.size() != b.snaps.size()) return false;
+        for (std::size_t i = 0; i < a.st.size(); ++i)
+            if (!eq(a.st[i], b.st[i])) return false;
+        for (std::size_t i = 0; i < a.snaps.size(); ++i)
+            if (!eq(a.snaps[i], b.snaps[i])) return false;
+        return true;
+    };
+    std::vector<std::size_t> runs(fs.size(), 0), bad(fs.size(), 0);
+    std::vector<std::string> first(fs.size());
+    auto check = [&](const std::string& name, const std::vector<Seg>& sg) {
+        const Out ref = run(c.k.gdn_step_norm, sg);
+        for (std::size_t i = 0; i < fs.size(); ++i) {
+            const Out o = run(fs[i].second, sg);
+            ++runs[i];
+            if (!same(o, ref)) {
+                ++bad[i];
+                if (first[i].empty()) first[i] = name;
+            }
+        }
+    };
+    for (int n = 0; n <= nmax; ++n) {
+        check("n" + std::to_string(n), {{0, n, 0}});
+        check("n" + std::to_string(n) + "+snap", {{0, n, std::min(n, 15)}});
+    }
+    check("2seg 3+5", {{0, 3, 3}, {3, 5, 0}});
+    check("2seg 4+4 snap", {{0, 4, 4}, {4, 4, 4}});
+    check("3seg 1+4+2", {{0, 1, 1}, {1, 4, 4}, {5, 2, 0}});
+    check("3seg 0+7+13", {{0, 0, 0}, {0, 7, 7}, {7, 13, 13}});
+    for (std::size_t i = 0; i < fs.size(); ++i) {
+        Result r;
+        r.name = "gdnv" + std::to_string(fs[i].first) + "_step_norm == shipped gdn_step_norm (out, xq, xd, state, snapshots)";
+        r.kind = Kind::invariant;
+        r.n = runs[i];
+        r.mismatches = bad[i];
+        r.pass = bad[i] == 0;
+        if (!first[i].empty()) r.note = "first mismatch: " + first[i];
+        c.rep.add(r);
+    }
+}
+
+
 }  // namespace kt
