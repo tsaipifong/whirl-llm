@@ -145,6 +145,10 @@ std::string execDump(const Model& m) {
     add("seqs", u(m.seqs.size()));
     WD_B(gdn_replay);
     WD_B(mtp_batch);
+    // arch025-execdump-f7: the forward's three research switches (Model::load, F7); prec_gs is -1 when unset, so no u()
+    WD_B(head_gemvx);
+    WD_B(prec_gemvh);
+    add("prec_gs", std::to_string(m.prec_gs));
     add("mtp", b(m.mtp.has_value()));
     WD_B(keep_hidden);
     WD_B(all_logits);
