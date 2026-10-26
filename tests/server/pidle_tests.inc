@@ -673,3 +673,133 @@ void testPidleLoadThrow() {
     CHECK_EQ(srv.model().decPrefills(), 0u);
     CHECK_EQ(srv.model().poison(), 0u);
 }
+
+// feat026-pidle-r3 (item 1): Swift preserve_thinking=false strips the think blocks of the earlier turns, but not of
+// the assistant messages after the last REAL user query (a tool response is not one). So a reply that ends in a tool
+// call is rendered again with its think block: the next prompt holds the reply as generated. A final answer is not.
+void testPidleToolEndRender() {
+    using namespace pidle_test;
+    const auto render = [](const std::string& msgs, bool preserve) {
+        const std::string kw = std::string("\"chat_template_kwargs\":{\"enable_thinking\":true,\"preserve_thinking\":") +
+                               (preserve ? "true" : "false") + "}";
+        chat::ChatRequest req = chat::parseChatRequest(json::parse("{" + msgs + "," + kw + "}"));
+        return chat::renderChat(chat::TemplateKind::a, req.messages, req.tools, req.options);
+    };
+    const std::string q = R"({"role":"user","content":"find the file"})";
+    const auto call = [](const char* rc, const char* id) {
+        return std::string(R"({"role":"assistant","content":"","reasoning_content":")") + rc +
+               R"(","tool_calls":[{"id":")" + id + R"(","type":"function","function":{"name":"f","arguments":"{\"a\":\"x\"}"}}]})";
+    };
+    const auto tool = [](const char* id) {
+        return std::string(R"({"role":"tool","tool_call_id":")") + id + R"(","content":"ok"})";
+    };
+    const std::string t1 = render("\"messages\":[" + q + "]", false);
+    CHECK(t1.size() > 8 && t1.compare(t1.size() - 8, 8, "<think>\n") == 0);
+    const std::string reply1 = "plan one\n</think>\n\n<tool_call>\n<function=f>\n<parameter=a>\nx\n</parameter>\n</function>\n</tool_call>";
+    const std::string t2 = render("\"messages\":[" + q + "," + call("plan one", "c1") + "," + tool("c1") + "]", false);
+    CHECK(t2.rfind(t1 + reply1 + "<|im_end|>\n", 0) == 0);  // step 1 = turn 1 + the reply as generated
+    // step 2 of the same user turn: still after the last real query
+    const std::string reply2 = "plan two\n</think>\n\n<tool_call>\n<function=f>\n<parameter=a>\nx\n</parameter>\n</function>\n</tool_call>";
+    const std::string t3 = render("\"messages\":[" + q + "," + call("plan one", "c1") + "," + tool("c1") + "," +
+                                      call("plan two", "c2") + "," + tool("c2") + "]", false);
+    CHECK(t3.rfind(t2 + reply2 + "<|im_end|>\n", 0) == 0);
+    // a final answer: the next prompt has a new user query, the block of the answer is stripped (preserve false) /
+    // kept (preserve true)
+    const std::string ans = "think it\n</think>\n\nDone.";
+    const std::string fin = R"({"role":"assistant","content":"Done.","reasoning_content":"think it"})";
+    const std::string nxt = R"({"role":"user","content":"next"})";
+    const std::string tf1 = render("\"messages\":[" + q + "]", false);
+    const std::string tf2f = render("\"messages\":[" + q + "," + fin + "," + nxt + "]", false);
+    const std::string tf2t = render("\"messages\":[" + q + "," + fin + "," + nxt + "]", true);
+    CHECK(tf2f.rfind(tf1 + ans + "<|im_end|>\n", 0) != 0);
+    CHECK(tf2t.rfind(tf1 + ans + "<|im_end|>\n", 0) == 0);
+}
+
+// feat026-pidle-r3 (item 1) on the engine: a reply that ends in a tool call is not skipped for preserve_thinking=false
+// (thinking off: the block is empty in every prompt; thinking on: an assistant message after the last user query
+// carries reasoning, as from the second tool step on). A reply that does not end in a tool call still is.
+void testPidleToolEnd() {
+    using namespace pidle_test;
+    std::string long1;
+    for (int i = 0; i < 2600; ++i) long1 += std::format("w{} ", i % 97);
+    struct Case {
+        bool think, tool_end, kept;
+    };
+    const Case cases[] = {{false, true, true}, {true, true, true}, {true, false, false}, {false, false, false}};
+    for (const Case& c : cases) {
+        g_log.clear();
+        TestServer srv(preciseSetup(true, true));
+        srv.onEngine([&] { srv.engine().toolEndForTest(c.tool_end); });
+        const std::string body = std::format(
+            R"({{"messages":[{{"role":"user","content":"{}"}},{{"role":"assistant","content":"","reasoning_content":"I weigh the options.",)"
+            R"("tool_calls":[{{"id":"c1","type":"function","function":{{"name":"f","arguments":"{{}}"}}}}]}},)"
+            R"({{"role":"tool","tool_call_id":"c1","content":"ok"}}],"max_tokens":1500,"temperature":0,"ignore_eos":true,)"
+            R"("chat_template_kwargs":{{"enable_thinking":{},"preserve_thinking":false}}}})",
+            long1, c.think ? "true" : "false");
+        auto r1 = srv.post("/v1/chat/completions", body);
+        CHECK_EQ(r1.status, 200);
+        CHECK(waitUntil([&] {
+            const auto st = srv.engine().pidleStats();
+            return st.skipped >= 1 || st.done >= 1;
+        }, 20000));
+        const auto st = srv.engine().pidleStats();
+        CHECK_EQ(st.done, c.kept ? 1u : 0u);
+        CHECK_EQ(st.skipped, c.kept ? 0u : 1u);
+        CHECK_EQ(g_log.count("precise idle: skipped: preserve_thinking=false"), c.kept ? 0u : 1u);
+        CHECK_EQ(srv.model().decPrefills(), 0u);
+        CHECK_EQ(srv.model().poison(), 0u);
+    }
+}
+
+// feat026-pidle-r3 (item 2, mutant N8): the page budget counts freeable pages, not reclaimable ones. Every free page
+// becomes a quarantined page another holder keeps (it never becomes free): the job is skipped by the budget check
+// ("needs"), not started and failed later in the copy on write.
+void testPidleBudgetFreeable() {
+    using namespace pidle_test;
+    g_log.clear();
+    ServerSetup su = preciseSetup(true, true, 300);
+    su.mc.pool_tokens = 12288;  // 48 pages: turn 1 (3000 + 1900 tokens) holds 20
+    TestServer srv(su);
+    const Turns t = makeTurns(srv, 3000, 1900, 60, 91);
+    srv.onEngine([&] {
+        srv.engine().quarantineFreeHeldForTest();  // reclaimable() 28, freeable() 0
+        srv.engine().holdPagesForTest(true);       // the rewrite needs copy on write
+    });
+    CHECK(waitUntil([&] {
+        const auto st = srv.engine().pidleStats();
+        return st.skipped + st.started >= 1;
+    }, 5000));
+    srv.onEngine([&] { srv.engine().holdPagesForTest(false); });
+    const auto st = srv.engine().pidleStats();
+    CHECK_EQ(st.started, 0u);
+    CHECK_EQ(st.skipped, 1u);
+    CHECK_EQ(g_log.count("precise idle: skipped: needs "), 1u);
+    CHECK_EQ(g_log.count("for the copy on write"), 0u);
+    auto r2 = srv.post("/v1/completions", completionBody(t.p2, 40));
+    CHECK_EQ(completionText(r2), decode(srv.model().greedyReference(t.p2, 40, true)));
+    CHECK_EQ(cachedTokens(r2), coldTail(t.p1.size()));
+    CHECK_EQ(srv.model().poison(), 0u);
+}
+
+// feat026-pidle-r3 (item 3): taking the pages up to `to` fails part way (two free pages are left after the budget
+// check): the pages already taken go back, the slot keeps exactly the pages of the rows it still has.
+void testPidleEnsureGivesBack() {
+    using namespace pidle_test;
+    g_log.clear();
+    TestServer srv(preciseSetup(true, true, 300));
+    const Turns t = makeTurns(srv, 3000, 1900, 60, 93);
+    srv.onEngine([&] {
+        srv.engine().holdPagesForTest(true);  // copy on write: the pages after row from - 1 are released, then re-taken
+        srv.engine().stealFreePagesForTest(2);
+    });
+    CHECK(waitUntil([&] { return g_log.count("precise idle: skipped: no free KV page for rows up to") >= 1; }, 5000));
+    const auto v = slotsView(srv);
+    CHECK_EQ(v[0].pages, PagePool::pagesFor(v[0].tokens));  // no page without rows
+    std::size_t free_in = 0;
+    srv.onEngine([&] { free_in = srv.engine().freePagesForTest(); });
+    CHECK_EQ(free_in, 2u);  // the two pages taken were given back
+    srv.onEngine([&] { srv.engine().holdPagesForTest(false); });
+    auto r2 = srv.post("/v1/completions", completionBody(t.p2, 40));
+    CHECK_EQ(completionText(r2), decode(srv.model().greedyReference(t.p2, 40, true)));
+    CHECK_EQ(srv.model().poison(), 0u);
+}

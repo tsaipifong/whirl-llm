@@ -928,6 +928,7 @@ bool Engine::startJob(Slot& sl, Job& job) {
     sl.last_used = ps_.cache().touch();
     sl.pidle_want = false;  // PRECISE-IDLE: the slot is in use again
     sl.pidle_hist_dropped = false;
+    sl.pidle_tool_end = false;
     // (v0.2.2.2: ctxForNew = the context per request, lowered by the memory governor for new requests only)
     const std::uint32_t ctx_new = ctxForNew();
     if (N + nd_max + 2 >= ctx_new || static_cast<std::uint64_t>(N) + nd_max + 2 >= static_cast<std::uint64_t>(pool_.pages()) * kv_page) {
@@ -2174,6 +2175,7 @@ void Engine::finishJob(Slot& sl) {
         logW("slot {} | kv tier: spill failed: {} ({})", sl.id, ex.what(), ops_.lastErrorString());
     }
     // PRECISE-IDLE: the reply may be re-prefilled once the server is idle (runLoop)
+    sl.pidle_tool_end = fin.n_tools > 0 || test_tool_end_;
     pidleMark(sl);
 }
 
@@ -2853,6 +2855,27 @@ void Engine::holdPagesForTest(bool hold) {
             pool_.ref(p);
             test_held_.push_back(p);
         }
+}
+
+void Engine::quarantineFreeHeldForTest() {
+    owner_.check("Engine::quarantineFreeHeldForTest");
+    if (pool_.freeCount() == 0) return;
+    pool_.setQuarantineStream(m_.stream());  // (no host tier in the tests that use this)
+    std::vector<std::int32_t> q;
+    while (auto p = pool_.takeFree()) {
+        pool_.ref(*p);  // the second holder
+        test_held_.push_back(*p);
+        q.push_back(*p);
+    }
+    pool_.quarantine(q);  // the quarantine keeps the first reference
+}
+
+void Engine::stealFreePagesNow() {
+    if (test_steal_leave_ < 0) return;
+    while (pool_.freeCount() > static_cast<std::size_t>(test_steal_leave_))
+        if (auto p = pool_.takeFree()) test_held_.push_back(*p);
+        else break;
+    test_steal_leave_ = -1;
 }
 
 std::vector<Engine::SlotViewForTest> Engine::slotsForTest() const {

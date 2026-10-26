@@ -220,6 +220,7 @@ bool Engine::pidleRun() {
                 break;
             }
         }
+        stealFreePagesNow();  // (test seam, inert)
         // every page up to `to` before any checkpoint is invalidated (review r1-batch-b: a page count that was too high
         // must not cost the slot its prompt-end / think-open / gen-end); the chunks then find their pages there
         {

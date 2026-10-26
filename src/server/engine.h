@@ -178,6 +178,9 @@ struct SlotData : SlotPrefix, SlotTier {
     TimePoint pidle_t{};
     // feat026-pidle-r2: the last request's Job::think_history_dropped (set when its reply starts)
     bool pidle_hist_dropped = false;
+    // feat026-pidle-r3: the last reply ended in a tool call (its think block stays in the next prompt even with
+    // preserve_thinking=false: the assistant message is after the last real user query)
+    bool pidle_tool_end = false;
 
     std::uint64_t reqId() const { return job ? job->id : 0; }
 };
@@ -432,6 +435,15 @@ public:
     void holdPagesForTest(bool hold);
     // feat026-pidle-r2 (review r1-batch-b): the next idle job start throws where it loads its checkpoint
     void failPidleLoadForTest() { test_pidle_load_fail_ = true; }
+    // feat026-pidle-r3: the replies from now on count as ending in a tool call (the mock model cannot emit one)
+    void toolEndForTest(bool on) { test_tool_end_ = on; }
+    // feat026-pidle-r3: every free page becomes one that is quarantined AND held by another holder (a quarantine
+    // freeable() does not count: reclaimable() would); released by holdPagesForTest(false)
+    void quarantineFreeHeldForTest();
+    std::size_t freePagesForTest() const { return pool_.freeCount(); }
+    // feat026-pidle-r3: when the next idle job has checked its page budget, all but `leave` free pages are taken
+    // away (released by holdPagesForTest(false)), so taking the pages up to `to` fails part way
+    void stealFreePagesForTest(std::size_t leave) { test_steal_leave_ = static_cast<std::int64_t>(leave); }
     struct SlotViewForTest {
         std::size_t tokens = 0, pages = 0;
         std::uint32_t max_ck = 0;
@@ -669,6 +681,9 @@ private:
     std::atomic<std::uint64_t> pidle_started_{0}, pidle_done_{0}, pidle_cancelled_{0}, pidle_skipped_{0}, pidle_rows_{0};
     std::vector<std::int32_t> test_held_;  // holdPagesForTest
     bool test_pidle_load_fail_ = false;      // failPidleLoadForTest
+    bool test_tool_end_ = false;             // toolEndForTest
+    std::int64_t test_steal_leave_ = -1;     // stealFreePagesForTest (-1: off)
+    void stealFreePagesNow();                // the hook in pidleStep
     std::vector<std::unique_ptr<EmbEntry>> emb_cache_;
     std::uint64_t emb_bytes_ = 0;
     std::uint64_t emb_seq_ = 0;
