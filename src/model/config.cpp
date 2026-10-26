@@ -38,7 +38,7 @@ std::size_t tuneBucket(std::uint32_t n) {
 }
 
 static_assert(std::tuple_size_v<GemvR> == std::tuple_size_v<decltype(device::Profile::gemv_r)>);
-GemvR defaultGemvR() { return device::profile(hip::Arch::gfx1201).gemv_r; }
+GemvR defaultGemvR() { return device::profile(device::k_default_arch).gemv_r; }
 
 GemvW defaultGemvW() {
     GemvW t{};

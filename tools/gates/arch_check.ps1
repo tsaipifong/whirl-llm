@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-# arch025-S0a: host Arch::gfx branches outside the device layer (M6 makes it block).
-# Thin entry point of tools/gates/pending_scan.py rule "arch" (the rule, the pending list arch_pending.txt and the
-# selftest live there). Report mode (default) prints the sites and exits 0; -Mode block exits 1 on a new site, a grown
-# count or a stale pending entry.
+# arch025-S0a: host Arch::gfx branches outside the device layer. Blocking since arch025-M6: any site outside
+# src/hip/, include/whirl/hip.h, include/whirl/device_profile.h and src/model/device.cpp exits 1 in either mode, and
+# the pending list (arch_pending.txt) is gone (an entry in a -Pending file is itself a FAIL).
+# Thin entry point of tools/gates/pending_scan.py rule "arch" (the rule and the selftest live there;
+# pending_scan.py arch --tree-test is the block / pass test on a copy of the real tree).
 #   pwsh -NoProfile -File tools\gates\arch_check.ps1 [-Mode report|block] [-Root <repo>] [-Pending <file>]
 #   pwsh -NoProfile -File tools\gates\arch_check.ps1 -SelfTest
 # Python: WHIRL_GATE_PYTHON, else C:\ClaudeWorkspace\tools\pyref\Scripts\python.exe when it exists, else python / py on PATH

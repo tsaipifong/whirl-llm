@@ -199,6 +199,14 @@ void testProfiles() {
         threw = true;
     }
     CHECK(threw);
+    // arch025-M6: the two named host defaults are rows of this table (Model::arch / defaultGemvR / mtpDefaults' default
+    // = the discrete reference row; the server's pre-load UMA estimate = the UMA row)
+    static_assert(&d::profile(d::k_default_arch) == &d::k_profile_gfx1201);
+    static_assert(&d::profile(d::k_uma_estimate_arch) == &d::k_profile_gfx1151);
+    CHECK(d::k_default_arch == Arch::gfx1201 && d::k_uma_estimate_arch == Arch::gfx1151);
+    CHECK(!d::profile(d::k_default_arch).uma_no_vram_fit_check && d::profile(d::k_uma_estimate_arch).uma_no_vram_fit_check);
+    // every row is found again by its own arch (a row copied without changing .arch would fail here)
+    for (const d::Profile* p : {&d::k_profile_gfx1201, &d::k_profile_gfx1151}) CHECK(&d::profile(p->arch) == p);
 }
 
 void testNullBackendMemoryModel() {

@@ -118,4 +118,16 @@ inline constexpr const Profile& profile(hip::Arch a) {
 #pragma clang diagnostic pop
 #endif
 
+// arch025-M6: the two host-side choices of a code-object family that are made before (or without) a device, named
+// here so no host code outside the device layer names a hip::Arch value (tools/gates/pending_scan.py rule arch blocks).
+// The family the host assumes while no device is known: a Model that never went through load (Model::arch), the
+// TuneTable gemv_r default (qwen35::defaultGemvR; the load overwrites it with the device's row) and mtpDefaults'
+// default argument. The same row hip::archFor gives every device that is not a gfx1151 (device-tests pin both).
+inline constexpr hip::Arch k_default_arch = hip::Arch::gfx1201;
+// The row the server's pre-load UMA estimate sizes the MTP verify snapshot sets for (server_main.cpp, UMA branch:
+// the 8060S draft count): the Radeon 8060S, the one UMA family. A second UMA family is a decision here.
+inline constexpr hip::Arch k_uma_estimate_arch = hip::Arch::gfx1151;
+static_assert(profile(k_uma_estimate_arch).uma_no_vram_fit_check, "the UMA estimate row must be a UMA family");
+static_assert(!profile(k_default_arch).uma_no_vram_fit_check, "the default family is the discrete reference row");
+
 }  // namespace whirl::device

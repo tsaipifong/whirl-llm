@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 """pending_scan.py - the four structure checks of arch025 (S0a), each with a pending list of the sites other 0.2.5
-steps remove. Report mode now; a later step switches a check to block mode (PL5 platform, M6 arch; include blocks since M3).
+steps remove. Report mode now; a later step switches a check to block mode (PL5 platform; include blocks since M3, arch since M6).
 A rule's "blocked" scopes fail in every mode and take no pending entry (arch025-F7: env reads in forward / engine / ops).
 
 Rules (sources under src/ and include/; comments and string literals are not code):
@@ -16,7 +16,8 @@ Rules (sources under src/ and include/; comments and string literals are not cod
             / envGet / envFlag / envOn / env("...") / dump::envOn); allowed in src/platform/ and src/config/env_snapshot.*.
             The pending counts of src/cli/main.cpp and src/server/server_main.cpp stay at 0.2.5's end (PLAN Noted).
   arch      a host-side GPU-architecture branch (Arch::gfx<N>) outside the device layer: allowed in src/hip/,
-            include/whirl/hip.h, include/whirl/device_profile.h, src/model/device.cpp.
+            include/whirl/hip.h, include/whirl/device_profile.h, src/model/device.cpp. Blocking since M6 (any mode, no
+            pending list): host code names a family through device::Profile / k_default_arch / k_uma_estimate_arch.
 
 Pending list (tools/gates/<rule>_pending.txt): path<TAB>count<TAB>step per line ('#' comments). In block mode a file's
 hits must equal its entry's count: more = FAIL (a new site), fewer = STALE (the step landed: lower or delete the
@@ -97,8 +98,10 @@ RULES = {
     "env": {"allowed": ["src/platform/", "src/config/env_snapshot."], "what": "env read",
             "blocked": ["src/model/qwen35/forward/", "src/model/qwen35/forward_internal.h", "src/model/forward.cpp", "src/server/engine",
                         "src/model/qwen35/server_model.cpp", "src/ops/", "include/whirl/ops/"]},
+    # blocked since arch025-M6: host Arch:: values only in the device layer (DeviceProfile and its named defaults); the
+    # pending list is gone (exit 1 in report mode too)
     "arch": {"allowed": ["src/hip/", "include/whirl/hip.h", "include/whirl/device_profile.h", "src/model/device.cpp"],
-             "what": "Arch:: branch"},
+             "what": "Arch:: branch", "blocked": ["src/", "include/"]},
 }
 
 
@@ -452,6 +455,22 @@ def selftest() -> int:
     case("Arch:: branch blocked", "arch", {"src/model/config.cpp": "if (a == hip::Arch::gfx1151) {}\n"}, None, "block", 1)
     case("device layer allowed", "arch", {"include/whirl/device_profile.h": "Arch::gfx1151\n", "src/hip/h.cpp": "Arch::gfx1201\n"}, None, "block", 0)
     case("Arch::gfx in a comment is not code", "arch", {"src/a.cpp": "// Arch::gfx1151 only\n"}, None, "block", 0)
+    # arch025-M6: blocking in any mode, a pending entry no longer covers a site
+    case("M6: Arch:: branch blocked in report mode", "arch", {"src/vision/kernel_image.cpp": "case hip::Arch::gfx1201: break;\n"},
+         None, "report", 1)
+    case("M6: a pending entry does not allow it", "arch", {"src/model/config.cpp": "auto a = hip::Arch::gfx1201;\n"},
+         f"src/model/config.cpp{T}1{T}M6\n", "block", 1)
+    case("M6: a pending entry for a clean file is itself a FAIL", "arch", {"src/model/config.cpp": "int x;\n"},
+         f"src/model/config.cpp{T}0{T}M6\n", "report", 1)
+    case("M6: an include/ header outside the device layer blocked", "arch", {"include/whirl/model.h": "hip::Arch a = hip::Arch::gfx1201;\n",
+                                                                                 "src/a.cpp": "int x;\n"}, None, "report", 1)
+    case("M6: named defaults from the device layer pass", "arch",
+         {"include/whirl/device_profile.h": "inline constexpr hip::Arch k_default_arch = hip::Arch::gfx1201;\n",
+          "src/model/config.cpp": "auto g = device::profile(device::k_default_arch).gemv_r;\n",
+          "src/server/server_main.cpp": "auto d = mtpDefaults(moe, device::k_uma_estimate_arch);\n",
+          "src/model/device.cpp": "Arch::gfx1151\n", "src/hip/hip_runtime.cpp": "Arch::gfx1151\n"}, None, "report", 0)
+    case("M6: a string or comment naming gfx1151 is not code", "arch",
+         {"src/vision/kernel_image.cpp": '{"gfx1151", d, &n},  // was case hip::Arch::gfx1151\n'}, None, "block", 0)
     # include
     inc_tree = {"cmake/server.cmake": CORE, "src/server/engine.cpp": '#include "server/engine.h"\n',
                 "src/server/engine.h": '#include "whirl/model.h"\n', "src/server/http.cpp": '#include "whirl/common.h"\n',
@@ -517,6 +536,29 @@ def tree_test(root: str, rule: str = "platform") -> int:
                 return 1
             print(f"pending_scan tree test: ok ({n} cases)")
             return 0
+        if rule == "arch":
+            # arch025-M6: blocking in both modes; the copy as is passes in both, a site added anywhere is blocked in both
+            one("the tree passes in report mode", 0, "report")
+            n = 2
+            for rel, line in (("src/model/config.cpp", "\nstatic const auto m6Probe = hip::Arch::gfx1201;\n"),
+                              ("src/server/server_main.cpp", "\nstatic bool m6Probe(whirl::hip::Arch a) { return a == whirl::hip::Arch::gfx1151; }\n"),
+                              ("include/whirl/model.h", "\ninline constexpr auto m6_probe = whirl::hip::Arch::gfx1151;\n")):
+                f = os.path.join(base, *rel.split("/"))
+                orig = open(f, "rb").read()
+                with open(f, "a", encoding="utf-8") as h:
+                    h.write(line)
+                one(f"an Arch:: value added to {rel} is blocked", 1)
+                one(f"an Arch:: value added to {rel} is blocked in report mode", 1, "report")
+                n += 2
+                with open(f, "wb") as h:
+                    h.write(orig)
+            one("restored tree passes", 0)
+            n += 1
+            if fails:
+                print(f"pending_scan tree test: FAIL ({fails} of {n})")
+                return 1
+            print(f"pending_scan tree test: ok ({n} cases)")
+            return 0
         probe = os.path.join(base, "src", "model", "pl0_probe.cpp")
         with open(probe, "w", encoding="utf-8") as f:
             f.write("unsigned long long now() { return GetTickCount64(); }\n")
@@ -543,7 +585,7 @@ def main(argv: list[str], rule_default: str | None = None) -> int:
     ap.add_argument("--mode", choices=["report", "block"], default="report")
     ap.add_argument("--write-pending", action="store_true")
     ap.add_argument("--selftest", action="store_true")
-    ap.add_argument("--tree-test", action="store_true", help="block / pass on a copy of --root (platform rule)")
+    ap.add_argument("--tree-test", action="store_true", help="block / pass on a copy of --root (platform, env, arch rules)")
     a = ap.parse_args(argv)
     if a.selftest:
         return selftest()

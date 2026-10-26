@@ -308,7 +308,7 @@ public:
     Config cfg;
     std::uint32_t max_ctx = 0;
     std::uint32_t max_batch = max_batch_default;
-    hip::Arch arch = hip::Arch::gfx1201;
+    hip::Arch arch = device::k_default_arch;
     std::vector<std::int32_t> host_ids;
     Kernels k;
     hip::Module module;

@@ -10,8 +10,9 @@
 
 #pragma once
 
-#include "whirl/hip.h"          // hip::Arch (mtpDefaults)
-#include "whirl/model_types.h"  // max_ng_drafts
+#include "whirl/device_profile.h"  // hip::Arch, device::k_default_arch (mtpDefaults)
+#include "whirl/hip.h"             // hip::Arch (mtpDefaults)
+#include "whirl/model_types.h"     // max_ng_drafts
 
 #include <array>
 #include <cstddef>
@@ -38,7 +39,7 @@ struct MtpDefaults {
 };
 // Per-device defaults: gfx1201 (R9700) is the reference; gfx1151 (Radeon 8060S, UMA,
 // bandwidth-bound decode) has its own values measured on that device.
-MtpDefaults mtpDefaults(bool moe, hip::Arch arch = hip::Arch::gfx1201);
+MtpDefaults mtpDefaults(bool moe, hip::Arch arch = device::k_default_arch);
 
 // ---- draft-head vocabulary subset (T5-1b): WHIRL_DRAFT_VOCAB = 48k | 64k | <file> | off | N
 // File for a WHIRL_DRAFT_VOCAB value: "48k" / "64k" / ... -> <dir>/subset_48k.bin, anything else

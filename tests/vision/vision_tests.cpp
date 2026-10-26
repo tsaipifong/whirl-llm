@@ -252,8 +252,33 @@ static void testPlaceFirstFit() {
     }
 }
 
+// arch025-M6: the vision code-object table (src/vision/kernel_image.cpp, looked up by hip::archName since M6): each
+// family of the build gets its own ELF image whose EF_AMDGPU_MACH (e_flags & 0xff at offset 0x30) is that family
+// (gfx1201 0x4e, gfx1151 0x4a: the LLVM AMDGPU ELF values); the two images are different objects.
+static void testKernelImageTable() {
+    struct Row {
+        hip::Arch arch;
+        unsigned mach;
+    };
+    const Row rows[] = {{hip::Arch::gfx1201, 0x4e}, {hip::Arch::gfx1151, 0x4a}};
+    const std::uint8_t* seen[2] = {nullptr, nullptr};
+    int i = 0;
+    for (const Row& r : rows) {
+        const std::span<const std::uint8_t> img = vision::kernelImage(r.arch);
+        CHECK(img.size() > 0x40);
+        if (img.size() <= 0x40) continue;
+        CHECK(img[0] == 0x7f && img[1] == 'E' && img[2] == 'L' && img[3] == 'F');
+        CHECK(img[4] == 2);  // ELFCLASS64
+        CHECK(img[0x30] == r.mach);
+        CHECK(vision::kernelImage(r.arch).data() == img.data());  // the same embedded object every call
+        seen[i++] = img.data();
+    }
+    CHECK(seen[0] && seen[1] && seen[0] != seen[1]);
+}
+
 int main(int argc, char** argv) {
     whirl::test::clearWhirlEnv();  // FR-TEST P3-11
+    testKernelImageTable();  // arch025-M6
     testSha();
     testWyhash();
     testTargetSize();

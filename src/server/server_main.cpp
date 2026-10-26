@@ -916,7 +916,7 @@ int serveMain(int argc, char** argv, const char* program) {
                 am->sizing.bufferBytes(cfg, lo.max_batch, est.ffs, est.max_elems, am->sizing.resolveFdSplits(kv_est));
             // DeltaNet snapshot sets for MTP verify: one recurrent state per draft (8 dense, 1 MoE: the server log's
             // "N snapshot sets")
-            const std::uint64_t snaps = std::max<std::uint32_t>(1, am->sizing.mtpDefaults(cfg.moe, hip::Arch::gfx1151).drafts) * st1;
+            const std::uint64_t snaps = std::max<std::uint32_t>(1, am->sizing.mtpDefaults(cfg.moe, device::k_uma_estimate_arch).drafts) * st1;
             const std::uint64_t slots_b = opt.parallel * (st1 + pend1) + snaps;
             const std::uint64_t ck_b = (opt.parallel * n_ck + n_spe_plan) * ck;
             need.fixed = need.weights + est.state + bufs + slots_b + ck_b + (est.has_mtp ? 65536ull * cfg.n_embd * 5 / 16 : 0) + (256ull << 20);

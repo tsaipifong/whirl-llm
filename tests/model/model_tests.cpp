@@ -3478,8 +3478,48 @@ void testArchRegistry() {
           "slotStateBytes: replay rows follow the module's max_small_batch");
 }
 
+// arch025-M6: the device layer's two named host defaults (include/whirl/device_profile.h) and the sites that read them
+// since the arch check blocks: (a) the values (gfx1201 = the discrete reference row, gfx1151 = the UMA row);
+// (b) hip::archFor gives k_default_arch to every gcn name that is not a gfx1151 (the code-object fallback) and
+//     k_uma_estimate_arch to the gfx1151 names; (c) a Model that never went through load has arch k_default_arch and
+//     the gfx1201 GEMV row (defaultGemvR; the load overwrites both); (d) mtpDefaults' default argument is
+//     k_default_arch; the server's UMA snapshot count reads the 8060S row (dense 8, MoE 1 drafts).
+void testDeviceDefaults() {
+    namespace d = whirl::device;
+    using whirl::hip::Arch;
+    static_assert(d::k_default_arch == Arch::gfx1201 && d::k_uma_estimate_arch == Arch::gfx1151);
+    check(d::profile(d::k_uma_estimate_arch).uma_no_vram_fit_check && !d::profile(d::k_default_arch).uma_no_vram_fit_check,
+          "device defaults: UMA estimate row is UMA, default row is discrete");
+    for (const char* n : {"gfx1201", "gfx1200", "gfx1100", "gfx1030", "gfx942:sramecc+:xnack-", ""})
+        check(whirl::hip::archFor(n) == d::k_default_arch, std::string("archFor fallback is k_default_arch: '") + n + "'");
+    for (const char* n : {"gfx1151", "gfx1151:xnack-"})
+        check(whirl::hip::archFor(n) == d::k_uma_estimate_arch, std::string("archFor gfx1151 is the UMA row: '") + n + "'");
+    check(std::string(whirl::hip::archName(d::k_default_arch)) == "gfx1201" &&
+              std::string(whirl::hip::archName(d::k_uma_estimate_arch)) == "gfx1151",
+          "device defaults: archName of the two rows");
+    {
+        q::Model m;
+        check(m.arch == d::k_default_arch, "Model before load: arch is k_default_arch");
+        const std::array<std::uint8_t, 17> r9 = {1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2};
+        check(q::defaultGemvR() == r9 && q::defaultGemvR() == d::profile(d::k_default_arch).gemv_r,
+              "defaultGemvR: the k_default_arch (gfx1201) row");
+        check(m.tuneTable().gemv_r == q::defaultGemvR(), "Model before load: gemv_r = defaultGemvR");
+    }
+    for (const bool moe : {false, true}) {
+        const q::MtpDefaults a = q::mtpDefaults(moe), b = q::mtpDefaults(moe, d::k_default_arch);
+        check(a.drafts == b.drafts && a.automatic == b.automatic && a.ngram_slope == b.ngram_slope && a.p_min == b.p_min &&
+                  a.adapt == b.adapt && a.ngram_min == b.ngram_min,
+              std::string("mtpDefaults default argument is k_default_arch: ") + (moe ? "moe" : "dense"));
+        check(q::mtpDefaults(moe, d::k_uma_estimate_arch).drafts == (moe ? 1u : 8u),
+              std::string("UMA estimate snapshot drafts (8060S row): ") + (moe ? "moe 1" : "dense 8"));
+    }
+    check(q::mtpDefaults(false, d::k_uma_estimate_arch).ngram_slope == 0.12f && q::mtpDefaults(false).ngram_slope == 0.015f,
+          "the two rows differ where the 8060S has its own value (dense n-gram slope)");
+}
+
 int main() {
     whirl::test::clearWhirlEnv();  // FR-TEST P3-11
+    testDeviceDefaults();  // arch025-M6
     testArchRegistry();  // arch025-M5
     testKvLayout();
     testKvPool();  // arch025-M2
