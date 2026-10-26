@@ -24,6 +24,8 @@ u32 cascadeGroupCap(const CascadePrefixProblem& p, const kernels::AttnKernels& k
         if (p.kv_q4 || !ws4gSet(k) || grp > 16 || p.head_dim != static_cast<u32>(ws4::kD)) return 0;
         return static_cast<u32>(kernels::kMaxVerifyRows);
     }
+    // feat026-cascade-wide: 8 waves x 16 columns share one K / V tile
+    if (k.attn_cascade_wide != nullptr && 128 / grp >= 2) return std::min<u32>(128 / grp, kCascadeMaxRows);
     if (k.attn_wsplit2 != nullptr && 32 / grp >= 2) return std::min<u32>(32 / grp, kCascadeMaxRows);
     if (k.attn_wsplit1 != nullptr && 16 / grp >= 2) return 16 / grp;
     return 0;
@@ -51,6 +53,15 @@ CascadePrefixPlan chooseCascadePrefix(const CascadePlan& plan, const CascadePref
         pl.kind = CascadePrefixKind::ws4g;
         pl.f = k.attn_ws4g[cg - 1];
         pl.grid = D(p.n_head_kv * ((widest + rpb - 1) / rpb), p.n_split, ng);
+        pl.block = D(256);
+        return pl;
+    }
+    if (widest * grp > 32 || (widest * grp > 16 && k.attn_wsplit2 == nullptr)) {
+        // wider than attn_wsplit2 (or no attn_wsplit2): the wide kernel (cap 128 / grp checked above)
+        if (k.attn_cascade_wide == nullptr || widest * grp > 128) return CascadePrefixPlan{};
+        pl.kind = CascadePrefixKind::wide;
+        pl.f = k.attn_cascade_wide;
+        pl.grid = D(p.n_head_kv, p.n_split, ng);
         pl.block = D(256);
         return pl;
     }

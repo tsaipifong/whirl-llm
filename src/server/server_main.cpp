@@ -815,8 +815,10 @@ int serveMain(int argc, char** argv, const char* program) {
                     .kv;  // (WHIRL_DUMP_KV: one "D kv:" line, arch025-S0a)
             // (q4 KV uses 256 attention splits: more split-K partial buffers)
             const std::uint32_t fd_splits_est = qwen35::resolveFdSplits(kv_est == numerics::KvKind::q4);
-            const std::uint64_t b2 = qwen35::bufferBytes(cfg, 2048, est.ffs, est.max_elems, fd_splits_est);
-            const std::uint64_t b4 = qwen35::bufferBytes(cfg, 4096, est.ffs, est.max_elems, fd_splits_est);
+            // (precise: no cas_* budget, as Model::load allocates none there; feat026-cascade re-review R1)
+            const bool prec_est = nreq.mode == numerics::Mode::precise;
+            const std::uint64_t b2 = qwen35::bufferBytes(cfg, 2048, est.ffs, est.max_elems, fd_splits_est, prec_est);
+            const std::uint64_t b4 = qwen35::bufferBytes(cfg, 4096, est.ffs, est.max_elems, fd_splits_est, prec_est);
             fi.buf_per_row = (b4 - b2) / 2048;
             fi.buf_fixed = b2 - fi.buf_per_row * 2048;
             // (WHIRL_CKPT_HOST=1: checkpoints in pinned host memory, no VRAM)

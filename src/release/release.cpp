@@ -429,6 +429,7 @@ constexpr EnvDoc k_env[] = {
     {"Numerics / speed switches (A/B tests; defaults are the tested paths)", "MOE_BN=32|64", "grouped expert GEMM token tile", C | B | S},
     {"Numerics / speed switches (A/B tests; defaults are the tested paths)", "CASCADE=1", "shared-prefix (cascade) decode attention for slots sharing prompt pages (balance / fast; experimental, off)", S},
     {"Numerics / speed switches (A/B tests; defaults are the tested paths)", "CASCADE_MIN=N", "shortest shared prefix in keys for CASCADE (default 2048)", S},
+    {"Numerics / speed switches (A/B tests; defaults are the tested paths)", "CASCADE_WIDE=0", "CASCADE on the R9700 without the 128-column prefix kernel (groups of <= 32 columns)", S},
     {"Numerics / speed switches (A/B tests; defaults are the tested paths)", "DBG=BITS", "1 no gdn_abconv merge, 2 scalar split attention, 4 one query per attention group", C | B},
 
     {"Diagnostics", "TOKENIZE_ONLY=1", "print the prompt token ids and stop", C},

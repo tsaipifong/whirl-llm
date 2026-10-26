@@ -29,6 +29,7 @@
 #include "misc_rows_norm.hip"      // get_rows, norms, rope, elementwise
 #include "attn.hip"                // paged KV + decode / split / prefill attention
 #include "attn_cascade.hip"        // feat026: cascade (shared-prefix) attention rows + merge
+#include "attn_cascade_wide.hip"   // feat026-cascade-wide: 128-column cascade prefix pass (gfx1201 only)
 #include "gdn_prefill.hip"         // Gated DeltaNet per-token and chunked f32
 #include "gdn_prefill_wmma.hip"    // Gated DeltaNet chunked prefill on WMMA
 #include "prefill_fused.hip"       // prefill activation fusions

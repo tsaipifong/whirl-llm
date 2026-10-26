@@ -561,6 +561,10 @@ struct AttnKernels {
     // ops::CascadeRows tab, n) and attn_cascade_merge(part_ml, part_acc, cas_ml, cas_acc, rows, n_head, head_dim,
     // n_split), grid (n_head, rows), 256 threads
     F attn_cascade_rows{}, attn_cascade_merge{};
+    // feat026-cascade-wide (kernels/attn_cascade_wide.hip, gfx1201 only; f16 / q8 / q8h / q8v KV, null for q4 and on
+    // gfx1151, and with WHIRL_CASCADE_WIDE=0): the cascade prefix pass for groups of up to 128 columns (8 waves x 16),
+    // attn_wsplit1 arguments, grid (n_kv, n_split, groups), 256 threads
+    F attn_cascade_wide{};
 };
 
 struct MoeKernels {

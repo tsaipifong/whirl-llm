@@ -797,6 +797,70 @@ void testCascadeCapMtp() {
         const auto c = ops::chooseCascadePrefix(pl, p27, k51, k51.caps);
         CHECK(c.kind == ops::CascadePrefixKind::ws4g && nameOf(c.f) == "attn_ws4g3" && c.grid.x == 4 * 2 && c.grid.y == 64);
     }
+    // feat026-cascade-wide: gfx1201 with attn_cascade_wide (128 columns): cap 128 / grp (27B 21, Ornith 16), so the
+    // MTP nd 3 rows of 4 slots form ONE prefix group (the shared prefix is read once instead of once per sequence)
+    {
+        auto k01w = k01;
+        k01w.attn_cascade_wide = tag("attn_cascade_wide");
+        const std::uint32_t w27 = ops::cascadeGroupCap(p27, k01w, k01w.caps), w35 = ops::cascadeGroupCap(p35, k01w, k01w.caps);
+        CHECK(w27 == 21 && w35 == 16);
+        p27.n_split = 64;
+        p35.n_split = 32;
+        for (const std::uint32_t nd : {1u, 2u, 3u}) {
+            const ops::CascadePlan pl = planFor(4, nd + 1, w27);
+            CHECK(pl.groups.size() == 1 && pl.groups[0].count == 4 * (nd + 1) && pl.groups[0].keys == 4096);
+            const auto c = ops::chooseCascadePrefix(pl, p27, k01w, k01w.caps);
+            // nd 1: 8 rows x 6 = 48 columns, past attn_wsplit2's 32: the wide kernel as well
+            CHECK(c.kind == ops::CascadePrefixKind::wide && nameOf(c.f) == "attn_cascade_wide" && c.grid.x == 4 && c.grid.y == 64 &&
+                  c.grid.z == 1 && c.block.x == 256 && c.groups.first[0] == 0 && c.groups.count[0] == static_cast<std::int32_t>(4 * (nd + 1)));
+        }
+        {
+            const ops::CascadePlan pl = planFor(4, 4, w35);  // Ornith: 16 rows x 8 = 128 columns, exactly one block
+            CHECK(pl.groups.size() == 1 && pl.groups[0].count == 16);
+            const auto c = ops::chooseCascadePrefix(pl, p35, k01w, k01w.caps);
+            CHECK(c.kind == ops::CascadePrefixKind::wide && c.grid.x == 2 && c.grid.y == 32 && c.block.x == 256);
+        }
+        // 6 slots x 4 rows (24 > 21): five sequences in one group, the sixth alone (no group)
+        {
+            const ops::CascadePlan pl = planFor(6, 4, w27);
+            CHECK(pl.groups.size() == 1 && pl.groups[0].count == 20);
+        }
+        // groups that fit the measured decode kernels keep them: <= 16 columns attn_wsplit1, <= 32 attn_wsplit2
+        {
+            ops::CascadePlan pl;
+            pl.groups.push_back(ops::CascadeGroup{0, 2, 2048});
+            CHECK(ops::chooseCascadePrefix(pl, p27, k01w, k01w.caps).kind == ops::CascadePrefixKind::wsplit1);
+            pl.groups[0].count = 5;
+            CHECK(ops::chooseCascadePrefix(pl, p27, k01w, k01w.caps).kind == ops::CascadePrefixKind::wsplit2);
+            pl.groups[0].count = 6;
+            CHECK(ops::chooseCascadePrefix(pl, p27, k01w, k01w.caps).kind == ops::CascadePrefixKind::wide);
+            pl.groups[0].count = 21;
+            CHECK(ops::chooseCascadePrefix(pl, p27, k01w, k01w.caps).kind == ops::CascadePrefixKind::wide);
+            pl.groups[0].count = 22;  // past the cap
+            CHECK(ops::chooseCascadePrefix(pl, p27, k01w, k01w.caps).kind == ops::CascadePrefixKind::none);
+            // two groups of different widths: one launch, the kernel of the widest
+            pl.groups[0].count = 4;
+            pl.groups.push_back(ops::CascadeGroup{4, 8, 2048});
+            const auto c = ops::chooseCascadePrefix(pl, p27, k01w, k01w.caps);
+            CHECK(c.kind == ops::CascadePrefixKind::wide && c.grid.z == 2 && c.groups.first[1] == 4 && c.groups.count[1] == 8);
+        }
+        // no attn_wsplit2 (a code object without it): 17..32 columns go to the wide kernel, not attn_wsplit1
+        {
+            auto kn2 = k01w;
+            kn2.attn_wsplit2 = nullptr;
+            ops::CascadePlan pl;
+            pl.groups.push_back(ops::CascadeGroup{0, 3, 2048});
+            CHECK(ops::chooseCascadePrefix(pl, p27, kn2, kn2.caps).kind == ops::CascadePrefixKind::wide);
+        }
+        // gfx1151 never loads it; a table with it set still takes attn_ws4g (caps.attn_group1 decides first)
+        {
+            auto k51w = k51;
+            k51w.attn_cascade_wide = tag("attn_cascade_wide");
+            CHECK(ops::cascadeGroupCap(p27, k51w, k51w.caps) == 32);
+            const auto c = ops::chooseCascadePrefix(planFor(4, 4, 32), p27, k51w, k51w.caps);
+            CHECK(c.kind == ops::CascadePrefixKind::ws4g);
+        }
+    }
 }
 
 // cascade (prefix splits merged into suffix split 0, then the combine) vs the plain split-K path vs an exact

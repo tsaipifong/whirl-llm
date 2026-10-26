@@ -346,6 +346,8 @@ void loadAttn(AttnKernels& k, const Loader& L, KvFormat kv) {
         k.attn_wsplit2 = L.opt("attn_wsplit2_q8");
     }
     const char* kvs = kv == KvFormat::q8v ? "_q8v" : kv == KvFormat::q4 ? "_q4" : kv == KvFormat::f16 ? "" : "_q8";
+    // feat026-cascade-wide: gfx1201 wide-group cascade prefix kernel (no q4 variant; q8h shares the q8 layout)
+    if (kv != KvFormat::q4) k.attn_cascade_wide = L.opt(std::string("attn_cascade_wide") + kvs);
     k.attn_kx = L.opt(std::string("attn_kx") + kvs);
     k.attn_ws4 = L.opt(std::string("attn_ws4") + kvs);  // gfx1151 only (no q8v variant)
     if (kv == KvFormat::f16 || kv == KvFormat::q8 || kv == KvFormat::q8h)  // gfx1151 only (f16 / int8 K/V)

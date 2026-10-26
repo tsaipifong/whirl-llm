@@ -1340,6 +1340,19 @@ void testLoadEstimate() {
         check(eh.embd_on_host && eh.weights == all - emb && emb > 0, ("estimate: host embedding not counted" + tag).c_str());
         check(ev.has_mtp, ("estimate: nextn layer seen" + tag).c_str());
         check(ev.max_elems == max_elems && ev.ffs == ffs, ("estimate: scratch sizes from the layer matrices" + tag).c_str());
+        {
+            // feat026-cascade re-review R1: the cas_* budget (WHIRL_CASCADE=1) is counted in balance / fast only; precise
+            // (Model::load allocates no cas_* there) budgets exactly what it does without WHIRL_CASCADE
+            const std::uint64_t off_b = q::bufferBytes(cfg, 2048, ev.ffs, ev.max_elems, 64, false);
+            const std::uint64_t off_p = q::bufferBytes(cfg, 2048, ev.ffs, ev.max_elems, 64, true);
+            _putenv_s("WHIRL_CASCADE", "1");
+            const std::uint64_t on_b = q::bufferBytes(cfg, 2048, ev.ffs, ev.max_elems, 64, false);
+            const std::uint64_t on_p = q::bufferBytes(cfg, 2048, ev.ffs, ev.max_elems, 64, true);
+            _putenv_s("WHIRL_CASCADE", "");
+            const std::uint64_t cas = static_cast<std::uint64_t>(q::max_verify_rows) * 64 * cfg.n_head * (2 + cfg.head_dim) * 4 + 3 * 32 * 4;
+            check(off_b == off_p && on_p == off_p && on_b == off_b + cas,
+                  ("estimate: WHIRL_CASCADE=1 budget (cas_*) only outside precise" + tag).c_str());
+        }
         // one DeltaNet layer (layer 0): conv + ssm state
         const std::uint64_t st = static_cast<std::uint64_t>(cfg.d_conv - 1) * cfg.convCh() * 4 +
                                  static_cast<std::uint64_t>(cfg.n_v_heads) * cfg.d_state * cfg.headV() * 4;
