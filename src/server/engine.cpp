@@ -142,6 +142,25 @@ Engine::Engine(ServerModel& model, device::Backend& ops, const Tokenizer& tok, c
     tb_.setOwner(&owner_);
 }
 
+// feat026-acc-r1: WHIRL_SPEC_ACC names (engine.h)
+namespace {
+constexpr const char* k_spec_acc_names[] = {"host", "pinned", "gpu", "gpu-zc", "check"};
+}  // namespace
+
+const char* specAccName(std::uint32_t mode) { return mode < std::size(k_spec_acc_names) ? k_spec_acc_names[mode] : "?"; }
+
+std::optional<std::uint32_t> parseSpecAcc(std::string_view v) {
+    while (!v.empty() && (v.front() == ' ' || v.front() == '\t')) v.remove_prefix(1);
+    while (!v.empty() && (v.back() == ' ' || v.back() == '\t')) v.remove_suffix(1);
+    if (v.size() == 1 && v[0] >= '0' && v[0] <= '4') return static_cast<std::uint32_t>(v[0] - '0');
+    std::string s(v);
+    for (char& c : s) c = (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c;
+    if (s == "gpu_zc" || s == "zc") return 3u;
+    for (std::uint32_t m = 0; m < std::size(k_spec_acc_names); ++m)
+        if (s == k_spec_acc_names[m]) return m;
+    return std::nullopt;
+}
+
 Engine::~Engine() {
     // the checkpoint buffers (Ckpt), events (slots, shared checkpoints, quarantine) and sampling buffers release
     // themselves when the members are destroyed; Slot / Spe wait for their spill / ready fences first (F1)
@@ -190,8 +209,7 @@ void Engine::allocState() {
             logW("WHIRL_SPEC_ACC={}: no spec_accept_rows kernel; pinned read + host accept", opt_.spec_acc);
             opt_.spec_acc = 1;
         }
-        static constexpr const char* names[] = {"host", "pinned", "gpu", "gpu-zc", "check"};
-        logI("decode: WHIRL_SPEC_ACC={} ({})", opt_.spec_acc, names[opt_.spec_acc]);
+        logI("decode: WHIRL_SPEC_ACC={} ({})", opt_.spec_acc, specAccName(opt_.spec_acc));
     }
     if (opt_.relax.on) {
         const std::uint64_t rb = static_cast<std::uint64_t>(max_rows) * opt_.relax.topk() * 8 + max_rows * 8;
@@ -336,6 +354,7 @@ Engine::Stats Engine::stats() const {
     s.acc_dev = stat_acc_dev_;
     s.acc_checked = stat_acc_checked_;
     s.acc_mismatch = stat_acc_mismatch_;
+    s.acc_fallback = stat_acc_fallback_;
     s.tab_checked = stat_tab_checked_;
     s.tab_mismatch = stat_tab_mismatch_;
     return s;
@@ -1913,8 +1932,9 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
             const std::int32_t a0 = ctl[WHIRL_SA_CTL_ACC0], a1 = ctl[WHIRL_SA_CTL_ACC];
             if (a0 < 0 || static_cast<std::uint32_t>(a0) > nd_dev || a1 < 0 || a1 > a0 ||
                 static_cast<std::uint32_t>(ctl[WHIRL_SA_CTL_NDDEV]) != nd_dev) {
-                if (stat_acc_mismatch_ == 0) logW("spec-acc | slot {} | device result out of range (acc {}/{}, nd {}); host decides", sl.id, a0, a1, nd_dev);
-                stat_acc_mismatch_ += 1;
+                if (stat_acc_fallback_ == 0)
+                    logW("spec-acc fallback | slot {} | device result out of range (acc {}/{}, nd {}); host decides", sl.id, a0, a1, nd_dev);
+                stat_acc_fallback_ += 1;
                 dev_use = false;
             }
         }
@@ -2270,6 +2290,12 @@ void Engine::finishJob(Slot& sl) {
              sl.cycles > 0 ? static_cast<double>(sl.accepted + sl.cycles) / sl.cycles : 0.0, sl.cycles);
         if (opt_.ngram) logI("req {} | slot {} | n-gram drafts in {} of {} cycles", job.id, sl.id, sl.ng_cycles, sl.cycles);
     }
+    // feat026-acc-r1 (review C5): engine totals since start, the two failure kinds apart
+    if (opt_.spec_acc >= 2)
+        logI("req {} | slot {} | spec-acc stats | {}: decided on the device {}, out of range (host decided) {}; check: "
+             "compared {}, disagree {}; next-cycle rows: compared {}, disagree {}",
+             job.id, sl.id, specAccName(opt_.spec_acc), stat_acc_dev_, stat_acc_fallback_, stat_acc_checked_, stat_acc_mismatch_,
+             stat_tab_checked_, stat_tab_mismatch_);
     // (whatever the draft source: with DFlash2 drafts it must stay 0, FR-DFL P2-3)
     if (opt_.relax.on && (opt_.use_mtp || opt_.use_dflash))
         logI("req {} | slot {} | relaxacc: {} of {} accepted drafts kept by the relaxed rule (greedy: mean ln p_max/p_kept {:.3f})",

@@ -98,8 +98,9 @@ public:
         // outside the capture, restores)
         std::uint64_t dfl_cycles = 0, dfl_drafted = 0, dfl_accepted = 0, dfl_cold = 0, dfl_gap = 0;
         // feat026-acc: slot cycles decided on the device, compared with the host loop (WHIRL_SPEC_ACC=check) and
-        // disagreeing; next-cycle row tables compared / disagreeing
-        std::uint64_t acc_dev = 0, acc_checked = 0, acc_mismatch = 0, tab_checked = 0, tab_mismatch = 0;
+        // disagreeing (check only); device results out of range in gpu / gpu-zc, decided on the host instead
+        // (feat026-acc-r1: a different event from a disagreement); next-cycle row tables compared / disagreeing
+        std::uint64_t acc_dev = 0, acc_checked = 0, acc_mismatch = 0, acc_fallback = 0, tab_checked = 0, tab_mismatch = 0;
     };
 
     virtual ~EngineApi() = default;

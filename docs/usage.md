@@ -576,6 +576,7 @@ The output always equals plain greedy decoding (with sampling: the same distribu
 | `WHIRL_GDN_REPLAY=0` | DeltaNet verify with snapshot sets instead of replaying kept rows |
 | `WHIRL_SNAP_SETS=N` | minimum number of recurrent-state snapshot sets (with `WHIRL_GDN_REPLAY=0`) |
 | `WHIRL_SLOT_DRAFTS=1` | split the draft budget between slots by expected acceptance |
+| `WHIRL_SPEC_ACC=host\|pinned\|gpu\|gpu-zc\|check` | where a draft cycle's accept decision is made; the reply is the same with every value *(A/B)*. `host` (or `0`, default): the host loop after a pageable read of the verify's control words; `pinned` (`1`): the same with a pinned-memory read; `gpu` (`2`): a GPU kernel decides the greedy slots (sampling and relaxed-acceptance slots always decide on the host); `gpu-zc` (`3`): `gpu`, with the kernel writing straight into pinned host memory (zero copy; not yet verified on a GPU); `check` (`4`): the GPU and the host loop both decide and every cycle is compared (the host result is used; differences are logged as `spec-acc check`). A GPU result out of range is logged as `spec-acc fallback` and decided on the host. With `gpu`, `gpu-zc` or `check`, every finished request logs a `spec-acc stats` line. Any other value warns and uses `host` |
 | `WHIRL_TIMING_RESET=0` | keep the MTP timing table across requests (not recommended) |
 | `WHIRL_KV_RAM_MB=N` | host RAM tier in MiB (= `--kv-ram-mb`) |
 | `WHIRL_KV_SSD_DIR=PATH` | SSD tier directory (= `--kv-ssd-dir`) |

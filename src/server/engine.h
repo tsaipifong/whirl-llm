@@ -225,6 +225,13 @@ struct DraftPlanSlot {
 std::vector<std::uint32_t> planSlotDrafts(std::span<const DraftPlanSlot> slots, const qwen35::CycleCost& cost,
                                           std::uint32_t uniform, std::uint32_t cap, std::uint32_t rows, std::uint32_t snaps);
 
+// feat026-acc-r1: WHIRL_SPEC_ACC values. 0..4 or the names host / pinned / gpu / gpu-zc / check (case-insensitive,
+// surrounding blanks ignored; gpu_zc and zc = gpu-zc). Anything else: nullopt (server_main warns and uses 0 = host).
+// specAccName: the name of a mode ("?" outside 0..4); one table for the parser and the startup log line.
+#define WHIRL_SPEC_ACC_R1 1  // tests/server/spec_acc_r1_tests.inc: the fixed API exists
+std::optional<std::uint32_t> parseSpecAcc(std::string_view v);
+const char* specAccName(std::uint32_t mode);
+
 struct EngineOptions {
     std::string model_name;
     std::string model_file;  // GGUF file name without directory (GET /props model_path)
@@ -546,7 +553,9 @@ private:
     std::vector<Cand> cands_scratch_;
     std::vector<std::int32_t> ctl_host_;
     device::PinnedBuf ctl_pin_;  // feat026-acc: pinned control words (WHIRL_SPEC_ACC >= 1)
-    std::uint64_t stat_acc_dev_ = 0, stat_acc_checked_ = 0, stat_acc_mismatch_ = 0, stat_tab_checked_ = 0,
+    // feat026-acc-r1 (review C5): acc_fallback = device result out of range in modes 2/3 (the host decided);
+    // acc_mismatch = mode 4 only, the device and the host loop disagreed
+    std::uint64_t stat_acc_dev_ = 0, stat_acc_checked_ = 0, stat_acc_mismatch_ = 0, stat_acc_fallback_ = 0, stat_tab_checked_ = 0,
                   stat_tab_mismatch_ = 0;
     // feat026-acc seam: the verify's control words for the host after the cycle's enqueue (aa: device accept
     // arguments, null = no device decision this cycle). Touches only this call of decodeCycle.

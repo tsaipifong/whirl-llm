@@ -1296,8 +1296,12 @@ int serveMain(int argc, char** argv, const char* program) {
         if (auto v = env("NGRAM_SLOPE")) eo.ngram_slope = std::strtof(v->c_str(), nullptr);
         eo.ngram_max = envU32("NGRAM_MAX", 0);
         eo.ngram_force = envOn("NGRAM_FORCE", false);
-        // feat026-acc: 0 host (default), 1 pinned, 2 gpu, 3 gpu-zc, 4 check (EngineOptions::spec_acc)
-        eo.spec_acc = envU32("SPEC_ACC", 0);
+        // feat026-acc: 0 host (default), 1 pinned, 2 gpu, 3 gpu-zc, 4 check (EngineOptions::spec_acc); feat026-acc-r1:
+        // the names too (parseSpecAcc); a bad value warns and runs host (FR-SRV P3-10: never a startup failure)
+        if (auto v = env("SPEC_ACC")) {
+            if (auto m = parseSpecAcc(*v)) eo.spec_acc = *m;
+            else logW("WHIRL_SPEC_ACC={} is not one of 0..4 / host, pinned, gpu, gpu-zc, check; using 0 (host)", *v);
+        }
         // WHIRL_SLOT_DRAFTS: 0 / unset uniform, 1 marginal-gain swaps, 2 cost-model allocation
         if (auto v = env("SLOT_DRAFTS")) eo.slot_drafts = *v == "2" ? 2u : (*v != "0" ? 1u : 0u);
         if (use_dflash) {

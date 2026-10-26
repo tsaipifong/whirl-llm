@@ -366,6 +366,7 @@ void testMisc(Ctx& c) {
             SpecNextTab wt{};
             spec_next_rows(a, want.data(), res, &wt);
             Buf dctl(ctl), dhost(std::vector<int>(4 * 64, -1)), dtab(sizeof(SpecNextTab));
+            dtab.zero();  // feat026-acc-r1 (review N2): compared whole with a zero-initialised SpecNextTab
             hip::launch(c.k.spec_accept_rows, {1, 1, 1}, {64, 1, 1}, 0, c.s, dctl.p(), a, dhost.p(), dtab.p());
             c.sync();
             const auto got = dctl.down<int>(4 * 64);
@@ -382,6 +383,28 @@ void testMisc(Ctx& c) {
             // the hand-checked values: seq 2 acc 2 chosen ctl[2], seq 0 cut to acc 1 chosen 998
             c.rep.add(cmpExact("spec_accept_rows acc / chosen", std::vector<int>{res[0].acc, res[0].chosen, res[1].acc, res[1].chosen},
                                std::vector<int>{2, want[2 * 64 + 2], 1, 998}));
+            // feat026-acc-r1 (review C4): WHIRL_SPEC_ACC=3 (gpu-zc) the way production runs it: the host-layout
+            // buffer is pinned host memory from hip::hostMalloc (hipHostMalloc, flags 0 = Engine::allocState's
+            // PinnedBuf), its HOST pointer goes to the kernel as the device address (Engine::readCycleCtl), the
+            // stream is synced (m_.syncStream) and the CPU reads the words straight from that memory, no download.
+            // Pre-filled with -1, so a write that lands elsewhere or nowhere fails. If this fails where the device
+            // buffer case above passes, the host pointer is not a device address on this GPU / driver: map it with
+            // hipHostGetDevicePointer like llama.cpp (ggml-cuda/allreduce.cu:268-300) before mode 3 is used.
+            {
+                Buf dctl2(ctl), dtab2(sizeof(SpecNextTab));
+                dtab2.zero();  // review N2: compared whole with a zero-initialised SpecNextTab
+                const std::size_t hb = 4 * 64 * sizeof(int);
+                auto* hp = static_cast<int*>(hip::hostMalloc(hb));
+                for (int i = 0; i < 4 * 64; ++i) hp[i] = -1;
+                hip::launch(c.k.spec_accept_rows, {1, 1, 1}, {64, 1, 1}, 0, c.s, dctl2.p(), a, reinterpret_cast<DevPtr>(hp), dtab2.p());
+                c.sync();
+                const std::vector<int> zc(hp, hp + 4 * 64);
+                hip::hostFree(hp);
+                c.rep.add(cmpExact("spec_accept_rows gpu-zc pinned host copy", zc, want_h));
+                c.rep.add(cmpExact("spec_accept_rows gpu-zc control words", dctl2.down<int>(4 * 64), want));
+                const auto tb2 = dtab2.down<int>(sizeof(SpecNextTab) / 4);
+                c.rep.add(cmpExact("spec_accept_rows gpu-zc next-cycle rows", tb2, wtv));
+            }
         }
         // topk_rows: the K largest (unordered) and the softmax normalizer
         if (c.k.topk_rows) {
