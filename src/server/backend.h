@@ -1,7 +1,7 @@
 // The model operations the server engine needs, behind an interface so the
 // engine (scheduling, prefix cache, shared prefix checkpoints, host tiers,
 // sampling) can run against a host-memory mock in tests. The production
-// implementation (backend_qwen35.cpp) forwards to whirl::qwen35::Model
+// implementation (src/model/qwen35/server_model.cpp) forwards to whirl::qwen35::Model
 // (include/whirl/model.h, owned by the model area; this header and the server core see only
 // whirl/model_types.h, arch025-M3); the semantics of every
 // call are those of the Model member of the same name.

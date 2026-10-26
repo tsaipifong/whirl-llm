@@ -1,6 +1,6 @@
 // MTP drafting and speculative-verify choice (ARCH-1 §6.5, arch025-F6): the draft head (rows, the 2-bit head's row
 // map), whether a chained draft gates its big kernels, the row limit of a batched verify / MTP step, and which batched
-// verifies the unfused decode path can run. Pure functions; src/model/forward/mtp_verify.cpp asks here and launches.
+// verifies the unfused decode path can run. Pure functions; src/model/qwen35/forward/mtp_verify.cpp asks here and launches.
 // SPDX-License-Identifier: Apache-2.0
 //
 // Tests: tests/ops/ops_tests.cpp (testMtpChoice).

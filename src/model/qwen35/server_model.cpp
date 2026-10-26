@@ -1,8 +1,8 @@
-// ServerModel over whirl::qwen35::Model.
+// ServerModel over whirl::qwen35::Model (src/server/backend_qwen35.cpp until arch025-M5).
 // SPDX-License-Identifier: Apache-2.0
 
-#include "backend.h"
-#include "vision_iface.h"
+#include "server/backend.h"
+#include "server/vision_iface.h"
 
 #include "whirl/hip.h"
 #include "whirl/model.h"  // the qwen35::Model this backend forwards to (backend.h sees model_types.h only, arch025-M3)

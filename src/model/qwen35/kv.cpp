@@ -1,7 +1,7 @@
 // qwen35 KV pool and sequence table (arch025-M2, R-8b), see kv.h. KvPool::allocate / releaseArrays and
 // SeqTable::mapPages are the bodies of the former Model::allocKvPool / freeKvPool / mapPages (src/model/loader.cpp) with
 // the device calls going through KvPool::Device / the upload argument; kvArrays is the former
-// Qwen35Backend::kvArrays (src/server/backend_qwen35.cpp). The Model functions below (kvBytesPerTokenFmt ..
+// Qwen35Backend::kvArrays (src/model/qwen35/server_model.cpp). The Model functions below (kvBytesPerTokenFmt ..
 // restoreSeqSnapshot) moved here from loader.cpp unchanged, apart from allocKvPool / freeKvPool / mapPages calling the
 // above.
 // SPDX-License-Identifier: Apache-2.0

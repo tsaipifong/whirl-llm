@@ -2,7 +2,7 @@
 // GEMMs reading one activation take, whether their outputs are f16 (h16), whether a norm writes that form directly
 // (rmsnormIn, the GDN two-input norm), and the decode-fusion predicates (fused rows, fused decode, wide verify).
 // Pure functions of the problem (matrix shapes, rows), the numerics flags, the device profile's fields (copied
-// into the flags by the caller) and the code object's kernel table. src/model/forward/dispatch.cpp builds the
+// into the flags by the caller) and the code object's kernel table. src/model/qwen35/forward/dispatch.cpp builds the
 // problem, asks here, and launches what comes back.
 // SPDX-License-Identifier: Apache-2.0
 //

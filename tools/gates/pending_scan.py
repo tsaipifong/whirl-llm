@@ -95,8 +95,8 @@ RULES = {
     # server engine read the load's EnvSnapshot / their Model members only; src/ops (the forward's choices since
     # F5 / F6) is pure.
     "env": {"allowed": ["src/platform/", "src/config/env_snapshot."], "what": "env read",
-            "blocked": ["src/model/forward/", "src/model/forward_internal.h", "src/model/forward.cpp", "src/server/engine",
-                        "src/server/backend_qwen35.cpp", "src/ops/", "include/whirl/ops/"]},
+            "blocked": ["src/model/qwen35/forward/", "src/model/qwen35/forward_internal.h", "src/model/forward.cpp", "src/server/engine",
+                        "src/model/qwen35/server_model.cpp", "src/ops/", "include/whirl/ops/"]},
     "arch": {"allowed": ["src/hip/", "include/whirl/hip.h", "include/whirl/device_profile.h", "src/model/device.cpp"],
              "what": "Arch:: branch"},
 }
@@ -435,18 +435,18 @@ def selftest() -> int:
          f"src/cli/main.cpp{T}3{T}C2\n", "block", 0)
     case("env snapshot file allowed", "env", {"src/config/env_snapshot.cpp": 'std::getenv("A");\n'}, None, "block", 0)
     # arch025-F7: forward / engine / ops blocked in any mode, even with a pending entry
-    case("F7: forward env read blocked in report mode", "env", {"src/model/forward/dispatch.cpp": 'bool a = envFlag("HEAD_GEMVX", false);\n'},
+    case("F7: forward env read blocked in report mode", "env", {"src/model/qwen35/forward/dispatch.cpp": 'bool a = envFlag("HEAD_GEMVX", false);\n'},
          None, "report", 1)
-    case("F7: forward pending entry does not allow it", "env", {"src/model/forward/gdn.cpp": 'auto v = std::getenv("WHIRL_X");\n'},
-         f"src/model/forward/gdn.cpp{T}1{T}F7\n", "block", 1)
-    case("F7: a pending entry for a blocked path is itself a FAIL", "env", {"src/model/forward/gdn.cpp": "int x;\n"},
-         f"src/model/forward/gdn.cpp{T}0{T}F7\n", "report", 1)
+    case("F7: forward pending entry does not allow it", "env", {"src/model/qwen35/forward/gdn.cpp": 'auto v = std::getenv("WHIRL_X");\n'},
+         f"src/model/qwen35/forward/gdn.cpp{T}1{T}F7\n", "block", 1)
+    case("F7: a pending entry for a blocked path is itself a FAIL", "env", {"src/model/qwen35/forward/gdn.cpp": "int x;\n"},
+         f"src/model/qwen35/forward/gdn.cpp{T}0{T}F7\n", "report", 1)
     case("F7: engine_thread env read blocked", "env", {"src/server/engine_thread.cpp": 'auto v = envGet("KV");\n'}, None, "report", 1)
-    case("F7: forward_internal.h env read blocked", "env", {"src/model/forward_internal.h": 'inline bool f() { return envFlag("A"); }\n'},
+    case("F7: forward_internal.h env read blocked", "env", {"src/model/qwen35/forward_internal.h": 'inline bool f() { return envFlag("A"); }\n'},
          None, "report", 1)
     case("F7: ops env read blocked", "env", {"include/whirl/ops/gdn.h": 'const char* v = getenv("WHIRL_A");\n', "src/ops/gdn.cpp": "int x;\n"}, None, "report", 1)
     case("F7: forward comment / string / snapshot field are not reads", "env",
-         {"src/model/forward/dispatch.cpp": '// envFlag("HEAD_GEMVX")\nconst char* s = "getenv(";\nbool h = head_gemvx;\n'}, None, "block", 0)
+         {"src/model/qwen35/forward/dispatch.cpp": '// envFlag("HEAD_GEMVX")\nconst char* s = "getenv(";\nbool h = head_gemvx;\n'}, None, "block", 0)
     case("F7: the rest of the tree stays report mode", "env", {"src/server/server_main.cpp": 'envGet("A");\n'}, None, "report", 0)
     # arch
     case("Arch:: branch blocked", "arch", {"src/model/config.cpp": "if (a == hip::Arch::gfx1151) {}\n"}, None, "block", 1)
@@ -465,7 +465,7 @@ def selftest() -> int:
     case("after M3: pending entry STALE", "include", clean, f"src/server/engine.cpp{T}1{T}M3\n", "block", 1)
     case("after M3: clean", "include", clean, None, "block", 0)
     other = dict(clean)
-    other["src/server/backend_qwen35.cpp"] = '#include "whirl/model.h"\n'  # not a core source
+    other["src/model/qwen35/server_model.cpp"] = '#include "whirl/model.h"\n'  # not a core source
     case("a non-core source may include model.h", "include", other, None, "block", 0)
     case("a non-core source may include model.h (report)", "include", other, None, "report", 0)
     shutil.rmtree(base, ignore_errors=True)
@@ -499,7 +499,7 @@ def tree_test(root: str, rule: str = "platform") -> int:
             # arch025-F7: forward / engine blocked in both modes; the copy as is passes in both
             one("the tree passes in report mode", 0, "report")
             n = 2
-            for rel, line in (("src/model/forward/dispatch.cpp", '\nstatic bool f7Probe() { return envFlag("HEAD_GEMVX", false); }\n'),
+            for rel, line in (("src/model/qwen35/forward/dispatch.cpp", '\nstatic bool f7Probe() { return envFlag("HEAD_GEMVX", false); }\n'),
                               ("src/server/engine.cpp", '\nstatic const char* f7Probe() { return std::getenv("WHIRL_KV"); }\n')):
                 f = os.path.join(base, *rel.split("/"))
                 orig = open(f, "rb").read()

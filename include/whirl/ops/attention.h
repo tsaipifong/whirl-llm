@@ -1,7 +1,7 @@
 // Attention kernel choice (ARCH-1 K-3): decode / verify split-K attention (attn_ws4 / ws4g, attn_wsplit1 / 2,
 // attn_dq4, attn_split + the combine) and prefill attention (attn_kg / kgf / kgs / kx / prefill_wmma / pwf / pws
 // with the K / V dequant copies), as pure functions of the problem, the flags, the kernel table and the device
-// profile, and the prep / core choice of the attention block around them (arch025-F6). src/model/forward/attn.cpp
+// profile, and the prep / core choice of the attention block around them (arch025-F6). src/model/qwen35/forward/attn.cpp
 // builds the problem and launches the plan (it alone knows the buffers).
 // SPDX-License-Identifier: Apache-2.0
 //

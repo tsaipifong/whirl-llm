@@ -1,5 +1,5 @@
 // Server side of image input: the encoder behind an interface (production:
-// whirl::vision::Vision on the model stream, backend_qwen35.cpp; tests: a host
+// whirl::vision::Vision on the model stream, src/model/qwen35/server_model.cpp; tests: a host
 // mock), the per-request image state and the embedding cache entries.
 // SPDX-License-Identifier: Apache-2.0
 //

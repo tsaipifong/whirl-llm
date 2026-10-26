@@ -3,7 +3,7 @@
 // gates ([beta; alpha] in one GEMM or two), the conv (+ q/k l2norm) kernel, the recurrence (sequential or chunked:
 // strix / f16-WMMA / f32 chunks) and the gated norm (straight into the out-projection's fp8 / f16 input or plain).
 // Pure functions of the problem (shapes, rows), the numerics flags and the code object's kernel table.
-// src/model/forward/gdn.cpp builds the problem, asks here, and launches what comes back (it alone knows the buffers).
+// src/model/qwen35/forward/gdn.cpp builds the problem, asks here, and launches what comes back (it alone knows the buffers).
 // SPDX-License-Identifier: Apache-2.0
 //
 // The precise rule (precise decode / verify rows take the f16 GEMM, never the int8 fused step) is preciseAllows in

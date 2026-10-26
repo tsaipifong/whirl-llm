@@ -27,7 +27,7 @@ struct Profile {
     // memory shared with the CPU (UMA iGPU): the load does not check the weights against the free VRAM,
     // which does not bound what it can allocate (loader.cpp; WHIRL_VRAM_LIMIT_MB still applies)
     bool uma_no_vram_fit_check;
-    // ---- GEMV / GEMM dispatch (src/model/forward.cpp)
+    // ---- GEMV / GEMM dispatch (src/model/qwen35/forward/dispatch.cpp)
     // rows per block of the multi-row quantized GEMV per batch size 0..16 (Model::gemv_r default)
     std::array<std::uint8_t, 17> gemv_r;
     // f16-in GEMV grid: kernels::gemvhGrid(nrows) blocks (else one block per 16 rows)

@@ -157,8 +157,12 @@ def git(root, *a):
 
 
 def list_files(root):
-    out = git(root, "ls-files")
-    files = [l.strip() for l in out.splitlines() if l.strip()]
+    # arch025-M5: the working tree, not only the index: tracked files that still exist + untracked, not ignored files.
+    # A refactor agent moves files without git (the main session stages them), so `git ls-files` alone listed the old
+    # paths (src/model/forward/*.cpp, gone) and missed the new ones: 12 roots "not found". Same list as before on a
+    # clean checkout.
+    out = git(root, "ls-files", "--cached", "--others", "--exclude-standard")
+    files = sorted({l.strip() for l in out.splitlines() if l.strip() and os.path.isfile(os.path.join(root, l.strip()))})
     if not files:  # not a git checkout
         for dp, dns, fns in os.walk(root):
             dns[:] = [d for d in dns if d not in (".git", "build")]

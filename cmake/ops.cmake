@@ -1,5 +1,5 @@
 # WHIRL ops: kernel choice per op (ARCH-1 K-1..K-5): pure functions of the problem, the numerics flags, the
-# code object's kernel table and the tuned tables; src/model/forward/*.cpp launch what they return.
+# code object's kernel table and the tuned tables; src/model/qwen35/forward/*.cpp launch what they return.
 # SPDX-License-Identifier: Apache-2.0
 #
 #   whirl_ops        : src/ops (no HIP calls; kernels_abi.h types only)

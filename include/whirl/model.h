@@ -229,24 +229,7 @@ struct LoadOptions {
     std::shared_ptr<const whirl::config::EnvSnapshot> env;
 };
 
-// VRAM Model::load will take, estimated from the GGUF header before any
-// allocation (pre-load fit check, server auto-shrink of the prefill batch).
-// buffers(B) follows the allocation list of Model::load exactly for B a
-// multiple of 64; weights are the tensor bytes (+ MXFP4 row refs) that go to VRAM.
-struct LoadEstimate {
-    std::uint64_t weights = 0;  // tensor bytes uploaded to VRAM
-    std::uint64_t state = 0;    // DeltaNet conv + ssm state allocated at load
-    std::uint64_t ffs = 0;      // widest layer-matrix side (ffn_g / ffn_u scratch)
-    std::uint64_t max_elems = 0;  // largest layer matrix (w16 scratch)
-    bool embd_on_host = false;  // token_embd goes to pinned host memory
-    bool has_mtp = false;       // nextn layer present (one more KV layer)
-    std::uint64_t kv_f16 = 0, kv_q8v = 0, kv_q8h = 0, kv_q4 = 0;  // KV bytes per token by format
-    // KV bytes per token of the format a pre-load estimate chose (numerics::kvEstimate); q8 has q8h's rows
-    // (arch025-N3-r1: was the same ternary at loader.cpp's UMA check and the server's dGPU / UMA estimates)
-    std::uint64_t kvPerToken(KvFormat kv) const {
-        return kv == KvFormat::f16 ? kv_f16 : kv == KvFormat::q8v ? kv_q8v : kv == KvFormat::q4 ? kv_q4 : kv_q8h;
-    }
-};
+// LoadEstimate: whirl/model_types.h (arch025-M5: the architecture module's sizing interface returns it)
 // no_mtp: the load skips the MTP (nextn) block (--draft dflash): no nextn weights, no MTP KV layer.
 LoadEstimate estimateLoad(const gguf::File& f, const Config& cfg, bool embd_on_host, bool no_mtp = false);
 // Bytes a DFlash2 drafter's weights take in VRAM (Model::loadDrafter: every tensor, + MXFP4 row refs).

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Reimplements the WHIRL Zig research prototype's model/qwen35.zig (Config, tables, tuneBucket).
 
+#include "model/arch_registry.h"  // findArchName, unsupportedArchText (arch025-M5)
 #include "whirl/model.h"
 #include "config/env_snapshot.h"
 
@@ -68,8 +69,11 @@ const char* opClassName(OpClass c) {
 
 Config Config::fromGguf(const gguf::File& f) {
     const std::string arch(f.getStringOr("general.architecture", ""));
-    const bool moe = arch == "qwen35moe";
-    if (!moe && arch != "qwen35") throw ModelError("UnsupportedArch", "general.architecture = '" + arch + "' (WHIRL supports qwen35 and qwen35moe only)");
+    // the GGUF names and their variant come from the architecture table (src/model/arch_registry.h; the qwen35 family's row:
+    // src/model/qwen35/module.cpp, arch025-M5); the message lists the table's names ("qwen35 and qwen35moe", as v0.2.4)
+    const model::ArchName* const an = model::findArchName(arch);
+    if (!an) throw ModelError("UnsupportedArch", model::unsupportedArchText(arch));
+    const bool moe = an->moe;
     auto K = [&](const char* s) { return arch + "." + s; };
     auto u32 = [&](const char* s) { return static_cast<std::uint32_t>(f.getUint(K(s))); };
     auto u32or = [&](const char* s, std::uint64_t d) { return static_cast<std::uint32_t>(f.getUintOr(K(s), d)); };

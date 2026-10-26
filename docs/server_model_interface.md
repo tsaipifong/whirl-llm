@@ -14,9 +14,9 @@ so that it also runs (in tests, without a GPU) against a host-memory mock:
 | Interface | File | Production implementation |
 |---|---|---|
 | `device::Backend` (copies, streams, events, pinned / device memory; memory model: free / WDDM / local counters / UMA carve-out) | `src/device/backend.h` | `src/device/backend_hip.cpp` → `whirl/hip.h`; tests: `src/device/null_backend.cpp` (host memory) |
-| `server::ServerModel` (model operations) | `src/server/backend.h` | `src/server/backend_qwen35.cpp` → `qwen35::Model` |
+| `server::ServerModel` (model operations) | `src/server/backend.h` | `src/model/qwen35/server_model.cpp` → `qwen35::Model` |
 
-`backend_qwen35.cpp` is a thin forwarder; every `ServerModel` call has the
+`server_model.cpp` is a thin forwarder; every `ServerModel` call has the
 semantics of the `Model` member of the same name.
 
 ## Members and functions of `qwen35::Model` the server uses

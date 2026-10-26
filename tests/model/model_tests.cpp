@@ -14,6 +14,7 @@
 #include "whirl/model.h"
 #include "device/null_backend.h"
 #include "model/qwen35/weight_loader.h"
+#include "model/arch_registry.h"  // arch025-M5
 
 #include <algorithm>
 #include <array>
@@ -1468,7 +1469,7 @@ void testFloatGemvDispatch() {
 }
 
 #ifdef WHIRL_SOURCE_DIR
-// The Model forward sources as one string: src/model/forward/*.cpp in name order (arch025 R-7 split forward.cpp into
+// The Model forward sources as one string: src/model/qwen35/forward/*.cpp in name order (arch025 R-7 split forward.cpp into
 // forward/ in steps F1..F4; source checks read all of them). Empty when forward/ holds no readable .cpp.
 std::string readSource(const std::filesystem::path& p) {
     std::ifstream in(p, std::ios::binary);
@@ -1476,7 +1477,7 @@ std::string readSource(const std::filesystem::path& p) {
 }
 
 std::string forwardSources() {
-    const std::filesystem::path model = std::filesystem::path(WHIRL_SOURCE_DIR) / "src" / "model";
+    const std::filesystem::path model = std::filesystem::path(WHIRL_SOURCE_DIR) / "src" / "model" / "qwen35";  // arch025-M5
     std::vector<std::filesystem::path> parts;
     std::error_code ec;
     for (const auto& e : std::filesystem::directory_iterator(model / "forward", ec))
@@ -1496,7 +1497,7 @@ std::string forwardSources() {
 // OVH-C1: the MTP draft window (Model::attn_win) is set only around the MTP draft attention and restored
 // when that attention throws. (a) Model::draftAttn, through the attnBlock test hook (throws before any
 // GPU work): the hook sees the draft window, and attn_win is back to its previous value after the throw.
-// (b) both MTP call sites in the forward sources (src/model/forward/*.cpp, arch025 R-7 split)
+// (b) both MTP call sites in the forward sources (src/model/qwen35/forward/*.cpp, arch025 R-7 split)
 // go through draftAttn and nothing else assigns attn_win (a call site reverted to
 // "attn_win = ...; attnBlock(); attn_win = 0;" fails here).
 void testDraftWindowRestore() {
@@ -1529,7 +1530,7 @@ void testDraftWindowRestore() {
     check(seen.calls == 2, "OVH-C1: test hook reached");
 #ifdef WHIRL_SOURCE_DIR
     const std::string fw = forwardSources();
-    check(!fw.empty(), "OVH-C1: src/model/forward/*.cpp readable");
+    check(!fw.empty(), "OVH-C1: src/model/qwen35/forward/*.cpp readable");
     std::size_t sites = 0, raw_mtp_attn = 0, assigns = 0;
     for (std::size_t p = fw.find("draftAttn(mw.attn, n)"); p != std::string::npos; p = fw.find("draftAttn(mw.attn, n)", p + 1)) ++sites;
     for (std::size_t p = fw.find("attnBlock(mw.attn"); p != std::string::npos; p = fw.find("attnBlock(mw.attn", p + 1)) ++raw_mtp_attn;
@@ -1541,8 +1542,8 @@ void testDraftWindowRestore() {
 #endif
 }
 
-// arch025-F1 (R-7, PLAN C8): the matmul dispatch lives in src/model/forward/dispatch.cpp and nowhere else, and the
-// shared helpers ti / I / D in src/model/forward_internal.h stay inside an anonymous namespace (internal linkage per
+// arch025-F1 (R-7, PLAN C8): the matmul dispatch lives in src/model/qwen35/forward/dispatch.cpp (M5) and nowhere else, and
+// the shared helpers ti / I / D in src/model/qwen35/forward_internal.h stay inside an anonymous namespace (internal linkage per
 // forward TU, as when they were file-local to forward.cpp); no public header includes the internal header.
 // arch025-F2: draftAttn / attnBlock / prefillAttn only in forward/attn.cpp, ffnBlock / moeBlock only in forward/ffn.cpp.
 // arch025-F3: gdnLayer / gdnSegsBatch / gdnSegsSingle / gdnChunked / gdnScan only in forward/gdn.cpp, and Model::run
@@ -1557,12 +1558,12 @@ void testForwardSplit() {
     const char* const names[] = {"run", "mtp_verify", "prefill", "vision_rows", "dispatch", "attn", "ffn", "gdn"};
     std::vector<std::string> src;
     for (const char* n : names) {
-        src.push_back(readSource(root / "src/model/forward" / (std::string(n) + ".cpp")));
+        src.push_back(readSource(root / "src/model/qwen35/forward" / (std::string(n) + ".cpp")));
         check(!src.back().empty(), std::string("forward split: forward/") + n + ".cpp readable");
         check(src.back().find("#include \"../forward_internal.h\"") != std::string::npos,
               std::string("forward split: forward/") + n + ".cpp includes forward_internal.h");
     }
-    const std::string hdr = readSource(root / "src/model/forward_internal.h");
+    const std::string hdr = readSource(root / "src/model/qwen35/forward_internal.h");
     check(!hdr.empty(), "forward split: forward_internal.h readable");
     struct Home {
         const char* fn;
@@ -2398,7 +2399,7 @@ void testForwardEnv() {
         check(product_whirl == 0, std::format("forward env: product code writes no WHIRL_ variable in-process ({})", product_whirl));
     }
     // (4) the forward files: no direct environment read
-    for (const auto& de : fs::directory_iterator(fs::path(WHIRL_SOURCE_DIR) / "src/model/forward")) {
+    for (const auto& de : fs::directory_iterator(fs::path(WHIRL_SOURCE_DIR) / "src/model/qwen35/forward")) {
         std::ifstream in(de.path(), std::ios::binary);
         const std::string src((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
         static const std::regex rd(R"(\b(?:getenv|_dupenv_s|_wgetenv|envGet|envFlag)\s*\()");
@@ -3392,8 +3393,94 @@ void testMtpDefaults() {
           "exeDirectory: the folder of the running executable (" + dir + ")");
 }
 
+// arch025-M5: the architecture registry (src/model/arch_registry.h) and the product table (src/model/qwen35/module.cpp).
+// (a) the table: one qwen35 family serving qwen35 (dense) and qwen35moe (MoE), every name in exactly one row (hipfire's
+//     carriers_are_disjoint), and the module's functions are the qwen35 ones the server called directly before M5;
+// (b) lookups: known names, unknown and case-changed names, a test table (hipfire-arch-toy: never in the product table);
+// (c) the UnsupportedArch message is byte-equal to v0.2.4 0e35407's literal (config.cpp:72 there), also through
+//     Config::fromGguf; supportedArchs joins 1 / 2 / 3 names;
+// (d) slotStateBytes == the server's per-slot formula (moved out of server_main.cpp's dGPU / UMA branches).
+void testArchRegistry() {
+    namespace m = whirl::model;
+    const m::ArchTable& t = m::builtinArchs();
+    check(t.size() == 1 && t[0].family == "qwen35", "arch table: one family, qwen35");
+    check(t[0].names.size() == 2 && t[0].names[0].name == "qwen35" && !t[0].names[0].moe && t[0].names[1].name == "qwen35moe" &&
+              t[0].names[1].moe,
+          "arch table: qwen35 (dense), qwen35moe (MoE), in that order");
+    std::set<std::string_view> seen;
+    bool disjoint = true;
+    for (const m::ArchModule& am : t)
+        for (const m::ArchName& n : am.names) disjoint = seen.insert(n.name).second && disjoint;
+    check(disjoint, "arch table: every GGUF name in exactly one row");
+    const m::ArchModule& qm = t[0];
+    check(qm.fromGguf == &q::Config::fromGguf && qm.validateTensors != nullptr, "arch table: qwen35 config reader + tensor check");
+    check(qm.sizing.estimateLoad == &q::estimateLoad && qm.sizing.bufferBytes == &q::bufferBytes &&
+              qm.sizing.resolveFdSplits == &q::resolveFdSplits && qm.sizing.dflashWeightBytes == &q::dflashWeightBytes &&
+              qm.sizing.mtpDefaults == &q::mtpDefaults && qm.sizing.max_small_batch == q::max_small_batch,
+          "arch table: the qwen35 sizing functions (the ones server_main called before M5)");
+    check(m::findArch("qwen35") == &qm && m::findArch("qwen35moe") == &qm, "findArch: both names -> the qwen35 module");
+    check(m::findArchName("qwen35moe") && m::findArchName("qwen35moe")->moe && m::findArchName("qwen35") && !m::findArchName("qwen35")->moe,
+          "findArchName: the variant");
+    for (const char* bad : {"", "llama", "qwen3", "QWEN35", "qwen35 ", "qwen35moe2", "dflash"})
+        check(m::findArch(bad) == nullptr && m::findArchName(bad) == nullptr, std::string("findArch: unknown '") + bad + "'");
+    // (b) a test-only table (never in builtinArchs)
+    static constexpr m::ArchName toy_names[] = {{"whirl-toy", false}, {"whirl-toy-moe", true}};
+    static constexpr m::ArchName one_name[] = {{"solo", false}};
+    static constexpr m::ArchName three_names[] = {{"a", false}, {"b", false}, {"c", true}};
+    static constexpr m::ArchModule toy_rows[] = {{"toy", toy_names, nullptr, nullptr, {}}};
+    const m::ArchTable toy{toy_rows};
+    check(m::findArch("whirl-toy", toy) == &toy_rows[0] && m::findArch("whirl-toy-moe", toy) == &toy_rows[0], "findArch: a test table");
+    check(m::findArch("qwen35", toy) == nullptr && m::findArch("whirl-toy") == nullptr, "findArch: tables do not mix");
+    // (c) the message (0e35407 src/model/config.cpp:72: "general.architecture = '" + arch + "' (WHIRL supports qwen35 and qwen35moe only)")
+    check(m::supportedArchs() == "qwen35 and qwen35moe", "supportedArchs: product table");
+    check(m::unsupportedArchText("llama") == "general.architecture = 'llama' (WHIRL supports qwen35 and qwen35moe only)",
+          "unsupportedArchText == the v0.2.4 literal");
+    check(m::unsupportedArchText("") == "general.architecture = '' (WHIRL supports qwen35 and qwen35moe only)", "unsupportedArchText: empty name");
+    const m::ArchModule one_rows[] = {{"one", one_name, nullptr, nullptr, {}}};
+    const m::ArchModule three_rows[] = {{"x", std::span<const m::ArchName>(three_names).first(2), nullptr, nullptr, {}},
+                                        {"y", std::span<const m::ArchName>(three_names).subspan(2), nullptr, nullptr, {}}};
+    check(m::supportedArchs(m::ArchTable(one_rows)) == "solo", "supportedArchs: one name");
+    check(m::supportedArchs(m::ArchTable(three_rows)) == "a, b and c", "supportedArchs: three names over two rows");
+    check(m::supportedArchs(m::ArchTable()) == "", "supportedArchs: empty table");
+    check(m::unsupportedArchText("qwen35", toy) == "general.architecture = 'qwen35' (WHIRL supports whirl-toy and whirl-toy-moe only)",
+          "unsupportedArchText: from the table it is given");
+    for (const char* arch : {"llama", "deepseek2"}) {
+        GgufImage g;
+        g.kvString("general.architecture", arch);
+        const std::vector<std::uint8_t> img = g.build();
+        std::string what, code;
+        try {
+            (void)q::Config::fromGguf(gguf::File::parse(img));
+        } catch (const q::ModelError& e) {
+            what = e.what();
+            code = e.code();
+        }
+        check(code == "UnsupportedArch" &&
+                  what == std::string("UnsupportedArch: general.architecture = '") + arch + "' (WHIRL supports qwen35 and qwen35moe only)",
+              std::string("Config::fromGguf UnsupportedArch text byte-equal to 0e35407: ") + what);
+    }
+    // (d) slotStateBytes: 8 trunk layers, attention every 4th -> 6 DeltaNet layers
+    q::Config c;
+    c.n_layer = 8;
+    c.interval = 4;
+    c.d_conv = 4;
+    c.d_state = 128;
+    c.n_k_heads = 2;
+    c.n_v_heads = 4;
+    c.d_inner = 512;
+    const std::uint64_t conv_ch = 2 * 2 * 128 + 512, head_v = 512 / 4;
+    const m::SlotStateBytes s = m::slotStateBytes(qm.sizing, c);
+    check(s.st1 == 6 * (3 * conv_ch * 4 + 4ull * 128 * head_v * 4), "slotStateBytes: st1 (conv + DeltaNet state of 6 layers)");
+    check(s.pend1 == 6 * (16 * conv_ch * 4 + 16ull * 4 * (128 + head_v + 2) * 4), "slotStateBytes: pend1 (16 replay rows)");
+    m::ArchSizing s8 = qm.sizing;
+    s8.max_small_batch = 8;
+    check(m::slotStateBytes(s8, c).pend1 == 6 * (8 * conv_ch * 4 + 8ull * 4 * (128 + head_v + 2) * 4) && m::slotStateBytes(s8, c).st1 == s.st1,
+          "slotStateBytes: replay rows follow the module's max_small_batch");
+}
+
 int main() {
     whirl::test::clearWhirlEnv();  // FR-TEST P3-11
+    testArchRegistry();  // arch025-M5
     testKvLayout();
     testKvPool();  // arch025-M2
     testSeqTableMapPages();  // arch025-M2

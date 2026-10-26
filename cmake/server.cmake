@@ -68,14 +68,15 @@ target_include_directories(whirl_server_core PUBLIC ${CMAKE_SOURCE_DIR}/src ${CM
 # whirl/version.h (configured by cmake/release.cmake) for GET /version and /props
 target_include_directories(whirl_server_core PRIVATE ${CMAKE_BINARY_DIR}/generated)
 # whirl_spec: the MTP / n-gram draft policy the engine runs (src/spec, arch025-M4)
-target_link_libraries(whirl_server_core PUBLIC whirl whirl_spec whirl_cache whirl_tier_core ws2_32)
+# whirl_arch: the architecture registry (server_main's config + pre-load sizing, the tests' fake table; arch025-M5)
+target_link_libraries(whirl_server_core PUBLIC whirl whirl_spec whirl_arch whirl_cache whirl_tier_core ws2_32)
 
 if(WHIRL_WITH_HIP)
   # whirl-server.exe: the production server (qwen35::Model on HIP)
   add_executable(whirl-server
     ${CMAKE_SOURCE_DIR}/src/server/whirl_server.cpp
     ${CMAKE_SOURCE_DIR}/src/server/server_main.cpp
-    ${CMAKE_SOURCE_DIR}/src/server/backend_qwen35.cpp)
+    ${CMAKE_SOURCE_DIR}/src/model/qwen35/server_model.cpp)
   target_link_libraries(whirl-server PRIVATE whirl_server_core whirl_model whirl_device)
   if(MSVC)
     target_link_options(whirl-server PRIVATE /ENTRY:wmainCRTStartup)

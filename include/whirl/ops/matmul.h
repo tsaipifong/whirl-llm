@@ -1,6 +1,6 @@
 // Matmul kernel choice (ARCH-1 K-1 GEMV): which kernel a matmul of n token rows launches, with which grid, as a
 // pure function of the problem (weight type, shape, rows), the numerics flags, the code object's kernel table and
-// the tuned tables. src/model/forward/dispatch.cpp builds the problem, asks here, and launches what comes back.
+// the tuned tables. src/model/qwen35/forward/dispatch.cpp builds the problem, asks here, and launches what comes back.
 // SPDX-License-Identifier: Apache-2.0
 //
 // Every kernel carries a bit-equivalence class (BitClass): kernels of one class give the same bits for the same
@@ -8,7 +8,7 @@
 // numerics decision. Precise picks only the precise class (the f16 GEMM family, bitwise == prefill) for decode /
 // verify rows; that rule is written once, in preciseRows / preciseAllows below, and every row-count gate asks it
 // (chooseMatmulPath, chooseGemmF16 / precChoice, chooseActIn in act.cpp, chooseGdnDecode - the fused GDN
-// [beta; alpha] step - in gdn.cpp, and in src/model/forward/ the grouped int8 GEMV (dispatch.cpp) and the fused
+// [beta; alpha] step - in gdn.cpp, and in src/model/qwen35/forward/ the grouped int8 GEMV (dispatch.cpp) and the fused
 // silu_mul_q8 (ffn.cpp)). Mode-level precise gates that do not depend on the row
 // count stay with their op: the attention combine (attention.cpp), the MoE decode experts (moe.cpp, which extends
 // precise rows to max_verify_rows) and the wide verify (wideAllowed, act.h). Tests: tests/ops/ops_tests.cpp (CPU, fake kernel tables).

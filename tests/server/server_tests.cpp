@@ -10,6 +10,7 @@
 #include "http_client.h"
 #include "mock_backend.h"
 #include "server/draft_caps.h"
+#include "model/arch_registry.h"  // arch025-M5: findArch over a test table
 #include "server/engine.h"
 #include "server/engine_thread.h"
 #include "server/http.h"
@@ -5645,13 +5646,109 @@ void testDFlashFit() {
         std::ifstream in(std::string(WHIRL_SOURCE_DIR) + "/src/server/server_main.cpp", std::ios::binary);
         const std::string src((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
         const std::size_t choose = src.find("whirl::dflash::choose(src, dm, why, true)");
-        const std::size_t est = src.find("qwen35::estimateLoad(f, cfg, lo.embd_on_host, use_dflash)");
+        const std::size_t est = src.find("sizing.estimateLoad(f, cfg, lo.embd_on_host, use_dflash)");  // arch025-M5: through the arch module
         const std::size_t add = src.find("fi.fixed += dm.total();");
         const std::size_t plan = src.find("vram::planFit(fi)");
         CHECK(choose != std::string::npos && est != std::string::npos && add != std::string::npos && plan != std::string::npos);
         CHECK(choose < est && est < add && add < plan);
     }
 #endif
+}
+
+// arch025-M5 (PLAN X-16, hipfire-arch-toy): a FAKE architecture table, never the product's. findArch finds the toy
+// family by its GGUF name, its config reader and sizing interface feed the server's dGPU fit input (the same
+// model::slotStateBytes and sizing calls server_main makes, in its order) and vram::planFit plans the KV pool. The
+// toy's functions return made-up sizes, so every number below can only come through the module. What does NOT go
+// through the module in 0.2.5: Model::load and the code after it (server_main holds a qwen35::Model; C1a / C1b).
+namespace toy_arch {
+constexpr std::uint64_t MiB = 1ull << 20;
+qwen35::Config fromGguf(const gguf::File& f) {
+    qwen35::Config c;
+    c.n_layer = static_cast<std::uint32_t>(f.getUintOr("whirl-toy.block_count", 0));
+    c.interval = 4, c.d_conv = 4, c.d_state = 128, c.n_k_heads = 2, c.n_v_heads = 4, c.d_inner = 512;
+    c.n_embd = 64, c.n_vocab = 1000;
+    return c;
+}
+qwen35::LoadEstimate estimateLoad(const gguf::File&, const qwen35::Config& cfg, bool embd_on_host, bool no_mtp) {
+    qwen35::LoadEstimate e;
+    e.weights = 3000 * MiB + cfg.n_layer * MiB;
+    e.state = 7 * MiB;
+    e.ffs = 1024, e.max_elems = 4096;
+    e.embd_on_host = embd_on_host;
+    e.has_mtp = !no_mtp;
+    e.kv_f16 = 4096, e.kv_q8v = 3072, e.kv_q8h = 2560, e.kv_q4 = 1536;
+    return e;
+}
+std::uint64_t bufferBytes(const qwen35::Config&, std::uint32_t B, std::uint64_t ffs, std::uint64_t, std::uint32_t fd_splits) {
+    return 100 * MiB + B * (ffs + fd_splits);
+}
+std::uint32_t fdSplits(KvFormat kv) { return kv == KvFormat::q4 ? 256 : 64; }
+std::uint64_t dflashBytes(const gguf::File&) { return 0; }
+qwen35::MtpDefaults mtp(bool, hip::Arch) { return {2, 0.0f, 0, false}; }
+constexpr model::ArchName names[] = {{"whirl-toy", false}};
+constexpr model::ArchModule rows[] = {{"toy", names, &fromGguf, nullptr, {&estimateLoad, &bufferBytes, &fdSplits, &dflashBytes, 8, &mtp}}};
+}  // namespace toy_arch
+
+void testFakeArchFit() {
+    const model::ArchTable table{toy_arch::rows};
+    std::vector<std::uint8_t> img;
+    const auto u32 = [&](std::uint32_t x) { for (int i = 0; i < 4; ++i) img.push_back(static_cast<std::uint8_t>(x >> (8 * i))); };
+    const auto u64 = [&](std::uint64_t x) { for (int i = 0; i < 8; ++i) img.push_back(static_cast<std::uint8_t>(x >> (8 * i))); };
+    const auto str = [&](std::string_view s) { u64(s.size()); img.insert(img.end(), s.begin(), s.end()); };
+    u32(0x46554747), u32(3), u64(0), u64(2);  // "GGUF" v3, no tensors, 2 keys
+    str("general.architecture"), u32(8), str("whirl-toy");
+    str("whirl-toy.block_count"), u32(4), u32(8);
+    while (img.size() % 32) img.push_back(0);  // data section alignment (no tensor data)
+    const gguf::File f = gguf::File::parse(img);
+    // the lookup server_main does
+    const std::string_view arch_name = f.getStringOr("general.architecture", "");
+    const model::ArchModule* const am = model::findArch(arch_name, table);
+    CHECK(am == &toy_arch::rows[0]);
+    CHECK(model::findArch("qwen35", table) == nullptr);
+    CHECK_EQ(model::unsupportedArchText("qwen35", table), std::string("general.architecture = 'qwen35' (WHIRL supports whirl-toy only)"));
+    if (!am) return;
+    const qwen35::Config cfg = am->fromGguf(f);
+    CHECK_EQ(cfg.n_layer, 8u);
+    // server_main's dGPU fit (same calls, same order: estimate, slot state, KV estimate -> splits, buffers at 2048 / 4096)
+    const qwen35::LoadEstimate est = am->sizing.estimateLoad(f, cfg, true, false);
+    CHECK_EQ(est.weights, 3008 * toy_arch::MiB);
+    const model::SlotStateBytes ssb = model::slotStateBytes(am->sizing, cfg);
+    const std::uint64_t conv_ch = 2 * 2 * 128 + 512, head_v = 512 / 4;
+    CHECK_EQ(ssb.st1, 6 * (3 * conv_ch * 4 + 4ull * 128 * head_v * 4));            // 6 DeltaNet layers of 8
+    CHECK_EQ(ssb.pend1, 6 * (8 * conv_ch * 4 + 8ull * 4 * (128 + head_v + 2) * 4));  // the toy's 8 replay rows
+    const std::uint32_t parallel = 2;
+    vram::FitInput fi;
+    fi.weights = est.weights;
+    fi.fixed = est.state + parallel * (ssb.st1 + ssb.pend1) + (est.has_mtp ? 65536ull * cfg.n_embd * 5 / 16 : 0) + (256ull << 20);
+    fi.fixed += (est.weights + fi.fixed) / 25;
+    const KvFormat kv_est = KvFormat::q4;
+    const std::uint32_t fd_splits_est = am->sizing.resolveFdSplits(kv_est);
+    CHECK_EQ(fd_splits_est, 256u);
+    const std::uint64_t b2 = am->sizing.bufferBytes(cfg, 2048, est.ffs, est.max_elems, fd_splits_est);
+    const std::uint64_t b4 = am->sizing.bufferBytes(cfg, 4096, est.ffs, est.max_elems, fd_splits_est);
+    fi.buf_per_row = (b4 - b2) / 2048;
+    fi.buf_fixed = b2 - fi.buf_per_row * 2048;
+    CHECK_EQ(fi.buf_per_row, 1024u + 256u);
+    CHECK_EQ(fi.buf_fixed, 100 * toy_arch::MiB);
+    fi.ckpt_bytes = ssb.st1 + static_cast<std::uint64_t>(cfg.n_embd) * 4 + static_cast<std::uint64_t>(cfg.n_vocab) * 4;
+    fi.parallel = parallel;
+    fi.kv_per_token = est.kvPerToken(kv_est);
+    CHECK_EQ(fi.kv_per_token, 1536u);
+    fi.pool_min_tokens = 32768;
+    fi.batch = 4096;
+    fi.n_ck = 4;
+    fi.n_spe = 2;
+    // room for 50000 tokens with the requested batch / checkpoints: nothing is reduced, the pool gets them
+    fi.avail = vram::fixedNeed(fi, 4096, 4, 2) + 50000ull * fi.kv_per_token;
+    const vram::FitPlan p = vram::planFit(fi);
+    CHECK(p.fits && !p.reduced);
+    CHECK_EQ(p.pool_tokens, 50000u);
+    // 10000 tokens short of the wanted pool: the planner lowers the batch / checkpoints from the toy's own sizes
+    fi.avail = vram::fixedNeed(fi, 4096, 4, 2) + 22768ull * fi.kv_per_token;
+    const vram::FitPlan pr = vram::planFit(fi);
+    CHECK(pr.reduced && pr.pool_tokens > 22768u);
+    // the UMA check's snapshot sets (server_main: mtpDefaults(moe, gfx1151).drafts x st1) come from the module too
+    CHECK_EQ(std::max<std::uint32_t>(1, am->sizing.mtpDefaults(cfg.moe, hip::Arch::gfx1151).drafts) * ssb.st1, 2 * ssb.st1);
 }
 
 // P3-1: a request arriving after the engine loop has stopped gets 503 at once (no hang)
@@ -7743,6 +7840,7 @@ int main(int argc, char** argv) {
         {"fr_cross_origin", testFrCrossOrigin},
         {"fr_dflash_noreplay", testFrDFlashNoReplay},
         {"dflash_fit", testDFlashFit},
+        {"fake_arch_fit", testFakeArchFit},  // arch025-M5
         {"fr_shutdown_503", testFrShutdown503},
         {"run_on_loop_timeout_cancels", testRunOnLoopTimeoutCancels},
         {"fr_protocol", testFrProtocol},

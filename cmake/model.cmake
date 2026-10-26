@@ -1,4 +1,5 @@
-# WHIRL model: weight loader, qwen35 forward, MTP drafting (the draft policy: cmake/spec.cmake),
+# WHIRL model: weight loader, qwen35 family module (src/model/qwen35/: forward, weights, KV, scratch, the ServerModel,
+# the architecture table row; the registry itself: cmake/arch.cmake), MTP drafting (the draft policy: cmake/spec.cmake),
 # autotune, and the `whirl` CLI (chat / bench / selftest).
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -27,14 +28,15 @@ if(WHIRL_WITH_HIP)
     ${CMAKE_SOURCE_DIR}/src/model/qwen35/scratch.cpp
     ${CMAKE_SOURCE_DIR}/src/model/qwen35/tune_table.cpp
     ${CMAKE_SOURCE_DIR}/src/model/qwen35/layer_subset.cpp
-    ${CMAKE_SOURCE_DIR}/src/model/forward/run.cpp
-    ${CMAKE_SOURCE_DIR}/src/model/forward/mtp_verify.cpp
-    ${CMAKE_SOURCE_DIR}/src/model/forward/prefill.cpp
-    ${CMAKE_SOURCE_DIR}/src/model/forward/vision_rows.cpp
-    ${CMAKE_SOURCE_DIR}/src/model/forward/dispatch.cpp
-    ${CMAKE_SOURCE_DIR}/src/model/forward/attn.cpp
-    ${CMAKE_SOURCE_DIR}/src/model/forward/ffn.cpp
-    ${CMAKE_SOURCE_DIR}/src/model/forward/gdn.cpp
+    ${CMAKE_SOURCE_DIR}/src/model/qwen35/module.cpp
+    ${CMAKE_SOURCE_DIR}/src/model/qwen35/forward/run.cpp
+    ${CMAKE_SOURCE_DIR}/src/model/qwen35/forward/mtp_verify.cpp
+    ${CMAKE_SOURCE_DIR}/src/model/qwen35/forward/prefill.cpp
+    ${CMAKE_SOURCE_DIR}/src/model/qwen35/forward/vision_rows.cpp
+    ${CMAKE_SOURCE_DIR}/src/model/qwen35/forward/dispatch.cpp
+    ${CMAKE_SOURCE_DIR}/src/model/qwen35/forward/attn.cpp
+    ${CMAKE_SOURCE_DIR}/src/model/qwen35/forward/ffn.cpp
+    ${CMAKE_SOURCE_DIR}/src/model/qwen35/forward/gdn.cpp
     ${CMAKE_SOURCE_DIR}/src/model/tune.cpp
     ${CMAKE_SOURCE_DIR}/src/model/exec_dump.cpp
     ${CMAKE_SOURCE_DIR}/src/model/device.cpp
@@ -44,7 +46,8 @@ if(WHIRL_WITH_HIP)
   target_include_directories(whirl_model PUBLIC ${CMAKE_SOURCE_DIR}/include)
   # whirl_device: device::hipBackend() and the src/device RAII handles that own the model buffers (arch024 S11)
   # whirl_spec: the MTP / n-gram draft policy and mtpDefaults (src/spec, arch025-M4; was src/model/spec.cpp)
-  target_link_libraries(whirl_model PUBLIC whirl_kernels_host whirl whirl_ops whirl_device whirl_spec)
+  # whirl_arch: the architecture registry (findArch / findArchName, arch025-M5; the table itself: src/model/qwen35/module.cpp)
+  target_link_libraries(whirl_model PUBLIC whirl_kernels_host whirl whirl_ops whirl_device whirl_spec whirl_arch)
 
   # the CLI executable is whirl.exe (target name differs from the core library)
   add_executable(whirl-cli ${CMAKE_SOURCE_DIR}/src/cli/main.cpp)
@@ -54,7 +57,7 @@ if(WHIRL_WITH_HIP)
   if(TARGET whirl_server_core)
     target_sources(whirl-cli PRIVATE
       ${CMAKE_SOURCE_DIR}/src/server/server_main.cpp
-      ${CMAKE_SOURCE_DIR}/src/server/backend_qwen35.cpp)
+      ${CMAKE_SOURCE_DIR}/src/model/qwen35/server_model.cpp)
     target_link_libraries(whirl-cli PRIVATE whirl_server_core whirl_device)
     target_compile_definitions(whirl-cli PRIVATE WHIRL_HAVE_SERVER=1)
   endif()
@@ -63,7 +66,8 @@ if(WHIRL_WITH_HIP)
   add_executable(whirl-model-tests ${CMAKE_SOURCE_DIR}/tests/model/model_tests.cpp)
   # arch025-M1: whirl_device_null (NullBackend: host memory behind WeightLoader in testWeightBinding)
   target_link_libraries(whirl-model-tests PRIVATE whirl_model whirl_device_null)
-  # OVH-C1 test reads src/model/forward/*.cpp (both MTP call sites use Model::draftAttn; forward.cpp split by arch025-F1..F4)
+  # OVH-C1 test reads src/model/qwen35/forward/*.cpp (both MTP call sites use Model::draftAttn; forward.cpp split by arch025-F1..F4,
+  # moved under src/model/qwen35/ by M5)
   target_compile_definitions(whirl-model-tests PRIVATE WHIRL_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 
   # measure-tools P4: whirl-stage-bench (forward stages at a synthetic KV / state depth; test executable, GPU).

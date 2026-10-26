@@ -1,7 +1,7 @@
 // MoE expert kernel choice (ARCH-1 K-4): decode experts (int8 moe_gu / moe_down, their MXFP4 whole-block twins,
 // the precise f32-activation moe_gu_f / moe_down_f) and prefill grouped GEMMs (MXFP4 x fp8, the 8060S fused
 // gate+up+SwiGLU, the gfx1201 f16 MXFP4 gemmr_moe*, the generic gemm_moe), as a pure function of the problem, the
-// flags and the kernel table. src/model/forward.cpp (Model::moeBlock) launches the plan.
+// flags and the kernel table. src/model/qwen35/forward/ffn.cpp (Model::moeBlock) launches the plan.
 // SPDX-License-Identifier: Apache-2.0
 //
 // Bit classes: precise decode experts take f32 activations, a token's result independent of its batch

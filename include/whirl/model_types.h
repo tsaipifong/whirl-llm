@@ -4,11 +4,13 @@
 // (tools/gates/pending_scan.py rule include, blocking since M3), like llama.h's opaque `struct llama_context;`.
 // SPDX-License-Identifier: Apache-2.0
 //
-// The declarations were moved verbatim from model.h; the draft policy part moved on to src/spec/policy.h (arch025-M4).
+// The declarations were moved verbatim from model.h; the draft policy part moved on to src/spec/policy.h (arch025-M4);
+// LoadEstimate followed in arch025-M5 (the sizing interface of src/model/arch_registry.h returns it).
 
 #pragma once
 
 #include "whirl/hip.h"
+#include "whirl/kv_format.h"  // KvFormat (LoadEstimate::kvPerToken)
 
 #include <algorithm>
 #include <array>
@@ -103,6 +105,26 @@ struct Config {
     // value columns in groups of 32 (conv state rows, gdn_seq_128's compile-time DK, grid.y =
     // headV / 32). Anything else would read / write past the state buffers or skip columns.
     bool gdnShapeSupported() const { return d_conv == 4 && d_state == 128 && headV() >= 32 && headV() % 32 == 0; }
+};
+
+// (moved verbatim from model.h, arch025-M5)
+// VRAM Model::load will take, estimated from the GGUF header before any
+// allocation (pre-load fit check, server auto-shrink of the prefill batch).
+// buffers(B) follows the allocation list of Model::load exactly for B a
+// multiple of 64; weights are the tensor bytes (+ MXFP4 row refs) that go to VRAM.
+struct LoadEstimate {
+    std::uint64_t weights = 0;  // tensor bytes uploaded to VRAM
+    std::uint64_t state = 0;    // DeltaNet conv + ssm state allocated at load
+    std::uint64_t ffs = 0;      // widest layer-matrix side (ffn_g / ffn_u scratch)
+    std::uint64_t max_elems = 0;  // largest layer matrix (w16 scratch)
+    bool embd_on_host = false;  // token_embd goes to pinned host memory
+    bool has_mtp = false;       // nextn layer present (one more KV layer)
+    std::uint64_t kv_f16 = 0, kv_q8v = 0, kv_q8h = 0, kv_q4 = 0;  // KV bytes per token by format
+    // KV bytes per token of the format a pre-load estimate chose (numerics::kvEstimate); q8 has q8h's rows
+    // (arch025-N3-r1: was the same ternary at loader.cpp's UMA check and the server's dGPU / UMA estimates)
+    std::uint64_t kvPerToken(KvFormat kv) const {
+        return kv == KvFormat::f16 ? kv_f16 : kv == KvFormat::q8v ? kv_q8v : kv == KvFormat::q4 ? kv_q4 : kv_q8h;
+    }
 };
 
 // ---------------------------------------------------------------------------

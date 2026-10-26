@@ -1,4 +1,4 @@
-// Internal header of the Model forward sources (src/model/forward/*.cpp, arch025-F1..F4): the includes they
+// Internal header of the Model forward sources (src/model/qwen35/forward/*.cpp, arch025-F1..F4, M5): the includes they
 // share and the small conversion helpers ti / I / D. The helpers stay in an anonymous namespace (arch025 PLAN C8):
 // every forward TU gets its own internal-linkage copy, as when they were file-local to forward.cpp. Include only from
 // the forward sources (not from a public header or an inline member).

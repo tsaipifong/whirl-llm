@@ -79,7 +79,7 @@ see "gfx1151 (Radeon 8060S)" below).
 | src/model/config.cpp | reimplemented from the prototype (`model/qwen35.zig`: Config, GEMM / GEMV tables, tuneBucket; `gguf_cli.zig`: mtpDefaults) | `envGet` (`WHIRL_*` names) is new |
 | src/model/kernels.cpp | reimplemented from the prototype (`model/qwen35.zig`: `Kernels.load`) | |
 | src/model/loader.cpp | reimplemented from the prototype (`model/qwen35.zig`: `Model.load`, `Loader`, KV pool, sequences, snapshots, `requantMtpQ4`, `buildDraftHeadEx`, Profile) | the code-object override (`WHIRL_CODE_OBJECT`) is new |
-| src/model/forward/*.cpp (src/model/forward.cpp until arch025-F4) | reimplemented from the prototype (`model/qwen35.zig`: matmul dispatch, blocks, prefill, decode, MTP, verify, segmented prefill) | |
+| src/model/qwen35/forward/*.cpp (src/model/forward.cpp until arch025-F4, src/model/forward/ until arch025-M5) | reimplemented from the prototype (`model/qwen35.zig`: matmul dispatch, blocks, prefill, decode, MTP, verify, segmented prefill) | |
 | src/model/tune.cpp | reimplemented from the prototype (`model/qwen35.zig`: autotune, tune table, self-checks; `gguf_cli.zig`: `loadOrTune`) | cache directory `%LOCALAPPDATA%\whirl` |
 | src/model/device.cpp | reimplemented from the prototype (`gguf_cli.zig`: `pickDevice`, `lockGpu`, `matchDevice`) | |
 | src/spec/policy.cpp (src/model/spec.cpp until arch025-M4) | reimplemented from the prototype (`model/qwen35.zig`: Ngram, NgramPolicy, DraftAccept, DraftTiming, pickDrafts) | |
@@ -102,7 +102,7 @@ see "gfx1151 (Radeon 8060S)" below).
 | src/server/log.h, src/server/log.cpp | reimplemented from the prototype (`server.zig`: `Log`) | same line format; file handling new |
 | src/server/protocol.h, src/server/protocol.cpp | reimplemented from the prototype (`server.zig`: text helpers, `parseParams`, `Out.view`, `parseToolCalls`, `Timings`, `writeUsage`, HTTP status / error responses) | tool-call argument floats use the Python repr of `whirl::json` |
 | src/server/tokens.h, src/server/tokens.cpp | new | think-open split, system-message boundary and CR LF map written from the Qwen3.x chat format |
-| src/server/backend.h, src/server/backend_qwen35.cpp | new (interface); `kvArrays` reimplemented from the prototype (`server.zig`: `buildKvArrays`) | `ServerModel` forwards to `qwen35::Model` (include/whirl/model.h) |
+| src/server/backend.h, src/model/qwen35/server_model.cpp (src/server/backend_qwen35.cpp until arch025-M5) | new (interface); `kvArrays` reimplemented from the prototype (`server.zig`: `buildKvArrays`) | `ServerModel` forwards to `qwen35::Model` (include/whirl/model.h) |
 | src/server/engine.h, src/server/engine.cpp | reimplemented from the prototype (`server.zig`: `Engine`, `Slot`, `Ckpt`, `Spe`, `Sampler`, `StreamState`, `CycleProf`, `runLoop`) | profile hooks behind `ServerModel`; shutdown (`stop`, queued requests answered 503) is new; `system_fingerprint` / `owned_by` are "whirl" |
 | src/server/http.h, src/server/http.cpp | reimplemented from the prototype (`server.zig`: `handleConn`, `buildJob`, `acceptLoop`) | Winsock sockets, buffered reader / writer and clean `stop()` are new |
 | src/server/server_main.h, src/server/server_main.cpp, src/server/whirl_server.cpp | reimplemented from the prototype (`server.zig`: `main`, `defaultBatchDrafts`, `tierFingerprint`, usage text) | `WHIRL_*` environment names (via `envGet`); default directories under `%LOCALAPPDATA%\whirl` |

@@ -2,7 +2,7 @@
 # arch025-S0a: process-environment reads. arch025-F7: forward / engine / ops are BLOCKED in every mode.
 # Thin entry point of tools/gates/pending_scan.py rule "env" (the rule, the pending list env_pending.txt and the
 # selftest live there). Report mode (default) prints the sites and exits 0, except that any read in a blocked scope
-# (src/model/forward/, forward_internal.h, src/server/engine*, backend_qwen35.cpp, src/ops/, include/whirl/ops/) or a
+# (src/model/qwen35/forward/, forward_internal.h, src/server/engine*, qwen35/server_model.cpp, src/ops/, include/whirl/ops/) or a
 # pending entry for one exits 1; -Mode block also exits 1 on a new site, a grown count or a stale pending entry.
 # -TreeTest: block / pass on a copy of the real tree (probes in forward/dispatch.cpp and server/engine.cpp).
 #   pwsh -NoProfile -File tools\gates\env_read_check.ps1 [-Mode report|block] [-Root <repo>] [-Pending <file>]

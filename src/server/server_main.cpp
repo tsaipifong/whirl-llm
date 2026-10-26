@@ -27,6 +27,7 @@
 #include "whirl/hip.h"
 #include "whirl/hip_runtime_loader.h"
 #include "whirl/model.h"
+#include "model/arch_registry.h"  // the architecture module: config + pre-load sizing (arch025-M5)
 #include "whirl/pool_budget.h"
 #include "whirl/startup_fit.h"
 #include "whirl/mem_governor.h"
@@ -581,7 +582,11 @@ int serveMain(int argc, char** argv, const char* program) {
         logI("WHIRL serve starting, log file {}", log_path);
         const TimePoint t_load0 = Clock::now();
         const gguf::File f = gguf::File::open(opt.path);
-        const qwen35::Config cfg = qwen35::Config::fromGguf(f);
+        // the architecture module (src/model/arch_registry.h, arch025-M5): the config and the pre-load sizing below
+        const std::string_view arch_name = f.getStringOr("general.architecture", "");
+        const model::ArchModule* const am = model::findArch(arch_name);
+        if (!am) throw qwen35::ModelError("UnsupportedArch", model::unsupportedArchText(arch_name));
+        const qwen35::Config cfg = am->fromGguf(f);
         int dev = 0;
         int dev_shown = 0;  // the index as --list-devices prints it (before the restriction)
         if (env("HIP_DEVICE")) {
@@ -757,7 +762,7 @@ int serveMain(int argc, char** argv, const char* program) {
         // (only values the user did not set; nothing changes when the pool has room). Not on the
         // UMA iGPU, whose VRAM numbers do not bound what it can allocate.
         if (!is_uma) {
-            const qwen35::LoadEstimate est = qwen35::estimateLoad(f, cfg, lo.embd_on_host, use_dflash);  // dflash: no MTP block
+            const qwen35::LoadEstimate est = am->sizing.estimateLoad(f, cfg, lo.embd_on_host, use_dflash);  // dflash: no MTP block
             const hip::MemInfo mf = ops->memInfo();
             const hip::WddmMemInfo w = ops->wddmMemInfo();
             const bool res_explicit = env("POOL_RESERVE_MB").has_value();
@@ -767,14 +772,10 @@ int serveMain(int argc, char** argv, const char* program) {
             std::uint64_t av = mf.free > res ? mf.free - res : 0;
             if (!res_explicit && w.ok) av = std::min(av, w.local_budget > w.local_usage + margin ? w.local_budget - w.local_usage - margin : 0);
             av = av > card.headroom ? av - card.headroom : 0;
-            std::uint64_t n_gdn_c = 0;
-            for (std::uint32_t li = 0; li < cfg.n_layer; ++li)
-                if (!cfg.isAttn(li)) ++n_gdn_c;
-            const std::uint64_t st1 = n_gdn_c * (static_cast<std::uint64_t>(cfg.d_conv - 1) * cfg.convCh() * 4 +
-                                                 static_cast<std::uint64_t>(cfg.n_v_heads) * cfg.d_state * cfg.headV() * 4);
-            const std::uint64_t pend1 = n_gdn_c * (static_cast<std::uint64_t>(qwen35::max_small_batch) * cfg.convCh() * 4 +
-                                                   static_cast<std::uint64_t>(qwen35::max_small_batch) * cfg.n_v_heads *
-                                                       (cfg.d_state + cfg.headV() + 2) * 4);
+            // per-slot recurrent state + replay rows (model::slotStateBytes: the same formula for the dGPU fit and the UMA check)
+            const model::SlotStateBytes ssb = model::slotStateBytes(am->sizing, cfg);
+            const std::uint64_t st1 = ssb.st1;
+            const std::uint64_t pend1 = ssb.pend1;
             vram::FitInput fi;
             fi.avail = av;
             fi.weights = est.weights;
@@ -795,7 +796,7 @@ int serveMain(int argc, char** argv, const char* program) {
                     }
                 }
                 const std::uint32_t sets = dflashSnapSets(false, true, envOn("GDN_REPLAY", true), dc.block, envOn("NGRAM", true), snap_env);
-                const whirl::dflash::Mem dm = dflashFitBytes(dc, qwen35::dflashWeightBytes(*dfile), cfg,
+                const whirl::dflash::Mem dm = dflashFitBytes(dc, am->sizing.dflashWeightBytes(*dfile), cfg,
                                                              whirl::dflash::captureRows(dp, dc.window, lo.max_batch), opt.parallel, sets, st1);
                 fi.fixed += dm.total();
                 logI("VRAM estimate: DFlash2 drafter {:.2f} GiB (weights {:.2f}, capture {:.0f} MiB, rings {:.0f} MiB, scratch {:.0f} MiB, "
@@ -809,9 +810,9 @@ int serveMain(int argc, char** argv, const char* program) {
             // (WHIRL_DUMP_KV: one "D kv: site=server.est_dgpu" line, arch025-S0a)
             const KvFormat kv_est = numerics::kvEstimate(numerics::KvEstSite::server_dgpu, nreq, cfg.moe, numerics::kvEstimateRequest(env("KV")));
             // (q4 KV uses 256 attention splits: more split-K partial buffers)
-            const std::uint32_t fd_splits_est = qwen35::resolveFdSplits(kv_est);
-            const std::uint64_t b2 = qwen35::bufferBytes(cfg, 2048, est.ffs, est.max_elems, fd_splits_est);
-            const std::uint64_t b4 = qwen35::bufferBytes(cfg, 4096, est.ffs, est.max_elems, fd_splits_est);
+            const std::uint32_t fd_splits_est = am->sizing.resolveFdSplits(kv_est);
+            const std::uint64_t b2 = am->sizing.bufferBytes(cfg, 2048, est.ffs, est.max_elems, fd_splits_est);
+            const std::uint64_t b4 = am->sizing.bufferBytes(cfg, 4096, est.ffs, est.max_elems, fd_splits_est);
             fi.buf_per_row = (b4 - b2) / 2048;
             fi.buf_fixed = b2 - fi.buf_per_row * 2048;
             // (WHIRL_CKPT_HOST=1: checkpoints in pinned host memory, no VRAM)
@@ -901,25 +902,21 @@ int serveMain(int argc, char** argv, const char* program) {
             // first device-memory call (a tiny carve-out fails in hipMemGetInfo with hipError 719,
             // issue #7), naming the setting. Room for less than the default pool: the pool shrinks to
             // what the carve-out holds instead of spilling into slower system memory.
-            const qwen35::LoadEstimate est = qwen35::estimateLoad(f, cfg, lo.embd_on_host, use_dflash);
-            std::uint64_t n_gdn_c = 0;
-            for (std::uint32_t li = 0; li < cfg.n_layer; ++li)
-                if (!cfg.isAttn(li)) ++n_gdn_c;
-            const std::uint64_t st1 = n_gdn_c * (static_cast<std::uint64_t>(cfg.d_conv - 1) * cfg.convCh() * 4 +
-                                                 static_cast<std::uint64_t>(cfg.n_v_heads) * cfg.d_state * cfg.headV() * 4);
-            const std::uint64_t pend1 = n_gdn_c * (static_cast<std::uint64_t>(qwen35::max_small_batch) * cfg.convCh() * 4 +
-                                                   static_cast<std::uint64_t>(qwen35::max_small_batch) * cfg.n_v_heads *
-                                                       (cfg.d_state + cfg.headV() + 2) * 4);
+            const qwen35::LoadEstimate est = am->sizing.estimateLoad(f, cfg, lo.embd_on_host, use_dflash);
+            // per-slot recurrent state + replay rows (model::slotStateBytes: the same formula for the dGPU fit and the UMA check)
+            const model::SlotStateBytes ssb = model::slotStateBytes(am->sizing, cfg);
+            const std::uint64_t st1 = ssb.st1;
+            const std::uint64_t pend1 = ssb.pend1;
             // (WHIRL_DUMP_KV: one "D kv: site=server.est_uma" line)
             const KvFormat kv_est = numerics::kvEstimate(numerics::KvEstSite::server_uma, nreq, cfg.moe, numerics::kvEstimateRequest(env("KV")));
             const std::uint64_t ck = st1 + static_cast<std::uint64_t>(cfg.n_embd) * 4 + static_cast<std::uint64_t>(cfg.n_vocab) * 4;
             hip::UmaNeed need;
-            need.weights = est.weights + (use_dflash && dfile ? qwen35::dflashWeightBytes(*dfile) : 0);
+            need.weights = est.weights + (use_dflash && dfile ? am->sizing.dflashWeightBytes(*dfile) : 0);
             const std::uint64_t bufs =
-                qwen35::bufferBytes(cfg, lo.max_batch, est.ffs, est.max_elems, qwen35::resolveFdSplits(kv_est));
+                am->sizing.bufferBytes(cfg, lo.max_batch, est.ffs, est.max_elems, am->sizing.resolveFdSplits(kv_est));
             // DeltaNet snapshot sets for MTP verify: one recurrent state per draft (8 dense, 1 MoE: the server log's
             // "N snapshot sets")
-            const std::uint64_t snaps = std::max<std::uint32_t>(1, qwen35::mtpDefaults(cfg.moe, hip::Arch::gfx1151).drafts) * st1;
+            const std::uint64_t snaps = std::max<std::uint32_t>(1, am->sizing.mtpDefaults(cfg.moe, hip::Arch::gfx1151).drafts) * st1;
             const std::uint64_t slots_b = opt.parallel * (st1 + pend1) + snaps;
             const std::uint64_t ck_b = (opt.parallel * n_ck + n_spe_plan) * ck;
             need.fixed = need.weights + est.state + bufs + slots_b + ck_b + (est.has_mtp ? 65536ull * cfg.n_embd * 5 / 16 : 0) + (256ull << 20);
@@ -1143,8 +1140,8 @@ int serveMain(int argc, char** argv, const char* program) {
             for (std::uint32_t li = 0; li < cfg.n_layer; ++li)
                 if (!cfg.isAttn(li)) ++ng;
             const std::uint64_t st = ng * (model.convBytes() + model.ssmBytes());
-            const std::uint64_t pend = ng * (static_cast<std::uint64_t>(qwen35::max_small_batch) * cfg.convCh() * 4 +
-                                             static_cast<std::uint64_t>(qwen35::max_small_batch) * cfg.n_v_heads * (cfg.d_state + cfg.headV() + 2) * 4);
+            const std::uint64_t pend = ng * (static_cast<std::uint64_t>(am->sizing.max_small_batch) * cfg.convCh() * 4 +
+                                             static_cast<std::uint64_t>(am->sizing.max_small_batch) * cfg.n_v_heads * (cfg.d_state + cfg.headV() + 2) * 4);
             const std::uint64_t ck = envOn("CKPT_HOST", false) ? 0 : st + static_cast<std::uint64_t>(cfg.n_vocab) * 4 + static_cast<std::uint64_t>(cfg.n_embd) * 4;
             // v0.2.2.2: + the DFlash2 context ring per slot (dflashSetup runs after setupSeqs, below; REVIEW-0221-2)
             const std::uint64_t per_slot = (st + pend + n_ck * ck + (use_dflash ? model.dflashSlotBytes() : 0)) * 104 / 100;
