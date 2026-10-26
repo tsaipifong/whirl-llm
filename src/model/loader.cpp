@@ -346,6 +346,7 @@ u64 bufferBytes(const Config& cfg, u32 Bq, u64 ffs, u64 max_elems, u32 fd_splits
     n += static_cast<u64>(max_small_batch) * cfg.n_embd * f4;  // mtp_h
     n += B * 4 * 3;                                       // mtp_ids, ids, pos_buf
     n += ctl_words * 4;                                   // out_tok
+    n += 512;                                             // am_ws (feat026-argmax)
     const u64 n_split = fd_splits;
     n += max_verify_rows * n_split * cfg.n_head * 2 * f4;  // part_ml
     n += max_verify_rows * n_split * cfg.n_head * cfg.head_dim * f4;  // part_acc
@@ -456,6 +457,7 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
         m.head_gemvx = fe.head_gemvx;
         m.prec_gemvh = fe.prec_gemvh;
         m.prec_gs = fe.prec_gs;
+        m.argmax_mode = fe.argmax_mode;  // feat026-argmax: WHIRL_ARGMAX = legacy (default) | mb | fused
     }
     m.cfg = Config::fromGguf(f);
     const Config& cfg = m.cfg;
@@ -675,6 +677,7 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
     m.host_ids.assign(static_cast<std::size_t>(2 * B), 0);
     m.pos_buf = m.alloc(B * 4);
     m.out_tok = m.allocZero(ctl_words * 4);
+    m.am_ws = m.allocZero(512);  // feat026-argmax: argmax keys / tickets (kernels reset them)
     m.fd_splits = fdSplitsOf(m.kv_fmt, env);
     const u64 n_split = m.fd_splits;
     m.part_ml = m.alloc(max_verify_rows * n_split * cfg.n_head * 2 * f4);

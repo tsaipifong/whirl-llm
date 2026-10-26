@@ -2245,7 +2245,7 @@ void testEnvSnapshot() {
     // envFlag sites (loader.cpp MOE_*), capture / fromValues above for the raw value of the others
     const std::vector<std::string> covered = envtab::namesCovered();
     const char* const load_only[] = {"GEMV_BITWISE_FLOAT", "CODE_OBJECT", "MOE_MXW", "MOE_WIDE", "MOE_RBF", "GPU_SHARE", "GPU_WAIT", "DEVICE", "DFLASH_PROF",
-                                     "HEAD_GEMVX", "PREC_GEMVH", "PREC_GS"};  // the last three: Model::load -> forwardEnv (testForwardEnv)
+                                     "HEAD_GEMVX", "PREC_GEMVH", "PREC_GS", "ARGMAX"};  // the last four: Model::load -> forwardEnv (testForwardEnv)
     for (const auto& e : names) {
         const bool in_table = std::find(covered.begin(), covered.end(), e.name) != covered.end();
         const bool in_empty = std::find(empty_names.begin(), empty_names.end(), e.name) != empty_names.end();
@@ -2321,6 +2321,15 @@ void testForwardEnv() {
                 ++n;
             }
     check(n == 17 * 17 * 17, "forward env: snapshot table size");
+    // feat026-argmax: ARGMAX against the source branch's load-time read (envGet("ARGMAX").value_or("legacy"), exact match)
+    for (const char* av : {static_cast<const char*>(nullptr), "", "legacy", "mb", "fused", "MB", "Fused", "fused ", "1", "2", "0"}) {
+        std::vector<std::pair<std::string, V>> in;
+        if (av) in.push_back({"ARGMAX", V(av)});
+        const std::string am = av ? std::string(av) : std::string("legacy");
+        const int want = am == "fused" ? 2 : am == "mb" ? 1 : 0;
+        check(whirl::config::forwardEnv(EnvSnapshot::fromValues(in)).argmax_mode == want,
+              std::format("forward env: ARGMAX={} -> argmax_mode {}", av ? av : "(unset)", want));
+    }
     // through the process environment (non-empty values; "" removes the variable): capture -> forwardEnv == getenv -> old
     for (const char* v : vals) {
         if (v != nullptr && *v == 0) continue;
@@ -2569,6 +2578,7 @@ void testPlanVsLoadOrTune() {
         {"HEAD_GEMVX", "F7 forwardEnv -> Model member (removed by feat026-o6)"},
         {"PREC_GEMVH", "F7 forwardEnv -> Model member (removed by feat026-o6)"},
         {"PREC_GS", "F7 forwardEnv -> Model member (removed by feat026-o6)"},
+        {"ARGMAX", "feat026-argmax forwardEnv -> Model::argmax_mode (kernel choice, same index)"},
     };
     for (const auto& e : EnvSnapshot::names()) {
         nu::EnvValues v;

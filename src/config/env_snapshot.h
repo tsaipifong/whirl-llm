@@ -34,12 +34,14 @@ public:
     Value code_object, moe_mxw, moe_wide, moe_rbf, gemv_r, gemv_w, gemv_wh, gpu_share, gpu_wait, device, dflash_prof;
     // src/model/forward/dispatch.cpp (arch025-F7, through forwardEnv below): gemvLaunch, gemmFlags
     Value head_gemvx, prec_gemvh, prec_gs;
+    // feat026-argmax (through forwardEnv below): the greedy argmax kernel choice (Model::argmax_mode)
+    Value argmax;
 
     struct Entry {
         const char* name;  // without the WHIRL_ prefix
         Value EnvSnapshot::* field;
     };
-    static constexpr std::size_t n_names = 54;
+    static constexpr std::size_t n_names = 55;
     // every field, once; the reflection test checks the count against sizeof(EnvSnapshot)
     static const std::array<Entry, n_names>& names();
 
@@ -67,16 +69,24 @@ public:
 // Behaviour change (plan I3): a process that changes WHIRL_HEAD_GEMVX after the load no longer sees the new value at
 // the next call; nothing in src/ or tests/ does (model tests: testForwardEnv grep). feat026-o6 removes the three
 // switches for 0.2.6 (warn and ignore): on that merge these fields, ForwardEnv and the Model members go away.
+// feat026-argmax: ARGMAX = legacy (default) | mb | fused -> argmax_mode 0 / 1 / 2, exact match, anything else legacy
+// (the feat026-argmax load-time read: envGet("ARGMAX").value_or("legacy"), loader.cpp). Not a numerics flag: every
+// choice gives the index of argmax_rows_to (same output bits), like HEAD_GEMVX.
 struct ForwardEnv {
     bool head_gemvx = false;
     bool prec_gemvh = true;
     int prec_gs = -1;
+    std::uint8_t argmax_mode = 0;
 };
 inline ForwardEnv forwardEnv(const EnvSnapshot& env) {
     ForwardEnv f;
     f.head_gemvx = EnvSnapshot::flag(env.head_gemvx, false);
     f.prec_gemvh = !env.prec_gemvh || env.prec_gemvh->c_str()[0] != '0';
     f.prec_gs = env.prec_gs && env.prec_gs->c_str()[0] != 0 ? std::atoi(env.prec_gs->c_str()) : -1;
+    {
+        const std::string am = env.argmax.value_or("legacy");
+        f.argmax_mode = am == "fused" ? 2 : am == "mb" ? 1 : 0;
+    }
     return f;
 }
 

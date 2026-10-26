@@ -177,6 +177,7 @@ void loadMatmul(MatmulKernels& k, const Loader& L) {
         for (int nt = 2; nt <= kMaxSmallBatch; ++nt) {
             k.gemvq_nt[nt - 2][ti(t)] = L.req(gemvqNtName(t, nt, false));
             k.gemvq_nt_g[nt - 2][ti(t)] = L.opt(gemvqNtName(t, nt, true));
+            if (t == QType::q6_k) k.gemvq_nt_am[nt - 2] = L.opt(gemvqNtName(t, nt, false) + "_am");  // feat026-argmax
         }
     }
     for (QType t : {QType::q4_k, QType::q5_k, QType::iq4_xs, QType::q6_k}) {
@@ -185,6 +186,7 @@ void loadMatmul(MatmulKernels& k, const Loader& L) {
                 const int r = ri == 0 ? 2 : 4;
                 k.gemvq_mr[ri][nt - 2][ti(t)] = L.req(gemvqMrName(t, nt, r, false));
                 k.gemvq_mr_g[ri][nt - 2][ti(t)] = L.opt(gemvqMrName(t, nt, r, true));
+                if (t == QType::q6_k) k.gemvq_mr_am[ri][nt - 2] = L.opt(gemvqMrName(t, nt, r, false) + "_am");  // feat026-argmax
             }
         }
     }
@@ -503,6 +505,7 @@ void loadMisc(MiscKernels& k, const Loader& L) {
     };
     for (const Named& n : required) k.*(n.f) = L.req(n.name);
     static constexpr Named optional[] = {
+        {&KernelTable::argmax_rows_to_mb, "argmax_rows_to_mb"},  // feat026-argmax
         {&KernelTable::requant_q6k_d2, "requant_q6k_d2"},
         {&KernelTable::requant_q80_q4k, "requant_q80_q4k"},
         {&KernelTable::rmsnorm_x8, "rmsnorm_x8"},

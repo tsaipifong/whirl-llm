@@ -215,15 +215,17 @@ u32 Model::verifyBatchEnqueue(std::span<const VSeg> segs) {
             m.all_logits = false;
             m.bplan = nullptr;
             m.small_max = max_small_batch;
+            m.am_armed = false;  // feat026-argmax
         }
     } reset_flags{*this};
     xq_src = 0;
     x16_src = 0;
+    armHeadArgmax(out_tok, dst);  // feat026-argmax
     run(n);
     // the kept rows of the previous verify are in the state now
     if (gdn_replay)
         for (const VSeg& sg : segs) seqs[sg.seq].npend = 0;
-    hip::launch(k.argmax_rows_to, D(n), D(1024), 0, stream, logits, I(cfg.n_vocab), out_tok, dst);
+    argmaxRowsTo(n, out_tok, dst);  // feat026-argmax: legacy argmax_rows_to unless WHIRL_ARGMAX
     return n;
 }
 
@@ -382,7 +384,36 @@ void Model::argmaxRows(u32 n, std::span<u32> out) {
     for (u32 r = 0; r < n; ++r) out[r] = static_cast<u32>(buf[r]);
 }
 
+void Model::armHeadArgmax(DevPtr out, const RowIdx& dst) {
+    am_armed = argmax_mode == 2 && am_ws != 0;
+    am_done = false;
+    am_req.key = am_ws;
+    am_req.cnt = am_ws + 32 * 8 + 32 * 4;
+    am_req.out = out;
+    am_req.dst = dst;
+}
+
+void Model::argmaxRowsTo(u32 n, DevPtr out, const RowIdx& dst) {
+    const bool fused = am_armed && am_done && am_req.out == out;
+    am_armed = false;
+    am_done = false;
+    if (fused) return;
+    if (argmax_mode != 0 && am_ws != 0 && k.argmax_rows_to_mb != nullptr) {
+        const u32 tiles = (cfg.n_vocab + 4095) / 4096;
+        hip::launch(k.argmax_rows_to_mb, hip::Dim3{tiles, n, 1}, D(256), 0, stream, logits, I(cfg.n_vocab), out, dst, am_ws,
+                    am_ws + 32 * 8);
+        return;
+    }
+    hip::launch(k.argmax_rows_to, D(n), D(1024), 0, stream, logits, I(cfg.n_vocab), out, dst);
+}
+
 void Model::argmaxRowsEnqueue(u32 n) {
+    if (argmax_mode != 0) {  // feat026-argmax: argmax_rows == argmax_rows_to with dst = identity
+        RowIdx id;
+        for (u32 r = 0; r < n; ++r) id.v[r] = static_cast<i32>(r);
+        argmaxRowsTo(n, ctlSlot(ctl_rows), id);
+        return;
+    }
     hip::launch(k.argmax_rows, D(n), D(1024), 0, stream, logits, I(cfg.n_vocab), ctlSlot(ctl_rows));
 }
 
@@ -399,6 +430,7 @@ void Model::verifyEnqueueEx(u32 next, u32 n_draft, std::optional<std::span<const
             m.keep_hidden = false;
             m.all_logits = false;
             m.snap_rows = 0;
+            m.am_armed = false;  // feat026-argmax
         }
     } reset_flags{*this};
     xq_src = 0;
@@ -411,6 +443,11 @@ void Model::verifyEnqueueEx(u32 next, u32 n_draft, std::optional<std::span<const
     } else {
         const u32 one[1] = {next};
         setTokensDev(ids, one, draftSlot(0), n_draft, pos0);
+    }
+    if (argmax_mode == 2) {  // feat026-argmax: fuse into the head GEMV of run(n)
+        RowIdx id;
+        for (u32 r = 0; r < n; ++r) id.v[r] = static_cast<i32>(r);
+        armHeadArgmax(ctlSlot(ctl_rows), id);
     }
     run(n);
     argmaxRowsEnqueue(n);

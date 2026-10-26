@@ -88,11 +88,38 @@ void Model::gemvKernels(std::span<const Mat> ws, std::span<const DevPtr> ys, u32
         }
         hip::launch(p.f, p.grid[0], p.block, 0, stream, g, xqp, xdp, ncols, acc, gate);
     } else {
+        if (ws.size() == 1 && acc == 0 && headArgmaxFused(ws[0], p.f, n, xqp, xdp, ys[0])) return;  // feat026-argmax
         for (std::size_t si = 0; si < ws.size(); ++si) {
             const Mat& wi = ws[si];
             hip::launch(p.f, p.grid[si], p.block, 0, stream, wi.ptr, wi.row_bytes, xqp, xdp, ys[si], ncols, I(wi.nrows), acc, gate);
         }
     }
+}
+
+// feat026-argmax: the armed greedy argmax fused into this output-head launch when f has a q6_k "_am" twin
+// (same grid, same y bits; the last block writes am_req.out[dst.v[t]]). Only for the one launch that holds
+// all n rows of the head (n <= 16, no skip gate). Returns true when it launched.
+bool Model::headArgmaxFused(const Mat& w, hip::Function f, u32 n, DevPtr xqp, DevPtr xdp, DevPtr y) {
+    if (!am_armed || am_done || !head_phase || w.ptr != output.ptr || w.ty != GgmlType::q6_k || gate != 0 || y != logits || n < 2 ||
+        n > max_small_batch || w.nrows != cfg.n_vocab)
+        return false;
+    const std::size_t q6 = ti(GgmlType::q6_k);
+    hip::Function af = nullptr;
+    u32 rows_per_block = 8;
+    if (f == k.gemvq_nt[n - 2][q6]) {
+        af = k.gemvq_nt_am[n - 2];
+    } else {
+        for (u32 ri = 0; ri < 2; ++ri)
+            if (f == k.gemvq_mr[ri][n - 2][q6]) {
+                af = k.gemvq_mr_am[ri][n - 2];
+                rows_per_block = 16 * (ri + 1);
+            }
+    }
+    if (af == nullptr) return false;
+    hip::launch(af, D((w.nrows + rows_per_block - 1) / rows_per_block), D(256), 0, stream, w.ptr, w.row_bytes, xqp, xdp, y, I(w.ncols),
+                I(w.nrows), i32(0), DevPtr{0}, am_req);
+    am_done = true;
+    return true;
 }
 
 // Matmuls (no accumulate) of ws on the same input into ys. On the int8 GEMV
