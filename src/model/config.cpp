@@ -295,11 +295,27 @@ void parseGemvWHead(Model& m, std::string_view list) {
     });
 }
 
+void parseGemvK(Model& m, std::string_view list) {
+    parseNtList(list, ops::kGemvkAuto, [&](std::uint32_t nt, std::uint32_t v) {
+        if (v < kernels::kNGemvk || v == ops::kGemvkAuto) m.gemv_k[nt] = static_cast<std::uint8_t>(v);
+    });
+}
+
 void applyGemvEnv(Model& m) {
     const auto env = whirl::config::snapshotOf(m);  // the load's (arch025-N1)
+    if (const auto& v = env->gemv_k) parseGemvK(m, *v);  // feat026-ggemv (snapshot field since arch025-port-gemv)
     if (const auto& v = env->gemv_r) parseGemvR(m, *v);
     if (const auto& v = env->gemv_w) parseGemvW(m, *v);
     if (const auto& v = env->gemv_wh) parseGemvWHead(m, *v);
+}
+
+std::optional<std::string> applyGemvKEnv(Model& m) {
+    const auto env = whirl::config::snapshotOf(m);
+    if (const auto& v = env->gemv_k) {
+        parseGemvK(m, *v);
+        return *v;
+    }
+    return std::nullopt;
 }
 
 MtpDefaults mtpDefaults(bool moe, hip::Arch arch) {

@@ -289,6 +289,8 @@ bool Model::checkGemvBitwise(std::string& log) {
     bool all_ok = true;
     const GemvR saved = gemv_r;
     const GemvW saved_w = gemv_w;
+    const GemvR saved_k = gemv_k;
+    gemv_k = GemvR{};
     for (std::size_t li = 0; li <= layers.size(); ++li) {
         MatList all;
         if (li < layers.size())
@@ -318,8 +320,13 @@ bool Model::checkGemvBitwise(std::string& log) {
             hip::upload(ffn_g, xs.data(), static_cast<std::size_t>(n_ref) * w.ncols * 4);
             u32 bad = 0;
             for (u32 nt = 2; nt <= max_small_batch; ++nt) {
-                for (int r : {1, 2, 4, 11, 12, 13, 14, 15, 16, 17, 18}) {
-                    if (r < 10) {
+                for (int r : {1, 2, 4, 11, 12, 13, 14, 15, 16, 17, 18, 21, 22, 23, 24, 25, 26, 27, 28, 29}) {
+                    gemv_k[nt] = 0;
+                    if (r > 20) {  // feat026-ggemv gemvk variant r - 20 (gfx1151 MXFP4, 2..8 tokens)
+                        if (w.ty != GgmlType::mxfp4 || nt > static_cast<u32>(kernels::kGemvkMaxNt) || k.gemvk[r - 20][nt - 2] == nullptr) continue;
+                        gemv_w[t][nt] = 0;
+                        gemv_k[nt] = static_cast<std::uint8_t>(r - 20);
+                    } else if (r < 10) {
                         if (r > 1 && k.gemvq_mr[r / 2 - 1][nt - 2][t] == nullptr) continue;
                         gemv_r[nt] = static_cast<std::uint8_t>(r);
                         gemv_w[t][nt] = 0;
@@ -339,13 +346,14 @@ bool Model::checkGemvBitwise(std::string& log) {
                                 if (got[i] != ref[i]) nd += 1;
                                 maxd = std::max(maxd, std::fabs(got[i] - ref[i]));
                             }
-                            log += fmt("    %-7s nt=%u %s=%d: MISMATCH (%zu of %zu differ, max |d| %.3e)\n", tyName(w.ty).c_str(), nt, r < 10 ? "R" : "W",
-                                       r < 10 ? r : r - 10, nd, static_cast<std::size_t>(nt) * nr, maxd);
+                            log += fmt("    %-7s nt=%u %s=%d: MISMATCH (%zu of %zu differ, max |d| %.3e)\n", tyName(w.ty).c_str(), nt,
+                                       r < 10 ? "R" : r < 20 ? "W" : "K", r < 10 ? r : r < 20 ? r - 10 : r - 20, nd, static_cast<std::size_t>(nt) * nr, maxd);
                         }
                     }
                 }
                 gemv_r = saved;
                 gemv_w = saved_w;
+                gemv_k[nt] = 0;
             }
             if (flt) {
                 // wide verify (17..32 rows, small_max raised like the verify entry points do): the GEMV family
@@ -376,6 +384,7 @@ bool Model::checkGemvBitwise(std::string& log) {
     }
     gemv_r = saved;
     gemv_w = saved_w;
+    gemv_k = saved_k;
     xq_src = 0;
     return all_ok;
 }

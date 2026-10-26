@@ -14,6 +14,7 @@
 //   attn  attn_wsplit1 + attn_combine (f16 KV, 24 / 4 heads, hd 256, one decode query at L = 2k / 32k / 128k)
 //   moe   moe_gu_mxfp4[w], moe_down_mxfp4[w] (Ornith MXFP4 experts, n = 1, K routed experts per launch)
 //   gdn   gdn_step_norm (one decode row, 48 v heads x 128 x 128 state)
+//   ggemv gemvq_nt<N>r2_mxfp4 vs gemvk_nt<N>v1..9_mxfp4 (gfx1151 verify GEMV, N = 2 / 4; feat026-ggemv)
 // Weights: --mx (Swift-1.5 27B MXFP4-A) for gemv / gemvh / gemm / anchor, --moemx (Ornith-1.5-35B-A3B MXFP4) for moe;
 // without a model the cells use synthetic MXFP4 blocks of the same shapes (cell names start with "synthetic.").
 
@@ -385,6 +386,109 @@ void benchGemv(Env& e) {
             return cmpTol("vs CPU (" + std::to_string(crows) + " rows)", got, ry, rs, 1e-4, 1e-6);
         };
         runCell(e, k);
+    }
+}
+
+// ---------------------------------------------------------------- ggemv (feat026-ggemv)
+// The balance verify GEMV on the 8060S: the production gemvq_nt<N>r2_mxfp4 (16 rows per block, 8 K-waves) and the
+// gfx1151 gemvk variants v1..v9 (gemv_gk.hip), N = 2 (Ornith 1 draft) and 4 (Swift 3 drafts), on the Swift and Ornith
+// dense MXFP4 shapes. Output check: the production kernel vs the CPU (tolerance), each gemvk variant BITWISE vs the
+// production kernel's output (the checkGemvBitwise contract). bytes = weight bytes + N x ncols int8 activations.
+// Plain (one-matrix) entries; the grouped twins run the same code per block.
+void benchGGemv(Env& e) {
+    Ctx& c = e.c;
+    c.rep.family = "ggemv";
+    if (c.k.gemvk[2][0] == nullptr) {
+        c.rep.skip("ggemv", "bench gemvk", "kernel not in this code object (gfx1151 only)");
+        return;
+    }
+    std::vector<Weights> ws;
+    ws.push_back(denseWeights(c, {"blk.0.attn_qkv.weight", "blk.0.attn_gate.weight", "blk.0.ssm_out.weight", "blk.0.ffn_gate.weight",
+                                  "blk.0.ffn_down.weight", "blk.3.attn_q.weight", "blk.3.attn_k.weight", "blk.3.attn_output.weight"}));
+    if (ws.back().label == "synthetic")  // denseWeights' fallback has the two FFN shapes; add the 5120-column group shape
+        ws.back().mats.push_back({"attn_qkv", randomMat(c, QType::mxfp4, 10240, 5120)});
+    {
+        Weights o;
+        const whirl::gguf::File* f = c.models.moemx.empty() ? nullptr : c.open(c.models.moemx);
+        if (f) {
+            o.label = "ornith";
+            for (const char* n : {"blk.0.attn_qkv.weight", "blk.0.attn_gate.weight", "blk.0.ssm_out.weight", "blk.0.ffn_gate_shexp.weight",
+                                  "blk.0.ffn_down_shexp.weight", "blk.3.attn_q.weight", "blk.3.attn_output.weight"})
+                if (f->tensor(n)) o.mats.push_back({n, loadMat(*f, n)});
+        }
+        if (o.mats.empty()) {
+            o.label = "synthetic_ornith";
+            o.mats.push_back({"attn_qkv", randomMat(c, QType::mxfp4, 8192, 2048)});
+            o.mats.push_back({"ffn_gate_shexp", randomMat(c, QType::mxfp4, 512, 2048)});
+            o.mats.push_back({"ffn_down_shexp", randomMat(c, QType::mxfp4, 2048, 512)});
+            o.mats.push_back({"attn_output", randomMat(c, QType::mxfp4, 2048, 4096)});
+        }
+        ws.push_back(std::move(o));
+    }
+    for (const Weights& w : ws) {
+        for (const auto& [tn, m] : w.mats) {
+            if (m.type != QType::mxfp4 || m.ncols % 256 != 0) continue;
+            const int ncols = m.ncols, nrows = m.nrows;
+            const DevCopies wc = upload(e, m.data);
+            const std::uint64_t rb = m.row_bytes;
+            for (const int nt : {2, 4}) {
+                const std::vector<float> x = c.randn(static_cast<std::size_t>(nt) * ncols);
+                Buf dx(x), xq(static_cast<std::size_t>(nt) * ncols), xd(static_cast<std::size_t>(nt) * ncols / 32 * 4),
+                    y(static_cast<std::size_t>(nt) * nrows * 4);
+                hip::launch(c.k.quantize_q8, {cdiv(static_cast<std::uint64_t>(nt) * ncols, 256), 1, 1}, {256, 1, 1}, 0, c.s, dx.p(), xq.p(),
+                            xd.p(), nt * ncols);
+                c.sync();
+                const auto hq = xq.down<std::int8_t>(static_cast<std::size_t>(nt) * ncols);
+                const auto hd = xd.down<float>(static_cast<std::size_t>(nt) * ncols / 32);
+                const std::size_t cnt = static_cast<std::size_t>(nt) * nrows;
+                std::vector<float> base_out;
+                struct K {
+                    std::string name;
+                    hip::Function f;
+                    int rows;
+                };
+                std::vector<K> ks;
+                ks.push_back({"gemvq_nt" + std::to_string(nt) + "r2_mxfp4", c.k.gemvqMr(QType::mxfp4, nt, 2, false), 16});
+                for (int v = 1; v < wk::kNGemvk; ++v) ks.push_back({wk::gemvkName(nt, v, false), c.k.gemvK(nt, v, false), wk::gemvkRows(v)});
+                for (const K& kk : ks) {
+                    if (kk.f == nullptr) continue;
+                    const bool is_base = base_out.empty();
+                    const int rows = kk.rows;
+                    Cell k;
+                    k.ci = e.info("ggemv", kk.name, w.label + "." + shortName(tn) + ".n" + std::to_string(nt), shapeStr(nrows, ncols));
+                    k.ci.settings = e.settings(static_cast<std::uint64_t>(wc.n()) * m.data.size(), wc.n());
+                    k.ci.bytes = static_cast<double>(m.data.size()) + static_cast<double>(nt) * ncols;
+                    k.kernel = kk.name;
+                    k.fa = kk.f;
+                    k.call = [&, rows](hip::Function f, std::uint64_t r) {
+                        hip::launch(f, {cdiv(nrows, rows), 1, 1}, {256, 1, 1}, 0, c.s, wc.at(r), rb, xq.p(), xd.p(), y.p(), ncols, nrows, 0,
+                                    DevPtr{0});
+                    };
+                    k.run = [&](hip::Function f) {
+                        y.fill(0xff);
+                        k.call(f, 0);
+                        c.sync();
+                        return y.down<float>(cnt);
+                    };
+                    k.verify = [&, is_base](const std::vector<float>& got) {
+                        if (!is_base) return cmpExact("bitwise == gemvq_nt" + std::to_string(nt) + "r2", got, base_out, Kind::invariant);
+                        const int crows = std::min(nrows, c.quick ? 64 : 256);
+                        const std::vector<float> wf = ref::dequantRows(m, 0, crows);
+                        std::vector<double> ry, rs;
+                        ref::gemvQ8F64(wf, crows, ncols, hq.data(), hd.data(), nt, ry, rs);
+                        std::vector<float> sub;
+                        for (int t = 0; t < nt; ++t)
+                            sub.insert(sub.end(), got.begin() + static_cast<std::ptrdiff_t>(t) * nrows,
+                                       got.begin() + static_cast<std::ptrdiff_t>(t) * nrows + crows);
+                        Result r = cmpTol("vs CPU (" + std::to_string(crows) + " rows)", sub, ry, rs, 1e-4, 1e-6);
+                        if (r.pass) base_out = got;
+                        return r;
+                    };
+                    runCell(e, k);
+                    if (is_base && base_out.empty()) break;  // the production kernel failed its check: no reference
+                }
+            }
+        }
     }
 }
 
@@ -934,7 +1038,7 @@ void benchGdn(Env& e) {
 
 }  // namespace
 
-const char* const kBenchFamilies[] = {"gemv", "gemvh", "gemm", "attn", "moe", "gdn"};
+const char* const kBenchFamilies[] = {"gemv", "gemvh", "gemm", "attn", "moe", "gdn", "ggemv"};
 
 bool benchFamilyKnown(const std::string& f) {
     for (const char* n : kBenchFamilies)
@@ -984,7 +1088,7 @@ void runBench(Ctx& c, const BenchOpts& o) {
         const char* name;
         void (*fn)(Env&);
     };
-    const F fams[] = {{"gemv", benchGemv}, {"gemvh", benchGemvh}, {"gemm", benchGemm}, {"attn", benchAttnDecode}, {"moe", benchMoe}, {"gdn", benchGdn}};
+    const F fams[] = {{"gemv", benchGemv}, {"gemvh", benchGemvh}, {"gemm", benchGemm}, {"attn", benchAttnDecode}, {"moe", benchMoe}, {"gdn", benchGdn}, {"ggemv", benchGGemv}};
     for (const F& f : fams) {
         if (!o.families.count(f.name)) continue;
         std::printf("== bench %s\n", f.name);

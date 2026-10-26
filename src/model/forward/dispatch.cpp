@@ -70,7 +70,7 @@ void Model::gemvLaunch(std::span<const Mat> ws, DevPtr xin, std::span<const DevP
 void Model::gemvKernels(std::span<const Mat> ws, std::span<const DevPtr> ys, u32 n, i32 acc, DevPtr xqp, DevPtr xdp) {
     ops::MatShape sh[3];
     for (std::size_t si = 0; si < ws.size(); ++si) sh[si] = matShape(ws[si]);
-    const ops::GemvTune tn{&gemv_r, &gemv_w, &gemv_w_head, nf().gv_nmax};
+    const ops::GemvTune tn{&gemv_r, &gemv_w, &gemv_w_head, nf().gv_nmax, &gemv_k};
     const ops::GemvPlan p = ops::chooseGemvTile(sh, ws.size(), n, k, tn);
     const i32 ncols = I(ws[0].ncols);
     if (p.grouped) {

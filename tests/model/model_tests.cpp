@@ -2234,10 +2234,21 @@ void testEnvSnapshot() {
         check(run(sw, 0, "") == envtab::tuneOutput(0, model.string()), std::string("env snapshot: switch ") + sw + "='' = not set (numerics.cpp:292)");
         empty_names.push_back(sw);
     }
-    for (const char* g : {"GEMV_R", "GEMV_W", "GEMV_WH"}) {
+    for (const char* g : {"GEMV_R", "GEMV_W", "GEMV_WH", "GEMV_K"}) {
         const auto snap = std::make_shared<const EnvSnapshot>(EnvSnapshot::fromValues({{g, V("")}}));
         check(envtab::gemvOutput(snap) == envtab::gemvOutput(), std::string("env snapshot: ") + g + "='' applies nothing (config.cpp:283-293)");
         empty_names.push_back(g);
+    }
+    {
+        // feat026-ggemv GEMV_K (a snapshot field since arch025-port-gemv; not in the pre-N1 table): a value reaches
+        // Model::gemv_k (the gemv_k dump row), the same from the process environment as from an injected snapshot
+        const auto snap = std::make_shared<const EnvSnapshot>(EnvSnapshot::fromValues({{"GEMV_K", V("4:2,6")}}));
+        const std::string got = envtab::gemvOutput(snap);
+        check(got != envtab::gemvOutput() && got.find("gemv_k") != std::string::npos, "env snapshot: GEMV_K=4:2,6 sets the gemv_k row");
+        envtab::setEnv("GEMV_K", "4:2,6");
+        const std::string proc = envtab::gemvOutput();
+        envtab::setEnv("GEMV_K", nullptr);
+        check(proc == got, "env snapshot: GEMV_K injected snapshot == process environment");
     }
     _putenv_s("LOCALAPPDATA", old_lad.c_str());
     // (6) reflection: every snapshot name is set by the process-env table, by (5), or (the sites that only run in a
@@ -2562,6 +2573,7 @@ void testPlanVsLoadOrTune() {
         {"GEMV_R", "config.cpp applyGemvEnv: tune rows (needs the GPU dump)"},
         {"GEMV_W", "config.cpp applyGemvEnv: tune rows (needs the GPU dump)"},
         {"GEMV_WH", "config.cpp applyGemvEnv: tune rows (needs the GPU dump)"},
+        {"GEMV_K", "config.cpp applyGemvEnv / applyGemvKEnv: gemvk variant rows (feat026-ggemv; needs the GPU dump)"},
         {"GPU_SHARE", "device.cpp: GPU lock"},
         {"GPU_WAIT", "device.cpp: GPU lock"},
         {"DEVICE", "device.cpp: GPU selection"},

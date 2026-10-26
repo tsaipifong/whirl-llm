@@ -77,6 +77,11 @@ std::string execDump(const Model& m) {
         if (any) add(std::format("gemv_w[{}]", t), hexRow(m.gemv_w[t]));
     }
     add("gemv_w_head", hexRow(m.gemv_w_head));
+    {
+        bool any = false;  // feat026-ggemv: only when WHIRL_GEMV_K is set (default dumps stay unchanged)
+        for (std::uint8_t v : m.gemv_k) any = any || v != 0;
+        if (any) add("gemv_k", hexRow(m.gemv_k));
+    }
     WD_FB(fp8_prefill);
     WD_FU(fp8_mask);
     WD_U(mm_class);

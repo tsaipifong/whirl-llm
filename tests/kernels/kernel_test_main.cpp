@@ -118,7 +118,7 @@ int main(int argc, char** argv) {
         }
     }
     const char* fam_names[] = {"quant", "gemv", "gemm", "attn", "attndq4", "gdn", "moe", "moemx", "moef", "misc", "attnbench",
-                               "gemvh", "gemvhbench", "dflash", "ws4", "ws4bench", "ws4g", "ws4gbench", "vision"};  // = fams below
+                               "gemvh", "gemvhbench", "dflash", "ws4", "ws4bench", "ws4g", "ws4gbench", "vision", "gemvk"};  // = fams below
     const bool bench = !bo.families.empty();
     if (!bench && (!bo.jsonl.empty() || !bo.ab_hsaco.empty())) {
         std::printf("whirl-kernel-test: --jsonl / --ab need --bench\n");
@@ -231,7 +231,7 @@ int main(int argc, char** argv) {
                         {"gemvh", kt::testGemvh}, {"gemvhbench", kt::benchGemvh}, {"dflash", kt::testDflash},
                         {"ws4", kt::testAttnWs4}, {"ws4bench", kt::benchAttnWs4},
                         {"ws4g", kt::testAttnWs4g}, {"ws4gbench", kt::benchAttnWs4g},
-                        {"vision", kt::testVision}};
+                        {"vision", kt::testVision}, {"gemvk", kt::testGemvk}};
     if (bench) {
         const auto t0 = std::chrono::steady_clock::now();
         try {
