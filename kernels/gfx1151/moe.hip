@@ -665,4 +665,12 @@ MOE_ENTRIES(q3_k, QT_Q3_K)
 MOE_ENTRIES(iq3_s, QT_IQ3_S)
 // MXFP4 experts on the generic paths (int8 decode, f16 WMMA prefill) over the load-time
 // MXFP4 layout (136-byte superblocks); gfx1151 has no fp8 grouped GEMM.
+// With a moe_down8.hip tune id (WHIRL_MD8_MXFP4 != 0) the shipped decode down entry is
+// renamed moe_down_mxfp4_shipped and moe_down8.hip defines moe_down_mxfp4 (feat026-moedown8s).
+#if defined(WHIRL_MD8_MXFP4) && WHIRL_MD8_MXFP4
+#define moe_down_mxfp4 moe_down_mxfp4_shipped
+#endif
 MOE_ENTRIES(mxfp4, QT_MXFP4)
+#if defined(WHIRL_MD8_MXFP4) && WHIRL_MD8_MXFP4
+#undef moe_down_mxfp4
+#endif

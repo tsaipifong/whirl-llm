@@ -82,10 +82,13 @@ __device__ __forceinline__ void gvh8_impl(const uint8_t *__restrict__ W, uint64_
 #pragma unroll
             for (int f = 0; f < 4; ++f) dst[f] = ld_frag16(p + 16 * f);
         };
-        // prologue: weights of units 0 .. D - 2 (WP 0) or 0 .. D - 1 (WP 1), clamped
+        // prologue: weights of units 0 .. D - 2 (WP 0) or 0 .. D - 1 (WP 1), clamped; none when nu == 0 (unit -1 would be
+        // before the row; = the shipped u < nsb guard, feat026-kcand-r1)
+        if (nu > 0) {
 #pragma unroll
-        for (int u = 0; u < D - 1 + WP; ++u) G::load(w[u], rowp, min(u, nu - 1), role);
-        if (XG) load_x(xa[0], 0);
+            for (int u = 0; u < D - 1 + WP; ++u) G::load(w[u], rowp, min(u, nu - 1), role);
+            if (XG) load_x(xa[0], 0);
+        }
         // one unit step: s = slot (u mod D, a constant after unrolling)
         auto step = [&](int s, int u) {
 #pragma unroll

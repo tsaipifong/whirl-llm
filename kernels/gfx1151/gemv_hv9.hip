@@ -23,7 +23,8 @@
 //  * XG: activations one group ahead in a 2-slot ring (1) or at the group start (0).
 //  * WP: weight load after the unit's last WMMA into the slot it consumed, fenced by sched_barrier(0) (1), or at
 //        group 0 after the activation loads (0).   * WF: 1 = weights before the activations (shipped order; ablation).
-//  All loads unconditional with clamped unit / group indices; loads-first epilogue (all old values, then add + store).
+//  All loads unconditional with clamped unit / group indices (the prologue only when nu > 0); loads-first epilogue
+//  (all old values, then add + store).
 //
 // Bit-identity contract (precise): same load / frag functions with the same role and phase (u & 1), the same
 // select, the same WMMA operand order (weights first for paired / dual, activations first for direct) and the same
@@ -131,9 +132,13 @@ __device__ __forceinline__ void gvh9_impl(const uint8_t *__restrict__ W, uint64_
                 for (int f = 0; f < GS; ++f) dst[j][f] = ld_frag16(p + 16 * f);
             }
         };
+        // nu == 0 (ncols < 16 UK; no product shape): no prologue loads (min(u, nu - 1) would be unit -1, before the row),
+        // as the shipped bodies' u < nsb guard; acc stays 0 (feat026-kcand-r1, review kcand-batch consider 5)
+        if (nu > 0) {
 #pragma unroll
-        for (int u = 0; u < D - 1 + WP; ++u) B::load(w[u], rowp, min(u, nu - 1), role);
-        if (XG) load_x(xa[0], 0);
+            for (int u = 0; u < D - 1 + WP; ++u) B::load(w[u], rowp, min(u, nu - 1), role);
+            if (XG) load_x(xa[0], 0);
+        }
         // one unit: slot s (u mod D, a constant after unrolling); NG u is even, so group g uses activation slot g & 1
         auto step = [&](int s, int u) {
 #pragma unroll
