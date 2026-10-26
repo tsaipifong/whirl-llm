@@ -51,6 +51,8 @@
 #include "gfx1151/whirl_kernels_gfx1151.hip"  // RDNA 3.5 kernel set
 #endif
 
+#include "moe_fused.hip"             // precise MoE decode: routed + shared gate/up + SwiGLU in one launch (both kernel sets)
+
 #include "spec_sample.hip"           // speculative sampling of MTP drafts (both kernel sets)
 #include "dflash.hip"                // DFlash2 drafter: dynamic conv, top-k, selector lattice / walk, attention
                                      // (both kernel sets: plain f32 code, h2f from either common.hip)

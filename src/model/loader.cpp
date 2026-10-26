@@ -526,7 +526,8 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
     // per-model-type request (numerics::forModel; MoE balance = dense balance items since MODES-MXFP4)
     m.num_req = numerics::forModel(opt.numerics, cfg.moe);
     // (arch025-N2b: moe_fp8 / moe_mxw / moe_wide / moe_rbf are numerics::plan's, in loadOrTune: WHIRL_MOE_FP8 / _MXW /
-    // _WIDE / _RBF from this load's snapshot; nothing reads them before loadOrTune)
+    // _WIDE / _RBF from this load's snapshot; nothing reads them before loadOrTune; feat026-moedec: moe_fuse / gemvh_f32,
+    // WHIRL_MOE_FUSE / _GEMVH_F32, the same way)
     m.layers.resize(cfg.n_layer);
     m.kcache.assign(cfg.n_layer, 0);
     m.vcache.assign(cfg.n_layer, 0);

@@ -1059,6 +1059,96 @@ void testGdnChoice() {
     }
 }
 
+// feat026-moedec: the fused precise decode MoE launch (ops::chooseMoeFuse) - taken only for the precise f32 decode
+// experts with one gate+up launch, MXFP4 routed and shared matrices on the gemvh path, the shapes the kernel needs
+// (F % 4, n_embd % 256, shared rows % 64), 1..32 rows, and only when enabled; grid = shared blocks + routed blocks
+void testMoeFuse() {
+    kn::MoeKernels k;
+    k.moe_gus_f = tag("moe_gus_f_mxfp4");
+    k.moe_gus2_f = tag("moe_gus2_f_mxfp4");
+    ops::MoePlan pl;
+    pl.small = true;
+    pl.small_q8 = false;
+    pl.bits = ops::MoeBits::moe_f32_row;
+    pl.gu_split = false;
+    ops::MoeFuseProblem p;  // Ornith-1.5-35B-A3B: n_embd 2048, 8 of 256 experts, F 512, shared 512 rows
+    p.n = 1;
+    p.C = 2048;
+    p.F = 512;
+    p.K = 8;
+    p.gate_ty = p.up_ty = GgmlType::mxfp4;
+    p.gate_rb = p.up_rb = 2048 / 32 * 17;
+    p.shared = true;
+    p.shared_gemvh = true;
+    p.sg_ty = p.su_ty = GgmlType::mxfp4;
+    p.sg_rb = p.su_rb = 2048 / 32 * 17;
+    p.sg_nrows = p.su_nrows = 512;
+    p.sg_ncols = p.su_ncols = 2048;
+    ops::MoeFusePlan f = ops::chooseMoeFuse(p, true, pl, k);
+    CHECK(f.use && nameOf(f.f) == "moe_gus_f_mxfp4" && f.nsb == 8 && f.nrb == 128 && f.grid.x == 8 + 128 * 8 && f.grid.y == 1);
+    // off by default (the selector), and never for the q8 / prefill experts
+    CHECK(!ops::chooseMoeFuse(p, false, pl, k).use);
+    ops::MoePlan q8 = pl;
+    q8.small_q8 = true;
+    q8.bits = ops::MoeBits::moe_q8_row;
+    CHECK(!ops::chooseMoeFuse(p, true, q8, k).use);
+    ops::MoePlan pf = pl;
+    pf.small = false;
+    CHECK(!ops::chooseMoeFuse(p, true, pf, k).use);
+    ops::MoePlan split = pl;
+    split.gu_split = true;
+    CHECK(!ops::chooseMoeFuse(p, true, split, k).use);
+    // rows: 17..32 take the two-token-tile twin, 0 / 33 none
+    p.n = 16;
+    CHECK(nameOf(ops::chooseMoeFuse(p, true, pl, k).f) == "moe_gus_f_mxfp4");
+    p.n = 17;
+    f = ops::chooseMoeFuse(p, true, pl, k);
+    CHECK(f.use && nameOf(f.f) == "moe_gus2_f_mxfp4" && f.grid.x == 8 + 128 * 17 * 8);
+    p.n = 32;
+    CHECK(ops::chooseMoeFuse(p, true, pl, k).use);
+    p.n = 33;
+    CHECK(!ops::chooseMoeFuse(p, true, pl, k).use);
+    p.n = 0;
+    CHECK(!ops::chooseMoeFuse(p, true, pl, k).use);
+    p.n = 1;
+    // shapes and types
+    ops::MoeFuseProblem b = p;
+    b.F = 510;
+    CHECK(!ops::chooseMoeFuse(b, true, pl, k).use);
+    b = p;
+    b.C = 2048 + 128;
+    CHECK(!ops::chooseMoeFuse(b, true, pl, k).use);
+    b = p;
+    b.gate_ty = b.up_ty = GgmlType::q4_k;
+    CHECK(!ops::chooseMoeFuse(b, true, pl, k).use);
+    b = p;
+    b.sg_nrows = b.su_nrows = 512 + 32;
+    CHECK(!ops::chooseMoeFuse(b, true, pl, k).use);
+    b = p;
+    b.su_ty = GgmlType::q8_0;
+    CHECK(!ops::chooseMoeFuse(b, true, pl, k).use);
+    b = p;
+    b.shared_gemvh = false;  // the old chain would not run gemvh on the shared matrices -> other bits, never fused
+    CHECK(!ops::chooseMoeFuse(b, true, pl, k).use);
+    b = p;
+    b.sg_ncols = 1024;
+    CHECK(!ops::chooseMoeFuse(b, true, pl, k).use);
+    // no shared expert: routed blocks only (the shared checks do not apply)
+    b = p;
+    b.shared = false;
+    b.shared_gemvh = false;
+    b.sg_ty = b.su_ty = GgmlType::f32;
+    f = ops::chooseMoeFuse(b, true, pl, k);
+    CHECK(f.use && f.nsb == 0 && f.grid.x == 128 * 8);
+    // a code object without the kernels (old build / other arch): not taken
+    kn::MoeKernels none;
+    CHECK(!ops::chooseMoeFuse(p, true, pl, none).use);
+    kn::MoeKernels only16;
+    only16.moe_gus_f = k.moe_gus_f;
+    p.n = 20;
+    CHECK(!ops::chooseMoeFuse(p, true, pl, only16).use);
+}
+
 }  // namespace
 
 int main() {
@@ -1071,6 +1161,7 @@ int main() {
     testAttnDecode();
     testAttnPrefill();
     testOpsMoe();
+    testMoeFuse();
     testOpTables();
     testActChoice();
     testGdnChoice();

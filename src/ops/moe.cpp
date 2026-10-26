@@ -119,4 +119,31 @@ MoePlan chooseMoe(const MoeProblem& p, const MoeFlags& f, const kernels::MoeKern
     return pl;
 }
 
+MoeFusePlan chooseMoeFuse(const MoeFuseProblem& p, bool enabled, const MoePlan& pl, const kernels::MoeKernels& k) {
+    MoeFusePlan f;
+    auto no = [&](const char* why) {
+        f.why = why;
+        return f;
+    };
+    if (!enabled) return no("off (WHIRL_MOE_FUSE)");
+    if (!pl.small || pl.bits != MoeBits::moe_f32_row || pl.gu_split) return no("not the precise decode experts with one gate+up launch");
+    if (p.gate_ty != GgmlType::mxfp4 || p.up_ty != GgmlType::mxfp4 || p.gate_rb != p.up_rb) return no("routed gate / up not MXFP4 of one row size");
+    if (p.n == 0 || p.n > 32) return no("rows outside 1..32");
+    if (p.F == 0 || p.F % 4 != 0 || p.C == 0 || p.C % 256 != 0 || p.K == 0) return no("shape (F % 4, C % 256)");
+    if (p.shared) {
+        if (!p.shared_gemvh) return no("shared expert not on the f16 gemvh path");
+        if (p.sg_ty != GgmlType::mxfp4 || p.su_ty != GgmlType::mxfp4 || p.sg_rb != p.su_rb) return no("shared gate / up not MXFP4 of one row size");
+        if (p.sg_ncols != p.C || p.su_ncols != p.C || p.sg_nrows != p.su_nrows || p.sg_nrows == 0 || p.sg_nrows % 64 != 0)
+            return no("shared shape (ncols == n_embd, rows % 64)");
+    }
+    const Function fn = p.n <= 16 ? k.moe_gus_f : k.moe_gus2_f;
+    if (fn == nullptr) return no("no moe_gus*_f_mxfp4 in the code object");
+    f.use = true;
+    f.f = fn;
+    f.nsb = p.shared ? p.sg_nrows / 64 : 0;
+    f.nrb = p.F / 4;
+    f.grid = D(f.nsb + f.nrb * p.n * p.K);
+    return f;
+}
+
 }  // namespace whirl::ops

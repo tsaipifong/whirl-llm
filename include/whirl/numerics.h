@@ -84,8 +84,8 @@ struct EnvValues {
     // src/model/tune.cpp:852-982 (loadOrTuneImpl)
     Raw fp8, fp8_mask, g8t, gdn_wmma, act_fuse, gemmh, gemmhq, attn_kx, attn_kg, attn_dqf, attn_seg, gdn_ba, gdn_in2, q4_relaxed,
         ffn_h16, gdn_strix, gdn_strix_min, kv, q8dec, relax, relax_k, relax_alpha, relax_eps, relax_delta, spec_sample;
-    // src/model/loader.cpp:550-553
-    Raw moe_fp8, moe_mxw, moe_wide, moe_rbf;
+    // src/model/loader.cpp:550-553; feat026-moedec: moe_fuse / gemvh_f32 (WHIRL_MOE_FUSE / _GEMVH_F32, k_bitwise_switches)
+    Raw moe_fp8, moe_mxw, moe_wide, moe_rbf, moe_fuse, gemvh_f32;
     // numerics::noteSwitches (k_numerics_switches, same order): recorded as overrides only
     std::array<Raw, 13> switches{};
 
@@ -93,7 +93,7 @@ struct EnvValues {
         const char* name;  // without the WHIRL_ prefix
         Raw EnvValues::* field;
     };
-    static constexpr std::size_t n_fields = 29;
+    static constexpr std::size_t n_fields = 31;
     // every Raw field once (switches are k_numerics_switches); the reflection test checks the count against sizeof
     static const std::array<Entry, n_fields>& names();
     // by name, switches included (nullptr for an unknown name)
@@ -202,6 +202,9 @@ struct ItemState {
 // kv_kf16, kv_q4, kv_mode, fd_splits: numerics::chooseKv / resolveFdSplits, N3), the tune results (gemv_r, gemv_w,
 // tune table, WHIRL_GEMV_R / _W / _WH: config.cpp applyGemvEnv), per-forward state (out_h16, mm_class, small_max,
 // head_phase, mtp_batch, mrope_on, rpos_rows) and sizes.
+// feat026-moedec(-r1): moe_fuse (WHIRL_MOE_FUSE, fused precise MoE decode) and gemvh_f32 (WHIRL_GEMVH_F32, gemvhf):
+// bitwise A/B switches (k_bitwise_switches), envFlag rule; printed by WHIRL_DUMP_EXEC but not in the S0b-2 dump
+// (recorded before them), so their dump key here is empty.
 #define WHIRL_NUMERICS_FLAGS(X)                                  \
     X(B, use_graph, true, "use_graph")                           \
     X(B, no_fuse, false, "no_fuse")                              \
@@ -246,6 +249,8 @@ struct ItemState {
     X(B, moe_fp8, true, "moe_fp8")                               \
     X(B, moe_mxw, true, "moe_mxw")                               \
     X(B, moe_rbf, true, "moe_rbf")                               \
+    X(B, moe_fuse, false, "")                                    \
+    X(B, gemvh_f32, false, "")                                   \
     X(B, gv_group, true, "gv_group")                             \
     X(U, gv_nmax, 0, "gv_nmax")                                  \
     X(B, gdn_v0, false, "")
@@ -322,8 +327,14 @@ void skipItem(Plan& p, Item it, const std::string& why);
 // WHIRL_* A/B switches that change which kernels run (WHIRL_FD_SPLITS, WHIRL_GEMV_MAX, ...):
 // each one set is recorded as an override ("+overrides" label), so the log and /props show that
 // the run's bits are not the mode's tested paths. get(name) reads WHIRL_<name>.
+// Bitwise A/B switches (k_bitwise_switches: WHIRL_MOE_FUSE, WHIRL_GEMVH_F32, feat026-moedec): other kernels, same bits.
+// Recorded as an override line only when the value turns the switch on (flagOn, the rule of whirl::envFlag), and
+// never set lossy_override: precise stays labelled "precise".
 extern const char* const k_numerics_switches[];
+extern const char* const k_bitwise_switches[];
 void noteSwitches(Plan& p, const std::function<std::optional<std::string>(const char*)>& get);
+// The one boolean rule of WHIRL_* flags (whirl::envFlag): a set variable is on unless it is "0" ("true", "1", "yes" on).
+bool flagOn(std::string_view v);
 
 // "numerics: balance - enabled: fp8 (...), ...; skipped: gdnwmma (...); always: q8dec (...)"
 std::string logLine(const Plan& p);

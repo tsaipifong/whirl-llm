@@ -1830,6 +1830,70 @@ void testBaselineDumps() {
 }
 #undef CHECK
 
+// feat026-moedec-r1 (review M2): WHIRL_MOE_FUSE / WHIRL_GEMVH_F32 use the envFlag rule (set and not "0" = on, so
+// "true" is on and "0" is off), the label follows the effective value, and a bitwise switch never marks the plan lossy
+// (precise stays "precise"). Before r1: getenv + *v == '1' ("true" off) and noteSwitches set lossy_override for any value.
+// arch025-port-moe: the two switches are plan flags (nf().moe_fuse / gemvh_f32, N2b) instead of Model members; the plan
+// takes them through Request::env exactly as loadOrTune does (numericsRequest), checked here for every case.
+#define CHECK(x) check((x), "moedec switches: " #x)
+void testMoedecSwitches() {
+    namespace nu = whirl::numerics;
+    struct Case {
+        const char* v;
+        bool on;
+    };
+    const Case cases[] = {{nullptr, false}, {"0", false}, {"1", true}, {"true", true}, {"yes", true}, {"2", true}};
+    for (const char* name : {"MOE_FUSE", "GEMVH_F32"}) {
+        const std::string key = std::string("WHIRL_") + name;
+        for (const Case& c : cases) {
+            _putenv_s(key.c_str(), c.v != nullptr ? c.v : "");  // "" removes the variable
+            CHECK(envFlag(name, false) == c.on);
+            if (c.v != nullptr) CHECK(nu::flagOn(c.v) == c.on);
+            nu::Plan p = nu::plan(nu::Request{}, nu::Target{});  // precise
+            CHECK(nu::modeLabel(p) == "precise");
+            nu::noteSwitches(p, [](const char* n) { return envGet(n); });
+            CHECK(!p.lossy_override);
+            CHECK(nu::modeLabel(p) == "precise");
+            CHECK(p.overrides.size() == (c.on ? 1u : 0u));
+            if (c.on) {
+                CHECK(p.overrides[0].find(key + "=" + c.v + ": bitwise A/B switch on") == 0);
+                CHECK(nu::logLine(p).find("precise+overrides") == std::string::npos);
+            }
+            nu::Plan pb = nu::plan(nu::parseMode("balance", "t"), nu::Target{});
+            nu::noteSwitches(pb, [](const char* n) { return envGet(n); });
+            CHECK(nu::modeLabel(pb) == "balance");
+            // the plan flag (load path: Request::env from the snapshot, load_overrides on)
+            nu::Request rq;
+            rq.load_overrides = true;
+            *rq.env.find(name) = envGet(name);
+            const nu::Plan pf = nu::plan(rq, nu::Target{});
+            CHECK((std::string(name) == "MOE_FUSE" ? pf.flags.moe_fuse : pf.flags.gemvh_f32) == c.on);
+            CHECK(!pf.lossy_override);
+        }
+        _putenv_s(key.c_str(), "");
+    }
+    // both on + a lossy-class switch: only the latter marks the plan
+    nu::Plan p = nu::plan(nu::Request{}, nu::Target{});
+    nu::noteSwitches(p, [](const char* n) -> std::optional<std::string> {
+        const std::string s(n);
+        if (s == "MOE_FUSE" || s == "GEMVH_F32") return std::string("1");
+        if (s == "GEMV_MAX") return std::string("8");
+        return std::nullopt;
+    });
+    CHECK(p.overrides.size() == 3 && p.lossy_override && nu::modeLabel(p) == "precise+overrides");
+    // no switch is in both lists
+    for (const char* const* a = nu::k_bitwise_switches; *a != nullptr; ++a)
+        for (const char* const* b = nu::k_numerics_switches; *b != nullptr; ++b) CHECK(std::string(*a) != *b);
+    // the exec dump carries the effective values (default off)
+    q::Model m;
+    const std::string d = q::execDump(m);
+    CHECK(d.find("D exec: moe_fuse=0\n") != std::string::npos && d.find("D exec: gemvh_f32=0\n") != std::string::npos);
+    m.num_plan.flags.moe_fuse = m.num_plan.flags.gemvh_f32 = true;
+    const std::string d1 = q::execDump(m);
+    CHECK(d1.find("D exec: moe_fuse=1\n") != std::string::npos && d1.find("D exec: gemvh_f32=1\n") != std::string::npos);
+}
+#undef CHECK
+
 // arch025-N1: environment -> Model field table (black box over the process environment, so the same test runs on the
 // code before and after the EnvSnapshot change). Each case sets WHIRL_<name> variables, runs loadOrTune on a host-only
 // Model (no layers, null kernels, an empty cached tune table in a private LOCALAPPDATA, so nothing reaches the GPU),
@@ -2244,7 +2308,7 @@ void testEnvSnapshot() {
     // GPU load / at static initialisation) named here with the test that covers its value: flag() above for the
     // envFlag sites (loader.cpp MOE_*), capture / fromValues above for the raw value of the others
     const std::vector<std::string> covered = envtab::namesCovered();
-    const char* const load_only[] = {"GEMV_BITWISE_FLOAT", "CODE_OBJECT", "MOE_MXW", "MOE_WIDE", "MOE_RBF", "GPU_SHARE", "GPU_WAIT", "DEVICE", "DFLASH_PROF",
+    const char* const load_only[] = {"GEMV_BITWISE_FLOAT", "CODE_OBJECT", "MOE_MXW", "MOE_WIDE", "MOE_RBF", "MOE_FUSE", "GEMVH_F32", "GPU_SHARE", "GPU_WAIT", "DEVICE", "DFLASH_PROF",
                                      "HEAD_GEMVX", "PREC_GEMVH", "PREC_GS"};  // the last three: Model::load -> forwardEnv (testForwardEnv)
     for (const auto& e : names) {
         const bool in_table = std::find(covered.begin(), covered.end(), e.name) != covered.end();
@@ -2593,6 +2657,7 @@ int main() {
     testDraftWindowRestore();
     testForwardSplit();
     testBaselineDumps();
+    testMoedecSwitches();
     testEnvTable();
     testEnvSnapshot();
     testForwardEnv();

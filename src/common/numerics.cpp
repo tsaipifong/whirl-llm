@@ -220,6 +220,8 @@ const std::array<EnvValues::Entry, EnvValues::n_fields>& EnvValues::names() {
         {"MOE_MXW", &S::moe_mxw},
         {"MOE_WIDE", &S::moe_wide},
         {"MOE_RBF", &S::moe_rbf},
+        {"MOE_FUSE", &S::moe_fuse},
+        {"GEMVH_F32", &S::gemvh_f32},
     }};
     return t;
 }
@@ -332,6 +334,9 @@ void loadFlags(const Request& r, const Target& t, Flags& F) {
     F.moe_mxw = flagOr(e.moe_mxw, true);
     F.moe_wide = flagOr(e.moe_wide, false);
     F.moe_rbf = flagOr(e.moe_rbf, true);
+    // feat026-moedec-r1 (was loader.cpp envFlag("MOE_FUSE" / "GEMVH_F32", false)): bitwise A/B, default off
+    F.moe_fuse = flagOr(e.moe_fuse, false);
+    F.gemvh_f32 = flagOr(e.gemvh_f32, false);
     // tune.cpp:852-861
     if (e.fp8) F.fp8_prefill = *e.fp8 != "0";
     if (e.fp8 && *e.fp8 == "0") F.moe_fp8 = false;
@@ -587,7 +592,12 @@ void skipItem(Plan& p, Item it, const std::string& why) {
 }
 
 const char* const k_numerics_switches[] = {"FD_SPLITS", "GEMV_MAX",   "GV_NMAX",  "GV_GROUP", "NO_FUSE", "FLOAT_GEMV",
-                                           "GDN_SEQ",   "NAIVE_ATTN", "DBG",      "ATTN_WIDE", "ATTN_DQ4", "ATTN_WS4", "MOE_BN", nullptr};
+                                           "GDN_SEQ",   "NAIVE_ATTN", "DBG",      "ATTN_WIDE", "ATTN_DQ4", "ATTN_WS4", "MOE_BN",
+                                           nullptr};
+// feat026-moedec(-r1): bitwise by construction (precise MoE fusion, gemvhf); read with envFlag in the loader
+const char* const k_bitwise_switches[] = {"MOE_FUSE", "GEMVH_F32", nullptr};
+
+bool flagOn(std::string_view v) { return v != "0"; }
 
 void noteSwitches(Plan& p, const std::function<std::optional<std::string>(const char*)>& get) {
     for (const char* const* n = k_numerics_switches; *n != nullptr; ++n) {
@@ -595,6 +605,11 @@ void noteSwitches(Plan& p, const std::function<std::optional<std::string>(const 
         if (!v || v->empty()) continue;
         p.overrides.push_back(std::format("WHIRL_{}={}: A/B switch (kernel paths differ from the tested defaults)", *n, *v));
         p.lossy_override = true;
+    }
+    for (const char* const* n = k_bitwise_switches; *n != nullptr; ++n) {
+        const auto v = get(*n);
+        if (!v || !flagOn(*v)) continue;  // off (unset or "0") = the default path: nothing to record
+        p.overrides.push_back(std::format("WHIRL_{}={}: bitwise A/B switch on (other kernels, same bits)", *n, *v));
     }
 }
 

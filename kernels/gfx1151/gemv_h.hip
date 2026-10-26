@@ -412,8 +412,16 @@ __device__ __forceinline__ half16 gh_xchg(half16 v) {
     return __builtin_shufflevector(__builtin_bit_cast(half8, pa), __builtin_bit_cast(half8, pb), 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
 }
 
-template <int T, int TN>
-__device__ __forceinline__ void gemvh_paired_impl(const uint8_t *__restrict__ W, uint64_t row_bytes, const _Float16 *__restrict__ X, float *__restrict__ Y,
+// ld_frag16 of f32 activations: each element rounded to f16 exactly as f32_to_f16 does ((_Float16)v, round to
+// nearest even) - the fused MoE kernel reads the f32 h (feat026)
+__device__ __forceinline__ half16 ld_frag16(const float *p) {
+    const float4 a = ((const float4 *)p)[0], b = ((const float4 *)p)[1], c = ((const float4 *)p)[2], d = ((const float4 *)p)[3];
+    return (half16){(_Float16)a.x, (_Float16)a.y, (_Float16)a.z, (_Float16)a.w, (_Float16)b.x, (_Float16)b.y, (_Float16)b.z, (_Float16)b.w,
+                    (_Float16)c.x, (_Float16)c.y, (_Float16)c.z, (_Float16)c.w, (_Float16)d.x, (_Float16)d.y, (_Float16)d.z, (_Float16)d.w};
+}
+
+template <int T, int TN, typename XT = _Float16>
+__device__ __forceinline__ void gemvh_paired_impl(const uint8_t *__restrict__ W, uint64_t row_bytes, const XT *__restrict__ X, float *__restrict__ Y,
                                            int ncols, int nrows, int n_tok, int accumulate) {
     using D = GhQ<T>;
     using Regs = typename D::Regs;
@@ -432,7 +440,7 @@ __device__ __forceinline__ void gemvh_paired_impl(const uint8_t *__restrict__ W,
     const int row = min(m0 + rl, nrows - 1);
     const uint8_t *rowp = W + (size_t)row * row_bytes;
     float8 acc[TN];
-    const _Float16 *xr[TN];
+    const XT *xr[TN];
 #pragma unroll
     for (int j = 0; j < TN; ++j) {
         acc[j] = (float8){0, 0, 0, 0, 0, 0, 0, 0};
@@ -498,6 +506,80 @@ __device__ __forceinline__ void gemvh_paired_impl(const uint8_t *__restrict__ W,
             }
         }
     }
+    }
+}
+
+// one wave's 16-row tile at row m0 of the paired kind (feat026, for the fused MoE kernel: a copy of gemvh_paired_impl's loop
+// body, kept separate so the existing gemvh kernels' machine code stays identical - scratch\f026 ISA check; kernel test
+// moefuse proves the copy bitwise against f32_to_f16 + gemvh): acc[j] = D[weight row][token] (lane holds token j * 16 + lane % 16,
+// rows m0 + 2 * v + lane / 16); no LDS, no barriers
+template <int T, int TN, typename XT>
+__device__ __forceinline__ void gemvh_paired_tile(const uint8_t *__restrict__ W, uint64_t row_bytes, const XT *__restrict__ X, int ncols,
+                                                  int nrows, int n_tok, int m0, float8 (&acc)[TN]) {
+    using D = GhQ<T>;
+    using Regs = typename D::Regs;
+    constexpr int DEPTH = D::DP, SB_EVERY = D::SBE;
+    const int lane = threadIdx.x % WARP;
+    const int nsb = ncols / (16 * D::UK);
+    const int rl = lane % 16;
+    // lanes r and r + 16 (both hold row r) decode one k-step each of the pair (2m, 2m + 1): role 0 -> step 2m, role 1 -> 2m + 1
+#if defined(WHIRL_GH_ROLE_PARITY)
+    const int role = ((lane & 1) == (lane >> 4)) ? 0 : 1;
+#else
+    const int role = lane >> 4;
+#endif
+    const int row = min(m0 + rl, nrows - 1);
+    const uint8_t *rowp = W + (size_t)row * row_bytes;
+    const XT *xr[TN];
+#pragma unroll
+    for (int j = 0; j < TN; ++j) {
+        acc[j] = (float8){0, 0, 0, 0, 0, 0, 0, 0};
+        const int t = j * 16 + rl;
+        xr[j] = X + (size_t)min(t, n_tok - 1) * ncols;
+    }
+    Regs buf[DEPTH];
+#pragma unroll
+    for (int u = 0; u < DEPTH - 1; ++u)
+        if (u < nsb) D::load(buf[u], rowp, u, role);
+    for (int sb0 = 0; sb0 < nsb; sb0 += DEPTH) {
+#pragma unroll
+        for (int u = 0; u < DEPTH; ++u) {
+            const int sb = sb0 + u;
+            if (sb < nsb) {
+                if (sb + DEPTH - 1 < nsb) D::load(buf[(u + DEPTH - 1) % DEPTH], rowp, sb + DEPTH - 1, role);
+#pragma unroll
+                for (int m = 0; m < D::UK / 2; ++m) {
+                    if (m % (SB_EVERY / 2) == 0) __builtin_amdgcn_sched_barrier(0);
+#if WHIRL_GH_INJECT == 3
+                    const half16 f = D::frag(buf[u], m, role, (sb + 1) & 1);  // test injection: wrong half-superblock phase
+#else
+                    const half16 f = D::frag(buf[u], m, role, sb & 1);
+#endif
+                    // x = the partner lane's step. Both half-waves then hold the SAME A fragment for row r (the documented
+                    // wave32 WMMA layout: lanes 16-31 replicate lanes 0-15), whichever lanes the hardware reads.
+                    const half16 x = gh_xchg(f);
+#if WHIRL_GH_INJECT == 1
+                    const half16 a0 = role ? f : x, a1 = role ? x : f;  // test injection: the two lanes' steps swapped
+#elif WHIRL_GH_INJECT == 4
+                    const half16 a0 = f, a1 = x;  // test injection: the pre-FIX-RC4-B half-waves that differ (P2-1)
+#else
+                    const half16 a0 = role ? x : f, a1 = role ? f : x;
+#endif
+#pragma unroll
+                    for (int j = 0; j < TN; ++j) {
+                        const half16 b0 = ld_frag16(xr[j] + sb * (16 * D::UK) + (2 * m) * 16);
+                        const half16 b1 = ld_frag16(xr[j] + sb * (16 * D::UK) + (2 * m + 1) * 16);
+#if WHIRL_GH_INJECT == 2
+                        acc[j] = WMMA16(a1, b1, acc[j]);  // test injection: k-steps of a pair accumulated out of order
+                        acc[j] = WMMA16(a0, b0, acc[j]);
+#else
+                        acc[j] = WMMA16(a0, b0, acc[j]);
+                        acc[j] = WMMA16(a1, b1, acc[j]);
+#endif
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -619,6 +701,17 @@ GH_ENTRY_X(WHIRL_GH_KIND_IQ4_XS, iq4_xs, QT_IQ4_XS)
 GH_ENTRY_X(WHIRL_GH_KIND_MXFP4, mxfp4, QT_MXFP4)
 GH_ENTRY_X(WHIRL_GH_KIND_IQ4_NL, iq4_nl, QT_IQ4_NL)
 GH_ENTRY_X(WHIRL_GH_KIND_Q3_K, q3_k, QT_Q3_K)
+// feat026: gemvhf* = gemvh* on f32 activations (each rounded to f16 in the B load as f32_to_f16 does), paired kind only
+// (bitwise == every kind: all equal gemm_c0); other types keep f32_to_f16 + gemvh (the host falls back on a null kernel).
+// No gemvhf2 here: the two-token-tile f32 variant needs 256 VGPRs and spills on gfx1151 (n 17..32 keeps f32_to_f16 + gemvh2).
+#define GHF_ENTRY(SUF, T)                                                                                                                    \
+    extern "C" __global__ void __launch_bounds__(32) gemvhf_##SUF(const uint8_t *W, uint64_t row_bytes, const float *X, float *Y, int ncols, \
+                                                                    int nrows, int n_tok, int accumulate) {                                  \
+        gemvh_paired_impl<T, 1, float>(W, row_bytes, X, Y, ncols, nrows, n_tok, accumulate);                                                 \
+    }
+GHF_ENTRY(mxfp4, QT_MXFP4)
+GHF_ENTRY(iq4_xs, QT_IQ4_XS)
+GHF_ENTRY(iq4_nl, QT_IQ4_NL)
 
 // ---- staged (LDS) implementation: f16 and iq3_s weights ----
 template <int T, int TN, int S>

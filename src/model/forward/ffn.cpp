@@ -57,6 +57,67 @@ void Model::ffnBlock(DevPtr post_norm, const Mat& gate_w, const Mat& up, const M
     matmul(down, ffn_g, x, n, true);
 }
 
+// feat026-moedec (kernel technique audit gap #4, research-moedec L1 + L3): the precise decode MoE tail as
+//   moe_gus*_f_mxfp4 (routed gate/up + SwiGLU -> moe_g; shared gate/up gemvh tiles + SwiGLU -> x16 f16, beside the
+//   routed blocks) -> gemmF16(sd, x16) -> moe_down_f
+// instead of moe_gu_f, f32_to_f16, gemvh x2, silu_mul, f32_to_f16, gemvh, silu_mul, moe_down_f (8 launches -> 3, the
+// shared expert off the critical path). Bitwise the same: every block runs the replaced kernels' code (kernels/
+// moe_fused.hip). Taken only where the old chain would run exactly the replaced kernels (ops::chooseMoeFuse);
+// WHIRL_MOE_FUSE (the plan's nf().moe_fuse) enables it (default off until the GPU A/B, progress/tools/feat026_ab.ps1). false: not taken.
+bool Model::moeFusedPrecise(const ops::MoePlan& pl, const Mat& sg, const Mat& su, const Mat& sd, const MoeW& mo, DevPtr ysh, u32 n) {
+    if (!nf().moe_fuse) return false;
+    ops::MoeFuseProblem fp;
+    fp.n = n;
+    fp.C = cfg.n_embd;
+    fp.F = cfg.n_ff_exp;
+    fp.K = cfg.n_expert_used;
+    fp.gate_ty = mo.gate.ty;
+    fp.up_ty = mo.up.ty;
+    fp.gate_rb = mo.gate.row_bytes;
+    fp.up_rb = mo.up.row_bytes;
+    fp.shared = ysh != 0;
+    if (fp.shared) {
+        // the old chain: matmulGroup -> (precise: never the grouped int8 GEMV) matmul -> f32_to_f16 + gemmF16 (gemvh)
+        const bool grouped = nf().gv_group && k.gv_grp && n <= gvMax() && !nf().float_gemv &&
+                             ops::preciseAllows(ops::BitClass::q8_row, nf().prec_dec, n, gvMax());
+        auto f16Path = [&](const Mat& w) { return ops::chooseMatmulPath(matShape(w), n, matmulFlags(), k) == ops::MatmulPath::gemm_f16; };
+        auto gemvhPath = [&](const Mat& w) {
+            return f16Path(w) && ops::chooseGemmF16(matShape(w), n, w.tune[tuneBucket(n)], gemmFlags(), k).kind == ops::GemmKind::gemvh;
+        };
+        fp.shared_gemvh = !grouped && gemvhPath(sg) && gemvhPath(su) && f16Path(sd) && sg.ptr != output.ptr && su.ptr != output.ptr;
+        fp.sg_ty = sg.ty;
+        fp.su_ty = su.ty;
+        fp.sg_rb = sg.row_bytes;
+        fp.su_rb = su.row_bytes;
+        fp.sg_nrows = sg.nrows;
+        fp.su_nrows = su.nrows;
+        fp.sg_ncols = sg.ncols;
+        fp.su_ncols = su.ncols;
+        if (fp.shared && sg.nrows != cfg.n_ff) fp.shared_gemvh = false;  // ffn_g / x16 sized by n_ff
+    }
+    const ops::MoeFusePlan f = ops::chooseMoeFuse(fp, true, pl, k);
+    if (!f.use) return false;
+    const u32 E = cfg.n_embd, K = cfg.n_expert_used, F = cfg.n_ff_exp;
+    hip::launch(f.f, f.grid, D(256), 0, stream, mo.gate.ptr, mo.up.ptr, mo.gate.row_bytes, I(F), I(f.nrb), h, moe_ids, moe_g, I(E), I(K),
+                fp.shared ? sg.ptr : DevPtr{0}, fp.shared ? su.ptr : DevPtr{0}, fp.shared ? sg.row_bytes : u64{0}, I(fp.shared ? sg.nrows : 0),
+                I(f.nsb), x16, I(n));
+    if (prof) prof->matmul_bytes += (mo.gate.row_bytes + mo.up.row_bytes) * F * n * K + (fp.shared ? (sg.row_bytes * sg.nrows + su.row_bytes * su.nrows) : 0);
+    xq_src = 0;
+    x16_src = 0;  // x16 now holds the shared expert's f16 activations (not a registered copy of any f32 buffer)
+    mark(OpClass::matmul);
+    if (fp.shared) {
+        gemmF16(sd, x16, ysh, n, 0);
+        if (prof) prof->matmul_bytes += sd.row_bytes * sd.nrows;
+        mark(OpClass::matmul);
+    }
+    hip::launch(pl.down, pl.down_grid, D(256), 0, stream, mo.down.ptr, mo.down.row_bytes, I(E), moe_g, moe_ids, moe_w, moe_sg, ysh, x, I(F), I(K));
+    if (prof) prof->matmul_bytes += mo.down.row_bytes * E * n * K;
+    xq_src = 0;
+    x16_src = 0;
+    mark(OpClass::matmul);
+    return true;
+}
+
 // Post-attention norm + MoE FFN (qwen35moe) on x, residual added into x:
 // softmax router -> top-K experts (weights renormalized) plus the shared
 // expert scaled by sigmoid(sh_gate . h). Small n: int8 GEMVs over the selected
@@ -127,6 +188,8 @@ void Model::moeBlock(DevPtr post_norm, const Mat& sg, const Mat& su, const Mat& 
     }
     const DevPtr ysh = mo.sh_gate != 0 ? moe_ysh : 0;
     if (small && nf().prec_dec) {
+        // feat026-moedec: routed + shared gate/up + SwiGLU in one launch (bitwise the chain below; WHIRL_MOE_FUSE=1)
+        if (moeFusedPrecise(pl, sg, su, sd, mo, ysh, n)) return;
         // precise decode experts: f32 h (no int8 / f16 rounding), f32 accumulation, every
         // pair on its own waves (a token's result does not depend on the batch)
         if (!pl.gu_split) {
