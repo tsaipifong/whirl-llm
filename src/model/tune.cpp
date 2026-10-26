@@ -844,6 +844,11 @@ whirl::numerics::Request numericsRequest(const Model& m, const whirl::config::En
     return r;
 }
 
+void applyLoadFlags(Model& m) {
+    const auto env_p = whirl::config::snapshotOf(m);
+    whirl::numerics::loaderFlags(numericsRequest(m, *env_p), m.num_plan.flags);
+}
+
 namespace {
 void loadOrTuneImpl(Model& m, const std::string& model_path, std::string& log);
 }  // namespace

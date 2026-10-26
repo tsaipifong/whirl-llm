@@ -2589,6 +2589,72 @@ void testPlanVsLoadOrTune() {
     }
 }
 
+// arch025-N2b-r2: the flags a load decides without loadOrTune (whirl selftest / dflash-check call Model::load only).
+// Before N2b the loader set fp8_prefill / moe_fp8 / moe_mxw / moe_wide / moe_rbf on every load (loader.cpp:537-540,
+// :730); N2b left them at the Flags defaults (fp8_prefill = moe_fp8 = true) until loadOrTune, so precise selftest ran
+// the fp8 GEMM on the R9700. q::applyLoadFlags is the step Model::load runs; the expected values are the pre-N2b
+// loader's rules, written out here (envFlag: not set -> default, else value != "0"); WHIRL_FP8 is not applied at load.
+void testLoadFlagsWithoutTune() {
+    namespace nu = whirl::numerics;
+    using whirl::config::EnvSnapshot;
+    using Vars = std::vector<std::pair<std::string, std::string>>;
+    const auto envOn = [](const Vars& vs, const char* n, bool def) {
+        for (const auto& [k, v] : vs)
+            if (k == n) return v != "0";
+        return def;
+    };
+    const std::vector<Vars> envs = {{},
+                                    {{"MOE_FP8", "1"}},
+                                    {{"MOE_FP8", "0"}},
+                                    {{"MOE_FP8", ""}},
+                                    {{"MOE_MXW", "0"}},
+                                    {{"MOE_WIDE", "1"}},
+                                    {{"MOE_RBF", "0"}},
+                                    {{"FP8", "1"}},
+                                    {{"FP8", "0"}},
+                                    {{"FP8", "0"}, {"MOE_FP8", "1"}},
+                                    {{"MOE_FP8", "auto"}, {"MOE_MXW", "1"}, {"MOE_WIDE", "0"}, {"MOE_RBF", "1"}}};
+    std::size_t n = 0;
+    for (const char* mode : {"precise", "balance", "fast"})
+        for (const bool moe : {false, true})
+            for (const Vars& vs : envs) {
+                ++n;
+                std::string id = std::string(mode) + (moe ? " moe" : " dense");
+                for (const auto& [k, v] : vs) id += " WHIRL_" + k + "=" + v;
+                auto m = envtab::makeModel(moe ? 3 : 1);
+                m->num_req = nu::forModel(nu::parseMode(mode, "test"), moe);
+                std::vector<std::pair<std::string, EnvSnapshot::Value>> vals;
+                for (const auto& [k, v] : vs) vals.emplace_back(k, EnvSnapshot::Value(v));
+                m->env_snap = std::make_shared<const EnvSnapshot>(EnvSnapshot::fromValues(vals));
+                q::applyLoadFlags(*m);
+                const nu::Flags& f = m->nf();
+                const bool has_fp8 = m->num_req.has(nu::Item::fp8), has_moefp8 = m->num_req.has(nu::Item::moefp8);
+                check(f.fp8_prefill == has_fp8, "n2b-r2 load flags: " + id + ": fp8_prefill == item fp8 (WHIRL_FP8 not applied at load)");
+                check(f.moe_fp8 == envOn(vs, "MOE_FP8", has_moefp8), "n2b-r2 load flags: " + id + ": moe_fp8");
+                check(f.moe_mxw == envOn(vs, "MOE_MXW", true), "n2b-r2 load flags: " + id + ": moe_mxw");
+                check(f.moe_wide == envOn(vs, "MOE_WIDE", false), "n2b-r2 load flags: " + id + ": moe_wide");
+                check(f.moe_rbf == envOn(vs, "MOE_RBF", true), "n2b-r2 load flags: " + id + ": moe_rbf");
+                // precise requests no lossy item, so its load runs without fp8 GEMM / MoE fp8 unless WHIRL_MOE_FP8 asks
+                const bool lossy = std::string_view(mode) != "precise";
+                if (!lossy) check(!has_fp8 && !has_moefp8, "n2b-r2 load flags: " + id + ": precise has no item fp8 / moefp8");
+                if (!lossy && vs.empty())
+                    check(!f.fp8_prefill && !f.moe_fp8, "n2b-r2 load flags: " + id + ": precise load: fp8_prefill == false, moe_fp8 == false");
+                // every other flag keeps its default (the load decides only these five)
+                nu::Flags rest = f, dflt{};
+                rest.fp8_prefill = dflt.fp8_prefill;
+                rest.moe_fp8 = dflt.moe_fp8;
+                rest.moe_mxw = dflt.moe_mxw;
+                rest.moe_wide = dflt.moe_wide;
+                rest.moe_rbf = dflt.moe_rbf;
+                check(rest == dflt, "n2b-r2 load flags: " + id + ": no other flag set at load");
+                // plan() starts from the same rules (loadFlags), before WHIRL_FP8 / its own overrides
+                nu::Flags viaPlanRule{};
+                nu::loaderFlags(q::numericsRequest(*m, *m->env_snap), viaPlanRule);
+                check(viaPlanRule == f, "n2b-r2 load flags: " + id + ": numerics::loaderFlags == applyLoadFlags");
+            }
+    std::printf("  n2b-r2 load flags without loadOrTune: %zu cases\n", n);
+}
+
 // arch025-M1: qwen35::WeightLoader (src/model/qwen35/weights.cpp) on the CPU. Host memory stands behind the device
 // pointers (NullBackend DevBufs, upload = memcpy), each tensor of a TinyModel file gets its own byte pattern, so the
 // binding table checks name -> field by content, the Mat fields against the tensor, the allocation sizes in upload
@@ -3143,6 +3209,7 @@ int main() {
     testEnvSnapshot();
     testForwardEnv();
     testPlanVsLoadOrTune();  // arch025-N2a
+    testLoadFlagsWithoutTune();  // arch025-N2b-r2
     testFloatGemvDispatch();
     testArchWhitelist();
     testLoadEstimate();

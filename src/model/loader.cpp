@@ -323,8 +323,10 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
     // MXFP4 routed experts: process-level switches (as WHIRL_KV), read by CLI and server alike
     // per-model-type request (numerics::forModel; MoE balance = dense balance items since MODES-MXFP4)
     m.num_req = numerics::forModel(opt.numerics, cfg.moe);
-    // (arch025-N2b: moe_fp8 / moe_mxw / moe_wide / moe_rbf are numerics::plan's, in loadOrTune: WHIRL_MOE_FP8 / _MXW /
-    // _WIDE / _RBF from this load's snapshot; nothing reads them before loadOrTune)
+    // fp8_prefill / moe_fp8 / moe_mxw / moe_wide / moe_rbf on every load (arch025-N2b-r2: numerics::loaderFlags, the rules
+    // that were here and at the fp8_prefill line below before N2b; WHIRL_MOE_FP8 / _MXW / _WIDE / _RBF from this load's
+    // snapshot). selftest / dflash-check run with these; loadOrTune's plan sets every flag again (WHIRL_FP8 there).
+    applyLoadFlags(m);
     m.layers.resize(cfg.n_layer);
     m.kcache.assign(cfg.n_layer, 0);
     m.vcache.assign(cfg.n_layer, 0);
@@ -458,7 +460,7 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
     // GDN prefill x16b (fp8 rows + f16 rows from one norm) must fit in x16 for any batch > 16
     if (B > 16 && m.x16bOff() + B * cfg.n_embd * 2 > m.x16_bytes) throw ModelError("X16bOverflow");
     m.sx8 = m.alloc(B * 4);
-    // (arch025-N2b: fp8_prefill is numerics::plan's, in loadOrTune: the item fp8, WHIRL_FP8 overrides)
+    // (fp8_prefill: applyLoadFlags above, arch025-N2b-r2; WHIRL_FP8 overrides in loadOrTune)
     if (cfg.moe) {
         const u64 Kx = cfg.n_expert_used;
         const u64 F = cfg.n_ff_exp;

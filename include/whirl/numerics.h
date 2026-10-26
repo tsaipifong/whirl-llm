@@ -303,6 +303,12 @@ struct Plan {
 // overrides afterwards until N2b). Throws std::invalid_argument / std::out_of_range where loadOrTune threw
 // (WHIRL_RELAX_K / _ALPHA / _EPS / _DELTA that std::stoul / std::stof reject, with relaxacc on).
 Plan plan(const Request& r, const Target& t);
+// arch025-N2b-r2: the five flags every load decides (Model::load, before loadOrTune; before N2b loader.cpp:537-540 and
+// :730): fp8_prefill = the item fp8; moe_fp8 = WHIRL_MOE_FP8 (r.env) else the item moefp8; moe_mxw / moe_wide / moe_rbf =
+// WHIRL_MOE_MXW / _WIDE / _RBF else true / false / true. WHIRL_FP8 is not applied here (plan() applies it in loadOrTune, as
+// before N2b). plan() starts from these rules (loadFlags), so a command without loadOrTune (selftest, dflash-check) and
+// one with it see the same load-time values. r: a per-model-type request (forModel), as Model::num_req.
+void loaderFlags(const Request& r, Flags& F);
 // arch025-N2b: the front end's after-load knobs (the CLI's applyRuntimeEnv, the server's knob block) on a plan made with
 // Front::none: the same rules plan() applies for r.front / r.runtime (plan(r) with a front == plan(r without) then this).
 // k_gdn_v0 = Target::k_gdn_v0. Front::none: no change.
