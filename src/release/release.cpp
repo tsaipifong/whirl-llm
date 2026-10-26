@@ -368,7 +368,7 @@ constexpr EnvDoc k_env[] = {
     {"Speculative decoding (output always equals plain greedy)", "NGRAM_FORCE=1", "take every n-gram proposal", C | B | S},
     {"Speculative decoding (output always equals plain greedy)", "NGRAM_DEBUG=1", "log every decode cycle to stderr", C | B},
 
-    {"Server", "CYCLE_SYNC=N", "decode cycle wait (developers, A/B; same output in every setting): 0 as before, 1 one wait per cycle for the sampling / relaxacc readbacks (pinned staging), 2 poll the cycle-end event instead of the runtime wait (not with SPEC_ACC >= 2), 3 both", S},
+    {"Server", "CYCLE_SYNC=N", "decode cycle wait (developers, A/B; same output in every setting): 0 as before, 1 one wait per cycle for the sampling / relaxacc readbacks (pinned staging), 2 poll the cycle-end event instead of the runtime wait, the control words come with it (no blocking call left; not with SPEC_ACC >= 2), 3 both", S},
     {"Server", "NO_PREFIX_CACHE=1", "disable the prefix cache", S},
     {"Server", "PREFIX_CACHE_VERIFY=1", "diagnostic: re-prefill after every cache hit and compare", S},
     {"Server", "COLD_RESUME=0|1", "resume only from checkpoints bitwise equal to a cold prefill (default: on in --precise, off otherwise)", S},

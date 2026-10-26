@@ -100,9 +100,9 @@ public:
         // feat026-acc: slot cycles decided on the device, compared with the host loop (WHIRL_SPEC_ACC=check) and
         // disagreeing; next-cycle row tables compared / disagreeing
         std::uint64_t acc_dev = 0, acc_checked = 0, acc_mismatch = 0, tab_checked = 0, tab_mismatch = 0;
-        // feat026-hostgap (WHIRL_CYCLE_SYNC): cycles waited by polling the cycle-end event; readbacks folded into the
-        // cycle's one wait (each would have been a blocking download)
-        // cycles waited by polling, readbacks folded, decode cycles run
+        // feat026-hostgap (WHIRL_CYCLE_SYNC): cycles waited by polling the cycle-end event (no blocking call left in
+        // that wait); readbacks folded into the cycle's one wait (each would have been a blocking download); decode
+        // cycles run (monotonic)
         std::uint64_t cyc_spin = 0, cyc_folded = 0, decode_cycles = 0;
     };
 

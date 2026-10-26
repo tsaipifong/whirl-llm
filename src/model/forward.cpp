@@ -1356,6 +1356,8 @@ void Model::readCtlPinned(std::span<i32> dst) {
     hip::streamSync(stream);
 }
 
+void Model::readCtlAsync(std::span<i32> dst) { hip::downloadAsync(dst.data(), out_tok, dst.size() * 4, stream); }
+
 void Model::readSpecTab(SpecNextTab& t) {
     if (spec_tab == 0) {
         t = SpecNextTab{};

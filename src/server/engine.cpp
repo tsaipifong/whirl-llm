@@ -201,6 +201,8 @@ void Engine::allocState() {
              "acceptance eps {:.2f} delta {:.2f} - output differs from exact speculative decoding",
              opt_.relax.topk(), opt_.relax.alpha, opt_.relax.eps, opt_.relax.delta);
     }
+    if (opt_.cycle_sync > 3u)
+        logW("WHIRL_CYCLE_SYNC={}: only bits 0 (fold) and 1 (spin) exist; using {}", opt_.cycle_sync, opt_.cycle_sync & 3u);
     opt_.cycle_sync &= 3u;
     if (opt_.cycle_sync != 0) {
         // feat026-hostgap: pinned staging for the folded readbacks, one event for the cycle-end wait
@@ -212,9 +214,16 @@ void Engine::allocState() {
                 std::memset(relax_pin_.get(), 0, relax_host_.size());
             }
         }
+        if ((opt_.cycle_sync & 2u) && opt_.spec_acc < 2 && !ctl_pin_) {
+            // feat026-hostgap-r1: spin reads the control words through pinned memory too (async copy before the
+            // polled event); with WHIRL_SPEC_ACC=0 readCycleCtl still uses ctl_host_ (it checks spec_acc first)
+            const std::uint64_t cb = static_cast<std::uint64_t>(opt_.parallel) * qwen35::ctl_words * 4;
+            ctl_pin_ = device::PinnedBuf::alloc(ops_, cb);
+            std::memset(ctl_pin_.get(), 0, cb);
+        }
         cyc_ev_ = device::EventH::create(ops_);
         logI("decode: WHIRL_CYCLE_SYNC={} (fold readbacks into one wait {}, spin wait {}{})", opt_.cycle_sync,
-             (opt_.cycle_sync & 1u) ? "on" : "off", (opt_.cycle_sync & 2u) ? "on" : "off",
+             (opt_.cycle_sync & 1u) ? "on" : "off", (opt_.cycle_sync & 2u) ? "on, control words with the polled event" : "off",
              (opt_.cycle_sync & 2u) && opt_.spec_acc >= 2 ? " - not with WHIRL_SPEC_ACC >= 2, the runtime wait stays" : "");
     }
     spec_on_ = opt_.spec_sample && opt_.use_mtp && m_.draftSampleOk() && !opt_.relax.on;
@@ -1835,7 +1844,9 @@ void Engine::decodeCycle(std::span<Slot* const> act_in) {
     const TimePoint t_enq = Clock::now();
     // feat026-hostgap: folded readbacks + spin wait (WHIRL_CYCLE_SYNC; 0 = the two downloads below, as before)
     const std::uint32_t folded = cycleWaitBegin(any_sampling, any_relax);
-    const std::int32_t* ctl_all = readCycleCtl(acc_dev ? &aa : nullptr);
+    // bit 3: the control words came with the polled event (spin, WHIRL_SPEC_ACC < 2, so no device accept here)
+    const std::int32_t* ctl_all = (folded & 8u) ? static_cast<const std::int32_t*>(ctl_pin_.get())
+                                                : readCycleCtl(acc_dev ? &aa : nullptr);
     if (p) {
         p->t_ready = Clock::now();
         p->enq_ms[pa] += std::chrono::duration<double, std::milli>(t_enq - tc0).count();
@@ -2172,7 +2183,8 @@ const std::int32_t* Engine::readCycleCtl(const SpecAccArgs* aa) {
 }
 
 // feat026-hostgap (WHIRL_CYCLE_SYNC). Called after the cycle's last enqueue and before readCycleCtl. Returns
-// the folded readbacks: bit 0 sampling candidates (samp_dev_), bit 1 relaxacc top-k (relax_dev_).
+// the folded readbacks: bit 0 sampling candidates (samp_dev_), bit 1 relaxacc top-k (relax_dev_); bit 2 the event is
+// recorded; bit 3 (spin) the control words are in ctl_pin_ already, readCycleCtl must not run (feat026-hostgap-r1).
 std::uint32_t Engine::cycleWaitBegin(bool any_sampling, bool any_relax) {
     if (opt_.cycle_sync == 0 || !cyc_ev_) return 0;
     std::uint32_t folded = 0;
@@ -2190,6 +2202,13 @@ std::uint32_t Engine::cycleWaitBegin(bool any_sampling, bool any_relax) {
     }
     const bool spin = (opt_.cycle_sync & 2u) != 0 && opt_.spec_acc < 2;
     if (folded == 0 && !spin) return 0;
+    if (spin && ctl_pin_) {
+        // feat026-hostgap-r1: the control words too, so after the poll nothing blocking is left (the readCtl copy
+        // would be a new submission with the runtime's own wait: the latency the spin is there to remove).
+        // llama.cpp / ggml: every output by tensor_get_async, then one wait; WHIRL CLI: pinned ring + event.
+        const std::size_t words = slots_.size() * qwen35::ctl_words;
+        if (m_.readCtlAsync(std::span<std::int32_t>(static_cast<std::int32_t*>(ctl_pin_.get()), words))) folded |= 8u;
+    }
     ops_.eventRecord(cyc_ev_.get(), m_.stream());
     if (spin) {
         // poll instead of the runtime's wait (llama.cpp: cudaDeviceScheduleSpin on its iGPU; hipfire HIPFIRE_HIP_WAIT);

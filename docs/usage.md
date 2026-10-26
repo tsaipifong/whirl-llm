@@ -556,7 +556,7 @@ The output always equals plain greedy decoding (with sampling: the same distribu
 
 | Variable | Meaning |
 |---|---|
-| `WHIRL_CYCLE_SYNC=N` | how a decode cycle waits for the GPU (same output in every setting): 0 as before (default); 1 the sampling / relaxacc readbacks share the cycle's one wait (pinned staging); 2 poll the cycle-end event instead of the runtime's wait (not with `WHIRL_SPEC_ACC` 2-4); 3 both *(A/B)* |
+| `WHIRL_CYCLE_SYNC=N` | how a decode cycle waits for the GPU (same output in every setting): 0 as before (default); 1 the sampling / relaxacc readbacks share the cycle's one wait (pinned staging); 2 poll the cycle-end event instead of the runtime's wait; the control words come with that event (async copy into pinned memory), so no blocking call is left in the wait (not with `WHIRL_SPEC_ACC` 2-4); 3 both *(A/B)* |
 | `WHIRL_NO_PREFIX_CACHE=1` | disable the prefix cache |
 | `WHIRL_PREFIX_CACHE_VERIFY=1` | re-prefill after every cache hit and compare *(diagnostic)* |
 | `WHIRL_COLD_RESUME=0\|1` | resume a cached conversation only from checkpoints that are bitwise equal to a cold prefill (default: on in `--precise`, off otherwise; `0` in precise restores the faster but not bitwise 0.2.1 behaviour) |

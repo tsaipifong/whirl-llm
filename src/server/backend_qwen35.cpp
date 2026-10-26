@@ -109,6 +109,10 @@ public:
     std::uint32_t verifyBatchEnqueue(std::span<const VSeg> segs) override { return m_.verifyBatchEnqueue(segs); }
     void readCtl(std::span<std::int32_t> dst) override { m_.readCtl(dst); }
     void readCtlPinned(std::span<std::int32_t> dst) override { m_.readCtlPinned(dst); }
+    bool readCtlAsync(std::span<std::int32_t> dst) override {
+        m_.readCtlAsync(dst);
+        return true;
+    }
     bool specAcceptOk() const override { return m_.k.spec_accept_rows != nullptr; }
     void specAccept(const SpecAccArgs& a, std::int32_t* host) override {
         m_.specAcceptEnqueue(a, static_cast<DevPtr>(reinterpret_cast<std::uintptr_t>(host)));

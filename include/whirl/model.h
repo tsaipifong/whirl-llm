@@ -851,6 +851,8 @@ public:
     bool specAcceptEnqueue(const SpecAccArgs& a, DevPtr host);
     // control areas into pinned host memory: async copy on the work stream + stream sync (no staged copy)
     void readCtlPinned(std::span<std::int32_t> dst);
+    // feat026-hostgap-r1: the same copy without the sync (the caller waits on an event recorded after it)
+    void readCtlAsync(std::span<std::int32_t> dst);
     // the SpecNextTab of the last specAcceptEnqueue (blocking; checks / tests)
     void readSpecTab(SpecNextTab& t);
     DevPtr spec_tab = 0;
