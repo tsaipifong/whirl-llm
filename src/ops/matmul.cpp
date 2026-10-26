@@ -197,6 +197,16 @@ GemmPlan chooseGemmF16(const MatShape& w, std::uint32_t n, std::uint8_t tuned, c
         p.grid = Dim3{(n + 255) / 256, (w.nrows + 127) / 128, 1};
         return p;
     }
+    if (choice >= G && w.ty == GgmlType::mxfp4 && f.fdq > 0 && static_cast<std::size_t>(f.fdq) <= k.gemmfq.size() && !f.out_h16 &&
+        n >= f.fdq_min && w.ncols % 256 == 0 && w.row_bytes % 8 == 0 && k.gemmfq[f.fdq - 1] != nullptr) {
+        // feat026-fdq: dequant fused into the f16 GEMM on gfx1151 (bitwise == dequant_f16 + gemm_cN_f16)
+        const kernels::GemmCfg fc = kernels::kGemmFqCfgs[static_cast<std::size_t>(f.fdq - 1)];
+        p.kind = GemmKind::gemmfq;
+        p.f = k.gemmfq[f.fdq - 1];
+        p.grid = Dim3{static_cast<unsigned>((n + fc.bn - 1) / fc.bn), static_cast<unsigned>((w.nrows + fc.bm - 1) / fc.bm), 1};
+        p.block = D(fc.nth);
+        return p;
+    }
     std::uint64_t wrb = w.row_bytes;
     GgmlType wty = w.ty;
     if (choice >= G && w.ty != GgmlType::f16) {

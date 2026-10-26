@@ -2245,7 +2245,9 @@ void testEnvSnapshot() {
     // envFlag sites (loader.cpp MOE_*), capture / fromValues above for the raw value of the others
     const std::vector<std::string> covered = envtab::namesCovered();
     const char* const load_only[] = {"GEMV_BITWISE_FLOAT", "CODE_OBJECT", "MOE_MXW", "MOE_WIDE", "MOE_RBF", "GPU_SHARE", "GPU_WAIT", "DEVICE", "DFLASH_PROF",
-                                     "HEAD_GEMVX", "PREC_GEMVH", "PREC_GS"};  // the last three: Model::load -> forwardEnv (testForwardEnv)
+                                     "HEAD_GEMVX", "PREC_GEMVH", "PREC_GS",
+                                     "FDQ8S", "FDQ8S_MIN"};  // HEAD_GEMVX..PREC_GS: Model::load -> forwardEnv (testForwardEnv);
+                                                              // FDQ8S / _MIN: Model::load -> fdqEnv (testFdqEnv)
     for (const auto& e : names) {
         const bool in_table = std::find(covered.begin(), covered.end(), e.name) != covered.end();
         const bool in_empty = std::find(empty_names.begin(), empty_names.end(), e.name) != empty_names.end();
@@ -2300,6 +2302,48 @@ bool oldHeadGemvx(const char* v) {  // envFlag("HEAD_GEMVX", false)
 bool oldPrecGemvh(const char* v) { return v == nullptr || *v != '0'; }
 int oldPrecGs(const char* v) { return v != nullptr && *v != 0 ? std::atoi(v) : -1; }
 }  // namespace f7
+
+// arch025-port-gemv: feat026-fdq's WHIRL_FDQ8S / _MIN reads (forward.cpp gemmFlags of feat026-fdq 90d5cf7, function-local
+// statics) moved to Model::load (fdqEnv on the load's snapshot). Oracle: the source branch's two lambdas, verbatim except
+// that the getenv result is the argument; checked on a value table, injected and through the process environment.
+namespace fdqo {
+int oldFdq(const char* v) {
+    if (v == nullptr || *v == 0) return 0;
+    for (std::size_t i = 0; i < kernels::kGemmFqNames.size(); ++i)
+        if (std::strcmp(v, kernels::kGemmFqNames[i]) == 0) return static_cast<int>(i) + 1;
+    const int i = std::atoi(v);
+    return i >= 1 && i <= static_cast<int>(kernels::kGemmFqNames.size()) ? i : 0;
+}
+std::uint32_t oldFdqMin(const char* v) { return v != nullptr && *v != 0 ? static_cast<std::uint32_t>(std::strtoul(v, nullptr, 10)) : 1025u; }
+}  // namespace fdqo
+
+void testFdqEnv() {
+    using whirl::config::EnvSnapshot;
+    using V = EnvSnapshot::Value;
+    const char* const vals[] = {nullptr, "", "0", "1", "2", "5", "6", "-1", "c2", "t2", "c2l", "t2l", "c2f", "C2", "c2 ", "3x", "abc", "2048", "99999999999"};
+    std::size_t n = 0;
+    for (const char* a : vals)
+        for (const char* b : vals) {
+            std::vector<std::pair<std::string, V>> in;
+            if (a) in.push_back({"FDQ8S", V(a)});
+            if (b) in.push_back({"FDQ8S_MIN", V(b)});
+            const q::FdqEnv fe = q::fdqEnv(EnvSnapshot::fromValues(in));
+            check(fe.fdq == fdqo::oldFdq(a) && fe.fdq_min == fdqo::oldFdqMin(b),
+                  std::format("fdq env: snapshot FDQ8S={} FDQ8S_MIN={} = the feat026-fdq reads", a ? a : "(unset)", b ? b : "(unset)"));
+            ++n;
+        }
+    check(n == std::size(vals) * std::size(vals), "fdq env: table size");
+    // through the process environment (non-empty values; "" removes the variable): capture -> fdqEnv == getenv -> old
+    for (const char* v : vals) {
+        if (v != nullptr && *v == 0) continue;
+        for (const char* name : {"WHIRL_FDQ8S", "WHIRL_FDQ8S_MIN"}) _putenv_s(name, v ? v : "");
+        const q::FdqEnv fe = q::fdqEnv(EnvSnapshot::capture());
+        const char* a = std::getenv("WHIRL_FDQ8S");
+        const char* b = std::getenv("WHIRL_FDQ8S_MIN");
+        check(fe.fdq == fdqo::oldFdq(a) && fe.fdq_min == fdqo::oldFdqMin(b), std::format("fdq env: process env {} = the feat026-fdq reads", v ? v : "(unset)"));
+    }
+    for (const char* name : {"WHIRL_FDQ8S", "WHIRL_FDQ8S_MIN"}) _putenv_s(name, "");
+}
 
 void testForwardEnv() {
     namespace fs = std::filesystem;
@@ -2562,6 +2606,8 @@ void testPlanVsLoadOrTune() {
         {"GEMV_R", "config.cpp applyGemvEnv: tune rows (needs the GPU dump)"},
         {"GEMV_W", "config.cpp applyGemvEnv: tune rows (needs the GPU dump)"},
         {"GEMV_WH", "config.cpp applyGemvEnv: tune rows (needs the GPU dump)"},
+        {"FDQ8S", "loader.cpp Model::load -> fdqEnv: bit-neutral gemmfq slot (feat026-fdq)"},
+        {"FDQ8S_MIN", "loader.cpp Model::load -> fdqEnv: gemmfq row threshold (feat026-fdq)"},
         {"GPU_SHARE", "device.cpp: GPU lock"},
         {"GPU_WAIT", "device.cpp: GPU lock"},
         {"DEVICE", "device.cpp: GPU selection"},
@@ -2596,6 +2642,7 @@ int main() {
     testEnvTable();
     testEnvSnapshot();
     testForwardEnv();
+    testFdqEnv();  // arch025-port-gemv (feat026-fdq)
     testPlanVsLoadOrTune();  // arch025-N2a
     testFloatGemvDispatch();
     testArchWhitelist();

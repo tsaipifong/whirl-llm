@@ -203,6 +203,9 @@ void Model::gemmF16(const Mat& w, DevPtr x16in, DevPtr y, u32 n, i32 acc) {
         case ops::GemmKind::gemmhq:
             hip::launch(p.f, p.grid, p.block, 0, stream, w.ptr, w.row_bytes, x16in, y, ncols, nrows, I(n), acc);
             return;
+        case ops::GemmKind::gemmfq:
+            hip::launch(p.f, p.grid, p.block, 0, stream, w.ptr, w.row_bytes, x16in, y, ncols, nrows, I(n), acc);
+            return;
         default:
             break;
     }
@@ -234,6 +237,10 @@ ops::GemmFlags Model::gemmFlags() const {
     f.gemvh_cap = device::profile(arch).gemvh_grid_by_rows ? kernels::gemvhCap() : 0;
     f.gemms_tie_larger_bm = device::profile(arch).gemms_tie_larger_bm;
     f.gv_max = gvMax();
+    // feat026-fdq: WHIRL_FDQ8S / WHIRL_FDQ8S_MIN, parsed once per load (fdqEnv, config.cpp; the source branch read them
+    // into function-local statics here, arch025-port-gemv moved them like arch025-F7 did PREC_GS)
+    f.fdq = fdq;
+    f.fdq_min = fdq_min;
     return f;
 }
 

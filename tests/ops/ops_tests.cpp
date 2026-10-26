@@ -315,6 +315,34 @@ void testOpsGemm() {
     CHECK(nameOf(ops::chooseGemm8(4096, 512, true, false, k).f) == "gemm8h_c0");
     CHECK(nameOf(ops::chooseGemm8(4096, 40, true, true, k).f) == "gemm8t_c4");  // no gemm8th: the plain tiled one
     CHECK(ops::gemm8Cfg(64) == 3 && ops::gemm8Cfg(65) == 1 && ops::gemm8Cfg(257) == 0 && ops::gemm8tCfg(48) == 4 && ops::gemm8tCfg(193) == 0);
+    // feat026-fdq: WHIRL_FDQ8S runs the fused MXFP4 slot for dequant choices only (MXFP4, n >= fdq_min, no f16 out,
+    // kernel present); off (default) or any other case keeps the old dequant + f16 GEMM plan
+    {
+        auto mx = mat(GgmlType::mxfp4, 17408, 5120);
+        mx.row_bytes = 5120 / 256 * 136;
+        kn::KernelTable kf = gemmTable(true, true, false);
+        for (std::size_t i = 0; i < kn::kGemmFqCfgs.size(); ++i) kf.gemmfq[i] = tag(std::string("gemmfq_") + kn::kGemmFqNames[i] + "_mxfp4");
+        const std::uint8_t deq2 = static_cast<std::uint8_t>(G + 2);
+        ops::GemmFlags fq = bal;
+        auto q = ops::chooseGemmF16(mx, 2048, deq2, fq, kf);  // fdq = 0: the old plan
+        CHECK(q.kind == ops::GemmKind::gemmc && q.dequant && nameOf(q.f) == "gemm_c2_" + std::to_string(static_cast<int>(GgmlType::f16)));
+        fq.fdq = 1;
+        q = ops::chooseGemmF16(mx, 2048, deq2, fq, kf);
+        CHECK(q.kind == ops::GemmKind::gemmfq && !q.dequant && nameOf(q.f) == "gemmfq_c2_mxfp4" && q.grid.x == 16 && q.grid.y == 68 && q.block.x == 256);
+        fq.fdq = 2;
+        q = ops::chooseGemmF16(mx, 2048, deq2, fq, kf);
+        CHECK(q.kind == ops::GemmKind::gemmfq && nameOf(q.f) == "gemmfq_t2_mxfp4" && q.grid.x == 8 && q.grid.y == 136);
+        CHECK(ops::chooseGemmF16(mx, 1024, deq2, fq, kf).kind == ops::GemmKind::gemmc);       // below fdq_min
+        CHECK(ops::chooseGemmF16(mx, 2048, 2, fq, kf).kind == ops::GemmKind::gemmc);          // a fused gemm_c choice
+        CHECK(ops::chooseGemmF16(q4, 2048, deq2, fq, kf).kind == ops::GemmKind::gemmc);       // not MXFP4
+        ops::GemmFlags fh = fq;
+        fh.out_h16 = true;
+        CHECK(ops::chooseGemmF16(mx, 2048, deq2, fh, kf).kind != ops::GemmKind::gemmfq);     // f16 outputs
+        fq.fdq = 6;
+        CHECK(ops::chooseGemmF16(mx, 2048, deq2, fq, kf).kind == ops::GemmKind::gemmc);       // no such slot
+        fq.fdq = 1;
+        CHECK(ops::chooseGemmF16(mx, 2048, deq2, fq, k).kind == ops::GemmKind::gemmh);        // kernel absent (gfx1201)
+    }
 }
 
 // ---- attention (K-3)

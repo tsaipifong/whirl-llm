@@ -532,6 +532,10 @@ public:
     bool head_gemvx = false;
     bool prec_gemvh = true;
     int prec_gs = -1;
+    // feat026-fdq (WHIRL_FDQ8S / _MIN, bit-neutral fused MXFP4 dequant GEMM slot; 0 = off): fdqEnv of the load's
+    // snapshot at Model::load (arch025-port-gemv; the source branch read them in gemmFlags as function-local statics)
+    int fdq = 0;
+    std::uint32_t fdq_min = 1025;
     // precise decode: the kernels every weight type of this model needs; "" = all present
     std::string precMissing() const;
     GemvR gemv_r = defaultGemvR();
@@ -924,6 +928,15 @@ void loadOrTune(Model& m, const std::string& model_path, std::string& log);
 // WHIRL_GDN_V0 looks the kernel up itself, as before)
 whirl::numerics::Target numericsTarget(const Model& m);
 whirl::numerics::Request numericsRequest(const Model& m, const whirl::config::EnvSnapshot& env);
+
+// feat026-fdq: WHIRL_FDQ8S = c2 | t2 | c2l | t2l | c2f (or 1..5) runs the fused MXFP4 gemmfq slot for the dequant choices
+// (bitwise the same; unset / "" / 0 / unknown = 0, the old dequant + f16 GEMM); WHIRL_FDQ8S_MIN = row threshold (unset or
+// "" -> 1025, else strtoul). The source branch's parse (forward.cpp gemmFlags), verbatim, on the load's snapshot.
+struct FdqEnv {
+    int fdq = 0;
+    std::uint32_t fdq_min = 1025;
+};
+FdqEnv fdqEnv(const whirl::config::EnvSnapshot& env);
 
 // Multi-token GEMV selection overrides (A/B testing), as "nt:value,..." lists:
 // rows per wave (r = 1, 2, 4), WMMA variant for every type (0..8), and the

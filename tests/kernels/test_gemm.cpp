@@ -473,6 +473,84 @@ void testGemm(Ctx& c) {
         c.rep.add(r);
     }
 
+    // feat026-fdq: the gfx1151 MXFP4 fused-dequant GEMMs (gemmfq_<v>_mxfp4, every slot present in the code object)
+    // == dequant_f16_mxfp4 + gemm_c2_f16, bitwise, on a many-block grid with partial row / token blocks, for a
+    // random matrix (block exponents 118..126: the injected decode) and one whose exponents cover 96..135 (the LUT
+    // fallback outside [104, 128], subnormal / zero weights), n = 17 / 700 / 1100, plain and accumulate; plus the
+    // CPU product for the first case. Skipped where the code object has no gemmfq (gfx1201).
+    {
+        bool any = false;
+        for (const auto f : c.k.gemmfq) any = any || f != nullptr;
+        const int ti = static_cast<int>(QType::mxfp4);
+        const hip::Function c2f16 = c.k.gemmc[2][static_cast<int>(QType::f16)];
+        if (!any || !c.k.dequant_f16[ti] || !c2f16) {
+            c.rep.skip("gemm", "gemmfq_*_mxfp4 == dequant + gemm_c2_f16", "no gemmfq kernels in this code object");
+        } else {
+            const int nr = 1000, nc = 768;
+            for (int variant = 0; variant < 2; ++variant) {
+                HostMat hm = randomMat(c, QType::mxfp4, nr, nc);
+                if (variant == 1) {
+                    std::uniform_int_distribution<int> ex(96, 135);
+                    for (std::size_t b = 0; b < hm.data.size(); b += 136)
+                        for (int i = 0; i < 8; ++i) hm.data[b + static_cast<std::size_t>(i)] = static_cast<std::uint8_t>(ex(c.rng));
+                }
+                Buf w(hm.data), w16(static_cast<std::size_t>(nr) * nc * 2);
+                const std::uint64_t groups = static_cast<std::uint64_t>(nc / 8) * nr;
+                hip::launch(c.k.dequant_f16[ti], {static_cast<unsigned>(std::min<std::uint64_t>(cdiv(groups, 256), 65535)), 1, 1}, {256, 1, 1}, 0,
+                            c.s, w.p(), hm.row_bytes, w16.p(), nc, nr);
+                c.sync();
+                const std::vector<int> ns = c.quick ? std::vector<int>{17, 700} : std::vector<int>{17, 700, 1100};
+                for (int nt : ns) {
+                    const std::vector<float> x = c.randn(static_cast<std::size_t>(nt) * nc);
+                    Buf dx(x), x16(static_cast<std::size_t>(nt) * nc * 2);
+                    hip::launch(c.k.f32_to_f16, {cdiv(static_cast<std::uint64_t>(nt) * nc / 4, 256), 1, 1}, {256, 1, 1}, 0, c.s, dx.p(), x16.p(),
+                                nt * nc);
+                    const std::vector<float> y0 = c.randn(static_cast<std::size_t>(nt) * nr);  // accumulate base
+                    const auto& c2 = wk::kGemmCfgs[2];
+                    auto runRef = [&](int accumulate) {
+                        Buf y(static_cast<std::size_t>(nt) * nr * 4);
+                        if (accumulate) y.up(y0); else y.fill(0xff);
+                        hip::launch(c2f16, {cdiv(nt, c2.bn), cdiv(nr, c2.bm), 1}, {static_cast<unsigned>(c2.nth), 1, 1}, 0, c.s, w16.p(),
+                                    static_cast<std::uint64_t>(nc) * 2, x16.p(), y.p(), nc, nr, nt, accumulate);
+                        c.sync();
+                        return y.down<float>(static_cast<std::size_t>(nt) * nr);
+                    };
+                    const std::vector<float> ref0 = runRef(0), ref1 = runRef(1);
+                    if (variant == 0 && nt == 700) {
+                        // the CPU product of the f16 weights (ref::dequantRowF16) on all rows and tokens
+                        const std::vector<std::uint16_t> hx16 = toHalf(x);
+                        std::vector<float> wf(static_cast<std::size_t>(nr) * nc), xf(hx16.size());
+                        std::vector<std::uint16_t> wh(static_cast<std::size_t>(nc));
+                        for (int r = 0; r < nr; ++r) {
+                            ref::dequantRowF16(QType::mxfp4, hm.data.data() + static_cast<std::size_t>(r) * hm.row_bytes, nc, wh.data());
+                            for (int k = 0; k < nc; ++k) wf[static_cast<std::size_t>(r) * nc + k] = h2f(wh[static_cast<std::size_t>(k)]);
+                        }
+                        for (std::size_t i = 0; i < xf.size(); ++i) xf[i] = h2f(hx16[i]);
+                        std::vector<double> ry, rs;
+                        ref::gemvF64(wf, nr, nc, xf.data(), nt, nc, ry, rs);
+                        c.rep.add(cmpTol("dequant_f16_mxfp4 + gemm_c2_f16 vs CPU, 1000x700", ref0, ry, rs, 1e-4, 1e-6));
+                    }
+                    for (std::size_t fi = 0; fi < c.k.gemmfq.size(); ++fi) {
+                        const hip::Function f = c.k.gemmfq[fi];
+                        if (!f) continue;
+                        const auto& g = wk::kGemmFqCfgs[fi];
+                        for (int accumulate = 0; accumulate < 2; ++accumulate) {
+                            Buf y(static_cast<std::size_t>(nt) * nr * 4);
+                            if (accumulate) y.up(y0); else y.fill(0xff);
+                            hip::launch(f, {cdiv(nt, g.bn), cdiv(nr, g.bm), 1}, {static_cast<unsigned>(g.nth), 1, 1}, 0, c.s, w.p(), hm.row_bytes,
+                                        x16.p(), y.p(), nc, nr, nt, accumulate);
+                            c.sync();
+                            const std::string name = std::string("gemmfq_") + wk::kGemmFqNames[fi] + "_mxfp4 == dequant + gemm_c2_f16 (" +
+                                                     (variant ? "e 96..135" : "random") + ", 1000 rows, n=" + std::to_string(nt) +
+                                                     (accumulate ? ", accumulate)" : ")");
+                            c.rep.add(cmpExact(name, y.down<float>(static_cast<std::size_t>(nt) * nr), accumulate ? ref1 : ref0, Kind::invariant));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // GDN [beta; alpha]: one 96-row Q8_0 GEMM == the two 48-row GEMMs side by side
     // (rows 0-47 of each token from beta, 48-95 from alpha), bitwise, for every choice.
     {

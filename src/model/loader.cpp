@@ -456,6 +456,9 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
         m.head_gemvx = fe.head_gemvx;
         m.prec_gemvh = fe.prec_gemvh;
         m.prec_gs = fe.prec_gs;
+        const FdqEnv fq = fdqEnv(env);  // feat026-fdq (arch025-port-gemv: was gemmFlags' statics)
+        m.fdq = fq.fdq;
+        m.fdq_min = fq.fdq_min;
     }
     m.cfg = Config::fromGguf(f);
     const Config& cfg = m.cfg;

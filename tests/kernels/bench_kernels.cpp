@@ -11,6 +11,7 @@
 //   gemv  gemvq_<T> (int8 activations, n = 1)                 Swift dense weights  bytes = weight bytes
 //   gemvh gemvh_<T> (precise f16 activations, n = 1 / 4)      Swift dense weights  bytes = weight bytes
 //   gemm  gemmhq_<T>, gemm_c0_<T> (f16 activations, n = 2048) Swift dense weights  flops = 2 n rows cols
+//         (+ MXFP4 on gfx1151: gemmfq_<v>_mxfp4 and the dequant_f16_mxfp4+gemm_c2_f16 pair, feat026-fdq)
 //   attn  attn_wsplit1 + attn_combine (f16 KV, 24 / 4 heads, hd 256, one decode query at L = 2k / 32k / 128k)
 //   moe   moe_gu_mxfp4[w], moe_down_mxfp4[w] (Ornith MXFP4 experts, n = 1, K routed experts per launch)
 //   gdn   gdn_step_norm (one decode row, 48 v heads x 128 x 128 state)
@@ -476,6 +477,12 @@ void benchGemm(Env& e) {
         std::vector<K> ks;
         if (c.k.gemmhq[ti]) ks.push_back({"gemmhq_" + sfx, c.k.gemmhq[ti], 128, 256, 256});
         if (c.k.gemmc[0][ti]) ks.push_back({"gemm_c0_" + sfx, c.k.gemmc[0][ti], c0.bm, c0.bn, c0.nth});
+        // feat026-fdq (gfx1151): the MXFP4 fused-dequant GEMMs; the old path is the cell "dequant_f16_mxfp4+gemm_c2_f16"
+        if (m.type == QType::mxfp4)
+            for (std::size_t fi = 0; fi < c.k.gemmfq.size(); ++fi)
+                if (c.k.gemmfq[fi])
+                    ks.push_back({std::string("gemmfq_") + wk::kGemmFqNames[fi] + "_mxfp4", c.k.gemmfq[fi], wk::kGemmFqCfgs[fi].bm,
+                                  wk::kGemmFqCfgs[fi].bn, wk::kGemmFqCfgs[fi].nth});
         if (ks.empty()) c.rep.skip("gemm", "bench gemm " + sfx, "kernel not in this code object");
         for (const K& kk : ks) {
             Cell k;
@@ -502,6 +509,52 @@ void benchGemm(Env& e) {
             };
             k.verify = [&m, &xh, cr, ct, ncols](const std::vector<float>& got) {
                 // the f16 weights the GEMM multiplies (dequant_f16 rounding), f16 activations, double accumulation
+                std::vector<float> wf(static_cast<std::size_t>(cr) * ncols);
+                std::vector<std::uint16_t> wh(static_cast<std::size_t>(ncols));
+                for (int r = 0; r < cr; ++r) {
+                    ref::dequantRowF16(m.type, m.data.data() + static_cast<std::size_t>(r) * m.row_bytes, ncols, wh.data());
+                    for (int q = 0; q < ncols; ++q) wf[static_cast<std::size_t>(r) * ncols + q] = h2f(wh[static_cast<std::size_t>(q)]);
+                }
+                std::vector<float> xf(static_cast<std::size_t>(ct) * ncols);
+                for (std::size_t i = 0; i < xf.size(); ++i) xf[i] = h2f(xh[i]);
+                std::vector<double> ry, rs;
+                ref::gemvF64(wf, cr, ncols, xf.data(), ct, ncols, ry, rs);
+                return cmpTol("vs CPU (" + std::to_string(cr) + " rows x " + std::to_string(ct) + " tokens)", got, ry, rs, 1e-4, 1e-6);
+            };
+            runCell(e, k);
+        }
+        // feat026-fdq: the path the fused kernels replace, timed as one cell (dequant_f16_mxfp4 into a f16 scratch, then
+        // gemm_c2_f16 on it): the denominator of the gemmfq cells. --ab looks up gemm_c2_f16 in the candidate.
+        const hip::Function c2f16 = c.k.gemmc[2][static_cast<int>(QType::f16)];
+        if (m.type == QType::mxfp4 && c.k.dequant_f16[ti] && c2f16) {
+            auto w16 = std::make_shared<Buf>(static_cast<std::size_t>(nrows) * ncols * 2);
+            const auto& c2 = wk::kGemmCfgs[2];
+            const std::uint64_t groups = static_cast<std::uint64_t>(ncols / 8) * nrows;
+            const hip::Function dq = c.k.dequant_f16[ti];
+            Cell k;
+            k.ci = e.info("gemm", "dequant_f16_mxfp4+gemm_c2_f16", w.label + "." + shortName(tn) + ".n" + std::to_string(n), shapeStr(nrows, ncols));
+            k.ci.settings = e.settings(static_cast<std::uint64_t>(wc.n()) * m.data.size(), wc.n());
+            k.ci.flops = 2.0 * n * nrows * ncols;
+            k.kernel = "gemm_c2_f16";
+            k.fa = c2f16;
+            k.call = [&c, &wc, &x16, &y, w16, dq, c2, groups, rb, ncols, nrows, n](hip::Function f, std::uint64_t r) {
+                hip::launch(dq, {static_cast<unsigned>(std::min<std::uint64_t>((groups + 255) / 256, 65535)), 1, 1}, {256, 1, 1}, 0, c.s, wc.at(r), rb,
+                            w16->p(), ncols, nrows);
+                hip::launch(f, {cdiv(n, c2.bn), cdiv(nrows, c2.bm), 1}, {static_cast<unsigned>(c2.nth), 1, 1}, 0, c.s, w16->p(),
+                            static_cast<std::uint64_t>(ncols) * 2, x16.p(), y.p(), ncols, nrows, n, 0);
+            };
+            k.run = [&c, &k, &y, n, nrows, cr, ct](hip::Function f) {
+                y.fill(0xff);
+                k.call(f, 0);
+                c.sync();
+                const auto all = y.down<float>(static_cast<std::size_t>(n) * nrows);
+                std::vector<float> got;
+                for (int t = 0; t < ct; ++t)
+                    got.insert(got.end(), all.begin() + static_cast<std::ptrdiff_t>(t) * nrows,
+                               all.begin() + static_cast<std::ptrdiff_t>(t) * nrows + cr);
+                return got;
+            };
+            k.verify = [&m, &xh, cr, ct, ncols](const std::vector<float>& got) {
                 std::vector<float> wf(static_cast<std::size_t>(cr) * ncols);
                 std::vector<std::uint16_t> wh(static_cast<std::size_t>(ncols));
                 for (int r = 0; r < cr; ++r) {

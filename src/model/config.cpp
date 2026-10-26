@@ -295,6 +295,26 @@ void parseGemvWHead(Model& m, std::string_view list) {
     });
 }
 
+FdqEnv fdqEnv(const whirl::config::EnvSnapshot& env) {
+    FdqEnv r;
+    if (const auto& s = env.fdq8s) {
+        const char* v = s->c_str();
+        if (*v != 0) {
+            int slot = 0;
+            for (std::size_t i = 0; i < kernels::kGemmFqNames.size() && slot == 0; ++i)
+                if (std::strcmp(v, kernels::kGemmFqNames[i]) == 0) slot = static_cast<int>(i) + 1;
+            if (slot == 0) {
+                const int i = std::atoi(v);
+                slot = i >= 1 && i <= static_cast<int>(kernels::kGemmFqNames.size()) ? i : 0;
+            }
+            r.fdq = slot;
+        }
+    }
+    if (const auto& s = env.fdq8s_min)
+        if (s->c_str()[0] != 0) r.fdq_min = static_cast<std::uint32_t>(std::strtoul(s->c_str(), nullptr, 10));
+    return r;
+}
+
 void applyGemvEnv(Model& m) {
     const auto env = whirl::config::snapshotOf(m);  // the load's (arch025-N1)
     if (const auto& v = env->gemv_r) parseGemvR(m, *v);

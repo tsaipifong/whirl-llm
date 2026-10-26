@@ -699,6 +699,187 @@ extern "C" __global__ void __launch_bounds__(256) dequant_f16_iq3_s(const uint8_
 extern "C" __global__ void __launch_bounds__(256) dequant_f16_iq4_xs(const uint8_t *W, uint64_t row_bytes, _Float16 *out, int ncols, int nrows) { dequant_f16_impl<QT_IQ4_XS>(W, row_bytes, out, ncols, nrows); }
 extern "C" __global__ void __launch_bounds__(256) dequant_f16_mxfp4(const uint8_t *W, uint64_t row_bytes, _Float16 *out, int ncols, int nrows) { dequant_f16_impl<QT_MXFP4>(W, row_bytes, out, ncols, nrows); }
 
+// ---------------------------------------------------------------------------
+// feat026-fdq: MXFP4 fused-dequant prefill GEMM (Swift dense prefill on the 8060S).
+// Bitwise == dequant_f16_mxfp4 + gemm_c2_f16 (and every other gemm_c<i>_f16): the LDS tile holds the same f16
+// weights (dec_group_h<QT_MXFP4> values; see mx_inject.h for the injected decode), the WMMAs run in the same k
+// order with the same operands (a = weights, b = tokens). Differences from gemm3_impl, all for speed:
+//   * the registers carry the RAW MXFP4 bytes of the next K chunk across the WMMA loop (2 x 8 bytes + the E8M0
+//     byte per 32-value sub-block instead of 4 half8) and decode them at the top of the next iteration, before
+//     the barrier (strix-llama.cpp mmb load_regs / store_lds: the load latency hides behind the WMMAs);
+//   * one lane per 32-value sub-block: no two lanes load the same bytes (dec_group_h's groups g and g + 2 do);
+//   * rows / tokens past the end are clamped, not branched (their outputs are never stored, and each output reads
+//     only its own row and token): no divergent guard that drains the loads;
+//   * DEC 1: exponent-injected decode + one v_pk_fma_f16 per 2 values (~2 VALU / value), LUT math for block
+//     exponents outside [104, 128]; DEC 0: the LUT math (mx_lut4 + bytes8_to_h8) everywhere (A/B probe).
+// Geometry: 256 x 128 WAVES_M 4 (the kept gemm_c2_f16 layout, 2 sub-blocks per lane) or 128 x 256 WAVES_M 2 (the
+// hipBLASLt gfx1151 W4A16 orientation: the quantized side is the short one, 1 sub-block per lane = half the decode
+// VALU per WMMA); both are 4 x 4 WMMA tiles per wave. 256 threads, BK 64, TOK_X grid (x = token blocks).
+// Requires ncols % 256 == 0 (whole MXFP4 superblocks) and row_bytes % 8 == 0 (136-byte units).
+// Modes: bitwise -> usable in precise, balance and fast; the gate is the bitwise kernel test, no KL needed.
+// ---------------------------------------------------------------------------
+#include "mx_inject.h"
+
+// 8 values of one LUT group: dec_group_h<QT_MXFP4>'s math on registers (same calls -> same bits)
+__device__ __forceinline__ half8 fq_lut8(uint32_t n0, uint32_t n1, _Float16 dl) {
+    const uint32_t u0 = (uint32_t)mx_lut4(n0) ^ 0x80808080u, u1 = (uint32_t)mx_lut4(n1) ^ 0x80808080u;
+    return bytes8_to_h8(u0, u1, (_Float16)128.f, dl, (_Float16)0.f);
+}
+// 8 values from two dwords of injected high bytes (t0: values 0-3, t1: values 4-7) times S (+0)
+__device__ __forceinline__ half8 fq_inj8(uint32_t t0, uint32_t t1, half2_t s2) {
+    const uint32_t w[4] = {__builtin_amdgcn_perm(0u, t0, kMxiSpread0), __builtin_amdgcn_perm(0u, t0, kMxiSpread1),
+                           __builtin_amdgcn_perm(0u, t1, kMxiSpread0), __builtin_amdgcn_perm(0u, t1, kMxiSpread1)};
+    const half2_t z2 = {(_Float16)0.f, (_Float16)0.f};
+    half8 out;
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        const half2_t v = __builtin_elementwise_fma(__builtin_bit_cast(half2_t, w[i]), s2, z2);
+        out[2 * i] = v[0];
+        out[2 * i + 1] = v[1];
+    }
+    return out;
+}
+// one 32-value sub-block (qa = bytes 0-7, qb = bytes 8-15 of its qs, e = its E8M0 byte) -> 4 half8 in k order:
+// [0, 8) low nibbles of qa, [8, 16) low of qb, [16, 24) high of qa, [24, 32) high of qb (= dec_group_h's groups)
+template <int DEC>
+__device__ __forceinline__ void fq_decode_sb(uint2 qa, uint2 qb, uint32_t e, half8 *o) {
+    if (DEC == 1 && mxi_fast_ok(e)) {
+        const uint32_t sb = mxi_scale_bits(e);
+        const half2_t s2 = __builtin_bit_cast(half2_t, sb | (sb << 16));
+        o[0] = fq_inj8(mxi_hib_lo(qa.x), mxi_hib_lo(qa.y), s2);
+        o[1] = fq_inj8(mxi_hib_lo(qb.x), mxi_hib_lo(qb.y), s2);
+        o[2] = fq_inj8(mxi_hib_hi(qa.x), mxi_hib_hi(qa.y), s2);
+        o[3] = fq_inj8(mxi_hib_hi(qb.x), mxi_hib_hi(qb.y), s2);
+    } else {
+        const _Float16 dl = (_Float16)e8m0_half(e);
+        o[0] = fq_lut8(qa.x & 0x0F0F0F0Fu, qa.y & 0x0F0F0F0Fu, dl);
+        o[1] = fq_lut8(qb.x & 0x0F0F0F0Fu, qb.y & 0x0F0F0F0Fu, dl);
+        o[2] = fq_lut8((qa.x >> 4) & 0x0F0F0F0Fu, (qa.y >> 4) & 0x0F0F0F0Fu, dl);
+        o[3] = fq_lut8((qb.x >> 4) & 0x0F0F0F0Fu, (qb.y >> 4) & 0x0F0F0F0Fu, dl);
+    }
+}
+
+template <int BM, int BN, int WAVES_M, int DEC>
+__device__ void gemmfq_impl(const uint8_t *__restrict__ W, uint64_t row_bytes, const _Float16 *__restrict__ X,
+                            float *__restrict__ Y, int ncols, int nrows, int n_tok, int accumulate) {
+    constexpr int NTH = 256, BK = 64;
+    constexpr int WAVES_N = NTH / 32 / WAVES_M;
+    constexpr int TM = BM / 16 / WAVES_M, TN = BN / 16 / WAVES_N;
+    constexpr int LD = BK + 8;
+    constexpr int GPR = BK / 8;
+    constexpr int A_SB = BM * (BK / 32) / NTH;  // 32-value sub-blocks per lane per K chunk
+    constexpr int B_PER = BN * GPR / NTH;
+    static_assert(A_SB >= 1 && BM * (BK / 32) % NTH == 0 && BN * GPR % NTH == 0, "tile/threads");
+    __shared__ _Float16 As[BM][LD];
+    __shared__ _Float16 Bs[BN][LD];
+
+    const int lane = threadIdx.x % WARP, wid = threadIdx.x / WARP;
+    const int wm = wid % WAVES_M, wn = wid / WAVES_M;
+    const int m0 = blockIdx.y * BM, t0 = blockIdx.x * BN;
+
+    float8 acc[TM][TN];
+#pragma unroll
+    for (int i = 0; i < TM; ++i)
+#pragma unroll
+        for (int j = 0; j < TN; ++j) acc[i][j] = (float8){0, 0, 0, 0, 0, 0, 0, 0};
+
+    // lane slot s = threadIdx.x + e * NTH: row s / 2, sub-block s % 2 of the chunk (adjacent lanes: one row's 32 bytes)
+    const uint8_t *arow[A_SB];
+#pragma unroll
+    for (int e = 0; e < A_SB; ++e) {
+        const int s = threadIdx.x + e * NTH;
+        arow[e] = W + (size_t)min(m0 + s / 2, nrows - 1) * row_bytes;
+    }
+    const _Float16 *brow[B_PER];
+#pragma unroll
+    for (int e = 0; e < B_PER; ++e) {
+        const int i = threadIdx.x + e * NTH;
+        brow[e] = X + (size_t)min(t0 + i / GPR, n_tok - 1) * ncols + (i % GPR) * 8;
+    }
+    uint2 qa[A_SB], qb[A_SB];
+    uint32_t qe[A_SB];
+    half8 rb[B_PER];
+#define GEMMFQ_FETCH(k0_)                                                                           \
+    do {                                                                                            \
+        _Pragma("unroll") for (int e = 0; e < A_SB; ++e) {                                          \
+            const int s = threadIdx.x + e * NTH;                                                    \
+            const uint8_t *blk = arow[e] + (size_t)((k0_) >> 8) * 136;                              \
+            const int ib = (((k0_) & 255) >> 5) + (s & 1);                                          \
+            const uint8_t *q = blk + 8 + 16 * ib;                                                   \
+            qa[e] = *(const uint2 *)q;                                                              \
+            qb[e] = *(const uint2 *)(q + 8);                                                        \
+            qe[e] = blk[ib];                                                                        \
+        }                                                                                           \
+        _Pragma("unroll") for (int e = 0; e < B_PER; ++e) rb[e] = *(const half8 *)(brow[e] + (k0_)); \
+    } while (0)
+
+    GEMMFQ_FETCH(0);
+    for (int k0 = 0; k0 < ncols; k0 += BK) {
+        half8 ra[A_SB][4];
+#pragma unroll
+        for (int e = 0; e < A_SB; ++e) fq_decode_sb<DEC>(qa[e], qb[e], qe[e], ra[e]);
+        __syncthreads();
+#pragma unroll
+        for (int e = 0; e < A_SB; ++e) {
+            const int s = threadIdx.x + e * NTH;
+#pragma unroll
+            for (int j = 0; j < 4; ++j) *(half8 *)&As[s / 2][(s & 1) * 32 + j * 8] = ra[e][j];
+        }
+#pragma unroll
+        for (int e = 0; e < B_PER; ++e) {
+            const int i = threadIdx.x + e * NTH;
+            *(half8 *)&Bs[i / GPR][(i % GPR) * 8] = rb[e];
+        }
+        __syncthreads();
+        if (k0 + BK < ncols) GEMMFQ_FETCH(k0 + BK);
+#pragma unroll
+        for (int kk = 0; kk < BK; kk += 16) {
+            half16 a[TM], b[TN];
+#pragma unroll
+            for (int i = 0; i < TM; ++i)
+                a[i] = ld_frag16(&As[(wm * TM + i) * 16 + lane % 16][kk]);
+#pragma unroll
+            for (int j = 0; j < TN; ++j)
+                b[j] = ld_frag16(&Bs[(wn * TN + j) * 16 + lane % 16][kk]);
+#pragma unroll
+            for (int i = 0; i < TM; ++i)
+#pragma unroll
+                for (int j = 0; j < TN; ++j)
+                    acc[i][j] = WMMA16(a[i], b[j], acc[i][j]);
+        }
+    }
+#undef GEMMFQ_FETCH
+#pragma unroll
+    for (int i = 0; i < TM; ++i) {
+#pragma unroll
+        for (int j = 0; j < TN; ++j) {
+            const int t = t0 + (wn * TN + j) * 16 + lane % 16;
+            if (t >= n_tok) continue;
+#pragma unroll
+            for (int v = 0; v < 8; ++v) {
+                const int row = m0 + (wm * TM + i) * 16 + CROW(lane, v);
+                if (row < nrows) {
+                    float *dst = Y + (size_t)t * nrows + row;
+                    *dst = accumulate ? *dst + acc[i][j][v] : acc[i][j][v];
+                }
+            }
+        }
+    }
+}
+
+// Entry points (host: MatmulKernels::gemmfq, kGemmFqCfgs; selector WHIRL_FDQ8S, default off). Same ABI as gemm_c*.
+//   gemmfq_c2_mxfp4   256 x 128 WAVES_M 4, injected decode   (the kept c2 layout)
+//   gemmfq_t2_mxfp4   128 x 256 WAVES_M 2, injected decode   (quantized side short)
+//   gemmfq_c2l_mxfp4  256 x 128 WAVES_M 4, LUT decode        (probe)
+//   gemmfq_t2l_mxfp4  128 x 256 WAVES_M 2, LUT decode        (probe)
+//   gemmfq_c2f_mxfp4  gemm3_impl<QT_MXFP4> in the kept c2 layout: decode at fetch (the 8S-P7 fused try, which
+//                     only ever ran with WAVES_M 1; probe)
+extern "C" __global__ void __launch_bounds__(256) gemmfq_c2_mxfp4(const uint8_t *W, uint64_t row_bytes, const _Float16 *X, float *Y, int ncols, int nrows, int n_tok, int accumulate) { gemmfq_impl<256, 128, 4, 1>(W, row_bytes, X, Y, ncols, nrows, n_tok, accumulate); }
+extern "C" __global__ void __launch_bounds__(256) gemmfq_t2_mxfp4(const uint8_t *W, uint64_t row_bytes, const _Float16 *X, float *Y, int ncols, int nrows, int n_tok, int accumulate) { gemmfq_impl<128, 256, 2, 1>(W, row_bytes, X, Y, ncols, nrows, n_tok, accumulate); }
+extern "C" __global__ void __launch_bounds__(256) gemmfq_c2l_mxfp4(const uint8_t *W, uint64_t row_bytes, const _Float16 *X, float *Y, int ncols, int nrows, int n_tok, int accumulate) { gemmfq_impl<256, 128, 4, 0>(W, row_bytes, X, Y, ncols, nrows, n_tok, accumulate); }
+extern "C" __global__ void __launch_bounds__(256) gemmfq_t2l_mxfp4(const uint8_t *W, uint64_t row_bytes, const _Float16 *X, float *Y, int ncols, int nrows, int n_tok, int accumulate) { gemmfq_impl<128, 256, 2, 0>(W, row_bytes, X, Y, ncols, nrows, n_tok, accumulate); }
+extern "C" __global__ void __launch_bounds__(256) gemmfq_c2f_mxfp4(const uint8_t *W, uint64_t row_bytes, const _Float16 *X, float *Y, int ncols, int nrows, int n_tok, int accumulate) { gemm3_impl<QT_MXFP4, 256, 128, 64, 4, 0, 256, true>(W, row_bytes, X, Y, ncols, nrows, n_tok, accumulate); }
+
 // Prefill GEMM configurations, chosen per matrix by the load-time autotuner.
 // (BM, BN, threads) must match kGemmCfgs in include/whirl/kernels_abi.h; BK / WAVES_M are free
 // per arch. gfx1151: c10 uses WAVES_M 2 (4x2 WMMA tiles per wave instead of
