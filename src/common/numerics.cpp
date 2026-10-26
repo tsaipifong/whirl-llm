@@ -3,6 +3,8 @@
 
 #include "whirl/numerics.h"
 
+#include "whirl/dump.h"
+
 #include <algorithm>
 #include <cstdlib>
 #include <format>
@@ -725,6 +727,15 @@ KvFitLabel kvFitLabel(const Request& r, bool moe, KvFormat kv) {
     // a lower-precision mode only helps where it changes the format (precise, dense: balance is q8h)
     l.alt = r.mode == Mode::precise && !moe && kv == KvFormat::f16 ? "--balance allows int8 KV" : "";
     return l;
+}
+
+std::optional<KvFormat> kvEstimateRequest(const std::optional<std::string>& kv_env) {
+    return kv_env && *kv_env != "auto" ? kvFormatFromName(*kv_env) : std::nullopt;
+}
+
+KvFormat kvEstimate(KvEstSite site, const Request& r, bool moe, std::optional<KvFormat> req) {
+    const KvCaps caps = kvCapsEstimate(kvEstSiteIntegrated(site));
+    return dump::kv(kvEstSiteName(site), r, moe, caps, req, chooseKv(r, moe, caps, req)).kv;
 }
 
 namespace {

@@ -1657,6 +1657,45 @@ void testKvLayout() {
     }
 }
 
+// arch025-N3-r1 (review A2, mutant n3-kvname-q8h): Model::kvName() is the KV part of the tier fingerprint
+// (server_main.cpp tierFingerprint id.kv_name -> cache/fingerprint.cpp "kv {}"), not only log text: q8 and q8h have the
+// same page bytes, so the name is what tells their tier entries apart. The full strings of the five formats (as at
+// d062129 loader.cpp:813-817) and all five pairwise different. A host-only Model: kvName reads kv_fmt alone.
+void testKvName() {
+    using F = whirl::KvFormat;
+    const std::pair<F, const char*> want[] = {
+        {F::f16, "f16"},
+        {F::q8, "q8 (int8 + f16 scale / 32)"},
+        {F::q8h, "q8h (int8 + f16 scale / 32, Hadamard-rotated q/k)"},
+        {F::q8v, "q8v (K f16, V int8 + f16 scale / 32)"},
+        {F::q4, "q4 (4-bit + f16 scale / 32, Hadamard-rotated q/k)"},
+    };
+    std::vector<std::string> got;
+    for (const auto& [fmt, name] : want) {
+        q::Model m;
+        m.kv_fmt = fmt;
+        got.emplace_back(m.kvName());
+        check(got.back() == name, std::format("kv name {}: '{}' == '{}'", whirl::kvFormatName(fmt), got.back(), name));
+    }
+    for (std::size_t i = 0; i < got.size(); ++i)
+        for (std::size_t j = i + 1; j < got.size(); ++j)
+            check(got[i] != got[j], std::format("kv name: formats {} and {} print the same name '{}' (one tier fingerprint)", i, j, got[i]));
+}
+
+// arch025-N3-r1 (review C1): LoadEstimate::kvPerToken, the one map from the estimated KV format to the bytes per token
+// the pre-load estimates size with (was the same ternary at loader.cpp's UMA check and the server's two estimates)
+void testKvPerToken() {
+    using F = whirl::KvFormat;
+    q::LoadEstimate e;
+    e.kv_f16 = 1001;
+    e.kv_q8v = 1002;
+    e.kv_q8h = 1003;
+    e.kv_q4 = 1004;
+    const std::pair<F, std::uint64_t> want[] = {{F::f16, 1001}, {F::q8, 1003}, {F::q8h, 1003}, {F::q8v, 1002}, {F::q4, 1004}};
+    for (const auto& [fmt, bytes] : want)
+        check(e.kvPerToken(fmt) == bytes, std::format("kv per token {}: {} == {}", whirl::kvFormatName(fmt), e.kvPerToken(fmt), bytes));
+}
+
 // arch024-S11c (F-8, S11b mutant D1): ~Model releases in the order of before arch024 S11 (graph, rpos, allocations in
 // order, pinned embedding, stream), not in reverse declaration order (which frees the stream before the buffers).
 // The handles carry their Backend (device/handles.h), so a recording Backend observes the order without a GPU.
@@ -2548,6 +2587,8 @@ void testPlanVsLoadOrTune() {
 int main() {
     whirl::test::clearWhirlEnv();  // FR-TEST P3-11
     testKvLayout();
+    testKvName();
+    testKvPerToken();
     testModelReleaseOrder();
     testDraftWindowRestore();
     testForwardSplit();

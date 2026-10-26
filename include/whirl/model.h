@@ -380,6 +380,11 @@ struct LoadEstimate {
     bool embd_on_host = false;  // token_embd goes to pinned host memory
     bool has_mtp = false;       // nextn layer present (one more KV layer)
     std::uint64_t kv_f16 = 0, kv_q8v = 0, kv_q8h = 0, kv_q4 = 0;  // KV bytes per token by format
+    // KV bytes per token of the format a pre-load estimate chose (numerics::kvEstimate); q8 has q8h's rows
+    // (arch025-N3-r1: was the same ternary at loader.cpp's UMA check and the server's dGPU / UMA estimates)
+    std::uint64_t kvPerToken(KvFormat kv) const {
+        return kv == KvFormat::f16 ? kv_f16 : kv == KvFormat::q8v ? kv_q8v : kv == KvFormat::q4 ? kv_q4 : kv_q8h;
+    }
 };
 // no_mtp: the load skips the MTP (nextn) block (--draft dflash): no nextn weights, no MTP KV layer.
 LoadEstimate estimateLoad(const gguf::File& f, const Config& cfg, bool embd_on_host, bool no_mtp = false);

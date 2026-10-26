@@ -7,7 +7,7 @@ include/whirl/kernels_abi.h	1	PL1
 include/whirl/model.h	2	C1a / C2 (the envGet / envFlag declarations for cli / server / forward; defined in src/config/env_snapshot.cpp since N1)
 include/whirl/uma_mem.h	1	PL1
 src/cache/fingerprint.cpp	1	PL1
-src/cli/main.cpp	61	C2 (reduced by the C line; kept at 0.2.5 end, PLAN Noted)
+src/cli/main.cpp	51	C2 (reduced by the C line; kept at 0.2.5 end, PLAN Noted)
 src/common/dump.cpp	4	S0a dump switches (N1 / PL1 move them into EnvSnapshot)
 src/common/vram_limit.cpp	1	PL1
 src/device/null_backend.cpp	1	PL1 (WHIRL_LEAKCHECK_QUIET; the site came without an entry, recorded by arch025-F7)
@@ -18,5 +18,5 @@ src/hip/uma_mem.cpp	1	PL1
 src/kernels_host/kernels_abi.cpp	1	PL1
 src/model/exec_dump.cpp	1	S0a dump switches (N1 / PL1 move them into EnvSnapshot)
 src/model/tune.cpp	1	PL1 (localAppData: LOCALAPPDATA, the tune cache folder; N1 left it, plan c-2 tune.cpp:715)
-src/server/server_main.cpp	98	C1a (reduced by the C line; kept at 0.2.5 end, PLAN Noted)
+src/server/server_main.cpp	87	C1a (reduced by the C line; kept at 0.2.5 end, PLAN Noted)
 src/vision/vis_cli.cpp	1	PL1

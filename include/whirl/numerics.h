@@ -355,6 +355,27 @@ struct KvChoice {
     bool debug = false;  // WHIRL_KV chose it (debug override: no fit check, sizing as before)
     std::string why;     // "balance, dense model: q8h"
 };
+// The three pre-load KV estimates (arch025-N3-r1, review C1: each site wrote out caps -> chooseKv -> "D kv:" line
+// itself). The site decides both its "D kv:" name and which GPU kind it sizes for: the server's dGPU branch runs on
+// a discrete GPU, Model::load's UMA check and the server's UMA branch on an integrated one (the Radeon 8060S).
+enum class KvEstSite : std::uint8_t { loader_uma, server_dgpu, server_uma };
+constexpr std::string_view kvEstSiteName(KvEstSite s) {
+    switch (s) {
+        case KvEstSite::loader_uma: return "loader.uma_est";
+        case KvEstSite::server_dgpu: return "server.est_dgpu";
+        case KvEstSite::server_uma: return "server.est_uma";
+    }
+    return "?";
+}
+constexpr bool kvEstSiteIntegrated(KvEstSite s) { return s != KvEstSite::server_dgpu; }
+// The server estimates' WHIRL_KV reading (both branches): unset, "auto" and a name kvFormatFromName does not know
+// are no request; Model::load refuses the unknown name afterwards (kvRequestFromEnv), as before arch025-N3.
+// Model::load's own UMA estimate reads the request strictly (loader.cpp kvRequestOf), the same as its load.
+std::optional<KvFormat> kvEstimateRequest(const std::optional<std::string>& kv_env);
+// The KV format a pre-load estimate sizes for: chooseKv(r, moe, kvCapsEstimate(kvEstSiteIntegrated(site)), req),
+// with one "D kv: site=<kvEstSiteName(site)>" line under WHIRL_DUMP_KV (dump::kv). whirl-tests testKvEstimateCaps
+// checks it per site against the load's choice with that site's GPU caps.
+KvFormat kvEstimate(KvEstSite site, const Request& r, bool moe, std::optional<KvFormat> req);
 // The request's KV format: WHIRL_KV (forced) wins; else kvq4 -> q4 (where the kernels exist,
 // else f16: R9700 has no q4 KV kernels yet, and int8 is no stand-in), dense and MoE, except a dense
 // model where caps.fast_q8h (gfx1151) -> q8h; else kvq8 on

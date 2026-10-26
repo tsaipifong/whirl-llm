@@ -472,20 +472,14 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
             // object has every KV kernel), not f16: a balance / fast load with an explicit --ctx was refused
             // although its q8 / q4 cache fits (REVIEW-022 F6)
             const std::optional<KvFormat> kvm_est = opt.kv_req ? opt.kv_req : kvRequestOf(env);
-            const numerics::KvCaps caps_est = numerics::kvCapsEstimate(true);
-            const KvFormat kv_est =
-                dump::kv("loader.uma_est", opt.numerics, cfg.moe, caps_est, kvm_est,
-                         numerics::chooseKv(opt.numerics, cfg.moe, caps_est, kvm_est))
-                    .kv;  // (WHIRL_DUMP_KV: one "D kv:" line, arch025-S0a)
+            // (WHIRL_DUMP_KV: one "D kv: site=loader.uma_est" line, arch025-S0a)
+            const KvFormat kv_est = numerics::kvEstimate(numerics::KvEstSite::loader_uma, opt.numerics, cfg.moe, kvm_est);
             hip::UmaNeed n;
             n.weights = est.weights;
             n.fixed = est.weights + est.state +
                       bufferBytes(cfg, std::clamp<u32>(opt.max_batch, 1, max_batch_limit), est.ffs, est.max_elems, fdSplitsOf(KvFormat::q4, env)) +
                       (256ull << 20);
-            n.kv_per_token = kv_est == KvFormat::f16   ? est.kv_f16
-                             : kv_est == KvFormat::q8v ? est.kv_q8v
-                             : kv_est == KvFormat::q4  ? est.kv_q4
-                                                       : est.kv_q8h;
+            n.kv_per_token = est.kvPerToken(kv_est);
             n.min_tokens = std::max<u32>(max_ctx_req, 4096);
             n.want_tokens = n.min_tokens;
             if (const std::string why = hip::umaRefusal(u, n, hip::describeDevice(hip::getDevice()).name); !why.empty())

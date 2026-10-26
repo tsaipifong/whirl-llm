@@ -1124,6 +1124,45 @@ void testKvEstimateCaps() {
     }
     CHECK(cells == 2 * 9 * 2 * 6);
     CHECK(differ == 0);
+    // arch025-N3-r1 (review C1, mutant n3-srv-est-caps): the three estimate sites call numerics::kvEstimate; each
+    // site's format equals the load's choice with the real caps of the GPU that site runs on (server dGPU branch:
+    // R9700; Model::load's UMA check and the server UMA branch: 8060S), and the "D kv:" site names are the old ones
+    {
+        struct Site {
+            nu::KvEstSite site;
+            const char* name;
+            const Gpu& gpu;
+        };
+        const Site sites[] = {{nu::KvEstSite::loader_uma, "loader.uma_est", gpus[1]},
+                              {nu::KvEstSite::server_dgpu, "server.est_dgpu", gpus[0]},
+                              {nu::KvEstSite::server_uma, "server.est_uma", gpus[1]}};
+        int site_cells = 0, site_differ = 0;
+        for (const Site& s : sites) {
+            CHECK(nu::kvEstSiteName(s.site) == std::string_view(s.name));
+            CHECK(nu::kvEstSiteIntegrated(s.site) == s.gpu.integrated);
+            nu::KvCaps real = s.gpu.code;
+            real.fast_q8h = s.gpu.prof.numerics_8060s;
+            for (const char* ms : modes)
+                for (bool moe : {false, true})
+                    for (const auto& f : forced) {
+                        const nu::Request r = nu::parseMode(ms, "t");
+                        ++site_cells;
+                        if (nu::kvEstimate(s.site, r, moe, f) != nu::chooseKv(r, moe, real, f).kv) {
+                            ++site_differ;
+                            std::fprintf(stderr, "  kvEstimate(%s) != load: %s moe=%d forced=%s\n", s.name, ms, moe ? 1 : 0,
+                                         f ? whirl::kvFormatName(*f) : "none");
+                        }
+                    }
+        }
+        CHECK(site_cells == 3 * 9 * 2 * 6);
+        CHECK(site_differ == 0);
+        // the server estimates' WHIRL_KV reading: unset / "auto" / unknown -> no request (Model::load refuses the
+        // unknown name later), a known name -> that format
+        CHECK(!nu::kvEstimateRequest(std::nullopt) && !nu::kvEstimateRequest(std::string("auto")));
+        CHECK(!nu::kvEstimateRequest(std::string("q5")) && !nu::kvEstimateRequest(std::string("")) && !nu::kvEstimateRequest(std::string("AUTO")));
+        for (const KvFormat k : {KvFormat::f16, KvFormat::q8, KvFormat::q8h, KvFormat::q8v, KvFormat::q4})
+            CHECK(nu::kvEstimateRequest(std::string(whirl::kvFormatName(k))) == k);
+    }
     // the estimate caps themselves (the literals they replaced at loader.cpp:492, server_main.cpp:810 / :922)
     CHECK(nu::kvCapsEstimate(false).q8h && nu::kvCapsEstimate(false).q8v && nu::kvCapsEstimate(false).q4 && !nu::kvCapsEstimate(false).fast_q8h);
     CHECK(nu::kvCapsEstimate(true).q8h && nu::kvCapsEstimate(true).q8v && nu::kvCapsEstimate(true).q4 && nu::kvCapsEstimate(true).fast_q8h);

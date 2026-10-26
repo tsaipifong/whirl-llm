@@ -63,12 +63,24 @@ def selftest(root: str) -> int:
     h = open(os.path.join(root, "include", "whirl", "model.h"), encoding="utf-8").read()
     d = open(os.path.join(root, "src", "model", "exec_dump.cpp"), encoding="utf-8").read()
     fails = 0
+    # the injection point: the first scalar member line of class Model (arch025-N3-r1: the fixed anchor
+    # "bool use_graph = true;" left Model in arch025-N2b, so both injection cases checked the unchanged tree)
+    body_at = h.index("class Model {")
+    anchor = next((ln + "\n" for ln in h[body_at:].split("\n") if DECL.match(ln.split("//")[0])), None)
+    if anchor is None:
+        print("exec dump check selftest: FAIL (no scalar member line in class Model to inject after)")
+        return 1
+    at = h.index(anchor, body_at) + len(anchor)
+    drop = "    WD_U(fd_splits);\n"
     cases = [
         ("the tree passes", h, d, 0),
-        ("a new bool member fails", h.replace("    bool use_graph = true;\n", "    bool use_graph = true;\n    bool s0a_new_flag = false;\n", 1), d, 1),
-        ("a new multi-name member fails", h.replace("    bool use_graph = true;\n", "    std::uint32_t s0a_a = 0, s0a_b = 0;\n    bool use_graph = true;\n", 1), d, 1),
-        ("a flag dropped from the dump fails", h, d.replace("    WD_U(fd_splits);\n", "", 1), 1),
+        ("a new bool member fails", h[:at] + "    bool s0a_new_flag = false;\n" + h[at:], d, 1),
+        ("a new multi-name member fails", h[:at] + "    std::uint32_t s0a_a = 0, s0a_b = 0;\n" + h[at:], d, 1),
+        ("a flag dropped from the dump fails", h, d.replace(drop, "", 1), 1),
     ]
+    if drop not in d:
+        print(f"exec dump check selftest: FAIL (exec_dump.cpp has no {drop.strip()!r} line to drop)")
+        return 1
     for name, hh, dd, want in cases:
         lines: list[str] = []
         rc = check(hh, dd, out=lines.append)

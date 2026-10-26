@@ -806,12 +806,8 @@ int serveMain(int argc, char** argv, const char* program) {
             fi.fixed += (est.weights + fi.fixed) / 25;
             // the mode's KV format (numerics::chooseKv; the code object is not loaded yet: only dGPUs
             // reach here, and the R9700 code object has q4 KV kernels since FC-1c)
-            const auto kv_env = env("KV");
-            const numerics::KvCaps caps_est = numerics::kvCapsEstimate(false);
-            const std::optional<KvFormat> kv_forced = kv_env && *kv_env != "auto" ? kvFormatFromName(*kv_env) : std::nullopt;
-            const KvFormat kv_est =
-                dump::kv("server.est_dgpu", nreq, cfg.moe, caps_est, kv_forced, numerics::chooseKv(nreq, cfg.moe, caps_est, kv_forced))
-                    .kv;  // (WHIRL_DUMP_KV: one "D kv:" line, arch025-S0a)
+            // (WHIRL_DUMP_KV: one "D kv: site=server.est_dgpu" line, arch025-S0a)
+            const KvFormat kv_est = numerics::kvEstimate(numerics::KvEstSite::server_dgpu, nreq, cfg.moe, numerics::kvEstimateRequest(env("KV")));
             // (q4 KV uses 256 attention splits: more split-K partial buffers)
             const std::uint32_t fd_splits_est = qwen35::resolveFdSplits(kv_est);
             const std::uint64_t b2 = qwen35::bufferBytes(cfg, 2048, est.ffs, est.max_elems, fd_splits_est);
@@ -821,10 +817,7 @@ int serveMain(int argc, char** argv, const char* program) {
             // (WHIRL_CKPT_HOST=1: checkpoints in pinned host memory, no VRAM)
             fi.ckpt_bytes = envOn("CKPT_HOST", false) ? 0 : st1 + static_cast<std::uint64_t>(cfg.n_embd) * 4 + static_cast<std::uint64_t>(cfg.n_vocab) * 4;
             fi.parallel = opt.parallel;
-            fi.kv_per_token = kv_est == KvFormat::f16   ? est.kv_f16
-                              : kv_est == KvFormat::q8v ? est.kv_q8v
-                              : kv_est == KvFormat::q4  ? est.kv_q4
-                                                                : est.kv_q8h;
+            fi.kv_per_token = est.kvPerToken(kv_est);
             fi.pool_min_tokens = pool_req ? *pool_req : std::min<std::uint32_t>(slot_ctx, vram_tight_pool);
             fi.batch = lo.max_batch;
             fi.n_ck = static_cast<std::uint32_t>(n_ck);
@@ -917,12 +910,8 @@ int serveMain(int argc, char** argv, const char* program) {
             const std::uint64_t pend1 = n_gdn_c * (static_cast<std::uint64_t>(qwen35::max_small_batch) * cfg.convCh() * 4 +
                                                    static_cast<std::uint64_t>(qwen35::max_small_batch) * cfg.n_v_heads *
                                                        (cfg.d_state + cfg.headV() + 2) * 4);
-            const auto kv_env = env("KV");
-            const numerics::KvCaps caps_est = numerics::kvCapsEstimate(true);
-            const std::optional<KvFormat> kv_forced = kv_env && *kv_env != "auto" ? kvFormatFromName(*kv_env) : std::nullopt;
-            const KvFormat kv_est =
-                dump::kv("server.est_uma", nreq, cfg.moe, caps_est, kv_forced, numerics::chooseKv(nreq, cfg.moe, caps_est, kv_forced))
-                    .kv;  // (WHIRL_DUMP_KV)
+            // (WHIRL_DUMP_KV: one "D kv: site=server.est_uma" line)
+            const KvFormat kv_est = numerics::kvEstimate(numerics::KvEstSite::server_uma, nreq, cfg.moe, numerics::kvEstimateRequest(env("KV")));
             const std::uint64_t ck = st1 + static_cast<std::uint64_t>(cfg.n_embd) * 4 + static_cast<std::uint64_t>(cfg.n_vocab) * 4;
             hip::UmaNeed need;
             need.weights = est.weights + (use_dflash && dfile ? qwen35::dflashWeightBytes(*dfile) : 0);
@@ -935,10 +924,7 @@ int serveMain(int argc, char** argv, const char* program) {
             const std::uint64_t ck_b = (opt.parallel * n_ck + n_spe_plan) * ck;
             need.fixed = need.weights + est.state + bufs + slots_b + ck_b + (est.has_mtp ? 65536ull * cfg.n_embd * 5 / 16 : 0) + (256ull << 20);
             need.fixed += need.fixed / 12;  // +8%: measured fast-mode Swift fixed part 3.9% above the itemized sum
-            need.kv_per_token = kv_est == KvFormat::f16   ? est.kv_f16
-                                : kv_est == KvFormat::q8v ? est.kv_q8v
-                                : kv_est == KvFormat::q4  ? est.kv_q4
-                                                                  : est.kv_q8h;
+            need.kv_per_token = est.kvPerToken(kv_est);
             need.min_tokens = opt.ctx ? *opt.ctx : slot_ctx;
             need.want_tokens = pool_req ? *pool_req : slot_ctx;
             const double g = 1024.0 * 1024.0 * 1024.0;
