@@ -350,6 +350,25 @@ void testGdn(Ctx& c) {
                     c.rep.add(cmpExact("gdn_sx_scan run-to-run final state (bitwise)", s, s1));
                 }
             }
+            // feat026-barrierdrain: WHIRL_KT_BD_HSACO = a WHIRL_BARDRAIN candidate object: its gdn_sx_scan on the
+            // same prep output == this object's, bitwise (3 repeats); absent -> no result
+            if (const hip::Function xs = xFn(c, "WHIRL_KT_BD_HSACO", "gdn_sx_scan")) {
+                std::size_t xbad = 0;
+                for (int rep = 0; rep < 3; ++rep) {
+                    Buf dst(state0), dout(out.size() * 4);
+                    hip::launch(xs, {kNv, 1, 1}, {256, 1, 1}, 0, c.s, Qh.p(), Kh.p(), Vh.p(), dst.p(), dout.p(), dst.p(), T.p(), P.p(),
+                                Gb.p(), kNv, kNk, n, n32, kScale, DevPtr{0}, DevPtr{0}, DevPtr{0}, DevPtr{0}, 0.0f, false);
+                    c.sync();
+                    xbad += dout.down<float>(out.size()) != o1 || dst.down<float>(st.size()) != s1;
+                }
+                Result r;
+                r.name = "gdn_sx_scan candidate object == shipped (out + state, 3 runs)";
+                r.kind = Kind::invariant;
+                r.n = 3;
+                r.mismatches = xbad;
+                r.pass = xbad == 0;
+                c.rep.add(r);
+            }
         }
     }
 
@@ -517,6 +536,37 @@ void testGdn(Ctx& c) {
             r.n = static_cast<std::size_t>(n);
             r.mismatches = bad;
             r.pass = bad == 0;
+            c.rep.add(r);
+        }
+        // feat026-barrierdrain: WHIRL_KT_BD_HSACO = a WHIRL_BARDRAIN candidate object: its gdn_step_norm on the
+        // segment == this object's (out, xq, xd, state, every snapshot), bitwise, 3 repeats; absent -> no result
+        if (const hip::Function xs = xFn(c, "WHIRL_KT_BD_HSACO", "gdn_step_norm")) {
+            std::size_t xbad = 0;
+            for (int rep = 0; rep < 3; ++rep) {
+                Buf st_x(state0), y_x(no * 4), q_x(no), d_x(no / 32 * 4);
+                std::vector<Buf> xsnap;
+                wk::GdnSegs sx;
+                sx.s[0].state = st_x.p();
+                sx.s[0].nrows = n;
+                for (int t = 0; t < n; ++t) {
+                    xsnap.emplace_back(sbytes);
+                    sx.s[0].snap[t] = xsnap.back().p();
+                }
+                step(xs, sx, 1, y_x.p(), q_x.p(), d_x.p());
+                c.sync();
+                bool same = y_x.down<float>(no) == ya && q_x.down<std::int8_t>(no) == q_a.down<std::int8_t>(no) &&
+                            d_x.down<float>(no / 32) == d_a.down<float>(no / 32) &&
+                            st_x.down<float>(state0.size()) == st_a.down<float>(state0.size());
+                for (int t = 0; t < n; ++t)
+                    same = same && xsnap[static_cast<std::size_t>(t)].down<float>(state0.size()) == ssnap[static_cast<std::size_t>(t)].down<float>(state0.size());
+                xbad += !same;
+            }
+            Result r;
+            r.name = "gdn_step_norm candidate object == shipped (out, xq, xd, state, snapshots; 3 runs)";
+            r.kind = Kind::invariant;
+            r.n = 3;
+            r.mismatches = xbad;
+            r.pass = xbad == 0;
             c.rep.add(r);
         }
         if (fv0) {

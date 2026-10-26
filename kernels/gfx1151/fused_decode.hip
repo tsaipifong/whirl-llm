@@ -166,6 +166,29 @@ extern "C" __global__ void __launch_bounds__(128)
 // Block = one v head of one segment (grid.y), 512 threads = 128 columns j x
 // 4 key-dim quarters. Thread (j, qi) keeps S[i][j] for i in [32 qi, 32 qi + 32)
 // in registers.
+#include "lds_barrier.h"  // feat026-barrierdrain: WHIRL_BARDRAIN bit 4 = gdn_step_norm LDS-only barriers
+#if WHIRL_BARDRAIN & 4
+// block_sum (common.hip) with the LDS-only barrier: same reduction order and values
+__device__ __forceinline__ float gdnsn_block_sum(float v) {
+    __shared__ float sh[32];
+    const int lane = threadIdx.x % WARP, wid = threadIdx.x / WARP;
+    v = warp_sum(v);
+    whirl_lds_barrier();
+    if (lane == 0) sh[wid] = v;
+    whirl_lds_barrier();
+    const int nw = (blockDim.x + WARP - 1) / WARP;
+    v = (threadIdx.x < nw) ? sh[threadIdx.x] : 0.0f;
+    if (wid == 0) v = warp_sum(v);
+    if (threadIdx.x == 0) sh[0] = v;
+    whirl_lds_barrier();
+    return sh[0];
+}
+#define GDNSN_BAR() whirl_lds_barrier()
+#define GDNSN_BSUM(x) gdnsn_block_sum(x)
+#else
+#define GDNSN_BAR() __syncthreads()
+#define GDNSN_BSUM(x) block_sum(x)
+#endif
 extern "C" __global__ void __launch_bounds__(512)
     gdn_step_norm(const float *qkv, const float *g, const float *beta, const float *z, const float *wn, float *out,
                   int8_t *xq, float *xd, int n_k_heads, float scale, float eps, int n_v_heads, int qkv_stride,
@@ -187,12 +210,12 @@ extern "C" __global__ void __launch_bounds__(512)
     for (int tl = 0; tl < n_tok; ++tl) {
         const int t = r0 + tl;
         const float *row = qkv + (size_t)t * qkv_stride;
-        __syncthreads();
+        GDNSN_BAR();
         if (threadIdx.x < DK) {
             qs[threadIdx.x] = row[(size_t)kh * DK + threadIdx.x];
             ks[threadIdx.x] = row[(size_t)n_k_heads * DK + (size_t)kh * DK + threadIdx.x];
         }
-        __syncthreads();
+        GDNSN_BAR();
         const float decay = __expf(g[(size_t)t * n_v_heads + h]);
         float sk = 0.f;
 #pragma unroll
@@ -201,7 +224,7 @@ extern "C" __global__ void __launch_bounds__(512)
             sk += S[e] * ks[qi * PER + e];
         }
         red[qi][j] = sk;
-        __syncthreads();
+        GDNSN_BAR();
         sk = red[0][j] + red[1][j] + red[2][j] + red[3][j];
         const float v = row[(size_t)2 * n_k_heads * DK + (size_t)h * DV + j];
         const float delta = (v - sk) * beta[(size_t)t * n_v_heads + h];
@@ -217,14 +240,14 @@ extern "C" __global__ void __launch_bounds__(512)
 #pragma unroll
             for (int e = 0; e < PER; ++e) Ss[(size_t)(qi * PER + e) * DV + j] = S[e];
         }
-        __syncthreads();
+        GDNSN_BAR();
         red[qi][j] = o;
-        __syncthreads();
+        GDNSN_BAR();
         if (qi == 0) ov[j] = (red[0][j] + red[1][j] + red[2][j] + red[3][j]) * scale;
-        __syncthreads();
+        GDNSN_BAR();
         float y = 0.f;
         if (threadIdx.x < DV) y = ov[threadIdx.x];
-        const float ss = block_sum(threadIdx.x < DV ? y * y : 0.f);
+        const float ss = GDNSN_BSUM(threadIdx.x < DV ? y * y : 0.f);
         if (threadIdx.x < DV) {
             const float r = rsqrtf(ss / DV + eps);
             const float zz = z[(size_t)t * d_inner + (size_t)h * DV + threadIdx.x];

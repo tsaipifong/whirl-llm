@@ -516,6 +516,51 @@ void benchGemm(Env& e) {
             };
             runCell(e, k);
         }
+        // small-batch GEMMs (gemms_c*: short prompts, precise verify rows) at the token count of their tile
+        // (feat026-barrierdrain: gemms_c5..c7 = gemmsd on gfx1201); n <= the 2048-token activations above
+        if (ncols % 256 == 0)
+            for (std::size_t si = 0; si < c.k.gemms.size(); ++si) {
+                const hip::Function fs = c.k.gemms[si][ti];
+                if (!fs) continue;
+                const wk::GemmCfg sc = c.k.gemms_geom[si];
+                const int ns = sc.bn;
+                const std::string kn = "gemms_c" + std::to_string(si) + "_" + sfx;
+                Cell k;
+                k.ci = e.info("gemm", kn, w.label + "." + shortName(tn) + ".n" + std::to_string(ns), shapeStr(nrows, ncols));
+                k.ci.settings = e.settings(static_cast<std::uint64_t>(wc.n()) * m.data.size(), wc.n());
+                k.ci.flops = 2.0 * ns * nrows * ncols;
+                k.ci.bytes = static_cast<double>(m.data.size());
+                k.kernel = kn;
+                k.fa = fs;
+                k.call = [&c, &wc, &x16, &y, sc, rb, ncols, nrows, ns](hip::Function f, std::uint64_t r) {
+                    hip::launch(f, {cdiv(ns, sc.bn), cdiv(nrows, sc.bm), 1}, {static_cast<unsigned>(sc.nth), 1, 1}, 0, c.s, wc.at(r), rb, x16.p(),
+                                y.p(), ncols, nrows, ns, 0);
+                };
+                k.run = [&c, &k, &y, ns, nrows](hip::Function f) {
+                    y.fill(0xff);
+                    k.call(f, 0);
+                    c.sync();
+                    return y.down<float>(static_cast<std::size_t>(ns) * nrows);
+                };
+                const std::vector<float> ref0 = [&] {
+                    Buf yr(static_cast<std::size_t>(ns) * nrows * 4);
+                    hip::launch(c.k.gemmc[0][ti], {cdiv(ns, c0.bn), cdiv(nrows, c0.bm), 1}, {static_cast<unsigned>(c0.nth), 1, 1}, 0, c.s, wc.at(0), rb,
+                                x16.p(), yr.p(), ncols, nrows, ns, 0);
+                    c.sync();
+                    return yr.down<float>(static_cast<std::size_t>(ns) * nrows);
+                }();
+                k.verify = [ref0, kn](const std::vector<float>& got) {
+                    // gemms == gemm_c0 bitwise (the class rule of every prefill GEMM choice)
+                    Result r;
+                    r.name = kn + " == gemm_c0 (bitwise)";
+                    r.kind = Kind::invariant;
+                    r.n = got.size();
+                    r.mismatches = got.size() == ref0.size() && std::memcmp(got.data(), ref0.data(), got.size() * 4) == 0 ? 0 : 1;
+                    r.pass = r.mismatches == 0;
+                    return r;
+                };
+                if (c.k.gemmc[0][ti]) runCell(e, k);
+            }
     }
 }
 
@@ -930,6 +975,76 @@ void benchGdn(Env& e) {
         return cmpTol("out + state vs CPU delta rule + gated norm", got, ref, sc, 1e-4, 1e-5);
     };
     runCell(e, k);
+
+    // MTP verify shape (feat026-barrierdrain): a 4-row segment with the per-row rollback snapshots written, as the
+    // verify of 3 drafts does; reference = 4 single-row launches of this object's kernel (the segment == row-by-row
+    // invariant of test_gdn), bitwise
+    constexpr int NR = 4;
+    std::vector<float> qkv4 = c.randn(static_cast<std::size_t>(NR) * ch);
+    for (int t = 0; t < NR; ++t)
+        for (int hh = 0; hh < 2 * nk; ++hh) {
+            float* p = qkv4.data() + static_cast<std::size_t>(t) * ch + static_cast<std::size_t>(hh) * dk;
+            double s = 0;
+            for (int i = 0; i < dk; ++i) s += static_cast<double>(p[i]) * p[i];
+            const float r = static_cast<float>(1.0 / std::sqrt(s));
+            for (int i = 0; i < dk; ++i) p[i] *= r;
+        }
+    auto dq4 = std::make_shared<Buf>(qkv4), dg4 = std::make_shared<Buf>(c.randu(static_cast<std::size_t>(NR) * nv, -1.5f, -0.01f)),
+         db4 = std::make_shared<Buf>(c.randu(static_cast<std::size_t>(NR) * nv, 0.05f, 0.95f)),
+         dz4 = std::make_shared<Buf>(c.randn(static_cast<std::size_t>(NR) * dinner));
+    auto out4 = std::make_shared<Buf>(static_cast<std::size_t>(NR) * dinner * 4), xq4 = std::make_shared<Buf>(static_cast<std::size_t>(NR) * dinner),
+         xd4 = std::make_shared<Buf>(static_cast<std::size_t>(NR) * dinner / 32 * 4);
+    auto snaps = std::make_shared<std::vector<Buf>>();
+    for (int t = 0; t < NR; ++t) snaps->emplace_back(sbytes);
+    auto launch4 = [&c, dq4, dg4, db4, dz4, dwn, out4, xq4, xd4, snaps](hip::Function f, DevPtr st, int row0, int nrows, bool snap) {
+        wk::GdnSegs s;
+        s.s[0].state = st;
+        s.s[0].row0 = row0;
+        s.s[0].nrows = nrows;
+        if (snap)
+            for (int t = 0; t < nrows; ++t) s.s[0].snap[t] = (*snaps)[static_cast<std::size_t>(t)].p();
+        hip::launch(f, {nv, 1, 1}, {512, 1, 1}, 0, c.s, dq4->p(), dg4->p(), db4->p(), dz4->p(), dwn->p(), out4->p(), xq4->p(), xd4->p(), nk, scale,
+                    eps, nv, ch, s);
+    };
+    std::vector<float> ref4;
+    {
+        Buf st(state0);
+        out4->fill(0xff);
+        for (int t = 0; t < NR; ++t) launch4(c.k.gdn_step_norm, st.p(), t, 1, false);
+        c.sync();
+        ref4 = out4->down<float>(static_cast<std::size_t>(NR) * dinner);
+        const auto sv = st.down<float>(state0.size());
+        ref4.insert(ref4.end(), sv.begin(), sv.end());
+    }
+    Cell k4;
+    k4.ci = e.info("gdn", "gdn_step_norm", "swift.verify.n4", "nk16_nv48_dk128_dv128");
+    k4.ci.settings = e.settings(sbytes * static_cast<std::uint64_t>(R), R);
+    k4.ci.bytes = (2.0 + NR) * static_cast<double>(sbytes);
+    k4.kernel = "gdn_step_norm";
+    k4.fa = c.k.gdn_step_norm;
+    k4.call = [launch4, states](hip::Function f, std::uint64_t r) {
+        launch4(f, (*states)[static_cast<std::size_t>(r % states->size())].p(), 0, NR, true);
+    };
+    k4.run = [&c, launch4, out4, &state0](hip::Function f) {
+        Buf st(state0);
+        out4->fill(0xff);
+        launch4(f, st.p(), 0, NR, true);
+        c.sync();
+        std::vector<float> o = out4->down<float>(static_cast<std::size_t>(NR) * dinner);
+        const auto sv = st.down<float>(state0.size());
+        o.insert(o.end(), sv.begin(), sv.end());
+        return o;
+    };
+    k4.verify = [ref4](const std::vector<float>& got) {
+        Result r;
+        r.name = "4-row segment (snapshots on) == 4 single-row launches (out + state, bitwise)";
+        r.kind = Kind::invariant;
+        r.n = got.size();
+        r.mismatches = got.size() == ref4.size() && std::memcmp(got.data(), ref4.data(), got.size() * 4) == 0 ? 0 : 1;
+        r.pass = r.mismatches == 0;
+        return r;
+    };
+    runCell(e, k4);
 }
 
 }  // namespace

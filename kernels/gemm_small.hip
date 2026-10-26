@@ -14,6 +14,12 @@
 template <int T> constexpr int t2_sbb() { return 256 / Q<T>::blk * Q<T>::bytes; }
 typedef unsigned int t2_u32x4 __attribute__((ext_vector_type(4)));
 #include "gemm_small_addr.h"  // CH and which W chunks a stage loads (shared with the unit tests)
+#include "lds_barrier.h"     // feat026-barrierdrain: WHIRL_BARDRAIN bit 1 = gemmsd LDS-only barriers
+#if WHIRL_BARDRAIN & 1
+#define GEMMSD_BAR() whirl_lds_barrier()
+#else
+#define GEMMSD_BAR() __syncthreads()
+#endif
 
 template <int T, int BM, int BN, int NTH, int WAVES_M, bool OH>
 __device__ __forceinline__ void gemms_impl(const uint8_t *__restrict__ W, uint64_t row_bytes, const _Float16 *__restrict__ X,
@@ -217,23 +223,23 @@ __device__ __forceinline__ void gemmsd_impl(const uint8_t *__restrict__ W, uint6
     fetch_w(0);
     fetch_x(rx0, 0);
     for (int js = 0; js < nst; ++js) {
-        __syncthreads();
+        GEMMSD_BAR();
 #pragma unroll
         for (int e = 0; e < WPER; ++e) {
             const int idx = tid + e * NTH;
             if (WCH % NTH == 0 || idx < WCH) *(t2_u32x4 *)&Wr[(idx / CH) * SLOT + (idx % CH) * 16] = rw[e];
         }
         store_x(rx0);
-        __syncthreads();
+        GEMMSD_BAR();
         fetch_x(rx1, js * 256 + 128);
         if (js + 1 < nst) fetch_w(js + 1);
         decode(js, 0);
-        __syncthreads();
+        GEMMSD_BAR();
         compute();
-        __syncthreads();
+        GEMMSD_BAR();
         store_x(rx1);
         decode(js, 1);
-        __syncthreads();
+        GEMMSD_BAR();
         if (js + 1 < nst) fetch_x(rx0, (js + 1) * 256);
         compute();
     }

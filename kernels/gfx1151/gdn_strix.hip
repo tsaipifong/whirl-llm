@@ -244,6 +244,12 @@ static __device__ __forceinline__ uint16_t ggml_cuda_f32_to_bf16_rne(const float
 // (on_z != nullptr) is kept as in strix but WHIRL passes on_z = nullptr: a rewrite without that branch spilled
 // twice as much and ran 1.7x slower (GDN-8S tier 0).
 // out (dst): [n_tokens][H][128].
+#include "lds_barrier.h"  // feat026-barrierdrain: WHIRL_BARDRAIN bit 2 = gdn_sx_scan LDS-only barriers
+#if WHIRL_BARDRAIN & 2
+#define GDNSX_BAR() whirl_lds_barrier()
+#else
+#define GDNSX_BAR() __syncthreads()
+#endif
 extern "C" __global__ void __launch_bounds__(256, 6)
 gdn_sx_scan(const _Float16 * __restrict__ Qh, const _Float16 * __restrict__ Kh, const _Float16 * __restrict__ Vh,
         const float * __restrict__ curr_state, float * __restrict__ dst, float * __restrict__ state,
@@ -327,7 +333,7 @@ gdn_sx_scan(const _Float16 * __restrict__ Qh, const _Float16 * __restrict__ Kh, 
 
     for (int ch = 0; ch < nch; ++ch) {
         const int t0 = ch * CL;
-        __syncthreads();
+        GDNSX_BAR();
 #pragma unroll
         for (int j = 0; j < NQK; ++j) {
             const int idx = tid + 256 * j, r = idx >> 5, i = (idx & 31) * 4;
@@ -345,7 +351,7 @@ gdn_sx_scan(const _Float16 * __restrict__ Qh, const _Float16 * __restrict__ Kh, 
             *(uint4 *) ((idx < CL * CL / 8 ? Ts : Ps) + r * ST + c8) = ptp[j];
         }
         if (tid < CL) Gs[tid] = pg;
-        __syncthreads();
+        GDNSX_BAR();
         // unconditional (clamped): a branch here makes the compiler drain the prefetch before the compute
         prefetch(min(ch + 1, nch - 1));
 
@@ -430,7 +436,7 @@ gdn_sx_scan(const _Float16 * __restrict__ Qh, const _Float16 * __restrict__ Kh, 
                     p += __shfl_xor(p, 1, 32); p += __shfl_xor(p, 2, 32); p += __shfl_xor(p, 4, 32); p += __shfl_xor(p, 8, 32);
                     if (cl == 0) red[rt * 16 + 2 * e + rh][wave] = p;
                 }
-            __syncthreads();
+            GDNSX_BAR();
             const float wc = on_w[col];
 #pragma unroll
             for (int rt = 0; rt < NT; ++rt)

@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdlib>
 #include <stdexcept>
 
 namespace kt {
@@ -370,6 +371,30 @@ std::vector<HostMat> sampleMats(Ctx& c, int max_rows) {
     out.push_back(randomMat(c, QType::f16, std::min(max_rows, 512), 4096));
     out.push_back(randomMat(c, QType::f32, std::min(max_rows, 512), 4096));
     return out;
+}
+
+hip::Function xFn(const Ctx& c, const char* env, const std::string& name) {
+    static std::map<std::string, std::pair<std::vector<char>, std::unique_ptr<hip::Module>>> mods;
+    const char* path = std::getenv(env);
+    if (path == nullptr || *path == 0) return nullptr;
+    auto it = mods.find(path);
+    if (it == mods.end()) {
+        std::vector<char> image;
+        if (std::FILE* fp = std::fopen(path, "rb")) {
+            std::fseek(fp, 0, SEEK_END);
+            image.resize(static_cast<std::size_t>(std::ftell(fp)));
+            std::fseek(fp, 0, SEEK_SET);
+            if (std::fread(image.data(), 1, image.size(), fp) != image.size()) image.clear();
+            std::fclose(fp);
+        }
+        std::unique_ptr<hip::Module> m;
+        if (!image.empty()) {
+            m = std::make_unique<hip::Module>(hip::Module::loadData(image.data(), c.mod.arch()));
+            std::printf("   %s: kernels from %s\n", env, path);
+        }
+        it = mods.emplace(path, std::make_pair(std::move(image), std::move(m))).first;
+    }
+    return it->second.second ? it->second.second->getFunctionOpt(name.c_str()) : nullptr;
 }
 
 }  // namespace kt

@@ -12,6 +12,7 @@
 
 #include "cpu_ref.h"
 
+#include <cstdlib>
 #include <functional>
 
 namespace kt {
@@ -285,6 +286,53 @@ void testGemm(Ctx& c) {
         r.pass = bad == 0;
         if (!first_bad.empty()) r.note = "first " + first_bad;
         c.rep.add(r);
+
+        // feat026-barrierdrain: WHIRL_KT_BD_HSACO = a WHIRL_BARDRAIN candidate code object: its gemms_c* /
+        // gemmsh_c* give the same bits as this object's at n = 1, 17, 64, 96, 128, 200 (3 repeats each, to
+        // catch a barrier race); absent -> no result.
+        if (ncols % 256 == 0 && std::getenv("WHIRL_KT_BD_HSACO") != nullptr) {
+            std::size_t xn = 0, xbad = 0;
+            std::string xfirst;
+            for (int si = 0; si < static_cast<int>(wk::kGemmsCfgs.size()); ++si) {
+                const auto& cf = c.k.gemms_geom[static_cast<std::size_t>(si)];
+                const std::string nm = "gemms_c" + std::to_string(si) + "_" + sfx;
+                const hip::Function xf = xFn(c, "WHIRL_KT_BD_HSACO", nm);
+                if (xf && c.k.gemms[si][ti]) {
+                    for (int nt : {1, 17, 64, 96, 128, n}) {
+                        const std::vector<float> a = g.run(c.k.gemms[si][ti], cf.bm, cf.bn, cf.nth, nt);
+                        for (int rep = 0; rep < 3; ++rep) {
+                            const std::vector<float> b = g.run(xf, cf.bm, cf.bn, cf.nth, nt);
+                            ++xn;
+                            if (std::memcmp(a.data(), b.data(), a.size() * 4) != 0) {
+                                ++xbad;
+                                if (xfirst.empty()) xfirst = nm + " n=" + std::to_string(nt);
+                            }
+                        }
+                    }
+                }
+                const std::string nmh = "gemmsh_c" + std::to_string(si) + "_" + sfx;
+                const hip::Function xh = xFn(c, "WHIRL_KT_BD_HSACO", nmh);
+                if (xh && c.k.gemmsh[si][ti]) {
+                    const std::vector<std::uint16_t> a = g.runH(c.k.gemmsh[si][ti], w.p(), m.row_bytes, cf.bm, cf.bn, cf.nth);
+                    for (int rep = 0; rep < 3; ++rep) {
+                        ++xn;
+                        if (g.runH(xh, w.p(), m.row_bytes, cf.bm, cf.bn, cf.nth) != a) {
+                            ++xbad;
+                            if (xfirst.empty()) xfirst = nmh;
+                        }
+                    }
+                }
+            }
+            Result xr;
+            xr.name = "gemms / gemmsh candidate object == shipped (" + std::to_string(xn) + " runs) " + m.name;
+            xr.kind = Kind::invariant;
+            xr.n = xn;
+            xr.mismatches = xbad;
+            xr.pass = xn > 0 && xbad == 0;
+            if (!xfirst.empty()) xr.note = "first " + xfirst;
+            if (xn == 0) xr.note = "no candidate kernel found";
+            c.rep.add(xr);
+        }
 
         // Precise decode (P-8): the small-batch / verify matmuls of precise mode run these same
         // f16 GEMMs (gemms_c*, gemm_c* on the quantized bytes) at n = 1..32. Every token row
