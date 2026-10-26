@@ -433,6 +433,21 @@ __device__ __forceinline__ half8 dec_group_h<QT_Q3_K>(const uint8_t *row, int g)
     return h;
 }
 
+// feat026-gemmc2spill (tune id WHIRL_C2SPILL, bit mask; 0 = the shipped code, unchanged):
+//   bit 1: the gemm_c2_f16 configuration (256x128, k64, WAVES_M 4, 256 threads): LDS staging stores from ONE base
+//          offset plus compile-time row steps (llama.cpp mmq load_tiles / CK slice-window style) instead of one address
+//          register per store; at 0 the 12 per-store addresses push gemm_c2_f16 to 256 VGPRs + 3 spilled (one scratch
+//          reload inside the K loop, between the two barriers).
+//   bit 2: the same for the gemm_c0 configuration (128x256, k64, WAVES_M 4, 512 threads; its quantized fused-dequant
+//          entries spill 3-6 VGPRs at 0: f32 -> 0, mxfp4 3 -> 1, q4_k 6 -> 4, ...).
+//   bit 4: the same for every other gemm3_impl configuration (mixed: removes some spills, adds others, e.g. gemm_c12
+//          mxfp4 0 -> 27 spilled; research only, compile-time measurement in research\gemmc2spill).
+// Bit-identical by construction: the same registers are stored to the same LDS addresses ((tid + e*NTH) / GPR =
+// tid / GPR + e*NTH/GPR because NTH % GPR == 0; the column is unchanged); fetch, WMMA chain and epilogue untouched.
+#ifndef WHIRL_C2SPILL
+#define WHIRL_C2SPILL 0
+#endif
+
 template <int T, int BM, int BN, int BK, int WAVES_M, int MODE = 0, int NTH = 256, bool TOK_X = false>
 __device__ void gemm3_impl(const uint8_t *__restrict__ W, uint64_t row_bytes, const _Float16 *__restrict__ X,
                            float *__restrict__ Y, int ncols, int nrows, int n_tok, int accumulate) {
@@ -443,6 +458,10 @@ __device__ void gemm3_impl(const uint8_t *__restrict__ W, uint64_t row_bytes, co
     constexpr int A_PER = BM * GPR / NTH;         // groups per thread (weights)
     constexpr int B_PER = BN * GPR / NTH;         // groups per thread (activations)
     static_assert(BM * GPR % NTH == 0 && BN * GPR % NTH == 0, "tile/threads");
+    constexpr bool kC2sIsC2 = BM == 256 && BN == 128 && BK == 64 && WAVES_M == 4 && NTH == 256;
+    constexpr bool kC2sIsC0 = BM == 128 && BN == 256 && BK == 64 && WAVES_M == 4 && NTH == 512;
+    constexpr bool kC2sOneBase = ((WHIRL_C2SPILL & 1) != 0 && kC2sIsC2) || ((WHIRL_C2SPILL & 2) != 0 && kC2sIsC0) ||
+                                 ((WHIRL_C2SPILL & 4) != 0 && !kC2sIsC2 && !kC2sIsC0);
     __shared__ _Float16 As[BM][LD];
     __shared__ _Float16 Bs[BN][LD];
 
@@ -466,7 +485,7 @@ __device__ void gemm3_impl(const uint8_t *__restrict__ W, uint64_t row_bytes, co
         _Pragma("unroll") for (int e = 0; e < A_PER; ++e) {                                         \
             const int i = threadIdx.x + e * NTH;                                                    \
             const int r = i / GPR, gg = i % GPR;                                                    \
-            if (MODE == 1) {                                                                        \
+            if (MODE == 1) {                                                                  \
                 ra[e] = *(const half8 *)(W + (size_t)(m0 + r) * row_bytes + (((k0_) / 8 + gg) * 16) % row_bytes); \
             } else if (m0 + r < nrows) {                                                            \
                 ra[e] = dec_group_h<T>(W + (size_t)(m0 + r) * row_bytes, (k0_) / 8 + gg);            \
@@ -488,15 +507,27 @@ __device__ void gemm3_impl(const uint8_t *__restrict__ W, uint64_t row_bytes, co
     GEMM3_FETCH(0);
     for (int k0 = 0; k0 < ncols; k0 += BK) {
         __syncthreads();
+        if constexpr (kC2sOneBase) {
+            static_assert(NTH % GPR == 0, "one-base staging needs NTH % GPR == 0");
+            constexpr int RS = NTH / GPR * LD;  // halfs between store e and e + 1
+            const int so = (int)(threadIdx.x / GPR) * LD + (int)(threadIdx.x % GPR) * 8;
+            _Float16 *pa = &As[0][0] + so;
+            _Float16 *pb = &Bs[0][0] + so;
 #pragma unroll
-        for (int e = 0; e < A_PER; ++e) {
-            const int i = threadIdx.x + e * NTH;
-            *(half8 *)&As[i / GPR][(i % GPR) * 8] = ra[e];
-        }
+            for (int e = 0; e < A_PER; ++e) *(half8 *)(pa + e * RS) = ra[e];
 #pragma unroll
-        for (int e = 0; e < B_PER; ++e) {
-            const int i = threadIdx.x + e * NTH;
-            *(half8 *)&Bs[i / GPR][(i % GPR) * 8] = rb[e];
+            for (int e = 0; e < B_PER; ++e) *(half8 *)(pb + e * RS) = rb[e];
+        } else {
+#pragma unroll
+            for (int e = 0; e < A_PER; ++e) {
+                const int i = threadIdx.x + e * NTH;
+                *(half8 *)&As[i / GPR][(i % GPR) * 8] = ra[e];
+            }
+#pragma unroll
+            for (int e = 0; e < B_PER; ++e) {
+                const int i = threadIdx.x + e * NTH;
+                *(half8 *)&Bs[i / GPR][(i % GPR) * 8] = rb[e];
+            }
         }
         __syncthreads();
         if (k0 + BK < ncols) GEMM3_FETCH(k0 + BK);

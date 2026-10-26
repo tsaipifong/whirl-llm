@@ -10,7 +10,8 @@
 // Families (kernels):
 //   gemv  gemvq_<T> (int8 activations, n = 1)                 Swift dense weights  bytes = weight bytes
 //   gemvh gemvh_<T> (precise f16 activations, n = 1 / 4)      Swift dense weights  bytes = weight bytes
-//   gemm  gemmhq_<T>, gemm_c0_<T> (f16 activations, n = 2048) Swift dense weights  flops = 2 n rows cols
+//   gemm  gemmhq_<T>, gemm_c0_<T>, gemm_c2_f16 on dequantized f16 weights (f16 activations, n = 2048) Swift dense
+//         weights  flops = 2 n rows cols
 //   attn  attn_wsplit1 + attn_combine (f16 KV, 24 / 4 heads, hd 256, one decode query at L = 2k / 32k / 128k)
 //   moe   moe_gu_mxfp4[w], moe_down_mxfp4[w] (Ornith MXFP4 experts, n = 1, K routed experts per launch)
 //   gdn   gdn_step_norm (one decode row, 48 v heads x 128 x 128 state)
@@ -471,22 +472,41 @@ void benchGemm(Env& e) {
             std::string name;
             hip::Function f;
             int bm, bn, nth;
+            const DevCopies* wp = nullptr;  // weights (nullptr: the quantized copies wc)
+            std::uint64_t rbk = 0;          // their row bytes
         };
         const auto& c0 = wk::kGemmCfgs[0];
         std::vector<K> ks;
         if (c.k.gemmhq[ti]) ks.push_back({"gemmhq_" + sfx, c.k.gemmhq[ti], 128, 256, 256});
         if (c.k.gemmc[0][ti]) ks.push_back({"gemm_c0_" + sfx, c.k.gemmc[0][ti], c0.bm, c0.bn, c0.nth});
+        // feat026-gemmc2spill: gemm_c2_f16 on the f16 weights dequant_f16 makes (the 8060S dense prefill choice
+        // dequant + gemm_c2_f16 = tune choice G + 2); --ab with a WHIRL_C2SPILL candidate object times the candidate
+        const int f16i = static_cast<int>(QType::f16);
+        DevCopies w16c;
+        const std::uint64_t rb16 = static_cast<std::uint64_t>(ncols) * 2;
+        if (m.type != QType::f16 && c.k.gemmc[2][f16i] && wk::kGemmCfgs.size() > 2) {
+            std::vector<std::uint8_t> h16(static_cast<std::size_t>(nrows) * rb16);
+            for (int r = 0; r < nrows; ++r)
+                ref::dequantRowF16(m.type, m.data.data() + static_cast<std::size_t>(r) * m.row_bytes, ncols,
+                                   reinterpret_cast<std::uint16_t*>(h16.data() + static_cast<std::size_t>(r) * rb16));
+            w16c = upload(e, h16);
+            const auto& c2 = wk::kGemmCfgs[2];
+            ks.push_back({"gemm_c2_f16", c.k.gemmc[2][f16i], c2.bm, c2.bn, c2.nth, &w16c, rb16});
+        }
         if (ks.empty()) c.rep.skip("gemm", "bench gemm " + sfx, "kernel not in this code object");
         for (const K& kk : ks) {
             Cell k;
             k.ci = e.info("gemm", kk.name, w.label + "." + shortName(tn) + ".n" + std::to_string(n), shapeStr(nrows, ncols));
-            k.ci.settings = e.settings(static_cast<std::uint64_t>(wc.n()) * m.data.size(), wc.n());
+            const DevCopies& wk_ = kk.wp != nullptr ? *kk.wp : wc;
+            const std::uint64_t rbk = kk.wp != nullptr ? kk.rbk : rb;
+            const std::uint64_t wbytes = kk.wp != nullptr ? static_cast<std::uint64_t>(nrows) * rbk : m.data.size();
+            k.ci.settings = e.settings(static_cast<std::uint64_t>(wk_.n()) * wbytes, wk_.n());
             k.ci.flops = 2.0 * n * nrows * ncols;
             k.kernel = kk.name;
             k.fa = kk.f;
             const K g = kk;
-            k.call = [&c, &wc, &x16, &y, g, rb, ncols, nrows, n](hip::Function f, std::uint64_t r) {
-                hip::launch(f, {cdiv(n, g.bn), cdiv(nrows, g.bm), 1}, {static_cast<unsigned>(g.nth), 1, 1}, 0, c.s, wc.at(r), rb, x16.p(), y.p(),
+            k.call = [&c, &wk_, &x16, &y, g, rbk, ncols, nrows, n](hip::Function f, std::uint64_t r) {
+                hip::launch(f, {cdiv(n, g.bn), cdiv(nrows, g.bm), 1}, {static_cast<unsigned>(g.nth), 1, 1}, 0, c.s, wk_.at(r), rbk, x16.p(), y.p(),
                             ncols, nrows, n, 0);
             };
             k.run = [&c, &k, &y, n, nrows, cr, ct](hip::Function f) {

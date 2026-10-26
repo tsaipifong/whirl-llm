@@ -12,7 +12,11 @@
 
 #include "cpu_ref.h"
 
+#include <cstdio>
+#include <cstdlib>
 #include <functional>
+#include <map>
+#include <memory>
 
 namespace kt {
 
@@ -43,6 +47,32 @@ struct Gemm {
         return y.down<std::uint16_t>(static_cast<std::size_t>(n) * m.nrows);
     }
 };
+
+// feat026-gemmc2spill: kernel `name` of the code object at env WHIRL_KT_C2S_HSACO (a WHIRL_C2SPILL candidate object);
+// a null Function when the variable is unset, the file cannot be read or the kernel is absent. Loaded once, kept.
+hip::Function c2sFn(const Ctx& c, const std::string& name) {
+    static std::map<std::string, std::pair<std::vector<char>, std::unique_ptr<hip::Module>>> mods;
+    const char* path = std::getenv("WHIRL_KT_C2S_HSACO");
+    if (path == nullptr || *path == 0) return nullptr;
+    auto it = mods.find(path);
+    if (it == mods.end()) {
+        std::vector<char> image;
+        if (std::FILE* fp = std::fopen(path, "rb")) {
+            std::fseek(fp, 0, SEEK_END);
+            image.resize(static_cast<std::size_t>(std::ftell(fp)));
+            std::fseek(fp, 0, SEEK_SET);
+            if (std::fread(image.data(), 1, image.size(), fp) != image.size()) image.clear();
+            std::fclose(fp);
+        }
+        std::unique_ptr<hip::Module> mo;
+        if (!image.empty()) {
+            mo = std::make_unique<hip::Module>(hip::Module::loadData(image.data(), c.mod.arch()));
+            std::printf("   WHIRL_KT_C2S_HSACO: kernels from %s\n", path);
+        }
+        it = mods.emplace(path, std::make_pair(std::move(image), std::move(mo))).first;
+    }
+    return it->second.second ? it->second.second->getFunctionOpt(name.c_str()) : nullptr;
+}
 
 std::vector<std::uint16_t> toHalf(const std::vector<float>& v) {
     std::vector<std::uint16_t> h(v.size());
@@ -267,6 +297,57 @@ void testGemm(Ctx& c) {
                 c.sync();
                 check(y.down<float>(ref.size()), "gemmh_f16");
             }
+        }
+        // feat026-gemmc2spill: WHIRL_KT_C2S_HSACO = a WHIRL_C2SPILL candidate object: its gemm_c<i>_<T> and
+        // gemm_c<i>_f16 (on the dequantized w16) give the same bits as this object's at n = 1, 17, 127, 129, 200
+        // (partial token tiles on both sides of a 128-token tile); absent -> no result.
+        if (std::getenv("WHIRL_KT_C2S_HSACO") != nullptr) {
+            std::size_t xn = 0, xbad = 0;
+            std::string xfirst;
+            const int f16i = static_cast<int>(QType::f16);
+            auto sameBits = [](const std::vector<float>& u, const std::vector<float>& v) {
+                return u.size() == v.size() && std::memcmp(u.data(), v.data(), u.size() * 4) == 0;
+            };
+            for (int ci = 0; ci < static_cast<int>(wk::kGemmCfgs.size()); ++ci) {
+                const auto& cf = wk::kGemmCfgs[static_cast<std::size_t>(ci)];
+                const std::string nm = "gemm_c" + std::to_string(ci) + "_" + sfx;
+                const hip::Function xf = c2sFn(c, nm);
+                for (int nt : {1, 17, 127, 129, n}) {
+                    if (xf && c.k.gemmc[ci][ti]) {
+                        ++xn;
+                        if (!sameBits(g.run(xf, cf.bm, cf.bn, cf.nth, nt), g.run(c.k.gemmc[ci][ti], cf.bm, cf.bn, cf.nth, nt))) {
+                            ++xbad;
+                            if (xfirst.empty()) xfirst = nm + " n=" + std::to_string(nt);
+                        }
+                    }
+                    const std::string nmh = "gemm_c" + std::to_string(ci) + "_f16";
+                    const hip::Function xh = m.type != QType::f16 ? c2sFn(c, nmh) : nullptr;
+                    if (xh && c.k.gemmc[ci][f16i]) {
+                        auto run16 = [&](hip::Function f) {
+                            Buf y(static_cast<std::size_t>(nt) * nrows * 4);
+                            y.fill(0xff);
+                            hip::launch(f, {cdiv(nt, cf.bn), cdiv(nrows, cf.bm), 1}, {static_cast<unsigned>(cf.nth), 1, 1}, 0,
+                                        c.s, w16.p(), rb16, x16.p(), y.p(), ncols, nrows, nt, 0);
+                            c.sync();
+                            return y.down<float>(static_cast<std::size_t>(nt) * nrows);
+                        };
+                        ++xn;
+                        if (!sameBits(run16(xh), run16(c.k.gemmc[ci][f16i]))) {
+                            ++xbad;
+                            if (xfirst.empty()) xfirst = "dequant+" + nmh + " n=" + std::to_string(nt);
+                        }
+                    }
+                }
+            }
+            Result xr;
+            xr.name = "gemm_c candidate object (WHIRL_C2SPILL) == shipped (" + std::to_string(xn) + " runs) " + m.name;
+            xr.kind = Kind::invariant;
+            xr.n = xn;
+            xr.mismatches = xbad;
+            xr.pass = xn > 0 && xbad == 0;
+            if (!xfirst.empty()) xr.note = "first " + xfirst;
+            if (xn == 0) xr.note = "no candidate kernel found";
+            c.rep.add(xr);
         }
         // 40-token subset alone
         {
