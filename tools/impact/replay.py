@@ -72,6 +72,8 @@ for s in git("log", "--format=%h", "--no-merges", f"--skip={a.skip}", f"-{a.n}",
               "moved": sum(1 for n in r["notes"] if "moved / re-indented" in n), "defects": r.get("map_defects", []),
               # mt-p1 pass 5 (review4 C1): the evidence validate --pass-json needs for R-fallback-resolved (users found per
               # changed file; the changed product files) - absent with older tools, which then cannot pass that rule
-              "users": r.get("decl_users", {}), "files": sorted(prod)}
+              "users": r.get("decl_users", {}), "files": sorted(prod),
+              # mt-p1 pass 6 (review5 A-2): changed file -> the paths its own lines selected (absent with older tools)
+              "owned": r.get("paths_by_file")}
 json.dump(res, open(a.out, "w", encoding="utf-8"), indent=0)
 print(f"replay: {len(res)} commits, {round(time.time() - t0)} s ({a.tools})", file=sys.stderr)

@@ -222,5 +222,75 @@ _f6, _l6, _e6 = validate.compare_passes({"ppppppp": _r(paths=["server.decode"], 
 expect("pass5 V-3 no map: the path check cannot run = failing (block)", "ppppppp" in _f6, _l6)
 _f7, _l7, _e7 = validate.compare_passes({"qqqqqqq": _r(paths=["cli.decode"], defects=[_fbh])}, {"qqqqqqq": _r(paths=[])}, _mp5)
 expect("pass5 replay without users / files fields (older tools) = failing (block)", "qqqqqqq" in _f7, _l7)
+# mt-p1 pass 6 (review5 A-2, probe V5-1 scratch/mt_p1_review5/probe_cp.py): the lost path belongs to an INCLUDER of
+# another changed header g.h (e.cpp includes c.h and g.h); g.h's analysis regressed in this pass
+_mp6 = {"files": {"src/c.h": [], "src/g.h": [], "src/u.cpp": ["load", "cli.decode"], "src/e.cpp": ["server.decode"]},
+        "includers": {"src/c.h": ["src/u.cpp", "src/e.cpp"], "src/g.h": ["src/e.cpp"]}}
+_b6 = {"v51aaaa": _r(paths=["cli.decode", "load", "server.decode"], defects=[_fbh])}
+_w6 = {"v51aaaa": dict(_r(paths=["load", "cli.decode"]), users={"src/c.h": ["src/u.cpp::useU"]}, files=["src/c.h", "src/g.h"])}
+_f8, _l8, _e8 = validate.compare_passes(_b6, _w6, _mp6)
+expect("pass6 V5-1 lost path of an includer of another changed header, earlier pass without owned = failing (block)",
+       "v51aaaa" in _f8, _l8)
+_b6o = {"v51aaaa": dict(_b6["v51aaaa"], owned={"src/g.h": ["server.decode"]})}
+_f9, _l9, _e9 = validate.compare_passes(_b6o, dict(_w6, v51aaaa=dict(_w6["v51aaaa"], owned={"src/c.h": ["load", "cli.decode"]})), _mp6)
+expect("pass6 V5-1 with owned: the earlier pass's g.h selected server.decode = failing (block)", "v51aaaa" in _f9, _l9)
+_b6p = {"v51aaaa": dict(_b6["v51aaaa"], owned={"src/g.h": ["load"]})}
+_f10, _l10, _e10 = validate.compare_passes(_b6p, dict(_w6, v51aaaa=dict(_w6["v51aaaa"], owned={"src/g.h": ["load"]})), _mp6)
+expect("pass6 owned in both passes, g.h never selected server.decode = R-fallback-resolved (pass; hold-out shape)",
+       "v51aaaa" in _e10, _l10)
+# mt-p1 pass 6 (review5 C-3): the noid row alone also brings the step back (ids_noid_only) -> R-init-noid, although a
+# dropped type identifier elsewhere restores it too (kkkkkkk shape)
+_att6 = {"kkkkkk6": dict(_att5["kkkkkkk"], ids_noid_only=["golden_moe"], both_noid_only=[]),
+         "kkkkkk7": dict(_att5["kkkkkkk"], ids_noid_only=[], both_noid_only=[]),
+         "llllll6": dict(_att5["lllllll"], ids_noid_only=[], both_noid_only=["golden_moe"])}
+_nar6 = [(k, {"steps": ["golden_moe"], "paths": []}) for k in _att6]
+fn6, ln6, en6, _ = validate.classify_narrowed(_nar6, {k: {"decl": []} for k in _att6}, {}, _att6)
+expect("pass6 C-3 noid row alone restores the step, the dropped id does too = R-init-noid, failing (block)",
+       "kkkkkk6" in fn6 and any("kkkkkk6" in x and "R-init-noid" in x for x in ln6), ln6)
+expect("pass6 C-3 noid row alone does not restore it = R-decl (pass)", "kkkkkk7" in en6, ln6)
+expect("pass6 C-3 ids+moved branch: noid row alone restores it = R-init-noid, failing (block)", "llllll6" in fn6, ln6)
+# mt-p1 pass 6b (p6_vs_024 failing c80b27a include/whirl/vision.h:133): an identifier-less continuation line of a
+# function declaration is re-checked on the source (cont_ok / verify_cont); an initializer data row (de40446
+# numerics.cpp:264) or a mislabelled row goes back to the identifier-less rows (C-3, fail closed)
+_SRC6b = {("c1", "include/v.h"): "#pragma once\nstd::uint64_t placeFit(const std::array<std::uint64_t, 7>& need,\n"
+                                 "                       std::array<std::pair<int, std::uint64_t>, 7>& at);\n",
+          ("c1", "src/n.cpp"): 'const char* const k_sw[] = {"FD_SPLITS", "GEMV_MAX",\n    "GDN_SEQ", "MOE_BN", nullptr};\n',
+          ("c1", "src/one.cpp"): "int placeFit(int a,\n             int b);\n"}
+_real_show = impact.show
+impact.show = lambda rev, path: _SRC6b.get((rev, path))
+try:
+    expect("pass6b cont_ok: wrapped parameter line of a function declaration = continuation (pass)",
+           validate.cont_ok("include/v.h", "c1", 3, ["placeFit"]))
+    expect("pass6b cont_ok block: initializer data row of a variable is not a continuation",
+           not validate.cont_ok("src/n.cpp", "c1", 2, ["k_sw"]))
+    expect("pass6b cont_ok block: names differ from the statement's declared names",
+           not validate.cont_ok("include/v.h", "c1", 3, ["otherFn"]))
+    expect("pass6b cont_ok block: the head line itself (spells the name) is not a continuation",
+           not validate.cont_ok("include/v.h", "c1", 2, ["placeFit"]))
+    expect("pass6b cont_ok block: file missing at the revision", not validate.cont_ok("include/v.h", "c0", 3, ["placeFit"]))
+    _r, _c, _b = validate.verify_cont({"noid_at": [("src/q.cpp", "new", 9)],
+                                       "decl_cont": [("include/v.h", "new", 3, ["placeFit"]), ("src/n.cpp", "new", 2, ["k_sw"])]},
+                                      "c1", {})
+    expect("pass6b verify_cont: verified row kept, mislabelled data row sent back to C-3 (block)",
+           _c == ["include/v.h:3 (new)"] and _b == ["src/n.cpp:2 (new) unverified continuation"]
+           and _r["noid_at"] == [("src/q.cpp", "new", 9), ("src/n.cpp", "new", 2)], (_r, _c, _b))
+    _r, _c, _b = validate.verify_cont({"decl_cont": [("include/v.h", "old", 3, ["placeFit"])]}, "c1", {})
+    expect("pass6b verify_cont block: old side is read at s^ (here: missing -> unverified)",
+           not _c and _r["noid_at"] == [("include/v.h", "old", 3)], (_r, _c, _b))
+finally:
+    impact.show = _real_show
+# classify: a narrowed step restored by legacy ids with only a verified continuation row and no identifier-less row =
+# R-decl, and the report names the row; the same step with the row identifier-less (unverified) stays failing
+_att6b = {"ccccc6b": {"ids": ["srv_fs_moe"], "moved": [], "both": ["srv_fs_moe"], "braces": [], "dropped": {"lens": "param"},
+                      "noid": [], "cont": ["include/whirl/vision.h:133 (new)"]},
+          "ddddd6b": {"ids": ["srv_fs_moe"], "moved": [], "both": ["srv_fs_moe"], "braces": [], "dropped": {"lens": "param"},
+                      "noid": ["include/whirl/vision.h:133 (new) unverified continuation"], "cont": [],
+                      "ids_wo_noid": ["srv_fs_moe"], "both_wo_noid": ["srv_fs_moe"], "ids_noid_only": ["srv_fs_moe"],
+                      "both_noid_only": ["srv_fs_moe"]}}
+_nar6b = [(k, {"steps": ["srv_fs_moe"], "paths": []}) for k in _att6b]
+fn6b, ln6b, en6b, _ = validate.classify_narrowed(_nar6b, {k: {"decl": []} for k in _att6b}, {}, _att6b)
+expect("pass6b c80b27a shape: verified declaration continuation = R-decl (pass), named in the report",
+       "ccccc6b" in en6b and any("ccccc6b" in x and "R-decl" in x and "continuation" in x for x in ln6b), ln6b)
+expect("pass6b block: unverified continuation stays identifier-less -> R-init-noid, failing", "ddddd6b" in fn6b, ln6b)
 print(f"validate test: {ok}/{ok + bad} ok")
 sys.exit(1 if bad else 0)

@@ -468,8 +468,44 @@ RULES = {
     "R-init-noid": "FAILING, not a rule (mt-p1 pass 4, REVIEW3 act-on 2; per step since pass 5): the step comes back with "
                    "the 0.2.4 identifier rule (or ids+moved) and a changed declaration line has no identifier (a table "
                    "row such as {64, 64, 256},), and it does NOT come back when those rows are taken out of the diff: "
-                   "0.2.4 reached it through its file-scope fallback over the row; inspect by hand",
+                   "0.2.4 reached it through its file-scope fallback over the row; inspect by hand. Pass 6b: impact "
+                   "now fails closed to the file scope on an identifier-less initializer row itself, and an identifier-"
+                   "less continuation line of a function / alias / type declaration (re-checked by cont_ok) is not "
+                   "such a row: it belongs to that declaration (R-decl)",
 }
+
+
+def cont_ok(path, rev, ln, names):
+    """mt-p1 pass 6b: line ln of path at rev is a continuation line of a declaration that declares only functions /
+    aliases / types (declscan, statement level, as clang's Decl source range), those are the names impact reported, and
+    the line itself does not spell them (the name is on another line of the statement)"""
+    import declscan
+    src = impact.show(rev, path)
+    if src is None or not names:
+        return False
+    d = declscan.declared(src, ln)
+    if d is None or d.get("kind") != "decl" or not d.get("decls"):
+        return False
+    if not {x["what"] for x in d["decls"]} <= {"function", "alias", "type"}:
+        return False
+    if sorted({x["name"] for x in d["decls"]}) != sorted(names):
+        return False
+    line = src.split("\n")[ln - 1] if 0 < ln <= src.count("\n") + 1 else ""
+    return not any(re.search(rf"\b{re.escape(str(n).split('::')[-1])}\b", line) for n in names)
+
+
+def verify_cont(r, s, prod):
+    """mt-p1 pass 6b: impact's decl_cont rows of commit s re-checked with cont_ok (old side read at s^ under its old
+    path). Returns (r with every unverified row added to noid_at, verified rows "path:line (side)", unverified rows as
+    noid_lines text): an unverified row is identifier-less again (C-3, fail closed)"""
+    cont, back = [], []
+    for p_, side, ln, names in r.get("decl_cont", []):
+        ok_ = cont_ok(p_ if side == "new" else (prod.get(p_, {}).get("old_path") or p_), s if side == "new" else f"{s}^", ln, names)
+        (cont if ok_ else back).append((p_, side, ln))
+    if back:
+        r = dict(r, noid_at=list(r.get("noid_at", [])) + back)
+    return (r, [f"{p_}:{ln} ({side})" for p_, side, ln in cont],
+            [f"{p_}:{ln} ({side}) unverified continuation" for p_, side, ln in back])
 
 
 def attribute(nar, rev, skip_cpu=True):
@@ -492,6 +528,12 @@ def attribute(nar, rev, skip_cpu=True):
         lk = impact.expand_steps(impact.analyze(prod, m, s, f"{s}^", legacy=("braces",))["release_gate_steps"])
         out[s] = {"ids": sorted(li - base), "moved": sorted(lm - base), "both": sorted(lb - base), "braces": sorted(lk - base),
                   "dropped": r.get("dropped_ids", {}), "noid": r.get("noid_lines", [])}
+        # mt-p1 pass 6b: impact reports identifier-less continuation lines of a function / alias / type declaration
+        # (decl_cont) apart from the identifier-less rows; each is re-checked here on its own side's source: the
+        # statement must declare only those kinds and spell the declared name on another line. A row that fails
+        # the check is treated as identifier-less again (C-3 below, fail closed)
+        r, out[s]["cont"], back = verify_cont(r, s, prod)
+        out[s]["noid"] = out[s]["noid"] + back
         # mt-p1 pass 5 (review4 A3): per step, not per commit: the same legacy runs with the identifier-less lines taken
         # out of the diff; a step that comes back only WITH them came back through those rows (0.2.4's file-scope
         # fallback), whatever else the commit dropped
@@ -502,6 +544,14 @@ def attribute(nar, rev, skip_cpu=True):
                     cut[p_][side].remove(ln)
             out[s]["ids_wo_noid"] = sorted(impact.expand_steps(impact.analyze(cut, m, s, f"{s}^", legacy=("ids",))["release_gate_steps"]) - base)
             out[s]["both_wo_noid"] = sorted(impact.expand_steps(impact.analyze(cut, m, s, f"{s}^", legacy=("ids", "moved"))["release_gate_steps"]) - base)
+            # mt-p1 pass 6 (review5 C-3): and with ONLY the identifier-less lines kept: a step those rows bring back on
+            # their own is needed by them, even when a dropped identifier elsewhere also brings it back
+            only = {}
+            for p_, side, ln in r["noid_at"]:
+                if p_ in prod:
+                    only.setdefault(p_, {**prod[p_], "new": [], "old": []})[side].append(ln)
+            out[s]["ids_noid_only"] = sorted(impact.expand_steps(impact.analyze(only, m, s, f"{s}^", legacy=("ids",))["release_gate_steps"]) - base)
+            out[s]["both_noid_only"] = sorted(impact.expand_steps(impact.analyze(only, m, s, f"{s}^", legacy=("ids", "moved"))["release_gate_steps"]) - base)
     return out
 
 
@@ -543,18 +593,19 @@ def classify_narrowed(nar, w, gt=None, attrib=None):
             elif st in a.get("ids", []):
                 if kinds.get("other"):
                     bad.append(f"{st} (dropped identifier(s) of kind other: {', '.join(sorted(kinds['other'])[:4])})")
-                elif a.get("noid") and st not in a.get("ids_wo_noid", []):
+                elif a.get("noid") and (st not in a.get("ids_wo_noid", []) or st in a.get("ids_noid_only", [])):
                     # mt-p1 pass 4 (REVIEW3 act-on 2, G3) / pass 5 (review4 A3, V-1): a changed declaration line has no
                     # identifier (a table row) and the step does not come back without it: 0.2.4 reached the step
                     # through its file-scope fallback over that row, so neither a dropped identifier elsewhere in the
-                    # commit nor member-access precision explains it
+                    # commit nor member-access precision explains it. Pass 6 (review5 C-3): also when the rows ALONE
+                    # bring the step back (ids_noid_only), although a dropped identifier elsewhere brings it back too
                     bad.append(f"{st} (R-init-noid: identifier-less changed line(s) {', '.join(a['noid'][:3])})")
                 else:
                     per[st] = "R-decl" if dropped else "R-member"
             elif st in a.get("braces", []):
                 per[st] = "R-block"
             elif st in a.get("both", []) and not kinds.get("other"):
-                if a.get("noid") and st not in a.get("both_wo_noid", []):
+                if a.get("noid") and (st not in a.get("both_wo_noid", []) or st in a.get("both_noid_only", [])):
                     bad.append(f"{st} (R-init-noid on ids+moved: identifier-less changed line(s) {', '.join(a['noid'][:3])})")
                 else:
                     per[st] = "R-decl+R-moved"
@@ -568,7 +619,8 @@ def classify_narrowed(nar, w, gt=None, attrib=None):
             expl.append(s)
             gpu_expl += 1
             rules = sorted(set(per.values()))
-            lines.append(f"   narrowed {s}: GPU steps {gpu_lost} -> {', '.join(rules)} | dropped {ev}")
+            cont = f" | declaration continuation line(s) (R-decl, pass 6b): {', '.join(a['cont'][:3])}" if a.get("cont") else ""
+            lines.append(f"   narrowed {s}: GPU steps {gpu_lost} -> {', '.join(rules)} | dropped {ev}{cont}")
     return fails, lines, expl, gpu_expl
 
 
@@ -648,7 +700,9 @@ def compare_passes(b, w, m=None):
     file-scope fallback ("has no user function in the map", a map gap, not a conservative rule) for a file F that this
     pass no longer reports, this pass's replay names the users it found for F ("users", pass 5), every lost path is a
     path of F or of its includers and none is a path of another changed file of the commit ("files", pass 5; m = the
-    map at the replayed tree; without a map, or without those fields, the LESS fails). Hold-out 4fae76e / c3601d4 / 7078143: the
+    map at the replayed tree; without a map, or without those fields, the LESS fails). Pass 6 (review5 A-2): what another
+    changed file owns is what its own lines selected in either pass (replay "owned"); without "owned" in the earlier
+    pass, its file's paths plus, for a header, its includers' paths (F left out). Hold-out 4fae76e / c3601d4 / 7078143: the
     help-text macro WHIRL_HELP_MODES of src/cli/main.cpp; pass 4 (V5) finds commandHelp, on no path. Anything else that
     selects less fails. Returns (failing commits, lines, explained commits)."""
     fails, lines, expl, more = [], [], [], []
@@ -686,10 +740,24 @@ def compare_passes(b, w, m=None):
                 for f in res:
                     for g in [f] + (m["includers"].get(f, []) if f.endswith((".h", ".inc")) else []):
                         own |= set(m["files"].get(g, []))
+                # mt-p1 pass 6 (review5 A-2, V5-1): what another changed file g owns is what g's own lines selected in
+                # EITHER pass ("owned", pass 6+: impact paths_by_file). The earlier pass's view is the one that matters:
+                # a regression of g's analysis in this pass is what this check exists to catch, so this pass's view
+                # of g alone is not enough. Without "owned" in the earlier pass (older tools), g owns its own file's
+                # paths and, for a header, the paths of all its includers except F (fail closed: pass 5 looked at
+                # g's own file only, V5-1). That closure fails every LESS on a common header (numerics.h's includers
+                # own all 4 cli.* paths: hold-out 4fae76e / c3601d4 / 7078143), so the replays carry "owned"
+                bo, wo = b[s].get("owned"), w[s].get("owned") or {}
                 others = set()
                 for g in files:
-                    if g not in res:
-                        others |= set(m["files"].get(g, []))
+                    if g in res:
+                        continue
+                    if bo is not None:
+                        others |= set(bo.get(g, [])) | set(wo.get(g, []))
+                        continue
+                    for h in [g] + (m["includers"].get(g, []) if g.endswith((".h", ".inc")) else []):
+                        if h not in res:
+                            others |= set(m["files"].get(h, []))
                 lost = set(sub["paths"])
                 if not lost <= own:
                     why_not = f"lost path(s) {sorted(lost - own)} outside {', '.join(res)} and its includers"

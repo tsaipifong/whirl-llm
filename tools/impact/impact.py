@@ -103,6 +103,10 @@ def tree_includes(rev):
     out = {f: [] for f in r1.stdout.splitlines() if f.endswith(INC_EXT)}
     r2 = subprocess.run(["git", "-C", ROOT, "grep", "-I", "-E", r"^[[:space:]]*#[[:space:]]*include", rev, "--", *INC_DIRS],
                         capture_output=True, text=True, encoding="utf-8", errors="replace")
+    # mt-p1 pass 6 (review5 C-2): git grep exits 1 when nothing matches, 2 (or more) on an error; an error would leave
+    # every file with no #include and make every cross-header move pass the TU check (fail-open): use the map instead
+    if r2.returncode not in (0, 1):
+        return None
     pre = f"{rev}:"
     for l in r2.stdout.splitlines():
         if not l.startswith(pre):
@@ -119,8 +123,12 @@ def tree_tus(rev, m):
     (dirname, include/, src/, kernels/), as a depfile is per compile; the map's includers when REV cannot be read"""
     inc = tree_includes(rev)
     if inc is None:
+        fwd_m = defaultdict(set)
+        for f, us in m["includers"].items():
+            for u in us:
+                fwd_m[u].add(f)
         res = ((lambda f: {g for g in [f] + list(m["includers"].get(f, [])) if g.endswith(TU_EXT)}), "map",
-               (lambda f: set(m["includers"].get(f, []))))
+               (lambda f: set(m["includers"].get(f, []))), (lambda t: {t} | fwd_m.get(t, set())))
     else:
         inc_by = defaultdict(set)
         for f, targets in inc.items():
@@ -143,15 +151,27 @@ def tree_tus(rev, m):
                             dq.append(y)
                 memo[f] = seen - {f}
             return memo[f]
-        res = (lambda f: {g for g in includers(f) | {f} if g.endswith(TU_EXT)}), "tree", includers
-    return res  # (file -> TUs that see it, "tree" | "map", file -> every file that includes it)
+        fwd = {}
+
+        def closure(t):
+            # mt-p1 pass 6 (review5 A-1): the files a translation unit reads (itself + everything it includes)
+            if not fwd:
+                fwd[None] = None
+                for f in inc:
+                    for g in includers(f):
+                        fwd.setdefault(g, set()).add(f)
+            return {t} | fwd.get(t, set())
+        res = (lambda f: {g for g in includers(f) | {f} if g.endswith(TU_EXT)}), "tree", includers, closure
+    return res  # (file -> TUs that see it, "tree" | "map", file -> every file that includes it, TU -> files it reads)
 
 
 def gains_meaning(x):
     """mt-p1 pass 5 (review4 A1): kinds whose mere visibility changes what a translation unit compiles (ccache direct
     mode's documented false hit: a header that newly becomes visible): macros (#ifdef / expansion), namespace-scope
-    function overloads / operators (overload resolution), explicit specialisations (template <> ...). Types are not:
-    a type newly visible to a TU that did not name it changes nothing it compiles (the 6 real cross-file move commits)"""
+    function overloads / operators (overload resolution, ADL: a use need not spell the name), explicit specialisations
+    (template <> ...). Every other kind (types, partial specialisations, using-declarations, namespace constants) is
+    a change only when a TU that newly sees it spells its name (pass 6, review5 A-1: spelled_in); a type newly
+    visible to a TU that never names it changes nothing it compiles (the 6 real cross-file move commits)"""
     if x["what"] == "macro":
         return True
     if x["cls"] is None and x["what"] == "function":
@@ -185,7 +205,24 @@ def analyze(changes, m, new_rev, old_rev, legacy=()):
     by_name = defaultdict(list)
     for nid, d in F.items():
         by_name[d["name"]].append(nid)
-    paths = defaultdict(set)    # path -> reasons
+    # mt-p1 pass 6 (review5 A-2): path -> reasons, and which changed file's lines added each path (validate
+    # compare_passes: what another changed file of the commit owns, per pass, not its whole file / includer closure)
+    owned = defaultdict(set)    # changed file -> paths selected while that file was analysed
+    cur_file = [None]
+
+    class _Reasons(set):
+        def add(self, v):
+            if cur_file[0] is not None:
+                owned[cur_file[0]].add(self.key)
+            set.add(self, v)
+
+    class _Paths(dict):
+        def __missing__(self, k):
+            r_ = _Reasons()
+            r_.key = k
+            self[k] = r_
+            return r_
+    paths = _Paths()
     models = set()
     archs = set()
     tests = set()
@@ -219,6 +256,7 @@ def analyze(changes, m, new_rev, old_rev, legacy=()):
     dropped_ids = {}            # review A4: identifier -> kind (type / param / init / qualifier / other) the new rule dropped
     noid_lines = []             # mt-p1 pass 4 (REVIEW3 act-on 2): changed declaration lines with no identifier (table rows)
     noid_at = []                # the same as (path, side, line): validate.attribute re-runs without them (pass 5, A3)
+    decl_cont = []              # pass 6b: identifier-less continuation lines of a function / alias / type declaration
     test_steps = set()          # release steps of test executables whose sources changed
     side_tus = {}               # mt-p1 pass 5: "old" / "new" -> (file -> translation units that see it, source)
     users_by_file = {}          # mt-p1 pass 5 (review4 C1): changed file -> the user functions its declarations selected
@@ -227,7 +265,50 @@ def analyze(changes, m, new_rev, old_rev, legacy=()):
         if side not in side_tus:
             side_tus[side] = tree_tus(new_rev if side == "new" else old_rev, m)
         return side_tus[side]
+    new_src = {}
+
+    def src_new(f):
+        if f not in new_src:
+            new_src[f] = show(new_rev, f) if new_rev else (open(os.path.join(ROOT, f), encoding="utf-8", errors="replace").read()
+                                                           if os.path.exists(os.path.join(ROOT, f)) else None)
+        return new_src[f]
+
+    def spelled_in(x, gained, news):
+        """mt-p1 pass 6 (review5 A-1): does a gained TU (or a file it reads, new tree) contain the declared name of
+        the moved statement x (the name, or the template name of a (partial) specialisation)? The added lines of the
+        moved-to files (news) are skipped, they are the moved statement itself.
+        - A member of a class is reached through its class: the class name(s) are looked for, not the member's name
+          (field names such as `id` / `tools` are spelled everywhere for other classes).
+        - Code is searched with comments / string literals / preprocessor lines blanked (cxxscan.blank_code): these
+          kinds do not act in #if lines (macros are gains_meaning).
+        - A gained TU that does not exist in the old tree (added in this commit, e.g. the new .cpp of an extracted
+          module: 51de103 stream.cpp, dadae41 prefix_store.cpp, 920ae63 page_pool.cpp, ef40a1f ckpt_store.cpp) had no
+          earlier meaning to change; its own added lines are selected as changes"""
+        if x["cls"]:
+            names = set(str(x["cls"]).split("::"))
+        else:
+            names = {str(x["name"]).split("::")[-1]}
+        mt = re.search(r"\b(?:struct|class|union)\s+(\w+)\s*<", str(x.get("sig") or ""))
+        if mt:
+            names.add(mt.group(1))
+        names = {n for n in names if re.fullmatch(r"[A-Za-z_]\w*", n)}
+        if not names:
+            return True  # nothing to look for (operator, unnamed): fail closed
+        pat = re.compile(r"\b(?:" + "|".join(map(re.escape, sorted(names))) + r")\b")
+        if old_rev:
+            gained = {t for t in gained if show(old_rev, changes[t]["old_path"] if t in changes else t) is not None}
+        reads = set().union(*(tus_at("new")[3](t) for t in gained)) if gained else set()
+        for f in sorted(reads):
+            src = src_new(f)
+            if src is None:
+                continue
+            skip = set(changes[f]["new"]) if f in news and f in changes else set()
+            for i, l in enumerate(cxxscan.blank_code(src).split("\n"), 1):
+                if i not in skip and pat.search(l):
+                    return True
+        return False
     for path, ch in sorted(changes.items()):
+        cur_file[0] = path
         rule = next((r for r in FILE_RULES if fnmatch.fnmatch(path, r[0])), None)
         if rule and not path.endswith((".cpp", ".h", ".hip")) or (rule and path.startswith(("tests/", "tools/"))):
             for p in rule[1]:
@@ -330,7 +411,16 @@ def analyze(changes, m, new_rev, old_rev, legacy=()):
                 sees = set().union(*(tus_new(f) for f in news))
                 if not saw <= sees:
                     return False
-                return not (gains_meaning(x) and not sees <= saw)
+                gained = sees - saw
+                if not gained:
+                    return True
+                if gains_meaning(x):
+                    return False
+                # mt-p1 pass 6 (review5 A-1, R5-3 partial specialisation / R5-5 using-declaration / R5-7 namespace
+                # constant / R5-8 type shadowing a global): any other kind newly visible to a TU changes what it
+                # compiles when the TU spells the name (lookup now finds it): a move only if no gained TU, nor any file
+                # it reads, contains the declared name (the moved statement's own added lines excluded)
+                return not spelled_in(x, gained, news)
             if x["cls"] is not None:
                 return x["cls"] not in order_changed
             if not ns_changed:
@@ -343,6 +433,7 @@ def analyze(changes, m, new_rev, old_rev, legacy=()):
         outside_ids = free_names | {n for _, n in member_names}
         # review A4: the identifiers the 0.2.4 rule took from these lines that the declared-name rule drops, by kind
         declared_all = {x["name"] for x in fc["decls"]}
+        noid_data = []  # pass 6b: changed initializer rows with no identifier (fail closed to the file scope below)
         for side, ln, txt, whats in fc["legacy"]:
             for x, c in id_categories(txt, declared_all, in_function="function" in whats).items():
                 if dropped_ids.get(x) != "other":
@@ -350,8 +441,23 @@ def analyze(changes, m, new_rev, old_rev, legacy=()):
             # mt-p1 pass 5 (review4 R4-9 / R4-17): a #define line (blanked by blank_code) declares its macro name: not
             # an identifier-less row
             if whats and "macro" not in whats and not [x for x in re.findall(r"[A-Za-z_]\w*", txt) if len(x) > 2 and x not in DECL_NOISE]:
-                noid_lines.append(f"{path}:{ln} ({side})")
-                noid_at.append((path, side, ln))
+                # mt-p1 pass 6b: the row is a continuation line of a multi-line statement; declscan gives the
+                # statement's declared name(s) (as clang's Decl source range covers the whole statement).
+                # - only function / alias / type declarations (a wrapped parameter list, c80b27a vision.h:133): the
+                #   row's types / parameters / default arguments belong to that declaration, whose users (callers) are
+                #   selected by the declared-name rule: R-decl, not an identifier-less row (decl_cont)
+                # - an initializer data row of a variable / member / field (de40446 numerics.cpp:264): the variable's
+                #   readers are selected, and the row also fails closed to the 0.2.4 file scope (its value leaves the
+                #   readers as data, which the call graph does not follow; main-session decision): noid_lines as before
+                kinds = set(whats)
+                if kinds <= {"function", "alias", "type"}:
+                    decl_cont.append((path, side, ln, sorted({x["name"] for x in fc["decls"] if x["side"] == side and x["line"] == ln})))
+                else:
+                    noid_lines.append(f"{path}:{ln} ({side})")
+                    noid_at.append((path, side, ln))
+                    if any(x["side"] == side and x["line"] == ln and x["what"] in ("variable", "member", "field") for x in decls):
+                        noid_data.append(f"{side}:{ln} identifier-less initializer row of "
+                                         f"{', '.join(sorted({x['name'] for x in decls if x['side'] == side and x['line'] == ln}))}")
         if "ids" in legacy:
             member_names = set()
             free_names = {x for _, _, txt, _ in fc["legacy"] for x in re.findall(r"[A-Za-z_]\w*", txt) if len(x) > 2} - DECL_NOISE
@@ -363,7 +469,7 @@ def analyze(changes, m, new_rev, old_rev, legacy=()):
             notes.append(f"{path}: {moved} declaration(s) unchanged on the other side of the diff (moved / re-indented): build only")
         for side, ln, tg in fc["includes"]:
             reruns[f"build: compile {path} and every file that includes it (#include changed)"].add(f"{path}:{ln} {tg}")
-        fail_closed = []
+        fail_closed = list(noid_data)
         for side, ln, k in fc["cond"]:
             fail_closed.append(f"{side}:{ln} {'preprocessor condition' if k == 'cond' else 'using namespace'}")
         for side, ln, txt in fc["unparsed"]:
@@ -519,6 +625,7 @@ def analyze(changes, m, new_rev, old_rev, legacy=()):
             hits.append((path, "deleted / renamed file"))
             for p in m["files"].get(path, []):
                 paths[p].add(f"{path} (file removed)")
+    cur_file[0] = None
     if not models:
         models = {"dense", "moe"}
     if not archs and paths:
@@ -535,7 +642,9 @@ def analyze(changes, m, new_rev, old_rev, legacy=()):
     rep["dropped_ids"] = dropped_ids
     rep["noid_lines"] = noid_lines
     rep["noid_at"] = noid_at
+    rep["decl_cont"] = decl_cont
     rep["decl_users"] = users_by_file
+    rep["paths_by_file"] = {f: sorted(v) for f, v in sorted(owned.items())}
     rep["map_defects"] = defects
     rep.update(module_gate(changes, rep=rep, m=m))
     return rep

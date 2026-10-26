@@ -147,7 +147,10 @@ specialisations, nested classes or headers is a change. A move to another file i
 translation unit that saw the statement still sees it (the old file itself when it is a `.cpp`; each side from its
 own revision's `#include` lines, so a deleted / split header or an `#include` switched in the same commit counts),
 and, for macros, namespace-scope function overloads / operators and explicit specialisations, no translation unit
-newly sees it (the ccache direct-mode false-hit direction); a plain type newly visible is still a move. The users of a
+newly sees it (the ccache direct-mode false-hit direction). Any other kind (type, partial specialisation,
+using-declaration, namespace constant) newly seen by a translation unit is a change when that unit, or a file it
+reads, spells the declared name (for a member: its class) outside comments and strings; a unit added by the same
+commit, or one that never names it, keeps it a move. The users of a
 changed header are searched in its includers of both trees. A reorder inside one struct / enum, a reorder at
 namespace scope of one file (two-phase lookup, initialisation order), an enumerator inserted or removed before
 others, and a removed member or enumerator fall back to the whole file. A designated-initializer row
@@ -163,16 +166,24 @@ one. Fallbacks that come from a gap of the map are printed as `DEFECT`. Since th
 on purpose, `--baseline` accepts a narrowed commit only when every GPU step it loses comes back with the
 0.2.4 identifier rule (or with the moved rule off) and every identifier the new rule dropped is a type,
 parameter, initializer reference or qualifier (`impact.analyze(..., legacy=...)`, validate.py `RULES`; a step that
-comes back only with an identifier-less row such as `{64, 64, 256},` in the diff is `R-init-noid`, failing), and it
+comes back only with an identifier-less row such as `{64, 64, 256},` in the diff, or that such rows bring back on
+their own, is `R-init-noid`, failing; impact.py itself selects the readers of the table such a row belongs to and,
+as 0.2.4 did, every path of the file, because the row's value leaves the readers as data; an identifier-less
+continuation line of a wrapped function / alias / type declaration belongs to that declaration, selects its users
+and counts as `R-decl` once validate.py has re-checked it on the source), and it
 loses no step its ground truth needed; `--exclude-tuned` leaves the commits the rules were tuned on out (`--arch024`: the GPU checks each arch024 step ran; `RANGE_CASES`:
 the 0.2.4 range 605281b..9844fde).
 
 Known gaps of the static rule (not selected by impact.py; review mt-p1 rereview P5, P7, P11): `#pragma pack` around a
 struct (layout changes, no declaration line changes); a default member initializer whose effect reaches only code that
 default-constructs the struct without naming the member (only the member's readers are selected);
-a self-registering
-namespace-scope global removed with no user by name (`static Registrar r(...)`: build only). For these shapes run the
-full gate or name the users by hand.
+a self-registering namespace-scope global removed with no user by name (`static Registrar r(...)`: build only);
+**include order** (review mt-p1 review5 C-1): the move rule compares the sets of translation units that see a
+statement, not where it sits in each unit's include sequence, so a macro moved to a header included after the
+`#ifdef` that reads it, or an overload moved behind the call that resolves it, is taken as a move when the sets are
+equal (ccache hashes the include sequence in order; impact.py does not); a function template that is not in the map
+falls back to its file's paths only, not its includers' (review5 N-2). For these shapes run the full gate or name the
+users by hand.
 
 ### <a id="module-gate"></a>Module gate (dev-time only)
 

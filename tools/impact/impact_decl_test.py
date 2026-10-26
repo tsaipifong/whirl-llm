@@ -339,7 +339,8 @@ A52ta = "#pragma once\nstruct Ring {\n    int head;\n    int tail;\n};\n"
 A52tb = "#pragma once\n"
 C52tb = "#pragma once\nint more();\nstruct Ring {\n    int head;\n    int tail;\n};\n"
 U52t = '#include "a.h"\n#include "c.h"\nint useU(Ring& r) {\n  return r.head;\n}\n'
-V52t = '#include "c.h"\nint useV(Ring& r) {\n  return r.tail;\n}\n'
+# (pass 6, review5 A-1: v.cpp gains Ring and must not spell it, else lookup of Ring in v.cpp changes: a change)
+V52t = '#include "c.h"\nint useV(int r) {\n  return r + 1;\n}\n'
 # R4-18 header split, a.h deleted; R4-19 include switched in the same commit (old-tree includers)
 A518 = "#pragma once\nnamespace w {\nint score(int v);\nint score(long v);\n}\n"
 B518a = "#pragma once\nint more();\n"
@@ -410,6 +411,93 @@ def fake_tree_includes(rev):
     return {p: _re.findall(r'^\s*#\s*include\s*[<"]([^">]+)[">]', t, _re.M) for (r_, p), t in REPO.items() if r_ == rev}
 
 
+# mt-p1 pass 6 (review5 A-1, probes scratch/mt_p1_review5/probe_r5.py): a moved statement of ANY kind that a TU newly
+# sees is a change when that TU (or a file it reads) spells the declared name: partial specialisation, using-declaration,
+# namespace constant / type shadowing a global. Each fails on a8bc01e (scratch/mt_p1_p6/before_impact_decl_test.txt)
+P63 = "#pragma once\nnamespace w {\ntemplate <typename T> struct Cfg {\n    static constexpr int kTile = 16;\n};\n}\n"
+A63a = "#pragma once\n#include \"p.h\"\nnamespace w {\ntemplate <typename T> struct Cfg<T*> {\n    static constexpr int kTile = 32;\n};\n}\n"
+A63b = "#pragma once\n#include \"p.h\"\nnamespace w {\n}\n"
+C63a = "#pragma once\n#include \"p.h\"\nint more();\n"
+C63b = ("#pragma once\n#include \"p.h\"\nint more();\nnamespace w {\ntemplate <typename T> struct Cfg<T*> {\n"
+        "    static constexpr int kTile = 32;\n};\n}\n")
+U63 = '#include "a.h"\n#include "c.h"\nint useU() {\n  return w::Cfg<int*>::kTile;\n}\n'
+V63 = '#include "c.h"\nint useV() {\n  return w::Cfg<int*>::kTile;\n}\n'
+INC63 = {"src/p.h": ["src/a.h", "src/c.h", "src/u.cpp", "src/v.cpp"], "src/a.h": ["src/u.cpp"], "src/c.h": ["src/u.cpp", "src/v.cpp"]}
+B65 = "#pragma once\nnamespace w {\nint score(long v);\n}\nnamespace w2 {\nint score(int v);\n}\n"
+A65a = "#pragma once\n#include \"b.h\"\nnamespace w {\nusing w2::score;\n}\n"
+A65b = "#pragma once\n#include \"b.h\"\nnamespace w {\n}\n"
+C65a = "#pragma once\n#include \"b.h\"\nint more();\n"
+C65b = "#pragma once\n#include \"b.h\"\nint more();\nnamespace w {\nusing w2::score;\n}\n"
+U65 = '#include "a.h"\n#include "c.h"\nint useU() {\n  return w::score(3);\n}\n'
+V65 = '#include "c.h"\nint useV() {\n  return w::score(4);\n}\n'
+INC65 = {"src/b.h": ["src/a.h", "src/c.h", "src/u.cpp", "src/v.cpp"], "src/a.h": ["src/u.cpp"], "src/c.h": ["src/u.cpp", "src/v.cpp"]}
+B67 = "#pragma once\nconstexpr int kTile = 16;\n"
+A67a = "#pragma once\nnamespace w {\nconstexpr int kTile = 32;\n}\n"
+A67b = "#pragma once\nnamespace w {\n}\n"
+C67a = "#pragma once\nnamespace w {\nint more();\n}\n"
+C67b = "#pragma once\nnamespace w {\nint more();\nconstexpr int kTile = 32;\n}\n"
+U67 = '#include "a.h"\n#include "c.h"\nnamespace w {\nint useU() {\n  return kTile;\n}\n}\n'
+V67 = '#include "b.h"\n#include "c.h"\nnamespace w {\nint useV() {\n  return kTile;\n}\n}\n'
+FNW6 = [("src/u.cpp", "w::useU"), ("src/v.cpp", "w::useV")]
+INC67 = {"src/b.h": ["src/v.cpp"], "src/a.h": ["src/u.cpp"], "src/c.h": ["src/u.cpp", "src/v.cpp"]}
+B68 = "#pragma once\nstruct Tile {\n    int n = 16;\n};\n"
+A68a = "#pragma once\nnamespace w {\nstruct Tile {\n    int n = 32;\n};\n}\n"
+C68b = "#pragma once\nnamespace w {\nint more();\nstruct Tile {\n    int n = 32;\n};\n}\n"
+U68 = '#include "a.h"\n#include "c.h"\nnamespace w {\nint useU() {\n  Tile t;\n  return t.n;\n}\n}\n'
+V68 = '#include "b.h"\n#include "c.h"\nnamespace w {\nint useV() {\n  Tile t;\n  return t.n;\n}\n}\n'
+T68 = '#pragma once\nnamespace w {\ninline int useT() {\n  Tile t;\n  return t.n;\n}\n}\n'
+V68i = '#include "b.h"\n#include "c.h"\n#include "t.h"\nnamespace w {\nint useV() {\n  return useT();\n}\n}\n'
+PROBES6 = {
+    "R5-8i type w::Tile a.h -> c.h, gained v.cpp spells it only through its included t.h":
+        ({"src/b.h": B68, "src/a.h": A68a, "src/c.h": C67a, "src/t.h": T68, "src/u.cpp": U68, "src/v.cpp": V68i},
+         {"src/b.h": B68, "src/a.h": A67b, "src/c.h": C68b, "src/t.h": T68, "src/u.cpp": U68, "src/v.cpp": V68i},
+         # (useT itself is not found: the user search covers c.h and its includers, not headers a TU includes beside
+         # it - a pre-existing scope limit; the TU's function useV, which calls useT, is selected and covers its paths)
+         FNW6 + [("src/t.h", "w::useT")], ["useV"], dict(INC67, **{"src/t.h": ["src/v.cpp"]})),
+    "R5-3 partial specialisation Cfg<T*> a.h -> c.h, v.cpp gains it":
+        ({"src/p.h": P63, "src/a.h": A63a, "src/c.h": C63a, "src/u.cpp": U63, "src/v.cpp": V63},
+         {"src/p.h": P63, "src/a.h": A63b, "src/c.h": C63b, "src/u.cpp": U63, "src/v.cpp": V63}, FNV5, ["useV"], INC63),
+    "R5-5 using w2::score a.h -> c.h, v.cpp gains it":
+        ({"src/b.h": B65, "src/a.h": A65a, "src/c.h": C65a, "src/u.cpp": U65, "src/v.cpp": V65},
+         {"src/b.h": B65, "src/a.h": A65b, "src/c.h": C65b, "src/u.cpp": U65, "src/v.cpp": V65}, FNV5, ["useV"], INC65),
+    "R5-7 namespace constant w::kTile a.h -> c.h, v.cpp gains it (shadows ::kTile)":
+        ({"src/b.h": B67, "src/a.h": A67a, "src/c.h": C67a, "src/u.cpp": U67, "src/v.cpp": V67},
+         {"src/b.h": B67, "src/a.h": A67b, "src/c.h": C67b, "src/u.cpp": U67, "src/v.cpp": V67}, FNW6, ["useV"], INC67),
+    "R5-8 type w::Tile a.h -> c.h, v.cpp gains it (shadows ::Tile)":
+        ({"src/b.h": B68, "src/a.h": A68a, "src/c.h": C67a, "src/u.cpp": U68, "src/v.cpp": V68},
+         {"src/b.h": B68, "src/a.h": A67b, "src/c.h": C68b, "src/u.cpp": U68, "src/v.cpp": V68}, FNW6, ["useV"], INC67),
+}
+# blocks (the 6 real cross-file move commits 51de103 / 3bfaac7 / dadae41 / 920ae63 / ef40a1f / 43205f5 stay moves,
+# scratch/mt_p1_p6/moves_p6_vs_p5.txt): the gained TU spells a member name only (fields are reached through their
+# class), or the name only in a comment, or the gained TU is a file added by the commit (no earlier meaning)
+V68m = '#include "c.h"\nint useV() {\n  // a Tile is moved here\n  struct Q { int n = 1; } q;\n  return q.n;\n}\n'
+MOVES6 = {
+    "type w::Tile moved, gained v.cpp spells only the member name n and Tile in a comment":
+        ({"src/a.h": A68a, "src/c.h": C67a, "src/u.cpp": U68, "src/v.cpp": V68m},
+         {"src/a.h": A67b, "src/c.h": C68b, "src/u.cpp": U68, "src/v.cpp": V68m}, FNW6,
+         {"src/a.h": ["src/u.cpp"], "src/c.h": ["src/u.cpp", "src/v.cpp"]}),
+    "type w::Tile moved, the gained TU v.cpp is added by the commit":
+        ({"src/a.h": A68a, "src/c.h": C67a, "src/u.cpp": U68},
+         {"src/a.h": A67b, "src/c.h": C68b, "src/u.cpp": U68, "src/v.cpp": V68.replace('#include "b.h"\n', "")}, FNW6,
+         {"src/a.h": ["src/u.cpp"], "src/c.h": ["src/u.cpp", "src/v.cpp"]}),
+}
+
+
+# mt-p1 pass 6b (p6_vs_024 failing rows): identifier-less continuation lines of a multi-line statement.
+# T6b: string table, 2nd row changed (de40446 numerics.cpp:264 shape); the head line is unchanged, so the row alone must
+# select the table's reader AND fail closed to the file scope (other() too: 0.2.4 selected the file's paths)
+T6B = ('const char* const k_sw[] = {"FD_SPLITS", "GEMV_MAX",\n'
+       '                            "GDN_SEQ", "NAIVE_ATTN", nullptr};\n'
+       'int noteSw(const char* v) {\n  return k_sw[0] == v;\n}\nint other() {\n  return 1;\n}\n')
+T6BN = T6B.replace('"GDN_SEQ", "NAIVE_ATTN"', '"GDN_SEQ", "NAIVE_ATTN", "MOE_BN"')
+# D6b: wrapped declaration of a new function in a header (c80b27a vision.h:133 shape), only the continuation line
+# changes: the callers are selected, the line is a declaration continuation (decl_cont), not an identifier-less row,
+# and no file-scope fallback (the reader of another function in the includer is not selected)
+D6BH = ("#pragma once\nstd::uint64_t placeFit(const std::array<std::uint64_t, 7>& need,\n"
+        "                       std::array<std::pair<int, std::uint64_t>, 7>& at);\nint keep();\n")
+D6BN = D6BH.replace("std::array<std::pair<int, std::uint64_t>, 7>& at);", "std::array<std::pair<int, std::uint64_t>, 8>& at);")
+D6BC = ('#include "x.h"\nint useFit() {\n  std::array<std::pair<int, std::uint64_t>, 7> at;\n  return (int)placeFit({}, at);\n}\n'
+        'int other() {\n  return keep();\n}\n')
 real = impact.show
 impact.show = fake_show
 real_tree = getattr(impact, "tree_includes", None)
@@ -519,6 +607,9 @@ try:
     REPO.update({("A", "src/other.h"): "#pragma once\nstruct Model {\n    int other = 0;\n};\n", ("B", "src/other.h"): "#pragma once\n"})
     REPO[("B", "src/model.h")] = HDR_NEW
     REPO[("A", "src/model.h")] = "#pragma once\nstruct Model {\n    std::vector<DevBuf> allocations;\n};\n"
+    # (pass 6, review5 A-1: model.cpp, the TU that spells Model, saw other.h in the old tree too; without that include
+    # it newly sees the moved member and spells its class: a change, not a move)
+    REPO.update({("A", "src/model.cpp"): '#include "other.h"\n' + CPP, ("B", "src/model.cpp"): '#include "other.h"\n' + CPP})
     r = run({"src/model.h": {"old_path": "src/model.h", "new": [4], "old": []},
              "src/other.h": {"old_path": "src/other.h", "new": [], "old": [2, 3, 4]}})
     expect("moved unchanged declaration selects no user (block)", "t_readOther" not in tests_of(r), tests_of(r))
@@ -687,9 +778,108 @@ try:
         r, miss, sel = probe(a, b, FNV5, ["useU"], {"src/a.h": ["src/u.cpp", "src/v.cpp"]})
         expect(f"pass5 {nm}: useU selected", not miss, (miss, sel))
         expect(f"pass5 block: {nm} -> no identifier-less line reported", not r.get("noid_lines"), r.get("noid_lines"))
+    # mt-p1 pass 6 (review5 A-1): every kind is checked for TUs that newly see it and spell its name
+    for nm, (a, b, fns, need, inc) in sorted(PROBES6.items()):
+        r, miss, sel = probe(a, b, fns, need, inc)
+        expect(f"pass6 {nm}: needed {need} selected", not miss, (miss, sel, r["notes"][:3]))
+    for nm, (a, b, fns, inc) in sorted(MOVES6.items()):
+        r, miss, sel = probe(a, b, fns, [], inc)
+        # (the added v.cpp of the second block is itself a change: its own function is selected, the move is not)
+        nosel = {"useU", "w::useU"} | (set() if "added" in nm else {"useV", "w::useV"})
+        expect(f"pass6 block: {nm} -> still a move", not (sel & nosel)
+               and any("moved / re-indented" in n for n in r["notes"] if n.startswith("src/c.h")), (sel, r["notes"][:4]))
+    # mt-p1 pass 6b: identifier-less continuation lines (see T6B / D6BH)
+    r, miss, sel = probe({"src/t.cpp": T6B}, {"src/t.cpp": T6BN}, [("src/t.cpp", "noteSw"), ("src/t.cpp", "other")], ["noteSw", "other"], {})
+    expect("pass6b de40446 shape: changed identifier-less row of a table (head unchanged) -> its reader + 0.2.4 file scope",
+           not miss, (miss, sel, r["notes"][:3]))
+    expect("pass6b de40446 shape: the row stays an identifier-less row (noid_lines, validate C-3), not a continuation",
+           r.get("noid_lines") and not r.get("decl_cont"), (r.get("noid_lines"), r.get("decl_cont")))
+    expect("pass6b de40446 shape: file-scope reason names the initializer row",
+           "identifier-less initializer row of k_sw" in str(r.get("paths")), str(r.get("paths"))[:300])
+    r, miss, sel = probe({"src/x.h": D6BH, "src/x.cpp": D6BC}, {"src/x.h": D6BN, "src/x.cpp": D6BC},
+                         [("src/x.cpp", "useFit"), ("src/x.cpp", "other")], ["useFit"], {"src/x.h": ["src/x.cpp"]})
+    expect("pass6b c80b27a shape: changed continuation line of a function declaration -> its caller selected",
+           not miss, (miss, sel, r["notes"][:3]))
+    expect("pass6b c80b27a shape: reported as decl_cont (placeFit), not as an identifier-less row",
+           not r.get("noid_lines") and sorted((c[1], c[2], tuple(c[3])) for c in r.get("decl_cont", [])) == [("new", 3, ("placeFit",)), ("old", 3, ("placeFit",))], (r.get("noid_lines"), r.get("decl_cont")))
+    expect("pass6b block: c80b27a shape -> no file-scope fallback (other not selected)", "other" not in sel, sel)
+    # mt-p1 pass 6c: since pass 6b an identifier-less initializer row also fails closed to the file scope, so the V6 / V7b
+    # and G3 selection checks above hold even with the designator / member-default rules off (mut_p6b MISSED both).
+    # These pin the rules themselves: the attribution (declarations row, reason of the reader's path) for V6 / V7b, and
+    # for the member-default rule a NAMED constant (no identifier-less row, no file scope) read only through a member.
+    for nm, fld in (("V6 designator value on its own line (C-1)", "Profile::vision_attn_threads"),
+                    ("V7b designated array value continued on the next line (C-1)", "Profile::gemv_r")):
+        a, b, fns, need, _, inc = PROBES4[nm]
+        r, miss, sel = probe(a, b, fns, need, inc)
+        expect(f"pass6c {nm}: the continuation row declares the field in force ({fld})",
+               any(d["name"] == fld and d["what"] == "field" for d in r["declarations"]), r["declarations"])
+        why = sorted(r["paths"].get("p_useU", [])) if isinstance(r["paths"], dict) else []
+        expect(f"pass6c {nm}: useU selected as a reader of {fld} (not only by the file scope)",
+               any(f"uses {fld}" in w for w in why), why)
+    KD6 = "#pragma once\nconstexpr int kBn = 32;\nstruct KT {\n    int bn = kBn;\n};\nstruct Holder {\n    KT kt;\n};\n"
+    KC6 = ('#include "k.h"\nint readBn(const Holder& h) {\n  return h.kt.bn;\n}\nint other() {\n  return 1;\n}\n')
+    r, miss, sel = probe({"src/k.h": KD6, "src/m.cpp": KC6}, {"src/k.h": KD6.replace("= 32;", "= 64;"), "src/m.cpp": KC6},
+                         [("src/m.cpp", "readBn"), ("src/m.cpp", "other")], ["readBn"], {"src/k.h": ["src/m.cpp"]})
+    expect("pass6c member default from a named constant (kBn -> KT::bn = kBn) -> reader of .bn selected",
+           not miss, (miss, sel, r["notes"][:3]))
+    expect("pass6c block: member default from a named constant -> no file scope (other not selected)",
+           "other" not in sel and not r.get("noid_lines"), (sel, r.get("noid_lines"), r["notes"][:3]))
 finally:
     impact.show = real
     if real_tree is not None:
         impact.tree_includes = real_tree
+# mt-p1 pass 6 (review5 C-2): the git path of tree_includes / tree_tus, unpatched, on this repository's HEAD: the CLI
+# translation unit includes whirl/common.h, so tree_tus must list src/cli/main.cpp as a TU of include/whirl/common.h,
+# and a failing git grep (exit 2) must fall back to the map (None), never return a tree with no #include lines
+if real_tree is not None:
+    _inc = impact.tree_includes("HEAD")
+    expect("pass6 C-2 git tree_includes(HEAD): src/cli/main.cpp includes whirl/common.h",
+           _inc is not None and "whirl/common.h" in _inc.get("src/cli/main.cpp", []), (_inc or {}).get("src/cli/main.cpp"))
+    _tt = impact.tree_tus("HEAD", {"includers": {}})
+    expect("pass6 C-2 git tree_tus(HEAD): include/whirl/common.h is seen by src/cli/main.cpp (source tree)",
+           _tt[1] == "tree" and "src/cli/main.cpp" in _tt[0]("include/whirl/common.h")
+           and "include/whirl/common.h" in _tt[3]("src/cli/main.cpp"), _tt[1])
+    _run = impact.subprocess.run
+
+    def _grep_fails(cmd, *a, **k):
+        r_ = _run(cmd, *a, **k)
+        if "grep" in cmd:
+            r_.returncode, r_.stdout = 2, ""
+        return r_
+    impact.subprocess.run = _grep_fails
+    try:
+        expect("pass6 C-2 git grep exit 2 -> tree_includes None (map fallback, not an empty include graph)",
+               impact.tree_includes("HEAD") is None)
+    finally:
+        impact.subprocess.run = _run
+# mt-p1 pass 6c: the same C-2 return-code rule with an injected fake runner (no git, no repository needed): the check
+# above runs real git first and is vacuous where impact.ROOT is not a repository (a temp copy: ls-tree already fails)
+if real_tree is not None:
+    import types
+
+    def _fake_git(grep_rc, grep_out):
+        def _r(cmd, *a, **k):
+            if "ls-tree" in cmd:
+                return types.SimpleNamespace(returncode=0, stdout="src/a.cpp\nsrc/a.h\ndocs/x.md\n", stderr="")
+            if "grep" in cmd:
+                return types.SimpleNamespace(returncode=grep_rc, stdout=grep_out, stderr="fatal: fake" if grep_rc > 1 else "")
+            raise AssertionError(f"unexpected command {cmd}")
+        return _r
+    _run = impact.subprocess.run
+    try:
+        impact.subprocess.run = _fake_git(0, 'R:src/a.cpp:#include "a.h"\n')
+        _inc = impact.tree_includes("R")
+        expect("pass6c C-2 fake runner: grep exit 0 -> the #include lines parsed",
+               _inc == {"src/a.cpp": ["a.h"], "src/a.h": []}, _inc)
+        impact.subprocess.run = _fake_git(1, "")
+        _inc = impact.tree_includes("R")
+        expect("pass6c C-2 fake runner: grep exit 1 (no match) -> files with no #include, not None",
+               _inc == {"src/a.cpp": [], "src/a.h": []}, _inc)
+        for rc_ in (2, 128):
+            impact.subprocess.run = _fake_git(rc_, "")
+            _inc = impact.tree_includes("R")
+            expect(f"pass6c C-2 fake runner: grep exit {rc_} -> None (map fallback, fail closed)", _inc is None, _inc)
+    finally:
+        impact.subprocess.run = _run
 print(f"impact decl test: {ok}/{ok + bad} ok")
 sys.exit(1 if bad else 0)
