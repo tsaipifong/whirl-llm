@@ -183,6 +183,11 @@ struct Ctx {
     std::map<std::string, std::unique_ptr<whirl::gguf::File>> files;
 };
 
+// Kernel `name` of the code object at the path in environment variable `env` (kernel development,
+// e.g. WHIRL_KT_BD_HSACO = a WHIRL_BARDRAIN candidate object); a null Function when the variable is
+// unset, the file cannot be read or the kernel is absent. Modules are loaded once and kept.
+hip::Function xFn(const Ctx& c, const char* env, const std::string& name);
+
 struct HostMat;
 // One real weight matrix per supported type from the configured models (rows
 // [0, max_rows) of a representative tensor), plus synthetic f32 / f16 (and

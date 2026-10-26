@@ -190,6 +190,16 @@ extern "C" __global__ void __launch_bounds__(256)
 // uniform row base + this one 32-bit lane offset).
 #define GW_OPAQUE(x) asm volatile("" : "+v"(x))
 
+// feat026-wscanspill: opt-in register-pressure candidates for gdn_wscan8 / gdn_wscan4 (gfx1201), bit-identical by
+// construction (same values, same WMMA order per accumulator, same addresses; only address arithmetic / load order).
+// Default 0 = the shipped object.
+//   bit 1: the state load (prologue) and store (epilogue) use a uniform base + one opaque 32-bit lane offset, so the
+//          compiler no longer keeps 32 CSE'd 64-bit state addresses live across the chunk loop (the shipped spill:
+//          gdn_wscan8 256 VGPR + 20 spilled, gdn_wscan4 256 + 54 -> 241 / 247, no spill, no scratch).
+#ifndef WHIRL_WSCAN_SPILL
+#define WHIRL_WSCAN_SPILL 0
+#endif
+
 template <int WPB>
 __device__ void gdn_wscan_impl(const float *qkv, const _Float16 *TMin, const float *Gin, const float *beta, float *state,
                                float *out, int n_tok, int n_k_heads, int n_v_heads, int qkv_stride, float scale) {
@@ -214,10 +224,21 @@ __device__ void gdn_wscan_impl(const float *qkv, const _Float16 *TMin, const flo
     }
     float *Sg = state + (size_t)h * GDK * GDK;
     wf8 S[8];
+#if WHIRL_WSCAN_SPILL & 1
+    {
+        int s_lane = 8 * hi * GDK + j;
+        GW_OPAQUE(s_lane);
+#pragma unroll
+        for (int it = 0; it < 8; ++it)
+#pragma unroll
+            for (int v = 0; v < 8; ++v) S[it][v] = (Sg + (it * 16 + v) * GDK)[s_lane];
+    }
+#else
 #pragma unroll
     for (int it = 0; it < 8; ++it)
 #pragma unroll
         for (int v = 0; v < 8; ++v) S[it][v] = Sg[(size_t)(it * 16 + 8 * hi + v) * GDK + j];
+#endif
     const int n_chunks = (n_tok + GCH - 1) / GCH;
     float4 pre[BLK_PER][16];
     uint4 ptm[NPTM];
@@ -396,10 +417,21 @@ __device__ void gdn_wscan_impl(const float *qkv, const _Float16 *TMin, const flo
         }
     }
 #undef GW_FETCH
+#if WHIRL_WSCAN_SPILL & 1
+    {
+        int s_lane = 8 * hi * GDK + j;
+        GW_OPAQUE(s_lane);
+#pragma unroll
+        for (int it = 0; it < 8; ++it)
+#pragma unroll
+            for (int v = 0; v < 8; ++v) (Sg + (it * 16 + v) * GDK)[s_lane] = S[it][v];
+    }
+#else
 #pragma unroll
     for (int it = 0; it < 8; ++it)
 #pragma unroll
         for (int v = 0; v < 8; ++v) Sg[(size_t)(it * 16 + 8 * hi + v) * GDK + j] = S[it][v];
+#endif
 }
 
 extern "C" __global__ void __launch_bounds__(256)

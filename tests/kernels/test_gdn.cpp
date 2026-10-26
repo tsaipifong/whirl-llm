@@ -324,6 +324,33 @@ void testGdn(Ctx& c) {
             c.sync();
             c.rep.add(tolRms("gdn_wprep + gdn_wscan8 (f16 WMMA) out vs CPU", dout.down<float>(out.size()), out, 2e-2));
             c.rep.add(tolRms("gdn_wscan8 final state vs CPU", dst.down<float>(st.size()), st, 2e-2));
+            // feat026-barrierdrain2: WHIRL_KT_BD_HSACO = a WHIRL_BARDRAIN candidate object: its gdn_wscan8 (and
+            // gdn_wscan4, grid y = 2x, 128 threads) on the same gdn_wprep output == this object's same kernel, bitwise
+            // (out + state), 3 repeats each; absent -> no result
+            for (const char* nm : {"gdn_wscan8", "gdn_wscan4"}) {
+                const hip::Function xs = xFn(c, "WHIRL_KT_BD_HSACO", nm), fs = c.fnOpt(nm);
+                if (!xs || !fs) continue;
+                const bool w4 = nm[9] == '4';
+                auto runW = [&](hip::Function f) {
+                    Buf xst(state0), xout(out.size() * 4);
+                    hip::launch(f, {kNv, (w4 ? 2u : 1u) * (kDv / 128), 1}, {w4 ? 128u : 256u, 1, 1}, 0, c.s, dq.p(), W.p(), G.p(),
+                                db.p(), xst.p(), xout.p(), n, kNk, kNv, kCh, kScale);
+                    c.sync();
+                    return std::make_pair(xout.down<float>(out.size()), xst.down<float>(st.size()));
+                };
+                const auto ref = runW(fs);
+                {
+                    std::size_t xbad = 0;
+                    for (int rep = 0; rep < 3; ++rep) xbad += runW(xs) != ref;
+                    Result r;
+                    r.name = std::string(nm) + " candidate object == shipped (out + state, 3 runs)";
+                    r.kind = Kind::invariant;
+                    r.n = 3;
+                    r.mismatches = xbad;
+                    r.pass = xbad == 0;
+                    c.rep.add(r);
+                }
+            }
         }
         if (c.k.gdn_sx_prep && c.k.gdn_sx_scan) {
             // GDN-8S (gfx1151): strix-llama.cpp f16-WMMA chunks, CL = 32, same tolerance class as gdn_wscan8
