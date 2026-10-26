@@ -1110,9 +1110,19 @@ void testMoeSkip() {
         nu::Plan pb2 = pb;  // no environment: unchanged
         nu::setMoeSkip(pb2, "", "", true);
         CHECK(!pb2.on(Item::moeskip) && pb2.overrides.empty() && nu::modeLabel(pb2) == "balance");
-        nu::Plan pp2 = pp;  // user-requested in precise: lossy override
-        nu::setMoeSkip(pp2, "0.1", "", true);
-        CHECK(pp2.on(Item::moeskip) && std::fabs(pp2.moe_skip_thr - 0.1f) < 1e-7f && nu::modeLabel(pp2) == "precise+overrides");
+        // feat027-moeskip-r1 (F1 of feat026-moe-skipsafe): moeskip is a fast-only item, so WHIRL_MOESKIP_THR / _MIN
+        // are ignored in precise and balance (applyFastOnlyOverride semantics: plan unchanged, no threshold, no
+        // override entry). Before the fix precise + WHIRL_MOESKIP_THR=0.1 enabled it (slot id -1 reached the
+        // unpatched precise kernels moe_gu_f_* / moe_down_f_*).
+        for (const nu::Plan* base : {&pp, &pb}) {
+            for (const auto& [thr, mn] : {std::pair<const char*, const char*>{"0.1", ""}, {"0.1", "2"}, {"0.5", "1"}, {"", "3"}, {"0", ""}}) {
+                nu::Plan q = *base;
+                nu::setMoeSkip(q, thr, mn, true);
+                CHECK(!q.on(Item::moeskip) && q.moe_skip_thr == 0.f && q.overrides.empty() && !q.lossy_override);
+                CHECK(nu::modeLabel(q) == nu::modeLabel(*base) && nu::logLine(q) == nu::logLine(*base));
+                CHECK(q.moe_skip_min == base->moe_skip_min);
+            }
+        }
         nu::Plan pp3 = pp;  // not applicable: nothing
         nu::setMoeSkip(pp3, "0.1", "", false);
         CHECK(!pp3.on(Item::moeskip) && nu::modeLabel(pp3) == "precise");
@@ -1133,6 +1143,12 @@ void testMoeSkip() {
         CHECK(!pd.on(Item::moeskip) && pd.items[static_cast<std::size_t>(Item::moeskip)].note == "dense model");
         const nu::Plan pc = nu::plan(nu::parseMode("fast:kvq4", "t"), ornith);  // custom list without it
         CHECK(!pc.on(Item::moeskip) && pc.moe_skip_thr == 0.f);
+        {
+            // fast with a custom list without it: the switch still applies (fast takes fast-only items), lossy
+            nu::Plan pc2 = pc;
+            nu::setMoeSkip(pc2, "0.1", "", true);
+            CHECK(pc2.on(Item::moeskip) && std::fabs(pc2.moe_skip_thr - 0.1f) < 1e-7f && nu::modeLabel(pc2) == "fast+overrides");
+        }
         CHECK(nu::plan(nu::parseMode("fast:moeskip", "t"), ornith).on(Item::moeskip));
         nu::Target s8 = ornith;  // Radeon 8060S: same rule (no fp8 there)
         s8.gfx1151 = true;

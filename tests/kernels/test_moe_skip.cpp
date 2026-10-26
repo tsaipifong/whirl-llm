@@ -6,6 +6,8 @@
 //     ids leaves dropped pairs untouched and kept pairs bitwise equal to the full-id launch; moe_down_*
 //     with skipped ids == the full-id launch with zero weights on the dropped slots (tolerance: the
 //     dropped terms are absent instead of 0 * x);
+//   * precise decode experts moe_gu_f_* / moe_down_f_* (MXFP4 whole-block and the generic Q4_K form,
+//     feat027-moeskip-r1): the same checks, dropped down slots with NaN activations;
 //   * prefill: moe_route (and moe_tiles where present) with dropped pairs == the host reference
 //     (tiles exact, inv -1 for dropped, dropped pairs parked after the kept positions); moe_combine
 //     with inv -1 and a NaN tail vs CPU.
@@ -138,6 +140,66 @@ void testMoeSkip(Ctx& c) {
         }
     } else {
         c.rep.skip("moeskip", "moe_gu_mxfp4 / moe_down_mxfp4", "kernel not in this code object");
+    }
+
+    // ---------------- precise decode experts moe_gu_f_* / moe_down_f_* (kernels/moe_f.hip) with id -1
+    // feat027-moeskip-r1 (F1 of feat026-moe-skipsafe): the precise kernels must honour the same contract (moeskip is
+    // refused outside fast, this is the kernel-level safety). The weight tensors hold exactly R experts, so a kernel
+    // that forms the address of expert -1 reads before the tensor (out of bounds; garbage or a fault). Dropped
+    // gate/up pairs must stay untouched (0xff fill), and dropped down slots get NaN activations, so a kernel that
+    // reads them poisons the result instead of passing by luck.
+    for (const QType qt : {QType::mxfp4, QType::q4_k}) {
+        const int ti2 = static_cast<int>(qt);
+        const std::string sfx = qt == QType::mxfp4 ? "mxfp4" : "q4_k";
+        if (!c.k.moe_gu_f[ti2] || !c.k.moe_down_f[ti2]) {
+            c.rep.skip("moeskip", "moe_gu_f_" + sfx + " / moe_down_f_" + sfx, "kernel not in this code object");
+            continue;
+        }
+        HostMat gate = randomMat(c, qt, R * F, E), up = randomMat(c, qt, R * F, E), down = randomMat(c, qt, R * E, F);
+        Buf dg(gate.data), du(up.data), dd(down.data);
+        const std::size_t ng = nk * F;
+        // gate + up (f32 activations h)
+        Buf yg_s(ng * 4), yu_s(ng * 4), yg_f(ng * 4), yu_f(ng * 4);
+        yg_s.fill(0xff);
+        yu_s.fill(0xff);
+        hip::launch(c.k.moe_gu_f[ti2], {cdiv(2 * F, 8), static_cast<unsigned>(n * K), 1}, {256, 1, 1}, 0, c.s, dg.p(), du.p(), gate.row_bytes, F,
+                    2 * F, dh.p(), ids_s.p(), yg_s.p(), yu_s.p(), E, K);
+        hip::launch(c.k.moe_gu_f[ti2], {cdiv(2 * F, 8), static_cast<unsigned>(n * K), 1}, {256, 1, 1}, 0, c.s, dg.p(), du.p(), gate.row_bytes, F,
+                    2 * F, dh.p(), ids_f.p(), yg_f.p(), yu_f.p(), E, K);
+        c.sync();
+        {
+            const auto gs = yg_s.down<std::uint32_t>(ng), us = yu_s.down<std::uint32_t>(ng);
+            const auto gf = yg_f.down<std::uint32_t>(ng), uf = yu_f.down<std::uint32_t>(ng);
+            std::size_t bad = 0;
+            for (std::size_t p = 0; p < nk; ++p)
+                for (int r = 0; r < F; ++r) {
+                    const std::size_t i = p * F + r;
+                    if (hs[p] < 0) bad += gs[i] != 0xffffffffu || us[i] != 0xffffffffu;
+                    else bad += gs[i] != gf[i] || us[i] != uf[i];
+                }
+            c.rep.add(invariant("moe_gu_f_" + sfx + " skipped ids: dropped pairs untouched, kept == full ids (bitwise)", ng, bad));
+        }
+        // down + combine: f32 activations; dropped slots NaN in the skipped launch, finite with weight 0 in the full one
+        std::vector<float> act = c.randn(ng), act_nan = act;
+        for (std::size_t p = 0; p < nk; ++p)
+            if (hs[p] < 0) std::fill(act_nan.begin() + static_cast<std::ptrdiff_t>(p * F), act_nan.begin() + static_cast<std::ptrdiff_t>((p + 1) * F), std::nanf(""));
+        const std::vector<float> x0 = c.randn(static_cast<std::size_t>(n) * E), ysh = c.randn(static_cast<std::size_t>(n) * E);
+        std::vector<float> wz = ws;
+        Buf da(act), dan(act_nan), dwz(wz), x_s(x0), x_f(x0), dysh(ysh);
+        hip::launch(c.k.moe_down_f[ti2], {cdiv(E, 8), static_cast<unsigned>(n), 1}, {256, 1, 1}, 0, c.s, dd.p(), down.row_bytes, E, dan.p(),
+                    ids_s.p(), w_s.p(), sg_s.p(), dysh.p(), x_s.p(), F, K);
+        hip::launch(c.k.moe_down_f[ti2], {cdiv(E, 8), static_cast<unsigned>(n), 1}, {256, 1, 1}, 0, c.s, dd.p(), down.row_bytes, E, da.p(),
+                    ids_f.p(), dwz.p(), sg_s.p(), dysh.p(), x_f.p(), F, K);
+        c.sync();
+        const auto gxs = x_s.down<float>(x0.size()), gxf = x_f.down<float>(x0.size());
+        std::vector<double> ref(gxf.begin(), gxf.end());
+        c.rep.add(cmpTolRel("moe_down_f_" + sfx + " skipped ids (NaN dropped activations) == full ids with zero weights", gxs, ref, 1e-5, 1e-5));
+        // without -1 the patched kernel is the shipped one: full ids twice, bitwise (no -1 -> kt == K)
+        Buf x_f2(x0);
+        hip::launch(c.k.moe_down_f[ti2], {cdiv(E, 8), static_cast<unsigned>(n), 1}, {256, 1, 1}, 0, c.s, dd.p(), down.row_bytes, E, da.p(),
+                    ids_f.p(), dwz.p(), sg_s.p(), dysh.p(), x_f2.p(), F, K);
+        c.sync();
+        c.rep.add(cmpExact("moe_down_f_" + sfx + " full ids deterministic (bitwise)", x_f2.down<float>(x0.size()), gxf));
     }
 
     // ---------------- prefill grouping + combine
