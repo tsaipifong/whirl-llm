@@ -34,6 +34,22 @@ bool envFlag(std::string_view name, bool def) {
 
 namespace whirl::config {
 
+const std::vector<const char*>& removedSwitches() {
+    static const std::vector<const char*> v = {"HEAD_GEMVX", "PREC_GEMVH", "PREC_GS"};
+    return v;
+}
+
+std::vector<std::string> removedSwitchWarnings(const std::function<std::optional<std::string>(std::string_view)>& get) {
+    std::vector<std::string> w;
+    for (const char* n : removedSwitches())
+        if (auto v = get(n)) w.push_back(std::string("WHIRL_") + n + "=" + *v + " is ignored: this research switch was removed in WHIRL 0.2.6");
+    return w;
+}
+
+std::vector<std::string> removedSwitchWarnings() {
+    return removedSwitchWarnings([](std::string_view n) { return envGet(n); });
+}
+
 namespace {
 using S = EnvSnapshot;
 constexpr std::array<S::Entry, S::n_names> k_names{{
@@ -77,6 +93,13 @@ constexpr std::array<S::Entry, S::n_names> k_names{{
     {"ATTN_DQ4", &S::attn_dq4},
     {"ATTN_WS4", &S::attn_ws4},
     {"MOE_BN", &S::moe_bn},
+    {"HEAD_CHUNK", &S::head_chunk},
+    {"DQ4_DYN", &S::dq4_dyn},
+    {"GDN_V0", &S::gdn_v0},
+    {"NO_GRAPH", &S::no_graph},
+    {"WIDE_VERIFY", &S::wide_verify},
+    {"DRAFT_WINDOW", &S::draft_window},
+    {"DRAFT_WINDOW_MIN", &S::draft_window_min},
     {"CODE_OBJECT", &S::code_object},
     {"MOE_MXW", &S::moe_mxw},
     {"MOE_WIDE", &S::moe_wide},
@@ -88,9 +111,6 @@ constexpr std::array<S::Entry, S::n_names> k_names{{
     {"GPU_WAIT", &S::gpu_wait},
     {"DEVICE", &S::device},
     {"DFLASH_PROF", &S::dflash_prof},
-    {"HEAD_GEMVX", &S::head_gemvx},
-    {"PREC_GEMVH", &S::prec_gemvh},
-    {"PREC_GS", &S::prec_gs},
 }};
 // every field is in the table (a field added without an entry would never be read)
 static_assert(sizeof(EnvSnapshot) == S::n_names * sizeof(S::Value));

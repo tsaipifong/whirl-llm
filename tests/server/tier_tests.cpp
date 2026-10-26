@@ -28,6 +28,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -4167,6 +4168,68 @@ static bool want(const char* name) {
     return all || std::strcmp(only, name) == 0;
 }
 
+// feat026-o6 (1), owner O6: every file carries tier::key_scheme. A file of the earlier scheme (WHIRL 0.2.5 and before:
+// the reserved 0) under another fingerprint is kept, counted and reported in one startup line; a file of the current
+// scheme under another fingerprint (another model / build) is kept without that line.
+static void testKeySchemeReport(NullBackend& ops, const fs::path& dir) {
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    SsdEnv env{dir};
+    const std::uint64_t fp_a = 91, fp_b = 92;
+    Sess a(ops, 24);
+    std::uint64_t seed = 9900;
+    a.toks = freshToks(2560, seed);
+    {
+        auto t = Tier::create(ops, 256ull << 20, 120, 0);
+        t->start(env.cfg(4ull << 30), kLay, fp_a);
+        spillSess(*t, a, 0);
+        CHECK(tickIdle(*t));
+    }
+    const fs::path fa = entryFile(dir, fp_a, a.id);
+    CHECK(fs::exists(fa));
+    CHECK(readHeader(fa).key_scheme == key_scheme && key_scheme == 1);
+    auto startAt = [&](std::uint64_t fp, std::uint64_t seed, std::vector<std::string>& logs) {
+        auto t = Tier::create(ops, 256ull << 20, seed, 0);
+        t->log_fn = [&logs](std::string_view l) { logs.emplace_back(l); };
+        t->start(env.cfg(4ull << 30), kLay, fp);
+        return t->cleanup();
+    };
+    auto reported = [](const std::vector<std::string>& logs) {
+        int n = 0;
+        for (const auto& l : logs)
+            if (l.find("written by WHIRL 0.2.5 or earlier") != std::string::npos) {
+                ++n;
+                CHECK(l.find("kv tier: 1 SSD cache files") == 0);
+                CHECK(l.find("processed and cached again once") != std::string::npos);
+            }
+        return n;
+    };
+    {
+        std::vector<std::string> logs;
+        const Tier::Cleanup c = startAt(fp_b, 121, logs);
+        CHECK(c.prev_key_files == 0 && reported(logs) == 0);
+    }
+    {  // the same file as an older WHIRL wrote it (key_scheme 0)
+        FILE* f = _wfopen(fa.c_str(), L"r+b");
+        CHECK(f != nullptr);
+        if (f) {
+            const std::uint32_t zero = 0;
+            std::fseek(f, static_cast<long>(offsetof(Header, key_scheme)), SEEK_SET);
+            std::fwrite(&zero, sizeof zero, 1, f);
+            std::fclose(f);
+        }
+        CHECK(readHeader(fa).key_scheme == 0);
+    }
+    {
+        std::vector<std::string> logs;
+        const Tier::Cleanup c = startAt(fp_b, 122, logs);
+        CHECK(c.prev_key_files == 1 && c.prev_key_bytes > 0 && reported(logs) == 1);
+    }
+    CHECK(fs::exists(fa));  // kept: the older WHIRL can still use it
+    fs::remove_all(dir, ec);
+}
+
+
 int main(int argc, char** argv) {
     whirl::test::clearWhirlEnv({L"WHIRL_TIER_ONLY", L"WHIRL_TIER_AMP"});  // FR-TEST P3-11
     std::setvbuf(stdout, nullptr, _IONBF, 0);
@@ -4338,6 +4401,10 @@ int main(int argc, char** argv) {
     if (want("testDedupStartupCycleOwnerTrunc")) {
         std::printf("-- %s\n", "testDedupStartupCycleOwnerTrunc");
         testDedupStartupCycleOwnerTrunc(ops, dir);
+    }
+    if (want("testKeySchemeReport")) {  // feat026-o6 (1)
+        std::printf("-- %s\n", "testKeySchemeReport");
+        testKeySchemeReport(ops, dir);
     }
     if (want("testWriteAmplification")) {
         std::printf("-- %s\n", "testWriteAmplification");

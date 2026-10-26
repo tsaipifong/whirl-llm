@@ -457,7 +457,11 @@ then KV page j at `nck × ck_stride + j × page_bytes` (13.0 MiB per page for q8
 - **Fingerprint:** executable (size + modification time), model file name + tensor count + bytes,
   KV format, MTP on/off, layout, prefill batch, and every engine setting that changes numerics
   (scheduling/logging/tier settings excluded). An entry written by a different build or numerical
-  configuration is never restored.
+  configuration is never restored. Since 0.2.6 the numerics part is the plan's bits key (mode, the items in effect,
+  the decode activation form and every execution flag as the loaded model holds it) instead of the plan's log line,
+  so rewording a log message no longer changes the key. Files written by 0.2.5 or earlier are reported in one startup
+  line ("written by WHIRL 0.2.5 or earlier ...") and are not used; as after any WHIRL update (the executable is part of
+  the key), those prompts are processed and cached again once.
 - Reads: up to 4 overlapped reads in flight, completed in order (NVMe 2 MiB QD4 7.0 GB/s vs QD1
   4.1 GB/s); the restore is pipelined — as soon as a block is read, its pieces are copied H2D.
 

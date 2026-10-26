@@ -87,7 +87,10 @@ bool fingerprintEnvKept(std::string_view key) {
                                  // launch-log raw word dump (arch024 left these out; they print, change nothing)
                                  "WHIRL_LAUNCH_LOG_RAW", "WHIRL_LAUNCH_LOG_RAW_MAX",
                                  // safe025: leak-check report verbosity (test builds only)
-                                 "WHIRL_LEAKCHECK_QUIET"};
+                                 "WHIRL_LEAKCHECK_QUIET",
+                                 // feat026-o6 (3): research switches removed in 0.2.6 (config::removedSwitches): ignored,
+                                 // they change nothing
+                                 "WHIRL_HEAD_GEMVX", "WHIRL_PREC_GEMVH", "WHIRL_PREC_GS"};
     for (const char* x : skip)
         if (up == x) return false;
     return true;

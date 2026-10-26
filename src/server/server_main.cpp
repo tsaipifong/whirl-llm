@@ -399,7 +399,10 @@ std::uint64_t tierFingerprint(const qwen35::Model& m, const std::string& path, c
     id.ck_bytes = lay.ck_bytes;
     id.page_bytes = lay.page_bytes;
     id.max_batch = m.max_batch;
-    id.numerics = whirl::numerics::logLine(m.num_plan);
+    // feat026-o6 (1), owner O6 (redone on arch025-N2b): the plan's bits key (mode, items, q8dec and every execution
+    // flag; since N2b the Model runs from num_plan.flags, so the key names what runs), not logLine(num_plan), whose
+    // descriptions changed the key with their wording
+    id.numerics = m.num_plan.bitsKey();
     const hip::DeviceInfo dev = hip::describeDevice(hip::getDevice());
     id.gpu_arch = dev.gcn_arch;
     id.gpu_name = dev.name;
@@ -1037,22 +1040,14 @@ int serveMain(int argc, char** argv, const char* program) {
                  static_cast<double>(d0.free > d1.free ? d0.free - d1.free : 0) / (1024.0 * 1024.0 * 1024.0));
         }
 
-        // same knobs as the CLI. arch025-N2b (R-5): numerics::applyFront(Front::server) on the model's plan, with the
-        // server's parse rules (server_main.cpp:1040-1120 before N2b, moved in arch025-N2a): NO_FUSE, FLOAT_GEMV,
-        // NAIVE_ATTN, GDN_SEQ, MOE_BN, DRAFT_WINDOW(_MIN), use_graph off, WIDE_VERIFY, HEAD_CHUNK, GDN_V0, ATTN_WIDE,
-        // ATTN_DQ4, DQ4_DYN, ATTN_WS4. All before their first reader (wideCapable below); the CLI-only names are not sent.
+        // feat026-o6 (2), owner O6 (redone on arch025-N2b): the runtime switches, the same function and rules as the CLI
+        // (qwen35::applyRuntimeEnv -> numerics::applyFront(Front::server); the server's one difference, use_graph off: it
+        // never replays the decode graph, is a rule of numerics runtimeFlags). Before 0.2.6 the server skipped DBG,
+        // GEMV_MAX, NO_GRAPH, GV_GROUP, GV_NMAX and the WHIRL_GEMV_* lists. All before their first reader (wideCapable).
         {
-            namespace nu = whirl::numerics;
-            nu::RuntimeValues rv;
-            for (const auto& e : nu::RuntimeValues::names()) {
-                const std::string_view n = e.name;
-                if (n == "DBG" || n == "GEMV_MAX" || n == "NO_GRAPH" || n == "GV_GROUP" || n == "GV_NMAX") continue;  // CLI only
-                rv.*e.field = env(e.name);
-            }
-            hip::Function fv0 = nullptr;
-            if (rv.gdn_v0) fv0 = model.module.getFunctionOpt("gdn_step_norm_v0");
-            nu::applyFront(model.num_plan, nu::Front::server, rv, fv0 != nullptr);
-            if (model.nf().gdn_v0) model.k.gdn_step_norm = fv0;
+            std::vector<std::string> warn;
+            qwen35::applyRuntimeEnv(model, [](const char* n) { return envGet(n); }, whirl::numerics::Front::server, &warn);
+            for (const std::string& w : warn) logW("{}", w);
         }
         if (env("PREFILL_BATCH"))  // (same floor as above: never below vram::min_prefill_batch)
             model.max_batch = std::min(model.max_batch, vram::prefillBatchFloor(envU32("PREFILL_BATCH", model.max_batch)));
@@ -1060,11 +1055,6 @@ int serveMain(int argc, char** argv, const char* program) {
         // 48k / <file> = frequency subset file, N = the first N rows (old experiment), off = full head
         const qwen35::DraftVocabChoice draft_vocab = qwen35::draftVocabChoice(env("DRAFT_VOCAB"), qwen35::exeDirectory());
         if (draft_vocab.kind == qwen35::DraftVocabChoice::Kind::first_n) model.draft_vocab = draft_vocab.n;
-        // (applyFront set DRAFT_WINDOW / _MIN; envU32 here only logs a bad value at its old place, with the same default)
-        (void)envU32("DRAFT_WINDOW", model.nf().draft_window);
-        (void)envU32("DRAFT_WINDOW_MIN", model.nf().draft_window_min);
-        if (env("GEMV_R") || env("GEMV_W") || env("GEMV_WH"))
-            logW("WHIRL_GEMV_R / WHIRL_GEMV_W / WHIRL_GEMV_WH are not supported by whirl-server (ignored)");
         const bool use_mtp = model.mtp.has_value() && envOn("MTP", true);
         const qwen35::MtpDefaults def = qwen35::mtpDefaults(model.cfg.moe, model.arch);
         std::optional<std::uint32_t> drafts_env;
@@ -1097,7 +1087,6 @@ int serveMain(int argc, char** argv, const char* program) {
         }
         // an explicit draft count is used as is (fixed) unless WHIRL_MTP_ADAPT asks otherwise
         const bool auto_mode = adapt_env ? (*adapt_env == "auto") : (def.automatic && !drafts_user);
-        if (env("HEAD_CHUNK")) (void)envU32("HEAD_CHUNK", model.nf().head_chunk);  // (bad-value warning only, as above)
         auto batch_drafts = defaultBatchDrafts(model.cfg.moe, model.wideCapable());
         batch_drafts[1] = drafts;
         const auto bd_env = env("MTP_BATCH_DRAFTS");

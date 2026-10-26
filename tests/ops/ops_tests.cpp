@@ -226,12 +226,11 @@ void testGemvTile() {
 void testGemvWide() {
     const kn::KernelTable kx = fakeTable(true, true, true, false), k = fakeTable(true, true, false, false);
     const auto q4 = mat(GgmlType::q4_k, 4096, 5120), head = mat(GgmlType::q6_k, 248320, 5120, true), hq4 = mat(GgmlType::q4_k, 248320, 5120, true);
-    CHECK(ops::chooseGemvWide(q4, 3, kx, false) == ops::GemvWide::gemvx);
-    CHECK(ops::chooseGemvWide(q4, 3, k, false) == ops::GemvWide::pieces);
-    CHECK(ops::chooseGemvWide(head, 1, kx, false) == ops::GemvWide::head_split);
-    CHECK(ops::chooseGemvWide(head, 2, kx, false) == ops::GemvWide::pieces);
-    CHECK(ops::chooseGemvWide(hq4, 1, kx, false) == ops::GemvWide::pieces);  // a q4_k head without WHIRL_HEAD_GEMVX
-    CHECK(ops::chooseGemvWide(hq4, 1, kx, true) == ops::GemvWide::gemvx);
+    CHECK(ops::chooseGemvWide(q4, 3, kx) == ops::GemvWide::gemvx);
+    CHECK(ops::chooseGemvWide(q4, 3, k) == ops::GemvWide::pieces);
+    CHECK(ops::chooseGemvWide(head, 1, kx) == ops::GemvWide::head_split);
+    CHECK(ops::chooseGemvWide(head, 2, kx) == ops::GemvWide::pieces);
+    CHECK(ops::chooseGemvWide(hq4, 1, kx) == ops::GemvWide::pieces);  // a q4_k head never takes gemvx (feat026-o6: no WHIRL_HEAD_GEMVX)
     CHECK(ops::gemvxGrid(4096).x == 256 && ops::gemvxGrid(4097).x == 257 && ops::headSplitGrid(248320).x == 7760);
 }
 
@@ -275,19 +274,16 @@ void testOpsGemm() {
     ops::GemmFlags pre8 = pre;
     pre8.gemvh_cap = 64;  // fewer blocks than the 320 row tiles: 5 tiles per block
     CHECK(ops::chooseGemmF16(q4, 4, 0, pre8, k).grid.x == kn::gemvhGridCap(5120, 64) && kn::gemvhGridCap(5120, 64) == 64);
-    // WHIRL_PREC_GEMVH=0: the precise gemms choice (narrowest tile that holds n, then the smaller row block)
-    ops::GemmFlags nog = pre;
-    nog.prec_gemvh = false;
-    p = ops::chooseGemmF16(q4, 4, 0, nog, k);
+    // no gemvh kernel (feat026-o6: WHIRL_PREC_GEMVH=0, which skipped it, is gone): the precise gemms choice (narrowest
+    // tile that holds n, then the smaller row block)
+    const ops::GemmFlags nog = pre;
+    p = ops::chooseGemmF16(q4, 4, 0, nog, gemmTable(false, true, true));
     CHECK(p.kind == ops::GemmKind::gemms && nameOf(p.f).rfind("gemms_c4_", 0) == 0);  // c4 = 128 x 16
     CHECK(ops::precChoice(q4, 4, 0, nog, k) == 2 * G + 4);
     CHECK(ops::precChoice(q4, 20, 0, nog, k) == 2 * G + 0);  // 32-token tiles: c0 (64 x 32) over c1 (128 x 32)
     ops::GemmFlags tie = nog;
     tie.gemms_tie_larger_bm = true;
     CHECK(ops::precChoice(q4, 20, 0, tie, k) == 2 * G + 1);  // the 8060S rule: ties to the larger row block
-    ops::GemmFlags gs = nog;
-    gs.prec_gs = 1;
-    CHECK(ops::precChoice(q4, 4, 0, gs, k) == 2 * G + 1);    // WHIRL_PREC_GS
     // no gemms for the type (f16 weights): the tuned fused config, never the dequant choice
     CHECK(ops::precChoice(f16, 4, static_cast<std::uint8_t>(G + 3), nog, k) == 3);
     // prefill: the tuned choice; a dequant choice dequantizes into w16 then runs gemm_c on f16 (or gemmh for n >= 512)

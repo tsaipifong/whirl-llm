@@ -93,9 +93,10 @@ GemvPlan chooseGemvTile(const MatShape* mats, std::size_t n_mats, std::uint32_t 
 std::uint32_t gvNmax(GgmlType ty, std::uint32_t gv_nmax_override);
 
 // 17..32 token rows (wide batched verify): the two-tile WMMA GEMV, the output head's split q6_k kernel, or 16-row
-// pieces through chooseGemvTile. head_gemvx: WHIRL_HEAD_GEMVX (the head on gemvx too).
+// pieces through chooseGemvTile. The output head never takes gemvx (feat026-o6 (3): the research switch
+// WHIRL_HEAD_GEMVX that allowed it is gone).
 enum class GemvWide : std::uint8_t { gemvx, head_split, pieces };
-GemvWide chooseGemvWide(const MatShape& w0, std::size_t n_mats, const kernels::MatmulKernels& k, bool head_gemvx);
+GemvWide chooseGemvWide(const MatShape& w0, std::size_t n_mats, const kernels::MatmulKernels& k);
 // smallest batch that takes gemmh_f16 instead of the tuned f16 GEMM (= tune.cpp's candidate rule)
 inline constexpr std::uint32_t gemmh_min = 512;
 
@@ -112,8 +113,6 @@ struct GemmFlags {
     bool h16_dq = false;     // a fused quantized choice with f16 out takes its dequant twin (same bits)
     bool gemmh_on = true;    // 128 x 256 f16 GEMM (gemmh_f16 / gemmhh_f16) for n >= 512
     bool gemmhq_on = false;  // dequant fused into gemmh (gemmhq_<T>)
-    bool prec_gemvh = true;  // WHIRL_PREC_GEMVH (0: precise rows skip gemvh)
-    int prec_gs = -1;        // WHIRL_PREC_GS: forced gemms slot for precise rows (-1: chosen)
     // device::Profile gemvh_grid_by_rows: the gemvh grid is kernels::gemvhGridCap(rows, cap) with this device's cap
     // (kernels::gemvhCap(), read by the caller: the choice stays a pure function); 0: one block per 16 rows
     unsigned gemvh_cap = 0;

@@ -101,9 +101,9 @@ GemvPlan chooseGemvTile(const MatShape* mats, std::size_t n_mats, std::uint32_t 
     return p;
 }
 
-GemvWide chooseGemvWide(const MatShape& w0, std::size_t n_mats, const kernels::MatmulKernels& k, bool head_gemvx) {
+GemvWide chooseGemvWide(const MatShape& w0, std::size_t n_mats, const kernels::MatmulKernels& k) {
     const std::size_t t = ti(w0.ty);
-    if (k.gemvx[t] != nullptr && (!w0.head || head_gemvx)) return GemvWide::gemvx;
+    if (k.gemvx[t] != nullptr && !w0.head) return GemvWide::gemvx;
     if (w0.head && w0.ty == GgmlType::q6_k && k.gemvw_head_s != nullptr && n_mats == 1) return GemvWide::head_split;
     return GemvWide::pieces;
 }
@@ -132,8 +132,6 @@ std::uint32_t precChoice(const MatShape& w, std::uint32_t n, std::uint8_t tuned,
     const std::size_t G = kernels::kGemmCfgs.size();
     const std::size_t t = ti(w.ty);
     if (w.ty != GgmlType::f16 && w.ty != GgmlType::f32 && w.ncols % 256 == 0) {
-        if (f.prec_gs >= 0 && static_cast<std::size_t>(f.prec_gs) < k.gemms.size() && k.gemms[f.prec_gs][t] != nullptr)
-            return static_cast<std::uint32_t>(2 * G + f.prec_gs);
         int best = -1;
         for (std::size_t si = 0; si < k.gemms.size(); ++si) {
             if (k.gemms[si][t] == nullptr) continue;
@@ -166,7 +164,7 @@ GemmPlan chooseGemmF16(const MatShape& w, std::uint32_t n, std::uint8_t tuned, c
     if (precise_rows && n <= 32 && w.ncols % 256 == 0 && !f.out_h16) {
         // precise decode / verify: the decode-shaped f16 GEMM (bitwise == every choice below)
         const Function hv = n <= 16 ? k.gemvh[t] : k.gemvh2[t];
-        if (f.prec_gemvh && hv != nullptr) {
+        if (hv != nullptr) {
             p.kind = GemmKind::gemvh;
             p.f = hv;
             p.grid = D(f.gemvh_cap != 0 ? kernels::gemvhGridCap(w.nrows, f.gemvh_cap) : (w.nrows + 15) / 16);

@@ -2149,8 +2149,8 @@ void testEnvSnapshot() {
         check(got == want, std::string("env snapshot: ") + r.name + "='' (" + envtab::k_kind_names[r.kind] + ") as the pre-N1 site rule");
         empty_names.push_back(r.name);
     }
-    for (const char* sw : {"FD_SPLITS", "GEMV_MAX", "GV_NMAX", "GV_GROUP", "NO_FUSE", "FLOAT_GEMV", "GDN_SEQ", "NAIVE_ATTN", "DBG", "ATTN_WIDE",
-                           "ATTN_DQ4", "ATTN_WS4", "MOE_BN"}) {
+    for (std::size_t i = 0; i < whirl::numerics::n_numerics_switches; ++i) {  // feat026-o6-r1: every switch of the list
+        const char* sw = whirl::numerics::k_numerics_switches[i];
         check(run(sw, 0, "") == envtab::tuneOutput(0, model.string()), std::string("env snapshot: switch ") + sw + "='' = not set (numerics.cpp:292)");
         empty_names.push_back(sw);
     }
@@ -2164,8 +2164,8 @@ void testEnvSnapshot() {
     // GPU load / at static initialisation) named here with the test that covers its value: flag() above for the
     // envFlag sites (loader.cpp MOE_*), capture / fromValues above for the raw value of the others
     const std::vector<std::string> covered = envtab::namesCovered();
-    const char* const load_only[] = {"GEMV_BITWISE_FLOAT", "CODE_OBJECT", "MOE_MXW", "MOE_WIDE", "MOE_RBF", "GPU_SHARE", "GPU_WAIT", "DEVICE", "DFLASH_PROF",
-                                     "HEAD_GEMVX", "PREC_GEMVH", "PREC_GS"};  // the last three: Model::load -> forwardEnv (testForwardEnv)
+    // (feat026-o6 (3): HEAD_GEMVX / PREC_GEMVH / PREC_GS were here, Model::load -> forwardEnv; removed in 0.2.6)
+    const char* const load_only[] = {"GEMV_BITWISE_FLOAT", "CODE_OBJECT", "MOE_MXW", "MOE_WIDE", "MOE_RBF", "GPU_SHARE", "GPU_WAIT", "DEVICE", "DFLASH_PROF"};
     for (const auto& e : names) {
         const bool in_table = std::find(covered.begin(), covered.end(), e.name) != covered.end();
         const bool in_empty = std::find(empty_names.begin(), empty_names.end(), e.name) != empty_names.end();
@@ -2174,8 +2174,8 @@ void testEnvSnapshot() {
         check(in_table || in_empty || in_load, std::string("env snapshot: name read by no test: ") + e.name);
     }
     // the reverse: the names the five files read are all fields (a get() of a missing name would throw at load)
-    for (const char* sw : {"FD_SPLITS", "GEMV_MAX", "GV_NMAX", "GV_GROUP", "NO_FUSE", "FLOAT_GEMV", "GDN_SEQ", "NAIVE_ATTN", "DBG", "ATTN_WIDE",
-                           "ATTN_DQ4", "ATTN_WS4", "MOE_BN"}) {
+    for (std::size_t i = 0; i < whirl::numerics::n_numerics_switches; ++i) {  // feat026-o6-r1: every switch of the list
+        const char* sw = whirl::numerics::k_numerics_switches[i];
         bool ok = true;
         try {
             (void)EnvSnapshot().get(sw);
@@ -2203,112 +2203,20 @@ void testEnvSnapshot() {
     }
 }
 
-// arch025-F7: the forward's research switches (HEAD_GEMVX, PREC_GEMVH, PREC_GS) and the GV pair are Model members
-// read once per load. (1) config::forwardEnv against the pre-F7 site expressions copied verbatim (forward.cpp:56,
-// :245-252 at arch025-base; F7-oracle), on snapshot values (the empty string included) and through the process
-// environment + capture(); (2) a host-only Model's defaults = "not set" and the old globals' initial values;
-// (3) grep: nothing in src/ or tests/ writes one of the three names in-process (so "read once" cannot differ from
-// "read at every call / first call" for any caller here), and product code writes only non-WHIRL_ names;
-// (4) the forward files read no environment (env_read_check blocks them too).
-namespace f7 {
-// F7-oracle: the old reads, verbatim except the getenv argument
-bool oldHeadGemvx(const char* v) {  // envFlag("HEAD_GEMVX", false)
-    std::optional<std::string> o = v ? std::optional<std::string>(v) : std::nullopt;
-    if (!o) return false;
-    return *o != "0";
-}
-bool oldPrecGemvh(const char* v) { return v == nullptr || *v != '0'; }
-int oldPrecGs(const char* v) { return v != nullptr && *v != 0 ? std::atoi(v) : -1; }
-}  // namespace f7
-
+// arch025-F7: the GV pair is per Model (plan flags since N2b), and the forward files read no environment.
+// feat026-o6 (3), owner O6 (redone on N2b by feat026-o6-p25): F7's research switches HEAD_GEMVX / PREC_GEMVH / PREC_GS
+// (ForwardEnv, Model::head_gemvx / prec_gemvh / prec_gs) are removed in 0.2.6, and with them parts (1) (forwardEnv ==
+// the pre-F7 reads) and (3) (no in-process write of the three names) of this test; testRemovedSwitches pins the warning.
 void testForwardEnv() {
     namespace fs = std::filesystem;
-    using whirl::config::EnvSnapshot;
-    using V = EnvSnapshot::Value;
-    const char* const vals[] = {nullptr, "", "0", "1", "00", "0x", "01", "auto", "7", "-3", "abc", " 5", "3x", "+2", "0 ", "x0", "255"};
-    std::size_t n = 0;
-    for (const char* hv : vals)
-        for (const char* gv : vals)
-            for (const char* sv : vals) {
-                std::vector<std::pair<std::string, V>> in;
-                if (hv) in.push_back({"HEAD_GEMVX", V(hv)});
-                if (gv) in.push_back({"PREC_GEMVH", V(gv)});
-                if (sv) in.push_back({"PREC_GS", V(sv)});
-                const auto fe = whirl::config::forwardEnv(EnvSnapshot::fromValues(in));
-                const bool ok = fe.head_gemvx == f7::oldHeadGemvx(hv) && fe.prec_gemvh == f7::oldPrecGemvh(gv) && fe.prec_gs == f7::oldPrecGs(sv);
-                check(ok, std::format("forward env: snapshot HEAD_GEMVX={} PREC_GEMVH={} PREC_GS={} = the pre-F7 reads", hv ? hv : "(unset)",
-                                      gv ? gv : "(unset)", sv ? sv : "(unset)"));
-                ++n;
-            }
-    check(n == 17 * 17 * 17, "forward env: snapshot table size");
-    // through the process environment (non-empty values; "" removes the variable): capture -> forwardEnv == getenv -> old
-    for (const char* v : vals) {
-        if (v != nullptr && *v == 0) continue;
-        for (const char* name : {"WHIRL_HEAD_GEMVX", "WHIRL_PREC_GEMVH", "WHIRL_PREC_GS"}) _putenv_s(name, v ? v : "");
-        const auto fe = whirl::config::forwardEnv(EnvSnapshot::capture());
-        const char* h = std::getenv("WHIRL_HEAD_GEMVX");
-        const char* g = std::getenv("WHIRL_PREC_GEMVH");
-        const char* s = std::getenv("WHIRL_PREC_GS");
-        check(fe.head_gemvx == f7::oldHeadGemvx(h) && fe.prec_gemvh == f7::oldPrecGemvh(g) && fe.prec_gs == f7::oldPrecGs(s),
-              std::format("forward env: process env all three = '{}' -> capture = the pre-F7 reads", v ? v : "(unset)"));
-        for (const char* name : {"WHIRL_HEAD_GEMVX", "WHIRL_PREC_GEMVH", "WHIRL_PREC_GS"}) _putenv_s(name, "");
-    }
     // (2) defaults
     {
         q::Model m;
-        const auto fe = whirl::config::forwardEnv(EnvSnapshot());
-        check(m.head_gemvx == fe.head_gemvx && m.prec_gemvh == fe.prec_gemvh && m.prec_gs == fe.prec_gs,
-              "forward env: a Model's defaults = forwardEnv of an empty snapshot");
-        check(!m.head_gemvx && m.prec_gemvh && m.prec_gs == -1, "forward env: defaults = not set (off, on, -1)");
         check(m.nf().gv_group && m.nf().gv_nmax == 0, "forward env: gv_group / gv_nmax defaults = the old globals' initial values (config.cpp:23-24)");
         q::Model m2;
         m.num_plan.flags.gv_group = false;
         m.num_plan.flags.gv_nmax = 5;
         check(m2.nf().gv_group && m2.nf().gv_nmax == 0, "forward env: gv_group / gv_nmax are per Model (no process-wide state)");
-    }
-    // (3) grep: in-process writes of the three names, and product writes of any WHIRL_ name
-    {
-        static const std::regex wr(R"(\b(?:_putenv_s|_putenv|_wputenv_s|_wputenv|SetEnvironmentVariable[AW]?|setenv)\s*\()");
-        static const std::regex names3(R"(HEAD_GEMVX|PREC_GEMVH|PREC_GS)");
-        std::size_t files = 0, writes = 0, named = 0, product_whirl = 0;
-        std::vector<std::string> named_where;
-        for (const char* top : {"src", "tests", "include"}) {
-            for (const auto& de : fs::recursive_directory_iterator(fs::path(WHIRL_SOURCE_DIR) / top)) {
-                if (!de.is_regular_file()) continue;
-                const std::string ext = de.path().extension().string();
-                if (ext != ".cpp" && ext != ".h" && ext != ".hpp" && ext != ".hip") continue;
-                std::ifstream in(de.path(), std::ios::binary);
-                const std::string src((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-                ++files;
-                const std::string rel = fs::relative(de.path(), fs::path(WHIRL_SOURCE_DIR)).generic_string();
-                std::size_t ls = 0, ln = 0;
-                while (ls < src.size()) {
-                    std::size_t le = src.find('\n', ls);
-                    if (le == std::string::npos) le = src.size();
-                    const std::string line = src.substr(ls, le - ls);
-                    ++ln;
-                    ls = le + 1;
-                    std::smatch mw;
-                    if (!std::regex_search(line, mw, wr)) continue;
-                    const std::size_t cpos = line.find("//");
-                    if (cpos != std::string::npos && cpos < static_cast<std::size_t>(mw.position())) continue;  // a comment
-                    ++writes;
-                    // this test's own writes carry the three names on purpose (set, read back, removed in the same loop)
-                    const bool own = rel == "tests/model/model_tests.cpp" && line.find("for (const char* name : {\"WHIRL_HEAD_GEMVX\"") != std::string::npos;
-                    if (std::regex_search(line, names3) && !own) {
-                        ++named;
-                        named_where.push_back(rel + ":" + std::to_string(ln));
-                    }
-                    if (rel.rfind("src/", 0) == 0 && line.find("WHIRL_") != std::string::npos) ++product_whirl;
-                }
-            }
-        }
-        check(files > 100, std::format("forward env: grep scanned the tree ({} files)", files));
-        check(writes > 0, std::format("forward env: grep sees in-process env writes ({})", writes));
-        std::string where;
-        for (const auto& w : named_where) where += " " + w;
-        check(named == 0, std::format("forward env: no in-process write of HEAD_GEMVX / PREC_GEMVH / PREC_GS ({}:{})", named, where));
-        check(product_whirl == 0, std::format("forward env: product code writes no WHIRL_ variable in-process ({})", product_whirl));
     }
     // (4) the forward files: no direct environment read
     for (const auto& de : fs::directory_iterator(fs::path(WHIRL_SOURCE_DIR) / "src/model/forward")) {
@@ -2376,7 +2284,7 @@ nu::Request requestOf(const q::Model& m, const whirl::config::EnvSnapshot& env) 
     nu::Request r = m.num_req;
     r.load_overrides = true;
     for (const auto& e : nu::EnvValues::names()) r.env.*e.field = env.get(e.name);
-    for (std::size_t i = 0; nu::k_numerics_switches[i] != nullptr; ++i) r.env.switches[i] = env.get(nu::k_numerics_switches[i]);
+    for (std::size_t i = 0; i < nu::n_numerics_switches; ++i) r.env.switches[i] = env.get(nu::k_numerics_switches[i]);
     return r;
 }
 
@@ -2391,6 +2299,93 @@ std::map<std::string, std::string> dumpKv(const std::string& d) {
 }
 
 }  // namespace n2a
+
+#include "runtime_env_tests.inc"  // feat026-o6 (2)
+#include "o6r1_tests.inc"          // feat026-o6-r1 (review C5 / C6)
+
+// feat026-o6 (3), owner O6: the removed research switches are ignored with one warning each (printed in the loadOrTune
+// log by the CLI and the server); their code paths are gone (ops_tests testGemvWide / the gemm choice)
+void testRemovedSwitches() {
+    namespace cf = whirl::config;
+    const auto& r = cf::removedSwitches();
+    check(r.size() == 3 && std::string_view(r[0]) == "HEAD_GEMVX" && std::string_view(r[1]) == "PREC_GEMVH" &&
+              std::string_view(r[2]) == "PREC_GS",
+          "o6: removed switch list");
+    auto none = [](std::string_view) { return std::optional<std::string>(); };
+    check(cf::removedSwitchWarnings(none).empty(), "o6: no removed switch set");
+    auto one = [](std::string_view n) { return n == "PREC_GS" ? std::optional<std::string>("1") : std::nullopt; };
+    const auto w = cf::removedSwitchWarnings(one);
+    check(w.size() == 1 && w[0] == "WHIRL_PREC_GS=1 is ignored: this research switch was removed in WHIRL 0.2.6", "o6: warning text");
+    // the process environment (the default getter, as loadOrTune calls it)
+    _putenv_s("WHIRL_HEAD_GEMVX", "1");
+    _putenv_s("WHIRL_PREC_GEMVH", "0");
+    const auto wp = cf::removedSwitchWarnings();
+    _putenv_s("WHIRL_HEAD_GEMVX", "");
+    _putenv_s("WHIRL_PREC_GEMVH", "");
+    check(wp.size() == 2 && wp[0].rfind("WHIRL_HEAD_GEMVX=1 ", 0) == 0 && wp[1].rfind("WHIRL_PREC_GEMVH=0 ", 0) == 0, "o6: process env");
+    check(cf::removedSwitchWarnings().empty(), "o6: unset again");
+    // the snapshot has no field for them any more (a get() would throw: nothing can read them through the snapshot)
+    for (const char* n : {"HEAD_GEMVX", "PREC_GEMVH", "PREC_GS"}) {
+        bool threw = false;
+        try {
+            (void)whirl::config::EnvSnapshot().get(n);
+        } catch (...) {
+            threw = true;
+        }
+        check(threw, std::string("o6: EnvSnapshot has no field ") + n);
+    }
+}
+
+// feat026-o6 (1), owner O6 (redone on N2b by feat026-o6-p25): the SSD tier fingerprint's numerics part is
+// m.num_plan.bitsKey() (server_main.cpp tierFingerprint). Since N2b the Model runs from num_plan.flags (nf()), so the key
+// names what runs (o6 before N2b had to rebuild the flags from the Model's members, include/whirl/model_bits.h; not
+// needed any more). The key is a pure function of the plan's bits: descriptions (notes, overrides, source) are not in
+// it, and it is not the log line. The pinned key strings: testPlanVsLoadOrTune (tests/model/bits_key.expected.txt).
+void testTierKey() {
+    namespace nu = whirl::numerics;
+    q::Model m;
+    m.num_plan = nu::plan(nu::parseMode("balance", "test"), nu::Target{});
+    const std::string k = m.num_plan.bitsKey();
+    check(k == m.num_plan.bitsKey(), "o6: key deterministic");
+    m.num_plan.overrides.push_back("WHIRL_X=1: note only");
+    m.num_plan.source = "command line";
+    for (auto& it : m.num_plan.items) it.note += " (reworded)";
+    check(k == m.num_plan.bitsKey(), "o6: descriptions not in the key");
+    check(k != nu::logLine(m.num_plan), "o6: the key is not the log line");
+    // every flag the Model reads changes the key (the dump shows the flag, so the forward sees it)
+    std::size_t n = 0;
+    for (const nu::FlagInfo& fi : nu::flagTable()) {
+        q::Model x;
+        x.num_plan = m.num_plan;
+        const std::string v0 = nu::flagValue(x.num_plan.flags, fi);
+        // flip the field through the reflection table's byte range: any change of its value must change the key
+        nu::Flags f = x.num_plan.flags;
+        bool changed = false;
+        for (std::size_t b = 0; b < sizeof(nu::Flags) && !changed; ++b) {
+            nu::Flags g = f;
+            reinterpret_cast<unsigned char*>(&g)[b] ^= 1u;
+            if (nu::flagValue(g, fi) != v0) {
+                bool only = true;
+                for (const nu::FlagInfo& gi : nu::flagTable())
+                    if (&gi != &fi && nu::flagValue(g, gi) != nu::flagValue(f, gi)) only = false;
+                if (!only) continue;
+                x.num_plan.flags = g;
+                changed = true;
+            }
+        }
+        check(changed, std::string("o6: no single-bit change found for flag ") + fi.name);
+        if (!changed) continue;
+        check(x.num_plan.bitsKey() != k, std::string("o6: flag ") + fi.name + " does not change the tier key");
+        if (*fi.dump_key) {
+            const auto d = n2a::dumpKv(q::execDump(x));
+            const auto it = d.find(fi.dump_key);
+            check(it != d.end() && it->second == nu::flagValue(x.num_plan.flags, fi),
+                  std::string("o6: the Model does not read flag ") + fi.name + " from its plan (dump " + fi.dump_key + ")");
+        }
+        ++n;
+    }
+    std::printf("  o6 tier key: num_plan.bitsKey, %zu flags each change it\n", n);
+}
 
 void testPlanVsLoadOrTune() {
     namespace fs = std::filesystem;
@@ -2418,14 +2413,26 @@ void testPlanVsLoadOrTune() {
     for (int k = 0; k < 5; ++k) cs.push_back({std::string("base ") + envtab::k_kind_names[k], k, {}});
     for (const envtab::Case& c : envtab::cases())
         if (c.id.rfind("tune", 0) == 0) cs.push_back(c);
-    std::size_t n_cases = 0, n_fields = 0, n_precise_refused = 0;
+    // feat026-o6-r1 (review C5): the switches added to k_numerics_switches, balance and precise (the override record and
+    // its lossy flag, plan == loadOrTune), and the draft-only ones with relaxed acceptance on
+    for (const char* n : {"GEMV_R", "GEMV_W", "GEMV_WH", "HEAD_CHUNK", "DQ4_DYN", "GDN_V0", "NO_GRAPH", "WIDE_VERIFY", "DRAFT_WINDOW", "DRAFT_WINDOW_MIN"})
+        for (int k : {0, 4})
+            for (const char* v : {"0", "2:2", "4096"})
+                cs.push_back({std::string("o6r1 ") + envtab::k_kind_names[k] + " " + n + "=" + v, k, {{n, v}}});
+    for (const char* n : {"DRAFT_WINDOW", "DRAFT_WINDOW_MIN"}) cs.push_back({std::string("o6r1 d1201 RELAX=1 ") + n + "=4096", 0, {{"RELAX", "1"}, {n, "4096"}}});
+    std::size_t n_cases = 0, n_fields = 0, n_precise_refused = 0, n_bits = 0, n_other_throw = 0;
+    std::string o6_keys;  // feat026-o6 (1)
     for (const envtab::Case& c : cs) {
         ++n_cases;
         std::vector<std::pair<std::string, EnvSnapshot::Value>> vals;
         for (const envtab::Var& v : c.vars) vals.emplace_back(v.name, EnvSnapshot::Value(v.value));
         const auto snap = std::make_shared<const EnvSnapshot>(EnvSnapshot::fromValues(vals));
-        auto m = envtab::makeModel(c.kind);
-        m->env_snap = snap;
+        auto setup = [&] {
+            auto mm = envtab::makeModel(c.kind);
+            mm->env_snap = snap;
+            return mm;
+        };
+        auto m = setup();
         // (arch025-N2b: the loader's flag lines, copied here for N2a, are numerics::plan inside loadOrTune now)
         std::string log, err;
         try {
@@ -2446,10 +2453,27 @@ void testPlanVsLoadOrTune() {
                 err.find("f16 decode activations") != std::string::npos) {
                 ++n_precise_refused;
                 check(p.has_value() && p->flags.prec_dec, "n2a plan vs loadOrTune: " + c.id + ": refused for f16 decode, plan prec_dec");
+                // feat026-o6-r1 (review A1): the refusal alone left every precise cell uncompared and the pre1201 key
+                // unpinned. Again with the one kernel the host-only Model lacks for precise decode (Model::precMissing:
+                // f32_to_f16, only compared against nullptr by loadOrTune, like the sx1151 fake handles), so the cell
+                // goes through every comparison below.
+                static int fake_f16 = 0;
+                m = setup();
+                m->k.f32_to_f16 = &fake_f16;
+                log.clear();
+                err.clear();
+                try {
+                    q::loadOrTune(*m, model.string(), log);
+                } catch (const std::exception& e) {
+                    err = e.what();
+                }
+                check(err.empty(), "o6r1: " + c.id + ": loadOrTune with f32_to_f16 present still threw: " + err);
+                if (!err.empty()) continue;
             } else {
                 check(!perr.empty(), "n2a plan vs loadOrTune: " + c.id + ": loadOrTune threw (" + err + "), plan did not");
+                ++n_other_throw;
+                continue;
             }
-            continue;
         }
         check(perr.empty(), "n2a plan vs loadOrTune: " + c.id + ": plan threw " + perr);
         if (!p) continue;
@@ -2470,25 +2494,60 @@ void testPlanVsLoadOrTune() {
             check(p->items[i].enabled == m->num_plan.items[i].enabled && p->items[i].note == m->num_plan.items[i].note,
                   "n2a plan vs loadOrTune: " + c.id + ": item " + nu::itemName(static_cast<nu::Item>(i)));
         n_fields += 4 + nu::n_items;
+        // feat026-o6 (1): the tier key (m.num_plan.bitsKey(), what the Model runs since N2b) equals the plan's
+        check(p->bitsKey() == m->num_plan.bitsKey(), "o6: " + c.id + ": plan.bitsKey() != the Model's num_plan.bitsKey()\n  plan  " +
+                                                         p->bitsKey() + "\n  model " + m->num_plan.bitsKey());
+        ++n_bits;
+        if (c.id.rfind("base ", 0) == 0) o6_keys += c.id + "\t" + m->num_plan.bitsKey() + "\n";
     }
     _putenv_s("LOCALAPPDATA", old_lad.c_str());
+    // feat026-o6-r1 (review A1): every cell that loadOrTune accepts (precise ones with the f32_to_f16 stand-in) is
+    // compared, and the pin holds all five base cells, the precise one with f16 decode
+    check(n_bits + n_other_throw == n_cases, std::format("o6r1: bitsKey compared in {} of {} cases ({} threw in plan and loadOrTune)",
+                                                         n_bits, n_cases, n_other_throw));
+    {
+        std::size_t rows = 0;
+        for (std::size_t q0 = 0; (q0 = o6_keys.find("base ", q0)) != std::string::npos; ++q0) ++rows;
+        check(rows == 5, std::format("o6r1: {} base rows in the bits key pin (want 5: d1201 mx1201 sx1151 moe1201 pre1201)", rows));
+        const std::size_t pre = o6_keys.find("base pre1201\t");
+        const std::string row = pre == std::string::npos ? std::string() : o6_keys.substr(pre, o6_keys.find('\n', pre) - pre);
+        check(row.find("\tmode=precise;") != std::string::npos && row.find(";q8dec=0;") != std::string::npos &&
+                  row.find(";prec_dec=1;") != std::string::npos,
+              "o6r1: pre1201 pin row is precise with f16 decode: " + row);
+    }
+    // feat026-o6 (1): the bits keys of the base cases are pinned (tests/model/bits_key.expected.txt, recorded with the
+    // change). A diff here changes every user's SSD cache key. The rule (feat026-o6-r1, review A2; merge map C-BITS):
+    // the way the key is computed changed -> bump tier::key_scheme; a deliberate numerics change (e.g. ornkv: Ornith
+    // balance kvq8=1 in the moe1201 row) -> re-record the pin in that commit and say so in its message (no scheme bump:
+    // the exe identity already makes old files miss); anything else -> undo the change.
+    // WHIRL_TEST_BITS_KEY_WRITE=<file> writes the actual keys instead of comparing.
+    {
+        char* w = nullptr;
+        std::size_t wl = 0;
+        if (_dupenv_s(&w, &wl, "WHIRL_TEST_BITS_KEY_WRITE") == 0 && w != nullptr) {
+            std::ofstream(w, std::ios::binary) << o6_keys;
+            std::printf("  o6: bits keys written to %s\n", w);
+            std::free(w);
+        } else {
+            std::free(w);
+            std::ifstream in(fs::path(WHIRL_SOURCE_DIR) / "tests" / "model" / "bits_key.expected.txt", std::ios::binary);
+            const std::string exp((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            check(!exp.empty() && exp == o6_keys, "o6: pinned bits keys (tests/model/bits_key.expected.txt)\n" + o6_keys);
+        }
+    }
     check(n_cases > 150, "n2a plan vs loadOrTune: case count " + std::to_string(n_cases));
-    std::printf("  n2a plan vs loadOrTune: %zu cases (%zu refused for f16 decode), %zu fields compared\n", n_cases, n_precise_refused, n_fields);
+    std::printf("  n2a plan vs loadOrTune: %zu cases (%zu refused for f16 decode, then compared with f32_to_f16 present), %zu fields compared, "
+                "bitsKey compared in %zu\n",
+                n_cases, n_precise_refused, n_fields, n_bits);
 
     // every EnvSnapshot name: a plan field (load-time value or A/B switch), or read by code that decides no flag
     static const std::map<std::string, std::string> not_plan = {
         {"GEMV_BITWISE_FLOAT", "checkGemvBitwise (tune.cpp): the bitwise check's warn / fail mode, not a flag"},
         {"CODE_OBJECT", "loader.cpp: which code object loads (the fingerprint's kernel_set)"},
-        {"GEMV_R", "config.cpp applyGemvEnv: tune rows (needs the GPU dump)"},
-        {"GEMV_W", "config.cpp applyGemvEnv: tune rows (needs the GPU dump)"},
-        {"GEMV_WH", "config.cpp applyGemvEnv: tune rows (needs the GPU dump)"},
         {"GPU_SHARE", "device.cpp: GPU lock"},
         {"GPU_WAIT", "device.cpp: GPU lock"},
         {"DEVICE", "device.cpp: GPU selection"},
         {"DFLASH_PROF", "dflash.cpp: profiling print"},
-        {"HEAD_GEMVX", "F7 forwardEnv -> Model member (removed by feat026-o6)"},
-        {"PREC_GEMVH", "F7 forwardEnv -> Model member (removed by feat026-o6)"},
-        {"PREC_GS", "F7 forwardEnv -> Model member (removed by feat026-o6)"},
     };
     for (const auto& e : EnvSnapshot::names()) {
         nu::EnvValues v;
@@ -2514,7 +2573,12 @@ int main() {
     testEnvTable();
     testEnvSnapshot();
     testForwardEnv();
-    testPlanVsLoadOrTune();  // arch025-N2a
+    testPlanVsLoadOrTune();  // arch025-N2a (+ feat026-o6 (1) bits key pin, o6-r1 A1 / C5 cells)
+    testRemovedSwitches();     // feat026-o6 (3)
+    testTierKey();             // feat026-o6 (1)
+    testRuntimeEnvShared();    // feat026-o6 (2)
+    o6r1::testSwitchLabels();  // feat026-o6-r1 C5
+    o6r1::testGemvEnvWarns();  // feat026-o6-r1 C6
     testFloatGemvDispatch();
     testArchWhitelist();
     testLoadEstimate();

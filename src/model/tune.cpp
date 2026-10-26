@@ -840,7 +840,7 @@ whirl::numerics::Request numericsRequest(const Model& m, const whirl::config::En
     nu::Request r = m.num_req;
     r.load_overrides = true;  // plan() also applies the per-item overrides, WHIRL_Q8DEC and the switch notes
     for (const auto& e : nu::EnvValues::names()) r.env.*e.field = env.get(e.name);
-    for (std::size_t i = 0; nu::k_numerics_switches[i] != nullptr; ++i) r.env.switches[i] = env.get(nu::k_numerics_switches[i]);
+    for (std::size_t i = 0; i < nu::n_numerics_switches; ++i) r.env.switches[i] = env.get(nu::k_numerics_switches[i]);
     return r;
 }
 
@@ -908,6 +908,8 @@ void loadOrTuneImpl(Model& m, const std::string& model_path, std::string& log) {
     m.num_plan = p;
     log += "  " + nu::logLine(p) + "\n";
     if (!m.load_note.empty()) log += "  " + m.load_note;
+    // feat026-o6 (3): the research switches removed in 0.2.6 (CLI and server both print this log)
+    for (const std::string& w : whirl::config::removedSwitchWarnings()) log += "  warning: " + w + "\n";
 
     std::string cache_path;
     std::vector<std::string> read_paths4, read_paths_old;

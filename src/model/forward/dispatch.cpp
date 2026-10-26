@@ -32,9 +32,7 @@ void Model::gemvLaunch(std::span<const Mat> ws, DevPtr xin, std::span<const DevP
     // (weights read once), else 16-token pieces through the multi-token kernels. Either
     // way every token row is computed exactly as the one-token GEMV computes it.
     const ops::MatShape w0 = matShape(w);
-    // WHIRL_HEAD_GEMVX: Model::head_gemvx, read once at the load (arch025-F7; was envFlag at every call)
-    const bool head_on = w0.head && k.gemvx[ti(w.ty)] != nullptr && head_gemvx;
-    const ops::GemvWide wide = ops::chooseGemvWide(w0, ws.size(), k, head_on);
+    const ops::GemvWide wide = ops::chooseGemvWide(w0, ws.size(), k);
     if (wide == ops::GemvWide::gemvx) {
         for (std::size_t si = 0; si < ws.size(); ++si) {
             const Mat& wi = ws[si];
@@ -219,9 +217,8 @@ void Model::gemmF16(const Mat& w, DevPtr x16in, DevPtr y, u32 n, i32 acc) {
         hip::launch(p.f, p.grid, p.block, 0, stream, wptr, wrb, x16in, y, ncols, nrows, I(n), acc);
 }
 
-// the f16 GEMM flags (precise rows, f16 outputs, the WHIRL_PREC_GEMVH / WHIRL_PREC_GS experiments, the profile's
-// precise-decode geometry). The two switches are Model members since arch025-F7 (config::forwardEnv at the load;
-// were function-local statics read at the first call).
+// the f16 GEMM flags (precise rows, f16 outputs, the profile's precise-decode geometry). feat026-o6 (3), owner O6: the
+// research switches WHIRL_PREC_GEMVH / WHIRL_PREC_GS are gone (config::removedSwitchWarnings warns at load).
 ops::GemmFlags Model::gemmFlags() const {
     ops::GemmFlags f;
     f.prec_dec = nf().prec_dec;
@@ -229,8 +226,6 @@ ops::GemmFlags Model::gemmFlags() const {
     f.h16_dq = nf().h16_dq;
     f.gemmh_on = nf().gemmh_on;
     f.gemmhq_on = nf().gemmhq_on;
-    f.prec_gemvh = prec_gemvh;
-    f.prec_gs = prec_gs;
     f.gemvh_cap = device::profile(arch).gemvh_grid_by_rows ? kernels::gemvhCap() : 0;
     f.gemms_tie_larger_bm = device::profile(arch).gemms_tie_larger_bm;
     f.gv_max = gvMax();

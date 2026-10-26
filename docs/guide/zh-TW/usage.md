@@ -471,6 +471,18 @@ PowerShell 中先用 `$env:WHIRL_MODE = "precise"` 設定再啟動程式。**一
 
 保留給 A/B 測試與數值比對的替代路徑；預設值就是測試過的路徑。「位元相同」的替代路徑算出的位元一樣，只差速度。
 
+`whirl`（每個指令）和 `whirl-server` 用同一套規則套用這些開關（0.2.6 起）。之前 server 不理 `WHIRL_DBG`、`WHIRL_GEMV_MAX`、
+`WHIRL_NO_GRAPH`、`WHIRL_GV_GROUP`、`WHIRL_GV_NMAX` 與 `WHIRL_GEMV_R` / `_W` / `_WH`，CLI 不理 `WHIRL_WIDE_VERIFY` 與
+`WHIRL_HEAD_CHUNK`。數字開關的值不是整數時忽略，並印出警告；`WHIRL_GEMV_R` / `_W` / `_WH` 清單格式不對時也一樣忽略並警告，啟動照常繼續。
+server 本來就不重播 decode graph，所以 `WHIRL_NO_GRAPH` 在 server 上沒有作用。
+
+這一節的開關只要有設，啟動時都會記成一筆 override（`GET /props` 的 "overrides" 也看得到）。只有可能改變輸出位元的開關，
+才會讓模式標籤變成 `MODE+overrides`：
+- `WHIRL_GEMV_R` / `_W` / `_WH`、`WHIRL_HEAD_CHUNK`、`WHIRL_DQ4_DYN`、`WHIRL_GDN_V0`、`WHIRL_NO_GRAPH` 的位元與預設相同。
+  記成「bitwise」，標籤不變，precise 仍是 precise。
+- `WHIRL_DRAFT_WINDOW` / `_MIN` 只改 MTP 草稿，文字不受草稿影響。例外是寬鬆接受（fast 的 `relaxacc`），那時算有損。
+- `WHIRL_WIDE_VERIFY` 算有損。
+
 | 變數 | 說明 |
 |---|---|
 | `WHIRL_FP8=0\|1` | MXFP4 prefill 用 fp8 activation（項目 `fp8`；balance / fast 預設開）。`0` 也會關掉 `WHIRL_MOE_FP8` |
@@ -493,6 +505,8 @@ PowerShell 中先用 `$env:WHIRL_MODE = "precise"` 設定再啟動程式。**一
 | `WHIRL_NO_FUSE=1` | 不用融合的 decode kernel（參考路徑） |
 | `WHIRL_FLOAT_GEMV=1` | GEMV 用 f32，不用 int8（參考路徑） |
 | `WHIRL_NO_GRAPH=1` | 一般 decode 步驟不用 HIP graph |
+| `WHIRL_WIDE_VERIFY=0` | MTP verify 每個序列最多 16 列（預設：kernel 有時最多 32 列） |
+| `WHIRL_HEAD_CHUNK=N` | wide verify 每次處理的輸出頭列數（32 的倍數，至少 32） |
 | `WHIRL_GEMV_MAX=N` | 多 token GEMV 一次最多的 token 數 |
 | `WHIRL_GEMV_R=nt:r,...` | 多 token GEMV 每 block 列數的覆寫 |
 | `WHIRL_GEMV_W=nt:v,...` | 多 token GEMV kernel 變體的覆寫 |

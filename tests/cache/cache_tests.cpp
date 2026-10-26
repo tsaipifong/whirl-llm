@@ -684,9 +684,11 @@ static void testFingerprintCoversBitsKey() {
     };
     std::vector<std::string> names;
     for (const auto& e : nu::EnvValues::names()) names.push_back(e.name);
-    for (std::size_t i = 0; nu::k_numerics_switches[i] != nullptr; ++i) names.push_back(nu::k_numerics_switches[i]);
+    for (std::size_t i = 0; i < nu::n_numerics_switches; ++i) names.push_back(nu::k_numerics_switches[i]);
     for (const auto& e : nu::RuntimeValues::names()) names.push_back(e.name);
-    const std::vector<std::string> outside = {"FD_SPLITS"};
+    // FD_SPLITS and the GEMV tune lists (feat026-o6-r1: in k_numerics_switches for the override record) are no Plan flag:
+    // the fingerprint keeps them through the env list
+    const std::vector<std::string> outside = {"FD_SPLITS", "GEMV_R", "GEMV_W", "GEMV_WH"};
     const char* values[] = {"0", "1", "", "2", "5", "f16", "q4", "512", "0x3", "0.5", "64", "4096"};
     std::size_t n_checked = 0;
     for (const std::string& n : names) {
@@ -731,8 +733,15 @@ static void testFingerprintCoversBitsKey() {
     std::printf("  fingerprint covers bitsKey: %zu plan variables, %zu outside the plan\n", n_checked, outside.size());
 }
 
+// feat026-o6 (3): the research switches removed in 0.2.6 change nothing, so the fingerprint skips them
+static void testRemovedSwitchesSkipped() {
+    for (const char* k : {"WHIRL_HEAD_GEMVX", "WHIRL_PREC_GEMVH", "WHIRL_PREC_GS", "whirl_prec_gs"}) CHECK(!fingerprintEnvKept(k));
+    CHECK(fingerprintEnvKept("WHIRL_GEMV_MAX"));  // a live A/B switch stays in
+}
+
 int main() {
     whirl::test::clearWhirlEnv();  // FR-TEST P3-11
+    testRemovedSwitchesSkipped();  // feat026-o6 (3)
     testFingerprintCoversBitsKey();
     testHelpers();
     testMatchSlot();

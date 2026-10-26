@@ -1027,20 +1027,13 @@ bool loadDraftModelEnv(q::Model& m, const Args& a) {
     return true;
 }
 
-// arch025-N2b (R-5): the CLI's after-load knobs are numerics::applyFront(Front::cli) on the model's plan (the rules
-// that were here, main.cpp:1030-1048 and the chat's WHIRL_GDN_V0 at :1340, moved there in arch025-N2a). gdn_v0: the
-// chat only (the other commands never applied it); its kernel is looked up only when WHIRL_GDN_V0 is set, as before.
-// applyGemvEnv sets tune rows (not a flag) and stays here.
-void applyRuntimeEnv(q::Model& m, bool gdn_v0 = false) {
-    namespace nu = whirl::numerics;
-    nu::RuntimeValues rv;
-    for (const auto& e : nu::RuntimeValues::names()) rv.*e.field = envGet(e.name);
-    if (!gdn_v0) rv.gdn_v0.reset();
-    hip::Function fv0 = nullptr;
-    if (rv.gdn_v0) fv0 = m.module.getFunctionOpt("gdn_step_norm_v0");
-    q::applyGemvEnv(m);
-    nu::applyFront(m.num_plan, nu::Front::cli, rv, fv0 != nullptr);
-    if (m.nf().gdn_v0) m.k.gdn_step_norm = fv0;
+// feat026-o6 (2), owner O6 (redone on arch025-N2b): the runtime switches with the function and rules the server uses
+// too (qwen35::applyRuntimeEnv -> numerics::applyFront(Front::cli)); WHIRL_GDN_V0 in every command (before 0.2.6: chat
+// only). Warnings (a bad number, a malformed WHIRL_GEMV_* list) go to stderr; nothing stops.
+void applyRuntimeEnv(q::Model& m) {
+    std::vector<std::string> warn;
+    q::applyRuntimeEnv(m, [](const char* n) { return envGet(n); }, whirl::numerics::Front::cli, &warn);
+    for (const std::string& w : warn) std::fprintf(stderr, "warning: %s\n", w.c_str());
 }
 
 struct Loaded {
@@ -1333,7 +1326,7 @@ int cmdChat(const Args& a) {
         q::loadOrTune(model, path, log);
         out(log);
     }
-    // (WHIRL_GDN_V0: applyRuntimeEnv(model, true) below, arch025-N2b)
+    // (WHIRL_GDN_V0: applyRuntimeEnv(model) below, every command since feat026-o6 (2))
     // MTP block as Q4_K from Q6_K or Q8_0 (drafts only; default, WHIRL_MTP_Q4=0 keeps the file's types)
     if (envFlag("MTP_Q4", true)) model.requantMtpQ4();
     loadLog(model, L.stats);
@@ -1370,7 +1363,7 @@ int cmdChat(const Args& a) {
     q::Profile prof;
     const bool profiling = envGet("PROFILE").has_value();
     if (profiling) model.prof = &prof;
-    applyRuntimeEnv(model, true);
+    applyRuntimeEnv(model);
     if (use_dflash) use_dflash = loadDraftModelEnv(model, a);
 
     // MTP speculative decode is exact greedy: on whenever the checkpoint has a nextn

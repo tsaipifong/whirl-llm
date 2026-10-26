@@ -10,7 +10,9 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <stdexcept>
 #include <string>
+#include <utility>
 
 namespace whirl {
 
@@ -300,6 +302,40 @@ void applyGemvEnv(Model& m) {
     if (const auto& v = env->gemv_r) parseGemvR(m, *v);
     if (const auto& v = env->gemv_w) parseGemvW(m, *v);
     if (const auto& v = env->gemv_wh) parseGemvWHead(m, *v);
+}
+
+void applyRuntimeEnv(Model& m, const EnvGetter& get, whirl::numerics::Front front, std::vector<std::string>* warnings) {
+    namespace nu = whirl::numerics;
+    if (front == nu::Front::none) return;
+    nu::RuntimeValues rv;
+    for (const auto& e : nu::RuntimeValues::names()) rv.*e.field = get(e.name);
+    {
+        // feat026-o6-r1 (review C6): a malformed list is a warning, like a bad number (the server must not refuse to
+        // start over an A/B switch); the tables are put back whole on an error, so a bad list changes nothing
+        const auto env = whirl::config::snapshotOf(m);  // the load's (arch025-N1), as applyGemvEnv reads it
+        auto list = [&](const char* name, const std::optional<std::string>& v, void (*parse)(Model&, std::string_view)) {
+            if (!v) return;
+            const GemvR r = m.gemv_r, wh = m.gemv_w_head;
+            const GemvW w = m.gemv_w;
+            try {
+                parse(m, *v);
+            } catch (const std::exception&) {
+                m.gemv_r = r;
+                m.gemv_w = w;
+                m.gemv_w_head = wh;
+                if (warnings) warnings->push_back(std::string("WHIRL_") + name + "=" + *v + " is not a valid nt:value list; ignored");
+            }
+        };
+        list("GEMV_R", env->gemv_r, &parseGemvR);
+        list("GEMV_W", env->gemv_w, &parseGemvW);
+        list("GEMV_WH", env->gemv_wh, &parseGemvWHead);
+    }
+    hip::Function fv0 = nullptr;
+    if (rv.gdn_v0) fv0 = m.module.getFunctionOpt("gdn_step_norm_v0");
+    nu::applyFront(m.num_plan, front, rv, fv0 != nullptr);
+    if (m.nf().gdn_v0) m.k.gdn_step_norm = fv0;
+    if (warnings)
+        for (std::string& w : nu::runtimeWarnings(rv)) warnings->push_back(std::move(w));
 }
 
 MtpDefaults mtpDefaults(bool moe, hip::Arch arch) {

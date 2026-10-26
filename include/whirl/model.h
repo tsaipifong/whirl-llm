@@ -524,12 +524,6 @@ public:
     std::uint32_t small_max = max_small_batch;
     std::uint64_t tune_mask = ~0ull;
     bool tune_cold = false;
-    // research switches WHIRL_HEAD_GEMVX / PREC_GEMVH / PREC_GS (arch025-F7: config::forwardEnv of the load's
-    // snapshot, set by Model::load; the defaults = not set). head_gemvx: the output head may take gemvx in a wide
-    // verify; prec_gemvh false: precise rows skip gemvh; prec_gs >= 0: forced precise gemms slot.
-    bool head_gemvx = false;
-    bool prec_gemvh = true;
-    int prec_gs = -1;
     // precise decode: the kernels every weight type of this model needs; "" = all present
     std::string precMissing() const;
     GemvR gemv_r = defaultGemvR();
@@ -932,6 +926,18 @@ void parseGemvR(Model& m, std::string_view list);
 void parseGemvW(Model& m, std::string_view list);
 void parseGemvWHead(Model& m, std::string_view list);
 void applyGemvEnv(Model& m);
+
+// feat026-o6 (2), owner O6 (ARCH-1 4.4; redone on arch025-N2b by feat026-o6-p25): the after-load runtime switches, ONE
+// function for the CLI (every command) and the server. get(name) returns WHIRL_<name> (the caller's environment read;
+// tests pass a table). It fills numerics::RuntimeValues from get and applies them with numerics::applyFront(front) to
+// m.num_plan (the rules: src/common/numerics.cpp runtimeFlags; the server's one difference, no graph replay, is a rule
+// there), swaps in gdn_step_norm_v0 when WHIRL_GDN_V0 is set and the kernel exists, and applies the WHIRL_GEMV_R / _W /
+// _WH lists of the load's snapshot (tune rows, not flags). Warnings (not applied, start-up goes on) in *warnings:
+//   a number switch whose value is not a whole number (numerics::runtimeWarnings)
+//   a malformed GEMV list: not applied, not even in part (feat026-o6-r1, review C6; applyGemvEnv itself throws)
+// Called after loadOrTune.
+using EnvGetter = std::function<std::optional<std::string>(const char* name)>;
+void applyRuntimeEnv(Model& m, const EnvGetter& get, whirl::numerics::Front front, std::vector<std::string>* warnings);
 
 // ---------------------------------------------------------------------------
 // device selection

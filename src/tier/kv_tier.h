@@ -80,6 +80,10 @@ constexpr std::uint64_t chunk_bytes = 512ull << 20;
 constexpr std::uint32_t no_block = 0xffffffffu;
 constexpr char file_magic[8] = {'W', 'H', 'K', 'V', 'T', 'I', 'E', 'R'};
 constexpr std::uint32_t file_version = 2;
+// How the fingerprint (the file name and Header::fingerprint) was computed: 0 = WHIRL 0.2.5 and older (the numerics
+// part was the plan's log line), 1 = 0.2.6 (feat026-o6, owner O6: numerics::Plan::bitsKey). The payload layout is the
+// same (file_version unchanged); the scheme only lets the startup scan say why older files are not used.
+constexpr std::uint32_t key_scheme = 1;
 constexpr std::uint64_t header_bytes = 4096;
 constexpr std::uint64_t sector = 4096;
 
@@ -104,7 +108,7 @@ struct Header {
     std::uint32_t n_tok;
     std::uint32_t nck;
     std::uint32_t pages;
-    std::uint32_t _r;
+    std::uint32_t key_scheme;  // tier::key_scheme of the writer (a reserved 0 before 0.2.6)
     std::uint64_t tok_off;
     std::uint64_t data_off;
     std::uint64_t ck_stride;
@@ -411,6 +415,8 @@ public:
         std::uint64_t unreadable_files = 0, unreadable_bytes = 0;
         // written with another per-slot context (tok_cap: other file layout): kept, counted, evicted first
         std::uint64_t layout_files = 0, layout_bytes = 0;
+        // feat026-o6: written with an earlier fingerprint scheme (WHIRL 0.2.5 and before): kept, counted, evicted first
+        std::uint64_t prev_key_files = 0, prev_key_bytes = 0;
     };
     const Cleanup& cleanup() const { return cleanup_; }
     // the SSD directory is used by another process (SSD tier disabled)

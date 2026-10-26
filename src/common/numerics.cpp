@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <format>
 #include <stdexcept>
+#include <utility>
 
 namespace whirl::numerics {
 
@@ -225,7 +226,7 @@ const std::array<EnvValues::Entry, EnvValues::n_fields>& EnvValues::names() {
 const Raw* EnvValues::find(std::string_view name) const {
     for (const Entry& e : names())
         if (name == e.name) return &(this->*e.field);
-    for (std::size_t i = 0; k_numerics_switches[i] != nullptr; ++i)
+    for (std::size_t i = 0; i < n_numerics_switches; ++i)
         if (name == k_numerics_switches[i]) return &switches[i];
     return nullptr;
 }
@@ -300,25 +301,18 @@ void setNe0(bool& x, const Raw& v) {
 }
 // EnvSnapshot::flag / envFlag: not set -> def, else value != "0" (loader.cpp:550-553)
 bool flagOr(const Raw& v, bool def) { return v ? *v != "0" : def; }
-// cli main.cpp:345-353 envU32: std::stoul, any exception -> not set
-std::optional<std::uint32_t> cliU32(const Raw& v) {
+// feat026-o6 (2) (owner O6), redone on N2b by feat026-o6-p25: the runtime switches' number rule, one for the CLI and
+// the server (before 0.2.6 the CLI took a std::stoul prefix, cli main.cpp envU32, and the server the whole value,
+// server_main.cpp envU32): the whole value a number <= 0xffffffff, else not applied (runtimeWarnings names it)
+std::optional<std::uint32_t> runtimeU32(const Raw& v) {
     if (!v) return std::nullopt;
-    try {
-        return static_cast<std::uint32_t>(std::stoul(*v));
-    } catch (...) {
-    }
-    return std::nullopt;
-}
-// server_main.cpp:314-326 envU32: the whole value a number <= 0xffffffff, else def (the server logs a warning)
-std::uint32_t srvU32(const Raw& v, std::uint32_t def) {
-    if (!v) return def;
     try {
         std::size_t used = 0;
         const unsigned long x = std::stoul(*v, &used);
         if (used == v->size() && x <= 0xffffffffull) return static_cast<std::uint32_t>(x);
     } catch (const std::exception&) {
     }
-    return def;
+    return std::nullopt;
 }
 
 // loader.cpp:548-553 and :743, then tune.cpp:850-914 (before the numerics block)
@@ -430,50 +424,38 @@ void loadOverrides(Plan& p, const Request& r, const Target& t, bool items) {
     }
 }
 
-// The front end's after-load knobs (after loadOrTune in both)
+// The front end's after-load knobs (after loadOrTune in both). feat026-o6 (2), owner O6 (redone on N2b,
+// feat026-o6-p25): ONE rule set for the CLI (every command) and the server; before 0.2.6 the CLI had its own copy
+// (WHIRL_GDN_V0 in chat only, no WIDE_VERIFY / HEAD_CHUNK) and the server another one (no DBG / GEMV_MAX / NO_GRAPH /
+// GV_GROUP / GV_NMAX, other number rules). The one difference: the server never replays the decode graph (use_graph
+// off; not a switch).
+//   set (any value, "0" too): FLOAT_GEMV, NO_GRAPH, NO_FUSE, NAIVE_ATTN, GDN_SEQ, GDN_V0 (if the kernel exists)
+//   "0" turns off: ATTN_WIDE, ATTN_DQ4, DQ4_DYN, ATTN_WS4, WIDE_VERIFY;  GV_GROUP: on unless "0"
+//   numbers (runtimeU32): DBG, GEMV_MAX (clamped to 1..16 = q::max_small_batch), DRAFT_WINDOW, DRAFT_WINDOW_MIN, MOE_BN,
+//   GV_NMAX, HEAD_CHUNK (multiple of 32, at least 32)
 void runtimeFlags(Front front, const RuntimeValues& v, bool k_gdn_v0, Flags& F) {
-    if (front == Front::cli) {
-        // cli main.cpp:1030-1048 (applyRuntimeEnv; applyGemvEnv at :1032 sets tune rows, not a flag)
-        if (v.float_gemv) F.float_gemv = true;
-        if (auto x = cliU32(v.dbg)) F.dbg_flags = *x;
-        if (auto x = cliU32(v.gemv_max)) F.gemv_max = std::clamp<std::uint32_t>(*x, 1, 16);  // q::max_small_batch
-        if (v.no_graph) F.use_graph = false;
-        if (v.no_fuse) F.no_fuse = true;
-        if (auto x = cliU32(v.draft_window)) F.draft_window = *x;
-        if (auto x = cliU32(v.draft_window_min)) F.draft_window_min = *x;
-        if (v.naive_attn) F.naive_attn = true;
-        if (v.attn_wide && *v.attn_wide == "0") F.attn_wide = false;
-        if (v.attn_dq4 && *v.attn_dq4 == "0") F.attn_dq4 = false;
-        if (v.dq4_dyn && *v.dq4_dyn == "0") F.dq4_dyn = false;
-        if (v.attn_ws4 && *v.attn_ws4 == "0") F.attn_ws4 = false;
-        if (auto x = cliU32(v.moe_bn)) F.moe_bn_force = *x;
-        if (v.gdn_seq) F.gdn_chunked = false;
-        if (v.gv_group) F.gv_group = *v.gv_group != "0";
-        if (auto x = cliU32(v.gv_nmax)) F.gv_nmax = *x;
-        // cli main.cpp:1340 (chat only: other CLI commands leave runtime.gdn_v0 unset)
-        if (v.gdn_v0 && k_gdn_v0) F.gdn_v0 = true;
-    } else if (front == Front::server) {
-        // server_main.cpp:1041-1045
-        if (v.no_fuse) F.no_fuse = true;
-        if (v.float_gemv) F.float_gemv = true;
-        if (v.naive_attn) F.naive_attn = true;
-        if (v.gdn_seq) F.gdn_chunked = false;
-        if (v.moe_bn) F.moe_bn_force = static_cast<std::uint32_t>(std::strtoul(v.moe_bn->c_str(), nullptr, 10));
-        // :1052-1053, :1056 (the server never replays the decode graph)
-        F.draft_window = srvU32(v.draft_window, F.draft_window);
-        F.draft_window_min = srvU32(v.draft_window_min, F.draft_window_min);
-        F.use_graph = false;
-        // :1089-1090
-        if (v.wide_verify && *v.wide_verify == "0") F.wide_verify = false;
-        if (v.head_chunk) F.head_chunk = std::max<std::uint32_t>(32, srvU32(v.head_chunk, F.head_chunk) / 32 * 32);
-        // :1112-1114
-        if (v.gdn_v0 && k_gdn_v0) F.gdn_v0 = true;
-        // :1117-1120 (!envOn(name, true): set and == "0")
-        if (v.attn_wide && *v.attn_wide == "0") F.attn_wide = false;
-        if (v.attn_dq4 && *v.attn_dq4 == "0") F.attn_dq4 = false;
-        if (v.dq4_dyn && *v.dq4_dyn == "0") F.dq4_dyn = false;
-        if (v.attn_ws4 && *v.attn_ws4 == "0") F.attn_ws4 = false;
-    }
+    if (front == Front::none) return;
+    auto off0 = [](const Raw& x) { return x && *x == "0"; };
+    if (v.float_gemv) F.float_gemv = true;
+    if (auto x = runtimeU32(v.dbg)) F.dbg_flags = *x;
+    if (auto x = runtimeU32(v.gemv_max)) F.gemv_max = std::clamp<std::uint32_t>(*x, 1, 16);  // q::max_small_batch
+    if (v.no_graph) F.use_graph = false;
+    if (v.no_fuse) F.no_fuse = true;
+    if (auto x = runtimeU32(v.draft_window)) F.draft_window = *x;
+    if (auto x = runtimeU32(v.draft_window_min)) F.draft_window_min = *x;
+    if (v.naive_attn) F.naive_attn = true;
+    if (off0(v.attn_wide)) F.attn_wide = false;
+    if (off0(v.attn_dq4)) F.attn_dq4 = false;
+    if (off0(v.dq4_dyn)) F.dq4_dyn = false;
+    if (off0(v.attn_ws4)) F.attn_ws4 = false;
+    if (off0(v.wide_verify)) F.wide_verify = false;
+    if (auto x = runtimeU32(v.moe_bn)) F.moe_bn_force = *x;
+    if (v.gdn_seq) F.gdn_chunked = false;
+    if (v.gv_group) F.gv_group = *v.gv_group != "0";
+    if (auto x = runtimeU32(v.gv_nmax)) F.gv_nmax = *x;
+    if (auto x = runtimeU32(v.head_chunk)) F.head_chunk = std::max<std::uint32_t>(32, *x / 32 * 32);
+    if (v.gdn_v0 && k_gdn_v0) F.gdn_v0 = true;
+    if (front == Front::server) F.use_graph = false;
 }
 
 }  // namespace
@@ -565,6 +547,21 @@ Plan plan(const Request& r_in, const Target& t) {
 
 void applyFront(Plan& p, Front f, const RuntimeValues& v, bool k_gdn_v0) { runtimeFlags(f, v, k_gdn_v0, p.flags); }
 
+std::vector<std::string> runtimeWarnings(const RuntimeValues& v) {
+    // the number switches of runtimeFlags; a value runtimeU32 rejects is not applied
+    const std::pair<const char*, const Raw*> nums[] = {{"DBG", &v.dbg},
+                                                       {"GEMV_MAX", &v.gemv_max},
+                                                       {"DRAFT_WINDOW", &v.draft_window},
+                                                       {"DRAFT_WINDOW_MIN", &v.draft_window_min},
+                                                       {"MOE_BN", &v.moe_bn},
+                                                       {"GV_NMAX", &v.gv_nmax},
+                                                       {"HEAD_CHUNK", &v.head_chunk}};
+    std::vector<std::string> w;
+    for (const auto& [name, raw] : nums)
+        if (*raw && !runtimeU32(*raw)) w.push_back(std::format("WHIRL_{}={} is not a number; ignored", name, **raw));
+    return w;
+}
+
 void setQ8dec(Plan& p, bool q8, const std::string& env) {
     p.q8dec = q8;
     const bool def = p.q8dec_default;
@@ -584,15 +581,56 @@ void skipItem(Plan& p, Item it, const std::string& why) {
     s.note = why;
 }
 
-const char* const k_numerics_switches[] = {"FD_SPLITS", "GEMV_MAX",   "GV_NMAX",  "GV_GROUP", "NO_FUSE", "FLOAT_GEMV",
-                                           "GDN_SEQ",   "NAIVE_ATTN", "DBG",      "ATTN_WIDE", "ATTN_DQ4", "ATTN_WS4", "MOE_BN", nullptr};
+// feat026-o6-r1 (review C5), redone on N2b by feat026-o6-p25: the list also holds every runtime switch runtimeFlags
+// applies (the server applies all of them since feat026-o6 (2)) and the GEMV tune lists, each with its kind. Evidence
+// for the bitwise ones (by code reading; the GPU check G-r1, progress/tools/feat026_o6_gr1_gpu.ps1, is pending):
+//   GEMV_R / GEMV_W / GEMV_WH: ops BitClass q8_row (every int8 GEMV variant == the one-token gemvq per row), the
+//     checkGemvBitwise gate; the parsers accept only the variants that exist (r 1/2/4, w < n_gemvw)
+//   HEAD_CHUNK: rows per head-split launch (forward/dispatch.cpp), a multiple of 32 = whole 32-row blocks of one kernel
+//   DQ4_DYN: attention.cpp FAST-8S-1 (same key partition: same partials, same combine order)
+//   GDN_V0: fused_decode.hip, gdn_step_norm == the per-row gdn_step_norm_v0 bit for bit
+//   NO_GRAPH: the same kernels launched one by one instead of replayed from the HIP graph
+// lossy (no bitwise proof): the 13 kernel-path switches as before, WIDE_VERIFY (verify row groups change the attention
+// grouping). drafts: DRAFT_WINDOW / DRAFT_WINDOW_MIN (draft attention only; trunk and verify see every position).
+const char* const k_numerics_switches[] = {"FD_SPLITS",  "GEMV_MAX",     "GV_NMAX",          "GV_GROUP", "NO_FUSE",  "FLOAT_GEMV",
+                                           "GDN_SEQ",    "NAIVE_ATTN",   "DBG",              "ATTN_WIDE", "ATTN_DQ4", "ATTN_WS4",
+                                           "MOE_BN",     "GEMV_R",       "GEMV_W",           "GEMV_WH",  "HEAD_CHUNK", "DQ4_DYN",
+                                           "GDN_V0",     "NO_GRAPH",     "WIDE_VERIFY",      "DRAFT_WINDOW", "DRAFT_WINDOW_MIN", nullptr};
+static_assert(sizeof(k_numerics_switches) / sizeof(k_numerics_switches[0]) == n_numerics_switches + 1);
+namespace {
+constexpr SwitchKind SwL = SwitchKind::lossy, SwB = SwitchKind::bitwise, SwD = SwitchKind::drafts;
+constexpr SwitchKind k_switch_kinds[n_numerics_switches] = {SwL, SwL, SwL, SwL, SwL, SwL, SwL, SwL, SwL, SwL, SwL, SwL, SwL,
+                                                            SwB, SwB, SwB, SwB, SwB, SwB, SwB, SwL, SwD, SwD};
+}  // namespace
+
+SwitchKind switchKind(std::string_view name) {
+    for (std::size_t i = 0; i < n_numerics_switches; ++i)
+        if (name == k_numerics_switches[i]) return k_switch_kinds[i];
+    return SwitchKind::lossy;
+}
 
 void noteSwitches(Plan& p, const std::function<std::optional<std::string>(const char*)>& get) {
-    for (const char* const* n = k_numerics_switches; *n != nullptr; ++n) {
-        const auto v = get(*n);
+    for (std::size_t i = 0; i < n_numerics_switches; ++i) {
+        const char* n = k_numerics_switches[i];
+        const auto v = get(n);
         if (!v || v->empty()) continue;
-        p.overrides.push_back(std::format("WHIRL_{}={}: A/B switch (kernel paths differ from the tested defaults)", *n, *v));
-        p.lossy_override = true;
+        switch (k_switch_kinds[i]) {
+            case SwitchKind::bitwise:
+                p.overrides.push_back(std::format("WHIRL_{}={}: A/B switch, bitwise (same output bits as the default; label unchanged)", n, *v));
+                break;
+            case SwitchKind::drafts:
+                if (p.on(Item::relaxacc)) {
+                    p.overrides.push_back(std::format("WHIRL_{}={}: A/B switch, drafts only, lossy here (relaxed acceptance takes other drafts)", n, *v));
+                    p.lossy_override = true;
+                } else {
+                    p.overrides.push_back(std::format("WHIRL_{}={}: A/B switch, drafts only (the text does not depend on the drafts; label unchanged)", n, *v));
+                }
+                break;
+            case SwitchKind::lossy:
+                p.overrides.push_back(std::format("WHIRL_{}={}: A/B switch (kernel paths differ from the tested defaults)", n, *v));
+                p.lossy_override = true;
+                break;
+        }
     }
 }
 

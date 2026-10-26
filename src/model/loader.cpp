@@ -467,13 +467,6 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
     // read below; kept on the Model for loadOrTune / applyGemvEnv / the selftest checks
     m.env_snap = opt.env ? opt.env : std::make_shared<const whirl::config::EnvSnapshot>(whirl::config::EnvSnapshot::capture());
     const whirl::config::EnvSnapshot& env = *m.env_snap;
-    // arch025-F7: the forward's research switches, once per load (were read by forward at every call / first call)
-    {
-        const whirl::config::ForwardEnv fe = whirl::config::forwardEnv(env);
-        m.head_gemvx = fe.head_gemvx;
-        m.prec_gemvh = fe.prec_gemvh;
-        m.prec_gs = fe.prec_gs;
-    }
     m.cfg = Config::fromGguf(f);
     const Config& cfg = m.cfg;
     // every tensor's type and shape against cfg, before any GPU allocation

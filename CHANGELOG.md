@@ -3,6 +3,32 @@
 All notable changes to WHIRL are listed here. Versions follow `project(whirl VERSION ...)` in
 `CMakeLists.txt`.
 
+## 0.2.6 — unreleased (draft lines, feat026-o6; owner decision O6)
+
+### Changed
+
+- **SSD prompt cache: the cache key now uses the numerics bits key.** The key's numerics part is the mode, the items in
+  effect, the decode activation form and every execution flag of the loaded model, instead of the numerics log line,
+  so rewording a log message no longer invalidates the cache. Cache files written by 0.2.5 or earlier are not reused:
+  the server says so in one startup line, and those prompts are processed and cached again once (as after any WHIRL
+  update, since the executable is part of the key). The old files are kept until they are evicted or expire.
+- **`whirl-server` applies the runtime switches exactly like `whirl`.** One set of rules for both: the server now also
+  honours `WHIRL_DBG`, `WHIRL_GEMV_MAX`, `WHIRL_GV_GROUP`, `WHIRL_GV_NMAX` and `WHIRL_GEMV_R` / `_W` / `_WH`, and
+  `whirl` honours `WHIRL_WIDE_VERIFY` and `WHIRL_HEAD_CHUNK` (and `WHIRL_GDN_V0` in every command, not only chat). A
+  number switch with a value that is not a whole number is ignored with a warning (the CLI used to take a leading
+  number silently), and so is a `WHIRL_GEMV_R` / `_W` / `_WH` list that does not parse (start-up goes on). Every
+  runtime switch that is set is now listed as an override at start-up and in `GET /props`; the mode label shows
+  `+overrides` only for the ones that can change output bits (`WHIRL_WIDE_VERIFY`, and `WHIRL_DRAFT_WINDOW` / `_MIN`
+  under relaxed acceptance), not for the ones classified bitwise (`WHIRL_GEMV_R` / `_W` / `_WH`, `WHIRL_HEAD_CHUNK`,
+  `WHIRL_DQ4_DYN`, `WHIRL_GDN_V0`, `WHIRL_NO_GRAPH`). That classification comes from reading the code and is pending
+  the GPU check G-r1 (bit-identical output with each switch set); until it passes, it is not a verified fact. With none of these variables set nothing changes.
+
+### Removed
+
+- The research switches `WHIRL_HEAD_GEMVX`, `WHIRL_PREC_GEMVH` and `WHIRL_PREC_GS` and their code paths. They were
+  never documented and their defaults are the product path, so default output is unchanged; a set one is ignored with
+  a warning.
+
 ## 0.2.4 — 2026-10-25 (one bug fix and internal restructuring)
 
 No new feature (feature freeze until the modularization is done). This release is the second half of WHIRL's

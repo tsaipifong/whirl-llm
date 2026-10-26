@@ -77,6 +77,9 @@ inline constexpr std::uint32_t implemented_items = balance_items | bit(Item::kvq
 // or cache::fingerprintEnvKept (whirl_cache); the tests (model_tests, cache_tests) hold the two name lists together.
 using Raw = std::optional<std::string>;
 
+// the number of k_numerics_switches (13 kernel-path switches + 10 added by feat026-o6-r1, review C5)
+inline constexpr std::size_t n_numerics_switches = 23;
+
 // Load-time values (loader + loadOrTune; CLI and server alike: Model::load / loadOrTune run for both).
 struct EnvValues {
     // src/model/tune.cpp:852-982 (loadOrTuneImpl)
@@ -85,7 +88,7 @@ struct EnvValues {
     // src/model/loader.cpp:550-553
     Raw moe_fp8, moe_mxw, moe_wide, moe_rbf;
     // numerics::noteSwitches (k_numerics_switches, same order): recorded as overrides only
-    std::array<Raw, 13> switches{};
+    std::array<Raw, n_numerics_switches> switches{};
 
     struct Entry {
         const char* name;  // without the WHIRL_ prefix
@@ -103,9 +106,10 @@ struct EnvValues {
 // --dump-only cells: the S0b-2 dumps are taken after loadOrTune, before these knobs).
 enum class Front : std::uint8_t { none, cli, server };
 
-// After-load knobs of the front ends: src/cli/main.cpp:1030-1048 (applyRuntimeEnv) and :1340 (GDN_V0, chat only);
-// src/server/server_main.cpp:1040-1120. A front end fills only the names it applies (the server sends none of the
-// CLI-only ones: DBG, GEMV_MAX, NO_GRAPH, GV_GROUP, GV_NMAX).
+// After-load knobs of the front ends: qwen35::applyRuntimeEnv (src/model/config.cpp), the same function and rules for the
+// CLI (every command) and the server since feat026-o6 (2) (owner O6; redone on N2b by feat026-o6-p25). Before 0.2.6:
+// cli main.cpp applyRuntimeEnv (WHIRL_GDN_V0 in chat only) and the server's knob block with other rules, without DBG,
+// GEMV_MAX, NO_GRAPH, GV_GROUP, GV_NMAX. The rules: src/common/numerics.cpp runtimeFlags.
 struct RuntimeValues {
     Raw float_gemv, dbg, gemv_max, no_graph, no_fuse, draft_window, draft_window_min, naive_attn, attn_wide, attn_dq4, dq4_dyn,
         attn_ws4, moe_bn, gdn_seq, gv_group, gv_nmax, gdn_v0, wide_verify, head_chunk;
@@ -290,7 +294,7 @@ struct Plan {
     bool on(Item it) const { return items[static_cast<std::size_t>(it)].enabled; }
     // Everything here that decides the bits of the output, as "key=value;" in a fixed order: the mode, every item's
     // enabled state, q8dec and every Flags field (flagTable order). Descriptions (notes, overrides, source) are not in
-    // it. Not used by the tier fingerprint yet (freeze, plan O6).
+    // it. The SSD tier fingerprint's numerics part since feat026-o6 (1) (owner O6; server_main.cpp tierFingerprint).
     std::string bitsKey() const;
 };
 
@@ -305,6 +309,9 @@ Plan plan(const Request& r, const Target& t);
 // Front::none: the same rules plan() applies for r.front / r.runtime (plan(r) with a front == plan(r without) then this).
 // k_gdn_v0 = Target::k_gdn_v0. Front::none: no change.
 void applyFront(Plan& p, Front f, const RuntimeValues& v, bool k_gdn_v0);
+// feat026-o6 (2): one warning per number switch of v whose value is not a whole number <= 0xffffffff (not applied:
+// "WHIRL_DBG=12abc is not a number; ignored"); the front ends print them (a bad A/B value never stops the start-up).
+std::vector<std::string> runtimeWarnings(const RuntimeValues& v);
 // Per-item override from the environment: `forced` = the effective value after the variable.
 // Records "WHIRL_X=v: item on (lossy, user-requested)" or "... item off" when it differs.
 void applyOverride(Plan& p, Item it, const char* var, const std::string& value, bool forced, bool applicable);
@@ -317,10 +324,17 @@ void setQ8dec(Plan& p, bool q8, const std::string& env);
 // An item the run cannot use after all (e.g. relaxacc with --draft dflash): skipped with `why`.
 void skipItem(Plan& p, Item it, const std::string& why);
 
-// WHIRL_* A/B switches that change which kernels run (WHIRL_FD_SPLITS, WHIRL_GEMV_MAX, ...):
-// each one set is recorded as an override ("+overrides" label), so the log and /props show that
-// the run's bits are not the mode's tested paths. get(name) reads WHIRL_<name>.
-extern const char* const k_numerics_switches[];
+// WHIRL_* A/B switches that change which kernels run (WHIRL_FD_SPLITS, WHIRL_GEMV_MAX, ...), and every runtime switch
+// the front ends apply (runtimeFlags; feat026-o6-r1, review C5). Each one set is recorded as an override (log line,
+// /props "overrides"); what it does to the label depends on its kind:
+//   lossy:   other kernel paths with no bitwise proof -> lossy_override ("MODE+overrides", precise too)
+//   bitwise: the same output bits by construction (named in the override text) -> the label stays the mode's
+//   drafts:  changes only the MTP drafts; the text does not depend on them (greedy verify, race-coupled sampling)
+//            except under relaxed acceptance (relaxacc on: lossy)
+// get(name) reads WHIRL_<name>.
+enum class SwitchKind : std::uint8_t { lossy, bitwise, drafts };
+extern const char* const k_numerics_switches[];  // n_numerics_switches names, then nullptr
+SwitchKind switchKind(std::string_view name);     // lossy for a name not in the list
 void noteSwitches(Plan& p, const std::function<std::optional<std::string>(const char*)>& get);
 
 // "numerics: balance - enabled: fp8 (...), ...; skipped: gdnwmma (...); always: q8dec (...)"
