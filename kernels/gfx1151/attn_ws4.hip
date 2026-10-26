@@ -37,6 +37,16 @@ __device__ __forceinline__ void ws4_lds_barrier() {
 // AT_BARRIER): this wave's LDS reads / writes done (lgkmcnt(0)), then s_barrier; global loads stay
 // in flight. Only LDS is exchanged between the waves here. Same instructions on the data, so the
 // same bits; B = 0 is the shipped barrier.
+// Why the compiler cannot break it: asm volatile has unmodeled side effects (a scheduling barrier at
+// the MI level; the "memory" clobber orders it at the IR level), and clang marks inline asm in HIP
+// device code convergent, so it is never duplicated into divergent paths (every caller's condition is
+// block-uniform: c, nch, cidx, kAlias). VGPR dependencies on the in-flight loads still get their
+// vmcnt from SIInsertWaitcnts (the asm does not touch those registers).
+// Risk accepted (review C2): without FeatureBackOffBarrier (GFX11) a wave waiting in s_barrier with
+// VMEM still outstanding cannot be backed out of the barrier on an exception (trap / debugger / bad
+// address), so a corrupt KV pointer may hang the GPU (TDR) instead of a clean page fault. All loads
+// here are clamped to [b0, b1 - 1]; only a bad KV pool pointer can trigger it. hipfire ships the same
+// barrier (AT_BARRIER).
 template <int B>
 __device__ __forceinline__ void ws4_bar() {
     if constexpr (B == 0)
@@ -504,8 +514,6 @@ __device__ __forceinline__ void attn_ws4g_impl(const float *q, const KvArgs &kv,
     }
     ws4g_stage<F>(raw, Ks, Vt, b0, b1, isv, tq);
     ws4g_load<F>(raw, kv, tb, b0 + min(1, nch - 1) * AW_K, b1, g, n_kv, isv, tq);
-    int dl_next = 0;  // TU & 2: page-table entry of the first in-loop load (chunk min(2, nch - 1))
-    if constexpr ((TU & 2) != 0) dl_next = kv_delta(kv, tb, b0 + min(2, nch - 1) * AW_K);
     float8 o[CG][NDT];
 #pragma unroll
     for (int c = 0; c < CG; ++c)
@@ -522,6 +530,13 @@ __device__ __forceinline__ void attn_ws4g_impl(const float *q, const KvArgs &kv,
         const int kend = min(k0 + AW_K, b1) - 1;  // last key of the chunk
         const bool tail = pmin < kend;            // some row has keys of this chunk past its position
         ws4_bar<TU & 1>();                        // LB0: Ks / Vt (and Qs) of the chunk written
+        // TU & 2 (r1 schedule): the page-table entry of the load issued after LB2 of THIS chunk, read here
+        // (unconditional, clamped as that load), a whole chunk of compute earlier. It is younger than the
+        // in-flight prefetch, which ws4g_stage consumes first at LB2 anyway, so no young load is drained
+        // for it. (The first version read the entry of the load after next AFTER the 16 prefetch loads;
+        // the loop end then got a vmcnt(12) draining 5 of them.)
+        int dl_la = 0;
+        if constexpr ((TU & 2) != 0) dl_la = kv_delta(kv, tb, min(k0 + 2 * AW_K, b0 + (nch - 1) * AW_K));
         // QK + softmax of tile c in wave c (its m, l live there): the two kt chains of aw_qk_chain
         // interleaved (one Q fragment load per st for both; each chain's order unchanged)
         half8 ptw[AW_K / 16];
@@ -628,8 +643,7 @@ __device__ __forceinline__ void attn_ws4g_impl(const float *q, const KvArgs &kv,
             if constexpr ((TU & 2) == 0) {
                 ws4g_load<F>(raw, kv, tb, min(k0 + 2 * AW_K, b0 + (nch - 1) * AW_K), b1, g, n_kv, isv, tq);
             } else {
-                ws4g_load<F, true>(raw, kv, tb, min(k0 + 2 * AW_K, b0 + (nch - 1) * AW_K), b1, g, n_kv, isv, tq, dl_next);
-                dl_next = kv_delta(kv, tb, min(k0 + 3 * AW_K, b0 + (nch - 1) * AW_K));  // the following load's entry
+                ws4g_load<F, true>(raw, kv, tb, min(k0 + 2 * AW_K, b0 + (nch - 1) * AW_K), b1, g, n_kv, isv, tq, dl_la);
             }
         }
     }

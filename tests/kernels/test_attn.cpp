@@ -420,8 +420,10 @@ void dq4Long(Ctx& c) {
                 const Out ow = run(pos, cs.ns, winArg(w, 0));
                 if (fcand) {
                     const Out owc = run(pos, cs.ns, winArg(w, 0), fcand);
-                    c.rep.add(cmpExact("cand attn_dq4 draft window W " + std::to_string(w) + " (ml, acc, out) == attn_dq4" + tag, owc.acc, ow.acc, Kind::exact));
+                    c.rep.add(cmpExact("cand attn_dq4 draft window W " + std::to_string(w) + " acc == attn_dq4" + tag, owc.acc, ow.acc, Kind::exact));
                     c.rep.add(cmpExact("cand attn_dq4 draft window W " + std::to_string(w) + " ml == attn_dq4" + tag, owc.ml, ow.ml, Kind::exact));
+                    // review N3 (r1): the combined output too, as in the long cases above
+                    c.rep.add(cmpExact("cand attn_dq4 draft window W " + std::to_string(w) + " + combine == attn_dq4 + combine" + tag, owc.o, ow.o, Kind::exact));
                 }
                 std::vector<double> rwo, rws;
                 ref(pos, w0, rwo, rws);

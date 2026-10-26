@@ -14,6 +14,7 @@
 #include <array>
 #include <functional>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <numeric>
@@ -36,6 +37,54 @@ const float kSc = 1.0f / 16.0f;
 enum class F { f16, q8, q4 };
 const char* fname(F f) { return f == F::f16 ? "f16" : f == F::q8 ? "q8" : "q4"; }
 const char* fsuf(F f) { return f == F::f16 ? "" : f == F::q8 ? "_q8" : "_q4"; }
+
+// WHIRL_KT_BENCH_CHECK=N (feat026-attndec8s-r1, race detection in the bench families; unset = timing only, as before):
+// after a kernel's timing, zero the partials, launch once and hash them (FNV-1a 64 over ml and acc), then N more
+// launches, each compared with that hash. A timing-dependent LDS race (e.g. a barrier that lets a wave overwrite LDS
+// another wave still reads) shows as differ > 0; the printed hash also lets the runner compare side A (the shipped
+// object) with side B (a candidate object): bit-identical candidates must give the same hash.
+int benchCheckN() {
+    const char* e = std::getenv("WHIRL_KT_BENCH_CHECK");
+    return e ? std::max(0, std::atoi(e)) : 0;
+}
+unsigned long long fnv64(const std::vector<float>& a, const std::vector<float>& b) {
+    unsigned long long h = 1469598103934665603ull;
+    for (const auto* v : {&a, &b}) {
+        for (const float x : *v) {  // FNV-1a over the 32-bit words (bit patterns, so -0 / NaN payloads count)
+            std::uint32_t w;
+            std::memcpy(&w, &x, 4);
+            h = (h ^ w) * 1099511628211ull;
+        }
+    }
+    return h;
+}
+// nml / nacc: floats hashed from the start of ml / acc (0 = the whole buffer; the rows are the outermost index)
+void benchCheck(Ctx& c, const std::function<void()>& launch, Buf& ml, Buf& acc, const char* fam, F f, int L, const std::string& what,
+                std::size_t nml = 0, std::size_t nacc = 0) {
+    const int n = benchCheckN();
+    if (n <= 0) return;
+    if (nml == 0) nml = ml.bytes() / 4;
+    if (nacc == 0) nacc = acc.bytes() / 4;
+    ml.zero();
+    acc.zero();
+    launch();
+    c.sync();
+    const unsigned long long h0 = fnv64(ml.down<float>(nml), acc.down<float>(nacc));
+    int differ = 0;
+    for (int i = 0; i < n; ++i) {
+        launch();
+        c.sync();
+        differ += fnv64(ml.down<float>(nml), acc.down<float>(nacc)) != h0;
+    }
+    std::printf("   %s check %-4s L %6d %-34s hash %016llx launches %d differ %d\n", fam, fname(f), L, what.c_str(), h0, n, differ);
+    Result res;
+    res.name = std::string(fam) + " repeat " + what + " [kv " + fname(f) + "] L " + std::to_string(L);
+    res.kind = Kind::invariant;
+    res.n = static_cast<std::size_t>(n);
+    res.mismatches = static_cast<std::size_t>(differ);
+    res.pass = differ == 0;
+    c.rep.add(res);
+}
 
 struct XorShift {
     std::uint64_t s;
@@ -473,6 +522,7 @@ void benchAttnWs4(Ctx& c) {
                 const double bytes = static_cast<double>(L) * kNkv * row_bytes;
                 std::printf("   ws4bench %-4s L %6d %-20s %8.1f us  %6.1f GB/s\n", fname(f), L, nm.c_str(), us, bytes / us / 1e3);
                 std::fflush(stdout);
+                benchCheck(c, launch, ml, acc, "ws4bench", f, L, nm);
             }
             if (f == F::q8 && L == lens[0]) {  // attn_combine (24 heads, 64 splits), for the fusion estimate
                 auto launch = [&]() {
@@ -770,10 +820,13 @@ void benchAttnWs4g(Ctx& c) {
                     g.first[0] = 0;
                     g.count[0] = 1;
                     const auto fn = c.fnOpt(std::string("attn_ws4") + fsuf(f));
-                    t1 = timeit([&]() {
+                    auto l1 = [&]() {
                         hip::launch(fn, {static_cast<unsigned>(kNkv), kNs, 1}, {128, 1, 1}, 0, c.s, dq.p(), kva, ml.p(), acc.p(), kH, kNkv, kQStr, dpos.p(), kSc, DevPtr{0}, g);
-                    });
+                    };
+                    t1 = timeit(l1);
                     std::printf("   ws4gbench %-4s L %6d rows  1 attn_ws4 (single row)      %8.1f us  %6.1f GB/s\n", fname(f), L, t1, bytes / t1 / 1e3);
+                    benchCheck(c, l1, ml, acc, "ws4gbench", f, L, std::string("rows 1 attn_ws4") + fsuf(f), static_cast<std::size_t>(kNs) * kH * 2,
+                               static_cast<std::size_t>(kNs) * kH * kD);
                 }
                 const auto grps = ws4grp(pos, 0);
                 int maxc = 1;
@@ -786,12 +839,17 @@ void benchAttnWs4g(Ctx& c) {
                 }
                 const auto fn = c.fnOpt(std::string("attn_ws4g") + std::to_string(cg) + fsuf(f));
                 const unsigned gx = static_cast<unsigned>(kNkv * ((maxc + rpb - 1) / rpb));
-                const double us = timeit([&]() {
+                auto lg = [&]() {
                     hip::launch(fn, {gx, kNs, static_cast<unsigned>(grps.size())}, {256, 1, 1}, 0, c.s, dq.p(), kva, ml.p(), acc.p(), kH, kNkv, kQStr,
                                 dpos.p(), kSc, DevPtr{0}, g);
-                });
+                };
+                const double us = timeit(lg);
                 std::printf("   ws4gbench %-4s L %6d rows %2d attn_ws4g%d (%zu grp)           %8.1f us  x%.2f of 1 row  +%.1f us/extra row\n", fname(f), L, R, cg,
                             grps.size(), us, us / t1, R > 1 ? (us - t1) / (R - 1) : 0.0);
+                // the R rows written (up to 8 rows: 12.6 MB per read back; 16 / 32 rows reuse the same kernels)
+                if (R <= 8)
+                    benchCheck(c, lg, ml, acc, "ws4gbench", f, L, "rows " + std::to_string(R) + " attn_ws4g" + std::to_string(cg) + fsuf(f),
+                               static_cast<std::size_t>(R) * kNs * kH * 2, static_cast<std::size_t>(R) * kNs * kH * kD);
                 if (old && R <= 8) {
                     wk::AwGroups go{};
                     for (int r = 0; r < R; ++r) {

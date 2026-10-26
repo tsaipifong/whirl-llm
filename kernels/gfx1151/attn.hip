@@ -852,7 +852,10 @@ extern "C" __global__ void __launch_bounds__(128)
 // feat026-attndec8s tune id (bit mask; 0 = the shipped kernels, bit-identical outputs for every id):
 //   1 attn_ws4* inline-asm LDS barriers   2 attn_ws4g* inline-asm LDS barriers   (attn_ws4.hip ws4_bar)
 //   4 attn_ws4_q8 / _q4 page-table lookahead   8 attn_ws4g*_q8 page-table lookahead (f16 entries: no, they spilled)
-//  16 attn_dq4 page-table lookahead (the next tile's kv_delta read after this tile's K / V loads)
+//  16 attn_dq4 page-table lookahead (r1: the next tile's kv_delta read BEFORE this tile's K / V loads,
+//     plus a sched_barrier after them so the 42 loads stay in flight together)
+// Candidates (feat026-attndec8s-r1): m7 = 1|2|4 (the runner's -Best), m15 = 7|8 and m23 = 7|16 measured
+// separately (each differs from m7 in one bit); bits 8 / 16 are kept only if their kb B/A shows no regression.
 #ifndef WHIRL_ATTNDEC8S
 #define WHIRL_ATTNDEC8S 0
 #endif
@@ -974,10 +977,16 @@ extern "C" __global__ void __launch_bounds__(256)
     if constexpr (AD8S_DQ4_DLA != 0) dl_next = kv_delta(kv, tb, min(b0 + wid * 32, b1 - 1));
     for (int k0 = b0 + wid * 32; k0 < b1; k0 += DQ_NW * 32) {
         int dl;  // 32-key tiles never straddle a page
-        if constexpr (AD8S_DQ4_DLA != 0)
-            dl = dl_next;
-        else
+        if constexpr (AD8S_DQ4_DLA != 0) {
+            dl = dl_next;  // read one tile earlier (arrived: issued before that tile's K / V loads)
+            // the next tile's entry, issued BEFORE this tile's K / V loads: vmcnt is in order on gfx11,
+            // so a read issued after them could only be waited for by waiting for all of them
+            // (r1: the first version read it after the V loads; the compiler then split the 32 V
+            // loads into groups of 4, each with a vmcnt(0))
+            dl_next = kv_delta(kv, tb, min(k0 + DQ_NW * 32, b1 - 1));
+        } else {
             dl = kv_delta(kv, tb, k0);
+        }
         const int key = k0 + lane;
         const bool valid = key < b1;
         const size_t r = (size_t)(min(key, b1 - 1) + dl) * n_kv + g;
@@ -993,7 +1002,9 @@ extern "C" __global__ void __launch_bounds__(256)
             const size_t rv = (size_t)(min(k0 + j, b1 - 1) + dl) * n_kv + g;
             vw[j] = *(const uint32_t *)((const uint8_t *)kv.v + rv * (AW_D / 2) + 4 * lane);
         }
-        if constexpr (AD8S_DQ4_DLA != 0) dl_next = kv_delta(kv, tb, min(k0 + DQ_NW * 32, b1 - 1));
+        // AD8S_DQ4_DLA: keep the 42 K / V loads issued together (no sinking of the V loads to their
+        // P.V uses; scheduling only, same instructions and data)
+        if constexpr (AD8S_DQ4_DLA != 0) __builtin_amdgcn_sched_barrier(0);
         // scores (lane = key). zo: an opaque 0 so the q reads stay in the loop (hoisted, the
         // 512 q words and their scales would spill)
         int zo;
