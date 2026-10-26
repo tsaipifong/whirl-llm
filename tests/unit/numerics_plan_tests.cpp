@@ -495,6 +495,30 @@ void testLoadRules() {
 
 // ---- arch025-n2b-r1: unit cells for the two N2b mutants only the oracle killed (tools/impact mutants n2b-q8dec-empty,
 // n2b-g8t-kernels). Decision inputs taken from the oracle's mismatch lines.
+// audit-fastonly-overrides FO-5 (2026-10-26): WHIRL_<SWITCH>=0 must not turn the switch ON. runtimeFlags tests only
+// presence (numerics.cpp:437-450 cli, :457-460 server: `if (v.naive_attn) F.naive_attn = true;`), so WHIRL_NAIVE_ATTN=0
+// enables the naive attention (scores buffer max_batch x n_head x max_ctx x 4 B, attn.cpp:133) and labels the run
+// +overrides; same for NO_FUSE, FLOAT_GEMV, GDN_SEQ, NO_GRAPH. Expected to FAIL on 799aa49 / e87d58f.
+void testSwitchZeroIsOff() {
+    for (const nu::Front fr : {nu::Front::cli, nu::Front::server}) {
+        const char* fn = fr == nu::Front::cli ? "cli" : "server";
+        auto withZero = [&](nu::Raw nu::RuntimeValues::*field) {
+            nu::RuntimeValues v;
+            v.*field = std::string("0");
+            nu::Plan p;
+            nu::applyFront(p, fr, v, true);
+            return p.flags;
+        };
+        const nu::Flags d{};
+        NCHECK(!withZero(&nu::RuntimeValues::naive_attn).naive_attn, "FO-5 {}: WHIRL_NAIVE_ATTN=0 turned naive attention on", fn);
+        NCHECK(!withZero(&nu::RuntimeValues::no_fuse).no_fuse, "FO-5 {}: WHIRL_NO_FUSE=0 turned no_fuse on", fn);
+        NCHECK(!withZero(&nu::RuntimeValues::float_gemv).float_gemv, "FO-5 {}: WHIRL_FLOAT_GEMV=0 turned float_gemv on", fn);
+        NCHECK(withZero(&nu::RuntimeValues::gdn_seq).gdn_chunked == d.gdn_chunked, "FO-5 {}: WHIRL_GDN_SEQ=0 turned chunked DeltaNet off", fn);
+        if (fr == nu::Front::cli)
+            NCHECK(withZero(&nu::RuntimeValues::no_graph).use_graph == d.use_graph, "FO-5 cli: WHIRL_NO_GRAPH=0 turned the graph off");
+    }
+}
+
 void testN2bR1() {
     const nu::Target t = target(k_cards[0], "swift", false);
     // n2b-q8dec-empty: WHIRL_Q8DEC= (empty) must not decide prec_dec (tune.cpp:955). Needs a mode whose default is f16 decode
@@ -520,6 +544,82 @@ void testN2bR1() {
     }
 }
 
+// audit-fastonly-overrides (2026-10-26): a fast-only item (fast_only_items: kvq4, relaxacc, headq, moeskip, a8, a4)
+// never reaches precise or balance through a WHIRL_* override (owner mode standard 2026-10-26; the moeskip-r1 class:
+// WHIRL_MOESKIP_THR in precise reached moe_f.hip with id -1). Same semantics as numerics::applyFastOnlyOverride
+// (feat027-i8qk-r2 e982759 / feat028-moefast97-r1 7ef2cae): plan untouched, a note in the load log.
+// Expected to FAIL on 799aa49: FO-1 (WHIRL_KV=q4 enables kvq4 via applyOverride, numerics.cpp:394-395, and chooseKv
+// returns the forced q4, numerics.cpp:684-688) and FO-2 (WHIRL_RELAX=1 enables relaxacc + relax_on,
+// numerics.cpp:402-412). FO-3 is the general invariant; FO-4 pins that every env name is classified.
+void testFastOnlyOverrides() {
+    auto planOf = [](const char* mode, const nu::Target& t, std::vector<std::pair<const char*, const char*>> vals) {
+        nu::Request r = nu::parseMode(mode, "t");
+        r.load_overrides = true;
+        for (const auto& [n, v] : vals) *r.env.find(n) = std::string(v);
+        return nu::plan(r, t);
+    };
+    auto fastOnlyOn = [](const nu::Plan& p) {
+        std::uint32_t m = 0;
+        for (const nu::ItemState& s : p.items)
+            if (s.enabled) m |= nu::bit(s.item);
+        return m & nu::fast_only_items;
+    };
+    for (const CardFake& c : k_cards)
+        for (const char* model : {"swift", "moe"})
+            for (const char* mode : {"precise", "balance"}) {
+                const std::string cell = std::format("{} {} {}", c.name, model, mode);
+                // FO-1: WHIRL_KV=q4 (4-bit KV is fast-only)
+                {
+                    const nu::Target t = target(c, model, true);
+                    const nu::Plan p = planOf(mode, t, {{"KV", "q4"}});
+                    NCHECK(!p.on(nu::Item::kvq4), "FO-1 {}: WHIRL_KV=q4 must not enable kvq4", cell);
+                    const nu::KvCaps caps{c.k_kv_q8h, c.k_kv_q8v, c.k_kv_q4, c.prof.numerics_8060s};
+                    const nu::KvChoice kc = nu::chooseKv(nu::parseMode(mode, "t"), std::string_view(model) == "moe", caps, whirl::KvFormat::q4);
+                    NCHECK(kc.kv != whirl::KvFormat::q4, "FO-1 {}: chooseKv(forced q4) gave q4 ({})", cell, kc.why);
+                }
+                // FO-2: WHIRL_RELAX=1 (relaxed acceptance is fast-only)
+                {
+                    const nu::Target t = target(c, model, false);
+                    const nu::Plan p = planOf(mode, t, {{"RELAX", "1"}});
+                    NCHECK(!p.on(nu::Item::relaxacc) && !p.flags.relax_on, "FO-2 {}: WHIRL_RELAX=1 must not enable relaxacc", cell);
+                    const nu::Plan pk = planOf(mode, t, {{"RELAX", "1"}, {"RELAX_K", "16"}, {"RELAX_ALPHA", "0.01"}});
+                    NCHECK(!pk.flags.relax_on && pk.flags.relax_k == nu::Flags{}.relax_k, "FO-2 {}: relax params must stay default", cell);
+                }
+                // FO-3: no single override (every EnvValues name and switch, typical values) turns a fast-only item on
+                {
+                    const nu::Target t = target(c, model, false);
+                    std::vector<std::pair<std::string, std::string>> probes = {
+                        {"KV", "q4"}, {"RELAX", "1"}, {"Q4_RELAXED", "1"}, {"FP8", "1"}, {"MOE_FP8", "1"}, {"SPEC_SAMPLE", "1"},
+                        {"Q8DEC", "1"}, {"GDN_WMMA", "1"}, {"FFN_H16", "1"}, {"GEMMHQ", "1"}};
+                    for (const auto& e : nu::EnvValues::names()) probes.emplace_back(e.name, "1");
+                    for (std::size_t i = 0; nu::k_numerics_switches[i] != nullptr; ++i) probes.emplace_back(nu::k_numerics_switches[i], "1");
+                    for (const auto& [n, v] : probes) {
+                        const nu::Target tt = n == "KV" ? target(c, model, true) : t;
+                        nu::Plan p;
+                        try {
+                            p = planOf(mode, tt, {{n.c_str(), v.c_str()}});
+                        } catch (...) {
+                            continue;  // a rejected value is not an enable
+                        }
+                        NCHECK(fastOnlyOn(p) == 0, "FO-3 {}: WHIRL_{}={} enabled fast-only items 0x{:x}", cell, n, v, fastOnlyOn(p));
+                    }
+                }
+            }
+    // FO-4: every WHIRL_* value the plan reads is classified (a new override must say which class it is and, for
+    // fast-only, go through the fast-only path). Classes: B bitwise-equal A/B, L lossy item allowed in balance,
+    // F fast-only, S numerics A/B switch (labelled +overrides), P relaxacc parameter (only with relaxacc).
+    const std::map<std::string, char> k_class = {
+        {"FP8", 'L'},      {"FP8_MASK", 'L'},   {"G8T", 'B'},       {"GDN_WMMA", 'L'},    {"ACT_FUSE", 'B'},    {"GEMMH", 'B'},
+        {"GEMMHQ", 'B'},   {"ATTN_KX", 'B'},    {"ATTN_KG", 'B'},   {"ATTN_DQF", 'B'},    {"ATTN_SEG", 'B'},    {"GDN_BA", 'B'},
+        {"GDN_IN2", 'B'},  {"Q4_RELAXED", 'L'}, {"FFN_H16", 'L'},   {"GDN_STRIX", 'L'},   {"GDN_STRIX_MIN", 'L'}, {"KV", 'F'},
+        {"Q8DEC", 'L'},    {"RELAX", 'F'},      {"RELAX_K", 'P'},   {"RELAX_ALPHA", 'P'}, {"RELAX_EPS", 'P'},   {"RELAX_DELTA", 'P'},
+        {"SPEC_SAMPLE", 'L'}, {"MOE_FP8", 'L'}, {"MOE_MXW", 'B'},   {"MOE_WIDE", 'B'},    {"MOE_RBF", 'B'},
+    };
+    for (const auto& e : nu::EnvValues::names()) NCHECK(k_class.count(e.name) == 1, "FO-4: WHIRL_{} has no override class", e.name);
+    for (std::size_t i = 0; nu::k_numerics_switches[i] != nullptr; ++i)
+        NCHECK(k_class.count(nu::k_numerics_switches[i]) == 0, "FO-4: switch WHIRL_{} is also an item override", nu::k_numerics_switches[i]);
+}
+
 }  // namespace
 
 void testNumericsPlan(int& pass, int& fail) {
@@ -530,6 +630,8 @@ void testNumericsPlan(int& pass, int& fail) {
     testFrontEnds();
     testLoadRules();
     testN2bR1();  // arch025-n2b-r1
+    testSwitchZeroIsOff();  // audit-fastonly-overrides FO-5 (fails before the fix)
+    testFastOnlyOverrides();  // audit-fastonly-overrides FO-1..4 (FO-1 / FO-2 / FO-3 fail before the fix)
     pass += g_p;
     fail += g_f;
 }
