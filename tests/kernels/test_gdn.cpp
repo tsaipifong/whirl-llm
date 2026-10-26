@@ -12,6 +12,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include <algorithm>
+#include <cstdlib>
+#include <cstring>
+#include <string>
+#include <utility>
 
 #include "cpu_ref.h"
 
@@ -78,6 +82,47 @@ void deltaRef(const std::vector<float>& qkv, const std::vector<float>& g, const 
 }
 
 std::vector<double> toD(const std::vector<float>& v) { return std::vector<double>(v.begin(), v.end()); }
+
+// feat026-gdn-tests-r1 (progress/gdn-kernels.review.md consider 6): the cross-object hooks claim "same bits", so they
+// compare raw bytes (memcmp: -0 != +0, a NaN equals the same NaN bits); std::vector<float>::operator== is IEEE ==
+// (-0 == +0 passes, NaN != NaN false-fails). Same rule as kt::cmpExactBits and the gemm hooks.
+template <class T>
+bool sameBits(const std::vector<T>& a, const std::vector<T>& b) {
+    return a.size() == b.size() && (a.empty() || std::memcmp(a.data(), b.data(), a.size() * sizeof(T)) == 0);
+}
+template <class T>
+bool sameBits(const std::vector<std::vector<T>>& a, const std::vector<std::vector<T>>& b) {
+    if (a.size() != b.size()) return false;
+    for (std::size_t i = 0; i < a.size(); ++i)
+        if (!sameBits(a[i], b[i])) return false;
+    return true;
+}
+template <class A, class B>
+bool sameBits(const std::pair<A, B>& a, const std::pair<A, B>& b) {
+    return sameBits(a.first, b.first) && sameBits(a.second, b.second);
+}
+
+// feat026-gdn-tests-r1 (review act-on 2): kernel `kernel` of the WHIRL_KT_BD_HSACO candidate object. Env unset ->
+// nullptr and no row (the hook is not requested). Env set but the object cannot be read, or the kernel is absent from
+// it (wrong path / arch / renamed kernel), or the shipped kernel it is compared with is absent -> a FAILING row named
+// `row` (the same name the hook's own row has, so runners can count rows) and nullptr. Never a silent skip. A
+// candidate object of the wrong arch already throws in hipModuleLoadData (non-zero exit).
+[[maybe_unused]] hip::Function bdFn(Ctx& c, const char* kernel, const std::string& row, bool shipped_present = true) {
+    const char* path = std::getenv("WHIRL_KT_BD_HSACO");
+    if (path == nullptr || *path == 0) return nullptr;
+    const hip::Function f = xFn(c, "WHIRL_KT_BD_HSACO", kernel);
+    if (f != nullptr && shipped_present) return f;
+    Result r;
+    r.name = row;
+    r.kind = Kind::invariant;
+    r.n = 0;
+    r.pass = false;
+    r.note = f == nullptr ? std::string("WHIRL_KT_BD_HSACO is set but ") + kernel + " is not loadable from " + path +
+                                " (unreadable path, other object or kernel absent)"
+                          : "the shipped object lacks " + std::string(kernel) + " (or the mode this case needs)";
+    c.rep.add(r);
+    return nullptr;
+}
 
 Result tolRms(const std::string& name, const std::vector<float>& got, const std::vector<double>& ref, double rtol) {
     const std::vector<double> sc(ref.size(), rmsOf(ref));
@@ -326,10 +371,11 @@ void testGdn(Ctx& c) {
             c.rep.add(tolRms("gdn_wscan8 final state vs CPU", dst.down<float>(st.size()), st, 2e-2));
             // feat026-barrierdrain2: WHIRL_KT_BD_HSACO = a WHIRL_BARDRAIN candidate object: its gdn_wscan8 (and
             // gdn_wscan4, grid y = 2x, 128 threads) on the same gdn_wprep output == this object's same kernel, bitwise
-            // (out + state), 3 repeats each; absent -> no result
+            // (out + state), 3 repeats each; env unset -> no row; set but not runnable -> a FAIL row (bdFn)
             for (const char* nm : {"gdn_wscan8", "gdn_wscan4"}) {
-                const hip::Function xs = xFn(c, "WHIRL_KT_BD_HSACO", nm), fs = c.fnOpt(nm);
-                if (!xs || !fs) continue;
+                const std::string row = std::string(nm) + " candidate object == shipped (out + state, 3 runs)";
+                const hip::Function fs = c.fnOpt(nm), xs = bdFn(c, nm, row, fs != nullptr);
+                if (!xs) continue;
                 const bool w4 = nm[9] == '4';
                 auto runW = [&](hip::Function f) {
                     Buf xst(state0), xout(out.size() * 4);
@@ -341,9 +387,9 @@ void testGdn(Ctx& c) {
                 const auto ref = runW(fs);
                 {
                     std::size_t xbad = 0;
-                    for (int rep = 0; rep < 3; ++rep) xbad += runW(xs) != ref;
+                    for (int rep = 0; rep < 3; ++rep) xbad += !sameBits(runW(xs), ref);
                     Result r;
-                    r.name = std::string(nm) + " candidate object == shipped (out + state, 3 runs)";
+                    r.name = row;
                     r.kind = Kind::invariant;
                     r.n = 3;
                     r.mismatches = xbad;
@@ -378,15 +424,16 @@ void testGdn(Ctx& c) {
                 }
             }
             // feat026-barrierdrain: WHIRL_KT_BD_HSACO = a WHIRL_BARDRAIN candidate object: its gdn_sx_scan on the
-            // same prep output == this object's, bitwise (3 repeats); absent -> no result
-            if (const hip::Function xs = xFn(c, "WHIRL_KT_BD_HSACO", "gdn_sx_scan")) {
+            // same prep output == this object's, bitwise (3 repeats); env unset -> no row; set but not runnable -> a
+            // FAIL row (bdFn)
+            if (const hip::Function xs = bdFn(c, "gdn_sx_scan", "gdn_sx_scan candidate object == shipped (out + state, 3 runs)")) {
                 std::size_t xbad = 0;
                 for (int rep = 0; rep < 3; ++rep) {
                     Buf dst(state0), dout(out.size() * 4);
                     hip::launch(xs, {kNv, 1, 1}, {256, 1, 1}, 0, c.s, Qh.p(), Kh.p(), Vh.p(), dst.p(), dout.p(), dst.p(), T.p(), P.p(),
                                 Gb.p(), kNv, kNk, n, n32, kScale, DevPtr{0}, DevPtr{0}, DevPtr{0}, DevPtr{0}, 0.0f, false);
                     c.sync();
-                    xbad += dout.down<float>(out.size()) != o1 || dst.down<float>(st.size()) != s1;
+                    xbad += !sameBits(dout.down<float>(out.size()), o1) || !sameBits(dst.down<float>(st.size()), s1);
                 }
                 Result r;
                 r.name = "gdn_sx_scan candidate object == shipped (out + state, 3 runs)";
@@ -566,8 +613,9 @@ void testGdn(Ctx& c) {
             c.rep.add(r);
         }
         // feat026-barrierdrain: WHIRL_KT_BD_HSACO = a WHIRL_BARDRAIN candidate object: its gdn_step_norm on the
-        // segment == this object's (out, xq, xd, state, every snapshot), bitwise, 3 repeats; absent -> no result
-        if (const hip::Function xs = xFn(c, "WHIRL_KT_BD_HSACO", "gdn_step_norm")) {
+        // segment == this object's (out, xq, xd, state, every snapshot), bitwise, 3 repeats; env unset -> no row; set
+        // but not runnable -> a FAIL row (bdFn)
+        if (const hip::Function xs = bdFn(c, "gdn_step_norm", "gdn_step_norm candidate object == shipped (out, xq, xd, state, snapshots; 3 runs)")) {
             std::size_t xbad = 0;
             for (int rep = 0; rep < 3; ++rep) {
                 Buf st_x(state0), y_x(no * 4), q_x(no), d_x(no / 32 * 4);
@@ -581,11 +629,12 @@ void testGdn(Ctx& c) {
                 }
                 step(xs, sx, 1, y_x.p(), q_x.p(), d_x.p());
                 c.sync();
-                bool same = y_x.down<float>(no) == ya && q_x.down<std::int8_t>(no) == q_a.down<std::int8_t>(no) &&
-                            d_x.down<float>(no / 32) == d_a.down<float>(no / 32) &&
-                            st_x.down<float>(state0.size()) == st_a.down<float>(state0.size());
+                bool same = sameBits(y_x.down<float>(no), ya) && sameBits(q_x.down<std::int8_t>(no), q_a.down<std::int8_t>(no)) &&
+                            sameBits(d_x.down<float>(no / 32), d_a.down<float>(no / 32)) &&
+                            sameBits(st_x.down<float>(state0.size()), st_a.down<float>(state0.size()));
                 for (int t = 0; t < n; ++t)
-                    same = same && xsnap[static_cast<std::size_t>(t)].down<float>(state0.size()) == ssnap[static_cast<std::size_t>(t)].down<float>(state0.size());
+                    same = same && sameBits(xsnap[static_cast<std::size_t>(t)].down<float>(state0.size()),
+                                            ssnap[static_cast<std::size_t>(t)].down<float>(state0.size()));
                 xbad += !same;
             }
             Result r;
@@ -648,14 +697,23 @@ void testGdn(Ctx& c) {
         }
         // feat026-barrierdrain2: WHIRL_KT_BD_HSACO = a WHIRL_BARDRAIN candidate object: its gdn_step_norm on a
         // multi-chunk segment (40 rows = chunks 16 + 16 + 8, snapshots on rows < 15) recording pend, then a replay of
-        // 4 kept rows + the 40 rows in ONE launch (pend read, then rewritten, by the same kernel) == this object's,
-        // bitwise (out, xq, xd, state, pend, snapshots of both launches), 3 repeats; absent -> no result
-        if (const hip::Function xs = xFn(c, "WHIRL_KT_BD_HSACO", "gdn_step_norm"); xs && c.k.caps.gdn_replay) {
+        // 4 kept rows + 40 NEW rows in ONE launch (pend read, then rewritten with other values, by the same kernel) ==
+        // this object's, bitwise (out, xq, xd, state, pend, snapshots of both launches), 3 repeats; env unset -> no row;
+        // set but not runnable (or no replay kernels) -> a FAIL row (bdFn).
+        // feat026-gdn-tests-r1 (review act-on 1): launch 1 runs a second input set (q/k/v, g, beta, z), so the rows it
+        // stores into pend differ from the 4 rows it replays; a replay load that observed a pend store of the same launch
+        // (the WAR hazard an LDS-only barrier could open) changes state / out / snapshots. With one input set the store
+        // wrote the bits the load had read and the case passed whatever the ordering. Self-check on the shipped run:
+        // pend rows 0..3 after launch 1 must differ bitwise from launch 0 in every row, else the row fails as vacuous.
+        const char* const kRowPend = "gdn_step_norm candidate object == shipped (40-row multi-chunk + pend replay in one launch; 3 runs)";
+        if (const hip::Function xs = bdFn(c, "gdn_step_norm", kRowPend, c.k.caps.gdn_replay)) {
             const int nL = 40, PW = kDk + kDv + 2, nsL = std::min(nL, wk::kGdnMaxSnap);
-            std::vector<float> qL, gL, bL;
+            std::vector<float> qL, gL, bL, qL1, gL1, bL1;
             inputs(nL, qL, gL, bL);
-            const std::vector<float> zL = c.randn(static_cast<std::size_t>(nL) * kDInner);
-            Buf dqL(qL), dgL(gL), dbL(bL), dzL(zL);
+            inputs(nL, qL1, gL1, bL1);
+            const std::vector<float> zL = c.randn(static_cast<std::size_t>(nL) * kDInner),
+                                     zL1 = c.randn(static_cast<std::size_t>(nL) * kDInner);
+            Buf dqL(qL), dgL(gL), dbL(bL), dzL(zL), dqL1(qL1), dgL1(gL1), dbL1(bL1), dzL1(zL1);
             const std::size_t noL = static_cast<std::size_t>(nL) * kDInner;
             auto runL = [&](hip::Function f) {
                 std::vector<std::vector<float>> res;
@@ -668,9 +726,11 @@ void testGdn(Ctx& c) {
                 s.s[0].pend = pend.p();
                 for (int t = 0; t < nsL; ++t) s.s[0].snap[t] = sn[static_cast<std::size_t>(t)].p();
                 for (int pass = 0; pass < 2; ++pass) {
-                    if (pass == 1) s.s[0].npend = 4;  // replay 4 kept rows, then the 40 rows again (pend rewritten)
-                    hip::launch(f, {kNv, 1, 1}, {512, 1, 1}, 0, c.s, dqL.p(), dgL.p(), dbL.p(), dzL.p(), dwn.p(), y.p(), q.p(), d.p(),
-                                kNk, kScale, kEps, kNv, kCh, s);
+                    if (pass == 1) s.s[0].npend = 4;  // replay 4 kept rows, then 40 new rows (pend rewritten, other values)
+                    const bool p1 = pass == 1;
+                    hip::launch(f, {kNv, 1, 1}, {512, 1, 1}, 0, c.s, p1 ? dqL1.p() : dqL.p(), p1 ? dgL1.p() : dgL.p(),
+                                p1 ? dbL1.p() : dbL.p(), p1 ? dzL1.p() : dzL.p(), dwn.p(), y.p(), q.p(), d.p(), kNk, kScale, kEps, kNv,
+                                kCh, s);
                     c.sync();
                     res.push_back(y.down<float>(noL));
                     const auto qv = q.down<std::int8_t>(noL);
@@ -683,14 +743,21 @@ void testGdn(Ctx& c) {
                 return res;
             };
             const auto ref = runL(c.k.gdn_step_norm);
+            // res per launch: y, xq, xd, state, pend, nsL snapshots; pend row t = floats [t * kNv * PW, (t + 1) * kNv * PW)
+            const std::size_t per = 5 + static_cast<std::size_t>(nsL), rowF = static_cast<std::size_t>(kNv) * PW;
+            int same_rows = 0;
+            for (std::size_t t = 0; t < 4; ++t)
+                same_rows += std::memcmp(ref[4].data() + t * rowF, ref[per + 4].data() + t * rowF, rowF * sizeof(float)) == 0;
             std::size_t xbad = 0;
-            for (int rep = 0; rep < 3; ++rep) xbad += runL(xs) != ref;
+            for (int rep = 0; rep < 3; ++rep) xbad += !sameBits(runL(xs), ref);
             Result r;
-            r.name = "gdn_step_norm candidate object == shipped (40-row multi-chunk + pend replay in one launch; 3 runs)";
+            r.name = kRowPend;
             r.kind = Kind::invariant;
             r.n = 3;
             r.mismatches = xbad;
-            r.pass = xbad == 0;
+            r.pass = xbad == 0 && same_rows == 0;
+            if (same_rows > 0)
+                r.note = "vacuous: " + std::to_string(same_rows) + " of pend rows 0..3 rewritten with the replayed bits";
             c.rep.add(r);
         }
         // two segments (rows 0..2 on state A, rows 3..5 on state B) in one launch == separate
