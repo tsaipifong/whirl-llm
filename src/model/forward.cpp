@@ -688,6 +688,8 @@ void Model::prefillAttn(DevPtr q, const KvArgs& kva, DevPtr out, DevPtr pos, u32
     pp.dq_st_ml = dq_st_ml != 0;
     ops::AttnPrefillFlags pf;
     pf.attn_kg_on = attn_kg_on;
+    pf.attn_kg_var = attn_kg_var;
+    pf.prec = prec_dec;
     pf.attn_kx_on = attn_kx_on;
     pf.attn_dqf_on = attn_dqf_on;
     pf.attn_seg = attn_seg;

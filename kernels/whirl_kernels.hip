@@ -32,6 +32,7 @@
 #include "gdn_prefill_wmma.hip"    // Gated DeltaNet chunked prefill on WMMA
 #include "prefill_fused.hip"       // prefill activation fusions
 #include "attn_prefill_kp.hip"     // prefill attention (key-split pairs)
+#include "attn_kgv.hip"            // prefill attention candidate: head-pair shared V (feat026-attnkg97)
 #include "gdn_seq.hip"             // DeltaNet conv / state / sequential scan
 #include "misc_kv_argmax.hip"      // kv_store, argmax
 #include "misc_probe_requant.hip"  // WMMA probes, Q6_K -> Q4_K requant

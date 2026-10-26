@@ -353,6 +353,13 @@ void loadAttn(AttnKernels& k, const Loader& L, KvFormat kv) {
         k.attn_kg6 = L.opt("attn_kg6" + s);
         k.attn_kg4 = L.opt("attn_kg4" + s);
         k.attn_kg2 = L.opt("attn_kg2" + s);
+        // f16 entries: the plain f16 path and the f16 attn_kg on dequantized rows (Q8P)
+        k.attn_kgv6 = L.opt("attn_kgv6");
+        k.attn_kgv4 = L.opt("attn_kgv4");
+        k.attn_kgv2 = L.opt("attn_kgv2");
+        k.attn_kgw6 = L.opt("attn_kgw6");
+        k.attn_kgw4 = L.opt("attn_kgw4");
+        k.attn_kgw2 = L.opt("attn_kgw2");
         if (kv == KvFormat::q8 || kv == KvFormat::q8h || kv == KvFormat::q4) {
             if (kv != KvFormat::q4) k.kv_dq_rows = L.opt("kv_dq_rows");
             k.kv_dq_rows_r = L.opt(kv == KvFormat::q4 ? "kv_dq_rows_r_q4" : "kv_dq_rows_r");

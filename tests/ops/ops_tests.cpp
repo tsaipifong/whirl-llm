@@ -425,6 +425,32 @@ void testAttnPrefill() {
     auto pl = ops::chooseAttnPrefill(p, f, k);
     CHECK(pl.steps.size() == 1 && nameOf(pl.steps[0].f) == "attn_kg2" && !pl.steps[0].from_copy && pl.steps[0].grid.x == 32 && pl.steps[0].grid.y == 12 &&
           pl.steps[0].block.x == 128);
+    // feat026-attnkg97: attn_kg_var 1 picks the f16 candidate attn_kgv (same grid / block); without it
+    // in the code object, and with attn_kg_var 0 (the default), the shipped attn_kg
+    f.attn_kg_var = 1;
+    pl = ops::chooseAttnPrefill(p, f, k);
+    CHECK(pl.steps.size() == 1 && nameOf(pl.steps[0].f) == "attn_kg2");
+    k.attn_kgv2 = tag("attn_kgv2");
+    pl = ops::chooseAttnPrefill(p, f, k);
+    CHECK(pl.steps.size() == 1 && nameOf(pl.steps[0].f) == "attn_kgv2" && pl.steps[0].grid.x == 32 && pl.steps[0].grid.y == 12 &&
+          pl.steps[0].block.x == 128 && !pl.steps[0].from_copy);
+    // var 2 (attn_kgw, not bit-identical): taken in balance / fast, refused under precise (-> attn_kg)
+    k.attn_kgw2 = tag("attn_kgw2");
+    f.attn_kg_var = 2;
+    pl = ops::chooseAttnPrefill(p, f, k);
+    CHECK(pl.steps.size() == 1 && nameOf(pl.steps[0].f) == "attn_kgw2" && pl.steps[0].block.x == 128);
+    f.prec = true;
+    pl = ops::chooseAttnPrefill(p, f, k);
+    CHECK(pl.steps.size() == 1 && nameOf(pl.steps[0].f) == "attn_kg2");
+    f.attn_kg_var = 1;  // the bit-identical variant stays allowed under precise
+    pl = ops::chooseAttnPrefill(p, f, k);
+    CHECK(pl.steps.size() == 1 && nameOf(pl.steps[0].f) == "attn_kgv2");
+    f.prec = false;
+    f.attn_kg_var = 0;
+    pl = ops::chooseAttnPrefill(p, f, k);
+    CHECK(pl.steps.size() == 1 && nameOf(pl.steps[0].f) == "attn_kg2");
+    k.attn_kgv2 = nullptr;
+    k.attn_kgw2 = nullptr;
     // q8 KV with the dequant scratch: kv_dq_rows once, then attn_kgf (only kgf4 exists here -> kg2's kgf2 is null -> falls through)
     p.kv_q8 = true;
     p.dq_rows = 8192;

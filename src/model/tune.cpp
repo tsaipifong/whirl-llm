@@ -874,6 +874,7 @@ void loadOrTuneImpl(Model& m, const std::string& model_path, std::string& log) {
     if (auto v = envGet("GEMMHQ")) m.gemmhq_on = *v != "0";
     if (auto v = envGet("ATTN_KX")) m.attn_kx_on = *v != "0";
     if (auto v = envGet("ATTN_KG")) m.attn_kg_on = *v != "0";
+    if (auto v = envGet("ATTN_KGVAR")) m.attn_kg_var = static_cast<std::uint32_t>(std::strtoul(v->c_str(), nullptr, 10));
     if (auto v = envGet("ATTN_DQF")) m.attn_dqf_on = *v != "0";
     if (auto v = envGet("ATTN_SEG")) m.attn_seg = static_cast<std::uint32_t>(std::strtoul(v->c_str(), nullptr, 10)) / 256 * 256;
     if (auto v = envGet("GDN_BA")) m.gdn_ba_on = *v != "0";
