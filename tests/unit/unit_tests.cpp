@@ -588,6 +588,36 @@ void testChat() {
                            R"("arguments":{"k":"v","n":2}}}]},{"role":"tool","content":"x"},{"role":"user","content":"q2"}]})";
         CHECK_EQ(render(chat::TemplateKind::b, req2), render(chat::TemplateKind::b_pyargs, req2));
     }
+    // bug-emptysystem: an empty / whitespace / null leading system message. The product Ornith MXFP4 template (b)
+    // renders `messages[0].role == 'system'` without checking the content, so it emits an empty system turn (as
+    // the Qwen3.5 / Qwen3 templates do); the Swift template (a, `if content`) and the original Ornith-1.5 template
+    // (b_pyargs, `if merged_system`) emit none. With tools all three append the system text only when non-empty.
+    // Same cases as tests/corpus/template_cases.json empty_system / null_system / empty_string_system /
+    // empty_system_parts / empty_system_tools / empty_system_no_think.
+    {
+        const std::string user_only = "<|im_start|>user\nx<|im_end|>\n<|im_start|>assistant\n<think>\n";
+        for (const char* sys : {R"("   ")", R"("")", "null", R"([{"type":"text","text":" "}])"}) {
+            const std::string req =
+                std::string(R"({"messages":[{"role":"system","content":)") + sys + R"(},{"role":"user","content":"x"}]})";
+            const std::string pb = render(chat::TemplateKind::b, req.c_str());
+            const bool ok = pb == "<|im_start|>system\n<|im_end|>\n" + user_only;
+            if (!ok) std::printf("  empty system %s kind b rendered:\n%s\n", sys, pb.c_str());
+            CHECK(ok);
+            CHECK_EQ(render(chat::TemplateKind::b_pyargs, req.c_str()), user_only);
+            const std::string ra = std::string(R"({"reasoning_effort":"medium",)") + req.substr(1);
+            CHECK_EQ(render(chat::TemplateKind::a, ra.c_str()), user_only);
+        }
+        // with tools the empty system text adds nothing (all variants)
+        const char* tools_empty = R"({"tools":[{"type":"function","function":{"name":"f"}}],"messages":[)"
+                                  R"({"role":"system","content":""},{"role":"user","content":"go"}]})";
+        const char* tools_none = R"({"tools":[{"type":"function","function":{"name":"f"}}],"messages":[)"
+                                 R"({"role":"user","content":"go"}]})";
+        for (chat::TemplateKind k : {chat::TemplateKind::a, chat::TemplateKind::b, chat::TemplateKind::b_pyargs})
+            CHECK_EQ(render(k, tools_empty), render(k, tools_none));
+        // a non-empty system message renders the same as before
+        CHECK_EQ(render(chat::TemplateKind::b, R"({"messages":[{"role":"system","content":" S "},{"role":"user","content":"x"}]})"),
+                 "<|im_start|>system\nS<|im_end|>\n" + user_only);
+    }
     // the two Ornith-1.5 argument lines as they appear in the GGUFs
     CHECK(chat::detectTemplate("{%- set args_value = args_value | string if args_value is string else args_value | "
                                "tojson | safe %}") == chat::TemplateKind::b);
