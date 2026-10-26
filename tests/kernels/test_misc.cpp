@@ -998,6 +998,57 @@ void testMisc(Ctx& c) {
         } else {
             c.rep.skip("fp8", "gemm8", "MXFP4 matrix or kernels not available");
         }
+        // feat026-gemm8tpp-r1: shape coverage of the schedule variants on synthetic MXFP4 matrices (the sampled model matrix is
+        // always 272 slabs of BK 64). ncols must be a multiple of 256 (MXFP4 super-block; forward.cpp needs it too), so the slab
+        // count is always a multiple of 4: the smallest shape is 4 slabs (256), odd super-block counts are 768 / 2304, and an
+        // odd slab count or nslabs == 1 (v5 branch) cannot reach the kernels from a product matrix. v4 needs ncols % 128 == 0,
+        // which every such ncols satisfies (its skip is dead for MXFP4). n 257 = the smallest gemm8t_c0 batch (one partial token block), n 600 = 3 blocks
+        // with a partial last one; accumulate = 1 and the f16-output twin are both compared bitwise with gemm8t_c0 / gemm8th_c0.
+        if (c.k.gemm8t[0] && c.k.gemm8th[0] && c.k.qact_fp8t) {
+            std::size_t ns = 0, bads = 0;
+            std::string fbs;
+            const int shapes_cols[] = {256, 768, 2304, 5120};
+            const int shapes_n[] = {257, 600};
+            for (const int sc : shapes_cols) {
+                const HostMat sm = randomMat(c, QType::mxfp4, 320, sc);  // 320 rows = 2.5 tiles of bm 128: partial last row tile
+                Buf sw(sm.data), swref(sm.ref);
+                for (const int sn : shapes_n) {
+                    const std::vector<float> sx_in = c.randn(static_cast<std::size_t>(sn) * sc);
+                    const std::vector<float> syinit = c.randn(static_cast<std::size_t>(sn) * sm.nrows);
+                    Buf sdx(sx_in), ssx(static_cast<std::size_t>(sn) * 4), sx8t(static_cast<std::size_t>(sn + 16) * sc);
+                    sx8t.zero();
+                    hip::launch(c.k.qact_fp8t, {static_cast<unsigned>(sn), 1, 1}, {256, 1, 1}, 0, c.s, sdx.p(), sx8t.p(), ssx.p(), sc);
+                    const auto runS = [&](hip::Function f, unsigned acc, std::size_t eb) {
+                        Buf y(syinit);
+                        const auto& cf = wk::kGemm8tCfgs[0];
+                        hip::launch(f, {cdiv(sn, cf.bn), cdiv(sm.nrows, cf.bm), 1}, {static_cast<unsigned>(cf.nth), 1, 1}, 0, c.s, sw.p(),
+                                    sm.row_bytes, swref.p(), sx8t.p(), ssx.p(), y.p(), sc, sm.nrows, sn, acc);
+                        c.sync();
+                        return y.down<std::uint8_t>(syinit.size() * eb);
+                    };
+                    // f32 output, accumulate 0 and 1
+                    for (unsigned acc = 0; acc < 2; ++acc) {
+                        const auto ref = runS(c.k.gemm8t[0], acc, 4);
+                        for (int v = 1; v < wk::kNGemm8tp; ++v) {
+                            if (!c.k.gemm8tp[v] || (v == 4 && sc % 128 != 0)) continue;
+                            ++ns;
+                            if (runS(c.k.gemm8tp[v], acc, 4) != ref) {
+                                ++bads;
+                                if (fbs.empty()) fbs = "gemm8tp_v" + std::to_string(v) + " (ncols " + std::to_string(sc) + ", n " + std::to_string(sn) + ", acc " + std::to_string(acc) + ")";
+                            }
+                        }
+                    }
+                }
+            }
+            Result rs;
+            rs.name = "gemm8tp_v* == gemm8t_c0, shapes ncols {256, 768, 2304, 5120} x n {257, 600} x accumulate {0, 1} (" + std::to_string(ns) + " runs)";
+            rs.kind = Kind::invariant;
+            rs.n = ns;
+            rs.mismatches = bads;
+            rs.pass = ns > 0 && bads == 0;
+            if (!fbs.empty()) rs.note = "first " + fbs;
+            c.rep.add(rs);
+        }
     }
 }
 

@@ -328,6 +328,9 @@ void testOpsGemm() {
     CHECK(nameOf(ops::chooseGemm8(4096, 512, false, true, k, 4, 5120).f) == "gemm8tp_v4");  // 80 slabs
     CHECK(nameOf(ops::chooseGemm8(4096, 512, false, true, k, 4, 5184).f) == "gemm8t_c0");   // 81 slabs: v4 cannot
     CHECK(nameOf(ops::chooseGemm8(4096, 512, false, true, k, 7, 5120).f) == "gemm8t_c0");   // out of range
+    // strict WHIRL_GEMM8T_V parse (feat026-gemm8tpp-r1): "2x" used to be taken as 2
+    CHECK(ops::parseGemm8tV("0") == 0 && ops::parseGemm8tV("2") == 2 && ops::parseGemm8tV("06") == 6);
+    for (const char* bad : {"", "2x", " 2", "2 ", "-1", "+2", "x", "1.5", "0x2", "99999"}) CHECK(!ops::parseGemm8tV(bad).has_value());
     const ops::Gemm8Plan gv = ops::chooseGemm8(4096, 600, false, true, k, 3, 5120);
     CHECK(gv.grid.x == 3 && gv.grid.y == 32 && gv.block.x == 256 && gv.bits == ops::BitClass::fp8_gemm);  // c0 geometry
     k.gemm8th[0] = nullptr;
