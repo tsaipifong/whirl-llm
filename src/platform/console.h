@@ -8,10 +8,19 @@
 
 namespace whirl::platform::console {
 
-// PL1 moves here (same code page and console mode before / after, same restore order at exit):
-//   - UTF-8 output code page and its restore: GetConsoleOutputCP / SetConsoleOutputCP, GetStdHandle, GetConsoleMode
-//     (src/release/release.cpp)
-//   - binary stdout of the CLI: _setmode(_fileno(stdout), _O_BINARY) (src/cli/main.cpp, <io.h>)
+inline constexpr unsigned kCodePageUtf8 = 65001;  // CP_UTF8 (static_assert in console_win.cpp)
+
+enum class Stream { out, err };
+
+// GetStdHandle(STD_OUTPUT_HANDLE / STD_ERROR_HANDLE) is a console (GetConsoleMode succeeds).
+bool isConsole(Stream s);
+// GetConsoleOutputCP / SetConsoleOutputCP (returns its BOOL != 0).
+unsigned outputCodePage();
+bool setOutputCodePage(unsigned cp);
+// _setmode(_fileno(stdout), _O_BINARY): the CLI writes UTF-8 bytes unchanged (no LF -> CRLF). Result ignored, as before.
+void setStdoutBinary();
+
+// The saved-code-page / atexit-restore logic stays in the caller (src/release/release.cpp initConsole).
 // Console Ctrl+C handling (SetConsoleCtrlHandler) is proc (PL4), not here.
 
 }  // namespace whirl::platform::console

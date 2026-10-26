@@ -31,9 +31,7 @@
 #include "whirl/vision.h"
 #endif
 #include "release/release.h"
-
-#include <fcntl.h>
-#include <io.h>
+#include "platform/console.h"
 
 #include <algorithm>
 #include <chrono>
@@ -2601,7 +2599,7 @@ bool isHelpFlag(const std::string& x) { return x == "-h" || x == "--help" || x =
 }  // namespace
 
 int wmain(int argc, wchar_t** wargv) {
-    _setmode(_fileno(stdout), _O_BINARY);
+    whirl::platform::console::setStdoutBinary();  // arch025 PL1: _setmode(_fileno(stdout), _O_BINARY)
     app::initConsole();
     std::vector<std::string> argv;
     for (int i = 0; i < argc; ++i) argv.push_back(narrow(wargv[i]));

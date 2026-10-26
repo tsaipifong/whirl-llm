@@ -9,10 +9,17 @@
 
 namespace whirl::platform::time {
 
-// PL1 moves here (same calls, same order, same log text):
-//   - the 1 ms timer resolution of whirl-server / whirl serve: timeBeginPeriod / timeEndPeriod (struct TimerRes,
-//     winmm.lib, <timeapi.h>) (src/server/server_main.cpp)
-//   - the local wall-clock time of log lines: GetLocalTime (src/server/log.cpp)
+// timeBeginPeriod(1) == TIMERR_NOERROR / timeEndPeriod(1) (winmm). whirl-server / whirl serve hold 1 ms while serving
+// (struct TimerRes in src/server/server_main.cpp keeps the RAII and the order).
+bool beginPeriod1ms();
+void endPeriod1ms();
+
+// The local wall-clock time (GetLocalTime), the fields the log line prints.
+struct LocalTime {
+    unsigned short year = 0, month = 0, day = 0, hour = 0, minute = 0, second = 0, milliseconds = 0;
+};
+LocalTime localTime();
+
 // std::chrono stays where it is used (not platform code).
 
 }  // namespace whirl::platform::time

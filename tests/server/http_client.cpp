@@ -2,8 +2,7 @@
 
 #include "http_client.h"
 
-#include <winsock2.h>
-#include <ws2tcpip.h>
+#include "platform/net.h"
 
 #include <atomic>
 #include <chrono>
@@ -15,11 +14,10 @@
 #include <string_view>
 #include <vector>
 
-#pragma comment(lib, "ws2_32.lib")
-
 namespace whirl::test {
 
 namespace {
+namespace net = whirl::platform::net;
 std::once_flag g_once;
 // local port of the last connection this process made (any thread): a failed connect says whether the OS
 // gave it the port of the connection just before (HTTP-DROP)
@@ -82,71 +80,55 @@ Dechunk dechunk(std::string_view b, std::string* out) {
     }
 }
 
-int watchedConnect(SOCKET s, const sockaddr* addr, int addrlen, std::uint16_t port, std::string& diag) {
-    u_long nb = 1;
-    ioctlsocket(s, FIONBIO, &nb);
+int watchedConnect(net::Socket s, const net::Addr* addr, std::uint16_t port, std::string& diag) {
+    net::setNonBlocking(s, true);
     const auto t0 = std::chrono::steady_clock::now();
     int err = 0;
-    if (connect(s, addr, addrlen) != 0) {
-        err = WSAGetLastError();
-        if (err == WSAEWOULDBLOCK) {
+    if (net::connect(s, addr) != 0) {
+        err = net::lastError();
+        if (err == net::kErrWouldBlock) {
             err = 0;
             bool looked = false;
             for (;;) {
-                fd_set w, e;
-                FD_ZERO(&w);
-                FD_ZERO(&e);
-                FD_SET(s, &w);
-                FD_SET(s, &e);
-                timeval tv{0, 500000};
-                const int n = select(0, nullptr, &w, &e, &tv);
-                if (n == SOCKET_ERROR) {
-                    err = WSAGetLastError();
+                bool wr = false, ex = false;
+                const int n = net::waitConnect(s, 0, 500000, &wr, &ex);
+                if (n == net::kError) {
+                    err = net::lastError();
                     break;
                 }
                 if (n > 0) {
-                    if (FD_ISSET(s, &e)) {
-                        int so = 0, sl = sizeof so;
-                        getsockopt(s, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&so), &sl);
-                        err = so != 0 ? so : WSAECONNREFUSED;
+                    if (ex) {
+                        const int so = net::socketError(s);
+                        err = so != 0 ? so : net::kErrConnRefused;
                     }
                     break;
                 }
                 if (!looked && msSince(t0) >= 4000) {
                     looked = true;
-                    sockaddr_in la{};
-                    int ll = sizeof la;
-                    getsockname(s, reinterpret_cast<sockaddr*>(&la), &ll);
+                    std::uint16_t lp = 0;
+                    net::localPort(s, &lp);
                     diag += std::format("\n      pending {:.0f} ms (local port {}): TCP rows of this port and of server port {}:",
-                                        msSince(t0), ntohs(la.sin_port), port);
-                    diag += netstatRows({std::format(":{} ", ntohs(la.sin_port)), std::format(":{} ", port)}, true);
+                                        msSince(t0), lp, port);
+                    diag += netstatRows({std::format(":{} ", lp), std::format(":{} ", port)}, true);
                     // a second connection while the first one waits: does the listener answer at all?
                     const auto t1 = std::chrono::steady_clock::now();
-                    SOCKET p2 = socket(addr->sa_family, SOCK_STREAM, IPPROTO_TCP);
-                    u_long nb2 = 1;
-                    ioctlsocket(p2, FIONBIO, &nb2);
-                    connect(p2, addr, addrlen);
-                    fd_set w2, e2;
-                    FD_ZERO(&w2);
-                    FD_ZERO(&e2);
-                    FD_SET(p2, &w2);
-                    FD_SET(p2, &e2);
-                    timeval tv2{3, 0};
-                    const int n2 = select(0, nullptr, &w2, &e2, &tv2);
-                    sockaddr_in la2{};
-                    int ll2 = sizeof la2;
-                    getsockname(p2, reinterpret_cast<sockaddr*>(&la2), &ll2);
-                    diag += std::format("\n      second connection from port {}: {} after {:.1f} ms", ntohs(la2.sin_port),
-                                        n2 > 0 && FD_ISSET(p2, &w2) ? "accepted" : n2 > 0 ? "refused" : "no answer in 3 s",
+                    const net::Socket p2 = net::openTcp(addr);
+                    net::setNonBlocking(p2, true);
+                    net::connect(p2, addr);
+                    bool wr2 = false, ex2 = false;
+                    const int n2 = net::waitConnect(p2, 3, 0, &wr2, &ex2);
+                    std::uint16_t lp2 = 0;
+                    net::localPort(p2, &lp2);
+                    diag += std::format("\n      second connection from port {}: {} after {:.1f} ms", lp2,
+                                        n2 > 0 && wr2 ? "accepted" : n2 > 0 ? "refused" : "no answer in 3 s",
                                         msSince(t1));
-                    closesocket(p2);  // never sends a request: the server sees a client that closed at once
+                    net::close(p2);  // never sends a request: the server sees a client that closed at once
                 }
             }
             if (looked) diag += std::format("\n      first connection {} after {:.0f} ms", err == 0 ? "completed" : "failed", msSince(t0));
         }
     }
-    nb = 0;
-    ioctlsocket(s, FIONBIO, &nb);
+    net::setNonBlocking(s, false);
     return err;
 }
 }  // namespace
@@ -158,74 +140,61 @@ HttpResult httpRequest(const std::string& host, std::uint16_t port, std::string_
 
 HttpResult httpRequestFrom(std::uint16_t local_port, const std::string& host, std::uint16_t port, std::string_view method,
                            std::string_view path, std::string_view body, double timeout_s, std::string_view extra_headers) {
-    std::call_once(g_once, [] {
-        WSADATA d;
-        WSAStartup(MAKEWORD(2, 2), &d);
-    });
+    std::call_once(g_once, [] { net::startup(); });
     HttpResult r;
     const auto t0 = std::chrono::steady_clock::now();
-    addrinfo hints{};
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-    addrinfo* res = nullptr;
     auto fail = [&](const char* step) {
-        r.err = std::format("{} failed, WSA error {}", step, WSAGetLastError());
+        r.err = std::format("{} failed, WSA error {}", step, net::lastError());
         r.ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     };
-    if (getaddrinfo(host.c_str(), std::to_string(port).c_str(), &hints, &res) != 0 || !res) {
+    const net::Addr* res = net::resolve(host.c_str(), std::to_string(port).c_str(), net::Lookup::client_v4);
+    if (!res) {
         fail("getaddrinfo");
         return r;
     }
-    SOCKET s = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-    if (s == INVALID_SOCKET) {
+    const net::Socket s = net::open(res);
+    if (s == net::kInvalid) {
         fail("socket");
-        freeaddrinfo(res);
+        net::freeAddr(res);
         return r;
     }
-    const DWORD to = static_cast<DWORD>(timeout_s * 1000);
-    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&to), sizeof to);
+    net::setRecvTimeout(s, static_cast<std::uint32_t>(timeout_s * 1000));
     if (local_port != 0) {
         // HTTP-DROP: a fixed local port, as the OS picks it again for a later connection (Windows reuses
         // ephemeral ports whose old connection is in TIME_WAIT on the server side)
-        sockaddr_in la{};
-        la.sin_family = AF_INET;
-        la.sin_port = htons(local_port);
-        inet_pton(AF_INET, "127.0.0.1", &la.sin_addr);
-        if (bind(s, reinterpret_cast<const sockaddr*>(&la), sizeof la) != 0) {
+        if (net::bindLoopback4(s, local_port) != 0) {
             fail("bind");
-            freeaddrinfo(res);
-            closesocket(s);
+            net::freeAddr(res);
+            net::close(s);
             return r;
         }
     }
     // HTTP-DROP: connect without blocking so a stalled handshake can be looked at while it is
     // pending (the outcome is the same: the OS still decides when it fails, 21 s by default)
     std::string pending_diag;
-    const int cerr = watchedConnect(s, res->ai_addr, static_cast<int>(res->ai_addrlen), port, pending_diag);
+    const int cerr = watchedConnect(s, res, port, pending_diag);
     if (cerr != 0) {
-        WSASetLastError(cerr);
+        net::setLastError(cerr);
         fail("connect");
         // CB-FLAKE: the local port of the failed attempt and every TCP row that names it (a TIME_WAIT
         // of an earlier connection on the same 4-tuple would explain an unanswered SYN)
-        sockaddr_in la{};
-        int ll = sizeof la;
-        if (getsockname(s, reinterpret_cast<sockaddr*>(&la), &ll) == 0 && ntohs(la.sin_port) != 0) {
-            const unsigned lp = ntohs(la.sin_port);
+        std::uint16_t lp16 = 0;
+        if (net::localPort(s, &lp16) == 0 && lp16 != 0) {
+            const unsigned lp = lp16;
             r.err += std::format(", local port {} (previous connection's local port {})", lp, g_last_local_port.load());
             r.err += netstatRows({std::format(":{} ", lp)});
         }
         r.err += pending_diag;
-        freeaddrinfo(res);
-        closesocket(s);
+        net::freeAddr(res);
+        net::close(s);
         return r;
     }
     {
-        sockaddr_in la{};
-        int ll = sizeof la;
-        if (getsockname(s, reinterpret_cast<sockaddr*>(&la), &ll) == 0) g_last_local_port = ntohs(la.sin_port);
+        std::uint16_t lp16 = 0;
+        if (net::localPort(s, &lp16) == 0) g_last_local_port = lp16;
     }
     if (!pending_diag.empty()) std::fprintf(stderr, "[http_client] slow connect to port %u:%s\n", port, pending_diag.c_str());
-    freeaddrinfo(res);
+    net::freeAddr(res);
     // extra_headers: complete lines, each ending in CRLF
     std::string req = std::format("{} {} HTTP/1.1\r\nHost: {}:{}\r\nContent-Type: application/json\r\nContent-Length: "
                                   "{}\r\n{}Connection: close\r\n\r\n",
@@ -233,9 +202,9 @@ HttpResult httpRequestFrom(std::uint16_t local_port, const std::string& host, st
     req += body;
     std::size_t off = 0;
     while (off < req.size()) {
-        const int n = send(s, req.data() + off, static_cast<int>(req.size() - off), 0);
+        const int n = net::send(s, req.data() + off, static_cast<int>(req.size() - off));
         if (n <= 0) {
-            r.err = std::format("send failed after {} of {} bytes, WSA error {}", off, req.size(), WSAGetLastError());
+            r.err = std::format("send failed after {} of {} bytes, WSA error {}", off, req.size(), net::lastError());
             break;
         }
         off += static_cast<std::size_t>(n);
@@ -250,8 +219,8 @@ HttpResult httpRequestFrom(std::uint16_t local_port, const std::string& host, st
     bool header_seen = false, chunked = false;
     std::size_t body_at = 0;
     for (;;) {
-        const int n = recv(s, buf, sizeof buf, 0);
-        if (n < 0 && r.err.empty()) r.err = std::format("recv failed after {} bytes, WSA error {}", resp.size(), WSAGetLastError());
+        const int n = net::recv(s, buf, sizeof buf, 0);
+        if (n < 0 && r.err.empty()) r.err = std::format("recv failed after {} bytes, WSA error {}", resp.size(), net::lastError());
         if (n <= 0) break;
         if (first) {
             r.first_byte_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
@@ -274,7 +243,7 @@ HttpResult httpRequestFrom(std::uint16_t local_port, const std::string& host, st
         if (resp.size() >= want) break;
         if (chunked && dechunk(std::string_view(resp).substr(body_at), nullptr) == Dechunk::complete) break;
     }
-    closesocket(s);
+    net::close(s);
     r.ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     const std::size_t he = resp.find("\r\n\r\n");
     if (he == std::string::npos) {
@@ -295,19 +264,11 @@ HttpResult httpRequestFrom(std::uint16_t local_port, const std::string& host, st
 }
 
 std::uint16_t freeLocalPort() {
-    std::call_once(g_once, [] {
-        WSADATA d;
-        WSAStartup(MAKEWORD(2, 2), &d);
-    });
-    SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    sockaddr_in a{};
-    a.sin_family = AF_INET;
-    inet_pton(AF_INET, "127.0.0.1", &a.sin_addr);
-    std::uint16_t p = 0;
-    int al = sizeof a;
-    if (bind(s, reinterpret_cast<const sockaddr*>(&a), sizeof a) == 0 && getsockname(s, reinterpret_cast<sockaddr*>(&a), &al) == 0)
-        p = ntohs(a.sin_port);
-    closesocket(s);
+    std::call_once(g_once, [] { net::startup(); });
+    const net::Socket s = net::openTcp4();
+    std::uint16_t p = 0, got = 0;
+    if (net::bindLoopback4(s, 0) == 0 && net::localPort(s, &got) == 0) p = got;
+    net::close(s);
     return p;
 }
 
@@ -328,34 +289,28 @@ int tcpRowCount(std::uint16_t local_port, std::uint16_t remote_port, std::string
 }
 
 std::uintptr_t rawConnect(const std::string& host, std::uint16_t port, int rcvbuf) {
-    std::call_once(g_once, [] {
-        WSADATA d;
-        WSAStartup(MAKEWORD(2, 2), &d);
-    });
-    addrinfo hints{};
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-    addrinfo* res = nullptr;
-    if (getaddrinfo(host.c_str(), std::to_string(port).c_str(), &hints, &res) != 0 || !res) return kNoSock;
-    SOCKET s = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-    if (s == INVALID_SOCKET) {
-        freeaddrinfo(res);
+    std::call_once(g_once, [] { net::startup(); });
+    const net::Addr* res = net::resolve(host.c_str(), std::to_string(port).c_str(), net::Lookup::client_v4);
+    if (!res) return kNoSock;
+    const net::Socket s = net::open(res);
+    if (s == net::kInvalid) {
+        net::freeAddr(res);
         return kNoSock;
     }
-    if (rcvbuf > 0) setsockopt(s, SOL_SOCKET, SO_RCVBUF, reinterpret_cast<const char*>(&rcvbuf), sizeof rcvbuf);
-    const int rc = connect(s, res->ai_addr, static_cast<int>(res->ai_addrlen));
-    freeaddrinfo(res);
+    if (rcvbuf > 0) net::setRecvBuf(s, rcvbuf);
+    const int rc = net::connect(s, res);
+    net::freeAddr(res);
     if (rc != 0) {
-        closesocket(s);
+        net::close(s);
         return kNoSock;
     }
-    return static_cast<std::uintptr_t>(s);
+    return s;
 }
 
 bool rawSend(std::uintptr_t s, std::string_view data) {
     std::size_t off = 0;
     while (off < data.size()) {
-        const int n = send(static_cast<SOCKET>(s), data.data() + off, static_cast<int>(data.size() - off), 0);
+        const int n = net::send(s, data.data() + off, static_cast<int>(data.size() - off));
         if (n <= 0) return false;
         off += static_cast<std::size_t>(n);
     }
@@ -363,24 +318,23 @@ bool rawSend(std::uintptr_t s, std::string_view data) {
 }
 
 std::string rawRecvAll(std::uintptr_t s, double timeout_s, bool* closed) {
-    const DWORD to = static_cast<DWORD>(timeout_s * 1000);
-    setsockopt(static_cast<SOCKET>(s), SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&to), sizeof to);
+    net::setRecvTimeout(s, static_cast<std::uint32_t>(timeout_s * 1000));
     std::string out;
     char buf[65536];
     if (closed) *closed = false;
     for (;;) {
-        const int n = recv(static_cast<SOCKET>(s), buf, sizeof buf, 0);
+        const int n = net::recv(s, buf, sizeof buf, 0);
         if (n > 0) {
             out.append(buf, static_cast<std::size_t>(n));
             continue;
         }
-        if (closed) *closed = n == 0 || WSAGetLastError() != WSAETIMEDOUT;
+        if (closed) *closed = n == 0 || net::lastError() != net::kErrTimedOut;
         return out;
     }
 }
 
 void rawClose(std::uintptr_t s) {
-    if (s != kNoSock) closesocket(static_cast<SOCKET>(s));
+    if (s != kNoSock) net::close(s);
 }
 
 std::vector<std::string> sseEvents(std::string_view body) {

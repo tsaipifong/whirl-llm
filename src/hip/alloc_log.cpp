@@ -3,6 +3,8 @@
 
 #include "alloc_log.h"
 
+#include "platform/env.h"
+
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -21,10 +23,8 @@ namespace whirl::hip::alloclog {
 
 namespace {
 
-std::string folder() {
-    const char* v = std::getenv("WHIRL_ALLOC_LOG");
-    return v != nullptr ? std::string(v) : std::string();
-}
+// arch025 PL1b: through platform::env::get; read where it was (g_on's static initializer and the write at exit)
+std::string folder() { return platform::env::get("WHIRL_ALLOC_LOG").value_or(std::string()); }
 
 constexpr std::uint64_t kFnvBasis = 1469598103934665603ull;
 constexpr std::uint64_t kFnvPrime = 1099511628211ull;
@@ -226,8 +226,8 @@ void onHostFree(std::uint64_t base) {
 void serverProcess() {
     Recorder& r = rec();
     std::lock_guard<std::mutex> lk(r.mu);
-    const char* v = std::getenv("WHIRL_ALLOC_LOG_RAW");
-    r.list = v != nullptr && std::strcmp(v, "server") == 0;
+    const std::optional<std::string> v = platform::env::get("WHIRL_ALLOC_LOG_RAW");
+    r.list = v.has_value() && *v == "server";
 }
 
 void testEnable(bool on, bool list, std::size_t max_lines) {

@@ -3,6 +3,8 @@
 
 #include "launch_log.h"
 
+#include "platform/env.h"
+
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -24,10 +26,8 @@ namespace whirl::hip::launchlog {
 
 namespace {
 
-std::string folder() {
-    const char* v = std::getenv("WHIRL_LAUNCH_LOG");
-    return v != nullptr ? std::string(v) : std::string();
-}
+// arch025 PL1b: through platform::env::get; read where it was (g_on's static initializer and the writes at exit)
+std::string folder() { return platform::env::get("WHIRL_LAUNCH_LOG").value_or(std::string()); }
 
 struct Key {
     std::string name;
@@ -100,15 +100,16 @@ struct Recorder {
         fnv(h, rec, sizeof rec);
         if (raw) { std::snprintf(b, sizeof b, " v:%llx", (unsigned long long)v); *raw += b; }
     }
-    bool raw_on = std::getenv("WHIRL_LAUNCH_LOG_RAW") != nullptr;
+    bool raw_on = platform::env::get("WHIRL_LAUNCH_LOG_RAW").has_value();
     std::vector<std::string> raw_lines;
     // arch024-S0a (REVIEW-ARCH6-code C-2): the per-launch dump is held in memory until exit, ~7 KB a line with a
     // GdnSegs argument; at most raw_max lines are kept (WHIRL_LAUNCH_LOG_RAW_MAX, default kRawMaxDefault), the rest
     // only counted and named in the dump's last line, so a long process (the server) cannot grow without bound
     static constexpr std::size_t kRawMaxDefault = 200000;
     std::size_t raw_max = [] {
-        const char* v = std::getenv("WHIRL_LAUNCH_LOG_RAW_MAX");
-        if (v == nullptr) return kRawMaxDefault;
+        const std::optional<std::string> e = platform::env::get("WHIRL_LAUNCH_LOG_RAW_MAX");
+        if (!e) return kRawMaxDefault;
+        const char* v = e->c_str();
         char* end = nullptr;
         const unsigned long long n = std::strtoull(v, &end, 10);
         return end != v ? static_cast<std::size_t>(n) : kRawMaxDefault;
@@ -218,8 +219,8 @@ void testAlloc(std::uint64_t base, std::uint64_t bytes) {
 void serverProcess() {
     Recorder& r = rec();
     std::lock_guard<std::mutex> lk(r.mu);
-    const char* v = std::getenv("WHIRL_LAUNCH_LOG_RAW");
-    r.raw_on = v != nullptr && std::strcmp(v, "server") == 0;
+    const std::optional<std::string> v = platform::env::get("WHIRL_LAUNCH_LOG_RAW");
+    r.raw_on = v.has_value() && *v == "server";
 }
 
 RawStats rawStats() {

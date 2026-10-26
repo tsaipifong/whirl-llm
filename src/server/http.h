@@ -7,6 +7,7 @@
 #pragma once
 
 #include "engine_api.h"
+#include "platform/net.h"
 
 #include <atomic>
 #include <cstdint>
@@ -85,24 +86,24 @@ public:
 
 private:
     void acceptLoop();
-    void connThread(std::uintptr_t sock);
-    void setReading(std::uintptr_t sock, bool on);
+    void connThread(platform::net::Socket sock);
+    void setReading(platform::net::Socket sock, bool on);
 
     EngineApi& e_;
     const EngineFacts facts_;
     HttpOptions o_;
     std::string bound_;  // the --host address (Host header allow-list)
     std::mutex conns_mu_;
-    std::set<std::uintptr_t> conns_;    // open connection sockets
-    std::set<std::uintptr_t> reading_;  // ... of which still reading their request
-    std::uintptr_t listen_ = ~std::uintptr_t(0);
+    std::set<platform::net::Socket> conns_;    // open connection sockets
+    std::set<platform::net::Socket> reading_;  // ... of which still reading their request
+    platform::net::Socket listen_ = platform::net::kInvalid;
     std::uint16_t port_ = 0;
     std::thread accept_;
     std::atomic<bool> stopping_{false};
     std::atomic<int> n_conn_{0};
 };
 
-// WSAStartup / WSACleanup (idempotent).
+// Starts Winsock once (platform::net::startup; throws if it fails). Idempotent.
 void netInit();
 
 }  // namespace whirl::server

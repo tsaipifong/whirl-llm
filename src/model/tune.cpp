@@ -6,6 +6,7 @@
 // checkAttnGroups) and gguf_cli.zig (loadOrTune).
 
 #include "config/env_snapshot.h"
+#include "platform/paths.h"
 #include "whirl/dump.h"
 #include "whirl/model.h"
 
@@ -729,17 +730,6 @@ bool Model::checkAttnGroups(std::string& log, u32 p0, u32 n, bool wide) {
 
 namespace {
 
-std::string localAppData() {
-    char* buf = nullptr;
-    std::size_t len = 0;
-    if (_dupenv_s(&buf, &len, "LOCALAPPDATA") == 0 && buf != nullptr) {
-        std::string v(buf);
-        std::free(buf);
-        return v;
-    }
-    return {};
-}
-
 bool tryRead(const std::string& path, std::string& out) {
     try {
         std::error_code ec;
@@ -867,7 +857,7 @@ void loadOrTuneImpl(Model& m, const std::string& model_path, std::string& log) {
 
     std::string cache_path;
     std::vector<std::string> read_paths4, read_paths_old;
-    const std::string base = localAppData();
+    const std::string base = platform::paths::localAppData().value_or(std::string());  // arch025 PL1
     if (!base.empty()) {
         std::error_code ec;
         const auto fsz = std::filesystem::file_size(widen(model_path), ec);
@@ -878,13 +868,12 @@ void loadOrTuneImpl(Model& m, const std::string& model_path, std::string& log) {
             const std::string sfx = device::profile(m.arch).tune_cache_suffix;
             const std::string bname = narrow(std::filesystem::path(widen(model_path)).filename().wstring());
             const std::string stem = bname + "-" + std::to_string(fsz) + sfx + ".txt";
-            const std::string dir = base + "\\whirl";
+            const std::string dir = platform::paths::whirlDir(base);
             std::filesystem::create_directories(widen(dir), ec);
-            cache_path = dir + "\\tune4-" + stem;
+            cache_path = platform::paths::tuneCachePath(base, stem);
             // tables written by the research prototype are read as well (same format)
-            for (const char* d : {"\\whirl\\", "\\whirl-r9700\\"}) read_paths4.push_back(base + d + "tune4-" + stem);
-            for (const char* pfx : {"tune3-", "tune-"})
-                for (const char* d : {"\\whirl\\", "\\whirl-r9700\\"}) read_paths_old.push_back(base + d + pfx + stem);
+            read_paths4 = platform::paths::tuneReadPaths4(base, stem);
+            read_paths_old = platform::paths::tuneReadPathsOld(base, stem);
         }
     }
     for (const std::string& p : read_paths4) {

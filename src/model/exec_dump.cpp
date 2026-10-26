@@ -175,7 +175,7 @@ std::string execDump(const Model& m) {
 }
 
 void afterLoadTune(const Model& m) {
-    if (dump::envOn("DUMP_EXEC")) {
+    if (dump::switchOn("DUMP_EXEC")) {
         const std::string s = execDump(m);
         std::fwrite(s.data(), 1, s.size(), stderr);
         std::fflush(stderr);

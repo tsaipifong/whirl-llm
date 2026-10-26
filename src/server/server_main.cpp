@@ -14,6 +14,9 @@
 #include "http.h"
 #include "log.h"
 #include "device/backend.h"
+#include "platform/env.h"
+#include "platform/paths.h"
+#include "platform/time.h"
 #include "hip/alloc_log.h"
 #include "hip/launch_log.h"
 #include "tier/kv_tier.h"
@@ -52,9 +55,7 @@
 
 #ifdef _WIN32
 #include <windows.h>
-#include <timeapi.h>
 #include <psapi.h>  // K32GetProcessMemoryInfo (kernel32; WDDM-LOG RAM figure)
-#pragma comment(lib, "winmm.lib")  // timeBeginPeriod (whirl-server and whirl serve)
 #endif
 
 namespace whirl::server {
@@ -139,9 +140,9 @@ BOOL WINAPI onConsoleCtrl(DWORD type) {
 // short wait of the main loop (the 1 ms polls of a burst gather and of host-tier
 // restores, the restore tail's 200 us poll) sleeps a whole tick. Restored on exit.
 struct TimerRes {
-    bool on = timeBeginPeriod(1) == TIMERR_NOERROR;
+    bool on = platform::time::beginPeriod1ms();  // arch025 PL1: timeBeginPeriod(1) / timeEndPeriod(1)
     ~TimerRes() {
-        if (on) timeEndPeriod(1);
+        if (on) platform::time::endPeriod1ms();
     }
 };
 
@@ -470,7 +471,7 @@ int serveMain(int argc, char** argv, const char* program) {
     // default. Allocation only: kernels and output are not affected.
     const bool hip_cache_user = std::getenv("GPU_RESOURCE_CACHE_SIZE") != nullptr;
     const bool hip_cache_set = !hip_cache_user && envOn("HIP_CACHE_LIMIT", true);
-    if (hip_cache_set) _putenv_s("GPU_RESOURCE_CACHE_SIZE", "256");
+    if (hip_cache_set) platform::env::set("GPU_RESOURCE_CACHE_SIZE", "256");  // arch025 PL1: _putenv_s
     Options opt;
     bool device_given = false;  // --device / -dev seen
     for (std::size_t i = 0; i < args.size(); ++i) {
@@ -569,9 +570,10 @@ int serveMain(int argc, char** argv, const char* program) {
         return app::explain(ex, g_program);
     }
 
-    const char* lad = std::getenv("LOCALAPPDATA");
-    const std::string log_path = opt.log_file ? *opt.log_file
-                                              : (lad ? std::string(lad) + "\\whirl\\server.log" : std::string("whirl-server.log"));
+    // arch025 PL1: LOCALAPPDATA (the CRT narrow value, as std::getenv) and the default paths are platform::paths
+    const std::optional<std::string> lad_v = platform::paths::localAppData();
+    const char* lad = lad_v ? lad_v->c_str() : nullptr;
+    const std::string log_path = opt.log_file ? *opt.log_file : platform::paths::serverLogPath(lad_v);
     try {
         Log::open(log_path);
     } catch (const std::exception& ex) {
@@ -1859,7 +1861,7 @@ int serveMain(int argc, char** argv, const char* program) {
                 if (ssd_gb > 0 && ssd_mode != "off") {
                     if (opt.kv_ssd_dir) ssd_dir = opt.kv_ssd_dir;
                     else if (auto v = env("KV_SSD_DIR")) ssd_dir = *v;
-                    else if (lad) ssd_dir = std::string(lad) + "\\whirl\\kvcache";
+                    else if (lad) ssd_dir = platform::paths::kvCacheDir(lad);
                 }
                 tier::Layout lay;
                 lay.ck_bytes = n_gdn * (conv_bytes + ssm_bytes) + static_cast<std::uint64_t>(cfg.n_embd) * 4 + static_cast<std::uint64_t>(V) * 4;

@@ -79,7 +79,8 @@ target_include_directories(whirl_server_core PRIVATE ${CMAKE_BINARY_DIR}/generat
 # whirl_spec: the MTP / n-gram draft policy the engine runs (src/spec, arch025-M4)
 # whirl_arch: the architecture registry (server_main's config + pre-load sizing, the tests' fake table; arch025-M5)
 # whirl_sampling: Sampler / Acceptor (src/sampling, arch025-E1a)
-target_link_libraries(whirl_server_core PUBLIC whirl whirl_spec whirl_arch whirl_cache whirl_tier_core whirl_sampling ws2_32)
+# ws2_32 is linked by whirl_platform only (arch025 PL3: net_win.cpp is Winsock's one user)
+target_link_libraries(whirl_server_core PUBLIC whirl whirl_spec whirl_arch whirl_cache whirl_tier_core whirl_sampling)
 
 if(WHIRL_WITH_HIP)
   # whirl-server.exe: the production server (qwen35::Model on HIP)

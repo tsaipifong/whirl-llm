@@ -2,16 +2,13 @@
 
 #include "log.h"
 
+#include "platform/time.h"
 #include "whirl/common.h"
 
 #include <cstdio>
 #include <filesystem>
 #include <mutex>
 #include <stdexcept>
-
-#ifdef _WIN32
-#include <windows.h>
-#endif
 
 namespace whirl::server {
 
@@ -24,14 +21,10 @@ Log::Hook g_hook = nullptr;
 void* g_hook_ctx = nullptr;
 
 std::string stamp() {
-#ifdef _WIN32
-    SYSTEMTIME st;
-    GetLocalTime(&st);
-    return std::format("{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}", st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute,
-                       st.wSecond, st.wMilliseconds);
-#else
-    return "0000-00-00 00:00:00.000";
-#endif
+    // arch025 PL1: GetLocalTime is platform::time::localTime (same fields, same format)
+    const platform::time::LocalTime st = platform::time::localTime();
+    return std::format("{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}", st.year, st.month, st.day, st.hour, st.minute,
+                       st.second, st.milliseconds);
 }
 
 }  // namespace

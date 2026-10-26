@@ -72,7 +72,7 @@ if(WHIRL_WITH_HIP)
                                    ${CMAKE_SOURCE_DIR}/src/release/dll_deps.cpp)
   target_include_directories(whirl_release PUBLIC ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/include
                                                   ${CMAKE_BINARY_DIR}/generated)
-  target_link_libraries(whirl_release PUBLIC whirl ws2_32)
+  target_link_libraries(whirl_release PUBLIC whirl)
 
   foreach(t whirl-cli whirl-server)
     if(TARGET ${t})

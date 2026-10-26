@@ -3,27 +3,18 @@
 
 #include "whirl/dump.h"
 
+#include "platform/env.h"
+
 #include <atomic>
 #include <cstdio>
-#include <cstdlib>
 #include <format>
 
 namespace whirl::dump {
 
-bool envOn(const char* name) {
-    const std::string key = std::string("WHIRL_") + name;
-#ifdef _WIN32
-    char* v = nullptr;
-    std::size_t n = 0;
-    if (_dupenv_s(&v, &n, key.c_str()) != 0 || v == nullptr) return false;
-    const std::string s(v);
-    std::free(v);
-#else
-    const char* v = std::getenv(key.c_str());
-    if (v == nullptr) return false;
-    const std::string s(v);
-#endif
-    return !s.empty() && s != "0";
+// arch025 PL1b: the _dupenv_s read is platform::env::get (the same _dupenv_s call, moved); still read on every call
+bool switchOn(const char* name) {
+    const std::optional<std::string> s = platform::env::get(std::string("WHIRL_") + name);
+    return s.has_value() && !s->empty() && *s != "0";
 }
 
 std::string kvLine(std::string_view site, const numerics::Request& r, bool moe, const numerics::KvCaps& caps,
@@ -36,7 +27,7 @@ std::string kvLine(std::string_view site, const numerics::Request& r, bool moe, 
 
 const numerics::KvChoice& kv(std::string_view site, const numerics::Request& r, bool moe, const numerics::KvCaps& caps,
                              std::optional<KvFormat> forced, const numerics::KvChoice& c) {
-    if (envOn("DUMP_KV")) {
+    if (switchOn("DUMP_KV")) {
         const std::string l = kvLine(site, r, moe, caps, forced, c);
         std::fprintf(stderr, "%s\n", l.c_str());
         std::fflush(stderr);

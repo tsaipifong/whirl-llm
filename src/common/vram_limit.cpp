@@ -3,8 +3,9 @@
 
 #include "whirl/vram_limit.h"
 
+#include "platform/env.h"
+
 #include <algorithm>
-#include <cstdlib>
 #include <format>
 
 namespace whirl::vram {
@@ -12,14 +13,9 @@ namespace whirl::vram {
 namespace {
 
 std::uint64_t readEnvLimit() {
-    char* buf = nullptr;
-    std::size_t len = 0;
     std::uint64_t mb = 0;
-    // _dupenv_s keeps MSVC quiet about getenv
-    if (_dupenv_s(&buf, &len, "WHIRL_VRAM_LIMIT_MB") == 0 && buf != nullptr) {
-        mb = parseLimitMb(buf);
-        std::free(buf);
-    }
+    // arch025 PL1: _dupenv_s is platform::env::get
+    if (const auto v = platform::env::get("WHIRL_VRAM_LIMIT_MB")) mb = parseLimitMb(v->c_str());
     return mb;
 }
 

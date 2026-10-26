@@ -5,8 +5,9 @@ the console, clocks, the process itself. WHIRL runs on Windows only; the platfor
 Winsock and CRT-platform call lives, so the rest of the code sees plain C++ and the tests can inject IO and socket
 errors. Decision record: ADR-0004 Decision 5 (link-time per-concern headers, no virtual interface).
 
-State (0.2.5, arch025 PL0): **skeleton only**. The headers, the CMake target and the check exist; no call site has
-moved yet. PL1-PL4 move the calls (table below), PL5 makes the check blocking in `release_gate.ps1`.
+State (0.2.5): PL0 made the skeleton (headers, CMake target, check). **PL3 filled `net`**: every Winsock call of
+the HTTP server, the release pre-check and the server tests' client is in `src/platform/net_win.cpp`, with FakeNet.
+PL1, PL2 and PL4 move the other calls (table below), and PL5 makes the check blocking in `release_gate.ps1`.
 
 ## Shape
 
@@ -17,7 +18,7 @@ moved yet. PL1-PL4 move the calls (table below), PL5 makes the check blocking in
 | `src/platform/console.h` | `whirl::platform::console` | UTF-8 code page and its restore, console mode, binary stdout | PL1 |
 | `src/platform/time.h` | `whirl::platform::time` | 1 ms timer resolution, local wall-clock time of log lines | PL1 |
 | `src/platform/fs.h` | `whirl::platform::fs` | mapped GGUF files, the SSD tier's unbuffered / overlapped files, `_wfopen` | PL2 (with FakeFs) |
-| `src/platform/net.h` | `whirl::platform::net` | the HTTP server's Winsock calls, the release front-end's port pre-check | PL3 (with FakeNet) |
+| `src/platform/net.h` | `whirl::platform::net` | the HTTP server's Winsock calls, the release front-end's port pre-check (`probeListen`), the test client | PL3 (done; FakeNet in `net_fake.h`) |
 | `src/platform/proc.h` | `whirl::platform::proc` | executable path, the per-GPU named mutex, Ctrl+C / shutdown events, process id / working set | PL4 |
 | `src/platform/sys.h` | `whirl::platform::sys` | physical RAM; the wmain UTF-16 -> UTF-8 conversion ("args") | PL4 |
 
@@ -34,8 +35,8 @@ Rules:
   `cmake/platform.cmake`. It includes `<windows.h>` itself. A future POSIX port adds `<concern>_posix.cpp` next to
   it and chooses in CMake; nothing outside `src/platform` changes.
 - **No virtual interface, no runtime registry.** The implementation is chosen at link time. The only fakes are for
-  fs (PL2: write failure, short read for the tier tests) and net (PL3: accept / recv errors); how they are injected
-  is decided in those steps.
+  fs (PL2: write failure, short read for the tier tests) and net (PL3: accept / recv errors, see "FakeNet" below);
+  how the fs fake is injected is decided in PL2.
 - **Moving a call keeps it bit for bit**: same flags (`CreateFileW` access / share / disposition / flags, socket
   options), same call order, same strings (the SSD fingerprint, `exeIdentity`, mutex names, paths). Each step pins
   them with a table test against v0.2.4 0e35407 (arch025.PLAN.md risk R7).
@@ -54,8 +55,46 @@ code, ADR-0004 #5), `src/release/dll_deps.cpp` (the DLL dependency diagnosis), a
 `cmake/platform.cmake` defines `whirl_platform` (STATIC). It is the bottom layer: it links no other WHIRL target.
 The core library links it (`target_link_libraries(whirl PUBLIC whirl_platform)` in `CMakeLists.txt`), so every
 executable can reach it and PL1-PL4 only add sources to `cmake/platform.cmake`. Winsock (`ws2_32`) and `winmm`
-move to `whirl_platform` with PL3 / PL1. Until PL1 the library holds only `headers_win.cpp`, which nothing
-references, so no executable contains code from it.
+move to `whirl_platform` with PL3 / PL1. Since PL3 the library holds `headers_win.cpp` (referenced by nothing) and
+`net_win.cpp`, and it is the only target that links `ws2_32` (PRIVATE; `whirl_server_core` and `whirl_release` no
+longer name it).
+
+## FakeNet (PL3)
+
+`src/platform/net_fake.h`, implemented in `net_win.cpp`. It is a pass-through fake (the model is Boost.Corosio's
+`mocket` fuse; MSVC has no `ld --wrap`, and there is no virtual interface). It is off unless a test calls
+`fake::begin()`; off, each net call costs one relaxed atomic load more. Once on:
+- it tracks the sockets a server makes: those opened on a `Lookup::passive_numeric` address and those `accept()`
+  returns on them. The test client's sockets in the same process are never tracked.
+- it records every call on a tracked socket with its arguments as integers (`setsockopt(65535,4102,4,300)`). The
+  tags are `L1`… / `C1`…, and calls on no socket get `-`. The server test `net_call_table` compares these records with
+  the call sequences and socket options of v0.2.4 0e35407.
+- `failAccept(n, err)` / `failRecv(n, err)` make the next n accepts on a tracked listener, or the next n recvs on a
+  tracked accepted socket, fail with that Winsock error, without calling Winsock. The tests `net_accept_error` and
+  `net_recv_error` use them: the connection closes, and the server goes on.
+
+## env / paths / console / time (PL1)
+
+PL1 (2026-10-26) filled the four small concerns. Each function wraps exactly the call it replaced; the logic stays
+with the caller.
+- `env::get(name)` is the one `_dupenv_s` read: `envGet` / `EnvSnapshot::capture` (src/config), the VRAM cap
+  (src/common/vram_limit.cpp), the kernel table switches (src/kernels_host/kernels_abi.cpp) and LOCALAPPDATA.
+  `env::set` is the one `_putenv_s` of the product (GPU_RESOURCE_CACHE_SIZE, server_main.cpp). `env::block()`
+  returns the raw `GetEnvironmentStringsW` entries in the OS order; the SSD fingerprint (src/cache/fingerprint.cpp)
+  still converts (`narrow`), filters and sorts them itself, so the fingerprint is unchanged.
+- `paths::localAppData()` reads the narrow LOCALAPPDATA (not `SHGetKnownFolderPath`, not `_wgetenv`: v0.2.4 did
+  not, and a changed tune or kvcache path would re-tune / miss the SSD tier). The path builders (`whirlDir`,
+  `serverLogPath`, `kvCacheDir`, `tuneCachePath`, `tuneReadPaths4`, `tuneReadPathsOld`) are pure string functions,
+  pinned by `testPlatformPaths` with the literal v0.2.4 strings. `declarePinned` (kv_tier.cpp) still builds its own
+  `pinned` folder from the pointer it is given.
+- `console::isConsole` / `outputCodePage` / `setOutputCodePage` / `setStdoutBinary`; the saved code page and the
+  atexit restore stay in `initConsole` (src/release/release.cpp, which no longer includes `<windows.h>`; the two
+  LoadLibrary error codes are `dlldeps::k_error_mod_not_found` / `k_error_proc_not_found`).
+- `time::beginPeriod1ms` / `endPeriod1ms` (winmm is linked by `whirl_platform`), `time::localTime` for log lines.
+
+Pins: `testFingerprintPlatformEnv` (cache tests: `fingerprintEnv()` equals a verbatim copy of the base loop, and a
+fixed environment set hashes to a constant computed outside C++), `testPlatformPaths`, `testPlatformEnv`,
+`testPlatformConsoleTime` (unit tests). Mutations of each are in `scratch\a25_pl1\pl1_extra.ps1`.
 
 ## The check
 

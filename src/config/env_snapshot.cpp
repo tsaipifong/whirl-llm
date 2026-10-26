@@ -3,25 +3,17 @@
 
 #include "config/env_snapshot.h"
 
+#include "platform/env.h"
 #include "whirl/model.h"  // envGet / envFlag declarations
 
-#include <cstdlib>
 #include <string>
 
 namespace whirl {
 
-// (moved unchanged from src/model/config.cpp)
+// (moved from src/model/config.cpp; arch025 PL1: the _dupenv_s read itself is platform::env::get)
 std::optional<std::string> envGet(std::string_view name) {
     const std::string key = std::string("WHIRL_") + std::string(name);
-    // _dupenv_s keeps MSVC quiet about getenv
-    char* buf = nullptr;
-    std::size_t len = 0;
-    if (_dupenv_s(&buf, &len, key.c_str()) == 0 && buf != nullptr) {
-        std::string v(buf);
-        std::free(buf);
-        return v;
-    }
-    return std::nullopt;
+    return platform::env::get(key);
 }
 
 bool envFlag(std::string_view name, bool def) {

@@ -6,6 +6,9 @@
 #include "release/release.h"
 #include "release/dll_deps.h"
 
+#include "platform/console.h"
+#include "platform/net.h"
+
 #include "whirl/common.h"
 #include "whirl/gguf.h"
 #include "whirl/hip.h"
@@ -20,13 +23,6 @@
 #include <format>
 #include <vector>
 
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <windows.h>
-#include <winsock2.h>
-#include <ws2tcpip.h>
-
 namespace whirl::app {
 
 namespace {
@@ -38,16 +34,12 @@ constexpr const char* k_driver_advice =
 
 constexpr const char* k_gpu_runtime_dll = "amdhip64_7.dll";
 
-UINT g_saved_cp = 0;
+namespace pcon = whirl::platform::console;  // arch025 PL1: the console calls
+
+unsigned g_saved_cp = 0;
 
 void restoreConsole() {
-    if (g_saved_cp != 0) SetConsoleOutputCP(g_saved_cp);
-}
-
-bool isConsole(DWORD std_handle) {
-    HANDLE h = GetStdHandle(std_handle);
-    DWORD mode = 0;
-    return h != nullptr && h != INVALID_HANDLE_VALUE && GetConsoleMode(h, &mode) != 0;
+    if (g_saved_cp != 0) pcon::setOutputCodePage(g_saved_cp);
 }
 
 }  // namespace
@@ -95,10 +87,10 @@ std::string versionText(std::string_view program) {
 
 void initConsole() {
     if (g_saved_cp != 0) return;
-    if (!isConsole(STD_OUTPUT_HANDLE) && !isConsole(STD_ERROR_HANDLE)) return;
-    const UINT cp = GetConsoleOutputCP();
-    if (cp == CP_UTF8 || cp == 0) return;
-    if (SetConsoleOutputCP(CP_UTF8)) {
+    if (!pcon::isConsole(pcon::Stream::out) && !pcon::isConsole(pcon::Stream::err)) return;
+    const unsigned cp = pcon::outputCodePage();
+    if (cp == pcon::kCodePageUtf8 || cp == 0) return;
+    if (pcon::setOutputCodePage(pcon::kCodePageUtf8)) {
         g_saved_cp = cp;
         std::atexit(restoreConsole);
     }
@@ -117,11 +109,11 @@ int gpuPreflight() {
             std::fputs(dlldeps::messageMissingSymbol(k_gpu_runtime_dll, r.missing_symbol, r.app_local, r.path, k_driver_advice)
                            .c_str(),
                        stderr);
-        } else if (r.error == ERROR_MOD_NOT_FOUND) {
+        } else if (r.error == dlldeps::k_error_mod_not_found) {
             // 126 = the DLL or a DLL it imports is missing: tell them apart and name the missing one
             // (issue #2: the ROCm 10.1 driver's amdhip64_7.dll needs rocm_kpack.dll, which it does not install)
             std::fputs(dlldeps::message126(k_gpu_runtime_dll, dlldeps::diagnose(dll), k_driver_advice).c_str(), stderr);
-        } else if (r.error == ERROR_PROC_NOT_FOUND) {
+        } else if (r.error == dlldeps::k_error_proc_not_found) {
             // 127 = a DLL it imports lacks a function: likely a DLL shipped next to whirl.exe
             // (rocm_kpack.dll, the app-local VC++ runtime) shadowing the version a newer driver expects
             std::fputs(dlldeps::message127(k_gpu_runtime_dll, dlldeps::inspect127(dll, dlldeps::exeDir())).c_str(), stderr);
@@ -146,34 +138,20 @@ void requireModelFile(const std::string& path, std::string_view what) {
 }
 
 void requirePortFree(const std::string& host, std::uint16_t port) {
+    namespace net = platform::net;
     if (port == 0) return;
-    WSADATA d;
-    if (WSAStartup(MAKEWORD(2, 2), &d) != 0) return;
-    addrinfo hints{};
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-    hints.ai_flags = AI_PASSIVE | AI_NUMERICHOST;
-    addrinfo* res = nullptr;
+    // arch025 PL3: the Winsock sequence of 0e35407 (WSAStartup ... WSACleanup) is net::probeListen
     const std::string ps = std::to_string(port);
-    if (getaddrinfo(host.c_str(), ps.c_str(), &hints, &res) != 0 || res == nullptr) {
-        WSACleanup();
+    const net::ProbeResult pr = net::probeListen(host.c_str(), ps.c_str());
+    if (pr.stage == net::ProbeResult::Stage::no_winsock) return;
+    if (pr.stage == net::ProbeResult::Stage::bad_host)
         throw UserError(exit_usage, std::format("invalid --host {} (give a numeric address such as 127.0.0.1 or 0.0.0.0)", host));
-    }
-    int err = 0;
-    SOCKET s = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-    if (s != INVALID_SOCKET) {
-        BOOL on = TRUE;
-        setsockopt(s, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, reinterpret_cast<const char*>(&on), sizeof on);
-        if (bind(s, res->ai_addr, static_cast<int>(res->ai_addrlen)) != 0 || listen(s, 1) != 0) err = WSAGetLastError();
-        closesocket(s);
-    }
-    freeaddrinfo(res);
-    WSACleanup();
-    if (err == WSAEADDRINUSE || err == WSAEACCES)
+    const int err = pr.err;
+    if (err == net::kErrAddrInUse || err == net::kErrAccess)
         throw UserError(exit_port, std::format("port {} on {} is already in use (another whirl-server or another program is listening there).\n"
                                                "  Stop that program, or start this one on another port: --port {}",
                                                port, host, port == 65535 ? 8081 : port + 1));
-    if (err == WSAEADDRNOTAVAIL)
+    if (err == net::kErrAddrNotAvail)
         throw UserError(exit_usage, std::format("--host {} is not an address of this computer (use 127.0.0.1 for local use, 0.0.0.0 for all networks)", host));
 }
 

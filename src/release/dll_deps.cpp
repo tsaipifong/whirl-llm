@@ -17,6 +17,9 @@
 #endif
 #include <windows.h>
 
+static_assert(ERROR_MOD_NOT_FOUND == whirl::app::dlldeps::k_error_mod_not_found);
+static_assert(ERROR_PROC_NOT_FOUND == whirl::app::dlldeps::k_error_proc_not_found);
+
 namespace whirl::app::dlldeps {
 
 namespace {
