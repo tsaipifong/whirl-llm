@@ -340,6 +340,7 @@ void Model::mtpBatchStepEx(std::span<const MSeg> segs, u32 r, bool draft) {
             da.key_lo[kk] = static_cast<std::uint32_t>(key);
             da.key_hi[kk] = static_cast<std::uint32_t>(key >> 32);
         }
+        // draft_qbuf is 0 unless want_draft_q (feat026-draftq): the kernel then skips the q writes
         if (any)
             hip::launch(k.draft_sample_rows, D(ns), D(1024), 0, stream, logits, I(head.nrows), out_tok, area, I(r), map, da, draft_qbuf);
     }

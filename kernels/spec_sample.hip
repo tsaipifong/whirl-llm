@@ -5,7 +5,7 @@
 // draft_sample_rows runs right after draft_pick_rows (same rows, same control areas) for the rows
 // whose request samples (temperature > 0): it replaces the greedy draft r with a token drawn from
 // the draft distribution q by the race coupled to the target sampler (argmin E(v) / q(v), E from the
-// row's race key, whirl/spec_sample.h) and writes q (tests / diagnostics).
+// row's race key, whirl/spec_sample.h) and, when qbuf is not null, writes q (tests / diagnostics).
 // q = softmax(x * inv_t) over the K = min(top_k, 32) (32 when top_k = 0) largest logits, then the
 // request's top-k / top-p / min-p, renormalized; host reference: whirl::spec::draftDist.
 // The p-min cutoff of draft_pick_rows (argmax probability at temperature 1, a function of the row
@@ -205,6 +205,10 @@ extern "C" __global__ void __launch_bounds__(1024)
         }
     }
     c[16 + r] = id[pick];
+    // feat026-draftq: q is optional (qbuf null: no q writes). The host never reads q (race coupling: the
+    // target side redraws argmin E / p with the same E and accepts on an exact token match), so product runs
+    // pass null; kernel tests pass a buffer. The drawn token above does not depend on this.
+    if (qbuf == nullptr) return;
     int *q = qbuf + a.qoff[b];
     q[0] = nk;
     for (int i = 0; i < nk; ++i) {
