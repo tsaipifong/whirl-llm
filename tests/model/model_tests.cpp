@@ -1774,6 +1774,7 @@ void testBaselineDumps() {
     CHECK(a.find("D exec: tune=") != std::string::npos);
     // arch025-execdump-f7: the three F7 forward switches are in the dump (defaults: off, on, -1)
     for (const char* k : {"D exec: head_gemvx=0\n", "D exec: prec_gemvh=1\n", "D exec: prec_gs=-1\n"}) CHECK(a.find(k) != std::string::npos);
+    CHECK(a.find("D exec: want_draft_q=0\n") != std::string::npos);  // feat026-draftq: off unless a caller sets it
     {
         q::Model m2;
         m2.head_gemvx = true;

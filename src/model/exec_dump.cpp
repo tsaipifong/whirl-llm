@@ -4,7 +4,7 @@
 // One "D exec: key=value" line per member, in declaration order of include/whirl/model.h. Listed: every scalar
 // configuration member that load / loadOrTune sets and the forward reads. Not listed (per-call state that a forward
 // sets and resets, the same after every load): row_n, row_pos, row_base, fwd_pos0, xq_n, x16_count, x16_fp8,
-// cur_seq, kv_off, ctl_off, cap_rows, cap_n, n_inj, attn_win, rdelta, the device pointers and the kernel table (the
+// cur_seq, kv_off, ctl_off, cap_rows, cap_n, n_inj, attn_win, rdelta, draft_samp_ok (setupSeqs, after this dump: = mtp), the device pointers and the kernel table (the
 // launch log pins the kernels). tools/gates/exec_dump_check.py keeps the two lists complete against model.h.
 
 #include "whirl/dump.h"
@@ -147,6 +147,7 @@ std::string execDump(const Model& m) {
     WD_FU(draft_window_min);
     add("draft_p_min", f(m.draft_p_min));
     WD_U(draft_n_min);
+    WD_B(want_draft_q);  // feat026-draftq: set by the caller before setupSeqs (draft_qbuf only then)
     add("draft_head", b(m.draft_head.has_value()));
     add("draft_d2", b(m.draft_d2.has_value()));
     WD_U(draft_rows);

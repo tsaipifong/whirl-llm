@@ -17,7 +17,10 @@ import sys
 
 # per-call state a forward sets and resets (the same after every load); keep in sync with exec_dump.cpp's comment
 PER_CALL = {"row_n", "fwd_pos0", "xq_n", "x16_count", "x16_fp8", "cur_seq", "kv_off", "ctl_off", "cap_rows", "cap_n",
-            "n_inj", "attn_win", "rdelta"}
+            "n_inj", "attn_win", "rdelta",
+            # feat026-draftq: set by setupSeqs (after the load + tune dump; false after every load) = mtp.has_value(),
+            # which the dump prints as "mtp"
+            "draft_samp_ok"}
 SCALAR = (r"(?:bool|float|double|int|unsigned|std::u?int(?:8|16|32|64)_t|u32|std::size_t|KvFormat|std::optional<KvFormat>|hip::Arch|"
           r"GemvR|GemvW|whirl::relax::Params|whirl::numerics::(?:Request|Plan|KvChoice)|std::array<std::uint64_t,\s*n_types>)")
 DECL = re.compile(r"^    (?:static\s+constexpr\s+)?" + SCALAR + r"\s+(.+?);")
