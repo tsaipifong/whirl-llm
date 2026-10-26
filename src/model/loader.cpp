@@ -705,8 +705,13 @@ std::unique_ptr<Model> Model::load(const gguf::File& f, u32 max_ctx_req, LoadSta
             } catch (const std::exception&) {
             }
         }
-        // feat026-cascade-wide: WHIRL_CASCADE_WIDE=0 = the r1 prefix kernels only (gfx1201 cap 32 / grp rows)
+        // feat026-cascade-wide: WHIRL_CASCADE_WIDE=0 = the r1 prefix kernels only (gfx1201 cap 32 / grp rows);
+        // feat026-cascade-wide-spill: WHIRL_CASCADE_WIDE=r0 = the first wide build (register spills, same bits)
         if (auto v = envGet("CASCADE_WIDE"); v && *v == "0") m.k.attn_cascade_wide = nullptr;
+        if (auto v = envGet("CASCADE_WIDE"); v && *v == "r0" && m.k.attn_cascade_wide_r0 != nullptr) {
+            m.k.attn_cascade_wide = m.k.attn_cascade_wide_r0;
+            m.load_note += "cascade: wide prefix kernel r0 (WHIRL_CASCADE_WIDE=r0)\n";
+        }
         m.cas_ml =m.alloc(max_verify_rows * n_split * cfg.n_head * 2 * f4);
         m.cas_acc = m.alloc(max_verify_rows * n_split * cfg.n_head * cfg.head_dim * f4);
         m.cas_rows = m.allocZero(3 * 32 * 4);

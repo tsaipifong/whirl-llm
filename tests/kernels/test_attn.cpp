@@ -10,6 +10,8 @@
 //     attn_prefill_wmma, head-range
 //     split launches == one launch, attn_combine_q8 == attn_combine (+ its
 //     int8 copy == quantize_q8), attn_prep == rmsnorm + rope_neox + kv_store.
+//   * feat026-cascade-wide-spill: attn_prefill_wmma_ns (no-spill tune candidate, WHIRL_ATTN_PFNS=1) == attn_prefill_wmma
+//     bitwise (short and long KV, every format that has it).
 // SPDX-License-Identifier: Apache-2.0
 
 #include <algorithm>
@@ -692,6 +694,13 @@ void testAttn(Ctx& c) {
             c.rep.add(cmpTol("attn_prefill_wmma" + fs + " vs CPU (" + std::to_string(rows.size()) + " of " +
                                  std::to_string(n) + " queries)" + tag,
                              pickRows(ref1, rows), ro, rs, 1e-2, 1e-4));
+            // feat026-cascade-wide-spill tune candidate (WHIRL_ATTN_PFNS=1): the no-spill build == attn_prefill_wmma (bits)
+            if (auto fn = c.fnOpt("attn_prefill_wmma_ns" + fs)) {
+                Buf o2 = run(fn, 256, 0, kHeads);
+                c.sync();
+                c.rep.add(cmpExact("attn_prefill_wmma_ns" + fs + " == attn_prefill_wmma" + fs + tag, o2.down<float>(ref1.size()), ref1,
+                                   Kind::invariant));
+            }
             if (auto fk = c.fnOpt("attn_kx" + fs)) {
                 Buf o2 = run(fk, 512, 0, kHeads);
                 c.sync();
@@ -1107,6 +1116,14 @@ void testAttn(Ctx& c) {
                 const auto got = rb.down<float>(on);
                 const std::string where = " (long KV, group " + std::to_string(grp) + ", n " + std::to_string(n) + " at " + std::to_string(p0) + ")";
                 c.rep.add(cmpExact("attn_prefill_wmma" + fs + " head-split launches == one" + where, sb.down<float>(on), got, Kind::invariant));
+                // feat026-cascade-wide-spill: the no-spill candidate == attn_prefill_wmma over the long shuffled KV (bits)
+                if (auto fn = c.fnOpt("attn_prefill_wmma_ns" + fs)) {
+                    sb.fill(0x7f);
+                    hip::launch(fn, {cdiv(n, 128), static_cast<unsigned>(kHeads), 1}, {256, 1, 1}, 0, c.s, dq.p(), a, sb.p(), kHeads, nkv,
+                                kQStride, dpos.p(), n, kScale, 0);
+                    c.sync();
+                    c.rep.add(cmpExact("attn_prefill_wmma_ns" + fs + " == attn_prefill_wmma" + fs + where, sb.down<float>(on), got, Kind::invariant));
+                }
                 // q8 / q8h prefill (Q8P): kv_dq_rows (keys 0 .. p0 + n - 1 into contiguous f16 rows) +
                 // the f16 attn_kg on them == attn_prefill_wmma_q8 bitwise (one and two head-range launches)
                 if (fmt == Fmt::q8) {

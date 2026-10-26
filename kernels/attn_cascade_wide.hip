@@ -21,6 +21,14 @@
 //     f16 rounding order, the same K dequantization values): a column's partial is expected to be the SAME
 //     BITS as attn_wsplit1 / attn_wsplit2 give it (checked by the kernel test family cascade, not assumed).
 //     The o rescale is skipped when alpha == 1 on every lane of the wave (exact no-op: x * 1 == x).
+//   * feat026-cascade-wide-spill (NS = 1, the default names attn_cascade_wide[_q8|_q8v]): the r0 code (NS = 0, now
+//     attn_cascade_wide_r0[_q8|_q8v], WHIRL_CASCADE_WIDE=r0) used 256 VGPRs and spilled 70-76 (156-164 B scratch):
+//     qf (64) + o (128) stay live across the tile loads, and the scheduler kept all 8 V rows of the transpose (32)
+//     and every V^T fragment of the P V loop in flight. NS stages V^T in two passes of 4 keys (8-byte stores, 16
+//     staging VGPRs) and pins o[dt] after its two WMMAs (asm volatile "+v": one dt's V fragments in flight, the
+//     gfx1151 attn_prefill_wmma fix of backlog 7c): 240-242 VGPRs, 0 spills, 0 scratch. The values written to
+//     Vt, the WMMA operands and the per-dt accumulation order (kt 0 then 1) are unchanged, so every column keeps
+//     the bits of r0 / attn_wsplit (kernel test family cascade checks both kernels).
 // Arguments: those of attn_wsplit1 (q, kv, part_ml, part_acc, n_head, n_kv, q_stride, pos, scale, skip,
 // groups); grid (n_kv, n_split, groups), block 256. kv.win must be 0 (the cascade never runs with the MTP
 // draft window). head_dim 256, grp * rows <= 128 per group (the host caps rows at 128 / grp).
@@ -28,7 +36,7 @@
 #define CW_NW 8                 // waves per block
 #define CW_COLS (16 * CW_NW)    // columns per block
 
-template <int Q8>
+template <int Q8, int NS>
 __device__ __forceinline__ void attn_cascade_wide_impl(const float *q, const KvArgs &kv, float *part_ml, float *part_acc, int n_head,
                                                        int n_kv, int q_stride, const int *pos, float scale, const int *skip,
                                                        AwGroups groups) {
@@ -101,23 +109,48 @@ __device__ __forceinline__ void attn_cascade_wide_impl(const float *q, const KvA
             // V^T tile: thread (kb, d8) loads keys kb*8 .. +8 at dims d8 .. +8, transposes in registers
             const int tv = threadIdx.x - 128;
             const int kb = tv / (AW_D / 8), d8 = (tv % (AW_D / 8)) * 8;
-            half8 rows[8];
+            if constexpr (NS) {
+                // two passes of 4 keys (16 staging VGPRs instead of 32); the same values land in Vt
 #pragma unroll
-            for (int r = 0; r < 8; ++r) {
-                const int key = k0 + kb * 8 + r;
-                if (key < b1) {
-                    rows[r] = kv_ld8<kv_vf(Q8)>(kv.v, kv.vs, ((size_t)(key + dl) * n_kv + g) * AW_D + d8);
-                } else {
+                for (int hh = 0; hh < 2; ++hh) {
+                    half8 rows[4];
 #pragma unroll
-                    for (int x = 0; x < 8; ++x) rows[r][x] = (_Float16)0.f;
+                    for (int r = 0; r < 4; ++r) {
+                        const int key = k0 + kb * 8 + hh * 4 + r;
+                        if (key < b1) {
+                            rows[r] = kv_ld8<kv_vf(Q8)>(kv.v, kv.vs, ((size_t)(key + dl) * n_kv + g) * AW_D + d8);
+                        } else {
+#pragma unroll
+                            for (int x = 0; x < 8; ++x) rows[r][x] = (_Float16)0.f;
+                        }
+                    }
+#pragma unroll
+                    for (int c = 0; c < 8; ++c) {
+                        half4 cv;
+#pragma unroll
+                        for (int r = 0; r < 4; ++r) cv[r] = rows[r][c];
+                        *(half4 *)&Vt[d8 + c][kb * 8 + hh * 4] = cv;
+                    }
                 }
-            }
+            } else {
+                half8 rows[8];
 #pragma unroll
-            for (int c = 0; c < 8; ++c) {
-                half8 cv;
+                for (int r = 0; r < 8; ++r) {
+                    const int key = k0 + kb * 8 + r;
+                    if (key < b1) {
+                        rows[r] = kv_ld8<kv_vf(Q8)>(kv.v, kv.vs, ((size_t)(key + dl) * n_kv + g) * AW_D + d8);
+                    } else {
 #pragma unroll
-                for (int r = 0; r < 8; ++r) cv[r] = rows[r][c];
-                *(half8 *)&Vt[d8 + c][kb * 8] = cv;
+                        for (int x = 0; x < 8; ++x) rows[r][x] = (_Float16)0.f;
+                    }
+                }
+#pragma unroll
+                for (int c = 0; c < 8; ++c) {
+                    half8 cv;
+#pragma unroll
+                    for (int r = 0; r < 8; ++r) cv[r] = rows[r][c];
+                    *(half8 *)&Vt[d8 + c][kb * 8] = cv;
+                }
             }
         }
         __syncthreads();
@@ -166,12 +199,15 @@ __device__ __forceinline__ void attn_cascade_wide_impl(const float *q, const KvA
                 for (int v = 0; v < 8; ++v) o[dt][v] *= alpha;
         }
 #pragma unroll
-        for (int dt = 0; dt < AW_D / 16; ++dt)
+        for (int dt = 0; dt < AW_D / 16; ++dt) {
 #pragma unroll
             for (int kt = 0; kt < AW_K / 16; ++kt) {
                 const half8 a = *(const half8 *)&Vt[dt * 16 + lane % 16][kt * 16 + 8 * (lane / 16)];
                 o[dt] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(a, pt[kt], o[dt]);
             }
+            // NS: pin (one dt's V^T fragments in flight, else they are all preloaded and the kernel spills)
+            if constexpr (NS) asm volatile("" : "+v"(o[dt]));
+        }
     }
     if (!cvalid) return;
     if (lane < 16) {
@@ -184,15 +220,19 @@ __device__ __forceinline__ void attn_cascade_wide_impl(const float *q, const KvA
 #pragma unroll
         for (int v = 0; v < 8; ++v) pa[dt * 16 + 8 * (lane / 16) + v] = o[dt][v];
 }
-#define CW_ENTRY(NAME, Q8)                                                                                              \
+#define CW_ENTRY(NAME, Q8, NS)                                                                                          \
     extern "C" __global__ void __launch_bounds__(256)                                                                   \
         NAME(const float *q, KvArgs kv, float *part_ml, float *part_acc, int n_head, int n_kv, int q_stride, const int *pos, \
              float scale, const int *skip, AwGroups groups) {                                                           \
-        attn_cascade_wide_impl<Q8>(q, kv, part_ml, part_acc, n_head, n_kv, q_stride, pos, scale, skip, groups);         \
+        attn_cascade_wide_impl<Q8, NS>(q, kv, part_ml, part_acc, n_head, n_kv, q_stride, pos, scale, skip, groups);     \
     }
-CW_ENTRY(attn_cascade_wide, 0)
-CW_ENTRY(attn_cascade_wide_q8, 1)
-CW_ENTRY(attn_cascade_wide_q8v, 2)
+CW_ENTRY(attn_cascade_wide, 0, 1)
+CW_ENTRY(attn_cascade_wide_q8, 1, 1)
+CW_ENTRY(attn_cascade_wide_q8v, 2, 1)
+// r0 (feat026-cascade-wide 1c0df5b code, spills): WHIRL_CASCADE_WIDE=r0, kernel-test A/B
+CW_ENTRY(attn_cascade_wide_r0, 0, 0)
+CW_ENTRY(attn_cascade_wide_r0_q8, 1, 0)
+CW_ENTRY(attn_cascade_wide_r0_q8v, 2, 0)
 #undef CW_ENTRY
 #undef CW_COLS
 #undef CW_NW

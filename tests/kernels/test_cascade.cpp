@@ -25,6 +25,8 @@
 //     logits, P cut by position, a sequence outside the group), and per column the prefix partials of
 //     attn_cascade_wide == those of attn_wsplit1 / attn_wsplit2 run per sequence (bits: same per-column code), as
 //     well as == those of the prefix kernel the launcher chose.
+//   * feat026-cascade-wide-spill: attn_cascade_wide is the no-spill build; every wide case runs again with the first
+//     build attn_cascade_wide_r0 (WHIRL_CASCADE_WIDE=r0 table) and both must give attn_wsplit's bits per column.
 //   * re-review R3: attn_combine_q8 (the balance decode combine when the o-projection is a GEMV) on the same partials:
 //     its f32 output == attn_combine's (bits), its int8 copy == the CPU quantizer of that output (wave_q8, exact), and
 //     cascade vs plain on the dequantized int8 within the tolerance + half a quantization step of each;
@@ -266,8 +268,9 @@ void checkWideBits(Ctx& c, Scratch& sc, const wk::KernelTable& kt_, const ops::C
     c.rep.add(cmpExact("prefix partials: launcher's prefix kernel == attn_wsplit per sequence (bits)" + tag, gc, gr, Kind::invariant));
 }
 
-void runCase(Ctx& c, Scratch& sc, const wk::KernelTable& kt_, Kv fmt, const Case& cs, bool narrow = false) {
-    const std::string tag = " [" + cs.name + ", kv " + kvName(fmt) + (narrow ? (fmt == Kv::q4 ? ", no attn_cascade_wide" : ", WHIRL_CASCADE_WIDE=0") : "") + "]";
+void runCase(Ctx& c, Scratch& sc, const wk::KernelTable& kt_, Kv fmt, const Case& cs, bool narrow = false, const char* var = "") {
+    const std::string tag = " [" + cs.name + ", kv " + kvName(fmt) + (narrow ? (fmt == Kv::q4 ? ", no attn_cascade_wide" : ", WHIRL_CASCADE_WIDE=0") : "") +
+                            var + "]";
     const int H = cs.n_head, HKV = cs.n_kv, grp = H / HKV, S = static_cast<int>(cs.seqs.size());
     // page tables: sequence s at base s * kTabStride; shared entries -> the same physical pages
     int n_rows = 0, need_pages = cs.sp;
@@ -704,6 +707,13 @@ void testCascade(Ctx& c) {
             kn.attn_cascade_wide = nullptr;
             for (const Case& cs : cases)
                 if (cs.narrow_empty) runCase(c, sc, kn, fmt, cs, true);
+        }
+        // feat026-cascade-wide-spill: the wide cases with the first wide build (WHIRL_CASCADE_WIDE=r0)
+        if (!g1151 && kt_.attn_cascade_wide_r0 != nullptr) {
+            wk::KernelTable kr = kt_;
+            kr.attn_cascade_wide = kt_.attn_cascade_wide_r0;
+            for (const Case& cs : cases)
+                if (cs.prefix == ops::CascadePrefixKind::wide) runCase(c, sc, kr, fmt, cs, false, ", WHIRL_CASCADE_WIDE=r0");
         }
     }
 }
