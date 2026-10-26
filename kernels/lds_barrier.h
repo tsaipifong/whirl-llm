@@ -19,6 +19,8 @@
 //   1 = gemmsd_impl (gfx1201 gemms_c5..c7 / gemmsh_c5..c7)
 //   2 = gdn_sx_scan (gfx1151)
 //   4 = gdn_step_norm (gfx1151)
+//   8 = gdn_step_norm (gfx1201; feat026-barrierdrain2)
+//  16 = gdn_wscan_impl (gfx1201 gdn_wscan4 / gdn_wscan8; feat026-barrierdrain2)
 #pragma once
 #ifndef WHIRL_BARDRAIN
 #define WHIRL_BARDRAIN 0

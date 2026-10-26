@@ -298,6 +298,14 @@ extern "C" __global__ void __launch_bounds__(512)
 // and the gated RMSNorm + int8 quantization of all rows run afterwards, one
 // wave per row, with the block_sum / wave_q8 arithmetic of the per-row
 // version (same values, bit for bit). gdn_step_norm_v0 = the per-row version.
+#include "lds_barrier.h"  // feat026-barrierdrain2: WHIRL_BARDRAIN bit 8 = gdn_step_norm (gfx1201) LDS-only barriers
+// valid: every cross-wave exchange here is LDS; pend loads are consumed by ds_stores before the first barrier, so all
+// complete before any pend store (progress/feat026-barrierdrain2.PRIOR_ART.md section 3)
+#if WHIRL_BARDRAIN & 8
+#define GDN12SN_BAR() whirl_lds_barrier()
+#else
+#define GDN12SN_BAR() __syncthreads()
+#endif
 #define GDN_MR 16
 extern "C" __global__ void __launch_bounds__(512)
     gdn_step_norm(const float *qkv, const float *g, const float *beta, const float *z, const float *wn, float *out,
@@ -334,7 +342,7 @@ extern "C" __global__ void __launch_bounds__(512)
             dec[threadIdx.x] = pr[DK + DV];
             bet[threadIdx.x] = pr[DK + DV + 1];
         }
-        __syncthreads();
+        GDN12SN_BAR();
         for (int tl = 0; tl < np; ++tl) {
             const float decay = dec[tl];
             float sk = 0.f;
@@ -344,7 +352,7 @@ extern "C" __global__ void __launch_bounds__(512)
                 sk += S[e] * ks[tl][qi * PER + e];
             }
             red[tl & 1][qi][j] = sk;
-            __syncthreads();
+            GDN12SN_BAR();
             sk = red[tl & 1][0][j] + red[tl & 1][1][j] + red[tl & 1][2][j] + red[tl & 1][3][j];
             const float delta = (vs[tl][j] - sk) * bet[tl];
 #pragma unroll
@@ -352,7 +360,7 @@ extern "C" __global__ void __launch_bounds__(512)
         }
 #pragma unroll
         for (int e = 0; e < PER; ++e) Sg[(size_t)(qi * PER + e) * DV + j] = S[e];
-        __syncthreads();  // ks / vs / red are reused below
+        GDN12SN_BAR();  // ks / vs / red are reused below
     }
     for (int c0 = 0; c0 < n_tok; c0 += MR) {
         const int nr = min(MR, n_tok - c0);
@@ -368,7 +376,7 @@ extern "C" __global__ void __launch_bounds__(512)
             dec[threadIdx.x] = __expf(g[(size_t)t * n_v_heads + h]);
             bet[threadIdx.x] = beta[(size_t)t * n_v_heads + h];
         }
-        __syncthreads();
+        GDN12SN_BAR();
         if (pend != nullptr) {
             // the rows' inputs, for the replay in the next verify (pend was read above)
             for (int i = threadIdx.x; i < nr * DK; i += blockDim.x) {
@@ -392,7 +400,7 @@ extern "C" __global__ void __launch_bounds__(512)
                 sk += S[e] * ks[tl][qi * PER + e];
             }
             red[tl & 1][qi][j] = sk;
-            __syncthreads();
+            GDN12SN_BAR();
             // o of the previous row (its partials were written before this barrier)
             if (tl > 0 && qi == 0)
                 ov[tl - 1][j] = (redo[(tl - 1) & 1][0][j] + redo[(tl - 1) & 1][1][j] + redo[(tl - 1) & 1][2][j] +
@@ -415,12 +423,12 @@ extern "C" __global__ void __launch_bounds__(512)
             }
             redo[tl & 1][qi][j] = o;
         }
-        __syncthreads();
+        GDN12SN_BAR();
         if (qi == 0)
             ov[nr - 1][j] = (redo[(nr - 1) & 1][0][j] + redo[(nr - 1) & 1][1][j] + redo[(nr - 1) & 1][2][j] +
                              redo[(nr - 1) & 1][3][j]) *
                             scale;
-        __syncthreads();
+        GDN12SN_BAR();
         // gated RMSNorm + int8 copy, one wave per row: lane l holds columns
         // l, 32 + l, 64 + l, 96 + l (= waves 0..3 of block_sum; the other
         // waves' zeros leave its sum unchanged)
@@ -446,7 +454,7 @@ extern "C" __global__ void __launch_bounds__(512)
                 wave_q8(yy, xq + (size_t)t * d_inner, xd + (size_t)t * (d_inner / 32), (h * DV + jj) >> 5);
             }
         }
-        __syncthreads();  // LDS reuse by the next chunk
+        GDN12SN_BAR();  // LDS reuse by the next chunk
     }
     if (pend == nullptr) {
 #pragma unroll

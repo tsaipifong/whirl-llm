@@ -190,6 +190,13 @@ extern "C" __global__ void __launch_bounds__(256)
 // uniform row base + this one 32-bit lane offset).
 #define GW_OPAQUE(x) asm volatile("" : "+v"(x))
 
+#include "lds_barrier.h"  // feat026-barrierdrain2: WHIRL_BARDRAIN bit 16 = gdn_wscan4/8 LDS-only barriers
+// valid: the barriers protect LDS staging only; out / state are written by their owner thread, never read back
+#if WHIRL_BARDRAIN & 16
+#define GW_BAR() whirl_lds_barrier()
+#else
+#define GW_BAR() __syncthreads()
+#endif
 template <int WPB>
 __device__ void gdn_wscan_impl(const float *qkv, const _Float16 *TMin, const float *Gin, const float *beta, float *state,
                                float *out, int n_tok, int n_k_heads, int n_v_heads, int qkv_stride, float scale) {
@@ -262,7 +269,7 @@ __device__ void gdn_wscan_impl(const float *qkv, const _Float16 *TMin, const flo
     for (int c = 0; c < n_chunks; ++c) {
         const int t0 = c * GCH;
         const bool full = t0 + GCH <= n_tok;
-        __syncthreads();
+        GW_BAR();
 #ifndef GW_PREFETCH
         if (!GW_FLOOR || c < 2) GW_FETCH(c);
 #endif
@@ -297,7 +304,7 @@ __device__ void gdn_wscan_impl(const float *qkv, const _Float16 *TMin, const flo
             Gs[tid] = pg;
             Bs[tid] = pb;
         }
-        __syncthreads();
+        GW_BAR();
         int v_lane = v_lane0;
         GW_OPAQUE(v_lane);
         // V (C-fragment layout) for this chunk

@@ -13,7 +13,7 @@
 //   gemm  gemmhq_<T>, gemm_c0_<T> (f16 activations, n = 2048) Swift dense weights  flops = 2 n rows cols
 //   attn  attn_wsplit1 + attn_combine (f16 KV, 24 / 4 heads, hd 256, one decode query at L = 2k / 32k / 128k)
 //   moe   moe_gu_mxfp4[w], moe_down_mxfp4[w] (Ornith MXFP4 experts, n = 1, K routed experts per launch)
-//   gdn   gdn_step_norm (one decode row, 48 v heads x 128 x 128 state)
+//   gdn   gdn_step_norm (one decode row, 48 v heads x 128 x 128 state; verify n4, n4 + pend), gdn_wscan8 (512-token prefill)
 // Weights: --mx (Swift-1.5 27B MXFP4-A) for gemv / gemvh / gemm / anchor, --moemx (Ornith-1.5-35B-A3B MXFP4) for moe;
 // without a model the cells use synthetic MXFP4 blocks of the same shapes (cell names start with "synthetic.").
 
@@ -1045,6 +1045,109 @@ void benchGdn(Env& e) {
         return r;
     };
     runCell(e, k4);
+
+    // feat026-barrierdrain2: the multi-sequence verify shape (replay mode): the same 4-row segment with snapshots AND
+    // pend recording (the kernel stores each row's k / v / decay / beta into pend and leaves the state alone); out ==
+    // the 4 single-row launches (bitwise), state untouched; --ab compares out + pend bitwise
+    if (c.k.caps.gdn_replay) {
+        constexpr int PW = dk + dv + 2;
+        auto pend = std::make_shared<Buf>(static_cast<std::size_t>(NR) * nv * PW * 4);
+        auto launchP = [&c, dq4, dg4, db4, dz4, dwn, out4, xq4, xd4, snaps, pend](hip::Function f, DevPtr st) {
+            wk::GdnSegs s;
+            s.s[0].state = st;
+            s.s[0].nrows = NR;
+            s.s[0].pend = pend->p();
+            for (int t = 0; t < NR; ++t) s.s[0].snap[t] = (*snaps)[static_cast<std::size_t>(t)].p();
+            hip::launch(f, {nv, 1, 1}, {512, 1, 1}, 0, c.s, dq4->p(), dg4->p(), db4->p(), dz4->p(), dwn->p(), out4->p(), xq4->p(), xd4->p(), nk,
+                        scale, eps, nv, ch, s);
+        };
+        Cell kp;
+        kp.ci = e.info("gdn", "gdn_step_norm", "swift.verify.n4.pend", "nk16_nv48_dk128_dv128");
+        kp.ci.settings = e.settings(sbytes * static_cast<std::uint64_t>(R), R);
+        kp.ci.bytes = (1.0 + NR) * static_cast<double>(sbytes);
+        kp.kernel = "gdn_step_norm";
+        kp.fa = c.k.gdn_step_norm;
+        kp.call = [launchP, states](hip::Function f, std::uint64_t r) { launchP(f, (*states)[static_cast<std::size_t>(r % states->size())].p()); };
+        kp.run = [&c, launchP, out4, pend, &state0](hip::Function f) {
+            Buf st(state0);
+            out4->fill(0xff);
+            pend->fill(0xff);
+            launchP(f, st.p());
+            c.sync();
+            std::vector<float> o = out4->down<float>(static_cast<std::size_t>(NR) * dinner);
+            const auto pv = pend->down<float>(static_cast<std::size_t>(NR) * nv * PW);
+            o.insert(o.end(), pv.begin(), pv.end());
+            o.push_back(st.down<float>(state0.size()) == state0 ? 1.f : 0.f);
+            return o;
+        };
+        kp.verify = [ref4](const std::vector<float>& got) {
+            const std::size_t no = static_cast<std::size_t>(NR) * dinner;
+            Result r;
+            r.name = "4-row replay-recording segment: out == 4 single-row launches (bitwise), state untouched";
+            r.kind = Kind::invariant;
+            r.n = no;
+            r.mismatches = got.size() > no && std::memcmp(got.data(), ref4.data(), no * 4) == 0 && got.back() == 1.f ? 0 : 1;
+            r.pass = r.mismatches == 0;
+            return r;
+        };
+        runCell(e, kp);
+    }
+
+    // feat026-barrierdrain2: gdn_wscan8 (R9700 chunked prefill scan, f16 WMMA) on a 512-token Swift prefill, inputs from
+    // one gdn_wprep launch; reference = this object's run (bitwise; accuracy is test_gdn's "gdn_wprep + gdn_wscan8 vs
+    // CPU"); --ab compares out + state bitwise
+    if (c.k.gdn_wprep && c.k.gdn_wscan8) {
+        constexpr int NP = 512, NCH = (NP + 63) / 64;
+        std::vector<float> qkvp = c.randn(static_cast<std::size_t>(NP) * ch);
+        for (int t = 0; t < NP; ++t)
+            for (int hh = 0; hh < 2 * nk; ++hh) {
+                float* p = qkvp.data() + static_cast<std::size_t>(t) * ch + static_cast<std::size_t>(hh) * dk;
+                double s = 0;
+                for (int i = 0; i < dk; ++i) s += static_cast<double>(p[i]) * p[i];
+                const float r = static_cast<float>(1.0 / std::sqrt(s));
+                for (int i = 0; i < dk; ++i) p[i] *= r;
+            }
+        auto dqp = std::make_shared<Buf>(qkvp), dgp = std::make_shared<Buf>(c.randu(static_cast<std::size_t>(NP) * nv, -1.5f, -0.01f)),
+             dbp = std::make_shared<Buf>(c.randu(static_cast<std::size_t>(NP) * nv, 0.05f, 0.95f));
+        const std::size_t gsz = static_cast<std::size_t>(NCH) * nv * 64;
+        auto Wp = std::make_shared<Buf>(gsz * 128 * 4), Gp = std::make_shared<Buf>(gsz * 4),
+             outp = std::make_shared<Buf>(static_cast<std::size_t>(NP) * dinner * 4);
+        hip::launch(c.k.gdn_wprep, {nv, NCH, 1}, {256, 1, 1}, 0, c.s, dqp->p(), dgp->p(), dbp->p(), Wp->p(), Gp->p(), NP, nk, nv, ch);
+        c.sync();
+        Cell kw;
+        kw.ci = e.info("gdn", "gdn_wscan8", "swift.prefill.n512", "nk16_nv48_dk128_dv128");
+        kw.ci.settings = e.settings(sbytes * static_cast<std::uint64_t>(R), R);
+        kw.ci.bytes = 2.0 * static_cast<double>(sbytes) + static_cast<double>(NP) * (ch + dinner) * 4.0;
+        kw.kernel = "gdn_wscan8";
+        kw.fa = c.k.gdn_wscan8;
+        kw.call = [&c, dqp, dbp, Wp, Gp, outp, states](hip::Function f, std::uint64_t r) {
+            hip::launch(f, {nv, dv / 128, 1}, {256, 1, 1}, 0, c.s, dqp->p(), Wp->p(), Gp->p(), dbp->p(),
+                        (*states)[static_cast<std::size_t>(r % states->size())].p(), outp->p(), NP, nk, nv, ch, scale);
+        };
+        kw.run = [&c, dqp, dbp, Wp, Gp, outp, &state0](hip::Function f) {
+            Buf st(state0);
+            outp->fill(0xff);
+            hip::launch(f, {nv, dv / 128, 1}, {256, 1, 1}, 0, c.s, dqp->p(), Wp->p(), Gp->p(), dbp->p(), st.p(), outp->p(), NP, nk, nv, ch, scale);
+            c.sync();
+            std::vector<float> o = outp->down<float>(static_cast<std::size_t>(NP) * dinner);
+            const auto sv = st.down<float>(state0.size());
+            o.insert(o.end(), sv.begin(), sv.end());
+            return o;
+        };
+        auto refw = std::make_shared<std::vector<float>>(kw.run(c.k.gdn_wscan8));
+        kw.verify = [refw](const std::vector<float>& got) {
+            Result r;
+            r.name = "out + state == a reference run of this object (bitwise, run-to-run)";
+            r.kind = Kind::invariant;
+            r.n = got.size();
+            r.mismatches = got.size() == refw->size() && std::memcmp(got.data(), refw->data(), got.size() * 4) == 0 ? 0 : 1;
+            r.pass = r.mismatches == 0;
+            return r;
+        };
+        runCell(e, kw);
+    } else {
+        c.rep.skip("gdn", "bench gdn_wscan8", "kernel not in this code object");
+    }
 }
 
 }  // namespace

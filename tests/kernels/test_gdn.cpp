@@ -324,6 +324,33 @@ void testGdn(Ctx& c) {
             c.sync();
             c.rep.add(tolRms("gdn_wprep + gdn_wscan8 (f16 WMMA) out vs CPU", dout.down<float>(out.size()), out, 2e-2));
             c.rep.add(tolRms("gdn_wscan8 final state vs CPU", dst.down<float>(st.size()), st, 2e-2));
+            // feat026-barrierdrain2: WHIRL_KT_BD_HSACO = a WHIRL_BARDRAIN candidate object: its gdn_wscan8 (and
+            // gdn_wscan4, grid y = 2x, 128 threads) on the same gdn_wprep output == this object's same kernel, bitwise
+            // (out + state), 3 repeats each; absent -> no result
+            for (const char* nm : {"gdn_wscan8", "gdn_wscan4"}) {
+                const hip::Function xs = xFn(c, "WHIRL_KT_BD_HSACO", nm), fs = c.fnOpt(nm);
+                if (!xs || !fs) continue;
+                const bool w4 = nm[9] == '4';
+                auto runW = [&](hip::Function f) {
+                    Buf xst(state0), xout(out.size() * 4);
+                    hip::launch(f, {kNv, (w4 ? 2u : 1u) * (kDv / 128), 1}, {w4 ? 128u : 256u, 1, 1}, 0, c.s, dq.p(), W.p(), G.p(),
+                                db.p(), xst.p(), xout.p(), n, kNk, kNv, kCh, kScale);
+                    c.sync();
+                    return std::make_pair(xout.down<float>(out.size()), xst.down<float>(st.size()));
+                };
+                const auto ref = runW(fs);
+                {
+                    std::size_t xbad = 0;
+                    for (int rep = 0; rep < 3; ++rep) xbad += runW(xs) != ref;
+                    Result r;
+                    r.name = std::string(nm) + " candidate object == shipped (out + state, 3 runs)";
+                    r.kind = Kind::invariant;
+                    r.n = 3;
+                    r.mismatches = xbad;
+                    r.pass = xbad == 0;
+                    c.rep.add(r);
+                }
+            }
         }
         if (c.k.gdn_sx_prep && c.k.gdn_sx_scan) {
             // GDN-8S (gfx1151): strix-llama.cpp f16-WMMA chunks, CL = 32, same tolerance class as gdn_wscan8
@@ -617,6 +644,53 @@ void testGdn(Ctx& c) {
                 r.pass = false;
                 r.note += !untouched ? " (recording run modified the state)" : " (recording run output differs)";
             }
+            c.rep.add(r);
+        }
+        // feat026-barrierdrain2: WHIRL_KT_BD_HSACO = a WHIRL_BARDRAIN candidate object: its gdn_step_norm on a
+        // multi-chunk segment (40 rows = chunks 16 + 16 + 8, snapshots on rows < 15) recording pend, then a replay of
+        // 4 kept rows + the 40 rows in ONE launch (pend read, then rewritten, by the same kernel) == this object's,
+        // bitwise (out, xq, xd, state, pend, snapshots of both launches), 3 repeats; absent -> no result
+        if (const hip::Function xs = xFn(c, "WHIRL_KT_BD_HSACO", "gdn_step_norm"); xs && c.k.caps.gdn_replay) {
+            const int nL = 40, PW = kDk + kDv + 2, nsL = std::min(nL, wk::kGdnMaxSnap);
+            std::vector<float> qL, gL, bL;
+            inputs(nL, qL, gL, bL);
+            const std::vector<float> zL = c.randn(static_cast<std::size_t>(nL) * kDInner);
+            Buf dqL(qL), dgL(gL), dbL(bL), dzL(zL);
+            const std::size_t noL = static_cast<std::size_t>(nL) * kDInner;
+            auto runL = [&](hip::Function f) {
+                std::vector<std::vector<float>> res;
+                Buf st(state0), pend(static_cast<std::size_t>(nL) * kNv * PW * 4), y(noL * 4), q(noL), d(noL / 32 * 4);
+                std::vector<Buf> sn;
+                for (int t = 0; t < nsL; ++t) sn.emplace_back(sbytes);
+                wk::GdnSegs s;
+                s.s[0].state = st.p();
+                s.s[0].nrows = nL;
+                s.s[0].pend = pend.p();
+                for (int t = 0; t < nsL; ++t) s.s[0].snap[t] = sn[static_cast<std::size_t>(t)].p();
+                for (int pass = 0; pass < 2; ++pass) {
+                    if (pass == 1) s.s[0].npend = 4;  // replay 4 kept rows, then the 40 rows again (pend rewritten)
+                    hip::launch(f, {kNv, 1, 1}, {512, 1, 1}, 0, c.s, dqL.p(), dgL.p(), dbL.p(), dzL.p(), dwn.p(), y.p(), q.p(), d.p(),
+                                kNk, kScale, kEps, kNv, kCh, s);
+                    c.sync();
+                    res.push_back(y.down<float>(noL));
+                    const auto qv = q.down<std::int8_t>(noL);
+                    res.emplace_back(qv.begin(), qv.end());
+                    res.push_back(d.down<float>(noL / 32));
+                    res.push_back(st.down<float>(state0.size()));
+                    res.push_back(pend.down<float>(static_cast<std::size_t>(nL) * kNv * PW));
+                    for (int t = 0; t < nsL; ++t) res.push_back(sn[static_cast<std::size_t>(t)].down<float>(state0.size()));
+                }
+                return res;
+            };
+            const auto ref = runL(c.k.gdn_step_norm);
+            std::size_t xbad = 0;
+            for (int rep = 0; rep < 3; ++rep) xbad += runL(xs) != ref;
+            Result r;
+            r.name = "gdn_step_norm candidate object == shipped (40-row multi-chunk + pend replay in one launch; 3 runs)";
+            r.kind = Kind::invariant;
+            r.n = 3;
+            r.mismatches = xbad;
+            r.pass = xbad == 0;
             c.rep.add(r);
         }
         // two segments (rows 0..2 on state A, rows 3..5 on state B) in one launch == separate
