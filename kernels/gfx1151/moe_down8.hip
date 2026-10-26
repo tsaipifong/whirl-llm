@@ -38,6 +38,12 @@
 //   10  1   8  0  1  0  1
 //   11  1   8  0  1  1  1
 //   12  1   4  0  1  0  1
+// moeskip contract (feat027-moeskip, fast only; feat026-moe-skipsafe): a token's slot ids are a kept prefix, then -1
+// (dropped, weight 0). The candidates run the lane steps of the kept prefix only, kt = md8_kept (the loop of feat027's
+// moe_kept: K when no id is -1): ns = kt * m, steps past it clamped to step ns - 1 (a kept slot), so no load uses an
+// id -1; the lane -> unit map and order are those of feat027's moe_down_impl loop over kt * nu. Without -1 kt == K
+// (unchanged values). The nu % 32 != 0 fallback is the shipped body, skip-aware once feat027 is merged. The LX stage
+// still copies all K rows of token t (in bounds; dropped rows are never consumed).
 
 #ifndef WHIRL_MD8_MXFP4
 #define WHIRL_MD8_MXFP4 0
@@ -85,6 +91,13 @@ __device__ __forceinline__ float md8_unit(const Md8Ld &o) {
     return dl * pk_d(o.xw) * acc;
 }
 
+// kept slots of token t (moeskip: kept prefix, then -1); == feat027 moe_kept, K without moeskip
+__device__ __forceinline__ int md8_kept(const int *__restrict__ ids, int t, int K) {
+    int kt = K;
+    while (kt > 1 && ids[(size_t)t * K + kt - 1] < 0) --kt;
+    return kt;
+}
+
 template <int KB, bool DB, bool EP, bool LX, bool NG = false>
 __device__ void md8_impl(const uint8_t *__restrict__ W, uint64_t row_bytes, int E, const int8_t *__restrict__ xq,
                          const float *__restrict__ xd, const int *__restrict__ ids, const float *__restrict__ w,
@@ -125,7 +138,7 @@ __device__ void md8_impl(const uint8_t *__restrict__ W, uint64_t row_bytes, int 
         }
     }
     const int m = nu / WARP;  // lane steps per expert
-    const int ns = K * m;     // lane steps in all
+    const int ns = md8_kept(ids, t, K) * m;  // lane steps of the kept slots (moeskip; K * m without it)
     float acc = 0.f;
     // step i of this lane: expert slot k = i / m, unit uu = lane + 32 (i % m)  (== shipped u = lane + 32 i)
     auto load = [&](Md8Ld &o, float &wp, int i) {
@@ -227,6 +240,10 @@ __device__ void md8_impl(const uint8_t *__restrict__ W, uint64_t row_bytes, int 
 #define MD8_ID12 MD8_BODY(4, false, true, false, true)
 #define MD8_CAT2(a, b) a##b
 #define MD8_CAT(a, b) MD8_CAT2(a, b)
+
+// skip-safety marker (feat026-moe-skipsafe): every object with md8 code has id -1 handling; kt family moedown8
+// refuses the id -1 cases for an object without it (built before this change)
+extern "C" __global__ void md8_skipsafe_v1() {}
 
 #if WHIRL_MD8_DEV
 MD8_SIG(md8d1_mxfp4) MD8_ID1
