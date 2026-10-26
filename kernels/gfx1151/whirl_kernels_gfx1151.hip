@@ -29,6 +29,7 @@
 #include "misc_probe_requant.hip"  // WMMA probes, Q6_K / Q8_0 -> Q4_K requant
 #include "draft_pick.hip"          // 2-bit MTP draft head, token tables, picks
 #include "moe.hip"                 // mixture of experts (incl. MXFP4 generic entries)
+#include "moe_down8.hip"           // MXFP4 decode down load-schedule candidates (empty unless a tune id is set)
 #include "sample_cand.hip"         // sampling candidates
 #include "prefill_fused.hip"       // prefill activation fusions (f16)
 #include "../moe_f.hip"            // precise MoE decode experts (f32 activations; shared with gfx1201)

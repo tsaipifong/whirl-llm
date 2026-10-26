@@ -223,6 +223,7 @@ void testVision(Ctx& c);  // "vision": encoder kernels (own code object) vs CPU
 void testMoe(Ctx& c);
 void testMoeMx(Ctx& c);
 void testMoeF(Ctx& c);  // "moef": precise MoE decode experts moe_gu_f_* / moe_down_f_*
+void testMoeDown8(Ctx& c);  // "moedown8": gfx1151 moe_down_mxfp4 candidates (WHIRL_KT_MD8_HSACO) bitwise == shipped
 // gfx1201 precise MoE prefill gemmr_moe* == gemm_moe + moe_act_f16 (test_moe_gu.cpp), called by testMoeMx
 void gemmrChecks(Ctx& c, const HostMat& gate, const HostMat& up, const HostMat& down, int R, int K);
 // 8060S grouped expert GEMMs (test_moe_gu.cpp), called by testMoe / testMoeMx
