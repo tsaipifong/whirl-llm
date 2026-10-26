@@ -978,15 +978,30 @@ void loadOrTuneImpl(Model& m, const std::string& model_path, std::string& log) {
             nu::applyOverride(p, nu::Item::specsample, "SPEC_SAMPLE", *v, *v != "0", t.mtp && t.k_spec_sample);
         // feat027-i8qk: int8 Q.K^T prefill attention (fast only, opt-in: --fast=...,i8qk, --fast=all or
         // WHIRL_ATTN_I8QK=1). int8 attention is a fast-only technique by the mode standard, so precise / balance never
-        // run it: there WHIRL_ATTN_I8QK is ignored with a note in the numerics line (feat027-i8qk-r1).
+        // run it: there WHIRL_ATTN_I8QK is ignored (plan and numerics line unchanged) with a note in the load log
+        // (applyFastOnlyOverride, the same semantics as moeshx; feat027-i8qk-r2).
         if (const auto v = envGet("ATTN_I8QK"); v && !v->empty())
-            nu::applyFastOnlyOverride(p, nu::Item::i8qk, "ATTN_I8QK", *v, *v != "0", t.k_attn_i8qk);
+            if (const std::string ign = nu::applyFastOnlyOverride(p, nu::Item::i8qk, "ATTN_I8QK", *v, *v != "0", t.k_attn_i8qk);
+                !ign.empty())
+                log += "  " + ign + "\n";
         m.attn_i8qk = p.mode == nu::Mode::fast && p.on(nu::Item::i8qk);
-        // minimum size (segment cost model, feat027-i8qk-r1.PRIOR_ART.md; GPU tunes it): keys / queries x keys
-        if (const auto v = envGet("ATTN_I8QK_MIN"); v && !v->empty())
-            m.attn_i8qk_min_keys = static_cast<std::uint32_t>(std::strtoul(v->c_str(), nullptr, 10));
-        if (const auto v = envGet("ATTN_I8QK_MIN_WORK"); v && !v->empty())
-            m.attn_i8qk_min_work = std::strtoull(v->c_str(), nullptr, 10);
+        // minimum size (segment cost model, feat027-i8qk-r1.PRIOR_ART.md; GPU tunes it): keys / queries x keys.
+        // Strict parse (feat027-i8qk-r2): a value that is not a plain number in range keeps the default with a warning
+        // (strtoul would read "8k" as 8 and "abc" as 0, i.e. int8 at any length).
+        if (const auto v = envGet("ATTN_I8QK_MIN"); v && !v->empty()) {
+            if (const auto n = parseUnsigned(*v, std::numeric_limits<std::uint32_t>::max()))
+                m.attn_i8qk_min_keys = static_cast<std::uint32_t>(*n);
+            else
+                log += std::format("  warning: WHIRL_ATTN_I8QK_MIN={} ignored (not a whole number of keys <= {}); keeps {}\n", *v,
+                                   std::numeric_limits<std::uint32_t>::max(), m.attn_i8qk_min_keys);
+        }
+        if (const auto v = envGet("ATTN_I8QK_MIN_WORK"); v && !v->empty()) {
+            if (const auto n = parseUnsigned(*v, std::numeric_limits<std::uint64_t>::max()))
+                m.attn_i8qk_min_work = *n;
+            else
+                log += std::format("  warning: WHIRL_ATTN_I8QK_MIN_WORK={} ignored (not a whole number of queries x keys); keeps {}\n",
+                                   *v, m.attn_i8qk_min_work);
+        }
         if (m.attn_i8qk && (m.attn_i8qk_min_keys != ops::kI8qkMinKeys || m.attn_i8qk_min_work != ops::kI8qkMinWork))
             p.items[static_cast<std::size_t>(nu::Item::i8qk)].note +=
                 std::format(" [min keys {}, min queries x keys {}]", m.attn_i8qk_min_keys, m.attn_i8qk_min_work);

@@ -1042,29 +1042,53 @@ void testNumerics() {
         try { (void)nu::parseMode("balance:i8qk", "t"); } catch (const std::invalid_argument&) { thr_b = true; }
         try { (void)nu::parseMode("balance:all", "t"); } catch (const std::invalid_argument&) { thr_ba = true; }
         CHECK(thr_p && thr_b && thr_ba);
-        // WHIRL_ATTN_I8QK=1 in precise / balance: ignored, item off, label unchanged, note recorded
+        // WHIRL_ATTN_I8QK=1 in precise / balance (r2: the moeshx semantics of applyFastOnlyOverride): ignored, the plan
+        // is unchanged (item off, no override, label / lossy flag / numerics line identical) and the returned note
+        // goes to the load log (tune.cpp)
         for (const nu::Request* r : {&rp, &rb}) {
             nu::Plan pl = nu::plan(*r, ti);
+            const std::string before = nu::logLine(pl), label0 = nu::modeLabel(pl);
             const bool lossy0 = pl.lossy_override;
-            const std::string label0 = nu::modeLabel(pl);
-            nu::applyFastOnlyOverride(pl, Item::i8qk, "ATTN_I8QK", "1", true, true);
+            const std::string ign = nu::applyFastOnlyOverride(pl, Item::i8qk, "ATTN_I8QK", "1", true, true);
             CHECK(!pl.on(Item::i8qk) && pl.lossy_override == lossy0 && nu::modeLabel(pl) == label0);
-            CHECK(pl.overrides.size() == 1 && pl.overrides[0].find("WHIRL_ATTN_I8QK=1: ignored (i8qk is a fast-only item") != std::string::npos);
-            CHECK(nu::logLine(pl).find("ignored (i8qk is a fast-only item") != std::string::npos);
+            CHECK(pl.overrides.empty() && nu::logLine(pl) == before);
+            CHECK(ign == std::string("WHIRL_ATTN_I8QK=1 ignored: i8qk is a fast-only item (") + (r == &rp ? "precise" : "balance") +
+                             " never takes it)");
             nu::Plan p0 = nu::plan(*r, ti);  // =0: nothing to note
-            nu::applyFastOnlyOverride(p0, Item::i8qk, "ATTN_I8QK", "0", false, true);
+            CHECK(nu::applyFastOnlyOverride(p0, Item::i8qk, "ATTN_I8QK", "0", false, true).empty());
             CHECK(!p0.on(Item::i8qk) && p0.overrides.empty());
         }
-        // fast: the switch works both ways (plain fast + =1 -> on; fast:all + =0 -> off); without kernels: off
+        // fast: the switch works both ways (plain fast + =1 -> on; fast:all + =0 -> off); without kernels: off; no note
         nu::Plan pf = nu::plan(rf, ti);
-        nu::applyFastOnlyOverride(pf, Item::i8qk, "ATTN_I8QK", "1", true, true);
+        CHECK(nu::applyFastOnlyOverride(pf, Item::i8qk, "ATTN_I8QK", "1", true, true).empty());
         CHECK(pf.on(Item::i8qk) && pf.overrides.size() == 1 && pf.overrides[0].find("i8qk on") != std::string::npos);
         nu::Plan pa = nu::plan(ra, ti);
-        nu::applyFastOnlyOverride(pa, Item::i8qk, "ATTN_I8QK", "0", false, true);
+        CHECK(nu::applyFastOnlyOverride(pa, Item::i8qk, "ATTN_I8QK", "0", false, true).empty());
         CHECK(!pa.on(Item::i8qk));
         nu::Plan pn = nu::plan(rf, ti);
-        nu::applyFastOnlyOverride(pn, Item::i8qk, "ATTN_I8QK", "1", true, false);
+        CHECK(nu::applyFastOnlyOverride(pn, Item::i8qk, "ATTN_I8QK", "1", true, false).empty());
         CHECK(!pn.on(Item::i8qk));
+        // r2 (review N1): i8qk is a fast item, so a fast plan with only i8qk on does not say "fast runs as balance";
+        // with i8qk off (plain fast on a target without kvq4 / relaxacc) it still does
+        nu::Plan pi = nu::plan(nu::parseMode("fast:i8qk", "t"), ti);
+        CHECK(pi.on(Item::i8qk) && !pi.on(Item::kvq4) && !pi.on(Item::relaxacc));
+        CHECK(nu::logLine(pi).find("fast runs as balance") == std::string::npos);
+        nu::Plan pi0 = nu::plan(nu::parseMode("fast:i8qk", "t"), ti);
+        CHECK(nu::applyFastOnlyOverride(pi0, Item::i8qk, "ATTN_I8QK", "0", false, true).empty() && !pi0.on(Item::i8qk));
+        CHECK(nu::logLine(pi0).find("fast runs as balance") != std::string::npos);
+    }
+    // feat027-i8qk-r2 (review N2): strict unsigned parse for WHIRL_ATTN_I8QK_MIN / _MIN_WORK - a typo keeps the
+    // default (tune.cpp warns) instead of strtoul's 0 / prefix, which would run int8 at any length
+    {
+        const std::uint64_t u32 = 0xffffffffull, u64 = ~0ull;
+        CHECK(parseUnsigned("8192", u32) == std::optional<std::uint64_t>(8192));
+        CHECK(parseUnsigned("0", u32) == std::optional<std::uint64_t>(0));  // an explicit 0 is allowed (any size)
+        CHECK(parseUnsigned("4294967295", u32) == std::optional<std::uint64_t>(u32));
+        CHECK(!parseUnsigned("4294967296", u32));  // > uint32: was silently truncated
+        CHECK(parseUnsigned("18446744073709551615", u64) == std::optional<std::uint64_t>(u64));
+        CHECK(!parseUnsigned("18446744073709551616", u64));  // from_chars result_out_of_range
+        for (const char* bad : {"", "8k", "abc", " 8192", "8192 ", "+8192", "-1", "1e4", "0x2000", "8,192", "81 92"})
+            CHECK(!parseUnsigned(bad, u64));
     }
     // per-item environment overrides
     {

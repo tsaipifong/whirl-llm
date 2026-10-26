@@ -317,16 +317,13 @@ void applyOverride(Plan& p, Item it, const char* var, const std::string& value, 
     }
 }
 
-void applyFastOnlyOverride(Plan& p, Item it, const char* var, const std::string& value, bool forced, bool applicable) {
+std::string applyFastOnlyOverride(Plan& p, Item it, const char* var, const std::string& value, bool forced, bool applicable) {
     if (p.mode == Mode::fast) {
         applyOverride(p, it, var, value, forced, applicable);
-        return;
+        return {};
     }
-    ItemState& s = p.items[static_cast<std::size_t>(it)];
-    s.enabled = false;
-    if (forced)
-        p.overrides.push_back(std::format("WHIRL_{}={}: ignored ({} is a fast-only item; {} never runs it)", var, value, itemName(it),
-                                          modeName(p.mode)));
+    if (!forced) return {};
+    return std::format("WHIRL_{}={} ignored: {} is a fast-only item ({} never takes it)", var, value, itemName(it), modeName(p.mode));
 }
 
 std::string modeLabel(const Plan& p) {
@@ -346,7 +343,7 @@ std::string logLine(const Plan& p) {
         l += std::string(" - f16/f32 prefill activations, ") + (p.q8dec ? "" : "f16 decode / verify activations, ") + "f32 DeltaNet, f16 KV";
     else l += " - enabled: " + (en.empty() ? std::string("none") : en);
     if (p.mode != Mode::precise || !sk.empty()) l += "; skipped: " + (sk.empty() ? std::string("none") : sk);
-    if (p.mode == Mode::fast && !p.on(Item::kvq4) && !p.on(Item::relaxacc))
+    if (p.mode == Mode::fast && !p.on(Item::kvq4) && !p.on(Item::relaxacc) && !p.on(Item::i8qk))
         l += "; no fast item applies here: fast runs as balance";
     for (const std::string& o : p.overrides) l += "; " + o;
     l += std::string("; decode: ") + (p.q8dec ? k_q8dec : k_f16dec);
