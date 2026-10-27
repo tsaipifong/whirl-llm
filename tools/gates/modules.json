@@ -217,19 +217,19 @@
   "handles": {
    "id": "M1", "desc": "RAII device handles (DevBuf / PinnedBuf / EventH / StreamH)",
    "paths": ["src/device/handles.h"], "callers": "rdeps",
-   "steps": ["cpu_device", "srv_gpu_select"],
-   "gpus": {"srv_gpu_select": 2},
+   "steps": ["cpu_device", "srv_gpu_select", "srv_kvram719"],
+   "gpus": {"srv_gpu_select": 2, "srv_kvram719": 1},
    "pending": [{"step": "cpu_raw_free_check", "lands_in": "S11 (tools/gates/raw_free_check.ps1)"}],
-   "manual": ["P-719: kvram719 R9700 (tools/repro/kvram719_tier.ps1)"]
+   "manual": []
   },
   "ckpt_store": {
    "id": "M2", "desc": "checkpoint buffers (CkptStore)",
    "paths": ["src/cache/ckpt_store.*"],
    "steps": ["cpu_cache", "cpu_server", "cpu_device", "golden_swift", "golden_moe", "srv_mt_precise", "srv_mt_precise_moe",
-             "srv_cache_balance", "srv_cache_precise", "srv_gpu_select"],
+             "srv_cache_balance", "srv_cache_precise", "srv_gpu_select", "srv_kvram719"],
    "gpus": {"golden_swift": 2, "golden_moe": 2, "srv_mt_precise": 2, "srv_mt_precise_moe": 2, "srv_cache_balance": 1,
-            "srv_cache_precise": 1, "srv_gpu_select": 2},
-   "manual": ["whirl-server-tests prefix/sys/pool/doc_qa/tail_ck x20 (flake check)", "P-719: kvram719 R9700",
+            "srv_cache_precise": 1, "srv_gpu_select": 2, "srv_kvram719": 1},
+   "manual": ["whirl-server-tests prefix/sys/pool/doc_qa/tail_ck x20 (flake check)",
               "P-size: startup sizing lines == S0 baseline", "P-sess: session anchors d5fc637 vs HEAD, both GPUs"]
   },
   "page_pool": {
@@ -257,9 +257,9 @@
    "paths": ["src/server/tier_bridge.*", "src/tier/kv_tier.*", "src/tier/evict_policy.h", "src/tier/idle_flush.h"],
    "lands_on": "arch024-s6b (S6a / S6b; restore half on arch024-s7)",
    "steps": ["cpu_tier", "cpu_server", "cpu_device", "golden_swift", "golden_moe", "srv_tier_verify", "srv_cache_balance",
-             "srv_cache_precise", "srv_gpu_select"],
-   "gpus": {"golden_swift": 2, "golden_moe": 2, "srv_tier_verify": 2, "srv_cache_balance": 1, "srv_cache_precise": 1, "srv_gpu_select": 2},
-   "manual": ["RAM tier size changed: run srv_cache_balance / srv_cache_precise on the 8060S", "P-719: kvram719 R9700", "P-size", "P-sess"]
+             "srv_cache_precise", "srv_gpu_select", "srv_kvram719"],
+   "gpus": {"golden_swift": 2, "golden_moe": 2, "srv_tier_verify": 2, "srv_cache_balance": 1, "srv_cache_precise": 1, "srv_gpu_select": 2, "srv_kvram719": 1},
+   "manual": ["RAM tier size changed: run srv_cache_balance / srv_cache_precise on the 8060S", "P-size", "P-sess"]
   },
   "protocol": {
    "id": "M6", "desc": "HTTP / OpenAI protocol / streaming (stream, EngineApi)",
@@ -272,9 +272,9 @@
   "engine_gov": {
    "id": "M7", "desc": "memory governor glue (engine_gov.cpp; policy memgov::Governor unchanged)",
    "paths": ["src/server/engine_gov.cpp"], "lands_on": "arch024 S9 (a214b6f)",
-   "steps": ["cpu_server", "srv_balance", "srv_gpu_select"],
-   "gpus": {"srv_balance": 1, "srv_gpu_select": 2},
-   "manual": ["whirl-server-tests governor / governor_restore / startup_adjust / vram_watch", "vram_hog scenario once", "P-719", "P-size"]
+   "steps": ["cpu_server", "srv_balance", "srv_gpu_select", "srv_kvram719"],
+   "gpus": {"srv_balance": 1, "srv_gpu_select": 2, "srv_kvram719": 1},
+   "manual": ["whirl-server-tests governor / governor_restore / startup_adjust / vram_watch", "vram_hog scenario once", "P-size"]
   },
   "threads": {
    "id": "M8", "desc": "engine thread ownership checks",

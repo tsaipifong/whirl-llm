@@ -260,6 +260,12 @@ AddStep "srv_tier_verify" $true (GateCmd $SW "tier" "balance" ($ram8s + @("--ser
 # one after the other); the other GPU's gate is a separate release_gate invocation. One GPU: SKIP.
 AddStep "srv_gpu_select" $true @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\gates\gpu_select_check.ps1"), "-Build", $Build, "-Model", $SW,
                                  "-Device", $Device, "-Port", "$($port + 3)", "-Work", "@WORK@") { param($o, $c) $c -eq 0 -and ($o -match "(?m)^gpu select check: (ok|SKIP)") }
+# arch025-kvram719tag: the kvram719 repro (tools/repro/kvram719_tier.ps1) as a gate step: a RAM tier over what the
+# Windows limit for GPU-locked memory leaves is lowered by the server, the request is answered, no hipError 719, the
+# selected adapter stays under its limit and no other HIP adapter is charged (REVIEW-B0 A1). Exit 0 + "kvram719: PASS"
+# (INVALID = no RAM tier in use = exit 3 = not a pass). Only this gate's GPU runs. Replaces the free-text "P-719" manual items.
+AddStep "srv_kvram719" $true @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\repro\kvram719_tier.ps1"), "-Exe", $exe["whirl-server"], "-Model", $SW,
+                               "-Device", $Device, "-Port", "$($port + 6)", "-Work", "@WORK@") { param($o, $c) $c -eq 0 -and ($o -match "(?m)^kvram719: PASS") }
 # arch024-S14 (PLAN c-3) environment matrix on this gate's GPU (tools/gates/env_matrix.ps1; one server at a time, the
 # other GPU only enumerated): E1 one vs two GPUs visible x default / --device + another program's pinned memory;
 # E3 the other GPU hidden; E4 VRAM + pinned held by another program during server gate basic; E7 WHIRL_CKPT_HOST=1

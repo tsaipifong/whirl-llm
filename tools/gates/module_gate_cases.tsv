@@ -7,16 +7,16 @@ case	modules_file	args	exit	steps	line
 # Not in c-1's text but in its intent: srv_gpu_select = P-719's GPU half (PLAN A3: pinned-memory owners M1/M2/M5/M7);
 # cpu_device = the F1 tracking-mode tests (NullBackend, whirl-device-tests, S2) that c-1 names for M2-M5.
 M1 handles: callers by includers; engine.* include handles.h and are in no module = full gate	repo	-Module handles -NoMapSteps	0	*	includer\(s\) in no module
-M2 ckpt_store	repo	-Module ckpt_store -NoMapSteps	0	cpu_cache,cpu_device,cpu_server,golden_swift,golden_moe,srv_mt_precise,srv_mt_precise_moe,srv_cache_balance,srv_cache_precise,srv_gpu_select	P-sess
+M2 ckpt_store	repo	-Module ckpt_store -NoMapSteps	0	cpu_cache,cpu_device,cpu_server,golden_swift,golden_moe,srv_mt_precise,srv_mt_precise_moe,srv_cache_balance,srv_cache_precise,srv_gpu_select,srv_kvram719	P-sess
 M3 page_pool	repo	-Module page_pool -NoMapSteps	0	cpu_cache,cpu_device,cpu_server,golden_swift,golden_moe,srv_mt_precise,srv_mt_precise_moe,srv_cache_balance,srv_cache_precise	when include/whirl/prefill_schedule.h changes add -Steps seq_swift_precise
 M4 prefix_store	repo	-Module prefix_store -NoMapSteps	0	cpu_cache,cpu_device,cpu_server,golden_swift,golden_moe,srv_mt_precise,srv_mt_precise_moe,srv_cache_balance,srv_cache_precise	COLD-RESUME
-M5 tier_bridge	repo	-Module tier_bridge -NoMapSteps	0	cpu_tier,cpu_device,cpu_server,golden_swift,golden_moe,srv_cache_balance,srv_cache_precise,srv_tier_verify,srv_gpu_select	both GPUs.*srv_tier_verify
+M5 tier_bridge	repo	-Module tier_bridge -NoMapSteps	0	cpu_tier,cpu_device,cpu_server,golden_swift,golden_moe,srv_cache_balance,srv_cache_precise,srv_tier_verify,srv_gpu_select,srv_kvram719	both GPUs.*srv_tier_verify
 M6 protocol	repo	-Module protocol -NoMapSteps	0	cpu_pins,cpu_server,golden_swift,srv_fs_swift,srv_fs_moe	prompt token hash
-M7 engine_gov	repo	-Module engine_gov -NoMapSteps	0	cpu_server,srv_balance,srv_gpu_select	vram_hog
-M8 threads: owner checks sit in M2-M5, M7 (c-1: by caller) = their union + the gate log scan (c-1 M8 row)	repo	-Module threads -NoMapSteps	0	cpu_cache,cpu_tier,cpu_device,cpu_server,cpu_logscan_selftest,golden_swift,golden_moe,srv_balance,srv_mt_precise,srv_mt_precise_moe,srv_cache_balance,srv_cache_precise,srv_tier_verify,srv_gpu_select	module threads: callers' modules: ckpt_store, page_pool, prefix_store, tier_bridge, engine_gov
+M7 engine_gov	repo	-Module engine_gov -NoMapSteps	0	cpu_server,srv_balance,srv_gpu_select,srv_kvram719	vram_hog
+M8 threads: owner checks sit in M2-M5, M7 (c-1: by caller) = their union + the gate log scan (c-1 M8 row)	repo	-Module threads -NoMapSteps	0	cpu_cache,cpu_tier,cpu_device,cpu_server,cpu_logscan_selftest,golden_swift,golden_moe,srv_balance,srv_mt_precise,srv_mt_precise_moe,srv_cache_balance,srv_cache_precise,srv_tier_verify,srv_gpu_select,srv_kvram719	module threads: callers' modules: ckpt_store, page_pool, prefix_store, tier_bridge, engine_gov
 X contract = full gate	repo	-Module contract -NoMapSteps	0	*	full gate
 dev-only notice printed	repo	-Module ckpt_store -NoMapSteps	0	-	DEV-TIME FAST FEEDBACK ONLY
-two modules = union	repo	-Module protocol,engine_gov -NoMapSteps	0	cpu_pins,cpu_server,golden_swift,srv_balance,srv_fs_swift,srv_fs_moe,srv_gpu_select	-
+two modules = union	repo	-Module protocol,engine_gov -NoMapSteps	0	cpu_pins,cpu_server,golden_swift,srv_balance,srv_fs_swift,srv_fs_moe,srv_gpu_select,srv_kvram719	-
 -Steps adds to a module	repo	-Module page_pool -Steps seq_swift_precise -NoMapSteps	0	cpu_cache,cpu_device,cpu_server,golden_swift,golden_moe,seq_swift_precise,srv_mt_precise,srv_mt_precise_moe,srv_cache_balance,srv_cache_precise	-
 plain -List unchanged	repo	-List	0	*	-
 block: unknown module	repo	-Module no_such_module -NoMapSteps	2	-	unknown module 'no_such_module'
@@ -38,7 +38,7 @@ block: unknown caller module	callers_bad	-Module m -NoMapSteps	2	-	unknown modul
 two modules warn	repo	-Module protocol,engine_gov -NoMapSteps	0	-	WARNING: 2 modules
 K2 block: -Module without -ImpactRange / -NoMapSteps	repo	-Module tier_bridge	2	-	give -ImpactRange
 K2 block: both -ImpactRange and -NoMapSteps	repo	-Module tier_bridge -NoMapSteps -ImpactRange bf31527^..bf31527	2	-	-ImpactRange and -NoMapSteps together
-K2 pass: bf31527 (kv tier dedup race): the map's c-2 steps join the table (+ arch025-Q1/Q3 safety steps: src/tier is lifetime)	repo	-Module tier_bridge -ImpactRange bf31527^..bf31527	0	cpu_tier,cpu_device,cpu_pins,cpu_server,cpu_safety_selftest,cpu_asan,cpu_analyze,golden_swift,golden_moe,srv_balance,srv_fast,srv_precise_cli,srv_mt_precise,srv_mt_precise_moe,srv_fs_swift,srv_fs_moe,srv_cache_balance,srv_cache_precise,srv_tier_verify,srv_gpu_select	steps added beyond the module table: run on both GPUs, one after the other: srv_balance, srv_fast
+K2 pass: bf31527 (kv tier dedup race): the map's c-2 steps join the table (+ arch025-Q1/Q3 safety steps: src/tier is lifetime)	repo	-Module tier_bridge -ImpactRange bf31527^..bf31527	0	cpu_tier,cpu_device,cpu_pins,cpu_server,cpu_safety_selftest,cpu_asan,cpu_analyze,golden_swift,golden_moe,srv_balance,srv_fast,srv_precise_cli,srv_mt_precise,srv_mt_precise_moe,srv_fs_swift,srv_fs_moe,srv_cache_balance,srv_cache_precise,srv_tier_verify,srv_gpu_select,srv_kvram719	steps added beyond the module table: run on both GPUs, one after the other: srv_balance, srv_fast
 K2 block: impact maps the change to another module	repo	-Module protocol -ImpactRange bf31527^..bf31527	2	-	maps the change to tier_bridge
 K2 full: impact says full gate (7ec63b4 fingerprint.cpp in no module)	repo	-Module tier_bridge -ImpactRange 7ec63b4^..7ec63b4	0	*	impact.py says full gate
 K1: -Steps beyond the table get the both-GPU hint	repo	-Module protocol -NoMapSteps -Steps srv_balance	0	cpu_pins,cpu_server,golden_swift,srv_balance,srv_fs_swift,srv_fs_moe	steps added beyond the module table: run on both GPUs, one after the other: srv_balance

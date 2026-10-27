@@ -73,6 +73,9 @@ CASES = [  # name, modules json, expect ok, substring of an error (block cases)
     ("block: no steps, not full", mut(lambda m: m["a"].update(steps=[])), False, "no steps"),
     ("block: no id", mut(lambda m: m["a"].pop("id")), False, "no id"),
     ("pass: callers rdeps / list", mut(lambda m: (m["a"].update(callers="rdeps"), m["later"].update(callers=["a"]))), True, None),
+    ("block: manual free text names a gate step (arch025-kvram719tag)", mut(lambda m: m["a"].update(manual=["P-719: srv_balance R9700"])), False, "names gate step srv_balance"),
+    ("block: manual free text names a step without its prefix (arch025-kvram719tag)", mut(lambda m: m["a"].update(manual=["P-719: balance R9700"])), False, "names gate step srv_balance"),
+    ("pass: manual free text with no gate step", mut(lambda m: m["a"].update(manual=["P-size: startup sizing lines", "vram_hog scenario once"])), True, None),
     ("block: callers names an unknown module", mut(lambda m: m["a"].update(callers=["nope"])), False, "callers must be"),
     # arch025-Q7 standards: block + pass
     ("pass: complete standards (refactor / precise / balance / fast, glob entry declared early)", BASE, True, None),
