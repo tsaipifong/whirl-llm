@@ -27,6 +27,7 @@ ap.add_argument("--rev", default="HEAD")
 ap.add_argument("--n", type=int, default=200)
 ap.add_argument("--skip", type=int, default=0)
 ap.add_argument("--out", required=True)
+ap.add_argument("--exclude", default="", help="comma-separated commits to leave out (validate.py --exclude-tuned)")
 a = ap.parse_args()
 sys.path.insert(0, a.tools)
 import impact  # noqa: E402
@@ -57,12 +58,22 @@ roots = set(git("rev-list", "--max-parents=0", a.rev).split())
 for s in git("log", "--format=%h", "--no-merges", f"--skip={a.skip}", f"-{a.n}", a.rev).split():
     if any(r.startswith(s) for r in roots):
         continue  # root commit: no parent to diff against
+    if s[:7] in set(x[:7] for x in a.exclude.split(",") if x):
+        continue
     ch = impact.parse_diff(git("diff", "-U0", "--no-color", "-M", f"{s}^", s))
     prod = {p: c for p, c in ch.items() if p.startswith(("src/", "include/", "kernels/"))}
     if not prod:
         continue
     r = impact.analyze(prod, m, s, f"{s}^")
     res[s] = {"steps": sorted(r["release_gate_steps"]), "paths": sorted(r["paths"]),
-              "cpu": sorted(f"{e}:{x}" for e, v in r["cpu_tests"].items() for x in v), "kt": sorted(r["kernel_tests"])}
+              "cpu": sorted(f"{e}:{x}" for e, v in r["cpu_tests"].items() for x in v), "kt": sorted(r["kernel_tests"]),
+              # measure-tools P1: what the declared-name rule saw (absent in older tools): declared names, moved notes
+              "decl": sorted({d["name"] for d in r.get("declarations", [])}),
+              "moved": sum(1 for n in r["notes"] if "moved / re-indented" in n), "defects": r.get("map_defects", []),
+              # mt-p1 pass 5 (review4 C1): the evidence validate --pass-json needs for R-fallback-resolved (users found per
+              # changed file; the changed product files) - absent with older tools, which then cannot pass that rule
+              "users": r.get("decl_users", {}), "files": sorted(prod),
+              # mt-p1 pass 6 (review5 A-2): changed file -> the paths its own lines selected (absent with older tools)
+              "owned": r.get("paths_by_file")}
 json.dump(res, open(a.out, "w", encoding="utf-8"), indent=0)
 print(f"replay: {len(res)} commits, {round(time.time() - t0)} s ({a.tools})", file=sys.stderr)

@@ -146,8 +146,66 @@ select fewer release steps or paths. `--skip N` reports on older commits the too
 (hold-out). A touched test that no executable of the map registers counts as missed (UNPAIRED), so a test
 executable missing from the map cannot shrink the denominator. "Not narrower than the old tools" is a
 regression check only, not GPU recall: what the old map missed, the new one may miss too. Exit 0 = every
-named case hit, every rate >= 95 %, nothing narrowed; 1 otherwise. A changed host function that dispatches
+named case hit, every rate >= 95 %, nothing narrowed; 1 otherwise; 2 = no result (a replay failed, or a
+finished-replay file given with `--base-json` / `--new-json` / `--pass-json` does not exist: `validate: INCOMPLETE`
+names it). A changed host function that dispatches
 kernels (a host user of a `.hip` file) lists those kernels' tests (kernel-test functions, `kt_full`).
+
+A changed line outside any function (measure-tools P1, `tools/impact/declscan.py`) selects the users of the
+name it **declares** (a member `std::vector<DevBuf> allocations;` selects the functions that use
+`allocations`, not every function that names `DevBuf`); type names are reported as `declarations ... type`.
+A declaration that appears unchanged in another file on the other side of the diff (moved between headers)
+selects nothing. "Unchanged" means the same statement in the same full scope (namespace path, enclosing class
+headers with template specialisation arguments, the `#if` branch; include guards ignored), vanishing from one
+side and appearing on the other the same number of times, so swapping values between `#if` branches,
+specialisations, nested classes or headers is a change; a statement that opens braces (`kTable[] = {1, 2, 3};`,
+a lambda, `Pr p{1};`, a function body) includes the brace contents, so a value changed inside them is a change
+(only whitespace is ignored). A move to another file is a move only when every
+translation unit that saw the statement still sees it (the old file itself when it is a `.cpp`; each side from its
+own revision's `#include` lines, so a deleted / split header or an `#include` switched in the same commit counts),
+and, for macros, namespace-scope function overloads / operators and explicit specialisations, no translation unit
+newly sees it (the ccache direct-mode false-hit direction). Any other kind (type, partial specialisation,
+using-declaration, namespace constant) newly seen by a translation unit is a change when that unit, or a file it
+reads, spells the declared name (for a member: its class; for an enumerator of an unscoped `enum`, which is declared
+in the enclosing scope, also the enumerator's own name) outside comments and strings; a unit added by the same
+commit, or one that never names it, keeps it a move. The users of a
+changed header are searched in its includers of both trees. A reorder inside one struct / enum, a reorder at
+namespace scope of one file (two-phase lookup, initialisation order), an enumerator inserted or removed before
+others, and a removed member or enumerator fall back to the whole file. A designated-initializer row
+`.field = v` selects the readers of `field` as well as the users of the table. A header included by a `.hip`
+file selects the kernel paths and kernel tests of every including `.hip` (`kt_full`) and the P-719 checks
+(`srv_gpu_select`, kvram719; class `kernel_header`);
+`#include` lines mean "compile the file and its includers"; `#define` selects the macro's users; `#if` lines
+and a lone moved `}` fall back to the whole file. Each report also names **behaviour classes** (lifetime,
+layout, dispatch, numeric, schedule, io, sizing, pinned, device, protocol, vision, compat, version, build,
+doc) with the measurements they call for and the GPU checks outside `release_gate.ps1` (E2, kvram719, visab,
+dense / DFlash, E6, the version bump); classes only add steps (`srv_gpu_select`, `srv_env_*`), never remove
+one. Fallbacks that come from a gap of the map are printed as `DEFECT`. Since the declared-name rule narrows
+on purpose, `--baseline` accepts a narrowed commit only when every GPU step it loses comes back with the
+0.2.4 identifier rule (or with the moved rule off) and every identifier the new rule dropped is a type,
+parameter, initializer reference or qualifier (`impact.analyze(..., legacy=...)`, validate.py `RULES`; a step that
+comes back only with an identifier-less row such as `{64, 64, 256},` in the diff, or that such rows bring back on
+their own, is `R-init-noid`, failing; impact.py itself selects the readers of the table such a row belongs to and,
+as 0.2.4 did, every path of the file, because the row's value leaves the readers as data; a row that spells a
+name it declares, however short (`bool ok = false;`), is that declarator, not such a row (a designator
+`.bn = 32,` names a member, it declares nothing: such a row is a data row), and a closing line of
+the statement (`}`, `};`, `}();`) has no value of its own: it stays such a row for validate.py but does not fall
+back to the whole file; an identifier-less
+continuation line of a wrapped function / alias / type declaration belongs to that declaration, selects its users
+and counts as `R-decl` once validate.py has re-checked it on the source), and it
+loses no step its ground truth needed; `--exclude-tuned` leaves the commits the rules were tuned on out (`--arch024`: the GPU checks each arch024 step ran; `RANGE_CASES`:
+the 0.2.4 range 605281b..9844fde).
+
+Known gaps of the static rule (not selected by impact.py; review mt-p1 rereview P5, P7, P11): `#pragma pack` around a
+struct (layout changes, no declaration line changes); a default member initializer whose effect reaches only code that
+default-constructs the struct without naming the member (only the member's readers are selected);
+a self-registering namespace-scope global removed with no user by name (`static Registrar r(...)`: build only);
+**include order** (review mt-p1 review5 C-1): the move rule compares the sets of translation units that see a
+statement, not where it sits in each unit's include sequence, so a macro moved to a header included after the
+`#ifdef` that reads it, or an overload moved behind the call that resolves it, is taken as a move when the sets are
+equal (ccache hashes the include sequence in order; impact.py does not); a function template that is not in the map
+falls back to its file's paths only, not its includers' (review5 N-2). For these shapes run the full gate or name the
+users by hand.
 
 ### <a id="module-gate"></a>Module gate (dev-time only)
 
