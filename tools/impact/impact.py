@@ -501,6 +501,13 @@ def module_gate(changes, mods=None, rep=None, m=None):
             "module_callers": {n: sorted(v) for n, v in callers.items()}}
 
 
+# server-gate suites that are flake-repro tools with no release step by design (progress cbflake.HANDOFF: sys_burst,
+# http_stress, sys_d; sys_d runs 30 reps by default). Every path they cover is also covered by a gated suite (basic: prefix,
+# loop, http; mt_cache_precise / tier / sys: restore), so a change that selects them selects those steps too. arch025-Q6:
+# reported as "repro", not as a GAP.
+REPRO_SUITES = {"sys_burst", "sys_d", "http_stress"}
+
+
 def build_report(m, paths, models, archs, tests, reruns, notes, hits):
     decl = m["declared"]
     P = sorted(paths)
@@ -539,14 +546,14 @@ def build_report(m, paths, models, archs, tests, reruns, notes, hits):
             steps |= {f"st_{'swift' if md == 'dense' else 'moe'}_<mode>" for md in models}
         elif n == "dflash_bench":
             steps.add("dfl_<mode> (R9700, Q4_K_M compatibility only)")
-    not_in_gate = []
+    not_in_gate, repro = [], []
     for s in suites:
         hit = [st for st, d in m["release_srv_steps"].items() if s in d["suites"]]
         if s == "golden":  # suite server of golden.ps1 (default suites, ARCH2): run by the golden_<model> steps
             hit += [f"golden_{'swift' if md == 'dense' else 'moe'}" for md in models]
         steps |= set(hit)
         if not hit:
-            not_in_gate.append(s)
+            (repro if s in REPRO_SUITES else not_in_gate).append(s)
     # matrix cells
     cells = set()
     for p in P:
@@ -569,6 +576,7 @@ def build_report(m, paths, models, archs, tests, reruns, notes, hits):
         "golden": golden,
         "release_gate_steps": sorted(steps),
         "not_in_release_gate": not_in_gate,
+        "repro_suites": repro,
         "extra": {k: sorted(v) for k, v in sorted(reruns.items())},
         "matrix_cells": sorted(cells),
         "touched": hits,
@@ -600,6 +608,8 @@ def print_report(title, r, why=False):
         print(f"   release  {', '.join(r['release_gate_steps'])}")
     if r["not_in_release_gate"]:
         print(f"   GAP      server-gate suites with no release_gate.ps1 step: {', '.join(r['not_in_release_gate'])}")
+    if r.get("repro_suites"):
+        print(f"   repro    flake-repro server-gate suites, no release step by design (their paths are in the steps above): {', '.join(r['repro_suites'])}")
     for k, v in r["extra"].items():
         print(f"   also     {k}  ({', '.join(v[:3])})")
     if r["matrix_cells"]:
