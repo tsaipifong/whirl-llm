@@ -113,6 +113,14 @@ try {
         @{ step = "cpu_platform_check"; name = "planted: a raw OS call outside the whitelist"; exit = 1; lines = @("  BLOCKED platform header / OS call src/model/x.cpp: 1 site(s) in a blocked scope (any mode)", "platform check: FAIL (1 site(s) in 1 file(s), 0 pending entr(y/ies); 0 new, 0 grown, 0 stale, 1 blocked)"); want = $false },
         @{ step = "cpu_platform_check"; name = "planted: exit 0 but sites reported (report line)"; exit = 0; lines = @("platform check: report (3 site(s) in 1 file(s), 0 pending entr(y/ies); 0 new, 0 grown, 0 stale, 0 blocked)"); want = $false },
         @{ step = "cpu_platform_check"; name = "planted: no verdict line"; exit = 0; lines = @("done"); want = $false },
+        @{ step = "cpu_emptyroot"; name = "clean (arch025-gaptests G18)"; exit = 0; lines = @("ok   b_env: exit 2, root entries 47 -> 47, C:\whirl absent | whirl-server: error: WHIRL_KV_SSD_DIR is empty", "emptyroot_paths: 4/4 as expected"); want = $true },
+        @{ step = "cpu_emptyroot"; name = "planted: the pre-fix result (scratch\bug_emptyroot\repro_pre.txt)"; exit = 1; lines = @("FAIL b_env: exit 4, root entries 47 -> 47, C:\whirl absent", "emptyroot_paths: 1/4 as expected"); want = $false },
+        @{ step = "cpu_emptyroot"; name = "planted: setup problem (exit 2, no verdict)"; exit = 2; lines = @("emptyroot_paths: setup: the empty variable did not reach the child"); want = $false },
+        @{ step = "cpu_emptyroot"; name = "planted: 0 cases ran"; exit = 0; lines = @("emptyroot_paths: 0/0 as expected"); want = $false },
+        @{ step = "cpu_vis_order"; name = "clean (arch025-gaptests G20)"; exit = 0; lines = @("vis stream order selftest: 7/7 as expected", "vis stream order check: ok (17 reads, 5 copies)"); want = $true },
+        @{ step = "cpu_vis_order"; name = "planted: the 12011b4 revert"; exit = 1; lines = @("vis stream order selftest: 7/7 as expected", "R1 line 557: hip::launch reads slot 0 without a wait on ev_copy_[0] covering its latest copy", "vis stream order check: FAIL (1 violation(s))"); want = $false },
+        @{ step = "cpu_vis_order"; name = "planted: selftest missed a planted reorder"; exit = 1; lines = @("vis stream order selftest: 6/7 as expected"); want = $false },
+        @{ step = "cpu_vis_order"; name = "planted: parse error"; exit = 2; lines = @("vis stream order selftest: 7/7 as expected", "vis stream order check: parse error: Vision::encode not found"); want = $false },
         @{ step = "cpu_step_selftest"; name = "clean"; exit = 0; lines = @("gate steps selftest: 36/36 as expected"); want = $true },
         @{ step = "cpu_step_selftest"; name = "planted: one proof did not hold"; exit = 1; lines = @("BAD  rules: ...", "gate steps selftest: 35/36 as expected"); want = $false }
     )

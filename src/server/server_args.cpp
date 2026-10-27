@@ -222,4 +222,9 @@ ResolvedConfig resolveServerConfig(Options opt, std::optional<std::string> mode_
     return ResolvedConfig{std::move(opt), std::move(nreq)};
 }
 
+void checkKvSsdDirEnv(const Options& opt, const std::optional<std::string>& kv_ssd_dir_env) {
+    if (!opt.kv_ssd_dir && kv_ssd_dir_env && kv_ssd_dir_env->empty())
+        throw ArgError("WHIRL_KV_SSD_DIR is empty (give a folder or remove the variable; to turn the SSD tier off use --kv-ssd-gb 0 or --kv-ssd-mode off)");
+}
+
 }  // namespace whirl::server

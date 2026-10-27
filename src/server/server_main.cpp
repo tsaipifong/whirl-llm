@@ -1987,10 +1987,14 @@ int serveMain(int argc, char** argv, const char* program) {
     Options& opt = rc.opt;
     numerics::Request& nreq = rc.nreq;
     // bug-emptyrootpaths: WHIRL_KV_SSD_DIR = --kv-ssd-dir (docs/usage.md), so an empty value is refused the same way,
-    // before the model load (read again at the tier setup below; --kv-ssd-dir wins there as before)
-    if (!opt.kv_ssd_dir)
-        if (auto v = env("KV_SSD_DIR"); v && v->empty())
-            die("WHIRL_KV_SSD_DIR is empty (give a folder or remove the variable; to turn the SSD tier off use --kv-ssd-gb 0 or --kv-ssd-mode off)");
+    // before the model load (read again at the tier setup below; --kv-ssd-dir wins there as before). The check is
+    // server_args.cpp checkKvSsdDirEnv (server-tests server_kv_ssd_dir_env); WHIRL_KV_SSD_DIR is read here only when
+    // no --kv-ssd-dir was given, as before.
+    try {
+        if (!opt.kv_ssd_dir) checkKvSsdDirEnv(opt, env("KV_SSD_DIR"));
+    } catch (const ArgError& ex) {
+        die(ex.what());
+    }
     // the model file and the port are checked before the (long) model load
     try {
         app::requireModelFile(opt.path);

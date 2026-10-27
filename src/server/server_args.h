@@ -76,4 +76,10 @@ Options parseServerArgs(const std::vector<std::string>& args, VisModeOk vis_mode
 // value of WHIRL_MODE. Throws ArgError.
 ResolvedConfig resolveServerConfig(Options opt, std::optional<std::string> mode_env);
 
+// bug-emptyrootpaths: WHIRL_KV_SSD_DIR = --kv-ssd-dir (docs/usage.md), so a set-but-empty value is refused the same
+// way when no --kv-ssd-dir was given (--kv-ssd-dir wins, as at the tier setup). kv_ssd_dir_env is the value of
+// WHIRL_KV_SSD_DIR (nullopt = unset). Throws ArgError; serveMain runs it after resolveServerConfig, before the model
+// file check (arch025-gaptests G18: moved out of serveMain unchanged so server-tests can pin it).
+void checkKvSsdDirEnv(const Options& opt, const std::optional<std::string>& kv_ssd_dir_env);
+
 }  // namespace whirl::server

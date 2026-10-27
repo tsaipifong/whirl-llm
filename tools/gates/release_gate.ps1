@@ -166,6 +166,18 @@ AddStep "cpu_device_once" $false @($pwsh, "-NoProfile", "-File", (Join-Path $rep
 # --whirl-gpu-probe with a well-formed GPU list, the same list from each (an exe that forgets the dispatch silently keeps
 # every GPU visible). No kernels, no model, no GPU memory: the probe only lists the GPUs, like --list-devices.
 AddStep "cpu_probe_dispatch" $false @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\repro\probe_dispatch_check.ps1"), "-Build", $Build) { param($o, $c) $c -eq 0 -and ($o -match "(?m)^probe_dispatch_check: PASS") }
+# arch025-gaptests G18 (X4): bug-emptyrootpaths (37ad538): --kv-ssd-dir "", --kv-ssd-dir= and WHIRL_KV_SSD_DIR= (set but
+# empty, in a child with a fixed environment) are refused at startup with exit 2; a given folder still starts. CPU only:
+# a fake model file, refused before any model or GPU work (b_given stops at the model read); the drive root listing
+# must not change. Without -LogCase (an unfixed build would create <root>\whirl\server.log; that case is the unit test
+# testLocalAppDataChild). Pre-fix proof: scratch\bug_emptyroot\repro_pre.txt (b_arg / b_eq / b_env FAIL, 1/4).
+AddStep "cpu_emptyroot" $false @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\repro\emptyroot_paths.ps1"), "-Exe", $exe["whirl-server"], "-Work", "@WORK@") { param($o, $c) $c -eq 0 -and ($o -match "(?m)^emptyroot_paths: ([1-9]\d*)/\1 as expected") }
+# arch025-gaptests G20 (X4): bug-visstream-race (12011b4): static happens-before check of Vision::encode's stream schedule
+# (tools/gates/vis_stream_order_check.py: every slot read on the compute stream waits the copy event that covers the
+# slot's latest copy; every copy into a slot waits the slot's free event). Its selftest plants the 12011b4 revert and five
+# other reorders. CPU, no exe. The device-side proof stays the GPU repro (vis-encode WHIRL_TEST_VIS_COPY_DELAY_MB).
+AddStep "cpu_vis_order" $false @($pwsh, "-NoProfile", "-Command", "& '$py' -I '$(Join-Path $repo "tools\gates\vis_stream_order_check.py")' --selftest; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\gates\vis_stream_order_check.py")'; exit `$LASTEXITCODE") `
+    { param($o, $c) $c -eq 0 -and ($o -match "(?m)^vis stream order selftest: ([1-9]\d*)/\1 as expected") -and ($o -match "(?m)^vis stream order check: ok") }
 AddStep "cpu_server_only_typo" $false @($exe["whirl-server-tests"], "--gguf", $SW, "--only", "no_such_test") { param($o, $c) $c -eq 2 }
 AddStep "cpu_golden_selftest" $false @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\golden\golden_selftest.ps1")) { param($o, $c) $c -eq 0 -and ($o -match "all cases as expected") }
 AddStep "cpu_kl_guard_selftest" $false @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\gates\kl_guard_selftest.ps1")) { param($o, $c) $c -eq 0 -and ($o -match "^kl guard selftest: ([1-9]\d*)/\1 as expected") }

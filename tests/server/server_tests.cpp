@@ -6770,6 +6770,35 @@ void testServerArgsTable() {
     }
 }
 
+// arch025-gaptests G18 (X4 report): the WHIRL_KV_SSD_DIR= startup refusal of bug-emptyrootpaths (37ad538), which no
+// gate test pinned. checkKvSsdDirEnv is the check serveMain runs after resolveServerConfig; the whole path (the env
+// read in a child process, exit code 2) is the release_gate step cpu_emptyroot (tools/repro/emptyroot_paths.ps1).
+void testServerKvSsdDirEnv() {
+    using namespace c1a_args;
+    using OS = std::optional<std::string>;
+    const auto envErr = [](const Options& o, const OS& v) -> std::string {
+        try {
+            checkKvSsdDirEnv(o, v);
+            return "<no error>";
+        } catch (const ArgError& e) {
+            return e.what();
+        }
+    };
+    const std::string refused =
+        "WHIRL_KV_SSD_DIR is empty (give a folder or remove the variable; to turn the SSD tier off use --kv-ssd-gb 0 or --kv-ssd-mode off)";
+    // set but empty, no --kv-ssd-dir: refused (before 37ad538: accepted -> \whirl.lock / \<fp>.wkv at the drive root)
+    CHECK_EQ(envErr(ok({"m"}), OS("")), refused);
+    // even with the SSD tier switched off by the other flags: the message names those flags, the value is still wrong
+    CHECK_EQ(envErr(ok({"m", "--kv-ssd-gb", "0"}), OS("")), refused);
+    // unset, or a folder: accepted
+    CHECK_EQ(envErr(ok({"m"}), std::nullopt), std::string("<no error>"));
+    CHECK_EQ(envErr(ok({"m"}), OS("D:\kv")), std::string("<no error>"));
+    CHECK_EQ(envErr(ok({"m"}), OS(" ")), std::string("<no error>"));  // only the empty string (as --kv-ssd-dir)
+    // --kv-ssd-dir given: it wins, the variable is not looked at (as the tier setup: opt.kv_ssd_dir, else the env)
+    CHECK_EQ(envErr(ok({"m", "--kv-ssd-dir", "D:\kv"}), OS("")), std::string("<no error>"));
+    CHECK_EQ(envErr(ok({"m", "--kv-ssd-dir=D:\kv"}), OS("")), std::string("<no error>"));
+}
+
 void testServerHelpBody() {
     using namespace c1a_args;
     const std::string_view body(kHelpBody);
@@ -9016,6 +9045,7 @@ int main(int argc, char** argv) {
         {"startup_order_fit", testStartupOrderFit},      // arch025-C0
         {"startup_order_slots", testStartupOrderSlots},  // arch025-C0
         {"server_args_table", testServerArgsTable},      // arch025-C1a
+        {"server_kv_ssd_dir_env", testServerKvSsdDirEnv},  // arch025-gaptests G18
         {"server_help_body", testServerHelpBody},        // arch025-C1a
         {"fr_shutdown_503", testFrShutdown503},
         {"run_on_loop_timeout_cancels", testRunOnLoopTimeoutCancels},
