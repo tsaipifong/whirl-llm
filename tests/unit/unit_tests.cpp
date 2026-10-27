@@ -4324,7 +4324,9 @@ void testProbeChild(const wchar_t* self) {
     CHECK((mode & SEM_NOGPFAULTERRORBOX) != 0);
     // (b) an inheritable handle of the parent must not reach the child
     SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
-    const std::wstring ev_name = L"whirl-probechild-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64());
+    static unsigned ev_seq = 0;  // unique per call: GetTickCount64 has ~16 ms steps and --probe-child-loop calls this repeatedly
+    const std::wstring ev_name = L"whirl-probechild-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()) +
+                                 L"-" + std::to_wstring(++ev_seq);
     HANDLE ev = CreateEventW(&sa, TRUE, TRUE, ev_name.c_str());  // inheritable, named so the child can check identity
     CHECK(ev != nullptr && GetLastError() != ERROR_ALREADY_EXISTS);
     const std::wstring ev_arg = ev_name + L" " + std::to_wstring(reinterpret_cast<std::uintptr_t>(ev));
