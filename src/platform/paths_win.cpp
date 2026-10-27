@@ -12,12 +12,18 @@
 namespace whirl::platform::paths {
 
 // bug-lappdata: UTF-16 -> UTF-8 (was env::get, the ANSI code page)
-std::optional<std::string> localAppData() { return env::getUtf8("LOCALAPPDATA"); }
+// bug-emptyrootpaths: set but empty (a parent's environment block) is unset, as llama.cpp fs_get_cache_directory
+// (.empty()); "" + "\\whirl\\..." was a path at the root of the current drive
+std::optional<std::string> localAppData() {
+    std::optional<std::string> v = env::getUtf8("LOCALAPPDATA");
+    if (v && v->empty()) return std::nullopt;
+    return v;
+}
 
 std::string whirlDir(const std::string& base) { return base + "\\whirl"; }
 
 std::string serverLogPath(const std::optional<std::string>& base) {
-    return base ? *base + "\\whirl\\server.log" : std::string("whirl-server.log");
+    return base && !base->empty() ? *base + "\\whirl\\server.log" : std::string("whirl-server.log");
 }
 
 std::string kvCacheDir(const std::string& base) { return base + "\\whirl\\kvcache"; }

@@ -1491,7 +1491,9 @@ int cmdChat(const Args& a) {
             printProfile("prefill", prof, ids.size());
             prof.reset();
         }
-        if (auto dir = envGet("DFLASH_DUMP")) dflashDumpFeatures(model, *dir, next, static_cast<u32>(ids.size()));
+        // bug-emptyrootpaths: empty = no dump (create_directories("") throws in MSVC, "" + "/feats.npy" is the drive root)
+        if (auto dir = envGet("DFLASH_DUMP"); dir && dir->empty()) std::fprintf(stderr, "WHIRL_DFLASH_DUMP is empty: no feature dump\n");
+        else if (dir) dflashDumpFeatures(model, *dir, next, static_cast<u32>(ids.size()));
         const ChatOpts dopt = dflashOpts(model, opt);
         const DecodeResult r = dflashDecode(model, tok, next, static_cast<u32>(ids.size()), dopt, ids);
         printSpecSummary(r, ids.size(), prefill_ms, dopt, "DFlash2 spec");

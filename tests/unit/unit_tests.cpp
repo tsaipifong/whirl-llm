@@ -4300,7 +4300,9 @@ static void testPlatformPaths() {
     const Row rows[] = {
         {"C:\\Users\\u\\AppData\\Local", "C:\\Users\\u\\AppData\\Local\\whirl", "C:\\Users\\u\\AppData\\Local\\whirl\\server.log",
          "C:\\Users\\u\\AppData\\Local\\whirl\\kvcache"},
-        {"", "\\whirl", "\\whirl\\server.log", "\\whirl\\kvcache"},              // set but empty: no fallback (as before)
+        // set but empty: the pure joins as before (callers never pass "": localAppData() is nullopt then); the log path
+        // is the unset one (bug-emptyrootpaths: was "\\whirl\\server.log", the drive root)
+        {"", "\\whirl", "whirl-server.log", "\\whirl\\kvcache"},
         {"D:\\x\\", "D:\\x\\\\whirl", "D:\\x\\\\whirl\\server.log", "D:\\x\\\\whirl\\kvcache"},  // no normalising
         {"C:\\Users\\\xe8\x94\xa1\\AppData\\Local", "C:\\Users\\\xe8\x94\xa1\\AppData\\Local\\whirl",
          "C:\\Users\\\xe8\x94\xa1\\AppData\\Local\\whirl\\server.log", "C:\\Users\\\xe8\x94\xa1\\AppData\\Local\\whirl\\kvcache"},
@@ -4487,11 +4489,14 @@ static void testLocalAppDataChild() {
         CHECK(c.started && c.exit_code == 0);
         CHECK(c.out.rfind("new=set:" + h + " old=set:" + h + " mkdir=1", 0) == 0);
     }
-    // set but empty, and unset: as the narrow read
+    // bug-emptyrootpaths: set but empty (a parent's environment block holds "LOCALAPPDATA=": the narrow read sees it as
+    // set) is unset for WHIRL, as llama.cpp fs_get_cache_directory (.empty()); was "new=set:" and every
+    // <base>\whirl\... path then started at the drive root
     {
         const LadChild c = runLadChild(self, std::wstring(), out_file);
         CHECK(c.started && c.exit_code == 0);
-        CHECK(c.out == "new=set: old=set:");
+        CHECK(c.out == "new=unset: old=set:");
+        if (c.out != "new=unset: old=set:") std::printf("  lappdata child (empty): %s (want new=unset: old=set:)\n", c.out.c_str());
     }
     {
         const LadChild c = runLadChild(self, std::nullopt, out_file);
