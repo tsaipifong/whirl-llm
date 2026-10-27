@@ -199,28 +199,45 @@ def pool_chain(replay: int, logged: int, rounds: list, page: int) -> list:
 
 
 # arch025-surv (mutation survivors c1a-main-mem0, c1b-mem-t1): the (B) measured VRAM values are not compared by value,
-# but three of the VRAM lines have a sign that holds on every run: a measuring point that is never read prints 0 there
-# (gib() / the MiB difference clamp at 0). Checked only when the line is present. Measured on the 93 recorded server
-# logs of scratch25_c1b_gpu (both GPUs, 2026-10-27): weights + buffers 16.08 .. 21.19 GiB, at start >= after weights,
-# tier stream 12.8 .. 18445.9 MiB; never 0.
-VALUE_RULES = [
+# but some VRAM lines have a sign: a measuring point that is never read prints 0 there. arch025-surv2 (REVIEW F5): only
+# what the product guarantees BLOCKS; a sign that is only very likely is a warning (printed as WARN, not a mismatch):
+# - "at start" is lm.mem0.free printed as read (no clamp): the free VRAM before a load that then succeeded, so > 0.
+#   Blocks (c1a-main-mem0 prints 0.00). The old "at start >= after weights" is dropped: another process may free VRAM
+#   during the load.
+# - "weights + buffers" and "tier stream" are differences clamped at 0 (server_main.cpp gib() and :1569-1570): a free
+#   reading that did not drop prints 0 legitimately (another process freed VRAM in between). Warning, except:
+# - tier stream on an integrated GPU (inputs line ram.integrated=1): the line is printed only with a RAM tier, whose
+#   pinned arena of "RAM tier size" MiB is mapped into the shared GPU memory just before mem_t1 is read; the drop is
+#   this process's own mapping (2.00x the RAM tier size on all 31 recorded 8060S logs, 8205.9 .. 18445.9 MiB), so 0
+#   would need another process to free more than that within about a second. Blocks (c1b-mem-t1 prints 0.0). On a
+#   discrete GPU the drop is only the stream (12.8 MiB on all 43 recorded R9700 logs): warning.
+# Measured on the recorded server logs under whirl-work/scratch/a25_c1b_gpu and a25_c1a_gpu (both GPUs, 2026-10-27).
+VALUE_RULES = [  # (regex, ok(groups), why, blocks(inputs kv))
+    (re.compile(r"\(after weights ([0-9.]+), at start ([0-9.]+)\)"), lambda v: float(v[1]) > 0,
+     "VRAM free at start is 0 (mem0, the VRAM before the load, was not read)", lambda kv: True),
     (re.compile(r"VRAM use: weights \+ buffers ([0-9.]+) GiB"), lambda v: float(v[0]) > 0,
-     "VRAM use: weights + buffers is 0 (the VRAM before the load, mem0, was not read)"),
-    (re.compile(r"\(after weights ([0-9.]+), at start ([0-9.]+)\)"), lambda v: float(v[1]) > 0 and float(v[1]) >= float(v[0]),
-     "VRAM free at start is 0 or below the free VRAM after the weights (mem0 not read)"),
+     "VRAM use: weights + buffers is 0 (mem0 not read, or another process freed VRAM during the load)", lambda kv: False),
     (re.compile(r"VRAM taken by the tier stream / pinned arena mapping: ([0-9.]+) MiB"), lambda v: float(v[0]) > 0,
-     "kv tier: VRAM taken by the tier stream is 0 (mem_t1 not read after the tier stream)"),
+     "kv tier: VRAM taken by the tier stream is 0 (mem_t1 not read after the tier stream)",
+     lambda kv: kv.get("ram.integrated") == "1"),
 ]
 
 
-def value_problems(log: str) -> list:
-    bad = []
+def value_findings(log: str) -> tuple:
+    """(blocking, warnings) of VALUE_RULES on the log"""
+    text = inputs_line(log)
+    kv = parse_kv(text) if text is not None else {}
+    bad, warn = [], []
     for l in log.splitlines():
-        for rx, ok, why in VALUE_RULES:
+        for rx, ok, why, blocks in VALUE_RULES:
             m = rx.search(l)
             if m and not ok(m.groups()):
-                bad.append(f"value: {why}: {l.strip()[:200]}")
-    return bad
+                (bad if blocks(kv) else warn).append(f"value: {why}: {l.strip()[:200]}")
+    return bad, warn
+
+
+def value_problems(log: str) -> list:
+    return value_findings(log)[0]
 
 
 def check(log: str, exe: str) -> list:
@@ -317,7 +334,15 @@ def selftest(exe: str) -> int:
         ("pass: VRAM lines of a real run (R9700, c1b GPU check)", good + vram_lines, 0),
         ("block: weights + buffers 0 and at start 0 (mem0 not read: c1a-main-mem0)",
          good + vram_lines.replace("weights + buffers 16.08", "weights + buffers 0.00").replace("at start 31.71", "at start 0.00"), 1),
-        ("block: tier stream 0 MiB (mem_t1 not read: c1b-mem-t1)", good + vram_lines.replace("mapping: 12.8 MiB", "mapping: 0.0 MiB"), 1),
+        ("pass: tier stream 0 MiB on a discrete GPU (a clamped 0 is legitimate there: warning only)",
+         log_for(base_in.replace("ram.integrated=1", "ram.integrated=0")) + vram_lines.replace("mapping: 12.8 MiB", "mapping: 0.0 MiB"), 0),
+        ("block: tier stream 0 MiB on an integrated GPU (mem_t1 not read: c1b-mem-t1)",
+         good + vram_lines.replace("mapping: 12.8 MiB", "mapping: 0.0 MiB"), 1),
+        ("pass: weights + buffers 0 alone (clamped difference: warning only)",
+         good + vram_lines.replace("weights + buffers 16.08", "weights + buffers 0.00"), 0),
+        ("block: at start 0 alone (mem0 not read: c1a-main-mem0)", good + vram_lines.replace("at start 31.71", "at start 0.00"), 1),
+        ("pass: at start below after weights (another process freed VRAM during the load)",
+         good + vram_lines.replace("at start 31.71", "at start 15.00"), 0),
     ]
     bad = 0
     for name, log, want in cases:
@@ -354,6 +379,8 @@ def main():
     bad = check(log, a.replay)
     for b in bad:
         print(f"MISMATCH {b}")
+    for w in value_findings(log)[1]:
+        print(f"WARN {w}")
     print(f"startup lines: {'ok' if not bad else f'{len(bad)} mismatch(es)'} ({os.path.basename(a.log)})")
     return 0 if not bad else 1
 

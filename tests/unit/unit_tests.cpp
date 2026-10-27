@@ -5156,7 +5156,10 @@ static DWORD runSelfChild(const std::wstring& exe, const wchar_t* arg, bool new_
     std::wstring cmd = L"\"" + exe + L"\" " + arg;
     const DWORD flags = new_console ? CREATE_NEW_CONSOLE : CREATE_NO_WINDOW;
     if (!CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, FALSE, flags, nullptr, nullptr, &si, &pi)) return ~0u;
-    if (WaitForSingleObject(pi.hProcess, 20000) != WAIT_OBJECT_0) TerminateProcess(pi.hProcess, 99);
+    if (WaitForSingleObject(pi.hProcess, 20000) != WAIT_OBJECT_0) {
+        TerminateProcess(pi.hProcess, 99);
+        WaitForSingleObject(pi.hProcess, 5000);  // arch025-surv2: asynchronous; (c) deletes the exe's folder next
+    }
     DWORD code = ~0u;
     GetExitCodeProcess(pi.hProcess, &code);
     CloseHandle(pi.hThread);
@@ -5197,12 +5200,16 @@ static void testPlatformProcSurvivors() {
 
     // (c) pl4-exepath-nsize: started from a path of >= 1024 characters, exePath() is that path truncated to 1022
     //     characters (GetModuleFileNameW(.., 1023) into a 1024-character buffer: 1022 + the terminating null; nSize
-    //     1024 would give 1023 and write buf[1024], one past the array). LongPathsEnabled is needed for the copy and
-    //     the start; without it the case is reported and skipped (no claim).
+    //     1024 would give 1023 and write buf[1024], one past the array). The copy uses the \\?\ form, which bypasses
+    //     MAX_PATH whatever LongPathsEnabled says; the start retries without the prefix. arch025-surv2 (REVIEW F4): a
+    //     failed copy or start is a FAILED check, not a skip (a skipped case would let the mutant survive unseen).
     {
         namespace fs = std::filesystem;
         const fs::path base = whirl::test::testTmpBase() / (L"pl4-longpath-" + std::to_wstring(GetCurrentProcessId()));
-        std::wstring dir = L"\\\\?\\" + fs::absolute(base).wstring();
+        // \\?\ turns off path normalisation: give it an absolute, normalised, backslash-only path (WHIRL_TEST_TMP may
+        // be relative or use forward slashes)
+        const std::wstring base_w = fs::absolute(base).lexically_normal().make_preferred().wstring();
+        std::wstring dir = L"\\\\?\\" + base_w;
         const std::wstring seg(200, L'd');
         while (dir.size() - 4 + 1 + 16 < 1100) dir += L"\\" + seg;
         std::error_code ec;
@@ -5210,19 +5217,22 @@ static void testPlatformProcSurvivors() {
         const std::wstring exe = dir + L"\\whirl-tests.exe";
         const bool copied = !ec && CopyFileW(self.c_str(), exe.c_str(), FALSE) != 0;
         if (!copied) {
-            std::printf("  note: testPlatformProcSurvivors (c) skipped: long path copy failed (LongPathsEnabled?)\n");
+            const DWORD le = GetLastError();
+            std::printf("  FAIL: testPlatformProcSurvivors (c): copy to a %zu-character path failed (create_directories: %s, "
+                        "CopyFileW: %lu; temp folder on FAT / network, or the copy blocked by antivirus?)\n",
+                        exe.size() - 4, ec.message().c_str(), le);
+            CHECK(copied);
         } else {
             const std::size_t len = exe.size() - 4;  // without the \\?\ prefix: what GetModuleFileNameW returns
             CHECK(len >= 1024);
             DWORD rc = runSelfChild(exe, L"--child-exepath", false);
             if (rc == ~0u) rc = runSelfChild(exe.substr(4), L"--child-exepath", false);
             if (rc == ~0u)
-                std::printf("  note: testPlatformProcSurvivors (c) skipped: CreateProcessW from a %zu-character path failed (%lu)\n",
+                std::printf("  FAIL: testPlatformProcSurvivors (c): CreateProcessW from a %zu-character path failed (%lu)\n",
                             len, GetLastError());
-            else
-                CHECK_EQ(rc, static_cast<DWORD>(1022));
+            CHECK_EQ(rc, static_cast<DWORD>(1022));
         }
-        fs::remove_all(L"\\\\?\\" + fs::absolute(base).wstring(), ec);
+        fs::remove_all(L"\\\\?\\" + base_w, ec);
     }
 }
 #endif

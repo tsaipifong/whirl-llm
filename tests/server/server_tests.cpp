@@ -11,6 +11,7 @@
 #include "mock_backend.h"
 #include "platform/net.h"
 #include "platform/net_fake.h"
+#include "platform/proc.h"  // restoreCtrlC / addCtrlHandler (arch025-surv2 console_ctrl_arm)
 #include "server/draft_caps.h"
 #include "model/arch_registry.h"  // arch025-M5: findArch over a test table
 #include "server/engine.h"
@@ -8885,9 +8886,11 @@ void testRevS5aR4RestartProbe() {
     }
 }
 
-// arch025-surv (mutation survivor pl4-ctrl-restore, progress\arch025.MUTATION.md class C): startup::armConsoleCtrl
-// (runServer's last step before runLoop) clears an inherited "ignore Ctrl+C" attribute before it registers the handler,
-// so a Ctrl+C reaches onConsoleCtrl. The child (this program, --child-ctrl-arm, its own hidden console so the event
+// arch025-surv (mutation survivor pl4-ctrl-restore, progress\arch025.MUTATION.md class C): runServer's last step
+// before runLoop, restoreCtrlC then addCtrlHandler, clears an inherited "ignore Ctrl+C" attribute before it registers the
+// handler, so a Ctrl+C reaches onConsoleCtrl. arch025-surv2: runServer keeps its two direct calls (machine code identical
+// to ec958cb); this child runs the same two calls, and whirl-model-tests testServerCtrlOrder pins runServer's source to
+// them (both present, in this order). The child (this program, --child-ctrl-arm, its own hidden console so the event
 // reaches no other process) sets the attribute itself (what a parent started with CREATE_NEW_PROCESS_GROUP or
 // SetConsoleCtrlHandler(nullptr, TRUE) passes on), arms, sends CTRL_C_EVENT to its console. Exit code 1 = handled.
 static std::atomic<int> g_child_ctrl_c{0};
@@ -8897,7 +8900,8 @@ static bool childCtrlOn(int type) {
 }
 static int childCtrlArm() {
     if (!SetConsoleCtrlHandler(nullptr, TRUE)) return 10;  // the inherited "ignore Ctrl+C" attribute
-    whirl::server::startup::armConsoleCtrl(childCtrlOn);
+    whirl::platform::proc::restoreCtrlC();  // as runServer (src/server/server_main.cpp)
+    whirl::platform::proc::addCtrlHandler(childCtrlOn);
     if (!GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0)) return 12;
     for (int i = 0; i < 300 && !g_child_ctrl_c.load(); ++i) Sleep(10);
     return g_child_ctrl_c.load();
@@ -8917,7 +8921,10 @@ void testConsoleCtrlArm() {
     const bool started = CreateProcessW(self.c_str(), cmd.data(), nullptr, nullptr, FALSE, CREATE_NEW_CONSOLE, nullptr, nullptr, &si, &pi) != 0;
     CHECK(started);
     if (!started) return;
-    if (WaitForSingleObject(pi.hProcess, 20000) != WAIT_OBJECT_0) TerminateProcess(pi.hProcess, 99);
+    if (WaitForSingleObject(pi.hProcess, 20000) != WAIT_OBJECT_0) {
+        TerminateProcess(pi.hProcess, 99);
+        WaitForSingleObject(pi.hProcess, 5000);  // arch025-surv2: TerminateProcess is asynchronous
+    }
     DWORD code = ~0u;
     GetExitCodeProcess(pi.hProcess, &code);
     CloseHandle(pi.hThread);

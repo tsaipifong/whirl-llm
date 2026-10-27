@@ -178,6 +178,12 @@ AddStep "cpu_emptyroot" $false @($pwsh, "-NoProfile", "-File", (Join-Path $repo 
 # other reorders. CPU, no exe. The device-side proof stays the GPU repro (vis-encode WHIRL_TEST_VIS_COPY_DELAY_MB).
 AddStep "cpu_vis_order" $false @($pwsh, "-NoProfile", "-Command", "& '$py' -I '$(Join-Path $repo "tools\gates\vis_stream_order_check.py")' --selftest; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\gates\vis_stream_order_check.py")'; exit `$LASTEXITCODE") `
     { param($o, $c) $c -eq 0 -and ($o -match "(?m)^vis stream order selftest: ([1-9]\d*)/\1 as expected") -and ($o -match "(?m)^vis stream order check: ok") }
+# arch025-surv2 (arch025-surv N5 / HANDOFF follow-up 3): the whirl.exe command-line tests of tests/cli, on the built
+# whirl.exe: preflight_order_test.py (the GPU-runtime preflight runs before every GPU command, also serve / vis-encode:
+# a copy of whirl.exe next to a fake amdhip64_7.dll must exit 3; kills mutant c2-raw-early) and dump_only_test.py
+# (bug-cli-dumponly: commands that do not load + tune refuse --dump-only). CPU only, nothing is loaded (missing models).
+AddStep "cpu_cli_tests" $false @($pwsh, "-NoProfile", "-Command", "& '$py' -I '$(Join-Path $repo "tests\cli\preflight_order_test.py")' --bin '$Build'; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tests\cli\dump_only_test.py")' --bin '$Build'; exit `$LASTEXITCODE") `
+    { param($o, $c) $c -eq 0 -and ($o -match "(?m)^preflight order test: [1-9]\d* passed, 0 failed") -and ($o -match "(?m)^dump-only cli test: [1-9]\d* passed, 0 failed") }
 AddStep "cpu_server_only_typo" $false @($exe["whirl-server-tests"], "--gguf", $SW, "--only", "no_such_test") { param($o, $c) $c -eq 2 }
 AddStep "cpu_golden_selftest" $false @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\golden\golden_selftest.ps1")) { param($o, $c) $c -eq 0 -and ($o -match "all cases as expected") }
 AddStep "cpu_kl_guard_selftest" $false @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\gates\kl_guard_selftest.ps1")) { param($o, $c) $c -eq 0 -and ($o -match "^kl guard selftest: ([1-9]\d*)/\1 as expected") }

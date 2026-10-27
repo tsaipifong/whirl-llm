@@ -48,3 +48,6 @@ arch025-PL5: platform.sys carries cpu_platform_check	repo	-Module platform.sys -
 arch025-gaptests G18: server.args carries cpu_emptyroot	repo	-Module server.args -NoMapSteps	0	-	^cpu_emptyroot\s+CPU
 arch025-gaptests G18: server.startup carries cpu_emptyroot	repo	-Module server.startup -NoMapSteps	0	-	^cpu_emptyroot\s+CPU
 arch025-gaptests G19: cli carries cpu_tests	repo	-Module cli -NoMapSteps	0	-	^cpu_tests\s+CPU
+arch025-surv2: cli carries cpu_cli_tests	repo	-Module cli -NoMapSteps	0	-	^cpu_cli_tests\s+CPU
+arch025-surv2: server.startup carries cpu_cli_tests	repo	-Module server.startup -NoMapSteps	0	-	^cpu_cli_tests\s+CPU
+arch025-surv2: server.startup carries cpu_model (source rules)	repo	-Module server.startup -NoMapSteps	0	-	^cpu_model\s+CPU
