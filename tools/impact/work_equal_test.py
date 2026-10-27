@@ -93,10 +93,10 @@ def mk_pe(path, text=b"\x90" * 64, strings=b"whirl version 0.2.4\0", elfs=(), rs
     return path
 
 
-def ll(folder, pid, cmd, n, seq, rows, aseq=None, args=None, mtime=None):
+def ll(folder, pid, cmd, n, seq, rows, aseq=None, args=None, mtime=None, name=None):
     os.makedirs(folder, exist_ok=True)
-    launch_table._log(folder, pid, cmd, n, seq, rows, aseq, args)
-    p = os.path.join(folder, f"launch_{pid}.txt")
+    launch_table._log(folder, pid, cmd, n, seq, rows, aseq, args, name=name)
+    p = os.path.join(folder, name or f"launch_{pid}.txt")
     if mtime is not None:
         os.utime(p, ns=(mtime, mtime))
     return p
@@ -219,6 +219,16 @@ with tempfile.TemporaryDirectory() as td:
         launch_table.write_table(launch_table.table_of(J("la", "golden_swift")), f)
     Lt = we.compare_launch(tab, J("lb", "golden_swift"), a_exes=exes_a, b_exes=exes_b, allow_unbound=True)
     expect("launch: a saved table vs a folder compares (table side unbound)", Lt["result"] == "identical" and Lt["binding"]["a"]["state"] == "table", Lt)
+    # bug:log-pid-names: the new names launch_<pid>_<start>[_<n>].txt, one PID reused by the second run -> both read
+    ll(J("ln", "golden_swift"), 1, cmd_b, 5, "c0c0", ROWS, "c1c1", ARGS, mtime=t_after, name="launch_1_20261025T134651112.txt")
+    ll(J("ln", "golden_swift"), 1, cmd_b.replace("single", "pair"), 5, "d0d0", ROWS, "d1d1", ARGS, mtime=t_after + 1,
+       name="launch_1_20261025T134808592_2.txt")
+    ll(J("ln", "golden_swift"), 1, "x", 0, "0", {}, mtime=t_after + 1, name="launch_1_20261025T134808592.raw.txt")
+    Ln = we.compare_launch(J("la"), J("ln"), a_exes=exes_a, b_exes=exes_b)
+    expect("launch: new file names (same PID twice) both read, identical, both bound", Ln["result"] == "identical"
+           and len(Ln["runs"]) == 2 and Ln["binding"]["b"]["state"] == "sha", (Ln["runs"], Ln["binding"]))
+    expect("launch: _log_files takes old + new names, not .raw.txt", sorted(os.path.basename(x) for x in we._log_files(J("ln")))
+           == ["launch_1_20261025T134651112.txt", "launch_1_20261025T134808592_2.txt"], we._log_files(J("ln")))
 
     # ---------------- launch_table refactor: structured compare() and the printed diff agree
     ra, rb = launch_table.load(J("la", "golden_swift"), False), launch_table.load(J("lc", "golden_swift"), False)

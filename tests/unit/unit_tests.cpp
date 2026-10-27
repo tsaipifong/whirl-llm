@@ -26,6 +26,7 @@
 #include "whirl/kv_format.h"
 #include "hip/alloc_log.h"
 #include "hip/launch_log.h"
+#include "hip/log_name.h"
 #include "platform/console.h"
 #include "platform/env.h"
 #include "platform/paths.h"
@@ -45,6 +46,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cwchar>
+#include <filesystem>
 #include <optional>
 #include <regex>
 #include <stdexcept>
@@ -2084,6 +2086,85 @@ void testAllocLog() {
     al::onDevFree(0x10000ull);
     CHECK(al::testText().find("# events 0 ") == 0);
     al::testEnable(was_on, true);
+}
+
+// bug:log-pid-names: launch_<pid>.txt / alloc_<pid>.txt were opened with "wb", so a later process with the same PID
+// overwrote an earlier one's table (arch025 S0b-1 8060S B golden: launch_16468.txt created 21:46:51.112 by moe balance
+// pair, rewritten 21:48:08.592 by moe fast single). Two writers with the same PID must leave two files; the names
+// follow <prefix><pid>_<start>[_<n>].txt and no existing file is ever opened.
+void testLogNamesUnique() {
+    namespace fs = std::filesystem;
+    namespace ln = whirl::hip::logname;
+    const fs::path dir = whirl::test::testTmpBase() / "lognames";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir, ec);
+    const std::string d = dir.string();
+    auto count = [&](const char* prefix, bool raw) {
+        int n = 0;
+        for (const auto& e : fs::directory_iterator(dir)) {
+            const std::string f = e.path().filename().string();
+            const bool is_raw = f.size() > 8 && f.ends_with(".raw.txt");
+            if (f.starts_with(prefix) && f.ends_with(".txt") && is_raw == raw) ++n;
+        }
+        return n;
+    };
+    const std::regex name_rx("^(launch|alloc)_[0-9]+_[0-9]{8}T[0-9]{9}(_[0-9]+)?\\.txt$");
+    // the helper: the same PID twice (a reused PID, other start time; and the same start time) -> three files
+    std::string s1, s2, s3;
+    std::FILE* f1 = ln::openUnique(d, "launch_", 16468, "20261025T134651112", ".txt", &s1);
+    CHECK(f1 != nullptr);
+    if (f1) { std::fputs("first\n", f1); std::fclose(f1); }
+    std::FILE* f2 = ln::openUnique(d, "launch_", 16468, "20261025T134808592", ".txt", &s2);
+    CHECK(f2 != nullptr);
+    if (f2) { std::fputs("second\n", f2); std::fclose(f2); }
+    std::FILE* f3 = ln::openUnique(d, "launch_", 16468, "20261025T134651112", ".txt", &s3);
+    CHECK(f3 != nullptr);
+    if (f3) { std::fputs("third\n", f3); std::fclose(f3); }
+    CHECK(s1 == "launch_16468_20261025T134651112");
+    CHECK(s2 == "launch_16468_20261025T134808592");
+    CHECK(s3 == "launch_16468_20261025T134651112_2");
+    CHECK_EQ(count("launch_", false), 3);
+    {
+        std::FILE* r = std::fopen((d + "\\" + s1 + ".txt").c_str(), "rb");  // the first file kept its content
+        char b[16] = {};
+        if (r) { std::fgets(b, sizeof b, r); std::fclose(r); }
+        CHECK(std::string(b) == "first\n");
+    }
+    CHECK(ln::openExclusive(d, s1, ".txt") == nullptr);  // exclusive: an existing name is refused
+    CHECK(ln::openUnique(d + "\\no_such_folder", "launch_", 1, "x", ".txt", nullptr) == nullptr);
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir, ec);
+    // the real writers, twice in one process (same PID, same start time) -> two files each
+    namespace ll = whirl::hip::launchlog;
+    namespace al = whirl::hip::alloclog;
+    const bool al_was_on = al::g_on;
+    al::testEnable(true, true);
+    al::onDevAlloc(0x10000ull, 64);
+    al::testWrite(d);
+    al::testWrite(d);
+    al::testEnable(al_was_on, true);
+    CHECK_EQ(count("alloc_", false), 2);
+    const ll::RawStats before = ll::rawStats();
+    ll::testRaw(true, 4);
+    ll::testRawPush("0 k 1x1x1 1x1x1 0");
+    ll::testWrite(d);
+    ll::testWrite(d);
+    ll::testRaw(before.on, before.max_lines);
+    CHECK_EQ(count("launch_", false), 2);
+    CHECK_EQ(count("launch_", true), 2);  // each table has its own RAW dump, same stem
+    int named = 0;
+    for (const auto& e : fs::directory_iterator(dir)) {
+        std::string f = e.path().filename().string();
+        if (f.ends_with(".raw.txt")) {
+            CHECK(fs::exists(dir / (f.substr(0, f.size() - 8) + ".txt")));
+            continue;
+        }
+        CHECK(std::regex_match(f, name_rx));
+        ++named;
+    }
+    CHECK_EQ(named, 4);
+    fs::remove_all(dir, ec);
 }
 
 // OVH-C1: the MTP draft window (Model::attn_win) must be restored when the draft attention throws,
@@ -4418,6 +4499,7 @@ int main(int argc, char** argv) {
     testLaunchDigestZeroAndAdjacent();
     testLaunchRawCap();
     testAllocLog();
+    testLogNamesUnique();
     testPlatformPaths();        // arch025 PL1
     testPlatformEnv();
     testPl1bEnvReads();  // arch025 PL1b
