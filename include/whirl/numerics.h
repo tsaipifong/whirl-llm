@@ -105,7 +105,7 @@ struct EnvValues {
 // --dump-only cells: the S0b-2 dumps are taken after loadOrTune, before these knobs).
 enum class Front : std::uint8_t { none, cli, server };
 
-// After-load knobs of the front ends: src/cli/main.cpp:1030-1048 (applyRuntimeEnv) and :1340 (GDN_V0, chat only);
+// After-load knobs of the front ends: src/cli/build_model.cpp applyRuntimeEnv (GDN_V0: chat only; arch025-C2);
 // src/server/server_main.cpp:1040-1120. A front end fills only the names it applies (the server sends none of the
 // CLI-only ones: DBG, GEMV_MAX, NO_GRAPH, GV_GROUP, GV_NMAX).
 struct RuntimeValues {

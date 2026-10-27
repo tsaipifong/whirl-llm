@@ -299,6 +299,9 @@ AddStep "srv_gpu_select" $true @($pwsh, "-NoProfile", "-File", (Join-Path $repo 
 # selected adapter stays under its limit and no other HIP adapter is charged (REVIEW-B0 A1). Exit 0 + "kvram719: PASS"
 # + the "kvram719: REPORT verdict=PASS" line (arch025-Q6 rule; the int4 merge kept this one step, Q6 had added a duplicate "kvram719")
 # (INVALID = no RAM tier in use = exit 3 = not a pass). Only this gate's GPU runs. Replaces the free-text "P-719" manual items.
+# Like every srv_* step it also needs the server log scan (wddm, owner, exit) of @WORK@: the repro writes
+# server_kvram719_<N>.log / server_kvram719.stdout.txt there (int4-final; its old kvram719_<N>.server.log was never found,
+# C1b GPU 2026-10-27), and prints the server's device lines ("  log: ... I device N: ... (gfxNNNN)") for the runners.
 AddStep "srv_kvram719" $true @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\repro\kvram719_tier.ps1"), "-Exe", $exe["whirl-server"], "-Model", $SW,
                                "-Device", $Device, "-Port", "$($port + 6)", "-Work", "@WORK@") { param($o, $c) $c -eq 0 -and ($o -match "(?m)^kvram719: PASS") -and ($o -match "(?m)^kvram719: REPORT verdict=PASS") }
 # arch024-S14 (PLAN c-3) environment matrix on this gate's GPU (tools/gates/env_matrix.ps1; one server at a time, the

@@ -15,7 +15,8 @@ Rules (sources under src/ and include/; comments and string literals are not cod
             headers they include (transitively); one site per (core source, header chain). Blocking since M3 (any mode).
   env       a process-environment read (getenv / _dupenv_s / _wgetenv / GetEnvironmentVariable / GetEnvironmentStrings
             / envGet / envFlag / envOn / env("...") / dump::envOn); allowed in src/platform/ and src/config/env_snapshot.*.
-            The pending counts of src/cli/main.cpp and src/server/server_main.cpp stay at 0.2.5's end (PLAN Noted).
+            The pending counts of the src/cli/ command files (arch025-C2 split of src/cli/main.cpp) and
+            src/server/server_main.cpp stay at 0.2.5's end (PLAN Noted).
   arch      a host-side GPU-architecture branch (Arch::gfx<N>) outside the device layer: allowed in src/hip/,
             include/whirl/hip.h, include/whirl/device_profile.h, src/model/device.cpp. Blocking since M6 (any mode, no
             pending list): host code names a family through device::Profile / k_default_arch / k_uma_estimate_arch.

@@ -25,9 +25,15 @@
 # FAIL: exit 1. Setup error: exit 2. The line before the verdict is "kvram719: REPORT verdict=... reason=... hip719=N ..."
 # (reason: request = failed request or error line, over_limit, other_hip_rise, tier_off; hip719 = "(hipError 719)" lines).
 # Kills only the server it started (by PID); uses --kv-ssd-mode off (no SSD files).
+# Files in -Work (int4-final: the release_gate naming, so the srv_* log scan reads the server log and the gate keeps it in
+# <step>_server_logs\): server_kvram719_<RamMb>.log, server_kvram719.stdout.txt, server_kvram719.stderr.txt
+# (before: kvram719_<RamMb>.server.log / stdout.txt, which tools/gates/server_log_scan.ps1 never found, C1b GPU run).
+# Device: the server log's "GPU pci:B:D (...): chosen" and "I device N: ... (gfxNNNN)" lines are printed as "  log: ..."
+# lines, so the step output itself names the GPU the server used (the GPU runners' device check reads them).
+#   pwsh tools/repro/kvram719_tier.ps1 -Work DIR -RamMb N -LogPaths   prints the three paths (no GPU, no server)
 #   pwsh tools/repro/kvram719_tier.ps1 -SelfTest   checks the pass judgement on recorded numbers (no GPU, no server)
 param([string]$Exe, [string]$Model, [int]$RamMb = 0, [int]$OverMb = 2048, [int]$Port = 8197,
-      [ValidateSet("r9700", "8060s")][string]$Device = "r9700", [string]$Work = "", [switch]$SelfTest)
+      [ValidateSet("r9700", "8060s")][string]$Device = "r9700", [string]$Work = "", [switch]$SelfTest, [switch]$LogPaths)
 $ErrorActionPreference = "Stop"
 # The verdict from what one run saw: res = the request result text, bad = hipError / "failed:" lines in the server log,
 # tierMb = the RAM tier in use (-1: no size line), adapters = one entry per PDH adapter
@@ -45,6 +51,16 @@ function Get-Kvram719Verdict([string]$res, [int]$bad, [int64]$tierMb, [object[]]
 }
 function A([string]$luid, [string]$name, [bool]$hip, [bool]$sel, [int64]$before, [int64]$up) {
     [pscustomobject]@{ luid = $luid; name = $name; hip = $hip; sel = $sel; before = $before; up = $up }
+}
+# the files of one run in -Work (gate naming, see the header)
+function Get-Kvram719Files([string]$dir, [int]$ramMb) {
+    @{ log = Join-Path $dir "server_kvram719_$ramMb.log"; out = Join-Path $dir "server_kvram719.stdout.txt"; err = Join-Path $dir "server_kvram719.stderr.txt" }
+}
+if ($LogPaths) {
+    if (-not $Work) { Write-Host "kvram719: -LogPaths needs -Work"; exit 2 }
+    $f = Get-Kvram719Files $Work $RamMb
+    Write-Host "kvram719: server log $($f.log)"; Write-Host "kvram719: stdout $($f.out)"; Write-Host "kvram719: stderr $($f.err)"
+    exit 0
 }
 if ($SelfTest) {
     # This host: 32407 MiB RAM, limit 16203 (half the RAM; SharedSystemMemory 16204). LUIDs of 2026-10-23: 0x182fa 8060S,
@@ -118,12 +134,13 @@ $limit = [int64][math]::Floor($totalMiB / 2)
 if ($dx[$selKey].SharedSystemMemory) { $limit = [math]::Min($limit, [int64][math]::Floor([uint64]$dx[$selKey].SharedSystemMemory / 1MB)) }
 if ($RamMb -le 0) { $RamMb = [int]([math]::Max(1024, [int64]($totalMiB / 2) - $pinned0 + $OverMb)) }
 Write-Host ("kvram719: RAM {0} MiB, selected adapter {1} ({2}), its limit ~{3} MiB, largest adapter now {4} MiB, request --kv-ram-mb {5}" -f $totalMiB, $selKey, $dx[$selKey].Description, $limit, $pinned0, $RamMb)
-$log = Join-Path $Work "kvram719_$RamMb.server.log"
-Remove-Item $log -ErrorAction SilentlyContinue
+$files = Get-Kvram719Files $Work $RamMb
+$log = $files.log
+Remove-Item $log, $files.out, $files.err -ErrorAction SilentlyContinue
 $env:AMD_LOG_LEVEL = "1"
 $env:WHIRL_DEVICE = $Device  # explicit: since 0.2.3 the default is the GPU with the most memory
 $a = @($Model, "--port", "$Port", "--log-file", $log, "--kv-ssd-mode", "off", "--kv-ram-mb", "$RamMb")
-$p = Start-Process -FilePath $Exe -ArgumentList $a -NoNewWindow -PassThru -RedirectStandardOutput (Join-Path $Work "stdout.txt") -RedirectStandardError (Join-Path $Work "stderr.txt")
+$p = Start-Process -FilePath $Exe -ArgumentList $a -NoNewWindow -PassThru -RedirectStandardOutput $files.out -RedirectStandardError $files.err
 $up = $false
 for ($i = 0; $i -lt 180 -and -not $p.HasExited; $i++) {
     Start-Sleep 1
@@ -139,7 +156,13 @@ if ($up) {
 }
 $s1 = SharedByAdapter  # with the server up (after the request)
 if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force; $p.WaitForExit() }
-$txt = @(Get-Content $log -ErrorAction SilentlyContinue) + @(Get-Content (Join-Path $Work "stdout.txt") -ErrorAction SilentlyContinue)
+$txt = @(Get-Content $log -ErrorAction SilentlyContinue) + @(Get-Content $files.out -ErrorAction SilentlyContinue)
+# the GPU the server used, from its own log (levelled lines only: a --list-devices table is not a use)
+$devLines = @($txt | Select-String -Pattern "^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d{3} I (GPU pci:\d+:\d+ \(.*\): chosen|device \d+: .*\(gfx\d+\))")
+$devLines | ForEach-Object { Write-Host "  log: $($_.Line)" }
+if ($devLines.Count -eq 0) { Write-Host "  log: (no device line in the server log)" }
+$devWant = @($devLines | Where-Object { $_.Line -like "*$want*" }).Count
+Write-Host "kvram719: device lines $($devLines.Count), naming $want $devWant (-Device $Device)"
 # "(hipError N)" is how a HIP failure is logged; the fixed server's "adjusted:" line names the error number too (s8-719)
 $bad = @($txt | Select-String -Pattern "\(hipError \d+\)|\| failed:")
 $h719 = @($txt | Select-String -SimpleMatch "(hipError 719)")

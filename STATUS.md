@@ -51,7 +51,7 @@ gfx1151（Radeon 8060S）：`gfx1151` 分支上為預覽版（結果正確、尚
 | forward | `src/model/qwen35/forward/*.cpp` | prefill（分段、chunk、多請求 segmented）、decode（融合 kernel、grouped GEMV、HIP graph）、MTP draft / verify、MoE、vision 掛鉤 |
 | autotune | `src/model/tune.cpp` | 11 個 batch bucket，快取 `%LOCALAPPDATA%\whirl\tune4-*.txt`；bitwise 自檢 |
 | 推測解碼策略 | `src/spec/policy.cpp` | MTP 草稿數成本模型、n-gram co-drafting |
-| CLI | `src/cli/main.cpp` | `whirl chat` / `bench` / `selftest` / `seqtest` / `devices`；`WHIRL_*` 環境變數見 `docs/usage.md` |
+| CLI | `src/cli/`（`main.cpp` 指令表，每個指令一個 `cmd_*.cpp`，arch025-C2） | `whirl chat` / `bench` / `selftest` / `seqtest` / `devices`；`WHIRL_*` 環境變數見 `docs/usage.md` |
 
 ### 驗收（R9700，對研究原型 exe 黑箱比對）
 

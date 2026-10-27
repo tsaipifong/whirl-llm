@@ -9,6 +9,10 @@
 #   4. rules: planted outputs through each step's own rule (release_gate.ps1 -RuleCheck): a planted failure FAILs, the
 #      clean output PASSes
 #   5. the scripts' own verdict tests: pkg_smoke.ps1 -SelfTest, vis_ab.ps1 -SelfTest, tools/repro/kvram719_tier.ps1 -SelfTest
+#   6. int4-final: the srv_kvram719 log contract. The release gate scans and keeps only server_*.log / *.stdout.txt in the
+#      step's work dir (@WORK@); the repro (-LogPaths) must name its files inside -Work with those names, and a server log
+#      written there must be read by tools/gates/server_log_scan.ps1 -Step srv_kvram719 (PASS clean, FAIL on a planted
+#      WDDM line). C1b GPU 2026-10-27: the repro's own verdict was PASS on both cards but the scan found no server log.
 #   pwsh tools/gates/gate_steps_selftest.ps1 [-Work DIR]
 # Last line "gate steps selftest: N/M as expected"; exit 0 all as expected, 1 not.
 param([string]$Work = "")
@@ -129,6 +133,29 @@ try {
                      @("tools\gates\platform_check.ps1", "^platform check selftest: ok"))) {
         $o = @(& $pwsh -NoProfile -File (Join-Path $repo $t[0]) -SelfTest 2>&1 | ForEach-Object { "$_" }); $c = $LASTEXITCODE
         Check "$($t[0]) -SelfTest" ($c -eq 0 -and ($o -match $t[1])) "exit $${c}: $($o | Select-Object -Last 1)"
+    }
+
+    # ---- 6. srv_kvram719 log contract (int4-final)
+    $kw = Join-Path $Work "work_srv_kvram719"
+    $lp = @(& $pwsh -NoProfile -File (Join-Path $repo "tools\repro\kvram719_tier.ps1") -Work $kw -RamMb 33997 -LogPaths 2>&1 | ForEach-Object { "$_" })
+    $slog = @($lp | Where-Object { $_ -match "^kvram719: server log (.+)$" } | ForEach-Object { $Matches[1] })
+    $sout = @($lp | Where-Object { $_ -match "^kvram719: stdout (.+)$" } | ForEach-Object { $Matches[1] })
+    Check "srv_kvram719: the repro names its server log inside -Work as server_*.log" ($slog.Count -eq 1 -and (Split-Path $slog[0]) -eq $kw -and (Split-Path $slog[0] -Leaf) -like "server_*.log") "got: $($lp -join ' | ')"
+    Check "srv_kvram719: the repro's stdout is kept by the gate (*.stdout.txt)" ($sout.Count -eq 1 -and (Split-Path $sout[0] -Leaf) -like "*.stdout.txt") "got: $($lp -join ' | ')"
+    if ($slog.Count -eq 1) {
+        New-Item -ItemType Directory -Force $kw | Out-Null
+        $ts = "2026-10-27 19:22:50.001"
+        # lines of a real run (scratch\a25_n3_gpu\data_r9700\k719\work\kvram719_33860.server.log, numbers kept)
+        $cl = @("$ts I GPU pci:71:0 (AMD Radeon AI PRO R9700): chosen with --device or WHIRL_DEVICE; use --device pci:<bus>:<device> to choose another (see --list-devices)",
+                "$ts I device 1: AMD Radeon AI PRO R9700 (gfx1201), 31.9 GiB VRAM",
+                "$ts I vram watch: vram local 28.97 / budget 31.03 GiB, shared 19835 MiB (+0 MiB since start), ram 19.57 GiB (pinned 19.26 GiB) | warns while GPU memory spills",
+                "$ts I kv tier: RAM tier size 17920 MiB (--kv-ram-mb 33997 asked, lowered to 17920 MiB: see the adjusted: line)")
+        [System.IO.File]::WriteAllLines($slog[0], [string[]]$cl)
+        $sc = @(& $pwsh -NoProfile -File (Join-Path $PSScriptRoot "server_log_scan.ps1") -Dir $kw -Step "srv_kvram719" 2>&1 | ForEach-Object { "$_" }); $scc = $LASTEXITCODE
+        Check "srv_kvram719: the scan reads the repro's server log (clean -> PASS)" ($scc -eq 0 -and ($sc -match "^server log scan: PASS 1 server log\(s\).*\[wddm,owner,exit\]")) "exit ${scc}: $($sc | Select-Object -First 1)"
+        [System.IO.File]::AppendAllLines($slog[0], [string[]]@("$ts W GPU memory spill: 1.2 GiB of the KV pool is in shared memory"))
+        $sc = @(& $pwsh -NoProfile -File (Join-Path $PSScriptRoot "server_log_scan.ps1") -Dir $kw -Step "srv_kvram719" 2>&1 | ForEach-Object { "$_" }); $scc = $LASTEXITCODE
+        Check "srv_kvram719: a planted WDDM line in the repro's server log FAILs the scan" ($scc -eq 1 -and ($sc -match "^server log scan: FAIL 1 line\(s\) matched \[wddm,owner,exit\]")) "exit ${scc}: $($sc | Select-Object -First 1)"
     }
 } finally {
     foreach ($v in $envKeep.Keys) { [Environment]::SetEnvironmentVariable($v, $envKeep[$v]) }

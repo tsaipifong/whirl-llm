@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // DFlash2 speculative decoding (`--draft dflash`): the host-side policy shared by whirl chat /
-// bench (src/cli/main.cpp), whirl-server (src/server/server_main.cpp, engine.cpp) and the drafter
+// bench (src/cli/decode.cpp, cmd_*.cpp), whirl-server (src/server/server_main.cpp, engine.cpp) and the drafter
 // forward (src/model/dflash.cpp). Header-only and GPU-free so tests/unit covers it.
 //
 // Design (DFLASH-1, owner-approved 2026-10-05, v0.2.0):

@@ -43,7 +43,7 @@ void setDumpOnly(bool on) { g_dump_only.store(on); }
 bool dumpOnly() { return g_dump_only.load(); }
 
 // bug-cli-dumponly: only these whirl commands reach qwen35::loadOrTune (the --dump-only exit); keep in step with
-// src/cli/main.cpp (cmdChat, cmdBench, cmdSeqtest, goldenSingle / goldenPair; serve = serveMain)
+// src/cli/cmd_*.cpp (cmdChat, cmdBench, cmdSeqtest, goldenSingle / goldenPair; serve = src/server serveMain)
 std::string dumpOnlyRefusal(std::string_view cmd) {
     static constexpr std::string_view honours[] = {"chat", "bench", "seqtest", "golden", "serve"};
     for (std::string_view h : honours)
