@@ -213,6 +213,8 @@
                      "proof": {"refactor": ["exit_rule", "golden_exact", "server_log_scan", "startup_sizing"]}},
    "server.args": {"metrics": [], "metrics_none": "the command line is parsed once at server startup: no bench key",
                    "proof": {"refactor": ["exit_rule", "golden_exact", "startup_sizing"]}},
+   "server.startup": {"metrics": [], "metrics_none": "server startup runs once per process: no bench key (the startup sizing lines are the pin)",
+                      "proof": {"refactor": ["exit_rule", "golden_exact", "startup_sizing"]}},
    "platform.*": {"metrics": [], "metrics_none": "no platform bench key yet (PLAN PL3: no HTTP microsecond tool); PL2 fs calls are covered by the tier paths",
                   "proof": {"refactor": ["exit_rule", "golden_exact", "server_log_scan", "host_work"]}}
   }
@@ -345,6 +347,16 @@
    "manual": ["whirl-server-tests server_args_table (every flag -> Options field, defaults == 0e35407, die() messages) and server_help_body (kHelpBody == the 0e35407 option list, length + FNV-1a)",
               "whirl-server.exe --help / -V / /? and whirl.exe serve --help byte-identical to the 0e35407 release exes (scratch\\a25_c1a help_*.txt)",
               "server startup log lines A vs B: tools/gates/startup_lines.py on the srv_* / golden server logs"]
+  },
+  "server.startup": {
+   "id": "C1b", "desc": "whirl-server's startup and serving loop: serveMain (help / version / device list, the command line through server.args, buildModel = the arch module, GPU choice, pre-load fit, Model::load, drafters, MTP) and ServerRun's phases in order (planSlots, makeEngine, reserveRamTier, loadVisionEarly, planPool, reportPool, startTier, attachVision, runServer: arch025-C1b), with the ordered slot / fit steps of src/server/startup_steps.h (arch025-C0). The hipError 719 measurement points (mem_ck0 / mem_ck1, the pinned room, mem_t1, wddm0 / pinned0) are read at fixed places relative to every allocation",
+   "paths": ["src/server/server_main.cpp", "src/server/startup_steps.h"], "lands_on": "arch025-c1b (C1b)",
+   "steps": ["cpu_server", "cpu_pins", "golden_swift", "golden_moe", "srv_gpu_select", "srv_kvram719", "srv_env_e1", "srv_env_e4", "pkg_smoke"],
+   "gpus": {"golden_swift": 2, "golden_moe": 2, "srv_gpu_select": 2, "srv_kvram719": 2, "srv_env_e1": 2, "srv_env_e4": 2, "pkg_smoke": 1},
+   "manual": ["scratch\\a25_c1b\\move_check.py: ServerRun's phase bodies == the old serveMain text (inverse renames), members in the old declaration order, the measurement / allocation calls in the same order",
+              "server startup log lines A vs B: tools/gates/startup_lines.py and the line-template compare on the srv_* / golden server logs (both GPUs)",
+              "8060S: release_gate srv_env_e2 (env_matrix E2, the UMA carve-out; only on the 8060S gate)",
+              "startup_order_fit / startup_order_slots (server-tests) for startup_steps.h; server_main.cpp itself is linked into no CPU test"]
   },
   "contract": {
    "id": "X", "desc": "cross-module contracts (ServerModel, device::Backend, kernels_abi, numerics): the full gate",
