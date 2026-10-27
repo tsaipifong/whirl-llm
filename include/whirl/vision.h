@@ -170,6 +170,11 @@ public:
     std::uint64_t n_encodes = 0;
     // diagnostics (WHIRL_VIS_PROF): per-op host-timed totals in ms (synchronizes)
     double* prof = nullptr;
+    // test only, null = off (bug-visstream-race; vis-encode sets it from WHIRL_TEST_VIS_COPY_DELAY_MB): the streamed
+    // path calls it on the host right before it queues the layer-0 weight copy on the copy stream, so a test can queue
+    // work there first and make that copy land late on the GPU
+    void (*copy_test_hook)(void* ctx, hip::Stream copy_stream) = nullptr;
+    void* copy_test_ctx = nullptr;
 
     std::uint64_t pinnedBytes() const { return total_; }
     std::uint64_t totalBytes() const { return total_; }

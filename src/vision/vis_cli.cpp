@@ -40,6 +40,21 @@ std::vector<std::uint8_t> readBytes(const std::string& path) {
     return std::vector<std::uint8_t>(s.begin(), s.end());
 }
 
+// test only (bug-visstream-race): WHIRL_TEST_VIS_COPY_DELAY_MB=N queues N MiB of dummy host->device copies on the
+// encoder's copy stream right before its layer-0 weight copy (Vision::copy_test_hook), so that copy lands well after
+// the compute stream's first kernels; off when unset. Own pinned / device buffers, never the encoder's.
+struct CopyDelay {
+    static constexpr std::uint64_t chunk = 64ull << 20;
+    std::uint64_t n_chunks = 0;
+    device::PinnedBuf src;
+    device::DevBuf dst;
+};
+
+void copyDelayHook(void* ctx, hip::Stream cs) {
+    const CopyDelay& d = *static_cast<const CopyDelay*>(ctx);
+    for (std::uint64_t i = 0; i < d.n_chunks; ++i) hip::copyAnyAsync(d.dst.get(), d.src.addr(), CopyDelay::chunk, cs);
+}
+
 }  // namespace
 
 namespace whirl::vision {
@@ -120,6 +135,19 @@ int cliVisEncode(std::span<const std::string> args) {
         (void)v->encode(*pre, lend, stream, pout.data(), pout.size());
         std::printf("pre-encoded %u tokens\n", pre->nTokens());
     }
+    CopyDelay delay;
+    if (const std::optional<std::string> dm = envRaw("WHIRL_TEST_VIS_COPY_DELAY_MB")) {
+        const std::uint64_t mb = std::strtoull(dm->c_str(), nullptr, 10);
+        delay.n_chunks = (mb * (1ull << 20) + CopyDelay::chunk - 1) / CopyDelay::chunk;
+        if (delay.n_chunks > 0) {
+            delay.src = device::PinnedBuf::alloc(device::hipBackend(), CopyDelay::chunk);
+            delay.dst = device::DevBuf::alloc(device::hipBackend(), CopyDelay::chunk);
+            v->copy_test_ctx = &delay;
+            v->copy_test_hook = copyDelayHook;
+            std::printf("test hook: %llu MiB of dummy copies before the layer-0 weight copy (streamed weights only)\n",
+                        static_cast<unsigned long long>(delay.n_chunks * (CopyDelay::chunk >> 20)));
+        }
+    }
     std::vector<float> out(static_cast<std::size_t>(p.nTokens()) * v->hp.proj_dim);
     double prof[8] = {};
     const bool want_prof = envRaw("WHIRL_VIS_PROF").has_value();
@@ -131,6 +159,8 @@ int cliVisEncode(std::span<const std::string> args) {
         std::fflush(stdout);
     }
     v->prof = nullptr;
+    v->copy_test_hook = nullptr;
+    v->copy_test_ctx = nullptr;
     if (want_prof)
         std::printf("profile (synchronized, last rep): patch+pos %.1f | gemm %.1f | qkv_prep %.1f | attn %.1f | ln/resid %.1f | gelu %.1f | merger %.1f | wait/copy %.1f ms\n",
                     prof[0], prof[1], prof[2], prof[3], prof[4], prof[5], prof[6], prof[7]);
