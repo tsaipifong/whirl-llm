@@ -4223,12 +4223,53 @@ void testProbeChild(const wchar_t* self) {
     CHECK((mode & SEM_NOGPFAULTERRORBOX) != 0);
     // (b) an inheritable handle of the parent must not reach the child
     SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
-    HANDLE ev = CreateEventW(&sa, TRUE, TRUE, nullptr);  // inheritable, manual reset, signaled
-    CHECK(ev != nullptr);
-    ChildRun hi = runChild(exe, q + L"--child-has-handle " + std::to_wstring(reinterpret_cast<std::uintptr_t>(ev)), 10000);
+    const std::wstring ev_name = L"whirl-probechild-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64());
+    HANDLE ev = CreateEventW(&sa, TRUE, TRUE, ev_name.c_str());  // inheritable, named so the child can check identity
+    CHECK(ev != nullptr && GetLastError() != ERROR_ALREADY_EXISTS);
+    const std::wstring ev_arg = ev_name + L" " + std::to_wstring(reinterpret_cast<std::uintptr_t>(ev));
+    ChildRun hi = runChild(exe, q + L"--child-has-handle " + ev_arg, 10000);
     CHECK(hi.started && hi.exit_code == 0);
     CHECK(hi.out.rfind("0", 0) == 0);  // "0" = not inherited
+    if (hi.out.rfind("0", 0) != 0) std::printf("  (b) child said '%s' for handle %llu\n", hi.out.c_str(), (unsigned long long)reinterpret_cast<std::uintptr_t>(ev));
+    {  // control: the oracle is not vacuous - without a handle list the event IS inherited and the child must say so
+        STARTUPINFOW csi{sizeof(csi)};
+        PROCESS_INFORMATION cpi{};
+        std::wstring ccmd = q + L"--child-has-handle-rc " + ev_arg;
+        const BOOL cok = CreateProcessW(exe.c_str(), ccmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &csi, &cpi);
+        CHECK(cok);
+        DWORD crc = 99;
+        if (cok) {
+            CHECK(WaitForSingleObject(cpi.hProcess, 10000) == WAIT_OBJECT_0);
+            GetExitCodeProcess(cpi.hProcess, &crc);
+            CloseHandle(cpi.hThread);
+            CloseHandle(cpi.hProcess);
+        }
+        CHECK_EQ(crc, 1ul);  // 1 = the parent's event reached this child
+    }
     CloseHandle(ev);
+    // (b2) bug-probechild-flaky 2026-10-26: none of 256 inheritable parent events may reach the child. Handle values are
+    // small and reused per process, so the child can hold an unrelated live object at the parent's value: the check must
+    // be exact, not "this value is a live signaled handle here" (that flaked 1 in ~4 runs in N2a and Q2).
+    {
+        const std::wstring name2 = ev_name + L"-b2";
+        HANDLE base = CreateEventW(nullptr, TRUE, TRUE, name2.c_str());
+        CHECK(base != nullptr);
+        std::vector<HANDLE> evs;
+        std::wstring args = L" " + name2;
+        for (int i = 0; i < 256 && base; ++i) {  // inheritable duplicates: 256 parent handle values, one object
+            HANDLE e = nullptr;
+            if (!DuplicateHandle(GetCurrentProcess(), base, GetCurrentProcess(), &e, 0, TRUE, DUPLICATE_SAME_ACCESS)) break;
+            evs.push_back(e);
+            args += L" " + std::to_wstring(reinterpret_cast<std::uintptr_t>(e));
+        }
+        CHECK_EQ(evs.size(), size_t{256});
+        ChildRun many = runChild(exe, q + L"--child-has-handle" + args, 10000);
+        CHECK(many.started && many.exit_code == 0);
+        CHECK(many.out == "0");
+        if (many.out != "0") std::printf("  (b2) child said %s of %zu parent events are inherited\n", many.out.c_str(), evs.size());
+        for (HANDLE e : evs) CloseHandle(e);
+        if (base) CloseHandle(base);
+    }
     // (c) a child that hangs is killed after the bound
     const ULONGLONG t0 = GetTickCount64();
     ChildRun hang = runChild(exe, q + L"--child-sleep-ms 30000", 1000);
@@ -4621,15 +4662,40 @@ int main(int argc, char** argv) {
     if (argc >= 2) {  // helper modes for testProbeChild (the test runs this program as the child)
         const std::string m = argv[1];
         if (m == "--child-error-mode") { std::printf("%u", GetErrorMode()); return 0; }
-        if (m == "--child-has-handle" && argc == 3) {
-            HANDLE h = reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(std::stoull(argv[2])));
-            DWORD f = 0;
-            const bool live = GetHandleInformation(h, &f) && WaitForSingleObject(h, 0) == WAIT_OBJECT_0;
-            std::printf("%d", live ? 1 : 0);
+        // --child-has-handle[-rc] <event name> <value>...: how many of the values are handles to THAT event (the parent's
+        // object, opened here by name). Exact: a value that is merely some live handle of this process does not count
+        // (bug-probechild-flaky: handle values are reused per process). -rc reports the count as the exit code.
+        if ((m == "--child-has-handle" || m == "--child-has-handle-rc") && argc >= 4) {
+            using CompareFn = BOOL(WINAPI*)(HANDLE, HANDLE);
+            HMODULE kb = GetModuleHandleW(L"kernelbase.dll");
+            auto same = kb ? reinterpret_cast<CompareFn>(GetProcAddress(kb, "CompareObjectHandles")) : nullptr;
+            HANDLE mine = OpenEventW(SYNCHRONIZE, FALSE, std::wstring(argv[2], argv[2] + std::strlen(argv[2])).c_str());
+            if (!same || !mine) { std::printf("no-oracle"); return 4; }
+            int live = 0;
+            for (int i = 3; i < argc; ++i) {
+                HANDLE h = reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(std::stoull(argv[i])));
+                live += h != mine && same(h, mine);  // `mine` took a free slot, so its own value was not inherited
+            }
+            if (m == "--child-has-handle-rc") return live;
+            std::printf("%d", live);
             return 0;
         }
         if (m == "--child-sleep-ms" && argc == 3) { Sleep(static_cast<DWORD>(std::stoul(argv[2]))); return 0; }
         if (m == "--child-echo") { std::printf("echo-ok"); return 0; }
+        if (m == "--probe-child-loop" && argc == 3) {  // stress: only testProbeChild, N times (bug-probechild-flaky)
+            wchar_t self[1024];
+            const DWORD n = GetModuleFileNameW(nullptr, self, 1024);
+            if (n == 0 || n >= 1024) return 2;
+            const int reps = std::stoi(argv[2]);
+            int bad_iters = 0;
+            for (int i = 0; i < reps; ++i) {
+                const int before = g_fail;
+                testProbeChild(self);
+                if (g_fail != before) std::printf("iteration %d failed\n", i), ++bad_iters;
+            }
+            std::printf("probe-child loop: %d iterations, %d failed iterations, %d passed, %d failed checks\n", reps, bad_iters, g_pass, g_fail);
+            return g_fail ? 1 : 0;
+        }
     }
 #endif
     whirl::test::clearWhirlEnv();  // FR-TEST P3-11
