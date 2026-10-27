@@ -42,8 +42,19 @@ robocopy "%WHIRL_KERNELS_FROM%\res" "%B%\res" /E /COPY:DAT /NFL /NDL /NJH /NJS /
 :build
 set "BRC=0"
 if "%WHIRL_CFG_ONLY%"=="1" exit /b 0
+set "TRY=0"
+:buildtry
+set /a TRY+=1
 start "" /b /wait /low cmake --build "%B%" -j 8 --target %TG%
 set "BRC=%ERRORLEVEL%"
+rem main session 2026-10-28: an exe just linked by the previous safety build is sometimes still locked (LNK1104 on
+rem whirl-tests.exe / whirl-model-tests.exe, int4-final 10-27 and int5 / int6 10-28; alone it always passed). Ninja resumes
+rem where it stopped, so retry twice after 20 s like progress\tools\build_retry.bat; a real compile error fails all three.
+if not "%BRC%"=="0" if %TRY% LSS 3 (
+  echo build_cfg: build rc=%BRC% on try %TRY%, retrying in 20 s
+  timeout /t 20 /nobreak >nul
+  goto buildtry
+)
 :fin
 if "%WHIRL_CFG_ONLY%"=="1" exit /b %BRC%
 rem the variable is BRC, not RC: CMake reads RC as the resource compiler. Redirection first: "echo %BRC%> f" with 0 is parsed as "echo" + "0>" (handle 0) and leaves an empty file (review C4)
