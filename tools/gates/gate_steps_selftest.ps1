@@ -35,6 +35,7 @@ try {
         Check "list r9700 $n GPU" (@($r97.out | Where-Object { $_ -match "^$n\s+GPU\s*$" }).Count -eq 1) "not listed as an available GPU step"
         Check "list 8060s $n GPU" (@($s8.out | Where-Object { $_ -match "^$n\s+GPU\s*$" }).Count -eq 1) "not listed as an available GPU step"
     }
+    Check "list cpu_platform_check CPU (arch025-PL5)" (@($r97.out | Where-Object { $_ -match "^cpu_platform_check\s+CPU\s*$" }).Count -eq 1 -and @($s8.out | Where-Object { $_ -match "^cpu_platform_check\s+CPU\s*$" }).Count -eq 1) "missing"
     Check "list cpu_step_selftest CPU" (@($r97.out | Where-Object { $_ -match "^cpu_step_selftest\s+CPU\s*$" }).Count -eq 1) "missing"
     Check "list r9700 srv_env_e2 not available" (@($r97.out | Where-Object { $_ -match "^srv_env_e2\s+GPU\s+\(not in this gate: 8060s only" }).Count -eq 1) "want '(not in this gate: 8060s only'"
     Check "list 8060s srv_env_e2 GPU" (@($s8.out | Where-Object { $_ -match "^srv_env_e2\s+GPU\s*$" }).Count -eq 1) "want available on the 8060s"
@@ -104,6 +105,10 @@ try {
         @{ step = "st_dense_balance"; name = "clean"; exit = 0; lines = @("selftest: ok", "leak check: ok (1 units)"); want = $true },
         @{ step = "st_dense_balance"; name = "planted: no leak check line (arch025-Q2 rule, int4 merge)"; exit = 0; lines = @("selftest: ok"); want = $false },
         @{ step = "st_dense_balance"; name = "planted: selftest failed"; exit = 1; lines = @("selftest: FAIL (logits differ)"); want = $false },
+        @{ step = "cpu_platform_check"; name = "clean"; exit = 0; lines = @("platform check: ok (0 site(s) in 0 file(s), 0 pending entr(y/ies); 0 new, 0 grown, 0 stale, 0 blocked)"); want = $true },
+        @{ step = "cpu_platform_check"; name = "planted: a raw OS call outside the whitelist"; exit = 1; lines = @("  BLOCKED platform header / OS call src/model/x.cpp: 1 site(s) in a blocked scope (any mode)", "platform check: FAIL (1 site(s) in 1 file(s), 0 pending entr(y/ies); 0 new, 0 grown, 0 stale, 1 blocked)"); want = $false },
+        @{ step = "cpu_platform_check"; name = "planted: exit 0 but sites reported (report line)"; exit = 0; lines = @("platform check: report (3 site(s) in 1 file(s), 0 pending entr(y/ies); 0 new, 0 grown, 0 stale, 0 blocked)"); want = $false },
+        @{ step = "cpu_platform_check"; name = "planted: no verdict line"; exit = 0; lines = @("done"); want = $false },
         @{ step = "cpu_step_selftest"; name = "clean"; exit = 0; lines = @("gate steps selftest: 36/36 as expected"); want = $true },
         @{ step = "cpu_step_selftest"; name = "planted: one proof did not hold"; exit = 1; lines = @("BAD  rules: ...", "gate steps selftest: 35/36 as expected"); want = $false }
     )
@@ -120,7 +125,8 @@ try {
 
     # ---- 5. the scripts' own verdict tests
     foreach ($t in @(@("tools\gates\pkg_smoke.ps1", "^pkg smoke selftest: (\d+)/\1 as expected"), @("tools\gates\vis_ab.ps1", "^vis ab selftest: (\d+)/\1 as expected"),
-                     @("tools\repro\kvram719_tier.ps1", "."))) {
+                     @("tools\repro\kvram719_tier.ps1", "."),
+                     @("tools\gates\platform_check.ps1", "^platform check selftest: ok"))) {
         $o = @(& $pwsh -NoProfile -File (Join-Path $repo $t[0]) -SelfTest 2>&1 | ForEach-Object { "$_" }); $c = $LASTEXITCODE
         Check "$($t[0]) -SelfTest" ($c -eq 0 -and ($o -match $t[1])) "exit $${c}: $($o | Select-Object -Last 1)"
     }

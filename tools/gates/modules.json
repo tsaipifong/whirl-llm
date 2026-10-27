@@ -307,28 +307,26 @@
   "platform.fs": {
    "id": "PL2", "desc": "platform layer, files (platform::fs + FakeFs: MappedFile, GGUF reader, server log, SSD tier files)",
    "paths": ["src/platform/fs.h", "src/platform/fs_fake.h", "src/platform/fs_win.cpp"], "lands_on": "arch025-pl2 (PL2)",
-   "steps": ["cpu_tests", "cpu_model", "cpu_tier", "cpu_server", "golden_swift", "golden_moe", "srv_tier_verify",
+   "steps": ["cpu_tests", "cpu_model", "cpu_tier", "cpu_server", "cpu_platform_check", "golden_swift", "golden_moe", "srv_tier_verify",
              "srv_cache_balance", "srv_fs_swift"],
    "gpus": {"golden_swift": 1, "golden_moe": 1, "srv_tier_verify": 2, "srv_cache_balance": 1, "srv_fs_swift": 1},
    "manual": ["flag table: whirl-tier-tests testFsOpenTable + whirl-tests testFsMappedOpen (CreateFileW access / share / disposition / flags == 0e35407)",
-              "SSD speed: T1 host-bench suite ssd A/B (write / read MB/s, QD1 / QD4) both GPUs, after T1 is merged",
-              "tools/gates/platform_check.ps1 -Mode block"]
+              "SSD speed: T1 host-bench suite ssd A/B (write / read MB/s, QD1 / QD4) both GPUs, after T1 is merged"]
   },
   "platform.proc": {
    "id": "PL4", "desc": "platform layer, this process (platform::proc: executable path of exeIdentity / exeDirectory, the GPU_WAIT named mutex, the shutdown event and console control handler, process id, working set)",
    "paths": ["src/platform/proc.h", "src/platform/proc_win.cpp"], "lands_on": "arch025-pl4 (PL4)",
-   "steps": ["cpu_tests", "cpu_tier", "cpu_server", "golden_swift", "golden_moe", "srv_cache_balance", "srv_gpu_select", "srv_env_e1",
+   "steps": ["cpu_tests", "cpu_tier", "cpu_server", "cpu_platform_check", "golden_swift", "golden_moe", "srv_cache_balance", "srv_gpu_select", "srv_env_e1",
              "srv_env_e3", "pkg_smoke"],
    "gpus": {"golden_swift": 1, "golden_moe": 1, "srv_cache_balance": 1, "srv_gpu_select": 2, "srv_env_e1": 2, "srv_env_e3": 2, "pkg_smoke": 1},
    "manual": ["exeIdentity pin: whirl-tier-tests testExeIdentityPinned (fixed size + last-write time -> the Python constants; exeIdentity() == the v0.2.4 body)",
               "GPU_WAIT mutex name pin: whirl-tests testPlatformProc (Local\\whirl-gpu-uuid-... / -pci-... strings of 0e35407)",
-              "golden server R9700 (tools/golden/golden.ps1 check -Suites server; precise t2.ssd restores SSD entries keyed by exeIdentity)",
-              "tools/gates/platform_check.ps1 -Mode block"]
+              "golden server R9700 (tools/golden/golden.ps1 check -Suites server; precise t2.ssd restores SSD entries keyed by exeIdentity)"]
   },
   "platform.sys": {
    "id": "PL4", "desc": "platform layer, machine facts (platform::sys::memoryStatus: physical / available RAM of the RAM-tier sizing)",
    "paths": ["src/platform/sys.h", "src/platform/sys_win.cpp"], "lands_on": "arch025-pl4 (PL4)",
-   "steps": ["cpu_tests", "cpu_tier", "cpu_pins", "golden_swift", "golden_moe", "srv_cache_balance", "srv_env_e1", "srv_env_e3"],
+   "steps": ["cpu_tests", "cpu_tier", "cpu_pins", "cpu_platform_check", "golden_swift", "golden_moe", "srv_cache_balance", "srv_env_e1", "srv_env_e3"],
    "gpus": {"golden_swift": 1, "golden_moe": 1, "srv_cache_balance": 1, "srv_env_e1": 2, "srv_env_e3": 2},
    "manual": ["startup sizing lines (kv tier RAM size) unchanged vs the parent exe: tools/gates/startup_lines.py check on the srv_* logs"]
   },

@@ -25,8 +25,8 @@ left outside the whitelist, and PL5 makes the check blocking in `release_gate.ps
 | `src/platform/sys.h` | `whirl::platform::sys` | physical RAM | PL4 |
 | `src/platform/args.h` | `whirl::platform::args` | UTF-8 <-> UTF-16 (behind `widen` / `narrow` / `narrowArgs`, so every path and wmain's argv) | PL4 |
 
-Each header lists, in a comment, the exact calls and files its step moves. The full per-file list with counts is
-`tools/gates/platform_pending.txt`.
+Each header lists, in a comment, the exact calls and files its step moves. There is no pending list (PL5: whitelist
+only, see "The check").
 
 Rules:
 - **Headers are platform-free.** No `<windows.h>`, Winsock or any other platform header in `src/platform/*.h`, and
@@ -177,17 +177,19 @@ PL4 (2026-10-27) moved the last calls, one function per Win32 call, arguments as
    names only when written with the global qualifier (`::recv`, `::send`); an unqualified `bind(` / `listen(` is
    covered by the file's `<winsock2.h>` include. Member and qualified calls (`x.send()`, `std::bind`) do not count.
 
-Outside the allowed places each site counts. `tools/gates/platform_pending.txt` holds, per file, the number of
-sites of the tree and the step that removes them. A file with more sites than its entry (GROWN), a file without an
-entry (NEW) or an entry with fewer sites than its count (STALE: lower the entry in the same commit) fails block
-mode. The list only shrinks; at PL5 it is empty.
+Blocking since PL5 (whitelist only, any mode, no pending list). Allowed places: the implementation files of
+`src/platform/` (`*_win.cpp`; the headers `src/platform/*.h` are checked and must stay platform-free), `src/hip/` (the
+HIP runtime's own DXGI / PDH / LoadLibrary code), `src/release/dll_deps.cpp` and the vendored
+`src/vision/stb_image.h`. `tests/` and `tools/` are not scanned; the `wmain` entry points call `whirl::narrowArgs`
+and need no entry. Every other site in `src/` or `include/` fails the check in report mode too, and a line in a
+`-Pending` file is itself a FAIL (`platform_pending.txt` is deleted). The release gate runs it as the CPU step
+`cpu_platform_check` (`-Mode block`); `pending_scan.py platform --tree-test` proves block and pass on a copy of the tree.
 
 ```
-pwsh -NoProfile -File tools\gates\platform_check.ps1                 # report (exit 0 always)
-pwsh -NoProfile -File tools\gates\platform_check.ps1 -Mode block     # exit 1 on NEW / GROWN / STALE
-pwsh -NoProfile -File tools\gates\platform_check.ps1 -SelfTest       # rule selftest + block / pass on a copy of the tree
+pwsh -NoProfile -File tools\gates\platform_check.ps1 -Mode block   # exit 1 on any site outside the whitelist
+pwsh -NoProfile -File tools\gates\platform_check.ps1 -SelfTest     # rule selftest + block / pass on a copy of the tree
 ```
 
 Adding OS code: put it in `src/platform/<concern>_win.cpp` behind a platform-free declaration in the concern's
 header, and call that from the rest of the code. If a name the check should know is missing from `PLATFORM_NAMES`,
-add it in the same commit and add its site to the pending list only if it is an existing site being recorded.
+add it in the same commit (there is no pending list to record a site in).
