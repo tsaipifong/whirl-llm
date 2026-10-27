@@ -563,7 +563,12 @@ void declarePinned(const char* local_app_data, std::uint64_t bytes);
 std::uint64_t hashStr(std::uint64_t h, std::string_view s);
 // Identity of the running executable (size + last write time): an SSD entry
 // written by another build is not restored (its numerics may differ).
+// = exeIdentityOf(platform::proc::exePath()), 0 when the path cannot be read.
 std::uint64_t exeIdentity();
+// size * 0x9e3779b97f4a7c15 ^ last-write time (GetFileAttributesExW, 100 ns ticks since 1601) of the file at path;
+// 0 when its attributes cannot be read. Byte-stable since v0.2.x: a change is a cache miss for every user
+// (pinned by tier_tests testExeIdentityPinned, arch025 PL4).
+std::uint64_t exeIdentityOf(const wchar_t* path);
 
 // CPU-test hook (power-loss fault injection; nullptr in the product). When set, the SSD write
 // job's positional writes and flush barriers go through it, so a test can model the drive's

@@ -238,6 +238,11 @@ std::string lockName(const GpuRecord& r) {
                        r.pci_domain ? std::format("-d{}", r.pci_domain) : std::string());
 }
 
+std::wstring lockMutexName(const GpuRecord& r) {
+    const std::string n = lockName(r);
+    return std::wstring(n.begin(), n.end());
+}
+
 std::string listText(const std::vector<GpuRecord>& gpus) {
     std::string s;
     for (const GpuRecord& g : gpus) s += oneLine(g);

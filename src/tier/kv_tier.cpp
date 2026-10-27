@@ -2,21 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // See kv_tier.h for the design. The SSD tier's files (unbuffered positional I/O, the overlapped restore read) go
-// through platform::fs (arch025 PL2); <windows.h> stays for the PL4 process calls (GetCurrentProcessId,
-// GetModuleFileNameW).
+// through platform::fs (arch025 PL2); the process id and the executable path through platform::proc (PL4).
 
 #include "kv_tier.h"
 #include "evict_policy.h"
 #include "idle_flush.h"
 #include "platform/fs.h"
-
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
+#include "platform/proc.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -354,7 +346,7 @@ void Tier::start(const Config& cfg_in, const Layout& lay_in, std::uint64_t finge
                 log_fn(fmt("kv tier: cannot lock the SSD directory (Windows error %lu); SSD tier off", static_cast<unsigned long>(pfs::lastError())));
             return;
         } else {
-            const std::string pid = std::to_string(GetCurrentProcessId());
+            const std::string pid = std::to_string(platform::proc::currentId());
             std::uint32_t w = 0;
             pfs::write(lh, pid.data(), static_cast<std::uint32_t>(pid.size()), &w);
             dir_lock_ = lh;
@@ -2480,7 +2472,7 @@ void declarePinned(const char* local_app_data, std::uint64_t bytes) {
         std::error_code ec;
         std::filesystem::create_directories(dir, ec);
         if (ec) return;
-        const std::filesystem::path path = dir / (std::to_wstring(GetCurrentProcessId()) + L".txt");
+        const std::filesystem::path path = dir / (std::to_wstring(platform::proc::currentId()) + L".txt");
         FILE* f = pfs::openStdio(path.c_str(), L"wb");
         if (f == nullptr) return;
         const std::string line = fmt("pinned_mib %llu\n", static_cast<unsigned long long>(bytes >> 20));
@@ -2499,16 +2491,18 @@ std::uint64_t hashStr(std::uint64_t h0, std::string_view s) {
     return h;
 }
 
-std::uint64_t exeIdentity() {
-    wchar_t buf[1024];
-    const DWORD n = GetModuleFileNameW(nullptr, buf, 1024 - 1);
-    if (n == 0) return 0;
-    buf[n] = 0;
+std::uint64_t exeIdentityOf(const wchar_t* path) {
     pfs::Attributes info;
-    if (!pfs::attributes(buf, &info)) return 0;
+    if (!pfs::attributes(path, &info)) return 0;
     const std::uint64_t size = info.size;
     const std::uint64_t wt = info.last_write;
     return size * 0x9e3779b97f4a7c15ull ^ wt;
+}
+
+std::uint64_t exeIdentity() {
+    const std::wstring exe = platform::proc::exePath();
+    if (exe.empty()) return 0;
+    return exeIdentityOf(exe.c_str());
 }
 
 }  // namespace whirl::tier

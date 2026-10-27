@@ -205,6 +205,12 @@
                            "proof": {"refactor": ["exit_rule", "golden_exact", "startup_sizing"]}},
    "model.qwen35": {"metrics": ["stage.decode_step", "stage.verify", "stage.prefill_chunk"],
                     "proof": {"refactor": ["exit_rule", "golden_exact", "move_equal", "work_trace", "stage_time"]}},
+   "platform.proc": {"metrics": [], "metrics_none": "process / named-object calls at startup and shutdown only (exe path, GPU_WAIT mutex, Ctrl+C event): no bench key",
+                     "proof": {"refactor": ["exit_rule", "golden_exact", "server_log_scan", "startup_sizing"]}},
+   "platform.sys": {"metrics": [], "metrics_none": "one GlobalMemoryStatusEx read at server startup (RAM-tier sizing): no bench key",
+                    "proof": {"refactor": ["exit_rule", "golden_exact", "startup_sizing"]}},
+   "platform.args": {"metrics": [], "metrics_none": "UTF-8 <-> UTF-16 conversion of paths and argv: no bench key (not on a per-token path)",
+                     "proof": {"refactor": ["exit_rule", "golden_exact", "server_log_scan", "startup_sizing"]}},
    "platform.*": {"metrics": [], "metrics_none": "no platform bench key yet (PLAN PL3: no HTTP microsecond tool); PL2 fs calls are covered by the tier paths",
                   "proof": {"refactor": ["exit_rule", "golden_exact", "server_log_scan", "host_work"]}}
   }
@@ -303,6 +309,31 @@
    "manual": ["flag table: whirl-tier-tests testFsOpenTable + whirl-tests testFsMappedOpen (CreateFileW access / share / disposition / flags == 0e35407)",
               "SSD speed: T1 host-bench suite ssd A/B (write / read MB/s, QD1 / QD4) both GPUs, after T1 is merged",
               "tools/gates/platform_check.ps1 -Mode block"]
+  },
+  "platform.proc": {
+   "id": "PL4", "desc": "platform layer, this process (platform::proc: executable path of exeIdentity / exeDirectory, the GPU_WAIT named mutex, the shutdown event and console control handler, process id, working set)",
+   "paths": ["src/platform/proc.h", "src/platform/proc_win.cpp"], "lands_on": "arch025-pl4 (PL4)",
+   "steps": ["cpu_tests", "cpu_tier", "cpu_server", "golden_swift", "golden_moe", "srv_cache_balance", "srv_gpu_select", "srv_env_e1",
+             "srv_env_e3", "pkg_smoke"],
+   "gpus": {"golden_swift": 1, "golden_moe": 1, "srv_cache_balance": 1, "srv_gpu_select": 2, "srv_env_e1": 2, "srv_env_e3": 2, "pkg_smoke": 1},
+   "manual": ["exeIdentity pin: whirl-tier-tests testExeIdentityPinned (fixed size + last-write time -> the Python constants; exeIdentity() == the v0.2.4 body)",
+              "GPU_WAIT mutex name pin: whirl-tests testPlatformProc (Local\\whirl-gpu-uuid-... / -pci-... strings of 0e35407)",
+              "golden server R9700 (tools/golden/golden.ps1 check -Suites server; precise t2.ssd restores SSD entries keyed by exeIdentity)",
+              "tools/gates/platform_check.ps1 -Mode block"]
+  },
+  "platform.sys": {
+   "id": "PL4", "desc": "platform layer, machine facts (platform::sys::memoryStatus: physical / available RAM of the RAM-tier sizing)",
+   "paths": ["src/platform/sys.h", "src/platform/sys_win.cpp"], "lands_on": "arch025-pl4 (PL4)",
+   "steps": ["cpu_tests", "cpu_tier", "cpu_pins", "golden_swift", "golden_moe", "srv_cache_balance", "srv_env_e1", "srv_env_e3"],
+   "gpus": {"golden_swift": 1, "golden_moe": 1, "srv_cache_balance": 1, "srv_env_e1": 2, "srv_env_e3": 2},
+   "manual": ["startup sizing lines (kv tier RAM size) unchanged vs the parent exe: tools/gates/startup_lines.py check on the srv_* logs"]
+  },
+  "platform.args": {
+   "id": "PL4", "desc": "platform layer, UTF-8 <-> UTF-16 (platform::args: the two conversion calls of whirl::widen / narrow / narrowArgs; every path and argv goes through them)",
+   "paths": ["src/platform/args.h", "src/platform/args_win.cpp"], "lands_on": "arch025-pl4 (PL4)",
+   "full": true,
+   "manual": ["whirl-tests testPlatformProc (3): flags 0 (invalid input -> U+FFFD), narrowArgs == narrow per argument",
+              "the packaged exe from a clean folder (argv conversion of both wmains) is in the full gate"]
   },
   "contract": {
    "id": "X", "desc": "cross-module contracts (ServerModel, device::Backend, kernels_abi, numerics): the full gate",

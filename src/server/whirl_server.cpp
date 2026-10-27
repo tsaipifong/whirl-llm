@@ -13,12 +13,11 @@ int wmain(int argc, wchar_t** wargv) {
     whirl::app::initConsole();
     // s8-719 root fix: the GPU list helper (a child of this program, see gpu_select.h); never interactive
     if (argc == 2 && std::wstring(wargv[1]) == L"--whirl-gpu-probe") return whirl::gpusel::probeMain();
-    std::vector<std::string> args;
+    std::vector<std::string> args = whirl::narrowArgs(argc, wargv);
     bool info_only = false;  // --help / --version need no GPU
-    for (int i = 0; i < argc; ++i) {
-        args.push_back(whirl::narrow(wargv[i]));
-        const std::string& a = args.back();
-        if (i > 0 && (a == "-h" || a == "--help" || a == "/?" || a == "-V" || a == "--version")) info_only = true;
+    for (std::size_t i = 1; i < args.size(); ++i) {
+        const std::string& a = args[i];
+        if (a == "-h" || a == "--help" || a == "/?" || a == "-V" || a == "--version") info_only = true;
     }
     if (!info_only)
         if (const int pf = whirl::app::gpuPreflight(); pf != whirl::app::exit_ok) return pf;

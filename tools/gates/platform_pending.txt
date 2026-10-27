@@ -9,9 +9,6 @@
 #   src/server/log.cpp 3 -> 1, src/server/server_main.cpp 15 -> 11 (env / paths / console / time behind src/platform).
 # PL2 (2026-10-26, arch025-pl2): util.cpp 14 -> 5, the GGUF reader 1 -> 0 (src/model/qwen35/weights.cpp since M1; the
 #   edit re-pointed there at the arch025-int3 merge, entry deleted), log.cpp 1 -> 0 (entry deleted), kv_tier.cpp 51 -> 4.
+# PL4 (2026-10-27, arch025-pl4): util.cpp 5, device.cpp 3, server_main.cpp 11, spec/policy.cpp 2, kv_tier.cpp 4 -> 0 (entries
+#   deleted; proc / sys / args behind src/platform). The tree has 0 sites outside the whitelist: PL5 turns the gate to block.
 # Regenerate counts only: pending_scan.py platform --write-pending (keeps this step column).
-src/common/util.cpp	5	PL4 args (MultiByteToWideChar / WideCharToMultiByte 4) + include 1 (PL2 moved MappedFile, _wfopen 9)
-src/model/device.cpp	3	PL4 proc (CreateMutexW, WaitForSingleObject 2 + include 1)
-src/server/server_main.cpp	11	PL4 proc / sys (<psapi.h> + 9) + <windows.h>: last (PL1 moved time + env: <timeapi.h>, timeBeginPeriod, timeEndPeriod, _putenv_s 4, 2026-10-26)
-src/spec/policy.cpp	2	PL4 proc (GetModuleFileNameW 1 + include 1; moved from src/model/spec.cpp by M4)
-src/tier/kv_tier.cpp	4	PL4 proc (GetModuleFileNameW, GetCurrentProcessId x2 3) + <windows.h> 1 (PL2 moved fs 46 + <winioctl.h> 1)

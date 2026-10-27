@@ -7,14 +7,11 @@
 #include "whirl/model.h"
 #include "whirl/gpu_select.h"
 #include "config/env_snapshot.h"
+#include "platform/proc.h"
 
+#include <cstdint>
 #include <cstdio>
 #include <string>
-
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <windows.h>
 
 namespace whirl::qwen35 {
 
@@ -26,9 +23,9 @@ namespace {
 // WHIRL_GPU_SHARE=1 skips it.
 void lockGpu(const gpusel::GpuRecord& g, const whirl::config::EnvSnapshot& env) {
     if (const auto& v = env.gpu_share; v && !v->empty() && (*v)[0] != '0') return;
-    const std::string n = gpusel::lockName(g);
-    const std::wstring name(n.begin(), n.end());
-    HANDLE h = CreateMutexW(nullptr, FALSE, name.c_str());
+    namespace pproc = platform::proc;
+    const std::wstring name = gpusel::lockMutexName(g);
+    pproc::Handle h = pproc::createMutex(name.c_str());
     if (!h) return;
     unsigned limit_s = 1800;
     if (const auto& v = env.gpu_wait) {
@@ -39,8 +36,8 @@ void lockGpu(const gpusel::GpuRecord& g, const whirl::config::EnvSnapshot& env) 
     }
     unsigned waited = 0;
     for (;;) {
-        const DWORD r = WaitForSingleObject(h, 30000);
-        if (r == WAIT_OBJECT_0 || r == WAIT_ABANDONED) return;  // held until exit (never closed)
+        const std::uint32_t r = pproc::wait(h, 30000);
+        if (r == pproc::kWaitObject0 || r == pproc::kWaitAbandoned) return;  // held until exit (never closed)
         waited += 30;
         std::fprintf(stderr, "whirl: another WHIRL process is using GPU pci:%d:%d (%s); waiting (%u s)\n", g.pci_bus, g.pci_device,
                      g.name.c_str(), waited);

@@ -16,6 +16,7 @@
 #include "cache/prefix_cache.h"
 #include "platform/fs.h"
 #include "platform/fs_fake.h"
+#include "platform/proc.h"
 
 #include <malloc.h>
 #ifndef NOMINMAX
@@ -769,6 +770,68 @@ static void testHelpers() {
     CHECK(exeIdentity() != 0);
     CHECK(kLay.ckStride() == (4ull << 20));
     CHECK(kLay.tokRegion() == 32768 && kLay.tblRegion() == 4096 && kLay.dataOff() == 40960);
+}
+
+// arch025 PL4: exeIdentity keys every SSD-cache entry (an entry of another build is not restored), so its value for a
+// given file must never change: a change is a cache miss for every user. Pinned two ways: (1) exeIdentityOf on files
+// with a fixed size and a fixed last-write time == constants computed outside C++ (Python: size * 0x9e3779b97f4a7c15
+// mod 2^64 xor FILETIME); (2) exeIdentity() of this test exe == the v0.2.4 body (GetModuleFileNameW into a 1024
+// buffer with nSize 1023, GetFileAttributesExW) evaluated here with direct Win32 calls, and exePath() == that path.
+static void testExeIdentityPinned(const fs::path& dir) {
+    namespace pproc = whirl::platform::proc;
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    struct Case {
+        std::uint64_t size, ft, want;
+    };
+    const Case cases[] = {{12345, 133000000000000000ull, 0xa0f460e0d5f910adull},
+                          {41255824, 134060000000000000ull, 0x769860a1806b4ad0ull},
+                          {0, 132000000000000001ull, 0x01d4f54cf65a0001ull}};
+    int k = 0;
+    for (const Case& c : cases) {
+        const fs::path p = dir / (L"pl4_exeid_" + std::to_wstring(k++) + L".bin");
+        {
+            std::FILE* f = _wfopen(p.c_str(), L"wb");
+            CHECK(f != nullptr);
+            if (f == nullptr) continue;
+            const std::string bytes(static_cast<std::size_t>(c.size), 'x');
+            if (!bytes.empty()) std::fwrite(bytes.data(), 1, bytes.size(), f);
+            std::fclose(f);
+        }
+        HANDLE h = CreateFileW(p.c_str(), FILE_WRITE_ATTRIBUTES, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        CHECK(h != INVALID_HANDLE_VALUE);
+        if (h == INVALID_HANDLE_VALUE) continue;
+        FILETIME ft;
+        ft.dwLowDateTime = static_cast<DWORD>(c.ft);
+        ft.dwHighDateTime = static_cast<DWORD>(c.ft >> 32);
+        CHECK(SetFileTime(h, nullptr, nullptr, &ft) != 0);
+        CloseHandle(h);
+        const std::uint64_t got = exeIdentityOf(p.c_str());
+        if (got != c.want)
+            std::printf("PL4 exeIdentityOf size %llu ft %llu = 0x%016llx (expected 0x%016llx)\n",
+                        static_cast<unsigned long long>(c.size), static_cast<unsigned long long>(c.ft),
+                        static_cast<unsigned long long>(got), static_cast<unsigned long long>(c.want));
+        CHECK(got == c.want);
+        fs::remove(p, ec);
+    }
+    CHECK(exeIdentityOf((dir / L"pl4_exeid_missing.bin").c_str()) == 0);
+    fs::remove(dir, ec);
+    // the running exe: the v0.2.4 body, verbatim except for the platform names
+    wchar_t buf[1024];
+    const DWORD n = GetModuleFileNameW(nullptr, buf, 1024 - 1);
+    CHECK(n != 0);
+    buf[n] = 0;
+    CHECK(pproc::exePath() == std::wstring(buf));
+    WIN32_FILE_ATTRIBUTE_DATA a{};
+    CHECK(GetFileAttributesExW(buf, GetFileExInfoStandard, &a) != 0);
+    const std::uint64_t size = (static_cast<std::uint64_t>(a.nFileSizeHigh) << 32) | a.nFileSizeLow;
+    const std::uint64_t wt = (static_cast<std::uint64_t>(a.ftLastWriteTime.dwHighDateTime) << 32) | a.ftLastWriteTime.dwLowDateTime;
+    const std::uint64_t old_id = size * 0x9e3779b97f4a7c15ull ^ wt;
+    CHECK(old_id != 0);
+    CHECK(exeIdentity() == old_id);
+    CHECK(exeIdentity() == exeIdentityOf(pproc::exePath().c_str()));
+    // the other PL4 process call of the tier (directory lock owner, pinned declaration)
+    CHECK(pproc::currentId() == GetCurrentProcessId());
 }
 
 // default size of the pinned-RAM tier (src/tier/ram_size.h)
@@ -4522,6 +4585,10 @@ int main(int argc, char** argv) {
     if (want("testHelpers")) {
         std::printf("-- %s\n", "testHelpers");
         testHelpers();
+    }
+    if (want("testExeIdentityPinned")) {
+        std::printf("-- %s\n", "testExeIdentityPinned");
+        testExeIdentityPinned(dir / L"pl4_exeid");
     }
     if (want("testEvictPolicy")) {
         std::printf("-- %s\n", "testEvictPolicy");

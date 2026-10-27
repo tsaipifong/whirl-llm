@@ -23,6 +23,13 @@ target_link_libraries(whirl_platform PRIVATE winmm)
 # PL2: fs (MappedFile, the GGUF reader, the server log, the SSD tier files; FakeFs in fs_fake.h)
 target_sources(whirl_platform PRIVATE
   ${CMAKE_SOURCE_DIR}/src/platform/fs_win.cpp)
+# PL4: proc (executable path, the GPU_WAIT named mutex, shutdown event / console control handler, process id / working
+# set), sys (physical RAM), args (UTF-8 <-> UTF-16 of widen / narrow / wmain); kernel32 only (K32GetProcessMemoryInfo
+# is kernel32's, no psapi.lib)
+target_sources(whirl_platform PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/platform/proc_win.cpp
+  ${CMAKE_SOURCE_DIR}/src/platform/sys_win.cpp
+  ${CMAKE_SOURCE_DIR}/src/platform/args_win.cpp)
 # callers include "platform/<concern>.h"; never put src/platform itself on an include path (its time.h would shadow
 # the C library's <time.h>)
 target_include_directories(whirl_platform PUBLIC ${CMAKE_SOURCE_DIR}/src)

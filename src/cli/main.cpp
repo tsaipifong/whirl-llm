@@ -2616,8 +2616,7 @@ bool isHelpFlag(const std::string& x) { return x == "-h" || x == "--help" || x =
 int wmain(int argc, wchar_t** wargv) {
     whirl::platform::console::setStdoutBinary();  // arch025 PL1: _setmode(_fileno(stdout), _O_BINARY)
     app::initConsole();
-    std::vector<std::string> argv;
-    for (int i = 0; i < argc; ++i) argv.push_back(narrow(wargv[i]));
+    std::vector<std::string> argv = narrowArgs(argc, wargv);
     // s8-719 root fix: the GPU list helper (a child of this program, see gpu_select.h); never interactive
     if (argv.size() == 2 && argv[1] == whirl::gpusel::k_probe_arg) return whirl::gpusel::probeMain();
     if (argv.size() >= 2 && argv[1] == "--list-devices") argv[1] = "devices";  // llama.cpp's name for it

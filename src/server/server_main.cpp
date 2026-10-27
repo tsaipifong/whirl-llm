@@ -53,10 +53,8 @@
 #include <type_traits>
 #include <vector>
 
-#ifdef _WIN32
-#include <windows.h>
-#include <psapi.h>  // K32GetProcessMemoryInfo (kernel32; WDDM-LOG RAM figure)
-#endif
+#include "platform/proc.h"  // shutdown event, console control handler, working set (arch025 PL4)
+#include "platform/sys.h"   // physical RAM (arch025 PL4)
 
 namespace whirl::server {
 
@@ -116,24 +114,26 @@ struct StartupInputs {
 // close / logoff / shutdown event regardless). A second Ctrl+C terminates at once.
 std::atomic<Engine*> g_engine{nullptr};
 std::atomic<bool> g_stopping{false};
-HANDLE g_stopped = nullptr;  // set when runLoop has returned
+platform::proc::Handle g_stopped = nullptr;  // set when runLoop has returned
 
-BOOL WINAPI onConsoleCtrl(DWORD type) {
+// platform::proc::addCtrlHandler's trampoline returns true as TRUE, false as FALSE
+bool onConsoleCtrl(int type) {
+    namespace pproc = platform::proc;
     Engine* e = g_engine.load();
-    if (e == nullptr || g_stopping.exchange(true)) return FALSE;  // default handling: exit now
-    const char* what = type == CTRL_C_EVENT ? "Ctrl+C" : type == CTRL_BREAK_EVENT ? "Ctrl+Break" : type == CTRL_CLOSE_EVENT ? "console closed" : "logoff / shutdown";
+    if (e == nullptr || g_stopping.exchange(true)) return false;  // default handling: exit now
+    const char* what = type == pproc::kCtrlC ? "Ctrl+C" : type == pproc::kCtrlBreak ? "Ctrl+Break" : type == pproc::kCtrlClose ? "console closed" : "logoff / shutdown";
     logI("shutdown requested ({}): no new requests; finishing running ones and flushing the prefix-cache tiers", what);
     e->stop();
-    const bool interactive = type == CTRL_C_EVENT || type == CTRL_BREAK_EVENT;
-    const DWORD wait_ms = interactive ? static_cast<DWORD>(Engine::shutdown_flush_long_ms + 60000) : 4500;
-    if (g_stopped != nullptr && WaitForSingleObject(g_stopped, wait_ms) == WAIT_OBJECT_0) {
+    const bool interactive = type == pproc::kCtrlC || type == pproc::kCtrlBreak;
+    const std::uint32_t wait_ms = interactive ? static_cast<std::uint32_t>(Engine::shutdown_flush_long_ms + 60000) : 4500;
+    if (g_stopped != nullptr && pproc::wait(g_stopped, wait_ms) == pproc::kWaitObject0) {
         // main returns from serveMain and the process exits normally; for close /
         // logoff / shutdown events the OS ends the process when the handler returns
-        if (!interactive) Sleep(500);
-        return TRUE;
+        if (!interactive) pproc::sleepMs(500);
+        return true;
     }
     logW("shutdown: the engine did not stop within {} s; exiting", wait_ms / 1000);
-    return FALSE;
+    return false;
 }
 
 // Windows timer resolution: 1 ms while serving. At the default tick (10-16 ms) every
@@ -1388,11 +1388,10 @@ int serveMain(int argc, char** argv, const char* program) {
             }
         }
         {
-            MEMORYSTATUSEX ms{};
-            ms.dwLength = sizeof(ms);
-            if (GlobalMemoryStatusEx(&ms)) {
-                rin.total_phys = ms.ullTotalPhys;
-                rin.avail_phys = ms.ullAvailPhys;
+            std::uint64_t total = 0, avail = 0;
+            if (platform::sys::memoryStatus(&total, &avail)) {
+                rin.total_phys = total;
+                rin.avail_phys = avail;
             }
         }
         const tier::RamTierSize rsz = tier::ramTierSize(rin);
@@ -2038,8 +2037,8 @@ int serveMain(int argc, char** argv, const char* program) {
                 s.local_usage = w.local_usage;
                 s.nonlocal_usage = w.nonlocal_usage;
                 s.pinned = be->pinnedHostBytes();
-                PROCESS_MEMORY_COUNTERS pmc{};
-                if (K32GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc))) s.rss = pmc.WorkingSetSize;
+                std::uint64_t ws = 0;
+                if (platform::proc::workingSetBytes(platform::proc::currentProcess(), &ws)) s.rss = ws;
                 return s;
             },
             !is_uma, wddm0.ok ? std::optional<wddmwatch::Sample>(vram_base) : std::nullopt, vram_cfg, startup_spill,
@@ -2118,15 +2117,15 @@ int serveMain(int argc, char** argv, const char* program) {
              opt.host, http.port(), name, opt.parallel);
         // main thread: continuous batching over the slots (until a console control
         // event stops the engine: graceful shutdown, see onConsoleCtrl)
-        g_stopped = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        g_stopped = platform::proc::createEvent();
         g_engine.store(&engine);
-        SetConsoleCtrlHandler(nullptr, FALSE);  // an "ignore Ctrl+C" attribute inherited from the parent would hide Ctrl+C
-        SetConsoleCtrlHandler(onConsoleCtrl, TRUE);
+        platform::proc::restoreCtrlC();  // an "ignore Ctrl+C" attribute inherited from the parent would hide Ctrl+C
+        platform::proc::addCtrlHandler(onConsoleCtrl);
         engine.runLoop();
         http.stop();
         logI("server stopped");
         g_engine.store(nullptr);
-        if (g_stopped != nullptr) SetEvent(g_stopped);
+        if (g_stopped != nullptr) platform::proc::setEvent(g_stopped);
         return 0;
     } catch (const std::exception& ex) {
         logE("fatal: {}", ex.what());

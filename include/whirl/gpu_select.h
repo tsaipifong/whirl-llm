@@ -111,6 +111,10 @@ std::string pciIdLong(const std::vector<GpuRecord>& all, const GpuRecord& r);
 // Name of the one-process-per-GPU mutex: keyed by the uuid when the runtime reports one, else the PCI
 // address; never the index (after the restriction every process sees its GPU as index 0).
 std::string lockName(const GpuRecord& r);
+// The name passed to CreateMutexW (src/model/device.cpp lockGpu): lockName widened byte by byte (ASCII). Every WHIRL
+// version on one GPU must use exactly this name, or two servers stop waiting for each other (GPU_WAIT); pinned by
+// tests/unit/unit_tests.cpp testPlatformProc (arch025 PL4).
+std::wstring lockMutexName(const GpuRecord& r);
 
 // "    device 0: NAME (ARCH), pci:3:0, 31.9 GiB" lines, for error texts.
 std::string listText(const std::vector<GpuRecord>& gpus);

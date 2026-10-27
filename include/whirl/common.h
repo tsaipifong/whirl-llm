@@ -47,6 +47,8 @@ void writeFile(const std::string& path, std::string_view data);
 // Converts a UTF-8 path/argument to the native wide form (Windows).
 std::wstring widen(std::string_view utf8);
 std::string narrow(std::wstring_view wide);
+// wmain's UTF-16 argv as UTF-8 strings, narrow() of each (both executables; arch025 PL4)
+std::vector<std::string> narrowArgs(int argc, const wchar_t* const* wargv);
 
 // Appends the UTF-8 encoding of cp (cp <= 0x10FFFF; surrogates are encoded
 // as-is, like the generic 3-byte form).

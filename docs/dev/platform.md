@@ -8,7 +8,8 @@ errors. Decision record: ADR-0004 Decision 5 (link-time per-concern headers, no 
 State (0.2.5): PL0 made the skeleton (headers, CMake target, check). **PL3 filled `net`**: every Winsock call of
 the HTTP server, the release pre-check and the server tests' client is in `src/platform/net_win.cpp`, with FakeNet.
 **PL1 filled env / paths / console / time** and **PL2 (fs) has moved its calls** (`fs.h` / `fs_win.cpp` /
-`fs_fake.h`; sections below). PL4 moves the rest (table below), and PL5 makes the check blocking in `release_gate.ps1`.
+`fs_fake.h`; sections below). PL4 (2026-10-27) moved the rest (proc / sys / args, below): the tree has no platform call
+left outside the whitelist, and PL5 makes the check blocking in `release_gate.ps1`.
 
 ## Shape
 
@@ -21,7 +22,8 @@ the HTTP server, the release pre-check and the server tests' client is in `src/p
 | `src/platform/fs.h` | `whirl::platform::fs` | mapped GGUF files, the SSD tier's unbuffered / overlapped files, `_wfopen` | PL2 (with FakeFs) |
 | `src/platform/net.h` | `whirl::platform::net` | the HTTP server's Winsock calls, the release front-end's port pre-check (`probeListen`), the test client | PL3 (done; FakeNet in `net_fake.h`) |
 | `src/platform/proc.h` | `whirl::platform::proc` | executable path, the per-GPU named mutex, Ctrl+C / shutdown events, process id / working set | PL4 |
-| `src/platform/sys.h` | `whirl::platform::sys` | physical RAM; the wmain UTF-16 -> UTF-8 conversion ("args") | PL4 |
+| `src/platform/sys.h` | `whirl::platform::sys` | physical RAM | PL4 |
+| `src/platform/args.h` | `whirl::platform::args` | UTF-8 <-> UTF-16 (behind `widen` / `narrow` / `narrowArgs`, so every path and wmain's argv) | PL4 |
 
 Each header lists, in a comment, the exact calls and files its step moves. The full per-file list with counts is
 `tools/gates/platform_pending.txt`.
@@ -62,8 +64,8 @@ arguments stay at the call sites as named constants (`kGenericRead`, `kShareRead
 `kOverlapped`, `kDeleteOnClose`, ...) whose values `fs_win.cpp` static_asserts against `<windows.h>`.
 
 Callers: `src/common/util.cpp` (MappedFile, readFile / writeFile), `src/model/qwen35/weights.cpp` (GGUF reader; was loader.cpp before arch025-M1),
-`src/server/log.cpp` (log file), `src/tier/kv_tier.cpp` (the SSD tier). Left for PL4: util.cpp's widen / narrow
-(args) and kv_tier.cpp's GetCurrentProcessId / GetModuleFileNameW (proc).
+`src/server/log.cpp` (log file), `src/tier/kv_tier.cpp` (the SSD tier). util.cpp's widen / narrow (args) and
+kv_tier.cpp's GetCurrentProcessId / GetModuleFileNameW (proc) moved in PL4.
 
 **FakeFs** (`platform/fs_fake.h`, implemented inside `fs_win.cpp`, the PL3 FakeNet pattern): off unless a test calls
 `fake::begin()`; then it records every `fs::open` (path, access, share, disposition, flags, ok) and injects
@@ -135,6 +137,33 @@ with the caller.
 Pins: `testFingerprintPlatformEnv` (cache tests: `fingerprintEnv()` equals a verbatim copy of the base loop, and a
 fixed environment set hashes to a constant computed outside C++), `testPlatformPaths`, `testPlatformEnv`,
 `testPlatformConsoleTime` (unit tests). Mutations of each are in `scratch\a25_pl1\pl1_extra.ps1`.
+
+## proc / sys / args (PL4)
+
+PL4 (2026-10-27) moved the last calls, one function per Win32 call, arguments as in v0.2.4 0e35407:
+- `proc::exePath()` is GetModuleFileNameW into a 1024-character buffer with nSize 1023 and `buf[n] = 0`, exactly the
+  two copies it replaced (`exeDirectory` in src/spec/policy.cpp, `exeIdentity` in src/tier/kv_tier.cpp). A longer path
+  stays truncated on purpose: `exeIdentity` keys every SSD-cache entry, so a different value is a cache miss for every
+  user. `exeIdentity()` is now `exeIdentityOf(exePath())`; `testExeIdentityPinned` (tier tests) pins
+  `exeIdentityOf` on files with a fixed size and last-write time to constants computed in Python, and `exeIdentity()`
+  of the test exe to the v0.2.4 body evaluated with direct Win32 calls.
+- The GPU_WAIT mutex (src/model/device.cpp `lockGpu`): `proc::createMutex` (CreateMutexW(nullptr, FALSE, name)) and
+  `proc::wait` (WaitForSingleObject, its result as is; `kWaitObject0` / `kWaitAbandoned` / `kWaitTimeout`
+  static_asserted). The name is `gpusel::lockMutexName` (lockName widened byte by byte, as before); every WHIRL version
+  on one GPU must use the same name or they stop waiting for each other. `testPlatformProc` (unit tests) writes the
+  uuid / PCI / PCI-with-domain names out literally and runs the wait results on real (test-named) objects, including
+  an abandoned mutex.
+- Shutdown (src/server/server_main.cpp): `proc::createEvent` (manual reset, not signaled), `setEvent`, `wait`,
+  `sleepMs`; `proc::restoreCtrlC()` (SetConsoleCtrlHandler(nullptr, FALSE)) then `proc::addCtrlHandler(onConsoleCtrl)`
+  (SetConsoleCtrlHandler(trampoline, TRUE); the trampoline turns the handler's bool into BOOL). `kCtrlC` / `kCtrlBreak` /
+  `kCtrlClose` are static_asserted. No CPU test sends a console event (it would reach the whole console group).
+- `proc::currentId` (the SSD directory lock owner and the pinned-memory declaration), `proc::currentProcess` +
+  `proc::workingSetBytes` (K32GetProcessMemoryInfo, the WDDM-LOG RAM figure).
+- `sys::memoryStatus` (GlobalMemoryStatusEx: total / available physical RAM of the RAM-tier sizing,
+  src/tier/ram_size.h).
+- `args::wideFromUtf8` / `utf8FromWide` (MultiByteToWideChar / WideCharToMultiByte with CP_UTF8 and flags 0: invalid
+  input becomes U+FFFD, as before). `widen` / `narrow` (src/common/util.cpp) keep their "length, then convert" logic;
+  the two wmain loops became `whirl::narrowArgs`.
 
 ## The check
 

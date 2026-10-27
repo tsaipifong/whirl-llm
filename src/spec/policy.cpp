@@ -9,23 +9,13 @@
 #include "whirl/vismap.h"  // image_id_base (Ngram::lookup)
 
 #include "whirl/common.h"  // widen / narrow (bug-envpaths)
+#include "platform/proc.h"  // exePath (arch025 PL4)
 
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <stdexcept>
-#ifdef _WIN32
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
-#else
-#include <unistd.h>
-#endif
 
 namespace whirl::qwen35 {
 
@@ -182,19 +172,11 @@ std::vector<u32> draftVocabIds(std::span<const u32> ids, u32 n_rows, std::span<c
 }
 
 std::string exeDirectory() {
-#ifdef _WIN32
-    wchar_t buf[1024];
-    const DWORD n = GetModuleFileNameW(nullptr, buf, 1023);
-    if (n == 0) return {};
-    buf[n] = 0;
-    return narrow(std::filesystem::path(buf).parent_path().wstring());  // bug-envpaths: UTF-8 (was .string(): ANSI)
-#else
-    char buf[4096];
-    const ssize_t n = readlink("/proc/self/exe", buf, sizeof buf - 1);
-    if (n <= 0) return {};
-    buf[n] = 0;
-    return std::filesystem::path(buf).parent_path().string();
-#endif
+    // arch025 PL4: GetModuleFileNameW through platform::proc (same buffer and size); the dead non-Windows readlink
+    // branch is gone (WHIRL builds for Windows only; a port adds a proc implementation, not a branch here)
+    const std::wstring exe = platform::proc::exePath();
+    if (exe.empty()) return {};
+    return narrow(std::filesystem::path(exe).parent_path().wstring());  // bug-envpaths: UTF-8 (was .string(): ANSI)
 }
 
 u32 pickDrafts(std::span<const DraftAccept* const> accepts, const DraftTiming& timing, u32 max, u32 cycle, u32 prev) {

@@ -7,6 +7,7 @@
 // including <windows.h> itself; this file stays first in cmake/platform.cmake and includes no platform header.
 // See docs/dev/platform.md.
 
+#include "platform/args.h"
 #include "platform/console.h"
 #include "platform/env.h"
 #include "platform/fs.h"

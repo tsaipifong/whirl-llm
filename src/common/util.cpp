@@ -2,9 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "whirl/common.h"
+#include "platform/args.h"
 #include "platform/fs.h"
-
-#include <windows.h>
 
 #include <chrono>
 #include <cstdio>
@@ -14,18 +13,24 @@ namespace whirl {
 
 std::wstring widen(std::string_view utf8) {
     if (utf8.empty()) return {};
-    const int n = MultiByteToWideChar(CP_UTF8, 0, utf8.data(), static_cast<int>(utf8.size()), nullptr, 0);
+    const int n = platform::args::wideFromUtf8(utf8.data(), static_cast<int>(utf8.size()), nullptr, 0);
     std::wstring w(static_cast<std::size_t>(n), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, utf8.data(), static_cast<int>(utf8.size()), w.data(), n);
+    platform::args::wideFromUtf8(utf8.data(), static_cast<int>(utf8.size()), w.data(), n);
     return w;
 }
 
 std::string narrow(std::wstring_view wide) {
     if (wide.empty()) return {};
-    const int n = WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()), nullptr, 0, nullptr, nullptr);
+    const int n = platform::args::utf8FromWide(wide.data(), static_cast<int>(wide.size()), nullptr, 0);
     std::string s(static_cast<std::size_t>(n), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()), s.data(), n, nullptr, nullptr);
+    platform::args::utf8FromWide(wide.data(), static_cast<int>(wide.size()), s.data(), n);
     return s;
+}
+
+std::vector<std::string> narrowArgs(int argc, const wchar_t* const* wargv) {
+    std::vector<std::string> args;
+    for (int i = 0; i < argc; ++i) args.push_back(narrow(wargv[i]));
+    return args;
 }
 
 MappedFile::MappedFile(const std::string& path) : path_(path) {
