@@ -87,4 +87,19 @@ using UniqueLock = std::unique_lock<std::mutex>;
 
 #endif
 
+// arch025-tsaidle: a function that is handed the caller's UniqueLock and unlocks / relocks it says WH_REQUIRES(mu) and
+// does both through these two, which name the mutex: the analysis cannot tie a UniqueLock& parameter to its mutex (the
+// parameter form `UniqueLock& lk WH_REQUIRES(mu)` of the Clang docs does not bind a member mutex in clang 21), so lk.unlock()
+// there would need WH_NO_THREAD_SAFETY_ANALYSIS on the whole function, its wait predicates included. With these the body
+// stays checked (a guarded read between them, a missing relock, a predicate without WH_REQUIRES all fail cpu_tsa).
+// lk must be the lock of mu (lk was made from mu). MSVC: the same lk.unlock() / lk.lock() as before.
+inline void unlockHeld(UniqueLock& lk, Mutex& mu) WH_RELEASE(mu) WH_NO_THREAD_SAFETY_ANALYSIS {
+    (void)mu;
+    lk.unlock();
+}
+inline void relockHeld(UniqueLock& lk, Mutex& mu) WH_ACQUIRE(mu) WH_NO_THREAD_SAFETY_ANALYSIS {
+    (void)mu;
+    lk.lock();
+}
+
 }  // namespace whirl
