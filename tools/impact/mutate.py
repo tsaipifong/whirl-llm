@@ -10,6 +10,10 @@ listed the test that caught it. The file is always restored (also on Ctrl+C / er
 
 --cmd KEY=COMMAND: the shell command that builds and runs the tests a mutation names in "run" (exit 0 = pass).
 A baseline run of every command used, with no mutation, must pass first; otherwise nothing is judged.
+A "run" value may name several keys ("server,cli"): every key needs a command, each runs, and the mutant is caught when
+any of them fails (a compile error counts). Built-in commands (used when no --cmd gives the key; a --cmd overrides):
+  cli_preflight: build whirl-cli in build/Release (cmake --build; run from an MSVC x64 shell, as the --cmd scripts do),
+                 then tests/cli/preflight_order_test.py on that whirl.exe (arch025-surv2: mutant c2-raw-early)
 Mutation kinds: "replace" (find -> replace, the find text must occur exactly once) and "revert" (reverse-apply
 one commit's diff of that file, e.g. re-introduce a fixed bug).
 A mutation that the tests do not catch is a SURVIVOR: a test gap, reported, never hidden.
@@ -25,6 +29,17 @@ import sys
 import time
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
+
+
+BUILTIN_CMDS = {
+    "cli_preflight": (f'cmake --build "{os.path.join(ROOT, "build", "Release")}" --target whirl-cli && '
+                      f'"{sys.executable}" -I "{os.path.join(ROOT, "tests", "cli", "preflight_order_test.py")}" '
+                      f'--bin "{os.path.join(ROOT, "build", "Release")}"'),
+}
+
+
+def run_keys(m):
+    return [k.strip() for k in m["run"].split(",") if k.strip()]
 
 
 def sh(cmd, timeout=1800):
@@ -71,19 +86,20 @@ def main():
     ap.add_argument("--spec", default=os.path.join(ROOT, "tools", "impact", "mutations.json"))
     ap.add_argument("--tsv")
     a = ap.parse_args()
-    cmds = dict(c.split("=", 1) for c in a.cmd)
+    cmds = dict(BUILTIN_CMDS)
+    cmds.update(dict(c.split("=", 1) for c in a.cmd))
     muts = json.load(open(a.spec, encoding="utf-8"))["mutations"]
     if a.only:
         keep = set(a.only.split(","))
         muts = [m for m in muts if m["id"] in keep]
-    muts = [m for m in muts if m["run"] in cmds]
+    muts = [m for m in muts if all(k in cmds for k in run_keys(m))]
     if not muts:
         print("mutate: no mutation has a --cmd for its 'run' key")
         return 2
     if subprocess.run(["git", "-C", ROOT, "diff", "--quiet", "--", *{m["file"] for m in muts}]).returncode != 0:
         print("mutate: the files to mutate have uncommitted changes; commit or stash them first")
         return 2
-    for k in sorted({m["run"] for m in muts}):
+    for k in sorted({k for m in muts for k in run_keys(m)}):
         rc, out, sec = sh(cmds[k])
         print(f"baseline {k}: exit {rc} ({sec:.0f} s)")
         if rc != 0:
@@ -95,7 +111,12 @@ def main():
         path, orig = apply(m)
         try:
             listed, ipaths = impact_lists(m["expect_test"])
-            rc, out, sec = sh(cmds[m["run"]])
+            rc, out, sec = 0, "", 0.0
+            for k in run_keys(m):
+                krc, kout, ksec = sh(cmds[k])
+                out += f"[{k}] exit {krc}\n" + kout
+                sec += ksec
+                rc = rc or krc
         finally:
             open(path, "wb").write(orig)
         caught = rc != 0

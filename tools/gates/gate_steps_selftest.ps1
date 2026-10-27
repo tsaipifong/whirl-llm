@@ -121,6 +121,11 @@ try {
         @{ step = "cpu_vis_order"; name = "planted: the 12011b4 revert"; exit = 1; lines = @("vis stream order selftest: 7/7 as expected", "R1 line 557: hip::launch reads slot 0 without a wait on ev_copy_[0] covering its latest copy", "vis stream order check: FAIL (1 violation(s))"); want = $false },
         @{ step = "cpu_vis_order"; name = "planted: selftest missed a planted reorder"; exit = 1; lines = @("vis stream order selftest: 6/7 as expected"); want = $false },
         @{ step = "cpu_vis_order"; name = "planted: parse error"; exit = 2; lines = @("vis stream order selftest: 7/7 as expected", "vis stream order check: parse error: Vision::encode not found"); want = $false },
+        @{ step = "cpu_cli_tests"; name = "clean (arch025-surv2)"; exit = 0; lines = @("ok   serve", "preflight order test: 4 passed, 0 failed", "ok   selftest --dump-only", "dump-only cli test: 9 passed, 0 failed"); want = $true },
+        @{ step = "cpu_cli_tests"; name = "planted: c2-raw-early (serve dispatched before the preflight)"; exit = 1; lines = @("FAIL serve: exit 4 (want 3), stderr: model file not found", "preflight order test: 3 passed, 1 failed"); want = $false },
+        @{ step = "cpu_cli_tests"; name = "planted: dump-only case failed (exit 0 of the step forged)"; exit = 0; lines = @("preflight order test: 4 passed, 0 failed", "dump-only cli test: 8 passed, 1 failed"); want = $false },
+        @{ step = "cpu_cli_tests"; name = "planted: setup error (whirl.exe missing)"; exit = 1; lines = @("preflight order test: setup error, whirl.exe missing"); want = $false },
+        @{ step = "cpu_cli_tests"; name = "planted: 0 cases ran"; exit = 0; lines = @("preflight order test: 0 passed, 0 failed", "dump-only cli test: 0 passed, 0 failed"); want = $false },
         @{ step = "cpu_step_selftest"; name = "clean"; exit = 0; lines = @("gate steps selftest: 36/36 as expected"); want = $true },
         @{ step = "cpu_step_selftest"; name = "planted: one proof did not hold"; exit = 1; lines = @("BAD  rules: ...", "gate steps selftest: 35/36 as expected"); want = $false }
     )

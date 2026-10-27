@@ -16,8 +16,13 @@
 #include "model/qwen35/weight_loader.h"
 #include "model/arch_registry.h"  // arch025-M5
 #include "whirl/common.h"  // widen / narrow (bug-envpaths child test)
+#include "whirl/gpu_select.h"  // arch025-surv testLockGpuAbandoned
+#include "model/device_lock.h"  // arch025-surv testLockGpuAbandoned
+#include "platform/proc.h"  // arch025-surv testLockGpuAbandoned
 
 #include <algorithm>
+#include <chrono>
+#include <thread>
 #include <array>
 #include <cmath>
 #include <cstdio>
@@ -3857,6 +3862,117 @@ void testEnvPathsModelChild() {
 }  // namespace
 #endif
 
+// arch025-surv (mutation survivor pl4-wait-abandoned, progress\arch025.MUTATION.md class C): lockGpu takes a GPU mutex
+// whose owner ended without releasing it (WAIT_ABANDONED: a WHIRL process killed while it held the GPU) at once. Test-only
+// mutex name (a uuid no real GPU has). GPU_WAIT=0: a lockGpu that does not take it reports a 30 s wait and throws
+// GpuBusy at once (the wait itself returns immediately on an abandoned mutex), so the case costs no time either way.
+void testLockGpuAbandoned() {
+    namespace pproc = whirl::platform::proc;
+    whirl::gpusel::GpuRecord g;
+    g.uuid = "a25surv-test-" + std::to_string(pproc::currentId());
+    const std::wstring name = whirl::gpusel::lockMutexName(g);
+    check(name.find(L"a25surv-test-") != std::wstring::npos, "lockGpu test: the mutex name is the test uuid's");
+    bool owned = false;
+    std::thread([&] {
+        pproc::Handle h = pproc::createMutex(name.c_str());
+        owned = h != nullptr && pproc::wait(h, 0) == pproc::kWaitObject0;
+        // the thread ends holding it: abandoned
+    }).join();
+    check(owned, "lockGpu test: a thread took the mutex and ended holding it");
+    using V = whirl::config::EnvSnapshot::Value;
+    const whirl::config::EnvSnapshot env = whirl::config::EnvSnapshot::fromValues({{"GPU_WAIT", V("0")}});
+    std::string err;
+    const auto t0 = std::chrono::steady_clock::now();
+    try {
+        whirl::qwen35::lockGpu(g, env);
+    } catch (const std::exception& e) {
+        err = e.what();
+    }
+    const auto dt = std::chrono::steady_clock::now() - t0;
+    check(err.empty(), "lockGpu takes an abandoned GPU mutex (got: " + err + ")");
+    check(dt < std::chrono::seconds(10), "lockGpu returns at once on an abandoned GPU mutex");
+}
+
+#ifdef WHIRL_SOURCE_DIR
+// arch025-surv (mutation survivor c1b-alloc-direct; C0-s4): server_main.cpp sizes the KV pool only through
+// startup::allocKvPool (the pool size it returns is what setupSlots / the budget re-check use); a direct
+// Model::allocKvPool there would allocate a second pool outside the startup plan. Model::allocKvPool stays public for the
+// CLI, the loader and the governor, so the rule is checked on the server's source text.
+void testServerPoolViaStartup() {
+    const std::string s = readSource(std::filesystem::path(WHIRL_SOURCE_DIR) / "src" / "server" / "server_main.cpp");
+    check(!s.empty(), "server_main.cpp readable");
+    const std::string call = "allocKvPool(", via = "startup::";
+    int good = 0, bad = 0;
+    for (std::size_t pos = s.find(call); pos != std::string::npos; pos = s.find(call, pos + call.size())) {
+        const bool ok = pos >= via.size() && s.compare(pos - via.size(), via.size(), via) == 0;
+        ok ? ++good : ++bad;
+    }
+    check(bad == 0, "server_main.cpp: every allocKvPool( call is startup::allocKvPool (" + std::to_string(bad) + " other)");
+    check(good >= 1, "server_main.cpp: startup::allocKvPool is called");
+}
+
+// The source text without comments; string and character literals are kept (a "//" inside "http://..." is not a
+// comment) and blanked of braces, so a brace count over the result follows only the code's braces.
+std::string codeOnly(const std::string& s) {
+    std::string o;
+    o.reserve(s.size());
+    for (std::size_t i = 0; i < s.size();) {
+        const char c = s[i];
+        if (c == '/' && i + 1 < s.size() && s[i + 1] == '/') {
+            while (i < s.size() && s[i] != '\n') ++i;
+        } else if (c == '/' && i + 1 < s.size() && s[i + 1] == '*') {
+            const std::size_t e = s.find("*/", i + 2);
+            i = e == std::string::npos ? s.size() : e + 2;
+            o += ' ';
+        } else if (c == '"' || c == '\'') {
+            o += c;
+            for (++i; i < s.size() && s[i] != c && s[i] != '\n'; ++i) {
+                if (s[i] == '\\' && i + 1 < s.size()) {
+                    o += "  ";
+                    ++i;
+                    continue;
+                }
+                o += (s[i] == '{' || s[i] == '}') ? ' ' : s[i];
+            }
+            if (i < s.size()) o += s[i++];
+        } else {
+            o += c;
+            ++i;
+        }
+    }
+    return o;
+}
+
+// arch025-surv2 (mutation survivor pl4-ctrl-restore; REVIEW F1): runServer arms Ctrl+C with two direct calls, as on
+// ec958cb (a helper changed MSVC's inlining of runServer, so the product keeps the calls in place and the rule pins them):
+// in the body of ServerRun::runServer, without comments, restoreCtrlC() comes before addCtrlHandler(, each exactly once.
+// whirl-server-tests console_ctrl_arm runs the same two calls in a child with an inherited "ignore Ctrl+C" attribute.
+// Same kind of text rule as llama.cpp's code-style.yml model-naming check (progress\arch025-surv2.PRIOR_ART.md).
+void testServerCtrlOrder() {
+    const std::string s = codeOnly(readSource(std::filesystem::path(WHIRL_SOURCE_DIR) / "src" / "server" / "server_main.cpp"));
+    check(!s.empty(), "server_main.cpp readable");
+    const std::size_t head = s.find("int ServerRun::runServer() {");
+    check(head != std::string::npos, "server_main.cpp: int ServerRun::runServer() { found");
+    if (head == std::string::npos) return;
+    std::size_t end = s.find('{', head), depth = 0;
+    for (; end < s.size(); ++end) {
+        if (s[end] == '{') ++depth;
+        if (s[end] == '}' && --depth == 0) break;
+    }
+    check(end < s.size(), "server_main.cpp: the body of runServer ends");
+    const std::string body = s.substr(head, end - head);
+    const auto count = [&](const std::string& n) {
+        int k = 0;
+        for (std::size_t p = body.find(n); p != std::string::npos; p = body.find(n, p + n.size())) ++k;
+        return k;
+    };
+    const std::string restore = "platform::proc::restoreCtrlC();", add = "platform::proc::addCtrlHandler(onConsoleCtrl);";
+    check(count(restore) == 1, "runServer calls platform::proc::restoreCtrlC() once (" + std::to_string(count(restore)) + ")");
+    check(count(add) == 1, "runServer calls platform::proc::addCtrlHandler(onConsoleCtrl) once (" + std::to_string(count(add)) + ")");
+    check(body.find(restore) < body.find(add), "runServer calls restoreCtrlC before addCtrlHandler");
+}
+#endif
+
 int main(int argc, char** argv) {
 #ifdef _WIN32
     if (argc == 2 && std::string(argv[1]) == "--child-envpaths") return childEnvPaths();  // bug-envpaths helper mode
@@ -3905,6 +4021,11 @@ int main(int argc, char** argv) {
     testAllocDrafts();
     testMtpDefaults();
     testMxfp4Repack();
+    testLockGpuAbandoned();  // arch025-surv
+#ifdef WHIRL_SOURCE_DIR
+    testServerPoolViaStartup();  // arch025-surv
+    testServerCtrlOrder();  // arch025-surv2
+#endif
 #ifdef _WIN32
     testEnvPathsModelChild();  // bug-envpaths
 #endif
