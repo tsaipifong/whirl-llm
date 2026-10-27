@@ -302,9 +302,9 @@
   "sampling": {
    "id": "E1a", "desc": "token sampling and draft acceptance (Sampler, filterCands, draws, Acceptor: greedy / specsample / relaxacc)",
    "paths": ["src/sampling/*"], "lands_on": "arch025-e1a (E1a)", "callers": "rdeps",
-   "steps": ["cpu_server", "golden_swift", "golden_moe", "srv_balance", "srv_fast"],
+   "steps": ["cpu_sampling", "cpu_sampling_iso", "cpu_server", "golden_swift", "golden_moe", "srv_balance", "srv_fast"],
    "gpus": {"golden_swift": 2, "golden_moe": 2, "srv_balance": 2, "srv_fast": 2},
-   "manual": ["whirl-server-tests sampler / acceptor_* (fixed-RNG acceptance sequences vs the pre-move code)", "V-host sched"]
+   "manual": ["whirl-server-tests sampler / acceptor_* (fixed-RNG acceptance sequences vs the pre-move code); the same bodies run alone in whirl-sampling-tests (arch025-X3, ARCH-1 8.5: src/sampling built from tests/sampling/isolation.txt only)", "V-host sched"]
   },
   "platform.fs": {
    "id": "PL2", "desc": "platform layer, files (platform::fs + FakeFs: MappedFile, GGUF reader, server log, SSD tier files)",

@@ -68,7 +68,7 @@ $fb = Join-Path $Work "fakebuild"; New-Item -ItemType Directory -Force $fb | Out
 $who = Join-Path $env:SystemRoot "System32\whoami.exe"
 foreach ($n in "whirl", "whirl-server", "whirl-server-gate", "whirl-kernel-test", "whirl-tests", "whirl-model-tests", "whirl-cache-tests",
                "whirl-vision-tests", "whirl-tier-tests", "whirl-server-tests", "whirl-hiprt-tests", "whirl-device-tests", "whirl-ops-tests",
-               "whirl-pins", "whirl-startup-replay") {
+               "whirl-pins", "whirl-startup-replay", "whirl-sampling-tests") {
     Copy-Item $who (Join-Path $fb "$n.exe") -Force
 }
 $dm = Join-Path $Work "dummy.gguf"; "x" | Set-Content $dm
