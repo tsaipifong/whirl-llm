@@ -102,8 +102,6 @@ add_executable(whirl-server-tests
   ${CMAKE_SOURCE_DIR}/tests/server/http_client.cpp)
 target_include_directories(whirl-server-tests PRIVATE ${CMAKE_SOURCE_DIR}/tests/server)
 target_link_libraries(whirl-server-tests PRIVATE whirl_server_core whirl_device_null)
-# FR-DFL P3-4: source-order checks on server_main.cpp (not linked into the test binary)
-target_compile_definitions(whirl-server-tests PRIVATE WHIRL_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 
 # arch024 S2: host micro-benchmark of the KV page path at 128k (mock model, no GPU; S4's P-speed check)
 add_executable(whirl-page-bench

@@ -13,6 +13,7 @@
 #include "engine.h"
 #include "http.h"
 #include "log.h"
+#include "startup_steps.h"
 #include "device/backend.h"
 #include "platform/env.h"
 #include "platform/paths.h"
@@ -754,10 +755,10 @@ int serveMain(int argc, char** argv, const char* program) {
         // --draft dflash: check the drafter against the target before loading (headers only, before the
         // VRAM fit check, which counts the drafter instead of the MTP block); a
         // model without a matching drafter keeps the MTP drafts (whirl/dflash_policy.h)
-        bool use_dflash = false;
+        // (use_dflash is this block's result: the VRAM fit below takes it, so the choice cannot move after the fit; arch025-C0)
         std::optional<std::string> dm_resolved;
         std::optional<gguf::File> dfile;
-        {
+        bool use_dflash = [&] {
             const std::optional<std::string> dm_cli = opt.draft_model.empty() ? std::nullopt : std::optional<std::string>(opt.draft_model);
             const auto dm = dm_resolved = whirl::dflash::resolveDraftModel(dm_cli, env("DRAFT_MODEL"));
             const auto src = *whirl::dflash::parseSource(opt.draft);
@@ -767,16 +768,16 @@ int serveMain(int argc, char** argv, const char* program) {
             if (src == whirl::dflash::Source::dflash && dm) why = qwen35::dflashIncompatibleFile(f, *dm, &dfile);
             const whirl::dflash::Choice ch = whirl::dflash::choose(src, dm, why, true);
             if (!ch.warning.empty()) logW("{}", ch.warning);
-            use_dflash = ch.source == whirl::dflash::Source::dflash;
-            if (use_dflash) lo.no_mtp = true;
+            const bool on = ch.source == whirl::dflash::Source::dflash;
+            if (on) lo.no_mtp = true;
             else dfile.reset();
-        }
+            return on;
+        }();
         // VRAM estimate before loading: when the KV pool left after weights, prefill buffers and
         // checkpoints would be small, lower the prefill batch and the checkpoint counts first
         // (only values the user did not set; nothing changes when the pool has room). Not on the
         // UMA iGPU, whose VRAM numbers do not bound what it can allocate.
         if (!is_uma) {
-            const qwen35::LoadEstimate est = am->sizing.estimateLoad(f, cfg, lo.embd_on_host, use_dflash);  // dflash: no MTP block
             const hip::MemInfo mf = ops->memInfo();
             const hip::WddmMemInfo w = ops->wddmMemInfo();
             const bool res_explicit = env("POOL_RESERVE_MB").has_value();
@@ -786,60 +787,43 @@ int serveMain(int argc, char** argv, const char* program) {
             std::uint64_t av = mf.free > res ? mf.free - res : 0;
             if (!res_explicit && w.ok) av = std::min(av, w.local_budget > w.local_usage + margin ? w.local_budget - w.local_usage - margin : 0);
             av = av > card.headroom ? av - card.headroom : 0;
-            // per-slot recurrent state + replay rows (model::slotStateBytes: the same formula for the dGPU fit and the UMA check)
-            const model::SlotStateBytes ssb = model::slotStateBytes(am->sizing, cfg);
-            const std::uint64_t st1 = ssb.st1;
-            const std::uint64_t pend1 = ssb.pend1;
-            vram::FitInput fi;
-            fi.avail = av;
-            fi.weights = est.weights;
-            // load-time state, per-slot state + replay rows, draft head (64k rows, 2 bit), slack; and the
-            // ~4% more that WDDM sees for this process than the sum of its allocations
-            fi.fixed = est.state + opt.parallel * (st1 + pend1) + (est.has_mtp ? 65536ull * cfg.n_embd * 5 / 16 : 0) + (256ull << 20);
+            // the module's load estimate, the fit input (the DFlash2 drafter instead of the MTP block, FR-DFL P3-1)
+            // and the first plan (startup::dgpuFit, arch025-C0: the server tests run the same code)
+            startup::DgpuFitIn fin;
+            fin.avail = av;
+            fin.parallel = opt.parallel;
+            fin.embd_on_host = lo.embd_on_host;
             if (use_dflash) {
-                // FR-DFL P3-1: the DFlash2 drafter (weights, capture, rings per slot, scratch, replay-less
-                // snapshot sets) instead of the MTP block / draft head / MTP KV layer (est above)
+                startup::DflashFitIn d;
                 std::vector<std::string> pw;
-                const whirl::dflash::Params dp = whirl::dflash::parseParams([](const char* n) { return env(n); }, pw);
-                const qwen35::DFlashConfig dc = qwen35::DFlashConfig::fromGguf(*dfile);
-                std::optional<std::uint32_t> snap_env;
+                d.params = whirl::dflash::parseParams([](const char* n) { return env(n); }, pw);
+                d.dc = qwen35::DFlashConfig::fromGguf(*dfile);
+                d.file = &*dfile;
                 if (auto v = env("SNAP_SETS")) {
                     try {
-                        snap_env = static_cast<std::uint32_t>(std::stoul(*v));
+                        d.snap_env = static_cast<std::uint32_t>(std::stoul(*v));
                     } catch (const std::exception&) {
                     }
                 }
-                const std::uint32_t sets = dflashSnapSets(false, true, envOn("GDN_REPLAY", true), dc.block, envOn("NGRAM", true), snap_env);
-                const whirl::dflash::Mem dm = dflashFitBytes(dc, am->sizing.dflashWeightBytes(*dfile), cfg,
-                                                             whirl::dflash::captureRows(dp, dc.window, lo.max_batch), opt.parallel, sets, st1);
-                fi.fixed += dm.total();
-                logI("VRAM estimate: DFlash2 drafter {:.2f} GiB (weights {:.2f}, capture {:.0f} MiB, rings {:.0f} MiB, scratch {:.0f} MiB, "
-                     "snapshot sets {:.0f} MiB); no MTP block",
-                     dm.total() / 1073741824.0, dm.weights / 1073741824.0, dm.capture / 1048576.0, dm.rings / 1048576.0,
-                     dm.scratch / 1048576.0, dm.snapshots / 1048576.0);
+                d.gdn_replay = envOn("GDN_REPLAY", true);
+                d.ngram = envOn("NGRAM", true);
+                fin.dflash = std::move(d);
             }
-            fi.fixed += (est.weights + fi.fixed) / 25;
-            // the mode's KV format (numerics::chooseKv; the code object is not loaded yet: only dGPUs
-            // reach here, and the R9700 code object has q4 KV kernels since FC-1c)
-            // (WHIRL_DUMP_KV: one "D kv: site=server.est_dgpu" line, arch025-S0a)
-            const KvFormat kv_est = numerics::kvEstimate(numerics::KvEstSite::server_dgpu, nreq, cfg.moe, numerics::kvEstimateRequest(env("KV")));
-            // (q4 KV uses 256 attention splits: more split-K partial buffers)
-            const std::uint32_t fd_splits_est = am->sizing.resolveFdSplits(kv_est);
-            const std::uint64_t b2 = am->sizing.bufferBytes(cfg, 2048, est.ffs, est.max_elems, fd_splits_est);
-            const std::uint64_t b4 = am->sizing.bufferBytes(cfg, 4096, est.ffs, est.max_elems, fd_splits_est);
-            fi.buf_per_row = (b4 - b2) / 2048;
-            fi.buf_fixed = b2 - fi.buf_per_row * 2048;
-            // (WHIRL_CKPT_HOST=1: checkpoints in pinned host memory, no VRAM)
-            fi.ckpt_bytes = envOn("CKPT_HOST", false) ? 0 : st1 + static_cast<std::uint64_t>(cfg.n_embd) * 4 + static_cast<std::uint64_t>(cfg.n_vocab) * 4;
-            fi.parallel = opt.parallel;
-            fi.kv_per_token = est.kvPerToken(kv_est);
-            fi.pool_min_tokens = pool_req ? *pool_req : std::min<std::uint32_t>(slot_ctx, vram_tight_pool);
-            fi.batch = lo.max_batch;
-            fi.n_ck = static_cast<std::uint32_t>(n_ck);
-            fi.n_spe = n_spe_plan;
-            fi.batch_fixed = env("PREFILL_BATCH").has_value();
-            fi.ck_fixed = env("SERVE_CKPTS").has_value() || env("SYS_CKPTS").has_value();
-            vram::FitPlan plan = vram::planFit(fi);
+            fin.nreq = nreq;
+            fin.kv_req = numerics::kvEstimateRequest(env("KV"));
+            fin.ckpt_host = envOn("CKPT_HOST", false);
+            fin.pool_min_tokens = pool_req ? *pool_req : std::min<std::uint32_t>(slot_ctx, vram_tight_pool);
+            fin.max_batch = lo.max_batch;
+            fin.n_ck = static_cast<std::uint32_t>(n_ck);
+            fin.n_spe = n_spe_plan;
+            fin.batch_fixed = env("PREFILL_BATCH").has_value();
+            fin.ck_fixed = env("SERVE_CKPTS").has_value() || env("SYS_CKPTS").has_value();
+            startup::DgpuFit fit = startup::dgpuFit(am->sizing, f, cfg, fin);
+            const qwen35::LoadEstimate& est = fit.est;
+            const std::uint64_t st1 = fit.ssb.st1;
+            const std::uint64_t pend1 = fit.ssb.pend1;
+            vram::FitInput& fi = fit.fi;
+            vram::FitPlan& plan = fit.plan;
             const double g = 1024.0 * 1024.0 * 1024.0;
             {
                 const auto want = [&] { return startfit::wantTokens(fi); };
@@ -1180,62 +1164,22 @@ int serveMain(int argc, char** argv, const char* program) {
             opt.parallel = startfit::slotsThatFit(opt.parallel, av, per_slot, shared, per_tok_est, target);
         }
         const hip::MemInfo mem_s0 = ops->memInfo();
-        model.setupSeqs(opt.parallel, slot_ctx);
-        if (use_dflash) {
-            // per-slot drafter context rings and the draft scratch (before the KV pool: it is sized
-            // from the VRAM left after them)
-            const hip::MemInfo r0 = ops->memInfo();
-            model.dflashSetup(opt.parallel, model.cap_rows);
-            const hip::MemInfo r1 = ops->memInfo();
-            logI("DFlash2 speculative decoding: on, block {} (up to {} drafts per cycle), context ring {} rows x {} slots, VRAM +{:.0f} MiB; "
-                 "p-min {:.2f}, n-min {}; n-gram drafts {}",
-                 model.dfr->block, model.dfr->block - 1, model.dfr->ring, opt.parallel,
-                 static_cast<double>(r0.free > r1.free ? r0.free - r1.free : 0) / (1024.0 * 1024.0),
-                 static_cast<double>(dfl_par.p_min), dfl_par.n_min,
-                 envOn("NGRAM", true) ? "on (chosen per cycle by the cost model)" : "off");
-        }
-        if (model.gdn_replay) {
-            logI("DeltaNet verify: replay of kept rows ({:.1f} MiB per slot), no snapshot sets",
-                 static_cast<double>(model.pendLayerBytes() * model.gdn_ord[cfg.n_layer - 1]) / (1024.0 * 1024.0));
-        }
-        std::uint32_t lit_snap_sets = 0;  // engine: snapshot sets for n-gram / DFlash2 drafts (0 = all)
-        if (use_mtp && !model.gdn_replay) {
-            std::optional<std::uint32_t> snap_env;
-            if (auto v = env("SNAP_SETS")) {
-                std::uint32_t x = 0;
-                try {
-                    x = static_cast<std::uint32_t>(std::stoul(*v));
-                } catch (const std::exception&) {
-                }
-                snap_env = x;
-            }
-            const SnapDraftCaps sc = snapshotDraftCaps(batch_drafts, drafts, opt.parallel, bd_env.has_value(), snap_env, model.relax().on);
-            batch_drafts = sc.caps;
-            lit_snap_sets = sc.lit_sets;
-            model.ensureSnapshots(sc.sets);
-            std::string tbl;
-            for (std::uint32_t k = 1; k <= opt.parallel; ++k) tbl += (k > 1 ? ", " : "") + std::to_string(std::min(batch_drafts[k], drafts));
-            logI("MTP under load, DeltaNet snapshot sets: max drafts per cycle with 1..{} decoding slots: {{ {} }}; {} snapshot sets ({} for n-gram drafts)",
-                 opt.parallel, tbl, model.snap_sets, lit_snap_sets > 0 ? std::to_string(lit_snap_sets) : std::string("all"));
-        } else if (use_dflash && !model.gdn_replay) {
-            // FR-SRV P2-5: without replay the literal drafts need snapshot sets (before the KV pool is sized)
-            std::optional<std::uint32_t> snap_env;
-            if (auto v = env("SNAP_SETS")) {
-                try {
-                    snap_env = static_cast<std::uint32_t>(std::stoul(*v));
-                } catch (const std::exception&) {
-                    logW("WHIRL_SNAP_SETS={} is not a number (ignored)", *v);
-                }
-            }
-            model.ensureSnapshots(dflashSnapSets(use_mtp, use_dflash, model.gdn_replay, model.dfr->block, envOn("NGRAM", true), snap_env));
-            std::uint64_t gdn_layers = 0;
-            for (std::uint32_t li = 0; li < cfg.n_layer; ++li)
-                if (model.ssm_state[li] != 0) ++gdn_layers;
-            logI("DeltaNet verify: no replay kernels: {} snapshot sets of {:.1f} MiB for DFlash2 / n-gram drafts (up to {} drafts "
-                 "per cycle over all decoding slots)",
-                 model.snap_sets,
-                 static_cast<double>(gdn_layers * (model.convBytes() + model.ssmBytes())) / (1024.0 * 1024.0), model.snap_sets);
-        }
+        // the slots, the DFlash2 rings / scratch, then the DeltaNet snapshot sets, before the KV pool is sized from the
+        // VRAM left (startup::setupSlots, arch025-C0: the server tests run the same code; allocKvPool takes its result)
+        startup::SlotSetupIn ssi;
+        ssi.parallel = opt.parallel;
+        ssi.slot_ctx = slot_ctx;
+        ssi.n_layer = cfg.n_layer;
+        ssi.use_mtp = use_mtp;
+        ssi.use_dflash = use_dflash;
+        ssi.drafts = drafts;
+        ssi.user_batch_drafts = bd_env.has_value();
+        ssi.dfl_par = dfl_par;
+        ssi.ngram = envOn("NGRAM", true);
+        ssi.snap_sets_env = env("SNAP_SETS");
+        const startup::SlotSetup slots = startup::setupSlots(model, *ops, ssi, batch_drafts);
+        batch_drafts = slots.batch_drafts;
+        const std::uint32_t lit_snap_sets = slots.lit_snap_sets;  // engine: snapshot sets for n-gram / DFlash2 drafts (0 = all)
 
         // engine (checkpoint buffers, shared checkpoints, sampling buffers)
         const std::uint64_t conv_bytes = model.convBytes();
@@ -1632,7 +1576,7 @@ int serveMain(int argc, char** argv, const char* program) {
                                              pool_tokens));
         if (slot_ctx_eff != slot_ctx) engine.setCtx(slot_ctx_eff);
         try {
-            model.allocKvPool(pool_tokens);
+            startup::allocKvPool(model, pool_tokens, slots);
         } catch (const std::exception& ex) {
             logE("cannot allocate a KV pool of {} tokens ({:.2f} GiB): {}", pool_tokens,
                  static_cast<double>(per_tok * pool_tokens) / (1024.0 * 1024.0 * 1024.0), ex.what());
@@ -1697,7 +1641,7 @@ int serveMain(int argc, char** argv, const char* program) {
                     prev_freed = per_tok * (have - tr.pool_tokens);
                     model.freeKvPool();
                     try {
-                        model.allocKvPool(tr.pool_tokens);
+                        startup::allocKvPool(model, tr.pool_tokens, slots);
                     } catch (const std::exception& ex) {
                         logE("cannot allocate the smaller KV pool of {} tokens ({:.2f} GiB): {}", tr.pool_tokens, poolGib(tr.pool_tokens),
                              ex.what());
