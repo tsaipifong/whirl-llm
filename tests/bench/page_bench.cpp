@@ -175,11 +175,15 @@ int main(int argc, char** argv) {
     loop.join();
     http->stop();
     http.reset();
-    engine->attachTier(nullptr);
-    tier.reset();  // the tier first (its IO thread calls into the engine), then the engine: the product's order
+    // bug-tbrig-order: the product's order (bug-server-exit-av): the tier IO thread stops first (it calls into the
+    // engine), then the engine (its spill fences are recorded on the tier stream), then the tier
+    tier->stopIo();
     engine.reset();
+    tier.reset();
     model.reset();
-    const bool clean = ops.clean();
+    const std::uint64_t dead = ops.deadStreamEventUses();
+    if (dead != 0) std::printf("page_bench: %llu event uses on a destroyed stream at teardown\n", static_cast<unsigned long long>(dead));
+    const bool clean = ops.clean() && dead == 0;
     std::printf("page_bench: %s, backend %s\n", bad == 0 ? "ok" : "FAILED", clean ? "clean" : "LEAK");
     return bad == 0 && clean ? 0 : 1;
 }

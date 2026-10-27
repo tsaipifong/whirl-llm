@@ -768,13 +768,15 @@ struct TierRig {
         tier->start(c, lay, 7);
     }
     ~TierRig() {
-        tb->attach(nullptr);
-        ps->attachTier(nullptr);
-        tier.reset();
+        // bug-tbrig-order: the product's teardown order (bug-server-exit-av): the tier IO thread stops and the tier
+        // stream drains, the engine-side owners go (their spill fences are recorded on the tier stream), the tier last
+        tier->stopIo();
         tb.reset();
-        cs.reset();
         ps.reset();
+        cs.reset();
+        tier.reset();
         model.reset();
+        EXPECT(nb.deadStreamEventUses() == 0);  // no event use on a destroyed stream
     }
     struct S {
         SlotPrefix sp;
