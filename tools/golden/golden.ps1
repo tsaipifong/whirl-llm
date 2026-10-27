@@ -45,9 +45,17 @@
 #                        single short.stream is a prefix of mtp.stream, mtp_ngram.stream == mtp.stream
 #   (fast: relaxed acceptance and the fast batch kernels change MTP / batched outputs by design.)
 #   pwsh tools/golden/golden.ps1 xcheck [-Arch ...] ...   cross-checks the reference files only (CPU)
-# record needs -KlReport: the JSON report of a passing KL gate run (tools/klgate/klgate.py: balance and fast
-# vs precise at 8k / 32k / 96k / 128k) made with the same whirl.exe (SHA-256), on the same GPU family, covering
-# every model being recorded. Without it record writes nothing and exits 2 (docs/dev/testing.md, FIX-TEST-B).
+# KL guard (arch025-klguard, owner mode standard 2026-10-26; replaces the FIX-TEST-B veto): KL / top-1 are a
+# regression guard and a diagnostic, never a veto on record. precise references are the strict bitwise golden
+# (check: a mismatch is exit 1, unchanged). After a record, the balance / fast references whose bytes changed
+# go through tools/klgate/kl_guard.ps1 with -KlReport (a tools/klgate/klgate.py --report of the same whirl.exe,
+# same GPU family, every recorded model, 3 positions, 8k / 32k / 96k / 128k): a case beyond its guard line prints
+# "WARN kl guard: ..." with the numbers and the mode's items, no report prints "TODO kl-guard: ...", and without
+# -TaskAccuracy (task-accuracy result file or KB exp_id) "TODO task-accuracy: ..."; record still writes and exits 0.
+# The evidence is written to -KlEvidence (default <Out>\kl_guard_<arch>.json) and "golden update note:" lines for
+# the commit message are printed. Unchanged balance / fast references (a bitwise refactor re-record) need no KL
+# report. A -KlReport that is not usable evidence (another exe / GPU family, run errors, < 3 positions, a length /
+# model missing, a negative --as test) is a setup error: exit 2 before any run, nothing written.
 param(
     [Parameter(Mandatory = $true, Position = 0)][ValidateSet("check", "record", "xcheck", "refhash")][string]$Action,
     [ValidateSet("gfx1201", "gfx1151")][string]$Arch = "gfx1201",
@@ -57,7 +65,9 @@ param(
     [string]$Exe = "",
     [string]$Out = "",  # check: also keep the new outputs here (default: a temp folder)
     [string]$GoldenRoot = "",  # reference tree (default tests\golden of this checkout; golden_selftest.ps1 uses a temp one)
-    [string]$KlReport = "",  # record: a passing tools/klgate report (--report) of this exe on this arch, for these models
+    [string]$KlReport = "",  # record: a tools/klgate report (--report) of this exe on this arch, for these models (guard, not veto)
+    [string]$TaskAccuracy = "",  # record: task-accuracy result reference (file or KB exp_id) for changed balance / fast references
+    [string]$KlEvidence = "",    # record: where the KL guard evidence JSON goes (default <Out>\kl_guard_<arch>.json)
     [string]$ServerExe = "",  # suite server: whirl-server.exe (default build\Release\whirl-server.exe)
     [string]$GateExe = "",    # suite server: whirl-server-gate.exe (default build\Release\whirl-server-gate.exe)
     [int]$Port = 8097,        # suite server: the port of the servers the gate starts
@@ -145,31 +155,14 @@ function RefSetHash([string]$groot, [string]$arch, [string[]]$models, [string[]]
     $h = ([BitConverter]::ToString([System.Security.Cryptography.SHA256]::HashData($ms.ToArray())) -replace "-", "").ToLower()
     return @{ hash = $h; n = $files.Count }
 }
-# FIX-TEST-B: no reference is recorded without a passing KL gate report for this exe / arch / models
-function KlReportError([string]$path) {
-    if (-not $path) { return "no -KlReport (run tools/klgate/klgate.py --report on this exe first)" }
-    if (-not (Test-Path $path)) { return "KL report $path not found" }
-    try { $r = Get-Content $path -Raw | ConvertFrom-Json } catch { return "KL report $path is not JSON" }
-    if ($r.pass -ne $true) { return "KL report $path did not pass ($($r.summary))" }
-    $h = (Get-FileHash -Algorithm SHA256 $Exe).Hash.ToLower()
-    if ("$($r.exe_sha256)".ToLower() -ne $h) { return "KL report $path is for another exe (sha256 $($r.exe_sha256), this exe $h)" }
-    $is8060 = "$($r.device)" -eq "8060s"
-    if (($Arch -eq "gfx1151") -ne $is8060) { return "KL report $path was measured on device '$($r.device)', not on $Arch" }
-    foreach ($md in @("balance", "fast")) { if ($md -notin @($r.modes)) { return "KL report $path has no $md cases" } }
-    # KL-ROBUST: 3 window positions per length (klgate.py default); a 1-position report carries chunk-schedule jitter
-    if ([int]"$($r.positions)" -lt 3) { return "KL report $path has $([int]"$($r.positions)") window position(s) per length, not 3 (KL-ROBUST: rerun klgate.py without --positions)" }
-    foreach ($L in @(8192, 32768, 98304, 131072)) { if ($L -notin @($r.lengths)) { return "KL report $path does not cover length $L" } }
-    $names = @($r.models.PSObject.Properties | ForEach-Object { "$($_.Value)" })
-    foreach ($m in $Models) {
-        $b = Split-Path -Leaf $modelPath[$m]
-        if ($b -notin $names) { return "KL report $path does not cover model $b" }
-    }
-    return ""
-}
-if ($Action -eq "record") {
-    $klErr = KlReportError $KlReport
-    if ($klErr) { Write-Host "golden: record refused: $klErr"; exit 2 }
-    Write-Host "golden: KL gate report $KlReport passed for this exe ($Arch)"
+# KL guard (arch025-klguard): a -KlReport given to record must be usable evidence for this exe / arch / models
+# (checked before any run); whether its numbers are within the guard lines is reported after the record, never a veto
+$klGuard = Join-Path $root "tools\klgate\kl_guard.ps1"
+$klModels = @($Models | ForEach-Object { Split-Path -Leaf $modelPath[$_] })
+if ($Action -eq "record" -and $KlReport) {
+    $kv = @(& $klGuard -Report $KlReport -Exe $Exe -Arch $Arch -Models $klModels -Modes balance,fast -ValidateOnly *>&1 | ForEach-Object { "$_" })
+    if ($LASTEXITCODE -ne 0) { $kv | ForEach-Object { Write-Host "golden: record refused: $_" }; exit 2 }
+    Write-Host "golden: KL report $KlReport is usable evidence for this exe ($Arch); judged as a regression guard after the record"
 }
 
 # (model paths above were read from WHIRL_GOLDEN_*; now drop every WHIRL_* variable, restored in the finally below;
@@ -478,6 +471,7 @@ foreach ($mk in $Models) {
                 Write-Host "      now:    $y"
                 Write-Host "      change: $(FieldDiff $x $y)"
                 Write-Host "      (full new output: $new)"
+                if ($mode -ne "precise") { Write-Host "      (an intended $mode output change: record new references with the KL guard report (-KlReport) and the task-accuracy reference (-TaskAccuracy); a refactor must not change it)" }
             }
         }
     }
@@ -488,6 +482,35 @@ foreach ($mk in $Models) {
 # record: the references and models.txt are written together, and only when no case failed (a partial
 # record would leave new references next to a stale model hash)
 if ($Action -eq "record" -and $err -eq 0) {
+    # which references change (bytes differ or new): balance / fast changes go through the KL guard; precise is
+    # the bitwise golden; unchanged references (a bitwise refactor re-record) need no KL report
+    $chg = [ordered]@{}
+    foreach ($gold in $staged.Keys) {
+        $old = if (Test-Path $gold) { [System.IO.File]::ReadAllLines($gold) } else { $null }
+        if ($null -ne $old -and (($old -join "`n") -eq ($staged[$gold] -join "`n"))) { continue }
+        $md = ((Split-Path -Leaf $gold) -split "_")[0]
+        $mk = Split-Path -Leaf (Split-Path -Parent $gold)
+        if (-not $chg.Contains($md)) { $chg[$md] = @() }
+        $chg[$md] += "$mk/$(Split-Path -Leaf $gold)$(if ($null -eq $old) { ' (new)' })"
+    }
+    foreach ($md in $chg.Keys) { Write-Host "golden: $md references changed: $($chg[$md] -join ', ')" }
+    if ($chg.Contains("precise")) { Write-Host "golden: precise is the strict bitwise golden: the commit's 'golden update:' note must name why precise output changed (model / exe change, deliberate precise fix)" }
+    if ($chg.Count -eq 0) { Write-Host "golden: every reference is byte-identical to the recorded one (no output change)" }
+    $chMd = @(@("balance", "fast") | Where-Object { $chg.Contains($_) })
+    if (-not $KlEvidence) { $KlEvidence = Join-Path $Out "kl_guard_$Arch.json" }
+    $ka = @{ Exe = $Exe; Arch = $Arch; Models = $klModels; Modes = $chMd; Evidence = $KlEvidence; Context = "golden record $Arch" }
+    if ($KlReport) { $ka.Report = $KlReport }
+    if ($TaskAccuracy) { $ka.TaskAccuracy = $TaskAccuracy }
+    $kg = @(& $klGuard @ka *>&1 | ForEach-Object { "$_" })
+    $kgRc = $LASTEXITCODE
+    $kg | ForEach-Object { Write-Host $_ }
+    if ($kgRc -ne 0) { Write-Host "golden record: the KL guard could not judge (exit $kgRc): nothing written"; exit 2 }
+    # the commit message's golden update: note (docs/dev/testing.md): one line per changed mode
+    $kv = @($kg | Where-Object { $_ -like "kl guard: *" } | Select-Object -Last 1)
+    foreach ($md in $chg.Keys) {
+        $v = if ($md -eq "precise") { "bitwise golden (not KL-judged)" } else { "$kv" }
+        Write-Host "golden update note: $Arch $md`: $($chg[$md].Count) reference(s); $v"
+    }
     foreach ($gold in $staged.Keys) {
         New-Item -ItemType Directory -Force (Split-Path $gold) | Out-Null
         [System.IO.File]::WriteAllLines($gold, $staged[$gold])

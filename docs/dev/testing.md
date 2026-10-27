@@ -87,9 +87,9 @@ reference files plus `models.txt`); `golden.ps1 refhash` prints the reference-se
 `tools/impact/impact.py` lists for that diff (see [Impact map](#impact-map)).
 
 `--fast` has its own items (q4 KV, relaxacc on dense models with an MTP head), so the fast
-files differ from the balance files wherever those items apply. `golden.ps1 record` refuses to write
-any reference without a passing KL gate report of the same executable (`-KlReport`, see
-[KL gate](#kl-gate) below).
+files differ from the balance files wherever those items apply. `golden.ps1 record` reports the
+changed balance / fast references through the KL regression guard (`-KlReport`, `-TaskAccuracy`, see
+[KL gate](#kl-gate) below); the guard warns, it does not refuse the record.
 
 ### Rules
 
@@ -100,12 +100,25 @@ any reference without a passing KL gate report of the same executable (`-KlRepor
   `golden update: <reason>`. Otherwise the gate stops meaning anything.
 - Run the check three times after recording on a new machine or driver to confirm the run is
   deterministic there.
-- **No re-record without the KL gate.** Before any `golden.ps1 record` (every mode: a precise change
-  moves the reference the other modes are measured against), run `tools/klgate/klgate.py` with the
-  same `whirl.exe` on the same GPU family, for every model being recorded, and pass its report as
-  `-KlReport`. record checks the report (pass, exe SHA-256, device, models, modes balance + fast,
-  lengths 8k / 32k / 96k / 128k) and otherwise writes nothing (exit 2). The report goes into the
-  commit message's `golden update:` note (one line per model: worst KL / top-1 per mode).
+- **KL guard on every balance / fast re-record (arch025-klguard, owner mode standard 2026-10-26;
+  replaces the FIX-TEST-B rule "no re-record without a passing KL gate").** precise references are
+  the strict bitwise golden: `golden.ps1 check` fails (exit 1) on any precise difference, and a
+  record that changes them prints that the `golden update:` note must name why. When a record
+  changes balance or fast references, run `tools/klgate/klgate.py` with the same `whirl.exe` on the
+  same GPU family for every recorded model and pass its report as `-KlReport`, plus the
+  task-accuracy result (`-TaskAccuracy FILE` or a KB exp_id), which is the acceptance of balance and
+  fast. `tools/klgate/kl_guard.ps1` judges the report as a guard: a case beyond its guard line prints
+  `WARN kl guard: <model> <prompt> <mode> <length>: KL ... vs guard line ...; top1 ... | mode <mode>,
+  items ...` (the run's numerics items, marked allowed balance item / fast item) and the next steps
+  (find the item, check task accuracy, re-baseline the guard line); no report prints
+  `TODO kl-guard: ...`, no task-accuracy reference `TODO task-accuracy: ...`. The record is written
+  and exits 0 in all of these cases; the evidence goes to `-KlEvidence` (default
+  `<Out>\kl_guard_<arch>.json`) and `golden update note:` lines are printed for the commit message.
+  A record whose balance / fast references are byte-identical (a bitwise refactor) needs no report.
+  A `-KlReport` that is not usable evidence (another exe SHA-256 or GPU family, run errors, 0 cases,
+  fewer than 3 positions, a missing length 8k / 32k / 96k / 128k, model or mode, a negative `--as`
+  test) is a setup error: exit 2 before any run, nothing written. The guard takes each case's
+  pass / limit from the report as klgate judged it; after a limit change use `klgate.py --rejudge`.
 
 ## <a id="impact-map"></a>Impact map
 
@@ -245,10 +258,14 @@ the noise floor on dense models (reported, not judged). `--rejudge REPORT --repo
 earlier report's per-window numbers with the current limits without running anything (exe hash,
 device and corpus are carried over and `rejudged_from` is recorded), e.g. after a limit change. `--as MODE=ARG` runs MODE
 with another CLI argument and judges it by MODE's limits (a negative test: its report never passes).
-`golden.ps1 record` refuses a report with fewer than 3 positions.
+`golden.ps1 record` and the release gate step `kl_guard` refuse a report with fewer than 3 positions as
+evidence (exit 2: a measurement problem, not a KL miss).
 
 Exit 0 only when every case ran and passed; 1 when a limit failed; 2 on a failed run, a missing or
-changed corpus file (`tools/klgate/corpus.sha256`), a too-short prompt or 0 cases. The corpus is two
+changed corpus file (`tools/klgate/corpus.sha256`), a too-short prompt or 0 cases. Exit 1 is the
+measurement tool's "beyond the guard line", not a verdict on the build: golden record and the release
+gate read the report through `tools/klgate/kl_guard.ps1` (WARN + evidence + the task-accuracy TODO,
+exit 0; self-test `tools/gates/kl_guard_selftest.ps1`). The corpus is two
 fixed texts: `code.txt` (C++ / HIP source with Chinese design notes, 131,478 tokens) and `zh.txt`
 (Chinese prose with some code); the workstation copy is `C:\ClaudeWorkspace\whirl-work\klgate\corpus`.
 
@@ -260,8 +277,10 @@ python tools/klgate/klgate.py --exe build\Release\whirl.exe --corpus <corpus dir
 
 R9700: 14 runs (2 models x 2 prompts x precise / balance / fast, + the MoE noise run per prompt), about 30 minutes; take the R9700
 lock around the whole run. 8060S: pass `--wrap "python <gpu_lock.py> --max-min 30 --"` so each run
-takes the shared lock on its own. Required: before any golden re-record (above), after a change to
-a numerics item or a default KV format, and before an rc merge / release on both GPUs.
+takes the shared lock on its own. Run it (as the regression guard): before a golden re-record that
+changes balance / fast references (above), after a change to a numerics item or a default KV format,
+and before an rc merge / release on both GPUs (pass the report to `release_gate.ps1 -KlReport`, with
+`-TaskAccuracy`, so step `kl_guard` puts its WARN / TODO lines into the gate summary).
 
 ## <a id="chunks"></a>Chunk schedule gate (`whirl seqtest`)
 
