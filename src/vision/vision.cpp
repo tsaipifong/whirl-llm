@@ -538,6 +538,7 @@ EncodeStats Vision::encode(const Prepared& p, std::span<const Region> lend, hip:
         hip::streamWaitEvent(cs, ev_start_.get());
         hip::copyAnyAsync(slot[1], host0 + 0, so_.bytes, cs);
         hip::eventRecord(ev_copy_[1].get(), cs);
+        if (copy_test_hook != nullptr) copy_test_hook(copy_test_ctx, cs);  // test only (null by default)
         hip::copyAnyAsync(slot[0], host0 + layer0_, lb, cs);
         hip::eventRecord(ev_copy_[0].get(), cs);
     }
