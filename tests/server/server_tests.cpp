@@ -256,11 +256,12 @@ public:
         if (loop_.joinable()) loop_.join();
         http_->stop();
         http_.reset();
-        engine_->attachTier(nullptr);
-        // FR-CACHE P3-5: the tier first (its destructor joins the IO thread, whose wake callback calls into
-        // the engine), then the engine -- the product's order (server_main declares the tier after the engine)
-        tier_.reset();
+        // bug-server-exit-av: the product's order (server_main declares the tiers before the engine and stops the
+        // tier IO thread first, TierIoStop): the IO thread stops (FR-CACHE P3-5: its wake callback calls into the
+        // engine), then the engine goes (its spill fences are recorded on the tier stream), then the tier
+        if (tier_) tier_->stopIo();
         engine_.reset();
+        tier_.reset();
         model_.reset();
     }
     // arch024 S3: shutdown() with a callback before each step ("tier": the tier is destroyed next, "engine", "model",
@@ -270,11 +271,11 @@ public:
         if (loop_.joinable()) loop_.join();
         http_->stop();
         http_.reset();
-        engine_->attachTier(nullptr);
-        at("tier");
-        tier_.reset();
+        if (tier_) tier_->stopIo();  // shutdown()'s order (bug-server-exit-av)
         at("engine");
         engine_.reset();
+        at("tier");
+        tier_.reset();
         at("model");
         model_.reset();
         at("end");
@@ -6138,17 +6139,44 @@ void testCkptEngineTeardown() {
             viol_after = srv.ops().pendingFreeViolations();
         }
     });
-    CHECK_EQ(viol_after, viol_engine);  // ~Engine freed nothing past a fence
+    // bug-server-exit-av order: "engine" (~Engine runs next), "tier" (~Tier next), "model"
+    CHECK_EQ(viol_tier, viol_engine);  // ~Engine freed nothing past a fence
+    CHECK_EQ(viol_after, viol_tier);   // ~Tier freed nothing past a fence
     for (const auto& v : srv.ops().violations())
         std::printf("  ckpt_engine_teardown: violation: stream %llu work %llu release #%llu %s\n", static_cast<unsigned long long>(v.stream),
                     static_cast<unsigned long long>(v.seq), static_cast<unsigned long long>(v.order), v.host ? "hostFree" : "free");
     // the number of syncs in ~Engine varies run to run (1 or 2: how many slots' spills were still unsynced); print only
     // whether one ran
-    std::printf("  ckpt_engine_teardown: violations before ~Tier %zu, before ~Engine %zu, after %zu; %s\n", viol_tier, viol_engine,
+    std::printf("  ckpt_engine_teardown: violations before ~Engine %zu, before ~Tier %zu, after %zu; %s\n", viol_engine, viol_tier,
                 viol_after,
                 syncs_after > syncs_engine ? "a spill was pending at ~Engine: the Slot / Spe wait ran"
                                            : "no spill pending at ~Engine");
     srv.ops().completeAll();
+}
+
+// bug-server-exit-av: whirl-server died after "server stopped" with an access violation in amdhip64_7.dll (+0x8f725 on
+// 10.0.3679.0: ihipEventQuery -> checkEventCaptureRestrictions reads event->captureStream_ without an isValid check).
+// The slot / shared-prefix spill fences are recorded on the tier's stream; the server destroyed the tier (and its stream)
+// before the engine, whose ~Slot / ~Spe then query those fences: a use of a destroyed stream through an event. The
+// NullBackend counts such uses (deadStreamEventUses); the shutdown order of the product (TestServer::shutdown mirrors
+// server_main) must leave it at 0. Failed (count > 0) with the tier-first order.
+void testShutdownEventStream() {
+    ServerSetup su = baseSetup(false);
+    su.mc.parallel = 2;
+    su.tier = true;
+    su.tier_min = 512;
+    TestServer srv(su);
+    const auto p1 = makePrompt(1500, 311), p2 = makePrompt(1500, 312);
+    CHECK_EQ(completionText(srv.post("/v1/completions", completionBody(p1, 8))), decode(srv.model().greedyReference(p1, 8, true)));
+    CHECK_EQ(completionText(srv.post("/v1/completions", completionBody(p2, 8))), decode(srv.model().greedyReference(p2, 8, true)));
+    const tier::Stats st = srv.tierStats();
+    CHECK(st.spills >= 1);  // the fences under test exist only after a spill
+    CHECK_EQ(srv.ops().deadStreamEventUses(), 0u);  // nothing destroyed a stream while serving
+    srv.shutdown();
+    const std::uint64_t dead = srv.ops().deadStreamEventUses();
+    std::printf("  srv_exit_event_stream: spills %llu, event uses on a destroyed stream at shutdown %llu\n",
+                static_cast<unsigned long long>(st.spills), static_cast<unsigned long long>(dead));
+    CHECK_EQ(dead, 0u);
 }
 
 }  // namespace
@@ -8708,6 +8736,7 @@ int main(int argc, char** argv) {
         {"backend_others_pinned", testBackendOthersPinned},
         {"env_matrix", testEnvMatrix},
         {"ckpt_engine_teardown", testCkptEngineTeardown},
+        {"srv_exit_event_stream", testShutdownEventStream},
         {"tier_io_thread_calls", testTierIoThreadCalls},
         {"alloc_state_measured", testAllocStateMeasured},
         {"test_tmp_base", testTestTmpBase},

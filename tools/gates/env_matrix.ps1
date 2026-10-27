@@ -205,7 +205,7 @@ if ($Cells -contains "E4") {
         $o | Set-Content (Join-Path $Work "e4_gate.txt")
         $gl = @(Get-ChildItem $gw -Recurse -File -Filter "server_*.log" -ErrorAction SilentlyContinue)
         foreach ($l in $gl) { Copy-Item $l.FullName (Join-Path $Work "server_e4_$($l.Name -replace '^server_','')") -Force }
-        $scan = @(& (Join-Path $PSScriptRoot "server_log_scan.ps1") -Dir $gw -Patterns wddm,owner *>&1 | ForEach-Object { "$_" }); $sc = $LASTEXITCODE
+        $scan = @(& (Join-Path $PSScriptRoot "server_log_scan.ps1") -Dir $gw -Patterns wddm,owner,exit *>&1 | ForEach-Object { "$_" }); $sc = $LASTEXITCODE
         $archOk = $gl.Count -gt 0 -and @($gl | Select-String -SimpleMatch "($arch)" -List).Count -eq $gl.Count
         $ps = @($gl | Where-Object { Select-String -Path $_.FullName -SimpleMatch "startup inputs:" -Quiet } | ForEach-Object { PSize $_.FullName })
         $okG = $gc -eq 0 -and ($o -match "== whirl-server-gate: [1-9]\d* passed, 0 failed \(ALL PASS\)")

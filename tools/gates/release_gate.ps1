@@ -63,7 +63,7 @@
 # server gate (model Swift) balance + fast basic,mt_cache,
 # precise basic with --cli, precise mt_cache_precise (multi-turn cache == cold, bitwise), fast_stream dense + MoE, tier,sys,restore_conc,pool in balance and precise
 # (--kv auto: the formats the modes ship, not a pinned q8v).
-# arch025-Q6: srv_vis, vis_ab, pkg_smoke, kvram719, srv_env_e2 (the GPU checks that used to run outside the gate) and
+# arch025-Q6: srv_vis, vis_ab, pkg_smoke, srv_kvram719, srv_env_e2 (the GPU checks that used to run outside the gate) and
 # cpu_step_selftest (their FAIL / PASS proofs); inputs WHIRL_GATE_MMPROJ (optional), WHIRL_GATE_IMAGES (srv_vis),
 # WHIRL_GATE_VIS_BASE (optional A/B build), WHIRL_GATE_PACKAGE (optional zip; default: packed from -Build).
 # A step that cannot run here (Q4_K_M without WHIRL_GATE_DENSE, dfl_* off the R9700, srv_env_e2 off the 8060S) is
@@ -177,7 +177,7 @@ AddStep "cpu_module_gate" $false @($pwsh, "-NoProfile", "-File", (Join-Path $rep
 # module mapping (python: WHIRL_GATE_PYTHON, else python on PATH; none found = the step fails)
 AddStep "cpu_modules_check" $false @($pwsh, "-NoProfile", "-Command", "& '$py' -I '$(Join-Path $repo "tools\gates\modules_check_test.py")'; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\impact\validate_test.py")'; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\impact\impact_steps_test.py")'; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\impact\mutations_check.py")' --selftest; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\impact\mutations_check.py")'; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\gates\modules_check.py")'; exit `$LASTEXITCODE") `
     { param($o, $c) $c -eq 0 -and ($o -match "^modules check test: ([1-9]\d*)/\1 ok") -and ($o -match "^validate test: ([1-9]\d*)/\1 ok") -and ($o -match "^impact steps test: ([1-9]\d*)/\1 ok") -and ($o -match "^modules check: ok") }
-# arch025-Q6: the FAIL / PASS proofs of srv_vis, vis_ab, pkg_smoke, kvram719, srv_env_e2 and of the dense / dfl
+# arch025-Q6: the FAIL / PASS proofs of srv_vis, vis_ab, pkg_smoke, srv_kvram719, srv_env_e2 and of the dense / dfl
 # availability rule (tools/gates/gate_steps_selftest.ps1: planted outputs through each step's own rule via -RuleCheck,
 # and the -SelfTest of the scripts behind them). CPU, no exe, no model.
 AddStep "cpu_step_selftest" $false @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\gates\gate_steps_selftest.ps1"), "-Work", "@WORK@") `
@@ -293,9 +293,10 @@ AddStep "srv_gpu_select" $true @($pwsh, "-NoProfile", "-File", (Join-Path $repo 
 # arch025-kvram719tag: the kvram719 repro (tools/repro/kvram719_tier.ps1) as a gate step: a RAM tier over what the
 # Windows limit for GPU-locked memory leaves is lowered by the server, the request is answered, no hipError 719, the
 # selected adapter stays under its limit and no other HIP adapter is charged (REVIEW-B0 A1). Exit 0 + "kvram719: PASS"
+# + the "kvram719: REPORT verdict=PASS" line (arch025-Q6 rule; the int4 merge kept this one step, Q6 had added a duplicate "kvram719")
 # (INVALID = no RAM tier in use = exit 3 = not a pass). Only this gate's GPU runs. Replaces the free-text "P-719" manual items.
 AddStep "srv_kvram719" $true @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\repro\kvram719_tier.ps1"), "-Exe", $exe["whirl-server"], "-Model", $SW,
-                               "-Device", $Device, "-Port", "$($port + 6)", "-Work", "@WORK@") { param($o, $c) $c -eq 0 -and ($o -match "(?m)^kvram719: PASS") }
+                               "-Device", $Device, "-Port", "$($port + 6)", "-Work", "@WORK@") { param($o, $c) $c -eq 0 -and ($o -match "(?m)^kvram719: PASS") -and ($o -match "(?m)^kvram719: REPORT verdict=PASS") }
 # arch024-S14 (PLAN c-3) environment matrix on this gate's GPU (tools/gates/env_matrix.ps1; one server at a time, the
 # other GPU only enumerated): E1 one vs two GPUs visible x default / --device + another program's pinned memory;
 # E3 the other GPU hidden; E4 VRAM + pinned held by another program during server gate basic; E7 WHIRL_CKPT_HOST=1
@@ -337,7 +338,8 @@ AddStep "kl_guard" $false $klArgs { param($o, $c) $c -eq 0 -and ($o -match "^kl 
 #   pkg_smoke   the release zip (tools/package_release.ps1 from -Build, or WHIRL_GATE_PACKAGE) unpacked into a clean
 #               folder, PATH = Windows folders only: with rocm_kpack.dll as shipped, and without it (refuses with a
 #               message naming it when the driver's runtime imports it, else runs)
-#   kvram719    tools/repro/kvram719_tier.ps1 (a RAM tier over the GPU-locked memory limit; arch024 PLAN P-719)
+#   srv_kvram719 (defined above with the server steps) tools/repro/kvram719_tier.ps1 (a RAM tier over the GPU-locked memory
+#               limit; arch024 PLAN P-719); Q6 named it kvram719, merged into srv_kvram719 at arch025-int4
 #   srv_env_e2  env_matrix cell E2 (8060S: WHIRL_VRAM_LIMIT_MB x 3 + a fake 0.5 GB carve-out)
 # dense / dfl_<mode>: see the Q4_K_M steps above (listed always, available with WHIRL_GATE_DENSE / _DFLASH).
 $MMP = $env:WHIRL_GATE_MMPROJ
@@ -354,8 +356,6 @@ AddStep "vis_ab" $true (@($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\
 $pkgZip = @(if ($env:WHIRL_GATE_PACKAGE) { "-Zip"; $env:WHIRL_GATE_PACKAGE })
 AddStep "pkg_smoke" $true (@($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\gates\pkg_smoke.ps1"), "-Build", $Build, "-Model", $SW, "-Device", $Device,
                             "-Port", "$($port + 21)", "-Work", "@WORK@") + $pkgZip) { param($o, $c) $c -eq 0 -and ($o -match "(?m)^pkg smoke: ok") }
-AddStep "kvram719" $true @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\repro\kvram719_tier.ps1"), "-Exe", $exe["whirl-server"], "-Model", $SW,
-                           "-Device", $Device, "-Port", "$($port + 20)", "-Work", "@WORK@") { param($o, $c) $c -eq 0 -and ($o -match "(?m)^kvram719: REPORT verdict=PASS") }
 # E2 must have run its cells (an "ok" with no E2_ cell is the R9700 n/a path, which this step does not take)
 AddStep "srv_env_e2" $true (EnvCmd "E2") { param($o, $c) $c -eq 0 -and ($o -match "(?m)^env matrix: (ok \(.*\bE2_\d+ PASS|SKIP)") } @{} $(if ($Device -ne "8060s") { "8060s only (E2 is the UMA carve-out)" } else { "" })
 

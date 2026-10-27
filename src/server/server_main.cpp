@@ -1333,7 +1333,24 @@ int serveMain(int argc, char** argv, const char* program) {
         eo.seed = seed0;
 
         auto backend = makeQwen35Backend(model);
+        // bug-server-exit-av: the host tiers are declared before the engine, so the engine is destroyed first: its
+        // slot / shared-prefix spill fences are recorded on the tier's stream, and HIP reads that stream through the
+        // event when ~Slot / ~Spe query it (hipEventQuery -> checkEventCaptureRestrictions; a destroyed stream there
+        // was the access violation at amdhip64_7.dll +0x8f725 after "server stopped"). llama.cpp's order: events
+        // before streams (~ggml_backend_cuda_context). tier_io_stop (declared after the engine, so destroyed before
+        // it) joins the tier IO thread first, whose wake callback calls into the engine (why the tier used to go first,
+        // FR-CACHE P3-5); it runs on every exit path, also exception unwinding.
+        std::unique_ptr<tier::Tier> tier_pre;
+        std::unique_ptr<tier::Tier> tier_owned;
         Engine engine(*backend, *ops, tok, eo);
+        struct TierIoStop {
+            std::unique_ptr<tier::Tier>& a;
+            std::unique_ptr<tier::Tier>& b;
+            ~TierIoStop() {
+                if (a) a->stopIo();
+                if (b) b->stopIo();
+            }
+        } tier_io_stop{tier_pre, tier_owned};
         // the checkpoint VRAM is measured around allocState only (F-7: Engine::allocStateMeasured, CPU-tested order)
         const Engine::StateMem mem_ck = engine.allocStateMeasured();
         const hip::MemInfo mem_ck0 = mem_ck.before;
@@ -1464,7 +1481,6 @@ int serveMain(int argc, char** argv, const char* program) {
             }
             kv_ram_mb = rf->mb;
         }
-        std::unique_ptr<tier::Tier> tier_pre;
         double tier_alloc_s = 0.0;
         if (kv_ram_mb > 0 && n_ck > 0 && !no_pc) {
             if (rsz.avail_limited) logW("kv tier: RAM tier size {} MiB ({})", kv_ram_mb, ram_text.size_reason);
@@ -1853,8 +1869,7 @@ int serveMain(int argc, char** argv, const char* program) {
         else
             logI("shared prefix checkpoints: off (system message split at >= {} tokens{})", eo.sys_min, eo.sys_min == 0 ? ": off" : "");
 
-        // host prefix-cache tiers (pinned RAM, SSD)
-        std::unique_ptr<tier::Tier> tier_owned;
+        // host prefix-cache tiers (pinned RAM, SSD; tier_owned is declared before the engine)
         {
             std::uint64_t ssd_gb = kv_ssd_gb_default;
             if (opt.kv_ssd_gb) ssd_gb = *opt.kv_ssd_gb;

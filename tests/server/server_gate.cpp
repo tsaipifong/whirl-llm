@@ -370,6 +370,22 @@ std::pair<std::string, int> consoleStopRun(int n) {
     return {text, code};
 }
 
+// bug-server-exit-av: what the exit code of a server stopped with Ctrl+C means. Empty: a clean exit (0). The server
+// returns 0 after "server stopped"; 0xC0000005 was the access violation in amdhip64_7.dll during teardown, which the
+// gate used to miss (WER holds the process ~26 s, then it exits with that code; the stop still looked graceful).
+std::string exitProblem(DWORD code) {
+    if (code == 0) return {};
+    if (code == 0xC0000005u) return std::format("exit code 0x{:08X} (0xC0000005 = access violation)", code);
+    return std::format("exit code 0x{:08X} ({})", code, code);
+}
+
+// The line appended to the server's log for a non-zero exit, in the server's own log format (src/server/log.cpp
+// "yyyy-mm-dd HH:MM:SS.mmm L message"), so tools/gates/server_log_scan.ps1 (set "exit") finds it.
+std::string exitLogLine(const SYSTEMTIME& t, DWORD code) {
+    return std::format("{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03} E server exit: code 0x{:08X} after Ctrl+C ({})", t.wYear, t.wMonth,
+                       t.wDay, t.wHour, t.wMinute, t.wSecond, t.wMilliseconds, code, exitProblem(code));
+}
+
 class Server {
 public:
     Server(const std::string& tag, const std::vector<std::string>& args, const std::map<std::string, std::string>& env_extra,
@@ -465,14 +481,32 @@ public:
         if (!proc_) return;
         const auto t0 = std::chrono::steady_clock::now();
         const bool sent = sendCtrlC(GetProcessId(proc_));
+        bool terminated = false;
         if (!sent || WaitForSingleObject(proc_, 30000) != WAIT_OBJECT_0) {
             logLine(std::format("server {}: {}; terminating", tag_, sent ? "no exit 30 s after Ctrl+C" : "Ctrl+C could not be sent"));
             TerminateProcess(proc_, 1);
+            terminated = true;
         } else {
-            logLine(std::format("server {} stopped (Ctrl+C) in {:.1f} s", tag_,
-                                std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count()));
+            DWORD code = 0;
+            const bool got = GetExitCodeProcess(proc_, &code) != 0;
+            logLine(std::format("server {} stopped (Ctrl+C) in {:.1f} s, exit code {}", tag_,
+                                std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(),
+                                got ? std::format("0x{:08X}", code) : std::string("unknown")));
+            if (got && code != 0) {
+                check(std::format("server {} exits with code 0 after Ctrl+C", tag_), false, exitProblem(code));
+                SYSTEMTIME st;
+                GetLocalTime(&st);
+                if (std::FILE* f = _wfopen(widen(log_).c_str(), L"ab")) {
+                    const std::string l = exitLogLine(st, code) + "\n";
+                    std::fwrite(l.data(), 1, l.size(), f);
+                    std::fclose(f);
+                }
+            }
         }
         WaitForSingleObject(proc_, 30000);
+        DWORD code_end = 0;
+        if (terminated && GetExitCodeProcess(proc_, &code_end))  // 1 = our TerminateProcess; anything else: it exited on its own first
+            logLine(std::format("server {}: exit code 0x{:08X} after the terminate", tag_, code_end));
         CloseHandle(proc_);
         proc_ = nullptr;
         if (!ssd_.empty()) {
@@ -2641,6 +2675,20 @@ int selfTest() {
     const ChatResult err = mk(500, ""), err4 = mk(400, ""), ok = mk(200, "hello"), ok2 = mk(200, "world"), think = mk(200, "", "hmm"),
                      empty200 = mk(200, "");
     std::string d;
+    // bug-server-exit-av: the exit code after a Ctrl+C stop
+    check("selftest: exit code 0 -> no problem", exitProblem(0).empty());
+    check("selftest: exit code 0xC0000005 -> access violation", exitProblem(0xC0000005u) == "exit code 0xC0000005 (0xC0000005 = access violation)",
+          exitProblem(0xC0000005u));
+    check("selftest: exit code 1 -> an error", exitProblem(1) == "exit code 0x00000001 (1)", exitProblem(1));
+    {
+        SYSTEMTIME t{};
+        t.wYear = 2026, t.wMonth = 10, t.wDay = 26, t.wHour = 1, t.wMinute = 2, t.wSecond = 3, t.wMilliseconds = 45;
+        const std::string l = exitLogLine(t, 0xC0000005u);
+        check("selftest: exit log line in the server log format (server_log_scan set exit)",
+              std::regex_search(l, std::regex(R"(^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d{3} E server exit: )")) &&
+                  l.rfind("2026-10-26 01:02:03.045 E server exit: code 0xC0000005", 0) == 0,
+              l);
+    }
     check("selftest: concurrency, equal answers -> same", concSame({ok, ok2}, {ok, ok2}, d));
     d.clear();
     check("selftest: concurrency, one differs -> not same", !concSame({ok, ok}, {ok, ok2}, d) && d == "=x", d);

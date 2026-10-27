@@ -32,6 +32,9 @@ try {
     $empty = Join-Path $tmp "empty"; New-Item -ItemType Directory -Force $empty | Out-Null
     $other = MkLogDir "other" @("$ts E owner check: x called on thread 1") "server_a.stdout.txt"
     $sub = MkLogDir "sub" @("$ts E owner check: TierBridge::tick called on thread 7") "case1\server_b.log"
+    # bug-server-exit-av: the gate's exit line (whirl-server-gate exitLogLine), and a request text that only quotes it
+    $exitl = MkLogDir "exit" @("$ts I server stopped", "$ts E server exit: code 0xC0000005 after Ctrl+C (exit code 0xC0000005 (0xC0000005 = access violation))")
+    $exitq = MkLogDir "exitq" @("$ts I request text: E server exit: code 0xC0000005")
     Case "clean log passes (owner)" 0 "server log scan: PASS 1 server log\(s\).*0 line\(s\) matched \[owner\]" @("-Dir", $clean, "-Patterns", "owner")
     Case "default set is owner" 0 "\[owner\]" @("-Dir", $clean)
     Case "owner check line blocks" 1 "FAIL 1 line\(s\) matched \[owner\].*PagePool::take" @("-Dir", $own, "-Patterns", "owner")
@@ -43,10 +46,15 @@ try {
     Case "WDDM line blocks wddm,owner" 1 "FAIL 1 line\(s\) matched \[wddm,owner\]" @("-Dir", $wddm, "-Patterns", "wddm,owner")
     Case "owner line blocks owner,wddm" 1 "FAIL 1 line\(s\) matched \[owner,wddm\]" @("-Dir", $own, "-Patterns", "owner,wddm")
     Case "lines that only mention the rule pass" 0 "PASS" @("-Dir", $rule, "-Patterns", "wddm,owner")
-    Case "-Step srv_*: WDDM blocks" 1 "\[wddm,owner\]" @("-Dir", $wddm, "-Step", "srv_balance")
-    Case "-Step srv_*: owner blocks" 1 "\[wddm,owner\]" @("-Dir", $own, "-Step", "srv_tier_verify")
+    Case "-Step srv_*: WDDM blocks" 1 "\[wddm,owner,exit\]" @("-Dir", $wddm, "-Step", "srv_balance")
+    Case "-Step srv_*: owner blocks" 1 "\[wddm,owner,exit\]" @("-Dir", $own, "-Step", "srv_tier_verify")
     Case "-Step srv_*: no log fails" 2 "no server log" @("-Dir", $empty, "-Step", "srv_mt_precise")
-    Case "-Step golden_*: owner only" 0 "\[owner\]" @("-Dir", $wddm, "-Step", "golden_swift")
+    Case "-Step golden_*: owner,exit only" 0 "\[owner,exit\]" @("-Dir", $wddm, "-Step", "golden_swift")
+    Case "exit line blocks (exit set)" 1 "FAIL 1 line\(s\) matched \[exit\].*E server exit: code 0xC0000005" @("-Dir", $exitl, "-Patterns", "exit")
+    Case "-Step srv_*: exit line blocks" 1 "\[wddm,owner,exit\]" @("-Dir", $exitl, "-Step", "srv_mt_precise_moe")
+    Case "-Step golden_*: exit line blocks" 1 "\[owner,exit\]" @("-Dir", $exitl, "-Step", "golden_moe")
+    Case "a quoted exit line passes" 0 "PASS" @("-Dir", $exitq, "-Patterns", "exit,owner")
+    Case "exit line passes the owner set" 0 "PASS" @("-Dir", $exitl, "-Patterns", "owner")
     Case "-Step of a CPU step: no scan" 0 "not a server step" @("-Dir", $empty, "-Step", "cpu_server")
     Case "unknown pattern set is a usage error" 3 "unknown pattern set" @("-Dir", $clean, "-Patterns", "nosuch")
 } finally {

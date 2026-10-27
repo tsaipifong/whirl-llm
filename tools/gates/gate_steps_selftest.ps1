@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # FAIL / PASS proofs of the release_gate steps added by arch025-Q6 (ARCH-1 8.7 condition 2): srv_vis, vis_ab, pkg_smoke,
-# kvram719, srv_env_e2 and the always-listed Q4_K_M / DFlash2 steps (st_dense_*, golden_dense, seq_dense_*, dfl_*).
+# srv_kvram719, srv_env_e2 and the always-listed Q4_K_M / DFlash2 steps (st_dense_*, golden_dense, seq_dense_*, dfl_*).
 # CPU only: no exe, no model, no GPU. release_gate step cpu_step_selftest.
 #   1. -List: every new step is listed (GPU), the unavailable ones with "(not in this gate: ...)", on both -Device values
 #   2. availability: an unavailable step in -Steps is a setup error (exit 2, "not available here"); with WHIRL_GATE_DENSE
@@ -31,7 +31,7 @@ foreach ($v in "WHIRL_GATE_DENSE", "WHIRL_GATE_DFLASH", "WHIRL_GATE_IMAGES", "WH
 try {
     # ---- 1. -List
     $r97 = Gate @("-Device", "r9700", "-List"); $s8 = Gate @("-Device", "8060s", "-List")
-    foreach ($n in "srv_vis", "vis_ab", "pkg_smoke", "kvram719") {
+    foreach ($n in "srv_vis", "vis_ab", "pkg_smoke", "srv_kvram719") {
         Check "list r9700 $n GPU" (@($r97.out | Where-Object { $_ -match "^$n\s+GPU\s*$" }).Count -eq 1) "not listed as an available GPU step"
         Check "list 8060s $n GPU" (@($s8.out | Where-Object { $_ -match "^$n\s+GPU\s*$" }).Count -eq 1) "not listed as an available GPU step"
     }
@@ -91,9 +91,9 @@ try {
         @{ step = "pkg_smoke"; name = "clean"; exit = 0; lines = @("pkg smoke: REPORT kpack: ver 0 devices 0 chat 0", "pkg smoke: ok (zip whirl-0.2.5-windows-x64.zip 0123456789abcdef, r9700, with and without rocm_kpack.dll)"); want = $true },
         @{ step = "pkg_smoke"; name = "planted: member missing"; exit = 1; lines = @("pkg smoke: FAIL (member_missing:whirl-server.exe)"); want = $false },
         @{ step = "pkg_smoke"; name = "planted: ok line, exit 1"; exit = 1; lines = @("pkg smoke: ok (x)"); want = $false },
-        @{ step = "kvram719"; name = "clean"; exit = 0; lines = @("kvram719: REPORT verdict=PASS reason=ok hip719=0 tier=8192", "kvram719: PASS"); want = $true },
-        @{ step = "kvram719"; name = "planted: hipError 719"; exit = 1; lines = @("kvram719: REPORT verdict=FAIL reason=request hip719=1"); want = $false },
-        @{ step = "kvram719"; name = "planted: tier off (INVALID)"; exit = 3; lines = @("kvram719: REPORT verdict=INVALID reason=tier_off hip719=0"); want = $false },
+        @{ step = "srv_kvram719"; name = "clean"; exit = 0; lines = @("kvram719: REPORT verdict=PASS reason=ok hip719=0 tier=8192", "kvram719: PASS"); want = $true },
+        @{ step = "srv_kvram719"; name = "planted: hipError 719"; exit = 1; lines = @("kvram719: REPORT verdict=FAIL reason=request hip719=1"); want = $false },
+        @{ step = "srv_kvram719"; name = "planted: tier off (INVALID)"; exit = 3; lines = @("kvram719: REPORT verdict=INVALID reason=tier_off hip719=0"); want = $false },
         @{ step = "srv_env_e2"; name = "clean (8060s cells)"; exit = 0; lines = @("env matrix: ok (4 cell(s): E2_49152 PASS, E2_32768 PASS, E2_24576 PASS, E2_fake0.5 PASS) [8060s gfx1151, carve-out 96 GB]"); want = $true },
         @{ step = "srv_env_e2"; name = "clean (one GPU: SKIP)"; exit = 0; lines = @("env matrix: SKIP (this host has 1 GPU; the matrix needs two)"); want = $true },
         @{ step = "srv_env_e2"; name = "planted: a refused limit"; exit = 1; lines = @("env matrix: FAIL (E2_32768 FAIL) [8060s gfx1151, carve-out 96 GB]"); want = $false },
@@ -113,7 +113,7 @@ try {
     $x.out | Where-Object { $_ -match "^(ok|BAD) " } | ForEach-Object { Write-Host "       rule $_" }
     Check "rules: $($cases.Count) planted / clean outputs through the step rules" ($x.code -eq 0 -and ($x.out -match "^rule check: $($cases.Count)/$($cases.Count) as expected")) "exit $($x.code): $($x.out | Select-Object -Last 1)"
     # the rule check itself must notice a wrong expectation (a check that cannot fail proves nothing)
-    $wrong = @(@{ step = "kvram719"; name = "inverted"; exit = 1; lines = @("kvram719: REPORT verdict=FAIL"); want = $true })
+    $wrong = @(@{ step = "srv_kvram719"; name = "inverted"; exit = 1; lines = @("kvram719: REPORT verdict=FAIL"); want = $true })
     ConvertTo-Json -InputObject $wrong -Depth 5 | Set-Content $rc
     $x = Gate @("-Device", "r9700", "-RuleCheck", $rc)
     Check "rules: an inverted expectation is reported (exit 1)" ($x.code -eq 1 -and ($x.out -match "^rule check: 0/1 as expected")) "exit $($x.code)"

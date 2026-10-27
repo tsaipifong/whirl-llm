@@ -220,7 +220,7 @@ try {
     Expect "suite server: the case's server log is scanned (PASS line)" $r 0 { $r.out -match "dense/precise_server server log scan: PASS 1 server log\(s\)" }
     $r = RunSrv "check" $g7 @{ FAKEGATE_LOGLINE = "2026-01-01 00:00:01.000 E owner check: PagePool::take called on thread 4242" }
     Expect "suite server: an owner check line in a server log fails the case" $r 2 {
-        ($r.out -match "server log scan: FAIL 1 line\(s\) matched \[owner\]") -and ($r.out -match "whirl exit 10") }
+        ($r.out -match "server log scan: FAIL 1 line\(s\) matched \[owner(,exit)?\]") -and ($r.out -match "whirl exit 10") }
     $r = RunSrv "check" $g7 @{ FAKEGATE_NOLOG = "1" }
     Expect "suite server: a case with no server log fails" $r 2 { $r.out -match "server log scan: FAIL no server log" }
     $r = RunSrv "check" $g7 @{ FAKEGATE_LOGLINE = "2026-01-01 00:00:01.000 W GPU memory spill: 1.0 GiB" }

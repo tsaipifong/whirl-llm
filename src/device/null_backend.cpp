@@ -99,6 +99,10 @@ Stream NullBackend::streamCreateNonBlocking() {
 
 void NullBackend::streamDestroy(Stream s) {
     noteThread(Call::stream_destroy);
+    if (s != nullptr) {
+        std::lock_guard<std::mutex> lk(rec_mu_);
+        dead_streams_.insert(idOf(s));
+    }
     live_streams_ -= 1;
     delete static_cast<int*>(s);
 }
@@ -126,14 +130,25 @@ void NullBackend::streamWaitEvent(Stream s, Event e) {
 
 void NullBackend::eventRecord(Event e, Stream s) {
     noteThread(Call::event_record);
+    {
+        std::lock_guard<std::mutex> lk(rec_mu_);
+        rec_stream_[e] = idOf(s);
+    }
     if (!track_.load()) return;
     std::lock_guard<std::mutex> lk(mu_);
     const StreamState& st = streams_[idOf(s)];
     events_[e] = EventRec{{idOf(s), st.issued}, st.deps};
 }
 
+void NullBackend::noteEventUse(Event e) {
+    std::lock_guard<std::mutex> lk(rec_mu_);
+    const auto it = rec_stream_.find(e);
+    if (it != rec_stream_.end() && it->second != 0 && dead_streams_.count(it->second) != 0) dead_stream_uses_ += 1;
+}
+
 bool NullBackend::eventDone(Event e) {
     noteThread(Call::event_done);
+    noteEventUse(e);
     if (!track_.load()) return true;
     std::lock_guard<std::mutex> lk(mu_);
     return doneLocked(e);
@@ -157,6 +172,10 @@ Event NullBackend::eventCreate() {
 
 void NullBackend::eventDestroy(Event e) {
     noteThread(Call::event_destroy);
+    {
+        std::lock_guard<std::mutex> lk(rec_mu_);
+        rec_stream_.erase(e);
+    }
     if (track_.load()) {
         std::lock_guard<std::mutex> lk(mu_);
         events_.erase(e);
@@ -167,6 +186,7 @@ void NullBackend::eventDestroy(Event e) {
 
 bool NullBackend::eventDoneChecked(Event e) {
     noteThread(Call::event_done_checked);
+    noteEventUse(e);
     if (event_error_.load()) throw std::runtime_error("injected asynchronous device error");
     if (!track_.load()) return true;
     std::lock_guard<std::mutex> lk(mu_);
@@ -175,6 +195,7 @@ bool NullBackend::eventDoneChecked(Event e) {
 
 void NullBackend::eventSync(Event e) {
     noteThread(Call::event_sync);
+    noteEventUse(e);
     {
         std::unique_lock<std::mutex> lk(gate_m_);
         gate_cv_.wait(lk, [&] { return gate_open_; });

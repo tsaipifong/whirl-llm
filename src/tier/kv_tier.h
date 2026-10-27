@@ -295,6 +295,14 @@ public:
     ~Tier();
     Tier(const Tier&) = delete;
     Tier& operator=(const Tier&) = delete;
+    // bug-server-exit-av: stops the IO thread (joins it after its current job) and waits for the tier stream (no
+    // copy may still touch the engine's buffers once the owner destroys the engine); idempotent, and ~Tier calls it
+    // first. After it the wake callback (setWake: it calls into the engine) never runs again, so
+    // the owner can destroy the engine before the tier: the engine's events recorded on stream() (slot / shared
+    // prefix spill fences) must go before the stream does (HIP reads the stream through the event on
+    // hipEventQuery / hipEventSynchronize; amdhip64_7.dll +0x8f725 at server exit). Entries, jobs, arena, events
+    // and stream stay until ~Tier.
+    void stopIo();
 
     // Layout, SSD index and IO thread (after the KV format is known).
     void start(const Config& cfg, const Layout& lay, std::uint64_t fingerprint);

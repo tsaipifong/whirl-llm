@@ -128,6 +128,12 @@ public:
     };
     void recordCopies(bool on);
     std::vector<Copy> copies() const;  // recorded copies (non-empty ones), in call order
+    // bug-server-exit-av (always on, independent of tracking mode): eventDone / eventDoneChecked / eventSync of an
+    // event whose last record was on a stream that has since been destroyed. HIP's ihipEventQuery and
+    // hipEventSynchronize read that stream's capture status through the event (ROCm clr hip_event.cpp
+    // checkEventCaptureRestrictions, no isValid check): a use after free that crashed whirl-server at exit
+    // (amdhip64_7.dll +0x8f725). eventDestroy is not counted (hipEventDestroy checks isValid first).
+    std::uint64_t deadStreamEventUses() const { return dead_stream_uses_.load(); }
 
     // ---- tracking mode (F1; see the header comment). Turning it on or off clears its state.
     void trackPending(bool on);
@@ -205,6 +211,12 @@ private:
     void checkRelease(std::uintptr_t start, bool host);
     void noteThread(Call c);
     bool doneLocked(Event e);  // eventDone's answer with tracking on, under mu_
+    // bug-server-exit-av: the stream id each event was last recorded on, the ids of destroyed streams (under rec_mu_)
+    void noteEventUse(Event e);
+    mutable std::mutex rec_mu_;
+    std::map<void*, std::uint64_t> rec_stream_;
+    std::set<std::uint64_t> dead_streams_;
+    std::atomic<std::uint64_t> dead_stream_uses_{0};
     std::atomic<bool> track_{false}, rec_threads_{false};
     std::atomic<std::uint64_t> sync_calls_{0};
     std::atomic<int> next_id_{0};
