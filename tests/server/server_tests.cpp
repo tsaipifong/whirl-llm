@@ -18,6 +18,7 @@
 #include "server/http.h"
 #include "server/log.h"
 #include "server/prefix_store.h"
+#include "server/startup_steps.h"
 #include "server/protocol.h"
 #include "server/tier_bridge.h"
 #include "server/tokens.h"
@@ -35,8 +36,6 @@
 #include "whirl/vismap.h"
 
 #include <algorithm>
-#include <fstream>
-#include <iterator>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -80,6 +79,7 @@ using namespace whirl::server;
 using whirl::test::HttpResult;
 using whirl::test::MockConfig;
 using whirl::device::NullBackend;
+namespace startup = whirl::server::startup;
 using whirl::test::MockModel;
 
 namespace {
@@ -6472,19 +6472,8 @@ void testFrDFlashNoReplay() {
     CHECK_EQ(dflashSnapSets(false, true, true, 8, true, std::nullopt), 0u);     // replay: none
     CHECK_EQ(dflashSnapSets(true, false, false, 8, true, std::nullopt), 0u);    // MTP: the MTP caps decide
     CHECK_EQ(dflashSnapSets(false, false, false, 8, true, std::nullopt), 0u);
-#ifdef WHIRL_SOURCE_DIR
-    {
-        // ... and server_main makes it after the DFlash2 setup, before the KV pool is allocated (the
-        // engine's own fallback allocation comes after the pool: the pool would not leave room)
-        std::ifstream in(std::string(WHIRL_SOURCE_DIR) + "/src/server/server_main.cpp", std::ios::binary);
-        const std::string src((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-        const std::size_t setup = src.find("model.dflashSetup(opt.parallel");
-        const std::size_t sets = src.find("model.ensureSnapshots(dflashSnapSets(");
-        const std::size_t pool = src.find("model.allocKvPool(");
-        CHECK(setup != std::string::npos && sets != std::string::npos && pool != std::string::npos);
-        CHECK(setup < sets && sets < pool);
-    }
-#endif
+    // ... and server_main makes it after the DFlash2 setup, before the KV pool is allocated: startup_order_slots
+    // (arch025-C0) runs serveMain's own code for that on a recording model
     CHECK_EQ(literalSnapSets(15, std::nullopt), 15u);
     CHECK_EQ(literalSnapSets(7, 10u), 10u);
     CHECK_EQ(literalSnapSets(7, 99u), qwen35::gdn_max_snap);
@@ -6564,19 +6553,8 @@ void testDFlashFit() {
     const vram::FitPlan pb = vram::planFit(fd);
     CHECK(pb.reduced);
     CHECK(pb.batch < 4096 || pb.n_ck < 4);
-#ifdef WHIRL_SOURCE_DIR
-    {
-        // server_main adds it to the fit input before planFit, and decides --draft dflash before that
-        std::ifstream in(std::string(WHIRL_SOURCE_DIR) + "/src/server/server_main.cpp", std::ios::binary);
-        const std::string src((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-        const std::size_t choose = src.find("whirl::dflash::choose(src, dm, why, true)");
-        const std::size_t est = src.find("sizing.estimateLoad(f, cfg, lo.embd_on_host, use_dflash)");  // arch025-M5: through the arch module
-        const std::size_t add = src.find("fi.fixed += dm.total();");
-        const std::size_t plan = src.find("vram::planFit(fi)");
-        CHECK(choose != std::string::npos && est != std::string::npos && add != std::string::npos && plan != std::string::npos);
-        CHECK(choose < est && est < add && add < plan);
-    }
-#endif
+    // server_main adds it to the fit input before planFit, and decides --draft dflash before that: startup_order_fit
+    // (arch025-C0) runs serveMain's own code for that over a recording sizing module
 }
 
 // arch025-M5 (PLAN X-16, hipfire-arch-toy): a FAKE architecture table, never the product's. findArch finds the toy
@@ -6613,8 +6591,8 @@ constexpr model::ArchName names[] = {{"whirl-toy", false}};
 constexpr model::ArchModule rows[] = {{"toy", names, &fromGguf, nullptr, {&estimateLoad, &bufferBytes, &fdSplits, &dflashBytes, 8, &mtp}}};
 }  // namespace toy_arch
 
-void testFakeArchFit() {
-    const model::ArchTable table{toy_arch::rows};
+// a GGUF header of the toy family (no tensors): general.architecture = whirl-toy, 8 blocks
+std::vector<std::uint8_t> toyGgufImage() {
     std::vector<std::uint8_t> img;
     const auto u32 = [&](std::uint32_t x) { for (int i = 0; i < 4; ++i) img.push_back(static_cast<std::uint8_t>(x >> (8 * i))); };
     const auto u64 = [&](std::uint64_t x) { for (int i = 0; i < 8; ++i) img.push_back(static_cast<std::uint8_t>(x >> (8 * i))); };
@@ -6623,7 +6601,12 @@ void testFakeArchFit() {
     str("general.architecture"), u32(8), str("whirl-toy");
     str("whirl-toy.block_count"), u32(4), u32(8);
     while (img.size() % 32) img.push_back(0);  // data section alignment (no tensor data)
-    const gguf::File f = gguf::File::parse(img);
+    return img;
+}
+
+void testFakeArchFit() {
+    const model::ArchTable table{toy_arch::rows};
+    const gguf::File f = gguf::File::parse(toyGgufImage());
     // the lookup server_main does
     const std::string_view arch_name = f.getStringOr("general.architecture", "");
     const model::ArchModule* const am = model::findArch(arch_name, table);
@@ -6633,46 +6616,218 @@ void testFakeArchFit() {
     if (!am) return;
     const qwen35::Config cfg = am->fromGguf(f);
     CHECK_EQ(cfg.n_layer, 8u);
-    // server_main's dGPU fit (same calls, same order: estimate, slot state, KV estimate -> splits, buffers at 2048 / 4096)
-    const qwen35::LoadEstimate est = am->sizing.estimateLoad(f, cfg, true, false);
+    // server_main's dGPU fit (arch025-C0: its own code, startup::dgpuFit: estimate, slot state, KV estimate -> splits,
+    // buffers at 2048 / 4096, planFit)
+    const std::uint32_t parallel = 2;
+    startup::DgpuFitIn in;
+    in.parallel = parallel;
+    in.embd_on_host = true;
+    in.nreq.mode = numerics::Mode::fast;  // a forced 4-bit KV format is fast-only (chooseKv)
+    in.kv_req = KvFormat::q4;
+    in.pool_min_tokens = 32768;
+    in.max_batch = 4096;
+    in.n_ck = 4;
+    in.n_spe = 2;
+    const startup::DgpuFit r0 = startup::dgpuFit(am->sizing, f, cfg, in);
+    const qwen35::LoadEstimate& est = r0.est;
     CHECK_EQ(est.weights, 3008 * toy_arch::MiB);
-    const model::SlotStateBytes ssb = model::slotStateBytes(am->sizing, cfg);
+    CHECK(est.has_mtp && est.embd_on_host);
+    const model::SlotStateBytes& ssb = r0.ssb;
     const std::uint64_t conv_ch = 2 * 2 * 128 + 512, head_v = 512 / 4;
     CHECK_EQ(ssb.st1, 6 * (3 * conv_ch * 4 + 4ull * 128 * head_v * 4));            // 6 DeltaNet layers of 8
     CHECK_EQ(ssb.pend1, 6 * (8 * conv_ch * 4 + 8ull * 4 * (128 + head_v + 2) * 4));  // the toy's 8 replay rows
-    const std::uint32_t parallel = 2;
-    vram::FitInput fi;
-    fi.weights = est.weights;
-    fi.fixed = est.state + parallel * (ssb.st1 + ssb.pend1) + (est.has_mtp ? 65536ull * cfg.n_embd * 5 / 16 : 0) + (256ull << 20);
-    fi.fixed += (est.weights + fi.fixed) / 25;
-    const KvFormat kv_est = KvFormat::q4;
-    const std::uint32_t fd_splits_est = am->sizing.resolveFdSplits(kv_est);
-    CHECK_EQ(fd_splits_est, 256u);
-    const std::uint64_t b2 = am->sizing.bufferBytes(cfg, 2048, est.ffs, est.max_elems, fd_splits_est);
-    const std::uint64_t b4 = am->sizing.bufferBytes(cfg, 4096, est.ffs, est.max_elems, fd_splits_est);
-    fi.buf_per_row = (b4 - b2) / 2048;
-    fi.buf_fixed = b2 - fi.buf_per_row * 2048;
-    CHECK_EQ(fi.buf_per_row, 1024u + 256u);
-    CHECK_EQ(fi.buf_fixed, 100 * toy_arch::MiB);
-    fi.ckpt_bytes = ssb.st1 + static_cast<std::uint64_t>(cfg.n_embd) * 4 + static_cast<std::uint64_t>(cfg.n_vocab) * 4;
-    fi.parallel = parallel;
-    fi.kv_per_token = est.kvPerToken(kv_est);
-    CHECK_EQ(fi.kv_per_token, 1536u);
-    fi.pool_min_tokens = 32768;
-    fi.batch = 4096;
-    fi.n_ck = 4;
-    fi.n_spe = 2;
+    std::uint64_t fixed = est.state + parallel * (ssb.st1 + ssb.pend1) + 65536ull * cfg.n_embd * 5 / 16 + (256ull << 20);
+    fixed += (est.weights + fixed) / 25;
+    CHECK_EQ(r0.fi.fixed, fixed);
+    CHECK(!r0.dflash_mem);
+    CHECK_EQ(r0.fi.buf_per_row, 1024u + 256u);  // q4 KV: the toy's 256 splits
+    CHECK_EQ(r0.fi.buf_fixed, 100 * toy_arch::MiB);
+    CHECK_EQ(r0.fi.ckpt_bytes, ssb.st1 + static_cast<std::uint64_t>(cfg.n_embd) * 4 + static_cast<std::uint64_t>(cfg.n_vocab) * 4);
+    CHECK_EQ(r0.fi.kv_per_token, 1536u);
+    CHECK_EQ(r0.fi.parallel, parallel);
+    CHECK(r0.fi.pool_min_tokens == 32768u && r0.fi.batch == 4096u && r0.fi.n_ck == 4u && r0.fi.n_spe == 2u);
     // room for 50000 tokens with the requested batch / checkpoints: nothing is reduced, the pool gets them
-    fi.avail = vram::fixedNeed(fi, 4096, 4, 2) + 50000ull * fi.kv_per_token;
-    const vram::FitPlan p = vram::planFit(fi);
-    CHECK(p.fits && !p.reduced);
-    CHECK_EQ(p.pool_tokens, 50000u);
+    in.avail = vram::fixedNeed(r0.fi, 4096, 4, 2) + 50000ull * r0.fi.kv_per_token;
+    const startup::DgpuFit r1 = startup::dgpuFit(am->sizing, f, cfg, in);
+    CHECK(r1.plan.fits && !r1.plan.reduced);
+    CHECK_EQ(r1.plan.pool_tokens, 50000u);
     // 10000 tokens short of the wanted pool: the planner lowers the batch / checkpoints from the toy's own sizes
-    fi.avail = vram::fixedNeed(fi, 4096, 4, 2) + 22768ull * fi.kv_per_token;
-    const vram::FitPlan pr = vram::planFit(fi);
-    CHECK(pr.reduced && pr.pool_tokens > 22768u);
+    in.avail = vram::fixedNeed(r0.fi, 4096, 4, 2) + 22768ull * r0.fi.kv_per_token;
+    const startup::DgpuFit r2 = startup::dgpuFit(am->sizing, f, cfg, in);
+    CHECK(r2.plan.reduced && r2.plan.pool_tokens > 22768u);
     // the UMA check's snapshot sets (server_main: mtpDefaults(moe, gfx1151).drafts x st1) come from the module too
     CHECK_EQ(std::max<std::uint32_t>(1, am->sizing.mtpDefaults(cfg.moe, hip::Arch::gfx1151).drafts) * ssb.st1, 2 * ssb.st1);
+}
+
+// arch025-C0 (replaces FR-DFL P3-1's check on positions in server_main.cpp's text): serveMain's dGPU fit
+// (startup::dgpuFit) over a sizing module that records its calls. With --draft dflash the estimate leaves the MTP block
+// out (the choice comes first: serveMain passes its result in), the drafter is added to the fit input before the 4%
+// slack, and the plan is planFit of the finished input.
+namespace c0_rec {
+std::vector<std::string> g_calls;
+qwen35::LoadEstimate estimateLoad(const gguf::File& f, const qwen35::Config& cfg, bool embd_on_host, bool no_mtp) {
+    g_calls.push_back(std::format("estimateLoad(no_mtp={})", no_mtp ? 1 : 0));
+    return toy_arch::estimateLoad(f, cfg, embd_on_host, no_mtp);
+}
+std::uint64_t bufferBytes(const qwen35::Config& cfg, std::uint32_t B, std::uint64_t ffs, std::uint64_t me, std::uint32_t fd_splits) {
+    g_calls.push_back(std::format("bufferBytes({})", B));
+    return toy_arch::bufferBytes(cfg, B, ffs, me, fd_splits);
+}
+std::uint32_t fdSplits(KvFormat kv) {
+    g_calls.push_back("resolveFdSplits");
+    return toy_arch::fdSplits(kv);
+}
+std::uint64_t dflashBytes(const gguf::File&) {
+    g_calls.push_back("dflashWeightBytes");
+    return 1961 * toy_arch::MiB;
+}
+std::string calls() {
+    std::string s;
+    for (const std::string& c : g_calls) s += (s.empty() ? "" : " ") + c;
+    return s;
+}
+}  // namespace c0_rec
+
+void testStartupOrderFit() {
+    const model::ArchSizing rec{&c0_rec::estimateLoad, &c0_rec::bufferBytes, &c0_rec::fdSplits, &c0_rec::dflashBytes, 8, &toy_arch::mtp};
+    const gguf::File f = gguf::File::parse(toyGgufImage());
+    const qwen35::Config cfg = toy_arch::fromGguf(f);
+    const gguf::File drafter = gguf::File::parse(toyGgufImage());  // only its address reaches the recording sizing
+    startup::DflashFitIn d;
+    d.dc.n_layer = 5, d.dc.n_embd = 5120, d.dc.n_head = 32, d.dc.n_head_kv = 8, d.dc.head_dim = 128, d.dc.n_ff = 17408;
+    d.dc.block = 8, d.dc.window = 2048, d.dc.conv_k = 2, d.dc.conv_group = 16, d.dc.sel_topk = 16, d.dc.sel_rank = 256;
+    d.dc.target_layers = {6, 20, 34, 48, 62};
+    d.file = &drafter;
+    d.gdn_replay = false;  // replay-less: the drafter's snapshot sets are counted too
+    d.ngram = false;  // the block decides the sets (block - 1)
+    startup::DgpuFitIn in;
+    in.parallel = 2;
+    in.kv_req = KvFormat::q8h;
+    in.pool_min_tokens = 32768;
+    in.max_batch = 4096;
+    in.n_ck = 4;
+    in.n_spe = 2;
+    // the pool's room depends on the fixed part (weights + 6 GiB: not every request fits, nothing is capped)
+    in.avail = 3008 * toy_arch::MiB + (6ull << 30);
+    for (bool dfl : {false, true}) {
+        in.dflash.reset();
+        if (dfl) in.dflash = d;
+        c0_rec::g_calls.clear();
+        const startup::DgpuFit r = startup::dgpuFit(rec, f, cfg, in);
+        // the calls, in order (the estimate first, without the MTP block when the drafter is used)
+        CHECK_EQ(c0_rec::calls(), std::string(dfl ? "estimateLoad(no_mtp=1) dflashWeightBytes resolveFdSplits bufferBytes(2048) bufferBytes(4096)"
+                                                  : "estimateLoad(no_mtp=0) resolveFdSplits bufferBytes(2048) bufferBytes(4096)"));
+        // the fixed part, computed here from the toy's sizes: drafter added before the 4% slack
+        const qwen35::LoadEstimate est = toy_arch::estimateLoad(f, cfg, false, dfl);
+        CHECK_EQ(r.est.weights, est.weights);
+        CHECK_EQ(r.est.has_mtp, !dfl);
+        const model::SlotStateBytes ssb = model::slotStateBytes(rec, cfg);
+        std::uint64_t fixed = est.state + in.parallel * (ssb.st1 + ssb.pend1) + (dfl ? 0 : 65536ull * cfg.n_embd * 5 / 16) + (256ull << 20);
+        std::uint64_t dm_total = 0;
+        if (dfl) {
+            const std::uint32_t sets = dflashSnapSets(false, true, false, d.dc.block, false, std::nullopt);
+            CHECK_EQ(sets, 7u);
+            const whirl::dflash::Mem dm = dflashFitBytes(d.dc, 1961 * toy_arch::MiB, cfg, whirl::dflash::captureRows(d.params, d.dc.window, 4096),
+                                                         in.parallel, sets, ssb.st1);
+            dm_total = dm.total();
+            CHECK(r.dflash_mem.has_value());
+            if (r.dflash_mem) CHECK_EQ(r.dflash_mem->total(), dm_total);
+            CHECK(dm_total > 2ull << 30);  // the drafter's ~2 GiB
+        } else {
+            CHECK(!r.dflash_mem);
+        }
+        fixed += dm_total;
+        fixed += (est.weights + fixed) / 25;
+        CHECK_EQ(r.fi.fixed, fixed);
+        // the plan is planFit of the finished input (not of a part of it)
+        const vram::FitPlan again = vram::planFit(r.fi);
+        CHECK_EQ(r.plan.need_fixed, again.need_fixed);
+        CHECK_EQ(r.plan.pool_tokens, again.pool_tokens);
+        CHECK(r.plan.batch == again.batch && r.plan.n_ck == again.n_ck && r.plan.n_spe == again.n_spe);
+        CHECK(r.plan.reduced == again.reduced && r.plan.fits == again.fits && r.plan.note == again.note);
+        // and a plan of the input without the drafter would give the pool its ~2 GiB more
+        if (dfl) {
+            vram::FitInput less = r.fi;
+            less.fixed -= dm_total;
+            CHECK(vram::planFit(less).pool_tokens > r.plan.pool_tokens);
+        }
+    }
+}
+
+// arch025-C0 (replaces FR-DFL P3-4's check on positions in server_main.cpp's text): serveMain's slot setup
+// (startup::setupSlots) and KV pool allocation (startup::allocKvPool, which needs setupSlots' result) on a model that
+// records its calls: the DFlash2 rings / scratch, then the snapshot sets (sized from the drafter's block), then the pool.
+namespace c0_rec {
+struct OrderModel {
+    struct Dfr {
+        std::uint32_t block = 0, ring = 0;
+    };
+    std::vector<std::string> calls;
+    std::unique_ptr<Dfr> dfr;  // made by dflashSetup, as Model::dflashSetup does (src/model/dflash.cpp)
+    std::uint32_t dfl_block = 8;
+    std::uint32_t cap_rows = 2048;
+    bool gdn_replay = false;
+    std::vector<std::uint32_t> gdn_ord;
+    std::vector<std::uint64_t> ssm_state;
+    std::uint32_t snap_sets = 0;
+    whirl::relax::Params relax() const { return {}; }
+    std::uint64_t pendLayerBytes() const { return 1 << 20; }
+    std::uint64_t convBytes() const { return 1 << 20; }
+    std::uint64_t ssmBytes() const { return 1 << 20; }
+    void setupSeqs(std::uint32_t n, std::uint32_t ctx) { calls.push_back(std::format("setupSeqs({},{})", n, ctx)); }
+    void dflashSetup(std::uint32_t slots, std::uint32_t rows) {
+        dfr = std::make_unique<Dfr>(Dfr{dfl_block, 2048});
+        calls.push_back(std::format("dflashSetup({},{})", slots, rows));
+    }
+    void ensureSnapshots(std::uint32_t n) {
+        snap_sets = std::max(snap_sets, n);
+        calls.push_back(std::format("ensureSnapshots({})", n));
+    }
+    void allocKvPool(std::uint32_t tokens) { calls.push_back(std::format("allocKvPool({})", tokens)); }
+    std::string trace() const {
+        std::string s;
+        for (const std::string& c : calls) s += (s.empty() ? "" : " ") + c;
+        return s;
+    }
+};
+}  // namespace c0_rec
+
+void testStartupOrderSlots() {
+    NullBackend nb;
+    const auto run = [&](bool use_mtp, bool use_dflash, bool replay, std::optional<std::string> snap_env, std::uint32_t block = 8, bool ngram = false) {
+        c0_rec::OrderModel m;
+        m.dfl_block = block;
+        m.gdn_replay = replay;
+        m.gdn_ord.assign(8, 6);
+        m.ssm_state = {0, 0, 0, 1, 0, 0, 0, 1};
+        startup::SlotSetupIn in;
+        in.parallel = 2;
+        in.slot_ctx = 8192;
+        in.n_layer = 8;
+        in.use_mtp = use_mtp;
+        in.use_dflash = use_dflash;
+        in.drafts = 3;
+        in.ngram = ngram;
+        in.snap_sets_env = std::move(snap_env);
+        startup::BatchDrafts bd{};
+        bd.fill(3);
+        const startup::SlotSetup slots = startup::setupSlots(m, nb, in, bd);
+        startup::allocKvPool(m, 65536, slots);
+        return m.trace();
+    };
+    // --draft dflash without replay: rings / scratch, then the block's 7 snapshot sets, then the pool
+    CHECK_EQ(run(false, true, false, std::nullopt), std::string("setupSeqs(2,8192) dflashSetup(2,2048) ensureSnapshots(7) allocKvPool(65536)"));
+    CHECK_EQ(run(false, true, false, std::nullopt, 16), std::string("setupSeqs(2,8192) dflashSetup(2,2048) ensureSnapshots(15) allocKvPool(65536)"));
+    CHECK_EQ(run(false, true, false, std::string("12")), std::string("setupSeqs(2,8192) dflashSetup(2,2048) ensureSnapshots(12) allocKvPool(65536)"));
+    CHECK_EQ(run(false, true, false, std::nullopt, 8, true), std::format("setupSeqs(2,8192) dflashSetup(2,2048) ensureSnapshots({}) allocKvPool(65536)",
+             dflashSnapSets(false, true, false, 8, true, std::nullopt)));  // n-gram drafts too
+    // with replay: no snapshot sets
+    CHECK_EQ(run(false, true, true, std::nullopt), std::string("setupSeqs(2,8192) dflashSetup(2,2048) allocKvPool(65536)"));
+    // MTP without replay: the MTP caps' sets, no DFlash2 setup; plain decoding: slots and pool only
+    const std::string mtp = run(true, false, false, std::nullopt);
+    CHECK(mtp.starts_with("setupSeqs(2,8192) ensureSnapshots(") && mtp.ends_with(") allocKvPool(65536)"));
+    CHECK(mtp.find("dflashSetup") == std::string::npos);
+    CHECK_EQ(run(false, false, false, std::nullopt), std::string("setupSeqs(2,8192) allocKvPool(65536)"));
 }
 
 // P3-1: a request arriving after the engine loop has stopped gets 503 at once (no hang)
@@ -8871,6 +9026,8 @@ int main(int argc, char** argv) {
         {"fr_dflash_noreplay", testFrDFlashNoReplay},
         {"dflash_fit", testDFlashFit},
         {"fake_arch_fit", testFakeArchFit},  // arch025-M5
+        {"startup_order_fit", testStartupOrderFit},      // arch025-C0
+        {"startup_order_slots", testStartupOrderSlots},  // arch025-C0
         {"fr_shutdown_503", testFrShutdown503},
         {"run_on_loop_timeout_cancels", testRunOnLoopTimeoutCancels},
         {"fr_protocol", testFrProtocol},
