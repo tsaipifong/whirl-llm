@@ -2179,7 +2179,8 @@ void testLogNamesUnique() {
     std::error_code ec;
     fs::remove_all(dir, ec);
     fs::create_directories(dir, ec);
-    const std::string d = dir.string();
+    const std::u8string d8 = dir.u8string();  // log_name.h takes UTF-8 folders (bug-envpaths, arch025-int4)
+    const std::string d(d8.begin(), d8.end());
     auto count = [&](const char* prefix, bool raw) {
         int n = 0;
         for (const auto& e : fs::directory_iterator(dir)) {
@@ -2206,7 +2207,7 @@ void testLogNamesUnique() {
     CHECK(s3 == "launch_16468_20261025T134651112_2");
     CHECK_EQ(count("launch_", false), 3);
     {
-        std::FILE* r = std::fopen((d + "\\" + s1 + ".txt").c_str(), "rb");  // the first file kept its content
+        std::FILE* r = _wfopen((dir / (s1 + ".txt")).c_str(), L"rb");  // the first file kept its content
         char b[16] = {};
         if (r) { std::fgets(b, sizeof b, r); std::fclose(r); }
         CHECK(std::string(b) == "first\n");
@@ -4664,6 +4665,116 @@ static void testLocalAppDataChild() {
     }
     fs::remove_all(root, ec);
 }
+
+// bug-envpaths (2026-10-26): the other environment variables whose value becomes a path had the bug-lappdata defect.
+// This binary links whirl_hip, not the model library, so it covers class B; classes A (envGet / EnvSnapshot:
+// WHIRL_KV_SSD_DIR, WHIRL_CODE_OBJECT) and C (WHIRL_DRAFT_VOCAB file through std::filesystem::path(std::string)) are
+// testEnvPathsModelChild in tests/model/model_tests.cpp (whirl-model-tests links whirl_model).
+//   B  read by std::getenv at static initialization, file opened with narrow std::fopen: WHIRL_ALLOC_LOG,
+//      WHIRL_LAUNCH_LOG (alloc_<pid>_<start>.txt / launch_<pid>_<start>.txt written at exit; read through platform::env
+//      since PL1b, getUtf8 + a wide exclusive open since this fix)
+// Helper mode --child-envpaths: nothing to do; the atexit writers of the two logs run when it returns.
+static int childEnvPaths() { return 0; }
+
+struct EnvChild {
+    bool started = false;
+    DWORD exit_code = ~0u;
+    DWORD pid = 0;
+    std::string out;
+};
+
+// vars: name / value pairs, sorted by name by the caller's order (the block is passed as given)
+static EnvChild runEnvChild(const std::wstring& self, std::vector<std::pair<std::wstring, std::wstring>> vars,
+                            const std::filesystem::path& out_file) {
+    EnvChild r;
+    if (const wchar_t* v = _wgetenv(L"PATH")) vars.emplace_back(L"PATH", v);
+    if (const wchar_t* v = _wgetenv(L"SystemRoot")) vars.emplace_back(L"SystemRoot", v);
+    std::sort(vars.begin(), vars.end(), [](const auto& a, const auto& b) { return _wcsicmp(a.first.c_str(), b.first.c_str()) < 0; });
+    std::wstring blk;
+    for (const auto& [n, v] : vars) {
+        blk += n;
+        blk += L'=';
+        blk += v;
+        blk += L'\0';
+    }
+    blk += L'\0';
+    SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
+    HANDLE f = CreateFileW(out_file.c_str(), GENERIC_WRITE, FILE_SHARE_READ, &sa, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return r;
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = nullptr;
+    si.hStdOutput = f;
+    si.hStdError = f;
+    PROCESS_INFORMATION pi{};
+    std::wstring cmd = L"\"" + self + L"\" --child-envpaths";
+    r.started = CreateProcessW(self.c_str(), cmd.data(), nullptr, nullptr, TRUE, CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW,
+                               blk.data(), nullptr, &si, &pi) != 0;
+    CloseHandle(f);
+    if (!r.started) return r;
+    r.pid = pi.dwProcessId;
+    if (WaitForSingleObject(pi.hProcess, 20000) != WAIT_OBJECT_0) TerminateProcess(pi.hProcess, 99);
+    GetExitCodeProcess(pi.hProcess, &r.exit_code);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    std::ifstream in(out_file, std::ios::binary);
+    r.out.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    return r;
+}
+
+static void testEnvPathsChild() {
+    namespace fs = std::filesystem;
+    wchar_t self[1024];
+    const DWORD n = GetModuleFileNameW(nullptr, self, 1024);
+    CHECK(n > 0 && n < 1024);
+    if (n == 0 || n >= 1024) return;
+    const fs::path root = whirl::test::testTmpBase() / L"envpaths";
+    std::error_code ec;
+    fs::remove_all(root, ec);
+    fs::create_directories(root, ec);
+    const fs::path out_file = root / L"child_out.txt";
+    // the bug-lappdata folder names (outside code page 950, and inside it) and an ASCII one (bytes must not change)
+    for (const wchar_t* name : {L"u蔡é\U0001F600", L"測試", L"ascii dir"}) {
+        const fs::path base = root / name;
+        fs::create_directories(base / L"alog", ec);
+        fs::create_directories(base / L"llog", ec);
+        const EnvChild c = runEnvChild(self,
+                                       {{L"WHIRL_ALLOC_LOG", (base / L"alog").wstring()}, {L"WHIRL_LAUNCH_LOG", (base / L"llog").wstring()}},
+                                       out_file);
+        CHECK(c.started && c.exit_code == 0);
+        // B: the alloc / launch logs land in the folders the variables name, under the bug:log-pid-names name
+        // <prefix><pid>_<start>[_<n>].txt (log_name.h; arch025-int4 merge of bug-envpaths with the lognames port)
+        const std::wstring pid = std::to_wstring(c.pid);
+        auto logIn = [&](const fs::path& d, const std::wstring& prefix) {
+            const std::wregex rx(L"^" + prefix + pid + L"_[0-9]{8}T[0-9]{9}(_[0-9]+)?\\.txt$");
+            for (const fs::directory_entry& e : fs::directory_iterator(d, ec))
+                if (e.is_regular_file(ec) && std::regex_match(e.path().filename().wstring(), rx)) return true;
+            return false;
+        };
+        const bool b_alloc = logIn(base / L"alog", L"alloc_");
+        const bool b_launch = logIn(base / L"llog", L"launch_");
+        CHECK(b_alloc);
+        CHECK(b_launch);
+        if (!b_alloc || !b_launch)
+            std::printf("  envpaths B (static-init log folders) %s: alloc=%d launch=%d\n", whirl::narrow(name).c_str(), b_alloc ? 1 : 0, b_launch ? 1 : 0);
+    }
+    // exactly the three case folders and the child output exist under root (no mangled sibling)
+    std::size_t entries = 0;
+    for (const fs::directory_entry& e : fs::directory_iterator(root, ec)) {
+        const std::wstring fn = e.path().filename().wstring();
+        CHECK(fn == L"child_out.txt" || fn == L"u蔡é\U0001F600" || fn == L"測試" || fn == L"ascii dir");
+        ++entries;
+    }
+    CHECK(entries == 4);
+    // unset: the child runs and writes no log anywhere
+    {
+        const EnvChild c = runEnvChild(self, {}, out_file);
+        CHECK(c.started && c.exit_code == 0);
+        CHECK(c.out.empty());
+    }
+    fs::remove_all(root, ec);
+}
 #endif
 
 static void testPlatformEnv() {
@@ -4821,6 +4932,7 @@ void testFsMappedOpen() {
 int main(int argc, char** argv) {
 #ifdef _WIN32
     if (argc == 2 && std::string(argv[1]) == "--child-lappdata") return childLappdata();  // bug-lappdata helper mode
+    if (argc == 2 && std::string(argv[1]) == "--child-envpaths") return childEnvPaths();  // bug-envpaths helper mode
 #endif
 #if WHIRL_WITH_HIP && defined(_WIN32)
     if (argc >= 2) {  // helper modes for testProbeChild (the test runs this program as the child)
@@ -4890,6 +5002,7 @@ int main(int argc, char** argv) {
     testPlatformPaths();        // arch025 PL1
 #ifdef _WIN32
     testLocalAppDataChild();    // bug-lappdata
+    testEnvPathsChild();        // bug-envpaths
 #endif
     testPlatformEnv();
     testPl1bEnvReads();  // arch025 PL1b

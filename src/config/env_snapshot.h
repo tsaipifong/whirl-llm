@@ -43,7 +43,7 @@ public:
     // every field, once; the reflection test checks the count against sizeof(EnvSnapshot)
     static const std::array<Entry, n_names>& names();
 
-    // Reads WHIRL_<name> for every entry of names() (_dupenv_s, as envGet).
+    // Reads WHIRL_<name> for every entry of names() (through envGet: the UTF-8 of the wide value since bug-envpaths).
     static EnvSnapshot capture();
     // Tests: the given values, every other name not set. Throws std::invalid_argument on a name not in names().
     static EnvSnapshot fromValues(const std::vector<std::pair<std::string, Value>>& values);

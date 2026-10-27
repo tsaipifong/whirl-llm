@@ -8,6 +8,8 @@
 #include "whirl/device_profile.h"  // device::profile (mtpDefaults)
 #include "whirl/vismap.h"  // image_id_base (Ngram::lookup)
 
+#include "whirl/common.h"  // widen / narrow (bug-envpaths)
+
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
@@ -117,7 +119,8 @@ std::optional<std::string> draftVocabFile(std::string_view spec, const std::stri
     if (std::all_of(spec.begin(), spec.end(), [](char c) { return c >= '0' && c <= '9'; })) return std::nullopt;  // first-N rows
     const bool named = spec.size() >= 2 && spec.back() == 'k' &&
                        std::all_of(spec.begin(), spec.end() - 1, [](char c) { return c >= '0' && c <= '9'; });
-    if (named) return (std::filesystem::path(dir) / "draft_vocab" / ("subset_" + std::string(spec) + ".bin")).string();
+    // bug-envpaths: dir and the result are UTF-8 (was path(std::string) / .string(): the ANSI code page)
+    if (named) return narrow((std::filesystem::path(widen(dir)) / "draft_vocab" / ("subset_" + std::string(spec) + ".bin")).wstring());
     return std::string(spec);
 }
 
@@ -147,7 +150,7 @@ DraftVocabChoice draftVocabChoice(const std::optional<std::string>& env_value, c
 }
 
 std::vector<u32> readDraftVocab(const std::string& path) {
-    std::ifstream f(std::filesystem::path(path), std::ios::binary | std::ios::ate);
+    std::ifstream f(std::filesystem::path(widen(path)), std::ios::binary | std::ios::ate);  // bug-envpaths: path is UTF-8
     if (!f) throw std::runtime_error("draft vocabulary file not found: " + path);
     const std::streamoff n = f.tellg();
     if (n <= 0 || n % 4 != 0) throw std::runtime_error("draft vocabulary file size is not a multiple of 4: " + path);
@@ -184,7 +187,7 @@ std::string exeDirectory() {
     const DWORD n = GetModuleFileNameW(nullptr, buf, 1023);
     if (n == 0) return {};
     buf[n] = 0;
-    return std::filesystem::path(buf).parent_path().string();
+    return narrow(std::filesystem::path(buf).parent_path().wstring());  // bug-envpaths: UTF-8 (was .string(): ANSI)
 #else
     char buf[4096];
     const ssize_t n = readlink("/proc/self/exe", buf, sizeof buf - 1);

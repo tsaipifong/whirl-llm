@@ -15,6 +15,7 @@
 #include "device/null_backend.h"
 #include "model/qwen35/weight_loader.h"
 #include "model/arch_registry.h"  // arch025-M5
+#include "whirl/common.h"  // widen / narrow (bug-envpaths child test)
 
 #include <algorithm>
 #include <array>
@@ -3684,7 +3685,169 @@ void testDeviceDefaults() {
           "the two rows differ where the 8060S has its own value (dense n-gram slope)");
 }
 
-int main() {
+#ifdef _WIN32
+namespace {
+// bug-envpaths (2026-10-26): path-valued WHIRL_* read through envGet (the ANSI code page outside whirl.exe /
+// whirl-server.exe, no UTF-8 manifest) and then widened, or opened through std::filesystem::path(std::string) (ANSI).
+// The child is this program (--child-envpaths, before clearWhirlEnv in main) with a fixed environment. Classes:
+//   A  envGet / EnvSnapshot (model layer and whirl-server's env()): WHIRL_KV_SSD_DIR (the --kv-ssd-dir env form;
+//      kv_tier widens it), WHIRL_CODE_OBJECT (loader readWhole -> readFile, widen)
+//   C  envGet value opened through std::filesystem::path(std::string): WHIRL_DRAFT_VOCAB=<file> (spec.cpp)
+// Class B (WHIRL_ALLOC_LOG / WHIRL_LAUNCH_LOG) is testEnvPathsChild in tests/unit/unit_tests.cpp.
+std::string envHex(const std::string& s) {
+    std::string h;
+    char b[3];
+    for (unsigned char c : s) {
+        std::snprintf(b, sizeof b, "%02x", c);
+        h += b;
+    }
+    return h;
+}
+
+int childEnvPaths() {
+    auto hexOpt = [](const std::optional<std::string>& v) { return v ? "set:" + envHex(*v) : std::string("unset:"); };
+    const std::optional<std::string> kv = whirl::envGet("KV_SSD_DIR");
+    std::printf("kv=%s", hexOpt(kv).c_str());
+    if (kv && !kv->empty()) {
+        std::error_code ec;
+        bool made = false;
+        try {
+            std::filesystem::create_directories(std::filesystem::path(whirl::widen(*kv)), ec);
+            made = !ec;
+        } catch (...) {
+        }
+        std::printf(" kvmkdir=%d", made ? 1 : 0);
+    }
+    const whirl::config::EnvSnapshot snap = whirl::config::EnvSnapshot::capture();
+    std::printf(" co=%s", hexOpt(snap.code_object).c_str());
+    if (snap.code_object) {
+        long long n = -1;
+        try {
+            n = static_cast<long long>(whirl::readFile(*snap.code_object).size());
+        } catch (...) {
+        }
+        std::printf(" coread=%lld", n);
+    }
+    const q::DraftVocabChoice dv = q::draftVocabChoice(whirl::envGet("DRAFT_VOCAB"), q::exeDirectory());
+    if (dv.kind == q::DraftVocabChoice::Kind::file) {
+        long long n = -1;
+        try {
+            n = static_cast<long long>(q::readDraftVocab(dv.file).size());
+        } catch (...) {
+        }
+        std::printf(" dv=%lld", n);
+    }
+    std::fflush(stdout);
+    return 0;
+}
+
+struct EnvChild {
+    bool started = false;
+    DWORD exit_code = ~0u;
+    std::string out;
+};
+
+EnvChild runEnvChild(const std::wstring& self, std::vector<std::pair<std::wstring, std::wstring>> vars, const std::filesystem::path& out_file) {
+    EnvChild r;
+    if (const wchar_t* v = _wgetenv(L"PATH")) vars.emplace_back(L"PATH", v);
+    if (const wchar_t* v = _wgetenv(L"SystemRoot")) vars.emplace_back(L"SystemRoot", v);
+    std::sort(vars.begin(), vars.end(), [](const auto& a, const auto& b) { return _wcsicmp(a.first.c_str(), b.first.c_str()) < 0; });
+    std::wstring blk;
+    for (const auto& [n, v] : vars) {
+        blk += n;
+        blk += L'=';
+        blk += v;
+        blk += L'\0';
+    }
+    blk += L'\0';
+    SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
+    HANDLE f = CreateFileW(out_file.c_str(), GENERIC_WRITE, FILE_SHARE_READ, &sa, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return r;
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = nullptr;
+    si.hStdOutput = f;
+    si.hStdError = f;
+    PROCESS_INFORMATION pi{};
+    std::wstring cmd = L"\"" + self + L"\" --child-envpaths";
+    r.started = CreateProcessW(self.c_str(), cmd.data(), nullptr, nullptr, TRUE, CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW,
+                               blk.data(), nullptr, &si, &pi) != 0;
+    CloseHandle(f);
+    if (!r.started) return r;
+    if (WaitForSingleObject(pi.hProcess, 20000) != WAIT_OBJECT_0) TerminateProcess(pi.hProcess, 99);
+    GetExitCodeProcess(pi.hProcess, &r.exit_code);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    std::ifstream in(out_file, std::ios::binary);
+    r.out.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    return r;
+}
+
+void testEnvPathsModelChild() {
+    namespace fs = std::filesystem;
+    wchar_t self[1024];
+    const DWORD n = GetModuleFileNameW(nullptr, self, 1024);
+    check(n > 0 && n < 1024, "envpaths: own exe path");
+    if (n == 0 || n >= 1024) return;
+    const fs::path root = whirl::test::testTmpBase() / L"envpaths_model";
+    std::error_code ec;
+    fs::remove_all(root, ec);
+    fs::create_directories(root, ec);
+    const fs::path out_file = root / L"child_out.txt";
+    // the bug-lappdata folder names (outside code page 950, and inside it) and an ASCII one (bytes must not change)
+    for (const wchar_t* name : {L"u蔡é\U0001F600", L"測試", L"ascii dir"}) {
+        const std::string label = whirl::narrow(name);
+        const fs::path base = root / name;
+        fs::create_directories(base, ec);
+        const fs::path co = base / L"co.bin";
+        const fs::path dvf = base / L"dv.bin";
+        {
+            std::ofstream o(co, std::ios::binary);
+            o.write("12345678", 8);
+            std::ofstream d(dvf, std::ios::binary);
+            const unsigned char ids[12] = {1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0};
+            d.write(reinterpret_cast<const char*>(ids), sizeof ids);
+        }
+        const fs::path kv = base / L"kv";
+        const EnvChild c = runEnvChild(self,
+                                       {{L"WHIRL_CODE_OBJECT", co.wstring()}, {L"WHIRL_DRAFT_VOCAB", dvf.wstring()}, {L"WHIRL_KV_SSD_DIR", kv.wstring()}},
+                                       out_file);
+        check(c.started && c.exit_code == 0, "envpaths: child ran (" + label + ")");
+        // A: envGet / EnvSnapshot give the UTF-8 of the UTF-16 value; the folder / file it names is the real one
+        const std::string want_a = "kv=set:" + envHex(whirl::narrow(kv.wstring())) + " kvmkdir=1 co=set:" + envHex(whirl::narrow(co.wstring())) +
+                                   " coread=8";
+        const bool a_ok = c.out.rfind(want_a, 0) == 0 && fs::is_directory(kv, ec);
+        check(a_ok, "envpaths A (envGet: KV_SSD_DIR, CODE_OBJECT) " + label + ": " + c.out + " (want prefix " + want_a + ")");
+        // C: the draft vocabulary file named by WHIRL_DRAFT_VOCAB is read
+        check(c.out.find(" dv=3") != std::string::npos, "envpaths C (DRAFT_VOCAB file) " + label + ": " + c.out);
+    }
+    // exactly the three case folders and the child output exist under root (no mangled sibling)
+    std::size_t entries = 0;
+    for (const fs::directory_entry& e : fs::directory_iterator(root, ec)) {
+        const std::wstring fn = e.path().filename().wstring();
+        check(fn == L"child_out.txt" || fn == L"u蔡é\U0001F600" || fn == L"測試" || fn == L"ascii dir",
+              "envpaths: no other entry under the test root: " + whirl::narrow(fn));
+        ++entries;
+    }
+    check(entries == 4, "envpaths: four entries under the test root");
+    // unset: envGet nullopt, no file read
+    {
+        const EnvChild c = runEnvChild(self, {}, out_file);
+        check(c.started && c.exit_code == 0 && c.out == "kv=unset: co=unset:", "envpaths: unset: " + c.out);
+    }
+    fs::remove_all(root, ec);
+}
+}  // namespace
+#endif
+
+int main(int argc, char** argv) {
+#ifdef _WIN32
+    if (argc == 2 && std::string(argv[1]) == "--child-envpaths") return childEnvPaths();  // bug-envpaths helper mode
+#else
+    (void)argc;
+    (void)argv;
+#endif
     whirl::test::clearWhirlEnv();  // FR-TEST P3-11
     testDeviceDefaults();  // arch025-M6
     testArchRegistry();  // arch025-M5
@@ -3726,6 +3889,9 @@ int main() {
     testAllocDrafts();
     testMtpDefaults();
     testMxfp4Repack();
+#ifdef _WIN32
+    testEnvPathsModelChild();  // bug-envpaths
+#endif
     std::printf("model tests: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }

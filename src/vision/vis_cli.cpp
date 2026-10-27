@@ -31,8 +31,9 @@ using namespace whirl;
 
 namespace {
 
-// arch025 PL1b: through platform::env::get (each read at its old place, once per command)
-std::optional<std::string> envRaw(const char* name) { return platform::env::get(name); }
+// arch025 PL1b + bug-envpaths: through platform::env::getUtf8 (each read at its old place, once per command;
+// UTF-8 of the wide value, was the ANSI code page); both path values go through readFile / writeFile (widen)
+std::optional<std::string> envRaw(const char* name) { return platform::env::getUtf8(name); }
 
 std::vector<std::uint8_t> readBytes(const std::string& path) {
     const std::string s = readFile(path);

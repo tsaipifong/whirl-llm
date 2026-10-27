@@ -16,6 +16,7 @@
 
 #include <cerrno>
 #include <cstdio>
+#include <filesystem>
 #include <string>
 
 #ifdef _WIN32
@@ -55,6 +56,16 @@ inline std::string processStart() {
     return "0";
 }
 
+// bug-envpaths: dir comes from platform::env::getUtf8 (UTF-8); opened wide (_wfopen, "x" = CREATE_NEW as with fopen),
+// so a non-ASCII folder is the folder the variable names (narrow fopen read the bytes as the ANSI code page)
+inline std::FILE* openNewFile(const std::string& utf8_path) {
+#ifdef _WIN32
+    return _wfopen(std::filesystem::path(std::u8string(utf8_path.begin(), utf8_path.end())).c_str(), L"wbx");
+#else
+    return std::fopen(utf8_path.c_str(), "wbx");
+#endif
+}
+
 // creates <dir>\<prefix><pid>_<start>[_<n>]<ext> exclusively and returns it open for binary writing (nullptr if no
 // name could be created); *stem gets the chosen name without <ext>. pid / start are parameters for the unit tests.
 inline std::FILE* openUnique(const std::string& dir, const std::string& prefix, unsigned long pid, const std::string& start,
@@ -64,7 +75,7 @@ inline std::FILE* openUnique(const std::string& dir, const std::string& prefix, 
         std::string s = i == 1 ? base : base + "_" + std::to_string(i);
         const std::string path = dir + "\\" + s + ext;
         errno = 0;
-        std::FILE* f = std::fopen(path.c_str(), "wbx");
+        std::FILE* f = openNewFile(path);
         if (f != nullptr) {
             if (stem != nullptr) *stem = std::move(s);
             return f;
@@ -82,7 +93,7 @@ inline std::FILE* openUnique(const std::string& dir, const std::string& prefix, 
 
 // creates <dir>\<stem><ext> exclusively (the RAW dump next to a table); nullptr if it exists
 inline std::FILE* openExclusive(const std::string& dir, const std::string& stem, const char* ext) {
-    return std::fopen((dir + "\\" + stem + ext).c_str(), "wbx");
+    return openNewFile(dir + "\\" + stem + ext);
 }
 
 }  // namespace whirl::hip::logname

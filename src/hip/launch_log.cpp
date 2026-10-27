@@ -27,8 +27,10 @@ namespace whirl::hip::launchlog {
 
 namespace {
 
-// arch025 PL1b: through platform::env::get; read where it was (g_on's static initializer and the writes at exit)
-std::string folder() { return platform::env::get("WHIRL_LAUNCH_LOG").value_or(std::string()); }
+// arch025 PL1b + bug-envpaths: through platform::env::getUtf8 (UTF-8 of the wide value; std::getenv / env::get
+// gave the ANSI code page); read where it was (g_on's static initializer and the writes at exit); the file is
+// opened wide by log_name.h
+std::string folder() { return platform::env::getUtf8("WHIRL_LAUNCH_LOG").value_or(std::string()); }
 
 struct Key {
     std::string name;
