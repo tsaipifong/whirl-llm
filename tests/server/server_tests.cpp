@@ -6792,11 +6792,11 @@ void testServerKvSsdDirEnv() {
     CHECK_EQ(envErr(ok({"m", "--kv-ssd-gb", "0"}), OS("")), refused);
     // unset, or a folder: accepted
     CHECK_EQ(envErr(ok({"m"}), std::nullopt), std::string("<no error>"));
-    CHECK_EQ(envErr(ok({"m"}), OS("D:\kv")), std::string("<no error>"));
+    CHECK_EQ(envErr(ok({"m"}), OS("D:\\kv")), std::string("<no error>"));
     CHECK_EQ(envErr(ok({"m"}), OS(" ")), std::string("<no error>"));  // only the empty string (as --kv-ssd-dir)
     // --kv-ssd-dir given: it wins, the variable is not looked at (as the tier setup: opt.kv_ssd_dir, else the env)
-    CHECK_EQ(envErr(ok({"m", "--kv-ssd-dir", "D:\kv"}), OS("")), std::string("<no error>"));
-    CHECK_EQ(envErr(ok({"m", "--kv-ssd-dir=D:\kv"}), OS("")), std::string("<no error>"));
+    CHECK_EQ(envErr(ok({"m", "--kv-ssd-dir", "D:\\kv"}), OS("")), std::string("<no error>"));
+    CHECK_EQ(envErr(ok({"m", "--kv-ssd-dir=D:\\kv"}), OS("")), std::string("<no error>"));
 }
 
 void testServerHelpBody() {

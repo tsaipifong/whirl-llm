@@ -4617,7 +4617,7 @@ static void testDFlashDumpDir() {
     using OS = std::optional<std::string>;
     CHECK(!cli::dflashDumpDir(std::nullopt));         // unset: no dump
     CHECK(!cli::dflashDumpDir(OS("")));               // set but empty: no dump (before: "" -> create_directories("") threw)
-    CHECK(cli::dflashDumpDir(OS("D:\dump")) == OS("D:\dump"));  // a folder: that folder, unchanged
+    CHECK(cli::dflashDumpDir(OS("D:\\dump")) == OS("D:\\dump"));  // a folder: that folder, unchanged
     CHECK(cli::dflashDumpDir(OS(" ")) == OS(" "));    // only the empty string is "no dump" (as --kv-ssd-dir "")
     CHECK(cli::dflashDumpDir(OS(".")) == OS("."));
 }

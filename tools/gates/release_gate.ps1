@@ -174,8 +174,11 @@ AddStep "cpu_probe_dispatch" $false @($pwsh, "-NoProfile", "-File", (Join-Path $
 AddStep "cpu_emptyroot" $false @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\repro\emptyroot_paths.ps1"), "-Exe", $exe["whirl-server"], "-Work", "@WORK@") { param($o, $c) $c -eq 0 -and ($o -match "(?m)^emptyroot_paths: ([1-9]\d*)/\1 as expected") }
 # arch025-gaptests G20 (X4): bug-visstream-race (12011b4): static happens-before check of Vision::encode's stream schedule
 # (tools/gates/vis_stream_order_check.py: every slot read on the compute stream waits the copy event that covers the
-# slot's latest copy; every copy into a slot waits the slot's free event). Its selftest plants the 12011b4 revert and five
-# other reorders. CPU, no exe. The device-side proof stays the GPU repro (vis-encode WHIRL_TEST_VIS_COPY_DELAY_MB).
+# slot's latest copy; every copy into a slot waits the slot's free event; the guards of the schedule calls are only !res
+# and the known loop conditions; the parse must find exactly 17 reads / 5 copies (arch025-gt2)). Its selftest plants the
+# 12011b4 revert and nine other changes (an inverted / unknown guard, a read behind a new wrapper, a loop copy into a
+# concrete slot) and pins the exact (rule, line) set of each. CPU, no exe. The device-side proof stays the GPU repro
+# (vis-encode WHIRL_TEST_VIS_COPY_DELAY_MB).
 AddStep "cpu_vis_order" $false @($pwsh, "-NoProfile", "-Command", "& '$py' -I '$(Join-Path $repo "tools\gates\vis_stream_order_check.py")' --selftest; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\gates\vis_stream_order_check.py")'; exit `$LASTEXITCODE") `
     { param($o, $c) $c -eq 0 -and ($o -match "(?m)^vis stream order selftest: ([1-9]\d*)/\1 as expected") -and ($o -match "(?m)^vis stream order check: ok") }
 AddStep "cpu_server_only_typo" $false @($exe["whirl-server-tests"], "--gguf", $SW, "--only", "no_such_test") { param($o, $c) $c -eq 2 }

@@ -215,6 +215,39 @@ compile and a call into another library fails to link. The product build is unch
 To declare a new dependency of the module, add its header (and, if it is not header-only, its source) to the
 list. The change is then visible in review.
 
+## <a id="vis-order"></a>Vision stream order (`cpu_vis_order`)
+
+`tools/gates/vis_stream_order_check.py` is a static happens-before check of the stream schedule in
+`Vision::encode` (the `!res` path that streams the encoder weights through two slots on a copy stream). It reads
+the source and runs nothing on a GPU. It models per-stream program order, event record / wait edges and slot
+reads / copies, the same model as the PyTorch CUDA Stream Sanitizer, but over the source in host order.
+
+- R1: every read of a slot waits for the copy event that covers the slot's latest copy (RAW).
+- R2: every copy into a slot waits for a free event recorded after the slot's last read (WAR).
+- R3: the merger reads after the loop are ordered.
+- R4: a schedule call (a copy on `cs`, a record or wait of `ev_copy_` / `ev_free_` / `ev_start_`) may only be
+  guarded by `!res` and the known loop conditions (`last`, `!last`, `l + 2 < hp.n_layer`,
+  `l + 2 == hp.n_layer`, `hp.n_layer > 1`). An inverted guard such as `if (res)` is a violation. The model also
+  leaves that call out, so the read it should order fails R1 too. An unknown condition is a violation.
+- R5: inside the layer loop a copy goes into `slot[s]` or is the merger copy into `W + lb`.
+- R0: the parse finds exactly 17 reads and 5 copies (`EXPECTED_READS` / `EXPECTED_COPIES`). A launch the parser
+  stops seeing, such as a new wrapper or a moved stream argument, fails the check and is not skipped. Update the two
+  numbers only after checking a real change by hand.
+
+`--selftest` plants the 12011b4 revert and nine other changes. For each one it requires the exact set of
+(rule, line) results. The line comes from an anchor text, so it follows edits of `vision.cpp`.
+
+Limits:
+- The loop body is checked as one symbolic iteration (s, 1 - s). The loop conditions are treated as true, so a
+  swapped `last` / `!last` is not detected.
+- The merger copy into `W + lb` is not WAR-checked. Whether slot 1 is free then depends on the parity of `n_layer`.
+- The loop boundary is covered by construction. A copy into `slot[s]` must wait for `ev_free_[s]` recorded in the
+  loop body. Prologue events are keyed 0 / 1 / start and never match s. On `stream` that record comes after every
+  read of the prologue and of earlier iterations. A loop copy into a concrete slot would break this argument, so R5
+  forbids it.
+- Timing is not modelled. Only the GPU repro (vis-encode `WHIRL_TEST_VIS_COPY_DELAY_MB`, vis_ab) shows that the
+  device really reorders.
+
 ## <a id="kl-gate"></a>KL gate
 
 `tools/klgate/klgate.py` measures what the golden hashes cannot: how far balance and fast are from
