@@ -211,6 +211,8 @@
                     "proof": {"refactor": ["exit_rule", "golden_exact", "startup_sizing"]}},
    "platform.args": {"metrics": [], "metrics_none": "UTF-8 <-> UTF-16 conversion of paths and argv: no bench key (not on a per-token path)",
                      "proof": {"refactor": ["exit_rule", "golden_exact", "server_log_scan", "startup_sizing"]}},
+   "server.args": {"metrics": [], "metrics_none": "the command line is parsed once at server startup: no bench key",
+                   "proof": {"refactor": ["exit_rule", "golden_exact", "startup_sizing"]}},
    "platform.*": {"metrics": [], "metrics_none": "no platform bench key yet (PLAN PL3: no HTTP microsecond tool); PL2 fs calls are covered by the tier paths",
                   "proof": {"refactor": ["exit_rule", "golden_exact", "server_log_scan", "host_work"]}}
   }
@@ -334,6 +336,15 @@
    "full": true,
    "manual": ["whirl-tests testPlatformProc (3): flags 0 (invalid input -> U+FFFD), narrowArgs == narrow per argument",
               "the packaged exe from a clean folder (argv conversion of both wmains) is in the full gate"]
+  },
+  "server.args": {
+   "id": "C1a", "desc": "whirl-server's command line (src/server/server_args.*, in whirl_server_core; from serveMain by arch025-C1a): Options (the v0.2.4 defaults), parseServerArgs (the argument loop: every flag, its value checks and messages), resolveServerConfig (numerics::resolve of the mode flags / WHIRL_MODE, the --parallel range) and kHelpBody (the --help option list)",
+   "paths": ["src/server/server_args.cpp", "src/server/server_args.h"], "lands_on": "arch025-c1a (C1a)",
+   "steps": ["cpu_server", "golden_swift", "golden_moe", "srv_gpu_select", "pkg_smoke"],
+   "gpus": {"golden_swift": 1, "golden_moe": 1, "srv_gpu_select": 2, "pkg_smoke": 1},
+   "manual": ["whirl-server-tests server_args_table (every flag -> Options field, defaults == 0e35407, die() messages) and server_help_body (kHelpBody == the 0e35407 option list, length + FNV-1a)",
+              "whirl-server.exe --help / -V / /? and whirl.exe serve --help byte-identical to the 0e35407 release exes (scratch\\a25_c1a help_*.txt)",
+              "server startup log lines A vs B: tools/gates/startup_lines.py on the srv_* / golden server logs"]
   },
   "contract": {
    "id": "X", "desc": "cross-module contracts (ServerModel, device::Backend, kernels_abi, numerics): the full gate",

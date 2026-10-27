@@ -61,6 +61,7 @@ target_link_libraries(whirl_sampling PUBLIC whirl)
 # device::Backend interfaces), so the tests can run it against a host-memory backend
 add_library(whirl_server_core STATIC
   ${CMAKE_SOURCE_DIR}/src/server/log.cpp
+  ${CMAKE_SOURCE_DIR}/src/server/server_args.cpp
   ${CMAKE_SOURCE_DIR}/src/server/protocol.cpp
   ${CMAKE_SOURCE_DIR}/src/server/tokens.cpp
   ${CMAKE_SOURCE_DIR}/src/server/stream.cpp

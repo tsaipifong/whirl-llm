@@ -18,6 +18,7 @@
 #include "server/http.h"
 #include "server/log.h"
 #include "server/prefix_store.h"
+#include "server/server_args.h"  // arch025-C1a: parseServerArgs / resolveServerConfig / kHelpBody
 #include "server/startup_steps.h"
 #include "server/protocol.h"
 #include "server/tier_bridge.h"
@@ -6606,7 +6607,9 @@ std::vector<std::uint8_t> toyGgufImage() {
 
 void testFakeArchFit() {
     const model::ArchTable table{toy_arch::rows};
-    const gguf::File f = gguf::File::parse(toyGgufImage());
+    // File::parse keeps views into the bytes (gguf.h: `bytes` must outlive the File): the image is a named local
+    const std::vector<std::uint8_t> img = toyGgufImage();
+    const gguf::File f = gguf::File::parse(img);
     // the lookup server_main does
     const std::string_view arch_name = f.getStringOr("general.architecture", "");
     const model::ArchModule* const am = model::findArch(arch_name, table);
@@ -6690,9 +6693,12 @@ std::string calls() {
 
 void testStartupOrderFit() {
     const model::ArchSizing rec{&c0_rec::estimateLoad, &c0_rec::bufferBytes, &c0_rec::fdSplits, &c0_rec::dflashBytes, 8, &toy_arch::mtp};
-    const gguf::File f = gguf::File::parse(toyGgufImage());
+    // File::parse keeps views into the bytes (gguf.h: `bytes` must outlive the File): the image is a named local
+    const std::vector<std::uint8_t> img = toyGgufImage();
+    const gguf::File f = gguf::File::parse(img);
     const qwen35::Config cfg = toy_arch::fromGguf(f);
-    const gguf::File drafter = gguf::File::parse(toyGgufImage());  // only its address reaches the recording sizing
+    const std::vector<std::uint8_t> img_d = toyGgufImage();
+    const gguf::File drafter = gguf::File::parse(img_d);  // only its address reaches the recording sizing
     startup::DflashFitIn d;
     d.dc.n_layer = 5, d.dc.n_embd = 5120, d.dc.n_head = 32, d.dc.n_head_kv = 8, d.dc.head_dim = 128, d.dc.n_ff = 17408;
     d.dc.block = 8, d.dc.window = 2048, d.dc.conv_k = 2, d.dc.conv_group = 16, d.dc.sel_topk = 16, d.dc.sel_rank = 256;
@@ -6791,6 +6797,248 @@ struct OrderModel {
     }
 };
 }  // namespace c0_rec
+
+// ---- arch025-C1a: whirl-server's argument table (src/server/server_args.cpp, moved out of serveMain). Defaults pinned to
+// v0.2.4 (0e35407 server_main.cpp struct Options, identical text); every flag -> its Options field, in both the "--f V" and
+// "--f=V" forms; the messages die() prints ("<program>: error: <message>", exit code 2); the numerics request; the help
+// option list byte-identical to the 0e35407 release exe's --help (whirl-0.2.4-windows-x64\whirl-server.exe: 16913 B,
+// sha256 62ed8e43...; the 6669-byte option list between the usage line and the environment variables, CRLF -> LF).
+namespace c1a_args {
+// vision::parseMode's three names (the server passes vision::parseMode itself; whirl_vision is not linked here)
+bool visOk(std::string_view s) { return s == "auto" || s == "resident" || s == "stream"; }
+struct Parsed {
+    std::optional<Options> opt;
+    std::string err;
+};
+Parsed parse(const std::vector<std::string>& a) {
+    try {
+        return {parseServerArgs(a, visOk), ""};
+    } catch (const ArgError& e) {
+        return {std::nullopt, e.what()};
+    }
+}
+Options ok(const std::vector<std::string>& a) {
+    Parsed p = parse(a);
+    if (!p.opt) {
+        std::fprintf(stderr, "  FAIL server_args_table: unexpected error '%s'\n", p.err.c_str());
+        ++g_fail;
+        return Options{};
+    }
+    return *p.opt;
+}
+std::string err(const std::vector<std::string>& a) {
+    Parsed p = parse(a);
+    return p.opt ? std::string("<no error>") : p.err;
+}
+std::string resolveErr(Options o, std::optional<std::string> env) {
+    try {
+        (void)resolveServerConfig(std::move(o), std::move(env));
+        return "<no error>";
+    } catch (const ArgError& e) {
+        return e.what();
+    }
+}
+std::uint64_t fnv1a(std::string_view s) {
+    std::uint64_t h = 0xcbf29ce484222325ull;
+    for (const char c : s) {
+        h ^= static_cast<unsigned char>(c);
+        h *= 0x100000001b3ull;
+    }
+    return h;
+}
+}  // namespace c1a_args
+
+void testServerArgsTable() {
+    using namespace c1a_args;
+    using OU32 = std::optional<std::uint32_t>;
+    using OU64 = std::optional<std::uint64_t>;
+    using OS = std::optional<std::string>;
+    // 1. defaults (0e35407: struct Options member initializers)
+    {
+        const Options o = ok({"m.gguf"});
+        CHECK_EQ(o.path, std::string("m.gguf"));
+        CHECK_EQ(o.host, std::string("127.0.0.1"));
+        CHECK_EQ(o.port, std::uint16_t{8080});
+        CHECK(!o.ctx);
+        CHECK_EQ(o.parallel, 4u);
+        CHECK(!o.parallel_given);
+        CHECK(!o.ctx_per_slot);
+        CHECK(!o.mtp_drafts);
+        CHECK_EQ(o.draft, std::string("mtp"));
+        CHECK(o.draft_model.empty());
+        CHECK(!o.decode_min_tps);
+        CHECK(!o.log_file);
+        CHECK(!o.alias);
+        CHECK(!o.kv_ram_mb);
+        CHECK(!o.kv_ssd_dir);
+        CHECK(!o.kv_ssd_gb);
+        CHECK(!o.kv_ssd_mode);
+        CHECK(!o.kv_ssd_delay);
+        CHECK(o.device.empty());
+        CHECK(!o.mmproj);
+        CHECK_EQ(o.vis_idle_s, 60u);
+        CHECK_EQ(o.vis_mode, std::string("auto"));
+        CHECK_EQ(o.vis_cache_mb, std::uint64_t{1024});
+        CHECK(!o.allow_local_images);
+        CHECK(o.cors_origins.empty());
+        CHECK(o.allowed_hosts.empty());
+        CHECK(!o.mode_spec);
+        CHECK(Options{}.path.empty());  // the model path has no default
+    }
+    // 2. every flag -> its field ("--f V" and "--f=V"); the model path may come anywhere
+    {
+        const Options o = ok({"--host", "0.0.0.0", "--port", "9000", "--ctx", "65536", "m.gguf", "--parallel", "2", "--ctx-per-slot",
+                              "32768", "--mtp-drafts", "3", "--draft", "dflash", "--draft-model", "d.gguf", "--decode-min-tps", "0",
+                              "--log-file", "x.log", "--alias", "swift", "--kv-ram-mb", "4096", "--kv-ssd-dir", "D:\\kv", "--kv-ssd-gb",
+                              "0", "--kv-ssd-mode", "always", "--kv-ssd-delay", "30", "--device", "pci:71:0", "--mmproj", "v.gguf",
+                              "--vis-idle-s", "5", "--vis-mode", "stream", "--vis-cache-mb", "0", "--allow-local-images",
+                              "--cors-origin", "https://a.example", "--cors-origin", "*", "--allow-host", "myhost.lan", "--allow-host",
+                              "*", "--fast"});
+        CHECK_EQ(o.path, std::string("m.gguf"));
+        CHECK_EQ(o.host, std::string("0.0.0.0"));
+        CHECK_EQ(o.port, std::uint16_t{9000});
+        CHECK_EQ(o.ctx, OU32(65536));
+        CHECK_EQ(o.parallel, 2u);
+        CHECK(o.parallel_given);
+        CHECK_EQ(o.ctx_per_slot, OU32(32768));
+        CHECK_EQ(o.mtp_drafts, OU32(3));
+        CHECK_EQ(o.draft, std::string("dflash"));
+        CHECK_EQ(o.draft_model, std::string("d.gguf"));
+        CHECK_EQ(o.decode_min_tps, OU32(0));
+        CHECK_EQ(o.log_file, OS("x.log"));
+        CHECK_EQ(o.alias, OS("swift"));
+        CHECK_EQ(o.kv_ram_mb, OU64(4096));
+        CHECK_EQ(o.kv_ssd_dir, OS("D:\\kv"));
+        CHECK_EQ(o.kv_ssd_gb, OU64(0));
+        CHECK_EQ(o.kv_ssd_mode, OS("always"));
+        CHECK_EQ(o.kv_ssd_delay, OU64(30));
+        CHECK_EQ(o.device, std::string("pci:71:0"));
+        CHECK_EQ(o.mmproj, OS("v.gguf"));
+        CHECK_EQ(o.vis_idle_s, 5u);
+        CHECK_EQ(o.vis_mode, std::string("stream"));
+        CHECK_EQ(o.vis_cache_mb, std::uint64_t{0});
+        CHECK(o.allow_local_images);
+        CHECK(o.cors_origins == (std::vector<std::string>{"https://a.example", "*"}));
+        CHECK(o.allowed_hosts == (std::vector<std::string>{"myhost.lan", "*"}));
+        CHECK_EQ(o.mode_spec, OS("fast"));
+    }
+    {
+        const Options o = ok({"--host=h", "--port=1", "-c=2048", "-np=3", "--ctx-per-slot=4096", "--mtp-drafts=99", "--draft=mtp",
+                              "--draft-model=e.gguf", "--decode-min-tps=7", "--log-file=l", "--alias=a", "--kv-ram-mb=1",
+                              "--kv-ssd-dir=s", "--kv-ssd-gb=2", "--kv-ssd-mode=off", "--kv-ssd-delay=3", "-dev=r9700", "--mmproj=p",
+                              "--vis-idle-s=4", "--vis-mode=resident", "--vis-cache-mb=5", "--cors-origin=http://b", "--allow-host=h2",
+                              "--balance=fp8,kvq8", "m.gguf"});
+        CHECK_EQ(o.host, std::string("h"));
+        CHECK_EQ(o.port, std::uint16_t{1});
+        CHECK_EQ(o.ctx, OU32(2048));
+        CHECK_EQ(o.parallel, 3u);
+        CHECK(o.parallel_given);
+        CHECK_EQ(o.ctx_per_slot, OU32(4096));
+        CHECK_EQ(o.mtp_drafts, OU32(10));  // clamped to 1..qwen35::max_drafts
+        CHECK_EQ(o.draft, std::string("mtp"));
+        CHECK_EQ(o.draft_model, std::string("e.gguf"));
+        CHECK_EQ(o.decode_min_tps, OU32(7));
+        CHECK_EQ(o.log_file, OS("l"));
+        CHECK_EQ(o.alias, OS("a"));
+        CHECK_EQ(o.kv_ram_mb, OU64(1));
+        CHECK_EQ(o.kv_ssd_dir, OS("s"));
+        CHECK_EQ(o.kv_ssd_gb, OU64(2));
+        CHECK_EQ(o.kv_ssd_mode, OS("off"));
+        CHECK_EQ(o.kv_ssd_delay, OU64(3));
+        CHECK_EQ(o.device, std::string("r9700"));
+        CHECK_EQ(o.mmproj, OS("p"));
+        CHECK_EQ(o.vis_idle_s, 4u);
+        CHECK_EQ(o.vis_mode, std::string("resident"));
+        CHECK_EQ(o.vis_cache_mb, std::uint64_t{5});
+        CHECK(o.cors_origins == (std::vector<std::string>{"http://b"}));
+        CHECK(o.allowed_hosts == (std::vector<std::string>{"h2"}));
+        CHECK_EQ(o.mode_spec, OS("balance:fp8,kvq8"));
+    }
+    CHECK_EQ(ok({"m", "--mtp-drafts", "0"}).mtp_drafts, OU32(1));  // clamp low end
+    CHECK_EQ(ok({"m", "--kv-ssd-mode", "shutdown"}).kv_ssd_mode, OS("shutdown"));
+    CHECK_EQ(ok({"--precise", "m"}).mode_spec, OS("precise"));
+    CHECK_EQ(ok({"--mode", "fast", "m"}).mode_spec, OS("fast"));
+    CHECK_EQ(ok({"--mode=precise", "m"}).mode_spec, OS("precise"));
+    CHECK_EQ(ok({"--balanced", "m"}).mode_spec, OS("balanced"));
+    CHECK_EQ(ok({"-dev", "8060s", "m"}).device, std::string("8060s"));
+    CHECK_EQ(ok({"-c", "1024", "m"}).ctx, OU32(1024));
+    CHECK_EQ(ok({"m", "--ctx", "5", "--ctx", "6"}).ctx, OU32(6));  // a repeated value flag: the last one
+    CHECK_EQ(ok({"m", "--port", "65535"}).port, std::uint16_t{65535});
+    CHECK(!ok({"m", "--parallel", "4"}).ctx);  // --parallel is not --ctx; "--ctx-per-slot" is not "--ctx"
+    CHECK(!ok({"m", "--ctx-per-slot", "8192"}).ctx);
+    CHECK_EQ(ok({"m", "--draft-model", "x"}).draft, std::string("mtp"));  // "--draft-model" is not "--draft"
+    // 3. the messages die() prints (0e35407 texts; the empty --kv-ssd-dir one is bug-emptyrootpaths, after 0e35407)
+    CHECK_EQ(err({}), std::string("missing MODEL.gguf"));
+    CHECK_EQ(err({"--host", "h"}), std::string("missing MODEL.gguf"));
+    CHECK_EQ(err({"a.gguf", "b.gguf"}), std::string("unexpected argument b.gguf"));
+    CHECK_EQ(err({"m", "--bogus"}), std::string("unknown option --bogus"));
+    CHECK_EQ(err({"m", "--port"}), std::string("unknown option --port"));  // a value flag without its value
+    CHECK_EQ(err({"m", "--port", "65536"}), std::string("invalid --port 65536"));
+    CHECK_EQ(err({"m", "--port", "80x"}), std::string("invalid --port 80x"));
+    CHECK_EQ(err({"m", "--port", "-1"}), std::string("invalid --port -1"));
+    CHECK_EQ(err({"m", "-c", "x"}), std::string("invalid --ctx x"));
+    CHECK_EQ(err({"m", "-np", "4294967296"}), std::string("invalid --parallel 4294967296"));
+    CHECK_EQ(err({"m", "--mtp-drafts", ""}), std::string("invalid --mtp-drafts "));
+    CHECK_EQ(err({"m", "--decode-min-tps", "q"}), std::string("invalid --decode-min-tps q"));
+    CHECK_EQ(err({"m", "--ctx-per-slot", "q"}), std::string("invalid --ctx-per-slot q"));
+    CHECK_EQ(err({"m", "--kv-ram-mb", "q"}), std::string("invalid --kv-ram-mb q"));
+    CHECK_EQ(err({"m", "--kv-ssd-gb", "q"}), std::string("invalid --kv-ssd-gb q"));
+    CHECK_EQ(err({"m", "--kv-ssd-delay", "q"}), std::string("invalid --kv-ssd-delay q"));
+    CHECK_EQ(err({"m", "--vis-idle-s", "q"}), std::string("invalid --vis-idle-s q"));
+    CHECK_EQ(err({"m", "--vis-cache-mb", "q"}), std::string("invalid --vis-cache-mb q"));
+    CHECK_EQ(err({"m", "--draft", "x"}), std::string("invalid --draft x (mtp or dflash)"));
+    CHECK_EQ(err({"m", "--kv-ssd-dir", ""}),
+             std::string("--kv-ssd-dir is empty (give a folder; to turn the SSD tier off use --kv-ssd-gb 0 or --kv-ssd-mode off)"));
+    CHECK_EQ(err({"m", "--kv-ssd-mode", "never"}), std::string("invalid --kv-ssd-mode never (expected always, shutdown or off)"));
+    CHECK_EQ(err({"m", "--device", "a", "-dev", "b"}), std::string("give --device only once"));
+    CHECK_EQ(err({"m", "-dev", "a", "--device=b"}), std::string("give --device only once"));
+    CHECK_EQ(err({"m", "--vis-mode", "fast"}), std::string("invalid --vis-mode fast"));
+    CHECK_EQ(err({"m", "--cors-origin", "a.example"}),
+             std::string("invalid --cors-origin a.example (give an origin such as https://app.example.com, or *)"));
+    CHECK_EQ(err({"m", "--allow-host", "a/b"}), std::string("invalid --allow-host a/b (give a host name such as myhost.lan, or *)"));
+    CHECK_EQ(err({"m", "--allow-host="}), std::string("invalid --allow-host  (give a host name such as myhost.lan, or *)"));
+    CHECK_EQ(err({"m", "--mode"}), std::string("missing value for --mode"));
+    CHECK_EQ(err({"m", "--precise", "--fast"}), std::string("give one numerics mode (--precise, --balance, --fast or --mode M)"));
+    {
+        const std::string e = err({"m", "--mode", "turbo"});  // numerics::parseMode's own message
+        CHECK(e != "<no error>" && !e.empty());
+        CHECK(err({"m", "--fast=nosuchitem"}) != "<no error>");
+    }
+    // the first bad argument wins (the loop stops there)
+    CHECK_EQ(err({"m", "--port", "x", "--bogus"}), std::string("invalid --port x"));
+    // 4. resolveServerConfig: numerics::resolve (flag, else WHIRL_MODE, else balance), then --parallel 1..16
+    {
+        const ResolvedConfig d = resolveServerConfig(ok({"m"}), std::nullopt);
+        CHECK(d.nreq.mode == numerics::Mode::balance);
+        CHECK_EQ(d.nreq.source, std::string("default"));
+        CHECK_EQ(d.opt.path, std::string("m"));
+        const ResolvedConfig e = resolveServerConfig(ok({"m"}), OS("precise"));
+        CHECK(e.nreq.mode == numerics::Mode::precise);
+        CHECK_EQ(e.nreq.source, std::string("WHIRL_MODE"));
+        const ResolvedConfig blank = resolveServerConfig(ok({"m"}), OS("  "));
+        CHECK(blank.nreq.mode == numerics::Mode::balance);
+        CHECK_EQ(blank.nreq.source, std::string("default"));
+        const ResolvedConfig f = resolveServerConfig(ok({"m", "--fast"}), OS("precise"));  // the flag wins
+        CHECK(f.nreq.mode == numerics::Mode::fast);
+        CHECK_EQ(f.nreq.source, std::string("command line"));
+        CHECK(resolveErr(ok({"m"}), OS("turbo")) != "<no error>");
+        CHECK_EQ(resolveServerConfig(ok({"m", "-np", "16"}), std::nullopt).opt.parallel, 16u);
+        CHECK_EQ(resolveServerConfig(ok({"m", "-np", "1"}), std::nullopt).opt.parallel, 1u);
+        CHECK_EQ(resolveErr(ok({"m", "-np", "0"}), std::nullopt), std::string("--parallel must be 1..16"));
+        CHECK_EQ(resolveErr(ok({"m", "--parallel", "17"}), std::nullopt), std::string("--parallel must be 1..16"));
+        // a bad WHIRL_MODE is reported before the --parallel range (resolve runs first, as in serveMain)
+        CHECK(resolveErr(ok({"m", "-np", "0"}), OS("turbo")) != std::string("--parallel must be 1..16"));
+    }
+}
+
+void testServerHelpBody() {
+    using namespace c1a_args;
+    const std::string_view body(kHelpBody);
+    CHECK_EQ(body.size(), std::size_t{6669});
+    CHECK_EQ(fnv1a(body), 0xf3f8420410023c7aull);
+    CHECK(body.starts_with("Loads a qwen35 / qwen35moe GGUF model on the GPU"));
+    CHECK(body.ends_with("  -V, --version            show the version\n"));
+}
 
 void testStartupOrderSlots() {
     NullBackend nb;
@@ -9028,6 +9276,8 @@ int main(int argc, char** argv) {
         {"fake_arch_fit", testFakeArchFit},  // arch025-M5
         {"startup_order_fit", testStartupOrderFit},      // arch025-C0
         {"startup_order_slots", testStartupOrderSlots},  // arch025-C0
+        {"server_args_table", testServerArgsTable},      // arch025-C1a
+        {"server_help_body", testServerHelpBody},        // arch025-C1a
         {"fr_shutdown_503", testFrShutdown503},
         {"run_on_loop_timeout_cancels", testRunOnLoopTimeoutCancels},
         {"fr_protocol", testFrProtocol},
