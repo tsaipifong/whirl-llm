@@ -215,6 +215,8 @@
                    "proof": {"refactor": ["exit_rule", "golden_exact", "startup_sizing"]}},
    "server.startup": {"metrics": [], "metrics_none": "server startup runs once per process: no bench key (the startup sizing lines are the pin)",
                       "proof": {"refactor": ["exit_rule", "golden_exact", "startup_sizing"]}},
+   "cli": {"metrics": [], "metrics_none": "whirl.exe commands are dispatched once per process: no bench key (golden / seqtest / selftest G lines and exit codes are the pin)",
+           "proof": {"refactor": ["exit_rule", "golden_exact", "move_equal"]}},
    "platform.*": {"metrics": [], "metrics_none": "no platform bench key yet (PLAN PL3: no HTTP microsecond tool); PL2 fs calls are covered by the tier paths",
                   "proof": {"refactor": ["exit_rule", "golden_exact", "server_log_scan", "host_work"]}}
   }
@@ -357,6 +359,18 @@
               "server startup log lines A vs B: tools/gates/startup_lines.py and the line-template compare on the srv_* / golden server logs (both GPUs)",
               "8060S: release_gate srv_env_e2 (env_matrix E2, the UMA carve-out; only on the 8060S gate)",
               "startup_order_fit / startup_order_slots (server-tests) for startup_steps.h; server_main.cpp itself is linked into no CPU test"]
+  },
+  "cli": {
+   "id": "C2", "desc": "whirl.exe (src/cli): wmain and the command table (main.cpp), one file per command (cmd_chat / cmd_bench / cmd_selftest / cmd_seqtest / cmd_golden / cmd_dflash_check / cmd_devices / cmd_serve -> server::serveMain / cmd_vis -> vision::cliVisEncode), the shared helpers (common.cpp: arguments, text, the server's prefill forwards, hashes; decode.cpp: the decode loops) and the CLI's own model building (build_model.cpp: GPU choice, Model::load options, applyRuntimeEnv, draft vocabulary, DFlash2 drafter; not shared with whirl-server), declared in cli.h. golden / seqtest / selftest are gate tools: their output lines are the golden / seq / st steps' input",
+   "paths": ["src/cli/*"], "lands_on": "arch025-c2 (C2)",
+   "steps": ["cpu_golden_selftest", "cpu_gate_selftest", "cpu_probe_dispatch", "st_swift_precise", "st_swift_balance", "st_swift_fast",
+             "st_moe_precise", "st_moe_balance", "st_moe_fast", "seq_swift_precise", "seq_swift_balance", "seq_swift_fast",
+             "seq_moe_precise", "seq_moe_balance", "golden_swift", "golden_moe", "pkg_smoke"],
+   "gpus": {"cpu_probe_dispatch": 2, "st_swift_precise": 2, "st_swift_balance": 2, "st_swift_fast": 2, "st_moe_precise": 2, "st_moe_balance": 2,
+            "st_moe_fast": 2, "seq_swift_precise": 2, "seq_swift_balance": 2, "seq_swift_fast": 2, "seq_moe_precise": 2, "seq_moe_balance": 2, "golden_swift": 2, "golden_moe": 2, "pkg_smoke": 1},
+   "manual": ["scratch\\a25_c2\\move_check.py: every old main.cpp line verbatim in one new file, the replaced lines listed, the command table == the old known / commandHelp / commandScope / dispatch lists, fn_equiv",
+              "whirl.exe help / version / usage errors (every command's --help, -h, /?, help NAME; unknown command / topic; missing model; bad options) byte-identical to the 0e35407 release exe and to the C1b build (scratch\\a25_c2\\cli_cmp.py)",
+              "whirl.exe has no CPU test of its own: GPU V-work (st / seq / mt / golden cli on both cards, seq_* R9700) is the behaviour pin"]
   },
   "contract": {
    "id": "X", "desc": "cross-module contracts (ServerModel, device::Backend, kernels_abi, numerics): the full gate",

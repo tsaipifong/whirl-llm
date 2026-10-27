@@ -50,7 +50,21 @@ if(WHIRL_WITH_HIP)
   target_link_libraries(whirl_model PUBLIC whirl_kernels_host whirl whirl_ops whirl_device whirl_spec whirl_arch)
 
   # the CLI executable is whirl.exe (target name differs from the core library)
-  add_executable(whirl-cli ${CMAKE_SOURCE_DIR}/src/cli/main.cpp)
+  # arch025-C2: one file per command (src/cli/cmd_*.cpp), the shared helpers, the CLI's model building (src/cli/cli.h)
+  add_executable(whirl-cli
+    ${CMAKE_SOURCE_DIR}/src/cli/main.cpp
+    ${CMAKE_SOURCE_DIR}/src/cli/common.cpp
+    ${CMAKE_SOURCE_DIR}/src/cli/build_model.cpp
+    ${CMAKE_SOURCE_DIR}/src/cli/decode.cpp
+    ${CMAKE_SOURCE_DIR}/src/cli/cmd_chat.cpp
+    ${CMAKE_SOURCE_DIR}/src/cli/cmd_bench.cpp
+    ${CMAKE_SOURCE_DIR}/src/cli/cmd_selftest.cpp
+    ${CMAKE_SOURCE_DIR}/src/cli/cmd_seqtest.cpp
+    ${CMAKE_SOURCE_DIR}/src/cli/cmd_golden.cpp
+    ${CMAKE_SOURCE_DIR}/src/cli/cmd_dflash_check.cpp
+    ${CMAKE_SOURCE_DIR}/src/cli/cmd_devices.cpp
+    ${CMAKE_SOURCE_DIR}/src/cli/cmd_serve.cpp
+    ${CMAKE_SOURCE_DIR}/src/cli/cmd_vis.cpp)
   set_target_properties(whirl-cli PROPERTIES OUTPUT_NAME whirl)
   target_link_libraries(whirl-cli PRIVATE whirl_model)
   # `whirl serve` forwards to the server's serveMain (cmake/server.cmake)
