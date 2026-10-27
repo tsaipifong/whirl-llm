@@ -302,6 +302,10 @@ void setNe0(bool& x, const Raw& v) {
 }
 // EnvSnapshot::flag / envFlag: not set -> def, else value != "0" (loader.cpp:550-553)
 bool flagOr(const Raw& v, bool def) { return v ? *v != "0" : def; }
+// bug-fastonly (audit F-D): an on / off runtime switch (WHIRL_NAIVE_ATTN, NO_FUSE, FLOAT_GEMV, GDN_SEQ, NO_GRAPH) is on
+// for any value but "0" and "" (was: set at all, so WHIRL_NAIVE_ATTN=0 turned the naive attention ON); the same rule as
+// GV_GROUP / ATTN_WIDE here and llama.cpp ggml_cuda_env_flag (atoi(v) != 0)
+bool switchOn(const Raw& v) { return v && !v->empty() && *v != "0"; }
 // cli main.cpp:345-353 envU32: std::stoul, any exception -> not set
 std::optional<std::uint32_t> cliU32(const Raw& v) {
     if (!v) return std::nullopt;
@@ -389,16 +393,22 @@ void loadOverrides(Plan& p, const Request& r, const Target& t, bool items) {
         else if (e.gdn_wmma) applyOverride(p, Item::gdnwmma, "GDN_WMMA", *e.gdn_wmma, F.gdn_wmma, t.k_gdn_wmma && F.gdn_chunked);
         if (e.ffn_h16) applyOverride(p, Item::h16, "FFN_H16", *e.ffn_h16, F.ffn_h16, true);
         else if (relaxed) applyOverride(p, Item::h16, "Q4_RELAXED", *e.q4_relaxed, F.ffn_h16, true);
-        if (const Raw& v = e.kv; v && !v->empty() && *v != "auto")
-            applyOverride(p, *v == "q4" ? Item::kvq4 : Item::kvq8, "KV", *v, *v != "f16", !t.moe || *v != "f16");
+        // bug-fastonly (audit F-B): 4-bit KV is fast-only; precise / balance ignore WHIRL_KV=q4 (chooseKv as well)
+        if (const Raw& v = e.kv; v && *v == "q4") {
+            if (std::string ign = applyFastOnlyOverride(p, Item::kvq4, "KV", *v, true, true); !ign.empty()) p.ignored.push_back(std::move(ign));
+        } else if (v && !v->empty() && *v != "auto")
+            applyOverride(p, Item::kvq8, "KV", *v, *v != "f16", !t.moe || *v != "f16");
     }
     // tune.cpp:954-957
     F.prec_dec = !p.q8dec_default;
     if (e.q8dec && !e.q8dec->empty()) F.prec_dec = *e.q8dec == "0";
     if (items) setQ8dec(p, !F.prec_dec, e.q8dec ? *e.q8dec : std::string());
     // tune.cpp:968-979
+    // bug-fastonly (audit F-A): relaxed acceptance is fast-only; precise / balance ignore WHIRL_RELAX (and its parameters)
     if (items)
-        if (const Raw& v = e.relax; v && !v->empty()) applyOverride(p, Item::relaxacc, "RELAX", *v, *v != "0", true);
+        if (const Raw& v = e.relax; v && !v->empty())
+            if (std::string ign = applyFastOnlyOverride(p, Item::relaxacc, "RELAX", *v, *v != "0", true); !ign.empty())
+                p.ignored.push_back(std::move(ign));
     const Flags dflt{};
     F.relax_on = dflt.relax_on;
     F.relax_k = dflt.relax_k;
@@ -406,7 +416,7 @@ void loadOverrides(Plan& p, const Request& r, const Target& t, bool items) {
     F.relax_eps = dflt.relax_eps;
     F.relax_delta = dflt.relax_delta;
     // (items == false: the item table is the mode's; relaxacc there is what loadOrTune sees when no WHIRL_RELAX is set)
-    if (p.on(Item::relaxacc)) {
+    if (p.mode == Mode::fast && p.on(Item::relaxacc)) {
         F.relax_on = true;
         if (const Raw& v = e.relax_k; v && !v->empty()) F.relax_k = static_cast<std::uint32_t>(std::stoul(*v));
         if (const Raw& v = e.relax_alpha; v && !v->empty()) F.relax_alpha = std::stof(*v);
@@ -432,30 +442,30 @@ void loadOverrides(Plan& p, const Request& r, const Target& t, bool items) {
 void runtimeFlags(Front front, const RuntimeValues& v, bool k_gdn_v0, Flags& F) {
     if (front == Front::cli) {
         // cli main.cpp:1030-1048 (applyRuntimeEnv; applyGemvEnv at :1032 sets tune rows, not a flag)
-        if (v.float_gemv) F.float_gemv = true;
+        if (switchOn(v.float_gemv)) F.float_gemv = true;
         if (auto x = cliU32(v.dbg)) F.dbg_flags = *x;
         if (auto x = cliU32(v.gemv_max)) F.gemv_max = std::clamp<std::uint32_t>(*x, 1, 16);  // q::max_small_batch
-        if (v.no_graph) F.use_graph = false;
-        if (v.no_fuse) F.no_fuse = true;
+        if (switchOn(v.no_graph)) F.use_graph = false;
+        if (switchOn(v.no_fuse)) F.no_fuse = true;
         if (auto x = cliU32(v.draft_window)) F.draft_window = *x;
         if (auto x = cliU32(v.draft_window_min)) F.draft_window_min = *x;
-        if (v.naive_attn) F.naive_attn = true;
+        if (switchOn(v.naive_attn)) F.naive_attn = true;
         if (v.attn_wide && *v.attn_wide == "0") F.attn_wide = false;
         if (v.attn_dq4 && *v.attn_dq4 == "0") F.attn_dq4 = false;
         if (v.dq4_dyn && *v.dq4_dyn == "0") F.dq4_dyn = false;
         if (v.attn_ws4 && *v.attn_ws4 == "0") F.attn_ws4 = false;
         if (auto x = cliU32(v.moe_bn)) F.moe_bn_force = *x;
-        if (v.gdn_seq) F.gdn_chunked = false;
+        if (switchOn(v.gdn_seq)) F.gdn_chunked = false;
         if (v.gv_group) F.gv_group = *v.gv_group != "0";
         if (auto x = cliU32(v.gv_nmax)) F.gv_nmax = *x;
         // cli main.cpp:1340 (chat only: other CLI commands leave runtime.gdn_v0 unset)
         if (v.gdn_v0 && k_gdn_v0) F.gdn_v0 = true;
     } else if (front == Front::server) {
         // server_main.cpp:1041-1045
-        if (v.no_fuse) F.no_fuse = true;
-        if (v.float_gemv) F.float_gemv = true;
-        if (v.naive_attn) F.naive_attn = true;
-        if (v.gdn_seq) F.gdn_chunked = false;
+        if (switchOn(v.no_fuse)) F.no_fuse = true;
+        if (switchOn(v.float_gemv)) F.float_gemv = true;
+        if (switchOn(v.naive_attn)) F.naive_attn = true;
+        if (switchOn(v.gdn_seq)) F.gdn_chunked = false;
         if (v.moe_bn) F.moe_bn_force = static_cast<std::uint32_t>(std::strtoul(v.moe_bn->c_str(), nullptr, 10));
         // :1052-1053, :1056 (the server never replays the decode graph)
         F.draft_window = srvU32(v.draft_window, F.draft_window);
@@ -620,6 +630,20 @@ void applyOverride(Plan& p, Item it, const char* var, const std::string& value, 
     }
 }
 
+std::string applyFastOnlyOverride(Plan& p, Item it, const char* var, const std::string& value, bool forced, bool applicable) {
+    if (p.mode == Mode::fast) {
+        applyOverride(p, it, var, value, forced, applicable);
+        return {};
+    }
+    if (!forced) return {};
+    return std::format("WHIRL_{}={} ignored: {} is a fast-only item ({} never takes it)", var, value, itemName(it), modeName(p.mode));
+}
+
+// bug-fastonly: the same note for a refusal outside the plan (chooseKv: a forced 4-bit KV format)
+std::string fastOnlyIgnoredNote(Mode m, Item it, const char* var, const std::string& value) {
+    return std::format("WHIRL_{}={} ignored: {} is a fast-only item ({} never takes it)", var, value, itemName(it), modeName(m));
+}
+
 std::string modeLabel(const Plan& p) {
     std::string l = modeName(p.mode);
     if (p.lossy_override) l += "+overrides";
@@ -686,15 +710,11 @@ std::string propsJson(const Plan& p, std::string_view kv) {
     return b;
 }
 
-KvChoice chooseKv(const Request& r, bool moe, const KvCaps& caps, std::optional<KvFormat> forced) {
+namespace {
+// chooseKv without a forced format: the mode's choice
+KvChoice chooseKvMode(const Request& r, bool moe, const KvCaps& caps) {
     KvChoice c;
     const char* model = moe ? "MoE model" : "dense model";
-    if (forced) {
-        c.kv = *forced;
-        c.debug = true;
-        c.why = std::format("WHIRL_KV={} (debug override)", kvFormatName(*forced));
-        return c;
-    }
     // int8 with rotation where the code object has it, else plain int8 (every code object has q8)
     const KvFormat q8 = caps.q8h ? KvFormat::q8h : KvFormat::q8;
     if (r.has(Item::kvq4)) {
@@ -725,6 +745,28 @@ KvChoice chooseKv(const Request& r, bool moe, const KvCaps& caps, std::optional<
     c.why = std::format("{}, {}: f16", modeName(r.mode), model);
     return c;
 }
+
+}  // namespace
+
+KvChoice chooseKv(const Request& r, bool moe, const KvCaps& caps, std::optional<KvFormat> forced) {
+    KvChoice c;
+    // bug-fastonly (audit F-B): a forced 4-bit format is fast-only; precise / balance keep their own choice (below)
+    std::string ignored;
+    if (forced && kvIs4bit(*forced) && r.mode != Mode::fast) {
+        ignored = fastOnlyIgnoredNote(r.mode, Item::kvq4, "KV", kvFormatName(*forced)) + "; ";
+        forced.reset();
+    }
+    if (forced) {
+        c.kv = *forced;
+        c.debug = true;
+        c.why = std::format("WHIRL_KV={} (debug override)", kvFormatName(*forced));
+        return c;
+    }
+    c = chooseKvMode(r, moe, caps);
+    c.why = ignored + c.why;
+    return c;
+}
+
 
 KvFitLabel kvFitLabel(const Request& r, bool moe, KvFormat kv) {
     KvFitLabel l;
