@@ -42,4 +42,15 @@ std::atomic<bool> g_dump_only{false};
 void setDumpOnly(bool on) { g_dump_only.store(on); }
 bool dumpOnly() { return g_dump_only.load(); }
 
+// bug-cli-dumponly: only these whirl commands reach qwen35::loadOrTune (the --dump-only exit); keep in step with
+// src/cli/main.cpp (cmdChat, cmdBench, cmdSeqtest, goldenSingle / goldenPair; serve = serveMain)
+std::string dumpOnlyRefusal(std::string_view cmd) {
+    static constexpr std::string_view honours[] = {"chat", "bench", "seqtest", "golden", "serve"};
+    for (std::string_view h : honours)
+        if (cmd == h) return {};
+    return std::format("'{}' does not support --dump-only (it does not load and tune a model); use it with chat, bench, "
+                       "seqtest, golden or serve",
+                       cmd);
+}
+
 }  // namespace whirl::dump

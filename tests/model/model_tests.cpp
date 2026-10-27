@@ -1987,6 +1987,14 @@ void testBaselineDumps() {
     }
     _putenv_s("WHIRL_S0A_DUMP_T", "");
     CHECK(!whirl::dump::dumpOnly());  // only the --dump-only argument sets it
+    // bug-cli-dumponly: the commands that reach loadOrTune take --dump-only, the others refuse it (naming the command)
+    for (const char* c : {"chat", "bench", "seqtest", "golden", "serve"}) CHECK(whirl::dump::dumpOnlyRefusal(c).empty());
+    for (const char* c : {"selftest", "devices", "dflash-check", "vis-encode"}) {
+        const std::string why = whirl::dump::dumpOnlyRefusal(c);
+        CHECK(why.find("does not support --dump-only") != std::string::npos && why.find(c) != std::string::npos);
+        CHECK(why.find('\n') == std::string::npos);
+    }
+    CHECK(!whirl::dump::dumpOnly());  // asking does not set it
 }
 #undef CHECK
 
