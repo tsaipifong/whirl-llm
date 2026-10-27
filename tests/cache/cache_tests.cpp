@@ -490,19 +490,29 @@ static void testFingerprint() {
     CHECK(!fingerprintEnvKept("WHIRL_PREFIX_CACHE_VERIFY"));
     CHECK(!fingerprintEnvKept("WHIRL_LAUNCH_LOG"));  // ARCH-1 K-0 launch table (diagnostic)
     CHECK(!fingerprintEnvKept("WHIRL_LEAKCHECK_QUIET"));  // safe025 leak-check report switch (test builds only; rule I6)
+    CHECK(!fingerprintEnvKept("WHIRL_LEAK_CHECK"));       // arch025-Q2 GPU-side leak count (rule I6)
+    CHECK(!fingerprintEnvKept("whirl_leak_check"));       // the skip compare is case-insensitive like the prefix
 #ifdef _WIN32
-    {
-        // I6: the switch on and off gives the same fingerprint environment and the same fingerprint
+    // I6: each switch on and off gives the same fingerprint environment and the same fingerprint
+    for (const char* sw : {"WHIRL_LEAKCHECK_QUIET", "WHIRL_LEAK_CHECK"}) {
         const auto off = fingerprintEnv();
-        _putenv_s("WHIRL_LEAKCHECK_QUIET", "1");
+        _putenv_s(sw, "1");
         const auto on = fingerprintEnv();
-        _putenv_s("WHIRL_LEAKCHECK_QUIET", "");
+        _putenv_s(sw, "");
         CHECK(on == off);
         auto q = p;
         q.env = off;
         const auto fp_off = tierFingerprint(q);
         q.env = on;
         CHECK(tierFingerprint(q) == fp_off);
+    }
+    {
+        // block proof of the on/off check itself: a variable that IS hashed changes the fingerprint environment
+        const auto off = fingerprintEnv();
+        _putenv_s("WHIRL_Q2_I6_PROBE", "1");
+        const auto on = fingerprintEnv();
+        _putenv_s("WHIRL_Q2_I6_PROBE", "");
+        CHECK(on != off);
     }
 #endif
     CHECK(!fingerprintEnvKept("WHIRLX"));

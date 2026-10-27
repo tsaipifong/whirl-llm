@@ -9,6 +9,11 @@
 // --require-all on an arch without a required-kernel list (FIX-TEST-A, FR-TEST P3-3 / P3-4).
 // families: quant gemv gemm attn attndq4 gdn moe moemx moef misc gemvh dflash ws4 ws4g vision
 //
+// Leak count (arch025-Q2, include/whirl/leak_count.h): with WHIRL_LEAK_CHECK=1 every family must leave as many device /
+// pinned allocations, streams and events alive as it found; a family that leaks gets a failing "leak check" result
+// (named LEAK_CHECK line, exit 1) and the run ends with "leak check: ok (N units)" or FAIL. --inject-leak (proof of the
+// check, never in a gate) leaks one 4 KiB device allocation inside the first family that runs.
+//
 // Timing (measure-tools P2, tests/kernels/kt_bench.h + bench_kernels.cpp): --bench FAMILY[,FAMILY] runs the timing cells
 // of gemv gemvh gemm attn moe gdn instead of the test families (each cell checks its output vs the CPU first);
 // --jsonl FILE appends one row per cell (db_record.py jsonl); --ab HSACO times the same kernels of a candidate code
@@ -27,6 +32,7 @@
 #include "cpu_ref.h"
 #include "kt_bench.h"
 #include "whirl/common.h"
+#include "whirl/leak_count.h"
 
 #ifndef WHIRL_KT_VERSION
 #define WHIRL_KT_VERSION "dev"
@@ -60,6 +66,7 @@ int main(int argc, char** argv) {
     std::string device = envOr("WHIRL_DEVICE");
     std::set<std::string> only;
     bool require_all = false;
+    bool inject_leak = false;  // arch025-Q2 proof: one device allocation of the first family is never freed
     kt::BenchOpts bo;
     kt::Ctx c;
     c.models = {envOr("WHIRL_TEST_Q4"), envOr("WHIRL_TEST_MX"), envOr("WHIRL_TEST_MOE"), envOr("WHIRL_TEST_MOEMX")};
@@ -78,6 +85,7 @@ int main(int argc, char** argv) {
                 while (std::getline(ss, f, ',')) only.insert(f);
             } else if (a == "--quick") c.quick = true;
             else if (a == "--require-all") require_all = true;
+            else if (a == "--inject-leak") inject_leak = true;
             else if (a == "-v" || a == "--verbose") c.rep.verbose = true;
             else if (a == "--q4") c.models.q4 = next();
             else if (a == "--mx") c.models.mx = next();
@@ -252,12 +260,25 @@ int main(int argc, char** argv) {
         const auto t0 = std::chrono::steady_clock::now();
         std::printf("== %s\n", f.name);
         std::fflush(stdout);
+        const whirl::hip::leakcount::Snapshot leak0 = whirl::hip::leakcount::snapshot();
         try {
             f.run(c);
+            if (inject_leak) {
+                (void)whirl::hip::malloc(4096);  // never freed: the leak count must name this family
+                inject_leak = false;
+            }
         } catch (const std::exception& e) {
             kt::Result r;
             r.family = f.name;
             r.name = std::string("exception: ") + e.what();
+            r.pass = false;
+            c.rep.add(r);
+        }
+        if (whirl::hip::leakcount::check(f.name, leak0)) {
+            kt::Result r;
+            r.family = f.name;
+            r.name = "leak check";
+            r.note = whirl::hip::leakcount::leaked(leak0, whirl::hip::leakcount::snapshot()) + " still alive (WHIRL_LEAK_CHECK)";
             r.pass = false;
             c.rep.add(r);
         }
@@ -266,6 +287,7 @@ int main(int argc, char** argv) {
     }
     int fails = c.rep.summary();
     whirl::hip::streamDestroy(c.s);
+    (void)whirl::hip::leakcount::report();  // a leaking family is already a failing check in the summary
     if (c.rep.checks() == 0) {
         std::printf("whirl-kernel-test: 0 checks ran: refusing to report success\n");
         return 2;
