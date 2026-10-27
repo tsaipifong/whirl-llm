@@ -232,13 +232,43 @@ class GateTests(unittest.TestCase):
         self.assertIn("no reason for src/b.cpp|C6262", out)
         self.assertIn("not in the baseline (stale): src/c.cpp|C6001|c", out)
 
-    def test_reasons_moved_line_and_wrong_file_fail(self):
+    def test_reasons_line_drift_is_info_not_fail(self):
+        # arch025-Q3: unrelated code above moved every warning 69 lines down (server_tests.cpp 7009 -> 7078 on arch025-next):
+        # same file|rule|function and count -> PASS, the drift is printed as INFO
         t = Tree(os.path.join(self.tmp, "t1"), TUS)
         bl = self.baseline(t)
-        t2 = Tree(os.path.join(self.tmp, "t2"), TUS, line_shift=3)  # the warnings moved 3 lines down
+        t2 = Tree(os.path.join(self.tmp, "t2"), TUS, line_shift=69)
+        rc, out = run("reasons", bl, self.whitelist(self.GOOD), t2.b)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("INFO line drift: src/a.cpp|C6001|whirl::a: whitelist line 10, cl reports line(s) 79 now", out)
+        self.assertIn("analyze reasons: ok", out)
+        self.assertNotIn("FAIL", out)
+
+    def test_reasons_other_function_fails(self):
+        # the same warning now reported in another function = another key: no reason for it -> FAIL
+        t = Tree(os.path.join(self.tmp, "t1"), TUS)
+        bl = self.baseline(t)
+        moved = dict(TUS)
+        moved["CMakeFiles/a.dir/src/a.cpp.obj"] = [("src/a.cpp", "C6001", "whirl::a2", 10), TUS["CMakeFiles/a.dir/src/a.cpp.obj"][1]]
+        t2 = Tree(os.path.join(self.tmp, "t2"), moved)
         rc, out = run("reasons", bl, self.whitelist(self.GOOD), t2.b)
         self.assertEqual(rc, 1, out)
-        self.assertIn("src/a.cpp|C6001|whirl::a: whitelist says line 10, cl reports line(s) 13 now", out)
+        self.assertIn("FAIL src/a.cpp|C6001|whirl::a2: cl reports it 1 time(s) and the whitelist has no reason", out)
+
+    def test_reasons_extra_count_fails(self):
+        # a second occurrence of a whitelisted key (other line, same function) has no reason -> FAIL, even with drifted lines
+        t = Tree(os.path.join(self.tmp, "t1"), TUS)
+        bl = self.baseline(t)
+        more = dict(TUS)
+        more["CMakeFiles/a.dir/src/a.cpp.obj"] = TUS["CMakeFiles/a.dir/src/a.cpp.obj"] + [("src/a.cpp", "C6001", "whirl::a", 25)]
+        t2 = Tree(os.path.join(self.tmp, "t2"), more, line_shift=4)
+        rc, out = run("reasons", bl, self.whitelist(self.GOOD), t2.b)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("FAIL src/a.cpp|C6001|whirl::a: cl reports it 2 time(s), the baseline accepts 1", out)
+
+    def test_reasons_wrong_file_fails(self):
+        t = Tree(os.path.join(self.tmp, "t1"), TUS)
+        bl = self.baseline(t)
         rows = [self.GOOD[0], ("src/a.cpp|C6001|whirl::a", "src/other.cpp:10", "points into another file (test)"), self.GOOD[2]]
         rc, out = run("reasons", bl, self.whitelist(rows))
         self.assertEqual(rc, 1, out)
@@ -251,6 +281,96 @@ class GateTests(unittest.TestCase):
         rc, out = run("reasons", bl, self.whitelist(self.GOOD), t2.b)
         self.assertEqual(rc, 1, out)
         self.assertIn("build dir incomplete", out)
+
+
+class FaultProofTest(unittest.TestCase):
+    """arch025-Q3: analyze_check.py faultproof (verdict of analyze_fault.bat). Synthetic case dirs written like the bat leaves them;
+    the real-compiler run is in cpu_safety_selftest / cpu_analyze."""
+
+    F = ac.FAULT_FILE
+    ACC = (F, "C6001", "acceptedOld", 14)
+    PLANTED = [(F, "C6001", "usesUninitialized", 29), (F, "C6011", "derefsNull", 35), (F, "C6201", "overrun", 42)]
+    SAME = (F, "C6001", "acceptedOld", 19)
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="afp_")
+        self.bl = os.path.join(self.tmp, "bl.txt")
+        with open(self.bl, "w", encoding="utf-8") as f:
+            f.write(f"1\t{ac.FAULT_ACCEPTED}\n")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def case(self, name, results, done_rc=0, run_gate=True):
+        """One case dir: the Tree layout (CMakeCache, start, expected, SARIF), then the real 'check' writes gate.log + GATE."""
+        t = Tree(os.path.join(self.tmp, "src_" + name), {"af.cpp.obj": results}, rc=done_rc)
+        d = os.path.join(self.tmp, "proof", name)
+        shutil.copytree(t.b, d)
+        with open(os.path.join(d, "CMakeCache.txt"), "w") as f:
+            f.write(f"CMAKE_HOME_DIRECTORY:INTERNAL={t.src}\n")
+        if run_gate:
+            rc, out = run("check", d, self.bl)
+            with open(os.path.join(d, "gate.log"), "w", encoding="utf-8") as f:
+                f.write(out)
+            with open(os.path.join(d, "GATE"), "w") as f:
+                f.write(f"rc={rc}\n")
+
+    def proof(self):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = ac.faultproof(os.path.join(self.tmp, "proof"))
+        return rc, buf.getvalue()
+
+    def good(self, skip=None):
+        cases = {"clean": [self.ACC], "new": [self.ACC] + self.PLANTED, "samekey": [self.ACC, self.SAME]}
+        for k, v in cases.items():
+            if k != skip:
+                self.case(k, v)
+
+    def test_all_three_cases_ok(self):
+        self.good()
+        rc, out = self.proof()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("analyze fault proof: ok", out)
+
+    def test_samekey_not_caught_fails(self):
+        self.good(skip="samekey")
+        self.case("samekey", [self.ACC])  # cl reported the key only once: the gate PASSES, so the proof must FAIL
+        rc, out = self.proof()
+        self.assertEqual(rc, 1, out)
+        self.assertIn("FAIL samekey:", out)
+
+    def test_clean_without_accepted_warning_fails(self):
+        self.good(skip="clean")
+        self.case("clean", [])  # PASS, but with no warning at all it proves nothing about the baseline
+        rc, out = self.proof()
+        self.assertEqual(rc, 1, out)
+        self.assertIn("FAIL clean: the accepted warning", out)
+
+    def test_clean_with_extra_warning_fails(self):
+        self.good(skip="clean")
+        self.case("clean", [self.ACC, self.PLANTED[0]])
+        rc, out = self.proof()
+        self.assertEqual(rc, 1, out)
+        self.assertIn("FAIL clean: the baseline-only TU must PASS", out)
+
+    def test_new_with_too_few_planted_fails(self):
+        self.good(skip="new")
+        self.case("new", [self.ACC] + self.PLANTED[:2])
+        rc, out = self.proof()
+        self.assertEqual(rc, 1, out)
+        self.assertIn("FAIL new:", out)
+
+    def test_compile_failed_or_gate_missing_fails(self):
+        self.good(skip="new")
+        self.case("new", [self.ACC] + self.PLANTED, done_rc=2)
+        rc, out = self.proof()
+        self.assertEqual(rc, 1, out)
+        self.assertIn("new: compile DONE rc=2", out)
+        shutil.rmtree(os.path.join(self.tmp, "proof", "samekey"))
+        self.case("samekey", [self.ACC, self.SAME], run_gate=False)
+        rc, out = self.proof()
+        self.assertIn("samekey: gate.log missing or empty", out)
 
 
 if __name__ == "__main__":

@@ -1,8 +1,9 @@
 # arch025-Q3 /analyze false-positive / accepted-warning whitelist: one row per key of tools/safety/analyze_baseline.txt.
-# Columns: key (file|ruleId|function, as in the baseline) <TAB> file:line (where cl reports it; checked against the SARIF of every
-# cpu_analyze run) <TAB> reason (why it is not fixed in 0.2.5: false positive, or a style warning with no defect; a real defect goes
+# Columns: key (file|ruleId|function, as in the baseline) <TAB> file:line (where cl reported it; a HINT only: a moved line prints
+# "INFO line drift", never FAIL, arch025-Q3) <TAB> reason (why it is not fixed in 0.2.5: false positive, or a style warning with no defect; a real defect goes
 # to a bug-fix line instead, PLAN Q). Read by tools/safety/analyze_check.py reasons. Triaged by arch025-Q135, 2026-10-25.
-# A baseline key without a row, a row whose key is not in the baseline, an empty reason or a line cl no longer reports: FAIL.
+# FAIL: a baseline key without a row, a row whose key is not in the baseline, an empty reason; with the build, a key cl reports
+# that has no row (new key / other function) or more often than its baseline count.
 src/common/pool_budget.cpp|C6326|whirl::poolbudget::defaultMargin	src/common/pool_budget.cpp:47	constant compared with a constant: moe_extra_mb is a constexpr tuning value; the "> 0" test keeps the code correct if the constant is ever set to 0. No defect.
 src/common/util.cpp|C6262|whirl::readFile	src/common/util.cpp:86	64 KiB read buffer on the stack (> /analyze 16 KiB stack threshold); leaf function, not recursive, called on threads with the 1 MiB default stack. No defect.
 src/hip/uma_mem.cpp|C6240|whirl::hip::umaMemory	src/hip/uma_mem.cpp:54	sizeof(AdapterLuid) == sizeof(prop.luid) is a deliberate compile-time size guard before memcmp; the constant term is intended. No defect.

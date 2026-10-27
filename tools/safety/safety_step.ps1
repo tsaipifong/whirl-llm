@@ -11,11 +11,13 @@
 #           pins and the 8 fault modes), then tools/safety/asan_check.py check: every suite clean and passing, every fault mode
 #           caught by the checker meant for it, the ASan opt-out whitelist (asan_allow.txt) exact. Verdict "cpu asan: ok (...)".
 #  analyze  tools/safety/run_analyze.bat (full /analyze rebuild of the CPU test targets + baseline gate), then the gate must PASS,
-#           tools/safety/analyze_check.py reasons (every baseline key has file:line + reason in analyze_whitelist.tsv, at the line cl
-#           reports now) and the injected-fault proof tools/safety/analyze_fault.bat must FAIL with its 3 planted warnings NEW.
+#           tools/safety/analyze_check.py reasons (every baseline key has file:line + reason in analyze_whitelist.tsv; keyed on
+#           file|rule|function + count, the line is a hint: drift = INFO) and the injected-fault proof tools/safety/analyze_fault.bat must hold (arch025-Q3: baseline-only TU
+#           PASS, 3 planted warnings NEW -> FAIL, a 2nd warning of a baselined key NEW x1 -> FAIL).
 #           Verdict "cpu analyze: ok (...)".
 #  selftest the block / pass unit tests of both verdicts (test_asan_check.py, test_analyze_check.py) and the two whitelist checks
-#           without a build (seconds). Verdict "cpu safety selftest: ok".
+#           without a build, plus the real-compiler analyze_fault.bat proof (3 one-TU cl compiles; seconds). Verdict
+#           "cpu safety selftest: ok".
 # Time cap (the 2x rule; measured times in progress\arch025-Q135.HANDOFF.md): over -CapMin the step's own process tree is killed
 # and the step FAILS. Environment: WHIRL_PYTHON (python), WHIRL_KERNELS_FROM (HIP code objects for a new build dir, e.g. the gated
 # build\Release of this tree), WHIRL_QUIET_WAIT (a local script build_cfg.bat runs before compiling); release_gate sets them.
@@ -63,7 +65,16 @@ if ($Kind -eq "selftest") {
         Write-Output "$($t -join ' ' -replace [regex]::Escape($repo), '<repo>'): exit $c"
         if ($c -ne 0) { $bad++ }
     }
-    Write-Output "cpu safety selftest: $(if ($bad -eq 0) { 'ok' } else { "FAIL ($bad of 4)" })"
+    # arch025-Q3: the real-compiler block AND pass proof of the /analyze baseline gate (3 one-TU cl /analyze compiles, seconds):
+    # baseline-only TU PASS, 3 planted keys NEW -> FAIL, a 2nd warning of a baselined key NEW x1 -> FAIL. Output in build-analyze
+    # (/build-*/ is ignored by git); needs only cl.
+    $F = Join-Path $repo "build-analyze\fault_selftest"
+    $fo = @(& cmd.exe /d /c "`"$(Join-Path $here 'analyze_fault.bat')`" `"$F`"" 2>&1 | ForEach-Object { "$_" })
+    $fc = Rc (Join-Path $F "PROOF")
+    $fo | Select-Object -Last 3 | ForEach-Object { "   $_" }
+    Write-Output "analyze_fault.bat (clean PASS / new FAIL / same key FAIL): PROOF rc=$fc"
+    if ($fc -ne 0) { $bad++ }
+    Write-Output "cpu safety selftest: $(if ($bad -eq 0) { 'ok' } else { "FAIL ($bad of 5)" })"
     exit $(if ($bad -eq 0) { 0 } else { 1 })
 }
 
@@ -98,15 +109,15 @@ if ($g -ne 0) { $bad += "baseline gate GATE rc=$g (0 = PASS)" }
 $o = @(& $py -I (Join-Path $here "analyze_check.py") reasons (Join-Path $here "analyze_baseline.txt") (Join-Path $here "analyze_whitelist.tsv") $B 2>&1 | ForEach-Object { "$_" })
 if ($LASTEXITCODE -ne 0) { $bad += "whitelist reasons check failed" }
 $o | ForEach-Object { "   $_" }
-# injected-fault proof: 3 planted defects in tests/safety/analyze_fault.cpp must be NEW and the gate must FAIL
+# injected-fault proof (arch025-Q3, real cl, tests/safety/analyze_fault.cpp x3): the baseline-only TU must PASS, the 3 planted
+# defects must be NEW (FAIL), a 2nd warning of the baselined key must be NEW x1 (FAIL); verdict analyze_check.py faultproof
 $F = Join-Path $B "fault_proof"
 $fo = @(& cmd.exe /d /c "`"$(Join-Path $here 'analyze_fault.bat')`" `"$F`"" 2>&1 | ForEach-Object { "$_" })
-$fg = Rc (Join-Path $F "GATE")
-$fnew = @($fo | Where-Object { $_ -match "^NEW x\d+: tests/safety/analyze_fault\.cpp\|C\d+\|" }).Count
-"   fault proof: GATE rc=$fg, $fnew planted warning(s) NEW" | Write-Output
-if ($fg -ne 1 -or $fnew -lt 3) { $bad += "injected-fault proof did not FAIL with 3 NEW (rc=$fg, NEW $fnew)" }
+$fc = Rc (Join-Path $F "PROOF")
+$fo | ForEach-Object { "   fault proof: $_" }
+if ($fc -ne 0) { $bad += "injected-fault proof failed (PROOF rc=$fc): see $F\proof.log" }
 $min = [math]::Round(((Get-Date) - $t0).TotalMinutes, 1)
 $gs = @(Get-Content $gl -ErrorAction SilentlyContinue | Where-Object { $_ -match "^analyze: " } | Select-Object -First 1)
-if ($bad.Count -eq 0) { Write-Output "cpu analyze: ok ($min min; $($gs -join '') ; whitelist reasons ok; fault proof 3 NEW)"; exit 0 }
+if ($bad.Count -eq 0) { Write-Output "cpu analyze: ok ($min min; $($gs -join '') ; whitelist reasons ok; fault proof clean PASS / 3 NEW / same key NEW x1)"; exit 0 }
 Write-Output "cpu analyze: FAIL ($min min; $($bad -join '; '))"
 exit 1
