@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "cli/cli.h"
+#include "cli/dflash_dump.h"
 
 namespace cli {
 
@@ -331,8 +332,10 @@ int cmdChat(const Args& a) {
             prof.reset();
         }
         // bug-emptyrootpaths: empty = no dump (create_directories("") throws in MSVC, "" + "/feats.npy" is the drive root)
-        if (auto dir = envGet("DFLASH_DUMP"); dir && dir->empty()) std::fprintf(stderr, "WHIRL_DFLASH_DUMP is empty: no feature dump\n");
-        else if (dir) dflashDumpFeatures(model, *dir, next, static_cast<u32>(ids.size()));
+        // (the rule is dflash_dump.h dflashDumpDir, pinned by whirl-tests testDFlashDumpDir; arch025-gaptests G19)
+        const std::optional<std::string> dump_env = envGet("DFLASH_DUMP");
+        if (dump_env && dump_env->empty()) std::fprintf(stderr, "WHIRL_DFLASH_DUMP is empty: no feature dump\n");
+        if (const std::optional<std::string> dir = dflashDumpDir(dump_env)) dflashDumpFeatures(model, *dir, next, static_cast<u32>(ids.size()));
         const ChatOpts dopt = dflashOpts(model, opt);
         const DecodeResult r = dflashDecode(model, tok, next, static_cast<u32>(ids.size()), dopt, ids);
         printSpecSummary(r, ids.size(), prefill_ms, dopt, "DFlash2 spec");

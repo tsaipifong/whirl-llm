@@ -302,9 +302,9 @@
   "sampling": {
    "id": "E1a", "desc": "token sampling and draft acceptance (Sampler, filterCands, draws, Acceptor: greedy / specsample / relaxacc)",
    "paths": ["src/sampling/*"], "lands_on": "arch025-e1a (E1a)", "callers": "rdeps",
-   "steps": ["cpu_server", "golden_swift", "golden_moe", "srv_balance", "srv_fast"],
+   "steps": ["cpu_sampling", "cpu_sampling_iso", "cpu_server", "golden_swift", "golden_moe", "srv_balance", "srv_fast"],
    "gpus": {"golden_swift": 2, "golden_moe": 2, "srv_balance": 2, "srv_fast": 2},
-   "manual": ["whirl-server-tests sampler / acceptor_* (fixed-RNG acceptance sequences vs the pre-move code)", "V-host sched"]
+   "manual": ["whirl-server-tests sampler / acceptor_* (fixed-RNG acceptance sequences vs the pre-move code); the same bodies run alone in whirl-sampling-tests (arch025-X3, ARCH-1 8.5: src/sampling built from tests/sampling/isolation.txt only)", "V-host sched"]
   },
   "platform.fs": {
    "id": "PL2", "desc": "platform layer, files (platform::fs + FakeFs: MappedFile, GGUF reader, server log, SSD tier files)",
@@ -342,7 +342,7 @@
   "server.args": {
    "id": "C1a", "desc": "whirl-server's command line (src/server/server_args.*, in whirl_server_core; from serveMain by arch025-C1a): Options (the v0.2.4 defaults), parseServerArgs (the argument loop: every flag, its value checks and messages), resolveServerConfig (numerics::resolve of the mode flags / WHIRL_MODE, the --parallel range) and kHelpBody (the --help option list)",
    "paths": ["src/server/server_args.cpp", "src/server/server_args.h"], "lands_on": "arch025-c1a (C1a)",
-   "steps": ["cpu_server", "golden_swift", "golden_moe", "srv_gpu_select", "pkg_smoke"],
+   "steps": ["cpu_server", "cpu_emptyroot", "golden_swift", "golden_moe", "srv_gpu_select", "pkg_smoke"],
    "gpus": {"golden_swift": 1, "golden_moe": 1, "srv_gpu_select": 2, "pkg_smoke": 1},
    "manual": ["whirl-server-tests server_args_table (every flag -> Options field, defaults == 0e35407, die() messages) and server_help_body (kHelpBody == the 0e35407 option list, length + FNV-1a)",
               "whirl-server.exe --help / -V / /? and whirl.exe serve --help byte-identical to the 0e35407 release exes (scratch\\a25_c1a help_*.txt)",
@@ -351,7 +351,7 @@
   "server.startup": {
    "id": "C1b", "desc": "whirl-server's startup and serving loop: serveMain (help / version / device list, the command line through server.args, buildModel = the arch module, GPU choice, pre-load fit, Model::load, drafters, MTP) and ServerRun's phases in order (planSlots, makeEngine, reserveRamTier, loadVisionEarly, planPool, reportPool, startTier, attachVision, runServer: arch025-C1b), with the ordered slot / fit steps of src/server/startup_steps.h (arch025-C0). The hipError 719 measurement points (mem_ck0 / mem_ck1, the pinned room, mem_t1, wddm0 / pinned0) are read at fixed places relative to every allocation",
    "paths": ["src/server/server_main.cpp", "src/server/startup_steps.h"], "lands_on": "arch025-c1b (C1b)",
-   "steps": ["cpu_server", "cpu_pins", "golden_swift", "golden_moe", "srv_gpu_select", "srv_kvram719", "srv_env_e1", "srv_env_e4", "pkg_smoke"],
+   "steps": ["cpu_server", "cpu_emptyroot", "cpu_pins", "golden_swift", "golden_moe", "srv_gpu_select", "srv_kvram719", "srv_env_e1", "srv_env_e4", "pkg_smoke"],
    "gpus": {"golden_swift": 2, "golden_moe": 2, "srv_gpu_select": 2, "srv_kvram719": 2, "srv_env_e1": 2, "srv_env_e4": 2, "pkg_smoke": 1},
    "manual": ["scratch\\a25_c1b\\move_check.py: ServerRun's phase bodies == the old serveMain text (inverse renames), members in the old declaration order, the measurement / allocation calls in the same order",
               "server startup log lines A vs B: tools/gates/startup_lines.py and the line-template compare on the srv_* / golden server logs (both GPUs)",
@@ -361,7 +361,7 @@
   "cli": {
    "id": "C2", "desc": "whirl.exe (src/cli): wmain and the command table (main.cpp), one file per command (cmd_chat / cmd_bench / cmd_selftest / cmd_seqtest / cmd_golden / cmd_dflash_check / cmd_devices / cmd_serve -> server::serveMain / cmd_vis -> vision::cliVisEncode), the shared helpers (common.cpp: arguments, text, the server's prefill forwards, hashes; decode.cpp: the decode loops) and the CLI's own model building (build_model.cpp: GPU choice, Model::load options, applyRuntimeEnv, draft vocabulary, DFlash2 drafter; not shared with whirl-server), declared in cli.h. golden / seqtest / selftest are gate tools: their output lines are the golden / seq / st steps' input",
    "paths": ["src/cli/*"], "lands_on": "arch025-c2 (C2)",
-   "steps": ["cpu_golden_selftest", "cpu_gate_selftest", "cpu_probe_dispatch", "st_swift_precise", "st_swift_balance", "st_swift_fast",
+   "steps": ["cpu_tests", "cpu_golden_selftest", "cpu_gate_selftest", "cpu_probe_dispatch", "st_swift_precise", "st_swift_balance", "st_swift_fast",
              "st_moe_precise", "st_moe_balance", "st_moe_fast", "seq_swift_precise", "seq_swift_balance", "seq_swift_fast",
              "seq_moe_precise", "seq_moe_balance", "golden_swift", "golden_moe", "pkg_smoke"],
    "gpus": {"cpu_probe_dispatch": 2, "st_swift_precise": 2, "st_swift_balance": 2, "st_swift_fast": 2, "st_moe_precise": 2, "st_moe_balance": 2,

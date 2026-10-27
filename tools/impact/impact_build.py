@@ -139,6 +139,8 @@ RELEASE_STEPS = {
     # arch024-S11c (F-3): tests/pins/check.ps1 runs whirl-pins (prompt token hash, engine pins on the mock model) and
     # whirl-startup-replay (startup decision table); impact.py selects it for every product file those two link
     "cpu_pins": "tool",
+    # arch025-X3 (ARCH-1 8.5): the sampling tests built against src/sampling alone, and the boundary mutants
+    "cpu_sampling": "exe:whirl-sampling-tests", "cpu_sampling_iso": "exe:whirl-sampling-tests",
 }
 CLI_GATES = {  # GPU gates run through whirl.exe subcommands: their roots are CLI functions (derived reach)
     "golden.single": ["goldenSingle"], "golden.pair": ["goldenPair"], "golden.ngram": ["goldenSingle"],
@@ -205,6 +207,23 @@ def parse_cmake(root, files):
             for tok in m.group(2).split():
                 if tok not in ("PRIVATE", "PUBLIC", "INTERFACE") and not tok.startswith(("$", '"')):
                     links[m.group(1)].add(tok)
+    # arch025-X3: an isolation-check program (cmake/sampling_iso.cmake) compiles copies of the files its manifest
+    # tests/<module>/isolation.txt lists ("exe <target>", then "src|hdr|testsrc|testhdr <path>"); the CMake text only
+    # has ${...} variables, so its sources come from the manifest
+    for f in files:
+        if f.startswith("tests/") and f.endswith("/isolation.txt"):
+            iso_exe, iso_files = None, []
+            for line in open(os.path.join(root, f), encoding="utf-8", errors="replace"):
+                im = re.match(r"([a-z]+)\s+([^\s#]+)", line)
+                if not im:
+                    continue
+                if im.group(1) == "exe":
+                    iso_exe = im.group(2)
+                elif im.group(1) in ("src", "hdr", "testsrc", "testhdr"):
+                    iso_files.append(im.group(2))
+            if iso_exe:
+                exes.add(iso_exe)
+                srcs[iso_exe].update(iso_files)
     targets = set(srcs) | set(links)
 
     def closure(tg, seen=None):

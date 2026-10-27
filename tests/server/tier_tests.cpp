@@ -4414,6 +4414,53 @@ static void testFsWriteFail(NullBackend& ops, const fs::path& dir) {
 // caller prefills cold) and, as in 0e35407 (endRestore: "the read failed: the file is unusable" -> removeEntry), the
 // entry is dropped; nothing crashes. Each case starts from a fresh copy of the file; the control restore of the same
 // file without the fault is byte-identical and verifyPieces finds it clean.
+// arch025-X12 (X1 survivor x12-pl2-offset-high): writeAt / readAt past 4 GiB keep the high half of the offset
+static void testFsLargeOffset(const fs::path& dir) {
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    const fs::path f = dir / L"x12_large_offset.bin";
+    fs::remove(f, ec);
+    pfs::Handle h = pfs::open(f.c_str(), pfs::kGenericRead | pfs::kGenericWrite, pfs::kShareNone, pfs::kOpenAlways, pfs::kAttrNormal);
+    CHECK(pfs::valid(h));
+    if (!pfs::valid(h)) return;
+    if (!pfs::setSparse(h)) {
+        std::printf("  (testFsLargeOffset skipped: the test folder cannot hold a sparse file)\n");
+        pfs::close(h);
+        pfs::remove(f.c_str());
+        return;
+    }
+    const std::uint64_t off = (5ull << 30) + 4096;
+    const std::uint32_t v = 0x5eed1234u;
+    std::uint32_t w = 0, r = 0, got = 0;
+    CHECK(pfs::writeAt(h, &v, 4, off, &w) && w == 4);
+    std::int64_t sz = 0;
+    CHECK(pfs::size(h, &sz) && sz == static_cast<std::int64_t>(off + 4));
+    CHECK(pfs::readAt(h, &got, 4, off, &r) && r == 4 && got == v);
+    std::uint32_t low = 1;
+    CHECK(pfs::readAt(h, &low, 4, off & 0xffffffffull, &r) && r == 4 && low == 0);  // nothing at the low half
+    pfs::close(h);
+    CHECK(pfs::remove(f.c_str()));
+}
+
+// arch025-X12 (X1 survivor tier-blockhash-constant, open since arch1 2026-10-20): the SSD block hash is an on-disk
+// format (files of an older build must still verify): its values are pinned. Expected values from an independent
+// Python port of blockHash (scratch\\a25_x12\\blockhash_ref.py); input bytes (i * 37 + 11) & 0xff.
+static void testBlockHashPinned() {
+    struct Pin { std::uint64_t n, h0, h1; };
+    constexpr Pin pins[] = {
+        {0, 0x1e34aa2c7767df36ull, 0xed8bad8ab817c7e4ull},    {1, 0x43d61cd92d35cba5ull, 0xe237a38d0cb25da4ull},
+        {31, 0x288a1dd9735e95e3ull, 0x6cc3c87538afe4b2ull},   {32, 0x10ada188d336bf7bull, 0xe615ad5b3bf8f844ull},
+        {33, 0x348c0db2847f7e20ull, 0xe1e90f7d39ce0797ull},   {100, 0xef48a3ab484405acull, 0xf5ff332d4c824485ull},
+        {4096, 0x353a4ef019bf521aull, 0xbda40a74dfc4537full},
+    };
+    std::vector<std::uint8_t> b(4096);
+    for (std::size_t i = 0; i < b.size(); ++i) b[i] = static_cast<std::uint8_t>((i * 37 + 11) & 0xff);
+    for (const Pin& p : pins) {
+        const auto h = whirl::tier::blockHash(b.data(), p.n);
+        CHECK(h[0] == p.h0 && h[1] == p.h1);
+    }
+}
+
 static void testFsShortRead(NullBackend& ops, const fs::path& dir) {
     std::error_code ec;
     fs::remove_all(dir, ec);
@@ -4843,6 +4890,14 @@ int main(int argc, char** argv) {
     if (want("testFsShortRead")) {
         std::printf("-- %s\n", "testFsShortRead");
         testFsShortRead(ops, dir);
+    }
+    if (want("testFsLargeOffset")) {
+        std::printf("-- %s\n", "testFsLargeOffset");
+        testFsLargeOffset(dir);
+    }
+    if (want("testBlockHashPinned")) {
+        std::printf("-- %s\n", "testBlockHashPinned");
+        testBlockHashPinned();
     }
     if (want("testFsVerifyNotBlind")) {
         std::printf("-- %s\n", "testFsVerifyNotBlind");

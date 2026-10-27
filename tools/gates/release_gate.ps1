@@ -122,7 +122,7 @@ if (-not $py) { $py = "python-not-found" }
 $exe = @{}
 foreach ($n in "whirl", "whirl-server", "whirl-server-gate", "whirl-kernel-test", "whirl-tests", "whirl-model-tests", "whirl-cache-tests",
                "whirl-vision-tests", "whirl-tier-tests", "whirl-server-tests", "whirl-hiprt-tests", "whirl-device-tests", "whirl-ops-tests",
-               "whirl-pins", "whirl-startup-replay") { $exe[$n] = Join-Path $Build "$n.exe" }
+               "whirl-pins", "whirl-startup-replay", "whirl-sampling-tests") { $exe[$n] = Join-Path $Build "$n.exe" }
 
 # ---------------------------------------------------------------------------------------------------
 # step table: name, gpu, command (array: exe + args), rule (scriptblock over the output lines + exit code)
@@ -143,7 +143,7 @@ function NaOf([string]$m) { if ($m -eq "dense") { $naQ } else { "" } }
 $modelOf = @{ swift = $SW; dense = $Q; moe = $MX }
 $gmodels = (@("swift", "moe") + @(if ($hasQ) { "dense" })) -join ","
 $pwsh = (Get-Process -Id $PID).Path
-foreach ($t in "whirl-tests", "whirl-model-tests", "whirl-cache-tests", "whirl-vision-tests", "whirl-tier-tests", "whirl-device-tests", "whirl-ops-tests") {
+foreach ($t in "whirl-tests", "whirl-model-tests", "whirl-cache-tests", "whirl-vision-tests", "whirl-tier-tests", "whirl-device-tests", "whirl-ops-tests", "whirl-sampling-tests") {
     AddStep "cpu_$($t -replace '^whirl-','' -replace '-tests$','')" $false @($exe[$t]) { param($o, $c) $c -eq 0 -and ($o -match "\b[1-9]\d* passed, 0 failed") }
 }
 # HIP runtime loader (ARCH-1 D-1): fake / absent runtimes, then this machine's runtime through load()
@@ -166,6 +166,18 @@ AddStep "cpu_device_once" $false @($pwsh, "-NoProfile", "-File", (Join-Path $rep
 # --whirl-gpu-probe with a well-formed GPU list, the same list from each (an exe that forgets the dispatch silently keeps
 # every GPU visible). No kernels, no model, no GPU memory: the probe only lists the GPUs, like --list-devices.
 AddStep "cpu_probe_dispatch" $false @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\repro\probe_dispatch_check.ps1"), "-Build", $Build) { param($o, $c) $c -eq 0 -and ($o -match "(?m)^probe_dispatch_check: PASS") }
+# arch025-gaptests G18 (X4): bug-emptyrootpaths (37ad538): --kv-ssd-dir "", --kv-ssd-dir= and WHIRL_KV_SSD_DIR= (set but
+# empty, in a child with a fixed environment) are refused at startup with exit 2; a given folder still starts. CPU only:
+# a fake model file, refused before any model or GPU work (b_given stops at the model read); the drive root listing
+# must not change. Without -LogCase (an unfixed build would create <root>\whirl\server.log; that case is the unit test
+# testLocalAppDataChild). Pre-fix proof: scratch\bug_emptyroot\repro_pre.txt (b_arg / b_eq / b_env FAIL, 1/4).
+AddStep "cpu_emptyroot" $false @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\repro\emptyroot_paths.ps1"), "-Exe", $exe["whirl-server"], "-Work", "@WORK@") { param($o, $c) $c -eq 0 -and ($o -match "(?m)^emptyroot_paths: ([1-9]\d*)/\1 as expected") }
+# arch025-gaptests G20 (X4): bug-visstream-race (12011b4): static happens-before check of Vision::encode's stream schedule
+# (tools/gates/vis_stream_order_check.py: every slot read on the compute stream waits the copy event that covers the
+# slot's latest copy; every copy into a slot waits the slot's free event). Its selftest plants the 12011b4 revert and five
+# other reorders. CPU, no exe. The device-side proof stays the GPU repro (vis-encode WHIRL_TEST_VIS_COPY_DELAY_MB).
+AddStep "cpu_vis_order" $false @($pwsh, "-NoProfile", "-Command", "& '$py' -I '$(Join-Path $repo "tools\gates\vis_stream_order_check.py")' --selftest; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\gates\vis_stream_order_check.py")'; exit `$LASTEXITCODE") `
+    { param($o, $c) $c -eq 0 -and ($o -match "(?m)^vis stream order selftest: ([1-9]\d*)/\1 as expected") -and ($o -match "(?m)^vis stream order check: ok") }
 AddStep "cpu_server_only_typo" $false @($exe["whirl-server-tests"], "--gguf", $SW, "--only", "no_such_test") { param($o, $c) $c -eq 2 }
 AddStep "cpu_golden_selftest" $false @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\golden\golden_selftest.ps1")) { param($o, $c) $c -eq 0 -and ($o -match "all cases as expected") }
 AddStep "cpu_kl_guard_selftest" $false @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\gates\kl_guard_selftest.ps1")) { param($o, $c) $c -eq 0 -and ($o -match "^kl guard selftest: ([1-9]\d*)/\1 as expected") }
@@ -177,6 +189,11 @@ AddStep "cpu_module_gate" $false @($pwsh, "-NoProfile", "-File", (Join-Path $rep
 # no Windows / CRT-platform header and no Win32 / Winsock / CRT-platform call in src/ or include/ outside src/platform/*_win.cpp,
 # src/hip, src/release/dll_deps.cpp and the vendored stb_image.h. Blocking in every mode, no pending list. CPU, no exe.
 AddStep "cpu_platform_check" $false @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\gates\platform_check.ps1"), "-Mode", "block") { param($o, $c) $c -eq 0 -and ($o -match "(?m)^platform check: ok \(0 site\(s\) in 0 file\(s\)") }
+# arch025-X3 (ARCH-1 8.5 isolation check): cpu_sampling (above) runs the sampling tests built against src/sampling alone
+# (cmake/sampling_iso.cmake: only the headers of tests/sampling/isolation.txt, linked to nothing else). Here the boundary
+# mutants: an undeclared include, a relative ../server include, a call into whirl and into the server must each fail the
+# isolated build and compile under the product flags (tools/gates/iso_check.py; MSVC through vcvars64, CPU, ~1 min).
+AddStep "cpu_sampling_iso" $false @($py, "-I", (Join-Path $repo "tools\gates\iso_check.py"), "--mutants", "--work", "@WORK@") { param($o, $c) $c -eq 0 -and ($o -match "(?m)^iso check: ok \(sampling, ([1-9]\d*)/\1 cases") }
 # review C7: modules.json against this tree and this gate, and the block / pass tests of that check and of impact.py's
 # module mapping (python: WHIRL_GATE_PYTHON, else python on PATH; none found = the step fails)
 AddStep "cpu_modules_check" $false @($pwsh, "-NoProfile", "-Command", "& '$py' -I '$(Join-Path $repo "tools\gates\modules_check_test.py")'; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\impact\validate_test.py")'; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\impact\impact_steps_test.py")'; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\impact\mutations_check.py")' --selftest; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\impact\mutations_check.py")'; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\gates\modules_check.py")'; exit `$LASTEXITCODE") `
