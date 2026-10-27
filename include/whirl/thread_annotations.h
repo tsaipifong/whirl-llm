@@ -88,11 +88,15 @@ using UniqueLock = std::unique_lock<std::mutex>;
 #endif
 
 // arch025-tsaidle: a function that is handed the caller's UniqueLock and unlocks / relocks it says WH_REQUIRES(mu) and
-// does both through these two, which name the mutex: the analysis cannot tie a UniqueLock& parameter to its mutex (the
-// parameter form `UniqueLock& lk WH_REQUIRES(mu)` of the Clang docs does not bind a member mutex in clang 21), so lk.unlock()
-// there would need WH_NO_THREAD_SAFETY_ANALYSIS on the whole function, its wait predicates included. With these the body
-// stays checked (a guarded read between them, a missing relock, a predicate without WH_REQUIRES all fail cpu_tsa).
-// lk must be the lock of mu (lk was made from mu). MSVC: the same lk.unlock() / lk.lock() as before.
+// does both through WH_UNLOCK_HELD(lk, mu) / WH_RELOCK_HELD(lk, mu), which name the mutex: the analysis cannot tie a
+// UniqueLock& parameter to its mutex (the parameter form `UniqueLock& lk WH_REQUIRES(mu)` of the Clang docs does not bind a
+// member mutex in clang 21), so a bare lk.unlock() there needs WH_NO_THREAD_SAFETY_ANALYSIS on the whole function. With these
+// the body stays checked (a missing relock, a guarded read after the unlock fail cpu_tsa). lk must be the lock of mu.
+// clang (cpu_tsa, hipcc): calls of unlockHeld / relockHeld, annotated WH_RELEASE / WH_ACQUIRE.
+// MSVC (the product build): the same lk.unlock() / lk.lock() expression, so the product code is that of a plain
+// lk.unlock() / lk.lock(). An inline helper function there (plain or __forceinline) changed MSVC's /Ob2 inlining of
+// std::unique_lock::lock at one idleWait site (arch025-tsaidle2 objeq2); with the macro the object code is identical.
+#if defined(__clang__)
 inline void unlockHeld(UniqueLock& lk, Mutex& mu) WH_RELEASE(mu) WH_NO_THREAD_SAFETY_ANALYSIS {
     (void)mu;
     lk.unlock();
@@ -101,5 +105,11 @@ inline void relockHeld(UniqueLock& lk, Mutex& mu) WH_ACQUIRE(mu) WH_NO_THREAD_SA
     (void)mu;
     lk.lock();
 }
+#define WH_UNLOCK_HELD(lk, mu) ::whirl::unlockHeld(lk, mu)
+#define WH_RELOCK_HELD(lk, mu) ::whirl::relockHeld(lk, mu)
+#else
+#define WH_UNLOCK_HELD(lk, mu) ((void)(mu), (lk).unlock())
+#define WH_RELOCK_HELD(lk, mu) ((void)(mu), (lk).lock())
+#endif
 
 }  // namespace whirl

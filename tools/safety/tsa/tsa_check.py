@@ -32,19 +32,20 @@ MUTATIONS = [
      "    whirl::MutexLock lk(vram_mu_);\n    h.vram_ok = vram_last_.ok;",
      "    h.vram_ok = vram_last_.ok;",
      r"reading variable 'vram_last_' requires holding mutex 'vram_mu_'"),
-    # arch025-tsaidle: idleWait / runLoopCalls unlock and relock the caller's lock through whirl::unlockHeld / relockHeld, so
-    # their bodies are analysed (they were WH_NO_THREAD_SAFETY_ANALYSIS after arch025-E2, and a predicate without
-    # WH_REQUIRES passed): a dropped predicate annotation, a dropped relock and an unbalanced runLoopCalls must fail
+    # arch025-tsaidle: idleWait / runLoopCalls unlock and relock the caller's lock through WH_UNLOCK_HELD / WH_RELOCK_HELD,
+    # so their bodies are analysed (they were WH_NO_THREAD_SAFETY_ANALYSIS after arch025-E2, where a dropped relock passed;
+    # the predicate lambdas are checked either way): a dropped predicate annotation, a dropped relock and an unbalanced
+    # runLoopCalls must fail
     ("engine-idlewait-predicate-unannotated", "src/server/engine.cpp",
      "[&]() WH_REQUIRES(q_mutex_) { return !queue_.empty() || tier_wake_ || stop_ || !loop_calls_.empty(); });\n        } else {",
      "[&] { return !queue_.empty() || tier_wake_ || stop_ || !loop_calls_.empty(); });\n        } else {",
      r"reading variable 'queue_' requires holding mutex 'q_mutex_'"),
     ("engine-idlewait-relock-dropped", "src/server/engine.cpp",
-     "            vram_due = vramIdleTick();\n            govApply();\n            whirl::relockHeld(lk, q_mutex_);\n",
+     "            vram_due = vramIdleTick();\n            govApply();\n            WH_RELOCK_HELD(lk, q_mutex_);\n",
      "            vram_due = vramIdleTick();\n            govApply();\n",
      r"reading variable 'queue_' requires holding mutex 'q_mutex_'"),
     ("engine-runloopcalls-relock-dropped", "src/server/engine.cpp",
-     "    for (auto& f : calls) f();\n    whirl::relockHeld(lk, q_mutex_);\n",
+     "    for (auto& f : calls) f();\n    WH_RELOCK_HELD(lk, q_mutex_);\n",
      "    for (auto& f : calls) f();\n",
      r"mutex 'q_mutex_' (is not held on every path|to be held at the end of function)"),
     # not Tier::submit: clang's analysis does not see the access in `(c ? q_reads_ : q_writes_).push_back(j)` (a guarded member
