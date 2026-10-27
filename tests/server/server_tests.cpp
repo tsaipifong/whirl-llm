@@ -629,6 +629,27 @@ void testSampler() {
     s.top_k = 20;
     for (std::uint32_t i = 0; i < 8; ++i) cands[i] = {i, logits[i], 0};
     CHECK(!filterCands(s, 8, false));
+    // arch025-X12 (X1 survivor x12-e1a-topk-boundary): top_k == the candidate count on an open set closes the
+    // distribution with every candidate (no full-row escalation)
+    s.top_k = 8;
+    for (std::uint32_t i = 0; i < 8; ++i) cands[i] = {i, logits[i], 0};
+    CHECK(filterCands(s, 8, false));
+    CHECK(s.n == 8 && s.closed);
+    // arch025-X12 (X1 survivor x12-e1a-minp-strict): min_p keeps a candidate whose p equals min_p * p(top)
+    // (min_p = 1 and two tied top logits: both stay)
+    {
+        const float tl[4] = {5, 5, 3, 1};
+        std::vector<Cand> tc(4);
+        for (std::uint32_t i = 0; i < 4; ++i) tc[i] = {i, tl[i], 0};
+        Sampler t;
+        t.cands = &tc;
+        t.inv_t = 1;
+        t.top_k = 0;
+        t.top_p = 1;
+        t.min_p = 1;
+        CHECK(filterCands(t, 4, true));
+        CHECK(t.n == 2 && t.closed);
+    }
     // uniforms keyed by (seed, index)
     Sampler a, b;
     a.seed = b.seed = 7;
