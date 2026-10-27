@@ -26,7 +26,9 @@
    "cpu_asan: a lifetime-class change = a C / C++ file of a lifetime module or under the lifetime globs, or a changed line (new",
    "or old side) that matches lifetime.tokens (allocation, release, RAII, ownership, views into owned storage). Fail closed: a",
    "file whose text cannot be read counts as lifetime. own: the safety tools themselves (any file type) -> all three steps.",
-   "cpu_safety_selftest goes with either. Locks / threads -> cpu_tsa (Q4, not landed)."
+   "cpu_safety_selftest goes with either. threads (arch025-Q4): cpu_tsa (clang thread-safety build of whirl_server_core +",
+   "whirl_tier_core) for a C / C++ file those TUs compile (src/server, src/cache, src/tier, include/whirl) or a changed line of any",
+   "C / C++ file that matches threads.tokens (locks, threads, annotations)."
   ],
   "cxx": {"globs": ["src/*", "include/*", "tests/*", "tools/*"], "ext": [".cpp", ".h", ".hpp", ".inc", ".c", ".cc"],
           "steps": ["cpu_analyze", "cpu_safety_selftest"]},
@@ -34,7 +36,10 @@
                "globs": ["src/device/*", "src/cache/*", "src/tier/*", "tests/safety/*"],
                "tokens": "\\bnew\\b|\\bdelete\\b|malloc|calloc|realloc|\\bfree\\s*\\(|_aligned_|unique_ptr|shared_ptr|weak_ptr|make_unique|make_shared|~\\w+\\s*\\(|\\.reset\\s*\\(|\\.release\\s*\\(|std::move|\\bswap\\b|std::optional|string_view|std::span|\\.data\\s*\\(|c_str\\s*\\(|emplace|push_back|resize\\s*\\(|reserve\\s*\\(|erase\\s*\\(|clear\\s*\\(|memcpy|memmove|memset|alloca|\\[\\s*\\w+\\s*[-+]",
                "steps": ["cpu_asan", "cpu_safety_selftest"]},
-  "own": {"globs": ["tools/safety/*", "cmake/safety*.cmake", "tests/safety/*"], "steps": ["cpu_safety_selftest", "cpu_asan", "cpu_analyze"]}
+  "threads": {"globs": ["src/server/*", "src/cache/*", "src/tier/*", "include/whirl/*"],
+              "tokens": "mutex|lock_guard|unique_lock|scoped_lock|condition_variable|std::thread|std::atomic|\\bWH_[A-Z_]+|MutexLock|UniqueLock",
+              "steps": ["cpu_tsa", "cpu_safety_selftest"]},
+  "own": {"globs": ["tools/safety/*", "cmake/safety*.cmake", "tests/safety/*"], "steps": ["cpu_safety_selftest", "cpu_asan", "cpu_analyze", "cpu_tsa"]}
  },
  "standards": {
   "_doc": [

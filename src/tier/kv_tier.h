@@ -48,6 +48,7 @@
 #include "device/backend.h"
 #include "device/handles.h"
 #include "evict_policy.h"
+#include "whirl/thread_annotations.h"
 
 #include <array>
 #include <atomic>
@@ -505,11 +506,11 @@ private:
     std::optional<std::wstring> ssd_dir_w_;
     std::vector<Foreign> foreign_;
     // IO thread
-    std::mutex q_mutex_;
+    whirl::Mutex q_mutex_;
     std::condition_variable q_cond_;
-    std::vector<Job*> q_reads_;
-    std::vector<Job*> q_writes_;
-    bool stop_ = false;  // guarded by q_mutex_
+    std::vector<Job*> q_reads_ WH_GUARDED_BY(q_mutex_);
+    std::vector<Job*> q_writes_ WH_GUARDED_BY(q_mutex_);
+    bool stop_ WH_GUARDED_BY(q_mutex_) = false;
     std::thread io_thread_;
     std::vector<Job*> jobs_;
     std::function<void()> wake_fn_;

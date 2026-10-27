@@ -318,12 +318,14 @@ def safety_steps(changes, new_rev, old_rev, safety=None, mods=None):
     mods = mods or {}
     steps, notes = set(), []
     cx, lt, own = safety.get("cxx", {}), safety.get("lifetime", {}), safety.get("own", {})
+    th = safety.get("threads", {})  # arch025-Q4: cpu_tsa
+    th_tok = re.compile(th.get("tokens", r"(?!)"))
     ext = tuple(cx.get("ext", []))
     tok = re.compile(lt.get("tokens", r"(?!)"))
     lt_globs = list(lt.get("globs", []))
     for n in lt.get("modules", []):
         lt_globs += list((mods.get(n) or {}).get("paths", []))
-    why_a, why_l, why_o = [], [], []
+    why_a, why_l, why_o, why_t = [], [], [], []
     for path, ch in sorted(changes.items()):
         if any(fnmatch.fnmatch(path, g) for g in own.get("globs", [])):
             steps |= set(own.get("steps", []))
@@ -333,6 +335,15 @@ def safety_steps(changes, new_rev, old_rev, safety=None, mods=None):
             continue
         steps |= set(cx.get("steps", []))
         why_a.append(path)
+        if th and any(fnmatch.fnmatch(path, g) for g in th.get("globs", [])):
+            steps |= set(th.get("steps", []))
+            why_t.append(f"{path} (compiled by the cpu_tsa build)")
+        elif th:
+            ttxt = changed_text(path, ch, new_rev, old_rev)
+            thit = None if ttxt is None else sorted({mt.group(0).strip() for l in ttxt for mt in th_tok.finditer(l)})
+            if thit is None or thit:
+                steps |= set(th.get("steps", []))
+                why_t.append(f"{path} ({'text not readable: fail closed' if thit is None else 'changed lines use ' + ', '.join(thit[:4])})")
         if any(fnmatch.fnmatch(path, g) for g in lt_globs):
             steps |= set(lt.get("steps", []))
             why_l.append(f"{path} (lifetime module / path)")
@@ -350,6 +361,8 @@ def safety_steps(changes, new_rev, old_rev, safety=None, mods=None):
         notes.append(f"cpu_analyze: C / C++ change in {', '.join(why_a[:4])}{' ...' if len(why_a) > 4 else ''}")
     if why_l:
         notes.append(f"cpu_asan: lifetime-class change: {'; '.join(why_l[:4])}{' ...' if len(why_l) > 4 else ''}")
+    if why_t:
+        notes.append(f"cpu_tsa: lock / thread change: {'; '.join(why_t[:4])}{' ...' if len(why_t) > 4 else ''}")
     if why_o:
         notes.append(f"cpu_asan + cpu_analyze: safety tools changed ({', '.join(why_o[:4])})")
     return steps, notes

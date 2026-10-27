@@ -578,9 +578,9 @@ bool isKnownProbe(std::string_view path) {
 }
 
 bool firstProbe(std::string_view path) {
-    static std::mutex mu;
+    static whirl::Mutex mu;
     static std::set<std::string, std::less<>> seen;
-    std::lock_guard<std::mutex> lk(mu);
+    whirl::MutexLock lk(mu);
     return seen.emplace(path).second;
 }
 
@@ -942,7 +942,7 @@ void HttpServer::stop() {
     auto shutAll = [this](bool reading_only) {
         // shutdown (not closesocket) from this thread: the connection thread still
         // owns the handle and closes it; it leaves the sets before closing
-        std::lock_guard<std::mutex> lk(conns_mu_);
+        whirl::MutexLock lk(conns_mu_);
         // (shutdown alone does not end a recv that is already waiting: cancel it)
         for (net::Socket c : reading_only ? reading_ : conns_) {
             net::shutdown(c, net::Shut::both);
@@ -971,7 +971,7 @@ void HttpServer::stop() {
 }
 
 void HttpServer::setReading(platform::net::Socket sock, bool on) {
-    std::lock_guard<std::mutex> lk(conns_mu_);
+    whirl::MutexLock lk(conns_mu_);
     if (on) reading_.insert(sock);
     else reading_.erase(sock);
 }
@@ -1001,7 +1001,7 @@ void HttpServer::acceptLoop() {
         }
         n_conn_.fetch_add(1);
         {
-            std::lock_guard<std::mutex> lk(conns_mu_);
+            whirl::MutexLock lk(conns_mu_);
             conns_.insert(c);
             reading_.insert(c);
         }
@@ -1010,7 +1010,7 @@ void HttpServer::acceptLoop() {
         } catch (const std::exception& ex) {
             logE("cannot spawn connection thread: {}", ex.what());
             {
-                std::lock_guard<std::mutex> lk(conns_mu_);
+                whirl::MutexLock lk(conns_mu_);
                 conns_.erase(c);
                 reading_.erase(c);
             }
@@ -1043,7 +1043,7 @@ void HttpServer::connThread(platform::net::Socket sock) {
         peer_closed = lingerDrain(s, o_.close_wait_ms);
     }
     {
-        std::lock_guard<std::mutex> lk(conns_mu_);
+        whirl::MutexLock lk(conns_mu_);
         conns_.erase(sock);
         reading_.erase(sock);
     }

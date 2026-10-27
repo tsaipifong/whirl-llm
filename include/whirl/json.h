@@ -38,8 +38,10 @@ public:
     // Inserts or replaces (keeping the original position).
     Value& set(std::string key, Value v);
     const std::vector<Member>& members() const { return members_; }
-    std::size_t size() const { return members_.size(); }
-    bool empty() const { return members_.empty(); }
+    // size() / empty() are defined after Value (below): their bodies instantiate std::pair<std::string, Value>, which needs the
+    // complete Value. MSVC accepted them in-class; clang-cl (arch025-Q4 cpu_tsa) does not. Same inline functions.
+    std::size_t size() const;
+    bool empty() const;
 
 private:
     std::vector<Member> members_;
@@ -96,6 +98,9 @@ private:
     std::unique_ptr<Array> a_;
     std::unique_ptr<Object> o_;
 };
+
+inline std::size_t Object::size() const { return members_.size(); }
+inline bool Object::empty() const { return members_.empty(); }
 
 // Parses one JSON document (surrounding whitespace allowed). Strings must
 // be valid UTF-8; \u escapes are decoded and lone surrogates become U+FFFD.

@@ -5,6 +5,7 @@
 #include "server/engine_thread.h"
 
 #include "server/log.h"
+#include "whirl/thread_annotations.h"
 
 #include <mutex>
 #include <set>
@@ -17,8 +18,8 @@ namespace whirl::server {
 namespace {
 std::atomic<bool> g_throw{false};
 std::atomic<std::uint64_t> g_violations{0};
-std::mutex g_mu;
-std::set<std::string> g_logged;  // under g_mu: call sites already logged
+whirl::Mutex g_mu;
+std::set<std::string> g_logged WH_GUARDED_BY(g_mu);  // call sites already logged
 }  // namespace
 
 void EngineThread::setThrowing(bool on) { g_throw.store(on, std::memory_order_relaxed); }
@@ -26,7 +27,7 @@ bool EngineThread::throwing() { return g_throw.load(std::memory_order_relaxed); 
 std::uint64_t EngineThread::violations() { return g_violations.load(std::memory_order_relaxed); }
 
 void EngineThread::resetLoggedForTests() {
-    std::lock_guard<std::mutex> lk(g_mu);
+    whirl::MutexLock lk(g_mu);
     g_logged.clear();
 }
 
@@ -37,7 +38,7 @@ void EngineThread::violation(const char* func) {
     const std::string msg = std::string("owner check: ") + func + " called on thread " + id.str();
     bool first = false;
     {
-        std::lock_guard<std::mutex> lk(g_mu);
+        whirl::MutexLock lk(g_mu);
         first = g_logged.insert(func).second;
     }
     if (first) Log::line('E', msg);
