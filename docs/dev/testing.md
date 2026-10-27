@@ -196,6 +196,25 @@ The map lists all three modes for every change: a change is shown to be mode-con
 golden hashes (precise unchanged). Host code that branches on the GPU inside a shared function is listed
 for both GPUs.
 
+### <a id="isolation"></a>Isolation check (ARCH-1 8.5, first module: src/sampling)
+
+`tests/sampling/isolation.txt` lists the sampling module's sources and the only headers they may see
+(its own interface plus the header-only math of `whirl/spec_sample.h` and `whirl/relax_accept.h`).
+`cmake/sampling_iso.cmake` copies those files into `build/Release/iso/sampling/` and builds them from
+there with that copy as the only include path; `whirl-sampling-tests` links the result and nothing else
+(no `whirl`, no server, no tokenizer GGUF, no GPU) and runs the same test bodies as `whirl-server-tests`
+(`tests/sampling/sampling_unit.inc`). So an undeclared include (also `../server/engine.h`) fails to
+compile and a call into another library fails to link. The product build is unchanged.
+
+- `cpu_sampling`: runs `whirl-sampling-tests`.
+- `cpu_sampling_iso`: `tools/gates/iso_check.py --mutants` builds the same thing by hand and proves the boundary
+  holds. There is a control case and four mutants: an engine include, a relative engine include, a call into
+  `whirl` and a call into the server. Each mutant must fail the isolated build (C1083 / LNK2019) and still
+  compile with the product flags.
+
+To declare a new dependency of the module, add its header (and, if it is not header-only, its source) to the
+list. The change is then visible in review.
+
 ## <a id="kl-gate"></a>KL gate
 
 `tools/klgate/klgate.py` measures what the golden hashes cannot: how far balance and fast are from

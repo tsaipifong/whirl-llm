@@ -122,7 +122,7 @@ if (-not $py) { $py = "python-not-found" }
 $exe = @{}
 foreach ($n in "whirl", "whirl-server", "whirl-server-gate", "whirl-kernel-test", "whirl-tests", "whirl-model-tests", "whirl-cache-tests",
                "whirl-vision-tests", "whirl-tier-tests", "whirl-server-tests", "whirl-hiprt-tests", "whirl-device-tests", "whirl-ops-tests",
-               "whirl-pins", "whirl-startup-replay") { $exe[$n] = Join-Path $Build "$n.exe" }
+               "whirl-pins", "whirl-startup-replay", "whirl-sampling-tests") { $exe[$n] = Join-Path $Build "$n.exe" }
 
 # ---------------------------------------------------------------------------------------------------
 # step table: name, gpu, command (array: exe + args), rule (scriptblock over the output lines + exit code)
@@ -143,7 +143,7 @@ function NaOf([string]$m) { if ($m -eq "dense") { $naQ } else { "" } }
 $modelOf = @{ swift = $SW; dense = $Q; moe = $MX }
 $gmodels = (@("swift", "moe") + @(if ($hasQ) { "dense" })) -join ","
 $pwsh = (Get-Process -Id $PID).Path
-foreach ($t in "whirl-tests", "whirl-model-tests", "whirl-cache-tests", "whirl-vision-tests", "whirl-tier-tests", "whirl-device-tests", "whirl-ops-tests") {
+foreach ($t in "whirl-tests", "whirl-model-tests", "whirl-cache-tests", "whirl-vision-tests", "whirl-tier-tests", "whirl-device-tests", "whirl-ops-tests", "whirl-sampling-tests") {
     AddStep "cpu_$($t -replace '^whirl-','' -replace '-tests$','')" $false @($exe[$t]) { param($o, $c) $c -eq 0 -and ($o -match "\b[1-9]\d* passed, 0 failed") }
 }
 # HIP runtime loader (ARCH-1 D-1): fake / absent runtimes, then this machine's runtime through load()
@@ -177,6 +177,11 @@ AddStep "cpu_module_gate" $false @($pwsh, "-NoProfile", "-File", (Join-Path $rep
 # no Windows / CRT-platform header and no Win32 / Winsock / CRT-platform call in src/ or include/ outside src/platform/*_win.cpp,
 # src/hip, src/release/dll_deps.cpp and the vendored stb_image.h. Blocking in every mode, no pending list. CPU, no exe.
 AddStep "cpu_platform_check" $false @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\gates\platform_check.ps1"), "-Mode", "block") { param($o, $c) $c -eq 0 -and ($o -match "(?m)^platform check: ok \(0 site\(s\) in 0 file\(s\)") }
+# arch025-X3 (ARCH-1 8.5 isolation check): cpu_sampling (above) runs the sampling tests built against src/sampling alone
+# (cmake/sampling_iso.cmake: only the headers of tests/sampling/isolation.txt, linked to nothing else). Here the boundary
+# mutants: an undeclared include, a relative ../server include, a call into whirl and into the server must each fail the
+# isolated build and compile under the product flags (tools/gates/iso_check.py; MSVC through vcvars64, CPU, ~1 min).
+AddStep "cpu_sampling_iso" $false @($py, "-I", (Join-Path $repo "tools\gates\iso_check.py"), "--mutants", "--work", "@WORK@") { param($o, $c) $c -eq 0 -and ($o -match "(?m)^iso check: ok \(sampling, ([1-9]\d*)/\1 cases") }
 # review C7: modules.json against this tree and this gate, and the block / pass tests of that check and of impact.py's
 # module mapping (python: WHIRL_GATE_PYTHON, else python on PATH; none found = the step fails)
 AddStep "cpu_modules_check" $false @($pwsh, "-NoProfile", "-Command", "& '$py' -I '$(Join-Path $repo "tools\gates\modules_check_test.py")'; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\impact\validate_test.py")'; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\impact\impact_steps_test.py")'; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\impact\mutations_check.py")' --selftest; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\impact\mutations_check.py")'; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\gates\modules_check.py")'; exit `$LASTEXITCODE") `
