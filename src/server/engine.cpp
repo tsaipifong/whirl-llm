@@ -250,15 +250,15 @@ void Engine::runOnLoop(std::function<void()> fn, std::chrono::milliseconds timeo
     f.get();
 }
 
-// called with lk held; runs the queued test calls without the lock
-// the body unlocks and relocks the caller's lock, which the analysis cannot follow (arch025-Q4); callers are checked
-void Engine::runLoopCalls(whirl::UniqueLock& lk) WH_NO_THREAD_SAFETY_ANALYSIS {
+// called with lk held; runs the queued test calls without the lock (unlocks / relocks through WH_UNLOCK_HELD /
+// WH_RELOCK_HELD, so the body is checked: arch025-tsaidle)
+void Engine::runLoopCalls(whirl::UniqueLock& lk) {
     if (loop_calls_.empty()) return;
     std::vector<std::function<void()>> calls;
     calls.swap(loop_calls_);
-    lk.unlock();
+    WH_UNLOCK_HELD(lk, q_mutex_);
     for (auto& f : calls) f();
-    lk.lock();
+    WH_RELOCK_HELD(lk, q_mutex_);
 }
 
 EngineFacts Engine::facts() const {
@@ -2426,16 +2426,16 @@ void Engine::runLoop() {
 
 // arch025-E2: runLoop's phases (extracted verbatim; same call order, same lock state at every call)
 // idle: no request running or queued. Called with lk held; true = the engine stops (runLoop returns).
-// arch025-int4 (Q4 annotations on the E2 split): the body unlocks and relocks the caller's lock, which the analysis cannot
-// follow (same as runLoopCalls); callers are checked through WH_REQUIRES(q_mutex_). Known gap: clang skips the wait predicates
-// inside too (they keep their WH_REQUIRES); before E2 they were checked inside runLoop
-bool Engine::idleWait(whirl::UniqueLock& lk, bool& was_busy) WH_NO_THREAD_SAFETY_ANALYSIS {
+// arch025-tsaidle: the body unlocks and relocks the caller's lock through WH_UNLOCK_HELD / WH_RELOCK_HELD (they name
+// q_mutex_), so the body is checked by the analysis again, as inside runLoop before E2 (WH_NO_THREAD_SAFETY_ANALYSIS here
+// let a dropped relock or a guarded read after the unlock pass; the wait predicates are lambdas, checked either way)
+bool Engine::idleWait(whirl::UniqueLock& lk, bool& was_busy) {
     if (was_busy) {
-        lk.unlock();
+        WH_UNLOCK_HELD(lk, q_mutex_);
         logBatchStats(true);
         if (prof_) prof_->print(m_);
         was_busy = false;
-        lk.lock();
+        WH_RELOCK_HELD(lk, q_mutex_);
     }
     // idle: tier background work is polled; otherwise sleep until a
     // request arrives or the tier IO thread wakes us
@@ -2447,24 +2447,24 @@ bool Engine::idleWait(whirl::UniqueLock& lk, bool& was_busy) WH_NO_THREAD_SAFETY
         }
         if (stop_) {
             abortQueued(lk);
-            lk.unlock();
+            WH_UNLOCK_HELD(lk, q_mutex_);
             flushTierOnStop();
-            lk.lock();
+            WH_RELOCK_HELD(lk, q_mutex_);
             runLoopCalls(lk);
             return true;
         }
         // WDDM-LOG: /health "vram" and the spill-over line stay current while idle (one sample a minute)
         std::optional<TimePoint> vram_due;
         if (vram_probe_) {
-            lk.unlock();
+            WH_UNLOCK_HELD(lk, q_mutex_);
             vram_due = vramIdleTick();
             govApply();
-            lk.lock();
+            WH_RELOCK_HELD(lk, q_mutex_);
             if (!queue_.empty() || stop_) continue;
         }
         if (tb_.tier() != nullptr) {
             const std::uint64_t seq = wake_seq_;
-            lk.unlock();
+            WH_UNLOCK_HELD(lk, q_mutex_);
             tb_.idlePoll(n_building_.load() > 0);
             const bool busy = tierTick();
             if (busy) logged = false;
@@ -2472,7 +2472,7 @@ bool Engine::idleWait(whirl::UniqueLock& lk, bool& was_busy) WH_NO_THREAD_SAFETY
                 tb_.logStats(pool_.stats().cow_pages, pool_.stats().q_waits);
                 logged = true;
             }
-            lk.lock();
+            WH_RELOCK_HELD(lk, q_mutex_);
             if (busy) {
                 // tier work in flight: polled every 5 ms, but a request (or the
                 // tier IO thread) ends the wait at once (a sleep here delayed a
@@ -2486,9 +2486,9 @@ bool Engine::idleWait(whirl::UniqueLock& lk, bool& was_busy) WH_NO_THREAD_SAFETY
         // (a timed wait on the queue condition, not a sleep: a request that arrives
         // meanwhile starts at once; the prototype slept 100 ms here)
         if (visWakeNeeded()) {
-            lk.unlock();
+            WH_UNLOCK_HELD(lk, q_mutex_);
             visIdle();
-            lk.lock();
+            WH_RELOCK_HELD(lk, q_mutex_);
             tier_wake_ = false;
             if (queue_.empty() && !stop_)
                 q_cond_.wait_for(lk, std::chrono::milliseconds(100), [&]() WH_REQUIRES(q_mutex_) { return !queue_.empty() || tier_wake_ || stop_ || !loop_calls_.empty(); });
@@ -2515,10 +2515,10 @@ bool Engine::idleWait(whirl::UniqueLock& lk, bool& was_busy) WH_NO_THREAD_SAFETY
     // v0.2.2.2: the governor sees the budget before the first request after an idle period (one probe sample,
     // ~0.3 ms) when the last sample is older than 5 s, so a pool that must shrink does so before the request runs
     if (gov_ && vram_probe_ && msSince(vram_last_t_) > 5000.0) {
-        lk.unlock();
+        WH_UNLOCK_HELD(lk, q_mutex_);
         (void)vramNote();
         govApply();
-        lk.lock();
+        WH_RELOCK_HELD(lk, q_mutex_);
     }
     return false;
 }
