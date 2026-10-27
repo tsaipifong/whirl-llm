@@ -97,6 +97,22 @@ if(WHIRL_WITH_HIP)
   endforeach()
 endif()
 
+# arch025-ramwait: the bin2c byte arrays of the HIP code objects (whirl_kernels_<arch>.cpp 48-131 MB of initializer
+# text, whirl_vision_<arch>.cpp from cmake/vision.cmake) compile one at a time: two of them side by side took the host
+# out of commit / available RAM (System event 2004 2026-10-25 21:43:33, cl.exe 46.0 + 20.2 GB under /analyze), which
+# lowered a parallel GPU test's RAM tier. Source-file JOB_POOL_COMPILE needs CMake >= 4.2 and the Ninja generator;
+# older CMake ignores it (the build is as before). The other TUs keep the normal -j.
+option(WHIRL_BIN2C_POOL "compile the bin2c code-object arrays in a ninja job pool of depth WHIRL_BIN2C_POOL_DEPTH" ON)
+set(WHIRL_BIN2C_POOL_DEPTH 1 CACHE STRING "parallel compiles of the bin2c code-object arrays (ninja pool depth)")
+if(WHIRL_WITH_HIP AND WHIRL_BIN2C_POOL AND CMAKE_GENERATOR MATCHES "Ninja")
+  set_property(GLOBAL APPEND PROPERTY JOB_POOLS whirl_bin2c=${WHIRL_BIN2C_POOL_DEPTH})
+  foreach(arch IN LISTS WHIRL_GPU_ARCHS)
+    set_property(SOURCE "${CMAKE_BINARY_DIR}/kernels/whirl_kernels_${arch}.cpp" "${CMAKE_BINARY_DIR}/kernels/whirl_vision_${arch}.cpp"
+                 PROPERTY JOB_POOL_COMPILE whirl_bin2c)
+  endforeach()
+  message(STATUS "WHIRL: bin2c code-object arrays in ninja pool whirl_bin2c=${WHIRL_BIN2C_POOL_DEPTH}")
+endif()
+
 # ---------------------------------------------------------------------------
 # core library
 
