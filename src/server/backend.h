@@ -41,7 +41,6 @@ public:
 
     virtual const qwen35::Config& cfg() const = 0;
     virtual device::Stream stream() const = 0;
-    virtual bool hasMtp() const = 0;
 
     // ---- device buffers (see Model members of the same names)
     virtual DevPtr logits() const = 0;   // row r at logits + r * n_vocab * 4
@@ -94,8 +93,10 @@ public:
     virtual std::uint32_t verifyBatchEnqueue(std::span<const VSeg> segs) = 0;
     virtual void readCtl(std::span<std::int32_t> dst) = 0;
     // speculative sampling of MTP drafts (numerics item specsample): per sequence, set before the
-    // draft steps of a cycle; q per (sequence, draft step) read back after the verify
-    // (whirl/spec_sample.h layout). Not supported: drafts stay greedy (exact-match acceptance).
+    // draft steps of a cycle. Race coupling (whirl/spec_sample.h): the device draws draft r as
+    // argmin E/q and the host draws the target as argmin E/p with the same E, accepting on an exact
+    // token match, so q is never read back (the device still writes it, for kernel tests only).
+    // Not supported: drafts stay greedy (exact-match acceptance).
     virtual bool draftSampleOk() const { return false; }
     virtual void setDraftSample(std::uint32_t s, const spec::DraftSample& ds) { (void)s, (void)ds; }
     virtual void mtpEnqueue(DevPtr hidden, std::span<const std::uint32_t> tokens, std::uint32_t pos0) = 0;
@@ -136,7 +137,6 @@ public:
     virtual std::uint32_t verifyRows() const { return qwen35::max_small_batch; }
 
     // ---- DFlash2 drafter (--draft dflash; see Model::dflash*). Defaults: no drafter.
-    virtual bool hasDFlash() const { return false; }
     // most drafts of one block (block - 1)
     virtual std::uint32_t dflashMaxDrafts() const { return 0; }
     // the latest forward / verify of n rows captured the target features of its last captureN()
