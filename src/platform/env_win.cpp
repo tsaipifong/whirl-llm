@@ -30,6 +30,28 @@ std::optional<std::string> get(const std::string& name) {
     return std::nullopt;
 }
 
+std::optional<std::string> getUtf8(const std::string& name) {
+    // bug-lappdata: the wide table, as llama.cpp's common_get_path_from_env (_wgetenv); PRIOR_ART bug-lappdata
+    std::wstring wname;
+    if (!name.empty()) {
+        const int nw = MultiByteToWideChar(CP_UTF8, 0, name.data(), static_cast<int>(name.size()), nullptr, 0);
+        wname.resize(static_cast<std::size_t>(nw));
+        MultiByteToWideChar(CP_UTF8, 0, name.data(), static_cast<int>(name.size()), wname.data(), nw);
+    }
+    wchar_t* buf = nullptr;
+    std::size_t len = 0;
+    if (_wdupenv_s(&buf, &len, wname.c_str()) != 0 || buf == nullptr) return std::nullopt;
+    const std::size_t wl = wcslen(buf);
+    std::string v;
+    if (wl > 0) {
+        const int n = WideCharToMultiByte(CP_UTF8, 0, buf, static_cast<int>(wl), nullptr, 0, nullptr, nullptr);
+        v.resize(static_cast<std::size_t>(n));
+        WideCharToMultiByte(CP_UTF8, 0, buf, static_cast<int>(wl), v.data(), n, nullptr, nullptr);
+    }
+    std::free(buf);
+    return v;
+}
+
 int set(const char* name, const char* value) { return _putenv_s(name, value); }
 
 std::vector<std::wstring> block() {

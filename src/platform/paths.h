@@ -12,9 +12,11 @@
 
 namespace whirl::platform::paths {
 
-// %LOCALAPPDATA% as the CRT's narrow environment holds it (env::get; read at the call, nullopt when unset).
-// Not SHGetKnownFolderPath and not _wgetenv: v0.2.4 read the narrow variable, and every path below must stay byte
-// for byte the same (a changed tune path re-tunes, a changed kvcache path misses the SSD tier; PRIOR_ART PL1).
+// %LOCALAPPDATA% as UTF-8 (env::getUtf8: the CRT's wide environment, read at the call; nullopt when unset, "" when
+// set but empty). Every caller hands the path text to widen() (UTF-8), so a non-ASCII user folder now reaches the
+// file system unchanged (bug-lappdata; v0.2.4 read the narrow table, ANSI code page). ASCII values: byte for byte the
+// old read, so no path of an ASCII user changes (a changed tune path re-tunes, a changed kvcache path misses the SSD
+// tier). Still not SHGetKnownFolderPath: tests and users point LOCALAPPDATA at another folder (PRIOR_ART PL1).
 std::optional<std::string> localAppData();
 
 // Path text, pure functions (no file system access). `base` is localAppData()'s value. Pinned by the table test

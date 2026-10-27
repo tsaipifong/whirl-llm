@@ -43,6 +43,8 @@
 #include <cmath>
 #include <cstdint>
 #include <format>
+#include <fstream>
+#include <iterator>
 #include <cstdio>
 #include <cstring>
 #include <cwchar>
@@ -4311,9 +4313,153 @@ static void testPlatformPaths() {
         CHECK(pp::serverLogPath(got) == old_log);
     }
     _putenv_s("LOCALAPPDATA", saved ? saved->c_str() : "");
-    CHECK(pp::localAppData() == saved);
+    // bug-lappdata: localAppData() is the UTF-16 value as UTF-8, the narrow read is the ANSI code page; they agree for
+    // ASCII only (a non-ASCII user folder of the machine running the tests is not an error here)
+    const bool saved_ascii = !saved || std::all_of(saved->begin(), saved->end(), [](char c) { return (static_cast<unsigned char>(c) & 0x80) == 0; });
+    if (saved_ascii) CHECK(pp::localAppData() == saved);
 #endif
 }
+
+#ifdef _WIN32
+// bug-lappdata (2026-10-26): LOCALAPPDATA was read through the CRT narrow table (the ANSI code page) and the path text
+// then went through widen() (UTF-8), so a non-ASCII user folder gave a mangled tune-cache / server-log / kvcache path in
+// a process whose ANSI code page is not UTF-8. The child is this test program (--child-lappdata, helper mode in main())
+// started with a fixed environment: SystemRoot, PATH and the LOCALAPPDATA of the case only.
+static std::string hexBytes(const std::string& s) {
+    std::string h;
+    char b[3];
+    for (unsigned char c : s) {
+        std::snprintf(b, sizeof b, "%02x", c);
+        h += b;
+    }
+    return h;
+}
+
+// helper mode: print what localAppData() and the old narrow read (_dupenv_s) return, then create <base>\whirl the way
+// tune.cpp creates the tune folder (path text -> widen -> file system)
+static int childLappdata() {
+    namespace pp = whirl::platform::paths;
+    const std::optional<std::string> got = pp::localAppData();
+    std::optional<std::string> old;
+    char* buf = nullptr;
+    std::size_t len = 0;
+    if (_dupenv_s(&buf, &len, "LOCALAPPDATA") == 0 && buf != nullptr) {
+        old = std::string(buf);
+        std::free(buf);
+    }
+    std::printf("new=%s:%s old=%s:%s", got ? "set" : "unset", hexBytes(got.value_or(std::string())).c_str(),
+                old ? "set" : "unset", hexBytes(old.value_or(std::string())).c_str());
+    if (got && !got->empty()) {
+        std::error_code ec;
+        std::filesystem::create_directories(whirl::widen(pp::whirlDir(*got)), ec);
+        std::printf(" mkdir=%d", ec ? 0 : 1);
+    }
+    std::fflush(stdout);
+    return 0;
+}
+
+struct LadChild {
+    bool started = false;
+    DWORD exit_code = ~0u;
+    std::string out;
+};
+
+static LadChild runLadChild(const std::wstring& self, const std::optional<std::wstring>& lad, const std::filesystem::path& out_file) {
+    LadChild r;
+    // the environment block, sorted by name: LOCALAPPDATA (when given), PATH (DLL search), SystemRoot
+    std::wstring blk;
+    auto add = [&blk](const wchar_t* n, const std::wstring& v) {
+        blk += n;
+        blk += L'=';
+        blk += v;
+        blk += L'\0';
+    };
+    if (lad) add(L"LOCALAPPDATA", *lad);
+    if (const wchar_t* v = _wgetenv(L"PATH")) add(L"PATH", v);
+    if (const wchar_t* v = _wgetenv(L"SystemRoot")) add(L"SystemRoot", v);
+    blk += L'\0';
+    SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
+    HANDLE f = CreateFileW(out_file.c_str(), GENERIC_WRITE, FILE_SHARE_READ, &sa, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return r;
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = nullptr;
+    si.hStdOutput = f;
+    si.hStdError = f;
+    PROCESS_INFORMATION pi{};
+    std::wstring cmd = L"\"" + self + L"\" --child-lappdata";
+    r.started = CreateProcessW(self.c_str(), cmd.data(), nullptr, nullptr, TRUE, CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW,
+                               blk.data(), nullptr, &si, &pi) != 0;
+    CloseHandle(f);
+    if (!r.started) return r;
+    if (WaitForSingleObject(pi.hProcess, 20000) != WAIT_OBJECT_0) TerminateProcess(pi.hProcess, 99);
+    GetExitCodeProcess(pi.hProcess, &r.exit_code);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    std::ifstream in(out_file, std::ios::binary);
+    r.out.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    return r;
+}
+
+static void testLocalAppDataChild() {
+    namespace fs = std::filesystem;
+    namespace pp = whirl::platform::paths;
+    wchar_t self[1024];
+    const DWORD n = GetModuleFileNameW(nullptr, self, 1024);
+    CHECK(n > 0 && n < 1024);
+    if (n == 0 || n >= 1024) return;
+    const fs::path root = whirl::test::testTmpBase() / L"lappdata";
+    std::error_code ec;
+    fs::remove_all(root, ec);
+    fs::create_directories(root, ec);
+    const fs::path out_file = root / L"child_out.txt";
+    // non-ASCII user folders: CJK + Latin-1 + a character outside the BMP (none of the last two in code page 950), and
+    // CJK that code page 950 holds (the narrow read is then valid Big5, not '?', and still not UTF-8)
+    for (const wchar_t* user : {L"u蔡é\U0001F600", L"測試"}) {
+        const fs::path users = root / L"users";
+        fs::remove_all(users, ec);
+        const std::wstring lad = (users / user / L"AppData" / L"Local").wstring();
+        const std::string want = whirl::narrow(lad);
+        const LadChild c = runLadChild(self, lad, out_file);
+        CHECK(c.started && c.exit_code == 0);
+        CHECK(c.out.rfind("new=set:" + hexBytes(want) + " ", 0) == 0);
+        if (c.out.rfind("new=set:" + hexBytes(want) + " ", 0) != 0) std::printf("  lappdata child: %s (want %s)\n", c.out.c_str(), hexBytes(want).c_str());
+        CHECK(c.out.find(" mkdir=1") != std::string::npos);
+        CHECK(fs::is_directory(fs::path(lad) / L"whirl", ec));  // the folder the user owns, not a mangled sibling
+        std::size_t entries = 0;
+        for (const fs::directory_entry& e : fs::directory_iterator(users, ec)) {
+            ++entries;
+            CHECK(e.path().filename().wstring() == user);
+        }
+        CHECK(entries == 1);
+        // the path text of every user goes back to the same UTF-16 folder
+        CHECK(whirl::widen(pp::kvCacheDir(want)) == lad + L"\\whirl\\kvcache");
+        CHECK(whirl::widen(pp::serverLogPath(std::optional<std::string>(want))) == lad + L"\\whirl\\server.log");
+        CHECK(whirl::widen(pp::tuneCachePath(want, "m.gguf-1.txt")) == lad + L"\\whirl\\tune4-m.gguf-1.txt");
+    }
+    // ASCII: the new read is byte for byte the old narrow read (paths of ASCII users do not change)
+    {
+        const std::wstring lad = (root / L"ascii user" / L"AppData" / L"Local").wstring();
+        const std::string h = hexBytes(whirl::narrow(lad));
+        const LadChild c = runLadChild(self, lad, out_file);
+        CHECK(c.started && c.exit_code == 0);
+        CHECK(c.out.rfind("new=set:" + h + " old=set:" + h + " mkdir=1", 0) == 0);
+    }
+    // set but empty, and unset: as the narrow read
+    {
+        const LadChild c = runLadChild(self, std::wstring(), out_file);
+        CHECK(c.started && c.exit_code == 0);
+        CHECK(c.out == "new=set: old=set:");
+    }
+    {
+        const LadChild c = runLadChild(self, std::nullopt, out_file);
+        CHECK(c.started && c.exit_code == 0);
+        CHECK(c.out == "new=unset: old=unset:");
+    }
+    fs::remove_all(root, ec);
+}
+#endif
 
 static void testPlatformEnv() {
     namespace pe = whirl::platform::env;
@@ -4322,6 +4468,14 @@ static void testPlatformEnv() {
     CHECK(pe::set("WHIRL_PL1U_X", "v=1") == 0);
     CHECK(pe::get("WHIRL_PL1U_X") == std::optional<std::string>("v=1"));
     CHECK(pe::get("whirl_pl1u_x") == std::optional<std::string>("v=1"));  // names are case-insensitive on Windows
+    // bug-lappdata: getUtf8 is get for ASCII values (set, any case, unset below) and the UTF-8 of the wide value else
+    CHECK(pe::getUtf8("WHIRL_PL1U_X") == std::optional<std::string>("v=1"));
+    CHECK(pe::getUtf8("whirl_pl1u_x") == std::optional<std::string>("v=1"));
+    CHECK(!pe::getUtf8("WHIRL_PL1U_NONE"));
+    CHECK(_wputenv_s(L"WHIRL_PL1U_W", L"a蔡é\U0001F600") == 0);
+    CHECK(pe::getUtf8("WHIRL_PL1U_W") == std::optional<std::string>("a\xe8\x94\xa1\xc3\xa9\xf0\x9f\x98\x80"));
+    CHECK(_wputenv_s(L"WHIRL_PL1U_W", L"") == 0);
+    CHECK(!pe::getUtf8("WHIRL_PL1U_W"));
     // block(): the same entries in the same order as the v0.2.4 GetEnvironmentStringsW loop
     std::vector<std::wstring> ref;
     if (wchar_t* blk = GetEnvironmentStringsW()) {
@@ -4460,6 +4614,9 @@ void testFsMappedOpen() {
 }
 
 int main(int argc, char** argv) {
+#ifdef _WIN32
+    if (argc == 2 && std::string(argv[1]) == "--child-lappdata") return childLappdata();  // bug-lappdata helper mode
+#endif
 #if WHIRL_WITH_HIP && defined(_WIN32)
     if (argc >= 2) {  // helper modes for testProbeChild (the test runs this program as the child)
         const std::string m = argv[1];
@@ -4501,6 +4658,9 @@ int main(int argc, char** argv) {
     testAllocLog();
     testLogNamesUnique();
     testPlatformPaths();        // arch025 PL1
+#ifdef _WIN32
+    testLocalAppDataChild();    // bug-lappdata
+#endif
     testPlatformEnv();
     testPl1bEnvReads();  // arch025 PL1b
     testPlatformConsoleTime();

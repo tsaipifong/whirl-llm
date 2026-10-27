@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // arch025 PL1: LOCALAPPDATA of src/model/tune.cpp (_dupenv_s) and src/server/server_main.cpp (std::getenv: the same
-// CRT narrow table) and the path text built from it, character for character as in v0.2.4.
+// CRT narrow table) and the path text built from it, character for character as in v0.2.4. bug-lappdata (2026-10-26):
+// LOCALAPPDATA is read from the wide table and converted to UTF-8 (the same bytes for ASCII values).
 
 #include "platform/paths.h"
 
@@ -10,7 +11,8 @@
 
 namespace whirl::platform::paths {
 
-std::optional<std::string> localAppData() { return env::get("LOCALAPPDATA"); }
+// bug-lappdata: UTF-16 -> UTF-8 (was env::get, the ANSI code page)
+std::optional<std::string> localAppData() { return env::getUtf8("LOCALAPPDATA"); }
 
 std::string whirlDir(const std::string& base) { return base + "\\whirl"; }
 

@@ -14,8 +14,15 @@ namespace whirl::platform::env {
 
 // One variable of the CRT's narrow environment (_dupenv_s: the ANSI code page, read at the call). nullopt when unset.
 // The single raw read behind envGet / EnvSnapshot::capture (src/config), the VRAM cap, the kernel table switches and
-// LOCALAPPDATA (paths::localAppData). Moved unchanged from the four _dupenv_s copies of v0.2.4.
+// LOCALAPPDATA up to PL1. Moved unchanged from the four _dupenv_s copies of v0.2.4.
 std::optional<std::string> get(const std::string& name);
+
+// One variable of the CRT's wide environment (_wdupenv_s: UTF-16, read at the call) as UTF-8. nullopt when unset,
+// "" when set but empty (as get()). For values that become file system paths through widen(): the narrow table is
+// the ANSI code page, which is UTF-8 only in a process with the activeCodePage manifest (whirl.exe /
+// whirl-server.exe), so get() mangles a non-ASCII user folder in every other program (bug-lappdata). For ASCII values
+// the bytes equal get()'s. Used by paths::localAppData().
+std::optional<std::string> getUtf8(const std::string& name);
 
 // _putenv_s(name, value): the CRT's and the process environment. Returns its errno_t (0 = ok); callers that ignored
 // it before keep ignoring it. The one product write: GPU_RESOURCE_CACHE_SIZE before the HIP runtime starts.
