@@ -1,29 +1,31 @@
 [English](../en/quantization.md) | **繁體中文**
 
-# 量化：精確模式、速度模式，以及為 WHIRL 製作 GGUF
+# 量化：三種數值模式，以及為 WHIRL 製作 GGUF
 
 > **狀態。** 本文描述的 kernel 支援已收錄在 WHIRL 0.1.0（gfx1201，R9700）。文中列出的 GGUF 檔案由我們製作並量測；
 > Swift-1.5 MXFP4 檔案已發布於 Hugging Face，Ornith-1.5-35B-A3B MXFP4 檔案會在第一個發行版之後發布。
 
 **對誰有幫助：** 為 RDNA 上的混合式 Qwen3.x 模型挑選量化格式的人、用 llama.cpp 的 `llama-quantize` 量化這類模型的人（下面有幾個不明顯的陷阱），以及想知道 MXFP4 在品質上實際付出多少代價的人。
 
-## 1. 兩種模式
+## 1. 三種數值模式
 
-WHIRL 會以兩種方式之一看待一個模型檔案：
+WHIRL 以三種數值模式之一執行模型檔案，每個行程選一種（`--precise`、`--balance`（預設）、`--fast`；見 [usage.md](usage.md#modes)）。本指南較早的版本把 precise 稱為「精確模式」、把 balance／fast 稱為「速度模式」。
 
-| | 精確模式 | 速度模式 |
-|---|---|---|
-| 典型檔案 | K-quant／IQ-quant GGUF（WHIRL 可載入 Q4_K_M 等檔案） | MXFP4 |
-| Prefill activation（啟動值） | f16 | fp8（e4m3），每個 token 一個 scale |
-| 有損變更的規則 | 必須通過 KL 對路徑雜訊 + 成對 QA（McNemar）+ needles | 接受；量測並記錄影響 |
-| 各項優化之間的輸出 | 前一版逐位元相同之處維持逐位元相同 | 速度路徑改變時可能改變 |
-| MTP == 純 greedy、並行 == 單獨執行 | 是 | 是 |
+| | precise | balance（預設） | fast |
+|---|---|---|---|
+| 輸出 | 嚴格無損、逐位元相同；唯一做此保證的模式 | 近乎無損，與 precise 不是逐位元相同 | 有損，4-bit 等級品質 |
+| Prefill activation（啟動值） | f16 | R9700 上的 MXFP4 檔用 fp8（e4m3），每個 token 一個 scale；其他情形 f16 | 同 balance |
+| Decode activation | f16 | int8（q8_1 等級） | int8（q8_1 等級） |
+| 允許的有損項目 | 無 | R9700 的 fp8 GEMM、MoE fp8、int8 decode activation、f16 中間結果、int8 KV（fp8 attention 不是 balance 項目） | balance 再加 4-bit KV、放寬的 MTP 接受、int8／fp8 attention、W4A8、MoE 專家略過等 |
+| 驗收 | golden 輸出逐位元相同 | 任務準確度；KL／top-1 只作回歸守門 | 任務準確度回收至少達 precise 的 95% |
+| 各項優化之間的輸出 | 前一版逐位元相同之處維持逐位元相同 | 速度路徑改變時可能改變 | 可能改變 |
+| MTP == 純 greedy、並行 == 單獨執行 | 是 | 是 | 僅在關閉放寬接受時 |
 
-當檔案包含 MXFP4 tensor 時，在 balance（預設）與 fast 數值模式下速度模式會自動套用（`--precise` 對所有檔案都維持 f16 prefill activation，見 [usage.md](usage.md#modes)）：fp8 prefill（提示詞預填）GEMM、f16-WMMA DeltaNet chunk，以及供逐元素運算使用者讀取的 f16 GEMM 輸出。在 R9700 上，後兩項（balance 項目 `gdnwmma`、`h16`）也用在其他格式的 dense 模型（Q4_K_M 等 K-quant 檔案可載入並使用這兩項）；這些模型的 GEMM 仍用 f16 activation。`WHIRL_FP8=0` 會讓 MXFP4 prefill 回到 f16 activation（MXFP4 prefill 的速度主要來自 fp8，而非格式本身）。兩種模式下 decode（逐 token 生成）都是精確的（int8 GEMV，每個單元的算術相同）。
+balance 的各項目在 balance（預設）與 fast 模式下自動套用；`--precise` 對所有檔案都維持 f16 的 prefill 與 decode activation。對 MXFP4 檔案而言，這是指 fp8 prefill（提示詞預填）GEMM、f16-WMMA DeltaNet chunk，以及供逐元素運算使用者讀取的 f16 GEMM 輸出。在 R9700 上，後兩項（balance 項目 `gdnwmma`、`h16`）也用在其他格式的 dense 模型（Q4_K_M 等 K-quant 檔案可載入並使用這兩項）；這些模型的 GEMM 仍用 f16 activation。`WHIRL_FP8=0` 會讓 MXFP4 prefill 回到 f16 activation（MXFP4 prefill 的速度主要來自 fp8，而非格式本身）。Decode：precise 用 f16 activation 進 f16 GEMM；balance 與 fast 用 int8 activation（q8_1 等級，項目 `q8dec`），這是 balance 的允許項目，近乎無損，但與 precise 不是逐位元相同。在每個模式內，多列 GEMV 與 1 列 GEMV 逐位元相同，所以 MTP 與合批不會改變該模式的輸出。
 
 兩個 MXFP4 模型公開的速度數據見 [benchmarks.md](benchmarks.md)。在 MXFP4 內部，fp8 對 f16 prefill 有用 350 題成對 QA 比較（WHIRL，greedy）：答對 256 對 253，McNemar p = 0.58。
 
-**選擇精確模式**：當輸出必須與 greedy 參考一致，且每項優化都必須通過精確度關卡（gate）時。**選擇速度模式**：用於長提示詞和會讀取大量檔案的 agent，這時 prefill 佔主導；decode 也會依權重位元組數變少而等比例變快。
+**選擇 precise**：當輸出必須與 greedy 參考逐位元相同時。**選擇 balance**（預設；近乎無損）：用於長提示詞和會讀取大量檔案的 agent，這時 prefill 佔主導；decode 也會依權重位元組數變少而等比例變快。
 
 ## 2. WHIRL 接受的 tensor 類型
 

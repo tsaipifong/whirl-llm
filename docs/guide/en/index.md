@@ -33,7 +33,7 @@ other projects can reuse the lessons.
 | [server.md](server.md) | OpenAI-compatible API, sampling, tool calls, `reasoning_content`, continuous batching, logging, limitations |
 | [benchmarking.md](benchmarking.md) | Methodology (interleaved A/B, min–max, unified protocol vs llama.cpp, cache and thermal traps, VRAM-only rule), correctness gates, **current numbers** |
 | [benchmarks.md](../../benchmarks.md) | Release benchmarks of WHIRL 0.1.0 vs llama.cpp (prefill, decode, concurrency, cache TTFT, VRAM, vision) |
-| [quantization.md](quantization.md) | Precision mode (Q4_K_M) vs speed mode (MXFP4), MXFP4 handling, perplexity, the Swift-1.5 MXFP4 recipe, a checklist for GGUFs that run well, mmproj |
+| [quantization.md](quantization.md) | The three numerics modes (precise / balance / fast), MXFP4 handling, perplexity, the Swift-1.5 MXFP4 recipe, a checklist for GGUFs that run well, mmproj |
 | [vision.md](vision.md) | On-demand image input: design, numerics, bugs found |
 | [pitfalls.md](pitfalls.md) | **125 pitfalls** with conditions → symptom → root cause → fix → gate, plus the generalizable lessons |
 

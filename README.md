@@ -176,7 +176,7 @@ WHIRL 0.2.0 has three numerics modes. You pick one per process (`--precise`, `--
 |---|---|---|
 | **precise** | **bitwise lossless**: nothing is quantized beyond the GGUF's own weights; f16 KV cache, f16 / f32 activations everywhere | output **bitwise identical** to plain greedy decoding: the same bits with or without speculative drafts, alone or batched with other users, and from a prefix-cache hit or a restored session |
 | **balance** (default) | near-lossless, default | MTP / n-gram drafts and batching give the same tokens as plain greedy decoding in balance mode, and a restored session the same tokens as that session kept in VRAM; a conversation's next turn, continued from the cached end of the previous reply, is numerically equivalent to a cold run, not bitwise, so its reply can differ |
-| **fast** (opt-in) | maximum speed within an accepted, gated loss: balance plus a 4-bit KV cache and relaxed MTP acceptance (on the Radeon 8060S the dense model keeps an int8 KV cache, which decodes faster there) | lossy within published KL limits; the text can depend on the drafts and on other users |
+| **fast** (opt-in) | maximum speed within 4-bit-level quality: balance plus a 4-bit KV cache and relaxed MTP acceptance (on the Radeon 8060S the dense model keeps an int8 KV cache, which decodes faster there) | lossy; accepted when task accuracy recovers at least 95% of precise (KL limits are only a regression guard); the text can depend on the drafts and on other users |
 
 What this means in practice:
 

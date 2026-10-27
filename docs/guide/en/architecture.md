@@ -216,7 +216,7 @@ Where the gap comes from, in order of size:
    against a pure-read ceiling.
 3. **Formats chosen for the hardware.** MXFP4's power-of-two block scales fold exactly into fp8
    exponents, so RDNA 4's fp8 WMMA runs the prefill GEMM at about 240 TOPS with a single
-   epilogue. That is the "speed mode" ([quantization.md](quantization.md)).
+   epilogue. That is the balance numerics ([quantization.md](quantization.md)).
 
 **Plain decode has a hard ceiling.** Without speculation, every token must stream all weights
 once. WHIRL's 1-token GEMV already runs at 97–100% of the measured pure-read ceiling
@@ -228,16 +228,19 @@ why decode numbers in these documents lead with it.
 
 ## 4. Correctness model
 
-Two modes, chosen per model file:
+Three numerics modes ([quantization.md](quantization.md)), chosen per process:
 
-- **Precision mode (Q4_K_M and other K/IQ quants).** Every optimization must keep outputs
-  bit-identical where the previous version was bit-identical. Lossy changes (8-bit KV, for
-  example) must pass a KL-divergence check against measured path noise, a paired
-  question-answering test (350 items, McNemar exact test) and long-context needle tests.
-- **Speed mode (MXFP4).** fp8 activations in prefill are accepted; their effect is measured
-  and recorded (KL, paired QA, perplexity) but is not a blocking gate.
+- **precise** (strictly lossless). Every optimization must keep outputs bit-identical where the
+  previous version was bit-identical (golden outputs on both GPUs). Bit-identity is promised only
+  here, and by behaviour-preserving refactors in every mode.
+- **balance** (default, near-lossless) and **fast**. Accepted on task accuracy, not on
+  bit-identity. Balance may use the allowed items (fp8 GEMM on the R9700, MoE fp8, int8 decode
+  activations, f16 intermediates, int8 KV); fast (4-bit-level quality) is accepted when task
+  accuracy recovers at least 95% of precise. KL divergence against measured path noise, top-1
+  agreement, a paired question-answering test (350 items, McNemar exact test) and long-context
+  needle tests are measured and recorded for each change as regression guards.
 
-In both modes these invariants are enforced by permanent gates on every change:
+In every mode these invariants are enforced by permanent gates on every change:
 
 - MTP greedy == plain greedy (all draft counts 1–10, with and without n-gram drafts).
 - Multi-row GEMV == 1-row GEMV, bit for bit, for every type, row count 2–16 and kernel variant.
@@ -259,6 +262,6 @@ In both modes these invariants are enforced by permanent gates on every change:
 | Paged KV, KV formats, checkpoints, tiered cache | [kv-and-caching.md](kv-and-caching.md) |
 | OpenAI server behavior and limits | [server.md](server.md) |
 | How we measure; current numbers | [benchmarking.md](benchmarking.md) |
-| Precision vs speed mode, MXFP4 quantization recipe | [quantization.md](quantization.md) |
+| The three numerics modes, MXFP4 quantization recipe | [quantization.md](quantization.md) |
 | Image input | [vision.md](vision.md) |
 | Every pitfall we hit | [pitfalls.md](pitfalls.md) |

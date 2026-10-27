@@ -30,7 +30,7 @@ WHIRL（*Windows HIP Inference for RDNA LLMs*）是以 C++ 與 HIP 撰寫、授�
 | [server.md](server.md) | OpenAI 相容 API、取樣、工具呼叫、`reasoning_content`、continuous batching、log、限制 |
 | [benchmarking.md](benchmarking.md) | 量測方法（交錯 A/B、min–max、與 llama.cpp 的統一協定、快取與散熱陷阱、只用專用 VRAM 規則）、正確性關卡、**目前的數字** |
 | [benchmarks.md](benchmarks.md) | WHIRL 0.1.0 對 llama.cpp 的發行版量測（prefill、decode、並發、快取 TTFT、VRAM、視覺） |
-| [quantization.md](quantization.md) | 精確模式（Q4_K_M）與速度模式（MXFP4）、MXFP4 的處理、困惑度、Swift-1.5 MXFP4 量化步驟、讓 GGUF 跑得好的檢查清單、mmproj |
+| [quantization.md](quantization.md) | 三種數值模式（precise／balance／fast）、MXFP4 的處理、困惑度、Swift-1.5 MXFP4 量化步驟、讓 GGUF 跑得好的檢查清單、mmproj |
 | [vision.md](vision.md) | 按需載入的圖片輸入：設計、數值、找到的 bug |
 | [pitfalls.md](pitfalls.md) | **125 個坑**，每個都有 條件 → 症狀 → 根本原因 → 修正 → 關卡，外加可通用的教訓 |
 

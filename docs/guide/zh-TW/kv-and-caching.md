@@ -99,7 +99,7 @@ f16 副本放在 attention 期間閒置的 prefill 緩衝區（預設 prefill ba
 | fast | q4 | q4 |
 
 - **Dense、balance：q8h。** 在 128k 通過相對 f16 的 balance KL 門檻（KL-1），近乎無損，而且 KV 位元組減半，32 GB 卡上一個 128k 請求加上另一個長請求都放得下，不必換格式。
-- **MoE：precise 與 balance 都用 f16。** 它在 q8 下的單一提示詞 KL 遠高於自身的路徑雜訊（p12k 時 77 倍；即使 q8h 也有 50 倍），Ornith 用 q8 在中文 128k 也沒過門檻（KL-1）。（以 22 KiB/token 計，MoE 的 f16 池已約 340k token。）
+- **MoE：precise 與 balance 目前都用 f16。** 它在 q8 下的單一提示詞 KL 遠高於自身的路徑雜訊（p12k 時 77 倍；即使 q8h 也有 50 倍），Ornith 用 q8 在中文 128k 也沒過 KL 門檻（KL-1）。KL 只是回歸守門、不是驗收標準：同一個實驗的成對 QA 顯示沒有差異（350 題答對 333 對 334），MoE 的 int8 KV 正在以任務準確度與速度驗證。（以 22 KiB/token 計，MoE 的 f16 池已約 340k token。）
 - **放不下時：** 選定的格式放不下要求的 context，沒有指定時就降低 context（CLI）或池與每個請求的 context（server）並發出警告；有指定就停止並說明（結束代碼 5）。不會自動改用更低精度的格式；BAL-Q8 之前 dense 模型會依 f16 → q8v → q8h 退下去，20 GiB 以下的卡則優先 q8v。
 - `WHIRL_KV=f16|q8|q8h|q8v|q4` 是**除錯用覆寫**（[usage 7.7](usage.md#env-debug)）：取代模式的選擇、不做容量檢查，池低於下限時會印出警告。
 

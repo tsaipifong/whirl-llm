@@ -1,6 +1,6 @@
 **English** | [繁體中文](../zh-TW/quantization.md)
 
-# Quantization: precision mode, speed mode, and making GGUFs for WHIRL
+# Quantization: the three numerics modes, and making GGUFs for WHIRL
 
 > **Status.** The kernel support described here is in WHIRL 0.1.0 for gfx1201 (R9700). The GGUF files
 > listed were produced and measured by us; the Swift-1.5 MXFP4 files are published on Hugging Face,
@@ -10,28 +10,30 @@
 quantizing such a model with llama.cpp's `llama-quantize` (several non-obvious traps below), and
 anyone who wants to know what MXFP4 actually costs in quality.
 
-## 1. Two modes
+## 1. Three numerics modes
 
-WHIRL treats a model file in one of two ways:
+WHIRL runs a model file in one of three numerics modes, chosen per process (`--precise`, `--balance` (default), `--fast`; [usage.md](../../usage.md#modes)). Earlier versions of this guide called precise "precision mode" and balance/fast "speed mode".
 
-| | Precision mode | Speed mode |
-|---|---|---|
-| Typical file | K-quant / IQ-quant GGUF (WHIRL loads Q4_K_M and similar files) | MXFP4 |
-| Prefill activations | f16 | fp8 (e4m3), one scale per token |
-| Rule for lossy changes | must pass KL vs path noise + paired QA (McNemar) + needles | accepted; effects measured and recorded |
-| Outputs across optimizations | bit-identical where the previous build was | may change when the speed path changes |
-| MTP == plain greedy, concurrent == solo | yes | yes |
+| | precise | balance (default) | fast |
+|---|---|---|---|
+| Output | strictly lossless, bit-identical; the only mode that promises it | near-lossless, not bit-identical to precise | lossy, 4-bit-level quality |
+| Prefill activations | f16 | fp8 (e4m3, one scale per token) on MXFP4 files on the R9700; f16 elsewhere | same as balance |
+| Decode activations | f16 | int8 (q8_1 class) | int8 (q8_1 class) |
+| Allowed lossy items | none | fp8 GEMM on the R9700, MoE fp8, int8 decode activations, f16 intermediates, int8 KV (fp8 attention is not a balance item) | balance plus 4-bit KV, relaxed MTP acceptance, int8 / fp8 attention, W4A8, MoE expert skipping, ... |
+| Acceptance | golden outputs, bitwise | task accuracy; KL / top-1 only as regression guards | task accuracy recovers at least 95% of precise |
+| Outputs across optimizations | bit-identical where the previous build was | may change when the speed path changes | may change |
+| MTP == plain greedy, concurrent == solo | yes | yes | only with relaxed acceptance off |
 
-Speed mode applies automatically when the file contains MXFP4 tensors, in the balance (default) and fast numerics modes; `--precise` keeps f16 prefill activations for every file ([usage.md](../../usage.md#modes)). It means fp8 prefill GEMMs, f16-WMMA
+The balance items apply automatically in the balance (default) and fast modes; `--precise` keeps f16 prefill and decode activations for every file. On MXFP4 files that means fp8 prefill GEMMs, f16-WMMA
 DeltaNet chunks and f16 GEMM outputs for element-wise consumers. On the R9700 the last two (balance items `gdnwmma`, `h16`) also apply to dense models in other formats (K-quants such as Q4_K_M load and use them); their GEMMs keep f16 activations. `WHIRL_FP8=0` returns MXFP4
-prefill to f16 activations (most of the MXFP4 prefill speed comes from fp8, not from the format). Decode is exact in both modes (int8 GEMV with the same per-unit arithmetic).
+prefill to f16 activations (most of the MXFP4 prefill speed comes from fp8, not from the format). Decode: precise uses f16 activations into the f16 GEMM; balance and fast use int8 activations (q8_1 class, item `q8dec`), an allowed balance item that is near-lossless, not bit-identical to precise. Within each mode the multi-row GEMV equals the 1-row GEMV bit for bit, so MTP and batching do not change that mode's output.
 
 Published speed numbers for the two MXFP4 models are in [benchmarks.md](../../benchmarks.md). Within
 MXFP4, fp8 vs f16 prefill was compared on a paired 350-item QA set (WHIRL, greedy): 256 vs 253 correct,
 McNemar p = 0.58.
 
-**Choose precision mode** when outputs must match a greedy reference and every optimization must
-pass precision gates. **Choose speed mode** for long prompts and agents that read many files, where
+**Choose precise** when outputs must be bit-identical to a greedy reference. **Choose balance**
+(default; near-lossless) for long prompts and agents that read many files, where
 prefill dominates; decode also gets faster in proportion to the smaller weight bytes.
 
 ## 2. Tensor types WHIRL accepts
