@@ -554,6 +554,9 @@ EncodeStats Vision::encode(const Prepared& p, std::span<const Region> lend, hip:
                 hp.mean[1], hp.mean[2], hp.sd[0], hp.sd[1], hp.sd[2]);
     launchGemm(stream, misc + so_.patch_w, T, X, patch_k, E, N);
     const DevPtr lw0 = res ? resident + layer0_ : slot[0];
+    // pos_ln reads layer 0's ln1 from slot 0: wait for that copy too (ev_copy_[1] above covers only the misc weights in
+    // slot 1). Without it pos_ln could read slot 0 before the copy lands (the previous encode's last layer) - bug-visstream-race.
+    if (!res) hip::streamWaitEvent(stream, ev_copy_[0].get());
     hip::launch(f_.pos_ln, Dim3{N, 1, 1}, Dim3{256, 1, 1}, 0, stream, X, misc + so_.pos, misc + so_.patch_b, static_cast<i32>(pw),
                 static_cast<i32>(ph), static_cast<i32>(hp.n_side), lw0 + lo_.ln1_g, lw0 + lo_.ln1_b, Hb, hp.eps);
     pm(stream, 0);
