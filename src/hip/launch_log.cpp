@@ -32,6 +32,21 @@ namespace {
 // opened wide by log_name.h
 std::string folder() { return platform::env::getUtf8("WHIRL_LAUNCH_LOG").value_or(std::string()); }
 
+}  // namespace
+
+// bug-launchlogroot: no folder, no file (llama.cpp common_log_set_file opens nothing without a path): "" + "\launch_"
+// would be the root of the current drive
+// with a folder: the first name the exit writer tries (bug:log-pid-names, log_name.h: <pid>_<this process's start>;
+// _<n> if it exists; the RAW dump shares the table's stem)
+std::string exitPath(const std::string& dir, unsigned long pid, bool raw) {
+    if (dir.empty()) return std::string();
+    return dir + "\\launch_" + std::to_string(pid) + "_" + logname::processStart() + (raw ? ".raw.txt" : ".txt");
+}
+
+std::string exitPathNow(unsigned long pid, bool raw) { return exitPath(folder(), pid, raw); }
+
+namespace {
+
 struct Key {
     std::string name;
     unsigned g[3], b[3], shared;
@@ -135,6 +150,7 @@ struct Recorder {
             WideCharToMultiByte(CP_UTF8, 0, w, -1, cmd.data(), len, nullptr, nullptr);
         }
 #endif
+        if (dir.empty()) return;  // bug-launchlogroot: no folder, no file (was <drive root>\<name>)
         std::string stem;
         std::FILE* f = logname::openUnique(dir, "launch_", ".txt", &stem);
         if (f == nullptr) return;

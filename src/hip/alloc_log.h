@@ -48,4 +48,10 @@ std::string testText();
 // unit tests (bug:log-pid-names): write the log file to dir now, as the exit writer would
 void testWrite(const std::string& dir);
 
+// bug-launchlogroot: the file the exit writer opens first, <folder>\alloc_<pid>_<start>.txt (bug:log-pid-names); "" when
+// the folder is empty, and then nothing is written (it used to be "\alloc_<pid>.txt", the current drive's root).
+// exitPathNow reads WHIRL_ALLOC_LOG at the call, as the exit writer does.
+std::string exitPath(const std::string& dir, unsigned long pid);
+std::string exitPathNow(unsigned long pid);
+
 }  // namespace whirl::hip::alloclog

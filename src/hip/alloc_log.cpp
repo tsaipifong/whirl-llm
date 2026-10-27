@@ -29,6 +29,19 @@ namespace {
 // opened wide by log_name.h
 std::string folder() { return platform::env::getUtf8("WHIRL_ALLOC_LOG").value_or(std::string()); }
 
+}  // namespace
+
+// bug-launchlogroot: no folder, no file ("" + "\alloc_" would be the root of the current drive); with a folder the
+// first name the exit writer tries (bug:log-pid-names, log_name.h: <pid>_<this process's start>; _<n> if it exists)
+std::string exitPath(const std::string& dir, unsigned long pid) {
+    if (dir.empty()) return std::string();
+    return dir + "\\alloc_" + std::to_string(pid) + "_" + logname::processStart() + ".txt";
+}
+
+std::string exitPathNow(unsigned long pid) { return exitPath(folder(), pid); }
+
+namespace {
+
 constexpr std::uint64_t kFnvBasis = 1469598103934665603ull;
 constexpr std::uint64_t kFnvPrime = 1099511628211ull;
 
@@ -162,6 +175,7 @@ struct Recorder {
             WideCharToMultiByte(CP_UTF8, 0, w, -1, cmd.data(), len, nullptr, nullptr);
         }
 #endif
+        if (dir.empty()) return;  // bug-launchlogroot: no folder, no file (was <drive root>\<name>)
         std::FILE* f = logname::openUnique(dir, "alloc_", ".txt", nullptr);
         if (f == nullptr) return;
         const std::string body = text();

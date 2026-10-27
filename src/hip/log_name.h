@@ -70,6 +70,7 @@ inline std::FILE* openNewFile(const std::string& utf8_path) {
 // name could be created); *stem gets the chosen name without <ext>. pid / start are parameters for the unit tests.
 inline std::FILE* openUnique(const std::string& dir, const std::string& prefix, unsigned long pid, const std::string& start,
                              const char* ext, std::string* stem) {
+    if (dir.empty()) return nullptr;  // bug-launchlogroot: no folder, no file ("" + "\\" is the drive root)
     const std::string base = prefix + std::to_string(pid) + "_" + start;
     for (int i = 1; i <= kMaxTries; ++i) {
         std::string s = i == 1 ? base : base + "_" + std::to_string(i);
@@ -93,6 +94,7 @@ inline std::FILE* openUnique(const std::string& dir, const std::string& prefix, 
 
 // creates <dir>\<stem><ext> exclusively (the RAW dump next to a table); nullptr if it exists
 inline std::FILE* openExclusive(const std::string& dir, const std::string& stem, const char* ext) {
+    if (dir.empty()) return nullptr;  // bug-launchlogroot
     return openNewFile(dir + "\\" + stem + ext);
 }
 
