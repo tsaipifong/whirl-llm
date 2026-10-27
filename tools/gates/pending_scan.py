@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 """pending_scan.py - the four structure checks of arch025 (S0a), each with a pending list of the sites other 0.2.5
-steps remove. Report mode now; a later step switches a check to block mode (PL5 platform; include blocks since M3, arch since M6).
+steps remove. Report mode now; a later step switches a check to block mode (include blocks since M3, arch since M6, platform since PL5; env still reports).
 A rule's "blocked" scopes fail in every mode and take no pending entry (arch025-F7: env reads in forward / engine / ops).
 
 Rules (sources under src/ and include/; comments and string literals are not code):
@@ -10,6 +10,7 @@ Rules (sources under src/ and include/; comments and string literals are not cod
             implementation files of src/platform/ (*_win.cpp), src/hip/ (the HIP runtime's own DXGI / PDH /
             LoadLibrary code, ADR-0004 #5), src/release/dll_deps.cpp and the vendored src/vision/stb_image.h; the
             headers src/platform/*.h are checked too (they must stay platform-free, ADR-0004 #5).
+            Blocking since PL5 (any mode, no pending list).
   include   whirl_server_core (cmake/server.cmake) reaches include/whirl/model.h through its sources or the repo
             headers they include (transitively); one site per (core source, header chain). Blocking since M3 (any mode).
   env       a process-environment read (getenv / _dupenv_s / _wgetenv / GetEnvironmentVariable / GetEnvironmentStrings
@@ -87,8 +88,10 @@ ENV_READ = re.compile(
 ARCH = re.compile(r"\bArch::gfx\d+\b")
 
 RULES = {
+    # blocked since arch025-PL5: whitelist only (src/platform *_win.cpp, src/hip, dll_deps.cpp, the vendored stb_image.h; tests/
+    # and tools/ are not scanned, the wmain entry points call whirl::narrowArgs); no pending list (exit 1 in report mode too)
     "platform": {"allowed": ["src/platform/", "src/hip/", "src/release/dll_deps.cpp", "src/vision/stb_image.h"],
-                 "what": "platform header / OS call"},
+                 "what": "platform header / OS call", "blocked": ["src/", "include/"]},
     # blocked since arch025-M3 (R-8c): the server core sees whirl/model_types.h only; no core source may reach model.h
     # and the pending list is gone (exit 1 in report mode too)
     "include": {"allowed": [], "what": "server core reaches model.h", "blocked": ["src/", "include/"]},
@@ -394,27 +397,16 @@ def selftest() -> int:
     # platform
     case("clean tree passes", "platform", {"src/a.cpp": "#include <vector>\nint x;\n"}, None, "block", 0)
     case("windows.h outside the platform layer blocked", "platform", {"src/a.cpp": "#include <windows.h>\n"}, None, "block", 1)
-    case("same in report mode exits 0", "platform", {"src/a.cpp": "#include <windows.h>\n"}, None, "report", 0)
+    case("same in report mode exits 1 (PL5)", "platform", {"src/a.cpp": "#include <windows.h>\n"}, None, "report", 1)
     case("allowed dirs pass", "platform", {"src/hip/a.cpp": "#include <windows.h>\n", "src/platform/env_win.cpp": "#include <windows.h>\n",
                                            "src/release/dll_deps.cpp": "#  include <psapi.h>\n"}, None, "block", 0)
     case("commented include is not code", "platform", {"src/a.cpp": "// #include <windows.h>\n/* #include <io.h> */\n"}, None, "block", 0)
-    case("pending entry covers its file", "platform", {"src/a.cpp": "#include <windows.h>\n#include <shlobj.h>\n"},
-         f"src/a.cpp{T}2{T}PL1\n", "block", 0)
-    case("one more than pending: GROWN", "platform", {"src/a.cpp": "#include <windows.h>\n#include <io.h>\n#include <shlobj.h>\n"},
-         f"src/a.cpp{T}2{T}PL1\n", "block", 1)
-    case("fewer than pending: STALE", "platform", {"src/a.cpp": "#include <windows.h>\n"}, f"src/a.cpp{T}2{T}PL1\n", "block", 1)
     case("malformed pending is a usage error", "platform", {"src/a.cpp": "\n"}, "src/a.cpp two PL1\n", "block", 2)
     # platform, PL0: OS calls and the platform layer's own headers
     case("new OS call without a platform include blocked", "platform",
          {"src/model/x.cpp": "void f() { auto h = CreateFileW(p, 0, 0, nullptr, 3, 0, nullptr); }\n"}, None, "block", 1)
-    case("same in report mode exits 0", "platform",
-         {"src/model/x.cpp": "void f() { CreateFileW(p, 0, 0, nullptr, 3, 0, nullptr); }\n"}, None, "report", 0)
-    case("one more OS call in a pending file: GROWN", "platform",
-         {"src/a.cpp": "#include <windows.h>\nvoid f() { CloseHandle(h); }\nvoid g() { ReadFile(h, b, n, &r, nullptr); }\n"},
-         f"src/a.cpp{T}2{T}PL2\n", "block", 1)
-    case("pending counts include + calls exactly", "platform",
-         {"src/a.cpp": "#include <winsock2.h>\nint f() { WSAStartup(MAKEWORD(2, 2), &d); return ::recv(s, b, 1, 0); }\n"},
-         f"src/a.cpp{T}4{T}PL3\n", "block", 0)
+    case("same in report mode exits 1 (PL5)", "platform",
+         {"src/model/x.cpp": "void f() { CreateFileW(p, 0, 0, nullptr, 3, 0, nullptr); }\n"}, None, "report", 1)
     case("not OS calls: member, qualified, std::bind, a lambda named accept, comment, string", "platform",
          {"src/a.cpp": "x.send(b); p->ReadFile(); Foo::Sleep(1); auto g = std::bind(f, 1); if (accept(c)) {}\n"
                        "// CreateFileW(p)\nconst char* s = \"GetLastError()\"; recv(s, b, 1, 0);\n"}, None, "block", 0)
@@ -429,7 +421,17 @@ def selftest() -> int:
                                      "bool whirl::platform::fs::exists(const char*) { return GetFileAttributesW(L\"x\") != 0; }\n",
           "src/tier/t.cpp": "#include \"platform/fs.h\"\nbool e() { return whirl::platform::fs::exists(\"x\"); }\n"},
          None, "block", 0)
-    # env
+    # arch025-PL5: blocking in any mode, no pending list
+    case("PL5: windows.h outside the layer blocked in report mode", "platform", {"src/server/s.cpp": "#include <windows.h>\n"}, None, "report", 1)
+    case("PL5: an OS call outside the layer blocked in report mode", "platform", {"src/tier/t.cpp": "void f(void* h) { CloseHandle(h); }\n"}, None, "report", 1)
+    case("PL5: a pending entry does not allow it", "platform", {"src/a.cpp": "#include <windows.h>\n"}, f"src/a.cpp{T}1{T}PL1\n", "block", 1)
+    case("PL5: a pending entry for a clean file is itself a FAIL", "platform", {"src/a.cpp": "int x;\n"}, f"src/a.cpp{T}0{T}PL1\n", "report", 1)
+    case("PL5: include/ header blocked", "platform", {"include/whirl/x.h": "#include <windows.h>\n", "src/a.cpp": "int x;\n"}, None, "report", 1)
+    case("PL5: whitelist (hip, dll_deps, stb_image, platform *_win.cpp) passes in report mode", "platform",
+         {"src/hip/a.cpp": "#include <windows.h>\n", "src/release/dll_deps.cpp": "#include <windows.h>\nvoid f(void* h){CloseHandle(h);}\n",
+          "src/vision/stb_image.h": "#include <io.h>\n", "src/platform/p_win.cpp": "#include <windows.h>\nvoid f(void* h){CloseHandle(h);}\n"}, None, "report", 0)
+    case("PL5: an entry point calling the layer only passes", "platform",
+         {"src/cli/main.cpp": "#include \"platform/args.h\"\nint wmain(int c, wchar_t** v) { return run(whirl::narrowArgs(c, v)); }\n"}, None, "report", 0)
     case("env reads blocked", "env", {"src/model/f.cpp": 'int a = envFlag("X", true);\nauto b = std::getenv("WHIRL_Y");\n'}, None, "block", 1)
     case("env helper with a string argument counts", "env", {"src/server/s.cpp": 'const auto kv = env("KV");\n'}, None, "block", 1)
     case("not env reads: fingerprintEnv(), x.env(), a comment, a string", "env",
@@ -496,11 +498,12 @@ def selftest() -> int:
 
 
 def tree_test(root: str, rule: str = "platform") -> int:
-    """arch025-PL0: block / pass on a copy of the real tree with the real pending list. Pass: the copy as is.
-    Block: (1) a new file outside src/platform with one OS call, (2) one more OS call in a pending file."""
+    """block / pass on a copy of the real tree with the real pending list (PL5: platform has none). Pass: the copy as is.
+    Block: a raw OS call / platform include added outside the whitelist; pass: the same inside it."""
     pending = os.path.join(GATES, f"{rule}_pending.txt")
     base = tempfile.mkdtemp(prefix="whirl_pending_tree_")
     fails = 0
+    n = 0
     try:
         for d in ("src", "include"):
             shutil.copytree(os.path.join(root, d), os.path.join(base, d))
@@ -559,21 +562,63 @@ def tree_test(root: str, rule: str = "platform") -> int:
                 return 1
             print(f"pending_scan tree test: ok ({n} cases)")
             return 0
-        probe = os.path.join(base, "src", "model", "pl0_probe.cpp")
-        with open(probe, "w", encoding="utf-8") as f:
-            f.write("unsigned long long now() { return GetTickCount64(); }\n")
-        one("a new OS call in a new file outside src/platform (not pending) is blocked", 1)
-        os.remove(probe)
-        http = os.path.join(base, "src", "server", "http.cpp")
-        with open(http, "a", encoding="utf-8") as f:
-            f.write("\nstatic void pl0Probe(void* h) { CloseHandle(h); }\n")
-        one("one more OS call in a pending file (src/server/http.cpp) is blocked", 1)
+        # arch025-PL5: blocking in both modes with no pending list; a raw Win32 call or platform include outside the
+        # whitelist blocks anywhere (src/, include/), the same inside src/platform/*_win.cpp, src/hip, dll_deps.cpp passes
+        one("the tree passes in report mode", 0, "report")
+        n = 2
+        for rel, line in (("src/model/pl5_probe.cpp", "unsigned long long now() { return GetTickCount64(); }\n"),
+                          ("src/server/http.cpp", "\nstatic void pl5Probe(void* h) { CloseHandle(h); }\n"),
+                          ("src/cli/main.cpp", "\n#include <windows.h>\n"),
+                          ("include/whirl/common.h", "\nstatic inline void pl5Probe(void* h) { CloseHandle(h); }\n")):
+            f = os.path.join(base, *rel.split("/"))
+            had = os.path.exists(f)
+            orig = open(f, "rb").read() if had else None
+            with open(f, "a", encoding="utf-8") as h:
+                h.write(line)
+            one(f"a raw Win32 call / platform include added to {rel} is blocked", 1)
+            one(f"the same in {rel} is blocked in report mode", 1, "report")
+            n += 2
+            if had:
+                with open(f, "wb") as h:
+                    h.write(orig)
+            else:
+                os.remove(f)
+        for rel in ("src/platform/pl5_probe_win.cpp", "src/hip/pl5_probe.cpp", "src/release/dll_deps.cpp"):
+            f = os.path.join(base, *rel.split("/"))
+            had = os.path.exists(f)
+            orig = open(f, "rb").read() if had else None
+            with open(f, "a", encoding="utf-8") as h:
+                h.write("\n#include <windows.h>\nstatic void pl5Probe(void* h) { CloseHandle(h); }\n")
+            one(f"the same raw call inside {rel} (whitelist) passes", 0)
+            n += 1
+            if had:
+                with open(f, "wb") as h:
+                    h.write(orig)
+            else:
+                os.remove(f)
+        hdr = os.path.join(base, "src", "platform", "pl5_probe.h")
+        with open(hdr, "w", encoding="utf-8") as h:
+            h.write("#pragma once\n#include <windows.h>\n")
+        one("a src/platform header including windows.h is blocked", 1)
+        n += 1
+        os.remove(hdr)
+        one("restored tree passes", 0)
+        n += 1
+        pend = os.path.join(base, "pl5_pending.txt")
+        with open(pend, "w", encoding="utf-8") as h:
+            h.write("src/model/config.cpp\t0\tPL5\n")
+        lines: list[str] = []
+        rc = run(rule, base, pend, "report", out=lines.append)
+        n += 1
+        if rc != 1:
+            fails += 1
+        print(f"  {'ok  ' if rc == 1 else 'FAIL'} [{rule}/tree/report] a pending line is itself a FAIL: rc {rc} (want 1)")
     finally:
         shutil.rmtree(base, ignore_errors=True)
     if fails:
-        print(f"pending_scan tree test: FAIL ({fails} of 3)")
+        print(f"pending_scan tree test: FAIL ({fails} of {n})")
         return 1
-    print("pending_scan tree test: ok (3 cases)")
+    print(f"pending_scan tree test: ok ({n} cases)")
     return 0
 
 

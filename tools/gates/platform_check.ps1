@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-# arch025-S0a: platform headers outside the platform layer; PL0: also Win32 / Winsock / CRT-platform calls, the final
-# pending list (per-file owner steps PL1-PL4) and -SelfTest's block / pass test on a copy of the tree. Report mode stays
-# the default until PL5 makes release_gate run -Mode block (the tree passes block mode since PL0).
-# Thin entry point of tools/gates/pending_scan.py rule "platform" (the rule, the pending list platform_pending.txt and the
-# selftest live there). Report mode (default) prints the sites and exits 0; -Mode block exits 1 on a new site, a grown
-# count or a stale pending entry.
+# arch025-S0a: platform headers outside the platform layer; PL0: also Win32 / Winsock / CRT-platform calls. Blocking since
+# arch025-PL5 (whitelist only): any site in src/ or include/ outside src/platform/*_win.cpp, src/hip/, src/release/dll_deps.cpp
+# and the vendored src/vision/stb_image.h exits 1 in either mode, and the pending list (platform_pending.txt) is gone (an entry
+# in a -Pending file is itself a FAIL). tests/ and tools/ are not scanned; the wmain entry points call whirl::narrowArgs.
+# Thin entry point of tools/gates/pending_scan.py rule "platform" (the rule and the selftest live there). Release gate step:
+# cpu_platform_check (-Mode block). -SelfTest = the rule selftest + the block / pass test on a copy of the real tree.
 #   pwsh -NoProfile -File tools\gates\platform_check.ps1 [-Mode report|block] [-Root <repo>] [-Pending <file>]
 #   pwsh -NoProfile -File tools\gates\platform_check.ps1 -SelfTest
 # Python: WHIRL_GATE_PYTHON, else C:\ClaudeWorkspace\tools\pyref\Scripts\python.exe when it exists, else python / py on PATH
