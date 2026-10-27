@@ -37,6 +37,7 @@
 #include "platform/sys.h"
 #include "platform/fs.h"
 #include "platform/fs_fake.h"
+#include "cli/dflash_dump.h"
 #if WHIRL_TEST_DLL_DEPS
 #include "release/dll_deps.h"
 #endif
@@ -4610,6 +4611,17 @@ static LadChild runLadChild(const std::wstring& self, const std::optional<std::w
     return r;
 }
 
+// arch025-gaptests G19 (X4 report): bug-emptyrootpaths (37ad538) (c), an empty WHIRL_DFLASH_DUMP means no dump. The
+// dump itself runs only in a GPU whirl chat --draft dflash, so the rule cmd_chat.cpp applies is pinned here.
+static void testDFlashDumpDir() {
+    using OS = std::optional<std::string>;
+    CHECK(!cli::dflashDumpDir(std::nullopt));         // unset: no dump
+    CHECK(!cli::dflashDumpDir(OS("")));               // set but empty: no dump (before: "" -> create_directories("") threw)
+    CHECK(cli::dflashDumpDir(OS("D:\dump")) == OS("D:\dump"));  // a folder: that folder, unchanged
+    CHECK(cli::dflashDumpDir(OS(" ")) == OS(" "));    // only the empty string is "no dump" (as --kv-ssd-dir "")
+    CHECK(cli::dflashDumpDir(OS(".")) == OS("."));
+}
+
 static void testLocalAppDataChild() {
     namespace fs = std::filesystem;
     namespace pp = whirl::platform::paths;
@@ -5172,6 +5184,7 @@ int main(int argc, char** argv) {
     testAllocLog();
     testLogNamesUnique();
     testPlatformPaths();        // arch025 PL1
+    testDFlashDumpDir();        // arch025-gaptests G19
 #ifdef _WIN32
     testLocalAppDataChild();    // bug-lappdata
     testEnvPathsChild();        // bug-envpaths
