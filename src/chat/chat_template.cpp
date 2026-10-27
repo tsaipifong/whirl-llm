@@ -106,7 +106,10 @@ void writeArgValue(std::string& w, const json::Value& v, TemplateKind kind) {
         w += v.asString();
         return;
     }
-    if (kind == TemplateKind::b) {
+    // b_pyargs templates write scalars with `args_value | string` (Python str(): True / False / None); the
+    // product templates (a, b) write every non-string with `args_value | tojson | safe` (true / false / null).
+    // Containers are tojson in all of them.
+    if (kind == TemplateKind::b_pyargs) {
         if (v.isBool()) {
             w += v.asBool() ? "True" : "False";
             return;
@@ -140,10 +143,21 @@ constexpr std::string_view k_effort_low =
 }  // namespace
 
 TemplateKind detectTemplate(std::string_view chat_template) {
-    return chat_template.find("reasoning_effort") != std::string_view::npos ? TemplateKind::a : TemplateKind::b;
+    if (chat_template.find("reasoning_effort") != std::string_view::npos) return TemplateKind::a;
+    // `... | tojson | safe if args_value is mapping or (args_value is sequence and args_value is not string) else
+    // args_value | string`: only containers are tojson (Qwen3-Coder / Qwen3.5 / original Ornith-1.5 GGUFs)
+    if (chat_template.find("args_value is mapping") != std::string_view::npos) return TemplateKind::b_pyargs;
+    return TemplateKind::b;
 }
 
-const char* templateName(TemplateKind k) { return k == TemplateKind::a ? "a" : "b"; }
+const char* templateName(TemplateKind k) {
+    switch (k) {
+        case TemplateKind::a: return "a";
+        case TemplateKind::b: return "b";
+        case TemplateKind::b_pyargs: return "b-pyargs";
+    }
+    return "?";
+}
 
 std::string renderChat(TemplateKind kind, const json::Array& msgs, const json::Array& tools, const ChatOptions& opt) {
     if (msgs.empty()) bad("messages must be a non-empty array");
@@ -207,7 +221,10 @@ std::string renderChat(TemplateKind kind, const json::Array& msgs, const json::A
             w += merged;
         }
         w += "<|im_end|>\n";
-    } else if (!merged.empty()) {
+    } else if (!merged.empty() || (kind == TemplateKind::b && num_sys > 0)) {
+        // bug-emptysystem: the product Ornith MXFP4 template (b) emits the system turn whenever messages[0] is a
+        // system message, even when its trimmed content is empty (as the Qwen3 / Qwen3.5 templates do); a (`if
+        // content`) and b_pyargs (`if merged_system`) emit none
         w += "<|im_start|>system\n";
         if (!instr.empty()) {
             w += instr;
@@ -245,7 +262,7 @@ std::string renderChat(TemplateKind kind, const json::Array& msgs, const json::A
         std::string_view c = trimWs(text);
         if (isSystemRole(role)) {
             // template a raises here and b skips; a keeps the text instead of failing
-            if (kind == TemplateKind::b) continue;
+            if (kind != TemplateKind::a) continue;
             w += "<|im_start|>system\n";
             w += c;
             w += "<|im_end|>\n";
@@ -257,7 +274,7 @@ std::string renderChat(TemplateKind kind, const json::Array& msgs, const json::A
             std::string_view reasoning;
             if (const std::string* rc = getStr(m, "reasoning_content")) {
                 reasoning = *rc;
-            } else if (kind == TemplateKind::b) {
+            } else if (kind != TemplateKind::a) {
                 const std::size_t close = c.find("</think>");
                 if (close != std::string_view::npos) {
                     const std::string_view before = trimRightChars(c.substr(0, close), "\n");
@@ -268,7 +285,7 @@ std::string renderChat(TemplateKind kind, const json::Array& msgs, const json::A
                 }
             }
             reasoning = trimWs(reasoning);
-            const bool keep = kind == TemplateKind::b || !opt.preserve_thinking.has_value() ||
+            const bool keep = kind != TemplateKind::a || !opt.preserve_thinking.has_value() ||
                               *opt.preserve_thinking || i > last_query;
             w += "<|im_start|>assistant\n";
             if (keep) {
