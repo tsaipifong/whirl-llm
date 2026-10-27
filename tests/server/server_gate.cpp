@@ -547,6 +547,9 @@ struct ChatResult {
     std::int64_t prompt = 0, cached = 0, completion = 0;
     std::string raw;
     double ms = 0;
+    // The text a --results file records: reasoning, NUL, content, NUL, then the tool calls. The NULs are
+    // deliberate separators (text moving between reasoning and content must not compare equal) and show up as
+    // \u0000 in results.json (valid JSON; json::parse gives the same bytes back). Not server output (bug-gatenul).
     std::string text() const {
         std::string t = reasoning + std::string(1, '\0') + content + std::string(1, '\0');
         for (const auto& tc : tool_calls) t += tc[1] + "(" + tc[2] + ");";

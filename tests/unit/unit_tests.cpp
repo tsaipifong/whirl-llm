@@ -3599,6 +3599,30 @@ void testStartupFit() {
         CHECK_EQ(startfit::startupJson(startfit::StartupInfo{}),
                  std::string("{\"ctx_per_request\":0,\"pool_tokens\":0,\"parallel\":0,\"kv_ram_mb\":0,\"wddm_margin_mib\":0,"
                              "\"other_processes_mib\":0,\"display_attached\":false,\"adjusted\":[]}"));
+        // bug-gatenul: control bytes in an "adjusted" entry (a newline, a tab, a NUL) must be escaped
+        // (RFC 8259 §7) so the JSON stays valid and parses back to the same text
+        startfit::StartupInfo sc;
+        sc.adjusted = {std::string("a\nb\tc\0d\x1f", 8)};
+        const std::string jc = startfit::startupJson(sc);
+        CHECK(jc.find("\"adjusted\":[\"a\\nb\\tc\\u0000d\\u001f\"]") != std::string::npos);
+        bool parsed = false;
+        try {
+            const json::Value pv = json::parse(jc);
+            parsed = pv.get("adjusted") && pv.get("adjusted")->asArray().size() == 1 &&
+                     pv.get("adjusted")->asArray()[0].asString() == sc.adjusted[0];
+        } catch (const std::exception&) {
+        }
+        CHECK(parsed);
+    }
+    // bug-gatenul guard: whirl-server-gate's results.json joins reasoning / content / tool calls with NUL
+    // (ChatResult::text()); the writer escapes it as \u0000 and the --compare reader gets the same bytes back
+    {
+        const std::string t = std::string("think") + '\0' + "answer" + '\0' + "f(x);";
+        json::Object o;
+        o.set("basic/en_nothink", json::Value(t));
+        const std::string d = json::dumpPython(json::Value(o));
+        CHECK(d.find("think\\u0000answer\\u0000f(x);") != std::string::npos);
+        CHECK_EQ(json::parse(d).asObject().find("basic/en_nothink")->asString(), t);
     }
     // a Swift-like card: 16 GiB weights, 0.75 GiB fixed per slot, 36 KiB / token, ~11 GiB left with 1 slot
     vram::FitInput fi;
