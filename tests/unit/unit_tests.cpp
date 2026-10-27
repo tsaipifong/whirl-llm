@@ -45,6 +45,7 @@
 #include "../../kernels/gemm_small_addr.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -72,6 +73,7 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include <psapi.h>  // K32GetProcessMemoryInfo (arch025-surv testPlatformProcSurvivors)
 #endif
 
 using namespace whirl;
@@ -5113,8 +5115,122 @@ void testFsMappedOpen() {
     std::filesystem::remove_all(dir, ec);
 }
 
+#ifdef _WIN32
+// arch025-surv (mutation survivors pl4-exepath-nsize, pl4-ctrl-always, pl4-ws-peak; progress\arch025.MUTATION.md
+// class C): the platform::proc wrappers on the inputs the PL4 tests did not reach. Real OS, no seam: the exe-path and
+// console-control cases run this program as a child (the --child-lappdata pattern).
+
+// --child-exepath: exit code = platform::proc::exePath().size() (the parent starts a copy from a long path)
+static int childExePath() { return static_cast<int>(whirl::platform::proc::exePath().size()); }
+
+// --child-ctrl-passon: a handler registered through addCtrlHandler that returns false must pass the event on to the
+// handler registered before it (the OS calls the last-registered handler first). Exit code: 1 = our handler ran,
+// + 2 = the earlier handler got the event too. Runs in its own console (the parent's CREATE_NEW_CONSOLE), so the event
+// reaches no other process.
+static std::atomic<int> g_ctrl_seen{0};
+static std::atomic<int> g_ctrl_passed{0};
+static BOOL WINAPI ctrlEarlier(DWORD type) {
+    if (type == CTRL_BREAK_EVENT) g_ctrl_passed.store(1);
+    return TRUE;  // handled: the default handler (ExitProcess) is not reached
+}
+static bool ctrlPassOn(int type) {
+    if (type == whirl::platform::proc::kCtrlBreak) g_ctrl_seen.store(1);
+    return false;
+}
+static int childCtrlPassOn() {
+    if (!SetConsoleCtrlHandler(ctrlEarlier, TRUE)) return 10;
+    if (!whirl::platform::proc::addCtrlHandler(ctrlPassOn)) return 11;
+    if (!GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, 0)) return 12;
+    for (int i = 0; i < 500 && !(g_ctrl_seen.load() && g_ctrl_passed.load()); ++i) Sleep(10);
+    Sleep(100);  // a handler called late would still change the result
+    return g_ctrl_seen.load() + 2 * g_ctrl_passed.load();
+}
+
+// starts `exe` (any path form CreateProcessW takes) with one argument, hidden, its own console; exit code or ~0u
+static DWORD runSelfChild(const std::wstring& exe, const wchar_t* arg, bool new_console) {
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    PROCESS_INFORMATION pi{};
+    std::wstring cmd = L"\"" + exe + L"\" " + arg;
+    const DWORD flags = new_console ? CREATE_NEW_CONSOLE : CREATE_NO_WINDOW;
+    if (!CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, FALSE, flags, nullptr, nullptr, &si, &pi)) return ~0u;
+    if (WaitForSingleObject(pi.hProcess, 20000) != WAIT_OBJECT_0) TerminateProcess(pi.hProcess, 99);
+    DWORD code = ~0u;
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return code;
+}
+
+static void testPlatformProcSurvivors() {
+    namespace pproc = whirl::platform::proc;
+    std::vector<wchar_t> selfb(32768);
+    const DWORD sn = GetModuleFileNameW(nullptr, selfb.data(), static_cast<DWORD>(selfb.size()));
+    CHECK(sn > 0 && sn < selfb.size());
+    if (sn == 0 || sn >= selfb.size()) return;
+    const std::wstring self(selfb.data(), sn);
+
+    // (a) pl4-ws-peak: workingSetBytes is the CURRENT working set. Touch 256 MiB, release it: the peak keeps it, the
+    //     current working set drops again (the old test only checked > 0).
+    {
+        const std::size_t big = std::size_t{256} << 20;
+        void* p = VirtualAlloc(nullptr, big, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        CHECK(p != nullptr);
+        if (p != nullptr) {
+            std::memset(p, 0x5A, big);
+            VirtualFree(p, 0, MEM_RELEASE);
+        }
+        std::uint64_t ws = 0;
+        CHECK(pproc::workingSetBytes(pproc::currentProcess(), &ws));
+        PROCESS_MEMORY_COUNTERS pmc{};
+        CHECK(K32GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc)) != 0);
+        CHECK(pmc.PeakWorkingSetSize >= big);
+        CHECK(ws + (std::uint64_t{128} << 20) <= pmc.PeakWorkingSetSize);  // the mutant returns the peak itself
+        const std::uint64_t cur = pmc.WorkingSetSize;
+        CHECK((ws > cur ? ws - cur : cur - ws) < (std::uint64_t{64} << 20));  // == the direct read (moves a little)
+    }
+
+    // (b) pl4-ctrl-always: a handler returning false passes the event on (FALSE), true would swallow it
+    CHECK_EQ(runSelfChild(self, L"--child-ctrl-passon", true), static_cast<DWORD>(3));
+
+    // (c) pl4-exepath-nsize: started from a path of >= 1024 characters, exePath() is that path truncated to 1022
+    //     characters (GetModuleFileNameW(.., 1023) into a 1024-character buffer: 1022 + the terminating null; nSize
+    //     1024 would give 1023 and write buf[1024], one past the array). LongPathsEnabled is needed for the copy and
+    //     the start; without it the case is reported and skipped (no claim).
+    {
+        namespace fs = std::filesystem;
+        const fs::path base = whirl::test::testTmpBase() / (L"pl4-longpath-" + std::to_wstring(GetCurrentProcessId()));
+        std::wstring dir = L"\\\\?\\" + fs::absolute(base).wstring();
+        const std::wstring seg(200, L'd');
+        while (dir.size() - 4 + 1 + 16 < 1100) dir += L"\\" + seg;
+        std::error_code ec;
+        fs::create_directories(dir, ec);
+        const std::wstring exe = dir + L"\\whirl-tests.exe";
+        const bool copied = !ec && CopyFileW(self.c_str(), exe.c_str(), FALSE) != 0;
+        if (!copied) {
+            std::printf("  note: testPlatformProcSurvivors (c) skipped: long path copy failed (LongPathsEnabled?)\n");
+        } else {
+            const std::size_t len = exe.size() - 4;  // without the \\?\ prefix: what GetModuleFileNameW returns
+            CHECK(len >= 1024);
+            DWORD rc = runSelfChild(exe, L"--child-exepath", false);
+            if (rc == ~0u) rc = runSelfChild(exe.substr(4), L"--child-exepath", false);
+            if (rc == ~0u)
+                std::printf("  note: testPlatformProcSurvivors (c) skipped: CreateProcessW from a %zu-character path failed (%lu)\n",
+                            len, GetLastError());
+            else
+                CHECK_EQ(rc, static_cast<DWORD>(1022));
+        }
+        fs::remove_all(L"\\\\?\\" + fs::absolute(base).wstring(), ec);
+    }
+}
+#endif
+
 int main(int argc, char** argv) {
 #ifdef _WIN32
+    if (argc == 2 && std::string(argv[1]) == "--child-exepath") return childExePath();  // arch025-surv helper mode
+    if (argc == 2 && std::string(argv[1]) == "--child-ctrl-passon") return childCtrlPassOn();  // arch025-surv helper mode
     if (argc == 2 && std::string(argv[1]) == "--child-lappdata") return childLappdata();  // bug-lappdata helper mode
     if (argc == 2 && std::string(argv[1]) == "--child-envpaths") return childEnvPaths();  // bug-envpaths helper mode
 #endif
@@ -5194,6 +5310,9 @@ int main(int argc, char** argv) {
     testLogFolderEmpty();  // bug-launchlogroot
     testPlatformConsoleTime();
     testPlatformProc();  // arch025 PL4
+#ifdef _WIN32
+    testPlatformProcSurvivors();  // arch025-surv (pl4-ws-peak, pl4-ctrl-always, pl4-exepath-nsize)
+#endif
     testLeakCount();
     specsample_test::testSpecSample();
     testDflashPolicy();

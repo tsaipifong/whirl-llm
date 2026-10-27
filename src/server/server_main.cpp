@@ -45,6 +45,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstddef>  // offsetof (arch025-surv member-order guard)
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -887,7 +888,14 @@ public:
     ServerRun(Options& opt_, const numerics::Request& nreq_, const char* lad_, LoadedModel& lm_, bool hip_cache_user_,
               bool hip_cache_set_)
         : opt(opt_), nreq(nreq_), lad(lad_), lm(lm_), model(*lm_.mp), tok(*lm_.tok), hip_cache_user(hip_cache_user_),
-          hip_cache_set(hip_cache_set_) {}
+          hip_cache_set(hip_cache_set_) {
+        // arch025-surv (mutation survivor c1b-tierio-order): members are destroyed in reverse declaration order, so
+        // tier_io_stop (declared after the engine) joins the tier IO thread before ~Engine runs (its wake callback calls
+        // into the engine, FR-CACHE P3-5), and the tiers outlive the engine (bug-server-exit-av). Only a graceful
+        // shutdown with a busy tier would show a wrong order, so the order is checked here at compile time.
+        static_assert(offsetof(ServerRun, tier_io_stop) > offsetof(ServerRun, engine), "tier_io_stop must be declared after engine");
+        static_assert(offsetof(ServerRun, engine) > offsetof(ServerRun, tier_owned), "the tiers must be declared before engine");
+    }
     void planSlots();  // the slot re-check after loading (--parallel lowered to what fits), then startup::setupSlots
     void makeEngine();  // the engine options, the backend, the Engine, and the checkpoint VRAM around allocState (mem_ck0 / mem_ck1)
     void reserveRamTier();  // the RAM tier's size (pinned room measured now) and its pinned allocation, before the KV pool is sized
@@ -1897,8 +1905,7 @@ int ServerRun::runServer() {
     // event stops the engine: graceful shutdown, see onConsoleCtrl)
     g_stopped = platform::proc::createEvent();
     g_engine.store(&*engine);
-    platform::proc::restoreCtrlC();  // an "ignore Ctrl+C" attribute inherited from the parent would hide Ctrl+C
-    platform::proc::addCtrlHandler(onConsoleCtrl);
+    startup::armConsoleCtrl(onConsoleCtrl);  // restoreCtrlC, addCtrlHandler (src/server/startup_steps.h)
     engine->runLoop();
     http.stop();
     logI("server stopped");

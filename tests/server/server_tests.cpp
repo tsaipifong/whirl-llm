@@ -8885,7 +8885,48 @@ void testRevS5aR4RestartProbe() {
     }
 }
 
+// arch025-surv (mutation survivor pl4-ctrl-restore, progress\arch025.MUTATION.md class C): startup::armConsoleCtrl
+// (runServer's last step before runLoop) clears an inherited "ignore Ctrl+C" attribute before it registers the handler,
+// so a Ctrl+C reaches onConsoleCtrl. The child (this program, --child-ctrl-arm, its own hidden console so the event
+// reaches no other process) sets the attribute itself (what a parent started with CREATE_NEW_PROCESS_GROUP or
+// SetConsoleCtrlHandler(nullptr, TRUE) passes on), arms, sends CTRL_C_EVENT to its console. Exit code 1 = handled.
+static std::atomic<int> g_child_ctrl_c{0};
+static bool childCtrlOn(int type) {
+    if (type == whirl::platform::proc::kCtrlC) g_child_ctrl_c.store(1);
+    return true;
+}
+static int childCtrlArm() {
+    if (!SetConsoleCtrlHandler(nullptr, TRUE)) return 10;  // the inherited "ignore Ctrl+C" attribute
+    whirl::server::startup::armConsoleCtrl(childCtrlOn);
+    if (!GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0)) return 12;
+    for (int i = 0; i < 300 && !g_child_ctrl_c.load(); ++i) Sleep(10);
+    return g_child_ctrl_c.load();
+}
+void testConsoleCtrlArm() {
+    std::vector<wchar_t> b(32768);
+    const DWORD n = GetModuleFileNameW(nullptr, b.data(), static_cast<DWORD>(b.size()));
+    CHECK(n > 0 && n < b.size());
+    if (n == 0 || n >= b.size()) return;
+    const std::wstring self(b.data(), n);
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    PROCESS_INFORMATION pi{};
+    std::wstring cmd = L"\"" + self + L"\" --child-ctrl-arm";
+    const bool started = CreateProcessW(self.c_str(), cmd.data(), nullptr, nullptr, FALSE, CREATE_NEW_CONSOLE, nullptr, nullptr, &si, &pi) != 0;
+    CHECK(started);
+    if (!started) return;
+    if (WaitForSingleObject(pi.hProcess, 20000) != WAIT_OBJECT_0) TerminateProcess(pi.hProcess, 99);
+    DWORD code = ~0u;
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    CHECK_EQ(code, static_cast<DWORD>(1));  // 0 = the Ctrl+C was ignored (restoreCtrlC not called)
+}
+
 int main(int argc, char** argv) {
+    if (argc == 2 && std::string(argv[1]) == "--child-ctrl-arm") return childCtrlArm();  // arch025-surv helper mode
     whirl::test::clearWhirlEnv();  // FR-TEST P3-11
     // arch024 M8: the test program is the "test build": an owner check violation throws std::logic_error; every test
     // must end with no violation other than the ones it causes on purpose (g_owner_expected)
@@ -8929,6 +8970,7 @@ int main(int argc, char** argv) {
     };
     const std::vector<T> tests = {
         {"vision", testVision},
+        {"console_ctrl_arm", testConsoleCtrlArm},  // arch025-surv
         {"draft_caps", testDraftCaps},
         {"protocol", testProtocol},
         {"sampler", testSampler},

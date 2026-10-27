@@ -18,6 +18,7 @@
 #include "draft_caps.h"
 #include "log.h"
 #include "model/arch_registry.h"
+#include "platform/proc.h"  // armConsoleCtrl (arch025-surv)
 #include "whirl/dflash_policy.h"
 #include "whirl/gguf.h"
 #include "whirl/model.h"
@@ -221,6 +222,16 @@ SlotSetup setupSlots(M& model, device::Backend& ops, const SlotSetupIn& in, cons
 template <class M>
 void allocKvPool(M& model, std::uint32_t tokens, const SlotSetup&) {
     model.allocKvPool(tokens);
+}
+
+// --- console control (the last startup step before runLoop) --------------------------------------------------------
+
+// arch025-surv: the two calls of runServer moved here verbatim (mutation survivor pl4-ctrl-restore), so the server
+// tests run them in a child with its own console and an inherited "ignore Ctrl+C" attribute
+// (tests/server/server_tests.cpp testConsoleCtrlArm).
+inline void armConsoleCtrl(platform::proc::CtrlHandler on_ctrl) {
+    platform::proc::restoreCtrlC();  // an "ignore Ctrl+C" attribute inherited from the parent would hide Ctrl+C
+    platform::proc::addCtrlHandler(on_ctrl);
 }
 
 }  // namespace whirl::server::startup

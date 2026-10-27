@@ -8,6 +8,7 @@
 #include "whirl/gpu_select.h"
 #include "config/env_snapshot.h"
 #include "platform/proc.h"
+#include "model/device_lock.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -15,8 +16,8 @@
 
 namespace whirl::qwen35 {
 
-namespace {
-
+// arch025-surv: out of the anonymous namespace (declared in src/model/device_lock.h) so whirl-model-tests
+// testLockGpuAbandoned reaches it (mutation survivor pl4-wait-abandoned); the body is unchanged.
 // One model process per GPU: a named mutex per GPU (gpusel::lockName: uuid, else PCI address - after the
 // restriction every WHIRL process sees its GPU as index 0), held until the process exits. A second WHIRL
 // process on the same GPU waits (reporting every 30 s, up to WHIRL_GPU_WAIT seconds, default 1800).
@@ -44,8 +45,6 @@ void lockGpu(const gpusel::GpuRecord& g, const whirl::config::EnvSnapshot& env) 
         if (waited >= limit_s) throw ModelError("GpuBusy");
     }
 }
-
-}  // namespace
 
 const gpusel::Restriction& restrictDevice(std::string_view spec) {
     try {

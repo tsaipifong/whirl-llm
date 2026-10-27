@@ -198,6 +198,31 @@ def pool_chain(replay: int, logged: int, rounds: list, page: int) -> list:
     return bad
 
 
+# arch025-surv (mutation survivors c1a-main-mem0, c1b-mem-t1): the (B) measured VRAM values are not compared by value,
+# but three of the VRAM lines have a sign that holds on every run: a measuring point that is never read prints 0 there
+# (gib() / the MiB difference clamp at 0). Checked only when the line is present. Measured on the 93 recorded server
+# logs of scratch25_c1b_gpu (both GPUs, 2026-10-27): weights + buffers 16.08 .. 21.19 GiB, at start >= after weights,
+# tier stream 12.8 .. 18445.9 MiB; never 0.
+VALUE_RULES = [
+    (re.compile(r"VRAM use: weights \+ buffers ([0-9.]+) GiB"), lambda v: float(v[0]) > 0,
+     "VRAM use: weights + buffers is 0 (the VRAM before the load, mem0, was not read)"),
+    (re.compile(r"\(after weights ([0-9.]+), at start ([0-9.]+)\)"), lambda v: float(v[1]) > 0 and float(v[1]) >= float(v[0]),
+     "VRAM free at start is 0 or below the free VRAM after the weights (mem0 not read)"),
+    (re.compile(r"VRAM taken by the tier stream / pinned arena mapping: ([0-9.]+) MiB"), lambda v: float(v[0]) > 0,
+     "kv tier: VRAM taken by the tier stream is 0 (mem_t1 not read after the tier stream)"),
+]
+
+
+def value_problems(log: str) -> list:
+    bad = []
+    for l in log.splitlines():
+        for rx, ok, why in VALUE_RULES:
+            m = rx.search(l)
+            if m and not ok(m.groups()):
+                bad.append(f"value: {why}: {l.strip()[:200]}")
+    return bad
+
+
 def check(log: str, exe: str) -> list:
     text = inputs_line(log)
     if text is None:
@@ -205,7 +230,7 @@ def check(log: str, exe: str) -> list:
     bad = format_problems(text)
     if bad:
         return bad
-    return compare(log, replay_lines(exe, text), parse_kv(text))
+    return compare(log, replay_lines(exe, text), parse_kv(text)) + value_problems(log)
 
 
 def selftest(exe: str) -> int:
@@ -265,6 +290,11 @@ def selftest(exe: str) -> int:
         "pin.pinned_max=1575485440", "pinned_max_placeholder")
     b_changed = b_changed.replace("pinned_max_placeholder", "pin.pinned_max=9663676416")
     good = log_for(base_in)
+    vram_lines = ("2026-10-27 19:30:01.100 I kv tier: VRAM taken by the tier stream / pinned arena mapping: 12.8 MiB (before the pool was sized)\n"
+                  "2026-10-27 19:30:01.101 I VRAM use: weights + buffers 16.08 GiB (prefill batch 512, embedding in VRAM), slots 0.58 GiB, "
+                  "other 0.10 GiB, checkpoints 0.50 GiB, KV pool 9.85 GiB, left 3.83 GiB\n"
+                  "2026-10-27 19:30:01.102 I context 131072 tokens per request, pool 313856 tokens; VRAM free 3.83 / 31.86 GiB "
+                  "(after weights 15.63, at start 31.71)\n")
     cases = [
         ("pass: log made from the replay", good, 0),
         ("block: a (C) value changed (RAM tier size)", re.sub(r"RAM tier size (\d+) MiB", lambda m: f"RAM tier size {int(m.group(1)) + 512} MiB", good), 1),
@@ -284,6 +314,10 @@ def selftest(exe: str) -> int:
          pool_log([256, 512]).replace(f"from {p0 - 256} to {p0 - 512}", f"from {p0 - 1024} to {p0 - 512}"), 1),
         ("block: re-check 'shrank' to a larger pool", pool_log([-256]), 1),
         ("block: re-check to a size that is not whole pages", pool_log([100]), 1),
+        ("pass: VRAM lines of a real run (R9700, c1b GPU check)", good + vram_lines, 0),
+        ("block: weights + buffers 0 and at start 0 (mem0 not read: c1a-main-mem0)",
+         good + vram_lines.replace("weights + buffers 16.08", "weights + buffers 0.00").replace("at start 31.71", "at start 0.00"), 1),
+        ("block: tier stream 0 MiB (mem_t1 not read: c1b-mem-t1)", good + vram_lines.replace("mapping: 12.8 MiB", "mapping: 0.0 MiB"), 1),
     ]
     bad = 0
     for name, log, want in cases:
