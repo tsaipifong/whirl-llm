@@ -407,8 +407,6 @@
    "paths": ["src/model/qwen35/forward/vision_rows.cpp"], "lands_on": "arch025-f4 (F4)",
    "steps": ["cpu_model", "cpu_vision", "st_swift_precise", "golden_swift", "vis_ab", "srv_vis"],
    "gpus": {"st_swift_precise": 2, "golden_swift": 2, "vis_ab": 1, "srv_vis": 1},
-   "pending": [{"step": "vis_ab", "lands_in": "arch025-Q6 (tools/gates/vis_ab.ps1)"},
-               {"step": "srv_vis", "lands_in": "arch025-Q6 (server-gate suite vis)"}],
    "manual": ["visab one GPU: base exe vs new exe, vis-encode resident / stream and chat --image (WHIRL_VIS_DUMP) embeddings byte-identical, answer text identical",
               "V-work: launch table under WHIRL_LAUNCH_LOG == S0b (text rows: visRowsCur / visCommit run on every forward)"]
   },

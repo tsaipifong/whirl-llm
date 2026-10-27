@@ -86,10 +86,13 @@ inline std::FILE* openUnique(const std::string& dir, const std::string& prefix, 
     return nullptr;
 }
 
-// the same for this process
+// the same for this process. The start string is never destroyed (as Recorder in launch_log.cpp / alloc_log.cpp): both
+// writers run from atexit, and a function-local static std::string first built inside the first writer registers its
+// destructor during exit, which then runs before the second writer (MSVC CRT) - the second file got "<prefix><pid>_.txt"
+// (arch025-int4 full verification: whirl-tests envpaths B, launch_36852_.txt next to a correct alloc_<pid>_<start>.txt).
 inline std::FILE* openUnique(const std::string& dir, const std::string& prefix, const char* ext, std::string* stem) {
-    static const std::string start = processStart();
-    return openUnique(dir, prefix, processId(), start, ext, stem);
+    static const std::string* const start = new std::string(processStart());
+    return openUnique(dir, prefix, processId(), *start, ext, stem);
 }
 
 // creates <dir>\<stem><ext> exclusively (the RAW dump next to a table); nullptr if it exists

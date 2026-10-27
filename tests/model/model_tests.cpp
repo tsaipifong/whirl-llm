@@ -3782,7 +3782,21 @@ EnvChild runEnvChild(const std::wstring& self, std::vector<std::pair<std::wstrin
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
     std::ifstream in(out_file, std::ios::binary);
-    r.out.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    const std::string all{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+    // arch025-int4: in a WHIRL_LEAKCHECK build (cpu_asan) the NullBackend ledger prints "LEAKCHECK: ..." on stderr at exit
+    // (the fixed environment has no WHIRL_LEAKCHECK_QUIET), into the same file: those lines are not the child's answer.
+    // A leak still shows as exit code 97, which every caller checks. The child's own answer has no newline, so the
+    // ledger line can follow it on the same line: each "LEAKCHECK: " up to and including its newline is dropped.
+    for (std::size_t p = 0; p < all.size();) {
+        const std::size_t k = all.find("LEAKCHECK: ", p);
+        if (k == std::string::npos) {
+            r.out.append(all, p, std::string::npos);
+            break;
+        }
+        r.out.append(all, p, k - p);
+        const std::size_t e = all.find('\n', k);
+        p = e == std::string::npos ? all.size() : e + 1;
+    }
     return r;
 }
 
