@@ -41,6 +41,8 @@ target_link_libraries(whirl_cache PUBLIC whirl whirl_tier_core)
 add_executable(whirl-cache-tests ${CMAKE_SOURCE_DIR}/tests/cache/cache_tests.cpp)
 target_include_directories(whirl-cache-tests PRIVATE ${CMAKE_SOURCE_DIR}/tests/cache)
 target_link_libraries(whirl-cache-tests PRIVATE whirl_cache)
+# arch025-i6vis: testFingerprintEnvClassified scans src/ and include/ for the WHIRL_* names the source reads
+target_compile_definitions(whirl-cache-tests PRIVATE WHIRL_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 if(TARGET whirl-tier-tests)
   target_link_libraries(whirl-tier-tests PRIVATE whirl_cache)
 endif()
