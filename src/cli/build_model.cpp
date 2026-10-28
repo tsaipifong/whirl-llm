@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "cli/cli.h"
+#include "config/device_choice.h"  // the GPU choice shared with the server (arch025-N15b)
 
 namespace cli {
 
@@ -13,7 +14,7 @@ namespace cli {
 // (old experiment); off = full head. Special and byte tokens are always added.
 void applyDraftVocab(q::Model& model, const Tokenizer& tok) {
     using K = q::DraftVocabChoice::Kind;
-    const q::DraftVocabChoice dv = q::draftVocabChoice(envGet("DRAFT_VOCAB"), q::exeDirectory());
+    const q::DraftVocabChoice dv = q::draftVocabChoice(whirl::settings::draftVocab(), q::exeDirectory());
     if (dv.kind == K::first_n) {
         model.draft_vocab = dv.n;
         return;
@@ -54,7 +55,7 @@ namespace {
 std::optional<std::string> draftModelOpt(const Args& a) {
     std::optional<std::string> cli;
     if (a.get("--draft-model")) cli = *a.get("--draft-model");
-    return whirl::dflash::resolveDraftModel(cli, envGet("DRAFT_MODEL"));
+    return whirl::dflash::resolveDraftModel(cli, whirl::settings::draftModel());
 }
 }  // namespace
 bool wantDFlash(const Args& a, const gguf::File& f) {
@@ -65,7 +66,7 @@ bool wantDFlash(const Args& a, const gguf::File& f) {
     if (*src == whirl::dflash::Source::dflash) {
         std::optional<std::string> cli;
         if (a.get("--draft-model")) cli = *a.get("--draft-model");
-        if (const std::string note = whirl::dflash::draftModelNote(cli, envGet("DRAFT_MODEL")); !note.empty())
+        if (const std::string note = whirl::dflash::draftModelNote(cli, whirl::settings::draftModel()); !note.empty())
             std::fprintf(stderr, "note: %s\n", note.c_str());
     }
     std::string why;
@@ -121,20 +122,13 @@ void applyRuntimeEnv(q::Model& m, bool gdn_v0) {
 }
 
 int selectDevice(const Args& a, std::string* info_line) {
-    int dev;
-    int shown;  // the index as `whirl devices` prints it (before the restriction)
-    std::string gpu_note;
-    if (auto v = envGet("HIP_DEVICE")) {
-        dev = shown = std::stoi(*v);
-    } else {
-        // s8-719 root fix: choose the GPU and make the HIP runtime see only it, before the first HIP call
-        const std::string spec = a.get("--device") ? *a.get("--device") : std::string();
-        const whirl::gpusel::Restriction& r = q::restrictDevice(spec);
-        gpu_note = r.note;
-        dev = q::pickDevice(spec);
-        shown = r.active ? r.all[r.selected[0]].index : dev;
-        if (!gpu_note.empty()) std::fprintf(stderr, "whirl: %s\n", gpu_note.c_str());
-    }
+    // the GPU choice shared with the server (src/config/device_choice.h, arch025-N15b): WHIRL_HIP_DEVICE, else the
+    // s8-719 restriction + pickDevice; the restriction note goes to stderr before pickDevice
+    const std::string spec = a.get("--device") ? *a.get("--device") : std::string();
+    const whirl::settings::DeviceChoice ch = whirl::settings::chooseDevice(spec, settingsWarn, settingsWarn);
+    const int dev = ch.dev;
+    const int shown = ch.shown;  // the index as `whirl devices` prints it (before the restriction)
+    const std::string& gpu_note = ch.note;
     const hip::DeviceInfo info = hip::describeDevice(dev);
     hip::setDevice(dev);
     if (info_line)
@@ -146,7 +140,7 @@ int selectDevice(const Args& a, std::string* info_line) {
 
 // numerics mode: --precise / --balance[=items] / --fast[=items] / --mode M, else WHIRL_MODE, else balance
 whirl::numerics::Request modeRequest(const Args& a) {
-    return whirl::numerics::resolve(a.get("--mode") ? std::optional<std::string>(*a.get("--mode")) : std::nullopt, envGet("MODE"));
+    return whirl::numerics::resolve(a.get("--mode") ? std::optional<std::string>(*a.get("--mode")) : std::nullopt, whirl::settings::mode());
 }
 
 // ctx_explicit: the context was asked for (--ctx / WHIRL_MAX_CTX, bench sizes): precise f16 KV that
@@ -159,7 +153,7 @@ Loaded loadModel(const Args& a, const gguf::File& f, u32 max_ctx, bool ctx_expli
     lo.ctx_explicit = ctx_explicit;
     lo.min_ctx = min_ctx;
     lo.no_mtp = no_mtp;
-    if (auto v = envU32("PREFILL_BATCH")) lo.max_batch = std::max(q::max_batch_default, std::min(q::max_batch_limit, *v));
+    if (auto v = whirl::settings::prefillBatch(settingsWarn)) lo.max_batch = std::max(q::max_batch_default, std::min(q::max_batch_limit, *v));
     lo.kv_req = q::kvRequestFromEnv();
     L.model = q::Model::load(f, max_ctx, L.stats, lo);
     q::Model& m = *L.model;

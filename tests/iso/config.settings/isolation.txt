@@ -1,0 +1,18 @@
+# ARCH-1 8.5 isolation check of config.settings (arch025-N15): the run settings both front ends read
+# (src/config/run_settings.*). Format: tests/sampling/isolation.txt; read by cmake/iso.cmake and tools/gates/iso_check.py.
+# declared dependencies: platform.env (src/platform/env_win.cpp, the raw environment read)
+module    config.settings
+exe       whirl-iso-config-settings-tests
+mutate    src/config/run_settings.cpp
+mutsym    hip
+mutsym    log
+mutsym    now
+# module sources
+src       src/config/run_settings.cpp
+src       src/platform/env_win.cpp
+# headers (include closure of the sources above)
+hdr       src/config/run_settings.h
+hdr       src/platform/env.h
+# test program
+testsrc   tests/iso/config.settings/settings_tests.cpp
+testhdr   tests/iso/iso_test.h

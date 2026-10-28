@@ -230,6 +230,7 @@ endif()
 # area fragments: each source area has its own cmake/<area>.cmake
 
 include(cmake/ops.cmake)  # kernel choice per op (ARCH-1 K-1..K-5)
+include(cmake/settings.cmake)  # run settings shared by the CLI and the server (src/config/run_settings.*, arch025-N15)
 include(cmake/spec.cmake)  # speculative-decoding policy (src/spec, arch025-M4), host-only; before server / model
 include(cmake/arch.cmake)  # architecture registry (src/model/arch_registry.*, arch025-M5), host-only; before server / model
 include(cmake/server.cmake OPTIONAL)

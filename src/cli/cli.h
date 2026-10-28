@@ -24,6 +24,7 @@
 #include "whirl/tokenizer.h"
 #include "whirl/uma_mem.h"
 #include "whirl/vram_limit.h"
+#include "config/run_settings.h"  // the run settings the CLI shares with the server (arch025-N15)
 
 #if WHIRL_HAVE_SERVER
 #include "server/server_main.h"
@@ -104,7 +105,10 @@ struct Args {
 // common.cpp
 Args parseArgs(const std::vector<std::string>& argv, std::size_t from);
 std::vector<u32> parseIds(const std::string& list);
+// WHIRL_<name> as an unsigned number: the shared rule (settings::envU32; a bad value warns on stderr, arch025-N15)
 std::optional<u32> envU32(const char* name);
+// the CLI's settings::Warn: "whirl: <text>" on stderr
+void settingsWarn(const std::string& msg);
 
 // build_model.cpp
 void applyDraftVocab(q::Model& model, const Tokenizer& tok);

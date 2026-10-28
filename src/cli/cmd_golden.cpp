@@ -68,8 +68,8 @@ int goldenSingle(const Args& a, const gguf::File& f, const Tok& tok, u32 n_dec, 
         std::string log;
         q::loadOrTune(m, a.pos[0], log);
     }
-    const bool mtp = m.mtp.has_value() && envFlag("MTP", true);
-    if (mtp && envFlag("MTP_Q4", true)) m.requantMtpQ4();
+    const bool mtp = m.mtp.has_value() && whirl::settings::mtp();
+    if (mtp && whirl::settings::mtpQ4()) m.requantMtpQ4();
     applyRuntimeEnv(m);
     gout(fmt("info kv=%s max_ctx=%u mtp=%d fused=%d", m.kvName(), m.max_ctx, mtp ? 1 : 0, m.fusedDecode() ? 1 : 0));
     GoldenRow gr;
@@ -150,8 +150,8 @@ int goldenPair(const Args& a, const gguf::File& f, const Tok& tok, u32 n_dec) {
         std::string log;
         q::loadOrTune(m, a.pos[0], log);
     }
-    const bool mtp = m.mtp.has_value() && envFlag("MTP", true);
-    if (mtp && envFlag("MTP_Q4", true)) m.requantMtpQ4();
+    const bool mtp = m.mtp.has_value() && whirl::settings::mtp();
+    if (mtp && whirl::settings::mtpQ4()) m.requantMtpQ4();
     if (mtp) {
         m.buildDraftHeadEx(q::Model::DraftHeadKind::d2);
         applyDraftVocab(m, tok.t);

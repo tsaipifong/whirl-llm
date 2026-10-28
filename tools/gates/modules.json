@@ -220,6 +220,12 @@
                    "proof": {"refactor": ["exit_rule", "golden_exact", "move_equal", "host_work", "host_time"]}},
    "spec.engine": {"metrics": ["host.sched.round_us_per_cycle", "host.sched.request_ms"],
                    "proof": {"refactor": ["exit_rule", "golden_exact", "move_equal", "host_work", "host_time"]}},
+   "spec.rules": {"metrics": ["host.sched.round_us_per_cycle", "host.sched.request_ms"],
+                  "proof": {"refactor": ["exit_rule", "golden_exact", "move_equal", "host_work", "host_time"]}},
+   "config.settings": {"metrics": [], "metrics_none": "WHIRL_* settings are read at startup / per command: no bench key",
+                       "proof": {"refactor": ["exit_rule", "golden_exact", "startup_sizing"]}},
+   "config.device": {"metrics": [], "metrics_none": "the GPU is chosen once per process: no bench key",
+                     "proof": {"refactor": ["exit_rule", "golden_exact", "startup_sizing"]}},
    "model.arch_registry": {"metrics": [], "metrics_none": "table lookup at load: no bench key",
                            "proof": {"refactor": ["exit_rule", "golden_exact", "startup_sizing"]}},
    "model.qwen35": {"metrics": ["stage.decode_step", "stage.verify", "stage.prefill_chunk"],
@@ -602,6 +608,38 @@
               "whirl-server-tests slot_draft_plan / slot_draft_split / slot_draft_cap / slot_drafts_one_slot / concurrency_slot2*",
               "V-srv: srv_mt_precise / _moe + golden server == the parent exe on both GPUs (draftCap reaches every MTP cycle; WHIRL_SLOT_DRAFTS stays 0 on the GPU)",
               "V-host sched: whirl-host-bench --backend null --suite sched work rows exact vs the parent exe"]
+  },
+  "spec.rules": {
+   "id": "R12cli", "desc": "the speculative-decoding RULES shared by the CLI specDecode (src/cli/decode.cpp) and the server Engine decode phases (src/server/engine.cpp) (src/spec/spec_rules.h, header-only, pure; arch025-R12cli route B, owner 2026-10-28): decodeRoom (context stop, D8), ctxRoom / ngramDraftCap (n-gram draft cap, D3), soloDraftCap (one-sequence MTP draft cap = slotDraftCap for one slot, D14), ngramAltDrafts / mtpScore (the MTP draft count and score an n-gram proposal is weighed against, D2), relaxRepeats (relaxacc repetition guard on prompt + trunk, D1), synthCycleMs (relaxacc synthetic cycle cost, D6); draft acceptance is sampling::Acceptor (module sampling), called by both loops",
+   "paths": ["src/spec/spec_rules.h"], "lands_on": "arch025-r12cli (R12cli)",
+   "steps": ["cpu_server", "golden_swift", "golden_moe", "srv_mt_precise", "srv_mt_precise_moe"],
+   "gpus": {"golden_swift": 2, "golden_moe": 2, "srv_mt_precise": 2, "srv_mt_precise_moe": 2},
+   "callers": "rdeps",
+   "manual": ["whirl-server-tests spec_rules_* (each rule == the f68a9aa engine / decode code verbatim; D1 / D2 CLI side == the server rule; D14 equivalence)",
+              "V-srv: server golden + srv_mt_precise / _moe == the parent exe on both GPUs (server output unchanged in all modes); server object code compared with the parent's (objeq)",
+              "V-cli: CLI golden single / pair / ngram x Swift / Ornith x precise and the default (balanced) mode == the parent exe; fast: the changed cases listed, task accuracy vs precise (fast standard); cmp_mtp*; CLI speed vs 0.2.4",
+              "isolation: no per-module iso build yet (arch025-isoall not in int4 at f68a9aa); the header includes spec/policy.h, spec/slot_drafts.h, whirl/model_types.h, whirl/relax_accept.h only"]
+  },
+  "config.settings": {
+   "id": "N15", "desc": "the WHIRL_* run settings the CLI (src/cli) and whirl-server (src/server/server_main.cpp) both read, one parse rule each (src/config/run_settings.*, library whirl_settings, links whirl_platform only; arch025-N15, the shape of llama.cpp common_params / common_arg): envGet / envFlag / envU32 (with a default, or optional) / parseU32 (the server's envU32 rule: whole decimal value <= 2^32-1, else a warning and the default), the 11 shared names (MTP, MTP_Q4, TAIL_CK, DRAFT_HEAD, DRAFT_MODEL, DRAFT_VOCAB, MODE, MTP_ADAPT, PREFILL_BATCH, PREFILL_CHUNK, SYS_MIN)",
+   "paths": ["src/config/run_settings.h", "src/config/run_settings.cpp", "cmake/settings.cmake", "tests/iso/config.settings/isolation.txt", "tests/iso/config.settings/settings_tests.cpp"],
+   "lands_on": "arch025-r12cli (lane 1, N15)",
+   "steps": ["cpu_iso_config_settings", "cpu_server", "cpu_cli_tests", "golden_swift", "golden_moe", "srv_mt_precise", "srv_mt_precise_moe", "st_swift_precise", "st_swift_balance", "st_swift_fast", "st_moe_precise", "st_moe_balance", "st_moe_fast", "srv_gpu_select"],
+   "gpus": {"golden_swift": 2, "golden_moe": 2, "srv_mt_precise": 2, "srv_mt_precise_moe": 2, "st_swift_precise": 2, "st_swift_balance": 2, "st_swift_fast": 2, "st_moe_precise": 2, "st_moe_balance": 2, "st_moe_fast": 2, "srv_gpu_select": 2},
+   "callers": "rdeps",
+   "manual": ["whirl-iso-config-settings-tests: parseU32 == the 3eef475 server envU32 on every listed text, the 3eef475 CLI envU32 differs only on malformed values (12 / 12x / 0x10 / 3.5); MTP_ADAPT == the server rule; unset = the former defaults",
+              "V-cli / V-srv: CLI golden + server golden + srv_mt + st_* == the parent exe on both GPUs with every WHIRL_* unset (work_equal, the lane-1 GPU runner)",
+              "server startup log lines A vs B: tools/gates/startup_lines.py (a bad value's warning text is the former envU32 text)"]
+  },
+  "config.device": {
+   "id": "N15b", "desc": "the GPU choice of whirl.exe and whirl-server (src/config/device_choice.h, header-only, arch025-N15b): settings::chooseDevice = WHIRL_HIP_DEVICE (the settings u32 rule; a bad value warns and uses 0), else qwen35::restrictDevice (s8-719: the runtime sees only the chosen GPU; its note goes to the caller's log before pickDevice) + qwen35::pickDevice; the shown index as the device list prints it. Was written twice (src/cli/build_model.cpp selectDevice, src/server/server_main.cpp)",
+   "paths": ["src/config/device_choice.h"],
+   "lands_on": "arch025-r12cli (lane 1, N15b)",
+   "steps": ["cpu_device_once", "cpu_cli_tests", "cpu_emptyroot", "srv_gpu_select", "golden_swift", "golden_moe"],
+   "gpus": {"srv_gpu_select": 2, "golden_swift": 2, "golden_moe": 2},
+   "callers": "rdeps",
+   "manual": ["device lines of every golden / server log on both GPUs == the parent exe (startup_lines.py; the lane-1 GPU runner checks the arch per case)",
+              "isolation: header-only on top of the model layer's device selection (include/whirl/model.h); no own iso program (needs HIP)"]
   },
   "model.arch_registry": {
    "id": "M5a", "desc": "architecture registry (src/model/arch_registry.*, host-only library whirl_arch, linked by the server core and the model library): ArchName / ArchSizing / ArchModule / ArchTable, findArch / findArchName (explicit tables, no self-registration), the UnsupportedArch text generated from the table (byte-identical to v0.2.4 with the product table), slotStateBytes (the server's per-slot recurrent state + replay rows for the dGPU fit and the UMA check)",

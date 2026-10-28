@@ -49,6 +49,14 @@
   ],
   [
    "cli",
+   "config.device"
+  ],
+  [
+   "cli",
+   "config.settings"
+  ],
+  [
+   "cli",
    "file:include/whirl/dflash_policy.h"
   ],
   [
@@ -101,6 +109,14 @@
   ],
   [
    "cli",
+   "sampling"
+  ],
+  [
+   "cli",
+   "spec.rules"
+  ],
+  [
+   "cli",
    "tokenizer"
   ],
   [
@@ -114,6 +130,22 @@
   [
    "common.base",
    "platform.fs"
+  ],
+  [
+   "config.device",
+   "config.settings"
+  ],
+  [
+   "config.device",
+   "file:include/whirl/model.h"
+  ],
+  [
+   "config.device",
+   "gpu_select"
+  ],
+  [
+   "config.settings",
+   "platform.env"
   ],
   [
    "contract",
@@ -650,6 +682,10 @@
   [
    "file:src/server/engine.cpp",
    "file:src/server/log.h"
+  ],
+  [
+   "file:src/server/engine.cpp",
+   "spec.rules"
   ],
   [
    "file:src/server/engine.h",
@@ -1253,6 +1289,14 @@
   ],
   [
    "server.startup",
+   "config.device"
+  ],
+  [
+   "server.startup",
+   "config.settings"
+  ],
+  [
+   "server.startup",
    "contract"
   ],
   [
@@ -1386,6 +1430,22 @@
   [
    "spec.policy",
    "vision"
+  ],
+  [
+   "spec.rules",
+   "accept_policy"
+  ],
+  [
+   "spec.rules",
+   "model.scratch"
+  ],
+  [
+   "spec.rules",
+   "spec.engine"
+  ],
+  [
+   "spec.rules",
+   "spec.policy"
   ],
   [
    "threads",

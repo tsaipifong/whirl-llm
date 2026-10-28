@@ -38,6 +38,8 @@
 #include "whirl/mem_governor.h"
 #include "whirl/tokenizer.h"
 #include "whirl/uma_mem.h"
+#include "config/run_settings.h"  // the run settings the server shares with the CLI (arch025-N15)
+#include "config/device_choice.h"  // the GPU choice shared with the CLI (arch025-N15b)
 #include "whirl/vram_limit.h"
 #include "whirl/wddm_watch.h"
 #include "release/release.h"
@@ -179,21 +181,13 @@ std::string g_program = "whirl-server";
     std::exit(app::exit_usage);
 }
 
-std::optional<std::string> env(std::string_view name) { return envGet(name); }
+std::optional<std::string> env(std::string_view name) { return settings::envGet(name); }
 
-std::uint32_t envU32(std::string_view name, std::uint32_t def) {
-    if (auto v = env(name)) {
-        try {
-            std::size_t used = 0;
-            const unsigned long x = std::stoul(*v, &used);
-            if (used == v->size() && x <= 0xffffffffull) return static_cast<std::uint32_t>(x);
-        } catch (const std::exception&) {
-        }
-        // FR-SRV P3-10: a bad value is a warning and the default, never a startup failure
-        logW("WHIRL_{}={} is not a number; using {}", name, *v, def);
-    }
-    return def;
-}
+// the server's settings::Warn (a bad WHIRL_* value: a warning line, never a startup failure; FR-SRV P3-10)
+void settingsWarn(const std::string& msg) { logW("{}", msg); }
+
+// (arch025-N15: the rule is settings::envU32, shared with the CLI)
+std::uint32_t envU32(std::string_view name, std::uint32_t def) { return settings::envU32(name, def, settingsWarn); }
 
 // WHIRL_DRAFT_VOCAB (default: the embedded 64k subset on dense qwen35 models with the 248320-token
 // vocabulary): keep only that vocabulary subset of the 2-bit draft head (special and byte tokens are
@@ -237,10 +231,7 @@ void applyDraftVocab(qwen35::Model& model, const Tokenizer& tok, const qwen35::D
         logW("WHIRL_DRAFT_VOCAB ignored: it needs the 2-bit draft head (Q6_K output head, WHIRL_DRAFT_HEAD not q4)");
 }
 
-bool envOn(std::string_view name, bool def) {
-    if (auto v = env(name)) return *v != "0";
-    return def;
-}
+bool envOn(std::string_view name, bool def) { return settings::envFlag(name, def); }
 
 // Default max drafts per cycle by number of decoding slots (index = slots).
 // wide: verify batches of up to 32 rows (otherwise 16); the cost model picks within the cap.
@@ -363,17 +354,11 @@ void buildModel(Options& opt, const numerics::Request& nreq, const char* lad, Lo
     if (!am) throw qwen35::ModelError("UnsupportedArch", model::unsupportedArchText(arch_name));
     const qwen35::Config& cfg = b.cfg = am->fromGguf(f);
     int& dev = b.dev = 0;
-    int dev_shown = 0;  // the index as --list-devices prints it (before the restriction)
-    if (env("HIP_DEVICE")) {
-        dev = dev_shown = static_cast<int>(envU32("HIP_DEVICE", 0));
-    } else {
-        // s8-719 root fix: choose the GPU and make the HIP runtime see only it, before the first HIP call
-        // (a pinned host buffer is charged on every GPU the runtime sees: hipError 719 with two GPUs)
-        const gpusel::Restriction& gr = qwen35::restrictDevice(opt.device);
-        if (!gr.note.empty()) logI("{}", gr.note);
-        dev = qwen35::pickDevice(opt.device);
-        dev_shown = gr.active ? gr.all[gr.selected[0]].index : dev;
-    }
+    // the GPU choice shared with the CLI (src/config/device_choice.h, arch025-N15b): WHIRL_HIP_DEVICE, else the s8-719
+    // restriction (the runtime sees only the chosen GPU; its note logged before pickDevice) + pickDevice
+    const settings::DeviceChoice dch = settings::chooseDevice(opt.device, settingsWarn, [](const std::string& s) { logI("{}", s); });
+    dev = dch.dev;
+    const int dev_shown = dch.shown;  // the index as --list-devices prints it (before the restriction)
     const hip::DeviceInfo& info = b.info = hip::describeDevice(dev);
     hip::setDevice(dev);
     // the device backend: memory queries of the plan below, then the engine's / tiers' device operations (ARCH-1 D-5)
@@ -476,11 +461,9 @@ void buildModel(Options& opt, const numerics::Request& nreq, const char* lad, Lo
     lo.numerics = nreq;
     lo.max_batch = serve_prefill_batch;
     lo.embd_on_host = envOn("EMBD_HOST", true);  // WHIRL_EMBD_HOST=0: embedding in VRAM
-    if (auto v = env("PREFILL_BATCH")) {
-        try {
-            lo.max_batch = std::clamp(static_cast<std::uint32_t>(std::stoul(*v)), 1u, qwen35::max_batch_limit);
-        } catch (const std::exception&) {
-        }
+    if (auto v = settings::envGet("PREFILL_BATCH")) {
+        // (arch025-N15: the shared number rule; a malformed value keeps the default batch)
+        if (auto x = settings::parseU32(*v)) lo.max_batch = std::clamp(*x, 1u, qwen35::max_batch_limit);
         // the scheduler's largest forward is a 1024-row chunk + a 256-row tail: a smaller batch would
         // fail every long prompt with BatchTooLarge (VRAM-01), so it is raised to that floor
         if (lo.max_batch < vram::min_prefill_batch) {
@@ -507,10 +490,10 @@ void buildModel(Options& opt, const numerics::Request& nreq, const char* lad, Lo
     std::optional<gguf::File>& dfile = b.dfile;
     bool& use_dflash = b.use_dflash = [&] {
         const std::optional<std::string> dm_cli = opt.draft_model.empty() ? std::nullopt : std::optional<std::string>(opt.draft_model);
-        const auto dm = dm_resolved = whirl::dflash::resolveDraftModel(dm_cli, env("DRAFT_MODEL"));
+        const auto dm = dm_resolved = whirl::dflash::resolveDraftModel(dm_cli, settings::draftModel());
         const auto src = *whirl::dflash::parseSource(opt.draft);
         if (src == whirl::dflash::Source::dflash)
-            if (const std::string note = whirl::dflash::draftModelNote(dm_cli, env("DRAFT_MODEL")); !note.empty()) logI("{}", note);
+            if (const std::string note = whirl::dflash::draftModelNote(dm_cli, settings::draftModel()); !note.empty()) logI("{}", note);
         std::string why;
         if (src == whirl::dflash::Source::dflash && dm) why = qwen35::dflashIncompatibleFile(f, *dm, &dfile);
         const whirl::dflash::Choice ch = whirl::dflash::choose(src, dm, why, true);
@@ -690,11 +673,8 @@ void buildModel(Options& opt, const numerics::Request& nreq, const char* lad, Lo
     }
     b.mem0 = ops->memInfo();
     std::optional<std::size_t> exec_req;  // unset = the device default (prefillExecDefault, after the load)
-    if (auto v = env("PREFILL_CHUNK")) {
-        try {
-            exec_req = std::stoul(*v);
-        } catch (const std::exception&) {
-        }
+    if (settings::envGet("PREFILL_CHUNK")) {
+        exec_req = settings::prefillChunk(nullptr);  // (arch025-N15: the shared number rule; malformed = unset)
         logI("prefill forward up to {} rows requested (WHIRL_PREFILL_CHUNK)", exec_req.value_or(0));
     }
     std::unique_ptr<qwen35::Model>& mp = b.mp = qwen35::Model::load(f, 0, stats, lo);
@@ -784,14 +764,14 @@ void buildModel(Options& opt, const numerics::Request& nreq, const char* lad, Lo
         model.max_batch = std::min(model.max_batch, vram::prefillBatchFloor(envU32("PREFILL_BATCH", model.max_batch)));
     // WHIRL_DRAFT_VOCAB: unset = embedded 64k subset (dense qwen35, 248320 vocab), 64k = embedded,
     // 48k / <file> = frequency subset file, N = the first N rows (old experiment), off = full head
-    const qwen35::DraftVocabChoice& draft_vocab = b.draft_vocab = qwen35::draftVocabChoice(env("DRAFT_VOCAB"), qwen35::exeDirectory());
+    const qwen35::DraftVocabChoice& draft_vocab = b.draft_vocab = qwen35::draftVocabChoice(settings::draftVocab(), qwen35::exeDirectory());
     if (draft_vocab.kind == qwen35::DraftVocabChoice::Kind::first_n) model.draft_vocab = draft_vocab.n;
     // (applyFront set DRAFT_WINDOW / _MIN; envU32 here only logs a bad value at its old place, with the same default)
     (void)envU32("DRAFT_WINDOW", model.nf().draft_window);
     (void)envU32("DRAFT_WINDOW_MIN", model.nf().draft_window_min);
     if (env("GEMV_R") || env("GEMV_W") || env("GEMV_WH"))
         logW("WHIRL_GEMV_R / WHIRL_GEMV_W / WHIRL_GEMV_WH are not supported by whirl-server (ignored)");
-    const bool& use_mtp = b.use_mtp = model.mtp.has_value() && envOn("MTP", true);
+    const bool& use_mtp = b.use_mtp = model.mtp.has_value() && settings::mtp();
     const qwen35::MtpDefaults& def = b.def = qwen35::mtpDefaults(model.cfg.moe, model.arch);
     std::optional<std::uint32_t> drafts_env;
     if (auto v = env("MTP_DRAFTS")) {
@@ -812,15 +792,9 @@ void buildModel(Options& opt, const numerics::Request& nreq, const char* lad, Lo
         }
     }
     const std::uint32_t& n_min = b.n_min = envU32("MTP_NMIN", 0);
-    const auto& adapt_env = b.adapt_env = env("MTP_ADAPT");
+    const auto& adapt_env = b.adapt_env = settings::envGet("MTP_ADAPT");
     std::uint32_t& adapt = b.adapt = def.adapt;
-    if (adapt_env) {
-        try {
-            adapt = static_cast<std::uint32_t>(std::stoul(*adapt_env));
-        } catch (const std::exception&) {
-            adapt = 0;
-        }
-    }
+    if (adapt_env) adapt = settings::parseMtpAdapt(adapt_env).adapt;  // (the rule shared with the CLI, arch025-N15)
     // an explicit draft count is used as is (fixed) unless WHIRL_MTP_ADAPT asks otherwise
     const bool& auto_mode = b.auto_mode = adapt_env ? (*adapt_env == "auto") : (def.automatic && !drafts_user);
     if (env("HEAD_CHUNK")) (void)envU32("HEAD_CHUNK", model.nf().head_chunk);  // (bad-value warning only, as above)
@@ -846,9 +820,9 @@ void buildModel(Options& opt, const numerics::Request& nreq, const char* lad, Lo
         for (; k <= gdn_max_seg; ++k) batch_drafts[k] = batch_drafts[k - 1];
     }
     // MTP block as Q4_K from Q6_K or Q8_0 (drafts only; WHIRL_MTP_Q4=0 keeps the file's types)
-    if (use_mtp && envOn("MTP_Q4", true)) model.requantMtpQ4();
+    if (use_mtp && settings::mtpQ4()) model.requantMtpQ4();
     if (use_mtp && !env("MTP_FULLHEAD")) {
-        const bool q4 = env("DRAFT_HEAD").value_or("") == "q4";
+        const bool q4 = settings::draftHeadQ4();
         model.buildDraftHeadEx(q4 ? qwen35::Model::DraftHeadKind::q4 : qwen35::Model::DraftHeadKind::d2);
         applyDraftVocab(model, tok, draft_vocab);
     }
@@ -1111,13 +1085,13 @@ void ServerRun::makeEngine() {
     else
         logI("decode floor: off (--decode-min-tps 0: prefill forwards are not limited)");
     if (auto v = env("PROFILE")) eo.profile = *v == "2" ? 2 : 1;
-    eo.sys_min = envU32("SYS_MIN", sys_min_default);
+    eo.sys_min = settings::sysMin(sys_min_default, settingsWarn);
     eo.kv_supersede = envU32("KV_SUPERSEDE", 1) != 0;
     // TIER-IDLE: hidden test override of the 300 s idle write delay (no CLI flag; 0: off)
     if (env("KV_IDLE_FLUSH_MS")) eo.kv_idle_flush_ms = envU32("KV_IDLE_FLUSH_MS", 0);
     eo.lcp_on = envOn("SYS_LCP", true);
     eo.n_ck = lm.n_ck;
-    eo.tail_ck = envOn("TAIL_CK", true);  // debug knob: WHIRL_TAIL_CK=0 turns the tail checkpoint off
+    eo.tail_ck = settings::tailCk();  // debug knob: WHIRL_TAIL_CK=0 turns the tail checkpoint off
     eo.n_spe = (lm.n_ck == 0 || lm.no_pc) ? 0 : lm.n_spe_plan;
     eo.ckpt_host = envOn("CKPT_HOST", false);
     eo.prefill_exec = lm.prefill_exec;
@@ -1984,7 +1958,7 @@ int serveMain(int argc, char** argv, const char* program) {
             die(ex.what());
         }
     }();
-    std::optional<std::string> mode_env = env("MODE");
+    std::optional<std::string> mode_env = settings::mode();
     ResolvedConfig rc = [&] {
         try {
             return resolveServerConfig(std::move(opt0), std::move(mode_env));
