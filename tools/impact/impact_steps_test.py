@@ -9,6 +9,8 @@ from the committed map) and checks the selected release_gate steps:
   F-3 block: a kernel .hip file, docs -> no cpu_pins
   F-4 pass : spec::raceE (the race key the server samples with) -> srv_balance + srv_fast (suite basic)
   F-4 note : spec::sampleRace is the host reference of the GPU race draw (tests only): cpu_tests + kt_full, no srv_*
+  (the rule cases check rep["map_steps"], what the map's rules select; since arch025-srctext every selection also holds
+  EVERY CPU step and CPU test, checked by the CPU-all cases for every change above)
 Prints "impact steps test: N/N ok" and exits 0 only when every case holds.
 """
 from __future__ import annotations
@@ -32,9 +34,15 @@ def fn_line(path, name):
     return d["lines"][0] + 1
 
 
+full_reps = []  # (change, full report): every one must contain every CPU step and every CPU test (arch025-srctext)
+
+
 def steps(path, line=None):
+    """the steps the map's RULES select (rep["map_steps"]); the selection itself is that plus every CPU step"""
     ch = {path: {"old_path": path, "new": [line] if line else [], "old": []}}
-    return set(impact.analyze(ch, m, None, "HEAD")["release_gate_steps"])
+    r = impact.analyze(ch, m, None, "HEAD")
+    full_reps.append((f"{path}:{line}", r))
+    return set(r.get("map_steps", r["release_gate_steps"]))
 
 
 cases = []
@@ -93,6 +101,25 @@ case("Q4 pass: safety tools -> cpu_tsa", steps("tools/safety/tsa/tsa_check.py", 
 case("Q4 block: unit test line without a lock token -> no cpu_tsa",
      steps("tests/unit/unit_tests.cpp", line_where("tests/unit/unit_tests.cpp", False)), ["cpu_analyze"], ["cpu_tsa"])
 case("Q4 block: docs -> no cpu_tsa", steps("docs/building.md", 1), [], ["cpu_tsa"])
+# arch025-srctext (owner 2026-10-28 「98/103，沒選到的那5項，如果不耗什麼時，那乾脆都跑了吧?」): every CPU step and every
+# CPU test is in EVERY selection (docs, kernel file, test file, product function alike); only GPU steps are map-selected.
+cpu_steps, cpu_tests = impact.all_cpu(m)
+case("CPU-all setup: the map lists CPU steps (cpu_steps parsed from release_gate.ps1) and CPU tests",
+     {"cpu_steps"} if m.get("cpu_steps") and len(cpu_steps) >= 20 and sum(len(v) for v in cpu_tests.values()) >= 100 else set(),
+     ["cpu_steps"])
+for where, r in full_reps:
+    miss = sorted(cpu_steps - set(r["release_gate_steps"]))
+    miss_t = sorted(f"{e}:{t}" for e, v in cpu_tests.items() for t in v if t not in r["cpu_tests"].get(e, []))
+    gpu_lost = sorted(set(r.get("map_steps", [])) - set(r["release_gate_steps"]))
+    case(f"CPU-all pass: {where} selects every CPU step + test, keeps the map's steps",
+         {"all"} if not miss and not miss_t and not gpu_lost else set(), ["all"])
+    if miss or miss_t or gpu_lost:
+        print(f"     left out: steps {miss[:6]} tests {miss_t[:6]} map steps lost {gpu_lost[:6]}")
+# block: a map without the CPU-all rule would leave CPU steps out for docs (proves the case above can fail)
+r0 = impact.analyze({"docs/building.md": {"old_path": "docs/building.md", "new": [1], "old": []}}, m, None, "HEAD")
+case("CPU-all block: docs map pick alone has no CPU test step (the rule, not the map, adds them)",
+     {"cpu_model"} if "cpu_model" in r0["release_gate_steps"] and "cpu_model" not in r0.get("map_steps", ["cpu_model"]) else set(),
+     ["cpu_model"])
 ok = 0
 for name, good, bad, got in cases:
     ok += good

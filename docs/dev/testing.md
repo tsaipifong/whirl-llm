@@ -128,6 +128,19 @@ CMake link sets, the include graph, the call graph, and the kernel dispatch tabl
 -> `.hip` files, arch from the `#if __gfx1151__` guards). Path roots, server-gate suites and matrix
 metrics are declared in `impact_build.py` and marked `declared` in the JSON.
 
+**Every CPU step always runs (arch025-srctext, owner 2026-10-28).** The CPU steps are cheap (P-cpu about
+6-9 min; the C++ safety steps `cpu_asan` / `cpu_analyze` / `cpu_tsa` longer), so `impact.py` adds every
+`cpu_*` step of `release_gate.ps1` (parsed into the map as `cpu_steps`: each `AddStep "cpu_*" $false` and the
+per-binary loop) and every registered CPU test to every selection, whatever changed. Only GPU steps
+(server gate, golden, selftest, seqtest, `kt_full`, kernel-test functions) are chosen by the map. This closes
+the misses the call graph cannot see by construction: tests that read sources as text (`testForwardSplit`
+reads `src/model/qwen35/forward/*.cpp`, the cache env scan reads `src/` and `include/`), destructors, data
+tables, test sources included as `.inc`. None of the source-text readers is a GPU step (they are in
+`whirl-model-tests`, `whirl-cache-tests`, `whirl-parity`). The report prints "cpu ALL N CPU release steps ..."
+and keeps what the map's rules alone pick in `map_steps` / `map_cpu_tests` (`--json`). It only adds:
+nothing the map selects is removed. `tools/impact/impact_steps_test.py` fails when any selection leaves out a
+CPU step or CPU test.
+
 ```
 python tools/impact/impact.py --worktree           # what to re-run for uncommitted changes
 python tools/impact/impact.py --commit SHA --why   # with the reason for every path
@@ -138,7 +151,8 @@ python tools/impact/validate.py                    # replay real fix commits: do
 `validate.py` is the map's acceptance test (arch024-S12): every named case (a real bug, the fix commit
 and the gate that caught it) must be hit by the map built at that fix commit, and the history replay
 (`--history 200`: every commit that changed product code and a registered test together) must list that
-test for >= 95 % of the pairs. It prints the selectivity next to the hit rate (a map that lists
+test for >= 95 % of the pairs (since every CPU test is always selected, a CPU pair is a hit by construction;
+kernel-test pairs are still the map's). It prints the selectivity next to the hit rate (a map that lists
 everything would hit everything) and every miss with its commit. The history rate counts **CPU tests
 only**; it is not evidence for the GPU steps. For those, `--baseline REV` replays REV's `tools/impact`
 on the same commits (`tools/impact/replay.py`) and fails on every commit for which the current tools
