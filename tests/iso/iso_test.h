@@ -1,7 +1,8 @@
 // Shared harness of the per-module isolation test programs (ARCH-1 8.5, arch025-isoall). Each program is built by
 // cmake/iso.cmake (and by hand in tools/gates/iso_check.py) from a copy of the files its tests/iso/<module>/isolation.txt
 // lists, with that copy as the ONLY include path and the module objects linked directly (nothing else), so a test here
-// sees exactly the module and its declared dependencies. Header-only, no WHIRL include.
+// sees exactly the module and its declared dependencies. Header-only, no WHIRL include; counts through
+// tests/test_check.h (list it as a testhdr next to this file).
 //   <program> [--only NAME[,NAME...]] [--list]      last line "<module> tests: N passed, M failed"
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
@@ -14,9 +15,12 @@
 #include <string>
 #include <vector>
 
+#include "../test_check.h"  // the counters and the failure line (arch025 N16: one assert header)
+
 namespace iso {
 
-inline int g_pass = 0, g_fail = 0;
+inline int& g_pass = whirl::test::g_pass;
+inline int& g_fail = whirl::test::g_fail;
 
 struct Test {
     const char* name;
@@ -73,7 +77,7 @@ inline int run(const char* module, const std::vector<Test>& tests, int argc, cha
             ++iso::g_pass;                                                         \
         } else {                                                                   \
             ++iso::g_fail;                                                         \
-            std::fprintf(stderr, "  FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); \
+            ::whirl::test::failErr(__FILE__, __LINE__, #cond);                     \
         }                                                                          \
     } while (0)
 

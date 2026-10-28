@@ -96,6 +96,11 @@ check("contract full", p["level"] == "full" and any("core module contract" in r 
 # 10. arch-specific kernel -> full matrix on that GPU only
 p = plan(["kernels/gfx1151/attn.hip"], rep({}, "full gate or the release steps above: 1 file(s) in no module (kernels/gfx1151/attn.hip)", gpus=("gfx1151",)))
 check("kernel 1151 only", p["level"] == "full" and p["gpu_steps"]["r9700"] == [] and len(p["gpu_steps"]["8060s"]) == 10, p["gpu_steps"])
+# 10b. the kernel ABI layout table (host + device, arch025 N13) -> full matrix on both GPUs, counted as a kernel source
+p = plan(["include/whirl/kernels_abi_layout.h"], rep({"kernels.abi": ["include/whirl/kernels_abi_layout.h"]}, "full gate, both GPUs (contract module kernels.abi)"))
+check("abi layout full both", p["level"] == "full" and all(p["gpu_steps"][d] for d in tc.DEVICES)
+      and any(r.startswith("core file include/whirl/kernels_abi_layout.h") for r in p["full_reasons"]), p["full_reasons"])
+check("abi layout is kernel source", "kernels_abi_layout.h" in p["work_equivalence"]["static"], p.get("work_equivalence"))
 # 11. work-equivalence proof: skips the covered steps when bound to --build; not when a kernel / .hip-included header changed
 with tempfile.TemporaryDirectory() as td:
     b = os.path.join(td, "build")

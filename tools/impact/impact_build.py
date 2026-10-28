@@ -602,6 +602,15 @@ def build(root):
                     mm = re.search(r"^module\s+(\S+)", man, re.M)
                     if mm:
                         cpu.add("cpu_iso_" + mm.group(1).replace(".", "_"))
+        # 2026-10-28: the gate's own list is the authority - steps added in loops (cpu_iso_*, the 23 cpu_unit_* of
+        # arch025-lane3 N7) escaped the regexes above twice. "<name> CPU" lines of release_gate.ps1 -List; a step the
+        # gate marks "(not in this gate ...)" is not run, so it is not added. No pwsh / no output -> the regexes alone.
+        try:
+            lst = subprocess.run(["pwsh", "-NoProfile", "-File", rg, "-List"], capture_output=True, text=True,
+                                 encoding="utf-8", errors="replace", timeout=180).stdout
+            cpu |= {ln.split()[0] for ln in lst.splitlines() if re.match(r"^cpu_\S+\s+CPU\s*$", ln)}
+        except (OSError, subprocess.SubprocessError):
+            pass
         cpu_steps = sorted(cpu)
         if not cpu_steps:
             errors.append('release_gate.ps1: no CPU step parsed (AddStep "cpu_*" $false): impact.py cannot add every CPU step')

@@ -15,8 +15,9 @@
 1	tests/server/server_tests.cpp|C6262|`anonymous-namespace'::testCkptF1
 1	tests/server/server_tests.cpp|C6262|testAllocStateMeasured
 1	tests/server/server_tests.cpp|C6262|testHttpFakeEngine
+1	tests/server/server_tests.cpp|C6262|testServerArgsTable
 1	tests/server/tier_tests.cpp|C6387|PowerLossSim::write
-1	tests/unit/unit_tests.cpp|C6246|testMemGovernor
-1	tests/unit/unit_tests.cpp|C6262|`anonymous-namespace'::testNumerics
-1	tests/unit/unit_tests.cpp|C6385|specsample_test::runOpen
+1	tests/unit/mem_governor_tests.cpp|C6246|`anonymous-namespace'::testMemGovernor
+1	tests/unit/contract_tests.cpp|C6262|`anonymous-namespace'::testNumerics
+1	tests/unit/spec_sample_tests.cpp|C6385|`anonymous-namespace'::specsample_test::runOpen
 1	tools/bin2c/bin2c.cpp|C6262|main

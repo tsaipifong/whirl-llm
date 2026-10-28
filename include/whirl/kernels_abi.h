@@ -186,6 +186,7 @@
 #include <string_view>
 
 #include "whirl/hip.h"
+#include "whirl/kernels_abi_layout.h"  // the one layout table of the kernel argument structs (arch025 N13)
 #include "whirl/kv_format.h"
 
 namespace whirl::kernels {
@@ -378,6 +379,39 @@ static_assert(offsetof(GvArgs, y) == 24 && offsetof(GvArgs, rb) == 48);
 static_assert(offsetof(GdnSeg, snap) == 8 && offsetof(GdnSeg, row0) == 8 + 8 * kGdnMaxSnap &&
               offsetof(GdnSeg, pend) == 16 + 8 * kGdnMaxSnap && offsetof(GdnSeg, npend) == 24 + 8 * kGdnMaxSnap &&
               sizeof(GdnSeg) % 8 == 0);
+}  // namespace whirl::kernels
+// Layout of the kernel argument structs against the one table in whirl/kernels_abi_layout.h; the device structs
+// (kernels/kernel_args.h) assert the same table, so a change on one side fails to compile (arch025 N13,
+// tools/gates/kernel_abi_check.py).
+namespace whirl::kernels {
+namespace abi_check_ {
+namespace L = whirl::kernels::abi;
+static_assert(kKvPage == L::kKvPage && kGdnMaxSeg == L::kGdnMaxSeg && kGdnMaxSnap == L::kGdnMaxSnap &&
+              kMaxVerifyRows == L::kMaxVerifyRows);
+static_assert(sizeof(KvArgs) == L::kKvArgsSize && offsetof(KvArgs, k) == L::kKvArgsK && offsetof(KvArgs, v) == L::kKvArgsV &&
+              offsetof(KvArgs, ks) == L::kKvArgsKs && offsetof(KvArgs, vs) == L::kKvArgsVs &&
+              offsetof(KvArgs, ptab) == L::kKvArgsPtab && offsetof(KvArgs, kvbase) == L::kKvArgsKvbase &&
+              offsetof(KvArgs, tab0) == L::kKvArgsTab0 && offsetof(KvArgs, win) == L::kKvArgsWin);
+static_assert(sizeof(GvArgs) == L::kGvArgsSize && offsetof(GvArgs, w) == L::kGvArgsW && offsetof(GvArgs, y) == L::kGvArgsY &&
+              offsetof(GvArgs, rb) == L::kGvArgsRb && offsetof(GvArgs, n) == L::kGvArgsN &&
+              offsetof(GvArgs, b1) == L::kGvArgsB1 && offsetof(GvArgs, b2) == L::kGvArgsB2 &&
+              offsetof(GvArgs, pad_) == L::kGvArgsTail);
+static_assert(sizeof(Tok16) == L::kTok16Size && sizeof(RowIdx) == L::kRowIdxSize);
+static_assert(sizeof(RowTab) == L::kRowTabSize && offsetof(RowTab, tok) == L::kRowTabTok &&
+              offsetof(RowTab, pos) == L::kRowTabPos && offsetof(RowTab, base) == L::kRowTabBase);
+static_assert(sizeof(AwGroups) == L::kAwGroupsSize && offsetof(AwGroups, first) == L::kAwGroupsFirst &&
+              offsetof(AwGroups, count) == L::kAwGroupsCount);
+static_assert(sizeof(DSampArgs) == L::kDSampArgsSize && offsetof(DSampArgs, on) == L::kDSampOn &&
+              offsetof(DSampArgs, top_k) == L::kDSampTopK && offsetof(DSampArgs, qoff) == L::kDSampQoff &&
+              offsetof(DSampArgs, inv_t) == L::kDSampInvT && offsetof(DSampArgs, top_p) == L::kDSampTopP &&
+              offsetof(DSampArgs, min_p) == L::kDSampMinP && offsetof(DSampArgs, key_lo) == L::kDSampKeyLo &&
+              offsetof(DSampArgs, key_hi) == L::kDSampKeyHi);
+static_assert(sizeof(GdnSeg) == L::kGdnSegSize && offsetof(GdnSeg, state) == L::kGdnSegState &&
+              offsetof(GdnSeg, snap) == L::kGdnSegSnap && offsetof(GdnSeg, row0) == L::kGdnSegRow0 &&
+              offsetof(GdnSeg, nrows) == L::kGdnSegNrows && offsetof(GdnSeg, pend) == L::kGdnSegPend &&
+              offsetof(GdnSeg, npend) == L::kGdnSegNpend && offsetof(GdnSeg, pad_) == L::kGdnSegPad);
+static_assert(sizeof(GdnSegs) == L::kGdnSegsSize);
+}  // namespace abi_check_
 }  // namespace whirl::kernels
 template <>
 struct whirl::hip::LaunchArgPtrWords<whirl::kernels::KvArgs> {  // k v ks vs ptab kvbase; then tab0 / win

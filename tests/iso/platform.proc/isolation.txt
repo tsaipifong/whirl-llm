@@ -15,3 +15,4 @@ hdr       src/platform/proc.h
 # test program
 testsrc   tests/iso/platform.proc/proc_tests.cpp
 testhdr   tests/iso/iso_test.h
+testhdr   tests/test_check.h

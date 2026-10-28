@@ -28,8 +28,6 @@
 // The block geometry of each slot is exported in whirl_gemms_geom (BM, BN, threads per
 // slot); the host reads it instead of the gfx1201 table (kernels::KernelTable::gemms_geom).
 // ---------------------------------------------------------------------------
-template <int T> constexpr int gs_sbb() { return 256 / Q<T>::blk * Q<T>::bytes; }
-typedef unsigned int gs_u32x4 __attribute__((ext_vector_type(4)));
 
 template <int T, int BM, int BN, int WAVES_M, int XK, bool OH>
 __device__ __forceinline__ void gemms11_impl(const uint8_t *__restrict__ W, uint64_t row_bytes, const _Float16 *__restrict__ X,

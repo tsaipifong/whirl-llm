@@ -153,6 +153,15 @@ $pwsh = (Get-Process -Id $PID).Path
 foreach ($t in "whirl-tests", "whirl-model-tests", "whirl-cache-tests", "whirl-vision-tests", "whirl-tier-tests", "whirl-device-tests", "whirl-ops-tests", "whirl-sampling-tests") {
     AddStep "cpu_$($t -replace '^whirl-','' -replace '-tests$','')" $false @($exe[$t]) { param($o, $c) $c -eq 0 -and ($o -match "\b[1-9]\d* passed, 0 failed") }
 }
+# arch025 N7: each module's host unit tests alone: tests/unit/<module>_tests.cpp -> whirl-unit-<module>-tests.exe
+# (cmake/unit.cmake), step cpu_unit_<module> (the file's stem); cpu_tests above runs every one of them in one program
+# (whirl-tests: the same cases in the old order). unit_tests.cpp (whirl-tests' main) and numerics_plan_tests.cpp (a part
+# of contract's tests) are no module file.
+foreach ($uf in @(Get-ChildItem -Path (Join-Path $repo "tests\unit") -Filter "*_tests.cpp" -ErrorAction SilentlyContinue | Sort-Object Name)) {
+    $um = $uf.BaseName -replace '_tests$', ''
+    if ($um -in @("unit", "numerics_plan")) { continue }
+    AddStep "cpu_unit_$um" $false @((Join-Path $Build ("whirl-unit-" + ($um -replace '_', '-') + "-tests.exe"))) { param($o, $c) $c -eq 0 -and ($o -match "tests: [1-9]\d* passed, 0 failed") }
+}
 # HIP runtime loader (ARCH-1 D-1): fake / absent runtimes, then this machine's runtime through load()
 # (a runtime that does not import rocm_kpack.dll must never load it)
 AddStep "cpu_hiprt" $false @($exe["whirl-hiprt-tests"]) { param($o, $c) $c -eq 0 -and ($o -match "hiprt tests: [1-9]\d* passed, 0 failed") -and ($o -match "^real runtime: ok=1") } @{ WHIRL_TEST_REAL_HIPRT = "1" }
@@ -240,6 +249,15 @@ AddStep "cpu_census" $false @($pwsh, "-NoProfile", "-Command", "& '$py' -I '$(Jo
     { param($o, $c) $c -eq 0 -and ($o -match "(?m)^census check test: ([1-9]\d*)/\1 ok") -and ($o -match "(?m)^census: ok") }
 AddStep "cpu_layering" $false @($pwsh, "-NoProfile", "-Command", "& '$py' -I '$(Join-Path $repo "tools\gates\layering_check_test.py")'; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\gates\layering_check.py")'; exit `$LASTEXITCODE") `
     { param($o, $c) $c -eq 0 -and ($o -match "(?m)^layering check test: ([1-9]\d*)/\1 ok") -and ($o -match "(?m)^layering: ok") }
+# arch025 N13: the kernel argument structs' one layout table (include/whirl/kernels_abi_layout.h) against the host
+# (kernels_abi.h) and device (kernels/kernel_args.h) definitions, plus its mutants (a one-field change on either side
+# must fail). CPU, HIP clang -fsyntax-only, seconds.
+AddStep "cpu_kernel_abi" $false @($pwsh, "-NoProfile", "-Command", "& '$py' -I '$(Join-Path $repo "tools\gates\kernel_abi_check.py")' --selftest; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\gates\kernel_abi_check.py")'; exit `$LASTEXITCODE") `
+    { param($o, $c) $c -eq 0 -and ($o -match "(?m)^kernel_abi_check selftest: PASS") -and ($o -match "(?m)^kernel_abi_check: PASS") }
+# arch025 N14: compile boundary of every kernel family (kernels/families.json): each family alone with only its declared
+# dependencies, per architecture, plus boundary mutants. CPU, HIP clang -fsyntax-only, ~1 min.
+AddStep "cpu_kernel_iso" $false @($pwsh, "-NoProfile", "-Command", "& '$py' -I '$(Join-Path $repo "tools\gates\kernel_iso_check.py")' --selftest; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\gates\kernel_iso_check.py")'; exit `$LASTEXITCODE") `
+    { param($o, $c) $c -eq 0 -and ($o -match "(?m)^kernel iso check selftest: PASS") -and ($o -match "(?m)^kernel iso check: ok \(") }
 # arch025-Q6: the FAIL / PASS proofs of srv_vis, vis_ab, pkg_smoke, srv_kvram719, srv_env_e2 and of the dense / dfl
 # availability rule (tools/gates/gate_steps_selftest.ps1: planted outputs through each step's own rule via -RuleCheck,
 # and the -SelfTest of the scripts behind them). CPU, no exe, no model.

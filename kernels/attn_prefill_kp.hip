@@ -479,17 +479,7 @@ __device__ __forceinline__ void kv_dq_rows_impl(const KvArgs &kv, _Float16 *k16,
     *(half8 *)(k16 + o) = kv_ld8<F>(kv.k, kv.ks, src);
     *(half8 *)(v16 + o) = kv_ld8<F>(kv.v, kv.vs, src);
 }
-extern "C" __global__ void __launch_bounds__(256) kv_dq_rows(KvArgs kv, _Float16 *k16, _Float16 *v16, int n_rows, int row_el) {
-    kv_dq_rows_impl<1>(kv, k16, v16, 0, n_rows, row_el);
-}
-// FC-1c: keys [r0, r0 + n_rows) into rows 0 .. n_rows - 1 of k16 / v16 (a key range of a long
-// prefill, see Model::prefillAttn); _q4: the q4 cache (kv_dq4, the q4 readers' dequantization)
-extern "C" __global__ void __launch_bounds__(256) kv_dq_rows_r(KvArgs kv, _Float16 *k16, _Float16 *v16, int r0, int n_rows, int row_el) {
-    kv_dq_rows_impl<1>(kv, k16, v16, r0, n_rows, row_el);
-}
-extern "C" __global__ void __launch_bounds__(256) kv_dq_rows_r_q4(KvArgs kv, _Float16 *k16, _Float16 *v16, int r0, int n_rows, int row_el) {
-    kv_dq_rows_impl<2>(kv, k16, v16, r0, n_rows, row_el);
-}
+#include "shared/attn_prefill_kp_kv_dq_rows.h"  // also in the gfx1151 set (kernels/gfx1151/attn.hip)
 
 // item P: f16-output variants of the f16-weight prefill GEMMs (Q4_K_M relaxed mode)
 extern "C" __global__ void __launch_bounds__(512) gemm_ch0_f16(const uint8_t *W, uint64_t row_bytes, const _Float16 *X, float *Y, int ncols, int nrows, int n_tok, int accumulate) { gemm3_impl<QT_F16, 128, 256, 64, 4, 0, 512, true, true>(W, row_bytes, X, Y, ncols, nrows, n_tok, 0); }

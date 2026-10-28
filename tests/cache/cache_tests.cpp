@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "../test_env.h"
+#include "../test_check.h"
 #include "cache/fingerprint.h"
 #include "cache/prefix_cache.h"
 #include "mock_tier.h"
@@ -41,18 +42,10 @@
 using namespace whirl::cache;
 using whirl::cache::test::MockTier;
 
-static int g_pass = 0;
-static int g_fail = 0;
+using whirl::test::g_fail;
+using whirl::test::g_pass;
+// CHECK / CHECK_EQ / the counters: tests/test_check.h (arch025 N16)
 
-#define CHECK(c)                                                              \
-    do {                                                                      \
-        if (c) {                                                              \
-            ++g_pass;                                                         \
-        } else {                                                              \
-            ++g_fail;                                                         \
-            std::printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #c);          \
-        }                                                                     \
-    } while (0)
 
 static std::vector<std::uint32_t> seq(std::size_t n, std::uint32_t base = 100) {
     std::vector<std::uint32_t> v(n);

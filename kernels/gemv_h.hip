@@ -13,6 +13,7 @@
 // GEMM of any batch size. Decode-shaped: one wave per 16 rows (no K split), its rows' raw
 // quantized stages staged through LDS with coalesced loads, two 256-k stages per LDS round
 // when ncols % 512 == 0 (more bytes in flight per wave; the same k order, so the same bits).
+#include "gemm_small_addr.h"  // gemms_stage_chunks / stage addressing (declared dependency, arch025 N14)
 template <int T, int TN, int S>
 __device__ __forceinline__ void gemvh_impl(const uint8_t *__restrict__ W, uint64_t row_bytes, const _Float16 *__restrict__ X,
                                            float *__restrict__ Y, int ncols, int nrows, int n_tok, int accumulate) {

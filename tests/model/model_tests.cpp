@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "../test_env.h"
+#include "../test_check.h"
 #include "config/env_snapshot.h"
 #include "whirl/device_profile.h"
 #include "whirl/dflash_policy.h"
@@ -50,17 +51,11 @@ namespace q = whirl::qwen35;
 
 namespace {
 
-int g_fail = 0, g_pass = 0;
+using whirl::test::check;  // message form: "FAIL: <what>" (tests/test_check.h)
+using whirl::test::g_fail;
+using whirl::test::g_pass;
+// CHECK / CHECK_EQ / the counters: tests/test_check.h (arch025 N16)
 
-void check(bool ok, const char* what) {
-    if (ok) {
-        ++g_pass;
-    } else {
-        ++g_fail;
-        std::printf("FAIL: %s\n", what);
-    }
-}
-void check(bool ok, const std::string& what) { check(ok, what.c_str()); }
 
 // Minimal GGUF v3 image builder.
 struct GgufImage {
@@ -1884,44 +1879,44 @@ void testModelReleaseOrder() {
 
 // arch025-S0a: the baseline dumps. execDump: one "D exec: key=value" line per member, deterministic, covering the
 // numerics flags; kvLine: the chooseKv inputs and result on one line; switchOn (was envOn): unset / "" / "0" are off.
-#define CHECK(x) check((x), "baseline dumps: " #x)
+#define BCHECK(x) check((x), "baseline dumps: " #x)  // message form; CHECK (tests/test_check.h) prints file:line
 void testBaselineDumps() {
     namespace nu = whirl::numerics;
     q::Model m;
     const std::string a = q::execDump(m);
-    CHECK(a == q::execDump(m));
+    BCHECK(a == q::execDump(m));
     std::size_t lines = 0;
     for (std::size_t p = 0; p < a.size();) {
         const std::size_t e = a.find('\n', p);
-        CHECK(e != std::string::npos);
-        CHECK(a.compare(p, 8, "D exec: ") == 0);
-        CHECK(a.find('=', p) < e);
+        BCHECK(e != std::string::npos);
+        BCHECK(a.compare(p, 8, "D exec: ") == 0);
+        BCHECK(a.find('=', p) < e);
         ++lines;
         p = e + 1;
     }
-    CHECK(lines > 100);
+    BCHECK(lines > 100);
     for (const char* k : {"D exec: kv_q8=1\n", "D exec: kv_q4=0\n", "D exec: prec_dec=0\n", "D exec: fd_splits=64\n",
                           "D exec: kv_mode=automatic\n", "D exec: gdn_strix_min=256\n", "D exec: relax.k=4\n", "D exec: arch=gfx1201\n",
                           "D exec: moe_rbf=1\n", "D exec: num_req.mode=precise\n", "D exec: kv_choice.kv=f16\n"})
-        CHECK(a.find(k) != std::string::npos);
-    CHECK(a.find("D exec: num_plan=numerics: ") != std::string::npos);
-    CHECK(a.find("D exec: tune=") != std::string::npos);
+        BCHECK(a.find(k) != std::string::npos);
+    BCHECK(a.find("D exec: num_plan=numerics: ") != std::string::npos);
+    BCHECK(a.find("D exec: tune=") != std::string::npos);
     // arch025-execdump-f7: the three F7 forward switches are in the dump (defaults: off, on, -1)
-    for (const char* k : {"D exec: head_gemvx=0\n", "D exec: prec_gemvh=1\n", "D exec: prec_gs=-1\n"}) CHECK(a.find(k) != std::string::npos);
+    for (const char* k : {"D exec: head_gemvx=0\n", "D exec: prec_gemvh=1\n", "D exec: prec_gs=-1\n"}) BCHECK(a.find(k) != std::string::npos);
     {
         q::Model m2;
         m2.head_gemvx = true;
         m2.prec_gemvh = false;
         m2.prec_gs = 2;
         const std::string d = q::execDump(m2);
-        CHECK(d.find("D exec: head_gemvx=1\n") != std::string::npos);
-        CHECK(d.find("D exec: prec_gemvh=0\n") != std::string::npos);
-        CHECK(d.find("D exec: prec_gs=2\n") != std::string::npos);
+        BCHECK(d.find("D exec: head_gemvx=1\n") != std::string::npos);
+        BCHECK(d.find("D exec: prec_gemvh=0\n") != std::string::npos);
+        BCHECK(d.find("D exec: prec_gs=2\n") != std::string::npos);
     }
     m.fixFormat(whirl::KvFormat::q8h);  // one property changes one line (q8 -> q8h: the rotation)
     const std::string b = q::execDump(m);
-    CHECK(b != a);
-    CHECK(b.find("D exec: kv_rot=1\n") != std::string::npos);
+    BCHECK(b != a);
+    BCHECK(b.find("D exec: kv_rot=1\n") != std::string::npos);
     {
         std::size_t diff_lines = 0;
         for (std::size_t p = 0, r = 0; p < a.size() && r < b.size();) {
@@ -1930,7 +1925,7 @@ void testBaselineDumps() {
             p = e + 1;
             r = f + 1;
         }
-        CHECK(diff_lines == 1);
+        BCHECK(diff_lines == 1);
     }
     // the four KV keys are the properties of the format (arch025-N3: were four Model bools)
     for (const whirl::KvFormat f : {whirl::KvFormat::f16, whirl::KvFormat::q8, whirl::KvFormat::q8h, whirl::KvFormat::q8v, whirl::KvFormat::q4}) {
@@ -1938,28 +1933,28 @@ void testBaselineDumps() {
         mf.fixFormat(f);
         const std::string d = q::execDump(mf);
         const bool q8 = f != whirl::KvFormat::f16, rot = f == whirl::KvFormat::q8h || f == whirl::KvFormat::q4;
-        CHECK(d.find(std::format("D exec: kv_q8={}\nD exec: kv_rot={}\nD exec: kv_kf16={}\nD exec: kv_q4={}\n", q8 ? 1 : 0, rot ? 1 : 0,
+        BCHECK(d.find(std::format("D exec: kv_q8={}\nD exec: kv_rot={}\nD exec: kv_kf16={}\nD exec: kv_q4={}\n", q8 ? 1 : 0, rot ? 1 : 0,
                                  f == whirl::KvFormat::q8v ? 1 : 0, f == whirl::KvFormat::q4 ? 1 : 0)) != std::string::npos);
     }
     m.kv_req = whirl::KvFormat::q8v;
-    CHECK(q::execDump(m).find("D exec: kv_mode=q8v\n") != std::string::npos);
+    BCHECK(q::execDump(m).find("D exec: kv_mode=q8v\n") != std::string::npos);
     const nu::Request r = nu::parseMode("balance", "test");
     const nu::KvCaps caps{true, false, true, false};
     const nu::KvChoice c = nu::chooseKv(r, false, caps, std::nullopt);
     const std::string l = whirl::dump::kvLine("loader.load", r, false, caps, std::nullopt, c);
-    CHECK(l.rfind("D kv: site=loader.load mode=balance items=0x", 0) == 0);
-    CHECK(l.find(" moe=0 caps=q8h:1,q8v:0,q4:1,fast_q8h:0 forced=none -> kv=") != std::string::npos);
-    CHECK(l.find(std::string("-> kv=") + whirl::kvFormatName(c.kv) + " debug=0 why=" + c.why) != std::string::npos);
+    BCHECK(l.rfind("D kv: site=loader.load mode=balance items=0x", 0) == 0);
+    BCHECK(l.find(" moe=0 caps=q8h:1,q8v:0,q4:1,fast_q8h:0 forced=none -> kv=") != std::string::npos);
+    BCHECK(l.find(std::string("-> kv=") + whirl::kvFormatName(c.kv) + " debug=0 why=" + c.why) != std::string::npos);
     const nu::KvChoice cf = nu::chooseKv(r, true, caps, whirl::KvFormat::f16);
     const std::string lf = whirl::dump::kvLine("server.est_uma", r, true, caps, whirl::KvFormat::f16, cf);
-    CHECK(lf.find(" moe=1 ") != std::string::npos && lf.find(" forced=f16 -> kv=f16 debug=1 ") != std::string::npos);
-    CHECK(&whirl::dump::kv("x", r, false, caps, std::nullopt, c) == &c);  // passes the choice through
+    BCHECK(lf.find(" moe=1 ") != std::string::npos && lf.find(" forced=f16 -> kv=f16 debug=1 ") != std::string::npos);
+    BCHECK(&whirl::dump::kv("x", r, false, caps, std::nullopt, c) == &c);  // passes the choice through
     _putenv_s("WHIRL_S0A_DUMP_T", "");
-    CHECK(!whirl::dump::switchOn("S0A_DUMP_T"));
+    BCHECK(!whirl::dump::switchOn("S0A_DUMP_T"));
     _putenv_s("WHIRL_S0A_DUMP_T", "0");
-    CHECK(!whirl::dump::switchOn("S0A_DUMP_T"));
+    BCHECK(!whirl::dump::switchOn("S0A_DUMP_T"));
     _putenv_s("WHIRL_S0A_DUMP_T", "1");
-    CHECK(whirl::dump::switchOn("S0A_DUMP_T"));
+    BCHECK(whirl::dump::switchOn("S0A_DUMP_T"));
     // arch025 PL1b: switchOn (platform::env::get) == the removed envOn (_dupenv_s, copied verbatim) for each value,
     // read on every call (a change between two calls is seen); gemvhWavesEnv == the removed std::atoi(std::getenv)
     {
@@ -1982,25 +1977,25 @@ void testBaselineDumps() {
         int cells = 0;
         for (const char* v : vals) {
             _putenv_s("WHIRL_S0A_DUMP_T", v ? v : "");
-            CHECK(whirl::dump::switchOn("S0A_DUMP_T") == envOnRef("S0A_DUMP_T"));
+            BCHECK(whirl::dump::switchOn("S0A_DUMP_T") == envOnRef("S0A_DUMP_T"));
             _putenv_s("WHIRL_GEMVH_WAVES", v ? v : "");
             const char* e = std::getenv("WHIRL_GEMVH_WAVES");
-            CHECK(whirl::kernels::gemvhWavesEnv() == (e ? std::atoi(e) : 0));
+            BCHECK(whirl::kernels::gemvhWavesEnv() == (e ? std::atoi(e) : 0));
             ++cells;
         }
-        CHECK(cells == 14);
+        BCHECK(cells == 14);
         _putenv_s("WHIRL_GEMVH_WAVES", gw_had ? gw_saved.c_str() : "");
     }
     _putenv_s("WHIRL_S0A_DUMP_T", "");
-    CHECK(!whirl::dump::dumpOnly());  // only the --dump-only argument sets it
+    BCHECK(!whirl::dump::dumpOnly());  // only the --dump-only argument sets it
     // bug-cli-dumponly: the commands that reach loadOrTune take --dump-only, the others refuse it (naming the command)
-    for (const char* c : {"chat", "bench", "seqtest", "golden", "serve"}) CHECK(whirl::dump::dumpOnlyRefusal(c).empty());
+    for (const char* c : {"chat", "bench", "seqtest", "golden", "serve"}) BCHECK(whirl::dump::dumpOnlyRefusal(c).empty());
     for (const char* c : {"selftest", "devices", "dflash-check", "vis-encode"}) {
         const std::string why = whirl::dump::dumpOnlyRefusal(c);
-        CHECK(why.find("does not support --dump-only") != std::string::npos && why.find(c) != std::string::npos);
-        CHECK(why.find('\n') == std::string::npos);
+        BCHECK(why.find("does not support --dump-only") != std::string::npos && why.find(c) != std::string::npos);
+        BCHECK(why.find('\n') == std::string::npos);
     }
-    CHECK(!whirl::dump::dumpOnly());  // asking does not set it
+    BCHECK(!whirl::dump::dumpOnly());  // asking does not set it
 }
 #undef CHECK
 

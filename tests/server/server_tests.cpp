@@ -7,6 +7,8 @@
 // Qwen3.8-27B UD-Q4_K_M file of this machine, or WHIRL_TEST_GGUF.
 
 #include "../test_env.h"
+#define WHIRL_TEST_FAIL_STDERR 1  // this program printed its failures on stderr as "  FAIL ..."
+#include "../test_check.h"
 #include "http_client.h"
 #include "mock_backend.h"
 #include "platform/net.h"
@@ -86,30 +88,12 @@ using whirl::test::MockModel;
 
 namespace {
 
-int g_pass = 0, g_fail = 0;
+using whirl::test::g_fail;
+using whirl::test::g_pass;
+// CHECK / CHECK_EQ / the counters: tests/test_check.h (arch025 N16)
 bool g_verbose = false;
 
-#define CHECK(cond)                                                                       \
-    do {                                                                                  \
-        if (cond) {                                                                       \
-            ++g_pass;                                                                     \
-        } else {                                                                          \
-            ++g_fail;                                                                     \
-            std::fprintf(stderr, "  FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond);        \
-        }                                                                                 \
-    } while (0)
 
-#define CHECK_EQ(a, b)                                                                              \
-    do {                                                                                            \
-        const auto& va_ = (a);                                                                      \
-        const auto& vb_ = (b);                                                                      \
-        if (va_ == vb_) {                                                                           \
-            ++g_pass;                                                                               \
-        } else {                                                                                    \
-            ++g_fail;                                                                               \
-            std::fprintf(stderr, "  FAIL %s:%d: %s == %s\n", __FILE__, __LINE__, #a, #b);           \
-        }                                                                                           \
-    } while (0)
 
 std::string g_gguf;
 std::unique_ptr<gguf::File> g_file;

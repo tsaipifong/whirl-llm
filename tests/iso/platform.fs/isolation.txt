@@ -16,3 +16,4 @@ hdr       src/platform/fs_fake.h
 # test program
 testsrc   tests/iso/platform.fs/fs_tests.cpp
 testhdr   tests/iso/iso_test.h
+testhdr   tests/test_check.h

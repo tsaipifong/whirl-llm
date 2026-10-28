@@ -15,16 +15,7 @@
 #define WHIRL_SPEC_QMAX 32
 #define WHIRL_SPEC_QWORDS 72
 
-struct DSampArgs {
-    int on[32];
-    int top_k[32];
-    int qoff[32];  // i32 word offset of this row's q entry in qbuf
-    float inv_t[32];
-    float top_p[32];
-    float min_p[32];
-    unsigned key_lo[32];  // race key base (whirl::spec::raceBase)
-    unsigned key_hi[32];
-};
+#include "kernel_args.h"  // DSampArgs (defined once for both kernel sets, arch025 N13)
 
 __device__ __forceinline__ unsigned long long spec_splitmix(unsigned long long z) {
     z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;

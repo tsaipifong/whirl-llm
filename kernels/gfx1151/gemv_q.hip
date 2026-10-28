@@ -25,7 +25,6 @@ extern "C" __global__ void quantize_q8(const float *x, int8_t *xq, float *xd, in
     }
 }
 
-__device__ __forceinline__ int dp4(int a, int b, int c) { return __builtin_amdgcn_sudot4(true, a, true, b, c, false); }
 
 
 __device__ __forceinline__ uint32_t ld32u(const uint8_t *p) {  // 2-byte aligned (all call sites)
@@ -96,25 +95,7 @@ template <> struct QD<QT_Q5_K> {
 
 // Map 4 packed nibbles (one per byte, low 4 bits) through kvalues_iq4nl with
 // two v_perm_b32 byte selects (entries 0..7 and 8..15) and a bit-3 blend.
-__device__ __forceinline__ int iq4_lut4(uint32_t nib4) {
-    const uint32_t t0 = 0xBFAD9881u, t1 = 0xF6EADDCFu, t2 = 0x26190D01u, t3 = 0x71594535u;
-    const uint32_t sel = nib4 & 0x07070707u;
-    const uint32_t lo = __builtin_amdgcn_perm(t1, t0, sel);
-    const uint32_t hi = __builtin_amdgcn_perm(t3, t2, sel);
-    const uint32_t m = ((nib4 & 0x08080808u) >> 3) * 0xFFu;
-    return (int)((hi & m) | (lo & ~m));
-}
-
-// kvalues_mxfp4 (0 1 2 3 4 6 8 12 and negatives) through the same two-table
-// v_perm_b32 select as iq4_lut4.
-__device__ __forceinline__ int mx_lut4(uint32_t nib4) {
-    const uint32_t t0 = 0x03020100u, t1 = 0x0C080604u, t2 = 0xFDFEFF00u, t3 = 0xF4F8FAFCu;
-    const uint32_t sel = nib4 & 0x07070707u;
-    const uint32_t lo = __builtin_amdgcn_perm(t1, t0, sel);
-    const uint32_t hi = __builtin_amdgcn_perm(t3, t2, sel);
-    const uint32_t m = ((nib4 & 0x08080808u) >> 3) * 0xFFu;
-    return (int)((hi & m) | (lo & ~m));
-}
+#include "shared/gemv_q_part.h"  // also in the gfx1201 set (kernels/gemv_q.hip)
 
 // MXFP4: the IQ4_XS unit layout with a power-of-2 block scale 2^(e - 128).
 template <> struct QD<QT_MXFP4> {
@@ -320,14 +301,7 @@ template <> struct QD<QT_IQ3_S> {
 
 // Multi-token unit dot: decode the weight unit once, dot it with NT tokens.
 // Generic fallback re-runs the single-token dot (weight part left to CSE).
-template <int T> struct QDN {
-    template <int NT>
-    static __device__ __forceinline__ void dot(const uint8_t *row, int u, const int8_t *xq, const float *xd, int ncols,
-                                               float *acc) {
-#pragma unroll
-        for (int t = 0; t < NT; ++t) acc[t] += QD<T>::dot(row, u, xq + (size_t)t * ncols, xd + (size_t)t * (ncols / 32));
-    }
-};
+#include "shared/gemv_q_part_2.h"  // also in the gfx1201 set (kernels/gemv_q.hip)
 
 template <> struct QDN<QT_Q3_K_U16> {
     template <int NT>
@@ -358,72 +332,7 @@ __device__ __forceinline__ void kq_tail(int lo0, int lo1, int hi0, int hi1, floa
     }
 }
 
-template <> struct QDN<QT_Q4_K> {
-    template <int NT>
-    static __device__ __forceinline__ void dot(const uint8_t *row, int u, const int8_t *xq, const float *xd, int ncols,
-                                               float *acc) {
-        const int b = u >> 4, j = (u >> 2) & 3, i = u & 3;
-        const uint8_t *blk = row + (size_t)b * 144;
-        const uint32_t dm = *(const uint32_t *)blk;
-        const float d = __half2float(__ushort_as_half((uint16_t)(dm & 0xFFFF)));
-        const float dmin = __half2float(__ushort_as_half((uint16_t)(dm >> 16)));
-        const uint2 q = *(const uint2 *)(blk + 16 + 32 * j + 8 * i);
-        int s0, m0, s1, m1;
-        scale_min_k4(2 * j, blk + 4, s0, m0);
-        scale_min_k4(2 * j + 1, blk + 4, s1, m1);
-        kq_tail<NT>(q.x & 0x0F0F0F0F, q.y & 0x0F0F0F0F, (q.x >> 4) & 0x0F0F0F0F, (q.y >> 4) & 0x0F0F0F0F, d * s0, d * s1,
-                    dmin * m0, dmin * m1, b * 256 + 64 * j + 8 * i, (b * 256 + 64 * j) >> 5, xq, xd, ncols, acc);
-    }
-};
-
-template <> struct QDN<QT_Q5_K> {
-    template <int NT>
-    static __device__ __forceinline__ void dot(const uint8_t *row, int u, const int8_t *xq, const float *xd, int ncols,
-                                               float *acc) {
-        const int b = u >> 4, j = (u >> 2) & 3, i = u & 3;
-        const uint8_t *blk = row + (size_t)b * 176;
-        const uint32_t dm = *(const uint32_t *)blk;
-        const float d = __half2float(__ushort_as_half((uint16_t)(dm & 0xFFFF)));
-        const float dmin = __half2float(__ushort_as_half((uint16_t)(dm >> 16)));
-        const uint2 q = *(const uint2 *)(blk + 48 + 32 * j + 8 * i);
-        const uint2 h = *(const uint2 *)(blk + 16 + 8 * i);
-        int s0, m0, s1, m1;
-        scale_min_k4(2 * j, blk + 4, s0, m0);
-        scale_min_k4(2 * j + 1, blk + 4, s1, m1);
-        kq_tail<NT>((q.x & 0x0F0F0F0F) | (((h.x >> (2 * j)) & 0x01010101) << 4),
-                    (q.y & 0x0F0F0F0F) | (((h.y >> (2 * j)) & 0x01010101) << 4),
-                    ((q.x >> 4) & 0x0F0F0F0F) | (((h.x >> (2 * j + 1)) & 0x01010101) << 4),
-                    ((q.y >> 4) & 0x0F0F0F0F) | (((h.y >> (2 * j + 1)) & 0x01010101) << 4), d * s0, d * s1, dmin * m0,
-                    dmin * m1, b * 256 + 64 * j + 8 * i, (b * 256 + 64 * j) >> 5, xq, xd, ncols, acc);
-    }
-};
-
-// ---- grouped one-token GEMV ABI ----
-// One launch of a one-token gemvq_<type> covers up to 3 matrices that share the input:
-// blocks [0, b1) run segment 0, [b1, b2) segment 1, the rest segment 2, each with its
-// own (W, row_bytes, y, nrows) and segment-local block index (bitwise the same rows).
-struct GvArgs {
-    const uint8_t *W0, *W1, *W2;
-    float *y0, *y1, *y2;
-    uint64_t rb0, rb1, rb2;
-    int n0, n1, n2;
-    int b1, b2;
-};
-struct GvSel {
-    const uint8_t *W;
-    float *y;
-    uint64_t rb;
-    int nrows, b;
-};
-__device__ __forceinline__ GvSel gv_sel(const GvArgs &g) {
-    const int b = blockIdx.x;
-    if (b < g.b1) return {g.W0, g.y0, g.rb0, g.n0, b};
-    if (b < g.b2) return {g.W1, g.y1, g.rb1, g.n1, b - g.b1};
-    return {g.W2, g.y2, g.rb2, g.n2, b - g.b2};
-}
-#define GV_PARAMS const GvArgs g, const int8_t *xq, const float *xd, int ncols, int accumulate, const int *skip
-// marker: the host passes GvArgs to the one-token gemvq_<type> entries
-extern "C" __global__ void gemv_grouped_abi() {}
+#include "shared/gemv_q_gemv_grouped_abi.h"  // also in the gfx1201 set (kernels/gemv_q.hip)
 // ---- grouped ABI (end) ----
 template <int T>
 __device__ void gemvq_impl(const uint8_t *__restrict__ W, uint64_t row_bytes, const int8_t *__restrict__ xq,

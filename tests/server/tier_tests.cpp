@@ -7,6 +7,7 @@
 //   (default: %WHIRL_TEST_TMP%\tier_test_tmp, else %TEMP%\whirl-tests\<pid>\tier_test_tmp)
 
 #include "../test_env.h"
+#include "../test_check.h"
 #include "device/handles.h"
 #include "device/null_backend.h"
 #include "tier/kv_tier.h"
@@ -44,18 +45,10 @@ using namespace whirl::tier;
 using namespace whirl::device;
 namespace fs = std::filesystem;
 
-static int g_pass = 0;
-static int g_fail = 0;
+using whirl::test::g_fail;
+using whirl::test::g_pass;
+// CHECK / CHECK_EQ / the counters: tests/test_check.h (arch025 N16)
 
-#define CHECK(c)                                                              \
-    do {                                                                      \
-        if (c) {                                                              \
-            ++g_pass;                                                         \
-        } else {                                                              \
-            ++g_fail;                                                         \
-            std::printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #c);          \
-        }                                                                     \
-    } while (0)
 
 // ---- device: device::NullBackend (src/device/null_backend.h, ARCH-1 D-3)
 
@@ -324,6 +317,7 @@ static void testEvictLru(NullBackend& ops) {
     // c needs 4 blocks: the LRU entry (a, no SSD copy) is dropped
     Entry* c = spill(*t, dc, makeTokens(512, 3));
     CHECK(c != nullptr);
+    if (!c) return;
     CHECK(t->find(ida) == nullptr);
     CHECK(t->find(idb) == b);
     CHECK(t->stats.ram_evictions == 1 && t->stats.dropped == 1);

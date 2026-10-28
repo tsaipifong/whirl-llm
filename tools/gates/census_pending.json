@@ -30,6 +30,6 @@
   {"glob": "src/model/kernels.cpp", "owner": "lane 2 (arch025-model, N9 Model split)"},
   {"glob": "src/model/loader.cpp", "owner": "lane 2 (arch025-model, N9 Model split)"},
   {"glob": "src/model/tune.cpp", "owner": "lane 2 (arch025-model, N9 Model split)"},
-  {"glob": "kernels/*", "owner": "lane 3 (arch025-kern, N5 / N14 kernel modules)"}
+  {"glob": "kernels/vision/vision.hip", "owner": "lane 3 (arch025-kern, kernel modules: the vision kernel is still in no family)"}
  ]
 }

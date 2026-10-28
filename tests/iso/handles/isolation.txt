@@ -24,3 +24,4 @@ hdr       src/platform/env.h
 testsrc   tests/device/device_tests.cpp
 testhdr   include/whirl/device_profile.h
 testhdr   src/tier/ram_size.h
+testhdr   tests/test_check.h

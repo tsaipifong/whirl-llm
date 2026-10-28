@@ -11,8 +11,6 @@
 // aligned copy keeps every super-block's global alignment mod 16, so dec_group_h reads the
 // same bytes the same way) plus the X slab (BN tokens x 256 k) in LDS, next stage
 // prefetched into registers; token tiles of 16..64 instead of 128/256 (no padding work).
-template <int T> constexpr int t2_sbb() { return 256 / Q<T>::blk * Q<T>::bytes; }
-typedef unsigned int t2_u32x4 __attribute__((ext_vector_type(4)));
 #include "gemm_small_addr.h"  // CH and which W chunks a stage loads (shared with the unit tests)
 
 template <int T, int BM, int BN, int NTH, int WAVES_M, bool OH>

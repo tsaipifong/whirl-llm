@@ -8,6 +8,7 @@
 // image NAME.png / NAME.jpg next to it, checks decode + resize bit-exactly.
 
 #include "../test_env.h"
+#include "../test_check.h"
 #include "whirl/common.h"
 #include "whirl/vision.h"
 
@@ -19,17 +20,10 @@
 
 using namespace whirl;
 
-static int g_fail = 0, g_pass = 0;
+using whirl::test::g_fail;
+using whirl::test::g_pass;
+// CHECK / CHECK_EQ / the counters: tests/test_check.h (arch025 N16)
 
-#define CHECK(cond)                                                       \
-    do {                                                                  \
-        if (cond) {                                                       \
-            ++g_pass;                                                     \
-        } else {                                                          \
-            ++g_fail;                                                     \
-            std::printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond);   \
-        }                                                                 \
-    } while (0)
 
 static std::span<const std::uint8_t> sv(const char* s) { return {reinterpret_cast<const std::uint8_t*>(s), std::strlen(s)}; }
 

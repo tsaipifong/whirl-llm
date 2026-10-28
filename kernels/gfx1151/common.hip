@@ -19,36 +19,7 @@
 // and llama.cpp's reference math; the C++ CPU references in tests/kernels/
 // check them.
 
-#include <hip/hip_runtime.h>
-#include <hip/hip_fp16.h>
-#include <stdint.h>
-
-#include "iq_tables.h"
-
-#define WARP 32
-
-// KV cache element type (f16: half the bytes of f32, and WMMA-ready).
-typedef _Float16 kv_t;  // (f16 KV element; q8 pools use int8 + scales, see KvArgs)
-
-// Debug slots (host reads via hipModuleGetGlobal "whirl_dbg").
-__device__ unsigned long long whirl_dbg[8];
-
-__device__ __forceinline__ float h2f(const uint8_t *p) {
-    uint16_t u = (uint16_t)p[0] | ((uint16_t)p[1] << 8);
-    return __half2float(__ushort_as_half(u));
-}
-
-__device__ __forceinline__ float warp_sum(float v) {
-#pragma unroll
-    for (int o = WARP / 2; o > 0; o >>= 1) v += __shfl_xor(v, o, WARP);
-    return v;
-}
-
-__device__ __forceinline__ float warp_max(float v) {
-#pragma unroll
-    for (int o = WARP / 2; o > 0; o >>= 1) v = fmaxf(v, __shfl_xor(v, o, WARP));
-    return v;
-}
+#include "shared/common_warp.h"  // also in the gfx1201 set (kernels/common.hip)
 
 // gfx1151 int8 activation scale word (the xd[] arrays): bits 31..13 hold f32
 // bits 30..12 of d (full exponent, 11-bit mantissa, rounded), bits 12..0 the
@@ -77,32 +48,4 @@ __device__ __forceinline__ int warp_sum_i(int v) {
 }
 
 // Block-wide sum for blockDim.x <= 1024 (multiple of 32).
-__device__ float block_sum(float v) {
-    __shared__ float sh[32];
-    const int lane = threadIdx.x % WARP, wid = threadIdx.x / WARP;
-    v = warp_sum(v);
-    __syncthreads();
-    if (lane == 0) sh[wid] = v;
-    __syncthreads();
-    const int nw = (blockDim.x + WARP - 1) / WARP;
-    v = (threadIdx.x < nw) ? sh[threadIdx.x] : 0.0f;
-    if (wid == 0) v = warp_sum(v);
-    if (threadIdx.x == 0) sh[0] = v;
-    __syncthreads();
-    return sh[0];
-}
-
-__device__ float block_max(float v) {
-    __shared__ float sh[32];
-    const int lane = threadIdx.x % WARP, wid = threadIdx.x / WARP;
-    v = warp_max(v);
-    __syncthreads();
-    if (lane == 0) sh[wid] = v;
-    __syncthreads();
-    const int nw = (blockDim.x + WARP - 1) / WARP;
-    v = (threadIdx.x < nw) ? sh[threadIdx.x] : -INFINITY;
-    if (wid == 0) v = warp_max(v);
-    if (threadIdx.x == 0) sh[0] = v;
-    __syncthreads();
-    return sh[0];
-}
+#include "shared/common_part_2.h"  // also in the gfx1201 set (kernels/common.hip)

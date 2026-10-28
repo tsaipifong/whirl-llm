@@ -163,7 +163,12 @@ regression check only, not GPU recall: what the old map missed, the new one may 
 named case hit, every rate >= 95 %, nothing narrowed; 1 otherwise. A changed host function that dispatches
 kernels (a host user of a `.hip` file) lists those kernels' tests (kernel-test functions, `kt_full`).
 
-### <a id="module-gate"></a>Module gate (dev-time only)
+### <a id="module-gate"></a>Module gate (internal; dev-time only)
+
+**Internal.** The one dev-time entry point is [`tools/gates/test_change.py`](#test-what-you-changed) (arch025 N16);
+`release_gate.ps1 -Module` stays as the module-row tool that `module_gate_test.ps1` and older notes use, and
+`tools/quick/gate.py` is the FASTLANE candidate cascade (kernel / mode experiments: bitwise, NMSE, KL, perf), not a
+"test what you changed" tool. New work starts from `test_change.py`.
 
 `tools/gates/modules.json` maps each engine module (arch024 M1-M8, plus the cross-module contracts) to
 its source globs and the `release_gate.ps1` steps of its row in the arch024 plan, table c-1.
@@ -451,6 +456,38 @@ and do not fail the gate (they are not guaranteed; see kv-and-caching.md section
 mode (`--precise`, default balance, `--fast`) on dense and MoE; it needs the default `--slot-ctx`
 (12288) or larger. CPU side: whirl-server-tests `prefill_sched` checks the schedule functions.
 
+## <a id="unit-tests"></a>Host unit tests: one file and one program per module (arch025 N7 / N16)
+
+`tests/unit/<module>_tests.cpp` holds one module's host-side unit tests (module name with `.` -> `_`, e.g.
+`mem_fit_tests.cpp` for `mem.fit`, `kernels_gemm_tests.cpp` for the host checks of `kernels/gemm_small_addr.h`). Each
+file ends with its `whirl::test::Suite` (the cases in the order the old single `main()` called them) and, unless
+`WHIRL_UNIT_ALL` is defined, its own `main()`. `cmake/unit.cmake` builds every file twice:
+
+| program | sources | gate step |
+|---|---|---|
+| `whirl-unit-<module>-tests.exe` | that file alone (+ `numerics_plan_tests.cpp` for contract, `dll_deps.cpp` for release) | `cpu_unit_<module>` |
+| `whirl-tests.exe` | every `tests/unit/*_tests.cpp`; `unit_tests.cpp` runs all cases in the old order | `cpu_tests` |
+
+`whirl-tests` refuses to run (exit 2) when a module's case is missing from its `ORDER` table or the table names a case
+no module has, so a test cannot drop out unnoticed. Both take `--list` (`<module> <case>` lines) and
+`--only NAME[,NAME...]`; each prints `<module> tests: N passed, M failed` per module, `whirl-tests` then
+`unit tests: N passed, M failed`. Adding a module: a new `tests/unit/<module>_tests.cpp` (copy the end of an existing
+one) and its cases in `unit_tests.cpp` `ORDER`. A module file includes only its module's headers plus
+`tests/test_check.h` / `tests/test_env.h` (both header-only), so it can also be the test program of the module's
+isolation manifest (`tests/iso/<module>/isolation.txt`, `testsrc tests/unit/<module>_tests.cpp`, `testhdr` the two
+headers).
+
+**One assert header**: `tests/test_check.h` (`CHECK`, `CHECK_EQ`, `CHECK_DETAIL`, `whirl::test::check(ok, what)`,
+the `g_pass` / `g_fail` counters, `throws`, `Suite` / `runSuites` with `--list` / `--only`). The unit, cache, tier,
+vision, device, ops, hiprt, sampling, server and model test programs use it instead of their own copies; sampling and
+server define `WHIRL_TEST_FAIL_STDERR` first (their failures keep going to stderr as `  FAIL ...`). The isolation
+programs keep `tests/iso/iso_test.h` (`ISO_CHECK`, `iso::run`) for now.
+
+Kernel source checks (CPU, HIP clang, no GPU): `cpu_kernel_abi` (`tools/gates/kernel_abi_check.py`: one layout table
+`include/whirl/kernels_abi_layout.h`, one device definition `kernels/kernel_args.h`, static_asserts both sides) and
+`cpu_kernel_iso` (`tools/gates/kernel_iso_check.py`: each kernel family of `kernels/families.json` compiles from its
+own and its declared dependencies' fragments only). Both run `--selftest` first.
+
 ## Change → required tests
 
 R9700 = gfx1201 and 8060S = gfx1151. G0 = the golden-hash gate above. Some tests in the table
@@ -459,9 +496,9 @@ unit tests and block tests. Until they exist, run G0 for those changes.
 
 | What changed | Required | GPU? | Both GPUs? |
 |---|---|---|---|
-| tokenizer / chat template / json | whirl-tests, whirl-parity | no | no |
+| tokenizer / chat template / json | whirl-tests (whirl-unit-tokenizer / -chat / -json / -gguf-tests alone), whirl-parity | no | no |
 | protocol / http / StreamState | whirl-server-tests | no | no |
-| numerics / config resolve (pure logic) | whirl-tests (numerics), resolve table tests | no | no |
+| numerics / config resolve (pure logic) | whirl-tests (numerics; whirl-unit-contract-tests alone), resolve table tests | no | no |
 | **default ExecFlags change** (the actual flags of any mode) | the row above + G0 (affected modes) + check.ps1 | yes | **yes** (different Caps give different flags) |
 | kv_policy | kv_policy table tests, whirl-server-tests (pool pressure) | no | no; if the default format changes add G0 + server-gate pool |
 | prefix_cache / PagePool | whirl-server-tests (prefix, shared sys, pool, restore), prefix_cache unit tests | no | no; on a behaviour change (not just a move) add server-gate mt_cache, sys (R9700) |
