@@ -41,7 +41,7 @@ void Reader::read(void* dst, std::size_t n, u64 off) {
     if (std::fread(dst, 1, n, f_) != n) throw ModelError("Truncated", "short read");
 }
 
-WeightLoader::WeightLoader(const gguf::File& f, const Config& cfg, const Kernels& k, Weights& w, LoadStats& stats, Device dev,
+WeightLoader::WeightLoader(const gguf::File& f, const Config& cfg, const kernels::KernelTable& k, Weights& w, LoadStats& stats, Device dev,
                            std::uint8_t* staging, std::size_t staging_len)
     : f_(f), cfg_(cfg), k_(k), w_(w), stats_(stats), dev_(std::move(dev)), file_(f.path()), staging_(staging), staging_len_(staging_len) {}
 

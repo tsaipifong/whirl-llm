@@ -1,0 +1,74 @@
+# ARCH-1 8.5 isolation check of protocol, the HTTP / OpenAI protocol / streaming front end (src/server/protocol.cpp,
+# stream.cpp, http.cpp, base64.cpp; arch025-lane2 leg 5 S6): the module's sources, its DECLARED dependencies and the ONLY
+# headers they may see. Format: tests/sampling/isolation.txt; read by cmake/iso.cmake and tools/gates/iso_check.py.
+# declared dependencies: the chat template and JSON (src/chat), the tokenizer and the GGUF reader it loads from, the
+# vision prompt side (src/vision/prompt.cpp: placeholder expansion; hash.cpp: the token-id hash) - not the encoder, the
+# server log, lib whirl's util and the platform layer (sockets, time, env, fs, args, proc); the generated version header.
+# What the module sees of the engine is engine_api.h (EngineApi, Job, Conn) and of the encoder vision_iface.h's names;
+# headers only: whirl/vision.h (http.cpp builds vision::Prepared) with device/handles.h and whirl/hip.h.
+# NOT declared: the engine, the ServerModel, the model (class Model), the HIP layer, the image encoder (vision.cpp).
+module    protocol
+exe       whirl-iso-protocol-tests
+mutate    src/server/stream.cpp
+mutsym    hip
+mutsym    engine
+mutsym    model
+syslib    ws2_32.lib
+syslib    winmm.lib
+gen       whirl/version.h
+# module sources
+src       src/server/protocol.cpp
+src       src/server/stream.cpp
+src       src/server/http.cpp
+src       src/server/base64.cpp
+# declared dependency sources
+src       src/chat/chat_template.cpp
+src       src/chat/json.cpp
+src       src/tokenizer/tokenizer.cpp
+src       src/tokenizer/unicode.cpp
+src       src/gguf/gguf.cpp
+src       src/vision/prompt.cpp
+src       src/vision/hash.cpp
+src       src/server/log.cpp
+src       src/common/util.cpp
+src       src/platform/env_win.cpp
+src       src/platform/fs_win.cpp
+src       src/platform/args_win.cpp
+src       src/platform/time_win.cpp
+src       src/platform/proc_win.cpp
+src       src/platform/net_win.cpp
+# include closure of the sources above
+hdr       include/whirl/chat.h
+hdr       include/whirl/common.h
+hdr       include/whirl/device_mem.h
+hdr       include/whirl/device_profile.h
+hdr       include/whirl/gguf.h
+hdr       include/whirl/hip.h
+hdr       include/whirl/json.h
+hdr       include/whirl/prefill_schedule.h
+hdr       include/whirl/thread_annotations.h
+hdr       include/whirl/tokenizer.h
+hdr       include/whirl/uma_mem.h
+hdr       include/whirl/unicode.h
+hdr       include/whirl/vision.h
+hdr       include/whirl/vismap.h
+hdr       src/device/backend.h
+hdr       src/device/handles.h
+hdr       src/platform/args.h
+hdr       src/platform/env.h
+hdr       src/platform/fs.h
+hdr       src/platform/fs_fake.h
+hdr       src/platform/net.h
+hdr       src/platform/net_fake.h
+hdr       src/platform/proc.h
+hdr       src/platform/time.h
+hdr       src/server/engine_api.h
+hdr       src/server/http.h
+hdr       src/server/log.h
+hdr       src/server/protocol.h
+hdr       src/server/stream.h
+hdr       src/server/vision_iface.h
+hdr       src/tokenizer/unicode_tables.inc
+# test program
+testsrc   tests/iso/protocol/protocol_tests.cpp
+testhdr   tests/iso/iso_test.h

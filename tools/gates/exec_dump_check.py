@@ -3,7 +3,8 @@
 """exec_dump_check.py (arch025-S0a): every scalar data member of qwen35::Model (include/whirl/model.h; since arch025-M1
 also of its base qwen35::Weights, src/model/qwen35/weights.h; since arch025-M2 of its bases qwen35::KvPool and
 qwen35::SeqTable, src/model/qwen35/kv.h; since arch025-M3 of its private bases qwen35::Scratch and qwen35::TuneTable,
-src/model/qwen35/scratch.h / tune_table.h, read as m.scratch().<name> / m.tuneTable().<name>) is either
+src/model/qwen35/scratch.h / tune_table.h, read as m.scratch().<name> / m.tuneTable().<name>; since arch025-lane2 N9 S3 of
+its base qwen35::Context, src/model/qwen35/context.h, which holds most of the former Model members) is either
 printed by WHIRL_DUMP_EXEC (src/model/exec_dump.cpp reads it as m.<name>) or named here as per-call state. A member
 added to Model without either fails, so the S0b-2 dump cannot silently miss a new numerics flag.
 
@@ -37,6 +38,7 @@ CLASS_KVPOOL = re.compile(r"^class KvPool \{", re.M)
 STRUCT_SEQTABLE = re.compile(r"^struct SeqTable \{", re.M)
 STRUCT_SCRATCH = re.compile(r"^struct Scratch \{", re.M)  # arch025-M3
 STRUCT_TUNE = re.compile(r"^struct TuneTable \{", re.M)  # arch025-M3
+CLASS_CONTEXT = re.compile(r"^class Context\b[^{;]*\{", re.M)  # arch025-lane2 N9 S3: class Model : public Context
 
 
 def body_of(text: str, head: re.Pattern) -> str:
@@ -53,7 +55,8 @@ def members(model_h: str, weights_h: str = "") -> list[str]:
         body += "\n" + body_of(weights_h, STRUCT_WEIGHTS)
         # arch025-M2: ... public KvPool, public SeqTable (src/model/qwen35/kv.h, appended by weights_text)
         # arch025-M3: ... private Scratch, private TuneTable (scratch.h / tune_table.h)
-        for head in (CLASS_KVPOOL, STRUCT_SEQTABLE, STRUCT_SCRATCH, STRUCT_TUNE):
+        # arch025-lane2 N9 S3: Model : public Context (src/model/qwen35/context.h), Context : the bases above
+        for head in (CLASS_CONTEXT, CLASS_KVPOOL, STRUCT_SEQTABLE, STRUCT_SCRATCH, STRUCT_TUNE):
             if head.search(weights_h):
                 body += "\n" + body_of(weights_h, head)
     out = []
@@ -138,6 +141,10 @@ def selftest(root: str) -> int:
         cases.append(("a new TuneTable member fails", h, d, 1, w[:tat] + "    bool m3_tune_flag = false;\n" + w[tat:]))
         cases.append(("tune_cold dropped from the dump fails", h, d.replace("WD_TB(tune_cold);", ""), 1, w))
         cases.append(("tune_mask dropped from the dump fails", h, d.replace("m.tuneTable().tune_mask", "m.tuneTable().tm_gone"), 1, w))
+    if w and CLASS_CONTEXT.search(w):  # arch025-lane2 N9 S3: the members of the base Context count too
+        xat = w.index("\n", w.index("    Config cfg;", CLASS_CONTEXT.search(w).start())) + 1
+        cases.append(("a new Context member fails", h, d, 1, w[:xat] + "    bool n9_ctx_flag = false;\n" + w[xat:]))
+        cases.append(("max_batch dropped from the dump fails", h, d.replace("WD_U(max_batch);", ""), 1, w))
     if drop not in d:
         print(f"exec dump check selftest: FAIL (exec_dump.cpp has no {drop.strip()!r} line to drop)")
         return 1
@@ -155,9 +162,10 @@ def selftest(root: str) -> int:
 
 
 def weights_text(root: str) -> str:
-    # the bases' headers: weights.h (arch025-M1), kv.h (arch025-M2), scratch.h / tune_table.h (arch025-M3)
+    # the bases' headers: weights.h (arch025-M1), kv.h (arch025-M2), scratch.h / tune_table.h (arch025-M3), context.h
+    # (arch025-lane2 N9 S3)
     out = ""
-    for f in ("weights.h", "kv.h", "scratch.h", "tune_table.h"):
+    for f in ("weights.h", "kv.h", "scratch.h", "tune_table.h", "context.h"):
         p = os.path.join(root, "src", "model", "qwen35", f)
         if os.path.exists(p):
             out += open(p, encoding="utf-8").read() + "\n"

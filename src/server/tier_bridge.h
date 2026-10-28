@@ -23,7 +23,7 @@
 #include "cache/prefix_cache.h"
 #include "device/backend.h"
 #include "device/handles.h"
-#include "server/backend.h"
+#include "cache/cache_model.h"  // not server/backend.h: the narrow model interface (arch025-lane2 D2.2)
 #include "server/prefix_store.h"
 #include "whirl/chat_tokens.h"
 #include "tier/idle_flush.h"
@@ -79,7 +79,7 @@ public:
     };
 
     // m: the model (main stream, state geometry); kv: the pool arrays (Engine's, set by initPool)
-    TierBridge(device::Backend& ops, ServerModel& m, const chat::ChatTokens& ct, PrefixStore& ps,
+    TierBridge(device::Backend& ops, CacheModel& m, const chat::ChatTokens& ct, PrefixStore& ps,
                const std::vector<KvArr>& kv, const Config& cfg);
     // arch024 M8: the engine thread that may call the entry points below (nullptr: unchecked; docs/dev/threads.md)
     void setOwner(const EngineThread* o) { owner_ = o; }
@@ -169,7 +169,7 @@ public:
 
 private:
     device::Backend& ops_;
-    ServerModel& m_;
+    CacheModel& m_;
     const chat::ChatTokens& ct_;
     PrefixStore& ps_;
     const std::vector<KvArr>& kv_;

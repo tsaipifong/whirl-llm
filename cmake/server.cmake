@@ -85,7 +85,8 @@ add_library(whirl_server_core STATIC
   ${CMAKE_SOURCE_DIR}/src/cache/page_pool.cpp
   ${CMAKE_SOURCE_DIR}/src/server/prefix_store.cpp
   ${CMAKE_SOURCE_DIR}/src/server/tier_bridge.cpp
-  ${CMAKE_SOURCE_DIR}/src/server/http.cpp)
+  ${CMAKE_SOURCE_DIR}/src/server/http.cpp
+  ${CMAKE_SOURCE_DIR}/src/server/base64.cpp)
 target_include_directories(whirl_server_core PUBLIC ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/include)
 # whirl/version.h (configured by cmake/release.cmake) for GET /version and /props
 target_include_directories(whirl_server_core PRIVATE ${CMAKE_BINARY_DIR}/generated)

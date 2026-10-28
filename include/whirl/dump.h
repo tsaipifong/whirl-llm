@@ -42,10 +42,4 @@ std::string dumpOnlyRefusal(std::string_view cmd);
 
 }  // namespace whirl::dump
 
-namespace whirl::qwen35 {
-class Model;
-// WHIRL_DUMP_EXEC: the "D exec:" lines (src/model/exec_dump.cpp)
-std::string execDump(const Model& m);
-// end of loadOrTune: the exec dump when WHIRL_DUMP_EXEC is on; exit(0) when --dump-only
-void afterLoadTune(const Model& m);
-}  // namespace whirl::qwen35
+// qwen35::execDump / afterLoadTune (WHIRL_DUMP_EXEC, the --dump-only exit): src/model/exec_dump.h (arch025-lane2 N3)

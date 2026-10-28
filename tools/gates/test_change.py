@@ -67,11 +67,13 @@ CORE = {
     "model.scratch": "forward: activation buffers every forward kernel writes",
     "model.tune": "kernels: the per-GPU kernel / tile choice tables",
     "handles": "device: RAII device buffers / streams / events under every GPU call",
-    "contract": "numerics / device::Backend / kernels_abi / ServerModel contracts (modules.json full: true)",
+    "contract.abi": "numerics / kernels_abi contracts (modules.json full: true; arch025-lane2 N3 split of contract)",
+    "contract.device": "device::Backend contract (modules.json full: true)",
+    "contract.server": "ServerModel contract (modules.json full: true)",
 }
 # Not core (their own steps are enough; modules.json rows already carry their GPU steps): env_snapshot, ckpt_store,
 # page_pool, prefix_store, tier_bridge, protocol, engine_gov, threads, sampling, platform.*, server.*, cli, spec.*,
-# model.arch_registry, model.qwen35 (registration / glue: golden + MTP server steps in their rows).
+# model.arch_registry, model.qwen35.arch / model.qwen35.server (registration / glue: golden + MTP server steps in their rows).
 
 # Core by path, also for paths of older commits that no module glob matches any more (e.g. src/model/forward/*.cpp
 # before the qwen35 move) and for files no module owns:

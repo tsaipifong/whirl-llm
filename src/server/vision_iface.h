@@ -8,7 +8,6 @@
 #pragma once
 
 #include "whirl/device_mem.h"
-#include "whirl/vision.h"
 #include "whirl/prefill_schedule.h"
 #include "whirl/vismap.h"
 
@@ -18,6 +17,15 @@
 #include <span>
 #include <string>
 #include <vector>
+
+// arch025-lane2 leg 5 (S6): the encoder's types by name only, so the HTTP side (engine_api.h -> this header) does not
+// see whirl/vision.h (the HIP encoder, device/handles.h); a file that builds or reads them includes whirl/vision.h
+// (llama.cpp tools/mtmd/mtmd.h:62-67 gives its server opaque types the same way).
+namespace whirl::vision {
+struct Prepared;
+struct Region;
+struct EncodeStats;
+}  // namespace whirl::vision
 
 namespace whirl::server {
 

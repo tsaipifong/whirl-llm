@@ -4,11 +4,12 @@
 CPU only, no GPU, no model.
 
     python -I tools/gates/iso_check.py [--module NAME[,NAME...]] [--mutants] [--list] [-j N] [--work DIR] [--root REPO]
-                                       [--vcvars BAT] [--keep]
+                                       [--vcvars BAT] [--keep] [--build DIR]
 
 Manifests: tests/sampling/isolation.txt and tests/iso/<module>/isolation.txt (one per module; cmake/iso.cmake reads the
 same files). Kinds: module NAME, exe TARGET, lib TARGET (optional object-library name), mutate PATH (the source the
-mutants edit), mutsym hip|log|now|engine (link mutants), syslib X.lib, then src / hdr (module + declared dependencies)
+mutants edit), mutinc top|end (where the include mutants put the line: after the first quoted include, the default, or
+at the end of the file), mutsym hip|log|now|engine|model|tier|archtable (link mutants), syslib X.lib, gen PATH, then src / hdr (module + declared dependencies)
 and testsrc / testhdr (test program only). Every file is copied into <work>/<module>/<case>/{mod,test} (leading src/
 include/ tests/ dropped); module sources are compiled with mod/ as the ONLY include path, the test with mod/ + test/, and
 the test program is linked from ALL those objects directly (no static-library member selection) with /OPT:NOREF, so an
@@ -17,12 +18,20 @@ undeclared symbol in any module object is LNK2019 even when no test calls it.
 --mutants adds, per module, boundary mutants on the `mutate` source; each must FAIL the isolated build at the named stage
 AND compile with the product flags (/I src /I include), which is what makes the check worth having:
   include_engine       gains #include "server/engine.h"                                -> isolated compile C1083
+                       (mutinc end, arch025-lane2 leg 4: at the end of the file, for a source whose anonymous-namespace
+                       helpers share a name with engine.h's (tier_bridge.cpp: kv_page, msSince), where the line at the
+                       top would not compile with the product flags either; the product source stays as it is)
   include_relative     gains #include "<relative path>/server/engine.h"                -> isolated compile C1083
   call_<sym>           a function appended at the end calls a symbol outside the tree  -> isolated link LNK2019
        hip    whirl::hip::deviceCount       (src/hip, whirl_hip: the device runtime)
        log    whirl::server::Log::line      (src/server/log.cpp, whirl_server_core)
        now    whirl::nowSeconds             (src/common/util.cpp, lib whirl)
        engine whirl::server::serveMain      (src/server/server_main.cpp, whirl_server_core: server startup)
+       model  whirl::qwen35::loadOrTune     (src/model/tune.cpp, whirl_model: the model core, class Model)
+       tier   whirl::tier::blockHash        (src/tier/kv_tier.cpp, whirl_tier_core: the KV host tier)
+       archtable whirl::model::builtinArchs (src/model/qwen35/module.cpp, model.qwen35: the product architecture table)
+gen PATH (arch025-lane2 leg 5): a header the build generates (<build>/generated/PATH, e.g. whirl/version.h from
+src/release/version.h.in), staged as mod/PATH; --build names the build tree (default <root>/build/Release).
 The product compile of a mutant is done on a temporary file next to the real one (_iso_mut_<module>_<case>.cpp, so the relative
 include resolves as in the tree) and removed right after. The product link is not redone here (it needs the HIP build).
 Per module the last line is "iso check: ok (<module>, N/N cases as expected)" or "iso check: FAIL (<module>, ...)"; with
@@ -55,6 +64,20 @@ SYMS = {
     "engine": ("namespace whirl::server { int serveMain(int argc, char** argv, const char* program); }"
                "  // iso mutant: src/server/server_main.cpp (whirl_server_core)\n",
                "(void)whirl::server::serveMain(0, nullptr, \"iso\");"),
+    # arch025-lane2 leg 3: the model core (class Model's load / tune), for the modules below it (forward.*)
+    "model": ("#include <string>\nnamespace whirl::qwen35 { class Model; void loadOrTune(Model& m, const std::string& model_path, "
+              "std::string& log); }  // iso mutant: src/model/tune.cpp (whirl_model, model.core)\n",
+              "std::string s; whirl::qwen35::loadOrTune(*reinterpret_cast<whirl::qwen35::Model*>(&s), s, s);"),
+    # arch025-lane2 leg 4: the KV host tier (tier.kv, whirl_tier_core), for the model core (the model never reaches the
+    # server's cache stack)
+    "tier": ("#include <array>\n#include <cstdint>\nnamespace whirl::tier { std::array<std::uint64_t, 2> blockHash(const void* p, "
+             "std::uint64_t n); }  // iso mutant: src/tier/kv_tier.cpp (whirl_tier_core, tier.kv)\n",
+             "(void)whirl::tier::blockHash(nullptr, 0);"),
+    # arch025-lane2 leg 5: the product architecture table (model.qwen35, src/model/qwen35/module.cpp), for the model core
+    # (Config::fromGguf checks the qwen35 family's own names, src/model/qwen35/arch_names.h)
+    "archtable": ("#include <span>\nnamespace whirl::model { struct ArchModule; const std::span<const ArchModule>& builtinArchs(); }"
+                  "  // iso mutant: src/model/qwen35/module.cpp (model.qwen35)\n",
+                  "(void)whirl::model::builtinArchs().size();"),
 }
 ENGINE_H = "server/engine.h"
 
@@ -66,9 +89,11 @@ class Manifest:
         self.module = None
         self.exe = None
         self.mutate = None
+        self.mutinc = "top"
         self.mutsyms = []
         self.syslibs = []
         self.items = []
+        self.gens = []
         for line in open(path, encoding="utf-8"):
             m = re.match(r"([a-z]+)\s+([^\s#]+)", line)
             if not m:
@@ -82,12 +107,18 @@ class Manifest:
                 pass  # cmake only
             elif kind == "mutate":
                 self.mutate = p
+            elif kind == "mutinc":
+                if p not in ("top", "end"):
+                    raise SetupError(f"{self.rel}: mutinc {p} (known: top, end)")
+                self.mutinc = p
             elif kind == "mutsym":
                 if p not in SYMS:
                     raise SetupError(f"{self.rel}: unknown mutsym {p} (known: {', '.join(SYMS)})")
                 self.mutsyms.append(p)
             elif kind == "syslib":
                 self.syslibs.append(p)
+            elif kind == "gen":
+                self.gens.append(p)
             elif kind in KINDS:
                 if not os.path.isfile(os.path.join(root, p)):
                     raise SetupError(f"{self.rel}: no such file {p}")
@@ -149,11 +180,26 @@ def staged(p):
     return re.sub(r"^(src|include|tests)/", "", p)
 
 
+GEN_ROOT = None  # <build>/generated (main: --build)
+
+
 def stage(root, man, d):
     shutil.rmtree(d, ignore_errors=True)
     out = {"src": [], "testsrc": []}
+    for p in man.gens:
+        g = os.path.join(GEN_ROOT or os.path.join(root, "build", "Release", "generated"), *p.split("/"))
+        if not os.path.isfile(g):
+            raise SetupError(f"{man.rel}: gen {p}: no {g} (configure the build first, or --build)")
+        dst = os.path.join(d, "mod", *p.split("/"))
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        shutil.copyfile(g, dst)
     for kind, p in man.items:
-        dst = os.path.join(d, "test" if kind.startswith("test") else "mod", *staged(p).split("/"))
+        if staged(p) == p:
+            # arch025-lane2 leg 3: outside src/ include/ tests/ (kernels/gfx1151/attn_ws4_index.h, included from
+            # src/ops/attention.cpp as "../../kernels/..."): next to mod/, as next to src/ in the tree (cmake/iso.cmake)
+            dst = os.path.join(d, *p.split("/"))
+        else:
+            dst = os.path.join(d, "test" if kind.startswith("test") else "mod", *staged(p).split("/"))
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         shutil.copyfile(os.path.join(root, p), dst)
         if kind in out:
@@ -167,9 +213,11 @@ def relative_engine(src_rel):
     return "/".join([".."] * up + [ENGINE_H]) if up else ENGINE_H
 
 
-def mutate(text, case, src_rel):
+def mutate(text, case, src_rel, inc_at="top"):
     if case in ("include_engine", "include_relative"):
         inc = ENGINE_H if case == "include_engine" else relative_engine(src_rel)
+        if inc_at == "end":
+            return text + ("" if text.endswith("\n") else "\n") + f'#include "{inc}"  // iso mutant (mutinc end)\n'
         m = re.search(r'^#include "[^"]+"[^\n]*\n', text, re.M)
         assert m, f"{src_rel}: no quoted include to anchor the include mutant"
         return text[:m.end()] + f'#include "{inc}"  // iso mutant\n' + text[m.end():]
@@ -262,7 +310,7 @@ def check_module(root, man, work, env, mutants, keep):
                 lines.append(tail(out, 14))
         else:
             src_text = open(os.path.join(root, man.mutate), encoding="utf-8").read()
-            mut = mutate(src_text, name, man.mutate)
+            mut = mutate(src_text, name, man.mutate, man.mutinc)
             target = dict(files["src"])[man.mutate]
             with open(target, "w", encoding="utf-8", newline="\n") as f:
                 f.write(mut)
@@ -300,7 +348,10 @@ def main(argv):
     ap.add_argument("--root", default=os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")))
     ap.add_argument("--vcvars", default=VCVARS)
     ap.add_argument("--keep", action="store_true")
+    ap.add_argument("--build", default="", help="build tree whose generated/ headers the gen lines stage (default <root>/build/Release)")
     a = ap.parse_args(argv)
+    global GEN_ROOT
+    GEN_ROOT = os.path.join(a.build or os.path.join(a.root, "build", "Release"), "generated")
     # python -I ignores PYTHONIOENCODING; a cp950 console cannot print U+FFFD from a decoded cl line (arch025-X3fix)
     sys.stdout.reconfigure(errors="replace")
     try:

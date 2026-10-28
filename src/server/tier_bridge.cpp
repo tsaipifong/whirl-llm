@@ -34,7 +34,7 @@ std::uint64_t tierStamp(const tier::Entry* e) {
 
 }  // namespace
 
-TierBridge::TierBridge(device::Backend& ops, ServerModel& m, const chat::ChatTokens& ct, PrefixStore& ps,
+TierBridge::TierBridge(device::Backend& ops, CacheModel& m, const chat::ChatTokens& ct, PrefixStore& ps,
                        const std::vector<KvArr>& kv, const Config& cfg)
     : ops_(ops), m_(m), ct_(ct), ps_(ps), kv_(kv), cfg_(cfg), conv_bytes_(m.convBytes()), ssm_bytes_(m.ssmBytes()) {}
 

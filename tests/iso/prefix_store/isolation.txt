@@ -1,0 +1,75 @@
+# ARCH-1 8.5 isolation check of prefix_store, the server's prefix cache owner (PrefixStore, SlotPrefix, Spe; arch025-lane2
+# leg 4): the module's sources, its DECLARED dependencies and the ONLY headers they may see. Format:
+# tests/sampling/isolation.txt; read by cmake/iso.cmake and tools/gates/iso_check.py.
+# declared dependencies: the chat-token facts (src/server/tokens.cpp) with the tokenizer they read (src/tokenizer, the
+# GGUF reader it loads from), the prefix cache decisions (cache/prefix_cache.cpp) and the tier view (cache/tier_adapter.cpp
+# over tier.kv), the checkpoint buffers (ckpt_store, through the narrow model interface cache/cache_model.h), the device
+# contract with the NullBackend, the owner check (threads: engine_thread.cpp + the server log it reports to), lib whirl's
+# util and the platform layer. NOT declared: the engine, the tier bridge, the model (class Model), the HIP layer.
+module    prefix_store
+exe       whirl-iso-prefix-store-tests
+mutate    src/server/prefix_store.cpp
+mutsym    hip
+mutsym    engine
+mutsym    model
+syslib    winmm.lib
+# module sources
+src       src/server/prefix_store.cpp
+# declared dependency sources
+src       src/server/tokens.cpp
+src       src/tokenizer/tokenizer.cpp
+src       src/tokenizer/unicode.cpp
+src       src/gguf/gguf.cpp
+src       src/cache/prefix_cache.cpp
+src       src/cache/tier_adapter.cpp
+src       src/cache/ckpt_store.cpp
+src       src/tier/kv_tier.cpp
+src       src/device/null_backend.cpp
+src       src/server/engine_thread.cpp
+src       src/server/log.cpp
+src       src/common/util.cpp
+src       src/platform/env_win.cpp
+src       src/platform/fs_win.cpp
+src       src/platform/args_win.cpp
+src       src/platform/time_win.cpp
+src       src/platform/proc_win.cpp
+# include closure of the sources above
+hdr       include/whirl/common.h
+hdr       include/whirl/device_mem.h
+hdr       include/whirl/device_profile.h
+hdr       include/whirl/gguf.h
+hdr       include/whirl/hip.h
+hdr       include/whirl/kv_format.h
+hdr       include/whirl/model_types.h
+hdr       include/whirl/prefill_schedule.h
+hdr       include/whirl/thread_annotations.h
+hdr       include/whirl/tokenizer.h
+hdr       include/whirl/uma_mem.h
+hdr       include/whirl/unicode.h
+hdr       include/whirl/vismap.h
+hdr       src/cache/cache_model.h
+hdr       src/cache/ckpt_store.h
+hdr       src/cache/prefix_cache.h
+hdr       src/cache/tier_adapter.h
+hdr       src/device/backend.h
+hdr       src/device/handles.h
+hdr       src/device/null_backend.h
+hdr       src/model/qwen35/kv.h
+hdr       src/platform/args.h
+hdr       src/platform/env.h
+hdr       src/platform/fs.h
+hdr       src/platform/fs_fake.h
+hdr       src/platform/proc.h
+hdr       src/platform/time.h
+hdr       src/server/engine_thread.h
+hdr       src/server/log.h
+hdr       src/server/prefix_store.h
+hdr       src/server/tokens.h
+hdr       src/tier/evict_policy.h
+hdr       src/tier/idle_flush.h
+hdr       src/tier/kv_tier.h
+hdr       src/tokenizer/unicode_tables.inc
+# test program
+testsrc   tests/iso/prefix_store/prefix_store_tests.cpp
+testhdr   tests/iso/fake_cache_model.h
+testhdr   tests/iso/iso_test.h

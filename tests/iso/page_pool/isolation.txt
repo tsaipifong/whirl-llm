@@ -1,0 +1,51 @@
+# ARCH-1 8.5 isolation check of page_pool, the KV page pool (PagePool) (arch025-lane2 leg 3): the module's sources, its DECLARED
+# dependencies and the ONLY headers they may see. Format: tests/sampling/isolation.txt; read by cmake/iso.cmake and
+# tools/gates/iso_check.py.
+# declared dependencies: the narrow model interface (src/cache/cache_model.h, contract.cache; the test's
+# iso::FakeCacheModel implements it), the device contract (device/backend.h, handles.h) with the NullBackend
+# (src/device/null_backend.cpp + platform env), the owner check (module threads: engine_thread.cpp, the server log,
+# lib whirl's util and the platform layer they use; winmm for the 1 ms timer period), the model's KV array type
+# (model/qwen35/kv.h, header only). NOT declared: ServerModel (server/backend.h), the engine, the HIP layer.
+module    page_pool
+exe       whirl-iso-page-pool-tests
+mutate    src/cache/page_pool.cpp
+mutsym    hip
+mutsym    engine
+mutsym    model
+syslib    winmm.lib
+# module sources
+src       src/cache/page_pool.cpp
+# declared dependency sources
+src       src/device/null_backend.cpp
+src       src/platform/env_win.cpp
+src       src/server/engine_thread.cpp
+src       src/server/log.cpp
+src       src/common/util.cpp
+src       src/platform/args_win.cpp
+src       src/platform/fs_win.cpp
+src       src/platform/time_win.cpp
+# include closure of the sources above
+hdr       include/whirl/common.h
+hdr       include/whirl/device_mem.h
+hdr       include/whirl/hip.h
+hdr       include/whirl/kv_format.h
+hdr       include/whirl/model_types.h
+hdr       include/whirl/thread_annotations.h
+hdr       include/whirl/uma_mem.h
+hdr       src/cache/cache_model.h
+hdr       src/cache/page_pool.h
+hdr       src/device/backend.h
+hdr       src/device/handles.h
+hdr       src/device/null_backend.h
+hdr       src/model/qwen35/kv.h
+hdr       src/platform/args.h
+hdr       src/platform/env.h
+hdr       src/platform/fs.h
+hdr       src/platform/fs_fake.h
+hdr       src/platform/time.h
+hdr       src/server/engine_thread.h
+hdr       src/server/log.h
+# test program
+testsrc   tests/iso/page_pool/page_pool_tests.cpp
+testhdr   tests/iso/fake_cache_model.h
+testhdr   tests/iso/iso_test.h

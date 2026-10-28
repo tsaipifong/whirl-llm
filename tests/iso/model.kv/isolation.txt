@@ -1,0 +1,23 @@
+# ARCH-1 8.5 isolation check of model.kv (arch025-lane2 N9 S2c): the module's sources, its DECLARED dependencies and the
+# ONLY headers they may see. Format: tests/sampling/isolation.txt; read by cmake/iso.cmake and tools/gates/iso_check.py.
+# declared dependencies: the model types (whirl/model_types.h: Config, kv_page), ModelError (model/qwen35/model_error.h),
+# the KV format and page layout (whirl/kv_format.h, whirl/kv_layout.h); all header-only. Model's KV / sequence
+# functions moved to src/model/qwen35/model_kv.cpp (the model core).
+module    model.kv
+exe       whirl-iso-model-kv-tests
+mutate    src/model/qwen35/kv.cpp
+mutsym    hip
+mutsym    log
+mutsym    now
+# module sources
+src       src/model/qwen35/kv.cpp
+# headers (include closure of the sources above)
+hdr       include/whirl/hip.h
+hdr       include/whirl/kv_format.h
+hdr       include/whirl/kv_layout.h
+hdr       include/whirl/model_types.h
+hdr       src/model/qwen35/kv.h
+hdr       src/model/qwen35/model_error.h
+# test program
+testsrc   tests/iso/model.kv/kv_tests.cpp
+testhdr   tests/iso/iso_test.h

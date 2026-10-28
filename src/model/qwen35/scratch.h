@@ -1,6 +1,6 @@
 // qwen35::Scratch: the prefill / decode activation buffers of a loaded Model (arch025-M3, R-8c) and the caches of
-// what they hold. Allocated once by Model::load (Model::allocScratch, src/model/qwen35/scratch.cpp, in this order;
-// bufferBytes there is the pre-load estimate of the same list), freed with the Model's allocation ledger.
+// what they hold. Allocated once by Model::load (Model::allocScratch, src/model/qwen35/model_scratch.cpp, in this order;
+// bufferBytes in scratch.cpp is the pre-load estimate of the same list), freed with the Model's allocation ledger.
 // SPDX-License-Identifier: Apache-2.0
 //
 // A private base of qwen35::Model: the forward (Model's member functions) reads the members by name as before;
@@ -16,6 +16,12 @@
 namespace whirl::qwen35 {
 
 using hip::DevPtr;
+
+struct Config;  // whirl/model_types.h
+
+// Prefill / decode buffers of Model::load for prefill batch B (moved from include/whirl/model.h, arch025-lane2 N9 S2c).
+// fd_splits: attention split-K partials (resolveFdSplits: 64, 256 with q4 KV, WHIRL_FD_SPLITS).
+std::uint64_t bufferBytes(const Config& cfg, std::uint32_t B, std::uint64_t ffs, std::uint64_t max_elems, std::uint32_t fd_splits = 64);
 
 struct Scratch {
     DevPtr x = 0, h = 0, qf = 0, kv_k = 0, kv_v = 0, attn_out = 0, qkv = 0, conv_out = 0, z = 0, beta = 0, alpha = 0, ba_buf = 0,

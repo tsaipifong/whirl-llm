@@ -2,7 +2,7 @@
 # path<TAB>count<TAB>step that removes the sites. The list may only shrink: the step that removes sites lowers or
 # deletes its entry in the same commit (block mode: STALE otherwise). Regenerate counts: pending_scan.py <rule> --write-pending.
 include/whirl/dflash_policy.h	4	C1a / C2 (parseParams' getter parameter `env`, not a read: cli / server pass envGet; N1 left it)
-include/whirl/model.h	2	C1a / C2 (the envGet / envFlag declarations for cli / server / forward; defined in src/config/env_snapshot.cpp since N1)
+src/config/env_get.h	2	C1a / C2 (the envGet / envFlag declarations for cli / server / forward; defined in src/config/env_snapshot.cpp since N1; moved from include/whirl/model.h, arch025-lane2 D2.2)
 src/cli/build_model.cpp	10	later (reduced by the C line; kept at 0.2.5 end, PLAN Noted; arch025-C2 split src/cli/main.cpp x51 into one file per command, every read verbatim in its old function: build_model 10 + cmd_bench 6 + cmd_chat 15 + cmd_devices 1 + cmd_golden 5 + common 3 + decode 11 = 51)
 src/cli/cmd_bench.cpp	6	later (arch025-C2: from src/cli/main.cpp x51, see src/cli/build_model.cpp)
 src/cli/cmd_chat.cpp	15	later (arch025-C2: from src/cli/main.cpp x51, see src/cli/build_model.cpp)

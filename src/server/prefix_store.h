@@ -15,7 +15,6 @@
 #include "cache/ckpt_store.h"
 #include "cache/prefix_cache.h"
 #include "device/handles.h"
-#include "server/backend.h"
 #include "server/engine_thread.h"
 #include "whirl/chat_tokens.h"
 #include "whirl/prefill_schedule.h"

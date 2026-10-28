@@ -20,6 +20,9 @@
 
 namespace whirl::qwen35 {
 
+// Number of distinct prefill GEMM choices (tune values). (Moved from include/whirl/model.h, arch025-lane2.)
+constexpr std::uint32_t n_choices = 2 * 24 + 8;
+
 using GemvR = std::array<std::uint8_t, max_small_batch + 1>;
 using GemvW = std::array<GemvR, n_types>;
 GemvR defaultGemvR();  // the gfx1201 row of device::Profile::gemv_r

@@ -7,7 +7,7 @@
 namespace whirl::qwen35 {
 
 // Post-attention norm + SwiGLU FFN on x, residual added into x.
-void Model::ffnBlock(DevPtr post_norm, const Mat& gate_w, const Mat& up, const Mat& down, u32 n) {
+void Context::ffnBlock(DevPtr post_norm, const Mat& gate_w, const Mat& up, const Mat& down, u32 n) {
     const Mat gu[2] = {gate_w, up};
     if (fused(n))
         rmsnormQ8(x, post_norm, h, n);
@@ -61,7 +61,7 @@ void Model::ffnBlock(DevPtr post_norm, const Mat& gate_w, const Mat& up, const M
 // softmax router -> top-K experts (weights renormalized) plus the shared
 // expert scaled by sigmoid(sh_gate . h). Small n: int8 GEMVs over the selected
 // experts' rows; larger n: pairs grouped by expert, grouped WMMA GEMM.
-void Model::moeBlock(DevPtr post_norm, const Mat& sg, const Mat& su, const Mat& sd, const MoeW& mo, u32 n) {
+void Context::moeBlock(DevPtr post_norm, const Mat& sg, const Mat& su, const Mat& sd, const MoeW& mo, u32 n) {
     const u32 E = cfg.n_embd;
     const u32 K = cfg.n_expert_used;
     const u32 F = cfg.n_ff_exp;

@@ -7,7 +7,8 @@
 
 namespace whirl::server {
 
-using qwen35::kv_page;
+// qwen35::kv_page spelled out, no using-declaration: server/engine.h has its own server::kv_page (the same value), and
+// the page_pool code must stay valid next to it (tests/iso/page_pool include mutants, arch025-lane2 leg 3)
 
 void PagePool::init(std::uint32_t n, std::vector<KvArr> arrs) {
     ownerCheck(owner_, "PagePool::init");
@@ -42,7 +43,7 @@ void PagePool::unref(std::span<const std::int32_t> pages) {
 }
 
 bool PagePool::sharedFrom(std::span<const std::int32_t> pages, std::uint32_t reuse) const {
-    const std::size_t keep = reuse == 0 ? 0 : (reuse - 1) / kv_page;
+    const std::size_t keep = reuse == 0 ? 0 : (reuse - 1) / qwen35::kv_page;
     if (keep >= pages.size()) return false;
     for (std::size_t i = keep; i < pages.size(); ++i)
         if (ref_[static_cast<std::size_t>(pages[i])] > 1) return true;
@@ -54,7 +55,7 @@ void PagePool::copy(std::int32_t dst_p, std::int32_t src_p) {
     const std::uint64_t src = static_cast<std::uint64_t>(src_p);
     const std::uint64_t dst = static_cast<std::uint64_t>(dst_p);
     for (const KvArr& a : arrs_) {
-        const std::uint64_t len = static_cast<std::uint64_t>(kv_page) * a.row;
+        const std::uint64_t len = static_cast<std::uint64_t>(qwen35::kv_page) * a.row;
         ops_.copyAsync(a.base + dst * len, a.base + src * len, len, m_.stream());
     }
 }
@@ -109,7 +110,7 @@ void PagePool::reclaim(bool force) {
 PagePool::Cow PagePool::cow(std::vector<std::int32_t>& pages, std::uint32_t seq, std::uint32_t reuse, bool spill,
                             Evictor& ev) {
     ownerCheck(owner_, "PagePool::cow");
-    const std::size_t keep = reuse == 0 ? 0 : (reuse - 1) / kv_page;
+    const std::size_t keep = reuse == 0 ? 0 : (reuse - 1) / qwen35::kv_page;
     if (keep >= pages.size()) return Cow::unchanged;
     std::optional<std::int32_t> newp;
     if (reuse > 0) {

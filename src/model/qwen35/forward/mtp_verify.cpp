@@ -11,7 +11,7 @@ namespace whirl::qwen35 {
 
 // Rows [0, host.size()) take host tokens, the next n_dev rows the i32 tokens at
 // dev_src; positions pos0 + r. Kernel args only: never blocks.
-void Model::setTokensDev(DevPtr ids_dev, std::span<const u32> host, DevPtr dev_src, u32 n_dev, u32 pos0) {
+void Context::setTokensDev(DevPtr ids_dev, std::span<const u32> host, DevPtr dev_src, u32 n_dev, u32 pos0) {
     const u32 n = static_cast<u32>(host.size()) + n_dev;
     visRowsCur(n, pos0);
     Tok16 t;
@@ -24,9 +24,9 @@ void Model::setTokensDev(DevPtr ids_dev, std::span<const u32> host, DevPtr dev_s
     hip::launch(k.set_tokens, D(1), D(32), 0, stream, ids_dev, pos_buf, dev_src, t, I(n), I(host.size()), I(pos0));
 }
 
-DevPtr Model::ctlSlot(u32 word) const { return out_tok + 4 * static_cast<u64>(ctl_off + word); }
+DevPtr Context::ctlSlot(u32 word) const { return out_tok + 4 * static_cast<u64>(ctl_off + word); }
 
-void Model::setTokens(DevPtr ids_dev, std::span<const u32> tokens, u32 pos0) {
+void Context::setTokens(DevPtr ids_dev, std::span<const u32> tokens, u32 pos0) {
     if (tokens.size() <= max_small_batch) return setTokensDev(ids_dev, tokens, 0, 0, pos0);
     const std::size_t cap = host_ids.size() / 2;
     const std::size_t n = tokens.size();
@@ -42,7 +42,7 @@ void Model::setTokens(DevPtr ids_dev, std::span<const u32> tokens, u32 pos0) {
 // MTP block over n rows: row r pairs hidden + r*E with token tokens[r] at
 // position pos0 + r. Fills the MTP KV cache; if want_draft, returns the argmax
 // of the last row.
-u32 Model::mtpForward(DevPtr hidden, std::span<const u32> tokens, u32 pos0, bool want_draft) {
+u32 Context::mtpForward(DevPtr hidden, std::span<const u32> tokens, u32 pos0, bool want_draft) {
     mtpEnqueue(hidden, tokens, 0, pos0, want_draft ? std::optional<u32>(0) : std::nullopt);
     if (!want_draft) return 0;
     i32 r = 0;
@@ -52,7 +52,7 @@ u32 Model::mtpForward(DevPtr hidden, std::span<const u32> tokens, u32 pos0, bool
 
 // mtpForward without a host round trip: the last row's token may come from
 // the device (dev_tok) and the draft lands in draftSlot(slot).
-void Model::mtpEnqueue(DevPtr hidden, std::span<const u32> tokens, DevPtr dev_tok, u32 pos0, std::optional<u32> slot) {
+void Context::mtpEnqueue(DevPtr hidden, std::span<const u32> tokens, DevPtr dev_tok, u32 pos0, std::optional<u32> slot) {
     if (!mtp) throw ModelError("NoMtp");
     const MtpW& mw = *mtp;
     const u32 E = cfg.n_embd;
@@ -103,7 +103,7 @@ void Model::mtpEnqueue(DevPtr hidden, std::span<const u32> tokens, DevPtr dev_to
 }
 
 // DFlash2 capture: x (the input of layer li) for the last min(n, cap_rows) rows into li's slot.
-void Model::captureLayerInput(std::size_t li, u32 n) {
+void Context::captureLayerInput(std::size_t li, u32 n) {
     if (!cap_buf || li >= cap_slot.size() || cap_slot[li] < 0 || n == 0) return;
     const u64 E = cfg.n_embd;
     const u32 c = std::min(n, cap_rows);
@@ -113,7 +113,7 @@ void Model::captureLayerInput(std::size_t li, u32 n) {
 }
 
 // Apply sequence s's kept verify rows to its recurrent state (replay mode).
-void Model::commitSeq(u32 s) {
+void Context::commitSeq(u32 s) {
     if (!gdn_replay || s >= seqs.size()) return;
     const Seq& sq = seqs[s];
     if (sq.npend == 0) return;
@@ -140,7 +140,7 @@ void Model::commitSeq(u32 s) {
 }
 
 // Batched verify over sequences (see the header).
-u32 Model::verifyBatchEnqueue(std::span<const VSeg> segs) {
+u32 Context::verifyBatchEnqueue(std::span<const VSeg> segs) {
     if (segs.empty() || segs.size() > gdn_max_seg) throw ModelError("BadBatch");
     // several sequences need the segment-aware fused DeltaNet kernels
     const bool unfused = !fusedDecode();
@@ -209,7 +209,7 @@ u32 Model::verifyBatchEnqueue(std::span<const VSeg> segs) {
     bplan = &plan;
     small_max = ops::verifySmallMax(n, max_small_batch, max_verify_rows);
     struct Reset {
-        Model& m;
+        Context& m;
         ~Reset() {
             m.keep_hidden = false;
             m.all_logits = false;
@@ -228,7 +228,7 @@ u32 Model::verifyBatchEnqueue(std::span<const VSeg> segs) {
 }
 
 // Batched MTP draft step r over sequences (see the header).
-void Model::mtpBatchStepEx(std::span<const MSeg> segs, u32 r, bool draft) {
+void Context::mtpBatchStepEx(std::span<const MSeg> segs, u32 r, bool draft) {
     if (!mtp) throw ModelError("NoMtp");
     const MtpW& mw = *mtp;
     const u64 E = cfg.n_embd;
@@ -264,7 +264,7 @@ void Model::mtpBatchStepEx(std::span<const MSeg> segs, u32 r, bool draft) {
     mtp_batch = true;
     small_max = ops::verifySmallMax(n, max_small_batch, max_verify_rows);
     struct BatchReset {
-        Model& m;
+        Context& m;
         ~BatchReset() {
             m.mtp_batch = false;
             m.small_max = max_small_batch;
@@ -346,7 +346,7 @@ void Model::mtpBatchStepEx(std::span<const MSeg> segs, u32 r, bool draft) {
 }
 
 // the draft-head problem of `head` (the draft head, else the output head)
-ops::DraftHeadProblem Model::draftHeadProblem(const Mat& head) const {
+ops::DraftHeadProblem Context::draftHeadProblem(const Mat& head) const {
     ops::DraftHeadProblem p;
     p.head_rows = head.nrows;
     p.draft_rows = draft_rows;
@@ -356,11 +356,11 @@ ops::DraftHeadProblem Model::draftHeadProblem(const Mat& head) const {
     return p;
 }
 
-void Model::readCtl(std::span<i32> dst) { hip::download(dst.data(), out_tok, dst.size() * 4); }
+void Context::readCtl(std::span<i32> dst) { hip::download(dst.data(), out_tok, dst.size() * 4); }
 
 // Draft-head logits for the n rows of h into logits: the 2-bit head when
 // built, else the Q4_K / full head.
-void Model::draftHeadMatmul(const Mat& head, u32 n) {
+void Context::draftHeadMatmul(const Mat& head, u32 n) {
     if (draft_d2) {
         if (xq_src != h || xq_n != n) {
             const u32 cnt = n * head.ncols;
@@ -375,18 +375,18 @@ void Model::draftHeadMatmul(const Mat& head, u32 n) {
     matmul(head, h, logits, n, false);
 }
 
-void Model::argmaxRows(u32 n, std::span<u32> out) {
+void Context::argmaxRows(u32 n, std::span<u32> out) {
     argmaxRowsEnqueue(n);
     i32 buf[max_small_batch];
     hip::download(buf, out_tok, n * 4);
     for (u32 r = 0; r < n; ++r) out[r] = static_cast<u32>(buf[r]);
 }
 
-void Model::argmaxRowsEnqueue(u32 n) {
+void Context::argmaxRowsEnqueue(u32 n) {
     hip::launch(k.argmax_rows, D(n), D(1024), 0, stream, logits, I(cfg.n_vocab), ctlSlot(ctl_rows));
 }
 
-void Model::verifyEnqueueEx(u32 next, u32 n_draft, std::optional<std::span<const u32>> host_drafts, u32 pos0) {
+void Context::verifyEnqueueEx(u32 next, u32 n_draft, std::optional<std::span<const u32>> host_drafts, u32 pos0) {
     const u32 n = n_draft + 1;
     if (pos0 + n > max_ctx) throw ModelError("ContextTooLong");
     ensureSnapshots(n_draft);
@@ -394,7 +394,7 @@ void Model::verifyEnqueueEx(u32 next, u32 n_draft, std::optional<std::span<const
     all_logits = true;
     snap_rows = n_draft;
     struct Reset {
-        Model& m;
+        Context& m;
         ~Reset() {
             m.keep_hidden = false;
             m.all_logits = false;
@@ -416,7 +416,7 @@ void Model::verifyEnqueueEx(u32 next, u32 n_draft, std::optional<std::span<const
     argmaxRowsEnqueue(n);
 }
 
-Model::Cycle Model::readCycle(std::span<u32> out, std::span<u32> drafts) {
+Context::Cycle Context::readCycle(std::span<u32> out, std::span<u32> drafts) {
     i32 buf[ctl_words];
     hip::download(buf, out_tok, sizeof buf);
     for (std::size_t r = 0; r < out.size(); ++r) out[r] = static_cast<u32>(buf[ctl_rows + r]);
@@ -430,14 +430,14 @@ Model::Cycle Model::readCycle(std::span<u32> out, std::span<u32> drafts) {
 
 // Main-model forward over tokens at pos0 keeping every row's logits and normed
 // hidden; the recurrent state after rows 0 .. len-2 is snapshotted.
-void Model::verify(std::span<const u32> tokens, u32 pos0, std::span<u32> out) {
+void Context::verify(std::span<const u32> tokens, u32 pos0, std::span<u32> out) {
     const u32 snaps = static_cast<u32>(tokens.size() - 1);
     ensureSnapshots(snaps);
     keep_hidden = true;
     all_logits = true;
     snap_rows = snaps;
     struct Reset {
-        Model& m;
+        Context& m;
         ~Reset() {
             m.keep_hidden = false;
             m.all_logits = false;
@@ -449,7 +449,7 @@ void Model::verify(std::span<const u32> tokens, u32 pos0, std::span<u32> out) {
 }
 
 // Roll the recurrent state back to the snapshot taken after row keep - 1.
-void Model::restoreSnapshot(u32 keep) {
+void Context::restoreSnapshot(u32 keep) {
     // a captured decode graph holds the old state pointers
     decode_graph.reset();
     // the unfused decode path writes only snapshot 0: any later set would be stale

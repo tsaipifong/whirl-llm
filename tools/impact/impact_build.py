@@ -49,12 +49,12 @@ STOP_NAMES = cxxscan.STD_CALLS | {"main", "wmain", "CHECK", "fmt", "out", "log",
 # declared: product paths and their root functions (short or qualified names; every root must resolve,
 # the builder fails otherwise, so a rename cannot silently empty a path)
 PATHS = {
-    "cli.prefill":       {"roots": ["prefillLikeServer", "Model::prefill", "Model::prefillSegs", "Model::run"], "metric": "pp",
+    "cli.prefill":       {"roots": ["prefillLikeServer", "Context::prefill", "Context::prefillSegs", "Context::run"], "metric": "pp",
                           "desc": "CLI / model prefill (chunked forward over the prompt)"},
-    "cli.decode":        {"roots": ["plainDecode", "Model::decodeStep", "Model::step"], "metric": "tg",
+    "cli.decode":        {"roots": ["plainDecode", "Context::decodeStep", "Context::step"], "metric": "tg",
                           "desc": "CLI plain decode (one token per step)"},
-    "cli.mtp":           {"roots": ["specDecode", "Model::mtpBatchStepEx", "Model::verifyBatchEnqueue", "Model::mtpEnqueue",
-                                    "Model::verify"], "metric": "tg", "desc": "MTP draft / verify (CLI and the model side of the server)"},
+    "cli.mtp":           {"roots": ["specDecode", "Context::mtpBatchStepEx", "Context::verifyBatchEnqueue", "Context::mtpEnqueue",
+                                    "Context::verify"], "metric": "tg", "desc": "MTP draft / verify (CLI and the model side of the server)"},
     "cli.dflash":        {"roots": ["dflashDecode"], "metric": "tg", "desc": "DFlash2 drafter (CLI)"},
     "server.prefill":    {"roots": ["Engine::startJob", "Engine::prefillGroup", "Engine::prefillStep", "Engine::finishPrefill"],
                           "metric": "pp", "desc": "server prefill on the engine schedule (chunks, segments, groups)"},
@@ -82,8 +82,8 @@ PATHS = {
                           "metric": "agent", "desc": "VRAM -> RAM -> SSD spill, dedup, flush on stop"},
     "cache.fingerprint": {"roots": ["tierFingerprint", "serverFingerprintInputs", "fingerprintEnv", "Tier::index", "Tier::indexFile"],
                           "metric": None, "desc": "SSD tier identity: which saved states a new server may reuse"},
-    "vision":            {"roots": ["ImageEmbeddings::prepare", "Engine::attachVision", "Qwen35Vision::encode", "Model::visRow",
-                                    "Model::injectRows"], "metric": None, "desc": "image encoder and image-token injection"},
+    "vision":            {"roots": ["ImageEmbeddings::prepare", "Engine::attachVision", "Qwen35Vision::encode", "Context::visRow",
+                                    "Context::injectRows"], "metric": None, "desc": "image encoder and image-token injection"},
     "http":              {"roots": ["Engine::writeError", "StreamState::send"], "metric": None,
                           "desc": "HTTP transport, OpenAI protocol, streaming"},
     "load":              {"roots": ["Model::load", "loadOrTune", "Model::autotuneGemm", "Model::checkPreciseDecode"], "metric": "all",
@@ -106,7 +106,7 @@ PATHS.setdefault("build", {"roots": [], "metric": "all", "desc": "build system (
 
 # declared: model-type narrowing by name (Swift = dense qwen35, Ornith = MoE qwen35moe; both hybrid GDN + attention)
 MOE_NAME = re.compile(r"moe|expert|router", re.I)
-DENSE_ONLY_FUNCS = {"Model::ffnBlock"}  # the dense FFN; MoE layers run moeBlock instead
+DENSE_ONLY_FUNCS = {"Context::ffnBlock"}  # the dense FFN; MoE layers run moeBlock instead
 
 # declared: server-gate suites -> paths (tests/server/server_gate.cpp suite functions; HTTP-driven, no call edge)
 GATE_SUITES = {
@@ -454,7 +454,7 @@ def build(root):
             roots += got
         path_nodes[p] = reach(roots, depth=d.get("depth"))
     # moe / dense narrowing: a node is MoE-only when every path to it from the model roots passes a MoE-named node
-    model_roots = [x for r in ["Model::run", "Model::decodeStep", "Model::mtpBatchStepEx", "Model::verifyBatchEnqueue", "Model::forward"]
+    model_roots = [x for r in ["Context::run", "Context::decodeStep", "Context::mtpBatchStepEx", "Context::verifyBatchEnqueue", "Context::forward"]
                    for x in resolve(r)]
     allm = reach(model_roots)
 

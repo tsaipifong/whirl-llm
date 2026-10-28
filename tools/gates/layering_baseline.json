@@ -13,7 +13,7 @@
   ],
   [
    "cache.fingerprint",
-   "tier_bridge"
+   "tier.kv"
   ],
   [
    "cache.tier_adapter",
@@ -21,7 +21,7 @@
   ],
   [
    "cache.tier_adapter",
-   "tier_bridge"
+   "tier.kv"
   ],
   [
    "chat",
@@ -33,7 +33,11 @@
   ],
   [
    "ckpt_store",
-   "contract"
+   "contract.cache"
+  ],
+  [
+   "ckpt_store",
+   "contract.device"
   ],
   [
    "ckpt_store",
@@ -57,15 +61,7 @@
   ],
   [
    "cli",
-   "file:include/whirl/dflash_policy.h"
-  ],
-  [
-   "cli",
-   "file:include/whirl/dump.h"
-  ],
-  [
-   "cli",
-   "file:include/whirl/model.h"
+   "contract.abi"
   ],
   [
    "cli",
@@ -98,6 +94,10 @@
   [
    "cli",
    "model.arch_open"
+  ],
+  [
+   "cli",
+   "model.core"
   ],
   [
    "cli",
@@ -152,52 +152,80 @@
    "platform.env"
   ],
   [
-   "contract",
-   "file:include/whirl/dump.h"
-  ],
-  [
-   "contract",
-   "file:src/server/vision_iface.h"
-  ],
-  [
-   "contract",
-   "hip.mem"
-  ],
-  [
-   "contract",
+   "contract.abi",
    "hip.runtime"
   ],
   [
-   "contract",
+   "contract.abi",
    "kernels.abi"
   ],
   [
-   "contract",
+   "contract.abi",
    "kv_format"
   ],
   [
-   "contract",
+   "contract.abi",
+   "platform.env"
+  ],
+  [
+   "contract.cache",
+   "contract.device"
+  ],
+  [
+   "contract.cache",
    "model.kv"
   ],
   [
-   "contract",
-   "model.scratch"
+   "contract.cache",
+   "model.types"
   ],
   [
-   "contract",
-   "platform.env"
+   "contract.device",
+   "hip.mem"
   ],
   [
-   "contract",
+   "contract.device",
+   "hip.runtime"
+  ],
+  [
+   "contract.server",
+   "contract.cache"
+  ],
+  [
+   "contract.server",
+   "contract.device"
+  ],
+  [
+   "contract.server",
+   "file:src/server/vision_iface.h"
+  ],
+  [
+   "contract.server",
+   "model.kv"
+  ],
+  [
+   "contract.server",
+   "model.types"
+  ],
+  [
+   "contract.server",
    "spec.sample"
   ],
   [
+   "contract.server",
+   "vision"
+  ],
+  [
    "device.null",
-   "contract"
+   "contract.device"
   ],
   [
    "device.null",
    "platform.env"
+  ],
+  [
+   "device.profile",
+   "hip.runtime"
   ],
   [
    "engine_gov",
@@ -209,239 +237,11 @@
   ],
   [
    "env_snapshot",
-   "file:include/whirl/model.h"
-  ],
-  [
-   "env_snapshot",
    "platform.env"
   ],
   [
-   "file:include/whirl/device_profile.h",
-   "hip.runtime"
-  ],
-  [
-   "file:include/whirl/dump.h",
-   "contract"
-  ],
-  [
-   "file:include/whirl/model.h",
-   "accept_policy"
-  ],
-  [
-   "file:include/whirl/model.h",
-   "config.device"
-  ],
-  [
-   "file:include/whirl/model.h",
-   "contract"
-  ],
-  [
-   "file:include/whirl/model.h",
-   "file:include/whirl/device_profile.h"
-  ],
-  [
-   "file:include/whirl/model.h",
-   "file:include/whirl/value_scope.h"
-  ],
-  [
-   "file:include/whirl/model.h",
-   "gguf"
-  ],
-  [
-   "file:include/whirl/model.h",
-   "handles"
-  ],
-  [
-   "file:include/whirl/model.h",
-   "hip.runtime"
-  ],
-  [
-   "file:include/whirl/model.h",
-   "model.kv"
-  ],
-  [
-   "file:include/whirl/model.h",
-   "model.scratch"
-  ],
-  [
-   "file:include/whirl/model.h",
-   "model.tune"
-  ],
-  [
-   "file:include/whirl/model.h",
-   "model.weights"
-  ],
-  [
-   "file:include/whirl/model.h",
-   "ops.act"
-  ],
-  [
-   "file:include/whirl/model.h",
-   "ops.attention"
-  ],
-  [
-   "file:include/whirl/model.h",
-   "ops.matmul"
-  ],
-  [
-   "file:include/whirl/model.h",
-   "ops.moe"
-  ],
-  [
-   "file:include/whirl/model.h",
-   "ops.mtp"
-  ],
-  [
-   "file:include/whirl/model.h",
-   "spec.policy"
-  ],
-  [
-   "file:include/whirl/model.h",
-   "spec.sample"
-  ],
-  [
-   "file:include/whirl/model.h",
-   "vision"
-  ],
-  [
-   "file:src/common/dump.cpp",
-   "file:include/whirl/dump.h"
-  ],
-  [
-   "file:src/common/dump.cpp",
-   "platform.env"
-  ],
-  [
-   "file:src/model/config.cpp",
-   "env_snapshot"
-  ],
-  [
-   "file:src/model/config.cpp",
-   "file:include/whirl/model.h"
-  ],
-  [
-   "file:src/model/config.cpp",
-   "model.arch_registry"
-  ],
-  [
-   "file:src/model/device.cpp",
-   "env_snapshot"
-  ],
-  [
-   "file:src/model/device.cpp",
-   "file:include/whirl/model.h"
-  ],
-  [
-   "file:src/model/device.cpp",
-   "file:src/model/device_lock.h"
-  ],
-  [
-   "file:src/model/device.cpp",
-   "gpu_select"
-  ],
-  [
-   "file:src/model/device.cpp",
-   "platform.proc"
-  ],
-  [
-   "file:src/model/device_lock.h",
-   "env_snapshot"
-  ],
-  [
-   "file:src/model/device_lock.h",
-   "gpu_select"
-  ],
-  [
-   "file:src/model/dflash.cpp",
-   "env_snapshot"
-  ],
-  [
-   "file:src/model/dflash.cpp",
-   "file:include/whirl/dflash_policy.h"
-  ],
-  [
-   "file:src/model/dflash.cpp",
-   "file:include/whirl/model.h"
-  ],
-  [
-   "file:src/model/draft_vocab_embed.cpp",
-   "file:include/whirl/model.h"
-  ],
-  [
-   "file:src/model/exec_dump.cpp",
-   "file:include/whirl/dump.h"
-  ],
-  [
-   "file:src/model/exec_dump.cpp",
-   "file:include/whirl/model.h"
-  ],
-  [
-   "file:src/model/kernels.cpp",
-   "file:include/whirl/model.h"
-  ],
-  [
-   "file:src/model/loader.cpp",
-   "common.base"
-  ],
-  [
-   "file:src/model/loader.cpp",
-   "contract"
-  ],
-  [
-   "file:src/model/loader.cpp",
-   "env_snapshot"
-  ],
-  [
-   "file:src/model/loader.cpp",
-   "file:include/whirl/dump.h"
-  ],
-  [
-   "file:src/model/loader.cpp",
-   "file:include/whirl/model.h"
-  ],
-  [
-   "file:src/model/loader.cpp",
-   "hip.mem"
-  ],
-  [
-   "file:src/model/loader.cpp",
-   "kv_format"
-  ],
-  [
-   "file:src/model/loader.cpp",
-   "mem.fit"
-  ],
-  [
-   "file:src/model/loader.cpp",
-   "model.weights"
-  ],
-  [
-   "file:src/model/tune.cpp",
-   "common.base"
-  ],
-  [
-   "file:src/model/tune.cpp",
-   "env_snapshot"
-  ],
-  [
-   "file:src/model/tune.cpp",
-   "file:include/whirl/dump.h"
-  ],
-  [
-   "file:src/model/tune.cpp",
-   "file:include/whirl/model.h"
-  ],
-  [
-   "file:src/model/tune.cpp",
-   "platform.paths"
-  ],
-  [
    "file:src/server/draft_caps.h",
-   "file:include/whirl/dflash_policy.h"
-  ],
-  [
-   "file:src/server/draft_caps.h",
-   "file:include/whirl/model.h"
+   "model.core"
   ],
   [
    "file:src/server/log.cpp",
@@ -497,7 +297,7 @@
   ],
   [
    "forward.dispatch",
-   "file:include/whirl/model.h"
+   "forward.state"
   ],
   [
    "forward.dispatch",
@@ -540,6 +340,86 @@
    "forward.dispatch"
   ],
   [
+   "forward.state",
+   "accept_policy"
+  ],
+  [
+   "forward.state",
+   "contract.abi"
+  ],
+  [
+   "forward.state",
+   "contract.device"
+  ],
+  [
+   "forward.state",
+   "device.profile"
+  ],
+  [
+   "forward.state",
+   "gguf"
+  ],
+  [
+   "forward.state",
+   "handles"
+  ],
+  [
+   "forward.state",
+   "hip.runtime"
+  ],
+  [
+   "forward.state",
+   "model.kv"
+  ],
+  [
+   "forward.state",
+   "model.scratch"
+  ],
+  [
+   "forward.state",
+   "model.tune"
+  ],
+  [
+   "forward.state",
+   "model.types"
+  ],
+  [
+   "forward.state",
+   "model.weights"
+  ],
+  [
+   "forward.state",
+   "ops.act"
+  ],
+  [
+   "forward.state",
+   "ops.attention"
+  ],
+  [
+   "forward.state",
+   "ops.matmul"
+  ],
+  [
+   "forward.state",
+   "ops.moe"
+  ],
+  [
+   "forward.state",
+   "ops.mtp"
+  ],
+  [
+   "forward.state",
+   "spec.policy"
+  ],
+  [
+   "forward.state",
+   "spec.sample"
+  ],
+  [
+   "forward.state",
+   "vision"
+  ],
+  [
    "forward.vision_rows",
    "forward.dispatch"
   ],
@@ -549,7 +429,7 @@
   ],
   [
    "handles",
-   "contract"
+   "contract.device"
   ],
   [
    "hip.mem",
@@ -665,10 +545,6 @@
   ],
   [
    "model.arch_open",
-   "file:include/whirl/model.h"
-  ],
-  [
-   "model.arch_open",
    "gguf"
   ],
   [
@@ -676,52 +552,124 @@
    "model.arch_registry"
   ],
   [
+   "model.arch_open",
+   "model.core"
+  ],
+  [
    "model.arch_registry",
    "kv_format"
   ],
   [
    "model.arch_registry",
-   "model.scratch"
+   "model.types"
   ],
   [
    "model.arch_registry",
    "spec.policy"
   ],
   [
-   "model.kv",
-   "file:include/whirl/model.h"
+   "model.core",
+   "common.base"
   ],
   [
-   "model.kv",
-   "hip.runtime"
+   "model.core",
+   "config.device"
   ],
   [
-   "model.kv",
+   "model.core",
+   "contract.abi"
+  ],
+  [
+   "model.core",
+   "contract.device"
+  ],
+  [
+   "model.core",
+   "env_snapshot"
+  ],
+  [
+   "model.core",
+   "forward.state"
+  ],
+  [
+   "model.core",
+   "gpu_select"
+  ],
+  [
+   "model.core",
+   "hip.mem"
+  ],
+  [
+   "model.core",
    "kv_format"
   ],
   [
-   "model.qwen35",
-   "contract"
+   "model.core",
+   "mem.fit"
   ],
   [
-   "model.qwen35",
-   "file:include/whirl/model.h"
-  ],
-  [
-   "model.qwen35",
-   "file:src/server/vision_iface.h"
-  ],
-  [
-   "model.qwen35",
-   "hip.runtime"
-  ],
-  [
-   "model.qwen35",
+   "model.core",
    "model.arch_registry"
   ],
   [
-   "model.scratch",
-   "file:include/whirl/model.h"
+   "model.core",
+   "model.kv"
+  ],
+  [
+   "model.core",
+   "model.scratch"
+  ],
+  [
+   "model.core",
+   "model.tune"
+  ],
+  [
+   "model.core",
+   "model.weights"
+  ],
+  [
+   "model.core",
+   "platform.paths"
+  ],
+  [
+   "model.core",
+   "platform.proc"
+  ],
+  [
+   "model.kv",
+   "hip.runtime"
+  ],
+  [
+   "model.kv",
+   "kv_format"
+  ],
+  [
+   "model.kv",
+   "model.types"
+  ],
+  [
+   "model.qwen35.arch",
+   "model.arch_registry"
+  ],
+  [
+   "model.qwen35.arch",
+   "model.core"
+  ],
+  [
+   "model.qwen35.server",
+   "contract.server"
+  ],
+  [
+   "model.qwen35.server",
+   "file:src/server/vision_iface.h"
+  ],
+  [
+   "model.qwen35.server",
+   "hip.runtime"
+  ],
+  [
+   "model.qwen35.server",
+   "model.core"
   ],
   [
    "model.scratch",
@@ -729,19 +677,27 @@
   ],
   [
    "model.scratch",
-   "kv_format"
+   "model.types"
+  ],
+  [
+   "model.scratch",
+   "ops.attention"
   ],
   [
    "model.tune",
-   "file:include/whirl/model.h"
-  ],
-  [
-   "model.tune",
-   "model.scratch"
+   "model.types"
   ],
   [
    "model.tune",
    "model.weights"
+  ],
+  [
+   "model.types",
+   "hip.runtime"
+  ],
+  [
+   "model.types",
+   "kv_format"
   ],
   [
    "model.weights",
@@ -749,7 +705,11 @@
   ],
   [
    "model.weights",
-   "file:include/whirl/model.h"
+   "contract.abi"
+  ],
+  [
+   "model.weights",
+   "contract.device"
   ],
   [
    "model.weights",
@@ -765,6 +725,10 @@
   ],
   [
    "model.weights",
+   "model.types"
+  ],
+  [
+   "model.weights",
    "platform.fs"
   ],
   [
@@ -773,11 +737,11 @@
   ],
   [
    "ops.attention",
-   "contract"
+   "contract.abi"
   ],
   [
    "ops.attention",
-   "file:include/whirl/device_profile.h"
+   "device.profile"
   ],
   [
    "ops.attention",
@@ -797,7 +761,7 @@
   ],
   [
    "ops.matmul",
-   "contract"
+   "contract.abi"
   ],
   [
    "ops.matmul",
@@ -809,7 +773,7 @@
   ],
   [
    "ops.moe",
-   "contract"
+   "contract.abi"
   ],
   [
    "ops.moe",
@@ -825,7 +789,11 @@
   ],
   [
    "page_pool",
-   "contract"
+   "contract.cache"
+  ],
+  [
+   "page_pool",
+   "contract.device"
   ],
   [
    "page_pool",
@@ -877,7 +845,7 @@
   ],
   [
    "prefill.plan",
-   "file:include/whirl/device_profile.h"
+   "device.profile"
   ],
   [
    "prefill.plan",
@@ -894,10 +862,6 @@
   [
    "prefix_store",
    "ckpt_store"
-  ],
-  [
-   "prefix_store",
-   "contract"
   ],
   [
    "prefix_store",
@@ -948,12 +912,12 @@
    "tokenizer"
   ],
   [
-   "release",
-   "common.base"
+   "protocol",
+   "vision"
   ],
   [
    "release",
-   "file:include/whirl/model.h"
+   "common.base"
   ],
   [
    "release",
@@ -966,6 +930,10 @@
   [
    "release",
    "hip.runtime"
+  ],
+  [
+   "release",
+   "model.core"
   ],
   [
    "release",
@@ -985,11 +953,11 @@
   ],
   [
    "server.args",
-   "contract"
+   "contract.abi"
   ],
   [
    "server.args",
-   "model.scratch"
+   "model.types"
   ],
   [
    "server.engine",
@@ -1021,11 +989,11 @@
   ],
   [
    "server.engine",
-   "contract"
+   "contract.device"
   ],
   [
    "server.engine",
-   "file:include/whirl/dflash_policy.h"
+   "contract.server"
   ],
   [
    "server.engine",
@@ -1057,7 +1025,11 @@
   ],
   [
    "server.engine",
-   "model.scratch"
+   "model.core"
+  ],
+  [
+   "server.engine",
+   "model.types"
   ],
   [
    "server.engine",
@@ -1105,6 +1077,10 @@
   ],
   [
    "server.engine",
+   "tier.kv"
+  ],
+  [
+   "server.engine",
    "tier_bridge"
   ],
   [
@@ -1112,12 +1088,20 @@
    "tokenizer"
   ],
   [
+   "server.engine",
+   "vision"
+  ],
+  [
    "server.image_embeddings",
    "common.base"
   ],
   [
    "server.image_embeddings",
-   "contract"
+   "contract.device"
+  ],
+  [
+   "server.image_embeddings",
+   "contract.server"
   ],
   [
    "server.image_embeddings",
@@ -1145,7 +1129,11 @@
   ],
   [
    "server.sample_buffers",
-   "contract"
+   "contract.device"
+  ],
+  [
+   "server.sample_buffers",
+   "contract.server"
   ],
   [
    "server.sample_buffers",
@@ -1153,7 +1141,7 @@
   ],
   [
    "server.sample_buffers",
-   "model.scratch"
+   "model.types"
   ],
   [
    "server.sample_buffers",
@@ -1177,19 +1165,15 @@
   ],
   [
    "server.startup",
-   "contract"
+   "contract.abi"
   ],
   [
    "server.startup",
-   "file:include/whirl/dflash_policy.h"
+   "contract.device"
   ],
   [
    "server.startup",
-   "file:include/whirl/dump.h"
-  ],
-  [
-   "server.startup",
-   "file:include/whirl/model.h"
+   "contract.server"
   ],
   [
    "server.startup",
@@ -1241,6 +1225,10 @@
   ],
   [
    "server.startup",
+   "model.core"
+  ],
+  [
+   "server.startup",
    "platform.env"
   ],
   [
@@ -1281,11 +1269,11 @@
   ],
   [
    "server.startup",
-   "tier.ram_size"
+   "tier.kv"
   ],
   [
    "server.startup",
-   "tier_bridge"
+   "tier.ram_size"
   ],
   [
    "server.startup",
@@ -1309,7 +1297,7 @@
   ],
   [
    "spec.policy",
-   "file:include/whirl/device_profile.h"
+   "device.profile"
   ],
   [
    "spec.policy",
@@ -1317,7 +1305,7 @@
   ],
   [
    "spec.policy",
-   "model.scratch"
+   "model.types"
   ],
   [
    "spec.policy",
@@ -1333,7 +1321,7 @@
   ],
   [
    "spec.rules",
-   "model.scratch"
+   "model.types"
   ],
   [
    "spec.rules",
@@ -1352,6 +1340,30 @@
    "file:src/server/log.h"
   ],
   [
+   "tier.kv",
+   "common.base"
+  ],
+  [
+   "tier.kv",
+   "common.tsa"
+  ],
+  [
+   "tier.kv",
+   "contract.device"
+  ],
+  [
+   "tier.kv",
+   "handles"
+  ],
+  [
+   "tier.kv",
+   "platform.fs"
+  ],
+  [
+   "tier.kv",
+   "platform.proc"
+  ],
+  [
    "tier_bridge",
    "cache.prefix"
   ],
@@ -1365,11 +1377,11 @@
   ],
   [
    "tier_bridge",
-   "common.tsa"
+   "contract.cache"
   ],
   [
    "tier_bridge",
-   "contract"
+   "contract.device"
   ],
   [
    "tier_bridge",
@@ -1381,15 +1393,7 @@
   ],
   [
    "tier_bridge",
-   "model.scratch"
-  ],
-  [
-   "tier_bridge",
-   "platform.fs"
-  ],
-  [
-   "tier_bridge",
-   "platform.proc"
+   "model.types"
   ],
   [
    "tier_bridge",
@@ -1398,6 +1402,10 @@
   [
    "tier_bridge",
    "prefix_store"
+  ],
+  [
+   "tier_bridge",
+   "tier.kv"
   ],
   [
    "tokenizer",
@@ -1413,7 +1421,7 @@
   ],
   [
    "vision",
-   "file:include/whirl/device_profile.h"
+   "device.profile"
   ],
   [
    "vision",
@@ -1436,28 +1444,5 @@
    "platform.env"
   ]
  ],
- "cycles": [
-  [
-   "contract",
-   "file:include/whirl/dump.h",
-   "file:include/whirl/model.h",
-   "file:src/server/vision_iface.h",
-   "handles",
-   "model.kv",
-   "model.scratch",
-   "model.tune",
-   "model.weights",
-   "ops.act",
-   "ops.attention",
-   "ops.matmul",
-   "ops.moe",
-   "spec.policy",
-   "vision"
-  ],
-  [
-   "cache.tier_adapter",
-   "prefix_store",
-   "tier_bridge"
-  ]
- ]
+ "cycles": []
 }

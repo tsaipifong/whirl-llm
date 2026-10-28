@@ -47,51 +47,6 @@ Model::~Model() {
     stream_own.reset();
 }
 
-DevPtr Model::alloc(u64 bytes) {
-    device::DevBuf b = device::DevBuf::alloc(device::hipBackend(), bytes);
-    const DevPtr p = b.get();
-    allocations.push_back(std::move(b));
-    alloc_total += bytes;
-    return p;
-}
-
-DevPtr Model::allocZero(u64 bytes) {
-    const DevPtr p = alloc(bytes);
-    hip::memset(p, 0, static_cast<std::size_t>(bytes));
-    return p;
-}
-
-void Model::freeAlloc(DevPtr p) {
-    for (std::size_t i = 0; i < allocations.size(); ++i)
-        if (allocations[i].get() == p) {
-            device::DevBuf gone = std::move(allocations[i]);
-            if (i + 1 != allocations.size()) allocations[i] = std::move(allocations.back());
-            allocations.pop_back();
-            alloc_total -= gone.bytes();  // WDDM-LOG review P3-8: alloc_total stays the live sum
-            gone.reset();
-            return;
-        }
-}
-
-u64 Model::convBytes() const { return static_cast<u64>(cfg.d_conv - 1) * cfg.convCh() * 4; }
-u64 Model::ssmBytes() const { return static_cast<u64>(cfg.n_v_heads) * cfg.d_state * cfg.headV() * 4; }
-
-void Model::ensureSnapshots(u32 n) {
-    const u32 want = std::min(n, gdn_max_snap);
-    while (snap_sets < want) {
-        const u32 kk = snap_sets;
-        std::vector<DevPtr> conv(cfg.n_layer, 0), ssm(cfg.n_layer, 0);
-        for (u32 i = 0; i < cfg.n_layer; ++i) {
-            if (ssm_state[i] == 0) continue;
-            conv[i] = allocZero(convBytes());
-            ssm[i] = allocZero(ssmBytes());
-        }
-        snap_conv[kk] = std::move(conv);
-        snap_ssm[kk] = std::move(ssm);
-        snap_sets += 1;
-    }
-}
-
 namespace {
 
 std::string readWhole(const std::string& path) { return readFile(path); }
@@ -469,26 +424,6 @@ bool Model::setDraftVocab(std::span<const u32> vocab_ids) {
     return true;
 }
 
-MatList Model::layerMats(const Layer& L) const {
-    MatList out;
-    if (L.kind == LayerKind::attn) {
-        out.add(L.attn.q);
-        out.add(L.attn.k);
-        out.add(L.attn.v);
-        out.add(L.attn.o);
-    } else {
-        out.add(L.gdn.qkv);
-        out.add(L.gdn.gate);
-        out.add(L.gdn.beta);
-        out.add(L.gdn.alpha);
-        out.add(L.gdn.out);
-    }
-    out.add(L.ffn_gate);
-    out.add(L.ffn_up);
-    out.add(L.ffn_down);
-    return out;
-}
-
 std::vector<Mat*> Model::tuneMats(Layer& L) {
     std::vector<Mat*> out;
     if (L.kind == LayerKind::attn) {
@@ -500,34 +435,6 @@ std::vector<Mat*> Model::tuneMats(Layer& L) {
     out.push_back(&L.ffn_up);
     out.push_back(&L.ffn_down);
     return out;
-}
-
-// ---------------------------------------------------------------------------
-// profiling
-
-Profile::Profile() : events(cap), classes(cap, OpClass::misc) {}
-Profile::~Profile() {
-    for (device::EventH& e : events) e.reset();  // in index order, as before arch024 S11
-}
-void Profile::record(hip::Stream s, OpClass cls) {
-    if (count == cap) flush();
-    if (!events[count]) events[count] = device::EventH::adopt(device::hipBackend(), hip::eventCreate());  // timing event
-    hip::eventRecord(events[count].get(), s);
-    classes[count] = cls;
-    count += 1;
-}
-void Profile::flush() {
-    if (count == 0) return;
-    hip::sync();
-    for (std::size_t i = 1; i < count; ++i) ms[static_cast<std::size_t>(classes[i])] += hip::eventElapsedMs(events[i - 1].get(), events[i].get());
-    std::swap(events[count - 1], events[0]);
-    classes[0] = classes[count - 1];
-    count = 1;
-}
-void Profile::reset() {
-    ms.fill(0);
-    matmul_bytes = 0;
-    count = 0;
 }
 
 }  // namespace whirl::qwen35

@@ -9,21 +9,6 @@
   {"glob": "src/server/log.*", "owner": "lane 1 (arch025-r12cli, N4 Engine split)"},
   {"glob": "src/server/vision_iface.h", "owner": "lane 1 (arch025-r12cli, N4 Engine split)"},
   {"glob": "src/server/whirl_server.cpp", "owner": "lane 1 (arch025-r12cli, N10 assembly-only)"},
-  {"glob": "src/server/server_main.h", "owner": "lane 1 (arch025-r12cli, N10 assembly-only)"},
-  {"glob": "include/whirl/dump.h", "owner": "lane 2 (arch025-model, N3: folded into contract.abi)"},
-  {"glob": "src/common/dump.cpp", "owner": "lane 2 (arch025-model, N3: folded into contract.abi)"},
-  {"glob": "include/whirl/model.h", "owner": "lane 2 (arch025-model, N9 Model split)"},
-  {"glob": "include/whirl/dflash_policy.h", "owner": "lane 2 (arch025-model, N9 Model split)"},
-  {"glob": "include/whirl/device_profile.h", "owner": "lane 2 (arch025-model, N9 Model split)"},
-  {"glob": "include/whirl/value_scope.h", "owner": "lane 2 (arch025-model, N9 Model split)"},
-  {"glob": "src/model/config.cpp", "owner": "lane 2 (arch025-model, N9 Model split)"},
-  {"glob": "src/model/device.cpp", "owner": "lane 2 (arch025-model, N9 Model split)"},
-  {"glob": "src/model/device_lock.h", "owner": "lane 2 (arch025-model, N9 Model split)"},
-  {"glob": "src/model/dflash.cpp", "owner": "lane 2 (arch025-model, N9 Model split)"},
-  {"glob": "src/model/draft_vocab_embed.cpp", "owner": "lane 2 (arch025-model, N9 Model split)"},
-  {"glob": "src/model/exec_dump.cpp", "owner": "lane 2 (arch025-model, N9 Model split)"},
-  {"glob": "src/model/kernels.cpp", "owner": "lane 2 (arch025-model, N9 Model split)"},
-  {"glob": "src/model/loader.cpp", "owner": "lane 2 (arch025-model, N9 Model split)"},
-  {"glob": "src/model/tune.cpp", "owner": "lane 2 (arch025-model, N9 Model split)"}
+  {"glob": "src/server/server_main.h", "owner": "lane 1 (arch025-r12cli, N10 assembly-only)"}
  ]
 }

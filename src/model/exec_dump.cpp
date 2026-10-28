@@ -9,6 +9,7 @@
 
 #include "whirl/dump.h"
 #include "whirl/model.h"
+#include "model/exec_dump.h"  // after model.h: the same declaration order as when dump.h declared these (objeq)
 
 #include <cstdio>
 #include <cstdlib>

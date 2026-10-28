@@ -9,13 +9,23 @@
 
 #pragma once
 
-#include "whirl/model.h"
+// arch025-lane2 N9 S2c: the model lower types only (no whirl/model.h): ModelError, LoadStats / DFlash*, Weights / Mat,
+// Config, the kernel table and the pinned-memory backend.
+#include "device/backend.h"
+#include "device/handles.h"
+#include "model/qwen35/load_types.h"
+#include "model/qwen35/model_error.h"
+#include "model/qwen35/weights.h"
+#include "whirl/gguf.h"
+#include "whirl/kernels_abi.h"
+#include "whirl/model_types.h"
 
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -45,7 +55,7 @@ public:
 
     // Opens f.path() (ModelError("OpenFailed")). staging: a pinned host buffer of staging_len bytes the reads go
     // through. Counts into w.type_bytes / w.mx_fold_lossy and stats (bytes, tensors, gdn_ba_contig).
-    WeightLoader(const gguf::File& f, const Config& cfg, const Kernels& k, Weights& w, LoadStats& stats, Device dev,
+    WeightLoader(const gguf::File& f, const Config& cfg, const kernels::KernelTable& k, Weights& w, LoadStats& stats, Device dev,
                  std::uint8_t* staging, std::size_t staging_len);
 
     static std::string bn(std::uint32_t l, const char* suffix) { return "blk." + std::to_string(l) + "." + suffix; }
@@ -84,7 +94,7 @@ public:
 private:
     const gguf::File& f_;
     const Config& cfg_;
-    const Kernels& k_;
+    const kernels::KernelTable& k_;  // = qwen35::Kernels (model.h)
     Weights& w_;
     LoadStats& stats_;
     Device dev_;

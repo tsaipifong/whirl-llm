@@ -4,7 +4,7 @@
 #include "config/env_snapshot.h"
 
 #include "platform/env.h"
-#include "whirl/model.h"  // envGet / envFlag declarations
+#include "config/env_get.h"  // envGet / envFlag declarations (were in whirl/model.h, arch025-lane2 D2.2)
 
 #include <string>
 

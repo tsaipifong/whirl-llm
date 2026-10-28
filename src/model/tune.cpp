@@ -6,6 +6,7 @@
 // checkAttnGroups) and gguf_cli.zig (loadOrTune).
 
 #include "config/env_snapshot.h"
+#include "model/exec_dump.h"
 #include "platform/paths.h"
 #include "whirl/dump.h"
 #include "whirl/model.h"

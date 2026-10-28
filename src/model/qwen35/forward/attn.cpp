@@ -10,13 +10,13 @@ namespace whirl::qwen35 {
 
 // Gated full-attention sublayer on h (already attn-normed) for n tokens at
 // pos_buf, adding into x.
-void Model::draftAttn(const AttnW& a, u32 n) {
+void Context::draftAttn(const AttnW& a, u32 n) {
     // restored on every exit, also when attnBlock throws (OVH-C1)
     ValueScope<std::int32_t> draft_win(attn_win, draftWindowArg(nf().draft_window, nf().draft_window_min));
     attnBlock(a, mtpKv(), n);
 }
 
-void Model::attnBlock(const AttnW& a, const KvLayer& lkv, u32 n) {
+void Context::attnBlock(const AttnW& a, const KvLayer& lkv, u32 n) {
     if (attn_test_hook) attn_test_hook(attn_test_ctx, attn_win);
     const u32 hd = cfg.head_dim;
     const bool batched = bplan != nullptr || mtp_batch;
@@ -144,7 +144,7 @@ void Model::attnBlock(const AttnW& a, const KvLayer& lkv, u32 n) {
 // WMMA prefill attention of n queries at positions pos0 .. (keys 0 .. pos0 + n - 1): the launches (head ranges,
 // key ranges, K / V dequant copies into ffn_g / ffn_u) come from ops::chooseAttnPrefill (K-3); here the KV
 // arguments are built (the cache, or the copy whose row r0 is row 0 of the range).
-void Model::prefillAttn(DevPtr q, const KvArgs& kva, DevPtr out, DevPtr pos, u32 n, u32 pos0, float scale) {
+void Context::prefillAttn(DevPtr q, const KvArgs& kva, DevPtr out, DevPtr pos, u32 n, u32 pos0, float scale) {
     ops::AttnPrefillProblem pp;
     pp.n = n;
     pp.pos0 = pos0;
