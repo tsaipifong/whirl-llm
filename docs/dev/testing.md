@@ -128,6 +128,19 @@ CMake link sets, the include graph, the call graph, and the kernel dispatch tabl
 -> `.hip` files, arch from the `#if __gfx1151__` guards). Path roots, server-gate suites and matrix
 metrics are declared in `impact_build.py` and marked `declared` in the JSON.
 
+**Every CPU step always runs (arch025-srctext, owner 2026-10-28).** The CPU steps are cheap (P-cpu about
+6-9 min; the C++ safety steps `cpu_asan` / `cpu_analyze` / `cpu_tsa` longer), so `impact.py` adds every
+`cpu_*` step of `release_gate.ps1` (parsed into the map as `cpu_steps`: each `AddStep "cpu_*" $false` and the
+per-binary loop) and every registered CPU test to every selection, whatever changed. Only GPU steps
+(server gate, golden, selftest, seqtest, `kt_full`, kernel-test functions) are chosen by the map. This closes
+the misses the call graph cannot see by construction: tests that read sources as text (`testForwardSplit`
+reads `src/model/qwen35/forward/*.cpp`, the cache env scan reads `src/` and `include/`), destructors, data
+tables, test sources included as `.inc`. None of the source-text readers is a GPU step (they are in
+`whirl-model-tests`, `whirl-cache-tests`, `whirl-parity`). The report prints "cpu ALL N CPU release steps ..."
+and keeps what the map's rules alone pick in `map_steps` / `map_cpu_tests` (`--json`). It only adds:
+nothing the map selects is removed. `tools/impact/impact_steps_test.py` fails when any selection leaves out a
+CPU step or CPU test.
+
 ```
 python tools/impact/impact.py --worktree           # what to re-run for uncommitted changes
 python tools/impact/impact.py --commit SHA --why   # with the reason for every path
@@ -138,7 +151,8 @@ python tools/impact/validate.py                    # replay real fix commits: do
 `validate.py` is the map's acceptance test (arch024-S12): every named case (a real bug, the fix commit
 and the gate that caught it) must be hit by the map built at that fix commit, and the history replay
 (`--history 200`: every commit that changed product code and a registered test together) must list that
-test for >= 95 % of the pairs. It prints the selectivity next to the hit rate (a map that lists
+test for >= 95 % of the pairs (since every CPU test is always selected, a CPU pair is a hit by construction;
+kernel-test pairs are still the map's). It prints the selectivity next to the hit rate (a map that lists
 everything would hit everything) and every miss with its commit. The history rate counts **CPU tests
 only**; it is not evidence for the GPU steps. For those, `--baseline REV` replays REV's `tools/impact`
 on the same commits (`tools/impact/replay.py`) and fails on every commit for which the current tools
@@ -196,24 +210,90 @@ The map lists all three modes for every change: a change is shown to be mode-con
 golden hashes (precise unchanged). Host code that branches on the GPU inside a shared function is listed
 for both GPUs.
 
-### <a id="isolation"></a>Isolation check (ARCH-1 8.5, first module: src/sampling)
+### <a id="test-what-you-changed"></a>Test what you changed (`tools/gates/test_change.py`, dev-time default)
 
-`tests/sampling/isolation.txt` lists the sampling module's sources and the only headers they may see
-(its own interface plus the header-only math of `whirl/spec_sample.h` and `whirl/relax_accept.h`).
-`cmake/sampling_iso.cmake` copies those files into `build/Release/iso/sampling/` and builds them from
-there with that copy as the only include path; `whirl-sampling-tests` links the result and nothing else
-(no `whirl`, no server, no tokenizer GGUF, no GPU) and runs the same test bodies as `whirl-server-tests`
-(`tests/sampling/sampling_unit.inc`). So an undeclared include (also `../server/engine.h`) fails to
-compile and a call into another library fails to link. The product build is unchanged.
+One command for a development change. It runs **every CPU step** of the release gate, the **GPU steps of the
+modules the change touches**, and the **full two-GPU matrix only for a core change** or when work equivalence
+cannot be shown. It records what it ran and how long that took.
+
+```
+python tools/gates/test_change.py --worktree                 # plan for uncommitted changes (untracked files included)
+python tools/gates/test_change.py --range main..HEAD         # plan for a branch
+python tools/gates/test_change.py --commit SHA [--json]      # plan for one commit
+python tools/gates/test_change.py --worktree --run           # run the plan: R9700, then 8060S, one GPU at a time
+python tools/gates/test_change.py --refresh-times            # step durations from stored gate summaries (estimates)
+python tools/gates/test_change_test.py                       # unit tests (CPU)
+```
+
+How the plan is built, from the impact map (`impact.py`) and `modules.json`:
+
+1. **CPU:** every CPU step of `release_gate.ps1 -List` runs once. `cpu_golden_xcheck` and `kl_guard` check one
+   GPU's references, so they run with each GPU. Nothing on the CPU side is selected.
+2. **GPU, module level:** the module's `steps` from `modules.json`, including its callers (`rdeps`, named callers)
+   and its `when` steps, plus the GPU steps the impact map selects for the diff. A step that `modules.json` marks
+   `gpus: 2` runs on both GPUs. Other module steps run on one GPU (`--one-gpu`, default R9700: testing rule "8060S
+   at merge time"). Map steps run on the GPUs the map lists. A change in **two or more non-core modules runs the
+   union** of their steps. The full gate that `impact.py` suggests for a cross-module change is not used here.
+3. **Full matrix, both GPUs** (every GPU step `-List` has on that GPU) when the change touches any of these:
+   - **a core module.** The `CORE` table in `test_change.py` gives the reason for each: `forward.*`, `model.kv`,
+     `model.weights`, `model.scratch`, `model.tune`, `handles`, `contract`. A core module counts as touched when
+     it is a caller of the changed module (`rdeps`), that is, when it includes a header the change edits.
+   - **a core path:** `kernels/*`, `*.hip`, `src/kernels_host/*`, `kernels_abi.h`, numerics, `src/ops/*`,
+     `src/hip/*`, `src/device/*`, forward / kv files, also under their older paths.
+   - **a contract, a build-wide file** (`cmake/*`, `CMakeLists.txt`, `build.bat`, `redist/*`) **or product code in
+     no module.** These are `impact.py`'s fail-closed cases.
+   - **a change whose work equivalence cannot be shown.** With `--base-build DIR`, the code objects of both builds
+     are compared (`work_equal.py`, CPU). If they differ although no kernel source changed, the full matrix runs.
+   - **Exception:** when every changed product file is a kernel for one architecture (the map lists one GPU), the
+     full matrix runs on that GPU only.
+4. **Work-equivalence short-cut** (ADR-0003). `--proof r9700=FILE` / `--proof 8060s=FILE` takes a `work_equal.py`
+   report. GPU steps are skipped on that GPU only if all of these hold:
+   - the verdict is `EQUIVALENT`, the code objects are identical or identical-except-cuid, and the launch
+     sequence is identical;
+   - its B `whirl.exe` (and `whirl-server.exe`) is the sha256 of `--build`;
+   - every launch run in it is for that GPU;
+   - the diff touches no kernel source and no header that a `.hip` file includes.
+
+   The skipped steps are the launch-covered steps (`<step>/<command>` keys), `golden_*` when golden is identical,
+   and `kt_full`. The plan names the proof file. Server steps the proof does not cover still run.
+
+`--run` calls `release_gate.ps1 -Steps <plan> -Tag change_<id>_<device> -LaunchLog ...` once per GPU, R9700 first,
+then 8060S. It refuses (exit 2) while any `whirl*` process runs, and `--force` overrides that. It writes
+`test_change_summary.json` / `.txt` in the work folder (default `<workspace>/scratch/test_change/<time>`). It
+appends one row to `internal_docs/TEST_COST_LEDGER.tsv` of the workspace (`--ledger` / `WHIRL_TEST_COST_LEDGER`)
+with these columns: change, modules, level, step counts, estimated and measured CPU / GPU minutes, the
+full-matrix estimate, result and summary. `--record-plan` appends a `plan` row without running. Minutes come from
+`internal_docs/STEP_TIMES.tsv`: the median of the newest five PASS durations per (GPU, step) over stored gate
+summaries, written by `--refresh-times`. They are estimates, and the plan prints the steps that have no stored
+duration. The data files stay outside the repo.
+
+**Dev-time only, like `-Module`.** The tag is never `gate_<device>`, so no `PASS_gate_*` marker is written. A
+release, an rc merge and a bug-fix release still run the full release gate on both GPUs. `release_check` R1
+MODULES.json needs owner sign-off for module runs (arch025-X14).
+
+### <a id="isolation"></a>Isolation check (ARCH-1 8.5: src/sampling, then every isolatable module)
+
+One manifest per isolated module: `tests/sampling/isolation.txt` (sampling, arch025-X3) and
+`tests/iso/<module>/isolation.txt` (arch025-isoall). A manifest names the module (`module`), its test program
+(`exe`), the source the boundary mutants edit (`mutate`), the link mutants (`mutsym hip|log|now|engine`), extra
+Windows libraries (`syslib`), and the files: `src` / `hdr` = the module and its DECLARED dependencies (for example
+spec.policy declares `src/common/util.cpp` and the platform layer it calls), `testsrc` / `testhdr` = the test
+program only. `cmake/iso.cmake` copies those files into `build/Release/iso/<module>/{mod,test}/` and builds them from
+there with that copy as the only include path; the test program links the module OBJECTS directly (no static-library
+member selection) with `/OPT:NOREF` and nothing else (no `whirl`, no server, no tokenizer GGUF, no GPU). So an
+undeclared include (also `../server/engine.h`) fails to compile and a call into anything not listed fails to link, even
+in a function no test calls. The product build is unchanged.
 
 - `cpu_sampling`: runs `whirl-sampling-tests`.
-- `cpu_sampling_iso`: `tools/gates/iso_check.py --mutants` builds the same thing by hand and proves the boundary
-  holds. There is a control case and four mutants: an engine include, a relative engine include, a call into
-  `whirl` and a call into the server. Each mutant must fail the isolated build (C1083 / LNK2019) and still
-  compile with the product flags.
+- `cpu_sampling_iso`, `cpu_iso_<module>` (`.` -> `_`; one per `tests/iso/*/isolation.txt`):
+  `tools/gates/iso_check.py --mutants --module <m>` builds the same thing by hand, runs the test program (control) and
+  proves the boundary: an engine include and a relative engine include (C1083), and one call per `mutsym` into the
+  device runtime / the server / lib whirl (LNK2019), each of which must also compile with the product flags.
+  `iso_check.py --list` lists the isolated modules; without `--module` it checks all of them.
 
-To declare a new dependency of the module, add its header (and, if it is not header-only, its source) to the
-list. The change is then visible in review.
+To declare a new dependency of a module, add its header (and, if it is not header-only, its source) to the
+module's list. The change is then visible in review. Which modules are not isolated yet, and the include / call that
+blocks each one with the smallest fix: [isolation_blockers.md](isolation_blockers.md).
 
 ## <a id="vis-order"></a>Vision stream order (`cpu_vis_order`)
 

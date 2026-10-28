@@ -1,0 +1,29 @@
+# Isolation check: modules not isolated yet
+
+ARCH-1 8.5 (arch025-isoall). The isolation check (docs/dev/testing.md#isolation) builds a module from a copy that sees
+only its declared headers and links its test program against those objects alone. A module of
+`tools/gates/modules.json` gets a manifest (`tests/iso/<module>/isolation.txt`) only when that build works WITHOUT a
+change to product code. This file lists every module that does not, the first include or call that blocks it, and the
+smallest fix. A fix that only moves code must be proven by identical object code (objeq) before a manifest is added.
+
+Isolated (manifest + release_gate step): sampling (`cpu_sampling_iso`), handles, platform.args, platform.fs,
+platform.proc, platform.sys, spec.policy, spec.engine, model.arch_registry, server.args, threads (`cpu_iso_<module>`).
+
+| module | blocked by (first reach outside the declared dependencies) | smallest fix |
+|---|---|---|
+| env_snapshot | `src/config/env_snapshot.cpp:7` includes `whirl/model.h` only for the declarations of `envGet` / `envFlag` (`include/whirl/model.h:71-73`, defined in env_snapshot.cpp itself); model.h pulls the whole qwen35 Model (`model.h:27` device/handles.h, weights / kv / scratch / tune, spec/policy) | move the two declarations to `src/config/env_snapshot.h` and include that from model.h (declaration move; objeq of env_snapshot.obj and of every model.h includer) |
+| ckpt_store | `src/cache/ckpt_store.h:21` includes `server/backend.h` (ServerModel&, `:49`, `:75`): the cache depends upward on the server contract, which pulls `model/qwen35/kv.h` and `server/vision_iface.h` -> `include/whirl/vision.h:23` device/handles.h; `:22` server/engine_thread.h | a cache-side interface with only the ServerModel calls CkptStore makes (dependency inversion), ServerModel adapts to it; then cache + device interface + NullBackend + engine_thread (isolated as `threads`) |
+| page_pool | `src/cache/page_pool.h:20` `server/backend.h` (ServerModel&, `:51`, `:103`), `:21` server/engine_thread.h | same as ckpt_store |
+| prefix_store | `src/server/prefix_store.h:15` cache/ckpt_store.h (blocked above), `:18` server/backend.h, `:20` server/tokens.h -> whirl/tokenizer.h (tokenizer.cpp in lib whirl, GGUF reader); `prefix_store.cpp:5` cache/tier_adapter.h | after ckpt_store; tokenizer as a declared dependency (or the token type only) |
+| tier_bridge | `src/server/tier_bridge.h:26` server/backend.h, `:27` server/prefix_store.h (blocked above); `tier_bridge.cpp:4` server/log.h | after prefix_store / ckpt_store; kv_tier itself sees only device/backend.h (`src/tier/kv_tier.h:48`) and platform fs / proc and could be its own module |
+| protocol | `src/server/engine_api.h:11` server/vision_iface.h -> `include/whirl/vision.h:23` device/handles.h (device) and vision::Vision; `engine_api.h:14` whirl/tokenizer.h (lib whirl, GGUF) | forward-declare the vision types engine_api / vision_iface use by pointer (header change, objeq); tokenizer (+ gguf) as declared dependencies |
+| engine_gov | `src/server/engine_gov.cpp:13` `engine.h`: the file is Engine member functions | by design part of the engine (isolate after Engine is split) |
+| server.startup | `src/server/server_main.cpp:13` engine.h, `:18` device/backend.h, Model::load: the program's composition root | not isolatable by design (covered by the gate's end-to-end steps) |
+| cli | `src/cli/*`: whirl.exe composition root (build_model.cpp: Model::load, HIP device) | not isolatable by design |
+| contract | `src/device/backend_hip.cpp` is the HIP backend (whirl_hip, HIP runtime); `src/kernels_host/kernels_abi.cpp` the kernel table | mixed module (full gate). `src/common/numerics.cpp` alone is isolated as a declared dependency of server.args |
+| forward.dispatch, forward.attn, forward.ffn, forward.gdn, forward.run, forward.mtp_verify, forward.prefill, forward.vision_rows | `src/model/qwen35/forward/*.cpp` include `../forward_internal.h` -> `forward_internal.h:9` whirl/model.h; the files are qwen35::Model member functions that launch kernels (whirl_kernels_host, whirl_ops, whirl_hip) | needs the Model split into per-block objects behind the kernel / device interfaces (ARCH-1 model layer); until then whirl-model-tests (NullBackend) is the CPU coverage |
+| model.weights | `src/model/qwen35/weights.h:13` device/handles.h, `:14` whirl/gguf.h (GGUF reader, lib whirl), uploads through hip | GGUF reader + device interface + NullBackend as declared dependencies (gguf.cpp's own closure to be checked) |
+| model.kv | `src/model/qwen35/kv.cpp:13` whirl/model.h: Model member functions (`kv.cpp:117` kvBytesPerTokenFmt, `:141` allocKvPool, ...) | move the Model members out (KvPool / SeqTable already exist as types) |
+| model.scratch | `src/model/qwen35/scratch.cpp:10` whirl/model.h (Model::allocScratch / bufferBytes) | same pattern as model.kv |
+| model.tune | `src/model/qwen35/tune_table.cpp:9` whirl/model.h for `Model::writeTune` / `readTune` (`:83`, `:92`); the pure functions `tuneText` / `applyTuneText` (`:37`, `:52`) need only weights.h | move the two Model members to the model's own file (verbatim move, objeq); then tune_table.cpp + weights.h types are isolatable |
+| model.qwen35 | `src/model/qwen35/module.cpp:10` whirl/model.h; `server_model.cpp:4` server/backend.h + `:8` whirl/model.h: the adapter between the server contract and the Model | not isolatable by design (it is the seam) |

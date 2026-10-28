@@ -15,6 +15,9 @@ into a temp folder, then impact_build.py), so tests that exist only on that bran
 History replay: every commit that changes product code AND a registered test function in the same commit; the
 touched test functions are taken as "the test for this change". Hit = the map lists that test for the product
 part of the diff. Executable hit = it lists at least that test executable.
+Since arch025-srctext (owner 2026-10-28) impact.py selects EVERY CPU step and CPU test on every change, so the CPU part
+of the history hit rate is 100 % by construction (kernel-test functions are still map-selected); the map's own CPU pick
+is in the report's map_cpu_tests / map_steps.
 The history hit rate counts CPU tests only (a test touched in the same commit). It says nothing about the GPU steps:
 those are reported separately (commits with / without a GPU release step) and checked against a baseline with
 --baseline (narrowed commits). Cases marked "lock" pin a fix the tools were tuned on (regression lock, not evidence).
@@ -314,16 +317,20 @@ def run_baseline(base_rev, n, rev, skip):
     shutil.rmtree(tmp, ignore_errors=True)
     nar, grew = [], 0
     nsteps = {"base": 0, "new": 0}
+    ngpu = {"base": 0, "new": 0}  # arch025-srctext: GPU steps alone (CPU steps are all selected since then)
     for s in b:
         nsteps["base"] += len(b[s]["steps"])
         nsteps["new"] += len(w[s]["steps"])
+        ngpu["base"] += len([x for x in b[s]["steps"] if not x.startswith("cpu_")])
+        ngpu["new"] += len([x for x in w[s]["steps"] if not x.startswith("cpu_")])
         lost = {k: sorted(set(b[s][k]) - set(w[s][k])) for k in ("steps", "paths", "cpu", "kt")}
         if any(lost[k] for k in ("steps", "paths")):
             nar.append((s, lost))
         if any(set(w[s][k]) - set(b[s][k]) for k in ("steps", "paths", "cpu", "kt")):
             grew += 1
     print(f"== baseline: tools/impact of {base_rev} vs these tools on {len(b)} product commits of {rev} (skip {skip}): "
-          f"release steps {nsteps['base']} -> {nsteps['new']}; {grew} commit(s) select more; {len(nar)} narrowed")
+          f"release steps {nsteps['base']} -> {nsteps['new']} (GPU steps {ngpu['base']} -> {ngpu['new']}); {grew} commit(s) select more; "
+          f"{len(nar)} narrowed")
     for s, lost in nar:
         print(f"   NARROWED {s}: steps {lost['steps']} paths {lost['paths']}")
     for s in b:

@@ -1,5 +1,5 @@
 # ARCH-1 8.5 isolation check of src/sampling (arch025-X3): the module's sources and the ONLY headers they may see.
-# Read by cmake/sampling_iso.cmake (target whirl_sampling_iso + whirl-sampling-tests) and tools/gates/iso_check.py.
+# Read by cmake/iso.cmake (target whirl_sampling_iso + whirl-sampling-tests) and tools/gates/iso_check.py.
 # Every file is copied into <build>/iso/sampling/ at its path below (the "src" / "include" / "tests" prefix stripped), and
 # the copies are compiled with that tree as the ONLY include path: an include of anything not listed here (also
 # "../server/engine.h") fails with C1083, and the test exe links whirl_sampling_iso alone, so any symbol from outside
@@ -7,7 +7,14 @@
 #   kind    path (repo-relative)
 # the test program (cmake target name; tools/impact/impact_build.py reads this file too, so impact.py lists the
 # release_gate step cpu_sampling for a change in any file below)
+module    sampling
 exe       whirl-sampling-tests
+lib       whirl_sampling_iso
+# boundary mutants of tools/gates/iso_check.py --mutants (arch025-isoall: the same cases as arch025-X3, now generic)
+mutate    src/sampling/sampler.cpp
+mutsym    now
+mutsym    log
+mutsym    hip
 # module sources
 src       src/sampling/sampler.cpp
 src       src/sampling/acceptor.cpp

@@ -1,5 +1,5 @@
 // whirl-sampling-tests: the src/sampling unit tests built against the sampling module ALONE (ARCH-1 8.5 isolation
-// check, arch025-X3). cmake/sampling_iso.cmake compiles a copy of this file, of the module sources and of the headers
+// check, arch025-X3). cmake/iso.cmake compiles a copy of this file, of the module sources and of the headers
 // listed in tests/sampling/isolation.txt, with that copied tree as the only include path, and links nothing but
 // whirl_sampling_iso: no whirl, no whirl_server_core, no tokenizer GGUF, no GPU. The test bodies are the ones
 // whirl-server-tests runs (tests/sampling/sampling_unit.inc), so the two programs pin the same fixed-RNG table.

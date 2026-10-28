@@ -1,0 +1,27 @@
+# ARCH-1 8.5 isolation check of server.args (arch025-isoall): the module's sources, its DECLARED dependencies and the
+# ONLY headers they may see. Format: tests/sampling/isolation.txt; read by cmake/iso.cmake and tools/gates/iso_check.py
+# (and tools/impact/impact_build.py for the exe's sources).
+# declared dependencies: numerics (src/common/numerics.cpp, its dump::kv in src/common/dump.cpp) + platform env
+module    server.args
+exe       whirl-iso-server-args-tests
+mutate    src/server/server_args.cpp
+mutsym    hip
+mutsym    log
+mutsym    now
+# module sources
+src       src/server/server_args.cpp
+# declared dependency sources
+src       src/common/numerics.cpp
+src       src/common/dump.cpp
+src       src/platform/env_win.cpp
+# headers (include closure of the sources above)
+hdr       include/whirl/dump.h
+hdr       include/whirl/hip.h
+hdr       include/whirl/kv_format.h
+hdr       include/whirl/model_types.h
+hdr       include/whirl/numerics.h
+hdr       src/platform/env.h
+hdr       src/server/server_args.h
+# test program
+testsrc   tests/iso/server.args/server_args_tests.cpp
+testhdr   tests/iso/iso_test.h

@@ -215,7 +215,20 @@ AddStep "cpu_env_restore" $false @($pwsh, "-NoProfile", "-Command", "& '$pwsh' -
 # (cmake/sampling_iso.cmake: only the headers of tests/sampling/isolation.txt, linked to nothing else). Here the boundary
 # mutants: an undeclared include, a relative ../server include, a call into whirl and into the server must each fail the
 # isolated build and compile under the product flags (tools/gates/iso_check.py; MSVC through vcvars64, CPU, ~1 min).
-AddStep "cpu_sampling_iso" $false @($py, "-I", (Join-Path $repo "tools\gates\iso_check.py"), "--mutants", "--work", "@WORK@") { param($o, $c) $c -eq 0 -and ($o -match "(?m)^iso check: ok \(sampling, ([1-9]\d*)/\1 cases") }
+AddStep "cpu_sampling_iso" $false @($py, "-I", (Join-Path $repo "tools\gates\iso_check.py"), "--mutants", "--module", "sampling", "--work", "@WORK@") { param($o, $c) $c -eq 0 -and ($o -match "(?m)^iso check: ok \(sampling, ([1-9]\d*)/\1 cases") }
+# arch025-isoall (ARCH-1 8.5 for every isolatable module): one step per tests/iso/<module>/isolation.txt, named
+# cpu_iso_<module> ("." -> "_"). tools/gates/iso_check.py builds the module + its declared dependencies from a copy that
+# sees only the listed headers, links its test program from those objects alone (/OPT:NOREF) and runs it (control), then
+# the boundary mutants (an engine include, a relative engine include, calls into the device runtime / the server / lib
+# whirl as the manifest's mutsym lines say) must each fail the isolated build and compile with the product flags.
+# CPU, MSVC through vcvars64, no exe of this build, ~1 min per module. Module names come from the manifests' "module" line.
+foreach ($isoList in @(Get-ChildItem -Path (Join-Path $repo "tests\iso") -Filter "isolation.txt" -Recurse -ErrorAction SilentlyContinue | Sort-Object FullName)) {
+    $isoMod = @(Select-String -Path $isoList.FullName -Pattern "^module\s+(\S+)" | ForEach-Object { $_.Matches[0].Groups[1].Value })[0]
+    if (-not $isoMod) { continue }
+    $isoRx = "(?m)^iso check: ok \(" + [regex]::Escape($isoMod) + ", ([1-9]\d*)/\1 cases"
+    AddStep "cpu_iso_$($isoMod -replace '\.', '_')" $false @($py, "-I", (Join-Path $repo "tools\gates\iso_check.py"), "--mutants", "--module", $isoMod, "--work", "@WORK@") `
+        ([scriptblock]::Create("param(`$o, `$c) `$c -eq 0 -and (`$o -match '$isoRx')"))
+}
 # review C7: modules.json against this tree and this gate, and the block / pass tests of that check and of impact.py's
 # module mapping (python: WHIRL_GATE_PYTHON, else python on PATH; none found = the step fails)
 AddStep "cpu_modules_check" $false @($pwsh, "-NoProfile", "-Command", "& '$py' -I '$(Join-Path $repo "tools\gates\modules_check_test.py")'; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\impact\validate_test.py")'; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\impact\impact_steps_test.py")'; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\impact\mutations_check.py")' --selftest; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\impact\mutations_check.py")'; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\gates\modules_check.py")'; exit `$LASTEXITCODE") `
