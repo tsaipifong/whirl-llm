@@ -275,8 +275,48 @@ def analyze(changes, m, new_rev, old_rev):
     if sst:
         rep["release_gate_steps"] = sorted(set(rep["release_gate_steps"]) | sst)
         rep["notes"] += snotes
+    if changes:
+        add_all_cpu(rep, m)
     rep.update(module_gate(changes, rep=rep, m=m))
     return rep
+
+
+def all_cpu(m):
+    """(every CPU release step, every CPU test per executable) of map m. arch025-srctext, owner 2026-10-28 (「98/103，沒選到的
+    那5項，如果不耗什麼時，那乾脆都跑了吧?」): the CPU steps (P-cpu ~6-9 min; the C++ safety steps longer) always run in
+    full, so a CPU test the map cannot reach (source-text tests such as testForwardSplit, destructors, data tables) is
+    never left out. Only GPU steps are selected by the map. An old map without "cpu_steps" falls back to the cpu_* names
+    it does have (release_gate.ps1 literals + the declared RELEASE_STEPS + one cpu_<exe> per test executable)."""
+    steps = set(m.get("cpu_steps") or [])
+    if not steps:
+        steps = {s for s in m.get("release_gate_steps", []) if s.startswith("cpu_") and "<" not in s}
+        steps |= {s for s in (m.get("declared", {}).get("release_steps") or {}) if s.startswith("cpu_")}
+        for d in m.get("tests", {}).values():
+            if not d.get("gpu") and d.get("exe", "").startswith("whirl-"):
+                short = d["exe"].replace("whirl-", "", 1)
+                short = short[:-len("-tests")] if short.endswith("-tests") else short
+                steps.add(f"cpu_{short}")
+    tests = defaultdict(set)
+    for tid, d in m.get("tests", {}).items():
+        if d.get("gpu") or d.get("exe") in ("whirl", "whirl-kernel-test"):
+            continue
+        exe, name = tid.split(":", 1)
+        tests[exe].add(name)
+    return steps, tests
+
+
+def add_all_cpu(rep, m):
+    """adds every CPU step and every CPU test to report rep (only ADDS). The map's own pick is kept in rep["map_steps"] /
+    rep["map_cpu_tests"] (diagnostics: what the rules alone would select)."""
+    steps, tests = all_cpu(m)
+    rep["map_steps"] = list(rep["release_gate_steps"])
+    rep["map_cpu_tests"] = {e: list(v) for e, v in rep["cpu_tests"].items()}
+    rep["release_gate_steps"] = sorted(set(rep["release_gate_steps"]) | steps)
+    cpu = {e: set(v) for e, v in rep["cpu_tests"].items()}
+    for e, v in tests.items():
+        cpu.setdefault(e, set()).update(v)
+    rep["cpu_tests"] = {e: sorted(v) for e, v in sorted(cpu.items())}
+    rep["cpu_all"] = True
 
 
 # arch025-Q1 / Q3 (PLAN (e)): every C / C++ change -> cpu_analyze; a lifetime-class change -> cpu_asan; the safety tools themselves
@@ -594,8 +634,12 @@ def print_report(title, r, why=False):
         print(f"   path     {p}" + (f"   <- {'; '.join(why_l)}" if why else ""))
     if r["paths"]:
         print(f"   scope    GPUs {','.join(r['gpus'])} | models {','.join(r['models'])} | modes {','.join(r['modes'])}")
-    for e, v in r["cpu_tests"].items():
-        print(f"   cpu      {e}: {len(v)} test(s): {', '.join(v[:8])}{' ...' if len(v) > 8 else ''}")
+    if r.get("cpu_all"):
+        ncs = len([s for s in r["release_gate_steps"] if s.startswith("cpu_")])
+        print(f"   cpu      ALL {ncs} CPU release steps and all {sum(len(v) for v in r['cpu_tests'].values())} CPU tests "
+              f"({len(r['cpu_tests'])} executables) run on every change (owner 2026-10-28); only GPU steps are map-selected")
+    for e, v in (r.get("map_cpu_tests") if r.get("cpu_all") else r["cpu_tests"]).items():
+        print(f"   cpu      {e}: {len(v)} test(s){' the map points at' if r.get('cpu_all') else ''}: {', '.join(v[:8])}{' ...' if len(v) > 8 else ''}")
     if r["kernel_tests"]:
         print(f"   kernel   whirl-kernel-test: {', '.join(r['kernel_tests'][:10])}{' ...' if len(r['kernel_tests']) > 10 else ''}")
     if r["gpu_cli_gates"]:

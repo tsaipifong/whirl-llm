@@ -581,9 +581,20 @@ def build(root):
     rg = os.path.join(root, "tools/gates/release_gate.ps1")
     rg_steps = []
     srv_steps = {}
+    cpu_steps = []
     if os.path.exists(rg):
         t = open(rg, encoding="utf-8", errors="replace").read()
         rg_steps = sorted(set(re.findall(r'AddStep\s+"([^"$]+)"', t)) | {"st_<model>_<mode>", "golden_<model>", "seq_<model>_<mode>", "dfl_<mode>", "cpu_<exe>"})
+        # arch025-srctext (owner 2026-10-28: CPU steps are cheap, run them all): every CPU step of the gate, i.e. every
+        # AddStep "cpu_*" $false plus the per-binary steps of the `foreach ($t in "<exe>", ...)` loop. impact.py adds
+        # all of them to every selection; only GPU steps are chosen by the map.
+        cpu = set(re.findall(r'AddStep\s+"(cpu_\w+)"\s+\$false', t))
+        for lp in re.finditer(r'foreach\s*\(\$t\s+in\s+([^)]*)\)\s*\{\s*AddStep\s+"cpu_\$\(', t):
+            for exe in re.findall(r'"([\w-]+)"', lp.group(1)):
+                cpu.add("cpu_" + re.sub(r"-tests$", "", re.sub(r"^whirl-", "", exe)))
+        cpu_steps = sorted(cpu)
+        if not cpu_steps:
+            errors.append('release_gate.ps1: no CPU step parsed (AddStep "cpu_*" $false): impact.py cannot add every CPU step')
         # server-gate steps: AddStep "srv_x" $true (GateCmd $MODEL "suite,suite" "mode" ...)
         for mm in re.finditer(r'AddStep\s+"(srv_\w+)"\s+\$true\s+\(GateCmd\s+\$(\w+)\s+"([^"]*)"\s+"([^"]*)"', t):
             srv_steps[mm.group(1)] = {"model": {"SW": "dense", "MX": "moe", "Q": "dense-q4"}.get(mm.group(2), mm.group(2)),
@@ -625,6 +636,7 @@ def build(root):
         "tests": {t: {"exe": d["exe"], "gpu": d["gpu"]} for t, d in sorted(tests.items())},
         "path_gates": gates,
         "release_gate_steps": rg_steps,
+        "cpu_steps": cpu_steps,
         "release_srv_steps": srv_steps,
         "includers": includers,
         "fanout_near_cut": {k: v for k, v in sorted(near_cut.items())},  # arch024-S12 C2: > MAX_FANOUT = cut
