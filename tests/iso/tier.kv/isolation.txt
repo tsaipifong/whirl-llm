@@ -1,0 +1,37 @@
+# ARCH-1 8.5 isolation check of tier.kv, the KV host tier (arch025-lane2 leg 3; split from tier_bridge in leg 2): the
+# module's sources, its DECLARED dependencies and the ONLY headers they may see. Format: tests/sampling/isolation.txt;
+# read by cmake/iso.cmake and tools/gates/iso_check.py.
+# declared dependencies: the device contract (device/backend.h, handles.h) with the NullBackend
+# (src/device/null_backend.cpp), the platform layer (env / fs / proc). NOT declared: any server header (prefix store,
+# tier bridge, engine), the model, the HIP layer: prefix_store -> cache.tier_adapter -> tier.kv is no cycle.
+module    tier.kv
+exe       whirl-iso-tier-kv-tests
+mutate    src/tier/kv_tier.cpp
+mutsym    hip
+mutsym    engine
+mutsym    log
+# module sources
+src       src/tier/kv_tier.cpp
+# declared dependency sources
+src       src/device/null_backend.cpp
+src       src/platform/env_win.cpp
+src       src/platform/fs_win.cpp
+src       src/platform/proc_win.cpp
+# include closure of the sources above
+hdr       include/whirl/device_mem.h
+hdr       include/whirl/hip.h
+hdr       include/whirl/thread_annotations.h
+hdr       include/whirl/uma_mem.h
+hdr       src/device/backend.h
+hdr       src/device/handles.h
+hdr       src/device/null_backend.h
+hdr       src/platform/env.h
+hdr       src/platform/fs.h
+hdr       src/platform/fs_fake.h
+hdr       src/platform/proc.h
+hdr       src/tier/evict_policy.h
+hdr       src/tier/idle_flush.h
+hdr       src/tier/kv_tier.h
+# test program
+testsrc   tests/iso/tier.kv/kv_tier_tests.cpp
+testhdr   tests/iso/iso_test.h

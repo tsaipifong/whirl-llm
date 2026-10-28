@@ -236,7 +236,7 @@ How the plan is built, from the impact map (`impact.py`) and `modules.json`:
    union** of their steps. The full gate that `impact.py` suggests for a cross-module change is not used here.
 3. **Full matrix, both GPUs** (every GPU step `-List` has on that GPU) when the change touches any of these:
    - **a core module.** The `CORE` table in `test_change.py` gives the reason for each: `forward.*`, `model.kv`,
-     `model.weights`, `model.scratch`, `model.tune`, `handles`, `contract`. A core module counts as touched when
+     `model.weights`, `model.scratch`, `model.tune`, `handles`, `contract.abi`, `contract.device`, `contract.server`. A core module counts as touched when
      it is a caller of the changed module (`rdeps`), that is, when it includes a header the change edits.
    - **a core path:** `kernels/*`, `*.hip`, `src/kernels_host/*`, `kernels_abi.h`, numerics, `src/ops/*`,
      `src/hip/*`, `src/device/*`, forward / kv files, also under their older paths.

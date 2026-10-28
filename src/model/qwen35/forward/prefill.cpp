@@ -10,7 +10,7 @@ namespace whirl::qwen35 {
 // ---------------------------------------------------------------------------
 // prefill drivers
 
-void Model::prefillWithMtp(std::span<const u32> tokens) {
+void Context::prefillWithMtp(std::span<const u32> tokens) {
     std::size_t off = 0;
     while (off < tokens.size()) {
         const std::size_t n = std::min<std::size_t>(tokens.size() - off, max_batch);
@@ -31,7 +31,7 @@ void Model::prefillWithMtp(std::span<const u32> tokens) {
 // to the same row inside a larger batch. Exact acceptance never showed the
 // difference; relaxacc (fast) keeps drafts, so the text depended on it (FIX-FS).
 // The final chunk's last hidden stays in mtp_h for the first decode draft.
-void Model::prefillMtpChunk(std::span<const u32> tokens, u32 pos0, std::size_t off, std::size_t n, std::optional<DevPtr> prev_hidden) {
+void Context::prefillMtpChunk(std::span<const u32> tokens, u32 pos0, std::size_t off, std::size_t n, std::optional<DevPtr> prev_hidden) {
     const u64 E = cfg.n_embd;
     if (off == 0 && prev_hidden) hip::copyAsync(mtp_h, *prev_hidden, E * 4, stream);
     // mtp_h: the previous chunk's last hidden (off > 0) or the checkpoint's (resume)
@@ -49,14 +49,14 @@ void Model::prefillMtpChunk(std::span<const u32> tokens, u32 pos0, std::size_t o
     hip::copyAsync(mtp_h, hn + (n - 1) * E * 4, E * 4, stream);
 }
 
-bool Model::canSegment() const {
+bool Context::canSegment() const {
     return seqs.size() > 1 && k.attn_prep != nullptr && !nf().no_fuse && !nf().naive_attn && cfg.head_dim == 256 && cfg.d_conv == 4;
 }
 
 // Several sequences' prefill chunks as one forward (each chunk longer than
 // max_small_batch). Logits of every segment that ends its prompt land in
 // logits row k; with mtp, also the MTP rows and mtp_h of each sequence.
-void Model::prefillSegs(std::span<const PSeg> segs, bool with_mtp) {
+void Context::prefillSegs(std::span<const PSeg> segs, bool with_mtp) {
     if (segs.empty() || segs.size() > max_small_batch) throw ModelError("BadBatch");
     const u64 E = cfg.n_embd;
     u32 total = 0;
@@ -110,7 +110,7 @@ void Model::prefillSegs(std::span<const PSeg> segs, bool with_mtp) {
     psegs = std::span<const PRows>(rows, segs.size());
     keep_hidden = with_mtp;
     struct Reset {
-        Model& m;
+        Context& m;
         ~Reset() {
             m.psegs = {};
             m.keep_hidden = false;
@@ -140,13 +140,13 @@ void Model::prefillSegs(std::span<const PSeg> segs, bool with_mtp) {
     }
 }
 
-void Model::segLogitsToFront(u32 kk) {
+void Context::segLogitsToFront(u32 kk) {
     if (kk == 0) return;
     const u64 V = cfg.n_vocab;
     hip::copyAsync(logits, logits + static_cast<u64>(kk) * V * 4, V * 4, stream);
 }
 
-void Model::prefill(std::span<const u32> tokens, u32 pos0) {
+void Context::prefill(std::span<const u32> tokens, u32 pos0) {
     std::size_t off = 0;
     while (off < tokens.size()) {
         const std::size_t n = std::min<std::size_t>(tokens.size() - off, max_batch);
@@ -155,13 +155,13 @@ void Model::prefill(std::span<const u32> tokens, u32 pos0) {
     }
 }
 
-u32 Model::argmax() {
+u32 Context::argmax() {
     hip::launch(k.argmax, D(1), D(1024), 0, stream, logits, I(cfg.n_vocab), out_tok, ids, pos_buf, i32(0));
     i32 out = 0;
     hip::download(&out, out_tok, 4);
     return static_cast<u32>(out);
 }
 
-void Model::readLogits(std::span<float> dst) { hip::download(dst.data(), logits, dst.size() * 4); }
+void Context::readLogits(std::span<float> dst) { hip::download(dst.data(), logits, dst.size() * 4); }
 
 }  // namespace whirl::qwen35

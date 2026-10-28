@@ -1,0 +1,46 @@
+# ARCH-1 8.5 isolation check of model.weights (arch025-lane2 leg 3): the module's sources, its DECLARED dependencies
+# and the ONLY headers they may see. Format: tests/sampling/isolation.txt; read by cmake/iso.cmake and
+# tools/gates/iso_check.py.
+# declared dependencies: the GGUF reader (src/gguf/gguf.cpp), the kernel ABI (contract.abi: kernels_abi.cpp, the MXFP4
+# row repack and the kernel table type; it loads kernels through the HIP layer, here the link double
+# tests/iso/fake_hip.cpp), lib whirl's util (widen) and the platform layer it uses (fs / env / args); the device
+# contract headers (matHost's pinned buffers) and the model types. The device side of the load is injected
+# (WeightLoader::Device), so NOT declared: class Model (model.core), the server, the engine.
+module    model.weights
+exe       whirl-iso-model-weights-tests
+mutate    src/model/qwen35/weights.cpp
+mutsym    model
+mutsym    engine
+mutsym    log
+# module sources
+src       src/model/qwen35/weights.cpp
+# declared dependency sources
+src       src/gguf/gguf.cpp
+src       src/kernels_host/kernels_abi.cpp
+src       src/common/util.cpp
+src       src/platform/env_win.cpp
+src       src/platform/fs_win.cpp
+src       src/platform/args_win.cpp
+# include closure of the sources above
+hdr       include/whirl/common.h
+hdr       include/whirl/device_mem.h
+hdr       include/whirl/gguf.h
+hdr       include/whirl/hip.h
+hdr       include/whirl/kernels_abi.h
+hdr       include/whirl/kv_format.h
+hdr       include/whirl/model_types.h
+hdr       include/whirl/uma_mem.h
+hdr       src/device/backend.h
+hdr       src/device/handles.h
+hdr       src/model/qwen35/load_types.h
+hdr       src/model/qwen35/model_error.h
+hdr       src/model/qwen35/weight_loader.h
+hdr       src/model/qwen35/weights.h
+hdr       src/platform/args.h
+hdr       src/platform/env.h
+hdr       src/platform/fs.h
+hdr       src/platform/fs_fake.h
+# test program (fake_hip.cpp: the HIP layer's link double)
+testsrc   tests/iso/model.weights/weights_tests.cpp
+testsrc   tests/iso/fake_hip.cpp
+testhdr   tests/iso/iso_test.h

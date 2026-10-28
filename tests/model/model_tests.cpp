@@ -8,6 +8,7 @@
 #include "whirl/device_profile.h"
 #include "whirl/dflash_policy.h"
 #include "whirl/dump.h"
+#include "model/exec_dump.h"  // arch025-lane2 N3: execDump moved out of whirl/dump.h
 #include "whirl/gguf.h"
 #include "whirl/kernels_abi.h"
 #include "whirl/kv_layout.h"
@@ -1677,7 +1678,8 @@ void testDraftWindowRestore() {
 // calls gdnLayer exactly once (the extracted DeltaNet branch).
 // arch025-F4: src/model/forward.cpp is gone; the drivers in forward/run.cpp, MTP / verify / commitSeq in
 // forward/mtp_verify.cpp, the prefill drivers in forward/prefill.cpp, the vision rows in forward/vision_rows.cpp.
-// Every forward function is defined in exactly one of the eight forward/*.cpp, its home below.
+// Every forward function is defined in exactly one of the eight forward/*.cpp, its home below (as a qwen35::Context
+// member since arch025-lane2 N9 S3).
 void testForwardSplit() {
 #ifdef WHIRL_SOURCE_DIR
     const std::filesystem::path root(WHIRL_SOURCE_DIR);
@@ -1698,32 +1700,32 @@ void testForwardSplit() {
     };
     const Home homes[] = {
         // F4 run.cpp
-        {"void Model::forward(", 0}, {"void Model::decodeStep(", 0}, {"void Model::decodeStepLaunches(", 0},
-        {"u32 Model::beginDecode(", 0}, {"void Model::run(", 0}, {"std::size_t Model::lendScratch(", 0},
+        {"void Context::forward(", 0}, {"void Context::decodeStep(", 0}, {"void Context::decodeStepLaunches(", 0},
+        {"u32 Context::beginDecode(", 0}, {"void Context::run(", 0}, {"std::size_t Context::lendScratch(", 0},
         // F4 mtp_verify.cpp
-        {"void Model::setTokensDev(", 1}, {"DevPtr Model::ctlSlot(", 1}, {"void Model::setTokens(", 1},
-        {"u32 Model::mtpForward(", 1}, {"void Model::mtpEnqueue(", 1}, {"void Model::captureLayerInput(", 1},
-        {"void Model::commitSeq(", 1}, {"u32 Model::verifyBatchEnqueue(", 1}, {"void Model::mtpBatchStepEx(", 1},
-        {"void Model::readCtl(", 1}, {"void Model::draftHeadMatmul(", 1}, {"void Model::argmaxRows(", 1},
-        {"void Model::argmaxRowsEnqueue(", 1}, {"void Model::verifyEnqueueEx(", 1}, {"Model::Cycle Model::readCycle(", 1},
-        {"void Model::verify(", 1}, {"void Model::restoreSnapshot(", 1},
+        {"void Context::setTokensDev(", 1}, {"DevPtr Context::ctlSlot(", 1}, {"void Context::setTokens(", 1},
+        {"u32 Context::mtpForward(", 1}, {"void Context::mtpEnqueue(", 1}, {"void Context::captureLayerInput(", 1},
+        {"void Context::commitSeq(", 1}, {"u32 Context::verifyBatchEnqueue(", 1}, {"void Context::mtpBatchStepEx(", 1},
+        {"void Context::readCtl(", 1}, {"void Context::draftHeadMatmul(", 1}, {"void Context::argmaxRows(", 1},
+        {"void Context::argmaxRowsEnqueue(", 1}, {"void Context::verifyEnqueueEx(", 1}, {"Context::Cycle Context::readCycle(", 1},
+        {"void Context::verify(", 1}, {"void Context::restoreSnapshot(", 1},
         // F4 prefill.cpp
-        {"void Model::prefillWithMtp(", 2}, {"void Model::prefillMtpChunk(", 2}, {"bool Model::canSegment(", 2},
-        {"void Model::prefillSegs(", 2}, {"void Model::segLogitsToFront(", 2}, {"void Model::prefill(", 2},
-        {"u32 Model::argmax(", 2}, {"void Model::readLogits(", 2},
+        {"void Context::prefillWithMtp(", 2}, {"void Context::prefillMtpChunk(", 2}, {"bool Context::canSegment(", 2},
+        {"void Context::prefillSegs(", 2}, {"void Context::segLogitsToFront(", 2}, {"void Context::prefill(", 2},
+        {"u32 Context::argmax(", 2}, {"void Context::readLogits(", 2},
         // F4 vision_rows.cpp
-        {"bool Model::visAny(", 3}, {"const VisMap* Model::visOf(", 3}, {"void Model::visBegin(", 3}, {"void Model::visEnsure(", 3},
-        {"void Model::visRelease(", 3}, {"void Model::visRow(", 3}, {"void Model::visCommit(", 3}, {"void Model::visRowsCur(", 3},
-        {"void Model::injectRows(", 3},
+        {"bool Context::visAny(", 3}, {"const VisMap* Context::visOf(", 3}, {"void Context::visBegin(", 3}, {"void Context::visEnsure(", 3},
+        {"void Context::visRelease(", 3}, {"void Context::visRow(", 3}, {"void Context::visCommit(", 3}, {"void Context::visRowsCur(", 3},
+        {"void Context::injectRows(", 3},
         // F1 dispatch.cpp
-        {"void Model::mark(", 4}, {"void Model::gemvLaunch(", 4}, {"void Model::matmul(", 4}, {"void Model::gemmF16(", 4},
-        {"ops::GemmFlags Model::gemmFlags(", 4}, {"bool Model::fused(", 4}, {"void Model::step(", 4},
+        {"void Context::mark(", 4}, {"void Context::gemvLaunch(", 4}, {"void Context::matmul(", 4}, {"void Context::gemmF16(", 4},
+        {"ops::GemmFlags Context::gemmFlags(", 4}, {"bool Context::fused(", 4}, {"void Context::step(", 4},
         // F2 attn.cpp / ffn.cpp
-        {"void Model::draftAttn(", 5}, {"void Model::attnBlock(", 5}, {"void Model::prefillAttn(", 5},
-        {"void Model::ffnBlock(", 6}, {"void Model::moeBlock(", 6},
+        {"void Context::draftAttn(", 5}, {"void Context::attnBlock(", 5}, {"void Context::prefillAttn(", 5},
+        {"void Context::ffnBlock(", 6}, {"void Context::moeBlock(", 6},
         // F3 gdn.cpp
-        {"void Model::gdnLayer(", 7}, {"GdnSegs Model::gdnSegsBatch(", 7}, {"GdnSegs Model::gdnSegsSingle(", 7},
-        {"void Model::gdnChunked(", 7}, {"void Model::gdnScan(", 7},
+        {"void Context::gdnLayer(", 7}, {"GdnSegs Context::gdnSegsBatch(", 7}, {"GdnSegs Context::gdnSegsSingle(", 7},
+        {"void Context::gdnChunked(", 7}, {"void Context::gdnScan(", 7},
     };
     for (const Home& h : homes) {
         bool once = true;
@@ -1737,7 +1739,7 @@ void testForwardSplit() {
         // arch025-F3: the DeltaNet branch of Model::run is the single gdnLayer call; F4: run.cpp holds no other copy of
         // the branch head (commitSeq's own `const GdnW& g = L.gdn;` moved to mtp_verify.cpp with it)
         const std::string& run = src[0];
-        const std::size_t r = run.find("void Model::run(u32 n) {");
+        const std::size_t r = run.find("void Context::run(u32 n) {");
         const std::size_t c = run.find("gdnLayer(i, L.gdn, n, gdn_in2);");
         check(r != std::string::npos && c != std::string::npos && c > r && run.find("gdnLayer(") == c &&
                   run.find("gdnLayer(", c + 1) == std::string::npos && run.find("const GdnW& g = L.gdn;") == std::string::npos,
@@ -1756,6 +1758,24 @@ void testForwardSplit() {
     for (const auto& e : std::filesystem::recursive_directory_iterator(root / "include", ec))
         if (e.is_regular_file() && readSource(e.path()).find("forward_internal.h") != std::string::npos) leaked = true;
     check(!leaked, "forward split: no public header includes forward_internal.h");
+    // arch025-lane2 N9 S3: the forward functions are qwen35::Context members (src/model/qwen35/context.h) and the forward
+    // sources never see class Model: neither forward_internal.h nor a forward/*.cpp includes whirl/model.h, none
+    // names Model:: in its code (comments may still say "Model::run")
+    check(hdr.find("#include \"model/qwen35/context.h\"") != std::string::npos && hdr.find("whirl/model.h\"") == std::string::npos,
+          "forward split: forward_internal.h includes context.h, not whirl/model.h (N9 S3)");
+    for (std::size_t i = 0; i < src.size(); ++i) {
+        bool model_code = false;
+        std::size_t p = 0;
+        while (p < src[i].size()) {
+            std::size_t e = src[i].find('\n', p);
+            if (e == std::string::npos) e = src[i].size();
+            const std::string code = src[i].substr(p, std::min(e, src[i].find("//", p)) - p);
+            model_code = model_code || code.find("Model::") != std::string::npos;
+            p = e + 1;
+        }
+        check(src[i].find("whirl/model.h\"") == std::string::npos && !model_code,
+              std::string("forward split: forward/") + names[i] + ".cpp: no whirl/model.h, no Model:: in the code (N9 S3)");
+    }
 #endif
 }
 

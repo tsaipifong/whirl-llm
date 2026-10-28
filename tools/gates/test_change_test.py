@@ -91,8 +91,8 @@ check("reason class bw", {tc.reason_class(r) for r in p["full_reasons"]} == {"im
 p = plan(["src/server/engine.cpp"], rep({}, "full gate or the release steps above: 1 file(s) in no module (src/server/engine.cpp)"))
 check("unmapped full", p["level"] == "full" and tc.reason_class(p["full_reasons"][0]) == "impact: product file in no module", p["full_reasons"])
 # 9. contract module (modules.json full) -> full via impact text and CORE
-p = plan(["src/device/backend.h"], rep({"contract": ["src/device/backend.h"]}, "full gate, both GPUs (contract module contract)"))
-check("contract full", p["level"] == "full" and any("core module contract" in r for r in p["full_reasons"]), p["full_reasons"])
+p = plan(["src/device/backend.h"], rep({"contract.device": ["src/device/backend.h"]}, "full gate, both GPUs (contract module contract.device)"))
+check("contract full", p["level"] == "full" and any("core module contract.device" in r for r in p["full_reasons"]), p["full_reasons"])
 # 10. arch-specific kernel -> full matrix on that GPU only
 p = plan(["kernels/gfx1151/attn.hip"], rep({}, "full gate or the release steps above: 1 file(s) in no module (kernels/gfx1151/attn.hip)", gpus=("gfx1151",)))
 check("kernel 1151 only", p["level"] == "full" and p["gpu_steps"]["r9700"] == [] and len(p["gpu_steps"]["8060s"]) == 10, p["gpu_steps"])

@@ -18,7 +18,7 @@
 #include "cache/prefix_cache.h"
 #include "device/backend.h"
 #include "device/handles.h"
-#include "server/backend.h"
+#include "cache/cache_model.h"  // not server/backend.h: the narrow model interface (arch025-lane2 D2.2)
 #include "server/engine_thread.h"
 
 #include <cstdint>
@@ -46,7 +46,7 @@ public:
         std::uint64_t conv_bytes = 0, ssm_bytes = 0;  // of one DeltaNet layer
         bool ckpt_host = false;                       // WHIRL_CKPT_HOST: per-slot checkpoints in pinned host memory
     };
-    CkptStore(device::Backend& ops, ServerModel& m, Layout lay) : ops_(ops), m_(m), lay_(lay) {}
+    CkptStore(device::Backend& ops, CacheModel& m, Layout lay) : ops_(ops), m_(m), lay_(lay) {}
     // arch024 M8: the engine thread that may call the entry points below (nullptr: unchecked; docs/dev/threads.md)
     void setOwner(const EngineThread* o) { owner_ = o; }
     const EngineThread* ownerThread() const { return owner_; }
@@ -72,7 +72,7 @@ private:
     void wait(std::initializer_list<device::Event> wait_for);
     static void free(Ckpt& c);
     device::Backend& ops_;
-    ServerModel& m_;
+    CacheModel& m_;
     Layout lay_;
     const EngineThread* owner_ = nullptr;
 };

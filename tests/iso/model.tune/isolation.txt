@@ -1,0 +1,27 @@
+# ARCH-1 8.5 isolation check of model.tune (arch025-lane2 D2.2 / N9 S2c): the module's sources, its DECLARED dependencies
+# and the ONLY headers they may see. Format: tests/sampling/isolation.txt; read by cmake/iso.cmake and tools/gates/iso_check.py.
+# declared dependencies: the weight types (model/qwen35/weights.h: Mat; header-only use) and the model types
+# (whirl/model_types.h). Model::writeTune / readTune moved to src/model/qwen35/model_tune.cpp (the model core).
+module    model.tune
+exe       whirl-iso-model-tune-tests
+mutate    src/model/qwen35/tune_table.cpp
+mutsym    hip
+mutsym    log
+mutsym    now
+# module sources
+src       src/model/qwen35/tune_table.cpp
+# headers (include closure of the sources above)
+hdr       include/whirl/common.h
+hdr       include/whirl/device_mem.h
+hdr       include/whirl/gguf.h
+hdr       include/whirl/hip.h
+hdr       include/whirl/kv_format.h
+hdr       include/whirl/model_types.h
+hdr       include/whirl/uma_mem.h
+hdr       src/device/backend.h
+hdr       src/device/handles.h
+hdr       src/model/qwen35/tune_table.h
+hdr       src/model/qwen35/weights.h
+# test program
+testsrc   tests/iso/model.tune/tune_table_tests.cpp
+testhdr   tests/iso/iso_test.h

@@ -8,7 +8,7 @@ CPU only, no GPU, no model.
 
 Manifests: tests/sampling/isolation.txt and tests/iso/<module>/isolation.txt (one per module; cmake/iso.cmake reads the
 same files). Kinds: module NAME, exe TARGET, lib TARGET (optional object-library name), mutate PATH (the source the
-mutants edit), mutsym hip|log|now|engine (link mutants), syslib X.lib, then src / hdr (module + declared dependencies)
+mutants edit), mutsym hip|log|now|engine|model (link mutants), syslib X.lib, then src / hdr (module + declared dependencies)
 and testsrc / testhdr (test program only). Every file is copied into <work>/<module>/<case>/{mod,test} (leading src/
 include/ tests/ dropped); module sources are compiled with mod/ as the ONLY include path, the test with mod/ + test/, and
 the test program is linked from ALL those objects directly (no static-library member selection) with /OPT:NOREF, so an
@@ -23,6 +23,7 @@ AND compile with the product flags (/I src /I include), which is what makes the 
        log    whirl::server::Log::line      (src/server/log.cpp, whirl_server_core)
        now    whirl::nowSeconds             (src/common/util.cpp, lib whirl)
        engine whirl::server::serveMain      (src/server/server_main.cpp, whirl_server_core: server startup)
+       model  whirl::qwen35::loadOrTune     (src/model/tune.cpp, whirl_model: the model core, class Model)
 The product compile of a mutant is done on a temporary file next to the real one (_iso_mut_<module>_<case>.cpp, so the relative
 include resolves as in the tree) and removed right after. The product link is not redone here (it needs the HIP build).
 Per module the last line is "iso check: ok (<module>, N/N cases as expected)" or "iso check: FAIL (<module>, ...)"; with
@@ -55,6 +56,10 @@ SYMS = {
     "engine": ("namespace whirl::server { int serveMain(int argc, char** argv, const char* program); }"
                "  // iso mutant: src/server/server_main.cpp (whirl_server_core)\n",
                "(void)whirl::server::serveMain(0, nullptr, \"iso\");"),
+    # arch025-lane2 leg 3: the model core (class Model's load / tune), for the modules below it (forward.*)
+    "model": ("#include <string>\nnamespace whirl::qwen35 { class Model; void loadOrTune(Model& m, const std::string& model_path, "
+              "std::string& log); }  // iso mutant: src/model/tune.cpp (whirl_model, model.core)\n",
+              "std::string s; whirl::qwen35::loadOrTune(*reinterpret_cast<whirl::qwen35::Model*>(&s), s, s);"),
 }
 ENGINE_H = "server/engine.h"
 
@@ -153,7 +158,12 @@ def stage(root, man, d):
     shutil.rmtree(d, ignore_errors=True)
     out = {"src": [], "testsrc": []}
     for kind, p in man.items:
-        dst = os.path.join(d, "test" if kind.startswith("test") else "mod", *staged(p).split("/"))
+        if staged(p) == p:
+            # arch025-lane2 leg 3: outside src/ include/ tests/ (kernels/gfx1151/attn_ws4_index.h, included from
+            # src/ops/attention.cpp as "../../kernels/..."): next to mod/, as next to src/ in the tree (cmake/iso.cmake)
+            dst = os.path.join(d, *p.split("/"))
+        else:
+            dst = os.path.join(d, "test" if kind.startswith("test") else "mod", *staged(p).split("/"))
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         shutil.copyfile(os.path.join(root, p), dst)
         if kind in out:

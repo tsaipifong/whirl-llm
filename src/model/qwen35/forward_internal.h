@@ -6,7 +6,7 @@
 
 #pragma once
 
-#include "whirl/model.h"
+#include "model/qwen35/context.h"  // qwen35::Context: the forward never sees class Model (arch025-lane2 N9 S3)
 
 #include "whirl/ops/attention.h"
 #include "whirl/ops/gdn.h"

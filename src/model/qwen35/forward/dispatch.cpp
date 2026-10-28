@@ -8,14 +8,14 @@
 
 namespace whirl::qwen35 {
 
-void Model::mark(OpClass cls) {
+void Context::mark(OpClass cls) {
     if (prof) prof->record(stream, cls);
 }
 
 // int8 GEMV of the matrices ws (same type and ncols) on input x (n tokens) into ys. The kernel and grid come from
 // ops::chooseGemvTile / chooseGemvWide (K-1); here the input is quantized and the arguments are built. Per-row
 // arithmetic is that of the single launch (class q8_row).
-void Model::gemvLaunch(std::span<const Mat> ws, DevPtr xin, std::span<const DevPtr> ys, u32 n, i32 acc) {
+void Context::gemvLaunch(std::span<const Mat> ws, DevPtr xin, std::span<const DevPtr> ys, u32 n, i32 acc) {
     const Mat& w = ws[0];
     if (xq_src != xin || xq_n != n) {
         const u32 cnt = n * w.ncols;
@@ -67,7 +67,7 @@ void Model::gemvLaunch(std::span<const Mat> ws, DevPtr xin, std::span<const DevP
 }
 
 // The int8 GEMV launches for n <= 16 tokens of xqp / xdp (already quantized): ops::chooseGemvTile's plan.
-void Model::gemvKernels(std::span<const Mat> ws, std::span<const DevPtr> ys, u32 n, i32 acc, DevPtr xqp, DevPtr xdp) {
+void Context::gemvKernels(std::span<const Mat> ws, std::span<const DevPtr> ys, u32 n, i32 acc, DevPtr xqp, DevPtr xdp) {
     ops::MatShape sh[3];
     for (std::size_t si = 0; si < ws.size(); ++si) sh[si] = matShape(ws[si]);
     const ops::GemvTune tn{&gemv_r, &gemv_w, &gemv_w_head, nf().gv_nmax};
@@ -97,7 +97,7 @@ void Model::gemvKernels(std::span<const Mat> ws, std::span<const DevPtr> ys, u32
 
 // Matmuls (no accumulate) of ws on the same input into ys. On the int8 GEMV
 // path the matrices of one type run as one grouped launch (bitwise the same).
-void Model::matmulGroup(std::span<const Mat> ws, DevPtr xin, std::span<const DevPtr> ys, u32 n) {
+void Context::matmulGroup(std::span<const Mat> ws, DevPtr xin, std::span<const DevPtr> ys, u32 n) {
     const bool ok = nf().gv_group && k.gv_grp && n <= gvMax() && !nf().float_gemv && ops::preciseAllows(ops::BitClass::q8_row, nf().prec_dec, n, gvMax());
     bool done[3] = {false, false, false};
     for (std::size_t i = 0; i < ws.size(); ++i) {
@@ -130,7 +130,7 @@ void Model::matmulGroup(std::span<const Mat> ws, DevPtr xin, std::span<const Dev
 }
 
 // y[t][:] (+)= W x[t][:] for n tokens: GEMV for small n, tiled GEMM otherwise.
-void Model::matmul(const Mat& w, DevPtr xin, DevPtr y, u32 n, bool accumulate) {
+void Context::matmul(const Mat& w, DevPtr xin, DevPtr y, u32 n, bool accumulate) {
     const i32 acc = accumulate ? 1 : 0;
     const i32 ncols = I(w.ncols);
     const i32 nrows = I(w.nrows);
@@ -189,7 +189,7 @@ void Model::matmul(const Mat& w, DevPtr xin, DevPtr y, u32 n, bool accumulate) {
 
 // The f16-activation GEMM of matmul: y[t][:] (+)= W x16in[t][:] (x16in: n rows of w.ncols f16; not registered in
 // the x16 cache). The kernel, the optional dequant into w16 and the grids come from ops::chooseGemmF16 (K-2).
-void Model::gemmF16(const Mat& w, DevPtr x16in, DevPtr y, u32 n, i32 acc) {
+void Context::gemmF16(const Mat& w, DevPtr x16in, DevPtr y, u32 n, i32 acc) {
     const ops::GemmPlan p = ops::chooseGemmF16(matShape(w), n, w.tune[tuneBucket(n)], gemmFlags(), k);
     const i32 ncols = I(w.ncols);
     const i32 nrows = I(w.nrows);
@@ -222,7 +222,7 @@ void Model::gemmF16(const Mat& w, DevPtr x16in, DevPtr y, u32 n, i32 acc) {
 // the f16 GEMM flags (precise rows, f16 outputs, the WHIRL_PREC_GEMVH / WHIRL_PREC_GS experiments, the profile's
 // precise-decode geometry). The two switches are Model members since arch025-F7 (config::forwardEnv at the load;
 // were function-local statics read at the first call).
-ops::GemmFlags Model::gemmFlags() const {
+ops::GemmFlags Context::gemmFlags() const {
     ops::GemmFlags f;
     f.prec_dec = nf().prec_dec;
     f.out_h16 = out_h16;
@@ -240,7 +240,7 @@ ops::GemmFlags Model::gemmFlags() const {
 // Every fp8 activation producer writes the fragment-tiled layout and the fp8
 // GEMMs run gemm8t (only when the whole kernel set is present).
 // arch025-N2b: a pure predicate (numerics::Target::k_gemm8t); numerics::plan sets Flags::g8t (was set here)
-bool Model::hasTiledFp8() const {
+bool Context::hasTiledFp8() const {
     for (std::size_t ci = 0; ci < gemm8t_cfgs.size(); ++ci)
         if (k.gemm8t[ci] == nullptr || k.gemm8th[ci] == nullptr) return false;
     if (k.qact_fp8t == nullptr || k.rmsnorm_x8t == nullptr || k.silu_mul_x8t == nullptr || k.silu_mul_x8ht == nullptr ||
@@ -249,7 +249,7 @@ bool Model::hasTiledFp8() const {
     return true;
 }
 
-void Model::rmsnorm(DevPtr xin, DevPtr w, DevPtr out, u32 n, u32 count, u32 in_stride, u32 out_stride) {
+void Context::rmsnorm(DevPtr xin, DevPtr w, DevPtr out, u32 n, u32 count, u32 in_stride, u32 out_stride) {
     xq_src = 0;
     x16_src = 0;
     hip::launch(k.rmsnorm, D(count), D(256), 0, stream, xin, w, out, I(n), I(in_stride), I(out_stride), cfg.eps);
@@ -268,7 +268,7 @@ struct ConsumerShapes {
 };
 }  // namespace
 
-ops::H16Tune Model::h16Tune() const {
+ops::H16Tune Context::h16Tune() const {
     ops::H16Tune h;
     h.from_candidates = device::profile(arch).h16_from_candidates;
     h.tune_mask = tune_mask;
@@ -277,9 +277,9 @@ ops::H16Tune Model::h16Tune() const {
     return h;
 }
 
-bool Model::h16Out(const Mat& w, u32 n, std::uint8_t cls) const { return ops::chooseH16Out(matShape(w), w.tune, n, cls, matmulFlags(), h16Tune(), k); }
+bool Context::h16Out(const Mat& w, u32 n, std::uint8_t cls) const { return ops::chooseH16Out(matShape(w), w.tune, n, cls, matmulFlags(), h16Tune(), k); }
 
-std::optional<ops::ActIn> Model::actCommon(std::span<const Mat> consumers, u32 n, std::uint8_t cls) const {
+std::optional<ops::ActIn> Context::actCommon(std::span<const Mat> consumers, u32 n, std::uint8_t cls) const {
     if (consumers.size() > 4) throw ModelError("ActCommonConsumers");
     ConsumerShapes cs;
     for (const Mat& w : consumers) cs.s[cs.n++] = matShape(w);
@@ -290,7 +290,7 @@ std::optional<ops::ActIn> Model::actCommon(std::span<const Mat> consumers, u32 n
 // they all take the same GEMM input form, the norm writes that form (x16, +
 // sx8 for fp8) directly and `out` is left unwritten (x16 is registered as its
 // conversion); else a plain rmsnorm into out.
-void Model::rmsnormIn(DevPtr xin, DevPtr w, DevPtr out, u32 n, std::span<const Mat> consumers, std::uint8_t cls) {
+void Context::rmsnormIn(DevPtr xin, DevPtr w, DevPtr out, u32 n, std::span<const Mat> consumers, std::uint8_t cls) {
     const u32 E = cfg.n_embd;
     if (consumers.size() > 4) throw ModelError("RmsnormInConsumers");
     ConsumerShapes cs;
@@ -310,7 +310,7 @@ void Model::rmsnormIn(DevPtr xin, DevPtr w, DevPtr out, u32 n, std::span<const M
 
 // n>16 GDN prefill with qkv / gate on fp8 and contiguous [beta; alpha] on f16:
 // one rmsnorm_x8h16(t) writes both inputs (WHIRL_GDN_IN2=0 off).
-bool Model::gdnIn2(const GdnW& g, u32 n) const {
+bool Context::gdnIn2(const GdnW& g, u32 n) const {
     ops::GdnIn2Problem p;
     p.qkv = matShape(g.qkv);
     p.gate = matShape(g.gate);
@@ -331,7 +331,7 @@ bool Model::gdnIn2(const GdnW& g, u32 n) const {
 
 // The matmul path of n rows of w: ops::chooseMatmulPath (K-1; the precise rule lives there). f32 / f16 weights
 // (no int8 GEMV) at n = 2..gvMax() run the f32-activation GEMV instances, bitwise == n = 1 per token (C-13).
-ops::MatShape Model::matShape(const Mat& w) const {
+ops::MatShape Context::matShape(const Mat& w) const {
     ops::MatShape s;
     s.ty = w.ty;
     s.nrows = w.nrows;
@@ -342,7 +342,7 @@ ops::MatShape Model::matShape(const Mat& w) const {
     return s;
 }
 
-ops::MatmulFlags Model::matmulFlags() const {
+ops::MatmulFlags Context::matmulFlags() const {
     ops::MatmulFlags f;
     f.prec_dec = nf().prec_dec;
     f.float_gemv = nf().float_gemv;
@@ -356,7 +356,7 @@ ops::MatmulFlags Model::matmulFlags() const {
 // Precise decode needs, for every weight type of the model, the f16 GEMM on the quantized
 // bytes (gemm_c / gemms) and, for MoE experts, the grouped f16 expert GEMMs. Returns the
 // first missing piece ("" = complete).
-std::string Model::precMissing() const {
+std::string Context::precMissing() const {
     if (k.f32_to_f16 == nullptr) return "f32_to_f16";
     auto tyName = [](GgmlType t) { return std::string(gguf::typeName(t)); };
     auto gemmOk = [&](const Mat& w) {
@@ -395,9 +395,9 @@ std::string Model::precMissing() const {
 }
 
 // Decode fusions apply to small batches on the int8 GEMV path (ops::fusedRows).
-bool Model::fused(u32 n) const { return ops::fusedRows(n, small_max, nf().float_gemv, nf().no_fuse); }
+bool Context::fused(u32 n) const { return ops::fusedRows(n, small_max, nf().float_gemv, nf().no_fuse); }
 
-bool Model::fusedDecode() const {
+bool Context::fusedDecode() const {
     if (!fused(max_small_batch)) return false;
     for (const Layer& L : layers) {
         if (L.kind != LayerKind::gdn) continue;
@@ -409,13 +409,13 @@ bool Model::fusedDecode() const {
 
 // MoE: balance / fast with WHIRL_MOE_WIDE=1 only (17..32 rows on the int8 decode experts, see
 // moeBlock); precise MoE keeps 16-row verifies (ops::wideAllowed)
-bool Model::wideCapable() const {
+bool Context::wideCapable() const {
     return ops::wideAllowed(nf().wide_verify, cfg.moe, nf().moe_wide, nf().prec_dec) && fusedDecode() && ops::wideKernels(k);
 }
 
-bool Model::wideOk() const { return wideCapable() && gdn_replay; }
+bool Context::wideOk() const { return wideCapable() && gdn_replay; }
 
-void Model::rmsnormQ8(DevPtr xin, DevPtr w, DevPtr out, u32 n) {
+void Context::rmsnormQ8(DevPtr xin, DevPtr w, DevPtr out, u32 n) {
     hip::launch(k.rmsnorm_q8, D(n), D(1024), 0, stream, xin, w, out, xq, xd, I(cfg.n_embd), cfg.eps);
     xq_src = out;
     xq_n = n;
@@ -423,14 +423,14 @@ void Model::rmsnormQ8(DevPtr xin, DevPtr w, DevPtr out, u32 n) {
     mark(OpClass::norm);
 }
 
-void Model::elementwise(hip::Function f, DevPtr a, DevPtr b, u32 n) {
+void Context::elementwise(hip::Function f, DevPtr a, DevPtr b, u32 n) {
     xq_src = 0;
     x16_src = 0;
     hip::launch(f, D((n + 255) / 256), D(256), 0, stream, a, b, I(n));
     mark(OpClass::misc);
 }
 
-void Model::step(u32 token, u32 pos) {
+void Context::step(u32 token, u32 pos) {
     const u32 one[1] = {token};
     forward(one, pos);
 }

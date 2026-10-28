@@ -1607,6 +1607,22 @@ void testNetRecvError() {
         int i = 0;
         for (const int err : {net::kErrConnReset, net::kErrTimedOut}) {
             ++i;
+            // arch025-lane2 leg 3: the injection hits the next recv on ANY tracked server connection. The previous
+            // round's /health connection (C{2i-2}) still runs its graceful-close drain (recv(4096,0), then
+            // closesocket(); see net_call_table) after the client already has the response, so arming before that
+            // connection is closed sometimes let its drain recv take the failure and C{2i-1} was answered (gate s3
+            // and int4: ~1 in 60 runs). Wait (bounded) until the server closed it.
+            if (i > 1 && std::getenv("WHIRL_TEST_NO_DRAIN_WAIT") == nullptr) {
+                const std::string prev = std::format("C{}", 2 * i - 2);
+                bool prev_closed = false;
+                int polls = 0;
+                for (const double tw = nowSeconds(); !prev_closed && nowSeconds() - tw < 2.0; ++polls) {
+                    for (const auto& c : netf::snapshot()) prev_closed = prev_closed || (c.tag == prev && c.text == "closesocket()");
+                    if (!prev_closed) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                }
+                CHECK(prev_closed);
+                if (g_verbose) std::printf("  %s closed by the server after %d poll(s)\n", prev.c_str(), polls);
+            }
             netf::failRecv(1, err);
             const auto s = test::rawConnect("127.0.0.1", srv.port());
             CHECK(s != test::kNoSock);
@@ -1625,6 +1641,9 @@ void testNetRecvError() {
             bool seen = false;
             for (const auto& c : netf::snapshot()) seen = seen || (c.tag == tag && c.text == std::format("recv(65536,0)=fail({})", err));
             CHECK(seen);
+            if (!seen)
+                for (const auto& c : netf::snapshot())
+                    if (c.text.find("=fail(") != std::string::npos) std::printf("  injected failure taken by %s: %s\n", c.tag.c_str(), c.text.c_str());
             // the next request (connection 2i) is answered
             const auto h = srv.get("/health");
             CHECK_EQ(h.status, 200);

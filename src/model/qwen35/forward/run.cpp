@@ -7,7 +7,7 @@
 
 namespace whirl::qwen35 {
 
-void Model::forward(std::span<const u32> tokens, u32 pos0) {
+void Context::forward(std::span<const u32> tokens, u32 pos0) {
     const u32 n = static_cast<u32>(tokens.size());
     if (n == 0 || n > max_batch) throw ModelError("BatchTooLarge");
     xq_src = 0;
@@ -21,7 +21,7 @@ void Model::forward(std::span<const u32> tokens, u32 pos0) {
 // Decode one token entirely from device state: the input token is ids[0] and
 // its position pos_buf[0] (both written by the previous argmax), so the launch
 // sequence is identical every step and never waits on the host.
-void Model::decodeStep() {
+void Context::decodeStep() {
     if (!nf().use_graph || prof != nullptr) return decodeStepLaunches();
     if (!decode_graph) {
         hip::Graph::beginCapture(stream);
@@ -39,7 +39,7 @@ void Model::decodeStep() {
     decode_graph->launch(stream);
 }
 
-void Model::decodeStepLaunches() {
+void Context::decodeStepLaunches() {
     // device positions (argmax advances pos_buf): the host row positions are not known here
     row_n = 0;
     // vision: device positions (argmax advances pos_buf): RoPE position = pos - delta
@@ -54,7 +54,7 @@ void Model::decodeStepLaunches() {
 }
 
 // Seed device state for decodeStep after a prefill of n_past tokens.
-u32 Model::beginDecode(u32 n_past) {
+u32 Context::beginDecode(u32 n_past) {
     const i32 p = static_cast<i32>(n_past);
     hip::upload(pos_buf, &p, 4);
     hip::launch(k.argmax, D(1), D(1024), 0, stream, logits, I(cfg.n_vocab), out_tok, ids, pos_buf, i32(0));
@@ -63,7 +63,7 @@ u32 Model::beginDecode(u32 n_past) {
     return static_cast<u32>(out);
 }
 
-void Model::run(u32 n) {
+void Context::run(u32 n) {
     if (gdn_replay && bplan == nullptr) {
         if (!psegs.empty()) {
             for (const PRows& ps : psegs) commitSeq(ps.seq);
@@ -139,7 +139,7 @@ void Model::run(u32 n) {
 // vision: lent prefill scratch, multi-section RoPE rows and image embedding rows
 // (ported from the research prototype, item VIS)
 
-std::size_t Model::lendScratch(std::span<std::array<u64, 2>> out) const {
+std::size_t Context::lendScratch(std::span<std::array<u64, 2>> out) const {
     const u64 B = max_batch;
     const u64 f4 = 4;
     const u64 in_max = std::max<u64>(std::max<u64>(cfg.n_ff, 2ull * cfg.n_embd), std::max<u64>(cfg.d_inner, static_cast<u64>(cfg.n_head) * cfg.head_dim));

@@ -9,6 +9,7 @@
 
 #pragma once
 
+#include "cache/cache_model.h"  // CacheModel: the calls of the cache side (arch025-lane2 D2.2)
 #include "device/backend.h"
 #include "model/qwen35/kv.h"  // qwen35::KvArray (arch025-M2)
 #include "vision_iface.h"
@@ -32,31 +33,24 @@ using qwen35::VSeg;
 
 // One KV pool array (every attention layer, then the MTP layer): base
 // address and bytes per token row. Page p of the array is at
-// base + p * kv_page * row. (arch025-M2: the model's qwen35::KvArray, src/model/qwen35/kv.h)
+// base + p * kv_page * row. (arch025-M2: the model's qwen35::KvArray, src/model/qwen35/kv.h; also declared by
+// cache/cache_model.h)
 using KvArr = qwen35::KvArray;
 
-class ServerModel {
+// cfg, stream, convState / ssmState, convBytes / ssmBytes, curSeq, seqPages, commitSeq, dropPending, mapPages:
+// CacheModel (src/cache/cache_model.h, arch025-lane2 D2.2), the part the cache side (CkptStore, PagePool, TierBridge) sees.
+class ServerModel : public CacheModel {
 public:
     virtual ~ServerModel() = default;
-
-    virtual const qwen35::Config& cfg() const = 0;
-    virtual device::Stream stream() const = 0;
 
     // ---- device buffers (see Model members of the same names)
     virtual DevPtr logits() const = 0;   // row r at logits + r * n_vocab * 4
     virtual DevPtr hn() const = 0;       // normed trunk hidden rows (n_embd f32 each)
     virtual DevPtr mtpH() const = 0;     // MTP hidden rows of the current sequence
     virtual DevPtr seqHid(std::uint32_t s) const = 0;
-    // per-layer recurrent state of the current sequence (0 = attention layer)
-    virtual std::span<const DevPtr> convState() const = 0;
-    virtual std::span<const DevPtr> ssmState() const = 0;
-    virtual std::uint64_t convBytes() const = 0;
-    virtual std::uint64_t ssmBytes() const = 0;
-    virtual std::uint32_t curSeq() const = 0;
 
     // ---- sizes and switches
     virtual std::uint32_t poolPages() const = 0;
-    virtual std::uint32_t seqPages() const = 0;
     virtual std::uint32_t maxBatch() const = 0;
     virtual std::uint32_t snapSets() const = 0;
     // DeltaNet snapshot sets for the verify without replay (at least n, at most gdn_max_snap)
@@ -72,11 +66,8 @@ public:
 
     // ---- sequences
     virtual void selectSeq(std::uint32_t s) = 0;
-    virtual void commitSeq(std::uint32_t s) = 0;
-    virtual void dropPending(std::uint32_t s) = 0;
     virtual void setPending(std::uint32_t s, std::uint32_t rows) = 0;
     virtual void restoreSeqSnapshot(std::uint32_t s, std::uint32_t set) = 0;
-    virtual void mapPages(std::uint32_t s, std::uint32_t first, std::span<const std::int32_t> phys) = 0;
     virtual void reset() = 0;
 
     // ---- forward

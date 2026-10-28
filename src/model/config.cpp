@@ -23,20 +23,6 @@ namespace whirl::qwen35 {
 
 static_assert(n_choices == 2 * 24 + 8);
 
-std::size_t tuneBucket(std::uint32_t n) {
-    if (n <= 32) return 3;
-    if (n <= 48) return 4;
-    if (n <= 64) return 5;
-    if (n <= 96) return 6;
-    if (n <= 128) return 2;
-    if (n <= 192) return 7;
-    if (n <= 256) return 8;
-    if (n <= 384) return 9;
-    if (n <= 768) return 0;
-    if (n <= tune_small_max) return 10;
-    return 1;
-}
-
 static_assert(std::tuple_size_v<GemvR> == std::tuple_size_v<decltype(device::Profile::gemv_r)>);
 GemvR defaultGemvR() { return device::profile(device::k_default_arch).gemv_r; }
 
@@ -60,11 +46,6 @@ GemvR defaultGemvWHead() {
     GemvR t{};
     for (std::uint32_t nt = 6; nt <= max_small_batch; ++nt) t[nt] = 2;
     return t;
-}
-
-const char* opClassName(OpClass c) {
-    static const char* names[] = {"embed", "norm", "quant", "matmul", "attn", "gdn_prep", "gdn_rec", "gdn_norm", "misc", "head"};
-    return names[static_cast<int>(c)];
 }
 
 Config Config::fromGguf(const gguf::File& f) {

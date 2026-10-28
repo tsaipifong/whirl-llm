@@ -21,7 +21,7 @@ ops::GdnShape gdnShapeOf(const Config& c) {
 }
 }  // namespace
 
-GdnSegs Model::gdnSegsBatch(const BatchPlan& bp, std::size_t i, bool conv) const {
+GdnSegs Context::gdnSegsBatch(const BatchPlan& bp, std::size_t i, bool conv) const {
     GdnSegs segs;
     i32 row = 0;
     for (std::size_t kk = 0; kk < bp.segs.size(); ++kk) {
@@ -45,7 +45,7 @@ GdnSegs Model::gdnSegsBatch(const BatchPlan& bp, std::size_t i, bool conv) const
     return segs;
 }
 
-GdnSegs Model::gdnSegsSingle(std::size_t i, bool conv, u32 n) const {
+GdnSegs Context::gdnSegsSingle(std::size_t i, bool conv, u32 n) const {
     GdnSegs segs;
     segs.s[0].state = conv ? conv_state[i] : ssm_state[i];
     segs.s[0].row0 = 0;
@@ -56,7 +56,7 @@ GdnSegs Model::gdnSegsSingle(std::size_t i, bool conv, u32 n) const {
 
 // Chunked (C = 64) DeltaNet prefill recurrence over n >= 64 rows: the f32 prep
 // + scan pair, or (gdn_wmma) the f16-WMMA pair.
-void Model::gdnChunked(std::size_t i, DevPtr conv_o, DevPtr alpha_b, DevPtr beta_b, DevPtr out, u32 n, float scale) {
+void Context::gdnChunked(std::size_t i, DevPtr conv_o, DevPtr alpha_b, DevPtr beta_b, DevPtr out, u32 n, float scale) {
     const u32 ch = cfg.convCh();
     const u32 n_chunks = (n + 63) / 64;
     ops::GdnChunkProblem cp;
@@ -95,7 +95,7 @@ void Model::gdnChunked(std::size_t i, DevPtr conv_o, DevPtr alpha_b, DevPtr beta
                 I(cfg.n_k_heads), I(cfg.n_v_heads), I(ch), scale);
 }
 
-void Model::gdnScan(std::size_t i, DevPtr conv_o, DevPtr alpha_b, DevPtr beta_b, DevPtr out, u32 n, float scale) {
+void Context::gdnScan(std::size_t i, DevPtr conv_o, DevPtr alpha_b, DevPtr beta_b, DevPtr out, u32 n, float scale) {
     const u32 ch = cfg.convCh();
     if (ops::chooseGdnScan(nf().gdn_chunked, n, gdnShapeOf(cfg)) == ops::GdnScan::chunked) {
         gdnChunked(i, conv_o, alpha_b, beta_b, out, n, scale);
@@ -107,7 +107,7 @@ void Model::gdnScan(std::size_t i, DevPtr conv_o, DevPtr alpha_b, DevPtr beta_b,
 
 // The DeltaNet (gated delta rule) layer body of Model::run (arch025-F3, extract-method of run's non-attention
 // branch; g = layers[i].gdn, gdn_in2 = run's flag that x16b holds this layer's normed input as f16 for [beta; alpha]).
-void Model::gdnLayer(std::size_t i, const GdnW& g, u32 n, bool gdn_in2) {
+void Context::gdnLayer(std::size_t i, const GdnW& g, u32 n, bool gdn_in2) {
     const u32 ch = cfg.convCh();
     const ops::GdnShape gs = gdnShapeOf(cfg);
     ops::GdnBaProblem bap;

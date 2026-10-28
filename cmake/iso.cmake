@@ -64,7 +64,11 @@ function(whirl_iso_module _list)
     list(GET _kp 0 _kind)
     list(GET _kp 1 _path)
     string(REGEX REPLACE "^(src|include|tests)/" "" _rel "${_path}")
-    if(_kind MATCHES "^test")
+    if(NOT _path MATCHES "^(src|include|tests)/")
+      # arch025-lane2 leg 3: a file outside src/ include/ tests/ (kernels/gfx1151/attn_ws4_index.h, which
+      # src/ops/attention.cpp includes as "../../kernels/...") sits next to mod/ as it sits next to src/ in the tree
+      set(_dst ${_iso}/${_path})
+    elseif(_kind MATCHES "^test")
       set(_dst ${_iso}/test/${_rel})
     else()
       set(_dst ${_iso}/mod/${_rel})

@@ -1,12 +1,11 @@
 // qwen35::TuneTable (src/model/qwen35/tune_table.h): the tune cache text (tune4-*.txt) as pure functions over the
-// matrices, and Model::writeTune / readTune over every layer's tuneMats (arch025-M3, R-8c).
+// matrices (arch025-M3, R-8c). Model::writeTune / readTune over every layer's tuneMats: src/model/qwen35/model_tune.cpp
+// (arch025-lane2: moved verbatim, so this file no longer includes whirl/model.h).
 // SPDX-License-Identifier: Apache-2.0
 // Moved from src/model/tune.cpp: the loops of writeTune / readTune are the same text over the flattened matrix list
 // (the layers' tuneMats in order), so the lines, their order and the stale-cache partial apply are unchanged.
 
 #include "model/qwen35/tune_table.h"
-
-#include "whirl/model.h"
 
 #include <cstdarg>
 #include <cstdio>
@@ -78,22 +77,6 @@ bool applyTuneText(std::string_view text, std::size_t n_buckets, std::span<Mat* 
             m->tune[b] = it->second;
         }
     return true;
-}
-
-std::string Model::writeTune() const {
-    std::vector<Mat*> mats;
-    for (const Layer& L : layers) {
-        Layer& LL = const_cast<Layer&>(L);
-        for (Mat* m : const_cast<Model*>(this)->tuneMats(LL)) mats.push_back(m);
-    }
-    return tuneText(mats);
-}
-
-bool Model::readTune(std::string_view text, std::size_t n_buckets) {
-    std::vector<Mat*> mats;
-    for (Layer& L : layers)
-        for (Mat* m : tuneMats(L)) mats.push_back(m);
-    return applyTuneText(text, n_buckets, mats);
 }
 
 }  // namespace whirl::qwen35

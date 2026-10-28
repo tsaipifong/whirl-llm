@@ -6,26 +6,26 @@
 
 namespace whirl::qwen35 {
 
-bool Model::visAny() const {
+bool Context::visAny() const {
     if (vis_single != nullptr) return true;
     for (const VisMap* v : vis_seq)
         if (v != nullptr) return true;
     return false;
 }
 
-const VisMap* Model::visOf(u32 seq) const {
+const VisMap* Context::visOf(u32 seq) const {
     const VisMap* vm = seqs.empty() ? vis_single : vis_seq[seq];
     return vm != nullptr && vm->active() ? vm : nullptr;
 }
 
-void Model::visBegin() {
+void Context::visBegin() {
     mrope_on = false;
     rpos_rows = false;
     rdelta = 0;
     n_inj = 0;
 }
 
-void Model::visEnsure() {
+void Context::visEnsure() {
     if (rpos_buf != 0) return;
     if (rpos_host.empty()) rpos_host.assign(static_cast<std::size_t>(max_batch) * 3, 0);
     // (not in `allocations`: visRelease frees it again once no sequence has images)
@@ -33,7 +33,7 @@ void Model::visEnsure() {
     rpos_buf = rpos_own.get();
 }
 
-void Model::visRelease() {
+void Context::visRelease() {
     if (rpos_buf == 0 || visAny()) return;
     try {
         hip::sync();
@@ -44,7 +44,7 @@ void Model::visRelease() {
 }
 
 // row r of the next forward is cache position pos of a sequence with image map vm
-void Model::visRow(const VisMap* vm, u32 r, u32 pos) {
+void Context::visRow(const VisMap* vm, u32 r, u32 pos) {
     const std::array<i32, 3> rp = vm != nullptr ? vm->rope(pos) : std::array<i32, 3>{static_cast<i32>(pos), static_cast<i32>(pos), static_cast<i32>(pos)};
     std::copy(rp.begin(), rp.end(), rpos_host.begin() + 3 * static_cast<std::size_t>(r));
     if (vm == nullptr) return;
@@ -65,7 +65,7 @@ void Model::visRow(const VisMap* vm, u32 r, u32 pos) {
 }
 
 // upload the rows' RoPE positions; mrope_on for the next forward
-void Model::visCommit(u32 n) {
+void Context::visCommit(u32 n) {
     if (k.attn_prep_m == nullptr) throw ModelError("MropeUnsupported");
     if (n <= max_small_batch && k.set_rpos != nullptr) {
         struct Rpos16 {
@@ -82,7 +82,7 @@ void Model::visCommit(u32 n) {
 }
 
 // rows 0 .. n-1 = positions pos0 .. of the current sequence
-void Model::visRowsCur(u32 n, u32 pos0) {
+void Context::visRowsCur(u32 n, u32 pos0) {
     visBegin();
     if (!visAny()) return;
     const VisMap* vm = visOf(cur_seq);
@@ -93,7 +93,7 @@ void Model::visRowsCur(u32 n, u32 pos0) {
 }
 
 // copy the image rows recorded by visRow into x (after the token lookup)
-void Model::injectRows() {
+void Context::injectRows() {
     const u64 E = cfg.n_embd;
     // the sources are pageable host memory: such a copy is not reliably ordered after
     // the work already queued on the stream (which may still read x), so drain first
