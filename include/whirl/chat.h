@@ -75,6 +75,11 @@
 
 namespace whirl::chat {
 
+// The text one image stands for in a prompt (an image content part, and one per --image in `whirl chat`): one copy for
+// the template rendering and the CLI (arch025 lane 1 leg 7, the vision CLI / server comparison; llama.cpp
+// mtmd_default_marker is one string for mtmd-cli and the server too).
+inline constexpr std::string_view k_image_placeholder = "<|vision_start|><|image_pad|><|vision_end|>";
+
 enum class TemplateKind { a, b, b_pyargs };
 
 // `a` if the template text mentions reasoning_effort; otherwise `b_pyargs` if

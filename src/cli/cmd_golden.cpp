@@ -157,7 +157,7 @@ int goldenPair(const Args& a, const gguf::File& f, const Tok& tok, u32 n_dec) {
         applyDraftVocab(m, tok.t);
     }
     applyRuntimeEnv(m);
-    m.gdn_replay = envFlag("GDN_REPLAY", true);  // the server default
+    m.gdn_replay = whirl::settings::gdnReplay();  // the server default (shared reader, arch025-N15 rest)
     m.setupSeqs(2, slot_ctx);
     m.allocKvPool(2 * slot_ctx);
     for (u32 s = 0; s < 2; ++s) {

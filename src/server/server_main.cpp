@@ -519,8 +519,8 @@ void buildModel(Options& opt, const numerics::Request& nreq, const char* lad, Lo
                 } catch (const std::exception&) {
                 }
             }
-            d.gdn_replay = settings::envFlag("GDN_REPLAY", true);
-            d.ngram = settings::envFlag("NGRAM", true);
+            d.gdn_replay = settings::gdnReplay();
+            d.ngram = settings::ngram(true);
             fin.dflash = std::move(d);
         }
         fin.nreq = nreq;
@@ -731,25 +731,12 @@ void buildModel(Options& opt, const numerics::Request& nreq, const char* lad, Lo
         logW("WHIRL_GEMV_R / WHIRL_GEMV_W / WHIRL_GEMV_WH are not supported by whirl-server (ignored)");
     const bool& use_mtp = b.use_mtp = model.mtp.has_value() && settings::mtp();
     const qwen35::MtpDefaults& def = b.def = qwen35::mtpDefaults(model.cfg.moe, model.arch);
-    std::optional<std::uint32_t> drafts_env;
-    if (auto v = settings::envGet("MTP_DRAFTS")) {
-        std::uint32_t d = def.drafts;
-        try {
-            d = static_cast<std::uint32_t>(std::stoul(*v));
-        } catch (const std::exception&) {
-        }
-        drafts_env = std::clamp(d, 1u, qwen35::max_drafts);
-    }
+    // (MTP_DRAFTS / MTP_PMIN / MTP_NMIN: the readers shared with the CLI's mtpOpts, config.settings, arch025-N15 rest)
+    const std::optional<std::uint32_t> drafts_env = settings::mtpDrafts(def.drafts, qwen35::max_drafts);
     const std::optional<std::uint32_t> drafts_user = opt.mtp_drafts ? opt.mtp_drafts : drafts_env;
     const std::uint32_t& drafts = b.drafts = drafts_user.value_or(def.drafts);
-    float& p_min = b.p_min = def.p_min;
-    if (auto v = settings::envGet("MTP_PMIN")) {
-        try {
-            p_min = std::stof(*v);
-        } catch (const std::exception&) {
-        }
-    }
-    const std::uint32_t& n_min = b.n_min = settings::envU32("MTP_NMIN", 0, settingsWarn);
+    float& p_min = b.p_min = settings::mtpPmin(def.p_min);
+    const std::uint32_t& n_min = b.n_min = settings::mtpNmin(0, settingsWarn);
     const auto& adapt_env = b.adapt_env = settings::envGet("MTP_ADAPT");
     std::uint32_t& adapt = b.adapt = def.adapt;
     if (adapt_env) adapt = settings::parseMtpAdapt(adapt_env).adapt;  // (the rule shared with the CLI, arch025-N15)
@@ -763,7 +750,7 @@ void buildModel(Options& opt, const numerics::Request& nreq, const char* lad, Lo
     if (bd_env) batch_drafts = qwen35::batchDraftsFrom(batch_drafts, *bd_env);
     // MTP block as Q4_K from Q6_K or Q8_0 (drafts only; WHIRL_MTP_Q4=0 keeps the file's types)
     if (use_mtp && settings::mtpQ4()) model.requantMtpQ4();
-    if (use_mtp && !settings::envGet("MTP_FULLHEAD")) {
+    if (use_mtp && !settings::mtpFullHead()) {
         const bool q4 = settings::draftHeadQ4();
         model.buildDraftHeadEx(q4 ? qwen35::Model::DraftHeadKind::q4 : qwen35::Model::DraftHeadKind::d2);
         applyDraftVocab(model, tok, draft_vocab);
@@ -881,7 +868,7 @@ private:
 
 void ServerRun::planSlots() {
     // slots: KV-cache regions, recurrent state, MTP hidden rows
-    model.gdn_replay = settings::envFlag("GDN_REPLAY", true);
+    model.gdn_replay = settings::gdnReplay();
     // REVIEW-0221 C3: the pre-load estimate can be off (it lowered --parallel 16 -> 15 for a 16384-token request and the
     // real pool held 13312). With the weights and buffers loaded, measure the VRAM usable now (same rule as the pool
     // sizing below) and lower --parallel again, one slot at a time, until one request of min(ctx-per-slot, 16384)
@@ -944,7 +931,7 @@ void ServerRun::planSlots() {
     ssi.drafts = lm.drafts;
     ssi.user_batch_drafts = lm.bd_env.has_value();
     ssi.dfl_par = lm.dfl_par;
-    ssi.ngram = settings::envFlag("NGRAM", true);
+    ssi.ngram = settings::ngram(true);
     ssi.snap_sets_env = settings::envGet("SNAP_SETS");
     slots.emplace(startup::setupSlots(model, *lm.ops, ssi, lm.batch_drafts));
     lm.batch_drafts = slots->batch_drafts;
@@ -1002,12 +989,12 @@ void ServerRun::makeEngine() {
     eo.cold_resume = settings::envFlag("COLD_RESUME", nreq.mode == numerics::Mode::precise);
     eo.seg_prefill = settings::envFlag("SEG_PREFILL", true);
     eo.timing_reset = settings::envFlag("TIMING_RESET", true);
-    eo.ngram = settings::envFlag("NGRAM", true);
-    eo.ngram_min = settings::envU32("NGRAM_MIN", lm.def.ngram_min, settingsWarn);
-    eo.ngram_slope = lm.def.ngram_slope;
-    if (auto v = settings::envGet("NGRAM_SLOPE")) eo.ngram_slope = std::strtof(v->c_str(), nullptr);
-    eo.ngram_max = settings::envU32("NGRAM_MAX", 0, settingsWarn);
-    eo.ngram_force = settings::envFlag("NGRAM_FORCE", false);
+    // (the n-gram readers shared with the CLI's mtpOpts, config.settings, arch025-N15 rest)
+    eo.ngram = settings::ngram(true);
+    eo.ngram_min = settings::ngramMin(lm.def.ngram_min, settingsWarn);
+    eo.ngram_slope = settings::ngramSlope(lm.def.ngram_slope);
+    eo.ngram_max = settings::ngramMax(0, settingsWarn);
+    eo.ngram_force = settings::ngramForce(false);
     // WHIRL_SLOT_DRAFTS: 0 / unset uniform, 1 marginal-gain swaps, 2 cost-model allocation
     if (auto v = settings::envGet("SLOT_DRAFTS")) eo.slot_drafts = *v == "2" ? 2u : (*v != "0" ? 1u : 0u);
     if (lm.use_dflash) {
@@ -1033,7 +1020,7 @@ void ServerRun::makeEngine() {
         logI("decode floor: >= {:.0f} tok/s per decoding request while others prefill (--decode-min-tps)", eo.decode_min_tps);
     else
         logI("decode floor: off (--decode-min-tps 0: prefill forwards are not limited)");
-    if (auto v = settings::envGet("PROFILE")) eo.profile = *v == "2" ? 2 : 1;
+    if (const std::uint32_t pf = settings::profile(); pf != 0) eo.profile = static_cast<int>(pf);  // (shared reader: 1, or 2 for "2")
     eo.sys_min = settings::sysMin(sys_min_default, settingsWarn);
     eo.kv_supersede = settings::envU32("KV_SUPERSEDE", 1, settingsWarn) != 0;
     // TIER-IDLE: hidden test override of the 300 s idle write delay (no CLI flag; 0: off)
@@ -1215,7 +1202,7 @@ void ServerRun::loadVisionEarly() {
         vis_load_taken = hip::localMemTaken(ml0, lm.ops->localMemSnap());
         vis_load_s = msSince(tl0) / 1000.0;
         vision::Mode vm = *vision::parseMode(opt.vis_mode);
-        if (auto x = settings::envGet("VIS_MODE")) vm = vision::parseMode(*x).value_or(vm);
+        if (auto x = settings::visMode()) vm = vision::parseMode(*x).value_or(vm);
         const bool resident = vm != vision::Mode::stream;  // auto: resident when it fits, which the reserve makes room for
         std::array<std::array<std::uint64_t, 2>, 16> raw{};
         const std::size_t n_lend = backend->lendScratch(raw);
@@ -1649,18 +1636,14 @@ void ServerRun::attachVision() {
             }
         }
         v.mode = *vision::parseMode(opt.vis_mode);
-        if (auto x = settings::envGet("VIS_MODE")) v.mode = vision::parseMode(*x).value_or(v.mode);
+        if (auto x = settings::visMode()) v.mode = vision::parseMode(*x).value_or(v.mode);
         VisionConfig vc;
         {
             const TokenId ve = tok.find("<|vision_end|>");
             vc.vision_end_id = ve < 0 ? 0 : static_cast<std::uint32_t>(ve);
         }
-        if (auto x = settings::envGet("VIS_CKPT_MIN")) {
-            try {
-                vc.ck_min = static_cast<std::uint32_t>(std::stoul(*x));
-            } catch (const std::exception&) {
-            }
-        }
+        // (the u32 rule shared with the CLI's image splits, config.settings, arch025-N15 rest; was std::stoul here)
+        vc.ck_min = settings::visCkptMin(settingsWarn).value_or(vc.ck_min);
         const TokenId pad = tok.find("<|image_pad|>");
         if (pad < 0) {
             logE("vision: the model's vocabulary has no <|image_pad|> token");
@@ -1680,7 +1663,7 @@ void ServerRun::attachVision() {
         }
         vc.cache_bytes = cache_mb << 20;
         vc.allow_files = opt.allow_local_images;
-        if (auto x = settings::envGet("VIS_DUMP")) vc.dump_prefix = *x;
+        if (auto x = settings::visDump()) vc.dump_prefix = *x;
         vis_srv = makeQwen35Vision(v, model);
         vc.vis = vis_srv.get();
         std::array<std::array<std::uint64_t, 2>, 16> raw{};

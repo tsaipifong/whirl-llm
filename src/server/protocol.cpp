@@ -15,39 +15,11 @@ namespace whirl::server {
 
 namespace {
 
-constexpr std::string_view kWs = " \t\r\n\x0b\x0c";
-
-const json::Value* getField(const json::Object& obj, std::string_view key) {
-    const json::Value* v = obj.find(key);
-    if (!v || v->isNull()) return nullptr;
-    return v;
-}
-
-// number field: nullopt when absent / null; throws RequestError(msg) when not a number
-std::optional<double> getNum(const json::Object& obj, std::string_view key, const char* msg) {
-    const json::Value* v = getField(obj, key);
-    if (!v) return std::nullopt;
-    switch (v->kind()) {
-        case json::Value::Kind::integer: return static_cast<double>(v->asInt());
-        case json::Value::Kind::number: return v->asDouble();
-        case json::Value::Kind::big_integer: return v->asDouble();
-        default: throw RequestError(msg);
-    }
-}
-
-std::optional<bool> getBool(const json::Object& obj, std::string_view key, const char* msg) {
-    const json::Value* v = getField(obj, key);
-    if (!v) return std::nullopt;
-    if (!v->isBool()) throw RequestError(msg);
-    return v->asBool();
-}
-
-const std::string* getStr(const json::Object& obj, std::string_view key) {
-    const json::Value* v = getField(obj, key);
-    if (!v || !v->isString()) return nullptr;
-    return &v->asString();
-}
-
+// getField / getNum / getBool / getStr: whirl/json_fields.h (one copy with chat_template.cpp, arch025-N6 lane 1 leg 7)
+using chat::getBool;
+using chat::getField;
+using chat::getNum;
+using chat::getStr;
 
 std::optional<std::string_view> toolParamType(const json::Array& tools, std::string_view fname, std::string_view pname) {
     for (const json::Value& t : tools) {
@@ -71,17 +43,7 @@ std::optional<std::string_view> toolParamType(const json::Array& tools, std::str
 
 }  // namespace
 
-std::string_view trimWs(std::string_view s) { return trimRightWs(trimLeftWs(s)); }
-
-std::string_view trimLeftWs(std::string_view s) {
-    const std::size_t a = s.find_first_not_of(kWs);
-    return a == std::string_view::npos ? std::string_view() : s.substr(a);
-}
-
-std::string_view trimRightWs(std::string_view s) {
-    const std::size_t b = s.find_last_not_of(kWs);
-    return b == std::string_view::npos ? std::string_view() : s.substr(0, b + 1);
-}
+// (trimWs / trimLeftWs / trimRightWs: whirl/json_fields.h, see protocol.h)
 
 std::size_t partialHold(std::string_view text, std::string_view pat) {
     if (pat.empty()) return 0;

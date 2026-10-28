@@ -45,6 +45,10 @@
   ],
   [
    "cli",
+   "chat"
+  ],
+  [
+   "cli",
    "common.base"
   ],
   [

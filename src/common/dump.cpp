@@ -13,8 +13,7 @@ namespace whirl::dump {
 
 // arch025 PL1b: the _dupenv_s read is platform::env::get (the same _dupenv_s call, moved); still read on every call
 bool switchOn(const char* name) {
-    const std::optional<std::string> s = platform::env::get(std::string("WHIRL_") + name);
-    return s.has_value() && !s->empty() && *s != "0";
+    return switchOnValue(platform::env::get(std::string("WHIRL_") + name));
 }
 
 std::string kvLine(std::string_view site, const numerics::Request& r, bool moe, const numerics::KvCaps& caps,

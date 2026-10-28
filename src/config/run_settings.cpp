@@ -5,6 +5,8 @@
 
 #include "platform/env.h"
 
+#include <algorithm>
+#include <cstdlib>
 #include <exception>
 #include <format>
 #include <string>
@@ -63,5 +65,35 @@ MtpAdapt parseMtpAdapt(const std::optional<std::string>& v) {
 }
 
 MtpAdapt mtpAdapt() { return parseMtpAdapt(envGet("MTP_ADAPT")); }
+
+// (src/server/server_main.cpp MTP_DRAFTS before arch025-N15 rest; the CLI's mtpOpts gave the same value)
+std::optional<std::uint32_t> parseMtpDrafts(const std::optional<std::string>& v, std::uint32_t def, std::uint32_t max) {
+    if (!v) return std::nullopt;
+    std::uint32_t d = def;
+    try {
+        d = static_cast<std::uint32_t>(std::stoul(*v));
+    } catch (const std::exception&) {
+    }
+    return std::clamp(d, 1u, max);
+}
+
+// (src/server/server_main.cpp MTP_PMIN before arch025-N15 rest)
+float parsePmin(const std::optional<std::string>& v, float def) {
+    float p = def;
+    if (v) {
+        try {
+            p = std::stof(*v);
+        } catch (const std::exception&) {
+        }
+    }
+    return p;
+}
+
+float parseNgramSlope(const std::optional<std::string>& v, float def) { return v ? std::strtof(v->c_str(), nullptr) : def; }
+
+std::uint32_t parseProfile(const std::optional<std::string>& v) {
+    if (!v) return 0;
+    return *v == "2" ? 2 : 1;
+}
 
 }  // namespace whirl::settings

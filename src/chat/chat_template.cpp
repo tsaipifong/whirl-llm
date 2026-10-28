@@ -5,21 +5,13 @@
 // contentText, writeArgValue and the request option handling of buildJob).
 
 #include "whirl/chat.h"
+#include "whirl/json_fields.h"  // trimWs, getField / getStr / getBool (one copy with protocol.cpp, arch025-N6)
 
 #include <string_view>
 
 namespace whirl::chat {
 
 namespace {
-
-constexpr std::string_view k_ws = " \t\r\n\x0b\x0c";
-
-std::string_view trimWs(std::string_view s) {
-    const std::size_t b = s.find_first_not_of(k_ws);
-    if (b == std::string_view::npos) return {};
-    const std::size_t e = s.find_last_not_of(k_ws);
-    return s.substr(b, e - b + 1);
-}
 
 std::string_view trimLeftChars(std::string_view s, std::string_view chars) {
     const std::size_t b = s.find_first_not_of(chars);
@@ -34,24 +26,6 @@ std::string_view trimRightChars(std::string_view s, std::string_view chars) {
 
 [[noreturn]] void bad(const std::string& msg) { throw RequestError(msg); }
 
-// member that is present and not JSON null
-const json::Value* getField(const json::Value& obj, std::string_view key) {
-    const json::Value* v = obj.get(key);
-    return (v && !v->isNull()) ? v : nullptr;
-}
-
-const std::string* getStr(const json::Value& obj, std::string_view key) {
-    const json::Value* v = getField(obj, key);
-    return (v && v->isString()) ? &v->asString() : nullptr;
-}
-
-std::optional<bool> getBool(const json::Value& obj, std::string_view key, const char* err) {
-    const json::Value* v = getField(obj, key);
-    if (!v) return std::nullopt;
-    if (!v->isBool()) bad(err);
-    return v->asBool();
-}
-
 const std::string& roleOf(const json::Value& m) {
     if (!m.isObject()) bad("each message must be an object");
     const std::string* r = getStr(m, "role");
@@ -61,7 +35,7 @@ const std::string& roleOf(const json::Value& m) {
 
 bool isSystemRole(std::string_view r) { return r == "system" || r == "developer"; }
 
-constexpr std::string_view k_image_placeholder = "<|vision_start|><|image_pad|><|vision_end|>";
+// (k_image_placeholder: whirl/chat.h, shared with the CLI)
 constexpr std::string_view k_video_placeholder = "<|vision_start|><|video_pad|><|vision_end|>";
 
 // render_content(): string, list of parts, or null/absent.
