@@ -807,9 +807,9 @@ void testVramLimit() {
             for (std::uint32_t mb : {1280u, 2048u, 2304u, 4096u, 8192u, 16384u})
                 for (std::optional<std::size_t> req : {std::optional<std::size_t>{}, std::optional<std::size_t>{1024}, std::optional<std::size_t>{3000},
                                                        std::optional<std::size_t>{100000}}) {
-                    const device::Profile& pr = device::profile(a);
-                    CHECK_EQ(sched::prefillExec(req, pr, moe, mb),
-                             sched::prefillExecFor(req.value_or(sched::prefillExecDefault(pr, moe)), mb, pr.prefill_fill_batch));
+                    const device::Profile& dprof = device::profile(a);
+                    CHECK_EQ(sched::prefillExec(req, dprof, moe, mb),
+                             sched::prefillExecFor(req.value_or(sched::prefillExecDefault(dprof, moe)), mb, dprof.prefill_fill_batch));
                 }
 }
 
