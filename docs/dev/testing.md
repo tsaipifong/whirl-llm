@@ -196,24 +196,29 @@ The map lists all three modes for every change: a change is shown to be mode-con
 golden hashes (precise unchanged). Host code that branches on the GPU inside a shared function is listed
 for both GPUs.
 
-### <a id="isolation"></a>Isolation check (ARCH-1 8.5, first module: src/sampling)
+### <a id="isolation"></a>Isolation check (ARCH-1 8.5: src/sampling, then every isolatable module)
 
-`tests/sampling/isolation.txt` lists the sampling module's sources and the only headers they may see
-(its own interface plus the header-only math of `whirl/spec_sample.h` and `whirl/relax_accept.h`).
-`cmake/sampling_iso.cmake` copies those files into `build/Release/iso/sampling/` and builds them from
-there with that copy as the only include path; `whirl-sampling-tests` links the result and nothing else
-(no `whirl`, no server, no tokenizer GGUF, no GPU) and runs the same test bodies as `whirl-server-tests`
-(`tests/sampling/sampling_unit.inc`). So an undeclared include (also `../server/engine.h`) fails to
-compile and a call into another library fails to link. The product build is unchanged.
+One manifest per isolated module: `tests/sampling/isolation.txt` (sampling, arch025-X3) and
+`tests/iso/<module>/isolation.txt` (arch025-isoall). A manifest names the module (`module`), its test program
+(`exe`), the source the boundary mutants edit (`mutate`), the link mutants (`mutsym hip|log|now|engine`), extra
+Windows libraries (`syslib`), and the files: `src` / `hdr` = the module and its DECLARED dependencies (for example
+spec.policy declares `src/common/util.cpp` and the platform layer it calls), `testsrc` / `testhdr` = the test
+program only. `cmake/iso.cmake` copies those files into `build/Release/iso/<module>/{mod,test}/` and builds them from
+there with that copy as the only include path; the test program links the module OBJECTS directly (no static-library
+member selection) with `/OPT:NOREF` and nothing else (no `whirl`, no server, no tokenizer GGUF, no GPU). So an
+undeclared include (also `../server/engine.h`) fails to compile and a call into anything not listed fails to link, even
+in a function no test calls. The product build is unchanged.
 
 - `cpu_sampling`: runs `whirl-sampling-tests`.
-- `cpu_sampling_iso`: `tools/gates/iso_check.py --mutants` builds the same thing by hand and proves the boundary
-  holds. There is a control case and four mutants: an engine include, a relative engine include, a call into
-  `whirl` and a call into the server. Each mutant must fail the isolated build (C1083 / LNK2019) and still
-  compile with the product flags.
+- `cpu_sampling_iso`, `cpu_iso_<module>` (`.` -> `_`; one per `tests/iso/*/isolation.txt`):
+  `tools/gates/iso_check.py --mutants --module <m>` builds the same thing by hand, runs the test program (control) and
+  proves the boundary: an engine include and a relative engine include (C1083), and one call per `mutsym` into the
+  device runtime / the server / lib whirl (LNK2019), each of which must also compile with the product flags.
+  `iso_check.py --list` lists the isolated modules; without `--module` it checks all of them.
 
-To declare a new dependency of the module, add its header (and, if it is not header-only, its source) to the
-list. The change is then visible in review.
+To declare a new dependency of a module, add its header (and, if it is not header-only, its source) to the
+module's list. The change is then visible in review. Which modules are not isolated yet, and the include / call that
+blocks each one with the smallest fix: [isolation_blockers.md](isolation_blockers.md).
 
 ## <a id="vis-order"></a>Vision stream order (`cpu_vis_order`)
 

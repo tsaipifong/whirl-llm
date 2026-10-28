@@ -234,7 +234,7 @@
   "handles": {
    "id": "M1", "desc": "RAII device handles (DevBuf / PinnedBuf / EventH / StreamH)",
    "paths": ["src/device/handles.h"], "callers": "rdeps",
-   "steps": ["cpu_device", "srv_gpu_select", "srv_kvram719"],
+   "steps": ["cpu_iso_handles", "cpu_device", "srv_gpu_select", "srv_kvram719"],
    "gpus": {"srv_gpu_select": 2, "srv_kvram719": 1},
    "pending": [{"step": "cpu_raw_free_check", "lands_in": "S11 (tools/gates/raw_free_check.ps1)"}],
    "manual": []
@@ -296,7 +296,7 @@
   "threads": {
    "id": "M8", "desc": "engine thread ownership checks",
    "paths": ["src/server/engine_thread.cpp", "src/server/engine_thread.h"], "lands_on": "arch024 S10 (1b17eb9)",
-   "steps": ["cpu_server", "cpu_logscan_selftest"], "callers": ["ckpt_store", "page_pool", "prefix_store", "tier_bridge", "engine_gov"],
+   "steps": ["cpu_iso_threads", "cpu_server", "cpu_logscan_selftest"], "callers": ["ckpt_store", "page_pool", "prefix_store", "tier_bridge", "engine_gov"],
    "manual": ["P-speed d5fc637 vs HEAD"]
   },
   "sampling": {
@@ -309,7 +309,7 @@
   "platform.fs": {
    "id": "PL2", "desc": "platform layer, files (platform::fs + FakeFs: MappedFile, GGUF reader, server log, SSD tier files)",
    "paths": ["src/platform/fs.h", "src/platform/fs_fake.h", "src/platform/fs_win.cpp"], "lands_on": "arch025-pl2 (PL2)",
-   "steps": ["cpu_tests", "cpu_model", "cpu_tier", "cpu_server", "cpu_platform_check", "golden_swift", "golden_moe", "srv_tier_verify",
+   "steps": ["cpu_iso_platform_fs", "cpu_iso_spec_policy", "cpu_iso_spec_engine", "cpu_iso_threads", "cpu_tests", "cpu_model", "cpu_tier", "cpu_server", "cpu_platform_check", "golden_swift", "golden_moe", "srv_tier_verify",
              "srv_cache_balance", "srv_fs_swift"],
    "gpus": {"golden_swift": 1, "golden_moe": 1, "srv_tier_verify": 2, "srv_cache_balance": 1, "srv_fs_swift": 1},
    "manual": ["flag table: whirl-tier-tests testFsOpenTable + whirl-tests testFsMappedOpen (CreateFileW access / share / disposition / flags == 0e35407)",
@@ -318,7 +318,7 @@
   "platform.proc": {
    "id": "PL4", "desc": "platform layer, this process (platform::proc: executable path of exeIdentity / exeDirectory, the GPU_WAIT named mutex, the shutdown event and console control handler, process id, working set)",
    "paths": ["src/platform/proc.h", "src/platform/proc_win.cpp"], "lands_on": "arch025-pl4 (PL4)",
-   "steps": ["cpu_tests", "cpu_tier", "cpu_server", "cpu_platform_check", "golden_swift", "golden_moe", "srv_cache_balance", "srv_gpu_select", "srv_env_e1",
+   "steps": ["cpu_iso_platform_proc", "cpu_iso_spec_policy", "cpu_iso_spec_engine", "cpu_tests", "cpu_tier", "cpu_server", "cpu_platform_check", "golden_swift", "golden_moe", "srv_cache_balance", "srv_gpu_select", "srv_env_e1",
              "srv_env_e3", "pkg_smoke"],
    "gpus": {"golden_swift": 1, "golden_moe": 1, "srv_cache_balance": 1, "srv_gpu_select": 2, "srv_env_e1": 2, "srv_env_e3": 2, "pkg_smoke": 1},
    "manual": ["exeIdentity pin: whirl-tier-tests testExeIdentityPinned (fixed size + last-write time -> the Python constants; exeIdentity() == the v0.2.4 body)",
@@ -328,7 +328,7 @@
   "platform.sys": {
    "id": "PL4", "desc": "platform layer, machine facts (platform::sys::memoryStatus: physical / available RAM of the RAM-tier sizing)",
    "paths": ["src/platform/sys.h", "src/platform/sys_win.cpp"], "lands_on": "arch025-pl4 (PL4)",
-   "steps": ["cpu_tests", "cpu_tier", "cpu_pins", "cpu_platform_check", "golden_swift", "golden_moe", "srv_cache_balance", "srv_env_e1", "srv_env_e3"],
+   "steps": ["cpu_iso_platform_sys", "cpu_tests", "cpu_tier", "cpu_pins", "cpu_platform_check", "golden_swift", "golden_moe", "srv_cache_balance", "srv_env_e1", "srv_env_e3"],
    "gpus": {"golden_swift": 1, "golden_moe": 1, "srv_cache_balance": 1, "srv_env_e1": 2, "srv_env_e3": 2},
    "manual": ["startup sizing lines (kv tier RAM size) unchanged vs the parent exe: tools/gates/startup_lines.py check on the srv_* logs"]
   },
@@ -342,7 +342,7 @@
   "server.args": {
    "id": "C1a", "desc": "whirl-server's command line (src/server/server_args.*, in whirl_server_core; from serveMain by arch025-C1a): Options (the v0.2.4 defaults), parseServerArgs (the argument loop: every flag, its value checks and messages), resolveServerConfig (numerics::resolve of the mode flags / WHIRL_MODE, the --parallel range) and kHelpBody (the --help option list)",
    "paths": ["src/server/server_args.cpp", "src/server/server_args.h"], "lands_on": "arch025-c1a (C1a)",
-   "steps": ["cpu_server", "cpu_emptyroot", "golden_swift", "golden_moe", "srv_gpu_select", "pkg_smoke"],
+   "steps": ["cpu_iso_server_args", "cpu_server", "cpu_emptyroot", "golden_swift", "golden_moe", "srv_gpu_select", "pkg_smoke"],
    "gpus": {"golden_swift": 1, "golden_moe": 1, "srv_gpu_select": 2, "pkg_smoke": 1},
    "manual": ["whirl-server-tests server_args_table (every flag -> Options field, defaults == 0e35407, die() messages) and server_help_body (kHelpBody == the 0e35407 option list, length + FNV-1a)",
               "whirl-server.exe --help / -V / /? and whirl.exe serve --help byte-identical to the 0e35407 release exes (scratch\\a25_c1a help_*.txt)",
@@ -529,7 +529,7 @@
   "spec.policy": {
    "id": "M4", "desc": "speculative-decoding policy (src/spec, host-only library whirl_spec, linked by the server core and the model library): MtpDefaults / mtpDefaults (per-device MTP defaults), the draft-head vocabulary choice (draftVocabFile / draftVocabChoice / readDraftVocab / draftVocabIds / exeDirectory / draftVocabDefaultFits), DraftAccept / DraftTiming / pickDrafts, the T4-1 per-slot draft allocation (CycleCost / SlotAccept / allocDrafts) and prompt-lookup drafting (Ngram / NgramPolicy)",
    "paths": ["src/spec/policy.h", "src/spec/policy.cpp", "cmake/spec.cmake"], "lands_on": "arch025-m4 (M4)",
-   "steps": ["cpu_model", "cpu_server", "cpu_pins", "golden_swift", "golden_moe", "srv_mt_precise", "srv_mt_precise_moe"],
+   "steps": ["cpu_iso_spec_policy", "cpu_iso_spec_engine", "cpu_model", "cpu_server", "cpu_pins", "golden_swift", "golden_moe", "srv_mt_precise", "srv_mt_precise_moe"],
    "gpus": {"golden_swift": 2, "golden_moe": 2, "srv_mt_precise": 2, "srv_mt_precise_moe": 2},
    "callers": "rdeps",
    "manual": ["V-move: tools/impact/fn_equiv.py old vs new file (every moved function byte-equal ignoring whitespace) + the moved declarations verbatim (scratch/a25_m4/move_check.py)",
@@ -539,7 +539,7 @@
   "spec.engine": {
    "id": "E1b", "desc": "the per-slot MTP draft allocation the server engine runs every decode cycle (src/spec/slot_drafts.*, in whirl_spec; from src/server/engine.* by arch025-E1b): DraftPlanSlot / planSlotDrafts (WHIRL_SLOT_DRAFTS=2 planner over allocDrafts), splitDraftsByGain (WHIRL_SLOT_DRAFTS=1 marginal-gain swaps, the body of Engine::splitDrafts), slotDraftCap (the draft cap for A decoding slots, the body of Engine::draftCap, also pickDrafts' first step)",
    "paths": ["src/spec/slot_drafts.h", "src/spec/slot_drafts.cpp"], "lands_on": "arch025-e1b (E1b)",
-   "steps": ["cpu_server", "golden_swift", "golden_moe", "srv_mt_precise", "srv_mt_precise_moe"],
+   "steps": ["cpu_iso_spec_engine", "cpu_server", "golden_swift", "golden_moe", "srv_mt_precise", "srv_mt_precise_moe"],
    "gpus": {"golden_swift": 2, "golden_moe": 2, "srv_mt_precise": 2, "srv_mt_precise_moe": 2},
    "callers": "rdeps",
    "manual": ["V-move: the moved bodies equal the 5e3d082 engine code up to the named parameter replacements (scratch/a25_e1b/move_check.py, fn_equiv on engine.cpp)",
@@ -550,7 +550,7 @@
   "model.arch_registry": {
    "id": "M5a", "desc": "architecture registry (src/model/arch_registry.*, host-only library whirl_arch, linked by the server core and the model library): ArchName / ArchSizing / ArchModule / ArchTable, findArch / findArchName (explicit tables, no self-registration), the UnsupportedArch text generated from the table (byte-identical to v0.2.4 with the product table), slotStateBytes (the server's per-slot recurrent state + replay rows for the dGPU fit and the UMA check)",
    "paths": ["src/model/arch_registry.h", "src/model/arch_registry.cpp", "cmake/arch.cmake"], "lands_on": "arch025-m5 (M5)",
-   "steps": ["cpu_model", "cpu_server", "cpu_pins", "golden_swift", "golden_moe", "srv_mt_precise", "srv_mt_precise_moe"],
+   "steps": ["cpu_iso_model_arch_registry", "cpu_model", "cpu_server", "cpu_pins", "golden_swift", "golden_moe", "srv_mt_precise", "srv_mt_precise_moe"],
    "gpus": {"golden_swift": 2, "golden_moe": 2, "srv_mt_precise": 2, "srv_mt_precise_moe": 2},
    "callers": "rdeps",
    "manual": ["V-size: startup_lines.py check on the server logs of both GPUs (the dGPU fit and the UMA check now take the sizing through the module and slotStateBytes)",

@@ -207,7 +207,7 @@ def parse_cmake(root, files):
             for tok in m.group(2).split():
                 if tok not in ("PRIVATE", "PUBLIC", "INTERFACE") and not tok.startswith(("$", '"')):
                     links[m.group(1)].add(tok)
-    # arch025-X3: an isolation-check program (cmake/sampling_iso.cmake) compiles copies of the files its manifest
+    # arch025-X3: an isolation-check program (cmake/iso.cmake) compiles copies of the files its manifest
     # tests/<module>/isolation.txt lists ("exe <target>", then "src|hdr|testsrc|testhdr <path>"); the CMake text only
     # has ${...} variables, so its sources come from the manifest
     for f in files:

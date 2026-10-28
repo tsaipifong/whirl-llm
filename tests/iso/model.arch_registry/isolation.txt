@@ -1,0 +1,22 @@
+# ARCH-1 8.5 isolation check of model.arch_registry (arch025-isoall): the module's sources, its DECLARED dependencies and the
+# ONLY headers they may see. Format: tests/sampling/isolation.txt; read by cmake/iso.cmake and tools/gates/iso_check.py
+# (and tools/impact/impact_build.py for the exe's sources).
+# declared dependencies: header-only types (model_types.h, kv_format.h, spec/policy.h)
+module    model.arch_registry
+exe       whirl-iso-model-arch-registry-tests
+mutate    src/model/arch_registry.cpp
+mutsym    hip
+mutsym    log
+mutsym    now
+# module sources
+src       src/model/arch_registry.cpp
+# headers (include closure of the sources above)
+hdr       include/whirl/device_profile.h
+hdr       include/whirl/hip.h
+hdr       include/whirl/kv_format.h
+hdr       include/whirl/model_types.h
+hdr       src/model/arch_registry.h
+hdr       src/spec/policy.h
+# test program
+testsrc   tests/iso/model.arch_registry/arch_registry_tests.cpp
+testhdr   tests/iso/iso_test.h
