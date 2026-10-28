@@ -16,13 +16,19 @@ sources call each other's qwen35::Context members; arch025-lane2 leg 3: tuneBuck
 context.h, moved from src/model/config.cpp and loader.cpp to context.cpp; the HIP layer is the link double
 tests/iso/fake_hip.cpp; link mutant `model` = qwen35::loadOrTune), model.weights (GGUF reader + kernels_abi.cpp + util /
 platform, fake_hip.cpp), ckpt_store, page_pool (CacheModel + NullBackend + threads; tests/iso/fake_cache_model.h) and
-tier.kv (NullBackend + platform).
+tier.kv (NullBackend + platform); arch025-lane2 leg 4: prefix_store (tokens.cpp + the tokenizer and GGUF reader,
+prefix_cache, tier_adapter over tier.kv, ckpt_store, NullBackend, threads), tier_bridge (prefix_store and its declared
+dependencies + tier.kv; manifest `mutinc end`: tier_bridge.cpp's anonymous-namespace kv_page / msSince share their
+names with engine.h's, so an engine include at the top of the file does not compile with the product flags either)
+and model.core (every model module below it + module.cpp's product table + spec.policy, fake_hip.cpp and
+tests/iso/model.core/fake_gpu_restrict.cpp; link mutants engine / log / `tier` = tier::blockHash). model.core's
+declared module.cpp is a link-level cycle (config.cpp's Config::fromGguf -> findArchName(name, builtinArchs()) ->
+module.cpp's table -> Config::fromGguf) that cycles.py (includes only) does not see; fix: the caller passes the table
+(or checks the name through findArch) so config.cpp no longer names builtinArchs().
 
 
 | module | blocked by (first reach outside the declared dependencies) | smallest fix |
 |---|---|---|
-| prefix_store | `src/server/prefix_store.h:15` cache/ckpt_store.h (blocked above), `:20` server/tokens.h -> whirl/tokenizer.h (tokenizer.cpp in lib whirl, GGUF reader); `prefix_store.cpp:5` cache/tier_adapter.h | after ckpt_store; tokenizer as a declared dependency (or the token type only) |
-| tier_bridge | (arch025-lane2 D2.2: `CacheModel&`; src/tier is its own module tier.kv, so prefix_store -> cache.tier_adapter -> tier.kv is no cycle) `src/server/tier_bridge.h:27` server/prefix_store.h (blocked above); `tier_bridge.cpp:4` server/log.h | after prefix_store / ckpt_store |
 | protocol | `src/server/engine_api.h:11` server/vision_iface.h -> `include/whirl/vision.h:23` device/handles.h (device) and vision::Vision; `engine_api.h:14` whirl/tokenizer.h (lib whirl, GGUF) | forward-declare the vision types engine_api / vision_iface use by pointer (header change, objeq); tokenizer (+ gguf) as declared dependencies |
 | engine_gov | `src/server/engine_gov.cpp:13` `engine.h`: the file is Engine member functions | by design part of the engine (isolate after Engine is split) |
 | server.startup | `src/server/server_main.cpp:13` engine.h, `:18` device/backend.h, Model::load: the program's composition root | not isolatable by design (covered by the gate's end-to-end steps) |

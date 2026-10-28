@@ -1,5 +1,5 @@
 // Link double of the device runtime (src/hip, whirl_hip) for the isolation programs (ARCH-1 8.5; forward, model.weights;
-// arch025-lane2 leg 3). The forward sources and their declared dependencies call the HIP layer through
+// arch025-lane2 leg 3; model.core, leg 4). The forward sources and their declared dependencies call the HIP layer through
 // include/whirl/hip.h (+ device_mem.h / uma_mem.h); the real layer needs the HIP SDK headers and a GPU, so the isolated
 // program links these definitions instead. Every call that would reach the GPU throws (no test here may launch,
 // allocate or synchronize); releasing nothing (null handles, an empty Graph) is a no-op, as the destructors of a
@@ -12,6 +12,8 @@
 
 #include <stdexcept>
 #include <string>
+#include <string_view>
+#include <utility>
 
 namespace whirl::hip {
 
@@ -81,5 +83,23 @@ Function Module::getFunctionOpt(const char*) const { gpu("Module::getFunctionOpt
 DevPtr Module::getGlobal(const char*, std::size_t*) const { gpu("Module::getGlobal"); }
 
 void launchRaw(Function, Dim3, Dim3, unsigned, Stream, void**) { gpu("launchRaw"); }
+
+// arch025-lane2 leg 4 (model.core): the code-object loading of the kernel table (Model::loadKernels), the gfx target
+// names and the UMA check of the loader. Loading a code object reaches the GPU; an unloaded Module (every Model member
+// before Model::load) is released as a no-op; archName / archFor are the HIP layer's (hip_runtime.cpp) and a test of the
+// layers above has no device to name.
+Module& Module::operator=(Module&& o) noexcept {
+    std::swap(handle_, o.handle_);
+    std::swap(arch_, o.arch_);
+    return *this;
+}
+Module::~Module() {
+    if (handle_) std::terminate();  // never loaded here
+}
+Module Module::loadEmbedded() { gpu("Module::loadEmbedded"); }
+Module Module::loadData(const void*, Arch) { gpu("Module::loadData"); }
+Arch archFor(std::string_view) { gpu("archFor"); }
+const char* archName(Arch) { gpu("archName"); }
+bool umaCheckOn() { gpu("umaCheckOn"); }
 
 }  // namespace whirl::hip

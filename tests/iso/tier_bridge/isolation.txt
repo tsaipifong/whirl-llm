@@ -1,0 +1,79 @@
+# ARCH-1 8.5 isolation check of tier_bridge, the tier glue of the server (TierBridge, SlotTier; arch025-lane2 leg 4): the
+# module's sources, its DECLARED dependencies and the ONLY headers they may see. Format: tests/sampling/isolation.txt; read
+# by cmake/iso.cmake and tools/gates/iso_check.py.
+# declared dependencies: the prefix store (prefix_store.cpp) and everything it declares (tests/iso/prefix_store: chat
+# tokens + tokenizer + GGUF reader, prefix cache with the superseded-session tracker, tier view, ckpt_store through
+# cache/cache_model.h, the NullBackend, threads + the server log, util, platform), the KV host tier itself (tier.kv:
+# kv_tier.cpp). NOT declared: the engine, the server model (server/backend.h), the model (class Model), the HIP layer.
+module    tier_bridge
+exe       whirl-iso-tier-bridge-tests
+mutate    src/server/tier_bridge.cpp
+# include mutants at the end: tier_bridge.cpp's anonymous-namespace kv_page and msSince share their names with engine.h's, so
+# the line at the top fails the product compile too (C2668); at the end it compiles there and still fails here (C1083)
+mutinc    end
+mutsym    hip
+mutsym    engine
+mutsym    model
+syslib    winmm.lib
+# module sources
+src       src/server/tier_bridge.cpp
+# declared dependency sources
+src       src/server/prefix_store.cpp
+src       src/server/tokens.cpp
+src       src/tokenizer/tokenizer.cpp
+src       src/tokenizer/unicode.cpp
+src       src/gguf/gguf.cpp
+src       src/cache/prefix_cache.cpp
+src       src/cache/tier_adapter.cpp
+src       src/cache/ckpt_store.cpp
+src       src/tier/kv_tier.cpp
+src       src/device/null_backend.cpp
+src       src/server/engine_thread.cpp
+src       src/server/log.cpp
+src       src/common/util.cpp
+src       src/platform/env_win.cpp
+src       src/platform/fs_win.cpp
+src       src/platform/args_win.cpp
+src       src/platform/time_win.cpp
+src       src/platform/proc_win.cpp
+# include closure of the sources above
+hdr       include/whirl/common.h
+hdr       include/whirl/device_mem.h
+hdr       include/whirl/device_profile.h
+hdr       include/whirl/gguf.h
+hdr       include/whirl/hip.h
+hdr       include/whirl/kv_format.h
+hdr       include/whirl/model_types.h
+hdr       include/whirl/prefill_schedule.h
+hdr       include/whirl/thread_annotations.h
+hdr       include/whirl/tokenizer.h
+hdr       include/whirl/uma_mem.h
+hdr       include/whirl/unicode.h
+hdr       include/whirl/vismap.h
+hdr       src/cache/cache_model.h
+hdr       src/cache/ckpt_store.h
+hdr       src/cache/prefix_cache.h
+hdr       src/cache/tier_adapter.h
+hdr       src/device/backend.h
+hdr       src/device/handles.h
+hdr       src/device/null_backend.h
+hdr       src/model/qwen35/kv.h
+hdr       src/platform/args.h
+hdr       src/platform/env.h
+hdr       src/platform/fs.h
+hdr       src/platform/fs_fake.h
+hdr       src/platform/proc.h
+hdr       src/platform/time.h
+hdr       src/server/engine_thread.h
+hdr       src/server/log.h
+hdr       src/server/prefix_store.h
+hdr       src/server/tier_bridge.h
+hdr       src/server/tokens.h
+hdr       src/tier/evict_policy.h
+hdr       src/tier/idle_flush.h
+hdr       src/tier/kv_tier.h
+hdr       src/tokenizer/unicode_tables.inc
+# test program
+testsrc   tests/iso/tier_bridge/tier_bridge_tests.cpp
+testhdr   tests/iso/fake_cache_model.h
+testhdr   tests/iso/iso_test.h
