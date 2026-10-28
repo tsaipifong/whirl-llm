@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import fnmatch
+import glob
 import json
 import os
 import re
@@ -48,6 +49,10 @@ MUTANTS = [
     ("kernels/gfx1151/attn.hip",
      "\n__device__ int kiso_mutant_gemv(const GvArgs &g) { return gv_sel(g).b; }  // kernel_iso_check mutant\n",
      "kernels.attn"),
+    # a standalone family (its own code object, not in the root's translation unit): compiled alone per file
+    ("kernels/vision/vision.hip",
+     "\n__device__ int kiso_mutant_gemv(const GvArgs &g) { return gv_sel(g).b; }  // kernel_iso_check mutant\n",
+     "kernels.vision"),
 ]
 
 
@@ -153,6 +158,18 @@ def check(repo, only=None, archs=ARCHS, quiet=False, jobs=6):
                 continue
             allowed = closure(n, fams) | {n}
             plan.append((n, arch, [f for f in frs if fam.get(f) in allowed]))
+    for n, f in fams.items():
+        if not f.get("standalone") or (only and n not in only):
+            continue
+        # own code object (cmake/vision.cmake): not in the root's translation unit, so it compiles alone, no deps
+        if f.get("deps"):
+            problems.append(f"{n}: a standalone family has no dependencies")
+        files = [rel(g, repo) for pat in f.get("paths", []) for g in glob.glob(os.path.join(repo, pat))]
+        if not files:
+            problems.append(f"{n}: standalone family has no file")
+        for arch in archs:
+            if files:
+                plan.append((n, arch, files))
     results = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as ex:
         futs = {ex.submit(compile_tu, repo, arch, files): (n, arch) for n, arch, files in plan}
@@ -177,7 +194,7 @@ def selftest(repo):
     bad = 0
     with tempfile.TemporaryDirectory(prefix="kiso_") as td:
         shutil.copytree(os.path.join(repo, "kernels"), os.path.join(td, "kernels"),
-                        ignore=shutil.ignore_patterns("vision"))
+                        ignore=None)
         os.makedirs(os.path.join(td, "include", "whirl"))
         shutil.copy(os.path.join(repo, "include", "whirl", "kernels_abi_layout.h"), os.path.join(td, "include", "whirl"))
         probs, _ = check(td, quiet=True)

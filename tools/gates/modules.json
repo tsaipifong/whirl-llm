@@ -666,7 +666,7 @@
   "kernels.common": {
      "id": "N5/N14",
      "desc": "kernel family common: smoke kernel, helpers, quant block decoders, packed scales, warp / block reductions (device code of both kernel sets; compile boundary: kernels/families.json, tools/gates/kernel_iso_check.py)",
-     "paths": ["kernels/smoke.hip", "kernels/common.hip", "kernels/gfx1151/common.hip", "kernels/gfx1151/quant.hip", "kernels/shared/common_part.h", "kernels/shared/common_part_2.h", "kernels/shared/common_vocab.h", "kernels/shared/common_warp.h", "kernels/whirl_kernels.hip", "kernels/gfx1151/whirl_kernels_gfx1151.hip", "kernels/iq_tables.h", "kernels/families.json"],
+     "paths": ["kernels/smoke.hip", "kernels/common.hip", "kernels/gfx1151/common.hip", "kernels/gfx1151/quant.hip", "kernels/shared/common_part.h", "kernels/shared/common_part_2.h", "kernels/shared/common_vocab.h", "kernels/shared/common_warp.h", "kernels/iq_tables.h", "kernels/families.json"],
      "lands_on": "arch025-kern (lane 3)",
      "steps": ["cpu_kernel_iso", "cpu_kernel_abi", "kt_full", "golden_swift", "golden_moe", "st_swift_precise", "st_moe_precise"],
      "gpus": {"kt_full": 2, "golden_swift": 2, "golden_moe": 2, "st_swift_precise": 2, "st_moe_precise": 2},
@@ -743,6 +743,24 @@
      "steps": ["cpu_kernel_iso", "cpu_kernel_abi", "kt_full", "golden_swift", "golden_moe"],
      "gpus": {"kt_full": 2, "golden_swift": 2, "golden_moe": 2},
      "manual": ["V-co: code objects per architecture identical to the base build (tools/impact/work_equal.py code_objects; CPU)", "kernel tests (tests/kernels) unchanged by a refactor of the family"]
+  },
+  "kernels.vision": {
+     "id": "N14",
+     "desc": "kernel family vision: Qwen3-VL / Qwen3.5 ViT encoder kernels, one source (kernels/vision/vision.hip), its own code object per architecture built by cmake/vision.cmake and loaded only when an image arrives; standalone (no dependency on another family, not in the whirl_kernels translation unit; compile boundary: kernels/families.json, tools/gates/kernel_iso_check.py)",
+     "paths": ["kernels/vision/vision.hip"],
+     "lands_on": "arch025-kern (lane 3)",
+     "steps": ["cpu_kernel_iso", "cpu_vision", "srv_vis", "vis_ab"],
+     "gpus": {"srv_vis": 2, "vis_ab": 2},
+     "manual": ["V-co: the vision code object per architecture identical to the base build (hsaco from cmake/vision.cmake, tools/impact/work_equal.py code_objects; CPU)"]
+  },
+  "kernels.unity": {
+     "id": "N14",
+     "desc": "the per-architecture unity sources: kernels/whirl_kernels.hip (gfx1201, and the include of the gfx1151 set) and kernels/gfx1151/whirl_kernels_gfx1151.hip. Each includes every kernel family's fragments in order into one translation unit = one code object; they hold no code of their own, only the include order (kept as a unity build, as llama.cpp's ggml-cuda keeps its aggregation unit apart from the per-family units), so this module sits ABOVE every family (it depends on all of them; none depends on it)",
+     "paths": ["kernels/whirl_kernels.hip", "kernels/gfx1151/whirl_kernels_gfx1151.hip"],
+     "lands_on": "arch025-kern (lane 3)",
+     "steps": ["cpu_kernel_iso", "cpu_kernel_abi", "kt_full", "golden_swift", "golden_moe", "st_swift_precise", "st_moe_precise"],
+     "gpus": {"kt_full": 2, "golden_swift": 2, "golden_moe": 2, "st_swift_precise": 2, "st_moe_precise": 2},
+     "manual": ["V-co: code objects per architecture identical to the base build (tools/impact/work_equal.py code_objects; CPU); the include order is the link order of the kernels, a change of order is a change of code object"]
   },
   "kernels.abi": {
      "id": "N13",
