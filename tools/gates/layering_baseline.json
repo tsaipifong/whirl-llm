@@ -1141,6 +1141,10 @@
   ],
   [
    "server.kv_fit",
+   "common.base"
+  ],
+  [
+   "server.kv_fit",
    "json"
   ],
   [

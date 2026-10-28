@@ -4,6 +4,7 @@
 #include "whirl/startup_fit.h"
 
 #include "whirl/json.h"
+#include "whirl/small_helpers.h"  // alignUp (arch025-lane1 leg 8: contextPlan / ramFloor)
 
 #include <algorithm>
 #include <format>
@@ -278,6 +279,44 @@ UmaFixed umaFixed(const UmaFixedIn& in) {
     r.ck = (in.parallel * in.n_ck + in.n_spe) * ck;
     r.fixed = in.weights + in.state + in.bufs + r.slots + r.ck + (in.has_mtp ? 65536ull * in.n_embd * 5 / 16 : 0) + (256ull << 20);
     r.fixed += r.fixed / 12;  // +8%: measured fast-mode Swift fixed part 3.9% above the itemized sum
+    return r;
+}
+
+// (arch025-lane1 leg 8: src/server/server_main.cpp:348-352 at 5728296)
+ContextPlan contextPlan(std::optional<std::uint32_t> ctx, std::optional<std::uint32_t> ctx_per_slot, bool uma, std::uint32_t page) {
+    ContextPlan p;
+    p.pool_req = ctx ? ctx : (uma ? std::optional<std::uint32_t>(uma_pool_default) : std::nullopt);
+    p.slot_ctx = static_cast<std::uint32_t>(alignUp(
+        ctx_per_slot ? *ctx_per_slot : (p.pool_req ? std::min(*p.pool_req, ctx_per_slot_default) : ctx_per_slot_default), page));
+    return p;
+}
+
+// (server_main.cpp:457 at 5728296)
+std::size_t ckptDefault(std::uint32_t parallel) { return parallel == 1 ? 4 : (parallel <= 4 ? 3 : 1); }
+
+// (server_main.cpp:459-462 at 5728296)
+CkptCap capCkpts(std::size_t n_ck, std::size_t max_ck) {
+    CkptCap c;
+    c.n = n_ck;
+    if (n_ck > max_ck) {
+        c.warn = std::format("WHIRL_SERVE_CKPTS={} is above the maximum ({}); using {}", n_ck, max_ck, max_ck);
+        c.n = max_ck;
+    }
+    return c;
+}
+
+// (server_main.cpp:898 and :1049-1050 at 5728296)
+std::uint64_t ckptBytes(std::uint64_t state, std::uint32_t n_vocab, std::uint32_t n_embd) {
+    return state + static_cast<std::uint64_t>(n_vocab) * 4 + static_cast<std::uint64_t>(n_embd) * 4;
+}
+
+// (server_main.cpp:1048-1055 at 5728296)
+RamFloor ramFloor(std::uint32_t slot_ctx, std::uint64_t kv_bytes_per_token_f16, std::size_t n_ck, std::uint64_t ck_stride,
+                  std::uint64_t auto_min_mb) {
+    RamFloor r;
+    const std::uint64_t full = static_cast<std::uint64_t>(slot_ctx) * kv_bytes_per_token_f16 + n_ck * ck_stride;
+    r.entry_mb = alignUp(full, 1ull << 30) >> 20;
+    r.floor_mb = std::max(auto_min_mb, r.entry_mb);
     return r;
 }
 

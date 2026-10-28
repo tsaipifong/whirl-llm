@@ -211,6 +211,40 @@ struct UmaFixed {
 };
 UmaFixed umaFixed(const UmaFixedIn& in);
 
+// ---- the sizing rules serveMain wrote inline (arch025-lane1 leg 8: server_main.cpp keeps the measurements, the log
+// lines and their order; these are the decisions, pinned against the 5728296 code in tests/iso/server.kv_fit) ---------
+// The shared KV pool asked for and the per-request context. Pool: -c, else uma_pool_default on an integrated GPU (the
+// pool the BIOS carve-out check sizes), else none (sized from the VRAM left after loading). Per request: --ctx-per-slot,
+// else min(pool, ctx_per_slot_default), else ctx_per_slot_default; rounded up to whole KV pages (`page` tokens).
+inline constexpr std::uint32_t ctx_per_slot_default = 131072;
+inline constexpr std::uint32_t uma_pool_default = 262144;
+struct ContextPlan {
+    std::optional<std::uint32_t> pool_req;
+    std::uint32_t slot_ctx = 0;
+};
+ContextPlan contextPlan(std::optional<std::uint32_t> ctx, std::optional<std::uint32_t> ctx_per_slot, bool uma, std::uint32_t page);
+// Prefix checkpoints per slot by default (WHIRL_SERVE_CKPTS unset): 4 with one slot, 3 with up to 4 slots (TAIL-CK:
+// tail + prompt-end + gen-end), 1 above.
+std::size_t ckptDefault(std::uint32_t parallel);
+// A checkpoint count above what tier entries / restore maps hold (tier::max_ck, FR-CACHE P2-3) is lowered to it; `warn`
+// is the warning line's text then (empty otherwise).
+struct CkptCap {
+    std::size_t n = 0;
+    std::string warn;
+};
+CkptCap capCkpts(std::size_t n_ck, std::size_t max_ck);
+// One prefix checkpoint's bytes: the recurrent state of the DeltaNet layers + the logits row (n_vocab f32) + the hidden
+// row (n_embd f32). The slot re-check after loading and the RAM tier's entry stride both use it.
+std::uint64_t ckptBytes(std::uint64_t state, std::uint32_t n_vocab, std::uint32_t n_embd);
+// The automatic RAM tier's floor: one max-context entry (slot_ctx tokens of f16 KV + n_ck checkpoints of ck_stride
+// bytes) in whole GiB, as MiB (entry_mb), and max(auto_min_mb, entry_mb) (floor_mb).
+struct RamFloor {
+    std::uint64_t entry_mb = 0;
+    std::uint64_t floor_mb = 0;
+};
+RamFloor ramFloor(std::uint32_t slot_ctx, std::uint64_t kv_bytes_per_token_f16, std::size_t n_ck, std::uint64_t ck_stride,
+                  std::uint64_t auto_min_mb);
+
 // The "startup" object of GET /props and GET /health (effective values after the startup fit).
 struct StartupInfo {
     std::uint32_t ctx_per_request = 0, pool_tokens = 0, parallel = 0;

@@ -104,6 +104,10 @@ BatchDrafts defaultBatchDrafts(bool moe);
 // WHIRL_MTP_BATCH_DRAFTS=d1,d2,...: entry k (from 1) for k slots; empty fields are skipped, a value that is not a number
 // is 1, each is capped at max_drafts, the slots after the last value keep the last value.
 BatchDrafts batchDraftsFrom(BatchDrafts base, const std::string& text);
+// The automatic MTP draft count (cost model) on or off, whirl-server's and the CLI's one rule (arch025-lane1 leg 8: each
+// wrote it, 5728296 server_main.cpp:744 / cli/decode.cpp:458-463): WHIRL_MTP_ADAPT set -> on exactly when it is "auto";
+// else the device default (MtpDefaults::automatic), unless the draft count was given (an explicit count stays fixed).
+bool mtpAutoMode(bool def_automatic, bool drafts_given, bool adapt_set, bool adapt_auto);
 
 struct DraftAccept {
     std::array<float, max_ng_drafts> alpha;

@@ -165,6 +165,10 @@ BatchDrafts defaultBatchDrafts(bool moe) {
     return {0, 8, 7, 4, 3, 2, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0};
 }
 
+bool mtpAutoMode(bool def_automatic, bool drafts_given, bool adapt_set, bool adapt_auto) {
+    return adapt_set ? adapt_auto : (def_automatic && !drafts_given);
+}
+
 BatchDrafts batchDraftsFrom(BatchDrafts batch_drafts, const std::string& s) {
     std::size_t k = 1, p = 0;
     while (p < s.size() && k <= gdn_max_seg) {

@@ -8,6 +8,7 @@
 #include "whirl/model_types.h"  // qwen35::max_drafts, qwen35::gdn_max_seg
 
 #include <algorithm>
+#include <cctype>
 #include <exception>
 #include <limits>
 
@@ -225,6 +226,23 @@ ResolvedConfig resolveServerConfig(Options opt, std::optional<std::string> mode_
 void checkKvSsdDirEnv(const Options& opt, const std::optional<std::string>& kv_ssd_dir_env) {
     if (!opt.kv_ssd_dir && kv_ssd_dir_env && kv_ssd_dir_env->empty())
         throw ArgError("WHIRL_KV_SSD_DIR is empty (give a folder or remove the variable; to turn the SSD tier off use --kv-ssd-gb 0 or --kv-ssd-mode off)");
+}
+
+
+std::string servedModelName(const std::string& file_name, const std::optional<std::string>& alias) {
+    std::string name = alias ? *alias : file_name;
+    if (!alias && name.size() > 5) {
+        std::string tail = name.substr(name.size() - 5);
+        for (char& c : tail) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (tail == ".gguf") name = name.substr(0, name.size() - 5);
+    }
+    return name;
+}
+
+std::string kvSsdMode(const std::optional<std::string>& cli, const std::optional<std::string>& env) {
+    std::string ssd_mode = cli.value_or(env.value_or("shutdown"));
+    if (ssd_mode != "always" && ssd_mode != "off") ssd_mode = "shutdown";
+    return ssd_mode;
 }
 
 }  // namespace whirl::server

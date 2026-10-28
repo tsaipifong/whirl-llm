@@ -454,14 +454,13 @@ ChatOpts mtpOpts(const q::Model& model, ChatOpts base, u32* drafts_out) {
     base.mtp_adapt = def.adapt;
     base.ngram_min = def.ngram_min;
     base.ngram_slope = def.ngram_slope;
-    // an explicit draft count is used as is (fixed) unless WHIRL_MTP_ADAPT asks otherwise
-    base.mtp_auto = def.automatic && !dv;
     base.mtp_p_min = st::mtpPmin(base.mtp_p_min);
     base.mtp_n_min = st::mtpNmin(base.mtp_n_min, settingsWarn);
-    if (const whirl::settings::MtpAdapt ad = whirl::settings::mtpAdapt(); ad.set) {  // (the server's rule, arch025-N15)
-        base.mtp_auto = ad.automatic;
-        base.mtp_adapt = ad.adapt;
-    }
+    const whirl::settings::MtpAdapt ad = whirl::settings::mtpAdapt();  // (the server's rule, arch025-N15)
+    if (ad.set) base.mtp_adapt = ad.adapt;
+    // an explicit draft count is used as is (fixed) unless WHIRL_MTP_ADAPT asks otherwise (q::mtpAutoMode, whirl-server's
+    // rule too; arch025-lane1 leg 8)
+    base.mtp_auto = q::mtpAutoMode(def.automatic, dv.has_value(), ad.set, ad.automatic);
     base.ngram = st::ngram(base.ngram);
     base.ngram_min = st::ngramMin(base.ngram_min, settingsWarn);
     base.ngram_slope = st::ngramSlope(base.ngram_slope);
