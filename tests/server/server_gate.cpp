@@ -2383,14 +2383,19 @@ bool visPoolOk(const VisPoolFacts& f, std::string& d) {
     return std::abs(static_cast<double>(drop) - want) <= static_cast<double>(jitter + page);
 }
 
-// (2) second turn of the 1080p conversation on the main server: it resumes at the end of the first turn's reply
-// ('gen-end' checkpoint, cached >= the first turn's prompt). In precise that resume is cold-exact (COLD-RESUME), so the
-// answer == the cold answer is the gate. In balance / fast the history from the gen-end checkpoint was written by the
-// decode kernels: numerically equivalent to a cold prefill, not bitwise (CACHEBAL, kv-and-caching.md section 5), so the
-// text is information here and the resumed state is gated by the restart verify line below (KL bound + same top-1),
-// which measures the same state (the restart restores this turn's prompt-end entry).
-bool visTurn2Ok(bool precise, const ChatResult& e2, const ChatResult& cold, std::int64_t first_prompt) {
-    return answered(e2) && e2.cached >= first_prompt && (!precise || sameText(e2, cold));
+// (2) second turn of the 1080p conversation on the main server. balance / fast: it resumes at the end of the first
+// turn's reply ('gen-end' checkpoint, cached >= the first turn's prompt); that history was written by the decode
+// kernels: numerically equivalent to a cold prefill, not bitwise (CACHEBAL, kv-and-caching.md section 5), so the text
+// is information here and the resumed state is gated by the restart verify line below (KL bound + same top-1), which
+// measures the same state (the restart restores this turn's prompt-end entry). precise (COLD-RESUME, 99f69a1): a
+// request resumes only at a checkpoint on its own cold schedule that prefill produced, never at gen-end; for this
+// prompt that is the shared image-end checkpoint (img_ck = the first turn's cached, 2045 on Swift: the first turn's
+// prompt-end @2066 is inside the second turn's last schedule chunk), so the gate is cached >= img_ck (it did resume)
+// and the answer == cold, bitwise (visTurn2Ok's caller checks the text as its own line in precise).
+bool visTurn2Ok(bool precise, const ChatResult& e2, const ChatResult& cold, std::int64_t first_prompt, std::int64_t img_ck) {
+    if (!answered(e2)) return false;
+    if (precise) return img_ck > 0 && e2.cached >= img_ck && sameText(e2, cold);
+    return e2.cached >= first_prompt;
 }
 
 // (3) restart: the second turn restored from the SSD. precise: the answer == cold (bitwise by COLD-RESUME). balance /
@@ -2406,6 +2411,87 @@ bool visRestartOk(bool precise, std::size_t n_restored, std::int64_t cached, con
     for (const auto& x : v)
         d += std::format("; max abs diff {:.4f}, KL {:.2e}, top1 {}", x.maxd, x.kl, x.top1_same ? "same" : "DIFFERENT");
     return base && v.size() == 1 && cacheVerifyOk(v[0]);
+}
+
+// (4) idle release (arch025-visfix item 4). The hipMemGetInfo delta after the release counts memory the HIP runtime
+// keeps as well as WHIRL's. Integrated GPU (8060S), Swift-1.5 MXFP4-A balance, 2026-10-28/29: 18.0 MiB in 5 runs (visab
+// A/B/B2, visfix rg_vis, visrel d_alloc), flat over the later cycles; without gdnwmma / h16 8.8 (= the 10-14 value, which
+// was measured on Qwen3.8-27B Q4_K_M, a non-product model, and set the old 16 MiB); Q4_K_M with gdnwmma 18.0; no
+// prefix cache 16.6. The alloc log of the same run shows WHIRL's own live device bytes unchanged at every release
+// (+0 bytes; each encoder cycle frees its 930652416 + 49408 B), so the step at the first long prefill is runtime memory
+// (consistent with the per-queue scratch growing for gdn_sx_scan, the largest private segment in the gfx1151 code
+// object, 1092 B). The integrated limit is therefore 24 MiB (measured 18.0 + margin) and WHIRL's own memory is checked
+// exactly from the alloc log (visAllocOk). Discrete: 8 MiB as before (R9700 0.0).
+constexpr double kVisReleaseIntegratedMiB = 24.0;
+double visReleaseLimitMiB(hip::MemClass c) { return c == hip::MemClass::integrated ? kVisReleaseIntegratedMiB : hip::releaseLimitMiB(c); }
+
+// WHIRL's live device bytes after each encoder release, from a whirl-server alloc log with the event list
+// (WHIRL_ALLOC_LOG + WHIRL_ALLOC_LOG_RAW=server; src/hip/alloc_log.h). Encoder blocks: device allocations >= 256 MiB of
+// a size allocated at least twice (the encoder weights, re-allocated at every load; the startup buffers are allocated
+// once and freed only at exit). The live bytes are sampled right after each such block's free (a release). Every
+// WHIRL-owned leak between two releases changes them.
+struct VisAllocFacts {
+    bool list_on = false;
+    std::vector<std::int64_t> live;  // at each release point, in order
+};
+VisAllocFacts visAllocFacts(const std::vector<std::string>& lines) {
+    VisAllocFacts f;
+    static const std::regex ra(R"(^(\d+) dev (\d+) #(\d+)$)"), rf(R"(^(\d+) free #(\d+|\?) (\d+)$)");
+    struct Ev {
+        bool alloc;
+        long long ord, bytes;
+    };
+    std::vector<Ev> ev;
+    for (const auto& l0 : lines) {
+        std::string l = l0;
+        while (!l.empty() && (l.back() == '\r' || l.back() == '\n' || l.back() == ' ')) l.pop_back();
+        if (l == "# list on") f.list_on = true;
+        std::smatch m;
+        if (std::regex_match(l, m, ra)) ev.push_back({true, std::stoll(m[3].str()), std::stoll(m[2].str())});
+        else if (std::regex_match(l, m, rf)) ev.push_back({false, m[2].str() == "?" ? -1 : std::stoll(m[2].str()), std::stoll(m[3].str())});
+    }
+    // encoder sizes: >= 256 MiB, allocated again after a block of that size was freed (the startup buffers, also
+    // several of one size, are freed only at exit and never re-allocated)
+    std::map<long long, int> size_count;  // 2 = re-allocated after a free
+    {
+        std::map<long long, bool> freed;
+        for (const Ev& e : ev) {
+            if (e.bytes < (256ll << 20)) continue;
+            if (!e.alloc) freed[e.bytes] = true;
+            else if (freed[e.bytes]) size_count[e.bytes] = 2;
+        }
+    }
+    // sampled right after each encoder block's free (the release frees the weights block first, then its small row
+    // buffer, the same order every cycle; a run-of-frees sample merged the last release with the exit teardown on the
+    // real d_alloc log, whose only separator was a host free)
+    std::map<long long, long long> live;
+    long long sum = 0;
+    for (const Ev& e : ev) {
+        if (e.alloc) {
+            live[e.ord] = e.bytes;
+            sum += e.bytes;
+            continue;
+        }
+        if (auto it = live.find(e.ord); it != live.end()) {
+            const long long b = it->second;
+            sum -= b;
+            live.erase(it);
+            if (b >= (256ll << 20) && size_count[b] >= 2) f.live.push_back(sum);
+        }
+    }
+    return f;
+}
+bool visAllocOk(const VisAllocFacts& f, std::size_t min_releases, std::string& d) {
+    if (!f.list_on) {
+        d = "alloc log without the event list (WHIRL_ALLOC_LOG_RAW=server not applied)";
+        return false;
+    }
+    d = std::format("{} encoder release(s), WHIRL live device bytes:", f.live.size());
+    for (auto x : f.live) d += std::format(" {}", x);
+    if (f.live.size() < min_releases) return false;
+    for (auto x : f.live)
+        if (x != f.live[0]) return false;
+    return true;
 }
 
 void suiteVis() {
@@ -2475,9 +2561,15 @@ void suiteVis() {
     const std::string ssd = g.work + "\\vis_gate_ssd";
     std::error_code ec;
     fs::remove_all(widen(ssd), ec);
+    const std::string vis_alloc = g.work + "\\vis_alloc";
+    fs::remove_all(widen(vis_alloc), ec);
+    fs::create_directories(widen(vis_alloc), ec);
     {
         auto env = kv;
         env["WHIRL_KV_SSD_DIR"] = ssd;
+        // item 4: WHIRL's own device allocations, checked exactly at every encoder release after this server stops
+        env["WHIRL_ALLOC_LOG"] = vis_alloc;
+        env["WHIRL_ALLOC_LOG_RAW"] = "server";
         auto args = mm;
         args.insert(args.end(), {"--vis-idle-s", "8"});
         ServerLease s("vis_main", args, env, false);
@@ -2520,12 +2612,26 @@ void suiteVis() {
         auto e2 = ask(m_1080b2, 64);
         {
             const bool same = sameText(e2, ref["s1080b2"]);
-            check(precise ? "vis: 1080p conversation, second turn: resumed (cached >= first turn), == cold"
+            check(precise ? "vis: 1080p conversation, second turn: resumed at a cold-exact checkpoint (cached >= the image-end "
+                            "checkpoint; COLD-RESUME), == cold"
                           : "vis: 1080p conversation, second turn: resumed (cached >= first turn; state gated by the restart verify)",
-                  visTurn2Ok(precise, e2, ref["s1080b2"], e.prompt), std::format("cached {} of {}", e2.cached, e2.prompt));
-            if (!precise)
+                  visTurn2Ok(precise, e2, ref["s1080b2"], e.prompt, e.cached),
+                  std::format("cached {} of {} (first turn {} of {})", e2.cached, e2.prompt, e.cached, e.prompt));
+            if (precise) {
+                // the text on its own line: the one thing precise never gives up (bitwise == cold)
+                check("vis: 1080p conversation, second turn == cold, bitwise (precise)", same, brief(e2));
+                // COLD-RESUME sends this turn through the shared image-end checkpoint (2045 tok, under the RAM tier's
+                // 2048-token minimum, so never a tier entry) into a fresh slot entry, which CLOSE-REUSED does not write
+                // at close (not reused). The same question again resumes that entry in place from its own prompt-end
+                // (on its schedule: cold-exact), which marks it reused, so the close flush writes it and the restart
+                // check below restores an image entry from the SSD in precise too.
+                auto e3 = ask(m_1080b2, 64);
+                check("vis: 1080p conversation, second turn asked again: resumed in place (cached >= prompt - 1), == cold (precise)",
+                      sameText(e3, ref["s1080b2"]) && e3.cached >= e3.prompt - 1, std::format("cached {} of {}", e3.cached, e3.prompt));
+            } else {
                 logLine(std::format("INFO vis: 1080p second turn (gen-end resume) == cold: {} (not a gate outside precise: numerically "
                                     "equivalent, not bitwise)", same ? "equal" : "differs"));
+            }
         }
         // one image request next to three text requests
         std::vector<std::function<ChatResult()>> jobs = {[&] { return ask(m_dialog, 160); },
@@ -2541,7 +2647,7 @@ void suiteVis() {
         // idle release
         const bool rel = s->waitLog("encoder released", 1, 40);
         const auto delta = logReal(*s.s, R"(encoder released; VRAM free .* delta (-?[\d.]+) MiB)");
-        const double rel_lim = hip::releaseLimitMiB(mcls);
+        const double rel_lim = visReleaseLimitMiB(mcls);
         check("vis: idle release: VRAM back to the level before the first image (device-class limit)", rel && delta && std::abs(*delta) <= rel_lim,
               std::format("delta {} MiB (limit {:.0f} MiB)", delta ? *delta : -1.0, rel_lim));
         auto f = ask(m_shapes, 160);
@@ -2565,6 +2671,21 @@ void suiteVis() {
         std::this_thread::sleep_for(std::chrono::seconds(3));
         s->waitTierIdle(60);  // pending SSD writes done before the stop
     }
+    {
+        // item 4: the vis_main alloc log (written at its exit): WHIRL's live device bytes equal at every encoder release
+        std::vector<std::string> al;
+        for (const auto& de : fs::directory_iterator(widen(vis_alloc), ec)) {
+            std::istringstream in(readFile(narrow(de.path().wstring())));
+            std::vector<std::string> ls;
+            for (std::string l; std::getline(in, l);) ls.push_back(l);
+            if (ls.size() > 1 && ls[1].find("server_vis_main") != std::string::npos) al = std::move(ls);
+        }
+        std::string ad;
+        const bool aok = !al.empty() && visAllocOk(visAllocFacts(al), 3, ad);
+        check("vis: WHIRL-owned device memory back to the same bytes at every encoder release (alloc log)", aok,
+              al.empty() ? std::string("no alloc log of vis_main in ") + vis_alloc : ad);
+    }
+    fs::remove_all(widen(vis_alloc), ec);
     {
         auto env = kv;
         env["WHIRL_KV_SSD_DIR"] = ssd;
@@ -2921,15 +3042,31 @@ int selfTest() {
         t2.prompt = t2same.prompt = 2110;
         t2.cached = t2same.cached = 2086;
         check("selftest: vis turn 2, balance, resumed 2086 >= 2066, text != cold -> ok (state gated by the restart verify)",
-              visTurn2Ok(false, t2, cold, 2066));
+              visTurn2Ok(false, t2, cold, 2066, 2045));
         ChatResult t2short = t2;
         t2short.cached = 2045;
-        check("selftest: vis turn 2, balance, resumed only at the image (2045 < 2066) -> not ok", !visTurn2Ok(false, t2short, cold, 2066));
+        check("selftest: vis turn 2, balance, resumed only at the image (2045 < 2066) -> not ok", !visTurn2Ok(false, t2short, cold, 2066, 2045));
         ChatResult t2err = mk(500, "");
         t2err.cached = 2086;
-        check("selftest: vis turn 2, balance, failed request -> not ok", !visTurn2Ok(false, t2err, cold, 2066));
-        check("selftest: vis turn 2, precise, text != cold -> not ok (bitwise by COLD-RESUME)", !visTurn2Ok(true, t2, cold, 2066));
-        check("selftest: vis turn 2, precise, text == cold, resumed -> ok", visTurn2Ok(true, t2same, cold, 2066));
+        check("selftest: vis turn 2, balance, failed request -> not ok", !visTurn2Ok(false, t2err, cold, 2066, 2045));
+        check("selftest: vis turn 2, precise, text != cold -> not ok (bitwise by COLD-RESUME)", !visTurn2Ok(true, t2, cold, 2066, 2045));
+        check("selftest: vis turn 2, precise, text == cold, resumed -> ok", visTurn2Ok(true, t2same, cold, 2066, 2045));
+        // precise on the R9700 / 8060S 2026-10-28: resumed at the image-end checkpoint 2045 (COLD-RESUME), not at gen-end
+        ChatResult p2 = ok2;
+        p2.prompt = 2110;
+        p2.cached = 2045;
+        check("selftest: vis turn 2, precise, resumed at the image-end checkpoint 2045 of 2110, text == cold -> ok",
+              visTurn2Ok(true, p2, cold, 2066, 2045));
+        ChatResult p2cold = p2;
+        p2cold.cached = 0;
+        check("selftest: vis turn 2, precise, not resumed at all (cached 0) -> not ok", !visTurn2Ok(true, p2cold, cold, 2066, 2045));
+        ChatResult p2part = p2;
+        p2part.cached = 1024;
+        check("selftest: vis turn 2, precise, resumed before the image end (1024 < 2045) -> not ok", !visTurn2Ok(true, p2part, cold, 2066, 2045));
+        check("selftest: vis turn 2, precise, first turn not cached (img_ck 0) -> not ok", !visTurn2Ok(true, p2, cold, 2066, 0));
+        ChatResult p2diff = p2;
+        p2diff.content = "different";
+        check("selftest: vis turn 2, precise, resumed at 2045 but text != cold -> not ok", !visTurn2Ok(true, p2diff, cold, 2066, 2045));
 
         // restart: verify lines as the server writes them
         const auto vbal = parseCacheVerify("2026-10-28 21:14:15.700 I req 1 | slot 0 | prefix-cache verify: cached vs from-scratch prefill "
@@ -2948,6 +3085,47 @@ int selfTest() {
               vbal && !visRestartOk(false, 1, 2110, {*vbal}, false, rd), rd);
         check("selftest: vis restart, precise, answer == cold, restored -> ok", visRestartOk(true, 1, 2110, {}, true, rd), rd);
         check("selftest: vis restart, precise, answer != cold -> not ok", !visRestartOk(true, 1, 2110, {}, false, rd), rd);
+
+        // item 4: release limits (8060S Swift balance 18.0 MiB; R9700 0.0) and the alloc-log check
+        check("selftest: vis release limit, integrated 18.0 MiB (8060S Swift) -> within, 24.1 -> over",
+              18.0 <= visReleaseLimitMiB(hip::MemClass::integrated) && !(24.1 <= visReleaseLimitMiB(hip::MemClass::integrated)));
+        check("selftest: vis release limit, discrete 0.0 -> within, 8.1 -> over (unchanged 8 MiB)",
+              0.0 <= visReleaseLimitMiB(hip::MemClass::discrete) && !(8.1 <= visReleaseLimitMiB(hip::MemClass::discrete)));
+        // the shape of visrel_8060s d_alloc (alloc_35936_..., events 2525-2575): 4 startup blocks of one size (256 MiB)
+        // freed only at exit, encoder cycles 930652416 + 49408 B, 49408 B row buffers alone, then the teardown
+        auto allocLog = [](int cycles, long long lazy_after_first, long long leak_per_cycle, bool list) {
+            std::vector<std::string> l = {"# whirl alloc log v1", "# cmd: whirl-server.exe --log-file x\\server_vis_main.log"};
+            if (list) l.push_back("# list on");
+            int idx = 0, ord = 0;
+            std::vector<std::pair<int, long long>> keep;
+            auto dev = [&](long long b) {
+                l.push_back(std::format("{} dev {} #{}", idx++, b, ord));
+                return ord++;
+            };
+            auto fr = [&](int o, long long b) { l.push_back(std::format("{} free #{} {}", idx++, o, b)); };
+            for (int k = 0; k < 4; ++k) keep.push_back({dev(268435456), 268435456});
+            keep.push_back({dev(1350861056), 1350861056});
+            for (int c = 0; c < cycles; ++c) {
+                const int w = dev(930652416), r = dev(49408);
+                if (leak_per_cycle > 0) keep.push_back({dev(leak_per_cycle), leak_per_cycle});
+                fr(w, 930652416);
+                fr(r, 49408);
+                const int r2 = dev(49408);
+                fr(r2, 49408);
+                if (c == 0 && lazy_after_first > 0) keep.push_back({dev(lazy_after_first), lazy_after_first});
+            }
+            for (auto [o, b] : keep) fr(o, b);
+            return l;
+        };
+        std::string ad;
+        check("selftest: vis alloc log, 4 encoder cycles, nothing kept (d_alloc shape) -> ok",
+              visAllocOk(visAllocFacts(allocLog(4, 0, 0, true)), 3, ad) && visAllocFacts(allocLog(4, 0, 0, true)).live.size() == 4, ad);
+        check("selftest: vis alloc log, a 16 MiB buffer allocated after the first release and kept (lazy, never freed) -> not ok",
+              !visAllocOk(visAllocFacts(allocLog(4, 16 << 20, 0, true)), 3, ad), ad);
+        check("selftest: vis alloc log, 4 MiB kept per encoder cycle (leak per cycle) -> not ok",
+              !visAllocOk(visAllocFacts(allocLog(4, 0, 4 << 20, true)), 3, ad), ad);
+        check("selftest: vis alloc log, 2 encoder cycles (< 3 releases) -> not ok", !visAllocOk(visAllocFacts(allocLog(2, 0, 0, true)), 3, ad), ad);
+        check("selftest: vis alloc log without the event list -> not ok", !visAllocOk(visAllocFacts(allocLog(4, 0, 0, false)), 3, ad), ad);
     }
     {
         // arch025-k2warn: restart RAM tier vs the largest SSD entry (the 8060S p1 case: 8192 -> 512 MiB, entry 801 MiB)
