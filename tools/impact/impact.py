@@ -534,6 +534,9 @@ def build_report(m, paths, models, archs, tests, reruns, notes, hits):
     steps = set()
     for exe in cpu:
         short = exe.replace("whirl-", "").replace("-tests", "")
+        if short.startswith("iso-"):
+            # arch025-isoall: whirl-iso-<module>-tests runs in release_gate step cpu_iso_<module> (tools/gates/iso_check.py)
+            short = short.replace("-", "_")
         steps.add({"tests": "cpu_tests"}.get(short, f"cpu_{short}"))
     if kt:
         steps.add("kt_full")

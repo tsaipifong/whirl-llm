@@ -13,7 +13,7 @@ M4 prefix_store	repo	-Module prefix_store -NoMapSteps	0	cpu_cache,cpu_device,cpu
 M5 tier_bridge	repo	-Module tier_bridge -NoMapSteps	0	cpu_tier,cpu_device,cpu_server,golden_swift,golden_moe,srv_cache_balance,srv_cache_precise,srv_tier_verify,srv_gpu_select,srv_kvram719	both GPUs.*srv_tier_verify
 M6 protocol	repo	-Module protocol -NoMapSteps	0	cpu_pins,cpu_server,golden_swift,srv_fs_swift,srv_fs_moe	prompt token hash
 M7 engine_gov	repo	-Module engine_gov -NoMapSteps	0	cpu_server,srv_balance,srv_gpu_select,srv_kvram719	vram_hog
-M8 threads: owner checks sit in M2-M5, M7 (c-1: by caller) = their union + the gate log scan (c-1 M8 row)	repo	-Module threads -NoMapSteps	0	cpu_cache,cpu_tier,cpu_device,cpu_server,cpu_logscan_selftest,golden_swift,golden_moe,srv_balance,srv_mt_precise,srv_mt_precise_moe,srv_cache_balance,srv_cache_precise,srv_tier_verify,srv_gpu_select,srv_kvram719	module threads: callers' modules: ckpt_store, page_pool, prefix_store, tier_bridge, engine_gov
+M8 threads: owner checks sit in M2-M5, M7 (c-1: by caller) = their union + the gate log scan (c-1 M8 row)	repo	-Module threads -NoMapSteps	0	cpu_cache,cpu_tier,cpu_device,cpu_server,cpu_logscan_selftest,cpu_iso_threads,golden_swift,golden_moe,srv_balance,srv_mt_precise,srv_mt_precise_moe,srv_cache_balance,srv_cache_precise,srv_tier_verify,srv_gpu_select,srv_kvram719	module threads: callers' modules: ckpt_store, page_pool, prefix_store, tier_bridge, engine_gov
 X contract = full gate	repo	-Module contract -NoMapSteps	0	*	full gate
 dev-only notice printed	repo	-Module ckpt_store -NoMapSteps	0	-	DEV-TIME FAST FEEDBACK ONLY
 two modules = union	repo	-Module protocol,engine_gov -NoMapSteps	0	cpu_pins,cpu_server,golden_swift,srv_balance,srv_fs_swift,srv_fs_moe,srv_gpu_select,srv_kvram719	-
@@ -42,9 +42,9 @@ K2 pass: bf31527 (kv tier dedup race): the map's c-2 steps join the table (+ arc
 K2 block: impact maps the change to another module	repo	-Module protocol -ImpactRange bf31527^..bf31527	2	-	maps the change to tier_bridge
 K2 full: impact says full gate (7ec63b4 fingerprint.cpp in no module)	repo	-Module tier_bridge -ImpactRange 7ec63b4^..7ec63b4	0	*	impact.py says full gate
 K1: -Steps beyond the table get the both-GPU hint	repo	-Module protocol -NoMapSteps -Steps srv_balance	0	cpu_pins,cpu_server,golden_swift,srv_balance,srv_fs_swift,srv_fs_moe	steps added beyond the module table: run on both GPUs, one after the other: srv_balance
-arch025-PL5: platform.fs carries cpu_platform_check	repo	-Module platform.fs -NoMapSteps	0	cpu_tests,cpu_model,cpu_tier,cpu_server,cpu_platform_check,golden_swift,golden_moe,srv_fs_swift,srv_cache_balance,srv_tier_verify	-
-arch025-PL5: platform.proc carries cpu_platform_check	repo	-Module platform.proc -NoMapSteps	0	cpu_tests,cpu_tier,cpu_server,cpu_platform_check,golden_swift,golden_moe,srv_cache_balance,srv_gpu_select,srv_env_e1,srv_env_e3,pkg_smoke	-
-arch025-PL5: platform.sys carries cpu_platform_check	repo	-Module platform.sys -NoMapSteps	0	cpu_tests,cpu_tier,cpu_pins,cpu_platform_check,golden_swift,golden_moe,srv_cache_balance,srv_env_e1,srv_env_e3	-
+arch025-PL5: platform.fs carries cpu_platform_check	repo	-Module platform.fs -NoMapSteps	0	cpu_tests,cpu_model,cpu_tier,cpu_server,cpu_platform_check,cpu_iso_platform_fs,cpu_iso_spec_engine,cpu_iso_spec_policy,cpu_iso_threads,golden_swift,golden_moe,srv_fs_swift,srv_cache_balance,srv_tier_verify	-
+arch025-PL5: platform.proc carries cpu_platform_check	repo	-Module platform.proc -NoMapSteps	0	cpu_tests,cpu_tier,cpu_server,cpu_platform_check,cpu_iso_platform_proc,cpu_iso_spec_engine,cpu_iso_spec_policy,golden_swift,golden_moe,srv_cache_balance,srv_gpu_select,srv_env_e1,srv_env_e3,pkg_smoke	-
+arch025-PL5: platform.sys carries cpu_platform_check	repo	-Module platform.sys -NoMapSteps	0	cpu_tests,cpu_tier,cpu_pins,cpu_platform_check,cpu_iso_platform_sys,golden_swift,golden_moe,srv_cache_balance,srv_env_e1,srv_env_e3	-
 arch025-gaptests G18: server.args carries cpu_emptyroot	repo	-Module server.args -NoMapSteps	0	-	^cpu_emptyroot\s+CPU
 arch025-gaptests G18: server.startup carries cpu_emptyroot	repo	-Module server.startup -NoMapSteps	0	-	^cpu_emptyroot\s+CPU
 arch025-gaptests G19: cli carries cpu_tests	repo	-Module cli -NoMapSteps	0	-	^cpu_tests\s+CPU

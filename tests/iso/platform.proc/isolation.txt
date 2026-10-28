@@ -1,0 +1,17 @@
+# ARCH-1 8.5 isolation check of platform.proc (arch025-isoall): the module's sources, its DECLARED dependencies and the
+# ONLY headers they may see. Format: tests/sampling/isolation.txt; read by cmake/iso.cmake and tools/gates/iso_check.py
+# (and tools/impact/impact_build.py for the exe's sources).
+# declared dependencies: none (Win32 only)
+module    platform.proc
+exe       whirl-iso-platform-proc-tests
+mutate    src/platform/proc_win.cpp
+mutsym    hip
+mutsym    log
+mutsym    now
+# module sources
+src       src/platform/proc_win.cpp
+# headers (include closure of the sources above)
+hdr       src/platform/proc.h
+# test program
+testsrc   tests/iso/platform.proc/proc_tests.cpp
+testhdr   tests/iso/iso_test.h

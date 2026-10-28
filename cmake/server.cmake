@@ -55,9 +55,10 @@ add_library(whirl_sampling STATIC
   ${CMAKE_SOURCE_DIR}/src/sampling/acceptor.cpp)
 target_include_directories(whirl_sampling PUBLIC ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(whirl_sampling PUBLIC whirl)
-# isolation check (ARCH-1 8.5, arch025-X3): the same sources built from a copy that sees only the declared headers,
-# and whirl-sampling-tests linked against that alone (no whirl, no server, no GGUF)
-include(${CMAKE_CURRENT_LIST_DIR}/sampling_iso.cmake)
+# isolation check (ARCH-1 8.5, arch025-X3 / arch025-isoall): every isolated module (tests/sampling/isolation.txt,
+# tests/iso/*/isolation.txt) built from a copy that sees only its declared headers, its test program linked against
+# those objects alone (no whirl, no server, no GGUF)
+include(${CMAKE_CURRENT_LIST_DIR}/iso.cmake)
 
 # ---------------------------------------------------------------------------
 # OpenAI-compatible server (src/server)
