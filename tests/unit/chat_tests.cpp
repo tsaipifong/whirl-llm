@@ -6,6 +6,7 @@
 #include "../test_env.h"
 #include "whirl/json.h"
 #include "whirl/chat.h"
+#include "whirl/json_fields.h"  // arch025-N6 lane 1 leg 7 (testJsonFields)
 
 #include <algorithm>
 #include <atomic>
@@ -192,6 +193,127 @@ void testChat() {
     CHECK(chat::detectTemplate("{% if x %}") == chat::TemplateKind::b);
 }
 
+// arch025-N6 (lane 1 leg 7): the JSON request field helpers chat_template.cpp (json::Value, Value::get) and protocol.cpp
+// (json::Object, Object::find) each wrote out -> one copy, whirl/json_fields.h. References: verbatim copies of both
+// former versions (f7e11d7 src/chat/chat_template.cpp:15-53, src/server/protocol.cpp:18-50 / :74-85). Pointers are compared
+// for identity (the same member of the same document), errors by their message.
+namespace oldjf {
+constexpr std::string_view k_ws = " \t\r\n\x0b\x0c";
+std::string_view c_trimWs(std::string_view s) {
+    const std::size_t b = s.find_first_not_of(k_ws);
+    if (b == std::string_view::npos) return {};
+    const std::size_t e = s.find_last_not_of(k_ws);
+    return s.substr(b, e - b + 1);
+}
+[[noreturn]] void bad(const std::string& msg) { throw chat::RequestError(msg); }
+const json::Value* c_getField(const json::Value& obj, std::string_view key) {
+    const json::Value* v = obj.get(key);
+    return (v && !v->isNull()) ? v : nullptr;
+}
+const std::string* c_getStr(const json::Value& obj, std::string_view key) {
+    const json::Value* v = c_getField(obj, key);
+    return (v && v->isString()) ? &v->asString() : nullptr;
+}
+std::optional<bool> c_getBool(const json::Value& obj, std::string_view key, const char* err) {
+    const json::Value* v = c_getField(obj, key);
+    if (!v) return std::nullopt;
+    if (!v->isBool()) bad(err);
+    return v->asBool();
+}
+const json::Value* p_getField(const json::Object& obj, std::string_view key) {
+    const json::Value* v = obj.find(key);
+    if (!v || v->isNull()) return nullptr;
+    return v;
+}
+std::optional<double> p_getNum(const json::Object& obj, std::string_view key, const char* msg) {
+    const json::Value* v = p_getField(obj, key);
+    if (!v) return std::nullopt;
+    switch (v->kind()) {
+        case json::Value::Kind::integer: return static_cast<double>(v->asInt());
+        case json::Value::Kind::number: return v->asDouble();
+        case json::Value::Kind::big_integer: return v->asDouble();
+        default: throw chat::RequestError(msg);
+    }
+}
+std::optional<bool> p_getBool(const json::Object& obj, std::string_view key, const char* msg) {
+    const json::Value* v = p_getField(obj, key);
+    if (!v) return std::nullopt;
+    if (!v->isBool()) throw chat::RequestError(msg);
+    return v->asBool();
+}
+const std::string* p_getStr(const json::Object& obj, std::string_view key) {
+    const json::Value* v = p_getField(obj, key);
+    if (!v || !v->isString()) return nullptr;
+    return &v->asString();
+}
+std::string_view p_trimLeftWs(std::string_view s) {
+    const std::size_t a = s.find_first_not_of(k_ws);
+    return a == std::string_view::npos ? std::string_view() : s.substr(a);
+}
+std::string_view p_trimRightWs(std::string_view s) {
+    const std::size_t b = s.find_last_not_of(k_ws);
+    return b == std::string_view::npos ? std::string_view() : s.substr(0, b + 1);
+}
+std::string_view p_trimWs(std::string_view s) { return p_trimRightWs(p_trimLeftWs(s)); }
+
+// "v:<value>" / "e:<message>" / "none"
+template <class F>
+std::string outcome(F f) {
+    try {
+        const auto r = f();
+        if (!r) return "none";
+        return "v:" + std::format("{}", *r);
+    } catch (const chat::RequestError& e) {
+        return std::string("e:") + e.what();
+    }
+}
+bool sameView(std::string_view a, std::string_view b) { return a.data() == b.data() && a.size() == b.size(); }
+}  // namespace oldjf
+
+void testJsonFields() {
+    const char* const docs[] = {
+        R"({"a":1,"b":null,"c":"s","d":true,"e":2.5,"f":[1],"g":{"x":1},"h":123456789012345678901234567890,"i":false,"j":"","c":"dup"})",
+        R"({})", R"({"":"empty key","a":null})", R"([1,2])", R"("str")", R"(null)", R"(5)", R"(true)"};
+    const char* const keys[] = {"a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "zz", "", "x"};
+    std::size_t n = 0, objs = 0;
+    for (const char* d : docs) {
+        const json::Value doc = json::parse(d);
+        for (const char* k : keys) {
+            // json::Value: == chat_template's former code on every value (an object or not)
+            CHECK(chat::getField(doc, k) == oldjf::c_getField(doc, k));
+            CHECK(chat::getStr(doc, k) == oldjf::c_getStr(doc, k));
+            CHECK_EQ(oldjf::outcome([&] { return chat::getBool(doc, k, "bad bool"); }),
+                     oldjf::outcome([&] { return oldjf::c_getBool(doc, k, "bad bool"); }));
+            ++n;
+            if (!doc.isObject()) continue;
+            // json::Object: == protocol's former code; and the Value overload == the Object one on an object
+            const json::Object& o = doc.asObject();
+            CHECK(chat::getField(o, k) == oldjf::p_getField(o, k));
+            CHECK(chat::getField(o, k) == chat::getField(doc, k));
+            CHECK(chat::getStr(o, k) == oldjf::p_getStr(o, k));
+            CHECK_EQ(oldjf::outcome([&] { return chat::getBool(o, k, "bad bool"); }),
+                     oldjf::outcome([&] { return oldjf::p_getBool(o, k, "bad bool"); }));
+            CHECK_EQ(oldjf::outcome([&] { return chat::getNum(o, k, "bad num"); }),
+                     oldjf::outcome([&] { return oldjf::p_getNum(o, k, "bad num"); }));
+            ++objs;
+        }
+    }
+    const std::string texts[] = {"",        " ",      " \t\r\n\x0b\x0c", "a",       " a ",  "\ta b\n",    "x\x0b",
+                                 "\x0c" "y", "  in  ner  ", "\xc2\xa0z\xc2\xa0", "\r\n\r\n", "no-ws", std::string("a\0b", 3)};
+    std::size_t nt = 0;
+    for (const std::string& t : texts) {
+        const std::string_view s(t);
+        CHECK(oldjf::sameView(chat::trimWs(s), oldjf::c_trimWs(s)));
+        CHECK(oldjf::sameView(chat::trimWs(s), oldjf::p_trimWs(s)));
+        CHECK(oldjf::sameView(chat::trimLeftWs(s), oldjf::p_trimLeftWs(s)));
+        CHECK(oldjf::sameView(chat::trimRightWs(s), oldjf::p_trimRightWs(s)));
+        ++nt;
+    }
+    // the image placeholder: one copy (chat.h) for the template and `whirl chat --image` (the CLI's former literal)
+    CHECK(chat::k_image_placeholder == std::string_view("<|vision_start|><|image_pad|><|vision_end|>"));
+    std::printf("json fields: %zu value cases, %zu object cases, %zu trim cases vs the chat_template / protocol copies\n", n, objs, nt);
+}
+
 }  // namespace
 
 // the old main()'s calls of this module, in their order (tests/unit/unit_tests.cpp ORDER lists all modules)
@@ -199,6 +321,7 @@ const whirl::test::Suite& unitSuite_chat() {
     static const whirl::test::Suite s{"chat",
                                       {
                                           {"testChat", [] { testChat(); }},
+                                          {"testJsonFields", [] { testJsonFields(); }},
                                       },
                                       nullptr};
     return s;

@@ -59,6 +59,7 @@ const OrderRow kOrder[] = {
     {"gguf", "testGgufHardening"},
     {"tokenizer", "testTokenizerByteTokens"},
     {"chat", "testChat"},
+    {"chat", "testJsonFields"},
     {"mem.fit", "testVramLimit"},
     {"mem.fit", "testCardDefaults"},
     {"contract", "testNumerics"},
