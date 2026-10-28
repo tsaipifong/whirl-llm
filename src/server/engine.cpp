@@ -7,6 +7,7 @@
 #include "cache/tier_adapter.h"
 #include "log.h"
 #include "whirl/dflash_policy.h"
+#include "spec/spec_rules.h"// the speculative-decoding rules shared with the CLI (arch025-R12cli)
 
 #include <algorithm>
 #include <cmath>
@@ -1314,11 +1315,9 @@ void Engine::finishPrefill(Slot& sl) {
 
 // relaxacc repetition guard: would keeping draft dr[acc] (after sl.next and dr[0..acc)) end in
 // an n-gram already in the slot's recent tokens?
+// (the rule is shared with the CLI: spec::rules::relaxRepeats, src/spec/spec_rules.h)
 bool Engine::relaxRepeats(const Slot& sl, std::span<const std::uint32_t> dr, std::uint32_t acc) const {
-    std::array<std::uint32_t, qwen35::max_ng_drafts + 2> tail{};
-    tail[0] = sl.next;
-    for (std::uint32_t r = 0; r <= acc; ++r) tail[r + 1] = dr[r];
-    return relax::extendsRepeat(std::span<const std::uint32_t>(sl.cache_tokens), std::span<const std::uint32_t>(tail.data(), acc + 2));
+    return spec::rules::relaxRepeats(std::span<const std::uint32_t>(sl.cache_tokens), sl.next, dr, acc);
 }
 
 std::uint32_t Engine::pickDrafts(std::span<Slot* const> act) {
@@ -1398,7 +1397,7 @@ bool Engine::relaxes(const Cycle& cy, std::size_t k) const {
 std::uint32_t Engine::verifyRoom(const Slot& sl, std::uint32_t lim) const {
     const std::uint64_t mapped = static_cast<std::uint64_t>(sl.pages.size()) * kv_page;
     const std::uint64_t a1 = mapped > static_cast<std::uint64_t>(sl.pos) + 1 ? mapped - (sl.pos + 1ull) : 0;
-    const std::uint64_t a2 = ctx_ > sl.pos + 2ull ? ctx_ - (sl.pos + 2ull) : 0;
+    const std::uint64_t a2 = spec::rules::ctxRoom(sl.pos, ctx_);
     return static_cast<std::uint32_t>(std::min({static_cast<std::uint64_t>(lim), a1, a2}));
 }
 
@@ -1429,9 +1428,9 @@ void Engine::dropOutOfRoom(Cycle& cy, std::span<Slot* const> act_in) {
     // slots out of context room end here
     const std::uint32_t nd_room = draftRoom();
     for (Slot* sl : act_in) {
-        const bool room_ok = sl->pos + nd_room + 1 < ctx_ && ensurePages(*sl, sl->pos + nd_room + 2);
+        const bool room_ok = spec::rules::decodeRoom(sl->pos, nd_room, ctx_) && ensurePages(*sl, sl->pos + nd_room + 2);
         if (!room_ok) {
-            if (sl->pos + nd_room + 1 < ctx_)
+            if (spec::rules::decodeRoom(sl->pos, nd_room, ctx_))
             {
                 logW("req {} | slot {} | kv pool exhausted at {} tokens (every page belongs to a running request); "
                      "finish_reason length, finish_cause kv_pool_exhausted",
@@ -1461,11 +1460,9 @@ void Engine::draftLimits(Cycle& cy) {
 void Engine::ngramDrafts(Cycle& cy) {
     const qwen35::DraftTiming& dtm = dtiming_[std::min<std::size_t>(cy.A, gdn_max_seg)];
     if (opt_.ngram && (opt_.use_mtp || opt_.use_dflash)) {
-        std::uint32_t lim = std::min({qwen35::max_ng_drafts, cy.lit_cap / cy.Au, vrows_ / cy.Au > 0 ? vrows_ / cy.Au - 1 : 0u});
-        if (opt_.ngram_max > 0) lim = std::min(lim, opt_.ngram_max);
-        if (!m_.fusedDecode()) lim = std::min(lim, 1u);
+        const std::uint32_t lim = spec::rules::ngramDraftCap(cy.lit_cap, vrows_, cy.Au, opt_.ngram_max, m_.fusedDecode());
         const qwen35::DraftTiming& tm = opt_.use_dflash ? dtm : timing_[std::min<std::size_t>(cy.A, gdn_max_seg)];
-        const std::uint32_t nd0 = std::max(1u, std::min(prev_nd_ > 0 ? prev_nd_ : 3u, draftCap(cy.Au)));
+        const std::uint32_t nd0 = spec::rules::ngramAltDrafts(prev_nd_, draftCap(cy.Au));
         for (std::size_t k = 0; k < cy.A; ++k) {
             if (lim == 0) break;
             Slot& sl = *cy.act[k];
@@ -1488,8 +1485,8 @@ void Engine::ngramDrafts(Cycle& cy) {
                 // against this slot's own last MTP allocation and its effective acceptance (one slot: as before)
                 const std::uint32_t d = sl.d_prev > 0 ? sl.d_prev : nd0;
                 if (auto t = tm.estimate(d)) alt_score = sl.sacc.effective(dpool_).expected(d) / *t;
-            } else if (auto t = tm.estimate(nd0)) {
-                alt_score = sl.dacc.expected(nd0) / *t;
+            } else {
+                alt_score = spec::rules::mtpScore(sl.dacc, tm, nd0);
             }
             cy.ng_ml[k] = mt.mlen;
             cy.ng_n[k] = opt_.ngram_force ? static_cast<std::uint32_t>(mt.n) : sl.ng.choose(mt.n, mt.mlen, alt_score, tm);
@@ -1711,7 +1708,7 @@ void Engine::trainCycle(Cycle& cy) {
         float rows = 0;
         for (std::size_t k = 0; k < cy.A; ++k) rows += static_cast<float>(cy.nd_of[k] + 1);
         const float a = static_cast<float>(cy.A);
-        return 100.0f * (a + opt_.ngram_slope * (rows - a) + 0.03f * static_cast<float>(steps));
+        return spec::rules::synthCycleMs(a, rows, opt_.ngram_slope, steps);
     };
     const float cycle_ms = opt_.relax.on ? synthMs(cy.n_ng == cy.A ? 0 : cy.nd_max) : static_cast<float>(msSince(cy.tc0));
     if (opt_.slot_drafts == 2 && opt_.use_mtp) {

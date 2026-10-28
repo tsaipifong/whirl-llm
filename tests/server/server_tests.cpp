@@ -8932,6 +8932,9 @@ void testConsoleCtrlArm() {
     CHECK_EQ(code, static_cast<DWORD>(1));  // 0 = the Ctrl+C was ignored (restoreCtrlC not called)
 }
 
+// arch025-R12cli route B: the shared speculative-decoding rules (src/spec/spec_rules.h), CLI and server side
+#include "spec_rules_tests.inc"
+
 int main(int argc, char** argv) {
     if (argc == 2 && std::string(argv[1]) == "--child-ctrl-arm") return childCtrlArm();  // arch025-surv helper mode
     whirl::test::clearWhirlEnv();  // FR-TEST P3-11
@@ -9054,6 +9057,15 @@ int main(int argc, char** argv) {
         {"slot_draft_plan", testSlotDraftPlan},
         {"slot_draft_split", testSlotDraftSplit},
         {"slot_draft_cap", testSlotDraftCap},
+        {"spec_rules_d1_server", r12b::testRulesD1Server},
+        {"spec_rules_d1_cli", r12b::testRulesD1Cli},
+        {"spec_rules_d2_server", r12b::testRulesD2Server},
+        {"spec_rules_d2_cli", r12b::testRulesD2Cli},
+        {"spec_rules_d3", r12b::testRulesD3},
+        {"spec_rules_d4", r12b::testRulesD4},
+        {"spec_rules_d6", r12b::testRulesD6},
+        {"spec_rules_d8", r12b::testRulesD8},
+        {"spec_rules_d14", r12b::testRulesD14},
         {"slot_draft_engine_caps", testSlotDraftEngineCaps},  // arch025-mutgap
         {"slot_drafts_one_slot", testSlotDraftsOneSlot},
         {"concurrency_slot2", [] { testConcurrency(4, 12, true, 0, 2); }},

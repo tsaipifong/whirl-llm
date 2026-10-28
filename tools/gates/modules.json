@@ -201,6 +201,8 @@
                    "proof": {"refactor": ["exit_rule", "golden_exact", "move_equal", "host_work", "host_time"]}},
    "spec.engine": {"metrics": ["host.sched.round_us_per_cycle", "host.sched.request_ms"],
                    "proof": {"refactor": ["exit_rule", "golden_exact", "move_equal", "host_work", "host_time"]}},
+   "spec.rules": {"metrics": ["host.sched.round_us_per_cycle", "host.sched.request_ms"],
+                  "proof": {"refactor": ["exit_rule", "golden_exact", "move_equal", "host_work", "host_time"]}},
    "model.arch_registry": {"metrics": [], "metrics_none": "table lookup at load: no bench key",
                            "proof": {"refactor": ["exit_rule", "golden_exact", "startup_sizing"]}},
    "model.qwen35": {"metrics": ["stage.decode_step", "stage.verify", "stage.prefill_chunk"],
@@ -546,6 +548,17 @@
               "whirl-server-tests slot_draft_plan / slot_draft_split / slot_draft_cap / slot_drafts_one_slot / concurrency_slot2*",
               "V-srv: srv_mt_precise / _moe + golden server == the parent exe on both GPUs (draftCap reaches every MTP cycle; WHIRL_SLOT_DRAFTS stays 0 on the GPU)",
               "V-host sched: whirl-host-bench --backend null --suite sched work rows exact vs the parent exe"]
+  },
+  "spec.rules": {
+   "id": "R12cli", "desc": "the speculative-decoding RULES shared by the CLI specDecode (src/cli/decode.cpp) and the server Engine decode phases (src/server/engine.cpp) (src/spec/spec_rules.h, header-only, pure; arch025-R12cli route B, owner 2026-10-28): decodeRoom (context stop, D8), ctxRoom / ngramDraftCap (n-gram draft cap, D3), soloDraftCap (one-sequence MTP draft cap = slotDraftCap for one slot, D14), ngramAltDrafts / mtpScore (the MTP draft count and score an n-gram proposal is weighed against, D2), relaxRepeats (relaxacc repetition guard on prompt + trunk, D1), synthCycleMs (relaxacc synthetic cycle cost, D6); draft acceptance is sampling::Acceptor (module sampling), called by both loops",
+   "paths": ["src/spec/spec_rules.h"], "lands_on": "arch025-r12cli (R12cli)",
+   "steps": ["cpu_server", "golden_swift", "golden_moe", "srv_mt_precise", "srv_mt_precise_moe"],
+   "gpus": {"golden_swift": 2, "golden_moe": 2, "srv_mt_precise": 2, "srv_mt_precise_moe": 2},
+   "callers": "rdeps",
+   "manual": ["whirl-server-tests spec_rules_* (each rule == the f68a9aa engine / decode code verbatim; D1 / D2 CLI side == the server rule; D14 equivalence)",
+              "V-srv: server golden + srv_mt_precise / _moe == the parent exe on both GPUs (server output unchanged in all modes); server object code compared with the parent's (objeq)",
+              "V-cli: CLI golden single / pair / ngram x Swift / Ornith x precise / balance == the parent exe; fast: the changed cases listed, task accuracy vs precise (fast standard); cmp_mtp*; CLI speed vs 0.2.4",
+              "isolation: no per-module iso build yet (arch025-isoall not in int4 at f68a9aa); the header includes spec/policy.h, spec/slot_drafts.h, whirl/model_types.h, whirl/relax_accept.h only"]
   },
   "model.arch_registry": {
    "id": "M5a", "desc": "architecture registry (src/model/arch_registry.*, host-only library whirl_arch, linked by the server core and the model library): ArchName / ArchSizing / ArchModule / ArchTable, findArch / findArchName (explicit tables, no self-registration), the UnsupportedArch text generated from the table (byte-identical to v0.2.4 with the product table), slotStateBytes (the server's per-slot recurrent state + replay rows for the dGPU fit and the UMA check)",
