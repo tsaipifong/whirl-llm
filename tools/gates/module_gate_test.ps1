@@ -44,8 +44,12 @@ function RunGate([string[]]$a) {
 }
 function Listed($out) { @($out | Where-Object { $_ -match "^(\S+)\s+(CPU|GPU)\s*$" } | ForEach-Object { ($_ -split "\s+")[0] }) }
 
-$all = Listed (RunGate @("-List")).out
+$lst = (RunGate @("-List")).out
+$all = Listed $lst
 if ($all.Count -lt 10) { Write-Host "module gate test: plain -List gave $($all.Count) steps"; exit 2 }
+# "@cpu" in a steps cell = every cpu_* step of the gate in gate order (arch025-srctext: impact always selects them all), so a
+# new CPU step does not break the hand-written GPU part of a case (2026-10-28: K2 pass went stale after srctext)
+$cpu = @($lst | Where-Object { $_ -match "^(cpu_\S+)\s+CPU\s*$" } | ForEach-Object { ($_ -split "\s+")[0] })
 $rows = @(Get-Content $Cases | Where-Object { $_ -and -not $_.StartsWith("#") } | Select-Object -Skip 1)
 if ($rows.Count -eq 0) { Write-Host "module gate test: no cases in $Cases"; exit 2 }
 $ok = 0; $bad = 0
@@ -61,7 +65,7 @@ foreach ($r in $rows) {
     if ("$($res.code)" -ne $wantExit) { $why += "exit $($res.code), want $wantExit" }
     $got = Listed $res.out
     if ($wantSteps -ne "-") {
-        $want = if ($wantSteps -eq "*") { $all } else { @($wantSteps -split ",") }
+        $want = if ($wantSteps -eq "*") { $all } else { @($wantSteps -split "," | ForEach-Object { if ($_ -eq "@cpu") { $cpu } else { $_ } }) }
         if (($got -join ",") -ne ($want -join ",")) { $why += "steps [$($got -join ',')], want [$($want -join ',')]" }
     }
     if ($wantLine -ne "-" -and -not ($res.out | Where-Object { $_ -match $wantLine })) { $why += "no line matching '$wantLine'" }
