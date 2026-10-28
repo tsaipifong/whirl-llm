@@ -1662,6 +1662,15 @@ void ServerRun::startTier() {
             tc.expire_s = envU32("KV_SSD_EXPIRE_S", 7 * 24 * 3600);  // test override only
             tc.ssd_shutdown_only = ssd_mode == "shutdown";
             tc.dedup = envU32("KV_SSD_DEDUP", 1) != 0;
+            // arch025-d7 (D7.1, X4 K7): exe identity 0 is the same value for every build whose identity cannot be read,
+            // so an SSD entry of another build (other numerics) would look like this build's: no SSD tier then (no
+            // read, write or clean-up of the directory); the RAM tier never outlives the process and stays on.
+            if (tc.ssd_dir && tier::exeIdentity() == 0) {
+                logW("kv tier: cannot read the size / date of this program's file ({}); SSD tier off (an SSD cache entry "
+                     "of another WHIRL build could not be told apart)",
+                     narrow(platform::proc::exePath()));
+                tc.ssd_dir.reset();
+            }
             // the wake hook must be in place before the IO thread starts
             engine->attachTier(tier_pre.get());
             try {

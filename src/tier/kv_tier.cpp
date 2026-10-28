@@ -51,7 +51,14 @@ std::string fmt(const char* f, A... a) {
     char buf[320];
     const int n = std::snprintf(buf, sizeof buf, f, a...);
     if (n < 0) return {};
-    return std::string(buf, static_cast<std::size_t>(std::min<int>(n, static_cast<int>(sizeof buf) - 1)));
+    if (static_cast<std::size_t>(n) < sizeof buf) return std::string(buf, static_cast<std::size_t>(n));
+    // arch025-d7 (D7.2): a longer message is printed again into a buffer of its size (llama.cpp common/log.cpp does
+    // the same); it was cut at 319 characters
+    std::string s(static_cast<std::size_t>(n) + 1, '\0');
+    const int m = std::snprintf(s.data(), s.size(), f, a...);
+    if (m < 0) return {};
+    s.resize(static_cast<std::size_t>(std::min(m, n)));
+    return s;
 }
 
 double msSince(std::chrono::steady_clock::time_point t0) {
@@ -2493,7 +2500,8 @@ std::uint64_t hashStr(std::uint64_t h0, std::string_view s) {
 
 std::uint64_t exeIdentityOf(const wchar_t* path) {
     pfs::Attributes info;
-    if (!pfs::attributes(path, &info)) return 0;
+    // arch025-d7 (D7.1): long-path form, so a path past MAX_PATH is read whether or not the process is long-path aware
+    if (!pfs::attributes(pfs::longPathForm(path).c_str(), &info)) return 0;
     const std::uint64_t size = info.size;
     const std::uint64_t wt = info.last_write;
     return size * 0x9e3779b97f4a7c15ull ^ wt;

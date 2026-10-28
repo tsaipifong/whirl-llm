@@ -57,9 +57,26 @@ void testUtf8Strict() {
     ISO_CHECK(!fs::utf8ToWideStrict(bad, &w));
 }
 
+// arch025-d7 (D7.1): longPathForm leaves short and already-prefixed paths alone and gives a long path the \\?\ form
+void testLongPathForm() {
+    const std::wstring shortp = L"C:\\whirl\\whirl-server.exe";
+    ISO_CHECK(fs::longPathForm(shortp) == shortp);
+    const std::wstring seg(120, L'q');
+    const std::wstring longp = L"C:\\" + seg + L"\\" + seg + L"\\" + seg + L"\\whirl-server.exe";
+    ISO_CHECK(fs::longPathForm(longp) == L"\\\\?\\" + longp);
+    const std::wstring pre = L"\\\\?\\" + longp;
+    ISO_CHECK(fs::longPathForm(pre) == pre);
+    const std::wstring unc = L"\\\\server\\share\\" + seg + L"\\" + seg + L"\\x.exe";
+    ISO_CHECK(fs::longPathForm(unc) == L"\\\\?\\UNC\\" + unc.substr(2));
+    // made absolute and normalised (\\?\ turns normalisation off): forward slashes and ".." resolved
+    const std::wstring messy = L"C:/" + seg + L"/../" + seg + L"/" + seg + L"/" + seg + L"/a.exe";
+    ISO_CHECK(fs::longPathForm(messy) == L"\\\\?\\C:\\" + seg + L"\\" + seg + L"\\" + seg + L"\\a.exe");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
-    return iso::run("platform.fs", {{"write_read", testWriteRead}, {"fake_recorder", testFakeRecorder}, {"utf8_strict", testUtf8Strict}},
+    return iso::run("platform.fs", {{"write_read", testWriteRead}, {"fake_recorder", testFakeRecorder}, {"utf8_strict", testUtf8Strict},
+                                   {"long_path_form", testLongPathForm}},
                     argc, argv);
 }

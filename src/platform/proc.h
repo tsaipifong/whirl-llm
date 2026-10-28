@@ -36,9 +36,10 @@ inline constexpr int kCtrlC = 0;      // CTRL_C_EVENT
 inline constexpr int kCtrlBreak = 1;  // CTRL_BREAK_EVENT
 inline constexpr int kCtrlClose = 2;  // CTRL_CLOSE_EVENT
 
-// GetModuleFileNameW(nullptr, buf, 1023) into a 1024-character buffer, buf[n] = 0: the path of this executable as
-// v0.2.4 read it (a path of 1023 characters or more comes back truncated to 1022, unchanged on purpose: exeIdentity
-// is an SSD-cache key). "" when the call returns 0.
+// GetModuleFileNameW(nullptr, ...): the whole path of this executable, in the form it was started with (it can start
+// with \\?\). The first try is v0.2.4's (nSize 1023 into a 1024-character buffer), so a path of up to 1022 characters
+// is the same string as v0.2.4 (exeIdentity is an SSD-cache key); a longer one is read again into a larger buffer
+// (arch025-d7, X4 K7: v0.2.4 cut it to 1022 characters). "" when the call returns 0 or the path does not fit 64 Ki.
 std::wstring exePath();
 
 std::uint32_t currentId();  // GetCurrentProcessId

@@ -187,6 +187,26 @@ bool attributes(const wchar_t* path, Attributes* out) {
     return true;
 }
 
+std::wstring longPathForm(const std::wstring& path) {
+    constexpr std::size_t kLegacyMax = 248;  // CreateDirectoryW's limit (MAX_PATH - 12); Rust std uses the same
+    if (path.size() < kLegacyMax) return path;
+    if (path.rfind(L"\\\\?\\", 0) == 0 || path.rfind(L"\\\\.\\", 0) == 0) return path;
+    std::wstring full(path.size() + 1, L'\0');
+    for (int tries = 0; tries < 4; ++tries) {
+        const DWORD n = GetFullPathNameW(path.c_str(), static_cast<DWORD>(full.size()), full.data(), nullptr);
+        if (n == 0) return path;
+        if (n < full.size()) {
+            full.resize(n);
+            break;
+        }
+        full.assign(n, L'\0');  // n = the size needed, with the terminating null
+    }
+    if (full.empty() || full.back() == L'\0') return path;
+    if (full.size() >= 3 && full[1] == L':' && full[2] == L'\\') return L"\\\\?\\" + full;
+    if (full.rfind(L"\\\\", 0) == 0) return L"\\\\?\\UNC\\" + full.substr(2);
+    return path;
+}
+
 bool allocatedSize(const wchar_t* path, std::uint64_t* bytes) {
     DWORD hi = 0;
     const DWORD lo = GetCompressedFileSizeW(path, &hi);
