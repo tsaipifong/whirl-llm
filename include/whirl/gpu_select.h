@@ -196,6 +196,11 @@ ChildRun runChild(const std::wstring& exe, const std::wstring& cmdline, unsigned
 // Every GPU this process sees, as records (HIP calls).
 std::vector<GpuRecord> enumerate();
 
+// userVisibilityVar / noGpuText with this process's environment (arch025-c2fu): for the "no GPU" messages of whirl,
+// whirl-server and vis-encode when enumerate() is empty.
+std::string userVisibilityVarHere();
+std::string noGpuTextHere();
+
 // Position in `recs` (= enumerate() after restrictToSelected) of the GPU to use: 0 when the restriction is
 // active (the runtime shows only the chosen GPU), else selectGpus(recs, spec or WHIRL_DEVICE) (default rule
 // when both are empty). The one place whirl, whirl-server and vis-encode decide it. Throws SelectError.

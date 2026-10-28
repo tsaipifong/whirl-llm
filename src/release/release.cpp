@@ -191,6 +191,11 @@ std::string explainText(const std::exception& e, int* exit_code) {
             msg = "no supported AMD GPU found (" + what + ").\n  WHIRL needs an AMD Radeon AI PRO R9700 (RDNA 4, gfx1201) or a Radeon 8060S\n  (Ryzen AI Max, RDNA 3.5, gfx1151); this build has GPU kernels for: " +
                   supportedArchList() + ".\n  GPUs reported by the driver:\n" + deviceListText() +
                   "  If the GPU is installed but not listed, update the driver:\n" + k_driver_advice;
+        } else if (c == "GpuHidden") {
+            // arch025-c2fu: no GPU visible because of a visibility variable the user set (src/model/device.cpp): the text
+            // names it and how to remove it; no driver advice (the driver is not the cause)
+            code = exit_gpu;
+            msg = "no AMD GPU is visible to WHIRL: " + (what.size() > c.size() + 2 ? what.substr(c.size() + 2) : what) + ".\n";
         } else if (c == "DeviceChoice") {
             // --device / WHIRL_DEVICE did not name exactly one GPU: the text lists the GPUs and how to choose
             code = exit_usage;

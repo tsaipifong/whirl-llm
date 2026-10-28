@@ -175,7 +175,23 @@ void setEnv(const char* k, const std::string& v) {
         if (auto f = reinterpret_cast<int(__cdecl*)(const char*, const char*)>(GetProcAddress(u, "_putenv_s"))) f(k, v.c_str());
 }
 
+// the process environment for the pure gpusel functions (getenv_fn); `held` keeps the value the pointer points into
+const char* processEnv(const char* k, std::optional<std::string>& held) {
+    held = platform::env::get(k);
+    return held ? held->c_str() : nullptr;
+}
+
 }  // namespace
+
+std::string userVisibilityVarHere() {
+    std::optional<std::string> held;
+    return userVisibilityVar([&held](const char* k) { return processEnv(k, held); });
+}
+
+std::string noGpuTextHere() {
+    std::optional<std::string> held;
+    return noGpuText([&held](const char* k) { return processEnv(k, held); });
+}
 
 std::vector<GpuRecord> enumerate() {
     std::vector<GpuRecord> out;

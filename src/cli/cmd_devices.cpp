@@ -16,6 +16,11 @@ const char* k_help_devices =
 int cmdDevices() {
     const std::vector<whirl::gpusel::GpuRecord> devs = whirl::gpusel::enumerate();
     if (devs.empty()) {
+        // arch025-c2fu: HIP_VISIBLE_DEVICES= (or another visibility variable) hides every GPU: name it, no driver advice
+        if (!whirl::gpusel::userVisibilityVarHere().empty()) {
+            std::fputs(("whirl: error: no AMD GPU is visible to WHIRL: " + whirl::gpusel::noGpuTextHere() + ".\n").c_str(), stderr);
+            return app::exit_gpu;
+        }
         std::fputs("whirl: error: the AMD graphics driver reports no GPU.\n"
                    "  WHIRL needs an AMD Radeon AI PRO R9700 (gfx1201) or a Radeon 8060S (gfx1151). If one is\n"
                    "  installed, install AMD Software:\n"

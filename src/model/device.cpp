@@ -59,7 +59,12 @@ int pickDevice(std::string_view spec_arg) {
     // HIP_VISIBLE_DEVICES, never a WHIRL_* name, so the values are the ones the reads below saw before
     const whirl::config::EnvSnapshot env = whirl::config::EnvSnapshot::capture();
     std::vector<gpusel::GpuRecord> recs = gpusel::enumerate();
-    if (recs.empty()) throw ModelError("NoTargetGpu", "the AMD graphics driver reports no GPU");
+    if (recs.empty()) {
+        // arch025-c2fu: a visibility variable the user set (HIP_VISIBLE_DEVICES= empty) hides every GPU: say so instead of
+        // "the driver reports no GPU" + a driver update (release.cpp GpuHidden); no variable: unchanged
+        if (!gpusel::userVisibilityVarHere().empty()) throw ModelError("GpuHidden", gpusel::noGpuTextHere());
+        throw ModelError("NoTargetGpu", "the AMD graphics driver reports no GPU");
+    }
     int pos = 0;
     try {
         pos = gpusel::chosenPosition(recs, spec_arg);  // 0 when restricted, else --device / WHIRL_DEVICE / default
