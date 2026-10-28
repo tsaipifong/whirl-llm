@@ -200,11 +200,36 @@ void testDraftVocabSubset() {
     }
 }
 
+// arch025-lane1 leg 8: the automatic MTP draft count, which whirl-server and the CLI each wrote (5728296
+// src/server/server_main.cpp:744 and src/cli/decode.cpp:458-463)
+bool old_srv_auto(const std::optional<std::string>& adapt_env, bool def_automatic, bool drafts_user) {
+    return adapt_env ? (*adapt_env == "auto") : (def_automatic && !drafts_user);
+}
+bool old_cli_auto(const std::optional<std::string>& adapt_env, bool def_automatic, bool dv) {
+    bool a = def_automatic && !dv;
+    if (adapt_env) a = *adapt_env == "auto";  // (MtpAdapt::set / automatic)
+    return a;
+}
+
+void testMtpAutoMode() {
+    std::size_t n = 0;
+    for (const std::optional<std::string>& v : {std::optional<std::string>(), std::optional<std::string>("auto"), std::optional<std::string>("0"),
+                                                std::optional<std::string>("2"), std::optional<std::string>(""), std::optional<std::string>("Auto")})
+        for (const bool def : {false, true})
+            for (const bool given : {false, true}) {
+                const bool a = mtpAutoMode(def, given, v.has_value(), v && *v == "auto");
+                ISO_CHECK(a == old_srv_auto(v, def, given));
+                ISO_CHECK(a == old_cli_auto(v, def, given));
+                ++n;
+            }
+    std::printf("mtp auto mode: %zu cases == the server's and the CLI's 5728296 rule\n", n);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     return iso::run("spec.policy",
                     {{"draft_vocab", testDraftVocab}, {"exe_directory", testExeDirectory}, {"mtp_defaults", testMtpDefaults}, {"ngram", testNgram},
-                     {"batch_drafts", testBatchDrafts}, {"draft_vocab_gate", testDraftVocabGate}, {"draft_vocab_subset", testDraftVocabSubset}},
+                     {"batch_drafts", testBatchDrafts}, {"draft_vocab_gate", testDraftVocabGate}, {"draft_vocab_subset", testDraftVocabSubset}, {"mtp_auto_mode", testMtpAutoMode}},
                     argc, argv);
 }

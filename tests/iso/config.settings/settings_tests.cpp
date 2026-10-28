@@ -320,8 +320,124 @@ void testSpecVis() {
                 n, cli_pmin_diff, cli_u32_diff, srv_ck_diff);
 }
 
+// ---- arch025-lane1 leg 8: the four WHIRL_* values whirl-server still parsed by hand (5728296 src/server/server_main.cpp) --
+// :999 SLOT_DRAFTS
+std::optional<std::uint32_t> old_slot_drafts(const std::optional<std::string>& v) {
+    std::optional<std::uint32_t> r;
+    if (v) r = *v == "2" ? 2u : (*v != "0" ? 1u : 0u);
+    return r;
+}
+// :1012-1017 GATHER_MS
+std::optional<double> old_gather_ms(const std::optional<std::string>& v) {
+    std::optional<double> r;
+    if (v) {
+        try {
+            r = std::stod(*v);
+        } catch (const std::exception&) {
+        }
+    }
+    return r;
+}
+// :1068-1074 KV_RAM_MB (the value, or "not a number")
+std::optional<std::uint64_t> old_kv_ram_mb(const std::string& v, bool& bad) {
+    bad = false;
+    try {
+        return std::stoull(v);
+    } catch (const std::exception&) {
+        bad = true;
+    }
+    return std::nullopt;
+}
+// :516-521 SNAP_SETS (the DFlash2 pre-load fit)
+std::optional<std::uint32_t> old_snap_sets(const std::optional<std::string>& v) {
+    std::optional<std::uint32_t> r;
+    if (v) {
+        try {
+            r = static_cast<std::uint32_t>(std::stoul(*v));
+        } catch (const std::exception&) {
+        }
+    }
+    return r;
+}
+
+// :1533-1538 KV_SSD_GB and :1642-1647 VIS_CACHE_MB (std::stoull, an unreadable value keeps the default)
+std::optional<std::uint64_t> old_u64_lead(const std::optional<std::string>& v) {
+    std::optional<std::uint64_t> r;
+    if (v) {
+        try {
+            r = std::stoull(*v);
+        } catch (const std::exception&) {
+        }
+    }
+    return r;
+}
+// :1716-1717 GOV_RECOVER_S / GOV_HOLD_S (std::strtod: never fails, an unreadable text is 0)
+std::optional<double> old_strtod(const std::optional<std::string>& v) {
+    std::optional<double> r;
+    if (v) r = std::strtod(v->c_str(), nullptr);
+    return r;
+}
+
+const char* const k_names8[] = {"WHIRL_SLOT_DRAFTS", "WHIRL_GATHER_MS", "WHIRL_KV_RAM_MB", "WHIRL_SNAP_SETS", "WHIRL_KV_SSD_GB",
+                                "WHIRL_VIS_IDLE_S", "WHIRL_VIS_CACHE_MB", "WHIRL_GOV_RECOVER_S", "WHIRL_GOV_HOLD_S"};
+
+void testServerLeg8() {
+    std::vector<std::optional<std::string>> vals = {std::nullopt};
+    for (const auto& v : k_vals) vals.push_back(v);
+    for (const char* v : {"2", "1", "0", "00", "02", "2x", "-1", "30", "0.5", "1e3", "-0.25", "nan", "inf", "x", "18446744073709551615",
+                          "18446744073709551616", "  7", "7  "})
+        vals.push_back(std::string(v));
+    std::size_t n = 0;
+    for (const auto& v : vals) {
+        ISO_CHECK(st::parseSlotDrafts(v) == old_slot_drafts(v));
+        const std::optional<double> g = st::parseGatherMs(v), og = old_gather_ms(v);
+        ISO_CHECK(g.has_value() == og.has_value() && (!g || *g == *og || (*g != *g && *og != *og)));
+        ISO_CHECK(st::parseU32Lead(v) == old_snap_sets(v));  // SNAP_SETS and VIS_IDLE_S (the same stoul code at :516 / :1616)
+        ISO_CHECK(st::parseU64Lead(v) == old_u64_lead(v));    // KV_SSD_GB (:1533-1538), VIS_CACHE_MB (:1642-1647)
+        {
+            const std::optional<double> a = st::parseStrtod(v), b = old_strtod(v);  // GOV_RECOVER_S / GOV_HOLD_S (:1716-1717)
+            ISO_CHECK(a.has_value() == b.has_value() && (!a || *a == *b || (*a != *a && *b != *b)));
+        }
+        const st::KvRamMb k = st::parseKvRamMb(v);
+        ISO_CHECK(k.set == v.has_value());
+        if (v) {
+            bool bad = false;
+            const std::optional<std::uint64_t> o = old_kv_ram_mb(*v, bad);
+            ISO_CHECK(k.mb == o && k.mb.has_value() == !bad && k.text == *v);
+        } else {
+            ISO_CHECK(!k.mb.has_value() && k.text.empty());
+        }
+        ++n;
+    }
+    // the readers read the variable (unset -> nullopt / not set)
+    for (const char* nm : k_names8) whirl::platform::env::set(nm, "");
+    ISO_CHECK(!st::slotDrafts() && !st::gatherMs() && !st::kvRamMb().set && !st::snapSets());
+    ISO_CHECK(!st::kvSsdGb() && !st::visIdleS() && !st::visCacheMb() && !st::govRecoverS() && !st::govHoldS());
+    whirl::platform::env::set("WHIRL_KV_SSD_GB", "16");
+    whirl::platform::env::set("WHIRL_VIS_IDLE_S", "5");
+    whirl::platform::env::set("WHIRL_VIS_CACHE_MB", "x");
+    whirl::platform::env::set("WHIRL_GOV_RECOVER_S", "2.5");
+    whirl::platform::env::set("WHIRL_GOV_HOLD_S", "q");
+    ISO_CHECK(st::kvSsdGb() == std::optional<std::uint64_t>(16u) && st::visIdleS() == std::optional<std::uint32_t>(5u) && !st::visCacheMb());
+    ISO_CHECK(st::govRecoverS() == std::optional<double>(2.5) && st::govHoldS() == std::optional<double>(0.0));
+    whirl::platform::env::set("WHIRL_SLOT_DRAFTS", "2");
+    whirl::platform::env::set("WHIRL_GATHER_MS", "12.5");
+    whirl::platform::env::set("WHIRL_KV_RAM_MB", "4096");
+    whirl::platform::env::set("WHIRL_SNAP_SETS", "3");
+    ISO_CHECK(st::slotDrafts() == std::optional<std::uint32_t>(2u) && st::gatherMs() == std::optional<double>(12.5));
+    ISO_CHECK(st::kvRamMb().mb == std::optional<std::uint64_t>(4096u) && st::snapSets() == std::optional<std::uint32_t>(3u));
+    whirl::platform::env::set("WHIRL_KV_RAM_MB", "lots");
+    {
+        const st::KvRamMb k = st::kvRamMb();
+        ISO_CHECK(k.set && !k.mb && k.text == "lots");
+    }
+    for (const char* nm : k_names8) whirl::platform::env::set(nm, "");
+    std::printf("server settings (leg 8): SLOT_DRAFTS / GATHER_MS / KV_RAM_MB / SNAP_SETS / KV_SSD_GB / VIS_IDLE_S / VIS_CACHE_MB / "
+                "GOV_RECOVER_S / GOV_HOLD_S, %zu texts == 5728296\n", n);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
-    return iso::run("config.settings", {{"u32", testU32}, {"mtp_adapt", testMtpAdapt}, {"env", testEnv}, {"pool_reserve", testPoolReserve}, {"spec_vis", testSpecVis}}, argc, argv);
+    return iso::run("config.settings", {{"u32", testU32}, {"mtp_adapt", testMtpAdapt}, {"env", testEnv}, {"pool_reserve", testPoolReserve}, {"spec_vis", testSpecVis}, {"server_leg8", testServerLeg8}}, argc, argv);
 }
