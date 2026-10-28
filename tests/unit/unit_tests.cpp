@@ -4286,6 +4286,7 @@ void testGpuSelect() {
             CHECK(t.find("Remove-Item Env:HIP_VISIBLE_DEVICES") != std::string::npos);
             CHECK(t.find("driver reports no GPU") == std::string::npos);
             CHECK(t.find("update") == std::string::npos);
+            CHECK(t.find("driver") == std::string::npos);  // arch025-X8bfix: the empty-value text stays driver-free
             CHECK(!t.empty() && t.back() != '.' && t.back() != '\n');
         }
         // blank counts as empty
@@ -4299,6 +4300,26 @@ void testGpuSelect() {
             CHECK(t.find("empty") == std::string::npos);
             CHECK(t.find("driver reports no GPU") == std::string::npos);
         }
+        // arch025-X8bfix (c2fu REVIEW C2): a NON-empty value may be a valid index (HIP_VISIBLE_DEVICES=0 from a ROCm
+        // guide) while the driver is missing or broken; the runtime shows zero GPUs either way. The text says the
+        // variable may hide the GPU (named, with how to remove it) AND that a driver problem is also possible (with the
+        // AMD support page), so the user is not sent through two rounds to find a driver cause.
+        for (const char* v : {"0", "7", "0,1"}) {
+            envm.clear();
+            envm["HIP_VISIBLE_DEVICES"] = v;
+            const std::string t = noGpuText(ge);
+            CHECK(t.find(std::string("HIP_VISIBLE_DEVICES=") + v) != std::string::npos);
+            CHECK(t.find("may hide") != std::string::npos);
+            CHECK(t.find("Remove-Item Env:HIP_VISIBLE_DEVICES") != std::string::npos);
+            CHECK(t.find("driver") != std::string::npos);
+            CHECK(t.find("https://www.amd.com/en/support") != std::string::npos);
+            CHECK(t.find("Remove-Item") < t.find("driver"));  // the variable first (cheap to check), then the driver
+            CHECK(!t.empty() && t.back() != '.' && t.back() != '\n');
+        }
+        envm.clear();
+        envm["ROCR_VISIBLE_DEVICES"] = "1";
+        CHECK(noGpuText(ge).find("ROCR_VISIBLE_DEVICES=1") != std::string::npos);
+        CHECK(noGpuText(ge).find("driver") != std::string::npos);
         // the other visibility variables WHIRL honours are named the same way
         envm.clear();
         envm["CUDA_VISIBLE_DEVICES"] = "";

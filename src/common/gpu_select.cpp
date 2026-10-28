@@ -293,11 +293,12 @@ std::string noGpuText(const std::function<const char*(const char*)>& getenv_fn) 
     const std::string var = userVisibilityVar(getenv_fn);
     if (var.empty()) return "the AMD graphics driver reports no GPU";
     const char* raw = getenv_fn(var.c_str());
-    const std::string val = trim(raw ? raw : "");
+    const std::string raw_s = raw ? raw : "";  // copied once: /analyze C6387 flagged std::string(raw) below (int7 cpu_analyze)
+    const std::string val = trim(raw_s);
     const std::string why = val.empty()
         ? std::format("{} is set to an empty value, which hides every GPU from the GPU runtime", var)
         : std::format("{}={} is set and the GPU runtime shows no GPU through it (it lists the GPUs to show, by index)", var,
-                      std::string(raw));
+                      raw_s);
     return why + std::format("; remove the variable and run the command again (PowerShell: Remove-Item Env:{0}; Command Prompt: "
                              "set {0}=; or delete it under System Properties > Environment Variables)",
                              var);

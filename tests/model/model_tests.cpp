@@ -3943,6 +3943,136 @@ std::string codeOnly(const std::string& s) {
     return o;
 }
 
+// arch025-X8bfix (c2fu REVIEW C1): the five places that report "no GPU visible" use gpusel::noGpuTextHere /
+// userVisibilityVarHere / the GpuHidden error, so a visibility variable that hides every GPU is named instead of the
+// driver text. noGpuText itself is unit-tested (unit_tests testGpuSelect); these rules catch a revert of a call site
+// on CPU (same kind of source-text rule as testServerPoolViaStartup). Each rule: in the code without comments and with
+// whitespace runs collapsed, the snippet `need` is present and, when `before` is set, comes before `before`.
+// Returns the failed rule names (empty = all hold).
+// The source without comments, string / character literals kept verbatim (codeOnly blanks escapes and braces in them).
+std::string withoutComments(const std::string& s) {
+    std::string o;
+    o.reserve(s.size());
+    for (std::size_t i = 0; i < s.size();) {
+        const char c = s[i];
+        if (c == '/' && i + 1 < s.size() && s[i + 1] == '/') {
+            while (i < s.size() && s[i] != '\n') ++i;
+        } else if (c == '/' && i + 1 < s.size() && s[i + 1] == '*') {
+            const std::size_t e = s.find("*/", i + 2);
+            i = e == std::string::npos ? s.size() : e + 2;
+            o += ' ';
+        } else if (c == '"' || c == '\'') {
+            o += s[i++];
+            for (; i < s.size() && s[i] != c && s[i] != '\n'; ++i) {
+                if (s[i] == '\\' && i + 1 < s.size()) o += s[i++];
+                o += s[i];
+            }
+            if (i < s.size()) o += s[i++];
+        } else {
+            o += c;
+            ++i;
+        }
+    }
+    return o;
+}
+
+std::string squashSpaces(const std::string& s) {
+    std::string o;
+    o.reserve(s.size());
+    bool sp = false;
+    for (char c : s) {
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
+            sp = true;
+            continue;
+        }
+        if (sp && !o.empty()) o += ' ';
+        sp = false;
+        o += c;
+    }
+    return o;
+}
+
+struct NoGpuSiteRule {
+    const char* name;
+    const char* file;    // relative to the source root
+    const char* need;    // squashed code snippet that must be present
+    const char* before;  // squashed snippet `need` must come before ("" = none)
+};
+
+const std::vector<NoGpuSiteRule>& noGpuSiteRules() {
+    static const std::vector<NoGpuSiteRule> r = {
+        {"device.cpp pickDevice GpuHidden", "src/model/device.cpp",
+         "if (!gpusel::userVisibilityVarHere().empty()) throw ModelError(\"GpuHidden\", gpusel::noGpuTextHere());",
+         "throw ModelError(\"NoTargetGpu\", \"the AMD graphics driver reports no GPU\");"},
+        {"release.cpp explainText GpuHidden", "src/release/release.cpp",
+         "} else if (c == \"GpuHidden\") { code = exit_gpu; msg = \"no AMD GPU is visible to WHIRL: \" + (what.size() > "
+         "c.size() + 2 ? what.substr(c.size() + 2) : what) + \".\\n\";",
+         ""},
+        {"cmd_devices.cpp cmdDevices", "src/cli/cmd_devices.cpp",
+         "if (!whirl::gpusel::userVisibilityVarHere().empty()) { std::fputs((\"whirl: error: no AMD GPU is visible to "
+         "WHIRL: \" + whirl::gpusel::noGpuTextHere() + \".\\n\").c_str(), stderr); return app::exit_gpu; }",
+         "std::fputs(\"whirl: error: the AMD graphics driver reports no GPU.\\n\""},
+        {"vis_cli.cpp vis-encode", "src/vision/vis_cli.cpp",
+         "if (!gpusel::userVisibilityVarHere().empty()) std::printf(\"no GPU: %s\\n\", gpusel::noGpuTextHere().c_str());",
+         "else std::printf(\"no GPU: the AMD graphics driver reports none\\n\");"},
+        {"server_main.cpp --list-devices", "src/server/server_main.cpp",
+         "if (devs.empty()) std::printf(\" (%s)\\n\", gpusel::noGpuTextHere().c_str());", ""},
+    };
+    return r;
+}
+
+std::vector<std::string> noGpuSiteFailures(const std::function<std::string(const char*)>& source_of) {
+    std::vector<std::string> bad;
+    for (const NoGpuSiteRule& r : noGpuSiteRules()) {
+        const std::string s = squashSpaces(withoutComments(source_of(r.file)));
+        const std::size_t at = s.find(r.need);
+        bool ok = !s.empty() && at != std::string::npos;
+        if (ok && r.before[0] != '\0') {
+            const std::size_t b = s.find(r.before);
+            ok = b != std::string::npos && at < b;
+        }
+        if (!ok) bad.push_back(r.name);
+    }
+    return bad;
+}
+
+void testNoGpuCallSites() {
+    const std::filesystem::path root(WHIRL_SOURCE_DIR);
+    std::map<std::string, std::string> src;
+    for (const NoGpuSiteRule& r : noGpuSiteRules())
+        if (!src.count(r.file)) src[r.file] = readSource(root / r.file);
+    auto real = [&](const char* f) { return src.at(f); };
+    const std::vector<std::string> bad = noGpuSiteFailures(real);
+    std::string names;
+    for (const std::string& b : bad) names += " [" + b + "]";
+    check(bad.empty(), "no-GPU call sites: all 5 use noGpuTextHere / GpuHidden" + names);
+    // negative controls: each revert a mutant would make is caught by its own rule (and only by it)
+    struct Mut {
+        const char* file;
+        const char* from;
+        const char* to;
+        const char* rule;
+    };
+    const Mut muts[] = {
+        {"src/model/device.cpp", "throw ModelError(\"GpuHidden\"", "throw ModelError(\"NoTargetGpu\"", "device.cpp pickDevice GpuHidden"},
+        {"src/model/device.cpp", "if (!gpusel::userVisibilityVarHere().empty()) throw", "if (false) throw", "device.cpp pickDevice GpuHidden"},
+        {"src/release/release.cpp", "c == \"GpuHidden\"", "c == \"GpuHiddenX\"", "release.cpp explainText GpuHidden"},
+        {"src/cli/cmd_devices.cpp", "whirl::gpusel::noGpuTextHere()", "std::string(\"x\")", "cmd_devices.cpp cmdDevices"},
+        {"src/vision/vis_cli.cpp", "gpusel::noGpuTextHere().c_str()", "\"none\"", "vis_cli.cpp vis-encode"},
+        {"src/server/server_main.cpp", "gpusel::noGpuTextHere().c_str()", "\"the AMD graphics driver reports no GPU\"", "server_main.cpp --list-devices"},
+    };
+    for (const Mut& m : muts) {
+        std::string mutated = src.at(m.file);
+        const std::size_t p = mutated.find(m.from);
+        check(p != std::string::npos, std::string("no-GPU call-site mutant applies: ") + m.rule);
+        if (p == std::string::npos) continue;
+        mutated.replace(p, std::strlen(m.from), m.to);
+        auto mut = [&](const char* f) { return std::string(f) == m.file ? mutated : src.at(f); };
+        const std::vector<std::string> mb = noGpuSiteFailures(mut);
+        check(mb.size() == 1 && mb[0] == m.rule, std::string("no-GPU call-site mutant caught by its rule: ") + m.rule);
+    }
+}
+
 // arch025-surv2 (mutation survivor pl4-ctrl-restore; REVIEW F1): runServer arms Ctrl+C with two direct calls, as on
 // ec958cb (a helper changed MSVC's inlining of runServer, so the product keeps the calls in place and the rule pins them):
 // in the body of ServerRun::runServer, without comments, restoreCtrlC() comes before addCtrlHandler(, each exactly once.
@@ -4025,6 +4155,7 @@ int main(int argc, char** argv) {
 #ifdef WHIRL_SOURCE_DIR
     testServerPoolViaStartup();  // arch025-surv
     testServerCtrlOrder();  // arch025-surv2
+    testNoGpuCallSites();  // arch025-X8bfix
 #endif
 #ifdef _WIN32
     testEnvPathsModelChild();  // bug-envpaths
