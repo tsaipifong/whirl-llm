@@ -233,6 +233,13 @@ foreach ($isoList in @(Get-ChildItem -Path (Join-Path $repo "tests\iso") -Filter
 # module mapping (python: WHIRL_GATE_PYTHON, else python on PATH; none found = the step fails)
 AddStep "cpu_modules_check" $false @($pwsh, "-NoProfile", "-Command", "& '$py' -I '$(Join-Path $repo "tools\gates\modules_check_test.py")'; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\impact\validate_test.py")'; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\impact\impact_steps_test.py")'; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\impact\mutations_check.py")' --selftest; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\impact\mutations_check.py")'; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\gates\modules_check.py")'; exit `$LASTEXITCODE") `
     { param($o, $c) $c -eq 0 -and ($o -match "^modules check test: ([1-9]\d*)/\1 ok") -and ($o -match "^validate test: ([1-9]\d*)/\1 ok") -and ($o -match "^impact steps test: ([1-9]\d*)/\1 ok") -and ($o -match "^modules check: ok") }
+# arch025 D11 N2: every product file in exactly one module (census; files a lane is still registering only through
+# tools/gates/census_pending.json) and no undeclared cross-module include or include cycle (layering ratchet against
+# tools/gates/layering_baseline.json); the block / pass tests of each check run first.
+AddStep "cpu_census" $false @($pwsh, "-NoProfile", "-Command", "& '$py' -I '$(Join-Path $repo "tools\gates\census_check_test.py")'; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\gates\census_check.py")'; exit `$LASTEXITCODE") `
+    { param($o, $c) $c -eq 0 -and ($o -match "(?m)^census check test: ([1-9]\d*)/\1 ok") -and ($o -match "(?m)^census: ok") }
+AddStep "cpu_layering" $false @($pwsh, "-NoProfile", "-Command", "& '$py' -I '$(Join-Path $repo "tools\gates\layering_check_test.py")'; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\gates\layering_check.py")'; exit `$LASTEXITCODE") `
+    { param($o, $c) $c -eq 0 -and ($o -match "(?m)^layering check test: ([1-9]\d*)/\1 ok") -and ($o -match "(?m)^layering: ok") }
 # arch025-Q6: the FAIL / PASS proofs of srv_vis, vis_ab, pkg_smoke, srv_kvram719, srv_env_e2 and of the dense / dfl
 # availability rule (tools/gates/gate_steps_selftest.ps1: planted outputs through each step's own rule via -RuleCheck,
 # and the -SelfTest of the scripts behind them). CPU, no exe, no model.
