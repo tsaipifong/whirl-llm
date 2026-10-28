@@ -133,8 +133,9 @@ std::string userVisibilityVar(const std::function<const char*(const char*)>& get
 
 // arch025-c2fu: the reason text when the GPU runtime shows NO GPU at all. With no visibility variable set it is
 // "the AMD graphics driver reports no GPU" (the real no-driver / no-GPU case). When the user set one
-// (userVisibilityVar), that variable is the cause: the text names it and its value ("set to an empty value, which
-// hides every GPU" for HIP_VISIBLE_DEVICES=) and how to remove it, and says nothing about the driver. No trailing
+// (userVisibilityVar), the text names it and its value and how to remove it. An empty value ("set to an empty value,
+// which hides every GPU" for HIP_VISIBLE_DEVICES=) is the cause, so nothing is said about the driver; a non-empty value
+// "may hide the GPU", and a driver problem is also possible, so the driver hint follows (arch025-X8bfix). No trailing
 // period / newline. getenv_fn as for userVisibilityVar (CPU-tested).
 std::string noGpuText(const std::function<const char*(const char*)>& getenv_fn);
 
