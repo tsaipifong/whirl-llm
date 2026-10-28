@@ -6,6 +6,13 @@
 #   pwsh tools/gates/module_gate_test.ps1 [-Work DIR] [-Gate PATH] [-Cases PATH]
 # Exit 0 = every case as expected ("module gate test: N/N cases ok"), 1 = a case differs, 2 = setup error.
 param([string]$Work = "", [string]$Gate = "", [string]$Cases = "")
+# arch025-c2fu: set or REMOVE a process environment variable. pwsh 7.5+ (.NET 9+) keeps a variable DEFINED AS EMPTY for
+# [Environment]::SetEnvironmentVariable(k, $null) (PowerShell passes $null as "") and for (k, ""): a restore of an unset
+# variable then leaves k= for every later child (arch024-S14 / arch025-c2ctx: HIP_VISIBLE_DEVICES= hid every GPU).
+# $null = remove; any other value (also "") = set. Checked by tools/gates/env_restore_check.ps1.
+function SetEnvOrRemove([string]$k, $v) {
+    if ($null -eq $v) { Remove-Item -LiteralPath "env:$k" -ErrorAction SilentlyContinue } else { [Environment]::SetEnvironmentVariable($k, "$v") }
+}
 $ErrorActionPreference = "Stop"
 if (-not $Gate) { $Gate = Join-Path $PSScriptRoot "release_gate.ps1" }
 if (-not $Cases) { $Cases = Join-Path $PSScriptRoot "module_gate_cases.tsv" }
@@ -78,7 +85,7 @@ $env:WHIRL_GATE_SWIFT = $dm; $env:WHIRL_GATE_MOE = $dm; $env:WHIRL_GATE_TEXT_ROO
 try {
     $o = @(& $pwsh -NoProfile -File $Gate -Device r9700 -Build $fb -Work $gw -Module m -NoMapSteps -ModulesFile (Join-Path $Work "one_cpu.json") 2>&1 | ForEach-Object { "$_" })
     $code = $LASTEXITCODE
-} finally { foreach ($v in $keep.Keys) { [Environment]::SetEnvironmentVariable($v, $keep[$v]) } }
+} finally { foreach ($v in $keep.Keys) { SetEnvOrRemove $v $keep[$v] } }
 $sum = Join-Path $gw "module_m_r9700_summary.txt"
 $why = @()
 if ($code -ne 1) { $why += "exit $code, want 1 (the fake step fails)" }

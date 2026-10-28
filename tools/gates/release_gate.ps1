@@ -92,6 +92,13 @@ param(
     [string]$TaskAccuracy = "",  # step kl_guard: the task-accuracy result reference (file or KB exp_id) of this build's balance / fast
     [string]$RuleCheck = ""
 )
+# arch025-c2fu: set or REMOVE a process environment variable. pwsh 7.5+ (.NET 9+) keeps a variable DEFINED AS EMPTY for
+# [Environment]::SetEnvironmentVariable(k, $null) (PowerShell passes $null as "") and for (k, ""): a restore of an unset
+# variable then leaves k= for every later child (arch024-S14 / arch025-c2ctx: HIP_VISIBLE_DEVICES= hid every GPU).
+# $null = remove; any other value (also "") = set. Checked by tools/gates/env_restore_check.ps1.
+function SetEnvOrRemove([string]$k, $v) {
+    if ($null -eq $v) { Remove-Item -LiteralPath "env:$k" -ErrorAction SilentlyContinue } else { [Environment]::SetEnvironmentVariable($k, "$v") }
+}
 $ErrorActionPreference = "Stop"
 $repo = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 if (-not $Build) { $Build = Join-Path $repo "build\Release" }
@@ -198,6 +205,12 @@ AddStep "cpu_module_gate" $false @($pwsh, "-NoProfile", "-File", (Join-Path $rep
 # no Windows / CRT-platform header and no Win32 / Winsock / CRT-platform call in src/ or include/ outside src/platform/*_win.cpp,
 # src/hip, src/release/dll_deps.cpp and the vendored stb_image.h. Blocking in every mode, no pending list. CPU, no exe.
 AddStep "cpu_platform_check" $false @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\gates\platform_check.ps1"), "-Mode", "block") { param($o, $c) $c -eq 0 -and ($o -match "(?m)^platform check: ok \(0 site\(s\) in 0 file\(s\)") }
+# arch025-c2fu: no tools\ / tests\ PowerShell script leaves an environment variable defined as EMPTY when it removes or
+# restores it (pwsh 7.5+ keeps k= for SetEnvironmentVariable(k, $null) and $env:k = ""; an unset HIP_VISIBLE_DEVICES
+# restored that way hid every GPU from later children twice: arch024-S14, arch025-c2ctx). tools/gates/env_restore_check.ps1:
+# its planted block / pass cases (-SelfTest), then the tree. CPU, no exe, seconds.
+AddStep "cpu_env_restore" $false @($pwsh, "-NoProfile", "-Command", "& '$pwsh' -NoProfile -File '$(Join-Path $repo "tools\gates\env_restore_check.ps1")' -SelfTest; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$pwsh' -NoProfile -File '$(Join-Path $repo "tools\gates\env_restore_check.ps1")'; exit `$LASTEXITCODE") `
+    { param($o, $c) $c -eq 0 -and ($o -match "(?m)^env restore check selftest: ([1-9]\d*)/\1 as expected") -and ($o -match "(?m)^env restore check: ok \([1-9]\d* file\(s\)\)") }
 # arch025-X3 (ARCH-1 8.5 isolation check): cpu_sampling (above) runs the sampling tests built against src/sampling alone
 # (cmake/sampling_iso.cmake: only the headers of tests/sampling/isolation.txt, linked to nothing else). Here the boundary
 # mutants: an undeclared include, a relative ../server include, a call into whirl and into the server must each fail the
@@ -244,6 +257,14 @@ foreach ($m in @($denseKeys) + @("moe")) {
         AddStep "st_${m}_$mode" $true @($exe["whirl"], "selftest", $mp, "--$mode", "--device", $Device) { param($o, $c) $c -eq 0 -and ($o -match "^selftest: ok") -and ($o -match "(?m)^leak check: ok \(1 units\)") } $leakEnv (NaOf $m)
     }
 }
+# arch025-c2fu: precise must REFUSE a 4096-token f16 KV that does not fit instead of shrinking the context the user did not
+# shorten (mutant c2-ctx-default survived every other step; killed on the 8060S by this squeeze, arch025-c2ctx 2026-10-28).
+# tools/gates/ctx_refuse_check.ps1: its classifier selftest, then `whirl selftest <Swift> --precise --device <card>` under a
+# WHIRL_VRAM_LIMIT_MB calibrated per run (start 20480; R9700: other programs' VRAM counts against the limit, 8060S UMA: it
+# does not) until one run refuses with exit 5 + "room for about N tokens. Use a shorter --ctx" (N 512..3584) on this card.
+# Both cards; no memory hog; a loading run is stopped at "numerics at load" (6-10 s per run on the 8060S).
+AddStep "st_ctx_refuse" $true @($pwsh, "-NoProfile", "-Command", "& '$pwsh' -NoProfile -File '$(Join-Path $repo "tools\gates\ctx_refuse_check.ps1")' -SelfTest; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$pwsh' -NoProfile -File '$(Join-Path $repo "tools\gates\ctx_refuse_check.ps1")' -Exe '$($exe["whirl"])' -Model '$SW' -Device $Device -Work '@WORK@'; exit `$LASTEXITCODE") `
+    { param($o, $c) $c -eq 0 -and ($o -match "(?m)^ctx refuse check selftest: ([1-9]\d*)/\1 as expected") -and ($o -match "(?m)^ctx refuse check: PASS limit=\d+ room=\d+") }
 foreach ($m in @($denseKeys) + @("moe")) {
     AddStep "golden_$m" $true @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\golden\golden.ps1"), "check", "-Arch", $arch, "-Models", $m, "-Exe", $exe["whirl"], "-GoldenRoot", "@GOLDEN@",
                          "-ServerExe", $exe["whirl-server"], "-GateExe", $exe["whirl-server-gate"], "-Port", "$($port + 4)") `
@@ -586,7 +607,7 @@ if ($InjectFail) {
 # what is tested); restored at the end
 $saved = @{}
 foreach ($v in @(Get-ChildItem Env: | Where-Object { $_.Name -like "WHIRL_*" -and $_.Name -notlike "WHIRL_GATE_*" -and $_.Name -ne "WHIRL_R9700_LOCK_HELD" })) {
-    $saved[$v.Name] = $v.Value; [Environment]::SetEnvironmentVariable($v.Name, $null)
+    $saved[$v.Name] = $v.Value; SetEnvOrRemove $v.Name $null
 }
 if (-not $env:AMD_LOG_LEVEL) { $env:AMD_LOG_LEVEL = "1" }
 $env:PYTHONIOENCODING = "utf-8"
@@ -607,7 +628,7 @@ try {
         $cmd = @($s.cmd | ForEach-Object { $_ -replace "@WORK@", $wd -replace "@GOLDEN@", $golden })
         $log = Join-Path $logDir "$($s.name).txt"
         $c = -1
-        foreach ($k in $s.env.Keys) { [Environment]::SetEnvironmentVariable($k, $s.env[$k]) }
+        foreach ($k in $s.env.Keys) { SetEnvOrRemove $k $s.env[$k] }
         if ($LaunchLog -and $s.gpu) {
             $ld = Join-Path $LaunchLog $s.name
             New-Item -ItemType Directory -Force $ld | Out-Null
@@ -640,7 +661,7 @@ try {
             "release gate: step did not run: $_" | Add-Content $log
             $c = -1
         }
-        foreach ($k in $s.env.Keys) { [Environment]::SetEnvironmentVariable($k, $null) }
+        foreach ($k in $s.env.Keys) { SetEnvOrRemove $k $null }
         Remove-Item Env:WHIRL_LAUNCH_LOG -ErrorAction SilentlyContinue
         $out = @(Get-Content $log -ErrorAction SilentlyContinue)
         $ok = $false
@@ -696,7 +717,7 @@ try {
 } finally {
     Remove-Item Env:WHIRL_TEST_TMP -ErrorAction SilentlyContinue
     Remove-Item -Recurse -Force $testTmp -ErrorAction SilentlyContinue
-    foreach ($k in $saved.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k]) }
+    foreach ($k in $saved.Keys) { SetEnvOrRemove $k $saved[$k] }
 }
 $nf = @($rows | Where-Object { -not $_.ok }).Count
 $verdict = if ($rows.Count -eq 0) { "FAIL (no step ran)" } elseif ($nf -gt 0) { "FAIL ($nf of $($rows.Count) steps failed)" } else { "PASS ($($rows.Count) steps)" }

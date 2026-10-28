@@ -75,6 +75,13 @@ param(
     [switch]$KeepServerWork,  # suite server: keep each case's server work dir (server_*.log; *.wkv removed) also when it passes
     [string[]]$ServerEnv = @()  # suite server: extra NAME=VALUE for its servers (--server-env; e.g. WHIRL_CKPT_HOST=1, arch024-S14 E7)
 )
+# arch025-c2fu: set or REMOVE a process environment variable. pwsh 7.5+ (.NET 9+) keeps a variable DEFINED AS EMPTY for
+# [Environment]::SetEnvironmentVariable(k, $null) (PowerShell passes $null as "") and for (k, ""): a restore of an unset
+# variable then leaves k= for every later child (arch024-S14 / arch025-c2ctx: HIP_VISIBLE_DEVICES= hid every GPU).
+# $null = remove; any other value (also "") = set. Checked by tools/gates/env_restore_check.ps1.
+function SetEnvOrRemove([string]$k, $v) {
+    if ($null -eq $v) { Remove-Item -LiteralPath "env:$k" -ErrorAction SilentlyContinue } else { [Environment]::SetEnvironmentVariable($k, "$v") }
+}
 # arch024-S0b: with WHIRL_LAUNCH_LOG=DIR the server case's servers write their launch tables to DIR\srv_<model>_<mode>
 # (passed with --server-env: whirl-server-gate gives its servers no WHIRL_* variable of its own environment except
 # WHIRL_DEVICE / WHIRL_VRAM_LIMIT_MB / WHIRL_MODE, so before this only the CLI cases were recorded)
@@ -170,7 +177,7 @@ if ($Action -eq "record" -and $KlReport) {
 $savedEnv = @{}
 foreach ($v in @(Get-ChildItem Env: | Where-Object { $_.Name -like "WHIRL_*" -and $_.Name -ne "WHIRL_R9700_LOCK_HELD" -and $_.Name -ne "WHIRL_LAUNCH_LOG" })) {
     $savedEnv[$v.Name] = $v.Value
-    [Environment]::SetEnvironmentVariable($v.Name, $null)
+    SetEnvOrRemove $v.Name $null
 }
 if (-not $env:AMD_LOG_LEVEL) { $env:AMD_LOG_LEVEL = "1" }
 if (-not $GoldenRoot) { $GoldenRoot = Join-Path $root "tests\golden" }
@@ -298,7 +305,7 @@ $rsAll = RefSetHash $GoldenRoot $Arch @("dense", "swift", "moe") @("precise", "b
 if ($Action -eq "refhash") {
     Write-Host "golden: reference set $Arch sha256 $($rs.hash) ($($rs.n) files: models $($Models -join ','), modes $($Modes -join ','), suites $($Suites -join ','))"
     Write-Host "golden: reference set $Arch (all files) sha256 $($rsAll.hash) ($($rsAll.n) files)"
-    foreach ($k in $savedEnv.Keys) { [Environment]::SetEnvironmentVariable($k, $savedEnv[$k]) }
+    foreach ($k in $savedEnv.Keys) { SetEnvOrRemove $k $savedEnv[$k] }
     exit 0
 }
 if ($Action -eq "xcheck") {
@@ -312,7 +319,7 @@ if ($Action -eq "xcheck") {
         if ($v.Count -gt 0) { $nx++; Write-Host "XBAD  $mk/${mode}_$suite"; $v | ForEach-Object { Write-Host "      $_" } }
         else { Write-Host "XOK   $mk/${mode}_$suite" }
     } } }
-    foreach ($k in $savedEnv.Keys) { [Environment]::SetEnvironmentVariable($k, $savedEnv[$k]) }
+    foreach ($k in $savedEnv.Keys) { SetEnvOrRemove $k $savedEnv[$k] }
     if ($nf -eq 0) { Write-Host "golden xcheck: no reference file found"; exit 2 }
     if ($nx -gt 0) { Write-Host "golden xcheck $Arch`: $nx file(s) violate in-run relations or are missing"; exit 2 }
     Write-Host "golden xcheck $Arch`: $nf file(s) ok"
@@ -477,7 +484,7 @@ foreach ($mk in $Models) {
     }
 }
 } finally {
-    foreach ($k in $savedEnv.Keys) { [Environment]::SetEnvironmentVariable($k, $savedEnv[$k]) }
+    foreach ($k in $savedEnv.Keys) { SetEnvOrRemove $k $savedEnv[$k] }
 }
 # record: the references and models.txt are written together, and only when no case failed (a partial
 # record would leave new references next to a stale model hash)

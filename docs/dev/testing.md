@@ -248,6 +248,25 @@ Limits:
 - Timing is not modelled. Only the GPU repro (vis-encode `WHIRL_TEST_VIS_COPY_DELAY_MB`, vis_ab) shows that the
   device really reorders.
 
+## <a id="ctx-refuse"></a>Precise KV refusal (`st_ctx_refuse`) and environment restores (`cpu_env_restore`)
+
+`st_ctx_refuse` (GPU, both cards) runs `tools/gates/ctx_refuse_check.ps1`. Precise mode keeps the KV cache in f16.
+When the f16 KV for the default 4096 tokens does not fit, `whirl selftest --precise` must refuse with exit 5 and
+"room for about N tokens. Use a shorter --ctx". It must not shrink a context the user did not ask for. The script
+squeezes the card with `WHIRL_VRAM_LIMIT_MB`, set only for the selftest child; it needs no memory hog. It calibrates
+the limit for each run. The first run uses 20480 MiB, and the room in the refusal text sets the next limit, aiming at
+2048 tokens. A run that loads past the KV check is stopped and lowers the limit. A run that fails before the check
+raises it. The step passes on a refusal with a room of 512 to 3584 tokens. A build that shrinks the context only
+refuses with room 0, because `numerics::cliCtxFit` rounds the room down to whole KV pages. Mutant `c2-ctx-default`
+fails the step.
+
+`cpu_env_restore` runs `tools/gates/env_restore_check.ps1` on every `.ps1` file under `tools\` and `tests\`.
+pwsh 7.5 and later (.NET 9 and later) keep a variable defined but empty after any of
+`[Environment]::SetEnvironmentVariable(k, $null)`, `(k, "")` or `$env:k = ""`. A restore of an unset
+`HIP_VISIBLE_DEVICES` written that way hid every GPU from the later child processes (arch024-S14, arch025-c2ctx).
+The script fails on three things: a `SetEnvironmentVariable` call outside a `SetEnv*` helper, an empty-string
+assignment to `$env:`, and a helper that does not remove the variable when it is given `$null`.
+
 ## <a id="kl-gate"></a>KL gate
 
 `tools/klgate/klgate.py` measures what the golden hashes cannot: how far balance and fast are from

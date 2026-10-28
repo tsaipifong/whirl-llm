@@ -21,6 +21,13 @@
 #     "E owner check:" line in the case's server log, or no server log at all, fails it (exit 2); a WDDM line does not
 #   - default suites (ARCH3, REVIEW-ARCH-D1 P3-7): dense skips suite server while swift runs it; a configured mmproj
 #     that is missing fails the swift server case and record writes nothing
+# arch025-c2fu: set or REMOVE a process environment variable. pwsh 7.5+ (.NET 9+) keeps a variable DEFINED AS EMPTY for
+# [Environment]::SetEnvironmentVariable(k, $null) (PowerShell passes $null as "") and for (k, ""): a restore of an unset
+# variable then leaves k= for every later child (arch024-S14 / arch025-c2ctx: HIP_VISIBLE_DEVICES= hid every GPU).
+# $null = remove; any other value (also "") = set. Checked by tools/gates/env_restore_check.ps1.
+function SetEnvOrRemove([string]$k, $v) {
+    if ($null -eq $v) { Remove-Item -LiteralPath "env:$k" -ErrorAction SilentlyContinue } else { [Environment]::SetEnvironmentVariable($k, "$v") }
+}
 $ErrorActionPreference = "Stop"
 $gate = Join-Path $PSScriptRoot "golden.ps1"
 $fake = Join-Path $PSScriptRoot "fake_whirl.cmd"
@@ -52,14 +59,14 @@ function KlRep([string]$name, [bool]$pass, [string]$sha, [int]$positions = 3, [s
 $fakeSha = (Get-FileHash -Algorithm SHA256 $fake).Hash.ToLower()
 $klGood = KlRep "kl_good.json" $true $fakeSha
 function RunGate([string]$action, [string]$root, [hashtable]$fakeEnv, [string]$kl = $klGood, [string]$modes = "precise", [string[]]$more = @()) {
-    foreach ($k in @("FAKEGOLD_FAIL_SUITE", "FAKEGOLD_NOSTEPS", "FAKEGOLD_DIR")) { [Environment]::SetEnvironmentVariable($k, $null) }
-    foreach ($k in $fakeEnv.Keys) { [Environment]::SetEnvironmentVariable($k, $fakeEnv[$k]) }
+    foreach ($k in @("FAKEGOLD_FAIL_SUITE", "FAKEGOLD_NOSTEPS", "FAKEGOLD_DIR")) { SetEnvOrRemove $k $null }
+    foreach ($k in $fakeEnv.Keys) { SetEnvOrRemove $k $fakeEnv[$k] }
     $env:WHIRL_GOLDEN_DENSE = $model
     $klArg = if ($kl) { @("-KlReport", $kl) } else { @() }
     $out = & pwsh -NoProfile -File $gate $action -Models dense -Modes $modes -Suites "single,pair" -Exe $fake `
         -GoldenRoot $root -Out (Join-Path $tmp "out") @klArg @more 2>&1 | ForEach-Object { "$_" }
     $rc = $LASTEXITCODE
-    foreach ($k in @("FAKEGOLD_FAIL_SUITE", "FAKEGOLD_NOSTEPS", "FAKEGOLD_DIR")) { [Environment]::SetEnvironmentVariable($k, $null) }
+    foreach ($k in @("FAKEGOLD_FAIL_SUITE", "FAKEGOLD_NOSTEPS", "FAKEGOLD_DIR")) { SetEnvOrRemove $k $null }
     return @{ rc = $rc; out = $out }
 }
 function Expect([string]$name, $r, [int]$want, [scriptblock]$extra = { $true }) {
@@ -193,13 +200,13 @@ try {
     #    a gate run without its ALL PASS line; the exe and reference-set hashes are printed; refhash follows the files
     $fakeGate = Join-Path $PSScriptRoot "fake_gate.cmd"
     function RunSrv([string]$action, [string]$root, [hashtable]$ge) {
-        foreach ($k in @("FAKEGATE_FAIL", "FAKEGATE_NOPASS", "FAKEGATE_H", "FAKEGATE_NOLOG", "FAKEGATE_LOGLINE")) { [Environment]::SetEnvironmentVariable($k, $null) }
-        foreach ($k in $ge.Keys) { [Environment]::SetEnvironmentVariable($k, $ge[$k]) }
+        foreach ($k in @("FAKEGATE_FAIL", "FAKEGATE_NOPASS", "FAKEGATE_H", "FAKEGATE_NOLOG", "FAKEGATE_LOGLINE")) { SetEnvOrRemove $k $null }
+        foreach ($k in $ge.Keys) { SetEnvOrRemove $k $ge[$k] }
         $env:WHIRL_GOLDEN_DENSE = $model
         $o = & pwsh -NoProfile -File $gate $action -Models dense -Modes precise -Suites server -Exe $fake -ServerExe $fake -GateExe $fakeGate `
             -GoldenRoot $root -Out (Join-Path $tmp "out") -KlReport $klGood 2>&1 | ForEach-Object { "$_" }
         $c = $LASTEXITCODE
-        foreach ($k in @("FAKEGATE_FAIL", "FAKEGATE_NOPASS", "FAKEGATE_H", "FAKEGATE_NOLOG", "FAKEGATE_LOGLINE")) { [Environment]::SetEnvironmentVariable($k, $null) }
+        foreach ($k in @("FAKEGATE_FAIL", "FAKEGATE_NOPASS", "FAKEGATE_H", "FAKEGATE_NOLOG", "FAKEGATE_LOGLINE")) { SetEnvOrRemove $k $null }
         return @{ rc = $c; out = $o }
     }
     $g7 = Join-Path $tmp "g7"
@@ -251,7 +258,7 @@ try {
         $o = & pwsh -NoProfile -File $gate record -Models "dense,swift" -Modes precise -Exe $fake -ServerExe $fake -GateExe $fakeGate `
             -GoldenRoot $root -Out (Join-Path $tmp "out") -KlReport $klBoth 2>&1 | ForEach-Object { "$_" }
         $c = $LASTEXITCODE
-        foreach ($k in $saved.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k]) }
+        foreach ($k in $saved.Keys) { SetEnvOrRemove $k $saved[$k] }
         return @{ rc = $c; out = $o }
     }
     $g8 = Join-Path $tmp "g8"

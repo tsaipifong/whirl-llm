@@ -16,6 +16,13 @@
 #   pwsh tools/gates/gate_steps_selftest.ps1 [-Work DIR]
 # Last line "gate steps selftest: N/M as expected"; exit 0 all as expected, 1 not.
 param([string]$Work = "")
+# arch025-c2fu: set or REMOVE a process environment variable. pwsh 7.5+ (.NET 9+) keeps a variable DEFINED AS EMPTY for
+# [Environment]::SetEnvironmentVariable(k, $null) (PowerShell passes $null as "") and for (k, ""): a restore of an unset
+# variable then leaves k= for every later child (arch024-S14 / arch025-c2ctx: HIP_VISIBLE_DEVICES= hid every GPU).
+# $null = remove; any other value (also "") = set. Checked by tools/gates/env_restore_check.ps1.
+function SetEnvOrRemove([string]$k, $v) {
+    if ($null -eq $v) { Remove-Item -LiteralPath "env:$k" -ErrorAction SilentlyContinue } else { [Environment]::SetEnvironmentVariable($k, "$v") }
+}
 $ErrorActionPreference = "Stop"
 if (-not $Work) { $Work = Join-Path ([System.IO.Path]::GetTempPath()) "whirl-gate-steps-selftest" }
 Remove-Item -Recurse -Force $Work -ErrorAction SilentlyContinue
@@ -30,7 +37,7 @@ function Check([string]$name, [bool]$cond, [string]$detail) {
 function Gate([string[]]$a) { $o = @(& $pwsh -NoProfile -File $gate @a 2>&1 | ForEach-Object { "$_" }); return [pscustomobject]@{ out = $o; code = $LASTEXITCODE } }
 $envKeep = @{}
 foreach ($v in "WHIRL_GATE_DENSE", "WHIRL_GATE_DFLASH", "WHIRL_GATE_IMAGES", "WHIRL_GATE_MMPROJ", "WHIRL_GATE_SWIFT", "WHIRL_GATE_MOE", "WHIRL_GATE_TEXT_ROOT", "WHIRL_GATE_VIS_BASE", "WHIRL_GATE_PACKAGE") {
-    $envKeep[$v] = [Environment]::GetEnvironmentVariable($v); [Environment]::SetEnvironmentVariable($v, $null)
+    $envKeep[$v] = [Environment]::GetEnvironmentVariable($v); SetEnvOrRemove $v $null
 }
 try {
     # ---- 1. -List
@@ -126,6 +133,13 @@ try {
         @{ step = "cpu_cli_tests"; name = "planted: dump-only case failed (exit 0 of the step forged)"; exit = 0; lines = @("preflight order test: 4 passed, 0 failed", "dump-only cli test: 8 passed, 1 failed"); want = $false },
         @{ step = "cpu_cli_tests"; name = "planted: setup error (whirl.exe missing)"; exit = 1; lines = @("preflight order test: setup error, whirl.exe missing"); want = $false },
         @{ step = "cpu_cli_tests"; name = "planted: 0 cases ran"; exit = 0; lines = @("preflight order test: 0 passed, 0 failed", "dump-only cli test: 0 passed, 0 failed"); want = $false },
+        @{ step = "st_ctx_refuse"; name = "clean (arch025-c2fu, 8060S control 2026-10-28)"; exit = 0; lines = @("ctx refuse check selftest: 7/7 as expected", "ctx refuse check: REPORT run 1 limit=20480 MiB exit=5 outcome=refused room=1280", "ctx refuse check: PASS limit=20480 room=1280 (selftest --precise refused the 4096-token f16 KV instead of shrinking the context)"); want = $true },
+        @{ step = "st_ctx_refuse"; name = "planted: c2-ctx-default (loads past the KV check at every limit)"; exit = 1; lines = @("ctx refuse check selftest: 7/7 as expected", "ctx refuse check: REPORT run 1 limit=20480 MiB exit=stopped outcome=proceeded room=-1", "ctx refuse check: FAIL (no f16-KV refusal with room 512..3584 tokens in 6 run(s); last limit 17000 MiB)"); want = $false },
+        @{ step = "st_ctx_refuse"; name = "planted: classifier selftest failed"; exit = 1; lines = @("ctx refuse check selftest: 6/7 as expected"); want = $false },
+        @{ step = "st_ctx_refuse"; name = "planted: PASS line with exit 1"; exit = 1; lines = @("ctx refuse check selftest: 7/7 as expected", "ctx refuse check: PASS limit=20480 room=1280"); want = $false },
+        @{ step = "cpu_env_restore"; name = "clean (arch025-c2fu)"; exit = 0; lines = @("env restore check selftest: 10/10 as expected", "env restore check: ok (37 file(s))"); want = $true },
+        @{ step = "cpu_env_restore"; name = "planted: a SetEnvironmentVariable(k, `$null) restore"; exit = 1; lines = @("env restore check selftest: 10/10 as expected", "FAIL x.ps1: R1 line 113: SetEnvironmentVariable outside a SetEnv* helper", "env restore check: FAIL (1 violation(s) in 37 file(s))"); want = $false },
+        @{ step = "cpu_env_restore"; name = "planted: 0 files scanned"; exit = 0; lines = @("env restore check selftest: 10/10 as expected", "env restore check: ok (0 file(s))"); want = $false },
         @{ step = "cpu_step_selftest"; name = "clean"; exit = 0; lines = @("gate steps selftest: 36/36 as expected"); want = $true },
         @{ step = "cpu_step_selftest"; name = "planted: one proof did not hold"; exit = 1; lines = @("BAD  rules: ...", "gate steps selftest: 35/36 as expected"); want = $false }
     )
@@ -143,7 +157,9 @@ try {
     # ---- 5. the scripts' own verdict tests
     foreach ($t in @(@("tools\gates\pkg_smoke.ps1", "^pkg smoke selftest: (\d+)/\1 as expected"), @("tools\gates\vis_ab.ps1", "^vis ab selftest: (\d+)/\1 as expected"),
                      @("tools\repro\kvram719_tier.ps1", "."),
-                     @("tools\gates\platform_check.ps1", "^platform check selftest: ok"))) {
+                     @("tools\gates\platform_check.ps1", "^platform check selftest: ok"),
+                     @("tools\gates\ctx_refuse_check.ps1", "^ctx refuse check selftest: (\d+)/\1 as expected"),
+                     @("tools\gates\env_restore_check.ps1", "^env restore check selftest: (\d+)/\1 as expected"))) {
         $o = @(& $pwsh -NoProfile -File (Join-Path $repo $t[0]) -SelfTest 2>&1 | ForEach-Object { "$_" }); $c = $LASTEXITCODE
         Check "$($t[0]) -SelfTest" ($c -eq 0 -and ($o -match $t[1])) "exit $${c}: $($o | Select-Object -Last 1)"
     }
@@ -171,7 +187,7 @@ try {
         Check "srv_kvram719: a planted WDDM line in the repro's server log FAILs the scan" ($scc -eq 1 -and ($sc -match "^server log scan: FAIL 1 line\(s\) matched \[wddm,owner,exit\]")) "exit ${scc}: $($sc | Select-Object -First 1)"
     }
 } finally {
-    foreach ($v in $envKeep.Keys) { [Environment]::SetEnvironmentVariable($v, $envKeep[$v]) }
+    foreach ($v in $envKeep.Keys) { SetEnvOrRemove $v $envKeep[$v] }
     Remove-Item -Recurse -Force $Work -ErrorAction SilentlyContinue
 }
 Write-Host "gate steps selftest: $ok/$($ok + $bad) as expected"
