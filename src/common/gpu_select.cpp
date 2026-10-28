@@ -297,11 +297,18 @@ std::string noGpuText(const std::function<const char*(const char*)>& getenv_fn) 
     const std::string val = trim(raw_s);
     const std::string why = val.empty()
         ? std::format("{} is set to an empty value, which hides every GPU from the GPU runtime", var)
-        : std::format("{}={} is set and the GPU runtime shows no GPU through it (it lists the GPUs to show, by index)", var,
-                      raw_s);
-    return why + std::format("; remove the variable and run the command again (PowerShell: Remove-Item Env:{0}; Command Prompt: "
-                             "set {0}=; or delete it under System Properties > Environment Variables)",
-                             var);
+        : std::format("{}={} is set and may hide the GPU (it lists the GPUs to show, by index)", var, raw_s);
+    std::string text = why + std::format("; remove the variable and run the command again (PowerShell: Remove-Item Env:{0}; "
+                                         "Command Prompt: set {0}=; or delete it under System Properties > Environment Variables)",
+                                         var);
+    // arch025-X8bfix (c2fu REVIEW C2, progress/arch025-X8bfix.PRIOR_ART.md): a non-empty value can be a valid index
+    // (HIP_VISIBLE_DEVICES=0 from a ROCm guide) while the driver is missing or broken; the runtime shows zero GPUs either
+    // way and cannot tell which. So the driver stays on the list, after the variable (the cheaper check). The empty value
+    // alone hides every GPU (measured, arch025-c2ctx), so that text keeps no driver hint.
+    if (!val.empty())
+        text += "; if no GPU shows after that, a driver problem is also possible: install or update AMD Software: Adrenalin "
+                "Edition (https://www.amd.com/en/support) and restart Windows";
+    return text;
 }
 
 bool sameGpu(const GpuRecord& a, const GpuRecord& b) {

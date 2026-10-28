@@ -266,6 +266,12 @@ pwsh 7.5 and later (.NET 9 and later) keep a variable defined but empty after an
 `HIP_VISIBLE_DEVICES` written that way hid every GPU from the later child processes (arch024-S14, arch025-c2ctx).
 The script fails on three things: a `SetEnvironmentVariable` call outside a `SetEnv*` helper, an empty-string
 assignment to `$env:`, and a helper that does not remove the variable when it is given `$null`.
+Both incidents were in runner scripts outside the tree. When the tree sits in the WHIRL workspace (a folder next to
+`progress\` and `scratch\`), the script also checks the live runner tools in `..\progress\tools\*.ps1` with the same
+rules, and a violation there fails the step. It lists the one-off runners in `..\scratch\**\*.ps1` that break a rule
+as `WARN scratch` lines and a count line. Those never fail the step, since scratch is never shipped and old runners
+stay as records. Fix a scratch runner (use a `SetEnvOrRemove` helper) before you copy it as a template for a new
+runner. Folders that do not exist are skipped, and `-NoWorkspace` checks the tree only.
 
 ## <a id="kl-gate"></a>KL gate
 

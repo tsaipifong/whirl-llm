@@ -14,11 +14,25 @@
 #   R3 the helper itself must remove for $null: its body contains Remove-Item and "env:"
 # A script that really needs NAME= set to an empty value for a child passes it in the child's own environment
 # (ProcessStartInfo / Start-Process -Environment), not through this process.
-#   pwsh tools/gates/env_restore_check.ps1 [-Root DIR] [-Files a.ps1,b.ps1]     -> "env restore check: ok (N file(s))" / FAIL lines, exit 1
+# arch025-X8bfix (c2fu REVIEW C3): both incidents were in runners outside the tree. In the WHIRL workspace layout (the
+# tree is a folder of whirl-work, next to progress\ and scratch\), the default run also checks
+#   - the live runner tools <Root>\..\progress\tools\*.ps1 (the gate GPU runners start from): same rules, a violation FAILS;
+#   - the one-off runners <Root>\..\scratch\**\*.ps1: violations are listed as WARN only (scratch is never shipped and
+#     old runners stay as records), with a count line. A scratch runner MUST be fixed (SetEnvOrRemove) before it is
+#     copied as a template for a new runner.
+# Folders that do not exist are skipped (a clone of the public repo has neither). -NoWorkspace checks the tree only;
+# -Live / -Scratch give other folders.
+#   pwsh tools/gates/env_restore_check.ps1 [-Root DIR] [-Files a.ps1,b.ps1] [-NoWorkspace] [-Live DIR] [-Scratch DIR]
+#        -> "env restore check: ok (N file(s))" / FAIL lines, exit 1; "WARN scratch ..." lines + "env restore check: scratch
+#           N file(s), M with the old restore (WARN, not shipped)" never change the exit code
 #   pwsh tools/gates/env_restore_check.ps1 -SelfTest                             -> "env restore check selftest: N/N as expected"
-param([string]$Root = "", [string[]]$Files = @(), [switch]$SelfTest)
+param([string]$Root = "", [string[]]$Files = @(), [switch]$SelfTest, [switch]$NoWorkspace, [string]$Live = "", [string]$Scratch = "")
 $ErrorActionPreference = "Stop"
 if (-not $Root) { $Root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path }
+if (-not $NoWorkspace -and $Files.Count -eq 0) {
+    if (-not $Live) { $Live = Join-Path $Root "..\progress\tools" }
+    if (-not $Scratch) { $Scratch = Join-Path $Root "..\scratch" }
+} else { $Live = ""; $Scratch = "" }
 
 function Violations([System.Management.Automation.Language.Ast]$ast) {
     $v = @()
@@ -81,6 +95,12 @@ if ($SelfTest) {
 $list = @($Files | ForEach-Object { $_ -split "," } | Where-Object { $_ })
 if ($list.Count -eq 0) {
     $list = @(foreach ($d in "tools", "tests") { $p = Join-Path $Root $d; if (Test-Path $p) { Get-ChildItem $p -Recurse -File -Filter *.ps1 | ForEach-Object { $_.FullName } } })
+    # the live runner tools of the workspace (not recursive: progress\tools holds the runners themselves)
+    if ($Live -and (Test-Path -LiteralPath $Live -PathType Container)) {
+        $lv = @(Get-ChildItem -LiteralPath $Live -File -Filter *.ps1 | ForEach-Object { $_.FullName })
+        Write-Host "env restore check: live runner folder $((Resolve-Path -LiteralPath $Live).Path) ($($lv.Count) file(s), FAIL rules)"
+        $list += $lv
+    }
 }
 $bad = 0
 foreach ($f in $list) {
@@ -88,6 +108,19 @@ foreach ($f in $list) {
     $ast = [System.Management.Automation.Language.Parser]::ParseFile($f, [ref]$tok, [ref]$err)
     if ($err.Count) { Write-Host "FAIL $f`: parse error line $($err[0].Extent.StartLineNumber): $($err[0].Message)"; $bad++; continue }
     foreach ($x in @(Violations $ast)) { Write-Host "FAIL $f`: $x"; $bad++ }
+}
+# scratch runners: WARN only (never shipped); listed so a template is fixed before it is copied
+if ($Scratch -and (Test-Path -LiteralPath $Scratch -PathType Container)) {
+    $sl = @(Get-ChildItem -LiteralPath $Scratch -Recurse -File -Filter *.ps1 -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
+    $sw = 0
+    foreach ($f in $sl) {
+        $tok = $null; $err = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($f, [ref]$tok, [ref]$err)
+        if ($err.Count) { continue }  # a broken one-off script is not this check's business
+        $vs = @(Violations $ast)
+        if ($vs.Count) { $sw++; Write-Host "WARN scratch $f`: $($vs.Count) violation(s), first: $($vs[0])" }
+    }
+    Write-Host "env restore check: scratch $($sl.Count) file(s), $sw with the old restore (WARN, not shipped; fix a runner with SetEnvOrRemove before copying it as a template)"
 }
 if ($bad) { Write-Host "env restore check: FAIL ($bad violation(s) in $($list.Count) file(s))"; exit 1 }
 Write-Host "env restore check: ok ($($list.Count) file(s))"
