@@ -170,8 +170,8 @@ DecodeResult specDecode(q::Model& model, const Tok& tok, u32 first, u32 n_prompt
                 nd_host = q::pickDrafts(accs, timing, n_draft, cycles, prev_nd);
                 prev_nd = nd_host;
             } else if (opt.mtp_adapt > 0) {
-                const u32 want = static_cast<u32>(std::ceil(acc_ema + static_cast<float>(opt.mtp_adapt)));
-                nd_host = std::clamp<u32>(want, 1, n_draft);
+                const float emas[1] = {acc_ema};
+                nd_host = spec::rules::adaptDrafts(emas, opt.mtp_adapt, n_draft);
             }
         }
         if (ng_n > 0) {
@@ -249,7 +249,7 @@ DecodeResult specDecode(q::Model& model, const Tok& tok, u32 first, u32 n_prompt
         } else {
             for (u32 kk = 0; kk < std::min(acc + 1, nd); ++kk) pos_tries[kk] += 1;
             for (u32 kk = 0; kk < acc; ++kk) pos_hits[kk] += 1;
-            acc_ema = 0.7f * acc_ema + 0.3f * static_cast<float>(acc);
+            acc_ema = spec::rules::accEma(acc_ema, acc);
             acc_model.update(nd, acc);
             timing.update(nd_host, cyc_ms);
         }
@@ -469,9 +469,9 @@ ChatOpts mtpOpts(const q::Model& model, ChatOpts base, u32* drafts_out) {
         }
     }
     if (auto v = envGet("MTP_NMIN")) base.mtp_n_min = static_cast<u32>(std::strtoul(v->c_str(), nullptr, 10));
-    if (auto v = envGet("MTP_ADAPT")) {
-        base.mtp_auto = *v == "auto";
-        base.mtp_adapt = static_cast<u32>(std::strtoul(v->c_str(), nullptr, 10));
+    if (const whirl::settings::MtpAdapt ad = whirl::settings::mtpAdapt(); ad.set) {  // (the server's rule, arch025-N15)
+        base.mtp_auto = ad.automatic;
+        base.mtp_adapt = ad.adapt;
     }
     if (auto v = envGet("NGRAM")) base.ngram = *v != "0";
     if (auto v = envGet("NGRAM_MIN")) base.ngram_min = static_cast<u32>(std::strtoul(v->c_str(), nullptr, 10));

@@ -173,7 +173,7 @@ int cmdChat(const Args& a) {
     }
     // (WHIRL_GDN_V0: applyRuntimeEnv(model, true) below, arch025-N2b)
     // MTP block as Q4_K from Q6_K or Q8_0 (drafts only; default, WHIRL_MTP_Q4=0 keeps the file's types)
-    if (envFlag("MTP_Q4", true)) model.requantMtpQ4();
+    if (whirl::settings::mtpQ4()) model.requantMtpQ4();
     loadLog(model, L.stats);
 #if WHIRL_HAVE_VISION
     // vision: encode the images now (borrowing the prefill scratch), then let the
@@ -203,7 +203,7 @@ int cmdChat(const Args& a) {
     out(fmt("  prompt tokens: %zu\n\n", ids.size()));
 
     // (CLI-SCHED: not below one schedule chunk + its merged tail, as the server's vram::min_prefill_batch)
-    if (auto v = envU32("PREFILL_BATCH"))
+    if (auto v = whirl::settings::prefillBatch(settingsWarn))
         model.max_batch = std::max<u32>(sched::prefill_chunk + sched::prefill_merge, std::min(model.max_batch, *v));
     q::Profile prof;
     const bool profiling = envGet("PROFILE").has_value();
@@ -213,7 +213,7 @@ int cmdChat(const Args& a) {
 
     // MTP speculative decode is exact greedy: on whenever the checkpoint has a nextn
     // layer; WHIRL_MTP=0 turns it off.
-    const bool use_mtp = model.mtp.has_value() && logits_out == nullptr && envFlag("MTP", true);
+    const bool use_mtp = model.mtp.has_value() && logits_out == nullptr && whirl::settings::mtp();
     Timer timer;
     timer.begin();
     std::vector<std::int32_t> moe_ids;
@@ -354,8 +354,7 @@ int cmdChat(const Args& a) {
         }
         // WHIRL_DRAFT_HEAD=q4 builds the older Q4_K draft head instead of the 2-bit one
         if (!envGet("MTP_FULLHEAD")) {
-            const auto dh = envGet("DRAFT_HEAD");
-            model.buildDraftHeadEx(dh && *dh == "q4" ? q::Model::DraftHeadKind::q4 : q::Model::DraftHeadKind::d2);
+            model.buildDraftHeadEx(whirl::settings::draftHeadQ4() ? q::Model::DraftHeadKind::q4 : q::Model::DraftHeadKind::d2);
         }
         applyDraftVocab(model, tok.t);
         u32 drafts = 0;

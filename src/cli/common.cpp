@@ -81,15 +81,10 @@ std::vector<u32> parseIds(const std::string& list) {
     return ids;
 }
 
-std::optional<u32> envU32(const char* name) {
-    if (auto v = envGet(name)) {
-        try {
-            return static_cast<u32>(std::stoul(*v));
-        } catch (...) {
-        }
-    }
-    return std::nullopt;
-}
+void settingsWarn(const std::string& msg) { std::fprintf(stderr, "whirl: %s\n", msg.c_str()); }
+
+// (arch025-N15: the server's rule, shared - whole value decimal, <= 2^32 - 1; it took a leading number before)
+std::optional<u32> envU32(const char* name) { return whirl::settings::envU32(name, settingsWarn); }
 
 // ---------------------------------------------------------------------------
 // CLI-SCHED: every CLI prefill runs the forwards whirl-server runs for the same prompt alone with
@@ -102,11 +97,11 @@ std::optional<u32> envU32(const char* name) {
 std::vector<std::size_t> serverForwardEnds(const Tok& tok, std::span<const u32> ids, u32 max_batch, const device::Profile& prof, bool moe) {
     const std::size_t n = ids.size();
     const std::size_t sys = sched::sysSplit(sched::sysBoundary(ids, tok.im_start, tok.system, tok.im_end, tok.newline), n,
-                                            envU32("SYS_MIN").value_or(sched::sys_min_default));
+                                            whirl::settings::sysMin(sched::sys_min_default, settingsWarn));
     const std::vector<std::uint32_t> imgs =
         sched::imageSplits(ids, q::image_id_base, tok.vision_end, envU32("VIS_CKPT_MIN").value_or(sched::img_split_min_default));
-    const std::size_t exec = sched::prefillExecFor(envU32("PREFILL_CHUNK").value_or(sched::prefillExecDefault(prof, moe)), max_batch, prof.prefill_fill_batch);
-    const std::size_t tail_min = envFlag("TAIL_CK", true) ? sched::tail_ck_min_default : 0;
+    const std::size_t exec = sched::prefillExecFor(whirl::settings::prefillChunk(settingsWarn).value_or(sched::prefillExecDefault(prof, moe)), max_batch, prof.prefill_fill_batch);
+    const std::size_t tail_min = whirl::settings::tailCk() ? sched::tail_ck_min_default : 0;
     return sched::soloForwardEnds(n, sys, tok.thinkOpenSplit(ids), imgs, 0, exec, tail_min, max_batch);
 }
 

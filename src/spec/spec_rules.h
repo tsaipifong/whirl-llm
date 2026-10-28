@@ -15,6 +15,8 @@
 //   D6  relaxacc synthetic cycle cost      -> synthCycleMs
 //   D8  context stop                       -> decodeRoom (each loop passes its own draft room)
 //   D14 per-cycle MTP draft cap            -> soloDraftCap = slotDraftCap for one slot (the server's draftCap)
+//   D16 WHIRL_MTP_ADAPT draft count        -> adaptDrafts (arch025-lane1; same result for one sequence)
+//   D17 acceptance EMA                     -> accEma (arch025-lane1)
 // SPDX-License-Identifier: Apache-2.0
 
 #pragma once
@@ -26,6 +28,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <span>
 
@@ -78,6 +81,22 @@ inline bool relaxRepeats(std::span<const std::uint32_t> hist, std::uint32_t next
     for (std::uint32_t r = 0; r <= acc; ++r) tail[r + 1] = dr[r];
     return relax::extendsRepeat(hist, std::span<const std::uint32_t>(tail.data(), acc + 2));
 }
+
+// D16: WHIRL_MTP_ADAPT's draft count: the largest ceil(acc_ema + adapt) over the decoding sequences, at least 1, within
+// the cycle's MTP draft cap (server: every MTP slot of the cycle; CLI: its one sequence).
+// `ema(s)` reads the EMA of each element s of `seqs` (the caller's own sequence type: Slot*, a float, ...).
+template <class Seqs, class Ema>
+std::uint32_t adaptDrafts(const Seqs& seqs, Ema&& ema, std::uint32_t adapt, std::uint32_t cap) {
+    std::uint32_t want = 1;
+    for (const auto& s : seqs) want = std::max(want, static_cast<std::uint32_t>(std::ceil(ema(s) + static_cast<float>(adapt))));
+    return std::min(cap, want);
+}
+inline std::uint32_t adaptDrafts(std::span<const float> acc_emas, std::uint32_t adapt, std::uint32_t cap) {
+    return adaptDrafts(acc_emas, [](float e) { return e; }, adapt, cap);
+}
+
+// D17: the acceptance EMA a sequence keeps for D16 after a cycle that kept `acc` drafts.
+inline float accEma(float ema, std::uint32_t acc) { return 0.7f * ema + 0.3f * static_cast<float>(acc); }
 
 // D6: relaxacc's deterministic cycle cost for the draft-count policy (wall-clock jitter would change the kept tokens):
 // a base per slot (a slots), + slope per extra verify row (rows = all verify rows), + 3% per sequential MTP draft step.

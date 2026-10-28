@@ -1342,12 +1342,7 @@ std::uint32_t Engine::pickDrafts(std::span<Slot* const> act) {
         prev_nd_ = pick;
         return pick;
     }
-    if (opt_.mtp_adapt > 0) {
-        std::uint32_t want = 1;
-        for (Slot* sl : act)
-            want = std::max(want, static_cast<std::uint32_t>(std::ceil(sl->acc_ema + static_cast<float>(opt_.mtp_adapt))));
-        nd = std::min(nd, want);
-    }
+    if (opt_.mtp_adapt > 0) nd = spec::rules::adaptDrafts(act, [](const Slot* sl) { return sl->acc_ema; }, opt_.mtp_adapt, nd);
     return nd;
 }
 
@@ -1801,7 +1796,7 @@ void Engine::acceptSlot(Cycle& cy, std::size_t k, const sampling::Acceptor& acce
     sl.accepted += acc;
     if (cy.dsrc[k] == 0 && opt_.use_mtp) {
         // n-gram cycles stay out of the MTP acceptance models
-        sl.acc_ema = 0.7f * sl.acc_ema + 0.3f * static_cast<float>(acc);
+        sl.acc_ema = spec::rules::accEma(sl.acc_ema, acc);
         sl.dacc.update(nd_dev, acc);
         if (opt_.slot_drafts == 2 && nd_dev > 0) {
             sl.sacc.observe(nd_dev, acc);

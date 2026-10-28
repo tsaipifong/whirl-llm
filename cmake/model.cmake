@@ -71,6 +71,8 @@ if(WHIRL_WITH_HIP)
   if(TARGET whirl_sampling)
     target_link_libraries(whirl-cli PRIVATE whirl_sampling)
   endif()
+  # whirl_settings: the WHIRL_* run settings the CLI shares with the server (arch025-N15)
+  target_link_libraries(whirl-cli PRIVATE whirl_settings)
   # `whirl serve` forwards to the server's serveMain (cmake/server.cmake)
   if(TARGET whirl_server_core)
     target_sources(whirl-cli PRIVATE

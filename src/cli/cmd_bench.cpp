@@ -72,14 +72,14 @@ int cmdBench(const Args& a) {
         q::loadOrTune(model, path, log);
         out(log);
     }
-    if (envFlag("MTP_Q4", true)) model.requantMtpQ4();
+    if (whirl::settings::mtpQ4()) model.requantMtpQ4();
     loadLog(model, L.stats);
     applyRuntimeEnv(model);
     if (use_dflash) {
         use_dflash = loadDraftModelEnv(model, a);
         if (!use_dflash && !a.get("--modes")) modes = {"mtp-ngram", "mtp", "plain"};
     }
-    const bool has_mtp = model.mtp.has_value() && envFlag("MTP", true);
+    const bool has_mtp = model.mtp.has_value() && whirl::settings::mtp();
 
     // prefill sweep: a long mixed zh/en coding text, truncated to each size
     std::vector<u32> long_ids;
