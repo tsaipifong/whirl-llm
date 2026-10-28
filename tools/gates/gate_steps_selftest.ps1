@@ -140,6 +140,11 @@ try {
         @{ step = "cpu_env_restore"; name = "clean (arch025-c2fu)"; exit = 0; lines = @("env restore check selftest: 10/10 as expected", "env restore check: ok (37 file(s))"); want = $true },
         @{ step = "cpu_env_restore"; name = "planted: a SetEnvironmentVariable(k, `$null) restore"; exit = 1; lines = @("env restore check selftest: 10/10 as expected", "FAIL x.ps1: R1 line 113: SetEnvironmentVariable outside a SetEnv* helper", "env restore check: FAIL (1 violation(s) in 37 file(s))"); want = $false },
         @{ step = "cpu_env_restore"; name = "planted: 0 files scanned"; exit = 0; lines = @("env restore check selftest: 10/10 as expected", "env restore check: ok (0 file(s))"); want = $false },
+        @{ step = "cpu_raw_free_check"; name = "clean (arch025-dtools D5.2)"; exit = 0; lines = @("raw free check selftest: ok (13 cases)", "raw free check: ok (0 raw release sites, 0 pending other steps, 180 files)"); want = $true },
+        @{ step = "cpu_raw_free_check"; name = "planted: a hip::free outside the RAII layer"; exit = 1; lines = @("raw free check selftest: ok (13 cases)", "  RAW FREE src/model/x.cpp:12: hip::free(p);", "raw free check: FAIL (1 raw release site(s), 0 stale pending entr(y/ies), 0 pending other steps, 180 files)"); want = $false },
+        @{ step = "cpu_raw_free_check"; name = "planted: a stale pending entry"; exit = 1; lines = @("raw free check selftest: ok (13 cases)", "raw free check: FAIL (0 raw release site(s), 1 stale pending entr(y/ies), 0 pending other steps, 180 files)"); want = $false },
+        @{ step = "cpu_raw_free_check"; name = "planted: selftest failed (exit forged to 0)"; exit = 0; lines = @("raw free check selftest: FAIL (1 of 13 cases)", "raw free check: ok (0 raw release sites, 0 pending other steps, 180 files)"); want = $false },
+        @{ step = "cpu_raw_free_check"; name = "planted: 0 files scanned still needs the ok line"; exit = 0; lines = @("raw free check selftest: ok (13 cases)", "done"); want = $false },
         @{ step = "cpu_step_selftest"; name = "clean"; exit = 0; lines = @("gate steps selftest: 36/36 as expected"); want = $true },
         @{ step = "cpu_step_selftest"; name = "planted: one proof did not hold"; exit = 1; lines = @("BAD  rules: ...", "gate steps selftest: 35/36 as expected"); want = $false }
     )

@@ -214,6 +214,11 @@ AddStep "cpu_module_gate" $false @($pwsh, "-NoProfile", "-File", (Join-Path $rep
 # no Windows / CRT-platform header and no Win32 / Winsock / CRT-platform call in src/ or include/ outside src/platform/*_win.cpp,
 # src/hip, src/release/dll_deps.cpp and the vendored stb_image.h. Blocking in every mode, no pending list. CPU, no exe.
 AddStep "cpu_platform_check" $false @($pwsh, "-NoProfile", "-File", (Join-Path $repo "tools\gates\platform_check.ps1"), "-Mode", "block") { param($o, $c) $c -eq 0 -and ($o -match "(?m)^platform check: ok \(0 site\(s\) in 0 file\(s\)") }
+# arch025-dtools D5.2 (arch024-S11): no hand-written GPU release (hip::free / hostFree / eventDestroy / streamDestroy, the same four through a
+# Backend, the raw hipFree... calls) in src/ outside the RAII layer. tools/gates/raw_free_check.ps1: its planted block / pass cases
+# (-SelfTest), then the tree (raw_free_pending.txt = sites other arch024 steps remove; a stale entry fails). CPU, no exe, seconds.
+AddStep "cpu_raw_free_check" $false @($pwsh, "-NoProfile", "-Command", "& '$pwsh' -NoProfile -File '$(Join-Path $repo "tools\gates\raw_free_check.ps1")' -SelfTest; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$pwsh' -NoProfile -File '$(Join-Path $repo "tools\gates\raw_free_check.ps1")'; exit `$LASTEXITCODE") `
+    { param($o, $c) $c -eq 0 -and ($o -match "(?m)^raw free check selftest: ok \(([1-9]\d*) cases\)") -and ($o -match "(?m)^raw free check: ok \(0 raw release sites") }
 # arch025-c2fu: no tools\ / tests\ PowerShell script leaves an environment variable defined as EMPTY when it removes or
 # restores it (pwsh 7.5+ keeps k= for SetEnvironmentVariable(k, $null) and $env:k = ""; an unset HIP_VISIBLE_DEVICES
 # restored that way hid every GPU from later children twice: arch024-S14, arch025-c2ctx). tools/gates/env_restore_check.ps1:

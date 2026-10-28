@@ -47,6 +47,18 @@ def stale(root, muts):
     return out
 
 
+import re
+
+# arch025-dtools D5.5: "maybe equivalent" without a reason is a hole in the evidence (x12-f4b-settokens had one). A mutant text may say
+# "equivalent" only with its argument ("equivalent by design", "NOT equivalent by construction ...", "equivalent because ...").
+HEDGE = re.compile(r"\b(maybe|possibly|probably|perhaps|might be)\s+(output[- ])?equivalent", re.I)
+
+
+def unargued(muts):
+    return [(m["id"], "hedged equivalence", m.get("file"), "says '" + HEDGE.search(m.get(k, "")).group(0) + "' with no argument")
+            for m in muts for k in ("expect_test", "what") if HEDGE.search(m.get(k, ""))]
+
+
 def selftest():
     cases = []
     with tempfile.TemporaryDirectory() as d:
@@ -61,6 +73,9 @@ def selftest():
         cases.append(("missing file is stale", "nofile" in got))
         cases.append(("unknown kind is stale", "badkind" in got))
         cases.append(("revert of a non-repo commit is stale", "rv" in {s[0] for s in stale(d, [{"id": "rv", "kind": "revert", "file": "a.cpp", "commit": "deadbee"}])}))
+    cases.append(("hedged 'maybe equivalent' is flagged", [x[0] for x in unargued([{"id": "h1", "expect_test": "GPU: golden (maybe equivalent in output)"}])] == ["h1"]))
+    cases.append(("'possibly output-equivalent' is flagged (what text)", [x[0] for x in unargued([{"id": "h2", "what": "possibly output equivalent"}])] == ["h2"]))
+    cases.append(("an argued claim passes", unargued([{"id": "ok1", "expect_test": "equivalent by design: WHIRL_MODE unset"}, {"id": "ok2", "expect_test": "NOT equivalent by construction"}]) == []))
     ok = 0
     for n, g in cases:
         ok += g
@@ -83,7 +98,7 @@ def main():
     except (OSError, ValueError, KeyError) as e:
         print(f"mutations_check: cannot read {spec}: {e}")
         return 2
-    bad = stale(a.root, muts)
+    bad = stale(a.root, muts) + unargued(muts)
     for i, k, f, why in bad:
         print(f"STALE {i} ({k}, {f}): {why}")
     print(f"mutations check: {'ok' if not bad else 'FAIL'} ({len(muts) - len(bad)}/{len(muts)} mutants apply)")
