@@ -5199,6 +5199,61 @@ struct CkRig {
     }
 };
 
+// arch025-N4a: the engine's sampling buffers as one component (SampleBuffers, src/server/engine_sampling.*; were
+// Engine members samp_dev_ .. ctl_host_ and Engine::SampleRows). Sizes == the 14ec7d7 Engine::allocState formulas;
+// the row reads (top-k_small, the k_big escalation, the full row, one logit) == a host reference on the mock's
+// logits. The end-to-end sampling / acceptance tests (sampling, specsample, relaxacc ...) pin the engine's use of it.
+void testSampleBuffers() {
+    NullBackend nb;
+    MockConfig mc;
+    mc.parallel = 3;
+    mc.pool_tokens = 4096;
+    MockModel model(nb, tok(), mc);
+    const std::uint32_t V = model.cfg().n_vocab;
+    CHECK_EQ(SampleBuffers::sampBytes(), static_cast<std::size_t>(max_rows) * k_small * 8 + max_rows * 8);
+    for (const std::uint32_t topk : {0u, 4u}) {
+        SampleBuffers sb(model, nb);
+        sb.alloc(3, topk > 0, topk);
+        CHECK_EQ(sb.sampHost().size(), SampleBuffers::sampBytes());
+        CHECK(sb.sampDev() != 0);
+        CHECK_EQ(sb.rowHost().size(), static_cast<std::size_t>(V));
+        CHECK_EQ(sb.cands()->size(), std::max<std::size_t>(V, k_big));
+        CHECK_EQ(sb.ctlHost().size(), static_cast<std::size_t>(3) * qwen35::ctl_words);
+        const std::uint64_t rb = topk ? static_cast<std::uint64_t>(max_rows) * topk * 8 + max_rows * 8 : 0;
+        CHECK_EQ(static_cast<std::uint64_t>(sb.relaxHost().size()), rb);
+        CHECK_EQ(sb.relaxDev() != 0, topk > 0);
+        CHECK_EQ(sb.nVocab(), V);
+        CHECK_EQ(sb.logitsRow(5), model.logits() + static_cast<std::uint64_t>(5) * V * 4);
+        CHECK(sb.inCands() != nullptr);
+    }
+    // row reads on known logits: rows 0..2 (row 1 flat -> the top-k_small set stays open and escalates)
+    SampleBuffers sb(model, nb);
+    sb.alloc(3, false, 0);
+    auto* lg = reinterpret_cast<float*>(model.logits());
+    for (std::uint32_t r = 0; r < 3; ++r)
+        for (std::uint32_t j = 0; j < V; ++j)
+            lg[static_cast<std::size_t>(r) * V + j] = r == 1 ? 0.0f : static_cast<float>((j * 7919u + r * 31u) % 1000u) * 0.01f;
+    CHECK_EQ(sb.logitAt(2, 17), lg[2 * static_cast<std::size_t>(V) + 17]);
+    const float* full = sb.loadFullRow(2);
+    CHECK(std::equal(full, full + V, lg + 2 * static_cast<std::size_t>(V)));
+    for (std::uint32_t r = 0; r < 3; ++r) {
+        Sampler s;
+        s.cands = sb.cands();
+        s.temp = 1.0;
+        s.inv_t = 1.0f;
+        s.top_p = 0.9;
+        sb.fetchCands(s, 3);
+        CHECK_EQ(s.row_base, 0u);
+        sb.prepareRow(s, r);
+        CHECK_EQ(s.row, r);
+        const float* x = lg + static_cast<std::size_t>(r) * V;
+        CHECK_EQ(s.m, *std::max_element(x, x + V));
+        CHECK(s.n > 0);
+        CHECK(s.big_used <= 1 && s.full_used <= s.big_used);  // escalation: at most once each, full only after big
+        if (r != 1) CHECK_EQ((*s.cands)[0].id, static_cast<std::uint32_t>(std::max_element(x, x + V) - x));
+    }
+}
+
 // arch025-x1m2 (mutant c4-align-off-by-one): CkptStore's 256-byte rounding of each part at exact multiples of 256 and
 // just above them. The mock's own parts (32 / 64 / 64 bytes) never hit a multiple; real conv / ssm / hidden sizes do.
 void testCkptAlign() {
@@ -9077,6 +9132,7 @@ int main(int argc, char** argv) {
         {"draft_caps", testDraftCaps},
         {"protocol", testProtocol},
         {"sampler", testSampler},
+        {"sample_buffers", testSampleBuffers},  // arch025-N4a
         {"acceptor_fixed", testAcceptorFixed},
         {"acceptor_rules", testAcceptorRules},
         {"acceptor_random", testAcceptorRandom},
