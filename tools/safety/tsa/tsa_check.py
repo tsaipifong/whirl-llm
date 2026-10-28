@@ -20,7 +20,7 @@ import sys
 
 # name, source (repo-relative), exact text to find, its replacement, a regex the compiler output of the mutant must match
 MUTATIONS = [
-    ("engine-stop-unlocked", "src/server/engine.cpp",
+    ("engine-stop-unlocked", "src/server/engine_queue.cpp",
      "void Engine::stop() {\n    whirl::MutexLock lk(q_mutex_);\n    stop_ = true;",
      "void Engine::stop() {\n    stop_ = true;",
      r"writing variable 'stop_' requires holding mutex 'q_mutex_'"),
@@ -44,7 +44,7 @@ MUTATIONS = [
      "            vram_due = vramIdleTick();\n            govApply();\n            WH_RELOCK_HELD(lk, q_mutex_);\n",
      "            vram_due = vramIdleTick();\n            govApply();\n",
      r"reading variable 'queue_' requires holding mutex 'q_mutex_'"),
-    ("engine-runloopcalls-relock-dropped", "src/server/engine.cpp",
+    ("engine-runloopcalls-relock-dropped", "src/server/engine_queue.cpp",
      "    for (auto& f : calls) f();\n    WH_RELOCK_HELD(lk, q_mutex_);\n",
      "    for (auto& f : calls) f();\n",
      r"mutex 'q_mutex_' (is not held on every path|to be held at the end of function)"),

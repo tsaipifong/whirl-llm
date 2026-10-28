@@ -48,10 +48,6 @@ const std::string* getStr(const json::Object& obj, std::string_view key) {
     return &v->asString();
 }
 
-bool startsWith(std::string_view s, std::string_view p) { return s.substr(0, p.size()) == p; }
-bool endsWith(std::string_view s, std::string_view p) {
-    return s.size() >= p.size() && s.substr(s.size() - p.size()) == p;
-}
 
 std::optional<std::string_view> toolParamType(const json::Array& tools, std::string_view fname, std::string_view pname) {
     for (const json::Value& t : tools) {
@@ -91,7 +87,7 @@ std::size_t partialHold(std::string_view text, std::string_view pat) {
     if (pat.empty()) return 0;
     std::size_t k = std::min(pat.size() - 1, text.size());
     for (; k > 0; --k)
-        if (endsWith(text, pat.substr(0, k))) return k;
+        if (std::string_view(text).ends_with(pat.substr(0, k))) return k;
     return 0;
 }
 
@@ -304,10 +300,10 @@ Out::View Out::view(bool final_in) const {
     std::optional<std::string_view> rest = t;
     if (!in_reason) {
         const std::string_view lt = trimLeftWs(t);
-        if (startsWith(lt, "<think>")) {
+        if (std::string_view(lt).starts_with("<think>")) {
             in_reason = true;
             t = lt.substr(7);
-        } else if (!final && !lt.empty() && lt.size() < 7 && startsWith("<think>", lt)) {
+        } else if (!final && !lt.empty() && lt.size() < 7 && std::string_view("<think>").starts_with(lt)) {
             return r;  // maybe the start of "<think>": hold everything
         }
     }
@@ -349,7 +345,7 @@ std::optional<std::vector<ToolCall>> parseToolCalls(std::string_view region, con
         const bool closed = e != std::string_view::npos;
         const std::string_view inner = trimWs(closed ? after.substr(0, e) : after);
         rest = closed ? after.substr(e + 12) : std::string_view();
-        if (startsWith(inner, "<function=")) {
+        if (std::string_view(inner).starts_with("<function=")) {
             const std::size_t gt = inner.find('>');
             if (gt == std::string_view::npos) return std::nullopt;
             const std::string_view name = trimWs(inner.substr(10, gt - 10));
@@ -373,8 +369,8 @@ std::optional<std::vector<ToolCall>> parseToolCalls(std::string_view region, con
                 if (pe == std::string_view::npos) return std::nullopt;  // a truncated value (FR-SRV P2-1)
                 body = vtext.substr(pe + 12);
                 vtext = vtext.substr(0, pe);
-                if (startsWith(vtext, "\n")) vtext.remove_prefix(1);
-                if (endsWith(vtext, "\n")) vtext.remove_suffix(1);
+                if (std::string_view(vtext).starts_with("\n")) vtext.remove_prefix(1);
+                if (std::string_view(vtext).ends_with("\n")) vtext.remove_suffix(1);
                 const auto ty = toolParamType(tools, name, pname);
                 json::Value val{std::string(vtext)};
                 if (!ty || *ty != "string") {
@@ -386,7 +382,7 @@ std::optional<std::vector<ToolCall>> parseToolCalls(std::string_view region, con
                 obj.set(std::string(pname), std::move(val));
             }
             calls.push_back({std::string(name), json::dumpPython(json::Value(std::move(obj)), true)});
-        } else if (startsWith(inner, "{")) {
+        } else if (std::string_view(inner).starts_with("{")) {
             if (!closed) return std::nullopt;  // FR-SRV P2-1: a JSON call needs its </tool_call>
             json::Value v;
             try {

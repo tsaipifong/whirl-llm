@@ -181,13 +181,8 @@ std::string g_program = "whirl-server";
     std::exit(app::exit_usage);
 }
 
-std::optional<std::string> env(std::string_view name) { return settings::envGet(name); }
-
 // the server's settings::Warn (a bad WHIRL_* value: a warning line, never a startup failure; FR-SRV P3-10)
 void settingsWarn(const std::string& msg) { logW("{}", msg); }
-
-// (arch025-N15: the rule is settings::envU32, shared with the CLI)
-std::uint32_t envU32(std::string_view name, std::uint32_t def) { return settings::envU32(name, def, settingsWarn); }
 
 // WHIRL_DRAFT_VOCAB (default: the embedded 64k subset on dense qwen35 models with the 248320-token
 // vocabulary): keep only that vocabulary subset of the 2-bit draft head (special and byte tokens are
@@ -230,8 +225,6 @@ void applyDraftVocab(qwen35::Model& model, const Tokenizer& tok, const qwen35::D
     else
         logW("WHIRL_DRAFT_VOCAB ignored: it needs the 2-bit draft head (Q6_K output head, WHIRL_DRAFT_HEAD not q4)");
 }
-
-bool envOn(std::string_view name, bool def) { return settings::envFlag(name, def); }
 
 // Default max drafts per cycle by number of decoding slots (index = slots).
 // wide: verify batches of up to 32 rows (otherwise 16); the cost model picks within the cap.
@@ -331,7 +324,7 @@ struct LoadedModel {
     poolbudget::Margin budgetMargin(std::uint64_t budget) const {
         const hip::GpuOthers& o = others0;
         poolbudget::MarginIn mi;
-        if (margin_explicit) mi.room_override = static_cast<std::uint64_t>(envU32("POOL_BUDGET_MARGIN_MB", 0)) << 20;
+        if (margin_explicit) mi.room_override = static_cast<std::uint64_t>(settings::envU32("POOL_BUDGET_MARGIN_MB", 0, settingsWarn)) << 20;
         mi.local_budget = budget;
         mi.budget_start = wddm_start.ok ? wddm_start.local_budget : 0;
         mi.moe = cfg.moe;
@@ -401,8 +394,8 @@ void buildModel(Options& opt, const numerics::Request& nreq, const char* lad, Lo
         ci.uma = is_uma;
         if (opt.parallel_given) ci.parallel_arg = opt.parallel;
         ci.parallel_default = opt.parallel;
-        if (env("VRAM_HEADROOM_MB")) ci.headroom_mb_env = envU32("VRAM_HEADROOM_MB", 0);
-        ci.reserve_explicit = env("POOL_RESERVE_MB").has_value();
+        if (settings::envGet("VRAM_HEADROOM_MB")) ci.headroom_mb_env = settings::envU32("VRAM_HEADROOM_MB", 0, settingsWarn);
+        ci.reserve_explicit = settings::envGet("POOL_RESERVE_MB").has_value();
         card = vram::cardDefaults(ci);
         opt.parallel = card.parallel;
         if (!card.note.empty()) logI("{}", card.note);
@@ -448,7 +441,7 @@ void buildModel(Options& opt, const numerics::Request& nreq, const char* lad, Lo
     sin.put("wddm_start.budget", wddm_start.ok ? wddm_start.local_budget : 0);
     const auto adjust = [&b](const std::string& what, const std::string& why) { b.adjust(what, why); };
     // the margin kept free under the WDDM local budget (pool sizing, the re-check after allocation)
-    b.margin_explicit = env("POOL_BUDGET_MARGIN_MB").has_value();
+    b.margin_explicit = settings::envGet("POOL_BUDGET_MARGIN_MB").has_value();
     const auto budgetMargin = [&b](std::uint64_t budget) { return b.budgetMargin(budget); };
 
     const Tokenizer& tok = b.tok.emplace(Tokenizer::fromGguf(f));
@@ -464,7 +457,7 @@ void buildModel(Options& opt, const numerics::Request& nreq, const char* lad, Lo
     qwen35::LoadOptions& lo = b.lo;
     lo.numerics = nreq;
     lo.max_batch = serve_prefill_batch;
-    lo.embd_on_host = envOn("EMBD_HOST", true);  // WHIRL_EMBD_HOST=0: embedding in VRAM
+    lo.embd_on_host = settings::envFlag("EMBD_HOST", true);  // WHIRL_EMBD_HOST=0: embedding in VRAM
     if (auto v = settings::envGet("PREFILL_BATCH")) {
         // (arch025-N15: the shared number rule; a malformed value keeps the default batch)
         if (auto x = settings::parseU32(*v)) {
@@ -479,14 +472,14 @@ void buildModel(Options& opt, const numerics::Request& nreq, const char* lad, Lo
         }
     }
     // prefix checkpoints (per slot / shared); the auto-shrink below may lower the defaults
-    const bool& no_pc = b.no_pc = envOn("NO_PREFIX_CACHE", false);
+    const bool& no_pc = b.no_pc = settings::envFlag("NO_PREFIX_CACHE", false);
     const std::size_t ck_def = opt.parallel == 1 ? n_ckpt_default : (opt.parallel <= 4 ? n_ckpt_default_par : 1);
-    std::size_t& n_ck = b.n_ck = no_pc ? 0 : envU32("SERVE_CKPTS", static_cast<std::uint32_t>(ck_def));
+    std::size_t& n_ck = b.n_ck = no_pc ? 0 : settings::envU32("SERVE_CKPTS", static_cast<std::uint32_t>(ck_def), settingsWarn);
     if (n_ck > tier::max_ck) {  // FR-CACHE P2-3: tier entries / restore maps hold at most max_ck checkpoints
         logW("WHIRL_SERVE_CKPTS={} is above the maximum ({}); using {}", n_ck, tier::max_ck, tier::max_ck);
         n_ck = tier::max_ck;
     }
-    std::uint32_t& n_spe_plan = b.n_spe_plan = (n_ck == 0 || no_pc) ? 0 : envU32("SYS_CKPTS", static_cast<std::uint32_t>(n_spe_default));
+    std::uint32_t& n_spe_plan = b.n_spe_plan = (n_ck == 0 || no_pc) ? 0 : settings::envU32("SYS_CKPTS", static_cast<std::uint32_t>(n_spe_default), settingsWarn);
     // --draft dflash: check the drafter against the target before loading (headers only, before the
     // VRAM fit check, which counts the drafter instead of the MTP block); a
     // model without a matching drafter keeps the MTP drafts (whirl/dflash_policy.h)
@@ -515,13 +508,18 @@ void buildModel(Options& opt, const numerics::Request& nreq, const char* lad, Lo
     if (!is_uma) {
         const hip::MemInfo mf = ops->memInfo();
         const hip::WddmMemInfo w = ops->wddmMemInfo();
-        const bool res_explicit = env("POOL_RESERVE_MB").has_value();
-        const std::uint64_t res = static_cast<std::uint64_t>(envU32("POOL_RESERVE_MB", cfg.moe ? 1536 : (w.ok ? 768 : 3072))) << 20;
+        poolbudget::RoomIn ri;
+        ri.reserve_explicit = settings::envGet("POOL_RESERVE_MB").has_value();
+        ri.reserve = static_cast<std::uint64_t>(settings::envU32("POOL_RESERVE_MB", poolbudget::defaultReserveMb(cfg.moe, w.ok), settingsWarn)) << 20;
         const poolbudget::Margin mg = budgetMargin(w.local_budget);
         const std::uint64_t margin = mg.bytes;
-        std::uint64_t av = mf.free > res ? mf.free - res : 0;
-        if (!res_explicit && w.ok) av = std::min(av, w.local_budget > w.local_usage + margin ? w.local_budget - w.local_usage - margin : 0);
-        av = av > card.headroom ? av - card.headroom : 0;
+        ri.margin = margin;
+        ri.free = mf.free;
+        ri.wddm_ok = w.ok;
+        ri.local_budget = w.local_budget;
+        ri.local_usage = w.local_usage;
+        ri.headroom = card.headroom;
+        const std::uint64_t av = poolbudget::kvRoom(ri).bytes;
         // the module's load estimate, the fit input (the DFlash2 drafter instead of the MTP block, FR-DFL P3-1)
         // and the first plan (startup::dgpuFit, arch025-C0: the server tests run the same code)
         startup::DgpuFitIn fin;
@@ -531,28 +529,28 @@ void buildModel(Options& opt, const numerics::Request& nreq, const char* lad, Lo
         if (use_dflash) {
             startup::DflashFitIn d;
             std::vector<std::string> pw;
-            d.params = whirl::dflash::parseParams([](const char* n) { return env(n); }, pw);
+            d.params = whirl::dflash::parseParams([](const char* n) { return settings::envGet(n); }, pw);
             d.dc = qwen35::DFlashConfig::fromGguf(*dfile);
             d.file = &*dfile;
-            if (auto v = env("SNAP_SETS")) {
+            if (auto v = settings::envGet("SNAP_SETS")) {
                 try {
                     d.snap_env = static_cast<std::uint32_t>(std::stoul(*v));
                 } catch (const std::exception&) {
                 }
             }
-            d.gdn_replay = envOn("GDN_REPLAY", true);
-            d.ngram = envOn("NGRAM", true);
+            d.gdn_replay = settings::envFlag("GDN_REPLAY", true);
+            d.ngram = settings::envFlag("NGRAM", true);
             fin.dflash = std::move(d);
         }
         fin.nreq = nreq;
-        fin.kv_req = numerics::kvEstimateRequest(env("KV"));
-        fin.ckpt_host = envOn("CKPT_HOST", false);
+        fin.kv_req = numerics::kvEstimateRequest(settings::envGet("KV"));
+        fin.ckpt_host = settings::envFlag("CKPT_HOST", false);
         fin.pool_min_tokens = pool_req ? *pool_req : std::min<std::uint32_t>(slot_ctx, vram_tight_pool);
         fin.max_batch = lo.max_batch;
         fin.n_ck = static_cast<std::uint32_t>(n_ck);
         fin.n_spe = n_spe_plan;
-        fin.batch_fixed = env("PREFILL_BATCH").has_value();
-        fin.ck_fixed = env("SERVE_CKPTS").has_value() || env("SYS_CKPTS").has_value();
+        fin.batch_fixed = settings::envGet("PREFILL_BATCH").has_value();
+        fin.ck_fixed = settings::envGet("SERVE_CKPTS").has_value() || settings::envGet("SYS_CKPTS").has_value();
         startup::DgpuFit fit = startup::dgpuFit(am->sizing, f, cfg, fin);
         const qwen35::LoadEstimate& est = fit.est;
         const std::uint64_t st1 = fit.ssb.st1;
@@ -619,7 +617,7 @@ void buildModel(Options& opt, const numerics::Request& nreq, const char* lad, Lo
         // not even the weights + smallest buffers fit (no room for any KV): stop before a load that
         // would run out of memory part way through, with the "smaller quantization" advice
         // (WHIRL_FIT_CHECK=0 loads anyway; borderline cases only warn)
-        if (!plan.fits && plan.pool_tokens == 0 && envOn("FIT_CHECK", true))
+        if (!plan.fits && plan.pool_tokens == 0 && settings::envFlag("FIT_CHECK", true))
             throw qwen35::ModelError("VramLimit",
                                      std::format("needs about {:.2f} GiB of VRAM before any KV cache (weights {:.2f} GiB + prefill batch {}, "
                                                  "state, checkpoints), about {:.2f} GiB usable of {:.2f} GiB{}",
@@ -641,7 +639,7 @@ void buildModel(Options& opt, const numerics::Request& nreq, const char* lad, Lo
         const std::uint64_t st1 = ssb.st1;
         const std::uint64_t pend1 = ssb.pend1;
         // (WHIRL_DUMP_KV: one "D kv: site=server.est_uma" line)
-        const KvFormat kv_est = numerics::kvEstimate(numerics::KvEstSite::server_uma, nreq, cfg.moe, numerics::kvEstimateRequest(env("KV")));
+        const KvFormat kv_est = numerics::kvEstimate(numerics::KvEstSite::server_uma, nreq, cfg.moe, numerics::kvEstimateRequest(settings::envGet("KV")));
         const std::uint64_t ck = st1 + static_cast<std::uint64_t>(cfg.n_embd) * 4 + static_cast<std::uint64_t>(cfg.n_vocab) * 4;
         hip::UmaNeed need;
         need.weights = est.weights + (use_dflash && dfile ? am->sizing.dflashWeightBytes(*dfile) : 0);
@@ -726,7 +724,7 @@ void buildModel(Options& opt, const numerics::Request& nreq, const char* lad, Lo
         dfile.reset();
     }
     std::vector<std::string>& dfl_warn = b.dfl_warn;
-    const whirl::dflash::Params& dfl_par = b.dfl_par = whirl::dflash::parseParams([](const char* n) { return env(n); }, dfl_warn);
+    const whirl::dflash::Params& dfl_par = b.dfl_par = whirl::dflash::parseParams([](const char* n) { return settings::envGet(n); }, dfl_warn);
     if (use_dflash)
         for (const std::string& w : dfl_warn) logW("{}", w);
     if (use_dflash) {
@@ -757,28 +755,28 @@ void buildModel(Options& opt, const numerics::Request& nreq, const char* lad, Lo
         for (const auto& e : nu::RuntimeValues::names()) {
             const std::string_view n = e.name;
             if (n == "DBG" || n == "GEMV_MAX" || n == "NO_GRAPH" || n == "GV_GROUP" || n == "GV_NMAX") continue;  // CLI only
-            rv.*e.field = env(e.name);
+            rv.*e.field = settings::envGet(e.name);
         }
         hip::Function fv0 = nullptr;
         if (rv.gdn_v0) fv0 = model.module.getFunctionOpt("gdn_step_norm_v0");
         nu::applyFront(model.num_plan, nu::Front::server, rv, fv0 != nullptr);
         if (model.nf().gdn_v0) model.k.gdn_step_norm = fv0;
     }
-    if (env("PREFILL_BATCH"))  // (same floor as above: never below vram::min_prefill_batch; the CLI's rule too)
-        model.max_batch = vram::prefillBatchCap(model.max_batch, envU32("PREFILL_BATCH", model.max_batch));
+    if (settings::envGet("PREFILL_BATCH"))  // (same floor as above: never below vram::min_prefill_batch; the CLI's rule too)
+        model.max_batch = vram::prefillBatchCap(model.max_batch, settings::envU32("PREFILL_BATCH", model.max_batch, settingsWarn));
     // WHIRL_DRAFT_VOCAB: unset = embedded 64k subset (dense qwen35, 248320 vocab), 64k = embedded,
     // 48k / <file> = frequency subset file, N = the first N rows (old experiment), off = full head
     const qwen35::DraftVocabChoice& draft_vocab = b.draft_vocab = qwen35::draftVocabChoice(settings::draftVocab(), qwen35::exeDirectory());
     if (draft_vocab.kind == qwen35::DraftVocabChoice::Kind::first_n) model.draft_vocab = draft_vocab.n;
     // (applyFront set DRAFT_WINDOW / _MIN; envU32 here only logs a bad value at its old place, with the same default)
-    (void)envU32("DRAFT_WINDOW", model.nf().draft_window);
-    (void)envU32("DRAFT_WINDOW_MIN", model.nf().draft_window_min);
-    if (env("GEMV_R") || env("GEMV_W") || env("GEMV_WH"))
+    (void)settings::envU32("DRAFT_WINDOW", model.nf().draft_window, settingsWarn);
+    (void)settings::envU32("DRAFT_WINDOW_MIN", model.nf().draft_window_min, settingsWarn);
+    if (settings::envGet("GEMV_R") || settings::envGet("GEMV_W") || settings::envGet("GEMV_WH"))
         logW("WHIRL_GEMV_R / WHIRL_GEMV_W / WHIRL_GEMV_WH are not supported by whirl-server (ignored)");
     const bool& use_mtp = b.use_mtp = model.mtp.has_value() && settings::mtp();
     const qwen35::MtpDefaults& def = b.def = qwen35::mtpDefaults(model.cfg.moe, model.arch);
     std::optional<std::uint32_t> drafts_env;
-    if (auto v = env("MTP_DRAFTS")) {
+    if (auto v = settings::envGet("MTP_DRAFTS")) {
         std::uint32_t d = def.drafts;
         try {
             d = static_cast<std::uint32_t>(std::stoul(*v));
@@ -789,22 +787,22 @@ void buildModel(Options& opt, const numerics::Request& nreq, const char* lad, Lo
     const std::optional<std::uint32_t> drafts_user = opt.mtp_drafts ? opt.mtp_drafts : drafts_env;
     const std::uint32_t& drafts = b.drafts = drafts_user.value_or(def.drafts);
     float& p_min = b.p_min = def.p_min;
-    if (auto v = env("MTP_PMIN")) {
+    if (auto v = settings::envGet("MTP_PMIN")) {
         try {
             p_min = std::stof(*v);
         } catch (const std::exception&) {
         }
     }
-    const std::uint32_t& n_min = b.n_min = envU32("MTP_NMIN", 0);
+    const std::uint32_t& n_min = b.n_min = settings::envU32("MTP_NMIN", 0, settingsWarn);
     const auto& adapt_env = b.adapt_env = settings::envGet("MTP_ADAPT");
     std::uint32_t& adapt = b.adapt = def.adapt;
     if (adapt_env) adapt = settings::parseMtpAdapt(adapt_env).adapt;  // (the rule shared with the CLI, arch025-N15)
     // an explicit draft count is used as is (fixed) unless WHIRL_MTP_ADAPT asks otherwise
     const bool& auto_mode = b.auto_mode = adapt_env ? (*adapt_env == "auto") : (def.automatic && !drafts_user);
-    if (env("HEAD_CHUNK")) (void)envU32("HEAD_CHUNK", model.nf().head_chunk);  // (bad-value warning only, as above)
+    if (settings::envGet("HEAD_CHUNK")) (void)settings::envU32("HEAD_CHUNK", model.nf().head_chunk, settingsWarn);  // (bad-value warning only, as above)
     auto& batch_drafts = b.batch_drafts = defaultBatchDrafts(model.cfg.moe, model.wideCapable());
     batch_drafts[1] = drafts;
-    const auto& bd_env = b.bd_env = env("MTP_BATCH_DRAFTS");
+    const auto& bd_env = b.bd_env = settings::envGet("MTP_BATCH_DRAFTS");
     if (bd_env) {
         std::size_t k = 1, p = 0;
         const std::string& s = *bd_env;
@@ -825,7 +823,7 @@ void buildModel(Options& opt, const numerics::Request& nreq, const char* lad, Lo
     }
     // MTP block as Q4_K from Q6_K or Q8_0 (drafts only; WHIRL_MTP_Q4=0 keeps the file's types)
     if (use_mtp && settings::mtpQ4()) model.requantMtpQ4();
-    if (use_mtp && !env("MTP_FULLHEAD")) {
+    if (use_mtp && !settings::envGet("MTP_FULLHEAD")) {
         const bool q4 = settings::draftHeadQ4();
         model.buildDraftHeadEx(q4 ? qwen35::Model::DraftHeadKind::q4 : qwen35::Model::DraftHeadKind::d2);
         applyDraftVocab(model, tok, draft_vocab);
@@ -943,7 +941,7 @@ private:
 
 void ServerRun::planSlots() {
     // slots: KV-cache regions, recurrent state, MTP hidden rows
-    model.gdn_replay = envOn("GDN_REPLAY", true);
+    model.gdn_replay = settings::envFlag("GDN_REPLAY", true);
     // REVIEW-0221 C3: the pre-load estimate can be off (it lowered --parallel 16 -> 15 for a 16384-token request and the
     // real pool held 13312). With the weights and buffers loaded, measure the VRAM usable now (same rule as the pool
     // sizing below) and lower --parallel again, one slot at a time, until one request of min(ctx-per-slot, 16384)
@@ -952,28 +950,35 @@ void ServerRun::planSlots() {
     if (!lm.is_uma && opt.parallel_given && opt.parallel > 1 && !model.kv_choice.debug) {
         const hip::WddmMemInfo w = lm.ops->wddmMemInfo();
         const hip::MemInfo mf = lm.ops->memInfo();
-        const bool res_explicit = env("POOL_RESERVE_MB").has_value();
-        const std::uint64_t res = static_cast<std::uint64_t>(envU32("POOL_RESERVE_MB", lm.cfg.moe ? 1536 : (w.ok ? 768 : 3072))) << 20;
-        std::uint64_t av = mf.free > res ? mf.free - res : 0;
-        const poolbudget::Margin mg = lm.budgetMargin(w.local_budget);
-        if (!res_explicit && w.ok) av = std::min(av, w.local_budget > w.local_usage + mg.bytes ? w.local_budget - w.local_usage - mg.bytes : 0);
-        av = av > lm.card.headroom ? av - lm.card.headroom : 0;
+        poolbudget::RoomIn ri;
+        ri.reserve_explicit = settings::envGet("POOL_RESERVE_MB").has_value();
+        ri.reserve = static_cast<std::uint64_t>(settings::envU32("POOL_RESERVE_MB", poolbudget::defaultReserveMb(lm.cfg.moe, w.ok), settingsWarn)) << 20;
+        ri.margin = lm.budgetMargin(w.local_budget).bytes;
+        ri.free = mf.free;
+        ri.wddm_ok = w.ok;
+        ri.local_budget = w.local_budget;
+        ri.local_usage = w.local_usage;
+        ri.headroom = lm.card.headroom;
+        const std::uint64_t av = poolbudget::kvRoom(ri).bytes;
         std::uint64_t ng = 0;
         for (std::uint32_t li = 0; li < lm.cfg.n_layer; ++li)
             if (!lm.cfg.isAttn(li)) ++ng;
         const std::uint64_t st = ng * (model.convBytes() + model.ssmBytes());
-        const std::uint64_t pend = ng * (static_cast<std::uint64_t>(lm.am->sizing.max_small_batch) * lm.cfg.convCh() * 4 +
-                                         static_cast<std::uint64_t>(lm.am->sizing.max_small_batch) * lm.cfg.n_v_heads * (lm.cfg.d_state + lm.cfg.headV() + 2) * 4);
-        const std::uint64_t ck = envOn("CKPT_HOST", false) ? 0 : st + static_cast<std::uint64_t>(lm.cfg.n_vocab) * 4 + static_cast<std::uint64_t>(lm.cfg.n_embd) * 4;
+        startfit::SlotFixedIn sfi;
+        sfi.state = st;
+        sfi.replay = whirl::model::slotStateBytes(lm.am->sizing, lm.cfg).pend1;
+        sfi.n_ck = lm.n_ck;
+        sfi.ck = settings::envFlag("CKPT_HOST", false) ? 0 : st + static_cast<std::uint64_t>(lm.cfg.n_vocab) * 4 + static_cast<std::uint64_t>(lm.cfg.n_embd) * 4;
         // v0.2.2.2: + the DFlash2 context ring per slot (dflashSetup runs after setupSeqs, below; REVIEW-0221-2)
-        const std::uint64_t per_slot = (st + pend + lm.n_ck * ck + (lm.use_dflash ? model.dflashSlotBytes() : 0)) * 104 / 100;
-        const std::uint64_t shared = (lm.n_spe_plan * ck + static_cast<std::uint64_t>(model.snap_sets) * st) * 104 / 100 + (256ull << 20);
+        sfi.dflash_slot = lm.use_dflash ? model.dflashSlotBytes() : 0;
+        sfi.n_spe = lm.n_spe_plan;
+        sfi.snap_sets = model.snap_sets;
+        const startfit::SlotFixed sf = startfit::slotFixed(sfi);
+        const std::uint64_t per_slot = sf.per_slot;
+        const std::uint64_t shared = sf.shared;
         const std::uint64_t target = std::min<std::uint32_t>(lm.slot_ctx, vram_tight_pool);
         const std::uint64_t per_tok_est = model.kvBytesPerToken();
-        const auto poolFor = [&](std::uint32_t n) {
-            const std::uint64_t fixed = shared + per_slot * n;
-            return av > fixed && per_tok_est ? (av - fixed) / per_tok_est : 0;
-        };
+        const auto poolFor = [&](std::uint32_t n) { return startfit::poolTokensWith(n, av, per_slot, shared, per_tok_est); };
         for (std::uint32_t p = opt.parallel; p > 1 && poolFor(p) < target; --p)
             lm.adjust(std::format("--parallel {} -> {}", p, p - 1),
                    std::format("measured after loading the weights: with {} slots the KV pool would hold about {} tokens, less than one "
@@ -999,8 +1004,8 @@ void ServerRun::planSlots() {
     ssi.drafts = lm.drafts;
     ssi.user_batch_drafts = lm.bd_env.has_value();
     ssi.dfl_par = lm.dfl_par;
-    ssi.ngram = envOn("NGRAM", true);
-    ssi.snap_sets_env = env("SNAP_SETS");
+    ssi.ngram = settings::envFlag("NGRAM", true);
+    ssi.snap_sets_env = settings::envGet("SNAP_SETS");
     slots.emplace(startup::setupSlots(model, *lm.ops, ssi, lm.batch_drafts));
     lm.batch_drafts = slots->batch_drafts;
     lit_snap_sets = slots->lit_snap_sets;  // engine: snapshot sets for n-gram / DFlash2 drafts (0 = all)
@@ -1052,52 +1057,52 @@ void ServerRun::makeEngine() {
     eo.batch_drafts = lm.batch_drafts;
     eo.ng_snap_sets = lit_snap_sets;
     eo.no_prefix_cache = lm.no_pc;
-    eo.verify_cache = env("PREFIX_CACHE_VERIFY").has_value();
+    eo.verify_cache = settings::envGet("PREFIX_CACHE_VERIFY").has_value();
     // COLD-RESUME: --precise resumes only from cold-exact checkpoints (output bitwise equal to a cold prefill)
-    eo.cold_resume = envOn("COLD_RESUME", nreq.mode == numerics::Mode::precise);
-    eo.seg_prefill = envOn("SEG_PREFILL", true);
-    eo.timing_reset = envOn("TIMING_RESET", true);
-    eo.ngram = envOn("NGRAM", true);
-    eo.ngram_min = envU32("NGRAM_MIN", lm.def.ngram_min);
+    eo.cold_resume = settings::envFlag("COLD_RESUME", nreq.mode == numerics::Mode::precise);
+    eo.seg_prefill = settings::envFlag("SEG_PREFILL", true);
+    eo.timing_reset = settings::envFlag("TIMING_RESET", true);
+    eo.ngram = settings::envFlag("NGRAM", true);
+    eo.ngram_min = settings::envU32("NGRAM_MIN", lm.def.ngram_min, settingsWarn);
     eo.ngram_slope = lm.def.ngram_slope;
-    if (auto v = env("NGRAM_SLOPE")) eo.ngram_slope = std::strtof(v->c_str(), nullptr);
-    eo.ngram_max = envU32("NGRAM_MAX", 0);
-    eo.ngram_force = envOn("NGRAM_FORCE", false);
+    if (auto v = settings::envGet("NGRAM_SLOPE")) eo.ngram_slope = std::strtof(v->c_str(), nullptr);
+    eo.ngram_max = settings::envU32("NGRAM_MAX", 0, settingsWarn);
+    eo.ngram_force = settings::envFlag("NGRAM_FORCE", false);
     // WHIRL_SLOT_DRAFTS: 0 / unset uniform, 1 marginal-gain swaps, 2 cost-model allocation
-    if (auto v = env("SLOT_DRAFTS")) eo.slot_drafts = *v == "2" ? 2u : (*v != "0" ? 1u : 0u);
+    if (auto v = settings::envGet("SLOT_DRAFTS")) eo.slot_drafts = *v == "2" ? 2u : (*v != "0" ? 1u : 0u);
     if (lm.use_dflash) {
         // MTP-only settings: the per-slot MTP draft allocation, the draft-head vocabulary subset and
         // the MTP draft attention window have nothing to act on without the MTP block
         if (eo.slot_drafts != 0) logW("WHIRL_SLOT_DRAFTS ignored with --draft dflash (it allocates MTP drafts)");
         eo.slot_drafts = 0;
-        if (env("DRAFT_VOCAB") || env("DRAFT_WINDOW") || env("DRAFT_WINDOW_MIN"))
+        if (settings::envGet("DRAFT_VOCAB") || settings::envGet("DRAFT_WINDOW") || settings::envGet("DRAFT_WINDOW_MIN"))
             logI("WHIRL_DRAFT_VOCAB / WHIRL_DRAFT_WINDOW not used with --draft dflash (MTP draft head only)");
     }
-    eo.trace_nd = env("TRACE_ND").has_value();
-    eo.loop_log = env("LOOP_LOG").has_value();
-    eo.tier_verify = env("TIER_VERIFY").has_value();
-    eo.tier_min_gain = envU32("TIER_MIN_GAIN", 512);
-    if (auto v = env("GATHER_MS")) {
+    eo.trace_nd = settings::envGet("TRACE_ND").has_value();
+    eo.loop_log = settings::envGet("LOOP_LOG").has_value();
+    eo.tier_verify = settings::envGet("TIER_VERIFY").has_value();
+    eo.tier_min_gain = settings::envU32("TIER_MIN_GAIN", 512, settingsWarn);
+    if (auto v = settings::envGet("GATHER_MS")) {
         try {
             eo.gather_ms = std::stod(*v);
         } catch (const std::exception&) {
         }
     }
-    eo.decode_min_tps = opt.decode_min_tps ? *opt.decode_min_tps : envU32("DECODE_MIN_TPS", decode_min_tps_default);
+    eo.decode_min_tps = opt.decode_min_tps ? *opt.decode_min_tps : settings::envU32("DECODE_MIN_TPS", decode_min_tps_default, settingsWarn);
     if (eo.decode_min_tps > 0)
         logI("decode floor: >= {:.0f} tok/s per decoding request while others prefill (--decode-min-tps)", eo.decode_min_tps);
     else
         logI("decode floor: off (--decode-min-tps 0: prefill forwards are not limited)");
-    if (auto v = env("PROFILE")) eo.profile = *v == "2" ? 2 : 1;
+    if (auto v = settings::envGet("PROFILE")) eo.profile = *v == "2" ? 2 : 1;
     eo.sys_min = settings::sysMin(sys_min_default, settingsWarn);
-    eo.kv_supersede = envU32("KV_SUPERSEDE", 1) != 0;
+    eo.kv_supersede = settings::envU32("KV_SUPERSEDE", 1, settingsWarn) != 0;
     // TIER-IDLE: hidden test override of the 300 s idle write delay (no CLI flag; 0: off)
-    if (env("KV_IDLE_FLUSH_MS")) eo.kv_idle_flush_ms = envU32("KV_IDLE_FLUSH_MS", 0);
-    eo.lcp_on = envOn("SYS_LCP", true);
+    if (settings::envGet("KV_IDLE_FLUSH_MS")) eo.kv_idle_flush_ms = settings::envU32("KV_IDLE_FLUSH_MS", 0, settingsWarn);
+    eo.lcp_on = settings::envFlag("SYS_LCP", true);
     eo.n_ck = lm.n_ck;
     eo.tail_ck = settings::tailCk();  // debug knob: WHIRL_TAIL_CK=0 turns the tail checkpoint off
     eo.n_spe = (lm.n_ck == 0 || lm.no_pc) ? 0 : lm.n_spe_plan;
-    eo.ckpt_host = envOn("CKPT_HOST", false);
+    eo.ckpt_host = settings::envFlag("CKPT_HOST", false);
     eo.prefill_exec = lm.prefill_exec;
     eo.seed = seed0;
 
@@ -1133,7 +1138,7 @@ void ServerRun::reserveRamTier() {
     rin.integrated = lm.info.integrated;
     if (opt.kv_ram_mb) {
         rin.explicit_mb = *opt.kv_ram_mb;
-    } else if (auto v = env("KV_RAM_MB")) {
+    } else if (auto v = settings::envGet("KV_RAM_MB")) {
         try {
             rin.explicit_mb = std::stoull(*v);
             rin.explicit_src = "WHIRL_KV_RAM_MB";
@@ -1179,7 +1184,7 @@ void ServerRun::reserveRamTier() {
         // REVIEW-S8-719-3 N3-4: the vision encoder's weights are pinned after this (Vision::load, discrete GPU below, the
         // integrated GPU later): count them now, from the mmproj file size plus its padding (startfit::mmprojPinnedBytes;
         // the file size alone is below what is pinned, REVIEW-B0 N1)
-        if (const std::optional<std::string> mm = opt.mmproj ? opt.mmproj : env("MMPROJ")) {
+        if (const std::optional<std::string> mm = opt.mmproj ? opt.mmproj : settings::envGet("MMPROJ")) {
             std::error_code ec;
             const std::uintmax_t sz = std::filesystem::file_size(*mm, ec);
             if (!ec) pst.later = startfit::mmprojPinnedBytes(static_cast<std::uint64_t>(sz));
@@ -1255,7 +1260,7 @@ void ServerRun::loadVisionEarly() {
     // leaves room for what the encoder adds after startup (REVIEW-GOV-3 question 4: on the R9700 the first image added
     // 873 MiB on Ornith and a 1920x1080 image 134 MiB more, leaving 30 MiB before the governor's trigger). Text-only
     // runs and the integrated GPU (where a pinned allocation lowers hipMemGetInfo free) keep the old order and pool.
-    mmp_path = opt.mmproj ? opt.mmproj : env("MMPROJ");
+    mmp_path = opt.mmproj ? opt.mmproj : settings::envGet("MMPROJ");
     vis_load_s = 0;
     vis_reserve = 0;
     if (mmp_path && !lm.is_uma) {
@@ -1270,7 +1275,7 @@ void ServerRun::loadVisionEarly() {
         vis_load_taken = hip::localMemTaken(ml0, lm.ops->localMemSnap());
         vis_load_s = msSince(tl0) / 1000.0;
         vision::Mode vm = *vision::parseMode(opt.vis_mode);
-        if (auto x = env("VIS_MODE")) vm = vision::parseMode(*x).value_or(vm);
+        if (auto x = settings::envGet("VIS_MODE")) vm = vision::parseMode(*x).value_or(vm);
         const bool resident = vm != vision::Mode::stream;  // auto: resident when it fits, which the reserve makes room for
         std::array<std::array<std::uint64_t, 2>, 16> raw{};
         const std::size_t n_lend = backend->lendScratch(raw);
@@ -1294,44 +1299,25 @@ void ServerRun::planPool() {
     // budget makes Windows demote allocations to system memory (seen as GPU 'Shared Usage'), and a
     // demoted KV array is read across PCIe on every step (FIX-1: ~128k agent decode 29 -> 68 tok/s).
     // WHIRL_POOL_RESERVE_MB keeps the old free-VRAM-only rule with that reserve.
-    reserve_explicit = env("POOL_RESERVE_MB").has_value();
+    reserve_explicit = settings::envGet("POOL_RESERVE_MB").has_value();
     wddm0 = lm.ops->wddmMemInfo();
     pinned0 = lm.ops->pinnedHostBytes();  // pinned host memory inside wddm0's non-local usage
-    const std::uint64_t reserve =
-        static_cast<std::uint64_t>(envU32("POOL_RESERVE_MB", lm.cfg.moe ? 1536 : (wddm0.ok ? 768 : 3072))) << 20;
+    poolbudget::RoomIn ri;
+    ri.reserve_explicit = reserve_explicit;
+    ri.reserve = static_cast<std::uint64_t>(settings::envU32("POOL_RESERVE_MB", poolbudget::defaultReserveMb(lm.cfg.moe, wddm0.ok), settingsWarn)) << 20;
     const poolbudget::Margin margin0 = lm.budgetMargin(wddm0.local_budget);
     budget_margin = margin0.bytes;
-    std::string budget_note;
-    const std::uint64_t avail = [&] {
-        const hip::MemInfo mf = lm.ops->memInfo();
-        std::uint64_t a = mf.free > reserve ? mf.free - reserve : 0;
-        if (!reserve_explicit && wddm0.ok) {
-            const std::uint64_t room = wddm0.local_budget > wddm0.local_usage + budget_margin
-                                           ? wddm0.local_budget - wddm0.local_usage - budget_margin
-                                           : 0;
-            budget_note = std::format("WDDM budget {:.2f} GiB, used {:.2f} GiB, margin {} MiB ({}) -> room {:.2f} GiB; free "
-                                      "VRAM {:.2f} GiB minus {} MiB -> {:.2f} GiB",
-                                      wddm0.local_budget / 1073741824.0, wddm0.local_usage / 1073741824.0, budget_margin >> 20,
-                                      margin0.why, room / 1073741824.0, mf.free / 1073741824.0, reserve >> 20, a / 1073741824.0);
-            a = std::min(a, room);
-        } else if (reserve_explicit) {
-            budget_note = std::format("WHIRL_POOL_RESERVE_MB={}: free VRAM {:.2f} GiB minus the reserve, WDDM budget not applied",
-                                      reserve >> 20, mf.free / 1073741824.0);
-        } else {
-            budget_note = std::format("WDDM budget unavailable: free VRAM {:.2f} GiB minus {} MiB", mf.free / 1073741824.0, reserve >> 20);
-        }
-        if (lm.card.headroom > 0) {
-            budget_note += std::format("; minus {} MiB desktop headroom (WHIRL_VRAM_HEADROOM_MB) -> {:.2f} GiB", lm.card.headroom >> 20,
-                                       (a > lm.card.headroom ? a - lm.card.headroom : 0) / 1073741824.0);
-            a = a > lm.card.headroom ? a - lm.card.headroom : 0;
-        }
-        // --mmproj (discrete GPU, not WHIRL_POOL_RESERVE_MB): room for the vision encoder; text only: vis_reserve 0, a unchanged
-        if (vis_reserve > 0 && !reserve_explicit) {
-            a = poolbudget::kvAvail(a, vis_reserve);
-            budget_note += std::format("; minus {} -> {:.2f} GiB", vis_reserve_note, a / 1073741824.0);
-        }
-        return a;
-    }();
+    ri.margin = budget_margin;
+    ri.free = lm.ops->memInfo().free;
+    ri.wddm_ok = wddm0.ok;
+    ri.local_budget = wddm0.local_budget;
+    ri.local_usage = wddm0.local_usage;
+    ri.headroom = lm.card.headroom;
+    // --mmproj (discrete GPU, not WHIRL_POOL_RESERVE_MB): room for the vision encoder; text only: vis_reserve 0, unchanged
+    ri.vis_reserve = vis_reserve;
+    const poolbudget::Room room0 = poolbudget::kvRoom(ri);
+    const std::uint64_t avail = room0.bytes;
+    const std::string budget_note = poolbudget::kvRoomNote(ri, room0, margin0.why, vis_reserve_note);
     if (!lm.pool_req) logI("kv pool sizing: {}", budget_note);
     // KV format: fixed at load by the mode and model type (numerics::chooseKv, as the CLI).
     // A pool / context that does not fit in that format shrinks when not given explicitly,
@@ -1575,7 +1561,7 @@ void ServerRun::reportPool() {
     vram_cfg.pool_tokens = model.pool_pages * kv_page;
     // v0.2.2.2 memory governor: discrete GPU with WDDM numbers, the budget rule in use (not WHIRL_POOL_RESERVE_MB, whose
     // pool is never resized), WHIRL_GOVERNOR=0 turns it off
-    gov_on = wddm0.ok && !lm.is_uma && !reserve_explicit && envOn("GOVERNOR", true);
+    gov_on = wddm0.ok && !lm.is_uma && !reserve_explicit && settings::envFlag("GOVERNOR", true);
     vram_cfg.governor = gov_on;
     startup_spill = false;
     engine->setNumerics(numerics::propsJson(model.num_plan, kvFormatName(model.kv_fmt)));
@@ -1633,7 +1619,7 @@ void ServerRun::startTier() {
     {
         std::uint64_t ssd_gb = kv_ssd_gb_default;
         if (opt.kv_ssd_gb) ssd_gb = *opt.kv_ssd_gb;
-        else if (auto v = env("KV_SSD_GB")) {
+        else if (auto v = settings::envGet("KV_SSD_GB")) {
             try {
                 ssd_gb = std::stoull(*v);
             } catch (const std::exception&) {
@@ -1643,11 +1629,11 @@ void ServerRun::startTier() {
         for (const KvArr& a : backend->kvArrays()) page_row += a.row;
         if (tier_pre && page_row == per_tok) {
             std::optional<std::string> ssd_dir;
-            std::string ssd_mode = opt.kv_ssd_mode.value_or(env("KV_SSD_MODE").value_or("shutdown"));
+            std::string ssd_mode = opt.kv_ssd_mode.value_or(settings::envGet("KV_SSD_MODE").value_or("shutdown"));
             if (ssd_mode != "always" && ssd_mode != "off") ssd_mode = "shutdown";
             if (ssd_gb > 0 && ssd_mode != "off") {
                 if (opt.kv_ssd_dir) ssd_dir = opt.kv_ssd_dir;
-                else if (auto v = env("KV_SSD_DIR")) ssd_dir = *v;
+                else if (auto v = settings::envGet("KV_SSD_DIR")) ssd_dir = *v;
                 else if (lad) ssd_dir = platform::paths::kvCacheDir(lad);
             }
             tier::Layout lay;
@@ -1660,12 +1646,12 @@ void ServerRun::startTier() {
             tc.ram_bytes = kv_ram_mb << 20;
             tc.ssd_dir = ssd_dir;
             tc.ssd_cap = ssd_gb << 30;
-            tc.min_tokens = envU32("KV_TIER_MIN", 2048);
+            tc.min_tokens = settings::envU32("KV_TIER_MIN", 2048, settingsWarn);
             if (opt.kv_ssd_delay) tc.ssd_delay_ms = *opt.kv_ssd_delay * 1000;
-            else tc.ssd_delay_ms = envU32("KV_SSD_DELAY_MS", 300000);
-            tc.expire_s = envU32("KV_SSD_EXPIRE_S", 7 * 24 * 3600);  // test override only
+            else tc.ssd_delay_ms = settings::envU32("KV_SSD_DELAY_MS", 300000, settingsWarn);
+            tc.expire_s = settings::envU32("KV_SSD_EXPIRE_S", 7 * 24 * 3600, settingsWarn);  // test override only
             tc.ssd_shutdown_only = ssd_mode == "shutdown";
-            tc.dedup = envU32("KV_SSD_DEDUP", 1) != 0;
+            tc.dedup = settings::envU32("KV_SSD_DEDUP", 1, settingsWarn) != 0;
             // the wake hook must be in place before the IO thread starts
             engine->attachTier(tier_pre.get());
             try {
@@ -1716,20 +1702,20 @@ void ServerRun::attachVision() {
         }
         vision::Vision& v = *vis_store;
         v.idle_s = opt.vis_idle_s;
-        if (auto x = env("VIS_IDLE_S")) {
+        if (auto x = settings::envGet("VIS_IDLE_S")) {
             try {
                 v.idle_s = static_cast<std::uint32_t>(std::stoul(*x));
             } catch (const std::exception&) {
             }
         }
         v.mode = *vision::parseMode(opt.vis_mode);
-        if (auto x = env("VIS_MODE")) v.mode = vision::parseMode(*x).value_or(v.mode);
+        if (auto x = settings::envGet("VIS_MODE")) v.mode = vision::parseMode(*x).value_or(v.mode);
         VisionConfig vc;
         {
             const TokenId ve = tok.find("<|vision_end|>");
             vc.vision_end_id = ve < 0 ? 0 : static_cast<std::uint32_t>(ve);
         }
-        if (auto x = env("VIS_CKPT_MIN")) {
+        if (auto x = settings::envGet("VIS_CKPT_MIN")) {
             try {
                 vc.ck_min = static_cast<std::uint32_t>(std::stoul(*x));
             } catch (const std::exception&) {
@@ -1746,7 +1732,7 @@ void ServerRun::attachVision() {
             throw std::runtime_error("MropeUnsupported");
         }
         std::uint64_t cache_mb = opt.vis_cache_mb;
-        if (auto x = env("VIS_CACHE_MB")) {
+        if (auto x = settings::envGet("VIS_CACHE_MB")) {
             try {
                 cache_mb = std::stoull(*x);
             } catch (const std::exception&) {
@@ -1754,7 +1740,7 @@ void ServerRun::attachVision() {
         }
         vc.cache_bytes = cache_mb << 20;
         vc.allow_files = opt.allow_local_images;
-        if (auto x = env("VIS_DUMP")) vc.dump_prefix = *x;
+        if (auto x = settings::envGet("VIS_DUMP")) vc.dump_prefix = *x;
         vis_srv = makeQwen35Vision(v, model);
         vc.vis = vis_srv.get();
         std::array<std::array<std::uint64_t, 2>, 16> raw{};
@@ -1782,7 +1768,7 @@ void ServerRun::attachVision() {
 
 int ServerRun::runServer() {
     logI("model ready in {:.1f} s (weights {:.1f} s)", msSince(lm.t_load0) / 1000.0, lm.stats.ms / 1000.0);
-    const bool timer_probe = env("TIMER_PROBE").has_value();
+    const bool timer_probe = settings::envGet("TIMER_PROBE").has_value();
     const double probe_1ms = timer_probe ? sleepMs(std::chrono::milliseconds(1), 50) : 0.0;
     const double probe_200us = timer_probe ? sleepMs(std::chrono::microseconds(200), 50) : 0.0;
     const TimerRes timer_res;
@@ -1820,8 +1806,8 @@ int ServerRun::runServer() {
         gc.pool_min = std::min<std::uint32_t>(gc.pool_start, 4096);
         gc.ctx = slot_ctx_eff;  // the engine's context per request (the governor lowers it only below the startup pool)
         // test overrides (no CLI flag): recovery time, hold after a shrink
-        if (auto v = env("GOV_RECOVER_S")) gc.recover_s = std::strtod(v->c_str(), nullptr);
-        if (auto v = env("GOV_HOLD_S")) gc.hold_s = std::strtod(v->c_str(), nullptr);
+        if (auto v = settings::envGet("GOV_RECOVER_S")) gc.recover_s = std::strtod(v->c_str(), nullptr);
+        if (auto v = settings::envGet("GOV_HOLD_S")) gc.hold_s = std::strtod(v->c_str(), nullptr);
         engine->setGovernor(gc, [&](std::uint64_t budget) { return lm.budgetMargin(budget).bytes; }, tier_owned ? kv_ram_mb : 0,
                            lm.ops->memInfo().total);
         const poolbudget::Margin mg = lm.budgetMargin(wddm0.local_budget);
@@ -1833,7 +1819,7 @@ int ServerRun::runServer() {
              memgov::endMargin(mg.bytes) >> 20);
         logI("memory governor: HIP resource cache {} (freed GPU memory larger than that goes back to Windows at once)",
              hip_cache_set ? std::string("limited to 256 MiB (GPU_RESOURCE_CACHE_SIZE; WHIRL_HIP_CACHE_LIMIT=0 keeps the runtime default)")
-             : hip_cache_user ? std::format("set by GPU_RESOURCE_CACHE_SIZE={} MiB", std::getenv("GPU_RESOURCE_CACHE_SIZE"))
+             : hip_cache_user ? std::format("set by GPU_RESOURCE_CACHE_SIZE={} MiB", platform::env::get("GPU_RESOURCE_CACHE_SIZE").value_or(""))
                               : std::string("at the runtime default (WHIRL_HIP_CACHE_LIMIT=0: part of freed GPU memory is kept, 0.87 GiB of a 3.91 GiB shrink in our R9700 test)"));
     } else if (wddm0.ok && !lm.is_uma) {
         logI("memory governor: off ({})", reserve_explicit ? "WHIRL_POOL_RESERVE_MB is set: the pool is never resized" : "WHIRL_GOVERNOR=0");
@@ -1931,8 +1917,8 @@ int serveMain(int argc, char** argv, const char* program) {
             // every GPU (never restricted here); [default] = the GPU used without --device
             try {
                 const std::vector<gpusel::GpuRecord> devs = gpusel::enumerate();
-                if (const char* hv = std::getenv("HIP_VISIBLE_DEVICES"))
-                    std::printf("  (HIP_VISIBLE_DEVICES=%s is set: only those GPUs are listed, numbered from 0)\n", hv);
+                if (const auto hv = platform::env::get("HIP_VISIBLE_DEVICES"))
+                    std::printf("  (HIP_VISIBLE_DEVICES=%s is set: only those GPUs are listed, numbered from 0)\n", hv->c_str());
                 if (devs.empty()) std::printf("  (%s)\n", gpusel::noGpuTextHere().c_str());  // arch025-c2fu: names a hiding variable
                 else std::fputs(gpusel::listingText(devs, gpusel::defaultGpu(devs).index).c_str(), stdout);
             } catch (const std::exception& ex) {
@@ -1950,8 +1936,8 @@ int serveMain(int argc, char** argv, const char* program) {
     // when the runtime initialises at the first API call, not at DLL load (measured: setting it here == setting it in the
     // parent environment, cache_test V1 == V2). A value the user set wins; WHIRL_HIP_CACHE_LIMIT=0 leaves the runtime
     // default. Allocation only: kernels and output are not affected.
-    const bool hip_cache_user = std::getenv("GPU_RESOURCE_CACHE_SIZE") != nullptr;
-    const bool hip_cache_set = !hip_cache_user && envOn("HIP_CACHE_LIMIT", true);
+    const bool hip_cache_user = platform::env::get("GPU_RESOURCE_CACHE_SIZE").has_value();
+    const bool hip_cache_set = !hip_cache_user && settings::envFlag("HIP_CACHE_LIMIT", true);
     if (hip_cache_set) platform::env::set("GPU_RESOURCE_CACHE_SIZE", "256");  // arch025 PL1: _putenv_s
     // arch025-C1a: the argument loop, then the numerics request and the --parallel range (server_args.cpp, run by the
     // argument table test); WHIRL_MODE is read here, after the loop, as before. A bad command line: die(message).
@@ -1977,7 +1963,7 @@ int serveMain(int argc, char** argv, const char* program) {
     // server_args.cpp checkKvSsdDirEnv (server-tests server_kv_ssd_dir_env); WHIRL_KV_SSD_DIR is read here only when
     // no --kv-ssd-dir was given, as before.
     try {
-        if (!opt.kv_ssd_dir) checkKvSsdDirEnv(opt, env("KV_SSD_DIR"));
+        if (!opt.kv_ssd_dir) checkKvSsdDirEnv(opt, settings::envGet("KV_SSD_DIR"));
     } catch (const ArgError& ex) {
         die(ex.what());
     }

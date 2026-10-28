@@ -217,6 +217,10 @@
                              "proof": {"refactor": ["exit_rule", "golden_exact", "work_trace", "move_equal", "host_work", "host_time"]}},
    "server.vram_watch": {"metrics": [], "metrics_none": "sampled per status line / request end / idle minute: no bench key (whirl-server-tests vram_watch counters)",
                          "proof": {"refactor": ["exit_rule", "golden_exact", "move_equal", "server_log_scan"]}},
+   "server.image_embeddings": {"metrics": [], "metrics_none": "one cache lookup / encode per image of a request: no bench key (whirl-server-tests image_embeddings / vision counters)",
+                               "proof": {"refactor": ["exit_rule", "golden_exact", "move_equal", "server_log_scan"]}},
+   "server.kv_fit": {"metrics": [], "metrics_none": "arithmetic at server startup only (pool / slot sizing): no bench key",
+                     "proof": {"refactor": ["exit_rule", "golden_exact", "startup_sizing", "server_log_scan"]}},
    "model.arch_registry": {"metrics": [], "metrics_none": "table lookup at load: no bench key",
                            "proof": {"refactor": ["exit_rule", "golden_exact", "startup_sizing"]}},
    "model.qwen35": {"metrics": ["stage.decode_step", "stage.verify", "stage.prefill_chunk"],
@@ -619,9 +623,10 @@
               "isolation: header-only over model.arch_registry and whirl/model.h (ModelError); no own iso program"]
   },
   "server.engine": {
-   "id": "N4", "desc": "the server engine (class Engine, src/server/engine.h / engine.cpp / engine_vision.cpp): continuous batching over the request slots, the request lifecycle, the decode cycle and prefill phases, the prefix cache / tier / governor glue calls; arch025-N4 splits its member groups into components (N4a SampleBuffers, N4c BatchStats, ...). Member declaration order = destruction order (pool_ / ps_ / tb_ / kv_arrays_ pinned by comments) is kept by every split",
-   "paths": ["src/server/engine.cpp", "src/server/engine.h", "src/server/engine_vision.cpp"],
-   "lands_on": "arch025-lane1b (lane 1 leg 3, registration with N4a)",
+   "id": "N4", "desc": "the server engine (class Engine, src/server/engine.h): engine.cpp = construction, the request lifecycle and runLoop's scheduling phases; arch025-N4e / N4f split the rest of its member functions by concern, verbatim: engine_queue.cpp (the request queue: stop, runOnLoop, submitAndWait, abortQueued, the reaper), engine_pages.cpp (checkpoints, KV pages, shared prefix checkpoints), engine_tier.cpp (the scheduler's half of the host tiers), engine_prefill.cpp (prefill phases, decode floor), engine_decode.cpp (the decode cycle and its phases, drafts, DFlash2 context); engine_internal.h holds the types they share (KvPoolFull, CycleProf). Member groups are components (N4a SampleBuffers, N4b ImageEmbeddings, N4c BatchStats, N4f SpecState spec_ / FloorState fl_). Member declaration order = destruction order (pool_ / ps_ / tb_ / kv_arrays_ pinned by comments) is kept by every split (scratch/a25_lane1b/pin_member_order.py against 2d166f4)",
+   "paths": ["src/server/engine.cpp", "src/server/engine.h", "src/server/engine_internal.h", "src/server/engine_decode.cpp",
+             "src/server/engine_pages.cpp", "src/server/engine_prefill.cpp", "src/server/engine_queue.cpp", "src/server/engine_tier.cpp"],
+   "lands_on": "arch025-lane1b (lane 1 leg 3, registration with N4a; leg 4 N4e / N4f split files)",
    "steps": ["cpu_server", "cpu_pins", "cpu_tsa", "golden_swift", "golden_moe", "srv_mt_precise", "srv_mt_precise_moe", "srv_balance",
              "srv_fast", "srv_cache_precise", "srv_cache_balance", "srv_gpu_select", "srv_vis"],
    "gpus": {"golden_swift": 2, "golden_moe": 2, "srv_mt_precise": 2, "srv_mt_precise_moe": 2, "srv_balance": 2, "srv_fast": 2,
@@ -650,6 +655,27 @@
    "callers": "rdeps",
    "manual": ["whirl-server-tests vram_watch / governor / governor_restore / startup_adjust",
               "V-move: setVramProbe / vramNote / vramIdleTick byte-equal to the 14ec7d7 engine_gov.cpp bodies (scratch/a25_lane1b/n4d/moved_watch.txt)"]
+  },
+  "server.image_embeddings": {
+   "id": "N4b", "desc": "the server engine's image input (src/server/engine_vision.*, arch025-N4b; were the Engine members vis_cfg_ .. vis_rel_pending_ and Engine::embGet / embUnpin / embEvict / visPrepare / visDone / visIdle / visWakeNeeded): class ImageEmbeddings - the embedding cache by content hash (LRU over unpinned entries down to --vis-cache-mb), the per-slot image maps for the model, the encoder idle release with its VRAM line; Engine::attachVision (prefix store vision settings + ImageEmbeddings::attach) and base64Decode for data: URLs. vision::lendRegions (include/whirl/vision.h) is shared with the CLI chat",
+   "paths": ["src/server/engine_vision.cpp", "src/server/engine_vision.h"],
+   "lands_on": "arch025-lane1b (lane 1 leg 4, N4b)",
+   "steps": ["cpu_server", "cpu_vision", "cpu_pins", "golden_swift", "srv_vis"],
+   "gpus": {"golden_swift": 2, "srv_vis": 1},
+   "callers": "rdeps",
+   "manual": ["whirl-server-tests image_embeddings (hit / LRU eviction / pins / wakeNeeded / lendRegions) and vision (end-to-end on MockVision)",
+              "V-move: the bodies equal the 2d166f4 engine_vision.cpp code up to the member names and the slot / JobVis* parameters (scratch/a25_lane1b/leg4/apply_n4b.py)",
+              "V-srv: srv_vis (image requests, embeddings cached / encoded lines) == the 2d166f4 exe (work_equal)"]
+  },
+  "server.kv_fit": {
+   "id": "N10b", "desc": "the KV capacity planning of whirl-server's startup, HIP-free (arch025-N10b / N10c; the shape of llama.cpp common/fit.{h,cpp}): poolbudget::kvRoom / kvRoomNote / defaultReserveMb (the VRAM the KV pool may use: free VRAM minus WHIRL_POOL_RESERVE_MB, the WDDM budget room, the desktop headroom, the vision reserve; was written three times in server_main.cpp), fitPool / defaultMargin / usageFell / visionReserve / kvAvail (include/whirl/pool_budget.h, src/common/pool_budget.cpp), and the startup fit of explicit settings (include/whirl/startup_fit.h, src/common/startup_fit.cpp: RAM tier, slotsThatFit, slotFixed / poolTokensWith = the slot re-check after loading, fitFixed, startupJson). server_main.cpp measures (memInfo / wddmMemInfo at its fixed places) and calls these",
+   "paths": ["include/whirl/pool_budget.h", "src/common/pool_budget.cpp", "include/whirl/startup_fit.h", "src/common/startup_fit.cpp"],
+   "lands_on": "arch025-lane1b (lane 1 leg 5, N10b / N10c)",
+   "steps": ["cpu_tests", "cpu_server", "golden_swift", "srv_gpu_select", "srv_kvram719"],
+   "gpus": {"golden_swift": 2, "srv_gpu_select": 2, "srv_kvram719": 2},
+   "callers": "rdeps",
+   "manual": ["whirl-tests testKvRoom (kvRoom / kvRoomNote == the three old server_main copies over 3456 + 1728 cases), testSlotFixed (slotFixed / poolTokensWith == the old planSlots text), testVisionPoolReserve, the fitPool / margin tests; whirl-server-tests slot_replay_rows (planSlots' replay rows == model::slotStateBytes pend1)",
+              "V-srv: the startup lines (kv pool sizing:, adjusted:, kv pool check:) of srv_* cases == the 2d166f4 exe (work_equal / server_log_scan)"]
   },
   "model.arch_registry": {
    "id": "M5a", "desc": "architecture registry (src/model/arch_registry.*, host-only library whirl_arch, linked by the server core and the model library): ArchName / ArchSizing / ArchModule / ArchTable, findArch / findArchName (explicit tables, no self-registration), the UnsupportedArch text generated from the table (byte-identical to v0.2.4 with the product table), slotStateBytes (the server's per-slot recurrent state + replay rows for the dGPU fit and the UMA check)",

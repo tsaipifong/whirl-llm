@@ -80,4 +80,36 @@ std::uint64_t visionReserve(const VisionVram& v) {
 
 std::uint64_t kvAvail(std::uint64_t avail, std::uint64_t reserve) { return avail > reserve ? avail - reserve : 0; }
 
+Room kvRoom(const RoomIn& in) {
+    Room r;
+    r.after_reserve = in.free > in.reserve ? in.free - in.reserve : 0;
+    r.wddm_room = in.local_budget > in.local_usage + in.margin ? in.local_budget - in.local_usage - in.margin : 0;
+    std::uint64_t a = r.after_reserve;
+    if (!in.reserve_explicit && in.wddm_ok) a = std::min(a, r.wddm_room);
+    a = a > in.headroom ? a - in.headroom : 0;
+    r.after_headroom = a;
+    if (in.vis_reserve > 0 && !in.reserve_explicit) a = kvAvail(a, in.vis_reserve);
+    r.bytes = a;
+    return r;
+}
+
+std::string kvRoomNote(const RoomIn& in, const Room& r, std::string_view margin_why, std::string_view vis_note) {
+    std::string s;
+    if (!in.reserve_explicit && in.wddm_ok)
+        s = std::format("WDDM budget {:.2f} GiB, used {:.2f} GiB, margin {} MiB ({}) -> room {:.2f} GiB; free "
+                        "VRAM {:.2f} GiB minus {} MiB -> {:.2f} GiB",
+                        in.local_budget / 1073741824.0, in.local_usage / 1073741824.0, in.margin >> 20, margin_why,
+                        r.wddm_room / 1073741824.0, in.free / 1073741824.0, in.reserve >> 20, r.after_reserve / 1073741824.0);
+    else if (in.reserve_explicit)
+        s = std::format("WHIRL_POOL_RESERVE_MB={}: free VRAM {:.2f} GiB minus the reserve, WDDM budget not applied",
+                        in.reserve >> 20, in.free / 1073741824.0);
+    else
+        s = std::format("WDDM budget unavailable: free VRAM {:.2f} GiB minus {} MiB", in.free / 1073741824.0, in.reserve >> 20);
+    if (in.headroom > 0)
+        s += std::format("; minus {} MiB desktop headroom (WHIRL_VRAM_HEADROOM_MB) -> {:.2f} GiB", in.headroom >> 20,
+                         r.after_headroom / 1073741824.0);
+    if (in.vis_reserve > 0 && !in.reserve_explicit) s += std::format("; minus {} -> {:.2f} GiB", vis_note, r.bytes / 1073741824.0);
+    return s;
+}
+
 }  // namespace whirl::poolbudget

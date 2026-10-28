@@ -163,12 +163,21 @@ std::uint32_t slotsThatFit(std::uint32_t parallel, std::uint64_t avail, std::uin
                            std::uint64_t per_token, std::uint64_t target_tokens) {
     if (per_token == 0) return parallel;
     std::uint32_t p = std::max<std::uint32_t>(parallel, 1);
-    const auto pool = [&](std::uint32_t n) {
-        const std::uint64_t fixed = shared + per_slot * n;
-        return avail > fixed ? (avail - fixed) / per_token : 0;
-    };
-    while (p > 1 && pool(p) < target_tokens) --p;
+    while (p > 1 && poolTokensWith(p, avail, per_slot, shared, per_token) < target_tokens) --p;
     return p;
+}
+
+SlotFixed slotFixed(const SlotFixedIn& in) {
+    SlotFixed r;
+    r.per_slot = (in.state + in.replay + in.n_ck * in.ck + in.dflash_slot) * 104 / 100;
+    r.shared = (in.n_spe * in.ck + static_cast<std::uint64_t>(in.snap_sets) * in.state) * 104 / 100 + (256ull << 20);
+    return r;
+}
+
+std::uint64_t poolTokensWith(std::uint32_t n, std::uint64_t avail, std::uint64_t per_slot, std::uint64_t shared,
+                             std::uint64_t per_token) {
+    const std::uint64_t fixed = shared + per_slot * n;
+    return avail > fixed && per_token ? (avail - fixed) / per_token : 0;
 }
 
 std::string startupJson(const StartupInfo& s) {

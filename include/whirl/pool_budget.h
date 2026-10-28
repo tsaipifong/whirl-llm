@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <string_view>
 
 namespace whirl::poolbudget {
 
@@ -77,5 +78,32 @@ inline constexpr std::uint64_t vision_fixed_mb = 16;
 std::uint64_t visionReserve(const VisionVram& v);
 // The bytes left for the KV pool: avail minus the reserve (0 when it does not fit). reserve 0 (no --mmproj): avail.
 std::uint64_t kvAvail(std::uint64_t avail, std::uint64_t reserve);
+
+// The VRAM the KV pool may use now (arch025-N10b: one copy of the rule server_main.cpp wrote three times - buildModel's
+// pre-load fit, ServerRun::planSlots' slot re-check and ServerRun::planPool's pool sizing). Free VRAM minus the reserve
+// (WHIRL_POOL_RESERVE_MB, default defaultReserveMb); capped by the WDDM room (budget - usage - margin) unless the reserve
+// was given or the WDDM numbers are unavailable; minus the desktop headroom (WHIRL_VRAM_HEADROOM_MB); minus the vision
+// encoder's reserve (--mmproj) unless the reserve was given. Pure: the caller measures free VRAM and the WDDM numbers.
+inline constexpr std::uint32_t defaultReserveMb(bool moe, bool wddm_ok) { return moe ? 1536 : (wddm_ok ? 768 : 3072); }
+struct RoomIn {
+    std::uint64_t free = 0;          // hip::MemInfo::free, read now
+    std::uint64_t reserve = 0;       // bytes
+    bool reserve_explicit = false;   // WHIRL_POOL_RESERVE_MB set: the old free-VRAM-only rule
+    bool wddm_ok = false;            // hip::WddmMemInfo::ok
+    std::uint64_t local_budget = 0;  // WDDM local budget / usage
+    std::uint64_t local_usage = 0;
+    std::uint64_t margin = 0;        // Margin::bytes for that budget
+    std::uint64_t headroom = 0;      // desktop headroom
+    std::uint64_t vis_reserve = 0;   // visionReserve (0: text only)
+};
+struct Room {
+    std::uint64_t after_reserve = 0;   // free minus the reserve
+    std::uint64_t wddm_room = 0;       // budget - usage - margin (0 when over)
+    std::uint64_t after_headroom = 0;  // after the WDDM cap and the headroom
+    std::uint64_t bytes = 0;           // the result
+};
+Room kvRoom(const RoomIn& in);
+// The "kv pool sizing:" startup note for that computation (margin_why: Margin::why; vis_note: what the vision reserve is).
+std::string kvRoomNote(const RoomIn& in, const Room& r, std::string_view margin_why, std::string_view vis_note);
 
 }  // namespace whirl::poolbudget

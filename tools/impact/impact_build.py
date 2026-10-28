@@ -82,7 +82,7 @@ PATHS = {
                           "metric": "agent", "desc": "VRAM -> RAM -> SSD spill, dedup, flush on stop"},
     "cache.fingerprint": {"roots": ["tierFingerprint", "serverFingerprintInputs", "fingerprintEnv", "Tier::index", "Tier::indexFile"],
                           "metric": None, "desc": "SSD tier identity: which saved states a new server may reuse"},
-    "vision":            {"roots": ["Engine::visPrepare", "Engine::attachVision", "Qwen35Vision::encode", "Model::visRow",
+    "vision":            {"roots": ["ImageEmbeddings::prepare", "Engine::attachVision", "Qwen35Vision::encode", "Model::visRow",
                                     "Model::injectRows"], "metric": None, "desc": "image encoder and image-token injection"},
     "http":              {"roots": ["Engine::writeError", "StreamState::send"], "metric": None,
                           "desc": "HTTP transport, OpenAI protocol, streaming"},

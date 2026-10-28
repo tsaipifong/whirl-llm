@@ -142,4 +142,17 @@ static const char* const k_fp_hashed[] = {
     "WHIRL_VIS_DUMP",  // src/cli/cmd_chat.cpp
     "WHIRL_VIS_DUMP_RGB",  // src/vision/vis_cli.cpp
     "WHIRL_VIS_PROF",  // src/vision/vis_cli.cpp
+    // arch025-lane1 leg 5 (N10): server_main read these through its local envOn() wrapper, a call form the scanner
+    // does not match, so the check never saw them. fingerprintEnv() hashed every one of them before and after N10
+    // (it hashes every set WHIRL_* outside the skip list); listed here as hashed, i.e. the fingerprint is unchanged.
+    "WHIRL_CKPT_HOST",  // src/server/server_main.cpp
+    "WHIRL_COLD_RESUME",  // src/server/server_main.cpp
+    "WHIRL_EMBD_HOST",  // src/server/server_main.cpp
+    "WHIRL_FIT_CHECK",  // src/server/server_main.cpp
+    "WHIRL_GOVERNOR",  // src/server/server_main.cpp
+    "WHIRL_HIP_CACHE_LIMIT",  // src/server/server_main.cpp
+    "WHIRL_NO_PREFIX_CACHE",  // src/server/server_main.cpp
+    "WHIRL_SEG_PREFILL",  // src/server/server_main.cpp
+    "WHIRL_SYS_LCP",  // src/server/server_main.cpp
+    "WHIRL_TIMING_RESET",  // src/server/server_main.cpp
 };

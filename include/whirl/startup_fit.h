@@ -129,6 +129,27 @@ struct FixedFit {
 };
 FixedFit fitFixed(const vram::FitInput& fi, const vram::FitPlan& plan);
 
+// 2b. The fixed VRAM of the slot re-check after loading (arch025-N10c: was ServerRun::planSlots' text): per slot =
+// (recurrent state + replay rows + n_ck checkpoints + the DFlash2 ring) + 4% WDDM overhead; shared = (the shared
+// checkpoints + the snapshot sets' state) + 4% + 256 MiB slack.
+struct SlotFixedIn {
+    std::uint64_t state = 0;        // one slot's recurrent state (conv + ssm, DeltaNet layers)
+    std::uint64_t replay = 0;       // one slot's replay rows (model::slotStateBytes pend1)
+    std::uint64_t n_ck = 0;         // checkpoints per slot
+    std::uint64_t ck = 0;           // bytes of one checkpoint (0 with WHIRL_CKPT_HOST)
+    std::uint64_t dflash_slot = 0;  // DFlash2 context ring per slot (0 without the drafter)
+    std::uint32_t n_spe = 0;        // shared prefix checkpoints
+    std::uint32_t snap_sets = 0;    // DeltaNet snapshot sets
+};
+struct SlotFixed {
+    std::uint64_t per_slot = 0;
+    std::uint64_t shared = 0;
+};
+SlotFixed slotFixed(const SlotFixedIn& in);
+// The KV pool tokens left with n slots (0 when the fixed part does not fit or per_token is 0).
+std::uint64_t poolTokensWith(std::uint32_t n, std::uint64_t avail, std::uint64_t per_slot, std::uint64_t shared,
+                             std::uint64_t per_token);
+
 // 2b. After the weights are loaded: how many slots leave a pool of at least target_tokens, given the VRAM usable now
 // (avail), the fixed VRAM per slot and the shared fixed VRAM. Never below 1 and never above `parallel`.
 std::uint32_t slotsThatFit(std::uint32_t parallel, std::uint64_t avail, std::uint64_t per_slot, std::uint64_t shared,
