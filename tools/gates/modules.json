@@ -298,9 +298,8 @@
   "handles": {
    "id": "M1", "desc": "RAII device handles (DevBuf / PinnedBuf / EventH / StreamH)",
    "paths": ["src/device/handles.h"], "callers": "rdeps",
-   "steps": ["cpu_iso_handles", "cpu_device", "srv_gpu_select", "srv_kvram719"],
+   "steps": ["cpu_iso_handles", "cpu_raw_free_check", "cpu_device", "srv_gpu_select", "srv_kvram719"],
    "gpus": {"srv_gpu_select": 2, "srv_kvram719": 1},
-   "pending": [{"step": "cpu_raw_free_check", "lands_in": "S11 (tools/gates/raw_free_check.ps1)"}],
    "manual": []
   },
   "ckpt_store": {
