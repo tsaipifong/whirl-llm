@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "whirl/vram_limit.h"
+#include "whirl/small_helpers.h"  // satSub / alignUp / unixNow / msSince / nowMs (arch025-N6)
 
 #include "platform/env.h"
 
@@ -24,7 +25,6 @@ std::atomic<std::uint64_t>& limitSlot() {
     return v;
 }
 
-std::uint64_t satSub(std::uint64_t a, std::uint64_t b) { return a > b ? a - b : 0; }
 
 }  // namespace
 

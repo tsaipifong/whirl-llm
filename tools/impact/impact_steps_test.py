@@ -94,7 +94,7 @@ case("Q1/Q3 pass: safety tools -> all three", steps("tools/safety/run_asan.bat",
 case(f"Q3 block: {hip} -> no cpu_analyze / cpu_asan", steps(hip, 1), [], ["cpu_analyze", "cpu_asan"])
 case("Q3 block: docs -> no cpu_analyze", steps("docs/building.md", 1), [], ["cpu_analyze", "cpu_asan"])
 # arch025-Q4: threads class -> cpu_tsa
-case("Q4 pass: engine.cpp (compiled by the tsa build) -> cpu_tsa", steps("src/server/engine.cpp", fn_line("src/server/engine.cpp", "Engine::stop")),
+case("Q4 pass: engine_queue.cpp (compiled by the tsa build; Engine::stop moved there in N4e) -> cpu_tsa", steps("src/server/engine_queue.cpp", fn_line("src/server/engine_queue.cpp", "Engine::stop")),
      ["cpu_tsa", "cpu_analyze"])
 case("Q4 pass: kv_tier.h -> cpu_tsa", steps("src/tier/kv_tier.h", 1), ["cpu_tsa"])
 case("Q4 pass: safety tools -> cpu_tsa", steps("tools/safety/tsa/tsa_check.py", 1), ["cpu_tsa", "cpu_safety_selftest"])

@@ -9,6 +9,7 @@
 #include "idle_flush.h"
 #include "platform/fs.h"
 #include "platform/proc.h"
+#include "whirl/small_helpers.h"  // satSub / alignUp / unixNow / msSince / nowMs (arch025-N6)
 
 #include <algorithm>
 #include <cstdio>
@@ -25,10 +26,6 @@ namespace pfs = whirl::platform::fs;
 std::atomic<WriteSim*> g_write_sim{nullptr};
 
 namespace {
-
-constexpr std::uint64_t alignUp(std::uint64_t x, std::uint64_t a) { return (x + a - 1) / a * a; }
-
-std::uint64_t satSub(std::uint64_t a, std::uint64_t b) { return a > b ? a - b : 0; }
 
 template <class F>
 struct ScopeExit {
@@ -53,12 +50,6 @@ std::string fmt(const char* f, A... a) {
     if (n < 0) return {};
     return std::string(buf, static_cast<std::size_t>(std::min<int>(n, static_cast<int>(sizeof buf) - 1)));
 }
-
-double msSince(std::chrono::steady_clock::time_point t0) {
-    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-}
-
-std::int64_t unixNow() { return static_cast<std::int64_t>(std::time(nullptr)); }
 
 std::uint64_t tokSum(const std::uint32_t* toks, std::size_t n) {
     std::uint64_t h = 0xcbf29ce484222325ull;

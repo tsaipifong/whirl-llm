@@ -19,27 +19,19 @@ void applyDraftVocab(q::Model& model, const Tokenizer& tok) {
         model.draft_vocab = dv.n;
         return;
     }
-    if (dv.kind == K::full) return;
-    if (dv.kind == K::embedded_64k) {
-        const bool fits = dv.by_default ? q::draftVocabDefaultFits(model.cfg.moe, model.cfg.n_vocab)
-                                        : model.cfg.n_vocab == q::draft_vocab_embedded_n_vocab;
-        if (!fits || (dv.by_default && !model.draft_d2)) {
-            if (!dv.by_default) std::fprintf(stderr, "WHIRL_DRAFT_VOCAB=64k ignored: the embedded subset needs a 248320-token vocabulary\n");
-            return;
-        }
+    // the decision and the subset are spec.policy's (shared with whirl-server, arch025-N10 leg 6); the messages are the CLI's
+    const q::DraftVocabGate gate = q::draftVocabGate(dv, model.cfg.moe, model.cfg.n_vocab, model.draft_d2.has_value());
+    if (gate == q::DraftVocabGate::none) return;
+    if (gate == q::DraftVocabGate::not_fit) {
+        if (!dv.by_default) std::fprintf(stderr, "WHIRL_DRAFT_VOCAB=64k ignored: the embedded subset needs a 248320-token vocabulary\n");
+        return;
     }
-    std::vector<u32> req;
-    for (const TokenId t : tok.specials())
-        if (t >= 0) req.push_back(static_cast<u32>(t));
-    for (int b = 0; b < 256; ++b)
-        if (tok.byteToken(b) >= 0) req.push_back(static_cast<u32>(tok.byteToken(b)));
-    u32 added = 0;
-    const auto ids =
-        q::draftVocabIds(dv.kind == K::file ? q::readDraftVocab(dv.file) : q::embeddedDraftVocab64k(), model.cfg.n_vocab, req, &added);
-    const std::string label = dv.kind == K::file ? dv.file : std::string(dv.by_default ? "64k (embedded, default)" : "64k (embedded)");
-    if (model.setDraftVocab(ids))
-        std::fprintf(stderr, "draft head: vocabulary subset %s (%zu of %u rows; %u special / byte tokens added)\n", label.c_str(),
-                     ids.size(), model.cfg.n_vocab, added);
+    if (gate == q::DraftVocabGate::no_d2 && dv.by_default) return;
+    // (an explicit setting without the 2-bit head goes on: setDraftVocab refuses it and the line below says so)
+    const q::DraftVocabSubset sub = q::draftVocabSubset(dv, &q::embeddedDraftVocab64k, model.cfg.n_vocab, q::draftVocabRequired(tok));
+    if (model.setDraftVocab(sub.ids))
+        std::fprintf(stderr, "draft head: vocabulary subset %s (%zu of %u rows; %u special / byte tokens added)\n", sub.label.c_str(),
+                     sub.ids.size(), model.cfg.n_vocab, sub.added);
     else if (!dv.by_default)  // the default only: stay quiet (the user did not set WHIRL_DRAFT_VOCAB)
         std::fprintf(stderr, "WHIRL_DRAFT_VOCAB ignored: it needs the 2-bit draft head (Q6_K output head, WHIRL_DRAFT_HEAD not q4)\n");
 }

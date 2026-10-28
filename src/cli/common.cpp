@@ -19,8 +19,6 @@ std::string fmt(const char* f, ...) {
     return buf;
 }
 
-double nowMs() { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
-
 namespace {
 bool takesValue(const std::string& o) {
     static const char* v[] = {"--max-tokens", "--ctx", "--tokens", "--out", "--device", "--prefill", "--decode", "--prompt", "--modes", "--mmproj", "--suite",

@@ -3,6 +3,7 @@
 #include "server/tier_bridge.h"
 
 #include "server/log.h"
+#include "whirl/small_helpers.h"  // satSub / alignUp / unixNow / msSince / nowMs (arch025-N6)
 #include "whirl/model_types.h"
 
 #include <algorithm>
@@ -20,8 +21,6 @@ namespace {
 constexpr std::uint32_t kv_page = qwen35::kv_page;
 constexpr std::uint8_t kNoTag = 0xff;
 using Clock = std::chrono::steady_clock;
-
-double msSince(Clock::time_point t0) { return std::chrono::duration<double, std::milli>(Clock::now() - t0).count(); }
 
 std::int64_t steadyMs(std::chrono::steady_clock::time_point t) {
     return std::chrono::duration_cast<std::chrono::milliseconds>(t.time_since_epoch()).count();

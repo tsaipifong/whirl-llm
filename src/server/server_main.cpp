@@ -2,7 +2,7 @@
 // the GPU and serves the OpenAI-compatible API (continuous batching over
 // --parallel slots, prefix cache, shared prefix checkpoints, host tiers).
 // Reimplements the WHIRL Zig research prototype's server.zig (main, buildKvArrays,
-// tierFingerprint, defaultBatchDrafts).
+// tierFingerprint; defaultBatchDrafts is spec.policy's since arch025-N10).
 // SPDX-License-Identifier: Apache-2.0
 
 #include "server_main.h"
@@ -25,6 +25,7 @@
 #include "tier/ram_size.h"
 #include "whirl/dump.h"
 #include "whirl/common.h"
+#include "whirl/small_helpers.h"  // satSub / alignUp / unixNow / msSince / nowMs (arch025-N6)
 #include "whirl/device_mem.h"
 #include "whirl/dflash_policy.h"
 #include "whirl/gguf.h"
@@ -188,12 +189,10 @@ void settingsWarn(const std::string& msg) { logW("{}", msg); }
 // vocabulary): keep only that vocabulary subset of the 2-bit draft head (special and byte tokens are
 // always added); outputs are unchanged, only the acceptance can drop.
 void applyDraftVocab(qwen35::Model& model, const Tokenizer& tok, const qwen35::DraftVocabChoice& dv) {
-    using K = qwen35::DraftVocabChoice::Kind;
-    if (dv.kind != K::embedded_64k && dv.kind != K::file) return;
-    if (dv.kind == K::embedded_64k) {
-        const bool fits = dv.by_default ? qwen35::draftVocabDefaultFits(model.cfg.moe, model.cfg.n_vocab)
-                                        : model.cfg.n_vocab == qwen35::draft_vocab_embedded_n_vocab;
-        if (!fits) {
+    // the decision and the subset are spec.policy's (shared with the CLI, arch025-N10 leg 6); the messages are the server's
+    switch (qwen35::draftVocabGate(dv, model.cfg.moe, model.cfg.n_vocab, model.draft_d2.has_value())) {
+        case qwen35::DraftVocabGate::none: return;
+        case qwen35::DraftVocabGate::not_fit:
             if (dv.by_default)
                 logI("draft head: full vocabulary (the embedded 64k subset is for dense qwen35 models with a {}-token vocabulary)",
                      qwen35::draft_vocab_embedded_n_vocab);
@@ -201,40 +200,22 @@ void applyDraftVocab(qwen35::Model& model, const Tokenizer& tok, const qwen35::D
                 logW("WHIRL_DRAFT_VOCAB=64k ignored: the embedded subset needs a {}-token vocabulary (model: {})",
                      qwen35::draft_vocab_embedded_n_vocab, model.cfg.n_vocab);
             return;
-        }
-        if (!model.draft_d2) {
+        case qwen35::DraftVocabGate::no_d2:
             if (dv.by_default) logI("draft head: full vocabulary (the vocabulary subset needs the 2-bit draft head)");
             else logW("WHIRL_DRAFT_VOCAB ignored: it needs the 2-bit draft head (Q6_K output head, WHIRL_DRAFT_HEAD not q4)");
             return;
-        }
+        case qwen35::DraftVocabGate::subset: break;
     }
-    std::vector<std::uint32_t> req;
-    for (const TokenId t : tok.specials())
-        if (t >= 0) req.push_back(static_cast<std::uint32_t>(t));
-    for (int b = 0; b < 256; ++b)
-        if (tok.byteToken(b) >= 0) req.push_back(static_cast<std::uint32_t>(tok.byteToken(b)));
-    std::uint32_t added = 0;
-    const auto ids = qwen35::draftVocabIds(dv.kind == K::file ? qwen35::readDraftVocab(dv.file) : qwen35::embeddedDraftVocab64k(),
-                                           model.cfg.n_vocab, req, &added);
-    const std::string label = dv.kind == K::file ? dv.file : std::string(dv.by_default ? "64k (embedded, default)" : "64k (embedded)");
-    if (model.setDraftVocab(ids))
-        logI("draft head: vocabulary subset {} ({} of {} rows; {} special / byte tokens added)", label, ids.size(), model.cfg.n_vocab,
-             added);
+    const qwen35::DraftVocabSubset sub =
+        qwen35::draftVocabSubset(dv, &qwen35::embeddedDraftVocab64k, model.cfg.n_vocab, qwen35::draftVocabRequired(tok));
+    if (model.setDraftVocab(sub.ids))
+        logI("draft head: vocabulary subset {} ({} of {} rows; {} special / byte tokens added)", sub.label, sub.ids.size(),
+             model.cfg.n_vocab, sub.added);
     else if (dv.by_default)  // the default only: no warning for a setting the user did not make
         logI("draft head: full vocabulary (no vocabulary subset with this draft head / kernel set)");
     else
         logW("WHIRL_DRAFT_VOCAB ignored: it needs the 2-bit draft head (Q6_K output head, WHIRL_DRAFT_HEAD not q4)");
 }
-
-// Default max drafts per cycle by number of decoding slots (index = slots).
-// wide: verify batches of up to 32 rows (otherwise 16); the cost model picks within the cap.
-std::array<std::uint32_t, gdn_max_seg + 1> defaultBatchDrafts(bool moe, bool wide) {
-    (void)wide;
-    if (moe) return {0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0};
-    return {0, 8, 7, 4, 3, 2, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0};
-}
-
-std::uint64_t alignUp(std::uint64_t x, std::uint64_t a) { return (x + a - 1) / a * a; }
 
 double gib(std::size_t a, std::size_t b) { return static_cast<double>(a > b ? a - b : 0) / (1024.0 * 1024.0 * 1024.0); }
 
@@ -394,8 +375,8 @@ void buildModel(Options& opt, const numerics::Request& nreq, const char* lad, Lo
         ci.uma = is_uma;
         if (opt.parallel_given) ci.parallel_arg = opt.parallel;
         ci.parallel_default = opt.parallel;
-        if (settings::envGet("VRAM_HEADROOM_MB")) ci.headroom_mb_env = settings::envU32("VRAM_HEADROOM_MB", 0, settingsWarn);
-        ci.reserve_explicit = settings::envGet("POOL_RESERVE_MB").has_value();
+        ci.headroom_mb_env = settings::vramHeadroomMb(settingsWarn);
+        ci.reserve_explicit = settings::poolReserveGiven();
         card = vram::cardDefaults(ci);
         opt.parallel = card.parallel;
         if (!card.note.empty()) logI("{}", card.note);
@@ -509,8 +490,8 @@ void buildModel(Options& opt, const numerics::Request& nreq, const char* lad, Lo
         const hip::MemInfo mf = ops->memInfo();
         const hip::WddmMemInfo w = ops->wddmMemInfo();
         poolbudget::RoomIn ri;
-        ri.reserve_explicit = settings::envGet("POOL_RESERVE_MB").has_value();
-        ri.reserve = static_cast<std::uint64_t>(settings::envU32("POOL_RESERVE_MB", poolbudget::defaultReserveMb(cfg.moe, w.ok), settingsWarn)) << 20;
+        ri.reserve_explicit = settings::poolReserveGiven();
+        ri.reserve = static_cast<std::uint64_t>(settings::poolReserveMb(poolbudget::defaultReserveMb(cfg.moe, w.ok), settingsWarn)) << 20;
         const poolbudget::Margin mg = budgetMargin(w.local_budget);
         const std::uint64_t margin = mg.bytes;
         ri.margin = margin;
@@ -551,82 +532,46 @@ void buildModel(Options& opt, const numerics::Request& nreq, const char* lad, Lo
         fin.n_spe = n_spe_plan;
         fin.batch_fixed = settings::envGet("PREFILL_BATCH").has_value();
         fin.ck_fixed = settings::envGet("SERVE_CKPTS").has_value() || settings::envGet("SYS_CKPTS").has_value();
-        startup::DgpuFit fit = startup::dgpuFit(am->sizing, f, cfg, fin);
-        const qwen35::LoadEstimate& est = fit.est;
-        const std::uint64_t st1 = fit.ssb.st1;
-        const std::uint64_t pend1 = fit.ssb.pend1;
-        vram::FitInput& fi = fit.fi;
-        vram::FitPlan& plan = fit.plan;
-        const double g = 1024.0 * 1024.0 * 1024.0;
-        {
-            const auto want = [&] { return startfit::wantTokens(fi); };
-            const std::string budget_why =
-                std::format("{:.2f} GiB usable under the Windows video memory budget, keeping {:.2f} GiB free for other programs "
-                            "({:.2f} GiB they use that the budget does not show yet + {:.2f} GiB room)",
-                            av / g, margin / g, mg.pending / g, mg.room / g);
-            // an explicit -c that does not fit is lowered when the pool is sized (below); plan for one request here
-            if (opt.ctx && plan.pool_tokens < want()) {
-                fi.pool_min_tokens = std::min<std::uint32_t>(slot_ctx, vram_tight_pool);
-                plan = vram::planFit(fi);
-            }
-            // 3. --parallel given: fewer slots while even one request does not fit next to every slot's fixed memory
-            const std::uint32_t par0 = opt.parallel;
-            sin.putFit("fitp", fi);
-            sin.put("fitp.per_slot", (st1 + pend1) + (st1 + pend1) / 25);
-            sin.put("fitp.given", opt.parallel_given);
-            const startfit::ParallelFit pfit = startfit::fitParallel(fi, (st1 + pend1) + (st1 + pend1) / 25, opt.parallel_given);
-            if (pfit.parallel != par0) {
-                opt.parallel = pfit.parallel;
-                fi = pfit.fi;
-                plan = pfit.plan;
-                adjust(std::format("--parallel {} -> {}", par0, opt.parallel),
-                       std::format("with {} slots, their recurrent state and prefix checkpoints leave a KV pool of about {} tokens, "
-                                   "less than one {}-token request; {}",
-                                   par0, pfit.pool_requested, want(), budget_why));
-            }
-            // 2. prefill batch / checkpoint counts set by the user: lowered only when the minimum still does not fit
-            sin.putFit("fitf", fi);
-            sin.put("fitf.plan.batch", plan.batch);
-            sin.put("fitf.plan.n_ck", plan.n_ck);
-            sin.put("fitf.plan.n_spe", plan.n_spe);
-            sin.put("fitf.plan.pool_tokens", plan.pool_tokens);
-            const startfit::FixedFit ffit = startfit::fitFixed(fi, plan);
-            if (ffit.changed) {
-                if (ffit.batch_changed)
-                    adjust(std::format("WHIRL_PREFILL_BATCH {} -> {}", plan.batch, ffit.plan.batch),
-                           std::format("the prefill buffers left a KV pool of about {} tokens, less than {}; {}", plan.pool_tokens,
-                                       want(), budget_why));
-                if (ffit.ck_changed)
-                    adjust(std::format("prefix checkpoints {} per slot + {} shared -> {} + {} (WHIRL_SERVE_CKPTS / WHIRL_SYS_CKPTS)",
-                                       plan.n_ck, plan.n_spe, ffit.plan.n_ck, ffit.plan.n_spe),
-                           std::format("they left a KV pool of about {} tokens, less than {}; {}", plan.pool_tokens, want(),
-                                       budget_why));
-                fi = ffit.fi;
-                plan = ffit.plan;
-            }
-        }
+        const startup::DgpuFit fit = startup::dgpuFit(am->sizing, f, cfg, fin);
+        // the pre-load decisions and their texts (startfit::preloadAdjust, module server.kv_fit; arch025-N10 leg 6: the -c
+        // re-plan, fewer --parallel slots, the user's prefill batch / checkpoint counts, the tight / refusal / short texts)
+        startfit::PreloadIn pin;
+        pin.fi = fit.fi;
+        pin.plan = fit.plan;
+        pin.st1 = fit.ssb.st1;
+        pin.pend1 = fit.ssb.pend1;
+        pin.parallel = opt.parallel;
+        pin.parallel_given = opt.parallel_given;
+        pin.ctx_given = opt.ctx.has_value();
+        pin.slot_ctx = slot_ctx;
+        pin.tight_pool = vram_tight_pool;
+        pin.avail = av;
+        pin.margin = margin;
+        pin.pending = mg.pending;
+        pin.room = mg.room;
+        pin.weights = fit.est.weights;
+        pin.total = mf.total;
+        const startfit::PreloadAdjust pa = startfit::preloadAdjust(pin);
+        sin.putFit("fitp", pa.fitp);
+        sin.put("fitp.per_slot", pa.per_slot);
+        sin.put("fitp.given", opt.parallel_given);
+        sin.putFit("fitf", pa.fitf);
+        sin.put("fitf.plan.batch", pa.fitf_plan.batch);
+        sin.put("fitf.plan.n_ck", pa.fitf_plan.n_ck);
+        sin.put("fitf.plan.n_spe", pa.fitf_plan.n_spe);
+        sin.put("fitf.plan.pool_tokens", pa.fitf_plan.pool_tokens);
+        opt.parallel = pa.parallel;
+        for (const startfit::Adjusted& a : pa.adjusted) adjust(a.what, a.why);
+        const vram::FitPlan& plan = pa.plan;
         if (plan.reduced) {
             lo.max_batch = plan.batch;
             n_ck = plan.n_ck;
             n_spe_plan = plan.n_spe;
-            logW("VRAM is tight (about {:.2f} GiB usable for weights {:.2f} GiB + buffers + checkpoints + KV): reduced {} so the KV "
-                 "pool gets about {} tokens (wanted {}); WHIRL_PREFILL_BATCH (at least 1280) / WHIRL_SERVE_CKPTS / WHIRL_SYS_CKPTS "
-                 "choose these yourself, --ctx a smaller pool",
-                 av / g, est.weights / g, plan.note, plan.pool_tokens, fi.pool_min_tokens);
+            logW("{}", pa.tight);
         }
-        // not even the weights + smallest buffers fit (no room for any KV): stop before a load that
-        // would run out of memory part way through, with the "smaller quantization" advice
-        // (WHIRL_FIT_CHECK=0 loads anyway; borderline cases only warn)
-        if (!plan.fits && plan.pool_tokens == 0 && settings::envFlag("FIT_CHECK", true))
-            throw qwen35::ModelError("VramLimit",
-                                     std::format("needs about {:.2f} GiB of VRAM before any KV cache (weights {:.2f} GiB + prefill batch {}, "
-                                                 "state, checkpoints), about {:.2f} GiB usable of {:.2f} GiB{}",
-                                                 plan.need_fixed / g, est.weights / g, plan.batch, av / g, mf.total / g,
-                                                 vram::limitBytes() ? " (" + vram::limitNote() + ")" : std::string()));
-        if (!plan.fits)
-            logW("VRAM estimate: weights + buffers + checkpoints {:.2f} GiB leave about {} KV tokens of {:.2f} GiB usable "
-                 "(at least {} needed); the model may not fit this GPU",
-                 plan.need_fixed / g, plan.pool_tokens, av / g, fi.pool_hard_min);
+        // WHIRL_FIT_CHECK=0 loads anyway; borderline cases only warn
+        if (pa.refuse && settings::envFlag("FIT_CHECK", true)) throw qwen35::ModelError("VramLimit", pa.refusal);
+        if (!plan.fits) logW("{}", pa.short_warn);
     } else if (uma.known && hip::umaCheckOn()) {
         // integrated GPU (UMA-1): weights, buffers, checkpoints and the KV cache must fit the BIOS
         // carve-out. Too small for one request at the context asked for: refuse now, before the
@@ -640,18 +585,29 @@ void buildModel(Options& opt, const numerics::Request& nreq, const char* lad, Lo
         const std::uint64_t pend1 = ssb.pend1;
         // (WHIRL_DUMP_KV: one "D kv: site=server.est_uma" line)
         const KvFormat kv_est = numerics::kvEstimate(numerics::KvEstSite::server_uma, nreq, cfg.moe, numerics::kvEstimateRequest(settings::envGet("KV")));
-        const std::uint64_t ck = st1 + static_cast<std::uint64_t>(cfg.n_embd) * 4 + static_cast<std::uint64_t>(cfg.n_vocab) * 4;
         hip::UmaNeed need;
         need.weights = est.weights + (use_dflash && dfile ? am->sizing.dflashWeightBytes(*dfile) : 0);
         const std::uint64_t bufs =
             am->sizing.bufferBytes(cfg, lo.max_batch, est.ffs, est.max_elems, am->sizing.resolveFdSplits(kv_est));
-        // DeltaNet snapshot sets for MTP verify: one recurrent state per draft (8 dense, 1 MoE: the server log's
-        // "N snapshot sets")
-        const std::uint64_t snaps = std::max<std::uint32_t>(1, am->sizing.mtpDefaults(cfg.moe, device::k_uma_estimate_arch).drafts) * st1;
-        const std::uint64_t slots_b = opt.parallel * (st1 + pend1) + snaps;
-        const std::uint64_t ck_b = (opt.parallel * n_ck + n_spe_plan) * ck;
-        need.fixed = need.weights + est.state + bufs + slots_b + ck_b + (est.has_mtp ? 65536ull * cfg.n_embd * 5 / 16 : 0) + (256ull << 20);
-        need.fixed += need.fixed / 12;  // +8%: measured fast-mode Swift fixed part 3.9% above the itemized sum
+        // the fixed part (startfit::umaFixed, module server.kv_fit; arch025-N10 leg 6): slots with their snapshot sets
+        // (one recurrent state per MTP draft), checkpoints, the MTP block, 256 MiB, +8%
+        startfit::UmaFixedIn ui;
+        ui.weights = need.weights;
+        ui.state = est.state;
+        ui.bufs = bufs;
+        ui.st1 = st1;
+        ui.pend1 = pend1;
+        ui.drafts = am->sizing.mtpDefaults(cfg.moe, device::k_uma_estimate_arch).drafts;
+        ui.parallel = opt.parallel;
+        ui.n_ck = n_ck;
+        ui.n_spe = n_spe_plan;
+        ui.has_mtp = est.has_mtp;
+        ui.n_embd = cfg.n_embd;
+        ui.n_vocab = cfg.n_vocab;
+        const startfit::UmaFixed uf = startfit::umaFixed(ui);
+        const std::uint64_t slots_b = uf.slots;
+        const std::uint64_t ck_b = uf.ck;
+        need.fixed = uf.fixed;
         need.kv_per_token = est.kvPerToken(kv_est);
         need.min_tokens = opt.ctx ? *opt.ctx : slot_ctx;
         need.want_tokens = pool_req ? *pool_req : slot_ctx;
@@ -800,27 +756,11 @@ void buildModel(Options& opt, const numerics::Request& nreq, const char* lad, Lo
     // an explicit draft count is used as is (fixed) unless WHIRL_MTP_ADAPT asks otherwise
     const bool& auto_mode = b.auto_mode = adapt_env ? (*adapt_env == "auto") : (def.automatic && !drafts_user);
     if (settings::envGet("HEAD_CHUNK")) (void)settings::envU32("HEAD_CHUNK", model.nf().head_chunk, settingsWarn);  // (bad-value warning only, as above)
-    auto& batch_drafts = b.batch_drafts = defaultBatchDrafts(model.cfg.moe, model.wideCapable());
+    // the per-slot draft caps: spec.policy's default table and WHIRL_MTP_BATCH_DRAFTS rule (arch025-N10 leg 6)
+    auto& batch_drafts = b.batch_drafts = qwen35::defaultBatchDrafts(model.cfg.moe);
     batch_drafts[1] = drafts;
     const auto& bd_env = b.bd_env = settings::envGet("MTP_BATCH_DRAFTS");
-    if (bd_env) {
-        std::size_t k = 1, p = 0;
-        const std::string& s = *bd_env;
-        while (p < s.size() && k <= gdn_max_seg) {
-            std::size_t e = s.find(',', p);
-            if (e == std::string::npos) e = s.size();
-            if (e > p) {
-                std::uint32_t x = 1;
-                try {
-                    x = static_cast<std::uint32_t>(std::stoul(s.substr(p, e - p)));
-                } catch (const std::exception&) {
-                }
-                batch_drafts[k++] = std::min(x, qwen35::max_drafts);
-            }
-            p = e + 1;
-        }
-        for (; k <= gdn_max_seg; ++k) batch_drafts[k] = batch_drafts[k - 1];
-    }
+    if (bd_env) batch_drafts = qwen35::batchDraftsFrom(batch_drafts, *bd_env);
     // MTP block as Q4_K from Q6_K or Q8_0 (drafts only; WHIRL_MTP_Q4=0 keeps the file's types)
     if (use_mtp && settings::mtpQ4()) model.requantMtpQ4();
     if (use_mtp && !settings::envGet("MTP_FULLHEAD")) {
@@ -951,8 +891,8 @@ void ServerRun::planSlots() {
         const hip::WddmMemInfo w = lm.ops->wddmMemInfo();
         const hip::MemInfo mf = lm.ops->memInfo();
         poolbudget::RoomIn ri;
-        ri.reserve_explicit = settings::envGet("POOL_RESERVE_MB").has_value();
-        ri.reserve = static_cast<std::uint64_t>(settings::envU32("POOL_RESERVE_MB", poolbudget::defaultReserveMb(lm.cfg.moe, w.ok), settingsWarn)) << 20;
+        ri.reserve_explicit = settings::poolReserveGiven();
+        ri.reserve = static_cast<std::uint64_t>(settings::poolReserveMb(poolbudget::defaultReserveMb(lm.cfg.moe, w.ok), settingsWarn)) << 20;
         ri.margin = lm.budgetMargin(w.local_budget).bytes;
         ri.free = mf.free;
         ri.wddm_ok = w.ok;
@@ -1299,12 +1239,12 @@ void ServerRun::planPool() {
     // budget makes Windows demote allocations to system memory (seen as GPU 'Shared Usage'), and a
     // demoted KV array is read across PCIe on every step (FIX-1: ~128k agent decode 29 -> 68 tok/s).
     // WHIRL_POOL_RESERVE_MB keeps the old free-VRAM-only rule with that reserve.
-    reserve_explicit = settings::envGet("POOL_RESERVE_MB").has_value();
+    reserve_explicit = settings::poolReserveGiven();
     wddm0 = lm.ops->wddmMemInfo();
     pinned0 = lm.ops->pinnedHostBytes();  // pinned host memory inside wddm0's non-local usage
     poolbudget::RoomIn ri;
     ri.reserve_explicit = reserve_explicit;
-    ri.reserve = static_cast<std::uint64_t>(settings::envU32("POOL_RESERVE_MB", poolbudget::defaultReserveMb(lm.cfg.moe, wddm0.ok), settingsWarn)) << 20;
+    ri.reserve = static_cast<std::uint64_t>(settings::poolReserveMb(poolbudget::defaultReserveMb(lm.cfg.moe, wddm0.ok), settingsWarn)) << 20;
     const poolbudget::Margin margin0 = lm.budgetMargin(wddm0.local_budget);
     budget_margin = margin0.bytes;
     ri.margin = budget_margin;

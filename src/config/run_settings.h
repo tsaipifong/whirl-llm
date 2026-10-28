@@ -67,4 +67,16 @@ inline std::optional<std::uint32_t> prefillChunk(const Warn& warn) { return envU
 // WHIRL_SYS_MIN: the smallest system message that gets its own prefill forward end; `def` when unset or bad.
 inline std::uint32_t sysMin(std::uint32_t def, const Warn& warn) { return envU32("SYS_MIN", def, warn); }
 
+// ---- whirl-server's KV-room settings (arch025-N10, lane 1 leg 6: were written out by hand in server_main.cpp) ----------
+// WHIRL_VRAM_HEADROOM_MB: VRAM kept free for the desktop on any card (vram::CardInput::headroom_mb_env). Set = the u32
+// rule with default 0, so a bad value warns and gives 0 (it is not "unset" as with the optional envU32).
+inline std::optional<std::uint32_t> vramHeadroomMb(const Warn& warn) {
+    if (!envGet("VRAM_HEADROOM_MB")) return std::nullopt;
+    return envU32("VRAM_HEADROOM_MB", 0, warn);
+}
+// WHIRL_POOL_RESERVE_MB: set at all (a bad value too) = the user's own reserve (the free-VRAM rule, no WDDM budget, no
+// default headroom); its value is the u32 rule with the caller's default (poolbudget::defaultReserveMb).
+inline bool poolReserveGiven() { return envGet("POOL_RESERVE_MB").has_value(); }
+inline std::uint32_t poolReserveMb(std::uint32_t def, const Warn& warn) { return envU32("POOL_RESERVE_MB", def, warn); }
+
 }  // namespace whirl::settings

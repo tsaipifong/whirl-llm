@@ -8,6 +8,7 @@
 #pragma once
 
 #include "backend.h"
+#include "whirl/small_helpers.h"  // satSub / alignUp / unixNow / msSince / nowMs (arch025-N6)
 #include "cache/ckpt_store.h"
 #include "cache/page_pool.h"
 #include "cache/prefix_cache.h"
@@ -57,9 +58,7 @@
 
 namespace whirl::server {
 
-inline double msSince(TimePoint t0) {
-    return std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
-}
+using whirl::msSince;  // whirl/small_helpers.h (arch025-N6)
 
 constexpr std::uint32_t kv_page = qwen35::kv_page;
 constexpr std::uint32_t gdn_max_seg = qwen35::gdn_max_seg;

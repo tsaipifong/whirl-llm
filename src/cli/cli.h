@@ -13,6 +13,7 @@
 
 #include "whirl/dump.h"
 #include "whirl/common.h"
+#include "whirl/small_helpers.h"  // satSub / alignUp / unixNow / msSince / nowMs (arch025-N6)
 #include "whirl/dflash_policy.h"
 #include "whirl/gguf.h"
 #include "whirl/hip.h"
@@ -78,7 +79,7 @@ extern const char* k_help_vis;
 // common.cpp
 void out(const std::string& s);
 std::string fmt(const char* f, ...);
-double nowMs();
+using whirl::nowMs;  // whirl/small_helpers.h (arch025-N6; was defined in common.cpp)
 
 // Wall-clock timer around device work: synchronizes at begin and end.
 struct Timer {

@@ -155,6 +155,62 @@ std::uint64_t poolTokensWith(std::uint32_t n, std::uint64_t avail, std::uint64_t
 std::uint32_t slotsThatFit(std::uint32_t parallel, std::uint64_t avail, std::uint64_t per_slot, std::uint64_t shared,
                            std::uint64_t per_token, std::uint64_t target_tokens);
 
+// The pre-load estimate's decisions and texts (arch025-N10, lane 1 leg 6: was buildModel's text in server_main.cpp, the
+// shape of llama.cpp common_fit_params). From the first plan (startup::dgpuFit) and the VRAM measured before loading:
+// an explicit -c that does not fit is planned for one request (min(slot_ctx, tight_pool)); 2. fitParallel with
+// per slot = (state + replay rows) + 4%; 3. fitFixed. Returns the "adjusted:" lines in their order, the snapshots the
+// "startup inputs:" line logs (fitp = before fitParallel, fitf = before fitFixed) and the warning / refusal texts. The
+// caller logs them in this order: adjusted lines, the tight warning (plan.reduced), the refusal (refuse, when
+// WHIRL_FIT_CHECK is on), the short warning (!plan.fits).
+struct PreloadIn {
+    vram::FitInput fi;     // startup::DgpuFit::fi
+    vram::FitPlan plan;    // startup::DgpuFit::plan
+    std::uint64_t st1 = 0, pend1 = 0;  // one slot's recurrent state and replay rows (model::slotStateBytes)
+    std::uint32_t parallel = 1;
+    bool parallel_given = false;  // --parallel given
+    bool ctx_given = false;       // -c / --ctx given
+    std::uint32_t slot_ctx = 0, tight_pool = 0;
+    std::uint64_t avail = 0;      // the KV room (poolbudget::kvRoom)
+    std::uint64_t margin = 0, pending = 0, room = 0;  // poolbudget::Margin bytes / pending / room
+    std::uint64_t weights = 0;    // the load estimate's weights
+    std::uint64_t total = 0;      // hipMemGetInfo total
+};
+struct Adjusted {
+    std::string what, why;
+};
+struct PreloadAdjust {
+    std::uint32_t parallel = 1;
+    vram::FitInput fi;
+    vram::FitPlan plan;
+    vram::FitInput fitp;            // "startup inputs:" fitp.*
+    std::uint64_t per_slot = 0;     // fitp.per_slot
+    vram::FitInput fitf;            // fitf.*
+    vram::FitPlan fitf_plan;        // fitf.plan.*
+    std::vector<Adjusted> adjusted;  // in order
+    std::string tight;              // "VRAM is tight ..." when plan.reduced, else ""
+    bool refuse = false;            // no room for any KV (!fits, pool 0)
+    std::string refusal;            // the VramLimit error text when refuse
+    std::string short_warn;         // "VRAM estimate: ..." when !plan.fits, else ""
+};
+PreloadAdjust preloadAdjust(const PreloadIn& in);
+
+// The UMA carve-out check's fixed memory (arch025-N10 leg 6: was buildModel's text): slots = parallel * (state + replay)
+// + snapshot sets (max(1, drafts) states); checkpoints = (parallel * n_ck + n_spe) * (state + n_embd*4 + n_vocab*4);
+// fixed = weights + state + buffers + slots + checkpoints + MTP block estimate + 256 MiB, then + 1/12 ("+8%").
+struct UmaFixedIn {
+    std::uint64_t weights = 0, state = 0, bufs = 0, st1 = 0, pend1 = 0;
+    std::uint32_t drafts = 0;  // the MTP default draft count (snapshot sets)
+    std::uint32_t parallel = 1;
+    std::uint64_t n_ck = 0;
+    std::uint32_t n_spe = 0;
+    bool has_mtp = false;
+    std::uint32_t n_embd = 0, n_vocab = 0;
+};
+struct UmaFixed {
+    std::uint64_t slots = 0, ck = 0, fixed = 0;
+};
+UmaFixed umaFixed(const UmaFixedIn& in);
+
 // The "startup" object of GET /props and GET /health (effective values after the startup fit).
 struct StartupInfo {
     std::uint32_t ctx_per_request = 0, pool_tokens = 0, parallel = 0;
