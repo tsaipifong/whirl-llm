@@ -63,7 +63,7 @@ PATHS = {
     "server.mtp":        {"roots": ["Engine::pickDrafts", "Engine::splitDrafts", "planSlotDrafts", "Engine::draftCap"], "metric": "tg",
                           "desc": "server MTP / n-gram draft allocation and acceptance"},
     # arch025-E1a: the draws and the Acceptor live in src/sampling (free functions / Acceptor); prepareRow stays on Engine
-    "server.sampling":   {"roots": ["sampleRow", "filterCands", "Engine::prepareRow", "probOf", "sampling::sampleRace", "Acceptor::greedy",
+    "server.sampling":   {"roots": ["sampleRow", "filterCands", "SampleBuffers::prepareRow", "probOf", "sampling::sampleRace", "Acceptor::greedy",
                                     "Acceptor::sample"],
                           "metric": "tg", "desc": "sampling and speculative sampling"},
     "server.loop":       {"roots": ["Engine::runLoop", "Engine::submitAndWait"], "metric": None, "depth": 0,

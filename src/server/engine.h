@@ -12,6 +12,7 @@
 #include "cache/page_pool.h"
 #include "cache/prefix_cache.h"
 #include "decode_floor.h"
+#include "engine_sampling.h"  // SampleBuffers, k_small / k_big / max_rows (arch025-N4a)
 #include "engine_api.h"
 #include "engine_thread.h"
 #include "prefix_store.h"
@@ -62,9 +63,6 @@ inline double msSince(TimePoint t0) {
 constexpr std::uint32_t kv_page = qwen35::kv_page;
 constexpr std::uint32_t gdn_max_seg = qwen35::gdn_max_seg;
 constexpr std::uint32_t max_small_batch = qwen35::max_small_batch;
-constexpr std::uint32_t k_small = 256;
-constexpr std::uint32_t k_big = 16384;
-constexpr std::uint32_t max_rows = qwen35::max_verify_rows;
 // the cold prefill schedule (shared with whirl seqtest's gate: include/whirl/prefill_schedule.h)
 using sched::prefill_chunk;
 using sched::prefill_merge;
@@ -262,6 +260,16 @@ struct EngineOptions {
     whirl::relax::Params relax;
 };
 
+// The engine's batch statistics (main thread; the "batch |" status line, Stats' DFlash2 counters). arch025-N4c: the
+// former Engine members stat_t0_ .. stat_dfl_gap_, same types, initial values and order.
+struct BatchStats {
+    TimePoint t0{};
+    std::uint64_t tokens = 0, cycles = 0, rows = 0, slots = 0, drafts = 0,
+                  lit_drafts = 0,  // FR-SRV P2-5: DFlash2 / n-gram drafts verified (all slots)
+                  prefill_tok = 0, seg_batches = 0, seg_chunks = 0;
+    std::uint64_t dfl_cycles = 0, dfl_drafted = 0, dfl_accepted = 0, dfl_cold = 0, dfl_gap = 0;
+};
+
 class Engine final : public EngineApi {
 public:
     Engine(ServerModel& model, device::Backend& ops, const Tokenizer& tok, const EngineOptions& opt);
@@ -378,14 +386,6 @@ private:
     bool waitsForSys(Job& job);
     bool waitsForTier(Job& job);
     void prefetchFor(Job& job);
-    // sampling
-    void launchTopk(std::uint32_t row0, std::uint32_t rows, std::uint32_t k, float inv_t, DevPtr dst,
-                    std::uint32_t dst_rows, std::uint32_t out0);
-    static std::size_t sampBytes();
-    void fetchCands(Sampler& s, std::uint32_t rows);
-    void prepareRow(Sampler& s, std::uint32_t r);
-    void loadFullRow(std::uint32_t gr);
-    DevPtr logitsRow(std::uint32_t r) const;
     // request lifecycle
     bool emit(Slot& sl, std::uint32_t t);
     void flushOut(Slot& sl);
@@ -506,26 +506,9 @@ private:
     TimePoint floor_epoch_{};
     TimePoint floor_log_t_{};
     std::uint64_t stat_floor_waits_ = 0, stat_floor_periods_ = 0;
-    // sampling buffers
-    device::DevBuf samp_dev_, big_dev_;
-    device::DevBuf relax_dev_;                // relaxacc: top-K of the greedy verify rows [ids | vals | stats]
-    std::vector<std::uint8_t> relax_host_;
-    std::vector<std::uint8_t> samp_host_, big_host_;
-    std::vector<float> row_host_;
-    std::vector<std::uint8_t> in_cands_;
-    std::vector<Cand> cands_scratch_;
-    // sampling::RowSource over this engine's verify rows (the draws and the Acceptor read the device through it)
-    struct SampleRows final : sampling::RowSource {
-        Engine& e;
-        explicit SampleRows(Engine& en) : e(en) {}
-        void prepareRow(Sampler& s, std::uint32_t r) override;
-        const float* loadFullRow(std::uint32_t gr) override;
-        float logitAt(std::uint32_t gr, std::uint32_t t) override;
-        std::uint32_t nVocab() const override;
-        std::uint8_t* inCands() override;
-    };
-    SampleRows samp_rows_{*this};
-    std::vector<std::int32_t> ctl_host_;
+    // sampling buffers and sampling::RowSource over this engine's verify rows (the draws and the Acceptor read the
+    // device through it); arch025-N4a: the former members samp_dev_ .. ctl_host_, here and in that order
+    SampleBuffers sb_{m_, ops_};
     bool spec_on_ = false;
     std::uint64_t conv_bytes_ = 0, ssm_bytes_ = 0;
     std::vector<Slot> slots_;
@@ -541,12 +524,8 @@ private:
     bool stop_ WH_GUARDED_BY(q_mutex_) = false;
     std::vector<std::function<void()>> loop_calls_ WH_GUARDED_BY(q_mutex_);  // runOnLoop (tests)
     void runLoopCalls(whirl::UniqueLock& lk) WH_REQUIRES(q_mutex_);
-    // batch statistics
-    TimePoint stat_t0_{};
-    std::uint64_t stat_tokens_ = 0, stat_cycles_ = 0, stat_rows_ = 0, stat_slots_ = 0, stat_drafts_ = 0,
-                  stat_lit_drafts_ = 0,  // FR-SRV P2-5: DFlash2 / n-gram drafts verified (all slots)
-                  stat_prefill_tok_ = 0, stat_seg_batches_ = 0, stat_seg_chunks_ = 0;
-    std::uint64_t stat_dfl_cycles_ = 0, stat_dfl_drafted_ = 0, stat_dfl_accepted_ = 0, stat_dfl_cold_ = 0, stat_dfl_gap_ = 0;
+    // batch statistics (arch025-N4c: the former stat_t0_ .. stat_dfl_gap_)
+    BatchStats bst_;
     // WDDM-LOG: runtime video memory watch (setVramProbe)
     std::function<wddmwatch::Sample()> vram_probe_;
     std::function<std::optional<wddmwatch::Others>()> vram_others_;

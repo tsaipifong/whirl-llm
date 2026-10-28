@@ -157,8 +157,6 @@ Engine::StateMem Engine::allocStateMeasured() {
 }
 
 void Engine::allocState() {
-    const auto& cfg = m_.cfg();
-    const std::uint32_t V = cfg.n_vocab;
     slots_.resize(opt_.parallel);
     m_.selectSeq(0);
     for (std::uint32_t si = 0; si < opt_.parallel; ++si) {
@@ -171,20 +169,8 @@ void Engine::allocState() {
     ps_.spes().resize(opt_.n_spe);
     for (Spe& s : ps_.spes()) ck_.init(s.ck, false);
     // sampling buffers
-    const std::uint64_t samp_bytes = sampBytes();
-    const std::uint64_t big_bytes = static_cast<std::uint64_t>(k_big) * 8 + 8;
-    samp_dev_ = device::DevBuf::alloc(ops_, samp_bytes);
-    big_dev_ = device::DevBuf::alloc(ops_, big_bytes);
-    samp_host_.assign(samp_bytes, 0);
-    big_host_.assign(big_bytes, 0);
-    row_host_.assign(V, 0.0f);
-    in_cands_.assign(V, 0);
-    cands_scratch_.resize(std::max<std::size_t>(V, k_big));
-    ctl_host_.assign(static_cast<std::size_t>(opt_.parallel) * qwen35::ctl_words, 0);
+    sb_.alloc(opt_.parallel, opt_.relax.on, opt_.relax.on ? opt_.relax.topk() : 0);
     if (opt_.relax.on) {
-        const std::uint64_t rb = static_cast<std::uint64_t>(max_rows) * opt_.relax.topk() * 8 + max_rows * 8;
-        relax_dev_ = device::DevBuf::alloc(ops_, rb);
-        relax_host_.assign(rb, 0);
         logI("decode: relaxed draft acceptance (relaxacc, fast): greedy top-{} with p >= {:.2f} p_max; sampling typical "
              "acceptance eps {:.2f} delta {:.2f} - output differs from exact speculative decoding",
              opt_.relax.topk(), opt_.relax.alpha, opt_.relax.eps, opt_.relax.delta);
@@ -317,11 +303,11 @@ Engine::Stats Engine::stats() const {
     s.ssd_used = tp.ssd_used;
     s.ssd_entries = tp.ssd_entries;
     s.superseded = tp.superseded;
-    s.dfl_cycles = stat_dfl_cycles_;
-    s.dfl_drafted = stat_dfl_drafted_;
-    s.dfl_accepted = stat_dfl_accepted_;
-    s.dfl_cold = stat_dfl_cold_;
-    s.dfl_gap = stat_dfl_gap_;
+    s.dfl_cycles = bst_.dfl_cycles;
+    s.dfl_drafted = bst_.dfl_drafted;
+    s.dfl_accepted = bst_.dfl_accepted;
+    s.dfl_cold = bst_.dfl_cold;
+    s.dfl_gap = bst_.dfl_gap;
     return s;
 }
 
@@ -334,10 +320,6 @@ Engine::Stats Engine::statsShared() const {
     s.ssd_entries = tp.ssd_entries;
     s.superseded = tp.superseded;
     return s;
-}
-
-DevPtr Engine::logitsRow(std::uint32_t r) const {
-    return m_.logits() + static_cast<std::uint64_t>(r) * m_.cfg().n_vocab * 4;
 }
 
 // ---------------------------------------------------------------------------
@@ -393,7 +375,7 @@ void Engine::dflIngest(Slot& sl, std::uint32_t run_rows, std::uint32_t r0, std::
     if (!opt_.use_dflash || n == 0) return;
     ::whirl::dflash::Range rg{sl.dfl_lo, sl.dfl_hi};
     const ::whirl::dflash::Ingest g = ::whirl::dflash::planIngest(rg, m_.captureN(), run_rows, r0, n, pos0);
-    stat_dfl_gap_ += g.gap;
+    bst_.dfl_gap += g.gap;
     if (g.any) m_.dflashIngest(sl.id, g.cap_row, g.n, g.pos);
     sl.dfl_lo = rg.lo;
     sl.dfl_hi = rg.hi;
@@ -698,82 +680,6 @@ void Engine::prefetchFor(Job& job) {
 // ---------------------------------------------------------------------------
 // sampling
 
-std::size_t Engine::sampBytes() {
-    return static_cast<std::size_t>(max_rows) * k_small * 8 + max_rows * 8;
-}
-
-void Engine::launchTopk(std::uint32_t row0, std::uint32_t rows, std::uint32_t k, float inv_t, DevPtr dst,
-                        std::uint32_t dst_rows, std::uint32_t out0) {
-    const DevPtr ids = dst + static_cast<std::uint64_t>(out0) * k * 4;
-    const DevPtr vals = dst + static_cast<std::uint64_t>(dst_rows) * k * 4 + static_cast<std::uint64_t>(out0) * k * 4;
-    const DevPtr stats = dst + static_cast<std::uint64_t>(dst_rows) * k * 8 + static_cast<std::uint64_t>(out0) * 8;
-    m_.topkRows(row0, rows, k, inv_t, ids, vals, stats);
-}
-
-void Engine::fetchCands(Sampler& s, std::uint32_t rows) {
-    s.row_base = 0;
-    launchTopk(0, rows, k_small, s.inv_t, samp_dev_.get(), max_rows, 0);
-    ops_.download(samp_host_.data(), samp_dev_.get(), sampBytes());
-}
-
-void Engine::prepareRow(Sampler& s, std::uint32_t r) {
-    const std::uint32_t gr = s.row_base + r;
-    s.row = gr;
-    const auto* host = samp_host_.data();
-    const auto* ids = reinterpret_cast<const std::int32_t*>(host);
-    const auto* vals = reinterpret_cast<const float*>(host + static_cast<std::size_t>(max_rows) * k_small * 4);
-    const auto* stats = reinterpret_cast<const float*>(host + static_cast<std::size_t>(max_rows) * k_small * 8);
-    s.m = stats[2 * gr];
-    s.sum = stats[2 * gr + 1];
-    std::vector<Cand>& c = *s.cands;
-    for (std::uint32_t j = 0; j < k_small; ++j) {
-        const std::size_t idx = static_cast<std::size_t>(gr) * k_small + j;
-        c[j] = {static_cast<std::uint32_t>(ids[idx]), vals[idx], 0};
-    }
-    if (filterCands(s, k_small, false)) return;
-    // escalate: a larger device top-k for this row, then the full row
-    s.big_used += 1;
-    launchTopk(gr, 1, k_big, s.inv_t, big_dev_.get(), 1, 0);
-    ops_.download(big_host_.data(), big_dev_.get(), big_host_.size());
-    {
-        const auto* bids = reinterpret_cast<const std::int32_t*>(big_host_.data());
-        const auto* bvals = reinterpret_cast<const float*>(big_host_.data() + static_cast<std::size_t>(k_big) * 4);
-        const auto* bst = reinterpret_cast<const float*>(big_host_.data() + static_cast<std::size_t>(k_big) * 8);
-        s.m = bst[0];
-        s.sum = bst[1];
-        for (std::uint32_t j = 0; j < k_big; ++j) c[j] = {static_cast<std::uint32_t>(bids[j]), bvals[j], 0};
-    }
-    if (filterCands(s, k_big, false)) return;
-    s.full_used += 1;
-    loadFullRow(gr);
-    const std::uint32_t V = m_.cfg().n_vocab;
-    for (std::uint32_t j = 0; j < V; ++j) c[j] = {j, row_host_[j], 0};
-    filterCands(s, V, true);
-}
-
-void Engine::loadFullRow(std::uint32_t gr) {
-    const std::uint32_t V = m_.cfg().n_vocab;
-    ops_.download(row_host_.data(), logitsRow(gr), static_cast<std::uint64_t>(V) * 4);
-}
-
-// sampling::RowSource over the verify rows (the draws in src/sampling read the device through it)
-void Engine::SampleRows::prepareRow(Sampler& s, std::uint32_t r) { e.prepareRow(s, r); }
-
-const float* Engine::SampleRows::loadFullRow(std::uint32_t gr) {
-    e.loadFullRow(gr);
-    return e.row_host_.data();
-}
-
-float Engine::SampleRows::logitAt(std::uint32_t gr, std::uint32_t t) {
-    float l = 0;
-    e.ops_.download(&l, e.logitsRow(gr) + static_cast<std::uint64_t>(t) * 4, 4);
-    return l;
-}
-
-std::uint32_t Engine::SampleRows::nVocab() const { return e.m_.cfg().n_vocab; }
-
-std::uint8_t* Engine::SampleRows::inCands() { return e.in_cands_.data(); }
-
 // ---------------------------------------------------------------------------
 // request lifecycle
 
@@ -837,7 +743,7 @@ bool Engine::startJob(Slot& sl, Job& job) {
     sl.sm.min_p = p.min_p;
     sl.sm.seed = seed;
     sl.sm.race = opt_.spec_sample;
-    sl.sm.cands = &cands_scratch_;
+    sl.sm.cands = sb_.cands();
     if (sl.greedy) {
         logI("req {} | slot {} | sampling: greedy (temperature 0), max_tokens {}{}, stop strings {}{}", job.id, sl.id,
              sl.max_tokens, p.max_tokens ? "" : " (ctx limit)", p.stop.size(), p.ignore_eos ? ", ignore_eos" : "");
@@ -1081,7 +987,7 @@ void Engine::prefillStep(Slot& sl) {
     }
     dflIngest(sl, static_cast<std::uint32_t>(n), 0, static_cast<std::uint32_t>(n), sl.reuse + static_cast<std::uint32_t>(sl.pf_off));
     sl.pf_off += n;
-    stat_prefill_tok_ += n;
+    bst_.prefill_tok += n;
     prefill_tok_cum_ += n;
     maybeSplitCkpt(sl, m_.hn() + static_cast<std::uint64_t>(n - 1) * m_.cfg().n_embd * 4);
     if (sl.pf_off == toks.size()) finishPrefill(sl);
@@ -1165,10 +1071,10 @@ std::size_t Engine::prefillGroup(Slot& first, std::size_t row_budget) {
         for (Slot* sl : grp) failSlot(*sl, ex.what());
         return 0;
     }
-    stat_prefill_tok_ += total;
+    bst_.prefill_tok += total;
     prefill_tok_cum_ += total;
-    stat_seg_batches_ += 1;
-    stat_seg_chunks_ += grp.size();
+    bst_.seg_batches += 1;
+    bst_.seg_chunks += grp.size();
     std::uint64_t r0 = 0;
     for (std::size_t k = 0; k < grp.size(); ++k) {
         Slot& sl = *grp[k];
@@ -1209,10 +1115,10 @@ void Engine::finishPrefill(Slot& sl) {
     if (sl.greedy) {
         first = m_.argmax();
     } else {
-        fetchCands(sl.sm, 1);
-        prepareRow(sl.sm, 0);
+        sb_.fetchCands(sl.sm, 1);
+        sb_.prepareRow(sl.sm, 0);
         sl.sm.pos_idx = 0;
-        first = sampling::sampleRow(samp_rows_, sl.sm, std::nullopt, 0);
+        first = sampling::sampleRow(sb_, sl.sm, std::nullopt, 0);
     }
     if (opt_.verify_cache && sl.reuse > 0) {
         // diagnostic: compare the cached-prefix logits with a from-scratch prefill
@@ -1237,7 +1143,7 @@ void Engine::finishPrefill(Slot& sl) {
             else m_.forward(toks.subspan(off, n), static_cast<std::uint32_t>(off));
             off += n;
         }
-        std::vector<float>& fresh = row_host_;
+        std::vector<float>& fresh = sb_.rowHost();
         ops_.download(fresh.data(), m_.logits(), static_cast<std::uint64_t>(V) * 4);
         float mc = -std::numeric_limits<float>::infinity(), mf = mc;
         std::size_t ac = 0, af = 0;
@@ -1273,9 +1179,9 @@ void Engine::finishPrefill(Slot& sl) {
         if (sl.greedy) {
             first = m_.argmax();
         } else {
-            fetchCands(sl.sm, 1);
-            prepareRow(sl.sm, 0);
-            first = sampling::sampleRow(samp_rows_, sl.sm, std::nullopt, 0);
+            sb_.fetchCands(sl.sm, 1);
+            sb_.prepareRow(sl.sm, 0);
+            first = sampling::sampleRow(sb_, sl.sm, std::nullopt, 0);
         }
     }
     sl.prompt_ms = msSince(sl.tp0);
@@ -1501,7 +1407,7 @@ void Engine::dflashDrafts(Cycle& cy) {
             if (cy.dsrc[k] != 0) continue;
             Slot& sl = *cy.act[k];
             if (!dflReady(sl)) {
-                stat_dfl_cold_ += 1;
+                bst_.dfl_cold += 1;
                 continue;
             }
             const std::uint32_t lim_k = verifyRoom(sl, cy.dfl_lim);
@@ -1677,21 +1583,21 @@ void Engine::sampleRows(Cycle& cy) {
         if (sl.greedy) {
             if (relaxes(cy, k) && cy.nd_of[k] > 0) {
                 any_relax = true;
-                launchTopk(cy.row_of[k], cy.nd_of[k], cy.rk, 1.0f, relax_dev_.get(), max_rows, cy.row_of[k]);
+                sb_.launchTopk(cy.row_of[k], cy.nd_of[k], cy.rk, 1.0f, sb_.relaxDev(), max_rows, cy.row_of[k]);
             }
             continue;
         }
         any_sampling = true;
-        launchTopk(cy.row_of[k], cy.nd_of[k] + 1, k_small, sl.sm.inv_t, samp_dev_.get(), max_rows, cy.row_of[k]);
+        sb_.launchTopk(cy.row_of[k], cy.nd_of[k] + 1, k_small, sl.sm.inv_t, sb_.sampDev(), max_rows, cy.row_of[k]);
     }
     const TimePoint t_enq = Clock::now();
-    m_.readCtl(std::span<std::int32_t>(ctl_host_.data(), slots_.size() * qwen35::ctl_words));
+    m_.readCtl(std::span<std::int32_t>(sb_.ctlHost().data(), slots_.size() * qwen35::ctl_words));
     if (cy.p) {
         cy.p->t_ready = Clock::now();
         cy.p->enq_ms[cy.pa] += std::chrono::duration<double, std::milli>(t_enq - cy.tc0).count();
     }
-    if (any_sampling) ops_.download(samp_host_.data(), samp_dev_.get(), sampBytes());
-    if (any_relax) ops_.download(relax_host_.data(), relax_dev_.get(), relax_host_.size());
+    if (any_sampling) ops_.download(sb_.sampHost().data(), sb_.sampDev(), SampleBuffers::sampBytes());
+    if (any_relax) ops_.download(sb_.relaxHost().data(), sb_.relaxDev(), sb_.relaxHost().size());
 }
 
 void Engine::trainCycle(Cycle& cy) {
@@ -1761,16 +1667,16 @@ void Engine::cycleStats(Cycle& cy) {
     if (opt_.trace_nd) logI("trace | cycle {} | slots {} | nd {} | n-gram {} | dflash {} | {:.2f} ms", n_cycles_, cy.A, cy.nd, cy.n_ng, cy.n_dfl, msSince(cy.tc0));
     n_cycles_ += 1;
     policy_cycles_ += 1;
-    stat_cycles_ += 1;
-    stat_rows_ += cy.rows;
-    stat_slots_ += cy.A;
-    stat_drafts_ += cy.nd;
-    for (std::size_t k = 0; k < cy.A; ++k) stat_lit_drafts_ += cy.ng_n[k];
+    bst_.cycles += 1;
+    bst_.rows += cy.rows;
+    bst_.slots += cy.A;
+    bst_.drafts += cy.nd;
+    for (std::size_t k = 0; k < cy.A; ++k) bst_.lit_drafts += cy.ng_n[k];
 }
 
 void Engine::acceptSlot(Cycle& cy, std::size_t k, const sampling::Acceptor& acceptor) {
     Slot& sl = *cy.act[k];
-    const std::int32_t* ctl = ctl_host_.data() + static_cast<std::size_t>(sl.id) * qwen35::ctl_words;
+    const std::int32_t* ctl = sb_.ctlHost().data() + static_cast<std::size_t>(sl.id) * qwen35::ctl_words;
     const std::uint32_t row0 = cy.row_of[k];
     const std::uint32_t nd_k = cy.nd_of[k];
     const bool is_ng = cy.ng_n[k] > 0;  // literal drafts (n-gram or DFlash2)
@@ -1788,9 +1694,9 @@ void Engine::acceptSlot(Cycle& cy, std::size_t k, const sampling::Acceptor& acce
     const sampling::Drafts drafts{std::span<const std::uint32_t>(dr.data(), dr.size()), nd_dev, row0};
     const sampling::RepeatGuard repeats = [&](std::uint32_t a) { return relaxRepeats(sl, dr, a); };
     const sampling::Accepted ac =
-        sl.greedy ? acceptor.greedy(ctl + qwen35::ctl_rows, drafts, relaxes(cy, k), sampling::RelaxRows{relax_host_.data(), max_rows, cy.rk},
+        sl.greedy ? acceptor.greedy(ctl + qwen35::ctl_rows, drafts, relaxes(cy, k), sampling::RelaxRows{sb_.relaxHost().data(), max_rows, cy.rk},
                                     repeats, sl.relaxed, sl.relax_gap)
-                  : acceptor.sample(samp_rows_, sl.sm, drafts, relaxes(cy, k), sl.n_gen, repeats, sl.relaxed);
+                  : acceptor.sample(sb_, sl.sm, drafts, relaxes(cy, k), sl.n_gen, repeats, sl.relaxed);
     std::uint32_t acc = ac.acc;
     std::uint32_t chosen = ac.chosen;
     sl.accepted += acc;
@@ -1805,9 +1711,9 @@ void Engine::acceptSlot(Cycle& cy, std::size_t k, const sampling::Acceptor& acce
     } else if (cy.dsrc[k] == 2) {
         sl.dfl_acc.update(nd_dev, acc);
         sl.dfl_cycles += 1;
-        stat_dfl_cycles_ += 1;
-        stat_dfl_drafted_ += nd_dev;
-        stat_dfl_accepted_ += acc;
+        bst_.dfl_cycles += 1;
+        bst_.dfl_drafted += nd_dev;
+        bst_.dfl_accepted += acc;
     }
     // an accepted end-of-turn draft ends the reply: the trunk keeps only the
     // rows before it and the stop token becomes `chosen`
@@ -1840,7 +1746,7 @@ void Engine::acceptSlot(Cycle& cy, std::size_t k, const sampling::Acceptor& acce
     for (std::uint32_t r = 0; r < acc; ++r)
         if (!sl.done) sl.done = emit(sl, dr[r]);
     if (!sl.done) sl.done = emit(sl, chosen);
-    stat_tokens_ += sl.n_gen - n_before;
+    bst_.tokens += sl.n_gen - n_before;
     if (opt_.use_mtp)
         ops_.copyAsync(m_.seqHid(sl.id), m_.hn() + static_cast<std::uint64_t>(row0) * cy.E * 4, (acc + 1) * cy.E * 4,
                        m_.stream());
@@ -1923,7 +1829,7 @@ void Engine::finishJob(Slot& sl) {
     if (sl.pos > N && sl.pos == sl.cache_tokens.size() && sl.logits_ok) {
         const std::optional<DevPtr> last_hid =
             opt_.use_mtp ? std::optional<DevPtr>(m_.mtpH() + static_cast<std::uint64_t>(sl.last_acc) * E * 4) : std::nullopt;
-        saveCkpt(sl, sl.pos, "gen-end", last_hid, logitsRow(sl.last_row));
+        saveCkpt(sl, sl.pos, "gen-end", last_hid, sb_.logitsRow(sl.last_row));
         // MTP KV rows for the accepted drafts of the last cycle (normally
         // written at the start of the next cycle)
         if (opt_.use_mtp && sl.n_pend > 1)
@@ -2201,35 +2107,35 @@ void Engine::writeError(Job& job, int status, const std::string& msg) {
 }
 
 void Engine::logBatchStats(bool force) {
-    const double el = msSince(stat_t0_);
+    const double el = msSince(bst_.t0);
     if (!force && el < 5000) return;
-    if (stat_cycles_ > 0 || stat_prefill_tok_ > 0) {
+    if (bst_.cycles > 0 || bst_.prefill_tok > 0) {
         std::uint32_t n_dec = 0, n_pf = 0;
         for (const Slot& sl : slots_) {
             if (sl.phase == Phase::decode) ++n_dec;
             else if (sl.phase == Phase::prefill || sl.phase == Phase::restore) ++n_pf;
         }
-        const double cyc = static_cast<double>(std::max<std::uint64_t>(stat_cycles_, 1));
+        const double cyc = static_cast<double>(std::max<std::uint64_t>(bst_.cycles, 1));
         // FR-SRV P2-5: "drafts/cycle" is the MTP draft count; literal drafts (DFlash2 / n-gram) are
         // reported next to it (with --draft dflash the MTP figure is always 0)
-        const std::string lit = stat_lit_drafts_ > 0
-                                    ? std::format(", {:.2f} literal drafts/cycle (DFlash2 / n-gram)", static_cast<double>(stat_lit_drafts_) / cyc)
+        const std::string lit = bst_.lit_drafts > 0
+                                    ? std::format(", {:.2f} literal drafts/cycle (DFlash2 / n-gram)", static_cast<double>(bst_.lit_drafts) / cyc)
                                     : std::string();
         // WDDM-LOG: this process's video memory at the same cadence (issues #5 / #6)
         const std::string vram = vramNote();
         logI("batch | slots busy {}/{} (decode {}, prefill {}) | {} cycles, {:.2f} slots/cycle, {:.2f} rows/cycle, {:.2f} "
              "drafts/cycle{} | aggregate tg {:.1f} tok/s, prefill {:.0f} tok/s over {:.1f} s{}{}",
-             n_dec + n_pf, slots_.size(), n_dec, n_pf, stat_cycles_, static_cast<double>(stat_slots_) / cyc,
-             static_cast<double>(stat_rows_) / cyc, static_cast<double>(stat_drafts_) / cyc, lit,
-             static_cast<double>(stat_tokens_) * 1000.0 / el, static_cast<double>(stat_prefill_tok_) * 1000.0 / el, el / 1000.0,
+             n_dec + n_pf, slots_.size(), n_dec, n_pf, bst_.cycles, static_cast<double>(bst_.slots) / cyc,
+             static_cast<double>(bst_.rows) / cyc, static_cast<double>(bst_.drafts) / cyc, lit,
+             static_cast<double>(bst_.tokens) * 1000.0 / el, static_cast<double>(bst_.prefill_tok) * 1000.0 / el, el / 1000.0,
              vram.empty() ? "" : " | ", vram);
     }
-    stat_t0_ = Clock::now();
-    stat_tokens_ = stat_cycles_ = stat_rows_ = stat_slots_ = stat_drafts_ = stat_lit_drafts_ = 0;
-    if (stat_seg_batches_ > 0)
-        logI("batch | segmented prefill: {} forwards, {} chunks ({:.2f} chunks/forward)", stat_seg_batches_, stat_seg_chunks_,
-             static_cast<double>(stat_seg_chunks_) / static_cast<double>(stat_seg_batches_));
-    stat_prefill_tok_ = stat_seg_batches_ = stat_seg_chunks_ = 0;
+    bst_.t0 = Clock::now();
+    bst_.tokens = bst_.cycles = bst_.rows = bst_.slots = bst_.drafts = bst_.lit_drafts = 0;
+    if (bst_.seg_batches > 0)
+        logI("batch | segmented prefill: {} forwards, {} chunks ({:.2f} chunks/forward)", bst_.seg_batches, bst_.seg_chunks,
+             static_cast<double>(bst_.seg_chunks) / static_cast<double>(bst_.seg_batches));
+    bst_.prefill_tok = bst_.seg_batches = bst_.seg_chunks = 0;
     if (stat_floor_periods_ > 0)
         logI("batch | decode floor: {} prefill forwards while decoding, {} decode cycles held prefill back", stat_floor_periods_,
              stat_floor_waits_);
@@ -2323,7 +2229,7 @@ void Engine::runLoop() {
         explicit Owned(EngineThread& t) : o(t) { o.enter(); }
         ~Owned() { o.leave(); }
     } owned(owner_);
-    stat_t0_ = Clock::now();
+    bst_.t0 = Clock::now();
     bool was_busy = false;
     for (;;) {
         const TimePoint tl0 = Clock::now();
@@ -2503,7 +2409,7 @@ bool Engine::idleWait(whirl::UniqueLock& lk, bool& was_busy) {
     // a request arrived: the idle period ends, an idle write stops starting new entries (TIER-IDLE)
     tb_.idleActivity();
     if (tb_.tier() != nullptr) tb_.tier()->endIdleWrite();
-    stat_t0_ = Clock::now();
+    bst_.t0 = Clock::now();
     // v0.2.2.2: the governor sees the budget before the first request after an idle period (one probe sample,
     // ~0.3 ms) when the last sample is older than 5 s, so a pool that must shrink does so before the request runs
     if (gov_ && vram_probe_ && msSince(vram_last_t_) > 5000.0) {

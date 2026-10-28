@@ -211,6 +211,12 @@
                     "proof": {"refactor": ["exit_rule", "golden_exact", "move_equal", "startup_sizing"]}},
    "model.arch_open": {"metrics": [], "metrics_none": "once per process at load: no bench key",
                        "proof": {"refactor": ["exit_rule", "golden_exact", "startup_sizing"]}},
+   "server.engine": {"metrics": ["host.sched.round_us_per_cycle", "host.sched.request_ms", "host.sched.prefix_reuse_ms"],
+                     "proof": {"refactor": ["exit_rule", "golden_exact", "work_trace", "move_equal", "host_work", "host_time"]}},
+   "server.sample_buffers": {"metrics": ["host.sched.round_us_per_cycle"],
+                             "proof": {"refactor": ["exit_rule", "golden_exact", "work_trace", "move_equal", "host_work", "host_time"]}},
+   "server.vram_watch": {"metrics": [], "metrics_none": "sampled per status line / request end / idle minute: no bench key (whirl-server-tests vram_watch counters)",
+                         "proof": {"refactor": ["exit_rule", "golden_exact", "move_equal", "server_log_scan"]}},
    "model.arch_registry": {"metrics": [], "metrics_none": "table lookup at load: no bench key",
                            "proof": {"refactor": ["exit_rule", "golden_exact", "startup_sizing"]}},
    "model.qwen35": {"metrics": ["stage.decode_step", "stage.verify", "stage.prefill_chunk"],
@@ -581,13 +587,13 @@
   },
   "config.device": {
    "id": "N15b", "desc": "the GPU choice of whirl.exe and whirl-server (src/config/device_choice.h, header-only, arch025-N15b): settings::chooseDevice = WHIRL_HIP_DEVICE (the settings u32 rule; a bad value warns and uses 0), else qwen35::restrictDevice (s8-719: the runtime sees only the chosen GPU; its note goes to the caller's log before pickDevice) + qwen35::pickDevice; the shown index as the device list prints it. Was written twice (src/cli/build_model.cpp selectDevice, src/server/server_main.cpp)",
-   "paths": ["src/config/device_choice.h"],
+   "paths": ["src/config/device_choice.h", "include/whirl/device_pick.h"],
    "lands_on": "arch025-r12cli (lane 1, N15b)",
    "steps": ["cpu_device_once", "cpu_cli_tests", "cpu_emptyroot", "srv_gpu_select", "golden_swift", "golden_moe"],
    "gpus": {"srv_gpu_select": 2, "golden_swift": 2, "golden_moe": 2},
    "callers": "rdeps",
    "manual": ["device lines of every golden / server log on both GPUs == the parent exe (startup_lines.py; the lane-1 GPU runner checks the arch per case)",
-              "isolation: header-only on top of the model layer's device selection (include/whirl/model.h); no own iso program (needs HIP)"]
+              "isolation: header-only on top of the model layer's device selection (include/whirl/device_pick.h: the two declarations, not the Model header; arch025-lane1 leg 3 layering fix); no own iso program (needs HIP)"]
   },
   "prefill.plan": {
    "id": "N15c", "desc": "the prompt's chat-token facts and the prefill plan, one copy for whirl.exe and whirl-server (arch025-N15c): chat::ChatTokens (include/whirl/chat_tokens.h, src/chat/chat_tokens.cpp in the whirl core library; was src/server/tokens.* and the CLI's own Tok facts): end-of-turn ids, think-open / system / image-end splits, the CR LF -> LF n-gram map; the cold prefill schedule (include/whirl/prefill_schedule.h, sched::*: chunks, forced splits, forward grouping, sched::prefillExec = the forward size both front ends wrote out); WHIRL_PREFILL_BATCH at load / after the load (vram::prefillBatchAtLoad / prefillBatchCap, include/whirl/vram_limit.h: the server's rule)",
@@ -611,6 +617,39 @@
    "callers": "rdeps",
    "manual": ["whirl.exe bench / chat and whirl-server on a GGUF with an unsupported general.architecture: the same exit code and message as the 44895be exes (release.cpp UnsupportedArch text)",
               "isolation: header-only over model.arch_registry and whirl/model.h (ModelError); no own iso program"]
+  },
+  "server.engine": {
+   "id": "N4", "desc": "the server engine (class Engine, src/server/engine.h / engine.cpp / engine_vision.cpp): continuous batching over the request slots, the request lifecycle, the decode cycle and prefill phases, the prefix cache / tier / governor glue calls; arch025-N4 splits its member groups into components (N4a SampleBuffers, N4c BatchStats, ...). Member declaration order = destruction order (pool_ / ps_ / tb_ / kv_arrays_ pinned by comments) is kept by every split",
+   "paths": ["src/server/engine.cpp", "src/server/engine.h", "src/server/engine_vision.cpp"],
+   "lands_on": "arch025-lane1b (lane 1 leg 3, registration with N4a)",
+   "steps": ["cpu_server", "cpu_pins", "cpu_tsa", "golden_swift", "golden_moe", "srv_mt_precise", "srv_mt_precise_moe", "srv_balance",
+             "srv_fast", "srv_cache_precise", "srv_cache_balance", "srv_gpu_select", "srv_vis"],
+   "gpus": {"golden_swift": 2, "golden_moe": 2, "srv_mt_precise": 2, "srv_mt_precise_moe": 2, "srv_balance": 2, "srv_fast": 2,
+            "srv_cache_precise": 1, "srv_cache_balance": 1, "srv_gpu_select": 2, "srv_vis": 1},
+   "callers": "rdeps",
+   "manual": ["whirl-server-tests (all: the end-to-end engine tests on MockModel / NullBackend) and whirl-pins (engine memory / copy sequence)",
+              "V-srv: server golden + srv_* == the parent exe on both GPUs with every WHIRL_* unset (work_equal of the launch logs)"]
+  },
+  "server.sample_buffers": {
+   "id": "N4a", "desc": "the server engine's sampling buffers (src/server/engine_sampling.*, arch025-N4a; were the Engine members samp_dev_ .. ctl_host_ and Engine::SampleRows): the top-k_small / k_big / full-row / relaxacc buffers and the per-slot control words, Engine::allocState's sampling block (SampleBuffers::alloc, same allocations in the same order), launchTopk / fetchCands / prepareRow (the k_small -> k_big -> full-row escalation), and sampling::RowSource over the verify rows",
+   "paths": ["src/server/engine_sampling.cpp", "src/server/engine_sampling.h"],
+   "lands_on": "arch025-lane1b (lane 1 leg 3, N4a)",
+   "steps": ["cpu_server", "cpu_sampling", "cpu_pins", "golden_swift", "golden_moe", "srv_mt_precise", "srv_mt_precise_moe", "srv_balance", "srv_fast"],
+   "gpus": {"golden_swift": 2, "golden_moe": 2, "srv_mt_precise": 2, "srv_mt_precise_moe": 2, "srv_balance": 2, "srv_fast": 2},
+   "callers": "rdeps",
+   "manual": ["whirl-server-tests sample_buffers (sizes == the 14ec7d7 allocState formulas; the row reads == a host reference) plus the end-to-end sampling / specsample / relaxacc tests",
+              "V-move: the moved bodies equal the 14ec7d7 engine.cpp code up to Engine:: -> SampleBuffers:: and loadFullRow -> loadRow (scratch/a25_lane1b/n4a/moved_from_engine_cpp.txt)",
+              "V-srv: server golden (precise / balance / fast) + srv_* == the 14ec7d7 exe (work_equal)"]
+  },
+  "server.vram_watch": {
+   "id": "N4d", "desc": "the server engine's WDDM video memory watch (src/server/engine_vram.cpp, arch025-N4d / N10 engine_gov split; moved verbatim from engine_gov.cpp): Engine::setVramProbe (the probe and its baseline at startup), vramNote (one sample per 'batch |' line and request end: govTick first, then the spill warning; vram_last_ / vram_spill_ for /health), vramIdleTick (one sample a minute while idle, every 5 s while the governor has reduced something)",
+   "paths": ["src/server/engine_vram.cpp"],
+   "lands_on": "arch025-lane1b (lane 1 leg 3, N4d)",
+   "steps": ["cpu_server", "srv_balance", "srv_gpu_select", "srv_kvram719"],
+   "gpus": {"srv_balance": 1, "srv_gpu_select": 2, "srv_kvram719": 1},
+   "callers": "rdeps",
+   "manual": ["whirl-server-tests vram_watch / governor / governor_restore / startup_adjust",
+              "V-move: setVramProbe / vramNote / vramIdleTick byte-equal to the 14ec7d7 engine_gov.cpp bodies (scratch/a25_lane1b/n4d/moved_watch.txt)"]
   },
   "model.arch_registry": {
    "id": "M5a", "desc": "architecture registry (src/model/arch_registry.*, host-only library whirl_arch, linked by the server core and the model library): ArchName / ArchSizing / ArchModule / ArchTable, findArch / findArchName (explicit tables, no self-registration), the UnsupportedArch text generated from the table (byte-identical to v0.2.4 with the product table), slotStateBytes (the server's per-slot recurrent state + replay rows for the dGPU fit and the UMA check)",
