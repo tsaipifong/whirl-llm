@@ -736,38 +736,6 @@
    "kernels.abi"
   ],
   [
-   "kernels.common",
-   "kernels.attn"
-  ],
-  [
-   "kernels.common",
-   "kernels.dflash"
-  ],
-  [
-   "kernels.common",
-   "kernels.gdn"
-  ],
-  [
-   "kernels.common",
-   "kernels.gemm"
-  ],
-  [
-   "kernels.common",
-   "kernels.gemv"
-  ],
-  [
-   "kernels.common",
-   "kernels.moe"
-  ],
-  [
-   "kernels.common",
-   "kernels.norm"
-  ],
-  [
-   "kernels.common",
-   "kernels.sample"
-  ],
-  [
    "kernels.gdn",
    "kernels.abi"
   ],
@@ -786,6 +754,42 @@
   [
    "kernels.sample",
    "kernels.abi"
+  ],
+  [
+   "kernels.unity",
+   "kernels.attn"
+  ],
+  [
+   "kernels.unity",
+   "kernels.common"
+  ],
+  [
+   "kernels.unity",
+   "kernels.dflash"
+  ],
+  [
+   "kernels.unity",
+   "kernels.gdn"
+  ],
+  [
+   "kernels.unity",
+   "kernels.gemm"
+  ],
+  [
+   "kernels.unity",
+   "kernels.gemv"
+  ],
+  [
+   "kernels.unity",
+   "kernels.moe"
+  ],
+  [
+   "kernels.unity",
+   "kernels.norm"
+  ],
+  [
+   "kernels.unity",
+   "kernels.sample"
   ],
   [
    "mem.fit",
