@@ -285,6 +285,24 @@ std::string userVisibilityVar(const std::function<const char*(const char*)>& get
     return {};
 }
 
+std::string noGpuText(const std::function<const char*(const char*)>& getenv_fn) {
+    // arch025-c2fu (PRIOR_ART progress/arch025-c2fu.PRIOR_ART.md): an EMPTY HIP_VISIBLE_DEVICES hides every GPU from the
+    // runtime (measured: whirl --list-devices lists none; CUDA documents the same for CUDA_VISIBLE_DEVICES=""), and a
+    // PowerShell restore with SetEnvironmentVariable(k, $null) leaves exactly that behind on pwsh 7.5+. llama.cpp prints
+    // only the runtime's "no ROCm-capable device"; WHIRL names the variable, since it reads the same list anyway.
+    const std::string var = userVisibilityVar(getenv_fn);
+    if (var.empty()) return "the AMD graphics driver reports no GPU";
+    const char* raw = getenv_fn(var.c_str());
+    const std::string val = trim(raw ? raw : "");
+    const std::string why = val.empty()
+        ? std::format("{} is set to an empty value, which hides every GPU from the GPU runtime", var)
+        : std::format("{}={} is set and the GPU runtime shows no GPU through it (it lists the GPUs to show, by index)", var,
+                      std::string(raw));
+    return why + std::format("; remove the variable and run the command again (PowerShell: Remove-Item Env:{0}; Command Prompt: "
+                             "set {0}=; or delete it under System Properties > Environment Variables)",
+                             var);
+}
+
 bool sameGpu(const GpuRecord& a, const GpuRecord& b) {
     if (a.pci_domain != b.pci_domain || a.pci_bus != b.pci_bus || a.pci_device != b.pci_device || a.pci_function != b.pci_function)
         return false;

@@ -88,7 +88,8 @@ int cliVisEncode(std::span<const std::string> args) {
     if (!r.note.empty()) std::fprintf(stderr, "whirl: %s\n", r.note.c_str());
     const std::vector<gpusel::GpuRecord> recs = gpusel::enumerate();
     if (recs.empty()) {
-        std::printf("no GPU: the AMD graphics driver reports none\n");
+        if (!gpusel::userVisibilityVarHere().empty()) std::printf("no GPU: %s\n", gpusel::noGpuTextHere().c_str());  // arch025-c2fu
+        else std::printf("no GPU: the AMD graphics driver reports none\n");
         return 1;
     }
     const int dev = recs[static_cast<std::size_t>(gpusel::chosenPosition(recs, device_spec))].index;

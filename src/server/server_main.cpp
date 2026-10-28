@@ -1955,7 +1955,7 @@ int serveMain(int argc, char** argv, const char* program) {
                 const std::vector<gpusel::GpuRecord> devs = gpusel::enumerate();
                 if (const char* hv = std::getenv("HIP_VISIBLE_DEVICES"))
                     std::printf("  (HIP_VISIBLE_DEVICES=%s is set: only those GPUs are listed, numbered from 0)\n", hv);
-                if (devs.empty()) std::printf("  (the AMD graphics driver reports no GPU)\n");
+                if (devs.empty()) std::printf("  (%s)\n", gpusel::noGpuTextHere().c_str());  // arch025-c2fu: names a hiding variable
                 else std::fputs(gpusel::listingText(devs, gpusel::defaultGpu(devs).index).c_str(), stdout);
             } catch (const std::exception& ex) {
                 std::fprintf(stderr, "%s: error: %s\n", program, ex.what());

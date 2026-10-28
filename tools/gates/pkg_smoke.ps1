@@ -28,6 +28,13 @@
 # setup error exit 2. Kills only the server it started (by PID). Unpacked folders are deleted at the end (logs kept).
 param([string]$Build = "", [string]$Model = "", [ValidateSet("r9700", "8060s")][string]$Device = "r9700", [string]$Zip = "",
       [int]$Port = 8114, [string]$Work = "", [switch]$SelfTest)
+# arch025-c2fu: set or REMOVE a process environment variable. pwsh 7.5+ (.NET 9+) keeps a variable DEFINED AS EMPTY for
+# [Environment]::SetEnvironmentVariable(k, $null) (PowerShell passes $null as "") and for (k, ""): a restore of an unset
+# variable then leaves k= for every later child (arch024-S14 / arch025-c2ctx: HIP_VISIBLE_DEVICES= hid every GPU).
+# $null = remove; any other value (also "") = set. Checked by tools/gates/env_restore_check.ps1.
+function SetEnvOrRemove([string]$k, $v) {
+    if ($null -eq $v) { Remove-Item -LiteralPath "env:$k" -ErrorAction SilentlyContinue } else { [Environment]::SetEnvironmentVariable($k, "$v") }
+}
 $ErrorActionPreference = "Stop"
 
 $required = @("whirl.exe", "whirl-server.exe", "rocm_kpack.dll", "msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll", "README_FIRST.txt", "LICENSE", "NOTICE")
@@ -159,7 +166,7 @@ Write-Host "pkg smoke: REPORT zip $Zip sha256 $zipSha device $Device"
 $saved = @{}
 $clear = @(Get-ChildItem Env: | Where-Object { $_.Name -like "HIP_PATH*" -or $_.Name -like "ROCM*" -or $_.Name -like "WHIRL_*" -or
                                               $_.Name -in @("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES", "GPU_DEVICE_ORDINAL", "HIP_DEVICE") })
-foreach ($v in $clear) { $saved[$v.Name] = $v.Value; [Environment]::SetEnvironmentVariable($v.Name, $null) }
+foreach ($v in $clear) { $saved[$v.Name] = $v.Value; SetEnvOrRemove $v.Name $null }
 $savedPath = $env:PATH
 $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot;$env:SystemRoot\System32\WindowsPowerShell\v1.0"
 $obs = @{ members = @(); rtKpack = $false; k = @{ ver = -1; dev = -1; chat = -1; list = -1; up = $false; tokens = 0; kpackLoaded = $false }; n = @{ ver = -1; chat = -1; text = "" } }
@@ -215,7 +222,7 @@ try {
     }
 } finally {
     $env:PATH = $savedPath
-    foreach ($k in $saved.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k]) }
+    foreach ($k in $saved.Keys) { SetEnvOrRemove $k $saved[$k] }
     foreach ($f in $folders) { Remove-Item -Recurse -Force $f -ErrorAction SilentlyContinue }
 }
 if (-not $rt) { $rt = Join-Path $env:SystemRoot "System32\amdhip64_7.dll" }

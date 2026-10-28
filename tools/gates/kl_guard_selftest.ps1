@@ -10,6 +10,13 @@
 #   - no -KlReport: PASS with "TODO kl-guard:" (the guard was not run)
 #   - a report that is not usable evidence (another exe, run errors, a negative --as test): FAIL row, exit 1
 #   - kl_guard.ps1: -Modes empty = NOT NEEDED; a bad -TaskAccuracy = exit 2; fast miss items marked as fast items
+# arch025-c2fu: set or REMOVE a process environment variable. pwsh 7.5+ (.NET 9+) keeps a variable DEFINED AS EMPTY for
+# [Environment]::SetEnvironmentVariable(k, $null) (PowerShell passes $null as "") and for (k, ""): a restore of an unset
+# variable then leaves k= for every later child (arch024-S14 / arch025-c2ctx: HIP_VISIBLE_DEVICES= hid every GPU).
+# $null = remove; any other value (also "") = set. Checked by tools/gates/env_restore_check.ps1.
+function SetEnvOrRemove([string]$k, $v) {
+    if ($null -eq $v) { Remove-Item -LiteralPath "env:$k" -ErrorAction SilentlyContinue } else { [Environment]::SetEnvironmentVariable($k, "$v") }
+}
 $ErrorActionPreference = "Stop"
 $repo = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $gate = Join-Path $PSScriptRoot "release_gate.ps1"
@@ -44,7 +51,7 @@ $ta = Join-Path $tmp "taskacc.json"; '{"selftest": true}' | Set-Content $ta
 $saved = @{}
 foreach ($k in "WHIRL_GATE_SWIFT", "WHIRL_GATE_MOE", "WHIRL_GATE_TEXT_ROOT", "WHIRL_GATE_DENSE", "WHIRL_GATE_MX", "WHIRL_GATE_LOCK_SCRIPT") { $saved[$k] = [Environment]::GetEnvironmentVariable($k) }
 $env:WHIRL_GATE_SWIFT = $sw; $env:WHIRL_GATE_MOE = $mx; $env:WHIRL_GATE_TEXT_ROOT = $tmp
-foreach ($k in "WHIRL_GATE_DENSE", "WHIRL_GATE_MX", "WHIRL_GATE_LOCK_SCRIPT") { [Environment]::SetEnvironmentVariable($k, $null) }
+foreach ($k in "WHIRL_GATE_DENSE", "WHIRL_GATE_MX", "WHIRL_GATE_LOCK_SCRIPT") { SetEnvOrRemove $k $null }
 $n = 0; $okN = 0
 function Gate([string]$tag, [string[]]$extra) {
     $w = Join-Path $tmp "work_$tag"
@@ -99,7 +106,7 @@ try {
     $o = @(& $guard -Report (Join-Path $tmp "miss.json") -TaskAccuracy "no such thing" *>&1 | ForEach-Object { "$_" }); $c = $LASTEXITCODE
     Expect "a -TaskAccuracy that is neither a file nor an exp_id: exit 2" @{ rc = $c; out = $o } 2 { $o -match "kl guard: ERROR -TaskAccuracy" }
 } finally {
-    foreach ($k in $saved.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k]) }
+    foreach ($k in $saved.Keys) { SetEnvOrRemove $k $saved[$k] }
     Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
 }
 if ($okN -ne $n) { Write-Host "kl guard selftest: $okN/$n as expected ($($n - $okN) failed)"; exit 1 }

@@ -4269,6 +4269,41 @@ void testGpuSelect() {
         envm.clear();
         envm["HIP_VISIBLE_DEVICES"] = "";
         CHECK_EQ(userVisibilityVar(ge), std::string("HIP_VISIBLE_DEVICES"));
+
+        // arch025-c2fu: zero GPUs. No visibility variable = the real no-driver / no-GPU case, text unchanged.
+        envm.clear();
+        envm["WHIRL_DEVICE"] = "8060s";
+        CHECK_EQ(noGpuText(ge), std::string("the AMD graphics driver reports no GPU"));
+        // HIP_VISIBLE_DEVICES set but EMPTY (a script restore that left HIP_VISIBLE_DEVICES=, arch024-S14 / arch025-c2ctx):
+        // the variable is the cause, so the text names it, says it is empty and how to remove it, and never sends the
+        // user to a driver update
+        envm.clear();
+        envm["HIP_VISIBLE_DEVICES"] = "";
+        {
+            const std::string t = noGpuText(ge);
+            CHECK(t.find("HIP_VISIBLE_DEVICES") != std::string::npos);
+            CHECK(t.find("empty") != std::string::npos);
+            CHECK(t.find("Remove-Item Env:HIP_VISIBLE_DEVICES") != std::string::npos);
+            CHECK(t.find("driver reports no GPU") == std::string::npos);
+            CHECK(t.find("update") == std::string::npos);
+            CHECK(!t.empty() && t.back() != '.' && t.back() != '\n');
+        }
+        // blank counts as empty
+        envm["HIP_VISIBLE_DEVICES"] = "  ";
+        CHECK(noGpuText(ge).find("empty") != std::string::npos);
+        // a value that names no GPU of this computer: the variable and its value are named
+        envm["HIP_VISIBLE_DEVICES"] = "7";
+        {
+            const std::string t = noGpuText(ge);
+            CHECK(t.find("HIP_VISIBLE_DEVICES=7") != std::string::npos);
+            CHECK(t.find("empty") == std::string::npos);
+            CHECK(t.find("driver reports no GPU") == std::string::npos);
+        }
+        // the other visibility variables WHIRL honours are named the same way
+        envm.clear();
+        envm["CUDA_VISIBLE_DEVICES"] = "";
+        CHECK(noGpuText(ge).find("CUDA_VISIBLE_DEVICES") != std::string::npos);
+        CHECK(noGpuText(ge).find("Remove-Item Env:CUDA_VISIBLE_DEVICES") != std::string::npos);
     }
 
     // identity: the GPU left after the restriction must be the one chosen (never trust the ordinal alone)
