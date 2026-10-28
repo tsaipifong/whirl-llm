@@ -51,3 +51,4 @@ arch025-gaptests G19: cli carries cpu_tests	repo	-Module cli -NoMapSteps	0	-	^cp
 arch025-surv2: cli carries cpu_cli_tests	repo	-Module cli -NoMapSteps	0	-	^cpu_cli_tests\s+CPU
 arch025-surv2: server.startup carries cpu_cli_tests	repo	-Module server.startup -NoMapSteps	0	-	^cpu_cli_tests\s+CPU
 arch025-surv2: server.startup carries cpu_model (source rules)	repo	-Module server.startup -NoMapSteps	0	-	^cpu_model\s+CPU
+arch025-n17: config.settings names cpu_cmake_modules when its iso manifest changes	repo	-Module config.settings -NoMapSteps	0	-	when tests/iso/config.settings/isolation.txt changes add -Steps cpu_cmake_modules

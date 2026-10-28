@@ -1038,6 +1038,56 @@ void testGovernor() {
         CHECK(completionText(srv.post("/v1/completions", completionBody(pB, gB))) == refB);
         budget = local0 + 3 * M;
     }
+
+    // (5) arch025-n17 (D5.1, mutant d51-g5-freecache-keeps-pages): the prefix cache the governor frees is really gone. The
+    // pool is already at its smallest size (pool_min = the startup pool), so the governor cannot shrink and only frees cache;
+    // every slot is idle, so it frees without parking the checkpoint buffers (govApply: park only while requests run). No RAM
+    // tier, so nothing comes back from it: B after the free is a cold prefill (0 cached tokens) with the reference output. A
+    // govFreeCache that counts the pages as freed but keeps them leaves B's prefix cache in place (cached tokens > 0).
+    {
+        std::atomic<std::uint64_t> budget3{28000 * MiB + (1ull << 40)};
+        std::atomic<NullBackend*> opsp3{nullptr};
+        ServerSetup s3 = baseSetup();
+        s3.mc.parallel = 2;
+        s3.mc.pool_tokens = 131072;
+        s3.mc.slot_ctx = 16384;
+        s3.mc.cycle_us = 2000;
+        s3.tier = false;
+        s3.vram_probe = [&] {
+            whirl::wddmwatch::Sample x;
+            NullBackend* o = opsp3.load();
+            x.ok = true;
+            x.local_usage = fixed + (o ? o->deviceBytes() : 0);
+            x.local_budget = budget3.load();
+            x.nonlocal_usage = 400 * MiB;
+            return x;
+        };
+        s3.vram_cfg.idle_sample_s = 0.2;
+        s3.vram_cfg.governor = true;
+        whirl::memgov::Config gc3 = gc;
+        gc3.pool_min = 131072;
+        s3.gov = gc3;
+        std::uint64_t pool3 = 0;
+        s3.gov_margin = [&](std::uint64_t) { return pool3 / 2; };
+        g_log.clear();
+        TestServer srv3(s3);
+        for (const KvArr& a : srv3.model().kvArrays()) pool3 += a.row * 131072;
+        const std::uint64_t M3 = pool3 / 2;
+        const std::uint64_t local3 = fixed + srv3.ops().deviceBytes();
+        budget3 = local3 + M3;
+        opsp3 = &srv3.ops();
+        CHECK(completionText(srv3.post("/v1/completions", completionBody(pB, gB))) == refB);
+        const HttpResult warm = srv3.post("/v1/completions", completionBody(pB, gB));
+        CHECK(completionText(warm) == refB);
+        CHECK(cachedTokens(warm) > 0u);  // the setup really keeps B's prefix cache in a slot
+        budget3 = local3 + M3 / 4;  // every slot idle: the next idle sample frees the cache
+        CHECK(waitFor([&] { return g_log.count("memory governor: freed reusable cache: prefix cache of 1 idle slot(s)") >= 1; }, 3000));
+        const HttpResult again = srv3.post("/v1/completions", completionBody(pB, gB));
+        CHECK(completionText(again) == refB);
+        CHECK_EQ(cachedTokens(again), 0u);
+        CHECK_EQ(srv3.model().resizes(), 0u);
+        budget3 = local3 + 3 * M3;
+    }
 }
 
 // arch025-x1m2 (mutant g2-tick-budget0): a video memory sample that reads ok but with a zero WDDM budget (no budget
@@ -1087,6 +1137,74 @@ void testGovernorZeroBudget() {
     }
     CHECK_EQ(srv.model().resizes(), 0u);
     CHECK(srv.get("/health").body.find("\"governor\":{\"on\":true,\"reduced\":false,\"pool_tokens\":131072,") != std::string::npos);
+
+    // arch025-n17 (D5.1, mutant d51-g2-tick-budget0): a zero-budget sample DURING an episode changes nothing either. The
+    // admission hold set while a long request runs stays (no "admitted again" line, /health admission_held) and nothing is
+    // re-allocated. Without the local_budget == 0 guard in Engine::govTick, memgov::Governor::tick returns its no-op plan for
+    // budget 0 (hold_admission false) and Engine::govApply lifts the hold at the next sample (A's request end).
+    {
+        auto waitFor = [](const std::function<bool()>& f, int ms) {
+            for (int i = 0; i < ms / 10; ++i) {
+                if (f()) return true;
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+            return f();
+        };
+        std::atomic<std::uint64_t> budget{28000 * MiB + (1ull << 40)};
+        std::atomic<NullBackend*> opsp{nullptr};
+        const std::uint64_t fixed = 28000 * MiB;
+        ServerSetup s2 = baseSetup();
+        s2.mc.parallel = 2;
+        s2.mc.pool_tokens = 131072;
+        s2.mc.slot_ctx = 16384;
+        s2.mc.cycle_us = 2000;
+        s2.tier = true;
+        s2.tier_ram_mb = 256;
+        s2.vram_probe = [&] {
+            whirl::wddmwatch::Sample x;
+            NullBackend* o = opsp.load();
+            x.ok = true;
+            x.local_usage = fixed + (o ? o->deviceBytes() : 0);
+            x.local_budget = budget.load();
+            x.nonlocal_usage = 400 * MiB;
+            return x;
+        };
+        s2.vram_cfg.idle_sample_s = 0.2;
+        s2.vram_cfg.governor = true;
+        s2.gov = gc;
+        std::uint64_t pool0 = 0;
+        s2.gov_margin = [&](std::uint64_t) { return pool0 / 2; };
+        g_log.clear();
+        TestServer srv2(s2);
+        for (const KvArr& a : srv2.model().kvArrays()) pool0 += a.row * 131072;
+        const std::uint64_t M = pool0 / 2;
+        const std::uint64_t local0 = fixed + srv2.ops().deviceBytes();
+        budget = local0 + M;
+        opsp = &srv2.ops();
+        const auto pA = makePrompt(3000, 71), pB = makePrompt(700, 72), pC = makePrompt(2600, 73);
+        const std::string refA = decode(srv2.model().greedyReference(pA, 1500, true));
+        const std::string refB = decode(srv2.model().greedyReference(pB, 8, true));
+        const std::string refC = decode(srv2.model().greedyReference(pC, 16, true));
+        std::string gotA, gotC;
+        std::thread ta([&] { gotA = completionText(srv2.post("/v1/completions", completionBody(pA, 1500))); });
+        CHECK(waitFor([&] { return srv2.get("/health").body.find("\"slots_busy\":1") != std::string::npos; }, 5000));
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        budget = local0 + M / 4;
+        CHECK(completionText(srv2.post("/v1/completions", completionBody(pB, 8))) == refB);
+        CHECK(waitFor([&] { return srv2.get("/health").body.find("\"admission_held\":true") != std::string::npos; }, 3000));
+        std::thread tc([&] { gotC = completionText(srv2.post("/v1/completions", completionBody(pC, 16))); });
+        CHECK(waitFor([&] { return srv2.get("/health").body.find("\"queued\":1") != std::string::npos; }, 3000));
+        CHECK(gotA.empty());  // A still runs: its request-end sample is the first one that reads the zero budget
+        budget = 0;
+        ta.join();
+        tc.join();
+        CHECK(gotA == refA);
+        CHECK(gotC == refC);
+        std::this_thread::sleep_for(std::chrono::milliseconds(600));  // idle samples every 0.2 s, all with budget 0
+        CHECK_EQ(g_log.count("memory governor: new requests are admitted again"), 0u);
+        CHECK(srv2.get("/health").body.find("\"admission_held\":true") != std::string::npos);
+        CHECK_EQ(srv2.model().resizes(), 0u);
+    }
 }
 
 // REVIEW-GOV-1 P2-2: a checkpoint-buffer restore that fails part way (allocation error) frees what it got, the slot stays

@@ -254,6 +254,12 @@ AddStep "cpu_census" $false @($pwsh, "-NoProfile", "-Command", "& '$py' -I '$(Jo
     { param($o, $c) $c -eq 0 -and ($o -match "(?m)^census check test: ([1-9]\d*)/\1 ok") -and ($o -match "(?m)^census: ok") }
 AddStep "cpu_layering" $false @($pwsh, "-NoProfile", "-Command", "& '$py' -I '$(Join-Path $repo "tools\gates\layering_check_test.py")'; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\gates\layering_check.py")'; exit `$LASTEXITCODE") `
     { param($o, $c) $c -eq 0 -and ($o -match "(?m)^layering check test: ([1-9]\d*)/\1 ok") -and ($o -match "(?m)^layering: ok") }
+# arch025 D11 N17: modules.json <-> CMake targets (tools/gates/cmake_modules_check.py): every module source file is built by a
+# target (or #included by a built source / the device TU), every compiled product source has exactly one module (the census
+# rule), the iso targets match the isolation manifests. Configure-only (~1 min, HIP on, nothing compiled) into
+# <Work>\cmake_modules_cfg with the CMake File API codemodel-v2 query; the block / pass tests run first.
+AddStep "cpu_cmake_modules" $false @($pwsh, "-NoProfile", "-Command", "& '$py' -I '$(Join-Path $repo "tools\gates\cmake_modules_check_test.py")'; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\gates\cmake_modules_check.py")' --configure '$(Join-Path $Work "cmake_modules_cfg")'; exit `$LASTEXITCODE") `
+    { param($o, $c) $c -eq 0 -and ($o -match "(?m)^cmake modules check test: ([1-9]\d*)/\1 ok") -and ($o -match "(?m)^cmake modules: ok \(") }
 # arch025 N13: the kernel argument structs' one layout table (include/whirl/kernels_abi_layout.h) against the host
 # (kernels_abi.h) and device (kernels/kernel_args.h) definitions, plus its mutants (a one-field change on either side
 # must fail). CPU, HIP clang -fsyntax-only, seconds.
