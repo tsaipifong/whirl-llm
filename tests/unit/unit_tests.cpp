@@ -3489,6 +3489,219 @@ void testKvRoom() {
     }
 }
 
+// arch025-N10 (lane 1 leg 6): the pre-load estimate's adjust / log section of buildModel (536d470 server_main.cpp:560-629:
+// the -c re-plan, fitParallel, fitFixed, the three "adjusted:" texts, the "VRAM is tight" warning, the VramLimit refusal
+// text and the "may not fit" warning) -> startfit::preloadAdjust. The reference below is that old text with the
+// measured values passed in, adjust() pushing into a list and logW / throw replaced by strings. Written before the
+// module function existed.
+namespace leg6 {
+struct OldPreload {
+    std::uint32_t parallel = 1;
+    whirl::vram::FitInput fi, fitp, fitf;
+    whirl::vram::FitPlan plan, fitf_plan;
+    std::uint64_t per_slot = 0;
+    std::vector<std::pair<std::string, std::string>> adjusted;
+    std::string tight, refusal, short_warn;
+    bool refuse = false;
+};
+inline OldPreload oldPreload(whirl::vram::FitInput fi, whirl::vram::FitPlan plan, std::uint64_t st1, std::uint64_t pend1,
+                             std::uint32_t parallel, bool parallel_given, bool ctx_given, std::uint32_t slot_ctx,
+                             std::uint32_t vram_tight_pool, std::uint64_t av, std::uint64_t margin, std::uint64_t pending,
+                             std::uint64_t room, std::uint64_t weights, std::uint64_t total) {
+    using namespace whirl;
+    OldPreload o;
+    const auto adjust = [&o](const std::string& what, const std::string& why) { o.adjusted.emplace_back(what, why); };
+    const double g = 1024.0 * 1024.0 * 1024.0;
+    {
+        const auto want = [&] { return startfit::wantTokens(fi); };
+        const std::string budget_why =
+            std::format("{:.2f} GiB usable under the Windows video memory budget, keeping {:.2f} GiB free for other programs "
+                        "({:.2f} GiB they use that the budget does not show yet + {:.2f} GiB room)",
+                        av / g, margin / g, pending / g, room / g);
+        if (ctx_given && plan.pool_tokens < want()) {
+            fi.pool_min_tokens = std::min<std::uint32_t>(slot_ctx, vram_tight_pool);
+            plan = vram::planFit(fi);
+        }
+        const std::uint32_t par0 = parallel;
+        o.fitp = fi;
+        o.per_slot = (st1 + pend1) + (st1 + pend1) / 25;
+        const startfit::ParallelFit pfit = startfit::fitParallel(fi, (st1 + pend1) + (st1 + pend1) / 25, parallel_given);
+        if (pfit.parallel != par0) {
+            parallel = pfit.parallel;
+            fi = pfit.fi;
+            plan = pfit.plan;
+            adjust(std::format("--parallel {} -> {}", par0, parallel),
+                   std::format("with {} slots, their recurrent state and prefix checkpoints leave a KV pool of about {} tokens, "
+                               "less than one {}-token request; {}",
+                               par0, pfit.pool_requested, want(), budget_why));
+        }
+        o.fitf = fi;
+        o.fitf_plan = plan;
+        const startfit::FixedFit ffit = startfit::fitFixed(fi, plan);
+        if (ffit.changed) {
+            if (ffit.batch_changed)
+                adjust(std::format("WHIRL_PREFILL_BATCH {} -> {}", plan.batch, ffit.plan.batch),
+                       std::format("the prefill buffers left a KV pool of about {} tokens, less than {}; {}", plan.pool_tokens,
+                                   want(), budget_why));
+            if (ffit.ck_changed)
+                adjust(std::format("prefix checkpoints {} per slot + {} shared -> {} + {} (WHIRL_SERVE_CKPTS / WHIRL_SYS_CKPTS)",
+                                   plan.n_ck, plan.n_spe, ffit.plan.n_ck, ffit.plan.n_spe),
+                       std::format("they left a KV pool of about {} tokens, less than {}; {}", plan.pool_tokens, want(),
+                                   budget_why));
+            fi = ffit.fi;
+            plan = ffit.plan;
+        }
+    }
+    if (plan.reduced)
+        o.tight = std::format("VRAM is tight (about {:.2f} GiB usable for weights {:.2f} GiB + buffers + checkpoints + KV): reduced {} so the KV "
+                              "pool gets about {} tokens (wanted {}); WHIRL_PREFILL_BATCH (at least 1280) / WHIRL_SERVE_CKPTS / WHIRL_SYS_CKPTS "
+                              "choose these yourself, --ctx a smaller pool",
+                              av / g, weights / g, plan.note, plan.pool_tokens, fi.pool_min_tokens);
+    if (!plan.fits && plan.pool_tokens == 0) {
+        o.refuse = true;
+        o.refusal = std::format("needs about {:.2f} GiB of VRAM before any KV cache (weights {:.2f} GiB + prefill batch {}, "
+                                "state, checkpoints), about {:.2f} GiB usable of {:.2f} GiB{}",
+                                plan.need_fixed / g, weights / g, plan.batch, av / g, total / g,
+                                vram::limitBytes() ? " (" + vram::limitNote() + ")" : std::string());
+    }
+    if (!plan.fits)
+        o.short_warn = std::format("VRAM estimate: weights + buffers + checkpoints {:.2f} GiB leave about {} KV tokens of {:.2f} GiB usable "
+                                   "(at least {} needed); the model may not fit this GPU",
+                                   plan.need_fixed / g, plan.pool_tokens, av / g, fi.pool_hard_min);
+    o.parallel = parallel;
+    o.fi = fi;
+    o.plan = plan;
+    return o;
+}
+inline bool sameFi(const whirl::vram::FitInput& a, const whirl::vram::FitInput& b) {
+    return a.avail == b.avail && a.weights == b.weights && a.fixed == b.fixed && a.buf_per_row == b.buf_per_row &&
+           a.buf_fixed == b.buf_fixed && a.ckpt_bytes == b.ckpt_bytes && a.parallel == b.parallel && a.kv_per_token == b.kv_per_token &&
+           a.pool_min_tokens == b.pool_min_tokens && a.pool_hard_min == b.pool_hard_min && a.batch == b.batch && a.n_ck == b.n_ck &&
+           a.n_spe == b.n_spe && a.batch_fixed == b.batch_fixed && a.ck_fixed == b.ck_fixed;
+}
+inline bool samePlan(const whirl::vram::FitPlan& a, const whirl::vram::FitPlan& b) {
+    return a.batch == b.batch && a.n_ck == b.n_ck && a.n_spe == b.n_spe && a.need_fixed == b.need_fixed && a.pool_tokens == b.pool_tokens &&
+           a.reduced == b.reduced && a.fits == b.fits && a.note == b.note;
+}
+}  // namespace leg6
+
+void testPreloadAdjust() {
+    using namespace whirl;
+    constexpr std::uint64_t MiB = 1ull << 20, GiB = 1ull << 30;
+    std::size_t n = 0, bad = 0, n_adj = 0, n_tight = 0, n_refuse = 0, n_short = 0;
+    for (std::uint64_t av : {6 * GiB, 14 * GiB + 300 * MiB, 21 * GiB, 29 * GiB})
+        for (std::uint64_t weights : {7 * GiB, 15 * GiB + 77 * MiB, 18 * GiB})
+            for (std::uint32_t parallel : {1u, 4u})
+                for (bool given : {false, true})
+                    for (bool ctx_given : {false, true})
+                        for (std::uint32_t pool_min : {16384u, 262144u})
+                            for (bool batch_fixed : {false, true})
+                                for (bool ck_fixed : {false, true})
+                                    for (std::uint32_t n_ck : {0u, 3u}) {
+                                        vram::FitInput fi;
+                                        fi.avail = av;
+                                        fi.weights = weights;
+                                        fi.fixed = 600 * MiB + 13;
+                                        fi.buf_per_row = 120 * 1024 + 7;
+                                        fi.buf_fixed = 300 * MiB;
+                                        fi.ckpt_bytes = 150 * MiB + 600 * 1024;
+                                        fi.parallel = parallel;
+                                        fi.kv_per_token = 32768;
+                                        fi.pool_min_tokens = pool_min;
+                                        fi.batch = 4096;
+                                        fi.n_ck = n_ck;
+                                        fi.n_spe = n_ck ? 2 : 0;
+                                        fi.batch_fixed = batch_fixed;
+                                        fi.ck_fixed = ck_fixed;
+                                        const vram::FitPlan plan = vram::planFit(fi);
+                                        const std::uint64_t st1 = 149 * MiB + 5, pend1 = 37 * MiB + 1;
+                                        const leg6::OldPreload o = leg6::oldPreload(fi, plan, st1, pend1, parallel, given, ctx_given, 131072,
+                                                                                    16384, av, 2068 * MiB, 300 * MiB, 1768 * MiB, weights,
+                                                                                    32 * GiB);
+                                        startfit::PreloadIn in;
+                                        in.fi = fi;
+                                        in.plan = plan;
+                                        in.st1 = st1;
+                                        in.pend1 = pend1;
+                                        in.parallel = parallel;
+                                        in.parallel_given = given;
+                                        in.ctx_given = ctx_given;
+                                        in.slot_ctx = 131072;
+                                        in.tight_pool = 16384;
+                                        in.avail = av;
+                                        in.margin = 2068 * MiB;
+                                        in.pending = 300 * MiB;
+                                        in.room = 1768 * MiB;
+                                        in.weights = weights;
+                                        in.total = 32 * GiB;
+                                        const startfit::PreloadAdjust r = startfit::preloadAdjust(in);
+                                        bool same = r.parallel == o.parallel && leg6::sameFi(r.fi, o.fi) && leg6::samePlan(r.plan, o.plan) &&
+                                                    leg6::sameFi(r.fitp, o.fitp) && r.per_slot == o.per_slot && leg6::sameFi(r.fitf, o.fitf) &&
+                                                    leg6::samePlan(r.fitf_plan, o.fitf_plan) && r.tight == o.tight && r.refuse == o.refuse &&
+                                                    r.refusal == o.refusal && r.short_warn == o.short_warn && r.adjusted.size() == o.adjusted.size();
+                                        for (std::size_t i = 0; same && i < r.adjusted.size(); ++i)
+                                            same = r.adjusted[i].what == o.adjusted[i].first && r.adjusted[i].why == o.adjusted[i].second;
+                                        ++n;
+                                        if (!same) ++bad;
+                                        n_adj += o.adjusted.empty() ? 0 : 1;
+                                        n_tight += o.tight.empty() ? 0 : 1;
+                                        n_refuse += o.refuse ? 1 : 0;
+                                        n_short += o.short_warn.empty() ? 0 : 1;
+                                    }
+    std::printf("preload adjust: %zu cases vs the old buildModel text (%zu adjusted, %zu tight, %zu refused, %zu short), %zu differ\n", n,
+                n_adj, n_tight, n_refuse, n_short, bad);
+    CHECK_EQ(n, std::size_t{1536});
+    CHECK(n_adj > 0 && n_tight > 0 && n_refuse > 0 && n_short > 0);  // every branch is exercised
+    CHECK_EQ(bad, std::size_t{0});
+}
+
+// arch025-N10 (lane 1 leg 6): the UMA carve-out check's fixed-memory formula (536d470 server_main.cpp:643-654) ->
+// startfit::umaFixed; the reference is the old text with the sizing results passed in.
+void testUmaFixed() {
+    using namespace whirl;
+    constexpr std::uint64_t MiB = 1ull << 20, GiB = 1ull << 30;
+    std::size_t n = 0, bad = 0;
+    for (std::uint64_t w : {7 * GiB + 3, 20 * GiB})
+        for (std::uint64_t state : {0ull, 900 * MiB + 11})
+            for (std::uint64_t bufs : {300 * MiB, 2 * GiB + 5})
+                for (std::uint64_t st1 : {0ull, 149 * MiB + 5})
+                    for (std::uint64_t pend1 : {0ull, 37 * MiB + 1})
+                        for (std::uint32_t drafts : {0u, 1u, 8u})
+                            for (std::uint32_t par : {1u, 4u})
+                                for (std::size_t n_ck : {std::size_t{0}, std::size_t{3}})
+                                    for (std::uint32_t n_spe : {0u, 2u})
+                                        for (bool has_mtp : {false, true})
+                                            for (std::uint32_t n_embd : {2048u, 5120u}) {
+                                                const std::uint32_t n_vocab = 248320;
+                                                // old text
+                                                const std::uint64_t ck = st1 + static_cast<std::uint64_t>(n_embd) * 4 + static_cast<std::uint64_t>(n_vocab) * 4;
+                                                const std::uint64_t snaps = std::max<std::uint32_t>(1, drafts) * st1;
+                                                const std::uint64_t slots_b = par * (st1 + pend1) + snaps;
+                                                const std::uint64_t ck_b = (par * n_ck + n_spe) * ck;
+                                                std::uint64_t fixed = w + state + bufs + slots_b + ck_b + (has_mtp ? 65536ull * n_embd * 5 / 16 : 0) + (256ull << 20);
+                                                fixed += fixed / 12;
+                                                startfit::UmaFixedIn in;
+                                                in.weights = w;
+                                                in.state = state;
+                                                in.bufs = bufs;
+                                                in.st1 = st1;
+                                                in.pend1 = pend1;
+                                                in.drafts = drafts;
+                                                in.parallel = par;
+                                                in.n_ck = n_ck;
+                                                in.n_spe = n_spe;
+                                                in.has_mtp = has_mtp;
+                                                in.n_embd = n_embd;
+                                                in.n_vocab = n_vocab;
+                                                const startfit::UmaFixed r = startfit::umaFixed(in);
+                                                ++n;
+                                                if (r.slots != slots_b || r.ck != ck_b || r.fixed != fixed) ++bad;
+                                            }
+    std::printf("uma fixed: %zu cases vs the old buildModel text, %zu differ\n", n, bad);
+    CHECK_EQ(n, std::size_t{3072});
+    CHECK_EQ(bad, std::size_t{0});
+}
+
 // REVIEW-GOV-3 question 4 (R9700 Ornith --mmproj, gov3 orn_new3): startup left exactly the margin free (29696 MiB local,
 // budget 31767 MiB, margin 2068 MiB); the first image added 873 MiB (encoder weights, 860.5 MiB pinned, made resident) and a
 // 1920x1080 image 134 MiB more (activations that did not fit the lent prefill scratch), so 30 MiB were left before the
@@ -5567,6 +5780,8 @@ int main(int argc, char** argv) {
     testVisionPoolReserve();
     testKvRoom();
     testSlotFixed();
+    testPreloadAdjust();
+    testUmaFixed();
     testMemGovernor();
     testMemGovernorGrowOvershoot();
     testGpuSelect();
