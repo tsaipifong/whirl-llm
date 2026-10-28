@@ -142,9 +142,12 @@ fixed environment set hashes to a constant computed outside C++), `testPlatformP
 
 PL4 (2026-10-27) moved the last calls, one function per Win32 call, arguments as in v0.2.4 0e35407:
 - `proc::exePath()` is GetModuleFileNameW into a 1024-character buffer with nSize 1023 and `buf[n] = 0`, exactly the
-  two copies it replaced (`exeDirectory` in src/spec/policy.cpp, `exeIdentity` in src/tier/kv_tier.cpp). A longer path
-  stays truncated on purpose: `exeIdentity` keys every SSD-cache entry, so a different value is a cache miss for every
-  user. `exeIdentity()` is now `exeIdentityOf(exePath())`; `testExeIdentityPinned` (tier tests) pins
+  two copies it replaced (`exeDirectory` in src/spec/policy.cpp, `exeIdentity` in src/tier/kv_tier.cpp). arch025-d7
+  (X4 K7) fixed the cut of a path of 1023 characters or more (it came back as 1022, so `exeIdentity` was 0): the first
+  try is still v0.2.4's (so every path up to 1022 characters, and with it every SSD-cache key, is unchanged), and a
+  truncated read (return value == nSize) is read again into a doubled buffer. `exeIdentityOf` reads the file through
+  `fs::longPathForm` (`\\?\` for a path of 248+ characters), so it works without long-path awareness; the server turns
+  the SSD tier off with a warning when the identity is still 0 (0 is shared by every build). `exeIdentity()` is now `exeIdentityOf(exePath())`; `testExeIdentityPinned` (tier tests) pins
   `exeIdentityOf` on files with a fixed size and last-write time to constants computed in Python, and `exeIdentity()`
   of the test exe to the v0.2.4 body evaluated with direct Win32 calls.
 - The GPU_WAIT mutex (src/model/device.cpp `lockGpu`): `proc::createMutex` (CreateMutexW(nullptr, FALSE, name)) and

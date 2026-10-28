@@ -42,11 +42,21 @@ BOOL WINAPI ctrlTrampoline(DWORD type) {
 }  // namespace
 
 std::wstring exePath() {
-    wchar_t buf[1024];
-    const DWORD n = GetModuleFileNameW(nullptr, buf, 1024 - 1);
-    if (n == 0) return {};
-    buf[n] = 0;
-    return std::wstring(buf);
+    // arch025-d7 (D7.1, X4 K7): grow until the path fits (GetModuleFileNameW returns nSize, truncated, when it does
+    // not). The first try is v0.2.4's (nSize 1023), so a path of up to 1022 characters is the same string as before.
+    std::wstring buf(1024, L'\0');
+    DWORD size = 1024 - 1;
+    for (;;) {
+        const DWORD n = GetModuleFileNameW(nullptr, buf.data(), size);
+        if (n == 0) return {};
+        if (n < size) {
+            buf.resize(n);
+            return buf;
+        }
+        if (size >= 0x10000u) return {};  // past the 32767-character Windows limit: never a cut path
+        size = size * 2 + 2;
+        buf.assign(static_cast<std::size_t>(size) + 1, L'\0');
+    }
 }
 
 std::uint32_t currentId() { return GetCurrentProcessId(); }

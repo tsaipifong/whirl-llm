@@ -183,8 +183,16 @@ static void testPlatformProc() {
 // class C): the platform::proc wrappers on the inputs the PL4 tests did not reach. Real OS, no seam: the exe-path and
 // console-control cases run this program as a child (the --child-lappdata pattern).
 
-// --child-exepath: exit code = platform::proc::exePath().size() (the parent starts a copy from a long path)
-static int childExePath() { return static_cast<int>(whirl::platform::proc::exePath().size()); }
+// --child-exepath: exit code = platform::proc::exePath().size() when it equals the full path of this executable
+// (GetModuleFileNameW into a 32768-character buffer, the Windows path limit), else 1 (the parent starts a copy from a
+// long path). arch025-d7 (D7.1, X4 K7): v0.2.4 cut a path of >= 1023 characters to 1022.
+static int childExePath() {
+    std::vector<wchar_t> b(32768);
+    const DWORD n = GetModuleFileNameW(nullptr, b.data(), static_cast<DWORD>(b.size()));
+    const std::wstring p = whirl::platform::proc::exePath();
+    if (n == 0 || n >= b.size() || p != std::wstring(b.data(), n)) return 1;
+    return static_cast<int>(p.size());
+}
 
 // --child-ctrl-passon: a handler registered through addCtrlHandler that returns false must pass the event on to the
 // handler registered before it (the OS calls the last-registered handler first). Exit code: 1 = our handler ran,
@@ -261,9 +269,11 @@ static void testPlatformProcSurvivors() {
     // (b) pl4-ctrl-always: a handler returning false passes the event on (FALSE), true would swallow it
     CHECK_EQ(runSelfChild(self, L"--child-ctrl-passon", true), static_cast<DWORD>(3));
 
-    // (c) pl4-exepath-nsize: started from a path of >= 1024 characters, exePath() is that path truncated to 1022
-    //     characters (GetModuleFileNameW(.., 1023) into a 1024-character buffer: 1022 + the terminating null; nSize
-    //     1024 would give 1023 and write buf[1024], one past the array). The copy uses the \\?\ form, which bypasses
+    // (c) pl4-exepath-nsize / arch025-d7 (D7.1, X4 K7): started from a path of >= 1024 characters, exePath() is the
+    //     whole path (v0.2.4 cut it to 1022 characters: GetModuleFileNameW(.., 1023) into a 1024-character buffer, so
+    //     exeIdentity read a file that does not exist and was 0). The child reports the length only when exePath()
+    //     equals GetModuleFileNameW with a 32768-character buffer; GetModuleFileNameW keeps the form the exe was
+    //     started with, so the length is the path with or without the \\?\ prefix. The copy uses the \\?\ form, which bypasses
     //     MAX_PATH whatever LongPathsEnabled says; the start retries without the prefix. arch025-surv2 (REVIEW F4): a
     //     failed copy or start is a FAILED check, not a skip (a skipped case would let the mutant survive unseen).
     {
@@ -293,7 +303,11 @@ static void testPlatformProcSurvivors() {
             if (rc == ~0u)
                 std::printf("  FAIL: testPlatformProcSurvivors (c): CreateProcessW from a %zu-character path failed (%lu)\n",
                             len, GetLastError());
-            CHECK_EQ(rc, static_cast<DWORD>(1022));
+            if (rc != static_cast<DWORD>(len) && rc != static_cast<DWORD>(len + 4))
+                std::printf("  FAIL: testPlatformProcSurvivors (c): exePath() from a %zu-character path: child exit %lu "
+                            "(1 = exePath() differs from the full path; 1022 = the v0.2.4 cut)\n",
+                            len, static_cast<unsigned long>(rc));
+            CHECK(rc == static_cast<DWORD>(len) || rc == static_cast<DWORD>(len + 4));
         }
         fs::remove_all(L"\\\\?\\" + base_w, ec);
     }

@@ -118,4 +118,11 @@ std::FILE* openStdio(const wchar_t* path, const wchar_t* mode);
 // UTF-8 -> UTF-16 with MB_ERR_INVALID_CHARS (MultiByteToWideChar); false on invalid UTF-8 (out untouched). "" -> "".
 bool utf8ToWideStrict(std::string_view s, std::wstring* out);
 
+// arch025-d7 (D7.1): the form of path a Win32 file call accepts whatever its length (Rust std's maybe_verbatim): a path
+// shorter than 248 characters, one that already starts with \\?\ or \\.\, or one that is neither drive-absolute nor UNC
+// after GetFullPathNameW comes back unchanged; a longer one is made absolute (GetFullPathNameW) and gets \\?\ (UNC:
+// \\?\UNC\server\share\...). A process that is not long-path aware (no manifest, or LongPathsEnabled = 0, the Windows
+// default) cannot open a path past MAX_PATH in the normal form.
+std::wstring longPathForm(const std::wstring& path);
+
 }  // namespace whirl::platform::fs

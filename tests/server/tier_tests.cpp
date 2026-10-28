@@ -829,6 +829,145 @@ static void testExeIdentityPinned(const fs::path& dir) {
 }
 
 // default size of the pinned-RAM tier (src/tier/ram_size.h)
+// arch025-d7 (D7.1, X4 K7): a WHIRL folder with a long path. v0.2.4 cut exePath() at 1022 characters, so exeIdentity()
+// read the attributes of a file that does not exist: 0 for every build there, i.e. an SSD entry of another build looked
+// like this build's. And a path past MAX_PATH reaches GetFileAttributesExW only in long-path form when the process is
+// not long-path aware (no manifest, as this test, or LongPathsEnabled = 0, the Windows default).
+// --child-exeid: exit 0 when exeIdentity() != 0 and == exeIdentityOf(the whole path of this exe), 1 when it is 0, 2
+// when it differs, 3 when the path cannot be read.
+static int childExeId() {
+    std::vector<wchar_t> b(32768);
+    const DWORD n = GetModuleFileNameW(nullptr, b.data(), static_cast<DWORD>(b.size()));
+    if (n == 0 || n >= b.size()) return 3;
+    const std::wstring self(b.data(), n);
+    const std::uint64_t id = exeIdentity();
+    if (id == 0) return 1;
+    std::wstring lp = self;
+    if (lp.rfind(L"\\\\?\\", 0) != 0) lp = L"\\\\?\\" + lp;  // the whole path, read whatever the process supports
+    WIN32_FILE_ATTRIBUTE_DATA a{};
+    if (GetFileAttributesExW(lp.c_str(), GetFileExInfoStandard, &a) == 0) return 3;
+    const std::uint64_t size = (static_cast<std::uint64_t>(a.nFileSizeHigh) << 32) | a.nFileSizeLow;
+    const std::uint64_t wt = (static_cast<std::uint64_t>(a.ftLastWriteTime.dwHighDateTime) << 32) | a.ftLastWriteTime.dwLowDateTime;
+    return id == (size * 0x9e3779b97f4a7c15ull ^ wt) ? 0 : 2;
+}
+
+static void testExeIdentityLongPath(const fs::path& dir) {
+    std::error_code ec;
+    // \\?\ needs an absolute, normalised, backslash-only path (WHIRL_TEST_TMP may be relative or use forward slashes)
+    const std::wstring base_w = fs::absolute(dir).lexically_normal().make_preferred().wstring();
+    const std::wstring xbase = L"\\\\?\\" + base_w;
+    fs::remove_all(xbase, ec);
+    // (1) exeIdentityOf on a file past MAX_PATH, given in the normal form (as exePath() returns it): the pinned value
+    {
+        std::wstring d = xbase;
+        while (d.size() - 4 < 400) d += L"\\" + std::wstring(120, L'p');
+        fs::create_directories(d, ec);
+        CHECK(!ec);
+        const std::wstring xf = d + L"\\pl4_exeid_long.bin";
+        HANDLE h = CreateFileW(xf.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        CHECK(h != INVALID_HANDLE_VALUE);
+        if (h != INVALID_HANDLE_VALUE) {
+            const std::string bytes(12345, 'x');
+            DWORD w = 0;
+            CHECK(WriteFile(h, bytes.data(), static_cast<DWORD>(bytes.size()), &w, nullptr) != 0 && w == bytes.size());
+            FILETIME ft;
+            const std::uint64_t t = 133000000000000000ull;
+            ft.dwLowDateTime = static_cast<DWORD>(t);
+            ft.dwHighDateTime = static_cast<DWORD>(t >> 32);
+            CHECK(SetFileTime(h, nullptr, nullptr, &ft) != 0);
+            CloseHandle(h);
+            const std::wstring plain = xf.substr(4);
+            CHECK(plain.size() > 260);
+            const std::uint64_t got = exeIdentityOf(plain.c_str());
+            if (got != 0xa0f460e0d5f910adull)
+                std::printf("  D7.1 exeIdentityOf(%zu-character path) = 0x%016llx (expected 0xa0f460e0d5f910ad, the "
+                            "testExeIdentityPinned case 0)\n",
+                            plain.size(), static_cast<unsigned long long>(got));
+            CHECK(got == 0xa0f460e0d5f910adull);
+            CHECK(exeIdentityOf(xf.c_str()) == 0xa0f460e0d5f910adull);  // the \\?\ form as given
+        }
+    }
+    // (2) the running exe started from a path of >= 1024 characters (a copy of this test): exeIdentity() is the
+    //     identity of that file, not 0
+    {
+        std::vector<wchar_t> b(32768);
+        const DWORD n = GetModuleFileNameW(nullptr, b.data(), static_cast<DWORD>(b.size()));
+        CHECK(n > 0 && n < b.size());
+        if (n == 0 || n >= b.size()) return;
+        const std::wstring self(b.data(), n);
+        std::wstring d = xbase;
+        while (d.size() - 4 + 1 + 22 < 1100) d += L"\\" + std::wstring(200, L'e');
+        fs::create_directories(d, ec);
+        const std::wstring exe = d + L"\\whirl-tier-tests.exe";
+        const bool copied = !ec && CopyFileW(self.c_str(), exe.c_str(), FALSE) != 0;
+        if (!copied)
+            std::printf("  FAIL: testExeIdentityLongPath (2): copy to a %zu-character path failed (%s, CopyFileW %lu)\n",
+                        exe.size() - 4, ec.message().c_str(), GetLastError());
+        CHECK(copied);
+        if (copied) {
+            CHECK(exe.size() - 4 >= 1024);
+            DWORD rc = ~0u;
+            for (const std::wstring& start : {exe, exe.substr(4)}) {
+                STARTUPINFOW si{};
+                si.cb = sizeof(si);
+                PROCESS_INFORMATION pi{};
+                std::wstring cmd = L"\"" + start + L"\" --child-exeid";
+                if (!CreateProcessW(start.c_str(), cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi))
+                    continue;
+                if (WaitForSingleObject(pi.hProcess, 20000) != WAIT_OBJECT_0) {
+                    TerminateProcess(pi.hProcess, 99);
+                    WaitForSingleObject(pi.hProcess, 5000);
+                }
+                GetExitCodeProcess(pi.hProcess, &rc);
+                CloseHandle(pi.hThread);
+                CloseHandle(pi.hProcess);
+                break;
+            }
+            if (rc != 0)
+                std::printf("  FAIL: testExeIdentityLongPath (2): child from a %zu-character path exit %lu (1 = "
+                            "exeIdentity() 0, 2 = not the identity of the exe, 3 = path unreadable, %lu = not started)\n",
+                            exe.size() - 4, static_cast<unsigned long>(rc), static_cast<unsigned long>(~0u));
+            CHECK(rc == 0);
+        }
+    }
+    fs::remove_all(xbase, ec);
+}
+
+// arch025-d7 (D7.2, c2fu Follow-ups): fmt() cut every tier log message at 319 characters (char buf[320]), so a long
+// --kv-ssd-dir lost the end of the "kv tier: SSD cache" startup line (the "other model / over the cap" count).
+static void testLongLogLine(NullBackend& ops, const fs::path& base) {
+    std::error_code ec;
+    const fs::path abs = fs::absolute(base).lexically_normal();
+    // an SSD directory of about 200 characters (under MAX_PATH with its files): the line is well over 320
+    const std::size_t have = abs.wstring().size() + 1;
+    const fs::path dir = abs / std::wstring(have < 190 ? 200 - have : 10, L'L');
+    fs::remove_all(dir, ec);
+    SsdEnv env{dir};
+    std::vector<std::string> logs;
+    {
+        auto t = Tier::create(ops, 32ull << 20, 5, 0);
+        t->log_fn = [&](std::string_view s) { logs.emplace_back(s); };
+        t->start(env.cfg(1ull << 30), kLay, hashStr(0xcbf29ce484222325ull, "model-long-log"));
+        CHECK(t->hasSsd());
+    }
+    const std::string want_dir = *env.cfg(1).ssd_dir;
+    const std::string head = "kv tier: SSD cache " + want_dir + ": ";
+    const std::string tail = "0 other model / over the cap (0.00 GiB)";
+    bool found = false;
+    for (const std::string& l : logs) {
+        if (l.rfind("kv tier: SSD cache ", 0) != 0) continue;
+        found = true;
+        if (l.size() <= 320 || l.rfind(head, 0) != 0 || l.size() < tail.size() || l.compare(l.size() - tail.size(), tail.size(), tail) != 0)
+            std::printf("  D7.2: the startup line (%zu characters) is not whole: ...%s\n", l.size(),
+                        l.substr(l.size() > 60 ? l.size() - 60 : 0).c_str());
+        CHECK(l.size() > 320);
+        CHECK(l.rfind(head, 0) == 0);
+        CHECK(l.size() >= tail.size() && l.compare(l.size() - tail.size(), tail.size(), tail) == 0);
+    }
+    CHECK(found);
+    fs::remove_all(dir, ec);
+}
+
 static void testRamTierSize() {
     constexpr std::uint64_t G = 1ull << 30;
     const auto sz = [](std::uint64_t total, std::uint64_t avail, std::uint64_t floor_mb = 8192) {
@@ -4613,6 +4752,7 @@ static void testBackendCleanHelper() {
 }
 
 int main(int argc, char** argv) {
+    if (argc == 2 && std::strcmp(argv[1], "--child-exeid") == 0) return childExeId();  // arch025-d7 helper mode
     whirl::test::clearWhirlEnv({L"WHIRL_TIER_ONLY", L"WHIRL_TIER_AMP"});  // FR-TEST P3-11
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     // default: WHIRL_TEST_TMP, else %TEMP%\whirl-tests\<pid> (whirl::test::testTmpBase); this test uses <base>\tier_test_tmp
@@ -4630,6 +4770,15 @@ int main(int argc, char** argv) {
     if (want("testExeIdentityPinned")) {
         std::printf("-- %s\n", "testExeIdentityPinned");
         testExeIdentityPinned(dir / L"pl4_exeid");
+    }
+    if (want("testExeIdentityLongPath")) {
+        std::printf("-- %s\n", "testExeIdentityLongPath");
+        testExeIdentityLongPath(dir / L"d7_exeid_long");
+    }
+    if (want("testLongLogLine")) {
+        std::printf("-- %s\n", "testLongLogLine");
+        const TestClean tc_(ops, "testLongLogLine");
+        testLongLogLine(ops, dir);
     }
     if (want("testEvictPolicy")) {
         std::printf("-- %s\n", "testEvictPolicy");
