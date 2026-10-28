@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Included from cmake/server.cmake after whirl_sampling. One manifest per module: tests/sampling/isolation.txt and
-# tests/iso/<module>/isolation.txt (kinds: module, exe, lib, mutate, mutsym, syslib, src, hdr, testsrc, testhdr; see
+# tests/iso/<module>/isolation.txt (kinds: module, exe, lib, mutate, mutinc, mutsym, syslib, gen, src, hdr, testsrc, testhdr; see
 # tools/gates/iso_check.py). The listed files are copied into <build>/iso/<module>/{mod,test}/ (the leading src/
 # include/ tests/ dropped) and compiled from there:
 #   <lib>   OBJECT library of the module sources + the declared dependency sources; include path = iso/<module>/mod
@@ -23,6 +23,7 @@ function(whirl_iso_module _list)
   set(_lib)
   set(_syslibs)
   set(_entries)
+  set(_gens)
   foreach(_l IN LISTS _lines)
     string(REGEX MATCH "^([a-z]+)[ \t]+([^ \t#]+)" _m "${_l}")
     set(_kind ${CMAKE_MATCH_1})
@@ -37,6 +38,10 @@ function(whirl_iso_module _list)
       list(APPEND _syslibs ${_path})
     elseif(_kind MATCHES "^(mutate|mutinc|mutsym)$")
       # iso_check.py only
+    elseif(_kind STREQUAL "gen")
+      # arch025-lane2 leg 5: a header the build generates (${CMAKE_BINARY_DIR}/generated/<path>, e.g. whirl/version.h,
+      # configured by cmake/release.cmake after this file): copied into mod/ at build time
+      list(APPEND _gens ${_path})
     elseif(_kind MATCHES "^(src|hdr|testsrc|testhdr)$")
       if(NOT EXISTS ${CMAKE_SOURCE_DIR}/${_path})
         message(FATAL_ERROR "${_list}: no such file '${_path}'")
@@ -84,7 +89,14 @@ function(whirl_iso_module _list)
     message(FATAL_ERROR "${_list}: needs src and testsrc lines")
   endif()
 
-  add_library(${_lib} OBJECT ${_mod_src})
+  set(_gen_dst)
+  foreach(_g IN LISTS _gens)
+    add_custom_command(OUTPUT ${_iso}/mod/${_g}
+                       COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_BINARY_DIR}/generated/${_g} ${_iso}/mod/${_g}
+                       DEPENDS ${CMAKE_BINARY_DIR}/generated/${_g} VERBATIM)
+    list(APPEND _gen_dst ${_iso}/mod/${_g})
+  endforeach()
+  add_library(${_lib} OBJECT ${_mod_src} ${_gen_dst})
   # set (not append) the include path: nothing inherited, nothing from linked targets
   set_property(TARGET ${_lib} PROPERTY INCLUDE_DIRECTORIES ${_iso}/mod)
 

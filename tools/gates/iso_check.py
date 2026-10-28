@@ -4,12 +4,12 @@
 CPU only, no GPU, no model.
 
     python -I tools/gates/iso_check.py [--module NAME[,NAME...]] [--mutants] [--list] [-j N] [--work DIR] [--root REPO]
-                                       [--vcvars BAT] [--keep]
+                                       [--vcvars BAT] [--keep] [--build DIR]
 
 Manifests: tests/sampling/isolation.txt and tests/iso/<module>/isolation.txt (one per module; cmake/iso.cmake reads the
 same files). Kinds: module NAME, exe TARGET, lib TARGET (optional object-library name), mutate PATH (the source the
 mutants edit), mutinc top|end (where the include mutants put the line: after the first quoted include, the default, or
-at the end of the file), mutsym hip|log|now|engine|model|tier (link mutants), syslib X.lib, then src / hdr (module + declared dependencies)
+at the end of the file), mutsym hip|log|now|engine|model|tier|archtable (link mutants), syslib X.lib, gen PATH, then src / hdr (module + declared dependencies)
 and testsrc / testhdr (test program only). Every file is copied into <work>/<module>/<case>/{mod,test} (leading src/
 include/ tests/ dropped); module sources are compiled with mod/ as the ONLY include path, the test with mod/ + test/, and
 the test program is linked from ALL those objects directly (no static-library member selection) with /OPT:NOREF, so an
@@ -29,6 +29,9 @@ AND compile with the product flags (/I src /I include), which is what makes the 
        engine whirl::server::serveMain      (src/server/server_main.cpp, whirl_server_core: server startup)
        model  whirl::qwen35::loadOrTune     (src/model/tune.cpp, whirl_model: the model core, class Model)
        tier   whirl::tier::blockHash        (src/tier/kv_tier.cpp, whirl_tier_core: the KV host tier)
+       archtable whirl::model::builtinArchs (src/model/qwen35/module.cpp, model.qwen35: the product architecture table)
+gen PATH (arch025-lane2 leg 5): a header the build generates (<build>/generated/PATH, e.g. whirl/version.h from
+src/release/version.h.in), staged as mod/PATH; --build names the build tree (default <root>/build/Release).
 The product compile of a mutant is done on a temporary file next to the real one (_iso_mut_<module>_<case>.cpp, so the relative
 include resolves as in the tree) and removed right after. The product link is not redone here (it needs the HIP build).
 Per module the last line is "iso check: ok (<module>, N/N cases as expected)" or "iso check: FAIL (<module>, ...)"; with
@@ -70,6 +73,11 @@ SYMS = {
     "tier": ("#include <array>\n#include <cstdint>\nnamespace whirl::tier { std::array<std::uint64_t, 2> blockHash(const void* p, "
              "std::uint64_t n); }  // iso mutant: src/tier/kv_tier.cpp (whirl_tier_core, tier.kv)\n",
              "(void)whirl::tier::blockHash(nullptr, 0);"),
+    # arch025-lane2 leg 5: the product architecture table (model.qwen35, src/model/qwen35/module.cpp), for the model core
+    # (Config::fromGguf checks the qwen35 family's own names, src/model/qwen35/arch_names.h)
+    "archtable": ("#include <span>\nnamespace whirl::model { struct ArchModule; const std::span<const ArchModule>& builtinArchs(); }"
+                  "  // iso mutant: src/model/qwen35/module.cpp (model.qwen35)\n",
+                  "(void)whirl::model::builtinArchs().size();"),
 }
 ENGINE_H = "server/engine.h"
 
@@ -85,6 +93,7 @@ class Manifest:
         self.mutsyms = []
         self.syslibs = []
         self.items = []
+        self.gens = []
         for line in open(path, encoding="utf-8"):
             m = re.match(r"([a-z]+)\s+([^\s#]+)", line)
             if not m:
@@ -108,6 +117,8 @@ class Manifest:
                 self.mutsyms.append(p)
             elif kind == "syslib":
                 self.syslibs.append(p)
+            elif kind == "gen":
+                self.gens.append(p)
             elif kind in KINDS:
                 if not os.path.isfile(os.path.join(root, p)):
                     raise SetupError(f"{self.rel}: no such file {p}")
@@ -169,9 +180,19 @@ def staged(p):
     return re.sub(r"^(src|include|tests)/", "", p)
 
 
+GEN_ROOT = None  # <build>/generated (main: --build)
+
+
 def stage(root, man, d):
     shutil.rmtree(d, ignore_errors=True)
     out = {"src": [], "testsrc": []}
+    for p in man.gens:
+        g = os.path.join(GEN_ROOT or os.path.join(root, "build", "Release", "generated"), *p.split("/"))
+        if not os.path.isfile(g):
+            raise SetupError(f"{man.rel}: gen {p}: no {g} (configure the build first, or --build)")
+        dst = os.path.join(d, "mod", *p.split("/"))
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        shutil.copyfile(g, dst)
     for kind, p in man.items:
         if staged(p) == p:
             # arch025-lane2 leg 3: outside src/ include/ tests/ (kernels/gfx1151/attn_ws4_index.h, included from
@@ -327,7 +348,10 @@ def main(argv):
     ap.add_argument("--root", default=os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")))
     ap.add_argument("--vcvars", default=VCVARS)
     ap.add_argument("--keep", action="store_true")
+    ap.add_argument("--build", default="", help="build tree whose generated/ headers the gen lines stage (default <root>/build/Release)")
     a = ap.parse_args(argv)
+    global GEN_ROOT
+    GEN_ROOT = os.path.join(a.build or os.path.join(a.root, "build", "Release"), "generated")
     # python -I ignores PYTHONIOENCODING; a cp950 console cannot print U+FFFD from a decoded cl line (arch025-X3fix)
     sys.stdout.reconfigure(errors="replace")
     try:

@@ -1,7 +1,7 @@
 // whirl-iso-model-core-tests: model.core (class qwen35::Model and its non-forward members: src/model/*.cpp and
 // src/model/qwen35/model_*.cpp, layer_subset.cpp) built alone (ARCH-1 8.5, arch025-lane2 leg 4) with its declared
 // dependencies: every model module below it (forward.state + forward.*, model.weights / kv / scratch / tune, the
-// architecture registry with the product table), env_snapshot, the low-level contracts, the op planners, the GGUF reader,
+// architecture registry; the product table, module.cpp, is above it: arch025-lane2 leg 5), env_snapshot, the low-level contracts, the op planners, the GGUF reader,
 // lib whirl's util / VRAM limit / GPU choice text and the platform layer. The HIP layer is a link double
 // (tests/iso/fake_hip.cpp, tests/iso/model.core/fake_gpu_restrict.cpp): nothing here reaches a GPU. No server, no engine,
 // no server log, no KV host tier. The tests are the host-only parts: the GGUF config check of Model::load's first step,
@@ -10,6 +10,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "iso/iso_test.h"
 #include "model/arch_registry.h"
+#include "model/qwen35/arch_names.h"
 #include "whirl/gguf.h"
 #include "whirl/model.h"
 
@@ -76,8 +77,8 @@ bool same(const std::string& got, const std::string& want) {
 }
 
 void testConfigArchCheck() {
-    // Model::load's first step: the architecture name against the product table (module.cpp's row through
-    // arch_registry), the v0.2.4 message
+    // Model::load's first step: the architecture name against the qwen35 family's names (arch_names.h, the array the
+    // product table's row in module.cpp lists; arch025-lane2 leg 5), the v0.2.4 message
     const auto llama = ggufImage("llama", 0);
     const gg::File fl = gg::File::parse(llama);
     ISO_CHECK(same(codeOf([&] { (void)q::Config::fromGguf(fl); }),
@@ -93,8 +94,10 @@ void testConfigArchCheck() {
         ISO_CHECK(same(codeOf([&] { (void)q::Config::fromGguf(f); }),
                    "MissingTensor|MissingTensor: token_embd.weight"));
     }
-    ISO_CHECK(whirl::model::findArchName("qwen35moe") != nullptr && whirl::model::findArchName("qwen35moe")->moe);
-    ISO_CHECK(whirl::model::findArchName("qwen3") == nullptr);
+    const whirl::model::ArchTable names(q::arch_names_table);
+    ISO_CHECK(whirl::model::findArchName("qwen35moe", names) != nullptr && whirl::model::findArchName("qwen35moe", names)->moe);
+    ISO_CHECK(whirl::model::findArchName("qwen35", names) != nullptr && !whirl::model::findArchName("qwen35", names)->moe);
+    ISO_CHECK(whirl::model::findArchName("qwen3", names) == nullptr);
 }
 
 void testEmbeddedDraftVocab() {

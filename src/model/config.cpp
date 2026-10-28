@@ -3,6 +3,7 @@
 // Reimplements the WHIRL Zig research prototype's model/qwen35.zig (Config, tables, tuneBucket).
 
 #include "model/arch_registry.h"  // findArchName, unsupportedArchText (arch025-M5)
+#include "model/qwen35/arch_names.h"  // the family's GGUF names (arch025-lane2 leg 5)
 #include "whirl/model.h"
 #include "config/env_snapshot.h"
 
@@ -50,10 +51,12 @@ GemvR defaultGemvWHead() {
 
 Config Config::fromGguf(const gguf::File& f) {
     const std::string arch(f.getStringOr("general.architecture", ""));
-    // the GGUF names and their variant come from the architecture table (src/model/arch_registry.h; the qwen35 family's row:
-    // src/model/qwen35/module.cpp, arch025-M5); the message lists the table's names ("qwen35 and qwen35moe", as v0.2.4)
-    const model::ArchName* const an = model::findArchName(arch);
-    if (!an) throw ModelError("UnsupportedArch", model::unsupportedArchText(arch));
+    // the GGUF names and their variant come from the qwen35 family's names (src/model/qwen35/arch_names.h, the same array
+    // as the product table's row in module.cpp, arch025-M5; not builtinArchs(): that table is above the model core,
+    // arch025-lane2 leg 5); the message lists the names ("qwen35 and qwen35moe", as v0.2.4)
+    const model::ArchTable names(arch_names_table);
+    const model::ArchName* const an = model::findArchName(arch, names);
+    if (!an) throw ModelError("UnsupportedArch", model::unsupportedArchText(arch, names));
     const bool moe = an->moe;
     auto K = [&](const char* s) { return arch + "." + s; };
     auto u32 = [&](const char* s) { return static_cast<std::uint32_t>(f.getUint(K(s))); };

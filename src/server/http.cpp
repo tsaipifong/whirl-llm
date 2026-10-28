@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "http.h"
+#include "whirl/vision.h"  // buildVis: Prepared, expand, VisionError (engine_api.h no longer brings it: arch025-lane2 leg 5 S6)
 
 #include "log.h"
 #include "whirl/common.h"

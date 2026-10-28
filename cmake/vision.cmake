@@ -40,6 +40,7 @@ if(WHIRL_WITH_HIP)
     ${CMAKE_SOURCE_DIR}/src/vision/vision.cpp
     ${CMAKE_SOURCE_DIR}/src/vision/image.cpp
     ${CMAKE_SOURCE_DIR}/src/vision/hash.cpp
+    ${CMAKE_SOURCE_DIR}/src/vision/prompt.cpp
     ${CMAKE_SOURCE_DIR}/src/vision/kernel_image.cpp
     ${CMAKE_SOURCE_DIR}/src/vision/vis_cli.cpp
     ${CMAKE_SOURCE_DIR}/src/vision/stb_image_impl.cpp

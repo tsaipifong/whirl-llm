@@ -222,8 +222,10 @@
                    "proof": {"refactor": ["exit_rule", "golden_exact", "move_equal", "host_work", "host_time"]}},
    "model.arch_registry": {"metrics": [], "metrics_none": "table lookup at load: no bench key",
                            "proof": {"refactor": ["exit_rule", "golden_exact", "startup_sizing"]}},
-   "model.qwen35": {"metrics": ["stage.decode_step", "stage.verify", "stage.prefill_chunk"],
-                    "proof": {"refactor": ["exit_rule", "golden_exact", "move_equal", "work_trace", "stage_time"]}},
+   "model.qwen35.arch": {"metrics": ["stage.decode_step", "stage.verify", "stage.prefill_chunk"],
+                         "proof": {"refactor": ["exit_rule", "golden_exact", "move_equal", "work_trace", "startup_sizing", "stage_time"]}},
+   "model.qwen35.server": {"metrics": ["stage.decode_step", "stage.verify", "stage.prefill_chunk"],
+                           "proof": {"refactor": ["exit_rule", "golden_exact", "move_equal", "work_trace", "server_log_scan", "stage_time"]}},
    "platform.proc": {"metrics": [], "metrics_none": "process / named-object calls at startup and shutdown only (exe path, GPU_WAIT mutex, Ctrl+C event): no bench key",
                      "proof": {"refactor": ["exit_rule", "golden_exact", "server_log_scan", "startup_sizing"]}},
    "platform.sys": {"metrics": [], "metrics_none": "one GlobalMemoryStatusEx read at server startup (RAM-tier sizing): no bench key",
@@ -307,10 +309,10 @@
    "manual": ["RAM tier size changed: run srv_cache_balance / srv_cache_precise on the 8060S", "P-size", "P-sess"]
   },
   "protocol": {
-   "id": "M6", "desc": "HTTP / OpenAI protocol / streaming (stream, EngineApi)",
-   "paths": ["src/server/stream.*", "src/server/engine_api.h", "src/server/http.*", "src/server/protocol.*"],
+   "id": "M6", "desc": "HTTP / OpenAI protocol / streaming (stream, EngineApi); base64Decode of data: URL images (base64.cpp, from engine_vision.cpp in arch025-lane2 leg 5 S6, which also made engine_api.h see the vision types by name only: vision_iface.h); link isolation tests/iso/protocol",
+   "paths": ["src/server/stream.*", "src/server/engine_api.h", "src/server/http.*", "src/server/protocol.*", "src/server/base64.cpp"],
    "lands_on": "arch024 S8 (40b637e on arch024-proto; 51de103 on arch024-int)",
-   "steps": ["cpu_pins", "cpu_server", "srv_fs_swift", "srv_fs_moe", "golden_swift"],
+   "steps": ["cpu_iso_protocol", "cpu_pins", "cpu_server", "srv_fs_swift", "srv_fs_moe", "golden_swift"],
    "gpus": {"srv_fs_swift": 1, "srv_fs_moe": 1, "golden_swift": 1},
    "manual": ["prompt token hash == S0: cpu_pins (tests/pins/check.ps1, arch024-S11c F-3) plus unit + server-tests (S11b P2: the hash alone misses an alias-table change)", "golden_swift stays until owner sign-off O1 (S11b: M6 files 3/3 caught on CPU)"]
   },
@@ -568,10 +570,11 @@
    "manual": ["full release_gate on both GPUs (ARCH-1 3.3)"]
   },
   "model.core": {
-   "id": "M6", "desc": "qwen35 model core (arch025-lane2 N9 S2b): class Model (include/whirl/model.h) and its non-forward members: Model::load and the loader (loader.cpp), the DFlash2 drafter (dflash.cpp, dflash_policy.h), tune / self-checks and loadOrTune (tune.cpp), writeTune / readTune (qwen35/model_tune.cpp), the KV / sequence functions (qwen35/model_kv.cpp), allocScratch (qwen35/model_scratch.cpp), the stage-bench seam LayerSubset (qwen35/layer_subset.cpp), the exec dump (exec_dump.*), config / device selection / kernel table loading (config.cpp, device.cpp, device_lock.h, kernels.cpp), the embedded draft vocabulary. Since arch025-lane2 N9 S3 class Model : public Context (forward.state): Model adds loading, the drafter, the KV pool management, the draft-head builds, autotune and the self-checks. Every forward, server and CLI path reads the Model: the full gate",
+   "id": "M6", "desc": "qwen35 model core (arch025-lane2 N9 S2b): class Model (include/whirl/model.h) and its non-forward members: Model::load and the loader (loader.cpp), the DFlash2 drafter (dflash.cpp, dflash_policy.h), tune / self-checks and loadOrTune (tune.cpp), writeTune / readTune (qwen35/model_tune.cpp), the KV / sequence functions (qwen35/model_kv.cpp), allocScratch (qwen35/model_scratch.cpp), the stage-bench seam LayerSubset (qwen35/layer_subset.cpp), the exec dump (exec_dump.*), config / device selection / kernel table loading (config.cpp, device.cpp, device_lock.h, kernels.cpp), the embedded draft vocabulary, the qwen35 family's GGUF names (qwen35/arch_names.h: Config::fromGguf checks them; the product table in module.cpp lists the same array, arch025-lane2 leg 5, so model.core does not link model.qwen35). Since arch025-lane2 N9 S3 class Model : public Context (forward.state): Model adds loading, the drafter, the KV pool management, the draft-head builds, autotune and the self-checks. Every forward, server and CLI path reads the Model: the full gate",
    "paths": ["include/whirl/model.h", "src/model/config.cpp", "src/model/device.cpp", "src/model/device_lock.h", "src/model/dflash.cpp",
              "src/model/draft_vocab_embed.cpp", "src/model/exec_dump.cpp", "src/model/exec_dump.h", "src/model/kernels.cpp", "src/model/loader.cpp",
-             "src/model/tune.cpp", "src/model/qwen35/model_tune.cpp", "src/model/qwen35/model_kv.cpp", "src/model/qwen35/model_scratch.cpp", "src/model/qwen35/layer_subset.cpp", "include/whirl/dflash_policy.h"],
+             "src/model/tune.cpp", "src/model/qwen35/model_tune.cpp", "src/model/qwen35/model_kv.cpp", "src/model/qwen35/model_scratch.cpp", "src/model/qwen35/layer_subset.cpp", "include/whirl/dflash_policy.h",
+             "src/model/qwen35/arch_names.h"],
    "full": true,
    "manual": ["full release_gate on both GPUs (ARCH-1 3.3)"]
   },
@@ -629,15 +632,23 @@
               "unknown architecture: the release front-end's UnsupportedArch message (src/release/release.cpp) unchanged (model-tests testArchRegistry pins the detail text)",
               "a test table (whirl-server-tests fake_arch_fit, whirl-model-tests testArchRegistry) must never reach builtinArchs"]
   },
-  "model.qwen35": {
-   "id": "M5b", "desc": "qwen35 family module (src/model/qwen35/): the product's architecture table row (module.cpp: qwen35 dense + qwen35moe, Config::fromGguf / validateTensors, the pre-load sizing functions) and the ServerModel over qwen35::Model (server_model.cpp, src/server/backend_qwen35.cpp until M5); the forward sources moved under it (forward.* modules)",
-   "paths": ["src/model/qwen35/module.cpp", "src/model/qwen35/server_model.cpp"], "lands_on": "arch025-m5 (M5)",
-   "steps": ["cpu_model", "cpu_server", "golden_swift", "golden_moe", "srv_mt_precise", "srv_mt_precise_moe"],
+  "model.qwen35.arch": {
+   "id": "M5b", "desc": "qwen35 family module, architecture half (arch025-lane2 leg 5: model.qwen35 split into arch / server): the product's architecture table (src/model/qwen35/module.cpp, builtinArchs: the qwen35 row = the family's GGUF names from qwen35/arch_names.h (model.core), Config::fromGguf / validateTensors, the pre-load sizing functions incl. spec.policy's mtpDefaults); above model.core (Config::fromGguf no longer names builtinArchs: no link cycle); link isolation tests/iso/model.qwen35.arch",
+   "paths": ["src/model/qwen35/module.cpp"], "lands_on": "arch025-m5 (M5); split arch025-lane2 leg 5",
+   "steps": ["cpu_iso_model_qwen35_arch", "cpu_model", "cpu_server", "golden_swift", "golden_moe", "srv_mt_precise", "srv_mt_precise_moe"],
    "gpus": {"golden_swift": 2, "golden_moe": 2, "srv_mt_precise": 2, "srv_mt_precise_moe": 2},
    "callers": "rdeps",
-   "manual": ["V-move: scratch/a25_m5/move_check.py (forward/*.cpp byte-identical at the new path, server_model.cpp == backend_qwen35.cpp with the named lines)",
-              "V-work both GPUs: code objects cuid-equivalent; golden cli + server and srv_mt_precise / _moe == the M4 exe",
+   "manual": ["V-work both GPUs: golden cli + server and srv_mt_precise / _moe == the exe before the change",
               "Q4_K_M dense golden single on the R9700 (compatibility format through the same module row)"]
+  },
+  "model.qwen35.server": {
+   "id": "M5c", "desc": "qwen35 family module, server half (arch025-lane2 leg 5: model.qwen35 split into arch / server): the ServerModel and ServerVision adapters over qwen35::Model / vision::Vision (src/model/qwen35/server_model.cpp: makeQwen35Backend, makeQwen35Vision; was src/server/backend_qwen35.cpp until M5) - the seam between the server contract (contract.server) and the model core, not isolatable by design (it links both)",
+   "paths": ["src/model/qwen35/server_model.cpp"], "lands_on": "arch025-m5 (M5); split arch025-lane2 leg 5",
+   "steps": ["cpu_model", "cpu_server", "golden_swift", "golden_moe", "srv_mt_precise", "srv_mt_precise_moe", "srv_vis"],
+   "gpus": {"golden_swift": 2, "golden_moe": 2, "srv_mt_precise": 2, "srv_mt_precise_moe": 2, "srv_vis": 2},
+   "callers": "rdeps",
+   "manual": ["V-move: scratch/a25_m5/move_check.py (server_model.cpp == backend_qwen35.cpp with the named lines)",
+              "V-work both GPUs: code objects cuid-equivalent; golden server and srv_mt_precise / _moe == the exe before the change"]
   }
  }
 }

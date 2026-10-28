@@ -277,8 +277,9 @@ One manifest per isolated module: `tests/sampling/isolation.txt` (sampling, arch
 `tests/iso/<module>/isolation.txt` (arch025-isoall). A manifest names the module (`module`), its test program
 (`exe`), the source the boundary mutants edit (`mutate`), where the include mutants put the line (`mutinc top|end`;
 `end` for a source whose anonymous-namespace helpers share a name with engine.h's: tier_bridge.cpp), the link mutants
-(`mutsym hip|log|now|engine|model|tier`), extra
-Windows libraries (`syslib`), and the files: `src` / `hdr` = the module and its DECLARED dependencies (for example
+(`mutsym hip|log|now|engine|model|tier|archtable`; `archtable` = the product architecture table builtinArchs,
+model.qwen35.arch), extra Windows libraries (`syslib`), headers the build generates (`gen whirl/version.h`: copied
+from `<build>/generated/`; iso_check.py `--build`, default `build/Release`), and the files: `src` / `hdr` = the module and its DECLARED dependencies (for example
 spec.policy declares `src/common/util.cpp` and the platform layer it calls), `testsrc` / `testhdr` = the test
 program only. `cmake/iso.cmake` copies those files into `build/Release/iso/<module>/{mod,test}/` and builds them from
 there with that copy as the only include path; the test program links the module OBJECTS directly (no static-library

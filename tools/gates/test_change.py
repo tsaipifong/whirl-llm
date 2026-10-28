@@ -73,7 +73,7 @@ CORE = {
 }
 # Not core (their own steps are enough; modules.json rows already carry their GPU steps): env_snapshot, ckpt_store,
 # page_pool, prefix_store, tier_bridge, protocol, engine_gov, threads, sampling, platform.*, server.*, cli, spec.*,
-# model.arch_registry, model.qwen35 (registration / glue: golden + MTP server steps in their rows).
+# model.arch_registry, model.qwen35.arch / model.qwen35.server (registration / glue: golden + MTP server steps in their rows).
 
 # Core by path, also for paths of older commits that no module glob matches any more (e.g. src/model/forward/*.cpp
 # before the qwen35 move) and for files no module owns:

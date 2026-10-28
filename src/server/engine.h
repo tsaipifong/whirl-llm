@@ -28,6 +28,7 @@
 #include "spec/slot_drafts.h"  // DraftPlanSlot, planSlotDrafts, splitDraftsByGain, slotDraftCap (arch025-E1b)
 #include "tokens.h"
 #include "vision_iface.h"
+#include "whirl/vision.h"  // vision::Vision / Prepared / Region (vision_iface.h only names them: arch025-lane2 leg 5 S6)
 #include "whirl/chat.h"
 #include "whirl/json.h"
 #include "whirl/mem_governor.h"

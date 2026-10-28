@@ -16,6 +16,7 @@
 #include "device/null_backend.h"
 #include "model/qwen35/weight_loader.h"
 #include "model/arch_registry.h"  // arch025-M5
+#include "model/qwen35/arch_names.h"  // arch025-lane2 leg 5
 #include "whirl/common.h"  // widen / narrow (bug-envpaths child test)
 #include "whirl/gpu_select.h"  // arch025-surv testLockGpuAbandoned
 #include "model/device_lock.h"  // arch025-surv testLockGpuAbandoned
@@ -3607,6 +3608,15 @@ void testArchRegistry() {
     for (const m::ArchModule& am : t)
         for (const m::ArchName& n : am.names) disjoint = seen.insert(n.name).second && disjoint;
     check(disjoint, "arch table: every GGUF name in exactly one row");
+    // arch025-lane2 leg 5: Config::fromGguf (model.core) checks the family's names (arch_names.h), not builtinArchs();
+    // the product row lists that same array, and with one family both tables give the same names and the same message
+    check(t[0].names.data() == q::arch_names && t[0].names.size() == std::size(q::arch_names),
+          "arch table: the qwen35 row lists the family's names (arch_names.h)");
+    const m::ArchTable fam(q::arch_names_table);
+    check(fam.size() == 1 && fam[0].names.data() == q::arch_names && fam[0].fromGguf == nullptr,
+          "family names table: one row, the same names, no functions");
+    check(m::supportedArchs(fam) == m::supportedArchs() && m::unsupportedArchText("llama", fam) == m::unsupportedArchText("llama"),
+          "family names table: the product table's names and UnsupportedArch text (one family; a second one must revisit config.cpp)");
     const m::ArchModule& qm = t[0];
     check(qm.fromGguf == &q::Config::fromGguf && qm.validateTensors != nullptr, "arch table: qwen35 config reader + tensor check");
     check(qm.sizing.estimateLoad == &q::estimateLoad && qm.sizing.bufferBytes == &q::bufferBytes &&

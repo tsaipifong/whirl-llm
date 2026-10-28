@@ -7,6 +7,7 @@
 // (src/model/<family>/) and one row here.
 
 #include "model/arch_registry.h"
+#include "model/qwen35/arch_names.h"  // the family's GGUF names (model.core's config reader checks the same array)
 #include "whirl/model.h"
 
 namespace whirl::model {
@@ -15,10 +16,8 @@ namespace {
 
 void validateQwen35(const qwen35::Config& cfg, const gguf::File& f) { cfg.validateTensors(f); }
 
-constexpr ArchName qwen35_names[] = {{"qwen35", false}, {"qwen35moe", true}};
-
 constexpr ArchModule builtin_modules[] = {
-    {"qwen35", qwen35_names, &qwen35::Config::fromGguf, &validateQwen35,
+    {"qwen35", qwen35::arch_names, &qwen35::Config::fromGguf, &validateQwen35,
      {&qwen35::estimateLoad, &qwen35::bufferBytes, &qwen35::resolveFdSplits, &qwen35::dflashWeightBytes, qwen35::max_small_batch,
       &qwen35::mtpDefaults}},
 };

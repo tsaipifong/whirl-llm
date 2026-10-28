@@ -13,6 +13,7 @@
 #include "device/backend.h"
 #include "model/qwen35/kv.h"  // qwen35::KvArray (arch025-M2)
 #include "vision_iface.h"
+#include "whirl/vision.h"  // vision::Vision (makeQwen35Vision); vision_iface.h only names the types (arch025-lane2 leg 5 S6)
 #include "whirl/spec_sample.h"  // spec::DraftSample (was reached through model.h)
 #include "whirl/model_types.h"  // not whirl/model.h: the server core sees the model types only (arch025-M3)
 

@@ -20,18 +20,22 @@ tier.kv (NullBackend + platform); arch025-lane2 leg 4: prefix_store (tokens.cpp 
 prefix_cache, tier_adapter over tier.kv, ckpt_store, NullBackend, threads), tier_bridge (prefix_store and its declared
 dependencies + tier.kv; manifest `mutinc end`: tier_bridge.cpp's anonymous-namespace kv_page / msSince share their
 names with engine.h's, so an engine include at the top of the file does not compile with the product flags either)
-and model.core (every model module below it + module.cpp's product table + spec.policy, fake_hip.cpp and
-tests/iso/model.core/fake_gpu_restrict.cpp; link mutants engine / log / `tier` = tier::blockHash). model.core's
-declared module.cpp is a link-level cycle (config.cpp's Config::fromGguf -> findArchName(name, builtinArchs()) ->
-module.cpp's table -> Config::fromGguf) that cycles.py (includes only) does not see; fix: the caller passes the table
-(or checks the name through findArch) so config.cpp no longer names builtinArchs().
+and model.core (every model module below it, fake_hip.cpp and tests/iso/model.core/fake_gpu_restrict.cpp; link
+mutants engine / log / `tier` = tier::blockHash / `archtable` = builtinArchs). arch025-lane2 leg 5: the link-level
+cycle model.core <-> model.qwen35 (config.cpp's Config::fromGguf -> findArchName(name, builtinArchs()) -> module.cpp's
+table -> Config::fromGguf; cycles.py sees includes only) is gone: the qwen35 family's GGUF names are data in
+src/model/qwen35/arch_names.h (model.core), Config::fromGguf checks them, module.cpp's row lists the same array, so
+model.core no longer declares module.cpp / spec.policy. Also leg 5: protocol (S6: vision_iface.h names the vision types
+only, base64Decode moved from engine_vision.cpp to src/server/base64.cpp, vision::tokenId / expand from vision.cpp to
+src/vision/prompt.cpp; declared: src/chat, the tokenizer + GGUF reader, the vision prompt side, the server log, util,
+platform; manifest kind `gen` for the generated whirl/version.h) and model.qwen35.arch (module.cpp over the model core
++ spec.policy; model.qwen35 split into model.qwen35.arch and model.qwen35.server).
 
 
 | module | blocked by (first reach outside the declared dependencies) | smallest fix |
 |---|---|---|
-| protocol | `src/server/engine_api.h:11` server/vision_iface.h -> `include/whirl/vision.h:23` device/handles.h (device) and vision::Vision; `engine_api.h:14` whirl/tokenizer.h (lib whirl, GGUF) | forward-declare the vision types engine_api / vision_iface use by pointer (header change, objeq); tokenizer (+ gguf) as declared dependencies |
 | engine_gov | `src/server/engine_gov.cpp:13` `engine.h`: the file is Engine member functions | by design part of the engine (isolate after Engine is split) |
 | server.startup | `src/server/server_main.cpp:13` engine.h, `:18` device/backend.h, Model::load: the program's composition root | not isolatable by design (covered by the gate's end-to-end steps) |
 | cli | `src/cli/*`: whirl.exe composition root (build_model.cpp: Model::load, HIP device) | not isolatable by design |
 | contract.abi, contract.device, contract.server | (arch025-lane2 N3: `contract` split in three; the old module mixed the kernel ABI / numerics (low) with the ServerModel interface (high) and closed a 15-node include cycle.) contract.abi: `src/kernels_host/kernels_abi.cpp` loads the kernel table through the HIP runtime header; contract.device: `src/device/backend_hip.cpp` is the HIP backend (whirl_hip); contract.server: `src/server/backend.h:13` `model/qwen35/kv.h`, `:14` vision_iface.h -> device/handles.h | contract.abi: numerics.cpp + dump.cpp are already isolated as declared dependencies of server.args; a manifest needs a HIP-free kernels_abi.cpp test double. contract.server: after the model split (N9) |
-| model.qwen35 | `src/model/qwen35/module.cpp:10` whirl/model.h; `server_model.cpp:4` server/backend.h + `:8` whirl/model.h: the adapter between the server contract and the Model | not isolatable by design (it is the seam) |
+| model.qwen35.server | `src/model/qwen35/server_model.cpp:4` server/backend.h + `:8` whirl/model.h: the adapter between the server contract and the Model (model.qwen35.arch, module.cpp, is isolated since arch025-lane2 leg 5) | not isolatable by design (it is the seam) |
