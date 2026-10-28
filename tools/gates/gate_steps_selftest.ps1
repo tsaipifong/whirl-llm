@@ -48,6 +48,7 @@ try {
     }
     Check "list cpu_platform_check CPU (arch025-PL5)" (@($r97.out | Where-Object { $_ -match "^cpu_platform_check\s+CPU\s*$" }).Count -eq 1 -and @($s8.out | Where-Object { $_ -match "^cpu_platform_check\s+CPU\s*$" }).Count -eq 1) "missing"
     Check "list cpu_step_selftest CPU" (@($r97.out | Where-Object { $_ -match "^cpu_step_selftest\s+CPU\s*$" }).Count -eq 1) "missing"
+    Check "list cpu_cmake_modules CPU (arch025-n17)" (@($r97.out | Where-Object { $_ -match "^cpu_cmake_modules\s+CPU\s*$" }).Count -eq 1 -and @($s8.out | Where-Object { $_ -match "^cpu_cmake_modules\s+CPU\s*$" }).Count -eq 1) "missing"
     Check "list r9700 srv_env_e2 not available" (@($r97.out | Where-Object { $_ -match "^srv_env_e2\s+GPU\s+\(not in this gate: 8060s only" }).Count -eq 1) "want '(not in this gate: 8060s only'"
     Check "list 8060s srv_env_e2 GPU" (@($s8.out | Where-Object { $_ -match "^srv_env_e2\s+GPU\s*$" }).Count -eq 1) "want available on the 8060s"
     foreach ($n in "st_dense_precise", "st_dense_balance", "st_dense_fast", "golden_dense", "seq_dense_precise", "seq_dense_balance", "seq_dense_fast", "dfl_precise", "dfl_balance", "dfl_fast") {
@@ -140,6 +141,12 @@ try {
         @{ step = "cpu_env_restore"; name = "clean (arch025-c2fu)"; exit = 0; lines = @("env restore check selftest: 10/10 as expected", "env restore check: ok (37 file(s))"); want = $true },
         @{ step = "cpu_env_restore"; name = "planted: a SetEnvironmentVariable(k, `$null) restore"; exit = 1; lines = @("env restore check selftest: 10/10 as expected", "FAIL x.ps1: R1 line 113: SetEnvironmentVariable outside a SetEnv* helper", "env restore check: FAIL (1 violation(s) in 37 file(s))"); want = $false },
         @{ step = "cpu_env_restore"; name = "planted: 0 files scanned"; exit = 0; lines = @("env restore check selftest: 10/10 as expected", "env restore check: ok (0 file(s))"); want = $false },
+        @{ step = "cpu_cmake_modules"; name = "clean (arch025-n17)"; exit = 0; lines = @("cmake modules check test: 20/20 ok", "   WARN src/model/tune.cpp is compiled and still census-pending (owner lane 2)", "cmake modules: ok (11 census-pending, 99 targets, 166 module source files, 124 compiled product sources (2 device TU), 8 generated, 12 iso manifests)"); want = $true },
+        @{ step = "cpu_cmake_modules"; name = "planted: a module source no target compiles"; exit = 1; lines = @("cmake modules check test: 20/20 ok", "   FAIL module a: src/a/y.cpp is compiled by no CMake target and included by no compiled source", "cmake modules: FAIL (1 problem(s)) (99 targets)"); want = $false },
+        @{ step = "cpu_cmake_modules"; name = "planted: an iso target that does not match its manifest"; exit = 1; lines = @("cmake modules check test: 20/20 ok", "   FAIL tests/iso/threads/isolation.txt (module threads): target whirl_iso_threads compiles mod/server/x.cpp, which the manifest does not list", "cmake modules: FAIL (1 problem(s)) (99 targets)"); want = $false },
+        @{ step = "cpu_cmake_modules"; name = "planted: the self-test missed a planted case"; exit = 1; lines = @("FAIL block: an iso target no manifest names", "cmake modules check test: 19/20 ok"); want = $false },
+        @{ step = "cpu_cmake_modules"; name = "planted: configure failed (setup, exit 2)"; exit = 2; lines = @("cmake modules check test: 20/20 ok", "cmake modules: SETUP (configure failed (exit 1): CMake Error)"); want = $false },
+        @{ step = "cpu_cmake_modules"; name = "planted: exit 0 with no verdict line"; exit = 0; lines = @("cmake modules check test: 20/20 ok"); want = $false },
         @{ step = "cpu_step_selftest"; name = "clean"; exit = 0; lines = @("gate steps selftest: 36/36 as expected"); want = $true },
         @{ step = "cpu_step_selftest"; name = "planted: one proof did not hold"; exit = 1; lines = @("BAD  rules: ...", "gate steps selftest: 35/36 as expected"); want = $false }
     )

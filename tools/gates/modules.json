@@ -643,6 +643,7 @@
    "steps": ["cpu_iso_config_settings", "cpu_server", "cpu_cli_tests", "golden_swift", "golden_moe", "srv_mt_precise", "srv_mt_precise_moe", "st_swift_precise", "st_swift_balance", "st_swift_fast", "st_moe_precise", "st_moe_balance", "st_moe_fast", "srv_gpu_select"],
    "gpus": {"golden_swift": 2, "golden_moe": 2, "srv_mt_precise": 2, "srv_mt_precise_moe": 2, "st_swift_precise": 2, "st_swift_balance": 2, "st_swift_fast": 2, "st_moe_precise": 2, "st_moe_balance": 2, "st_moe_fast": 2, "srv_gpu_select": 2},
    "callers": "rdeps",
+   "when": {"tests/iso/config.settings/isolation.txt": ["cpu_cmake_modules"], "cmake/settings.cmake": ["cpu_cmake_modules"]},
    "manual": ["whirl-iso-config-settings-tests: parseU32 == the 3eef475 server envU32 on every listed text, the 3eef475 CLI envU32 differs only on malformed values (12 / 12x / 0x10 / 3.5); MTP_ADAPT == the server rule; unset = the former defaults",
               "V-cli / V-srv: CLI golden + server golden + srv_mt + st_* == the parent exe on both GPUs with every WHIRL_* unset (work_equal, the lane-1 GPU runner)",
               "server startup log lines A vs B: tools/gates/startup_lines.py (a bad value's warning text is the former envU32 text)"]

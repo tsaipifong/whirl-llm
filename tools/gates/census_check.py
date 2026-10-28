@@ -31,11 +31,16 @@ def product_files(root):
     return sorted(out)
 
 
+def owners(f, mods):
+    """the modules whose paths globs match product file f (census: exactly one; cmake_modules_check.py uses the same rule)"""
+    return [n for n, d in mods.items() if any(fnmatch.fnmatch(f, g) for g in d.get("paths") or [])]
+
+
 def check(files, mods, pending, release=False):
     errs, warns = [], []
     unreg = []
     for f in files:
-        own = [n for n, d in mods.items() if any(fnmatch.fnmatch(f, g) for g in d.get("paths") or [])]
+        own = owners(f, mods)
         if len(own) > 1:
             errs.append(f"{f} is in {len(own)} modules: {', '.join(own)}")
         elif not own:

@@ -37,6 +37,10 @@ ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)),
 FILE_RULES = [
     ("tests/golden/*", [], ["cpu_golden_xcheck", "golden(all, both GPUs)"], "golden references changed: the commit must say 'golden update: <reason>'"),
     ("tools/golden/*", [], ["cpu_golden_selftest", "cpu_golden_xcheck", "golden(one model, one GPU) to prove the runner"], "golden runner"),
+    # arch025-n17: the module table and the iso manifests are build descriptions too: cpu_cmake_modules compares them with
+    # the CMake targets (before the generic tools/gates/* and tests/* rules)
+    ("tools/gates/modules.json", [], ["cpu_modules_check", "cpu_census", "cpu_cmake_modules"], "module table"),
+    ("tests/*/isolation.txt", [], ["cpu_iso_<module>", "cpu_cmake_modules"], "isolation manifest"),
     ("tools/gates/*", [], ["release_gate.ps1 -List", "the changed step on one GPU"], "release gate script"),
     ("tools/klgate/*", [], ["tools/klgate/test_klgate_judge.py", "klgate one model one GPU"], "KL gate"),
     ("tools/impact/*", [], ["python tools/impact/impact_build.py --check", "python tools/impact/validate.py"], "impact map tooling"),
