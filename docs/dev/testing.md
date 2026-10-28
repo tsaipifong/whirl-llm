@@ -210,6 +210,67 @@ The map lists all three modes for every change: a change is shown to be mode-con
 golden hashes (precise unchanged). Host code that branches on the GPU inside a shared function is listed
 for both GPUs.
 
+### <a id="test-what-you-changed"></a>Test what you changed (`tools/gates/test_change.py`, dev-time default)
+
+One command for a development change. It runs **every CPU step** of the release gate, the **GPU steps of the
+modules the change touches**, and the **full two-GPU matrix only for a core change** or when work equivalence
+cannot be shown. It records what it ran and how long that took.
+
+```
+python tools/gates/test_change.py --worktree                 # plan for uncommitted changes (untracked files included)
+python tools/gates/test_change.py --range main..HEAD         # plan for a branch
+python tools/gates/test_change.py --commit SHA [--json]      # plan for one commit
+python tools/gates/test_change.py --worktree --run           # run the plan: R9700, then 8060S, one GPU at a time
+python tools/gates/test_change.py --refresh-times            # step durations from stored gate summaries (estimates)
+python tools/gates/test_change_test.py                       # unit tests (CPU)
+```
+
+How the plan is built, from the impact map (`impact.py`) and `modules.json`:
+
+1. **CPU:** every CPU step of `release_gate.ps1 -List` runs once. `cpu_golden_xcheck` and `kl_guard` check one
+   GPU's references, so they run with each GPU. Nothing on the CPU side is selected.
+2. **GPU, module level:** the module's `steps` from `modules.json`, including its callers (`rdeps`, named callers)
+   and its `when` steps, plus the GPU steps the impact map selects for the diff. A step that `modules.json` marks
+   `gpus: 2` runs on both GPUs. Other module steps run on one GPU (`--one-gpu`, default R9700: testing rule "8060S
+   at merge time"). Map steps run on the GPUs the map lists. A change in **two or more non-core modules runs the
+   union** of their steps. The full gate that `impact.py` suggests for a cross-module change is not used here.
+3. **Full matrix, both GPUs** (every GPU step `-List` has on that GPU) when the change touches any of these:
+   - **a core module.** The `CORE` table in `test_change.py` gives the reason for each: `forward.*`, `model.kv`,
+     `model.weights`, `model.scratch`, `model.tune`, `handles`, `contract`. A core module counts as touched when
+     it is a caller of the changed module (`rdeps`), that is, when it includes a header the change edits.
+   - **a core path:** `kernels/*`, `*.hip`, `src/kernels_host/*`, `kernels_abi.h`, numerics, `src/ops/*`,
+     `src/hip/*`, `src/device/*`, forward / kv files, also under their older paths.
+   - **a contract, a build-wide file** (`cmake/*`, `CMakeLists.txt`, `build.bat`, `redist/*`) **or product code in
+     no module.** These are `impact.py`'s fail-closed cases.
+   - **a change whose work equivalence cannot be shown.** With `--base-build DIR`, the code objects of both builds
+     are compared (`work_equal.py`, CPU). If they differ although no kernel source changed, the full matrix runs.
+   - **Exception:** when every changed product file is a kernel for one architecture (the map lists one GPU), the
+     full matrix runs on that GPU only.
+4. **Work-equivalence short-cut** (ADR-0003). `--proof r9700=FILE` / `--proof 8060s=FILE` takes a `work_equal.py`
+   report. GPU steps are skipped on that GPU only if all of these hold:
+   - the verdict is `EQUIVALENT`, the code objects are identical or identical-except-cuid, and the launch
+     sequence is identical;
+   - its B `whirl.exe` (and `whirl-server.exe`) is the sha256 of `--build`;
+   - every launch run in it is for that GPU;
+   - the diff touches no kernel source and no header that a `.hip` file includes.
+
+   The skipped steps are the launch-covered steps (`<step>/<command>` keys), `golden_*` when golden is identical,
+   and `kt_full`. The plan names the proof file. Server steps the proof does not cover still run.
+
+`--run` calls `release_gate.ps1 -Steps <plan> -Tag change_<id>_<device> -LaunchLog ...` once per GPU, R9700 first,
+then 8060S. It refuses (exit 2) while any `whirl*` process runs, and `--force` overrides that. It writes
+`test_change_summary.json` / `.txt` in the work folder (default `<workspace>/scratch/test_change/<time>`). It
+appends one row to `internal_docs/TEST_COST_LEDGER.tsv` of the workspace (`--ledger` / `WHIRL_TEST_COST_LEDGER`)
+with these columns: change, modules, level, step counts, estimated and measured CPU / GPU minutes, the
+full-matrix estimate, result and summary. `--record-plan` appends a `plan` row without running. Minutes come from
+`internal_docs/STEP_TIMES.tsv`: the median of the newest five PASS durations per (GPU, step) over stored gate
+summaries, written by `--refresh-times`. They are estimates, and the plan prints the steps that have no stored
+duration. The data files stay outside the repo.
+
+**Dev-time only, like `-Module`.** The tag is never `gate_<device>`, so no `PASS_gate_*` marker is written. A
+release, an rc merge and a bug-fix release still run the full release gate on both GPUs. `release_check` R1
+MODULES.json needs owner sign-off for module runs (arch025-X14).
+
 ### <a id="isolation"></a>Isolation check (ARCH-1 8.5: src/sampling, then every isolatable module)
 
 One manifest per isolated module: `tests/sampling/isolation.txt` (sampling, arch025-X3) and
