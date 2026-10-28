@@ -592,6 +592,16 @@ def build(root):
         for lp in re.finditer(r'foreach\s*\(\$t\s+in\s+([^)]*)\)\s*\{\s*AddStep\s+"cpu_\$\(', t):
             for exe in re.findall(r'"([\w-]+)"', lp.group(1)):
                 cpu.add("cpu_" + re.sub(r"-tests$", "", re.sub(r"^whirl-", "", exe)))
+        # arch025-isoall: one cpu_iso_<module> step per tests/iso/**/isolation.txt ("module <name>" line, "." -> "_"),
+        # added by a loop the AddStep regex above cannot see (2026-10-28: module_gate_test's "@cpu" check found CPU-all
+        # missing all 10 isolation steps)
+        if re.search(r'AddStep\s+"cpu_iso_\$\(', t):
+            for dp, _dn, fn in os.walk(os.path.join(root, "tests", "iso")):
+                if "isolation.txt" in fn:
+                    man = open(os.path.join(dp, "isolation.txt"), encoding="utf-8", errors="replace").read()
+                    mm = re.search(r"^module\s+(\S+)", man, re.M)
+                    if mm:
+                        cpu.add("cpu_iso_" + mm.group(1).replace(".", "_"))
         cpu_steps = sorted(cpu)
         if not cpu_steps:
             errors.append('release_gate.ps1: no CPU step parsed (AddStep "cpu_*" $false): impact.py cannot add every CPU step')
