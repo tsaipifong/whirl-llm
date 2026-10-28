@@ -126,7 +126,7 @@ Engine::Engine(ServerModel& model, device::Backend& ops, const Tokenizer& tok, c
     ssm_bytes_ = m_.ssmBytes();
     vrows_ = std::clamp(m_.verifyRows(), max_small_batch, qwen35::max_verify_rows);
     // FR-SRV P3-9: n-gram drafts run with MTP and with DFlash2
-    if (opt_.ngram && (opt_.use_mtp || opt_.use_dflash)) crlf_norm_ = ChatTokens::crlfToLf(tok_);
+    if (opt_.ngram && (opt_.use_mtp || opt_.use_dflash)) crlf_norm_ = chat::ChatTokens::crlfToLf(tok_);
     // FR-SRV P2-5: --draft dflash without DeltaNet replay: literal drafts are capped by the snapshot
     // sets that exist, so none allocated = no draft ever (server_main allocates them before sizing
     // the KV pool; this covers every other caller)

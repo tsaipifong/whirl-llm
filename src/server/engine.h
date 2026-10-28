@@ -26,7 +26,7 @@
 #include "tier/kv_tier.h"
 #include "spec/policy.h"  // DraftAccept, SlotAccept, NgramPolicy, DraftTiming, CycleCost (arch025-M4)
 #include "spec/slot_drafts.h"  // DraftPlanSlot, planSlotDrafts, splitDraftsByGain, slotDraftCap (arch025-E1b)
-#include "tokens.h"
+#include "whirl/chat_tokens.h"  // chat::ChatTokens (arch025-N15c, shared with the CLI)
 #include "vision_iface.h"
 #include "whirl/chat.h"
 #include "whirl/json.h"
@@ -483,7 +483,7 @@ private:
     ServerModel& m_;
     device::Backend& ops_;
     const Tokenizer& tok_;
-    ChatTokens ct_;
+    chat::ChatTokens ct_;
     EngineOptions opt_;
     std::uint32_t ctx_;
     EngineThread owner_;  // arch024 M8: set by runLoop; ck_, pool_, ps_, tb_ and the governor glue check against it

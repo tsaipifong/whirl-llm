@@ -80,6 +80,14 @@ inline constexpr std::uint32_t min_prefill_batch = 1280;
 // The same floor for a prefill batch the user set (WHIRL_PREFILL_BATCH): a smaller value is raised to
 // min_prefill_batch (the server logs a warning) instead of failing every long prompt (REVIEW-RC4-C P2-3).
 inline std::uint32_t prefillBatchFloor(std::uint32_t requested) { return requested < min_prefill_batch ? min_prefill_batch : requested; }
+// WHIRL_PREFILL_BATCH = v, one rule for whirl.exe and whirl-server (arch025-N15c; the server's, the CLI had its own):
+// at load, v clamped to [1, limit] and then the floor; after the load (the model may hold a smaller batch than asked
+// for), the floor of v but never above the loaded batch.
+inline std::uint32_t prefillBatchAtLoad(std::uint32_t v, std::uint32_t limit) { return prefillBatchFloor(v < 1u ? 1u : v > limit ? limit : v); }
+inline std::uint32_t prefillBatchCap(std::uint32_t loaded, std::uint32_t v) {
+    const std::uint32_t f = prefillBatchFloor(v);
+    return loaded < f ? loaded : f;
+}
 struct FitInput {
     std::uint64_t avail = 0;          // VRAM the model may use from now on (free' minus reserve, WDDM room)
     std::uint64_t weights = 0;        // weight bytes uploaded to VRAM

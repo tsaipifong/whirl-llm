@@ -96,13 +96,13 @@ std::optional<u32> envU32(const char* name) { return whirl::settings::envU32(nam
 // (image ends: the ids >= image_id_base exist only in a prompt with images)
 std::vector<std::size_t> serverForwardEnds(const Tok& tok, std::span<const u32> ids, u32 max_batch, const device::Profile& prof, bool moe) {
     const std::size_t n = ids.size();
-    const std::size_t sys = sched::sysSplit(sched::sysBoundary(ids, tok.im_start, tok.system, tok.im_end, tok.newline), n,
+    const std::size_t sys = sched::sysSplit(tok.ct.sysBoundary(ids), n,
                                             whirl::settings::sysMin(sched::sys_min_default, settingsWarn));
     const std::vector<std::uint32_t> imgs =
-        sched::imageSplits(ids, q::image_id_base, tok.vision_end, envU32("VIS_CKPT_MIN").value_or(sched::img_split_min_default));
-    const std::size_t exec = sched::prefillExecFor(whirl::settings::prefillChunk(settingsWarn).value_or(sched::prefillExecDefault(prof, moe)), max_batch, prof.prefill_fill_batch);
+        sched::imageSplits(ids, q::image_id_base, tok.ct.vision_end, envU32("VIS_CKPT_MIN").value_or(sched::img_split_min_default));
+    const std::size_t exec = sched::prefillExec(whirl::settings::prefillChunk(settingsWarn), prof, moe, max_batch);
     const std::size_t tail_min = whirl::settings::tailCk() ? sched::tail_ck_min_default : 0;
-    return sched::soloForwardEnds(n, sys, tok.thinkOpenSplit(ids), imgs, 0, exec, tail_min, max_batch);
+    return sched::soloForwardEnds(n, sys, tok.ct.thinkOpenSplit(ids), imgs, 0, exec, tail_min, max_batch);
 }
 
 // the CLI prefill of ids from position 0 on the server's forwards (with the MTP block over the prompt: mtp)

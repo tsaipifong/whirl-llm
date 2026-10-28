@@ -59,7 +59,7 @@
 #include "server/log.h"
 #include "server/prefix_store.h"
 #include "server/tier_bridge.h"
-#include "server/tokens.h"
+#include "whirl/chat_tokens.h"
 #include "tier/kv_tier.h"
 #include "whirl/gguf.h"
 #include "whirl/model.h"
@@ -560,8 +560,8 @@ void suitePagePool(const Opts& o, BenchOut& out, const Tokenizer& tok) {
 }
 
 // ------------------------------------------------------------------ M4 PrefixStore
-ChatTokens benchChatIds() {
-    ChatTokens ct;
+whirl::chat::ChatTokens benchChatIds() {
+    whirl::chat::ChatTokens ct;
     ct.im_start = 1;
     ct.im_end = 2;
     ct.nl = 3;
@@ -571,7 +571,7 @@ ChatTokens benchChatIds() {
 }
 
 void suitePrefix(const Opts& o, BenchOut& out) {
-    const ChatTokens ct = benchChatIds();
+    const whirl::chat::ChatTokens ct = benchChatIds();
     PrefixStore::Config cfg;
     cfg.sys_min = sched::sys_min_default;
     cfg.kv_page = qwen35::kv_page;
@@ -729,7 +729,7 @@ struct TierRig {
     CountingBackend cb{nb};
     std::unique_ptr<test::MockModel> model;
     std::vector<KvArr> kv;
-    std::unique_ptr<ChatTokens> ct;
+    std::unique_ptr<whirl::chat::ChatTokens> ct;
     std::unique_ptr<PrefixStore> ps;
     std::unique_ptr<CkptStore> cs;
     std::unique_ptr<tier::Tier> tier;
@@ -742,7 +742,7 @@ struct TierRig {
         mc.mtp = false;
         model = std::make_unique<test::MockModel>(cb, tok, mc);
         kv = model->kvArrays();
-        ct = std::make_unique<ChatTokens>(tok);
+        ct = std::make_unique<whirl::chat::ChatTokens>(tok);
         ps = std::make_unique<PrefixStore>(*ct, PrefixStore::Config{});
         cs = std::make_unique<CkptStore>(cb, *model, CkptStore::Layout{model->convBytes(), model->ssmBytes(), false});
         tier = tier::Tier::create(cb, ram_mb << 20, 42, 0);

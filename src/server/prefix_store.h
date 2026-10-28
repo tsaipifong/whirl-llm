@@ -17,7 +17,7 @@
 #include "device/handles.h"
 #include "server/backend.h"
 #include "server/engine_thread.h"
-#include "server/tokens.h"
+#include "whirl/chat_tokens.h"
 #include "whirl/prefill_schedule.h"
 
 #include <algorithm>
@@ -119,7 +119,7 @@ public:
         std::size_t lcp = 0;
     };
 
-    PrefixStore(const ChatTokens& ct, const Config& cfg);
+    PrefixStore(const chat::ChatTokens& ct, const Config& cfg);
     // arch024 M8: the engine thread that may call the entry points below (nullptr: unchecked; docs/dev/threads.md)
     void setOwner(const EngineThread* o) { owner_ = o; }
     const EngineThread* ownerThread() const { return owner_; }
@@ -190,7 +190,7 @@ public:
     }
 
 private:
-    const ChatTokens& ct_;
+    const chat::ChatTokens& ct_;
     Config cfg_;
     Vision vis_;
     // prefix cache decisions (lookup / insertion / eviction); tier_view_: the tier seen through cache::Tier

@@ -153,7 +153,8 @@ Loaded loadModel(const Args& a, const gguf::File& f, u32 max_ctx, bool ctx_expli
     lo.ctx_explicit = ctx_explicit;
     lo.min_ctx = min_ctx;
     lo.no_mtp = no_mtp;
-    if (auto v = whirl::settings::prefillBatch(settingsWarn)) lo.max_batch = std::max(q::max_batch_default, std::min(q::max_batch_limit, *v));
+    // (arch025-N15c: the server's rule; the floor was max_batch_default 4096, now the scheduler's 1280 rows)
+    if (auto v = whirl::settings::prefillBatch(settingsWarn)) lo.max_batch = vram::prefillBatchAtLoad(*v, q::max_batch_limit);
     lo.kv_req = q::kvRequestFromEnv();
     L.model = q::Model::load(f, max_ctx, L.stats, lo);
     q::Model& m = *L.model;

@@ -23,6 +23,8 @@
 #include "whirl/value_scope.h"
 #include "whirl/kernels_abi.h"
 #include "whirl/device_profile.h"
+#include "whirl/prefill_schedule.h"  // sched::prefillExec (arch025-N15c)
+#include "whirl/model_types.h"  // qwen35::max_batch_default / max_batch_limit (arch025-N15c pins)
 #include "whirl/kv_format.h"
 #include "hip/alloc_log.h"
 #include "whirl/leak_count.h"
@@ -779,6 +781,36 @@ void testVramLimit() {
     CHECK_EQ(vram::prefillBatchFloor(1279u), 1280u);
     CHECK_EQ(vram::prefillBatchFloor(1280u), 1280u);
     CHECK_EQ(vram::prefillBatchFloor(4096u), 4096u);
+    // arch025-N15c pins: WHIRL_PREFILL_BATCH, one rule for whirl.exe and whirl-server == the 44895be server code
+    // (server_main.cpp: clamp to [1, max_batch_limit] then the floor; after the load min(loaded, floor(v))). The
+    // 44895be CLI (build_model.cpp max(max_batch_default, min(limit, v)); cmd_chat.cpp max(1280, min(loaded, v)))
+    // differed only for v < 4096 at load and for a loaded batch < 1280 after it.
+    {
+        const std::uint32_t lim = qwen35::max_batch_limit;
+        std::size_t cli_load_diff = 0, cli_cap_diff = 0;
+        for (std::uint32_t v : {0u, 1u, 2u, 512u, 1024u, 1279u, 1280u, 1281u, 2048u, 3000u, 4095u, 4096u, 4097u, 8192u, 16383u, 16384u,
+                                16385u, 100000u, 0xffffffffu}) {
+            CHECK_EQ(vram::prefillBatchAtLoad(v, lim), vram::prefillBatchFloor(std::clamp(v, 1u, lim)));
+            cli_load_diff += vram::prefillBatchAtLoad(v, lim) != std::max(qwen35::max_batch_default, std::min(lim, v));
+            for (std::uint32_t loaded : {1024u, 1280u, 2048u, 4096u, 16384u}) {
+                CHECK_EQ(vram::prefillBatchCap(loaded, v), std::min(loaded, vram::prefillBatchFloor(v)));
+                cli_cap_diff += vram::prefillBatchCap(loaded, v) != std::max<std::uint32_t>(1280u, std::min(loaded, v));
+            }
+        }
+        CHECK_EQ(cli_load_diff, std::size_t(11));  // the 11 listed values below 4096 (the CLI floor was 4096)
+        CHECK_EQ(vram::prefillBatchAtLoad(2048u, lim), 2048u);  // the CLI loaded 4096 rows for this value
+        CHECK_EQ(cli_cap_diff, std::size_t(19));  // loaded 1024, every v: the CLI raised it to 1280 (above the loaded batch)
+    }
+    // arch025-N15c: sched::prefillExec == the formula both front ends wrote out (44895be common.cpp / server_main.cpp)
+    for (hip::Arch a : {hip::Arch::gfx1201, hip::Arch::gfx1151})
+        for (bool moe : {false, true})
+            for (std::uint32_t mb : {1280u, 2048u, 2304u, 4096u, 8192u, 16384u})
+                for (std::optional<std::size_t> req : {std::optional<std::size_t>{}, std::optional<std::size_t>{1024}, std::optional<std::size_t>{3000},
+                                                       std::optional<std::size_t>{100000}}) {
+                    const device::Profile& pr = device::profile(a);
+                    CHECK_EQ(sched::prefillExec(req, pr, moe, mb),
+                             sched::prefillExecFor(req.value_or(sched::prefillExecDefault(pr, moe)), mb, pr.prefill_fill_batch));
+                }
 }
 
 // server defaults by card size (vram::cardDefaults)

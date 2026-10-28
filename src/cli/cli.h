@@ -20,7 +20,9 @@
 #include "whirl/hip_runtime_loader.h"
 #include "whirl/leak_count.h"
 #include "whirl/model.h"
+#include "model/arch_open.h"  // model::openArch, shared with whirl-server (arch025-N15d)
 #include "whirl/prefill_schedule.h"
+#include "whirl/chat_tokens.h"  // chat::ChatTokens, shared with whirl-server (arch025-N15c)
 #include "whirl/tokenizer.h"
 #include "whirl/uma_mem.h"
 #include "whirl/vram_limit.h"
@@ -118,25 +120,11 @@ void applyDraftVocab(q::Model& model, const Tokenizer& tok);
 
 struct Tok {
     Tokenizer t;
-    u32 im_end = 0xffffffffu, eot = 0xffffffffu, think_open = 0xffffffffu, newline = 0xffffffffu;
-    u32 im_start = 0xffffffffu, system = 0xffffffffu, vision_end = 0xffffffffu;  // CLI-SCHED: forced splits
+    // the chat-token facts whirl-server uses (end of turn, think-open / system / image-end splits, the CR LF map;
+    // include/whirl/chat_tokens.h, arch025-N15c: was this struct's own copy)
+    chat::ChatTokens ct;
 
-    explicit Tok(const gguf::File& f) : t(Tokenizer::fromGguf(f)) {
-        auto id = [&](const char* s) {
-            const TokenId i = t.find(s);
-            return i < 0 ? 0xffffffffu : static_cast<u32>(i);
-        };
-        im_end = id("<|im_end|>");
-        eot = id("<|endoftext|>");
-        think_open = id("<think>");
-        const std::vector<TokenId> nl = t.encode("\n");
-        if (nl.size() == 1) newline = static_cast<u32>(nl[0]);
-        // as the server's ChatTokens (src/server/tokens.cpp) and VisionConfig::vision_end_id
-        im_start = id("<|im_start|>");
-        const std::vector<TokenId> sy = t.encode("system", false);
-        if (sy.size() == 1) system = static_cast<u32>(sy[0]);
-        vision_end = id("<|vision_end|>");
-    }
+    explicit Tok(const gguf::File& f) : t(Tokenizer::fromGguf(f)), ct(t) {}
 
     std::vector<u32> encode(const std::string& s) const {
         const std::vector<TokenId> v = t.encode(s);
@@ -146,45 +134,6 @@ struct Tok {
     std::string decode(std::span<const u32> ids) const {
         std::vector<TokenId> v(ids.begin(), ids.end());
         return t.decode(v);
-    }
-
-    // A thinking-mode prompt ("...<think>\n") runs its last token as its own
-    // step (like the server's prefill schedule); 0 = no split.
-    std::size_t thinkOpenSplit(std::span<const u32> ids) const {
-        const std::size_t n = ids.size();
-        if (n >= 2 && ids[n - 2] == think_open && ids[n - 1] == newline) return n - 1;
-        return 0;
-    }
-
-    // token id -> the token with the same text where CR LF is LF (identity when
-    // the text has no CR LF or no such token exists)
-    std::vector<u32> crlfToLf() const {
-        const std::size_t n = t.size();
-        std::unordered_map<std::string, u32> by_piece;
-        std::vector<std::string> pieces(n);
-        for (std::size_t i = 0; i < n; ++i) {
-            pieces[i] = t.piece(static_cast<TokenId>(i), true);
-            by_piece.emplace(pieces[i], static_cast<u32>(i));
-        }
-        std::vector<u32> norm(n);
-        bool any = false;
-        for (std::size_t i = 0; i < n; ++i) {
-            norm[i] = static_cast<u32>(i);
-            const std::string& p = pieces[i];
-            if (p.find("\r\n") == std::string::npos) continue;
-            std::string q;
-            for (std::size_t j = 0; j < p.size(); ++j) {
-                if (p[j] == '\r' && j + 1 < p.size() && p[j + 1] == '\n') continue;
-                q.push_back(p[j]);
-            }
-            auto it = by_piece.find(q);
-            if (it != by_piece.end()) {
-                norm[i] = it->second;
-                any = true;
-            }
-        }
-        if (!any) norm.clear();
-        return norm;
     }
 };
 

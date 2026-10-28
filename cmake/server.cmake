@@ -69,7 +69,6 @@ add_library(whirl_server_core STATIC
   ${CMAKE_SOURCE_DIR}/src/server/log.cpp
   ${CMAKE_SOURCE_DIR}/src/server/server_args.cpp
   ${CMAKE_SOURCE_DIR}/src/server/protocol.cpp
-  ${CMAKE_SOURCE_DIR}/src/server/tokens.cpp
   ${CMAKE_SOURCE_DIR}/src/server/stream.cpp
   ${CMAKE_SOURCE_DIR}/src/server/engine.cpp
   ${CMAKE_SOURCE_DIR}/src/server/engine_thread.cpp

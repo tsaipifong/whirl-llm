@@ -32,7 +32,7 @@
 #include "whirl/hip.h"
 #include "whirl/hip_runtime_loader.h"
 #include "whirl/model.h"
-#include "model/arch_registry.h"  // the architecture module: config + pre-load sizing (arch025-M5)
+#include "model/arch_open.h"  // the architecture module: config + pre-load sizing (arch025-M5; openArch: N15d)
 #include "whirl/pool_budget.h"
 #include "whirl/startup_fit.h"
 #include "whirl/mem_governor.h"
@@ -349,10 +349,14 @@ void buildModel(Options& opt, const numerics::Request& nreq, const char* lad, Lo
     b.t_load0 = Clock::now();
     const gguf::File& f = b.f.emplace(gguf::File::open(opt.path));
     // the architecture module (src/model/arch_registry.h, arch025-M5): the config and the pre-load sizing below
-    const std::string_view arch_name = f.getStringOr("general.architecture", "");
-    const model::ArchModule* const& am = b.am = model::findArch(arch_name);
-    if (!am) throw qwen35::ModelError("UnsupportedArch", model::unsupportedArchText(arch_name));
-    const qwen35::Config& cfg = b.cfg = am->fromGguf(f);
+    // (model::openArch, the CLI's too: arch025-N15d)
+    {
+        model::OpenedArch oa = model::openArch(f);
+        b.am = oa.am;
+        b.cfg = std::move(oa.cfg);
+    }
+    const model::ArchModule* const& am = b.am;
+    const qwen35::Config& cfg = b.cfg;
     int& dev = b.dev = 0;
     // the GPU choice shared with the CLI (src/config/device_choice.h, arch025-N15b): WHIRL_HIP_DEVICE, else the s8-719
     // restriction (the runtime sees only the chosen GPU; its note logged before pickDevice) + pickDevice
@@ -463,14 +467,15 @@ void buildModel(Options& opt, const numerics::Request& nreq, const char* lad, Lo
     lo.embd_on_host = envOn("EMBD_HOST", true);  // WHIRL_EMBD_HOST=0: embedding in VRAM
     if (auto v = settings::envGet("PREFILL_BATCH")) {
         // (arch025-N15: the shared number rule; a malformed value keeps the default batch)
-        if (auto x = settings::parseU32(*v)) lo.max_batch = std::clamp(*x, 1u, qwen35::max_batch_limit);
-        // the scheduler's largest forward is a 1024-row chunk + a 256-row tail: a smaller batch would
-        // fail every long prompt with BatchTooLarge (VRAM-01), so it is raised to that floor
-        if (lo.max_batch < vram::min_prefill_batch) {
-            logW("WHIRL_PREFILL_BATCH={} is below the smallest prefill batch the scheduler needs ({} rows: one {}-row chunk + "
-                 "a {}-row tail); using {}",
-                 *v, vram::min_prefill_batch, prefill_chunk, prefill_merge, vram::min_prefill_batch);
-            lo.max_batch = vram::prefillBatchFloor(lo.max_batch);
+        if (auto x = settings::parseU32(*v)) {
+            // the scheduler's largest forward is a 1024-row chunk + a 256-row tail: a smaller batch would
+            // fail every long prompt with BatchTooLarge (VRAM-01), so it is raised to that floor
+            // (arch025-N15c: vram::prefillBatchAtLoad, the CLI's rule too)
+            if (*x < vram::min_prefill_batch)
+                logW("WHIRL_PREFILL_BATCH={} is below the smallest prefill batch the scheduler needs ({} rows: one {}-row chunk + "
+                     "a {}-row tail); using {}",
+                     *v, vram::min_prefill_batch, prefill_chunk, prefill_merge, vram::min_prefill_batch);
+            lo.max_batch = vram::prefillBatchAtLoad(*x, qwen35::max_batch_limit);
         }
     }
     // prefix checkpoints (per slot / shared); the auto-shrink below may lower the defaults
@@ -682,8 +687,7 @@ void buildModel(Options& opt, const numerics::Request& nreq, const char* lad, Lo
     // whole schedule chunks that fit the prefill batch (a forward never exceeds the batch:
     // Engine::chunkLen caps it); default 2048 rows, gfx1151 MoE 4096 (SRV-PP; dense 2048, SRV-PP-DENSE)
     const device::Profile& prof = device::profile(model.arch);
-    b.prefill_exec =
-        prefillExecFor(exec_req.value_or(prefillExecDefault(prof, model.cfg.moe)), lo.max_batch, prof.prefill_fill_batch);
+    b.prefill_exec = sched::prefillExec(exec_req, prof, model.cfg.moe, lo.max_batch);  // (the CLI's formula too, arch025-N15c)
     {
         std::string tl;
         qwen35::loadOrTune(model, opt.path, tl);
@@ -760,8 +764,8 @@ void buildModel(Options& opt, const numerics::Request& nreq, const char* lad, Lo
         nu::applyFront(model.num_plan, nu::Front::server, rv, fv0 != nullptr);
         if (model.nf().gdn_v0) model.k.gdn_step_norm = fv0;
     }
-    if (env("PREFILL_BATCH"))  // (same floor as above: never below vram::min_prefill_batch)
-        model.max_batch = std::min(model.max_batch, vram::prefillBatchFloor(envU32("PREFILL_BATCH", model.max_batch)));
+    if (env("PREFILL_BATCH"))  // (same floor as above: never below vram::min_prefill_batch; the CLI's rule too)
+        model.max_batch = vram::prefillBatchCap(model.max_batch, envU32("PREFILL_BATCH", model.max_batch));
     // WHIRL_DRAFT_VOCAB: unset = embedded 64k subset (dense qwen35, 248320 vocab), 64k = embedded,
     // 48k / <file> = frequency subset file, N = the first N rows (old experiment), off = full head
     const qwen35::DraftVocabChoice& draft_vocab = b.draft_vocab = qwen35::draftVocabChoice(settings::draftVocab(), qwen35::exeDirectory());

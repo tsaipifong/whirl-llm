@@ -36,7 +36,7 @@ DecodeResult plainDecode(q::Model& model, const Tok& tok, u32 first, std::size_t
     TpsTrace tps;
     tps.start(opt.trace_tps);
     while (n_gen < opt.max_tokens && n_gen < budget_ctx) {
-        if (cur == tok.im_end || cur == tok.eot) break;
+        if (cur == tok.ct.im_end || cur == tok.ct.endoftext) break;
         r.tokens.push_back(cur);
         n_gen += 1;
         tps.tick(n_gen);
@@ -93,7 +93,7 @@ DecodeResult specDecode(q::Model& model, const Tok& tok, u32 first, u32 n_prompt
     q::NgramPolicy ngp;
     ngp.verify_slope = opt.ngram_slope;
     ngp.reset();
-    if (opt.ngram) ngp.ng.norm = tok.crlfToLf();
+    if (opt.ngram) ngp.ng.norm = chat::ChatTokens::crlfToLf(tok.t);
     // the unfused decode path snapshots row 0 only: more than 1 draft would restore an unwritten set
     u32 ng_max = spec::rules::ngramDraftCap(q::max_ng_drafts, q::max_small_batch, 1, opt.ngram_max, model.fusedDecode());
     if (opt.ngram && ng_max > model.snap_sets) {
@@ -111,7 +111,7 @@ DecodeResult specDecode(q::Model& model, const Tok& tok, u32 first, u32 n_prompt
     }
     u32 ng_cycles = 0, ng_drafted = 0, ng_accepted = 0;
     auto emit = [&](u32 t) {
-        if (t == tok.im_end || t == tok.eot) return true;
+        if (t == tok.ct.im_end || t == tok.ct.endoftext) return true;
         generated.push_back(t);
         return generated.size() >= opt.max_tokens;
     };
@@ -332,7 +332,7 @@ DecodeResult dflashDecode(q::Model& model, const Tok& tok, u32 first, u32 n_prom
     ngp.reset();
     std::vector<u32> hist;
     if (opt.ngram) {
-        ngp.ng.norm = tok.crlfToLf();
+        ngp.ng.norm = chat::ChatTokens::crlfToLf(tok.t);
         hist.assign(prompt_ids.begin(), prompt_ids.end());
         hist.push_back(first);
     }
@@ -341,7 +341,7 @@ DecodeResult dflashDecode(q::Model& model, const Tok& tok, u32 first, u32 n_prom
     std::size_t verify_tokens = 0;
     bool done = false;
     auto emit = [&](u32 t) {
-        if (t == tok.im_end || t == tok.eot) return true;
+        if (t == tok.ct.im_end || t == tok.ct.endoftext) return true;
         generated.push_back(t);
         return generated.size() >= opt.max_tokens;
     };

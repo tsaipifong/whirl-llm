@@ -207,6 +207,10 @@
                        "proof": {"refactor": ["exit_rule", "golden_exact", "startup_sizing"]}},
    "config.device": {"metrics": [], "metrics_none": "the GPU is chosen once per process: no bench key",
                      "proof": {"refactor": ["exit_rule", "golden_exact", "startup_sizing"]}},
+   "prefill.plan": {"metrics": [], "metrics_none": "token facts once per vocabulary, the plan once per prompt: no bench key (seqtest / golden lines are the pin)",
+                    "proof": {"refactor": ["exit_rule", "golden_exact", "move_equal", "startup_sizing"]}},
+   "model.arch_open": {"metrics": [], "metrics_none": "once per process at load: no bench key",
+                       "proof": {"refactor": ["exit_rule", "golden_exact", "startup_sizing"]}},
    "model.arch_registry": {"metrics": [], "metrics_none": "table lookup at load: no bench key",
                            "proof": {"refactor": ["exit_rule", "golden_exact", "startup_sizing"]}},
    "model.qwen35": {"metrics": ["stage.decode_step", "stage.verify", "stage.prefill_chunk"],
@@ -584,6 +588,29 @@
    "callers": "rdeps",
    "manual": ["device lines of every golden / server log on both GPUs == the parent exe (startup_lines.py; the lane-1 GPU runner checks the arch per case)",
               "isolation: header-only on top of the model layer's device selection (include/whirl/model.h); no own iso program (needs HIP)"]
+  },
+  "prefill.plan": {
+   "id": "N15c", "desc": "the prompt's chat-token facts and the prefill plan, one copy for whirl.exe and whirl-server (arch025-N15c): chat::ChatTokens (include/whirl/chat_tokens.h, src/chat/chat_tokens.cpp in the whirl core library; was src/server/tokens.* and the CLI's own Tok facts): end-of-turn ids, think-open / system / image-end splits, the CR LF -> LF n-gram map; the cold prefill schedule (include/whirl/prefill_schedule.h, sched::*: chunks, forced splits, forward grouping, sched::prefillExec = the forward size both front ends wrote out); WHIRL_PREFILL_BATCH at load / after the load (vram::prefillBatchAtLoad / prefillBatchCap, include/whirl/vram_limit.h: the server's rule)",
+   "paths": ["include/whirl/chat_tokens.h", "src/chat/chat_tokens.cpp", "include/whirl/prefill_schedule.h"],
+   "lands_on": "arch025-r12cli (lane 1, N15c)",
+   "steps": ["cpu_tests", "cpu_server", "cpu_pins", "cpu_cli_tests", "golden_swift", "golden_moe", "srv_mt_precise", "srv_mt_precise_moe",
+             "seq_swift_precise", "seq_swift_balance", "seq_swift_fast", "seq_moe_precise", "seq_moe_balance", "srv_precise_cli"],
+   "gpus": {"golden_swift": 2, "golden_moe": 2, "srv_mt_precise": 2, "srv_mt_precise_moe": 2, "seq_swift_precise": 1, "seq_swift_balance": 1,
+            "seq_swift_fast": 1, "seq_moe_precise": 1, "seq_moe_balance": 1, "srv_precise_cli": 2},
+   "callers": "rdeps",
+   "manual": ["whirl-server-tests chat_tokens / chat_tokens_cli: the 44895be CLI Tok facts, thinkOpenSplit and CR LF map (copied verbatim) == chat::ChatTokens on the test GGUF; scratch/a25_lane1/crlf_tables.py: the CLI and server CR LF tables are equal row for row on the Swift-1.5 and Ornith-1.5 vocabularies (248320 rows, 53 mapped)",
+              "whirl-unit-tests vram: prefillBatchAtLoad / prefillBatchCap == the 44895be server code on every listed value; the 44895be CLI differed only with WHIRL_PREFILL_BATCH set (load floor 4096 -> 1280; a loaded batch below 1280 is no longer raised); sched::prefillExec == the written-out formula on both profiles",
+              "V-cli / V-srv: CLI golden + seqtest + server golden == the parent exe on both GPUs with every WHIRL_* unset (work_equal)"]
+  },
+  "model.arch_open": {
+   "id": "N15d", "desc": "the architecture module of an opened GGUF for whirl.exe and whirl-server (src/model/arch_open.h, header-only, arch025-N15d): model::openArch = general.architecture -> model::findArch, an unsupported name -> ModelError UnsupportedArch with the table's text (the code and text Config::fromGguf throws), else the module and ArchModule::fromGguf; called by the server's buildModel and the CLI's bench / chat (the other commands reach the same table inside Model::load)",
+   "paths": ["src/model/arch_open.h"],
+   "lands_on": "arch025-r12cli (lane 1, N15d)",
+   "steps": ["cpu_server", "cpu_cli_tests", "cpu_iso_model_arch_registry", "golden_swift", "golden_moe", "srv_mt_precise", "srv_mt_precise_moe"],
+   "gpus": {"golden_swift": 2, "golden_moe": 2, "srv_mt_precise": 2, "srv_mt_precise_moe": 2},
+   "callers": "rdeps",
+   "manual": ["whirl.exe bench / chat and whirl-server on a GGUF with an unsupported general.architecture: the same exit code and message as the 44895be exes (release.cpp UnsupportedArch text)",
+              "isolation: header-only over model.arch_registry and whirl/model.h (ModelError); no own iso program"]
   },
   "model.arch_registry": {
    "id": "M5a", "desc": "architecture registry (src/model/arch_registry.*, host-only library whirl_arch, linked by the server core and the model library): ArchName / ArchSizing / ArchModule / ArchTable, findArch / findArchName (explicit tables, no self-registration), the UnsupportedArch text generated from the table (byte-identical to v0.2.4 with the product table), slotStateBytes (the server's per-slot recurrent state + replay rows for the dGPU fit and the UMA check)",

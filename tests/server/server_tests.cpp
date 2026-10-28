@@ -23,7 +23,7 @@
 #include "server/startup_steps.h"
 #include "server/protocol.h"
 #include "server/tier_bridge.h"
-#include "server/tokens.h"
+#include "whirl/chat_tokens.h"
 #include "tier/kv_tier.h"
 #include "tier/ram_size.h"
 #include "whirl/vram_limit.h"
@@ -69,6 +69,7 @@
 #include <limits>
 #include <optional>
 #include <span>
+#include <unordered_map>
 
 // arch025-E1a: the pre-move sampling / acceptance code (verbatim copy, generated) and the fixed acceptance cases
 namespace whirl::server {
@@ -609,9 +610,9 @@ void testProtocol() {
 #include "../sampling/sampling_unit.inc"  // sampler, acceptor_* (arch025-X3: shared with whirl-sampling-tests)
 
 void testChatTokens() {
-    ChatTokens ct(tok());
-    CHECK(ct.im_start != ChatTokens::none && ct.im_end != ChatTokens::none && ct.think != ChatTokens::none &&
-          ct.nl != ChatTokens::none && ct.system != ChatTokens::none);
+    chat::ChatTokens ct(tok());
+    CHECK(ct.im_start != chat::ChatTokens::none && ct.im_end != chat::ChatTokens::none && ct.think != chat::ChatTokens::none &&
+          ct.nl != chat::ChatTokens::none && ct.system != chat::ChatTokens::none);
     auto enc = [](const std::string& s) {
         const auto ids = tok().encode(s, true);
         return std::vector<std::uint32_t>(ids.begin(), ids.end());
@@ -630,10 +631,102 @@ void testChatTokens() {
     // the next turn re-renders "<think>\n\n</think>": "\n\n" is one token
     const auto p3 = enc("<think>\n\n</think>");
     CHECK(p3.size() == 3 && p3[0] == ct.think);
-    const auto norm = ChatTokens::crlfToLf(tok());
+    const auto norm = chat::ChatTokens::crlfToLf(tok());
     const auto crlf = enc("\r\n");
     const auto lf = enc("\n");
     CHECK(crlf.size() == 1 && lf.size() == 1 && norm[crlf[0]] == lf[0]);
+}
+
+// arch025-N15c pin: whirl.exe's former token facts (src/cli/cli.h Tok at 44895be, copied verbatim below) == the
+// shared chat::ChatTokens the CLI uses now, on the test GGUF's vocabulary. The CR LF map: the CLI built it over
+// every token with piece(i, true) and returned an empty table when nothing maps (Ngram::nt reads an empty table
+// as identity); the shared one keeps normal tokens only. Equal as maps = the n-gram drafts cannot change.
+namespace cli_tok_44895be {
+struct Facts {
+    std::uint32_t im_end = 0xffffffffu, eot = 0xffffffffu, think_open = 0xffffffffu, newline = 0xffffffffu;
+    std::uint32_t im_start = 0xffffffffu, system = 0xffffffffu, vision_end = 0xffffffffu;
+};
+Facts facts(const Tokenizer& t) {
+    Facts r;
+    auto id = [&](const char* s) {
+        const TokenId i = t.find(s);
+        return i < 0 ? 0xffffffffu : static_cast<std::uint32_t>(i);
+    };
+    r.im_end = id("<|im_end|>");
+    r.eot = id("<|endoftext|>");
+    r.think_open = id("<think>");
+    const std::vector<TokenId> nl = t.encode("\n");
+    if (nl.size() == 1) r.newline = static_cast<std::uint32_t>(nl[0]);
+    r.im_start = id("<|im_start|>");
+    const std::vector<TokenId> sy = t.encode("system", false);
+    if (sy.size() == 1) r.system = static_cast<std::uint32_t>(sy[0]);
+    r.vision_end = id("<|vision_end|>");
+    return r;
+}
+std::size_t thinkOpenSplit(const Facts& f, std::span<const std::uint32_t> ids) {
+    const std::size_t n = ids.size();
+    if (n >= 2 && ids[n - 2] == f.think_open && ids[n - 1] == f.newline) return n - 1;
+    return 0;
+}
+std::vector<std::uint32_t> crlfToLf(const Tokenizer& t) {
+    const std::size_t n = t.size();
+    std::unordered_map<std::string, std::uint32_t> by_piece;
+    std::vector<std::string> pieces(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        pieces[i] = t.piece(static_cast<TokenId>(i), true);
+        by_piece.emplace(pieces[i], static_cast<std::uint32_t>(i));
+    }
+    std::vector<std::uint32_t> norm(n);
+    bool any = false;
+    for (std::size_t i = 0; i < n; ++i) {
+        norm[i] = static_cast<std::uint32_t>(i);
+        const std::string& p = pieces[i];
+        if (p.find("\r\n") == std::string::npos) continue;
+        std::string q;
+        for (std::size_t j = 0; j < p.size(); ++j) {
+            if (p[j] == '\r' && j + 1 < p.size() && p[j + 1] == '\n') continue;
+            q.push_back(p[j]);
+        }
+        auto it = by_piece.find(q);
+        if (it != by_piece.end()) {
+            norm[i] = it->second;
+            any = true;
+        }
+    }
+    if (!any) norm.clear();
+    return norm;
+}
+}  // namespace cli_tok_44895be
+
+void testChatTokensCli() {
+    const Tokenizer& t = tok();
+    const cli_tok_44895be::Facts o = cli_tok_44895be::facts(t);
+    const chat::ChatTokens ct(t);
+    CHECK_EQ(ct.im_end, o.im_end);
+    CHECK_EQ(ct.endoftext, o.eot);
+    CHECK_EQ(ct.think, o.think_open);
+    CHECK_EQ(ct.nl, o.newline);
+    CHECK_EQ(ct.im_start, o.im_start);
+    CHECK_EQ(ct.system, o.system);
+    CHECK_EQ(ct.vision_end, o.vision_end);
+    const std::vector<std::uint32_t> a = cli_tok_44895be::crlfToLf(t), b = chat::ChatTokens::crlfToLf(t);
+    auto nt = [](const std::vector<std::uint32_t>& m, std::uint32_t i) { return i < m.size() ? m[i] : i; };
+    std::size_t diff = 0, mapped = 0;
+    for (std::uint32_t i = 0; i < static_cast<std::uint32_t>(t.size()); ++i) {
+        diff += nt(a, i) != nt(b, i);
+        mapped += nt(b, i) != i;
+    }
+    CHECK_EQ(diff, std::size_t(0));
+    CHECK(mapped > 0);  // the product vocabularies map 53 CR LF tokens (crlf_tables.py)
+    auto enc = [&](const std::string& s) {
+        const auto ids = t.encode(s, true);
+        return std::vector<std::uint32_t>(ids.begin(), ids.end());
+    };
+    for (const char* s : {"<|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\n<think>\n", "<|im_start|>assistant\n",
+                          "<think>", "\n", "", "<think>\n\n</think>\n\n"}) {
+        const auto ids = enc(s);
+        CHECK_EQ(ct.thinkOpenSplit(ids), cli_tok_44895be::thinkOpenSplit(o, ids));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3506,7 +3599,7 @@ void testServeCkptsClamp() {
 
 // Chat-shaped token prompts (ChatML special tokens + random body ids) for the supersede / branch tests.
 struct ChatBuild {
-    ChatTokens ct;
+    chat::ChatTokens ct;
     std::uint32_t user = 0, assistant = 0;
     ChatBuild() : ct(tok()) {
         user = static_cast<std::uint32_t>(tok().encode("user", false).at(0));
@@ -4482,8 +4575,8 @@ struct ListEvictor final : PagePool::Evictor {
 namespace ps_test {
 constexpr std::uint32_t kImStart = 1, kImEnd = 2, kNl = 3, kSystem = 4, kThink = 5, kVisEnd = 6;
 
-ChatTokens chatIds() {
-    ChatTokens ct;
+chat::ChatTokens chatIds() {
+    chat::ChatTokens ct;
     ct.im_start = kImStart;
     ct.im_end = kImEnd;
     ct.nl = kNl;
@@ -4534,7 +4627,7 @@ struct TSlot : SlotPrefix {
 
 void testPrefixStore() {
     using namespace ps_test;
-    const ChatTokens ct = chatIds();
+    const chat::ChatTokens ct = chatIds();
     // ---- the chunk schedule: the store's functions are the prefill_schedule.h ones over the prompt's splits
     {
         PrefixStore st(ct, cfgFor(false));
@@ -5358,7 +5451,7 @@ void testCkptF1() {
 // empty, retry works).
 void testGovParkSpes() {
     using namespace ps_test;
-    const ChatTokens ct = chatIds();
+    const chat::ChatTokens ct = chatIds();
     auto fill = [](CkRig& r, PrefixStore& ps, device::Stream s2) {
         ps.spes().resize(2);
         for (Spe& sp : ps.spes()) r.cs->init(sp.ck, false);
@@ -7022,7 +7115,7 @@ struct TbRig {
     NullBackend nb;
     std::unique_ptr<MockModel> model;
     std::vector<KvArr> kv;
-    std::unique_ptr<ChatTokens> ct;
+    std::unique_ptr<chat::ChatTokens> ct;
     std::unique_ptr<PrefixStore> ps;
     std::unique_ptr<CkptStore> cs;
     std::unique_ptr<tier::Tier> tier;
@@ -7037,7 +7130,7 @@ struct TbRig {
         mc.kv_extra_rows = std::move(extra_rows);
         model = std::make_unique<MockModel>(nb, tok(), mc);
         kv = model->kvArrays();
-        ct = std::make_unique<ChatTokens>(tok());
+        ct = std::make_unique<chat::ChatTokens>(tok());
         ps = std::make_unique<PrefixStore>(*ct, PrefixStore::Config{});
         cs = std::make_unique<CkptStore>(nb, *model, CkptStore::Layout{model->convBytes(), model->ssmBytes(), false});
         tier = tier::Tier::create(nb, 64ull << 20, 42, 0);
@@ -8988,6 +9081,7 @@ int main(int argc, char** argv) {
         {"acceptor_rules", testAcceptorRules},
         {"acceptor_random", testAcceptorRandom},
         {"chat_tokens", testChatTokens},
+        {"chat_tokens_cli", testChatTokensCli},  // arch025-N15c
         {"endpoints", testEndpoints},
         {"http_fake_engine", testHttpFakeEngine},
         {"vram_watch", testVramWatch},

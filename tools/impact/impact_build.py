@@ -96,7 +96,7 @@ PATHS = {
 PATH_FILES = {
     "http": ["src/server/http.cpp", "src/server/http.h", "src/server/protocol.cpp", "src/server/protocol.h", "src/server/stream.cpp",
              "src/server/stream.h", "src/server/engine_api.h"],
-    "tokenizer": ["src/tokenizer/*", "src/chat/*", "include/whirl/tokenizer.h", "include/whirl/chat*.h", "src/server/tokens.*"],
+    "tokenizer": ["src/tokenizer/*", "src/chat/*", "include/whirl/tokenizer.h", "include/whirl/chat*.h"],
     "startup": ["src/release/*", "tools/package_release.ps1", "redist/*", "cmake/release.cmake", "src/hip/runtime_loader.cpp",
                 "src/hip/hip_api.h", "include/whirl/hip_runtime_loader.h", "tests/hiprt/*"],
     "build": ["CMakeLists.txt", "cmake/*.cmake", "build.bat"],
