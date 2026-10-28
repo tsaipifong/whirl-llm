@@ -9066,6 +9066,8 @@ int main(int argc, char** argv) {
         {"spec_rules_d6", r12b::testRulesD6},
         {"spec_rules_d8", r12b::testRulesD8},
         {"spec_rules_d14", r12b::testRulesD14},
+        {"spec_rules_d16", r12b::testRulesD16},  // arch025-lane1
+        {"spec_rules_d17", r12b::testRulesD17},
         {"slot_draft_engine_caps", testSlotDraftEngineCaps},  // arch025-mutgap
         {"slot_drafts_one_slot", testSlotDraftsOneSlot},
         {"concurrency_slot2", [] { testConcurrency(4, 12, true, 0, 2); }},

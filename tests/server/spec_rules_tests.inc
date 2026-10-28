@@ -280,4 +280,49 @@ void testRulesD6() {
     }
 }
 
+// ---- arch025-lane1: the last two rules both loops still wrote out (verbatim pre-change code, 3eef475) --------------
+
+// decode.cpp:167-169 (WHIRL_MTP_ADAPT, one sequence)
+std::uint32_t old_cli_adapt(float acc_ema, std::uint32_t adapt, std::uint32_t n_draft) {
+    const std::uint32_t want = static_cast<std::uint32_t>(std::ceil(acc_ema + static_cast<float>(adapt)));
+    return std::clamp<std::uint32_t>(want, 1, n_draft);
+}
+// engine.cpp:1345-1350 Engine::pickDrafts (mtp_adapt branch; nd = draftCap(A))
+std::uint32_t old_srv_adapt(std::span<const float> emas, std::uint32_t adapt, std::uint32_t nd) {
+    std::uint32_t want = 1;
+    for (float e : emas) want = std::max(want, static_cast<std::uint32_t>(std::ceil(e + static_cast<float>(adapt))));
+    return std::min(nd, want);
+}
+// decode.cpp:249 / engine.cpp:1804 (acc_ema after a cycle with acc accepted drafts)
+float old_ema(float ema, std::uint32_t acc) { return 0.7f * ema + 0.3f * static_cast<float>(acc); }
+
+// D16: WHIRL_MTP_ADAPT's draft count: one rule (the largest want over the slots, at least 1, within the cap); for one
+// sequence == the CLI's clamp
+void testRulesD16() {
+    std::mt19937 g(1606);
+    for (std::uint32_t adapt = 1; adapt <= 4; ++adapt)
+        for (std::uint32_t cap = 1; cap <= q35::max_drafts; ++cap)
+            for (float e = 0.0f; e <= 16.0f; e += 0.37f) {
+                const float one[1] = {e};
+                CHECK_EQ(sr::adaptDrafts(one, adapt, cap), old_cli_adapt(e, adapt, cap));
+                CHECK_EQ(sr::adaptDrafts(one, adapt, cap), old_srv_adapt(one, adapt, cap));
+            }
+    for (int it = 0; it < 2000; ++it) {
+        std::vector<float> emas(1 + g() % 16);
+        for (auto& x : emas) x = static_cast<float>(g() % 1700) / 100.0f;
+        const std::uint32_t adapt = 1 + g() % 4, cap = g() % (q35::max_drafts + 1);
+        CHECK_EQ(sr::adaptDrafts(emas, adapt, cap), old_srv_adapt(emas, adapt, cap));
+    }
+}
+
+// D17: the acceptance EMA both loops keep (bit-identical)
+void testRulesD17() {
+    std::mt19937 g(1707);
+    for (int it = 0; it < 5000; ++it) {
+        const float e = static_cast<float>(g() % 1700000) / 100000.0f;
+        const std::uint32_t acc = g() % (q35::max_ng_drafts + 1);
+        CHECK_EQ(std::bit_cast<std::uint32_t>(sr::accEma(e, acc)), std::bit_cast<std::uint32_t>(old_ema(e, acc)));
+    }
+}
+
 }  // namespace r12b
