@@ -11,7 +11,7 @@
 //   D2  n-gram vs MTP score draft count    -> ngramAltDrafts + mtpScore: the server rule (previous auto pick or 3)
 //   D3  n-gram draft cap                   -> ngramDraftCap + ctxRoom (each loop passes its own snapshot / row budget)
 //   D4  pickDrafts cycle counter           -> caller-owned input of qwen35::pickDrafts (CLI: cycles of this call;
-//                                             server: policy_cycles_ with relaxacc, else n_cycles_), unchanged
+//                                             server: spec_.policy_cycles with relaxacc, else spec_.n_cycles), unchanged
 //   D6  relaxacc synthetic cycle cost      -> synthCycleMs
 //   D8  context stop                       -> decodeRoom (each loop passes its own draft room)
 //   D14 per-cycle MTP draft cap            -> soloDraftCap = slotDraftCap for one slot (the server's draftCap)

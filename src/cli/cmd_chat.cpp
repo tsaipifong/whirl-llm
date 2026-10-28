@@ -182,8 +182,7 @@ int cmdChat(const Args& a) {
         if (auto mv = envGet("VIS_MODE")) vis->mode = vision::parseMode(*mv).value_or(vision::Mode::automatic);
         std::array<std::array<std::uint64_t, 2>, 16> lend_raw{};
         const std::size_t n_lend = model.lendScratch(lend_raw);
-        std::vector<vision::Region> lend;
-        for (std::size_t i = 0; i < n_lend; ++i) lend.push_back({lend_raw[i][0], lend_raw[i][1]});
+        const std::vector<vision::Region> lend = vision::lendRegions(lend_raw, n_lend);
         for (std::size_t i = 0; i < preps.size(); ++i) {
             const vision::Prepared& pp = preps[i];
             embs.emplace_back(static_cast<std::size_t>(pp.nTokens()) * vis->hp.proj_dim);

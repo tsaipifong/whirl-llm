@@ -126,6 +126,14 @@ struct Region {
     std::uint64_t len = 0;
 };
 
+// The first n regions of a model's lendScratch table ({ptr, len} rows) as Regions (the CLI chat and the server
+// engine; arch025-N4b, was a loop in each).
+inline std::vector<Region> lendRegions(std::span<const std::array<std::uint64_t, 2>> raw, std::size_t n) {
+    std::vector<Region> out;
+    for (std::size_t i = 0; i < n; ++i) out.push_back({raw[i][0], raw[i][1]});
+    return out;
+}
+
 enum class Mode { automatic, resident, stream };
 
 // First fit of the encoder's buffers into lent regions, largest buffer first (Vision::encode). at[k] = {region, offset},
