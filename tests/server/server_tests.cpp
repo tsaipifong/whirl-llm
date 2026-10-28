@@ -15,6 +15,7 @@
 #include "server/draft_caps.h"
 #include "model/arch_registry.h"  // arch025-M5: findArch over a test table
 #include "server/engine.h"
+#include "server/engine_vision.h"  // ImageEmbeddings (arch025-N4b)
 #include "server/engine_thread.h"
 #include "server/http.h"
 #include "server/log.h"
@@ -5254,6 +5255,97 @@ void testSampleBuffers() {
     }
 }
 
+// arch025-N4b: the engine's image embeddings as one component (ImageEmbeddings, src/server/engine_vision.*; were
+// Engine members vis_cfg_ .. vis_rel_pending_ and Engine::embGet / embUnpin / embEvict / visPrepare / visDone /
+// visIdle / visWakeNeeded). Cache by content hash (hit = same entry, no encode), LRU eviction of unpinned entries down
+// to cache_bytes, pins through prepare / done, wakeNeeded; vision::lendRegions == the loop both callers had. The
+// end-to-end vision tests (vision, vis_*) pin the engine's use of it.
+void testImageEmbeddings() {
+    // vision::lendRegions: the CLI's and the engine's former loop ({raw[i][0], raw[i][1]} for i < n)
+    {
+        std::array<std::array<std::uint64_t, 2>, 16> raw{};
+        raw[0] = {0x1000, 64};
+        raw[1] = {0x2000, 128};
+        raw[2] = {0x3000, 256};
+        const std::vector<vision::Region> r = vision::lendRegions(raw, 2);
+        CHECK_EQ(r.size(), 2u);
+        CHECK_EQ(r[0].ptr, DevPtr{0x1000});
+        CHECK_EQ(r[0].len, 64u);
+        CHECK_EQ(r[1].ptr, DevPtr{0x2000});
+        CHECK_EQ(r[1].len, 128u);
+        CHECK(vision::lendRegions(raw, 0).empty());
+    }
+    NullBackend nb;
+    MockConfig mc;
+    MockModel model(nb, tok(), mc);
+    {
+        ImageEmbeddings none(model, nb);
+        none.attach(VisionConfig{});
+        CHECK(!none.wakeNeeded());
+        CHECK(none.config().vis == nullptr);
+    }
+    MockVision mv;
+    VisionConfig vc;
+    vc.vis = &mv;
+    vc.cache_bytes = 256;  // two 2x2-token images (4 tokens x projDim 8 x 4 bytes = 128 bytes each)
+    ImageEmbeddings ie(model, nb);
+    ie.attach(vc);
+    CHECK(ie.config().vis == &mv);
+    auto img = [](std::uint8_t h) {
+        vision::Prepared p;
+        p.nx = 2;
+        p.ny = 2;
+        p.hash[0] = h;
+        return p;
+    };
+    const vision::Prepared a = img(1), b = img(2), c = img(3);
+    EmbEntry* ea = ie.get(a, 1, 0);
+    CHECK_EQ(ea->data.size(), 32u);
+    CHECK_EQ(ea->pins, 1u);
+    CHECK_EQ(ie.encoded(), 1u);
+    CHECK_EQ(ie.bytes(), 128u);
+    CHECK(ie.get(a, 2, 1) == ea);  // hit
+    CHECK_EQ(ie.hits(), 1u);
+    CHECK_EQ(ie.encoded(), 1u);
+    CHECK_EQ(ea->pins, 2u);
+    CHECK_EQ(mv.encodes.load(), 1);
+    CHECK(ie.wakeNeeded());  // the mock encoder is loaded after its first encode
+    ie.unpin(ea);
+    ie.unpin(ea);
+    CHECK_EQ(ea->pins, 0u);
+    EmbEntry* eb = ie.get(b, 3, 0);
+    EmbEntry* ec = ie.get(c, 4, 1);  // 384 > 256: the unpinned a (least recently used) goes
+    CHECK_EQ(ie.bytes(), 256u);
+    CHECK_EQ(ie.encoded(), 3u);
+    CHECK(ie.get(a, 5, 2) != nullptr);  // re-encoded; every entry pinned -> nothing evicted
+    CHECK_EQ(ie.encoded(), 4u);
+    CHECK_EQ(ie.bytes(), 384u);
+    // a request's spans: prepare pins the entry (hit) and points the span at it, done releases the pins
+    JobVis jv;
+    jv.preps.push_back(b);
+    jv.spans.resize(1);
+    jv.spans[0].start = 0;
+    jv.spans[0].n = 4;
+    jv.ents.resize(1, nullptr);
+    const std::uint32_t pins_b = eb->pins;
+    ie.prepare(0, &jv, 9, 0);
+    CHECK(jv.ents[0] == eb);
+    CHECK(jv.spans[0].emb == eb->data.data());
+    CHECK_EQ(eb->pins, pins_b + 1);
+    CHECK_EQ(ie.hits(), 2u);
+    ie.prepare(0, &jv, 9, 4);  // span already before `from`: no embeddings needed
+    CHECK(jv.spans[0].emb == nullptr);
+    ie.done(0, &jv);
+    CHECK(jv.ents[0] == nullptr);
+    CHECK_EQ(eb->pins, pins_b);
+    ie.prepare(0, nullptr, 9, 0);  // no images: the slot's map is cleared, nothing else
+    ie.done(0, nullptr);
+    CHECK_EQ(ie.encoded(), 4u);
+    (void)ec;
+    ie.idle();  // the mock's idleTick never releases: no state change
+    CHECK_EQ(ie.bytes(), 384u);
+}
+
 // arch025-x1m2 (mutant c4-align-off-by-one): CkptStore's 256-byte rounding of each part at exact multiples of 256 and
 // just above them. The mock's own parts (32 / 64 / 64 bytes) never hit a multiple; real conv / ssm / hidden sizes do.
 void testCkptAlign() {
@@ -6444,6 +6536,31 @@ void testDFlashFit() {
     CHECK(pb.batch < 4096 || pb.n_ck < 4);
     // server_main adds it to the fit input before planFit, and decides --draft dflash before that: startup_order_fit
     // (arch025-C0) runs serveMain's own code for that over a recording sizing module
+}
+
+// arch025-N10c (lane 1 leg 5): ServerRun::planSlots computed the per-slot replay rows itself (2d166f4 server_main.cpp:
+// 958-959); it now takes model::slotStateBytes(sizing, cfg).pend1. The old expression, verbatim, must equal it.
+static void testSlotReplayRows() {
+    using namespace whirl;
+    for (std::uint32_t msb : {16u, 32u}) {
+        model::ArchSizing s;
+        s.max_small_batch = msb;
+        qwen35::Config cfg;
+        cfg.n_layer = 64;
+        cfg.interval = 4;
+        cfg.d_conv = 4;
+        cfg.n_k_heads = 16;
+        cfg.n_v_heads = 48;
+        cfg.d_state = 128;
+        cfg.d_inner = 6144;
+        std::uint64_t ng = 0;
+        for (std::uint32_t li = 0; li < cfg.n_layer; ++li)
+            if (!cfg.isAttn(li)) ++ng;
+        const std::uint64_t pend = ng * (static_cast<std::uint64_t>(msb) * cfg.convCh() * 4 +
+                                         static_cast<std::uint64_t>(msb) * cfg.n_v_heads * (cfg.d_state + cfg.headV() + 2) * 4);
+        CHECK(pend > 0);
+        CHECK_EQ(model::slotStateBytes(s, cfg).pend1, pend);
+    }
 }
 
 // arch025-M5 (PLAN X-16, hipfire-arch-toy): a FAKE architecture table, never the product's. findArch finds the toy
@@ -9133,6 +9250,8 @@ int main(int argc, char** argv) {
         {"protocol", testProtocol},
         {"sampler", testSampler},
         {"sample_buffers", testSampleBuffers},  // arch025-N4a
+        {"image_embeddings", testImageEmbeddings},  // arch025-N4b
+        {"slot_replay_rows", testSlotReplayRows},  // arch025-N10c
         {"acceptor_fixed", testAcceptorFixed},
         {"acceptor_rules", testAcceptorRules},
         {"acceptor_random", testAcceptorRandom},

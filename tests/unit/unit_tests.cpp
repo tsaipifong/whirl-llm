@@ -3346,6 +3346,149 @@ void testMemGovernorGrowOvershoot() {
     }
 }
 
+// arch025-N10c (lane 1 leg 5): ServerRun::planSlots' slot re-check arithmetic (2d166f4 server_main.cpp:954-969: the
+// fixed VRAM per slot and shared, and the pool a slot count leaves) -> startfit::slotFixed / poolTokensWith; the
+// replay rows are model::slotStateBytes' pend1 (the same expression; whirl-server-tests slot_replay_rows). References = the old text. Written before the
+// module functions existed.
+void testSlotFixed() {
+    using namespace whirl;
+    constexpr std::uint64_t MiB = 1ull << 20;
+    std::size_t n = 0, bad = 0;
+    for (std::uint64_t st : {0ull, 37 * MiB + 5, 150 * MiB})
+        for (std::uint64_t pend : {0ull, 9 * MiB + 77})
+            for (std::uint64_t n_ck : {0ull, 1ull, 3ull})
+                for (std::uint64_t ck : {0ull, 39 * MiB + 1})
+                    for (bool use_dfl : {false, true})
+                        for (std::uint64_t dfl : {0ull, 300 * MiB + 3})
+                            for (std::uint32_t n_spe : {0u, 2u})
+                                for (std::uint32_t snap : {0u, 1u, 4u}) {
+                                    startfit::SlotFixedIn in;
+                                    in.state = st;
+                                    in.replay = pend;
+                                    in.n_ck = n_ck;
+                                    in.ck = ck;
+                                    in.dflash_slot = use_dfl ? dfl : 0;
+                                    in.n_spe = n_spe;
+                                    in.snap_sets = snap;
+                                    const startfit::SlotFixed r = startfit::slotFixed(in);
+                                    const std::uint64_t per_slot = (st + pend + n_ck * ck + (use_dfl ? dfl : 0)) * 104 / 100;
+                                    const std::uint64_t shared =
+                                        (n_spe * ck + static_cast<std::uint64_t>(snap) * st) * 104 / 100 + (256ull << 20);
+                                    ++n;
+                                    if (r.per_slot != per_slot || r.shared != shared) ++bad;
+                                }
+    std::size_t m = 0;
+    for (std::uint64_t av : {0ull, 300 * MiB, 9000 * MiB, 31000 * MiB})
+        for (std::uint64_t per_slot : {0ull, 200 * MiB + 9})
+            for (std::uint64_t shared : {256 * MiB, 2000 * MiB})
+                for (std::uint64_t per_tok : {0ull, 22528ull, 65536ull})
+                    for (std::uint32_t p : {1u, 2u, 7u, 16u}) {
+                        const std::uint64_t fixed = shared + per_slot * p;
+                        const std::uint64_t old = av > fixed && per_tok ? (av - fixed) / per_tok : 0;
+                        ++m;
+                        if (startfit::poolTokensWith(p, av, per_slot, shared, per_tok) != old) ++bad;
+                    }
+    std::printf("slot fixed: %zu + %zu cases vs the old planSlots text, %zu differ\n", n, m, bad);
+    CHECK(n == 864 && m == 192);
+    CHECK_EQ(bad, std::size_t{0});
+}
+
+// arch025-N10b (lane 1 leg 5): the VRAM the KV pool may use was computed three times in server_main.cpp (buildModel's
+// pre-load fit, ServerRun::planSlots' slot re-check, ServerRun::planPool's pool sizing with its "kv pool sizing:" note).
+// poolbudget::kvRoom / kvRoomNote / defaultReserveMb are the one copy; the references below are the three old texts
+// (2d166f4 server_main.cpp:512-517, :949-953, :1293-1327, values passed in instead of read), compared over a grid.
+// Written before the module function existed.
+void testKvRoom() {
+    using namespace whirl;
+    constexpr std::uint64_t MiB = 1ull << 20, GiB = 1ull << 30;
+    // the old reserve default (the three copies wrote the same expression)
+    for (bool moe : {false, true})
+        for (bool ok : {false, true}) CHECK_EQ(poolbudget::defaultReserveMb(moe, ok), moe ? 1536u : (ok ? 768u : 3072u));
+    // the old pre-load / slot re-check rule (copies 1 and 2: no vision reserve, no note)
+    const auto old12 = [](std::uint64_t free, std::uint64_t res, bool res_explicit, bool w_ok, std::uint64_t budget,
+                          std::uint64_t usage, std::uint64_t margin, std::uint64_t headroom) {
+        std::uint64_t av = free > res ? free - res : 0;
+        if (!res_explicit && w_ok) av = std::min(av, budget > usage + margin ? budget - usage - margin : 0);
+        av = av > headroom ? av - headroom : 0;
+        return av;
+    };
+    // the old pool-sizing lambda with its note (copy 3)
+    const auto old3 = [](std::uint64_t free, std::uint64_t reserve, bool reserve_explicit, bool w_ok, std::uint64_t budget,
+                         std::uint64_t usage, std::uint64_t budget_margin, std::uint64_t headroom, std::uint64_t vis_reserve,
+                         const std::string& why, const std::string& vis_reserve_note, std::string& budget_note) {
+        std::uint64_t a = free > reserve ? free - reserve : 0;
+        if (!reserve_explicit && w_ok) {
+            const std::uint64_t room = budget > usage + budget_margin ? budget - usage - budget_margin : 0;
+            budget_note = std::format("WDDM budget {:.2f} GiB, used {:.2f} GiB, margin {} MiB ({}) -> room {:.2f} GiB; free "
+                                      "VRAM {:.2f} GiB minus {} MiB -> {:.2f} GiB",
+                                      budget / 1073741824.0, usage / 1073741824.0, budget_margin >> 20, why, room / 1073741824.0,
+                                      free / 1073741824.0, reserve >> 20, a / 1073741824.0);
+            a = std::min(a, room);
+        } else if (reserve_explicit) {
+            budget_note = std::format("WHIRL_POOL_RESERVE_MB={}: free VRAM {:.2f} GiB minus the reserve, WDDM budget not applied",
+                                      reserve >> 20, free / 1073741824.0);
+        } else {
+            budget_note = std::format("WDDM budget unavailable: free VRAM {:.2f} GiB minus {} MiB", free / 1073741824.0, reserve >> 20);
+        }
+        if (headroom > 0) {
+            budget_note += std::format("; minus {} MiB desktop headroom (WHIRL_VRAM_HEADROOM_MB) -> {:.2f} GiB", headroom >> 20,
+                                       (a > headroom ? a - headroom : 0) / 1073741824.0);
+            a = a > headroom ? a - headroom : 0;
+        }
+        if (vis_reserve > 0 && !reserve_explicit) {
+            a = poolbudget::kvAvail(a, vis_reserve);
+            budget_note += std::format("; minus {} -> {:.2f} GiB", vis_reserve_note, a / 1073741824.0);
+        }
+        return a;
+    };
+    const std::string why = "pending 0 MiB + room 2048 MiB (floor)";
+    const std::string vnote = "1007 MiB for the vision encoder (--mmproj)";
+    std::size_t n = 0, bad = 0;
+    for (std::uint64_t free : {0ull, 1 * GiB, 20 * GiB + 123 * MiB, 31 * GiB})
+        for (std::uint64_t res : {768 * MiB, 3072 * MiB, 0ull})
+            for (bool res_explicit : {false, true})
+                for (bool w_ok : {false, true})
+                    for (std::uint64_t budget : {0ull, 31767 * MiB})
+                        for (std::uint64_t usage : {0ull, 29696 * MiB, 40 * GiB})
+                            for (std::uint64_t margin : {0ull, 2068 * MiB})
+                                for (std::uint64_t headroom : {0ull, 512 * MiB, 40 * GiB})
+                                    for (std::uint64_t vis : {0ull, 1007 * MiB}) {
+                                        poolbudget::RoomIn in;
+                                        in.free = free;
+                                        in.reserve = res;
+                                        in.reserve_explicit = res_explicit;
+                                        in.wddm_ok = w_ok;
+                                        in.local_budget = budget;
+                                        in.local_usage = usage;
+                                        in.margin = margin;
+                                        in.headroom = headroom;
+                                        in.vis_reserve = vis;
+                                        const poolbudget::Room r = poolbudget::kvRoom(in);
+                                        std::string note_old;
+                                        const std::uint64_t a3 =
+                                            old3(free, res, res_explicit, w_ok, budget, usage, margin, headroom, vis, why, vnote, note_old);
+                                        const std::string note_new = poolbudget::kvRoomNote(in, r, why, vnote);
+                                        ++n;
+                                        if (r.bytes != a3 || note_new != note_old) ++bad;
+                                        if (vis == 0) {
+                                            ++n;
+                                            if (r.bytes != old12(free, res, res_explicit, w_ok, budget, usage, margin, headroom)) ++bad;
+                                        }
+                                    }
+    std::printf("kv room: %zu cases vs the three old server_main copies, %zu differ\n", n, bad);
+    CHECK(n == 3456 + 1728);
+    CHECK_EQ(bad, std::size_t{0});
+    // control: the comparison is live (a changed headroom rule would be seen)
+    {
+        poolbudget::RoomIn in;
+        in.free = 20 * GiB;
+        in.reserve = 768 * MiB;
+        in.headroom = 512 * MiB;
+        CHECK_EQ(poolbudget::kvRoom(in).bytes, old12(20 * GiB, 768 * MiB, false, false, 0, 0, 0, 512 * MiB));
+        CHECK(poolbudget::kvRoom(in).bytes != old12(20 * GiB, 768 * MiB, false, false, 0, 0, 0, 0));
+    }
+}
+
 // REVIEW-GOV-3 question 4 (R9700 Ornith --mmproj, gov3 orn_new3): startup left exactly the margin free (29696 MiB local,
 // budget 31767 MiB, margin 2068 MiB); the first image added 873 MiB (encoder weights, 860.5 MiB pinned, made resident) and a
 // 1920x1080 image 134 MiB more (activations that did not fit the lent prefill scratch), so 30 MiB were left before the
@@ -5422,6 +5565,8 @@ int main(int argc, char** argv) {
     testStartupFit();
     testB0SizingFollowUps();
     testVisionPoolReserve();
+    testKvRoom();
+    testSlotFixed();
     testMemGovernor();
     testMemGovernorGrowOvershoot();
     testGpuSelect();
