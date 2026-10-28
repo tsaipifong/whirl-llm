@@ -1,0 +1,122 @@
+{
+ "_doc": "Kernel families (arch025 N14): each family's fragments, per architecture, compile alone with only the fragments of their declared deps (tools/gates/kernel_iso_check.py). Headers a fragment includes (kernels/shared/*.h, kernel_args.h, iq_tables.h, ...) belong to the includer. modules.json kernels.<name> rows use the same paths.",
+ "families": {
+  "kernels.common": {
+   "desc": "smoke kernel, helpers, quant block decoders, packed scales, warp / block reductions",
+   "paths": [
+    "kernels/smoke.hip",
+    "kernels/common.hip",
+    "kernels/gfx1151/common.hip",
+    "kernels/gfx1151/quant.hip"
+   ],
+   "deps": []
+  },
+  "kernels.gemv": {
+   "desc": "decode matvec: f32 / f16 activations, int8 GEMV (grouped ABI), multi-row, WMMA mid-batch, gfx1151 units / Q6_K",
+   "paths": [
+    "kernels/gemv_f.hip",
+    "kernels/gemv_q.hip",
+    "kernels/gemv_mr.hip",
+    "kernels/gemv_w.hip",
+    "kernels/gemv_wp.hip",
+    "kernels/gemv_wx.hip",
+    "kernels/gfx1151/gemv_f.hip",
+    "kernels/gfx1151/gemv_q.hip",
+    "kernels/gfx1151/gemv_mr.hip",
+    "kernels/gfx1151/gemv_wunit.hip",
+    "kernels/gfx1151/gemv_q6.hip"
+   ],
+   "deps": [
+    "kernels.common"
+   ]
+  },
+  "kernels.gemm": {
+   "desc": "prefill GEMM (WMMA f16), small-batch GEMM, MXFP4 x fp8 GEMM, gemv_h (precise f16-activation decode / verify matmul on the small-batch stages)",
+   "paths": [
+    "kernels/gemm_*.hip",
+    "kernels/gemv_h.hip",
+    "kernels/gfx1151/gemm_*.hip",
+    "kernels/gfx1151/gemv_h.hip"
+   ],
+   "deps": [
+    "kernels.common",
+    "kernels.norm"
+   ]
+  },
+  "kernels.gdn": {
+   "desc": "Gated DeltaNet: decode fusions, per-token / chunked / WMMA / strix prefill, sequential scan",
+   "paths": [
+    "kernels/fused_decode.hip",
+    "kernels/gdn_*.hip",
+    "kernels/gfx1151/fused_decode.hip",
+    "kernels/gfx1151/gdn*.hip"
+   ],
+   "deps": [
+    "kernels.common",
+    "kernels.gemv",
+    "kernels.attn"
+   ]
+  },
+  "kernels.norm": {
+   "desc": "get_rows, norms, rope, elementwise, prefill activation fusions, WMMA probes, requant",
+   "paths": [
+    "kernels/misc_rows_norm.hip",
+    "kernels/misc_probe_requant.hip",
+    "kernels/prefill_fused.hip",
+    "kernels/gfx1151/misc_rows_norm.hip",
+    "kernels/gfx1151/misc_probe_requant.hip",
+    "kernels/gfx1151/prefill_fused.hip"
+   ],
+   "deps": [
+    "kernels.common"
+   ]
+  },
+  "kernels.attn": {
+   "desc": "paged KV (kv_store), decode / split / prefill attention, attn_ws4 (gfx1151); argmax rides in misc_kv_argmax.hip",
+   "paths": [
+    "kernels/attn*.hip",
+    "kernels/misc_kv_argmax.hip",
+    "kernels/gfx1151/attn*.hip"
+   ],
+   "deps": [
+    "kernels.common",
+    "kernels.gemm"
+   ]
+  },
+  "kernels.moe": {
+   "desc": "mixture of experts: route, gather, expert GEMV / GEMM, MXFP4 experts, precise f32 experts",
+   "paths": [
+    "kernels/moe*.hip",
+    "kernels/gfx1151/moe.hip"
+   ],
+   "deps": [
+    "kernels.common",
+    "kernels.gemv",
+    "kernels.gemm",
+    "kernels.gdn"
+   ]
+  },
+  "kernels.sample": {
+   "desc": "token tables, greedy / draft picks, 2-bit MTP draft head, sampling candidates, speculative sampling",
+   "paths": [
+    "kernels/sample_*.hip",
+    "kernels/draft_d2.hip",
+    "kernels/spec_sample.hip",
+    "kernels/gfx1151/draft_pick.hip",
+    "kernels/gfx1151/sample_cand.hip"
+   ],
+   "deps": [
+    "kernels.common"
+   ]
+  },
+  "kernels.dflash": {
+   "desc": "DFlash2 drafter kernels (both sets)",
+   "paths": [
+    "kernels/dflash.hip"
+   ],
+   "deps": [
+    "kernels.common"
+   ]
+  }
+ }
+}

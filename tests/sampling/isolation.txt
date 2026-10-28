@@ -33,3 +33,4 @@ testhdr   tests/server/sampling_cases.h
 testhdr   include/whirl/model_types.h
 testhdr   include/whirl/hip.h
 testhdr   include/whirl/kv_format.h
+testhdr   tests/test_check.h

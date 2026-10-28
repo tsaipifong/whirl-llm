@@ -80,6 +80,7 @@ CORE_GLOBS = [
     ("*.hip", "kernels: GPU kernel source"),
     ("src/kernels_host/*", "kernels: host side of the kernel ABI / loaders"),
     ("include/whirl/kernels_abi.h", "kernels: kernel argument structs (testing.md: both GPUs)"),
+    ("include/whirl/kernels_abi_layout.h", "kernels: the one layout table of the kernel argument structs (host + device, arch025 N13)"),
     ("include/whirl/numerics.h", "numerics: mode / precision definitions"),
     ("src/common/numerics.cpp", "numerics: mode / precision resolution"),
     ("src/numerics/*", "numerics"),
@@ -94,7 +95,7 @@ CORE_GLOBS = [
 ]
 # A change to one of these (or to a header that a .hip file includes) can change the code objects: no work-equivalence
 # short-cut.
-KERNEL_GLOBS = ["kernels/*", "*.hip", "include/whirl/kernels_abi.h", "src/kernels_host/*"]
+KERNEL_GLOBS = ["kernels/*", "*.hip", "include/whirl/kernels_abi.h", "include/whirl/kernels_abi_layout.h", "src/kernels_host/*"]
 # build files can change code objects too (flags, offload archs): no static "cannot change" claim, but a binary proof
 # (work_equal code objects identical) still counts for them
 BUILD_GLOBS = ["cmake/*", "CMakeLists.txt", "build.bat", "redist/*"]

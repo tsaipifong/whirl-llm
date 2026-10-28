@@ -108,7 +108,8 @@
    "speed_ab": {"compare": "distribution", "bitwise": false, "tool": "paired A/B, order swapped (whirl-bench-check)", "desc": "end-to-end decode / prefill tok/s against the stored rows of the same cell"},
    "vram_peak": {"compare": "not_above", "bitwise": false, "tool": "startup sizing + WHIRL_ALLOC_LOG peak", "desc": "VRAM use not above the stored peak of the same cell (for changes that may change the allocation list)"},
    "task_accuracy": {"compare": "task_accuracy", "bitwise": false, "tool": "eval suite (agent / coding / tool use) vs precise", "desc": "task accuracy against precise on the same cells; the acceptance ratio per mode lives in the eval tool, not here"},
-   "kl_guard": {"compare": "diagnostic", "bitwise": false, "tool": "KL / top-1 vs precise logits", "desc": "regression guard and diagnostic only, never the acceptance criterion"}
+   "kl_guard": {"compare": "diagnostic", "bitwise": false, "tool": "KL / top-1 vs precise logits", "desc": "regression guard and diagnostic only, never the acceptance criterion"},
+   "code_object": {"compare": "exact", "bitwise": true, "tool": "tools/impact/work_equal.py compare (code_objects check; CPU)", "desc": "every embedded AMDGPU code object byte-identical to the base build's (identical-except-cuid counts), per architecture"}
   },
   "classes": {
    "refactor": {"modes": ["precise", "balance", "fast"], "allow_bitwise": true, "requires_bitwise": true,
@@ -217,6 +218,7 @@
                       "proof": {"refactor": ["exit_rule", "golden_exact", "startup_sizing"]}},
    "cli": {"metrics": [], "metrics_none": "whirl.exe commands are dispatched once per process: no bench key (golden / seqtest / selftest G lines and exit codes are the pin)",
            "proof": {"refactor": ["exit_rule", "golden_exact", "move_equal"]}},
+   "kernels.*": {"metrics": [], "metrics_none": "kernel speed is per kernel in whirl-kernel-test --bench (kt_bench rows in results.db), not a host / stage component key yet", "proof": {"refactor": ["exit_rule", "code_object", "kernel_reference", "golden_exact", "work_trace"], "precise": ["golden_exact", "kernel_reference", "stage_time", "speed_ab"], "balance": ["task_accuracy", "kl_guard", "stage_time", "speed_ab"], "fast": ["task_accuracy", "kl_guard", "stage_time", "speed_ab"]}},
    "platform.*": {"metrics": [], "metrics_none": "no platform bench key yet (PLAN PL3: no HTTP microsecond tool); PL2 fs calls are covered by the tier paths",
                   "proof": {"refactor": ["exit_rule", "golden_exact", "server_log_scan", "host_work"]}}
   }
@@ -566,6 +568,96 @@
    "manual": ["V-move: scratch/a25_m5/move_check.py (forward/*.cpp byte-identical at the new path, server_model.cpp == backend_qwen35.cpp with the named lines)",
               "V-work both GPUs: code objects cuid-equivalent; golden cli + server and srv_mt_precise / _moe == the M4 exe",
               "Q4_K_M dense golden single on the R9700 (compatibility format through the same module row)"]
+  },
+  "kernels.common": {
+     "id": "N5/N14",
+     "desc": "kernel family common: smoke kernel, helpers, quant block decoders, packed scales, warp / block reductions (device code of both kernel sets; compile boundary: kernels/families.json, tools/gates/kernel_iso_check.py)",
+     "paths": ["kernels/smoke.hip", "kernels/common.hip", "kernels/gfx1151/common.hip", "kernels/gfx1151/quant.hip", "kernels/shared/common_part.h", "kernels/shared/common_part_2.h", "kernels/shared/common_vocab.h", "kernels/shared/common_warp.h", "kernels/whirl_kernels.hip", "kernels/gfx1151/whirl_kernels_gfx1151.hip", "kernels/iq_tables.h", "kernels/families.json"],
+     "lands_on": "arch025-kern (lane 3)",
+     "steps": ["cpu_kernel_iso", "cpu_kernel_abi", "kt_full", "golden_swift", "golden_moe", "st_swift_precise", "st_moe_precise"],
+     "gpus": {"kt_full": 2, "golden_swift": 2, "golden_moe": 2, "st_swift_precise": 2, "st_moe_precise": 2},
+     "manual": ["V-co: code objects per architecture identical to the base build (tools/impact/work_equal.py code_objects; CPU)", "kernel tests (tests/kernels) unchanged by a refactor of the family"]
+  },
+  "kernels.gemv": {
+     "id": "N5/N14",
+     "desc": "kernel family gemv: decode matvec: f32 / f16 activations, int8 GEMV (grouped ABI), multi-row, WMMA mid-batch, gfx1151 units / Q6_K (device code of both kernel sets; compile boundary: kernels/families.json, tools/gates/kernel_iso_check.py)",
+     "paths": ["kernels/gemv_f.hip", "kernels/gemv_q.hip", "kernels/gemv_mr.hip", "kernels/gemv_w.hip", "kernels/gemv_wp.hip", "kernels/gemv_wx.hip", "kernels/gfx1151/gemv_f.hip", "kernels/gfx1151/gemv_q.hip", "kernels/gfx1151/gemv_mr.hip", "kernels/gfx1151/gemv_wunit.hip", "kernels/gfx1151/gemv_q6.hip", "kernels/shared/gemv_f_gemv_entry.h", "kernels/shared/gemv_q_gemv_grouped_abi.h", "kernels/shared/gemv_q_part.h", "kernels/shared/gemv_q_part_2.h"],
+     "lands_on": "arch025-kern (lane 3)",
+     "steps": ["cpu_kernel_iso", "cpu_kernel_abi", "kt_full", "golden_swift", "golden_moe", "st_swift_precise", "st_swift_balance", "st_swift_fast"],
+     "gpus": {"kt_full": 2, "golden_swift": 2, "golden_moe": 2, "st_swift_precise": 2, "st_swift_balance": 2, "st_swift_fast": 2},
+     "manual": ["V-co: code objects per architecture identical to the base build (tools/impact/work_equal.py code_objects; CPU)", "kernel tests (tests/kernels) unchanged by a refactor of the family"]
+  },
+  "kernels.gemm": {
+     "id": "N5/N14",
+     "desc": "kernel family gemm: prefill GEMM (WMMA f16), small-batch GEMM, MXFP4 x fp8 GEMM, gemv_h (precise f16-activation decode / verify matmul on the small-batch stages) (device code of both kernel sets; compile boundary: kernels/families.json, tools/gates/kernel_iso_check.py)",
+     "paths": ["kernels/gemm_*.hip", "kernels/gemv_h.hip", "kernels/gfx1151/gemm_*.hip", "kernels/gfx1151/gemv_h.hip", "kernels/shared/gemm_prefill_dequant_f16_f32.h", "kernels/shared/gemm_prefill_f32_to_f16.h", "kernels/shared/gemm_prefill_gemm_c12_f32.h", "kernels/shared/gemm_prefill_gemm_c2_q8_0.h", "kernels/shared/gemm_prefill_gemm_entry.h", "kernels/shared/gemm_prefill_wmma_entry.h", "kernels/gemm_small_addr.h"],
+     "lands_on": "arch025-kern (lane 3)",
+     "steps": ["cpu_kernel_iso", "cpu_kernel_abi", "kt_full", "golden_swift", "golden_moe", "st_swift_precise", "st_swift_balance", "st_moe_precise"],
+     "gpus": {"kt_full": 2, "golden_swift": 2, "golden_moe": 2, "st_swift_precise": 2, "st_swift_balance": 2, "st_moe_precise": 2},
+     "manual": ["V-co: code objects per architecture identical to the base build (tools/impact/work_equal.py code_objects; CPU)", "kernel tests (tests/kernels) unchanged by a refactor of the family"]
+  },
+  "kernels.gdn": {
+     "id": "N5/N14",
+     "desc": "kernel family gdn: Gated DeltaNet: decode fusions, per-token / chunked / WMMA / strix prefill, sequential scan (device code of both kernel sets; compile boundary: kernels/families.json, tools/gates/kernel_iso_check.py)",
+     "paths": ["kernels/fused_decode.hip", "kernels/gdn_*.hip", "kernels/gfx1151/fused_decode.hip", "kernels/gfx1151/gdn*.hip", "kernels/shared/fused_decode_rmsnorm_q8.h", "kernels/shared/gdn_prefill_gdn_conv_seq.h", "kernels/shared/gdn_seq_gdn_conv_par.h"],
+     "lands_on": "arch025-kern (lane 3)",
+     "steps": ["cpu_kernel_iso", "cpu_kernel_abi", "kt_full", "golden_swift", "golden_moe", "st_swift_precise", "st_swift_balance", "seq_swift_precise"],
+     "gpus": {"kt_full": 2, "golden_swift": 2, "golden_moe": 2, "st_swift_precise": 2, "st_swift_balance": 2, "seq_swift_precise": 2},
+     "manual": ["V-co: code objects per architecture identical to the base build (tools/impact/work_equal.py code_objects; CPU)", "kernel tests (tests/kernels) unchanged by a refactor of the family"]
+  },
+  "kernels.norm": {
+     "id": "N5/N14",
+     "desc": "kernel family norm: get_rows, norms, rope, elementwise, prefill activation fusions, WMMA probes, requant (device code of both kernel sets; compile boundary: kernels/families.json, tools/gates/kernel_iso_check.py)",
+     "paths": ["kernels/misc_rows_norm.hip", "kernels/misc_probe_requant.hip", "kernels/prefill_fused.hip", "kernels/gfx1151/misc_rows_norm.hip", "kernels/gfx1151/misc_probe_requant.hip", "kernels/gfx1151/prefill_fused.hip", "kernels/shared/misc_probe_requant_requant_q6k_q4k.h", "kernels/shared/misc_rows_norm_get_rows.h", "kernels/shared/misc_rows_norm_l2norm.h", "kernels/shared/prefill_fused_gated_norm_x16.h", "kernels/shared/prefill_fused_silu_mul_x16.h", "kernels/shared/prefill_fused_sm_per4.h"],
+     "lands_on": "arch025-kern (lane 3)",
+     "steps": ["cpu_kernel_iso", "cpu_kernel_abi", "kt_full", "golden_swift", "golden_moe", "st_swift_precise", "st_moe_precise"],
+     "gpus": {"kt_full": 2, "golden_swift": 2, "golden_moe": 2, "st_swift_precise": 2, "st_moe_precise": 2},
+     "manual": ["V-co: code objects per architecture identical to the base build (tools/impact/work_equal.py code_objects; CPU)", "kernel tests (tests/kernels) unchanged by a refactor of the family"]
+  },
+  "kernels.attn": {
+     "id": "N5/N14",
+     "desc": "kernel family attn: paged KV (kv_store), decode / split / prefill attention, attn_ws4 (gfx1151); argmax rides in misc_kv_argmax.hip (device code of both kernel sets; compile boundary: kernels/families.json, tools/gates/kernel_iso_check.py)",
+     "paths": ["kernels/attn*.hip", "kernels/misc_kv_argmax.hip", "kernels/gfx1151/attn*.hip", "kernels/shared/attn_attn_combine.h", "kernels/shared/attn_attn_decode_entry.h", "kernels/shared/attn_attn_prep.h", "kernels/shared/attn_attn_wsplit1.h", "kernels/shared/attn_dq_nw.h", "kernels/shared/attn_kv_page.h", "kernels/shared/attn_prefill_kp_kv_dq_rows.h", "kernels/shared/attn_set_rpos.h", "kernels/shared/misc_kv_argmax_kv_store.h", "kernels/gfx1151/attn_ws4_index.h"],
+     "lands_on": "arch025-kern (lane 3)",
+     "steps": ["cpu_kernel_iso", "cpu_kernel_abi", "kt_full", "golden_swift", "golden_moe", "st_swift_precise", "st_moe_precise", "srv_mt_precise"],
+     "gpus": {"kt_full": 2, "golden_swift": 2, "golden_moe": 2, "st_swift_precise": 2, "st_moe_precise": 2, "srv_mt_precise": 2},
+     "manual": ["V-co: code objects per architecture identical to the base build (tools/impact/work_equal.py code_objects; CPU)", "kernel tests (tests/kernels) unchanged by a refactor of the family"]
+  },
+  "kernels.moe": {
+     "id": "N5/N14",
+     "desc": "kernel family moe: mixture of experts: route, gather, expert GEMV / GEMM, MXFP4 experts, precise f32 experts (device code of both kernel sets; compile boundary: kernels/families.json, tools/gates/kernel_iso_check.py)",
+     "paths": ["kernels/moe*.hip", "kernels/gfx1151/moe.hip", "kernels/shared/moe_moe_bm.h", "kernels/shared/moe_moe_logits_f32.h", "kernels/shared/moe_moe_route.h"],
+     "lands_on": "arch025-kern (lane 3)",
+     "steps": ["cpu_kernel_iso", "cpu_kernel_abi", "kt_full", "golden_swift", "golden_moe", "st_moe_precise", "st_moe_balance", "st_moe_fast"],
+     "gpus": {"kt_full": 2, "golden_swift": 2, "golden_moe": 2, "st_moe_precise": 2, "st_moe_balance": 2, "st_moe_fast": 2},
+     "manual": ["V-co: code objects per architecture identical to the base build (tools/impact/work_equal.py code_objects; CPU)", "kernel tests (tests/kernels) unchanged by a refactor of the family"]
+  },
+  "kernels.sample": {
+     "id": "N5/N14",
+     "desc": "kernel family sample: token tables, greedy / draft picks, 2-bit MTP draft head, sampling candidates, speculative sampling (device code of both kernel sets; compile boundary: kernels/families.json, tools/gates/kernel_iso_check.py)",
+     "paths": ["kernels/sample_*.hip", "kernels/draft_d2.hip", "kernels/spec_sample.hip", "kernels/gfx1151/draft_pick.hip", "kernels/gfx1151/sample_cand.hip", "kernels/shared/draft_d2_requant_q6k_d2.h", "kernels/shared/sample_cand_topk_rows.h", "kernels/shared/sample_pick_set_tokens.h"],
+     "lands_on": "arch025-kern (lane 3)",
+     "steps": ["cpu_kernel_iso", "cpu_kernel_abi", "kt_full", "golden_swift", "golden_moe", "srv_mt_precise", "srv_balance", "seq_swift_precise"],
+     "gpus": {"kt_full": 2, "golden_swift": 2, "golden_moe": 2, "srv_mt_precise": 2, "srv_balance": 2, "seq_swift_precise": 2},
+     "manual": ["V-co: code objects per architecture identical to the base build (tools/impact/work_equal.py code_objects; CPU)", "kernel tests (tests/kernels) unchanged by a refactor of the family"]
+  },
+  "kernels.dflash": {
+     "id": "N5/N14",
+     "desc": "kernel family dflash: DFlash2 drafter kernels (both sets) (device code of both kernel sets; compile boundary: kernels/families.json, tools/gates/kernel_iso_check.py)",
+     "paths": ["kernels/dflash.hip"],
+     "lands_on": "arch025-kern (lane 3)",
+     "steps": ["cpu_kernel_iso", "cpu_kernel_abi", "kt_full", "golden_swift", "golden_moe"],
+     "gpus": {"kt_full": 2, "golden_swift": 2, "golden_moe": 2},
+     "manual": ["V-co: code objects per architecture identical to the base build (tools/impact/work_equal.py code_objects; CPU)", "kernel tests (tests/kernels) unchanged by a refactor of the family"]
+  },
+  "kernels.abi": {
+     "id": "N13",
+     "desc": "device definition of the by-value kernel argument structs (kernels/kernel_args.h, both kernel sets) and the one layout table host and device assert (include/whirl/kernels_abi_layout.h); the host twin lives in include/whirl/kernels_abi.h (contract)",
+     "paths": ["kernels/kernel_args.h", "include/whirl/kernels_abi_layout.h"],
+     "lands_on": "arch025-kern (lane 3)",
+     "full": true,
+     "steps": ["cpu_kernel_abi", "cpu_kernel_iso"],
+     "manual": ["a layout change is an ABI change: the full gate on both GPUs (as contract)"]
   }
  }
 }

@@ -10,6 +10,7 @@
 #include "device/null_backend.h"
 #include "tier/ram_size.h"
 #include "whirl/device_profile.h"
+#include "../test_check.h"
 #include "whirl/uma_mem.h"
 
 #include <algorithm>
@@ -27,17 +28,10 @@
 
 namespace {
 
-int g_pass = 0, g_fail = 0;
+using whirl::test::g_fail;
+using whirl::test::g_pass;
+// CHECK / CHECK_EQ / the counters: tests/test_check.h (arch025 N16)
 
-void check(bool ok, const char* what, int line) {
-    if (ok) {
-        ++g_pass;
-    } else {
-        ++g_fail;
-        std::printf("FAIL %s:%d: %s\n", __FILE__, line, what);
-    }
-}
-#define CHECK(c) check((c), #c, __LINE__)
 
 template <class F>
 bool throws(F f) {

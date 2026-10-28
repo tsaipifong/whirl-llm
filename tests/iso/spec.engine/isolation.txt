@@ -31,3 +31,4 @@ hdr       src/spec/slot_drafts.h
 # test program
 testsrc   tests/iso/spec.engine/slot_drafts_tests.cpp
 testhdr   tests/iso/iso_test.h
+testhdr   tests/test_check.h

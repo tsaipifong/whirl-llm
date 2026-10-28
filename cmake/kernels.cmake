@@ -14,11 +14,15 @@ file(GLOB WHIRL_KERNEL_FAMILY_SOURCES CONFIGURE_DEPENDS
   ${CMAKE_SOURCE_DIR}/kernels/*.hip
   ${CMAKE_SOURCE_DIR}/kernels/*.h)
 file(GLOB WHIRL_KERNEL_GFX1151_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/kernels/gfx1151/*.hip)
-set(WHIRL_KERNEL_SOURCES_gfx1201 ${WHIRL_KERNEL_SOURCES} ${WHIRL_KERNEL_FAMILY_SOURCES})
+# arch025 N5 / N13: code shared by both sets (kernels/shared/*.h, tools/kernels/kshare.py), the one device definition of
+# the kernel argument structs (kernels/kernel_args.h) and the one layout table both sides assert (kernels_abi_layout.h)
+file(GLOB WHIRL_KERNEL_SHARED_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/kernels/shared/*.h)
+list(APPEND WHIRL_KERNEL_SHARED_SOURCES ${CMAKE_SOURCE_DIR}/kernels/kernel_args.h ${CMAKE_SOURCE_DIR}/include/whirl/kernels_abi_layout.h)
+set(WHIRL_KERNEL_SOURCES_gfx1201 ${WHIRL_KERNEL_SOURCES} ${WHIRL_KERNEL_FAMILY_SOURCES} ${WHIRL_KERNEL_SHARED_SOURCES})
 set(WHIRL_KERNEL_SOURCES_gfx1151 ${WHIRL_KERNEL_SOURCES} ${CMAKE_SOURCE_DIR}/kernels/iq_tables.h ${CMAKE_SOURCE_DIR}/kernels/moe_f.hip
     ${CMAKE_SOURCE_DIR}/kernels/spec_sample.hip ${CMAKE_SOURCE_DIR}/kernels/dflash.hip ${CMAKE_SOURCE_DIR}/kernels/whirl_kernels.hip
-    ${WHIRL_KERNEL_GFX1151_SOURCES})
-list(APPEND WHIRL_KERNEL_SOURCES ${WHIRL_KERNEL_FAMILY_SOURCES} ${WHIRL_KERNEL_GFX1151_SOURCES})
+    ${WHIRL_KERNEL_GFX1151_SOURCES} ${WHIRL_KERNEL_SHARED_SOURCES})
+list(APPEND WHIRL_KERNEL_SOURCES ${WHIRL_KERNEL_FAMILY_SOURCES} ${WHIRL_KERNEL_GFX1151_SOURCES} ${WHIRL_KERNEL_SHARED_SOURCES})
 
 if(WHIRL_WITH_HIP)
   # Host-side kernel registry (loads every kernel by name from the embedded

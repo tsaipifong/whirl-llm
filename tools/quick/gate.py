@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # FASTLANE FL-1b: automatic gate cascade for one candidate (FASTLANE.md FL-1 item 3; PROTOCOL "固定的自動驗證關卡").
+# Internal experiment tool (arch025 N16): the dev-time "test what you changed" entry point is tools/gates/test_change.py
+# (docs/dev/testing.md#module-gate); this cascade judges one kernel / mode candidate (bitwise, NMSE, KL, perf).
 # Stages, in order; the first failure stops the run (the baseline stays the default: this tool never changes one):
 #   build    (only with --worktree --build) build.bat Release in the candidate worktree (--touch-cpp first when a
 #            header changed: the MSVC /showIncludes dependency scan is unreliable here)

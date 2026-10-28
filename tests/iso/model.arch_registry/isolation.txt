@@ -20,3 +20,4 @@ hdr       src/spec/policy.h
 # test program
 testsrc   tests/iso/model.arch_registry/arch_registry_tests.cpp
 testhdr   tests/iso/iso_test.h
+testhdr   tests/test_check.h

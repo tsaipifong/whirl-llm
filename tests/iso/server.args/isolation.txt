@@ -25,3 +25,4 @@ hdr       src/server/server_args.h
 # test program
 testsrc   tests/iso/server.args/server_args_tests.cpp
 testhdr   tests/iso/iso_test.h
+testhdr   tests/test_check.h

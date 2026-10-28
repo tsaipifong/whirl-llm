@@ -12,188 +12,11 @@
 // Every kernel reading K/V dequantizes with the same f16 multiply
 // (kv_ld8 / kv_ld1), and K/V are quantized once, when stored (kv_st32).
 // ---------------------------------------------------------------------------
-#define KV_PAGE 256
-struct KvArgs {
-    void *k;
-    void *v;
-    _Float16 *ks;
-    _Float16 *vs;
-    const int *ptab;
-    const int *kvbase;
-    int tab0;
-    int win;  // attn_wsplit only: MTP draft window (see attn_wsplit_impl), 0 = off; others ignore it
-};
-typedef char kvq8_t __attribute__((ext_vector_type(8)));
-__device__ __forceinline__ int kv_tb(const KvArgs &a, int row) { return a.kvbase != nullptr ? a.kvbase[row] : a.tab0; }
-__device__ __forceinline__ int kv_row(const KvArgs &a, int tb, int p) { return a.ptab[tb + p / KV_PAGE] * KV_PAGE + p % KV_PAGE; }
-// pool row of p minus p: the same for every position of p's page (aligned key tiles)
-__device__ __forceinline__ int kv_delta(const KvArgs &a, int tb, int p) {
-    const int pg = p / KV_PAGE;
-    return (a.ptab[tb + pg] - pg) * KV_PAGE;
-}
-// KV formats (template argument Q8 of the kernels):
-// 0 f16, 1 q8 (int8 K and V), 2 q8v (K f16, V int8), 3 q4 (4-bit K and V). Element
-// formats (template argument F of the loaders): 0 f16, 1 int8, 2 int4. Both int
-// formats carry one f16 scale per 32 consecutive values of a row (ks / vs).
-// q4: element e is nibble e & 1 (low first) of byte e / 2, value (nibble - 8) * scale
-// with the scale = (the group's signed value of largest magnitude) / -8 (as ggml
-// q4_0), so the largest value is exact and the rest round to 16 levels.
-__host__ __device__ constexpr int kv_kf(int m) { return m == 1 ? 1 : m == 3 ? 2 : 0; }
-__host__ __device__ constexpr int kv_vf(int m) { return m == 0 ? 0 : m == 3 ? 2 : 1; }
-typedef _Float16 kv_h2 __attribute__((ext_vector_type(2)));
-// 8 nibbles (elements e .. e + 7 of one aligned group) -> f16 x8 times s: 0x6400 | n read
-// as f16 is 1024 + n (exact), minus 1032 is n - 8 (exact), so (that - 1032) * s is the
-// same single f16 rounding as (_Float16)(n - 8) * s.
-__device__ __forceinline__ half8 kv_dq4(uint32_t w, _Float16 s) {
-#pragma clang fp contract(off)
-    const uint32_t lo = w & 0x0f0f0f0fu, hi = (w >> 4) & 0x0f0f0f0fu;  // even / odd elements
-    const kv_h2 off = (kv_h2){(_Float16)1032.0f, (_Float16)1032.0f}, sc = (kv_h2){s, s};
-    half8 r;
-#pragma unroll
-    for (int j = 0; j < 4; ++j) {
-        const uint32_t x = ((lo >> (8 * j)) & 0xffu) | (((hi >> (8 * j)) & 0xffu) << 16) | 0x64006400u;
-        kv_h2 a;
-        __builtin_memcpy(&a, &x, 4);
-        a = (a - off) * sc;
-        r[2 * j] = a[0];
-        r[2 * j + 1] = a[1];
-    }
-    return r;
-}
-// int8 x8 -> f16 x8 times s without per-element conversions: 0x6400 |
-// (b ^ 0x80) read as f16 is 1024 + (b + 128) (exact), minus 1152 is b (exact), so (that - 1152)
-// * s is the same single f16 rounding as (_Float16)b * s. Packed f16 pairs from v_perm.
-__device__ __forceinline__ half8 kv_dq8(kvq8_t qk, _Float16 s) {
-#pragma clang fp contract(off)
-    uint32_t w[2];
-    __builtin_memcpy(w, &qk, 8);
-    const kv_h2 off = (kv_h2){(_Float16)1152.0f, (_Float16)1152.0f}, sc = (kv_h2){s, s};
-    half8 r;
-#pragma unroll
-    for (int j = 0; j < 2; ++j) {
-        const uint32_t x = w[j] ^ 0x80808080u;
-        const uint32_t lo = __builtin_amdgcn_perm(0x64646464u, x, 0x04010400u);  // bytes 0,1 -> 0x64xx halves
-        const uint32_t hi = __builtin_amdgcn_perm(0x64646464u, x, 0x04030402u);  // bytes 2,3
-        kv_h2 a, b;
-        __builtin_memcpy(&a, &lo, 4);
-        __builtin_memcpy(&b, &hi, 4);
-        a = (a - off) * sc;
-        b = (b - off) * sc;
-        r[4 * j + 0] = a[0];
-        r[4 * j + 1] = a[1];
-        r[4 * j + 2] = b[0];
-        r[4 * j + 3] = b[1];
-    }
-    return r;
-}
-template <int F> __device__ __forceinline__ half8 kv_ld8(const void *base, const _Float16 *sc, size_t e) {
-    if constexpr (F == 1) {
-        return kv_dq8(*(const kvq8_t *)((const int8_t *)base + e), sc[e >> 5]);
-    } else if constexpr (F == 2) {
-        return kv_dq4(*(const uint32_t *)((const uint8_t *)base + (e >> 1)), sc[e >> 5]);
-    } else {
-        return *(const half8 *)((const _Float16 *)base + e);
-    }
-}
-template <int F> __device__ __forceinline__ float kv_ld1(const void *base, const _Float16 *sc, size_t e) {
-    if constexpr (F == 1) {
-        return (float)((_Float16)((const int8_t *)base)[e] * sc[e >> 5]);
-    } else if constexpr (F == 2) {
-        const int n = (((const uint8_t *)base)[e >> 1] >> (4 * (e & 1))) & 15;
-        return (float)((_Float16)(n - 8) * sc[e >> 5]);
-    } else {
-        return (float)((const _Float16 *)base)[e];
-    }
-}
+#include "shared/attn_kv_page.h"  // also in the gfx1151 set (kernels/gfx1151/attn.hip)
 // Store x at element e; the 32 lanes of the wave hold the 32 elements of one
 // aligned scale group, lane = e % 32 (q8: scale = amax / 127 rounded to f16,
 // q = round(x / scale); q4: see above, q = clamp(round(x / scale), -8, 7)).
-template <int F> __device__ __forceinline__ void kv_st32(void *base, _Float16 *sc, size_t e, float x) {
-    if constexpr (F == 1) {
-        const float amax = warp_max(fabsf(x));
-        const _Float16 s = (_Float16)(amax * (1.f / 127.f));
-        const float sf = (float)s;
-        int qv = sf > 0.f ? (int)rintf(x / sf) : 0;
-        qv = max(-127, min(127, qv));
-        ((int8_t *)base)[e] = (int8_t)qv;
-        if ((threadIdx.x % WARP) == 0) sc[e >> 5] = s;
-    } else if constexpr (F == 2) {
-        const float mx = warp_max(x), mn = -warp_max(-x);
-        const float m = mx >= -mn ? mx : mn;  // signed value of largest magnitude
-        const _Float16 s = (_Float16)(m * (-1.f / 8.f));
-        const float sf = (float)s;
-        int qv = sf != 0.f ? (int)rintf(x / sf) : 0;
-        qv = max(-8, min(7, qv)) + 8;
-        const int qo = __shfl_xor(qv, 1, WARP);
-        if ((e & 1) == 0) ((uint8_t *)base)[e >> 1] = (uint8_t)(qv | (qo << 4));
-        if ((threadIdx.x % WARP) == 0) sc[e >> 5] = s;
-    } else {
-        ((_Float16 *)base)[e] = (_Float16)x;
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Full attention (decode, one query token per launch row; the scalar
-// reference path, single sequence).
-// q: [n_tok][n_head][q_stride] (query at offset 0, gate at +head_dim).
-// out: [n_tok][n_head*head_dim], gated by sigmoid.
-// scores scratch: [n_tok][n_head][max_ctx].
-// Token t attends to positions [0, pos0 + t].
-// ---------------------------------------------------------------------------
-template <int Q8>
-__device__ __forceinline__ void attn_decode_impl(const float *q, const KvArgs &kv, float *out, float *scores,
-                int n_head, int n_kv, int head_dim, int q_stride, int max_ctx, const int *pos, float scale) {
-    const int h = blockIdx.x, t = blockIdx.y;
-    const int pos0 = pos[0];
-    const int kvh = h / (n_head / n_kv);
-    const int n_pos = pos0 + t + 1;
-    const int tb = kv.tab0;
-    const float *qv = q + ((size_t)t * n_head + h) * q_stride;
-    float *sc = scores + ((size_t)t * n_head + h) * max_ctx;
-
-    __shared__ float qs[512];
-    for (int i = threadIdx.x; i < head_dim; i += blockDim.x) qs[i] = qv[i];
-    __syncthreads();
-
-    // scores: one wave per position
-    const int lane = threadIdx.x % WARP, wid = threadIdx.x / WARP, nw = blockDim.x / WARP;
-    for (int p = wid; p < n_pos; p += nw) {
-        const size_t kb = ((size_t)kv_row(kv, tb, p) * n_kv + kvh) * head_dim;
-        float s = 0.f;
-        for (int i = lane; i < head_dim; i += WARP) s += qs[i] * kv_ld1<kv_kf(Q8)>(kv.k, kv.ks, kb + i);
-        s = warp_sum(s);
-        if (lane == 0) sc[p] = s * scale;
-    }
-    __syncthreads();
-
-    float m = -INFINITY;
-    for (int p = threadIdx.x; p < n_pos; p += blockDim.x) m = fmaxf(m, sc[p]);
-    m = block_max(m);
-    float sum = 0.f;
-    for (int p = threadIdx.x; p < n_pos; p += blockDim.x) {
-        const float e = __expf(sc[p] - m);
-        sc[p] = e;
-        sum += e;
-    }
-    sum = block_sum(sum);
-    const float inv = 1.f / sum;
-    __syncthreads();
-
-    const float *gate = qv + head_dim;
-    for (int d = threadIdx.x; d < head_dim; d += blockDim.x) {
-        float acc = 0.f;
-        for (int p = 0; p < n_pos; ++p)
-            acc += sc[p] * kv_ld1<kv_vf(Q8)>(kv.v, kv.vs, ((size_t)kv_row(kv, tb, p) * n_kv + kvh) * head_dim + d);
-        const float g = gate[d];
-        out[(size_t)t * n_head * head_dim + h * head_dim + d] = acc * inv / (1.f + __expf(-g));
-    }
-}
-#define ATTN_DECODE_ENTRY(NAME, Q8)                                                                          \
-    extern "C" __global__ void __launch_bounds__(256)                                                        \
-        NAME(const float *q, KvArgs kv, float *out, float *scores, int n_head, int n_kv, int head_dim,     \
-             int q_stride, int max_ctx, const int *pos, float scale) {                                      \
-        attn_decode_impl<Q8>(q, kv, out, scores, n_head, n_kv, head_dim, q_stride, max_ctx, pos, scale);  \
-    }
+#include "shared/attn_attn_decode_entry.h"  // also in the gfx1151 set (kernels/gfx1151/attn.hip)
 ATTN_DECODE_ENTRY(attn_decode, false)
 ATTN_DECODE_ENTRY(attn_decode_q8, true)
 ATTN_DECODE_ENTRY(attn_decode_q8v, 2)
@@ -387,49 +210,7 @@ __device__ __forceinline__ void attn_split_impl(const float *q, const KvArgs &kv
             }
 }
 
-#define ATTN_SPLIT_ENTRY(NAME, NQ, Q8)                                                                        \
-    extern "C" __global__ void __launch_bounds__(256)                                                         \
-        NAME(const float *q, KvArgs kv, float *part_ml, float *part_acc, int n_head,                          \
-             int n_kv, int head_dim, int q_stride, const int *pos, float scale, int nq, const int *skip) {    \
-        if (skip != nullptr && *skip) return;                                                                 \
-        const int tb = kv_tb(kv, blockIdx.z * NQ);                                                            \
-        attn_split_impl<NQ, Q8>(q, kv, tb, part_ml, part_acc, n_head, n_kv, head_dim, q_stride, pos, scale);  \
-    }
-// NQ > 1 (one pass over K/V for several queries) measured slower than
-// grid.z = query with NQ = 1: the score reductions, not K/V bytes, bound it.
-ATTN_SPLIT_ENTRY(attn_split, 1, false)
-ATTN_SPLIT_ENTRY(attn_split_q8, 1, true)
-ATTN_SPLIT_ENTRY(attn_split_q8v, 1, 2)
-ATTN_SPLIT_ENTRY(attn_split_q4, 1, 3)
-
-// out[h][d] = sum_i e^(m_i - M) acc_i[d] / sum_i e^(m_i - M) l_i, gated by sigmoid.
-extern "C" __global__ void attn_combine(const float *part_ml, const float *part_acc, const float *q, float *out,
-                                        int n_head, int head_dim, int q_stride, int n_split) {
-    const int h = blockIdx.x;
-    const int tq = blockIdx.y;  // query token
-    part_ml += (size_t)tq * n_split * n_head * 2;
-    part_acc += (size_t)tq * n_split * n_head * head_dim;
-    q += (size_t)tq * n_head * q_stride;
-    out += (size_t)tq * n_head * head_dim;
-    float M = -INFINITY;
-    for (int i = 0; i < n_split; ++i) M = fmaxf(M, part_ml[((size_t)i * n_head + h) * 2]);
-    float L = 0.f;
-    for (int i = 0; i < n_split; ++i) {
-        const float m = part_ml[((size_t)i * n_head + h) * 2];
-        if (m > -INFINITY) L += __expf(m - M) * part_ml[((size_t)i * n_head + h) * 2 + 1];
-    }
-    const float inv = 1.f / L;
-    const float *gate = q + (size_t)h * q_stride + head_dim;
-    for (int d = threadIdx.x; d < head_dim; d += blockDim.x) {
-        float acc = 0.f;
-        for (int i = 0; i < n_split; ++i) {
-            const float m = part_ml[((size_t)i * n_head + h) * 2];
-            if (m > -INFINITY) acc += __expf(m - M) * part_acc[((size_t)i * n_head + h) * head_dim + d];
-        }
-        const float gg = gate[d];
-        out[(size_t)h * head_dim + d] = acc * inv / (1.f + __expf(-gg));
-    }
-}
+#include "shared/attn_attn_combine.h"  // also in the gfx1151 set (kernels/gfx1151/attn.hip)
 
 // ---------------------------------------------------------------------------
 // Fused attention prep: per (head, token) block the q_norm / k_norm RMSNorm,
@@ -525,16 +306,7 @@ __device__ __forceinline__ void attn_prep_impl(float *qf, float *kk, const float
         kv_st32<kv_vf(Q8)>(kv.v, kv.vs, prow * row + (size_t)h * hd + d, vr[d]);
     }
 }
-extern "C" __global__ void __launch_bounds__(256)
-    attn_prep(float *qf, float *kk, const float *vv, const float *qw, const float *kw, KvArgs kv,
-              const int *pos, int n_head, int n_kv, int hd, int n_rot, float theta_scale, float eps) {
-    attn_prep_impl<false>(qf, kk, vv, qw, kw, kv, pos, n_head, n_kv, hd, n_rot, theta_scale, eps);
-}
-extern "C" __global__ void __launch_bounds__(256)
-    attn_prep_q8(float *qf, float *kk, const float *vv, const float *qw, const float *kw, KvArgs kv,
-              const int *pos, int n_head, int n_kv, int hd, int n_rot, float theta_scale, float eps) {
-    attn_prep_impl<true>(qf, kk, vv, qw, kw, kv, pos, n_head, n_kv, hd, n_rot, theta_scale, eps);
-}
+#include "shared/attn_attn_prep.h"  // also in the gfx1151 set (kernels/gfx1151/attn.hip)
 extern "C" __global__ void __launch_bounds__(256)
     attn_prep_q8h(float *qf, float *kk, const float *vv, const float *qw, const float *kw, KvArgs kv,
               const int *pos, int n_head, int n_kv, int hd, int n_rot, float theta_scale, float eps) {
@@ -571,67 +343,8 @@ ATTN_PREP_M(attn_prep_m_q4, 3, true)
 struct Rpos16 {
     int v[48];
 };
-extern "C" __global__ void set_rpos(int *rpos, Rpos16 tab, int n) {
-    const int i = threadIdx.x;
-    if (i < 3 * n) rpos[i] = tab.v[i];
-}
-
-// attn_combine + the int8 copy of its output for the o-projection GEMV
-// (same values as quantize_q8 over out); needs blockDim == head_dim, a
-// multiple of 32.
-extern "C" __global__ void attn_combine_q8(const float *part_ml, const float *part_acc, const float *q, float *out,
-                                           int n_head, int head_dim, int q_stride, int n_split, int8_t *xq, float *xd) {
-    const int h = blockIdx.x;
-    const int tq = blockIdx.y;  // query token
-    part_ml += (size_t)tq * n_split * n_head * 2;
-    part_acc += (size_t)tq * n_split * n_head * head_dim;
-    q += (size_t)tq * n_head * q_stride;
-    out += (size_t)tq * n_head * head_dim;
-    float M = -INFINITY;
-    for (int i = 0; i < n_split; ++i) M = fmaxf(M, part_ml[((size_t)i * n_head + h) * 2]);
-    float L = 0.f;
-    for (int i = 0; i < n_split; ++i) {
-        const float m = part_ml[((size_t)i * n_head + h) * 2];
-        if (m > -INFINITY) L += __expf(m - M) * part_ml[((size_t)i * n_head + h) * 2 + 1];
-    }
-    const float inv = 1.f / L;
-    const float *gate = q + (size_t)h * q_stride + head_dim;
-    const int d = threadIdx.x;
-    float acc = 0.f;
-    for (int i = 0; i < n_split; ++i) {
-        const float m = part_ml[((size_t)i * n_head + h) * 2];
-        if (m > -INFINITY) acc += __expf(m - M) * part_acc[((size_t)i * n_head + h) * head_dim + d];
-    }
-    const float gg = gate[d];
-    const float o = acc * inv / (1.f + __expf(-gg));
-    out[(size_t)h * head_dim + d] = o;
-    wave_q8(o, xq, xd, (int)((((size_t)tq * n_head + h) * head_dim + d) >> 5));
-}
-
-// ---------------------------------------------------------------------------
-// Split-K decode / verify attention on WMMA (gfx12), K/V read once per
-// query group. Block (kv head g, split, group z): the group's queries
-// (verify rows of one sequence) times the GQA heads of g form up to 64
-// "columns" (column c = query c / grp, head j = c % grp); wave cg handles
-// columns [16 cg, 16 cg + 16) like attn_prefill_impl (queries as columns):
-//   S^T = K Q^T  (A = K rows straight from the f16 cache, B = Q^T in registers)
-//   online softmax per column (lane % 16, partner lane ^ 16)
-//   O^T += V^T P^T (A = V^T from LDS, stored transposed per 32-key chunk).
-// Every column walks the split's keys [b0, b1) in 32-key chunks in order;
-// keys past its own position are masked (exact zeros), so a column's
-// partial (m, l, acc) is the same bits whether it runs alone (decode) or
-// with other queries (verify) - the split range comes from the group's last
-// query and the host only groups queries with the same split size `per`.
-// Partials go to part_ml / part_acc in the attn_split layout, merged by
-// attn_combine / attn_combine_q8.
-// ---------------------------------------------------------------------------
-#define AW_K 32
-#define AW_D 256
-#define AW_SINK 256  // draft window: positions [0, AW_SINK) are always attended
-struct AwGroups {
-    int first[32];
-    int count[32];
-};
+#include "shared/attn_set_rpos.h"  // also in the gfx1151 set (kernels/gfx1151/attn.hip)
+// struct AwGroups: kernels/kernel_args.h
 
 template <int CG, int Q8>
 __device__ __forceinline__ void attn_wsplit_impl(const float *q, const KvArgs &kv, float *part_ml, float *part_acc, int n_head, int n_kv,
@@ -802,26 +515,7 @@ __device__ __forceinline__ void attn_wsplit_impl(const float *q, const KvArgs &k
 #pragma unroll
         for (int v = 0; v < 8; ++v) pa[dt * 16 + 8 * (lane / 16) + v] = o[dt][v];
 }
-extern "C" __global__ void __launch_bounds__(128)
-    attn_wsplit1(const float *q, KvArgs kv, float *part_ml, float *part_acc, int n_head, int n_kv,
-                 int q_stride, const int *pos, float scale, const int *skip, AwGroups groups) {
-    attn_wsplit_impl<1, false>(q, kv, part_ml, part_acc, n_head, n_kv, q_stride, pos, scale, skip, groups);
-}
-extern "C" __global__ void __launch_bounds__(128)
-    attn_wsplit1_q8(const float *q, KvArgs kv, float *part_ml, float *part_acc, int n_head, int n_kv,
-                 int q_stride, const int *pos, float scale, const int *skip, AwGroups groups) {
-    attn_wsplit_impl<1, true>(q, kv, part_ml, part_acc, n_head, n_kv, q_stride, pos, scale, skip, groups);
-}
-extern "C" __global__ void __launch_bounds__(128)
-    attn_wsplit1_q8v(const float *q, KvArgs kv, float *part_ml, float *part_acc, int n_head, int n_kv,
-                 int q_stride, const int *pos, float scale, const int *skip, AwGroups groups) {
-    attn_wsplit_impl<1, 2>(q, kv, part_ml, part_acc, n_head, n_kv, q_stride, pos, scale, skip, groups);
-}
-extern "C" __global__ void __launch_bounds__(128)
-    attn_wsplit1_q4(const float *q, KvArgs kv, float *part_ml, float *part_acc, int n_head, int n_kv,
-                 int q_stride, const int *pos, float scale, const int *skip, AwGroups groups) {
-    attn_wsplit_impl<1, 3>(q, kv, part_ml, part_acc, n_head, n_kv, q_stride, pos, scale, skip, groups);
-}
+#include "shared/attn_attn_wsplit1.h"  // also in the gfx1151 set (kernels/gfx1151/attn.hip)
 // Up to 32 columns per group (27B: 5 verify rows x 6 GQA heads): waves 0 and 1 each
 // compute 16 columns on the same staged V^T tile, so a sequence's K/V is read once
 // for up to 5 verify rows instead of once per 2. Per column the arithmetic is the
@@ -869,24 +563,7 @@ extern "C" __global__ void __launch_bounds__(128)
 // (measured on the 8060S at 64k / 128k: 64-128 active splits beat 256 by 5-15%); the other
 // blocks of the fixed (graph-captured) grid exit at once.
 // ---------------------------------------------------------------------------
-#define DQ_NW 8
-#define DQ_C 8
-#define DQ_MAXS 128
-__device__ __forceinline__ int dq_per(int n_keys, int n_split) {
-    const int ns = min(n_split, DQ_MAXS);
-    return max(DQ_NW * 32, (n_keys + ns * 64 - 1) / (ns * 64) * 64);
-}
-typedef _Float16 dq_h2 __attribute__((ext_vector_type(2)));
-__device__ __forceinline__ dq_h2 dq_bits(uint32_t x) {
-    dq_h2 r;
-    __builtin_memcpy(&r, &x, 4);
-    return r;
-}
-__device__ __forceinline__ void dq_wave_sync() {
-    __builtin_amdgcn_fence(__ATOMIC_RELEASE, "wavefront");
-    __builtin_amdgcn_wave_barrier();
-    __builtin_amdgcn_fence(__ATOMIC_ACQUIRE, "wavefront");
-}
+#include "shared/attn_dq_nw.h"  // also in the gfx1151 set (kernels/gfx1151/attn.hip)
 extern "C" __global__ void __launch_bounds__(256)
     attn_dq4(const float *q, KvArgs kv, float *part_ml, float *part_acc, int n_head, int n_kv, int q_stride, const int *pos,
              float scale, const int *skip, AwGroups groups) {

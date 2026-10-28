@@ -10,6 +10,7 @@
 
 #include "hip/hip_api.h"
 #include "release/dll_deps.h"
+#include "../test_check.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -25,18 +26,10 @@
 
 namespace {
 
-int g_pass = 0, g_fail = 0;
+using whirl::test::g_fail;
+using whirl::test::g_pass;
+// CHECK / CHECK_EQ / the counters: tests/test_check.h (arch025 N16)
 
-void check(bool ok, const char* what, int line, const std::string& detail = {}) {
-    if (ok) {
-        ++g_pass;
-        return;
-    }
-    ++g_fail;
-    std::printf("FAIL line %d: %s %s\n", line, what, detail.c_str());
-}
-#define CHECK(c) check((c), #c, __LINE__)
-#define CHECKD(c, d) check((c), #c, __LINE__, (d))
 
 namespace rt = whirl::hip::runtime;
 namespace dd = whirl::app::dlldeps;
@@ -106,7 +99,7 @@ void testTable() {
     CHECK(names.size() == rt::symbolCount());  // no duplicates
     CHECK(rt::symbolCount() == sizeof(rt::Api) / sizeof(void*));
     CHECK(rt::symbolName(rt::symbolCount()) == nullptr);
-    for (const char* n : k_v022_imports) CHECKD(names.count(n) == 1, n);
+    for (const char* n : k_v022_imports) CHECK_DETAIL(names.count(n) == 1, n);
     // exactly the functions v0.2.2 imported: hipMemsetAsync (no caller, dropped by the 0.2.2 linker) is not
     // required at start-up (REVIEW-ARCH-D1 P3-1)
     CHECK(names.size() == std::size(k_v022_imports) && names.count("hipMemsetAsync") == 0);
@@ -118,7 +111,7 @@ void testFakes(const std::wstring& fakes) {
     bool have = true;
     for (const auto& f : {full, drop, withdep, dep}) {
         const bool e = GetFileAttributesW(f.c_str()) != INVALID_FILE_ATTRIBUTES;
-        CHECKD(e, n8(f));
+        CHECK_DETAIL(e, n8(f));
         have = have && e;
     }
     // arch6b: without the fakes every probe below fails and the API slots stay null; calling one crashed the test
@@ -134,7 +127,7 @@ void testFakes(const std::wstring& fakes) {
     {
         const rt::LoadResult r = rt::probe(empty, L"whirl_no_such_hiprt_t2.dll");
         CHECK(!r.ok && r.error == ERROR_MOD_NOT_FOUND && r.path.empty() && !r.app_local && r.missing_symbol.empty());
-        CHECKD(rt::failureText(r).find("error 126") != std::string::npos, rt::failureText(r));
+        CHECK_DETAIL(rt::failureText(r).find("error 126") != std::string::npos, rt::failureText(r));
     }
     // a complete fake in the executable's folder: loaded from there, every slot points into it
     {
@@ -147,7 +140,7 @@ void testFakes(const std::wstring& fakes) {
         int n = 0;
         CHECK(api.hipGetDeviceCount(&n) == hipSuccess && n == 7);
         CHECK(std::strcmp(api.hipGetErrorString(hipSuccess), "fake") == 0);
-        CHECKD(rt::describe(r) == n8(p), rt::describe(r));  // exact path logged (the fake has no version resource)
+        CHECK_DETAIL(rt::describe(r) == n8(p), rt::describe(r));  // exact path logged (the fake has no version resource)
         CHECK(loaded(p));
         unload(p);
         // keep = false unloads again
@@ -160,13 +153,13 @@ void testFakes(const std::wstring& fakes) {
         CHECK(t.copy(drop, p));
         const rt::LoadResult r = rt::probe(a, L"whirl_t4.dll", true);
         const std::string last = rt::symbolName(rt::symbolCount() - 1);
-        CHECKD(!r.ok && r.error == 0 && r.missing_symbol == last && r.path == p, r.missing_symbol);
+        CHECK_DETAIL(!r.ok && r.error == 0 && r.missing_symbol == last && r.path == p, r.missing_symbol);
         CHECK(!loaded(p));
-        CHECKD(rt::failureText(r).find("has no " + last) != std::string::npos, rt::failureText(r));
+        CHECK_DETAIL(rt::failureText(r).find("has no " + last) != std::string::npos, rt::failureText(r));
         // the user message (gpuPreflight): a copy in the executable's folder -> remove or replace that file,
         // named by its path; no "driver too old" text or driver advice (REVIEW-ARCH-D1 P2-2)
         const std::string m = dd::messageMissingSymbol("amdhip64_7.dll", r.missing_symbol, r.app_local, r.path, "ADVICE\n");
-        CHECKD(r.app_local && m.find(n8(p)) != std::string::npos && m.find("has no " + last) != std::string::npos &&
+        CHECK_DETAIL(r.app_local && m.find(n8(p)) != std::string::npos && m.find("has no " + last) != std::string::npos &&
                    m.find("Remove that file") != std::string::npos && m.find("replace it") != std::string::npos &&
                    m.find("ADVICE") == std::string::npos && m.find("too old") == std::string::npos,
                m);
@@ -182,20 +175,20 @@ void testFakes(const std::wstring& fakes) {
         old.resize(GetEnvironmentVariableW(L"PATH", old.data(), 32767));
         SetEnvironmentVariableW(L"PATH", (b + L";" + old).c_str());
         const rt::LoadResult r5 = rt::probe(a, L"whirl_t5.dll");
-        CHECKD(r5.ok && r5.app_local && r5.path == a + L"\\whirl_t5.dll", n8(r5.path));
+        CHECK_DETAIL(r5.ok && r5.app_local && r5.path == a + L"\\whirl_t5.dll", n8(r5.path));
         const rt::LoadResult r6 = rt::probe(a, L"whirl_t6.dll");
-        CHECKD(!r6.ok && r6.app_local && r6.path == a + L"\\whirl_t6.dll" && !r6.missing_symbol.empty(), n8(r6.path));
+        CHECK_DETAIL(!r6.ok && r6.app_local && r6.path == a + L"\\whirl_t6.dll" && !r6.missing_symbol.empty(), n8(r6.path));
         const rt::LoadResult r5b = rt::probe(empty, L"whirl_t5b.dll");
-        CHECKD(!r5b.ok && !r5b.app_local && r5b.path == b + L"\\whirl_t5b.dll" && !r5b.missing_symbol.empty(), n8(r5b.path));
+        CHECK_DETAIL(!r5b.ok && !r5b.app_local && r5b.path == b + L"\\whirl_t5b.dll" && !r5b.missing_symbol.empty(), n8(r5b.path));
         // found by the search path (System32 for the real driver): the driver wording and advice, unchanged
         {
             const std::string m = dd::messageMissingSymbol("amdhip64_7.dll", r5b.missing_symbol, r5b.app_local, r5b.path, "ADVICE\n");
-            CHECKD(m == "error: the installed AMD graphics driver is too old: its GPU runtime (amdhip64_7.dll) has no " +
+            CHECK_DETAIL(m == "error: the installed AMD graphics driver is too old: its GPU runtime (amdhip64_7.dll) has no " +
                             r5b.missing_symbol + ".\nADVICE\n",
                    m);
         }
         const rt::LoadResult r5c = rt::probe(empty, L"whirl_t5.dll");  // search path only: the broken copy in b
-        CHECKD(!r5c.ok && !r5c.app_local && r5c.path == b + L"\\whirl_t5.dll", n8(r5c.path));
+        CHECK_DETAIL(!r5c.ok && !r5c.app_local && r5c.path == b + L"\\whirl_t5.dll", n8(r5c.path));
         SetEnvironmentVariableW(L"PATH", old.c_str());
     }
     // 126 with the DLL present: its import is missing (issue #2: rocm_kpack.dll); the dll_deps diagnosis
@@ -208,7 +201,7 @@ void testFakes(const std::wstring& fakes) {
         const dd::Diagnosis d = dd::diagnose(r.path);
         CHECK(d.found_at == p && d.missing.size() == 1 && d.missing[0] == "whirl_fake_dep.dll");
         const std::string m = dd::message126("amdhip64_7.dll", d, "ADVICE\n");
-        CHECKD(m.find("whirl_fake_dep.dll") != std::string::npos && m.find("was found at") != std::string::npos, m);
+        CHECK_DETAIL(m.find("whirl_fake_dep.dll") != std::string::npos && m.find("was found at") != std::string::npos, m);
     }
     // 127: the import is present but lacks the function (a shipped DLL shadowing another version)
     {
@@ -237,7 +230,7 @@ void testFakes(const std::wstring& fakes) {
 void testReal() {
     const rt::LoadResult& r = rt::load();
     std::printf("real runtime: ok=%d %s app_local=%d\n", r.ok ? 1 : 0, rt::describe(r).c_str(), r.app_local ? 1 : 0);
-    CHECKD(r.ok, rt::failureText(r));
+    CHECK_DETAIL(r.ok, rt::failureText(r));
     if (!r.ok) return;
     CHECK(!r.version.empty());
     CHECK(&rt::rt() == &rt::g_api && allSlots(rt::g_api));

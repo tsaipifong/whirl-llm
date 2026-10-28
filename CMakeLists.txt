@@ -192,12 +192,8 @@ if(WHIRL_WITH_HIP)
   target_link_libraries(whirl-mem-hog PRIVATE whirl)
 endif()
 
-add_executable(whirl-tests tests/unit/unit_tests.cpp tests/unit/numerics_plan_tests.cpp)
-target_link_libraries(whirl-tests PRIVATE whirl)
-# GPU runtime load-failure diagnosis (release front-end, issue #2), CPU-only
-target_sources(whirl-tests PRIVATE src/release/dll_deps.cpp)
-target_include_directories(whirl-tests PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_compile_definitions(whirl-tests PRIVATE WHIRL_TEST_DLL_DEPS=1)
+# host unit tests: one file and one program per module + whirl-tests (all of them), arch025 N7
+include(cmake/unit.cmake)
 
 if(WHIRL_WITH_HIP)
   # HIP runtime loader tests (ARCH-1 D-1): load order, absent / fake DLLs, 126 / 127, a missing HIP function.

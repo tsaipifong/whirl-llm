@@ -15,3 +15,4 @@ hdr       src/platform/sys.h
 # test program
 testsrc   tests/iso/platform.sys/sys_tests.cpp
 testhdr   tests/iso/iso_test.h
+testhdr   tests/test_check.h

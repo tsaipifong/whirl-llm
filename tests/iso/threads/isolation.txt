@@ -28,3 +28,4 @@ hdr       src/server/log.h
 # test program
 testsrc   tests/iso/threads/engine_thread_tests.cpp
 testhdr   tests/iso/iso_test.h
+testhdr   tests/test_check.h

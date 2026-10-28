@@ -31,6 +31,7 @@
 // WHIRL_GH_INJECT (kernel-test development only, never set by the build): 1 = paired lanes' k-steps swapped, 2 = the two
 // WMMAs of a pair in the wrong order, 3 = wrong half-superblock phase, 4 = half-waves holding different A fragments
 // (the pre-FIX-RC4-B layout). --only gemvh must fail for 1-3 (audit/FIX-RC4-B.md).
+#include "gemm_small_addr.h"  // gemms_stage_chunks / stage addressing (declared dependency, arch025 N14)
 #ifndef WHIRL_GH_INJECT
 #define WHIRL_GH_INJECT 0
 #endif

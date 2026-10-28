@@ -14,6 +14,7 @@ A "run" value may name several keys ("server,cli"): every key needs a command, e
 any of them fails (a compile error counts). Built-in commands (used when no --cmd gives the key; a --cmd overrides):
   cli_preflight: build whirl-cli in build/Release (cmake --build; run from an MSVC x64 shell, as the --cmd scripts do),
                  then tests/cli/preflight_order_test.py on that whirl.exe (arch025-surv2: mutant c2-raw-early)
+  kernel_abi / kernel_iso: tools/gates/kernel_abi_check.py / kernel_iso_check.py (arch025 N13 / N14, CPU)
 Mutation kinds: "replace" (find -> replace, the find text must occur exactly once) and "revert" (reverse-apply
 one commit's diff of that file, e.g. re-introduce a fixed bug).
 A mutation that the tests do not catch is a SURVIVOR: a test gap, reported, never hidden.
@@ -35,6 +36,10 @@ BUILTIN_CMDS = {
     "cli_preflight": (f'cmake --build "{os.path.join(ROOT, "build", "Release")}" --target whirl-cli && '
                       f'"{sys.executable}" -I "{os.path.join(ROOT, "tests", "cli", "preflight_order_test.py")}" '
                       f'--bin "{os.path.join(ROOT, "build", "Release")}"'),
+    # arch025 N13 / N14 (CPU, HIP clang -fsyntax-only, seconds): the kernel ABI layout check and the kernel family
+    # compile boundary (n8-kiso-* / n8-kabi-* mutants)
+    "kernel_abi": f'"{sys.executable}" -I "{os.path.join(ROOT, "tools", "gates", "kernel_abi_check.py")}"',
+    "kernel_iso": f'"{sys.executable}" -I "{os.path.join(ROOT, "tools", "gates", "kernel_iso_check.py")}"',
 }
 
 
