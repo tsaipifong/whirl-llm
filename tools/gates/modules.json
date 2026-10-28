@@ -657,7 +657,7 @@
               "V-move: setVramProbe / vramNote / vramIdleTick byte-equal to the 14ec7d7 engine_gov.cpp bodies (scratch/a25_lane1b/n4d/moved_watch.txt)"]
   },
   "server.image_embeddings": {
-   "id": "N4b", "desc": "the server engine's image input (src/server/engine_vision.*, arch025-N4b; were the Engine members vis_cfg_ .. vis_rel_pending_ and Engine::embGet / embUnpin / embEvict / visPrepare / visDone / visIdle / visWakeNeeded): class ImageEmbeddings - the embedding cache by content hash (LRU over unpinned entries down to --vis-cache-mb), the per-slot image maps for the model, the encoder idle release with its VRAM line; Engine::attachVision (prefix store vision settings + ImageEmbeddings::attach) and base64Decode for data: URLs. vision::lendRegions (include/whirl/vision.h) is shared with the CLI chat",
+   "id": "N4b", "desc": "the server engine's image input (src/server/engine_vision.*, arch025-N4b; were the Engine members vis_cfg_ .. vis_rel_pending_ and Engine::embGet / embUnpin / embEvict / visPrepare / visDone / visIdle / visWakeNeeded): class ImageEmbeddings - the embedding cache by content hash (LRU over unpinned entries down to --vis-cache-mb), the per-slot image maps for the model, the encoder idle release with its VRAM line; base64Decode for data: URLs (Engine::attachVision - prefix store vision settings + ImageEmbeddings::attach - is in engine.cpp, so this module does not include engine.h). vision::lendRegions (include/whirl/vision.h) is shared with the CLI chat",
    "paths": ["src/server/engine_vision.cpp", "src/server/engine_vision.h"],
    "lands_on": "arch025-lane1b (lane 1 leg 4, N4b)",
    "steps": ["cpu_server", "cpu_vision", "cpu_pins", "golden_swift", "srv_vis"],

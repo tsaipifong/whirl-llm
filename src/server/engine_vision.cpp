@@ -4,7 +4,6 @@
 //
 // Ported from the research prototype (server.zig, item VIS).
 
-#include "engine.h"
 #include "engine_vision.h"
 
 #include "log.h"
@@ -13,11 +12,6 @@
 #include <algorithm>
 
 namespace whirl::server {
-
-void Engine::attachVision(const VisionConfig& vc) {
-    ps_.setVision({vc.vis != nullptr, vc.vision_end_id, vc.ck_min});
-    vis_.attach(vc);
-}
 
 void ImageEmbeddings::attach(const VisionConfig& vc) {
     cfg_ = vc;

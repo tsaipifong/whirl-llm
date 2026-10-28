@@ -136,6 +136,13 @@ void Engine::initPool() {
     pool_.init(n, kv_arrays_);
 }
 
+// the vision settings of the prefix store + the image embeddings (here, not in engine_vision.cpp: that file must not
+// include engine.h, or server.image_embeddings and server.engine include each other)
+void Engine::attachVision(const VisionConfig& vc) {
+    ps_.setVision({vc.vis != nullptr, vc.vision_end_id, vc.ck_min});
+    vis_.attach(vc);
+}
+
 EngineFacts Engine::facts() const {
     EngineFacts f;
     f.model_name = opt_.model_name;
