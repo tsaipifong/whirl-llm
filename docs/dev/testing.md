@@ -275,7 +275,9 @@ MODULES.json needs owner sign-off for module runs (arch025-X14).
 
 One manifest per isolated module: `tests/sampling/isolation.txt` (sampling, arch025-X3) and
 `tests/iso/<module>/isolation.txt` (arch025-isoall). A manifest names the module (`module`), its test program
-(`exe`), the source the boundary mutants edit (`mutate`), the link mutants (`mutsym hip|log|now|engine`), extra
+(`exe`), the source the boundary mutants edit (`mutate`), where the include mutants put the line (`mutinc top|end`;
+`end` for a source whose anonymous-namespace helpers share a name with engine.h's: tier_bridge.cpp), the link mutants
+(`mutsym hip|log|now|engine|model|tier`), extra
 Windows libraries (`syslib`), and the files: `src` / `hdr` = the module and its DECLARED dependencies (for example
 spec.policy declares `src/common/util.cpp` and the platform layer it calls), `testsrc` / `testhdr` = the test
 program only. `cmake/iso.cmake` copies those files into `build/Release/iso/<module>/{mod,test}/` and builds them from

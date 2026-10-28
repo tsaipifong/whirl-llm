@@ -8,7 +8,8 @@ CPU only, no GPU, no model.
 
 Manifests: tests/sampling/isolation.txt and tests/iso/<module>/isolation.txt (one per module; cmake/iso.cmake reads the
 same files). Kinds: module NAME, exe TARGET, lib TARGET (optional object-library name), mutate PATH (the source the
-mutants edit), mutsym hip|log|now|engine|model (link mutants), syslib X.lib, then src / hdr (module + declared dependencies)
+mutants edit), mutinc top|end (where the include mutants put the line: after the first quoted include, the default, or
+at the end of the file), mutsym hip|log|now|engine|model|tier (link mutants), syslib X.lib, then src / hdr (module + declared dependencies)
 and testsrc / testhdr (test program only). Every file is copied into <work>/<module>/<case>/{mod,test} (leading src/
 include/ tests/ dropped); module sources are compiled with mod/ as the ONLY include path, the test with mod/ + test/, and
 the test program is linked from ALL those objects directly (no static-library member selection) with /OPT:NOREF, so an
@@ -17,6 +18,9 @@ undeclared symbol in any module object is LNK2019 even when no test calls it.
 --mutants adds, per module, boundary mutants on the `mutate` source; each must FAIL the isolated build at the named stage
 AND compile with the product flags (/I src /I include), which is what makes the check worth having:
   include_engine       gains #include "server/engine.h"                                -> isolated compile C1083
+                       (mutinc end, arch025-lane2 leg 4: at the end of the file, for a source whose anonymous-namespace
+                       helpers share a name with engine.h's (tier_bridge.cpp: kv_page, msSince), where the line at the
+                       top would not compile with the product flags either; the product source stays as it is)
   include_relative     gains #include "<relative path>/server/engine.h"                -> isolated compile C1083
   call_<sym>           a function appended at the end calls a symbol outside the tree  -> isolated link LNK2019
        hip    whirl::hip::deviceCount       (src/hip, whirl_hip: the device runtime)
@@ -24,6 +28,7 @@ AND compile with the product flags (/I src /I include), which is what makes the 
        now    whirl::nowSeconds             (src/common/util.cpp, lib whirl)
        engine whirl::server::serveMain      (src/server/server_main.cpp, whirl_server_core: server startup)
        model  whirl::qwen35::loadOrTune     (src/model/tune.cpp, whirl_model: the model core, class Model)
+       tier   whirl::tier::blockHash        (src/tier/kv_tier.cpp, whirl_tier_core: the KV host tier)
 The product compile of a mutant is done on a temporary file next to the real one (_iso_mut_<module>_<case>.cpp, so the relative
 include resolves as in the tree) and removed right after. The product link is not redone here (it needs the HIP build).
 Per module the last line is "iso check: ok (<module>, N/N cases as expected)" or "iso check: FAIL (<module>, ...)"; with
@@ -60,6 +65,11 @@ SYMS = {
     "model": ("#include <string>\nnamespace whirl::qwen35 { class Model; void loadOrTune(Model& m, const std::string& model_path, "
               "std::string& log); }  // iso mutant: src/model/tune.cpp (whirl_model, model.core)\n",
               "std::string s; whirl::qwen35::loadOrTune(*reinterpret_cast<whirl::qwen35::Model*>(&s), s, s);"),
+    # arch025-lane2 leg 4: the KV host tier (tier.kv, whirl_tier_core), for the model core (the model never reaches the
+    # server's cache stack)
+    "tier": ("#include <array>\n#include <cstdint>\nnamespace whirl::tier { std::array<std::uint64_t, 2> blockHash(const void* p, "
+             "std::uint64_t n); }  // iso mutant: src/tier/kv_tier.cpp (whirl_tier_core, tier.kv)\n",
+             "(void)whirl::tier::blockHash(nullptr, 0);"),
 }
 ENGINE_H = "server/engine.h"
 
@@ -71,6 +81,7 @@ class Manifest:
         self.module = None
         self.exe = None
         self.mutate = None
+        self.mutinc = "top"
         self.mutsyms = []
         self.syslibs = []
         self.items = []
@@ -87,6 +98,10 @@ class Manifest:
                 pass  # cmake only
             elif kind == "mutate":
                 self.mutate = p
+            elif kind == "mutinc":
+                if p not in ("top", "end"):
+                    raise SetupError(f"{self.rel}: mutinc {p} (known: top, end)")
+                self.mutinc = p
             elif kind == "mutsym":
                 if p not in SYMS:
                     raise SetupError(f"{self.rel}: unknown mutsym {p} (known: {', '.join(SYMS)})")
@@ -177,9 +192,11 @@ def relative_engine(src_rel):
     return "/".join([".."] * up + [ENGINE_H]) if up else ENGINE_H
 
 
-def mutate(text, case, src_rel):
+def mutate(text, case, src_rel, inc_at="top"):
     if case in ("include_engine", "include_relative"):
         inc = ENGINE_H if case == "include_engine" else relative_engine(src_rel)
+        if inc_at == "end":
+            return text + ("" if text.endswith("\n") else "\n") + f'#include "{inc}"  // iso mutant (mutinc end)\n'
         m = re.search(r'^#include "[^"]+"[^\n]*\n', text, re.M)
         assert m, f"{src_rel}: no quoted include to anchor the include mutant"
         return text[:m.end()] + f'#include "{inc}"  // iso mutant\n' + text[m.end():]
@@ -272,7 +289,7 @@ def check_module(root, man, work, env, mutants, keep):
                 lines.append(tail(out, 14))
         else:
             src_text = open(os.path.join(root, man.mutate), encoding="utf-8").read()
-            mut = mutate(src_text, name, man.mutate)
+            mut = mutate(src_text, name, man.mutate, man.mutinc)
             target = dict(files["src"])[man.mutate]
             with open(target, "w", encoding="utf-8", newline="\n") as f:
                 f.write(mut)

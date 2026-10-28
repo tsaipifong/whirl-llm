@@ -35,7 +35,7 @@ function(whirl_iso_module _list)
       set(_lib ${_path})
     elseif(_kind STREQUAL "syslib")
       list(APPEND _syslibs ${_path})
-    elseif(_kind MATCHES "^(mutate|mutsym)$")
+    elseif(_kind MATCHES "^(mutate|mutinc|mutsym)$")
       # iso_check.py only
     elseif(_kind MATCHES "^(src|hdr|testsrc|testhdr)$")
       if(NOT EXISTS ${CMAKE_SOURCE_DIR}/${_path})
