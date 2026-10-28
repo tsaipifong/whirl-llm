@@ -285,6 +285,11 @@ std::string userVisibilityVar(const std::function<const char*(const char*)>& get
     return {};
 }
 
+std::string noGpuText(const std::function<const char*(const char*)>& getenv_fn) {
+    (void)getenv_fn;
+    return "the AMD graphics driver reports no GPU";
+}
+
 bool sameGpu(const GpuRecord& a, const GpuRecord& b) {
     if (a.pci_domain != b.pci_domain || a.pci_bus != b.pci_bus || a.pci_device != b.pci_device || a.pci_function != b.pci_function)
         return false;

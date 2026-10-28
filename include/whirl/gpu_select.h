@@ -131,6 +131,13 @@ std::string visibleDevicesValue(const std::vector<int>& ordinals);
 // ROCR_VISIBLE_DEVICES, GPU_DEVICE_ORDINAL), "" if none. WHIRL never overrides one of them.
 std::string userVisibilityVar(const std::function<const char*(const char*)>& getenv_fn);
 
+// arch025-c2fu: the reason text when the GPU runtime shows NO GPU at all. With no visibility variable set it is
+// "the AMD graphics driver reports no GPU" (the real no-driver / no-GPU case). When the user set one
+// (userVisibilityVar), that variable is the cause: the text names it and its value ("set to an empty value, which
+// hides every GPU" for HIP_VISIBLE_DEVICES=) and how to remove it, and says nothing about the driver. No trailing
+// period / newline. getenv_fn as for userVisibilityVar (CPU-tested).
+std::string noGpuText(const std::function<const char*(const char*)>& getenv_fn);
+
 // Same physical GPU (PCI domain/bus/device/function, uuid and LUID when both sides know them, name, arch).
 bool sameGpu(const GpuRecord& a, const GpuRecord& b);
 
