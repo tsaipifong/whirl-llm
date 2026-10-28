@@ -31,8 +31,6 @@ std::string_view trimRightChars(std::string_view s, std::string_view chars) {
     return e == std::string_view::npos ? std::string_view{} : s.substr(0, e + 1);
 }
 
-bool startsWith(std::string_view s, std::string_view p) { return s.substr(0, p.size()) == p; }
-bool endsWith(std::string_view s, std::string_view p) { return s.size() >= p.size() && s.substr(s.size() - p.size()) == p; }
 
 [[noreturn]] void bad(const std::string& msg) { throw RequestError(msg); }
 
@@ -247,7 +245,7 @@ std::string renderChat(TemplateKind kind, const json::Array& msgs, const json::A
         if (multi_step && r == "user") {
             const std::string text = contentText(msgs[i], opt, false);
             const std::string_view c = trimWs(text);
-            if (!(startsWith(c, "<tool_response>") && endsWith(c, "</tool_response>"))) {
+            if (!(std::string_view(c).starts_with("<tool_response>") && std::string_view(c).ends_with("</tool_response>"))) {
                 multi_step = false;
                 last_query = i;
             }

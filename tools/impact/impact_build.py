@@ -63,7 +63,7 @@ PATHS = {
     "server.mtp":        {"roots": ["Engine::pickDrafts", "Engine::splitDrafts", "planSlotDrafts", "Engine::draftCap"], "metric": "tg",
                           "desc": "server MTP / n-gram draft allocation and acceptance"},
     # arch025-E1a: the draws and the Acceptor live in src/sampling (free functions / Acceptor); prepareRow stays on Engine
-    "server.sampling":   {"roots": ["sampleRow", "filterCands", "Engine::prepareRow", "probOf", "sampling::sampleRace", "Acceptor::greedy",
+    "server.sampling":   {"roots": ["sampleRow", "filterCands", "SampleBuffers::prepareRow", "probOf", "sampling::sampleRace", "Acceptor::greedy",
                                     "Acceptor::sample"],
                           "metric": "tg", "desc": "sampling and speculative sampling"},
     "server.loop":       {"roots": ["Engine::runLoop", "Engine::submitAndWait"], "metric": None, "depth": 0,
@@ -82,7 +82,7 @@ PATHS = {
                           "metric": "agent", "desc": "VRAM -> RAM -> SSD spill, dedup, flush on stop"},
     "cache.fingerprint": {"roots": ["tierFingerprint", "serverFingerprintInputs", "fingerprintEnv", "Tier::index", "Tier::indexFile"],
                           "metric": None, "desc": "SSD tier identity: which saved states a new server may reuse"},
-    "vision":            {"roots": ["Engine::visPrepare", "Engine::attachVision", "Qwen35Vision::encode", "Model::visRow",
+    "vision":            {"roots": ["ImageEmbeddings::prepare", "Engine::attachVision", "Qwen35Vision::encode", "Model::visRow",
                                     "Model::injectRows"], "metric": None, "desc": "image encoder and image-token injection"},
     "http":              {"roots": ["Engine::writeError", "StreamState::send"], "metric": None,
                           "desc": "HTTP transport, OpenAI protocol, streaming"},
@@ -96,7 +96,7 @@ PATHS = {
 PATH_FILES = {
     "http": ["src/server/http.cpp", "src/server/http.h", "src/server/protocol.cpp", "src/server/protocol.h", "src/server/stream.cpp",
              "src/server/stream.h", "src/server/engine_api.h"],
-    "tokenizer": ["src/tokenizer/*", "src/chat/*", "include/whirl/tokenizer.h", "include/whirl/chat*.h", "src/server/tokens.*"],
+    "tokenizer": ["src/tokenizer/*", "src/chat/*", "include/whirl/tokenizer.h", "include/whirl/chat*.h"],
     "startup": ["src/release/*", "tools/package_release.ps1", "redist/*", "cmake/release.cmake", "src/hip/runtime_loader.cpp",
                 "src/hip/hip_api.h", "include/whirl/hip_runtime_loader.h", "tests/hiprt/*"],
     "build": ["CMakeLists.txt", "cmake/*.cmake", "build.bat"],

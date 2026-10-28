@@ -5,14 +5,14 @@
 //   shown = the index `whirl devices` / --list-devices prints (before the restriction).
 // The restriction's note goes to `note` right after restrictDevice, before pickDevice (the server's order; server: logI,
 // CLI: stderr "whirl: ..."); it is also returned. Header-only:
-// it uses the model layer's device selection (include/whirl/model.h), which both front ends link. llama.cpp shape:
+// it uses the model layer's device selection (include/whirl/device_pick.h), which both front ends link. llama.cpp shape:
 // one --device handling in common (common/arg.cpp), used by llama-cli and llama-server (arch025-lane1.PRIOR_ART.md).
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 
 #include "config/run_settings.h"
 #include "whirl/gpu_select.h"
-#include "whirl/model.h"
+#include "whirl/device_pick.h"  // qwen35::restrictDevice / pickDevice (not the Model header)
 
 #include <string>
 #include <string_view>

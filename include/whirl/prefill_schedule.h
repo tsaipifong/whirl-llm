@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -50,6 +51,12 @@ inline constexpr std::size_t prefillExecDefault(const device::Profile& p, bool m
 inline std::size_t prefillExecFor(std::size_t requested, std::uint32_t max_batch, bool fill = false) {
     const std::size_t mb = fill ? max_batch : max_batch > prefill_merge ? max_batch - prefill_merge : 0;
     return std::max(prefill_chunk, std::min(requested / prefill_chunk * prefill_chunk, mb / prefill_chunk * prefill_chunk));
+}
+
+// The forward size of whirl.exe's and whirl-server's prefill (arch025-N15c: was written out at both): the
+// WHIRL_PREFILL_CHUNK request, else the device / model default, as whole chunks that fit max_batch.
+inline std::size_t prefillExec(std::optional<std::size_t> requested, const device::Profile& p, bool moe, std::uint32_t max_batch) {
+    return prefillExecFor(requested.value_or(prefillExecDefault(p, moe)), max_batch, p.prefill_fill_batch);
 }
 
 // next forced split after pos: the system boundary, then the think-open split, then the first image

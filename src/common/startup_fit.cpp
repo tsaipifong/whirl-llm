@@ -163,12 +163,21 @@ std::uint32_t slotsThatFit(std::uint32_t parallel, std::uint64_t avail, std::uin
                            std::uint64_t per_token, std::uint64_t target_tokens) {
     if (per_token == 0) return parallel;
     std::uint32_t p = std::max<std::uint32_t>(parallel, 1);
-    const auto pool = [&](std::uint32_t n) {
-        const std::uint64_t fixed = shared + per_slot * n;
-        return avail > fixed ? (avail - fixed) / per_token : 0;
-    };
-    while (p > 1 && pool(p) < target_tokens) --p;
+    while (p > 1 && poolTokensWith(p, avail, per_slot, shared, per_token) < target_tokens) --p;
     return p;
+}
+
+SlotFixed slotFixed(const SlotFixedIn& in) {
+    SlotFixed r;
+    r.per_slot = (in.state + in.replay + in.n_ck * in.ck + in.dflash_slot) * 104 / 100;
+    r.shared = (in.n_spe * in.ck + static_cast<std::uint64_t>(in.snap_sets) * in.state) * 104 / 100 + (256ull << 20);
+    return r;
+}
+
+std::uint64_t poolTokensWith(std::uint32_t n, std::uint64_t avail, std::uint64_t per_slot, std::uint64_t shared,
+                             std::uint64_t per_token) {
+    const std::uint64_t fixed = shared + per_slot * n;
+    return avail > fixed && per_token ? (avail - fixed) / per_token : 0;
 }
 
 std::string startupJson(const StartupInfo& s) {
@@ -182,6 +191,94 @@ std::string startupJson(const StartupInfo& s) {
         j += "\"";
     }
     return j + "]}";
+}
+
+PreloadAdjust preloadAdjust(const PreloadIn& in) {
+    PreloadAdjust o;
+    vram::FitInput fi = in.fi;
+    vram::FitPlan plan = in.plan;
+    std::uint32_t parallel = in.parallel;
+    const auto adjust = [&o](const std::string& what, const std::string& why) { o.adjusted.push_back({what, why}); };
+    const double g = 1024.0 * 1024.0 * 1024.0;
+    const std::uint64_t av = in.avail, margin = in.margin;
+    {
+        const auto want = [&] { return wantTokens(fi); };
+        const std::string budget_why =
+            std::format("{:.2f} GiB usable under the Windows video memory budget, keeping {:.2f} GiB free for other programs "
+                        "({:.2f} GiB they use that the budget does not show yet + {:.2f} GiB room)",
+                        av / g, margin / g, in.pending / g, in.room / g);
+        // an explicit -c that does not fit is lowered when the pool is sized (later); plan for one request here
+        if (in.ctx_given && plan.pool_tokens < want()) {
+            fi.pool_min_tokens = std::min<std::uint32_t>(in.slot_ctx, in.tight_pool);
+            plan = vram::planFit(fi);
+        }
+        // 3. --parallel given: fewer slots while even one request does not fit next to every slot's fixed memory
+        const std::uint32_t par0 = parallel;
+        o.fitp = fi;
+        o.per_slot = (in.st1 + in.pend1) + (in.st1 + in.pend1) / 25;
+        const ParallelFit pfit = fitParallel(fi, o.per_slot, in.parallel_given);
+        if (pfit.parallel != par0) {
+            parallel = pfit.parallel;
+            fi = pfit.fi;
+            plan = pfit.plan;
+            adjust(std::format("--parallel {} -> {}", par0, parallel),
+                   std::format("with {} slots, their recurrent state and prefix checkpoints leave a KV pool of about {} tokens, "
+                               "less than one {}-token request; {}",
+                               par0, pfit.pool_requested, want(), budget_why));
+        }
+        // 2. prefill batch / checkpoint counts set by the user: lowered only when the minimum still does not fit
+        o.fitf = fi;
+        o.fitf_plan = plan;
+        const FixedFit ffit = fitFixed(fi, plan);
+        if (ffit.changed) {
+            if (ffit.batch_changed)
+                adjust(std::format("WHIRL_PREFILL_BATCH {} -> {}", plan.batch, ffit.plan.batch),
+                       std::format("the prefill buffers left a KV pool of about {} tokens, less than {}; {}", plan.pool_tokens,
+                                   want(), budget_why));
+            if (ffit.ck_changed)
+                adjust(std::format("prefix checkpoints {} per slot + {} shared -> {} + {} (WHIRL_SERVE_CKPTS / WHIRL_SYS_CKPTS)",
+                                   plan.n_ck, plan.n_spe, ffit.plan.n_ck, ffit.plan.n_spe),
+                       std::format("they left a KV pool of about {} tokens, less than {}; {}", plan.pool_tokens, want(),
+                                   budget_why));
+            fi = ffit.fi;
+            plan = ffit.plan;
+        }
+    }
+    if (plan.reduced)
+        o.tight = std::format("VRAM is tight (about {:.2f} GiB usable for weights {:.2f} GiB + buffers + checkpoints + KV): reduced {} so the KV "
+                              "pool gets about {} tokens (wanted {}); WHIRL_PREFILL_BATCH (at least 1280) / WHIRL_SERVE_CKPTS / WHIRL_SYS_CKPTS "
+                              "choose these yourself, --ctx a smaller pool",
+                              av / g, in.weights / g, plan.note, plan.pool_tokens, fi.pool_min_tokens);
+    // not even the weights + smallest buffers fit (no room for any KV): the caller stops before a load that would run
+    // out of memory part way through, with the "smaller quantization" advice (WHIRL_FIT_CHECK=0 loads anyway)
+    if (!plan.fits && plan.pool_tokens == 0) {
+        o.refuse = true;
+        o.refusal = std::format("needs about {:.2f} GiB of VRAM before any KV cache (weights {:.2f} GiB + prefill batch {}, "
+                                "state, checkpoints), about {:.2f} GiB usable of {:.2f} GiB{}",
+                                plan.need_fixed / g, in.weights / g, plan.batch, av / g, in.total / g,
+                                vram::limitBytes() ? " (" + vram::limitNote() + ")" : std::string());
+    }
+    if (!plan.fits)
+        o.short_warn = std::format("VRAM estimate: weights + buffers + checkpoints {:.2f} GiB leave about {} KV tokens of {:.2f} GiB usable "
+                                   "(at least {} needed); the model may not fit this GPU",
+                                   plan.need_fixed / g, plan.pool_tokens, av / g, fi.pool_hard_min);
+    o.parallel = parallel;
+    o.fi = fi;
+    o.plan = plan;
+    return o;
+}
+
+UmaFixed umaFixed(const UmaFixedIn& in) {
+    UmaFixed r;
+    const std::uint64_t ck = in.st1 + static_cast<std::uint64_t>(in.n_embd) * 4 + static_cast<std::uint64_t>(in.n_vocab) * 4;
+    // DeltaNet snapshot sets for MTP verify: one recurrent state per draft (8 dense, 1 MoE: the server log's
+    // "N snapshot sets")
+    const std::uint64_t snaps = std::max<std::uint32_t>(1, in.drafts) * in.st1;
+    r.slots = in.parallel * (in.st1 + in.pend1) + snaps;
+    r.ck = (in.parallel * in.n_ck + in.n_spe) * ck;
+    r.fixed = in.weights + in.state + in.bufs + r.slots + r.ck + (in.has_mtp ? 65536ull * in.n_embd * 5 / 16 : 0) + (256ull << 20);
+    r.fixed += r.fixed / 12;  // +8%: measured fast-mode Swift fixed part 3.9% above the itemized sum
+    return r;
 }
 
 }  // namespace whirl::startfit

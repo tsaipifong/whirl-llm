@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "cli/cli.h"
+#include "platform/env.h"  // HIP_VISIBLE_DEVICES (arch025-N10: no std::getenv outside the platform layer)
 
 namespace cli {
 
@@ -30,7 +31,8 @@ int cmdDevices() {
     }
     // every GPU (this command never restricts the runtime); [default] = the GPU used without --device /
     // WHIRL_DEVICE (gpusel::defaultGpu: the most GPU memory; an integrated GPU counts its carve-out, UMA-1)
-    if (const char* v = std::getenv("HIP_VISIBLE_DEVICES")) out(fmt("  (HIP_VISIBLE_DEVICES=%s is set: only those GPUs are listed, numbered from 0)\n", v));
+    if (const auto v = whirl::platform::env::get("HIP_VISIBLE_DEVICES"))
+        out(fmt("  (HIP_VISIBLE_DEVICES=%s is set: only those GPUs are listed, numbered from 0)\n", v->c_str()));
     out(whirl::gpusel::listingText(devs, whirl::gpusel::defaultGpu(devs).index));
     return 0;
 }

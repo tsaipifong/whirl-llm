@@ -25,7 +25,7 @@
 #include "device/handles.h"
 #include "server/backend.h"
 #include "server/prefix_store.h"
-#include "server/tokens.h"
+#include "whirl/chat_tokens.h"
 #include "tier/idle_flush.h"
 #include "tier/kv_tier.h"
 
@@ -79,7 +79,7 @@ public:
     };
 
     // m: the model (main stream, state geometry); kv: the pool arrays (Engine's, set by initPool)
-    TierBridge(device::Backend& ops, ServerModel& m, const ChatTokens& ct, PrefixStore& ps,
+    TierBridge(device::Backend& ops, ServerModel& m, const chat::ChatTokens& ct, PrefixStore& ps,
                const std::vector<KvArr>& kv, const Config& cfg);
     // arch024 M8: the engine thread that may call the entry points below (nullptr: unchecked; docs/dev/threads.md)
     void setOwner(const EngineThread* o) { owner_ = o; }
@@ -170,7 +170,7 @@ public:
 private:
     device::Backend& ops_;
     ServerModel& m_;
-    const ChatTokens& ct_;
+    const chat::ChatTokens& ct_;
     PrefixStore& ps_;
     const std::vector<KvArr>& kv_;
     Config cfg_;

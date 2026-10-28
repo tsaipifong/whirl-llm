@@ -10,6 +10,7 @@
 
 #include "whirl/common.h"
 #include "whirl/gguf.h"
+#include "whirl/small_helpers.h"  // satSub / alignUp / unixNow / msSince / nowMs (arch025-N6)
 
 #include <algorithm>
 #include <cmath>
@@ -24,8 +25,6 @@ using u32 = std::uint32_t;
 using u64 = std::uint64_t;
 using i32 = std::int32_t;
 using hip::Dim3;
-
-u64 alignUp(u64 x, u64 a) { return (x + a - 1) / a * a; }
 
 // f32 -> f16 bits, round to nearest even (as a hardware / Zig @floatCast conversion)
 std::uint16_t f32ToF16(float f) {

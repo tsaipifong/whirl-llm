@@ -6,6 +6,8 @@
 
 #include <array>
 #include <cstdint>
+#include <cstdio>
+#include <exception>
 #include <optional>
 #include <string>
 #include <vector>
@@ -52,10 +54,157 @@ void testNgram() {
     if (m.n > 0) ISO_CHECK(out[0] == 8);  // the continuation of the earlier 5 6 7
 }
 
+// arch025-N10 (lane 1 leg 6): whirl-server's defaultBatchDrafts and its WHIRL_MTP_BATCH_DRAFTS parse (536d470
+// server_main.cpp:231-235, :803-823) -> defaultBatchDrafts / batchDraftsFrom. The references are the old texts.
+void testBatchDrafts() {
+    using BD = std::array<std::uint32_t, gdn_max_seg + 1>;
+    const auto oldDefault = [](bool moe, bool wide) -> BD {
+        (void)wide;
+        if (moe) return {0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0};
+        return {0, 8, 7, 4, 3, 2, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0};
+    };
+    const auto oldParse = [](BD batch_drafts, const std::string& s) {
+        std::size_t k = 1, p = 0;
+        while (p < s.size() && k <= gdn_max_seg) {
+            std::size_t e = s.find(',', p);
+            if (e == std::string::npos) e = s.size();
+            if (e > p) {
+                std::uint32_t x = 1;
+                try {
+                    x = static_cast<std::uint32_t>(std::stoul(s.substr(p, e - p)));
+                } catch (const std::exception&) {
+                }
+                batch_drafts[k++] = std::min(x, qwen35::max_drafts);
+            }
+            p = e + 1;
+        }
+        for (; k <= gdn_max_seg; ++k) batch_drafts[k] = batch_drafts[k - 1];
+        return batch_drafts;
+    };
+    std::size_t n = 0, bad = 0;
+    for (bool moe : {false, true})
+        for (bool wide : {false, true}) {
+            ++n;
+            if (defaultBatchDrafts(moe) != oldDefault(moe, wide)) ++bad;
+        }
+    const char* texts[] = {"", ",", "3", "8,7,4", "1,,2", "x,5", "99,2", "-1,4", "4294967296,3", " 5,6", "1,2,3,4,5,6,7,8,9,10,1,2,3,4,5,6,7,8,9",
+                           "0", "2,", ",,,7", "3x,2", "+4,1", "10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10"};
+    for (bool moe : {false, true})
+        for (std::uint32_t drafts : {1u, 3u, 8u})
+            for (const char* t : texts) {
+                BD base = defaultBatchDrafts(moe);
+                base[1] = drafts;
+                ++n;
+                if (batchDraftsFrom(base, t) != oldParse(base, t)) ++bad;
+            }
+    std::printf("batch drafts: %zu cases vs the old server_main text, %zu differ\n", n, bad);
+    ISO_CHECK(n == 4 + 2 * 3 * (sizeof(texts) / sizeof(texts[0])));
+    ISO_CHECK(bad == 0);
+}
+
+// arch025-N10 / N6 (lane 1 leg 6): the draft-head vocabulary decision both front ends made (536d470 server_main.cpp:190-227,
+// cli/build_model.cpp:15-45) -> draftVocabGate. The references are the two old decision paths, outcome only (messages stay
+// with each front end): server = what it logged / whether it went on to the subset; CLI = whether it printed the 64k
+// line, returned quietly, or went on.
+void testDraftVocabGate() {
+    using K = DraftVocabChoice::Kind;
+    enum Srv { s_return, s_info_fit, s_warn_fit, s_info_d2, s_warn_d2, s_subset };
+    const auto oldServer = [](const DraftVocabChoice& dv, bool moe, std::uint32_t n_vocab, bool d2) {
+        if (dv.kind != K::embedded_64k && dv.kind != K::file) return s_return;
+        if (dv.kind == K::embedded_64k) {
+            const bool fits = dv.by_default ? draftVocabDefaultFits(moe, n_vocab) : n_vocab == draft_vocab_embedded_n_vocab;
+            if (!fits) return dv.by_default ? s_info_fit : s_warn_fit;
+            if (!d2) return dv.by_default ? s_info_d2 : s_warn_d2;
+        }
+        return s_subset;
+    };
+    enum Cli { c_first_n, c_return, c_print64k, c_subset };
+    const auto oldCli = [](const DraftVocabChoice& dv, bool moe, std::uint32_t n_vocab, bool d2) {
+        if (dv.kind == K::first_n) return c_first_n;
+        if (dv.kind == K::full) return c_return;
+        if (dv.kind == K::embedded_64k) {
+            const bool fits = dv.by_default ? draftVocabDefaultFits(moe, n_vocab) : n_vocab == draft_vocab_embedded_n_vocab;
+            if (!fits || (dv.by_default && !d2)) return dv.by_default ? c_return : c_print64k;
+        }
+        return c_subset;
+    };
+    // the new decision, read the way each front end now reads it
+    const auto newServer = [](const DraftVocabChoice& dv, DraftVocabGate g) {
+        switch (g) {
+            case DraftVocabGate::none: return s_return;
+            case DraftVocabGate::not_fit: return dv.by_default ? s_info_fit : s_warn_fit;
+            case DraftVocabGate::no_d2: return dv.by_default ? s_info_d2 : s_warn_d2;
+            case DraftVocabGate::subset: break;
+        }
+        return s_subset;
+    };
+    const auto newCli = [](const DraftVocabChoice& dv, DraftVocabGate g) {
+        if (dv.kind == K::first_n) return c_first_n;
+        if (g == DraftVocabGate::none) return c_return;
+        if (g == DraftVocabGate::not_fit) return dv.by_default ? c_return : c_print64k;
+        if (g == DraftVocabGate::no_d2 && dv.by_default) return c_return;
+        return c_subset;
+    };
+    std::size_t n = 0, bad = 0;
+    for (K kind : {K::full, K::first_n, K::embedded_64k, K::file})
+        for (bool by_default : {false, true})
+            for (bool moe : {false, true})
+                for (std::uint32_t n_vocab : {draft_vocab_embedded_n_vocab, 151936u})
+                    for (bool d2 : {false, true}) {
+                        DraftVocabChoice dv;
+                        dv.kind = kind;
+                        dv.by_default = by_default;
+                        dv.n = 1000;
+                        dv.file = "f.bin";
+                        const DraftVocabGate g = draftVocabGate(dv, moe, n_vocab, d2);
+                        ++n;
+                        if (newServer(dv, g) != oldServer(dv, moe, n_vocab, d2)) ++bad;
+                        if (newCli(dv, g) != oldCli(dv, moe, n_vocab, d2)) ++bad;
+                    }
+    std::printf("draft vocab gate: %zu cases x 2 front ends vs the old texts, %zu differ\n", n, bad);
+    ISO_CHECK(n == 64);
+    ISO_CHECK(bad == 0);
+}
+
+// the required ids (specials + byte tokens), the ids and the label (the part both old texts wrote alike)
+struct FakeTok {
+    std::vector<int> sp{-1, 7, 3, 7};
+    std::vector<int> specials() const { return sp; }
+    int byteToken(int b) const { return b % 5 == 0 ? -1 : 20 + b; }
+};
+std::vector<std::uint32_t> fakeEmbedded() { return {1, 2, 5, 9, 40, 100}; }
+void testDraftVocabSubset() {
+    const FakeTok tok;
+    std::vector<std::uint32_t> old_req;
+    for (const int t : tok.specials())
+        if (t >= 0) old_req.push_back(static_cast<std::uint32_t>(t));
+    for (int b = 0; b < 256; ++b)
+        if (tok.byteToken(b) >= 0) old_req.push_back(static_cast<std::uint32_t>(tok.byteToken(b)));
+    const std::vector<std::uint32_t> req = draftVocabRequired(tok);
+    ISO_CHECK(req == old_req);
+    for (bool by_default : {false, true}) {
+        DraftVocabChoice dv;
+        dv.kind = DraftVocabChoice::Kind::embedded_64k;
+        dv.by_default = by_default;
+        std::uint32_t added = 0;
+        const std::vector<std::uint32_t> ids = draftVocabIds(fakeEmbedded(), 400, old_req, &added);
+        const std::string label = std::string(dv.by_default ? "64k (embedded, default)" : "64k (embedded)");
+        const DraftVocabSubset s = draftVocabSubset(dv, &fakeEmbedded, 400, req);
+        ISO_CHECK(s.ids == ids && s.added == added && s.label == label);
+    }
+    {
+        DraftVocabChoice dv;
+        dv.kind = DraftVocabChoice::Kind::file;
+        dv.file = "iso_no_such_vocab_file.bin";
+        ISO_THROWS(draftVocabSubset(dv, &fakeEmbedded, 400, req), std::exception);  // readDraftVocab's throw, as before
+    }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     return iso::run("spec.policy",
-                    {{"draft_vocab", testDraftVocab}, {"exe_directory", testExeDirectory}, {"mtp_defaults", testMtpDefaults}, {"ngram", testNgram}},
+                    {{"draft_vocab", testDraftVocab}, {"exe_directory", testExeDirectory}, {"mtp_defaults", testMtpDefaults}, {"ngram", testNgram},
+                     {"batch_drafts", testBatchDrafts}, {"draft_vocab_gate", testDraftVocabGate}, {"draft_vocab_subset", testDraftVocabSubset}},
                     argc, argv);
 }

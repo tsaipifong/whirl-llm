@@ -90,7 +90,7 @@ int cmdChat(const Args& a) {
     const std::string* logits_out = a.get("--out");
 
     gguf::File f = gguf::File::open(path);
-    const q::Config cfg = q::Config::fromGguf(f);
+    const q::Config cfg = whirl::model::openArch(f).cfg;  // the architecture module, as whirl-server (arch025-N15d)
     std::string dev_line;
     selectDevice(a, &dev_line);
     out(fmt("whirl gguf: %s\n  arch %s  layers %u (attn every %u)  embd %u  ff %u  vocab %u\n", path.c_str(), cfg.archName(), cfg.n_layer, cfg.interval,
@@ -182,8 +182,7 @@ int cmdChat(const Args& a) {
         if (auto mv = envGet("VIS_MODE")) vis->mode = vision::parseMode(*mv).value_or(vision::Mode::automatic);
         std::array<std::array<std::uint64_t, 2>, 16> lend_raw{};
         const std::size_t n_lend = model.lendScratch(lend_raw);
-        std::vector<vision::Region> lend;
-        for (std::size_t i = 0; i < n_lend; ++i) lend.push_back({lend_raw[i][0], lend_raw[i][1]});
+        const std::vector<vision::Region> lend = vision::lendRegions(lend_raw, n_lend);
         for (std::size_t i = 0; i < preps.size(); ++i) {
             const vision::Prepared& pp = preps[i];
             embs.emplace_back(static_cast<std::size_t>(pp.nTokens()) * vis->hp.proj_dim);
@@ -202,9 +201,9 @@ int cmdChat(const Args& a) {
 #endif
     out(fmt("  prompt tokens: %zu\n\n", ids.size()));
 
-    // (CLI-SCHED: not below one schedule chunk + its merged tail, as the server's vram::min_prefill_batch)
-    if (auto v = whirl::settings::prefillBatch(settingsWarn))
-        model.max_batch = std::max<u32>(sched::prefill_chunk + sched::prefill_merge, std::min(model.max_batch, *v));
+    // (CLI-SCHED: not below one schedule chunk + its merged tail, never above the loaded batch: the server's rule,
+    // arch025-N15c)
+    if (auto v = whirl::settings::prefillBatch(settingsWarn)) model.max_batch = vram::prefillBatchCap(model.max_batch, *v);
     q::Profile prof;
     const bool profiling = envGet("PROFILE").has_value();
     if (profiling) model.prof = &prof;
@@ -224,7 +223,7 @@ int cmdChat(const Args& a) {
         // CLI-SCHED: the server's forwards for this prompt (serverForwardEnds: chunk schedule, think-open /
         // system / image splits). WHIRL_DUMP_LOGITS keeps its own teacher-forced forwards (16-row windows,
         // max_batch chunks between them; a thinking-mode prompt's last token as its own step).
-        const std::size_t split = tok.thinkOpenSplit(ids);
+        const std::size_t split = tok.ct.thinkOpenSplit(ids);
         // WHIRL_DUMP_LOGITS=path, WHIRL_DUMP_FROM=N (no MTP): next-token logits of every
         // prompt position >= N as f16 rows (teacher-forced, 16-row forwards).
         // WHIRL_DUMP_AT=E1,E2,... instead: the WHIRL_DUMP_ROWS (default 128) positions before each

@@ -30,7 +30,7 @@ const char* ckKindStr(std::uint8_t c) {
     }
 }
 
-PrefixStore::PrefixStore(const ChatTokens& ct, const Config& cfg) : ct_(ct), cfg_(cfg) {
+PrefixStore::PrefixStore(const chat::ChatTokens& ct, const Config& cfg) : ct_(ct), cfg_(cfg) {
     cache::Config pc;
     pc.enabled = cfg_.enabled;
     pc.lcp_on = cfg_.lcp_on;

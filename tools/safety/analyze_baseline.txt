@@ -5,7 +5,7 @@
 1	src/hip/wddm_mem.cpp|C6240|whirl::hip::gpuPinnedNow
 1	src/hip/wddm_mem.cpp|C6240|whirl::hip::wddmMemInfo
 1	src/platform/console_win.cpp|C6031|whirl::platform::console::setStdoutBinary
-1	src/server/engine.cpp|C28020|whirl::server::CycleProf::print
+1	src/server/engine_internal.h|C28020|whirl::server::CycleProf::print
 1	src/spec/policy.cpp|C28020|whirl::qwen35::SlotAccept::observe
 1	src/vision/stb_image.h|C6262|stbi__gif_load
 1	src/vision/stb_image.h|C6262|stbi__load_gif_main

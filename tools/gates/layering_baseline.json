@@ -69,10 +69,6 @@
   ],
   [
    "cli",
-   "file:include/whirl/prefill_schedule.h"
-  ],
-  [
-   "cli",
    "file:src/server/server_main.h"
   ],
   [
@@ -101,7 +97,19 @@
   ],
   [
    "cli",
+   "model.arch_open"
+  ],
+  [
+   "cli",
    "platform.console"
+  ],
+  [
+   "cli",
+   "platform.env"
+  ],
+  [
+   "cli",
+   "prefill.plan"
   ],
   [
    "cli",
@@ -134,10 +142,6 @@
   [
    "config.device",
    "config.settings"
-  ],
-  [
-   "config.device",
-   "file:include/whirl/model.h"
   ],
   [
    "config.device",
@@ -197,11 +201,11 @@
   ],
   [
    "engine_gov",
-   "file:src/server/engine.h"
+   "file:src/server/log.h"
   ],
   [
    "engine_gov",
-   "file:src/server/log.h"
+   "server.engine"
   ],
   [
    "env_snapshot",
@@ -222,6 +226,10 @@
   [
    "file:include/whirl/model.h",
    "accept_policy"
+  ],
+  [
+   "file:include/whirl/model.h",
+   "config.device"
   ],
   [
    "file:include/whirl/model.h",
@@ -294,10 +302,6 @@
   [
    "file:include/whirl/model.h",
    "vision"
-  ],
-  [
-   "file:include/whirl/prefill_schedule.h",
-   "file:include/whirl/device_profile.h"
   ],
   [
    "file:src/common/dump.cpp",
@@ -440,134 +444,6 @@
    "file:include/whirl/model.h"
   ],
   [
-   "file:src/server/engine.cpp",
-   "cache.tier_adapter"
-  ],
-  [
-   "file:src/server/engine.cpp",
-   "file:include/whirl/dflash_policy.h"
-  ],
-  [
-   "file:src/server/engine.cpp",
-   "file:src/server/engine.h"
-  ],
-  [
-   "file:src/server/engine.cpp",
-   "file:src/server/log.h"
-  ],
-  [
-   "file:src/server/engine.cpp",
-   "spec.rules"
-  ],
-  [
-   "file:src/server/engine.h",
-   "accept_policy"
-  ],
-  [
-   "file:src/server/engine.h",
-   "cache.prefix"
-  ],
-  [
-   "file:src/server/engine.h",
-   "chat"
-  ],
-  [
-   "file:src/server/engine.h",
-   "ckpt_store"
-  ],
-  [
-   "file:src/server/engine.h",
-   "common.tsa"
-  ],
-  [
-   "file:src/server/engine.h",
-   "contract"
-  ],
-  [
-   "file:src/server/engine.h",
-   "file:include/whirl/prefill_schedule.h"
-  ],
-  [
-   "file:src/server/engine.h",
-   "file:src/server/decode_floor.h"
-  ],
-  [
-   "file:src/server/engine.h",
-   "file:src/server/tokens.h"
-  ],
-  [
-   "file:src/server/engine.h",
-   "file:src/server/vision_iface.h"
-  ],
-  [
-   "file:src/server/engine.h",
-   "handles"
-  ],
-  [
-   "file:src/server/engine.h",
-   "json"
-  ],
-  [
-   "file:src/server/engine.h",
-   "mem.governor"
-  ],
-  [
-   "file:src/server/engine.h",
-   "mem.wddm_watch"
-  ],
-  [
-   "file:src/server/engine.h",
-   "model.scratch"
-  ],
-  [
-   "file:src/server/engine.h",
-   "page_pool"
-  ],
-  [
-   "file:src/server/engine.h",
-   "prefix_store"
-  ],
-  [
-   "file:src/server/engine.h",
-   "protocol"
-  ],
-  [
-   "file:src/server/engine.h",
-   "sampling"
-  ],
-  [
-   "file:src/server/engine.h",
-   "spec.engine"
-  ],
-  [
-   "file:src/server/engine.h",
-   "spec.policy"
-  ],
-  [
-   "file:src/server/engine.h",
-   "threads"
-  ],
-  [
-   "file:src/server/engine.h",
-   "tier_bridge"
-  ],
-  [
-   "file:src/server/engine.h",
-   "tokenizer"
-  ],
-  [
-   "file:src/server/engine_vision.cpp",
-   "common.base"
-  ],
-  [
-   "file:src/server/engine_vision.cpp",
-   "file:src/server/engine.h"
-  ],
-  [
-   "file:src/server/engine_vision.cpp",
-   "file:src/server/log.h"
-  ],
-  [
    "file:src/server/log.cpp",
    "common.base"
   ],
@@ -588,24 +464,12 @@
    "platform.time"
   ],
   [
-   "file:src/server/tokens.cpp",
-   "file:include/whirl/prefill_schedule.h"
-  ],
-  [
-   "file:src/server/tokens.cpp",
-   "file:src/server/tokens.h"
-  ],
-  [
-   "file:src/server/tokens.h",
-   "tokenizer"
-  ],
-  [
-   "file:src/server/vision_iface.h",
-   "file:include/whirl/prefill_schedule.h"
-  ],
-  [
    "file:src/server/vision_iface.h",
    "hip.mem"
+  ],
+  [
+   "file:src/server/vision_iface.h",
+   "prefill.plan"
   ],
   [
    "file:src/server/vision_iface.h",
@@ -793,11 +657,23 @@
   ],
   [
    "mem.fit",
-   "json"
+   "common.base"
   ],
   [
    "mem.fit",
    "platform.env"
+  ],
+  [
+   "model.arch_open",
+   "file:include/whirl/model.h"
+  ],
+  [
+   "model.arch_open",
+   "gguf"
+  ],
+  [
+   "model.arch_open",
+   "model.arch_registry"
   ],
   [
    "model.arch_registry",
@@ -1000,6 +876,14 @@
    "platform.env"
   ],
   [
+   "prefill.plan",
+   "file:include/whirl/device_profile.h"
+  ],
+  [
+   "prefill.plan",
+   "tokenizer"
+  ],
+  [
    "prefix_store",
    "cache.prefix"
   ],
@@ -1017,15 +901,11 @@
   ],
   [
    "prefix_store",
-   "file:include/whirl/prefill_schedule.h"
-  ],
-  [
-   "prefix_store",
-   "file:src/server/tokens.h"
-  ],
-  [
-   "prefix_store",
    "handles"
+  ],
+  [
+   "prefix_store",
+   "prefill.plan"
   ],
   [
    "prefix_store",
@@ -1112,6 +992,174 @@
    "model.scratch"
   ],
   [
+   "server.engine",
+   "accept_policy"
+  ],
+  [
+   "server.engine",
+   "cache.prefix"
+  ],
+  [
+   "server.engine",
+   "cache.tier_adapter"
+  ],
+  [
+   "server.engine",
+   "chat"
+  ],
+  [
+   "server.engine",
+   "ckpt_store"
+  ],
+  [
+   "server.engine",
+   "common.base"
+  ],
+  [
+   "server.engine",
+   "common.tsa"
+  ],
+  [
+   "server.engine",
+   "contract"
+  ],
+  [
+   "server.engine",
+   "file:include/whirl/dflash_policy.h"
+  ],
+  [
+   "server.engine",
+   "file:src/server/decode_floor.h"
+  ],
+  [
+   "server.engine",
+   "file:src/server/log.h"
+  ],
+  [
+   "server.engine",
+   "file:src/server/vision_iface.h"
+  ],
+  [
+   "server.engine",
+   "handles"
+  ],
+  [
+   "server.engine",
+   "json"
+  ],
+  [
+   "server.engine",
+   "mem.governor"
+  ],
+  [
+   "server.engine",
+   "mem.wddm_watch"
+  ],
+  [
+   "server.engine",
+   "model.scratch"
+  ],
+  [
+   "server.engine",
+   "page_pool"
+  ],
+  [
+   "server.engine",
+   "prefill.plan"
+  ],
+  [
+   "server.engine",
+   "prefix_store"
+  ],
+  [
+   "server.engine",
+   "protocol"
+  ],
+  [
+   "server.engine",
+   "sampling"
+  ],
+  [
+   "server.engine",
+   "server.image_embeddings"
+  ],
+  [
+   "server.engine",
+   "server.sample_buffers"
+  ],
+  [
+   "server.engine",
+   "spec.engine"
+  ],
+  [
+   "server.engine",
+   "spec.policy"
+  ],
+  [
+   "server.engine",
+   "spec.rules"
+  ],
+  [
+   "server.engine",
+   "threads"
+  ],
+  [
+   "server.engine",
+   "tier_bridge"
+  ],
+  [
+   "server.engine",
+   "tokenizer"
+  ],
+  [
+   "server.image_embeddings",
+   "common.base"
+  ],
+  [
+   "server.image_embeddings",
+   "contract"
+  ],
+  [
+   "server.image_embeddings",
+   "file:src/server/log.h"
+  ],
+  [
+   "server.image_embeddings",
+   "file:src/server/vision_iface.h"
+  ],
+  [
+   "server.image_embeddings",
+   "hip.mem"
+  ],
+  [
+   "server.image_embeddings",
+   "vision"
+  ],
+  [
+   "server.kv_fit",
+   "json"
+  ],
+  [
+   "server.kv_fit",
+   "mem.fit"
+  ],
+  [
+   "server.sample_buffers",
+   "contract"
+  ],
+  [
+   "server.sample_buffers",
+   "handles"
+  ],
+  [
+   "server.sample_buffers",
+   "model.scratch"
+  ],
+  [
+   "server.sample_buffers",
+   "sampling"
+  ],
+  [
    "server.startup",
    "cache.fingerprint"
   ],
@@ -1146,10 +1194,6 @@
   [
    "server.startup",
    "file:src/server/draft_caps.h"
-  ],
-  [
-   "server.startup",
-   "file:src/server/engine.h"
   ],
   [
    "server.startup",
@@ -1189,6 +1233,10 @@
   ],
   [
    "server.startup",
+   "model.arch_open"
+  ],
+  [
+   "server.startup",
    "model.arch_registry"
   ],
   [
@@ -1225,6 +1273,14 @@
   ],
   [
    "server.startup",
+   "server.engine"
+  ],
+  [
+   "server.startup",
+   "server.kv_fit"
+  ],
+  [
+   "server.startup",
    "tier.ram_size"
   ],
   [
@@ -1234,6 +1290,14 @@
   [
    "server.startup",
    "tokenizer"
+  ],
+  [
+   "server.vram_watch",
+   "file:src/server/log.h"
+  ],
+  [
+   "server.vram_watch",
+   "server.engine"
   ],
   [
    "spec.engine",
@@ -1297,6 +1361,10 @@
   ],
   [
    "tier_bridge",
+   "common.base"
+  ],
+  [
+   "tier_bridge",
    "common.tsa"
   ],
   [
@@ -1306,10 +1374,6 @@
   [
    "tier_bridge",
    "file:src/server/log.h"
-  ],
-  [
-   "tier_bridge",
-   "file:src/server/tokens.h"
   ],
   [
    "tier_bridge",
@@ -1326,6 +1390,10 @@
   [
    "tier_bridge",
    "platform.proc"
+  ],
+  [
+   "tier_bridge",
+   "prefill.plan"
   ],
   [
    "tier_bridge",

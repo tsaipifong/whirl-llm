@@ -132,6 +132,7 @@ add_library(whirl STATIC
   src/tokenizer/tokenizer.cpp
   src/chat/json.cpp
   src/chat/chat_template.cpp
+  src/chat/chat_tokens.cpp
 )
 target_include_directories(whirl PUBLIC ${CMAKE_SOURCE_DIR}/include)
 # platform layer (arch025 PL0): linked now so PL1-PL4 only add sources to cmake/platform.cmake

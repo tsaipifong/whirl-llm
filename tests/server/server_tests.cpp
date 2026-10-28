@@ -17,6 +17,7 @@
 #include "server/draft_caps.h"
 #include "model/arch_registry.h"  // arch025-M5: findArch over a test table
 #include "server/engine.h"
+#include "server/engine_vision.h"  // ImageEmbeddings (arch025-N4b)
 #include "server/engine_thread.h"
 #include "server/http.h"
 #include "server/log.h"
@@ -25,7 +26,7 @@
 #include "server/startup_steps.h"
 #include "server/protocol.h"
 #include "server/tier_bridge.h"
-#include "server/tokens.h"
+#include "whirl/chat_tokens.h"
 #include "tier/kv_tier.h"
 #include "tier/ram_size.h"
 #include "whirl/vram_limit.h"
@@ -71,6 +72,7 @@
 #include <limits>
 #include <optional>
 #include <span>
+#include <unordered_map>
 
 // arch025-E1a: the pre-move sampling / acceptance code (verbatim copy, generated) and the fixed acceptance cases
 namespace whirl::server {
@@ -593,9 +595,9 @@ void testProtocol() {
 #include "../sampling/sampling_unit.inc"  // sampler, acceptor_* (arch025-X3: shared with whirl-sampling-tests)
 
 void testChatTokens() {
-    ChatTokens ct(tok());
-    CHECK(ct.im_start != ChatTokens::none && ct.im_end != ChatTokens::none && ct.think != ChatTokens::none &&
-          ct.nl != ChatTokens::none && ct.system != ChatTokens::none);
+    chat::ChatTokens ct(tok());
+    CHECK(ct.im_start != chat::ChatTokens::none && ct.im_end != chat::ChatTokens::none && ct.think != chat::ChatTokens::none &&
+          ct.nl != chat::ChatTokens::none && ct.system != chat::ChatTokens::none);
     auto enc = [](const std::string& s) {
         const auto ids = tok().encode(s, true);
         return std::vector<std::uint32_t>(ids.begin(), ids.end());
@@ -614,10 +616,102 @@ void testChatTokens() {
     // the next turn re-renders "<think>\n\n</think>": "\n\n" is one token
     const auto p3 = enc("<think>\n\n</think>");
     CHECK(p3.size() == 3 && p3[0] == ct.think);
-    const auto norm = ChatTokens::crlfToLf(tok());
+    const auto norm = chat::ChatTokens::crlfToLf(tok());
     const auto crlf = enc("\r\n");
     const auto lf = enc("\n");
     CHECK(crlf.size() == 1 && lf.size() == 1 && norm[crlf[0]] == lf[0]);
+}
+
+// arch025-N15c pin: whirl.exe's former token facts (src/cli/cli.h Tok at 44895be, copied verbatim below) == the
+// shared chat::ChatTokens the CLI uses now, on the test GGUF's vocabulary. The CR LF map: the CLI built it over
+// every token with piece(i, true) and returned an empty table when nothing maps (Ngram::nt reads an empty table
+// as identity); the shared one keeps normal tokens only. Equal as maps = the n-gram drafts cannot change.
+namespace cli_tok_44895be {
+struct Facts {
+    std::uint32_t im_end = 0xffffffffu, eot = 0xffffffffu, think_open = 0xffffffffu, newline = 0xffffffffu;
+    std::uint32_t im_start = 0xffffffffu, system = 0xffffffffu, vision_end = 0xffffffffu;
+};
+Facts facts(const Tokenizer& t) {
+    Facts r;
+    auto id = [&](const char* s) {
+        const TokenId i = t.find(s);
+        return i < 0 ? 0xffffffffu : static_cast<std::uint32_t>(i);
+    };
+    r.im_end = id("<|im_end|>");
+    r.eot = id("<|endoftext|>");
+    r.think_open = id("<think>");
+    const std::vector<TokenId> nl = t.encode("\n");
+    if (nl.size() == 1) r.newline = static_cast<std::uint32_t>(nl[0]);
+    r.im_start = id("<|im_start|>");
+    const std::vector<TokenId> sy = t.encode("system", false);
+    if (sy.size() == 1) r.system = static_cast<std::uint32_t>(sy[0]);
+    r.vision_end = id("<|vision_end|>");
+    return r;
+}
+std::size_t thinkOpenSplit(const Facts& f, std::span<const std::uint32_t> ids) {
+    const std::size_t n = ids.size();
+    if (n >= 2 && ids[n - 2] == f.think_open && ids[n - 1] == f.newline) return n - 1;
+    return 0;
+}
+std::vector<std::uint32_t> crlfToLf(const Tokenizer& t) {
+    const std::size_t n = t.size();
+    std::unordered_map<std::string, std::uint32_t> by_piece;
+    std::vector<std::string> pieces(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        pieces[i] = t.piece(static_cast<TokenId>(i), true);
+        by_piece.emplace(pieces[i], static_cast<std::uint32_t>(i));
+    }
+    std::vector<std::uint32_t> norm(n);
+    bool any = false;
+    for (std::size_t i = 0; i < n; ++i) {
+        norm[i] = static_cast<std::uint32_t>(i);
+        const std::string& p = pieces[i];
+        if (p.find("\r\n") == std::string::npos) continue;
+        std::string q;
+        for (std::size_t j = 0; j < p.size(); ++j) {
+            if (p[j] == '\r' && j + 1 < p.size() && p[j + 1] == '\n') continue;
+            q.push_back(p[j]);
+        }
+        auto it = by_piece.find(q);
+        if (it != by_piece.end()) {
+            norm[i] = it->second;
+            any = true;
+        }
+    }
+    if (!any) norm.clear();
+    return norm;
+}
+}  // namespace cli_tok_44895be
+
+void testChatTokensCli() {
+    const Tokenizer& t = tok();
+    const cli_tok_44895be::Facts o = cli_tok_44895be::facts(t);
+    const chat::ChatTokens ct(t);
+    CHECK_EQ(ct.im_end, o.im_end);
+    CHECK_EQ(ct.endoftext, o.eot);
+    CHECK_EQ(ct.think, o.think_open);
+    CHECK_EQ(ct.nl, o.newline);
+    CHECK_EQ(ct.im_start, o.im_start);
+    CHECK_EQ(ct.system, o.system);
+    CHECK_EQ(ct.vision_end, o.vision_end);
+    const std::vector<std::uint32_t> a = cli_tok_44895be::crlfToLf(t), b = chat::ChatTokens::crlfToLf(t);
+    auto nt = [](const std::vector<std::uint32_t>& m, std::uint32_t i) { return i < m.size() ? m[i] : i; };
+    std::size_t diff = 0, mapped = 0;
+    for (std::uint32_t i = 0; i < static_cast<std::uint32_t>(t.size()); ++i) {
+        diff += nt(a, i) != nt(b, i);
+        mapped += nt(b, i) != i;
+    }
+    CHECK_EQ(diff, std::size_t(0));
+    CHECK(mapped > 0);  // the product vocabularies map 53 CR LF tokens (crlf_tables.py)
+    auto enc = [&](const std::string& s) {
+        const auto ids = t.encode(s, true);
+        return std::vector<std::uint32_t>(ids.begin(), ids.end());
+    };
+    for (const char* s : {"<|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\n<think>\n", "<|im_start|>assistant\n",
+                          "<think>", "\n", "", "<think>\n\n</think>\n\n"}) {
+        const auto ids = enc(s);
+        CHECK_EQ(ct.thinkOpenSplit(ids), cli_tok_44895be::thinkOpenSplit(o, ids));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3490,7 +3584,7 @@ void testServeCkptsClamp() {
 
 // Chat-shaped token prompts (ChatML special tokens + random body ids) for the supersede / branch tests.
 struct ChatBuild {
-    ChatTokens ct;
+    chat::ChatTokens ct;
     std::uint32_t user = 0, assistant = 0;
     ChatBuild() : ct(tok()) {
         user = static_cast<std::uint32_t>(tok().encode("user", false).at(0));
@@ -4466,8 +4560,8 @@ struct ListEvictor final : PagePool::Evictor {
 namespace ps_test {
 constexpr std::uint32_t kImStart = 1, kImEnd = 2, kNl = 3, kSystem = 4, kThink = 5, kVisEnd = 6;
 
-ChatTokens chatIds() {
-    ChatTokens ct;
+chat::ChatTokens chatIds() {
+    chat::ChatTokens ct;
     ct.im_start = kImStart;
     ct.im_end = kImEnd;
     ct.nl = kNl;
@@ -4518,7 +4612,7 @@ struct TSlot : SlotPrefix {
 
 void testPrefixStore() {
     using namespace ps_test;
-    const ChatTokens ct = chatIds();
+    const chat::ChatTokens ct = chatIds();
     // ---- the chunk schedule: the store's functions are the prefill_schedule.h ones over the prompt's splits
     {
         PrefixStore st(ct, cfgFor(false));
@@ -5090,6 +5184,152 @@ struct CkRig {
     }
 };
 
+// arch025-N4a: the engine's sampling buffers as one component (SampleBuffers, src/server/engine_sampling.*; were
+// Engine members samp_dev_ .. ctl_host_ and Engine::SampleRows). Sizes == the 14ec7d7 Engine::allocState formulas;
+// the row reads (top-k_small, the k_big escalation, the full row, one logit) == a host reference on the mock's
+// logits. The end-to-end sampling / acceptance tests (sampling, specsample, relaxacc ...) pin the engine's use of it.
+void testSampleBuffers() {
+    NullBackend nb;
+    MockConfig mc;
+    mc.parallel = 3;
+    mc.pool_tokens = 4096;
+    MockModel model(nb, tok(), mc);
+    const std::uint32_t V = model.cfg().n_vocab;
+    CHECK_EQ(SampleBuffers::sampBytes(), static_cast<std::size_t>(max_rows) * k_small * 8 + max_rows * 8);
+    for (const std::uint32_t topk : {0u, 4u}) {
+        SampleBuffers sb(model, nb);
+        sb.alloc(3, topk > 0, topk);
+        CHECK_EQ(sb.sampHost().size(), SampleBuffers::sampBytes());
+        CHECK(sb.sampDev() != 0);
+        CHECK_EQ(sb.rowHost().size(), static_cast<std::size_t>(V));
+        CHECK_EQ(sb.cands()->size(), std::max<std::size_t>(V, k_big));
+        CHECK_EQ(sb.ctlHost().size(), static_cast<std::size_t>(3) * qwen35::ctl_words);
+        const std::uint64_t rb = topk ? static_cast<std::uint64_t>(max_rows) * topk * 8 + max_rows * 8 : 0;
+        CHECK_EQ(static_cast<std::uint64_t>(sb.relaxHost().size()), rb);
+        CHECK_EQ(sb.relaxDev() != 0, topk > 0);
+        CHECK_EQ(sb.nVocab(), V);
+        CHECK_EQ(sb.logitsRow(5), model.logits() + static_cast<std::uint64_t>(5) * V * 4);
+        CHECK(sb.inCands() != nullptr);
+    }
+    // row reads on known logits: rows 0..2 (row 1 flat -> the top-k_small set stays open and escalates)
+    SampleBuffers sb(model, nb);
+    sb.alloc(3, false, 0);
+    auto* lg = reinterpret_cast<float*>(model.logits());
+    for (std::uint32_t r = 0; r < 3; ++r)
+        for (std::uint32_t j = 0; j < V; ++j)
+            lg[static_cast<std::size_t>(r) * V + j] = r == 1 ? 0.0f : static_cast<float>((j * 7919u + r * 31u) % 1000u) * 0.01f;
+    CHECK_EQ(sb.logitAt(2, 17), lg[2 * static_cast<std::size_t>(V) + 17]);
+    const float* full = sb.loadFullRow(2);
+    CHECK(std::equal(full, full + V, lg + 2 * static_cast<std::size_t>(V)));
+    for (std::uint32_t r = 0; r < 3; ++r) {
+        Sampler s;
+        s.cands = sb.cands();
+        s.temp = 1.0;
+        s.inv_t = 1.0f;
+        s.top_p = 0.9;
+        sb.fetchCands(s, 3);
+        CHECK_EQ(s.row_base, 0u);
+        sb.prepareRow(s, r);
+        CHECK_EQ(s.row, r);
+        const float* x = lg + static_cast<std::size_t>(r) * V;
+        CHECK_EQ(s.m, *std::max_element(x, x + V));
+        CHECK(s.n > 0);
+        CHECK(s.big_used <= 1 && s.full_used <= s.big_used);  // escalation: at most once each, full only after big
+        if (r != 1) CHECK_EQ((*s.cands)[0].id, static_cast<std::uint32_t>(std::max_element(x, x + V) - x));
+    }
+}
+
+// arch025-N4b: the engine's image embeddings as one component (ImageEmbeddings, src/server/engine_vision.*; were
+// Engine members vis_cfg_ .. vis_rel_pending_ and Engine::embGet / embUnpin / embEvict / visPrepare / visDone /
+// visIdle / visWakeNeeded). Cache by content hash (hit = same entry, no encode), LRU eviction of unpinned entries down
+// to cache_bytes, pins through prepare / done, wakeNeeded; vision::lendRegions == the loop both callers had. The
+// end-to-end vision tests (vision, vis_*) pin the engine's use of it.
+void testImageEmbeddings() {
+    // vision::lendRegions: the CLI's and the engine's former loop ({raw[i][0], raw[i][1]} for i < n)
+    {
+        std::array<std::array<std::uint64_t, 2>, 16> raw{};
+        raw[0] = {0x1000, 64};
+        raw[1] = {0x2000, 128};
+        raw[2] = {0x3000, 256};
+        const std::vector<vision::Region> r = vision::lendRegions(raw, 2);
+        CHECK_EQ(r.size(), 2u);
+        CHECK_EQ(r[0].ptr, DevPtr{0x1000});
+        CHECK_EQ(r[0].len, 64u);
+        CHECK_EQ(r[1].ptr, DevPtr{0x2000});
+        CHECK_EQ(r[1].len, 128u);
+        CHECK(vision::lendRegions(raw, 0).empty());
+    }
+    NullBackend nb;
+    MockConfig mc;
+    MockModel model(nb, tok(), mc);
+    {
+        ImageEmbeddings none(model, nb);
+        none.attach(VisionConfig{});
+        CHECK(!none.wakeNeeded());
+        CHECK(none.config().vis == nullptr);
+    }
+    MockVision mv;
+    VisionConfig vc;
+    vc.vis = &mv;
+    vc.cache_bytes = 256;  // two 2x2-token images (4 tokens x projDim 8 x 4 bytes = 128 bytes each)
+    ImageEmbeddings ie(model, nb);
+    ie.attach(vc);
+    CHECK(ie.config().vis == &mv);
+    auto img = [](std::uint8_t h) {
+        vision::Prepared p;
+        p.nx = 2;
+        p.ny = 2;
+        p.hash[0] = h;
+        return p;
+    };
+    const vision::Prepared a = img(1), b = img(2), c = img(3);
+    EmbEntry* ea = ie.get(a, 1, 0);
+    CHECK_EQ(ea->data.size(), 32u);
+    CHECK_EQ(ea->pins, 1u);
+    CHECK_EQ(ie.encoded(), 1u);
+    CHECK_EQ(ie.bytes(), 128u);
+    CHECK(ie.get(a, 2, 1) == ea);  // hit
+    CHECK_EQ(ie.hits(), 1u);
+    CHECK_EQ(ie.encoded(), 1u);
+    CHECK_EQ(ea->pins, 2u);
+    CHECK_EQ(mv.encodes.load(), 1);
+    CHECK(ie.wakeNeeded());  // the mock encoder is loaded after its first encode
+    ie.unpin(ea);
+    ie.unpin(ea);
+    CHECK_EQ(ea->pins, 0u);
+    EmbEntry* eb = ie.get(b, 3, 0);
+    EmbEntry* ec = ie.get(c, 4, 1);  // 384 > 256: the unpinned a (least recently used) goes
+    CHECK_EQ(ie.bytes(), 256u);
+    CHECK_EQ(ie.encoded(), 3u);
+    CHECK(ie.get(a, 5, 2) != nullptr);  // re-encoded; every entry pinned -> nothing evicted
+    CHECK_EQ(ie.encoded(), 4u);
+    CHECK_EQ(ie.bytes(), 384u);
+    // a request's spans: prepare pins the entry (hit) and points the span at it, done releases the pins
+    JobVis jv;
+    jv.preps.push_back(b);
+    jv.spans.resize(1);
+    jv.spans[0].start = 0;
+    jv.spans[0].n = 4;
+    jv.ents.resize(1, nullptr);
+    const std::uint32_t pins_b = eb->pins;
+    ie.prepare(0, &jv, 9, 0);
+    CHECK(jv.ents[0] == eb);
+    CHECK(jv.spans[0].emb == eb->data.data());
+    CHECK_EQ(eb->pins, pins_b + 1);
+    CHECK_EQ(ie.hits(), 2u);
+    ie.prepare(0, &jv, 9, 4);  // span already before `from`: no embeddings needed
+    CHECK(jv.spans[0].emb == nullptr);
+    ie.done(0, &jv);
+    CHECK(jv.ents[0] == nullptr);
+    CHECK_EQ(eb->pins, pins_b);
+    ie.prepare(0, nullptr, 9, 0);  // no images: the slot's map is cleared, nothing else
+    ie.done(0, nullptr);
+    CHECK_EQ(ie.encoded(), 4u);
+    (void)ec;
+    ie.idle();  // the mock's idleTick never releases: no state change
+    CHECK_EQ(ie.bytes(), 384u);
+}
+
 // arch025-x1m2 (mutant c4-align-off-by-one): CkptStore's 256-byte rounding of each part at exact multiples of 256 and
 // just above them. The mock's own parts (32 / 64 / 64 bytes) never hit a multiple; real conv / ssm / hidden sizes do.
 void testCkptAlign() {
@@ -5342,7 +5582,7 @@ void testCkptF1() {
 // empty, retry works).
 void testGovParkSpes() {
     using namespace ps_test;
-    const ChatTokens ct = chatIds();
+    const chat::ChatTokens ct = chatIds();
     auto fill = [](CkRig& r, PrefixStore& ps, device::Stream s2) {
         ps.spes().resize(2);
         for (Spe& sp : ps.spes()) r.cs->init(sp.ck, false);
@@ -6282,6 +6522,31 @@ void testDFlashFit() {
     // (arch025-C0) runs serveMain's own code for that over a recording sizing module
 }
 
+// arch025-N10c (lane 1 leg 5): ServerRun::planSlots computed the per-slot replay rows itself (2d166f4 server_main.cpp:
+// 958-959); it now takes model::slotStateBytes(sizing, cfg).pend1. The old expression, verbatim, must equal it.
+static void testSlotReplayRows() {
+    using namespace whirl;
+    for (std::uint32_t msb : {16u, 32u}) {
+        model::ArchSizing s;
+        s.max_small_batch = msb;
+        qwen35::Config cfg;
+        cfg.n_layer = 64;
+        cfg.interval = 4;
+        cfg.d_conv = 4;
+        cfg.n_k_heads = 16;
+        cfg.n_v_heads = 48;
+        cfg.d_state = 128;
+        cfg.d_inner = 6144;
+        std::uint64_t ng = 0;
+        for (std::uint32_t li = 0; li < cfg.n_layer; ++li)
+            if (!cfg.isAttn(li)) ++ng;
+        const std::uint64_t pend = ng * (static_cast<std::uint64_t>(msb) * cfg.convCh() * 4 +
+                                         static_cast<std::uint64_t>(msb) * cfg.n_v_heads * (cfg.d_state + cfg.headV() + 2) * 4);
+        CHECK(pend > 0);
+        CHECK_EQ(model::slotStateBytes(s, cfg).pend1, pend);
+    }
+}
+
 // arch025-M5 (PLAN X-16, hipfire-arch-toy): a FAKE architecture table, never the product's. findArch finds the toy
 // family by its GGUF name, its config reader and sizing interface feed the server's dGPU fit input (the same
 // model::slotStateBytes and sizing calls server_main makes, in its order) and vram::planFit plans the KV pool. The
@@ -7006,7 +7271,7 @@ struct TbRig {
     NullBackend nb;
     std::unique_ptr<MockModel> model;
     std::vector<KvArr> kv;
-    std::unique_ptr<ChatTokens> ct;
+    std::unique_ptr<chat::ChatTokens> ct;
     std::unique_ptr<PrefixStore> ps;
     std::unique_ptr<CkptStore> cs;
     std::unique_ptr<tier::Tier> tier;
@@ -7021,7 +7286,7 @@ struct TbRig {
         mc.kv_extra_rows = std::move(extra_rows);
         model = std::make_unique<MockModel>(nb, tok(), mc);
         kv = model->kvArrays();
-        ct = std::make_unique<ChatTokens>(tok());
+        ct = std::make_unique<chat::ChatTokens>(tok());
         ps = std::make_unique<PrefixStore>(*ct, PrefixStore::Config{});
         cs = std::make_unique<CkptStore>(nb, *model, CkptStore::Layout{model->convBytes(), model->ssmBytes(), false});
         tier = tier::Tier::create(nb, 64ull << 20, 42, 0);
@@ -8968,10 +9233,14 @@ int main(int argc, char** argv) {
         {"draft_caps", testDraftCaps},
         {"protocol", testProtocol},
         {"sampler", testSampler},
+        {"sample_buffers", testSampleBuffers},  // arch025-N4a
+        {"image_embeddings", testImageEmbeddings},  // arch025-N4b
+        {"slot_replay_rows", testSlotReplayRows},  // arch025-N10c
         {"acceptor_fixed", testAcceptorFixed},
         {"acceptor_rules", testAcceptorRules},
         {"acceptor_random", testAcceptorRandom},
         {"chat_tokens", testChatTokens},
+        {"chat_tokens_cli", testChatTokensCli},  // arch025-N15c
         {"endpoints", testEndpoints},
         {"http_fake_engine", testHttpFakeEngine},
         {"vram_watch", testVramWatch},

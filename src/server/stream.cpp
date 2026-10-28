@@ -5,6 +5,7 @@
 #include "stream.h"
 
 #include "log.h"
+#include "whirl/small_helpers.h"  // satSub / alignUp / unixNow / msSince / nowMs (arch025-N6)
 
 #include <array>
 #include <ctime>
@@ -16,7 +17,6 @@ namespace {
 
 std::uint64_t prngNext(void* ctx) { return (*static_cast<std::mt19937_64*>(ctx))(); }
 
-std::int64_t unixNow() { return static_cast<std::int64_t>(std::time(nullptr)); }
 
 }  // namespace
 

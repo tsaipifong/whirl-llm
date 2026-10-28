@@ -8,10 +8,13 @@
 #pragma once
 
 #include "backend.h"
+#include "whirl/small_helpers.h"  // satSub / alignUp / unixNow / msSince / nowMs (arch025-N6)
 #include "cache/ckpt_store.h"
 #include "cache/page_pool.h"
 #include "cache/prefix_cache.h"
 #include "decode_floor.h"
+#include "engine_sampling.h"  // SampleBuffers, k_small / k_big / max_rows (arch025-N4a)
+#include "engine_vision.h"  // ImageEmbeddings (arch025-N4b)
 #include "engine_api.h"
 #include "engine_thread.h"
 #include "prefix_store.h"
@@ -26,7 +29,7 @@
 #include "tier/kv_tier.h"
 #include "spec/policy.h"  // DraftAccept, SlotAccept, NgramPolicy, DraftTiming, CycleCost (arch025-M4)
 #include "spec/slot_drafts.h"  // DraftPlanSlot, planSlotDrafts, splitDraftsByGain, slotDraftCap (arch025-E1b)
-#include "tokens.h"
+#include "whirl/chat_tokens.h"  // chat::ChatTokens (arch025-N15c, shared with the CLI)
 #include "vision_iface.h"
 #include "whirl/chat.h"
 #include "whirl/json.h"
@@ -55,16 +58,11 @@
 
 namespace whirl::server {
 
-inline double msSince(TimePoint t0) {
-    return std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
-}
+using whirl::msSince;  // whirl/small_helpers.h (arch025-N6)
 
 constexpr std::uint32_t kv_page = qwen35::kv_page;
 constexpr std::uint32_t gdn_max_seg = qwen35::gdn_max_seg;
 constexpr std::uint32_t max_small_batch = qwen35::max_small_batch;
-constexpr std::uint32_t k_small = 256;
-constexpr std::uint32_t k_big = 16384;
-constexpr std::uint32_t max_rows = qwen35::max_verify_rows;
 // the cold prefill schedule (shared with whirl seqtest's gate: include/whirl/prefill_schedule.h)
 using sched::prefill_chunk;
 using sched::prefill_merge;
@@ -262,6 +260,43 @@ struct EngineOptions {
     whirl::relax::Params relax;
 };
 
+// The engine's batch statistics (main thread; the "batch |" status line, Stats' DFlash2 counters). arch025-N4c: the
+// former Engine members stat_t0_ .. stat_dfl_gap_, same types, initial values and order.
+struct BatchStats {
+    TimePoint t0{};
+    std::uint64_t tokens = 0, cycles = 0, rows = 0, slots = 0, drafts = 0,
+                  lit_drafts = 0,  // FR-SRV P2-5: DFlash2 / n-gram drafts verified (all slots)
+                  prefill_tok = 0, seg_batches = 0, seg_chunks = 0;
+    std::uint64_t dfl_cycles = 0, dfl_drafted = 0, dfl_accepted = 0, dfl_cold = 0, dfl_gap = 0;
+};
+
+// The decode cycle's draft-policy state (main thread). arch025-N4f: the former Engine members timing_ .. policy_cycles_,
+// same types, initial values and order (Engine keeps it where they were: destruction order unchanged).
+struct SpecState {
+    std::array<qwen35::DraftTiming, gdn_max_seg + 1> timing{};
+    // WHIRL_SLOT_DRAFTS=2: cycle time per number of decoding slots, global acceptance pool
+    std::array<qwen35::CycleCost, gdn_max_seg + 1> ccost{};
+    std::array<bool, gdn_max_seg + 1> ccost_primed{};
+    qwen35::DraftAccept dpool{};
+    // DFlash2 cycle times by decoding slots (drafting included), keyed by the largest draft count
+    std::array<qwen35::DraftTiming, gdn_max_seg + 1> dtiming{};
+    std::unique_ptr<CycleProf> prof;  // CycleProf is complete where Engine is destroyed (engine.cpp, engine_internal.h)
+    std::uint32_t n_cycles = 0;
+    // most rows of one batched verify (ServerModel::verifyRows: 16, or 32 with the wide GEMV path)
+    std::uint32_t vrows = max_small_batch;
+    std::uint32_t prev_nd = 0;
+    std::uint32_t policy_cycles = 0;  // cycles since the draft-policy state was last reset
+};
+
+// The decode floor bookkeeping (main thread). arch025-N4f: the former Engine members floor_ .. stat_floor_periods_,
+// same types, initial values and order.
+struct FloorState {
+    DecodeFloor floor;
+    TimePoint epoch{};
+    TimePoint log_t{};
+    std::uint64_t waits = 0, periods = 0;
+};
+
 class Engine final : public EngineApi {
 public:
     Engine(ServerModel& model, device::Backend& ops, const Tokenizer& tok, const EngineOptions& opt);
@@ -285,7 +320,7 @@ public:
     void attachTier(tier::Tier* t);
     // Vision encoder (optional; after the KV pool exists): image_url parts become image tokens.
     void attachVision(const VisionConfig& vc);
-    const VisionConfig& visionConfig() const { return vis_cfg_; }
+    const VisionConfig& visionConfig() const { return vis_.config(); }
 
     // Main loop (returns after stop()). On stop: queued requests get 503, the
     // running ones finish, idle slots spill to the RAM tier and pending RAM -> SSD
@@ -378,14 +413,6 @@ private:
     bool waitsForSys(Job& job);
     bool waitsForTier(Job& job);
     void prefetchFor(Job& job);
-    // sampling
-    void launchTopk(std::uint32_t row0, std::uint32_t rows, std::uint32_t k, float inv_t, DevPtr dst,
-                    std::uint32_t dst_rows, std::uint32_t out0);
-    static std::size_t sampBytes();
-    void fetchCands(Sampler& s, std::uint32_t rows);
-    void prepareRow(Sampler& s, std::uint32_t r);
-    void loadFullRow(std::uint32_t gr);
-    DevPtr logitsRow(std::uint32_t r) const;
     // request lifecycle
     bool emit(Slot& sl, std::uint32_t t);
     void flushOut(Slot& sl);
@@ -471,61 +498,20 @@ private:
         for (const KvArr& a : kv_arrays_) b += a.row;
         return b;
     }
-    // vision: image embeddings (cache by content hash), per-slot image maps, idle release
-    EmbEntry* embGet(const vision::Prepared& p, std::uint64_t req, std::uint32_t slot);
-    void embUnpin(EmbEntry* ent);
-    void embEvict();
-    void visPrepare(Slot& sl, Job& job, std::uint32_t from);
-    void visDone(Slot& sl, Job& job);
-    void visIdle();
-    bool visWakeNeeded() const;
 
     ServerModel& m_;
     device::Backend& ops_;
     const Tokenizer& tok_;
-    ChatTokens ct_;
+    chat::ChatTokens ct_;
     EngineOptions opt_;
     std::uint32_t ctx_;
     EngineThread owner_;  // arch024 M8: set by runLoop; ck_, pool_, ps_, tb_ and the governor glue check against it
     CkptStore ck_;  // checkpoint buffers (arch024 M2)
-    std::array<qwen35::DraftTiming, gdn_max_seg + 1> timing_{};
-    // WHIRL_SLOT_DRAFTS=2: cycle time per number of decoding slots, global acceptance pool
-    std::array<qwen35::CycleCost, gdn_max_seg + 1> ccost_{};
-    std::array<bool, gdn_max_seg + 1> ccost_primed_{};
-    qwen35::DraftAccept dpool_{};
-    // DFlash2 cycle times by decoding slots (drafting included), keyed by the largest draft count
-    std::array<qwen35::DraftTiming, gdn_max_seg + 1> dtiming_{};
-    std::unique_ptr<CycleProf> prof_;
-    std::uint32_t n_cycles_ = 0;
-    // most rows of one batched verify (ServerModel::verifyRows: 16, or 32 with the wide GEMV path)
-    std::uint32_t vrows_ = max_small_batch;
-    std::uint32_t prev_nd_ = 0;
-    std::uint32_t policy_cycles_ = 0;  // cycles since the draft-policy state was last reset
-    // decode floor bookkeeping (main thread)
-    DecodeFloor floor_;
-    TimePoint floor_epoch_{};
-    TimePoint floor_log_t_{};
-    std::uint64_t stat_floor_waits_ = 0, stat_floor_periods_ = 0;
-    // sampling buffers
-    device::DevBuf samp_dev_, big_dev_;
-    device::DevBuf relax_dev_;                // relaxacc: top-K of the greedy verify rows [ids | vals | stats]
-    std::vector<std::uint8_t> relax_host_;
-    std::vector<std::uint8_t> samp_host_, big_host_;
-    std::vector<float> row_host_;
-    std::vector<std::uint8_t> in_cands_;
-    std::vector<Cand> cands_scratch_;
-    // sampling::RowSource over this engine's verify rows (the draws and the Acceptor read the device through it)
-    struct SampleRows final : sampling::RowSource {
-        Engine& e;
-        explicit SampleRows(Engine& en) : e(en) {}
-        void prepareRow(Sampler& s, std::uint32_t r) override;
-        const float* loadFullRow(std::uint32_t gr) override;
-        float logitAt(std::uint32_t gr, std::uint32_t t) override;
-        std::uint32_t nVocab() const override;
-        std::uint8_t* inCands() override;
-    };
-    SampleRows samp_rows_{*this};
-    std::vector<std::int32_t> ctl_host_;
+    SpecState spec_;  // arch025-N4f: the former members timing_ .. policy_cycles_, here and in that order
+    FloorState fl_;   // arch025-N4f: the former members floor_ .. stat_floor_periods_, here and in that order
+    // sampling buffers and sampling::RowSource over this engine's verify rows (the draws and the Acceptor read the
+    // device through it); arch025-N4a: the former members samp_dev_ .. ctl_host_, here and in that order
+    SampleBuffers sb_{m_, ops_};
     bool spec_on_ = false;
     std::uint64_t conv_bytes_ = 0, ssm_bytes_ = 0;
     std::vector<Slot> slots_;
@@ -541,12 +527,8 @@ private:
     bool stop_ WH_GUARDED_BY(q_mutex_) = false;
     std::vector<std::function<void()>> loop_calls_ WH_GUARDED_BY(q_mutex_);  // runOnLoop (tests)
     void runLoopCalls(whirl::UniqueLock& lk) WH_REQUIRES(q_mutex_);
-    // batch statistics
-    TimePoint stat_t0_{};
-    std::uint64_t stat_tokens_ = 0, stat_cycles_ = 0, stat_rows_ = 0, stat_slots_ = 0, stat_drafts_ = 0,
-                  stat_lit_drafts_ = 0,  // FR-SRV P2-5: DFlash2 / n-gram drafts verified (all slots)
-                  stat_prefill_tok_ = 0, stat_seg_batches_ = 0, stat_seg_chunks_ = 0;
-    std::uint64_t stat_dfl_cycles_ = 0, stat_dfl_drafted_ = 0, stat_dfl_accepted_ = 0, stat_dfl_cold_ = 0, stat_dfl_gap_ = 0;
+    // batch statistics (arch025-N4c: the former stat_t0_ .. stat_dfl_gap_)
+    BatchStats bst_;
     // WDDM-LOG: runtime video memory watch (setVramProbe)
     std::function<wddmwatch::Sample()> vram_probe_;
     std::function<std::optional<wddmwatch::Others>()> vram_others_;
@@ -594,16 +576,9 @@ private:
     TierBridge tb_;
     std::uint64_t stat_spe_new_ = 0, stat_spe_hits_ = 0, stat_spe_tok_ = 0, stat_spe_evict_ = 0, stat_unshare_ = 0;
     std::uint64_t stat_evictions_ = 0;
-    // vision
-    VisionConfig vis_cfg_;
-    std::vector<std::unique_ptr<EmbEntry>> emb_cache_;
-    std::uint64_t emb_bytes_ = 0;
-    std::uint64_t emb_seq_ = 0;
-    std::uint64_t stat_vis_enc_ = 0, stat_vis_hit_ = 0;
-    std::array<std::array<std::uint64_t, 2>, 16> vis_lend_raw_{};
-    std::vector<vision::Region> vis_lend_;
-    hip::LocalMemSnap vis_snap0_;  // device memory counters right after the mmproj was loaded (no image yet)
-    bool vis_rel_pending_ = false;
+    // vision: image embeddings (cache by content hash), per-slot image maps, idle release; arch025-N4b: the former
+    // members vis_cfg_ .. vis_rel_pending_, here (the last members) and in that order
+    ImageEmbeddings vis_{m_, ops_};
 };
 
 }  // namespace whirl::server

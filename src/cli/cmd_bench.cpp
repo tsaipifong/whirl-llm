@@ -52,7 +52,7 @@ int cmdBench(const Args& a) {
     }
     const bool think = thinkFromArgs(a);
     gguf::File f = gguf::File::open(path);
-    const q::Config cfg = q::Config::fromGguf(f);
+    const q::Config cfg = whirl::model::openArch(f).cfg;  // the architecture module, as whirl-server (arch025-N15d)
     std::string dev_line;
     selectDevice(a, &dev_line);
     out(fmt("whirl bench: %s (%s)\n", path.c_str(), cfg.archName()));

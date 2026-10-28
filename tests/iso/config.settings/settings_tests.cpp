@@ -127,8 +127,42 @@ void testEnv() {
     for (const char* n : k_names) whirl::platform::env::set(n, "");
 }
 
+// arch025-N10 (lane 1 leg 6): the two small-card / KV-room settings whirl-server read by hand (536d470 server_main.cpp:397-398,
+// :512-513, :954-955, :1302-1307): references are the old expressions.
+void testPoolReserve() {
+    namespace st = whirl::settings;
+    std::vector<std::string> warns;
+    const st::Warn w = [&warns](const std::string& s) { warns.push_back(s); };
+    const auto oldHeadroom = [&w]() {
+        std::optional<std::uint32_t> h;
+        if (st::envGet("VRAM_HEADROOM_MB")) h = st::envU32("VRAM_HEADROOM_MB", 0, w);
+        return h;
+    };
+    for (const char* v : {"", "512", "0", "12x", "99999999999"}) {
+        whirl::platform::env::set("WHIRL_VRAM_HEADROOM_MB", v);
+        whirl::platform::env::set("WHIRL_POOL_RESERVE_MB", v);
+        warns.clear();
+        const std::optional<std::uint32_t> a = oldHeadroom();
+        const std::size_t w_old = warns.size();
+        const std::optional<std::uint32_t> b = st::vramHeadroomMb(w);
+        ISO_CHECK(a == b && warns.size() == 2 * w_old);
+        ISO_CHECK(st::poolReserveGiven() == st::envGet("POOL_RESERVE_MB").has_value());
+        for (std::uint32_t def : {768u, 1536u, 3072u}) {
+            warns.clear();
+            const std::uint32_t r0 = st::envU32("POOL_RESERVE_MB", def, w);
+            const std::size_t w0 = warns.size();
+            ISO_CHECK(st::poolReserveMb(def, w) == r0 && warns.size() == 2 * w0);
+        }
+    }
+    whirl::platform::env::set("WHIRL_VRAM_HEADROOM_MB", "12x");  // a bad value: warned, then 0 (not "unset")
+    ISO_CHECK(st::vramHeadroomMb(nullptr) == std::optional<std::uint32_t>(0u));
+    whirl::platform::env::set("WHIRL_VRAM_HEADROOM_MB", "");
+    whirl::platform::env::set("WHIRL_POOL_RESERVE_MB", "");
+    ISO_CHECK(!st::vramHeadroomMb(nullptr).has_value() && !st::poolReserveGiven());
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
-    return iso::run("config.settings", {{"u32", testU32}, {"mtp_adapt", testMtpAdapt}, {"env", testEnv}}, argc, argv);
+    return iso::run("config.settings", {{"u32", testU32}, {"mtp_adapt", testMtpAdapt}, {"env", testEnv}, {"pool_reserve", testPoolReserve}}, argc, argv);
 }

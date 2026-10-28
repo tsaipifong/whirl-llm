@@ -68,6 +68,42 @@ DraftVocabChoice draftVocabChoice(const std::optional<std::string>& env_value, c
 inline constexpr std::uint32_t draft_vocab_embedded_n_vocab = 248320;
 // the default (embedded 64k) subset is used only for dense qwen35 models with that vocabulary
 inline bool draftVocabDefaultFits(bool moe, std::uint32_t n_vocab) { return !moe && n_vocab == draft_vocab_embedded_n_vocab; }
+// Whether the subset can be applied to this model (arch025-N10 / N6, lane 1 leg 6: the decision whirl.exe and
+// whirl-server both wrote, the shape of llama.cpp common_speculative_are_compatible: the decision here, the message and
+// what to do in each front end). none: full / first_n (nothing to apply here; first_n is applied by the caller at its
+// own time); not_fit: the embedded subset does not fit this vocabulary (by_default: draftVocabDefaultFits, explicit:
+// the 248320-token vocabulary); no_d2: it fits but the model has no 2-bit draft head; subset: build and set it.
+enum class DraftVocabGate { none, not_fit, no_d2, subset };
+DraftVocabGate draftVocabGate(const DraftVocabChoice& dv, bool moe, std::uint32_t n_vocab, bool draft_d2);
+// The ids the subset must keep: every special token and every byte token (the tokenizer's specials() / byteToken(b),
+// -1 = none), in that order.
+template <class Tok>
+std::vector<std::uint32_t> draftVocabRequired(const Tok& tok) {
+    std::vector<std::uint32_t> req;
+    for (const auto t : tok.specials())
+        if (t >= 0) req.push_back(static_cast<std::uint32_t>(t));
+    for (int b = 0; b < 256; ++b)
+        if (tok.byteToken(b) >= 0) req.push_back(static_cast<std::uint32_t>(tok.byteToken(b)));
+    return req;
+}
+// The subset of a file / embedded choice: the ids (readDraftVocab(dv.file), else embedded(): the embedded 64k list,
+// qwen35::embeddedDraftVocab64k in the model library) through draftVocabIds, the added count and the log label.
+struct DraftVocabSubset {
+    std::vector<std::uint32_t> ids;
+    std::uint32_t added = 0;
+    std::string label;
+};
+DraftVocabSubset draftVocabSubset(const DraftVocabChoice& dv, std::vector<std::uint32_t> (*embedded)(), std::uint32_t n_rows,
+                                  std::span<const std::uint32_t> required);
+
+// whirl-server's max drafts per cycle by number of decoding slots (index = slots; arch025-N10 leg 6: was server_main.cpp's
+// defaultBatchDrafts, whose `wide` argument was unused): dense {0, 8, 7, 4, 3, 2, 1, 1, 1, 0...}, MoE 1 up to 8 slots.
+// The cost model picks within the cap.
+using BatchDrafts = std::array<std::uint32_t, gdn_max_seg + 1>;
+BatchDrafts defaultBatchDrafts(bool moe);
+// WHIRL_MTP_BATCH_DRAFTS=d1,d2,...: entry k (from 1) for k slots; empty fields are skipped, a value that is not a number
+// is 1, each is capped at max_drafts, the slots after the last value keep the last value.
+BatchDrafts batchDraftsFrom(BatchDrafts base, const std::string& text);
 
 struct DraftAccept {
     std::array<float, max_ng_drafts> alpha;

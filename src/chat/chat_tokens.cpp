@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
-#include "tokens.h"
+#include "whirl/chat_tokens.h"
 
 #include "whirl/prefill_schedule.h"
 
 #include <string>
+#include <string_view>
 #include <unordered_map>
 
-namespace whirl::server {
+namespace whirl::chat {
 
 namespace {
 std::uint32_t idOf(const Tokenizer& tok, std::string_view text) {
@@ -21,6 +22,7 @@ ChatTokens::ChatTokens(const Tokenizer& tok) {
     im_end = idOf(tok, "<|im_end|>");
     endoftext = idOf(tok, "<|endoftext|>");
     think = idOf(tok, "<think>");
+    vision_end = idOf(tok, "<|vision_end|>");
     // "\n" and "system" as single tokens (byte-level text of "\n" is U+010A)
     {
         const auto ids = tok.encode("\n", false);
@@ -80,4 +82,4 @@ std::vector<std::uint32_t> ChatTokens::crlfToLf(const Tokenizer& tok) {
     return norm;
 }
 
-}  // namespace whirl::server
+}  // namespace whirl::chat

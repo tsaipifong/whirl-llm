@@ -31,6 +31,7 @@
 #include "model/qwen35/scratch.h"  // src/: qwen35::Scratch (arch025-M3)
 #include "model/qwen35/tune_table.h"  // src/: qwen35::TuneTable, GemvR / GemvW (arch025-M3)
 #include "spec/policy.h"  // src/: the MTP / n-gram draft policy, mtpDefaults, the draft vocabulary choice (arch025-M4)
+#include "whirl/device_pick.h"  // qwen35::pickDevice / restrictDevice (moved from here, arch025-lane1 leg 3)
 #include "whirl/gguf.h"
 #include "whirl/model_types.h"
 #include "whirl/device_profile.h"
@@ -723,21 +724,8 @@ void parseGemvWHead(Model& m, std::string_view list);
 void applyGemvEnv(Model& m);
 
 // ---------------------------------------------------------------------------
-// device selection
-
-// HIP device for `spec` (gpusel::selectGpus: pci:BUS:DEVICE, index, uuid:, r9700 / 8060s, a name part);
-// empty: WHIRL_DEVICE, else gpusel::defaultGpu (the most GPU memory). After restrictDevice() restricted
-// the runtime it is the one visible GPU. Takes the per-GPU process mutex, keyed by uuid / PCI address
-// (WHIRL_GPU_SHARE=1 skips it).
-int pickDevice(std::string_view spec);
-}  // namespace whirl::qwen35
-namespace whirl::gpusel {
-struct Restriction;
-}
-namespace whirl::qwen35 {
-// s8-719 root fix: decide the GPU and make the HIP runtime see only it (gpusel::restrictToSelected), before
-// the first HIP call of whirl.exe / whirl-server.exe; a bad --device becomes ModelError("DeviceChoice").
-const gpusel::Restriction& restrictDevice(std::string_view spec);
+// device selection: qwen35::pickDevice / restrictDevice are declared in whirl/device_pick.h (included above;
+// arch025-lane1 leg 3: config.device needs them without this header)
 
 // ---------------------------------------------------------------------------
 // MTP draft-count control and n-gram (prompt-lookup) drafting: src/spec/policy.h (arch025-M4: MtpDefaults,

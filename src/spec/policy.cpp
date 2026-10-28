@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <stdexcept>
@@ -137,6 +138,50 @@ DraftVocabChoice draftVocabChoice(const std::optional<std::string>& env_value, c
         c.file = *f;
     }
     return c;
+}
+
+DraftVocabGate draftVocabGate(const DraftVocabChoice& dv, bool moe, std::uint32_t n_vocab, bool draft_d2) {
+    using K = DraftVocabChoice::Kind;
+    if (dv.kind != K::embedded_64k && dv.kind != K::file) return DraftVocabGate::none;
+    if (dv.kind == K::embedded_64k) {
+        const bool fits = dv.by_default ? draftVocabDefaultFits(moe, n_vocab) : n_vocab == draft_vocab_embedded_n_vocab;
+        if (!fits) return DraftVocabGate::not_fit;
+        if (!draft_d2) return DraftVocabGate::no_d2;
+    }
+    return DraftVocabGate::subset;
+}
+
+DraftVocabSubset draftVocabSubset(const DraftVocabChoice& dv, std::vector<std::uint32_t> (*embedded)(), std::uint32_t n_rows,
+                                  std::span<const std::uint32_t> required) {
+    using K = DraftVocabChoice::Kind;
+    DraftVocabSubset s;
+    s.ids = draftVocabIds(dv.kind == K::file ? readDraftVocab(dv.file) : embedded(), n_rows, required, &s.added);
+    s.label = dv.kind == K::file ? dv.file : std::string(dv.by_default ? "64k (embedded, default)" : "64k (embedded)");
+    return s;
+}
+
+BatchDrafts defaultBatchDrafts(bool moe) {
+    if (moe) return {0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0};
+    return {0, 8, 7, 4, 3, 2, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0};
+}
+
+BatchDrafts batchDraftsFrom(BatchDrafts batch_drafts, const std::string& s) {
+    std::size_t k = 1, p = 0;
+    while (p < s.size() && k <= gdn_max_seg) {
+        std::size_t e = s.find(',', p);
+        if (e == std::string::npos) e = s.size();
+        if (e > p) {
+            std::uint32_t x = 1;
+            try {
+                x = static_cast<std::uint32_t>(std::stoul(s.substr(p, e - p)));
+            } catch (const std::exception&) {
+            }
+            batch_drafts[k++] = std::min(x, max_drafts);
+        }
+        p = e + 1;
+    }
+    for (; k <= gdn_max_seg; ++k) batch_drafts[k] = batch_drafts[k - 1];
+    return batch_drafts;
 }
 
 std::vector<u32> readDraftVocab(const std::string& path) {

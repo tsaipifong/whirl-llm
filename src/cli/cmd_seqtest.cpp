@@ -222,7 +222,7 @@ int cmdSeqtest(const Args& a) {
         m.selectSeq(0);
         const std::vector<u32> lp = goldenLongIds(tok, long_n);
         const std::span<const u32> ls(lp);
-        const std::size_t N = lp.size(), th = tok.thinkOpenSplit(lp);
+        const std::size_t N = lp.size(), th = tok.ct.thinkOpenSplit(lp);
         const std::span<const std::uint32_t> noimg;
         const std::size_t tail = sched::tailPoint(N, 0, th, noimg);
         // run forwards ending at `ends` (the first starts at 0); the last row's logits hash
@@ -253,7 +253,7 @@ int cmdSeqtest(const Args& a) {
             return r;
         };
         const device::Profile& prof = device::profile(m.arch);
-        const std::size_t ex = sched::prefillExecFor(sched::prefillExecDefault(prof, m.cfg.moe), m.max_batch, prof.prefill_fill_batch),
+        const std::size_t ex = sched::prefillExec(std::nullopt, prof, m.cfg.moe, m.max_batch),
                           ex_big = sched::prefillExecFor(16384, m.max_batch, prof.prefill_fill_batch), ex2 = sched::prefillExecFor(2048, m.max_batch);
         const std::array<std::size_t, 1> tail_stop = {tail};
         const std::size_t mid = sched::schedFloor(N, 0, th, noimg, N / 3);  // a prefix checkpoint inside the prompt
@@ -311,7 +311,7 @@ int cmdSeqtest(const Args& a) {
         m.selectSeq(0);
         const std::span<const std::uint32_t> noimg;
         const device::Profile& prof = device::profile(m.arch);
-        const std::size_t ex = sched::prefillExecFor(sched::prefillExecDefault(prof, m.cfg.moe), m.max_batch, prof.prefill_fill_batch);
+        const std::size_t ex = sched::prefillExec(std::nullopt, prof, m.cfg.moe, m.max_batch);
         auto runEndsMtp = [&](std::span<const u32> ids, const std::vector<std::size_t>& ends, bool mtp) {
             m.reset();
             std::size_t cur = 0;
@@ -353,8 +353,8 @@ int cmdSeqtest(const Args& a) {
                 ++cli_total;
                 continue;
             }
-            const std::size_t th = tok.thinkOpenSplit(pp.ids);
-            const std::size_t sy = sched::sysSplit(sched::sysBoundary(ids, tok.im_start, tok.system, tok.im_end, tok.newline), n, sched::sys_min_default);
+            const std::size_t th = tok.ct.thinkOpenSplit(pp.ids);
+            const std::size_t sy = sched::sysSplit(tok.ct.sysBoundary(ids), n, sched::sys_min_default);
             // the split prompts must really split (else the case is vacuous)
             if ((pp.name.rfind("thinking", 0) == 0 && th == 0) || (pp.name.rfind("long system", 0) == 0 && sy == 0)) {
                 out(fmt("    CLI-SCHED %-36s: no forced split in the prompt (N %zu) (FAIL)\n", pp.name.c_str(), n));
