@@ -231,7 +231,8 @@ void restoreStdHandles() {
         if (!g_std.console[i] && g_std.h[i] != nullptr && g_std.h[i] != INVALID_HANDLE_VALUE) SetStdHandle(kStdIds[i], g_std.h[i]);
 }
 
-bool sendCtrlC(DWORD pid) {
+// why (optional): which Win32 call failed and its GetLastError, for the stop line / gate log (arch025-flake912)
+bool sendCtrlC(DWORD pid, std::string* why = nullptr) {
     bool ok = false;
     if (!g_std.captured) captureStdHandles();  // wmain probes at startup; this only covers a caller that did not
     std::fflush(stdout);
@@ -240,8 +241,11 @@ bool sendCtrlC(DWORD pid) {
     if (AttachConsole(pid)) {
         SetConsoleCtrlHandler(nullptr, TRUE);  // this process ignores the event it sends
         ok = GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0) != 0;
+        if (!ok && why) *why = std::format("GenerateConsoleCtrlEvent error {}", GetLastError());
         Sleep(100);  // let the event be delivered before leaving the console
         FreeConsole();
+    } else if (why) {
+        *why = std::format("AttachConsole({}) error {}", pid, GetLastError());
     }
     if (AttachConsole(ATTACH_PARENT_PROCESS)) {
         // the old console handles died with FreeConsole: reopen only the streams that were a console at startup
@@ -256,12 +260,43 @@ bool sendCtrlC(DWORD pid) {
     return ok;
 }
 
-// bug-gatectrlc selftest helpers (CPU only, ping.exe as the child). The layout of a runner that wraps the gate in
+// bug-gatectrlc selftest helpers (CPU only). The layout of a runner that wraps the gate in
 // `Start-Process pwsh -Command "& gate.exe ..." -RedirectStandardOutput F`:
 //   selftest  --(new hidden console, STARTF_USESTDHANDLES = file F)-->  --selftest-console-wrap (plays pwsh)
 //   wrap      --(same console, NO STARTF_USESTDHANDLES: inherits F as its std handles)-->  --selftest-console-child
-//   child     starts N ping.exe children the way Server starts a server and stops each with sendCtrlC, then prints
-//             the summary line, which must reach F.
+//   child     starts N --selftest-console-sleeper children the way Server starts a server (CREATE_NO_WINDOW = own hidden
+//             console), waits for each one's ready event, stops it with sendCtrlC, then prints the summary line, which
+//             must reach F.
+// arch025-flake912 (2026-10-30): the child used to be ping.exe after a fixed Sleep(1500) ("let ping reach its main
+// loop"). A CREATE_NO_WINDOW child has no console until its conhost is up, and AttachConsole(pid) fails with error 6
+// (ERROR_INVALID_HANDLE) until then; that took 160-1800 ms on the busy machine and up to 3.5 s under CPU load
+// (scratch/a25_flake912/attach_probe.cpp), so under load the Ctrl+C was never sent ("sent 0, exited 0"). Like CPython's
+// Win32KillTests (the child reports ready before the event is sent) and the gate's own Server (Ctrl+C only after
+// /health 200), the sleeper now sets a named event once its Ctrl+C handler is installed - its console is attached
+// before any user code runs - and the child waits for that event (or the sleeper's exit) instead of guessing.
+// Ready bound, failure path only (a ready sleeper ends the wait at once): measured "ready in N ms" under 16 console-spawn
+// load workers 65 / 4489 / 12941 ms (min / median / max of 24, scratch/a25_flake912/fix_spawn16), idle 42-123 ms; 60 s is
+// 4.6x that max (the gate's Server waits up to 400 s for /health 200 for the same reason).
+constexpr DWORD kSleeperReadyMs = 60000;
+
+HANDLE g_sleeper_stop = nullptr;
+BOOL WINAPI sleeperCtrl(DWORD type) {
+    if (type != CTRL_C_EVENT && type != CTRL_BREAK_EVENT) return FALSE;
+    SetEvent(g_sleeper_stop);
+    return TRUE;
+}
+
+// --selftest-console-sleeper <event>: plays the server - handles Ctrl+C (exit 0), says "ready" through <event> first
+int consoleSleeper(const std::string& ev) {
+    g_sleeper_stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!g_sleeper_stop || !SetConsoleCtrlHandler(sleeperCtrl, TRUE)) return 8;
+    HANDLE ready = OpenEventW(EVENT_MODIFY_STATE, FALSE, widen(ev).c_str());
+    if (!ready) return 9;
+    SetEvent(ready);
+    CloseHandle(ready);
+    return WaitForSingleObject(g_sleeper_stop, 60000) == WAIT_OBJECT_0 ? 0 : 7;
+}
+
 std::wstring selfExe() {
     std::wstring p(32768, L'\0');
     p.resize(GetModuleFileNameW(nullptr, p.data(), static_cast<DWORD>(p.size())));
@@ -269,12 +304,16 @@ std::wstring selfExe() {
 }
 
 int consoleChild(int n, const std::string& dir) {
-    std::wstring sys(MAX_PATH, L'\0');
-    sys.resize(GetSystemDirectoryW(sys.data(), MAX_PATH));
     int stopped = 0;
     for (int i = 0; i < n; ++i) {
+        const std::wstring ev = L"Local\\whirl_ctrlc_ready_" + std::to_wstring(GetCurrentProcessId()) + L"_" + std::to_wstring(i);
+        HANDLE ready = CreateEventW(nullptr, TRUE, FALSE, ev.c_str());
+        if (!ready) {
+            std::printf("console child: cannot create the ready event (error %lu)\n", GetLastError());
+            return 3;
+        }
         SECURITY_ATTRIBUTES sa{sizeof sa, nullptr, TRUE};
-        HANDLE out = CreateFileW(widen(dir + "\\ping_" + std::to_string(i) + ".txt").c_str(), GENERIC_WRITE, FILE_SHARE_READ,
+        HANDLE out = CreateFileW(widen(dir + "\\sleeper_" + std::to_string(i) + ".txt").c_str(), GENERIC_WRITE, FILE_SHARE_READ,
                                  &sa, CREATE_ALWAYS, 0, nullptr);
         STARTUPINFOW si{};
         si.cb = sizeof si;
@@ -283,25 +322,39 @@ int consoleChild(int n, const std::string& dir) {
         si.hStdOutput = out;
         si.hStdError = out;
         PROCESS_INFORMATION pi{};
-        std::wstring cmd = quoteArg(sys + L"\\ping.exe") + L" -n 60 127.0.0.1";
+        std::wstring cmd = quoteArg(selfExe()) + L" --selftest-console-sleeper " + quoteArg(ev);
         std::vector<wchar_t> cbuf(cmd.begin(), cmd.end());
         cbuf.push_back(0);
+        const auto t0 = std::chrono::steady_clock::now();
         const BOOL started = CreateProcessW(nullptr, cbuf.data(), nullptr, nullptr, TRUE,
                                             CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
         if (out != INVALID_HANDLE_VALUE) CloseHandle(out);
         if (!started) {
-            std::printf("console child: cannot start ping.exe (error %lu)\n", GetLastError());
+            std::printf("console child: cannot start the sleeper (error %lu)\n", GetLastError());
+            CloseHandle(ready);
             return 3;
         }
         CloseHandle(pi.hThread);
-        Sleep(1500);  // let ping.exe reach its main loop
-        const bool sent = sendCtrlC(pi.dwProcessId);
+        // event-driven: the sleeper is attachable once it says ready (or it died: then there is nothing to stop)
+        const HANDLE w[2] = {ready, pi.hProcess};
+        const DWORD wr = WaitForMultipleObjects(2, w, FALSE, kSleeperReadyMs);
+        const long long ready_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+        CloseHandle(ready);
+        std::string why;
+        bool sent = false;
+        if (wr == WAIT_OBJECT_0) sent = sendCtrlC(pi.dwProcessId, &why);
+        else why = wr == WAIT_OBJECT_0 + 1 ? "sleeper exited before it was ready" : std::format("sleeper not ready in {} ms", ready_ms);
         const bool exited = WaitForSingleObject(pi.hProcess, 10000) == WAIT_OBJECT_0;
         if (!exited) TerminateProcess(pi.hProcess, 1);
         WaitForSingleObject(pi.hProcess, 5000);
+        DWORD code = 1;
+        GetExitCodeProcess(pi.hProcess, &code);
         CloseHandle(pi.hProcess);
-        if (sent && exited) ++stopped;
-        std::printf("console child: stop %d: sent %d, exited %d\n", i, sent ? 1 : 0, exited ? 1 : 0);
+        if (exited && code != 0 && why.empty()) why = std::format("sleeper exit code {}", code);
+        if (sent && exited && code == 0) ++stopped;
+        std::printf("console child: stop %d: sent %d, exited %d (ready in %lld ms%s)\n", i, sent ? 1 : 0, exited ? 1 : 0, ready_ms,
+                    why.empty() ? "" : ("; " + why).c_str());
         std::fflush(stdout);
     }
     std::printf("== console child: %d of %d stops ok (summary)\n", stopped, n);
@@ -320,7 +373,9 @@ int consoleWrap(int n, const std::string& dir) {
     if (!CreateProcessW(nullptr, cbuf.data(), nullptr, nullptr, TRUE, CREATE_UNICODE_ENVIRONMENT, nullptr, nullptr, &si, &pi))
         return 4;
     CloseHandle(pi.hThread);
-    if (WaitForSingleObject(pi.hProcess, 60000) != WAIT_OBJECT_0) TerminateProcess(pi.hProcess, 5);
+    // failure-path bound: 2 stops x (ready wait 60 s + send 0.3 s + exit 10 s + 5 s) = 151 s, so the old 60 s could cut
+    // the summary line of a failing run
+    if (WaitForSingleObject(pi.hProcess, 180000) != WAIT_OBJECT_0) TerminateProcess(pi.hProcess, 5);
     WaitForSingleObject(pi.hProcess, 5000);
     DWORD code = 0;
     GetExitCodeProcess(pi.hProcess, &code);
@@ -353,7 +408,7 @@ std::pair<std::string, int> consoleStopRun(int n) {
     if (CreateProcessW(nullptr, cbuf.data(), nullptr, nullptr, TRUE, CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW, nullptr,
                        nullptr, &si, &pi)) {
         CloseHandle(pi.hThread);
-        if (WaitForSingleObject(pi.hProcess, 90000) != WAIT_OBJECT_0) TerminateProcess(pi.hProcess, 6);
+        if (WaitForSingleObject(pi.hProcess, 210000) != WAIT_OBJECT_0) TerminateProcess(pi.hProcess, 6);  // > the wrap 180 s
         WaitForSingleObject(pi.hProcess, 5000);
         DWORD c = 0;
         GetExitCodeProcess(pi.hProcess, &c);
@@ -480,10 +535,12 @@ public:
     void stop() {
         if (!proc_) return;
         const auto t0 = std::chrono::steady_clock::now();
-        const bool sent = sendCtrlC(GetProcessId(proc_));
+        std::string why;
+        const bool sent = sendCtrlC(GetProcessId(proc_), &why);
         bool terminated = false;
         if (!sent || WaitForSingleObject(proc_, 30000) != WAIT_OBJECT_0) {
-            logLine(std::format("server {}: {}; terminating", tag_, sent ? "no exit 30 s after Ctrl+C" : "Ctrl+C could not be sent"));
+            logLine(std::format("server {}: {}; terminating", tag_,
+                                sent ? std::string("no exit 30 s after Ctrl+C") : "Ctrl+C could not be sent (" + why + ")"));
             TerminateProcess(proc_, 1);
             terminated = true;
         } else {
@@ -3219,6 +3276,7 @@ int wmain(int argc, wchar_t** wargv) {
     // internal processes of the --selftest console check (consoleStopRun)
     if (a.size() == 3 && a[0] == "--selftest-console-wrap") return consoleWrap(std::stoi(a[1]), a[2]);
     if (a.size() == 3 && a[0] == "--selftest-console-child") return consoleChild(std::stoi(a[1]), a[2]);
+    if (a.size() == 2 && a[0] == "--selftest-console-sleeper") return consoleSleeper(a[1]);
     for (std::size_t i = 0; i < a.size(); ++i) {
         auto val = [&]() -> std::string {
             if (i + 1 >= a.size()) throw std::runtime_error(a[i] + " needs a value");
