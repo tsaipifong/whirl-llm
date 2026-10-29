@@ -25,6 +25,19 @@
 extern const unsigned char whirl_draft_vocab_64k[] = {0x01, 0x00, 0x00, 0x00, 0x10, 0x27, 0x00, 0x00, 0x78, 0x56, 0x34, 0x12};
 extern const unsigned long long whirl_draft_vocab_64k_size = sizeof(whirl_draft_vocab_64k);
 
+// arch025-gmsurv: the opt-in allocation recorder of the HIP double (tests/iso/fake_hip.cpp)
+namespace whirl::hip::isofake {
+void recordAllocs(bool on);
+std::vector<std::uint64_t> recordedSizes();
+}  // namespace whirl::hip::isofake
+
+// arch025-gmsurv: the test seam of class Model (friend struct ModelTestAccess in include/whirl/model.h; defined only here)
+namespace whirl::qwen35 {
+struct ModelTestAccess {
+    static void allocScratch(Model& m, std::uint32_t fd_splits) { m.allocScratch(fd_splits); }
+};
+}  // namespace whirl::qwen35
+
 namespace {
 
 namespace q = whirl::qwen35;
@@ -131,6 +144,48 @@ void testLoadRefusesBeforeTheDevice() {
     ISO_CHECK(same(codeOf([&] { (void)q::Model::load(fq, 4096, stats); }), "MissingTensor|MissingTensor: token_embd.weight"));
 }
 
+// arch025-gmsurv (R9700 gpumut-A survivor m3-scratch-fd; Model::allocScratch was reachable only through Model::load on a
+// GPU): allocScratch on a small dense config with no layers, through the HIP double's allocation recorder. Pinned:
+// m.fd_splits is the argument, and the first 25 allocations (x .. out_tok, then part_ml / part_acc) have the sizes of
+// their definition, part_ml / part_acc sized for that split count. Run for 64 (f16 / q8 default) and 256 (q4 KV).
+void testAllocScratchFdSplits() {
+    for (const std::uint32_t splits : {64u, 128u, 256u}) {
+        std::vector<std::uint64_t> got;
+        std::uint32_t fd = 0;
+        {
+            auto m = std::make_unique<q::Model>();
+            q::Config& c = m->cfg;
+            c.n_embd = 64, c.n_head = 4, c.n_head_kv = 2, c.head_dim = 16, c.n_ff = 128, c.n_vocab = 100;
+            c.d_conv = 4, c.d_state = 8, c.n_k_heads = 2, c.n_v_heads = 2, c.d_inner = 32;
+            m->max_batch = 32;
+            whirl::hip::isofake::recordAllocs(true);
+            q::ModelTestAccess::allocScratch(*m, splits);
+            whirl::hip::isofake::recordAllocs(false);
+            got = whirl::hip::isofake::recordedSizes();
+            fd = m->fd_splits;
+        }  // ~Model releases the recorded ledger through the double
+        const std::uint64_t B = 32, f4 = 4, E = 64, H = 4, HKV = 2, HD = 16, FF = 128, V = 100, CC = 2 * 2 * 8 + 32, DI = 32, NV = 2;
+        const std::uint64_t R = q::max_verify_rows, S = splits;
+        const std::vector<std::uint64_t> want = {B * E * f4,      B * E * f4,  B * H * HD * 2 * f4, B * HKV * HD * f4, B * HKV * HD * f4,
+                                                 B * H * HD * f4, B * CC * f4, B * CC * f4,         B * DI * f4,       B * NV * f4,
+                                                 B * NV * f4,     B * 2 * NV * f4, B * DI * f4,     B * FF * f4,       B * FF * f4,
+                                                 R * V * f4,      B * E * f4,  B * 2 * E * f4,      q::max_small_batch * E * f4,
+                                                 B * 4,           B * 4,       B * 4,               q::ctl_words * 4,
+                                                 R * S * H * 2 * f4, R * S * H * HD * f4};
+        ISO_CHECK(fd == splits);
+        ISO_CHECK(got.size() > want.size());
+        bool same_prefix = got.size() > want.size();
+        for (std::size_t i = 0; same_prefix && i < want.size(); ++i) same_prefix = got[i] == want[i];
+        if (!same_prefix) {
+            std::string s;
+            for (std::size_t i = 0; i < got.size() && i < want.size(); ++i)
+                s += std::to_string(i) + ":" + std::to_string(got[i]) + "/" + std::to_string(want[i]) + " ";
+            std::printf("  alloc sizes (got/want), splits %u: %s\n", splits, s.c_str());
+        }
+        ISO_CHECK(same_prefix);
+    }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -138,6 +193,7 @@ int main(int argc, char** argv) {
                     {{"config_arch_check", testConfigArchCheck},
                      {"embedded_draft_vocab", testEmbeddedDraftVocab},
                      {"empty_model", testEmptyModel},
-                     {"load_refuses_before_device", testLoadRefusesBeforeTheDevice}},
+                     {"load_refuses_before_device", testLoadRefusesBeforeTheDevice},
+                     {"alloc_scratch_fd_splits", testAllocScratchFdSplits}},
                     argc, argv);
 }

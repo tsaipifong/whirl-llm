@@ -126,6 +126,10 @@ Kernels loadKernels(const hip::Module& m, KvFormat kv);
 // the draft-head builds, autotune / tune cache and the self-checks (arch025-lane2 N9 S3/S4).
 class Model : public Context {
 public:
+    // arch025-gmsurv test seam: tests/iso/model.core defines ModelTestAccess (allocScratch on the HIP double's
+    // allocation recorder, mutant m3-scratch-fd); no product code defines or uses it. A friend declaration changes
+    // no member's access, so no decorated name and no product object changes (seam_objeq proof).
+    friend struct ModelTestAccess;
     Model() = default;
     Model(const Model&) = delete;
     Model& operator=(const Model&) = delete;

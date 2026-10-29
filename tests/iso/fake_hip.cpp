@@ -10,10 +10,13 @@
 #include "whirl/hip.h"
 #include "whirl/uma_mem.h"
 
+#include <cstdint>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace whirl::hip {
 
@@ -21,7 +24,27 @@ namespace {
 
 [[noreturn]] void gpu(const char* op) { throw std::logic_error(std::string("iso fake hip: ") + op + " reached the device runtime"); }
 
+// arch025-gmsurv: the opt-in allocation recorder (isofake::recordAllocs). Off (the default) every device call throws
+// as before. On: malloc hands out fake addresses (never dereferenced: nothing here maps memory) and records the
+// requested sizes in order; free / memset accept an address it handed out (also after recording stopped, so a Model
+// destroyed later releases its ledger). Only the functions an allocation-ledger test needs; launches, uploads and
+// syncs still throw.
+bool g_record = false;
+std::vector<std::uint64_t> g_sizes;
+std::set<DevPtr> g_live;
+DevPtr g_next = 0x100000;
+
+bool handedOut(DevPtr p) { return g_live.count(p) != 0; }
+
 }  // namespace
+
+namespace isofake {
+void recordAllocs(bool on) {
+    g_record = on;
+    if (on) g_sizes.clear();
+}
+std::vector<std::uint64_t> recordedSizes() { return g_sizes; }
+}  // namespace isofake
 
 const char* lastErrorOp() { return ""; }
 int lastErrorCode() { return 0; }
@@ -29,8 +52,19 @@ std::string errorString(int code) { return "iso fake hip error " + std::to_strin
 DeviceInfo describeDevice(int) { gpu("describeDevice"); }
 void setDevice(int) { gpu("setDevice"); }
 int getDevice() { gpu("getDevice"); }
-DevPtr malloc(std::size_t) { gpu("malloc"); }
+DevPtr malloc(std::size_t n) {
+    if (!g_record) gpu("malloc");
+    const DevPtr p = g_next;
+    g_next += (static_cast<DevPtr>(n) + 0xFFFF) / 0x10000 * 0x10000 + 0x10000;  // distinct, increasing, never overlapping
+    g_sizes.push_back(n);
+    g_live.insert(p);
+    return p;
+}
 void free(DevPtr p) {
+    if (p && handedOut(p)) {
+        g_live.erase(p);
+        return;
+    }
     if (p) gpu("free");
 }
 void* hostMalloc(std::size_t) { gpu("hostMalloc"); }
@@ -42,7 +76,9 @@ void upload(DevPtr, const void*, std::size_t) { gpu("upload"); }
 void download(void*, DevPtr, std::size_t) { gpu("download"); }
 void copyAsync(DevPtr, DevPtr, std::size_t, Stream) { gpu("copyAsync"); }
 void copyAnyAsync(DevPtr, DevPtr, std::size_t, Stream) { gpu("copyAnyAsync"); }
-void memset(DevPtr, int, std::size_t) { gpu("memset"); }
+void memset(DevPtr p, int, std::size_t) {
+    if (!handedOut(p)) gpu("memset");
+}
 void sync() { gpu("sync"); }
 MemInfo memInfo() { gpu("memInfo"); }
 WddmMemInfo wddmMemInfo() { gpu("wddmMemInfo"); }
