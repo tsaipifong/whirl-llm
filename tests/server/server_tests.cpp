@@ -9433,9 +9433,54 @@ void testConsoleCtrlArm() {
 // arch025-R12cli route B: the shared speculative-decoding rules (src/spec/spec_rules.h), CLI and server side
 #include "spec_rules_tests.inc"
 
+// arch025-t915 (PLAN 9.15): a hidden case (runs only when named with --only) that never returns, to prove the per-case
+// watchdog: with WHIRL_TEST_CASE_TIMEOUT_S small the run must end with "FAIL <name>: TIMEOUT" and exit 124, not hang.
+// tools/gates/server_watchdog_test.py runs it under an outer timeout.
+static void testWatchdogSelfcheckHang() {
+    for (;;) std::this_thread::sleep_for(std::chrono::seconds(1));
+}
+
+// arch025-t915 (PLAN 9.15) per-case watchdog. WHIRL_TEST_CASE_TIMEOUT_S=N (N > 0) arms it: a case that runs longer than N s
+// prints "FAIL <case>: TIMEOUT after N s" and the program ends with exit code 124 (a stuck test thread cannot be unwound, so
+// the whole program ends; the caller, e.g. tools/impact/mutate.py, records the verdict and goes on). Unset or 0 = off (today's
+// behaviour: the longest legitimate case is not known to be under any fixed bound, so there is no default limit).
+static std::atomic<const char*> g_wd_case{nullptr};
+static std::atomic<long long> g_wd_deadline_ms{0};
+static double g_wd_limit_s = 0;
+
+static long long steadyMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+static void startCaseWatchdog() {
+    std::thread([] {
+        for (;;) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            const char* c = g_wd_case.load();
+            if (c && steadyMs() > g_wd_deadline_ms.load()) {
+                std::fprintf(stderr, "  FAIL %s: TIMEOUT after %g s (WHIRL_TEST_CASE_TIMEOUT_S)\n", c, g_wd_limit_s);
+                std::printf("server tests: TIMEOUT in case %s: the program ends with exit code 124\n", c);
+                std::fflush(stdout);
+                std::fflush(stderr);
+                std::_Exit(124);
+            }
+        }
+    }).detach();
+}
+
 int main(int argc, char** argv) {
     if (argc == 2 && std::string(argv[1]) == "--child-ctrl-arm") return childCtrlArm();  // arch025-surv helper mode
+    // arch025-t915: read before clearWhirlEnv wipes the WHIRL_ variables
+    if (const char* e = std::getenv("WHIRL_TEST_CASE_TIMEOUT_S")) {
+        char* end = nullptr;
+        g_wd_limit_s = std::strtod(e, &end);
+        if (end == e || *end != 0 || g_wd_limit_s < 0) {
+            std::fprintf(stderr, "whirl-server-tests: WHIRL_TEST_CASE_TIMEOUT_S=\"%s\" is not a number of seconds\n", e);
+            return 2;
+        }
+    }
     whirl::test::clearWhirlEnv();  // FR-TEST P3-11
+    if (g_wd_limit_s > 0) startCaseWatchdog();
     // arch024 M8: the test program is the "test build": an owner check violation throws std::logic_error; every test
     // must end with no violation other than the ones it causes on purpose (g_owner_expected)
     EngineThread::setThrowing(true);
@@ -9475,8 +9520,10 @@ int main(int argc, char** argv) {
     struct T {
         const char* name;
         std::function<void()> fn;
+        bool hidden = false;  // runs only when named with --only (self-checks of the harness)
     };
     const std::vector<T> tests = {
+        {"watchdog_selfcheck_hang", testWatchdogSelfcheckHang, true},  // arch025-t915
         {"vision", testVision},
         {"console_ctrl_arm", testConsoleCtrlArm},  // arch025-surv
         {"draft_caps", testDraftCaps},
@@ -9633,16 +9680,22 @@ int main(int argc, char** argv) {
     }
     for (const T& t : tests) {
         if (!only.empty() && !only.count(t.name)) continue;
+        if (only.empty() && t.hidden) continue;
         const int f0 = g_fail, p0 = g_pass;
         const double t0 = nowSeconds();
         const std::uint64_t ov0 = EngineThread::violations();
         const int oe0 = g_owner_expected;
+        if (g_wd_limit_s > 0) {
+            g_wd_deadline_ms.store(steadyMs() + static_cast<long long>(g_wd_limit_s * 1000));
+            g_wd_case.store(t.name);
+        }
         try {
             t.fn();
         } catch (const std::exception& ex) {
             ++g_fail;
             std::fprintf(stderr, "  FAIL %s: exception %s\n", t.name, ex.what());
         }
+        g_wd_case.store(nullptr);
         // arch024 M8: a violation on an HTTP thread may be turned into a 500 by the handler: count them, not only throws
         if (EngineThread::violations() - ov0 != static_cast<std::uint64_t>(g_owner_expected - oe0)) {
             ++g_fail;

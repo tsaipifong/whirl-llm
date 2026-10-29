@@ -17,6 +17,9 @@ any of them fails (a compile error counts). Built-in commands (used when no --cm
   kernel_abi / kernel_iso: tools/gates/kernel_abi_check.py / kernel_iso_check.py (arch025 N13 / N14, CPU)
 Mutation kinds: "replace" (find -> replace, the find text must occur exactly once) and "revert" (reverse-apply
 one commit's diff of that file, e.g. re-introduce a fixed bug).
+A test command that outlives its timeout (default 1800 s, optional per-row "timeout_s" in mutations.json) is killed with its
+whole process tree (by PID) and recorded as CAUGHT(timeout): a hang is a detection, like PIT's TIMED_OUT / Stryker's TimedOut,
+and the run goes on with the next mutation (arch025-t915).
 A mutation that the tests do not catch is a SURVIVOR: a test gap, reported, never hidden.
 """
 from __future__ import annotations
@@ -47,10 +50,37 @@ def run_keys(m):
     return [k.strip() for k in m["run"].split(",") if k.strip()]
 
 
-def sh(cmd, timeout=1800):
+TIMEOUT_RC = 124  # the rc of a command that outlived its timeout (as GNU timeout)
+DEFAULT_TIMEOUT_S = 1800
+
+
+def kill_tree(pid):
+    """Kill a process and all its descendants by PID (never by image name)."""
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(pid)], capture_output=True)
+    else:
+        try:
+            os.killpg(pid, 9)
+        except OSError:
+            pass
+
+
+def sh(cmd, timeout=DEFAULT_TIMEOUT_S):
+    """Run a shell command. A command that outlives `timeout` seconds is killed with its whole process tree and returns
+    (TIMEOUT_RC, output + 'TIMEOUT ...', seconds): a hung test is a verdict, not an exception that ends the run."""
     t0 = time.time()
-    r = subprocess.run(cmd, shell=True, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
-    return r.returncode, (r.stdout or "") + (r.stderr or ""), time.time() - t0
+    p = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8",
+                         errors="replace", start_new_session=(os.name != "nt"))
+    try:
+        so, se = p.communicate(timeout=timeout)
+        return p.returncode, (so or "") + (se or ""), time.time() - t0
+    except subprocess.TimeoutExpired:
+        kill_tree(p.pid)
+        try:
+            so, se = p.communicate(timeout=30)
+        except subprocess.TimeoutExpired:
+            so, se = "", ""
+        return TIMEOUT_RC, (so or "") + (se or "") + f"TIMEOUT: killed the process tree of pid {p.pid} after {timeout} s" + chr(10), time.time() - t0
 
 
 def apply(m):
@@ -116,9 +146,10 @@ def main():
         path, orig = apply(m)
         try:
             listed, ipaths = impact_lists(m["expect_test"])
-            rc, out, sec = 0, "", 0.0
+            rc, out, sec, timed_out = 0, "", 0.0, False
             for k in run_keys(m):
-                krc, kout, ksec = sh(cmds[k])
+                krc, kout, ksec = sh(cmds[k], m.get("timeout_s", DEFAULT_TIMEOUT_S))
+                timed_out = timed_out or (krc == TIMEOUT_RC and "TIMEOUT: killed" in kout)
                 out += f"[{k}] exit {krc}\n" + kout
                 sec += ksec
                 rc = rc or krc
@@ -126,8 +157,8 @@ def main():
             open(path, "wb").write(orig)
         caught = rc != 0
         fails = [l.strip() for l in out.splitlines() if "FAIL" in l or "failed" in l][:3]
-        verdict = "CAUGHT" if caught else "SURVIVED"
-        print(f"{verdict:8} {m['id']} ({m['module']}): exit {rc} in {sec:.0f} s; impact map lists {m['expect_test']}: "
+        verdict = ("CAUGHT(timeout)" if timed_out else "CAUGHT") if caught else "SURVIVED"
+        print(f"{verdict:15} {m['id']} ({m['module']}): exit {rc} in {sec:.0f} s; impact map lists {m['expect_test']}: "
               f"{'yes' if listed else 'NO'} [{ipaths}]")
         for l in fails:
             print(f"         {l[:160]}")
