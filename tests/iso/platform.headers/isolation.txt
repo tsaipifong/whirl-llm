@@ -1,0 +1,28 @@
+# ARCH-1 8.5 isolation check of platform.headers (arch025-iso4): headers_win.cpp, the compile-time proof that the src/platform headers stay
+# platform-free, built with ONLY the platform headers (so the proof can not be satisfied by a header the platform layer does not declare) and its own
+# test (tests/iso/platform.headers/headers_tests.cpp, which repeats the #error check). Format: tests/sampling/isolation.txt.
+module    platform.headers
+exe       whirl-iso-platform-headers-tests
+mutate    src/platform/headers_win.cpp
+mutsym    hip
+mutsym    log
+mutsym    now
+mutsym    engine
+# module sources
+src       src/platform/headers_win.cpp
+# headers (include closure of the files above)
+hdr       src/platform/args.h
+hdr       src/platform/console.h
+hdr       src/platform/env.h
+hdr       src/platform/fs.h
+hdr       src/platform/fs_fake.h
+hdr       src/platform/net.h
+hdr       src/platform/net_fake.h
+hdr       src/platform/paths.h
+hdr       src/platform/proc.h
+hdr       src/platform/sys.h
+hdr       src/platform/time.h
+# test program
+testsrc   tests/iso/platform.headers/headers_tests.cpp
+testhdr   tests/iso/iso_test.h
+testhdr   tests/test_check.h

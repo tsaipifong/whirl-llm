@@ -1,0 +1,20 @@
+# ARCH-1 8.5 isolation check of platform.net (arch025-iso4): the socket layer and its FakeNet built with its own test (tests/iso/platform.net/net_tests.cpp;
+# no unit test existed). ws2_32 is the Windows platform library (cmake/platform.cmake links it), listed as a syslib line. Loopback only.
+# Format: tests/sampling/isolation.txt.
+module    platform.net
+exe       whirl-iso-platform-net-tests
+mutate    src/platform/net_win.cpp
+mutsym    hip
+mutsym    log
+mutsym    now
+mutsym    engine
+syslib    ws2_32.lib
+# module sources
+src       src/platform/net_win.cpp
+# headers (include closure of the files above)
+hdr       src/platform/net.h
+hdr       src/platform/net_fake.h
+# test program
+testsrc   tests/iso/platform.net/net_tests.cpp
+testhdr   tests/iso/iso_test.h
+testhdr   tests/test_check.h
