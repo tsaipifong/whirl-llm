@@ -10,6 +10,7 @@
 #include "server/backend.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <numeric>
@@ -101,6 +102,18 @@ public:
     void visRelease() override { ++vis_releases; }
     const qwen35::VisMap* last_vismap = nullptr;
     int vis_releases = 0;
+
+    // WHIRL_PROFILE (arch025-engine S2, server.cycle_prof test): the per-op-class ms profileTake hands out (and resets),
+    // and the class names; all 0 / "?" by default, as ServerModel's own defaults
+    std::array<double, n_prof_classes> prof_mtp{}, prof_ver{};
+    std::vector<const char*> prof_names;
+    void profileTake(std::size_t, std::array<double, n_prof_classes>& mtp_ms, std::array<double, n_prof_classes>& ver_ms) override {
+        mtp_ms = prof_mtp;
+        ver_ms = prof_ver;
+        prof_mtp = {};
+        prof_ver = {};
+    }
+    const char* profileClassName(std::size_t i) const override { return i < prof_names.size() ? prof_names[i] : "?"; }
 
 private:
     template <class T>
