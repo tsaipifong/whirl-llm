@@ -115,6 +115,12 @@ add_executable(whirl-server-tests
   ${CMAKE_SOURCE_DIR}/tests/server/http_client.cpp)
 target_include_directories(whirl-server-tests PRIVATE ${CMAKE_SOURCE_DIR}/tests/server)
 target_link_libraries(whirl-server-tests PRIVATE whirl_server_core whirl_device_null)
+if(MSVC)
+  # arch025 (2026-10-29): server_tests.cpp passed the COFF section limit in the ASan build (cpu_asan: C1128 "compile with
+  # /bigobj"). llama.cpp sets /bigobj on every MSVC C/C++ TU (CMakeLists.txt:88-89); here only this test target, so the
+  # product objects keep their object format for the per-TU objeq proofs
+  target_compile_options(whirl-server-tests PRIVATE /bigobj)
+endif()
 
 # arch024 S2: host micro-benchmark of the KV page path at 128k (mock model, no GPU; S4's P-speed check)
 add_executable(whirl-page-bench
