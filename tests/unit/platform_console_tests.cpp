@@ -65,7 +65,7 @@ static void testPlatformConsoleTime() {
     {
         std::fflush(stdout);
         const int orig = _setmode(_fileno(stdout), _O_TEXT);
-        _setmode(_fileno(stdout), orig);
+        CHECK(_setmode(_fileno(stdout), orig) == _O_TEXT);  // the probe's own restore (int6 cpu_analyze C6031: use the result)
         pc::setStdoutBinary();
         const int was = _setmode(_fileno(stdout), orig);  // back to the mode the program had
         CHECK(was == _O_BINARY);
