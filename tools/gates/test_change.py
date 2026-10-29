@@ -3,7 +3,8 @@
 
 One command takes a change and prints (and with --run executes) exactly:
   * ALL CPU steps of release_gate.ps1 (owner 2026-10-28 「乾脆都跑了吧」), once; the two per-GPU CPU checks
-    (cpu_golden_xcheck, kl_guard) on both GPUs,
+    (cpu_golden_xcheck, kl_guard) on both GPUs; the C++ safety steps (SAFETY_STEPS) are left out only when no changed
+    file is one of their inputs (NO_SAFETY_INPUT allow-list: docs, python gate / impact tools, golden refs; --all-cpu),
   * the GPU steps of the touched modules (tools/gates/modules.json, with their callers) plus the GPU steps the impact
     map selects for the diff (tools/impact/impact.py), on the GPUs modules.json / the map name,
   * the FULL two-GPU matrix only when the change touches a CORE module or file (CORE / CORE_GLOBS below, with the reason
@@ -18,7 +19,7 @@ the summaries are tagged change_<id>_<device> and never write PASS_gate_<device>
     python tools/gates/test_change.py --worktree                     plan for uncommitted changes (vs HEAD)
     python tools/gates/test_change.py --range A..B                   plan for what B adds since it left A
     python tools/gates/test_change.py --commit SHA                   plan for one commit
-        [--build DIR] [--base-build DIR] [--proof r9700=FILE] [--proof 8060s=FILE] [--one-gpu r9700|8060s] [--json]
+        [--build DIR] [--base-build DIR] [--proof r9700=FILE] [--proof 8060s=FILE] [--one-gpu r9700|8060s] [--json] [--all-cpu]
         [--run [--work DIR] [--force]] [--ledger FILE] [--record-plan]
     python tools/gates/test_change.py --refresh-times [ROOT ...]      step durations from release-gate summaries -> STEP_TIMES.tsv
     python tools/gates/test_change.py --backtest N --rev REV [--out DIR]   plans for REV's last N non-merge product commits
@@ -104,6 +105,23 @@ BUILD_GLOBS = ["cmake/*", "CMakeLists.txt", "build.bat", "redist/*"]
 # GPU steps whose work a work_equal proof covers: launch runs keyed "<step>/<command>" in the report, plus kt_full when
 # the code objects are identical and golden_* when golden is identical.
 PROOF_EXES = ("whirl.exe", "whirl-server.exe")
+# arch025-modsel2 (PLAN 3.5): the C++ safety steps build and run the C / C++ tree with their own tools; a change that
+# touches none of their inputs gives the parent's result again (same inputs -> same result, like a build-cache hit), so a
+# dev-time plan skips them ONLY when every changed file is on this allow-list (fail closed: anything not listed runs
+# them). Measured cost (stored summaries, PASS medians): cpu_asan 662 s (n 10, max 1328), cpu_analyze 139 s (n 28, full
+# rebuild 618-903), cpu_tsa 149 s (n 28, max 403), cpu_safety_selftest 18 s: ~16 min a change, up to ~44 min.
+# The release gate (release_gate.ps1 without -Steps / -Module) always runs them; --all-cpu keeps them here.
+# arch025-modsel2 (PLAN 3.6, X12 Finding K8-7): product code whose modules select no GPU step plans the full matrix
+# (fail closed: never miss a module), except for these modules, which generate no GPU-visible code:
+NO_GPU_MODULES = {
+    "platform.headers": "compile-time proof that the platform headers stay platform-free (headers_win.cpp; cpu_platform_check)",
+    "common.tsa": "clang thread-safety annotation macros, no code generated (cpu_tsa checks them)",
+    "device.null": "the CPU null backend of the device tests (whirl-device-tests); src/device/* is a CORE_GLOBS path anyway",
+}
+SAFETY_STEPS = ("cpu_safety_selftest", "cpu_asan", "cpu_analyze", "cpu_tsa")
+NO_SAFETY_INPUT = ["docs/*", "*.md", "LICENSE", "NOTICE", "tools/impact/*.py", "tools/impact/*.json", "tools/impact_map.json",
+                   "tools/gates/*.py", "tools/gates/*.json", "tools/gates/*.tsv", "tools/gates/*.txt", "tools/klgate/*.py",
+                   "tools/golden/*.py", "tests/golden/*"]
 
 
 def now():
@@ -283,6 +301,146 @@ def matches(path, globs):
 
 
 # ---------------------------------------------------------------------------------------------------------------------
+# arch025-modsel2 (PLAN 3.6, X12 Finding K8-3, GPU half): which release_gate steps run a gate script. A changed script
+# that a GPU step runs selects that step (on --one-gpu: impact.py FILE_RULES "the changed step on one GPU"); a script used
+# by release_gate.ps1 outside every AddStep statement (the runner loop, e.g. server_log_scan.ps1; a helper function, e.g.
+# env_matrix.ps1), or a release_gate.ps1 line outside every AddStep statement, is common code: every GPU step on one GPU.
+# A script the gate never reaches (directly, by a variable, or through another gate script) selects no GPU step.
+
+SCRIPT_RX = re.compile(r"([A-Za-z0-9_.-]+\.(?:ps1|py))\b")
+# used by release_gate.ps1 only to CHOOSE steps (-Module / -ImpactRange), never inside a step; its own tests run in
+# cpu_modules_check, so a change does not alter how any GPU step runs
+SELECTION_ONLY = {"impact.py"}
+DOCQ = '"' * 3
+
+
+def code_text(txt):
+    """script text without # / <# comment lines and python docstring lines (names mentioned there are not calls)"""
+    out, doc = [], False
+    for l in txt.splitlines():
+        s = l.strip()
+        if s.startswith((DOCQ, "'''")):
+            if not (len(s) > 3 and s.endswith(s[:3])):
+                doc = not doc
+            continue
+        if doc or s.startswith(("#", "<#")):
+            continue
+        out.append(l)
+    return "\n".join(out)
+
+
+def gate_script_map(ps_text, others=None):
+    """release_gate.ps1 text (+ {basename: text} of the other gate scripts) -> {"refs": {script: {step name globs}},
+    "common": {script}, "stmts": [(first line, last line, name glob)], "neutral": {blank / comment line numbers}}"""
+    lines = ps_text.splitlines()
+    var = {}
+    for l in lines:
+        m = re.match(r"^\s*\$(\w+)\s*=(.*)$", l)
+        if m and SCRIPT_RX.search(m.group(2)):
+            var[m.group(1)] = set(SCRIPT_RX.findall(m.group(2)))
+    stmts, in_stmt, used_vars = [], set(), set()
+    i = 0
+    while i < len(lines):
+        m = re.match(r'^\s*AddStep\s+"([^"]+)"', lines[i])
+        if not m:
+            i += 1
+            continue
+        j = i
+        while lines[j].rstrip().endswith("`") and j + 1 < len(lines):
+            j += 1
+        text = "\n".join(lines[i:j + 1])
+        name = re.sub(r"\$\((?:[^()]|\([^()]*\))*\)|\$\w+", "*", m.group(1))
+        refs = set(SCRIPT_RX.findall(text))
+        for v in re.findall(r"\$(\w+)", text):
+            if v in var:
+                refs |= var[v]
+                used_vars.add(v)
+        stmts.append((i + 1, j + 1, name, refs))
+        in_stmt.update(range(i + 1, j + 2))
+        i = j + 1
+    refs = {}
+    for _, _, name, rs in stmts:
+        for b in rs:
+            refs.setdefault(b, set()).add(name)
+    common, neutral = set(), set()
+    for k, l in enumerate(lines, 1):
+        s = l.strip()
+        if not s or s.startswith("#"):
+            neutral.add(k)
+            continue
+        if k in in_stmt:
+            continue
+        m = re.match(r"^\s*\$(\w+)\s*=", l)
+        if m and m.group(1) in used_vars and m.group(1) in var:
+            continue  # the assignment of a variable an AddStep uses: counted with that step
+        common |= set(SCRIPT_RX.findall(l))
+        for v in re.findall(r"\$(\w+)", l):
+            if v in var and not (m and m.group(1) == v):
+                common |= var[v]
+    common.discard("release_gate.ps1")
+    common -= SELECTION_ONLY
+    for _ in range(2):  # through other gate scripts (golden.ps1 -> tools/golden/*, server_log_scan.ps1 ...)
+        for b, txt in (others or {}).items():
+            for c in set(SCRIPT_RX.findall(code_text(txt))) - {b} - SELECTION_ONLY:
+                if b in refs:
+                    refs.setdefault(c, set()).update(refs[b])
+                if b in common:
+                    common.add(c)
+    return {"refs": refs, "common": common, "stmts": [(a, b, n) for a, b, n, _ in stmts], "neutral": neutral}
+
+
+def gate_line_steps(gm, line_nos):
+    """step name globs of the AddStep statements that hold these release_gate.ps1 lines; None = a line is common code"""
+    out = set()
+    for k in line_nos:
+        if k in gm["neutral"]:
+            continue
+        hit = [n for a, b, n in gm["stmts"] if a <= k <= b]
+        if not hit:
+            return None
+        out |= set(hit)
+    return out
+
+
+_GATE_MAP = {}
+
+
+def load_gate_map(root=REPO):
+    if root not in _GATE_MAP:
+        def rd(p):
+            try:
+                return open(p, encoding="utf-8", errors="replace").read()
+            except OSError:
+                return ""
+        others = {}
+        for d in ("tools/gates", "tools/golden", "tools/safety", "tools/klgate"):
+            for p in glob.glob(os.path.join(root, d, "*.ps1")) + glob.glob(os.path.join(root, d, "*.py")):
+                if os.path.basename(p) != "release_gate.ps1":
+                    others[os.path.basename(p)] = rd(p)
+        _GATE_MAP[root] = gate_script_map(rd(os.path.join(root, "tools", "gates", "release_gate.ps1")), others)
+    return _GATE_MAP[root]
+
+
+def gate_script_steps(files, changes, gm):
+    """{changed script: step name globs, or "ALL" (common code)} for the changed gate scripts"""
+    out = {}
+    for f in files:
+        if not f.startswith("tools/"):
+            continue
+        b = f.rsplit("/", 1)[-1]
+        if f == "tools/gates/release_gate.ps1":
+            ch = changes.get(f) or {}
+            new, old = ch.get("new") or [], ch.get("old") or []
+            st = None if (not new and not old) or len(old) > len(new) else gate_line_steps(gm, new)
+            out[f] = "ALL" if st is None else st
+        elif b in gm["common"]:
+            out[f] = "ALL"
+        elif b in gm["refs"]:
+            out[f] = set(gm["refs"][b])
+    return out
+
+
+# ---------------------------------------------------------------------------------------------------------------------
 # plan
 
 def expand_gpu(names, gates):
@@ -353,7 +511,7 @@ def compare_code_objects(base, build, out_json):
 
 
 def make_plan(title, cid, changes, rep, mods, m, gates, times, one_gpu="r9700", build=None, base_build=None, proofs=None,
-              scratch=None):
+              scratch=None, all_cpu=False, gate_map=None):
     files = sorted(changes)
     product = [f for f in files if f.startswith(("src/", "include/", "kernels/"))]
     modules = dict(rep.get("modules") or {})
@@ -372,10 +530,19 @@ def make_plan(title, cid, changes, rep, mods, m, gates, times, one_gpu="r9700", 
             if fnmatch.fnmatch(f, g):
                 full.append(f"core file {f}: {why}")
                 break
+    # arch025-modsel2 (PLAN 3.3): a list-only CMake edit counts as the modules of the sources it names, so a named
+    # source on a core path is a core change too
+    lists = rep.get("cmake_lists") or {}
+    for cf, srcs in sorted(lists.items()):
+        for f in srcs:
+            for g, why in CORE_GLOBS:
+                if fnmatch.fnmatch(f, g):
+                    full.append(f"core file {f} listed in {cf}: {why}")
+                    break
     if gate_txt.startswith("full gate") and "cross-module" not in gate_txt:
         full.append(f"impact.py: {gate_txt}")  # contract / build-wide / product file in no module / includer in no module
     kernel = [f for f in files if matches(f, KERNEL_GLOBS)] + hip_closure(m, files)
-    bfiles = [f for f in files if matches(f, BUILD_GLOBS)]
+    bfiles = [f for f in files if matches(f, BUILD_GLOBS) and f not in lists]  # a source-list edit changes no flags
     weq = {"code_objects": "not compared (no --base-build)", "static": (
         f"kernel sources touched: {', '.join(kernel[:4])}" if kernel else
         f"build files touched (code objects may change; a binary proof decides): {', '.join(bfiles[:4])}" if bfiles else
@@ -432,7 +599,22 @@ def make_plan(title, cid, changes, rep, mods, m, gates, times, one_gpu="r9700", 
                 if st not in gpu[dv]:
                     gpu[dv].append(st)
                     why[(dv, st)] = "impact map"
+        gm = gate_map if gate_map is not None else load_gate_map()
+        ok1 = [s["name"] for s in gates[one_gpu] if s["gpu"] and not s["na"]]
+        for f, sel in sorted(gate_script_steps(files, changes, gm).items()):
+            for st in ok1:
+                if (sel == "ALL" or any(fnmatch.fnmatch(st, g) for g in sel)) and st not in gpu[one_gpu]:
+                    gpu[one_gpu].append(st)
+                    why[(one_gpu, st)] = f"gate script {f}" + (" (common code: every GPU step)" if sel == "ALL" else "")
         level = "module" if any(gpu.values()) else ("cpu" if not product else "cpu (product code, no GPU step selected)")
+        touched = set(modules) | {k for v in callers.values() for k in v}
+        if level.startswith("cpu (product") and not (touched and touched <= set(NO_GPU_MODULES)):
+            full.append(f"product code selected no GPU step (modules {', '.join(sorted(touched)) or '-'} not in NO_GPU_MODULES; K8-7)")
+            for d in DEVICES:
+                gpu[d] = [s["name"] for s in gates[d] if s["gpu"] and not s["na"]]
+                for s in gpu[d]:
+                    why[(d, s)] = "full matrix"
+            level = "full"
     # work-equivalence short-cut
     skipped = {d: [] for d in DEVICES}
     proof_notes = {}
@@ -453,6 +635,9 @@ def make_plan(title, cid, changes, rep, mods, m, gates, times, one_gpu="r9700", 
         order = [s["name"] for s in gates[dv]]
         gpu[dv].sort(key=order.index)
     cpu = [s["name"] for s in gates[DEVICES[0]] if not s["gpu"] and not s["na"] and s["name"] not in PER_DEVICE_CPU]
+    no_input = bool(files) and not all_cpu and all(matches(f, NO_SAFETY_INPUT) for f in files)
+    skipped_cpu = [s for s in cpu if s in SAFETY_STEPS] if no_input else []
+    cpu = [s for s in cpu if s not in skipped_cpu]
     est = {}
     unknown = []
     cpu_s = sum(step_seconds(times, DEVICES[0], s) or 0 for s in cpu)
@@ -470,7 +655,9 @@ def make_plan(title, cid, changes, rep, mods, m, gates, times, one_gpu="r9700", 
     return {
         "change": title, "id": cid, "created": now(), "files": files, "product_files": product,
         "modules": modules, "callers": callers, "impact_module_gate": gate_txt, "level": level, "full_reasons": full,
-        "cpu_steps": cpu, "per_device_cpu": list(PER_DEVICE_CPU), "gpu_steps": gpu, "gpu_why": {f"{d}:{s}": w for (d, s), w in why.items()},
+        "cpu_steps": cpu, "per_device_cpu": list(PER_DEVICE_CPU),
+        "cpu_skipped": {"steps": skipped_cpu, "why": ("no changed file is an input of the C++ safety steps (NO_SAFETY_INPUT); "
+                                                      "the release gate runs them") if skipped_cpu else ""}, "gpu_steps": gpu, "gpu_why": {f"{d}:{s}": w for (d, s), w in why.items()},
         "skipped_by_proof": skipped, "proofs": proof_notes, "work_equivalence": weq,
         "est_cpu_min": round(cpu_s / 60, 1), "est_gpu_min": {d: round(v / 60, 1) for d, v in est.items()},
         "est_full_gpu_min": {d: round(v / 60, 1) for d, v in full_s.items()}, "est_unknown": unknown,
@@ -485,6 +672,8 @@ def print_plan(p):
     print(f"   level    {p['level'].upper()}" + ("".join(f"\n            - {r}" for r in p["full_reasons"][:8]) if p["full_reasons"] else "")
           + (f"\n            ... {len(p['full_reasons']) - 8} more" if len(p["full_reasons"]) > 8 else ""))
     print(f"   CPU      all {len(p['cpu_steps'])} CPU steps once + {', '.join(p['per_device_cpu'])} on both GPUs: ~{p['est_cpu_min']} min [est]")
+    if p.get("cpu_skipped", {}).get("steps"):
+        print(f"            not run: {', '.join(p['cpu_skipped']['steps'])} ({p['cpu_skipped']['why']}; --all-cpu runs them)")
     for d in DEVICES:
         st = p["gpu_steps"][d]
         print(f"   GPU {d:<5} {len(st)} step(s), ~{p['est_gpu_min'][d]} min [est] (full matrix ~{p['est_full_gpu_min'][d]} min)"
@@ -672,6 +861,7 @@ def main():
     ap.add_argument("--proof", action="append", default=[], help="DEV=work_equal report (EQUIVALENT) for this build")
     ap.add_argument("--one-gpu", choices=DEVICES, default="r9700", help="GPU of a step modules.json runs on one GPU (testing.md: R9700; 8060S at merge)")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--all-cpu", action="store_true", help="keep the C++ safety steps even when no changed file is their input")
     ap.add_argument("--run", action="store_true")
     ap.add_argument("--work")
     ap.add_argument("--force", action="store_true")
@@ -713,7 +903,7 @@ def main():
     if a.base_build:
         os.makedirs(scratch, exist_ok=True)
     p = make_plan(title, cid, changes, rep, load_mods(root), m, gates, times, one_gpu=a.one_gpu, build=a.build,
-                  base_build=a.base_build, proofs=proofs, scratch=scratch)
+                  base_build=a.base_build, proofs=proofs, scratch=scratch, all_cpu=a.all_cpu)
     if a.json:
         print(json.dumps(p, indent=1))
     else:

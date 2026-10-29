@@ -209,5 +209,110 @@ with tempfile.TemporaryDirectory() as td:
     finally:
         tc.subprocess.run = real_run
     check("run refuses busy GPU", rc == 2 and not calls, (rc, calls))
+# 15. arch025-modsel2 (PLAN 3.3): a list-only CMake edit (impact.py cmake_lists) is the module of its sources: module
+# level, not a build file for work equivalence; a listed source on a core path still forces the full matrix
+r15 = dict(rep({"protocol": ["cmake/server.cmake", "src/server/stream.cpp"]}, "release_gate.ps1 -Module protocol"),
+           cmake_lists={"cmake/server.cmake": ["src/server/stream.cpp"]})
+p = plan(["cmake/server.cmake", "src/server/stream.cpp"], r15)
+check("cmake list-only = module", p["level"] == "module" and p["gpu_steps"]["r9700"] == ["golden_swift", "srv_balance"], (p["level"], p["full_reasons"]))
+check("cmake list-only not a build file", "build files" not in p["work_equivalence"]["static"], p["work_equivalence"])
+r15c = dict(rep({"protocol": ["cmake/server.cmake"]}, "release_gate.ps1 -Module protocol"), cmake_lists={"cmake/server.cmake": ["src/ops/x.cpp"]})
+p = plan(["cmake/server.cmake"], r15c)
+check("cmake lists a core path = full", p["level"] == "full" and any("src/ops/x.cpp" in r and "cmake/server.cmake" in r for r in p["full_reasons"]), p["full_reasons"])
+p = plan(["cmake/server.cmake", "src/server/stream.cpp"], dict(r15, cmake_lists={}))
+check("cmake not list-only stays build file", "build files" in p["work_equivalence"]["static"], p["work_equivalence"])
+# 16. arch025-modsel2 (PLAN 3.5): dev-time plans skip cpu_asan / cpu_analyze / cpu_tsa / cpu_safety_selftest only when
+# every changed file is outside their inputs (allow-list: docs, *.md, python gate / impact tools, golden refs); any
+# C / C++ / HIP / CMake / build / safety-tool / isolation-manifest change runs them (the release gate always does)
+SG = [dict(x) for x in GATE] + [{"name": s, "gpu": False, "na": ""} for s in ("cpu_safety_selftest", "cpu_asan", "cpu_analyze", "cpu_tsa")]
+SGATES = {"r9700": SG, "8060s": SG}
+
+
+def splan(files, r=None, **kw):
+    return tc.make_plan("t", "x", {f: {} for f in files}, r or rep(gate="none (no product code)"), MODS, {"includers": {}}, SGATES, TIMES, **kw)
+
+
+SAF = set(tc.SAFETY_STEPS)
+for fs in (["docs/dev/testing.md"], ["README.md", "tools/gates/test_change.py"], ["tools/impact/impact.py", "tools/impact_map.json"],
+           ["tests/golden/swift.json"], ["tools/gates/module_gate_cases.tsv", "tools/gates/modules.json"]):
+    p = splan(fs)
+    check(f"safety skipped {fs[0]}", not SAF & set(p["cpu_steps"]) and set(p["cpu_skipped"]["steps"]) == SAF, (p["cpu_steps"], p.get("cpu_skipped")))
+for fs in (["src/server/stream.cpp"], ["tests/server/server_tests.cpp"], ["tools/safety/run_asan.bat"], ["CMakeLists.txt"],
+           ["cmake/server.cmake"], ["tests/iso/forward/isolation.txt"], ["kernels/gemv.hip"], ["src/hip/embedded_objects.cpp.in"],
+           ["docs/x.md", "include/whirl/model.h"], ["tools/gates/release_gate.ps1"], ["build.bat"], ["tools/gen-unicode-tables/main.cpp"]):
+    p = splan(fs)
+    check(f"safety runs {fs[-1]}", SAF <= set(p["cpu_steps"]) and not p["cpu_skipped"]["steps"], (p["cpu_steps"], p.get("cpu_skipped")))
+p = splan(["docs/dev/testing.md"], all_cpu=True)
+check("--all-cpu keeps the safety steps", SAF <= set(p["cpu_steps"]), p["cpu_steps"])
+p = splan([])
+check("empty change skips nothing", SAF <= set(p["cpu_steps"]), p["cpu_steps"])
+# 17. arch025-modsel2 (PLAN 3.6, X12 Findings K8 1-7): pins on THIS tree's modules.json for the impact-map gaps whose
+# GPU selection is closed by the module table (no map edge needed): K8-2 ~Model / member destruction order
+# (src/model/loader.cpp, include/whirl/model.h: model.core, full) and K8-5 kernel-ABI struct member deletion
+# (include/whirl/kernels_abi.h: contract.abi + CORE_GLOBS) plan the full matrix on both GPUs; a file moved out of
+# those modules breaks the pin here, not silently in a dev run.
+RMODS = tc.load_mods(tc.REPO)
+sys.path.insert(0, os.path.join(tc.REPO, "tools", "impact"))
+import impact as _imp  # noqa: E402
+for f, why in (("src/model/loader.cpp", "K8-2 ~Model"), ("include/whirl/model.h", "K8-2 Model member order"),
+               ("include/whirl/kernels_abi.h", "K8-5 ABI struct member deletion")):
+    g = _imp.module_gate({f: {"old_path": f, "new": [1], "old": [1]}}, RMODS)
+    r = rep(g["modules"], g["module_gate"], callers=g.get("module_callers"))
+    p = tc.make_plan("t", "x", {f: {}}, r, RMODS, {"includers": {}}, GATES, TIMES)
+    check(f"{why} ({f}) = full matrix both GPUs", p["level"] == "full" and all(len(p["gpu_steps"][d]) >= 9 for d in tc.DEVICES),
+          (g["module_gate"], p["level"], p["full_reasons"][:2]))
+# 18. arch025-modsel2 (PLAN 3.6, K8-3 GPU half): a gate script a GPU step runs selects that step (on --one-gpu); a script
+# release_gate.ps1 uses outside any AddStep statement, or a release_gate.ps1 line outside every AddStep, is common code
+# -> every GPU step on one GPU; a script the gate never reaches selects no GPU step (CPU all covers the CPU steps)
+PS = "\n".join([
+    '$vs = Join-Path $repo "tools\\gates\\vis_ab.ps1"',                                   # 1
+    'AddStep "cpu_tests" $false @($py, "x_check.py") `',                                  # 2
+    '    { param($o, $c) $c -eq 0 }',                                                     # 3
+    'foreach ($m in "swift", "moe") {',                                                   # 4
+    '    AddStep "golden_$m" $true @($pwsh, "-File", (Join-Path $PSScriptRoot "golden.ps1"))',  # 5
+    '}',                                                                                  # 6
+    'AddStep "srv_balance" $true @($pwsh, "-File", $vs)',                                 # 7
+    '$scan = & (Join-Path $PSScriptRoot "server_log_scan.ps1") -Dir $wd',                  # 8
+    'AddStep "kt_full" $true @($exe)'])                                                   # 9
+gm = tc.gate_script_map(PS, {"golden.ps1": "& (Join-Path $PSScriptRoot 'helper_lines.py')", "helper_lines.py": ""})
+check("map direct", gm["refs"].get("x_check.py") == {"cpu_tests"}, gm["refs"])
+check("map loop name", gm["refs"].get("golden.ps1") == {"golden_*"}, gm["refs"])
+check("map variable", gm["refs"].get("vis_ab.ps1") == {"srv_balance"}, gm["refs"])
+check("map common ref", "server_log_scan.ps1" in gm["common"], gm["common"])
+check("map indirect", gm["refs"].get("helper_lines.py") == {"golden_*"}, gm["refs"])
+check("map lines", tc.gate_line_steps(gm, [3]) == {"cpu_tests"} and tc.gate_line_steps(gm, [8]) is None and tc.gate_line_steps(gm, [5]) == {"golden_*"},
+      (tc.gate_line_steps(gm, [3]), tc.gate_line_steps(gm, [8])))
+
+
+def gplan(files, changes=None, **kw):
+    ch = changes or {f: {} for f in files}
+    return tc.make_plan("t", "x", ch, rep(gate="none (no product code)"), MODS, {"includers": {}}, GATES, TIMES, gate_map=gm, **kw)
+
+
+p = gplan(["tools/gates/vis_ab.ps1"])
+check("gate script -> its GPU step on one GPU", p["gpu_steps"]["r9700"] == ["srv_balance"] and p["gpu_steps"]["8060s"] == [] and p["level"] == "module", (p["level"], p["gpu_steps"]))
+p = gplan(["tools/golden/helper_lines.py"])
+check("indirect script -> loop steps", p["gpu_steps"]["r9700"] == ["golden_swift", "golden_moe"], p["gpu_steps"])
+p = gplan(["tools/gates/server_log_scan.ps1"])
+check("common script -> every GPU step, one GPU", len(p["gpu_steps"]["r9700"]) == 9 and p["gpu_steps"]["8060s"] == [], p["gpu_steps"])
+p = gplan(["tools/gates/release_gate.ps1"], {"tools/gates/release_gate.ps1": {"new": [3], "old": [3]}})
+check("release_gate.ps1 AddStep line of a CPU step -> no GPU step", not any(p["gpu_steps"].values()), p["gpu_steps"])
+p = gplan(["tools/gates/release_gate.ps1"], {"tools/gates/release_gate.ps1": {"new": [8], "old": []}})
+check("release_gate.ps1 common line -> every GPU step, one GPU", len(p["gpu_steps"]["r9700"]) == 9, p["gpu_steps"])
+p = gplan(["tools/gates/module_gate_mutate.py"])
+check("script the gate never runs -> no GPU step", not any(p["gpu_steps"].values()) and p["level"] == "cpu", (p["level"], p["gpu_steps"]))
+p = gplan(["tools/gates/vis_ab.ps1"], one_gpu="8060s")
+check("gate script on --one-gpu 8060s", p["gpu_steps"]["8060s"] == ["srv_balance"] and p["gpu_steps"]["r9700"] == [], p["gpu_steps"])
+# 19. arch025-modsel2 (PLAN 3.6, K8-7: product commits that selected no GPU step): product code whose modules select
+# no GPU step is the full matrix unless every such module is in NO_GPU_MODULES (compile-only / no-code modules, each
+# with its reason); this tree's modules.json has no other non-full module without a GPU step or callers
+p = plan(["src/x/y.cpp"], rep({"m0": ["src/x/y.cpp"]}, "release_gate.ps1 -Module m0"))
+check("product code, module without GPU steps = full", p["level"] == "full" and any("no GPU step" in r for r in p["full_reasons"]), (p["level"], p["full_reasons"]))
+p = tc.make_plan("t", "x", {"src/platform/headers_win.cpp": {}}, rep({"platform.headers": ["src/platform/headers_win.cpp"]}, "release_gate.ps1 -Module platform.headers"),
+                 dict(MODS, **{"platform.headers": {"paths": ["src/platform/headers_win.cpp"], "steps": ["cpu_tests"]}}), {"includers": {}}, GATES, TIMES)
+check("NO_GPU_MODULES member stays CPU", p["level"].startswith("cpu"), (p["level"], p["full_reasons"]))
+lone = [k for k, d in RMODS.items() if not d.get("full") and not d.get("callers") and k not in tc.NO_GPU_MODULES
+        and not any(not s.startswith(("cpu_", "kl_")) for s in d.get("steps") or [])]
+check("every non-full module has a GPU step, callers, or a NO_GPU_MODULES reason", not lone, lone)
 print(f"test_change_test: {n - fails}/{n} passed")
 sys.exit(1 if fails else 0)
