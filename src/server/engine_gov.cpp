@@ -142,15 +142,6 @@ void Engine::govDrain() {
     if (tb_.tier() != nullptr) ops_.streamSync(tb_.tier()->stream());
 }
 
-std::uint64_t parkSlotCkpts(CkptStore& cs, Slot& sl) {
-    // the spill to the RAM tier may still read the checkpoint buffers: its fence goes to park (F1)
-    const std::uint64_t b = sl.ckpts.size() * cs.bytes(true);
-    cs.park(sl.ckpts, {sl.spill_ev.get()});
-    sl.ckpts.clear();
-    sl.parked = true;
-    return b;
-}
-
 void Engine::govFreeCache(bool park) {
     owner_.check("Engine::govFreeCache");
     std::size_t n_sl = 0, n_pages = 0, n_spe = 0, n_park = 0;

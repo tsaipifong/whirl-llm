@@ -252,6 +252,10 @@
                        "proof": {"refactor": ["exit_rule", "golden_exact", "startup_sizing"]}},
    "server.engine": {"metrics": ["host.sched.round_us_per_cycle", "host.sched.request_ms", "host.sched.prefix_reuse_ms"],
                      "proof": {"refactor": ["exit_rule", "golden_exact", "work_trace", "move_equal", "host_work", "host_time"]}},
+   "server.slot": {"metrics": [], "metrics_none": "per-request state and one park call per idle slot when the governor frees VRAM: no bench key (whirl-iso-server-slot-tests, whirl-server-tests ckpt_f1 / governor)",
+                   "proof": {"refactor": ["exit_rule", "golden_exact", "move_equal", "work_trace"]}},
+   "server.cycle_prof": {"metrics": [], "metrics_none": "WHIRL_PROFILE only (off in the product default): no bench key (whirl-iso-server-cycle-prof-tests)",
+                         "proof": {"refactor": ["exit_rule", "golden_exact", "move_equal", "server_log_scan"]}},
    "server.sample_buffers": {"metrics": ["host.sched.round_us_per_cycle"],
                              "proof": {"refactor": ["exit_rule", "golden_exact", "work_trace", "move_equal", "host_work", "host_time"]}},
    "server.vram_watch": {"metrics": [], "metrics_none": "sampled per status line / request end / idle minute: no bench key (whirl-server-tests vram_watch counters)",
@@ -767,6 +771,67 @@
    "callers": "rdeps",
    "manual": ["whirl-server-tests (all: the end-to-end engine tests on MockModel / NullBackend) and whirl-pins (engine memory / copy sequence)",
               "V-srv: server golden + srv_* == the parent exe on both GPUs with every WHIRL_* unset (work_equal of the launch logs)"]
+  },
+  "server.slot": {
+   "id": "N4-S1",
+   "desc": "the server's request slot (src/server/engine_slot.*, arch025-engine S1; moved verbatim out of engine.h and engine_gov.cpp): Phase, SlotData (the per-request state; bases SlotPrefix / SlotTier), Slot (F1: destructor and move-assign wait the slot's last spill before its checkpoint buffers go), parkSlotCkpts (the governor's checkpoint park of one idle slot: the spill fence goes to CkptStore::park) and max_small_batch. Layer L0 of the Engine split (progress/arch025-engine.DESIGN.md): every engine component takes Slot& from here without engine.h; link-isolated (tests/iso/server.slot on CkptStore + NullBackend, test double tests/iso/fake_cache_model.h)",
+   "paths": [
+    "src/server/engine_slot.cpp",
+    "src/server/engine_slot.h"
+   ],
+   "lands_on": "arch025-engine (leg 1, S1)",
+   "steps": [
+    "cpu_iso_server_slot",
+    "cpu_server",
+    "cpu_pins",
+    "golden_swift",
+    "golden_moe",
+    "srv_mt_precise",
+    "srv_mt_precise_moe",
+    "srv_balance",
+    "srv_cache_precise",
+    "srv_cache_balance"
+   ],
+   "gpus": {
+    "golden_swift": 2,
+    "golden_moe": 2,
+    "srv_mt_precise": 2,
+    "srv_mt_precise_moe": 2,
+    "srv_balance": 2,
+    "srv_cache_precise": 1,
+    "srv_cache_balance": 1
+   },
+   "callers": "rdeps",
+   "manual": [
+    "whirl-iso-server-slot-tests (parkSlotCkpts == the c1ca7ce engine_gov.cpp body: bytes, fence, list cleared, parked; Slot F1 waits and noexcept moves; SlotData defaults) and whirl-server-tests ckpt_f1 / governor",
+    "V-move: scratch/a25_engine/apply_s1.py --check (the moved block and body equal the c1ca7ce text; line multiset: 0 lines lost)",
+    "V-srv: server golden + srv_* == the c1ca7ce exe (work_equal)"
+   ]
+  },
+  "server.cycle_prof": {
+   "id": "N4-S2",
+   "desc": "the server engine's WHIRL_PROFILE decode-cycle profile (src/server/engine_prof.*, arch025-engine S2; moved out of engine_internal.h): struct CycleProf (per number of decoding slots the cycle / row / draft / token counts and the wall / host / gap / enqueue / post-readCtl times engine_decode.cpp adds up) and print() (the 'profile |' lines with ServerModel::profileTake's per-op-class GPU times, then every counter and last_end reset). Layer L1 of the Engine split (progress/arch025-engine.DESIGN.md); link-isolated (tests/iso/server.cycle_prof, test double tests/iso/fake_server_model.h with settable profile times)",
+   "paths": [
+    "src/server/engine_prof.cpp",
+    "src/server/engine_prof.h"
+   ],
+   "lands_on": "arch025-engine (leg 1, S2)",
+   "steps": [
+    "cpu_iso_server_cycle_prof",
+    "cpu_server",
+    "golden_swift",
+    "srv_mt_precise"
+   ],
+   "gpus": {
+    "golden_swift": 2,
+    "srv_mt_precise": 2
+   },
+   "callers": "rdeps",
+   "manual": [
+    "whirl-iso-server-cycle-prof-tests (print's lines == the c1ca7ce format strings on the same counters, slots without cycles silent, every counter and last_end reset)",
+    "V-move: scratch/a25_engine/apply_s2.py --check (struct and print body equal the c1ca7ce text, print dedented one level; only n = qwen35::gdn_max_seg + 1 spelled out)",
+    "V-srv: server golden + srv_mt_precise == the c1ca7ce exe (work_equal; the default path never calls print)"
+   ]
   },
   "server.sample_buffers": {
    "id": "N4a", "desc": "the server engine's sampling buffers (src/server/engine_sampling.*, arch025-N4a; were the Engine members samp_dev_ .. ctl_host_ and Engine::SampleRows): the top-k_small / k_big / full-row / relaxacc buffers and the per-slot control words, Engine::allocState's sampling block (SampleBuffers::alloc, same allocations in the same order), launchTopk / fetchCands / prepareRow (the k_small -> k_big -> full-row escalation), and sampling::RowSource over the verify rows; link-isolated (tests/iso/server.sample_buffers, test double tests/iso/fake_server_model.h; arch025-lane1 leg 8)",
