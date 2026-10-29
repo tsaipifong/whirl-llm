@@ -113,6 +113,25 @@ CASES = [
      [], 1, "target whirl_iso_ghost compiles iso copies but no isolation manifest names it"),
     ("block: manifest module not in modules.json", FILES, drop(MODS, "iso_a"), T(), NINJA, None, MAN, [], 1,
      "module is not in tools/gates/modules.json"),
+    # arch025 lane 2 merge (2026-10-29): one manifest may isolate a group of modules (tests/iso/forward covers
+    # forward.dispatch .. forward.vision_rows + forward.state): its module line names the group
+    ("pass: manifest module names a group of modules (iso_a.x, iso_a.y)", FILES,
+     dict(drop(MODS, "iso_a"), **{"iso_a.x": {"paths": ["src/iso_a.cpp"]}, "iso_a.y": {"paths": []}}), T(), NINJA, None, MAN, [], 0,
+     "cmake modules: ok"),
+    ("block: a module that only shares the prefix is no group (iso_ab)", FILES,
+     dict(drop(MODS, "iso_a"), **{"iso_ab": {"paths": ["src/iso_a.cpp"]}}), T(), NINJA, None, MAN, [], 1,
+     "module is not in tools/gates/modules.json"),
+    # arch025 lane 2 leg 6 (2026-10-29): a header-only manifest (no src line, e.g. tests/iso/model.types) has no object
+    # library - cmake/iso.cmake builds only its test program, which compiles exactly the testsrc lines
+    ("pass: header-only manifest (no src): only the test program target", FILES, dict(MODS, iso_h={"paths": ["src/a/x.h"]}),
+     T(**{"whirl-iso-h-tests": ("EXECUTABLE", ["@/iso/iso_h/test/t.cpp"], [])}), NINJA, None,
+     dict(MAN, **{"tests/iso/iso_h/isolation.txt": "module iso_h\nexe whirl-iso-h-tests\nhdr src/a/x.h\ntestsrc tests/t.cpp\n"}), [], 0,
+     "cmake modules: ok"),
+    ("block: header-only manifest whose test program compiles an unlisted file", dict(FILES, **{"tests/u.cpp": "// u\n"}),
+     dict(MODS, iso_h={"paths": ["src/a/x.h"]}),
+     T(**{"whirl-iso-h-tests": ("EXECUTABLE", ["@/iso/iso_h/test/t.cpp", "@/iso/iso_h/test/u.cpp"], [])}), NINJA, None,
+     dict(MAN, **{"tests/iso/iso_h/isolation.txt": "module iso_h\nexe whirl-iso-h-tests\nhdr src/a/x.h\ntestsrc tests/t.cpp\n"}), [], 1,
+     "which the manifest does not list"),
     ("block: wrong target type for the iso library", FILES, MODS, T(whirl_iso_iso_a=("STATIC_LIBRARY", ["@/iso/iso_a/mod/iso_a.cpp"], [])), NINJA,
      None, MAN, [], 1, "is STATIC_LIBRARY, want OBJECT_LIBRARY"),
 ]
