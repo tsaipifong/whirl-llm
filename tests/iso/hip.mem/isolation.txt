@@ -1,0 +1,54 @@
+# ARCH-1 8.5 isolation check of hip.mem (arch025-iso4): device memory queries (device_mem.cpp, uma_mem.cpp, wddm_mem.cpp) built with its own
+# unit tests (tests/unit/hip_mem_tests.cpp).
+# The HIP SDK headers are the platform (sdkinc hip: put after the staged tree, so it only supplies hip/hip_runtime_api.h; define
+# __HIP_PLATFORM_AMD__ as the product build does); no GPU call is made: the loader loads the DLL only when a test asks it to. hip.mem and
+# hip.runtime are one link unit (hip_api.h; memInfo / getDevice / describeDevice in hip_runtime.cpp, umaCheckOn / localMemSnap in
+# uma_mem.cpp / device_mem.cpp), so each manifest lists the other's sources as declared dependencies. The build-generated code-object table
+# is the link double tests/iso/fake_embedded_objects.cpp (empty).
+module    hip.mem
+exe       whirl-iso-hip-mem-tests
+mutate    src/hip/device_mem.cpp
+mutsym    log
+mutsym    engine
+mutsym    model
+syslib    pdh.lib
+syslib    dxgi.lib
+define    __HIP_PLATFORM_AMD__
+sdkinc    hip
+# module sources
+src       src/hip/device_mem.cpp
+src       src/hip/uma_mem.cpp
+src       src/hip/wddm_mem.cpp
+# declared dependency sources
+src       src/hip/hip_runtime.cpp
+src       src/hip/alloc_log.cpp
+src       src/hip/launch_log.cpp
+src       src/hip/runtime_loader.cpp
+src       src/hip/leak_count.cpp
+src       src/common/vram_limit.cpp
+src       src/platform/env_win.cpp
+src       src/common/util.cpp
+src       src/platform/args_win.cpp
+src       src/platform/fs_win.cpp
+src       tests/iso/fake_embedded_objects.cpp
+# headers (include closure of the files above)
+hdr       include/whirl/common.h
+hdr       include/whirl/device_mem.h
+hdr       include/whirl/hip.h
+hdr       include/whirl/hip_runtime_loader.h
+hdr       include/whirl/leak_count.h
+hdr       include/whirl/small_helpers.h
+hdr       include/whirl/uma_mem.h
+hdr       include/whirl/vram_limit.h
+hdr       src/hip/alloc_log.h
+hdr       src/hip/hip_api.h
+hdr       src/hip/launch_log.h
+hdr       src/hip/log_name.h
+hdr       src/platform/args.h
+hdr       src/platform/env.h
+hdr       src/platform/fs.h
+hdr       src/platform/fs_fake.h
+# test program
+testsrc   tests/unit/hip_mem_tests.cpp
+testhdr   tests/test_check.h
+testhdr   tests/test_env.h
