@@ -37,6 +37,8 @@
 #endif
 #include <windows.h>
 #include <psapi.h>  // K32GetProcessMemoryInfo (arch025-surv testPlatformProcSurvivors)
+#include <fcntl.h>  // _O_TEXT / _O_BINARY (arch025-mutcat2 setStdoutBinary check)
+#include <io.h>     // _setmode, _fileno
 #endif
 
 using namespace whirl;
@@ -58,6 +60,28 @@ static void testPlatformConsoleTime() {
     };
     CHECK(pc::isConsole(pc::Stream::out) == oldIsConsole(STD_OUTPUT_HANDLE));
     CHECK(pc::isConsole(pc::Stream::err) == oldIsConsole(STD_ERROR_HANDLE));
+    // arch025-mutcat2: setStdoutBinary puts stdout in binary mode (the server / CLI stream raw UTF-8 and "\n" bytes);
+    // _setmode returns the mode it replaces, so the probe reads the mode and puts it back
+    {
+        std::fflush(stdout);
+        const int orig = _setmode(_fileno(stdout), _O_TEXT);
+        _setmode(_fileno(stdout), orig);
+        pc::setStdoutBinary();
+        const int was = _setmode(_fileno(stdout), orig);  // back to the mode the program had
+        CHECK(was == _O_BINARY);
+    }
+    // arch025-mutcat2: setOutputCodePage sets the OUTPUT code page (not the input one). Only with a console attached
+    // (GetConsoleOutputCP() == 0 without one); the old value is put back.
+    if (const unsigned old_out = GetConsoleOutputCP(); old_out != 0) {
+        const unsigned old_in = GetConsoleCP();
+        const unsigned want = old_out == 437 ? 850 : 437;
+        CHECK(pc::setOutputCodePage(want));
+        CHECK(GetConsoleOutputCP() == want);
+        SetConsoleOutputCP(old_out);
+        SetConsoleCP(old_in);
+    } else {
+        std::printf("  (no console: setOutputCodePage not checked)\n");
+    }
     // local time: the same fields as GetLocalTime (retry once across a second boundary)
     bool same = false;
     for (int k = 0; k < 2 && !same; ++k) {
