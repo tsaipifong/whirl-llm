@@ -113,6 +113,14 @@ CASES = [
      [], 1, "target whirl_iso_ghost compiles iso copies but no isolation manifest names it"),
     ("block: manifest module not in modules.json", FILES, drop(MODS, "iso_a"), T(), NINJA, None, MAN, [], 1,
      "module is not in tools/gates/modules.json"),
+    # arch025 lane 2 merge (2026-10-29): one manifest may isolate a group of modules (tests/iso/forward covers
+    # forward.dispatch .. forward.vision_rows + forward.state): its module line names the group
+    ("pass: manifest module names a group of modules (iso_a.x, iso_a.y)", FILES,
+     dict(drop(MODS, "iso_a"), **{"iso_a.x": {"paths": ["src/iso_a.cpp"]}, "iso_a.y": {"paths": []}}), T(), NINJA, None, MAN, [], 0,
+     "cmake modules: ok"),
+    ("block: a module that only shares the prefix is no group (iso_ab)", FILES,
+     dict(drop(MODS, "iso_a"), **{"iso_ab": {"paths": ["src/iso_a.cpp"]}}), T(), NINJA, None, MAN, [], 1,
+     "module is not in tools/gates/modules.json"),
     ("block: wrong target type for the iso library", FILES, MODS, T(whirl_iso_iso_a=("STATIC_LIBRARY", ["@/iso/iso_a/mod/iso_a.cpp"], [])), NINJA,
      None, MAN, [], 1, "is STATIC_LIBRARY, want OBJECT_LIBRARY"),
 ]

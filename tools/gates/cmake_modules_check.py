@@ -211,8 +211,10 @@ def check(root, build, mods, targets, roots, pending=(), release=False):
         if not m["module"] or not m["exe"]:
             errs.append(f"{m['file']}: needs 'module' and 'exe' lines")
             continue
-        if m["module"] not in mods:
-            errs.append(f"{tag}: module is not in tools/gates/modules.json")
+        # a manifest may isolate a group of modules: its module line then names the group's prefix (tests/iso/forward:
+        # forward.dispatch .. forward.vision_rows + forward.state; arch025 lane 2 merge 2026-10-29)
+        if m["module"] not in mods and not any(k.startswith(m["module"] + ".") for k in mods):
+            errs.append(f"{tag}: module is not in tools/gates/modules.json (nor a group {m['module']}.*)")
         base = os.path.join(iso_dir, m["module"])
         for tname, kind, want_type, lines in ((m["lib"], "src", "OBJECT_LIBRARY", m["src"]), (m["exe"], "testsrc", "EXECUTABLE", m["testsrc"])):
             claimed.add(tname)
