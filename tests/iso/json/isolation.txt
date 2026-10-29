@@ -1,0 +1,25 @@
+# ARCH-1 8.5 isolation check of json (arch025-iso3): src/chat/json.cpp built with its own unit tests
+# (tests/unit/json_tests.cpp). Format: tests/sampling/isolation.txt; read by cmake/iso.cmake and tools/gates/iso_check.py.
+# declared dependencies: src/common/util.cpp (appendUtf8, isValidUtf8) + platform args / fs (util.cpp's own calls).
+# include/whirl/json_fields.h is NOT in this module's closure (lane 1 changes it; recheck after that merge).
+module    json
+exe       whirl-iso-json-tests
+mutate    src/chat/json.cpp
+mutsym    hip
+mutsym    log
+# module sources
+src       src/chat/json.cpp
+# declared dependency sources
+src       src/common/util.cpp
+src       src/platform/args_win.cpp
+src       src/platform/fs_win.cpp
+# headers (include closure of the sources above)
+hdr       include/whirl/common.h
+hdr       include/whirl/json.h
+hdr       src/platform/args.h
+hdr       src/platform/fs.h
+hdr       src/platform/fs_fake.h
+# test program
+testsrc   tests/unit/json_tests.cpp
+testhdr   tests/test_check.h
+testhdr   tests/test_env.h

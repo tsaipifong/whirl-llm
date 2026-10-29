@@ -1,0 +1,17 @@
+# ARCH-1 8.5 isolation check of gpu_select (arch025-iso3): src/common/gpu_select.cpp built with its own unit tests (tests/unit/gpu_select_tests.cpp).
+# Format: tests/sampling/isolation.txt; read by cmake/iso.cmake and tools/gates/iso_check.py.
+# declared dependencies: none
+module    gpu_select
+exe       whirl-iso-gpu-select-tests
+mutate    src/common/gpu_select.cpp
+mutsym    hip
+mutsym    log
+mutsym    now
+# module sources
+src       src/common/gpu_select.cpp
+# headers (include closure of the sources above)
+hdr       include/whirl/gpu_select.h
+# test program
+testsrc   tests/unit/gpu_select_tests.cpp
+testhdr   tests/test_check.h
+testhdr   tests/test_env.h

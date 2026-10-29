@@ -1,0 +1,17 @@
+# ARCH-1 8.5 isolation check of mem.governor (arch025-iso3): src/common/mem_governor.cpp built with its own unit tests (tests/unit/mem_governor_tests.cpp).
+# Format: tests/sampling/isolation.txt; read by cmake/iso.cmake and tools/gates/iso_check.py.
+# declared dependencies: none
+module    mem.governor
+exe       whirl-iso-mem-governor-tests
+mutate    src/common/mem_governor.cpp
+mutsym    hip
+mutsym    log
+mutsym    now
+# module sources
+src       src/common/mem_governor.cpp
+# headers (include closure of the sources above)
+hdr       include/whirl/mem_governor.h
+# test program
+testsrc   tests/unit/mem_governor_tests.cpp
+testhdr   tests/test_check.h
+testhdr   tests/test_env.h

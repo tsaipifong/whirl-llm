@@ -1,0 +1,17 @@
+# ARCH-1 8.5 isolation check of mem.wddm_watch (arch025-iso3): src/common/wddm_watch.cpp built with its own unit tests (tests/unit/mem_wddm_watch_tests.cpp).
+# Format: tests/sampling/isolation.txt; read by cmake/iso.cmake and tools/gates/iso_check.py.
+# declared dependencies: none
+module    mem.wddm_watch
+exe       whirl-iso-mem-wddm-watch-tests
+mutate    src/common/wddm_watch.cpp
+mutsym    hip
+mutsym    log
+mutsym    now
+# module sources
+src       src/common/wddm_watch.cpp
+# headers (include closure of the sources above)
+hdr       include/whirl/wddm_watch.h
+# test program
+testsrc   tests/unit/mem_wddm_watch_tests.cpp
+testhdr   tests/test_check.h
+testhdr   tests/test_env.h
