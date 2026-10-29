@@ -122,7 +122,15 @@ def analyze(changes, m, new_rev, old_rev):
     for h in m["hip"].values():
         for u in h["host_users"]:
             dispatch_tests[u] |= set(h["tests"])
+    cmake_lists = {}            # arch025-modsel2: list-only CMake edits -> the source paths they name (module_gate)
     for path, ch in sorted(changes.items()):
+        if any(fnmatch.fnmatch(path, g) for g in CMAKE_LISTS):
+            lp = cmake_list_edit(path, side_lines(path, ch, old_rev, "old"), side_lines(path, ch, new_rev, "new"))
+            if lp is not None:
+                cmake_lists[path] = lp
+                hits.append((path, f"CMake source-list edit only ({', '.join(lp[:4]) or 'comments / blank lines'}"
+                                   f"{' ...' if len(lp) > 4 else ''}): counted as the module(s) of those sources"))
+                continue
         rule = next((r for r in FILE_RULES if fnmatch.fnmatch(path, r[0])), None)
         if rule and not path.endswith((".cpp", ".h", ".hip")) or (rule and path.startswith(("tests/", "tools/"))):
             for p in rule[1]:
@@ -281,6 +289,7 @@ def analyze(changes, m, new_rev, old_rev):
         rep["notes"] += snotes
     if changes:
         add_all_cpu(rep, m)
+    rep["cmake_lists"] = cmake_lists
     rep.update(module_gate(changes, rep=rep, m=m))
     return rep
 
@@ -332,6 +341,69 @@ def load_safety(root=None):
         return d.get("safety"), d.get("modules") or {}
     except (OSError, ValueError):
         return None, {}
+
+
+# arch025-modsel2 (PLAN 3.3): a CMake edit that only adds / removes source-path entries of existing targets is that
+# source's module, not build-wide. Prior art (progress\arch025-modsel2.PRIOR_ART.md): bazel-diff hashes every rule
+# attribute, so one more `srcs` entry changes that rule (and its dependents) only; llama.cpp gives a backend's own
+# CMakeLists.txt to that backend's job. Anything else in a CMake diff (targets, flags, options, link libraries, include
+# dirs, if(), bracket comments, variables in a path, a kernel source) stays build-wide = full gate (fail closed).
+CMAKE_LISTS = ("CMakeLists.txt", "cmake/*.cmake")
+CMAKE_SRC_EXT = (".cpp", ".cc", ".c", ".h", ".hpp", ".inc")
+CMAKE_SRC_PATH = re.compile(r"^(?:src|include|tests|tools)/[A-Za-z0-9_./+-]+$")
+
+
+def cmake_list_edit(path, old, new):
+    """old / new: the removed / added lines of CMake file `path` (None = a side could not be read). Returns the sorted
+    source paths named on those lines when every changed line is a source-path entry, blank or a # comment (and the
+    count of closing parens is the same on both sides); None otherwise (build-wide)."""
+    if old is None or new is None or not any(fnmatch.fnmatch(path, g) for g in CMAKE_LISTS):
+        return None
+    pre = ["${CMAKE_SOURCE_DIR}/", "${CMAKE_CURRENT_SOURCE_DIR}/", "${PROJECT_SOURCE_DIR}/"]
+    pre.append("${CMAKE_CURRENT_LIST_DIR}/../" if path.startswith("cmake/") else "${CMAKE_CURRENT_LIST_DIR}/")
+    out, parens = set(), []
+    for side in (old, new):
+        close = 0
+        for line in side:
+            if any(x in line for x in ("[[", "]]", "[=", "]=", '"', "(")):
+                return None
+            code = line.split("#", 1)[0]
+            for tok in code.split():
+                k = len(tok) - len(tok.rstrip(")"))
+                close += k
+                tok = tok.rstrip(")")
+                if not tok:
+                    continue
+                for p in pre:
+                    if tok.startswith(p):
+                        tok = tok[len(p):]
+                        break
+                if (not CMAKE_SRC_PATH.match(tok) or not tok.endswith(CMAKE_SRC_EXT)
+                        or any(s in ("..", ".", "") for s in tok.split("/"))):
+                    return None
+                out.add(tok)
+        parens.append(close)
+    if parens[0] != parens[1]:
+        return None
+    return sorted(out)
+
+
+def side_lines(path, ch, rev, key):
+    """the changed lines of one side ("new" / "old") of a file; None when that side cannot be read"""
+    if not ch.get(key):
+        return []
+    p = path if key == "new" else (ch.get("old_path") or path)
+    if rev:
+        src = show(rev, p)
+    else:
+        try:
+            src = open(os.path.join(ROOT, p), encoding="utf-8", errors="replace").read()
+        except OSError:
+            src = None
+    if src is None:
+        return None
+    lines = src.splitlines()
+    return [lines[i - 1] for i in ch[key] if 0 < i <= len(lines)]
 
 
 def changed_text(path, ch, new_rev, old_rev):
@@ -482,7 +554,21 @@ def module_gate(changes, mods=None, rep=None, m=None):
     def owner(path):
         return [n for n, d in mods.items() if any(fnmatch.fnmatch(path, g) for g in d.get("paths", []))]
 
+    lists = {k: v for k, v in ((rep or {}).get("cmake_lists") or {}).items() if any(fnmatch.fnmatch(k, g) for g in CMAKE_LISTS)}
+    renamed = {ch.get("old_path"): p for p, ch in changes.items() if isinstance(ch, dict) and ch.get("old_path") not in (None, p)}
     for path in sorted(changes):
+        if path in lists:  # arch025-modsel2 (PLAN 3.3): list-only CMake edit = the modules of the sources it names
+            for src in lists[path]:
+                if not src.startswith(("src/", "include/", "kernels/")):
+                    continue  # a test / tool source: no product module (CPU all covers it)
+                ms = owner(src) or owner(renamed.get(src, src))
+                for n in ms:
+                    if path not in hit[n]:
+                        hit[n].append(path)
+                if not ms:
+                    loose.append(src)
+                    why.append(f"{path} lists {src}, which is in no module")
+            continue
         if any(fnmatch.fnmatch(path, g) for g in BUILD_WIDE):
             loose.append(path)
             why.append(f"{path} is build-wide")
