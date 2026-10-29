@@ -89,4 +89,61 @@ std::string servedModelName(const std::string& file_name, const std::optional<st
 // else WHIRL_KV_SSD_MODE, else "shutdown"; any text but "always" / "off" is "shutdown".
 std::string kvSsdMode(const std::optional<std::string>& cli, const std::optional<std::string>& env);
 
+// ---- the host tier setup's rules (arch025-lane1 leg 10: were ServerRun::startTier's, c1ca7ce server_main.cpp:1512-1524,
+// :1517, :1576-1580; pinned in tests/iso/server.args). env / dir_of are callables, called only where the old code read
+// the environment / the default directory (the env read order is unchanged).
+inline constexpr std::uint64_t kv_ssd_gb_default = 64;
+// The SSD tier cap in GiB: --kv-ssd-gb, else env() (WHIRL_KV_SSD_GB; read only without the flag), else 64.
+template <class Env>
+std::uint64_t kvSsdGb(const std::optional<std::uint64_t>& cli, Env&& env) {
+    if (cli) return *cli;
+    if (const std::optional<std::uint64_t> g = env()) return *g;
+    return kv_ssd_gb_default;
+}
+// The SSD tier directory: none with a 0 GiB cap or mode "off"; else --kv-ssd-dir, else env() (WHIRL_KV_SSD_DIR), else
+// dir_of(base) (base: %LOCALAPPDATA%, nullptr = no default directory).
+template <class Env, class DirOf>
+std::optional<std::string> kvSsdDir(std::uint64_t ssd_gb, std::string_view mode, const std::optional<std::string>& cli, Env&& env,
+                                    const char* base, DirOf&& dir_of) {
+    std::optional<std::string> ssd_dir;
+    if (ssd_gb > 0 && mode != "off") {
+        if (cli) ssd_dir = cli;
+        else if (auto v = env()) ssd_dir = *v;
+        else if (base) ssd_dir = dir_of(base);
+    }
+    return ssd_dir;
+}
+// Whether the host tiers start: on when they were set up (tier_made) and the backend's KV rows per token (page_row) are
+// the bytes per token the tier layout assumes; layout_unknown (a warning, tierLayoutWarn) when a RAM tier was asked for
+// and they differ; else off.
+enum class TierStart { on, layout_unknown, off };
+TierStart tierStart(bool tier_made, std::uint64_t page_row, std::uint64_t per_tok, std::uint64_t kv_ram_mb);
+std::string tierLayoutWarn(std::uint64_t page_row, std::uint64_t per_tok);
+
+// ---- command line over environment (arch025-lane1 leg 10 part B: were inline in server_main.cpp, c1ca7ce :1002, :1092,
+// :1168, :1529-1530, :1854; pinned in tests/iso/server.args). The flag wins; env() / def() is called only without it.
+inline constexpr std::uint32_t decode_min_tps_default = 20;
+inline constexpr std::uint32_t kv_ssd_delay_ms_default = 300000;
+// --decode-min-tps, else env() (WHIRL_DECODE_MIN_TPS, default decode_min_tps_default).
+template <class Env>
+std::uint32_t decodeMinTps(const std::optional<std::uint32_t>& cli, Env&& env) {
+    return cli ? *cli : env();
+}
+// --mmproj, else env() (WHIRL_MMPROJ).
+template <class Env>
+std::optional<std::string> mmprojPath(const std::optional<std::string>& cli, Env&& env) {
+    return cli ? cli : env();
+}
+// --kv-ssd-delay (seconds) in ms, else env() (WHIRL_KV_SSD_DELAY_MS, default kv_ssd_delay_ms_default).
+template <class Env>
+std::uint64_t kvSsdDelayMs(const std::optional<std::uint64_t>& cli, Env&& env) {
+    if (cli) return *cli * 1000;
+    return env();
+}
+// --log-file, else def() (the default log path).
+template <class Def>
+std::string logPath(const std::optional<std::string>& cli, Def&& def) {
+    return cli ? *cli : def();
+}
+
 }  // namespace whirl::server

@@ -108,6 +108,15 @@ std::uint32_t parseProfile(const std::optional<std::string>& v);
 inline std::uint32_t profile() { return parseProfile(envGet("PROFILE")); }
 // WHIRL_VIS_MODE / WHIRL_VIS_DUMP: passed as text (vision::parseMode / the dump prefix), unchanged.
 inline std::optional<std::string> visMode() { return envGet("VIS_MODE"); }
+// The vision mode (arch025-lane1 leg 10: the server wrote it twice, c1ca7ce server_main.cpp:1180-1181 / :1601-1602):
+// the --vis-mode value (parseServerArgs checked it), replaced by WHIRL_VIS_MODE when that parses. parse =
+// vision::parseMode, passed in: the parser lives in the HIP vision module, which config.settings does not link.
+template <class Parse>
+auto visModeFrom(std::string_view cli, Parse&& parse) {
+    auto m = *parse(cli);
+    if (auto x = visMode()) m = parse(*x).value_or(m);
+    return m;
+}
 inline std::optional<std::string> visDump() { return envGet("VIS_DUMP"); }
 // WHIRL_VIS_CKPT_MIN: the u32 rule, nullopt when unset or bad ("ignored"; the CLI's; the server read it with std::stoul).
 inline std::optional<std::uint32_t> visCkptMin(const Warn& warn) { return envU32("VIS_CKPT_MIN", warn); }
