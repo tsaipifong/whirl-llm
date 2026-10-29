@@ -1,0 +1,63 @@
+# ARCH-1 8.5 isolation check of server.cycle_prof (arch025-engine S2): the module's sources, its DECLARED dependencies and
+# the ONLY headers they may see. Format: tests/sampling/isolation.txt; read by cmake/iso.cmake and tools/gates/iso_check.py.
+# module: src/server/engine_prof.{h,cpp} (struct CycleProf and its print(), the WHIRL_PROFILE "profile |" lines; moved out
+# of engine_internal.h). declared dependencies: the server log (src/server/log.cpp) with what it calls (src/common/util.cpp,
+# the platform layer), the server model contract (server/backend.h: ServerModel::profileTake / profileClassName, headers
+# only) and the host-memory NullBackend for the test double (src/device/null_backend.cpp). Test double:
+# tests/iso/fake_server_model.h (settable per-op-class times). No engine, no HIP runtime, no tokenizer.
+module    server.cycle_prof
+exe       whirl-iso-server-cycle-prof-tests
+mutate    src/server/engine_prof.cpp
+mutsym    hip
+mutsym    engine
+mutsym    model
+mutsym    tier
+syslib    winmm.lib
+# module sources
+src       src/server/engine_prof.cpp
+# declared dependency sources
+src       src/server/log.cpp
+src       src/common/util.cpp
+src       src/device/null_backend.cpp
+src       src/platform/env_win.cpp
+src       src/platform/args_win.cpp
+src       src/platform/fs_win.cpp
+src       src/platform/time_win.cpp
+# headers (include closure of the sources above and of the test)
+hdr       include/whirl/chat.h
+hdr       include/whirl/common.h
+hdr       include/whirl/device_mem.h
+hdr       include/whirl/device_profile.h
+hdr       include/whirl/hip.h
+hdr       include/whirl/json.h
+hdr       include/whirl/json_fields.h
+hdr       include/whirl/kv_format.h
+hdr       include/whirl/model_types.h
+hdr       include/whirl/prefill_schedule.h
+hdr       include/whirl/spec_sample.h
+hdr       include/whirl/thread_annotations.h
+hdr       include/whirl/tokenizer.h
+hdr       include/whirl/uma_mem.h
+hdr       include/whirl/vision.h
+hdr       include/whirl/vismap.h
+hdr       src/cache/cache_model.h
+hdr       src/device/backend.h
+hdr       src/device/handles.h
+hdr       src/device/null_backend.h
+hdr       src/model/qwen35/kv.h
+hdr       src/platform/args.h
+hdr       src/platform/env.h
+hdr       src/platform/fs.h
+hdr       src/platform/fs_fake.h
+hdr       src/platform/time.h
+hdr       src/server/backend.h
+hdr       src/server/engine_api.h
+hdr       src/server/engine_prof.h
+hdr       src/server/log.h
+hdr       src/server/protocol.h
+hdr       src/server/vision_iface.h
+# test program
+testsrc   tests/iso/server.cycle_prof/cycle_prof_tests.cpp
+testhdr   tests/iso/fake_server_model.h
+testhdr   tests/iso/iso_test.h
+testhdr   tests/test_check.h

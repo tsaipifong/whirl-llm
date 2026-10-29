@@ -81,6 +81,8 @@ add_library(whirl_server_core STATIC
   ${CMAKE_SOURCE_DIR}/src/server/engine_vision.cpp
   ${CMAKE_SOURCE_DIR}/src/server/engine_gov.cpp
   ${CMAKE_SOURCE_DIR}/src/server/engine_vram.cpp
+  ${CMAKE_SOURCE_DIR}/src/server/engine_slot.cpp
+  ${CMAKE_SOURCE_DIR}/src/server/engine_prof.cpp
   ${CMAKE_SOURCE_DIR}/src/cache/ckpt_store.cpp
   ${CMAKE_SOURCE_DIR}/src/cache/page_pool.cpp
   ${CMAKE_SOURCE_DIR}/src/server/prefix_store.cpp
