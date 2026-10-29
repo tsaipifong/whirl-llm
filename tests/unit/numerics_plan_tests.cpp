@@ -415,6 +415,18 @@ void testFrontEnds() {
     const nu::Flags d = nu::plan(nu::parseMode("balance", "t"), t).flags;
     // none: runtime values ignored
     NCHECK(run(F::none, {{"NO_FUSE", "1"}, {"GDN_SEQ", "1"}}) == d, "front none");
+    // arch025-lane1 leg 9: the CLI-only column == the names whirl-server skipped (729c080 src/server/server_main.cpp:707,
+    // verbatim), in table order; every other name is sent by both front ends
+    {
+        std::size_t n_cli = 0;
+        for (const auto& e : nu::RuntimeValues::names()) {
+            const std::string_view n = e.name;
+            const bool old_skip = n == "DBG" || n == "GEMV_MAX" || n == "NO_GRAPH" || n == "GV_GROUP" || n == "GV_NMAX";
+            NCHECK(e.cli_only == old_skip, "RuntimeValues::names {} cli_only {}", n, e.cli_only);
+            n_cli += e.cli_only ? 1 : 0;
+        }
+        NCHECK(n_cli == 5, "RuntimeValues::names: 5 CLI-only names (got {})", n_cli);
+    }
     // on / off knobs (bug-fastonly, audit F-D; was "presence: any value, 0 included"): on for any value but "0" / "";
     // GDN_V0 is still a presence knob (not in the F-D list; "0" turns it on)
     for (F fr : {F::cli, F::server}) {

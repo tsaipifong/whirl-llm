@@ -189,6 +189,14 @@ void testChat() {
                                "is sequence and args_value is not string) else args_value | string %}") ==
           chat::TemplateKind::b_pyargs);
     CHECK(std::string(chat::templateName(chat::TemplateKind::b_pyargs)) == "b-pyargs");
+    // arch025-lane1 leg 9: the variant's description in whirl-server's "chat template:" line == the ternary of 729c080
+    // src/server/server_main.cpp:431-433 (verbatim)
+    for (chat::TemplateKind tmpl : {chat::TemplateKind::a, chat::TemplateKind::b, chat::TemplateKind::b_pyargs}) {
+        const char* old = tmpl == chat::TemplateKind::a ? "reasoning effort, merged system, preserve_thinking"
+                          : tmpl == chat::TemplateKind::b ? "system + tools, <think> in history"
+                                                          : "system + tools, <think> in history, scalar tool arguments as True / False / None";
+        CHECK(std::string(chat::templateDescription(tmpl)) == old);
+    }
     CHECK(chat::detectTemplate("{% if reasoning_effort %}") == chat::TemplateKind::a);
     CHECK(chat::detectTemplate("{% if x %}") == chat::TemplateKind::b);
 }

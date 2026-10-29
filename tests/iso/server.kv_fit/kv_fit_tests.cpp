@@ -127,6 +127,183 @@ void testRamFloor() {
     std::printf("ram floor: %zu cases == 5728296\n", n);
 }
 
+// ---- leg 9 (arch025-lane1): the rules left in 729c080 src/server/server_main.cpp, verbatim copies ------------------
+// a config with qwen35::Config's isAttn (include/whirl/model_types.h:101, verbatim) and n_layer
+struct FakeCfg {
+    std::uint32_t n_layer = 0;
+    std::uint32_t interval = 1;
+    bool isAttn(std::uint32_t il) const { return (il + 1) % interval == 0; }
+};
+// :886-888 (planSlots ng); makeEngine :941-943 counted model.ssm_state[li] != 0, which Model::load sets exactly for
+// !cfg.isAttn(li) (src/model/loader.cpp:318-322; HANDOFF section 48)
+std::uint64_t old_ng(const FakeCfg& cfg) {
+    std::uint64_t ng = 0;
+    for (std::uint32_t li = 0; li < cfg.n_layer; ++li)
+        if (!cfg.isAttn(li)) ++ng;
+    return ng;
+}
+void testDeltaNetLayers() {
+    std::size_t n = 0;
+    for (std::uint32_t nl = 0; nl <= 96; ++nl)
+        for (std::uint32_t iv = 1; iv <= 9; ++iv) {
+            const FakeCfg c{nl, iv};
+            ISO_CHECK(sf::deltaNetLayers(c) == old_ng(c));
+            ++n;
+        }
+    ISO_CHECK(sf::deltaNetLayers(FakeCfg{64, 4}) == 48u);  // Qwen3.8-27B: 64 layers, attention every 4th
+    std::printf("deltanet layers: %zu cases == 729c080\n", n);
+}
+// :1086-1094 (reserveRamTier: the per-GPU text of the "kv tier: pinned memory now:" line)
+std::string old_per(const std::vector<sf::PinnedGpu>& gs) {
+    std::string per;
+    for (const sf::PinnedGpu& g0 : gs) {
+        struct {
+            std::uint64_t nonlocal_budget, shared_system, adapter_shared;
+        } g{g0.nonlocal_budget, g0.shared_system, g0.adapter_shared};
+        const std::uint64_t own = g0.own_nonlocal;
+        per += std::format("{}{} MiB {} (this process {} MiB, all programs {})", per.empty() ? "" : ", ",
+                           (g.nonlocal_budget > 0 ? g.nonlocal_budget : g.shared_system) >> 20,
+                           g.nonlocal_budget > 0 ? "non-local budget" : "shared GPU memory", own >> 20,
+                           g.adapter_shared ? std::format("{} MiB", g.adapter_shared >> 20) : std::string("unknown"));
+    }
+    return per;
+}
+void testPinnedGpusText() {
+    std::size_t n = 0;
+    const std::uint64_t vals[] = {0, 1, (1ull << 20) - 1, 1ull << 20, 3ull << 30, (16ull << 30) + 12345};
+    std::vector<sf::PinnedGpu> all;
+    for (const std::uint64_t nb : vals)
+        for (const std::uint64_t own : {0ull, 5ull << 20})
+            for (const std::uint64_t ss : vals)
+                for (const std::uint64_t as : vals) {
+                    const sf::PinnedGpu g{nb, own, ss, as};
+                    ISO_CHECK(sf::pinnedGpusText({g}) == old_per({g}));
+                    all.push_back(g);
+                    ++n;
+                }
+    ISO_CHECK(sf::pinnedGpusText({}) == old_per({}));
+    for (std::size_t k = 2; k <= 4; ++k) {
+        const std::vector<sf::PinnedGpu> v(all.begin() + static_cast<std::ptrdiff_t>(k * 7), all.begin() + static_cast<std::ptrdiff_t>(k * 7 + k));
+        ISO_CHECK(sf::pinnedGpusText(v) == old_per(v));
+        ++n;
+    }
+    std::printf("pinned gpus text: %zu cases == 729c080\n", n);
+}
+// :1276-1285 (planPool: the pool without -c / a fit, and the 4096-token refusal)
+std::uint32_t old_poolTokens(std::uint64_t avail, std::uint64_t per_tok, std::uint32_t cap_max, std::uint32_t kv_page) {
+    const std::uint64_t t = std::min(avail / per_tok, static_cast<std::uint64_t>(8) * cap_max);
+    return static_cast<std::uint32_t>(t / kv_page * kv_page);
+}
+std::string old_refusal(std::uint32_t pool_tokens) {
+    if (pool_tokens < 4096)
+        return std::format("not enough GPU memory left for the KV cache: a pool of {} tokens (at least 4096 needed).\n"
+                           "  Use a smaller model or quantization, give --ctx explicitly,\n"
+                           "  or close other programs that use the GPU.",
+                           pool_tokens);
+    return {};
+}
+// :1395-1403 (the "kv pool N tokens < floor" warning; floor_second_ctx :167)
+std::string old_floorWarn(std::uint32_t pool_now, std::uint32_t slot_ctx_eff, std::uint32_t parallel, bool hint) {
+    constexpr std::uint32_t floor_second_ctx = 65536;
+    const std::uint64_t floor = static_cast<std::uint64_t>(slot_ctx_eff) + (parallel > 1 ? std::min(floor_second_ctx, slot_ctx_eff) : 0);
+    if (pool_now < floor)
+        return std::format("kv pool {} tokens < {} (one {}-token request + a second one reaching {}): concurrent long requests wait in "
+                           "the queue, or end early while generating (finish_reason length, finish_cause kv_pool_exhausted){}",
+                           pool_now, floor, slot_ctx_eff, parallel > 1 ? std::min(floor_second_ctx, slot_ctx_eff) : 0,
+                           hint ? "; --balance allows int8 KV (a longer pool)" : "");
+    return {};
+}
+void testPoolTokens() {
+    std::size_t n = 0;
+    for (const std::uint64_t av : {0ull, 1ull, 1ull << 20, 3ull << 30, 31ull << 30, 200ull << 30})
+        for (const std::uint64_t pt : {1ull, 1024ull, 16384ull, 65536ull, 147456ull})
+            for (const std::uint32_t cap : {0u, 4096u, 262144u})
+                for (const std::uint32_t pg : {1u, 256u}) {
+                    ISO_CHECK(sf::defaultPoolTokens(av, pt, static_cast<std::uint64_t>(8) * cap, pg) == old_poolTokens(av, pt, cap, pg));
+                    ++n;
+                }
+    for (const std::uint32_t p : {0u, 1u, 4095u, 4096u, 4097u, 262144u}) {
+        ISO_CHECK(sf::poolRefusal(p) == old_refusal(p));
+        ++n;
+    }
+    for (const std::uint32_t pn : {0u, 4096u, 65535u, 65536u, 131071u, 131072u, 196608u, 262144u})
+        for (const std::uint32_t sc : {1024u, 65536u, 65792u, 131072u, 262144u})
+            for (const std::uint32_t par : {1u, 2u, 4u})
+                for (const bool h : {false, true}) {
+                    ISO_CHECK(sf::poolFloorWarn(pn, sc, par, h) == old_floorWarn(pn, sc, par, h));
+                    ++n;
+                }
+    std::printf("pool tokens / refusal / floor: %zu cases == 729c080\n", n);
+}
+// :1408-1410 (reportPool ck_mb: one checkpoint in MiB, the sum ckptBytes holds)
+void testCkptMib() {
+    std::size_t n = 0;
+    for (const std::uint64_t ng : {0ull, 1ull, 48ull, 30ull})
+        for (const std::uint64_t cb : {0ull, 12288ull, 98304ull})
+            for (const std::uint64_t sb : {0ull, 1048576ull, 2097152ull})
+                for (const std::uint32_t v : {0u, 151936u, 248320u})
+                    for (const std::uint32_t e : {0u, 2048u, 5120u}) {
+                        const double old = static_cast<double>(ng * (cb + sb) + static_cast<std::uint64_t>(v) * 4 + static_cast<std::uint64_t>(e) * 4) /
+                                           (1024.0 * 1024.0);
+                        ISO_CHECK(sf::ckptMib(ng * (cb + sb), v, e) == old);
+                        ++n;
+                    }
+    std::printf("ckpt MiB: %zu cases == 729c080\n", n);
+}
+// :1722-1726 and :1747-1750 (runServer: the "target not reached" entry and the /health note)
+std::optional<std::string> old_target(bool parallel_given, std::uint32_t ctx_eff, std::uint64_t target_ctx, std::uint32_t parallel) {
+    if (parallel_given && ctx_eff < target_ctx)
+        return std::format("target not reached: context {} tokens per request with {} slot(s), less than {}", ctx_eff, parallel, target_ctx);
+    return std::nullopt;
+}
+std::string old_note(const std::vector<std::string>& adjusted) {
+    std::string note;
+    for (const std::string& a : adjusted)
+        if (a.find("--ctx-per-slot") != std::string::npos || a.rfind("-c ", 0) == 0) note += (note.empty() ? "" : "; ") + a;
+    return note.empty() ? std::string() : "adjusted at startup to fit the GPU memory: " + note;
+}
+void testStartupNotes() {
+    std::size_t n = 0;
+    for (const bool pg : {false, true})
+        for (const std::uint32_t ce : {0u, 4096u, 16383u, 16384u, 131072u})
+            for (const std::uint32_t sc : {1024u, 16384u, 131072u})
+                for (const std::uint32_t par : {1u, 3u}) {
+                    const std::uint64_t target = std::min<std::uint32_t>(sc, 16384);
+                    ISO_CHECK(sf::targetNotReached(pg, ce, target, par) == old_target(pg, ce, target, par));
+                    ++n;
+                }
+    const std::vector<std::vector<std::string>> lists = {
+        {},
+        {"--parallel 4 -> 3"},
+        {"-c 262144 -> 131072"},
+        {"--ctx-per-slot 131072 -> 65536", "--parallel 2 -> 1", "-c 9 -> 8"},
+        {"x -c 5", "-cx", "WHIRL_KV_RAM_MB 1 -> 0 MiB", "a --ctx-per-slot b"},
+    };
+    for (const auto& l : lists) {
+        ISO_CHECK(sf::startupNote(l) == old_note(l));
+        ++n;
+    }
+    std::printf("startup notes: %zu cases == 729c080\n", n);
+}
+// :446-449 (buildModel: the WHIRL_PREFILL_BATCH below-minimum warning; prefill_chunk / prefill_merge = 1024 / 256,
+// include/whirl/prefill_schedule.h:28-29)
+std::string old_pbWarn(std::uint32_t x, const std::string& v) {
+    if (x < whirl::vram::min_prefill_batch)
+        return std::format("WHIRL_PREFILL_BATCH={} is below the smallest prefill batch the scheduler needs ({} rows: one {}-row chunk + "
+                           "a {}-row tail); using {}",
+                           v, whirl::vram::min_prefill_batch, std::size_t{1024}, std::size_t{256}, whirl::vram::min_prefill_batch);
+    return {};
+}
+void testPrefillBatchWarn() {
+    std::size_t n = 0;
+    for (const std::uint32_t x : {0u, 1u, 1024u, 1279u, 1280u, 1281u, 4096u, 0xffffffffu})
+        for (const char* t : {"0", "1279", "01279", "1280", " 12", "4096"}) {
+            ISO_CHECK(whirl::vram::prefillBatchFloorWarn(x, t, 1024, 256) == old_pbWarn(x, t));
+            ++n;
+        }
+    std::printf("prefill batch warning: %zu cases == 729c080\n", n);
+}
+
 // the module's older functions, linked from the isolated objects (smoke: the tables are in whirl-tests)
 void testSmoke() {
     ISO_CHECK(sf::slotsThatFit(1, 0, 0, 0, 1, 1) == 1u);
@@ -141,6 +318,9 @@ void testSmoke() {
 }  // namespace
 
 int main(int argc, char** argv) {
-    return iso::run("server.kv_fit", {{"context_plan", testContextPlan}, {"checkpoints", testCheckpoints}, {"ram_floor", testRamFloor}, {"smoke", testSmoke}},
+    return iso::run("server.kv_fit", {{"context_plan", testContextPlan}, {"checkpoints", testCheckpoints}, {"ram_floor", testRamFloor},
+                                        {"deltanet_layers", testDeltaNetLayers}, {"pinned_gpus_text", testPinnedGpusText},
+                                        {"pool_tokens", testPoolTokens}, {"ckpt_mib", testCkptMib}, {"startup_notes", testStartupNotes},
+                                        {"prefill_batch_warn", testPrefillBatchWarn}, {"smoke", testSmoke}},
                     argc, argv);
 }
