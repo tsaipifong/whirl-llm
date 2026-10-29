@@ -4,6 +4,7 @@
 #include "iso/iso_test.h"
 #include "spec/policy.h"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstdio>
@@ -276,10 +277,42 @@ void testDflashRules() {
 
 }  // namespace
 
+// ---- leg 10: verbatim c1ca7ce src/server/server_main.cpp:1440 (reportPool: the n-gram drafts the startup line prints)
+std::uint32_t old_ngShown(std::uint32_t ngram_max) {
+    return ngram_max > 0 ? std::min(ngram_max, whirl::qwen35::max_ng_drafts) : whirl::qwen35::max_ng_drafts;
+}
+void testNgramShown() {
+    std::size_t n = 0;
+    for (std::uint32_t x = 0; x <= 2 * whirl::qwen35::max_ng_drafts + 2; ++x) {
+        ISO_CHECK(whirl::qwen35::ngramDraftsShown(x) == old_ngShown(x));
+        ++n;
+    }
+    for (const std::uint32_t x : {100u, 65535u, 0x7fffffffu, 0xffffffffu}) {
+        ISO_CHECK(whirl::qwen35::ngramDraftsShown(x) == old_ngShown(x));
+        ++n;
+    }
+    std::printf("n-gram drafts shown: %zu cases == c1ca7ce\n", n);
+}
+
+// ---- leg 10 part B: verbatim c1ca7ce src/server/server_main.cpp:727 (buildModel: --mtp-drafts over WHIRL_MTP_DRAFTS)
+std::optional<std::uint32_t> old_draftsUser(const std::optional<std::uint32_t>& cli, const std::optional<std::uint32_t>& env) {
+    return cli ? cli : env;
+}
+void testMtpDraftsGiven() {
+    std::size_t n = 0;
+    const std::vector<std::optional<std::uint32_t>> v = {std::nullopt, 0u, 1u, 3u, 8u, 0xffffffffu};
+    for (const auto& c : v)
+        for (const auto& e : v) {
+            ISO_CHECK(whirl::qwen35::mtpDraftsGiven(c, e) == old_draftsUser(c, e));
+            ++n;
+        }
+    std::printf("mtp drafts given: %zu cases == c1ca7ce\n", n);
+}
+
 int main(int argc, char** argv) {
     return iso::run("spec.policy",
                     {{"draft_vocab", testDraftVocab}, {"exe_directory", testExeDirectory}, {"mtp_defaults", testMtpDefaults}, {"ngram", testNgram},
                      {"batch_drafts", testBatchDrafts}, {"draft_vocab_gate", testDraftVocabGate}, {"draft_vocab_subset", testDraftVocabSubset}, {"mtp_auto_mode", testMtpAutoMode},
-                     {"dflash_rules", testDflashRules}},
+                     {"dflash_rules", testDflashRules}, {"ngram_shown", testNgramShown}, {"mtp_drafts_given", testMtpDraftsGiven}},
                     argc, argv);
 }

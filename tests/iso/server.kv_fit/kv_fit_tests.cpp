@@ -14,6 +14,7 @@
 #include <format>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace sf = whirl::startfit;
@@ -305,6 +306,189 @@ void testPrefillBatchWarn() {
 }
 
 // the module's older functions, linked from the isolated objects (smoke: the tables are in whirl-tests)
+// ---- leg 10: verbatim c1ca7ce src/server/server_main.cpp --------------------------------------------------------------
+// :1236-1263 (planPool: the explicit flags serverPoolFit gets, the adjusted entries, the warning). The ctx entry's reason
+// is the caller's fit text (not part of the rule).
+struct OldAdj {
+    bool pool_explicit = false, slot_explicit = false;
+    std::optional<std::string> c, s;
+    std::string s_why;
+    bool warn = false;
+};
+OldAdj old_poolAdjust(bool is_uma, std::optional<std::uint32_t> ctx, std::optional<std::uint32_t> ctx_per_slot, std::uint32_t slot_ctx,
+                      std::uint32_t pf_pool, std::uint32_t pf_slot_ctx, bool pf_msg_nonempty) {
+    OldAdj r;
+    const bool fit_explicit = !is_uma;
+    r.pool_explicit = ctx.has_value() && !fit_explicit;
+    r.slot_explicit = ctx_per_slot.has_value() && !fit_explicit;
+    const bool adj_c = fit_explicit && ctx && pf_pool < *ctx;
+    const bool adj_s = fit_explicit && ctx_per_slot && pf_slot_ctx < slot_ctx;
+    if (adj_c) r.c = std::format("-c {} -> {}", *ctx, pf_pool);
+    if (adj_s) {
+        r.s = std::format("--ctx-per-slot {} -> {}", slot_ctx, pf_slot_ctx);
+        r.s_why = std::format("the KV pool holds {} tokens", pf_pool);
+    }
+    r.warn = pf_msg_nonempty && !(adj_c || adj_s);
+    return r;
+}
+void testPoolAdjust() {
+    std::size_t n = 0;
+    const std::vector<std::optional<std::uint32_t>> opts = {std::nullopt, 0u, 4096u, 65535u, 65536u, 131072u, 262144u, 0xffffffffu};
+    for (const bool uma : {false, true})
+        for (const auto& c : opts)
+            for (const auto& s : opts)
+                for (const std::uint32_t sc : {0u, 4096u, 65536u, 131072u})
+                    for (const std::uint32_t pool : {0u, 4096u, 65536u, 131072u, 262144u})
+                        for (const std::uint32_t pfs : {0u, 4096u, 65536u, 131072u})
+                            for (const bool msg : {false, true}) {
+                                const OldAdj o = old_poolAdjust(uma, c, s, sc, pool, pfs, msg);
+                                const sf::PoolFitExplicit fe = sf::poolFitExplicit(uma, c.has_value(), s.has_value());
+                                const sf::PoolAdjust a = sf::poolAdjust(uma, c, s, sc, pool, pfs, msg);
+                                ISO_CHECK(fe.pool == o.pool_explicit);
+                                ISO_CHECK(fe.slot == o.slot_explicit);
+                                ISO_CHECK(a.ctx == o.c);
+                                ISO_CHECK(a.slot == o.s);
+                                ISO_CHECK(a.slot_why == o.s_why);
+                                ISO_CHECK(a.warn == o.warn);
+                                ++n;
+                            }
+    std::printf("pool adjust: %zu cases == c1ca7ce\n", n);
+}
+// :1398-1410 (reportPool: the tail checkpoint line; warn = logW)
+std::pair<bool, std::string> old_tail(bool tail_ck, std::size_t n_ck, std::size_t tail_ck_slots, std::uint32_t tail_ck_min, double ck_mb) {
+    if (!tail_ck)
+        return {true, "prefix cache: tail checkpoint off (WHIRL_TAIL_CK=0, debug override): a second question about the same long "
+                      "document re-prefills it"};
+    else if (n_ck >= tail_ck_slots)
+        return {false, std::format("prefix cache: tail checkpoint on: prompts >= {} tokens keep one of the {} per-slot checkpoints ({:.1f} MiB) at the "
+                                   "start of their last chunk, so another question about the same document resumes there",
+                                   tail_ck_min, n_ck, ck_mb)};
+    else
+        return {false, std::format("prefix cache: tail checkpoint off ({} checkpoint(s) per slot, needs {}; WHIRL_SERVE_CKPTS={} turns it on at "
+                                   "+{:.1f} MiB VRAM per slot each)",
+                                   n_ck, tail_ck_slots, tail_ck_slots, ck_mb)};
+}
+void testTailCkLine() {
+    std::size_t n = 0;
+    for (const bool on : {false, true})
+        for (const std::size_t nck : {std::size_t{0}, std::size_t{1}, std::size_t{2}, std::size_t{3}, std::size_t{4}, std::size_t{8}})
+            for (const std::size_t slots : {std::size_t{0}, std::size_t{1}, std::size_t{3}, std::size_t{4}})
+                for (const std::uint32_t mn : {0u, 2048u, 8192u, 0xffffffffu})
+                    for (const double mb : {0.0, 0.05, 0.25, 12.34, 149.95, 1e6}) {
+                        const auto o = old_tail(on, nck, slots, mn, mb);
+                        const sf::TailCkLine t = sf::tailCkLine(on, nck, slots, mn, mb);
+                        ISO_CHECK(t.warn == o.first);
+                        ISO_CHECK(t.text == o.second);
+                        ++n;
+                    }
+    std::printf("tail checkpoint line: %zu cases == c1ca7ce\n", n);
+}
+// :457 (buildModel) and :1013 (makeEngine): shared prefix checkpoints; the planned value is read only when used
+std::uint32_t old_spe(std::size_t n_ck, bool no_pc, std::uint32_t planned, int& reads) { return (n_ck == 0 || no_pc) ? 0 : (++reads, planned); }
+// :1456 (reportPool) gov_on (GOVERNOR is read only when the first three hold); :1687 gc.pool_min; :1706-1707 the off line
+bool old_gov(bool wddm_ok, bool is_uma, bool reserve_explicit, bool env, int& reads) {
+    return wddm_ok && !is_uma && !reserve_explicit && (++reads, env);
+}
+std::optional<std::string> old_govOff(bool wddm_ok, bool is_uma, bool reserve_explicit) {
+    if (wddm_ok && !is_uma) return std::string(reserve_explicit ? "WHIRL_POOL_RESERVE_MB is set: the pool is never resized" : "WHIRL_GOVERNOR=0");
+    return std::nullopt;
+}
+void testGovernorRules() {
+    std::size_t n = 0;
+    for (const std::size_t nck : {std::size_t{0}, std::size_t{1}, std::size_t{4}})
+        for (const bool no_pc : {false, true})
+            for (const std::uint32_t p : {0u, 1u, 2u, 7u, 0xffffffffu}) {
+                int r0 = 0, r1 = 0;
+                const std::uint32_t o = old_spe(nck, no_pc, p, r0);
+                ISO_CHECK(sf::sharedCkpts(nck, no_pc, [&] { ++r1; return p; }) == o);
+                ISO_CHECK(r1 == r0);
+                ++n;
+            }
+    for (const bool w : {false, true})
+        for (const bool u : {false, true})
+            for (const bool re : {false, true}) {
+                for (const bool env : {false, true}) {
+                    int r0 = 0, r1 = 0;
+                    const bool o = old_gov(w, u, re, env, r0);
+                    ISO_CHECK(sf::governorOn(w, u, re, [&] { ++r1; return env; }) == o);
+                    ISO_CHECK(r1 == r0);
+                    ++n;
+                }
+                ISO_CHECK(sf::governorOffWhy(w, u, re) == old_govOff(w, u, re));
+                ++n;
+            }
+    for (const std::uint32_t ps : {0u, 1u, 4095u, 4096u, 4097u, 65536u, 0xffffffffu}) {
+        ISO_CHECK(sf::governorPoolMin(ps) == std::min<std::uint32_t>(ps, 4096));
+        ++n;
+    }
+    std::printf("governor / shared checkpoint rules: %zu cases == c1ca7ce\n", n);
+}
+// ---- leg 10 part B: verbatim c1ca7ce src/server/server_main.cpp ----------------------------------------------------
+// :171 vram_tight_pool = 16384; :520 (buildModel: the fit's pool_min_tokens); :603-604 (the UMA need's tokens); :897 and
+// :1705 (the per-request target); :1413 / :1429 (the log lines, 64-bit) and :1704 (/health, 32-bit) the context per request
+std::uint32_t old_fitPoolMin(std::optional<std::uint32_t> pool_req, std::uint32_t slot_ctx) {
+    return pool_req ? *pool_req : std::min<std::uint32_t>(slot_ctx, 16384);
+}
+std::uint64_t old_targetCtx(std::uint32_t slot_ctx) { return std::min<std::uint32_t>(slot_ctx, 16384); }
+std::pair<std::uint32_t, std::uint32_t> old_umaTokens(std::optional<std::uint32_t> ctx, std::optional<std::uint32_t> pool_req, std::uint32_t slot_ctx) {
+    return {ctx ? *ctx : slot_ctx, pool_req ? *pool_req : slot_ctx};
+}
+std::uint64_t old_ctxLog(std::uint32_t slot_ctx_eff, std::uint32_t pool_pages, std::uint32_t kv_page) {
+    return std::min<std::uint64_t>(slot_ctx_eff, static_cast<std::uint64_t>(pool_pages) * kv_page);
+}
+std::uint32_t old_ctxEff(std::uint32_t slot_ctx_eff, std::uint32_t pool_pages, std::uint32_t kv_page) {
+    return std::min<std::uint32_t>(slot_ctx_eff, pool_pages * kv_page);
+}
+void testContextRules() {
+    std::size_t n = 0;
+    ISO_CHECK(sf::vram_tight_pool == 16384u);
+    const std::vector<std::optional<std::uint32_t>> opts = {std::nullopt, 0u, 1u, 4096u, 16383u, 16384u, 16385u, 262144u, 0xffffffffu};
+    for (const std::uint32_t sc : {0u, 1u, 4096u, 16383u, 16384u, 16385u, 131072u, 0xffffffffu}) {
+        ISO_CHECK(static_cast<std::uint64_t>(sf::targetCtx(sc)) == old_targetCtx(sc));
+        ++n;
+        for (const auto& pr : opts) {
+            ISO_CHECK(sf::fitPoolMin(pr, sc) == old_fitPoolMin(pr, sc));
+            ++n;
+            for (const auto& c : opts) {
+                const sf::UmaTokens ut = sf::umaTokens(c, pr, sc);
+                const auto o = old_umaTokens(c, pr, sc);
+                ISO_CHECK(ut.min_tokens == o.first);
+                ISO_CHECK(ut.want_tokens == o.second);
+                ++n;
+            }
+        }
+    }
+    for (const std::uint32_t sce : {0u, 1u, 4096u, 65536u, 131072u, 262144u, 0xffffffffu})
+        for (const std::uint32_t pp : {0u, 1u, 16u, 512u, 1024u, 16777215u, 16777216u, 16777217u, 0xffffffffu})
+            for (const std::uint32_t kp : {1u, 256u}) {
+                ISO_CHECK(sf::ctxPerRequest(sce, static_cast<std::uint64_t>(pp) * kp) == old_ctxLog(sce, pp, kp));
+                ISO_CHECK(static_cast<std::uint32_t>(sf::ctxPerRequest(sce, pp * kp)) == old_ctxEff(sce, pp, kp));
+                ++n;
+            }
+    std::printf("context rules: %zu cases == c1ca7ce\n", n);
+}
+// ---- leg 10 part C: verbatim c1ca7ce src/server/server_main.cpp:1272-1274 (planPool: the pool size; the default only
+// computed when neither a fit nor a requested pool is there)
+std::uint32_t old_poolTokens(std::optional<std::uint32_t> fit_pool, std::optional<std::uint32_t> pool_req, std::uint32_t def, int& calls) {
+    const std::uint32_t pool_tokens = fit_pool       ? *fit_pool
+                                      : pool_req ? *pool_req
+                                                    : (++calls, def);
+    return pool_tokens;
+}
+void testPoolPrecedence() {
+    std::size_t n = 0;
+    const std::vector<std::optional<std::uint32_t>> v = {std::nullopt, 0u, 4096u, 131072u, 0xffffffffu};
+    for (const auto& f : v)
+        for (const auto& r : v)
+            for (const std::uint32_t d : {0u, 4095u, 262144u}) {
+                int c0 = 0, c1 = 0;
+                const std::uint32_t o = old_poolTokens(f, r, d, c0);
+                ISO_CHECK(sf::poolTokens(f, r, [&] { ++c1; return d; }) == o);
+                ISO_CHECK(c1 == c0);
+                ++n;
+            }
+    std::printf("pool precedence: %zu cases == c1ca7ce\n", n);
+}
 void testSmoke() {
     ISO_CHECK(sf::slotsThatFit(1, 0, 0, 0, 1, 1) == 1u);
     ISO_CHECK(sf::poolTokensWith(1, 1000, 0, 0, 10) == 100u);
@@ -321,6 +505,9 @@ int main(int argc, char** argv) {
     return iso::run("server.kv_fit", {{"context_plan", testContextPlan}, {"checkpoints", testCheckpoints}, {"ram_floor", testRamFloor},
                                         {"deltanet_layers", testDeltaNetLayers}, {"pinned_gpus_text", testPinnedGpusText},
                                         {"pool_tokens", testPoolTokens}, {"ckpt_mib", testCkptMib}, {"startup_notes", testStartupNotes},
-                                        {"prefill_batch_warn", testPrefillBatchWarn}, {"smoke", testSmoke}},
+                                        {"prefill_batch_warn", testPrefillBatchWarn}, {"pool_adjust", testPoolAdjust},
+                                        {"tail_ck_line", testTailCkLine}, {"governor_rules", testGovernorRules},
+                                        {"context_rules", testContextRules}, {"pool_precedence", testPoolPrecedence},
+                                        {"smoke", testSmoke}},
                     argc, argv);
 }

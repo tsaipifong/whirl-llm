@@ -13,6 +13,7 @@
 #include <exception>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace st = whirl::settings;
@@ -438,6 +439,36 @@ void testServerLeg8() {
 
 }  // namespace
 
+// ---- leg 10: verbatim c1ca7ce src/server/server_main.cpp:1180-1181 (loadVisionEarly) == :1601-1602 (attachVision): the
+// vision mode (vision::parseMode faked with the same three names)
+enum class FakeVisMode { automatic, resident, stream };
+std::optional<FakeVisMode> fakeParseMode(std::string_view s) {
+    if (s == "auto") return FakeVisMode::automatic;
+    if (s == "resident") return FakeVisMode::resident;
+    if (s == "stream") return FakeVisMode::stream;
+    return std::nullopt;
+}
+FakeVisMode old_visMode(const std::string& cli) {
+    FakeVisMode vm = *fakeParseMode(cli);
+    if (auto x = st::visMode()) vm = fakeParseMode(*x).value_or(vm);
+    return vm;
+}
+void testVisModeFrom() {
+    std::size_t n = 0;
+    for (const char* env : {static_cast<const char*>(nullptr), "auto", "resident", "stream", "bad", "STREAM", " stream"})
+        for (const char* cli : {"auto", "resident", "stream"}) {
+            whirl::platform::env::set("WHIRL_VIS_MODE", env ? env : "");
+            const FakeVisMode o = old_visMode(cli);
+            int calls = 0;
+            const FakeVisMode m = st::visModeFrom(std::string(cli), [&](std::string_view s) { ++calls; return fakeParseMode(s); });
+            ISO_CHECK(m == o);
+            ISO_CHECK(calls == (env ? 2 : 1));
+            ++n;
+        }
+    whirl::platform::env::set("WHIRL_VIS_MODE", "");
+    std::printf("vision mode: %zu cases == c1ca7ce\n", n);
+}
+
 int main(int argc, char** argv) {
-    return iso::run("config.settings", {{"u32", testU32}, {"mtp_adapt", testMtpAdapt}, {"env", testEnv}, {"pool_reserve", testPoolReserve}, {"spec_vis", testSpecVis}, {"server_leg8", testServerLeg8}}, argc, argv);
+    return iso::run("config.settings", {{"u32", testU32}, {"mtp_adapt", testMtpAdapt}, {"env", testEnv}, {"pool_reserve", testPoolReserve}, {"spec_vis", testSpecVis}, {"server_leg8", testServerLeg8}, {"vis_mode_from", testVisModeFrom}}, argc, argv);
 }
