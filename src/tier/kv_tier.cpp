@@ -1763,8 +1763,12 @@ bool Tier::tick() {
                         log_fn(fmt("kv tier: entry %016llx (%u tok) prefetched from SSD into RAM in %.0f ms",
                                    static_cast<unsigned long long>(e->id), e->n_tok, msSince(j->t0)));
                     }
-                } else if (failed || e->pin == 0) {
-                    // abandoned or failed read: the RAM blocks are incomplete
+                } else if (failed) {
+                    // the read failed: the file is unusable (as endRestore when the job finished first;
+                    // arch025-tierfix: keeping the SSD entry here read the same bad file again)
+                    removeEntry(e);
+                } else if (e->pin == 0) {
+                    // abandoned read: the RAM blocks are incomplete, the SSD copy is good
                     if (e->ssd) {
                         releaseBlocks(e, 0);
                         e->in_ram = false;
