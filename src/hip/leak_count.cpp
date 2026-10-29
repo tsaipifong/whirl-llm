@@ -3,9 +3,9 @@
 
 #include "whirl/leak_count.h"
 
+#include "platform/env.h"
+
 #include <cstdio>
-#include <cstdlib>
-#include <cstring>
 #include <format>
 #include <mutex>
 #include <unordered_map>
@@ -13,11 +13,6 @@
 namespace whirl::hip::leakcount {
 
 namespace {
-
-bool envOn() {
-    const char* v = std::getenv("WHIRL_LEAK_CHECK");
-    return v != nullptr && *v != 0 && std::strcmp(v, "0") != 0;
-}
 
 struct Counts {
     std::mutex mu;
@@ -44,7 +39,8 @@ void add(std::string& s, std::int64_t n, const char* one, const char* many) {
 
 }  // namespace
 
-bool g_on = envOn();
+// arch025-env61: read once here, at static initialization, as before (platform::env::get; was std::getenv)
+bool g_on = switchFrom([](const char* name) { return whirl::platform::env::get(name); });
 
 void onDevAlloc(std::uint64_t base, std::uint64_t bytes) {
     Counts& c = counts();

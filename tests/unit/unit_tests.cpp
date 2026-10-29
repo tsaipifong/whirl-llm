@@ -93,6 +93,7 @@ const OrderRow kOrder[] = {
     {"platform.proc", "testPlatformProcSurvivors"},
 #endif
     {"hip.leak", "testLeakCount"},
+    {"hip.leak", "testLeakSwitch"},
     {"spec.sample", "testSpecSample"},
     {"model.core", "testDflashPolicy"},
     {"hip.mem", "testLocalMemTaken"},

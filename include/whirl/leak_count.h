@@ -20,12 +20,22 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string>
 
 namespace whirl::hip::leakcount {
 
 // set once at static initialization from WHIRL_LEAK_CHECK; tests may turn it on (testEnable)
 extern bool g_on;
+
+// arch025-env61: the WHIRL_LEAK_CHECK rule of g_on's static initializer. leak_count.cpp passes platform::env::get (the
+// _dupenv_s read of the CRT's narrow table; before env61 a std::getenv of the same table, same bytes). `get` is called
+// once, with "WHIRL_LEAK_CHECK"; on when the variable is set, not empty and not "0" ("00", " 0", "false" are on).
+template <class Get>
+bool switchFrom(Get&& get) {
+    const std::optional<std::string> v = get("WHIRL_LEAK_CHECK");
+    return v.has_value() && !v->empty() && *v != "0";
+}
 
 struct Snapshot {
     std::int64_t dev = 0, host = 0, streams = 0, events = 0;  // live counts
