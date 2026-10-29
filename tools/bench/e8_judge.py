@@ -28,8 +28,13 @@ that loses an expected cell fails and writes no noise table; a blank noise colum
                                     [--host-a ..] [--host-b ..]
   python -I tools/bench/e8_judge.py --dir D --base base --new aa --aa --expect-cells cells.tsv --write-noise noise.tsv
   python -I tools/bench/e8_judge.py --selftest
+S0d (S0c review act-on 3, probes Q1-Q4): a row that names no cell (blank / malformed engine label) fails the whole run; a
+(tag, round) seen twice (a retry appended), a row without rN in its note, a value <= 0 or not a number, a note saying
+TIMEOUT / FAIL are bad rounds of their cell; a cell with fewer than MIN_ROUNDS (6, C5) pairs is NOT ACCEPTED. A crash of
+the judge itself is exit 5 (never 1, which means "not accepted").
 Exit 0 every expected GPU cell PASS (or a clean --aa), 1 a cell NOT ACCEPTED / SLOWER / MISSING / host work differs,
-3 EXTEND needed, 2 usage (also: no expected-cell list), 4 a blank noise column in --aa-noise.
+3 EXTEND needed, 2 usage (also: no expected-cell list, a bad expected-cell line), 4 a blank noise column in --aa-noise,
+5 the judge crashed (traceback printed).
 """
 import csv, glob, json, os, re, sys
 from collections import defaultdict
@@ -38,6 +43,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import abjudge  # noqa: E402
 
 MAX_ROUNDS = 10
+MIN_ROUNDS = 6   # S0d (S0c review Q3): C5 starts at 6 rounds; fewer pairs is never accepted
 
 
 def arg(n, d=None):
@@ -45,12 +51,13 @@ def arg(n, d=None):
     return a[a.index(n) + 1] if n in a else d
 
 
-def load_gpu(d, base, new, errs=None, bad=None):
+def load_gpu(d, base, new, errs=None, bad=None, orphans=None):
     """per cell {tag: {round: value}}. S0c (S0b review act-on 3; llama-bench exit(1) on any failed repetition): a row whose
     note says ERROR, or whose metric column is empty in a file that has the column (timeout / silent failure), is a BAD
     ROUND of its cell: bad[cell][tag][round] = why (evaluate() rejects a cell with any bad round, never judges the rest)."""
     cells = defaultdict(lambda: {base: {}, new: {}, "t": {base: {}, new: {}}})
     pend = []
+    dup_seen = set()
     for path in sorted(glob.glob(os.path.join(d, "ab_*_*_*.tsv"))):
         gpu, model = os.path.basename(path)[:-4].split("_")[1:3]
         rd = csv.DictReader(open(path, encoding="utf-8"), delimiter="\t")
@@ -62,28 +69,41 @@ def load_gpu(d, base, new, errs=None, bad=None):
                 k = (os.path.basename(path), r.get("engine", "?"))
                 errs[k] = errs.get(k, 0) + 1
             m = re.match(r"r(\d+)", note)
-            rnd = int(m.group(1)) if m else 0
+            rnd = int(m.group(1)) if m else None
             parts = (r.get("engine") or "").split("-")
-            if len(parts) < 3: continue
+            if len(parts) < 3:   # S0d (Q1): a row that names no cell cannot be attributed: the whole run fails
+                if orphans is not None: orphans.append(f"{os.path.basename(path)}: engine label {r.get('engine')!r}, note {note!r}")
+                continue
             tag, mode = parts[1], parts[-1]
             if tag not in (base, new): continue
             for met, col in cols:
                 key = (gpu, model, r.get("test", ""), r.get("target", ""), met, mode)
                 v = (r.get(col) or "").strip()
+                if rnd is None:   # S0d (Q3): no rN in the note - rounds would collapse into one
+                    pend.append((key, tag, "?", "no round number in the note")); continue
                 if err or not v:
                     pend.append((key, tag, rnd, "ERROR" if err else "blank " + col))
                     continue
+                try:
+                    fv = float(v)
+                except ValueError:
+                    fv = None
+                if fv is None or not fv > 0 or re.search(r"TIMEOUT|FAIL", note, re.I):   # S0d (Q4)
+                    pend.append((key, tag, rnd, f"value {v!r} / note {note.strip()!r}")); continue
                 c = cells[key]
-                c[tag][rnd] = float(v)
+                if rnd in c[tag] or rnd in (bad or {}).get(key, {}).get(tag, {}) or (key, tag, rnd) in dup_seen:   # S0d (Q2)
+                    pend.append((key, tag, rnd, "duplicate round (a retry appended)")); continue
+                dup_seen.add((key, tag, rnd))
+                c[tag][rnd] = fv
                 if r.get("time"):
                     c["t"][tag][rnd] = min(c["t"][tag].get(rnd, r["time"]), r["time"])
     for key, tag, rnd, why in pend:
         # a blank metric belongs to a cell that has values somewhere (a test without prefill has no pp cell);
         # an ERROR row always marks its cells
-        if why == "ERROR" or key in cells:
-            cells[key][tag].pop(rnd, None)
-            if bad is not None:
-                bad.setdefault(key, {}).setdefault(tag, {})[rnd] = why
+        if why.startswith("blank") and key not in cells: continue
+        cells[key][tag].pop(rnd, None)
+        if bad is not None:
+            bad.setdefault(key, {}).setdefault(tag, {})[rnd] = why
     return cells
 
 
@@ -168,13 +188,15 @@ def evaluate(d, base, new, noise_p=None, cells_p=None, aa=False, write_noise=Non
         return [f"e8 judge: NOISE TABLE BLANK in {noise_p}: {', '.join(' '.join(k) for k in nblank)} (the A/A run lost these "
                 f"cells: re-run G-AA; no band is invented)"], 4
     expect = load_cells(cells_p)
-    errs, badr = {}, {}
-    cells = load_gpu(d, base, new, errs, badr)
+    errs, badr, orphans = {}, {}, []
+    cells = load_gpu(d, base, new, errs, badr, orphans)
     for k in sorted(expect - set(cells)):
         cells[k]   # an expected cell without rows: MISSING (defaultdict creates the empty cell)
     out, bad, ext, nrows = [], 0, 0, []
     for (f, eng), n in sorted(errs.items()):
         out.append(f"ERROR rows: {f} {eng}: {n} (the cell is not accepted)")
+    for o_ in orphans:   # S0d (S0c review Q1)
+        out.append(f"ROW WITHOUT A CELL: {o_} (the run is not accepted)")
     for k in sorted(cells):
         c = cells[k]
         first = {r: abjudge.first_of(c["t"][base], c["t"][new], r) for r in set(c[base]) | set(c[new])}
@@ -189,7 +211,7 @@ def evaluate(d, base, new, noise_p=None, cells_p=None, aa=False, write_noise=Non
         why = None
         if nb:
             why = (f"NOT ACCEPTED ({nb} ERROR / blank rounds: "
-                   + "; ".join(f"{t} r{','.join(map(str, sorted(v)))} {sorted(set(v.values()))[0]}" for t, v in sorted(badr[k].items()))
+                   + "; ".join(f"{t} r{','.join(map(str, sorted(v, key=str)))} {sorted(set(v.values()))[0]}" for t, v in sorted(badr[k].items()))
                    + ")")
         elif e8 == "MISSING":   # S0b: no pairs (no rows, or one side only) is a failure, never a pass
             why = (f"MISSING (base rounds {len(c[base])}, new rounds {len(c[new])}"
@@ -198,6 +220,8 @@ def evaluate(d, base, new, noise_p=None, cells_p=None, aa=False, write_noise=Non
             why = f"NOT ACCEPTED (unpaired rounds {unp})"
         elif abs(nbf - (len(pairs) - nbf)) > 1:
             why = f"NOT ACCEPTED (order not balanced: base-first {nbf}, new-first {len(pairs) - nbf})"
+        elif len(pairs) < MIN_ROUNDS:   # S0d (S0c review Q3)
+            why = f"NOT ACCEPTED ({len(pairs)} pairs < {MIN_ROUNDS}: C5 starts at {MIN_ROUNDS} rounds)"
         elif len(pairs) > MAX_ROUNDS:
             why = f"NOT ACCEPTED ({len(pairs)} pairs > {MAX_ROUNDS}: rounds were extended past C5)"
         elif noise_p and k in expect and k not in noise and not aa:
@@ -223,6 +247,9 @@ def evaluate(d, base, new, noise_p=None, cells_p=None, aa=False, write_noise=Non
     if host_a and host_b:
         hl, hbad = host(host_a.split(","), host_b.split(","))
     lines = out + hl
+    if orphans:   # S0d (S0c review Q1): a row no cell owns makes the whole run fail (A/A writes no noise table)
+        return lines + [f"e8 judge: FAIL ({len(orphans)} rows name no cell: a crashed / malformed runner row is never a pass"
+                        + ("; no noise table written" if aa else "") + ")"], 1
     if aa:
         if bad or hbad:   # S0c: an A/A that lost an expected cell writes no noise table (it would only hide the loss)
             return lines + [f"e8 judge: A/A FAIL ({bad} expected cells without a clean A/A, {hbad} host cells with different work; "
@@ -332,11 +359,55 @@ def selftest():
             lines, rc = [f"EXCEPTION {type(ex).__name__}: {ex}"], -1
         txt = "\n".join(lines)
         cases.append((nm, rc == want_rc and re.search(want_re, txt, re.M) is not None))
+    # S0d (S0c review act-on 3; reviewer probes scratch/a25_engine/s0c_review/runner/r_e8.py Q1-Q4)
+    clean = rounds("precise", 40.0, 40.0)
+    q1 = tsv("q1", clean + [("", "r7 ERROR", "chat", "512", "", "2026-10-29T10:07:00")])
+    q2 = tsv("q2", clean + [("r9700-fin-precise", "r3", "chat", "512", "48.0", "2026-10-29T11:03:00")])
+    q3 = tsv("q3", [(e, "", t, g, v, ti) for (e, _n, t, g, v, ti) in clean])
+    q3b = tsv("q3b", [x for x in clean if not re.match(r"r[5-6]\b", x[1])])
+    q4r = list(clean); q4r[3] = (q4r[3][0], "r2 TIMEOUT", q4r[3][2], q4r[3][3], "0", q4r[3][5])
+    q4 = tsv("q4", q4r)
+    for nm, d, want_rc, want_re in (
+            ("Q1 an ERROR row with a blank engine label + 6 clean pairs -> FAIL rc 1", q1, 1, r"^e8 judge: FAIL \(1 rows name no cell"),
+            ("Q2 a duplicate r3 of the new build (retry appended) -> NOT ACCEPTED rc 1", q2, 1, r"precise band .*NOT ACCEPTED \(1 ERROR / blank rounds: fin r3 duplicate round"),
+            ("Q3 notes without rN -> NOT ACCEPTED rc 1", q3, 1, r"precise band .*NOT ACCEPTED .*no round number"),
+            ("Q3b 4 clean pairs (< 6, C5) -> NOT ACCEPTED rc 1", q3b, 1, r"precise band .*NOT ACCEPTED \(4 pairs < 6"),
+            ("Q4 a TIMEOUT row with value 0 -> NOT ACCEPTED rc 1 (no ZeroDivisionError)", q4, 1, r"precise band .*NOT ACCEPTED \(1 ERROR / blank rounds")):
+        try:
+            lines, rc = evaluate(d, "base", "fin", None, one_p)
+        except BaseException as ex:
+            lines, rc = [f"EXCEPTION {type(ex).__name__}: {ex}"], -1
+        txt = "\n".join(lines)
+        cases.append((nm, rc == want_rc and re.search(want_re, txt, re.M) is not None))
+    # a crash of the judge is exit 5, a bad expected-cell line is a usage error 2 (never 1 = "not accepted")
+    import subprocess
+    badc = os.path.join(work, "cells_bad.tsv"); open(badc, "w", encoding="utf-8").write("r9700\tswift\n")
+    r = subprocess.run([sys.executable, "-I", os.path.abspath(__file__), "--dir", d_ok, "--new", "fin", "--expect-cells", badc],
+                       capture_output=True, text=True)
+    cases.append(("a bad expected-cell line -> usage exit 2", r.returncode == 2 and "USAGE ERROR" in r.stdout))
+    r = subprocess.run([sys.executable, "-I", "-c", "import sys; sys.path.insert(0, sys.argv[1]); import e8_judge as J; "
+                        "J.evaluate = lambda *a, **k: 1 / 0; sys.argv = ['e8_judge.py', '--dir', 'x', '--new', 'fin']; sys.exit(J.run_main())",
+                        os.path.dirname(os.path.abspath(__file__))], capture_output=True, text=True)
+    cases.append(("a crash inside the judge -> exit 5 with CRASH, not 1", r.returncode == 5 and "e8 judge: CRASH" in r.stdout))
     ok = all(g for _, g in cases)
     for n, g in cases: print(f"  {'ok  ' if g else 'FAIL'} {n}")
     print(f"e8 judge selftest: {sum(g for _, g in cases)}/{len(cases)} as expected")
     return 0 if ok else 1
 
 
+def run_main():
+    """S0d (S0c review act-on 3 Q4): exit 1 means 'not accepted' only; a usage error is 2, a crash of the judge is 5"""
+    try:
+        return main()
+    except SystemExit as ex:
+        if isinstance(ex.code, int) or ex.code is None: return ex.code or 0
+        print(ex.code); print("e8 judge: USAGE ERROR"); return 2
+    except BaseException:
+        import traceback
+        traceback.print_exc()
+        print("e8 judge: CRASH (exit 5: the judge failed, not the cells; nothing was judged)")
+        return 5
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(run_main())

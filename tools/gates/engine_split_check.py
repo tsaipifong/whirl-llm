@@ -32,7 +32,10 @@ UNPINNED = {"new_funcs", "new_data"}   # pinned separately: key -> module, rows 
 TOOLS = {"engine_split_census.py": "gates/engine_split_census.py", "engine_split_graph.py": "gates/engine_split_graph.py",
          "engine_split_check.py": "gates/engine_split_check.py", "engine_split_selftest.py": "gates/engine_split_selftest.py",
          "engine_split_inline_c1ca7ce.tsv": "gates/engine_split_inline_c1ca7ce.tsv", "member_order_check.py": "gates/member_order_check.py",
-         "revtext.py": "impact/revtext.py", "e8_judge.py": "bench/e8_judge.py", "abjudge.py": "bench/abjudge.py"}
+         "revtext.py": "impact/revtext.py", "e8_judge.py": "bench/e8_judge.py", "abjudge.py": "bench/abjudge.py",
+         # S0d: the AST census (the member writes) and the P4 judges of srv_mt_* (S0c review consider 5)
+         "engine_split_ast.py": "gates/engine_split_ast.py", "mt_equiv_compare.py": "gates/mt_equiv_compare.py",
+         "mt_equiv_rules.py": "gates/mt_equiv_rules.py", "mt_equiv_ignore_server.txt": "gates/mt_equiv_ignore_server.txt"}
 BASE_BRANCHES = ["arch025-engine", "origin/arch025-engine"]   # S0c: the range is merge-base(HEAD, first that exists)..
 REL_PIN, REL_CUT, REL_REV = "tests/pins/engine_cut_arch.sha256", "tools/gates/engine_cut.json", "tests/pins/engine_cut_reviews.tsv"
 
@@ -212,6 +215,9 @@ def pin_check(cutp, pinp, reviews=REVIEWS, base="auto"):
                                    f"rows may only be deleted)")
                     elif bs[k] != m:
                         bad.append(f"engine cut pin: PLANNED ROW MOVED {sec} {k} ({bs[k]} -> {m} against the base cut)")
+        else:   # S0d (S0c review consider 3): a base without the cut file cannot judge the planned rows - fail closed
+            bad.append(f"engine cut pin: BASE CUT MISSING (base {base['ref'][:24]} has no {REL_CUT}: the planned-row and ledger "
+                       f"checks against the base cannot run; use a base that contains the cut, e.g. --base <merge-base with arch025-engine>)")
         if changed:
             bp, cp = _pinkeys(base["pin"]), _pinkeys(ptext)
             diff = sorted(k for k in set(bp) | set(cp) if bp.get(k) != cp.get(k))

@@ -33,6 +33,9 @@ bases = [sys.argv[i + 1] for i, x in enumerate(sys.argv) if x == "--base"] or [R
 WORK = arg("--work", os.path.join(REPO, "build", "engine_split_selftest"))
 JOBS = int(arg("--jobs", "8"))
 LEDGER = os.path.join(WORK, "ledger", "engine_cut_reviews.tsv")   # S0c: synthetic ledger (setup_ledger)
+# S0d: every mutant's census shares one AST cache (keyed by the content of each TU's files; a mutant re-parses only the
+# TUs whose files it edits)
+os.environ.setdefault("WHIRL_ENGINE_AST_CACHE", os.path.join(REPO, "build", "engine_split_ast_cache"))
 BASESNAP = os.path.join(WORK, "ledger", "base")                     # S0c: base snapshot for --base-dir
 
 EMIT = "bool Engine::emit(Slot& sl, std::uint32_t t) {\n"
@@ -57,6 +60,23 @@ def ow(fd):   # write to another module's data, not in outside_writers
 
 def sw(fd):   # write to a core.shared member by an unlisted writer
     return r"^== writes to core\.shared not in shared_writers '\w+' \(\d+\): .*\b" + re.escape(fd) + r"\b"
+
+
+def _dc(code, m="stop_"):   # S0d (S0c review runner shapes): a statement in dropCache that must be a write of m
+    return [(EP, DROPC, DROPC + "    " + code + "\n")], None, [], ow("dropCache:" + m)
+
+
+def _rl(code, m="gov_json_"):
+    return [(EC, RUNL, RUNL + "    " + code + "\n")], None, [], ow("runLoop:" + m)
+
+
+def _acc(decl, use, mod="server.governor", name="holdRef", m="gov_hold_"):
+    return ([(EH, HOLD, HOLD + "\n    " + decl), (EC, RUNL, RUNL + "    " + use + "\n")],
+            lambda c: c["new_funcs"].update({name: mod}), ["--no-pin"], ow("runLoop:" + m))
+
+
+def _okc(code):   # a read control in runLoop: the check must pass
+    return [(EC, RUNL, RUNL + "    " + code + "\n")], None, [], r"(?#OK)^engine split check: ok"
 
 
 def unas(e):
@@ -253,6 +273,59 @@ MUT = [
     ("P10", "an old ledger row edited (its review column rewritten)", [], None, ["@LEDGEREDIT"], r"^engine cut pin: LEDGER EDITED"),
     ("P11", "e8_judge.py edited (S0c: in the hashed tool list)", [("TOOL:e8_judge.py", "APPEND", "\n# a harmless-looking edit\n")], None, [], r"^engine cut pin: MISMATCH tools e8_judge\.py"),
     ("P11b", "revtext.py edited (S0c: in the hashed tool list)", [("TOOL:revtext.py", "APPEND", "\n# a harmless-looking edit\n")], None, [], r"^engine cut pin: MISMATCH tools revtext\.py"),
+    # --- S0c review (progress/arch025-engine.S0c.REVIEW.md act-on 1, consider 2; reviewer runner
+    # scratch/a25_engine/s0c_review/runner/r_mut.py): write shapes only declared types decide (S0d: the AST census) ---
+    ("R1", "alias-typedef reference: using BR = bool&; BR q = stop_; q = true", *_dc("{ using BR = bool&; BR q = stop_; q = true; }")),
+    ("R2", "std::reference_wrapper<bool> q{stop_}; q.get() = true", *_dc("{ std::reference_wrapper<bool> q{stop_}; q.get() = true; }")),
+    ("R3", "std::reference_wrapper<bool> q = stop_; q.get() = true", *_dc("{ std::reference_wrapper<bool> q = stop_; q.get() = true; }")),
+    ("R4", "conditional lvalue: (sl.job ? stop_ : stop_) = true", *_dc("(sl.job ? stop_ : stop_) = true;")),
+    ("R5", "comma lvalue: (void(0), stop_) = true", *_dc("(void(0), stop_) = true;")),
+    ("R6", "immediately-invoked lambda: [](bool& b) { b = true; }(stop_)", *_dc("[](bool& b) { b = true; }(stop_);")),
+    ("R7", "parenthesized callee: auto set = [](bool& b) { b = true; }; (set)(stop_)", *_dc("{ auto set = [](bool& b) { b = true; }; (set)(stop_); }")),
+    ("R8", "local lambda returning a reference: auto r = [this]() -> bool& { return stop_; }; r() = true", *_dc("{ auto r = [this]() -> bool& { return stop_; }; r() = true; }")),
+    ("R9", "decltype((stop_)) q = stop_; q = true", *_dc("{ decltype((stop_)) q = stop_; q = true; }")),
+    ("R10", "aggregate with a reference member: struct H { bool& r; }; H h{stop_}; h.r = true", *_dc("{ struct H { bool& r; }; H h{stop_}; h.r = true; }")),
+    ("R11", "move-from through a cast: auto q = static_cast<std::deque<Job*>&&>(queue_)", *_dc("{ auto q = static_cast<std::deque<Job*>&&>(queue_); (void)q; }", "queue_")),
+    ("R12", "span view copy-init: std::span<char> v = gov_json_; v[0] = 'x'", *_rl("if (!gov_json_.empty()) { std::span<char> v = gov_json_; v[0] = 'x'; }")),
+    ("R13", "span view brace-init: std::span<char> v{gov_json_}; v[0] = 'x'", *_rl("if (!gov_json_.empty()) { std::span<char> v{gov_json_}; v[0] = 'x'; }")),
+    ("R14", "control: pointer typedef, address taken: using P = bool*; P p = &stop_; *p = true", *_dc("{ using P = bool*; P p = &stop_; *p = true; }")),
+    ("R15", "range-for with a reference typedef: using JR = Job*&; for (JR j : queue_) j = nullptr", *_dc("{ using JR = Job*&; for (JR j : queue_) j = nullptr; }", "queue_")),
+    ("R16", "accessor returning reference_wrapper: holdRef().get() = true",
+     *_acc("std::reference_wrapper<bool> holdRef() { return gov_hold_; }", "holdRef().get() = true;")),
+    ("R17", "accessor returning std::add_pointer_t<bool>: *holdPtr() = true", *_acc("std::add_pointer_t<bool> holdPtr() { return &gov_hold_; }", "*holdPtr() = true;", name="holdPtr")),
+    ("R18", "control: vram_probe_ = nullptr in runLoop (core.shared write)", [(EC, RUNL, RUNL + "    vram_probe_ = nullptr;\n")], None, [], sw("runLoop:vram_probe_")),
+    ("R19", "std::function member: non-const target<T>() handed out", [(EC, RUNL, RUNL + "    (void)vram_probe_.target<int>();\n")], None, [], sw("runLoop:vram_probe_")),
+    ("R20", "std::function member: vram_probe_.swap(f)", [(EC, RUNL, RUNL + "    { std::function<wddmwatch::Sample()> f; vram_probe_.swap(f); }\n")], None, [], sw("runLoop:vram_probe_")),
+    # read controls (S0c review consider 2): a write finding here is a FALSE POSITIVE
+    ("F1", "read: std::find(queue_.begin(), queue_.end(), nullptr) != queue_.end() (the review's F1 with whirl::MutexLock; as written it does not compile, F1x)",
+     *_okc("{ whirl::MutexLock lk(q_mutex_); (void)(std::find(queue_.begin(), queue_.end(), nullptr) != queue_.end()); }")),
+    ("F1x", "the review's F1 as written (std::lock_guard<std::mutex> on a whirl::Mutex) does not compile: the AST census fails closed",
+     [(EC, RUNL, RUNL + "    { std::lock_guard<std::mutex> lk(q_mutex_); (void)(std::find(queue_.begin(), queue_.end(), nullptr) != queue_.end()); }\n")],
+     None, [], fnd("clang errors in src/server/engine.cpp")),
+    ("F2", "read: std::format(\"{}\", gov_last_) into a local", *_okc("{ const std::string s = std::format(\"{}\", gov_last_); (void)s; }")),
+    ("F3", "read: std::size(gov_last_)", *_okc("{ const auto n = std::size(gov_last_); (void)n; }")),
+    ("F4", "read: throw std::runtime_error(gov_last_) under a false condition", *_okc("if (gov_last_ == \"never\") throw std::runtime_error(gov_last_);")),
+    ("F5", "read: std::any_of over slots_.begin()/end()", *_okc("(void)std::any_of(slots_.begin(), slots_.end(), [](const Slot& s) { return s.job != nullptr; });")),
+    ("F6", "read: const auto& r = gov_last_; copy", *_okc("{ const auto& r = gov_last_; std::string c = r; (void)c; }")),
+    ("F7", "read: std::string_view v{gov_last_}", *_okc("{ std::string_view v{gov_last_}; (void)v; }")),
+    ("F8", "read: lambda init-capture copy [h = gov_hold_]", *_okc("{ auto f = [h = gov_hold_] { return h; }; (void)f(); }")),
+    ("F9", "read: by-value auto accessor const auto h = holdVal()",
+     [(EH, HOLD, HOLD + "\n    auto holdVal() { return gov_hold_; }"), (EC, RUNL, RUNL + "    { const auto h = holdVal(); (void)h; }\n")],
+     lambda c: c["new_funcs"].update({"holdVal": GV}), ["--no-pin"], r"(?#OK)^engine split check: ok"),
+    # S0d's own probes
+    ("D1", "S0d: a new std::function member (governor data) called in runLoop, not in callable_reads: a write",
+     [(EH, HOLD, HOLD + "\n    std::function<void()> on_gov_;"), (EC, RUNL, RUNL + "    if (on_gov_) on_gov_();\n")],
+     lambda c: c["modules"][GV]["data"].append("on_gov_"), ["--no-pin"], ow("runLoop:on_gov_")),
+    ("D2", "S0d control: vram_probe_ (in callable_reads) called in govTick stays a read",
+     [(EG, GOVT, GOVT + "    if (vram_probe_) (void)vram_probe_();\n")], None, [], r"(?#OK)^engine split check: ok"),
+    ("D3", "S0d: an accessor's pointer kept in a variable and written: auto p = holdPtr(); *p = true",
+     *_acc("bool* holdPtr() { return &gov_hold_; }", "{ auto p = holdPtr(); *p = true; }", name="holdPtr")),
+    ("D4", "S0d: a holder in a member initializer (the S4 dc_{bst_, m_, opt_} shape): std::reference_wrapper<bool> hd_{stop_}",
+     [(EH, HOLD, HOLD + "\n    std::reference_wrapper<bool> hd_{stop_};")], lambda c: c["modules"][GV]["data"].append("hd_"), ["--no-pin"], ow("Engine:stop_")),
+    ("D4b", "S0d: the same binding in a declarator after a nested struct body (struct Hd { bool& r; } hd_{stop_}; the text census has no "
+     "entry for it): the AST write outside every entry is a finding",
+     [(EH, HOLD, HOLD + "\n    struct Hd { bool& r; } hd_{stop_};")], lambda c: c["modules"][GV]["data"].append("hd_"), ["--no-pin"],
+     fnd("AST write outside every census entry: server/engine.h:")),
 ]
 # S0c: tools a TOOL: edit may name -> path under tools/ (a copy of tools/gates, bench, impact is made for the mutant)
 TOOL_PATHS = {"e8_judge.py": "bench/e8_judge.py", "abjudge.py": "bench/abjudge.py", "revtext.py": "impact/revtext.py"}
@@ -280,7 +353,7 @@ def one(item):
         tools = os.path.join(d, "tools", "gates")
         os.makedirs(tools)
         for f in os.listdir(HERE):
-            if f.startswith(("engine_split_", "engine_cut", "member_order")):
+            if f.startswith(("engine_split_", "engine_cut", "member_order", "mt_equiv_")):
                 shutil.copy2(os.path.join(HERE, f), tools)
         for rp in TOOL_PATHS.values():   # S0c: bench / impact tools are hashed too
             src = os.path.join(os.path.dirname(HERE), rp)
@@ -375,7 +448,7 @@ def git_cases(sha):
     try:
         import engine_split_check as esc
     except Exception as ex:
-        return [(f"G{i}", "CRASH", f"G{i} import engine_split_check: {ex} -> CRASH") for i in range(1, 6)]
+        return [(f"G{i}", "CRASH", f"G{i} import engine_split_check: {ex} -> CRASH") for i in range(1, 7)]
     d = os.path.join(WORK, "G"); os.makedirs(d, exist_ok=True)
     pin = os.path.join(d, "pin.sha256")
     open(pin, "w", encoding="utf-8", newline="\n").write(open(PIN, encoding="utf-8").read().replace("\r\n", "\n") + "# changed in the range\n")
@@ -396,7 +469,9 @@ def git_cases(sha):
             ("G3", "control: git, the row lands after the pin commit -> ok", mk(), None),
             ("G4", "no base (no merge-base): today's 3-column rows are not valid reviews -> REVIEW ROW INVALID", None, r"REVIEW ROW INVALID"),
             ("G5", "empty range (merge-base == HEAD on the integration branch), only a '<sha> x x' row -> REVIEW ROW INVALID", "empty",
-             r"REVIEW ROW INVALID .*needs 4 non-empty columns")):
+             r"REVIEW ROW INVALID .*needs 4 non-empty columns"),
+            ("G6", "S0d (S0c review consider 3): a base without the cut file (an integration branch without arch025-engine) fails closed",
+             dict(mk(), cut=None), r"BASE CUT MISSING")):
         try:
             if gid == "G5":
                 led5 = os.path.join(d, "reviews_xx.tsv")

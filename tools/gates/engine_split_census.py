@@ -141,13 +141,15 @@ for dp, dn, fn in os.walk(os.path.join(ROOT, "include")):
 data, funcs, types, statics = [], [], [], []   # data: (name, line, access, decl, class, file)
 decls = []   # S0b: (class, member, file, line, start, end) of every data member declaration (revtext compares them)
 bodies = {}  # key -> (file, line, text, def)
+branges = {}  # S0d: key -> [(file, start, end)] character offsets of the body text (the AST census maps clang positions)
 class_files = {}
 inits = {}   # class -> [(file, line, initializer text)]  (A2: in-class member initializers)
 
 
-def add_body(key, f, ln, txt, dfn):
+def add_body(key, f, ln, txt, dfn, rng=None):
     while key in bodies: key += "#"
     bodies[key] = (f, ln, txt, dfn)
+    branges[key] = rng or []
     return key
 
 
@@ -169,14 +171,14 @@ def parse_class(cname, rel, hs, a):
                 tn = re.findall(r"\w+", hd)[1]
                 types.append((tn, lineno(hs, stmt0), cname))
                 if not hd.startswith("enum"):   # A2: the nested type's inline bodies are an entry type:X
-                    add_body("type:" + tn, rel, lineno(hs, stmt0), hs[stmt0:j + 1], f"struct {cname}::{tn} (in-class)")
+                    add_body("type:" + tn, rel, lineno(hs, stmt0), hs[stmt0:j + 1], f"struct {cname}::{tn} (in-class)", [(rel, stmt0, j + 1)])
                 k = hs.index(";", j); i = k + 1; stmt0 = i; continue
             hd = re.sub(r"\bdecltype\s*\(\s*auto\s*\)", "decltype_auto", hd)   # S0c (N11): a return type, not a call
             if "(" in hd.split("=")[0] and re.search(r"\w\s*$", hd.split("(")[0]) is not None:
                 pre = hd.split("(")[0]
                 nm = re.search(r"(operator\s*\S+|~?\w+)\s*$", pre).group(1)
                 funcs.append((nm, lineno(hs, stmt0), access, re.sub(r"\s+", " ", hd)[:90], cname))
-                add_body(resolve(cname, nm), rel, lineno(hs, stmt0), hs[stmt0:j + 1], f"{cname}::{nm} (inline)")
+                add_body(resolve(cname, nm), rel, lineno(hs, stmt0), hs[stmt0:j + 1], f"{cname}::{nm} (inline)", [(rel, stmt0, j + 1)])
                 i = j + 1; stmt0 = i; continue
             i = j + 1; continue
         if c == ";":
@@ -231,7 +233,7 @@ def parse_class(cname, rel, hs, a):
                 if mb: ini.append(mb.group(1))
             ini = [x for x in ini if re.search(r"[A-Za-z_]", x)]   # literal initializers use nothing
             if any(x.strip() for x in ini):
-                inits.setdefault(cname, []).append((rel, ln, " ; ".join(ini)))
+                inits.setdefault(cname, []).append((rel, ln, " ; ".join(ini), span))
             continue
         if c == ":" and hs[stmt0:i].strip() in ("public", "private", "protected"):
             access = hs[stmt0:i].strip(); stmt0 = i + 1
@@ -298,7 +300,7 @@ for rel, (raw, s) in sorted(texts.items()):
             while k < len(s) and s[k] not in "{;": k += 1
             if k >= len(s) or s[k] == ";": continue
             e = match_close(s, k, "{", "}")
-            key = add_body("type:" + m.group(5), rel, lineno(s, m.start()), s[m.start():e + 1], f"struct {owner}::{m.group(5)}")
+            key = add_body("type:" + m.group(5), rel, lineno(s, m.start()), s[m.start():e + 1], f"struct {owner}::{m.group(5)}", [(rel, m.start(), e + 1)])
             files_with_defs.setdefault(rel, []).append(key)
             continue
         owner, sub, nm = m.group(1), m.group(2), m.group(3)
@@ -336,14 +338,14 @@ for rel, (raw, s) in sorted(texts.items()):
         k = j + mm.end() - 1
         e = match_close(s, k, "{", "}")
         key = (sub + "::" + nm) if sub else resolve(owner, nm)   # Engine::Cycle::f -> nested type method (as v2)
-        key = add_body(key, rel, lineno(s, m.start()), s[m.start():e + 1], f"{owner}::{(sub + '::') if sub else ''}{nm}")
+        key = add_body(key, rel, lineno(s, m.start()), s[m.start():e + 1], f"{owner}::{(sub + '::') if sub else ''}{nm}", [(rel, m.start(), e + 1)])
         files_with_defs.setdefault(rel, []).append(key)
     # A2: namespace-level struct / class definitions with a body in an engine file (helper types with inline methods)
     if is_eng:
         for m in re.finditer(r"(?<![\w:])(?:struct|class)\s+(\w+)\b(?!\s*::)(?:\s+final)?\s*(?::(?!:)[^;{]*)?\{", s):
             if cd[m.start()] != 0 or m.group(1) in CLASSES: continue
             e = match_close(s, m.end() - 1, "{", "}")
-            key = add_body("type:" + m.group(1), rel, lineno(s, m.start()), s[m.start():e + 1], f"struct {m.group(1)} (namespace)")
+            key = add_body("type:" + m.group(1), rel, lineno(s, m.start()), s[m.start():e + 1], f"struct {m.group(1)} (namespace)", [(rel, m.start(), e + 1)])
             files_with_defs.setdefault(rel, []).append(key)
             types.append((m.group(1), lineno(s, m.start()), "-"))
     # free functions: in engine files every namespace-level definition; elsewhere only the names the cut lists
@@ -362,13 +364,13 @@ for rel, (raw, s) in sorted(texts.items()):
         if not mm: continue
         k = j + mm.end() - 1
         e = match_close(s, k, "{", "}")
-        key = add_body(nm, rel, lineno(s, m.start()), s[m.start():e + 1], f"free {nm}")
+        key = add_body(nm, rel, lineno(s, m.start()), s[m.start():e + 1], f"free {nm}", [(rel, m.start(), e + 1)])
         files_with_defs.setdefault(rel, []).append(key)
 
 # A2: in-class member initializers are part of the class's constructor entry
 for cname, lst in sorted(inits.items()):
-    add_body(resolve(cname, cname), lst[0][0], lst[0][1], "{ " + " ;\n".join(t for _, _, t in lst) + " }",
-             f"{cname}::{cname} (in-class initializers)")
+    add_body(resolve(cname, cname), lst[0][0], lst[0][1], "{ " + " ;\n".join(t for _, _, t, _ in lst) + " }",
+             f"{cname}::{cname} (in-class initializers)", [(r, a0, a1) for r, _, _, (a0, a1) in lst])
 
 # A3: no component holds Engine (DESIGN 2.1 rule 3) - not even as a listed holder
 for h, c in sorted(HOLDERS.items()):
@@ -391,6 +393,7 @@ for k in list(bodies):
         nk = "Engine." + k.split("#")[0]
         while nk in bodies: nk += "#"
         bodies[nk] = bodies.pop(k)
+        branges[nk] = branges.pop(k)
 
 # macros anywhere that name a tracked data member or class
 dnames = sorted({d[0] for d in data})
@@ -807,6 +810,121 @@ def uses(key, txt):
 rows = {}
 for key, (f, ln, txt, dfn) in bodies.items():
     rows[key] = (f, ln) + uses(key, txt)
+
+# ---------------- S0d: the member writes come from the clang AST (tools/gates/engine_split_ast.py) ----------------
+# The text rules above stay as a cross-check (writes_text.tsv, ast_xcheck.tsv: every row where they disagree is listed
+# and counted on stdout); the writes the graph judges (funcs.tsv data_written, members.tsv writers) are the AST's.
+# A body the AST cannot see (no parsed TU reads its file, or its TU has clang errors) keeps text OR AST writes and is
+# a finding. Clang missing = crash (exit 1), never a silent fallback.
+HERE = os.path.dirname(os.path.abspath(__file__))
+text_wlog = list(wlog)
+wlog = []
+_tus = sorted({"src/" + f for f in set(files_with_defs) | engine_files if f.endswith(".cpp")})
+_cache = os.environ.get("WHIRL_ENGINE_AST_CACHE") or os.path.join(os.path.dirname(os.path.dirname(HERE)), "build", "engine_split_ast_cache")
+_callable = sorted(k for k in cut.get("callable_reads", {}) if not k.startswith("_"))
+_astout = os.path.join(OUT, "ast.json")
+import subprocess
+_cmd = [sys.executable, "-I", os.path.join(HERE, "engine_split_ast.py"), "--root", ROOT, "--out", _astout, "--cache", _cache,
+        "--classes", ",".join(sorted(CLASSES)), "--callable-ok", ",".join(_callable), "--jobs", os.environ.get("WHIRL_ENGINE_AST_JOBS", "6")]
+for _t in _tus: _cmd += ["--tu", _t]
+_r = subprocess.run(_cmd, capture_output=True, text=True)
+if _r.returncode != 0 or not os.path.exists(_astout):
+    print(_r.stdout + _r.stderr)
+    print("census3: AST census failed (engine_split_ast.py rc %d)" % _r.returncode)
+    sys.exit(1)
+_ast = json.load(open(_astout, encoding="utf-8"))
+_covered, _errfiles = set(), set()
+for _t in _ast["tus"]:
+    if _t["errors"] or _t["rc"]:
+        findings.append(f"clang errors in {_t['tu']} ({len(_t['errors'])}; the AST census of its bodies falls back to text OR AST): "
+                        + (_t["errors"][0][-160:] if _t["errors"] else f"rc {_t['rc']}"))
+        _errfiles.add(_t["tu"][4:])
+    else:
+        _covered.update(d[4:] for d in _t["deps"] if d.startswith("src/"))
+# per position: strong (non-template-pattern, non-dependent) verdicts win over weak ones
+_pos = {}
+for _t in _ast["tus"]:
+    for rel, idx, mem, cls, v, why, weak, rf in _t["hits"]:
+        e = _pos.setdefault((rel, idx, mem), {"strong": [], "weak": [], "rf": set()})
+        e["weak" if weak else "strong"].append((v, why))
+        if rf: e["rf"].add(rf)
+_calls = {}
+for _t in _ast["tus"]:
+    for rel, idx, callee, v, why, rf, weak in _t["calls"]:
+        e = _calls.setdefault((rel, idx, callee), {"strong": [], "weak": [], "rf": set()})
+        e["weak" if weak else "strong"].append((v, why))
+        if rf: e["rf"].add(rf)
+_fname = {}
+for _t in _ast["tus"]: _fname.update(_t["funcs"])
+
+
+def _verdict(e):
+    lst = e["strong"] or e["weak"]
+    w = [why for v, why in lst if v == "w"]
+    return (w[0] if w else None)
+
+
+# accessors: a function whose return hands out a member writes it; a call that does not only read the result writes
+# what the callee hands out (fixpoint: an accessor returning another accessor's result)
+_leaks = {}
+for (rel, idx, mem), e in _pos.items():
+    if _verdict(e):
+        for rf in e["rf"]: _leaks.setdefault(rf, set()).add(mem)
+for _ in range(20):
+    grew = False
+    for (rel, idx, callee), e in _calls.items():
+        if callee in _leaks and _verdict(e):
+            for rf in e["rf"]:
+                s0 = _leaks.setdefault(rf, set()); n0 = len(s0); s0 |= _leaks[callee]; grew |= len(s0) != n0
+    if not grew: break
+_byfile = {}
+for (rel, idx, mem), e in _pos.items(): _byfile.setdefault(rel, []).append((idx, mem, e))
+_cbyfile = {}
+for (rel, idx, callee), e in _calls.items(): _cbyfile.setdefault(rel, []).append((idx, callee, e))
+_inbody = set()
+xrows = []
+for key in list(rows):
+    f, ln, ud, uw_text, uf, ut = rows[key]
+    aw, why_of = [], {}
+    for rel, a, b in branges.get(key, []):
+        for idx, mem, e in _byfile.get(rel, []):
+            if a <= idx < b:
+                _inbody.add((rel, idx, mem))
+                w = _verdict(e)
+                if w and mem not in why_of: why_of[mem] = (w, idx, rel)
+        for idx, callee, e in _cbyfile.get(rel, []):
+            if a <= idx < b and callee in _leaks and _verdict(e):
+                for mem in sorted(_leaks[callee]):
+                    if mem not in why_of: why_of[mem] = (f"through {_fname.get(callee, callee)}(): {_verdict(e)}", idx, rel)
+    aw = sorted(why_of)
+    files_k = {r for r, _, _ in branges.get(key, [])}
+    blind = [r for r in files_k if r in _errfiles or r not in _covered]
+    if blind and (ud or uw_text):
+        if not any(r in _errfiles for r in blind):
+            findings.append(f"no AST coverage (no parsed TU reads {', '.join(sorted(blind))}): {key}; text census writes used")
+        aw = sorted(set(aw) | set(uw_text))
+        for m in uw_text:
+            why_of.setdefault(m, ("text census (no AST)", 0, f))
+    for m in sorted(set(aw) | set(uw_text)):
+        if (m in aw) != (m in uw_text):
+            tw = next((l.split("\t")[2] for l in text_wlog if l.split("\t")[0] == key and l.split("\t")[1] == m), "-")
+            xrows.append(f"{key}\t{m}\t{'w' if m in uw_text else 'r'}\t{'w' if m in aw else 'r'}\t{why_of.get(m, ('-',))[0]}\t{tw}")
+    for m in aw:
+        w, idx, rel = why_of[m]
+        rawt = texts.get(rel, ("", ""))[1]
+        wlog.append(f"{key}\t{m}\t{w}\t{' '.join(rawt[max(0, idx - 40):idx + 60].split()) if rawt else '-'}")
+    rows[key] = (f, ln, ud, aw, uf, ut)
+# a write the AST sees outside every census entry (a body the text census did not find) is a finding
+for (rel, idx, mem), e in sorted(_pos.items()):
+    if (rel, idx, mem) not in _inbody and _verdict(e) and not rel.startswith("include:"):
+        findings.append(f"AST write outside every census entry: {rel}:{texts.get(rel, ('', ''))[1].count(chr(10), 0, idx) + 1} {mem} ({_verdict(e)})")
+open(os.path.join(OUT, "writes_text.tsv"), "w", encoding="utf-8").write("entry\tmember\twhy\tcontext\n" + "\n".join(text_wlog) + "\n")
+open(os.path.join(OUT, "ast_xcheck.tsv"), "w", encoding="utf-8").write(
+    "entry\tmember\ttext\tast\tast_why\ttext_why\n" + "\n".join(xrows) + ("\n" if xrows else ""))
+print(f"AST census: {len(_ast['tus'])} TUs ({sum(1 for t in _ast['tus'] if t['errors'] or t['rc'])} with clang errors), "
+      f"{len(_pos)} member uses, {len(_leaks)} accessors handing out members; "
+      f"AST vs text census: {len(xrows)} rows disagree (ast_xcheck.tsv: text w / AST r {sum(1 for x in xrows if x.split(chr(9))[2] == 'w')}, "
+      f"text r / AST w {sum(1 for x in xrows if x.split(chr(9))[3] == 'w')})")
 # S0b (S0 review act-on 2): an unresolved call is a finding unless the cut lists it exactly (cut "unresolved_ok", which is
 # inside the cut pin); a listed entry that no longer occurs is a finding too (the list stays exact).
 _uok = [x for x in cut.get("unresolved_ok", []) if not x.startswith("_")]
