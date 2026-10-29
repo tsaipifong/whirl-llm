@@ -1,7 +1,7 @@
 # ARCH-1 8.5 isolation check of hip.leak (arch025-iso3): the GPU-side leak counter (src/hip/leak_count.cpp) built with its
 # own unit tests (tests/unit/hip_leak_tests.cpp). Format: tests/sampling/isolation.txt; read by cmake/iso.cmake and
 # tools/gates/iso_check.py.
-# declared dependencies: none
+# declared dependencies: platform env (arch025-env61: WHIRL_LEAK_CHECK through platform::env::get)
 module    hip.leak
 exe       whirl-iso-hip-leak-tests
 mutate    src/hip/leak_count.cpp
@@ -10,8 +10,11 @@ mutsym    log
 mutsym    now
 # module sources
 src       src/hip/leak_count.cpp
+# declared dependency sources
+src       src/platform/env_win.cpp
 # headers (include closure of the sources above)
 hdr       include/whirl/leak_count.h
+hdr       src/platform/env.h
 # test program
 testsrc   tests/unit/hip_leak_tests.cpp
 testhdr   tests/test_check.h

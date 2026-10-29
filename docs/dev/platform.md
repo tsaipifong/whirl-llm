@@ -116,6 +116,14 @@ with the caller.
   to `env::getUtf8` too, and made the draft-vocabulary paths (src/model/spec.cpp) UTF-8. Rule: an environment value that
   becomes a path is read with `env::getUtf8` and opened through `widen()`; ASCII values keep their bytes
   (child-process test `testEnvPathsChild`).
+  arch025-env61 (PLAN 6.1) moved the last raw read, WHIRL_LEAK_CHECK in src/hip/leak_count.cpp (`g_on`'s static
+  initializer, `leakcount::switchFrom(env::get)`), so no file outside src/platform reads the environment directly.
+  `cpu_platform_check` enforces it: a raw read (`getenv` / `_wgetenv` / `getenv_s` / `_dupenv_s` / `_wdupenv_s` /
+  `GetEnvironmentVariable*` / `GetEnvironmentStrings*` / `ExpandEnvironmentStrings*` / `_environ` / `_wenviron`,
+  `std::`-qualified too) is allowed in `src/platform/*_win.cpp` only; the src/hip / dll_deps.cpp / stb_image.h whitelist
+  does not exempt it (environment writes keep that whitelist: src/hip/gpu_restrict.cpp writes into the HIP runtime's
+  own CRT copy). The env scan (`env_read_check.ps1`, `env_pending.txt`) is a separate list: it counts the
+  `envGet` / `envFlag` readers of the WHIRL_* settings outside config.settings, which are not raw OS reads.
   `env::set` is the one `_putenv_s` of the product (GPU_RESOURCE_CACHE_SIZE, server_main.cpp). `env::block()`
   returns the raw `GetEnvironmentStringsW` entries in the OS order; the SSD fingerprint (src/cache/fingerprint.cpp)
   still converts (`narrow`), filters and sorts them itself, so the fingerprint is unchanged.

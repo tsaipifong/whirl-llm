@@ -10,7 +10,9 @@ Rules (sources under src/ and include/; comments and string literals are not cod
             implementation files of src/platform/ (*_win.cpp), src/hip/ (the HIP runtime's own DXGI / PDH /
             LoadLibrary code, ADR-0004 #5), src/release/dll_deps.cpp and the vendored src/vision/stb_image.h; the
             headers src/platform/*.h are checked too (they must stay platform-free, ADR-0004 #5).
-            Blocking since PL5 (any mode, no pending list).
+            Blocking since PL5 (any mode, no pending list). arch025-env61: a raw environment READ (RAW_ENV_READ:
+            getenv / _dupenv_s / _wgetenv / getenv_s / GetEnvironmentVariable / GetEnvironmentStrings / _environ ...)
+            is allowed in src/platform/*_win.cpp only (the src/hip / dll_deps / stb_image whitelist does not exempt it).
   include   whirl_server_core (cmake/server.cmake) reaches include/whirl/model.h through its sources or the repo
             headers they include (transitively); one site per (core source, header chain). Blocking since M3 (any mode).
   env       a process-environment read (getenv / _dupenv_s / _wgetenv / GetEnvironmentVariable / GetEnvironmentStrings
@@ -84,6 +86,15 @@ PLATFORM_CALL = re.compile(
     r"|::(?:socket|bind|listen|accept|recv|send|select|shutdown|connect)"
     r")\s*\(")
 PLATFORM_HEADER_EXTS = {".h", ".hpp", ".inl", ".cuh"}
+# arch025-env61 (PLAN 6.1, PL.REVIEW C1): raw process-environment READS (CRT narrow / wide, Win32; std:: / ::
+# qualified too) and the CRT's environment tables. Allowed in src/platform/*_win.cpp only: the src/hip, dll_deps.cpp and
+# stb_image.h whitelist entries of the platform rule do not exempt them, so every read outside the layer is a blocked
+# site (writes keep the whitelist: src/hip/gpu_restrict.cpp writes into the HIP runtime's own CRT copy).
+# A member call (x.getenv(), p->getenv()) and a longer name (getenv_fn, my_environ) are not counted.
+RAW_ENV_READ = re.compile(
+    r"(?<![\w.>])(?:(?:getenv|_wgetenv|getenv_s|_wgetenv_s|_dupenv_s|_wdupenv_s|GetEnvironmentVariable[AW]?|"
+    r"GetEnvironmentStrings[AW]?|ExpandEnvironmentStrings[AW]?)\s*\(|_w?environ\b)")
+ENV_READ_ALLOWED = ("src/platform/",)
 ENV_READ = re.compile(
     r"\b(?:getenv|_wgetenv|_dupenv_s|_wdupenv_s|GetEnvironmentVariable[AW]?|GetEnvironmentStrings[AW]?|envGet|envFlag|"
     r"envOn)\s*\(|(?<![\w.:>])env\s*\(\s*\"")
@@ -180,8 +191,12 @@ def line_hits(root: str, rule: str) -> dict[str, list[tuple[int, str]]]:
         # the platform layer's own headers are not exempt: they must not include a platform header or call the OS
         platform_hdr = (rule == "platform" and r.startswith("src/platform/")
                         and os.path.splitext(r)[1].lower() in PLATFORM_HEADER_EXTS)
+        # arch025-env61: a whitelisted file outside src/platform/ is still scanned for raw environment reads
+        env_only = False
         if allowed(rule, r) and not platform_hdr:
-            continue
+            if rule != "platform" or r.startswith(ENV_READ_ALLOWED):
+                continue
+            env_only = True
         text = read(root, r)
         raw = text.split("\n")
         if rule == "platform":
@@ -190,10 +205,17 @@ def line_hits(root: str, rule: str) -> dict[str, list[tuple[int, str]]]:
             # matched on the stripped text (one site per call)
             code = strip_code(text).split("\n")
             for i, l in enumerate(raw):
-                if PLATFORM_HDR.match(l) and code[i].strip():
-                    hits.setdefault(r, []).append((i + 1, l.strip()))
-                for _ in PLATFORM_CALL.finditer(code[i]):
-                    hits.setdefault(r, []).append((i + 1, l.strip()))
+                starts = set()
+                if not env_only:
+                    if PLATFORM_HDR.match(l) and code[i].strip():
+                        hits.setdefault(r, []).append((i + 1, l.strip()))
+                    for m in PLATFORM_CALL.finditer(code[i]):
+                        starts.add(m.start())
+                        hits.setdefault(r, []).append((i + 1, l.strip()))
+                # env61: one site per raw read; a W-suffixed read the PL0 suffix rule already counted is not counted again
+                for m in RAW_ENV_READ.finditer(code[i]):
+                    if m.start() not in starts:
+                        hits.setdefault(r, []).append((i + 1, l.strip()))
             continue
         pat = ENV_READ if rule == "env" else ARCH
         code = strip_code(text).split("\n")
@@ -437,6 +459,44 @@ def selftest() -> int:
           "src/vision/stb_image.h": "#include <io.h>\n", "src/platform/p_win.cpp": "#include <windows.h>\nvoid f(void* h){CloseHandle(h);}\n"}, None, "report", 0)
     case("PL5: an entry point calling the layer only passes", "platform",
          {"src/cli/main.cpp": "#include \"platform/args.h\"\nint wmain(int c, wchar_t** v) { return run(whirl::narrowArgs(c, v)); }\n"}, None, "report", 0)
+    # arch025-env61 (PLAN 6.1, PL.REVIEW C1): a raw environment READ is allowed in src/platform/*_win.cpp only; the
+    # src/hip / dll_deps / stb_image whitelist does not exempt it (writes keep the whitelist)
+    case("env61: std::getenv in src/hip blocked in report mode", "platform",
+         {"src/hip/a.cpp": "bool f() { return std::getenv(\"WHIRL_X\") != nullptr; }\n"}, None, "report", 1)
+    case("env61: getenv outside the layer blocked", "platform", {"src/model/x.cpp": "auto v = getenv(\"A\");\n"}, None, "block", 1)
+    case("env61: each raw read name in src/hip counts", "platform",
+         {"src/hip/a.cpp": "void f(char** b, size_t* n, wchar_t** w, char* o) { _dupenv_s(b, n, \"A\"); _wdupenv_s(w, n, L\"A\");\n"
+                           "::getenv(\"B\"); _wgetenv(L\"C\"); getenv_s(n, o, 4, \"D\"); _wgetenv_s(n, nullptr, 0, L\"E\");\n"
+                           "GetEnvironmentVariableA(\"F\", o, 4); GetEnvironmentVariableW(L\"G\", nullptr, 0);\n"
+                           "GetEnvironmentStringsW(); ExpandEnvironmentStringsA(\"%H%\", o, 4); char** e = _environ; (void)_wenviron; }\n"},
+         None, "report", 1)
+    case("env61: dll_deps.cpp and stb_image.h do not exempt a raw read", "platform",
+         {"src/release/dll_deps.cpp": "auto v = std::getenv(\"A\");\n", "src/vision/stb_image.h": "char* p = getenv(\"B\");\n"}, None, "report", 1)
+    case("env61: raw reads in src/platform/env_win.cpp pass", "platform",
+         {"src/platform/env_win.cpp": "#include <windows.h>\nvoid f(char** b, size_t* n) { _dupenv_s(b, n, \"A\"); GetEnvironmentStringsW(); }\n"},
+         None, "block", 0)
+    case("env61: a raw read in a src/platform header blocked", "platform",
+         {"src/platform/env.h": "#pragma once\ninline const char* f() { return std::getenv(\"A\"); }\n"}, None, "block", 1)
+    case("env61: not raw reads: platform::env::get, getenv_fn(), x.getenv(), comment, string, a src/hip write", "platform",
+         {"src/hip/b.cpp": "auto a = platform::env::get(\"A\"); auto b = getenv_fn(\"B\"); x.getenv(\"C\"); p->getenv(\"D\");\n"
+                           "// getenv(\"E\") _environ\nconst char* s = \"getenv(\";\nvoid g() { SetEnvironmentVariableA(\"K\", \"v\"); _putenv_s(\"K\", \"v\"); }\n"
+                           "int my_environ = 0; bool env_on = envOn();\n"}, None, "block", 0)
+    # env61: one site per raw read (12 names in src/hip, env-only), and a W-suffixed read outside the whitelist counts
+    # once (the PL0 suffix rule and the env61 read rule do not double-count it)
+    for nm, files, want_n in (
+            ("env61 counts: 12 raw read names in src/hip = 12 sites",
+             {"src/hip/a.cpp": "_dupenv_s(b, n, \"A\"); _wdupenv_s(w, n, L\"A\"); ::getenv(\"B\"); _wgetenv(L\"C\");\n"
+                               "getenv_s(n, o, 4, \"D\"); _wgetenv_s(n, nullptr, 0, L\"E\"); GetEnvironmentVariableA(\"F\", o, 4);\n"
+                               "GetEnvironmentVariableW(L\"G\", nullptr, 0); GetEnvironmentStringsW(); ExpandEnvironmentStringsA(\"x\", o, 4);\n"
+                               "char** e = _environ; (void)_wenviron;\n"}, 12),
+            ("env61 counts: GetEnvironmentVariableW + std::getenv outside the whitelist = 2 sites",
+             {"src/model/x.cpp": "void f() { GetEnvironmentVariableW(L\"G\", nullptr, 0); auto v = std::getenv(\"A\"); }\n"}, 2)):
+        cases += 1
+        tree(files)
+        got = sum(len(v) for v in line_hits(base, "platform").values())
+        ok = got == want_n
+        fails += 0 if ok else 1
+        print(f"  {'ok  ' if ok else 'FAIL'} [platform/count] {nm}: {got} (want {want_n})")
     case("env reads blocked", "env", {"src/model/f.cpp": 'int a = envFlag("X", true);\nauto b = std::getenv("WHIRL_Y");\n'}, None, "block", 1)
     case("env helper with a string argument counts", "env", {"src/server/s.cpp": 'const auto kv = env("KV");\n'}, None, "block", 1)
     case("not env reads: fingerprintEnv(), x.env(), a comment, a string", "env",
@@ -578,7 +638,10 @@ def tree_test(root: str, rule: str = "platform") -> int:
         for rel, line in (("src/model/pl5_probe.cpp", "unsigned long long now() { return GetTickCount64(); }\n"),
                           ("src/server/http.cpp", "\nstatic void pl5Probe(void* h) { CloseHandle(h); }\n"),
                           ("src/cli/main.cpp", "\n#include <windows.h>\n"),
-                          ("include/whirl/common.h", "\nstatic inline void pl5Probe(void* h) { CloseHandle(h); }\n")):
+                          ("include/whirl/common.h", "\nstatic inline void pl5Probe(void* h) { CloseHandle(h); }\n"),
+                          # arch025-env61: a raw environment read is blocked inside the src/hip whitelist too
+                          ("src/hip/leak_count.cpp", "\nstatic const char* env61Probe() { return std::getenv(\"WHIRL_X\"); }\n"),
+                          ("src/hip/env61_probe.cpp", "\nstatic char* env61Probe(char** b, size_t* n) { _dupenv_s(b, n, \"WHIRL_X\"); return *b; }\n")):
             f = os.path.join(base, *rel.split("/"))
             had = os.path.exists(f)
             orig = open(f, "rb").read() if had else None

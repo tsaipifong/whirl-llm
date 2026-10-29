@@ -436,6 +436,10 @@
    "contract.device"
   ],
   [
+   "hip.leak",
+   "platform.env"
+  ],
+  [
    "hip.mem",
    "hip.runtime"
   ],

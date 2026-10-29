@@ -4,6 +4,7 @@
 
 #include "../test_check.h"
 #include "../test_env.h"
+#include "platform/env.h"
 #include "whirl/leak_count.h"
 
 #include <algorithm>
@@ -99,6 +100,54 @@ void testLeakCount() {
     lc::testEnable(was_on);
 }
 
+// arch025-env61: g_on's WHIRL_LEAK_CHECK rule (leakcount::switchFrom, leak_count.cpp passes platform::env::get).
+// One read, of exactly "WHIRL_LEAK_CHECK"; on = set, not empty and not "0", as the v0.2.5 std::getenv rule
+// (v != nullptr && *v != 0 && std::strcmp(v, "0") != 0), which each row also computes as the oracle.
+// the process's WHIRL_LEAK_CHECK at static initialization (before the harness clears WHIRL_*), by the old rule
+const bool k_leak_env_at_start = [] {
+    const char* g = std::getenv("WHIRL_LEAK_CHECK");
+    return g != nullptr && *g != 0 && std::strcmp(g, "0") != 0;
+}();
+
+void testLeakSwitch() {
+    namespace lc = whirl::hip::leakcount;
+    // g_on was set once, at static initialization, by the rule (testLeakCount restored it)
+    CHECK_EQ(lc::g_on, k_leak_env_at_start);
+    struct Row {
+        std::optional<std::string> v;
+        bool on;
+    };
+    const Row rows[] = {{std::nullopt, false}, {std::string(), false}, {std::string("0"), false}, {std::string("1"), true},
+                        {std::string("00"), true}, {std::string(" 0"), true}, {std::string("0 "), true},
+                        {std::string("false"), true}, {std::string("yes"), true}};
+    for (const Row& r : rows) {
+        int calls = 0;
+        std::string asked;
+        const bool on = lc::switchFrom([&](const char* name) {
+            ++calls;
+            asked = name;
+            return r.v;
+        });
+        const bool old_rule = r.v.has_value() && !r.v->empty() && std::strcmp(r.v->c_str(), "0") != 0;
+        CHECK_EQ(on, r.on);
+        CHECK_EQ(on, old_rule);
+        CHECK_EQ(calls, 1);
+        CHECK(asked == "WHIRL_LEAK_CHECK");
+    }
+#ifdef _WIN32
+    // the real reader gives the bytes std::getenv gave (the same CRT narrow table): unset, "1", "0", "yes", restored
+    const char* had = std::getenv("WHIRL_LEAK_CHECK");
+    const std::optional<std::string> saved = had ? std::optional<std::string>(had) : std::nullopt;
+    for (const char* v : {"", "1", "0", "yes"}) {
+        _putenv_s("WHIRL_LEAK_CHECK", v);  // "" removes the variable
+        const char* g = std::getenv("WHIRL_LEAK_CHECK");
+        const bool old_rule = g != nullptr && *g != 0 && std::strcmp(g, "0") != 0;
+        CHECK_EQ(lc::switchFrom([](const char* name) { return whirl::platform::env::get(name); }), old_rule);
+    }
+    _putenv_s("WHIRL_LEAK_CHECK", saved ? saved->c_str() : "");
+#endif
+}
+
 }  // namespace
 
 // the old main()'s calls of this module, in their order (tests/unit/unit_tests.cpp ORDER lists all modules)
@@ -106,6 +155,7 @@ const whirl::test::Suite& unitSuite_hip_leak() {
     static const whirl::test::Suite s{"hip.leak",
                                       {
                                           {"testLeakCount", [] { testLeakCount(); }},
+                                          {"testLeakSwitch", [] { testLeakSwitch(); }},
                                       },
                                       nullptr};
     return s;
