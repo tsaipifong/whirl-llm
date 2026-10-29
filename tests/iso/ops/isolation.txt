@@ -1,0 +1,35 @@
+# ARCH-1 8.5 isolation check of the host wrappers of the kernel ops (arch025-iso4): ops.act, ops.attention, ops.gdn, ops.matmul, ops.moe and ops.mtp in ONE
+# manifest (as forward.*), because their choice tests are one program (tests/ops/ops_tests.cpp: testActChoice uses matmul and gdn rules, testGdnChoice
+# uses the attention / act / mtp rules) and moe.cpp includes the matmul header. The ops use kernels_abi.h types only (no HIP call, no SDK header), so the
+# program links no device runtime at all: a call into hip, the server or lib whirl is LNK2019. Split per module only if the test file is split.
+module    ops
+exe       whirl-iso-ops-tests
+mutate    src/ops/matmul.cpp
+mutsym    hip
+mutsym    log
+mutsym    now
+# module sources
+src       src/ops/act.cpp
+src       src/ops/attention.cpp
+src       src/ops/gdn.cpp
+src       src/ops/matmul.cpp
+src       src/ops/moe.cpp
+src       src/ops/mtp.cpp
+# headers (include closure of the files above)
+hdr       include/whirl/common.h
+hdr       include/whirl/device_profile.h
+hdr       include/whirl/gguf.h
+hdr       include/whirl/hip.h
+hdr       include/whirl/kernels_abi.h
+hdr       include/whirl/kernels_abi_layout.h
+hdr       include/whirl/kv_format.h
+hdr       include/whirl/ops/act.h
+hdr       include/whirl/ops/attention.h
+hdr       include/whirl/ops/gdn.h
+hdr       include/whirl/ops/matmul.h
+hdr       include/whirl/ops/moe.h
+hdr       include/whirl/ops/mtp.h
+hdr       kernels/gfx1151/attn_ws4_index.h
+# test program
+testsrc   tests/ops/ops_tests.cpp
+testhdr   tests/test_check.h

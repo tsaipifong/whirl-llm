@@ -1,0 +1,79 @@
+# ARCH-1 8.5 isolation check of vision (arch025-iso4): the vision host side (preprocessing, hashes, placeholder expansion, the M-RoPE map, the encoder's host code,
+# the code-object table, the whirl-vis command's vis_cli.cpp) built with its own unit program (tests/vision/vision_tests.cpp). vis_main.cpp is the whirl-vis
+# executable's main() and stays out. declared dependencies: stb_image (third_party.stb), the GGUF reader, util, platform, gpu_select, the HIP layer
+# (hip.runtime / hip.mem / hip.restrict: the HIP SDK headers are the platform, sdkinc hip), the device interface with the null backend behind the link double
+# tests/iso/vision/fake_hip_backend.cpp (device::hipBackend), and the vision code objects as the link double tests/iso/vision/fake_vision_objects.cpp
+# (the real ones are hipcc output; kernel_image.cpp is compiled with WHIRL_VISION_GFX1201 / WHIRL_VISION_GFX1151 as the product does).
+module    vision
+exe       whirl-iso-vision-tests
+mutate    src/vision/vision.cpp
+mutsym    log
+mutsym    engine
+mutsym    model
+syslib    pdh.lib
+syslib    dxgi.lib
+define    __HIP_PLATFORM_AMD__
+define    WHIRL_VISION_GFX1201=1
+define    WHIRL_VISION_GFX1151=1
+sdkinc    hip
+# module sources
+src       src/vision/vision.cpp
+src       src/vision/image.cpp
+src       src/vision/hash.cpp
+src       src/vision/prompt.cpp
+src       src/vision/kernel_image.cpp
+src       src/vision/vis_cli.cpp
+# declared dependency sources
+src       src/vision/stb_image_impl.cpp
+src       tests/iso/vision/fake_vision_objects.cpp
+src       tests/iso/vision/fake_hip_backend.cpp
+src       src/device/null_backend.cpp
+src       src/gguf/gguf.cpp
+src       src/hip/gpu_restrict.cpp
+src       src/hip/hip_runtime.cpp
+src       src/hip/alloc_log.cpp
+src       src/hip/launch_log.cpp
+src       src/hip/runtime_loader.cpp
+src       src/hip/device_mem.cpp
+src       src/hip/uma_mem.cpp
+src       src/hip/wddm_mem.cpp
+src       src/hip/leak_count.cpp
+src       src/common/vram_limit.cpp
+src       src/platform/env_win.cpp
+src       src/common/util.cpp
+src       src/platform/args_win.cpp
+src       src/platform/fs_win.cpp
+src       src/platform/proc_win.cpp
+src       tests/iso/fake_embedded_objects.cpp
+src       src/common/gpu_select.cpp
+# headers (include closure of the files above)
+hdr       include/whirl/common.h
+hdr       include/whirl/device_mem.h
+hdr       include/whirl/device_profile.h
+hdr       include/whirl/gguf.h
+hdr       include/whirl/gpu_select.h
+hdr       include/whirl/hip.h
+hdr       include/whirl/hip_runtime_loader.h
+hdr       include/whirl/leak_count.h
+hdr       include/whirl/small_helpers.h
+hdr       include/whirl/uma_mem.h
+hdr       include/whirl/vision.h
+hdr       include/whirl/vismap.h
+hdr       include/whirl/vram_limit.h
+hdr       src/device/backend.h
+hdr       src/device/handles.h
+hdr       src/device/null_backend.h
+hdr       src/hip/alloc_log.h
+hdr       src/hip/hip_api.h
+hdr       src/hip/launch_log.h
+hdr       src/hip/log_name.h
+hdr       src/platform/args.h
+hdr       src/platform/env.h
+hdr       src/platform/fs.h
+hdr       src/platform/fs_fake.h
+hdr       src/platform/proc.h
+hdr       src/vision/stb_image.h
+# test program
+testsrc   tests/vision/vision_tests.cpp
+testhdr   tests/test_check.h
+testhdr   tests/test_env.h

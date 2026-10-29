@@ -1039,7 +1039,9 @@ int main() {
     testFingerprintDumpEnv();
     testFingerprintPlatformEnv();  // arch025 PL1
     testFingerprintVisCopyDelayEnv();  // arch025-i6vis (I6, X4 K4)
+#ifndef WHIRL_ISO_NO_SOURCE_TREE  // arch025-iso4: the isolated program (tests/iso/cache) has no source tree to scan; the case runs in whirl-cache-tests
     testFingerprintEnvClassified();    // arch025-i6vis: every WHIRL_* read is classified
+#endif
     try {
         testServerFingerprintInputs();
     } catch (const std::exception& e) {  // e.g. a field the assembly no longer fills: report, do not abort
