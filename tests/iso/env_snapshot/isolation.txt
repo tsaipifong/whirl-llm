@@ -19,3 +19,4 @@ hdr       src/platform/env.h
 # test program
 testsrc   tests/iso/env_snapshot/env_snapshot_tests.cpp
 testhdr   tests/iso/iso_test.h
+testhdr   tests/test_check.h

@@ -32,6 +32,8 @@ hdr       src/platform/proc.h
 hdr       src/tier/evict_policy.h
 hdr       src/tier/idle_flush.h
 hdr       src/tier/kv_tier.h
+hdr       include/whirl/small_helpers.h
 # test program
 testsrc   tests/iso/tier.kv/kv_tier_tests.cpp
 testhdr   tests/iso/iso_test.h
+testhdr   tests/test_check.h

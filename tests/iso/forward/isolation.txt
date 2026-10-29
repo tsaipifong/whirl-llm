@@ -77,7 +77,9 @@ hdr       src/platform/env.h
 hdr       src/platform/fs.h
 hdr       src/platform/fs_fake.h
 hdr       src/spec/policy.h
+hdr       include/whirl/kernels_abi_layout.h
 # test program (fake_hip.cpp: the HIP layer's link double)
 testsrc   tests/iso/forward/forward_tests.cpp
 testsrc   tests/iso/fake_hip.cpp
 testhdr   tests/iso/iso_test.h
+testhdr   tests/test_check.h

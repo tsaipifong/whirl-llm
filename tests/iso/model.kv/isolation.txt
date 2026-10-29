@@ -21,3 +21,4 @@ hdr       src/model/qwen35/model_error.h
 # test program
 testsrc   tests/iso/model.kv/kv_tests.cpp
 testhdr   tests/iso/iso_test.h
+testhdr   tests/test_check.h

@@ -1,7 +1,7 @@
 # ARCH-1 8.5 isolation check of prefix_store, the server's prefix cache owner (PrefixStore, SlotPrefix, Spe; arch025-lane2
 # leg 4): the module's sources, its DECLARED dependencies and the ONLY headers they may see. Format:
 # tests/sampling/isolation.txt; read by cmake/iso.cmake and tools/gates/iso_check.py.
-# declared dependencies: the chat-token facts (src/server/tokens.cpp) with the tokenizer they read (src/tokenizer, the
+# declared dependencies: the chat-token facts (src/chat/chat_tokens.cpp) with the tokenizer they read (src/tokenizer, the
 # GGUF reader it loads from), the prefix cache decisions (cache/prefix_cache.cpp) and the tier view (cache/tier_adapter.cpp
 # over tier.kv), the checkpoint buffers (ckpt_store, through the narrow model interface cache/cache_model.h), the device
 # contract with the NullBackend, the owner check (threads: engine_thread.cpp + the server log it reports to), lib whirl's
@@ -16,7 +16,7 @@ syslib    winmm.lib
 # module sources
 src       src/server/prefix_store.cpp
 # declared dependency sources
-src       src/server/tokens.cpp
+src       src/chat/chat_tokens.cpp
 src       src/tokenizer/tokenizer.cpp
 src       src/tokenizer/unicode.cpp
 src       src/gguf/gguf.cpp
@@ -64,12 +64,14 @@ hdr       src/platform/time.h
 hdr       src/server/engine_thread.h
 hdr       src/server/log.h
 hdr       src/server/prefix_store.h
-hdr       src/server/tokens.h
+hdr       include/whirl/chat_tokens.h
 hdr       src/tier/evict_policy.h
 hdr       src/tier/idle_flush.h
 hdr       src/tier/kv_tier.h
 hdr       src/tokenizer/unicode_tables.inc
+hdr       include/whirl/small_helpers.h
 # test program
 testsrc   tests/iso/prefix_store/prefix_store_tests.cpp
 testhdr   tests/iso/fake_cache_model.h
 testhdr   tests/iso/iso_test.h
+testhdr   tests/test_check.h

@@ -19,6 +19,8 @@ hdr       include/whirl/kv_format.h
 hdr       include/whirl/model_types.h
 hdr       include/whirl/ops/attention.h
 hdr       src/model/qwen35/scratch.h
+hdr       include/whirl/kernels_abi_layout.h
 # test program
 testsrc   tests/iso/model.scratch/scratch_tests.cpp
 testhdr   tests/iso/iso_test.h
+testhdr   tests/test_check.h

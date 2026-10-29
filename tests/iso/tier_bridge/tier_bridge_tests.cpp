@@ -32,7 +32,7 @@ struct Rig {
     dv::NullBackend nb;
     iso::FakeCacheModel m{nb, {false, true, false, true}, kConv, kSsm, 8, 10};
     std::vector<sv::KvArr> kv;
-    sv::ChatTokens ct;
+    whirl::chat::ChatTokens ct;
     std::unique_ptr<sv::PrefixStore> ps;
     std::unique_ptr<sv::CkptStore> cs;
     std::unique_ptr<t::Tier> tier;

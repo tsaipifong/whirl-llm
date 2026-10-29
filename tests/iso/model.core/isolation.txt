@@ -158,8 +158,12 @@ hdr       src/platform/proc.h
 hdr       src/platform/proc.h
 hdr       src/spec/policy.h
 hdr       src/spec/policy.h
+hdr       include/whirl/kernels_abi_layout.h
+hdr       include/whirl/small_helpers.h
+hdr       include/whirl/device_pick.h
 # test program (fake_hip.cpp: the HIP layer's link double)
 testsrc   tests/iso/model.core/model_core_tests.cpp
 testsrc   tests/iso/fake_hip.cpp
 testsrc   tests/iso/model.core/fake_gpu_restrict.cpp
 testhdr   tests/iso/iso_test.h
+testhdr   tests/test_check.h

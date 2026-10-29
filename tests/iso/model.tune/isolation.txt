@@ -25,3 +25,4 @@ hdr       src/model/qwen35/weights.h
 # test program
 testsrc   tests/iso/model.tune/tune_table_tests.cpp
 testhdr   tests/iso/iso_test.h
+testhdr   tests/test_check.h

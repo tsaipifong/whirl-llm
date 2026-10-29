@@ -49,3 +49,4 @@ hdr       src/server/log.h
 testsrc   tests/iso/page_pool/page_pool_tests.cpp
 testhdr   tests/iso/fake_cache_model.h
 testhdr   tests/iso/iso_test.h
+testhdr   tests/test_check.h

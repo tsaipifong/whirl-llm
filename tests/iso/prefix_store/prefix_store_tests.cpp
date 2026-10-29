@@ -23,8 +23,8 @@ namespace sv = whirl::server;
 namespace dv = whirl::device;
 
 // chat ids of the test vocabulary: <|im_start|> 1, system 2, <|im_end|> 3, "\n" 4, <think> 5; text ids from 10
-sv::ChatTokens chat() {
-    sv::ChatTokens ct;
+whirl::chat::ChatTokens chat() {
+    whirl::chat::ChatTokens ct;
     ct.im_start = 1;
     ct.system = 2;
     ct.im_end = 3;
@@ -63,7 +63,7 @@ void testCkKindCodes() {
 }
 
 void testScheduleAndColdResume() {
-    const sv::ChatTokens ct = chat();
+    const whirl::chat::ChatTokens ct = chat();
     const std::vector<std::uint32_t> t = prompt();
     sv::PrefixStore ps(ct, config(false));
     // schedule: 0, 1024 (one chunk), 2002 (the system split; 978 rows <= chunk + merge), 3000
@@ -100,7 +100,7 @@ void addCk(sv::SlotPrefix& sl, std::uint32_t pos, const char* kind) {
 }
 
 void testCacheMatch() {
-    const sv::ChatTokens ct = chat();
+    const whirl::chat::ChatTokens ct = chat();
     const std::vector<std::uint32_t> t = prompt();
     sv::SlotPrefix sl;
     sl.cache_tokens.assign(t.begin(), t.begin() + 2100);
@@ -121,7 +121,7 @@ void testCacheMatch() {
 }
 
 void testSpeMatchAndPickSlot() {
-    const sv::ChatTokens ct = chat();
+    const whirl::chat::ChatTokens ct = chat();
     const std::vector<std::uint32_t> t = prompt();
     sv::PrefixStore ps(ct, config(false));
     ISO_CHECK(ps.speMatch(t) == nullptr);
@@ -155,7 +155,7 @@ void testSpeMatchAndPickSlot() {
 
 void testTierViewAndParkedSpes() {
     dv::NullBackend ops;
-    const sv::ChatTokens ct = chat();
+    const whirl::chat::ChatTokens ct = chat();
     sv::PrefixStore ps(ct, config(false));
     ISO_CHECK(ps.tierView() == nullptr);
     auto tier = whirl::tier::Tier::create(ops, 8 * whirl::tier::block_bytes, 42, 0);

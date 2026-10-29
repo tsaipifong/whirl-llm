@@ -50,3 +50,4 @@ hdr       src/server/log.h
 testsrc   tests/iso/ckpt_store/ckpt_store_tests.cpp
 testhdr   tests/iso/fake_cache_model.h
 testhdr   tests/iso/iso_test.h
+testhdr   tests/test_check.h
