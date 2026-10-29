@@ -109,9 +109,9 @@ if (Test-Path $pyref) {
     try {
         Remove-Item Env:WHIRL_GATE_PYTHON -ErrorAction SilentlyContinue
         $env:PATH = (@($env:PATH -split ";" | Where-Object { $_ -and -not (Test-Path (Join-Path $_ "python.exe")) -and -not (Test-Path (Join-Path $_ "py.exe")) }) -join ";")
-        $o1 = @(& $pwsh -NoProfile -File $Gate -Device r9700 -Module tier_bridge -ImpactRange "bf31527^..bf31527" -List 2>&1 | ForEach-Object { "$_" }); $c1 = $LASTEXITCODE
+        $o1 = @(& $pwsh -NoProfile -File $Gate -Device r9700 -Module tier.kv -ImpactRange "bf31527^..bf31527" -List 2>&1 | ForEach-Object { "$_" }); $c1 = $LASTEXITCODE
         $env:WHIRL_GATE_PYTHON = Join-Path $Work "no_python.exe"
-        $o2 = @(& $pwsh -NoProfile -File $Gate -Device r9700 -Module tier_bridge -ImpactRange "bf31527^..bf31527" -List 2>&1 | ForEach-Object { "$_" }); $c2 = $LASTEXITCODE
+        $o2 = @(& $pwsh -NoProfile -File $Gate -Device r9700 -Module tier.kv -ImpactRange "bf31527^..bf31527" -List 2>&1 | ForEach-Object { "$_" }); $c2 = $LASTEXITCODE
     } finally { $env:PATH = $keepP; if ($keepW) { $env:WHIRL_GATE_PYTHON = $keepW } else { Remove-Item Env:WHIRL_GATE_PYTHON -ErrorAction SilentlyContinue } }
     if ($c1 -eq 0 -and ($o1 | Where-Object { $_ -match "^srv_balance\s+GPU" })) { $ok++; Write-Host "ok   python: no python on PATH -> the pyref interpreter runs impact.py" }
     else { $bad++; Write-Host "FAIL python: no python on PATH: exit $c1"; $o1 | Select-Object -Last 4 | ForEach-Object { Write-Host "       | $_" } }
