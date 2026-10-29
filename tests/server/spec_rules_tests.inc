@@ -208,6 +208,7 @@ void testRulesD4() {
     std::set<std::uint32_t> picks;
     for (std::uint32_t c = 0; c < 128; ++c) picks.insert(q35::pickDrafts(accs, tm, 8, c, 4));
     CHECK(picks.size() >= 2);  // the counter matters
+#ifndef WHIRL_ISO_NO_SERVER  // arch025-iso4: tests/iso/spec.rules has no Engine / TestServer; the server half runs in whirl-server-tests
     const auto cycleNums = [] {
         std::vector<std::uint32_t> v;
         std::lock_guard<std::mutex> lk(g_log.mu);
@@ -236,6 +237,7 @@ void testRulesD4() {
         CHECK_EQ(*std::min_element(c1.begin(), c1.end()), 0u);
         CHECK_EQ(*std::min_element(c2.begin(), c2.end()), *std::max_element(c1.begin(), c1.end()) + 1);
     }
+#endif
 }
 
 // D8: the context stop, each loop with its own room (CLI: n_draft after the cap; server: draftRoom() = n_draft)

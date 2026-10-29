@@ -1,0 +1,38 @@
+# ARCH-1 8.5 isolation check of spec.rules (arch025-iso4): the header-only speculative-decoding rules (src/spec/spec_rules.h) over their declared dependencies
+# (spec.policy: policy.cpp, slot_drafts.cpp, the relaxed-acceptance policy, model_types.h) built with tests/server/spec_rules_tests.inc (every case of
+# whirl-server-tests; define WHIRL_ISO_NO_SERVER compiles out only D4's Engine half). Header-only mode: tests/iso/model.types/isolation.txt.
+module    spec.rules
+exe       whirl-iso-spec-rules-tests
+mutate    src/spec/spec_rules.h
+mutinc    end
+mutsym    hip
+mutsym    log
+mutsym    model
+define    WHIRL_ISO_NO_SERVER
+# declared dependency sources
+src       src/spec/policy.cpp
+src       src/spec/slot_drafts.cpp
+src       src/common/util.cpp
+src       src/platform/args_win.cpp
+src       src/platform/fs_win.cpp
+src       src/platform/proc_win.cpp
+# headers (include closure of the files above)
+hdr       include/whirl/common.h
+hdr       include/whirl/device_profile.h
+hdr       include/whirl/hip.h
+hdr       include/whirl/kv_format.h
+hdr       include/whirl/model_types.h
+hdr       include/whirl/relax_accept.h
+hdr       include/whirl/vismap.h
+hdr       src/platform/args.h
+hdr       src/platform/fs.h
+hdr       src/platform/fs_fake.h
+hdr       src/platform/proc.h
+hdr       src/spec/policy.h
+hdr       src/spec/slot_drafts.h
+hdr       src/spec/spec_rules.h
+# test program
+testsrc   tests/iso/spec.rules/spec_rules_tests.cpp
+testhdr   tests/iso/iso_test.h
+testhdr   tests/server/spec_rules_tests.inc
+testhdr   tests/test_check.h

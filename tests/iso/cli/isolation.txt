@@ -1,0 +1,17 @@
+# ARCH-1 8.5 isolation check of cli, the one header-only part (arch025-iso4): src/cli/dflash_dump.h built with its own unit test
+# (tests/unit/cli_tests.cpp). The rest of src/cli (main.cpp, build_model.cpp, cmd_*.cpp) is the whirl.exe composition root (Model::load, the HIP
+# device, every command): not isolatable by design, see docs/dev/isolation_blockers.md. Header-only mode: tests/iso/model.types/isolation.txt.
+# Format: tests/sampling/isolation.txt; read by cmake/iso.cmake and tools/gates/iso_check.py.
+
+module    cli
+exe       whirl-iso-cli-tests
+mutate    src/cli/dflash_dump.h
+mutinc    end
+mutsym    now
+mutsym    log
+# headers (include closure of the files above)
+hdr       src/cli/dflash_dump.h
+# test program
+testsrc   tests/unit/cli_tests.cpp
+testhdr   tests/test_check.h
+testhdr   tests/test_env.h

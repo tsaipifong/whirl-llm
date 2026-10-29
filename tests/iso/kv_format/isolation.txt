@@ -1,0 +1,17 @@
+# ARCH-1 8.5 isolation check of kv_format (arch025-iso4): the header-only KV format enum, its predicates and the page row layout
+# (include/whirl/kv_format.h, kv_layout.h) built with its own test (tests/iso/kv_format/kv_format_tests.cpp; no unit test existed). Header-only mode:
+# tests/iso/model.types/isolation.txt. Format: tests/sampling/isolation.txt; read by cmake/iso.cmake and tools/gates/iso_check.py.
+module    kv_format
+exe       whirl-iso-kv-format-tests
+mutate    include/whirl/kv_format.h
+mutinc    end
+mutsym    now
+mutsym    model
+mutsym    hip
+# headers (include closure of the files above)
+hdr       include/whirl/kv_format.h
+hdr       include/whirl/kv_layout.h
+# test program
+testsrc   tests/iso/kv_format/kv_format_tests.cpp
+testhdr   tests/iso/iso_test.h
+testhdr   tests/test_check.h

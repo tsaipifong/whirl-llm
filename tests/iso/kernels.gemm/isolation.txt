@@ -1,0 +1,16 @@
+# ARCH-1 8.5 isolation check of kernels.gemm, host side (arch025-iso4): kernels/gemm_small_addr.h, the W-stage addressing shared by the device
+# code and the host (header-only mode, tests/iso/model.types/isolation.txt) built with its own unit tests
+# (tests/unit/kernels_gemm_tests.cpp, which includes it as ../../kernels/gemm_small_addr.h: the header is staged next to mod/ as it sits next to src/
+# in the tree). The .hip device code is kernel_iso_check.py's, not this check's.
+module    kernels.gemm
+exe       whirl-iso-kernels-gemm-tests
+mutate    kernels/gemm_small_addr.h
+mutinc    end
+mutsym    now
+mutsym    hip
+# headers (include closure of the files above)
+hdr       kernels/gemm_small_addr.h
+# test program
+testsrc   tests/unit/kernels_gemm_tests.cpp
+testhdr   tests/test_check.h
+testhdr   tests/test_env.h

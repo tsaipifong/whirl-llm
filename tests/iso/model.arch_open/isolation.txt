@@ -1,0 +1,62 @@
+# ARCH-1 8.5 isolation check of model.arch_open (arch025-iso4): the header-only architecture module of an opened GGUF (src/model/arch_open.h) over its
+# declared dependencies (model.arch_registry, the GGUF reader, util) built with its own test (tests/iso/model.arch_open/arch_open_tests.cpp; no test existed).
+# Header-only mode: tests/iso/model.types/isolation.txt. The header includes whirl/model.h (the Model class) for ModelError and Config: only the header
+# closure is declared (no Model code is linked), docs/dev/isolation_blockers.md lists the include as the smallest fix.
+module    model.arch_open
+exe       whirl-iso-model-arch-open-tests
+mutate    src/model/arch_open.h
+mutinc    end
+mutsym    hip
+mutsym    log
+mutsym    engine
+# declared dependency sources
+src       src/model/arch_registry.cpp
+src       src/gguf/gguf.cpp
+src       src/common/util.cpp
+src       src/platform/args_win.cpp
+src       src/platform/fs_win.cpp
+src       src/platform/proc_win.cpp
+# headers (include closure of the files above)
+hdr       include/whirl/common.h
+hdr       include/whirl/device_mem.h
+hdr       include/whirl/device_pick.h
+hdr       include/whirl/device_profile.h
+hdr       include/whirl/gguf.h
+hdr       include/whirl/hip.h
+hdr       include/whirl/kernels_abi.h
+hdr       include/whirl/kernels_abi_layout.h
+hdr       include/whirl/kv_format.h
+hdr       include/whirl/model.h
+hdr       include/whirl/model_types.h
+hdr       include/whirl/numerics.h
+hdr       include/whirl/ops/act.h
+hdr       include/whirl/ops/attention.h
+hdr       include/whirl/ops/matmul.h
+hdr       include/whirl/ops/moe.h
+hdr       include/whirl/ops/mtp.h
+hdr       include/whirl/relax_accept.h
+hdr       include/whirl/spec_sample.h
+hdr       include/whirl/uma_mem.h
+hdr       include/whirl/value_scope.h
+hdr       include/whirl/vismap.h
+hdr       src/config/env_get.h
+hdr       src/device/backend.h
+hdr       src/device/handles.h
+hdr       src/model/arch_open.h
+hdr       src/model/arch_registry.h
+hdr       src/model/qwen35/context.h
+hdr       src/model/qwen35/kv.h
+hdr       src/model/qwen35/load_types.h
+hdr       src/model/qwen35/model_error.h
+hdr       src/model/qwen35/scratch.h
+hdr       src/model/qwen35/tune_table.h
+hdr       src/model/qwen35/weights.h
+hdr       src/platform/args.h
+hdr       src/platform/fs.h
+hdr       src/platform/fs_fake.h
+hdr       src/platform/proc.h
+hdr       src/spec/policy.h
+# test program
+testsrc   tests/iso/model.arch_open/arch_open_tests.cpp
+testhdr   tests/iso/iso_test.h
+testhdr   tests/test_check.h
