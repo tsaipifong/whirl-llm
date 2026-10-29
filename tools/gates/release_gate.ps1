@@ -254,6 +254,11 @@ AddStep "cpu_census" $false @($pwsh, "-NoProfile", "-Command", "& '$py' -I '$(Jo
     { param($o, $c) $c -eq 0 -and ($o -match "(?m)^census check test: ([1-9]\d*)/\1 ok") -and ($o -match "(?m)^census: ok") }
 AddStep "cpu_layering" $false @($pwsh, "-NoProfile", "-Command", "& '$py' -I '$(Join-Path $repo "tools\gates\layering_check_test.py")'; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\gates\layering_check.py")'; exit `$LASTEXITCODE") `
     { param($o, $c) $c -eq 0 -and ($o -match "(?m)^layering check test: ([1-9]\d*)/\1 ok") -and ($o -match "(?m)^layering: ok") }
+# arch025 PLAN 9.13: every quoted #include of every file a tests/**/isolation.txt manifest stages is itself staged (a merge that
+# adds an include to a staged file without the manifest line fails the iso build only after a long verify has started).
+# Seconds, no build; the block / pass selftest runs first.
+AddStep "cpu_iso_includes" $false @($pwsh, "-NoProfile", "-Command", "& '$py' -I '$(Join-Path $repo "tools\gates\iso_includes_check.py")' --selftest; if (`$LASTEXITCODE) { exit `$LASTEXITCODE }; & '$py' -I '$(Join-Path $repo "tools\gates\iso_includes_check.py")'; exit `$LASTEXITCODE") `
+    { param($o, $c) $c -eq 0 -and ($o -match "(?m)^iso includes check selftest: PASS \(([1-9]\d*)/\1\)") -and ($o -match "(?m)^iso includes check: ok \(") }
 # arch025 D11 N17: modules.json <-> CMake targets (tools/gates/cmake_modules_check.py): every module source file is built by a
 # target (or #included by a built source / the device TU), every compiled product source has exactly one module (the census
 # rule), the iso targets match the isolation manifests. Configure-only (~1 min, HIP on, nothing compiled) into
