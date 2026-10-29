@@ -7,6 +7,7 @@
 
 #include "whirl/chat.h"
 #include "whirl/json.h"
+#include "whirl/json_fields.h"
 
 #include <cstdint>
 #include <optional>
@@ -20,9 +21,10 @@ using RequestError = chat::RequestError;  // message is the HTTP 400 text
 
 // ---- text helpers
 
-std::string_view trimWs(std::string_view s);
-std::string_view trimLeftWs(std::string_view s);
-std::string_view trimRightWs(std::string_view s);
+// (one copy with the chat template rendering: whirl/json_fields.h, arch025-N6 lane 1 leg 7)
+using chat::trimWs;
+using chat::trimLeftWs;
+using chat::trimRightWs;
 // Longest k in [1, pat.size()) such that text ends with pat[0..k).
 std::size_t partialHold(std::string_view text, std::string_view pat);
 // Length of the longest prefix of s that does not end inside a UTF-8

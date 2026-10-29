@@ -93,7 +93,7 @@ int cmdBench(const Args& a) {
     // WHIRL_PROFILE: per-op-class GPU time of the last prefill run of each size
     // (per-op events slow the run down; the printed tok/s is then not comparable)
     q::Profile prof;
-    const bool profiling = envGet("PROFILE").has_value();
+    const bool profiling = whirl::settings::profile() != 0;  // (WHIRL_PROFILE set at all; shared reader, arch025-N15 rest)
     Timer timer;
     // CLI-ATTN-GAP: the prefill runs on the server's / chat's forwards (serverForwardEnds: gfx1151 dense
     // 2048 rows, WHIRL_PREFILL_CHUNK applies), as whirl chat and whirl-server run a prompt. It used to run
@@ -143,9 +143,8 @@ int cmdBench(const Args& a) {
     opt.max_ctx = ctx;
     opt.stream = false;
     opt.print_text = false;
-    if (has_mtp && !envGet("MTP_FULLHEAD")) {
-        const auto dh = envGet("DRAFT_HEAD");
-        model.buildDraftHeadEx(dh && *dh == "q4" ? q::Model::DraftHeadKind::q4 : q::Model::DraftHeadKind::d2);
+    if (has_mtp && !whirl::settings::mtpFullHead()) {  // (shared readers, arch025-N15 rest)
+        model.buildDraftHeadEx(whirl::settings::draftHeadQ4() ? q::Model::DraftHeadKind::q4 : q::Model::DraftHeadKind::d2);
     }
     if (has_mtp) applyDraftVocab(model, tok.t);
     std::optional<u64> ref_hash;

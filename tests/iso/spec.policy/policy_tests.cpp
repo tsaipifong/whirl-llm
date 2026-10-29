@@ -200,11 +200,86 @@ void testDraftVocabSubset() {
     }
 }
 
+// arch025-lane1 leg 8: the automatic MTP draft count, which whirl-server and the CLI each wrote (5728296
+// src/server/server_main.cpp:744 and src/cli/decode.cpp:458-463)
+bool old_srv_auto(const std::optional<std::string>& adapt_env, bool def_automatic, bool drafts_user) {
+    return adapt_env ? (*adapt_env == "auto") : (def_automatic && !drafts_user);
+}
+bool old_cli_auto(const std::optional<std::string>& adapt_env, bool def_automatic, bool dv) {
+    bool a = def_automatic && !dv;
+    if (adapt_env) a = *adapt_env == "auto";  // (MtpAdapt::set / automatic)
+    return a;
+}
+
+void testMtpAutoMode() {
+    std::size_t n = 0;
+    for (const std::optional<std::string>& v : {std::optional<std::string>(), std::optional<std::string>("auto"), std::optional<std::string>("0"),
+                                                std::optional<std::string>("2"), std::optional<std::string>(""), std::optional<std::string>("Auto")})
+        for (const bool def : {false, true})
+            for (const bool given : {false, true}) {
+                const bool a = mtpAutoMode(def, given, v.has_value(), v && *v == "auto");
+                ISO_CHECK(a == old_srv_auto(v, def, given));
+                ISO_CHECK(a == old_cli_auto(v, def, given));
+                ++n;
+            }
+    std::printf("mtp auto mode: %zu cases == the server's and the CLI's 5728296 rule\n", n);
+}
+
+// arch025-lane1 leg 9: --draft dflash and the MTP-only settings, verbatim from 729c080 src/server/server_main.cpp
+// ServerRun::makeEngine :962-969 (relaxacc) and :991-998 (WHIRL_SLOT_DRAFTS, WHIRL_DRAFT_VOCAB / _WINDOW); the log calls
+// recorded as text, numerics::skipItem as its reason
+struct OldDflash {
+    bool relax_on = false;
+    std::string relax_note, skip_why;
+    std::uint32_t slot_drafts = 0;
+    std::string warn, note;
+};
+OldDflash old_dflash(bool use_dflash, bool relax_on, std::uint32_t slot_drafts, bool head_env) {
+    OldDflash o;
+    o.relax_on = relax_on;
+    o.slot_drafts = slot_drafts;
+    if (use_dflash && o.relax_on) {
+        o.relax_note = "relaxacc: not used with --draft dflash (DFlash2 / n-gram drafts keep exact acceptance)";
+        o.relax_on = false;
+        o.skip_why = "--draft dflash: DFlash2 / n-gram drafts keep exact acceptance";
+    }
+    if (use_dflash) {
+        if (o.slot_drafts != 0) o.warn = "WHIRL_SLOT_DRAFTS ignored with --draft dflash (it allocates MTP drafts)";
+        o.slot_drafts = 0;
+        if (head_env) o.note = "WHIRL_DRAFT_VOCAB / WHIRL_DRAFT_WINDOW not used with --draft dflash (MTP draft head only)";
+    }
+    return o;
+}
+void testDflashRules() {
+    std::size_t n = 0;
+    for (const bool ud : {false, true})
+        for (const bool ro : {false, true})
+            for (const std::uint32_t sd : {0u, 1u, 2u, 7u})
+                for (const bool he : {false, true}) {
+                    const OldDflash o = old_dflash(ud, ro, sd, he);
+                    const DflashRelax r = dflashRelax(ud, ro);
+                    ISO_CHECK((r.off ? false : ro) == o.relax_on);
+                    ISO_CHECK(r.note == o.relax_note && r.skip_why == o.skip_why);
+                    std::uint32_t sd_new = sd;
+                    std::string warn, note;
+                    if (ud) {
+                        const DflashMtpOnly m = dflashMtpOnly(sd, he);
+                        sd_new = m.slot_drafts;
+                        warn = m.warn;
+                        note = m.note;
+                    }
+                    ISO_CHECK(sd_new == o.slot_drafts && warn == o.warn && note == o.note);
+                    ++n;
+                }
+    std::printf("dflash rules: %zu cases == 729c080 makeEngine\n", n);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     return iso::run("spec.policy",
                     {{"draft_vocab", testDraftVocab}, {"exe_directory", testExeDirectory}, {"mtp_defaults", testMtpDefaults}, {"ngram", testNgram},
-                     {"batch_drafts", testBatchDrafts}, {"draft_vocab_gate", testDraftVocabGate}, {"draft_vocab_subset", testDraftVocabSubset}},
+                     {"batch_drafts", testBatchDrafts}, {"draft_vocab_gate", testDraftVocabGate}, {"draft_vocab_subset", testDraftVocabSubset}, {"mtp_auto_mode", testMtpAutoMode},
+                     {"dflash_rules", testDflashRules}},
                     argc, argv);
 }

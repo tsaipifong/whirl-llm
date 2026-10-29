@@ -5,6 +5,8 @@
 
 #include "platform/env.h"
 
+#include <algorithm>
+#include <cstdlib>
 #include <exception>
 #include <format>
 #include <string>
@@ -63,5 +65,90 @@ MtpAdapt parseMtpAdapt(const std::optional<std::string>& v) {
 }
 
 MtpAdapt mtpAdapt() { return parseMtpAdapt(envGet("MTP_ADAPT")); }
+
+// (src/server/server_main.cpp MTP_DRAFTS before arch025-N15 rest; the CLI's mtpOpts gave the same value)
+std::optional<std::uint32_t> parseMtpDrafts(const std::optional<std::string>& v, std::uint32_t def, std::uint32_t max) {
+    if (!v) return std::nullopt;
+    std::uint32_t d = def;
+    try {
+        d = static_cast<std::uint32_t>(std::stoul(*v));
+    } catch (const std::exception&) {
+    }
+    return std::clamp(d, 1u, max);
+}
+
+// (src/server/server_main.cpp MTP_PMIN before arch025-N15 rest)
+float parsePmin(const std::optional<std::string>& v, float def) {
+    float p = def;
+    if (v) {
+        try {
+            p = std::stof(*v);
+        } catch (const std::exception&) {
+        }
+    }
+    return p;
+}
+
+float parseNgramSlope(const std::optional<std::string>& v, float def) { return v ? std::strtof(v->c_str(), nullptr) : def; }
+
+std::uint32_t parseProfile(const std::optional<std::string>& v) {
+    if (!v) return 0;
+    return *v == "2" ? 2 : 1;
+}
+
+// (arch025-lane1 leg 8: src/server/server_main.cpp:999 at 5728296)
+std::optional<std::uint32_t> parseSlotDrafts(const std::optional<std::string>& v) {
+    if (!v) return std::nullopt;
+    return *v == "2" ? 2u : (*v != "0" ? 1u : 0u);
+}
+
+// (server_main.cpp:1012-1017 at 5728296)
+std::optional<double> parseGatherMs(const std::optional<std::string>& v) {
+    if (!v) return std::nullopt;
+    try {
+        return std::stod(*v);
+    } catch (const std::exception&) {
+    }
+    return std::nullopt;
+}
+
+// (server_main.cpp:1068-1074 at 5728296)
+KvRamMb parseKvRamMb(const std::optional<std::string>& v) {
+    KvRamMb r;
+    if (!v) return r;
+    r.set = true;
+    r.text = *v;
+    try {
+        r.mb = std::stoull(*v);
+    } catch (const std::exception&) {
+    }
+    return r;
+}
+
+// (server_main.cpp:516-521 SNAP_SETS and :1616-1621 VIS_IDLE_S at 5728296)
+std::optional<std::uint32_t> parseU32Lead(const std::optional<std::string>& v) {
+    if (!v) return std::nullopt;
+    try {
+        return static_cast<std::uint32_t>(std::stoul(*v));
+    } catch (const std::exception&) {
+    }
+    return std::nullopt;
+}
+
+// (server_main.cpp:1533-1538 KV_SSD_GB and :1642-1647 VIS_CACHE_MB at 5728296)
+std::optional<std::uint64_t> parseU64Lead(const std::optional<std::string>& v) {
+    if (!v) return std::nullopt;
+    try {
+        return std::stoull(*v);
+    } catch (const std::exception&) {
+    }
+    return std::nullopt;
+}
+
+// (server_main.cpp:1716-1717 GOV_RECOVER_S / GOV_HOLD_S at 5728296)
+std::optional<double> parseStrtod(const std::optional<std::string>& v) {
+    if (!v) return std::nullopt;
+    return std::strtod(v->c_str(), nullptr);
+}
 
 }  // namespace whirl::settings

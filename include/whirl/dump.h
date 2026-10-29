@@ -24,6 +24,9 @@ namespace whirl::dump {
 // WHIRL_<name> set, not empty and not "0"; read on every call through platform::env::get (a dump is not on a hot
 // path). Was envOn (arch025 PL1b renamed it: the env read is the platform layer's, this is a dump switch)
 bool switchOn(const char* name);
+// The rule on a value read earlier (nullopt = unset): set, not empty and not "0". One copy for switchOn and the
+// numerics on / off runtime switches (src/common/numerics.cpp wrote it out as its own switchOn; arch025-N6 lane 1 leg 7).
+inline bool switchOnValue(const std::optional<std::string>& v) { return v.has_value() && !v->empty() && *v != "0"; }
 
 // "D kv: site=<site> mode=<m> items=<hex> custom=<0|1> moe=<0|1> caps=q8h:<b>,q8v:<b>,q4:<b>,fast_q8h:<b>
 //  forced=<name|none> -> kv=<name> debug=<0|1> why=<why>"

@@ -1,0 +1,59 @@
+# ARCH-1 8.5 isolation check of server.image_embeddings (arch025-lane1 leg 8): the module's sources, its DECLARED
+# dependencies and the ONLY headers they may see. Format: tests/sampling/isolation.txt; read by cmake/iso.cmake and
+# tools/gates/iso_check.py.
+# declared dependencies: the server log (src/server/log.cpp: the per-request image lines), writeFile of lib whirl's
+# common.base (src/common/util.cpp, WHIRL_VIS_DUMP) and the platform layer util.cpp / log.cpp call (args, fs, proc, time,
+# env), the host-memory NullBackend (src/device/null_backend.cpp) for the test, and the device / server / vision contracts
+# (headers only: device/backend.h, server/backend.h ServerModel&, server/vision_iface.h ServerVision*, whirl/vision.h
+# with the inline lendRegions). Test doubles: tests/iso/fake_server_model.h and a fake encoder in the test. No engine,
+# no encoder (src/vision), no HIP runtime, no tokenizer. Mutants: hip and engine (log and now are declared: log.cpp,
+# util.cpp's nowSeconds).
+module    server.image_embeddings
+exe       whirl-iso-server-image-embeddings-tests
+mutate    src/server/engine_vision.cpp
+mutsym    hip
+mutsym    engine
+syslib    winmm.lib
+# module sources
+src       src/server/engine_vision.cpp
+# declared dependency sources
+src       src/server/log.cpp
+src       src/common/util.cpp
+src       src/platform/args_win.cpp
+src       src/platform/fs_win.cpp
+src       src/platform/proc_win.cpp
+src       src/platform/env_win.cpp
+src       src/platform/time_win.cpp
+src       src/device/null_backend.cpp
+# headers (include closure of the sources above)
+hdr       include/whirl/common.h
+hdr       include/whirl/device_mem.h
+hdr       include/whirl/device_profile.h
+hdr       include/whirl/hip.h
+hdr       include/whirl/kv_format.h
+hdr       include/whirl/model_types.h
+hdr       include/whirl/prefill_schedule.h
+hdr       include/whirl/spec_sample.h
+hdr       include/whirl/thread_annotations.h
+hdr       include/whirl/uma_mem.h
+hdr       include/whirl/vision.h
+hdr       include/whirl/vismap.h
+hdr       src/device/backend.h
+hdr       src/device/handles.h
+hdr       src/device/null_backend.h
+hdr       src/model/qwen35/kv.h
+hdr       src/platform/args.h
+hdr       src/platform/env.h
+hdr       src/platform/fs.h
+hdr       src/platform/fs_fake.h
+hdr       src/platform/proc.h
+hdr       src/platform/time.h
+hdr       src/server/backend.h
+hdr       src/server/engine_vision.h
+hdr       src/server/log.h
+hdr       src/server/vision_iface.h
+# test program
+testsrc   tests/iso/server.image_embeddings/image_embeddings_tests.cpp
+testhdr   tests/iso/fake_server_model.h
+testhdr   tests/iso/iso_test.h
+testhdr   tests/test_check.h

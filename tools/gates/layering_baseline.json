@@ -49,6 +49,10 @@
   ],
   [
    "cli",
+   "chat"
+  ],
+  [
+   "cli",
    "common.base"
   ],
   [
@@ -1118,6 +1122,10 @@
   [
    "server.image_embeddings",
    "vision"
+  ],
+  [
+   "server.kv_fit",
+   "common.base"
   ],
   [
    "server.kv_fit",

@@ -75,12 +75,20 @@
 
 namespace whirl::chat {
 
+// The text one image stands for in a prompt (an image content part, and one per --image in `whirl chat`): one copy for
+// the template rendering and the CLI (arch025 lane 1 leg 7, the vision CLI / server comparison; llama.cpp
+// mtmd_default_marker is one string for mtmd-cli and the server too).
+inline constexpr std::string_view k_image_placeholder = "<|vision_start|><|image_pad|><|vision_end|>";
+
 enum class TemplateKind { a, b, b_pyargs };
 
 // `a` if the template text mentions reasoning_effort; otherwise `b_pyargs` if
 // it contains `args_value is mapping` (scalar arguments via `| string`), else `b`.
 TemplateKind detectTemplate(std::string_view chat_template);
 const char* templateName(TemplateKind k);
+// What the variant renders, as whirl-server's "chat template:" startup line describes it (arch025-lane1 leg 9; was the
+// ternary in server_main.cpp buildModel).
+const char* templateDescription(TemplateKind k);
 
 // Invalid request content; the message is suitable for an HTTP 400 reply.
 class RequestError : public std::runtime_error {

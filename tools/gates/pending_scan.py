@@ -14,7 +14,8 @@ Rules (sources under src/ and include/; comments and string literals are not cod
   include   whirl_server_core (cmake/server.cmake) reaches include/whirl/model.h through its sources or the repo
             headers they include (transitively); one site per (core source, header chain). Blocking since M3 (any mode).
   env       a process-environment read (getenv / _dupenv_s / _wgetenv / GetEnvironmentVariable / GetEnvironmentStrings
-            / envGet / envFlag / envOn / env("...") / dump::envOn); allowed in src/platform/ and src/config/env_snapshot.*.
+            / envGet / envFlag / envOn / env("...") / dump::envOn); allowed in src/platform/, src/config/env_snapshot.* and the
+            settings modules src/config/run_settings.* / device_choice.h (arch025-N15).
             The pending counts of the src/cli/ command files (arch025-C2 split of src/cli/main.cpp) and
             src/server/server_main.cpp stay at 0.2.5's end (PLAN Noted).
   arch      a host-side GPU-architecture branch (Arch::gfx<N>) outside the device layer: allowed in src/hip/,
@@ -99,7 +100,10 @@ RULES = {
     # blocked (arch025-F7, plan X-1): no env read and no pending entry, in report mode too (exit 1). The forward and the
     # server engine read the load's EnvSnapshot / their Model members only; src/ops (the forward's choices since
     # F5 / F6) is pure.
-    "env": {"allowed": ["src/platform/", "src/config/env_snapshot."], "what": "env read",
+    # arch025-N15 (lane 1 leg 7): the run settings module config.settings (src/config/run_settings.*) and the GPU choice
+    # config.device (src/config/device_choice.h) are the one read point of the WHIRL_* names both front ends share
+    "env": {"allowed": ["src/platform/", "src/config/env_snapshot.", "src/config/run_settings.", "src/config/device_choice.h"],
+            "what": "env read",
             "blocked": ["src/model/qwen35/forward/", "src/model/qwen35/forward_internal.h", "src/model/forward.cpp", "src/server/engine",
                         "src/model/qwen35/server_model.cpp", "src/ops/", "include/whirl/ops/"]},
     # blocked since arch025-M6: host Arch:: values only in the device layer (DeviceProfile and its named defaults); the
@@ -440,6 +444,10 @@ def selftest() -> int:
     case("env pending counts exactly", "env", {"src/cli/main.cpp": 'envGet("A"); envGet("B");\nstd::getenv("C");\n'},
          f"src/cli/main.cpp{T}3{T}C2\n", "block", 0)
     case("env snapshot file allowed", "env", {"src/config/env_snapshot.cpp": 'std::getenv("A");\n'}, None, "block", 0)
+    case("N15: the settings modules allowed", "env",
+         {"src/config/run_settings.h": 'inline bool a() { return envFlag("A", true); }\n', "src/config/device_choice.h": 'if (envGet("B")) {}\n'},
+         None, "block", 0)
+    case("N15: another src/config file is not", "env", {"src/config/other.cpp": 'auto v = envGet("C");\n'}, None, "block", 1)
     # arch025-F7: forward / engine / ops blocked in any mode, even with a pending entry
     case("F7: forward env read blocked in report mode", "env", {"src/model/qwen35/forward/dispatch.cpp": 'bool a = envFlag("HEAD_GEMVX", false);\n'},
          None, "report", 1)

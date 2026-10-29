@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "cli/cli.h"
+#include "whirl/chat.h"  // chat::k_image_placeholder (one copy with the template rendering, arch025 lane 1 leg 7)
 #include "cli/dflash_dump.h"
 
 namespace cli {
@@ -108,7 +109,7 @@ int cmdChat(const Args& a) {
         // vision: one image placeholder per --image before the text (as llama-mtmd-cli)
         std::string marks;
         if (!raw)
-            for (std::size_t i = 0; i < a.images.size(); ++i) marks += "<|vision_start|><|image_pad|><|vision_end|>";
+            for (std::size_t i = 0; i < a.images.size(); ++i) marks += whirl::chat::k_image_placeholder;  // (the template's text, whirl/chat.h)
         ids = tok.encode(raw ? p : chatWrap(marks + p, think));
     }
 #if WHIRL_HAVE_VISION
@@ -179,7 +180,7 @@ int cmdChat(const Args& a) {
     // vision: encode the images now (borrowing the prefill scratch), then let the
     // prefill inject their rows and use multi-section RoPE
     if (vis) {
-        if (auto mv = envGet("VIS_MODE")) vis->mode = vision::parseMode(*mv).value_or(vision::Mode::automatic);
+        if (auto mv = whirl::settings::visMode()) vis->mode = vision::parseMode(*mv).value_or(vision::Mode::automatic);
         std::array<std::array<std::uint64_t, 2>, 16> lend_raw{};
         const std::size_t n_lend = model.lendScratch(lend_raw);
         const std::vector<vision::Region> lend = vision::lendRegions(lend_raw, n_lend);
@@ -190,7 +191,7 @@ int cmdChat(const Args& a) {
             spans[i].emb = embs.back().p;
             out(fmt("  image %zu: encoded %u tokens in %.1f ms (%s%s%s)\n", i, pp.nTokens(), st.ms_total, st.resident ? "resident weights" : "streamed weights",
                     st.ms_upload > 0 ? ", incl. upload" : "", st.borrowed_extra > 0 ? ", extra VRAM" : ""));
-            if (auto dp = envGet("VIS_DUMP")) {
+            if (auto dp = whirl::settings::visDump()) {
                 const Pinned& e = embs.back();
                 writeFile(*dp + "." + std::to_string(i) + ".f32", std::string_view(reinterpret_cast<const char*>(e.p), e.n * 4));
             }
@@ -205,7 +206,7 @@ int cmdChat(const Args& a) {
     // arch025-N15c)
     if (auto v = whirl::settings::prefillBatch(settingsWarn)) model.max_batch = vram::prefillBatchCap(model.max_batch, *v);
     q::Profile prof;
-    const bool profiling = envGet("PROFILE").has_value();
+    const bool profiling = whirl::settings::profile() != 0;  // (WHIRL_PROFILE set at all; shared reader, arch025-N15 rest)
     if (profiling) model.prof = &prof;
     applyRuntimeEnv(model, true);
     if (use_dflash) use_dflash = loadDraftModelEnv(model, a);
@@ -352,7 +353,7 @@ int cmdChat(const Args& a) {
             prof.reset();
         }
         // WHIRL_DRAFT_HEAD=q4 builds the older Q4_K draft head instead of the 2-bit one
-        if (!envGet("MTP_FULLHEAD")) {
+        if (!whirl::settings::mtpFullHead()) {
             model.buildDraftHeadEx(whirl::settings::draftHeadQ4() ? q::Model::DraftHeadKind::q4 : q::Model::DraftHeadKind::d2);
         }
         applyDraftVocab(model, tok.t);

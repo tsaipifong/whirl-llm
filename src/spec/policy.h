@@ -104,6 +104,28 @@ BatchDrafts defaultBatchDrafts(bool moe);
 // WHIRL_MTP_BATCH_DRAFTS=d1,d2,...: entry k (from 1) for k slots; empty fields are skipped, a value that is not a number
 // is 1, each is capped at max_drafts, the slots after the last value keep the last value.
 BatchDrafts batchDraftsFrom(BatchDrafts base, const std::string& text);
+// The automatic MTP draft count (cost model) on or off, whirl-server's and the CLI's one rule (arch025-lane1 leg 8: each
+// wrote it, 5728296 server_main.cpp:744 / cli/decode.cpp:458-463): WHIRL_MTP_ADAPT set -> on exactly when it is "auto";
+// else the device default (MtpDefaults::automatic), unless the draft count was given (an explicit count stays fixed).
+bool mtpAutoMode(bool def_automatic, bool drafts_given, bool adapt_set, bool adapt_auto);
+// whirl-server --draft dflash and the MTP-only settings (arch025-lane1 leg 9; were ServerRun::makeEngine rules).
+// relaxacc relaxes MTP drafts only (whirl/dflash_policy.h relaxApplies): with DFlash2 it is turned off (off), with the
+// info line (note) and the reason numerics::skipItem records (skip_why); otherwise nothing changes.
+struct DflashRelax {
+    bool off = false;
+    std::string note;
+    std::string skip_why;
+};
+DflashRelax dflashRelax(bool use_dflash, bool relax_on);
+// With --draft dflash: WHIRL_SLOT_DRAFTS (the per-slot MTP draft allocation) is 0, with a warning when it was set
+// (warn), and an info line when the draft-head settings WHIRL_DRAFT_VOCAB / _WINDOW / _WINDOW_MIN are set (note). Only
+// called with --draft dflash.
+struct DflashMtpOnly {
+    std::uint32_t slot_drafts = 0;
+    std::string warn;
+    std::string note;
+};
+DflashMtpOnly dflashMtpOnly(std::uint32_t slot_drafts, bool draft_head_env);
 
 struct DraftAccept {
     std::array<float, max_ng_drafts> alpha;

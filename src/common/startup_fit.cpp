@@ -4,6 +4,7 @@
 #include "whirl/startup_fit.h"
 
 #include "whirl/json.h"
+#include "whirl/small_helpers.h"  // alignUp (arch025-lane1 leg 8: contextPlan / ramFloor)
 
 #include <algorithm>
 #include <format>
@@ -279,6 +280,100 @@ UmaFixed umaFixed(const UmaFixedIn& in) {
     r.fixed = in.weights + in.state + in.bufs + r.slots + r.ck + (in.has_mtp ? 65536ull * in.n_embd * 5 / 16 : 0) + (256ull << 20);
     r.fixed += r.fixed / 12;  // +8%: measured fast-mode Swift fixed part 3.9% above the itemized sum
     return r;
+}
+
+// (arch025-lane1 leg 8: src/server/server_main.cpp:348-352 at 5728296)
+ContextPlan contextPlan(std::optional<std::uint32_t> ctx, std::optional<std::uint32_t> ctx_per_slot, bool uma, std::uint32_t page) {
+    ContextPlan p;
+    p.pool_req = ctx ? ctx : (uma ? std::optional<std::uint32_t>(uma_pool_default) : std::nullopt);
+    p.slot_ctx = static_cast<std::uint32_t>(alignUp(
+        ctx_per_slot ? *ctx_per_slot : (p.pool_req ? std::min(*p.pool_req, ctx_per_slot_default) : ctx_per_slot_default), page));
+    return p;
+}
+
+// (server_main.cpp:457 at 5728296)
+std::size_t ckptDefault(std::uint32_t parallel) { return parallel == 1 ? 4 : (parallel <= 4 ? 3 : 1); }
+
+// (server_main.cpp:459-462 at 5728296)
+CkptCap capCkpts(std::size_t n_ck, std::size_t max_ck) {
+    CkptCap c;
+    c.n = n_ck;
+    if (n_ck > max_ck) {
+        c.warn = std::format("WHIRL_SERVE_CKPTS={} is above the maximum ({}); using {}", n_ck, max_ck, max_ck);
+        c.n = max_ck;
+    }
+    return c;
+}
+
+// (server_main.cpp:898 and :1049-1050 at 5728296)
+std::uint64_t ckptBytes(std::uint64_t state, std::uint32_t n_vocab, std::uint32_t n_embd) {
+    return state + static_cast<std::uint64_t>(n_vocab) * 4 + static_cast<std::uint64_t>(n_embd) * 4;
+}
+
+// (server_main.cpp:1048-1055 at 5728296)
+RamFloor ramFloor(std::uint32_t slot_ctx, std::uint64_t kv_bytes_per_token_f16, std::size_t n_ck, std::uint64_t ck_stride,
+                  std::uint64_t auto_min_mb) {
+    RamFloor r;
+    const std::uint64_t full = static_cast<std::uint64_t>(slot_ctx) * kv_bytes_per_token_f16 + n_ck * ck_stride;
+    r.entry_mb = alignUp(full, 1ull << 30) >> 20;
+    r.floor_mb = std::max(auto_min_mb, r.entry_mb);
+    return r;
+}
+
+// ---- arch025-lane1 leg 9 (729c080 src/server/server_main.cpp, moved verbatim) -----------------------------------------
+// (:1086-1094, reserveRamTier)
+std::string pinnedGpusText(const std::vector<PinnedGpu>& gpus) {
+    std::string per;
+    for (const PinnedGpu& g : gpus)
+        per += std::format("{}{} MiB {} (this process {} MiB, all programs {})", per.empty() ? "" : ", ",
+                           (g.nonlocal_budget > 0 ? g.nonlocal_budget : g.shared_system) >> 20,
+                           g.nonlocal_budget > 0 ? "non-local budget" : "shared GPU memory", g.own_nonlocal >> 20,
+                           g.adapter_shared ? std::format("{} MiB", g.adapter_shared >> 20) : std::string("unknown"));
+    return per;
+}
+
+// (:1408-1410, reportPool)
+double ckptMib(std::uint64_t state, std::uint32_t n_vocab, std::uint32_t n_embd) {
+    return static_cast<double>(ckptBytes(state, n_vocab, n_embd)) / (1024.0 * 1024.0);
+}
+
+// (:1276-1279, planPool)
+std::uint32_t defaultPoolTokens(std::uint64_t avail, std::uint64_t per_tok, std::uint64_t pool_cap, std::uint32_t kv_page) {
+    const std::uint64_t t = std::min(avail / per_tok, pool_cap);
+    return static_cast<std::uint32_t>(t / kv_page * kv_page);
+}
+
+// (:1280-1285, planPool)
+std::string poolRefusal(std::uint32_t pool_tokens) {
+    if (pool_tokens >= pool_min_tokens) return {};
+    return std::format("not enough GPU memory left for the KV cache: a pool of {} tokens (at least 4096 needed).\n"
+                       "  Use a smaller model or quantization, give --ctx explicitly,\n"
+                       "  or close other programs that use the GPU.",
+                       pool_tokens);
+}
+
+// (:1395-1403, planPool)
+std::string poolFloorWarn(std::uint32_t pool_now, std::uint32_t slot_ctx, std::uint32_t parallel, bool int8_hint) {
+    const std::uint32_t second = parallel > 1 ? std::min(floor_second_ctx, slot_ctx) : 0;
+    const std::uint64_t floor = static_cast<std::uint64_t>(slot_ctx) + second;
+    if (pool_now >= floor) return {};
+    return std::format("kv pool {} tokens < {} (one {}-token request + a second one reaching {}): concurrent long requests wait in "
+                       "the queue, or end early while generating (finish_reason length, finish_cause kv_pool_exhausted){}",
+                       pool_now, floor, slot_ctx, second, int8_hint ? "; --balance allows int8 KV (a longer pool)" : "");
+}
+
+// (:1722-1726, runServer)
+std::optional<std::string> targetNotReached(bool parallel_given, std::uint32_t ctx_eff, std::uint64_t target_ctx, std::uint32_t parallel) {
+    if (!(parallel_given && ctx_eff < target_ctx)) return std::nullopt;
+    return std::format("target not reached: context {} tokens per request with {} slot(s), less than {}", ctx_eff, parallel, target_ctx);
+}
+
+// (:1747-1750, runServer)
+std::string startupNote(const std::vector<std::string>& adjusted) {
+    std::string note;
+    for (const std::string& a : adjusted)
+        if (a.find("--ctx-per-slot") != std::string::npos || a.rfind("-c ", 0) == 0) note += (note.empty() ? "" : "; ") + a;
+    return note.empty() ? std::string() : "adjusted at startup to fit the GPU memory: " + note;
 }
 
 }  // namespace whirl::startfit

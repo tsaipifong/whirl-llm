@@ -72,6 +72,9 @@ std::uint64_t pinnedRoomMb(const PinnedState& s);
 // upper bound (REVIEW-B0 N1): Vision::load pads its layout (vision.cpp: 256-byte / 4-KiB alignment, n_ff_pad, f32
 // position embedding and biases), so Swift's 884.6 MiB mmproj pinned 887 MiB (REVIEW-S8-719-3 N3-4).
 std::uint64_t mmprojPinnedBytes(std::uint64_t file_bytes);
+// The per-GPU part of the "kv tier: pinned memory now:" line: "<budget or shared> MiB <which> (this process <own> MiB, all
+// programs <adapter shared or unknown>)", ", "-joined (arch025-lane1 leg 9; was ServerRun::reserveRamTier's loop).
+std::string pinnedGpusText(const std::vector<PinnedGpu>& gpus);
 // The reason text of a RAM tier lowered to the pinned room (log and "adjusted:" line). It must match none of the error
 // patterns the gates and repro scripts scan server logs for (golden.ps1, kvram719_tier.ps1, fix719.ps1: "hipError",
 // "hip ... 719", "| failed:", "PAL failed"): a healthy, adjusted server must not read as a failed one (REVIEW-S8-719 A1).
@@ -210,6 +213,71 @@ struct UmaFixed {
     std::uint64_t slots = 0, ck = 0, fixed = 0;
 };
 UmaFixed umaFixed(const UmaFixedIn& in);
+
+// ---- the sizing rules serveMain wrote inline (arch025-lane1 leg 8: server_main.cpp keeps the measurements, the log
+// lines and their order; these are the decisions, pinned against the 5728296 code in tests/iso/server.kv_fit) ---------
+// The shared KV pool asked for and the per-request context. Pool: -c, else uma_pool_default on an integrated GPU (the
+// pool the BIOS carve-out check sizes), else none (sized from the VRAM left after loading). Per request: --ctx-per-slot,
+// else min(pool, ctx_per_slot_default), else ctx_per_slot_default; rounded up to whole KV pages (`page` tokens).
+inline constexpr std::uint32_t ctx_per_slot_default = 131072;
+inline constexpr std::uint32_t uma_pool_default = 262144;
+struct ContextPlan {
+    std::optional<std::uint32_t> pool_req;
+    std::uint32_t slot_ctx = 0;
+};
+ContextPlan contextPlan(std::optional<std::uint32_t> ctx, std::optional<std::uint32_t> ctx_per_slot, bool uma, std::uint32_t page);
+// Prefix checkpoints per slot by default (WHIRL_SERVE_CKPTS unset): 4 with one slot, 3 with up to 4 slots (TAIL-CK:
+// tail + prompt-end + gen-end), 1 above.
+std::size_t ckptDefault(std::uint32_t parallel);
+// A checkpoint count above what tier entries / restore maps hold (tier::max_ck, FR-CACHE P2-3) is lowered to it; `warn`
+// is the warning line's text then (empty otherwise).
+struct CkptCap {
+    std::size_t n = 0;
+    std::string warn;
+};
+CkptCap capCkpts(std::size_t n_ck, std::size_t max_ck);
+// One prefix checkpoint's bytes: the recurrent state of the DeltaNet layers + the logits row (n_vocab f32) + the hidden
+// row (n_embd f32). The slot re-check after loading and the RAM tier's entry stride both use it.
+std::uint64_t ckptBytes(std::uint64_t state, std::uint32_t n_vocab, std::uint32_t n_embd);
+// The same checkpoint in MiB, as the "prefix cache:" / "slots:" / "shared prefix checkpoints:" lines print it (leg 9).
+double ckptMib(std::uint64_t state, std::uint32_t n_vocab, std::uint32_t n_embd);
+// The DeltaNet (recurrent) layers of a model config: the layers that are not attention layers (Config::isAttn). One
+// rule for the slot re-check after loading and the engine's checkpoint layout; the engine counted the layers whose
+// recurrent state Model::load allocated, which is exactly !isAttn (src/model/loader.cpp; arch025-lane1 leg 9, HANDOFF
+// section 48). A template so this module needs no model header (any config with n_layer and isAttn(il)).
+template <class Cfg>
+std::uint64_t deltaNetLayers(const Cfg& cfg) {
+    std::uint64_t ng = 0;
+    for (std::uint32_t li = 0; li < cfg.n_layer; ++li)
+        if (!cfg.isAttn(li)) ++ng;
+    return ng;
+}
+// The automatic RAM tier's floor: one max-context entry (slot_ctx tokens of f16 KV + n_ck checkpoints of ck_stride
+// bytes) in whole GiB, as MiB (entry_mb), and max(auto_min_mb, entry_mb) (floor_mb).
+struct RamFloor {
+    std::uint64_t entry_mb = 0;
+    std::uint64_t floor_mb = 0;
+};
+RamFloor ramFloor(std::uint32_t slot_ctx, std::uint64_t kv_bytes_per_token_f16, std::size_t n_ck, std::uint64_t ck_stride,
+                  std::uint64_t auto_min_mb);
+
+// ---- the KV pool after sizing (arch025-lane1 leg 9; were ServerRun::planPool / runServer rules)
+// The pool without -c and without a fit (WHIRL_KV debug override): what the usable VRAM holds, at most pool_cap tokens,
+// whole pages.
+std::uint32_t defaultPoolTokens(std::uint64_t avail, std::uint64_t per_tok, std::uint64_t pool_cap, std::uint32_t kv_page);
+// The smallest pool the server starts with, and the refusal text below it ("" = it starts).
+inline constexpr std::uint32_t pool_min_tokens = 4096;
+std::string poolRefusal(std::uint32_t pool_tokens);
+// A second long request the pool should hold besides one full request (--parallel > 1).
+inline constexpr std::uint32_t floor_second_ctx = 65536;
+// The warning when the pool holds less than one full request plus a second one of up to floor_second_ctx tokens ("" =
+// none); int8_hint adds the "--balance allows int8 KV" hint (precise, dense, f16 KV).
+std::string poolFloorWarn(std::uint32_t pool_now, std::uint32_t slot_ctx, std::uint32_t parallel, bool int8_hint);
+// The "target not reached" entry of the startup adjustments: with an explicit --parallel the context per request ended
+// below target_ctx (nullopt: reached).
+std::optional<std::string> targetNotReached(bool parallel_given, std::uint32_t ctx_eff, std::uint64_t target_ctx, std::uint32_t parallel);
+// The note /health shows for the startup adjustments of the context (-c / --ctx-per-slot); "" when none.
+std::string startupNote(const std::vector<std::string>& adjusted);
 
 // The "startup" object of GET /props and GET /health (effective values after the startup fit).
 struct StartupInfo {

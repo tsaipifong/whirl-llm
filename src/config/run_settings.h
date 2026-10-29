@@ -79,4 +79,69 @@ inline std::optional<std::uint32_t> vramHeadroomMb(const Warn& warn) {
 inline bool poolReserveGiven() { return envGet("POOL_RESERVE_MB").has_value(); }
 inline std::uint32_t poolReserveMb(std::uint32_t def, const Warn& warn) { return envU32("POOL_RESERVE_MB", def, warn); }
 
+// ---- the other names both front ends read (arch025-N15 rest, lane 1 leg 7; DISCOVERY review 7: 26 shared names, the 11
+// above + HIP_DEVICE in config.device + these 14). Each read stays at its old place; with a variable unset both front ends
+// read what they read before. The differences of the former readers (bad values only) are in DESIGN 3.9.
+// WHIRL_MTP_DRAFTS: the fixed draft count. nullopt when unset (so "given at all" = has_value()); a text std::stoul cannot
+// read gives `def`; clamped to [1, max] (both former readers).
+std::optional<std::uint32_t> parseMtpDrafts(const std::optional<std::string>& v, std::uint32_t def, std::uint32_t max);
+inline std::optional<std::uint32_t> mtpDrafts(std::uint32_t def, std::uint32_t max) { return parseMtpDrafts(envGet("MTP_DRAFTS"), def, max); }
+// WHIRL_MTP_PMIN: std::stof; unset or unreadable = `def` (the server's rule; the CLI used 0 for an unreadable value).
+float parsePmin(const std::optional<std::string>& v, float def);
+inline float mtpPmin(float def) { return parsePmin(envGet("MTP_PMIN"), def); }
+// WHIRL_MTP_NMIN / WHIRL_NGRAM_MIN / WHIRL_NGRAM_MAX: the u32 rule with the caller's default (the server's; the CLI read
+// them with strtoul).
+inline std::uint32_t mtpNmin(std::uint32_t def, const Warn& warn) { return envU32("MTP_NMIN", def, warn); }
+inline std::uint32_t ngramMin(std::uint32_t def, const Warn& warn) { return envU32("NGRAM_MIN", def, warn); }
+inline std::uint32_t ngramMax(std::uint32_t def, const Warn& warn) { return envU32("NGRAM_MAX", def, warn); }
+// WHIRL_MTP_FULLHEAD set at all: draft with the full LM head (no draft head).
+inline bool mtpFullHead() { return envGet("MTP_FULLHEAD").has_value(); }
+// WHIRL_GDN_REPLAY (default on), WHIRL_NGRAM (the caller's default: on), WHIRL_NGRAM_FORCE: set and not "0".
+inline bool gdnReplay() { return envFlag("GDN_REPLAY", true); }
+inline bool ngram(bool def) { return envFlag("NGRAM", def); }
+inline bool ngramForce(bool def) { return envFlag("NGRAM_FORCE", def); }
+// WHIRL_NGRAM_SLOPE: std::strtof of the text (both former readers); `def` when unset.
+float parseNgramSlope(const std::optional<std::string>& v, float def);
+inline float ngramSlope(float def) { return parseNgramSlope(envGet("NGRAM_SLOPE"), def); }
+// WHIRL_PROFILE: 0 unset, 2 for "2", 1 for any other value (the CLI profiles when it is not 0).
+std::uint32_t parseProfile(const std::optional<std::string>& v);
+inline std::uint32_t profile() { return parseProfile(envGet("PROFILE")); }
+// WHIRL_VIS_MODE / WHIRL_VIS_DUMP: passed as text (vision::parseMode / the dump prefix), unchanged.
+inline std::optional<std::string> visMode() { return envGet("VIS_MODE"); }
+inline std::optional<std::string> visDump() { return envGet("VIS_DUMP"); }
+// WHIRL_VIS_CKPT_MIN: the u32 rule, nullopt when unset or bad ("ignored"; the CLI's; the server read it with std::stoul).
+inline std::optional<std::uint32_t> visCkptMin(const Warn& warn) { return envU32("VIS_CKPT_MIN", warn); }
+
+
+// ---- whirl-server's engine / tier values it parsed by hand (arch025-lane1 leg 8; the rules of 5728296 server_main.cpp,
+// pinned in tests/iso/config.settings server_leg8). Each is read at its old place; the messages stay in server_main.cpp.
+// WHIRL_SLOT_DRAFTS: unset nullopt; "2" = 2 (cost-model allocation), "0" = 0 (uniform), any other text 1 (marginal-gain swaps).
+std::optional<std::uint32_t> parseSlotDrafts(const std::optional<std::string>& v);
+inline std::optional<std::uint32_t> slotDrafts() { return parseSlotDrafts(envGet("SLOT_DRAFTS")); }
+// WHIRL_GATHER_MS: std::stod (a leading number counts); unset or unreadable nullopt (the engine's default stays).
+std::optional<double> parseGatherMs(const std::optional<std::string>& v);
+inline std::optional<double> gatherMs() { return parseGatherMs(envGet("GATHER_MS")); }
+// WHIRL_KV_RAM_MB: std::stoull (a leading number counts). set = the variable exists; mb = nullopt when it is not a number
+// (the caller warns with `text`, the value as set).
+struct KvRamMb {
+    bool set = false;
+    std::optional<std::uint64_t> mb;
+    std::string text;
+};
+KvRamMb parseKvRamMb(const std::optional<std::string>& v);
+inline KvRamMb kvRamMb() { return parseKvRamMb(envGet("KV_RAM_MB")); }
+// The leading-number rules whirl-server wrote by hand (unset or unreadable = nullopt, the caller keeps its default):
+// parseU32Lead = static_cast<uint32_t>(std::stoul) (WHIRL_SNAP_SETS for the DFlash2 pre-load fit, WHIRL_VIS_IDLE_S),
+// parseU64Lead = std::stoull (WHIRL_KV_SSD_GB, WHIRL_VIS_CACHE_MB), parseStrtod = std::strtod, which never fails: an
+// unreadable text is 0 (WHIRL_GOV_RECOVER_S / WHIRL_GOV_HOLD_S, the memory governor's test overrides).
+std::optional<std::uint32_t> parseU32Lead(const std::optional<std::string>& v);
+std::optional<std::uint64_t> parseU64Lead(const std::optional<std::string>& v);
+std::optional<double> parseStrtod(const std::optional<std::string>& v);
+inline std::optional<std::uint32_t> snapSets() { return parseU32Lead(envGet("SNAP_SETS")); }
+inline std::optional<std::uint32_t> visIdleS() { return parseU32Lead(envGet("VIS_IDLE_S")); }
+inline std::optional<std::uint64_t> kvSsdGb() { return parseU64Lead(envGet("KV_SSD_GB")); }
+inline std::optional<std::uint64_t> visCacheMb() { return parseU64Lead(envGet("VIS_CACHE_MB")); }
+inline std::optional<double> govRecoverS() { return parseStrtod(envGet("GOV_RECOVER_S")); }
+inline std::optional<double> govHoldS() { return parseStrtod(envGet("GOV_HOLD_S")); }
+
 }  // namespace whirl::settings

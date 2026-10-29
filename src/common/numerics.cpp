@@ -238,9 +238,9 @@ const std::array<RuntimeValues::Entry, RuntimeValues::n_fields>& RuntimeValues::
     using S = RuntimeValues;
     static const std::array<Entry, n_fields> t = {{
         {"FLOAT_GEMV", &S::float_gemv},
-        {"DBG", &S::dbg},
-        {"GEMV_MAX", &S::gemv_max},
-        {"NO_GRAPH", &S::no_graph},
+        {"DBG", &S::dbg, true},
+        {"GEMV_MAX", &S::gemv_max, true},
+        {"NO_GRAPH", &S::no_graph, true},
         {"NO_FUSE", &S::no_fuse},
         {"DRAFT_WINDOW", &S::draft_window},
         {"DRAFT_WINDOW_MIN", &S::draft_window_min},
@@ -251,8 +251,8 @@ const std::array<RuntimeValues::Entry, RuntimeValues::n_fields>& RuntimeValues::
         {"ATTN_WS4", &S::attn_ws4},
         {"MOE_BN", &S::moe_bn},
         {"GDN_SEQ", &S::gdn_seq},
-        {"GV_GROUP", &S::gv_group},
-        {"GV_NMAX", &S::gv_nmax},
+        {"GV_GROUP", &S::gv_group, true},
+        {"GV_NMAX", &S::gv_nmax, true},
         {"GDN_V0", &S::gdn_v0},
         {"WIDE_VERIFY", &S::wide_verify},
         {"HEAD_CHUNK", &S::head_chunk},
@@ -305,7 +305,7 @@ bool flagOr(const Raw& v, bool def) { return v ? *v != "0" : def; }
 // bug-fastonly (audit F-D): an on / off runtime switch (WHIRL_NAIVE_ATTN, NO_FUSE, FLOAT_GEMV, GDN_SEQ, NO_GRAPH) is on
 // for any value but "0" and "" (was: set at all, so WHIRL_NAIVE_ATTN=0 turned the naive attention ON); the same rule as
 // GV_GROUP / ATTN_WIDE here and llama.cpp ggml_cuda_env_flag (atoi(v) != 0)
-bool switchOn(const Raw& v) { return v && !v->empty() && *v != "0"; }
+// (the rule is dump::switchOnValue, whirl/dump.h: one copy with dump::switchOn, arch025-N6 lane 1 leg 7)
 // cli main.cpp:345-353 envU32: std::stoul, any exception -> not set
 std::optional<std::uint32_t> cliU32(const Raw& v) {
     if (!v) return std::nullopt;
@@ -442,30 +442,30 @@ void loadOverrides(Plan& p, const Request& r, const Target& t, bool items) {
 void runtimeFlags(Front front, const RuntimeValues& v, bool k_gdn_v0, Flags& F) {
     if (front == Front::cli) {
         // cli main.cpp:1030-1048 (applyRuntimeEnv; applyGemvEnv at :1032 sets tune rows, not a flag)
-        if (switchOn(v.float_gemv)) F.float_gemv = true;
+        if (dump::switchOnValue(v.float_gemv)) F.float_gemv = true;
         if (auto x = cliU32(v.dbg)) F.dbg_flags = *x;
         if (auto x = cliU32(v.gemv_max)) F.gemv_max = std::clamp<std::uint32_t>(*x, 1, 16);  // q::max_small_batch
-        if (switchOn(v.no_graph)) F.use_graph = false;
-        if (switchOn(v.no_fuse)) F.no_fuse = true;
+        if (dump::switchOnValue(v.no_graph)) F.use_graph = false;
+        if (dump::switchOnValue(v.no_fuse)) F.no_fuse = true;
         if (auto x = cliU32(v.draft_window)) F.draft_window = *x;
         if (auto x = cliU32(v.draft_window_min)) F.draft_window_min = *x;
-        if (switchOn(v.naive_attn)) F.naive_attn = true;
+        if (dump::switchOnValue(v.naive_attn)) F.naive_attn = true;
         if (v.attn_wide && *v.attn_wide == "0") F.attn_wide = false;
         if (v.attn_dq4 && *v.attn_dq4 == "0") F.attn_dq4 = false;
         if (v.dq4_dyn && *v.dq4_dyn == "0") F.dq4_dyn = false;
         if (v.attn_ws4 && *v.attn_ws4 == "0") F.attn_ws4 = false;
         if (auto x = cliU32(v.moe_bn)) F.moe_bn_force = *x;
-        if (switchOn(v.gdn_seq)) F.gdn_chunked = false;
+        if (dump::switchOnValue(v.gdn_seq)) F.gdn_chunked = false;
         if (v.gv_group) F.gv_group = *v.gv_group != "0";
         if (auto x = cliU32(v.gv_nmax)) F.gv_nmax = *x;
         // cli main.cpp:1340 (chat only: other CLI commands leave runtime.gdn_v0 unset)
         if (v.gdn_v0 && k_gdn_v0) F.gdn_v0 = true;
     } else if (front == Front::server) {
         // server_main.cpp:1041-1045
-        if (switchOn(v.no_fuse)) F.no_fuse = true;
-        if (switchOn(v.float_gemv)) F.float_gemv = true;
-        if (switchOn(v.naive_attn)) F.naive_attn = true;
-        if (switchOn(v.gdn_seq)) F.gdn_chunked = false;
+        if (dump::switchOnValue(v.no_fuse)) F.no_fuse = true;
+        if (dump::switchOnValue(v.float_gemv)) F.float_gemv = true;
+        if (dump::switchOnValue(v.naive_attn)) F.naive_attn = true;
+        if (dump::switchOnValue(v.gdn_seq)) F.gdn_chunked = false;
         if (v.moe_bn) F.moe_bn_force = static_cast<std::uint32_t>(std::strtoul(v.moe_bn->c_str(), nullptr, 10));
         // :1052-1053, :1056 (the server never replays the decode graph)
         F.draft_window = srvU32(v.draft_window, F.draft_window);

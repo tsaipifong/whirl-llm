@@ -172,4 +172,13 @@ CardDefaults cardDefaults(const CardInput& in) {
     return d;
 }
 
+
+// (729c080 src/server/server_main.cpp:446-449, buildModel; arch025-lane1 leg 9)
+std::string prefillBatchFloorWarn(std::uint32_t x, std::string_view text, std::size_t chunk, std::size_t merge) {
+    if (x >= min_prefill_batch) return {};
+    return std::format("WHIRL_PREFILL_BATCH={} is below the smallest prefill batch the scheduler needs ({} rows: one {}-row chunk + "
+                       "a {}-row tail); using {}",
+                       text, min_prefill_batch, chunk, merge, min_prefill_batch);
+}
+
 }  // namespace whirl::vram

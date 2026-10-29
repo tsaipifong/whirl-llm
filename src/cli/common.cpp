@@ -97,7 +97,7 @@ std::vector<std::size_t> serverForwardEnds(const Tok& tok, std::span<const u32> 
     const std::size_t sys = sched::sysSplit(tok.ct.sysBoundary(ids), n,
                                             whirl::settings::sysMin(sched::sys_min_default, settingsWarn));
     const std::vector<std::uint32_t> imgs =
-        sched::imageSplits(ids, q::image_id_base, tok.ct.vision_end, envU32("VIS_CKPT_MIN").value_or(sched::img_split_min_default));
+        sched::imageSplits(ids, q::image_id_base, tok.ct.vision_end, whirl::settings::visCkptMin(settingsWarn).value_or(sched::img_split_min_default));
     const std::size_t exec = sched::prefillExec(whirl::settings::prefillChunk(settingsWarn), prof, moe, max_batch);
     const std::size_t tail_min = whirl::settings::tailCk() ? sched::tail_ck_min_default : 0;
     return sched::soloForwardEnds(n, sys, tok.ct.thinkOpenSplit(ids), imgs, 0, exec, tail_min, max_batch);

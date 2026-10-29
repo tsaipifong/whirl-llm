@@ -445,39 +445,27 @@ void printProfile(const char* label, q::Profile& p, std::size_t n_tok) {
 
 ChatOpts mtpOpts(const q::Model& model, ChatOpts base, u32* drafts_out) {
     const q::MtpDefaults def = q::mtpDefaults(model.cfg.moe, model.arch);
-    u32 drafts = def.drafts;
-    const auto dv = envGet("MTP_DRAFTS");
-    if (dv) {
-        try {
-            drafts = std::clamp<u32>(static_cast<u32>(std::stoul(*dv)), 1, q::max_drafts);
-        } catch (...) {
-            drafts = def.drafts;
-        }
-    }
+    // the run settings shared with whirl-server (config.settings, arch025-N15 rest): each read at its old place
+    namespace st = whirl::settings;
+    const std::optional<u32> dv = st::mtpDrafts(def.drafts, q::max_drafts);
+    const u32 drafts = dv.value_or(def.drafts);
     base.trace_tps = envU32("TRACE_TPS").value_or(0);
     base.mtp_p_min = def.p_min;
     base.mtp_adapt = def.adapt;
     base.ngram_min = def.ngram_min;
     base.ngram_slope = def.ngram_slope;
-    // an explicit draft count is used as is (fixed) unless WHIRL_MTP_ADAPT asks otherwise
-    base.mtp_auto = def.automatic && !dv;
-    if (auto v = envGet("MTP_PMIN")) {
-        try {
-            base.mtp_p_min = std::stof(*v);
-        } catch (...) {
-            base.mtp_p_min = 0;
-        }
-    }
-    if (auto v = envGet("MTP_NMIN")) base.mtp_n_min = static_cast<u32>(std::strtoul(v->c_str(), nullptr, 10));
-    if (const whirl::settings::MtpAdapt ad = whirl::settings::mtpAdapt(); ad.set) {  // (the server's rule, arch025-N15)
-        base.mtp_auto = ad.automatic;
-        base.mtp_adapt = ad.adapt;
-    }
-    if (auto v = envGet("NGRAM")) base.ngram = *v != "0";
-    if (auto v = envGet("NGRAM_MIN")) base.ngram_min = static_cast<u32>(std::strtoul(v->c_str(), nullptr, 10));
-    if (auto v = envGet("NGRAM_SLOPE")) base.ngram_slope = std::strtof(v->c_str(), nullptr);
-    if (auto v = envGet("NGRAM_MAX")) base.ngram_max = static_cast<u32>(std::strtoul(v->c_str(), nullptr, 10));
-    if (auto v = envGet("NGRAM_FORCE")) base.ngram_force = *v != "0";
+    base.mtp_p_min = st::mtpPmin(base.mtp_p_min);
+    base.mtp_n_min = st::mtpNmin(base.mtp_n_min, settingsWarn);
+    const whirl::settings::MtpAdapt ad = whirl::settings::mtpAdapt();  // (the server's rule, arch025-N15)
+    if (ad.set) base.mtp_adapt = ad.adapt;
+    // an explicit draft count is used as is (fixed) unless WHIRL_MTP_ADAPT asks otherwise (q::mtpAutoMode, whirl-server's
+    // rule too; arch025-lane1 leg 8)
+    base.mtp_auto = q::mtpAutoMode(def.automatic, dv.has_value(), ad.set, ad.automatic);
+    base.ngram = st::ngram(base.ngram);
+    base.ngram_min = st::ngramMin(base.ngram_min, settingsWarn);
+    base.ngram_slope = st::ngramSlope(base.ngram_slope);
+    base.ngram_max = st::ngramMax(base.ngram_max, settingsWarn);
+    base.ngram_force = st::ngramForce(base.ngram_force);
     if (auto v = envGet("NGRAM_DEBUG")) base.ngram_debug = *v != "0";
     *drafts_out = drafts;
     return base;

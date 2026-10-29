@@ -82,4 +82,11 @@ ResolvedConfig resolveServerConfig(Options opt, std::optional<std::string> mode_
 // file check (arch025-gaptests G18: moved out of serveMain unchanged so server-tests can pin it).
 void checkKvSsdDirEnv(const Options& opt, const std::optional<std::string>& kv_ssd_dir_env);
 
+// The model name of /v1/models, /props and the startup lines (arch025-lane1 leg 8: was serveMain's, 5728296
+// server_main.cpp:953-958): --alias as given, else the GGUF file name without a final ".gguf" (any case).
+std::string servedModelName(const std::string& file_name, const std::optional<std::string>& alias);
+// The SSD tier mode (arch025-lane1 leg 8: was ServerRun::startTier's, 5728296 server_main.cpp:1543-1544): --kv-ssd-mode,
+// else WHIRL_KV_SSD_MODE, else "shutdown"; any text but "always" / "off" is "shutdown".
+std::string kvSsdMode(const std::optional<std::string>& cli, const std::optional<std::string>& env);
+
 }  // namespace whirl::server
