@@ -12,6 +12,8 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstring>
 #include <mutex>
 #include <utility>
@@ -64,6 +66,12 @@ struct FakeState {
     int fail_write = 0;
     int short_read = 0;
     std::uint32_t short_bytes = 0;
+    // holdReadClose: handles opened with kOverlapped since it was armed; their close waits for releaseClose
+    bool hold_close = false;
+    bool released = false;
+    int held = 0;
+    std::vector<HANDLE> hold_handles;
+    std::condition_variable cv;
 };
 FakeState& fstate() {
     static FakeState s;
@@ -103,13 +111,27 @@ Handle open(const wchar_t* path, std::uint32_t access, std::uint32_t share, std:
         {
             std::lock_guard<std::mutex> lk(f.mu);
             f.opens.push_back(fake::Open{path, access, share, disposition, flags, h != INVALID_HANDLE_VALUE});
+            if (f.hold_close && (flags & kOverlapped) != 0 && h != INVALID_HANDLE_VALUE) f.hold_handles.push_back(h);
         }
         SetLastError(err);
     }
     return h;
 }
 
-bool close(Handle h) { return CloseHandle(hh(h)) != 0; }
+bool close(Handle h) {
+    if (g_on.load(std::memory_order_relaxed)) {
+        FakeState& f = fstate();
+        std::unique_lock<std::mutex> lk(f.mu);
+        auto it = std::find(f.hold_handles.begin(), f.hold_handles.end(), hh(h));
+        if (it != f.hold_handles.end()) {
+            f.hold_handles.erase(it);
+            f.held += 1;
+            // bounded: a test that never releases fails on its checks instead of hanging the IO thread
+            f.cv.wait_for(lk, std::chrono::seconds(30), [&] { return f.released; });
+        }
+    }
+    return CloseHandle(hh(h)) != 0;
+}
 
 int lastError() { return static_cast<int>(GetLastError()); }
 
@@ -284,6 +306,10 @@ void begin() {
     f.fail_write = 0;
     f.short_read = 0;
     f.short_bytes = 0;
+    f.hold_close = false;
+    f.released = false;
+    f.held = 0;
+    f.hold_handles.clear();
     g_on.store(true, std::memory_order_relaxed);
 }
 
@@ -293,6 +319,10 @@ std::vector<Open> end() {
     g_on.store(false, std::memory_order_relaxed);
     f.fail_write = 0;
     f.short_read = 0;
+    f.hold_close = false;
+    f.released = true;  // a close still held goes on (g_on is off: no new holds)
+    f.hold_handles.clear();
+    f.cv.notify_all();
     std::vector<Open> out;
     out.swap(f.opens);
     return out;
@@ -315,6 +345,29 @@ void shortRead(int n, std::uint32_t bytes) {
     std::lock_guard<std::mutex> lk(f.mu);
     f.short_read = n;
     f.short_bytes = bytes;
+}
+
+void holdReadClose() {
+    FakeState& f = fstate();
+    std::lock_guard<std::mutex> lk(f.mu);
+    f.hold_close = true;
+    f.released = false;
+}
+
+void releaseClose() {
+    FakeState& f = fstate();
+    {
+        std::lock_guard<std::mutex> lk(f.mu);
+        f.released = true;
+        f.hold_close = false;
+    }
+    f.cv.notify_all();
+}
+
+int closesHeld() {
+    FakeState& f = fstate();
+    std::lock_guard<std::mutex> lk(f.mu);
+    return f.held;
 }
 
 int injectedLeft() {

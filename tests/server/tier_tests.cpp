@@ -4672,6 +4672,152 @@ static void testFsShortRead(NullBackend& ops, const fs::path& dir) {
     fs::remove_all(dir, ec);
 }
 
+// arch025-tierfix: a failed SSD read drops the entry whichever path reaps the read job. testFsShortRead
+// passes when the IO thread stores `finished` before endRestore runs (endRestore removes the entry); when
+// it stores it later, endRestore hands the job to tick, which kept the SSD entry (the same bad file was read
+// again; cpu_tier failed 1 in 55 runs). FakeFs holdReadClose stops the read job between `failed` and
+// `finished`, so the late case runs every time. Cases: a failed restore read reaped by tick (dropped),
+// a failed prefetch (dropped), an abandoned read that did not fail (the SSD copy stays, as before).
+static void testFsShortReadLate(NullBackend& ops, const fs::path& dir) {
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    SsdEnv env{dir};
+    const std::uint64_t fp = hashStr(0xcbf29ce484222325ull, "model-fs-short-late");
+    const std::uint32_t nck = 2, pages = 7;
+    DevSlot src(ops, nck, pages);
+    src.fill(927);
+    const auto toks = makeTokens(1700, 927);
+    std::uint64_t id = 0;
+    {
+        auto t = Tier::create(ops, 32ull << 20, 5, 0);
+        t->start(env.cfg(1ull << 30), kLay, fp);
+        Entry* e = spill(*t, src, toks);
+        CHECK(e != nullptr);
+        if (!e) return;
+        id = e->id;
+        CHECK(tickIdle(*t));
+        CHECK(e->ssd.has_value());
+    }
+    const fs::path f = entryFile(dir, fp, id);
+    const fs::path keep = dir / L"short_read_late_copy.bin";
+    fs::copy_file(f, keep, fs::copy_options::overwrite_existing, ec);
+    CHECK(!ec);
+    const auto fresh = [&] {
+        fs::remove(f, ec);
+        fs::copy_file(keep, f, fs::copy_options::overwrite_existing, ec);
+    };
+    // the read job reached the held close (it has stored `failed` if it failed; `finished` comes after the release)
+    const auto waitHeld = [] {
+        const auto dl = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+        while (pfs::fake::closesHeld() < 1) {
+            if (std::chrono::steady_clock::now() > dl) return false;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        return true;
+    };
+    // overlapped (read job) opens of the entry's file recorded since fake::begin
+    const auto readOpens = [&](const std::vector<pfs::fake::Open>& opens) {
+        int n = 0;
+        for (const auto& o : opens)
+            if ((o.flags & pfs::kOverlapped) != 0 && fs::path(o.path).filename() == f.filename()) n += 1;
+        return n;
+    };
+    // 1. failed restore read, the job finishes after endRestore: tick reaps it and drops the entry
+    for (const std::uint32_t got : {0u, static_cast<std::uint32_t>(sector)}) {
+        fresh();
+        auto t = Tier::create(ops, 32ull << 20, 6, 0);
+        t->start(env.cfg(1ull << 30), kLay, fp);
+        Entry* e = t->find(id);
+        CHECK(e != nullptr && t->ssdEntries() == 1 && !e->in_ram);
+        if (!e) continue;
+        pfs::fake::begin();
+        pfs::fake::shortRead(1, got);
+        pfs::fake::holdReadClose();
+        DevSlot dst(ops, nck, pages);
+        std::size_t nm = 0;
+        const auto sp = dst.spans(e, 1, &nm);
+        Restore* r = t->beginRestore(e, sp, nm);
+        CHECK(r != nullptr && r->from_ssd && r->job != nullptr);
+        if (r) {
+            CHECK(!runRestore(*t, r));
+            CHECK(r->failed);
+            // the window: the IO thread waits in close, after `failed`, before `finished`
+            CHECK(waitHeld());
+            t->endRestore(r);  // the job goes to tick
+        }
+        pfs::fake::releaseClose();
+        CHECK(tickIdle(*t));
+        CHECK(pfs::fake::closesHeld() == 1);
+        CHECK(pfs::fake::injectedLeft() == 0);
+        CHECK(t->find(id) == nullptr && t->ssdEntries() == 0);  // dropped: the file is unusable
+        CHECK(!fs::exists(f));
+        CHECK(!t->lookup(toks).has_value());  // not read again
+        CHECK(readOpens(pfs::fake::end()) == 1);
+    }
+    // 2. failed prefetch (always reaped by tick): dropped as well
+    {
+        fresh();
+        auto t = Tier::create(ops, 32ull << 20, 6, 0);
+        t->start(env.cfg(1ull << 30), kLay, fp);
+        Entry* e = t->find(id);
+        CHECK(e != nullptr && t->ssdEntries() == 1 && !e->in_ram);
+        if (e) {
+            pfs::fake::begin();
+            pfs::fake::shortRead(1, static_cast<std::uint32_t>(sector));
+            CHECK(t->prefetch(e));
+            CHECK(tickIdle(*t));
+            CHECK(pfs::fake::injectedLeft() == 0);
+            CHECK(t->find(id) == nullptr && t->ssdEntries() == 0);
+            CHECK(!fs::exists(f));
+            CHECK(readOpens(pfs::fake::end()) == 1);
+        }
+    }
+    // 3. control: an abandoned read that did not fail (restore ended before the job finished) keeps the
+    // SSD copy, and the next restore reads it back intact
+    {
+        fresh();
+        auto t = Tier::create(ops, 32ull << 20, 6, 0);
+        t->start(env.cfg(1ull << 30), kLay, fp);
+        Entry* e = t->find(id);
+        CHECK(e != nullptr && t->ssdEntries() == 1 && !e->in_ram);
+        if (e) {
+            pfs::fake::begin();
+            pfs::fake::holdReadClose();
+            DevSlot dst(ops, nck, pages);
+            std::size_t nm = 0;
+            const auto sp = dst.spans(e, 1, &nm);
+            Restore* r = t->beginRestore(e, sp, nm);
+            CHECK(r != nullptr && r->from_ssd && r->job != nullptr);
+            if (r) {
+                CHECK(waitHeld());  // the read is done, the job not finished
+                t->endRestore(r);  // abandoned
+            }
+            pfs::fake::releaseClose();
+            CHECK(tickIdle(*t));
+            CHECK(pfs::fake::closesHeld() == 1);
+            pfs::fake::end();
+            e = t->find(id);
+            CHECK(e != nullptr && t->ssdEntries() == 1 && !e->in_ram);
+            if (e) {
+                DevSlot dst2(ops, nck, pages);
+                std::size_t nm2 = 0;
+                const auto sp2 = dst2.spans(e, 1, &nm2);
+                Restore* r2 = t->beginRestore(e, sp2, nm2);
+                CHECK(r2 != nullptr && r2->from_ssd);
+                if (r2) {
+                    CHECK(runRestore(*t, r2));
+                    const auto v = t->verifyPieces(r2->pieces);
+                    CHECK(v.bad == 0 && v.bytes == r2->bytes);
+                    t->endRestore(r2);
+                    CHECK(dst2.ckEq(src, 0) && dst2.ckEq(src, 1) && dst2.kvEq(src));
+                }
+            }
+        }
+        tickIdle(*t);
+    }
+    fs::remove_all(dir, ec);
+}
+
 // ARCH-1 §8.9 survivor tier-verify-blind ("verifyPieces never reports an error"): the restore check must count a
 // piece whose device bytes differ from the host bytes, and verifySpans an arena block that differs from the device.
 static void testFsVerifyNotBlind(NullBackend& ops) {
@@ -5033,6 +5179,10 @@ int main(int argc, char** argv) {
     if (want("testFsShortRead")) {
         std::printf("-- %s\n", "testFsShortRead");
         testFsShortRead(ops, dir);
+    }
+    if (want("testFsShortReadLate")) {
+        std::printf("-- %s\n", "testFsShortReadLate");
+        testFsShortReadLate(ops, dir);
     }
     if (want("testFsLargeOffset")) {
         std::printf("-- %s\n", "testFsLargeOffset");
