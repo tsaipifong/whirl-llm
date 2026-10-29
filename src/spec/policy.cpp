@@ -169,6 +169,25 @@ bool mtpAutoMode(bool def_automatic, bool drafts_given, bool adapt_set, bool ada
     return adapt_set ? adapt_auto : (def_automatic && !drafts_given);
 }
 
+// (729c080 src/server/server_main.cpp:962-969)
+DflashRelax dflashRelax(bool use_dflash, bool relax_on) {
+    DflashRelax r;
+    if (!(use_dflash && relax_on)) return r;
+    r.off = true;
+    r.note = "relaxacc: not used with --draft dflash (DFlash2 / n-gram drafts keep exact acceptance)";
+    r.skip_why = "--draft dflash: DFlash2 / n-gram drafts keep exact acceptance";
+    return r;
+}
+
+// (729c080 src/server/server_main.cpp:991-998)
+DflashMtpOnly dflashMtpOnly(std::uint32_t slot_drafts, bool draft_head_env) {
+    DflashMtpOnly r;
+    if (slot_drafts != 0) r.warn = "WHIRL_SLOT_DRAFTS ignored with --draft dflash (it allocates MTP drafts)";
+    r.slot_drafts = 0;
+    if (draft_head_env) r.note = "WHIRL_DRAFT_VOCAB / WHIRL_DRAFT_WINDOW not used with --draft dflash (MTP draft head only)";
+    return r;
+}
+
 BatchDrafts batchDraftsFrom(BatchDrafts batch_drafts, const std::string& s) {
     std::size_t k = 1, p = 0;
     while (p < s.size() && k <= gdn_max_seg) {

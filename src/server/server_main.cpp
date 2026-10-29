@@ -164,7 +164,7 @@ double sleepMs(std::chrono::microseconds d, int n) {
 // checkpoint before the question + prompt-end + gen-end; with 2 the tail would push out what a regenerate or the next
 // turn resumes from), about 150.6 MiB each for Qwen3.8-27B, 63.8 MiB for Ornith-1.5-35B-A3B; the KV-fit estimate below
 // counts them and lowers them to 2 (tail off) when VRAM is tight)
-constexpr std::uint32_t floor_second_ctx = 65536;
+// (the second long request the pool should hold, 65536 tokens: startfit::floor_second_ctx; arch025-lane1 leg 9)
 constexpr std::uint32_t serve_prefill_batch = 4096;
 constexpr std::size_t n_spe_default = 2;
 // KV pool (tokens, smallest format) below which startup lowers the prefill batch / checkpoints
@@ -427,10 +427,7 @@ void buildModel(Options& opt, const numerics::Request& nreq, const char* lad, Lo
     const std::string_view tmpl_text = f.getStringOr("tokenizer.chat_template", "");
     const chat::TemplateKind& tmpl = b.tmpl = chat::detectTemplate(tmpl_text);
     logI("chat template: GGUF tokenizer.chat_template ({} B) -> built-in Qwen3.x renderer variant '{}' ({})", tmpl_text.size(),
-         chat::templateName(tmpl),
-         tmpl == chat::TemplateKind::a ? "reasoning effort, merged system, preserve_thinking"
-         : tmpl == chat::TemplateKind::b ? "system + tools, <think> in history"
-                                         : "system + tools, <think> in history, scalar tool arguments as True / False / None");
+         chat::templateName(tmpl), chat::templateDescription(tmpl));  // (the description: module chat, arch025-lane1 leg 9)
 
     qwen35::LoadStats& stats = b.stats;
     qwen35::LoadOptions& lo = b.lo;
@@ -442,11 +439,9 @@ void buildModel(Options& opt, const numerics::Request& nreq, const char* lad, Lo
         if (auto x = settings::parseU32(*v)) {
             // the scheduler's largest forward is a 1024-row chunk + a 256-row tail: a smaller batch would
             // fail every long prompt with BatchTooLarge (VRAM-01), so it is raised to that floor
-            // (arch025-N15c: vram::prefillBatchAtLoad, the CLI's rule too)
-            if (*x < vram::min_prefill_batch)
-                logW("WHIRL_PREFILL_BATCH={} is below the smallest prefill batch the scheduler needs ({} rows: one {}-row chunk + "
-                     "a {}-row tail); using {}",
-                     *v, vram::min_prefill_batch, prefill_chunk, prefill_merge, vram::min_prefill_batch);
+            // (arch025-N15c: vram::prefillBatchAtLoad, the CLI's rule too; the warning: vram::prefillBatchFloorWarn, module
+            // mem.fit, arch025-lane1 leg 9)
+            if (const std::string w = vram::prefillBatchFloorWarn(*x, *v, prefill_chunk, prefill_merge); !w.empty()) logW("{}", w);
             lo.max_batch = vram::prefillBatchAtLoad(*x, qwen35::max_batch_limit);
         }
     }
@@ -698,13 +693,13 @@ void buildModel(Options& opt, const numerics::Request& nreq, const char* lad, Lo
     // same knobs as the CLI. arch025-N2b (R-5): numerics::applyFront(Front::server) on the model's plan, with the
     // server's parse rules (server_main.cpp:1040-1120 before N2b, moved in arch025-N2a): NO_FUSE, FLOAT_GEMV,
     // NAIVE_ATTN, GDN_SEQ, MOE_BN, DRAFT_WINDOW(_MIN), use_graph off, WIDE_VERIFY, HEAD_CHUNK, GDN_V0, ATTN_WIDE,
-    // ATTN_DQ4, DQ4_DYN, ATTN_WS4. All before their first reader (wideCapable below); the CLI-only names are not sent.
+    // ATTN_DQ4, DQ4_DYN, ATTN_WS4. All before their first reader (wideCapable below); the CLI-only names are not sent
+    // (the table's cli_only column, numerics::RuntimeValues::Entry; arch025-lane1 leg 9).
     {
         namespace nu = whirl::numerics;
         nu::RuntimeValues rv;
         for (const auto& e : nu::RuntimeValues::names()) {
-            const std::string_view n = e.name;
-            if (n == "DBG" || n == "GEMV_MAX" || n == "NO_GRAPH" || n == "GV_GROUP" || n == "GV_NMAX") continue;  // CLI only
+            if (e.cli_only) continue;  // CLI only
             rv.*e.field = settings::envGet(e.name);
         }
         hip::Function fv0 = nullptr;
@@ -883,9 +878,7 @@ void ServerRun::planSlots() {
         ri.local_usage = w.local_usage;
         ri.headroom = lm.card.headroom;
         const std::uint64_t av = poolbudget::kvRoom(ri).bytes;
-        std::uint64_t ng = 0;
-        for (std::uint32_t li = 0; li < lm.cfg.n_layer; ++li)
-            if (!lm.cfg.isAttn(li)) ++ng;
+        const std::uint64_t ng = startfit::deltaNetLayers(lm.cfg);  // (module server.kv_fit, arch025-lane1 leg 9)
         const std::uint64_t st = ng * (model.convBytes() + model.ssmBytes());
         startfit::SlotFixedIn sfi;
         sfi.state = st;
@@ -938,9 +931,9 @@ void ServerRun::makeEngine() {
     // engine (checkpoint buffers, shared checkpoints, sampling buffers)
     conv_bytes = model.convBytes();
     ssm_bytes = model.ssmBytes();
-    n_gdn = 0;
-    for (std::uint32_t li = 0; li < lm.cfg.n_layer; ++li)
-        if (model.ssm_state[li] != 0) ++n_gdn;
+    // the DeltaNet layers: planSlots' rule (startfit::deltaNetLayers, module server.kv_fit; arch025-lane1 leg 9). Before
+    // leg 9 this counted model.ssm_state[li] != 0, which Model::load sets exactly for !cfg.isAttn(li) (HANDOFF section 48)
+    n_gdn = startfit::deltaNetLayers(lm.cfg);
     V = lm.cfg.n_vocab;
     std::random_device rd;
     seed0 = (static_cast<std::uint64_t>(rd()) << 32) ^ rd();
@@ -959,13 +952,14 @@ void ServerRun::makeEngine() {
     eo.dfl_p_min = lm.dfl_par.p_min;
     eo.dfl_n_min = lm.dfl_par.n_min;
     eo.dfl_warm = lm.dfl_par.warm;
-    if (lm.use_dflash && eo.relax.on) {  // whirl::dflash::relaxApplies: MTP drafts only
-        // relaxacc relaxes MTP drafts only; DFlash2 and n-gram drafts keep exact acceptance, so
-        // the fast mode's other items (4-bit KV, ...) stay and the decode equals greedy of them
-        logI("relaxacc: not used with --draft dflash (DFlash2 / n-gram drafts keep exact acceptance)");
+    // relaxacc relaxes MTP drafts only (whirl::dflash::relaxApplies); DFlash2 and n-gram drafts keep exact acceptance, so
+    // the fast mode's other items (4-bit KV, ...) stay and the decode equals greedy of them (qwen35::dflashRelax, module
+    // spec.policy; arch025-lane1 leg 9)
+    if (const qwen35::DflashRelax dr = qwen35::dflashRelax(lm.use_dflash, eo.relax.on); dr.off) {
+        logI("{}", dr.note);
         eo.relax.on = false;
         // /props and the tier fingerprint must not report relaxacc as active
-        numerics::skipItem(model.num_plan, numerics::Item::relaxacc, "--draft dflash: DFlash2 / n-gram drafts keep exact acceptance");
+        numerics::skipItem(model.num_plan, numerics::Item::relaxacc, dr.skip_why);
     }
     eo.n_draft = lm.drafts;
     eo.p_min = lm.p_min;
@@ -990,11 +984,13 @@ void ServerRun::makeEngine() {
     if (const std::optional<std::uint32_t> sd = settings::slotDrafts()) eo.slot_drafts = *sd;  // (config.settings, arch025-lane1 leg 8)
     if (lm.use_dflash) {
         // MTP-only settings: the per-slot MTP draft allocation, the draft-head vocabulary subset and
-        // the MTP draft attention window have nothing to act on without the MTP block
-        if (eo.slot_drafts != 0) logW("WHIRL_SLOT_DRAFTS ignored with --draft dflash (it allocates MTP drafts)");
-        eo.slot_drafts = 0;
-        if (settings::envGet("DRAFT_VOCAB") || settings::envGet("DRAFT_WINDOW") || settings::envGet("DRAFT_WINDOW_MIN"))
-            logI("WHIRL_DRAFT_VOCAB / WHIRL_DRAFT_WINDOW not used with --draft dflash (MTP draft head only)");
+        // the MTP draft attention window have nothing to act on without the MTP block (qwen35::dflashMtpOnly, module
+        // spec.policy; arch025-lane1 leg 9; the three names are read here, as before)
+        const bool head_env = settings::envGet("DRAFT_VOCAB") || settings::envGet("DRAFT_WINDOW") || settings::envGet("DRAFT_WINDOW_MIN");
+        const qwen35::DflashMtpOnly mo = qwen35::dflashMtpOnly(eo.slot_drafts, head_env);
+        if (!mo.warn.empty()) logW("{}", mo.warn);
+        eo.slot_drafts = mo.slot_drafts;
+        if (!mo.note.empty()) logI("{}", mo.note);
     }
     eo.trace_nd = settings::envGet("TRACE_ND").has_value();
     eo.loop_log = settings::envGet("LOOP_LOG").has_value();
@@ -1083,15 +1079,11 @@ void ServerRun::reserveRamTier() {
         startfit::PinnedState pst;
         pst.total_phys = rin.total_phys;
         pst.pinned_max = gp.ok ? gp.max_shared : 0;
-        std::string per;
         for (const hip::GpuPinnedDev& g : gp.devs) {
             const std::uint64_t own = std::max(g.nonlocal_usage, g.own_shared);  // iGPU: DXGI says 0 (REVIEW C4)
             pst.gpus.push_back({g.nonlocal_budget, own, g.shared_system, g.adapter_shared});
-            per += std::format("{}{} MiB {} (this process {} MiB, all programs {})", per.empty() ? "" : ", ",
-                               (g.nonlocal_budget > 0 ? g.nonlocal_budget : g.shared_system) >> 20,
-                               g.nonlocal_budget > 0 ? "non-local budget" : "shared GPU memory", own >> 20,
-                               g.adapter_shared ? std::format("{} MiB", g.adapter_shared >> 20) : std::string("unknown"));
         }
+        const std::string per = startfit::pinnedGpusText(pst.gpus);  // (module server.kv_fit, arch025-lane1 leg 9)
         // REVIEW-S8-719-3 N3-4: the vision encoder's weights are pinned after this (Vision::load, discrete GPU below, the
         // integrated GPU later): count them now, from the mmproj file size plus its padding (startfit::mmprojPinnedBytes;
         // the file size alone is below what is pinned, REVIEW-B0 N1)
@@ -1273,16 +1265,12 @@ void ServerRun::planPool() {
         slot_ctx_eff = pf.slot_ctx;
     }
     per_tok = model.kvBytesPerToken();
-    const std::uint32_t pool_tokens = fit_pool ? *fit_pool : lm.pool_req ? *lm.pool_req : [&] {
-        const std::uint64_t t = std::min(avail / per_tok, static_cast<std::uint64_t>(8) * lm.cap_max);
-        return static_cast<std::uint32_t>(t / kv_page * kv_page);
-    }();
-    if (pool_tokens < 4096)
-        throw app::UserError(app::exit_vram,
-                             std::format("not enough GPU memory left for the KV cache: a pool of {} tokens (at least 4096 needed).\n"
-                                         "  Use a smaller model or quantization, give --ctx explicitly,\n"
-                                         "  or close other programs that use the GPU.",
-                                         pool_tokens));
+    // the pool without -c / a fit and the 4096-token refusal (startfit::defaultPoolTokens / poolRefusal, module server.kv_fit;
+    // arch025-lane1 leg 9)
+    const std::uint32_t pool_tokens = fit_pool       ? *fit_pool
+                                      : lm.pool_req ? *lm.pool_req
+                                                    : startfit::defaultPoolTokens(avail, per_tok, static_cast<std::uint64_t>(8) * lm.cap_max, kv_page);
+    if (const std::string why = startfit::poolRefusal(pool_tokens); !why.empty()) throw app::UserError(app::exit_vram, why);
     if (slot_ctx_eff != lm.slot_ctx) engine->setCtx(slot_ctx_eff);
     try {
         startup::allocKvPool(model, pool_tokens, *slots);
@@ -1393,21 +1381,14 @@ void ServerRun::planPool() {
     }
     {
         const std::uint32_t pool_now = model.pool_pages * kv_page;
-        const std::uint64_t floor = static_cast<std::uint64_t>(slot_ctx_eff) + (opt.parallel > 1 ? std::min(floor_second_ctx, slot_ctx_eff) : 0);
-        if (pool_now < floor)
-            logW("kv pool {} tokens < {} (one {}-token request + a second one reaching {}): concurrent long requests wait in "
-                 "the queue, or end early while generating (finish_reason length, finish_cause kv_pool_exhausted){}",
-                 pool_now, floor, slot_ctx_eff, opt.parallel > 1 ? std::min(floor_second_ctx, slot_ctx_eff) : 0,
-                 model.kv_choice.kv == KvFormat::f16 && !lm.cfg.moe && nreq.mode == numerics::Mode::precise
-                     ? "; --balance allows int8 KV (a longer pool)"
-                     : "");
+        // (startfit::poolFloorWarn, module server.kv_fit; arch025-lane1 leg 9)
+        const bool int8_hint = model.kv_choice.kv == KvFormat::f16 && !lm.cfg.moe && nreq.mode == numerics::Mode::precise;
+        if (const std::string w = startfit::poolFloorWarn(pool_now, slot_ctx_eff, opt.parallel, int8_hint); !w.empty()) logW("{}", w);
     }
 }
 
 void ServerRun::reportPool() {
-    const double ck_mb = static_cast<double>(n_gdn * (conv_bytes + ssm_bytes) + static_cast<std::uint64_t>(V) * 4 +
-                                             static_cast<std::uint64_t>(lm.cfg.n_embd) * 4) /
-                         (1024.0 * 1024.0);
+    const double ck_mb = startfit::ckptMib(n_gdn * (conv_bytes + ssm_bytes), V, lm.cfg.n_embd);  // (module server.kv_fit, arch025-lane1 leg 9)
     if (lm.no_pc) logI("prefix cache: disabled (WHIRL_NO_PREFIX_CACHE)");
     else logI("prefix cache: {} checkpoint(s) per slot x {:.1f} MiB ({} DeltaNet layers of recurrent state + logits row)", lm.n_ck, ck_mb, n_gdn);
     if (!lm.no_pc && eo.cold_resume)
@@ -1721,9 +1702,9 @@ int ServerRun::runServer() {
         // the HTTP server starts (REVIEW-0221 C5: /health readers on other threads)
         const std::uint32_t ctx_eff = std::min<std::uint32_t>(slot_ctx_eff, model.pool_pages * kv_page);
         const std::uint64_t target_ctx = std::min<std::uint32_t>(lm.slot_ctx, vram_tight_pool);
-        if (opt.parallel_given && ctx_eff < target_ctx)
-            lm.adjusted.push_back(std::format("target not reached: context {} tokens per request with {} slot(s), less than {}", ctx_eff,
-                                           opt.parallel, target_ctx));
+        // (startfit::targetNotReached / startupNote, module server.kv_fit; arch025-lane1 leg 9)
+        if (std::optional<std::string> tn = startfit::targetNotReached(opt.parallel_given, ctx_eff, target_ctx, opt.parallel))
+            lm.adjusted.push_back(std::move(*tn));
         // arch024-S0a (PLAN v3 N3): every input of the sizing's pure functions, for tests/pins startup_replay (log only)
         logI("startup inputs:{}", lm.sin.line);
         if (lm.adjusted.empty()) {
@@ -1744,10 +1725,7 @@ int ServerRun::runServer() {
         si.other_processes_mib = lm.others0.ok ? lm.others0.others >> 20 : 0;
         si.display_attached = lm.others0.display_known && lm.others0.display;
         si.adjusted = lm.adjusted;
-        std::string note;
-        for (const std::string& a : lm.adjusted)
-            if (a.find("--ctx-per-slot") != std::string::npos || a.rfind("-c ", 0) == 0) note += (note.empty() ? "" : "; ") + a;
-        engine->setStartup(startfit::startupJson(si), note.empty() ? std::string() : "adjusted at startup to fit the GPU memory: " + note);
+        engine->setStartup(startfit::startupJson(si), startfit::startupNote(lm.adjusted));
     }
     HttpOptions ho;
     ho.cors_origins = opt.cors_origins;

@@ -107,13 +107,14 @@ enum class Front : std::uint8_t { none, cli, server };
 
 // After-load knobs of the front ends: src/cli/build_model.cpp applyRuntimeEnv (GDN_V0: chat only; arch025-C2);
 // src/server/server_main.cpp:1040-1120. A front end fills only the names it applies (the server sends none of the
-// CLI-only ones: DBG, GEMV_MAX, NO_GRAPH, GV_GROUP, GV_NMAX).
+// CLI-only ones: DBG, GEMV_MAX, NO_GRAPH, GV_GROUP, GV_NMAX = Entry::cli_only, arch025-lane1 leg 9).
 struct RuntimeValues {
     Raw float_gemv, dbg, gemv_max, no_graph, no_fuse, draft_window, draft_window_min, naive_attn, attn_wide, attn_dq4, dq4_dyn,
         attn_ws4, moe_bn, gdn_seq, gv_group, gv_nmax, gdn_v0, wide_verify, head_chunk;
     struct Entry {
         const char* name;
         Raw RuntimeValues::* field;
+        bool cli_only = false;  // whirl.exe only: whirl-server does not read or send it
     };
     static constexpr std::size_t n_fields = 19;
     static const std::array<Entry, n_fields>& names();

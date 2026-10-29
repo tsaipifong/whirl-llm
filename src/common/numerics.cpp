@@ -238,9 +238,9 @@ const std::array<RuntimeValues::Entry, RuntimeValues::n_fields>& RuntimeValues::
     using S = RuntimeValues;
     static const std::array<Entry, n_fields> t = {{
         {"FLOAT_GEMV", &S::float_gemv},
-        {"DBG", &S::dbg},
-        {"GEMV_MAX", &S::gemv_max},
-        {"NO_GRAPH", &S::no_graph},
+        {"DBG", &S::dbg, true},
+        {"GEMV_MAX", &S::gemv_max, true},
+        {"NO_GRAPH", &S::no_graph, true},
         {"NO_FUSE", &S::no_fuse},
         {"DRAFT_WINDOW", &S::draft_window},
         {"DRAFT_WINDOW_MIN", &S::draft_window_min},
@@ -251,8 +251,8 @@ const std::array<RuntimeValues::Entry, RuntimeValues::n_fields>& RuntimeValues::
         {"ATTN_WS4", &S::attn_ws4},
         {"MOE_BN", &S::moe_bn},
         {"GDN_SEQ", &S::gdn_seq},
-        {"GV_GROUP", &S::gv_group},
-        {"GV_NMAX", &S::gv_nmax},
+        {"GV_GROUP", &S::gv_group, true},
+        {"GV_NMAX", &S::gv_nmax, true},
         {"GDN_V0", &S::gdn_v0},
         {"WIDE_VERIFY", &S::wide_verify},
         {"HEAD_CHUNK", &S::head_chunk},

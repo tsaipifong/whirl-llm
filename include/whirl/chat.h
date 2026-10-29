@@ -86,6 +86,9 @@ enum class TemplateKind { a, b, b_pyargs };
 // it contains `args_value is mapping` (scalar arguments via `| string`), else `b`.
 TemplateKind detectTemplate(std::string_view chat_template);
 const char* templateName(TemplateKind k);
+// What the variant renders, as whirl-server's "chat template:" startup line describes it (arch025-lane1 leg 9; was the
+// ternary in server_main.cpp buildModel).
+const char* templateDescription(TemplateKind k);
 
 // Invalid request content; the message is suitable for an HTTP 400 reply.
 class RequestError : public std::runtime_error {

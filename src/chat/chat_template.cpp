@@ -131,6 +131,13 @@ const char* templateName(TemplateKind k) {
     return "?";
 }
 
+// (729c080 src/server/server_main.cpp:431-433, verbatim)
+const char* templateDescription(TemplateKind k) {
+    return k == TemplateKind::a ? "reasoning effort, merged system, preserve_thinking"
+           : k == TemplateKind::b ? "system + tools, <think> in history"
+                                  : "system + tools, <think> in history, scalar tool arguments as True / False / None";
+}
+
 std::string renderChat(TemplateKind kind, const json::Array& msgs, const json::Array& tools, const ChatOptions& opt) {
     if (msgs.empty()) bad("messages must be a non-empty array");
     std::string w;

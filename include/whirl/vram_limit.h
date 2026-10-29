@@ -21,6 +21,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <string_view>
 
 namespace whirl::vram {
 
@@ -88,6 +89,10 @@ inline std::uint32_t prefillBatchCap(std::uint32_t loaded, std::uint32_t v) {
     const std::uint32_t f = prefillBatchFloor(v);
     return loaded < f ? loaded : f;
 }
+// The warning when WHIRL_PREFILL_BATCH (value x, as written: text) is below min_prefill_batch ("" = none); chunk / merge:
+// the scheduler's chunk and tail rows (prefill_schedule.h prefill_chunk / prefill_merge) (arch025-lane1 leg 9; was
+// whirl-server's buildModel).
+std::string prefillBatchFloorWarn(std::uint32_t x, std::string_view text, std::size_t chunk, std::size_t merge);
 struct FitInput {
     std::uint64_t avail = 0;          // VRAM the model may use from now on (free' minus reserve, WDDM room)
     std::uint64_t weights = 0;        // weight bytes uploaded to VRAM
