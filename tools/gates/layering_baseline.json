@@ -964,6 +964,22 @@
    "model.types"
   ],
   [
+   "server.cycle_prof",
+   "contract.server"
+  ],
+  [
+   "server.cycle_prof",
+   "file:src/server/log.h"
+  ],
+  [
+   "server.cycle_prof",
+   "model.types"
+  ],
+  [
+   "server.cycle_prof",
+   "protocol"
+  ],
+  [
    "server.engine",
    "accept_policy"
   ],
@@ -1057,11 +1073,19 @@
   ],
   [
    "server.engine",
+   "server.cycle_prof"
+  ],
+  [
+   "server.engine",
    "server.image_embeddings"
   ],
   [
    "server.engine",
    "server.sample_buffers"
+  ],
+  [
+   "server.engine",
+   "server.slot"
   ],
   [
    "server.engine",
@@ -1154,6 +1178,38 @@
   [
    "server.sample_buffers",
    "sampling"
+  ],
+  [
+   "server.slot",
+   "ckpt_store"
+  ],
+  [
+   "server.slot",
+   "mem.wddm_watch"
+  ],
+  [
+   "server.slot",
+   "model.types"
+  ],
+  [
+   "server.slot",
+   "prefix_store"
+  ],
+  [
+   "server.slot",
+   "protocol"
+  ],
+  [
+   "server.slot",
+   "sampling"
+  ],
+  [
+   "server.slot",
+   "spec.policy"
+  ],
+  [
+   "server.slot",
+   "tier_bridge"
   ],
   [
    "server.startup",
