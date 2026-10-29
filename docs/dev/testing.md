@@ -289,11 +289,14 @@ How the plan is built, from the impact map (`impact.py`) and `modules.json`:
      `AddStep`, is common code and selects every GPU step on one GPU. A multi-line `AddStep` (backtick, or an
      argument list still open at the line end) is one statement. `impact.py` is selection-only and selects no step.
 3. **Full matrix, both GPUs** (every GPU step `-List` has on that GPU) when the change touches any of these:
-   - **a core module.** The `CORE` table in `test_change.py` gives the reason for each: `forward.*`, `model.kv`,
-     `model.weights`, `model.scratch`, `model.tune`, `handles`, `contract.abi`, `contract.device`, `contract.server`. A core module counts as touched when
+   - **a core module** without a GPU step set from mutation evidence (next section). The `CORE` table in
+     `test_change.py` gives the reason for each: `forward.*`, `model.kv`, `model.weights`, `model.scratch`,
+     `model.tune`, `handles`, `contract.abi`, `contract.device`, `contract.server`. A core module counts as touched when
      it is a caller of the changed module (`rdeps`), that is, when it includes a header the change edits.
    - **a core path:** `kernels/*`, `*.hip`, `src/kernels_host/*`, `kernels_abi.h`, numerics, `src/ops/*`,
-     `src/hip/*`, `src/device/*`, forward / kv files, also under their older paths.
+     `src/hip/*`, `src/device/*`, forward / kv files, also under their older paths, unless every module that owns the
+     file has an evidence set. A core path whose every owning module is in `NO_GPU_MODULES` is not a core change
+     (arch025-n11b: `device.null`, the CPU null backend under `src/device/`, which no product executable links).
    - **a contract, a build-wide file** (`cmake/*`, `CMakeLists.txt`, `build.bat`, `redist/*`) **or product code in
      no module.** These are `impact.py`'s fail-closed cases. A CMake edit leaves this case through the source-list
      rule or the build graph above.
@@ -306,6 +309,55 @@ How the plan is built, from the impact map (`impact.py`) and `modules.json`:
      are compared (`work_equal.py`, CPU). If they differ although no kernel source changed, the full matrix runs.
    - **Exception:** when every changed product file is a kernel for one architecture (the map lists one GPU), the
      full matrix runs on that GPU only.
+   <a id="core-sets"></a>**Core modules with GPU mutation evidence** (arch025 N11). A core module, a `modules.json`
+   `full: true` module that is not a contract (`model.core`, `forward.state`, `model.types`, `device.profile`,
+   `platform.args`), or a module owning a core path (`ops.*`) plans **its own GPU step set** instead of the full
+   matrix once recorded GPU mutation runs support it. The evidence rows are in `tools/gates/core_steps.json`: one row
+   per mutant and card, with the verdict and the GPU step that killed it. The sets are computed from the rows and
+   are never written by hand. A module gets a set only when all of these hold:
+   - every mutant of the module in `tools/impact/mutations.json` has a newest row on **both** cards, each `KILLED`
+     by a named GPU step or `BUILD-FAIL`;
+   - at least 2 of them are `KILLED` on each card (`min_mutants`, never below 2);
+   - every mutant the module's `require` entry names (a known bug class, e.g. K8-2 `~Model` release order for
+     `model.core`: `x12-f8-model-dtor`) is in the catalog and `KILLED` on both cards; a required mutant cannot be
+     declared equivalent.
+
+   Catalog fields the rule reads (arch025-n11b; `mutations_check.py` enforces them):
+   - `module` must be a `modules.json` module (or a key of the catalog's `labels`, e.g. `gates` for
+     `tools/gates/*.py`): kills are attributed by this label.
+   - `module` must also be an OWNER of the mutated `file` (`modules.json` paths; arch025-n11c): `test_change.py` plans
+     GPU steps for the modules whose files change, so a mutant is evidence for the module that owns its file, never for
+     the bug class it was written for. That class goes in `fault_area` (optional, information only, differs from
+     `module`). A file owned by no module (`tools/gates/*.py`) keeps its `labels` entry. A module may therefore need
+     more killed mutants of its own files before it gets a step set.
+   - `cards` (optional): the cards a mutant of one code object applies to. A `kernels/gfx1151/` file needs
+     `["8060s"]`; a kernel file that `kernels/whirl_kernels.hip` includes only inside its `!defined(__gfx1151__)`
+     block (and the gfx1151 set does not include) needs `["r9700"]`. Such a mutant counts on its cards only: a row on
+     another card is ignored, and the per-card count of 2 kills is over the mutants of that card (like llama.cpp
+     `test-backend-ops`' `NOT_SUPPORTED`). `gpumut` runs it on its cards only.
+   - `equivalent` (optional): the written argument why no test can kill the mutant (at least 40 characters;
+     `expect_test` starts with `none`), e.g. a deleted `static_assert` whose condition holds (no code is generated:
+     Trivial Compiler Equivalence). Such a mutant is left out of the rule instead of blocking its module for ever.
+
+   A survivor, `CAP`, `GATE-ERROR`, `NOT-RUN`, `DEVICE-MISMATCH`, a mutant not run on one card, or a mutant added to
+   the catalog after the run puts the module back on the full matrix. The set of a card is the steps that killed
+   the module's mutants on that card plus `golden_swift` and `golden_moe`. The set replaces the module's
+   `modules.json` GPU steps for a core or `full: true` module, and is added to them for other modules. Map steps,
+   `when` steps and gate-script steps are added as usual. A `full: true` module with a set no longer forces
+   `impact.py`'s full gate: the module gate is computed again without that flag, so a file or includer in no module,
+   or a build-wide file, still plans the full matrix. **Contracts never get a set**: `contract.*` and `kernels.abi`
+   are always full. The plan prints `core <module>: own GPU step set from mutation evidence (...)`.
+
+   ```
+   python tools/gates/test_change.py --core-steps-report                     # set or reason per module
+   python tools/gates/test_change.py --add-kill-records kill_r9700.tsv kill_8060s.tsv --source "gpumut <tree sha>"
+   ```
+
+   `--add-kill-records` appends rows from the GPU mutation runner's `kill_<card>.tsv` files (columns id, module,
+   card, verdict, killed_by, ...; rows whose id is not in the catalog are reported and skipped) and prints the new
+   report. The newest row per mutant and card counts, so a later run replaces an earlier verdict. This is
+   fault-detection evidence, not dependency safety (every GPU step runs every core module). The residual risk is a
+   bug class that no recorded mutant represents. The release gate stays full.
 4. **Work-equivalence short-cut** (ADR-0003). `--proof r9700=FILE` / `--proof 8060s=FILE` takes a `work_equal.py`
    report. GPU steps are skipped on that GPU only if all of these hold:
    - the verdict is `EQUIVALENT`, the code objects are identical or identical-except-cuid, and the launch

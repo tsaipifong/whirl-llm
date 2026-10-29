@@ -79,6 +79,15 @@ void testJson() {
     CHECK(throws([] { json::parse("[1, 2,]"); }));
     CHECK(throws([] { json::parse("01"); }));
     CHECK(throws([] { json::parse("\"\xFF\""); }));
+    // arch025-mutcat (common.base, isValidUtf8 in src/common/util.cpp): raw UTF-8 in a string is checked by RFC 3629's
+    // rules: an encoded surrogate (CESU-8 / WTF-8 U+D800), an overlong form and a code point above U+10FFFF are refused;
+    // the largest scalar values on each side of the surrogate range are kept
+    CHECK(throws([] { json::parse("\"a\xED\xA0\x80z\""); }));
+    CHECK(throws([] { json::parse("\"a\xED\xBF\xBFz\""); }));
+    CHECK(throws([] { json::parse("\"a\xC0\xAFz\""); }));
+    CHECK(throws([] { json::parse("\"a\xE0\x80\xAFz\""); }));
+    CHECK(throws([] { json::parse("\"a\xF4\x90\x80\x80z\""); }));
+    CHECK_EQ(json::parse("\"\xED\x9F\xBF\xEE\x80\x80\xF4\x8F\xBF\xBF\"").asString(), std::string("\xED\x9F\xBF\xEE\x80\x80\xF4\x8F\xBF\xBF"));
     CHECK(throws([] { json::parse("\"a\nb\""); }));
     CHECK(throws([] { json::parse("1 2"); }));
 }
