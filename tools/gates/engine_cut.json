@@ -1,0 +1,1092 @@
+{
+ "_doc": "arch025-engine design v3: the cut. layer: an edge (call or data use) may only point to a LOWER layer, to the module itself, or to core.shared (Engine-owned state used by >= 3 component modules, handed to each component by a per-member reference listed in modules[m].refs). Every other member is OWNED by one module (data) even when Engine holds it at its declared position ('placed state', DESIGN 2.5). Checked by graph3.py; census3.py reads classes / holders / aliases / free_funcs / files / users.",
+ "modules": {
+  "core.shared": {
+   "layer": 0,
+   "funcs": [],
+   "data": [
+    "m_",
+    "ops_",
+    "ct_",
+    "opt_",
+    "ctx_",
+    "owner_",
+    "ck_",
+    "spec_",
+    "sb_",
+    "slots_",
+    "bst_",
+    "vram_probe_",
+    "pool_",
+    "ps_",
+    "tb_",
+    "vis_"
+   ]
+  },
+  "server.job_queue": {
+   "layer": 1,
+   "funcs": [
+    "nextJobId",
+    "submitAndWait",
+    "beginBuilding",
+    "endBuilding",
+    "stop",
+    "runOnLoop",
+    "runLoopCalls",
+    "abortQueued"
+   ],
+   "data": [
+    "q_mutex_",
+    "q_cond_",
+    "queue_",
+    "n_active_",
+    "n_building_",
+    "next_id_",
+    "stop_",
+    "loop_calls_",
+    "tier_wake_",
+    "wake_seq_"
+   ],
+   "refs": [
+    "slots_"
+   ]
+  },
+  "server.slot_output": {
+   "layer": 1,
+   "funcs": [
+    "emit",
+    "flushOut",
+    "writeError"
+   ],
+   "data": [],
+   "free_funcs": [
+    "emit",
+    "flushOut",
+    "writeError"
+   ],
+   "refs": [
+    "ct_"
+   ]
+  },
+  "server.drafter_ctx": {
+   "layer": 1,
+   "funcs": [
+    "dflReset",
+    "dflIngest",
+    "dflReady",
+    "draftRoom"
+   ],
+   "data": [],
+   "refs": [
+    "bst_",
+    "m_",
+    "opt_"
+   ]
+  },
+  "server.slot_cache": {
+   "layer": 2,
+   "funcs": [
+    "saveCkpt",
+    "dropCache",
+    "freePages",
+    "type:SlotEvictor",
+    "evictFor",
+    "takePage",
+    "cowPages",
+    "ensurePages",
+    "dropSpe",
+    "createSpe",
+    "attachSpe",
+    "waitsForSys",
+    "pagesFor",
+    "poolAvailable",
+    "initPool",
+    "kvTokBytes"
+   ],
+   "data": [
+    "kv_arrays_",
+    "stat_spe_new_",
+    "stat_spe_hits_",
+    "stat_spe_tok_",
+    "stat_spe_evict_",
+    "stat_unshare_",
+    "stat_evictions_",
+    "conv_bytes_",
+    "ssm_bytes_"
+   ],
+   "refs": [
+    "ck_",
+    "m_",
+    "ops_",
+    "opt_",
+    "pool_",
+    "ps_",
+    "slots_",
+    "tb_"
+   ]
+  },
+  "server.governor": {
+   "layer": 3,
+   "funcs": [
+    "setGovernor",
+    "govTick",
+    "govApply",
+    "govAllIdle",
+    "govFreeable",
+    "govFreeCache",
+    "govRestoreCache",
+    "govResize",
+    "govDrain",
+    "govPublish",
+    "governorJson",
+    "ctxForNew",
+    "monoS"
+   ],
+   "data": [
+    "gov_",
+    "gov_margin_",
+    "gov_plan_",
+    "gov_pending_",
+    "gov_hold_",
+    "spe_parked_",
+    "gov_parked_",
+    "gov_ram_mb_",
+    "gov_vram_total_",
+    "gov_grow_denied_logged_",
+    "gov_restored_",
+    "gov_resize_before_",
+    "gov_resize_delta_",
+    "ctx_new_",
+    "gov_warn_",
+    "gov_last_",
+    "gov_json_",
+    "ctx_pub_",
+    "vram_others_"
+   ],
+   "free_funcs": [
+    "monoS"
+   ],
+   "refs": [
+    "ck_",
+    "ctx_",
+    "m_",
+    "ops_",
+    "opt_",
+    "owner_",
+    "pool_",
+    "ps_",
+    "slots_",
+    "tb_",
+    "vram_probe_"
+   ]
+  },
+  "server.vram_watch": {
+   "layer": 4,
+   "funcs": [
+    "setVramProbe",
+    "vramNote",
+    "vramIdleTick"
+   ],
+   "data": [
+    "vram_watch_",
+    "vram_idle_next_",
+    "vram_idle_s_",
+    "vram_warn_",
+    "vram_mu_",
+    "vram_last_",
+    "vram_spill_",
+    "vram_last_t_"
+   ],
+   "refs": [
+    "owner_",
+    "vram_probe_"
+   ]
+  },
+  "server.slot_end": {
+   "layer": 5,
+   "funcs": [
+    "releaseSlot",
+    "failSlot",
+    "finishJob",
+    "reapDisconnected"
+   ],
+   "data": [
+    "last_reap_"
+   ],
+   "refs": [
+    "m_",
+    "ops_",
+    "opt_",
+    "sb_",
+    "slots_",
+    "tb_",
+    "vis_"
+   ]
+  },
+  "server.prefill": {
+   "layer": 6,
+   "funcs": [
+    "chunkLen",
+    "floorProtected",
+    "maybeSplitCkpt",
+    "prefillStep",
+    "prefillGroup",
+    "finishPrefill",
+    "runPrefill",
+    "noteFloor"
+   ],
+   "data": [
+    "rcx_",
+    "fl_",
+    "prefill_tok_cum_"
+   ],
+   "refs": [
+    "bst_",
+    "ct_",
+    "m_",
+    "ops_",
+    "opt_",
+    "pool_",
+    "ps_",
+    "sb_",
+    "slots_",
+    "spec_"
+   ]
+  },
+  "server.spec_cycle": {
+   "layer": 7,
+   "funcs": [
+    "decodeCycle",
+    "type:Cycle",
+    "relaxes",
+    "verifyRoom",
+    "dropOutOfRoom",
+    "draftLimits",
+    "ngramDrafts",
+    "dflashDrafts",
+    "mtpDrafts",
+    "layoutBatch",
+    "draftSampling",
+    "enqueueVerify",
+    "sampleRows",
+    "trainCycle",
+    "cycleStats",
+    "acceptSlot",
+    "finishCycle",
+    "pickDrafts",
+    "relaxRepeats",
+    "splitDrafts",
+    "draftCap"
+   ],
+   "data": [
+    "spec_on_"
+   ],
+   "refs": [
+    "bst_",
+    "ct_",
+    "ctx_",
+    "m_",
+    "ops_",
+    "opt_",
+    "sb_",
+    "slots_",
+    "spec_"
+   ]
+  },
+  "server.slot_start": {
+   "layer": 7,
+   "funcs": [
+    "startJob"
+   ],
+   "data": [
+    "ids_",
+    "crlf_norm_"
+   ],
+   "refs": [
+    "ck_",
+    "ct_",
+    "ctx_",
+    "m_",
+    "ops_",
+    "opt_",
+    "pool_",
+    "ps_",
+    "sb_",
+    "slots_",
+    "spec_",
+    "tb_",
+    "vis_"
+   ]
+  },
+  "server.tier_glue": {
+   "layer": 8,
+   "funcs": [
+    "attachTier",
+    "waitsForTier",
+    "prefetchFor",
+    "tryRestore",
+    "pollRestores",
+    "restoreSteps",
+    "tierTick",
+    "flushTierOnStop"
+   ],
+   "data": [],
+   "refs": [
+    "ops_",
+    "opt_",
+    "pool_",
+    "ps_",
+    "slots_",
+    "tb_"
+   ]
+  },
+  "server.engine": {
+   "layer": 10,
+   "funcs": [
+    "Engine",
+    "~Engine",
+    "allocState",
+    "allocStateMeasured",
+    "attachVision",
+    "visionConfig",
+    "owner",
+    "modulesOwned",
+    "health",
+    "facts",
+    "options",
+    "setCtx",
+    "setNumerics",
+    "setStartup",
+    "setKvSsdMode",
+    "ctxPublished",
+    "tokenizer",
+    "model",
+    "stats",
+    "statsShared",
+    "storeConfig",
+    "bridgeConfig",
+    "type:StateMem"
+   ],
+   "data": [
+    "tok_"
+   ],
+   "free_funcs": [
+    "storeConfig",
+    "bridgeConfig"
+   ]
+  },
+  "server.scheduler": {
+   "layer": 9,
+   "funcs": [
+    "runLoop",
+    "idleWait",
+    "admitQueued",
+    "startAdmitted",
+    "logBatchStats"
+   ],
+   "data": [
+    "last_tick_"
+   ],
+   "refs": [
+    "bst_",
+    "m_",
+    "opt_",
+    "owner_",
+    "pool_",
+    "ps_",
+    "slots_",
+    "spec_",
+    "tb_",
+    "vis_",
+    "vram_probe_"
+   ]
+  },
+  "server.slot": {
+   "layer": 0,
+   "funcs": [
+    "parkSlotCkpts"
+   ],
+   "data": [],
+   "free_funcs": [
+    "parkSlotCkpts"
+   ],
+   "_doc": "leg 1 module (engine_slot.{h,cpp}); its free function is tracked wherever it is defined",
+   "refs": []
+  }
+ },
+ "core_categories": {
+  "_doc": "leg-end categories of server.engine; mutually exclusive (graph3 always checks), shapes checked with --core",
+  "special": [
+   "Engine",
+   "~Engine"
+  ],
+  "startup": [
+   "allocState",
+   "allocStateMeasured",
+   "attachVision",
+   "setCtx",
+   "setNumerics",
+   "setStartup",
+   "setKvSsdMode"
+  ],
+  "accessor": [
+   "visionConfig",
+   "owner",
+   "options",
+   "tokenizer",
+   "model"
+  ],
+  "report": [
+   "facts",
+   "health",
+   "stats",
+   "statsShared",
+   "modulesOwned"
+  ],
+  "forwarder_public": [
+   "ctxPublished",
+   "Engine.attachTier",
+   "Engine.initPool",
+   "Engine.setVramProbe",
+   "Engine.setGovernor",
+   "Engine.governorJson",
+   "Engine.nextJobId",
+   "Engine.submitAndWait",
+   "Engine.beginBuilding",
+   "Engine.endBuilding",
+   "Engine.stop",
+   "Engine.runOnLoop",
+   "Engine.runLoop"
+  ],
+  "helper": [
+   "storeConfig",
+   "bridgeConfig"
+  ]
+ },
+ "hot": [
+  "acceptSlot",
+  "emit",
+  "flushOut",
+  "dflIngest",
+  "relaxes",
+  "relaxRepeats",
+  "sampleRows",
+  "decodeCycle",
+  "draftLimits",
+  "ngramDrafts",
+  "dflashDrafts",
+  "mtpDrafts",
+  "layoutBatch",
+  "draftSampling",
+  "enqueueVerify",
+  "trainCycle",
+  "cycleStats",
+  "finishCycle",
+  "dropOutOfRoom",
+  "verifyRoom",
+  "draftRoom",
+  "dflReady",
+  "pickDrafts",
+  "splitDrafts",
+  "draftCap",
+  "ensurePages",
+  "takePage",
+  "prefillStep",
+  "prefillGroup",
+  "chunkLen"
+ ],
+ "header_inline": [
+  "dflReset",
+  "dflIngest",
+  "dflReady",
+  "draftRoom",
+  "kvTokBytes",
+  "ctxForNew"
+ ],
+ "_doc_header_inline": "functions that stay inline in their module's header (they are inline today: engine.h, or inlined in their callers' TU in the c1ca7ce objects, inline_check.py)",
+ "rewrites": {
+  "_doc": "planned body changes that change a use (each is a design step with its own proof): function -> {old member: new member}",
+  "govPublish": {
+   "vram_mu_": "gov_mu_"
+  },
+  "governorJson": {
+   "vram_mu_": "gov_mu_"
+  }
+ },
+ "new_data": {
+  "_doc": "planned members (allowed to be missing until the step that adds them)",
+  "gov_mu_": "server.governor",
+  "jq_": "server.job_queue",
+  "dc_": "server.drafter_ctx",
+  "sc_": "server.slot_cache",
+  "cnt_": "server.slot_cache",
+  "gst_": "server.governor",
+  "gv_": "server.governor",
+  "vst_": "server.vram_watch",
+  "vw_": "server.vram_watch",
+  "se_": "server.slot_end",
+  "pf_": "server.prefill",
+  "cyc_": "server.spec_cycle",
+  "ss_": "server.slot_start",
+  "tg_": "server.tier_glue",
+  "sch_": "server.scheduler"
+ },
+ "outside_writers": {
+  "_doc": "writes to a module's own data from another module, measured at c1ca7ce (census3). leg_end = what remains after the encapsulation steps S10b / S12b / S9b (DESIGN 4): the constructor statements stay in Engine's constructor in their order (rule A); allocState / setVramProbe are startup installers (DESIGN 2.6 table)",
+  "now": [
+   "Engine:conv_bytes_",
+   "Engine:crlf_norm_",
+   "Engine:ctx_pub_",
+   "Engine:fl_",
+   "Engine:ssm_bytes_",
+   "admitQueued:n_active_",
+   "admitQueued:queue_",
+   "allocState:spec_on_",
+   "attachTier:q_cond_",
+   "attachTier:tier_wake_",
+   "attachTier:wake_seq_",
+   "idleWait:q_cond_",
+   "idleWait:q_mutex_",
+   "idleWait:tier_wake_",
+   "logBatchStats:fl_",
+   "reapDisconnected:q_cond_",
+   "reapDisconnected:queue_",
+   "releaseSlot:n_active_",
+   "releaseSlot:q_cond_",
+   "runLoop:q_cond_",
+   "setCtx:ctx_pub_",
+   "setVramProbe:vram_others_",
+   "startAdmitted:n_active_",
+   "startAdmitted:queue_",
+   "vramNote:gov_warn_"
+  ],
+  "leg_end": [
+   "Engine:conv_bytes_",
+   "Engine:crlf_norm_",
+   "Engine:ctx_pub_",
+   "Engine:fl_",
+   "Engine:ssm_bytes_",
+   "allocState:spec_on_",
+   "setVramProbe:vram_others_"
+  ],
+  "_doc_s0": "S0 re-measure (A1): now adds the lock-protocol writes (q_cond_.notify_all / wait_for, q_mutex_ through WH_UNLOCK_HELD) outside job_queue; leg_end is unchanged: they move behind JobQueue methods (review3 C3, leg 3 design)"
+ },
+ "engine_members_final": [
+  "m_",
+  "ops_",
+  "tok_",
+  "ct_",
+  "opt_",
+  "ctx_",
+  "owner_",
+  "ck_",
+  "spec_",
+  "fl_",
+  "sb_",
+  "spec_on_",
+  "conv_bytes_",
+  "ssm_bytes_",
+  "slots_",
+  "jq_",
+  "ids_",
+  "rcx_",
+  "bst_",
+  "vram_probe_",
+  "vram_others_",
+  "vst_",
+  "prefill_tok_cum_",
+  "crlf_norm_",
+  "gst_",
+  "ctx_pub_",
+  "kv_arrays_",
+  "pool_",
+  "last_tick_",
+  "last_reap_",
+  "ps_",
+  "tb_",
+  "cnt_",
+  "vis_",
+  "dc_",
+  "sc_",
+  "gv_",
+  "vw_",
+  "se_",
+  "pf_",
+  "cyc_",
+  "ss_",
+  "tg_",
+  "sch_"
+ ],
+ "classes": {
+  "_doc": "component class -> module; Engine is implicit (server.engine, plus every entry the cut assigns)",
+  "JobQueue": "server.job_queue",
+  "DrafterCtx": "server.drafter_ctx",
+  "SlotPages": "server.slot_cache",
+  "SlotPagesCounters": "server.slot_cache",
+  "GovState": "server.governor",
+  "GovernorGlue": "server.governor",
+  "VramState": "server.vram_watch",
+  "VramWatch": "server.vram_watch",
+  "SlotEnd": "server.slot_end",
+  "PrefillPhase": "server.prefill",
+  "SpecCycle": "server.spec_cycle",
+  "SlotStart": "server.slot_start",
+  "TierGlue": "server.tier_glue",
+  "Scheduler": "server.scheduler"
+ },
+ "holders": {
+  "_doc": "member object name -> class (calls h.f( resolve to the class's entries; rule: a component's reference to a core.shared member keeps that member's name)",
+  "jq_": "JobQueue",
+  "dc_": "DrafterCtx",
+  "sc_": "SlotPages",
+  "cnt_": "SlotPagesCounters",
+  "gst_": "GovState",
+  "gv_": "GovernorGlue",
+  "vst_": "VramState",
+  "vw_": "VramWatch",
+  "se_": "SlotEnd",
+  "pf_": "PrefillPhase",
+  "cyc_": "SpecCycle",
+  "ss_": "SlotStart",
+  "tg_": "TierGlue",
+  "sch_": "Scheduler"
+ },
+ "aliases": {
+  "_doc": "planned renames: qualified definition -> cut entry",
+  "GovernorGlue::tick": "govTick"
+ },
+ "new_funcs": {
+  "_doc": "planned functions (S-steps of DESIGN 4); allowed to be missing until written",
+  "govActive": "server.governor",
+  "govSetWarn": "server.governor",
+  "govReduced": "server.governor",
+  "govCtxPublished": "server.governor",
+  "govPublishCtx": "server.governor",
+  "jqHealth": "server.job_queue",
+  "jqAdmit": "server.job_queue",
+  "jqStartAdmitted": "server.job_queue",
+  "jqRelease": "server.job_queue",
+  "jqReap": "server.job_queue",
+  "jqTierWake": "server.job_queue",
+  "vramHealth": "server.vram_watch",
+  "cacheCounters": "server.slot_cache",
+  "floorLogPeriod": "server.prefill",
+  "floorOn": "server.prefill",
+  "Engine.attachTier": "server.engine",
+  "Engine.initPool": "server.engine",
+  "Engine.setVramProbe": "server.engine",
+  "Engine.setGovernor": "server.engine",
+  "Engine.governorJson": "server.engine",
+  "Engine.nextJobId": "server.engine",
+  "Engine.submitAndWait": "server.engine",
+  "Engine.beginBuilding": "server.engine",
+  "Engine.endBuilding": "server.engine",
+  "Engine.stop": "server.engine",
+  "Engine.runOnLoop": "server.engine",
+  "Engine.runLoop": "server.engine"
+ },
+ "users": [
+  "server/server_main.cpp"
+ ],
+ "core_shapes": {
+  "_doc": "statements = ';'-separated parts of the body; forbid = regex on the body",
+  "accessor": {
+   "max_statements": 1,
+   "forbid": [
+    "\\bfor\\b",
+    "\\bwhile\\b",
+    "\\bif\\b",
+    "Lock\\b"
+   ]
+  },
+  "forwarder_public": {
+   "max_statements": 1,
+   "forbid": [
+    "\\bfor\\b",
+    "\\bwhile\\b",
+    "\\bif\\b",
+    "Lock\\b"
+   ]
+  },
+  "report": {
+   "max_lines": 30,
+   "forbid": [
+    "\\bwhile\\b",
+    "Lock\\b",
+    "\\block\\(",
+    "\\bsleep"
+   ]
+  },
+  "startup": {
+   "max_lines": 30,
+   "forbid": [
+    "\\bwhile\\b",
+    "Lock\\b"
+   ]
+  },
+  "special": {
+   "max_lines": 45
+  },
+  "helper": {
+   "max_lines": 15,
+   "forbid": [
+    "\\bwhile\\b"
+   ]
+  }
+ },
+ "core_exceptions": {
+  "_doc": "core data uses that stay at leg end (graph3 --core); each with its reason (DESIGN 2.6)",
+  "allocState:spec_on_": "two-phase construction: allocState sizes the buffers and sets spec_on_ once, before runLoop; spec_cycle only reads it afterwards"
+ },
+ "shared_writers": {
+  "_doc": "writers of each core.shared member, measured at c1ca7ce by engine_split_census.py (S0: assignments, non-const method calls, non-const reference / pointer bindings, arguments that are not provably by value / const&); a writer not listed fails. leg_end = now",
+  "now": {
+   "bst_": [
+    "acceptSlot",
+    "cycleStats",
+    "dflIngest",
+    "dflashDrafts",
+    "idleWait",
+    "logBatchStats",
+    "prefillGroup",
+    "prefillStep",
+    "runLoop"
+   ],
+   "ck_": [
+    "Engine",
+    "allocState",
+    "govFreeCache",
+    "govRestoreCache",
+    "saveCkpt"
+   ],
+   "ct_": [
+    "Engine"
+   ],
+   "ctx_": [
+    "Engine",
+    "setCtx"
+   ],
+   "m_": [
+    "Engine",
+    "acceptSlot",
+    "allocState",
+    "createSpe",
+    "cycleStats",
+    "dflIngest",
+    "dflReset",
+    "dflashDrafts",
+    "draftSampling",
+    "enqueueVerify",
+    "finishJob",
+    "finishPrefill",
+    "govResize",
+    "idleWait",
+    "layoutBatch",
+    "maybeSplitCkpt",
+    "prefillGroup",
+    "prefillStep",
+    "sampleRows",
+    "startJob"
+   ],
+   "ops_": [
+    "acceptSlot",
+    "allocStateMeasured",
+    "createSpe",
+    "dropSpe",
+    "finishJob",
+    "finishPrefill",
+    "freePages",
+    "govDrain",
+    "sampleRows",
+    "startJob"
+   ],
+   "opt_": [
+    "Engine",
+    "allocState",
+    "govRestoreCache",
+    "setCtx",
+    "setKvSsdMode",
+    "setNumerics",
+    "setStartup"
+   ],
+   "owner_": [
+    "Engine",
+    "modulesOwned",
+    "runLoop"
+   ],
+   "pool_": [
+    "Engine",
+    "attachSpe",
+    "attachTier",
+    "cowPages",
+    "createSpe",
+    "dropSpe",
+    "ensurePages",
+    "freePages",
+    "govDrain",
+    "govFreeCache",
+    "govResize",
+    "initPool",
+    "startJob",
+    "takePage",
+    "tierTick"
+   ],
+   "ps_": [
+    "Engine",
+    "allocState",
+    "attachSpe",
+    "attachTier",
+    "attachVision",
+    "createSpe",
+    "evictFor",
+    "govDrain",
+    "govFreeCache",
+    "govResize",
+    "govRestoreCache",
+    "prefetchFor",
+    "saveCkpt",
+    "startAdmitted",
+    "startJob",
+    "waitsForSys",
+    "waitsForTier"
+   ],
+   "sb_": [
+    "acceptSlot",
+    "allocState",
+    "finishPrefill",
+    "sampleRows",
+    "startJob"
+   ],
+   "slots_": [
+    "allocState",
+    "evictFor",
+    "govDrain",
+    "govFreeCache",
+    "govResize",
+    "govRestoreCache",
+    "pollRestores",
+    "prefetchFor",
+    "prefillGroup",
+    "reapDisconnected",
+    "runLoop",
+    "runPrefill",
+    "startJob",
+    "tierTick",
+    "waitsForSys",
+    "waitsForTier"
+   ],
+   "spec_": [
+    "Engine",
+    "acceptSlot",
+    "cycleStats",
+    "idleWait",
+    "mtpDrafts",
+    "pickDrafts",
+    "runPrefill",
+    "startJob",
+    "trainCycle"
+   ],
+   "tb_": [
+    "Engine",
+    "attachTier",
+    "cowPages",
+    "createSpe",
+    "dropSpe",
+    "failSlot",
+    "finishJob",
+    "flushTierOnStop",
+    "freePages",
+    "idleWait",
+    "pollRestores",
+    "prefetchFor",
+    "releaseSlot",
+    "saveCkpt",
+    "startJob",
+    "tierTick",
+    "tryRestore"
+   ],
+   "vis_": [
+    "attachVision",
+    "releaseSlot"
+   ],
+   "vram_probe_": [
+    "setVramProbe"
+   ]
+  },
+  "leg_end": {
+   "bst_": [
+    "acceptSlot",
+    "cycleStats",
+    "dflIngest",
+    "dflashDrafts",
+    "idleWait",
+    "logBatchStats",
+    "prefillGroup",
+    "prefillStep",
+    "runLoop"
+   ],
+   "ck_": [
+    "Engine",
+    "allocState",
+    "govFreeCache",
+    "govRestoreCache",
+    "saveCkpt"
+   ],
+   "ct_": [
+    "Engine"
+   ],
+   "ctx_": [
+    "Engine",
+    "setCtx"
+   ],
+   "m_": [
+    "Engine",
+    "acceptSlot",
+    "allocState",
+    "createSpe",
+    "cycleStats",
+    "dflIngest",
+    "dflReset",
+    "dflashDrafts",
+    "draftSampling",
+    "enqueueVerify",
+    "finishJob",
+    "finishPrefill",
+    "govResize",
+    "idleWait",
+    "layoutBatch",
+    "maybeSplitCkpt",
+    "prefillGroup",
+    "prefillStep",
+    "sampleRows",
+    "startJob"
+   ],
+   "ops_": [
+    "acceptSlot",
+    "allocStateMeasured",
+    "createSpe",
+    "dropSpe",
+    "finishJob",
+    "finishPrefill",
+    "freePages",
+    "govDrain",
+    "sampleRows",
+    "startJob"
+   ],
+   "opt_": [
+    "Engine",
+    "allocState",
+    "govRestoreCache",
+    "setCtx",
+    "setKvSsdMode",
+    "setNumerics",
+    "setStartup"
+   ],
+   "owner_": [
+    "Engine",
+    "modulesOwned",
+    "runLoop"
+   ],
+   "pool_": [
+    "Engine",
+    "attachSpe",
+    "attachTier",
+    "cowPages",
+    "createSpe",
+    "dropSpe",
+    "ensurePages",
+    "freePages",
+    "govDrain",
+    "govFreeCache",
+    "govResize",
+    "initPool",
+    "startJob",
+    "takePage",
+    "tierTick"
+   ],
+   "ps_": [
+    "Engine",
+    "allocState",
+    "attachSpe",
+    "attachTier",
+    "attachVision",
+    "createSpe",
+    "evictFor",
+    "govDrain",
+    "govFreeCache",
+    "govResize",
+    "govRestoreCache",
+    "prefetchFor",
+    "saveCkpt",
+    "startAdmitted",
+    "startJob",
+    "waitsForSys",
+    "waitsForTier"
+   ],
+   "sb_": [
+    "acceptSlot",
+    "allocState",
+    "finishPrefill",
+    "sampleRows",
+    "startJob"
+   ],
+   "slots_": [
+    "allocState",
+    "evictFor",
+    "govDrain",
+    "govFreeCache",
+    "govResize",
+    "govRestoreCache",
+    "pollRestores",
+    "prefetchFor",
+    "prefillGroup",
+    "reapDisconnected",
+    "runLoop",
+    "runPrefill",
+    "startJob",
+    "tierTick",
+    "waitsForSys",
+    "waitsForTier"
+   ],
+   "spec_": [
+    "Engine",
+    "acceptSlot",
+    "cycleStats",
+    "idleWait",
+    "mtpDrafts",
+    "pickDrafts",
+    "runPrefill",
+    "startJob",
+    "trainCycle"
+   ],
+   "tb_": [
+    "Engine",
+    "attachTier",
+    "cowPages",
+    "createSpe",
+    "dropSpe",
+    "failSlot",
+    "finishJob",
+    "flushTierOnStop",
+    "freePages",
+    "idleWait",
+    "pollRestores",
+    "prefetchFor",
+    "releaseSlot",
+    "saveCkpt",
+    "startJob",
+    "tierTick",
+    "tryRestore"
+   ],
+   "vis_": [
+    "attachVision",
+    "releaseSlot"
+   ],
+   "vram_probe_": [
+    "setVramProbe"
+   ]
+  }
+ },
+ "_doc_engine_members_final": "E3 (graph3 --core): Engine's data members at leg end, in declaration order; placed state stays at its c1ca7ce position (DESIGN 2.5)",
+ "_doc_s0": "S0 (2026-10-29): generated by scratch/a25_engine/s0/gen_cut_s0.py from cut_v3.json; the architecture part is pinned by tests/pins/engine_cut_arch.sha256 (engine_split_check.py --pin-check, review3 C2)"
+}

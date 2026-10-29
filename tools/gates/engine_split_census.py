@@ -1,0 +1,658 @@
+# SPDX-License-Identifier: Apache-2.0
+# arch025-engine S0 (from scratch/a25_engine/v3/census3.py): census of class Engine AND of every component the cut
+# names. Run through tools/gates/engine_split_check.py (census + graph + self-test).
+#   python -I engine_split_census.py <src_root> <out_dir> --cut tools/gates/engine_cut.json
+# S0 changes against census3 (third review A1-A3, progress/arch025-engine.DESIGN.REVIEW3.md):
+#  A1 writes: a member hit is a WRITE when (a) an assignment / ++ / -- ends its access chain (`queue_.front()->id = 0`),
+#     (b) any method called on the chain is not on the measured const list (CONST_OK: names that src/ declares only
+#     as const member functions, plus std read-only names) - so `.append`, `.update`, `cc.observe` through a binding,
+#     `ps_.spes().clear()` are writes, (c) it is bound to a non-const local reference / pointer / range-for reference
+#     (`auto& q = stop_;`), (d) it is an argument of a function call (`std::swap(a_, b_)`, `dropAll(queue_)`,
+#     `std::fill(x_.begin(), ...)`) unless the callee is on READ_CALLEES, (e) its address is taken (`&x_`) outside a
+#     const declaration. Conservative: unknown = write (clang-tidy misc-const-correctness does the same).
+#  A2 nested types: a nested struct / class with a body inside a tracked class, and a namespace-level struct / class
+#     with a body in an engine file, become entries `type:X` (their inline bodies are scanned); in-class member
+#     initializers (`X y_{a_, b_}`, `int n_ = k_;`) are scanned as part of the class's constructor entry.
+#  A3 receivers: a local alias of *this / of a tracked class (`Engine& me = *this`, `auto* p = this`,
+#     `SlotPages& s = sc_`) is a known receiver; a call `r.f(` / `r->f(` with any other receiver whose name f is a
+#     tracked entry and NOT a method of any untracked class in src/ is recorded as a call (conservative); the rest
+#     are listed in unresolved.txt (reported, not dropped silently). A data member of a tracked class whose type
+#     names Engine or a tracked class, and whose name is not a cut holder of that class, is a FINDING.
+# <src_root> = a tree with src/ (git archive c1ca7ce / abe3512 exports).
+# v3 changes against census2.py (v2):
+#  R1 (blind after the first move): the class bodies parsed are Engine AND every class in cut["classes"] (wherever it is
+#     defined under src/); out-of-line definitions are `C::f` for every tracked C; in the "engine files" (files with a
+#     tracked definition, files a module lists in cut["files"], and files that include a tracked header but are not
+#     in cut["users"]) EVERY namespace-level function definition is an entry: an untracked `X::f` or an unknown free
+#     function becomes an entry the cut does not know -> graph3 fails (unassigned). Free functions the cut lists
+#     (cut["free_funcs"]) are found in any file under src/. Entry keys are the cut's names: `C::f` -> cut["aliases"]
+#     or f (graph3 checks that f belongs to C's module).
+#  R2 (this->, Engine::, macros): a data member is used wherever its identifier appears (any receiver: bare, this->,
+#     e., holder_.x, Engine::x); a function is called when its name is followed by `(` and the receiver is none,
+#     this, e, Engine, a tracked class, or a holder object (cut["holders"]); `C::f` / `&C::f` without a call also
+#     counts. Every `#define` in an engine file, every `#define` anywhere in src/ whose replacement names a tracked
+#     data member or class, and every `friend` in a tracked class body is a FINDING (exit 2).
+#  R3 support: writes are recorded per entry for every data member (graph3 checks them against the cut's writer lists).
+# Outputs: members.tsv, funcs.tsv (+ column 'def' = the qualified definition), files.txt, findings.txt, census3.json.
+# Exit: 0 clean, 2 findings (the census itself is complete; graph3 still runs), 1 crash.
+import os, re, sys, json
+
+ROOT, OUT = sys.argv[1], sys.argv[2]
+CUTP = sys.argv[sys.argv.index("--cut") + 1]
+cut = json.load(open(CUTP, encoding="utf-8"))
+os.makedirs(OUT, exist_ok=True)
+SRC = os.path.join(ROOT, "src")
+CLASSES = {k: v for k, v in cut.get("classes", {}).items() if not k.startswith("_")}  # class -> module
+CLASSES.setdefault("Engine", "server.engine")
+HOLDERS = {k: v for k, v in cut.get("holders", {}).items() if not k.startswith("_")}   # object name -> class
+ALIASES = {k: v for k, v in cut.get("aliases", {}).items() if not k.startswith("_")}   # "C::f" -> entry
+FREE = set(f for m, v in cut["modules"].items() for f in v.get("free_funcs", []))
+USERS = set(cut.get("users", []))          # files allowed to include engine headers without being engine files
+LISTED = set(f for m, v in cut["modules"].items() for f in v.get("files", []))
+KW = {"if", "for", "while", "switch", "return", "sizeof", "catch", "static_assert", "decltype", "alignof", "noexcept",
+      "defined", "new", "delete", "throw", "operator", "assert"}
+findings = []
+
+
+def strip(s):
+    out, i, n = [], 0, len(s)
+    while i < n:
+        c = s[i]
+        if s.startswith("//", i):
+            j = s.find("\n", i); j = n if j < 0 else j
+            out.append(" " * (j - i)); i = j
+        elif s.startswith("/*", i):
+            j = s.find("*/", i + 2); j = n if j < 0 else j + 2
+            out.append(re.sub(r"[^\n]", " ", s[i:j])); i = j
+        elif s.startswith('R"', i) and (i == 0 or not (s[i - 1].isalnum() or s[i - 1] == "_")):
+            m = re.match(r'R"([^(]*)\(', s[i:])
+            end = s.find(")" + m.group(1) + '"', i)
+            j = end + len(m.group(1)) + 2
+            out.append(re.sub(r"[^\n]", " ", s[i:j])); i = j
+        elif c == "'" and i > 0 and s[i - 1].isdigit() and i + 1 < n and s[i + 1].isdigit():
+            out.append(" "); i += 1
+        elif c in "\"'":
+            j = i + 1
+            while j < n and s[j] != c:
+                j += 2 if s[j] == "\\" else 1
+            out.append(c + " " * (j - i - 1) + c); i = j + 1
+        else:
+            out.append(c); i += 1
+    return "".join(out)
+
+
+def match_close(s, i, op, cl):
+    d = 0
+    while i < len(s):
+        if s[i] == op: d += 1
+        elif s[i] == cl:
+            d -= 1
+            if d == 0: return i
+        i += 1
+    raise ValueError("unbalanced")
+
+
+def detpl(x):
+    prev = None
+    while prev != x:
+        prev = x; x = re.sub(r"<[^<>;{}]*>", "", x)
+    return x
+
+
+def lineno(s, i):
+    return s.count("\n", 0, i) + 1
+
+
+def code_depth(s):
+    stack, cdepth, cd, last = [], [0] * (len(s) + 1), 0, 0
+    for k, ch in enumerate(s):
+        cdepth[k] = cd
+        if ch == "{":
+            isns = re.search(r"(namespace\s*[\w:]*|extern\s*\"\"\s*)\s*$", s[last:k]) is not None
+            stack.append(isns)
+            if not isns: cd += 1
+            last = k + 1
+        elif ch == "}":
+            if stack and not stack.pop(): cd -= 1
+            last = k + 1
+        elif ch == ";":
+            last = k + 1
+    cdepth[len(s)] = cd
+    return cdepth
+
+
+# ---------------- read all of src/ ----------------
+texts = {}
+for dp, dn, fn in os.walk(SRC):
+    for f in sorted(fn):
+        if f.endswith((".cpp", ".h", ".hip", ".inc", ".hpp")):
+            p = os.path.join(dp, f)
+            raw = open(p, encoding="utf-8", errors="replace").read()
+            texts[os.path.relpath(p, SRC).replace("\\", "/")] = (raw, strip(raw))
+# A1: declarations (const list, parameter kinds) are also read from include/ (wddm_watch.h, mem_governor.h ...);
+# a tree without include/ gets fewer const names = more writes (the safe direction).
+decl_texts = dict(texts)
+for dp, dn, fn in os.walk(os.path.join(ROOT, "include")):
+    for f in sorted(fn):
+        if f.endswith((".h", ".hpp", ".inc")):
+            p = os.path.join(dp, f)
+            decl_texts["include:" + os.path.relpath(p, ROOT).replace("\\", "/")] = (None, strip(open(p, encoding="utf-8", errors="replace").read()))
+
+data, funcs, types, statics = [], [], [], []   # data: (name, line, access, decl, class, file)
+bodies = {}  # key -> (file, line, text, def)
+class_files = {}
+inits = {}   # class -> [(file, line, initializer text)]  (A2: in-class member initializers)
+
+
+def add_body(key, f, ln, txt, dfn):
+    while key in bodies: key += "#"
+    bodies[key] = (f, ln, txt, dfn)
+    return key
+
+
+def parse_class(cname, rel, hs, a):
+    cb0 = a.end()
+    cb1 = match_close(hs, a.end() - 1, "{", "}")
+    i, stmt0, access = cb0, cb0, ("private" if hs[a.start():a.end()].lstrip().startswith("class") else "public")
+    while i < cb1:
+        c = hs[i]
+        if c == "{":
+            head = hs[stmt0:i]
+            if head.count("(") > head.count(")"):
+                i = match_close(hs, i, "{", "}") + 1; continue
+            hd = detpl(re.sub(r"WH_\w+\([^)]*\)", "", head)).strip()
+            for acc in ("public:", "private:", "protected:"):
+                while hd.startswith(acc): access = acc[:-1]; hd = hd[len(acc):].strip()
+            j = match_close(hs, i, "{", "}")
+            if re.match(r"(struct|class|enum|union)\b", hd):
+                tn = re.findall(r"\w+", hd)[1]
+                types.append((tn, lineno(hs, stmt0), cname))
+                if not hd.startswith("enum"):   # A2: the nested type's inline bodies are an entry type:X
+                    add_body("type:" + tn, rel, lineno(hs, stmt0), hs[stmt0:j + 1], f"struct {cname}::{tn} (in-class)")
+                k = hs.index(";", j); i = k + 1; stmt0 = i; continue
+            if "(" in hd.split("=")[0] and re.search(r"\w\s*$", hd.split("(")[0]) is not None:
+                pre = hd.split("(")[0]
+                nm = re.search(r"(operator\s*\S+|~?\w+)\s*$", pre).group(1)
+                funcs.append((nm, lineno(hs, stmt0), access, re.sub(r"\s+", " ", hd)[:90], cname))
+                add_body(resolve(cname, nm), rel, lineno(hs, stmt0), hs[stmt0:j + 1], f"{cname}::{nm} (inline)")
+                i = j + 1; stmt0 = i; continue
+            i = j + 1; continue
+        if c == ";":
+            s = re.sub(r"\s+", " ", hs[stmt0:i]).strip()
+            ln = lineno(hs, stmt0 + (len(hs[stmt0:i]) - len(hs[stmt0:i].lstrip())))
+            stmt0 = i + 1; i += 1
+            for acc in ("public:", "private:", "protected:"):
+                while s.startswith(acc):
+                    access = acc[:-1]; s = s[len(acc):].strip()
+            if s.startswith("friend"):
+                findings.append(f"friend in tracked class {cname} ({rel}:{ln}): {s[:80]}")
+                continue
+            if not s or s.startswith(("using ", "static_assert")):
+                continue
+            m = re.match(r"(struct|class) (\w+)$", s)
+            if m:
+                types.append((m.group(2), ln, cname)); continue
+            s2 = detpl(re.sub(r"WH_\w+\([^)]*\)", "", s))
+            if s2.startswith("static constexpr"):
+                statics.append((re.search(r"(\w+)\s*=", s2).group(1), ln)); continue
+            if "(" in re.sub(r"operator\s*=", "operator_assign", s2).split("=")[0] and not re.match(r"[\w:<>,\s*&]+\s+\w+\s*\{", s2):
+                pre = s2.split("(")[0]
+                nm = re.search(r"(operator\s*\S+|~?\w+)\s*$", pre).group(1)
+                funcs.append((nm, ln, access, s[:90], cname)); continue
+            s3 = re.sub(r"\{[^{}]*\}", "", s2)
+            parts, d, cur = [], 0, ""
+            for ch in s3:
+                if ch in "([": d += 1
+                if ch in ")]": d -= 1
+                if ch == "," and d == 0: parts.append(cur); cur = ""
+                else: cur += ch
+            parts.append(cur)
+            for p in parts:
+                w = re.findall(r"\w+", p.split("=")[0])
+                if w:
+                    data.append((w[-1], ln, access, s[:90], cname, rel))
+            # A2: in-class initializers (`= expr` or `{...}` after the declarator) belong to the constructor entry
+            ini, d2, cur2, parts2 = [], 0, "", []
+            for ch in s2:                     # declarators at depth 0 (commas inside (), [], {} , <> do not split)
+                if ch in "([{<": d2 += 1
+                if ch in ")]}>": d2 -= 1
+                if ch == "," and d2 == 0: parts2.append(cur2); cur2 = ""
+                else: cur2 += ch
+            parts2.append(cur2)
+            for p in parts2:
+                m_eq = re.search(r"(?<![=!<>])=(?!=)(.*)$", p)
+                if m_eq: ini.append(m_eq.group(1))
+                mb = re.search(r"\w\s*(\{.*\})\s*$", p.split("=")[0])
+                if mb: ini.append(mb.group(1))
+            ini = [x for x in ini if re.search(r"[A-Za-z_]", x)]   # literal initializers use nothing
+            if any(x.strip() for x in ini):
+                inits.setdefault(cname, []).append((rel, ln, " ; ".join(ini)))
+            continue
+        if c == ":" and hs[stmt0:i].strip() in ("public", "private", "protected"):
+            access = hs[stmt0:i].strip(); stmt0 = i + 1
+        i += 1
+
+
+def resolve(cname, nm):
+    q = f"{cname}::{nm}"
+    if q in ALIASES: return ALIASES[q]
+    if cname == "Engine" or cname in CLASSES: return nm
+    return q
+
+
+# class bodies (tracked classes), wherever they are
+for rel, (raw, s) in texts.items():
+    cd = None
+    for cname in CLASSES:
+        for a in re.finditer(r"(?:class|struct)\s+" + re.escape(cname) + r"\b(?:\s+final)?\s*(?::(?!:)[^;{]*)?\{", s):
+            if cd is None: cd = code_depth(s)
+            if cd[a.start()] != 0: continue
+            class_files.setdefault(cname, []).append(rel)
+            parse_class(cname, rel, s, a)
+
+tracked_hdr_paths = {f for v in class_files.values() for f in v if f.endswith(".h")}
+QUAL = "|".join(re.escape(c) for c in CLASSES)
+files_with_defs = {}
+engine_files = set()
+
+
+def inc_paths(rel, raw):
+    out = set()
+    for x in re.findall(r'#include\s+"([^"]+)"', raw):
+        out.add(os.path.normpath(os.path.join(os.path.dirname(rel), x)).replace(os.sep, "/"))
+        out.add(os.path.normpath(x).replace(os.sep, "/"))
+    return out
+
+
+for rel, (raw, s) in texts.items():
+    if rel in USERS: continue
+    if re.search(r"(?<![\w:])(?:" + QUAL + r")::", s): engine_files.add(rel)
+    if rel in LISTED: engine_files.add(rel)
+    if inc_paths(rel, raw) & tracked_hdr_paths and not rel.endswith(".h") \
+            and not any(rel in v for v in class_files.values()):
+        engine_files.add(rel)
+        if rel not in LISTED and not re.search(r"(?<![\w:])(?:" + QUAL + r")::", s):
+            findings.append(f"file includes an engine header but is neither a module file nor a listed user: {rel}")
+
+for rel, (raw, s) in sorted(texts.items()):
+    is_eng = rel in engine_files
+    if not is_eng and not re.search(r"(?<![\w:])(?:" + QUAL + r")::", s) and not any(n in s for n in FREE):
+        continue
+    cd = code_depth(s)
+    if is_eng:
+        for m in re.finditer(r"^[ \t]*#[ \t]*define\b[^\n]*", raw, re.M):
+            findings.append(f"#define in an engine file {rel}:{lineno(raw, m.start())}: {m.group(0).strip()[:80]}")
+    # qualified definitions X::f( / X::Y::f( and nested types struct X::Y
+    pat = r"(?<![\w:])(\w+)::(?:(\w+)::)?(~?\w+)\s*\(|(?:struct|class)\s+(\w+)::(\w+)\b"
+    for m in re.finditer(pat, s):
+        if cd[m.start()] != 0: continue
+        if m.group(5):
+            owner = m.group(4)
+            if owner not in CLASSES and not is_eng: continue
+            k = m.end()
+            while k < len(s) and s[k] not in "{;": k += 1
+            if k >= len(s) or s[k] == ";": continue
+            e = match_close(s, k, "{", "}")
+            key = add_body("type:" + m.group(5), rel, lineno(s, m.start()), s[m.start():e + 1], f"struct {owner}::{m.group(5)}")
+            files_with_defs.setdefault(rel, []).append(key)
+            continue
+        owner, sub, nm = m.group(1), m.group(2), m.group(3)
+        if owner not in CLASSES and not is_eng: continue
+        if owner in ("std", "whirl", "server", "chat", "qwen35", "tier", "memgov", "wddmwatch", "spec", "sampling",
+                     "device", "vision", "protocol", "detail"):
+            continue
+        # must be a definition: preceded by a declaration context, followed by (...) quals [: init] {
+        before = s[max(0, m.start() - 200):m.start()]
+        if re.search(r"(=|return|\(|,|\.|->|!|&&|\|\||\?)\s*[&*]?\s*$", before): continue
+        j = match_close(s, m.end() - 1, "(", ")") + 1
+        while True:
+            mm = re.match(r"\s*(const|noexcept|override|final|&&|&)(?!\w)", s[j:])
+            mm2 = re.match(r"\s*WH_\w+\([^)]*\)", s[j:])
+            if mm2: j += mm2.end(); continue
+            if mm and mm.group(1): j += mm.end(); continue
+            break
+        mm = re.match(r"\s*->\s*[\w:<>,\s*&]+?(?=\s*\{)", s[j:])
+        if mm: j += mm.end()
+        mm = re.match(r"\s*:(?!:)", s[j:])
+        if mm:
+            j += mm.end()
+            while True:
+                mm = re.match(r"\s*[\w:]+(?:<[^>]*>)?\s*", s[j:])
+                j += mm.end()
+                if s[j] == "(": j = match_close(s, j, "(", ")") + 1
+                elif s[j] == "{": j = match_close(s, j, "{", "}") + 1
+                else: raise ValueError(f"init list parse {rel}:{lineno(s, j)}")
+                mm = re.match(r"\s*(,|\{)", s[j:])
+                if mm.group(1) == ",": j += mm.end(); continue
+                j += mm.end() - 1; break
+        mm = re.match(r"\s*([{;=])", s[j:])
+        if not mm or mm.group(1) != "{":
+            continue
+        k = j + mm.end() - 1
+        e = match_close(s, k, "{", "}")
+        key = (sub + "::" + nm) if sub else resolve(owner, nm)   # Engine::Cycle::f -> nested type method (as v2)
+        key = add_body(key, rel, lineno(s, m.start()), s[m.start():e + 1], f"{owner}::{(sub + '::') if sub else ''}{nm}")
+        files_with_defs.setdefault(rel, []).append(key)
+    # A2: namespace-level struct / class definitions with a body in an engine file (helper types with inline methods)
+    if is_eng:
+        for m in re.finditer(r"(?<![\w:])(?:struct|class)\s+(\w+)\b(?!\s*::)(?:\s+final)?\s*(?::(?!:)[^;{]*)?\{", s):
+            if cd[m.start()] != 0 or m.group(1) in CLASSES: continue
+            e = match_close(s, m.end() - 1, "{", "}")
+            key = add_body("type:" + m.group(1), rel, lineno(s, m.start()), s[m.start():e + 1], f"struct {m.group(1)} (namespace)")
+            files_with_defs.setdefault(rel, []).append(key)
+            types.append((m.group(1), lineno(s, m.start()), "-"))
+    # free functions: in engine files every namespace-level definition; elsewhere only the names the cut lists
+    for m in re.finditer(r"(?<![\w:.>~])([A-Za-z_]\w*)\s*\(", s):
+        nm = m.group(1)
+        if cd[m.start()] != 0 or nm in KW: continue
+        if not is_eng and nm not in FREE: continue
+        before = s[max(0, m.start() - 200):m.start()]
+        if not re.search(r"[\w>&*]\s+[&*]*\s*$|^\s*$", before): continue
+        if re.search(r"(=|return|\(|,|\.|->|!|&&|\|\||\?|#\s*\w+)\s*[\w:<>]*\s*$", before): continue
+        try:
+            j = match_close(s, m.end() - 1, "(", ")") + 1
+        except ValueError:
+            continue
+        mm = re.match(r"(?:\s*(?:const|noexcept|&&|&)(?!\w)|\s*WH_\w+\([^)]*\))*\s*(?:->\s*[\w:<>,\s*&]+?)?\s*\{", s[j:])
+        if not mm: continue
+        k = j + mm.end() - 1
+        e = match_close(s, k, "{", "}")
+        key = add_body(nm, rel, lineno(s, m.start()), s[m.start():e + 1], f"free {nm}")
+        files_with_defs.setdefault(rel, []).append(key)
+
+# A2: in-class member initializers are part of the class's constructor entry
+for cname, lst in sorted(inits.items()):
+    add_body(resolve(cname, cname), lst[0][0], lst[0][1], "{ " + " ;\n".join(t for _, _, t in lst) + " }",
+             f"{cname}::{cname} (in-class initializers)")
+
+# A3: no component holds Engine (DESIGN 2.1 rule 3) - not even as a listed holder
+for h, c in sorted(HOLDERS.items()):
+    if c == "Engine":
+        findings.append(f"cut holder of Engine: {h}  [no component may hold Engine& / Engine*]")
+# A3: data members of tracked classes whose type names Engine or a tracked class must be cut holders of that class
+for nm, ln, acc, decl, cname, rel in data:
+    dtype = decl.split(nm)[0] if nm in decl else decl
+    named = [c for c in CLASSES if re.search(r"(?<![\w:])" + re.escape(c) + r"\b", dtype)]
+    if named and not (nm in HOLDERS and HOLDERS[nm] in named):
+        findings.append(f"member of tracked class {cname} holds {'/'.join(named)} but is not a cut holder of it "
+                        f"({rel}:{ln}): {nm}  [no component may hold Engine& / another component under an unlisted name]")
+
+# public forwarders: once a component class defines f, Engine's own f is the forwarder entry "Engine.f"
+comp_keys = {k.split("#")[0] for k, v in bodies.items() if v[3].split()[-1].split("::")[0] in CLASSES
+             and not v[3].split()[-1].startswith("Engine::") and not v[3].startswith("free")}
+for k in list(bodies):
+    v = bodies[k]
+    if v[3].split()[-1].startswith("Engine::") and k.split("#")[0] in comp_keys and k.split("#")[0] not in ("Engine", "~Engine"):
+        nk = "Engine." + k.split("#")[0]
+        while nk in bodies: nk += "#"
+        bodies[nk] = bodies.pop(k)
+
+# macros anywhere that name a tracked data member or class
+dnames = sorted({d[0] for d in data})
+dset = set(dnames)
+for rel, (raw, s) in texts.items():
+    if rel in engine_files: continue
+    for m in re.finditer(r"^[ \t]*#[ \t]*define[ \t]+(\w+)([^\n]*)", raw, re.M):
+        toks = set(re.findall(r"\w+", m.group(2)))
+        hit = sorted(toks & (dset | set(CLASSES)))
+        if hit:
+            findings.append(f"#define naming tracked names {rel}:{lineno(raw, m.start())}: {m.group(1)} -> {','.join(hit)}")
+
+fnames = sorted({k.split("#")[0] for k in bodies if not k.startswith("type:")} | {f[0] for f in funcs if "::" not in f[0]}
+                | set(ALIASES.values()))
+fnames = [n for n in fnames if "::" not in n]
+WOPS = r"(?:(?:\s*(?:\.\w+|->\w+|\[[^\]]*\]))*\s*(?:=(?!=)|\+=|-=|\*=|/=|\|=|&=|\^=|<<=|>>=|\+\+|--)|(?:\s*(?:\.\w+|\[[^\]]*\]))*\s*\.\s*(?:store|fetch_add|fetch_sub|push_back|emplace_back|emplace|clear|reset|resize|assign|erase|insert|pop_front|pop_back|push_front|swap|exchange)\s*\()"
+OKRECV = {"this", "e", "Engine", "self"} | set(CLASSES) | set(HOLDERS)
+# method name of a tracked class -> entry (for holder.f( calls): C::f resolves through aliases / f
+meth = {}
+for nm, ln, acc, s, cname in funcs:
+    meth.setdefault(nm.split("::")[-1], set()).add(resolve(cname, nm.split("::")[-1]))
+for q, e in ALIASES.items():
+    meth.setdefault(q.split("::")[-1], set()).add(e)
+
+
+# A1: the measured const list. A method name counts as read-only when src/ declares it ONLY as a const member
+# function (some `name(...) const` declaration and no non-const declaration of the same name), or it is a std
+# read-only name. Everything else called on a member's access chain is a write.
+STD_CONST = {"size", "empty", "load", "find", "count", "contains", "at", "front", "back", "data", "begin", "end",
+             "cbegin", "cend", "rbegin", "rend", "get", "c_str", "str", "substr", "length", "capacity", "value",
+             "has_value", "value_or", "compare", "starts_with", "ends_with", "rfind", "find_first_of", "test",
+             "time_since_epoch", "count_ms", "lower_bound", "upper_bound", "equal_range", "max_size", "native_handle"}
+_decl_const, _decl_mut = set(), set()
+_params = {}   # function / method name -> [parameter list per declaration] (A1 (d): by-value / const& = read)
+
+
+def _split_top(x):
+    out, d, cur = [], 0, ""
+    for ch in x:
+        if ch in "([{<": d += 1
+        if ch in ")]}>": d -= 1
+        if ch == "," and d == 0: out.append(cur.strip()); cur = ""
+        else: cur += ch
+    if cur.strip(): out.append(cur.strip())
+    return out
+
+
+def _param_reads(cal, idx):
+    """True when every src/ declaration of `cal` takes argument idx by value or by const reference / pointer."""
+    decls = _params.get(cal)
+    if not decls: return False
+    seen = False
+    for ps in decls:
+        if idx >= len(ps) and not any("..." in x for x in ps): continue   # cannot bind: not this overload
+        if idx >= len(ps): return False
+        seen = True
+        t = ps[idx].split("=")[0]
+        if re.search(r"[&*]", t) and not re.match(r"\s*const\b", t): return False
+        if "&&" in t: return False
+    return seen
+_DECL = re.compile(r"(?<![\w.>:])(?:[\w:<>,]+[\s*&]+)(~?[A-Za-z_]\w*)\s*\(((?:[^()]|\([^()]*\))*)\)\s*(const)?(?![\w])")
+_NOTTYPE = KW | {"return", "else", "case", "goto", "co_return", "co_await", "throw", "new", "delete", "typename"}
+for _rel, (_raw, _s) in decl_texts.items():
+    for _m in _DECL.finditer(_s):
+        _t = _s[max(0, _m.start() - 1):_m.start(1)].strip().split()
+        if not _t or _t[0].strip("*&") in _NOTTYPE: continue
+        _after = _s[_m.end():_m.end() + 40]
+        if not re.match(r"\s*(?:const\s*)?(?:noexcept\s*)?(?:override\s*)?(?:final\s*)?(?:WH_\w+\([^)]*\)\s*)*[;{=]", _after):
+            continue
+        (_decl_const if _m.group(3) else _decl_mut).add(_m.group(1))
+        _params.setdefault(_m.group(1), []).append(_split_top(_m.group(2)))
+CONST_OK = STD_CONST | (_decl_const - _decl_mut)
+# accessor pairs (declared both const and non-const, e.g. PrefixStore::spes()): the call itself is not a write; what
+# follows on the chain decides (`ps_.spes().size()` reads, `ps_.spes().clear()` / `= x` / `f(ps_.spes())` write).
+PAIRS = _decl_const & _decl_mut
+# A1 (d): callees that only read their arguments (by value or const reference) - measured on c1ca7ce by hand, each
+# checked at its declaration; anything else that receives a member as an argument is a write.
+READ_CALLEES = {"min", "max", "clamp", "static_cast", "size_t", "uint32_t", "uint64_t", "int", "double", "float",
+                "bool", "to_string", "duration_cast", "duration", "move_if_noexcept", "logf", "log", "snprintf",
+                "printf", "fprintf", "strlen", "memcmp", "abs", "llabs", "ceil", "floor", "round", "sqrt", "pow", "exp",
+                "isfinite", "isnan", "string", "string_view", "span", "hash", "equal", "distance",
+                "logI", "logW", "logE", "logD",   # log*: printf-style varargs (by value)
+                "WH_REQUIRES", "WH_REQUIRES_SHARED", "WH_GUARDED_BY", "WH_PT_GUARDED_BY", "WH_EXCLUDES",
+                "WH_RETURN_CAPABILITY", "WH_ACQUIRED_AFTER", "WH_ACQUIRED_BEFORE"}   # TSA annotations, not operations
+_ASSIGN = re.compile(r"\s*(?:=(?!=)|\+=|-=|\*=|/=|%=|\|=|&=|\^=|<<=|>>=|\+\+|--)")
+
+
+def _chain(txt, i):
+    """Walk an access chain after a member hit: .x  ->x  [..]  (..). Returns ([(name, called)], end)."""
+    out, n = [], len(txt)
+    while i < n:
+        m = re.match(r"\s*(?:\.|->)\s*(~?\w+)", txt[i:])
+        if m:
+            i += m.end()
+            mm = re.match(r"\s*(?:<[^<>;(){}]*>)?\s*\(", txt[i:])
+            if mm:
+                try: i = match_close(txt, i + mm.end() - 1, "(", ")") + 1
+                except ValueError: return out, n
+                out.append((m.group(1), True))
+            else:
+                out.append((m.group(1), False))
+            continue
+        m = re.match(r"\s*\[", txt[i:])
+        if m:
+            try: i = match_close(txt, i + m.end() - 1, "[", "]") + 1
+            except ValueError: return out, n
+            continue
+        break
+    return out, i
+
+
+def _callee(txt, k):
+    """txt[k] is the '(' that opens an argument list: the callee name, or None (not a call: if/while/(..) cast)."""
+    m = re.search(r"([A-Za-z_]\w*)\s*(?:<[^<>;(){}]*>)?\s*$", txt[:k])
+    if not m or m.group(1) in KW | {"return", "else", "case"}: return None
+    return m.group(1)
+
+
+def write_kind(txt, h0, h1):
+    """A1: why the member hit txt[h0:h1] is a write, or None for a read."""
+    ch, end = _chain(txt, h1)
+    pre = txt[:h0]
+    for nm, called in ch:
+        if called and nm not in CONST_OK and nm not in PAIRS: return f"method {nm}()"
+    if _ASSIGN.match(txt[end:]): return "assignment"
+    if re.search(r"(\+\+|--)\s*(?:\(\s*)*$", pre): return "prefix ++/--"
+    seg = re.split(r"[;{}]", pre)[-1]
+    if re.search(r"(?<![&])&\s*[A-Za-z_]\w*\s*(?:=|:)\s*$|\*\s*[A-Za-z_]\w*\s*=\s*&\s*$", seg) and not re.search(r"\bconst\b", seg):
+        return "bound to a non-const reference / pointer"
+    if re.search(r"(?<![&\w)\]])&\s*$", pre) and not re.search(r"\bconst\b", seg): return "address taken"
+    # argument of a call: the hit (with its chain) is a whole argument
+    if re.search(r"[(,]\s*(?:std::move\s*\(\s*)?$", pre) and re.match(r"\s*[,)]", txt[end:]):
+        d, k = 0, len(pre) - 1
+        while k >= 0:
+            c = pre[k]
+            if c == ")": d += 1
+            elif c == "(":
+                if d == 0: break
+                d -= 1
+            elif c in ";{}": k = -1; break
+            k -= 1
+        if k >= 0:
+            cal = _callee(pre, k)
+            if cal is not None and cal not in READ_CALLEES:
+                inner = pre[k + 1:]
+                idx, dd = 0, 0
+                for ch in inner:
+                    if ch in "([{": dd += 1
+                    elif ch in ")]}": dd -= 1
+                    elif ch == "," and dd == 0: idx += 1
+                if not _param_reads(cal, idx):
+                    return f"argument {idx} of {cal}()"
+    return None
+
+
+# untracked classes' method names (A3: an unknown receiver calling one of these is ambiguous -> reported only)
+_untracked_methods = set()
+for _rel, (_raw, _s) in decl_texts.items():
+    for _m in re.finditer(r"(?:class|struct)\s+(\w+)\b[^;{]*\{", _s):
+        if _m.group(1) in CLASSES: continue
+        try: _e = match_close(_s, _m.end() - 1, "{", "}")
+        except ValueError: continue
+        for _d in _DECL.finditer(_s, _m.end(), _e):
+            _untracked_methods.add(_d.group(1))
+unresolved = []
+wlog = []   # entry, member, why it is a write, context (writes.tsv)
+
+
+def uses(key, txt):
+    ud, uw = [], []
+    for n in dnames:
+        hits = list(re.finditer(r"(?<![\w])" + re.escape(n) + r"\b", txt))
+        if hits:
+            ud.append(n)
+            for h in hits:
+                why = write_kind(txt, h.start(), h.end())
+                if why:
+                    uw.append(n)
+                    wlog.append(f"{key}\t{n}\t{why}\t{' '.join(txt[max(0, h.start() - 40):h.end() + 40].split())}")
+                    break
+    me = key.split("#")[0]
+    # A3: local aliases of *this / of a tracked object are known receivers
+    alias = {}
+    for m in re.finditer(r"(?<![\w:])(" + QUAL + r"|auto)\s*(?:const\s*)?[&*]\s*(\w+)\s*=\s*(\*?\s*this|[\w.>-]+)", txt):
+        tgt = m.group(3).replace(" ", "")
+        if m.group(1) == "auto":
+            if tgt in ("*this", "this"): alias[m.group(2)] = "Engine"
+            elif tgt.lstrip("*") in HOLDERS: alias[m.group(2)] = HOLDERS[tgt.lstrip("*")]
+        else:
+            alias[m.group(2)] = m.group(1)
+    called = set()
+    for h in re.finditer(r"(?<![\w])(~?\w+)\s*\(", txt):
+        n = h.group(1)
+        pre = txt[:h.start()]
+        mr = re.search(r"(\w+)\s*(?:\.|->|::)\s*$", pre)
+        recv = mr.group(1) if mr else None
+        if recv in alias:
+            rc = alias[recv]
+            if rc == "Engine":
+                if n in fnames: called.add(n)
+            else:
+                for t in meth.get(n, set()) | ({n} if n in fnames else set()): called.add(t)
+            continue
+        if recv is None:
+            if re.search(r"(?:\.|->|::)\s*$", pre):
+                if n in fnames: unresolved.append(f"{me}: <expr>.{n}(")
+                continue      # ).f( / ]->f( : unknown receiver
+            if n in fnames: called.add(n)
+        elif recv in OKRECV:
+            if recv in HOLDERS or (recv in CLASSES and recv != "Engine"):
+                for t in meth.get(n, set()) | ({n} if n in fnames else set()):
+                    called.add(t)
+            elif n in fnames:
+                called.add(n)
+        elif n in fnames and not re.search(r"::\s*$", pre):
+            # A3: unknown receiver calling a tracked entry name: a call unless an untracked class also has that method
+            if n in _untracked_methods: unresolved.append(f"{me}: {recv}.{n}(  (also a method of an untracked class)")
+            else: called.add(n)
+    for h in re.finditer(r"(?<![\w:])(" + QUAL + r")::(~?\w+)\b(?!\s*\()", txt):
+        t = resolve(h.group(1), h.group(2))
+        if t in fnames: called.add(t)
+    called.discard(me)
+    ut = [t for t, _, _ in types if re.search(r"(?<![\w:])" + t + r"\b", txt) and key != "type:" + t]
+    return ud, uw, sorted(called), sorted(set(ut))
+
+
+rows = {}
+for key, (f, ln, txt, dfn) in bodies.items():
+    rows[key] = (f, ln) + uses(key, txt)
+
+with open(os.path.join(OUT, "funcs.tsv"), "w", encoding="utf-8") as o:
+    o.write("entry\tfile\tline\tlines\tdata_used\tdata_written\tfuncs_called\ttypes_used\tdef\n")
+    for key in sorted(rows):
+        f, ln, ud, uw, uf, ut = rows[key]
+        nlines = bodies[key][2].count("\n") + 1
+        o.write(f"{key}\t{f}\t{ln}\t{nlines}\t{','.join(ud)}\t{','.join(uw)}\t{','.join(uf)}\t{','.join(ut)}\t{bodies[key][3]}\n")
+json.dump({k: v[2] for k, v in bodies.items()}, open(os.path.join(OUT, "bodies.json"), "w", encoding="utf-8"))
+with open(os.path.join(OUT, "members.tsv"), "w", encoding="utf-8") as o:
+    o.write("kind\tname\tline\taccess\tusers\twriters\tdecl\tclass\tfile\n")
+    for nm, ln, acc, s, cname, rel in data:
+        us = sorted({k.split("#")[0] for k, r in rows.items() if nm in r[2]})
+        ws = sorted({k.split("#")[0] for k, r in rows.items() if nm in r[3]})
+        o.write(f"data\t{nm}\t{ln}\t{acc}\t{','.join(us)}\t{','.join(ws)}\t{s}\t{cname}\t{rel}\n")
+    for nm, ln in statics:
+        o.write(f"static\t{nm}\t{ln}\t\t\t\t\t\t\n")
+    for nm, ln, cname in types:
+        o.write(f"type\t{nm}\t{ln}\t\t\t\t\t{cname}\t\n")
+    for nm, ln, acc, s, cname in funcs:
+        o.write(f"func\t{nm}\t{ln}\t{acc}\t\t\t{s}\t{cname}\t\n")
+with open(os.path.join(OUT, "files.txt"), "w", encoding="utf-8") as o:
+    for f in sorted(files_with_defs):
+        o.write(f"{f}\t{len(files_with_defs[f])}\n")
+declared = {resolve(c, n) for n, _, _, _, c in funcs if "::" not in n}
+have = {k.split("#")[0] for k in bodies}
+missing = sorted(n for n in declared if n not in have and n not in ("Engine", "operator="))
+for n in missing:
+    findings.append(f"declared in a tracked class, no body found: {n}")
+open(os.path.join(OUT, "findings.txt"), "w", encoding="utf-8").write("\n".join(findings) + ("\n" if findings else ""))
+open(os.path.join(OUT, "writes.tsv"), "w", encoding="utf-8").write("entry\tmember\twhy\tcontext\n" + "\n".join(wlog) + "\n")
+open(os.path.join(OUT, "unresolved.txt"), "w", encoding="utf-8").write("\n".join(sorted(set(unresolved))) + "\n")
+print(f"unresolved calls (reported in unresolved.txt, not edges): {len(set(unresolved))}")
+print(f"census3: {len(set(d[0] for d in data))} data members ({len(data)} declarations), {len(statics)} static, "
+      f"{len(types)} nested types, {len(funcs)} declared functions, {len(bodies)} bodies; classes found: "
+      + ", ".join(f"{c}@{'/'.join(v)}" for c, v in sorted(class_files.items())))
+print("files with tracked definitions:", ", ".join(f"{f}({len(v)})" for f, v in sorted(files_with_defs.items())))
+print("findings:", len(findings), *(["\n  " + x for x in findings][:20]))
+json.dump({"data": len(data), "bodies": len(bodies), "missing": missing, "findings": findings,
+           "files": {f: len(v) for f, v in files_with_defs.items()}, "classes": class_files},
+          open(os.path.join(OUT, "census3.json"), "w"), indent=1)
+sys.exit(2 if findings else 0)
