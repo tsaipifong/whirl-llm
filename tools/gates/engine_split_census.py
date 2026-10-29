@@ -171,6 +171,7 @@ def parse_class(cname, rel, hs, a):
                 if not hd.startswith("enum"):   # A2: the nested type's inline bodies are an entry type:X
                     add_body("type:" + tn, rel, lineno(hs, stmt0), hs[stmt0:j + 1], f"struct {cname}::{tn} (in-class)")
                 k = hs.index(";", j); i = k + 1; stmt0 = i; continue
+            hd = re.sub(r"\bdecltype\s*\(\s*auto\s*\)", "decltype_auto", hd)   # S0c (N11): a return type, not a call
             if "(" in hd.split("=")[0] and re.search(r"\w\s*$", hd.split("(")[0]) is not None:
                 pre = hd.split("(")[0]
                 nm = re.search(r"(operator\s*\S+|~?\w+)\s*$", pre).group(1)
@@ -195,7 +196,7 @@ def parse_class(cname, rel, hs, a):
             m = re.match(r"(struct|class) (\w+)$", s)
             if m:
                 types.append((m.group(2), ln, cname)); continue
-            s2 = detpl(re.sub(r"WH_\w+\([^)]*\)", "", s))
+            s2 = re.sub(r"\bdecltype\s*\(\s*auto\s*\)", "decltype_auto", detpl(re.sub(r"WH_\w+\([^)]*\)", "", s)))
             if s2.startswith("static constexpr"):
                 statics.append((re.search(r"(\w+)\s*=", s2).group(1), ln)); continue
             if "(" in re.sub(r"operator\s*=", "operator_assign", s2).split("=")[0] and not re.match(r"[\w:<>,\s*&]+\s+\w+\s*\{", s2):
@@ -511,6 +512,8 @@ def _callee(txt, k):
 
 
 CASTS = {"static_cast", "const_cast", "reinterpret_cast"}
+# S0c: data members declared as std::function<...>: calling one is a read (std::function::operator() is a const member)
+FUNC_MEMBERS = {nm for nm, _ln, _acc, decl, _c, _r in data if re.match(r"\s*(?:mutable\s+)?std::function\s*<", decl)}
 # S0b: std accessors that hand out a writable handle (iterator / pointer / reference) in a non-const context
 HANDLE = {"begin", "end", "rbegin", "rend", "data", "front", "back", "at"}
 
@@ -549,16 +552,62 @@ def _outer(txt, h0, end):
     return k, end + m.end()
 
 
-def write_kind(txt, h0, h1):
-    """A1: why the member hit txt[h0:h1] is a write, or None for a read."""
+def _unary_star(txt, h0):
+    """S0c (N1, N5): a unary `*` (dereference) right before txt[h0:] without parentheses: its position, else None"""
+    q = h0
+    while q > 0 and txt[q - 1].isspace(): q -= 1
+    if q == 0 or txt[q - 1] != "*": return None
+    r = q - 1
+    while r > 0 and txt[r - 1].isspace(): r -= 1
+    if r == 0 or txt[r - 1] in "(=,;{}!?:&|[<>+-" or re.search(r"\breturn\s*$", txt[:r]): return r
+    return None
+
+
+def _ccast(txt, h0):
+    """S0c (N3): a C-style cast to a non-const reference / pointer `(T&)x_` / `(T*)x_` right before txt[h0:]"""
+    m = re.search(r"\(\s*[\w:<>,\s]*?[\w>]\s*([&*]+)\s*\)\s*$", txt[:h0])
+    if not m or re.search(r"\bconst\b", m.group(0)): return None
+    if re.search(r"[\w\]]\s*$", txt[:m.start()]) and not re.search(r"\b(?:return|case)\s*$", txt[:m.start()]): return None
+    return m.start()
+
+
+_CMP = r"(?:==|!=|<=|>=|<(?![<=])|>(?![>=]))"
+_BINR = r"(?:==|!=|<=|>=|&&|\|\||<<|>>|<|>|\+|-(?!>)|\*|/|%|&|\||\^|\?|:(?!:))"
+_STMT0 = r"(?:^|[;{}]|\)|\belse|\bdo)\s*$"
+
+
+def write_kind(txt, h0, h1, handle0=False):
+    """A1: why the member hit txt[h0:h1] is a write, or None for a read.
+    S0c (S0b review act-on 1, ExprMutationAnalyzer direction): the rule is inverted - a hit is a READ only in one of the
+    listed read forms (after unwrapping parentheses / derefs / casts and walking the access chain): a const method on
+    the chain, an operand of a comparison / arithmetic / logic operator, `return`, the right side of a non-reference
+    copy, a condition, a subscript, a read-only call argument, a member initializer; ANYTHING ELSE is a write. A writable
+    handle (begin / data / front / at ... or a returned iterator / pointer / view) is a write unless it is only compared."""
+    hit = txt[h0:h1]
     ch, end = _chain(txt, h1)
-    # S0b: unwrap parentheses / dereference / reference casts around the hit, continuing the access chain after them
-    for _ in range(8):
+    deref = False
+    hk = lambda c, dflt: (c[-1][1] and c[-1][0] in HANDLE) if c else dflt
+    handle = hk(ch, handle0)
+    # S0b / S0c: unwrap parentheses / dereference / casts around the hit, continuing the access chain after them
+    for _ in range(12):
         n0, n1 = _outer(txt, h0, end)
-        if (n0, n1) == (h0, end): break
-        h0 = n0
-        ch2, end = _chain(txt, n1)
-        ch += ch2
+        if (n0, n1) != (h0, end):
+            inner = txt[n0:h0]
+            if re.search(r"\*\s*$", re.sub(r"\(", "", inner)) and "*" in inner: deref = True; handle = False
+            h0 = n0
+            ch2, end = _chain(txt, n1)
+            ch += ch2
+            handle = hk(ch2, handle)
+            continue
+        u = _unary_star(txt, h0)
+        if u is not None:
+            h0 = u; deref = True; handle = False
+            continue
+        c = _ccast(txt, h0)
+        if c is not None:
+            h0 = c
+            continue
+        break
     pre = txt[:h0]
     for nm, called in ch:
         if called and nm not in CONST_OK and nm not in PAIRS: return f"method {nm}()"
@@ -576,6 +625,19 @@ def write_kind(txt, h0, h1):
     if ch and ch[-1][1] and ch[-1][0] in HANDLE and not re.search(r"\bconst\b", seg) \
             and re.search(r"(?:[\w\]>)]\s*(?<![=!<>])=(?!=)|[A-Za-z_]\w*\s*\{)\s*$", pre):
         return f"handle {ch[-1][0]}() kept"
+    post = txt[end:]
+    L = pre.rstrip()
+    # S0c (N2): brace-initialized reference `auto& q{x_}`; (N4) a reference bound through ?: `auto& q = c ? x_ : y_`
+    mb = re.search(r"(?:&&|&)\s*[A-Za-z_]\w*\s*\{\s*$", pre)   # (the `{` itself ends `seg`: look at the text before it)
+    if mb and not re.search(r"\bconst\b", re.split(r"[;{}]", pre[:mb.start()])[-1]):
+        return "bound to a non-const reference (brace)"
+    if re.search(r"(?<!:)[?:]\s*$", L) and re.search(r"(?:&&|&|\*)\s*[A-Za-z_]\w*\s*(?:=|\{)", seg) \
+            and not re.search(r"\bconst\b", seg):
+        return "bound to a non-const reference / pointer through ?:"
+    # S0c (N5-N8, N15): a writable handle is a write unless it is only compared (`it != x_.end()`)
+    if handle:
+        if re.match(r"\s*" + _CMP, post) or re.search(_CMP + r"\s*$", L): return None
+        return f"writable handle {ch[-1][0] if ch else 'result'}() used ({' '.join(post[:12].split()) or 'end'})"
     # argument of a call: the hit (with its chain) is a whole argument
     if re.search(r"[(,]\s*(?:std::move\s*\(\s*)?$", pre) and re.match(r"\s*[,)]", txt[end:]):
         d, k = 0, len(pre) - 1
@@ -596,9 +658,29 @@ def write_kind(txt, h0, h1):
                     if ch in "([{": dd += 1
                     elif ch in ")]}": dd -= 1
                     elif ch == "," and dd == 0: idx += 1
-                if not _param_reads(cal, idx):
+                # S0c (Z1): a std:: callee is never matched against src/ declarations of the same bare name
+                # (std::ref(x_) is not PagePool::ref(int32_t)); only READ_CALLEES make a std call a read
+                is_std = re.search(r"\bstd\s*::\s*(?:\w+\s*::\s*)*" + re.escape(cal) + r"\s*(?:<[^<>;(){}]*>)?\s*$", pre[:k]) is not None
+                if is_std or not _param_reads(cal, idx):
                     return f"argument {idx} of {cal}()"
-    return None
+    # S0c: the positive read forms; everything else is a write
+    R = re.match(r"\s*(->\*|\.\*|==|!=|<=|>=|&&|\|\||<<|>>|\S)", post)
+    R = R.group(1) if R else ""
+    if R in ("->*", ".*"): return "member pointer access on it"
+    stmt0 = re.search(_STMT0, L) is not None
+    if R in ("<<", ">>") and stmt0: return f"stream operator {R} on it"
+    if R == "(":
+        if re.search(r"[:,]\s*$", L): return None   # member initializer `: x_(v)` (initialization, not a mutation)
+        if not ch and hit in FUNC_MEMBERS: return None   # std::function::operator() is const (its declaration)
+        return "called (operator())"
+    if R == "{":
+        if re.search(r"[:,]\s*$", L): return None   # member initializer `: x_{v}`
+        return "brace after it"
+    r_ok = R in (")", ",", ";", "]", "}", "") or re.match(_BINR, R) is not None
+    l_ok = (stmt0 or re.search(r"(?:[(,\[{!~]|\breturn|\bcase|\bco_return|" + _BINR + r"|(?<![=!<>])=)\s*$", L) is not None)
+    if r_ok and l_ok:
+        return None
+    return f"not a known read form ({' '.join(L[-12:].split()) or 'start'} .. {R or 'end'})"
 
 
 # untracked classes' method names (A3: an unknown receiver calling one of these is ambiguous -> reported only)
@@ -617,16 +699,31 @@ wlog = []   # entry, member, why it is a write, context (writes.tsv)
 # their return statements name: the function itself counts as writing them, and a caller that writes through the
 # result (`holdRef() = true`, `auto& h = holdRef(); h = ..`, `holdRef().clear()`) writes them too.
 REFACC = {}
+REFHANDLE = set()   # S0c: accessors whose result is itself a handle (pointer / iterator / span / auto)
+# S0c (S0b review act-on 1 (c); N10, N12, N13, N15): the return type text includes a trailing `-> T`; a return type with
+# & / * / span / iterator / view / auto / decltype(auto) and no const (and a non-const method) hands out write access to
+# EVERY member its body uses (a local reference in between does not hide it)
+_RETW = r"[&*]|\bspan\b|(?<!const_)iterator\b|(?<!string_)view\b|\bauto\b|decltype"
 for _nm, _ln, _acc, _decl, _cname in funcs:
-    _ret = _decl.split("(")[0]
+    _dd = re.sub(r"\bdecltype\s*\(\s*auto\s*\)", "decltype_auto", detpl(_decl))
+    _ret = _dd.split("(")[0]
     _ret = _ret[:_ret.rfind(_nm)] if _nm in _ret else _ret
     _ret = re.sub(r"\b(static|inline|virtual|constexpr|explicit|\[\[[^\]]*\]\])\b", "", _ret)
-    if re.search(r"[&*]\s*$", _ret.strip()) and not re.search(r"\bconst\b", _ret) and "&&" not in _ret:
-        _k = resolve(_cname, _nm)
-        for _bk, (_f, _l, _t, _d) in bodies.items():
-            if _bk.split("#")[0] != _k: continue
-            for _r in re.finditer(r"\breturn\b([^;]*);", _t):
-                REFACC.setdefault(_k, set()).update(n for n in re.findall(r"[A-Za-z_]\w*", _r.group(1)) if n in dset)
+    _k = resolve(_cname, _nm)
+    _bl = [(_bk, _t) for _bk, (_f, _l, _t, _d) in bodies.items() if _bk.split("#")[0] == _k]
+    _tr = ""
+    for _bk, _t in _bl[:1]:
+        _mt = re.search(r"\)\s*((?:const|noexcept|override|final|&|\s)*)(->\s*[^{;]*)?\{", detpl(_t))
+        if _mt: _tr = (_mt.group(2) or "")[2:]; _quals = _mt.group(1) or ""
+    _mq = re.search(r"\)\s*((?:const|noexcept|override|final|\s)*)(?:->|;|=|\{|$)", _dd)
+    _mconst = bool(_mq and re.search(r"\bconst\b", _mq.group(1)))
+    _rt = (_ret + " " + _tr).replace("&&", " ")
+    if re.search(_RETW, _rt) and not re.search(r"\bconst\b", _rt) and not _mconst:
+        for _bk, _t in _bl:
+            _body = _t[_t.find("{"):] if "{" in _t else _t
+            REFACC.setdefault(_k, set()).update(n for n in dnames if re.search(r"(?<![\w])" + re.escape(n) + r"\b", _body))
+        if re.search(r"\*|\bspan\b|iterator\b|\bauto\b|decltype", _rt) and not re.search(r"&\s*$", _ret.strip()):
+            REFHANDLE.add(_k)
 
 
 def uses(key, txt):
@@ -665,7 +762,7 @@ def uses(key, txt):
             try:
                 k1 = match_close(txt, h.end() - 1, "(", ")") + 1
                 mrc = re.search(r"(?:(?:\(\s*\*\s*)?\w+\s*\)?\s*(?:\.|->)\s*)+$", pre)
-                why = write_kind(txt, mrc.start() if mrc else h.start(), k1)
+                why = write_kind(txt, mrc.start() if mrc else h.start(), k1, n in REFHANDLE)
             except ValueError:
                 why = "unparsed call"
             if why:

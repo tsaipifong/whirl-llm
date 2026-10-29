@@ -12,7 +12,7 @@ catch it) and cut-pin mutants (P1-P3, review3 C2).
   runs as a baseline (B0, B1, ...). X13 (the leg-1 tree) runs on the second base when one is given.
 Exit 0 = "engine split selftest: N/N as expected".
 """
-import json, os, re, shutil, subprocess, sys
+import hashlib, json, os, re, shutil, subprocess, sys
 from concurrent.futures import ThreadPoolExecutor
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -32,6 +32,8 @@ def arg(name, default=None):
 bases = [sys.argv[i + 1] for i, x in enumerate(sys.argv) if x == "--base"] or [REPO]
 WORK = arg("--work", os.path.join(REPO, "build", "engine_split_selftest"))
 JOBS = int(arg("--jobs", "8"))
+LEDGER = os.path.join(WORK, "ledger", "engine_cut_reviews.tsv")   # S0c: synthetic ledger (setup_ledger)
+BASESNAP = os.path.join(WORK, "ledger", "base")                     # S0c: base snapshot for --base-dir
 
 EMIT = "bool Engine::emit(Slot& sl, std::uint32_t t) {\n"
 GOVT = "void Engine::govTick(const wddmwatch::Sample& s) {\n"
@@ -196,7 +198,64 @@ MUT = [
      [("TOOL:engine_split_census.py", "APPEND", "\n# a harmless-looking edit\n")], None, [], r"^engine cut pin: MISMATCH tools engine_split_census\.py"),
     ("P7", "the pin rewritten with --pin-write for a cut edit (same commit), no review row: UNREVIEWED",
      [], lambda c: c["holders"].update({"zz_": "SlotPages"}), ["@PINWRITE"], r"^engine cut pin: UNREVIEWED"),
+    # --- S0b review (progress/arch025-engine.S0b.REVIEW.md; reviewer runner scratch/a25_engine/s0b_review/runner/r_mut.py) ---
+    # act-on 1: write shapes the S0b census still missed (N1-N8, N10, N12, N13, N15); N9 / N14 / C1-C5 are controls
+    ("N1", "deref binding: auto& j = *queue_.begin(); j = nullptr (dropCache)", [(EP, DROPC, DROPC + "    if (!queue_.empty()) { auto& j = *queue_.begin(); j = nullptr; }\n")], None, [], ow("dropCache:queue_")),
+    ("N2", "brace-init reference: auto& q{stop_}; q = true (dropCache)", [(EP, DROPC, DROPC + "    { auto& q{stop_}; q = true; }\n")], None, [], ow("dropCache:stop_")),
+    ("N3", "C-style reference cast: ((bool&)stop_) = true (dropCache)", [(EP, DROPC, DROPC + "    ((bool&)stop_) = true;\n")], None, [], ow("dropCache:stop_")),
+    ("N4", "ternary binding: auto& q = sl.job ? stop_ : stop_; q = true (dropCache)", [(EP, DROPC, DROPC + "    { auto& q = sl.job ? stop_ : stop_; q = true; }\n")], None, [], ow("dropCache:stop_")),
+    ("N5", "deref as call argument: std::swap(*queue_.begin(), *queue_.rbegin()) (dropCache)", [(EP, DROPC, DROPC + "    if (queue_.size() > 1) std::swap(*queue_.begin(), *queue_.rbegin());\n")], None, [], ow("dropCache:queue_")),
+    ("N6", "pointer arithmetic deref: *(gov_json_.data() + 1) = 'x' (runLoop)", [(EC, RUNL, RUNL + "    if (gov_json_.size() > 1) *(gov_json_.data() + 1) = 'x';\n")], None, [], ow("runLoop:gov_json_")),
+    ("N7", "handle + offset as argument: std::memset(gov_json_.data() + 1, 0, 1) (runLoop)", [(EC, RUNL, RUNL + "    if (gov_json_.size() > 1) std::memset(gov_json_.data() + 1, 0, 1);\n")], None, [], ow("runLoop:gov_json_")),
+    ("N8", "fill_n(gov_json_.begin() + 1, 1, 'x') (runLoop)", [(EC, RUNL, RUNL + "    if (gov_json_.size() > 1) std::fill_n(gov_json_.begin() + 1, 1, 'x');\n")], None, [], ow("runLoop:gov_json_")),
+    ("N9", "control: C++20 range-for init-statement with const: for (const auto n = queue_.size(); auto& j : queue_) j = nullptr", [(EP, DROPC, DROPC + "    for (const auto n = queue_.size(); auto& j : queue_) { (void)n; j = nullptr; }\n")], None, [], ow("dropCache:queue_")),
+    ("N10", "trailing return type accessor: auto holdRef() -> bool& { return gov_hold_; }; runLoop holdRef() = true",
+     [(EH, HOLD, HOLD + "\n    auto holdRef() -> bool& { return gov_hold_; }"), (EC, RUNL, RUNL + "    holdRef() = true;\n")], lambda c: c["new_funcs"].update({"holdRef": GV}), ["--no-pin"], ow("runLoop:gov_hold_")),
+    ("N11", "decltype(auto) holdRef() { return (gov_hold_); }; runLoop holdRef() = true (the write rule, not 'unassigned decltype')",
+     [(EH, HOLD, HOLD + "\n    decltype(auto) holdRef() { return (gov_hold_); }"), (EC, RUNL, RUNL + "    holdRef() = true;\n")], lambda c: c["new_funcs"].update({"holdRef": GV}), ["--no-pin"], ow("runLoop:gov_hold_")),
+    ("N12", "accessor through a local reference: bool& holdRef() { auto& r = gov_hold_; return r; }; runLoop holdRef() = true",
+     [(EH, HOLD, HOLD + "\n    bool& holdRef() { auto& r = gov_hold_; return r; }"), (EC, RUNL, RUNL + "    holdRef() = true;\n")], lambda c: c["new_funcs"].update({"holdRef": GV}), ["--no-pin"], ow("runLoop:gov_hold_")),
+    ("N13", "accessor returning a writable view: std::span<char> jsonView() { return gov_json_; }; runLoop jsonView()[0] = 'x'",
+     [(EH, HOLD, HOLD + "\n    std::span<char> jsonView() { return gov_json_; }"), (EC, RUNL, RUNL + "    if (!jsonView().empty()) jsonView()[0] = 'x';\n")], lambda c: c["new_funcs"].update({"jsonView": GV}), ["--no-pin"], ow("runLoop:gov_json_")),
+    ("N14", "control: accessor whose return type has parentheses: std::function<wddmwatch::Sample()>& probeRef(); runLoop probeRef() = nullptr (vram_probe_ is core.shared)",
+     [(EH, HOLD, HOLD + "\n    std::function<wddmwatch::Sample()>& probeRef() { return vram_probe_; }"), (EC, RUNL, RUNL + "    probeRef() = nullptr;\n")], lambda c: c["new_funcs"].update({"probeRef": "server.vram_watch"}), ["--no-pin"], sw("runLoop:vram_probe_")),
+    ("N15", "accessor returning an iterator: auto qBegin() { return queue_.begin(); }; runLoop *qBegin() = nullptr",
+     [(EH, HOLD, HOLD + "\n    auto qBegin() { return queue_.begin(); }"), (EC, RUNL, RUNL + "    if (!queue_.empty()) *qBegin() = nullptr;\n")], lambda c: c["new_funcs"].update({"qBegin": GV}), ["--no-pin"], ow("runLoop:queue_")),
+    ("C1", "control: init capture by reference [&q = stop_]{ q = true; }() (dropCache)", [(EP, DROPC, DROPC + "    [&q = stop_] { q = true; }();\n")], None, [], ow("dropCache:stop_")),
+    ("C2", "control: std::exchange(stop_, true) (dropCache)", [(EP, DROPC, DROPC + "    (void)std::exchange(stop_, true);\n")], None, [], ow("dropCache:stop_")),
+    ("C3", "control: *queue_.begin() = nullptr (dropCache)", [(EP, DROPC, DROPC + "    if (!queue_.empty()) *queue_.begin() = nullptr;\n")], None, [], ow("dropCache:queue_")),
+    ("C4", "control: auto p = this; p->finishJob(sl) in emit (unknown pointer alias)", [(EC, EMIT, EMIT + "    if (t == 1u) { auto p = this; p->finishJob(sl); }\n")], None, [], viol(SO, SE, "call", "emit->finishJob")),
+    ("C5", "control: std::invoke(&Engine::finishJob, this, sl) in emit", [(EC, EMIT, EMIT + "    if (t == 1u) std::invoke(&Engine::finishJob, this, sl);\n")], None, [], viol(SO, SE, "call", "emit->finishJob")),
+    # S0c's own probes of the inverted rule (shapes no earlier list enumerated) and read controls that must stay reads
+    ("Z1", "std::ref(stop_).get() = true (dropCache)", [(EP, DROPC, DROPC + "    std::ref(stop_).get() = true;\n")], None, [], ow("dropCache:stop_")),
+    ("Z2", "bool* p = std::addressof(stop_); *p = true (dropCache)", [(EP, DROPC, DROPC + "    { bool* p = std::addressof(stop_); *p = true; }\n")], None, [], ow("dropCache:stop_")),
+    ("Z3", "for (auto it = queue_.rbegin(); it != queue_.rend(); ++it) *it = nullptr (dropCache)", [(EP, DROPC, DROPC + "    for (auto it = queue_.rbegin(); it != queue_.rend(); ++it) *it = nullptr;\n")], None, [], ow("dropCache:queue_")),
+    ("Z4", "if (auto& q = stop_; !q) q = true (if-init binding, dropCache)", [(EP, DROPC, DROPC + "    if (auto& q = stop_; !q) q = true;\n")], None, [], ow("dropCache:stop_")),
+    ("Z5", "std::tie(stop_) = std::make_tuple(true) (dropCache)", [(EP, DROPC, DROPC + "    std::tie(stop_) = std::make_tuple(true);\n")], None, [], ow("dropCache:stop_")),
+    ("Z6", "control: reads in runLoop (compare a handle, size arithmetic, ==, !, subscript read) stay reads",
+     [(EC, RUNL, RUNL + "    if (!queue_.empty() && queue_.front() != nullptr && gov_json_.size() + 1 > 2 && gov_json_[0] == 'x' && !stop_) {}\n")],
+     None, [], r"(?#OK)^engine split check: ok"),
+    # act-on 2: the ledger against the base of the range (base = the selftest's snapshot of today's cut / pin / ledger)
+    ("P8", "reviewer's bypass (s0b_review/bypass): cut edit + --pin-write + ledger row '<sha> x x' in the same change",
+     [], lambda c: c["outside_writers"]["now"].append("runLoop:gov_json_"), ["@PINWRITE", "@ROW:xx"], r"^engine cut pin: REVIEW ROW INVALID .*needs 4 non-empty columns"),
+    ("P8b", "a row whose review report does not name the pin sha256", [], lambda c: c["outside_writers"]["now"].append("runLoop:gov_json_"),
+     ["@PINWRITE", "@ROW:nosha"], r"^engine cut pin: REVIEW ROW INVALID .*does not name the pin sha256"),
+    ("P8c", "a row whose report's reviewer is the author (self-review)", [], lambda c: c["outside_writers"]["now"].append("runLoop:gov_json_"),
+     ["@PINWRITE", "@ROW:self"], r"^engine cut pin: REVIEW ROW INVALID .*is the author \(no self-review\)"),
+    ("P8d", "a row whose review column says pending (the S0b row shape)", [], lambda c: c["outside_writers"]["now"].append("runLoop:gov_json_"),
+     ["@PINWRITE", "@ROW:pending"], r"^engine cut pin: REVIEW ROW INVALID .*says pending"),
+    ("P8e", "control: the same cut edit with a valid row (report names the sha, reviewer != author) passes", [],
+     lambda c: c["outside_writers"]["now"].append("runLoop:gov_json_"), ["@PINWRITE", "@ROW:valid"], r"(?#OK)^engine split check: ok"),
+    ("P9", "a new planned row with --pin-write and a valid row: not in the base cut", [], lambda c: c["new_funcs"].update({"zzPlanned": SO}),
+     ["@PINWRITE", "@ROW:valid"], r"^engine cut pin: NEW PLANNED ROW new_funcs zzPlanned"),
+    ("P9b", "a planned row moved to another module with --pin-write and a valid row", [], lambda c: c["new_funcs"].update({"govActive": SO}),
+     ["@PINWRITE", "@ROW:valid"], r"^engine cut pin: PLANNED ROW MOVED new_funcs govActive"),
+    ("P10", "an old ledger row edited (its review column rewritten)", [], None, ["@LEDGEREDIT"], r"^engine cut pin: LEDGER EDITED"),
+    ("P11", "e8_judge.py edited (S0c: in the hashed tool list)", [("TOOL:e8_judge.py", "APPEND", "\n# a harmless-looking edit\n")], None, [], r"^engine cut pin: MISMATCH tools e8_judge\.py"),
+    ("P11b", "revtext.py edited (S0c: in the hashed tool list)", [("TOOL:revtext.py", "APPEND", "\n# a harmless-looking edit\n")], None, [], r"^engine cut pin: MISMATCH tools revtext\.py"),
 ]
+# S0c: tools a TOOL: edit may name -> path under tools/ (a copy of tools/gates, bench, impact is made for the mutant)
+TOOL_PATHS = {"e8_judge.py": "bench/e8_judge.py", "abjudge.py": "bench/abjudge.py", "revtext.py": "impact/revtext.py"}
 
 
 def run(cmd):
@@ -223,9 +282,15 @@ def one(item):
         for f in os.listdir(HERE):
             if f.startswith(("engine_split_", "engine_cut", "member_order")):
                 shutil.copy2(os.path.join(HERE, f), tools)
+        for rp in TOOL_PATHS.values():   # S0c: bench / impact tools are hashed too
+            src = os.path.join(os.path.dirname(HERE), rp)
+            if os.path.exists(src):
+                os.makedirs(os.path.join(d, "tools", os.path.dirname(rp)), exist_ok=True)
+                shutil.copy2(src, os.path.join(d, "tools", rp))
     for rel, old, new in edits:
         if rel.startswith("TOOL:"):
-            open(os.path.join(tools, rel[5:]), "a", encoding="utf-8").write(new); continue
+            tp = os.path.join(d, "tools", TOOL_PATHS[rel[5:]]) if rel[5:] in TOOL_PATHS else os.path.join(tools, rel[5:])
+            open(tp, "a", encoding="utf-8").write(new); continue
         p = os.path.join(d, "src", rel)
         if old is None:
             open(p, "w", encoding="utf-8").write(new); continue
@@ -240,12 +305,32 @@ def one(item):
         cj = json.load(open(CUT, encoding="utf-8")); cut_edit(cj)
         cutp = os.path.join(d, "engine_cut.json"); json.dump(cj, open(cutp, "w", encoding="utf-8"), indent=1)
     pin = PIN
+    ledger = LEDGER
     if "@PINWRITE" in gargs:   # S0b: the step rewrites the pin in the same commit (no review row added)
-        gargs = [g for g in gargs if g != "@PINWRITE"]
         pin = os.path.join(d, "engine_cut_arch.sha256")
         run([PY, "-I", os.path.join(tools, "engine_split_check.py"), "--pin-write", "--cut", cutp, "--pin", pin])
+    for g in gargs:   # S0c: a ledger row added in the same change (@ROW:kind) or an old row edited (@LEDGEREDIT)
+        if g.startswith("@ROW:") or g == "@LEDGEREDIT":
+            ledger = os.path.join(d, "engine_cut_reviews.tsv")
+            txt = open(LEDGER, encoding="utf-8").read()
+            if g == "@LEDGEREDIT":
+                rows = txt.split("\n")
+                k = next(i for i, l in enumerate(rows) if l.strip() and not l.startswith("#"))
+                q = rows[k].split("\t"); q[1] = "progress/arch025-engine.S0b.REVIEW.md (rewritten afterwards)"; rows[k] = "\t".join(q)
+                txt = "\n".join(rows)
+            else:
+                kind = g[5:]
+                sha = hashlib.sha256(open(pin, "rb").read().replace(b"\r\n", b"\n")).hexdigest()
+                rp = os.path.join(d, "REVIEW.md")
+                body = {"nosha": "reviewer: rev-agent\nlooked at the cut\n", "self": f"pin sha256: {sha}\nreviewer: step-agent\n"}
+                open(rp, "w", encoding="utf-8").write(body.get(kind, f"pin sha256: {sha}\nreviewer: rev-agent\n"))
+                row = {"xx": f"{sha}\tx\tx", "pending": f"{sha}\t{rp} (review pending)\tcut edit\tstep-agent"}.get(
+                    kind, f"{sha}\t{rp} (rev-agent)\tcut edit\tstep-agent")
+                txt = txt.rstrip("\n") + "\n" + row + "\n"
+            open(ledger, "w", encoding="utf-8").write(txt)
+    gargs = [g for g in gargs if not g.startswith("@")]
     cmd = [PY, "-I", os.path.join(tools, "engine_split_check.py"), "--root", d, "--cut", cutp, "--work", os.path.join(d, "w"),
-           "--pin", pin, "--reviews", REVIEWS, "--inline", INL] + gargs
+           "--pin", pin, "--reviews", ledger, "--base-dir", BASESNAP, "--inline", INL] + gargs
     rc, out = run(cmd)
     rep = ""
     for f in ("graph_engine_cut.txt",):
@@ -256,7 +341,9 @@ def one(item):
     if os.path.exists(fp):
         allt += "\n" + "".join("   " + l for l in open(fp, encoding="utf-8"))
     hit = re.search(expect, allt, re.M) is not None
-    if rc == 3: v = "CRASH"
+    if expect.startswith("(?#OK)"):   # S0c: a control that must pass
+        v = "PASS" if rc == 0 and hit else "FALSE POSITIVE"
+    elif rc == 3: v = "CRASH"
     elif rc == 1 and hit: v = "CAUGHT"
     elif rc == 1: v = "CAUGHT BY ANOTHER RULE"
     else: v = "NOT CAUGHT"
@@ -265,15 +352,85 @@ def one(item):
     return mid, v, f"{mid} {what}\n   rc={rc}; expected line: {shown} -> {v}"
 
 
+def setup_ledger():
+    """S0c: the self-test does not depend on today's review state: a synthetic report + ledger row for today's pin, and a
+    base snapshot (cut, pin, that ledger) = "nothing changed in this range". The real gate run (no --base-dir) judges
+    the real ledger against the real merge-base."""
+    os.makedirs(os.path.join(WORK, "ledger", "base"), exist_ok=True)
+    sha = hashlib.sha256(open(PIN, "rb").read().replace(b"\r\n", b"\n")).hexdigest()
+    rp = os.path.join(WORK, "ledger", "REVIEW.md")
+    open(rp, "w", encoding="utf-8").write(f"pin sha256: {sha}\nreviewer: selftest-reviewer\n")
+    txt = open(REVIEWS, encoding="utf-8").read().replace("\r\n", "\n").rstrip("\n") + f"\n{sha}\t{rp} (selftest)\tselftest baseline\tselftest-author\n"
+    open(LEDGER, "w", encoding="utf-8", newline="\n").write(txt)
+    shutil.copy2(LEDGER, os.path.join(BASESNAP, "engine_cut_reviews.tsv"))
+    shutil.copy2(PIN, os.path.join(BASESNAP, "engine_cut_arch.sha256"))
+    shutil.copy2(CUT, os.path.join(BASESNAP, "engine_cut.json"))
+    return sha
+
+
+def git_cases(sha):
+    """S0c: the git-mode commit-order rule of pin_check (GitHub 'approval of the most recent push': the review row must
+    land in a later commit than the pin change), with a synthetic base state (no git writes)"""
+    sys.path.insert(0, HERE)
+    try:
+        import engine_split_check as esc
+    except Exception as ex:
+        return [(f"G{i}", "CRASH", f"G{i} import engine_split_check: {ex} -> CRASH") for i in range(1, 6)]
+    d = os.path.join(WORK, "G"); os.makedirs(d, exist_ok=True)
+    pin = os.path.join(d, "pin.sha256")
+    open(pin, "w", encoding="utf-8", newline="\n").write(open(PIN, encoding="utf-8").read().replace("\r\n", "\n") + "# changed in the range\n")
+    psha = esc.sha_text(pin)
+    rp = os.path.join(d, "REVIEW.md"); open(rp, "w", encoding="utf-8").write(f"pin sha256: {psha}\nreviewer: rev-agent\n")
+    led = os.path.join(d, "reviews.tsv")
+    row = f"{psha}\t{rp} (rev-agent)\tcut edit\tstep-agent"
+    base_led = open(LEDGER, encoding="utf-8").read()
+    open(led, "w", encoding="utf-8", newline="\n").write(base_led.rstrip("\n") + "\n" + row + "\n")
+    ptxt = open(pin, encoding="utf-8").read()
+    bpin = open(PIN, encoding="utf-8").read().replace("\r\n", "\n")
+    mk = lambda **g: {"ref": "deadbeef", "cut": open(CUT, encoding="utf-8").read(), "pin": bpin, "reviews": base_led,
+                      "git": dict({"head_pin": ptxt, "pin_commit": "c0ffee00", "pin_commit_reviews": base_led}, **g)}
+    out = []
+    for gid, what, base, want in (
+            ("G1", "git: the pin change is uncommitted, its row too -> SELF-REVIEWED", mk(head_pin=bpin), r"REVIEW ROW INVALID .*SELF-REVIEWED: the pin change is not committed"),
+            ("G2", "git: the row is in the same commit as the pin change -> SELF-REVIEWED", mk(pin_commit_reviews=base_led + row + "\n"), r"REVIEW ROW INVALID .*SELF-REVIEWED: the row was added in the same commit"),
+            ("G3", "control: git, the row lands after the pin commit -> ok", mk(), None),
+            ("G4", "no base (no merge-base): today's 3-column rows are not valid reviews -> REVIEW ROW INVALID", None, r"REVIEW ROW INVALID"),
+            ("G5", "empty range (merge-base == HEAD on the integration branch), only a '<sha> x x' row -> REVIEW ROW INVALID", "empty",
+             r"REVIEW ROW INVALID .*needs 4 non-empty columns")):
+        try:
+            if gid == "G5":
+                led5 = os.path.join(d, "reviews_xx.tsv")
+                open(led5, "w", encoding="utf-8").write(f"{sha}\tx\tx\n")
+                lines = esc.pin_check(CUT, PIN, led5, {"ref": "head", "cut": open(CUT, encoding="utf-8").read(), "pin": bpin,
+                                                       "reviews": open(led5, encoding="utf-8").read(), "git": None})
+            elif gid == "G4":   # the S0b ledger row shape (3 columns, no author)
+                led4 = os.path.join(d, "reviews_s0b_shape.tsv")
+                open(led4, "w", encoding="utf-8").write(f"{sha}\tprogress/arch025-engine.S0b.REVIEW.md (s0b-review)\tS0b row shape\n")
+                lines = esc.pin_check(CUT, PIN, led4, None)
+            else:
+                lines = esc.pin_check(CUT, pin, led, base)
+            txt = "\n".join(lines)
+            ok = (not lines) if want is None else re.search(want, txt) is not None
+            v = ("PASS" if ok else "FALSE POSITIVE") if want is None else ("CAUGHT" if ok else "NOT CAUGHT")
+        except Exception as ex:
+            txt, v = f"{type(ex).__name__}: {ex}", "CRASH"
+        out.append((gid, v, f"{gid} {what}\n   {txt[:200] or '(no pin lines)'} -> {v}"))
+    return out
+
+
 def main():
     os.makedirs(WORK, exist_ok=True)
+    os.makedirs(BASESNAP, exist_ok=True)
+    sha = setup_ledger()
     res = []
     for i, b in enumerate(bases):   # baselines
-        rc, out = run([PY, "-I", os.path.join(HERE, "engine_split_check.py"), "--root", b, "--work", os.path.join(WORK, f"B{i}"), "--pin", PIN])
+        rc, out = run([PY, "-I", os.path.join(HERE, "engine_split_check.py"), "--root", b, "--work", os.path.join(WORK, f"B{i}"), "--pin", PIN,
+                       "--reviews", LEDGER, "--base-dir", BASESNAP])
         ok = rc == 0 and "engine split check: ok" in out
         res.append((f"B{i}", "PASS" if ok else "FAIL", f"B{i} baseline {b}\n   rc={rc}: {out.strip().splitlines()[-1] if out.strip() else ''} -> {'PASS' if ok else 'FAIL (false positive)'}"))
     with ThreadPoolExecutor(JOBS) as ex:
         res += list(ex.map(one, MUT))
+    res += git_cases(sha)
     good = sum(1 for _, v, _ in res if v in ("PASS", "CAUGHT"))
     counted = sum(1 for _, v, _ in res if v != "SKIP")
     txt = "\n".join(r[2] for r in res)

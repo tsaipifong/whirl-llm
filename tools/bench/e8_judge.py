@@ -18,12 +18,18 @@ metric mode, a header line allowed) or else from the --aa-noise table; without e
 expected cell with no rows, or a cell with rows on one side only (every round of the new build ERROR), is MISSING = a
 failure; rows whose note contains ERROR are counted and printed per file and tag (never dropped silently).
 
-  python -I tools/bench/e8_judge.py --dir D --base base --new fin (--aa-noise noise.tsv | --expect-cells cells.tsv)
+S0c (S0b review act-on 3; llama-bench exit(1) / hyperfine abort on any failed repetition): --expect-cells is required
+(also with --aa; --aa-noise only gives the bands). A cell with any ERROR row or blank metric round (timeout, silent
+failure) on either side is NOT ACCEPTED (the other rounds are never judged alone); so are unpaired rounds, an unbalanced
+AB / BA order, more than MAX_ROUNDS pairs, and an expected cell without an A/A band when --aa-noise is given. An A/A run
+that loses an expected cell fails and writes no noise table; a blank noise column is exit 4 with a message.
+
+  python -I tools/bench/e8_judge.py --dir D --base base --new fin --expect-cells cells.tsv [--aa-noise noise.tsv]
                                     [--host-a ..] [--host-b ..]
-  python -I tools/bench/e8_judge.py --dir D --base base --new aa --aa --write-noise noise.tsv
+  python -I tools/bench/e8_judge.py --dir D --base base --new aa --aa --expect-cells cells.tsv --write-noise noise.tsv
   python -I tools/bench/e8_judge.py --selftest
-Exit 0 every expected GPU cell PASS (or --aa), 1 a cell NOT ACCEPTED / SLOWER / MISSING / host work differs, 3 EXTEND
-needed, 2 usage (also: no expected-cell list).
+Exit 0 every expected GPU cell PASS (or a clean --aa), 1 a cell NOT ACCEPTED / SLOWER / MISSING / host work differs,
+3 EXTEND needed, 2 usage (also: no expected-cell list), 4 a blank noise column in --aa-noise.
 """
 import csv, glob, json, os, re, sys
 from collections import defaultdict
@@ -39,27 +45,45 @@ def arg(n, d=None):
     return a[a.index(n) + 1] if n in a else d
 
 
-def load_gpu(d, base, new, errs=None):
+def load_gpu(d, base, new, errs=None, bad=None):
+    """per cell {tag: {round: value}}. S0c (S0b review act-on 3; llama-bench exit(1) on any failed repetition): a row whose
+    note says ERROR, or whose metric column is empty in a file that has the column (timeout / silent failure), is a BAD
+    ROUND of its cell: bad[cell][tag][round] = why (evaluate() rejects a cell with any bad round, never judges the rest)."""
     cells = defaultdict(lambda: {base: {}, new: {}, "t": {base: {}, new: {}}})
+    pend = []
     for path in sorted(glob.glob(os.path.join(d, "ab_*_*_*.tsv"))):
         gpu, model = os.path.basename(path)[:-4].split("_")[1:3]
-        for r in csv.DictReader(open(path, encoding="utf-8"), delimiter="\t"):
-            if "ERROR" in r.get("note", ""):
-                if errs is not None:   # S0b: counted per file / engine label (printed by evaluate)
-                    k = (os.path.basename(path), r.get("engine", "?"))
-                    errs[k] = errs.get(k, 0) + 1
-                continue
-            m = re.match(r"r(\d+)", r.get("note", ""))
+        rd = csv.DictReader(open(path, encoding="utf-8"), delimiter="\t")
+        cols = [(met, col) for met, col in (("pp", "prefill_tps"), ("tg", "decode_tps")) if col in (rd.fieldnames or [])]
+        for r in rd:
+            note = r.get("note") or ""
+            err = "ERROR" in note
+            if err and errs is not None:   # S0b: counted per file / engine label (printed by evaluate)
+                k = (os.path.basename(path), r.get("engine", "?"))
+                errs[k] = errs.get(k, 0) + 1
+            m = re.match(r"r(\d+)", note)
             rnd = int(m.group(1)) if m else 0
-            parts = r["engine"].split("-")
+            parts = (r.get("engine") or "").split("-")
+            if len(parts) < 3: continue
             tag, mode = parts[1], parts[-1]
             if tag not in (base, new): continue
-            for met, col in (("pp", "prefill_tps"), ("tg", "decode_tps")):
-                if r.get(col):
-                    c = cells[(gpu, model, r["test"], r["target"], met, mode)]
-                    c[tag][rnd] = float(r[col])
-                    if r.get("time"):
-                        c["t"][tag][rnd] = min(c["t"][tag].get(rnd, r["time"]), r["time"])
+            for met, col in cols:
+                key = (gpu, model, r.get("test", ""), r.get("target", ""), met, mode)
+                v = (r.get(col) or "").strip()
+                if err or not v:
+                    pend.append((key, tag, rnd, "ERROR" if err else "blank " + col))
+                    continue
+                c = cells[key]
+                c[tag][rnd] = float(v)
+                if r.get("time"):
+                    c["t"][tag][rnd] = min(c["t"][tag].get(rnd, r["time"]), r["time"])
+    for key, tag, rnd, why in pend:
+        # a blank metric belongs to a cell that has values somewhere (a test without prefill has no pp cell);
+        # an ERROR row always marks its cells
+        if why == "ERROR" or key in cells:
+            cells[key][tag].pop(rnd, None)
+            if bad is not None:
+                bad.setdefault(key, {}).setdefault(tag, {})[rnd] = why
     return cells
 
 
@@ -75,13 +99,17 @@ def judge(b, f, first, band, final):
 
 
 def load_noise(p):
-    out = {}
+    """S0c: (noise per cell, cells whose noise column is empty / not a number) - a blank never becomes a traceback"""
+    out, blank = {}, []
     if p and os.path.exists(p):
         for l in open(p, encoding="utf-8"):
             q = l.rstrip("\n").split("\t")
-            if len(q) == 7 and not l.startswith("gpu"):
-                out[tuple(q[:6])] = float(q[6])
-    return out
+            if len(q) >= 6 and not l.startswith("gpu") and l.strip():
+                try:
+                    out[tuple(q[:6])] = float(q[6])
+                except (IndexError, ValueError):
+                    blank.append(tuple(q[:6]))
+    return out, blank
 
 
 def host(alist, blist):
@@ -131,30 +159,61 @@ def main():
 
 
 def evaluate(d, base, new, noise_p=None, cells_p=None, aa=False, write_noise=None, host_a=None, host_b=None):
-    noise = load_noise(noise_p)
-    if not aa and not cells_p and not noise:
-        return [f"e8 judge: NO EXPECTED-CELL LIST (give --expect-cells or --aa-noise; a missing cell must not pass)"], 2
-    expect = load_cells(cells_p) if cells_p else set(noise)
-    errs = {}
-    cells = load_gpu(d, base, new, errs)
-    if not aa:
-        for k in sorted(expect - set(cells)):
-            cells[k]   # an expected cell without rows: MISSING (defaultdict creates the empty cell)
+    # S0c (S0b review act-on 3): the expected-cell list is always --expect-cells (A/A too); --aa-noise only gives bands
+    if not cells_p:
+        return [f"e8 judge: NO EXPECTED-CELL LIST (give --expect-cells, also with --aa; --aa-noise only gives the band; "
+                f"a missing cell must not pass)"], 2
+    noise, nblank = load_noise(noise_p)
+    if nblank:
+        return [f"e8 judge: NOISE TABLE BLANK in {noise_p}: {', '.join(' '.join(k) for k in nblank)} (the A/A run lost these "
+                f"cells: re-run G-AA; no band is invented)"], 4
+    expect = load_cells(cells_p)
+    errs, badr = {}, {}
+    cells = load_gpu(d, base, new, errs, badr)
+    for k in sorted(expect - set(cells)):
+        cells[k]   # an expected cell without rows: MISSING (defaultdict creates the empty cell)
     out, bad, ext, nrows = [], 0, 0, []
     for (f, eng), n in sorted(errs.items()):
-        out.append(f"ERROR rows: {f} {eng}: {n} (not judged)")
+        out.append(f"ERROR rows: {f} {eng}: {n} (the cell is not accepted)")
     for k in sorted(cells):
         c = cells[k]
         first = {r: abjudge.first_of(c["t"][base], c["t"][new], r) for r in set(c[base]) | set(c[new])}
         band = max(abjudge.SMALL, noise.get(k, 0.0))
         o, e8 = judge(c[base], c[new], first, band, final=len(set(c[base]) & set(c[new])) >= MAX_ROUNDS)
+        # S0c: llama-bench / hyperfine rule - any failed round rejects the cell; rounds on one side only, an unbalanced
+        # AB / BA order, more than MAX_ROUNDS pairs, or no A/A band for an expected cell when a noise table is given too
+        nb = sum(len(v) for v in badr.get(k, {}).values())
+        unp = sorted(set(c[base]) ^ set(c[new]))
+        pairs = sorted(set(c[base]) & set(c[new]))
+        nbf = sum(1 for r in pairs if first.get(r) == "base")
+        why = None
+        if nb:
+            why = (f"NOT ACCEPTED ({nb} ERROR / blank rounds: "
+                   + "; ".join(f"{t} r{','.join(map(str, sorted(v)))} {sorted(set(v.values()))[0]}" for t, v in sorted(badr[k].items()))
+                   + ")")
+        elif e8 == "MISSING":   # S0b: no pairs (no rows, or one side only) is a failure, never a pass
+            why = (f"MISSING (base rounds {len(c[base])}, new rounds {len(c[new])}"
+                   + ("; an expected cell" if k in expect else "; not in the expected-cell list") + ")")
+        elif unp:
+            why = f"NOT ACCEPTED (unpaired rounds {unp})"
+        elif abs(nbf - (len(pairs) - nbf)) > 1:
+            why = f"NOT ACCEPTED (order not balanced: base-first {nbf}, new-first {len(pairs) - nbf})"
+        elif len(pairs) > MAX_ROUNDS:
+            why = f"NOT ACCEPTED ({len(pairs)} pairs > {MAX_ROUNDS}: rounds were extended past C5)"
+        elif noise_p and k in expect and k not in noise and not aa:
+            why = f"NOT ACCEPTED (NO A/A NOISE for this expected cell in {os.path.basename(noise_p)})"
         if aa:
-            nrows.append("\t".join(k) + f"\t{o['noise_pct'] if o['noise_pct'] is not None else ''}")
-            out.append(f"AA {' '.join(k)} | {abjudge.line(o)} | A/A verdict {o['verdict']}")
+            if why is None and o["noise_pct"] is None:
+                why = "NOT ACCEPTED (no noise estimate)"
+            if why is not None and k in expect:
+                bad += 1
+            if why is None:
+                nrows.append("\t".join(k) + f"\t{o['noise_pct']}")
+            out.append(f"AA {' '.join(k)} | {abjudge.line(o)} | A/A verdict {why or o['verdict']}"
+                       + ("" if k in expect else " (not in the expected-cell list: info)"))
             continue
-        if e8 == "MISSING":   # S0b: no pairs (no rows, or one side only) is a failure, never a pass
-            e8 = (f"MISSING (base rounds {len(c[base])}, new rounds {len(c[new])}"
-                  + ("; an expected cell" if k in expect else "; not in the expected-cell list") + ")")
+        if why is not None:
+            e8 = why
         elif k not in expect:
             e8 += " (not in the expected-cell list: info)"
         bad += e8.startswith(("NOT ACCEPTED", "SLOWER", "MISSING"))
@@ -165,9 +224,12 @@ def evaluate(d, base, new, noise_p=None, cells_p=None, aa=False, write_noise=Non
         hl, hbad = host(host_a.split(","), host_b.split(","))
     lines = out + hl
     if aa:
+        if bad or hbad:   # S0c: an A/A that lost an expected cell writes no noise table (it would only hide the loss)
+            return lines + [f"e8 judge: A/A FAIL ({bad} expected cells without a clean A/A, {hbad} host cells with different work; "
+                            f"no noise table written)"], 1
         if write_noise:
             open(write_noise, "w", encoding="utf-8").write("gpu\tmodel\ttest\ttarget\tmetric\tmode\tnoise_pct\n" + "\n".join(nrows) + "\n")
-        return lines + [f"e8 judge: A/A {len(nrows)} cells{', host work differs in ' + str(hbad) if hbad else ''}"], (1 if hbad else 0)
+        return lines + [f"e8 judge: A/A {len(nrows)} cells"], 0
     ng = sum(1 for l in out if l.startswith("E8 "))
     if not ng:
         return lines + [f"e8 judge: NO GPU CELLS in {d} (nothing judged; host lines are info only)"], 2
@@ -201,14 +263,15 @@ def selftest():
             for r in rows: o.write("\t".join(r) + "\n")
         return os.path.join(work, name)
 
-    def rounds(mode, base_v, fin_v, fin_err=False):
+    def rounds(mode, base_v, fin_v, fin_err=False, err_r=(), blank_r=(), tag_new="fin"):
         rows = []
         for r in range(1, 7):
-            first, second = (("base", base_v), ("fin", fin_v)) if r % 2 else (("fin", fin_v), ("base", base_v))
+            first, second = (("base", base_v), (tag_new, fin_v)) if r % 2 else ((tag_new, fin_v), ("base", base_v))
             for j, (tag, v) in enumerate((first, second)):
-                err = fin_err and tag == "fin"
-                rows.append((f"r9700-{tag}-{mode}", f"r{r}" + (" ERROR" if err else ""), "chat", "512", "" if err else f"{v}",
-                             f"2026-10-29T10:{r:02d}:{j}0"))
+                err = tag == tag_new and (fin_err or r in err_r)
+                blank = tag == tag_new and r in blank_r
+                rows.append((f"r9700-{tag}-{mode}", f"r{r}" + (" ERROR" if err else "") + (" timeout" if blank else ""), "chat",
+                             "512", "" if (err or blank) else f"{v}", f"2026-10-29T10:{r:02d}:{j}0"))
         return rows
 
     cells_p = os.path.join(work, "cells.tsv")
@@ -219,11 +282,54 @@ def selftest():
     d_one = tsv("one", rounds("precise", 40.0, 40.1))
     for nm, d, cp, want_rc, want_re in (
             ("control: both expected cells present and equal -> PASS rc 0", d_ok, cells_p, 0, r"^e8 judge: PASS \(2 GPU cells, all 2 expected"),
-            ("balance: every new-version round ERROR -> MISSING, FAIL rc 1 (review e8t)", d_err, cells_p, 1, r"\| MISSING \(base rounds 6, new rounds 0"),
+            ("balance: every new-version round ERROR -> FAIL rc 1 (review e8t)", d_err, cells_p, 1, r"balance band .*\| NOT ACCEPTED \(6 ERROR / blank rounds"),
             ("the ERROR rows are counted and printed", d_err, cells_p, 1, r"^ERROR rows: ab_r9700_swift_short\.tsv r9700-fin-balance: 6"),
             ("an expected cell with no rows at all -> MISSING, FAIL rc 1", d_one, cells_p, 1, r"balance band .*\| MISSING \(base rounds 0, new rounds 0; an expected cell"),
             ("no expected-cell list -> refuses, rc 2", d_ok, None, 2, r"^e8 judge: NO EXPECTED-CELL LIST")):
         lines, rc = evaluate(d, "base", "fin", None, cp)
+        txt = "\n".join(lines)
+        cases.append((nm, rc == want_rc and re.search(want_re, txt, re.M) is not None))
+    # S0c (S0b review act-on 3; reviewer probes scratch/a25_engine/s0b_review/runner/r_e8.py P1-P5): llama-bench style,
+    # any ERROR / blank round of a cell rejects the cell; A/A needs the expected-cell list; a blank noise is its own exit
+    one_p = os.path.join(work, "cells1.tsv")
+    open(one_p, "w", encoding="utf-8").write("gpu\tmodel\ttest\ttarget\tmetric\tmode\nr9700\tswift\tchat\t512\ttg\tprecise\n")
+    two_p = cells_p
+    d_p1 = tsv("p1", rounds("precise", 40.0, 40.0, err_r=(1, 2, 3, 4)))
+    d_p2 = tsv("p2", rounds("precise", 40.0, 40.0, err_r=(5, 6)))
+    d_p3 = tsv("p3", rounds("precise", 40.0, 40.0, blank_r=(2, 4, 6)))
+    d_p4 = tsv("p4", rounds("precise", 40.0, 40.0, tag_new="aa") + rounds("balance", 45.0, 45.0, fin_err=True, tag_new="aa"))
+    d_p5 = tsv("p5", rounds("precise", 40.0, 40.0, tag_new="aa"))
+    d_aa = tsv("aaok", rounds("precise", 40.0, 40.1, tag_new="aa") + rounds("balance", 45.0, 45.1, tag_new="aa"))
+    nz_blank = os.path.join(work, "noise_blank.tsv")
+    open(nz_blank, "w", encoding="utf-8").write("gpu\tmodel\ttest\ttarget\tmetric\tmode\tnoise_pct\n"
+                                                "r9700\tswift\tchat\t512\ttg\tprecise\t0.3\nr9700\tswift\tchat\t512\ttg\tbalance\t\n")
+    nz_one = os.path.join(work, "noise_one.tsv")
+    open(nz_one, "w", encoding="utf-8").write("gpu\tmodel\ttest\ttarget\tmetric\tmode\tnoise_pct\nr9700\tswift\tchat\t512\ttg\tprecise\t0.3\n")
+    for nm, args, want_rc, want_re in (
+            ("P1 new build ERROR in 4 of 6 rounds -> NOT ACCEPTED rc 1", (d_p1, "base", "fin", None, one_p), 1,
+             r"precise band .*\| NOT ACCEPTED \(4 ERROR / blank rounds"),
+            ("P2 new build ERROR in rounds 5-6 -> NOT ACCEPTED rc 1", (d_p2, "base", "fin", None, one_p), 1,
+             r"precise band .*\| NOT ACCEPTED \(2 ERROR / blank rounds"),
+            ("P3 three silent blank rounds (timeout, no ERROR) -> NOT ACCEPTED rc 1", (d_p3, "base", "fin", None, one_p), 1,
+             r"precise band .*\| NOT ACCEPTED \(3 ERROR / blank rounds"),
+            ("P4a A/A with one side of an expected cell lost -> FAIL rc 1", (d_p4, "base", "aa", None, two_p, True), 1,
+             r"^AA r9700 swift chat 512 tg balance .*NOT ACCEPTED \(6 ERROR / blank rounds"),
+            ("P4b a blank noise column -> its own exit code 4, a message, no traceback", (d_ok, "base", "fin", nz_blank, two_p), 4,
+             r"^e8 judge: NOISE TABLE BLANK .*r9700 swift chat 512 tg balance"),
+            ("P5a A/A without an expected-cell list -> refuses rc 2", (d_p5, "base", "aa", None, None, True), 2,
+             r"^e8 judge: NO EXPECTED-CELL LIST"),
+            ("P5b A/A missing an expected cell -> FAIL rc 1", (d_p5, "base", "aa", None, two_p, True), 1,
+             r"^AA r9700 swift chat 512 tg balance .*MISSING"),
+            ("P5c --aa-noise alone is not an expected-cell list -> refuses rc 2", (d_ok, "base", "fin", nz_one, None), 2,
+             r"^e8 judge: NO EXPECTED-CELL LIST"),
+            ("P5d noise table without an expected cell -> FAIL rc 1", (d_ok, "base", "fin", nz_one, two_p), 1,
+             r"balance band .*NO A/A NOISE"),
+            ("control: A/A with both cells, expected list -> rc 0", (d_aa, "base", "aa", None, two_p, True), 0,
+             r"^e8 judge: A/A 2 cells")):
+        try:
+            lines, rc = evaluate(*args)
+        except BaseException as ex:   # a traceback is a failure of the case, never an exit code
+            lines, rc = [f"EXCEPTION {type(ex).__name__}: {ex}"], -1
         txt = "\n".join(lines)
         cases.append((nm, rc == want_rc and re.search(want_re, txt, re.M) is not None))
     ok = all(g for _, g in cases)

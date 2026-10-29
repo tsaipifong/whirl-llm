@@ -5,3 +5,6 @@
 # and the reviewer of that step checks the row against the cut diff.
 f8f9ffada2a6862535d4874980f6881cec7682392cc78871d71044ac0a20baac	progress/arch025-engine.S0.REVIEW.md (s0review, 2026-10-29)	S0 pin at a17493b (architecture sections only); superseded by the S0b pin
 99d47f48416cd0f10efd85884af6581b87dc2fed5e5008af6b34313f9d4c3bf2	progress/arch025-engine.S0b.REVIEW.md (s0b-review, 2026-10-29; commit allowed, act-on 1-3 open -> S0c before S4)	S0b: pin adds new_funcs / new_data rows (delete-only) and the six checker tools; cut adds unresolved_ok (4 calls) and shared_writers m_ += model, slots_ += startAdmitted (S0 review act-on 1-3)
+# S0c (S0b review act-on 2): a row is sha256 <TAB> review report path (+ note) <TAB> what changed <TAB> author. engine_split_check.py
+# compares the range against merge-base(HEAD, arch025-engine): the report must exist, name the full sha256 and have a
+# 'reviewer: <name>' line that is not the author; the row lands in a LATER commit than the pin change; lines above stay byte for byte.

@@ -142,7 +142,8 @@ def audit_names(pin):
         if not m or m.group(1).strip() in ("member", "callback") or set(m.group(1).strip()) <= set("-: "): continue
         for x in m.group(1).split(","):
             x = re.sub(r"\([^)]*\)", "", x).strip()
-            if re.fullmatch(r"[\w*.]+", x): pats.append(x)
+            # S0c (S0b review C-1 (a)): a glob needs at least two literal name characters (a lone `*` covered everything)
+            if re.fullmatch(r"[\w*.]+", x) and len(re.sub(r"[*.]", "", x)) >= 2: pats.append(x)
     return pats
 
 
@@ -271,6 +272,9 @@ def selftest(root, groups, want, pin, origin, work):
              r"^member order: NO AUDIT ROW for tb_ \(moved", p_nr)
         p_r = pin_with("pin_tb_moved_row", moved, ["# | tb_ | TierBridge | selftest row | after ck_ | selftest control |"])
         case("r5c: control: the same move with an audit row for tb_ passes", tbm, 0, r"^member order: audited vs origin: tb_ \(moved\)", p_r)
+        # S0c (S0b review C-1 (a), r_mo.py case a): a lone `*` row would cover every change
+        p_star = pin_with("pin_tb_moved_star", moved, ["# | * | any | any | any | any |"])
+        case("C-1a: the same move with only a lone '*' audit row: fails", tbm, 1, r"^member order: NO AUDIT ROW for tb_ \(moved", p_star)
     else:
         cases.append(("tb_ / ck_ anchors missing", False, ""))
     for old, new, nm in (("    double vram_idle_s_ = 60.0;", "    double vram_idle_s_ = 30.0;", "vram_idle_s_"),
