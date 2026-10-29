@@ -295,7 +295,8 @@ How the plan is built, from the impact map (`impact.py`) and `modules.json`:
      it is a caller of the changed module (`rdeps`), that is, when it includes a header the change edits.
    - **a core path:** `kernels/*`, `*.hip`, `src/kernels_host/*`, `kernels_abi.h`, numerics, `src/ops/*`,
      `src/hip/*`, `src/device/*`, forward / kv files, also under their older paths, unless every module that owns the
-     file has an evidence set.
+     file has an evidence set. A core path whose every owning module is in `NO_GPU_MODULES` is not a core change
+     (arch025-n11b: `device.null`, the CPU null backend under `src/device/`, which no product executable links).
    - **a contract, a build-wide file** (`cmake/*`, `CMakeLists.txt`, `build.bat`, `redist/*`) **or product code in
      no module.** These are `impact.py`'s fail-closed cases. A CMake edit leaves this case through the source-list
      rule or the build graph above.
@@ -318,7 +319,20 @@ How the plan is built, from the impact map (`impact.py`) and `modules.json`:
      by a named GPU step or `BUILD-FAIL`;
    - at least 2 of them are `KILLED` on each card (`min_mutants`, never below 2);
    - every mutant the module's `require` entry names (a known bug class, e.g. K8-2 `~Model` release order for
-     `model.weights`) is in the catalog and `KILLED` on both cards.
+     `model.core`: `x12-f8-model-dtor`) is in the catalog and `KILLED` on both cards; a required mutant cannot be
+     declared equivalent.
+
+   Catalog fields the rule reads (arch025-n11b; `mutations_check.py` enforces them):
+   - `module` must be a `modules.json` module (or a key of the catalog's `labels`, e.g. `gates` for
+     `tools/gates/*.py`): kills are attributed by this label.
+   - `cards` (optional): the cards a mutant of one code object applies to. A `kernels/gfx1151/` file needs
+     `["8060s"]`; a kernel file that `kernels/whirl_kernels.hip` includes only inside its `!defined(__gfx1151__)`
+     block (and the gfx1151 set does not include) needs `["r9700"]`. Such a mutant counts on its cards only: a row on
+     another card is ignored, and the per-card count of 2 kills is over the mutants of that card (like llama.cpp
+     `test-backend-ops`' `NOT_SUPPORTED`). `gpumut` runs it on its cards only.
+   - `equivalent` (optional): the written argument why no test can kill the mutant (at least 40 characters;
+     `expect_test` starts with `none`), e.g. a deleted `static_assert` whose condition holds (no code is generated:
+     Trivial Compiler Equivalence). Such a mutant is left out of the rule instead of blocking its module for ever.
 
    A survivor, `CAP`, `GATE-ERROR`, `NOT-RUN`, `DEVICE-MISMATCH`, a mutant not run on one card, or a mutant added to
    the catalog after the run puts the module back on the full matrix. The set of a card is the steps that killed

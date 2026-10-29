@@ -557,8 +557,8 @@ R = dict(doc(both("fa-1") + both("fa-2")), require={"forward.attn": {"fa-2": "K-
 ok, why = tc.core_step_sets(R, CAT2)
 check("n11: required mutant killed -> set", "forward.attn" in ok, why)
 real_req = tc.load_core_doc(tc.REPO).get("require") or {}
-check("n11 shipped: K8-2 pins model.core (Model member order) and model.weights (~Model release order)",
-      "model.core" in real_req and "x12-f8-model-dtor" in (real_req.get("model.weights") or {}), real_req)
+check("n11 shipped: K8-2 pins model.core (~Model release order; arch025-n11b: x12-f8-model-dtor is a model.core file's mutant)",
+      "x12-f8-model-dtor" in (real_req.get("model.core") or {}), real_req)
 # kill records -> evidence rows (gpumut.ps1 kill_<card>.tsv)
 with tempfile.TemporaryDirectory() as td:
     kt = os.path.join(td, "kill_r9700.tsv")
@@ -579,5 +579,90 @@ check("n11 shipped rows name catalog mutants and cards", all(r["id"] in cat_real
       [r["id"] for r in real["evidence"] if r["id"] not in cat_real])
 ok_real, why_real = tc.core_step_sets(real, cat_real)
 check("n11 shipped: every core module has a set or a reason", all((m in ok_real) != (m in why_real) for m in tc.CORE), (ok_real, why_real))
+# arch025-n11b: (a) a mutant valid on one card only (catalog "cards": a kernel file of one code object) is evidence on
+# that card only: it is not "not run" / a survivor on the other card, and the >= 2 kills are counted per card over the
+# mutants of that card (llama.cpp test-backend-ops NOT_SUPPORTED, progress/arch025-n11b.PRIOR_ART.md)
+CATK = {"kc-a": "kernels.common", "kc-b": "kernels.common", "kc-r": "kernels.common", "kc-s": "kernels.common"}
+METAK = {"kc-r": {"cards": ["r9700"]}, "kc-s": {"cards": ["8060s"]}}
+ok, why = tc.core_step_sets(doc(both("kc-a") + both("kc-b") + [ev("kc-r", "r9700", by="kt_full"), ev("kc-s", "8060s", by="kt_full")]), CATK,
+                            modules=["kernels.common"], meta=METAK)
+check("n11b cards: a one-card mutant run on its card only -> set", "kernels.common" in ok, why)
+check("n11b cards: its killer joins that card's set only", "kt_full" in ok.get("kernels.common", {}).get("r9700", [])
+      and "kt_full" in ok.get("kernels.common", {}).get("8060s", []), ok)
+ok, why = tc.core_step_sets(doc(both("kc-a") + both("kc-b") + [ev("kc-r", "r9700", by="kt_full"), ev("kc-s", "8060s", by="kt_full")]), CATK,
+                            modules=["kernels.common"])
+check("n11b cards: without the cards field the same rows stay full (both-cards rule)", "kernels.common" not in ok, why)
+ok, why = tc.core_step_sets(doc([ev("kc-r", "r9700", by="kt_full"), ev("kc-s", "8060s", by="kt_full")] + both("kc-a")), CATK, modules=["kernels.common"],
+                            meta=dict(METAK, **{"kc-b": {"cards": ["r9700"]}}))
+check("n11b cards: kills are counted per card over that card's mutants (8060s 2: kc-a + kc-s; r9700 kc-b not run)",
+      "kernels.common" not in ok and "kc-b not run on r9700" in why.get("kernels.common", ""), why)
+ok, why = tc.core_step_sets(doc(both("kc-a") + both("kc-b") + [ev("kc-r", "r9700", by="kt_full")]), CATK, modules=["kernels.common"], meta=METAK)
+check("n11b cards: a one-card mutant not run on its card -> full", "kernels.common" not in ok and "kc-s not run on 8060s" in why.get("kernels.common", ""), why)
+ok, why = tc.core_step_sets(doc(both("kc-a") + both("kc-b") + [ev("kc-r", "r9700", by="kt_full"), ev("kc-s", "8060s", by="kt_full"),
+                                                                 ev("kc-r", "8060s", verdict="SURVIVED")]), CATK, modules=["kernels.common"], meta=METAK)
+check("n11b cards: a row on a card the mutant does not apply to is ignored", "kernels.common" in ok, why)
+# (b) an equivalent mutant (catalog "equivalent": the argument) is not evidence either way: left out of the rule
+CATE = {"dp-1": "device.profile", "dp-2": "device.profile", "dp-eq": "device.profile"}
+ok, why = tc.core_step_sets(doc(both("dp-1") + both("dp-2")), CATE, modules=["device.profile"], meta={"dp-eq": {"equivalent": "static_assert deleted: no code"}})
+check("n11b equivalent: an argued equivalent mutant does not block the module", "device.profile" in ok and "dp-eq" not in ok["device.profile"]["mutants"], why)
+ok, why = tc.core_step_sets(doc(both("dp-1") + both("dp-2")), CATE, modules=["device.profile"])
+check("n11b equivalent: without the field it blocks (not run)", "device.profile" not in ok and "dp-eq" in why.get("device.profile", ""), why)
+R = dict(doc(both("dp-1") + both("dp-2")), require={"device.profile": {"dp-eq": "K-q"}})
+ok, why = tc.core_step_sets(R, CATE, modules=["device.profile"], meta={"dp-eq": {"equivalent": "x"}})
+check("n11b equivalent: a required mutant cannot be equivalent", "device.profile" not in ok and "dp-eq" in why.get("device.profile", ""), why)
+with tempfile.TemporaryDirectory() as td:
+    kt = os.path.join(td, "kill_8060s.tsv")
+    open(kt, "w", encoding="utf-8").write("id\tmodule\tcard\tverdict\tkilled_by\tsteps_run\tfailed_steps\tminutes\n"
+                                          "kc-r\tkernels.common\t8060s\tSURVIVED\t\tkt_full\t\t9\n"
+                                          "kc-s\tkernels.common\t8060s\tKILLED\tkt_full\tkt_full\tkt_full\t9\n")
+    rows, notes = tc.kill_rows([kt], CATK, "2026-10-29T18:00", "t", meta=METAK)
+    check("n11b kill rows: a row on a card the mutant does not apply to is skipped and reported",
+          [r["id"] for r in rows] == ["kc-s"] and any("kc-r" in x and "r9700" in x for x in notes), (rows, notes))
+# (c) device.null (CPU null backend, NO_GPU_MODULES) is not core just because its files are under src/device/*
+NB = "src/device/null_backend.cpp"
+MODSN = dict(MODS, **{"device.null": {"paths": ["src/device/null_backend.*"], "steps": ["cpu_tests"]},
+                      "contract.device": {"paths": ["src/device/backend.h"], "full": True}})
+p = tc.make_plan("t", "x", {NB: {}}, rep({"device.null": [NB]}, "release_gate.ps1 -Module device.null"), MODSN, {"includers": {}}, GATES, TIMES, core_sets={})
+check("n11b device.null: a core path owned only by NO_GPU_MODULES -> CPU", p["level"].startswith("cpu") and not p["full_reasons"], (p["level"], p["full_reasons"]))
+p = tc.make_plan("t", "x", {"src/device/zz.cpp": {}}, rep({}, "full gate or the release steps above: 1 file(s) in no module (src/device/zz.cpp)"), MODSN,
+                 {"includers": {}}, GATES, TIMES, core_sets={})
+check("n11b device.null: a src/device file in no module stays full", p["level"] == "full" and any(r.startswith("core file src/device/zz.cpp") for r in p["full_reasons"]), p["full_reasons"])
+p = tc.make_plan("t", "x", {NB: {}, "src/device/backend.h": {}}, rep({"device.null": [NB], "contract.device": ["src/device/backend.h"]}, "full gate, both GPUs (contract module contract.device)"),
+                 MODSN, {"includers": {}}, GATES, TIMES, core_sets={})
+check("n11b device.null: with a GPU device file it stays full", p["level"] == "full" and any("src/device/backend.h" in r for r in p["full_reasons"]), p["full_reasons"])
+p = tc.make_plan("t", "x", {"cmake/device.cmake": {}}, dict(rep({}, "x"), cmake_lists={"cmake/device.cmake": [NB]}), MODSN, {"includers": {}}, GATES, TIMES, core_sets={})
+check("n11b device.null: a CMake list naming only its source is not a core change", not any("core file" in r for r in p["full_reasons"]), p["full_reasons"])
+# (d) the shipped catalog: labels, cards, the missing mutants, the declared equivalent
+meta_real = tc.load_catalog_meta(tc.REPO)
+check("n11b shipped: hiprt-* name hip.runtime", all(cat_real.get(i) == "hip.runtime" for i in ("hiprt-slot-wrong-symbol", "hiprt-order-reversed",
+      "hiprt-fallback-on-broken-local", "hiprt-missing-symbol-ignored")), [cat_real.get(i) for i in cat_real if i.startswith("hiprt-")])
+check("n11b shipped: kernels.common one-card mutants carry cards", meta_real.get("n8-kt-common-wq8-gfx1201", {}).get("cards") == ["r9700"]
+      and meta_real.get("n8-kt-common-wq8-gfx1151", {}).get("cards") == ["8060s"], (meta_real.get("n8-kt-common-wq8-gfx1201"), meta_real.get("n8-kt-common-wq8-gfx1151")))
+check("n11b shipped: k8-2-model-member-order is a model.core mutant", cat_real.get("k8-2-model-member-order") == "model.core", cat_real.get("k8-2-model-member-order"))
+for mname in ("forward.state", "model.types"):
+    k = [i for i, mm in cat_real.items() if mm == mname and not (meta_real.get(i) or {}).get("equivalent")]
+    check(f"n11b shipped: {mname} has >= 2 non-equivalent mutants", len(k) >= 2, k)
+check("n11b shipped: m6-uma-assert-drop is a declared, argued equivalent", len((meta_real.get("m6-uma-assert-drop") or {}).get("equivalent") or "") >= 40,
+      meta_real.get("m6-uma-assert-drop"))
+for mname in ("model.core", "hip.runtime", "kernels.common", "forward.state", "model.types"):
+    for card in tc.DEVICES:
+        k = [i for i, mm in cat_real.items() if mm == mname and not (meta_real.get(i) or {}).get("equivalent") and card in tc.mutant_cards(meta_real, i)]
+        check(f"n11b shipped: {mname} has >= 2 killable mutants on {card} (else no GPU run can earn it a set)", len(k) >= 2, k)
+bad_req = [(mm, i) for mm, d in (real.get("require") or {}).items() for i in d
+           if cat_real.get(i) != mm or (meta_real.get(i) or {}).get("equivalent")]
+check("n11b shipped: every required mutant is in the catalog under its module and killable (not equivalent)", not bad_req, bad_req)
+check("n11b shipped: the K8-2 class of model.core is required through ~Model's explicit release order (x12-f8-model-dtor, src/model/loader.cpp = model.core)",
+      "x12-f8-model-dtor" in ((real.get("require") or {}).get("model.core") or {}) and cat_real.get("x12-f8-model-dtor") == "model.core",
+      (real.get("require"), cat_real.get("x12-f8-model-dtor")))
+ok_real, why_real = tc.core_step_sets(real, cat_real, tc.evidence_modules(RMODS), meta=meta_real)
+check("n11b shipped: device.profile is blocked only by missing GPU runs, not by m6-uma-assert-drop", "m6-uma-assert-drop" not in why_real.get("device.profile", "x"), why_real.get("device.profile"))
+import subprocess  # noqa: E402
+rr = subprocess.run([sys.executable, "-I", os.path.join(os.path.dirname(os.path.abspath(__file__)), "test_change.py"), "--core-steps-report"],
+                    capture_output=True, text=True)
+lines = {ln.split()[0]: ln for ln in rr.stdout.splitlines() if ln.split()}
+check("n11b report: modules with catalog mutants are listed (hip.runtime, kernels.common)", "hip.runtime" in lines and "kernels.common" in lines, rr.stdout[-800:])
+check("n11b report: the report honours cards (kernels.common: n8-kt-common-wq8-gfx1201 is not 'not run on 8060s')",
+      "n8-kt-common-wq8-gfx1201 not run on 8060s" not in lines.get("kernels.common", ""), lines.get("kernels.common"))
+check("n11b report: the report honours equivalent (device.profile: m6-uma-assert-drop not listed)", "m6-uma-assert-drop" not in lines.get("device.profile", "x"), lines.get("device.profile"))
 print(f"test_change_test: {n - fails}/{n} passed")
 sys.exit(1 if fails else 0)

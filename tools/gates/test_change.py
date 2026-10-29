@@ -153,6 +153,22 @@ def load_catalog(root=REPO):
     return {x["id"]: x.get("module", "") for x in d.get("mutations", [])}
 
 
+def load_catalog_meta(root=REPO):
+    """arch025-n11b: {mutant id: {"cards": [...] or None, "equivalent": text or None}} of tools/impact/mutations.json.
+    cards = the cards a one-code-object mutant applies to (kernels/common.hip: gfx1201 only); equivalent = the written
+    argument why no test can kill it (mutations_check enforces both fields)"""
+    try:
+        d = json.load(open(os.path.join(root, "tools", "impact", "mutations.json"), encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return {x["id"]: {"cards": x.get("cards"), "equivalent": x.get("equivalent")} for x in d.get("mutations", [])}
+
+
+def mutant_cards(meta, i):
+    c = ((meta or {}).get(i) or {}).get("cards")
+    return [x for x in DEVICES if x in c] if c else list(DEVICES)
+
+
 def is_contract(n):
     """contract modules never get a step set: contract.* (modules.json full: true by design) and the kernel ABI"""
     return n.startswith("contract.") or n == "kernels.abi"
@@ -165,22 +181,25 @@ def evidence_modules(mods):
     return sorted(n for n in set(CORE) | set(mods or {}) if not is_contract(n))
 
 
-def core_step_sets(doc, catalog, modules=None):
+def core_step_sets(doc, catalog, modules=None, meta=None):
     """({module: {"r9700": [steps], "8060s": [steps], "mutants": [ids], "proof": text}}, {module: why full}) over
-    `modules` (default: the CORE table)"""
+    `modules` (default: the CORE table). meta (load_catalog_meta): a mutant with "cards" is evidence on those cards
+    only (a row on another card is ignored, like llama.cpp's NOT_SUPPORTED); a mutant with an "equivalent" argument
+    is left out of the rule (it can never be killed: PRIOR_ART n11b, Trivial Compiler Equivalence)."""
+    meta = meta or {}
     always = sorted(set(doc.get("always") or CORE_ALWAYS) | set(CORE_ALWAYS))
     need = max(CORE_MIN_MUTANTS, int(doc.get("min_mutants") or 0))
     newest = {}
     for r in doc.get("evidence") or []:
         k = (r.get("id"), r.get("card"))
-        if k[0] in catalog and k[1] in DEVICES and (k not in newest or str(r.get("date", "")) >= str(newest[k].get("date", ""))):
+        if k[0] in catalog and k[1] in mutant_cards(meta, k[0]) and (k not in newest or str(r.get("date", "")) >= str(newest[k].get("date", ""))):
             newest[k] = r
     ok, why = {}, {}
     for mname in (list(CORE) if modules is None else modules):
         if is_contract(mname):
             why[mname] = "contract module: always the full matrix (modules.json full: true)"
             continue
-        muts = sorted(i for i, mod in catalog.items() if mod == mname)
+        muts = sorted(i for i, mod in catalog.items() if mod == mname and not (meta.get(i) or {}).get("equivalent"))
         if not muts:
             why[mname] = "no mutant of this module in tools/impact/mutations.json"
             continue
@@ -191,13 +210,18 @@ def core_step_sets(doc, catalog, modules=None):
             if catalog.get(i) != mname:
                 problems.append(f"required mutant {i} ({cls}) not in tools/impact/mutations.json for {mname}: write it")
                 continue
-            for card in DEVICES:
+            if (meta.get(i) or {}).get("equivalent"):
+                problems.append(f"required mutant {i} ({cls}) is declared equivalent: a required class needs a killable mutant")
+                continue
+            for card in mutant_cards(meta, i):
                 r = newest.get((i, card))
                 if not (r and r.get("verdict") == "KILLED" and r.get("killed_by")):
                     problems.append(f"required mutant {i} ({cls}) not KILLED by a GPU step on {card}")
         for card in DEVICES:
             killers, nk = set(), 0
             for i in muts:
+                if card not in mutant_cards(meta, i):
+                    continue
                 r = newest.get((i, card))
                 if r is None:
                     problems.append(f"{i} not run on {card}")
@@ -228,11 +252,11 @@ def load_core_sets(root=REPO):
             mods = load_mods(root)
         except (OSError, ValueError, KeyError):
             mods = {}
-        _CORE_SETS[root] = core_step_sets(load_core_doc(root), load_catalog(root), evidence_modules(mods))[0]
+        _CORE_SETS[root] = core_step_sets(load_core_doc(root), load_catalog(root), evidence_modules(mods), load_catalog_meta(root))[0]
     return _CORE_SETS[root]
 
 
-def kill_rows(paths, catalog, date, source):
+def kill_rows(paths, catalog, date, source, meta=None):
     """evidence rows from gpumut.ps1 kill_<card>.tsv files (id, module, card, verdict, killed_by, ...) -> (rows, notes)"""
     rows, notes = [], []
     for p in paths:
@@ -243,6 +267,9 @@ def kill_rows(paths, catalog, date, source):
                 continue
             if card not in DEVICES:
                 notes.append(f"{i}: card {card!r} unknown (row of {p} skipped)")
+                continue
+            if card not in mutant_cards(meta, i):
+                notes.append(f"{i}: applies to {', '.join(mutant_cards(meta, i))} only (catalog cards), row on {card} of {p} skipped")
                 continue
             if (r.get("module") or catalog[i]) != catalog[i]:
                 notes.append(f"{i}: module {r.get('module')} in {p}, {catalog[i]} in the catalog (catalog used)")
@@ -792,6 +819,12 @@ def compare_code_objects(base, build, out_json):
     return r.get("checks", {}).get("code_objects"), out_json
 
 
+def no_gpu_file(f, mods):
+    """arch025-n11b: f is owned (modules.json paths) only by NO_GPU_MODULES modules"""
+    owners = [k for k, d in (mods or {}).items() if matches(f, (d or {}).get("paths") or [])]
+    return bool(owners) and all(k in NO_GPU_MODULES for k in owners)
+
+
 def make_plan(title, cid, changes, rep, mods, m, gates, times, one_gpu="r9700", build=None, base_build=None, proofs=None,
               scratch=None, all_cpu=False, gate_map=None, cmake_graph=None, core_sets=None):
     files = sorted(changes)
@@ -822,6 +855,8 @@ def make_plan(title, cid, changes, rep, mods, m, gates, times, one_gpu="r9700", 
         for g, why in CORE_GLOBS:
             if fnmatch.fnmatch(f, g):
                 owners = [k for k, fl in modules.items() if f in (fl or [])]
+                if owners and all(k in NO_GPU_MODULES for k in owners):
+                    break  # arch025-n11b: a core path owned only by no-GPU modules (device.null: the CPU null backend) is not core
                 if owners and all(k in cset for k in owners):
                     for k in owners:
                         core_used[k] = cset[k]
@@ -833,6 +868,8 @@ def make_plan(title, cid, changes, rep, mods, m, gates, times, one_gpu="r9700", 
     lists = rep.get("cmake_lists") or {}
     for cf, srcs in sorted(lists.items()):
         for f in srcs:
+            if no_gpu_file(f, mods):
+                continue  # arch025-n11b: a source of a no-GPU module only (device.null)
             for g, why in CORE_GLOBS:
                 if fnmatch.fnmatch(f, g):
                     full.append(f"core file {f} listed in {cf}: {why}")
@@ -1239,7 +1276,7 @@ def main():
     if a.add_kill_records:
         root = os.path.abspath(a.root or REPO)
         d = load_core_doc(root)
-        rows, notes = kill_rows(a.add_kill_records, load_catalog(root), now(), a.source or "gpumut")
+        rows, notes = kill_rows(a.add_kill_records, load_catalog(root), now(), a.source or "gpumut", meta=load_catalog_meta(root))
         d.setdefault("evidence", []).extend(rows)
         with open(os.path.join(root, CORE_STEPS_FILE), "w", encoding="utf-8", newline="\n") as fh:
             json.dump(d, fh, indent=1)
@@ -1252,8 +1289,9 @@ def main():
         root = os.path.abspath(a.root or REPO)
         mods = load_mods(root)
         doc = load_core_doc(root)
-        ok, why = core_step_sets(doc, load_catalog(root), evidence_modules(mods))
-        seen = {r.get("module") for r in doc.get("evidence") or []}
+        cat = load_catalog(root)
+        ok, why = core_step_sets(doc, cat, evidence_modules(mods), meta=load_catalog_meta(root))
+        seen = {r.get("module") for r in doc.get("evidence") or []} | set(cat.values())  # arch025-n11b: every module with a mutant
         show = [k for k in list(CORE) + sorted(mods) if k in CORE or (mods.get(k) or {}).get("full") or k in ok or k in seen]
         for k in dict.fromkeys(show):
             if k in ok:
