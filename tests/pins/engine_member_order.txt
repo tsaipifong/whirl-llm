@@ -1,0 +1,141 @@
+# arch025-engine (PLAN N4) member-order pin of class Engine: declaration order == destruction order (reverse).
+# Checked by tools/gates/member_order_check.py (gate step cpu_member_order). One flattened data member per line below
+# the header; members of a `groups:` struct appear as holder.member. Written at d6e83ed (arch025-int5); measured equal
+# (same 120 members, same order) on c1ca7ce and abe3512 exports (S0, scratch/a25_engine/s0).
+#
+# A step that MOVES a member edits the list below in the same commit and adds a row to this audit table
+# (DESIGN 2.5 / 6 C2; each row: member | type | what its destructor does | why nobody else sees the move):
+# | member | type | destructor | move | why nobody else sees it |
+# | ids_, rcx_ | IdGen, ResponseCtx | memory only (rcx_ holds refs to ids_, tok_) | after jq_ (S10; was between next_id_ and stop_) | relative order kept (rcx_ first); no destructor reads them |
+# | stop_, loop_calls_ | bool, vector<function<void()>> | loop_calls_ destroys the tests' lambda captures | into jq_, destroyed after ids_ / rcx_ (S10) | captures are test values, not ids_ / rcx_; runOnLoop only on the loop thread, no loop at ~Engine |
+# | tier_wake_, wake_seq_ | bool, uint64 | trivial | from after kv_arrays_ into jq_ (S10) | trivial types |
+# | prefill_tok_cum_, crlf_norm_ | uint64, vector<uint32> | memory only | out of the vram block, after vst_ (S9) | no destructor reads them |
+# | stat_* (6) | uint64 | trivial | merged into cnt_ at stat_spe_new_ (S6) | trivial |
+# | gov_mu_ (new) | whirl::Mutex | trivial | last member of GovState (S8) | nobody holds it at ~Engine (C3) |
+# Stored callbacks that capture `this` (review3 C4): today they capture Engine; after the split they capture a
+# component (sc_ / dc_ / tg_), which is declared after vis_ and destroyed FIRST, while tb_ / the Tier outlive it.
+# | callback | stored in | captures (today -> after split) | lifetime rule |
+# | t->setWake([this]{..}) engine_tier.cpp:29 | Tier (outlives Engine) | Engine -> jq_ (JobQueue) | ~Engine must clear the wake (H1 / F13) before jq_ goes; C3 test |
+# | s.drop_cache / s.drafter_reset / s.share = [this, &sl] engine_tier.cpp:118-120 | TierBridge::RestoreSteps (stack of a restore) | Engine -> sc_ / dc_ | used only inside tb_.tryRestore called from the loop; no restore runs at ~Engine (stopIo before ~Engine) |
+# | tb_.flushOnStop([this]{ tierTick(); }) engine_tier.cpp:177 | call argument (not stored after return) | Engine -> tg_ | runs inside stop() before ~Engine; C3 test triggers flushOnStop before the reset |
+groups: BatchStats SampleBuffers ImageEmbeddings SpecState FloorState
+m_
+ops_
+tok_
+ct_
+opt_
+ctx_
+owner_
+ck_
+spec_.timing
+spec_.ccost
+spec_.ccost_primed
+spec_.dpool
+spec_.dtiming
+spec_.prof
+spec_.n_cycles
+spec_.vrows
+spec_.prev_nd
+spec_.policy_cycles
+fl_.floor
+fl_.epoch
+fl_.log_t
+fl_.waits
+fl_.periods
+sb_.m_
+sb_.ops_
+sb_.samp_dev_
+sb_.big_dev_
+sb_.relax_dev_
+sb_.relax_host_
+sb_.samp_host_
+sb_.big_host_
+sb_.row_host_
+sb_.in_cands_
+sb_.cands_scratch_
+sb_.ctl_host_
+spec_on_
+conv_bytes_
+ssm_bytes_
+slots_
+q_mutex_
+q_cond_
+queue_
+n_active_
+n_building_
+next_id_
+ids_
+rcx_
+stop_
+loop_calls_
+bst_.t0
+bst_.tokens
+bst_.cycles
+bst_.rows
+bst_.slots
+bst_.drafts
+bst_.lit_drafts
+bst_.prefill_tok
+bst_.seg_batches
+bst_.seg_chunks
+bst_.dfl_cycles
+bst_.dfl_drafted
+bst_.dfl_accepted
+bst_.dfl_cold
+bst_.dfl_gap
+vram_probe_
+vram_others_
+vram_watch_
+vram_idle_next_
+vram_idle_s_
+prefill_tok_cum_
+vram_warn_
+vram_mu_
+vram_last_
+vram_spill_
+crlf_norm_
+vram_last_t_
+gov_
+gov_margin_
+gov_plan_
+gov_pending_
+gov_hold_
+spe_parked_
+gov_parked_
+gov_ram_mb_
+gov_vram_total_
+gov_grow_denied_logged_
+gov_restored_
+gov_resize_before_
+gov_resize_delta_
+ctx_new_
+gov_warn_
+gov_last_
+gov_json_
+ctx_pub_
+kv_arrays_
+tier_wake_
+wake_seq_
+pool_
+last_tick_
+last_reap_
+ps_
+tb_
+stat_spe_new_
+stat_spe_hits_
+stat_spe_tok_
+stat_spe_evict_
+stat_unshare_
+stat_evictions_
+vis_.m_
+vis_.ops_
+vis_.cfg_
+vis_.cache_
+vis_.bytes_
+vis_.seq_
+vis_.n_enc_
+vis_.n_hit_
+vis_.lend_raw_
+vis_.lend_
+vis_.snap0_
+vis_.rel_pending_
