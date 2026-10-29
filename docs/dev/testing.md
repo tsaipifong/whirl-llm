@@ -587,6 +587,8 @@ Kernel source checks (CPU, HIP clang, no GPU): `cpu_kernel_abi` (`tools/gates/ke
 `cpu_kernel_iso` (`tools/gates/kernel_iso_check.py`: each kernel family of `kernels/families.json` compiles from its
 own and its declared dependencies' fragments only). Both run `--selftest` first.
 
+Isolation manifest include closure (CPU, seconds, no build): `cpu_iso_includes` (`tools/gates/iso_includes_check.py`: every quoted `#include` of a file a `tests/**/isolation.txt` stages must itself be staged; `--rev COMMIT` checks a commit read-only). Catches the merge that adds an include to a staged file without the manifest line before the ~1 min per module iso build (C1083) does.
+
 ## Change → required tests
 
 R9700 = gfx1201 and 8060S = gfx1151. G0 = the golden-hash gate above. Some tests in the table
