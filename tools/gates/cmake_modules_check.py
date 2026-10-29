@@ -216,7 +216,13 @@ def check(root, build, mods, targets, roots, pending=(), release=False):
         if m["module"] not in mods and not any(k.startswith(m["module"] + ".") for k in mods):
             errs.append(f"{tag}: module is not in tools/gates/modules.json (nor a group {m['module']}.*)")
         base = os.path.join(iso_dir, m["module"])
-        for tname, kind, want_type, lines in ((m["lib"], "src", "OBJECT_LIBRARY", m["src"]), (m["exe"], "testsrc", "EXECUTABLE", m["testsrc"])):
+        # a header-only manifest (no src line; arch025 lane 2 leg 6, e.g. tests/iso/model.types) has no object library:
+        # cmake/iso.cmake builds only its test program
+        header_only = not m["src"]
+        pairs = [(m["exe"], "testsrc", "EXECUTABLE", m["testsrc"])]
+        if not header_only:
+            pairs.insert(0, (m["lib"], "src", "OBJECT_LIBRARY", m["src"]))
+        for tname, kind, want_type, lines in pairs:
             claimed.add(tname)
             t = targets.get(tname)
             if t is None:
@@ -233,7 +239,7 @@ def check(root, build, mods, targets, roots, pending=(), release=False):
                 errs.append(f"{tag}: target {tname} does not compile {x} (manifest {kind} line)")
             for x in sorted(got - want):
                 errs.append(f"{tag}: target {tname} compiles {x}, which the manifest does not list")
-        if m["exe"] in targets and m["lib"] not in targets[m["exe"]]["deps"]:
+        if not header_only and m["exe"] in targets and m["lib"] not in targets[m["exe"]]["deps"]:
             errs.append(f"{tag}: test program {m['exe']} does not depend on {m['lib']}")
     for name, t in sorted(targets.items()):
         if name in claimed:

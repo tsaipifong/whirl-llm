@@ -257,6 +257,25 @@ def check(mj, files, steps):
     return errs, notes
 
 
+def load_modules(path):
+    """modules.json as a dict, plus every key that appears twice in one object. json.load keeps only the later
+    entry of a duplicated key without a word (arch025-engine 2026-10-29: a second "server.slot" entry hid the
+    first), so the gate reports them."""
+    dups = []
+
+    def pairs(items):
+        seen = set()
+        for k, _ in items:
+            if k in seen:
+                dups.append(k)
+            seen.add(k)
+        return dict(items)
+
+    with open(path, encoding="utf-8") as f:
+        mj = json.load(f, object_pairs_hook=pairs)
+    return mj, dups
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--modules", default=os.path.join(HERE, "modules.json"))
@@ -265,13 +284,14 @@ def main():
     ap.add_argument("--steps")
     a = ap.parse_args()
     try:
-        mj = json.load(open(a.modules, encoding="utf-8"))
+        mj, dups = load_modules(a.modules)
     except (OSError, ValueError) as e:
         print(f"modules check: FAIL: cannot read {a.modules}: {e}")
         return 1
     files = rev_files(a.rev) if a.rev else tree_files(a.tree or REPO)
     steps = set(a.steps.split(",")) if a.steps else gate_steps()
     errs, notes = check(mj, files, steps)
+    errs = [f"duplicate key {k!r} in {os.path.basename(a.modules)} (json keeps only the last one)" for k in dups] + errs
     where = f"rev {a.rev}" if a.rev else (a.tree or REPO)
     for n in notes:
         print(f"   {n}")

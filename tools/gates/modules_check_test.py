@@ -164,6 +164,23 @@ def main():
     good = g.startswith("full gate or") and "build-wide" in g
     print(f"{'ok  ' if good else 'FAIL'} map: build-wide file = full gate: {g}")
     ok, bad = ok + good, bad + (not good)
+    # arch025-engine 2026-10-29: a duplicated module key in modules.json passed json.load silently (the later entry
+    # won) - the file loader must report it
+    import tempfile
+    for name, text, want in (
+            ("load: duplicated module key is reported", '{"modules": {"a": {"id": "A"}, "b": {"id": "B"}, "a": {"id": "A2"}}}', ["a"]),
+            ("load: duplicated key inside an entry is reported", '{"modules": {"a": {"id": "A", "id": "A2"}}}', ["id"]),
+            ("load: no duplicates", '{"modules": {"a": {"id": "A"}, "b": {"id": "B"}}}', [])):
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as f:
+            f.write(text)
+        try:
+            loader = getattr(modules_check, "load_modules", None)
+            got = loader(f.name)[1] if loader else None
+        finally:
+            os.remove(f.name)
+        good = got == want
+        print(f"{'ok  ' if good else 'FAIL'} {name}: duplicates {got} (want {want})")
+        ok, bad = ok + good, bad + (not good)
     print(f"modules check test: {ok}/{ok + bad} ok")
     return 1 if bad else 0
 
