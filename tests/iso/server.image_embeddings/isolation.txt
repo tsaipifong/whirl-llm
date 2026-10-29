@@ -52,6 +52,7 @@ hdr       src/server/backend.h
 hdr       src/server/engine_vision.h
 hdr       src/server/log.h
 hdr       src/server/vision_iface.h
+hdr       src/cache/cache_model.h
 # test program
 testsrc   tests/iso/server.image_embeddings/image_embeddings_tests.cpp
 testhdr   tests/iso/fake_server_model.h

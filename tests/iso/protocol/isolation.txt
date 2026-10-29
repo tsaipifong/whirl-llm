@@ -70,6 +70,7 @@ hdr       src/server/stream.h
 hdr       src/server/vision_iface.h
 hdr       src/tokenizer/unicode_tables.inc
 hdr       include/whirl/small_helpers.h
+hdr       include/whirl/json_fields.h
 # test program
 testsrc   tests/iso/protocol/protocol_tests.cpp
 testhdr   tests/iso/iso_test.h
