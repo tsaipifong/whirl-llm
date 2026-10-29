@@ -1081,7 +1081,14 @@ void testGovernor() {
         CHECK(completionText(warm) == refB);
         CHECK(cachedTokens(warm) > 0u);  // the setup really keeps B's prefix cache in a slot
         budget3 = local3 + M3 / 4;  // every slot idle: the next idle sample frees the cache
-        CHECK(waitFor([&] { return g_log.count("memory governor: freed reusable cache: prefix cache of 1 idle slot(s)") >= 1; }, 3000));
+        // arch025-govfix: wait for THIS server's free, not for a log line: g_log is shared by every live server, and the
+        // server of parts (1)-(4) is still running and can log its own "freed reusable cache" line after the clear above
+        // (its request-end sample of part (4) saw the low budget; diag run scratch/a25_govfix/diag/r1/run_2), so a log
+        // wait could return before srv3 freed anything and B then hit its cache. srv3's /health governor status is
+        // published by govApply after govFreeCache on the engine thread (engine_gov.cpp govPublish), so once it names
+        // the free, the next request sees the freed slots.
+        CHECK(waitFor([&] { return srv3.get("/health").body.find("\"last_action\":\"freed cache: 1 slot(s), 0 shared,") != std::string::npos; }, 3000));
+        CHECK(g_log.count("memory governor: freed reusable cache: prefix cache of 1 idle slot(s)") >= 1);
         const HttpResult again = srv3.post("/v1/completions", completionBody(pB, gB));
         CHECK(completionText(again) == refB);
         CHECK_EQ(cachedTokens(again), 0u);
