@@ -62,6 +62,7 @@ src       src/platform/args_win.cpp
 src       src/platform/paths_win.cpp
 src       src/platform/proc_win.cpp
 src       src/spec/policy.cpp
+src       src/config/run_settings.cpp
 # include closure of the sources above
 hdr       include/whirl/common.h
 hdr       include/whirl/common.h
@@ -152,6 +153,7 @@ hdr       src/spec/policy.h
 hdr       include/whirl/kernels_abi_layout.h
 hdr       include/whirl/small_helpers.h
 hdr       include/whirl/device_pick.h
+hdr       src/config/run_settings.h
 # test program (fake_hip.cpp: the HIP layer's link double)
 testsrc   tests/iso/model.qwen35.arch/arch_table_tests.cpp
 testsrc   tests/iso/fake_hip.cpp

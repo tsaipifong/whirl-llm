@@ -7,7 +7,9 @@
 #include "config/env_snapshot.h"
 #include "platform/env.h"
 
+#include <optional>
 #include <set>
+#include <string_view>
 #include <stdexcept>
 #include <string>
 
@@ -79,11 +81,52 @@ void testFlagAndForwardEnv() {
     ISO_CHECK(!d.head_gemvx && d.prec_gemvh && d.prec_gs == -1);
 }
 
+// arch025-N6 (lane 1 leg 11): whirl::envGet / envFlag are config.settings' functions (one definition), and they read
+// what both old bodies read (src/config/env_snapshot.cpp and src/config/run_settings.cpp before leg 11, verbatim)
+std::optional<std::string> oldSnapGet(std::string_view name) {
+    const std::string key = std::string("WHIRL_") + std::string(name);
+    return whirl::platform::env::getUtf8(key);
+}
+bool oldSnapFlag(std::string_view name, bool def) {
+    auto v = oldSnapGet(name);
+    if (!v) return def;
+    return *v != "0";
+}
+std::optional<std::string> oldSetGet(std::string_view name) {
+    return whirl::platform::env::getUtf8(std::string("WHIRL_") + std::string(name));
+}
+bool oldSetFlag(std::string_view name, bool def) {
+    if (auto v = oldSetGet(name)) return *v != "0";
+    return def;
+}
+
+void testEnvGetOneCopy() {
+    using GetFn = std::optional<std::string> (*)(std::string_view);
+    using FlagFn = bool (*)(std::string_view, bool);
+    ISO_CHECK(static_cast<GetFn>(&whirl::envGet) == static_cast<GetFn>(&whirl::settings::envGet));
+    ISO_CHECK(static_cast<FlagFn>(&whirl::envFlag) == static_cast<FlagFn>(&whirl::settings::envFlag));
+    const char* vals[] = {nullptr, "", "0", "1", "00", "0 ", " 0", "auto", "yes", "-1", "\xC3\xA9"};
+    for (const char* v : vals) {
+        whirl::platform::env::set("WHIRL_ISO_ENVSNAP_N6", v == nullptr ? "" : v);
+        const auto want = oldSnapGet("ISO_ENVSNAP_N6");
+        ISO_CHECK(oldSetGet("ISO_ENVSNAP_N6") == want);
+        ISO_CHECK(whirl::envGet("ISO_ENVSNAP_N6") == want);
+        for (bool def : {false, true}) {
+            const bool f = oldSnapFlag("ISO_ENVSNAP_N6", def);
+            ISO_CHECK(oldSetFlag("ISO_ENVSNAP_N6", def) == f);
+            ISO_CHECK(whirl::envFlag("ISO_ENVSNAP_N6", def) == f);
+        }
+        ISO_CHECK(whirl::envFlag("ISO_ENVSNAP_N6") == oldSnapFlag("ISO_ENVSNAP_N6", false));
+    }
+    whirl::platform::env::set("WHIRL_ISO_ENVSNAP_N6", "");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     return iso::run("env_snapshot",
                     {{"env_get_flag", testEnvGetFlag},
+                     {"env_get_one_copy", testEnvGetOneCopy},
                      {"names_unique", testNamesUnique},
                      {"from_values_get", testFromValuesAndGet},
                      {"capture_reads_env", testCaptureReadsEnv},

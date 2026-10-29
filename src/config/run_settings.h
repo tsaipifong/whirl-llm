@@ -10,6 +10,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 
+#include "config/env_get.h"  // envGet / envFlag (declared there since arch025-N6, lane 1 leg 11)
+
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -20,11 +22,7 @@ namespace whirl::settings {
 
 using Warn = std::function<void(const std::string&)>;
 
-// WHIRL_<name> (UTF-8 of the wide value, as envGet). nullopt when unset.
-std::optional<std::string> envGet(std::string_view name);
-
-// WHIRL_<name> set and not "0"; `def` when unset (the former envFlag / envOn).
-bool envFlag(std::string_view name, bool def);
+// envGet(name) / envFlag(name, def = false): src/config/env_get.h
 
 // The ONE unsigned-number rule (the server's envU32, FR-SRV P3-10): the whole value must be a decimal number that fits
 // in 32 bits; anything else is a warning "WHIRL_<name>=<v> is not a number; using <def>" and `def`.

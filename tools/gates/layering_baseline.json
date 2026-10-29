@@ -157,6 +157,10 @@
   ],
   [
    "contract.abi",
+   "common.base"
+  ],
+  [
+   "contract.abi",
    "hip.runtime"
   ],
   [
@@ -238,6 +242,10 @@
   [
    "engine_gov",
    "server.engine"
+  ],
+  [
+   "env_snapshot",
+   "config.settings"
   ],
   [
    "env_snapshot",
@@ -432,6 +440,10 @@
    "common.base"
   ],
   [
+   "gpu_select",
+   "common.base"
+  ],
+  [
    "handles",
    "contract.device"
   ],
@@ -462,6 +474,10 @@
   [
    "hip.restrict",
    "platform.env"
+  ],
+  [
+   "hip.runtime",
+   "common.base"
   ],
   [
    "hip.runtime",
@@ -578,6 +594,10 @@
   [
    "model.core",
    "config.device"
+  ],
+  [
+   "model.core",
+   "config.settings"
   ],
   [
    "model.core",

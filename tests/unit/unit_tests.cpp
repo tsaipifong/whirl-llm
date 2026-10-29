@@ -53,6 +53,7 @@ const OrderRow kOrder[] = {
 #if WHIRL_TEST_DLL_DEPS
     {"release", "testDllDeps"},
 #endif
+    {"release", "testSharedHelpersN6"},
     {"accept_policy", "testRelaxAccept"},
     {"json", "testJson"},
     {"tokenizer", "testUnicode"},

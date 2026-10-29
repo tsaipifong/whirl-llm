@@ -17,6 +17,8 @@
 #endif
 #include <windows.h>
 
+#include "win_text.h"  // narrowUtf8 / fileExists (arch025-N6, lane 1 leg 11)
+
 namespace whirl::hip::runtime {
 
 // every table entry has exactly the SDK's signature (unevaluated: no link-time reference to amdhip64)
@@ -36,13 +38,8 @@ constexpr const char* k_names[] = {WHIRL_HIP_API_LIST(WHIRL_HIP_API_NAME)};
 #undef WHIRL_HIP_API_NAME
 static_assert(sizeof(Api) == sizeof(k_names) / sizeof(k_names[0]) * sizeof(void*), "Api must hold only the listed pointers");
 
-std::string narrowUtf8(const std::wstring& w) {
-    if (w.empty()) return {};
-    const int n = WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), nullptr, 0, nullptr, nullptr);
-    std::string s(static_cast<std::size_t>(n > 0 ? n : 0), '\0');
-    if (n > 0) WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), s.data(), n, nullptr, nullptr);
-    return s;
-}
+using win::fileExists;  // src/hip/win_text.h (arch025-N6, lane 1 leg 11)
+using win::narrowUtf8;
 
 std::wstring modulePath(HMODULE h) {
     std::wstring p(1024, L'\0');
@@ -76,11 +73,6 @@ std::string fileVersion(HMODULE h) {
                            LOWORD(fi.dwFileVersionLS));
     }
     return {};
-}
-
-bool fileExists(const std::wstring& p) {
-    const DWORD a = GetFileAttributesW(p.c_str());
-    return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY) == 0;
 }
 
 std::wstring searchPath(const std::wstring& dll) {

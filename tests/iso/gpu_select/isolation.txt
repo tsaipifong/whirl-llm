@@ -11,6 +11,7 @@ mutsym    now
 src       src/common/gpu_select.cpp
 # headers (include closure of the sources above)
 hdr       include/whirl/gpu_select.h
+hdr       include/whirl/small_helpers.h
 # test program
 testsrc   tests/unit/gpu_select_tests.cpp
 testhdr   tests/test_check.h

@@ -12,10 +12,12 @@ mutsym    now
 src       src/config/env_snapshot.cpp
 # declared dependency sources
 src       src/platform/env_win.cpp
+src       src/config/run_settings.cpp
 # headers (include closure of the sources above)
 hdr       src/config/env_get.h
 hdr       src/config/env_snapshot.h
 hdr       src/platform/env.h
+hdr       src/config/run_settings.h
 # test program
 testsrc   tests/iso/env_snapshot/env_snapshot_tests.cpp
 testhdr   tests/iso/iso_test.h

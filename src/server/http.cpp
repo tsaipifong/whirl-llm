@@ -7,6 +7,7 @@
 
 #include "log.h"
 #include "whirl/common.h"
+#include "whirl/small_helpers.h"  // lowerAscii (arch025-N6, lane 1 leg 11)
 #include "platform/net.h"
 #include "whirl/version.h"
 
@@ -798,16 +799,10 @@ void handleConn(const ConnCtx& cx, net::Socket s) {
 
 std::once_flag g_net_once;
 
-std::string lower(std::string_view s) {
-    std::string r(s);
-    for (char& c : r) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    return r;
-}
-
 }  // namespace
 
 bool isLoopbackOrigin(std::string_view origin) {
-    const std::string o = lower(origin);
+    const std::string o = lowerAscii(origin);
     std::string_view v = o;
     if (v.starts_with("http://")) v.remove_prefix(7);
     else if (v.starts_with("https://")) v.remove_prefix(8);
@@ -831,7 +826,7 @@ bool hostAllowed(std::string_view host_in, const std::vector<std::string>& extra
     if (host_in.empty()) return true;
     for (const std::string& x : extra)
         if (x == "*") return true;
-    const std::string h = lower(host_in);
+    const std::string h = lowerAscii(host_in);
     std::string_view name = h, port;
     if (name.starts_with("[")) {
         const std::size_t e = name.find(']');
@@ -850,7 +845,7 @@ bool hostAllowed(std::string_view host_in, const std::vector<std::string>& extra
     if (name.ends_with(".")) name.remove_suffix(1);  // "localhost." is the same name
     if (name.empty()) return false;
     if (name == "localhost" || name == "127.0.0.1" || name == "[::1]") return true;
-    std::string bound = lower(bound_in);
+    std::string bound = lowerAscii(bound_in);
     if (bound.find(':') != std::string::npos && !bound.starts_with("[")) bound = "[" + bound + "]";
     if (name == bound) return true;
     if (bound == "0.0.0.0" || bound == "[::]") {
@@ -867,7 +862,7 @@ bool hostAllowed(std::string_view host_in, const std::vector<std::string>& extra
     for (const std::string& x : extra) {
         std::string_view xv = x;
         while (!xv.empty() && xv.back() == '.') xv.remove_suffix(1);
-        if (lower(xv) == name) return true;
+        if (lowerAscii(xv) == name) return true;
     }
     return false;
 }
@@ -881,11 +876,11 @@ std::string corsHeaders(std::string_view origin, const std::vector<std::string>&
         if (static_cast<unsigned char>(c) < 0x21 || static_cast<unsigned char>(c) > 0x7e) return {};
     bool ok = isLoopbackOrigin(origin);
     if (!ok) {
-        const std::string lo = lower(origin);
+        const std::string lo = lowerAscii(origin);
         for (const std::string& x : extra) {
             std::string_view xv = x;
             while (!xv.empty() && xv.back() == '/') xv.remove_suffix(1);
-            if (lower(xv) == lo) {
+            if (lowerAscii(xv) == lo) {
                 ok = true;
                 break;
             }

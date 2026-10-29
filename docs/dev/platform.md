@@ -56,7 +56,7 @@ code, ADR-0004 #5), `src/release/dll_deps.cpp` (the DLL dependency diagnosis), a
 ## fs (PL2)
 
 `platform/fs.h` has one function per Win32 / CRT file call (`open` = CreateFileW, `writeAt` / `readAt` = WriteFile /
-ReadFile with an offset-only OVERLAPPED, `readAsync` / `overlappedResult` / `createEvent` / `prepare` for the SSD
+ReadFile with an offset-only OVERLAPPED, `readAsync` / `overlappedResult` / `prepare` (the event: `proc::createEvent`) for the SSD
 restore's QD-4 overlapped reads, `flush`, `remove`, `setSparse`, `seek` / `setEndOfFile`, file times, attributes,
 `forEachMatch` = FindFirstFileW / FindNextFileW / FindClose, the read-only mapping of `MappedFile`, `openStdio` =
 _wfopen, `utf8ToWideStrict`). A file handle is `fs::Handle` (the bits of a HANDLE as `void*`). The CreateFileW
