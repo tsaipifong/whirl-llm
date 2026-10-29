@@ -4,6 +4,7 @@
 // Written for WHIRL.
 
 #include "release/dll_deps.h"
+#include "whirl/small_helpers.h"  // lowerAscii (arch025-N6, lane 1 leg 11)
 
 #include <algorithm>
 #include <cstdint>
@@ -17,6 +18,8 @@
 #endif
 #include <windows.h>
 
+#include "hip/win_text.h"  // narrowUtf8 / fileExists (arch025-N6, lane 1 leg 11)
+
 static_assert(ERROR_MOD_NOT_FOUND == whirl::app::dlldeps::k_error_mod_not_found);
 static_assert(ERROR_PROC_NOT_FOUND == whirl::app::dlldeps::k_error_proc_not_found);
 
@@ -24,24 +27,13 @@ namespace whirl::app::dlldeps {
 
 namespace {
 
-std::string narrowUtf8(const std::wstring& w) {
-    if (w.empty()) return {};
-    const int n = WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), nullptr, 0, nullptr, nullptr);
-    std::string s(static_cast<std::size_t>(n > 0 ? n : 0), '\0');
-    if (n > 0) WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), s.data(), n, nullptr, nullptr);
-    return s;
-}
+using hip::win::fileExists;  // src/hip/win_text.h (arch025-N6, lane 1 leg 11)
+using hip::win::narrowUtf8;
 
 std::wstring widenAscii(const std::string& s) { return std::wstring(s.begin(), s.end()); }
 
-std::string lower(std::string s) {
-    for (char& c : s)
-        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
-    return s;
-}
-
 bool isApiSet(const std::string& dll) {
-    const std::string l = lower(dll);
+    const std::string l = lowerAscii(dll);
     return l.rfind("api-ms-", 0) == 0 || l.rfind("ext-ms-", 0) == 0;
 }
 
@@ -53,9 +45,9 @@ bool rd(const std::vector<unsigned char>& b, std::size_t off, T& v) {
 }
 
 void addUnique(std::vector<std::string>& v, const std::string& s) {
-    const std::string l = lower(s);
+    const std::string l = lowerAscii(s);
     for (const std::string& x : v)
-        if (lower(x) == l) return;
+        if (lowerAscii(x) == l) return;
     v.push_back(s);
 }
 
@@ -189,7 +181,7 @@ std::string message126(const std::string& dll_name, const Diagnosis& d, const ch
                                 dll_name, at, list);
     bool kpack = false, vcrt = false;
     for (const std::string& m : d.missing) {
-        const std::string l = lower(m);
+        const std::string l = lowerAscii(m);
         if (l == "rocm_kpack.dll") kpack = true;
         if (l.rfind("vcruntime140", 0) == 0 || l.rfind("msvcp140", 0) == 0) vcrt = true;
     }
@@ -209,11 +201,6 @@ std::string message126(const std::string& dll_name, const Diagnosis& d, const ch
 }
 
 namespace {
-
-bool fileExists(const std::wstring& p) {
-    const DWORD a = GetFileAttributesW(p.c_str());
-    return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY) == 0;
-}
 
 std::wstring dirOf(const std::wstring& path) {
     const std::size_t k = path.find_last_of(L"\\/");
@@ -283,13 +270,13 @@ std::string messageMissingSymbol(const std::string& dll_name, const std::string&
 std::string message127(const std::string& dll_name, const Shadow127& s) {
     auto has = [&](const char* name) {
         for (const std::string& b : s.bundled)
-            if (lower(b) == name) return true;
+            if (lowerAscii(b) == name) return true;
         return false;
     };
     const bool kpack = has("rocm_kpack.dll");
     std::string vc_list;
     for (const std::string& b : s.bundled)
-        if (lower(b) != "rocm_kpack.dll") vc_list += (vc_list.empty() ? "" : ", ") + b;
+        if (lowerAscii(b) != "rocm_kpack.dll") vc_list += (vc_list.empty() ? "" : ", ") + b;
     const std::string dir = s.app_dir.empty() ? std::string("the WHIRL folder") : narrowUtf8(s.app_dir);
     const std::string at = s.found_at.empty() ? std::string() : " at " + narrowUtf8(s.found_at);
 

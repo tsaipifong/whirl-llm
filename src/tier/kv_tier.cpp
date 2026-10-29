@@ -2332,7 +2332,7 @@ void Tier::runJob(Job* j) {
             bool eof[read_qd] = {};
             bool ok = true;
             for (auto& h : evs) {
-                h = pfs::createEvent();
+                h = whirl::platform::proc::createEvent();  // the one CreateEventW (arch025-N6, lane 1 leg 11)
                 if (h == nullptr) ok = false;
             }
             const std::size_t n_lbs = j->lbs.size();

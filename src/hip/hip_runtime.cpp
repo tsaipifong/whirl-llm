@@ -8,6 +8,7 @@
 #include "whirl/hip.h"
 #include "whirl/vram_limit.h"
 #include "whirl/leak_count.h"
+#include "whirl/small_helpers.h"  // lowerAscii (arch025-N6, lane 1 leg 11)
 
 #include "hip_api.h"
 #include "alloc_log.h"
@@ -42,12 +43,6 @@ void check(hipError_t st, const char* op) {
 void* ptr(DevPtr p) { return reinterpret_cast<void*>(static_cast<std::uintptr_t>(p)); }
 hipStream_t strm(Stream s) { return static_cast<hipStream_t>(s); }
 hipEvent_t evt(Event e) { return static_cast<hipEvent_t>(e); }
-
-std::string lower(std::string_view s) {
-    std::string r(s);
-    for (auto& c : r) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    return r;
-}
 
 }  // namespace
 
@@ -103,11 +98,11 @@ int findDevice(std::string_view spec) {
         const int i = std::stoi(std::string(spec));
         return i < static_cast<int>(devs.size()) ? i : -1;
     }
-    const std::string s = lower(spec);
+    const std::string s = lowerAscii(spec);
     for (const auto& d : devs)
-        if (lower(d.gcn_arch).rfind(s, 0) == 0) return d.index;
+        if (lowerAscii(d.gcn_arch).rfind(s, 0) == 0) return d.index;
     for (const auto& d : devs)
-        if (lower(d.name).find(s) != std::string::npos) return d.index;
+        if (lowerAscii(d.name).find(s) != std::string::npos) return d.index;
     return -1;
 }
 

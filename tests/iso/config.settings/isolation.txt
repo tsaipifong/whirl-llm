@@ -13,6 +13,7 @@ src       src/platform/env_win.cpp
 # headers (include closure of the sources above)
 hdr       src/config/run_settings.h
 hdr       src/platform/env.h
+hdr       src/config/env_get.h
 # test program
 testsrc   tests/iso/config.settings/settings_tests.cpp
 testhdr   tests/iso/iso_test.h

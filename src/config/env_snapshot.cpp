@@ -1,32 +1,13 @@
-// EnvSnapshot (arch025 R-4 / N1) and envGet / envFlag: the model layer's reads of the process environment.
+// EnvSnapshot (arch025 R-4 / N1): the model layer's reads of the process environment. envGet / envFlag are
+// config.settings' (src/config/env_get.h, src/config/run_settings.cpp; arch025-N6, lane 1 leg 11).
 // SPDX-License-Identifier: Apache-2.0
 
 #include "config/env_snapshot.h"
 
 #include "platform/env.h"
-#include "config/env_get.h"  // envGet / envFlag declarations (were in whirl/model.h, arch025-lane2 D2.2)
+#include "config/env_get.h"  // envGet / envFlag (config.settings since arch025-N6, lane 1 leg 11)
 
 #include <string>
-
-namespace whirl {
-
-// (moved from src/model/config.cpp; arch025 PL1: the _dupenv_s read itself is platform::env::get)
-// bug-envpaths: UTF-8 of the wide value (platform::env::getUtf8), as LOCALAPPDATA since bug-lappdata. Several WHIRL_*
-// values are paths that the readers widen() (KV_SSD_DIR, DRAFT_MODEL, DRAFT_VOCAB, MMPROJ, CODE_OBJECT, the dump
-// files); the narrow read is the ANSI code page outside whirl.exe / whirl-server.exe (no UTF-8 manifest). Every other
-// value is ASCII, for which the bytes equal the narrow read's. PRIOR_ART progress\bug-envpaths.PRIOR_ART.md.
-std::optional<std::string> envGet(std::string_view name) {
-    const std::string key = std::string("WHIRL_") + std::string(name);
-    return platform::env::getUtf8(key);
-}
-
-bool envFlag(std::string_view name, bool def) {
-    auto v = envGet(name);
-    if (!v) return def;
-    return *v != "0";
-}
-
-}  // namespace whirl
 
 namespace whirl::config {
 

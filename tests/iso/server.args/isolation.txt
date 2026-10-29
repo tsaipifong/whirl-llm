@@ -22,6 +22,7 @@ hdr       include/whirl/model_types.h
 hdr       include/whirl/numerics.h
 hdr       src/platform/env.h
 hdr       src/server/server_args.h
+hdr       include/whirl/small_helpers.h
 # test program
 testsrc   tests/iso/server.args/server_args_tests.cpp
 testhdr   tests/iso/iso_test.h

@@ -9,6 +9,7 @@
 // (refsrc llama.cpp common/arg.cpp parse_device_list).
 
 #include "whirl/gpu_select.h"
+#include "whirl/small_helpers.h"  // lowerAscii (arch025-N6, lane 1 leg 11)
 
 #include <algorithm>
 #include <cctype>
@@ -19,12 +20,6 @@
 namespace whirl::gpusel {
 
 namespace {
-
-std::string lower(std::string_view s) {
-    std::string r(s);
-    for (char& c : r) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    return r;
-}
 
 std::string trim(std::string_view s) {
     std::size_t b = 0, e = s.size();
@@ -103,7 +98,7 @@ bool parsePci(std::string_view t, int& dom, int& bus, int& dev, int& fn) {
 
 std::vector<int> matchOne(const std::vector<GpuRecord>& gpus, const std::string& item) {
     const int n = static_cast<int>(gpus.size());
-    std::string key = lower(item);
+    std::string key = lowerAscii(item);
     // llama.cpp names its HIP devices ROCm0, ROCm1, ...; "HIP0" also accepted
     for (const char* pre : {"rocm", "hip"}) {
         const std::string p(pre);
@@ -118,7 +113,7 @@ std::vector<int> matchOne(const std::vector<GpuRecord>& gpus, const std::string&
             if (gpus[i].index == idx) return {i};
         // not an index here: a number can still be part of a name ("9070"), but only for a plain number
         bool named = false;
-        for (int i = 0; i < n && key == lower(item) && key.size() >= 3; ++i) named = named || lower(gpus[i].name).find(key) != std::string::npos;
+        for (int i = 0; i < n && key == lowerAscii(item) && key.size() >= 3; ++i) named = named || lowerAscii(gpus[i].name).find(key) != std::string::npos;
         if (!named) fail(gpus, std::format("--device {}: there is no GPU with that index", item));
     }
     std::vector<int> hits;
@@ -139,7 +134,7 @@ std::vector<int> matchOne(const std::vector<GpuRecord>& gpus, const std::string&
         const std::string want = key.substr(5);
         if (!want.empty())
             for (int i = 0; i < n; ++i)
-                if (!gpus[i].uuid.empty() && lower(gpus[i].uuid).rfind(want, 0) == 0) hits.push_back(i);
+                if (!gpus[i].uuid.empty() && lowerAscii(gpus[i].uuid).rfind(want, 0) == 0) hits.push_back(i);
     } else if (key == "igpu") {
         for (int i = 0; i < n; ++i)
             if (gpus[i].integrated) hits.push_back(i);
@@ -149,7 +144,7 @@ std::vector<int> matchOne(const std::vector<GpuRecord>& gpus, const std::string&
         const bool arch_key = key == "strix" || key.rfind("gfx", 0) == 0;
         const std::string a = key == "strix" ? std::string("gfx1151") : key;
         for (int i = 0; i < n; ++i) {
-            const bool m = arch_key ? lower(gpus[i].arch).rfind(a, 0) == 0 : lower(gpus[i].name).find(key) != std::string::npos;
+            const bool m = arch_key ? lowerAscii(gpus[i].arch).rfind(a, 0) == 0 : lowerAscii(gpus[i].name).find(key) != std::string::npos;
             if (m) hits.push_back(i);
         }
     }
@@ -233,7 +228,7 @@ std::string pciIdLong(const std::vector<GpuRecord>&, const GpuRecord& r) {
 }
 
 std::string lockName(const GpuRecord& r) {
-    if (!r.uuid.empty()) return "Local\\whirl-gpu-uuid-" + lower(r.uuid);
+    if (!r.uuid.empty()) return "Local\\whirl-gpu-uuid-" + lowerAscii(r.uuid);
     return std::format("Local\\whirl-gpu-pci-{}-{}-{}{}", r.pci_bus, r.pci_device, r.pci_function,
                        r.pci_domain ? std::format("-d{}", r.pci_domain) : std::string());
 }
@@ -314,7 +309,7 @@ std::string noGpuText(const std::function<const char*(const char*)>& getenv_fn) 
 bool sameGpu(const GpuRecord& a, const GpuRecord& b) {
     if (a.pci_domain != b.pci_domain || a.pci_bus != b.pci_bus || a.pci_device != b.pci_device || a.pci_function != b.pci_function)
         return false;
-    if (!a.uuid.empty() && !b.uuid.empty() && lower(a.uuid) != lower(b.uuid)) return false;
+    if (!a.uuid.empty() && !b.uuid.empty() && lowerAscii(a.uuid) != lowerAscii(b.uuid)) return false;
     if (!a.luid.empty() && !b.luid.empty() && a.luid != b.luid) return false;
     return a.name == b.name && a.arch == b.arch;
 }

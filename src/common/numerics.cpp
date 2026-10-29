@@ -4,6 +4,7 @@
 #include "whirl/numerics.h"
 
 #include "whirl/dump.h"
+#include "whirl/small_helpers.h"  // lowerAscii (arch025-N6, lane 1 leg 11)
 
 #include <algorithm>
 #include <cstdlib>
@@ -36,13 +37,6 @@ constexpr std::array<ItemInfo, n_items> k_items = {{
 constexpr const char* k_q8dec = "q8dec (int8 activations in the decode / verify GEMV, as llama.cpp's q8_1)";
 constexpr const char* k_f16dec = "f16 decode / verify activations into the f16 GEMM, f32 accumulation (no int8)";
 
-std::string lower(std::string_view s) {
-    std::string o(s);
-    for (char& c : o)
-        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
-    return o;
-}
-
 std::string trim(std::string_view s) {
     while (!s.empty() && (s.front() == ' ' || s.front() == '\t')) s.remove_prefix(1);
     while (!s.empty() && (s.back() == ' ' || s.back() == '\t')) s.remove_suffix(1);
@@ -55,7 +49,7 @@ std::uint32_t parseItems(std::string_view list) {
     while (p <= list.size()) {
         std::size_t e = list.find(',', p);
         if (e == std::string_view::npos) e = list.size();
-        const std::string t = lower(trim(list.substr(p, e - p)));
+        const std::string t = lowerAscii(trim(list.substr(p, e - p)));
         if (!t.empty()) {
             if (t == "all") m |= balance_items | fast_only_items;
             else if (t == "balance" || t == "balanced") m |= balance_items;
@@ -117,7 +111,7 @@ Request parseMode(std::string_view spec, std::string source) {
         name = s.substr(0, c);
         items = s.substr(c + 1);
     }
-    name = lower(trim(name));
+    name = lowerAscii(trim(name));
     Request r;
     r.source = std::move(source);
     if (name == "precise") r.mode = Mode::precise;

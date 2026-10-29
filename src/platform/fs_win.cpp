@@ -253,8 +253,6 @@ void forEachMatch(const std::wstring& pattern, const std::function<void(const wc
     }
 }
 
-Handle createEvent() { return CreateEventW(nullptr, TRUE, FALSE, nullptr); }
-
 bool resetEvent(Handle ev) { return ResetEvent(hh(ev)) != 0; }
 
 void prepare(Overlapped& ov, std::uint64_t off, Handle ev) {

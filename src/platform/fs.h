@@ -99,7 +99,8 @@ void forEachMatch(const std::wstring& pattern, const std::function<void(const wc
 struct Overlapped {
     alignas(8) unsigned char raw[32];
 };
-Handle createEvent();          // CreateEventW(nullptr, manual reset, not signaled, nullptr); nullptr on failure
+// the event of an overlapped read: platform::proc::createEvent (manual reset, not signaled; one definition since
+// arch025-N6 lane 1 leg 11, it was written in fs_win.cpp and proc_win.cpp)
 bool resetEvent(Handle ev);    // ResetEvent
 void prepare(Overlapped& ov, std::uint64_t off, Handle ev);  // zeroed, offset, hEvent
 // ReadFile(h, buf, n, nullptr, &ov); false: see lastError() (kErrIoPending = in flight). FakeFs: short read.
