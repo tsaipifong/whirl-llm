@@ -20,6 +20,7 @@
 
 #include "whirl/vram_limit.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -268,6 +269,14 @@ std::uint32_t defaultPoolTokens(std::uint64_t avail, std::uint64_t per_tok, std:
 // The smallest pool the server starts with, and the refusal text below it ("" = it starts).
 inline constexpr std::uint32_t pool_min_tokens = 4096;
 std::string poolRefusal(std::uint32_t pool_tokens);
+// The KV pool planPool allocates: the fit's pool (WHIRL_KV not set), else the requested pool (-c / the UMA default), else
+// def() (startfit::defaultPoolTokens: what the usable VRAM holds), which is computed only then (leg 10 part C).
+template <class Def>
+std::uint32_t poolTokens(std::optional<std::uint32_t> fit_pool, std::optional<std::uint32_t> pool_req, Def&& def) {
+    if (fit_pool) return *fit_pool;
+    if (pool_req) return *pool_req;
+    return def();
+}
 // A second long request the pool should hold besides one full request (--parallel > 1).
 inline constexpr std::uint32_t floor_second_ctx = 65536;
 // The warning when the pool holds less than one full request plus a second one of up to floor_second_ctx tokens ("" =
@@ -278,6 +287,71 @@ std::string poolFloorWarn(std::uint32_t pool_now, std::uint32_t slot_ctx, std::u
 std::optional<std::string> targetNotReached(bool parallel_given, std::uint32_t ctx_eff, std::uint64_t target_ctx, std::uint32_t parallel);
 // The note /health shows for the startup adjustments of the context (-c / --ctx-per-slot); "" when none.
 std::string startupNote(const std::vector<std::string>& adjusted);
+
+// ---- leg 10 (arch025-lane1; were ServerRun::planPool / reportPool / runServer and buildModel / makeEngine rules, pinned
+// against verbatim copies of the c1ca7ce server_main.cpp in tests/iso/server.kv_fit) ---------------------------------
+// The explicit flags serverPoolFit gets: -c / --ctx-per-slot count as explicit (refused when they do not fit) only on the
+// integrated GPU (its carve-out rule); on a discrete GPU they are lowered instead (v0.2.2.1 adjusted: entries).
+struct PoolFitExplicit {
+    bool pool = false;
+    bool slot = false;
+};
+PoolFitExplicit poolFitExplicit(bool uma, bool ctx_given, bool ctx_per_slot_given);
+// After serverPoolFit (fit_pool / fit_slot_ctx; fit_msg = it has a message): the adjusted entries (discrete GPU, an
+// explicit -c / --ctx-per-slot the fit lowered) and whether the fit's message is logged as a warning (only when nothing
+// was adjusted).
+struct PoolAdjust {
+    std::optional<std::string> ctx;   // "-c <asked> -> <pool>" (its reason: the caller's fit text)
+    std::optional<std::string> slot;  // "--ctx-per-slot <asked> -> <fit>"
+    std::string slot_why;             // the reason of `slot`
+    bool warn = false;
+};
+PoolAdjust poolAdjust(bool uma, std::optional<std::uint32_t> ctx, std::optional<std::uint32_t> ctx_per_slot, std::uint32_t slot_ctx,
+                      std::uint32_t fit_pool, std::uint32_t fit_slot_ctx, bool fit_msg);
+// The "prefix cache: tail checkpoint ..." line, the log mirror of the engine's TAIL-CK rule (EngineOptions::tail_ck,
+// tail_ck_slots passed in); warn = a warning (the debug override WHIRL_TAIL_CK=0).
+struct TailCkLine {
+    bool warn = false;
+    std::string text;
+};
+TailCkLine tailCkLine(bool tail_ck, std::size_t n_ck, std::size_t tail_ck_slots, std::uint32_t tail_ck_min, double ck_mib);
+// Shared prefix checkpoints (system messages / common prefixes): none without slot checkpoints or with the prefix cache
+// off, else planned() (WHIRL_SYS_CKPTS at load, the fit's plan at the engine). planned is called only then, so the env
+// read happens exactly when it did. One rule for buildModel and makeEngine.
+template <class F>
+std::uint32_t sharedCkpts(std::size_t n_ck, bool no_pc, F&& planned) {
+    return (n_ck == 0 || no_pc) ? 0 : planned();
+}
+// The memory governor (v0.2.2.2): on with WDDM numbers on a discrete GPU, the budget rule in use (not
+// WHIRL_POOL_RESERVE_MB, whose pool is never resized) and governor_env() (WHIRL_GOVERNOR, default on), which is called
+// only when the rest holds (the env read order).
+template <class F>
+bool governorOn(bool wddm_ok, bool uma, bool reserve_explicit, F&& governor_env) {
+    return wddm_ok && !uma && !reserve_explicit && governor_env();
+}
+// The smallest pool the governor shrinks to: pool_min_tokens, or the startup pool when that is smaller.
+std::uint32_t governorPoolMin(std::uint32_t pool_start);
+// Why the governor is off, for the "memory governor: off (...)" line, when governorOn was false; nullopt = no line
+// (integrated GPU / no WDDM numbers).
+std::optional<std::string> governorOffWhy(bool wddm_ok, bool uma, bool reserve_explicit);
+
+// ---- leg 10 part B (arch025-lane1: rules a grep of server_main.cpp found beyond HANDOFF section 49) ------------------
+// The KV pool (tokens, smallest format) below which startup lowers the prefill batch / checkpoints; the per-request
+// target the startup fit and the "target not reached" entry aim for: the context per request, at most that.
+inline constexpr std::uint32_t vram_tight_pool = 16384;
+std::uint32_t targetCtx(std::uint32_t slot_ctx);
+// The pool the load fit must keep (vram::FitInput::pool_min_tokens): the requested pool, else targetCtx.
+std::uint32_t fitPoolMin(std::optional<std::uint32_t> pool_req, std::uint32_t slot_ctx);
+// The integrated GPU's need (hip::UmaNeed): the context the load cannot do without (-c, else one request) and the pool
+// wanted (the requested pool, else one request).
+struct UmaTokens {
+    std::uint32_t min_tokens = 0;
+    std::uint32_t want_tokens = 0;
+};
+UmaTokens umaTokens(std::optional<std::uint32_t> ctx, std::optional<std::uint32_t> pool_req, std::uint32_t slot_ctx);
+// The context per request after sizing: the slot context, at most the pool (the caller picks the width of pool_tokens,
+// as before: 64-bit in the log lines, the 32-bit product for /health).
+std::uint64_t ctxPerRequest(std::uint64_t slot_ctx, std::uint64_t pool_tokens);
 
 // The "startup" object of GET /props and GET /health (effective values after the startup fit).
 struct StartupInfo {

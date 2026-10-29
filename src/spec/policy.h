@@ -126,6 +126,12 @@ struct DflashMtpOnly {
     std::string note;
 };
 DflashMtpOnly dflashMtpOnly(std::uint32_t slot_drafts, bool draft_head_env);
+// The n-gram draft cap the startup line prints (the static part of spec::rules::ngramDraftCap): WHIRL_NGRAM_MAX when set
+// (> 0), at most max_ng_drafts (arch025-lane1 leg 10: was ServerRun::reportPool's).
+std::uint32_t ngramDraftsShown(std::uint32_t ngram_max);
+// The MTP draft count given by the user (arch025-lane1 leg 10 part B: was buildModel's): --mtp-drafts, else WHIRL_MTP_DRAFTS
+// (nullopt: neither; the caller takes mtpDefaults' count).
+std::optional<std::uint32_t> mtpDraftsGiven(const std::optional<std::uint32_t>& cli, const std::optional<std::uint32_t>& env);
 
 struct DraftAccept {
     std::array<float, max_ng_drafts> alpha;

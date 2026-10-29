@@ -188,6 +188,12 @@ DflashMtpOnly dflashMtpOnly(std::uint32_t slot_drafts, bool draft_head_env) {
     return r;
 }
 
+std::uint32_t ngramDraftsShown(std::uint32_t ngram_max) { return ngram_max > 0 ? std::min(ngram_max, max_ng_drafts) : max_ng_drafts; }
+
+std::optional<std::uint32_t> mtpDraftsGiven(const std::optional<std::uint32_t>& cli, const std::optional<std::uint32_t>& env) {
+    return cli ? cli : env;
+}
+
 BatchDrafts batchDraftsFrom(BatchDrafts batch_drafts, const std::string& s) {
     std::size_t k = 1, p = 0;
     while (p < s.size() && k <= gdn_max_seg) {

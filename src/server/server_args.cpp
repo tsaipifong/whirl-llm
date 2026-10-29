@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cctype>
 #include <exception>
+#include <format>
 #include <limits>
 
 namespace whirl::server {
@@ -243,6 +244,16 @@ std::string kvSsdMode(const std::optional<std::string>& cli, const std::optional
     std::string ssd_mode = cli.value_or(env.value_or("shutdown"));
     if (ssd_mode != "always" && ssd_mode != "off") ssd_mode = "shutdown";
     return ssd_mode;
+}
+
+TierStart tierStart(bool tier_made, std::uint64_t page_row, std::uint64_t per_tok, std::uint64_t kv_ram_mb) {
+    if (tier_made && page_row == per_tok) return TierStart::on;
+    if (kv_ram_mb > 0 && tier_made && page_row != per_tok) return TierStart::layout_unknown;
+    return TierStart::off;
+}
+
+std::string tierLayoutWarn(std::uint64_t page_row, std::uint64_t per_tok) {
+    return std::format("kv tier: KV layout not understood ({} vs {} bytes per token); host tiers off", page_row, per_tok);
 }
 
 }  // namespace whirl::server

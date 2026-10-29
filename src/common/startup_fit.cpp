@@ -376,4 +376,65 @@ std::string startupNote(const std::vector<std::string>& adjusted) {
     return note.empty() ? std::string() : "adjusted at startup to fit the GPU memory: " + note;
 }
 
+PoolFitExplicit poolFitExplicit(bool uma, bool ctx_given, bool ctx_per_slot_given) {
+    const bool fit_explicit = !uma;
+    PoolFitExplicit r;
+    r.pool = ctx_given && !fit_explicit;
+    r.slot = ctx_per_slot_given && !fit_explicit;
+    return r;
+}
+
+PoolAdjust poolAdjust(bool uma, std::optional<std::uint32_t> ctx, std::optional<std::uint32_t> ctx_per_slot, std::uint32_t slot_ctx,
+                      std::uint32_t fit_pool, std::uint32_t fit_slot_ctx, bool fit_msg) {
+    PoolAdjust r;
+    const bool fit_explicit = !uma;
+    const bool adj_c = fit_explicit && ctx && fit_pool < *ctx;
+    const bool adj_s = fit_explicit && ctx_per_slot && fit_slot_ctx < slot_ctx;
+    if (adj_c) r.ctx = std::format("-c {} -> {}", *ctx, fit_pool);
+    if (adj_s) {
+        r.slot = std::format("--ctx-per-slot {} -> {}", slot_ctx, fit_slot_ctx);
+        r.slot_why = std::format("the KV pool holds {} tokens", fit_pool);
+    }
+    r.warn = fit_msg && !(adj_c || adj_s);
+    return r;
+}
+
+TailCkLine tailCkLine(bool tail_ck, std::size_t n_ck, std::size_t tail_ck_slots, std::uint32_t tail_ck_min, double ck_mib) {
+    TailCkLine r;
+    if (!tail_ck) {
+        r.warn = true;
+        r.text = "prefix cache: tail checkpoint off (WHIRL_TAIL_CK=0, debug override): a second question about the same long "
+                 "document re-prefills it";
+    } else if (n_ck >= tail_ck_slots) {
+        r.text = std::format("prefix cache: tail checkpoint on: prompts >= {} tokens keep one of the {} per-slot checkpoints ({:.1f} MiB) at the "
+                             "start of their last chunk, so another question about the same document resumes there",
+                             tail_ck_min, n_ck, ck_mib);
+    } else {
+        r.text = std::format("prefix cache: tail checkpoint off ({} checkpoint(s) per slot, needs {}; WHIRL_SERVE_CKPTS={} turns it on at "
+                             "+{:.1f} MiB VRAM per slot each)",
+                             n_ck, tail_ck_slots, tail_ck_slots, ck_mib);
+    }
+    return r;
+}
+
+std::uint32_t governorPoolMin(std::uint32_t pool_start) { return std::min<std::uint32_t>(pool_start, pool_min_tokens); }
+
+std::optional<std::string> governorOffWhy(bool wddm_ok, bool uma, bool reserve_explicit) {
+    if (!(wddm_ok && !uma)) return std::nullopt;
+    return std::string(reserve_explicit ? "WHIRL_POOL_RESERVE_MB is set: the pool is never resized" : "WHIRL_GOVERNOR=0");
+}
+
+std::uint32_t targetCtx(std::uint32_t slot_ctx) { return std::min<std::uint32_t>(slot_ctx, vram_tight_pool); }
+
+std::uint32_t fitPoolMin(std::optional<std::uint32_t> pool_req, std::uint32_t slot_ctx) { return pool_req ? *pool_req : targetCtx(slot_ctx); }
+
+UmaTokens umaTokens(std::optional<std::uint32_t> ctx, std::optional<std::uint32_t> pool_req, std::uint32_t slot_ctx) {
+    UmaTokens r;
+    r.min_tokens = ctx ? *ctx : slot_ctx;
+    r.want_tokens = pool_req ? *pool_req : slot_ctx;
+    return r;
+}
+
+std::uint64_t ctxPerRequest(std::uint64_t slot_ctx, std::uint64_t pool_tokens) { return std::min(slot_ctx, pool_tokens); }
+
 }  // namespace whirl::startfit
