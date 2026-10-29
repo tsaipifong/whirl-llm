@@ -101,6 +101,117 @@ case("Q4 pass: safety tools -> cpu_tsa", steps("tools/safety/tsa/tsa_check.py", 
 case("Q4 block: unit test line without a lock token -> no cpu_tsa",
      steps("tests/unit/unit_tests.cpp", line_where("tests/unit/unit_tests.cpp", False)), ["cpu_analyze"], ["cpu_tsa"])
 case("Q4 block: docs -> no cpu_tsa", steps("docs/building.md", 1), [], ["cpu_tsa"])
+# arch025-n12 (PLAN N12, impact.py fall-through): a file the build compiles INTO the exes that is not C / C++ source (a
+# bin2c input, res/*.rc.in / manifest, the build-time generators, CMake-configured .in templates) has an owner module or
+# is build-wide (impact.BUILD_INPUTS). Before N12 a change to data/draft_vocab/subset_64k.bin, res/* or tools/bin2c
+# selected no GPU step and module gate "none (no product code)".
+def report(path, line=None):
+    ch = {path: {"old_path": path, "new": [line] if line else [], "old": []}}
+    r = impact.analyze(ch, m, None, "HEAD")
+    full_reps.append((f"{path}:{line}", r))
+    return r
+
+
+def gate_of(r):
+    return r.get("module_gate") or ""
+
+
+GPU_ALL = impact.expand_steps([s.replace("<model>", md) for s in m["release_gate_steps"] if not s.startswith("cpu_")
+                               for md in ("swift", "moe")])
+r = report("data/draft_vocab/subset_64k.bin", 1)
+case("N12 pass: draft vocab .bin (bin2c -> whirl_model) -> MTP paths + model.core (contract: full gate)",
+     set(r["paths"]) | set(r["modules"]) | ({"full"} if gate_of(r).startswith("full gate") else set())
+     | set(r.get("map_cpu_tests", {}).get("whirl-model-tests", [])),
+     ["cli.mtp", "server.mtp", "model.core", "full", "testDraftVocab"])
+r = report("res/whirl.rc.in", 12)
+case("N12 pass: res/whirl.rc.in (VERSIONINFO of whirl.exe / whirl-server.exe) -> startup + module release (pkg_smoke)",
+     set(r["paths"]) | set(r["modules"]) | ({"mod-release"} if gate_of(r).startswith("release_gate.ps1 -Module release") else set()),
+     ["startup", "release", "mod-release"])
+r = report("tools/gen-icon/main.cpp", 20)
+case("N12 pass: tools/gen-icon (icon rendered at build time into the .rc) -> startup + module release",
+     set(r["paths"]) | set(r["modules"]), ["startup", "release"])
+r = report("res/whirl.manifest", 24)
+case("N12 pass: res/whirl.manifest (process-wide UTF-8 code page / long paths / asInvoker) -> build-wide: full gate + every GPU step",
+     ({"full"} if gate_of(r).startswith("full gate") else set()) | ({"all-gpu"} if GPU_ALL <= impact.expand_steps(r["map_steps"]) else set())
+     | set(r["paths"]), ["full", "all-gpu", "startup"])
+r = report("tools/bin2c/bin2c.cpp", 20)
+case("N12 pass: tools/bin2c (writes every embedded code object / vision / vocab array) -> build-wide: full gate + every GPU step",
+     ({"full"} if gate_of(r).startswith("full gate") else set()) | ({"all-gpu"} if GPU_ALL <= impact.expand_steps(r["map_steps"]) else set())
+     | set(r["paths"]), ["full", "all-gpu", "build"])
+r = report("tools/gen-unicode-tables/main.cpp", 20)
+case("N12 pass: tools/gen-unicode-tables (not run by the build; its output unicode_tables.inc is checked in) -> regenerate note, no GPU step",
+     {k.split(" ")[0] for k in r["extra"]} | {s for s in r["map_steps"] if not s.startswith("cpu_")}, ["regenerate"],
+     sorted(GPU_ALL))
+r = report("src/release/version.h.in", 8)
+case("N12 pass: src/release/version.h.in (-> generated whirl/version.h: release.cpp, server/http.cpp) -> startup + http, callers protocol",
+     set(r["paths"]) | {k for v in (r.get("module_callers") or {}).values() for k in v} | set(r["modules"]),
+     ["startup", "http", "release", "protocol"])
+r = report("src/hip/embedded_objects.cpp.in", 13)
+case("N12 pass: src/hip/embedded_objects.cpp.in (configure_file -> whirl_hip) is in module hip.runtime, not 'in no module'",
+     set(r["modules"]) | ({"no-module"} if "in no module" in gate_of(r) else set()), ["hip.runtime"], ["no-module"])
+r = report("docs/building.md", 1)
+case("N12 block: docs still select no module and no GPU step",
+     set(r["modules"]) | {s for s in r["map_steps"] if not s.startswith("cpu_")}, [], ["model.core", "release", "golden_swift"])
+r = report("src/tokenizer/unicode_tables.inc", 20)
+case("N12 block: unicode_tables.inc keeps its source rule (tokenizer path, module tokenizer, not build-wide)",
+     set(r["paths"]) | set(r["modules"]) | ({"full"} if gate_of(r).startswith("full gate") else set()), ["tokenizer"], ["full", "build"])
+
+
+def cmake_inputs(root):
+    """every repo path CMakeLists.txt / cmake/*.cmake name (a path literal, ${CMAKE_SOURCE_DIR}/..., or a relative one)"""
+    import glob
+    import re as _re
+    pat = _re.compile(r"(?:\$\{(?:CMAKE_SOURCE_DIR|PROJECT_SOURCE_DIR|CMAKE_CURRENT_SOURCE_DIR)\}/|\$\{CMAKE_CURRENT_LIST_DIR\}/\.\./"
+                      r"|(?<![\w/$}.-]))((?:src|include|kernels|tools|tests|data|res|redist)/[A-Za-z0-9_./*+-]+)")
+    out = set()
+    for f in [os.path.join(root, "CMakeLists.txt")] + sorted(glob.glob(os.path.join(root, "cmake", "*.cmake"))):
+        for line in open(f, encoding="utf-8", errors="replace"):
+            for mt in pat.finditer(line.split("#", 1)[0]):
+                out.add(mt.group(1).rstrip(")\""))
+    return sorted(out)
+
+
+# census: every path the build names that is not C / C++ / HIP source of src / include / kernels / tests (those have
+# the source rules, the census and cmake_modules_check), and not a test folder / manifest (tests/* rule), needs a
+# BUILD_INPUTS entry. A new data / res / generator input added to CMake without a rule fails here (the llama.cpp
+# '**/.cmake' path-filter lesson, progress\arch025-n12.PRIOR_ART.md).
+bi = getattr(impact, "build_input", lambda p: None)
+SRC_EXT = (".cpp", ".h", ".hip", ".inc", ".c", ".hpp")
+unruled = []
+for p in cmake_inputs(ROOT):
+    if p.startswith(("src/", "include/", "kernels/", "tests/")) and p.endswith(SRC_EXT):
+        continue
+    if p.startswith("tests/"):
+        continue  # test folders / isolation manifests: FILE_RULES tests/* and tests/*/isolation.txt
+    if p.startswith("tools/safety/"):
+        continue  # inputs of the C++ safety steps: modules.json safety.own
+    if bi(p) is None:
+        unruled.append(p)
+case("N12 census: every non-source path CMake names has a BUILD_INPUTS rule", set(unruled), [], unruled or ["x"])
+case("N12 census setup: the CMake scan finds the known inputs",
+     set(cmake_inputs(ROOT)), ["data/draft_vocab/subset_64k.bin", "res/whirl.rc.in", "res/whirl.manifest", "tools/bin2c/bin2c.cpp",
+                               "src/hip/embedded_objects.cpp.in", "src/release/version.h.in"])
+# every BUILD_INPUTS owner is a module, and agrees with modules.json where modules.json also covers the path
+mods_all = impact.load_modules() or {}
+bad_owner = []
+for e in getattr(impact, "BUILD_INPUTS", []):
+    own = e.get("owner")
+    if own is not None and own not in mods_all:
+        bad_owner.append(f"{e['glob']}: owner {own} is not a module")
+    mj = [n for n, d in mods_all.items() if any(impact.fnmatch.fnmatch(e["glob"], g) for g in d.get("paths", []))]
+    if mj and own not in mj:
+        bad_owner.append(f"{e['glob']}: owner {own}, modules.json says {mj}")
+    for u in e.get("users", []):
+        if not os.path.exists(os.path.join(ROOT, u)):
+            bad_owner.append(f"{e['glob']}: user {u} does not exist")
+case("N12 census: BUILD_INPUTS owners are modules and match modules.json; users exist",
+     set(bad_owner) | ({"table"} if getattr(impact, "BUILD_INPUTS", None) else set()), ["table"], bad_owner)
+# .in templates under src / include / kernels are product files: census_check counts them (each in one module)
+sys.path.insert(0, os.path.join(ROOT, "tools", "gates"))
+import census_check  # noqa: E402
+ins = [f for f in census_check.product_files(ROOT) if f.endswith(".in")]
+case("N12 census: census_check.product_files lists the .in templates (embedded_objects.cpp.in, version.h.in)",
+     set(ins), ["src/hip/embedded_objects.cpp.in", "src/release/version.h.in"])
 # arch025-srctext (owner 2026-10-28 「98/103，沒選到的那5項，如果不耗什麼時，那乾脆都跑了吧?」): every CPU step and every
 # CPU test is in EVERY selection (docs, kernel file, test file, product function alike); only GPU steps are map-selected.
 cpu_steps, cpu_tests = impact.all_cpu(m)

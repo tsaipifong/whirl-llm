@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Census (arch025 D11 N2): every product file belongs to exactly one module of tools/gates/modules.json.
 
-Product files: src/, include/, kernels/ with a C / C++ / HIP extension. A file in no module fails, unless a glob in
+Product files: src/, include/, kernels/ with a C / C++ / HIP extension or .in (CMake-configured C++ templates, arch025-n12). A file in no module fails, unless a glob in
 tools/gates/census_pending.json lists it (files a lane is still registering; printed as WARN with the owner). A pending
 entry that matches no unregistered file is stale and fails, so the list only shrinks. --release fails while any pending
 entry is left (release_check: every product file in a module before a release).
@@ -17,7 +17,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
 TOPS = ("src", "include", "kernels")
-EXTS = (".cpp", ".h", ".hpp", ".hip", ".inc", ".c", ".cu", ".cuh")
+EXTS = (".cpp", ".h", ".hpp", ".hip", ".inc", ".c", ".cu", ".cuh", ".in")  # arch025-n12: .in = CMake-configured C++ templates
 
 
 def product_files(root):

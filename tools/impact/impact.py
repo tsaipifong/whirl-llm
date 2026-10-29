@@ -55,6 +55,66 @@ FILE_RULES = [
     ("cmake/*", ["build"], ["full build both archs", "release gate CPU steps"], "build"),
     ("build.bat", ["build"], ["full build"], "build"),
 ]
+# arch025-n12 (PLAN N12): files the build compiles INTO the exes that are not C / C++ source, and the build-time tools
+# that write such content. Before N12 they fell through to "no rule (not product code)" (data/, res/, tools/*) or were
+# scanned as C++ with no includer (the CMake-configured .in templates), so a change selected no GPU step and module gate
+# "none". Prior art (progress\arch025-n12.PRIOR_ART.md): Bazel hashes `data` deps into their rule and treats global
+# inputs as invalidators of everything; Nx `inputs` / `sharedGlobals`, Turborepo `inputs` / `globalDependencies`;
+# llama.cpp's CI gives the UI assets / shader sources to the job of the component that embeds them.
+#   glob      the input (fnmatch)
+#   owner     the module (tools/gates/modules.json) whose code embeds / reads it; None = build-wide (full gate and every
+#             GPU step): it feeds every exe / every embedded object, so no one module's tests cover it
+#   paths     product paths the input changes; via: map functions that read it (their paths / models / tests are added)
+#   users     files that consume the generated output (their modules are the owner's callers, like rdeps of a header)
+#   extra     re-runs to print; scan: True = also run the normal source rule on the file (CMake .in templates are C++)
+#   embedded  where it ends up (census; documentation)
+# impact_steps_test.py's N12 census fails when CMakeLists.txt / cmake/*.cmake name a non-source path no entry covers.
+BUILD_INPUTS = [
+    {"glob": "data/draft_vocab/*", "owner": "model.core", "paths": ["cli.mtp", "server.mtp"],
+     "via": ["src/model/draft_vocab_embed.cpp::embeddedDraftVocab64k"], "users": ["src/model/draft_vocab_embed.cpp"],
+     "extra": [], "embedded": "bin2c -> build/generated/draft_vocab_64k.cpp in whirl_model (whirl.exe, whirl-server.exe, model tests)",
+     "why": "default MTP draft-head vocabulary subset, read by embeddedDraftVocab64k"},
+    {"glob": "res/whirl.rc.in", "owner": "release", "paths": ["startup"], "via": [], "users": [],
+     "extra": ["pkg_smoke (VERSIONINFO / icon of whirl.exe and whirl-server.exe: file properties)"],
+     "embedded": "configure_file -> build/res/<target>.rc of whirl-cli / whirl-server (cmake/release.cmake whirl_add_resources)",
+     "why": "Windows resources (version info, icon) of the shipped exes"},
+    {"glob": "tools/gen-icon/*", "owner": "release", "paths": ["startup"], "via": [], "users": [],
+     "extra": ["pkg_smoke (VERSIONINFO / icon of whirl.exe and whirl-server.exe: file properties)"],
+     "embedded": "whirl-gen-icon runs at build time -> build/res/whirl.ico -> the .rc of whirl-cli / whirl-server",
+     "why": "build-time icon renderer"},
+    {"glob": "res/whirl.manifest", "owner": None, "paths": ["startup", "load"], "via": [], "users": [],
+     "extra": ["full build both archs", "pkg_smoke"],
+     "embedded": "linked into whirl-cli / whirl-server (cmake/release.cmake)",
+     "why": "process-wide settings of both shipped exes (UTF-8 active code page for every narrow path / env / console "
+            "call, longPathAware, asInvoker): no one module's tests cover them"},
+    {"glob": "tools/bin2c/*", "owner": None, "paths": ["build"], "via": [], "users": [],
+     "extra": ["full build both archs"],
+     "embedded": "whirl-bin2c runs at build time: whirl_kernels_<arch>.cpp, whirl_vision_<arch>.cpp, draft_vocab_64k.cpp",
+     "why": "writes every embedded code object / vision / vocabulary array of every exe"},
+    {"glob": "tools/gen-unicode-tables/*", "owner": None, "paths": [], "via": [], "users": [], "nobuild": True,
+     "extra": ["regenerate src/tokenizer/unicode_tables.inc with whirl-gen-unicode and diff it (a changed .inc is a tokenizer change)"],
+     "embedded": "not run by the build: whirl-gen-unicode's output src/tokenizer/unicode_tables.inc is checked in",
+     "why": "generator of a checked-in table; the exes change only when the .inc changes (its own source rule)"},
+    {"glob": "tools/whirl-tool/*", "owner": None, "paths": [], "via": [], "users": [], "nobuild": True, "scan": True,
+     "extra": [], "embedded": "repo tool exe whirl-tool (not shipped, tools/package_release.ps1)", "why": "dev tool; CPU all"},
+    {"glob": "tools/mem-hog/*", "owner": None, "paths": [], "via": [], "users": [], "nobuild": True, "scan": True,
+     "extra": [], "embedded": "test helper exe whirl-mem-hog (not shipped)", "why": "dev tool; CPU all"},
+    {"glob": "src/release/version.h.in", "owner": "release", "paths": ["startup", "http"], "via": [],
+     "users": ["src/release/release.cpp", "src/server/http.cpp"], "extra": [], "scan": True,
+     "embedded": "configure_file -> build/generated/whirl/version.h (release.cpp: --version / banner; server/http.cpp)",
+     "why": "version / arch strings of the generated header"},
+    {"glob": "src/hip/embedded_objects.cpp.in", "owner": "hip.runtime", "paths": ["load"], "via": [],
+     "users": ["src/hip/hip_runtime.cpp", "src/hip/gpu_restrict.cpp", "src/release/release.cpp"], "extra": [], "scan": True,
+     "embedded": "configure_file -> build/kernels/embedded_objects.cpp in whirl_hip (every GPU exe)",
+     "why": "table of the embedded code objects the module loader walks"},
+]
+
+
+def build_input(path):
+    """the BUILD_INPUTS entry of path, or None"""
+    return next((e for e in BUILD_INPUTS if fnmatch.fnmatch(path, e["glob"])), None)
+
+
 # identifiers on a changed declaration line that say nothing about who uses it
 DECL_NOISE = {"const", "constexpr", "static", "inline", "struct", "class", "enum", "public", "private", "protected", "virtual",
               "override", "void", "bool", "int", "unsigned", "char", "float", "double", "auto", "std", "uint8_t", "uint16_t",
@@ -122,6 +182,7 @@ def analyze(changes, m, new_rev, old_rev):
     for h in m["hip"].values():
         for u in h["host_users"]:
             dispatch_tests[u] |= set(h["tests"])
+    build_wide = []             # arch025-n12: BUILD_INPUTS entries with owner None (full gate, every GPU step)
     cmake_lists = {}            # arch025-modsel2: list-only CMake edits -> the source paths they name (module_gate)
     for path, ch in sorted(changes.items()):
         if any(fnmatch.fnmatch(path, g) for g in CMAKE_LISTS):
@@ -130,6 +191,31 @@ def analyze(changes, m, new_rev, old_rev):
                 cmake_lists[path] = lp
                 hits.append((path, f"CMake source-list edit only ({', '.join(lp[:4]) or 'comments / blank lines'}"
                                    f"{' ...' if len(lp) > 4 else ''}): counted as the module(s) of those sources"))
+                continue
+        bi = build_input(path)
+        if bi is not None:  # arch025-n12: non-source build input (BUILD_INPUTS)
+            for p in bi["paths"]:
+                paths[p].add(f"{path} ({bi['why']})")
+            for fid in bi["via"]:
+                d = F.get(fid)
+                if d is None:
+                    notes.append(f"{path}: reader {fid} not in the map: using the paths only")
+                    continue
+                for p in d["paths"]:
+                    paths[p].add(f"{path} (read by {d['name']})")
+                models |= set(d["models"])
+                tests |= set(d["tests"])
+            for x in bi["extra"]:
+                reruns[x].add(path)
+            if bi["owner"] is None and not bi.get("nobuild"):
+                build_wide.append(path)
+            if bi["paths"] or bi["via"]:
+                host_code = True
+                archs |= {"gfx1201", "gfx1151"}
+            kind = ("build-wide" if bi["owner"] is None and not bi.get("nobuild") else
+                    "not compiled into a shipped exe" if bi.get("nobuild") else f"owner {bi['owner']}")
+            hits.append((path, f"build input ({kind}): {bi['embedded']}"))
+            if not bi.get("scan"):
                 continue
         rule = next((r for r in FILE_RULES if fnmatch.fnmatch(path, r[0])), None)
         if rule and not path.endswith((".cpp", ".h", ".hip")) or (rule and path.startswith(("tests/", "tools/"))):
@@ -279,6 +365,14 @@ def analyze(changes, m, new_rev, old_rev):
     if not archs and paths:
         archs = {"gfx1201", "gfx1151"}
     rep = build_report(m, paths, models, archs, tests, reruns, notes, hits)
+    if build_wide:
+        # arch025-n12: a build-wide input reaches every exe: every GPU step of the map (the module gate says full gate)
+        gpu_all = {s.replace("<model>", md) for s in m.get("release_gate_steps", []) if not s.startswith(("cpu_", "dfl_"))
+                   for md in ("swift", "moe")}
+        rep["release_gate_steps"] = sorted(set(rep["release_gate_steps"]) | gpu_all)
+        rep["gpus"] = ["gfx1151", "gfx1201"]
+        rep["notes"].append(f"build-wide input(s) {', '.join(build_wide[:4])}: every GPU step, both GPUs (BUILD_INPUTS)")
+    rep["build_wide"] = build_wide
     pins = pins_files(changes, m)
     if pins:
         rep["release_gate_steps"] = sorted(set(rep["release_gate_steps"]) | {"cpu_pins"})
@@ -554,6 +648,7 @@ def module_gate(changes, mods=None, rep=None, m=None):
     def owner(path):
         return [n for n, d in mods.items() if any(fnmatch.fnmatch(path, g) for g in d.get("paths", []))]
 
+    input_callers = defaultdict(set)  # arch025-n12: owner module -> modules of the files that read its build input
     lists = {k: v for k, v in ((rep or {}).get("cmake_lists") or {}).items() if any(fnmatch.fnmatch(k, g) for g in CMAKE_LISTS)}
     renamed = {ch.get("old_path"): p for p, ch in changes.items() if isinstance(ch, dict) and ch.get("old_path") not in (None, p)}
     for path in sorted(changes):
@@ -568,6 +663,20 @@ def module_gate(changes, mods=None, rep=None, m=None):
                 if not ms:
                     loose.append(src)
                     why.append(f"{path} lists {src}, which is in no module")
+            continue
+        bi = build_input(path)
+        if bi is not None:  # arch025-n12: non-source build input: its owner module, or build-wide
+            if bi["owner"] is None:
+                if not bi.get("nobuild"):
+                    loose.append(path)
+                    why.append(f"{path} is build-wide ({bi['why']})")
+                continue
+            hit[bi["owner"]].append(path)
+            for u in bi.get("users", []):
+                input_callers[bi["owner"]] |= {k for k in owner(u) if k != bi["owner"]}
+                if not owner(u):
+                    loose.append(u)
+                    why.append(f"{u} reads {path} and is in no module")
             continue
         if any(fnmatch.fnmatch(path, g) for g in BUILD_WIDE):
             loose.append(path)
@@ -600,6 +709,8 @@ def module_gate(changes, mods=None, rep=None, m=None):
                         why.append(f"{x} includes {f} and is in no module")
         elif isinstance(c, list):
             callers[n] |= set(c)
+        if input_callers.get(n):
+            callers[n] |= input_callers[n]
     when = sorted({st for n in hit for f, sts in (mods[n].get("when") or {}).items() if f in changes for st in sts})
     full = [n for n in hit if mods[n].get("full")] + [k for n in callers for k in callers[n] if mods.get(k, {}).get("full")]
     direct = sorted(hit)
