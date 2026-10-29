@@ -1,0 +1,18 @@
+# ARCH-1 8.5 isolation check of platform.time (arch025-iso4): the clock layer built with its own test (tests/iso/platform.time/time_tests.cpp; no unit test
+# existed). winmm is the Windows platform library (cmake/platform.cmake links it), listed as a syslib line. Format: tests/sampling/isolation.txt.
+module    platform.time
+exe       whirl-iso-platform-time-tests
+mutate    src/platform/time_win.cpp
+mutsym    hip
+mutsym    log
+mutsym    now
+mutsym    engine
+syslib    winmm.lib
+# module sources
+src       src/platform/time_win.cpp
+# headers (include closure of the files above)
+hdr       src/platform/time.h
+# test program
+testsrc   tests/iso/platform.time/time_tests.cpp
+testhdr   tests/iso/iso_test.h
+testhdr   tests/test_check.h

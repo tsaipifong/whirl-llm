@@ -360,6 +360,41 @@ compile), and the product-flags compile of a mutant compiles the mutated header 
 (`<root>/_iso_mut_<module>_<case>/`, removed right after). `iso_check.py --mutants` first runs the script's own
 pure-Python selftest (`--selftest` alone runs only it; line `iso check selftest: N/N as expected`).
 
+Two more manifest kinds (arch025-iso4): `define NAME[=VALUE]` is a `/D` for the module's sources and test program (release:
+its only unit case is compiled under `WHIRL_TEST_DLL_DEPS=1`; also `WHIRL_ISO_NO_SOURCE_TREE` / `WHIRL_ISO_NO_SERVER`, which compile
+out the one test half that needs a source tree or an Engine, and `__HIP_PLATFORM_AMD__` as the product build defines it). A define
+reaches the module's product sources too, so iso_check.py refuses (setup error) a define name that a product file (not under
+`tests/`) of a `src` / `hdr` line reads, unless the product build defines it the same way (allow list: `__HIP_PLATFORM_AMD__`,
+`WHIRL_VISION_GFX1201`, `WHIRL_VISION_GFX1151`; arch025-iso4-fix): a product `#ifndef WHIRL_ISO_X` around a crossing can not hide it.
+`sdkinc hip` puts a copy of the HIP SDK's `include/hip` ALONE (`WHIRL_HIP_ROOT` / `HIP_PATH`, default `C:\Program Files\AMD\ROCm\7.2`;
+staged once per run into `<work>/_sdk/hip/include`, by cmake into `<build>/iso/_sdk/hip/include`) AFTER the staged tree, so the
+SDK can only supply `hip/*.h` (`hip/hip_runtime_api.h`, which `src/hip/hip_api.h` includes for its types) and no other ROCm library
+header (hipblas, hipblaslt, rocblas, rocprim, ... are C1083 like an undeclared WHIRL header; arch025-iso4-fix): the HIP headers are
+the platform, like the Windows headers. The product-flags compile of a mutant keeps the full SDK `include/`. A module that needs it
+is not configured by cmake when `WHIRL_WITH_HIP=OFF`. A header outside `src/ include/ tests/` (kernels/gemm_small_addr.h) is staged
+next to `mod/` and may be a header-only module's `mutate` line. A test program that runs longer than 600 s fails its case (a hung
+socket test would otherwise hang the gate step). Link doubles of a layer the module may not link: `tests/iso/fake_hip.cpp` (the HIP
+layer, every GPU call throws), `fake_embedded_objects.cpp` (the build-generated kernel code objects), and per module under
+`tests/iso/<module>/` (config.device: the model layer's device choice, test side; vision: the HIP backend factory and the vision
+code objects).
+
+Inline functions of a header-only module (arch025-iso4-fix, review finding 1). MSVC never emits an inline function nobody calls
+(measured: `cl` with `/Zc:inline-`, `/Zc:inline`, `/Od` - no body, no external reference; `/Zc:inline-` only keeps the symbol
+information of COMDATs that were generated), so a test program alone proves the link boundary only for the paths its tests walk.
+iso_check.py therefore compiles, for a header-only module, one more TU per `hdr` line (`#include` of the staged copy) with the ROCm
+`clang-cl /Od -Xclang -femit-all-decls` (mod/ the only include path; MSVC-ABI objects that link.exe links) and links those objects
+with the module and test objects into a second program (stage `decl-link`, `/OPT:NOREF`; the test program is linked and run as
+before): every non-template inline / constexpr / in-class function of the staged headers then has a body and its references must
+resolve inside the listed sources (LNK2019 otherwise). The mutant kind `inline_<sym>` (one per `mutsym`, header-only modules only)
+appends an uncalled `inline` function that calls `<sym>`; it must fail at the decl-link. Manifest kind `declbase PATH` (an `hdr`
+line, not the `mutate` one): a declared dependency header whose own inline bodies reach code outside the tree (model.arch_open:
+whirl/model.h, qwen35/context.h, spec/policy.h); the unresolved references of the decl-link must then be a subset of what the
+`declbase` headers alone leave unresolved (isolation_blockers.md). Limits that remain: a function template (or a member of a class template) that nothing instantiates has no body in any compiler, so a crossing
+inside an uninstantiated template is not seen; the cmake build (`cmake/iso.cmake`) does not compile the header TUs (that check is
+iso_check.py's, gate step `cpu_iso_<module>`); `.cpp` modules get no header TUs (their `call_<sym>` mutants are plain functions;
+an inline function in their staged headers is checked only when a header-only manifest stages that header). Evidence:
+`progress/arch025-iso4.PRIOR_ART.md` section iso4-fix.
+
 To declare a new dependency of a module, add its header (and, if it is not header-only, its source) to the
 module's list. The change is then visible in review. Which modules are not isolated yet, and the include / call that
 blocks each one with the smallest fix: [isolation_blockers.md](isolation_blockers.md).

@@ -23,6 +23,7 @@ const whirl::test::Suite& unitSuite_tokenizer();
 const whirl::test::Suite& unitSuite_gguf();
 const whirl::test::Suite& unitSuite_chat();
 const whirl::test::Suite& unitSuite_mem_fit();
+const whirl::test::Suite& unitSuite_server_kv_fit();  // arch025-iso4: split off mem_fit_tests.cpp
 const whirl::test::Suite& unitSuite_contract();
 const whirl::test::Suite& unitSuite_kernels_gemm();
 const whirl::test::Suite& unitSuite_model_core();
@@ -96,15 +97,15 @@ const OrderRow kOrder[] = {
     {"hip.mem", "testLocalMemTaken"},
     {"hip.mem", "testUmaCheck"},
     {"mem.wddm_watch", "testWddmWatch"},
-    {"mem.fit", "testPoolBudget"},
-    {"mem.fit", "testPoolMargin"},
-    {"mem.fit", "testStartupFit"},
-    {"mem.fit", "testB0SizingFollowUps"},
-    {"mem.fit", "testVisionPoolReserve"},
-    {"mem.fit", "testKvRoom"},
-    {"mem.fit", "testSlotFixed"},
-    {"mem.fit", "testPreloadAdjust"},
-    {"mem.fit", "testUmaFixed"},
+    {"server.kv_fit", "testPoolBudget"},
+    {"server.kv_fit", "testPoolMargin"},
+    {"server.kv_fit", "testStartupFit"},
+    {"server.kv_fit", "testB0SizingFollowUps"},
+    {"server.kv_fit", "testVisionPoolReserve"},
+    {"server.kv_fit", "testKvRoom"},
+    {"server.kv_fit", "testSlotFixed"},
+    {"server.kv_fit", "testPreloadAdjust"},
+    {"server.kv_fit", "testUmaFixed"},
     {"mem.governor", "testMemGovernor"},
     {"mem.governor", "testMemGovernorGrowOvershoot"},
     {"gpu_select", "testGpuSelect"},
@@ -125,6 +126,7 @@ int main(int argc, char** argv) {
         &unitSuite_gguf(),
         &unitSuite_chat(),
         &unitSuite_mem_fit(),
+        &unitSuite_server_kv_fit(),
         &unitSuite_contract(),
         &unitSuite_kernels_gemm(),
         &unitSuite_model_core(),

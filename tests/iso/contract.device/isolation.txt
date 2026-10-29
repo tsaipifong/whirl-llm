@@ -1,0 +1,22 @@
+# ARCH-1 8.5 isolation check of contract.device (arch025-iso4): the device interface and its HIP implementation (src/device/backend.h, backend_hip.cpp) built with their own
+# test (tests/iso/contract.device/backend_hip_tests.cpp; no test existed). declared dependency: the HIP layer, as the link double tests/iso/fake_hip.cpp (every call that would
+# reach a GPU throws, which is what the forwarding pins read). Format: tests/sampling/isolation.txt.
+module    contract.device
+exe       whirl-iso-contract-device-tests
+mutate    src/device/backend_hip.cpp
+mutsym    log
+mutsym    engine
+mutsym    model
+# module sources
+src       src/device/backend_hip.cpp
+# declared dependency sources
+src       tests/iso/fake_hip.cpp
+# headers (include closure of the files above)
+hdr       include/whirl/device_mem.h
+hdr       include/whirl/hip.h
+hdr       include/whirl/uma_mem.h
+hdr       src/device/backend.h
+# test program
+testsrc   tests/iso/contract.device/backend_hip_tests.cpp
+testhdr   tests/iso/iso_test.h
+testhdr   tests/test_check.h

@@ -2,7 +2,7 @@
 // src/common/startup_fit.cpp) built with only its declared dependencies (mem.fit's vram_limit.cpp, chat's json.cpp,
 // platform env) (ARCH-1 8.5 isolation, arch025-lane1 leg 8). Pins the sizing rules leg 8 moved out of
 // src/server/server_main.cpp against verbatim copies of the 5728296 code over value grids, plus smoke checks of the
-// module's older functions (the full tables stay in whirl-tests mem_fit_tests.cpp).
+// module's older functions (the full tables stay in tests/unit/server_kv_fit_tests.cpp, in whirl-tests and whirl-unit-server-kv-fit-tests).
 // SPDX-License-Identifier: Apache-2.0
 #include "iso/iso_test.h"
 #include "whirl/pool_budget.h"

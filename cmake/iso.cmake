@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Included from cmake/server.cmake after whirl_sampling. One manifest per module: tests/sampling/isolation.txt and
-# tests/iso/<module>/isolation.txt (kinds: module, exe, lib, mutate, mutinc, mutsym, syslib, gen, src, hdr, testsrc, testhdr; see
+# tests/iso/<module>/isolation.txt (kinds: module, exe, lib, mutate, mutinc, mutsym, declbase, syslib, define, sdkinc, gen, src, hdr, testsrc, testhdr; see
 # tools/gates/iso_check.py; a header-only module has no src line and no object library). The listed files are copied into <build>/iso/<module>/{mod,test}/ (the leading src/
 # include/ tests/ dropped) and compiled from there:
 #   <lib>   OBJECT library of the module sources + the declared dependency sources; include path = iso/<module>/mod
@@ -13,6 +13,8 @@
 # The product build is unchanged: these targets are extra, nothing links them.
 # Negative check (mutants that reach across the boundary must fail here and pass the product flags):
 #   tools/gates/iso_check.py --mutants   (release_gate cpu_sampling_iso, cpu_iso_<module>)
+# The decl-link of a header-only module (each hdr line compiled alone by clang-cl -femit-all-decls, so uncalled inline functions
+# reach the link; arch025-iso4-fix) is iso_check.py's only: these targets build the test program as before.
 
 function(whirl_iso_module _list)
   # start from an empty tree at every configure: a file dropped from the list must not stay visible
@@ -24,6 +26,8 @@ function(whirl_iso_module _list)
   set(_syslibs)
   set(_entries)
   set(_gens)
+  set(_defs)
+  set(_sdk)
   foreach(_l IN LISTS _lines)
     string(REGEX MATCH "^([a-z]+)[ \t]+([^ \t#]+)" _m "${_l}")
     set(_kind ${CMAKE_MATCH_1})
@@ -36,7 +40,17 @@ function(whirl_iso_module _list)
       set(_lib ${_path})
     elseif(_kind STREQUAL "syslib")
       list(APPEND _syslibs ${_path})
-    elseif(_kind MATCHES "^(mutate|mutinc|mutsym)$")
+    elseif(_kind STREQUAL "define")
+      # arch025-iso4: a compile definition of the module's sources and test program
+      list(APPEND _defs ${_path})
+    elseif(_kind STREQUAL "sdkinc")
+      # arch025-iso4: a system SDK include directory after the staged tree (hip = a copy of ${WHIRL_HIP_ROOT}/include/hip
+      # alone, arch025-iso4-fix)
+      if(NOT _path STREQUAL "hip")
+        message(FATAL_ERROR "${_list}: unknown sdkinc '${_path}' (known: hip)")
+      endif()
+      list(APPEND _sdk ${_path})
+    elseif(_kind MATCHES "^(mutate|mutinc|mutsym|declbase)$")
       # iso_check.py only
     elseif(_kind STREQUAL "gen")
       # arch025-lane2 leg 5: a header the build generates (${CMAKE_BINARY_DIR}/generated/<path>, e.g. whirl/version.h,
@@ -56,6 +70,12 @@ function(whirl_iso_module _list)
   endif()
   if(NOT _module OR NOT _exe)
     message(FATAL_ERROR "${_list}: needs 'module' and 'exe' lines")
+  endif()
+  if(_sdk AND NOT WHIRL_HIP_ROOT)
+    # arch025-iso4: a module that needs the HIP SDK headers is not configured when the build has no HIP SDK (WHIRL_WITH_HIP=OFF);
+    # tools/gates/iso_check.py checks it either way
+    message(STATUS "iso: ${_module} not configured (sdkinc hip needs WHIRL_WITH_HIP=ON)")
+    return()
   endif()
   if(NOT _lib)
     string(REGEX REPLACE "[^A-Za-z0-9]" "_" _lib "whirl_iso_${_module}")
@@ -107,6 +127,29 @@ function(whirl_iso_module _list)
   else()
     target_sources(${_exe} PRIVATE ${_gen_dst})
     target_link_libraries(${_exe} PRIVATE ${_syslibs})
+  endif()
+  set(_sdk_dirs)
+  foreach(_s IN LISTS _sdk)
+    if(NOT WHIRL_HIP_ROOT)
+      message(FATAL_ERROR "${_list}: sdkinc hip needs WHIRL_HIP_ROOT")
+    endif()
+    # arch025-iso4-fix (REVIEW 2): only include/hip of the SDK, staged into <build>/iso/_sdk/hip/include (the whole ROCm
+    # include/ also holds hipblas, hipblaslt, rocblas, rocprim, ...: an undeclared ROCm library header must be C1083 too);
+    # file(COPY) copies only what changed
+    file(COPY ${WHIRL_HIP_ROOT}/include/hip DESTINATION ${CMAKE_BINARY_DIR}/iso/_sdk/hip/include)
+    list(APPEND _sdk_dirs ${CMAKE_BINARY_DIR}/iso/_sdk/hip/include)
+  endforeach()
+  if(_sdk_dirs)
+    set_property(TARGET ${_exe} APPEND PROPERTY INCLUDE_DIRECTORIES ${_sdk_dirs})
+    if(_mod_src)
+      set_property(TARGET ${_lib} APPEND PROPERTY INCLUDE_DIRECTORIES ${_sdk_dirs})
+    endif()
+  endif()
+  if(_defs)
+    target_compile_definitions(${_exe} PRIVATE ${_defs})
+    if(_mod_src)
+      target_compile_definitions(${_lib} PRIVATE ${_defs})
+    endif()
   endif()
   if(MSVC)
     target_link_options(${_exe} PRIVATE /OPT:NOREF)

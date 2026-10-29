@@ -1,0 +1,16 @@
+# ARCH-1 8.5 isolation check of device.profile (arch025-iso4): the header-only per-architecture profile rows (include/whirl/device_profile.h) over the
+# HIP runtime header (whirl/hip.h: hip::Arch; no HIP call) built with its own test (tests/iso/device.profile/device_profile_tests.cpp = testProfiles of
+# tests/device/device_tests.cpp). Header-only mode: tests/iso/model.types/isolation.txt. Format: tests/sampling/isolation.txt.
+module    device.profile
+exe       whirl-iso-device-profile-tests
+mutate    include/whirl/device_profile.h
+mutinc    end
+mutsym    now
+mutsym    model
+# headers (include closure of the files above)
+hdr       include/whirl/device_profile.h
+hdr       include/whirl/hip.h
+# test program
+testsrc   tests/iso/device.profile/device_profile_tests.cpp
+testhdr   tests/iso/iso_test.h
+testhdr   tests/test_check.h

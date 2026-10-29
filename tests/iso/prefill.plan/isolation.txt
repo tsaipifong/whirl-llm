@@ -1,0 +1,38 @@
+# ARCH-1 8.5 isolation check of prefill.plan (arch025-iso4): the cold-prefill schedule (header-only prefill_schedule.h) and the chat token facts
+# (chat_tokens.h / chat_tokens.cpp) built with its own test (tests/iso/prefill.plan/prefill_plan_tests.cpp; the cases lived behind a TestServer in
+# tests/server/server_tests.cpp). declared dependencies: the tokenizer, the GGUF reader, util and the platform layer it uses.
+module    prefill.plan
+exe       whirl-iso-prefill-plan-tests
+mutate    src/chat/chat_tokens.cpp
+mutsym    hip
+mutsym    log
+mutsym    engine
+mutsym    model
+# module sources
+src       src/chat/chat_tokens.cpp
+# declared dependency sources
+src       src/tokenizer/tokenizer.cpp
+src       src/tokenizer/unicode.cpp
+src       src/gguf/gguf.cpp
+src       src/common/util.cpp
+src       src/platform/args_win.cpp
+src       src/platform/fs_win.cpp
+src       src/platform/proc_win.cpp
+# headers (include closure of the files above)
+hdr       include/whirl/chat_tokens.h
+hdr       include/whirl/common.h
+hdr       include/whirl/device_profile.h
+hdr       include/whirl/gguf.h
+hdr       include/whirl/hip.h
+hdr       include/whirl/prefill_schedule.h
+hdr       include/whirl/tokenizer.h
+hdr       include/whirl/unicode.h
+hdr       src/platform/args.h
+hdr       src/platform/fs.h
+hdr       src/platform/fs_fake.h
+hdr       src/platform/proc.h
+hdr       src/tokenizer/unicode_tables.inc
+# test program
+testsrc   tests/iso/prefill.plan/prefill_plan_tests.cpp
+testhdr   tests/iso/iso_test.h
+testhdr   tests/test_check.h

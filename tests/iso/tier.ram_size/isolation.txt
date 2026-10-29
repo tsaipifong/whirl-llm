@@ -1,0 +1,16 @@
+# ARCH-1 8.5 isolation check of tier.ram_size (arch025-iso4): the header-only default size of the pinned-RAM tier (src/tier/ram_size.h) built with its
+# own test (tests/iso/tier.ram_size/ram_size_tests.cpp; no unit test file existed, its cases lived in tests/device and tests/server/tier_tests.cpp).
+# Header-only mode: tests/iso/model.types/isolation.txt. Format: tests/sampling/isolation.txt.
+module    tier.ram_size
+exe       whirl-iso-tier-ram-size-tests
+mutate    src/tier/ram_size.h
+mutinc    end
+mutsym    now
+mutsym    model
+mutsym    hip
+# headers (include closure of the files above)
+hdr       src/tier/ram_size.h
+# test program
+testsrc   tests/iso/tier.ram_size/ram_size_tests.cpp
+testhdr   tests/iso/iso_test.h
+testhdr   tests/test_check.h

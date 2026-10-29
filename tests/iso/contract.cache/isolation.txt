@@ -1,0 +1,29 @@
+# ARCH-1 8.5 isolation check of contract.cache (arch025-iso4): the header-only CacheModel interface (src/cache/cache_model.h) over its declared dependencies (the device interface
+# with the null backend, the qwen35 KV / model types) built with its own test (tests/iso/contract.cache/cache_model_tests.cpp; no test existed) and the host-only
+# implementation tests/iso/fake_cache_model.h. Header-only mode: tests/iso/model.types/isolation.txt.
+module    contract.cache
+exe       whirl-iso-contract-cache-tests
+mutate    src/cache/cache_model.h
+mutinc    end
+mutsym    hip
+mutsym    log
+mutsym    engine
+mutsym    model
+# module sources
+src       src/device/null_backend.cpp
+# headers (include closure of the files above)
+hdr       include/whirl/device_mem.h
+hdr       include/whirl/hip.h
+hdr       include/whirl/kv_format.h
+hdr       include/whirl/model_types.h
+hdr       include/whirl/uma_mem.h
+hdr       src/cache/cache_model.h
+hdr       src/device/backend.h
+hdr       src/device/null_backend.h
+hdr       src/model/qwen35/kv.h
+hdr       src/platform/env.h
+hdr       tests/iso/fake_cache_model.h
+# test program
+testsrc   tests/iso/contract.cache/cache_model_tests.cpp
+testhdr   tests/iso/iso_test.h
+testhdr   tests/test_check.h

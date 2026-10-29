@@ -1,0 +1,37 @@
+# ARCH-1 8.5 isolation check of contract.server (arch025-iso4): the header-only ServerModel interface (src/server/backend.h) over its declared dependencies (the cache and
+# device interfaces, the qwen35 KV / model types, the vision declarations) built with its own test (tests/iso/contract.server/backend_tests.cpp; no test existed)
+# and the host-only implementation tests/iso/fake_server_model.h. Header-only mode: tests/iso/model.types/isolation.txt.
+module    contract.server
+exe       whirl-iso-contract-server-tests
+mutate    src/server/backend.h
+mutinc    end
+mutsym    hip
+mutsym    log
+mutsym    engine
+mutsym    model
+# module sources
+src       src/device/null_backend.cpp
+# headers (include closure of the files above)
+hdr       include/whirl/device_mem.h
+hdr       include/whirl/device_profile.h
+hdr       include/whirl/hip.h
+hdr       include/whirl/kv_format.h
+hdr       include/whirl/model_types.h
+hdr       include/whirl/prefill_schedule.h
+hdr       include/whirl/spec_sample.h
+hdr       include/whirl/uma_mem.h
+hdr       include/whirl/vision.h
+hdr       include/whirl/vismap.h
+hdr       src/cache/cache_model.h
+hdr       src/device/backend.h
+hdr       src/device/handles.h
+hdr       src/device/null_backend.h
+hdr       src/model/qwen35/kv.h
+hdr       src/platform/env.h
+hdr       src/server/backend.h
+hdr       src/server/vision_iface.h
+hdr       tests/iso/fake_server_model.h
+# test program
+testsrc   tests/iso/contract.server/backend_tests.cpp
+testhdr   tests/iso/iso_test.h
+testhdr   tests/test_check.h

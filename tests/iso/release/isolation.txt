@@ -1,0 +1,18 @@
+# ARCH-1 8.5 isolation check of release (arch025-iso4): the DLL dependency check (src/release/dll_deps.cpp) built with its own unit test
+# (tests/unit/release_tests.cpp, whose only case is compiled under WHIRL_TEST_DLL_DEPS: manifest kind define). src/release/release.cpp is the
+# module's composition part and stays out (it includes whirl/model.h: docs/dev/isolation_blockers.md).
+module    release
+exe       whirl-iso-release-tests
+mutate    src/release/dll_deps.cpp
+mutsym    log
+mutsym    now
+mutsym    hip
+define    WHIRL_TEST_DLL_DEPS=1
+# module sources
+src       src/release/dll_deps.cpp
+# headers (include closure of the files above)
+hdr       src/release/dll_deps.h
+# test program
+testsrc   tests/unit/release_tests.cpp
+testhdr   tests/test_check.h
+testhdr   tests/test_env.h

@@ -1,0 +1,48 @@
+# ARCH-1 8.5 isolation check of contract.abi (arch025-iso4): the numerics plan, the kernel table loader and the dump switches (src/common/numerics.cpp, dump.cpp,
+# src/kernels_host/kernels_abi.cpp) built with their own unit tests (tests/unit/contract_tests.cpp + numerics_plan_tests.cpp, the program cmake/unit.cmake builds
+# as whirl-unit-contract-tests: numerics_plan_tests.cpp is its WHIRL_UNIT_EXTRA source). declared dependencies: the JSON reader (module json), vram_limit, util,
+# the platform layer, and the HIP link double tests/iso/fake_hip.cpp (the kernel table loader reaches the device runtime; the SDK is not needed).
+module    contract.abi
+exe       whirl-iso-contract-abi-tests
+mutate    src/common/numerics.cpp
+mutsym    log
+mutsym    engine
+mutsym    model
+# module sources
+src       src/kernels_host/kernels_abi.cpp
+src       src/common/numerics.cpp
+src       src/common/dump.cpp
+# declared dependency sources
+src       src/chat/json.cpp
+src       src/common/vram_limit.cpp
+src       src/common/util.cpp
+src       src/platform/env_win.cpp
+src       src/platform/args_win.cpp
+src       src/platform/fs_win.cpp
+src       src/platform/proc_win.cpp
+src       tests/iso/fake_hip.cpp
+# headers (include closure of the files above)
+hdr       include/whirl/common.h
+hdr       include/whirl/device_mem.h
+hdr       include/whirl/device_profile.h
+hdr       include/whirl/dump.h
+hdr       include/whirl/hip.h
+hdr       include/whirl/json.h
+hdr       include/whirl/kernels_abi.h
+hdr       include/whirl/kernels_abi_layout.h
+hdr       include/whirl/kv_format.h
+hdr       include/whirl/numerics.h
+hdr       include/whirl/small_helpers.h
+hdr       include/whirl/uma_mem.h
+hdr       include/whirl/vram_limit.h
+hdr       src/platform/args.h
+hdr       src/platform/env.h
+hdr       src/platform/fs.h
+hdr       src/platform/fs_fake.h
+hdr       src/platform/proc.h
+# test program
+testsrc   tests/unit/contract_tests.cpp
+testsrc   tests/unit/numerics_plan_tests.cpp
+testhdr   tests/test_check.h
+testhdr   tests/test_env.h
+testhdr   tests/unit/numerics_plan_s0b2.inc

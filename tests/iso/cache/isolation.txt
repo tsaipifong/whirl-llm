@@ -1,0 +1,56 @@
+# ARCH-1 8.5 isolation check of cache.fingerprint, cache.prefix and cache.tier_adapter (arch025-iso4) in ONE manifest: their tests are one program
+# (tests/cache/cache_tests.cpp: the fingerprint and prefix-cache cases share the mock tier). contract.cache (src/cache/cache_model.h) is header-only and
+# reached through the same program. declared dependencies: the KV host tier (kv_tier.cpp + NullBackend) and platform, util, numerics.
+# The one source-tree scan of the test file (testFingerprintEnvClassified: every WHIRL_* read is classified) cannot run in a copy that holds only the
+# declared files: define WHIRL_ISO_NO_SOURCE_TREE leaves it to whirl-cache-tests (the case is not removed).
+module    cache
+exe       whirl-iso-cache-tests
+mutate    src/cache/prefix_cache.cpp
+mutsym    hip
+mutsym    engine
+mutsym    model
+define    WHIRL_ISO_NO_SOURCE_TREE
+# module sources
+src       src/cache/fingerprint.cpp
+src       src/cache/prefix_cache.cpp
+src       src/cache/tier_adapter.cpp
+# declared dependency sources
+src       src/tier/kv_tier.cpp
+src       src/device/null_backend.cpp
+src       src/platform/env_win.cpp
+src       src/platform/fs_win.cpp
+src       src/platform/proc_win.cpp
+src       src/platform/args_win.cpp
+src       src/common/util.cpp
+src       src/common/numerics.cpp
+src       src/common/dump.cpp
+# headers (include closure of the files above)
+hdr       include/whirl/common.h
+hdr       include/whirl/device_mem.h
+hdr       include/whirl/dump.h
+hdr       include/whirl/hip.h
+hdr       include/whirl/kv_format.h
+hdr       include/whirl/numerics.h
+hdr       include/whirl/small_helpers.h
+hdr       include/whirl/thread_annotations.h
+hdr       include/whirl/uma_mem.h
+hdr       src/cache/fingerprint.h
+hdr       src/cache/prefix_cache.h
+hdr       src/cache/tier_adapter.h
+hdr       src/device/backend.h
+hdr       src/device/handles.h
+hdr       src/device/null_backend.h
+hdr       src/platform/args.h
+hdr       src/platform/env.h
+hdr       src/platform/fs.h
+hdr       src/platform/fs_fake.h
+hdr       src/platform/proc.h
+hdr       src/tier/evict_policy.h
+hdr       src/tier/idle_flush.h
+hdr       src/tier/kv_tier.h
+# test program
+testsrc   tests/cache/cache_tests.cpp
+testhdr   tests/cache/fingerprint_env_names.inc
+testhdr   tests/cache/mock_tier.h
+testhdr   tests/test_check.h
+testhdr   tests/test_env.h

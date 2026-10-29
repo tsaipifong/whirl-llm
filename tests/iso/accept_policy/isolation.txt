@@ -1,0 +1,15 @@
+# ARCH-1 8.5 isolation check of accept_policy (arch025-iso4): the header-only relaxed-acceptance policy built with its own
+# unit tests (tests/unit/accept_policy_tests.cpp), header-only mode (tests/iso/model.types/isolation.txt). Format: tests/sampling/isolation.txt;
+# read by cmake/iso.cmake and tools/gates/iso_check.py.
+module    accept_policy
+exe       whirl-iso-accept-policy-tests
+mutate    include/whirl/relax_accept.h
+mutinc    end
+mutsym    now
+mutsym    model
+# headers (include closure of the files above)
+hdr       include/whirl/relax_accept.h
+# test program
+testsrc   tests/unit/accept_policy_tests.cpp
+testhdr   tests/test_check.h
+testhdr   tests/test_env.h
