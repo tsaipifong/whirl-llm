@@ -117,6 +117,8 @@ NO_GPU_MODULES = {
     "platform.headers": "compile-time proof that the platform headers stay platform-free (headers_win.cpp; cpu_platform_check)",
     "common.tsa": "clang thread-safety annotation macros, no code generated (cpu_tsa checks them)",
     "device.null": "the CPU null backend of the device tests (whirl-device-tests); src/device/* is a CORE_GLOBS path anyway",
+    "server.engine_split_tools": "Python checker tools of the Engine split (cut, census, pins, revtext, e8_judge), no product "
+                                 "code; their CPU steps cpu_engine_split / cpu_member_order run them (arch025-engine S0b / S0c)",
 }
 SAFETY_STEPS = ("cpu_safety_selftest", "cpu_asan", "cpu_analyze", "cpu_tsa")
 NO_SAFETY_INPUT = ["docs/*", "*.md", "LICENSE", "NOTICE", "tools/impact/*.py", "tools/impact/*.json", "tools/impact_map.json",
