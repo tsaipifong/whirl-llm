@@ -123,6 +123,133 @@ NO_SAFETY_INPUT = ["docs/*", "*.md", "LICENSE", "NOTICE", "tools/impact/*.py", "
                    "tools/gates/*.py", "tools/gates/*.json", "tools/gates/*.tsv", "tools/gates/*.txt", "tools/klgate/*.py",
                    "tools/golden/*.py", "tests/golden/*"]
 
+# arch025-n11 (PLAN N11): a core module plans its OWN GPU step set instead of the full matrix only when recorded GPU
+# mutation evidence supports it (progress/arch025-n11.PRIOR_ART.md: fault-detection evidence, not dependency safety).
+# The evidence rows live in tools/gates/core_steps.json (one row per mutant x card: verdict and the GPU step that killed
+# it, from scratch gpumut.ps1 kill_<card>.tsv files via --add-kill-records); the step sets are COMPUTED here from those
+# rows, never written by hand. Rule (fail closed; core_step_sets): every mutant of the module in tools/impact/mutations.json
+# has a newest row on BOTH cards, each KILLED by a named GPU step or BUILD-FAIL (compiler), and >= 2 of them are KILLED
+# on each card. Then the set of a card = the steps that killed them on that card + golden_swift + golden_moe ("always").
+# Anything else (a survivor, CAP / GATE-ERROR / NOT-RUN / DEVICE-MISMATCH, a mutant not run on one card, a new mutant
+# added to the catalog after the run) keeps the module on the full matrix. contract.* modules are always full.
+CORE_STEPS_FILE = os.path.join("tools", "gates", "core_steps.json")
+CORE_ALWAYS = ["golden_swift", "golden_moe"]
+CORE_MIN_MUTANTS = 2  # floor: a data file asking for fewer is ignored (Shin et al. STVR 2018: one mutant is no evidence)
+
+
+def load_core_doc(root=REPO):
+    try:
+        return json.load(open(os.path.join(root, CORE_STEPS_FILE), encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"always": list(CORE_ALWAYS), "min_mutants": CORE_MIN_MUTANTS, "evidence": []}
+
+
+def load_catalog(root=REPO):
+    """{mutant id: module} of tools/impact/mutations.json"""
+    try:
+        d = json.load(open(os.path.join(root, "tools", "impact", "mutations.json"), encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return {x["id"]: x.get("module", "") for x in d.get("mutations", [])}
+
+
+def is_contract(n):
+    """contract modules never get a step set: contract.* (modules.json full: true by design) and the kernel ABI"""
+    return n.startswith("contract.") or n == "kernels.abi"
+
+
+def evidence_modules(mods):
+    """modules that may earn a GPU step set from evidence: every CORE / modules.json module except the contracts (a
+    modules.json full: true module such as model.core / forward.state, and a module owning a CORE_GLOBS path such as
+    ops.matmul, forces the full matrix today exactly like a CORE module)"""
+    return sorted(n for n in set(CORE) | set(mods or {}) if not is_contract(n))
+
+
+def core_step_sets(doc, catalog, modules=None):
+    """({module: {"r9700": [steps], "8060s": [steps], "mutants": [ids], "proof": text}}, {module: why full}) over
+    `modules` (default: the CORE table)"""
+    always = sorted(set(doc.get("always") or CORE_ALWAYS) | set(CORE_ALWAYS))
+    need = max(CORE_MIN_MUTANTS, int(doc.get("min_mutants") or 0))
+    newest = {}
+    for r in doc.get("evidence") or []:
+        k = (r.get("id"), r.get("card"))
+        if k[0] in catalog and k[1] in DEVICES and (k not in newest or str(r.get("date", "")) >= str(newest[k].get("date", ""))):
+            newest[k] = r
+    ok, why = {}, {}
+    for mname in (list(CORE) if modules is None else modules):
+        if is_contract(mname):
+            why[mname] = "contract module: always the full matrix (modules.json full: true)"
+            continue
+        muts = sorted(i for i, mod in catalog.items() if mod == mname)
+        if not muts:
+            why[mname] = "no mutant of this module in tools/impact/mutations.json"
+            continue
+        problems, sets, dates = [], {}, []
+        # a bug class the module must be shown to catch (doc "require": {module: {mutant id: class}}): that mutant is
+        # in the catalog and KILLED by a GPU step on both cards (a compile error proves nothing about the GPU steps)
+        for i, cls in sorted(((doc.get("require") or {}).get(mname) or {}).items()):
+            if catalog.get(i) != mname:
+                problems.append(f"required mutant {i} ({cls}) not in tools/impact/mutations.json for {mname}: write it")
+                continue
+            for card in DEVICES:
+                r = newest.get((i, card))
+                if not (r and r.get("verdict") == "KILLED" and r.get("killed_by")):
+                    problems.append(f"required mutant {i} ({cls}) not KILLED by a GPU step on {card}")
+        for card in DEVICES:
+            killers, nk = set(), 0
+            for i in muts:
+                r = newest.get((i, card))
+                if r is None:
+                    problems.append(f"{i} not run on {card}")
+                    continue
+                v = r.get("verdict") or "?"
+                if v == "KILLED" and r.get("killed_by"):
+                    nk += 1
+                    killers.add(r["killed_by"])
+                    dates.append(str(r.get("date", "")))
+                elif v != "BUILD-FAIL":
+                    problems.append(f"{i} {v} on {card}" + (" (no killing step)" if v == "KILLED" else ""))
+            if nk < need:
+                problems.append(f"{card}: {nk} killed on the GPU (need >= {need})")
+            sets[card] = sorted(killers | set(always))
+        if problems:
+            why[mname] = "; ".join(problems[:6]) + (f" (+{len(problems) - 6} more)" if len(problems) > 6 else "")
+        else:
+            ok[mname] = dict(sets, mutants=muts, proof=f"{len(muts)} mutant(s) caught on both cards ({min(dates)[:10]}..{max(dates)[:10]})")
+    return ok, why
+
+
+_CORE_SETS = {}
+
+
+def load_core_sets(root=REPO):
+    if root not in _CORE_SETS:
+        try:
+            mods = load_mods(root)
+        except (OSError, ValueError, KeyError):
+            mods = {}
+        _CORE_SETS[root] = core_step_sets(load_core_doc(root), load_catalog(root), evidence_modules(mods))[0]
+    return _CORE_SETS[root]
+
+
+def kill_rows(paths, catalog, date, source):
+    """evidence rows from gpumut.ps1 kill_<card>.tsv files (id, module, card, verdict, killed_by, ...) -> (rows, notes)"""
+    rows, notes = [], []
+    for p in paths:
+        for r in csv.DictReader(open(p, encoding="utf-8"), delimiter="\t"):
+            i, card = (r.get("id") or "").strip(), (r.get("card") or "").strip()
+            if i not in catalog:
+                notes.append(f"{i}: not in tools/impact/mutations.json (row of {p} skipped)")
+                continue
+            if card not in DEVICES:
+                notes.append(f"{i}: card {card!r} unknown (row of {p} skipped)")
+                continue
+            if (r.get("module") or catalog[i]) != catalog[i]:
+                notes.append(f"{i}: module {r.get('module')} in {p}, {catalog[i]} in the catalog (catalog used)")
+            rows.append({"id": i, "module": catalog[i], "card": card, "verdict": (r.get("verdict") or "").strip(),
+                         "killed_by": (r.get("killed_by") or "").strip(), "date": date, "source": f"{source} ({p})"})
+    return rows, notes
+
 
 def now():
     return datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
@@ -666,7 +793,7 @@ def compare_code_objects(base, build, out_json):
 
 
 def make_plan(title, cid, changes, rep, mods, m, gates, times, one_gpu="r9700", build=None, base_build=None, proofs=None,
-              scratch=None, all_cpu=False, gate_map=None, cmake_graph=None):
+              scratch=None, all_cpu=False, gate_map=None, cmake_graph=None, core_sets=None):
     files = sorted(changes)
     gm = gate_map if gate_map is not None else load_gate_map()
     graph_src = sorted({f for v in ((cmake_graph or {}).get("sources") or {}).values() for f in v})
@@ -674,17 +801,31 @@ def make_plan(title, cid, changes, rep, mods, m, gates, times, one_gpu="r9700", 
     modules = dict(rep.get("modules") or {})
     callers = {k: list(v) for k, v in (rep.get("module_callers") or {}).items()}
     gate_txt = rep.get("module_gate") or ""
+    # arch025-n11: core modules with a GPU mutation evidence set (core_step_sets); contract.* never
+    cset = {k: v for k, v in (load_core_sets() if core_sets is None else core_sets).items() if not is_contract(k)}
+    core_used = {}
     full = []  # reasons
     for n in sorted(modules):
         if n in CORE:
-            full.append(f"core module {n}: {CORE[n]}")
+            if n in cset:
+                core_used[n] = cset[n]
+            else:
+                full.append(f"core module {n}: {CORE[n]}")
     for n, cs in sorted(callers.items()):  # rdeps: a changed header of n is compiled into these modules
         for k in cs:
             if k in CORE:
-                full.append(f"core module {k} includes a changed header of {n} (callers): {CORE[k]}")
+                if k in cset:
+                    core_used[k] = cset[k]
+                else:
+                    full.append(f"core module {k} includes a changed header of {n} (callers): {CORE[k]}")
     for f in files:
         for g, why in CORE_GLOBS:
             if fnmatch.fnmatch(f, g):
+                owners = [k for k, fl in modules.items() if f in (fl or [])]
+                if owners and all(k in cset for k in owners):
+                    for k in owners:
+                        core_used[k] = cset[k]
+                    break  # a core path inside an evidenced module: that module's set covers it
                 full.append(f"core file {f}: {why}")
                 break
     # arch025-modsel2 (PLAN 3.3): a list-only CMake edit counts as the modules of the sources it names, so a named
@@ -707,7 +848,19 @@ def make_plan(title, cid, changes, rep, mods, m, gates, times, one_gpu="r9700", 
                     full.append(f"core file {f} built differently (CMake graph): {why}")
                     break
     if gate_txt.startswith("full gate") and "cross-module" not in gate_txt:
-        full.append(f"impact.py: {gate_txt}")  # contract / build-wide / product file in no module / includer in no module
+        # arch025-n11: full only because of modules.json full: true modules that all have an evidence set -> impact.py's
+        # module gate again without their full flag (a file / includer in no module or a build-wide file keeps it full)
+        touched = set(modules) | {k for v in callers.values() for k in v}
+        fl = sorted(n for n in touched if (mods.get(n) or {}).get("full"))
+        g2 = gate_txt
+        if fl and "contract module" in gate_txt and all(n in cset for n in fl):
+            mods2 = {k: (dict(v, full=False) if k in fl else v) for k, v in mods.items()}
+            g2 = impact.module_gate(changes, mods2, rep, m).get("module_gate") or ""
+        if g2.startswith("full gate") and "cross-module" not in g2:
+            full.append(f"impact.py: {g2}")  # contract / build-wide / product file in no module / includer in no module
+        else:
+            for n in fl:
+                core_used[n] = cset[n]
     kernel = [f for f in files if matches(f, KERNEL_GLOBS)] + hip_closure(m, files)
     bfiles = [f for f in files if matches(f, BUILD_GLOBS) and f not in lists]  # a source-list edit changes no flags
     weq = {"code_objects": "not compared (no --base-build)", "static": (
@@ -746,6 +899,15 @@ def make_plan(title, cid, changes, rep, mods, m, gates, times, one_gpu="r9700", 
         level = "full"
     else:
         for n in sorted(set(modules) | {k for v in callers.values() for k in v}):
+            ev = core_used.get(n) or cset.get(n)
+            if ev:  # arch025-n11: the module's GPU mutation evidence set, both cards
+                for dv in DEVICES:
+                    for st in ev.get(dv) or []:
+                        if st in expand_gpu([st], gates)[dv] and st not in gpu[dv]:
+                            gpu[dv].append(st)
+                            why[(dv, st)] = f"core module {n}: GPU mutation evidence ({', '.join(ev.get('mutants') or [])})"
+                if n in CORE or (mods.get(n) or {}).get("full"):
+                    continue  # a core / full: true module: the evidence set replaces its modules.json GPU steps
             d = mods.get(n, {})
             g2 = d.get("gpus") or {}
             for st in d.get("steps") or []:
@@ -844,6 +1006,7 @@ def make_plan(title, cid, changes, rep, mods, m, gates, times, one_gpu="r9700", 
         "est_cpu_min": round(cpu_s / 60, 1), "est_gpu_min": {d: round(v / 60, 1) for d, v in est.items()},
         "est_full_gpu_min": {d: round(v / 60, 1) for d, v in full_s.items()}, "est_unknown": unknown,
         "one_gpu": one_gpu, "cmake_graph": cmake_graph,
+        "core_sets": {k: {"mutants": v.get("mutants"), "proof": v.get("proof")} for k, v in sorted(core_used.items())},
     }
 
 
@@ -853,6 +1016,8 @@ def print_plan(p):
     print(f"   modules  {', '.join(sorted(p['modules'])) or '(none)'}" + (f"; callers {p['callers']}" if p["callers"] else ""))
     print(f"   level    {p['level'].upper()}" + ("".join(f"\n            - {r}" for r in p["full_reasons"][:8]) if p["full_reasons"] else "")
           + (f"\n            ... {len(p['full_reasons']) - 8} more" if len(p["full_reasons"]) > 8 else ""))
+    for k, v in (p.get("core_sets") or {}).items():
+        print(f"   core     {k}: own GPU step set from mutation evidence ({v.get('proof')}; {', '.join(v.get('mutants') or [])})")
     print(f"   CPU      all {len(p['cpu_steps'])} CPU steps once + {', '.join(p['per_device_cpu'])} on both GPUs: ~{p['est_cpu_min']} min [est]")
     if p.get("cpu_skipped", {}).get("steps"):
         print(f"            not run: {', '.join(p['cpu_skipped']['steps'])} ({p['cpu_skipped']['why']}; --all-cpu runs them)")
@@ -1067,7 +1232,37 @@ def main():
     ap.add_argument("--backtest", type=int)
     ap.add_argument("--rev", default="HEAD")
     ap.add_argument("--out")
+    ap.add_argument("--core-steps-report", action="store_true", help="per core module: its GPU step set from mutation evidence, or why it stays full")
+    ap.add_argument("--add-kill-records", nargs="+", metavar="KILL_TSV", help="append gpumut.ps1 kill_<card>.tsv rows to tools/gates/core_steps.json")
+    ap.add_argument("--source", default="", help="--add-kill-records: what produced the rows (runner, tree, commit)")
     a = ap.parse_args()
+    if a.add_kill_records:
+        root = os.path.abspath(a.root or REPO)
+        d = load_core_doc(root)
+        rows, notes = kill_rows(a.add_kill_records, load_catalog(root), now(), a.source or "gpumut")
+        d.setdefault("evidence", []).extend(rows)
+        with open(os.path.join(root, CORE_STEPS_FILE), "w", encoding="utf-8", newline="\n") as fh:
+            json.dump(d, fh, indent=1)
+            fh.write("\n")
+        for x in notes:
+            print(f"note: {x}")
+        print(f"add-kill-records: {len(rows)} row(s) -> {os.path.join(root, CORE_STEPS_FILE)}")
+        a.core_steps_report = True
+    if a.core_steps_report:
+        root = os.path.abspath(a.root or REPO)
+        mods = load_mods(root)
+        doc = load_core_doc(root)
+        ok, why = core_step_sets(doc, load_catalog(root), evidence_modules(mods))
+        seen = {r.get("module") for r in doc.get("evidence") or []}
+        show = [k for k in list(CORE) + sorted(mods) if k in CORE or (mods.get(k) or {}).get("full") or k in ok or k in seen]
+        for k in dict.fromkeys(show):
+            if k in ok:
+                print(f"{k:<20} SET   r9700 {','.join(ok[k]['r9700'])} | 8060s {','.join(ok[k]['8060s'])} | {ok[k]['proof']}: {','.join(ok[k]['mutants'])}")
+            else:
+                print(f"{k:<20} FULL  {why.get(k) or ('contract module: always the full matrix' if is_contract(k) else '?')}")
+        print(f"core-steps: {len(ok)} module(s) plan their own GPU step set from mutation evidence "
+              f"({len([k for k in CORE if k in ok])} of {len(CORE)} CORE modules)")
+        return 0
     if a.refresh_times is not None:
         ws = os.path.abspath(os.path.join(REPO, ".."))
         roots = a.refresh_times or [ws]

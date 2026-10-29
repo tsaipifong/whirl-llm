@@ -258,7 +258,7 @@ for f, why in (("src/model/loader.cpp", "K8-2 ~Model"), ("include/whirl/model.h"
                ("include/whirl/kernels_abi.h", "K8-5 ABI struct member deletion")):
     g = _imp.module_gate({f: {"old_path": f, "new": [1], "old": [1]}}, RMODS)
     r = rep(g["modules"], g["module_gate"], callers=g.get("module_callers"))
-    p = tc.make_plan("t", "x", {f: {}}, r, RMODS, {"includers": {}}, GATES, TIMES)
+    p = tc.make_plan("t", "x", {f: {}}, r, RMODS, {"includers": {}}, GATES, TIMES, core_sets={})  # module table pin (N11 sets: below)
     check(f"{why} ({f}) = full matrix both GPUs", p["level"] == "full" and all(len(p["gpu_steps"][d]) >= 9 for d in tc.DEVICES),
           (g["module_gate"], p["level"], p["full_reasons"][:2]))
 # 18. arch025-modsel2 (PLAN 3.6, K8-3 GPU half): a gate script a GPU step runs selects that step (on --one-gpu); a script
@@ -431,5 +431,153 @@ r2, g2 = tc.graph_rep({CM: {}, "build.bat": {}}, BW, {}, "R", "a1", "b2", "W", g
 check("graph_rep: build.bat changed too -> no graph (full anyway)", r2 is None and not calls, calls)
 r2, g2 = tc.graph_rep({"src/a.cpp": {}}, BW, {}, "R", "a1", "b2", "W", gm2, runner=fake_runner, analyze_fn=fake_analyze)
 check("graph_rep: no CMake file -> no graph", r2 is None and not calls, calls)
+# ---------------------------------------------------------------------------------------------------------------------
+# arch025-n11 (PLAN N11): a core module with GPU mutation evidence plans its own GPU step set (tools/gates/core_steps.json)
+CAT = {"fa-1": "forward.attn", "fa-2": "forward.attn", "fa-3": "forward.attn", "kv-1": "model.kv", "kv-2": "model.kv",
+       "cd-1": "contract.device", "cd-2": "contract.device", "ff-1": "forward.ffn", "ff-2": "forward.ffn"}
+
+
+def ev(i, card, verdict="KILLED", by="st_swift_precise", date="2026-10-29T10:00"):
+    return {"id": i, "card": card, "verdict": verdict, "killed_by": by if verdict == "KILLED" else "", "date": date, "source": "t"}
+
+
+def both(i, **kw):
+    return [ev(i, "r9700", **kw), ev(i, "8060s", **kw)]
+
+
+def doc(rows):
+    return {"always": ["golden_swift", "golden_moe"], "min_mutants": 2, "evidence": rows}
+
+
+CAT2 = {k: v for k, v in CAT.items() if k != "fa-3"}  # forward.attn with exactly two mutants
+ok, why = tc.core_step_sets(doc(both("fa-1") + both("fa-2", by="seq_swift_precise")), CAT2)
+check("n11: 2 mutants killed on both cards -> set", "forward.attn" in ok, why)
+check("n11: set = killers + golden on both cards", ok.get("forward.attn", {}).get("r9700") == ["golden_moe", "golden_swift", "seq_swift_precise", "st_swift_precise"]
+      and ok["forward.attn"]["8060s"] == ok["forward.attn"]["r9700"], ok)
+check("n11: the set names its mutants", sorted(ok.get("forward.attn", {}).get("mutants", [])) == ["fa-1", "fa-2"], ok)
+ok, why = tc.core_step_sets(doc(both("fa-1") + both("fa-2")), CAT)
+check("n11: a catalog mutant never run on the GPU -> full", "forward.attn" not in ok and "fa-3" in why.get("forward.attn", ""), why)
+ok, why = tc.core_step_sets(doc(both("fa-1") + [ev("fa-2", "r9700")]), CAT2)
+check("n11: one card without evidence -> full", "forward.attn" not in ok and "8060s" in why.get("forward.attn", ""), why)
+ok, why = tc.core_step_sets(doc(both("fa-1") + [ev("fa-2", "r9700"), ev("fa-2", "8060s", verdict="SURVIVED")]), CAT2)
+check("n11: a GPU survivor -> full", "forward.attn" not in ok and "SURVIVED" in why.get("forward.attn", ""), why)
+for v in ("CAP", "GATE-ERROR", "NOT-RUN", "DEVICE-MISMATCH", "CONTROL-FAIL"):
+    ok, why = tc.core_step_sets(doc(both("fa-1") + [ev("fa-2", "r9700"), ev("fa-2", "8060s", verdict=v)]), CAT2)
+    check(f"n11: verdict {v} is not a kill -> full", "forward.attn" not in ok, why)
+ok, why = tc.core_step_sets(doc(both("ff-1")), {"ff-1": "forward.ffn"})
+check("n11: one mutant is not enough (min 2)", "forward.ffn" not in ok and "1 killed" in why.get("forward.ffn", ""), why)
+ok, why = tc.core_step_sets(doc(both("ff-1") + both("ff-2", verdict="BUILD-FAIL")), {"ff-1": "forward.ffn", "ff-2": "forward.ffn"})
+check("n11: BUILD-FAIL is caught but does not count toward 2", "forward.ffn" not in ok, why)
+ok, why = tc.core_step_sets(doc(both("fa-1") + both("fa-2") + both("fa-3", verdict="BUILD-FAIL")), CAT)
+check("n11: BUILD-FAIL + 2 kills -> set", "forward.attn" in ok, why)
+ok, why = tc.core_step_sets(doc(both("fa-1") + both("fa-2", verdict="SURVIVED", date="2026-10-28T10:00")
+                                + both("fa-2", date="2026-10-29T12:00")), CAT2)
+check("n11: the newest row per mutant and card counts", "forward.attn" in ok, why)
+ok, why = tc.core_step_sets(doc(both("fa-1") + both("fa-2", date="2026-10-28T10:00")
+                                + both("fa-2", verdict="SURVIVED", date="2026-10-29T12:00")), CAT2)
+check("n11: a newer survivor overrides an older kill", "forward.attn" not in ok, why)
+ok, why = tc.core_step_sets(doc(both("cd-1") + both("cd-2")), CAT)
+check("n11: contract modules always full", "contract.device" not in ok and "contract" in why.get("contract.device", ""), why)
+ok, why = tc.core_step_sets(doc([ev("fa-1", "r9700", by="")] + [ev("fa-1", "8060s")] + both("fa-2")), CAT2)
+check("n11: KILLED without a killing step is not evidence", "forward.attn" not in ok, why)
+ok, why = tc.core_step_sets(doc([]), CAT)
+check("n11: no evidence -> every core module full with a reason", not ok and all(m in why for m in tc.CORE), sorted(set(tc.CORE) - set(why)))
+# plans
+FA = "src/model/qwen35/forward/attn.cpp"
+SETS = {"forward.attn": {"r9700": ["golden_moe", "golden_swift", "seq_swift_precise"], "8060s": ["golden_moe", "golden_swift", "kt_full"],
+                         "mutants": ["fa-1", "fa-2"], "proof": "fa-1, fa-2 killed on both cards"}}
+p = plan([FA], rep({"forward.attn": [FA]}, "release_gate.ps1 -Module forward.attn"), core_sets=SETS)
+check("n11 plan: evidenced core module -> module level", p["level"] == "module" and not p["full_reasons"], p["full_reasons"])
+check("n11 plan: the evidence set per card (not modules.json steps)", p["gpu_steps"]["r9700"] == ["golden_swift", "golden_moe", "seq_swift_precise"]
+      and p["gpu_steps"]["8060s"] == ["kt_full", "golden_swift", "golden_moe"], p["gpu_steps"])
+check("n11 plan: why names the evidence", p["gpu_why"].get("r9700:seq_swift_precise", "").startswith("core module forward.attn: GPU mutation evidence"), p["gpu_why"])
+check("n11 plan: core set recorded", "forward.attn" in (p.get("core_sets") or {}), p.get("core_sets"))
+p = plan([FA], rep({"forward.attn": [FA]}, "release_gate.ps1 -Module forward.attn", steps=["srv_balance"]), core_sets=SETS)
+check("n11 plan: impact map steps still added", "srv_balance" in p["gpu_steps"]["r9700"], p["gpu_steps"])
+p = plan([FA], rep({"forward.attn": [FA]}, "release_gate.ps1 -Module forward.attn"), core_sets={})
+check("n11 plan: no evidence -> full (unchanged)", p["level"] == "full" and any("core module forward.attn" in r for r in p["full_reasons"]), p["full_reasons"])
+p = plan([FA, "src/model/kv.cpp"], rep({"forward.attn": [FA], "model.kv": ["src/model/kv.cpp"]}, "x"), core_sets=SETS)
+check("n11 plan: a second core module without evidence -> full", p["level"] == "full" and any("model.kv" in r for r in p["full_reasons"])
+      and not any("forward.attn" in r for r in p["full_reasons"] if r.startswith("core module")), p["full_reasons"])
+p = plan(["src/model/forward/attn.cpp"], rep({}, "full gate or the release steps above: 1 file(s) in no module (src/model/forward/attn.cpp)"), core_sets=SETS)
+check("n11 plan: core path in no module stays full", p["level"] == "full" and any(r.startswith("core file src/model/forward/attn.cpp") for r in p["full_reasons"]), p["full_reasons"])
+p = plan([FA, "kernels/attn.hip"], rep({"forward.attn": [FA]}, "x"), core_sets=SETS)
+check("n11 plan: a kernel file with it stays full", p["level"] == "full" and any(r.startswith("core file kernels/attn.hip") for r in p["full_reasons"]), p["full_reasons"])
+p = plan(["src/device/backend.h", FA], rep({"contract.device": ["src/device/backend.h"], "forward.attn": [FA]}, "full gate, both GPUs (contract module contract.device)"),
+         core_sets=dict(SETS, **{"contract.device": SETS["forward.attn"]}))
+check("n11 plan: contract module full even if a set is passed for it", p["level"] == "full" and any("contract.device" in r for r in p["full_reasons"]), p["full_reasons"])
+p = plan(["src/server/stream.h"], rep({"protocol": ["src/server/stream.h"]}, "release_gate.ps1 -Module protocol,forward.attn", callers={"protocol": ["forward.attn"]}), core_sets=SETS)
+check("n11 plan: evidenced core caller -> its set", p["level"] == "module" and "seq_swift_precise" in p["gpu_steps"]["r9700"]
+      and "srv_balance" in p["gpu_steps"]["r9700"], (p["level"], p["full_reasons"], p["gpu_steps"]))
+# modules.json full: true modules that are not contracts (model.core, forward.state, ...) can earn a set the same way;
+# contract.* and kernels.abi never
+MODS2 = dict(MODS, **{"model.core": {"paths": ["include/whirl/model.h"], "full": True}, "contract.server": {"paths": ["src/server/backend.h"], "full": True},
+                      "ops.matmul": {"paths": ["src/ops/matmul.cpp"], "steps": ["srv_fast"]}})
+CAT3 = dict(CAT, **{"mc-1": "model.core", "mc-2": "model.core", "om-1": "ops.matmul", "om-2": "ops.matmul", "ka-1": "kernels.abi", "ka-2": "kernels.abi"})
+ok, why = tc.core_step_sets(doc(both("mc-1") + both("mc-2") + both("om-1") + both("om-2") + both("ka-1") + both("ka-2")), CAT3,
+                            modules=tc.evidence_modules(MODS2))
+check("n11: a full:true module (model.core) can earn a set", "model.core" in ok, why)
+check("n11: a non-core module owning a core path (ops.matmul) can earn a set", "ops.matmul" in ok, why)
+check("n11: kernels.abi is a contract: never", "kernels.abi" not in ok, why)
+check("n11: evidence_modules lists CORE + full:true + mutant modules, no contracts",
+      {"forward.attn", "model.core", "handles"} <= set(tc.evidence_modules(MODS2)) and not any(m.startswith("contract.") or m == "kernels.abi" for m in tc.evidence_modules(MODS2)),
+      tc.evidence_modules(MODS2))
+SET_MC = {"r9700": ["golden_moe", "golden_swift", "srv_balance"], "8060s": ["golden_moe", "golden_swift"], "mutants": ["mc-1", "mc-2"], "proof": "p"}
+MH = "include/whirl/model.h"
+
+
+def plan2(files, r, **kw):
+    return tc.make_plan("t", "x", {f: {} for f in files}, r, MODS2, {"includers": {}}, GATES, TIMES, **kw)
+
+
+p = plan2([MH], rep({"model.core": [MH]}, "full gate, both GPUs (contract module model.core)"), core_sets={"model.core": SET_MC})
+check("n11 plan: evidenced full:true module -> its set, impact's full gate overridden", p["level"] == "module" and not p["full_reasons"]
+      and p["gpu_steps"]["r9700"] == ["golden_swift", "golden_moe", "srv_balance"] and p["gpu_steps"]["8060s"] == ["golden_swift", "golden_moe"], (p["full_reasons"], p["gpu_steps"]))
+p = plan2([MH], rep({"model.core": [MH]}, "full gate, both GPUs (contract module model.core)"), core_sets={})
+check("n11 plan: full:true module without evidence -> full", p["level"] == "full" and any(r.startswith("impact.py: full gate") for r in p["full_reasons"]), p["full_reasons"])
+p = plan2([MH, "src/server/backend.h"], rep({"model.core": [MH], "contract.server": ["src/server/backend.h"]}, "full gate, both GPUs (contract module contract.server, model.core)"),
+          core_sets={"model.core": SET_MC, "contract.server": SET_MC})
+check("n11 plan: with a contract module the impact full gate stays", p["level"] == "full" and any(r.startswith("impact.py: full gate") for r in p["full_reasons"]), p["full_reasons"])
+p = plan2([MH, "src/x.cpp"], rep({"model.core": [MH]}, "full gate, both GPUs (contract module model.core)"), core_sets={"model.core": SET_MC})
+check("n11 plan: a file in no module keeps the full gate", p["level"] == "full", p["full_reasons"])
+OM = "src/ops/matmul.cpp"
+p = plan2([OM], rep({"ops.matmul": [OM]}, "release_gate.ps1 -Module ops.matmul"), core_sets={"ops.matmul": dict(SET_MC, r9700=["golden_swift", "kt_full"])})
+check("n11 plan: evidenced owner of a core path -> module level, modules.json steps + evidence set", p["level"] == "module"
+      and set(p["gpu_steps"]["r9700"]) == {"srv_fast", "golden_swift", "kt_full"}, (p["full_reasons"], p["gpu_steps"]))
+p = plan2([OM], rep({"ops.matmul": [OM]}, "release_gate.ps1 -Module ops.matmul"), core_sets={})
+check("n11 plan: owner of a core path without evidence -> full", p["level"] == "full" and any(r.startswith("core file src/ops/matmul.cpp") for r in p["full_reasons"]), p["full_reasons"])
+# a bug class named in "require" (e.g. K8-2 Model member order) must be represented by a KILLED mutant on both cards
+R = dict(doc(both("fa-1") + both("fa-2")), require={"forward.attn": {"fa-2": "K-x class", "fa-9": "K-y class"}})
+ok, why = tc.core_step_sets(R, CAT2)
+check("n11: a required mutant missing from the catalog -> full", "forward.attn" not in ok and "fa-9" in why.get("forward.attn", "") and "K-y" in why["forward.attn"], why)
+R = dict(doc(both("fa-1") + both("fa-2") + both("fa-3", verdict="BUILD-FAIL")), require={"forward.attn": {"fa-3": "K-z class"}})
+ok, why = tc.core_step_sets(R, CAT)
+check("n11: a required mutant must be KILLED by a GPU step (BUILD-FAIL is not enough)", "forward.attn" not in ok and "fa-3" in why.get("forward.attn", ""), why)
+R = dict(doc(both("fa-1") + both("fa-2")), require={"forward.attn": {"fa-2": "K-x class"}})
+ok, why = tc.core_step_sets(R, CAT2)
+check("n11: required mutant killed -> set", "forward.attn" in ok, why)
+real_req = tc.load_core_doc(tc.REPO).get("require") or {}
+check("n11 shipped: K8-2 pins model.core (Model member order) and model.weights (~Model release order)",
+      "model.core" in real_req and "x12-f8-model-dtor" in (real_req.get("model.weights") or {}), real_req)
+# kill records -> evidence rows (gpumut.ps1 kill_<card>.tsv)
+with tempfile.TemporaryDirectory() as td:
+    kt = os.path.join(td, "kill_r9700.tsv")
+    open(kt, "w", encoding="utf-8").write("id\tmodule\tcard\tverdict\tkilled_by\tsteps_run\tfailed_steps\tminutes\n"
+                                          "fa-1\tforward.attn\tr9700\tKILLED\tst_swift_precise\tst_swift_precise\tst_swift_precise\t4.2\n"
+                                          "fa-2\tforward.attn\tr9700\tSURVIVED\t\tst_swift_precise,golden_swift\t\t9.0\n"
+                                          "zz-9\tforward.attn\tr9700\tKILLED\tgolden_swift\tgolden_swift\tgolden_swift\t3\n")
+    rows, notes = tc.kill_rows([kt], CAT, "2026-10-29T13:00", "pilot")
+    check("n11 kill rows: one row per catalog mutant", [(r["id"], r["card"], r["verdict"], r["killed_by"]) for r in rows]
+          == [("fa-1", "r9700", "KILLED", "st_swift_precise"), ("fa-2", "r9700", "SURVIVED", "")], rows)
+    check("n11 kill rows: id not in the catalog reported", any("zz-9" in x for x in notes), notes)
+    check("n11 kill rows: date / source / file kept", rows[0]["date"] == "2026-10-29T13:00" and rows[0]["source"].startswith("pilot") and "kill_r9700.tsv" in rows[0]["source"], rows[0])
+# the shipped data file: loads, every row names a catalog mutant and a card, and no core module claims a set it cannot prove
+real = tc.load_core_doc(tc.REPO)
+cat_real = tc.load_catalog(tc.REPO)
+check("n11 shipped core_steps.json loads", isinstance(real.get("evidence"), list) and real.get("min_mutants", 0) >= 2, real.keys())
+check("n11 shipped rows name catalog mutants and cards", all(r["id"] in cat_real and r["card"] in tc.DEVICES for r in real["evidence"]),
+      [r["id"] for r in real["evidence"] if r["id"] not in cat_real])
+ok_real, why_real = tc.core_step_sets(real, cat_real)
+check("n11 shipped: every core module has a set or a reason", all((m in ok_real) != (m in why_real) for m in tc.CORE), (ok_real, why_real))
 print(f"test_change_test: {n - fails}/{n} passed")
 sys.exit(1 if fails else 0)

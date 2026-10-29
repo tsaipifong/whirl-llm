@@ -1,0 +1,13 @@
+{
+ "_doc": "arch025-n11 (PLAN N11): GPU mutation evidence for test_change.py's core-module step sets. One row per mutant x card (newest row counts): verdict (KILLED / SURVIVED / BUILD-FAIL / CAP / GATE-ERROR / NOT-RUN / DEVICE-MISMATCH) and killed_by (the release_gate GPU step that FAILed where the control PASSed). Rows are appended by `python tools/gates/test_change.py --add-kill-records kill_r9700.tsv kill_8060s.tsv --source ...` (gpumut.ps1 output); never write step sets here: test_change.core_step_sets computes them (every catalog mutant of the module on both cards, >= min_mutants KILLED per card, no survivor; set = killers + always). `--core-steps-report` prints the result. docs/dev/testing.md 'Core modules'.",
+ "always": ["golden_swift", "golden_moe"],
+ "min_mutants": 2,
+ "require": {
+  "model.core": {"k8-2-model-member-order": "X12 K8-2: a reordered Model member changes the release order of device memory (include/whirl/model.h); no such mutant in the catalog yet"},
+  "model.weights": {"x12-f8-model-dtor": "X12 K8-2 / S11b D1: ~Model loses its explicit release order (src/model/loader.cpp)"}
+ },
+ "evidence": [
+  {"id": "device-hip-copy-short-64", "module": "device.hip", "card": "r9700", "verdict": "KILLED", "killed_by": "srv_tier_verify", "date": "2026-10-21T10:49", "source": "arch4 GPU mutation run (progress/arch4_mutations.tsv:12, progress/arch4.log:20): srv_tier_verify FAIL after 379 s, 35 lines differ; not a core module (src/device/* is a CORE_GLOBS path of no evidenced module)"},
+  {"id": "ops-precise-rule-allows-all-gpu", "module": "ops.matmul", "card": "r9700", "verdict": "KILLED", "killed_by": "golden_swift", "date": "2026-10-22T11:12", "source": "arch6 GPU mutation run (progress/arch6_mutations.tsv:2, progress/ARCH6_R9700_RESULTS.md:127): golden_swift DIFF swift/precise_single 34 of 43 lines; not a core module"}
+ ]
+}
