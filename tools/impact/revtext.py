@@ -53,16 +53,31 @@ def census(tree, out, cut):
     for l in list(open(os.path.join(out, "funcs.tsv"), encoding="utf-8"))[1:]:
         p = l.rstrip("\n").split("\t")
         rows.setdefault(p[0].split("#")[0], []).append((p[1], int(p[2]), int(p[3]), p[8]))
+    # S0b (S0 review act-on 4): every data member declaration of a tracked class is an entry "member:<name>" (its whole
+    # statement: type, annotations, in-class initializer), so `vram_idle_s_ = 60.0` -> `30.0` or a type change is a DIFF;
+    # a member moved into a component keeps its entry name (rules.renames maps a renamed one back). A census without
+    # member_decls.tsv fails (the comparison would silently skip the declarations).
+    md = os.path.join(out, "member_decls.tsv")
+    if not os.path.exists(md):
+        raise SystemExit(f"revtext: census of {tree} wrote no member_decls.tsv (old census?): FAIL")
+    for l in list(open(md, encoding="utf-8"))[1:]:
+        c, n, f, ln, a0, a1 = l.rstrip("\n").split("\t")
+        rows.setdefault("member:" + n, []).append((f, int(ln), -1, f"decl {c}::{n} @{a0}:{a1}"))
     return rows
 
 
 def body_text(tree, rows):
     """raw text (comments dropped, strings kept) of every part of an entry, in census order"""
     parts = []
-    for f, ln, n, dfn in sorted(rows, key=lambda x: (x[0], x[1])):
-        if "in-class initializer" in dfn:   # synthetic: the class body's initializers (checked by the member-order pin)
+    for f, ln, n, dfn in sorted(rows, key=lambda x: (x[0], x[1], x[3])):
+        if "in-class initializer" in dfn:   # synthetic: the initializers are compared as member:<name> entries (S0b)
             continue
-        lines = open(os.path.join(tree, "src", f), encoding="utf-8", errors="replace").read().split("\n")
+        raw = open(os.path.join(tree, "src", f), encoding="utf-8", errors="replace").read()
+        if n < 0:   # S0b: a member declaration, by offsets (the census's strip() keeps offsets)
+            a0, a1 = (int(x) for x in dfn.rsplit("@", 1)[1].split(":"))
+            parts.append(re.sub(r"^\s*(?:public|private|protected)\s*:", "", raw[a0:a1]))
+            continue
+        lines = raw.split("\n")
         parts.append("\n".join(lines[ln - 1:ln - 1 + n]))
     return strip_comments("\n".join(parts))
 
@@ -114,17 +129,17 @@ def selftest(work):
     m = re.search(r"void Engine::dropCache\(Slot& sl\) \{\n((?:    [^\n]*\n){2})", src)
     cases = []
 
-    def tree(name, text, extra=None):
+    def tree(name, text, extra=None, rel=eh):
         d = os.path.join(work, re.sub(r"\W+", "_", name))
         if os.path.isdir(d): shutil.rmtree(d)
         for sub in ("src", "include"):
             shutil.copytree(os.path.join(REPO, sub), os.path.join(d, sub))
-        open(os.path.join(d, "src", eh), "w", encoding="utf-8").write(text)
+        open(os.path.join(d, "src", rel), "w", encoding="utf-8").write(text)
         if extra: extra(d)
         return d
 
-    def case(name, text, rules, want, extra=None):
-        d = tree(name, text, extra)
+    def case(name, text, rules, want, extra=None, rel=eh):
+        d = tree(name, text, extra, rel)
         print(f"-- {name}")
         rc = run(REPO, d, rules, cut, d + "_w")
         cases.append((name, rc == want))
@@ -149,6 +164,17 @@ def selftest(work):
     mv = src.replace("void Engine::dropCache(Slot& sl) {", "void SlotPages::dropCache(Slot& sl) {", 1)
     case("a move SlotPages::dropCache with the mapping rule", mv, {"replace": [["SlotPages::dropCache", "Engine::dropCache"]]}, 0)
     case("the same move without the rule", mv, {}, 1)
+    # S0b (S0 review act-on 4, scratch/a25_engine/s0review/rt_new): in-class initializers / member types were not compared
+    hh = "server/engine.h"
+    hs = open(os.path.join(REPO, "src", hh), encoding="utf-8").read()
+    for old, new, nm in (("    double vram_idle_s_ = 60.0;", "    double vram_idle_s_ = 30.0;", "an in-class initializer changed (vram_idle_s_ 60 -> 30)"),
+                         ("    bool gov_hold_ = false;", "    bool gov_hold_ = true;", "an in-class initializer changed (gov_hold_ false -> true)"),
+                         ("    std::uint32_t ctx_new_ = 0xffffffffu;", "    std::uint16_t ctx_new_ = 0xffffffffu;", "a member type changed (ctx_new_ uint32 -> uint16)")):
+        if hs.count(old) == 1: case(nm, hs.replace(old, new, 1), {}, 1, rel=hh)
+        else: cases.append((nm + ": anchor", False))
+    if hs.count("    double vram_idle_s_ = 60.0;") == 1:
+        case("the initializer change listed in allowed_diffs (control)", hs.replace("    double vram_idle_s_ = 60.0;", "    double vram_idle_s_ = 30.0;", 1),
+             {"allowed_diffs": [{"entry": "member:vram_idle_s_", "old": "60.0", "new": "30.0", "why": "selftest"}]}, 0, rel=hh)
     ok = all(g for _, g in cases)
     for n, g in cases: print(f"  {'ok  ' if g else 'FAIL'} {n}")
     print(f"revtext selftest: {sum(g for _, g in cases)}/{len(cases)} as expected")
