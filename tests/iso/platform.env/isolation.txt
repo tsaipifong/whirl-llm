@@ -1,0 +1,18 @@
+# ARCH-1 8.5 isolation check of platform.env (arch025-iso3): the raw environment read (src/platform/env_win.cpp) built
+# with its own unit tests (tests/unit/platform_env_tests.cpp). Format: tests/sampling/isolation.txt; read by
+# cmake/iso.cmake and tools/gates/iso_check.py.
+# declared dependencies: none (Win32 only)
+module    platform.env
+exe       whirl-iso-platform-env-tests
+mutate    src/platform/env_win.cpp
+mutsym    hip
+mutsym    log
+mutsym    now
+# module sources
+src       src/platform/env_win.cpp
+# headers (include closure of the sources above)
+hdr       src/platform/env.h
+# test program
+testsrc   tests/unit/platform_env_tests.cpp
+testhdr   tests/test_check.h
+testhdr   tests/test_env.h

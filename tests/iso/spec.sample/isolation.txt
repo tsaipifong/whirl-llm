@@ -1,0 +1,17 @@
+# ARCH-1 8.5 isolation check of spec.sample (arch025-iso3): src/common/spec_sample.cpp built with its own unit tests (tests/unit/spec_sample_tests.cpp).
+# Format: tests/sampling/isolation.txt; read by cmake/iso.cmake and tools/gates/iso_check.py.
+# declared dependencies: none
+module    spec.sample
+exe       whirl-iso-spec-sample-tests
+mutate    src/common/spec_sample.cpp
+mutsym    hip
+mutsym    log
+mutsym    now
+# module sources
+src       src/common/spec_sample.cpp
+# headers (include closure of the sources above)
+hdr       include/whirl/spec_sample.h
+# test program
+testsrc   tests/unit/spec_sample_tests.cpp
+testhdr   tests/test_check.h
+testhdr   tests/test_env.h

@@ -1,0 +1,23 @@
+# ARCH-1 8.5 isolation check of platform.console (arch025-iso3): the console layer (src/platform/console_win.cpp) built
+# with its own unit tests (tests/unit/platform_console_tests.cpp, which also calls platform.time).
+# Format: tests/sampling/isolation.txt; read by cmake/iso.cmake and tools/gates/iso_check.py.
+# declared dependencies: platform.time (src/platform/time_win.cpp, the test calls it)
+module    platform.console
+exe       whirl-iso-platform-console-tests
+mutate    src/platform/console_win.cpp
+mutsym    hip
+mutsym    log
+mutsym    now
+# module sources
+src       src/platform/console_win.cpp
+# declared dependency sources
+src       src/platform/time_win.cpp
+# headers (include closure of the sources above)
+hdr       src/platform/console.h
+hdr       src/platform/time.h
+# Win32 library for time_win.cpp (timeBeginPeriod)
+syslib    winmm.lib
+# test program
+testsrc   tests/unit/platform_console_tests.cpp
+testhdr   tests/test_check.h
+testhdr   tests/test_env.h
