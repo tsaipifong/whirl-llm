@@ -9,7 +9,8 @@ CPU only, no GPU, no model.
 Manifests: tests/sampling/isolation.txt and tests/iso/<module>/isolation.txt (one per module; cmake/iso.cmake reads the
 same files). Kinds: module NAME, exe TARGET, lib TARGET (optional object-library name), mutate PATH (the source the
 mutants edit), mutinc top|end (where the include mutants put the line: after the first quoted include, the default, or
-at the end of the file), mutsym hip|log|now|engine|model|tier|archtable (link mutants), syslib X.lib, gen PATH, then src / hdr (module + declared dependencies)
+at the end of the file), mutsym hip|log|now|engine|model|tier|archtable (link mutants), syslib X.lib, define NAME[=VALUE] (arch025-iso4: /D for
+the module's sources and test program), sdkinc hip (arch025-iso4: the HIP SDK include/ after the staged tree), gen PATH, then src / hdr (module + declared dependencies)
 and testsrc / testhdr (test program only). Every file is copied into <work>/<module>/<case>/{mod,test} (leading src/
 include/ tests/ dropped); module sources are compiled with mod/ as the ONLY include path, the test with mod/ + test/, and
 the test program is linked from ALL those objects directly (no static-library member selection) with /OPT:NOREF, so an
@@ -86,6 +87,24 @@ SYMS = {
                   "(void)whirl::model::builtinArchs().size();"),
 }
 ENGINE_H = "server/engine.h"
+# sdkinc NAME -> (environment variables that name the SDK root, default root, include sub folder)
+SDK_DIRS = {"hip": (("WHIRL_HIP_ROOT", "HIP_PATH"), r"C:\Program Files\AMD\ROCm\7.2", "include")}
+
+
+def sdk_dirs(man):
+    out = []
+    for n in man.sdkinc:
+        envs, default, sub = SDK_DIRS[n]
+        root = next((os.environ[e] for e in envs if os.environ.get(e)), default)
+        d = os.path.join(root, sub)
+        if not os.path.isdir(d):
+            raise SetupError(f"{man.rel}: sdkinc {n}: no {d} (set {envs[0]})")
+        out.append(d)
+    return out
+
+
+def def_flags(man):
+    return [f"/D{d}" for d in man.defines]
 
 
 class Manifest:
@@ -100,6 +119,8 @@ class Manifest:
         self.syslibs = []
         self.items = []
         self.gens = []
+        self.defines = []
+        self.sdkinc = []
         for line in open(path, encoding="utf-8"):
             m = re.match(r"([a-z]+)\s+([^\s#]+)", line)
             if not m:
@@ -125,6 +146,19 @@ class Manifest:
                 self.syslibs.append(p)
             elif kind == "gen":
                 self.gens.append(p)
+            elif kind == "define":
+                # arch025-iso4: a compile definition of the module's sources and test program (/DNAME[=VALUE]); the one
+                # module that needs it is release (its only unit case is compiled under WHIRL_TEST_DLL_DEPS)
+                if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(=[A-Za-z0-9_.]+)?", p):
+                    raise SetupError(f"{self.rel}: define {p} (NAME or NAME=VALUE)")
+                self.defines.append(p)
+            elif kind == "sdkinc":
+                # arch025-iso4: a system SDK include directory (the platform, like the MSVC / Windows headers): hip = the
+                # HIP SDK's include/ (hip/hip_runtime_api.h, which src/hip/hip_api.h includes for its types). It is put
+                # AFTER the staged tree, so it can only supply what the tree does not have and never shadows a module header.
+                if p not in SDK_DIRS:
+                    raise SetupError(f"{self.rel}: unknown sdkinc {p} (known: {', '.join(SDK_DIRS)})")
+                self.sdkinc.append(p)
             elif kind in KINDS:
                 if not os.path.isfile(os.path.join(root, p)):
                     raise SetupError(f"{self.rel}: no such file {p}")
@@ -172,7 +206,10 @@ def vc_env(bat):
     return env
 
 
-def run(cmd, env, cwd):
+RUN_TIMEOUT_S = 600  # arch025-iso4: a test program that hangs (a socket test) fails the case instead of the gate step
+
+
+def run(cmd, env, cwd, timeout=None):
     # CreateProcess looks a bare name up in THIS process's PATH, not in env= (CPython subprocess docs, Windows), so
     # cl / link from the vcvars env are resolved to full paths first (arch025-X3fix)
     if not os.path.isabs(cmd[0]):
@@ -180,7 +217,10 @@ def run(cmd, env, cwd):
         if not full:
             raise SetupError(f"{cmd[0]} not on the vcvars PATH")
         cmd = [full, *cmd[1:]]
-    p = subprocess.run(cmd, capture_output=True, text=True, env=env, cwd=cwd, encoding="utf-8", errors="replace")
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, env=env, cwd=cwd, encoding="utf-8", errors="replace", timeout=timeout)
+    except subprocess.TimeoutExpired as ex:
+        return 124, f"timed out after {timeout} s: {cmd[0]}\n" + str(ex.stdout or "")
     return p.returncode, (p.stdout or "") + (p.stderr or "")
 
 
@@ -237,8 +277,8 @@ def mutate(text, case, src_rel, inc_at="top"):
         f"void whirl_iso_mutant_probe() {{ {call} }}\n"
 
 
-def compile_obj(src, incs, obj, env, d):
-    return run(["cl", *CL_FLAGS, "/c", *[f"/I{i}" for i in incs], src, f"/Fo{obj}"], env, d)
+def compile_obj(src, incs, obj, env, d, defs=()):
+    return run(["cl", *CL_FLAGS, *defs, "/c", *[f"/I{i}" for i in incs], src, f"/Fo{obj}"], env, d)
 
 
 def build_iso(man, d, files, env, objs_from=None, only_src=None):
@@ -251,7 +291,7 @@ def build_iso(man, d, files, env, objs_from=None, only_src=None):
         if objs_from and rel != only_src:
             objs.append(os.path.join(objs_from, f"m{i}.obj"))
             continue
-        rc, out = compile_obj(s, [mod], o, env, d)
+        rc, out = compile_obj(s, [mod, *sdk_dirs(man)], o, env, d, def_flags(man))
         if rc:
             return "compile", rc, out
         objs.append(o)
@@ -260,7 +300,7 @@ def build_iso(man, d, files, env, objs_from=None, only_src=None):
         if objs_from:
             objs.append(os.path.join(objs_from, f"t{i}.obj"))
             continue
-        rc, out = compile_obj(s, [mod, test], o, env, d)
+        rc, out = compile_obj(s, [mod, test, *sdk_dirs(man)], o, env, d, def_flags(man))
         if rc:
             return "test-compile", rc, out
         objs.append(o)
@@ -268,15 +308,45 @@ def build_iso(man, d, files, env, objs_from=None, only_src=None):
     rc, out = run(["link", "/nologo", "/OPT:NOREF", f"/OUT:{exe}", *objs, *man.syslibs], env, d)
     if rc:
         return "link", rc, out
-    rc, out = run([exe], env, d)
+    rc, out = run([exe], env, d, RUN_TIMEOUT_S)
     return "run", rc, out
 
 
-def product_compile_header(root, rel_hdr, text, tag, env, d):
+def product_compile_header(root, rel_hdr, text, tag, env, d, man, case=""):
     # arch025-lane2 leg 6 (header-only module): the mutated header shadows the real one. It is written to
     # <root>/_iso_mut_<tag>/<path without include/ or src/> (same depth as the real file, so a relative include resolves
     # as in the tree) and a one-line source includes it with that directory first on the include path: the product
     # headers that include it (server/engine.h -> whirl/model_types.h) then reach the same copy (#pragma once).
+    if staged(rel_hdr) == rel_hdr or rel_hdr.startswith("src/"):
+        # arch025-iso4: a header outside src/ include/ tests/ (kernels/gemm_small_addr.h) or under src/ (src/tier/ram_size.h,
+        # src/server/backend.h, whose same-directory includes such as "vision_iface.h" a shadow folder would not have): the mutated
+        # copy sits next to the real one under a temporary name, as product_compile does for a .cpp, so its relative includes
+        # resolve as in the tree. An include mutant of a header that server/engine.h includes back (backend.h, cache_model.h)
+        # can not be a second copy of the header (the classes would be defined twice): its product compile is the added include
+        # first, then the real header, which is the same text order.
+        base = os.path.join(root, os.path.dirname(rel_hdr))
+        hdr = os.path.join(base, f"_iso_mut_{tag}.h")
+        src = os.path.join(base, f"_iso_mut_{tag}_probe.cpp")
+        probe = f'#include "_iso_mut_{tag}.h"\n'
+        write_copy = True
+        if case in ("include_engine", "include_relative"):
+            inc = ENGINE_H if case == "include_engine" else relative_engine(rel_hdr)
+            probe = f'#include "{inc}"\n#include "{os.path.basename(rel_hdr)}"\n'
+            write_copy = False
+        try:
+            if write_copy:
+                with open(hdr, "w", encoding="utf-8", newline="\n") as f:
+                    f.write(text)
+            with open(src, "w", encoding="utf-8", newline="\n") as f:
+                f.write(probe)
+            return compile_obj(src, [os.path.join(root, "src"), os.path.join(root, "include"), *sdk_dirs(man)],
+                               os.path.join(d, "prod.obj"), env, d, def_flags(man))
+        finally:
+            for x in (hdr, src):
+                try:
+                    os.remove(x)
+                except OSError:
+                    pass
     top = os.path.join(root, f"_iso_mut_{tag}")
     hdr = os.path.join(top, *staged(rel_hdr).split("/"))
     src = os.path.join(top, "_iso_probe.cpp")
@@ -286,21 +356,23 @@ def product_compile_header(root, rel_hdr, text, tag, env, d):
             f.write(text)
         with open(src, "w", encoding="utf-8", newline="\n") as f:
             f.write(f'#include "{staged(rel_hdr)}"\n')
-        rc, out = compile_obj(src, [top, os.path.join(root, "src"), os.path.join(root, "include")], os.path.join(d, "prod.obj"), env, d)
+        rc, out = compile_obj(src, [top, os.path.join(root, "src"), os.path.join(root, "include"), *sdk_dirs(man)],
+                              os.path.join(d, "prod.obj"), env, d, def_flags(man))
     finally:
         shutil.rmtree(top, ignore_errors=True)
     return rc, out
 
 
-def product_compile(root, rel_src, text, tag, env, d):
+def product_compile(root, rel_src, text, tag, env, d, man, case=""):
     # tag = <module>_<case>: modules checked in parallel can mutate sources of one directory
     if not rel_src.endswith(".cpp"):
-        return product_compile_header(root, rel_src, text, tag, env, d)
+        return product_compile_header(root, rel_src, text, tag, env, d, man, case)
     tmp = os.path.join(root, os.path.dirname(rel_src), f"_iso_mut_{tag}.cpp")
     try:
         with open(tmp, "w", encoding="utf-8", newline="\n") as f:
             f.write(text)
-        rc, out = compile_obj(tmp, [os.path.join(root, "src"), os.path.join(root, "include")], os.path.join(d, "prod.obj"), env, d)
+        rc, out = compile_obj(tmp, [os.path.join(root, "src"), os.path.join(root, "include"), *sdk_dirs(man)],
+                              os.path.join(d, "prod.obj"), env, d, def_flags(man))
     finally:
         try:
             os.remove(tmp)
@@ -329,6 +401,9 @@ def mutate_target(man, d, files):
     # the staged copy the mutant edits: a src line's copy, or (header-only module) the hdr line's copy under mod/
     if not man.header_only:
         return dict(files["src"])[man.mutate]
+    if staged(man.mutate) == man.mutate:
+        # arch025-iso4: a header outside src/ include/ tests/ (kernels/gemm_small_addr.h) is staged next to mod/
+        return os.path.join(d, *man.mutate.split("/"))
     return os.path.join(d, "mod", *staged(man.mutate).split("/"))
 
 
@@ -342,7 +417,7 @@ def selftest():
         lines.append(f"{'ok  ' if ok else 'FAIL'} selftest {name}")
 
     with tempfile.TemporaryDirectory() as root:
-        for p in ("include/whirl/t.h", "src/a/t.cpp", "tests/iso/t/t_tests.cpp"):
+        for p in ("include/whirl/t.h", "kernels/k.h", "src/a/t.cpp", "tests/iso/t/t_tests.cpp"):
             os.makedirs(os.path.join(root, os.path.dirname(p)), exist_ok=True)
             open(os.path.join(root, p), "w").close()
         mp = os.path.join(root, "tests", "iso", "t", "isolation.txt")
@@ -368,6 +443,15 @@ def selftest():
              m is not None and ("include_engine", "test-compile", "C1083") in cases_of(m, True))
         case("src module include mutants expected at compile",
              m2 is not None and ("include_engine", "compile", "C1083") in cases_of(m2, True))
+        md = man(head + "src src/a/t.cpp\nmutate src/a/t.cpp\ndefine WHIRL_X\ndefine WHIRL_Y=1\nsdkinc hip\n")
+        case("define lines become /D flags", md is not None and def_flags(md) == ["/DWHIRL_X", "/DWHIRL_Y=1"])
+        case("sdkinc hip accepted", md is not None and md.sdkinc == ["hip"])
+        case("define with a bad name refused", man(head + "src src/a/t.cpp\nmutate src/a/t.cpp\ndefine 1bad\n") is None)
+        case("unknown sdkinc refused", man(head + "src src/a/t.cpp\nmutate src/a/t.cpp\nsdkinc zz\n") is None)
+        case("a module with neither has no flags and no sdk dirs", m2 is not None and def_flags(m2) == [] and sdk_dirs(m2) == [])
+        mk = man("module t\nexe t-tests\ntestsrc tests/iso/t/t_tests.cpp\nhdr kernels/k.h\nmutate kernels/k.h\n")
+        case("header outside src/ include/ tests/ is staged next to mod/",
+             mk is not None and mk.header_only and mutate_target(mk, "D", {"src": []}).replace(chr(92), "/") == "D/kernels/k.h")
     case("relative include from include/whirl", relative_engine("include/whirl/model_types.h") == "../../src/server/engine.h")
     case("relative include from src/sampling unchanged", relative_engine("src/sampling/x.cpp") == "../server/engine.h")
     case("relative include from src/server unchanged", relative_engine("src/server/x.cpp") == "../server/engine.h")
@@ -404,7 +488,7 @@ def check_module(root, man, work, env, mutants, keep):
             st, rc, out = build_iso(man, d, files, env, objs_from=ctl if ctl_ok and not man.header_only else None,
                                     only_src=man.mutate)
             caught = st == want_stage and rc != 0 and want_code in out
-            prc, pout = product_compile(root, man.mutate, mut, f"{man.module}_{name}", env, d)
+            prc, pout = product_compile(root, man.mutate, mut, f"{man.module}_{name}", env, d, man, name)
             ok = caught and prc == 0
             msg = [l.strip() for l in out.splitlines() if want_code in l][:1]
             lines.append(f"{'ok  ' if ok else 'FAIL'} {man.module} {name}: isolated -> {st} rc={rc} ({want_code} "
