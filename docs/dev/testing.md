@@ -294,6 +294,12 @@ in a function no test calls. The product build is unchanged.
   device runtime / the server / lib whirl (LNK2019), each of which must also compile with the product flags.
   `iso_check.py --list` lists the isolated modules; without `--module` it checks all of them.
 
+A header-only module (model.types, arch025-lane2 leg 6) has no `src` line: its `mutate` line names one of its `hdr`
+lines, the test program is the only translation unit (rebuilt for every mutant, the include mutants fail at its
+compile), and the product-flags compile of a mutant compiles the mutated header shadowing the real one
+(`<root>/_iso_mut_<module>_<case>/`, removed right after). `iso_check.py --mutants` first runs the script's own
+pure-Python selftest (`--selftest` alone runs only it; line `iso check selftest: N/N as expected`).
+
 To declare a new dependency of a module, add its header (and, if it is not header-only, its source) to the
 module's list. The change is then visible in review. Which modules are not isolated yet, and the include / call that
 blocks each one with the smallest fix: [isolation_blockers.md](isolation_blockers.md).

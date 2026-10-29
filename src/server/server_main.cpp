@@ -697,7 +697,7 @@ void buildModel(Options& opt, const numerics::Request& nreq, const char* lad, Lo
         }
         logI("prefill forward up to {} rows requested (WHIRL_PREFILL_CHUNK)", exec_req.value_or(0));
     }
-    std::unique_ptr<qwen35::Model>& mp = b.mp = qwen35::Model::load(f, 0, stats, lo);
+    std::unique_ptr<qwen35::Model>& mp = b.mp = model::loadServerModel(*am, f, 0, stats, lo);  // the arch module's load (X-16)
     qwen35::Model& model = *mp;
     // whole schedule chunks that fit the prefill batch (a forward never exceeds the batch:
     // Engine::chunkLen caps it); default 2048 rows, gfx1151 MoE 4096 (SRV-PP; dense 2048, SRV-PP-DENSE)

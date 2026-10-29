@@ -1,0 +1,24 @@
+# ARCH-1 8.5 isolation check of model.types (arch025-lane2 leg 6, DESIGN section 6): a header-only module, so the
+# boundary is the test program itself - it includes only the module's headers and their declared dependencies, and is
+# built with that copy as the ONLY include path and linked to nothing else (tools/gates/iso_check.py header-only mode:
+# `mutate` names an hdr line). Format: tests/sampling/isolation.txt; read by cmake/iso.cmake and tools/gates/iso_check.py.
+# declared dependencies: the HIP runtime header (whirl/hip.h: DevPtr, hip::Arch; header only here, no HIP call is made)
+# and the KV format enum (whirl/kv_format.h)
+module    model.types
+exe       whirl-iso-model-types-tests
+mutate    include/whirl/model_types.h
+# the include mutants go at the end: server/engine.h includes model_types.h back, so a line at the top would see the
+# module half-read (the product flags compile must pass)
+mutinc    end
+mutsym    hip
+mutsym    model
+mutsym    archtable
+# module headers
+hdr       include/whirl/model_types.h
+hdr       src/model/qwen35/model_error.h
+# declared dependency headers
+hdr       include/whirl/hip.h
+hdr       include/whirl/kv_format.h
+# test program
+testsrc   tests/iso/model.types/model_types_tests.cpp
+testhdr   tests/iso/iso_test.h

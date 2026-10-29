@@ -3596,6 +3596,18 @@ void testMtpDefaults() {
 // (c) the UnsupportedArch message is byte-equal to v0.2.4 0e35407's literal (config.cpp:72 there), also through
 //     Config::fromGguf; supportedArchs joins 1 / 2 / 3 names;
 // (d) slotStateBytes == the server's per-slot formula (moved out of server_main.cpp's dGPU / UMA branches).
+// arch025-lane2 leg 6: a toy load entry that records its call and loads nothing (testArchRegistry (e))
+struct ToyLoad {
+    static inline int calls = 0;
+    static inline std::uint32_t ctx = 0;
+    static inline std::uint32_t batch = 0;
+    static whirl::model::Loaded load(const whirl::gguf::File&, std::uint32_t max_ctx, whirl::qwen35::LoadStats&,
+                                     const whirl::qwen35::LoadOptions& lo) {
+        ++calls, ctx = max_ctx, batch = lo.max_batch;
+        return {};
+    }
+};
+
 void testArchRegistry() {
     namespace m = whirl::model;
     const m::ArchTable& t = m::builtinArchs();
@@ -3681,6 +3693,34 @@ void testArchRegistry() {
     s8.max_small_batch = 8;
     check(m::slotStateBytes(s8, c).pend1 == 6 * (8 * conv_ch * 4 + 8ull * 4 * (128 + head_v + 2) * 4) && m::slotStateBytes(s8, c).st1 == s.st1,
           "slotStateBytes: replay rows follow the module's max_small_batch");
+    // (e) arch025-lane2 leg 6 (X-16): the load entry. The qwen35 row has one (Model::load; run on the GPU by the golden /
+    // server cases); the names-only table has none; whirl-server's loadServerModel calls the row's load once with its
+    // arguments and refuses a family whose load gives no qwen35 model (whirl-server-tests fake_arch_fit loads the toy
+    // family to its ServerModel and the server's pool steps)
+    check(qm.load != nullptr && fam[0].load == nullptr, "arch table: the qwen35 row has a load entry, the names table none");
+    static constexpr m::ArchModule toy_load[] = {{"toy", toy_names, nullptr, nullptr, {}, &ToyLoad::load}};
+    GgufImage g0;
+    g0.kvString("general.architecture", "whirl-toy");
+    const std::vector<std::uint8_t> img0 = g0.build();
+    const gguf::File f0 = gguf::File::parse(img0);
+    q::LoadStats st0;
+    q::LoadOptions lo0;
+    lo0.max_batch = 1234;
+    for (const m::ArchModule* row : {&toy_load[0], &toy_rows[0]}) {
+        std::string what, code;
+        try {
+            (void)m::loadServerModel(*row, f0, 77, st0, lo0);
+        } catch (const q::ModelError& e) {
+            what = e.what();
+            code = e.code();
+        }
+        check(code == "UnsupportedArch" &&
+                  what == "UnsupportedArch: model family 'toy' (general.architecture = 'whirl-toy'): its load gives no model "
+                          "whirl-server can run (the server runs the qwen35 family)",
+              "loadServerModel: a family without a qwen35 model is refused: " + what);
+    }
+    check(ToyLoad::calls == 1 && ToyLoad::ctx == 77 && ToyLoad::batch == 1234,
+          "loadServerModel: the row's load once, with its max_ctx and options (a row without a load: not called)");
 }
 
 // arch025-M6: the device layer's two named host defaults (include/whirl/device_profile.h) and the sites that read them
