@@ -325,6 +325,11 @@ How the plan is built, from the impact map (`impact.py`) and `modules.json`:
    Catalog fields the rule reads (arch025-n11b; `mutations_check.py` enforces them):
    - `module` must be a `modules.json` module (or a key of the catalog's `labels`, e.g. `gates` for
      `tools/gates/*.py`): kills are attributed by this label.
+   - `module` must also be an OWNER of the mutated `file` (`modules.json` paths; arch025-n11c): `test_change.py` plans
+     GPU steps for the modules whose files change, so a mutant is evidence for the module that owns its file, never for
+     the bug class it was written for. That class goes in `fault_area` (optional, information only, differs from
+     `module`). A file owned by no module (`tools/gates/*.py`) keeps its `labels` entry. A module may therefore need
+     more killed mutants of its own files before it gets a step set.
    - `cards` (optional): the cards a mutant of one code object applies to. A `kernels/gfx1151/` file needs
      `["8060s"]`; a kernel file that `kernels/whirl_kernels.hip` includes only inside its `!defined(__gfx1151__)`
      block (and the gfx1151 set does not include) needs `["r9700"]`. Such a mutant counts on its cards only: a row on

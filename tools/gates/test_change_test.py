@@ -656,6 +656,14 @@ check("n11b shipped: the K8-2 class of model.core is required through ~Model's e
       (real.get("require"), cat_real.get("x12-f8-model-dtor")))
 ok_real, why_real = tc.core_step_sets(real, cat_real, tc.evidence_modules(RMODS), meta=meta_real)
 check("n11b shipped: device.profile is blocked only by missing GPU runs, not by m6-uma-assert-drop", "m6-uma-assert-drop" not in why_real.get("device.profile", "x"), why_real.get("device.profile"))
+# arch025-n11c: a mutant counts under the module that OWNS the file it mutates (modules.json paths); the old label is fault_area
+_cat_rows = json.load(open(os.path.join(tc.REPO, "tools", "impact", "mutations.json"), encoding="utf-8"))["mutations"]
+_own = lambda f: [k for k, d in RMODS.items() if tc.matches(f, (d or {}).get("paths") or [])]
+bad_own = [(x["id"], x["module"], _own(x["file"])) for x in _cat_rows if _own(x["file"]) and x["module"] not in _own(x["file"])]
+check("n11c shipped: every catalog mutant is counted under the module that owns its mutated file", not bad_own, bad_own[:5])
+check("n11c shipped: m1-* (loader.cpp) count under model.core and keep model.weights as fault_area",
+      all(x["module"] == "model.core" and x.get("fault_area") == "model.weights" for x in _cat_rows if x["id"].startswith("m1-") and x["file"] == "src/model/loader.cpp")
+      and any(x["id"].startswith("m1-") and x["file"] == "src/model/loader.cpp" for x in _cat_rows), "m1-*")
 import subprocess  # noqa: E402
 rr = subprocess.run([sys.executable, "-I", os.path.join(os.path.dirname(os.path.abspath(__file__)), "test_change.py"), "--core-steps-report"],
                     capture_output=True, text=True)

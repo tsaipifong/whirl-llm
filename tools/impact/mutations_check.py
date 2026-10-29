@@ -13,6 +13,7 @@ no longer reverse-applies (git apply -R --check). Exit 0 = every mutant applies,
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import json
 import os
 import subprocess
@@ -68,6 +69,23 @@ def labels(muts, modules, extra=None):
     extra = extra or {}
     return [(m["id"], "label", m.get("file"), f"module {m.get('module')!r} is not in tools/gates/modules.json (nor in the catalog's \"labels\")")
             for m in muts if m.get("module") not in modules and m.get("module") not in extra]
+
+
+def owner_bad(muts, modules):
+    """arch025-n11c: a mutant counts, for the N11 GPU evidence rule, under the module that OWNS the file it mutates
+    (tools/gates/modules.json paths; test_change.py plans GPU steps for the modules whose files change). A row whose "module"
+    is not an owner of its file is refused; the bug class it was labelled with before goes in "fault_area" (information
+    only, must name a different label). A file owned by no module keeps its declared catalog label (e.g. gates)."""
+    out = []
+    for m in muts:
+        own = [k for k, d in modules.items() if any(fnmatch.fnmatch(m.get("file") or "", g) for g in (d or {}).get("paths", []))]
+        if own and m.get("module") not in own:
+            out.append((m["id"], "owner", m.get("file"), f"module {m.get('module')!r} is not an owner of this file (owner: {', '.join(own)}); "
+                        "set module to the owner and keep the old label in fault_area"))
+        fa = m.get("fault_area")
+        if "fault_area" in m and (not isinstance(fa, str) or not fa.strip() or fa == m.get("module")):
+            out.append((m["id"], "fault_area", m.get("file"), f"fault_area {fa!r}: want a non-empty label different from module"))
+    return out
 
 
 def gfx1201_only(root):
@@ -150,6 +168,17 @@ def selftest():
     got = [x[0] for x in labels([{"id": "l1", "module": "hip.runtime_loader"}, {"id": "l2", "module": "hip.runtime"},
                                  {"id": "l3", "module": "gates"}], MODS, {"gates": "tools/gates scripts"})]
     cases.append(("label not in modules.json is flagged; module / declared label pass", got == ["l1"]))
+    # arch025-n11c: module = the owner of the mutated file (modules.json paths); the old label moves to fault_area
+    OW = {"model.core": {"paths": ["src/model/loader.cpp"]}, "model.weights": {"paths": ["src/model/weights.cpp"]}}
+    got = {x[0]: x[3] for x in owner_bad([
+        {"id": "o1", "module": "model.weights", "file": "src/model/loader.cpp"},
+        {"id": "o2", "module": "model.core", "file": "src/model/loader.cpp", "fault_area": "model.weights"},
+        {"id": "o3", "module": "model.core", "file": "src/model/loader.cpp", "fault_area": "model.core"},
+        {"id": "o4", "module": "gates", "file": "tools/gates/x.py"},
+        {"id": "o5", "module": "model.core", "file": "src/model/loader.cpp", "fault_area": ""}], OW)}
+    cases.append(("owner: module that is not the file's owner flagged", "o1" in got and "fault_area" in got["o1"]))
+    cases.append(("owner: owner + fault_area passes; file in no module keeps its label", "o2" not in got and "o4" not in got))
+    cases.append(("owner: fault_area equal to module or empty flagged", {"o3", "o5"} <= set(got)))
     # cards: a non-empty subset of the two cards; a kernels/gfx1151/ file is the 8060S code object only
     got = {x[0]: x[3] for x in cards_bad([{"id": "c1", "file": "kernels/common.hip", "cards": ["r9700"]},
                                           {"id": "c2", "file": "kernels/common.hip", "cards": []},
@@ -199,7 +228,7 @@ def main():
     except (OSError, ValueError, KeyError) as e:
         print(f"mutations_check: cannot read {spec} / tools/gates/modules.json: {e}")
         return 2
-    bad = stale(a.root, muts) + unargued(muts) + labels(muts, mods, cat.get("labels")) + cards_bad(muts, gfx1201_only(a.root)) + equiv_bad(muts)
+    bad = stale(a.root, muts) + unargued(muts) + labels(muts, mods, cat.get("labels")) + owner_bad(muts, mods) + cards_bad(muts, gfx1201_only(a.root)) + equiv_bad(muts)
     for i, k, f, why in bad:
         print(f"STALE {i} ({k}, {f}): {why}")
     print(f"mutations check: {'ok' if not bad else 'FAIL'} ({len(muts) - len(bad)}/{len(muts)} mutants apply)")
