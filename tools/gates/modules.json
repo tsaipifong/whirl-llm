@@ -254,6 +254,8 @@
                      "proof": {"refactor": ["exit_rule", "golden_exact", "work_trace", "move_equal", "host_work", "host_time"]}},
    "server.slot": {"metrics": [], "metrics_none": "per-request state and one park call per idle slot when the governor frees VRAM: no bench key (whirl-iso-server-slot-tests, whirl-server-tests ckpt_f1 / governor)",
                    "proof": {"refactor": ["exit_rule", "golden_exact", "move_equal", "work_trace"]}},
+   "server.engine_types": {"metrics": [], "metrics_none": "types, constants and aliases only (no function of its own): no bench key (whirl-iso-server-engine-types-tests)",
+                           "proof": {"refactor": ["exit_rule", "golden_exact", "move_equal"]}},
    "server.cycle_prof": {"metrics": [], "metrics_none": "WHIRL_PROFILE only (off in the product default): no bench key (whirl-iso-server-cycle-prof-tests)",
                          "proof": {"refactor": ["exit_rule", "golden_exact", "move_equal", "server_log_scan"]}},
    "server.sample_buffers": {"metrics": ["host.sched.round_us_per_cycle"],
@@ -760,7 +762,7 @@
               "isolation: header-only over model.arch_registry and whirl/model.h (ModelError); no own iso program"]
   },
   "server.engine": {
-   "id": "N4", "desc": "the server engine (class Engine, src/server/engine.h): engine.cpp = construction, the request lifecycle and runLoop's scheduling phases; arch025-N4e / N4f split the rest of its member functions by concern, verbatim: engine_queue.cpp (the request queue: stop, runOnLoop, submitAndWait, abortQueued, the reaper), engine_pages.cpp (checkpoints, KV pages, shared prefix checkpoints), engine_tier.cpp (the scheduler's half of the host tiers), engine_prefill.cpp (prefill phases, decode floor), engine_decode.cpp (the decode cycle and its phases, drafts, DFlash2 context); engine_internal.h holds the types they share (KvPoolFull, CycleProf). Member groups are components (N4a SampleBuffers, N4b ImageEmbeddings, N4c BatchStats, N4f SpecState spec_ / FloorState fl_). Member declaration order = destruction order (pool_ / ps_ / tb_ / kv_arrays_ pinned by comments) is kept by every split (scratch/a25_lane1b/pin_member_order.py against 2d166f4)",
+   "id": "N4", "desc": "the server engine (class Engine, src/server/engine.h): engine.cpp = construction, the request lifecycle and runLoop's scheduling phases; arch025-N4e / N4f split the rest of its member functions by concern, verbatim: engine_queue.cpp (the request queue: stop, runOnLoop, submitAndWait, abortQueued, the reaper), engine_pages.cpp (checkpoints, KV pages, shared prefix checkpoints), engine_tier.cpp (the scheduler's half of the host tiers), engine_prefill.cpp (prefill phases, decode floor), engine_decode.cpp (the decode cycle and its phases, drafts, DFlash2 context); engine_internal.h is what they include beyond engine.h (CycleProf from server.cycle_prof, KvPoolFull from server.engine_types, the log). Member groups are components (N4a SampleBuffers, N4b ImageEmbeddings, N4c BatchStats, N4f SpecState spec_ / FloorState fl_). Member declaration order = destruction order (pool_ / ps_ / tb_ / kv_arrays_ pinned by comments) is kept by every split (scratch/a25_lane1b/pin_member_order.py against 2d166f4)",
    "paths": ["src/server/engine.cpp", "src/server/engine.h", "src/server/engine_internal.h", "src/server/engine_decode.cpp",
              "src/server/engine_pages.cpp", "src/server/engine_prefill.cpp", "src/server/engine_queue.cpp", "src/server/engine_tier.cpp"],
    "lands_on": "arch025-lane1b (lane 1 leg 3, registration with N4a; leg 4 N4e / N4f split files)",
@@ -807,6 +809,47 @@
     "whirl-iso-server-slot-tests (parkSlotCkpts == the c1ca7ce engine_gov.cpp body: bytes, fence, list cleared, parked; Slot F1 waits and noexcept moves; SlotData defaults) and whirl-server-tests ckpt_f1 / governor",
     "V-move: scratch/a25_engine/apply_s1.py --check (the moved block and body equal the c1ca7ce text; line multiset: 0 lines lost)",
     "V-srv: server golden + srv_* == the c1ca7ce exe (work_equal)"
+   ]
+  },
+  "server.engine_types": {
+   "id": "N4-S3",
+   "desc": "the server engine's shared types (src/server/engine_common.h, engine_options.h, engine_state.h; arch025-engine S3, moved verbatim out of engine.h and engine_internal.h): engine_common.h = the aliases every engine file uses (kv_page, gdn_max_seg, the prefill schedule names, tail_ck_slots, msSince, sampling::Cand / Sampler) and KvPoolFull; engine_options.h = EngineOptions; engine_state.h = BatchStats, SpecState, FloorState (CycleProf only declared). Header-only, layer L0 of the Engine split (progress/arch025-engine.DESIGN.md v3 S3); engine.h includes the three last, where their text stood. Isolated: tests/iso/server.engine_types (header-only manifest; the test links spec.policy because SpecState's CycleCost array calls CycleCost::reset)",
+   "paths": [
+    "src/server/engine_common.h",
+    "src/server/engine_options.h",
+    "src/server/engine_state.h"
+   ],
+   "lands_on": "arch025-engine (leg 2, S3)",
+   "steps": [
+    "cpu_iso_server_engine_types",
+    "cpu_server",
+    "cpu_pins",
+    "cpu_engine_split",
+    "cpu_member_order",
+    "golden_swift",
+    "golden_moe",
+    "srv_mt_precise",
+    "srv_mt_precise_moe",
+    "srv_balance",
+    "srv_fast",
+    "srv_cache_precise",
+    "srv_cache_balance"
+   ],
+   "gpus": {
+    "golden_swift": 2,
+    "golden_moe": 2,
+    "srv_mt_precise": 2,
+    "srv_mt_precise_moe": 2,
+    "srv_balance": 2,
+    "srv_fast": 2,
+    "srv_cache_precise": 1,
+    "srv_cache_balance": 1
+   },
+   "callers": "rdeps",
+   "manual": [
+    "whirl-iso-server-engine-types-tests (alias values and types, KvPoolFull type and text, every EngineOptions default, BatchStats / SpecState / FloorState starts == the a17493b text)",
+    "V-move: scratch/a25_engine/s3/apply_s3.py --check (the moved blocks equal the a17493b text byte for byte; line multiset: only engine_internal.h's old head comment lost) and s3/hdr_alone.py (each header compiles alone and twice with the product flags)",
+    "V-obj: objeq of every product object against the a17493b build (expected all identical: types only)"
    ]
   },
   "server.cycle_prof": {
