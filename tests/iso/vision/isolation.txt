@@ -73,6 +73,7 @@ hdr       src/platform/fs.h
 hdr       src/platform/fs_fake.h
 hdr       src/platform/proc.h
 hdr       src/vision/stb_image.h
+hdr       src/hip/win_text.h
 # test program
 testsrc   tests/vision/vision_tests.cpp
 testhdr   tests/test_check.h

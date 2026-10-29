@@ -12,6 +12,8 @@ define    WHIRL_TEST_DLL_DEPS=1
 src       src/release/dll_deps.cpp
 # headers (include closure of the files above)
 hdr       src/release/dll_deps.h
+hdr       include/whirl/small_helpers.h
+hdr       src/hip/win_text.h
 # test program
 testsrc   tests/unit/release_tests.cpp
 testhdr   tests/test_check.h

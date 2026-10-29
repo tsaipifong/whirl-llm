@@ -49,6 +49,7 @@ hdr       src/platform/env.h
 hdr       src/platform/fs.h
 hdr       src/platform/fs_fake.h
 hdr       src/platform/proc.h
+hdr       src/hip/win_text.h
 # test program
 testsrc   tests/iso/hip.restrict/gpu_restrict_tests.cpp
 testhdr   tests/iso/iso_test.h
