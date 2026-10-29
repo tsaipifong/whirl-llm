@@ -31,7 +31,9 @@ model.core no longer declares module.cpp / spec.policy. Also leg 5: protocol (S6
 only, base64Decode moved from engine_vision.cpp to src/server/base64.cpp, vision::tokenId / expand from vision.cpp to
 src/vision/prompt.cpp; declared: src/chat, the tokenizer + GGUF reader, the vision prompt side, the server log, util,
 platform; manifest kind `gen` for the generated whirl/version.h) and model.qwen35.arch (module.cpp over the model core
-+ spec.policy; model.qwen35 split into model.qwen35.arch and model.qwen35.server).
++ spec.policy; model.qwen35 split into model.qwen35.arch and model.qwen35.server). arch025-lane2 leg 6: model.types
+(header-only: model_types.h + model_error.h over whirl/hip.h and whirl/kv_format.h; iso_check.py header-only mode,
+`mutinc end` because server/engine.h includes model_types.h back).
 
 arch025-iso3 added, each built with its own `tests/unit/<module>_tests.cpp`: gguf, tokenizer, json, mem.governor, mem.wddm_watch,
 gpu_select, spec.sample, hip.leak, platform.env, platform.paths, platform.console.

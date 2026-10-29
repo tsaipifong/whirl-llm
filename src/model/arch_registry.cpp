@@ -1,4 +1,5 @@
-// Architecture registry: table lookup, the UnsupportedArch text and the server's per-slot state bytes (arch025-M5).
+// Architecture registry: table lookup, the UnsupportedArch text, the load entry (arch025-lane2 leg 6) and the server's
+// per-slot state bytes (arch025-M5).
 // SPDX-License-Identifier: Apache-2.0
 
 #include "model/arch_registry.h"
@@ -35,6 +36,12 @@ std::string supportedArchs(const ArchTable& table) {
 
 std::string unsupportedArchText(std::string_view name, const ArchTable& table) {
     return "general.architecture = '" + std::string(name) + "' (WHIRL supports " + supportedArchs(table) + " only)";
+}
+
+Loaded loadArch(const ArchModule& am, const gguf::File& f, std::uint32_t max_ctx, qwen35::LoadStats& stats,
+                const qwen35::LoadOptions& lo) {
+    if (!am.load) return {};
+    return am.load(f, max_ctx, stats, lo);
 }
 
 SlotStateBytes slotStateBytes(const ArchSizing& s, const qwen35::Config& cfg) {

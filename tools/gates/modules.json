@@ -629,7 +629,7 @@
               "kvram719_tier both GPUs (pool allocation and resizePool, hipError 719 history)"]
   },
   "model.types": {
-   "id": "M0", "desc": "qwen35 model types (arch025-lane2 N9 S2b, was part of model.scratch): include/whirl/model_types.h (Config, max_batch_default .. ctl_words, VSeg / PSeg / PRows / MSeg / BatchPlan, LoadEstimate), the only model header the server core and spec.policy include; ModelError (src/model/qwen35/model_error.h, arch025-lane2 N9 S2c: thrown by model.kv / scratch / weights without the Model class). Includes only the HIP runtime header and kv_format: the full gate",
+   "id": "M0", "desc": "qwen35 model types (arch025-lane2 N9 S2b, was part of model.scratch): include/whirl/model_types.h (Config, max_batch_default .. ctl_words, VSeg / PSeg / PRows / MSeg / BatchPlan, LoadEstimate), the only model header the server core and spec.policy include; ModelError (src/model/qwen35/model_error.h, arch025-lane2 N9 S2c: thrown by model.kv / scratch / weights without the Model class). Includes only the HIP runtime header and kv_format: the full gate; header-only isolation (arch025-lane2 leg 6): tests/iso/model.types (iso_check.py header-only mode, cpu_iso_model_types in the full gate)",
    "paths": ["include/whirl/model_types.h", "src/model/qwen35/model_error.h"],
    "full": true,
    "manual": ["full release_gate on both GPUs (ARCH-1 3.3)"]
@@ -811,17 +811,18 @@
               "V-srv: the startup lines (kv pool sizing:, adjusted:, kv pool check:) of srv_* cases == the 2d166f4 exe (work_equal / server_log_scan)"]
   },
   "model.arch_registry": {
-   "id": "M5a", "desc": "architecture registry (src/model/arch_registry.*, host-only library whirl_arch, linked by the server core and the model library): ArchName / ArchSizing / ArchModule / ArchTable, findArch / findArchName (explicit tables, no self-registration), the UnsupportedArch text generated from the table (byte-identical to v0.2.4 with the product table), slotStateBytes (the server's per-slot recurrent state + replay rows for the dGPU fit and the UMA check)",
+   "id": "M5a", "desc": "architecture registry (src/model/arch_registry.*, host-only library whirl_arch, linked by the server core and the model library): ArchName / ArchSizing / ArchModule / ArchTable, findArch / findArchName (explicit tables, no self-registration), the UnsupportedArch text generated from the table (byte-identical to v0.2.4 with the product table), slotStateBytes (the server's per-slot recurrent state + replay rows for the dGPU fit and the UMA check); the load entry (arch025-lane2 leg 6, X-16): ArchModule::load (LoadFn), Loaded (Owned<T> = unique_ptr with the family's deleter: qwen35 model or ServerModel) and loadArch (the row's load, nothing for a row without one)",
    "paths": ["src/model/arch_registry.h", "src/model/arch_registry.cpp", "cmake/arch.cmake"], "lands_on": "arch025-m5 (M5)",
    "steps": ["cpu_iso_model_arch_registry", "cpu_model", "cpu_server", "cpu_pins", "golden_swift", "golden_moe", "srv_mt_precise", "srv_mt_precise_moe"],
    "gpus": {"golden_swift": 2, "golden_moe": 2, "srv_mt_precise": 2, "srv_mt_precise_moe": 2},
    "callers": "rdeps",
    "manual": ["V-size: startup_lines.py check on the server logs of both GPUs (the dGPU fit and the UMA check now take the sizing through the module and slotStateBytes)",
               "unknown architecture: the release front-end's UnsupportedArch message (src/release/release.cpp) unchanged (model-tests testArchRegistry pins the detail text)",
-              "a test table (whirl-server-tests fake_arch_fit, whirl-model-tests testArchRegistry) must never reach builtinArchs"]
+              "a test table (whirl-server-tests fake_arch_fit, whirl-model-tests testArchRegistry) must never reach builtinArchs",
+              "X-16 (arch025-lane2 leg 6): whirl-server-tests fake_arch_fit loads the toy family through loadArch to its ServerModel and the server's pool steps; whirl-server's own load goes through loadServerModel (golden server / srv_mt on both GPUs)"]
   },
   "model.qwen35.arch": {
-   "id": "M5b", "desc": "qwen35 family module, architecture half (arch025-lane2 leg 5: model.qwen35 split into arch / server): the product's architecture table (src/model/qwen35/module.cpp, builtinArchs: the qwen35 row = the family's GGUF names from qwen35/arch_names.h (model.core), Config::fromGguf / validateTensors, the pre-load sizing functions incl. spec.policy's mtpDefaults); above model.core (Config::fromGguf no longer names builtinArchs: no link cycle); link isolation tests/iso/model.qwen35.arch",
+   "id": "M5b", "desc": "qwen35 family module, architecture half (arch025-lane2 leg 5: model.qwen35 split into arch / server): the product's architecture table (src/model/qwen35/module.cpp, builtinArchs: the qwen35 row = the family's GGUF names from qwen35/arch_names.h (model.core), Config::fromGguf / validateTensors, the pre-load sizing functions incl. spec.policy's mtpDefaults); above model.core (Config::fromGguf no longer names builtinArchs: no link cycle); link isolation tests/iso/model.qwen35.arch; arch025-lane2 leg 6 (X-16): the row's load entry loadQwen35 (= qwen35::Model::load, the call server_main made) and loadServerModel (whirl-server's load: loadArch, then the qwen35 model; a family whose load gives none is UnsupportedArch)",
    "paths": ["src/model/qwen35/module.cpp"], "lands_on": "arch025-m5 (M5); split arch025-lane2 leg 5",
    "steps": ["cpu_iso_model_qwen35_arch", "cpu_model", "cpu_server", "golden_swift", "golden_moe", "srv_mt_precise", "srv_mt_precise_moe"],
    "gpus": {"golden_swift": 2, "golden_moe": 2, "srv_mt_precise": 2, "srv_mt_precise_moe": 2},

@@ -1815,7 +1815,7 @@ void testNetRecvError() {
             // closesocket(); see net_call_table) after the client already has the response, so arming before that
             // connection is closed sometimes let its drain recv take the failure and C{2i-1} was answered (gate s3
             // and int4: ~1 in 60 runs). Wait (bounded) until the server closed it.
-            if (i > 1 && std::getenv("WHIRL_TEST_NO_DRAIN_WAIT") == nullptr) {
+            if (i > 1) {
                 const std::string prev = std::format("C{}", 2 * i - 2);
                 bool prev_closed = false;
                 int polls = 0;
@@ -6721,8 +6721,67 @@ std::uint64_t bufferBytes(const qwen35::Config&, std::uint32_t B, std::uint64_t 
 std::uint32_t fdSplits(KvFormat kv) { return kv == KvFormat::q4 ? 256 : 64; }
 std::uint64_t dflashBytes(const gguf::File&) { return 0; }
 qwen35::MtpDefaults mtp(bool, hip::Arch) { return {2, 0.0f, 0, false}; }
+// arch025-lane2 leg 6 (X-16): the toy's load entry. No qwen35 model: the engine's interface straight away, a host-memory
+// MockModel on the toy's own NullBackend, shaped from the GGUF (block_count) and the load options (max_batch), so its
+// shape can only come through the load entry. The deleter is the toy's (model::Owned).
+NullBackend& ops() {
+    static NullBackend nb;
+    return nb;
+}
+int g_loads = 0;
+std::uint32_t g_load_ctx = 1;
+void freeServerModel(server::ServerModel* m) { delete m; }
+model::Loaded load(const gguf::File& f, std::uint32_t max_ctx, qwen35::LoadStats& stats, const qwen35::LoadOptions& lo) {
+    ++g_loads;
+    g_load_ctx = max_ctx;
+    test::MockConfig mc;
+    mc.n_layer = static_cast<std::uint32_t>(f.getUintOr("whirl-toy.block_count", 0));
+    mc.max_batch = lo.max_batch;
+    mc.parallel = 2;
+    mc.slot_ctx = 8192;
+    mc.pool_tokens = 4096;  // a placeholder pool: the server's pool step resizes it
+    stats.tensors = 1;
+    model::Loaded r;
+    r.server = model::Owned<server::ServerModel>(new test::MockModel(ops(), tok(), mc), &freeServerModel);
+    return r;
+}
 constexpr model::ArchName names[] = {{"whirl-toy", false}};
-constexpr model::ArchModule rows[] = {{"toy", names, &fromGguf, nullptr, {&estimateLoad, &bufferBytes, &fdSplits, &dflashBytes, 8, &mtp}}};
+constexpr model::ArchModule rows[] = {
+    {"toy", names, &fromGguf, nullptr, {&estimateLoad, &bufferBytes, &fdSplits, &dflashBytes, 8, &mtp}, &load}};
+
+// The server's slot and KV pool steps (startup::setupSlots / allocKvPool: the model type is a template parameter;
+// whirl-server passes qwen35::Model) over the toy's ServerModel: every member those steps name, each answered by the
+// ServerModel interface where it has one (snapshot sets, replay, state bytes, the pool) and recorded where it has none
+// (setupSeqs: the ServerModel's slots exist from its load; dflashSetup: no drafter).
+struct PoolModel {
+    struct Dfr {
+        std::uint32_t block = 0, ring = 0;
+    };
+    server::ServerModel& sm;
+    std::uint64_t per_token = 0;  // the toy's KV bytes per token (its sizing's estimate)
+    std::vector<std::string> calls;
+    std::unique_ptr<Dfr> dfr;
+    std::uint32_t cap_rows = 0;
+    bool gdn_replay = sm.gdnReplay();
+    std::vector<std::uint32_t> gdn_ord = std::vector<std::uint32_t>(sm.cfg().n_layer, 1);
+    std::vector<std::uint64_t> ssm_state = std::vector<std::uint64_t>(sm.cfg().n_layer, 0);
+    std::uint32_t snap_sets = sm.snapSets();
+    whirl::relax::Params relax() const { return {}; }
+    std::uint64_t pendLayerBytes() const { return 0; }
+    std::uint64_t convBytes() const { return sm.convBytes(); }
+    std::uint64_t ssmBytes() const { return sm.ssmBytes(); }
+    std::uint64_t kvBytesPerToken() const { return per_token; }
+    void setupSeqs(std::uint32_t n, std::uint32_t ctx) { calls.push_back(std::format("setupSeqs({},{})", n, ctx)); }
+    void dflashSetup(std::uint32_t, std::uint32_t) { calls.push_back("dflashSetup"); }
+    void ensureSnapshots(std::uint32_t n) {
+        sm.ensureSnapshots(n);
+        snap_sets = sm.snapSets();
+        calls.push_back(std::format("ensureSnapshots({})", n));
+    }
+    void allocKvPool(std::uint32_t tokens) {
+        calls.push_back(std::format("allocKvPool({}) -> {}", tokens, sm.resizePool(tokens) ? "resized" : "refused"));
+    }
+};
 }  // namespace toy_arch
 
 // a GGUF header of the toy family (no tensors): general.architecture = whirl-toy, 8 blocks
@@ -6793,6 +6852,52 @@ void testFakeArchFit() {
     CHECK(r2.plan.reduced && r2.plan.pool_tokens > 22768u);
     // the UMA check's snapshot sets (server_main: mtpDefaults(moe, gfx1151).drafts x st1) come from the module too
     CHECK_EQ(std::max<std::uint32_t>(1, am->sizing.mtpDefaults(cfg.moe, hip::Arch::gfx1151).drafts) * ssb.st1, 2 * ssb.st1);
+
+    // arch025-lane2 leg 6 (X-16): the toy is LOADED through the registry (model::loadArch -> the row's load entry, as
+    // whirl-server's model::loadServerModel calls it), with the batch the fit planned, and its ServerModel goes
+    // through the server's pool steps: slots (startup::setupSlots), the pool sized from the VRAM left
+    // (numerics::serverPoolFit, planPool's call), startup::allocKvPool. What stays qwen35-bound: whirl-server itself
+    // refuses a family whose load gives no qwen35 model (loadServerModel; tests/model testArchRegistry).
+    qwen35::LoadStats stats;
+    qwen35::LoadOptions lo;
+    lo.max_batch = r2.plan.batch;
+    toy_arch::g_loads = 0;
+    model::Loaded ld = model::loadArch(*am, f, 0, stats, lo);
+    CHECK_EQ(toy_arch::g_loads, 1);
+    CHECK_EQ(toy_arch::g_load_ctx, 0u);
+    CHECK_EQ(stats.tensors, 1u);
+    CHECK(!ld.qwen35);
+    CHECK(ld.server != nullptr);
+    if (!ld.server) return;
+    server::ServerModel& sm = *ld.server;
+    CHECK_EQ(sm.cfg().n_layer, cfg.n_layer);  // the toy's GGUF reached the model through its load
+    CHECK_EQ(sm.maxBatch(), r2.plan.batch);   // and so did the planned batch (r2: reduced from 4096)
+    CHECK(r2.plan.batch < 4096u || r2.plan.n_ck < 4u);
+    toy_arch::PoolModel pm{sm, r1.fi.kv_per_token};
+    startup::SlotSetupIn sin;
+    sin.parallel = parallel;
+    sin.slot_ctx = 8192;
+    sin.n_layer = cfg.n_layer;
+    const startup::SlotSetup slots = startup::setupSlots(pm, toy_arch::ops(), sin, startup::BatchDrafts{});
+    // planPool: the pool from the VRAM left (here: exactly 50000 tokens of the toy's KV after nothing else) and the
+    // toy's bytes per token, in pages of kv_page
+    const std::uint64_t avail = 50000ull * pm.kvBytesPerToken();
+    const numerics::PoolFit pf =
+        numerics::serverPoolFit(avail, pm.kvBytesPerToken(), std::nullopt, false, sin.slot_ctx, false, kv_page, 8 * 50000u);
+    CHECK_EQ(pf.pool, 50000u / kv_page * kv_page);
+    CHECK_EQ(pf.slot_ctx, sin.slot_ctx);
+    startup::allocKvPool(pm, pf.pool, slots);
+    CHECK_EQ(pm.calls.size(), std::size_t{2});
+    if (pm.calls.size() == 2) {
+        CHECK_EQ(pm.calls[0], std::string("setupSeqs(2,8192)"));
+        CHECK_EQ(pm.calls[1], std::format("allocKvPool({}) -> resized", pf.pool));
+    }
+    CHECK_EQ(sm.poolPages(), pf.pool / kv_page);  // the toy's own pool, through the ServerModel interface
+    // a row without a load entry (the GGUF-name tables) loads nothing
+    constexpr model::ArchModule no_load[] = {{"toy", toy_arch::names}};
+    const model::Loaded none = model::loadArch(no_load[0], f, 0, stats, lo);
+    CHECK(!none.qwen35 && !none.server);
+    CHECK_EQ(toy_arch::g_loads, 1);
 }
 
 // arch025-C0 (replaces FR-DFL P3-1's check on positions in server_main.cpp's text): serveMain's dGPU fit

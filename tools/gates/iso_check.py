@@ -32,6 +32,12 @@ AND compile with the product flags (/I src /I include), which is what makes the 
        archtable whirl::model::builtinArchs (src/model/qwen35/module.cpp, model.qwen35: the product architecture table)
 gen PATH (arch025-lane2 leg 5): a header the build generates (<build>/generated/PATH, e.g. whirl/version.h from
 src/release/version.h.in), staged as mod/PATH; --build names the build tree (default <root>/build/Release).
+Header-only module (arch025-lane2 leg 6, model.types): `mutate` may name one of its hdr lines, and then src lines are
+optional; the test program is the only translation unit, so it is rebuilt for every mutant (the header goes into it),
+and the product compile of a mutant compiles the mutated header as a source of its own (so it must be self-contained).
+The relative include mutant of a file outside src/ (include/whirl/x.h) names the tree's src/server/engine.h
+("../../src/server/engine.h"). --mutants first runs the script's own selftest (pure Python, no compiler; --selftest
+alone runs only it): last line "iso check selftest: N/N as expected".
 The product compile of a mutant is done on a temporary file next to the real one (_iso_mut_<module>_<case>.cpp, so the relative
 include resolves as in the tree) and removed right after. The product link is not redone here (it needs the HIP build).
 Per module the last line is "iso check: ok (<module>, N/N cases as expected)" or "iso check: FAIL (<module>, ...)"; with
@@ -127,11 +133,13 @@ class Manifest:
                 raise SetupError(f"{self.rel}: unknown kind {kind}")
         if self.module is None and self.rel == "tests/sampling/isolation.txt":
             self.module = "sampling"
-        if not self.module or not self.exe or not any(k == "src" for k, _ in self.items) or \
+        # arch025-lane2 leg 6: a header-only module mutates one of its hdr lines and needs no src line
+        self.header_only = bool(self.mutate) and ("hdr", self.mutate) in self.items
+        if not self.module or not self.exe or not (self.header_only or any(k == "src" for k, _ in self.items)) or \
                 not any(k == "testsrc" for k, _ in self.items):
-            raise SetupError(f"{self.rel}: needs module, exe, src and testsrc lines")
-        if self.mutate and (("src", self.mutate) not in self.items):
-            raise SetupError(f"{self.rel}: mutate {self.mutate} is not one of its src lines")
+            raise SetupError(f"{self.rel}: needs module, exe, src (or a mutate hdr line) and testsrc lines")
+        if self.mutate and (("src", self.mutate) not in self.items) and not self.header_only:
+            raise SetupError(f"{self.rel}: mutate {self.mutate} is not one of its src or hdr lines")
 
 
 class SetupError(Exception):
@@ -209,6 +217,9 @@ def stage(root, man, d):
 
 def relative_engine(src_rel):
     # from the source's directory to src/server/engine.h, as a relative include ("../server/engine.h" from src/sampling)
+    if not src_rel.startswith("src/"):
+        # arch025-lane2 leg 6: a header under include/ (include/whirl/model_types.h): up to the root, then src/
+        return "/".join([".."] * (len(src_rel.split("/")) - 1) + ["src", ENGINE_H])
     up = len(staged(src_rel).split("/")) - 1
     return "/".join([".."] * up + [ENGINE_H]) if up else ENGINE_H
 
@@ -261,8 +272,30 @@ def build_iso(man, d, files, env, objs_from=None, only_src=None):
     return "run", rc, out
 
 
+def product_compile_header(root, rel_hdr, text, tag, env, d):
+    # arch025-lane2 leg 6 (header-only module): the mutated header shadows the real one. It is written to
+    # <root>/_iso_mut_<tag>/<path without include/ or src/> (same depth as the real file, so a relative include resolves
+    # as in the tree) and a one-line source includes it with that directory first on the include path: the product
+    # headers that include it (server/engine.h -> whirl/model_types.h) then reach the same copy (#pragma once).
+    top = os.path.join(root, f"_iso_mut_{tag}")
+    hdr = os.path.join(top, *staged(rel_hdr).split("/"))
+    src = os.path.join(top, "_iso_probe.cpp")
+    try:
+        os.makedirs(os.path.dirname(hdr), exist_ok=True)
+        with open(hdr, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+        with open(src, "w", encoding="utf-8", newline="\n") as f:
+            f.write(f'#include "{staged(rel_hdr)}"\n')
+        rc, out = compile_obj(src, [top, os.path.join(root, "src"), os.path.join(root, "include")], os.path.join(d, "prod.obj"), env, d)
+    finally:
+        shutil.rmtree(top, ignore_errors=True)
+    return rc, out
+
+
 def product_compile(root, rel_src, text, tag, env, d):
     # tag = <module>_<case>: modules checked in parallel can mutate sources of one directory
+    if not rel_src.endswith(".cpp"):
+        return product_compile_header(root, rel_src, text, tag, env, d)
     tmp = os.path.join(root, os.path.dirname(rel_src), f"_iso_mut_{tag}.cpp")
     try:
         with open(tmp, "w", encoding="utf-8", newline="\n") as f:
@@ -285,9 +318,61 @@ def cases_of(man, mutants):
     if mutants:
         if not man.mutate:
             raise SetupError(f"{man.rel}: --mutants needs a mutate line")
-        cs += [("include_engine", "compile", "C1083"), ("include_relative", "compile", "C1083")]
+        # a header-only module's header is compiled inside the test program (arch025-lane2 leg 6)
+        inc_stage = "test-compile" if man.header_only else "compile"
+        cs += [("include_engine", inc_stage, "C1083"), ("include_relative", inc_stage, "C1083")]
         cs += [(f"call_{s}", "link", "LNK2019") for s in (man.mutsyms or ["now", "log"])]
     return cs
+
+
+def mutate_target(man, d, files):
+    # the staged copy the mutant edits: a src line's copy, or (header-only module) the hdr line's copy under mod/
+    if not man.header_only:
+        return dict(files["src"])[man.mutate]
+    return os.path.join(d, "mod", *staged(man.mutate).split("/"))
+
+
+def selftest():
+    """Pure-Python checks of what the header-only mode added (arch025-lane2 leg 6). -> (good, n, lines)"""
+    lines = []
+    res = []
+
+    def case(name, ok):
+        res.append(bool(ok))
+        lines.append(f"{'ok  ' if ok else 'FAIL'} selftest {name}")
+
+    with tempfile.TemporaryDirectory() as root:
+        for p in ("include/whirl/t.h", "src/a/t.cpp", "tests/iso/t/t_tests.cpp"):
+            os.makedirs(os.path.join(root, os.path.dirname(p)), exist_ok=True)
+            open(os.path.join(root, p), "w").close()
+        mp = os.path.join(root, "tests", "iso", "t", "isolation.txt")
+
+        def man(text):
+            with open(mp, "w", encoding="utf-8") as f:
+                f.write(text)
+            try:
+                return Manifest(mp, root)
+            except SetupError:
+                return None
+
+        head = "module t\nexe t-tests\ntestsrc tests/iso/t/t_tests.cpp\nhdr include/whirl/t.h\n"
+        m = man(head + "mutate include/whirl/t.h\n")
+        case("header-only manifest (mutate hdr, no src) accepted", m is not None and m.header_only)
+        case("no src and no mutate hdr refused", man(head) is None)
+        case("mutate naming no src / hdr line refused", man(head + "mutate src/a/t.cpp\n") is None)
+        m2 = man(head + "src src/a/t.cpp\nmutate src/a/t.cpp\n")
+        case("module with a mutate src line is not header-only", m2 is not None and not m2.header_only)
+        case("header mutant edits mod/<header>",
+             m is not None and mutate_target(m, "D", {"src": []}).replace("\\", "/") == "D/mod/whirl/t.h")
+        case("header-only include mutants expected at test-compile",
+             m is not None and ("include_engine", "test-compile", "C1083") in cases_of(m, True))
+        case("src module include mutants expected at compile",
+             m2 is not None and ("include_engine", "compile", "C1083") in cases_of(m2, True))
+    case("relative include from include/whirl", relative_engine("include/whirl/model_types.h") == "../../src/server/engine.h")
+    case("relative include from src/sampling unchanged", relative_engine("src/sampling/x.cpp") == "../server/engine.h")
+    case("relative include from src/server unchanged", relative_engine("src/server/x.cpp") == "../server/engine.h")
+    lines.append(f"iso check selftest: {sum(res)}/{len(res)} as expected")
+    return sum(res), len(res), lines
 
 
 def check_module(root, man, work, env, mutants, keep):
@@ -311,11 +396,13 @@ def check_module(root, man, work, env, mutants, keep):
         else:
             src_text = open(os.path.join(root, man.mutate), encoding="utf-8").read()
             mut = mutate(src_text, name, man.mutate, man.mutinc)
-            target = dict(files["src"])[man.mutate]
+            target = mutate_target(man, d, files)
             with open(target, "w", encoding="utf-8", newline="\n") as f:
                 f.write(mut)
-            # the control's objects are reused for the unchanged sources (only when the control built them)
-            st, rc, out = build_iso(man, d, files, env, objs_from=ctl if ctl_ok else None, only_src=man.mutate)
+            # the control's objects are reused for the unchanged sources (only when the control built them; never for
+            # a header-only module, whose header is compiled into the test program)
+            st, rc, out = build_iso(man, d, files, env, objs_from=ctl if ctl_ok and not man.header_only else None,
+                                    only_src=man.mutate)
             caught = st == want_stage and rc != 0 and want_code in out
             prc, pout = product_compile(root, man.mutate, mut, f"{man.module}_{name}", env, d)
             ok = caught and prc == 0
@@ -349,7 +436,15 @@ def main(argv):
     ap.add_argument("--vcvars", default=VCVARS)
     ap.add_argument("--keep", action="store_true")
     ap.add_argument("--build", default="", help="build tree whose generated/ headers the gen lines stage (default <root>/build/Release)")
+    ap.add_argument("--selftest", action="store_true", help="only the script's own pure-Python selftest")
     a = ap.parse_args(argv)
+    if a.selftest or a.mutants:
+        sgood, sn, slines = selftest()
+        print("\n".join(slines), flush=True)
+        if sgood != sn:
+            return 2
+        if a.selftest:
+            return 0
     global GEN_ROOT
     GEN_ROOT = os.path.join(a.build or os.path.join(a.root, "build", "Release"), "generated")
     # python -I ignores PYTHONIOENCODING; a cp950 console cannot print U+FFFD from a decoded cl line (arch025-X3fix)

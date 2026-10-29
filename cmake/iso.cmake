@@ -3,7 +3,7 @@
 #
 # Included from cmake/server.cmake after whirl_sampling. One manifest per module: tests/sampling/isolation.txt and
 # tests/iso/<module>/isolation.txt (kinds: module, exe, lib, mutate, mutinc, mutsym, syslib, gen, src, hdr, testsrc, testhdr; see
-# tools/gates/iso_check.py). The listed files are copied into <build>/iso/<module>/{mod,test}/ (the leading src/
+# tools/gates/iso_check.py; a header-only module has no src line and no object library). The listed files are copied into <build>/iso/<module>/{mod,test}/ (the leading src/
 # include/ tests/ dropped) and compiled from there:
 #   <lib>   OBJECT library of the module sources + the declared dependency sources; include path = iso/<module>/mod
 #           ONLY. An undeclared include, also a relative "../server/x.h", is C1083.
@@ -85,8 +85,9 @@ function(whirl_iso_module _list)
       list(APPEND _test_src ${_dst})
     endif()
   endforeach()
-  if(NOT _mod_src OR NOT _test_src)
-    message(FATAL_ERROR "${_list}: needs src and testsrc lines")
+  # arch025-lane2 leg 6: a header-only module (model.types) has no src line; its test program is the only target
+  if(NOT _test_src)
+    message(FATAL_ERROR "${_list}: needs testsrc lines (and src lines unless the module is header-only)")
   endif()
 
   set(_gen_dst)
@@ -96,13 +97,17 @@ function(whirl_iso_module _list)
                        DEPENDS ${CMAKE_BINARY_DIR}/generated/${_g} VERBATIM)
     list(APPEND _gen_dst ${_iso}/mod/${_g})
   endforeach()
-  add_library(${_lib} OBJECT ${_mod_src} ${_gen_dst})
-  # set (not append) the include path: nothing inherited, nothing from linked targets
-  set_property(TARGET ${_lib} PROPERTY INCLUDE_DIRECTORIES ${_iso}/mod)
-
   add_executable(${_exe} ${_test_src})
   set_property(TARGET ${_exe} PROPERTY INCLUDE_DIRECTORIES ${_iso}/mod ${_iso}/test)
-  target_link_libraries(${_exe} PRIVATE ${_lib} ${_syslibs})
+  if(_mod_src)
+    add_library(${_lib} OBJECT ${_mod_src} ${_gen_dst})
+    # set (not append) the include path: nothing inherited, nothing from linked targets
+    set_property(TARGET ${_lib} PROPERTY INCLUDE_DIRECTORIES ${_iso}/mod)
+    target_link_libraries(${_exe} PRIVATE ${_lib} ${_syslibs})
+  else()
+    target_sources(${_exe} PRIVATE ${_gen_dst})
+    target_link_libraries(${_exe} PRIVATE ${_syslibs})
+  endif()
   if(MSVC)
     target_link_options(${_exe} PRIVATE /OPT:NOREF)
   endif()
