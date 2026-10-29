@@ -7,6 +7,9 @@
 #if WHIRL_TEST_DLL_DEPS
 #include "release/dll_deps.h"
 #endif
+#include "whirl/small_helpers.h"  // lowerAscii (arch025-N6, lane 1 leg 11)
+
+#include <cctype>
 
 #include <algorithm>
 #include <atomic>
@@ -38,6 +41,9 @@
 #endif
 #include <windows.h>
 #include <psapi.h>  // K32GetProcessMemoryInfo (arch025-surv testPlatformProcSurvivors)
+#endif
+#if WHIRL_TEST_DLL_DEPS
+#include "hip/win_text.h"  // narrowUtf8 / fileExists (arch025-N6, lane 1 leg 11; after <windows.h>)
 #endif
 
 using namespace whirl;
@@ -201,6 +207,96 @@ void testDllDeps() {
 }
 #endif
 
+// arch025-N6 (lane 1 leg 11): the shared helpers against verbatim copies of every old body they replaced
+namespace n6old {
+// src/common/gpu_select.cpp
+std::string lower_gpu_select(std::string_view s) {
+    std::string r(s);
+    for (char& c : r) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return r;
+}
+// src/common/numerics.cpp
+std::string lower_numerics(std::string_view s) {
+    std::string o(s);
+    for (char& c : o)
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    return o;
+}
+// src/hip/hip_runtime.cpp
+std::string lower_hip_runtime(std::string_view s) {
+    std::string r(s);
+    for (auto& c : r) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return r;
+}
+// src/server/http.cpp
+std::string lower_http(std::string_view s) {
+    std::string r(s);
+    for (char& c : r) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return r;
+}
+// src/release/dll_deps.cpp
+std::string lower_dll_deps(std::string s) {
+    for (char& c : s)
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    return s;
+}
+#if WHIRL_TEST_DLL_DEPS
+// src/hip/runtime_loader.cpp (src/release/dll_deps.cpp had the same text)
+std::string narrowUtf8_old(const std::wstring& w) {
+    if (w.empty()) return {};
+    const int n = WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), nullptr, 0, nullptr, nullptr);
+    std::string s(static_cast<std::size_t>(n > 0 ? n : 0), '\0');
+    if (n > 0) WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), s.data(), n, nullptr, nullptr);
+    return s;
+}
+// src/hip/runtime_loader.cpp (src/release/dll_deps.cpp had the same text)
+bool fileExists_old(const std::wstring& p) {
+    const DWORD a = GetFileAttributesW(p.c_str());
+    return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY) == 0;
+}
+#endif
+}  // namespace n6old
+
+void testSharedHelpersN6() {
+    // lowerAscii: every single byte, all 256 bytes in one string, embedded NUL, words the callers lower
+    std::vector<std::string> in;
+    for (int b = 0; b < 256; ++b) in.emplace_back(1, static_cast<char>(b));
+    std::string all;
+    for (int b = 0; b < 256; ++b) all.push_back(static_cast<char>(b));
+    in.push_back(all);
+    for (const char* w : {"", "GFX1201", "gfx1151", "AMD Radeon(TM) 8060S Graphics", "Rocm_KPack.DLL", "API-MS-Win-Core",
+                          "http://LOCALHOST:8080", "GPU-0A1B2C3D-UUID", "Balance", " Fast\t", "\xC3\x89t\xC3\xA9"})
+        in.emplace_back(w);
+    in.emplace_back("A\0Z", 3);
+    int lower_same = 0;
+    for (const std::string& s : in) {
+        const std::string want = n6old::lower_numerics(s);
+        const bool same = whirl::lowerAscii(s) == want && n6old::lower_gpu_select(s) == want &&
+                          n6old::lower_hip_runtime(s) == want && n6old::lower_http(s) == want && n6old::lower_dll_deps(s) == want;
+        lower_same += same ? 1 : 0;
+        CHECK(same);
+    }
+    CHECK_EQ(lower_same, static_cast<int>(in.size()));
+#if WHIRL_TEST_DLL_DEPS
+    // narrowUtf8: empty, ASCII, BMP, a surrogate pair, lone surrogates (replaced, flags 0), embedded NUL, U+FFFF, long
+    const std::vector<std::wstring> wide = {L"", L"C:\\Program Files\\AMD\\ROCm\\bin\\amdhip64_7.dll", L"\u4E2D\u6587\\\u8DEF\u5F91",
+                                            std::wstring(L"\xD83D\xDE00"), std::wstring(L"a\xD800" L"b"), std::wstring(L"\xDC00"),
+                                            std::wstring(L"x\0y", 3), std::wstring(L"\xFFFF"), std::wstring(300, L'\u00E9')};
+    for (const std::wstring& w : wide) CHECK(whirl::hip::win::narrowUtf8(w) == n6old::narrowUtf8_old(w));
+    CHECK(whirl::hip::win::narrowUtf8(L"\u4E2D") == "\xE4\xB8\xAD");
+    // fileExists: this program (a file), its folder (a directory), a missing file, "" and trailing separators
+    wchar_t self[MAX_PATH];
+    const DWORD n = GetModuleFileNameW(nullptr, self, MAX_PATH);
+    CHECK(n > 0 && n < MAX_PATH);
+    const std::wstring exe(self, n);
+    const std::wstring dir = exe.substr(0, exe.find_last_of(L"\\/"));
+    for (const std::wstring& p : {exe, dir, dir + L"\\", dir + L"\\no_such_file_whirl_n6.dll", std::wstring(), exe + L"\\"})
+        CHECK(whirl::hip::win::fileExists(p) == n6old::fileExists_old(p));
+    CHECK(whirl::hip::win::fileExists(exe));
+    CHECK(!whirl::hip::win::fileExists(dir));
+#endif
+}
+
 }  // namespace
 
 // the old main()'s calls of this module, in their order (tests/unit/unit_tests.cpp ORDER lists all modules)
@@ -210,6 +306,7 @@ const whirl::test::Suite& unitSuite_release() {
 #if WHIRL_TEST_DLL_DEPS
                                           {"testDllDeps", [] { testDllDeps(); }},
 #endif
+                                          {"testSharedHelpersN6", [] { testSharedHelpersN6(); }},
                                       },
                                       nullptr};
     return s;
